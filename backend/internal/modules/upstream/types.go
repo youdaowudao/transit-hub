@@ -31,6 +31,7 @@ const (
 	ErrorRequest         = "admin.upstream.errors.request"
 	ErrorInvalidResponse = "admin.upstream.errors.invalidResponse"
 	ErrorUnsupported     = "admin.upstream.errors.unsupported"
+	ErrorDisabled        = "admin.upstream.errors.disabled"
 	ErrorUnknown         = "admin.upstream.errors.unknown"
 	// ErrorSub2APIBulkUpdateUnsupported 表示当前 Sub2API 站点没有字段级批量更新能力。
 	// 调度优先级/状态更新遇到该能力缺失时必须要求升级，绝不回退到整对象回写。
@@ -113,9 +114,9 @@ type Metrics struct {
 	Groups          []GroupInfo `json:"groups"`
 	// TodayConsumeDate 是 TodayConsume 对应的上海业务日期（"2006-01-02"）。
 	// 同步时由上游同步入口统一写入，用于日期归属校验。空字符串表示尚未记录。
-	TodayConsumeDate string `json:"-"`
+	TodayConsumeDate string `json:"todayConsumeDate,omitempty"`
 	// TodayConsumeAt 是 TodayConsume 的实际采集时间，用于缓存时效校验。
-	TodayConsumeAt *time.Time `json:"-"`
+	TodayConsumeAt *time.Time `json:"todayConsumeAt,omitempty"`
 }
 
 // CostFetchMeta 是 FetchCostForDate 的返回元数据，定义在 upstream 包中以避免循环依赖。
@@ -155,6 +156,10 @@ type UpdateRequest struct {
 	RechargeRate float64  `json:"rechargeRate"`
 }
 
+type UpdateEnabledRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
 // SiteSettings 站点级预警覆盖配置。nil 表示使用全局默认值。
 type SiteSettings struct {
 	BalanceThreshold *float64 `json:"balanceThreshold"`
@@ -171,6 +176,7 @@ type Site struct {
 	Account           string       `json:"account"`
 	Remark            string       `json:"remark"`
 	RechargeRate      float64      `json:"rechargeRate"`
+	Enabled           *bool        `json:"enabled"`
 	Status            Status       `json:"status"`
 	ErrorKey          *string      `json:"errorKey"`
 	Metrics           Metrics      `json:"metrics"`
@@ -190,11 +196,24 @@ type Response struct {
 	Account           string       `json:"account"`
 	Remark            string       `json:"remark"`
 	RechargeRate      float64      `json:"rechargeRate"`
+	Enabled           *bool        `json:"enabled"`
 	Status            Status       `json:"status"`
 	ErrorKey          *string      `json:"errorKey"`
 	Metrics           Metrics      `json:"metrics"`
 	Settings          SiteSettings `json:"settings"`
 	LastSyncedAt      *int64       `json:"lastSyncedAt"`
+}
+
+func enabledOrDefault(enabled *bool) bool {
+	return enabled == nil || *enabled
+}
+
+func (s *Site) IsEnabled() bool {
+	return s != nil && enabledOrDefault(s.Enabled)
+}
+
+func (r Response) IsEnabled() bool {
+	return enabledOrDefault(r.Enabled)
 }
 
 type Session struct {

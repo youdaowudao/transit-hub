@@ -197,6 +197,9 @@ func (s *Service) FetchGroupDailyStats(ctx context.Context, userID string, id st
 	if site == nil || site.UserID != userID || site.Session == nil {
 		return nil, newRequestError(ErrorNotFound, "")
 	}
+	if !site.IsEnabled() {
+		return nil, newRequestError(ErrorDisabled, "")
+	}
 	aid, err := s.requireCurrentAdminAccountID(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -225,7 +228,7 @@ func (s *Service) FetchGroupDailyStats(ctx context.Context, userID string, id st
 
 	// 将刷新后的会话写回缓存和数据库。
 	site, err = s.cache.Get(ctx, id)
-	if err == nil && site != nil && site.UserID == userID {
+	if err == nil && site != nil && site.UserID == userID && site.IsEnabled() {
 		site.Session = &refreshedSession
 		_ = s.setCachedSite(ctx, site)
 		_ = s.saveSite(ctx, site)
@@ -266,7 +269,7 @@ func (s *Service) keyUsageToday(ctx context.Context, userID string, includeZero 
 
 	targets := make([]*Site, 0, len(sites))
 	for _, site := range sites {
-		if site.AdminAccountID != adminAccountID || site.Session == nil || site.RechargeRate <= 0 {
+		if site.AdminAccountID != adminAccountID || !site.IsEnabled() || site.Session == nil || site.RechargeRate <= 0 {
 			continue
 		}
 		targets = append(targets, site)
@@ -317,7 +320,7 @@ func (s *Service) keyUsageToday(ctx context.Context, userID string, includeZero 
 			}
 
 			// 将刷新后的会话写回缓存和数据库，与 FetchGroupDailyStats 的写回模式一致。
-			if cached, cacheErr := s.cache.Get(ctx, site.ID); cacheErr == nil && cached != nil && cached.UserID == site.UserID {
+			if cached, cacheErr := s.cache.Get(ctx, site.ID); cacheErr == nil && cached != nil && cached.UserID == site.UserID && cached.IsEnabled() {
 				cached.Session = &refreshedSession
 				_ = s.setCachedSite(ctx, cached)
 				_ = s.saveSite(ctx, cached)
@@ -374,7 +377,7 @@ func (s *Service) BalanceBreakdown(ctx context.Context, userID string) ([]Balanc
 
 	items := make([]BalanceBreakdownItem, 0, len(sites))
 	for _, site := range sites {
-		if site.AdminAccountID != adminAccountID {
+		if site.AdminAccountID != adminAccountID || !site.IsEnabled() {
 			continue
 		}
 		item := BalanceBreakdownItem{
@@ -429,6 +432,7 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 		Account:           account,
 		Remark:            strings.TrimSpace(dto.Remark),
 		RechargeRate:      dto.RechargeRate,
+		Enabled:           boolPointer(true),
 		Status:            StatusConnecting,
 		ErrorKey:          nil,
 		Metrics:           defaultMetrics(),
@@ -646,6 +650,9 @@ func (s *Service) Sync(ctx context.Context, userID string, id string) (Response,
 	if site.AdminAccountID != aid {
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
+	if !site.IsEnabled() {
+		return Response{}, newRequestError(ErrorDisabled, "")
+	}
 	return s.sync(ctx, id)
 }
 
@@ -666,6 +673,10 @@ func (s *Service) SyncAll(ctx context.Context, userID string) ([]Response, error
 	responses := make([]Response, 0)
 	for _, site := range sites {
 		if site.AdminAccountID != adminAccountID {
+			continue
+		}
+		if !site.IsEnabled() {
+			responses = append(responses, toResponse(site))
 			continue
 		}
 		if site.Session == nil {
@@ -730,6 +741,9 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 		if site.AdminAccountID != adminAccountID {
 			continue
 		}
+		if !site.IsEnabled() {
+			continue
+		}
 		if site.Session == nil {
 			resp := toResponse(site)
 			safeEmit(SyncEvent{Event: SyncEventDone, SiteID: site.ID, Site: &resp})
@@ -785,6 +799,9 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 	if site == nil || site.Session == nil {
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
+	if !site.IsEnabled() {
+		return Response{}, newRequestError(ErrorDisabled, "")
+	}
 
 	// 标记为同步中。
 	site.Status = StatusSyncing
@@ -807,6 +824,12 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 	site, err = s.cache.Get(ctx, id)
 	if err != nil || site == nil {
 		return Response{}, newRequestError(ErrorNotFound, "")
+	}
+	if !site.IsEnabled() {
+		s.mu.Lock()
+		s.clearTimerLocked(id)
+		s.mu.Unlock()
+		return toResponse(site), newRequestError(ErrorDisabled, "")
 	}
 
 	// 在覆盖前保存旧指标，用于同步后的预警检测。
@@ -957,7 +980,7 @@ func (s *Service) scheduleSyncLocked(id string, site *Site) {
 	if _, deleted := s.deletedSites[id]; deleted {
 		return
 	}
-	if !s.refreshConfig.Enabled || site == nil || site.Session == nil {
+	if !s.refreshConfig.Enabled || site == nil || !site.IsEnabled() || site.Session == nil {
 		return
 	}
 	delay := s.refreshConfig.Interval
@@ -1085,6 +1108,46 @@ func (s *Service) UpdateSettings(ctx context.Context, userID string, siteID stri
 	return toResponse(site), nil
 }
 
+// UpdateEnabled 只切换本地站点生命周期。停用后停止定时刷新并退出各统计入口；
+// 恢复后只安排下一次定时刷新，不立即请求上游。
+func (s *Service) UpdateEnabled(ctx context.Context, userID string, siteID string, enabled bool) (Response, error) {
+	site, err := s.cache.Get(ctx, siteID)
+	if err != nil {
+		return Response{}, err
+	}
+	if site == nil || site.UserID != userID {
+		return Response{}, newRequestError(ErrorNotFound, "")
+	}
+	aid, err := s.requireCurrentAdminAccountID(ctx, userID)
+	if err != nil {
+		return Response{}, err
+	}
+	if site.AdminAccountID != aid {
+		return Response{}, newRequestError(ErrorNotFound, "")
+	}
+
+	previousSite := *site
+	site.Enabled = boolPointer(enabled)
+	if !enabled {
+		s.mu.Lock()
+		s.clearTimerLocked(siteID)
+		s.mu.Unlock()
+	}
+	if err := s.setCachedSite(ctx, site); err != nil {
+		return Response{}, err
+	}
+	if err := s.saveSite(ctx, site); err != nil {
+		s.restoreSite(ctx, siteID, &previousSite)
+		return Response{}, err
+	}
+	if enabled {
+		s.mu.Lock()
+		s.scheduleSyncLocked(siteID, site)
+		s.mu.Unlock()
+	}
+	return toResponse(site), nil
+}
+
 // GetSite 根据 ID 获取站点（供 alert 逻辑读取站点级配置）。
 func (s *Service) GetSite(ctx context.Context, siteID string) (*Site, error) {
 	return s.cache.Get(ctx, siteID)
@@ -1101,12 +1164,17 @@ func toResponse(site *Site) Response {
 		Account:           site.Account,
 		Remark:            site.Remark,
 		RechargeRate:      site.RechargeRate,
+		Enabled:           boolPointer(site.IsEnabled()),
 		Status:            site.Status,
 		ErrorKey:          site.ErrorKey,
 		Metrics:           site.Metrics,
 		Settings:          site.Settings,
 		LastSyncedAt:      site.LastSyncedAt,
 	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func (s *Service) saveSite(ctx context.Context, site *Site) error {
@@ -1185,7 +1253,7 @@ func (s *Service) FetchSiteCostsForDate(ctx context.Context, userID, adminAccoun
 	type targetSite struct{ site Site }
 	var targets []targetSite
 	for _, site := range sites {
-		if site.AdminAccountID != adminAccountID || site.RechargeRate <= 0 {
+		if site.AdminAccountID != adminAccountID || !site.IsEnabled() || site.RechargeRate <= 0 {
 			continue
 		}
 		targets = append(targets, targetSite{*site})

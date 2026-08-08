@@ -462,6 +462,7 @@ export default {
       retry: '重试',
       costQuality: {
         complete: '今日成本 {cost}',
+        fallback: '沿用 {fallback}/{expected} 个站点今天最近一次成功成本，最早更新于 {time}，暂不计算正式环比',
         partial: '已确认成本 {cost}，{collected}/{expected} 个站点',
         netProfitCeiling: '暂估上限 {value}',
         marginCeiling: '暂估上限 {value}%',
@@ -470,6 +471,7 @@ export default {
         deltaPartial: '成本未完整，环比暂不可确定',
         deltaUnsettled: '昨日未结算',
         trendConfirmed: '已确认',
+        trendFallback: '今日旧值',
         trendCeiling: '暂估上限',
         trendConfirmedCost: '已确认成本',
         trendProfitCeiling: '暂估净利润上限',
@@ -487,6 +489,7 @@ export default {
         last30Days: '最近 30 天',
         last90Days: '最近 90 天',
         statusFinal: '已结算',
+        statusFallback: '今日旧值',
         statusPartial: '部分结算',
         statusProvisional: '临时快照',
         statusMissing: '未结算',
@@ -1769,7 +1772,13 @@ export default {
         connecting: '连接中',
         syncing: '同步中',
         connected: '已连接',
-        error: '异常'
+        error: '异常',
+        disabled: '已废弃'
+      },
+      lifecycle: {
+        label: '启用站点',
+        enabledHelp: '参与刷新与经营统计',
+        disabledHelp: '不刷新，也不计入经营统计'
       },
       empty: {
         title: '未找到上游站点',
@@ -1817,6 +1826,7 @@ export default {
         tokenMissing: '登录成功但未返回访问令牌。',
         detect: '无法自动识别平台，请手动选择平台后重试。',
         sub2APIBulkUpdateUnsupported: '当前 Sub2API 版本不支持安全的账号字段更新，请升级 Sub2API 后重试。',
+        disabled: '该站点已废弃，请先恢复启用。',
         unknown: '连接上游站点时发生未知错误。'
       }
     },

@@ -56,6 +56,7 @@ function buildMetricData(
     settlementStatus?: string
     costExpectedCount?: number | null
     costCollectedCount?: number | null
+    costMode?: string
     upstreamBalance: number
   }
   const pointsByDate = new Map<string, LivePoint>()
@@ -71,6 +72,7 @@ function buildMetricData(
       settlementStatus: point.settlementStatus,
       costExpectedCount: point.costExpectedCount,
       costCollectedCount: point.costCollectedCount,
+      costMode: undefined,
       upstreamBalance: point.upstreamBalance,
     })
   }
@@ -87,6 +89,7 @@ function buildMetricData(
       settlementStatus: live.settlementStatus,
       costExpectedCount: live.costQuality?.expectedSites,
       costCollectedCount: live.costQuality?.collectedSites,
+      costMode: live.costQuality?.mode,
       upstreamBalance: live.upstreamBalance,
     })
   }
@@ -94,16 +97,20 @@ function buildMetricData(
   const monthPoints: TrendPoint[] = Array.from(pointsByDate.values())
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((p) => {
-      const provisionalQuality = key === 'todayPurchase' ? 'confirmed' : 'ceiling'
+      const provisionalQuality = p.costMode === 'fallback'
+        ? 'fallback'
+        : key === 'todayPurchase' ? 'confirmed' : 'ceiling'
       const provisionalValue = key === 'todayPurchase'
         ? p.confirmedCost
         : key === 'netProfit'
-          ? p.netProfitCeiling
+          ? (p.costMode === 'fallback' ? p.netProfit : p.netProfitCeiling)
           : null
       const selected = selectDashboardTrendValue({
         formalValue: p[key] as number | null | undefined,
         provisionalValue,
-        status: p.settlementStatus ?? 'unavailable',
+        status: key === 'todayPurchase' || key === 'netProfit'
+          ? p.settlementStatus ?? 'unavailable'
+          : 'final',
         provisionalQuality,
       })
       return {

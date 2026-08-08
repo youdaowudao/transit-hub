@@ -143,6 +143,11 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		h.updateSettings(w, r, userID, id)
 		return
 	}
+	// PATCH /api/upstream-sites/{id}/enabled → 启用或停用本地站点刷新与统计。
+	if id, ok := pathID(r.URL.Path, "/api/upstream-sites/", "/enabled"); ok && r.Method == http.MethodPatch {
+		h.updateEnabled(w, r, userID, id)
+		return
+	}
 
 	id, ok := pathID(r.URL.Path, "/api/upstream-sites/", "")
 	if !ok {
@@ -155,6 +160,20 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := h.service.Update(r.Context(), userID, id, dto)
+	if err != nil {
+		writeUpstreamError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, response)
+}
+
+func (h *Handler) updateEnabled(w http.ResponseWriter, r *http.Request, userID, siteID string) {
+	var dto UpdateEnabledRequest
+	if err := httpjson.Decode(r, &dto); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	response, err := h.service.UpdateEnabled(r.Context(), userID, siteID, dto.Enabled)
 	if err != nil {
 		writeUpstreamError(w, err)
 		return
@@ -256,6 +275,10 @@ func writeUpstreamError(w http.ResponseWriter, err error) {
 	var requestErr *RequestError
 	if errors.As(err, &requestErr) && requestErr.MessageKey == ErrorNotFound {
 		httpjson.WriteError(w, http.StatusNotFound, requestErr.MessageKey)
+		return
+	}
+	if errors.As(err, &requestErr) && requestErr.MessageKey == ErrorDisabled {
+		httpjson.WriteError(w, http.StatusConflict, requestErr.MessageKey)
 		return
 	}
 	httpjson.WriteError(w, http.StatusInternalServerError, errorKey(err))

@@ -138,7 +138,7 @@ func summarizeCachedUpstreamCosts(sites []upstream.Response) (total float64, com
 	available := 0
 	var firstErr error
 	for _, site := range sites {
-		if site.RechargeRate <= 0 {
+		if !site.IsEnabled() || site.RechargeRate <= 0 {
 			continue
 		}
 		targets++
@@ -175,14 +175,12 @@ func summarizeCachedUpstreamCostsWithQuality(sites []upstream.Response, business
 	}
 
 	for _, site := range sites {
-		if site.RechargeRate <= 0 {
+		if !site.IsEnabled() || site.RechargeRate <= 0 {
 			continue
 		}
 		quality.ExpectedSites++
+		metric := site.Metrics.TodayConsume
 
-		// 日期归属校验：仅当日期字段有值且与当次业务日不匹配时才拒绝。
-		// TodayConsumeDate=="" 表示 V0.1.16 上线前的旧缓存，放行（等下次同步自然补上日期）；
-		// 已知日期与今天不符才是真正的日期错配。
 		if site.Metrics.TodayConsumeDate != "" && site.Metrics.TodayConsumeDate != businessDate {
 			quality.FailedSites++
 			quality.Failures = append(quality.Failures, SiteCostFault{
@@ -192,18 +190,7 @@ func summarizeCachedUpstreamCostsWithQuality(sites []upstream.Response, business
 			continue
 		}
 
-		// 时效校验：只有采集时间有值且超过阈值时才拒绝；nil 表示旧缓存，放行。
-		if maxStaleness > 0 && site.Metrics.TodayConsumeAt != nil &&
-			now.Sub(*site.Metrics.TodayConsumeAt) > maxStaleness {
-			quality.FailedSites++
-			quality.Failures = append(quality.Failures, SiteCostFault{
-				SiteName: site.Name,
-				Reason:   "stale",
-			})
-			continue
-		}
-
-		if site.Status == upstream.StatusError || site.Metrics.TodayConsume.Value == nil {
+		if metric.Value == nil {
 			quality.FailedSites++
 			quality.Failures = append(quality.Failures, SiteCostFault{
 				SiteName: site.Name,
@@ -211,21 +198,50 @@ func summarizeCachedUpstreamCostsWithQuality(sites []upstream.Response, business
 			})
 			continue
 		}
+
+		stale := maxStaleness > 0 && site.Metrics.TodayConsumeAt != nil &&
+			now.Sub(*site.Metrics.TodayConsumeAt) > maxStaleness
+		needsFallback := site.Status == upstream.StatusError || stale
+		if needsFallback && (site.Metrics.TodayConsumeDate != businessDate || site.Metrics.TodayConsumeAt == nil) {
+			reason := "fetch_error"
+			if stale {
+				reason = "stale"
+			}
+			quality.FailedSites++
+			quality.Failures = append(quality.Failures, SiteCostFault{SiteName: site.Name, Reason: reason})
+			continue
+		}
+
 		quality.CollectedSites++
-		quality.ConfirmedCost += *site.Metrics.TodayConsume.Value * site.RechargeRate
+		quality.ConfirmedCost += *metric.Value * site.RechargeRate
+		if needsFallback {
+			quality.FallbackSites++
+			if quality.FallbackAt == nil || site.Metrics.TodayConsumeAt.Before(*quality.FallbackAt) {
+				observedAt := *site.Metrics.TodayConsumeAt
+				quality.FallbackAt = &observedAt
+			}
+		}
 	}
 
 	if quality.ExpectedSites == 0 {
 		quality.Complete = true
+		quality.Mode = "exact"
+	} else if quality.FailedSites > 0 && quality.CollectedSites == 0 {
+		quality.Mode = "unavailable"
+	} else if quality.FailedSites > 0 {
+		quality.Mode = "partial"
+	} else if quality.FallbackSites > 0 {
+		quality.Mode = "fallback"
 	} else {
-		quality.Complete = quality.FailedSites == 0
+		quality.Complete = true
+		quality.Mode = "exact"
 	}
 	return quality.ConfirmedCost, quality
 }
 
 func cachedUpstreamCostSiteCounts(sites []upstream.Response) (totalSites, failedSites int) {
 	for _, site := range sites {
-		if site.RechargeRate <= 0 {
+		if !site.IsEnabled() || site.RechargeRate <= 0 {
 			continue
 		}
 		totalSites++
@@ -338,7 +354,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		total, cq := summarizeCachedUpstreamCostsWithQuality(sites, today, s.maxStaleness())
 		costQuality = cq
 		for _, site := range sites {
-			if site.RechargeRate <= 0 {
+			if !site.IsEnabled() || site.RechargeRate <= 0 {
 				continue
 			}
 			if site.Metrics.Balance.Value != nil {
@@ -359,28 +375,32 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	var netProfitCeiling *float64
 	settlementStatus := SettlementStatusUnavailable
 	if costQuality != nil {
-		if costQuality.Complete {
+		if costQuality.Mode == "exact" || costQuality.Mode == "fallback" {
 			confirmedCost = ptrF64(costQuality.ConfirmedCost)
 		} else if costQuality.CollectedSites > 0 {
 			confirmedCost = ptrF64(costQuality.ConfirmedCost)
 		}
-		if todayProfit != nil && confirmedCost != nil {
+		if costQuality.Mode == "partial" && todayProfit != nil && confirmedCost != nil {
 			ceiling := *todayProfit - *confirmedCost
 			netProfitCeiling = &ceiling
 		}
 	}
 	var todayPurchase *float64
-	if costQuality != nil && costQuality.Complete {
+	if costQuality != nil && (costQuality.Mode == "exact" || costQuality.Mode == "fallback") {
 		todayPurchase = ptrF64(costQuality.ConfirmedCost)
 	} else if costQuality != nil {
 		// 部分成本：todayPurchase = nil（不能作为完整值），但 confirmedCost 是下限
 		todayPurchase = nil
 	}
 	var netProfit *float64
-	if todayProfit != nil && costQuality != nil && costQuality.Complete {
+	if todayProfit != nil && costQuality != nil && (costQuality.Mode == "exact" || costQuality.Mode == "fallback") {
 		np := *todayProfit - costQuality.ConfirmedCost
 		netProfit = &np
-		settlementStatus = SettlementStatusFinal
+		if costQuality.Mode == "exact" {
+			settlementStatus = SettlementStatusFinal
+		} else {
+			settlementStatus = SettlementStatusFallback
+		}
 	} else if confirmedCost != nil || todayProfit != nil {
 		settlementStatus = SettlementStatusPartial
 	}
@@ -406,8 +426,8 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		}
 	}
 
-	// 仅在营收和成本都完整时写入快照（live_cache 来源，不覆盖 final 行）。
-	if todayProfit != nil && costQuality != nil && costQuality.Complete {
+	// 营收与成本独立保存；成本不完整时仍保留可用营收（live_cache 不覆盖 final 行）。
+	if todayProfit != nil {
 		s.upsertSnapshot(ctx, userID, adminAccountID, today, result)
 	}
 
@@ -533,6 +553,10 @@ func (s *MetricsService) upsertSnapshot(ctx context.Context, userID, adminAccoun
 		return
 	}
 	now := time.Now()
+	snapshotStatus := SettlementStatusProvisional
+	if metrics.SettlementStatus == SettlementStatusFallback {
+		snapshotStatus = SettlementStatusFallback
+	}
 	snapshot := DailySnapshot{
 		ID:               id,
 		UserID:           userID,
@@ -544,9 +568,13 @@ func (s *MetricsService) upsertSnapshot(ctx context.Context, userID, adminAccoun
 		NetProfit:        metrics.NetProfit,
 		UpstreamBalance:  ptrF64(metrics.UpstreamBalance),
 		CreatedAt:        now,
-		SettlementStatus: SettlementStatusProvisional,
+		SettlementStatus: snapshotStatus,
 		SnapshotSource:   SnapshotSourceLiveCache,
 		ObservedAt:       &now,
+	}
+	if metrics.CostQuality != nil {
+		snapshot.CostExpectedCount = intPtr(metrics.CostQuality.ExpectedSites)
+		snapshot.CostCollectedCount = intPtr(metrics.CostQuality.CollectedSites)
 	}
 	if err := s.metricsRepo.Upsert(ctx, snapshot); err != nil {
 		log.Printf("dashboard metrics: upsert snapshot failed user_id=%s date=%s err=%v", userID, date, err)
@@ -690,7 +718,7 @@ func (s *MetricsService) GroupUsageToday(ctx context.Context, userID string) (Gr
 	// 缓存中的上游分组列表用于区分“当日零成本”和“根本无法对齐”。
 	knownUpstreamGroups := make(map[string]struct{})
 	for _, site := range s.upstreams.List(ctx, userID) {
-		if site.RechargeRate <= 0 {
+		if !site.IsEnabled() || site.RechargeRate <= 0 {
 			continue
 		}
 		for _, group := range site.Metrics.Groups {
@@ -888,6 +916,10 @@ func derefF64(v *float64) float64 {
 
 // ptrF64 将 float64 转为 *float64。
 func ptrF64(v float64) *float64 {
+	return &v
+}
+
+func intPtr(v int) *int {
 	return &v
 }
 

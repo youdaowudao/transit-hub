@@ -72,6 +72,13 @@ export const updateUpstreamSite = async (id: string, form: UpstreamSiteForm): Pr
   })
 )
 
+export const updateUpstreamSiteEnabled = async (id: string, enabled: boolean): Promise<UpstreamSiteResponse> => (
+  requestJson<UpstreamSiteResponse>(`/upstream-sites/${id}/enabled`, {
+    method: 'PATCH',
+    body: JSON.stringify({ enabled }),
+  })
+)
+
 export const syncUpstreamSite = async (id: string): Promise<UpstreamSiteResponse> => (
   requestJson<UpstreamSiteResponse>(`/upstream-sites/${id}/sync`, { method: 'POST' })
 )

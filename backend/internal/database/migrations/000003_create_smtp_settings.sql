@@ -1,3 +1,4 @@
+-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）
 -- SMTP 设置专用表：按 (user_id, admin_account_id) 隔离，密码仅以密文形式存储。
 -- 不包含 enabled / skip_tls_verification 字段：一期只要保存了配置即可用于测试邮件，且强制 TLS 1.2+ 不允许跳过证书校验。
 

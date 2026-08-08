@@ -1,3 +1,4 @@
+-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）
 ALTER TABLE lottery_prizes
     ADD COLUMN IF NOT EXISTS delivery_mode text NOT NULL DEFAULT 'sub2api_auto',
     ADD COLUMN IF NOT EXISTS manual_contact text NOT NULL DEFAULT '',

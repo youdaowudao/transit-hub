@@ -23,7 +23,7 @@ type fakeUpgradeExecutor struct {
 
 func newUpgradeTestService(executor UpgradeExecutor) *Service {
 	restartExecutor := &fakeRestartExecutor{status: RestartStatusResponse{State: RestartStateIdle}}
-	return newServiceWithExecutors(config.Config{}, executor, restartExecutor)
+	return newServiceWithExecutors(config.Config{}, executor, restartExecutor, newIdleRollbackExecutor())
 }
 
 func (f *fakeUpgradeExecutor) Start(context.Context) error {
@@ -67,7 +67,7 @@ func TestStartUpgradeRejectsRunningUpgrade(t *testing.T) {
 func TestStartUpgradeRejectsRunningRestart(t *testing.T) {
 	upgradeExecutor := &fakeUpgradeExecutor{status: UpgradeStatusResponse{State: UpgradeStateIdle}}
 	restartExecutor := &fakeRestartExecutor{status: RestartStatusResponse{State: RestartStateRunning}}
-	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor)
+	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor, newIdleRollbackExecutor())
 
 	_, err := service.StartUpgrade(context.Background())
 	if !errors.Is(err, ErrRestartInProgress) {
@@ -82,6 +82,8 @@ func TestSystemdUpgradeExecutorStartsOnlyFixedUnit(t *testing.T) {
 	var gotName string
 	var gotArgs []string
 	executor := &systemdUpgradeExecutor{
+		statusPath: filepath.Join(t.TempDir(), "upgrade-status.json"),
+		logPath:    filepath.Join(t.TempDir(), "upgrade.log"),
 		runCommand: func(_ context.Context, name string, args ...string) ([]byte, error) {
 			gotName = name
 			gotArgs = append([]string(nil), args...)

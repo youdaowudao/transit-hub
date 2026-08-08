@@ -81,14 +81,29 @@ func TestServiceRestartUsesFixedSystemdUnitAndHealthContract(t *testing.T) {
 	}
 }
 
-func TestSourceUpgradeAndServiceRestartShareMaintenanceLock(t *testing.T) {
-	upgradeScript := readProjectFileForUpgradeTest(t, "deploy/run-source-upgrade.sh")
-	restartScript := readProjectFileForUpgradeTest(t, "deploy/run-service-restart.sh")
-	for _, script := range []string{upgradeScript, restartScript} {
+// 升级、回滚、重启三个维护动作必须互斥。升级与回滚在各自的主脚本里持锁，
+// 这样锁的生命周期覆盖整个 git 切换与构建过程，不依赖包装脚本的 fd 继承；
+// 重启动作短小，仍在包装脚本内持锁。
+func TestMaintenanceActionsShareSingleLock(t *testing.T) {
+	for _, relativePath := range []string{
+		"deploy/update-source.sh",
+		"deploy/rollback-source.sh",
+		"deploy/run-service-restart.sh",
+	} {
+		script := readProjectFileForUpgradeTest(t, relativePath)
 		requireTextContains(t, script, "LOCK_FILE='/run/lock/transithub-maintenance.lock'")
 		requireTextContains(t, script, `if ! exec 9>"$LOCK_FILE"; then`)
 		requireTextContains(t, script, "flock -n 9")
 		requireTextContains(t, script, "无法打开维护锁文件")
+	}
+
+	// 包装脚本不得重复持锁：同一进程重复 flock 同一 fd 会掩盖真实竞争。
+	for _, relativePath := range []string{
+		"deploy/run-source-upgrade.sh",
+		"deploy/run-source-rollback.sh",
+	} {
+		wrapper := readProjectFileForUpgradeTest(t, relativePath)
+		requireTextNotContains(t, wrapper, "flock -n 9")
 	}
 }
 

@@ -1,18 +1,27 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Plus, Save, Loader2, CheckCircle2, MessageSquare, Send, Trash2, Timer, AlertTriangle, TrendingUp, Info, Mail, RefreshCw, ServerCog, Power, X } from 'lucide-vue-next'
+import { Plus, Save, Loader2, CheckCircle2, MessageSquare, Send, Trash2, Timer, AlertTriangle, TrendingUp, Info, Mail, RefreshCw, RotateCcw, ServerCog, Power, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import EmailTemplatesPanel from '../components/settings/EmailTemplatesPanel.vue'
 import NotificationTemplateEditor from '../components/settings/NotificationTemplateEditor.vue'
 import {
   getSystemRestartStatus,
+  getSystemRollbackStatus,
   getSystemUpgradeStatus,
+  getSystemVersion,
+  isRollbackRouteNotFound,
   isTransientSystemApiError,
   startSystemRestart,
+  startSystemRollback,
   startSystemUpgrade,
 } from '../api/system'
-import type { SystemRestartStatusResponse, SystemUpgradeStatusResponse } from '../api/system'
+import type {
+  SystemRestartStatusResponse,
+  SystemRollbackStatusResponse,
+  SystemUpgradeStatusResponse,
+} from '../api/system'
+import { formatDateTime } from '../utils/dashboard'
 import {
   getNotificationChannelSettings,
   getSmtpSettings,
@@ -636,7 +645,7 @@ const beginUpgradePolling = () => {
 }
 
 const startUpgrade = async () => {
-  if (isUpgradeBusy.value || isRestartBusy.value) return
+  if (isUpgradeBusy.value || isRestartBusy.value || isRollbackBusy.value) return
   isStartingUpgrade.value = true
   upgradeResult.value = null
   try {
@@ -669,6 +678,190 @@ const closeUpgradeResult = () => {
     return
   }
   upgradeResult.value = null
+}
+
+// === Source version rollback ===
+const rollbackStatus = ref<SystemRollbackStatusResponse>({ state: 'idle' })
+const isStartingRollback = ref(false)
+const isRollbackConfirmOpen = ref(false)
+const rollbackResult = ref<{ state: 'succeeded' | 'failed'; message: string; output: string } | null>(null)
+const isRollbackBusy = computed(() => (
+  isStartingRollback.value || rollbackStatus.value.state === 'starting' || rollbackStatus.value.state === 'running'
+))
+const rollbackStatusKey = computed(() => `admin.settings.rollback.statuses.${rollbackStatus.value.state}`)
+const hasRollbackPoint = computed(() => Boolean(rollbackStatus.value.point?.commit))
+const rollbackPointLabel = computed(() => {
+  const point = rollbackStatus.value.point
+  if (!point) return t('admin.settings.rollback.noPoint')
+  const captured = formatDateTime(Date.parse(point.capturedAt)) ?? ''
+  return [point.version, point.commit.slice(0, 7), captured].filter(Boolean).join(' · ')
+})
+
+let rollbackPollTimer: number | undefined
+let rollbackPollDeadline = 0
+let currentRollbackRequestedAt = ''
+// 回滚到不含 /api/system/rollback 路由的旧版本时置 true，改用 version 接口判断是否成功。
+let rollbackUseVersionFallback = false
+
+const clearRollbackPoll = () => {
+  if (rollbackPollTimer !== undefined) {
+    window.clearTimeout(rollbackPollTimer)
+    rollbackPollTimer = undefined
+  }
+}
+
+const scheduleRollbackPoll = (delay = 2000) => {
+  clearRollbackPoll()
+  rollbackPollTimer = window.setTimeout(() => { void pollRollbackStatus() }, delay)
+}
+
+const rollbackStatusIsOlderThanRequest = (status: SystemRollbackStatusResponse): boolean => {
+  if (!currentRollbackRequestedAt || status.state === 'starting' || status.state === 'running') return false
+  if (status.state === 'idle' || !status.startedAt) return true
+  const requestedAt = Date.parse(currentRollbackRequestedAt)
+  const startedAt = Date.parse(status.startedAt)
+  return Number.isFinite(requestedAt) && Number.isFinite(startedAt) && startedAt < requestedAt
+}
+
+const showRollbackFailure = (message: string, output = '') => {
+  clearRollbackPoll()
+  rollbackResult.value = { state: 'failed', message, output }
+}
+
+async function pollRollbackStatus() {
+  if (rollbackUseVersionFallback) {
+    await pollRollbackStatusViaVersion()
+    return
+  }
+  try {
+    const status = await getSystemRollbackStatus()
+    if (rollbackStatusIsOlderThanRequest(status)) {
+      if (Date.now() < rollbackPollDeadline) {
+        scheduleRollbackPoll()
+      } else {
+        showRollbackFailure(t('admin.settings.rollback.timeout'))
+      }
+      return
+    }
+
+    rollbackStatus.value = status
+    if (status.state === 'starting' || status.state === 'running') {
+      scheduleRollbackPoll()
+      return
+    }
+    if (status.state === 'succeeded') {
+      clearRollbackPoll()
+      rollbackResult.value = {
+        state: 'succeeded',
+        message: t('admin.settings.rollback.successMessage'),
+        output: '',
+      }
+      currentRollbackRequestedAt = ''
+      return
+    }
+    if (status.state === 'failed') {
+      showRollbackFailure(t('admin.settings.rollback.failedMessage'), status.output ?? '')
+      currentRollbackRequestedAt = ''
+    }
+  } catch (error) {
+    // 回滚到旧版本后该接口不存在（404）：旧版本没有 /api/system/rollback 路由。
+    // 切换到 version 接口判断是否已回到还原点版本，而非直接报失败。
+    if (isRollbackRouteNotFound(error)) {
+      rollbackUseVersionFallback = true
+      if (Date.now() < rollbackPollDeadline) {
+        scheduleRollbackPoll()
+      } else {
+        showRollbackFailure(t('admin.settings.rollback.timeout'))
+      }
+      return
+    }
+    if (isTransientSystemApiError(error) && Date.now() < rollbackPollDeadline) {
+      scheduleRollbackPoll()
+      return
+    }
+    showRollbackFailure(localizeSystemError(error))
+  }
+}
+
+async function pollRollbackStatusViaVersion() {
+  const targetVersion = rollbackStatus.value.point?.version
+  if (!targetVersion) {
+    showRollbackFailure(t('admin.settings.rollback.failedMessage'))
+    return
+  }
+  try {
+    const versionResp = await getSystemVersion()
+    if (versionResp.version === targetVersion) {
+      clearRollbackPoll()
+      rollbackResult.value = {
+        state: 'succeeded',
+        message: t('admin.settings.rollback.successMessage'),
+        output: '',
+      }
+      currentRollbackRequestedAt = ''
+      return
+    }
+    if (Date.now() < rollbackPollDeadline) {
+      scheduleRollbackPoll()
+    } else {
+      showRollbackFailure(t('admin.settings.rollback.timeout'))
+    }
+  } catch (error) {
+    if (isTransientSystemApiError(error) && Date.now() < rollbackPollDeadline) {
+      scheduleRollbackPoll()
+      return
+    }
+    showRollbackFailure(localizeSystemError(error))
+  }
+}
+
+const beginRollbackPolling = () => {
+  rollbackUseVersionFallback = false
+  rollbackPollDeadline = Date.now() + 20 * 60 * 1000
+  scheduleRollbackPoll(500)
+}
+
+const requestRollback = () => {
+  if (isRollbackBusy.value || isUpgradeBusy.value || isRestartBusy.value) return
+  if (!hasRollbackPoint.value) return
+  isRollbackConfirmOpen.value = true
+}
+
+const confirmRollback = async () => {
+  isRollbackConfirmOpen.value = false
+  if (isRollbackBusy.value || isUpgradeBusy.value || isRestartBusy.value) return
+  isStartingRollback.value = true
+  rollbackResult.value = null
+  try {
+    const response = await startSystemRollback()
+    currentRollbackRequestedAt = response.requestedAt
+    rollbackStatus.value = { ...rollbackStatus.value, state: response.state }
+    beginRollbackPolling()
+  } catch (error) {
+    showRollbackFailure(localizeSystemError(error))
+  } finally {
+    isStartingRollback.value = false
+  }
+}
+
+const restoreRollbackStatus = async () => {
+  try {
+    const status = await getSystemRollbackStatus()
+    rollbackStatus.value = status
+    if (status.state === 'starting' || status.state === 'running') {
+      beginRollbackPolling()
+    }
+  } catch {
+    rollbackStatus.value = { state: 'idle' }
+  }
+}
+
+const closeRollbackResult = () => {
+  if (rollbackResult.value?.state === 'succeeded') {
+    window.location.reload()
+    return
+  }
+  rollbackResult.value = null
 }
 
 // === Manual backend service restart ===
@@ -762,7 +955,7 @@ const beginRestartPolling = () => {
 }
 
 const openRestartConfirm = () => {
-  if (isRestartBusy.value || isUpgradeBusy.value) return
+  if (isRestartBusy.value || isUpgradeBusy.value || isRollbackBusy.value) return
   isRestartConfirmOpen.value = true
 }
 
@@ -772,7 +965,7 @@ const closeRestartConfirm = () => {
 }
 
 const startRestart = async () => {
-  if (isRestartBusy.value || isUpgradeBusy.value) return
+  if (isRestartBusy.value || isUpgradeBusy.value || isRollbackBusy.value) return
   isRestartConfirmOpen.value = false
   isStartingRestart.value = true
   restartResult.value = null
@@ -812,17 +1005,31 @@ const closeRestartResult = () => {
   restartResult.value = null
 }
 
+const currentVersion = ref('')
+
+const loadCurrentVersion = async () => {
+  try {
+    const payload = await getSystemVersion()
+    currentVersion.value = payload.version
+  } catch {
+    currentVersion.value = ''
+  }
+}
+
 onMounted(async () => {
   await loadChannels()
   void loadStrategy()
   void loadSmtp()
+  void loadCurrentVersion()
   void restoreUpgradeStatus()
   void restoreRestartStatus()
+  void restoreRollbackStatus()
 })
 
 onBeforeUnmount(() => {
   clearUpgradePoll()
   clearRestartPoll()
+  clearRollbackPoll()
 })
 </script>
 
@@ -1503,15 +1710,48 @@ onBeforeUnmount(() => {
                     ></span>
                     <span>{{ t('admin.settings.upgrade.statusLabel') }}：{{ t(upgradeStatusKey) }}</span>
                   </div>
-                  <div class="mt-0.5 text-xs text-muted-foreground/60">
-                    {{ t('admin.settings.upgrade.lastUpdated') }}：v2.0.10 · 2026-08-08
+                  <div v-if="currentVersion" class="mt-0.5 text-xs text-muted-foreground/60">
+                    {{ t('admin.settings.upgrade.currentVersion') }}：{{ currentVersion }}
                   </div>
                 </div>
               </div>
-              <Button class="min-w-[156px]" :disabled="isUpgradeBusy || isRestartBusy" @click="startUpgrade">
+              <Button class="min-w-[156px]" :disabled="isUpgradeBusy || isRestartBusy || isRollbackBusy" @click="startUpgrade">
                 <Loader2 v-if="isUpgradeBusy" class="mr-2 h-4 w-4 animate-spin" />
                 <RefreshCw v-else class="mr-2 h-4 w-4" />
                 {{ isUpgradeBusy ? t('admin.settings.upgrade.running') : t('admin.settings.upgrade.action') }}
+              </Button>
+            </div>
+          </section>
+
+          <section class="w-full overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm">
+            <div class="flex flex-col gap-5 p-6 sm:flex-row sm:items-center sm:justify-between">
+              <div class="flex min-w-0 items-center gap-3">
+                <div class="rounded-lg bg-amber-500/10 p-2 text-amber-500">
+                  <RotateCcw class="h-5 w-5" />
+                </div>
+                <div class="min-w-0">
+                  <h3 class="text-lg font-semibold text-foreground">{{ t('admin.settings.rollback.title') }}</h3>
+                  <div class="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
+                    <span
+                      class="h-2 w-2 rounded-full"
+                      :class="isRollbackBusy ? 'animate-pulse bg-amber-500' : (rollbackStatus.state === 'failed' ? 'bg-destructive' : (rollbackStatus.state === 'succeeded' ? 'bg-green-500' : 'bg-muted-foreground/50'))"
+                    ></span>
+                    <span>{{ t('admin.settings.rollback.statusLabel') }}：{{ t(rollbackStatusKey) }}</span>
+                  </div>
+                  <div class="mt-0.5 text-xs text-muted-foreground/60">
+                    {{ t('admin.settings.rollback.pointLabel') }}：{{ rollbackPointLabel }}
+                  </div>
+                </div>
+              </div>
+              <Button
+                variant="secondary"
+                class="min-w-[156px]"
+                :disabled="isRollbackBusy || isUpgradeBusy || isRestartBusy || !hasRollbackPoint"
+                @click="requestRollback"
+              >
+                <Loader2 v-if="isRollbackBusy" class="mr-2 h-4 w-4 animate-spin" />
+                <RotateCcw v-else class="mr-2 h-4 w-4" />
+                {{ isRollbackBusy ? t('admin.settings.rollback.running') : t('admin.settings.rollback.action') }}
               </Button>
             </div>
           </section>
@@ -1533,7 +1773,7 @@ onBeforeUnmount(() => {
                   </div>
                 </div>
               </div>
-              <Button class="min-w-[156px]" :disabled="isRestartBusy || isUpgradeBusy" @click="openRestartConfirm">
+              <Button class="min-w-[156px]" :disabled="isRestartBusy || isUpgradeBusy || isRollbackBusy" @click="openRestartConfirm">
                 <Loader2 v-if="isRestartBusy" class="mr-2 h-4 w-4 animate-spin" />
                 <Power v-else class="mr-2 h-4 w-4" />
                 {{ isRestartBusy ? t('admin.settings.restart.running') : t('admin.settings.restart.action') }}
@@ -1571,6 +1811,44 @@ onBeforeUnmount(() => {
                 <Loader2 v-if="isStartingRestart" class="mr-2 h-4 w-4 animate-spin" />
                 <Power v-else class="mr-2 h-4 w-4" />
                 {{ t('admin.settings.restart.confirm') }}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div v-if="isRollbackConfirmOpen" class="fixed inset-0 z-[180] flex items-center justify-center p-4">
+        <div class="absolute inset-0 bg-background/80 backdrop-blur-sm"></div>
+        <div
+          class="relative z-10 w-full max-w-lg overflow-hidden rounded-xl border border-border/60 bg-card shadow-2xl"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="rollback-confirm-title"
+        >
+          <div class="flex items-start gap-3 border-b border-border/50 px-5 py-4">
+            <div class="rounded-lg bg-amber-500/10 p-2 text-amber-500">
+              <AlertTriangle class="h-5 w-5" />
+            </div>
+            <h3 id="rollback-confirm-title" class="pt-1 text-base font-semibold text-foreground">
+              {{ t('admin.settings.rollback.confirmTitle') }}
+            </h3>
+          </div>
+          <div class="space-y-5 px-5 py-5">
+            <p class="text-sm leading-6 text-muted-foreground">{{ t('admin.settings.rollback.confirmMessage') }}</p>
+            <div class="rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
+              {{ t('admin.settings.rollback.confirmTarget') }}：{{ rollbackPointLabel }}
+            </div>
+            <p class="text-xs leading-5 text-muted-foreground/80">{{ t('admin.settings.rollback.confirmDatabaseNote') }}</p>
+            <div class="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <Button variant="secondary" :disabled="isStartingRollback" @click="isRollbackConfirmOpen = false">
+                {{ t('admin.settings.rollback.cancel') }}
+              </Button>
+              <Button :disabled="isStartingRollback" @click="confirmRollback">
+                <Loader2 v-if="isStartingRollback" class="mr-2 h-4 w-4 animate-spin" />
+                <RotateCcw v-else class="mr-2 h-4 w-4" />
+                {{ t('admin.settings.rollback.confirm') }}
               </Button>
             </div>
           </div>
@@ -1649,6 +1927,45 @@ onBeforeUnmount(() => {
             <div class="flex justify-end">
               <Button @click="closeRestartResult">
                 {{ restartResult.state === 'succeeded' ? t('admin.settings.restart.reload') : t('admin.settings.restart.close') }}
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div v-if="rollbackResult" class="fixed inset-0 z-[180] flex items-center justify-center p-4">
+        <div class="absolute inset-0 bg-background/80 backdrop-blur-sm"></div>
+        <div class="relative z-10 w-full max-w-lg overflow-hidden rounded-xl border border-border/60 bg-card shadow-2xl" role="dialog" aria-modal="true">
+          <div class="flex items-start justify-between gap-4 border-b border-border/50 px-5 py-4">
+            <div class="flex min-w-0 items-center gap-3">
+              <div
+                class="rounded-lg p-2"
+                :class="rollbackResult.state === 'succeeded' ? 'bg-green-500/10 text-green-500' : 'bg-destructive/10 text-destructive'"
+              >
+                <CheckCircle2 v-if="rollbackResult.state === 'succeeded'" class="h-5 w-5" />
+                <AlertTriangle v-else class="h-5 w-5" />
+              </div>
+              <h3 class="text-base font-semibold text-foreground">
+                {{ rollbackResult.state === 'succeeded' ? t('admin.settings.rollback.successTitle') : t('admin.settings.rollback.failedTitle') }}
+              </h3>
+            </div>
+            <button
+              type="button"
+              class="rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface-elevated hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              :aria-label="t('admin.settings.rollback.close')"
+              @click="closeRollbackResult"
+            >
+              <X class="h-5 w-5" />
+            </button>
+          </div>
+          <div class="space-y-4 px-5 py-5">
+            <p class="text-sm leading-6 text-muted-foreground">{{ rollbackResult.message }}</p>
+            <pre v-if="rollbackResult.output" class="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-destructive/20 bg-destructive/5 p-3 text-xs leading-5 text-foreground">{{ rollbackResult.output }}</pre>
+            <div class="flex justify-end">
+              <Button @click="closeRollbackResult">
+                {{ rollbackResult.state === 'succeeded' ? t('admin.settings.rollback.reload') : t('admin.settings.rollback.close') }}
               </Button>
             </div>
           </div>

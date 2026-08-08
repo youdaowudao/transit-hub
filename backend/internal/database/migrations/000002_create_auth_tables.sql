@@ -1,3 +1,4 @@
+-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）
 -- 认证基础表：空库首次启动时管理员初始化和登录所依赖的最小表结构。
 -- 已有库中这些表已存在，CREATE TABLE IF NOT EXISTS 保证幂等。
 

@@ -21,6 +21,30 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("GET /api/system/upgrade", handler.upgradeStatus)
 	mux.HandleFunc("POST /api/system/restart", handler.startRestart)
 	mux.HandleFunc("GET /api/system/restart", handler.restartStatus)
+	mux.HandleFunc("POST /api/system/rollback", handler.startRollback)
+	mux.HandleFunc("GET /api/system/rollback", handler.rollbackStatus)
+}
+
+func (h *Handler) startRollback(w http.ResponseWriter, r *http.Request) {
+	response, err := h.service.StartRollback(r.Context())
+	if err != nil {
+		if maintenanceConflict(err) || errors.Is(err, ErrRollbackPointMissing) {
+			httpjson.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
+		httpjson.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpjson.Write(w, http.StatusAccepted, response)
+}
+
+func (h *Handler) rollbackStatus(w http.ResponseWriter, r *http.Request) {
+	response, err := h.service.RollbackStatus(r.Context())
+	if err != nil {
+		httpjson.WriteError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpjson.Write(w, http.StatusOK, response)
 }
 
 func (h *Handler) startUpgrade(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +92,9 @@ func (h *Handler) restartStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func maintenanceConflict(err error) bool {
-	return errors.Is(err, ErrUpgradeInProgress) || errors.Is(err, ErrRestartInProgress)
+	return errors.Is(err, ErrUpgradeInProgress) ||
+		errors.Is(err, ErrRestartInProgress) ||
+		errors.Is(err, ErrRollbackInProgress)
 }
 
 func (h *Handler) version(w http.ResponseWriter, r *http.Request) {

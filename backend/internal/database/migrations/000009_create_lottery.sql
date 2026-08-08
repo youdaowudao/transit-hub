@@ -1,3 +1,4 @@
+-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）
 CREATE TABLE IF NOT EXISTS lottery_embed_configs (
     user_id text NOT NULL,
     admin_account_id text NOT NULL DEFAULT '',

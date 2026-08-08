@@ -55,3 +55,40 @@ type RestartStatusResponse struct {
 	ExitCode   *int         `json:"exitCode,omitempty"`
 	Output     string       `json:"output,omitempty"`
 }
+
+type RollbackState string
+
+const (
+	RollbackStateIdle      RollbackState = "idle"
+	RollbackStateStarting  RollbackState = "starting"
+	RollbackStateRunning   RollbackState = "running"
+	RollbackStateSucceeded RollbackState = "succeeded"
+	RollbackStateFailed    RollbackState = "failed"
+)
+
+// RollbackPoint 升级脚本在切换代码前写入的还原点，缺失表示尚未升级过。
+// SchemaVersion 是迁移文件名的数字前缀，由 deploy/update-source.sh 以 JSON 数字写入。
+type RollbackPoint struct {
+	Commit        string `json:"commit"`
+	Version       string `json:"version"`
+	SchemaVersion int    `json:"schemaVersion"`
+	DumpPath      string `json:"dumpPath,omitempty"`
+	CapturedAt    string `json:"capturedAt"`
+}
+
+// RollbackStartResponse POST /api/system/rollback 响应。
+type RollbackStartResponse struct {
+	State       RollbackState `json:"state"`
+	RequestedAt string        `json:"requestedAt"`
+}
+
+// RollbackStatusResponse GET /api/system/rollback 响应。
+// Point 为空表示当前没有可回滚的还原点，前端应禁用按钮。
+type RollbackStatusResponse struct {
+	State      RollbackState  `json:"state"`
+	StartedAt  string         `json:"startedAt,omitempty"`
+	FinishedAt string         `json:"finishedAt,omitempty"`
+	ExitCode   *int           `json:"exitCode,omitempty"`
+	Output     string         `json:"output,omitempty"`
+	Point      *RollbackPoint `json:"point,omitempty"`
+}

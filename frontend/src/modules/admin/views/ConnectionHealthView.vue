@@ -19,7 +19,7 @@ import {
 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { listUpstreamSites } from '../api/upstream'
-import { connectionHealthMessageKey, useConnectionHealth } from '../composables/useConnectionHealth'
+import { connectionHealthMessageKey, formatConnectionHealthTime, useConnectionHealth } from '../composables/useConnectionHealth'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import AdminGroupHealthDetail from '../components/dashboard/AdminGroupHealthDetail.vue'
 import ConnectionHealthEventsDialog from '../components/dashboard/ConnectionHealthEventsDialog.vue'
@@ -34,6 +34,7 @@ import type {
   AdminGroupHealth,
   ConnectionHealthPolicy,
   PolicyInput,
+  SafetySettings,
 } from '../types/connectionHealth'
 import { resolveConnectionHealthStrategyMode } from '../utils/connectionHealthPolicy'
 import {
@@ -53,6 +54,7 @@ const {
   adminGroups,
   events,
   policies,
+  safety,
   isLoading,
   isActionLoading,
   errorKey,
@@ -60,8 +62,11 @@ const {
   loadAdminGroups,
   loadEvents,
   loadPolicies,
+  loadSafety,
   removePolicy,
   savePolicy,
+  saveSafety,
+  emergencyClearSafety,
   updateTargetSchedulable,
 } = useConnectionHealth()
 const { currentAccount } = useAdminAccounts()
@@ -76,8 +81,54 @@ let eventsOpenRequestSequence = 0
 const siteNameMap = ref<Map<string, string>>(new Map())
 const preferences = ref<ConnectionHealthPreferences>(createDefaultConnectionHealthPreferences())
 const groupManagerOpen = ref(false)
+const safetySectionOpen = ref(false)
+const safetySaving = ref(false)
+const safetyClearing = ref(false)
+let pendingEmergencyClearKey = ''
+const safetyDraft = ref<SafetySettings>({
+  confirmationObservationCount: 4,
+  confirmationDelaysSeconds: [2, 5, 10],
+  confirmationJitterSeconds: 1,
+  abnormalQueueCapacity: 64,
+  manualReservedSlots: 1,
+  updatedAt: '',
+  updatedBy: '',
+})
 const preferenceScope = computed(() => currentAccount.value?.id ?? 'anonymous')
 let loadedPreferenceScope = ''
+
+const safetyDelayCount = computed(() => Math.max(0, Number(safetyDraft.value.confirmationObservationCount || 0) - 1))
+const safetyEffectiveAt = computed(() => {
+  const value = safety.value?.settings.updatedAt
+  if (!value) return ''
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp) || timestamp < Date.UTC(2000, 0, 1)) return ''
+  return formatConnectionHealthTime(value)
+})
+
+const syncSafetyDraft = (settings: SafetySettings | null | undefined) => {
+  if (!settings) return
+  safetyDraft.value = {
+    ...settings,
+    confirmationDelaysSeconds: [...settings.confirmationDelaysSeconds],
+  }
+}
+
+watch(safety, (next) => {
+  if (!safetySectionOpen.value) syncSafetyDraft(next?.settings)
+}, { deep: true })
+
+watch(
+  () => safetyDraft.value.confirmationObservationCount,
+  (nextCount) => {
+    const count = Math.max(3, Math.min(5, Number(nextCount) || 4))
+    const desiredLength = count - 1
+    const current = [...safetyDraft.value.confirmationDelaysSeconds]
+    const defaults = [2, 5, 10, 15]
+    while (current.length < desiredLength) current.push(defaults[current.length] ?? 15)
+    safetyDraft.value.confirmationDelaysSeconds = current.slice(0, desiredLength)
+  },
+)
 
 const groupTypes = ['public', 'exclusive', 'subscription']
 const groupTypeLabel = (type: string): string => t(`admin.connectionHealth.groupTypes.${groupTypes.includes(type) ? type : 'public'}`)
@@ -237,6 +288,64 @@ const loadSiteNames = async () => {
   }
 }
 
+const refreshSafety = async () => {
+  await loadSafety()
+  syncSafetyDraft(safety.value?.settings)
+}
+
+const saveSafetySettings = async () => {
+  if (safetySaving.value) return
+  safetySaving.value = true
+  try {
+    const input: SafetySettings = {
+      ...safetyDraft.value,
+      confirmationObservationCount: Number(safetyDraft.value.confirmationObservationCount),
+      confirmationDelaysSeconds: safetyDraft.value.confirmationDelaysSeconds.map(value => Number(value)),
+      confirmationJitterSeconds: Number(safetyDraft.value.confirmationJitterSeconds),
+      abnormalQueueCapacity: Number(safetyDraft.value.abnormalQueueCapacity),
+      manualReservedSlots: Number(safetyDraft.value.manualReservedSlots),
+    }
+    if (await saveSafety(input)) syncSafetyDraft(safety.value?.settings)
+  } finally {
+    safetySaving.value = false
+  }
+}
+
+const resetSafetyDraft = () => syncSafetyDraft(safety.value?.settings)
+
+const toggleSafetySection = () => {
+  const opening = !safetySectionOpen.value
+  safetySectionOpen.value = opening
+  if (opening) syncSafetyDraft(safety.value?.settings)
+}
+
+const createEmergencyClearUUID = (): string => {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID()
+  const bytes = new Uint8Array(16)
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes)
+  } else {
+    for (let index = 0; index < bytes.length; index++) bytes[index] = Math.floor(Math.random() * 256)
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
+
+const emergencyClear = async () => {
+  if (safetyClearing.value) return
+  if (!window.confirm(t('admin.connectionHealth.safety.emergencyClearConfirm'))) return
+  safetyClearing.value = true
+  try {
+    if (!pendingEmergencyClearKey) pendingEmergencyClearKey = createEmergencyClearUUID()
+    const result = await emergencyClearSafety(pendingEmergencyClearKey)
+    if (result) pendingEmergencyClearKey = ''
+  } finally {
+    safetyClearing.value = false
+  }
+}
+
 const moveGroup = (groupId: string, offset: -1 | 1) => {
   const ids = orderedGroups.value.map(group => group.id)
   const index = ids.indexOf(groupId)
@@ -268,6 +377,7 @@ const refreshOnEntry = () => {
   void loadAll()
   void loadEvents()
   void loadPolicies()
+  void refreshSafety()
   void loadSiteNames()
 }
 
@@ -280,7 +390,7 @@ const autoRefresh = async () => {
   if (documentVisibility.value !== 'visible' || autoRefreshInFlight || probeDialogOpen.value) return
   autoRefreshInFlight = true
   try {
-    await Promise.all([loadAll({ silent: true }), loadEvents(selectedConnectionId.value || undefined)])
+    await Promise.all([loadAll({ silent: true }), loadEvents(selectedConnectionId.value || undefined), loadSafety()])
   } finally {
     autoRefreshInFlight = false
   }
@@ -292,7 +402,7 @@ watch(documentVisibility, (visibility) => {
 })
 
 const refresh = async () => {
-  await Promise.all([loadAll(), loadPolicies(), loadEvents()])
+  await Promise.all([loadAll(), loadPolicies(), loadEvents(), refreshSafety()])
 }
 
 const siteName = (siteId: string): string => siteNameMap.value.get(siteId) ?? siteId
@@ -457,6 +567,15 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
         <p class="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">{{ t('admin.connectionHealth.simplifiedSubtitle') }}</p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
+        <Button variant="secondary" size="sm" @click="toggleSafetySection">
+          <ShieldCheck class="h-4 w-4" />
+          {{ t('admin.connectionHealth.topActions.safety') }}
+        </Button>
+        <Button variant="destructive" size="sm" :disabled="safetyClearing || !safety" @click="emergencyClear">
+          <Loader2 v-if="safetyClearing" class="h-4 w-4 animate-spin" />
+          <AlertTriangle v-else class="h-4 w-4" />
+          {{ t('admin.connectionHealth.safety.emergencyClear') }}
+        </Button>
         <Button variant="secondary" size="sm" @click="policyListDialogOpen = true">
           <Settings2 class="h-4 w-4" />
           {{ t('admin.connectionHealth.topActions.policies') }}
@@ -472,6 +591,170 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
         </Button>
       </div>
     </header>
+
+    <section v-if="safetySectionOpen" class="overflow-hidden rounded-lg border border-border/60 bg-card text-card-foreground shadow-sm" :aria-label="t('admin.connectionHealth.safety.title')">
+      <div class="flex flex-col gap-2 border-b border-border/50 px-4 py-3 sm:flex-row sm:items-start sm:justify-between">
+        <div class="min-w-0">
+          <h2 class="text-sm font-semibold text-foreground">{{ t('admin.connectionHealth.safety.title') }}</h2>
+          <p class="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.safety.subtitle') }}</p>
+        </div>
+        <span v-if="safetyEffectiveAt" class="shrink-0 text-xs text-muted-foreground">
+          {{ t('admin.connectionHealth.safety.updatedAt', { time: safetyEffectiveAt }) }}
+        </span>
+      </div>
+
+      <div v-if="safety" class="grid gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_22rem]">
+        <div class="space-y-4">
+          <div class="grid gap-3 sm:grid-cols-2">
+            <label class="space-y-1.5">
+              <span class="block text-xs font-medium text-foreground">{{ t('admin.connectionHealth.safety.observationCount') }}</span>
+              <input
+                v-model.number="safetyDraft.confirmationObservationCount"
+                type="number"
+                min="3"
+                max="5"
+                step="1"
+                class="h-10 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/20"
+              >
+              <span class="block text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.safety.observationCountHint') }}</span>
+            </label>
+
+            <label class="space-y-1.5">
+              <span class="block text-xs font-medium text-foreground">{{ t('admin.connectionHealth.safety.jitter') }}</span>
+              <input
+                v-model.number="safetyDraft.confirmationJitterSeconds"
+                type="number"
+                min="0"
+                max="3"
+                step="1"
+                class="h-10 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/20"
+              >
+              <span class="block text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.safety.jitterHint') }}</span>
+            </label>
+
+            <label class="space-y-1.5">
+              <span class="block text-xs font-medium text-foreground">{{ t('admin.connectionHealth.safety.queueCapacity') }}</span>
+              <input
+                v-model.number="safetyDraft.abnormalQueueCapacity"
+                type="number"
+                min="16"
+                max="256"
+                step="1"
+                class="h-10 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/20"
+              >
+              <span class="block text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.safety.queueCapacityHint') }}</span>
+            </label>
+
+            <label class="space-y-1.5">
+              <span class="block text-xs font-medium text-foreground">{{ t('admin.connectionHealth.safety.manualReservedSlots') }}</span>
+              <input
+                v-model.number="safetyDraft.manualReservedSlots"
+                type="number"
+                min="0"
+                max="1"
+                step="1"
+                class="h-10 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/20"
+              >
+              <span class="block text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.safety.manualReservedSlotsHint') }}</span>
+            </label>
+          </div>
+
+          <div class="space-y-2">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 class="text-xs font-medium text-foreground">{{ t('admin.connectionHealth.safety.delays') }}</h3>
+                <p class="mt-1 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.safety.delaysHint') }}</p>
+              </div>
+              <span class="text-xs tabular-nums text-muted-foreground">{{ t('admin.connectionHealth.safety.delayCount', { count: safetyDelayCount }) }}</span>
+            </div>
+            <div class="grid gap-2 sm:grid-cols-3">
+              <label v-for="index in safetyDelayCount" :key="index" class="space-y-1.5">
+                <span class="block text-xs text-muted-foreground">{{ t('admin.connectionHealth.safety.delayItem', { index }) }}</span>
+                <input
+                  v-model.number="safetyDraft.confirmationDelaysSeconds[index - 1]"
+                  type="number"
+                  min="1"
+                  max="30"
+                  step="1"
+                  class="h-10 w-full rounded-lg border border-border/60 bg-background px-3 text-sm tabular-nums text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/20"
+                >
+              </label>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap items-center justify-end gap-2 border-t border-border/50 pt-3">
+            <Button variant="ghost" size="sm" :disabled="safetySaving" @click="resetSafetyDraft">
+              <RefreshCw class="h-4 w-4" />
+              {{ t('admin.connectionHealth.safety.reset') }}
+            </Button>
+            <Button size="sm" :disabled="safetySaving" @click="saveSafetySettings">
+              <Loader2 v-if="safetySaving" class="h-4 w-4 animate-spin" />
+              <CheckCircle2 v-else class="h-4 w-4" />
+              {{ safetySaving ? t('admin.connectionHealth.safety.saving') : t('admin.connectionHealth.safety.save') }}
+            </Button>
+          </div>
+        </div>
+
+        <aside class="space-y-3">
+          <div class="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+            <div class="flex items-start gap-2">
+              <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+              <div class="min-w-0">
+                <h3 class="text-xs font-semibold text-foreground">{{ t('admin.connectionHealth.safety.emergencyTitle') }}</h3>
+                <p class="mt-1 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.safety.emergencyDescription') }}</p>
+              </div>
+            </div>
+            <Button class="mt-3 w-full" variant="destructive" size="sm" :disabled="safetyClearing" @click="emergencyClear">
+              <Loader2 v-if="safetyClearing" class="h-4 w-4 animate-spin" />
+              <AlertTriangle v-else class="h-4 w-4" />
+              {{ safetyClearing ? t('admin.connectionHealth.safety.clearing') : t('admin.connectionHealth.safety.emergencyClear') }}
+            </Button>
+          </div>
+
+          <div class="rounded-lg border border-border/60 bg-background p-3 text-xs">
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-medium text-foreground">{{ t('admin.connectionHealth.safety.latestClear') }}</span>
+              <span v-if="safety.latestEmergencyClear?.idempotent" class="text-muted-foreground">{{ t('admin.connectionHealth.safety.idempotent') }}</span>
+            </div>
+            <p v-if="safety.latestEmergencyClear" class="mt-2 leading-5 text-muted-foreground">
+              {{ t('admin.connectionHealth.safety.clearResult', { cancelled: safety.latestEmergencyClear.cancelled, dispatching: safety.latestEmergencyClear.dispatching, incidents: safety.latestEmergencyClear.incidents }) }}
+            </p>
+            <p v-else class="mt-2 leading-5 text-muted-foreground">{{ t('admin.connectionHealth.safety.latestClearNone') }}</p>
+            <p v-if="safety.latestEmergencyClear" class="mt-1 text-muted-foreground">
+              {{ formatConnectionHealthTime(safety.latestEmergencyClear.completedAt) }} · {{ t('admin.connectionHealth.safety.queueEpoch', { epoch: safety.latestEmergencyClear.queueEpoch }) }}
+            </p>
+          </div>
+
+          <div class="rounded-lg border border-border/60 bg-background p-3 text-xs">
+            <h3 class="font-medium text-foreground">{{ t('admin.connectionHealth.safety.queueSummary') }}</h3>
+            <dl class="mt-3 grid grid-cols-2 gap-x-3 gap-y-2">
+              <div>
+                <dt class="text-muted-foreground">{{ t('admin.connectionHealth.safety.queued') }}</dt>
+                <dd class="mt-0.5 font-semibold tabular-nums text-foreground">{{ safety.queue.queued }}</dd>
+              </div>
+              <div>
+                <dt class="text-muted-foreground">{{ t('admin.connectionHealth.safety.claimed') }}</dt>
+                <dd class="mt-0.5 font-semibold tabular-nums text-foreground">{{ safety.queue.claimed }}</dd>
+              </div>
+              <div>
+                <dt class="text-muted-foreground">{{ t('admin.connectionHealth.safety.dispatching') }}</dt>
+                <dd class="mt-0.5 font-semibold tabular-nums text-foreground">{{ safety.queue.dispatching }}</dd>
+              </div>
+              <div>
+                <dt class="text-muted-foreground">{{ t('admin.connectionHealth.safety.guardHeld') }}</dt>
+                <dd class="mt-0.5 font-semibold tabular-nums text-foreground">{{ safety.queue.guardHeld }}</dd>
+              </div>
+              <div class="col-span-2 border-t border-border/50 pt-2">
+                <dt class="text-muted-foreground">{{ t('admin.connectionHealth.safety.incidents') }}</dt>
+                <dd class="mt-0.5 font-semibold tabular-nums text-foreground">{{ safety.queue.incidents }}</dd>
+              </div>
+            </dl>
+          </div>
+        </aside>
+      </div>
+
+      <p v-else class="px-4 py-6 text-sm text-muted-foreground">{{ t('admin.connectionHealth.safety.loading') }}</p>
+    </section>
 
     <!-- 汇总与主列表使用同一 admin target 数据源。 -->
     <section class="overflow-hidden rounded-lg border border-border/60 bg-card" :aria-label="t('admin.connectionHealth.summaryLabel')">

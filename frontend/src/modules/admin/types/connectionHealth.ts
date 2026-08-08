@@ -310,6 +310,40 @@ export interface ConnectionHealthStoredSummary {
   lastProbeAt?: string | null
 }
 
+export interface SafetySettings {
+  confirmationObservationCount: number
+  confirmationDelaysSeconds: number[]
+  confirmationJitterSeconds: number
+  abnormalQueueCapacity: number
+  manualReservedSlots: number
+  updatedAt: string
+  updatedBy?: string
+}
+
+export interface SafetyEmergencyClearResult {
+  workspaceId: string
+  queueEpoch: number
+  cancelled: number
+  incidents: number
+  dispatching: number
+  completedAt: string
+  idempotent?: boolean
+}
+
+export interface SafetyQueueSummary {
+  queued: number
+  claimed: number
+  dispatching: number
+  guardHeld: number
+  incidents: number
+}
+
+export interface SafetyWorkspaceView {
+  settings: SafetySettings
+  queue: SafetyQueueSummary
+  latestEmergencyClear?: SafetyEmergencyClearResult | null
+}
+
 export interface ModelTargetInput {
   id?: string
   modelName: string

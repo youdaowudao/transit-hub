@@ -28,4 +28,13 @@ describe('dashboard provisional trend values', () => {
       provisionalQuality: 'ceiling',
     })).toEqual({ value: null, quality: 'unavailable' })
   })
+
+  it('marks a same-day cached value as fallback even when the live field is populated', () => {
+    expect(selectDashboardTrendValue({
+      formalValue: 198.19,
+      provisionalValue: 198.19,
+      status: 'fallback',
+      provisionalQuality: 'fallback',
+    })).toEqual({ value: 198.19, quality: 'fallback' })
+  })
 })

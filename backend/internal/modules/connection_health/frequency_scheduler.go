@@ -40,10 +40,20 @@ func (s *Service) startFrequencySchedulers(ctx context.Context) {
 		s.ensureSchedulerSignals()
 		schedulerCtx, cancel := context.WithCancel(ctx)
 		s.schedulerCancel = cancel
-		s.schedulerWG.Add(3)
+		safetyWorkers := 0
+		if s.safetyRepo != nil {
+			safetyWorkers = globalProbeConcurrency
+		}
+		s.schedulerWG.Add(3 + safetyWorkers)
 		go func() { defer s.schedulerWG.Done(); s.runPriorityReconcileLoop(schedulerCtx) }()
 		go func() { defer s.schedulerWG.Done(); s.runPriorityWritebackLoop(schedulerCtx) }()
 		go func() { defer s.schedulerWG.Done(); s.runProbeSchedulerLoop(schedulerCtx) }()
+		for index := 0; index < safetyWorkers; index++ {
+			go func(workerIndex int) {
+				defer s.schedulerWG.Done()
+				s.runSafetyQueueWorker(schedulerCtx, workerIndex)
+			}(index)
+		}
 	})
 }
 
@@ -450,6 +460,9 @@ func (s *Service) runPriorityReconcileTick(ctx context.Context) {
 				return
 			}
 			ttl := time.Duration(preset.InventorySnapshotTTLSeconds) * time.Second
+			if err := s.persistSafetyInventorySnapshot(ctx, userID, adminAccountID, inventory, now.UnixNano(), now.Add(ttl)); err != nil {
+				log.Printf("[connection-health] persist safety inventory snapshot failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
+			}
 			s.putAdminInventorySnapshot(ctx, userID, adminAccountID, inventory, now, ttl)
 			succeededAt := now
 			expiresAt := now.Add(ttl)

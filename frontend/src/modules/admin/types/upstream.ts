@@ -78,6 +78,7 @@ export interface UpstreamSite {
   requestedPlatform: UpstreamPlatform
   account: string
   rechargeRate: number
+  enabled: boolean
   remark: string
   logo: string
   logoBg: string
@@ -89,7 +90,7 @@ export interface UpstreamSite {
   lastSyncedAt: number | null
 }
 
-export type UpstreamSiteResponse = Omit<UpstreamSite, 'session' | 'logo' | 'logoBg'>
+export type UpstreamSiteResponse = Omit<UpstreamSite, 'session' | 'logo' | 'logoBg' | 'enabled'> & { enabled?: boolean }
 
 export interface UpstreamLoginResult {
   platform: ResolvedUpstreamPlatform

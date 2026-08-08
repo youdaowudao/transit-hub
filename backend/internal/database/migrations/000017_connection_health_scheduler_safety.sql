@@ -1,3 +1,4 @@
+-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）
 -- Atomically reserve daily probe budget across concurrent requests and backend replicas.
 CREATE TABLE IF NOT EXISTS connection_health_probe_budget_usage (
     user_id text NOT NULL,

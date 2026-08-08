@@ -41,6 +41,13 @@ func (s *Service) ManualProbeTarget(ctx context.Context, userID string, targetID
 	if err != nil {
 		return nil, err
 	}
+	limitCtx, cancelLimit := context.WithTimeout(ctx, 2*ProbeTimeout)
+	defer cancelLimit()
+	releaseSlot, acquired := s.sharedProbeLimiter().acquireManual(limitCtx, userID+"|"+adminAccountID, s.manualProbeReservedSlots(ctx, userID, adminAccountID))
+	if !acquired {
+		return nil, requestError(ErrorProbeConcurrencyLimited)
+	}
+	defer releaseSlot()
 	_, _, memberships, found, accountsReadError, err := s.findAdminTargetWithMemberships(ctx, session, adminAccountID, target.AccountID)
 	if err != nil {
 		return nil, err

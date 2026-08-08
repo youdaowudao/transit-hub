@@ -85,6 +85,44 @@ func TestUpdateSub2APIAdminAccountStatusContext_CancelsBlockedRequest(t *testing
 	}
 }
 
+func TestSetSub2APIAdminAccountSchedulableContext_CancelsBlockedRequest(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token-1", TokenType: "Bearer"}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- service.SetSub2APIAdminAccountSchedulableContext(ctx, session, "1515", false)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("blocked schedulable request did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("canceled schedulable request must return an error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("schedulable request did not stop after context cancellation")
+	}
+}
+
 // TestUpdateSub2APIAdminAccountStatus_UsesFieldOnlyBulkUpdate 验证状态更新不会读取或
 // 回写账号详情。请求体只能包含账号 ID 和目标状态，尤其不能携带倍率、凭据或分组字段。
 func TestUpdateSub2APIAdminAccountStatus_UsesFieldOnlyBulkUpdate(t *testing.T) {

@@ -1,3 +1,4 @@
+-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）
 -- Preserve the upstream status/weight that connection health managed before failover.
 -- The connection health module historically created its own tables at startup, so the
 -- events table may not exist yet on a fresh install when database migrations run.

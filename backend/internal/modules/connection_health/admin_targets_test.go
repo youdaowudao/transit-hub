@@ -353,11 +353,9 @@ func TestProbeTarget_FormalProbeRejectsUnassignedModel(t *testing.T) {
 	}
 }
 
-// TestProbeTargetOnce_Sub2APIAutoRemoteDegradeUpdatesInactive 验证 AutoRemoteActionEnabled=true
-// 时，sub2api target 探活遭遇硬失败（触发 TriggerRemoteDegrade）会真实调用
-// UpdateSub2APIAdminAccountStatus(session, target.AccountID, "inactive")，state/event 的
-// remoteAction 记录为 sub2api_account_status_inactive。
-func TestProbeTargetOnce_Sub2APIAutoRemoteDegradeUpdatesInactive(t *testing.T) {
+// 正式人工探活只产生一次观测。即使策略开启自动远程动作，
+// 单次认证失败也不得暂停账号或直接写 inactive。
+func TestProbeTargetOnce_FormalFailureDoesNotWriteInactive(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
@@ -380,18 +378,18 @@ func TestProbeTargetOnce_Sub2APIAutoRemoteDegradeUpdatesInactive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 1 || results[0].State != StateSuspended {
-		t.Fatalf("expected hard failure to suspend immediately, got %+v", results)
+	if len(results) != 1 || results[0].State != StateHealthy || results[0].ConsecutiveFailures != 1 {
+		t.Fatalf("expected one isolated failure observation, got %+v", results)
 	}
-	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].accountID != "acc-1" || platform.sub2APICalls[0].status != "inactive" {
-		t.Fatalf("expected one call accountID=acc-1 status=inactive, got %+v", platform.sub2APICalls)
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("formal failure must not write upstream status, got %+v", platform.sub2APICalls)
 	}
 	st := repo.states[targetID]["gpt-4o"]
-	if st.LastRemoteAction != RemoteActionSub2APIStatusInactive {
-		t.Fatalf("expected state.LastRemoteAction=%s, got %q", RemoteActionSub2APIStatusInactive, st.LastRemoteAction)
+	if st.LastRemoteAction != "" {
+		t.Fatalf("formal failure must not record a dispatched action, got %q", st.LastRemoteAction)
 	}
-	if len(repo.events) != 1 || repo.events[0].RemoteAction != RemoteActionSub2APIStatusInactive {
-		t.Fatalf("expected event.RemoteAction=%s, got %+v", RemoteActionSub2APIStatusInactive, repo.events)
+	if len(repo.events) != 1 || repo.events[0].RemoteAction != "" {
+		t.Fatalf("formal failure event must remain observation-only, got %+v", repo.events)
 	}
 }
 
@@ -441,11 +439,8 @@ func TestProbeTargetOnce_Sub2APIAutoRemoteRestoreUpdatesActive(t *testing.T) {
 	}
 }
 
-// TestProbeTargetOnce_Sub2APIAutoRemoteDegradeFailureRecordsFailedAction 验证远端降级调用失败时
-// （UpdateSub2APIAdminAccountStatus 返回 error），state/event 的 remoteAction 记录为
-// sub2api_account_status_inactive_failed，绝不能回退成 unsupported——sub2api 已经支持这个
-// 动作，真的发起了调用只是失败了，和「平台不支持」是两回事。
-func TestProbeTargetOnce_Sub2APIAutoRemoteDegradeFailureRecordsFailedAction(t *testing.T) {
+// 上游动作客户端即使配置为必然报错，单次正式探活也不应触及它。
+func TestProbeTargetOnce_FormalFailureDoesNotAttemptRemoteAction(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
@@ -468,15 +463,18 @@ func TestProbeTargetOnce_Sub2APIAutoRemoteDegradeFailureRecordsFailedAction(t *t
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 1 || results[0].State != StateSuspended {
-		t.Fatalf("expected hard failure to suspend, got %+v", results)
+	if len(results) != 1 || results[0].State != StateHealthy || results[0].ConsecutiveFailures != 1 {
+		t.Fatalf("expected one isolated failure observation, got %+v", results)
+	}
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("formal failure must not attempt an upstream mutation, got %+v", platform.sub2APICalls)
 	}
 	st := repo.states[targetID]["gpt-4o"]
-	if st.LastRemoteAction != RemoteActionSub2APIStatusInactiveFailed {
-		t.Fatalf("expected state.LastRemoteAction=%s, got %q", RemoteActionSub2APIStatusInactiveFailed, st.LastRemoteAction)
+	if st.LastRemoteAction != "" {
+		t.Fatalf("no remote action was attempted, got state action %q", st.LastRemoteAction)
 	}
-	if len(repo.events) != 1 || repo.events[0].RemoteAction != RemoteActionSub2APIStatusInactiveFailed {
-		t.Fatalf("expected event.RemoteAction=%s, got %+v", RemoteActionSub2APIStatusInactiveFailed, repo.events)
+	if len(repo.events) != 1 || repo.events[0].RemoteAction != "" {
+		t.Fatalf("no remote action was attempted, got event %+v", repo.events)
 	}
 }
 
@@ -522,13 +520,9 @@ func TestProbeTargetOnce_Sub2APIAutoRemoteRestoreFailureRecordsFailedAction(t *t
 	}
 }
 
-// TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds 是覆盖「PlatformService
-// 单测通过、dispatcher fake 单测通过，但真实组合路径失败」这类盲区的端到端测试：
-// 用同一个 httptest.Server 同时模拟探活端点（返回 500 触发 healthy -> suspended）和 sub2api
-// admin accounts 的字段级批量更新，dispatcher 的 PlatformActioner 用真实 *upstream.PlatformService
-// （不是 fake），断言最终状态/事件里的 remoteAction 是 sub2api_account_status_inactive，
-// 且请求体只把指定账号的 status 改成 inactive。
-func TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds(t *testing.T) {
+// 真实 PlatformService 组合路径也必须遵守观测边界：正式探活的单次
+// 500 可以更新本地健康状态，但不得请求 Sub2API 批量写接口。
+func TestProbeTargetOnce_RealPlatformFormalFailureDoesNotBulkUpdate(t *testing.T) {
 	var bulkBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -568,31 +562,24 @@ func TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds(t *testi
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 1 || results[0].State != StateSuspended {
-		t.Fatalf("expected hard failure to suspend, got %+v", results)
+	if len(results) != 1 || results[0].State != StateHealthy || results[0].ConsecutiveFailures != 1 {
+		t.Fatalf("expected one isolated failure observation, got %+v", results)
 	}
 
 	st := repo.states[targetID]["gpt-4o"]
-	if st.LastRemoteAction != RemoteActionSub2APIStatusInactive {
-		t.Fatalf("expected state.LastRemoteAction=%s, got %q", RemoteActionSub2APIStatusInactive, st.LastRemoteAction)
+	if st.LastRemoteAction != "" {
+		t.Fatalf("formal failure must not record a dispatched action, got %q", st.LastRemoteAction)
 	}
-	if len(repo.events) != 1 || repo.events[0].RemoteAction != RemoteActionSub2APIStatusInactive {
-		t.Fatalf("expected event.RemoteAction=%s, got %+v", RemoteActionSub2APIStatusInactive, repo.events)
+	if len(repo.events) != 1 || repo.events[0].RemoteAction != "" {
+		t.Fatalf("formal failure event must remain observation-only, got %+v", repo.events)
 	}
-	if bulkBody == nil {
-		t.Fatalf("expected a real bulk update request to the sub2api admin accounts API")
-	}
-	if len(bulkBody) != 2 || bulkBody["status"] != "inactive" {
-		t.Fatalf("expected field-only status update, got %+v", bulkBody)
-	}
-	accountIDs, ok := bulkBody["account_ids"].([]any)
-	if !ok || len(accountIDs) != 1 || accountIDs[0] != float64(1515) {
-		t.Fatalf("expected account_ids=[1515], got %+v", bulkBody["account_ids"])
+	if bulkBody != nil {
+		t.Fatalf("formal failure must not call the bulk update API, got %+v", bulkBody)
 	}
 }
 
-// TestProbeTargetOnce_Sub2APIRemoteActionDisabledSkipsUpstream 验证 AutoRemoteActionEnabled=false
-// 时，即使状态机触发远端动作，也绝不调用 sub2api PUT 接口，只记录 skipped_independent_probe。
+// AutoRemoteActionEnabled=false 时同样只记录本地观测，不伪造一条已被安全闸门
+// 评估过的远程动作记录。
 func TestProbeTargetOnce_Sub2APIRemoteActionDisabledSkipsUpstream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -615,14 +602,14 @@ func TestProbeTargetOnce_Sub2APIRemoteActionDisabledSkipsUpstream(t *testing.T) 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(results) != 1 || results[0].State != StateSuspended {
-		t.Fatalf("expected hard failure to suspend, got %+v", results)
+	if len(results) != 1 || results[0].State != StateHealthy || results[0].ConsecutiveFailures != 1 {
+		t.Fatalf("expected one isolated failure observation, got %+v", results)
 	}
 	if len(platform.sub2APICalls) != 0 {
 		t.Fatalf("expected no upstream call when AutoRemoteActionEnabled=false, got %+v", platform.sub2APICalls)
 	}
 	st := repo.states[targetID]["gpt-4o"]
-	if st.LastRemoteAction != RemoteActionSkippedIndependentProbe {
-		t.Fatalf("expected LastRemoteAction=%s, got %q", RemoteActionSkippedIndependentProbe, st.LastRemoteAction)
+	if st.LastRemoteAction != "" {
+		t.Fatalf("disabled remote action must remain observation-only, got %q", st.LastRemoteAction)
 	}
 }

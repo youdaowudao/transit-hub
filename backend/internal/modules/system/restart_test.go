@@ -54,7 +54,7 @@ func (f *fakeRestartExecutor) Status(context.Context) (RestartStatusResponse, er
 func TestStartRestartStartsFixedExecutor(t *testing.T) {
 	upgradeExecutor := &fakeUpgradeExecutor{status: UpgradeStatusResponse{State: UpgradeStateIdle}}
 	restartExecutor := &fakeRestartExecutor{status: RestartStatusResponse{State: RestartStateIdle}}
-	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor)
+	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor, newIdleRollbackExecutor())
 
 	response, err := service.StartRestart(context.Background())
 	if err != nil {
@@ -77,6 +77,7 @@ func TestRestartStatusWaitsUntilRestartRequestIsEnqueued(t *testing.T) {
 		config.Config{},
 		&fakeUpgradeExecutor{status: UpgradeStatusResponse{State: UpgradeStateIdle}},
 		restartExecutor,
+		newIdleRollbackExecutor(),
 	)
 
 	startDone := make(chan error, 1)
@@ -120,7 +121,7 @@ func TestRestartStatusWaitsUntilRestartRequestIsEnqueued(t *testing.T) {
 func TestStartRestartRejectsDuplicateRequestWhileStartIsPending(t *testing.T) {
 	upgradeExecutor := &fakeUpgradeExecutor{status: UpgradeStatusResponse{State: UpgradeStateIdle}}
 	restartExecutor := &fakeRestartExecutor{status: RestartStatusResponse{State: RestartStateIdle}}
-	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor)
+	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor, newIdleRollbackExecutor())
 
 	if _, err := service.StartRestart(context.Background()); err != nil {
 		t.Fatalf("first restart: %v", err)
@@ -137,7 +138,7 @@ func TestStartRestartRejectsDuplicateRequestWhileStartIsPending(t *testing.T) {
 func TestStartRestartRejectsRunningRestart(t *testing.T) {
 	upgradeExecutor := &fakeUpgradeExecutor{status: UpgradeStatusResponse{State: UpgradeStateIdle}}
 	restartExecutor := &fakeRestartExecutor{status: RestartStatusResponse{State: RestartStateRunning}}
-	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor)
+	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor, newIdleRollbackExecutor())
 
 	_, err := service.StartRestart(context.Background())
 	if !errors.Is(err, ErrRestartInProgress) {
@@ -151,7 +152,7 @@ func TestStartRestartRejectsRunningRestart(t *testing.T) {
 func TestStartRestartRejectsRunningUpgrade(t *testing.T) {
 	upgradeExecutor := &fakeUpgradeExecutor{status: UpgradeStatusResponse{State: UpgradeStateRunning}}
 	restartExecutor := &fakeRestartExecutor{status: RestartStatusResponse{State: RestartStateIdle}}
-	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor)
+	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor, newIdleRollbackExecutor())
 
 	_, err := service.StartRestart(context.Background())
 	if !errors.Is(err, ErrUpgradeInProgress) {
@@ -416,7 +417,7 @@ func TestSystemdRestartExecutorRejectsCorruptStatus(t *testing.T) {
 func TestRestartHandlerStartsAndReturnsStatus(t *testing.T) {
 	upgradeExecutor := &fakeUpgradeExecutor{status: UpgradeStatusResponse{State: UpgradeStateIdle}}
 	restartExecutor := &fakeRestartExecutor{status: RestartStatusResponse{State: RestartStateIdle}}
-	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor)
+	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor, newIdleRollbackExecutor())
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, service)
 
@@ -451,7 +452,7 @@ func TestRestartHandlerStartsAndReturnsStatus(t *testing.T) {
 func TestRestartHandlerReturnsConflictWhileRunning(t *testing.T) {
 	upgradeExecutor := &fakeUpgradeExecutor{status: UpgradeStatusResponse{State: UpgradeStateIdle}}
 	restartExecutor := &fakeRestartExecutor{status: RestartStatusResponse{State: RestartStateRunning}}
-	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor)
+	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor, newIdleRollbackExecutor())
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, service)
 
@@ -468,7 +469,7 @@ func TestRestartHandlerReturnsExecutorFailureReason(t *testing.T) {
 		status:   RestartStatusResponse{State: RestartStateIdle},
 		startErr: errors.New("access denied by systemd"),
 	}
-	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor)
+	service := newServiceWithExecutors(config.Config{}, upgradeExecutor, restartExecutor, newIdleRollbackExecutor())
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, service)
 

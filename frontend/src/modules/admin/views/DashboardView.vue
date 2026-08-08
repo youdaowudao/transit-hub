@@ -56,6 +56,7 @@ import {
   buildProfitMarginSeries,
   calculateProfitMargin,
   computeDelta,
+  computeDashboardMetricDelta,
   formatCny,
   formatDateTime,
 } from '../utils/dashboard'
@@ -294,6 +295,7 @@ const profitMarginState = computed(() => {
     revenue: metric('todayProfit')?.current,
     netProfit: metric('netProfit')?.current,
     costComplete: cq?.complete,
+    costMode: cq?.mode,
     confirmedCost: cq?.confirmedCost,
     collectedSites: cq?.collectedSites,
   })
@@ -320,11 +322,16 @@ interface DashboardCoreCard {
 
 const cards = computed<DashboardCoreCard[]>(() => {
   const cq = liveData.value?.costQuality
-  const costIncomplete = cq && !cq.complete
+  const costMode = cq?.mode ?? (cq?.complete ? 'exact' : 'partial')
+  const costIncomplete = cq && (costMode === 'partial' || costMode === 'unavailable')
+  const costFallback = costMode === 'fallback'
+  const fallbackTime = cq?.fallbackAt
+    ? formatDateTime(Date.parse(cq.fallbackAt), locale) ?? t('admin.dashboard.common.unavailable')
+    : t('admin.dashboard.common.unavailable')
   const result: DashboardCoreCard[] = (['todayProfit', 'todayPurchase', 'netProfit'] as DashboardMetricKey[]).flatMap((key) => {
     const current = metric(key)
     if (!current) return []
-    const delta = computeDelta(current.series.month.map(point => ({ value: point.value, date: point.date, status: point.status })))
+    const delta = computeDashboardMetricDelta(key, current.series.month)
 
     // todayPurchase：成本不完整时展示已确认成本 + 站点覆盖数
     if (key === 'todayPurchase' && costIncomplete) {
@@ -370,7 +377,14 @@ const cards = computed<DashboardCoreCard[]>(() => {
       }]
     }
 
-    const deltaUnavailable = key === 'netProfit' && delta.unavailable
+    const deltaUnavailable = delta.unavailable
+    const fallbackStatus = costFallback && (key === 'todayPurchase' || key === 'netProfit')
+      ? t('admin.dashboard.costQuality.fallback', {
+          fallback: cq?.fallbackSites ?? 0,
+          expected: cq?.expectedSites ?? 0,
+          time: fallbackTime,
+        })
+      : ''
     return [{
       key,
       label: t(METRIC_META[key].labelKey),
@@ -380,6 +394,7 @@ const cards = computed<DashboardCoreCard[]>(() => {
       deltaDirection: delta.direction,
       deltaText: deltaUnavailable ? '' : formatCny(Math.abs(delta.amount)),
       statusText: metricErrorText(current.error)
+        || fallbackStatus
         || (deltaUnavailable ? t('admin.dashboard.costQuality.deltaUnsettled') : ''),
       clickable: key === 'todayProfit' || key === 'todayPurchase',
       negativeWhenUp: key === 'todayPurchase',
@@ -391,7 +406,13 @@ const cards = computed<DashboardCoreCard[]>(() => {
     : { amount: 0, direction: 'flat' as const, unavailable: true }
   const marginError = metric('netProfit')?.error || metric('todayProfit')?.error
   const marginStatusText = metricErrorText(marginError)
-    || (marginState.mode === 'ceiling' && marginState.value != null
+    || (marginState.mode === 'fallback'
+      ? t('admin.dashboard.costQuality.fallback', {
+          fallback: cq?.fallbackSites ?? 0,
+          expected: cq?.expectedSites ?? 0,
+          time: fallbackTime,
+        })
+      : marginState.mode === 'ceiling' && marginState.value != null
       ? t('admin.dashboard.costQuality.marginCeiling', { value: numberFormatter.value.format(marginState.value) })
       : marginState.mode === 'unavailable'
         ? (costIncomplete
@@ -557,9 +578,11 @@ const performanceChartOption = computed<EChartsCoreOption>(() => {
         }>
         const axisValue = escapeTooltipHtml(String(entries[0]?.axisValue ?? ''))
         const rows = entries.map((entry) => {
-          const quality = entry.data?.quality === 'confirmed'
-            ? t('admin.dashboard.costQuality.trendConfirmed')
-            : entry.data?.quality === 'ceiling'
+          const quality = entry.data?.quality === 'fallback'
+            ? t('admin.dashboard.costQuality.trendFallback')
+            : entry.data?.quality === 'confirmed'
+              ? t('admin.dashboard.costQuality.trendConfirmed')
+              : entry.data?.quality === 'ceiling'
               ? t('admin.dashboard.costQuality.trendCeiling')
               : entry.data?.quality === 'unavailable'
                 ? t('admin.dashboard.costQuality.trendUnavailable')

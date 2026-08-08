@@ -22,7 +22,7 @@ export interface TrendPoint {
   /** 指标数值；null 表示该天指标不可用，图表渲染时显示断点而非伪零。 */
   value: number | null
   date?: string  // 用于 computeDelta 日期相邻校验
-  quality?: 'exact' | 'confirmed' | 'ceiling' | 'unavailable'
+  quality?: 'exact' | 'fallback' | 'confirmed' | 'ceiling' | 'unavailable'
   status?: string
   expected?: number | null
   collected?: number | null

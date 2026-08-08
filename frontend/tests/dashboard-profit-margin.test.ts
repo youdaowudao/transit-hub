@@ -3,6 +3,7 @@ import {
   buildProfitMarginSeries,
   calculateProfitMargin,
   computeDelta,
+  computeDashboardMetricDelta,
 } from '../src/modules/admin/utils/dashboard'
 
 describe('calculateProfitMargin', () => {
@@ -30,6 +31,20 @@ describe('calculateProfitMargin', () => {
 
     expect(result.mode).toBe('ceiling')
     expect(result.value).toBeCloseTo((301.69 - 154.59) / 301.69 * 100, 12)
+  })
+
+  it('calculates a fallback margin without treating it as exact', () => {
+    const result = calculateProfitMargin({
+      revenue: 301.69,
+      netProfit: 147.10,
+      costComplete: false,
+      costMode: 'fallback',
+      confirmedCost: 154.59,
+      collectedSites: 23,
+    })
+
+    expect(result.mode).toBe('fallback')
+    expect(result.value).toBeCloseTo(147.10 / 301.69 * 100, 12)
   })
 
   it('returns unavailable instead of 100 percent when all site costs are unavailable', () => {
@@ -74,6 +89,24 @@ describe('profit margin series', () => {
       direction: 'flat',
       unavailable: true,
       reason: 'missing_data',
+    })
+  })
+})
+
+describe('revenue delta', () => {
+  it('remains available when cost settlement is partial', () => {
+    const points = [
+      { label: '8/7', date: '2026-08-07', value: 300, status: 'final' },
+      { label: '8/8', date: '2026-08-08', value: 348.54, status: 'partial' },
+    ]
+    const result = computeDashboardMetricDelta('todayProfit', points)
+    expect(result.unavailable).toBeUndefined()
+    expect(result.direction).toBe('up')
+    expect(result.amount).toBeCloseTo(48.54, 12)
+
+    expect(computeDashboardMetricDelta('todayPurchase', points)).toMatchObject({
+      unavailable: true,
+      reason: 'partial_cost',
     })
   })
 })

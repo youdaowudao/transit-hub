@@ -1,3 +1,4 @@
+-- rollback-safe: destructive（含 UPDATE 数据修正，回滚不撤销该数据变更，由 C 档门禁把守）
 -- Enforce one active mass-email batch per workspace without deleting historical data.
 -- If earlier deployments already created several active batches for the same
 -- (user_id, admin_account_id), keep the oldest active batch and mark newer queued/running/

@@ -462,6 +462,7 @@ export default {
       retry: '重试',
       costQuality: {
         complete: '今日成本 {cost}',
+        fallback: '沿用 {fallback}/{expected} 个站点今天最近一次成功成本，最早更新于 {time}，暂不计算正式环比',
         partial: '已确认成本 {cost}，{collected}/{expected} 个站点',
         netProfitCeiling: '暂估上限 {value}',
         marginCeiling: '暂估上限 {value}%',
@@ -470,6 +471,7 @@ export default {
         deltaPartial: '成本未完整，环比暂不可确定',
         deltaUnsettled: '昨日未结算',
         trendConfirmed: '已确认',
+        trendFallback: '今日旧值',
         trendCeiling: '暂估上限',
         trendConfirmedCost: '已确认成本',
         trendProfitCeiling: '暂估净利润上限',
@@ -487,6 +489,7 @@ export default {
         last30Days: '最近 30 天',
         last90Days: '最近 90 天',
         statusFinal: '已结算',
+        statusFallback: '今日旧值',
         statusPartial: '部分结算',
         statusProvisional: '临时快照',
         statusMissing: '未结算',
@@ -1362,7 +1365,45 @@ export default {
       topActions: {
         runFlow: '运行流程',
         policies: '自动化策略',
-        events: '探活事件'
+        events: '探活事件',
+        safety: '安全闸门'
+      },
+      safety: {
+        title: '安全调度参数',
+        subtitle: '这些参数只影响新的异常确认任务；正常扫描、正常优先级同步和人工命令保持独立。',
+        loading: '正在读取当前 workspace 的安全参数……',
+        updatedAt: '生效于 {time}',
+        observationCount: '确认观察次数',
+        observationCountHint: '允许 3-5 次，包含第一次失败；推荐 4 次。',
+        jitter: '确认抖动（秒）',
+        jitterHint: '允许 0-3 秒；推荐 1 秒，只会延后不会提前。',
+        queueCapacity: '异常队列容量',
+        queueCapacityHint: '允许 16-256 项；推荐 64 项，满载后进入 guard-held。',
+        manualReservedSlots: '手动预留槽位',
+        manualReservedSlotsHint: '允许 0-1 个，不会增加现有 workspace 并发上限。',
+        delays: '确认间隔（秒）',
+        delaysHint: '每项 1-30 秒，累计不超过 60 秒；它是最小等待时间。',
+        delayCount: '{count} 个间隔',
+        delayItem: '第 {index} 次等待后',
+        reset: '恢复当前值',
+        save: '保存安全参数',
+        saving: '保存中……',
+        emergencyTitle: '紧急清空异常排队任务',
+        emergencyDescription: '只取消当前 workspace 中由 health_incident 产生且尚未发送的 confirmation、canary、status 和 incident priority 任务。已经进入发送阶段的请求会继续完成。',
+        emergencyClear: '紧急清空异常队列',
+        emergencyClearConfirm: '确定清空当前 workspace 的异常排队任务吗？已经发出的请求不会被撤回。',
+        clearing: '清空中……',
+        latestClear: '最近一次清空',
+        latestClearNone: '暂无清空记录。',
+        idempotent: '幂等返回',
+        clearResult: '已取消 {cancelled} 项，影响 {incidents} 个 incident；{dispatching} 项仍在途。',
+        queueEpoch: '异常队列代次 {epoch}',
+        queueSummary: '异常队列当前状态',
+        queued: '排队中',
+        claimed: '已领取',
+        dispatching: '发送中',
+        guardHeld: '已拦截',
+        incidents: '活动 incident'
       },
       events: {
         title: '最近探活与远端动作',
@@ -1648,6 +1689,7 @@ export default {
         unknown: '暂时无法读取分组健康数据，请稍后重试。',
         network: '网络异常，请检查连接后重试。',
         notFound: '探活目标不存在或无权访问。',
+        manualActionFailed: '主站账号状态修改失败，实际状态未确认。',
         noMatchingModels: '所选模型未匹配当前探活策略。',
         accountsFetch: '该分组账号列表加载失败。',
         targetNotFound: '探活目标不存在或不属于当前工作区。',
@@ -1769,7 +1811,13 @@ export default {
         connecting: '连接中',
         syncing: '同步中',
         connected: '已连接',
-        error: '异常'
+        error: '异常',
+        disabled: '已废弃'
+      },
+      lifecycle: {
+        label: '启用站点',
+        enabledHelp: '参与刷新与经营统计',
+        disabledHelp: '不刷新，也不计入经营统计'
       },
       empty: {
         title: '未找到上游站点',
@@ -1817,6 +1865,7 @@ export default {
         tokenMissing: '登录成功但未返回访问令牌。',
         detect: '无法自动识别平台，请手动选择平台后重试。',
         sub2APIBulkUpdateUnsupported: '当前 Sub2API 版本不支持安全的账号字段更新，请升级 Sub2API 后重试。',
+        disabled: '该站点已废弃，请先恢复启用。',
         unknown: '连接上游站点时发生未知错误。'
       }
     },
@@ -2510,7 +2559,7 @@ export default {
       upgrade: {
         title: '源码升级',
         statusLabel: '当前状态',
-        lastUpdated: '最后更新',
+        currentVersion: '当前版本',
         action: '立即升级',
         running: '升级中...',
         successTitle: '升级成功',
@@ -2550,6 +2599,34 @@ export default {
           running: '正在重启',
           succeeded: '上次重启成功',
           failed: '上次重启失败'
+        }
+      },
+      rollback: {
+        title: '版本回滚',
+        statusLabel: '当前状态',
+        pointLabel: '可回滚至',
+        noPoint: '暂无可用还原点',
+        action: '回滚到上一版本',
+        running: '正在回滚...',
+        confirmTitle: '确认回滚到上一版本',
+        confirmMessage: '回滚会把源码切回上次升级前的提交，并重新构建前后端、重启后台服务。回滚期间页面和 API 会短暂断开。',
+        confirmTarget: '目标版本',
+        confirmDatabaseNote: '数据库结构保持当前版本不变，不会还原数据。若检测到不兼容的破坏性迁移，回滚会中止并给出说明。',
+        cancel: '取消',
+        confirm: '确认回滚',
+        successTitle: '回滚成功',
+        successMessage: '已回滚到上一版本并通过健康检查，请刷新页面。',
+        failedTitle: '回滚失败',
+        failedMessage: '回滚未完成，本次执行的错误输出如下。',
+        timeout: '等待回滚完成超时，请检查服务器状态。',
+        close: '关闭',
+        reload: '刷新页面',
+        statuses: {
+          idle: '待命',
+          starting: '正在启动',
+          running: '正在回滚',
+          succeeded: '上次回滚成功',
+          failed: '上次回滚失败'
         }
       },
       sections: {

@@ -1,3 +1,4 @@
+-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）
 -- B phase keeps workspace-level priority writeback intent separate from per-target checkpoints.
 ALTER TABLE IF EXISTS connection_health_policies
     ADD COLUMN IF NOT EXISTS priority_min_write_interval_seconds integer NOT NULL DEFAULT 30;

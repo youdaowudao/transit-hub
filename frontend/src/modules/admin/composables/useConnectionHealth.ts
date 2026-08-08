@@ -13,6 +13,9 @@ import type {
   OwnGroupHealth,
   PolicyInput,
   ProbeModelCandidate,
+  SafetyEmergencyClearResult,
+  SafetySettings,
+  SafetyWorkspaceView,
   TargetPolicyAssignments,
 } from '../types/connectionHealth'
 import type { AdminGroupAccount } from '../types/connectionHealth'
@@ -21,10 +24,12 @@ import {
   deleteConnectionHealthPolicy,
   disableConnection,
   discoverTargetModels,
+  emergencyClearConnectionHealthSafety,
   getConnectionHealthAdminGroups,
   getConnectionHealthEvents,
   getConnectionHealthGroups,
   getConnectionHealthOverview,
+  getConnectionHealthSafety,
   getAdminGroupPolicyConfiguration,
   getTargetPolicyAssignments,
   listConnectionHealthPolicies,
@@ -35,6 +40,7 @@ import {
   setTargetPolicyAssignments,
   setAdminGroupPolicyConfiguration,
   setTargetSchedulable,
+  updateConnectionHealthSafety,
   updateConnectionHealthPolicy,
 } from '../api/connectionHealth'
 
@@ -45,6 +51,7 @@ const groups = ref<OwnGroupHealth[]>([])
 const adminGroups = ref<AdminGroupHealth[]>([])
 const events = ref<ConnectionHealthEvent[]>([])
 const policies = ref<ConnectionHealthPolicy[]>([])
+const safety = ref<SafetyWorkspaceView | null>(null)
 const isLoading = ref(false)
 const isActionLoading = ref(false)
 const errorKey = ref('')
@@ -207,6 +214,14 @@ export function useConnectionHealth() {
     }
   }
 
+  const loadSafety = async () => {
+    try {
+      safety.value = await getConnectionHealthSafety()
+    } catch (err) {
+      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+    }
+  }
+
   const savePolicy = async (input: PolicyInput) => {
     errorKey.value = ''
     try {
@@ -220,6 +235,29 @@ export function useConnectionHealth() {
     } catch (err) {
       errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
       return false
+    }
+  }
+
+  const saveSafety = async (input: SafetySettings) => {
+    errorKey.value = ''
+    try {
+      safety.value = await updateConnectionHealthSafety(input)
+      return true
+    } catch (err) {
+      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      return false
+    }
+  }
+
+  const emergencyClearSafety = async (idempotencyKey: string): Promise<SafetyEmergencyClearResult | null> => {
+    errorKey.value = ''
+    try {
+      const result = await emergencyClearConnectionHealthSafety(idempotencyKey)
+      await loadSafety()
+      return result
+    } catch (err) {
+      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      return null
     }
   }
 
@@ -418,6 +456,7 @@ export function useConnectionHealth() {
     adminGroups,
     events,
     policies,
+    safety,
     isLoading,
     isActionLoading,
     errorKey,
@@ -427,7 +466,10 @@ export function useConnectionHealth() {
     loadAdminGroups,
     loadEvents,
     loadPolicies,
+    loadSafety,
     savePolicy,
+    saveSafety,
+    emergencyClearSafety,
     removePolicy,
     createPolicyForSetup,
     updatePolicyForSetup,

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -77,7 +78,11 @@ func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) ProbeOutc
 	if oversized && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated) {
 		return ProbeOutcome{Result: ResultInvalidResponse, LatencyMs: latencyMs, Detail: "probe response exceeds 1 MiB limit"}
 	}
-	return classifyHTTPResponse(resp.StatusCode, body, req.UpstreamKey, latencyMs)
+	outcome := classifyHTTPResponse(resp.StatusCode, body, req.UpstreamKey, latencyMs)
+	if outcome.Result == ResultRateLimited {
+		outcome.RetryAfterSeconds = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	}
+	return outcome
 }
 
 func readProbeResponseBody(body io.Reader) ([]byte, bool, error) {
@@ -193,6 +198,28 @@ func classifyHTTPResponse(status int, body []byte, upstreamKey string, latencyMs
 		// 其余 4xx（参数错误等）无法安全归类为上游不可用，按响应无法解析处理，避免误判暂停。
 		return ProbeOutcome{Result: ResultInvalidResponse, LatencyMs: latencyMs, Detail: detail}
 	}
+}
+
+func parseRetryAfter(value string, now time.Time) int {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(trimmed); err == nil {
+		if seconds > 0 && seconds <= 3600 {
+			return seconds
+		}
+		return 0
+	}
+	when, err := http.ParseTime(trimmed)
+	if err != nil || !when.After(now) {
+		return 0
+	}
+	seconds := int(when.Sub(now).Seconds())
+	if seconds < 1 || seconds > 3600 {
+		return 0
+	}
+	return seconds
 }
 
 func validChatCompletionResponse(body []byte) bool {

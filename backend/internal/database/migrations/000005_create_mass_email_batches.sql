@@ -1,3 +1,4 @@
+-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）
 -- Workspace-scoped mass email queue. The schema is additive and idempotent so it can
 -- be applied safely to already deployed installations.
 

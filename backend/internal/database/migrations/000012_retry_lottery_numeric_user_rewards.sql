@@ -1,3 +1,4 @@
+-- rollback-safe: destructive（含 UPDATE 数据修正，回滚不撤销该数据变更，由 C 档门禁把守）
 WITH reset_jobs AS (
     UPDATE lottery_reward_jobs
     SET status = 'pending',

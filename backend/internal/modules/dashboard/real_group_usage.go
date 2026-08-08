@@ -45,8 +45,19 @@ func (s *MetricsService) realGroupUsageToday(ctx context.Context, userID, adminA
 		annotateProfitIssues(&response, runID, quality.ObservedAt)
 		return response, nil
 	}
+	disabledSiteIDs := make(map[string]struct{})
+	if s.upstreams != nil {
+		for _, site := range s.upstreams.List(ctx, userID) {
+			if !site.IsEnabled() {
+				disabledSiteIDs[site.ID] = struct{}{}
+			}
+		}
+	}
 	active := make([]my_sites.RealConnection, 0, len(connections))
 	for _, connection := range connections {
+		if _, disabled := disabledSiteIDs[strings.TrimSpace(connection.UpstreamSiteID)]; disabled {
+			continue
+		}
 		if strings.TrimSpace(connection.Status) == "active" {
 			active = append(active, connection)
 		} else {

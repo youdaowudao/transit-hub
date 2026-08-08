@@ -1,0 +1,20 @@
+[Unit]
+Description=TransitHub fixed source rollback
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/transithub
+Environment=PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+Environment=HOME=/root
+Environment=GOPATH=/root/go
+Environment=GOMODCACHE=/root/go/pkg/mod
+Environment=GOCACHE=/root/.cache/go-build
+ExecStart=/opt/transithub/run-source-rollback.sh
+# npm ci + go build + 健康检查最长约 30 分钟，留 40 分钟余量。
+# 有限超时可避免 npm/go build 卡死时 flock 永久持有导致三方维护全部阻塞。
+TimeoutStartSec=2400
+TimeoutStopSec=120
+StandardOutput=journal
+StandardError=journal

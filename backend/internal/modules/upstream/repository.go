@@ -32,6 +32,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			account text NOT NULL,
 			remark text NOT NULL DEFAULT '',
 			recharge_rate double precision NOT NULL DEFAULT 1,
+			enabled boolean NOT NULL DEFAULT true,
 			status text NOT NULL,
 			error_key text NULL,
 			metrics jsonb NOT NULL,
@@ -50,6 +51,11 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 	}
 	if _, err := r.db.Exec(ctx, `
 		ALTER TABLE upstream_sites ADD COLUMN IF NOT EXISTS settings jsonb NOT NULL DEFAULT '{}'::jsonb
+	`); err != nil {
+		return err
+	}
+	if _, err := r.db.Exec(ctx, `
+		ALTER TABLE upstream_sites ADD COLUMN IF NOT EXISTS enabled boolean NOT NULL DEFAULT true
 	`); err != nil {
 		return err
 	}
@@ -82,7 +88,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 func (r *Repository) ListSites(ctx context.Context) ([]Site, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, user_id, admin_account_id, name, base_url, platform, requested_platform, account, remark,
-			recharge_rate, status, error_key, metrics, session, settings, last_synced_at
+			recharge_rate, status, error_key, metrics, session, settings, last_synced_at, enabled
 		FROM upstream_sites
 		WHERE user_id <> ''
 		ORDER BY created_at ASC, id ASC
@@ -96,7 +102,7 @@ func (r *Repository) ListSites(ctx context.Context) ([]Site, error) {
 func (r *Repository) ListSitesForUser(ctx context.Context, userID string) ([]Site, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, user_id, admin_account_id, name, base_url, platform, requested_platform, account, remark,
-			recharge_rate, status, error_key, metrics, session, settings, last_synced_at
+			recharge_rate, status, error_key, metrics, session, settings, last_synced_at, enabled
 		FROM upstream_sites
 		WHERE user_id = $1
 		ORDER BY created_at ASC, id ASC
@@ -130,10 +136,10 @@ func (r *Repository) SaveSite(ctx context.Context, site Site) error {
 	result, err := r.db.Exec(ctx, `
 		INSERT INTO upstream_sites (
 			id, user_id, admin_account_id, name, base_url, platform, requested_platform, account, remark,
-			recharge_rate, status, error_key, metrics, session, settings, last_synced_at,
+			recharge_rate, status, error_key, metrics, session, settings, last_synced_at, enabled,
 			created_at, updated_at
 		)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15::jsonb, $16, $17, $17
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15::jsonb, $16, $17, $18, $18
 		WHERE EXISTS (SELECT 1 FROM admin_accounts WHERE user_id = $2 AND id = $3)
 		ON CONFLICT (id) DO UPDATE SET
 			user_id = EXCLUDED.user_id,
@@ -151,10 +157,11 @@ func (r *Repository) SaveSite(ctx context.Context, site Site) error {
 			session = EXCLUDED.session,
 			settings = EXCLUDED.settings,
 			last_synced_at = EXCLUDED.last_synced_at,
+			enabled = EXCLUDED.enabled,
 			updated_at = EXCLUDED.updated_at
 		WHERE EXISTS (SELECT 1 FROM admin_accounts WHERE user_id = EXCLUDED.user_id AND id = EXCLUDED.admin_account_id)
 	`, site.ID, site.UserID, site.AdminAccountID, site.Name, site.BaseURL, site.Platform, site.RequestedPlatform, site.Account, site.Remark,
-		site.RechargeRate, site.Status, site.ErrorKey, string(metricsJSON), nullableJSONString(sessionJSON), string(settingsJSON), site.LastSyncedAt, now)
+		site.RechargeRate, site.Status, site.ErrorKey, string(metricsJSON), nullableJSONString(sessionJSON), string(settingsJSON), site.LastSyncedAt, enabledOrDefault(site.Enabled), now)
 	if err != nil {
 		return err
 	}
@@ -192,6 +199,7 @@ func scanSites(rows pgx.Rows) ([]Site, error) {
 		var metricsJSON []byte
 		var sessionJSON []byte
 		var settingsJSON []byte
+		var enabled bool
 		if err := rows.Scan(
 			&site.ID,
 			&site.UserID,
@@ -209,9 +217,11 @@ func scanSites(rows pgx.Rows) ([]Site, error) {
 			&sessionJSON,
 			&settingsJSON,
 			&site.LastSyncedAt,
+			&enabled,
 		); err != nil {
 			return nil, err
 		}
+		site.Enabled = boolPointer(enabled)
 		if err := json.Unmarshal(metricsJSON, &site.Metrics); err != nil {
 			return nil, err
 		}

@@ -88,10 +88,11 @@ type PrioritySyncPreset struct {
 }
 
 const (
-	ErrorRequest          = "admin.connectionHealth.errors.request"
-	ErrorUnknown          = "admin.connectionHealth.errors.unknown"
-	ErrorNotFound         = "admin.connectionHealth.errors.notFound"
-	ErrorNoCurrentAccount = "admin.adminAccounts.errors.noCurrentAccount"
+	ErrorRequest            = "admin.connectionHealth.errors.request"
+	ErrorUnknown            = "admin.connectionHealth.errors.unknown"
+	ErrorNotFound           = "admin.connectionHealth.errors.notFound"
+	ErrorNoCurrentAccount   = "admin.adminAccounts.errors.noCurrentAccount"
+	ErrorManualActionFailed = "admin.connectionHealth.errors.manualActionFailed"
 	// ErrorNoMatchingModels: 手动探活请求体显式指定了 models，但没有一个模型命中该连接
 	// 当前匹配到的启用策略/启用模型目标。与"models 为空时探活全部匹配目标但目标本身为空"
 	// 的旧行为（200 + 空数组）区分开，让前端能区分"策略配置问题"和"探活完成但结果为空"。
@@ -170,11 +171,15 @@ type PrioritySyncState struct {
 	// PendingPriority is persisted before an upstream write. If the process dies or the
 	// database write after the upstream call fails, the next tick can confirm the value
 	// instead of treating a successful system write as a manual conflict.
-	PendingPriority      *int      `json:"-"`
-	EffectiveMultiplier  float64   `json:"effectiveMultiplier"`
-	Conflict             bool      `json:"conflict"`
-	LastConflictPriority *int      `json:"lastConflictPriority,omitempty"`
-	UpdatedAt            time.Time `json:"updatedAt"`
+	PendingPriority           *int      `json:"-"`
+	PendingMutationGeneration int64     `json:"-"`
+	PendingSource             string    `json:"-"`
+	PendingEpoch              int64     `json:"-"`
+	PendingActionKey          string    `json:"-"`
+	EffectiveMultiplier       float64   `json:"effectiveMultiplier"`
+	Conflict                  bool      `json:"conflict"`
+	LastConflictPriority      *int      `json:"lastConflictPriority,omitempty"`
+	UpdatedAt                 time.Time `json:"updatedAt"`
 }
 
 // PriorityWorkspaceSyncState is the single workspace-level source for the effective ordering
@@ -232,17 +237,21 @@ type PriorityWorkspaceSyncState struct {
 // TargetActionState 记录分组健康首次接管账号/渠道启停或权重前的上游状态。
 // 健康恢复后只能恢复到这里保存的原值，不能假设账号原本一定启用或权重一定为 100。
 type TargetActionState struct {
-	UserID            string
-	AdminAccountID    string
-	TargetID          string
-	OriginalStatus    string
-	OriginalWeight    *int
-	LastAppliedStatus string
-	LastAppliedWeight *int
-	PendingStatus     string
-	PendingWeight     *int
-	Conflict          bool
-	UpdatedAt         time.Time
+	UserID                    string
+	AdminAccountID            string
+	TargetID                  string
+	OriginalStatus            string
+	OriginalWeight            *int
+	LastAppliedStatus         string
+	LastAppliedWeight         *int
+	PendingStatus             string
+	PendingWeight             *int
+	PendingMutationGeneration int64
+	PendingSource             string
+	PendingEpoch              int64
+	PendingActionKey          string
+	Conflict                  bool
+	UpdatedAt                 time.Time
 }
 
 // Policy 对应 connection_health_policies 表：一条健康探活/降级策略，
@@ -348,9 +357,10 @@ type ConnectionHealthEvent struct {
 
 // ProbeOutcome 是一次真实探活的结果，供状态机和事件记录消费。
 type ProbeOutcome struct {
-	Result    ResultKey
-	LatencyMs int
-	Detail    string
+	Result            ResultKey
+	LatencyMs         int
+	Detail            string
+	RetryAfterSeconds int
 }
 
 // MySitesReader 是 connection_health 对 my_sites 模块的全部只读依赖，

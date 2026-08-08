@@ -3,9 +3,82 @@ package connection_health
 import (
 	"context"
 	"testing"
+	"time"
 
 	"transithub/backend/internal/modules/upstream"
 )
+
+type targetActionStateReadRepository struct {
+	healthRepository
+	underlying *fakeRepository
+	called     chan struct{}
+}
+
+func (r *targetActionStateReadRepository) ListStatesByConnection(ctx context.Context, connectionID string) ([]ConnectionHealthState, error) {
+	close(r.called)
+	return r.underlying.ListStatesByConnection(ctx, connectionID)
+}
+
+func TestReconcileTargetRemoteAction_ReadsHealthAfterAccountMutationLock(t *testing.T) {
+	base := newFakeRepository()
+	repo := &targetActionStateReadRepository{healthRepository: base, underlying: base, called: make(chan struct{})}
+	platform := &fakePlatformActioner{}
+	service := &Service{repo: repo, dispatcher: newRemoteActionDispatcher(nil, nil, platform)}
+	targetID := "sub2api:ws1:acc-1"
+	base.states[targetID] = map[string]ConnectionHealthState{
+		"model-a": {ConnectionID: targetID, ModelName: "model-a", State: StateHealthy, CurrentWeight: 100},
+	}
+	base.targetActionStates["user1|ws1|"+targetID] = TargetActionState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		OriginalStatus: "active", LastAppliedStatus: "inactive",
+	}
+	policy := Policy{ID: "p1", Enabled: true, AutoDegradeEnabled: true, AutoRemoteActionEnabled: true}
+	target := AdminProbeTarget{
+		TargetID: targetID, Platform: string(upstream.PlatformSub2API),
+		AccountID: "acc-1", AccountStatus: "inactive",
+	}
+	key := MutationKey{UserID: "user1", WorkspaceID: "ws1", AccountID: "acc-1"}
+	incident, err := service.mutationCoordinatorForWrites().BeginAutomatic(context.Background(), key, true)
+	if err != nil {
+		t.Fatalf("begin incident mutation: %v", err)
+	}
+
+	type result struct {
+		action string
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		action, reconcileErr := service.reconcileTargetRemoteAction(
+			context.Background(), "user1", "ws1", upstream.Session{Platform: upstream.PlatformSub2API},
+			target, []probeModelSpec{{modelName: "model-a", policy: policy}},
+		)
+		done <- result{action: action, err: reconcileErr}
+	}()
+
+	select {
+	case <-repo.called:
+		incident.Release()
+		t.Fatal("normal recovery read health before acquiring the account mutation lock")
+	case <-time.After(25 * time.Millisecond):
+	}
+	base.states[targetID]["model-a"] = ConnectionHealthState{
+		ConnectionID: targetID, ModelName: "model-a", State: StateSuspended, CurrentWeight: 0,
+	}
+	incident.Release()
+
+	select {
+	case got := <-done:
+		if got.err != nil || got.action != "" {
+			t.Fatalf("reconcile result action=%q err=%v", got.action, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("normal recovery did not resume after the incident mutation released")
+	}
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("stale normal recovery wrote active after a newer incident: %+v", platform.sub2APICalls)
+	}
+}
 
 func TestReconcileTargetRemoteAction_SuspendedSiblingBlocksRestore(t *testing.T) {
 	repo := newFakeRepository()
@@ -320,10 +393,10 @@ func TestRestoreUnmanagedTargetActions_RestoresTargetRemovedFromAllGroups(t *tes
 	repo.targetActionStates["user1|ws1|"+targetID] = stored
 
 	service.restoreUnmanagedTargetActions(context.Background(), nil, nil, nil, nil, []TargetActionState{stored}, make(adminInventoryCache))
-	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].status != "active" {
-		t.Fatalf("target removed from every group should still restore by stable target id: %+v", platform.sub2APICalls)
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("target missing from a complete inventory must not be blindly restored: %+v", platform.sub2APICalls)
 	}
-	if _, exists := repo.targetActionStates["user1|ws1|"+targetID]; exists {
-		t.Fatal("restored missing target must release its action snapshot")
+	if _, exists := repo.targetActionStates["user1|ws1|"+targetID]; !exists {
+		t.Fatal("missing target must retain its checkpoint for an explicit, fresh-read action")
 	}
 }

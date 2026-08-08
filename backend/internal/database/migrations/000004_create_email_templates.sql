@@ -1,3 +1,4 @@
+-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）
 -- Workspace-scoped email templates. Built-in rows are editable, so the seed path must use
 -- INSERT ... ON CONFLICT DO NOTHING and never overwrite an operator's saved copy.
 

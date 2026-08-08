@@ -33,6 +33,57 @@ func (s *Service) updateAdminTargetPriority(ctx context.Context, session upstrea
 	return s.priorityActions.UpdateAdminTargetPriority(session, targetID, priority)
 }
 
+func clearPriorityPendingMetadata(state *PrioritySyncState) {
+	if state == nil {
+		return
+	}
+	state.PendingMutationGeneration = 0
+	state.PendingSource = ""
+	state.PendingEpoch = 0
+	state.PendingActionKey = ""
+}
+
+func clearPriorityPending(state *PrioritySyncState) {
+	if state == nil {
+		return
+	}
+	state.PendingPriority = nil
+	clearPriorityPendingMetadata(state)
+}
+
+func (s *Service) clearStalePriorityPending(ctx context.Context, session upstream.Session, state *PrioritySyncState, accountID string) (bool, error) {
+	if state == nil || state.PendingPriority == nil || session.Platform != upstream.PlatformSub2API {
+		return false, nil
+	}
+	if state.PendingSource == SafetySourceHealthIncident {
+		// Incident intent is owned by the abnormal queue/epoch worker. The normal
+		// one-second priority loop must not consume or revive it.
+		return true, nil
+	}
+	if state.PendingSource == "" {
+		// Rows created before mutation generations existed have no ownership
+		// metadata. Never consume them directly after upgrade; rebuild from the
+		// current inventory and generation in the normal evaluation below.
+		clearPriorityPending(state)
+		if err := s.repo.UpsertPrioritySyncState(ctx, *state); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	generation, err := s.mutationGeneration(ctx, state.UserID, state.AdminAccountID, accountID)
+	if err != nil {
+		return false, err
+	}
+	if generation == state.PendingMutationGeneration {
+		return false, nil
+	}
+	clearPriorityPending(state)
+	if err := s.repo.UpsertPrioritySyncState(ctx, *state); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 type priorityTargetInventory struct {
 	target              AdminProbeTarget
 	account             upstream.AdminGroupAccountInfo
@@ -994,12 +1045,19 @@ func (s *Service) observePriorityDrift(
 			observation.active++
 			continue
 		}
-		if stored.PendingPriority != nil && item.currentPriority == *stored.PendingPriority {
+		if stored.PendingPriority != nil && stored.PendingSource != SafetySourceHealthIncident &&
+			item.currentPriority == *stored.PendingPriority {
 			stored.LastAppliedPriority = *stored.PendingPriority
-			stored.PendingPriority = nil
+			clearPriorityPending(&stored)
 			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
 				log.Printf("[connection-health] priority sync confirm checkpoint failed target_id=%s err=%v", stored.TargetID, err)
 			}
+			continue
+		}
+		if skip, err := s.clearStalePriorityPending(ctx, session, &stored, item.target.AccountID); err != nil {
+			log.Printf("[connection-health] priority pending generation check failed target_id=%s err=%v", stored.TargetID, err)
+			continue
+		} else if skip {
 			continue
 		}
 		if item.currentPriority == stored.LastAppliedPriority {
@@ -1135,9 +1193,22 @@ func (s *Service) applyWorkspacePriorities(
 			result.drifts++
 			continue
 		}
-		if stored.PendingPriority != nil && item.currentPriority == *stored.PendingPriority {
-			stored.LastAppliedPriority = *stored.PendingPriority
-			stored.PendingPriority = nil
+		if exists {
+			if stored.PendingPriority != nil && stored.PendingSource != SafetySourceHealthIncident &&
+				item.currentPriority == *stored.PendingPriority {
+				stored.LastAppliedPriority = *stored.PendingPriority
+				clearPriorityPending(&stored)
+			}
+			skip, pendingErr := s.clearStalePriorityPending(ctx, session, &stored, item.target.AccountID)
+			if pendingErr != nil {
+				log.Printf("[connection-health] priority pending generation check failed target_id=%s err=%v", targetID, pendingErr)
+				result.failures++
+				result.complete = false
+				continue
+			}
+			if skip {
+				continue
+			}
 		}
 		if exists && item.currentPriority != stored.LastAppliedPriority && stored.PendingPriority == nil {
 			current := item.currentPriority
@@ -1168,6 +1239,21 @@ func (s *Service) applyWorkspacePriorities(
 		if item.currentPriority != desired {
 			pending := desired
 			stored.PendingPriority = &pending
+			stored.PendingSource = "normal"
+			stored.PendingEpoch = 0
+			stored.PendingActionKey = "priority:" + targetID + ":" + strconv.Itoa(desired)
+			if session.Platform == upstream.PlatformSub2API {
+				generation, generationErr := s.mutationGeneration(ctx, userID, adminAccountID, item.target.AccountID)
+				if generationErr != nil {
+					log.Printf("[connection-health] priority mutation generation read failed target_id=%s err=%v", targetID, generationErr)
+					result.failures++
+					result.complete = false
+					continue
+				}
+				stored.PendingMutationGeneration = generation
+			} else {
+				stored.PendingMutationGeneration = 0
+			}
 			stored.EffectiveMultiplier = multiplier
 			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
 				log.Printf("[connection-health] priority sync intent save failed target_id=%s err=%v", targetID, err)
@@ -1176,7 +1262,7 @@ func (s *Service) applyWorkspacePriorities(
 				continue
 			}
 			result.attempts++
-			if err := s.updateAdminTargetPriority(ctx, session, item.target.AccountID, desired); err != nil {
+			if err := s.updateAutomaticTargetPriority(ctx, userID, adminAccountID, session, targetID, item.target.AccountID, desired, stored.PendingMutationGeneration); err != nil {
 				log.Printf("[connection-health] priority sync update failed target_id=%s err=%v", targetID, err)
 				result.failures++
 				result.complete = false
@@ -1185,7 +1271,7 @@ func (s *Service) applyWorkspacePriorities(
 			result.successes++
 		}
 		stored.LastAppliedPriority = desired
-		stored.PendingPriority = nil
+		clearPriorityPending(&stored)
 		stored.EffectiveMultiplier = multiplier
 		stored.Conflict = false
 		stored.LastConflictPriority = nil
@@ -1230,6 +1316,21 @@ func (s *Service) applyWorkspacePriorities(
 			}
 			pending := stored.OriginalPriority
 			stored.PendingPriority = &pending
+			stored.PendingSource = "normal"
+			stored.PendingEpoch = 0
+			stored.PendingActionKey = "priority:" + targetID + ":" + strconv.Itoa(stored.OriginalPriority)
+			if session.Platform == upstream.PlatformSub2API {
+				generation, generationErr := s.mutationGeneration(ctx, userID, adminAccountID, parsed.accountID)
+				if generationErr != nil {
+					log.Printf("[connection-health] missing target priority generation read failed target_id=%s err=%v", targetID, generationErr)
+					result.failures++
+					result.complete = false
+					continue
+				}
+				stored.PendingMutationGeneration = generation
+			} else {
+				stored.PendingMutationGeneration = 0
+			}
 			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
 				log.Printf("[connection-health] missing target priority restore intent save failed target_id=%s err=%v", targetID, err)
 				result.failures++
@@ -1237,7 +1338,7 @@ func (s *Service) applyWorkspacePriorities(
 				continue
 			}
 			result.attempts++
-			if err := s.updateAdminTargetPriority(ctx, session, parsed.accountID, stored.OriginalPriority); err != nil {
+			if err := s.updateAutomaticTargetPriority(ctx, userID, adminAccountID, session, targetID, parsed.accountID, stored.OriginalPriority, stored.PendingMutationGeneration); err != nil {
 				log.Printf("[connection-health] missing target priority restore failed target_id=%s err=%v", targetID, err)
 				result.failures++
 				result.complete = false
@@ -1251,13 +1352,37 @@ func (s *Service) applyWorkspacePriorities(
 			}
 			continue
 		}
-		if stored.PendingPriority != nil && item.currentPriority == *stored.PendingPriority {
+		if stored.PendingPriority != nil && stored.PendingSource != SafetySourceHealthIncident &&
+			item.currentPriority == *stored.PendingPriority {
 			stored.LastAppliedPriority = *stored.PendingPriority
-			stored.PendingPriority = nil
+			clearPriorityPending(&stored)
+		}
+		if skip, pendingErr := s.clearStalePriorityPending(ctx, session, &stored, item.target.AccountID); pendingErr != nil {
+			log.Printf("[connection-health] priority restore pending generation check failed target_id=%s err=%v", targetID, pendingErr)
+			result.failures++
+			result.complete = false
+			continue
+		} else if skip {
+			continue
 		}
 		if !stored.Conflict && item.currentPriority == stored.LastAppliedPriority && item.currentPriority != stored.OriginalPriority {
 			pending := stored.OriginalPriority
 			stored.PendingPriority = &pending
+			stored.PendingSource = "normal"
+			stored.PendingEpoch = 0
+			stored.PendingActionKey = "priority:" + targetID + ":" + strconv.Itoa(stored.OriginalPriority)
+			if session.Platform == upstream.PlatformSub2API {
+				generation, generationErr := s.mutationGeneration(ctx, userID, adminAccountID, item.target.AccountID)
+				if generationErr != nil {
+					log.Printf("[connection-health] priority restore generation read failed target_id=%s err=%v", targetID, generationErr)
+					result.failures++
+					result.complete = false
+					continue
+				}
+				stored.PendingMutationGeneration = generation
+			} else {
+				stored.PendingMutationGeneration = 0
+			}
 			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
 				log.Printf("[connection-health] priority restore intent save failed target_id=%s err=%v", targetID, err)
 				result.failures++
@@ -1265,7 +1390,7 @@ func (s *Service) applyWorkspacePriorities(
 				continue
 			}
 			result.attempts++
-			if err := s.updateAdminTargetPriority(ctx, session, item.target.AccountID, stored.OriginalPriority); err != nil {
+			if err := s.updateAutomaticTargetPriority(ctx, userID, adminAccountID, session, targetID, item.target.AccountID, stored.OriginalPriority, stored.PendingMutationGeneration); err != nil {
 				log.Printf("[connection-health] priority restore failed target_id=%s err=%v", targetID, err)
 				result.failures++
 				result.complete = false

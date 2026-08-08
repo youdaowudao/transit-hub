@@ -11,6 +11,9 @@ import type {
   ModelHealth,
   OwnGroupHealth,
   PolicyInput,
+  SafetyEmergencyClearResult,
+  SafetySettings,
+  SafetyWorkspaceView,
   TargetPolicyAssignments,
 } from '../types/connectionHealth'
 import {
@@ -69,6 +72,21 @@ export const getConnectionHealthOverview = async (): Promise<ConnectionHealthOve
 
 export const getConnectionHealthStoredSummary = async (): Promise<ConnectionHealthStoredSummary> =>
   requestJson<ConnectionHealthStoredSummary>('/connection-health/stored-summary')
+
+export const getConnectionHealthSafety = async (): Promise<SafetyWorkspaceView> =>
+  requestJson<SafetyWorkspaceView>('/connection-health/safety')
+
+export const updateConnectionHealthSafety = async (input: SafetySettings): Promise<SafetyWorkspaceView> =>
+  requestJson<SafetyWorkspaceView>('/connection-health/safety', {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
+
+export const emergencyClearConnectionHealthSafety = async (idempotencyKey: string): Promise<SafetyEmergencyClearResult> =>
+  requestJson<SafetyEmergencyClearResult>('/connection-health/safety/emergency-clear', {
+    method: 'POST',
+    body: JSON.stringify({ idempotencyKey }),
+  })
 
 export const getConnectionHealthGroups = async (): Promise<OwnGroupHealth[]> =>
   requestJson<OwnGroupHealth[]>('/connection-health/groups')

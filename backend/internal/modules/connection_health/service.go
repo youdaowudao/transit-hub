@@ -2,12 +2,15 @@ package connection_health
 
 import (
 	"context"
+	"encoding/hex"
+	"errors"
 	"log"
 	"strings"
 	"sync"
 	"time"
 
 	"transithub/backend/internal/modules/my_sites"
+	"transithub/backend/internal/modules/upstream"
 )
 
 // healthRepository 是 Service 对存储层的全部依赖，由 *Repository 结构性满足。
@@ -66,6 +69,9 @@ type healthRepository interface {
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
 	repo                        healthRepository
+	safetyRepo                  safetyMutationRepository
+	mutationCoordinator         *MutationCoordinator
+	mutationCoordinatorMu       sync.Mutex
 	mySites                     MySitesReader
 	sites                       SiteLookup
 	accounts                    AdminAccountResolver
@@ -77,6 +83,8 @@ type Service struct {
 	schedulableActions          TargetSchedulableActioner
 	probeLimiterMu              sync.Mutex
 	probeLimiter                *probeConcurrencyLimiter
+	safetySettingsMu            sync.RWMutex
+	safetySettingsCache         map[string]SafetySettings
 	inventorySnapshotMu         sync.RWMutex
 	inventorySnapshots          map[string]adminInventorySnapshot
 	inventorySnapshotGeneration uint64
@@ -92,13 +100,16 @@ type Service struct {
 
 func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner) *Service {
 	service := &Service{
-		repo:           repo,
-		mySites:        mySites,
-		sites:          sites,
-		dispatcher:     newRemoteActionDispatcher(sites, mySites, platform),
-		probeRunner:    NewRealProbeRunner(),
-		modelDiscovery: NewModelDiscoveryRunner(),
-		probeLimiter:   newProbeConcurrencyLimiter(globalProbeConcurrency, perSiteProbeConcurrency),
+		repo:                repo,
+		safetyRepo:          repo,
+		mutationCoordinator: NewMutationCoordinator(repo),
+		mySites:             mySites,
+		sites:               sites,
+		dispatcher:          newRemoteActionDispatcher(sites, mySites, platform),
+		probeRunner:         NewRealProbeRunner(),
+		modelDiscovery:      NewModelDiscoveryRunner(),
+		probeLimiter:        newProbeConcurrencyLimiter(globalProbeConcurrency, perSiteProbeConcurrency),
+		safetySettingsCache: make(map[string]SafetySettings),
 	}
 	// 真实 PlatformService 同时实现优先级更新能力；测试或旧注入器如果尚未实现，倍率策略会
 	// 安全跳过远端写入，不影响既有探活/降级流程。
@@ -124,6 +135,118 @@ func (s *Service) currentAdminAccountID(ctx context.Context, userID string) (str
 		return "", requestError(ErrorNoCurrentAccount)
 	}
 	return s.accounts.RequireCurrentID(ctx, userID)
+}
+
+func (s *Service) safetyRepository() (safetyMutationRepository, error) {
+	if s.safetyRepo != nil {
+		return s.safetyRepo, nil
+	}
+	if repo, ok := s.repo.(safetyMutationRepository); ok {
+		return repo, nil
+	}
+	return nil, requestError(ErrorUnknown)
+}
+
+func (s *Service) workspaceSafetySettings(ctx context.Context, userID, workspaceID string) (SafetySettings, bool) {
+	key := userID + "|" + workspaceID
+	if s.safetyRepo != nil {
+		settings, err := s.safetyRepo.GetSafetySettings(ctx, userID, workspaceID)
+		if err == nil {
+			s.safetySettingsMu.Lock()
+			if s.safetySettingsCache == nil {
+				s.safetySettingsCache = make(map[string]SafetySettings)
+			}
+			s.safetySettingsCache[key] = settings
+			s.safetySettingsMu.Unlock()
+			return settings, true
+		}
+	}
+	s.safetySettingsMu.RLock()
+	settings, ok := s.safetySettingsCache[key]
+	s.safetySettingsMu.RUnlock()
+	return settings, ok
+}
+
+func (s *Service) manualProbeReservedSlots(ctx context.Context, userID, workspaceID string) int {
+	if settings, ok := s.workspaceSafetySettings(ctx, userID, workspaceID); ok {
+		return settings.ManualReservedSlots
+	}
+	return DefaultSafetySettings().ManualReservedSlots
+}
+
+func (s *Service) loadSafetyWorkspace(ctx context.Context, userID string) (SafetyWorkspaceView, error) {
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return SafetyWorkspaceView{}, err
+	}
+	repo, err := s.safetyRepository()
+	if err != nil {
+		return SafetyWorkspaceView{}, err
+	}
+	settings, err := repo.GetSafetySettings(ctx, userID, adminAccountID)
+	if err != nil {
+		return SafetyWorkspaceView{}, err
+	}
+	s.safetySettingsMu.Lock()
+	if s.safetySettingsCache == nil {
+		s.safetySettingsCache = make(map[string]SafetySettings)
+	}
+	s.safetySettingsCache[userID+"|"+adminAccountID] = settings
+	s.safetySettingsMu.Unlock()
+	latestClear, err := repo.GetLatestEmergencyClear(ctx, userID, adminAccountID)
+	if err != nil {
+		return SafetyWorkspaceView{}, err
+	}
+	queue, err := repo.GetSafetyQueueSummary(ctx, userID, adminAccountID)
+	if err != nil {
+		return SafetyWorkspaceView{}, err
+	}
+	return SafetyWorkspaceView{Settings: settings, Queue: queue, LatestEmergencyClear: latestClear}, nil
+}
+
+func (s *Service) SaveSafetySettings(ctx context.Context, userID string, settings SafetySettings) (SafetyWorkspaceView, error) {
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return SafetyWorkspaceView{}, err
+	}
+	repo, err := s.safetyRepository()
+	if err != nil {
+		return SafetyWorkspaceView{}, err
+	}
+	settings.UserID = userID
+	settings.WorkspaceID = adminAccountID
+	settings.UpdatedBy = userID
+	if err := settings.Validate(); err != nil {
+		return SafetyWorkspaceView{}, requestError(ErrorRequest)
+	}
+	if err := repo.UpsertSafetySettings(ctx, settings); err != nil {
+		return SafetyWorkspaceView{}, err
+	}
+	return s.loadSafetyWorkspace(ctx, userID)
+}
+
+func (s *Service) EmergencyClearAbnormalQueue(ctx context.Context, userID string, idempotencyKey string) (EmergencyClearResult, error) {
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return EmergencyClearResult{}, err
+	}
+	trimmedKey := strings.TrimSpace(idempotencyKey)
+	if !validSafetyIdempotencyKey(trimmedKey) {
+		return EmergencyClearResult{}, requestError(ErrorRequest)
+	}
+	repo, err := s.safetyRepository()
+	if err != nil {
+		return EmergencyClearResult{}, err
+	}
+	return repo.EmergencyClear(ctx, userID, adminAccountID, trimmedKey, s.schedulerNow())
+}
+
+func validSafetyIdempotencyKey(value string) bool {
+	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
+		return false
+	}
+	decoded, err := hex.DecodeString(strings.ReplaceAll(value, "-", ""))
+	return err == nil && len(decoded) == 16
 }
 
 // ModelHealth 是单个模型在某条对接链路上的健康状态展示数据，绝不包含 upstream_key。
@@ -1004,6 +1127,13 @@ func (s *Service) ProbeConnection(ctx context.Context, userID string, connection
 	if site == nil {
 		return nil, requestError(ErrorNotFound)
 	}
+	limitCtx, cancelLimit := context.WithTimeout(ctx, 2*ProbeTimeout)
+	defer cancelLimit()
+	releaseSlot, acquired := s.sharedProbeLimiter().acquireManual(limitCtx, userID+"|"+adminAccountID, s.manualProbeReservedSlots(ctx, userID, adminAccountID))
+	if !acquired {
+		return nil, requestError(ErrorProbeConcurrencyLimited)
+	}
+	defer releaseSlot()
 
 	results := make([]ModelHealth, 0, len(targets))
 	for _, mt := range targets {
@@ -1050,6 +1180,14 @@ func (s *Service) DisableConnection(ctx context.Context, userID string, connecti
 	}
 
 	remoteAction := ""
+	platformKnown := false
+	sub2API := false
+	if s.sites != nil {
+		if site, siteErr := s.sites.GetSite(ctx, conn.UpstreamSiteID); siteErr == nil && site != nil {
+			platformKnown = true
+			sub2API = site.Platform == upstream.PlatformSub2API
+		}
+	}
 	for i, st := range states {
 		fromState := st.State
 		st.State = StateDisabled
@@ -1057,10 +1195,23 @@ func (s *Service) DisableConnection(ctx context.Context, userID string, connecti
 		st.UserID = userID
 		st.AdminAccountID = adminAccountID
 		if i == 0 {
-			action, actionErr := s.dispatcher.Degrade(ctx, *conn, st)
+			var action string
+			var actionErr error
+			if !platformKnown {
+				action, actionErr = RemoteActionSafetyGateUnavailable, errors.New("upstream platform unavailable")
+			} else if sub2API {
+				action, actionErr = s.applyManualConnectionSub2APIStatus(ctx, *conn, "inactive")
+			} else {
+				action, actionErr = s.dispatcher.Degrade(ctx, *conn, st)
+			}
 			remoteAction = action
 			if actionErr != nil {
 				log.Printf("[connection-health] manual disable remote degrade failed connection_id=%s err=%v", connectionID, actionErr)
+				if sub2API {
+					s.recordEvent(ctx, *conn, "", st.ModelName, "manual_disable_failed", string(fromState), string(fromState), nil,
+						ErrorManualActionFailed, "", remoteAction, EventSourceManual)
+					return requestError(ErrorManualActionFailed)
+				}
 			}
 		}
 		st.LastRemoteAction = remoteAction
@@ -1095,6 +1246,14 @@ func (s *Service) RestoreConnection(ctx context.Context, userID string, connecti
 	}
 
 	remoteAction := ""
+	platformKnown := false
+	sub2API := false
+	if s.sites != nil {
+		if site, siteErr := s.sites.GetSite(ctx, conn.UpstreamSiteID); siteErr == nil && site != nil {
+			platformKnown = true
+			sub2API = site.Platform == upstream.PlatformSub2API
+		}
+	}
 	for i, st := range states {
 		fromState := st.State
 		st.State = StateObserving
@@ -1105,10 +1264,23 @@ func (s *Service) RestoreConnection(ctx context.Context, userID string, connecti
 		st.UserID = userID
 		st.AdminAccountID = adminAccountID
 		if i == 0 {
-			action, actionErr := s.dispatcher.Restore(ctx, *conn, st)
+			var action string
+			var actionErr error
+			if !platformKnown {
+				action, actionErr = RemoteActionSafetyGateUnavailable, errors.New("upstream platform unavailable")
+			} else if sub2API {
+				action, actionErr = s.applyManualConnectionSub2APIStatus(ctx, *conn, "active")
+			} else {
+				action, actionErr = s.dispatcher.Restore(ctx, *conn, st)
+			}
 			remoteAction = action
 			if actionErr != nil {
 				log.Printf("[connection-health] manual restore remote action failed connection_id=%s err=%v", connectionID, actionErr)
+				if sub2API {
+					s.recordEvent(ctx, *conn, "", st.ModelName, "manual_restore_failed", string(fromState), string(fromState), nil,
+						ErrorManualActionFailed, "", remoteAction, EventSourceManual)
+					return requestError(ErrorManualActionFailed)
+				}
 			}
 		}
 		st.LastRemoteAction = remoteAction
@@ -1153,28 +1325,26 @@ func (s *Service) probeOnce(ctx context.Context, conn my_sites.RealConnection, p
 	})
 
 	now := time.Now()
-	next, transitionOut := applyProbeOutcome(*current, outcome, policy, now)
+	next, transitionOut := applyProbeOutcomeWithConfirmation(
+		*current,
+		outcome,
+		policy,
+		now,
+		site.Platform == upstream.PlatformSub2API,
+	)
 	latencyMs := outcome.LatencyMs
 	next.UserID = policy.UserID
 	next.AdminAccountID = policy.AdminAccountID
 	next.OwnGroupID = policy.OwnGroupID
 	next.OwnGroupName = policy.OwnGroupName
 
+	// This legacy method is retained only for compatibility with old callers.
+	// It cannot issue an automatic remote mutation because it has no incident
+	// epoch, complete inventory or floor reservation. Formal scheduler paths use
+	// the target confirmation worker instead.
 	remoteAction := ""
-	if policy.AutoRemoteActionEnabled {
-		if transitionOut.TriggerRemoteDegrade {
-			action, actionErr := s.dispatcher.Degrade(ctx, conn, next)
-			remoteAction = action
-			if actionErr != nil {
-				log.Printf("[connection-health] auto degrade failed connection_id=%s model=%s err=%v", conn.ID, target.ModelName, actionErr)
-			}
-		} else if transitionOut.TriggerRemoteRestore {
-			action, actionErr := s.dispatcher.Restore(ctx, conn, next)
-			remoteAction = action
-			if actionErr != nil {
-				log.Printf("[connection-health] auto restore failed connection_id=%s model=%s err=%v", conn.ID, target.ModelName, actionErr)
-			}
-		}
+	if policy.AutoRemoteActionEnabled && (transitionOut.TriggerRemoteDegrade || transitionOut.TriggerRemoteRestore) {
+		remoteAction = RemoteActionSafetyGateUnavailable
 	}
 	next.LastRemoteAction = remoteAction
 

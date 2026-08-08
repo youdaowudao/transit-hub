@@ -31,6 +31,10 @@ type TargetSchedulableActioner interface {
 	SetSub2APIAdminAccountSchedulable(session upstream.Session, accountID string, schedulable bool) error
 }
 
+type TargetSchedulableContextActioner interface {
+	SetSub2APIAdminAccountSchedulableContext(ctx context.Context, session upstream.Session, accountID string, schedulable bool) error
+}
+
 type TargetSchedulableActionResult struct {
 	TargetID     string    `json:"targetId"`
 	Schedulable  bool      `json:"schedulable"`
@@ -59,18 +63,41 @@ func (s *Service) SetTargetSchedulable(ctx context.Context, userID string, targe
 	if err != nil {
 		return TargetSchedulableActionResult{}, err
 	}
-	remoteAction := schedulableRemoteAction(schedulable)
-	if err := s.schedulableActions.SetSub2APIAdminAccountSchedulable(session, target.AccountID, schedulable); err != nil {
+	mutation, mutationErr := s.mutationCoordinatorForWrites().BeginManual(ctx, MutationKey{
+		UserID: userID, WorkspaceID: adminAccountID, AccountID: target.AccountID,
+	})
+	if mutationErr != nil {
 		if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, target, SchedulableActionFailed, ErrorSchedulableActionFailed, schedulableFailedRemoteAction(schedulable)); auditErr != nil {
-			log.Printf("[connection-health] audit failed schedulable action target_id=%s err=%v", target.TargetID, auditErr)
+			log.Printf("[connection-health] audit failed schedulable mutation busy target_id=%s err=%v", target.TargetID, auditErr)
 		}
 		return TargetSchedulableActionResult{}, requestError(ErrorSchedulableActionFailed)
 	}
+	defer mutation.Release()
+	if err := mutation.Validate(ctx); err != nil {
+		if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, target, SchedulableActionFailed, ErrorSchedulableActionFailed, schedulableFailedRemoteAction(schedulable)); auditErr != nil {
+			log.Printf("[connection-health] audit failed stale schedulable mutation target_id=%s err=%v", target.TargetID, auditErr)
+		}
+		return TargetSchedulableActionResult{}, requestError(ErrorSchedulableActionFailed)
+	}
+	remoteAction := schedulableRemoteAction(schedulable)
+	writeErr := s.setTargetSchedulable(ctx, session, target.AccountID, schedulable)
+	mutationErr = mutation.Validate(ctx)
 
 	readbackTarget, readbackAccount, found, _, readbackErr := s.findAdminTarget(ctx, session, adminAccountID, target.AccountID)
 	if readbackErr != nil || !found || readbackTarget.TargetID != targetID || readbackAccount.Schedulable == nil || *readbackAccount.Schedulable != schedulable {
-		if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, target, SchedulableActionFailed, ErrorSchedulableReadbackFailed, schedulableFailedRemoteAction(schedulable)); auditErr != nil {
+		errorKey := ErrorSchedulableReadbackFailed
+		if writeErr != nil {
+			errorKey = ErrorSchedulableActionFailed
+		}
+		if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, target, SchedulableActionFailed, errorKey, schedulableFailedRemoteAction(schedulable)); auditErr != nil {
 			log.Printf("[connection-health] audit failed schedulable readback target_id=%s err=%v", target.TargetID, auditErr)
+		}
+		return TargetSchedulableActionResult{}, requestError(errorKey)
+	}
+	s.invalidateAdminInventorySnapshot(userID, adminAccountID)
+	if mutationErr != nil {
+		if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, readbackTarget, SchedulableActionFailed, ErrorSchedulableReadbackFailed, schedulableFailedRemoteAction(schedulable)); auditErr != nil {
+			log.Printf("[connection-health] audit failed stale schedulable readback target_id=%s err=%v", target.TargetID, auditErr)
 		}
 		return TargetSchedulableActionResult{}, requestError(ErrorSchedulableReadbackFailed)
 	}
@@ -83,6 +110,13 @@ func (s *Service) SetTargetSchedulable(ctx context.Context, userID string, targe
 	return TargetSchedulableActionResult{
 		TargetID: targetID, Schedulable: *readbackAccount.Schedulable, ActionSource: ActionSourceUser, ActionAt: actionAt,
 	}, nil
+}
+
+func (s *Service) setTargetSchedulable(ctx context.Context, session upstream.Session, accountID string, schedulable bool) error {
+	if actioner, ok := s.schedulableActions.(TargetSchedulableContextActioner); ok {
+		return actioner.SetSub2APIAdminAccountSchedulableContext(ctx, session, accountID, schedulable)
+	}
+	return s.schedulableActions.SetSub2APIAdminAccountSchedulable(session, accountID, schedulable)
 }
 
 func schedulableRemoteAction(schedulable bool) string {

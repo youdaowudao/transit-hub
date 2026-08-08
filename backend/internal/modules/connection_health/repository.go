@@ -318,6 +318,132 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			expires_at timestamptz NOT NULL,
 			updated_at timestamptz NOT NULL DEFAULT now()
 		)`,
+		`CREATE TABLE IF NOT EXISTS connection_health_safety_settings (
+			user_id text NOT NULL, admin_account_id text NOT NULL,
+			confirmation_observation_count integer NOT NULL DEFAULT 4,
+			confirmation_delays_seconds jsonb NOT NULL DEFAULT '[2,5,10]'::jsonb,
+			confirmation_jitter_seconds integer NOT NULL DEFAULT 1,
+			abnormal_queue_capacity integer NOT NULL DEFAULT 64,
+			manual_reserved_slots integer NOT NULL DEFAULT 1,
+			updated_by text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, admin_account_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS connection_health_safety_epochs (
+			user_id text NOT NULL, admin_account_id text NOT NULL,
+			abnormal_queue_epoch bigint NOT NULL DEFAULT 0,
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, admin_account_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS connection_health_abnormal_queue (
+			id text PRIMARY KEY, user_id text NOT NULL, admin_account_id text NOT NULL,
+			target_id text NOT NULL DEFAULT '', account_id text NOT NULL DEFAULT '',
+			model_name text NOT NULL DEFAULT '', provider_family text NOT NULL DEFAULT '',
+			probe_prompt text NOT NULL DEFAULT '', max_probe_tokens integer NOT NULL DEFAULT 1,
+			queue_kind text NOT NULL, source text NOT NULL, incident_id text NOT NULL DEFAULT '',
+			fault_domain text NOT NULL DEFAULT '', observation_epoch bigint NOT NULL DEFAULT 0,
+			normal_generation bigint NOT NULL DEFAULT 0, abnormal_queue_epoch bigint NOT NULL DEFAULT 0,
+			attempt integer NOT NULL DEFAULT 0, required_attempts integer NOT NULL DEFAULT 4,
+			confirmation_delays_seconds jsonb NOT NULL DEFAULT '[2,5,10]'::jsonb,
+			confirmation_jitter_seconds integer NOT NULL DEFAULT 1,
+			next_attempt_at timestamptz NOT NULL DEFAULT now(), action_key text NOT NULL,
+			mutation_generation bigint NOT NULL DEFAULT 0, state text NOT NULL DEFAULT 'queued',
+			claimed_by text NOT NULL DEFAULT '', claim_expires_at timestamptz NULL,
+			expected_result text NOT NULL DEFAULT '', last_result text NOT NULL DEFAULT '',
+			created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			UNIQUE (user_id, admin_account_id, action_key)
+		)`,
+		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS target_id text NOT NULL DEFAULT ''`,
+		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS provider_family text NOT NULL DEFAULT ''`,
+		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS probe_prompt text NOT NULL DEFAULT ''`,
+		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS max_probe_tokens integer NOT NULL DEFAULT 1`,
+		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS normal_generation bigint NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS required_attempts integer NOT NULL DEFAULT 4`,
+		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS confirmation_delays_seconds jsonb NOT NULL DEFAULT '[2,5,10]'::jsonb`,
+		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS confirmation_jitter_seconds integer NOT NULL DEFAULT 1`,
+		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS expected_result text NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_connection_health_abnormal_queue_due ON connection_health_abnormal_queue (user_id, admin_account_id, state, next_attempt_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_connection_health_abnormal_queue_source ON connection_health_abnormal_queue (user_id, admin_account_id, source, abnormal_queue_epoch, state)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_connection_health_abnormal_queue_active_domain
+			ON connection_health_abnormal_queue (user_id, admin_account_id, fault_domain)
+			WHERE fault_domain <> '' AND state IN ('claimed','dispatching')`,
+		`CREATE TABLE IF NOT EXISTS connection_health_incidents (
+			id text PRIMARY KEY, user_id text NOT NULL, admin_account_id text NOT NULL,
+			fault_domain text NOT NULL, state text NOT NULL DEFAULT 'closed',
+			normal_generation bigint NOT NULL DEFAULT 0, canary_target_id text NOT NULL DEFAULT '',
+			successful_canary_target_id text NOT NULL DEFAULT '',
+			updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE (user_id, admin_account_id, fault_domain)
+		)`,
+		`ALTER TABLE connection_health_incidents ADD COLUMN IF NOT EXISTS successful_canary_target_id text NOT NULL DEFAULT ''`,
+		`CREATE TABLE IF NOT EXISTS connection_health_incident_observations (
+			user_id text NOT NULL, admin_account_id text NOT NULL, fault_domain text NOT NULL,
+			normal_generation bigint NOT NULL, account_id text NOT NULL, target_id text NOT NULL,
+			result text NOT NULL, observed_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, admin_account_id, fault_domain, normal_generation, account_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS connection_health_target_fault_domains (
+			user_id text NOT NULL, admin_account_id text NOT NULL, target_id text NOT NULL,
+			endpoint text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, admin_account_id, target_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS connection_health_safety_audits (
+			id text PRIMARY KEY, user_id text NOT NULL, admin_account_id text NOT NULL,
+			audit_type text NOT NULL, actor text NOT NULL DEFAULT '',
+			old_value jsonb NOT NULL DEFAULT '{}'::jsonb, new_value jsonb NOT NULL DEFAULT '{}'::jsonb,
+			detail text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now()
+		)`,
+		`CREATE TABLE IF NOT EXISTS connection_health_safety_inventory_snapshots (
+			user_id text NOT NULL, admin_account_id text NOT NULL, generation bigint NOT NULL,
+			complete boolean NOT NULL DEFAULT false, expires_at timestamptz NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, admin_account_id, generation)
+		)`,
+		`CREATE TABLE IF NOT EXISTS connection_health_safety_inventory_accounts (
+			user_id text NOT NULL, admin_account_id text NOT NULL, generation bigint NOT NULL,
+			account_id text NOT NULL, target_id text NOT NULL, active boolean NOT NULL DEFAULT false,
+			schedulable boolean NOT NULL DEFAULT false, status_known boolean NOT NULL DEFAULT false,
+			schedulable_known boolean NOT NULL DEFAULT false, capability_known boolean NOT NULL DEFAULT false,
+			membership_known boolean NOT NULL DEFAULT false, models jsonb NOT NULL DEFAULT '[]'::jsonb,
+			group_ids jsonb NOT NULL DEFAULT '[]'::jsonb, last_success_at timestamptz NULL,
+			confirmed_failure_models integer NOT NULL DEFAULT 0,
+			PRIMARY KEY (user_id, admin_account_id, generation, account_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS connection_health_mutation_fences (
+			user_id text NOT NULL, admin_account_id text NOT NULL, account_id text NOT NULL,
+			generation bigint NOT NULL DEFAULT 0, lease_owner text NOT NULL DEFAULT '',
+			fencing_token bigint NOT NULL DEFAULT 0, lease_expires_at timestamptz NULL,
+			updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (user_id, admin_account_id, account_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS connection_health_emergency_clears (
+				user_id text NOT NULL, admin_account_id text NOT NULL, idempotency_key text NOT NULL,
+				result jsonb NOT NULL, expires_at timestamptz NOT NULL,
+				created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (user_id, admin_account_id, idempotency_key)
+			)`,
+		`CREATE INDEX IF NOT EXISTS idx_connection_health_emergency_clears_expiry ON connection_health_emergency_clears (expires_at)`,
+		`CREATE TABLE IF NOT EXISTS connection_health_floor_reservations (
+			id text PRIMARY KEY, user_id text NOT NULL, admin_account_id text NOT NULL,
+			account_id text NOT NULL, incident_id text NOT NULL DEFAULT '', reason text NOT NULL DEFAULT '',
+			inventory_generation bigint NOT NULL DEFAULT 0, expires_at timestamptz NOT NULL,
+			dispatching_at timestamptz NULL, readback_at timestamptz NULL, snapshot_invalidated_at timestamptz NULL,
+			created_at timestamptz NOT NULL DEFAULT now()
+		)`,
+		`ALTER TABLE connection_health_floor_reservations ADD COLUMN IF NOT EXISTS inventory_generation bigint NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_floor_reservations ADD COLUMN IF NOT EXISTS dispatching_at timestamptz NULL`,
+		`CREATE INDEX IF NOT EXISTS idx_connection_health_floor_reservations_workspace ON connection_health_floor_reservations (user_id, admin_account_id, expires_at)`,
+		`CREATE TABLE IF NOT EXISTS connection_health_incident_survivors (
+			user_id text NOT NULL, admin_account_id text NOT NULL, incident_id text NOT NULL,
+			scope_kind text NOT NULL, scope_id text NOT NULL, account_id text NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, admin_account_id, incident_id, scope_kind, scope_id)
+		)`,
+		`ALTER TABLE connection_health_priority_sync_states ADD COLUMN IF NOT EXISTS pending_mutation_generation bigint NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_priority_sync_states ADD COLUMN IF NOT EXISTS pending_source text NOT NULL DEFAULT ''`,
+		`ALTER TABLE connection_health_priority_sync_states ADD COLUMN IF NOT EXISTS pending_epoch bigint NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_priority_sync_states ADD COLUMN IF NOT EXISTS pending_action_key text NOT NULL DEFAULT ''`,
+		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_mutation_generation bigint NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_source text NOT NULL DEFAULT ''`,
+		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_epoch bigint NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_action_key text NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range statements {
 		if _, err := r.db.Exec(ctx, stmt); err != nil {
@@ -1415,7 +1541,8 @@ func scanGroupTargetExclusions(rows pgx.Rows) ([]GroupTargetExclusion, error) {
 func (r *Repository) ListPrioritySyncStates(ctx context.Context, userID string, adminAccountID string) ([]PrioritySyncState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_priority, last_applied_priority,
-			pending_priority, effective_multiplier, conflict, last_conflict_priority, updated_at
+			pending_priority, pending_mutation_generation, pending_source, pending_epoch, pending_action_key,
+			effective_multiplier, conflict, last_conflict_priority, updated_at
 		FROM connection_health_priority_sync_states
 		WHERE user_id = $1 AND admin_account_id = $2
 	`, userID, adminAccountID)
@@ -1427,7 +1554,9 @@ func (r *Repository) ListPrioritySyncStates(ctx context.Context, userID string, 
 	for rows.Next() {
 		var state PrioritySyncState
 		if err := rows.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalPriority,
-			&state.LastAppliedPriority, &state.PendingPriority, &state.EffectiveMultiplier, &state.Conflict, &state.LastConflictPriority, &state.UpdatedAt); err != nil {
+			&state.LastAppliedPriority, &state.PendingPriority, &state.PendingMutationGeneration,
+			&state.PendingSource, &state.PendingEpoch, &state.PendingActionKey,
+			&state.EffectiveMultiplier, &state.Conflict, &state.LastConflictPriority, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		states = append(states, state)
@@ -1438,7 +1567,8 @@ func (r *Repository) ListPrioritySyncStates(ctx context.Context, userID string, 
 func (r *Repository) ListAllPrioritySyncStates(ctx context.Context) ([]PrioritySyncState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_priority, last_applied_priority,
-			pending_priority, effective_multiplier, conflict, last_conflict_priority, updated_at
+			pending_priority, pending_mutation_generation, pending_source, pending_epoch, pending_action_key,
+			effective_multiplier, conflict, last_conflict_priority, updated_at
 		FROM connection_health_priority_sync_states
 	`)
 	if err != nil {
@@ -1449,7 +1579,9 @@ func (r *Repository) ListAllPrioritySyncStates(ctx context.Context) ([]PriorityS
 	for rows.Next() {
 		var state PrioritySyncState
 		if err := rows.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalPriority,
-			&state.LastAppliedPriority, &state.PendingPriority, &state.EffectiveMultiplier, &state.Conflict, &state.LastConflictPriority, &state.UpdatedAt); err != nil {
+			&state.LastAppliedPriority, &state.PendingPriority, &state.PendingMutationGeneration,
+			&state.PendingSource, &state.PendingEpoch, &state.PendingActionKey,
+			&state.EffectiveMultiplier, &state.Conflict, &state.LastConflictPriority, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		states = append(states, state)
@@ -1496,18 +1628,24 @@ func (r *Repository) UpsertPrioritySyncState(ctx context.Context, state Priority
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO connection_health_priority_sync_states (
 			user_id, admin_account_id, target_id, original_priority, last_applied_priority, pending_priority,
+			pending_mutation_generation, pending_source, pending_epoch, pending_action_key,
 			effective_multiplier, conflict, last_conflict_priority, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
 		ON CONFLICT (user_id, admin_account_id, target_id) DO UPDATE SET
 			original_priority = EXCLUDED.original_priority,
 			last_applied_priority = EXCLUDED.last_applied_priority,
 			pending_priority = EXCLUDED.pending_priority,
+			pending_mutation_generation = EXCLUDED.pending_mutation_generation,
+			pending_source = EXCLUDED.pending_source,
+			pending_epoch = EXCLUDED.pending_epoch,
+			pending_action_key = EXCLUDED.pending_action_key,
 			effective_multiplier = EXCLUDED.effective_multiplier,
 			conflict = EXCLUDED.conflict,
 			last_conflict_priority = EXCLUDED.last_conflict_priority,
 			updated_at = now()
 	`, state.UserID, state.AdminAccountID, state.TargetID, state.OriginalPriority, state.LastAppliedPriority,
-		state.PendingPriority, state.EffectiveMultiplier, state.Conflict, state.LastConflictPriority)
+		state.PendingPriority, state.PendingMutationGeneration, state.PendingSource, state.PendingEpoch,
+		state.PendingActionKey, state.EffectiveMultiplier, state.Conflict, state.LastConflictPriority)
 	return err
 }
 
@@ -1650,13 +1788,16 @@ func scanPriorityWorkspaceSyncState(row pgx.Row) (*PriorityWorkspaceSyncState, e
 func (r *Repository) GetTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) (*TargetActionState, error) {
 	row := r.db.QueryRow(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, updated_at
+			last_applied_status, last_applied_weight, pending_status, pending_weight,
+			pending_mutation_generation, pending_source, pending_epoch, pending_action_key, conflict, updated_at
 		FROM connection_health_target_action_states
 		WHERE user_id = $1 AND admin_account_id = $2 AND target_id = $3
 	`, userID, adminAccountID, targetID)
 	var state TargetActionState
 	if err := row.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalStatus, &state.OriginalWeight,
-		&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.UpdatedAt); err != nil {
+		&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight,
+		&state.PendingMutationGeneration, &state.PendingSource, &state.PendingEpoch, &state.PendingActionKey,
+		&state.Conflict, &state.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -1668,7 +1809,8 @@ func (r *Repository) GetTargetActionState(ctx context.Context, userID string, ad
 func (r *Repository) ListTargetActionStates(ctx context.Context, userID string, adminAccountID string) ([]TargetActionState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, updated_at
+			last_applied_status, last_applied_weight, pending_status, pending_weight,
+			pending_mutation_generation, pending_source, pending_epoch, pending_action_key, conflict, updated_at
 		FROM connection_health_target_action_states
 		WHERE user_id = $1 AND admin_account_id = $2
 	`, userID, adminAccountID)
@@ -1682,7 +1824,8 @@ func (r *Repository) ListTargetActionStates(ctx context.Context, userID string, 
 func (r *Repository) ListAllTargetActionStates(ctx context.Context) ([]TargetActionState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, updated_at
+			last_applied_status, last_applied_weight, pending_status, pending_weight,
+			pending_mutation_generation, pending_source, pending_epoch, pending_action_key, conflict, updated_at
 		FROM connection_health_target_action_states
 	`)
 	if err != nil {
@@ -1697,7 +1840,9 @@ func scanTargetActionStates(rows pgx.Rows) ([]TargetActionState, error) {
 	for rows.Next() {
 		var state TargetActionState
 		if err := rows.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalStatus, &state.OriginalWeight,
-			&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.UpdatedAt); err != nil {
+			&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight,
+			&state.PendingMutationGeneration, &state.PendingSource, &state.PendingEpoch, &state.PendingActionKey,
+			&state.Conflict, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		states = append(states, state)
@@ -1709,8 +1854,9 @@ func (r *Repository) UpsertTargetActionState(ctx context.Context, state TargetAc
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO connection_health_target_action_states (
 			user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
+			last_applied_status, last_applied_weight, pending_status, pending_weight,
+			pending_mutation_generation, pending_source, pending_epoch, pending_action_key, conflict, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
 		ON CONFLICT (user_id, admin_account_id, target_id) DO UPDATE SET
 			original_status = EXCLUDED.original_status,
 			original_weight = EXCLUDED.original_weight,
@@ -1718,10 +1864,15 @@ func (r *Repository) UpsertTargetActionState(ctx context.Context, state TargetAc
 			last_applied_weight = EXCLUDED.last_applied_weight,
 			pending_status = EXCLUDED.pending_status,
 			pending_weight = EXCLUDED.pending_weight,
+			pending_mutation_generation = EXCLUDED.pending_mutation_generation,
+			pending_source = EXCLUDED.pending_source,
+			pending_epoch = EXCLUDED.pending_epoch,
+			pending_action_key = EXCLUDED.pending_action_key,
 			conflict = EXCLUDED.conflict,
 			updated_at = now()
 	`, state.UserID, state.AdminAccountID, state.TargetID, state.OriginalStatus, state.OriginalWeight,
-		state.LastAppliedStatus, state.LastAppliedWeight, state.PendingStatus, state.PendingWeight, state.Conflict)
+		state.LastAppliedStatus, state.LastAppliedWeight, state.PendingStatus, state.PendingWeight,
+		state.PendingMutationGeneration, state.PendingSource, state.PendingEpoch, state.PendingActionKey, state.Conflict)
 	return err
 }
 

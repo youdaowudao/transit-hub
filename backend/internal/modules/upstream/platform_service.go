@@ -2534,6 +2534,10 @@ func (s *PlatformService) UpdateSub2APIAdminAccountStatusContext(ctx context.Con
 // SetSub2APIAdminAccountSchedulable 使用 Sub2API 的专用字段接口修改业务流量调度开关。
 // 请求体只包含 schedulable，不能复用账号详情更新或携带 status/priority 等其它字段。
 func (s *PlatformService) SetSub2APIAdminAccountSchedulable(session Session, accountID string, schedulable bool) error {
+	return s.SetSub2APIAdminAccountSchedulableContext(context.Background(), session, accountID, schedulable)
+}
+
+func (s *PlatformService) SetSub2APIAdminAccountSchedulableContext(ctx context.Context, session Session, accountID string, schedulable bool) error {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
 		return newRequestError(ErrorAuth, PlatformSub2API)
 	}
@@ -2544,7 +2548,8 @@ func (s *PlatformService) SetSub2APIAdminAccountSchedulable(session Session, acc
 	options := adminAuthOptions(session)
 	options.Method = http.MethodPost
 	options.Body = map[string]bool{"schedulable": schedulable}
-	_, err = s.httpClient.requestJSON(
+	_, err = s.httpClient.requestJSONWithContext(
+		ctx,
 		session.BaseURL+"/api/v1/admin/accounts/"+strconv.FormatInt(parsedAccountID, 10)+"/schedulable",
 		options,
 	)

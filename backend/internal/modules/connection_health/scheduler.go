@@ -29,6 +29,7 @@ type adminProbeJob struct {
 	snapshotFetchedAt  time.Time
 	snapshotExpiresAt  time.Time
 	snapshotGeneration uint64
+	normalGeneration   int64
 	models             []probeModelSpec
 	dueSpecs           []probeModelSpec
 }
@@ -185,6 +186,10 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 	if len(jobs) == 0 {
 		return
 	}
+	normalGeneration := s.schedulerNow().UnixNano()
+	for index := range jobs {
+		jobs[index].normalGeneration = normalGeneration
+	}
 
 	var wg sync.WaitGroup
 	type probedWorkspace struct {
@@ -196,7 +201,16 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 
 	for _, j := range jobs {
 		wsKey := j.userID + "|" + j.adminAccountID
-		releaseSlot, acquired := s.sharedProbeLimiter().acquire(ctx, wsKey, true)
+		manualReservedSlots := 0
+		if s.safetyRepo != nil && j.target.Platform == string(upstream.PlatformSub2API) {
+			settings, available := s.workspaceSafetySettings(ctx, j.userID, j.adminAccountID)
+			if !available {
+				log.Printf("[connection-health] safety settings unavailable user_id=%s admin_account_id=%s", j.userID, j.adminAccountID)
+				continue
+			}
+			manualReservedSlots = settings.ManualReservedSlots
+		}
+		releaseSlot, acquired := s.sharedProbeLimiter().acquireAutomatic(ctx, wsKey, true, manualReservedSlots)
 		if !acquired {
 			break
 		}
@@ -258,21 +272,67 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 	if err := jobCtx.Err(); err != nil {
 		return
 	}
+	var guard *automaticProbeGuard
+	if s.safetyRepo != nil && j.target.Platform == string(upstream.PlatformSub2API) {
+		queueEpoch, epochErr := s.safetyRepo.GetAbnormalQueueEpoch(jobCtx, j.userID, j.adminAccountID)
+		if epochErr != nil {
+			log.Printf("[connection-health] read automatic probe epoch failed target_id=%s err=%v", j.target.TargetID, epochErr)
+			return
+		}
+		allowed, guardErr := s.automaticProbeAllowed(jobCtx, j.userID, j.adminAccountID, j.target.TargetID, "", queueEpoch)
+		if guardErr != nil {
+			log.Printf("[connection-health] check automatic probe circuit failed target_id=%s err=%v", j.target.TargetID, guardErr)
+			return
+		}
+		if !allowed {
+			return
+		}
+		guard = &automaticProbeGuard{
+			queueEpoch: queueEpoch, normalGeneration: j.normalGeneration,
+			observationEpoch: s.schedulerNow().UnixNano(),
+		}
+	}
 
 	cred, err := s.resolveProbeCredential(jobCtx, j.session, j.account)
 	if err != nil {
 		reason := upstream.ProbeCredentialReason(err)
 		if jobCtx.Err() == nil {
-			s.recordTargetCredentialUnavailable(jobCtx, j.userID, j.adminAccountID, j.target, j.dueSpecs, reason)
+			if guard == nil {
+				s.recordTargetCredentialUnavailable(jobCtx, j.userID, j.adminAccountID, j.target, j.dueSpecs, reason)
+			} else {
+				currentEpoch, epochErr := s.safetyRepo.GetAbnormalQueueEpoch(jobCtx, j.userID, j.adminAccountID)
+				if epochErr != nil {
+					log.Printf("[connection-health] read credential failure epoch failed target_id=%s err=%v", j.target.TargetID, epochErr)
+					return
+				}
+				if currentEpoch != guard.queueEpoch {
+					if epochRepo, ok := s.repo.(epochObservationRepository); ok {
+						_ = epochRepo.InsertSafetyAudit(jobCtx, j.userID, j.adminAccountID, "stale_credential_response", j.target.TargetID+":"+reason)
+					}
+					return
+				}
+				s.recordTargetCredentialUnavailable(jobCtx, j.userID, j.adminAccountID, j.target, j.dueSpecs, reason, guard.queueEpoch)
+			}
 		}
 		return
+	}
+	if guard != nil {
+		endpoint := confirmationFaultEndpoint(cred.BaseURL)
+		if endpoint == "" {
+			log.Printf("[connection-health] normalize automatic probe endpoint failed target_id=%s", j.target.TargetID)
+			return
+		}
+		if err := s.safetyRepo.UpsertTargetFaultEndpoint(jobCtx, j.userID, j.adminAccountID, j.target.TargetID, endpoint); err != nil {
+			log.Printf("[connection-health] persist automatic probe endpoint failed target_id=%s err=%v", j.target.TargetID, err)
+			return
+		}
 	}
 	results := make([]targetProbeResult, 0, len(j.dueSpecs))
 	for _, spec := range j.dueSpecs {
 		if err := jobCtx.Err(); err != nil {
 			return
 		}
-		result, err := s.probeTargetOnce(jobCtx, j.userID, j.adminAccountID, j.target, cred, spec, true)
+		result, err := s.probeTargetOnce(jobCtx, j.userID, j.adminAccountID, j.target, cred, spec, true, guard)
 		if err != nil {
 			log.Printf("[connection-health] scheduled target probe failed target_id=%s model=%s err=%v", j.target.TargetID, spec.modelName, err)
 			continue
@@ -423,7 +483,7 @@ func (s *Service) currentScheduledProbeSpecs(ctx context.Context, userID string,
 // recordTargetCredentialUnavailable 在凭据解析失败时，对每个到期模型回填 last_probe_at（按探活
 // 间隔退避，避免每 30s 反复命中受保护的 key/导出接口）并记录一条 unsupported 事件，
 // 事件 error_key 为脱敏 reason。不驱动状态机、不计入探活预算。
-func (s *Service) recordTargetCredentialUnavailable(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, specs []probeModelSpec, reason string) {
+func (s *Service) recordTargetCredentialUnavailable(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, specs []probeModelSpec, reason string, expectedEpoch ...int64) {
 	now := time.Now()
 	for _, spec := range specs {
 		current, err := s.repo.GetState(ctx, target.TargetID, spec.modelName)
@@ -442,13 +502,35 @@ func (s *Service) recordTargetCredentialUnavailable(ctx context.Context, userID 
 		next.LastErrorDetail = ""
 		// LastRemoteAction 也是旧版本判断「该上游状态是否由健康模块接管」的兼容证据。
 		// 凭据暂时不可用只更新探活错误，不能抹掉此前成功执行的远端动作。
-		if err := s.repo.UpsertState(ctx, next); err != nil {
+		if len(expectedEpoch) > 0 {
+			epochRepo, ok := s.repo.(epochObservationRepository)
+			if !ok {
+				log.Printf("[connection-health] unavailable target epoch repository missing target_id=%s model=%s", target.TargetID, spec.modelName)
+				return
+			}
+			committed, commitErr := epochRepo.UpsertStateIfAbnormalQueueEpoch(ctx, next, expectedEpoch[0])
+			if commitErr != nil {
+				log.Printf("[connection-health] upsert unavailable target state failed target_id=%s model=%s err=%v", target.TargetID, spec.modelName, commitErr)
+				continue
+			}
+			if !committed {
+				_ = epochRepo.InsertSafetyAudit(ctx, userID, adminAccountID, "stale_credential_commit", target.TargetID+":"+spec.modelName)
+				return
+			}
+		} else if err := s.repo.UpsertState(ctx, next); err != nil {
 			log.Printf("[connection-health] upsert unavailable target state failed target_id=%s model=%s err=%v", target.TargetID, spec.modelName, err)
 			continue
 		}
 		eventTarget := targetForProbeSpec(target, spec)
-		if err := s.recordTargetEvent(ctx, userID, adminAccountID, eventTarget, spec.effectiveBudgetPolicy().ID, spec.modelName, string(ResultUnsupported), string(next.State), string(next.State), nil, reason, "", "", EventSourceScheduled); err != nil {
-			log.Printf("[connection-health] insert unavailable target event failed target_id=%s model=%s err=%v", target.TargetID, spec.modelName, err)
+		var eventErr error
+		if len(expectedEpoch) > 0 {
+			epoch := expectedEpoch[0]
+			eventErr = s.recordTargetEventAtEpoch(ctx, userID, adminAccountID, eventTarget, spec.effectiveBudgetPolicy().ID, spec.modelName, string(ResultUnsupported), string(next.State), string(next.State), nil, reason, "", "", EventSourceScheduled, &epoch)
+		} else {
+			eventErr = s.recordTargetEvent(ctx, userID, adminAccountID, eventTarget, spec.effectiveBudgetPolicy().ID, spec.modelName, string(ResultUnsupported), string(next.State), string(next.State), nil, reason, "", "", EventSourceScheduled)
+		}
+		if eventErr != nil {
+			log.Printf("[connection-health] insert unavailable target event failed target_id=%s model=%s err=%v", target.TargetID, spec.modelName, eventErr)
 		}
 	}
 }

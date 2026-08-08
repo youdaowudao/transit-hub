@@ -2480,7 +2480,7 @@ export default {
       upgrade: {
         title: '源码升级',
         statusLabel: '当前状态',
-        lastUpdated: '最后更新',
+        currentVersion: '当前版本',
         action: '立即升级',
         running: '升级中...',
         successTitle: '升级成功',
@@ -2520,6 +2520,34 @@ export default {
           running: '正在重启',
           succeeded: '上次重启成功',
           failed: '上次重启失败'
+        }
+      },
+      rollback: {
+        title: '版本回滚',
+        statusLabel: '当前状态',
+        pointLabel: '可回滚至',
+        noPoint: '暂无可用还原点',
+        action: '回滚到上一版本',
+        running: '正在回滚...',
+        confirmTitle: '确认回滚到上一版本',
+        confirmMessage: '回滚会把源码切回上次升级前的提交，并重新构建前后端、重启后台服务。回滚期间页面和 API 会短暂断开。',
+        confirmTarget: '目标版本',
+        confirmDatabaseNote: '数据库结构保持当前版本不变，不会还原数据。若检测到不兼容的破坏性迁移，回滚会中止并给出说明。',
+        cancel: '取消',
+        confirm: '确认回滚',
+        successTitle: '回滚成功',
+        successMessage: '已回滚到上一版本并通过健康检查，请刷新页面。',
+        failedTitle: '回滚失败',
+        failedMessage: '回滚未完成，本次执行的错误输出如下。',
+        timeout: '等待回滚完成超时，请检查服务器状态。',
+        close: '关闭',
+        reload: '刷新页面',
+        statuses: {
+          idle: '待命',
+          starting: '正在启动',
+          running: '正在回滚',
+          succeeded: '上次回滚成功',
+          failed: '上次回滚失败'
         }
       },
       sections: {

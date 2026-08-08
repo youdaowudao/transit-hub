@@ -1,3 +1,4 @@
+-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）
 ALTER TABLE lottery_reward_jobs
     ADD COLUMN IF NOT EXISTS rate_cleanup_status text NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS rate_cleanup_at timestamptz,

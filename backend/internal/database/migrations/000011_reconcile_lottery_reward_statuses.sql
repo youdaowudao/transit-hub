@@ -1,3 +1,4 @@
+-- rollback-safe: destructive（含 UPDATE 数据修正，回滚不撤销该数据变更，由 C 档门禁把守）
 UPDATE lottery_campaigns AS campaign
 SET status = CASE
         WHEN EXISTS (

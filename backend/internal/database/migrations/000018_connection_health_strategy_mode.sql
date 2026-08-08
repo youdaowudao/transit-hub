@@ -1,3 +1,4 @@
+-- rollback-safe: destructive（含 UPDATE 数据修正，回滚不撤销该数据变更，由 C 档门禁把守）
 -- Separate multiplier-only priority automation from policies that run real model probes.
 ALTER TABLE IF EXISTS connection_health_policies
     ADD COLUMN IF NOT EXISTS strategy_mode text NOT NULL DEFAULT 'health_probe';

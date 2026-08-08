@@ -22,16 +22,24 @@ type AdminErrorPayload = {
 
 class SystemApiError extends Error {
   readonly transient: boolean
+  readonly status?: number
 
-  constructor(message: string, transient = false) {
+  constructor(message: string, transient = false, status?: number) {
     super(message)
     this.name = 'SystemApiError'
     this.transient = transient
+    this.status = status
   }
 }
 
 export const isTransientSystemApiError = (error: unknown): boolean => (
   error instanceof SystemApiError && error.transient
+)
+
+// 回滚到不含 /api/system/rollback 路由的旧版本时，轮询会收到 404，
+// 前端应转为用 version 接口判断是否已回到还原点版本，而非直接报错。
+export const isRollbackRouteNotFound = (error: unknown): boolean => (
+  error instanceof SystemApiError && error.status === 404
 )
 
 const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
@@ -59,6 +67,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       throw new SystemApiError(
         response.ok ? 'admin.system.errors.request' : 'admin.system.errors.network',
         response.status === 502 || response.status === 503 || response.status === 504,
+        response.status,
       )
     }
   }
@@ -69,7 +78,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       throw new Error(authUnauthorizedErrorKey)
     }
     const message = [payload.message, payload.output].filter(Boolean).join('\n') || 'admin.system.errors.request'
-    throw new SystemApiError(message, response.status === 502 || response.status === 503 || response.status === 504)
+    throw new SystemApiError(message, response.status === 502 || response.status === 503 || response.status === 504, response.status)
   }
 
   return payload
@@ -127,4 +136,36 @@ export const startSystemRestart = async (): Promise<SystemRestartStartResponse> 
 
 export const getSystemRestartStatus = async (): Promise<SystemRestartStatusResponse> => (
   requestJson<SystemRestartStatusResponse>('/system/restart')
+)
+
+export type SystemRollbackState = 'idle' | 'starting' | 'running' | 'succeeded' | 'failed'
+
+export interface SystemRollbackPoint {
+  commit: string
+  version: string
+  schemaVersion: number
+  dumpPath?: string
+  capturedAt: string
+}
+
+export interface SystemRollbackStartResponse {
+  state: 'starting'
+  requestedAt: string
+}
+
+export interface SystemRollbackStatusResponse {
+  state: SystemRollbackState
+  startedAt?: string
+  finishedAt?: string
+  exitCode?: number
+  output?: string
+  point?: SystemRollbackPoint
+}
+
+export const startSystemRollback = async (): Promise<SystemRollbackStartResponse> => (
+  requestJson<SystemRollbackStartResponse>('/system/rollback', { method: 'POST' })
+)
+
+export const getSystemRollbackStatus = async (): Promise<SystemRollbackStatusResponse> => (
+  requestJson<SystemRollbackStatusResponse>('/system/rollback')
 )

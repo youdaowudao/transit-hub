@@ -155,7 +155,10 @@ func (e *systemdRestartExecutor) Status(ctx context.Context) (RestartStatusRespo
 	if !validRestartState(status.State) {
 		return RestartStatusResponse{}, fmt.Errorf("未知的重启状态：%s", status.State)
 	}
-	if status.State == RestartStateStarting {
+	// starting 与 running 都需要兜底：wrapper 在 running 期间被 SIGKILL 或断电时
+	// 无法自写终态，状态会永久停在 running，而三方维护互斥以此判定，
+	// 导致升级、重启、回滚全部永久阻塞。
+	if status.State == RestartStateStarting || status.State == RestartStateRunning {
 		status, err = e.reconcileStartingStatus(ctx, status)
 		if err != nil {
 			return RestartStatusResponse{}, err
@@ -212,10 +215,12 @@ func (e *systemdRestartExecutor) reconcileStartingStatus(ctx context.Context, st
 	if err != nil {
 		return RestartStatusResponse{}, err
 	}
-	if latestStatus.State != RestartStateStarting || latestStatus.StartedAt != status.StartedAt {
+	stillPending := latestStatus.State == RestartStateStarting || latestStatus.State == RestartStateRunning
+	if !stillPending || latestStatus.StartedAt != status.StartedAt {
 		return latestStatus, nil
 	}
 	status = latestStatus
+	interruptedState := status.State
 
 	exitCode := 1
 	if parsed, parseErr := strconv.Atoi(properties["ExecMainStatus"]); parseErr == nil && parsed != 0 {
@@ -225,7 +230,10 @@ func (e *systemdRestartExecutor) reconcileStartingStatus(ctx context.Context, st
 	status.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	status.ExitCode = &exitCode
 	reason := "后台服务重启单元异步启动失败"
-	if activeState == "inactive" {
+	switch {
+	case interruptedState == RestartStateRunning:
+		reason = "后台服务重启执行中被中断且未写入最终状态，请检查服务日志后再重试"
+	case activeState == "inactive":
 		reason = "后台服务重启单元已结束但未写入最终状态"
 	}
 	message := fmt.Sprintf("%s：\n%s", reason, strings.TrimSpace(string(output)))

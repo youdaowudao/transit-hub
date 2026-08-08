@@ -1,3 +1,4 @@
+-- rollback-safe: destructive（含 UPDATE 数据修正，回滚不撤销该数据变更，由 C 档门禁把守）
 -- Sub2API 的请求模型允许 128 字符兑换码，但其持久化模型仍限制为 32 字符。
 -- 旧版抽奖任务直接使用内部幂等键作为兑换码，因此会在 Sub2API 内部校验时返回通用 500。
 WITH reset_jobs AS (

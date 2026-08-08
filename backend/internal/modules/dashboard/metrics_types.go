@@ -5,6 +5,7 @@ import "time"
 // 结算状态常量。
 const (
 	SettlementStatusProvisional = "provisional" // 首页访问写入的临时快照
+	SettlementStatusFallback    = "fallback"    // 首页使用同一业务日旧成本写入的可展示快照
 	SettlementStatusPartial     = "partial"     // 部分站点成功的日结结果
 	SettlementStatusFinal       = "final"       // 所有站点成功的完整日结结果
 	SettlementStatusMissing     = "missing"     // 占位：该日期无任何记录
@@ -30,7 +31,7 @@ type MetricsResponse struct {
 	NetProfit        *float64          `json:"netProfit"`                  // 今日净利润；任一分项为 nil 时为 nil
 	ConfirmedCost    *float64          `json:"confirmedCost,omitempty"`    // 部分成本时的已确认成本下限
 	NetProfitCeiling *float64          `json:"netProfitCeiling,omitempty"` // 部分成本时的暂估净利润上限
-	SettlementStatus string            `json:"settlementStatus,omitempty"` // final/partial/provisional/unavailable
+	SettlementStatus string            `json:"settlementStatus,omitempty"` // final/fallback/partial/provisional/unavailable
 	UpstreamBalance  float64           `json:"upstreamBalance"`            // 上游总余额：所有上游站点余额（CNY）之和
 	GroupCount       int               `json:"groupCount"`                 // 管理员站点分组总数，省去前端单独请求
 	MetricErrors     map[string]string `json:"metricErrors,omitempty"`     // 局部指标拉取失败原因
@@ -40,10 +41,13 @@ type MetricsResponse struct {
 // CostQuality 描述本次成本采集的完整性与质量信息，前端根据此字段分级展示。
 type CostQuality struct {
 	BusinessDate   string          `json:"businessDate"`
-	ConfirmedCost  float64         `json:"confirmedCost"` // 已确认站点成本之和（真实下限）
-	Complete       bool            `json:"complete"`      // 所有目标站点均成功采集时为 true
+	Mode           string          `json:"mode"`          // exact/fallback/partial/unavailable
+	ConfirmedCost  float64         `json:"confirmedCost"` // exact/fallback 时为可展示成本，partial 时为已确认下限
+	Complete       bool            `json:"complete"`      // 所有目标站点均为本次有效采集时为 true
 	ExpectedSites  int             `json:"expectedSites"`
 	CollectedSites int             `json:"collectedSites"`
+	FallbackSites  int             `json:"fallbackSites"`
+	FallbackAt     *time.Time      `json:"fallbackAt,omitempty"` // fallback 站点中最早的最后成功采集时间
 	FailedSites    int             `json:"failedSites"`
 	ObservedAt     *time.Time      `json:"observedAt,omitempty"`
 	Failures       []SiteCostFault `json:"failures,omitempty"` // 失败站点脱敏原因
@@ -70,7 +74,7 @@ type TrendPoint struct {
 	NetProfit          *float64 `json:"netProfit"`                  // nil 表示该天净利润不可用
 	ConfirmedCost      *float64 `json:"confirmedCost,omitempty"`    // 部分结算日的成本下限
 	NetProfitCeiling   *float64 `json:"netProfitCeiling,omitempty"` // 部分结算日的利润上限
-	SettlementStatus   string   `json:"settlementStatus,omitempty"` // final/partial/provisional/missing
+	SettlementStatus   string   `json:"settlementStatus,omitempty"` // final/fallback/partial/provisional/missing
 	CostExpectedCount  *int     `json:"costExpectedCount,omitempty"`
 	CostCollectedCount *int     `json:"costCollectedCount,omitempty"`
 	UpstreamBalance    float64  `json:"upstreamBalance"`
@@ -90,7 +94,7 @@ type DailySnapshot struct {
 	NetProfit          *float64
 	UpstreamBalance    *float64
 	CreatedAt          time.Time
-	SettlementStatus   string     // provisional/partial/final
+	SettlementStatus   string     // provisional/fallback/partial/final
 	SnapshotSource     string     // live_cache/dated_query/backfill
 	ObservedAt         *time.Time // 数据实际采集时间
 	FinalizedAt        *time.Time // 日结成功写入时间，仅 final 行有值
@@ -121,7 +125,7 @@ type SiteDailyCost struct {
 // DailyStatItem 是 GET /api/dashboard/daily-stats 返回的单日数据。
 type DailyStatItem struct {
 	Date               string           `json:"date"`
-	SettlementStatus   string           `json:"settlementStatus"` // missing/provisional/partial/final
+	SettlementStatus   string           `json:"settlementStatus"` // missing/provisional/fallback/partial/final
 	SnapshotSource     string           `json:"snapshotSource,omitempty"`
 	TodayProfit        *float64         `json:"todayProfit,omitempty"`
 	ConfirmedCost      *float64         `json:"confirmedCost,omitempty"`    // 成本下限

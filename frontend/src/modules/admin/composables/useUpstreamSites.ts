@@ -6,6 +6,7 @@ import {
   streamSyncAllUpstreamSites,
   syncAllUpstreamSites,
   syncUpstreamSite,
+  updateUpstreamSiteEnabled,
   updateUpstreamSite,
 } from '../api/upstream'
 import type { SiteSyncState, UpstreamMetricValue, UpstreamMetrics, UpstreamSite, UpstreamSiteForm, UpstreamSiteResponse } from '../types/upstream'
@@ -36,6 +37,7 @@ const normalizeMetrics = (metrics: UpstreamSiteResponse['metrics'] | null | unde
 
 const normalizeSite = (site: UpstreamSiteResponse, logoBg: string): UpstreamSite => ({
   ...site,
+  enabled: site.enabled ?? true,
   metrics: normalizeMetrics(site.metrics),
   settings: site.settings ?? { balanceThreshold: null },
   logo: siteLogo(site.name),
@@ -47,8 +49,11 @@ export const useUpstreamSites = () => {
   const isAdding = ref(false)
   const isRefreshing = ref(false)
   const addErrorKey = ref<string | null>(null)
+  const enabledUpdatingIds = ref(new Set<string>())
+  const enabledErrorKeys = ref(new Map<string, string>())
 
-  const connectedCount = computed(() => sites.value.filter((site) => site.status === 'connected' || site.status === 'syncing').length)
+  const enabledSiteCount = computed(() => sites.value.filter((site) => site.enabled).length)
+  const connectedCount = computed(() => sites.value.filter((site) => site.enabled && (site.status === 'connected' || site.status === 'syncing')).length)
 
   const loadSites = async () => {
     const remoteSites = await listUpstreamSites()
@@ -90,7 +95,7 @@ export const useUpstreamSites = () => {
 
   const syncSite = async (id: string) => {
     const site = sites.value.find((item) => item.id === id)
-    if (!site) return
+    if (!site?.enabled) return
     const nextSite = await syncUpstreamSite(id)
     Object.assign(site, normalizeSite(nextSite, site.logoBg))
   }
@@ -114,7 +119,8 @@ export const useUpstreamSites = () => {
   const syncingSiteIds = ref(new Set<string>())
 
   const refreshSingleSite = async (id: string) => {
-    if (syncingSiteIds.value.has(id)) return
+    const site = sites.value.find((item) => item.id === id)
+    if (!site?.enabled || syncingSiteIds.value.has(id)) return
     syncingSiteIds.value = new Set([...syncingSiteIds.value, id])
     try {
       await syncSite(id)
@@ -133,6 +139,8 @@ export const useUpstreamSites = () => {
     try {
       await streamSyncAllUpstreamSites((event) => {
         const id = event.siteId
+        const currentSite = sites.value.find((site) => site.id === id)
+        if (event.event !== 'complete' && currentSite?.enabled === false) return
         switch (event.event) {
           case 'syncing':
             siteSyncStates.value.set(id, { phase: 'syncing' })
@@ -177,6 +185,30 @@ export const useUpstreamSites = () => {
     sites.value = sites.value.filter((site) => site.id !== id)
   }
 
+  const setSiteEnabled = async (id: string, enabled: boolean) => {
+    if (enabledUpdatingIds.value.has(id)) return
+    const site = sites.value.find((item) => item.id === id)
+    if (!site || site.enabled === enabled) return
+    enabledUpdatingIds.value = new Set([...enabledUpdatingIds.value, id])
+    enabledErrorKeys.value.delete(id)
+    try {
+      const nextSite = await updateUpstreamSiteEnabled(id, enabled)
+      Object.assign(site, normalizeSite(nextSite, site.logoBg))
+      if (!enabled) {
+        const nextSyncing = new Set(syncingSiteIds.value)
+        nextSyncing.delete(id)
+        syncingSiteIds.value = nextSyncing
+        siteSyncStates.value.delete(id)
+      }
+    } catch (error) {
+      enabledErrorKeys.value.set(id, error instanceof Error ? error.message : 'admin.upstream.errors.unknown')
+    } finally {
+      const next = new Set(enabledUpdatingIds.value)
+      next.delete(id)
+      enabledUpdatingIds.value = next
+    }
+  }
+
   void loadSites()
 
   onBeforeUnmount(() => {
@@ -189,6 +221,9 @@ export const useUpstreamSites = () => {
     isRefreshing,
     addErrorKey,
     connectedCount,
+    enabledSiteCount,
+    enabledUpdatingIds,
+    enabledErrorKeys,
     siteSyncStates,
     syncingSiteIds,
     addSite,
@@ -198,6 +233,7 @@ export const useUpstreamSites = () => {
     refreshSites,
     streamRefreshSites,
     deleteSite,
+    setSiteEnabled,
     loadSites,
   }
 }

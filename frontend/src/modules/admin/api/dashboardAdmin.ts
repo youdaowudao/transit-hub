@@ -89,7 +89,7 @@ export interface DashboardMetricsResponse {
   netProfit: number | null
   confirmedCost?: number | null
   netProfitCeiling?: number | null
-  settlementStatus?: 'final' | 'partial' | 'provisional' | 'unavailable' | string
+  settlementStatus?: 'final' | 'fallback' | 'partial' | 'provisional' | 'unavailable' | string
   upstreamBalance: number
   groupCount: number
   metricErrors?: Partial<Record<DashboardMetricKey, string>>
@@ -99,10 +99,13 @@ export interface DashboardMetricsResponse {
 /** 成本质量信息，描述缓存成本的完整性。 */
 export interface CostQuality {
   businessDate: string
+  mode?: 'exact' | 'fallback' | 'partial' | 'unavailable' | string
   confirmedCost: number   // 已确认站点成本之和（真实下限）
   complete: boolean       // 所有目标站点均成功采集时为 true
   expectedSites: number
   collectedSites: number
+  fallbackSites?: number
+  fallbackAt?: string
   failedSites: number
   observedAt?: string
   failures?: SiteCostFault[]
@@ -123,7 +126,7 @@ export interface DashboardTrendPoint {
   netProfit: number | null
   confirmedCost?: number | null
   netProfitCeiling?: number | null
-  settlementStatus?: 'final' | 'partial' | 'provisional' | 'missing' | 'unavailable' | string
+  settlementStatus?: 'final' | 'fallback' | 'partial' | 'provisional' | 'missing' | 'unavailable' | string
   costExpectedCount?: number | null
   costCollectedCount?: number | null
   upstreamBalance: number
@@ -316,7 +319,7 @@ export interface SiteCostDetail {
 /** 单日结算数据。settlementStatus 为 "missing" 表示该日期无记录。 */
 export interface DailyStatItem {
   date: string
-  settlementStatus: 'missing' | 'provisional' | 'partial' | 'final'
+  settlementStatus: 'missing' | 'provisional' | 'fallback' | 'partial' | 'final'
   snapshotSource?: string
   todayProfit?: number | null
   confirmedCost?: number | null

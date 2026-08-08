@@ -86,7 +86,7 @@ func ptrFloat64(value float64) *float64 {
 	return &value
 }
 
-func TestLiveMetricsCostFailureDoesNotPersistSnapshot(t *testing.T) {
+func TestLiveMetricsCostFailureStillPersistsRevenue(t *testing.T) {
 	errorKey := upstream.ErrorAuth
 	staleCost := 10.0
 	repo := &fakeMetricsRepository{}
@@ -115,8 +115,8 @@ func TestLiveMetricsCostFailureDoesNotPersistSnapshot(t *testing.T) {
 	if cq, hasCq := decoded["costQuality"].(map[string]any); !hasCq || cq["complete"] != false {
 		t.Fatalf("costQuality.complete should be false, got %#v", decoded["costQuality"])
 	}
-	if len(repo.snapshots) != 0 {
-		t.Fatalf("cost failure persisted %d snapshot(s): %+v", len(repo.snapshots), repo.snapshots)
+	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayProfit == nil || *repo.snapshots[0].TodayProfit != 30 || repo.snapshots[0].TodayPurchase != nil {
+		t.Fatalf("revenue-only snapshot = %+v, want revenue 30 without cost", repo.snapshots)
 	}
 }
 
@@ -156,8 +156,8 @@ func TestLiveMetricsUsesCachedCostsAndKeepsPartialSuccess(t *testing.T) {
 	if upstreams.keyUsageCalls != 0 {
 		t.Fatalf("LiveMetrics() called active upstream cost query %d time(s)", upstreams.keyUsageCalls)
 	}
-	if len(repo.snapshots) != 0 {
-		t.Fatalf("partial cached cost persisted %d snapshot(s): %+v", len(repo.snapshots), repo.snapshots)
+	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayProfit == nil || *repo.snapshots[0].TodayProfit != 30 {
+		t.Fatalf("partial cost did not preserve revenue snapshot: %+v", repo.snapshots)
 	}
 }
 
@@ -186,8 +186,86 @@ func TestLiveMetricsAllCachedCostsUnavailableReturnsZeroAndError(t *testing.T) {
 	if cq, hasCq := decoded["costQuality"].(map[string]any); !hasCq || cq["complete"] != false {
 		t.Fatalf("costQuality.complete should be false, got %#v", decoded["costQuality"])
 	}
-	if len(repo.snapshots) != 0 {
-		t.Fatalf("all cached costs unavailable persisted %d snapshot(s): %+v", len(repo.snapshots), repo.snapshots)
+	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayProfit == nil || *repo.snapshots[0].TodayProfit != 30 {
+		t.Fatalf("unavailable cost did not preserve revenue snapshot: %+v", repo.snapshots)
+	}
+}
+
+func TestLiveMetricsUsesSameDayCachedCostAsFallback(t *testing.T) {
+	errorKey := upstream.ErrorNetwork
+	metrics := todayCachedMetrics(10)
+	repo := &fakeMetricsRepository{}
+	service := newLiveMetricsTestService(
+		&fakePlatformClient{usageStats: 30},
+		&fakeUpstreamLister{cachedSites: []upstream.Response{{
+			ID: "site-fallback", Status: upstream.StatusError, ErrorKey: &errorKey, RechargeRate: 2, Metrics: metrics,
+		}}},
+		repo,
+	)
+
+	response, err := service.LiveMetrics(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("LiveMetrics() error: %v", err)
+	}
+	if response.TodayPurchase == nil || *response.TodayPurchase != 20 || response.NetProfit == nil || *response.NetProfit != 10 {
+		t.Fatalf("fallback amounts: cost=%v net=%v", response.TodayPurchase, response.NetProfit)
+	}
+	if response.CostQuality == nil || response.CostQuality.Mode != "fallback" || response.CostQuality.FallbackSites != 1 || response.CostQuality.FallbackAt == nil || response.CostQuality.Complete {
+		t.Fatalf("fallback quality = %+v", response.CostQuality)
+	}
+	if response.SettlementStatus != SettlementStatusFallback {
+		t.Fatalf("fallback settlement status = %q, want fallback", response.SettlementStatus)
+	}
+	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayPurchase == nil || *repo.snapshots[0].TodayPurchase != 20 || repo.snapshots[0].SettlementStatus != SettlementStatusFallback {
+		t.Fatalf("fallback snapshot = %+v", repo.snapshots)
+	}
+}
+
+func TestCachedCostUsesStaleSameDayValueAsFallback(t *testing.T) {
+	observedAt := time.Now().Add(-3 * time.Hour)
+	cost := 10.0
+	_, quality := summarizeCachedUpstreamCostsWithQuality([]upstream.Response{{
+		Name: "stale-site", Status: upstream.StatusConnected, RechargeRate: 1,
+		Metrics: upstream.Metrics{
+			TodayConsume:     upstream.MetricValue{Value: &cost},
+			TodayConsumeDate: businesstime.Today(),
+			TodayConsumeAt:   &observedAt,
+		},
+	}}, businesstime.Today(), 2*time.Hour)
+
+	if quality.Mode != "fallback" || quality.FallbackSites != 1 || quality.FallbackAt == nil || !quality.FallbackAt.Equal(observedAt) {
+		t.Fatalf("stale same-day quality = %+v", quality)
+	}
+}
+
+func TestCachedCostFallbackRejectsPreviousBusinessDay(t *testing.T) {
+	errorKey := upstream.ErrorNetwork
+	observedAt := time.Now().Add(-time.Hour)
+	cost := 10.0
+	_, quality := summarizeCachedUpstreamCostsWithQuality([]upstream.Response{{
+		Name: "old-site", Status: upstream.StatusError, ErrorKey: &errorKey, RechargeRate: 1,
+		Metrics: upstream.Metrics{
+			TodayConsume:     upstream.MetricValue{Value: &cost},
+			TodayConsumeDate: "2026-08-07",
+			TodayConsumeAt:   &observedAt,
+		},
+	}}, "2026-08-08", 2*time.Hour)
+
+	if quality.Mode != "unavailable" || quality.CollectedSites != 0 || len(quality.Failures) != 1 || quality.Failures[0].Reason != "date_mismatch" {
+		t.Fatalf("previous-day quality = %+v", quality)
+	}
+}
+
+func TestCachedCostExcludesDisabledSites(t *testing.T) {
+	disabled := false
+	cost := 99.0
+	_, quality := summarizeCachedUpstreamCostsWithQuality([]upstream.Response{{
+		Name: "disabled-site", Enabled: &disabled, Status: upstream.StatusError, RechargeRate: 1,
+		Metrics: upstream.Metrics{TodayConsume: upstream.MetricValue{Value: &cost}},
+	}}, businesstime.Today(), 2*time.Hour)
+
+	if quality.Mode != "exact" || quality.ExpectedSites != 0 || quality.ConfirmedCost != 0 {
+		t.Fatalf("disabled site quality = %+v", quality)
 	}
 }
 
@@ -292,5 +370,29 @@ func TestTrendsPassesExplicitBusinessDateToRepository(t *testing.T) {
 	}
 	if repo.listRangeBusinessDay == "" {
 		t.Fatal("Trends() did not pass an explicit business date")
+	}
+}
+
+func TestTrendsPreservesFallbackAmountsAndStatus(t *testing.T) {
+	revenue := 30.0
+	cost := 20.0
+	profit := 10.0
+	repo := &fakeMetricsRepository{listRangeSnapshots: []DailySnapshot{{
+		Date:             time.Date(2026, 8, 7, 0, 0, 0, 0, businesstime.Location()),
+		TodayProfit:      &revenue,
+		TodayPurchase:    &cost,
+		NetProfit:        &profit,
+		SettlementStatus: SettlementStatusFallback,
+	}}}
+	service := NewMetricsService(nil, nil, nil, repo, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+
+	response, err := service.Trends(context.Background(), "user-1", 7)
+	if err != nil {
+		t.Fatalf("Trends() error: %v", err)
+	}
+	if len(response.Points) != 1 || response.Points[0].SettlementStatus != SettlementStatusFallback ||
+		response.Points[0].TodayPurchase == nil || *response.Points[0].TodayPurchase != cost ||
+		response.Points[0].NetProfit == nil || *response.Points[0].NetProfit != profit {
+		t.Fatalf("fallback trend point = %+v", response.Points)
 	}
 }

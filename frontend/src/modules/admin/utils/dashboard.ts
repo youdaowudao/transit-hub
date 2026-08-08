@@ -1,7 +1,7 @@
 // 仪表盘共用的展示工具：主题色类名映射、CNY 金额格式化、环比变化计算。
 // 颜色类使用「字面量字符串」写法，确保 Tailwind JIT 能扫描到对应工具类。
 
-import type { DashboardColorToken, TrendPoint } from '../types/dashboard'
+import type { DashboardColorToken, DashboardMetricKey, TrendPoint } from '../types/dashboard'
 
 /** 指标图标底色 + 文字色。 */
 export const METRIC_ICON_CLASSES: Record<DashboardColorToken, string> = {
@@ -61,13 +61,13 @@ export interface DeltaResult {
   reason?: 'non_adjacent' | 'partial_cost' | 'missing_data'
 }
 
-export type TrendValueQuality = 'exact' | 'confirmed' | 'ceiling' | 'unavailable'
+export type TrendValueQuality = 'exact' | 'fallback' | 'confirmed' | 'ceiling' | 'unavailable'
 
 export interface DashboardTrendValueInput {
   formalValue: number | null | undefined
   provisionalValue: number | null | undefined
-  status: 'final' | 'partial' | 'provisional' | 'missing' | 'unavailable' | string
-  provisionalQuality: 'confirmed' | 'ceiling'
+  status: 'final' | 'fallback' | 'partial' | 'provisional' | 'missing' | 'unavailable' | string
+  provisionalQuality: 'fallback' | 'confirmed' | 'ceiling'
 }
 
 export interface DashboardTrendValue {
@@ -77,13 +77,18 @@ export interface DashboardTrendValue {
 
 /** 选择趋势图可展示的正式值或暂估值，绝不把未知数据转换成零。 */
 export function selectDashboardTrendValue(input: DashboardTrendValueInput): DashboardTrendValue {
-  if (typeof input.formalValue === 'number' && Number.isFinite(input.formalValue)) {
-    return { value: input.formalValue, quality: 'exact' }
+  if (input.status === 'fallback'
+    && typeof input.formalValue === 'number'
+    && Number.isFinite(input.formalValue)) {
+    return { value: input.formalValue, quality: 'fallback' }
   }
   if ((input.status === 'partial' || input.status === 'provisional')
     && typeof input.provisionalValue === 'number'
     && Number.isFinite(input.provisionalValue)) {
     return { value: input.provisionalValue, quality: input.provisionalQuality }
+  }
+  if (typeof input.formalValue === 'number' && Number.isFinite(input.formalValue)) {
+    return { value: input.formalValue, quality: 'exact' }
   }
   return { value: null, quality: 'unavailable' }
 }
@@ -125,7 +130,7 @@ export function computeDelta(
   }
 
   // 成本未完整时不显示环比。
-  if (last.status === 'partial' || prev.status === 'partial') {
+  if (last.status === 'fallback' || prev.status === 'fallback' || last.status === 'partial' || prev.status === 'partial') {
     return { amount: 0, direction: 'flat', unavailable: true, reason: 'partial_cost' }
   }
 
@@ -139,7 +144,16 @@ export function computeDelta(
   return { amount, direction }
 }
 
-export type ProfitMarginMode = 'exact' | 'ceiling' | 'unavailable'
+/** 营业额环比只依赖营收值和日期；成本与利润继续服从结算质量。 */
+export function computeDashboardMetricDelta(key: DashboardMetricKey, points: TrendPoint[]): DeltaResult {
+  return computeDelta(points.map(point => ({
+    value: point.value,
+    date: point.date,
+    status: key === 'todayProfit' ? undefined : point.status,
+  })))
+}
+
+export type ProfitMarginMode = 'exact' | 'fallback' | 'ceiling' | 'unavailable'
 
 export interface ProfitMarginResult {
   value: number | null
@@ -150,15 +164,27 @@ export interface ProfitMarginInput {
   revenue: number | null | undefined
   netProfit: number | null | undefined
   costComplete: boolean | undefined
+  costMode?: string
   confirmedCost: number | undefined
   collectedSites: number | undefined
 }
 
 /** 计算今日利润率，并明确区分正式值、部分成本上限和不可用。 */
 export function calculateProfitMargin(input: ProfitMarginInput): ProfitMarginResult {
-  const { revenue, netProfit, costComplete, confirmedCost, collectedSites } = input
+  const { revenue, netProfit, costComplete, costMode, confirmedCost, collectedSites } = input
   if (revenue == null || !Number.isFinite(revenue) || revenue <= 0) {
     return { value: null, mode: 'unavailable' }
+  }
+
+  if (costMode === 'fallback') {
+    const fallbackProfit = netProfit != null && Number.isFinite(netProfit)
+      ? netProfit
+      : confirmedCost != null && Number.isFinite(confirmedCost)
+        ? revenue - confirmedCost
+        : null
+    return fallbackProfit == null
+      ? { value: null, mode: 'unavailable' }
+      : { value: fallbackProfit / revenue * 100, mode: 'fallback' }
   }
 
   if (costComplete === false) {

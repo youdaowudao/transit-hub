@@ -270,6 +270,7 @@ type safetyMutationRepository interface {
 	ResolveIncidentFloorReservations(ctx context.Context, userID, workspaceID, accountID, incidentID string, snapshotInvalidated bool, now time.Time) error
 	EmergencyClear(ctx context.Context, userID, workspaceID, idempotencyKey string, now time.Time) (EmergencyClearResult, error)
 	AcquireMutationLease(ctx context.Context, userID, workspaceID, accountID string, wait bool) (RepositoryMutationLease, error)
+	AcquireManualMutationLease(ctx context.Context, userID, workspaceID, accountID string) (RepositoryMutationLease, error)
 	BumpMutationGeneration(ctx context.Context, userID, workspaceID, accountID string) (int64, error)
 	MutationGeneration(ctx context.Context, userID, workspaceID, accountID string) (int64, error)
 }
@@ -368,34 +369,22 @@ func (c *MutationCoordinator) BeginManual(ctx context.Context, key MutationKey) 
 	lock := c.lockFor(key)
 	waitCtx, cancel := context.WithTimeout(ctx, 2*probeTimeout())
 	defer cancel()
+	if err := lockMutex(waitCtx, &lock.mu); err != nil {
+		return nil, err
+	}
 	if c.repo != nil {
-		generation, err := c.repo.BumpMutationGeneration(ctx, key.UserID, key.WorkspaceID, key.AccountID)
-		if err != nil {
-			return nil, err
-		}
-		if err := lockMutex(waitCtx, &lock.mu); err != nil {
-			return nil, err
-		}
-		lease, err := c.repo.AcquireMutationLease(waitCtx, key.UserID, key.WorkspaceID, key.AccountID, true)
+		lease, err := c.repo.AcquireManualMutationLease(waitCtx, key.UserID, key.WorkspaceID, key.AccountID)
 		if err != nil {
 			lock.mu.Unlock()
 			return nil, err
 		}
-		if lease.Generation != generation {
-			lease.Release()
-			lock.mu.Unlock()
-			return nil, errStaleMutation
-		}
-		lock.generation.Store(generation)
+		lock.generation.Store(lease.Generation)
 		return &MutationSession{
-			Generation: generation, FencingToken: lease.FencingToken, validate: lease.Validate,
+			Generation: lease.Generation, FencingToken: lease.FencingToken, validate: lease.Validate,
 			release: func() { lease.Release(); lock.mu.Unlock() },
 		}, nil
 	}
 	generation := lock.generation.Add(1)
-	if err := lockMutex(waitCtx, &lock.mu); err != nil {
-		return nil, err
-	}
 	return &MutationSession{Generation: generation, validate: func(context.Context) error {
 		if lock.generation.Load() != generation {
 			return errStaleMutation

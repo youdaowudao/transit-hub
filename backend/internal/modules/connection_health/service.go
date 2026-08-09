@@ -95,6 +95,8 @@ type Service struct {
 	probeSchedulerWake          chan struct{}
 	priorityReconcileWake       chan struct{}
 	priorityWritebackWake       chan struct{}
+	priorityBatchMu             sync.Mutex
+	priorityBatches             map[string]priorityWriteBatch
 	now                         func() time.Time
 }
 
@@ -899,6 +901,9 @@ func (s *Service) SavePolicy(ctx context.Context, userID string, in PolicyInput)
 			if preset.ReconcileFailureBackoffSeconds == 0 {
 				preset.ReconcileFailureBackoffSeconds = existing.PrioritySyncPreset.ReconcileFailureBackoffSeconds
 			}
+			if !preset.writebackSpreadSecondsSet && preset.WritebackSpreadSeconds == 0 {
+				preset.WritebackSpreadSeconds = existing.PrioritySyncPreset.WritebackSpreadSeconds
+			}
 			in.PrioritySyncPreset = &preset
 		}
 	}
@@ -1015,6 +1020,7 @@ func normalizeStrategyMode(mode string) string {
 func normalizePrioritySyncPreset(input *PrioritySyncPreset) (PrioritySyncPreset, error) {
 	preset := PrioritySyncPreset{
 		MinWriteIntervalSeconds:        defaultPriorityMinWriteIntervalSeconds,
+		WritebackSpreadSeconds:         defaultPriorityWritebackSpreadSeconds,
 		MaxPendingAgeSeconds:           defaultPriorityMaxPendingAgeSeconds,
 		ReconcileIntervalSeconds:       defaultPriorityReconcileIntervalSeconds,
 		InventorySnapshotTTLSeconds:    defaultInventorySnapshotTTLSeconds,
@@ -1027,6 +1033,9 @@ func normalizePrioritySyncPreset(input *PrioritySyncPreset) (PrioritySyncPreset,
 	}
 	if input.MinWriteIntervalSeconds != 0 {
 		preset.MinWriteIntervalSeconds = input.MinWriteIntervalSeconds
+	}
+	if input.writebackSpreadSecondsSet || input.WritebackSpreadSeconds != 0 {
+		preset.WritebackSpreadSeconds = input.WritebackSpreadSeconds
 	}
 	if input.MaxPendingAgeSeconds != 0 {
 		preset.MaxPendingAgeSeconds = input.MaxPendingAgeSeconds
@@ -1046,7 +1055,8 @@ func normalizePrioritySyncPreset(input *PrioritySyncPreset) (PrioritySyncPreset,
 	if strings.TrimSpace(input.ReadMode) != "" {
 		preset.ReadMode = strings.TrimSpace(input.ReadMode)
 	}
-	if preset.MinWriteIntervalSeconds <= 0 || preset.MaxPendingAgeSeconds < preset.MinWriteIntervalSeconds ||
+	if preset.MinWriteIntervalSeconds <= 0 || preset.WritebackSpreadSeconds < 1 || preset.WritebackSpreadSeconds > 10 ||
+		preset.MaxPendingAgeSeconds < preset.MinWriteIntervalSeconds ||
 		preset.ReconcileIntervalSeconds <= 0 || preset.InventorySnapshotTTLSeconds <= 0 || preset.ReconcileFailureBackoffSeconds <= 0 ||
 		preset.DriftAction != PriorityDriftActionAlertOnly || preset.ReadMode != PriorityReadModeInventory {
 		return PrioritySyncPreset{}, requestError(ErrorRequest)

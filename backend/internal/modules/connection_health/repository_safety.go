@@ -671,24 +671,55 @@ func (r *Repository) MutationGeneration(ctx context.Context, userID, workspaceID
 }
 
 func (r *Repository) AcquireMutationLease(ctx context.Context, userID, workspaceID, accountID string, wait bool) (RepositoryMutationLease, error) {
+	return r.acquireMutationLease(ctx, userID, workspaceID, accountID, wait, false)
+}
+
+func (r *Repository) AcquireManualMutationLease(ctx context.Context, userID, workspaceID, accountID string) (RepositoryMutationLease, error) {
+	return r.acquireMutationLease(ctx, userID, workspaceID, accountID, true, true)
+}
+
+func (r *Repository) acquireMutationLease(
+	ctx context.Context,
+	userID string,
+	workspaceID string,
+	accountID string,
+	wait bool,
+	bumpGeneration bool,
+) (RepositoryMutationLease, error) {
 	owner, err := newID()
 	if err != nil {
 		return RepositoryMutationLease{}, err
 	}
 	for {
 		var generation, token int64
-		err = r.db.QueryRow(ctx, `
-			INSERT INTO connection_health_mutation_fences
-				(user_id,admin_account_id,account_id,generation,lease_owner,fencing_token,lease_expires_at,updated_at)
-				VALUES($1,$2,$3,0,$4,1,now()+interval '5 minutes',now())
-				ON CONFLICT(user_id,admin_account_id,account_id) DO UPDATE SET
-					lease_owner=$4,fencing_token=connection_health_mutation_fences.fencing_token+1,
-					lease_expires_at=now()+interval '5 minutes',updated_at=now()
-			WHERE connection_health_mutation_fences.lease_owner=''
-				OR connection_health_mutation_fences.lease_expires_at IS NULL
-				OR connection_health_mutation_fences.lease_expires_at<=now()
-			RETURNING generation,fencing_token
-		`, userID, workspaceID, accountID, owner).Scan(&generation, &token)
+		if bumpGeneration {
+			err = r.db.QueryRow(ctx, `
+				INSERT INTO connection_health_mutation_fences
+					(user_id,admin_account_id,account_id,generation,lease_owner,fencing_token,lease_expires_at,updated_at)
+					VALUES($1,$2,$3,1,$4,1,now()+interval '5 minutes',now())
+					ON CONFLICT(user_id,admin_account_id,account_id) DO UPDATE SET
+						generation=connection_health_mutation_fences.generation+1,
+						lease_owner=$4,fencing_token=connection_health_mutation_fences.fencing_token+1,
+						lease_expires_at=now()+interval '5 minutes',updated_at=now()
+				WHERE connection_health_mutation_fences.lease_owner=''
+					OR connection_health_mutation_fences.lease_expires_at IS NULL
+					OR connection_health_mutation_fences.lease_expires_at<=now()
+				RETURNING generation,fencing_token
+			`, userID, workspaceID, accountID, owner).Scan(&generation, &token)
+		} else {
+			err = r.db.QueryRow(ctx, `
+				INSERT INTO connection_health_mutation_fences
+					(user_id,admin_account_id,account_id,generation,lease_owner,fencing_token,lease_expires_at,updated_at)
+					VALUES($1,$2,$3,0,$4,1,now()+interval '5 minutes',now())
+					ON CONFLICT(user_id,admin_account_id,account_id) DO UPDATE SET
+						lease_owner=$4,fencing_token=connection_health_mutation_fences.fencing_token+1,
+						lease_expires_at=now()+interval '5 minutes',updated_at=now()
+				WHERE connection_health_mutation_fences.lease_owner=''
+					OR connection_health_mutation_fences.lease_expires_at IS NULL
+					OR connection_health_mutation_fences.lease_expires_at<=now()
+				RETURNING generation,fencing_token
+			`, userID, workspaceID, accountID, owner).Scan(&generation, &token)
+		}
 		if err == nil {
 			done := make(chan struct{})
 			var once sync.Once

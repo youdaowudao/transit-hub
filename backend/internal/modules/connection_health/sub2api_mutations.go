@@ -202,6 +202,7 @@ func (s *Service) updateAutomaticTargetPriority(
 	accountID string,
 	priority int,
 	expectedGeneration int64,
+	expectedPriorityValues ...int,
 ) error {
 	if session.Platform != upstream.PlatformSub2API {
 		return s.updateAdminTargetPriority(ctx, session, accountID, priority)
@@ -228,13 +229,20 @@ func (s *Service) updateAutomaticTargetPriority(
 	if err != nil {
 		return err
 	}
+	if len(expectedPriorityValues) > 0 && (account.Priority == nil || *account.Priority != expectedPriorityValues[0]) {
+		return &upstream.PriorityCompareAndSetError{
+			TargetID: targetID, ExpectedPriority: expectedPriorityValues[0], ActualPriority: account.Priority,
+		}
+	}
 	if account.Priority != nil && *account.Priority == priority {
 		return nil
 	}
 	if err := mutation.Validate(ctx); err != nil {
 		return err
 	}
-	writeErr := s.updateAdminTargetPriority(ctx, session, freshTarget.AccountID, priority)
+	writeErr := s.updateAdminTargetPriorityWithBeforeWrite(ctx, session, freshTarget.AccountID, priority, func() error {
+		return mutation.Validate(ctx)
+	})
 	mutationErr := mutation.Validate(ctx)
 	_, readback, err := s.freshSub2APITarget(ctx, session, workspaceID, targetID, accountID)
 	if err != nil || readback.Priority == nil || *readback.Priority != priority {
@@ -243,7 +251,6 @@ func (s *Service) updateAutomaticTargetPriority(
 		}
 		return errors.Join(writeErr, mutationErr, errSub2APIMutationReadback)
 	}
-	s.invalidateAdminInventorySnapshot(userID, workspaceID)
 	if mutationErr != nil {
 		return mutationErr
 	}

@@ -2,6 +2,7 @@ package connection_health
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"transithub/backend/internal/modules/my_sites"
@@ -69,6 +70,7 @@ const (
 	PriorityReadModeInventory    = "inventory_snapshot"
 
 	defaultPriorityMinWriteIntervalSeconds  = 30
+	defaultPriorityWritebackSpreadSeconds   = 1
 	defaultPriorityMaxPendingAgeSeconds     = 300
 	defaultPriorityReconcileIntervalSeconds = 30
 	defaultInventorySnapshotTTLSeconds      = 60
@@ -79,12 +81,29 @@ const (
 // inventory reconciliation cadence. ProbeIntervalSeconds remains the separate probe cadence.
 type PrioritySyncPreset struct {
 	MinWriteIntervalSeconds        int    `json:"minWriteIntervalSeconds"`
+	WritebackSpreadSeconds         int    `json:"writebackSpreadSeconds"`
 	MaxPendingAgeSeconds           int    `json:"maxPendingAgeSeconds"`
 	ReconcileIntervalSeconds       int    `json:"reconcileIntervalSeconds"`
 	InventorySnapshotTTLSeconds    int    `json:"inventorySnapshotTtlSeconds"`
 	ReconcileFailureBackoffSeconds int    `json:"reconcileFailureBackoffSeconds"`
 	DriftAction                    string `json:"driftAction"`
 	ReadMode                       string `json:"readMode"`
+	writebackSpreadSecondsSet      bool
+}
+
+func (p *PrioritySyncPreset) UnmarshalJSON(data []byte) error {
+	type presetAlias PrioritySyncPreset
+	var decoded presetAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*p = PrioritySyncPreset(decoded)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, p.writebackSpreadSecondsSet = fields["writebackSpreadSeconds"]
+	return nil
 }
 
 const (
@@ -208,6 +227,7 @@ type PriorityWorkspaceSyncState struct {
 	LastActionSource               string     `json:"lastActionSource"`
 	PolicyVersion                  string     `json:"policyVersion"`
 	MinWriteIntervalSeconds        int        `json:"minWriteIntervalSeconds"`
+	WritebackSpreadSeconds         int        `json:"writebackSpreadSeconds"`
 	MaxPendingAgeSeconds           int        `json:"maxPendingAgeSeconds"`
 	ReconcileIntervalSeconds       int        `json:"reconcileIntervalSeconds"`
 	InventorySnapshotTTLSeconds    int        `json:"inventorySnapshotTtlSeconds"`
@@ -215,6 +235,7 @@ type PriorityWorkspaceSyncState struct {
 	DriftAction                    string     `json:"driftAction"`
 	ReadMode                       string     `json:"readMode"`
 	PendingAgeSeconds              int64      `json:"pendingAgeSeconds"`
+	PendingTargetCount             int        `json:"pendingTargetCount"`
 	LastInventoryReadDurationMs    int64      `json:"lastInventoryReadDurationMs"`
 	LastWriteDurationMs            int64      `json:"lastWriteDurationMs"`
 	EvaluationCount                int64      `json:"evaluationCount"`

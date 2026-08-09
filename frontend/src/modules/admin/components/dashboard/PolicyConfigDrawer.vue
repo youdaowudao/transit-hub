@@ -38,6 +38,7 @@ const DEFAULTS = {
   dailyProbeBudget: 1000,
   unschedulableProbeIntervalMinutes: 60,
   priorityMinWriteIntervalSeconds: 30,
+  priorityWritebackSpreadSeconds: 1,
   priorityMaxPendingAgeSeconds: 300,
   priorityReconcileIntervalSeconds: 30,
   inventorySnapshotTtlSeconds: 60,
@@ -62,6 +63,7 @@ const autoRemoteActionEnabled = ref(false)
 const priorityMode = ref<ConnectionHealthPriorityMode>('none')
 const strategyMode = ref<ConnectionHealthStrategyMode>('health_probe')
 const priorityMinWriteIntervalSeconds = ref(DEFAULTS.priorityMinWriteIntervalSeconds)
+const priorityWritebackSpreadSeconds = ref(DEFAULTS.priorityWritebackSpreadSeconds)
 const priorityMaxPendingAgeSeconds = ref(DEFAULTS.priorityMaxPendingAgeSeconds)
 const priorityReconcileIntervalSeconds = ref(DEFAULTS.priorityReconcileIntervalSeconds)
 const inventorySnapshotTtlSeconds = ref(DEFAULTS.inventorySnapshotTtlSeconds)
@@ -98,6 +100,7 @@ const resetForm = () => {
   priorityMode.value = p?.priorityMode === 'multiplier' ? 'multiplier' : 'none'
   strategyMode.value = p ? resolveConnectionHealthStrategyMode(p) : 'health_probe'
   priorityMinWriteIntervalSeconds.value = p?.prioritySyncPreset?.minWriteIntervalSeconds ?? DEFAULTS.priorityMinWriteIntervalSeconds
+  priorityWritebackSpreadSeconds.value = p?.prioritySyncPreset?.writebackSpreadSeconds ?? DEFAULTS.priorityWritebackSpreadSeconds
   priorityMaxPendingAgeSeconds.value = p?.prioritySyncPreset?.maxPendingAgeSeconds ?? DEFAULTS.priorityMaxPendingAgeSeconds
   priorityReconcileIntervalSeconds.value = p?.prioritySyncPreset?.reconcileIntervalSeconds ?? DEFAULTS.priorityReconcileIntervalSeconds
   inventorySnapshotTtlSeconds.value = p?.prioritySyncPreset?.inventorySnapshotTtlSeconds ?? DEFAULTS.inventorySnapshotTtlSeconds
@@ -181,6 +184,10 @@ const handleSave = () => {
     validationError.value = t(`${prefix}.errors.priorityWriteIntervalInvalid`)
     return
   }
+  if (!Number.isInteger(priorityWritebackSpreadSeconds.value) || priorityWritebackSpreadSeconds.value < 1 || priorityWritebackSpreadSeconds.value > 10) {
+    validationError.value = t(`${prefix}.errors.priorityWritebackSpreadInvalid`)
+    return
+  }
   if (
     !Number.isInteger(priorityReconcileIntervalSeconds.value) || priorityReconcileIntervalSeconds.value <= 0
     || !Number.isInteger(inventorySnapshotTtlSeconds.value) || inventorySnapshotTtlSeconds.value <= 0
@@ -212,6 +219,7 @@ const handleSave = () => {
     strategyMode: strategyMode.value,
     prioritySyncPreset: {
       minWriteIntervalSeconds: priorityMinWriteIntervalSeconds.value,
+      writebackSpreadSeconds: priorityWritebackSpreadSeconds.value,
       maxPendingAgeSeconds: preservePriorityMaxPendingAge(priorityMaxPendingAgeSeconds.value, priorityMinWriteIntervalSeconds.value),
       reconcileIntervalSeconds: priorityReconcileIntervalSeconds.value,
       inventorySnapshotTtlSeconds: inventorySnapshotTtlSeconds.value,
@@ -533,6 +541,10 @@ const handleSave = () => {
                   <label class="space-y-1.5 text-xs text-muted-foreground">
                     <span>{{ t(`${prefix}.priorityWriteIntervalShortLabel`) }}</span>
                     <input v-model.number="priorityMinWriteIntervalSeconds" type="number" min="1" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
+                  </label>
+                  <label class="space-y-1.5 text-xs text-muted-foreground">
+                    <span>{{ t(`${prefix}.priorityWritebackSpreadLabel`) }}</span>
+                    <input v-model.number="priorityWritebackSpreadSeconds" type="number" min="1" max="10" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
                   </label>
                   <label class="space-y-1.5 text-xs text-muted-foreground">
                     <span>{{ t(`${prefix}.reconcileIntervalLabel`) }}</span>

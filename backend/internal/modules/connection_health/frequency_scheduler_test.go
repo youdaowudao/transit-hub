@@ -219,6 +219,53 @@ func TestFrequencyScheduler_ReconcileProbeEvaluationAndWritebackAreIndependent(t
 	}
 }
 
+func TestFrequencyScheduler_ReconcileTakesOverOrphanedPriorityBatchImmediately(t *testing.T) {
+	repo := newFakeRepository()
+	now := time.Date(2026, time.August, 9, 4, 30, 0, 0, time.UTC)
+	policy := priorityGatePolicy()
+	policy.UpdatedAt = now
+	repo.policies = []Policy{policy}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "vip", PolicyID: policy.ID,
+	}}
+	fallback := 0.4
+	repo.groupSortSettings["user1|ws1|g1"] = GroupProbeSortSetting{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", FallbackMultiplier: &fallback,
+	}
+	future := now.Add(30 * time.Second)
+	repo.priorityWorkspaceStates["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", InventoryStatus: "unknown", LastInventoryError: "priority_batch_in_progress",
+		PendingSignature: "orphaned-batch", NextReconcileAt: &future,
+	}
+	priority := 99
+	reader := &countingFrequencyReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip", Multiplier: func() *float64 { value := 0.4; return &value }()}},
+		accounts: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "a", Name: "a", Priority: &priority, Models: "gpt-4o"}},
+		},
+	}
+	service := &Service{
+		repo: repo,
+		mySites: fakeAdminGroupKeyReader{
+			fakeMySitesReader: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+			keysBySite:        map[string][]upstream.Sub2APIKeyItem{},
+		},
+		sites:           fakeSiteLookup{site: &upstream.Site{}},
+		platformGroups:  reader,
+		priorityActions: &gatePriorityActioner{},
+		now:             func() time.Time { return now },
+	}
+
+	service.runPriorityReconcileTick(context.Background())
+	state := priorityWorkspaceState(t, repo)
+	if reader.fetchCalls != 1 || reader.accountsCalls != 1 {
+		t.Fatalf("orphaned batch must reconcile immediately: fetch=%d accounts=%d", reader.fetchCalls, reader.accountsCalls)
+	}
+	if state.InventoryStatus != "ready" || state.LastReconcileSuccessAt == nil || state.NextReconcileAt == nil || !state.NextReconcileAt.After(now) {
+		t.Fatalf("orphaned batch did not rebuild from authoritative inventory: %+v", state)
+	}
+}
+
 func TestFrequencyScheduler_ReconcileFailureIsUnknownAndHonorsBackoff(t *testing.T) {
 	repo := newFakeRepository()
 	now := time.Date(2026, time.August, 8, 9, 0, 0, 0, time.UTC)

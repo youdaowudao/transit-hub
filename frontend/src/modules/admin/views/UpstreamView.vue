@@ -625,32 +625,6 @@ onBeforeUnmount(() => {
           <span>{{ t(site.errorKey) }}</span>
         </div>
 
-        <div class="mt-4 flex items-center justify-between gap-4 border-t border-border/40 pt-4">
-          <div class="min-w-0">
-            <p class="text-sm font-medium text-foreground">{{ t('admin.upstream.lifecycle.label') }}</p>
-            <p class="mt-0.5 text-xs text-muted-foreground">
-              {{ site.enabled ? t('admin.upstream.lifecycle.enabledHelp') : t('admin.upstream.lifecycle.disabledHelp') }}
-            </p>
-            <p v-if="enabledErrorKeys.get(site.id)" class="mt-1 text-xs text-destructive">
-              {{ t(enabledErrorKeys.get(site.id) ?? 'admin.upstream.errors.unknown') }}
-            </p>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            :aria-checked="site.enabled"
-            :aria-label="t('admin.upstream.lifecycle.label')"
-            :disabled="enabledUpdatingIds.has(site.id)"
-            class="relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-wait disabled:opacity-50"
-            :class="site.enabled ? 'bg-primary' : 'bg-muted'"
-            @click="toggleSiteEnabled(site)"
-          >
-            <span
-              class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200"
-              :class="site.enabled ? 'translate-x-5' : 'translate-x-0'"
-            />
-          </button>
-        </div>
       </div>
     </div>
 
@@ -940,8 +914,34 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div class="p-4 border-t border-border/40 flex justify-end">
-             <Button variant="ghost" @click="closeGroupsModal">{{ t('admin.upstream.fields.closeGroupsModal') }}</Button>
+          <div class="p-4 border-t border-border/40 flex items-center justify-between gap-4">
+            <div v-if="selectedSiteForGroups" class="flex items-center gap-4 min-w-0">
+              <div class="min-w-0">
+                <p class="text-sm font-medium text-foreground">{{ t('admin.upstream.lifecycle.label') }}</p>
+                <p class="mt-0.5 text-xs text-muted-foreground">
+                  {{ selectedSiteForGroups.enabled ? t('admin.upstream.lifecycle.enabledHelp') : t('admin.upstream.lifecycle.disabledHelp') }}
+                </p>
+                <p v-if="enabledErrorKeys.get(selectedSiteForGroups.id)" class="mt-1 text-xs text-destructive">
+                  {{ t(enabledErrorKeys.get(selectedSiteForGroups.id) ?? 'admin.upstream.errors.unknown') }}
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="selectedSiteForGroups.enabled"
+                :aria-label="t('admin.upstream.lifecycle.label')"
+                :disabled="enabledUpdatingIds.has(selectedSiteForGroups.id)"
+                class="relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-wait disabled:opacity-50"
+                :class="selectedSiteForGroups.enabled ? 'bg-primary' : 'bg-muted'"
+                @click="toggleSiteEnabled(selectedSiteForGroups!)"
+              >
+                <span
+                  class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200"
+                  :class="selectedSiteForGroups.enabled ? 'translate-x-5' : 'translate-x-0'"
+                />
+              </button>
+            </div>
+            <Button variant="ghost" @click="closeGroupsModal">{{ t('admin.upstream.fields.closeGroupsModal') }}</Button>
           </div>
         </div>
       </div>

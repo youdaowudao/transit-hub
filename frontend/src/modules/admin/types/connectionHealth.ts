@@ -246,6 +246,7 @@ export interface ConnectionHealthOverview {
 
 export interface PrioritySyncPreset {
   minWriteIntervalSeconds: number
+  writebackSpreadSeconds: number
   maxPendingAgeSeconds: number
   reconcileIntervalSeconds: number
   inventorySnapshotTtlSeconds: number
@@ -273,6 +274,7 @@ export interface PriorityWorkspaceSyncState {
   lastActionSource: string
   policyVersion: string
   minWriteIntervalSeconds: number
+  writebackSpreadSeconds: number
   maxPendingAgeSeconds: number
   reconcileIntervalSeconds: number
   inventorySnapshotTtlSeconds: number
@@ -280,6 +282,7 @@ export interface PriorityWorkspaceSyncState {
   driftAction: string
   readMode: string
   pendingAgeSeconds: number
+  pendingTargetCount: number
   lastInventoryReadDurationMs: number
   lastWriteDurationMs: number
   evaluationCount: number

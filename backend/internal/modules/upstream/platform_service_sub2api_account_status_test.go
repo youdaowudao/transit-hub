@@ -2,8 +2,10 @@ package upstream
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -184,6 +186,59 @@ func TestUpdateAdminTargetPriority_Sub2APIUsesFieldOnlyBulkUpdate(t *testing.T) 
 			t.Fatalf("priority update must never include %s: %+v", forbidden, body)
 		}
 	}
+}
+
+func TestUpdateAdminTargetPriorityPreparedContext_GatesSub2APIPost(t *testing.T) {
+	t.Run("failed preparation sends no request", func(t *testing.T) {
+		var posts atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			posts.Add(1)
+			writeJSON(w, map[string]any{"success": true})
+		}))
+		defer server.Close()
+
+		service := NewPlatformService(NewHTTPClient(server.Client()))
+		session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token-1", TokenType: "Bearer"}
+		prepareErr := errors.New("stale mutation generation")
+		err := service.UpdateAdminTargetPriorityPreparedContext(context.Background(), session, "1515", 1, func() error {
+			return prepareErr
+		})
+		if !errors.Is(err, prepareErr) {
+			t.Fatalf("prepared priority error=%v, want %v", err, prepareErr)
+		}
+		if posts.Load() != 0 {
+			t.Fatalf("failed preparation sent %d Sub2API requests", posts.Load())
+		}
+	})
+
+	t.Run("successful preparation runs before request", func(t *testing.T) {
+		var prepared atomic.Bool
+		var posts atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/api/v1/admin/accounts/bulk-update" {
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			}
+			if !prepared.Load() {
+				t.Error("Sub2API request started before preparation completed")
+			}
+			posts.Add(1)
+			writeJSON(w, map[string]any{"success": true})
+		}))
+		defer server.Close()
+
+		service := NewPlatformService(NewHTTPClient(server.Client()))
+		session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token-1", TokenType: "Bearer"}
+		err := service.UpdateAdminTargetPriorityPreparedContext(context.Background(), session, "1515", 1, func() error {
+			prepared.Store(true)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("prepared Sub2API priority write failed: %v", err)
+		}
+		if posts.Load() != 1 {
+			t.Fatalf("prepared priority write sent %d requests, want 1", posts.Load())
+		}
+	})
 }
 
 func TestSetSub2APIAdminAccountSchedulable_UsesDedicatedFieldEndpoint(t *testing.T) {

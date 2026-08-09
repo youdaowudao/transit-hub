@@ -39,6 +39,25 @@ type PlatformService struct {
 	httpClient *HTTPClient
 }
 
+var ErrPriorityCompareAndSetMismatch = errors.New("priority compare-and-set mismatch")
+
+type PriorityCompareAndSetError struct {
+	TargetID         string
+	ExpectedPriority int
+	ActualPriority   *int
+}
+
+func (e *PriorityCompareAndSetError) Error() string {
+	if e == nil || e.ActualPriority == nil {
+		return "priority changed before write"
+	}
+	return fmt.Sprintf("priority changed before write target=%s expected=%d actual=%d", e.TargetID, e.ExpectedPriority, *e.ActualPriority)
+}
+
+func (e *PriorityCompareAndSetError) Unwrap() error {
+	return ErrPriorityCompareAndSetMismatch
+}
+
 func NewPlatformService(httpClient *HTTPClient) *PlatformService {
 	return &PlatformService{httpClient: httpClient}
 }
@@ -2420,10 +2439,25 @@ func (s *PlatformService) UpdateAdminTargetPriority(session Session, targetID st
 }
 
 func (s *PlatformService) UpdateAdminTargetPriorityContext(ctx context.Context, session Session, targetID string, priority int) error {
+	return s.UpdateAdminTargetPriorityPreparedContext(ctx, session, targetID, priority, nil)
+}
+
+func (s *PlatformService) UpdateAdminTargetPriorityPreparedContext(
+	ctx context.Context,
+	session Session,
+	targetID string,
+	priority int,
+	beforeWrite func() error,
+) error {
 	switch session.Platform {
 	case PlatformNewAPI:
 		return s.updateNewAPIChannelPriorityContext(ctx, session, targetID, priority)
 	case PlatformSub2API:
+		if beforeWrite != nil {
+			if err := beforeWrite(); err != nil {
+				return err
+			}
+		}
 		return s.updateSub2APIAdminAccountPriorityContext(ctx, session, targetID, priority)
 	default:
 		return newRequestError(ErrorAuth, session.Platform)

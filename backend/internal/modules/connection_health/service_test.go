@@ -318,8 +318,54 @@ func TestSavePolicy_BEraPresetPreservesCFields(t *testing.T) {
 	}
 	if saved.PrioritySyncPreset.ReconcileIntervalSeconds != 11 ||
 		saved.PrioritySyncPreset.InventorySnapshotTTLSeconds != 19 ||
-		saved.PrioritySyncPreset.ReconcileFailureBackoffSeconds != 23 {
+		saved.PrioritySyncPreset.ReconcileFailureBackoffSeconds != 23 ||
+		saved.PrioritySyncPreset.WritebackSpreadSeconds != 1 {
 		t.Fatalf("B-era partial preset must preserve C fields: %+v", saved.PrioritySyncPreset)
+	}
+}
+
+func TestNormalizePrioritySyncPresetWritebackSpreadDefaultsAndBounds(t *testing.T) {
+	defaultPreset, err := normalizePrioritySyncPreset(nil)
+	if err != nil || defaultPreset.WritebackSpreadSeconds != 1 {
+		t.Fatalf("omitted E spread must default to one second: preset=%+v err=%v", defaultPreset, err)
+	}
+	for _, invalid := range []int{-1, 11} {
+		preset := defaultPreset
+		preset.WritebackSpreadSeconds = invalid
+		if _, err := normalizePrioritySyncPreset(&preset); err != requestError(ErrorRequest) {
+			t.Fatalf("spread=%d error=%v, want %s", invalid, err, ErrorRequest)
+		}
+	}
+	preset := defaultPreset
+	preset.WritebackSpreadSeconds = 10
+	if normalized, err := normalizePrioritySyncPreset(&preset); err != nil || normalized.WritebackSpreadSeconds != 10 {
+		t.Fatalf("spread upper bound was rejected: preset=%+v err=%v", normalized, err)
+	}
+	for _, test := range []struct {
+		json string
+		want int
+		err  bool
+	}{
+		{json: `{}`, want: 1},
+		{json: `{"writebackSpreadSeconds":0}`, err: true},
+		{json: `{"writebackSpreadSeconds":1}`, want: 1},
+		{json: `{"writebackSpreadSeconds":10}`, want: 10},
+		{json: `{"writebackSpreadSeconds":11}`, err: true},
+	} {
+		var decoded PrioritySyncPreset
+		if err := json.Unmarshal([]byte(test.json), &decoded); err != nil {
+			t.Fatalf("decode %s: %v", test.json, err)
+		}
+		normalized, err := normalizePrioritySyncPreset(&decoded)
+		if test.err {
+			if err != requestError(ErrorRequest) {
+				t.Fatalf("preset %s error=%v, want %s", test.json, err, ErrorRequest)
+			}
+			continue
+		}
+		if err != nil || normalized.WritebackSpreadSeconds != test.want {
+			t.Fatalf("preset %s normalized=%+v err=%v", test.json, normalized, err)
+		}
 	}
 }
 

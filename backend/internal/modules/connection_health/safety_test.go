@@ -61,6 +61,28 @@ func (r *mutationSafetyRepository) AcquireMutationLease(_ context.Context, userI
 	}, nil
 }
 
+func (r *mutationSafetyRepository) AcquireManualMutationLease(_ context.Context, userID, workspaceID, accountID string) (RepositoryMutationLease, error) {
+	r.mu.Lock()
+	key := mutationRepositoryKey(userID, workspaceID, accountID)
+	r.generations[key]++
+	generation := r.generations[key]
+	r.tokens[key]++
+	token := r.tokens[key]
+	r.mu.Unlock()
+	return RepositoryMutationLease{
+		Generation: generation, FencingToken: token,
+		Validate: func(context.Context) error {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			if r.generations[key] != generation || r.tokens[key] != token {
+				return errStaleMutation
+			}
+			return nil
+		},
+		Release: func() {},
+	}, nil
+}
+
 type mutatingSub2APIPlatformActioner struct {
 	fakePlatformActioner
 	afterStatus           func(string)
@@ -411,7 +433,7 @@ func TestStableSurvivor_PrefersLatestSuccessThenFailureCountThenID(t *testing.T)
 	}
 }
 
-func TestMutationCoordinator_ManualGenerationInvalidatesWaitingAutomaticAction(t *testing.T) {
+func TestMutationCoordinator_ManualWaitsForActiveAutomaticBeforeAdvancingGeneration(t *testing.T) {
 	coordinator := NewMutationCoordinator(nil)
 	key := MutationKey{UserID: "user", WorkspaceID: "workspace", AccountID: "account"}
 	automatic, err := coordinator.BeginAutomatic(context.Background(), key, true)
@@ -433,12 +455,19 @@ func TestMutationCoordinator_ManualGenerationInvalidatesWaitingAutomaticAction(t
 		manualResult <- manual
 	}()
 
-	deadline := time.Now().Add(time.Second)
-	for coordinator.lockFor(key).generation.Load() != 1 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	select {
+	case manual := <-manualResult:
+		manual.Release()
+		t.Fatal("manual mutation acquired the account lock before the active automatic mutation released it")
+	case err := <-manualError:
+		t.Fatalf("begin manual mutation while automatic was active: %v", err)
+	case <-time.After(10 * time.Millisecond):
 	}
-	if err := automatic.Validate(context.Background()); !errors.Is(err, errStaleMutation) {
-		t.Fatalf("older automatic mutation must become stale after manual command, got %v", err)
+	if got := coordinator.lockFor(key).generation.Load(); got != 0 {
+		t.Fatalf("manual wait advanced generation before acquiring the lock: %d", got)
+	}
+	if err := automatic.Validate(context.Background()); err != nil {
+		t.Fatalf("active automatic mutation became stale while manual was only waiting: %v", err)
 	}
 	automatic.Release()
 
@@ -468,8 +497,8 @@ func TestMutationCoordinator_ManualWaitHonorsBoundedContext(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("manual mutation wait error = %v, want deadline exceeded", err)
 	}
-	if err := automatic.Validate(context.Background()); !errors.Is(err, errStaleMutation) {
-		t.Fatalf("timed-out manual command must still invalidate older automatic work, got %v", err)
+	if err := automatic.Validate(context.Background()); err != nil {
+		t.Fatalf("timed-out manual wait must not invalidate active automatic work: %v", err)
 	}
 	automatic.Release()
 }

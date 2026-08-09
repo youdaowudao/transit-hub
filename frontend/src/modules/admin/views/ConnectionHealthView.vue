@@ -793,6 +793,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
         <div class="border-b border-border/50 px-4 py-3 sm:border-r xl:border-b-0">
           <dt class="text-xs font-medium text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.interval') }}</dt>
           <dd class="mt-1 text-sm font-medium tabular-nums text-foreground">{{ t('admin.connectionHealth.prioritySync.intervalPairValue', { write: overview.prioritySync.minWriteIntervalSeconds, reconcile: overview.prioritySync.reconcileIntervalSeconds }) }}</dd>
+          <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.writebackSpreadValue', { seconds: overview.prioritySync.writebackSpreadSeconds }) }}</p>
         </div>
         <div class="border-b border-border/50 px-4 py-3 xl:border-b-0 xl:border-r">
           <dt class="text-xs font-medium text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.reconcile') }}</dt>
@@ -811,6 +812,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
         <div class="px-4 py-3">
           <dt class="text-xs font-medium text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.pendingAge') }}</dt>
           <dd class="mt-1 text-sm font-medium tabular-nums text-foreground">{{ t('admin.connectionHealth.prioritySync.pendingAgeValue', { seconds: overview.prioritySync.pendingAgeSeconds }) }}</dd>
+          <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.pendingTargetsValue', { count: overview.prioritySync.pendingTargetCount }) }}</p>
           <p v-if="overview.prioritySync.lastError || overview.prioritySync.lastSuppressionReason" class="mt-1 truncate text-xs" :class="overview.prioritySync.lastError ? 'text-destructive' : 'text-muted-foreground'">{{ prioritySyncReasonLabel(overview.prioritySync.lastError || overview.prioritySync.lastSuppressionReason) }}</p>
         </div>
       </dl>

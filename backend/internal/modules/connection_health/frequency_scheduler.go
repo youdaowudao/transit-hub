@@ -413,6 +413,16 @@ func (s *Service) runPriorityReconcileTick(ctx context.Context) {
 			state.PolicyVersion = priorityPolicyVersion(workspacePolicies)
 			_, hasSnapshot := s.getAdminInventorySnapshot(userID, adminAccountID, now)
 			due := state.NextReconcileAt == nil || !now.Before(*state.NextReconcileAt)
+			if state.InventoryStatus == "unknown" && state.LastInventoryError == "priority_write_unconfirmed" {
+				due = true
+			}
+			if state.InventoryStatus == "unknown" && state.LastInventoryError == "priority_batch_in_progress" &&
+				!s.priorityWriteBatchSignatureInProgress(key, state.PendingSignature) {
+				// The in-memory cursor belongs to a different process (or was lost on
+				// restart). Rebuild from an authoritative inventory instead of waiting
+				// for the previous 30-second reconcile deadline.
+				due = true
+			}
 			if state.PolicyVersion != previousPolicyVersion {
 				due = true
 			}
@@ -519,9 +529,24 @@ func (s *Service) runPriorityWritebackTick(ctx context.Context) {
 			log.Printf("[connection-health] priority writeback load state failed user_id=%s admin_account_id=%s err=%v", identity[0], identity[1], stateErr)
 			continue
 		}
-		if state != nil && state.PendingSignature != "" {
+		batchOwned := state != nil && state.LastInventoryError == "priority_batch_in_progress" &&
+			s.priorityWriteBatchSignatureInProgress(key, state.PendingSignature)
+		if state != nil && (state.InventoryStatus != "unknown" || batchOwned) && state.PendingSignature != "" {
 			pending[key] = struct{}{}
 		}
+	}
+	for _, targetState := range inputs.priorityStates {
+		if targetState.PendingPriority == nil || targetState.PendingSource == SafetySourceHealthIncident {
+			continue
+		}
+		workspaceState, stateErr := s.repo.GetPriorityWorkspaceSyncState(ctx, targetState.UserID, targetState.AdminAccountID)
+		workspaceKey := priorityWorkspaceKey(targetState.UserID, targetState.AdminAccountID)
+		batchOwned := workspaceState != nil && workspaceState.LastInventoryError == "priority_batch_in_progress" &&
+			s.priorityWriteBatchSignatureInProgress(workspaceKey, workspaceState.PendingSignature)
+		if stateErr != nil || (workspaceState != nil && workspaceState.InventoryStatus == "unknown" && !batchOwned) {
+			continue
+		}
+		pending[workspaceKey] = struct{}{}
 	}
 	if len(pending) == 0 {
 		return
@@ -529,6 +554,7 @@ func (s *Service) runPriorityWritebackTick(ctx context.Context) {
 	cache := s.inventoryCacheForIdentities(identities)
 	mode := prioritySyncRunMode{
 		source: priorityActionWriteback, write: true, workspaceFilter: pending, workspaceIdentities: identities,
+		persistenceContext: ctx,
 	}
 	s.syncMultiplierPrioritiesWithCacheRunMode(ctx, inputs.policies, inputs.assignments, inputs.groupAssignments, inputs.exclusions, inputs.priorityStates, cache, mode)
 }

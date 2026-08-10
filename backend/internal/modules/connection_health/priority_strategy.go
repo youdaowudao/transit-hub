@@ -830,12 +830,8 @@ func (s *Service) syncWorkspacePrioritiesRunMode(
 	pendingTargetIDs, pendingTargetCount, urgentTargetCount := priorityPendingTargetIDs(session.Platform, plan, inventory, syncStates)
 	incidentHeldTargetCount := maxInt(0, pendingTargetCount-len(pendingTargetIDs))
 	state.PendingTargetCount = pendingTargetCount
-	priorityRoundAlreadyStarted := state.PendingSignature == plan.signature &&
-		state.LastInventoryError != "priority_plan_replaced" &&
-		state.LastSuppressionReason != "min_write_interval" &&
-		(state.LastInventoryError == "priority_write_unconfirmed" ||
-			state.LastInventoryError == "priority_batch_in_progress" ||
-			state.LastWriteAttemptAt != nil)
+	pendingSignatureMatchedPlan := state.PendingSignature == plan.signature
+	writeFailurePending := priorityWriteFailurePending(*state)
 	if plan.signature == state.AppliedSignature && !priorityPlanHasUnsettledCheckpoints(session.Platform, plan, syncStates) {
 		s.clearPriorityWriteBatch(priorityWorkspaceKey(userID, adminAccountID))
 		state.PendingTargetCount = 0
@@ -880,9 +876,17 @@ func (s *Service) syncWorkspacePrioritiesRunMode(
 	}
 
 	batchInProgress := mode.source == priorityActionWriteback && s.priorityWriteBatchInProgress(workspaceKey, plan.signature, mode.snapshotGeneration)
+	priorityRoundAlreadyStarted := pendingSignatureMatchedPlan &&
+		(batchInProgress ||
+			state.LastInventoryError == "priority_write_unconfirmed" ||
+			state.LastInventoryError == "priority_batch_in_progress" ||
+			(state.LastDecision == "failed" && writeFailurePending))
 	waitUntil, waitingForWindow := priorityWriteWaitUntil(*state, plan.preset)
 	windowWaiting := !batchInProgress && waitingForWindow && now.Before(waitUntil)
-	if windowWaiting && urgentTargetCount == 0 {
+	if mode.source == priorityActionWriteback && !writeFailurePending {
+		windowWaiting = false
+	}
+	if windowWaiting && (mode.source == priorityActionWriteback || urgentTargetCount == 0) {
 		state.LastDecision = "pending"
 		state.LastSuppressionReason = "min_write_interval"
 		state.LastError = priorityPendingError(priorityPendingOverdue(*state, plan.preset, now))
@@ -935,10 +939,6 @@ func (s *Service) syncWorkspacePrioritiesRunMode(
 			return
 		}
 		if len(batchSlot.targetIDs) > 0 {
-			allowedTargetIDs = make(map[string]struct{}, len(batchSlot.targetIDs))
-			for _, targetID := range batchSlot.targetIDs {
-				allowedTargetIDs[targetID] = struct{}{}
-			}
 			state.PendingTargetCount = len(batchSlot.targetIDs) + batchSlot.remainingAfter + heldTargetCount
 		}
 	} else if len(executableTargetIDs) != len(pendingTargetIDs) {
@@ -963,7 +963,12 @@ func (s *Service) syncWorkspacePrioritiesRunMode(
 		}
 	}
 	writeStartedAt := time.Now()
-	result := s.applyWorkspacePriorities(ctx, persistenceCtx, session, userID, adminAccountID, inventory, plan, syncStates, allowedTargetIDs)
+	result := priorityWriteResult{complete: true}
+	if batchMode && len(batchSlot.targetIDs) > 0 {
+		result = s.applyWorkspacePrioritiesInOrder(ctx, persistenceCtx, session, userID, adminAccountID, inventory, plan, syncStates, batchSlot.targetIDs)
+	} else {
+		result = s.applyWorkspacePriorities(ctx, persistenceCtx, session, userID, adminAccountID, inventory, plan, syncStates, allowedTargetIDs)
+	}
 	if heldTargetCount > 0 {
 		result.complete = false
 	}
@@ -1007,6 +1012,10 @@ func (s *Service) syncWorkspacePrioritiesRunMode(
 	if result.drifts > 0 {
 		state.LastDriftAt = &now
 		state.DriftCount += int64(drift.new)
+	}
+	if result.attempts > 0 && result.failures == 0 && !result.mutationPersistFailed {
+		succeededAt := now
+		state.LastWriteSuccessAt = &succeededAt
 	}
 	persistAfterWrite := func() {
 		workspacePersisted := persistWorkspace()
@@ -1077,8 +1086,6 @@ func (s *Service) syncWorkspacePrioritiesRunMode(
 		state.LastDecision = "observed_applied"
 	} else {
 		state.LastDecision = "applied"
-		succeededAt := now
-		state.LastWriteSuccessAt = &succeededAt
 	}
 	persistAfterWrite()
 }
@@ -1124,6 +1131,13 @@ func priorityWriteWaitUntil(state PriorityWorkspaceSyncState, preset PrioritySyn
 		waitUntil = state.LastWriteSuccessAt.Add(interval)
 	}
 	return waitUntil, true
+}
+
+func priorityWriteFailurePending(state PriorityWorkspaceSyncState) bool {
+	if state.LastWriteAttemptAt == nil {
+		return false
+	}
+	return state.LastWriteSuccessAt == nil || state.LastWriteAttemptAt.After(*state.LastWriteSuccessAt)
 }
 
 func priorityPendingOverdue(state PriorityWorkspaceSyncState, preset PrioritySyncPreset, now time.Time) bool {
@@ -1907,6 +1921,33 @@ func (s *Service) applyWorkspacePriorities(
 				result.mutationPersistFailed = true
 			}
 		}
+	}
+	return result
+}
+
+func (s *Service) applyWorkspacePrioritiesInOrder(
+	ctx context.Context,
+	checkpointCtx context.Context,
+	session upstream.Session,
+	userID string,
+	adminAccountID string,
+	inventory map[string]*priorityTargetInventory,
+	plan priorityWorkspacePlan,
+	syncStates []PrioritySyncState,
+	targetIDs []string,
+) priorityWriteResult {
+	result := priorityWriteResult{complete: true}
+	for _, targetID := range targetIDs {
+		partial := s.applyWorkspacePriorities(ctx, checkpointCtx, session, userID, adminAccountID, inventory, plan, syncStates, map[string]struct{}{targetID: {}})
+		result.attempts += partial.attempts
+		result.successes += partial.successes
+		result.failures += partial.failures
+		result.drifts += partial.drifts
+		result.incidentHeld += partial.incidentHeld
+		result.remoteMutation = result.remoteMutation || partial.remoteMutation
+		result.mutationPersistFailed = result.mutationPersistFailed || partial.mutationPersistFailed
+		result.reconcileRequired = result.reconcileRequired || partial.reconcileRequired
+		result.complete = result.complete && partial.complete
 	}
 	return result
 }

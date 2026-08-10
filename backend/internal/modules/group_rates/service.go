@@ -2,6 +2,7 @@ package group_rates
 
 import (
 	"context"
+	"math"
 	"strings"
 	"time"
 )
@@ -155,7 +156,7 @@ func (s *Service) List(ctx context.Context, userID string, adminAccountID string
 			Deleted:            record.Deleted,
 			UpstreamMultiplier: record.Multiplier,
 			RechargeRate:       record.RechargeRate,
-			CurrentMultiplier:  record.Multiplier * record.RechargeRate,
+			CurrentMultiplier:  math.Round(record.Multiplier*record.RechargeRate*1000) / 1000,
 			Delta:              delta,
 			DeltaPercent:       deltaPercent,
 			UpdatedAt:          record.LastSeenAt,
@@ -206,7 +207,7 @@ func (s *Service) History(ctx context.Context, userID string, adminAccountID str
 			Platform:          record.Platform,
 			Type:              record.Type,
 			Multiplier:        record.Multiplier,
-			CurrentMultiplier: record.Multiplier * record.RechargeRate,
+			CurrentMultiplier: math.Round(record.Multiplier*record.RechargeRate*1000) / 1000,
 			Deleted:           record.Deleted,
 			Delta:             delta,
 			DeltaPercent:      deltaPercent,

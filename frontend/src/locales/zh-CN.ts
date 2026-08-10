@@ -1260,7 +1260,7 @@ export default {
       },
       prioritySync: {
         decision: 'Priority 写回',
-        interval: '写回/校验间隔',
+        interval: '失败重试/校验间隔',
         intervalValue: '{seconds} 秒',
         intervalPairValue: '{write} 秒 / {reconcile} 秒',
         writebackSpreadValue: '写回分批：{seconds} 秒',
@@ -1285,7 +1285,7 @@ export default {
         decisions: {
           applied: '已写回最新排序',
           observed_applied: '主站已是最新排序',
-          pending: '等待写回窗口',
+          pending: '待继续写回',
           skipped: '排序未变化',
           signature_reverted: '排序已恢复原状',
           suppressed: '等待完整排序输入',
@@ -1296,7 +1296,7 @@ export default {
         reasons: {
           none: '无',
           signature_unchanged: '稳定生产顺序未变化',
-          min_write_interval: '窗口内保留最新排序',
+          min_write_interval: '写入失败，等待重试间隔',
           writeback_spread: '本轮 Priority 正在分批写回',
           writeback_queued: '最新排序已进入独立写回队列',
           inventory_unknown: '主站读取失败，当前状态未知',
@@ -1561,9 +1561,9 @@ export default {
         autoRemoteActionLabel: '自动远端动作',
         autoRemoteActionHelp: '开启后，安全闸门可以切换 Sub2API 主站账号的 active/inactive；关闭后只记录健康结果，不修改主站账号状态。',
         priorityModeLabel: '上游流量优先级',
-        priorityWriteIntervalLabel: '最短 Priority 写回间隔',
-        priorityWriteIntervalHelp: '探活、本地排序、主站写回和主站校验分别调度。排序未变时不会写入；主站人工修改默认只告警，不自动覆盖。',
-        priorityWriteIntervalShortLabel: '写回间隔（秒）',
+        priorityWriteIntervalLabel: 'Priority 失败重试间隔',
+        priorityWriteIntervalHelp: '该间隔只保护真实写入失败后的重试；正常写回只按分批秒数推进。排序未变时不会写入，主站人工修改默认只告警。',
+        priorityWriteIntervalShortLabel: '失败重试间隔（秒）',
         priorityWritebackSpreadLabel: '写回分批秒数',
         reconcileIntervalLabel: '校验间隔（秒）',
         snapshotTtlLabel: '快照有效期（秒）',
@@ -1595,7 +1595,7 @@ export default {
           autoDegrade: '开启后，探活结果会推进链路的健康状态机并调整本地转发权重；关闭后只记录探活结果，不会自动改变状态或权重。',
           autoRemoteAction: '开启后，经过安全闸门确认的故障或恢复可以切换 Sub2API 主站账号的 active/inactive；关闭后只记录探活和状态结果。',
           priorityMode: '健康探活模式先看健康档位，再使用唯一可靠的上游 Key 倍率；确定性缺失或多 Key 冲突时使用分组配置的本地回退倍率，同倍率再按最近成功延迟排序。上游查询暂不可用时保持上次排序。仅倍率模式始终只使用主站分组倍率。',
-          priorityWriteInterval: '同一 workspace 两次主站 priority 写入至少相隔此时长。窗口内只保留最新排序，探活仍按原策略继续执行。'
+          priorityWriteInterval: '主站 priority 真实写入失败后，同一 workspace 至少等待此时长再重试；正常写回不受该间隔限制。'
         },
         runFlow: {
           buttonLabel: '运行流程',
@@ -1650,7 +1650,7 @@ export default {
           modelTargetRequired: '至少需要一个已填写模型名称的探活目标。',
           providerRequired: '请选择该策略的 provider。',
           unschedulableIntervalInvalid: '关闭调度后的探活间隔必须是正整数分钟。',
-          priorityWriteIntervalInvalid: '最短 Priority 写回间隔必须是正整数秒。',
+          priorityWriteIntervalInvalid: 'Priority 失败重试间隔必须是正整数秒。',
           priorityWritebackSpreadInvalid: 'Priority 分批展开秒数必须是 1 到 10 的整数。',
           priorityFrequencyInvalid: '校验间隔、快照有效期和读取失败退避必须是正整数秒。'
         }

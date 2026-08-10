@@ -992,7 +992,7 @@ func newUpstreamKeyGroupInfo(siteID string, keyID string, group upstream.GroupIn
 		value := *group.Multiplier
 		info.multiplier = &value
 		if rechargeRate > 0 && !math.IsNaN(rechargeRate) && !math.IsInf(rechargeRate, 0) {
-			effective := value * rechargeRate
+			effective := math.Round(value*rechargeRate*1000) / 1000
 			if !math.IsNaN(effective) && !math.IsInf(effective, 0) {
 				info.effectiveMultiplier = &effective
 			}

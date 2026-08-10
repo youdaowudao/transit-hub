@@ -399,6 +399,7 @@ const lastUpdatedDisplay = (site: UpstreamSite): string => {
 
 onMounted(() => {
   void Promise.all([loadRefreshSettings(), loadGroupNavigationData()])
+  void runRefresh()
 })
 
 onBeforeUnmount(() => {

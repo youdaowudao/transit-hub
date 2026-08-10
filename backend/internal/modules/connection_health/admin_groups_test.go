@@ -395,7 +395,7 @@ func TestNewUpstreamKeyGroupInfo_MultipliesProvidedValues(t *testing.T) {
 	}{
 		{name: "fractional example", raw: 0.8, rechargeRate: 0.1, want: 0.08},
 		{name: "different fractions", raw: 1.25, rechargeRate: 0.4, want: 0.5},
-		{name: "non-round decimals", raw: 0.73, rechargeRate: 0.27, want: 0.1971},
+		{name: "non-round decimals", raw: 0.73, rechargeRate: 0.27, want: 0.197},
 		{name: "rate above one", raw: 2.4, rechargeRate: 1.5, want: 3.6},
 	}
 

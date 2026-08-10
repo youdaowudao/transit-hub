@@ -2051,8 +2051,8 @@ func hasHealthMultiplierPriorityPolicy(policies []Policy) bool {
 }
 
 func effectiveHealthSortMultiplier(item *priorityTargetInventory) (float64, bool) {
-	if item.upstreamMultiplier.status == MultiplierResolutionResolved && item.upstreamMultiplier.info.multiplier != nil {
-		return *item.upstreamMultiplier.info.multiplier, true
+	if item.upstreamMultiplier.status == MultiplierResolutionResolved && item.upstreamMultiplier.info.effectiveMultiplier != nil {
+		return *item.upstreamMultiplier.info.effectiveMultiplier, true
 	}
 	if item.upstreamMultiplier.status == MultiplierResolutionUnavailable {
 		return 0, false

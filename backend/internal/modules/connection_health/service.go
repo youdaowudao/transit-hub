@@ -139,6 +139,16 @@ func (s *Service) currentAdminAccountID(ctx context.Context, userID string) (str
 	return s.accounts.RequireCurrentID(ctx, userID)
 }
 
+// PrioritySync reads the persisted workspace writeback observation without loading
+// any upstream groups, accounts, inventory, or external site data.
+func (s *Service) PrioritySync(ctx context.Context, userID string) (*PriorityWorkspaceSyncState, error) {
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return s.repo.GetPriorityWorkspaceSyncState(ctx, userID, adminAccountID)
+}
+
 func (s *Service) safetyRepository() (safetyMutationRepository, error) {
 	if s.safetyRepo != nil {
 		return s.safetyRepo, nil

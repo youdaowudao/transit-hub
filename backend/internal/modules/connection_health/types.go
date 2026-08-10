@@ -236,6 +236,7 @@ type PriorityWorkspaceSyncState struct {
 	ReadMode                       string     `json:"readMode"`
 	PendingAgeSeconds              int64      `json:"pendingAgeSeconds"`
 	PendingTargetCount             int        `json:"pendingTargetCount"`
+	LastWriteRoundTargetCount      int        `json:"lastWriteRoundTargetCount"`
 	LastInventoryReadDurationMs    int64      `json:"lastInventoryReadDurationMs"`
 	LastWriteDurationMs            int64      `json:"lastWriteDurationMs"`
 	EvaluationCount                int64      `json:"evaluationCount"`

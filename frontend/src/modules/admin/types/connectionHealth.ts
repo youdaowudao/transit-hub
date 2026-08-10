@@ -283,6 +283,7 @@ export interface PriorityWorkspaceSyncState {
   readMode: string
   pendingAgeSeconds: number
   pendingTargetCount: number
+  lastWriteRoundTargetCount: number
   lastInventoryReadDurationMs: number
   lastWriteDurationMs: number
   evaluationCount: number

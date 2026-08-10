@@ -481,7 +481,7 @@ func TestFrequencyScheduler_ProbeEvaluationReusesSnapshotKeyMetadata(t *testing.
 	}}
 	service := &Service{
 		repo: repo, mySites: keyReader,
-		sites:           fakeSiteLookup{site: &upstream.Site{Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{ID: "g-upstream", Name: "vip", Multiplier: float64Ptr(0.4)}}}}},
+		sites:           fakeSiteLookup{site: &upstream.Site{RechargeRate: 1, Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{ID: "g-upstream", Name: "vip", Multiplier: float64Ptr(0.4)}}}}},
 		platformGroups:  reader,
 		priorityActions: &gatePriorityActioner{}, now: func() time.Time { return now },
 	}
@@ -560,7 +560,7 @@ func TestFrequencyScheduler_WritebackPersistsStateBeforeSnapshotInvalidation(t *
 			},
 			keysBySite: map[string][]upstream.Sub2APIKeyItem{"site-1": {{ID: "key-1", GroupID: "g1", GroupName: "vip"}}},
 		},
-		sites:          fakeSiteLookup{site: &upstream.Site{Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{ID: "g1", Name: "vip", Multiplier: float64Ptr(0.4)}}}}},
+		sites:          fakeSiteLookup{site: &upstream.Site{RechargeRate: 1, Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{ID: "g1", Name: "vip", Multiplier: float64Ptr(0.4)}}}}},
 		platformGroups: reader, priorityActions: actions, now: func() time.Time { return now },
 	}
 

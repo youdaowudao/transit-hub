@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -292,7 +293,8 @@ func TestAdminGroups_UsesRealUpstreamAPIKeyGroupMultiplier(t *testing.T) {
 	}
 	svc := newAdminGroupsService(reader, mySites, newFakeRepository())
 	svc.sites = fakeSiteLookup{site: &upstream.Site{
-		ID: "site-1",
+		ID:           "site-1",
+		RechargeRate: 1,
 		Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{
 			ID:         "historical-group",
 			Name:       "historical-vip",
@@ -331,6 +333,95 @@ func TestAdminGroups_UsesRealUpstreamAPIKeyGroupMultiplier(t *testing.T) {
 	}
 	if ambiguous := accountsByID["300"]; ambiguous.UpstreamKeyGroupMultiplier != nil || ambiguous.UpstreamKeyGroupName != "" {
 		t.Fatalf("account with an unresolved second connection must keep upstream API key group unknown, got %+v", ambiguous)
+	}
+}
+
+func TestAdminGroups_UsesRechargeRateForEffectiveMultiplier(t *testing.T) {
+	repo := newFakeRepository()
+	policy := probePolicy()
+	policy.PriorityMode = PriorityModeMultiplier
+	policy.StrategyMode = StrategyModeHealthProbe
+	repo.policies = []Policy{policy}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "own-group", AdminGroupName: "own-vip", PolicyID: policy.ID,
+	}}
+	rawMultiplier := 0.8
+	mySites := fakeAdminGroupKeyReader{
+		fakeMySitesReader: fakeMySitesReader{
+			session: upstream.Session{Platform: upstream.PlatformSub2API},
+			connections: []my_sites.RealConnection{{
+				UserID: "user1", WorkspaceAdminAccountID: "ws1", UpstreamSiteID: "site-1",
+				UpstreamKeyID: "key-9", AdminAccountID: "100", AdminPlatform: string(upstream.PlatformSub2API),
+			}},
+		},
+		keysBySite: map[string][]upstream.Sub2APIKeyItem{
+			"site-1": {{ID: "key-9", GroupID: "upstream-group-7", GroupName: "upstream-vip"}},
+		},
+	}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "own-group", Name: "own-vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"own-group": {{ID: "100", Name: "linked", BaseURL: "https://up", Models: "gpt-4o"}},
+		},
+	}
+	service := newAdminGroupsService(reader, mySites, repo)
+	service.sites = fakeSiteLookup{site: &upstream.Site{
+		ID: "site-1", RechargeRate: 0.1,
+		Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{ID: "upstream-group-7", Name: "upstream-vip", Multiplier: &rawMultiplier}}},
+	}}
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 || len(groups[0].Accounts) != 1 {
+		t.Fatalf("unexpected admin group response: %+v", groups)
+	}
+	account := groups[0].Accounts[0]
+	if account.UpstreamKeyGroupMultiplier == nil || *account.UpstreamKeyGroupMultiplier != rawMultiplier {
+		t.Fatalf("raw upstream multiplier must remain visible: %+v", account)
+	}
+	if account.EffectiveMultiplier == nil || math.Abs(*account.EffectiveMultiplier-0.08) > 1e-9 {
+		t.Fatalf("effective multiplier = %v, want 0.08", account.EffectiveMultiplier)
+	}
+}
+
+func TestNewUpstreamKeyGroupInfo_MultipliesProvidedValues(t *testing.T) {
+	tests := []struct {
+		name         string
+		raw          float64
+		rechargeRate float64
+		want         float64
+	}{
+		{name: "fractional example", raw: 0.8, rechargeRate: 0.1, want: 0.08},
+		{name: "different fractions", raw: 1.25, rechargeRate: 0.4, want: 0.5},
+		{name: "non-round decimals", raw: 0.73, rechargeRate: 0.27, want: 0.1971},
+		{name: "rate above one", raw: 2.4, rechargeRate: 1.5, want: 3.6},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			info := newUpstreamKeyGroupInfo(
+				"site-1",
+				"key-1",
+				upstream.GroupInfo{ID: "group-1", Multiplier: &test.raw},
+				test.rechargeRate,
+			)
+			if info.effectiveMultiplier == nil || math.Abs(*info.effectiveMultiplier-test.want) > 1e-12 {
+				t.Fatalf("effective multiplier = %v, want %v", info.effectiveMultiplier, test.want)
+			}
+		})
+	}
+}
+
+func TestNewUpstreamKeyGroupInfo_DoesNotUseRawMultiplierWhenRechargeRateInvalid(t *testing.T) {
+	rawMultiplier := 0.8
+	info := newUpstreamKeyGroupInfo("site-1", "key-1", upstream.GroupInfo{ID: "group-1", Multiplier: &rawMultiplier}, 0)
+	if info.multiplier == nil || *info.multiplier != rawMultiplier {
+		t.Fatalf("raw multiplier must remain available for diagnostics: %+v", info)
+	}
+	if info.effectiveMultiplier != nil {
+		t.Fatalf("invalid recharge rate must not produce an effective multiplier: %+v", info)
 	}
 }
 

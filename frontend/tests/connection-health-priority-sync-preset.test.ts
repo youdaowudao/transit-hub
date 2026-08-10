@@ -11,6 +11,14 @@ const connectionHealthViewSource = readFileSync(
   new URL('../src/modules/admin/views/ConnectionHealthView.vue', import.meta.url),
   'utf8',
 )
+const connectionHealthComposableSource = readFileSync(
+  new URL('../src/modules/admin/composables/useConnectionHealth.ts', import.meta.url),
+  'utf8',
+)
+const connectionHealthApiSource = readFileSync(
+  new URL('../src/modules/admin/api/connectionHealth.ts', import.meta.url),
+  'utf8',
+)
 
 describe('connection health priority sync preset', () => {
   it('preserves a hidden non-default max pending age during ordinary edits', () => {
@@ -34,8 +42,22 @@ describe('connection health priority sync preset', () => {
     expect(policyDrawerSource).toContain('min="1" max="10"')
   })
 
-  it('shows the E spread and pending target count in the existing overview', () => {
-    expect(connectionHealthViewSource).toContain('overview.prioritySync.writebackSpreadSeconds')
-    expect(connectionHealthViewSource).toContain('overview.prioritySync.pendingTargetCount')
+  it('loads the lightweight priority state independently and preserves it during local overview aggregation', () => {
+    expect(connectionHealthApiSource).toContain("'/connection-health/priority-sync'")
+    expect(connectionHealthComposableSource).toContain('const prioritySync = ref<PriorityWorkspaceSyncState | null>(null)')
+    expect(connectionHealthComposableSource).toContain('const prioritySyncErrorKey = ref(\'\')')
+    expect(connectionHealthComposableSource).toContain('loadPrioritySync()')
+    expect(connectionHealthComposableSource).toContain('loadAdminGroups(opts), loadGroups({ silent: true }), loadPrioritySync()')
+    expect(connectionHealthViewSource).toContain('prioritySync.writebackSpreadSeconds')
+    expect(connectionHealthViewSource).toContain('prioritySync.pendingTargetCount')
+    expect(connectionHealthViewSource).toContain('prioritySync.lastWriteRoundTargetCount')
+    expect(connectionHealthViewSource).toContain('prioritySync && prioritySync.lastWriteRoundTargetCount > 0')
+    expect(connectionHealthViewSource).not.toContain('overview.prioritySync')
+  })
+
+  it('keeps the no-history and account wording in the existing priority area', () => {
+    expect(connectionHealthViewSource).toContain("prioritySync.noHistory")
+    expect(connectionHealthViewSource).toContain("prioritySync.lastWriteRoundTargetValue")
+    expect(connectionHealthViewSource).toContain("prioritySync.pendingTargetsValue")
   })
 })

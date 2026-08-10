@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -250,7 +251,7 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 	budgetLoaded := make(map[string]bool)
 	now := time.Now().UTC()
 	budgetDayStart := probeBudgetDayStart(now)
-	// 真实上游 API Key 分组倍率仅用于展示，不参与探活或优先级计算。读取失败时降级为空，
+	// 真实上游 API Key 分组原始倍率和站点充值倍率用于计算有效倍率。读取失败时降级为空，
 	// 保证既有分组健康功能不会因为可选的倍率信息不可用而中断。
 	upstreamMultiplierLookup := s.upstreamMultiplierResolutionsByAdminAccount(ctx, userID, adminAccountID, platform)
 
@@ -451,7 +452,7 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 			if usesHealthPriority {
 				switch multiplierResolution.status {
 				case MultiplierResolutionResolved:
-					effectiveMultiplier = cloneFloat64Pointer(upstreamKeyGroup.multiplier)
+					effectiveMultiplier = cloneFloat64Pointer(upstreamKeyGroup.effectiveMultiplier)
 					multiplierSource = MultiplierSourceUpstreamKey
 				case MultiplierResolutionUnassociated, MultiplierResolutionMissing, MultiplierResolutionConflict:
 					if localFallback != nil {
@@ -729,11 +730,12 @@ func (s *Service) loadProbeBudgetUsage(ctx context.Context, userID string, admin
 }
 
 type upstreamKeyGroupInfo struct {
-	siteID     string
-	keyID      string
-	groupID    string
-	name       string
-	multiplier *float64
+	siteID              string
+	keyID               string
+	groupID             string
+	name                string
+	multiplier          *float64
+	effectiveMultiplier *float64
 }
 
 const (
@@ -972,14 +974,14 @@ func (s *Service) upstreamKeyGroupForConnection(
 	if matched == nil {
 		return upstreamMultiplierResolution{status: MultiplierResolutionMissing}
 	}
-	info := newUpstreamKeyGroupInfo(siteID, keyID, *matched)
-	if info.multiplier == nil {
+	info := newUpstreamKeyGroupInfo(siteID, keyID, *matched, site.RechargeRate)
+	if info.multiplier == nil || info.effectiveMultiplier == nil {
 		return upstreamMultiplierResolution{status: MultiplierResolutionMissing, info: info}
 	}
 	return upstreamMultiplierResolution{status: MultiplierResolutionResolved, info: info}
 }
 
-func newUpstreamKeyGroupInfo(siteID string, keyID string, group upstream.GroupInfo) upstreamKeyGroupInfo {
+func newUpstreamKeyGroupInfo(siteID string, keyID string, group upstream.GroupInfo, rechargeRate float64) upstreamKeyGroupInfo {
 	info := upstreamKeyGroupInfo{
 		siteID:  strings.TrimSpace(siteID),
 		keyID:   strings.TrimSpace(keyID),
@@ -989,6 +991,12 @@ func newUpstreamKeyGroupInfo(siteID string, keyID string, group upstream.GroupIn
 	if group.Multiplier != nil {
 		value := *group.Multiplier
 		info.multiplier = &value
+		if rechargeRate > 0 && !math.IsNaN(rechargeRate) && !math.IsInf(rechargeRate, 0) {
+			effective := value * rechargeRate
+			if !math.IsNaN(effective) && !math.IsInf(effective, 0) {
+				info.effectiveMultiplier = &effective
+			}
+		}
 	}
 	return info
 }

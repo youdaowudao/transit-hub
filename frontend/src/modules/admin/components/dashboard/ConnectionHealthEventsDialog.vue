@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Activity, ArrowRight, X } from 'lucide-vue-next'
-import { remoteActionLabelKey } from '../../composables/useConnectionHealth'
+import {
+  buildConnectionHealthRecordSummary,
+  latestConnectionHealthProbeFailure,
+  remoteActionLabelKey,
+} from '../../composables/useConnectionHealth'
 import ConnectionHealthLinkDetailCard from './ConnectionHealthLinkDetailCard.vue'
 import type {
   ConnectionHealthEvent,
@@ -29,9 +33,7 @@ import { t } from '@/locales'
 const prefix = 'admin.connectionHealth'
 const cardPrefix = `${prefix}.eventsDialog.card`
 
-// 探活结果分类：用于近 60 次记录条着色和可用率计算分母。人工禁用/恢复不算一次探活结果，
-// 不计入可用率分母，只在记录条里以中性色展示这个动作发生过。
-const PROBE_RESULTS = new Set(['ok', 'slow_response', 'network_fluctuation', 'rate_limited', 'server_error', 'auth', 'model_not_found', 'invalid_response'])
+// 状态集合只用于从事件兜底推导当前状态；记录条和可用率由共享纯函数统一计算。
 const VALID_STATES = new Set<ConnectionHealthState>(['healthy', 'degraded', 'suspended', 'observing', 'recovering', 'disabled'])
 
 interface StatusCard {
@@ -42,14 +44,17 @@ interface StatusCard {
   upstreamGroupName: string
   accountName: string
   provider: string
+  isActionCard: boolean
   state: ConnectionHealthState | ''
   latestLatencyMs: number | null
   lastProbeAt: string | null
+  lastSuccessAt: string | null
   nextProbeAt: string | null
   blockedReason: string
   lastFailureAt: string | null
   lastErrorKey: string
   lastErrorDetail: string
+  failureFromLoadedRecords: boolean
   elapsedSeconds: number | null
   effectiveIntervalSeconds: number
   effectivePolicySources: EffectiveProbePolicySource[]
@@ -79,6 +84,7 @@ const connectionMeta = computed(() => {
     providerFamily: string
     state: ConnectionHealthState
     lastProbeAt: string | null
+    lastSuccessAt: string | null
     nextProbeAt: string | null
     blockedReason: string
     lastFailureAt: string | null
@@ -95,6 +101,7 @@ const connectionMeta = computed(() => {
         providerFamily: string
         state: ConnectionHealthState
         lastProbeAt: string | null
+        lastSuccessAt: string | null
         nextProbeAt: string | null
         blockedReason: string
         lastFailureAt: string | null
@@ -110,6 +117,7 @@ const connectionMeta = computed(() => {
           providerFamily: model.providerFamily,
           state: model.state,
           lastProbeAt: model.lastProbeAt,
+          lastSuccessAt: model.lastSuccessAt,
           nextProbeAt: model.nextProbeAt ?? null,
           blockedReason: model.blockedReason ?? '',
           lastFailureAt: model.lastFailureAt,
@@ -132,6 +140,7 @@ type AdminTargetModelMeta = {
   configured: boolean
   state: ConnectionHealthState | ''
   lastProbeAt: string | null
+  lastSuccessAt: string | null
   lastLatencyMs: number | null
   lastRemoteAction: string
   nextProbeAt: string | null
@@ -165,6 +174,7 @@ const adminTargetMeta = computed(() => {
           configured: model.configured,
           state: model.configured ? model.state : '',
           lastProbeAt: model.lastProbeAt,
+          lastSuccessAt: model.lastSuccessAt,
           lastLatencyMs: model.lastLatencyMs,
           lastRemoteAction: model.lastRemoteAction ?? '',
           nextProbeAt: model.nextProbeAt ?? null,
@@ -185,6 +195,7 @@ const adminTargetMeta = computed(() => {
           configured: true,
           state: '',
           lastProbeAt: null,
+          lastSuccessAt: null,
           lastLatencyMs: null,
           lastRemoteAction: '',
           nextProbeAt: model.nextProbeAt ?? null,
@@ -229,15 +240,6 @@ const findConnectionContext = (connectionId: string) => {
   return null
 }
 
-const buildRecords = (eventsDesc: ConnectionHealthEvent[]) => {
-  // 近 60 次记录条：取最新 60 条后反转为「从过去到现在」排列，条数不足 60 就按实际数量渲染。
-  const records = eventsDesc.slice(0, 60).slice().reverse()
-  const probeRecords = records.filter((r) => PROBE_RESULTS.has(r.result))
-  const okCount = probeRecords.filter((r) => r.result === 'ok' || r.result === 'slow_response').length
-  const availabilityPct = probeRecords.length > 0 ? Math.round((okCount / probeRecords.length) * 100) : null
-  return { records, availabilityPct }
-}
-
 // 链路详情模式：以该链路已配置的模型列表（ConnectionHealth.models）为准逐个建卡，
 // 而不是只从事件反推——这样从未探活过的模型也能展示一张「尚未探活」的卡片，
 // 而不是因为没有事件就完全不出现。
@@ -260,14 +262,17 @@ const buildFocusedCards = (connectionId: string): StatusCard[] => {
     upstreamGroupName,
     accountName,
     provider,
+    isActionCard: true,
     state: '',
     latestLatencyMs: null,
     lastProbeAt: null,
+    lastSuccessAt: null,
     nextProbeAt: null,
     blockedReason: '',
     lastFailureAt: null,
     lastErrorKey: event.errorKey ?? '',
     lastErrorDetail: event.errorDetail ?? '',
+    failureFromLoadedRecords: false,
     elapsedSeconds: null,
     effectiveIntervalSeconds: 0,
     effectivePolicySources: [],
@@ -284,7 +289,7 @@ const buildFocusedCards = (connectionId: string): StatusCard[] => {
     const modelCards = ctx.conn.models.map((model) => {
       const eventsDesc = eventsByModel.get(model.modelName) ?? []
       const latestAction = eventsDesc.find((event) => Boolean(event.remoteAction))
-      const { records, availabilityPct } = buildRecords(eventsDesc)
+      const { records, availabilityPct } = buildConnectionHealthRecordSummary(eventsDesc)
       return {
         key: `${connectionId}::${model.modelName}`,
         connectionId,
@@ -293,14 +298,17 @@ const buildFocusedCards = (connectionId: string): StatusCard[] => {
         upstreamGroupName: ctx.conn.upstreamGroupName,
         accountName: '',
         provider: model.providerFamily,
+        isActionCard: false,
         state: model.state,
         latestLatencyMs: eventsDesc[0]?.latencyMs ?? model.lastLatencyMs,
         lastProbeAt: model.lastProbeAt,
+        lastSuccessAt: model.lastSuccessAt,
         nextProbeAt: model.nextProbeAt ?? null,
         blockedReason: model.blockedReason ?? '',
         lastFailureAt: model.lastFailureAt,
         lastErrorKey: model.lastErrorKey,
         lastErrorDetail: model.lastErrorDetail,
+        failureFromLoadedRecords: false,
         elapsedSeconds: model.elapsedSeconds ?? null,
         effectiveIntervalSeconds: model.effectiveIntervalSeconds ?? 0,
         effectivePolicySources: model.effectivePolicySources ?? [],
@@ -322,7 +330,7 @@ const buildFocusedCards = (connectionId: string): StatusCard[] => {
     const modelCards = Array.from(adminMeta.models.entries()).map(([modelName, modelMeta]) => {
       const eventsDesc = eventsByModel.get(modelName) ?? []
       const latestAction = eventsDesc.find((event) => Boolean(event.remoteAction))
-      const { records, availabilityPct } = buildRecords(eventsDesc)
+      const { records, availabilityPct } = buildConnectionHealthRecordSummary(eventsDesc)
       return {
         key: `${connectionId}::${modelName}`,
         connectionId,
@@ -331,14 +339,17 @@ const buildFocusedCards = (connectionId: string): StatusCard[] => {
         upstreamGroupName: groupName,
         accountName: adminMeta.accountName,
         provider: modelMeta.providerFamily,
+        isActionCard: false,
         state: modelMeta.state,
         latestLatencyMs: eventsDesc[0]?.latencyMs ?? modelMeta.lastLatencyMs,
         lastProbeAt: modelMeta.lastProbeAt,
+        lastSuccessAt: modelMeta.lastSuccessAt,
         nextProbeAt: modelMeta.nextProbeAt,
         blockedReason: modelMeta.blockedReason,
         lastFailureAt: modelMeta.lastFailureAt,
         lastErrorKey: modelMeta.lastErrorKey,
         lastErrorDetail: modelMeta.lastErrorDetail,
+        failureFromLoadedRecords: false,
         elapsedSeconds: modelMeta.elapsedSeconds,
         effectiveIntervalSeconds: modelMeta.effectiveIntervalSeconds,
         effectivePolicySources: modelMeta.effectivePolicySources,
@@ -359,8 +370,9 @@ const buildFocusedCards = (connectionId: string): StatusCard[] => {
   // 保证弹窗至少不是空的；此时无法解析 ownGroupId，探活间隔只能显示「未配置策略」。
   const modelCards = Array.from(eventsByModel.entries()).map(([modelName, eventsDesc]) => {
     const latest = eventsDesc[0]
+    const latestFailure = latestConnectionHealthProbeFailure(eventsDesc)
     const latestAction = eventsDesc.find((event) => Boolean(event.remoteAction))
-    const { records, availabilityPct } = buildRecords(eventsDesc)
+    const { records, availabilityPct } = buildConnectionHealthRecordSummary(eventsDesc)
     const state: ConnectionHealthState | '' = VALID_STATES.has(latest.toState as ConnectionHealthState) ? (latest.toState as ConnectionHealthState) : ''
     return {
       key: `${connectionId}::${modelName}`,
@@ -370,14 +382,17 @@ const buildFocusedCards = (connectionId: string): StatusCard[] => {
       upstreamGroupName: latest.upstreamGroupName,
       accountName: '',
       provider: 'custom',
+      isActionCard: false,
       state,
       latestLatencyMs: latest.latencyMs,
       lastProbeAt: latest.createdAt,
+      lastSuccessAt: null,
       nextProbeAt: null,
       blockedReason: '',
-      lastFailureAt: null,
-      lastErrorKey: latest.errorKey,
-      lastErrorDetail: latest.errorDetail ?? '',
+      lastFailureAt: latestFailure?.createdAt ?? null,
+      lastErrorKey: latestFailure?.errorKey ?? '',
+      lastErrorDetail: latestFailure?.errorDetail ?? '',
+      failureFromLoadedRecords: Boolean(latestFailure),
       elapsedSeconds: null,
       effectiveIntervalSeconds: 0,
       effectivePolicySources: [],
@@ -429,9 +444,10 @@ const globalGroups = computed<GroupBlock[]>(() => {
       const adminModelMeta = adminMeta?.models.get(latest.modelName)
       const failureMeta = adminModelMeta ?? legacyModelMeta
       const latestAction = eventsDesc.find((event) => Boolean(event.remoteAction))
+      const latestFailure = failureMeta ? null : latestConnectionHealthProbeFailure(eventsDesc)
       const state: ConnectionHealthState | '' = legacyModelMeta?.state ?? adminModelMeta?.state
         ?? (VALID_STATES.has(latest.toState as ConnectionHealthState) ? (latest.toState as ConnectionHealthState) : '')
-      const { records, availabilityPct } = buildRecords(eventsDesc)
+      const { records, availabilityPct } = buildConnectionHealthRecordSummary(eventsDesc)
 
       return {
         key: cardKey,
@@ -443,14 +459,17 @@ const globalGroups = computed<GroupBlock[]>(() => {
         upstreamGroupName: adminMeta?.groupNames.join('、') || latest.upstreamGroupName,
         accountName: adminMeta?.accountName ?? '',
         provider: legacyModelMeta?.providerFamily ?? adminModelMeta?.providerFamily ?? 'custom',
+        isActionCard: latest.modelName === '*' || latest.modelName === '',
         state,
         latestLatencyMs: latest.latencyMs ?? adminModelMeta?.lastLatencyMs ?? null,
         lastProbeAt: legacyModelMeta?.lastProbeAt ?? adminModelMeta?.lastProbeAt ?? null,
+        lastSuccessAt: legacyModelMeta?.lastSuccessAt ?? adminModelMeta?.lastSuccessAt ?? null,
         nextProbeAt: legacyModelMeta?.nextProbeAt ?? adminModelMeta?.nextProbeAt ?? null,
         blockedReason: legacyModelMeta?.blockedReason ?? adminModelMeta?.blockedReason ?? '',
-        lastFailureAt: failureMeta?.lastFailureAt ?? null,
-        lastErrorKey: failureMeta?.lastErrorKey ?? latest.errorKey ?? '',
-        lastErrorDetail: failureMeta?.lastErrorDetail ?? latest.errorDetail ?? '',
+        lastFailureAt: failureMeta?.lastFailureAt ?? latestFailure?.createdAt ?? null,
+        lastErrorKey: failureMeta?.lastErrorKey ?? latestFailure?.errorKey ?? latest.errorKey ?? '',
+        lastErrorDetail: failureMeta?.lastErrorDetail ?? latestFailure?.errorDetail ?? latest.errorDetail ?? '',
+        failureFromLoadedRecords: Boolean(latestFailure),
         elapsedSeconds: failureMeta?.elapsedSeconds ?? null,
         effectiveIntervalSeconds: legacyModelMeta?.effectiveIntervalSeconds ?? adminModelMeta?.effectiveIntervalSeconds ?? 0,
         effectivePolicySources: legacyModelMeta?.effectivePolicySources ?? adminModelMeta?.effectivePolicySources ?? [],
@@ -595,12 +614,15 @@ const nextProbeLabel = (card: StatusCard): string => {
                   :upstream-group-name="card.upstreamGroupName"
                   :model-name="card.modelName"
                   :provider="card.provider"
+                  :is-action-card="card.isActionCard"
                   :state="card.state"
                   :latest-latency-ms="card.latestLatencyMs"
                   :last-probe-at="card.lastProbeAt"
+                  :last-success-at="card.lastSuccessAt"
                   :last-failure-at="card.lastFailureAt"
                   :last-error-key="card.lastErrorKey"
                   :last-error-detail="card.lastErrorDetail"
+                  :failure-from-loaded-records="card.failureFromLoadedRecords"
                   :elapsed-seconds="card.elapsedSeconds"
                   :effective-interval-seconds="card.effectiveIntervalSeconds"
                   :effective-policy-sources="card.effectivePolicySources"
@@ -635,12 +657,15 @@ const nextProbeLabel = (card: StatusCard): string => {
                       :upstream-group-name="card.upstreamGroupName"
                       :model-name="card.modelName"
                       :provider="card.provider"
+                      :is-action-card="card.isActionCard"
                       :state="card.state"
                       :latest-latency-ms="card.latestLatencyMs"
                       :last-probe-at="card.lastProbeAt"
+                      :last-success-at="card.lastSuccessAt"
                       :last-failure-at="card.lastFailureAt"
                       :last-error-key="card.lastErrorKey"
                       :last-error-detail="card.lastErrorDetail"
+                      :failure-from-loaded-records="card.failureFromLoadedRecords"
                       :elapsed-seconds="card.elapsedSeconds"
                       :effective-interval-seconds="card.effectiveIntervalSeconds"
                       :effective-policy-sources="card.effectivePolicySources"

@@ -893,7 +893,7 @@ func TestHealthPrioritySync_UsesHealthThenUpstreamMultiplierThenSuccessLatency(t
 	}
 	service := &Service{
 		repo: repo, mySites: mySites, platformGroups: reader, priorityActions: priorityActions,
-		sites: fakeSiteLookup{site: &upstream.Site{Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{
+		sites: fakeSiteLookup{site: &upstream.Site{RechargeRate: 0.1, Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{
 			{ID: "m008", Multiplier: &multiplier008}, {ID: "m006", Multiplier: &multiplier006}, {ID: "m001", Multiplier: &multiplier001},
 		}}}},
 	}
@@ -923,6 +923,13 @@ func TestHealthPrioritySync_UsesHealthThenUpstreamMultiplierThenSuccessLatency(t
 	}
 	if !(priorities["c"] > priorities["b"] && priorities["b"] > priorities["a"] && priorities["a"] > priorities["d"]) {
 		t.Fatalf("priority tuple order is wrong: %+v", priorities)
+	}
+	wantEffective := map[string]float64{"a": 0.008, "b": 0.006, "c": 0.006, "d": 0.001}
+	for target, want := range wantEffective {
+		state := repo.priorityStates["user1|ws1|newapi:"+"ws1:"+target]
+		if state.EffectiveMultiplier != want {
+			t.Fatalf("target %s effective multiplier = %v, want %v", target, state.EffectiveMultiplier, want)
+		}
 	}
 }
 
@@ -954,7 +961,7 @@ func TestHealthPrioritySync_NewAPITupleIsNotOverriddenByCurrentWeight(t *testing
 	}
 	service := &Service{
 		repo: repo, mySites: mySites, platformGroups: reader, priorityActions: actions,
-		sites: fakeSiteLookup{site: &upstream.Site{Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{
+		sites: fakeSiteLookup{site: &upstream.Site{RechargeRate: 1, Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{
 			{ID: "cheap", Multiplier: &cheapMultiplier}, {ID: "expensive", Multiplier: &expensiveMultiplier},
 		}}}},
 	}

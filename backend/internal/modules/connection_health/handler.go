@@ -18,6 +18,7 @@ type Handler struct {
 func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	handler := &Handler{service: service}
 	mux.HandleFunc("GET /api/connection-health/overview", handler.overview)
+	mux.HandleFunc("GET /api/connection-health/priority-sync", handler.prioritySync)
 	mux.HandleFunc("GET /api/connection-health/stored-summary", handler.storedSummary)
 	mux.HandleFunc("GET /api/connection-health/safety", handler.getSafety)
 	mux.HandleFunc("PUT /api/connection-health/safety", handler.putSafety)
@@ -143,6 +144,20 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpjson.Write(w, http.StatusOK, resp)
+}
+
+func (h *Handler) prioritySync(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	state, err := h.service.PrioritySync(r.Context(), userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, state)
 }
 
 func (h *Handler) groups(w http.ResponseWriter, r *http.Request) {

@@ -13,7 +13,7 @@ const (
 	defaultPublicDir = "/app/public"
 	// 发版前必须同步该常量：回滚卡片与升级卡片的版本显示、以及还原点记录的
 	// previous_version 都取自这里，落后会让界面显示错误的版本号。
-	defaultAppVersion = "V2.1.6"
+	defaultAppVersion = "V2.1.7"
 )
 
 type Config struct {

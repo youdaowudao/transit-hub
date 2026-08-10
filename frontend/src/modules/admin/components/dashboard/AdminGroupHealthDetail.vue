@@ -23,6 +23,9 @@ import {
   connectionHealthMessageKey,
   connectionHealthStateBadgeClass,
   formatConnectionHealthTime,
+  formatConnectionHealthElapsed,
+  hasValidConnectionHealthTime,
+  isConnectionHealthCurrentFailure,
   remoteActionLabelKey,
 } from '../../composables/useConnectionHealth'
 import type {
@@ -760,27 +763,31 @@ const upstreamMultiplierStatusLabel = (account: AdminGroupAccount): string => {
                 <td colspan="9" class="px-12 py-4">
                   <div v-if="filteredModelHealth(account).length === 0 && filteredUnprobedModels(account).length === 0" class="text-xs text-muted-foreground">{{ t(`${detailPrefix}.models.empty`) }}</div>
                   <div v-else class="grid gap-2 lg:grid-cols-2">
-                    <div v-for="model in filteredModelHealth(account)" :key="model.modelName" class="rounded-lg border border-border/50 bg-background px-3 py-2.5">
+                    <div v-for="model in filteredModelHealth(account)" :key="model.modelName" class="rounded-lg border border-border/50 bg-background px-2.5 py-2">
                       <div class="flex items-center justify-between gap-3">
                         <span class="truncate text-sm font-medium text-foreground">{{ model.modelName }}</span>
                         <span class="rounded-md px-2 py-0.5 text-xs font-medium" :class="model.configured ? connectionHealthStateBadgeClass(model.state) : 'bg-muted text-muted-foreground'">{{ model.configured ? t(`${prefix}.stateLabels.${model.state}`) : t(`${prefix}.notConfigured`) }}</span>
                       </div>
-                      <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                      <div class="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                         <span :class="model.state === 'suspended' ? 'text-destructive' : ''">{{ t(`${detailPrefix}.models.latency`, { value: !model.configured || model.state === 'suspended' ? '-' : (model.lastLatencyMs ?? '-') }) }}</span>
                         <span>{{ t(`${detailPrefix}.models.lastProbe`, { value: formatConnectionHealthTime(model.lastProbeAt) }) }}</span>
                         <span>{{ t(`${detailPrefix}.models.weight`, { value: model.currentWeight }) }}</span>
                         <span v-if="model.nextProbeAt">{{ t(`${detailPrefix}.models.nextProbe`, { value: formatConnectionHealthTime(model.nextProbeAt) }) }}</span>
                         <span v-if="model.blockedReason">{{ blockedReasonLabel(model.blockedReason) }}</span>
                       </div>
-                      <p v-if="model.lastErrorKey" class="mt-2 truncate text-xs text-destructive">{{ readableMessage(model.lastErrorKey) }}</p>
+                      <div v-if="hasValidConnectionHealthTime(model.lastFailureAt)" class="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                        <span class="font-medium text-destructive">{{ t(`${detailPrefix}.models.lastFailure`, { value: formatConnectionHealthTime(model.lastFailureAt) }) }}</span>
+                        <span v-if="formatConnectionHealthElapsed(model.elapsedSeconds, model.lastFailureAt)" class="font-medium text-destructive">{{ t(`${detailPrefix}.models.elapsed`, { value: formatConnectionHealthElapsed(model.elapsedSeconds, model.lastFailureAt) }) }}</span>
+                      </div>
+                      <p v-if="isConnectionHealthCurrentFailure(model) && model.lastErrorKey" class="mt-1 truncate text-[11px] text-destructive/80">{{ readableMessage(model.lastErrorKey) }}</p>
                       <p v-if="effectiveSourcesLabel(model)" class="mt-1 text-xs text-muted-foreground">{{ effectiveSourcesLabel(model) }}</p>
                     </div>
-                    <div v-for="model in filteredUnprobedModels(account)" :key="`unprobed:${model.modelName}`" class="rounded-lg border border-border/50 bg-background px-3 py-2.5">
+                    <div v-for="model in filteredUnprobedModels(account)" :key="`unprobed:${model.modelName}`" class="rounded-lg border border-border/50 bg-background px-2.5 py-2">
                       <div class="flex items-center justify-between gap-3">
                         <span class="truncate text-sm font-medium text-foreground">{{ model.modelName }}</span>
                         <span class="rounded-md bg-muted px-2 py-0.5 text-xs text-muted-foreground">{{ account.probeModelsConfigured === false ? t(`${prefix}.notConfigured`) : t(`${prefix}.notProbed`) }}</span>
                       </div>
-                      <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                      <div class="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                         <span>{{ t(`${detailPrefix}.models.latency`, { value: '-' }) }}</span>
                         <span>{{ t(`${detailPrefix}.models.lastProbe`, { value: formatConnectionHealthTime(null) }) }}</span>
                         <span>{{ t(`${detailPrefix}.models.weight`, { value: '-' }) }}</span>

@@ -5,7 +5,10 @@ import {
   connectionHealthMessageKey,
   connectionHealthRecordColorClass,
   connectionHealthStateBadgeClass,
+  formatConnectionHealthElapsed,
   formatConnectionHealthTime,
+  hasValidConnectionHealthTime,
+  isConnectionHealthCurrentFailure,
   remoteActionLabelKey,
 } from '../../composables/useConnectionHealth'
 import type { ConnectionHealthEvent, ConnectionHealthState, EffectiveProbePolicySource } from '../../types/connectionHealth'
@@ -19,12 +22,15 @@ const props = defineProps<{
   accountName: string
   modelName: string
   provider: string
+  isActionCard: boolean
   state: ConnectionHealthState | ''
   latestLatencyMs: number | null
   lastProbeAt: string | null
+  lastSuccessAt: string | null
   lastFailureAt: string | null
   lastErrorKey: string
   lastErrorDetail: string
+  failureFromLoadedRecords: boolean
   elapsedSeconds: number | null
   effectiveIntervalSeconds: number
   effectivePolicySources: EffectiveProbePolicySource[]
@@ -75,10 +81,20 @@ const remoteActionText = computed(() => {
   if (!mapped) return ''
   return t(mapped.key, mapped.params ?? {})
 })
+
+const hasFailureTime = computed(() => hasValidConnectionHealthTime(props.lastFailureAt))
+const currentFailure = computed(() => isConnectionHealthCurrentFailure({
+  lastFailureAt: props.lastFailureAt,
+  lastProbeAt: props.lastProbeAt,
+  lastSuccessAt: props.lastSuccessAt,
+}))
+const elapsedText = computed(() => formatConnectionHealthElapsed(props.elapsedSeconds, props.lastFailureAt))
+const failureLabel = computed(() => t(`${cardPrefix}.${props.failureFromLoadedRecords ? 'loadedFailure' : currentFailure.value ? 'currentFailure' : 'historicalFailure'}`))
+const showErrorDetail = computed(() => props.isActionCard || hasFailureTime.value)
 </script>
 
 <template>
-  <div class="rounded-xl border border-border/50 bg-surface/40 p-4">
+  <div class="rounded-lg border border-border/50 bg-surface/40 p-3">
     <div class="flex items-start justify-between gap-2">
       <div class="flex min-w-0 items-center gap-2">
         <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -100,25 +116,25 @@ const remoteActionText = computed(() => {
       </div>
     </div>
 
-    <div class="mt-3 grid grid-cols-2 gap-2">
-      <div class="rounded-lg border border-border/40 bg-background/60 px-3 py-2">
+    <div class="mt-2 grid gap-2" :class="hasFailureTime ? 'grid-cols-2' : 'grid-cols-1'">
+      <div class="rounded-lg border border-border/40 bg-background/60 px-2.5 py-1.5">
         <p class="text-[11px] text-muted-foreground">{{ t(`${cardPrefix}.lastProbe`, { value: '' }) }}</p>
         <p class="mt-0.5 text-xs font-medium text-foreground">{{ formatConnectionHealthTime(lastProbeAt) }}</p>
       </div>
-      <div class="rounded-lg border border-border/40 bg-background/60 px-3 py-2">
-        <p class="text-[11px] text-muted-foreground">{{ t(`${cardPrefix}.lastFailure`, { value: '' }) }}</p>
-        <p class="mt-0.5 text-xs font-medium text-foreground">{{ formatConnectionHealthTime(lastFailureAt) }}</p>
+      <div v-if="hasFailureTime" class="rounded-lg border border-red-200/70 bg-red-50/40 px-2.5 py-1.5 dark:border-red-900/50 dark:bg-red-950/20">
+        <p class="text-[11px] text-red-600/80 dark:text-red-400/80">{{ failureLabel }}</p>
+        <p class="mt-0.5 text-xs font-medium text-destructive">{{ formatConnectionHealthTime(lastFailureAt) }}</p>
       </div>
     </div>
 
-    <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+    <div class="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
       <span>{{ t(`${cardPrefix}.latencyLabel`) }}：{{ latestLatencyMs != null ? `${latestLatencyMs}ms` : t(`${cardPrefix}.noData`) }}</span>
-      <span v-if="elapsedSeconds != null">{{ t(`${cardPrefix}.elapsed`, { seconds: elapsedSeconds }) }}</span>
+      <span v-if="elapsedText" class="font-medium text-red-600 dark:text-red-400">{{ t(`${cardPrefix}.elapsed`, { value: elapsedText }) }}</span>
     </div>
-    <p v-if="lastErrorKey" class="mt-2 text-xs text-destructive">{{ readableMessage(lastErrorKey) }}</p>
-    <p v-if="lastErrorDetail" class="mt-1 break-words text-xs text-muted-foreground">{{ t(`${cardPrefix}.errorDetail`, { value: lastErrorDetail }) }}</p>
+    <p v-if="showErrorDetail && lastErrorKey" class="mt-1 text-[11px] text-destructive/80">{{ readableMessage(lastErrorKey) }}</p>
+    <p v-if="showErrorDetail && lastErrorDetail" class="mt-0.5 break-words text-[11px] text-muted-foreground">{{ t(`${cardPrefix}.errorDetail`, { value: lastErrorDetail }) }}</p>
 
-    <div class="mt-3">
+    <div class="mt-2.5">
       <p class="text-[11px] text-muted-foreground">{{ t(`${cardPrefix}.availabilityLabel`) }}</p>
       <p class="text-2xl font-bold text-foreground">
         {{ availabilityPct != null ? `${availabilityPct}%` : t(`${cardPrefix}.noData`) }}

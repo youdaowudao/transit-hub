@@ -582,6 +582,97 @@ export function formatConnectionHealthTime(iso: string | null): string {
   return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Shanghai' }).format(date)
 }
 
+// connectionHealthTimeMs 让显示层统一使用同一套有效时间判定。后端恢复成功后仍会保留
+// 最近一次失败的错误详情，因此不能只凭 errorKey 判断它是否仍是当前异常。
+function connectionHealthTimeMs(iso: string | null | undefined): number | null {
+  if (!iso) return null
+  const value = new Date(iso).getTime()
+  return Number.isNaN(value) ? null : value
+}
+
+export function hasValidConnectionHealthTime(iso: string | null | undefined): boolean {
+  return connectionHealthTimeMs(iso) != null
+}
+
+export function isConnectionHealthCurrentFailure(input: {
+  lastFailureAt: string | null | undefined
+  lastProbeAt: string | null | undefined
+  lastSuccessAt: string | null | undefined
+}): boolean {
+  const lastFailureAt = connectionHealthTimeMs(input.lastFailureAt)
+  const lastProbeAt = connectionHealthTimeMs(input.lastProbeAt)
+  if (lastFailureAt == null || lastProbeAt == null || lastFailureAt < lastProbeAt) return false
+
+  const lastSuccessAt = connectionHealthTimeMs(input.lastSuccessAt)
+  return lastSuccessAt == null || lastFailureAt >= lastSuccessAt
+}
+
+// elapsedSeconds 是后端在响应时刻给出的快照，页面刷新前允许短暂滞后。没有可靠失败时间时，
+// 即使秒数存在也不能单独显示，避免用户看到无法对应具体事件的“距今”。
+export function formatConnectionHealthElapsed(
+  elapsedSeconds: number | null | undefined,
+  lastFailureAt: string | null | undefined,
+): string {
+  if (!hasValidConnectionHealthTime(lastFailureAt) || typeof elapsedSeconds !== 'number' || !Number.isFinite(elapsedSeconds) || elapsedSeconds < 0) return ''
+  const totalMinutes = Math.floor(elapsedSeconds / 60)
+  if (totalMinutes < 1) return '不到 1 分钟'
+  if (totalMinutes < 60) return `${totalMinutes} 分钟`
+  const totalHours = Math.floor(totalMinutes / 60)
+  if (totalHours < 24) return `${totalHours} 小时`
+  return `${Math.floor(totalHours / 24)} 天`
+}
+
+const PROBE_FAILURE_RESULTS = new Set([
+  'network_fluctuation',
+  'rate_limited',
+  'server_error',
+  'auth',
+  'model_not_found',
+  'invalid_response',
+])
+
+const CONNECTION_HEALTH_PROBE_RESULTS = new Set([
+  'ok',
+  'slow_response',
+  ...PROBE_FAILURE_RESULTS,
+])
+
+export function isConnectionHealthProbeFailure(result: string): boolean {
+  return PROBE_FAILURE_RESULTS.has(result)
+}
+
+export function buildConnectionHealthRecordSummary<T extends { result: string }>(eventsDesc: readonly T[]): {
+  records: T[]
+  availabilityPct: number | null
+} {
+  const records = eventsDesc.slice(0, 60).slice().reverse()
+  const probeRecords = records.filter((record) => CONNECTION_HEALTH_PROBE_RESULTS.has(record.result))
+  const okCount = probeRecords.filter((record) => record.result === 'ok' || record.result === 'slow_response').length
+  return {
+    records,
+    availabilityPct: probeRecords.length > 0 ? Math.round((okCount / probeRecords.length) * 100) : null,
+  }
+}
+
+// 元数据未加载时，最多只能从当前已加载事件窗口推导最近失败；账号动作（空模型名或 *）
+// 不属于模型探活失败。remoteAction 可以附着在真实探活失败上，因此不作为排除条件。
+export function latestConnectionHealthProbeFailure<T extends {
+  modelName: string
+  result: string
+  createdAt: string
+}>(records: readonly T[]): T | null {
+  let latest: T | null = null
+  let latestAt = Number.NEGATIVE_INFINITY
+  for (const record of records) {
+    if (!record.modelName || record.modelName === '*' || !isConnectionHealthProbeFailure(record.result)) continue
+    const createdAt = connectionHealthTimeMs(record.createdAt)
+    if (createdAt == null || createdAt <= latestAt) continue
+    latest = record
+    latestAt = createdAt
+  }
+  return latest
+}
+
 // connectionHealthMessageKey 将后端返回的 i18n key 或探活错误码转换为可安全展示的文案 key。
 // 未知值统一回退到通用错误，避免把 admin.connectionHealth.* 等内部标识直接暴露给用户。
 export function connectionHealthMessageKey(

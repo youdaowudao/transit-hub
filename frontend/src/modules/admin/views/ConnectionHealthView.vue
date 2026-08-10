@@ -478,6 +478,8 @@ const onViewEventsAccount = async (account: AdminGroupAccount) => {
 
 const onSetTargetSchedulable = async (account: AdminGroupAccount) => {
   if (!account.targetId || !account.targetId.toLowerCase().startsWith('sub2api:') || account.schedulable == null) return
+  const action = account.schedulable ? '关闭主站调度' : '恢复主站调度'
+  if (!confirm(`确认对 ${account.targetId} 执行「${action}」？`)) return
   await updateTargetSchedulable(account.targetId, !account.schedulable)
 }
 

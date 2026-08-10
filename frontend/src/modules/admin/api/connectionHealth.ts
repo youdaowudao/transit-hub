@@ -4,6 +4,7 @@ import type {
   AdminGroupHealth,
   ConnectionHealthEvent,
   ConnectionHealthOverview,
+  PriorityWorkspaceSyncState,
   ConnectionHealthStoredSummary,
   ConnectionHealthPolicy,
   ManualProbeModelOption,
@@ -69,6 +70,9 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
 
 export const getConnectionHealthOverview = async (): Promise<ConnectionHealthOverview> =>
   requestJson<ConnectionHealthOverview>('/connection-health/overview')
+
+export const getConnectionHealthPrioritySync = async (): Promise<PriorityWorkspaceSyncState | null> =>
+  requestJson<PriorityWorkspaceSyncState | null>('/connection-health/priority-sync')
 
 export const getConnectionHealthStoredSummary = async (): Promise<ConnectionHealthStoredSummary> =>
   requestJson<ConnectionHealthStoredSummary>('/connection-health/stored-summary')

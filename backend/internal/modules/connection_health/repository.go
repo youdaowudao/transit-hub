@@ -284,6 +284,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS pending_age_seconds bigint NOT NULL DEFAULT 0`,
 		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS writeback_spread_seconds integer NOT NULL DEFAULT 1`,
 		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS pending_target_count integer NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS last_write_round_target_count integer NOT NULL DEFAULT 0`,
 		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS last_inventory_read_duration_ms bigint NOT NULL DEFAULT 0`,
 		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS last_write_duration_ms bigint NOT NULL DEFAULT 0`,
 		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS probe_evaluation_count bigint NOT NULL DEFAULT 0`,
@@ -1613,7 +1614,7 @@ func (r *Repository) ListAllPriorityWorkspaceSyncStates(ctx context.Context) ([]
 			reconcile_attempt_count, reconcile_success_count, reconcile_failure_count,
 			snapshot_hit_count, snapshot_miss_count, write_attempt_count, write_success_count,
 			write_failure_count, unchanged_skip_count, window_suppression_count, drift_count,
-			writeback_spread_seconds, pending_target_count, updated_at
+			writeback_spread_seconds, pending_target_count, last_write_round_target_count, updated_at
 		FROM connection_health_priority_workspace_sync_states
 		WHERE pending_signature <> ''
 	`)
@@ -1682,7 +1683,7 @@ func (r *Repository) GetPriorityWorkspaceSyncState(ctx context.Context, userID s
 			reconcile_attempt_count, reconcile_success_count, reconcile_failure_count,
 			snapshot_hit_count, snapshot_miss_count, write_attempt_count, write_success_count,
 			write_failure_count, unchanged_skip_count, window_suppression_count, drift_count,
-			writeback_spread_seconds, pending_target_count, updated_at
+			writeback_spread_seconds, pending_target_count, last_write_round_target_count, updated_at
 		FROM connection_health_priority_workspace_sync_states
 		WHERE user_id = $1 AND admin_account_id = $2
 	`, userID, adminAccountID)
@@ -1705,11 +1706,11 @@ func (r *Repository) UpsertPriorityWorkspaceSyncState(ctx context.Context, state
 			reconcile_attempt_count, reconcile_success_count, reconcile_failure_count,
 			snapshot_hit_count, snapshot_miss_count, write_attempt_count, write_success_count,
 			write_failure_count, unchanged_skip_count, window_suppression_count, drift_count,
-			writeback_spread_seconds, pending_target_count, updated_at
+			writeback_spread_seconds, pending_target_count, last_write_round_target_count, updated_at
 		) VALUES (
 			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
 			$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,
-			$39,$40,$41,$42,$43,$44,$45,$46,$47,now()
+			$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,now()
 		)
 		ON CONFLICT (user_id, admin_account_id) DO UPDATE SET
 			applied_signature = EXCLUDED.applied_signature,
@@ -1757,6 +1758,7 @@ func (r *Repository) UpsertPriorityWorkspaceSyncState(ctx context.Context, state
 			drift_count = EXCLUDED.drift_count,
 			writeback_spread_seconds = EXCLUDED.writeback_spread_seconds,
 			pending_target_count = EXCLUDED.pending_target_count,
+			last_write_round_target_count = EXCLUDED.last_write_round_target_count,
 			updated_at = now()
 	`, state.UserID, state.AdminAccountID, state.AppliedSignature, state.PendingSignature, state.PendingSince,
 		state.LastEvaluationAt, state.LastWriteAttemptAt, state.LastWriteSuccessAt, state.LastDriftAt,
@@ -1771,7 +1773,7 @@ func (r *Repository) UpsertPriorityWorkspaceSyncState(ctx context.Context, state
 		state.ReconcileAttemptCount, state.ReconcileSuccessCount, state.ReconcileFailureCount,
 		state.SnapshotHitCount, state.SnapshotMissCount, state.WriteAttemptCount, state.WriteSuccessCount,
 		state.WriteFailureCount, state.UnchangedSkipCount, state.WindowSuppressionCount, state.DriftCount,
-		state.WritebackSpreadSeconds, state.PendingTargetCount)
+		state.WritebackSpreadSeconds, state.PendingTargetCount, state.LastWriteRoundTargetCount)
 	return err
 }
 
@@ -1791,7 +1793,7 @@ func scanPriorityWorkspaceSyncState(row pgx.Row) (*PriorityWorkspaceSyncState, e
 		&state.ReconcileAttemptCount, &state.ReconcileSuccessCount, &state.ReconcileFailureCount,
 		&state.SnapshotHitCount, &state.SnapshotMissCount, &state.WriteAttemptCount, &state.WriteSuccessCount,
 		&state.WriteFailureCount, &state.UnchangedSkipCount, &state.WindowSuppressionCount, &state.DriftCount,
-		&state.WritebackSpreadSeconds, &state.PendingTargetCount, &state.UpdatedAt,
+		&state.WritebackSpreadSeconds, &state.PendingTargetCount, &state.LastWriteRoundTargetCount, &state.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil

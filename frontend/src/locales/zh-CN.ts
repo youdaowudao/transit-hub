@@ -1267,7 +1267,9 @@ export default {
         probeEvaluations: '探活后排序 {count} 次',
         pendingAge: '当前 pending 年龄',
         pendingAgeValue: '{seconds} 秒',
-        pendingTargetsValue: '待写 target {count} 个',
+        lastWriteRoundTargetValue: '最近一轮计划写入账号：{count} 个',
+        pendingTargetsValue: '当前剩余待写账号：{count} 个',
+        noHistory: '暂无写回记录',
         writes: '主站写入成功/尝试',
         skips: '已抑制写入',
         actionSources: {

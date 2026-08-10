@@ -161,6 +161,7 @@ type priorityWriteBatchSlot struct {
 	targetIDs          []string
 	remainingAfter     int
 	deferredTargets    int
+	targetCount        int
 	final              bool
 }
 
@@ -212,7 +213,7 @@ func (s *Service) preparePriorityWriteBatch(
 		return priorityWriteBatchSlot{
 			signature: batch.signature, snapshotGeneration: batch.snapshotGeneration,
 			remainingAfter:  len(batch.targetIDs) - batch.nextIndex,
-			deferredTargets: batch.deferredTargets,
+			deferredTargets: batch.deferredTargets, targetCount: len(batch.targetIDs),
 		}, true, false
 	}
 	start := batch.nextIndex
@@ -220,8 +221,8 @@ func (s *Service) preparePriorityWriteBatch(
 	return priorityWriteBatchSlot{
 		signature: batch.signature, snapshotGeneration: batch.snapshotGeneration,
 		start: start, end: end, targetIDs: append([]string(nil), batch.targetIDs[start:end]...),
-		remainingAfter: len(batch.targetIDs) - end, final: end == len(batch.targetIDs),
-		deferredTargets: batch.deferredTargets,
+		remainingAfter: len(batch.targetIDs) - end, deferredTargets: batch.deferredTargets,
+		targetCount: len(batch.targetIDs), final: end == len(batch.targetIDs),
 	}, false, false
 }
 
@@ -829,6 +830,12 @@ func (s *Service) syncWorkspacePrioritiesRunMode(
 	pendingTargetIDs, pendingTargetCount, urgentTargetCount := priorityPendingTargetIDs(session.Platform, plan, inventory, syncStates)
 	incidentHeldTargetCount := maxInt(0, pendingTargetCount-len(pendingTargetIDs))
 	state.PendingTargetCount = pendingTargetCount
+	priorityRoundAlreadyStarted := state.PendingSignature == plan.signature &&
+		state.LastInventoryError != "priority_plan_replaced" &&
+		state.LastSuppressionReason != "min_write_interval" &&
+		(state.LastInventoryError == "priority_write_unconfirmed" ||
+			state.LastInventoryError == "priority_batch_in_progress" ||
+			state.LastWriteAttemptAt != nil)
 	if plan.signature == state.AppliedSignature && !priorityPlanHasUnsettledCheckpoints(session.Platform, plan, syncStates) {
 		s.clearPriorityWriteBatch(priorityWorkspaceKey(userID, adminAccountID))
 		state.PendingTargetCount = 0
@@ -948,6 +955,9 @@ func (s *Service) syncWorkspacePrioritiesRunMode(
 		state.NextReconcileAt = &nextReconcileAt
 		state.LastDecision = "pending"
 		state.LastSuppressionReason = "writeback_queued"
+		if session.Platform == upstream.PlatformSub2API && mode.source == priorityActionWriteback && batchSlot.start == 0 && batchSlot.targetCount > 0 && !priorityRoundAlreadyStarted {
+			state.LastWriteRoundTargetCount = batchSlot.targetCount
+		}
 		if !persistWorkspace() {
 			return
 		}

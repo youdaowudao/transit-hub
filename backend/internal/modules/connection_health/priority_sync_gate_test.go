@@ -26,6 +26,9 @@ func TestPriorityWriteGate_SkipsUnchangedOrderAndCoalescesLatestPending(t *testi
 	service := &Service{repo: repo, priorityActions: actions, now: func() time.Time { return now }}
 	policy := priorityGatePolicy()
 	inventory, healthStates := priorityGateInventory(policy, map[string]int{"a": 100, "b": 200, "c": 300})
+	repo.priorityWorkspaceStates["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", LastWriteRoundTargetCount: 9,
+	}
 
 	runPriorityWriteGate(service, repo, inventory, healthStates)
 	if len(actions.calls) != 2 {
@@ -45,6 +48,9 @@ func TestPriorityWriteGate_SkipsUnchangedOrderAndCoalescesLatestPending(t *testi
 	workspace := priorityWorkspaceState(t, repo)
 	if workspace.LastDecision != "skipped" || workspace.LastSuppressionReason != "signature_unchanged" {
 		t.Fatalf("unchanged order decision = %+v", workspace)
+	}
+	if workspace.LastWriteRoundTargetCount != 9 {
+		t.Fatalf("NewAPI combined sync must not overwrite Sub2API round history: %+v", workspace)
 	}
 
 	// The first order change writes after the preceding write interval. Two later changes

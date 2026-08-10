@@ -50,6 +50,8 @@ const route = useRoute()
 const router = useRouter()
 const {
   overview,
+  prioritySync,
+  prioritySyncErrorKey,
   groups,
   adminGroups,
   events,
@@ -784,38 +786,40 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           <dd class="mt-1 text-xl font-semibold tabular-nums text-foreground">{{ conflictCount }}</dd>
         </div>
       </dl>
-      <dl v-if="overview?.prioritySync" class="grid border-t border-border/50 sm:grid-cols-3 xl:grid-cols-6">
+      <dl v-if="prioritySync && prioritySync.lastWriteRoundTargetCount > 0" class="grid border-t border-border/50 sm:grid-cols-3 xl:grid-cols-6">
         <div class="min-w-0 border-b border-border/50 px-4 py-3 sm:border-r xl:border-b-0">
           <dt class="text-xs font-medium text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.decision') }}</dt>
-          <dd class="mt-1 truncate text-sm font-medium text-foreground">{{ prioritySyncDecisionLabel(overview.prioritySync.lastDecision) }}</dd>
-          <p class="mt-1 truncate text-xs text-muted-foreground">{{ prioritySyncActionLabel(overview.prioritySync.lastActionSource) }}</p>
+          <dd class="mt-1 truncate text-sm font-medium text-foreground">{{ prioritySyncDecisionLabel(prioritySync.lastDecision) }}</dd>
+          <p class="mt-1 truncate text-xs text-muted-foreground">{{ prioritySyncActionLabel(prioritySync.lastActionSource) }}</p>
         </div>
         <div class="border-b border-border/50 px-4 py-3 sm:border-r xl:border-b-0">
           <dt class="text-xs font-medium text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.interval') }}</dt>
-          <dd class="mt-1 text-sm font-medium tabular-nums text-foreground">{{ t('admin.connectionHealth.prioritySync.intervalPairValue', { write: overview.prioritySync.minWriteIntervalSeconds, reconcile: overview.prioritySync.reconcileIntervalSeconds }) }}</dd>
-          <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.writebackSpreadValue', { seconds: overview.prioritySync.writebackSpreadSeconds }) }}</p>
+          <dd class="mt-1 text-sm font-medium tabular-nums text-foreground">{{ t('admin.connectionHealth.prioritySync.intervalPairValue', { write: prioritySync.minWriteIntervalSeconds, reconcile: prioritySync.reconcileIntervalSeconds }) }}</dd>
+          <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.writebackSpreadValue', { seconds: prioritySync.writebackSpreadSeconds }) }}</p>
         </div>
         <div class="border-b border-border/50 px-4 py-3 xl:border-b-0 xl:border-r">
           <dt class="text-xs font-medium text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.reconcile') }}</dt>
-          <dd class="mt-1 text-sm font-medium tabular-nums text-foreground">{{ overview.prioritySync.reconcileSuccessCount }}/{{ overview.prioritySync.reconcileAttemptCount }}</dd>
-          <p v-if="overview.prioritySync.lastInventoryError" class="mt-1 truncate text-xs text-destructive">{{ prioritySyncReasonLabel(overview.prioritySync.lastInventoryError) }}</p>
+          <dd class="mt-1 text-sm font-medium tabular-nums text-foreground">{{ prioritySync.reconcileSuccessCount }}/{{ prioritySync.reconcileAttemptCount }}</dd>
+          <p v-if="prioritySync.lastInventoryError" class="mt-1 truncate text-xs text-destructive">{{ prioritySyncReasonLabel(prioritySync.lastInventoryError) }}</p>
         </div>
         <div class="border-b border-border/50 px-4 py-3 sm:border-r sm:border-b-0">
           <dt class="text-xs font-medium text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.snapshots') }}</dt>
-          <dd class="mt-1 text-sm font-medium tabular-nums text-foreground">{{ overview.prioritySync.snapshotHitCount }}/{{ overview.prioritySync.snapshotMissCount }}</dd>
-          <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.probeEvaluations', { count: overview.prioritySync.probeEvaluationCount }) }}</p>
+          <dd class="mt-1 text-sm font-medium tabular-nums text-foreground">{{ prioritySync.snapshotHitCount }}/{{ prioritySync.snapshotMissCount }}</dd>
+          <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.probeEvaluations', { count: prioritySync.probeEvaluationCount }) }}</p>
         </div>
         <div class="border-b border-border/50 px-4 py-3 sm:border-b-0 sm:border-r">
           <dt class="text-xs font-medium text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.writes') }}</dt>
-          <dd class="mt-1 text-sm font-medium tabular-nums text-foreground">{{ overview.prioritySync.writeSuccessCount }}/{{ overview.prioritySync.writeAttemptCount }}</dd>
+          <dd class="mt-1 text-sm font-medium tabular-nums text-foreground">{{ prioritySync.writeSuccessCount }}/{{ prioritySync.writeAttemptCount }}</dd>
         </div>
         <div class="px-4 py-3">
           <dt class="text-xs font-medium text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.pendingAge') }}</dt>
-          <dd class="mt-1 text-sm font-medium tabular-nums text-foreground">{{ t('admin.connectionHealth.prioritySync.pendingAgeValue', { seconds: overview.prioritySync.pendingAgeSeconds }) }}</dd>
-          <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.pendingTargetsValue', { count: overview.prioritySync.pendingTargetCount }) }}</p>
-          <p v-if="overview.prioritySync.lastError || overview.prioritySync.lastSuppressionReason" class="mt-1 truncate text-xs" :class="overview.prioritySync.lastError ? 'text-destructive' : 'text-muted-foreground'">{{ prioritySyncReasonLabel(overview.prioritySync.lastError || overview.prioritySync.lastSuppressionReason) }}</p>
+          <dd class="mt-1 text-sm font-medium tabular-nums text-foreground">{{ t('admin.connectionHealth.prioritySync.pendingAgeValue', { seconds: prioritySync.pendingAgeSeconds }) }}</dd>
+          <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.lastWriteRoundTargetValue', { count: prioritySync.lastWriteRoundTargetCount }) }}</p>
+          <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.pendingTargetsValue', { count: prioritySync.pendingTargetCount }) }}</p>
+          <p v-if="prioritySync.lastError || prioritySync.lastSuppressionReason" class="mt-1 truncate text-xs" :class="prioritySync.lastError ? 'text-destructive' : 'text-muted-foreground'">{{ prioritySyncReasonLabel(prioritySync.lastError || prioritySync.lastSuppressionReason) }}</p>
         </div>
       </dl>
+      <p v-else-if="!prioritySyncErrorKey" class="border-t border-border/50 px-4 py-3 text-sm text-muted-foreground">{{ t('admin.connectionHealth.prioritySync.noHistory') }}</p>
     </section>
 
     <p v-if="errorKey" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">{{ readableMessage(errorKey) }}</p>

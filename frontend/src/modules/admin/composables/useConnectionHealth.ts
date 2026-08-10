@@ -16,6 +16,7 @@ import type {
   SafetyEmergencyClearResult,
   SafetySettings,
   SafetyWorkspaceView,
+  PriorityWorkspaceSyncState,
   TargetPolicyAssignments,
 } from '../types/connectionHealth'
 import type { AdminGroupAccount } from '../types/connectionHealth'
@@ -29,6 +30,7 @@ import {
   getConnectionHealthEvents,
   getConnectionHealthGroups,
   getConnectionHealthOverview,
+  getConnectionHealthPrioritySync,
   getConnectionHealthSafety,
   getAdminGroupPolicyConfiguration,
   getTargetPolicyAssignments,
@@ -45,6 +47,8 @@ import {
 } from '../api/connectionHealth'
 
 const overview = ref<ConnectionHealthOverview | null>(null)
+const prioritySync = ref<PriorityWorkspaceSyncState | null>(null)
+const prioritySyncErrorKey = ref('')
 const groups = ref<OwnGroupHealth[]>([])
 // adminGroups 是新的主列表数据源：当前 admin workspace 下的 admin 全量分组。
 // 与旧的 groups（我的分组链路）并存，供改造后的 ConnectionHealthView 主列表使用。
@@ -133,6 +137,17 @@ export function useConnectionHealth() {
     }
   }
 
+  const loadPrioritySync = async (): Promise<boolean> => {
+    prioritySyncErrorKey.value = ''
+    try {
+      prioritySync.value = await getConnectionHealthPrioritySync()
+      return true
+    } catch (err) {
+      prioritySyncErrorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      return false
+    }
+  }
+
   // silent=true 时跳过 isLoading 切换：用于手动探活等已经在链路级别自带 loading 反馈的
   // 场景下后台刷新主列表数据，避免主列表出现整页 loading 空白/重绘。
   const loadGroups = async (opts: { silent?: boolean } = {}) => {
@@ -182,7 +197,7 @@ export function useConnectionHealth() {
   // 旧的 groups 仍需加载：探活事件弹窗按 connectionId 关联链路上下文、手动探活候选模型按
   // 链路所属 own group 匹配策略，都依赖这份数据；主列表展示已切换到 adminGroups。
   const loadAll = async (opts: { silent?: boolean } = {}) => {
-    await Promise.all([loadAdminGroups(opts), loadGroups({ silent: true })])
+    await Promise.all([loadAdminGroups(opts), loadGroups({ silent: true }), loadPrioritySync()])
   }
 
   const loadEvents = async (connectionId?: string): Promise<boolean> => {
@@ -452,6 +467,8 @@ export function useConnectionHealth() {
 
   return {
     overview,
+    prioritySync,
+    prioritySyncErrorKey,
     groups,
     adminGroups,
     events,
@@ -462,6 +479,7 @@ export function useConnectionHealth() {
     errorKey,
     loadAll,
     loadOverview,
+    loadPrioritySync,
     loadGroups,
     loadAdminGroups,
     loadEvents,

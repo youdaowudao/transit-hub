@@ -19,6 +19,7 @@ const connectionHealthApiSource = readFileSync(
   new URL('../src/modules/admin/api/connectionHealth.ts', import.meta.url),
   'utf8',
 )
+const zhCNSource = readFileSync(new URL('../src/locales/zh-CN.ts', import.meta.url), 'utf8')
 
 describe('connection health priority sync preset', () => {
   it('preserves a hidden non-default max pending age during ordinary edits', () => {
@@ -59,5 +60,14 @@ describe('connection health priority sync preset', () => {
     expect(connectionHealthViewSource).toContain("prioritySync.noHistory")
     expect(connectionHealthViewSource).toContain("prioritySync.lastWriteRoundTargetValue")
     expect(connectionHealthViewSource).toContain("prioritySync.pendingTargetsValue")
+  })
+
+  it('describes the retained interval as failure retry protection', () => {
+    expect(connectionHealthViewSource).toContain("prioritySync.intervalPairValue")
+    expect(policyDrawerSource).toContain("priorityWriteIntervalLabel")
+    expect(zhCNSource).toContain("interval: '失败重试/校验间隔'")
+    expect(zhCNSource).toContain("priorityWriteIntervalLabel: 'Priority 失败重试间隔'")
+    expect(zhCNSource).toContain("min_write_interval: '写入失败，等待重试间隔'")
+    expect(zhCNSource).not.toContain('最短 Priority 写回间隔')
   })
 })

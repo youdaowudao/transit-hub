@@ -278,9 +278,9 @@ func TestPriorityWritebackSpreadFailureKeepsFailedTargetInPendingCount(t *testin
 		}
 	}
 
-	// The next run sees only the failed checkpoint as pending. It must retry that
-	// account without treating the retry as a new write round.
-	now = now.Add(30 * time.Second)
+	// A failed write must retain the workspace retry interval even when the failed
+	// target crosses priority bands. The one-second writeback tick cannot retry it.
+	now = now.Add(time.Second)
 	states, err := repo.ListPrioritySyncStates(context.Background(), "user1", "ws1")
 	if err != nil {
 		t.Fatalf("list checkpoints before retry: %v", err)
@@ -288,6 +288,24 @@ func TestPriorityWritebackSpreadFailureKeepsFailedTargetInPendingCount(t *testin
 	service.syncWorkspacePrioritiesRunMode(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
 		"user1", "ws1", inventory, true, healthStates, states,
 		prioritySyncRunMode{source: priorityActionWriteback, write: true, persistenceContext: context.Background(), snapshotGeneration: 2})
+	if len(actions.calls) != 10 {
+		t.Fatalf("failed write retried before the workspace interval: %+v", actions.calls)
+	}
+	workspace = priorityWorkspaceState(t, repo)
+	if workspace.LastDecision != "pending" || workspace.LastSuppressionReason != "min_write_interval" {
+		t.Fatalf("failed write did not enter the existing retry protection: %+v", workspace)
+	}
+
+	// After the interval, the failed checkpoint may retry without changing the
+	// original round total.
+	now = now.Add(29 * time.Second)
+	states, err = repo.ListPrioritySyncStates(context.Background(), "user1", "ws1")
+	if err != nil {
+		t.Fatalf("list checkpoints after retry interval: %v", err)
+	}
+	service.syncWorkspacePrioritiesRunMode(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true, healthStates, states,
+		prioritySyncRunMode{source: priorityActionWriteback, write: true, persistenceContext: context.Background(), snapshotGeneration: 3})
 	workspace = priorityWorkspaceState(t, repo)
 	if workspace.LastWriteRoundTargetCount != 30 {
 		t.Fatalf("retry changed the full round target count: workspace=%+v", workspace)
@@ -494,20 +512,36 @@ func TestPriorityWritebackIncidentOwnershipDoesNotMarkNormalPlanApplied(t *testi
 	}
 }
 
-func TestPriorityWritebackCrossBandTargetsBypassWindowWithoutPullingSameBandTargets(t *testing.T) {
-	for _, spreadSeconds := range []int{1, 3} {
+func TestPriorityWritebackRecentSuccessStartsCompleteBatchWithCrossBandFirst(t *testing.T) {
+	for _, test := range []struct {
+		spreadSeconds int
+		wantCalls     []int
+	}{
+		{spreadSeconds: 1, wantCalls: []int{10}},
+		{spreadSeconds: 3, wantCalls: []int{4, 8, 10}},
+		{spreadSeconds: 5, wantCalls: []int{2, 4, 6, 8, 10}},
+	} {
+		spreadSeconds := test.spreadSeconds
 		t.Run(fmt.Sprintf("spread_%d", spreadSeconds), func(t *testing.T) {
 			repo := newFakeRepository()
 			now := time.Date(2026, time.August, 9, 3, 15, 0, 0, time.UTC)
 			policy := priorityGatePolicy()
 			policy.PrioritySyncPreset.WritebackSpreadSeconds = spreadSeconds
-			latency := 100
-			inventory := sub2APIPriorityGateInventory(policy, map[string]int{"a": 10, "b": 11, "c": 12})
-			healthStates := []ConnectionHealthState{
-				{ConnectionID: "sub2api:ws1:a", ModelName: "gpt-4o", State: StateDegraded, LastSuccessLatencyMs: &latency},
-				{ConnectionID: "sub2api:ws1:b", ModelName: "gpt-4o", State: StateHealthy, LastSuccessLatencyMs: &latency},
-				{ConnectionID: "sub2api:ws1:c", ModelName: "gpt-4o", State: StateHealthy, LastSuccessLatencyMs: &latency},
+			priorities := make(map[string]int, 10)
+			healthStates := make([]ConnectionHealthState, 0, 10)
+			for index := 0; index < 10; index++ {
+				accountID := string(rune('a' + index))
+				priorities[accountID] = 10 + index
+				latency := 100 + index
+				state := StateHealthy
+				if index == 0 {
+					state = StateDegraded
+				}
+				healthStates = append(healthStates, ConnectionHealthState{
+					ConnectionID: "sub2api:ws1:" + accountID, ModelName: "gpt-4o", State: state, LastSuccessLatencyMs: &latency,
+				})
 			}
+			inventory := sub2APIPriorityGateInventory(policy, priorities)
 			recent := now
 			repo.priorityWorkspaceStates["user1|ws1"] = PriorityWorkspaceSyncState{
 				UserID: "user1", AdminAccountID: "ws1", LastWriteAttemptAt: &recent, LastWriteSuccessAt: &recent,
@@ -515,41 +549,59 @@ func TestPriorityWritebackCrossBandTargetsBypassWindowWithoutPullingSameBandTarg
 			actions := &gatePriorityActioner{}
 			service := &Service{repo: repo, priorityActions: actions, now: func() time.Time { return now }}
 
-			states, _ := repo.ListPrioritySyncStates(context.Background(), "user1", "ws1")
-			service.syncWorkspacePrioritiesRunMode(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
-				"user1", "ws1", inventory, true, healthStates, states,
-				prioritySyncRunMode{source: priorityActionWriteback, write: true, persistenceContext: context.Background(), snapshotGeneration: 1})
-			if len(actions.calls) != 1 || actions.calls[0].targetID != "a" || actions.calls[0].priority != 1000 {
-				t.Fatalf("only cross-band target may bypass the B window: calls=%+v", actions.calls)
+			for slotIndex, wantCalls := range test.wantCalls {
+				states, _ := repo.ListPrioritySyncStates(context.Background(), "user1", "ws1")
+				service.syncWorkspacePrioritiesRunMode(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+					"user1", "ws1", inventory, true, healthStates, states,
+					prioritySyncRunMode{source: priorityActionWriteback, write: true, persistenceContext: context.Background(), snapshotGeneration: 1})
+				if len(actions.calls) != wantCalls {
+					t.Fatalf("after slot %d writes=%d, want %d: %+v", slotIndex+1, len(actions.calls), wantCalls, actions.calls)
+				}
+				workspace := priorityWorkspaceState(t, repo)
+				if workspace.LastWriteRoundTargetCount != 10 || workspace.PendingTargetCount != 10-wantCalls {
+					t.Fatalf("slot %d did not retain the complete ten-account round: %+v", slotIndex+1, workspace)
+				}
+				now = now.Add(time.Second)
 			}
-			first := priorityWorkspaceState(t, repo)
-			if first.LastDecision != "pending" || first.LastSuppressionReason != "min_write_interval" || first.PendingTargetCount != 2 {
-				t.Fatalf("same-band targets were not retained behind the B window: %+v", first)
+			if actions.calls[0].targetID != "a" || actions.calls[0].priority != 1000 {
+				t.Fatalf("cross-band target did not stay first: %+v", actions.calls)
 			}
-			if first.LastWriteRoundTargetCount != 1 {
-				t.Fatalf("window-held same-band target must stay outside the started batch: %+v", first)
-			}
-
-			inventory["sub2api:ws1:a"].currentPriority = 1000
-			now = now.Add(30 * time.Second)
-			states, _ = repo.ListPrioritySyncStates(context.Background(), "user1", "ws1")
-			service.syncWorkspacePrioritiesRunMode(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
-				"user1", "ws1", inventory, true, healthStates, states,
-				prioritySyncRunMode{source: priorityActionWriteback, write: true, persistenceContext: context.Background(), snapshotGeneration: 2})
-			wantCalls := 2
-			if spreadSeconds == 1 {
-				wantCalls = 3
-			}
-			if len(actions.calls) != wantCalls || actions.calls[1].targetID != "b" || actions.calls[1].priority != 10 {
-				t.Fatalf("same-band targets did not wait for then use the B window: calls=%+v", actions.calls)
-			}
-			if spreadSeconds == 1 && (actions.calls[2].targetID != "c" || actions.calls[2].priority != 11) {
-				t.Fatalf("same-band target order changed after the B window: calls=%+v", actions.calls)
-			}
-			if second := priorityWorkspaceState(t, repo); second.LastWriteRoundTargetCount != 2 {
-				t.Fatalf("window release did not record its new two-account batch: %+v", second)
+			if final := priorityWorkspaceState(t, repo); final.LastDecision != "applied" || final.PendingTargetCount != 0 {
+				t.Fatalf("complete normal batch did not converge: %+v", final)
 			}
 		})
+	}
+}
+
+func TestPriorityWritebackHistoricalSuccessfulAttemptDoesNotHideNewRoundCount(t *testing.T) {
+	repo := newFakeRepository()
+	now := time.Date(2026, time.August, 9, 3, 25, 0, 0, time.UTC)
+	policy := priorityGatePolicy()
+	policy.PrioritySyncPreset.WritebackSpreadSeconds = 1
+	latency := 100
+	inventory := sub2APIPriorityGateInventory(policy, map[string]int{"a": 11, "b": 12})
+	healthStates := []ConnectionHealthState{
+		{ConnectionID: "sub2api:ws1:a", ModelName: "gpt-4o", State: StateHealthy, LastSuccessLatencyMs: &latency},
+		{ConnectionID: "sub2api:ws1:b", ModelName: "gpt-4o", State: StateHealthy, LastSuccessLatencyMs: &latency},
+	}
+	plan := buildPriorityWorkspacePlan(upstream.Session{Platform: upstream.PlatformSub2API}, inventory, true, healthStates)
+	recent := now.Add(-time.Second)
+	pendingSince := now.Add(-2 * time.Second)
+	repo.priorityWorkspaceStates["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: plan.signature, PendingSince: &pendingSince,
+		LastDecision: "pending", LastSuppressionReason: "writeback_queued", LastWriteRoundTargetCount: 9,
+		LastWriteAttemptAt: &recent, LastWriteSuccessAt: &recent,
+	}
+	actions := &gatePriorityActioner{}
+	service := &Service{repo: repo, priorityActions: actions, now: func() time.Time { return now }}
+
+	states, _ := repo.ListPrioritySyncStates(context.Background(), "user1", "ws1")
+	service.syncWorkspacePrioritiesRunMode(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true, healthStates, states,
+		prioritySyncRunMode{source: priorityActionWriteback, write: true, persistenceContext: context.Background(), snapshotGeneration: 1})
+	workspace := priorityWorkspaceState(t, repo)
+	if len(actions.calls) != 2 || workspace.LastWriteRoundTargetCount != 2 || workspace.PendingTargetCount != 0 {
+		t.Fatalf("historical successful attempt hid the new batch total: calls=%+v workspace=%+v", actions.calls, workspace)
 	}
 }
 

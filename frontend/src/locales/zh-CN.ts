@@ -1105,7 +1105,16 @@ export default {
           strategyMultiplier: '实际有效倍率',
           upstreamMultiplier: '上游 API Key 倍率',
           latency: '延迟',
+          stability: '最近中断',
           actions: '操作'
+        },
+        stabilityColumn: {
+          notProbed: '未探活',
+          noFailure: '近 24 小时未中断',
+          lastFailure: '断开 {value}前',
+          overDay: '断开 24 小时+',
+          justNow: '刚刚断开',
+          unknownElapsed: '断开时间未知'
         },
         upstreamMultiplierPending: '关联后展示倍率',
         multiplierSources: {

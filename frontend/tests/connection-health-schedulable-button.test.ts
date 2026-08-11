@@ -6,6 +6,10 @@ const componentSource = readFileSync(
   new URL('../src/modules/admin/components/dashboard/AdminGroupHealthDetail.vue', import.meta.url),
   'utf8',
 )
+const viewSource = readFileSync(
+  new URL('../src/modules/admin/views/ConnectionHealthView.vue', import.meta.url),
+  'utf8',
+)
 
 describe('connection health scheduling button state', () => {
   it('uses a persistent green button for schedulable accounts', () => {
@@ -18,5 +22,13 @@ describe('connection health scheduling button state', () => {
     expect(componentSource).toContain(
       ": 'text-muted-foreground hover:bg-surface hover:text-foreground'",
     )
+  })
+
+  it('requires confirmation before changing Sub2API scheduling', () => {
+    const confirmIndex = viewSource.indexOf('if (!confirm(`确认对 ${account.targetId} 执行「${action}」？`)) return')
+    const updateIndex = viewSource.indexOf('await updateTargetSchedulable(account.targetId, !account.schedulable)')
+
+    expect(confirmIndex).toBeGreaterThan(-1)
+    expect(updateIndex).toBeGreaterThan(confirmIndex)
   })
 })

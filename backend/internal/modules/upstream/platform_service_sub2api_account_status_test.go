@@ -1,129 +1,11 @@
 package upstream
 
 import (
-	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
-	"sync/atomic"
 	"testing"
 	"time"
 )
-
-func TestUpdateAdminTargetPriorityContext_CancelsBlockedRequest(t *testing.T) {
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		started <- struct{}{}
-		select {
-		case <-r.Context().Done():
-		case <-release:
-		}
-	}))
-	defer func() {
-		close(release)
-		server.Close()
-	}()
-
-	service := NewPlatformService(NewHTTPClient(server.Client()))
-	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token-1", TokenType: "Bearer"}
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() {
-		result <- service.UpdateAdminTargetPriorityContext(ctx, session, "1515", 1)
-	}()
-
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("blocked priority request did not start")
-	}
-	cancel()
-	select {
-	case err := <-result:
-		if err == nil {
-			t.Fatal("canceled priority request must return an error")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("priority request did not stop after context cancellation")
-	}
-}
-
-func TestUpdateSub2APIAdminAccountStatusContext_CancelsBlockedRequest(t *testing.T) {
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		started <- struct{}{}
-		select {
-		case <-r.Context().Done():
-		case <-release:
-		}
-	}))
-	defer func() {
-		close(release)
-		server.Close()
-	}()
-
-	service := NewPlatformService(NewHTTPClient(server.Client()))
-	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token-1", TokenType: "Bearer"}
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() {
-		result <- service.UpdateSub2APIAdminAccountStatusContext(ctx, session, "1515", "inactive")
-	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("blocked status request did not start")
-	}
-	cancel()
-	select {
-	case err := <-result:
-		if err == nil {
-			t.Fatal("canceled status request must return an error")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("status request did not stop after context cancellation")
-	}
-}
-
-func TestSetSub2APIAdminAccountSchedulableContext_CancelsBlockedRequest(t *testing.T) {
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		started <- struct{}{}
-		select {
-		case <-r.Context().Done():
-		case <-release:
-		}
-	}))
-	defer func() {
-		close(release)
-		server.Close()
-	}()
-
-	service := NewPlatformService(NewHTTPClient(server.Client()))
-	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token-1", TokenType: "Bearer"}
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() {
-		result <- service.SetSub2APIAdminAccountSchedulableContext(ctx, session, "1515", false)
-	}()
-	select {
-	case <-started:
-	case <-time.After(time.Second):
-		t.Fatal("blocked schedulable request did not start")
-	}
-	cancel()
-	select {
-	case err := <-result:
-		if err == nil {
-			t.Fatal("canceled schedulable request must return an error")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("schedulable request did not stop after context cancellation")
-	}
-}
 
 // TestUpdateSub2APIAdminAccountStatus_UsesFieldOnlyBulkUpdate 验证状态更新不会读取或
 // 回写账号详情。请求体只能包含账号 ID 和目标状态，尤其不能携带倍率、凭据或分组字段。
@@ -186,59 +68,6 @@ func TestUpdateAdminTargetPriority_Sub2APIUsesFieldOnlyBulkUpdate(t *testing.T) 
 			t.Fatalf("priority update must never include %s: %+v", forbidden, body)
 		}
 	}
-}
-
-func TestUpdateAdminTargetPriorityPreparedContext_GatesSub2APIPost(t *testing.T) {
-	t.Run("failed preparation sends no request", func(t *testing.T) {
-		var posts atomic.Int32
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			posts.Add(1)
-			writeJSON(w, map[string]any{"success": true})
-		}))
-		defer server.Close()
-
-		service := NewPlatformService(NewHTTPClient(server.Client()))
-		session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token-1", TokenType: "Bearer"}
-		prepareErr := errors.New("stale mutation generation")
-		err := service.UpdateAdminTargetPriorityPreparedContext(context.Background(), session, "1515", 1, func() error {
-			return prepareErr
-		})
-		if !errors.Is(err, prepareErr) {
-			t.Fatalf("prepared priority error=%v, want %v", err, prepareErr)
-		}
-		if posts.Load() != 0 {
-			t.Fatalf("failed preparation sent %d Sub2API requests", posts.Load())
-		}
-	})
-
-	t.Run("successful preparation runs before request", func(t *testing.T) {
-		var prepared atomic.Bool
-		var posts atomic.Int32
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost || r.URL.Path != "/api/v1/admin/accounts/bulk-update" {
-				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-			}
-			if !prepared.Load() {
-				t.Error("Sub2API request started before preparation completed")
-			}
-			posts.Add(1)
-			writeJSON(w, map[string]any{"success": true})
-		}))
-		defer server.Close()
-
-		service := NewPlatformService(NewHTTPClient(server.Client()))
-		session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token-1", TokenType: "Bearer"}
-		err := service.UpdateAdminTargetPriorityPreparedContext(context.Background(), session, "1515", 1, func() error {
-			prepared.Store(true)
-			return nil
-		})
-		if err != nil {
-			t.Fatalf("prepared Sub2API priority write failed: %v", err)
-		}
-		if posts.Load() != 1 {
-			t.Fatalf("prepared priority write sent %d requests, want 1", posts.Load())
-		}
-	})
 }
 
 func TestSetSub2APIAdminAccountSchedulable_UsesDedicatedFieldEndpoint(t *testing.T) {

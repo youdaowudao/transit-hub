@@ -2,7 +2,6 @@ package connection_health
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"transithub/backend/internal/modules/my_sites"
@@ -66,52 +65,10 @@ const (
 )
 
 const (
-	PriorityDriftActionAlertOnly = "alert_only"
-	PriorityReadModeInventory    = "inventory_snapshot"
-
-	defaultPriorityMinWriteIntervalSeconds  = 30
-	defaultPriorityWritebackSpreadSeconds   = 1
-	defaultPriorityMaxPendingAgeSeconds     = 300
-	defaultPriorityReconcileIntervalSeconds = 30
-	defaultInventorySnapshotTTLSeconds      = 60
-	defaultReconcileFailureBackoffSeconds   = 30
-)
-
-// PrioritySyncPreset controls the workspace-level writeback gate and the independent C-phase
-// inventory reconciliation cadence. ProbeIntervalSeconds remains the separate probe cadence.
-type PrioritySyncPreset struct {
-	MinWriteIntervalSeconds        int    `json:"minWriteIntervalSeconds"`
-	WritebackSpreadSeconds         int    `json:"writebackSpreadSeconds"`
-	MaxPendingAgeSeconds           int    `json:"maxPendingAgeSeconds"`
-	ReconcileIntervalSeconds       int    `json:"reconcileIntervalSeconds"`
-	InventorySnapshotTTLSeconds    int    `json:"inventorySnapshotTtlSeconds"`
-	ReconcileFailureBackoffSeconds int    `json:"reconcileFailureBackoffSeconds"`
-	DriftAction                    string `json:"driftAction"`
-	ReadMode                       string `json:"readMode"`
-	writebackSpreadSecondsSet      bool
-}
-
-func (p *PrioritySyncPreset) UnmarshalJSON(data []byte) error {
-	type presetAlias PrioritySyncPreset
-	var decoded presetAlias
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	*p = PrioritySyncPreset(decoded)
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
-	_, p.writebackSpreadSecondsSet = fields["writebackSpreadSeconds"]
-	return nil
-}
-
-const (
-	ErrorRequest            = "admin.connectionHealth.errors.request"
-	ErrorUnknown            = "admin.connectionHealth.errors.unknown"
-	ErrorNotFound           = "admin.connectionHealth.errors.notFound"
-	ErrorNoCurrentAccount   = "admin.adminAccounts.errors.noCurrentAccount"
-	ErrorManualActionFailed = "admin.connectionHealth.errors.manualActionFailed"
+	ErrorRequest          = "admin.connectionHealth.errors.request"
+	ErrorUnknown          = "admin.connectionHealth.errors.unknown"
+	ErrorNotFound         = "admin.connectionHealth.errors.notFound"
+	ErrorNoCurrentAccount = "admin.adminAccounts.errors.noCurrentAccount"
 	// ErrorNoMatchingModels: 手动探活请求体显式指定了 models，但没有一个模型命中该连接
 	// 当前匹配到的启用策略/启用模型目标。与"models 为空时探活全部匹配目标但目标本身为空"
 	// 的旧行为（200 + 空数组）区分开，让前端能区分"策略配置问题"和"探活完成但结果为空"。
@@ -190,120 +147,56 @@ type PrioritySyncState struct {
 	// PendingPriority is persisted before an upstream write. If the process dies or the
 	// database write after the upstream call fails, the next tick can confirm the value
 	// instead of treating a successful system write as a manual conflict.
-	PendingPriority           *int      `json:"-"`
-	PendingMutationGeneration int64     `json:"-"`
-	PendingSource             string    `json:"-"`
-	PendingEpoch              int64     `json:"-"`
-	PendingActionKey          string    `json:"-"`
-	EffectiveMultiplier       float64   `json:"effectiveMultiplier"`
-	Conflict                  bool      `json:"conflict"`
-	LastConflictPriority      *int      `json:"lastConflictPriority,omitempty"`
-	UpdatedAt                 time.Time `json:"updatedAt"`
-}
-
-// PriorityWorkspaceSyncState is the single workspace-level source for the effective ordering
-// signature, coalesced pending signature and writeback observations. Per-target upstream values
-// remain in PrioritySyncState; this row only gates when that existing write path may run.
-type PriorityWorkspaceSyncState struct {
-	UserID                         string     `json:"-"`
-	AdminAccountID                 string     `json:"-"`
-	AppliedSignature               string     `json:"-"`
-	PendingSignature               string     `json:"-"`
-	PendingSince                   *time.Time `json:"pendingSince,omitempty"`
-	LastEvaluationAt               *time.Time `json:"lastEvaluationAt,omitempty"`
-	LastWriteAttemptAt             *time.Time `json:"lastWriteAttemptAt,omitempty"`
-	LastWriteSuccessAt             *time.Time `json:"lastWriteSuccessAt,omitempty"`
-	LastDriftAt                    *time.Time `json:"lastDriftAt,omitempty"`
-	LastReconcileAttemptAt         *time.Time `json:"lastReconcileAttemptAt,omitempty"`
-	LastReconcileSuccessAt         *time.Time `json:"lastReconcileSuccessAt,omitempty"`
-	LastReconcileFailureAt         *time.Time `json:"lastReconcileFailureAt,omitempty"`
-	NextReconcileAt                *time.Time `json:"nextReconcileAt,omitempty"`
-	InventorySnapshotExpiresAt     *time.Time `json:"inventorySnapshotExpiresAt,omitempty"`
-	LastDecision                   string     `json:"lastDecision"`
-	LastSuppressionReason          string     `json:"lastSuppressionReason"`
-	LastError                      string     `json:"lastError"`
-	LastInventoryError             string     `json:"lastInventoryError"`
-	InventoryStatus                string     `json:"inventoryStatus"`
-	LastActionSource               string     `json:"lastActionSource"`
-	PolicyVersion                  string     `json:"policyVersion"`
-	MinWriteIntervalSeconds        int        `json:"minWriteIntervalSeconds"`
-	WritebackSpreadSeconds         int        `json:"writebackSpreadSeconds"`
-	MaxPendingAgeSeconds           int        `json:"maxPendingAgeSeconds"`
-	ReconcileIntervalSeconds       int        `json:"reconcileIntervalSeconds"`
-	InventorySnapshotTTLSeconds    int        `json:"inventorySnapshotTtlSeconds"`
-	ReconcileFailureBackoffSeconds int        `json:"reconcileFailureBackoffSeconds"`
-	DriftAction                    string     `json:"driftAction"`
-	ReadMode                       string     `json:"readMode"`
-	PendingAgeSeconds              int64      `json:"pendingAgeSeconds"`
-	PendingTargetCount             int        `json:"pendingTargetCount"`
-	LastWriteRoundTargetCount      int        `json:"lastWriteRoundTargetCount"`
-	LastInventoryReadDurationMs    int64      `json:"lastInventoryReadDurationMs"`
-	LastWriteDurationMs            int64      `json:"lastWriteDurationMs"`
-	EvaluationCount                int64      `json:"evaluationCount"`
-	ProbeEvaluationCount           int64      `json:"probeEvaluationCount"`
-	SignatureChangeCount           int64      `json:"signatureChangeCount"`
-	ReconcileAttemptCount          int64      `json:"reconcileAttemptCount"`
-	ReconcileSuccessCount          int64      `json:"reconcileSuccessCount"`
-	ReconcileFailureCount          int64      `json:"reconcileFailureCount"`
-	SnapshotHitCount               int64      `json:"snapshotHitCount"`
-	SnapshotMissCount              int64      `json:"snapshotMissCount"`
-	WriteAttemptCount              int64      `json:"writeAttemptCount"`
-	WriteSuccessCount              int64      `json:"writeSuccessCount"`
-	WriteFailureCount              int64      `json:"writeFailureCount"`
-	UnchangedSkipCount             int64      `json:"unchangedSkipCount"`
-	WindowSuppressionCount         int64      `json:"windowSuppressionCount"`
-	DriftCount                     int64      `json:"driftCount"`
-	UpdatedAt                      time.Time  `json:"updatedAt"`
+	PendingPriority      *int      `json:"-"`
+	EffectiveMultiplier  float64   `json:"effectiveMultiplier"`
+	Conflict             bool      `json:"conflict"`
+	LastConflictPriority *int      `json:"lastConflictPriority,omitempty"`
+	UpdatedAt            time.Time `json:"updatedAt"`
 }
 
 // TargetActionState 记录分组健康首次接管账号/渠道启停或权重前的上游状态。
 // 健康恢复后只能恢复到这里保存的原值，不能假设账号原本一定启用或权重一定为 100。
 type TargetActionState struct {
-	UserID                    string
-	AdminAccountID            string
-	TargetID                  string
-	OriginalStatus            string
-	OriginalWeight            *int
-	LastAppliedStatus         string
-	LastAppliedWeight         *int
-	PendingStatus             string
-	PendingWeight             *int
-	PendingMutationGeneration int64
-	PendingSource             string
-	PendingEpoch              int64
-	PendingActionKey          string
-	Conflict                  bool
-	UpdatedAt                 time.Time
+	UserID            string
+	AdminAccountID    string
+	TargetID          string
+	OriginalStatus    string
+	OriginalWeight    *int
+	LastAppliedStatus string
+	LastAppliedWeight *int
+	PendingStatus     string
+	PendingWeight     *int
+	Conflict          bool
+	UpdatedAt         time.Time
 }
 
 // Policy 对应 connection_health_policies 表：一条健康探活/降级策略，
 // 按 own_group_id 匹配对接链路（own_group_id 为空表示匹配该 workspace 下全部已对接分组）。
 type Policy struct {
-	ID                                string             `json:"id"`
-	UserID                            string             `json:"-"`
-	AdminAccountID                    string             `json:"-"`
-	Name                              string             `json:"name"`
-	Enabled                           bool               `json:"enabled"`
-	OwnGroupID                        string             `json:"ownGroupId"`
-	OwnGroupName                      string             `json:"ownGroupName"`
-	ModelPattern                      string             `json:"modelPattern"`
-	ProbeMode                         string             `json:"probeMode"`
-	ProbeIntervalSeconds              int                `json:"probeIntervalSeconds"`
-	ContinueProbeWhenUnschedulable    bool               `json:"continueProbeWhenUnschedulable"`
-	UnschedulableProbeIntervalMinutes int                `json:"unschedulableProbeIntervalMinutes"`
-	FailureThreshold                  int                `json:"failureThreshold"`
-	SuccessThreshold                  int                `json:"successThreshold"`
-	CooldownSeconds                   int                `json:"cooldownSeconds"`
-	ObservationSeconds                int                `json:"observationSeconds"`
-	RecoveryStepPercent               int                `json:"recoveryStepPercent"`
-	AutoDegradeEnabled                bool               `json:"autoDegradeEnabled"`
-	AutoRemoteActionEnabled           bool               `json:"autoRemoteActionEnabled"`
-	PriorityMode                      string             `json:"priorityMode"`
-	StrategyMode                      string             `json:"strategyMode"`
-	PrioritySyncPreset                PrioritySyncPreset `json:"prioritySyncPreset"`
-	DailyProbeBudget                  int                `json:"dailyProbeBudget"`
-	CreatedAt                         time.Time          `json:"createdAt"`
-	UpdatedAt                         time.Time          `json:"updatedAt"`
+	ID                                string    `json:"id"`
+	UserID                            string    `json:"-"`
+	AdminAccountID                    string    `json:"-"`
+	Name                              string    `json:"name"`
+	Enabled                           bool      `json:"enabled"`
+	OwnGroupID                        string    `json:"ownGroupId"`
+	OwnGroupName                      string    `json:"ownGroupName"`
+	ModelPattern                      string    `json:"modelPattern"`
+	ProbeMode                         string    `json:"probeMode"`
+	ProbeIntervalSeconds              int       `json:"probeIntervalSeconds"`
+	ContinueProbeWhenUnschedulable    bool      `json:"continueProbeWhenUnschedulable"`
+	UnschedulableProbeIntervalMinutes int       `json:"unschedulableProbeIntervalMinutes"`
+	FailureThreshold                  int       `json:"failureThreshold"`
+	SuccessThreshold                  int       `json:"successThreshold"`
+	CooldownSeconds                   int       `json:"cooldownSeconds"`
+	ObservationSeconds                int       `json:"observationSeconds"`
+	RecoveryStepPercent               int       `json:"recoveryStepPercent"`
+	AutoDegradeEnabled                bool      `json:"autoDegradeEnabled"`
+	AutoRemoteActionEnabled           bool      `json:"autoRemoteActionEnabled"`
+	PriorityMode                      string    `json:"priorityMode"`
+	StrategyMode                      string    `json:"strategyMode"`
+	DailyProbeBudget                  int       `json:"dailyProbeBudget"`
+	CreatedAt                         time.Time `json:"createdAt"`
+	UpdatedAt                         time.Time `json:"updatedAt"`
 	// ModelTargets 不是数据库列，是查询时一并装载的关联目标（connection_health_model_targets）。
 	ModelTargets []ModelTarget `json:"modelTargets"`
 }
@@ -379,10 +272,9 @@ type ConnectionHealthEvent struct {
 
 // ProbeOutcome 是一次真实探活的结果，供状态机和事件记录消费。
 type ProbeOutcome struct {
-	Result            ResultKey
-	LatencyMs         int
-	Detail            string
-	RetryAfterSeconds int
+	Result    ResultKey
+	LatencyMs int
+	Detail    string
 }
 
 // MySitesReader 是 connection_health 对 my_sites 模块的全部只读依赖，
@@ -421,8 +313,7 @@ type PlatformGroupReader interface {
 	ResolveProbeCredential(session upstream.Session, account upstream.AdminGroupAccountInfo) (upstream.ProbeCredential, error)
 }
 
-// PlatformGroupContextReader is the production scheduler extension. Keeping it optional
-// preserves existing request-path readers while allowing shutdown to cancel inventory HTTP calls.
+// Context 扩展保持手动探活关闭后能够中断正在等待的上游请求；测试 fake 仍可只实现旧接口。
 type PlatformGroupContextReader interface {
 	FetchAdminAllGroupsContext(ctx context.Context, session upstream.Session) ([]upstream.AdminGroupInfo, error)
 	ListAdminGroupAccountsContext(ctx context.Context, session upstream.Session, group upstream.AdminGroupInfo) ([]upstream.AdminGroupAccountInfo, error)

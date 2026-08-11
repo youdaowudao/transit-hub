@@ -654,7 +654,7 @@ func TestCollectAdminProbeJobs_MultiWorkspaceIsolation(t *testing.T) {
 	}
 }
 
-func TestRunSchedulerTick_DoesNotWritePriorityWhenOneTargetHealthChangesWithoutReordering(t *testing.T) {
+func TestRunSchedulerTick_SyncsPriorityAfterProbeStateChanges(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -695,11 +695,6 @@ func TestRunSchedulerTick_DoesNotWritePriorityWhenOneTargetHealthChangesWithoutR
 		platformGroups: reader, priorityActions: priorityActions, dispatcher: noopRemoteActionRunner{},
 		probeRunner: NewRealProbeRunner(),
 	}
-	inventory, err := service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
-	if err != nil {
-		t.Fatalf("prime inventory snapshot: %v", err)
-	}
-	service.putAdminInventorySnapshot(context.Background(), "user1", "ws1", inventory, time.Now().UTC(), time.Minute)
 
 	service.runSchedulerTick(context.Background())
 
@@ -707,10 +702,10 @@ func TestRunSchedulerTick_DoesNotWritePriorityWhenOneTargetHealthChangesWithoutR
 	if stored.State != StateSuspended {
 		t.Fatalf("probe state = %q, want suspended", stored.State)
 	}
-	if len(priorityActions.calls) != 0 {
-		t.Fatalf("a health-only change without a global order change must not write priority: calls=%+v priority_states=%+v states=%+v", priorityActions.calls, repo.priorityStates, repo.states)
+	if len(priorityActions.calls) != 1 || priorityActions.calls[0].priority != 1 {
+		t.Fatalf("post-probe priority was not synchronized in the same tick: calls=%+v priority_states=%+v states=%+v", priorityActions.calls, repo.priorityStates, repo.states)
 	}
-	if repo.priorityLeaseCount["user1|ws1"] != 1 {
-		t.Fatalf("probe tick must only lease the local post-probe evaluation: %+v", repo.priorityLeaseCount)
+	if repo.priorityLeaseCount["user1|ws1"] != 2 {
+		t.Fatalf("scheduler priority sync must use the workspace lease before and after probes: %+v", repo.priorityLeaseCount)
 	}
 }

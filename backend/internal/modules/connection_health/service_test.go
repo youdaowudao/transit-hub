@@ -19,37 +19,35 @@ import (
 
 // fakeRepository 是 healthRepository 的内存实现，供 service 单测使用，不连接真实数据库。
 type fakeRepository struct {
-	policies                []Policy
-	states                  map[string]map[string]ConnectionHealthState // connectionID -> modelName -> state
-	events                  []ConnectionHealthEvent
-	assignments             []PolicyAssignment
-	groupAssignments        []GroupPolicyAssignment
-	groupExclusions         []GroupTargetExclusion
-	priorityStates          map[string]PrioritySyncState
-	priorityWorkspaceStates map[string]PriorityWorkspaceSyncState
-	targetActionStates      map[string]TargetActionState
-	groupSortSettings       map[string]GroupProbeSortSetting
-	budgetClaims            map[string]int
-	insertEventErr          error
-	upsertStateErr          error
-	savePolicyErr           error
-	deletePolicyErr         error
-	targetLeaseBlocked      bool
-	priorityLeaseMu         sync.Mutex
-	priorityLeases          map[string]*sync.Mutex
-	priorityLeaseCount      map[string]int
+	policies           []Policy
+	states             map[string]map[string]ConnectionHealthState // connectionID -> modelName -> state
+	events             []ConnectionHealthEvent
+	assignments        []PolicyAssignment
+	groupAssignments   []GroupPolicyAssignment
+	groupExclusions    []GroupTargetExclusion
+	priorityStates     map[string]PrioritySyncState
+	targetActionStates map[string]TargetActionState
+	groupSortSettings  map[string]GroupProbeSortSetting
+	budgetClaims       map[string]int
+	insertEventErr     error
+	upsertStateErr     error
+	savePolicyErr      error
+	deletePolicyErr    error
+	targetLeaseBlocked bool
+	priorityLeaseMu    sync.Mutex
+	priorityLeases     map[string]*sync.Mutex
+	priorityLeaseCount map[string]int
 }
 
 func newFakeRepository() *fakeRepository {
 	return &fakeRepository{
-		states:                  map[string]map[string]ConnectionHealthState{},
-		priorityStates:          map[string]PrioritySyncState{},
-		priorityWorkspaceStates: map[string]PriorityWorkspaceSyncState{},
-		targetActionStates:      map[string]TargetActionState{},
-		groupSortSettings:       map[string]GroupProbeSortSetting{},
-		budgetClaims:            map[string]int{},
-		priorityLeases:          map[string]*sync.Mutex{},
-		priorityLeaseCount:      map[string]int{},
+		states:             map[string]map[string]ConnectionHealthState{},
+		priorityStates:     map[string]PrioritySyncState{},
+		targetActionStates: map[string]TargetActionState{},
+		groupSortSettings:  map[string]GroupProbeSortSetting{},
+		budgetClaims:       map[string]int{},
+		priorityLeases:     map[string]*sync.Mutex{},
+		priorityLeaseCount: map[string]int{},
 	}
 }
 
@@ -293,79 +291,6 @@ func TestSavePolicy_OmittedUnschedulableProbeSettingsPreservesExistingValues(t *
 	}
 	if saved.ContinueProbeWhenUnschedulable || saved.UnschedulableProbeIntervalMinutes != 180 {
 		t.Fatalf("omitted fields must preserve existing values: %+v", saved)
-	}
-}
-
-func TestSavePolicy_BEraPresetPreservesCFields(t *testing.T) {
-	repo := newFakeRepository()
-	repo.policies = []Policy{{
-		ID: "p1", UserID: "user1", AdminAccountID: "ws1", Name: "existing", Enabled: true,
-		PrioritySyncPreset: PrioritySyncPreset{
-			MinWriteIntervalSeconds: 45, MaxPendingAgeSeconds: 240,
-			ReconcileIntervalSeconds: 11, InventorySnapshotTTLSeconds: 19,
-			ReconcileFailureBackoffSeconds: 23,
-			DriftAction:                    PriorityDriftActionAlertOnly, ReadMode: PriorityReadModeInventory,
-		},
-	}}
-	service := &Service{repo: repo, accounts: fakeAdminAccountResolver{id: "ws1"}}
-
-	saved, err := service.SavePolicy(context.Background(), "user1", PolicyInput{
-		ID: "p1", Name: "B client update", Enabled: true,
-		PrioritySyncPreset: &PrioritySyncPreset{MinWriteIntervalSeconds: 45, MaxPendingAgeSeconds: 240},
-	})
-	if err != nil {
-		t.Fatalf("SavePolicy() error = %v", err)
-	}
-	if saved.PrioritySyncPreset.ReconcileIntervalSeconds != 11 ||
-		saved.PrioritySyncPreset.InventorySnapshotTTLSeconds != 19 ||
-		saved.PrioritySyncPreset.ReconcileFailureBackoffSeconds != 23 ||
-		saved.PrioritySyncPreset.WritebackSpreadSeconds != 1 {
-		t.Fatalf("B-era partial preset must preserve C fields: %+v", saved.PrioritySyncPreset)
-	}
-}
-
-func TestNormalizePrioritySyncPresetWritebackSpreadDefaultsAndBounds(t *testing.T) {
-	defaultPreset, err := normalizePrioritySyncPreset(nil)
-	if err != nil || defaultPreset.WritebackSpreadSeconds != 1 {
-		t.Fatalf("omitted E spread must default to one second: preset=%+v err=%v", defaultPreset, err)
-	}
-	for _, invalid := range []int{-1, 11} {
-		preset := defaultPreset
-		preset.WritebackSpreadSeconds = invalid
-		if _, err := normalizePrioritySyncPreset(&preset); err != requestError(ErrorRequest) {
-			t.Fatalf("spread=%d error=%v, want %s", invalid, err, ErrorRequest)
-		}
-	}
-	preset := defaultPreset
-	preset.WritebackSpreadSeconds = 10
-	if normalized, err := normalizePrioritySyncPreset(&preset); err != nil || normalized.WritebackSpreadSeconds != 10 {
-		t.Fatalf("spread upper bound was rejected: preset=%+v err=%v", normalized, err)
-	}
-	for _, test := range []struct {
-		json string
-		want int
-		err  bool
-	}{
-		{json: `{}`, want: 1},
-		{json: `{"writebackSpreadSeconds":0}`, err: true},
-		{json: `{"writebackSpreadSeconds":1}`, want: 1},
-		{json: `{"writebackSpreadSeconds":10}`, want: 10},
-		{json: `{"writebackSpreadSeconds":11}`, err: true},
-	} {
-		var decoded PrioritySyncPreset
-		if err := json.Unmarshal([]byte(test.json), &decoded); err != nil {
-			t.Fatalf("decode %s: %v", test.json, err)
-		}
-		normalized, err := normalizePrioritySyncPreset(&decoded)
-		if test.err {
-			if err != requestError(ErrorRequest) {
-				t.Fatalf("preset %s error=%v, want %s", test.json, err, ErrorRequest)
-			}
-			continue
-		}
-		if err != nil || normalized.WritebackSpreadSeconds != test.want {
-			t.Fatalf("preset %s normalized=%+v err=%v", test.json, normalized, err)
-		}
 	}
 }
 
@@ -756,16 +681,6 @@ func (f *fakeRepository) ListAllPrioritySyncStates(ctx context.Context) ([]Prior
 	return out, nil
 }
 
-func (f *fakeRepository) ListAllPriorityWorkspaceSyncStates(ctx context.Context) ([]PriorityWorkspaceSyncState, error) {
-	out := make([]PriorityWorkspaceSyncState, 0, len(f.priorityWorkspaceStates))
-	for _, state := range f.priorityWorkspaceStates {
-		if state.PendingSignature != "" {
-			out = append(out, state)
-		}
-	}
-	return out, nil
-}
-
 func (f *fakeRepository) UpsertPrioritySyncState(ctx context.Context, state PrioritySyncState) error {
 	if f.priorityStates == nil {
 		f.priorityStates = map[string]PrioritySyncState{}
@@ -776,23 +691,6 @@ func (f *fakeRepository) UpsertPrioritySyncState(ctx context.Context, state Prio
 
 func (f *fakeRepository) DeletePrioritySyncState(ctx context.Context, userID string, adminAccountID string, targetID string) error {
 	delete(f.priorityStates, userID+"|"+adminAccountID+"|"+targetID)
-	return nil
-}
-
-func (f *fakeRepository) GetPriorityWorkspaceSyncState(ctx context.Context, userID string, adminAccountID string) (*PriorityWorkspaceSyncState, error) {
-	state, ok := f.priorityWorkspaceStates[userID+"|"+adminAccountID]
-	if !ok {
-		return nil, nil
-	}
-	copy := state
-	return &copy, nil
-}
-
-func (f *fakeRepository) UpsertPriorityWorkspaceSyncState(ctx context.Context, state PriorityWorkspaceSyncState) error {
-	if f.priorityWorkspaceStates == nil {
-		f.priorityWorkspaceStates = map[string]PriorityWorkspaceSyncState{}
-	}
-	f.priorityWorkspaceStates[state.UserID+"|"+state.AdminAccountID] = state
 	return nil
 }
 

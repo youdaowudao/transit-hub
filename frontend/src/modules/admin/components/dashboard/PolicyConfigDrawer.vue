@@ -4,7 +4,7 @@ import { ArrowDownUp, BookOpenText, Radar, X, ShieldCheck, Plus, Trash2 } from '
 import { HelpTooltip } from '@/components/ui/tooltip'
 import PolicyRunFlowDialog from './PolicyRunFlowDialog.vue'
 import type { ConnectionHealthPolicy, ConnectionHealthPriorityMode, ConnectionHealthStrategyMode, ModelTargetInput, PolicyInput } from '../../types/connectionHealth'
-import { preservePriorityMaxPendingAge, resolveConnectionHealthStrategyMode } from '../../utils/connectionHealthPolicy'
+import { resolveConnectionHealthStrategyMode } from '../../utils/connectionHealthPolicy'
 
 export interface OwnGroupOption {
   id: string
@@ -37,12 +37,6 @@ const DEFAULTS = {
   recoveryStepPercent: 25,
   dailyProbeBudget: 1000,
   unschedulableProbeIntervalMinutes: 60,
-  priorityMinWriteIntervalSeconds: 30,
-  priorityWritebackSpreadSeconds: 1,
-  priorityMaxPendingAgeSeconds: 300,
-  priorityReconcileIntervalSeconds: 30,
-  inventorySnapshotTtlSeconds: 60,
-  reconcileFailureBackoffSeconds: 30,
   maxProbeTokens: 1,
 }
 
@@ -62,12 +56,6 @@ const autoDegradeEnabled = ref(true)
 const autoRemoteActionEnabled = ref(false)
 const priorityMode = ref<ConnectionHealthPriorityMode>('none')
 const strategyMode = ref<ConnectionHealthStrategyMode>('health_probe')
-const priorityMinWriteIntervalSeconds = ref(DEFAULTS.priorityMinWriteIntervalSeconds)
-const priorityWritebackSpreadSeconds = ref(DEFAULTS.priorityWritebackSpreadSeconds)
-const priorityMaxPendingAgeSeconds = ref(DEFAULTS.priorityMaxPendingAgeSeconds)
-const priorityReconcileIntervalSeconds = ref(DEFAULTS.priorityReconcileIntervalSeconds)
-const inventorySnapshotTtlSeconds = ref(DEFAULTS.inventorySnapshotTtlSeconds)
-const reconcileFailureBackoffSeconds = ref(DEFAULTS.reconcileFailureBackoffSeconds)
 const modelTargets = ref<ModelTargetInput[]>([])
 const validationError = ref<string | null>(null)
 const runFlowOpen = ref(false)
@@ -99,12 +87,6 @@ const resetForm = () => {
   autoRemoteActionEnabled.value = autoDegradeEnabled.value && (p?.autoRemoteActionEnabled ?? false)
   priorityMode.value = p?.priorityMode === 'multiplier' ? 'multiplier' : 'none'
   strategyMode.value = p ? resolveConnectionHealthStrategyMode(p) : 'health_probe'
-  priorityMinWriteIntervalSeconds.value = p?.prioritySyncPreset?.minWriteIntervalSeconds ?? DEFAULTS.priorityMinWriteIntervalSeconds
-  priorityWritebackSpreadSeconds.value = p?.prioritySyncPreset?.writebackSpreadSeconds ?? DEFAULTS.priorityWritebackSpreadSeconds
-  priorityMaxPendingAgeSeconds.value = p?.prioritySyncPreset?.maxPendingAgeSeconds ?? DEFAULTS.priorityMaxPendingAgeSeconds
-  priorityReconcileIntervalSeconds.value = p?.prioritySyncPreset?.reconcileIntervalSeconds ?? DEFAULTS.priorityReconcileIntervalSeconds
-  inventorySnapshotTtlSeconds.value = p?.prioritySyncPreset?.inventorySnapshotTtlSeconds ?? DEFAULTS.inventorySnapshotTtlSeconds
-  reconcileFailureBackoffSeconds.value = p?.prioritySyncPreset?.reconcileFailureBackoffSeconds ?? DEFAULTS.reconcileFailureBackoffSeconds
 
   // 已有模型目标全部同一个 provider 时直接复用该 provider 初始化——必须从"唯一值"取，
   // 不能从 modelTargets[0] 取，否则历史数据里第一条 provider 恰好为空、后面几条其实
@@ -180,22 +162,6 @@ const handleSave = () => {
     validationError.value = t(`${prefix}.errors.unschedulableIntervalInvalid`)
     return
   }
-  if (!Number.isInteger(priorityMinWriteIntervalSeconds.value) || priorityMinWriteIntervalSeconds.value <= 0) {
-    validationError.value = t(`${prefix}.errors.priorityWriteIntervalInvalid`)
-    return
-  }
-  if (!Number.isInteger(priorityWritebackSpreadSeconds.value) || priorityWritebackSpreadSeconds.value < 1 || priorityWritebackSpreadSeconds.value > 10) {
-    validationError.value = t(`${prefix}.errors.priorityWritebackSpreadInvalid`)
-    return
-  }
-  if (
-    !Number.isInteger(priorityReconcileIntervalSeconds.value) || priorityReconcileIntervalSeconds.value <= 0
-    || !Number.isInteger(inventorySnapshotTtlSeconds.value) || inventorySnapshotTtlSeconds.value <= 0
-    || !Number.isInteger(reconcileFailureBackoffSeconds.value) || reconcileFailureBackoffSeconds.value <= 0
-  ) {
-    validationError.value = t(`${prefix}.errors.priorityFrequencyInvalid`)
-    return
-  }
 
   const ownGroup = props.ownGroupOptions.find(g => g.id === ownGroupId.value)
   const input: PolicyInput = {
@@ -217,16 +183,6 @@ const handleSave = () => {
     autoRemoteActionEnabled: isMultiplierOnly.value ? false : autoRemoteActionEnabled.value,
     priorityMode: isMultiplierOnly.value ? 'multiplier' : priorityMode.value,
     strategyMode: strategyMode.value,
-    prioritySyncPreset: {
-      minWriteIntervalSeconds: priorityMinWriteIntervalSeconds.value,
-      writebackSpreadSeconds: priorityWritebackSpreadSeconds.value,
-      maxPendingAgeSeconds: preservePriorityMaxPendingAge(priorityMaxPendingAgeSeconds.value, priorityMinWriteIntervalSeconds.value),
-      reconcileIntervalSeconds: priorityReconcileIntervalSeconds.value,
-      inventorySnapshotTtlSeconds: inventorySnapshotTtlSeconds.value,
-      reconcileFailureBackoffSeconds: reconcileFailureBackoffSeconds.value,
-      driftAction: 'alert_only',
-      readMode: 'inventory_snapshot',
-    },
     modelTargets: targets,
   }
   emit('save', input)
@@ -529,37 +485,6 @@ const handleSave = () => {
                   {{ t(`${prefix}.multiplierOnlySummaryTitle`) }}
                 </div>
                 <p class="mt-1 text-xs leading-5 text-muted-foreground">{{ t(`${prefix}.multiplierOnlySummary`) }}</p>
-              </div>
-
-              <div v-if="priorityMode === 'multiplier' || isMultiplierOnly" class="rounded-lg border border-border/40 bg-surface/30 px-4 py-3">
-                <div class="flex items-center gap-1 text-sm text-foreground">
-                  <ArrowDownUp class="h-4 w-4 text-primary" />
-                  {{ t(`${prefix}.priorityWriteIntervalLabel`) }}
-                  <HelpTooltip :text="t(`${prefix}.tooltips.priorityWriteInterval`)" />
-                </div>
-                <div class="mt-3 grid grid-cols-2 gap-3">
-                  <label class="space-y-1.5 text-xs text-muted-foreground">
-                    <span>{{ t(`${prefix}.priorityWriteIntervalShortLabel`) }}</span>
-                    <input v-model.number="priorityMinWriteIntervalSeconds" type="number" min="1" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
-                  </label>
-                  <label class="space-y-1.5 text-xs text-muted-foreground">
-                    <span>{{ t(`${prefix}.priorityWritebackSpreadLabel`) }}</span>
-                    <input v-model.number="priorityWritebackSpreadSeconds" type="number" min="1" max="10" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
-                  </label>
-                  <label class="space-y-1.5 text-xs text-muted-foreground">
-                    <span>{{ t(`${prefix}.reconcileIntervalLabel`) }}</span>
-                    <input v-model.number="priorityReconcileIntervalSeconds" type="number" min="1" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
-                  </label>
-                  <label class="space-y-1.5 text-xs text-muted-foreground">
-                    <span>{{ t(`${prefix}.snapshotTtlLabel`) }}</span>
-                    <input v-model.number="inventorySnapshotTtlSeconds" type="number" min="1" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
-                  </label>
-                  <label class="space-y-1.5 text-xs text-muted-foreground">
-                    <span>{{ t(`${prefix}.reconcileBackoffLabel`) }}</span>
-                    <input v-model.number="reconcileFailureBackoffSeconds" type="number" min="1" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
-                  </label>
-                </div>
-                <p class="mt-2 text-xs leading-5 text-muted-foreground">{{ t(`${prefix}.priorityWriteIntervalHelp`) }}</p>
               </div>
 
               <div class="flex items-center justify-end gap-2 border-t border-border/40 pt-4">

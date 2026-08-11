@@ -4,7 +4,6 @@ import type {
   AdminGroupHealth,
   ConnectionHealthEvent,
   ConnectionHealthOverview,
-  PriorityWorkspaceSyncState,
   ConnectionHealthStoredSummary,
   ConnectionHealthPolicy,
   ManualProbeModelOption,
@@ -12,9 +11,6 @@ import type {
   ModelHealth,
   OwnGroupHealth,
   PolicyInput,
-  SafetyEmergencyClearResult,
-  SafetySettings,
-  SafetyWorkspaceView,
   TargetPolicyAssignments,
 } from '../types/connectionHealth'
 import {
@@ -71,26 +67,8 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
 export const getConnectionHealthOverview = async (): Promise<ConnectionHealthOverview> =>
   requestJson<ConnectionHealthOverview>('/connection-health/overview')
 
-export const getConnectionHealthPrioritySync = async (): Promise<PriorityWorkspaceSyncState | null> =>
-  requestJson<PriorityWorkspaceSyncState | null>('/connection-health/priority-sync')
-
 export const getConnectionHealthStoredSummary = async (): Promise<ConnectionHealthStoredSummary> =>
   requestJson<ConnectionHealthStoredSummary>('/connection-health/stored-summary')
-
-export const getConnectionHealthSafety = async (): Promise<SafetyWorkspaceView> =>
-  requestJson<SafetyWorkspaceView>('/connection-health/safety')
-
-export const updateConnectionHealthSafety = async (input: SafetySettings): Promise<SafetyWorkspaceView> =>
-  requestJson<SafetyWorkspaceView>('/connection-health/safety', {
-    method: 'PUT',
-    body: JSON.stringify(input),
-  })
-
-export const emergencyClearConnectionHealthSafety = async (idempotencyKey: string): Promise<SafetyEmergencyClearResult> =>
-  requestJson<SafetyEmergencyClearResult>('/connection-health/safety/emergency-clear', {
-    method: 'POST',
-    body: JSON.stringify({ idempotencyKey }),
-  })
 
 export const getConnectionHealthGroups = async (): Promise<OwnGroupHealth[]> =>
   requestJson<OwnGroupHealth[]>('/connection-health/groups')

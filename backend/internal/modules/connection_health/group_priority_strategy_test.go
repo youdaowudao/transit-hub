@@ -251,7 +251,7 @@ func TestSetAdminGroupPolicyConfiguration_PersistsProbeSortFallbackMultiplier(t 
 	}
 }
 
-func TestSetAdminGroupPolicyConfiguration_QueuesPriorityWithoutImmediateWrite(t *testing.T) {
+func TestSetAdminGroupPolicyConfiguration_SynchronizesPriorityImmediately(t *testing.T) {
 	repo := newFakeRepository()
 	policy := probePolicy()
 	policy.PriorityMode = PriorityModeMultiplier
@@ -272,23 +272,66 @@ func TestSetAdminGroupPolicyConfiguration_QueuesPriorityWithoutImmediateWrite(t 
 	service.sites = fakeSiteLookup{}
 	service.priorityActions = actions
 	fallback := 0.08
-	inventory, err := service.loadAdminInventory(context.Background(), "user1", "ws1", make(adminInventoryCache))
-	if err != nil {
-		t.Fatalf("prime inventory snapshot: %v", err)
-	}
-	service.putAdminInventorySnapshot(context.Background(), "user1", "ws1", inventory, time.Now().UTC(), time.Minute)
 
-	if _, err = service.SetAdminGroupPolicyConfiguration(context.Background(), "user1", "g1", AdminGroupPolicyConfigurationInput{
+	if _, err := service.SetAdminGroupPolicyConfiguration(context.Background(), "user1", "g1", AdminGroupPolicyConfigurationInput{
 		PolicyIDs: []string{policy.ID}, ProbeSortFallbackMultiplier: &fallback,
 	}); err != nil {
 		t.Fatalf("save group configuration: %v", err)
 	}
-	if len(actions.calls) != 0 {
-		t.Fatalf("policy save must not write priority directly: %+v", actions.calls)
+	if len(actions.calls) != 1 || actions.calls[0].targetID != "100" || actions.calls[0].priority != 10 {
+		t.Fatalf("priority must synchronize immediately after saving group configuration: %+v", actions.calls)
 	}
-	state := priorityWorkspaceState(t, repo)
-	if state.PendingSignature == "" || state.LastActionSource != priorityActionPolicy || state.LastDecision != "pending" {
-		t.Fatalf("policy save must queue the latest local ordering: %+v", state)
+}
+
+func TestV205PrioritySync_RecoveryLeavesSuspendedAndUnprobedBands(t *testing.T) {
+	tests := []struct {
+		name            string
+		currentPriority int
+		state           State
+		wantPriority    int
+	}{
+		{name: "observing leaves suspended band", currentPriority: 100000, state: StateObserving, wantPriority: 1000},
+		{name: "healthy leaves unprobed band", currentPriority: 10000, state: StateHealthy, wantPriority: 10},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := newFakeRepository()
+			policy := probePolicy()
+			policy.AutoDegradeEnabled = true
+			policy.PriorityMode = PriorityModeMultiplier
+			policy.StrategyMode = StrategyModeHealthProbe
+			repo.policies = []Policy{policy}
+			targetID := "sub2api:ws1:100"
+			repo.states[targetID] = map[string]ConnectionHealthState{
+				"gpt-4o": {
+					ConnectionID: targetID, ModelName: "gpt-4o", UserID: "user1", AdminAccountID: "ws1",
+					State: test.state, CurrentWeight: 100,
+				},
+			}
+			reader := fakePlatformGroupReader{
+				groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+				accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+					"g1": {{ID: "100", Name: "account", Priority: &test.currentPriority, Models: "gpt-4o"}},
+				},
+			}
+			actions := &fakeTargetPriorityActioner{}
+			service := newAdminGroupsService(reader, fakeAdminGroupKeyReader{
+				fakeMySitesReader: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+			}, repo)
+			service.sites = fakeSiteLookup{}
+			service.priorityActions = actions
+			fallback := 0.08
+
+			if _, err := service.SetAdminGroupPolicyConfiguration(context.Background(), "user1", "g1", AdminGroupPolicyConfigurationInput{
+				PolicyIDs: []string{policy.ID}, ProbeSortFallbackMultiplier: &fallback,
+			}); err != nil {
+				t.Fatalf("save group configuration: %v", err)
+			}
+			if len(actions.calls) != 1 || actions.calls[0].priority != test.wantPriority {
+				t.Fatalf("recovery must leave priority %d through the V2.0.5 path, calls=%+v", test.currentPriority, actions.calls)
+			}
+		})
 	}
 }
 
@@ -304,8 +347,7 @@ func TestSetAdminGroupPolicyConfiguration_QuickPolicyCreatesAndBindsTogether(t *
 	configuration, err := service.SetAdminGroupPolicyConfiguration(context.Background(), "user1", "g1", AdminGroupPolicyConfigurationInput{
 		QuickPolicy: &PolicyInput{
 			Name: "quick", Enabled: true, AutoDegradeEnabled: true, AutoRemoteActionEnabled: true,
-			PrioritySyncPreset: &PrioritySyncPreset{MinWriteIntervalSeconds: 10, MaxPendingAgeSeconds: 20, DriftAction: PriorityDriftActionAlertOnly, ReadMode: PriorityReadModeInventory},
-			ModelTargets:       []ModelTargetInput{{ModelName: "gpt-4o", ProviderFamily: ProviderOpenAI, Enabled: true}},
+			ModelTargets: []ModelTargetInput{{ModelName: "gpt-4o", ProviderFamily: ProviderOpenAI, Enabled: true}},
 		},
 	})
 	if err != nil {
@@ -313,9 +355,6 @@ func TestSetAdminGroupPolicyConfiguration_QuickPolicyCreatesAndBindsTogether(t *
 	}
 	if len(configuration.PolicyIDs) != 1 || len(repo.policies) != 1 || repo.policies[0].ID != configuration.PolicyIDs[0] {
 		t.Fatalf("quick policy must be created and bound in one operation: config=%+v policies=%+v", configuration, repo.policies)
-	}
-	if got := repo.policies[0].PrioritySyncPreset; got.MinWriteIntervalSeconds != 10 || got.MaxPendingAgeSeconds != 20 {
-		t.Fatalf("quick policy must preserve priority sync preset: %+v", got)
 	}
 }
 

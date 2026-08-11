@@ -18,11 +18,7 @@ type Handler struct {
 func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	handler := &Handler{service: service}
 	mux.HandleFunc("GET /api/connection-health/overview", handler.overview)
-	mux.HandleFunc("GET /api/connection-health/priority-sync", handler.prioritySync)
 	mux.HandleFunc("GET /api/connection-health/stored-summary", handler.storedSummary)
-	mux.HandleFunc("GET /api/connection-health/safety", handler.getSafety)
-	mux.HandleFunc("PUT /api/connection-health/safety", handler.putSafety)
-	mux.HandleFunc("POST /api/connection-health/safety/emergency-clear", handler.emergencyClear)
 	mux.HandleFunc("GET /api/connection-health/groups", handler.groups)
 	mux.HandleFunc("GET /api/connection-health/admin-groups", handler.adminGroups)
 	mux.HandleFunc("GET /api/connection-health/events", handler.events)
@@ -41,60 +37,6 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/policy-assignments", handler.putPolicyAssignments)
 	mux.HandleFunc("GET /api/connection-health/admin-groups/{id}/policy-configuration", handler.getAdminGroupPolicyConfiguration)
 	mux.HandleFunc("PUT /api/connection-health/admin-groups/{id}/policy-configuration", handler.putAdminGroupPolicyConfiguration)
-}
-
-func (h *Handler) getSafety(w http.ResponseWriter, r *http.Request) {
-	userID, ok := authctx.UserID(r.Context())
-	if !ok {
-		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
-		return
-	}
-	view, err := h.service.loadSafetyWorkspace(r.Context(), userID)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	httpjson.Write(w, http.StatusOK, view)
-}
-
-func (h *Handler) putSafety(w http.ResponseWriter, r *http.Request) {
-	userID, ok := authctx.UserID(r.Context())
-	if !ok {
-		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
-		return
-	}
-	var input SafetySettings
-	if err := httpjson.Decode(r, &input); err != nil {
-		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
-		return
-	}
-	view, err := h.service.SaveSafetySettings(r.Context(), userID, input)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	httpjson.Write(w, http.StatusOK, view)
-}
-
-func (h *Handler) emergencyClear(w http.ResponseWriter, r *http.Request) {
-	userID, ok := authctx.UserID(r.Context())
-	if !ok {
-		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
-		return
-	}
-	var input struct {
-		IdempotencyKey string `json:"idempotencyKey"`
-	}
-	if err := httpjson.Decode(r, &input); err != nil {
-		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
-		return
-	}
-	result, err := h.service.EmergencyClearAbnormalQueue(r.Context(), userID, input.IdempotencyKey)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	httpjson.Write(w, http.StatusOK, result)
 }
 
 func (h *Handler) setTargetSchedulable(w http.ResponseWriter, r *http.Request) {
@@ -144,20 +86,6 @@ func (h *Handler) overview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpjson.Write(w, http.StatusOK, resp)
-}
-
-func (h *Handler) prioritySync(w http.ResponseWriter, r *http.Request) {
-	userID, ok := authctx.UserID(r.Context())
-	if !ok {
-		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
-		return
-	}
-	state, err := h.service.PrioritySync(r.Context(), userID)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	httpjson.Write(w, http.StatusOK, state)
 }
 
 func (h *Handler) groups(w http.ResponseWriter, r *http.Request) {

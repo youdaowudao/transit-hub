@@ -30,13 +30,14 @@ import {
   listConnectionHealthPolicies,
   manualProbeOnce,
   probeConnection,
-  probeTarget,
+  probeTargetWithProgress,
   restoreConnection,
   setTargetPolicyAssignments,
   setAdminGroupPolicyConfiguration,
   setTargetSchedulable,
   updateConnectionHealthPolicy,
 } from '../api/connectionHealth'
+import type { ProbeTargetProgressPhase } from '../api/connectionHealth'
 
 const overview = ref<ConnectionHealthOverview | null>(null)
 const groups = ref<OwnGroupHealth[]>([])
@@ -284,11 +285,16 @@ export function useConnectionHealth() {
   // 返回值语义同 manualProbe：
   // null=失败（errorKey 已设置，含 credential_unavailable 等结构化不可探活错误）、
   // []=执行成功但无结果、非空=正常结果。
-  const manualProbeTarget = async (targetId: string, models?: string[], signal?: AbortSignal): Promise<ModelHealth[] | null> => {
+  const manualProbeTarget = async (
+    targetId: string,
+    models?: string[],
+    signal?: AbortSignal,
+    onPhase?: (phase: ProbeTargetProgressPhase) => void,
+  ): Promise<ModelHealth[] | null> => {
     isActionLoading.value = true
     errorKey.value = ''
     try {
-      return await probeTarget(targetId, models, signal)
+      return await probeTargetWithProgress(targetId, models, onPhase ?? (() => {}), signal)
     } catch (err) {
       errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
       return null

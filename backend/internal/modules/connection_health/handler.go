@@ -1,7 +1,9 @@
 package connection_health
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -24,6 +26,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("GET /api/connection-health/events", handler.events)
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/probe", handler.probe)
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/probe", handler.probeTarget)
+	mux.HandleFunc("POST /api/connection-health/targets/{id}/probe-stream", handler.probeTargetStream)
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/disable", handler.disable)
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/restore", handler.restore)
 	mux.HandleFunc("GET /api/connection-health/policies", handler.listPolicies)
@@ -200,6 +203,66 @@ func (h *Handler) probeTarget(w http.ResponseWriter, r *http.Request) {
 		results = []ModelHealth{}
 	}
 	httpjson.Write(w, http.StatusOK, results)
+}
+
+type probeTargetStreamEvent struct {
+	Type     string        `json:"type"`
+	Phase    string        `json:"phase,omitempty"`
+	Results  []ModelHealth `json:"results,omitempty"`
+	ErrorKey string        `json:"errorKey,omitempty"`
+}
+
+// probeTargetStream 以 SSE 推送正式手动探活的排队/执行阶段，结果仍与 JSON 接口一致。
+func (h *Handler) probeTargetStream(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	targetID := r.PathValue("id")
+	var input ProbeConnectionInput
+	if err := httpjson.Decode(r, &input); err != nil && !errors.Is(err, io.EOF) {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		httpjson.WriteError(w, http.StatusInternalServerError, ErrorUnknown)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	emit := func(event probeTargetStreamEvent) {
+		data, err := json.Marshal(event)
+		if err != nil || r.Context().Err() != nil {
+			return
+		}
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	results, err := h.service.ProbeTargetWithProgress(r.Context(), userID, targetID, input.Models, func(phase ProbeTargetPhase) {
+		emit(probeTargetStreamEvent{Type: "phase", Phase: string(phase)})
+	})
+	if err != nil {
+		if r.Context().Err() == nil {
+			errorKey := ErrorUnknown
+			var requestErr requestError
+			if errors.As(err, &requestErr) {
+				errorKey = requestErr.Error()
+			}
+			emit(probeTargetStreamEvent{Type: "error", ErrorKey: errorKey})
+		}
+		return
+	}
+	if results == nil {
+		results = []ModelHealth{}
+	}
+	emit(probeTargetStreamEvent{Type: "result", Results: results})
 }
 
 func (h *Handler) disable(w http.ResponseWriter, r *http.Request) {

@@ -117,6 +117,48 @@ func TestProbeTarget_FormalProbeUsesEffectiveStrategyWithoutConsumingBudget(t *t
 	}
 }
 
+func TestProbeTarget_QueuedManualProbeStopsWhenRequestIsCancelled(t *testing.T) {
+	repo := newFakeRepository()
+	policy := sub2APIProbePolicy(false)
+	repo.policies = []Policy{policy}
+	targetID := "sub2api:ws1:acc-1"
+	assignPolicyToTarget(repo, policy, targetID)
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "acc-1", Name: "acc", Models: "gpt-4o"}},
+		},
+	}
+	svc := newAdminGroupsService(reader, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, repo)
+	svc.probeLimiter = newProbeConcurrencyLimiter(1, 1)
+	releaseCurrent, ok := svc.probeLimiter.acquireAutomatic(context.Background(), "user1|ws1")
+	if !ok {
+		t.Fatal("failed to occupy the probe slot")
+	}
+	defer releaseCurrent()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := svc.ProbeTarget(ctx, "user1", targetID, []string{"gpt-4o"})
+		resultCh <- err
+	}()
+	waitForProbeManualWaiters(t, svc.probeLimiter, "user1|ws1", 1)
+	cancel()
+
+	select {
+	case err := <-resultCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled queued probe error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled queued probe did not return")
+	}
+	if len(repo.events) != 0 || len(repo.states) != 0 {
+		t.Fatalf("cancelled queued probe changed health data: events=%+v states=%+v", repo.events, repo.states)
+	}
+}
+
 func TestProbeTarget_FormalProbeReturnsEventPersistenceFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

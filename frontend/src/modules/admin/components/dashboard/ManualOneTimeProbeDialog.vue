@@ -45,6 +45,7 @@ const selected = ref<Set<string>>(new Set())
 const results = ref<ManualProbeResult[]>([])
 const loadErrorKey = ref('')
 const testErrorKey = ref('')
+const formalProgress = ref<'starting' | 'queued' | 'direct' | 'running' | ''>('')
 let loadSequence = 0
 let activeRequestController: AbortController | null = null
 
@@ -96,6 +97,7 @@ watch(
     results.value = []
     loadErrorKey.value = ''
     testErrorKey.value = ''
+    formalProgress.value = ''
     phase.value = formalModels.length > 0 ? 'ready' : 'loading'
 
     const outcome = await discoverModels(targetId, controller.signal)
@@ -120,6 +122,7 @@ watch(
 watch(mode, (nextMode) => {
 	results.value = []
 	testErrorKey.value = ''
+	formalProgress.value = ''
 	if (nextMode === 'formal') {
 		models.value = props.target?.formalModels ?? []
 		selected.value = defaultSelection(models.value)
@@ -173,6 +176,7 @@ const startTest = async () => {
   if (!canStartTest.value || !props.target) return
   phase.value = 'testing'
   testErrorKey.value = ''
+  formalProgress.value = mode.value === 'formal' ? 'starting' : ''
   const sequence = ++loadSequence
   const controller = beginRequest()
   try {
@@ -185,7 +189,18 @@ const startTest = async () => {
       }
       results.value = outcome.results
     } else {
-      const outcome = await manualProbeTarget(props.target.targetId, Array.from(selected.value), controller.signal)
+      const outcome = await manualProbeTarget(
+        props.target.targetId,
+        Array.from(selected.value),
+        controller.signal,
+        (nextPhase) => {
+          if (nextPhase === 'queued') {
+            formalProgress.value = 'queued'
+          } else {
+            formalProgress.value = formalProgress.value === 'queued' ? 'running' : 'direct'
+          }
+        },
+      )
       if (sequence !== loadSequence || !props.open) return
       if (outcome == null) {
         testErrorKey.value = serviceErrorKey.value
@@ -196,7 +211,10 @@ const startTest = async () => {
     }
   } finally {
     finishRequest(controller)
-    if (sequence === loadSequence && props.open) phase.value = 'ready'
+    if (sequence === loadSequence && props.open) {
+      phase.value = 'ready'
+      formalProgress.value = ''
+    }
   }
 }
 
@@ -337,6 +355,14 @@ const close = () => {
                 <p v-if="testErrorKey" class="mt-4 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">
                   {{ readableMessage(testErrorKey) }}
                 </p>
+                <p
+                  v-if="mode === 'formal' && phase === 'testing' && formalProgress"
+                  class="mt-4 flex items-center gap-2 rounded-lg bg-primary/5 px-3 py-2 text-xs text-primary"
+                >
+                  <Loader2 v-if="formalProgress !== 'direct'" class="h-3.5 w-3.5 animate-spin" />
+                  <Zap v-else class="h-3.5 w-3.5" />
+                  {{ t(`${prefix}.progress.${formalProgress}`) }}
+                </p>
 
                 <div class="mt-5">
                   <h4 class="mb-2 text-xs font-semibold text-foreground">{{ t(`${prefix}.resultTitle`) }}</h4>
@@ -391,7 +417,9 @@ const close = () => {
                 @click="startTest"
               >
                 <Loader2 v-if="phase === 'testing'" class="h-4 w-4 animate-spin" />
-                {{ phase === 'testing' ? t(`${prefix}.testing`) : t(`${prefix}.${mode === 'formal' ? 'startFormal' : 'startTest'}`) }}
+                {{ phase === 'testing'
+                  ? t(`${prefix}.${mode === 'formal' && formalProgress === 'queued' ? 'queueing' : 'testing'}`)
+                  : t(`${prefix}.${mode === 'formal' ? 'startFormal' : 'startTest'}`) }}
               </button>
             </div>
           </div>

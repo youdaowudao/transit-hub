@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { manualProbeOnce } from '../src/modules/admin/api/connectionHealth'
+import { manualProbeOnce, probeTargetWithProgress } from '../src/modules/admin/api/connectionHealth'
 
 const dialogSource = readFileSync(
   new URL('../src/modules/admin/components/dashboard/ManualOneTimeProbeDialog.vue', import.meta.url),
@@ -33,5 +33,30 @@ describe('manual probe cancellation', () => {
     expect(closeBody).toContain("emit('close')")
     expect(closeBody).not.toContain("phase.value === 'testing'")
     expect(dialogSource).toContain('controller.signal')
+  })
+
+  it('shows queued and running phases from the formal probe stream', async () => {
+    vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null) })
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"phase","phase":"queued"}\n\n'))
+        controller.enqueue(new TextEncoder().encode('data: {"type":"phase","phase":"running"}\n\ndata: {"type":"result","results":[]}\n\n'))
+        controller.close()
+      },
+    })
+    const fetchMock = vi.fn().mockResolvedValue(new Response(body, { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const phases: string[] = []
+
+    await expect(probeTargetWithProgress('sub2api:ws1:account-1', ['gpt-5.6-sol'], phase => phases.push(phase))).resolves.toEqual([])
+
+    expect(phases).toEqual(['queued', 'running'])
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/connection-health/targets/sub2api%3Aws1%3Aaccount-1/probe-stream',
+      expect.objectContaining({ headers: expect.objectContaining({ Accept: 'text/event-stream' }) }),
+    )
+    expect(dialogSource).toContain("formalProgress.value = 'queued'")
+    expect(dialogSource).toContain("formalProgress.value === 'queued' ? 'running' : 'direct'")
+    expect(dialogSource).toContain('progress.${formalProgress}')
   })
 })

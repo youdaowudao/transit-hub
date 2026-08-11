@@ -1582,6 +1582,13 @@ export default {
         startTest: '开始测试',
         startFormal: '开始正式探活',
         testing: '测试中...',
+        queueing: '排队中...',
+        progress: {
+          starting: '正在提交探活请求...',
+          queued: '正在排队，前面的探活完成后会自动开始。',
+          direct: '已直接开始探活，正在进行。',
+          running: '正在进行探活，请稍候。'
+        },
         resultTitle: '测试结果',
         resultEmpty: '尚未开始测试，选择模型后点击"开始测试"。',
         latency: '{ms}ms',

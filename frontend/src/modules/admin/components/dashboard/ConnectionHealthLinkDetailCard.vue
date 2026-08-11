@@ -106,7 +106,7 @@ const showErrorDetail = computed(() => props.isActionCard || hasFailureTime.valu
           <p v-if="accountName && siteLabel" class="truncate text-[11px] text-muted-foreground">{{ siteLabel }}</p>
         </div>
       </div>
-      <div class="flex shrink-0 flex-col items-end gap-1">
+      <div v-if="!isActionCard" class="flex shrink-0 flex-col items-end gap-1">
         <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium" :class="connectionHealthStateBadgeClass(state)">
           {{ state ? t(`${prefix}.stateLabels.${state}`) : '—' }}
         </span>
@@ -116,7 +116,7 @@ const showErrorDetail = computed(() => props.isActionCard || hasFailureTime.valu
       </div>
     </div>
 
-    <div class="mt-2 grid gap-2" :class="hasFailureTime ? 'grid-cols-2' : 'grid-cols-1'">
+    <div v-if="!isActionCard" class="mt-2 grid gap-2" :class="hasFailureTime ? 'grid-cols-2' : 'grid-cols-1'">
       <div class="rounded-lg border border-border/40 bg-background/60 px-2.5 py-1.5">
         <p class="text-[11px] text-muted-foreground">{{ t(`${cardPrefix}.lastProbe`, { value: '' }) }}</p>
         <p class="mt-0.5 text-xs font-medium text-foreground">{{ formatConnectionHealthTime(lastProbeAt) }}</p>
@@ -127,14 +127,14 @@ const showErrorDetail = computed(() => props.isActionCard || hasFailureTime.valu
       </div>
     </div>
 
-    <div class="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+    <div v-if="!isActionCard" class="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
       <span>{{ t(`${cardPrefix}.latencyLabel`) }}：{{ latestLatencyMs != null ? `${latestLatencyMs}ms` : t(`${cardPrefix}.noData`) }}</span>
       <span v-if="elapsedText" class="font-medium text-red-600 dark:text-red-400">{{ t(`${cardPrefix}.elapsed`, { value: elapsedText }) }}</span>
     </div>
     <p v-if="showErrorDetail && lastErrorKey" class="mt-1 text-[11px] text-destructive/80">{{ readableMessage(lastErrorKey) }}</p>
     <p v-if="showErrorDetail && lastErrorDetail" class="mt-0.5 break-words text-[11px] text-muted-foreground">{{ t(`${cardPrefix}.errorDetail`, { value: lastErrorDetail }) }}</p>
 
-    <div class="mt-2.5">
+    <div v-if="!isActionCard" class="mt-2.5">
       <p class="text-[11px] text-muted-foreground">{{ t(`${cardPrefix}.availabilityLabel`) }}</p>
       <p class="text-2xl font-bold text-foreground">
         {{ availabilityPct != null ? `${availabilityPct}%` : t(`${cardPrefix}.noData`) }}
@@ -153,7 +153,7 @@ const showErrorDetail = computed(() => props.isActionCard || hasFailureTime.valu
     <p v-if="latestEventSource" class="mt-1 text-xs text-muted-foreground">{{ t(`${cardPrefix}.eventSource`, { source: latestEventSource }) }}</p>
     <p v-if="remoteActionText" class="mt-1 text-xs text-muted-foreground">{{ t(`${cardPrefix}.remoteActionLine`, { label: remoteActionText }) }}</p>
 
-    <div class="mt-3">
+    <div v-if="!isActionCard" class="mt-3">
       <div class="mb-1 flex items-center justify-between text-[10px] text-muted-foreground">
         <span>{{ t(`${cardPrefix}.recentRecordsLabel`) }} ({{ records.length }})</span>
       </div>

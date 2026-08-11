@@ -102,6 +102,91 @@ export const probeTarget = async (targetId: string, models?: string[], signal?: 
     signal,
   })
 
+export type ProbeTargetProgressPhase = 'queued' | 'running'
+
+type ProbeTargetStreamEvent = {
+  type: 'phase' | 'result' | 'error'
+  phase?: ProbeTargetProgressPhase
+  results?: ModelHealth[]
+  errorKey?: string
+}
+
+// probeTargetWithProgress 是正式手动探活的 SSE 版本。只有阶段通过流式事件推送，
+// 结果和错误语义与 probeTarget 保持一致；一次性探活继续使用普通 JSON 接口。
+export const probeTargetWithProgress = async (
+  targetId: string,
+  models: string[] | undefined,
+  onPhase: (phase: ProbeTargetProgressPhase) => void,
+  signal?: AbortSignal,
+): Promise<ModelHealth[]> => {
+  let response: Response
+  try {
+    response = await fetch(endpoint(`/connection-health/targets/${encodeURIComponent(targetId)}/probe-stream`), {
+      method: 'POST',
+      headers: { Accept: 'text/event-stream', 'Content-Type': 'application/json', ...authHeaders() },
+      body: models && models.length > 0 ? JSON.stringify({ models }) : undefined,
+      signal,
+    })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error
+    throw new Error('admin.connectionHealth.errors.network')
+  }
+
+  if (!response.ok) {
+    let payload: ApiErrorPayload = {}
+    try {
+      const text = await response.text()
+      payload = text ? JSON.parse(text) as ApiErrorPayload : {}
+    } catch {
+      // 保持通用请求错误，避免把上游响应原文带到界面。
+    }
+    if (isUnauthorizedApiResponse(response.status, payload)) {
+      handleAuthExpired()
+      throw new Error(authUnauthorizedErrorKey)
+    }
+    throw new Error(payload.message ?? 'admin.connectionHealth.errors.request')
+  }
+
+  if (!response.body) throw new Error('admin.connectionHealth.errors.request')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let results: ModelHealth[] | null = null
+  let streamErrorKey = ''
+
+  const consume = (part: string) => {
+    const dataLine = part.split('\n').find(line => line.startsWith('data: '))
+    if (!dataLine) return
+    try {
+      const event = JSON.parse(dataLine.slice(6)) as ProbeTargetStreamEvent
+      if (event.type === 'phase' && event.phase) {
+        onPhase(event.phase)
+      } else if (event.type === 'result') {
+        results = event.results ?? []
+      } else if (event.type === 'error') {
+        streamErrorKey = event.errorKey ?? 'admin.connectionHealth.errors.unknown'
+      }
+    } catch {
+      // 忽略单条格式错误事件，最终没有结果时统一返回请求错误。
+    }
+  }
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() ?? ''
+    parts.forEach(consume)
+  }
+  buffer += decoder.decode()
+  if (buffer.trim()) consume(buffer)
+  if (streamErrorKey) throw new Error(streamErrorKey)
+  if (results === null) throw new Error('admin.connectionHealth.errors.request')
+  return results
+}
+
 // discoverTargetModels 是手动一次性探活弹窗打开时调用的 server-only 模型发现接口：
 // 后端用当前 admin session 临时解析该 target 的 base_url + key 请求上游 /v1/models，
 // 这里只拿到安全字段（id/name/ownedBy/providerFamily），前端绝不接触凭据本身。

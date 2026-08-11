@@ -70,6 +70,7 @@ type AccountSortField =
   | 'effectiveMultiplier'
   | 'upstreamMultiplier'
   | 'latency'
+  | 'stability'
 
 type SortDirection = 'asc' | 'desc'
 type StateBreakdownItem = {
@@ -209,6 +210,7 @@ const DEFAULT_SORT_DIRECTIONS: Record<AccountSortField, SortDirection> = {
   effectiveMultiplier: 'asc',
   upstreamMultiplier: 'asc',
   latency: 'asc',
+  stability: 'asc',
 }
 
 const HEALTH_SORT_RANK: Record<ConnectionHealthState, number> = {
@@ -284,6 +286,85 @@ const accountLatency = (account: AdminGroupAccount): number | null => {
 
 const accountHasSlowResponse = (account: AdminGroupAccount): boolean => (accountLatency(account) ?? 0) > 5000
 
+// 稳定性列按「最差模型」聚合：权重取最小、最近失败取最新、连败取最大，
+// 让一行的读数不会被同账号里状态较好的模型稀释。
+const DAY_SECONDS = 24 * 60 * 60
+
+// 与展开行口径一致：展开行渲染 account.modelHealth 全量，这里不能再按 configured
+// 过滤。后端的 configured 是「最后一次错误是否为凭据不可用」，鉴权失败、权重被打到 0
+// 的模型会被标成 false，一旦过滤掉，列上只剩健康模型算出 100%，与展开行的读数矛盾。
+const aggregatedModelHealth = (account: AdminGroupAccount) => account.modelHealth ?? []
+
+const accountHealthWeight = (account: AdminGroupAccount): number | null => {
+  const values = aggregatedModelHealth(account)
+    .map(model => model.currentWeight)
+    .filter((value): value is number => value != null && Number.isFinite(value))
+  return values.length > 0 ? Math.min(...values) : null
+}
+
+// 取最近一次失败所在的模型，连同它的 elapsedSeconds 快照一起返回，
+// 避免把 A 模型的失败时间和 B 模型的距今秒数拼在一起显示。
+const accountLastFailure = (account: AdminGroupAccount) => {
+  let latest: { lastFailureAt: string; elapsedSeconds: number | null; at: number } | null = null
+  for (const model of aggregatedModelHealth(account)) {
+    if (!hasValidConnectionHealthTime(model.lastFailureAt)) continue
+    const at = new Date(model.lastFailureAt as string).getTime()
+    if (latest && at <= latest.at) continue
+    latest = { lastFailureAt: model.lastFailureAt as string, elapsedSeconds: model.elapsedSeconds ?? null, at }
+  }
+  return latest
+}
+
+const accountFailureElapsedSeconds = (account: AdminGroupAccount): number | null => {
+  const failure = accountLastFailure(account)
+  if (!failure) return null
+  if (typeof failure.elapsedSeconds === 'number' && Number.isFinite(failure.elapsedSeconds) && failure.elapsedSeconds >= 0) {
+    return failure.elapsedSeconds
+  }
+  return null
+}
+
+// 超过 24 小时统一收口成「24 小时+」：更久的精度对判断当下是否可用没有价值。
+// 不到 1 分钟收成「刚刚」，避免副行过长把列撑宽。
+const accountStabilityElapsedLabel = (account: AdminGroupAccount): string => {
+  const failure = accountLastFailure(account)
+  if (!failure) return t(`${detailPrefix}.stabilityColumn.noFailure`)
+  const elapsed = accountFailureElapsedSeconds(account)
+  if (elapsed != null && elapsed >= DAY_SECONDS) return t(`${detailPrefix}.stabilityColumn.overDay`)
+  if (elapsed != null && elapsed < 60) return t(`${detailPrefix}.stabilityColumn.justNow`)
+  const value = formatConnectionHealthElapsed(elapsed, failure.lastFailureAt)
+  if (!value) return t(`${detailPrefix}.stabilityColumn.unknownElapsed`)
+  return t(`${detailPrefix}.stabilityColumn.lastFailure`, { value })
+}
+
+const hasStabilityReading = (account: AdminGroupAccount): boolean =>
+  account.probeAvailable && aggregatedModelHealth(account).length > 0
+
+// 只在「当前仍处于失败」的模型上取错误原因：后端恢复后仍保留最后一次 errorKey，
+// 不能只凭它存在就展示，否则健康账号也会挂着旧报错。
+const accountCurrentErrorLabel = (account: AdminGroupAccount): string => {
+  const failing = aggregatedModelHealth(account)
+    .filter(model => isConnectionHealthCurrentFailure(model) && model.lastErrorKey)
+  return failing.length > 0 ? readableMessage(failing[0].lastErrorKey) : ''
+}
+
+// 副行压成一条：正常时只说最近一次中断，仍在故障时补上错误原因，
+// 因为限流会自行恢复、认证失败不会，这决定要不要动手。
+const accountStabilitySubLabel = (account: AdminGroupAccount): string => {
+  const elapsed = accountStabilityElapsedLabel(account)
+  const error = accountCurrentErrorLabel(account)
+  return error ? `${elapsed} · ${error}` : elapsed
+}
+
+// 排序权重：权重越低越靠前，同权重按最近中断时间升序（刚断的更需要关注），
+// 没有探活读数的目标一律沉底。
+const accountStabilityRank = (account: AdminGroupAccount): number | null => {
+  if (!hasStabilityReading(account)) return null
+  const weight = accountHealthWeight(account) ?? 100
+  const elapsed = accountFailureElapsedSeconds(account) ?? DAY_SECONDS
+  return weight * (DAY_SECONDS + 1) + Math.min(elapsed, DAY_SECONDS)
+}
+
 const accountHealthRank = (account: AdminGroupAccount): number => {
   if (!account.probeAvailable) return 7
   const state = aggregateState(account)
@@ -307,6 +388,8 @@ const accountSortValue = (account: AdminGroupAccount, field: AccountSortField): 
       return account.upstreamKeyGroupMultiplier ?? null
     case 'latency':
       return accountLatency(account)
+    case 'stability':
+      return accountStabilityRank(account)
   }
 }
 
@@ -409,12 +492,6 @@ const multiplierSourceLabel = (account: AdminGroupAccount): string => {
   return t(`${detailPrefix}.multiplierSources.fallbackRequired`)
 }
 
-const upstreamMultiplierStatusLabel = (account: AdminGroupAccount): string => {
-  if (account.multiplierResolutionStatus === 'conflict') return t(`${detailPrefix}.upstreamMultiplierStatuses.conflict`)
-  if (account.multiplierResolutionStatus === 'unavailable') return t(`${detailPrefix}.upstreamMultiplierStatuses.unavailable`)
-  if (account.multiplierResolutionStatus === 'unassociated') return t(`${detailPrefix}.upstreamMultiplierStatuses.unassociated`)
-  return t(`${detailPrefix}.upstreamMultiplierStatuses.missing`)
-}
 </script>
 
 <template>
@@ -604,19 +681,19 @@ const upstreamMultiplierStatusLabel = (account: AdminGroupAccount): string => {
                   <ArrowDownUp v-else class="h-3.5 w-3.5 opacity-50" />
                 </button>
               </th>
-              <th class="px-3 py-2.5 font-medium" :aria-sort="ariaSort('upstreamMultiplier')">
-                <button type="button" class="inline-flex items-center gap-1.5 text-left hover:text-foreground" @click="toggleSort('upstreamMultiplier')">
-                  {{ t(`${detailPrefix}.columns.upstreamMultiplier`) }}
-                  <ChevronUp v-if="customSortActive && sortField === 'upstreamMultiplier' && sortDirection === 'asc'" class="h-3.5 w-3.5" />
-                  <ChevronDown v-else-if="customSortActive && sortField === 'upstreamMultiplier'" class="h-3.5 w-3.5" />
-                  <ArrowDownUp v-else class="h-3.5 w-3.5 opacity-50" />
-                </button>
-              </th>
               <th class="px-3 py-2.5 font-medium" :aria-sort="ariaSort('latency')">
                 <button type="button" class="inline-flex items-center gap-1.5 text-left hover:text-foreground" @click="toggleSort('latency')">
                   {{ t(`${detailPrefix}.columns.latency`) }}
                   <ChevronUp v-if="customSortActive && sortField === 'latency' && sortDirection === 'asc'" class="h-3.5 w-3.5" />
                   <ChevronDown v-else-if="customSortActive && sortField === 'latency'" class="h-3.5 w-3.5" />
+                  <ArrowDownUp v-else class="h-3.5 w-3.5 opacity-50" />
+                </button>
+              </th>
+              <th class="w-40 px-3 py-2.5 text-right font-medium" :aria-sort="ariaSort('stability')">
+                <button type="button" class="inline-flex items-center justify-end gap-1.5 text-right hover:text-foreground" @click="toggleSort('stability')">
+                  {{ t(`${detailPrefix}.columns.stability`) }}
+                  <ChevronUp v-if="customSortActive && sortField === 'stability' && sortDirection === 'asc'" class="h-3.5 w-3.5" />
+                  <ChevronDown v-else-if="customSortActive && sortField === 'stability'" class="h-3.5 w-3.5" />
                   <ArrowDownUp v-else class="h-3.5 w-3.5 opacity-50" />
                 </button>
               </th>
@@ -700,15 +777,6 @@ const upstreamMultiplierStatusLabel = (account: AdminGroupAccount): string => {
                     {{ multiplierSourceLabel(account) }}
                   </span>
                 </td>
-                <td class="px-3 py-3 tabular-nums text-foreground">
-                  <span v-if="account.upstreamKeyGroupMultiplier == null" class="text-xs text-muted-foreground">
-                    {{ upstreamMultiplierStatusLabel(account) }}
-                  </span>
-                  <span v-else>{{ formatMultiplier(account.upstreamKeyGroupMultiplier) }}</span>
-                  <span v-if="account.upstreamKeyGroupName" class="mt-0.5 block max-w-32 truncate text-[11px] text-muted-foreground">
-                    {{ account.upstreamKeyGroupName }}
-                  </span>
-                </td>
                 <td class="px-3 py-3 tabular-nums">
                   <span v-if="aggregateState(account) === 'suspended'" class="text-destructive">-</span>
                   <span v-else-if="accountLatency(account) == null" class="text-muted-foreground">-</span>
@@ -718,6 +786,18 @@ const upstreamMultiplierStatusLabel = (account: AdminGroupAccount): string => {
                   <span v-if="accountHasSlowResponse(account)" class="mt-0.5 block text-[11px] text-amber-600 dark:text-amber-400">
                     {{ t(`${detailPrefix}.slowResponse`) }}
                   </span>
+                </td>
+                <td class="w-40 px-3 py-3 pl-8 text-right tabular-nums">
+                  <div class="ml-auto max-w-32">
+                    <span v-if="!hasStabilityReading(account)" class="text-muted-foreground">-</span>
+                    <span v-else class="text-foreground">{{ accountHealthWeight(account) ?? '-' }}%</span>
+                    <span
+                      class="mt-0.5 block truncate text-xs text-muted-foreground"
+                      :title="hasStabilityReading(account) ? accountStabilitySubLabel(account) : ''"
+                    >
+                      {{ hasStabilityReading(account) ? accountStabilitySubLabel(account) : t(`${detailPrefix}.stabilityColumn.notProbed`) }}
+                    </span>
+                  </div>
                 </td>
                 <td class="px-3 py-3">
                   <div class="flex items-center justify-end gap-1">

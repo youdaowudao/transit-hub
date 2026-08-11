@@ -102,4 +102,12 @@ describe('connection health historical failure display', () => {
     expect(eventsDialogSource).toContain(':failure-from-loaded-records="card.failureFromLoadedRecords"')
     expect(eventsDialogSource).toContain('buildConnectionHealthRecordSummary(eventsDesc)')
   })
+
+  it('keeps probe-only metrics out of account action cards', () => {
+    expect(cardSource).toContain('<div v-if="!isActionCard" class="flex shrink-0 flex-col items-end gap-1">')
+    expect(cardSource).toContain('<div v-if="!isActionCard" class="mt-2 grid gap-2"')
+    expect(cardSource).toContain('<div v-if="!isActionCard" class="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">')
+    expect(cardSource).toContain('<div v-if="!isActionCard" class="mt-2.5">')
+    expect(cardSource).toContain('<div v-if="!isActionCard" class="mt-3">')
+  })
 })

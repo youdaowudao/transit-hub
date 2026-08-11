@@ -1105,7 +1105,16 @@ export default {
           strategyMultiplier: '实际有效倍率',
           upstreamMultiplier: '上游 API Key 倍率',
           latency: '延迟',
+          stability: '最近中断',
           actions: '操作'
+        },
+        stabilityColumn: {
+          notProbed: '未探活',
+          noFailure: '近 24 小时未中断',
+          lastFailure: '断开 {value}前',
+          overDay: '断开 24 小时+',
+          justNow: '刚刚断开',
+          unknownElapsed: '断开时间未知'
         },
         upstreamMultiplierPending: '关联后展示倍率',
         multiplierSources: {
@@ -1582,6 +1591,13 @@ export default {
         startTest: '开始测试',
         startFormal: '开始正式探活',
         testing: '测试中...',
+        queueing: '排队中...',
+        progress: {
+          starting: '正在提交探活请求...',
+          queued: '正在排队，前面的探活完成后会自动开始。',
+          direct: '已直接开始探活，正在进行。',
+          running: '正在进行探活，请稍候。'
+        },
         resultTitle: '测试结果',
         resultEmpty: '尚未开始测试，选择模型后点击"开始测试"。',
         latency: '{ms}ms',

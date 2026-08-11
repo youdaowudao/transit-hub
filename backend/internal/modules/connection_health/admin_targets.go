@@ -326,11 +326,45 @@ func (s *Service) resolveManualTarget(ctx context.Context, userID string, target
 //
 // 这是正式手动探活路径：只允许当前目标实际生效的策略模型，写入统一健康状态和 manual 事件，
 // 但不消耗自动探活预算。一次性隔离测试使用 ManualProbeTarget（见 manual_probe.go）。
+type ProbeTargetPhase string
+
+const (
+	ProbeTargetPhaseQueued  ProbeTargetPhase = "queued"
+	ProbeTargetPhaseRunning ProbeTargetPhase = "running"
+)
+
 func (s *Service) ProbeTarget(ctx context.Context, userID string, targetID string, models []string) ([]ModelHealth, error) {
+	return s.probeTarget(ctx, userID, targetID, models, nil)
+}
+
+// ProbeTargetWithProgress 与 ProbeTarget 使用同一正式探活合同，仅额外通知排队和开始执行阶段。
+// 回调在请求处理 goroutine 内同步触发，调用方不得阻塞或执行外部副作用。
+func (s *Service) ProbeTargetWithProgress(ctx context.Context, userID string, targetID string, models []string, onPhase func(ProbeTargetPhase)) ([]ModelHealth, error) {
+	return s.probeTarget(ctx, userID, targetID, models, onPhase)
+}
+
+func (s *Service) probeTarget(ctx context.Context, userID string, targetID string, models []string, onPhase func(ProbeTargetPhase)) ([]ModelHealth, error) {
 	session, target, _, adminAccountID, err := s.resolveManualTarget(ctx, userID, targetID)
 	if err != nil {
 		return nil, err
 	}
+	workspaceKey := userID + "|" + adminAccountID
+	var notifyQueued func()
+	if onPhase != nil {
+		notifyQueued = func() { onPhase(ProbeTargetPhaseQueued) }
+	}
+	releaseSlot, acquired := s.sharedProbeLimiter().acquireManual(ctx, workspaceKey, notifyQueued)
+	if !acquired {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, requestError(ErrorProbeConcurrencyLimited)
+	}
+	defer releaseSlot()
+	if onPhase != nil {
+		onPhase(ProbeTargetPhaseRunning)
+	}
+
 	release, acquired, err := s.repo.TryAcquireTargetLease(ctx, targetID)
 	if err != nil {
 		return nil, err
@@ -394,13 +428,6 @@ func (s *Service) ProbeTarget(ctx context.Context, userID string, targetID strin
 			return nil, requestError(blocked)
 		}
 	}
-
-	workspaceKey := userID + "|" + adminAccountID
-	releaseSlot, acquired := s.sharedProbeLimiter().acquire(ctx, workspaceKey, false)
-	if !acquired {
-		return nil, requestError(ErrorProbeConcurrencyLimited)
-	}
-	defer releaseSlot()
 
 	// 解析凭据（server-only，明文只在内存短暂存在）。失败 -> 结构化不可探活错误。
 	cred, err := s.resolveProbeCredential(ctx, session, account)

@@ -204,7 +204,7 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 
 	for _, j := range jobs {
 		wsKey := j.userID + "|" + j.adminAccountID
-		releaseSlot, acquired := s.sharedProbeLimiter().acquire(ctx, wsKey, true)
+		releaseSlot, acquired := s.sharedProbeLimiter().acquireAutomatic(ctx, wsKey)
 		if !acquired {
 			break
 		}

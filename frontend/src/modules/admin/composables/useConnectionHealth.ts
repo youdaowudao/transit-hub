@@ -691,6 +691,10 @@ export function remoteActionLabelKey(remoteAction: string): { key: string; param
       return { key: `${prefix}.skippedTargetInitiallyDisabled` }
     case 'skipped_upstream_scheduling_disabled':
       return { key: `${prefix}.skippedUpstreamScheduling` }
+    case 'skipped_sub2api_group_last_active':
+      return { key: `${prefix}.skippedSub2apiLastActive` }
+    case 'skipped_sub2api_group_inventory_incomplete':
+      return { key: `${prefix}.skippedSub2apiInventoryIncomplete` }
     case 'sub2api_account_status_inactive':
       return { key: `${prefix}.sub2apiInactive` }
     case 'sub2api_account_status_active':

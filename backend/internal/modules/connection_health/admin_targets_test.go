@@ -13,7 +13,7 @@ import (
 )
 
 // newAdminTargetsRemoteActionService 构造一个用真实 remoteActionDispatcher（而不是
-// noopRemoteActionRunner）驱动的 Service，供本文件测试断言 probeTargetOnce 触发的真实远端动作调用。
+// noopRemoteActionRunner）驱动的 Service，供测试区分手动探活与后台调度的远端动作边界。
 func newAdminTargetsRemoteActionService(reader PlatformGroupReader, mySites MySitesReader, repo *fakeRepository, platform *fakePlatformActioner) *Service {
 	if fixture, ok := reader.(fakePlatformGroupReader); ok {
 		if siteFixture, ok := mySites.(fakeMySitesReader); ok {
@@ -353,11 +353,9 @@ func TestProbeTarget_FormalProbeRejectsUnassignedModel(t *testing.T) {
 	}
 }
 
-// TestProbeTargetOnce_Sub2APIAutoRemoteDegradeUpdatesInactive 验证 AutoRemoteActionEnabled=true
-// 时，sub2api target 探活遭遇硬失败（触发 TriggerRemoteDegrade）会真实调用
-// UpdateSub2APIAdminAccountStatus(session, target.AccountID, "inactive")，state/event 的
-// remoteAction 记录为 sub2api_account_status_inactive。
-func TestProbeTargetOnce_Sub2APIAutoRemoteDegradeUpdatesInactive(t *testing.T) {
+// TestProbeTarget_FormalFailureDefersRemoteDegradeToScheduler 验证正式手动探活只更新健康状态
+// 与事件；即使策略允许自动远端动作，也不能在请求线程直接关闭 Sub2API 账号。
+func TestProbeTarget_FormalFailureDefersRemoteDegradeToScheduler(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
@@ -383,21 +381,23 @@ func TestProbeTargetOnce_Sub2APIAutoRemoteDegradeUpdatesInactive(t *testing.T) {
 	if len(results) != 1 || results[0].State != StateSuspended {
 		t.Fatalf("expected hard failure to suspend immediately, got %+v", results)
 	}
-	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].accountID != "acc-1" || platform.sub2APICalls[0].status != "inactive" {
-		t.Fatalf("expected one call accountID=acc-1 status=inactive, got %+v", platform.sub2APICalls)
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("formal probe must defer remote inactive to the scheduler, got %+v", platform.sub2APICalls)
 	}
 	st := repo.states[targetID]["gpt-4o"]
-	if st.LastRemoteAction != RemoteActionSub2APIStatusInactive {
-		t.Fatalf("expected state.LastRemoteAction=%s, got %q", RemoteActionSub2APIStatusInactive, st.LastRemoteAction)
+	if st.LastRemoteAction != "" {
+		t.Fatalf("formal probe must not claim a remote action, got %q", st.LastRemoteAction)
 	}
-	if len(repo.events) != 1 || repo.events[0].RemoteAction != RemoteActionSub2APIStatusInactive {
-		t.Fatalf("expected event.RemoteAction=%s, got %+v", RemoteActionSub2APIStatusInactive, repo.events)
+	if len(repo.events) != 1 || repo.events[0].Source != EventSourceManual || repo.events[0].RemoteAction != "" {
+		t.Fatalf("formal probe must record only a manual health event, got %+v", repo.events)
+	}
+	if len(repo.targetActionStates) != 0 {
+		t.Fatalf("blocked manual inactive must not create an ownership checkpoint: %+v", repo.targetActionStates)
 	}
 }
 
-// TestProbeTargetOnce_Sub2APIAutoRemoteRestoreUpdatesActive 验证从 observing 状态达到成功阈值时
-// （触发 TriggerRemoteRestore），真实调用 UpdateSub2APIAdminAccountStatus(session,
-// target.AccountID, "active")，state/event 的 remoteAction 记录为 sub2api_account_status_active。
+// TestProbeTargetOnce_Sub2APIAutoRemoteRestoreUpdatesActive 验证手动探活恢复时保留
+// 既有 active 写回；最后账号保底只限制 inactive 方向。
 func TestProbeTargetOnce_Sub2APIAutoRemoteRestoreUpdatesActive(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -441,11 +441,9 @@ func TestProbeTargetOnce_Sub2APIAutoRemoteRestoreUpdatesActive(t *testing.T) {
 	}
 }
 
-// TestProbeTargetOnce_Sub2APIAutoRemoteDegradeFailureRecordsFailedAction 验证远端降级调用失败时
-// （UpdateSub2APIAdminAccountStatus 返回 error），state/event 的 remoteAction 记录为
-// sub2api_account_status_inactive_failed，绝不能回退成 unsupported——sub2api 已经支持这个
-// 动作，真的发起了调用只是失败了，和「平台不支持」是两回事。
-func TestProbeTargetOnce_Sub2APIAutoRemoteDegradeFailureRecordsFailedAction(t *testing.T) {
+// TestProbeTarget_FormalFailureNeverInvokesFailingDispatcher 验证即使远端动作配置为失败，正式
+// 手动探活也不会触达 dispatcher，更不能把一个未执行动作记录成失败。
+func TestProbeTarget_FormalFailureNeverInvokesFailingDispatcher(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
@@ -471,17 +469,20 @@ func TestProbeTargetOnce_Sub2APIAutoRemoteDegradeFailureRecordsFailedAction(t *t
 	if len(results) != 1 || results[0].State != StateSuspended {
 		t.Fatalf("expected hard failure to suspend, got %+v", results)
 	}
-	st := repo.states[targetID]["gpt-4o"]
-	if st.LastRemoteAction != RemoteActionSub2APIStatusInactiveFailed {
-		t.Fatalf("expected state.LastRemoteAction=%s, got %q", RemoteActionSub2APIStatusInactiveFailed, st.LastRemoteAction)
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("formal probe must not invoke the failing dispatcher: %+v", platform.sub2APICalls)
 	}
-	if len(repo.events) != 1 || repo.events[0].RemoteAction != RemoteActionSub2APIStatusInactiveFailed {
-		t.Fatalf("expected event.RemoteAction=%s, got %+v", RemoteActionSub2APIStatusInactiveFailed, repo.events)
+	st := repo.states[targetID]["gpt-4o"]
+	if st.LastRemoteAction != "" {
+		t.Fatalf("unattempted remote action must not be recorded as failed, got %q", st.LastRemoteAction)
+	}
+	if len(repo.events) != 1 || repo.events[0].RemoteAction != "" {
+		t.Fatalf("unattempted remote action must stay empty in the event: %+v", repo.events)
 	}
 }
 
-// TestProbeTargetOnce_Sub2APIAutoRemoteRestoreFailureRecordsFailedAction 验证远端恢复调用失败
-// 时，state/event 记录 sub2api_account_status_active_failed，不能回退成 unsupported。
+// TestProbeTargetOnce_Sub2APIAutoRemoteRestoreFailureRecordsFailedAction 验证手动恢复写回
+// 失败时仍记录 active_failed，不能因 inactive 保底丢失既有错误证据。
 func TestProbeTargetOnce_Sub2APIAutoRemoteRestoreFailureRecordsFailedAction(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -516,6 +517,9 @@ func TestProbeTargetOnce_Sub2APIAutoRemoteRestoreFailureRecordsFailedAction(t *t
 	if len(results) != 1 || results[0].State != StateRecovering {
 		t.Fatalf("expected transition to recovering, got %+v", results)
 	}
+	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].accountID != "acc-1" || platform.sub2APICalls[0].status != "active" {
+		t.Fatalf("expected one failed call accountID=acc-1 status=active, got %+v", platform.sub2APICalls)
+	}
 	st := repo.states[targetID]["gpt-4o"]
 	if st.LastRemoteAction != RemoteActionSub2APIStatusActiveFailed {
 		t.Fatalf("expected state.LastRemoteAction=%s, got %q", RemoteActionSub2APIStatusActiveFailed, st.LastRemoteAction)
@@ -524,10 +528,9 @@ func TestProbeTargetOnce_Sub2APIAutoRemoteRestoreFailureRecordsFailedAction(t *t
 
 // TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds 是覆盖「PlatformService
 // 单测通过、dispatcher fake 单测通过，但真实组合路径失败」这类盲区的端到端测试：
-// 用同一个 httptest.Server 同时模拟探活端点（返回 500 触发 healthy -> suspended）和 sub2api
-// admin accounts 的字段级批量更新，dispatcher 的 PlatformActioner 用真实 *upstream.PlatformService
-// （不是 fake），断言最终状态/事件里的 remoteAction 是 sub2api_account_status_inactive，
-// 且请求体只把指定账号的 status 改成 inactive。
+// 用同一个 httptest.Server 同时模拟探活端点和 sub2api admin accounts 的字段级批量更新。
+// 手动探活先只落 suspended；随后模拟 scheduled 收口，复用完整 inventory 做保底裁决并通过真实
+// *upstream.PlatformService 把指定账号写成 inactive。
 func TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds(t *testing.T) {
 	var bulkBody map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -551,8 +554,10 @@ func TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds(t *testi
 	repo.policies = []Policy{sub2APIProbePolicy(true)}
 	mySites := fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API, BaseURL: server.URL, AccessToken: "token-1", TokenType: "Bearer"}}
 	reader := fakePlatformGroupReader{
-		groups:        []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
-		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{"g1": {{ID: "1515", Name: "acc", Models: "gpt-4o"}}},
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "1515", Name: "acc", Status: "active", Models: "gpt-4o"}, {ID: "1516", Name: "reserve", Status: "active", Models: "gpt-4o"}},
+		},
 		credByAccount: map[string]upstream.ProbeCredential{"1515": {BaseURL: server.URL, Key: "probe-key"}},
 	}
 	svc := &Service{
@@ -571,12 +576,28 @@ func TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds(t *testi
 	if len(results) != 1 || results[0].State != StateSuspended {
 		t.Fatalf("expected hard failure to suspend, got %+v", results)
 	}
+	if bulkBody != nil {
+		t.Fatalf("formal probe must not write Sub2API before scheduled reconciliation: %+v", bulkBody)
+	}
+	refresh, err := svc.refreshAdminTarget(context.Background(), mySites.session, "ws1", "1515")
+	if err != nil || !refresh.found || refresh.accountsReadError {
+		t.Fatalf("scheduled refresh failed: refresh=%+v err=%v", refresh, err)
+	}
+	state := repo.states[targetID]["gpt-4o"]
+	spec := probeModelSpec{modelName: "gpt-4o", policy: repo.policies[0]}
+	if err := svc.finishTargetProbeBatchWithFloor(
+		context.Background(), "user1", "ws1", mySites.session, refresh.target,
+		[]probeModelSpec{spec}, []targetProbeResult{{state: &state, previousState: StateHealthy, outcome: ProbeOutcome{Result: ResultServerError}, spec: spec}},
+		EventSourceScheduled, newWorkspaceFloorGuard(), &refresh.inventory,
+	); err != nil {
+		t.Fatalf("scheduled target action failed: %v", err)
+	}
 
 	st := repo.states[targetID]["gpt-4o"]
 	if st.LastRemoteAction != RemoteActionSub2APIStatusInactive {
 		t.Fatalf("expected state.LastRemoteAction=%s, got %q", RemoteActionSub2APIStatusInactive, st.LastRemoteAction)
 	}
-	if len(repo.events) != 1 || repo.events[0].RemoteAction != RemoteActionSub2APIStatusInactive {
+	if len(repo.events) != 2 || repo.events[1].RemoteAction != RemoteActionSub2APIStatusInactive || repo.events[1].Source != EventSourceScheduled {
 		t.Fatalf("expected event.RemoteAction=%s, got %+v", RemoteActionSub2APIStatusInactive, repo.events)
 	}
 	if bulkBody == nil {

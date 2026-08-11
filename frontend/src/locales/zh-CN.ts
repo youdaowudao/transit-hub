@@ -1381,6 +1381,8 @@ export default {
         skippedIndependentProbe: '未开启自动远端动作，已跳过',
         skippedTargetConflict: '检测到上游被人工修改，已停止自动覆盖',
         skippedTargetInitiallyDisabled: '目标原本已在上游暂停，未执行自动启用',
+        skippedSub2apiLastActive: '该账号是所属分组最后一个 active，已跳过自动停用',
+        skippedSub2apiInventoryIncomplete: '主站分组清单读取不完整，已跳过自动停用',
         sub2apiInactive: 'Sub2API 账号已切换为 inactive',
         sub2apiActive: 'Sub2API 账号已切换为 active',
         sub2apiInactiveFailed: 'Sub2API 账号切换 inactive 失败',

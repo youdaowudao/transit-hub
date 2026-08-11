@@ -26,6 +26,7 @@ type adminProbeJob struct {
 	account        upstream.AdminGroupAccountInfo
 	models         []probeModelSpec
 	dueSpecs       []probeModelSpec
+	floorGuard     *workspaceFloorGuard
 }
 
 type probePolicyEventGroup struct {
@@ -181,6 +182,12 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 	if len(policies) == 0 {
 		return
 	}
+	remainingTargetActionStates, err := s.repo.ListAllTargetActionStates(ctx)
+	if err != nil {
+		log.Printf("[connection-health] scheduler refresh target action states failed: %v", err)
+		return
+	}
+	s.restoreEmptySub2APIGroups(ctx, remainingTargetActionStates, inventoryCache)
 	jobs := s.collectAdminProbeJobsWithGroupsAndCache(ctx, policies, assignments, groupAssignments, exclusions, inventoryCache)
 	if len(jobs) == 0 {
 		return
@@ -193,6 +200,7 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 	}
 	probedWorkspaces := make([]probedWorkspace, 0)
 	seenWorkspaces := make(map[string]struct{})
+	floorGuards := make(map[string]*workspaceFloorGuard)
 
 	for _, j := range jobs {
 		wsKey := j.userID + "|" + j.adminAccountID
@@ -204,6 +212,10 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 			seenWorkspaces[wsKey] = struct{}{}
 			probedWorkspaces = append(probedWorkspaces, probedWorkspace{userID: j.userID, adminAccountID: j.adminAccountID})
 		}
+		if floorGuards[wsKey] == nil {
+			floorGuards[wsKey] = newWorkspaceFloorGuard()
+		}
+		j.floorGuard = floorGuards[wsKey]
 
 		wg.Add(1)
 		go s.runAdminProbeJob(ctx, j, releaseSlot, &wg)
@@ -233,14 +245,14 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 		return
 	}
 	defer release()
-	freshTarget, freshAccount, memberships, found, accountsReadError, refreshErr := s.findAdminTargetWithMemberships(ctx, j.session, j.adminAccountID, j.target.AccountID)
-	if refreshErr != nil || accountsReadError || !found || freshTarget.TargetID != j.target.TargetID {
-		log.Printf("[connection-health] refresh scheduled target failed target_id=%s found=%t partial=%t err=%v", j.target.TargetID, found, accountsReadError, refreshErr)
+	refresh, refreshErr := s.refreshAdminTarget(ctx, j.session, j.adminAccountID, j.target.AccountID)
+	if refreshErr != nil || refresh.accountsReadError || !refresh.found || refresh.target.TargetID != j.target.TargetID {
+		log.Printf("[connection-health] refresh scheduled target failed target_id=%s found=%t partial=%t err=%v", j.target.TargetID, refresh.found, refresh.accountsReadError, refreshErr)
 		return
 	}
-	j.target = freshTarget
-	j.account = freshAccount
-	currentSpecs, queuedSpecs, policyOK := s.currentScheduledProbeSpecs(ctx, j.userID, j.adminAccountID, j.target, memberships, j.dueSpecs)
+	j.target = refresh.target
+	j.account = refresh.account
+	currentSpecs, queuedSpecs, policyOK := s.currentScheduledProbeSpecs(ctx, j.userID, j.adminAccountID, j.target, refresh.memberships, j.dueSpecs)
 	if !policyOK {
 		log.Printf("[connection-health] refresh scheduled policy decision failed target_id=%s", j.target.TargetID)
 		return
@@ -268,7 +280,7 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 			results = append(results, *result)
 		}
 	}
-	if err := s.finishTargetProbeBatch(ctx, j.userID, j.adminAccountID, j.session, j.target, j.models, results, EventSourceScheduled); err != nil {
+	if err := s.finishTargetProbeBatchWithFloor(ctx, j.userID, j.adminAccountID, j.session, j.target, j.models, results, EventSourceScheduled, j.floorGuard, &refresh.inventory); err != nil {
 		log.Printf("[connection-health] finish scheduled target probe failed target_id=%s err=%v", j.target.TargetID, err)
 	}
 }

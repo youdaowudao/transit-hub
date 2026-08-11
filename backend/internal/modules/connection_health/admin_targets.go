@@ -79,6 +79,15 @@ type adminTargetMembership struct {
 	groupName string
 }
 
+type adminTargetRefresh struct {
+	target            AdminProbeTarget
+	account           upstream.AdminGroupAccountInfo
+	memberships       []adminTargetMembership
+	inventory         adminWorkspaceInventory
+	found             bool
+	accountsReadError bool
+}
+
 // targetProbeResult 暂存单模型探活结果。一个账号的全部到期模型完成后，再统一决定一次上游
 // 动作并写事件，避免多模型按执行顺序互相启停同一个账号。
 type targetProbeResult struct {
@@ -444,25 +453,39 @@ func (s *Service) findAdminTarget(ctx context.Context, session upstream.Session,
 }
 
 func (s *Service) findAdminTargetWithMemberships(ctx context.Context, session upstream.Session, adminAccountID string, accountID string) (target AdminProbeTarget, account upstream.AdminGroupAccountInfo, memberships []adminTargetMembership, found bool, accountsReadError bool, err error) {
-	groups, err := s.fetchAdminAllGroups(ctx, session)
+	refresh, err := s.refreshAdminTarget(ctx, session, adminAccountID, accountID)
 	if err != nil {
 		return AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, nil, false, false, err
+	}
+	return refresh.target, refresh.account, refresh.memberships, refresh.found, refresh.accountsReadError, nil
+}
+
+// refreshAdminTarget keeps the existing execution-time refresh as one complete snapshot.
+// Scheduler floor decisions consume this same result and must not re-read groups or accounts.
+func (s *Service) refreshAdminTarget(ctx context.Context, session upstream.Session, adminAccountID string, accountID string) (adminTargetRefresh, error) {
+	groups, err := s.fetchAdminAllGroups(ctx, session)
+	if err != nil {
+		return adminTargetRefresh{}, err
+	}
+	refresh := adminTargetRefresh{
+		inventory: adminWorkspaceInventory{session: session, groups: make([]adminInventoryGroup, 0, len(groups))},
 	}
 	platform := string(session.Platform)
 	for _, group := range groups {
 		accounts, accErr := s.listAdminGroupAccounts(ctx, session, group)
+		refresh.inventory.groups = append(refresh.inventory.groups, adminInventoryGroup{group: group, accounts: accounts, err: accErr})
 		if accErr != nil {
 			// 单分组失败不影响在其它分组里继续找，但记录下发生过读取错误。
-			accountsReadError = true
+			refresh.accountsReadError = true
 			continue
 		}
 		for _, acc := range accounts {
 			if acc.ID != accountID {
 				continue
 			}
-			memberships = append(memberships, adminTargetMembership{groupID: group.ID, groupName: group.Name})
-			if !found {
-				target = AdminProbeTarget{
+			refresh.memberships = append(refresh.memberships, adminTargetMembership{groupID: group.ID, groupName: group.Name})
+			if !refresh.found {
+				refresh.target = AdminProbeTarget{
 					TargetID:       buildTargetID(platform, adminAccountID, acc.ID),
 					Platform:       platform,
 					AdminGroupID:   group.ID,
@@ -475,12 +498,12 @@ func (s *Service) findAdminTargetWithMemberships(ctx context.Context, session up
 					ProviderFamily: acc.Platform,
 					Models:         splitModelList(acc.Models),
 				}
-				account = acc
-				found = true
+				refresh.account = acc
+				refresh.found = true
 			}
 		}
 	}
-	return target, account, memberships, found, accountsReadError, nil
+	return refresh, nil
 }
 
 // probeTargetOnce 对一个 (target, model) 组合执行一次独立探活并落库状态。事件和账号级上游
@@ -564,12 +587,31 @@ func probeBudgetLimit(policy Policy) int {
 }
 
 func (s *Service) finishTargetProbeBatch(ctx context.Context, userID string, adminAccountID string, session upstream.Session, target AdminProbeTarget, specs []probeModelSpec, results []targetProbeResult, source string) error {
+	return s.finishTargetProbeBatchWithFloor(ctx, userID, adminAccountID, session, target, specs, results, source, nil, nil)
+}
+
+func (s *Service) finishTargetProbeBatchWithFloor(
+	ctx context.Context,
+	userID string,
+	adminAccountID string,
+	session upstream.Session,
+	target AdminProbeTarget,
+	specs []probeModelSpec,
+	results []targetProbeResult,
+	source string,
+	floorGuard *workspaceFloorGuard,
+	inventory *adminWorkspaceInventory,
+) error {
 	if len(results) == 0 {
 		return nil
 	}
-	remoteAction := ""
+	actionResult := targetRemoteActionResult{}
 	var actionErr error
-	remoteAction, actionErr = s.reconcileTargetRemoteAction(ctx, userID, adminAccountID, session, target, specs)
+	actionResult, actionErr = s.reconcileTargetRemoteActionWithFloorMode(
+		ctx, userID, adminAccountID, session, target, specs, floorGuard, inventory,
+		source != EventSourceManual,
+	)
+	remoteAction := actionResult.remoteAction
 	if actionErr != nil {
 		log.Printf("[connection-health] reconcile target action failed target_id=%s action=%s err=%v", target.TargetID, remoteAction, actionErr)
 	}
@@ -591,7 +633,7 @@ func (s *Service) finishTargetProbeBatch(ctx context.Context, userID string, adm
 		}
 		// A scheduling-disabled skip is an audit outcome, not a new ownership action.
 		// Preserve the last real active/inactive action used by legacy ownership recovery.
-		if remoteAction != RemoteActionSkippedUpstreamScheduling {
+		if !targetActionAuditOnly(remoteAction) {
 			results[actionIndex].state.LastRemoteAction = remoteAction
 			if err := s.repo.UpsertState(ctx, *results[actionIndex].state); err != nil {
 				return err
@@ -603,6 +645,10 @@ func (s *Service) finishTargetProbeBatch(ctx context.Context, userID string, adm
 			action := ""
 			if index == actionIndex {
 				action = remoteAction
+				if actionResult.adminGroupID != "" {
+					eventTarget.AdminGroupID = actionResult.adminGroupID
+					eventTarget.AdminGroupName = actionResult.adminGroupName
+				}
 			}
 			if err := s.recordTargetEvent(ctx, userID, adminAccountID, eventTarget, result.spec.effectiveBudgetPolicy().ID, result.spec.modelName,
 				string(result.outcome.Result), string(result.previousState), string(result.state.State), &result.latencyMs,

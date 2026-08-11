@@ -2,7 +2,6 @@ package connection_health
 
 import (
 	"context"
-	"errors"
 	"log"
 	"strings"
 	"time"
@@ -83,15 +82,12 @@ type adminTargetMembership struct {
 // targetProbeResult 暂存单模型探活结果。一个账号的全部到期模型完成后，再统一决定一次上游
 // 动作并写事件，避免多模型按执行顺序互相启停同一个账号。
 type targetProbeResult struct {
-	state            *ConnectionHealthState
-	previousState    State
-	outcome          ProbeOutcome
-	latencyMs        int
-	spec             probeModelSpec
-	safetyAction     string
-	degradeRequested bool
-	restoreRequested bool
-	automaticGuard   *automaticProbeGuard
+	state           *ConnectionHealthState
+	previousState   State
+	outcome         ProbeOutcome
+	latencyMs       int
+	spec            probeModelSpec
+	triggeredRemote bool
 }
 
 // buildTargetID 生成稳定的探活目标 ID：platform:workspaceAdminAccountID:accountID。
@@ -326,14 +322,6 @@ func (s *Service) ProbeTarget(ctx context.Context, userID string, targetID strin
 	if err != nil {
 		return nil, err
 	}
-	limitCtx, cancelLimit := context.WithTimeout(ctx, 2*ProbeTimeout)
-	defer cancelLimit()
-	workspaceKey := userID + "|" + adminAccountID
-	releaseSlot, acquired := s.sharedProbeLimiter().acquireManual(limitCtx, workspaceKey, s.manualProbeReservedSlots(ctx, userID, adminAccountID))
-	if !acquired {
-		return nil, requestError(ErrorProbeConcurrencyLimited)
-	}
-	defer releaseSlot()
 	release, acquired, err := s.repo.TryAcquireTargetLease(ctx, targetID)
 	if err != nil {
 		return nil, err
@@ -398,6 +386,13 @@ func (s *Service) ProbeTarget(ctx context.Context, userID string, targetID strin
 		}
 	}
 
+	workspaceKey := userID + "|" + adminAccountID
+	releaseSlot, acquired := s.sharedProbeLimiter().acquire(ctx, workspaceKey, false)
+	if !acquired {
+		return nil, requestError(ErrorProbeConcurrencyLimited)
+	}
+	defer releaseSlot()
+
 	// 解析凭据（server-only，明文只在内存短暂存在）。失败 -> 结构化不可探活错误。
 	cred, err := s.resolveProbeCredential(ctx, session, account)
 	if err != nil {
@@ -407,7 +402,7 @@ func (s *Service) ProbeTarget(ctx context.Context, userID string, targetID strin
 	results := make([]ModelHealth, 0, len(specs))
 	probeResults := make([]targetProbeResult, 0, len(specs))
 	for _, spec := range specs {
-		result, probeErr := s.probeTargetOnce(ctx, userID, adminAccountID, target, cred, spec, false, nil)
+		result, probeErr := s.probeTargetOnce(ctx, userID, adminAccountID, target, cred, spec, false)
 		if probeErr != nil {
 			return nil, probeErr
 		}
@@ -419,7 +414,7 @@ func (s *Service) ProbeTarget(ctx context.Context, userID string, targetID strin
 		return nil, err
 	}
 	if len(probeResults) > 0 {
-		s.evaluateCurrentWorkspacePriorities(ctx, userID, adminAccountID, priorityActionProbe)
+		s.syncCurrentWorkspacePriorities(ctx, userID, adminAccountID)
 	}
 	for _, result := range probeResults {
 		modelHealth := toModelHealth(result.spec.modelName, *result.state)
@@ -501,7 +496,7 @@ func (s *Service) findAdminTargetWithMemberships(ctx context.Context, session up
 // session 来自调用方（ProbeTarget 的 resolveManualTarget / 调度器 job 的 RequireSession），
 // 不信任前端传入的任何 platform/account 信息。
 // 每日探活预算耗尽时跳过真实请求，只保留当前状态。
-func (s *Service) probeTargetOnce(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, cred upstream.ProbeCredential, spec probeModelSpec, consumeBudget bool, guard *automaticProbeGuard) (*targetProbeResult, error) {
+func (s *Service) probeTargetOnce(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, cred upstream.ProbeCredential, spec probeModelSpec, consumeBudget bool) (*targetProbeResult, error) {
 	current, err := s.repo.GetState(ctx, target.TargetID, spec.modelName)
 	if err != nil {
 		return nil, err
@@ -509,17 +504,6 @@ func (s *Service) probeTargetOnce(ctx context.Context, userID string, adminAccou
 	if current == nil {
 		defaultState := defaultTargetState(userID, adminAccountID, target, spec.modelName)
 		current = &defaultState
-	}
-
-	// Check the current epoch and both endpoint circuit families before spending
-	// a probe budget or issuing an automatic request. Passing an empty domain
-	// makes automaticProbeAllowed re-read the target endpoint and catch a circuit
-	// opened by another worker since the scheduler selected this target.
-	if guard != nil {
-		allowed, guardErr := s.automaticProbeAllowed(ctx, userID, adminAccountID, target.TargetID, "", guard.queueEpoch)
-		if guardErr != nil || !allowed {
-			return nil, guardErr
-		}
 	}
 
 	if consumeBudget {
@@ -535,69 +519,18 @@ func (s *Service) probeTargetOnce(ctx context.Context, userID string, adminAccou
 	}
 
 	outcome := s.executeTargetProbe(ctx, target, cred, spec)
-	if guard != nil {
-		allowed, guardErr := s.automaticProbeAllowed(ctx, userID, adminAccountID, target.TargetID,
-			confirmationFaultDomain(cred.BaseURL, target, outcome.Result), guard.queueEpoch)
-		if guardErr != nil {
-			return nil, guardErr
-		}
-		if !allowed {
-			if auditRepo, ok := s.repo.(epochObservationRepository); ok {
-				_ = auditRepo.InsertSafetyAudit(ctx, userID, adminAccountID, "stale_probe_response", target.TargetID+":"+spec.modelName+":"+string(outcome.Result))
-			}
-			return nil, nil
-		}
-	}
 
 	now := time.Now()
-	requireConfirmation := target.Platform == string(upstream.PlatformSub2API)
-	next, transitionOut := applyProbeOutcomeWithConfirmation(*current, outcome, spec.policy, now, requireConfirmation)
+	next, transitionOut := applyProbeOutcome(*current, outcome, spec.policy, now)
 	next.LastProbeDecisionKey = probeDecisionKey(target, spec)
 	latencyMs := outcome.LatencyMs
-	safetyAction := ""
-	if consumeBudget && requireConfirmation {
-		var queueErr error
-		if guard == nil {
-			safetyAction = RemoteActionSafetyGateUnavailable
-		} else {
-			safetyAction, queueErr = s.enqueueHealthIncidentConfirmation(ctx, userID, adminAccountID, target, cred, spec, outcome, *guard, now)
-		}
-		if queueErr != nil {
-			// The safety gate fails closed: preserve the observation, but never
-			// fall back to an immediate upstream mutation when queue admission is
-			// unavailable.
-			log.Printf("[connection-health] safety confirmation admission failed target_id=%s model=%s err=%v", target.TargetID, spec.modelName, queueErr)
-			if safetyAction == "" {
-				safetyAction = RemoteActionSafetyGateUnavailable
-			}
-		}
-	}
-	if safetyAction != "" {
-		next.LastRemoteAction = safetyAction
-	}
 
-	if guard != nil {
-		epochRepo, ok := s.repo.(epochObservationRepository)
-		if !ok {
-			return nil, errors.New("automatic observation epoch repository unavailable")
-		}
-		committed, err := epochRepo.UpsertStateIfAbnormalQueueEpoch(ctx, next, guard.queueEpoch)
-		if err != nil {
-			return nil, err
-		}
-		if !committed {
-			_ = epochRepo.InsertSafetyAudit(ctx, userID, adminAccountID, "stale_probe_commit", target.TargetID+":"+spec.modelName)
-			return nil, nil
-		}
-	} else if err := s.repo.UpsertState(ctx, next); err != nil {
+	if err := s.repo.UpsertState(ctx, next); err != nil {
 		return nil, err
 	}
 	return &targetProbeResult{
 		state: &next, previousState: current.State, outcome: outcome, latencyMs: latencyMs, spec: spec,
-		safetyAction:     safetyAction,
-		degradeRequested: transitionOut.TriggerRemoteDegrade,
-		restoreRequested: transitionOut.TriggerRemoteRestore,
-		automaticGuard:   guard,
+		triggeredRemote: transitionOut.TriggerRemoteDegrade || transitionOut.TriggerRemoteRestore,
 	}, nil
 }
 
@@ -634,97 +567,57 @@ func (s *Service) finishTargetProbeBatch(ctx context.Context, userID string, adm
 	if len(results) == 0 {
 		return nil
 	}
-	// A successful observation may still complete a previously confirmed
-	// recovery. Destructive status changes never run from this batch; they must
-	// come from a persisted confirmation intent handled by the safety worker.
-	allowRestore := false
-	staleAutomaticBatch := false
-	for _, result := range results {
-		if source == EventSourceScheduled && result.automaticGuard != nil && s.safetyRepo != nil {
-			currentEpoch, epochErr := s.safetyRepo.GetAbnormalQueueEpoch(ctx, userID, adminAccountID)
-			if epochErr != nil || currentEpoch != result.automaticGuard.queueEpoch {
-				staleAutomaticBatch = true
-				if auditRepo, ok := s.repo.(epochObservationRepository); ok {
-					_ = auditRepo.InsertSafetyAudit(ctx, userID, adminAccountID, "stale_probe_batch_action", target.TargetID+":"+result.spec.modelName)
-				}
-			}
-		}
-		if isDestructiveConfirmationResult(result.outcome.Result) {
-			allowRestore = false
-			break
-		}
-		allowRestore = allowRestore || result.restoreRequested
-	}
 	remoteAction := ""
-	if target.Platform != string(upstream.PlatformSub2API) {
-		var actionErr error
-		remoteAction, actionErr = s.reconcileTargetRemoteAction(ctx, userID, adminAccountID, session, target, specs)
-		if actionErr != nil {
-			log.Printf("[connection-health] reconcile NewAPI target action failed target_id=%s action=%s err=%v", target.TargetID, remoteAction, actionErr)
-		}
-	} else if allowRestore && !staleAutomaticBatch {
-		circuitOpen := false
-		if s.safetyRepo != nil {
-			var circuitErr error
-			circuitOpen, circuitErr = s.safetyRepo.TargetCircuitOpen(ctx, userID, adminAccountID, target.TargetID)
-			if circuitErr != nil {
-				remoteAction = RemoteActionSafetyGateUnavailable
-				log.Printf("[connection-health] read target recovery circuit failed target_id=%s err=%v", target.TargetID, circuitErr)
-			}
-		}
-		if remoteAction == "" && circuitOpen {
-			remoteAction = RemoteActionSafetyCircuitOpen
-		}
-		if remoteAction == "" {
-			var actionErr error
-			remoteAction, actionErr = s.reconcileTargetRemoteAction(ctx, userID, adminAccountID, session, target, specs)
-			if actionErr != nil {
-				log.Printf("[connection-health] reconcile target recovery failed target_id=%s action=%s err=%v", target.TargetID, remoteAction, actionErr)
-			}
-		}
+	var actionErr error
+	remoteAction, actionErr = s.reconcileTargetRemoteAction(ctx, userID, adminAccountID, session, target, specs)
+	if actionErr != nil {
+		log.Printf("[connection-health] reconcile target action failed target_id=%s action=%s err=%v", target.TargetID, remoteAction, actionErr)
 	}
-	if remoteAction == "" && target.Schedulable != nil && !*target.Schedulable {
-		remoteAction = RemoteActionSkippedUpstreamScheduling
-	}
-	actionIndex := -1
-	for index := range results {
-		if results[index].safetyAction != "" || results[index].degradeRequested || results[index].restoreRequested {
-			actionIndex = index
-		}
-	}
-	if remoteAction == "" && target.Platform != string(upstream.PlatformSub2API) {
+	if remoteAction == "" {
 		for _, result := range results {
-			if (result.degradeRequested || result.restoreRequested) && !policyRemoteActionEnabled(result.spec.policy) {
+			if result.triggeredRemote && !policyRemoteActionEnabled(result.spec.policy) {
 				remoteAction = RemoteActionSkippedIndependentProbe
 				break
 			}
 		}
 	}
-	if remoteAction != "" && actionIndex >= 0 {
-		results[actionIndex].state.LastRemoteAction = remoteAction
-		if err := s.repo.UpsertState(ctx, *results[actionIndex].state); err != nil {
-			return err
+	if remoteAction != "" {
+		actionIndex := len(results) - 1
+		for index := len(results) - 1; index >= 0; index-- {
+			if policyRemoteActionEnabled(results[index].spec.policy) {
+				actionIndex = index
+				break
+			}
 		}
-	}
-	eventActionIndex := actionIndex
-	if remoteAction == RemoteActionSkippedUpstreamScheduling && eventActionIndex < 0 {
-		// 跳过动作只是本次事件的审计结果，不覆盖状态上原有的接管证据。
-		eventActionIndex = len(results) - 1
+		// A scheduling-disabled skip is an audit outcome, not a new ownership action.
+		// Preserve the last real active/inactive action used by legacy ownership recovery.
+		if remoteAction != RemoteActionSkippedUpstreamScheduling {
+			results[actionIndex].state.LastRemoteAction = remoteAction
+			if err := s.repo.UpsertState(ctx, *results[actionIndex].state); err != nil {
+				return err
+			}
+		}
+		for index := range results {
+			result := &results[index]
+			eventTarget := targetForProbeSpec(target, result.spec)
+			action := ""
+			if index == actionIndex {
+				action = remoteAction
+			}
+			if err := s.recordTargetEvent(ctx, userID, adminAccountID, eventTarget, result.spec.effectiveBudgetPolicy().ID, result.spec.modelName,
+				string(result.outcome.Result), string(result.previousState), string(result.state.State), &result.latencyMs,
+				result.state.LastErrorKey, result.state.LastErrorDetail, action, source); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	for index := range results {
 		result := &results[index]
 		eventTarget := targetForProbeSpec(target, result.spec)
-		action := result.safetyAction
-		if index == eventActionIndex && remoteAction != "" {
-			action = remoteAction
-		}
-		var expectedEpoch *int64
-		if result.automaticGuard != nil {
-			expectedEpoch = &result.automaticGuard.queueEpoch
-		}
-		if err := s.recordTargetEventAtEpoch(ctx, userID, adminAccountID, eventTarget, result.spec.effectiveBudgetPolicy().ID, result.spec.modelName,
+		if err := s.recordTargetEvent(ctx, userID, adminAccountID, eventTarget, result.spec.effectiveBudgetPolicy().ID, result.spec.modelName,
 			string(result.outcome.Result), string(result.previousState), string(result.state.State), &result.latencyMs,
-			result.state.LastErrorKey, result.state.LastErrorDetail, action, source, expectedEpoch); err != nil {
+			result.state.LastErrorKey, result.state.LastErrorDetail, "", source); err != nil {
 			return err
 		}
 	}
@@ -770,10 +663,6 @@ func defaultTargetState(userID string, adminAccountID string, target AdminProbeT
 // recordTargetEvent 写入一条独立探活事件（connection_id 列存 targetId）。error_detail 已在
 // probe_runner 里脱敏，绝不含明文 key。
 func (s *Service) recordTargetEvent(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, policyID string, modelName string, result string, fromState string, toState string, latencyMs *int, errorKey string, errorDetail string, remoteAction string, source string) error {
-	return s.recordTargetEventAtEpoch(ctx, userID, adminAccountID, target, policyID, modelName, result, fromState, toState, latencyMs, errorKey, errorDetail, remoteAction, source, nil)
-}
-
-func (s *Service) recordTargetEventAtEpoch(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, policyID string, modelName string, result string, fromState string, toState string, latencyMs *int, errorKey string, errorDetail string, remoteAction string, source string, expectedEpoch *int64) error {
 	id, err := newID()
 	if err != nil {
 		return err
@@ -788,20 +677,6 @@ func (s *Service) recordTargetEventAtEpoch(ctx context.Context, userID string, a
 		OwnGroupName: target.AdminGroupName, UpstreamSiteID: "", UpstreamGroupName: target.AdminGroupName, Result: result,
 		FromState: fromState, ToState: toState, LatencyMs: latencyMs, ErrorKey: errorKey, ErrorDetail: errorDetail,
 		RemoteAction: remoteAction, ActionSource: actionSource, Source: source,
-	}
-	if expectedEpoch != nil {
-		epochRepo, ok := s.repo.(epochObservationRepository)
-		if !ok {
-			return errors.New("automatic event epoch repository unavailable")
-		}
-		inserted, err := epochRepo.InsertEventIfAbnormalQueueEpoch(ctx, event, *expectedEpoch)
-		if err != nil {
-			return err
-		}
-		if !inserted {
-			return epochRepo.InsertSafetyAudit(ctx, userID, adminAccountID, "stale_probe_event", target.TargetID+":"+modelName)
-		}
-		return nil
 	}
 	return s.repo.InsertEvent(ctx, event)
 }

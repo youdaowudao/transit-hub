@@ -2,15 +2,12 @@ package connection_health
 
 import (
 	"context"
-	"encoding/hex"
-	"errors"
 	"log"
 	"strings"
 	"sync"
 	"time"
 
 	"transithub/backend/internal/modules/my_sites"
-	"transithub/backend/internal/modules/upstream"
 )
 
 // healthRepository 是 Service 对存储层的全部依赖，由 *Repository 结构性满足。
@@ -52,11 +49,8 @@ type healthRepository interface {
 	ListGroupProbeSortSettings(ctx context.Context, userID string, adminAccountID string) ([]GroupProbeSortSetting, error)
 	ListPrioritySyncStates(ctx context.Context, userID string, adminAccountID string) ([]PrioritySyncState, error)
 	ListAllPrioritySyncStates(ctx context.Context) ([]PrioritySyncState, error)
-	ListAllPriorityWorkspaceSyncStates(ctx context.Context) ([]PriorityWorkspaceSyncState, error)
 	UpsertPrioritySyncState(ctx context.Context, state PrioritySyncState) error
 	DeletePrioritySyncState(ctx context.Context, userID string, adminAccountID string, targetID string) error
-	GetPriorityWorkspaceSyncState(ctx context.Context, userID string, adminAccountID string) (*PriorityWorkspaceSyncState, error)
-	UpsertPriorityWorkspaceSyncState(ctx context.Context, state PriorityWorkspaceSyncState) error
 	GetTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) (*TargetActionState, error)
 	ListTargetActionStates(ctx context.Context, userID string, adminAccountID string) ([]TargetActionState, error)
 	ListAllTargetActionStates(ctx context.Context) ([]TargetActionState, error)
@@ -68,50 +62,29 @@ type healthRepository interface {
 // Service 组装 connection_health 模块的全部业务逻辑：聚合查询、策略管理、手动动作、
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
-	repo                        healthRepository
-	safetyRepo                  safetyMutationRepository
-	mutationCoordinator         *MutationCoordinator
-	mutationCoordinatorMu       sync.Mutex
-	mySites                     MySitesReader
-	sites                       SiteLookup
-	accounts                    AdminAccountResolver
-	dispatcher                  RemoteActionRunner
-	probeRunner                 *RealProbeRunner
-	modelDiscovery              *ModelDiscoveryRunner
-	platformGroups              PlatformGroupReader
-	priorityActions             TargetPriorityActioner
-	schedulableActions          TargetSchedulableActioner
-	probeLimiterMu              sync.Mutex
-	probeLimiter                *probeConcurrencyLimiter
-	safetySettingsMu            sync.RWMutex
-	safetySettingsCache         map[string]SafetySettings
-	inventorySnapshotMu         sync.RWMutex
-	inventorySnapshots          map[string]adminInventorySnapshot
-	inventorySnapshotGeneration uint64
-	schedulerSignalsOnce        sync.Once
-	schedulerStartOnce          sync.Once
-	schedulerCancel             context.CancelFunc
-	schedulerWG                 sync.WaitGroup
-	probeSchedulerWake          chan struct{}
-	priorityReconcileWake       chan struct{}
-	priorityWritebackWake       chan struct{}
-	priorityBatchMu             sync.Mutex
-	priorityBatches             map[string]priorityWriteBatch
-	now                         func() time.Time
+	repo               healthRepository
+	mySites            MySitesReader
+	sites              SiteLookup
+	accounts           AdminAccountResolver
+	dispatcher         RemoteActionRunner
+	probeRunner        *RealProbeRunner
+	modelDiscovery     *ModelDiscoveryRunner
+	platformGroups     PlatformGroupReader
+	priorityActions    TargetPriorityActioner
+	schedulableActions TargetSchedulableActioner
+	probeLimiterMu     sync.Mutex
+	probeLimiter       *probeConcurrencyLimiter
 }
 
 func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner) *Service {
 	service := &Service{
-		repo:                repo,
-		safetyRepo:          repo,
-		mutationCoordinator: NewMutationCoordinator(repo),
-		mySites:             mySites,
-		sites:               sites,
-		dispatcher:          newRemoteActionDispatcher(sites, mySites, platform),
-		probeRunner:         NewRealProbeRunner(),
-		modelDiscovery:      NewModelDiscoveryRunner(),
-		probeLimiter:        newProbeConcurrencyLimiter(globalProbeConcurrency, perSiteProbeConcurrency),
-		safetySettingsCache: make(map[string]SafetySettings),
+		repo:           repo,
+		mySites:        mySites,
+		sites:          sites,
+		dispatcher:     newRemoteActionDispatcher(sites, mySites, platform),
+		probeRunner:    NewRealProbeRunner(),
+		modelDiscovery: NewModelDiscoveryRunner(),
+		probeLimiter:   newProbeConcurrencyLimiter(globalProbeConcurrency, perSiteProbeConcurrency),
 	}
 	// 真实 PlatformService 同时实现优先级更新能力；测试或旧注入器如果尚未实现，倍率策略会
 	// 安全跳过远端写入，不影响既有探活/降级流程。
@@ -137,128 +110,6 @@ func (s *Service) currentAdminAccountID(ctx context.Context, userID string) (str
 		return "", requestError(ErrorNoCurrentAccount)
 	}
 	return s.accounts.RequireCurrentID(ctx, userID)
-}
-
-// PrioritySync reads the persisted workspace writeback observation without loading
-// any upstream groups, accounts, inventory, or external site data.
-func (s *Service) PrioritySync(ctx context.Context, userID string) (*PriorityWorkspaceSyncState, error) {
-	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	return s.repo.GetPriorityWorkspaceSyncState(ctx, userID, adminAccountID)
-}
-
-func (s *Service) safetyRepository() (safetyMutationRepository, error) {
-	if s.safetyRepo != nil {
-		return s.safetyRepo, nil
-	}
-	if repo, ok := s.repo.(safetyMutationRepository); ok {
-		return repo, nil
-	}
-	return nil, requestError(ErrorUnknown)
-}
-
-func (s *Service) workspaceSafetySettings(ctx context.Context, userID, workspaceID string) (SafetySettings, bool) {
-	key := userID + "|" + workspaceID
-	if s.safetyRepo != nil {
-		settings, err := s.safetyRepo.GetSafetySettings(ctx, userID, workspaceID)
-		if err == nil {
-			s.safetySettingsMu.Lock()
-			if s.safetySettingsCache == nil {
-				s.safetySettingsCache = make(map[string]SafetySettings)
-			}
-			s.safetySettingsCache[key] = settings
-			s.safetySettingsMu.Unlock()
-			return settings, true
-		}
-	}
-	s.safetySettingsMu.RLock()
-	settings, ok := s.safetySettingsCache[key]
-	s.safetySettingsMu.RUnlock()
-	return settings, ok
-}
-
-func (s *Service) manualProbeReservedSlots(ctx context.Context, userID, workspaceID string) int {
-	if settings, ok := s.workspaceSafetySettings(ctx, userID, workspaceID); ok {
-		return settings.ManualReservedSlots
-	}
-	return DefaultSafetySettings().ManualReservedSlots
-}
-
-func (s *Service) loadSafetyWorkspace(ctx context.Context, userID string) (SafetyWorkspaceView, error) {
-	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
-	if err != nil {
-		return SafetyWorkspaceView{}, err
-	}
-	repo, err := s.safetyRepository()
-	if err != nil {
-		return SafetyWorkspaceView{}, err
-	}
-	settings, err := repo.GetSafetySettings(ctx, userID, adminAccountID)
-	if err != nil {
-		return SafetyWorkspaceView{}, err
-	}
-	s.safetySettingsMu.Lock()
-	if s.safetySettingsCache == nil {
-		s.safetySettingsCache = make(map[string]SafetySettings)
-	}
-	s.safetySettingsCache[userID+"|"+adminAccountID] = settings
-	s.safetySettingsMu.Unlock()
-	latestClear, err := repo.GetLatestEmergencyClear(ctx, userID, adminAccountID)
-	if err != nil {
-		return SafetyWorkspaceView{}, err
-	}
-	queue, err := repo.GetSafetyQueueSummary(ctx, userID, adminAccountID)
-	if err != nil {
-		return SafetyWorkspaceView{}, err
-	}
-	return SafetyWorkspaceView{Settings: settings, Queue: queue, LatestEmergencyClear: latestClear}, nil
-}
-
-func (s *Service) SaveSafetySettings(ctx context.Context, userID string, settings SafetySettings) (SafetyWorkspaceView, error) {
-	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
-	if err != nil {
-		return SafetyWorkspaceView{}, err
-	}
-	repo, err := s.safetyRepository()
-	if err != nil {
-		return SafetyWorkspaceView{}, err
-	}
-	settings.UserID = userID
-	settings.WorkspaceID = adminAccountID
-	settings.UpdatedBy = userID
-	if err := settings.Validate(); err != nil {
-		return SafetyWorkspaceView{}, requestError(ErrorRequest)
-	}
-	if err := repo.UpsertSafetySettings(ctx, settings); err != nil {
-		return SafetyWorkspaceView{}, err
-	}
-	return s.loadSafetyWorkspace(ctx, userID)
-}
-
-func (s *Service) EmergencyClearAbnormalQueue(ctx context.Context, userID string, idempotencyKey string) (EmergencyClearResult, error) {
-	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
-	if err != nil {
-		return EmergencyClearResult{}, err
-	}
-	trimmedKey := strings.TrimSpace(idempotencyKey)
-	if !validSafetyIdempotencyKey(trimmedKey) {
-		return EmergencyClearResult{}, requestError(ErrorRequest)
-	}
-	repo, err := s.safetyRepository()
-	if err != nil {
-		return EmergencyClearResult{}, err
-	}
-	return repo.EmergencyClear(ctx, userID, adminAccountID, trimmedKey, s.schedulerNow())
-}
-
-func validSafetyIdempotencyKey(value string) bool {
-	if len(value) != 36 || value[8] != '-' || value[13] != '-' || value[18] != '-' || value[23] != '-' {
-		return false
-	}
-	decoded, err := hex.DecodeString(strings.ReplaceAll(value, "-", ""))
-	return err == nil && len(decoded) == 16
 }
 
 // ModelHealth 是单个模型在某条对接链路上的健康状态展示数据，绝不包含 upstream_key。
@@ -331,16 +182,15 @@ type EventView struct {
 
 // OverviewResponse 是大屏顶部汇总卡片的数据。
 type OverviewResponse struct {
-	TotalConnections int                         `json:"totalConnections"`
-	Healthy          int                         `json:"healthy"`
-	Degraded         int                         `json:"degraded"`
-	Suspended        int                         `json:"suspended"`
-	Observing        int                         `json:"observing"`
-	Recovering       int                         `json:"recovering"`
-	Disabled         int                         `json:"disabled"`
-	Unconfigured     int                         `json:"unconfigured"`
-	RecentEvents     []EventView                 `json:"recentEvents"`
-	PrioritySync     *PriorityWorkspaceSyncState `json:"prioritySync,omitempty"`
+	TotalConnections int         `json:"totalConnections"`
+	Healthy          int         `json:"healthy"`
+	Degraded         int         `json:"degraded"`
+	Suspended        int         `json:"suspended"`
+	Observing        int         `json:"observing"`
+	Recovering       int         `json:"recovering"`
+	Disabled         int         `json:"disabled"`
+	Unconfigured     int         `json:"unconfigured"`
+	RecentEvents     []EventView `json:"recentEvents"`
 }
 
 // StoredSummaryResponse 是工作台使用的轻量健康摘要。它只聚合本地状态、事件和动作接管表，
@@ -568,11 +418,6 @@ func (s *Service) Overview(ctx context.Context, userID string) (OverviewResponse
 			return OverviewResponse{}, err
 		}
 		resp.RecentEvents = toEventViews(events)
-		prioritySync, err := s.repo.GetPriorityWorkspaceSyncState(ctx, userID, adminAccountID)
-		if err != nil {
-			return OverviewResponse{}, err
-		}
-		resp.PrioritySync = prioritySync
 		return resp, nil
 	}
 
@@ -647,11 +492,6 @@ func (s *Service) Overview(ctx context.Context, userID string) (OverviewResponse
 		events = events[:50]
 	}
 	resp.RecentEvents = toEventViews(events)
-	prioritySync, err := s.repo.GetPriorityWorkspaceSyncState(ctx, userID, adminAccountID)
-	if err != nil {
-		return OverviewResponse{}, err
-	}
-	resp.PrioritySync = prioritySync
 	return resp, nil
 }
 
@@ -829,27 +669,26 @@ type ModelTargetInput struct {
 }
 
 type PolicyInput struct {
-	ID                                string              `json:"id"`
-	Name                              string              `json:"name"`
-	Enabled                           bool                `json:"enabled"`
-	OwnGroupID                        string              `json:"ownGroupId"`
-	OwnGroupName                      string              `json:"ownGroupName"`
-	ModelPattern                      string              `json:"modelPattern"`
-	ProbeIntervalSeconds              int                 `json:"probeIntervalSeconds"`
-	ContinueProbeWhenUnschedulable    *bool               `json:"continueProbeWhenUnschedulable"`
-	UnschedulableProbeIntervalMinutes *int                `json:"unschedulableProbeIntervalMinutes"`
-	FailureThreshold                  int                 `json:"failureThreshold"`
-	SuccessThreshold                  int                 `json:"successThreshold"`
-	CooldownSeconds                   int                 `json:"cooldownSeconds"`
-	ObservationSeconds                int                 `json:"observationSeconds"`
-	RecoveryStepPercent               int                 `json:"recoveryStepPercent"`
-	AutoDegradeEnabled                bool                `json:"autoDegradeEnabled"`
-	AutoRemoteActionEnabled           bool                `json:"autoRemoteActionEnabled"`
-	PriorityMode                      string              `json:"priorityMode"`
-	StrategyMode                      string              `json:"strategyMode"`
-	PrioritySyncPreset                *PrioritySyncPreset `json:"prioritySyncPreset"`
-	DailyProbeBudget                  int                 `json:"dailyProbeBudget"`
-	ModelTargets                      []ModelTargetInput  `json:"modelTargets"`
+	ID                                string             `json:"id"`
+	Name                              string             `json:"name"`
+	Enabled                           bool               `json:"enabled"`
+	OwnGroupID                        string             `json:"ownGroupId"`
+	OwnGroupName                      string             `json:"ownGroupName"`
+	ModelPattern                      string             `json:"modelPattern"`
+	ProbeIntervalSeconds              int                `json:"probeIntervalSeconds"`
+	ContinueProbeWhenUnschedulable    *bool              `json:"continueProbeWhenUnschedulable"`
+	UnschedulableProbeIntervalMinutes *int               `json:"unschedulableProbeIntervalMinutes"`
+	FailureThreshold                  int                `json:"failureThreshold"`
+	SuccessThreshold                  int                `json:"successThreshold"`
+	CooldownSeconds                   int                `json:"cooldownSeconds"`
+	ObservationSeconds                int                `json:"observationSeconds"`
+	RecoveryStepPercent               int                `json:"recoveryStepPercent"`
+	AutoDegradeEnabled                bool               `json:"autoDegradeEnabled"`
+	AutoRemoteActionEnabled           bool               `json:"autoRemoteActionEnabled"`
+	PriorityMode                      string             `json:"priorityMode"`
+	StrategyMode                      string             `json:"strategyMode"`
+	DailyProbeBudget                  int                `json:"dailyProbeBudget"`
+	ModelTargets                      []ModelTargetInput `json:"modelTargets"`
 }
 
 func (s *Service) ListPolicies(ctx context.Context, userID string) ([]Policy, error) {
@@ -894,27 +733,6 @@ func (s *Service) SavePolicy(ctx context.Context, userID string, in PolicyInput)
 		if in.UnschedulableProbeIntervalMinutes == nil {
 			value := defaultInt(existing.UnschedulableProbeIntervalMinutes, 60)
 			in.UnschedulableProbeIntervalMinutes = &value
-		}
-		if in.PrioritySyncPreset == nil {
-			preset := existing.PrioritySyncPreset
-			in.PrioritySyncPreset = &preset
-		} else {
-			// B-era clients send a non-nil preset but do not know the C cadence
-			// fields. Preserve the stored values for omitted fields during rollout.
-			preset := *in.PrioritySyncPreset
-			if preset.ReconcileIntervalSeconds == 0 {
-				preset.ReconcileIntervalSeconds = existing.PrioritySyncPreset.ReconcileIntervalSeconds
-			}
-			if preset.InventorySnapshotTTLSeconds == 0 {
-				preset.InventorySnapshotTTLSeconds = existing.PrioritySyncPreset.InventorySnapshotTTLSeconds
-			}
-			if preset.ReconcileFailureBackoffSeconds == 0 {
-				preset.ReconcileFailureBackoffSeconds = existing.PrioritySyncPreset.ReconcileFailureBackoffSeconds
-			}
-			if !preset.writebackSpreadSecondsSet && preset.WritebackSpreadSeconds == 0 {
-				preset.WritebackSpreadSeconds = existing.PrioritySyncPreset.WritebackSpreadSeconds
-			}
-			in.PrioritySyncPreset = &preset
 		}
 	}
 
@@ -966,10 +784,6 @@ func buildPolicyAndTargets(userID string, adminAccountID string, id string, in P
 		unschedulableIntervalMinutes = *in.UnschedulableProbeIntervalMinutes
 	}
 	strategyMode := normalizeStrategyMode(in.StrategyMode)
-	preset, presetErr := normalizePrioritySyncPreset(in.PrioritySyncPreset)
-	if presetErr != nil {
-		return Policy{}, nil, presetErr
-	}
 	policy := Policy{
 		ID: id, UserID: userID, AdminAccountID: adminAccountID, Name: strings.TrimSpace(in.Name), Enabled: in.Enabled,
 		OwnGroupID: in.OwnGroupID, OwnGroupName: in.OwnGroupName, ModelPattern: defaultString(in.ModelPattern, "*"),
@@ -980,9 +794,8 @@ func buildPolicyAndTargets(userID string, adminAccountID string, id string, in P
 		CooldownSeconds: defaultInt(in.CooldownSeconds, 300), ObservationSeconds: defaultInt(in.ObservationSeconds, 300),
 		RecoveryStepPercent: defaultInt(in.RecoveryStepPercent, 25), AutoDegradeEnabled: in.AutoDegradeEnabled,
 		AutoRemoteActionEnabled: in.AutoDegradeEnabled && in.AutoRemoteActionEnabled, PriorityMode: normalizePriorityMode(in.PriorityMode),
-		StrategyMode:       strategyMode,
-		PrioritySyncPreset: preset,
-		DailyProbeBudget:   defaultInt(in.DailyProbeBudget, 1000),
+		StrategyMode:     strategyMode,
+		DailyProbeBudget: defaultInt(in.DailyProbeBudget, 1000),
 	}
 	if strategyMode == StrategyModeMultiplierOnly {
 		// 仅倍率策略不拥有任何探活行为。即使错误或旧客户端同时提交了探活字段，也在服务端
@@ -1025,53 +838,6 @@ func normalizeStrategyMode(mode string) string {
 		return StrategyModeMultiplierOnly
 	}
 	return StrategyModeHealthProbe
-}
-
-func normalizePrioritySyncPreset(input *PrioritySyncPreset) (PrioritySyncPreset, error) {
-	preset := PrioritySyncPreset{
-		MinWriteIntervalSeconds:        defaultPriorityMinWriteIntervalSeconds,
-		WritebackSpreadSeconds:         defaultPriorityWritebackSpreadSeconds,
-		MaxPendingAgeSeconds:           defaultPriorityMaxPendingAgeSeconds,
-		ReconcileIntervalSeconds:       defaultPriorityReconcileIntervalSeconds,
-		InventorySnapshotTTLSeconds:    defaultInventorySnapshotTTLSeconds,
-		ReconcileFailureBackoffSeconds: defaultReconcileFailureBackoffSeconds,
-		DriftAction:                    PriorityDriftActionAlertOnly,
-		ReadMode:                       PriorityReadModeInventory,
-	}
-	if input == nil {
-		return preset, nil
-	}
-	if input.MinWriteIntervalSeconds != 0 {
-		preset.MinWriteIntervalSeconds = input.MinWriteIntervalSeconds
-	}
-	if input.writebackSpreadSecondsSet || input.WritebackSpreadSeconds != 0 {
-		preset.WritebackSpreadSeconds = input.WritebackSpreadSeconds
-	}
-	if input.MaxPendingAgeSeconds != 0 {
-		preset.MaxPendingAgeSeconds = input.MaxPendingAgeSeconds
-	}
-	if input.ReconcileIntervalSeconds != 0 {
-		preset.ReconcileIntervalSeconds = input.ReconcileIntervalSeconds
-	}
-	if input.InventorySnapshotTTLSeconds != 0 {
-		preset.InventorySnapshotTTLSeconds = input.InventorySnapshotTTLSeconds
-	}
-	if input.ReconcileFailureBackoffSeconds != 0 {
-		preset.ReconcileFailureBackoffSeconds = input.ReconcileFailureBackoffSeconds
-	}
-	if strings.TrimSpace(input.DriftAction) != "" {
-		preset.DriftAction = strings.TrimSpace(input.DriftAction)
-	}
-	if strings.TrimSpace(input.ReadMode) != "" {
-		preset.ReadMode = strings.TrimSpace(input.ReadMode)
-	}
-	if preset.MinWriteIntervalSeconds <= 0 || preset.WritebackSpreadSeconds < 1 || preset.WritebackSpreadSeconds > 10 ||
-		preset.MaxPendingAgeSeconds < preset.MinWriteIntervalSeconds ||
-		preset.ReconcileIntervalSeconds <= 0 || preset.InventorySnapshotTTLSeconds <= 0 || preset.ReconcileFailureBackoffSeconds <= 0 ||
-		preset.DriftAction != PriorityDriftActionAlertOnly || preset.ReadMode != PriorityReadModeInventory {
-		return PrioritySyncPreset{}, requestError(ErrorRequest)
-	}
-	return preset, nil
 }
 
 func policySupportsProbing(policy Policy) bool {
@@ -1147,13 +913,6 @@ func (s *Service) ProbeConnection(ctx context.Context, userID string, connection
 	if site == nil {
 		return nil, requestError(ErrorNotFound)
 	}
-	limitCtx, cancelLimit := context.WithTimeout(ctx, 2*ProbeTimeout)
-	defer cancelLimit()
-	releaseSlot, acquired := s.sharedProbeLimiter().acquireManual(limitCtx, userID+"|"+adminAccountID, s.manualProbeReservedSlots(ctx, userID, adminAccountID))
-	if !acquired {
-		return nil, requestError(ErrorProbeConcurrencyLimited)
-	}
-	defer releaseSlot()
 
 	results := make([]ModelHealth, 0, len(targets))
 	for _, mt := range targets {
@@ -1200,14 +959,6 @@ func (s *Service) DisableConnection(ctx context.Context, userID string, connecti
 	}
 
 	remoteAction := ""
-	platformKnown := false
-	sub2API := false
-	if s.sites != nil {
-		if site, siteErr := s.sites.GetSite(ctx, conn.UpstreamSiteID); siteErr == nil && site != nil {
-			platformKnown = true
-			sub2API = site.Platform == upstream.PlatformSub2API
-		}
-	}
 	for i, st := range states {
 		fromState := st.State
 		st.State = StateDisabled
@@ -1215,23 +966,10 @@ func (s *Service) DisableConnection(ctx context.Context, userID string, connecti
 		st.UserID = userID
 		st.AdminAccountID = adminAccountID
 		if i == 0 {
-			var action string
-			var actionErr error
-			if !platformKnown {
-				action, actionErr = RemoteActionSafetyGateUnavailable, errors.New("upstream platform unavailable")
-			} else if sub2API {
-				action, actionErr = s.applyManualConnectionSub2APIStatus(ctx, *conn, "inactive")
-			} else {
-				action, actionErr = s.dispatcher.Degrade(ctx, *conn, st)
-			}
+			action, actionErr := s.dispatcher.Degrade(ctx, *conn, st)
 			remoteAction = action
 			if actionErr != nil {
 				log.Printf("[connection-health] manual disable remote degrade failed connection_id=%s err=%v", connectionID, actionErr)
-				if sub2API {
-					s.recordEvent(ctx, *conn, "", st.ModelName, "manual_disable_failed", string(fromState), string(fromState), nil,
-						ErrorManualActionFailed, "", remoteAction, EventSourceManual)
-					return requestError(ErrorManualActionFailed)
-				}
 			}
 		}
 		st.LastRemoteAction = remoteAction
@@ -1266,14 +1004,6 @@ func (s *Service) RestoreConnection(ctx context.Context, userID string, connecti
 	}
 
 	remoteAction := ""
-	platformKnown := false
-	sub2API := false
-	if s.sites != nil {
-		if site, siteErr := s.sites.GetSite(ctx, conn.UpstreamSiteID); siteErr == nil && site != nil {
-			platformKnown = true
-			sub2API = site.Platform == upstream.PlatformSub2API
-		}
-	}
 	for i, st := range states {
 		fromState := st.State
 		st.State = StateObserving
@@ -1284,23 +1014,10 @@ func (s *Service) RestoreConnection(ctx context.Context, userID string, connecti
 		st.UserID = userID
 		st.AdminAccountID = adminAccountID
 		if i == 0 {
-			var action string
-			var actionErr error
-			if !platformKnown {
-				action, actionErr = RemoteActionSafetyGateUnavailable, errors.New("upstream platform unavailable")
-			} else if sub2API {
-				action, actionErr = s.applyManualConnectionSub2APIStatus(ctx, *conn, "active")
-			} else {
-				action, actionErr = s.dispatcher.Restore(ctx, *conn, st)
-			}
+			action, actionErr := s.dispatcher.Restore(ctx, *conn, st)
 			remoteAction = action
 			if actionErr != nil {
 				log.Printf("[connection-health] manual restore remote action failed connection_id=%s err=%v", connectionID, actionErr)
-				if sub2API {
-					s.recordEvent(ctx, *conn, "", st.ModelName, "manual_restore_failed", string(fromState), string(fromState), nil,
-						ErrorManualActionFailed, "", remoteAction, EventSourceManual)
-					return requestError(ErrorManualActionFailed)
-				}
 			}
 		}
 		st.LastRemoteAction = remoteAction
@@ -1345,26 +1062,28 @@ func (s *Service) probeOnce(ctx context.Context, conn my_sites.RealConnection, p
 	})
 
 	now := time.Now()
-	next, transitionOut := applyProbeOutcomeWithConfirmation(
-		*current,
-		outcome,
-		policy,
-		now,
-		site.Platform == upstream.PlatformSub2API,
-	)
+	next, transitionOut := applyProbeOutcome(*current, outcome, policy, now)
 	latencyMs := outcome.LatencyMs
 	next.UserID = policy.UserID
 	next.AdminAccountID = policy.AdminAccountID
 	next.OwnGroupID = policy.OwnGroupID
 	next.OwnGroupName = policy.OwnGroupName
 
-	// This legacy method is retained only for compatibility with old callers.
-	// It cannot issue an automatic remote mutation because it has no incident
-	// epoch, complete inventory or floor reservation. Formal scheduler paths use
-	// the target confirmation worker instead.
 	remoteAction := ""
-	if policy.AutoRemoteActionEnabled && (transitionOut.TriggerRemoteDegrade || transitionOut.TriggerRemoteRestore) {
-		remoteAction = RemoteActionSafetyGateUnavailable
+	if policy.AutoRemoteActionEnabled {
+		if transitionOut.TriggerRemoteDegrade {
+			action, actionErr := s.dispatcher.Degrade(ctx, conn, next)
+			remoteAction = action
+			if actionErr != nil {
+				log.Printf("[connection-health] auto degrade failed connection_id=%s model=%s err=%v", conn.ID, target.ModelName, actionErr)
+			}
+		} else if transitionOut.TriggerRemoteRestore {
+			action, actionErr := s.dispatcher.Restore(ctx, conn, next)
+			remoteAction = action
+			if actionErr != nil {
+				log.Printf("[connection-health] auto restore failed connection_id=%s model=%s err=%v", conn.ID, target.ModelName, actionErr)
+			}
+		}
 	}
 	next.LastRemoteAction = remoteAction
 

@@ -31,11 +31,6 @@ type PlatformActioner interface {
 	UpdateSub2APIAdminAccountStatus(session upstream.Session, accountID string, status string) error
 }
 
-type PlatformContextActioner interface {
-	UpdateNewAPIChannelWeightStatusContext(ctx context.Context, session upstream.Session, channelID string, weight int, status int) error
-	UpdateSub2APIAdminAccountStatusContext(ctx context.Context, session upstream.Session, accountID string, status string) error
-}
-
 // SessionProvider 复用 my_sites 已登录并自动刷新的 admin 会话，不重复实现登录逻辑。
 type SessionProvider interface {
 	RequireSession(ctx context.Context, userID string, adminAccountID string) (upstream.Session, error)
@@ -73,20 +68,6 @@ type remoteActionDispatcher struct {
 
 func newRemoteActionDispatcher(sites SiteLookup, sessions SessionProvider, platform PlatformActioner) *remoteActionDispatcher {
 	return &remoteActionDispatcher{sites: sites, sessions: sessions, platform: platform}
-}
-
-func (d *remoteActionDispatcher) updateNewAPIChannelWeightStatus(ctx context.Context, session upstream.Session, channelID string, weight int, status int) error {
-	if actioner, ok := d.platform.(PlatformContextActioner); ok {
-		return actioner.UpdateNewAPIChannelWeightStatusContext(ctx, session, channelID, weight, status)
-	}
-	return d.platform.UpdateNewAPIChannelWeightStatus(session, channelID, weight, status)
-}
-
-func (d *remoteActionDispatcher) updateSub2APIAdminAccountStatus(ctx context.Context, session upstream.Session, accountID string, status string) error {
-	if actioner, ok := d.platform.(PlatformContextActioner); ok {
-		return actioner.UpdateSub2APIAdminAccountStatusContext(ctx, session, accountID, status)
-	}
-	return d.platform.UpdateSub2APIAdminAccountStatus(session, accountID, status)
 }
 
 func (d *remoteActionDispatcher) Degrade(ctx context.Context, conn my_sites.RealConnection, state ConnectionHealthState) (remoteAction string, err error) {
@@ -148,7 +129,7 @@ func (d *remoteActionDispatcher) DegradeTarget(ctx context.Context, session upst
 		return RemoteActionUnsupported, nil
 	}
 	if target.Platform == string(upstream.PlatformNewAPI) {
-		if err := d.updateNewAPIChannelWeightStatus(ctx, session, target.AccountID, 0, 2); err != nil {
+		if err := d.platform.UpdateNewAPIChannelWeightStatus(session, target.AccountID, 0, 2); err != nil {
 			return RemoteActionNewAPIUpdateFailed, err
 		}
 		return "newapi_channel_disabled", nil
@@ -156,7 +137,7 @@ func (d *remoteActionDispatcher) DegradeTarget(ctx context.Context, session upst
 	if target.Platform != string(upstream.PlatformSub2API) {
 		return RemoteActionUnsupported, nil
 	}
-	if err := d.updateSub2APIAdminAccountStatus(ctx, session, target.AccountID, "inactive"); err != nil {
+	if err := d.platform.UpdateSub2APIAdminAccountStatus(session, target.AccountID, "inactive"); err != nil {
 		// 已经进入 sub2api 支持的动作分支，真的发起了调用但失败了：必须和「不支持」区分开，
 		// 否则排查者会误以为 sub2api 从不支持这个动作。
 		return RemoteActionSub2APIStatusInactiveFailed, err
@@ -180,7 +161,7 @@ func (d *remoteActionDispatcher) RestoreTarget(ctx context.Context, session upst
 		if weight <= 0 {
 			status = 2
 		}
-		if err := d.updateNewAPIChannelWeightStatus(ctx, session, target.AccountID, weight, status); err != nil {
+		if err := d.platform.UpdateNewAPIChannelWeightStatus(session, target.AccountID, weight, status); err != nil {
 			return RemoteActionNewAPIUpdateFailed, err
 		}
 		return fmt.Sprintf("newapi_channel_weight_%d", weight), nil
@@ -188,7 +169,7 @@ func (d *remoteActionDispatcher) RestoreTarget(ctx context.Context, session upst
 	if target.Platform != string(upstream.PlatformSub2API) {
 		return RemoteActionUnsupported, nil
 	}
-	if err := d.updateSub2APIAdminAccountStatus(ctx, session, target.AccountID, "active"); err != nil {
+	if err := d.platform.UpdateSub2APIAdminAccountStatus(session, target.AccountID, "active"); err != nil {
 		return RemoteActionSub2APIStatusActiveFailed, err
 	}
 	return RemoteActionSub2APIStatusActive, nil
@@ -215,7 +196,7 @@ func (d *remoteActionDispatcher) ApplyTargetState(ctx context.Context, session u
 		if status == "2" || status == "disabled" || status == "inactive" {
 			resolvedStatus = 2
 		}
-		if err := d.updateNewAPIChannelWeightStatus(ctx, session, target.AccountID, resolvedWeight, resolvedStatus); err != nil {
+		if err := d.platform.UpdateNewAPIChannelWeightStatus(session, target.AccountID, resolvedWeight, resolvedStatus); err != nil {
 			return RemoteActionNewAPIUpdateFailed, err
 		}
 		if resolvedStatus == 2 && resolvedWeight == 0 {
@@ -230,7 +211,7 @@ func (d *remoteActionDispatcher) ApplyTargetState(ctx context.Context, session u
 	if status == "inactive" || status == "disabled" || status == "2" {
 		resolvedStatus = "inactive"
 	}
-	if err := d.updateSub2APIAdminAccountStatus(ctx, session, target.AccountID, resolvedStatus); err != nil {
+	if err := d.platform.UpdateSub2APIAdminAccountStatus(session, target.AccountID, resolvedStatus); err != nil {
 		if resolvedStatus == "inactive" {
 			return RemoteActionSub2APIStatusInactiveFailed, err
 		}
@@ -253,7 +234,7 @@ func (d *remoteActionDispatcher) degradeNewAPI(ctx context.Context, conn my_site
 	if err != nil {
 		return RemoteActionUnsupported, err
 	}
-	if err := d.updateNewAPIChannelWeightStatus(ctx, session, channelID, 0, 2); err != nil {
+	if err := d.platform.UpdateNewAPIChannelWeightStatus(session, channelID, 0, 2); err != nil {
 		return RemoteActionUnsupported, err
 	}
 	return "newapi_channel_disabled", nil
@@ -274,7 +255,7 @@ func (d *remoteActionDispatcher) restoreNewAPI(ctx context.Context, conn my_site
 		// 权重仍为 0 时不解除远端禁用，避免观察期误放流量。
 		status = 2
 	}
-	if err := d.updateNewAPIChannelWeightStatus(ctx, session, channelID, weight, status); err != nil {
+	if err := d.platform.UpdateNewAPIChannelWeightStatus(session, channelID, weight, status); err != nil {
 		return RemoteActionUnsupported, err
 	}
 	return fmt.Sprintf("newapi_channel_weight_%d", weight), nil
@@ -292,7 +273,7 @@ func (d *remoteActionDispatcher) degradeSub2API(ctx context.Context, conn my_sit
 	if err != nil {
 		return RemoteActionUnsupported, err
 	}
-	if err := d.updateSub2APIAdminAccountStatus(ctx, session, accountID, "inactive"); err != nil {
+	if err := d.platform.UpdateSub2APIAdminAccountStatus(session, accountID, "inactive"); err != nil {
 		return RemoteActionSub2APIStatusInactiveFailed, err
 	}
 	return RemoteActionSub2APIStatusInactive, nil
@@ -307,7 +288,7 @@ func (d *remoteActionDispatcher) restoreSub2API(ctx context.Context, conn my_sit
 	if err != nil {
 		return RemoteActionUnsupported, err
 	}
-	if err := d.updateSub2APIAdminAccountStatus(ctx, session, accountID, "active"); err != nil {
+	if err := d.platform.UpdateSub2APIAdminAccountStatus(session, accountID, "active"); err != nil {
 		return RemoteActionSub2APIStatusActiveFailed, err
 	}
 	return RemoteActionSub2APIStatusActive, nil

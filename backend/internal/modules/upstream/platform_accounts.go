@@ -2,18 +2,12 @@ package upstream
 
 import (
 	"context"
-	"errors"
 	"log"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 )
-
-// ErrPaginationIncomplete means the upstream returned a full page at the
-// defensive page limit without a terminal total/short-page marker. Callers
-// must treat the inventory as unknown and hold destructive actions.
-var ErrPaginationIncomplete = errors.New("upstream pagination incomplete")
 
 // AdminGroupAccountInfo 是「某个 admin 分组下的账号(sub2api) / 渠道(new-api)」的平台中性信息，
 // 供 connection_health 分组健康主列表的账号弹窗展示。
@@ -103,9 +97,6 @@ func (s *PlatformService) listSub2APIGroupAccountsContext(ctx context.Context, s
 		}
 		if !hasTotal && len(items) < pageSize {
 			break
-		}
-		if page == maxPages {
-			return nil, ErrPaginationIncomplete
 		}
 	}
 	return accounts, nil
@@ -197,9 +188,6 @@ func (s *PlatformService) searchNewAPIGroupChannelsContext(ctx context.Context, 
 		if !hasTotal && len(items) < pageSize {
 			break
 		}
-		if page == maxPages {
-			return nil, ErrPaginationIncomplete
-		}
 	}
 	return channels, nil
 }
@@ -242,9 +230,6 @@ func (s *PlatformService) listNewAPIChannelsWithLocalFilterContext(ctx context.C
 		}
 		if !hasTotal && len(items) < pageSize {
 			break
-		}
-		if page == maxPages {
-			return nil, ErrPaginationIncomplete
 		}
 	}
 	return channels, nil

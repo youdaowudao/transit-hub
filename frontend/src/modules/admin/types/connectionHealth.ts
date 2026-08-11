@@ -241,66 +241,6 @@ export interface ConnectionHealthOverview {
   disabled: number
   unconfigured: number
   recentEvents: ConnectionHealthEvent[]
-  prioritySync?: PriorityWorkspaceSyncState
-}
-
-export interface PrioritySyncPreset {
-  minWriteIntervalSeconds: number
-  writebackSpreadSeconds: number
-  maxPendingAgeSeconds: number
-  reconcileIntervalSeconds: number
-  inventorySnapshotTtlSeconds: number
-  reconcileFailureBackoffSeconds: number
-  driftAction: 'alert_only' | string
-  readMode: 'inventory_snapshot' | string
-}
-
-export interface PriorityWorkspaceSyncState {
-  pendingSince?: string | null
-  lastEvaluationAt?: string | null
-  lastWriteAttemptAt?: string | null
-  lastWriteSuccessAt?: string | null
-  lastDriftAt?: string | null
-  lastReconcileAttemptAt?: string | null
-  lastReconcileSuccessAt?: string | null
-  lastReconcileFailureAt?: string | null
-  nextReconcileAt?: string | null
-  inventorySnapshotExpiresAt?: string | null
-  lastDecision: string
-  lastSuppressionReason: string
-  lastError: string
-  lastInventoryError: string
-  inventoryStatus: string
-  lastActionSource: string
-  policyVersion: string
-  minWriteIntervalSeconds: number
-  writebackSpreadSeconds: number
-  maxPendingAgeSeconds: number
-  reconcileIntervalSeconds: number
-  inventorySnapshotTtlSeconds: number
-  reconcileFailureBackoffSeconds: number
-  driftAction: string
-  readMode: string
-  pendingAgeSeconds: number
-  pendingTargetCount: number
-  lastWriteRoundTargetCount: number
-  lastInventoryReadDurationMs: number
-  lastWriteDurationMs: number
-  evaluationCount: number
-  probeEvaluationCount: number
-  signatureChangeCount: number
-  reconcileAttemptCount: number
-  reconcileSuccessCount: number
-  reconcileFailureCount: number
-  snapshotHitCount: number
-  snapshotMissCount: number
-  writeAttemptCount: number
-  writeSuccessCount: number
-  writeFailureCount: number
-  unchangedSkipCount: number
-  windowSuppressionCount: number
-  driftCount: number
-  updatedAt: string
 }
 
 // 工作台轻量摘要只来自本地健康状态与事件表，不会在页面加载时触发上游探活。
@@ -312,40 +252,6 @@ export interface ConnectionHealthStoredSummary {
   managedTargets: number
   recentFailureEvents: number
   lastProbeAt?: string | null
-}
-
-export interface SafetySettings {
-  confirmationObservationCount: number
-  confirmationDelaysSeconds: number[]
-  confirmationJitterSeconds: number
-  abnormalQueueCapacity: number
-  manualReservedSlots: number
-  updatedAt: string
-  updatedBy?: string
-}
-
-export interface SafetyEmergencyClearResult {
-  workspaceId: string
-  queueEpoch: number
-  cancelled: number
-  incidents: number
-  dispatching: number
-  completedAt: string
-  idempotent?: boolean
-}
-
-export interface SafetyQueueSummary {
-  queued: number
-  claimed: number
-  dispatching: number
-  guardHeld: number
-  incidents: number
-}
-
-export interface SafetyWorkspaceView {
-  settings: SafetySettings
-  queue: SafetyQueueSummary
-  latestEmergencyClear?: SafetyEmergencyClearResult | null
 }
 
 export interface ModelTargetInput {
@@ -386,7 +292,6 @@ export interface ConnectionHealthPolicy {
   autoRemoteActionEnabled: boolean
   priorityMode?: ConnectionHealthPriorityMode
   strategyMode?: ConnectionHealthStrategyMode
-  prioritySyncPreset: PrioritySyncPreset
   dailyProbeBudget: number
   createdAt: string
   updatedAt: string
@@ -445,7 +350,6 @@ export interface PolicyInput {
   autoRemoteActionEnabled: boolean
   priorityMode?: ConnectionHealthPriorityMode
   strategyMode?: ConnectionHealthStrategyMode
-  prioritySyncPreset?: PrioritySyncPreset
   dailyProbeBudget?: number
   modelTargets: ModelTargetInput[]
 }

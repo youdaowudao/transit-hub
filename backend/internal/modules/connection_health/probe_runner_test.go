@@ -89,7 +89,6 @@ func TestProbe_DefaultModelPerProviderWhenModelNameEmpty(t *testing.T) {
 
 func TestProbe_RateLimited(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Retry-After", "17")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
 	}))
@@ -101,22 +100,6 @@ func TestProbe_RateLimited(t *testing.T) {
 	})
 	if outcome.Result != ResultRateLimited {
 		t.Fatalf("expected rate_limited, got %s", outcome.Result)
-	}
-	if outcome.RetryAfterSeconds != 17 {
-		t.Fatalf("expected Retry-After=17 seconds, got %+v", outcome)
-	}
-}
-
-func TestParseRetryAfterRejectsInvalidOrUnboundedValues(t *testing.T) {
-	now := time.Date(2026, 8, 8, 8, 0, 0, 0, time.UTC)
-	if got := parseRetryAfter("0", now); got != 0 {
-		t.Fatalf("zero Retry-After must be rejected, got %d", got)
-	}
-	if got := parseRetryAfter("7200", now); got != 0 {
-		t.Fatalf("unbounded Retry-After must be rejected, got %d", got)
-	}
-	if got := parseRetryAfter(now.Add(20*time.Second).Format(http.TimeFormat), now); got != 20 {
-		t.Fatalf("HTTP-date Retry-After = %d, want 20", got)
 	}
 }
 

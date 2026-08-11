@@ -15,11 +15,10 @@ import (
 )
 
 type fakeTargetSchedulableActioner struct {
-	calls            int
-	wantAccount      string
-	err              error
-	afterWrite       func(bool)
-	applyBeforeError bool
+	calls       int
+	wantAccount string
+	err         error
+	afterWrite  func(bool)
 }
 
 func (f *fakeTargetSchedulableActioner) SetSub2APIAdminAccountSchedulable(session upstream.Session, accountID string, schedulable bool) error {
@@ -27,10 +26,13 @@ func (f *fakeTargetSchedulableActioner) SetSub2APIAdminAccountSchedulable(sessio
 	if f.wantAccount != "" && accountID != f.wantAccount {
 		return errors.New("unexpected account")
 	}
-	if f.afterWrite != nil && (f.err == nil || f.applyBeforeError) {
+	if f.err != nil {
+		return f.err
+	}
+	if f.afterWrite != nil {
 		f.afterWrite(schedulable)
 	}
-	return f.err
+	return nil
 }
 
 func schedulableActionService(initial *bool, actioner *fakeTargetSchedulableActioner) (*Service, *fakeRepository) {
@@ -91,21 +93,6 @@ func TestSetTargetSchedulable_UpstreamFailureIsNotSuccess(t *testing.T) {
 	}
 	if account.SchedulableSource != "upstream_observed" {
 		t.Fatalf("failed action must not own the observed scheduling state: %+v", account)
-	}
-}
-
-func TestSetTargetSchedulable_MatchingReadbackWinsAfterResponseLoss(t *testing.T) {
-	actioner := &fakeTargetSchedulableActioner{
-		wantAccount: "1515", err: errors.New("response lost"), applyBeforeError: true,
-	}
-	service, repo := schedulableActionService(boolPointer(true), actioner)
-
-	result, err := service.SetTargetSchedulable(context.Background(), "user1", "sub2api:ws1:1515", false)
-	if err != nil || result.Schedulable || actioner.calls != 1 {
-		t.Fatalf("matching schedulable readback result=%+v calls=%d err=%v", result, actioner.calls, err)
-	}
-	if len(repo.events) != 1 || repo.events[0].Result != SchedulableActionSucceeded {
-		t.Fatalf("matching readback must be audited as success: %+v", repo.events)
 	}
 }
 

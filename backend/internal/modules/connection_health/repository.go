@@ -49,14 +49,6 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			auto_remote_action_enabled boolean NOT NULL DEFAULT true,
 			priority_mode text NOT NULL DEFAULT 'none',
 			strategy_mode text NOT NULL DEFAULT 'health_probe',
-			priority_min_write_interval_seconds integer NOT NULL DEFAULT 30,
-			priority_writeback_spread_seconds integer NOT NULL DEFAULT 1,
-			priority_max_pending_age_seconds integer NOT NULL DEFAULT 300,
-			priority_reconcile_interval_seconds integer NOT NULL DEFAULT 30,
-			priority_inventory_snapshot_ttl_seconds integer NOT NULL DEFAULT 60,
-			priority_reconcile_failure_backoff_seconds integer NOT NULL DEFAULT 30,
-			priority_drift_action text NOT NULL DEFAULT 'alert_only',
-			priority_read_mode text NOT NULL DEFAULT 'inventory_snapshot',
 			daily_probe_budget integer NOT NULL DEFAULT 1000,
 			created_at timestamptz NOT NULL DEFAULT now(),
 			updated_at timestamptz NOT NULL DEFAULT now()
@@ -65,14 +57,6 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		`ALTER TABLE connection_health_policies ADD COLUMN IF NOT EXISTS strategy_mode text NOT NULL DEFAULT 'health_probe'`,
 		`ALTER TABLE connection_health_policies ADD COLUMN IF NOT EXISTS continue_probe_when_unschedulable boolean NOT NULL DEFAULT true`,
 		`ALTER TABLE connection_health_policies ADD COLUMN IF NOT EXISTS unschedulable_probe_interval_minutes integer NOT NULL DEFAULT 60`,
-		`ALTER TABLE connection_health_policies ADD COLUMN IF NOT EXISTS priority_min_write_interval_seconds integer NOT NULL DEFAULT 30`,
-		`ALTER TABLE connection_health_policies ADD COLUMN IF NOT EXISTS priority_writeback_spread_seconds integer NOT NULL DEFAULT 1`,
-		`ALTER TABLE connection_health_policies ADD COLUMN IF NOT EXISTS priority_max_pending_age_seconds integer NOT NULL DEFAULT 300`,
-		`ALTER TABLE connection_health_policies ADD COLUMN IF NOT EXISTS priority_reconcile_interval_seconds integer NOT NULL DEFAULT 30`,
-		`ALTER TABLE connection_health_policies ADD COLUMN IF NOT EXISTS priority_inventory_snapshot_ttl_seconds integer NOT NULL DEFAULT 60`,
-		`ALTER TABLE connection_health_policies ADD COLUMN IF NOT EXISTS priority_reconcile_failure_backoff_seconds integer NOT NULL DEFAULT 30`,
-		`ALTER TABLE connection_health_policies ADD COLUMN IF NOT EXISTS priority_drift_action text NOT NULL DEFAULT 'alert_only'`,
-		`ALTER TABLE connection_health_policies ADD COLUMN IF NOT EXISTS priority_read_mode text NOT NULL DEFAULT 'inventory_snapshot'`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_policies_workspace_enabled ON connection_health_policies (user_id, admin_account_id, enabled)`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_policies_group_model ON connection_health_policies (user_id, admin_account_id, own_group_name, model_pattern)`,
 
@@ -218,82 +202,6 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_priority_sync_workspace ON connection_health_priority_sync_states (user_id, admin_account_id)`,
 		`ALTER TABLE connection_health_priority_sync_states ADD COLUMN IF NOT EXISTS pending_priority integer NULL`,
 
-		`CREATE TABLE IF NOT EXISTS connection_health_priority_workspace_sync_states (
-			user_id text NOT NULL,
-			admin_account_id text NOT NULL DEFAULT '',
-			applied_signature text NOT NULL DEFAULT '',
-			pending_signature text NOT NULL DEFAULT '',
-			pending_since timestamptz NULL,
-			last_evaluation_at timestamptz NULL,
-			last_write_attempt_at timestamptz NULL,
-			last_write_success_at timestamptz NULL,
-			last_drift_at timestamptz NULL,
-			last_reconcile_attempt_at timestamptz NULL,
-			last_reconcile_success_at timestamptz NULL,
-			last_reconcile_failure_at timestamptz NULL,
-			next_reconcile_at timestamptz NULL,
-			inventory_snapshot_expires_at timestamptz NULL,
-			last_decision text NOT NULL DEFAULT '',
-			last_suppression_reason text NOT NULL DEFAULT '',
-			last_error text NOT NULL DEFAULT '',
-			last_inventory_error text NOT NULL DEFAULT '',
-			inventory_status text NOT NULL DEFAULT 'unknown',
-			last_action_source text NOT NULL DEFAULT '',
-			policy_version text NOT NULL DEFAULT '',
-			min_write_interval_seconds integer NOT NULL DEFAULT 30,
-			writeback_spread_seconds integer NOT NULL DEFAULT 1,
-			max_pending_age_seconds integer NOT NULL DEFAULT 300,
-			reconcile_interval_seconds integer NOT NULL DEFAULT 30,
-			inventory_snapshot_ttl_seconds integer NOT NULL DEFAULT 60,
-			reconcile_failure_backoff_seconds integer NOT NULL DEFAULT 30,
-			drift_action text NOT NULL DEFAULT 'alert_only',
-			read_mode text NOT NULL DEFAULT 'inventory_snapshot',
-			pending_age_seconds bigint NOT NULL DEFAULT 0,
-			pending_target_count integer NOT NULL DEFAULT 0,
-			last_inventory_read_duration_ms bigint NOT NULL DEFAULT 0,
-			last_write_duration_ms bigint NOT NULL DEFAULT 0,
-			evaluation_count bigint NOT NULL DEFAULT 0,
-			probe_evaluation_count bigint NOT NULL DEFAULT 0,
-			signature_change_count bigint NOT NULL DEFAULT 0,
-			reconcile_attempt_count bigint NOT NULL DEFAULT 0,
-			reconcile_success_count bigint NOT NULL DEFAULT 0,
-			reconcile_failure_count bigint NOT NULL DEFAULT 0,
-			snapshot_hit_count bigint NOT NULL DEFAULT 0,
-			snapshot_miss_count bigint NOT NULL DEFAULT 0,
-			write_attempt_count bigint NOT NULL DEFAULT 0,
-			write_success_count bigint NOT NULL DEFAULT 0,
-			write_failure_count bigint NOT NULL DEFAULT 0,
-			unchanged_skip_count bigint NOT NULL DEFAULT 0,
-			window_suppression_count bigint NOT NULL DEFAULT 0,
-			drift_count bigint NOT NULL DEFAULT 0,
-			updated_at timestamptz NOT NULL DEFAULT now(),
-			PRIMARY KEY (user_id, admin_account_id)
-		)`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS last_reconcile_attempt_at timestamptz NULL`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS last_reconcile_success_at timestamptz NULL`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS last_reconcile_failure_at timestamptz NULL`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS next_reconcile_at timestamptz NULL`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS inventory_snapshot_expires_at timestamptz NULL`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS last_inventory_error text NOT NULL DEFAULT ''`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS inventory_status text NOT NULL DEFAULT 'unknown'`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS last_action_source text NOT NULL DEFAULT ''`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS policy_version text NOT NULL DEFAULT ''`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS reconcile_interval_seconds integer NOT NULL DEFAULT 30`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS inventory_snapshot_ttl_seconds integer NOT NULL DEFAULT 60`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS reconcile_failure_backoff_seconds integer NOT NULL DEFAULT 30`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS pending_age_seconds bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS writeback_spread_seconds integer NOT NULL DEFAULT 1`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS pending_target_count integer NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS last_write_round_target_count integer NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS last_inventory_read_duration_ms bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS last_write_duration_ms bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS probe_evaluation_count bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS reconcile_attempt_count bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS reconcile_success_count bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS reconcile_failure_count bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS snapshot_hit_count bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_priority_workspace_sync_states ADD COLUMN IF NOT EXISTS snapshot_miss_count bigint NOT NULL DEFAULT 0`,
-
 		`CREATE TABLE IF NOT EXISTS connection_health_target_action_states (
 			user_id text NOT NULL,
 			admin_account_id text NOT NULL DEFAULT '',
@@ -325,132 +233,6 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			expires_at timestamptz NOT NULL,
 			updated_at timestamptz NOT NULL DEFAULT now()
 		)`,
-		`CREATE TABLE IF NOT EXISTS connection_health_safety_settings (
-			user_id text NOT NULL, admin_account_id text NOT NULL,
-			confirmation_observation_count integer NOT NULL DEFAULT 4,
-			confirmation_delays_seconds jsonb NOT NULL DEFAULT '[2,5,10]'::jsonb,
-			confirmation_jitter_seconds integer NOT NULL DEFAULT 1,
-			abnormal_queue_capacity integer NOT NULL DEFAULT 64,
-			manual_reserved_slots integer NOT NULL DEFAULT 1,
-			updated_by text NOT NULL DEFAULT '', updated_at timestamptz NOT NULL DEFAULT now(),
-			PRIMARY KEY (user_id, admin_account_id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS connection_health_safety_epochs (
-			user_id text NOT NULL, admin_account_id text NOT NULL,
-			abnormal_queue_epoch bigint NOT NULL DEFAULT 0,
-			updated_at timestamptz NOT NULL DEFAULT now(),
-			PRIMARY KEY (user_id, admin_account_id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS connection_health_abnormal_queue (
-			id text PRIMARY KEY, user_id text NOT NULL, admin_account_id text NOT NULL,
-			target_id text NOT NULL DEFAULT '', account_id text NOT NULL DEFAULT '',
-			model_name text NOT NULL DEFAULT '', provider_family text NOT NULL DEFAULT '',
-			probe_prompt text NOT NULL DEFAULT '', max_probe_tokens integer NOT NULL DEFAULT 1,
-			queue_kind text NOT NULL, source text NOT NULL, incident_id text NOT NULL DEFAULT '',
-			fault_domain text NOT NULL DEFAULT '', observation_epoch bigint NOT NULL DEFAULT 0,
-			normal_generation bigint NOT NULL DEFAULT 0, abnormal_queue_epoch bigint NOT NULL DEFAULT 0,
-			attempt integer NOT NULL DEFAULT 0, required_attempts integer NOT NULL DEFAULT 4,
-			confirmation_delays_seconds jsonb NOT NULL DEFAULT '[2,5,10]'::jsonb,
-			confirmation_jitter_seconds integer NOT NULL DEFAULT 1,
-			next_attempt_at timestamptz NOT NULL DEFAULT now(), action_key text NOT NULL,
-			mutation_generation bigint NOT NULL DEFAULT 0, state text NOT NULL DEFAULT 'queued',
-			claimed_by text NOT NULL DEFAULT '', claim_expires_at timestamptz NULL,
-			expected_result text NOT NULL DEFAULT '', last_result text NOT NULL DEFAULT '',
-			created_at timestamptz NOT NULL DEFAULT now(),
-			updated_at timestamptz NOT NULL DEFAULT now(),
-			UNIQUE (user_id, admin_account_id, action_key)
-		)`,
-		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS target_id text NOT NULL DEFAULT ''`,
-		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS provider_family text NOT NULL DEFAULT ''`,
-		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS probe_prompt text NOT NULL DEFAULT ''`,
-		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS max_probe_tokens integer NOT NULL DEFAULT 1`,
-		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS normal_generation bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS required_attempts integer NOT NULL DEFAULT 4`,
-		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS confirmation_delays_seconds jsonb NOT NULL DEFAULT '[2,5,10]'::jsonb`,
-		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS confirmation_jitter_seconds integer NOT NULL DEFAULT 1`,
-		`ALTER TABLE connection_health_abnormal_queue ADD COLUMN IF NOT EXISTS expected_result text NOT NULL DEFAULT ''`,
-		`CREATE INDEX IF NOT EXISTS idx_connection_health_abnormal_queue_due ON connection_health_abnormal_queue (user_id, admin_account_id, state, next_attempt_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_connection_health_abnormal_queue_source ON connection_health_abnormal_queue (user_id, admin_account_id, source, abnormal_queue_epoch, state)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_connection_health_abnormal_queue_active_domain
-			ON connection_health_abnormal_queue (user_id, admin_account_id, fault_domain)
-			WHERE fault_domain <> '' AND state IN ('claimed','dispatching')`,
-		`CREATE TABLE IF NOT EXISTS connection_health_incidents (
-			id text PRIMARY KEY, user_id text NOT NULL, admin_account_id text NOT NULL,
-			fault_domain text NOT NULL, state text NOT NULL DEFAULT 'closed',
-			normal_generation bigint NOT NULL DEFAULT 0, canary_target_id text NOT NULL DEFAULT '',
-			successful_canary_target_id text NOT NULL DEFAULT '',
-			updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE (user_id, admin_account_id, fault_domain)
-		)`,
-		`ALTER TABLE connection_health_incidents ADD COLUMN IF NOT EXISTS successful_canary_target_id text NOT NULL DEFAULT ''`,
-		`CREATE TABLE IF NOT EXISTS connection_health_incident_observations (
-			user_id text NOT NULL, admin_account_id text NOT NULL, fault_domain text NOT NULL,
-			normal_generation bigint NOT NULL, account_id text NOT NULL, target_id text NOT NULL,
-			result text NOT NULL, observed_at timestamptz NOT NULL DEFAULT now(),
-			PRIMARY KEY (user_id, admin_account_id, fault_domain, normal_generation, account_id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS connection_health_target_fault_domains (
-			user_id text NOT NULL, admin_account_id text NOT NULL, target_id text NOT NULL,
-			endpoint text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
-			PRIMARY KEY (user_id, admin_account_id, target_id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS connection_health_safety_audits (
-			id text PRIMARY KEY, user_id text NOT NULL, admin_account_id text NOT NULL,
-			audit_type text NOT NULL, actor text NOT NULL DEFAULT '',
-			old_value jsonb NOT NULL DEFAULT '{}'::jsonb, new_value jsonb NOT NULL DEFAULT '{}'::jsonb,
-			detail text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now()
-		)`,
-		`CREATE TABLE IF NOT EXISTS connection_health_safety_inventory_snapshots (
-			user_id text NOT NULL, admin_account_id text NOT NULL, generation bigint NOT NULL,
-			complete boolean NOT NULL DEFAULT false, expires_at timestamptz NOT NULL,
-			created_at timestamptz NOT NULL DEFAULT now(),
-			PRIMARY KEY (user_id, admin_account_id, generation)
-		)`,
-		`CREATE TABLE IF NOT EXISTS connection_health_safety_inventory_accounts (
-			user_id text NOT NULL, admin_account_id text NOT NULL, generation bigint NOT NULL,
-			account_id text NOT NULL, target_id text NOT NULL, active boolean NOT NULL DEFAULT false,
-			schedulable boolean NOT NULL DEFAULT false, status_known boolean NOT NULL DEFAULT false,
-			schedulable_known boolean NOT NULL DEFAULT false, capability_known boolean NOT NULL DEFAULT false,
-			membership_known boolean NOT NULL DEFAULT false, models jsonb NOT NULL DEFAULT '[]'::jsonb,
-			group_ids jsonb NOT NULL DEFAULT '[]'::jsonb, last_success_at timestamptz NULL,
-			confirmed_failure_models integer NOT NULL DEFAULT 0,
-			PRIMARY KEY (user_id, admin_account_id, generation, account_id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS connection_health_mutation_fences (
-			user_id text NOT NULL, admin_account_id text NOT NULL, account_id text NOT NULL,
-			generation bigint NOT NULL DEFAULT 0, lease_owner text NOT NULL DEFAULT '',
-			fencing_token bigint NOT NULL DEFAULT 0, lease_expires_at timestamptz NULL,
-			updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (user_id, admin_account_id, account_id)
-		)`,
-		`CREATE TABLE IF NOT EXISTS connection_health_emergency_clears (
-				user_id text NOT NULL, admin_account_id text NOT NULL, idempotency_key text NOT NULL,
-				result jsonb NOT NULL, expires_at timestamptz NOT NULL,
-				created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (user_id, admin_account_id, idempotency_key)
-			)`,
-		`CREATE INDEX IF NOT EXISTS idx_connection_health_emergency_clears_expiry ON connection_health_emergency_clears (expires_at)`,
-		`CREATE TABLE IF NOT EXISTS connection_health_floor_reservations (
-			id text PRIMARY KEY, user_id text NOT NULL, admin_account_id text NOT NULL,
-			account_id text NOT NULL, incident_id text NOT NULL DEFAULT '', reason text NOT NULL DEFAULT '',
-			inventory_generation bigint NOT NULL DEFAULT 0, expires_at timestamptz NOT NULL,
-			dispatching_at timestamptz NULL, readback_at timestamptz NULL, snapshot_invalidated_at timestamptz NULL,
-			created_at timestamptz NOT NULL DEFAULT now()
-		)`,
-		`ALTER TABLE connection_health_floor_reservations ADD COLUMN IF NOT EXISTS inventory_generation bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_floor_reservations ADD COLUMN IF NOT EXISTS dispatching_at timestamptz NULL`,
-		`CREATE INDEX IF NOT EXISTS idx_connection_health_floor_reservations_workspace ON connection_health_floor_reservations (user_id, admin_account_id, expires_at)`,
-		`CREATE TABLE IF NOT EXISTS connection_health_incident_survivors (
-			user_id text NOT NULL, admin_account_id text NOT NULL, incident_id text NOT NULL,
-			scope_kind text NOT NULL, scope_id text NOT NULL, account_id text NOT NULL,
-			created_at timestamptz NOT NULL DEFAULT now(),
-			PRIMARY KEY (user_id, admin_account_id, incident_id, scope_kind, scope_id)
-		)`,
-		`ALTER TABLE connection_health_priority_sync_states ADD COLUMN IF NOT EXISTS pending_mutation_generation bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_priority_sync_states ADD COLUMN IF NOT EXISTS pending_source text NOT NULL DEFAULT ''`,
-		`ALTER TABLE connection_health_priority_sync_states ADD COLUMN IF NOT EXISTS pending_epoch bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_priority_sync_states ADD COLUMN IF NOT EXISTS pending_action_key text NOT NULL DEFAULT ''`,
-		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_mutation_generation bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_source text NOT NULL DEFAULT ''`,
-		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_epoch bigint NOT NULL DEFAULT 0`,
-		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_action_key text NOT NULL DEFAULT ''`,
 	}
 	for _, stmt := range statements {
 		if _, err := r.db.Exec(ctx, stmt); err != nil {
@@ -471,11 +253,8 @@ func upsertPolicyWithExecutor(ctx context.Context, executor policyExecutor, p Po
 			id, user_id, admin_account_id, name, enabled, own_group_id, own_group_name, model_pattern, probe_mode,
 			probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
 			failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
-			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode,
-			priority_min_write_interval_seconds, priority_writeback_spread_seconds, priority_max_pending_age_seconds, priority_reconcile_interval_seconds,
-			priority_inventory_snapshot_ttl_seconds, priority_reconcile_failure_backoff_seconds, priority_drift_action, priority_read_mode,
-			daily_probe_budget, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,now(),now())
+			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,now(),now())
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
 			enabled = EXCLUDED.enabled,
@@ -495,24 +274,13 @@ func upsertPolicyWithExecutor(ctx context.Context, executor policyExecutor, p Po
 			auto_remote_action_enabled = EXCLUDED.auto_remote_action_enabled,
 			priority_mode = EXCLUDED.priority_mode,
 			strategy_mode = EXCLUDED.strategy_mode,
-			priority_min_write_interval_seconds = EXCLUDED.priority_min_write_interval_seconds,
-			priority_writeback_spread_seconds = EXCLUDED.priority_writeback_spread_seconds,
-			priority_max_pending_age_seconds = EXCLUDED.priority_max_pending_age_seconds,
-			priority_reconcile_interval_seconds = EXCLUDED.priority_reconcile_interval_seconds,
-			priority_inventory_snapshot_ttl_seconds = EXCLUDED.priority_inventory_snapshot_ttl_seconds,
-			priority_reconcile_failure_backoff_seconds = EXCLUDED.priority_reconcile_failure_backoff_seconds,
-			priority_drift_action = EXCLUDED.priority_drift_action,
-			priority_read_mode = EXCLUDED.priority_read_mode,
 			daily_probe_budget = EXCLUDED.daily_probe_budget,
 			updated_at = now()
 	`, p.ID, p.UserID, p.AdminAccountID, p.Name, p.Enabled, p.OwnGroupID, p.OwnGroupName, p.ModelPattern, p.ProbeMode,
 		p.ProbeIntervalSeconds, p.ContinueProbeWhenUnschedulable, defaultInt(p.UnschedulableProbeIntervalMinutes, 60),
 		p.FailureThreshold, p.SuccessThreshold, p.CooldownSeconds, p.ObservationSeconds,
 		p.RecoveryStepPercent, p.AutoDegradeEnabled, p.AutoRemoteActionEnabled, normalizePriorityMode(p.PriorityMode),
-		normalizeStrategyMode(p.StrategyMode), p.PrioritySyncPreset.MinWriteIntervalSeconds,
-		p.PrioritySyncPreset.WritebackSpreadSeconds, p.PrioritySyncPreset.MaxPendingAgeSeconds, p.PrioritySyncPreset.ReconcileIntervalSeconds,
-		p.PrioritySyncPreset.InventorySnapshotTTLSeconds, p.PrioritySyncPreset.ReconcileFailureBackoffSeconds,
-		p.PrioritySyncPreset.DriftAction, p.PrioritySyncPreset.ReadMode, p.DailyProbeBudget)
+		normalizeStrategyMode(p.StrategyMode), p.DailyProbeBudget)
 	return err
 }
 
@@ -639,10 +407,7 @@ func (r *Repository) GetPolicy(ctx context.Context, id string, userID string, ad
 		SELECT id, user_id, admin_account_id, name, enabled, own_group_id, own_group_name, model_pattern, probe_mode,
 			probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
 			failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
-			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode,
-			priority_min_write_interval_seconds, priority_writeback_spread_seconds, priority_max_pending_age_seconds, priority_reconcile_interval_seconds,
-			priority_inventory_snapshot_ttl_seconds, priority_reconcile_failure_backoff_seconds, priority_drift_action, priority_read_mode,
-			daily_probe_budget, created_at, updated_at
+			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, created_at, updated_at
 		FROM connection_health_policies WHERE id = $1 AND user_id = $2 AND admin_account_id = $3
 	`, id, userID, adminAccountID)
 	p, err := scanPolicy(row)
@@ -666,10 +431,7 @@ func (r *Repository) ListPolicies(ctx context.Context, userID string, adminAccou
 		SELECT id, user_id, admin_account_id, name, enabled, own_group_id, own_group_name, model_pattern, probe_mode,
 			probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
 			failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
-			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode,
-			priority_min_write_interval_seconds, priority_writeback_spread_seconds, priority_max_pending_age_seconds, priority_reconcile_interval_seconds,
-			priority_inventory_snapshot_ttl_seconds, priority_reconcile_failure_backoff_seconds, priority_drift_action, priority_read_mode,
-			daily_probe_budget, created_at, updated_at
+			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, created_at, updated_at
 		FROM connection_health_policies WHERE user_id = $1 AND admin_account_id = $2 ORDER BY created_at ASC
 	`, userID, adminAccountID)
 	if err != nil {
@@ -705,10 +467,7 @@ func (r *Repository) ListEnabledPolicies(ctx context.Context) ([]Policy, error) 
 		SELECT id, user_id, admin_account_id, name, enabled, own_group_id, own_group_name, model_pattern, probe_mode,
 			probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
 			failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
-			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode,
-			priority_min_write_interval_seconds, priority_writeback_spread_seconds, priority_max_pending_age_seconds, priority_reconcile_interval_seconds,
-			priority_inventory_snapshot_ttl_seconds, priority_reconcile_failure_backoff_seconds, priority_drift_action, priority_read_mode,
-			daily_probe_budget, created_at, updated_at
+			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, created_at, updated_at
 		FROM connection_health_policies WHERE enabled = true ORDER BY created_at ASC
 	`)
 	if err != nil {
@@ -749,11 +508,7 @@ func scanPolicy(row pgx.Row) (*Policy, error) {
 	if err := row.Scan(&p.ID, &p.UserID, &p.AdminAccountID, &p.Name, &p.Enabled, &p.OwnGroupID, &p.OwnGroupName, &p.ModelPattern, &p.ProbeMode,
 		&p.ProbeIntervalSeconds, &p.ContinueProbeWhenUnschedulable, &p.UnschedulableProbeIntervalMinutes,
 		&p.FailureThreshold, &p.SuccessThreshold, &p.CooldownSeconds, &p.ObservationSeconds,
-		&p.RecoveryStepPercent, &p.AutoDegradeEnabled, &p.AutoRemoteActionEnabled, &p.PriorityMode, &p.StrategyMode,
-		&p.PrioritySyncPreset.MinWriteIntervalSeconds, &p.PrioritySyncPreset.WritebackSpreadSeconds,
-		&p.PrioritySyncPreset.MaxPendingAgeSeconds, &p.PrioritySyncPreset.ReconcileIntervalSeconds,
-		&p.PrioritySyncPreset.InventorySnapshotTTLSeconds, &p.PrioritySyncPreset.ReconcileFailureBackoffSeconds,
-		&p.PrioritySyncPreset.DriftAction, &p.PrioritySyncPreset.ReadMode, &p.DailyProbeBudget, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		&p.RecoveryStepPercent, &p.AutoDegradeEnabled, &p.AutoRemoteActionEnabled, &p.PriorityMode, &p.StrategyMode, &p.DailyProbeBudget, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -771,11 +526,7 @@ func scanPolicyRow(row rowScanner) (*Policy, error) {
 	if err := row.Scan(&p.ID, &p.UserID, &p.AdminAccountID, &p.Name, &p.Enabled, &p.OwnGroupID, &p.OwnGroupName, &p.ModelPattern, &p.ProbeMode,
 		&p.ProbeIntervalSeconds, &p.ContinueProbeWhenUnschedulable, &p.UnschedulableProbeIntervalMinutes,
 		&p.FailureThreshold, &p.SuccessThreshold, &p.CooldownSeconds, &p.ObservationSeconds,
-		&p.RecoveryStepPercent, &p.AutoDegradeEnabled, &p.AutoRemoteActionEnabled, &p.PriorityMode, &p.StrategyMode,
-		&p.PrioritySyncPreset.MinWriteIntervalSeconds, &p.PrioritySyncPreset.WritebackSpreadSeconds,
-		&p.PrioritySyncPreset.MaxPendingAgeSeconds, &p.PrioritySyncPreset.ReconcileIntervalSeconds,
-		&p.PrioritySyncPreset.InventorySnapshotTTLSeconds, &p.PrioritySyncPreset.ReconcileFailureBackoffSeconds,
-		&p.PrioritySyncPreset.DriftAction, &p.PrioritySyncPreset.ReadMode, &p.DailyProbeBudget, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		&p.RecoveryStepPercent, &p.AutoDegradeEnabled, &p.AutoRemoteActionEnabled, &p.PriorityMode, &p.StrategyMode, &p.DailyProbeBudget, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &p, nil
@@ -1362,7 +1113,19 @@ func (r *Repository) CreatePolicyAndReplaceGroupConfiguration(ctx context.Contex
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err := upsertPolicyWithExecutor(ctx, tx, policy); err != nil {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO connection_health_policies (
+			id, user_id, admin_account_id, name, enabled, own_group_id, own_group_name, model_pattern, probe_mode,
+				probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
+				failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
+				recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, created_at, updated_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,now(),now())
+		`, policy.ID, policy.UserID, policy.AdminAccountID, policy.Name, policy.Enabled, policy.OwnGroupID, policy.OwnGroupName,
+		policy.ModelPattern, policy.ProbeMode, policy.ProbeIntervalSeconds, policy.ContinueProbeWhenUnschedulable,
+		defaultInt(policy.UnschedulableProbeIntervalMinutes, 60), policy.FailureThreshold, policy.SuccessThreshold,
+		policy.CooldownSeconds, policy.ObservationSeconds, policy.RecoveryStepPercent, policy.AutoDegradeEnabled,
+		policy.AutoRemoteActionEnabled, normalizePriorityMode(policy.PriorityMode), normalizeStrategyMode(policy.StrategyMode),
+		policy.DailyProbeBudget); err != nil {
 		return err
 	}
 	for _, target := range targets {
@@ -1551,8 +1314,7 @@ func scanGroupTargetExclusions(rows pgx.Rows) ([]GroupTargetExclusion, error) {
 func (r *Repository) ListPrioritySyncStates(ctx context.Context, userID string, adminAccountID string) ([]PrioritySyncState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_priority, last_applied_priority,
-			pending_priority, pending_mutation_generation, pending_source, pending_epoch, pending_action_key,
-			effective_multiplier, conflict, last_conflict_priority, updated_at
+			pending_priority, effective_multiplier, conflict, last_conflict_priority, updated_at
 		FROM connection_health_priority_sync_states
 		WHERE user_id = $1 AND admin_account_id = $2
 	`, userID, adminAccountID)
@@ -1564,9 +1326,7 @@ func (r *Repository) ListPrioritySyncStates(ctx context.Context, userID string, 
 	for rows.Next() {
 		var state PrioritySyncState
 		if err := rows.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalPriority,
-			&state.LastAppliedPriority, &state.PendingPriority, &state.PendingMutationGeneration,
-			&state.PendingSource, &state.PendingEpoch, &state.PendingActionKey,
-			&state.EffectiveMultiplier, &state.Conflict, &state.LastConflictPriority, &state.UpdatedAt); err != nil {
+			&state.LastAppliedPriority, &state.PendingPriority, &state.EffectiveMultiplier, &state.Conflict, &state.LastConflictPriority, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		states = append(states, state)
@@ -1577,8 +1337,7 @@ func (r *Repository) ListPrioritySyncStates(ctx context.Context, userID string, 
 func (r *Repository) ListAllPrioritySyncStates(ctx context.Context) ([]PrioritySyncState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_priority, last_applied_priority,
-			pending_priority, pending_mutation_generation, pending_source, pending_epoch, pending_action_key,
-			effective_multiplier, conflict, last_conflict_priority, updated_at
+			pending_priority, effective_multiplier, conflict, last_conflict_priority, updated_at
 		FROM connection_health_priority_sync_states
 	`)
 	if err != nil {
@@ -1589,48 +1348,10 @@ func (r *Repository) ListAllPrioritySyncStates(ctx context.Context) ([]PriorityS
 	for rows.Next() {
 		var state PrioritySyncState
 		if err := rows.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalPriority,
-			&state.LastAppliedPriority, &state.PendingPriority, &state.PendingMutationGeneration,
-			&state.PendingSource, &state.PendingEpoch, &state.PendingActionKey,
-			&state.EffectiveMultiplier, &state.Conflict, &state.LastConflictPriority, &state.UpdatedAt); err != nil {
+			&state.LastAppliedPriority, &state.PendingPriority, &state.EffectiveMultiplier, &state.Conflict, &state.LastConflictPriority, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		states = append(states, state)
-	}
-	return states, rows.Err()
-}
-
-func (r *Repository) ListAllPriorityWorkspaceSyncStates(ctx context.Context) ([]PriorityWorkspaceSyncState, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT user_id, admin_account_id, applied_signature, pending_signature, pending_since,
-			last_evaluation_at, last_write_attempt_at, last_write_success_at, last_drift_at,
-			last_reconcile_attempt_at, last_reconcile_success_at, last_reconcile_failure_at,
-			next_reconcile_at, inventory_snapshot_expires_at,
-			last_decision, last_suppression_reason, last_error, last_inventory_error,
-			inventory_status, last_action_source, policy_version,
-			min_write_interval_seconds, max_pending_age_seconds, reconcile_interval_seconds,
-			inventory_snapshot_ttl_seconds, reconcile_failure_backoff_seconds, drift_action, read_mode,
-			pending_age_seconds, last_inventory_read_duration_ms, last_write_duration_ms,
-			evaluation_count, probe_evaluation_count, signature_change_count,
-			reconcile_attempt_count, reconcile_success_count, reconcile_failure_count,
-			snapshot_hit_count, snapshot_miss_count, write_attempt_count, write_success_count,
-			write_failure_count, unchanged_skip_count, window_suppression_count, drift_count,
-			writeback_spread_seconds, pending_target_count, last_write_round_target_count, updated_at
-		FROM connection_health_priority_workspace_sync_states
-		WHERE pending_signature <> ''
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	states := make([]PriorityWorkspaceSyncState, 0)
-	for rows.Next() {
-		state, scanErr := scanPriorityWorkspaceSyncState(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		if state != nil {
-			states = append(states, *state)
-		}
 	}
 	return states, rows.Err()
 }
@@ -1639,24 +1360,18 @@ func (r *Repository) UpsertPrioritySyncState(ctx context.Context, state Priority
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO connection_health_priority_sync_states (
 			user_id, admin_account_id, target_id, original_priority, last_applied_priority, pending_priority,
-			pending_mutation_generation, pending_source, pending_epoch, pending_action_key,
 			effective_multiplier, conflict, last_conflict_priority, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
 		ON CONFLICT (user_id, admin_account_id, target_id) DO UPDATE SET
 			original_priority = EXCLUDED.original_priority,
 			last_applied_priority = EXCLUDED.last_applied_priority,
 			pending_priority = EXCLUDED.pending_priority,
-			pending_mutation_generation = EXCLUDED.pending_mutation_generation,
-			pending_source = EXCLUDED.pending_source,
-			pending_epoch = EXCLUDED.pending_epoch,
-			pending_action_key = EXCLUDED.pending_action_key,
 			effective_multiplier = EXCLUDED.effective_multiplier,
 			conflict = EXCLUDED.conflict,
 			last_conflict_priority = EXCLUDED.last_conflict_priority,
 			updated_at = now()
 	`, state.UserID, state.AdminAccountID, state.TargetID, state.OriginalPriority, state.LastAppliedPriority,
-		state.PendingPriority, state.PendingMutationGeneration, state.PendingSource, state.PendingEpoch,
-		state.PendingActionKey, state.EffectiveMultiplier, state.Conflict, state.LastConflictPriority)
+		state.PendingPriority, state.EffectiveMultiplier, state.Conflict, state.LastConflictPriority)
 	return err
 }
 
@@ -1668,154 +1383,16 @@ func (r *Repository) DeletePrioritySyncState(ctx context.Context, userID string,
 	return err
 }
 
-func (r *Repository) GetPriorityWorkspaceSyncState(ctx context.Context, userID string, adminAccountID string) (*PriorityWorkspaceSyncState, error) {
-	row := r.db.QueryRow(ctx, `
-		SELECT user_id, admin_account_id, applied_signature, pending_signature, pending_since,
-			last_evaluation_at, last_write_attempt_at, last_write_success_at, last_drift_at,
-			last_reconcile_attempt_at, last_reconcile_success_at, last_reconcile_failure_at,
-			next_reconcile_at, inventory_snapshot_expires_at,
-			last_decision, last_suppression_reason, last_error, last_inventory_error,
-			inventory_status, last_action_source, policy_version,
-			min_write_interval_seconds, max_pending_age_seconds, reconcile_interval_seconds,
-			inventory_snapshot_ttl_seconds, reconcile_failure_backoff_seconds, drift_action, read_mode,
-			pending_age_seconds, last_inventory_read_duration_ms, last_write_duration_ms,
-			evaluation_count, probe_evaluation_count, signature_change_count,
-			reconcile_attempt_count, reconcile_success_count, reconcile_failure_count,
-			snapshot_hit_count, snapshot_miss_count, write_attempt_count, write_success_count,
-			write_failure_count, unchanged_skip_count, window_suppression_count, drift_count,
-			writeback_spread_seconds, pending_target_count, last_write_round_target_count, updated_at
-		FROM connection_health_priority_workspace_sync_states
-		WHERE user_id = $1 AND admin_account_id = $2
-	`, userID, adminAccountID)
-	return scanPriorityWorkspaceSyncState(row)
-}
-
-func (r *Repository) UpsertPriorityWorkspaceSyncState(ctx context.Context, state PriorityWorkspaceSyncState) error {
-	_, err := r.db.Exec(ctx, `
-		INSERT INTO connection_health_priority_workspace_sync_states (
-			user_id, admin_account_id, applied_signature, pending_signature, pending_since,
-			last_evaluation_at, last_write_attempt_at, last_write_success_at, last_drift_at,
-			last_reconcile_attempt_at, last_reconcile_success_at, last_reconcile_failure_at,
-			next_reconcile_at, inventory_snapshot_expires_at,
-			last_decision, last_suppression_reason, last_error, last_inventory_error,
-			inventory_status, last_action_source, policy_version,
-			min_write_interval_seconds, max_pending_age_seconds, reconcile_interval_seconds,
-			inventory_snapshot_ttl_seconds, reconcile_failure_backoff_seconds, drift_action, read_mode,
-			pending_age_seconds, last_inventory_read_duration_ms, last_write_duration_ms,
-			evaluation_count, probe_evaluation_count, signature_change_count,
-			reconcile_attempt_count, reconcile_success_count, reconcile_failure_count,
-			snapshot_hit_count, snapshot_miss_count, write_attempt_count, write_success_count,
-			write_failure_count, unchanged_skip_count, window_suppression_count, drift_count,
-			writeback_spread_seconds, pending_target_count, last_write_round_target_count, updated_at
-		) VALUES (
-			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-			$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,
-			$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,now()
-		)
-		ON CONFLICT (user_id, admin_account_id) DO UPDATE SET
-			applied_signature = EXCLUDED.applied_signature,
-			pending_signature = EXCLUDED.pending_signature,
-			pending_since = EXCLUDED.pending_since,
-			last_evaluation_at = EXCLUDED.last_evaluation_at,
-			last_write_attempt_at = EXCLUDED.last_write_attempt_at,
-			last_write_success_at = EXCLUDED.last_write_success_at,
-			last_drift_at = EXCLUDED.last_drift_at,
-			last_reconcile_attempt_at = EXCLUDED.last_reconcile_attempt_at,
-			last_reconcile_success_at = EXCLUDED.last_reconcile_success_at,
-			last_reconcile_failure_at = EXCLUDED.last_reconcile_failure_at,
-			next_reconcile_at = EXCLUDED.next_reconcile_at,
-			inventory_snapshot_expires_at = EXCLUDED.inventory_snapshot_expires_at,
-			last_decision = EXCLUDED.last_decision,
-			last_suppression_reason = EXCLUDED.last_suppression_reason,
-			last_error = EXCLUDED.last_error,
-			last_inventory_error = EXCLUDED.last_inventory_error,
-			inventory_status = EXCLUDED.inventory_status,
-			last_action_source = EXCLUDED.last_action_source,
-			policy_version = EXCLUDED.policy_version,
-			min_write_interval_seconds = EXCLUDED.min_write_interval_seconds,
-			max_pending_age_seconds = EXCLUDED.max_pending_age_seconds,
-			reconcile_interval_seconds = EXCLUDED.reconcile_interval_seconds,
-			inventory_snapshot_ttl_seconds = EXCLUDED.inventory_snapshot_ttl_seconds,
-			reconcile_failure_backoff_seconds = EXCLUDED.reconcile_failure_backoff_seconds,
-			drift_action = EXCLUDED.drift_action,
-			read_mode = EXCLUDED.read_mode,
-			pending_age_seconds = EXCLUDED.pending_age_seconds,
-			last_inventory_read_duration_ms = EXCLUDED.last_inventory_read_duration_ms,
-			last_write_duration_ms = EXCLUDED.last_write_duration_ms,
-			evaluation_count = EXCLUDED.evaluation_count,
-			probe_evaluation_count = EXCLUDED.probe_evaluation_count,
-			signature_change_count = EXCLUDED.signature_change_count,
-			reconcile_attempt_count = EXCLUDED.reconcile_attempt_count,
-			reconcile_success_count = EXCLUDED.reconcile_success_count,
-			reconcile_failure_count = EXCLUDED.reconcile_failure_count,
-			snapshot_hit_count = EXCLUDED.snapshot_hit_count,
-			snapshot_miss_count = EXCLUDED.snapshot_miss_count,
-			write_attempt_count = EXCLUDED.write_attempt_count,
-			write_success_count = EXCLUDED.write_success_count,
-			write_failure_count = EXCLUDED.write_failure_count,
-			unchanged_skip_count = EXCLUDED.unchanged_skip_count,
-			window_suppression_count = EXCLUDED.window_suppression_count,
-			drift_count = EXCLUDED.drift_count,
-			writeback_spread_seconds = EXCLUDED.writeback_spread_seconds,
-			pending_target_count = EXCLUDED.pending_target_count,
-			last_write_round_target_count = EXCLUDED.last_write_round_target_count,
-			updated_at = now()
-	`, state.UserID, state.AdminAccountID, state.AppliedSignature, state.PendingSignature, state.PendingSince,
-		state.LastEvaluationAt, state.LastWriteAttemptAt, state.LastWriteSuccessAt, state.LastDriftAt,
-		state.LastReconcileAttemptAt, state.LastReconcileSuccessAt, state.LastReconcileFailureAt,
-		state.NextReconcileAt, state.InventorySnapshotExpiresAt,
-		state.LastDecision, state.LastSuppressionReason, state.LastError, state.LastInventoryError,
-		state.InventoryStatus, state.LastActionSource, state.PolicyVersion,
-		state.MinWriteIntervalSeconds, state.MaxPendingAgeSeconds, state.ReconcileIntervalSeconds,
-		state.InventorySnapshotTTLSeconds, state.ReconcileFailureBackoffSeconds, state.DriftAction, state.ReadMode,
-		state.PendingAgeSeconds, state.LastInventoryReadDurationMs, state.LastWriteDurationMs,
-		state.EvaluationCount, state.ProbeEvaluationCount, state.SignatureChangeCount,
-		state.ReconcileAttemptCount, state.ReconcileSuccessCount, state.ReconcileFailureCount,
-		state.SnapshotHitCount, state.SnapshotMissCount, state.WriteAttemptCount, state.WriteSuccessCount,
-		state.WriteFailureCount, state.UnchangedSkipCount, state.WindowSuppressionCount, state.DriftCount,
-		state.WritebackSpreadSeconds, state.PendingTargetCount, state.LastWriteRoundTargetCount)
-	return err
-}
-
-func scanPriorityWorkspaceSyncState(row pgx.Row) (*PriorityWorkspaceSyncState, error) {
-	var state PriorityWorkspaceSyncState
-	if err := row.Scan(
-		&state.UserID, &state.AdminAccountID, &state.AppliedSignature, &state.PendingSignature, &state.PendingSince,
-		&state.LastEvaluationAt, &state.LastWriteAttemptAt, &state.LastWriteSuccessAt, &state.LastDriftAt,
-		&state.LastReconcileAttemptAt, &state.LastReconcileSuccessAt, &state.LastReconcileFailureAt,
-		&state.NextReconcileAt, &state.InventorySnapshotExpiresAt,
-		&state.LastDecision, &state.LastSuppressionReason, &state.LastError, &state.LastInventoryError,
-		&state.InventoryStatus, &state.LastActionSource, &state.PolicyVersion,
-		&state.MinWriteIntervalSeconds, &state.MaxPendingAgeSeconds, &state.ReconcileIntervalSeconds,
-		&state.InventorySnapshotTTLSeconds, &state.ReconcileFailureBackoffSeconds, &state.DriftAction, &state.ReadMode,
-		&state.PendingAgeSeconds, &state.LastInventoryReadDurationMs, &state.LastWriteDurationMs,
-		&state.EvaluationCount, &state.ProbeEvaluationCount, &state.SignatureChangeCount,
-		&state.ReconcileAttemptCount, &state.ReconcileSuccessCount, &state.ReconcileFailureCount,
-		&state.SnapshotHitCount, &state.SnapshotMissCount, &state.WriteAttemptCount, &state.WriteSuccessCount,
-		&state.WriteFailureCount, &state.UnchangedSkipCount, &state.WindowSuppressionCount, &state.DriftCount,
-		&state.WritebackSpreadSeconds, &state.PendingTargetCount, &state.LastWriteRoundTargetCount, &state.UpdatedAt,
-	); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return &state, nil
-}
-
 func (r *Repository) GetTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) (*TargetActionState, error) {
 	row := r.db.QueryRow(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight,
-			pending_mutation_generation, pending_source, pending_epoch, pending_action_key, conflict, updated_at
+			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, updated_at
 		FROM connection_health_target_action_states
 		WHERE user_id = $1 AND admin_account_id = $2 AND target_id = $3
 	`, userID, adminAccountID, targetID)
 	var state TargetActionState
 	if err := row.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalStatus, &state.OriginalWeight,
-		&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight,
-		&state.PendingMutationGeneration, &state.PendingSource, &state.PendingEpoch, &state.PendingActionKey,
-		&state.Conflict, &state.UpdatedAt); err != nil {
+		&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -1827,8 +1404,7 @@ func (r *Repository) GetTargetActionState(ctx context.Context, userID string, ad
 func (r *Repository) ListTargetActionStates(ctx context.Context, userID string, adminAccountID string) ([]TargetActionState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight,
-			pending_mutation_generation, pending_source, pending_epoch, pending_action_key, conflict, updated_at
+			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, updated_at
 		FROM connection_health_target_action_states
 		WHERE user_id = $1 AND admin_account_id = $2
 	`, userID, adminAccountID)
@@ -1842,8 +1418,7 @@ func (r *Repository) ListTargetActionStates(ctx context.Context, userID string, 
 func (r *Repository) ListAllTargetActionStates(ctx context.Context) ([]TargetActionState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight,
-			pending_mutation_generation, pending_source, pending_epoch, pending_action_key, conflict, updated_at
+			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, updated_at
 		FROM connection_health_target_action_states
 	`)
 	if err != nil {
@@ -1858,9 +1433,7 @@ func scanTargetActionStates(rows pgx.Rows) ([]TargetActionState, error) {
 	for rows.Next() {
 		var state TargetActionState
 		if err := rows.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalStatus, &state.OriginalWeight,
-			&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight,
-			&state.PendingMutationGeneration, &state.PendingSource, &state.PendingEpoch, &state.PendingActionKey,
-			&state.Conflict, &state.UpdatedAt); err != nil {
+			&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		states = append(states, state)
@@ -1872,9 +1445,8 @@ func (r *Repository) UpsertTargetActionState(ctx context.Context, state TargetAc
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO connection_health_target_action_states (
 			user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight,
-			pending_mutation_generation, pending_source, pending_epoch, pending_action_key, conflict, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
+			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
 		ON CONFLICT (user_id, admin_account_id, target_id) DO UPDATE SET
 			original_status = EXCLUDED.original_status,
 			original_weight = EXCLUDED.original_weight,
@@ -1882,15 +1454,10 @@ func (r *Repository) UpsertTargetActionState(ctx context.Context, state TargetAc
 			last_applied_weight = EXCLUDED.last_applied_weight,
 			pending_status = EXCLUDED.pending_status,
 			pending_weight = EXCLUDED.pending_weight,
-			pending_mutation_generation = EXCLUDED.pending_mutation_generation,
-			pending_source = EXCLUDED.pending_source,
-			pending_epoch = EXCLUDED.pending_epoch,
-			pending_action_key = EXCLUDED.pending_action_key,
 			conflict = EXCLUDED.conflict,
 			updated_at = now()
 	`, state.UserID, state.AdminAccountID, state.TargetID, state.OriginalStatus, state.OriginalWeight,
-		state.LastAppliedStatus, state.LastAppliedWeight, state.PendingStatus, state.PendingWeight,
-		state.PendingMutationGeneration, state.PendingSource, state.PendingEpoch, state.PendingActionKey, state.Conflict)
+		state.LastAppliedStatus, state.LastAppliedWeight, state.PendingStatus, state.PendingWeight, state.Conflict)
 	return err
 }
 

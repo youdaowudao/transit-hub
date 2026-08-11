@@ -13,10 +13,6 @@ import type {
   OwnGroupHealth,
   PolicyInput,
   ProbeModelCandidate,
-  SafetyEmergencyClearResult,
-  SafetySettings,
-  SafetyWorkspaceView,
-  PriorityWorkspaceSyncState,
   TargetPolicyAssignments,
 } from '../types/connectionHealth'
 import type { AdminGroupAccount } from '../types/connectionHealth'
@@ -25,13 +21,10 @@ import {
   deleteConnectionHealthPolicy,
   disableConnection,
   discoverTargetModels,
-  emergencyClearConnectionHealthSafety,
   getConnectionHealthAdminGroups,
   getConnectionHealthEvents,
   getConnectionHealthGroups,
   getConnectionHealthOverview,
-  getConnectionHealthPrioritySync,
-  getConnectionHealthSafety,
   getAdminGroupPolicyConfiguration,
   getTargetPolicyAssignments,
   listConnectionHealthPolicies,
@@ -42,20 +35,16 @@ import {
   setTargetPolicyAssignments,
   setAdminGroupPolicyConfiguration,
   setTargetSchedulable,
-  updateConnectionHealthSafety,
   updateConnectionHealthPolicy,
 } from '../api/connectionHealth'
 
 const overview = ref<ConnectionHealthOverview | null>(null)
-const prioritySync = ref<PriorityWorkspaceSyncState | null>(null)
-const prioritySyncErrorKey = ref('')
 const groups = ref<OwnGroupHealth[]>([])
 // adminGroups 是新的主列表数据源：当前 admin workspace 下的 admin 全量分组。
 // 与旧的 groups（我的分组链路）并存，供改造后的 ConnectionHealthView 主列表使用。
 const adminGroups = ref<AdminGroupHealth[]>([])
 const events = ref<ConnectionHealthEvent[]>([])
 const policies = ref<ConnectionHealthPolicy[]>([])
-const safety = ref<SafetyWorkspaceView | null>(null)
 const isLoading = ref(false)
 const isActionLoading = ref(false)
 const errorKey = ref('')
@@ -137,17 +126,6 @@ export function useConnectionHealth() {
     }
   }
 
-  const loadPrioritySync = async (): Promise<boolean> => {
-    prioritySyncErrorKey.value = ''
-    try {
-      prioritySync.value = await getConnectionHealthPrioritySync()
-      return true
-    } catch (err) {
-      prioritySyncErrorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
-      return false
-    }
-  }
-
   // silent=true 时跳过 isLoading 切换：用于手动探活等已经在链路级别自带 loading 反馈的
   // 场景下后台刷新主列表数据，避免主列表出现整页 loading 空白/重绘。
   const loadGroups = async (opts: { silent?: boolean } = {}) => {
@@ -197,7 +175,7 @@ export function useConnectionHealth() {
   // 旧的 groups 仍需加载：探活事件弹窗按 connectionId 关联链路上下文、手动探活候选模型按
   // 链路所属 own group 匹配策略，都依赖这份数据；主列表展示已切换到 adminGroups。
   const loadAll = async (opts: { silent?: boolean } = {}) => {
-    await Promise.all([loadAdminGroups(opts), loadGroups({ silent: true }), loadPrioritySync()])
+    await Promise.all([loadAdminGroups(opts), loadGroups({ silent: true })])
   }
 
   const loadEvents = async (connectionId?: string): Promise<boolean> => {
@@ -229,14 +207,6 @@ export function useConnectionHealth() {
     }
   }
 
-  const loadSafety = async () => {
-    try {
-      safety.value = await getConnectionHealthSafety()
-    } catch (err) {
-      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
-    }
-  }
-
   const savePolicy = async (input: PolicyInput) => {
     errorKey.value = ''
     try {
@@ -250,29 +220,6 @@ export function useConnectionHealth() {
     } catch (err) {
       errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
       return false
-    }
-  }
-
-  const saveSafety = async (input: SafetySettings) => {
-    errorKey.value = ''
-    try {
-      safety.value = await updateConnectionHealthSafety(input)
-      return true
-    } catch (err) {
-      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
-      return false
-    }
-  }
-
-  const emergencyClearSafety = async (idempotencyKey: string): Promise<SafetyEmergencyClearResult | null> => {
-    errorKey.value = ''
-    try {
-      const result = await emergencyClearConnectionHealthSafety(idempotencyKey)
-      await loadSafety()
-      return result
-    } catch (err) {
-      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
-      return null
     }
   }
 
@@ -467,27 +414,20 @@ export function useConnectionHealth() {
 
   return {
     overview,
-    prioritySync,
-    prioritySyncErrorKey,
     groups,
     adminGroups,
     events,
     policies,
-    safety,
     isLoading,
     isActionLoading,
     errorKey,
     loadAll,
     loadOverview,
-    loadPrioritySync,
     loadGroups,
     loadAdminGroups,
     loadEvents,
     loadPolicies,
-    loadSafety,
     savePolicy,
-    saveSafety,
-    emergencyClearSafety,
     removePolicy,
     createPolicyForSetup,
     updatePolicyForSetup,

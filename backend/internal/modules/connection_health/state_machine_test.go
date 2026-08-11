@@ -96,19 +96,6 @@ func TestApplyProbeOutcome_SlowResponseIsSuccessfulWithoutOverwritingFailureEvid
 	}
 }
 
-func TestApplyProbeOutcome_UnconfirmedNetworkFailurePreservesPriorityInputs(t *testing.T) {
-	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
-	current := ConnectionHealthState{State: StateHealthy, CurrentWeight: 100}
-
-	next, transition := applyProbeOutcome(current, ProbeOutcome{Result: ResultNetworkFluctuation}, Policy{AutoDegradeEnabled: true}, now)
-	if next.State != StateHealthy || next.CurrentWeight != 100 || next.ConsecutiveFailures != 1 {
-		t.Fatalf("unconfirmed network observation changed priority inputs: %+v", next)
-	}
-	if transition.TriggerRemoteDegrade || transition.TriggerRemoteRestore {
-		t.Fatalf("unconfirmed network observation scheduled remote mutation: %+v", transition)
-	}
-}
-
 func TestApplyProbeOutcome_SlowResponseOnlyRecordsWhenAutoDegradeDisabled(t *testing.T) {
 	now := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
 	current := ConnectionHealthState{
@@ -155,53 +142,33 @@ func TestTransition_SoftFailureDegradesGradually(t *testing.T) {
 	}
 }
 
-func TestTransition_RateLimitedNeverAccumulatesOrSuspends(t *testing.T) {
+func TestTransition_SoftFailureSuspendsAtThreshold(t *testing.T) {
 	policy := testPolicy()
 	now := time.Now()
-	in := TransitionInput{
+
+	out := Transition(TransitionInput{
 		Current:             StateDegraded,
 		CurrentWeight:       50,
-		ConsecutiveFailures: 2,
+		ConsecutiveFailures: 2, // 第三次即达到 failureThreshold=3
 		Now:                 now,
 		Result:              ResultRateLimited,
 		Policy:              policy,
+	})
+	if out.NextState != StateSuspended {
+		t.Fatalf("expected suspended at failure threshold, got %s", out.NextState)
 	}
-	for i := 0; i < 10; i++ {
-		out := Transition(in)
-		if out.NextState != StateDegraded || out.Weight != 50 || out.ConsecutiveFailures != 2 {
-			t.Fatalf("429 #%d changed health state: %+v", i+1, out)
-		}
-		if out.TriggerRemoteDegrade || out.TriggerRemoteRestore || out.CooldownUntil != nil {
-			t.Fatalf("429 #%d must not schedule a destructive action: %+v", i+1, out)
-		}
-		in.Current = out.NextState
-		in.CurrentWeight = out.Weight
-		in.ConsecutiveFailures = out.ConsecutiveFailures
+	if out.Weight != 0 {
+		t.Fatalf("expected weight 0 when suspended, got %d", out.Weight)
 	}
-}
-
-func TestApplyProbeOutcome_RateLimitHonorsRetryAfterWithoutChangingHealth(t *testing.T) {
-	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
-	current := ConnectionHealthState{
-		State: StateHealthy, CurrentWeight: 100,
-		ConsecutiveFailures: 2, ConsecutiveSuccesses: 1,
+	if !out.TriggerRemoteDegrade {
+		t.Fatalf("expected remote degrade to trigger on entering suspended")
 	}
-	next, transition := applyProbeOutcome(current, ProbeOutcome{
-		Result: ResultRateLimited, RetryAfterSeconds: 17,
-	}, Policy{AutoDegradeEnabled: true}, now)
-	if next.State != StateHealthy || next.CurrentWeight != 100 || next.ConsecutiveFailures != 2 {
-		t.Fatalf("429 changed health inputs: %+v", next)
-	}
-	wantRetryAt := now.Add(17 * time.Second)
-	if next.CooldownUntil == nil || !next.CooldownUntil.Equal(wantRetryAt) {
-		t.Fatalf("429 retry deadline = %v, want %v", next.CooldownUntil, wantRetryAt)
-	}
-	if transition.TriggerRemoteDegrade || transition.TriggerRemoteRestore {
-		t.Fatalf("429 scheduled remote mutation: %+v", transition)
+	if out.CooldownUntil == nil || !out.CooldownUntil.After(now) {
+		t.Fatalf("expected cooldown_until to be set in the future")
 	}
 }
 
-func TestTransition_HardFailureIsObservationOnly(t *testing.T) {
+func TestTransition_HardFailureSuspendsImmediately(t *testing.T) {
 	policy := testPolicy()
 	now := time.Now()
 
@@ -212,14 +179,14 @@ func TestTransition_HardFailureIsObservationOnly(t *testing.T) {
 		Result:        ResultServerError,
 		Policy:        policy,
 	})
-	if out.NextState != StateHealthy || out.Weight != 100 || out.ConsecutiveFailures != 1 {
-		t.Fatalf("single 5xx must remain an observation until confirmed, got %+v", out)
+	if out.NextState != StateSuspended {
+		t.Fatalf("expected immediate suspend on 5xx, got %s", out.NextState)
 	}
-	if out.TriggerRemoteDegrade || out.TriggerRemoteRestore {
-		t.Fatalf("single 5xx must not trigger a remote mutation: %+v", out)
+	if !out.TriggerRemoteDegrade {
+		t.Fatalf("expected remote degrade to trigger")
 	}
 
-	// 认证失败同样只记录本地观测。
+	// 认证失败同样直接暂停。
 	out2 := Transition(TransitionInput{
 		Current:       StateDegraded,
 		CurrentWeight: 60,
@@ -227,8 +194,8 @@ func TestTransition_HardFailureIsObservationOnly(t *testing.T) {
 		Result:        ResultAuth,
 		Policy:        policy,
 	})
-	if out2.NextState != StateDegraded || out2.Weight != 60 || out2.TriggerRemoteDegrade {
-		t.Fatalf("single auth failure must not change priority input or mutate upstream: %+v", out2)
+	if out2.NextState != StateSuspended {
+		t.Fatalf("expected immediate suspend on auth failure, got %s", out2.NextState)
 	}
 }
 

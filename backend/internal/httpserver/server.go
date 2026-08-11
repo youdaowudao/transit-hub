@@ -48,8 +48,6 @@ type Server struct {
 	lotteryFrameAncestorOrigin     func(ctx context.Context, embedToken string) (string, bool)
 	lotteryCancel                  context.CancelFunc
 	lotteryWorker                  *lottery.Worker
-	connectionHealthService        *connection_health.Service
-	connectionHealthCancel         context.CancelFunc
 }
 
 func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server {
@@ -245,10 +243,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	lotteryService.StartScheduler(lotteryCtx)
 	server.lotteryCancel = lotteryCancel
 	server.lotteryWorker = lotteryWorker
-	connectionHealthCtx, connectionHealthCancel := context.WithCancel(context.Background())
-	connHealthService.StartScheduler(connectionHealthCtx)
-	server.connectionHealthService = connHealthService
-	server.connectionHealthCancel = connectionHealthCancel
+	connHealthService.StartScheduler(context.Background())
 
 	// 策略设置变更时通知上游服务更新定时同步配置。
 	applyRefreshConfig := func(s settings.StrategySettings) {
@@ -424,20 +419,11 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
-	var shutdownErr error
-	if s.connectionHealthCancel != nil {
-		s.connectionHealthCancel()
-	}
-	if s.connectionHealthService != nil {
-		if err := s.connectionHealthService.StopScheduler(ctx); err != nil {
-			shutdownErr = err
-		}
-	}
 	if s.lotteryCancel != nil {
 		s.lotteryCancel()
 	}
 	if s.lotteryWorker == nil {
-		return shutdownErr
+		return nil
 	}
 	s.lotteryWorker.Stop()
 	done := make(chan struct{})
@@ -447,12 +433,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}()
 	select {
 	case <-ctx.Done():
-		if shutdownErr == nil {
-			shutdownErr = ctx.Err()
-		}
+		return ctx.Err()
 	case <-done:
+		return nil
 	}
-	return shutdownErr
 }
 
 func (s *Server) protectedPath(path string) bool {

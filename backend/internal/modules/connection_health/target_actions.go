@@ -33,23 +33,6 @@ func (s *Service) reconcileTargetRemoteAction(
 	if len(controlledModels) == 0 {
 		return "", nil
 	}
-	var targetMutation *MutationSession
-	if target.Platform == string(upstream.PlatformSub2API) {
-		key := MutationKey{UserID: userID, WorkspaceID: adminAccountID, AccountID: target.AccountID}
-		var mutationErr error
-		targetMutation, mutationErr = s.mutationCoordinatorForWrites().BeginAutomatic(ctx, key, true)
-		if mutationErr != nil {
-			return RemoteActionSafetyGateUnavailable, mutationErr
-		}
-		defer targetMutation.Release()
-		if !s.usesInMemoryMutationTestFallback() {
-			freshTarget, _, readErr := s.freshSub2APITarget(ctx, session, adminAccountID, target.TargetID, target.AccountID)
-			if readErr != nil {
-				return RemoteActionSafetyGateUnavailable, readErr
-			}
-			target = freshTarget
-		}
-	}
 
 	allStates, err := s.repo.ListStatesByConnection(ctx, target.TargetID)
 	if err != nil {
@@ -70,34 +53,6 @@ func (s *Service) reconcileTargetRemoteAction(
 	if err != nil {
 		return "", err
 	}
-	currentStatus := normalizeTargetStatus(target.Platform, target.AccountStatus)
-	currentWeight := normalizedTargetWeight(target)
-	if target.Platform == string(upstream.PlatformSub2API) && stored != nil && stored.PendingStatus != "" && stored.PendingSource != "" {
-		generation, generationErr := s.mutationGeneration(ctx, userID, adminAccountID, target.AccountID)
-		if generationErr != nil {
-			return RemoteActionSafetyGateUnavailable, generationErr
-		}
-		if stored.PendingSource == SafetySourceHealthIncident && generation == stored.PendingMutationGeneration {
-			// The abnormal queue owns incident checkpoints until authoritative
-			// readback and local state finalization are complete. Normal restore must
-			// never consume or overwrite one, even if the remote value already matches.
-			return RemoteActionSafetyConfirmationQueued, nil
-		}
-		if stored.PendingSource != SafetySourceHealthIncident &&
-			targetStateEqual(target, currentStatus, currentWeight, stored.PendingStatus, stored.PendingWeight) {
-			stored.LastAppliedStatus = stored.PendingStatus
-			stored.LastAppliedWeight = cloneIntPointer(stored.PendingWeight)
-			clearTargetActionPending(stored)
-			if err := s.repo.UpsertTargetActionState(ctx, *stored); err != nil {
-				return "", err
-			}
-		} else if generation != stored.PendingMutationGeneration {
-			clearTargetActionPending(stored)
-			if err := s.repo.UpsertTargetActionState(ctx, *stored); err != nil {
-				return "", err
-			}
-		}
-	}
 	allHealthy, blocked, minWeight := aggregateTargetStates(states)
 	allHealthy = allHealthy && statesComplete
 	// 普通 degraded 只记录模型健康；只有已经接管或进入暂停/观察/恢复阶段时才修改上游。
@@ -113,6 +68,8 @@ func (s *Service) reconcileTargetRemoteAction(
 		return RemoteActionSkippedUpstreamScheduling, nil
 	}
 
+	currentStatus := normalizeTargetStatus(target.Platform, target.AccountStatus)
+	currentWeight := normalizedTargetWeight(target)
 	if stored == nil {
 		originalStatus := currentStatus
 		originalWeight := cloneIntPointer(currentWeight)
@@ -135,7 +92,8 @@ func (s *Service) reconcileTargetRemoteAction(
 		}
 	} else if targetActionCheckpointConflicted(target, stored, currentStatus, currentWeight) {
 		stored.Conflict = true
-		clearTargetActionPending(stored)
+		stored.PendingStatus = ""
+		stored.PendingWeight = nil
 		if err := s.repo.UpsertTargetActionState(ctx, *stored); err != nil {
 			return "", err
 		}
@@ -146,24 +104,11 @@ func (s *Service) reconcileTargetRemoteAction(
 	}
 
 	desiredStatus, desiredWeight := desiredTargetState(target.Platform, allHealthy, blocked, minWeight, *stored)
-	// A Sub2API inactive decision is an incident intent, never a direct normal
-	// scanner write. The confirmation worker owns floor reservation, epoch and
-	// readback before it can call ApplyTargetState.
-	if target.Platform == string(upstream.PlatformSub2API) &&
-		normalizeTargetStatus(target.Platform, desiredStatus) == "inactive" &&
-		!targetStateEqual(target, currentStatus, currentWeight, desiredStatus, desiredWeight) {
-		return RemoteActionSafetyConfirmationQueued, nil
-	}
-	if target.Platform == string(upstream.PlatformSub2API) && stored.PendingSource == SafetySourceHealthIncident &&
-		!targetStateEqual(target, currentStatus, currentWeight, stored.PendingStatus, stored.PendingWeight) {
-		return RemoteActionSafetyConfirmationQueued, nil
-	}
 	if targetStateEqual(target, currentStatus, currentWeight, desiredStatus, desiredWeight) {
 		stored.LastAppliedStatus = desiredStatus
 		stored.LastAppliedWeight = cloneIntPointer(desiredWeight)
 		stored.PendingStatus = ""
 		stored.PendingWeight = nil
-		clearTargetActionPendingMetadata(stored)
 		if allHealthy {
 			return "", s.repo.DeleteTargetActionState(ctx, userID, adminAccountID, target.TargetID)
 		}
@@ -174,30 +119,10 @@ func (s *Service) reconcileTargetRemoteAction(
 	// then be recognized as a completed system write instead of a manual conflict.
 	stored.PendingStatus = desiredStatus
 	stored.PendingWeight = cloneIntPointer(desiredWeight)
-	stored.PendingSource = "normal"
-	stored.PendingEpoch = 0
-	stored.PendingActionKey = "target-status:" + target.TargetID + ":" + desiredStatus
-	if target.Platform == string(upstream.PlatformSub2API) {
-		stored.PendingMutationGeneration = targetMutation.Generation
-	} else {
-		stored.PendingMutationGeneration = 0
-	}
 	if err := s.repo.UpsertTargetActionState(ctx, *stored); err != nil {
 		return "", err
 	}
-	var action string
-	var actionErr error
-	if target.Platform == string(upstream.PlatformSub2API) {
-		action, actionErr = s.applyAutomaticTargetStateUnderMutation(
-			ctx, userID, adminAccountID, session, target, desiredWeight, desiredStatus,
-			stored.PendingMutationGeneration, targetMutation,
-		)
-	} else {
-		action, actionErr = s.applyAutomaticTargetState(
-			ctx, userID, adminAccountID, session, target, desiredWeight, desiredStatus,
-			stored.PendingMutationGeneration,
-		)
-	}
+	action, actionErr := s.dispatcher.ApplyTargetState(ctx, session, target, desiredWeight, desiredStatus)
 	if actionErr != nil {
 		log.Printf("[connection-health] aggregate target action failed target_id=%s action=%s err=%v", target.TargetID, action, actionErr)
 		return action, actionErr
@@ -206,7 +131,6 @@ func (s *Service) reconcileTargetRemoteAction(
 	stored.LastAppliedWeight = cloneIntPointer(desiredWeight)
 	stored.PendingStatus = ""
 	stored.PendingWeight = nil
-	clearTargetActionPendingMetadata(stored)
 	if allHealthy {
 		return action, s.repo.DeleteTargetActionState(ctx, userID, adminAccountID, target.TargetID)
 	}
@@ -231,196 +155,103 @@ func (s *Service) restoreUnmanagedTargetActions(
 	groupPolicies := assignedEnabledPoliciesByGroup(policies, groupAssignments)
 	excluded := groupTargetExclusionIndex(exclusions)
 	for _, stored := range states {
-		func() {
-			inventory, err := s.loadAdminInventory(ctx, stored.UserID, stored.AdminAccountID, inventoryCache)
-			if err != nil {
-				log.Printf("[connection-health] restore unmanaged target inventory failed target_id=%s err=%v", stored.TargetID, err)
-				return
+		inventory, err := s.loadAdminInventory(ctx, stored.UserID, stored.AdminAccountID, inventoryCache)
+		if err != nil {
+			log.Printf("[connection-health] restore unmanaged target inventory failed target_id=%s err=%v", stored.TargetID, err)
+			continue
+		}
+		inventoryComplete := true
+		for _, groupInventory := range inventory.groups {
+			if groupInventory.err != nil {
+				inventoryComplete = false
+				break
 			}
-			operationCtx, releaseSnapshot, operationErr := s.inventoryCacheOperationContext(ctx, stored.UserID, stored.AdminAccountID, inventoryCache)
-			if operationErr != nil {
-				return
+		}
+		if !inventoryComplete {
+			// 任一分组成员读取失败时无法证明目标已经失去全部管理关系，保持当前状态更安全。
+			continue
+		}
+		var target AdminProbeTarget
+		found := false
+		effectivePolicies := append([]Policy(nil), targetPolicies[stored.UserID+"|"+stored.AdminAccountID][stored.TargetID]...)
+		for _, groupInventory := range inventory.groups {
+			if groupInventory.err != nil {
+				continue
 			}
-			defer releaseSnapshot()
-			inventoryComplete := true
-			for _, groupInventory := range inventory.groups {
-				if groupInventory.err != nil {
-					inventoryComplete = false
-					break
-				}
-			}
-			if !inventoryComplete {
-				// 任一分组成员读取失败时无法证明目标已经失去全部管理关系，保持当前状态更安全。
-				return
-			}
-			var target AdminProbeTarget
-			found := false
-			effectivePolicies := append([]Policy(nil), targetPolicies[stored.UserID+"|"+stored.AdminAccountID][stored.TargetID]...)
-			for _, groupInventory := range inventory.groups {
-				if groupInventory.err != nil {
+			for _, account := range groupInventory.accounts {
+				targetID := buildTargetID(string(inventory.session.Platform), stored.AdminAccountID, account.ID)
+				if targetID != stored.TargetID {
 					continue
 				}
-				for _, account := range groupInventory.accounts {
-					targetID := buildTargetID(string(inventory.session.Platform), stored.AdminAccountID, account.ID)
-					if targetID != stored.TargetID {
-						continue
+				if !found {
+					target = AdminProbeTarget{
+						TargetID: targetID, Platform: string(inventory.session.Platform),
+						AdminGroupID: groupInventory.group.ID, AdminGroupName: groupInventory.group.Name,
+						AccountID: account.ID, AccountName: account.Name, AccountStatus: account.Status,
+						AccountWeight: cloneIntPointer(account.Weight), ProviderFamily: account.Platform,
+						Models: splitModelList(account.Models),
 					}
-					if !found {
-						target = AdminProbeTarget{
-							TargetID: targetID, Platform: string(inventory.session.Platform),
-							AdminGroupID: groupInventory.group.ID, AdminGroupName: groupInventory.group.Name,
-							AccountID: account.ID, AccountName: account.Name, AccountStatus: account.Status,
-							AccountWeight: cloneIntPointer(account.Weight), ProviderFamily: account.Platform,
-							Models: splitModelList(account.Models),
-						}
-						found = true
-					}
-					workspaceKey := stored.UserID + "|" + stored.AdminAccountID
-					if !excluded[workspaceKey][groupInventory.group.ID][targetID] {
-						effectivePolicies = mergePoliciesByID(effectivePolicies, groupPolicies[workspaceKey][groupInventory.group.ID])
-					}
+					found = true
+				}
+				workspaceKey := stored.UserID + "|" + stored.AdminAccountID
+				if !excluded[workspaceKey][groupInventory.group.ID][targetID] {
+					effectivePolicies = mergePoliciesByID(effectivePolicies, groupPolicies[workspaceKey][groupInventory.group.ID])
 				}
 			}
-			if hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies)) {
-				return
+		}
+		if hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies)) {
+			continue
+		}
+		targetVisible := found
+		if !found {
+			parsed, ok := parseTargetID(stored.TargetID)
+			if !ok || parsed.adminAccountID != stored.AdminAccountID || parsed.platform != string(inventory.session.Platform) {
+				continue
 			}
-			targetVisible := found
-			if !found {
-				parsed, ok := parseTargetID(stored.TargetID)
-				if !ok || parsed.adminAccountID != stored.AdminAccountID || parsed.platform != string(inventory.session.Platform) {
-					return
-				}
-				// Keep parsing the stable target id so malformed stored rows do not
-				// accidentally enter an automatic restore path. A missing account is
-				// held below because it cannot satisfy fresh readback requirements.
-				target = AdminProbeTarget{
-					TargetID: stored.TargetID, Platform: parsed.platform, AccountID: parsed.accountID,
-					AccountStatus: stored.LastAppliedStatus, AccountWeight: cloneIntPointer(stored.LastAppliedWeight),
-				}
+			// The account can remain upstream after being removed from every group. We no longer
+			// have a list snapshot for conflict detection, but restoring the captured original
+			// value is safer than leaving a system-disabled account stuck forever.
+			target = AdminProbeTarget{
+				TargetID: stored.TargetID, Platform: parsed.platform, AccountID: parsed.accountID,
+				AccountStatus: stored.LastAppliedStatus, AccountWeight: cloneIntPointer(stored.LastAppliedWeight),
 			}
-			if !targetVisible {
-				// The account is no longer present in a complete inventory. A
-				// missing row is not a safe readback target; leave the checkpoint
-				// for an explicit administrator action instead of blindly enabling
-				// an account that may have moved or been deleted upstream.
-				log.Printf("[connection-health] hold unmanaged restore without fresh target target_id=%s", stored.TargetID)
-				return
+		}
+		currentStatus := normalizeTargetStatus(target.Platform, target.AccountStatus)
+		currentWeight := normalizedTargetWeight(target)
+		if stored.Conflict || (targetVisible && targetActionCheckpointConflicted(target, &stored, currentStatus, currentWeight)) {
+			stored.Conflict = true
+			stored.PendingStatus = ""
+			stored.PendingWeight = nil
+			if err := s.repo.UpsertTargetActionState(ctx, stored); err != nil {
+				log.Printf("[connection-health] store unmanaged target conflict failed target_id=%s err=%v", stored.TargetID, err)
 			}
-			var targetMutation *MutationSession
-			if target.Platform == string(upstream.PlatformSub2API) {
-				key := MutationKey{UserID: stored.UserID, WorkspaceID: stored.AdminAccountID, AccountID: target.AccountID}
-				targetMutation, err = s.mutationCoordinatorForWrites().BeginAutomatic(operationCtx, key, true)
-				if err != nil {
-					log.Printf("[connection-health] acquire unmanaged restore mutation failed target_id=%s err=%v", stored.TargetID, err)
-					return
-				}
-				defer targetMutation.Release()
-				if !s.usesInMemoryMutationTestFallback() {
-					freshTarget, _, readErr := s.freshSub2APITarget(operationCtx, inventory.session, stored.AdminAccountID, stored.TargetID, target.AccountID)
-					if readErr != nil {
-						log.Printf("[connection-health] read unmanaged restore target failed target_id=%s err=%v", stored.TargetID, readErr)
-						return
-					}
-					target = freshTarget
-				}
-				freshStored, readErr := s.repo.GetTargetActionState(operationCtx, stored.UserID, stored.AdminAccountID, stored.TargetID)
-				if readErr != nil {
-					log.Printf("[connection-health] reread unmanaged target checkpoint failed target_id=%s err=%v", stored.TargetID, readErr)
-					return
-				}
-				if freshStored == nil {
-					return
-				}
-				stored = *freshStored
-				if stored.PendingSource == SafetySourceHealthIncident {
-					if stored.PendingMutationGeneration == targetMutation.Generation {
-						return
-					}
-					clearTargetActionPending(&stored)
-					if err := s.repo.UpsertTargetActionState(operationCtx, stored); err != nil {
-						log.Printf("[connection-health] clear stale unmanaged incident checkpoint failed target_id=%s err=%v", stored.TargetID, err)
-						return
-					}
-				}
+			continue
+		}
+		if targetVisible && targetStateEqual(target, currentStatus, currentWeight, stored.OriginalStatus, stored.OriginalWeight) {
+			if err := s.repo.DeleteTargetActionState(ctx, stored.UserID, stored.AdminAccountID, stored.TargetID); err != nil {
+				log.Printf("[connection-health] clear restored target action state failed target_id=%s err=%v", stored.TargetID, err)
 			}
-			currentStatus := normalizeTargetStatus(target.Platform, target.AccountStatus)
-			currentWeight := normalizedTargetWeight(target)
-			if stored.Conflict || (targetVisible && targetActionCheckpointConflicted(target, &stored, currentStatus, currentWeight)) {
-				stored.Conflict = true
-				clearTargetActionPending(&stored)
-				if err := s.repo.UpsertTargetActionState(operationCtx, stored); err != nil {
-					log.Printf("[connection-health] store unmanaged target conflict failed target_id=%s err=%v", stored.TargetID, err)
-				}
-				return
-			}
-			if targetVisible && targetStateEqual(target, currentStatus, currentWeight, stored.OriginalStatus, stored.OriginalWeight) {
-				if err := s.repo.DeleteTargetActionState(operationCtx, stored.UserID, stored.AdminAccountID, stored.TargetID); err != nil {
-					log.Printf("[connection-health] clear restored target action state failed target_id=%s err=%v", stored.TargetID, err)
-				}
-				return
-			}
-			stored.PendingStatus = stored.OriginalStatus
-			stored.PendingWeight = cloneIntPointer(stored.OriginalWeight)
-			stored.PendingSource = "normal"
-			stored.PendingEpoch = 0
-			stored.PendingActionKey = "target-status:" + stored.TargetID + ":" + stored.OriginalStatus
-			if target.Platform == string(upstream.PlatformSub2API) {
-				stored.PendingMutationGeneration = targetMutation.Generation
-			} else {
-				stored.PendingMutationGeneration = 0
-			}
-			if err := s.repo.UpsertTargetActionState(operationCtx, stored); err != nil {
-				log.Printf("[connection-health] store unmanaged target restore intent failed target_id=%s err=%v", stored.TargetID, err)
-				return
-			}
-			if err := operationCtx.Err(); err != nil {
-				return
-			}
-			var action string
-			var actionErr error
-			if target.Platform == string(upstream.PlatformSub2API) {
-				action, actionErr = s.applyAutomaticTargetStateUnderMutation(
-					operationCtx, stored.UserID, stored.AdminAccountID, inventory.session, target,
-					stored.OriginalWeight, stored.OriginalStatus, stored.PendingMutationGeneration, targetMutation,
-				)
-			} else {
-				action, actionErr = s.applyAutomaticTargetState(
-					operationCtx, stored.UserID, stored.AdminAccountID, inventory.session, target,
-					stored.OriginalWeight, stored.OriginalStatus, stored.PendingMutationGeneration,
-				)
-			}
-			if actionErr != nil {
-				log.Printf("[connection-health] restore unmanaged target failed target_id=%s action=%s err=%v", stored.TargetID, action, actionErr)
-				return
-			}
-			if err := s.recordTargetEvent(operationCtx, stored.UserID, stored.AdminAccountID, target, "", "*", "policy_unmanaged_restore", "", "", nil, "", "", action, EventSourceScheduled); err != nil {
-				log.Printf("[connection-health] insert unmanaged target restore event failed target_id=%s err=%v", stored.TargetID, err)
-				return
-			}
-			if err := s.repo.DeleteTargetActionState(operationCtx, stored.UserID, stored.AdminAccountID, stored.TargetID); err != nil {
-				log.Printf("[connection-health] clear unmanaged target action state failed target_id=%s err=%v", stored.TargetID, err)
-			}
-		}()
+			continue
+		}
+		stored.PendingStatus = stored.OriginalStatus
+		stored.PendingWeight = cloneIntPointer(stored.OriginalWeight)
+		if err := s.repo.UpsertTargetActionState(ctx, stored); err != nil {
+			log.Printf("[connection-health] store unmanaged target restore intent failed target_id=%s err=%v", stored.TargetID, err)
+			continue
+		}
+		action, actionErr := s.dispatcher.ApplyTargetState(ctx, inventory.session, target, stored.OriginalWeight, stored.OriginalStatus)
+		if actionErr != nil {
+			log.Printf("[connection-health] restore unmanaged target failed target_id=%s action=%s err=%v", stored.TargetID, action, actionErr)
+			continue
+		}
+		if err := s.recordTargetEvent(ctx, stored.UserID, stored.AdminAccountID, target, "", "*", "policy_unmanaged_restore", "", "", nil, "", "", action, EventSourceScheduled); err != nil {
+			log.Printf("[connection-health] insert unmanaged target restore event failed target_id=%s err=%v", stored.TargetID, err)
+			continue
+		}
+		if err := s.repo.DeleteTargetActionState(ctx, stored.UserID, stored.AdminAccountID, stored.TargetID); err != nil {
+			log.Printf("[connection-health] clear unmanaged target action state failed target_id=%s err=%v", stored.TargetID, err)
+		}
 	}
-}
-
-func clearTargetActionPendingMetadata(stored *TargetActionState) {
-	if stored == nil {
-		return
-	}
-	stored.PendingMutationGeneration = 0
-	stored.PendingSource = ""
-	stored.PendingEpoch = 0
-	stored.PendingActionKey = ""
-}
-
-func clearTargetActionPending(stored *TargetActionState) {
-	if stored == nil {
-		return
-	}
-	stored.PendingStatus = ""
-	stored.PendingWeight = nil
-	clearTargetActionPendingMetadata(stored)
 }
 
 func hasRemoteActionModel(specs []probeModelSpec) bool {

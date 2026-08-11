@@ -28,8 +28,7 @@ type TransitionOutput struct {
 	TriggerRemoteRestore bool
 }
 
-// isHardFailure 分类：5xx、认证失败、模型不存在需要进入异常确认，
-// 但单次观测不能直接暂停账号或触发远程写入。
+// isHardFailure 分类：5xx、认证失败、模型不存在，无需累计失败次数即可直接暂停。
 func isHardFailure(result ResultKey) bool {
 	switch result {
 	case ResultServerError, ResultAuth, ResultModelNotFound:
@@ -39,11 +38,10 @@ func isHardFailure(result ResultKey) bool {
 	}
 }
 
-// isSoftFailure 分类：网络波动、响应无法解析会降低本地健康权重。
-// 429 是调度信号，在 Transition 中单独处理，不归入失败累计。
+// isSoftFailure 分类：网络波动、限流、响应无法解析，先降级观察，达到阈值才暂停。
 func isSoftFailure(result ResultKey) bool {
 	switch result {
-	case ResultNetworkFluctuation, ResultInvalidResponse:
+	case ResultNetworkFluctuation, ResultRateLimited, ResultInvalidResponse:
 		return true
 	default:
 		return false
@@ -72,8 +70,6 @@ func Transition(in TransitionInput) TransitionOutput {
 		return transitionOnSuccess(in, step)
 	case in.Result == ResultSlowResponse:
 		return transitionOnSlowResponse(in)
-	case in.Result == ResultRateLimited:
-		return transitionOnRateLimited(in)
 	case isHardFailure(in.Result):
 		return transitionOnHardFailure(in)
 	case isSoftFailure(in.Result):
@@ -108,37 +104,13 @@ func transitionOnSlowResponse(in TransitionInput) TransitionOutput {
 	return out
 }
 
-// Rate limiting is a scheduling signal, not evidence that the account is dead.
-// Keep the health state and failure counter unchanged so repeated 429 responses
-// cannot walk the legacy soft-failure path into suspension or remote disable.
-func transitionOnRateLimited(in TransitionInput) TransitionOutput {
-	return TransitionOutput{
-		NextState:            in.Current,
-		Weight:               in.CurrentWeight,
-		ConsecutiveFailures:  in.ConsecutiveFailures,
-		ConsecutiveSuccesses: 0,
-		CooldownUntil:        in.CooldownUntil,
-		ObservingUntil:       in.ObservingUntil,
-	}
-}
-
 func applyProbeOutcome(current ConnectionHealthState, outcome ProbeOutcome, policy Policy, now time.Time) (ConnectionHealthState, TransitionOutput) {
-	return applyProbeOutcomeWithConfirmation(current, outcome, policy, now, true)
-}
-
-func applyProbeOutcomeWithConfirmation(current ConnectionHealthState, outcome ProbeOutcome, policy Policy, now time.Time, requireConfirmation bool) (ConnectionHealthState, TransitionOutput) {
-	transitionInput := TransitionInput{
+	transitionOut := Transition(TransitionInput{
 		Current: current.State, CurrentWeight: current.CurrentWeight,
 		ConsecutiveFailures: current.ConsecutiveFailures, ConsecutiveSuccesses: current.ConsecutiveSuccesses,
 		CooldownUntil: current.CooldownUntil, ObservingUntil: current.ObservingUntil,
 		Now: now, Result: outcome.Result, Policy: policy,
-	}
-	transitionOut := Transition(transitionInput)
-	if requireConfirmation && (isHardFailure(outcome.Result) || isSoftFailure(outcome.Result)) {
-		transitionOut = transitionOnHardFailure(transitionInput)
-	} else if !requireConfirmation {
-		transitionOut = legacyTargetTransition(transitionInput)
-	}
+	})
 	if !policy.AutoDegradeEnabled {
 		transitionOut = TransitionOutput{
 			NextState: current.State, Weight: current.CurrentWeight,
@@ -154,16 +126,6 @@ func applyProbeOutcomeWithConfirmation(current ConnectionHealthState, outcome Pr
 	next.ConsecutiveSuccesses = transitionOut.ConsecutiveSuccesses
 	next.CooldownUntil = transitionOut.CooldownUntil
 	next.ObservingUntil = transitionOut.ObservingUntil
-	if outcome.Result == ResultRateLimited {
-		retryDelay := 30 * time.Second
-		if outcome.RetryAfterSeconds > 0 {
-			retryDelay = time.Duration(outcome.RetryAfterSeconds) * time.Second
-		}
-		retryAt := now.Add(retryDelay)
-		if next.CooldownUntil == nil || next.CooldownUntil.Before(retryAt) {
-			next.CooldownUntil = &retryAt
-		}
-	}
 	next.LastProbeAt = &now
 	latencyMs := outcome.LatencyMs
 	next.LastLatencyMs = &latencyMs
@@ -179,29 +141,6 @@ func applyProbeOutcomeWithConfirmation(current ConnectionHealthState, outcome Pr
 		next.LastErrorDetail = outcome.Detail
 	}
 	return next, transitionOut
-}
-
-func legacyTargetTransition(in TransitionInput) TransitionOutput {
-	if isHardFailure(in.Result) {
-		cooldownUntil := in.Now.Add(cooldownWindow(in.Policy))
-		return TransitionOutput{
-			NextState: StateSuspended, Weight: 0,
-			ConsecutiveFailures: in.ConsecutiveFailures + 1, ConsecutiveSuccesses: 0,
-			CooldownUntil: &cooldownUntil, TriggerRemoteDegrade: in.Current != StateSuspended,
-		}
-	}
-	if isSoftFailure(in.Result) && in.Current != StateHealthy && in.Current != StateSuspended {
-		failures := in.ConsecutiveFailures + 1
-		if failures >= failureThreshold(in.Policy) {
-			cooldownUntil := in.Now.Add(cooldownWindow(in.Policy))
-			return TransitionOutput{
-				NextState: StateSuspended, Weight: 0,
-				ConsecutiveFailures: failures, ConsecutiveSuccesses: 0,
-				CooldownUntil: &cooldownUntil, TriggerRemoteDegrade: true,
-			}
-		}
-	}
-	return Transition(in)
 }
 
 func stepPercent(p Policy) int {
@@ -299,10 +238,16 @@ func transitionOnSoftFailure(in TransitionInput, step int) TransitionOutput {
 		out.Weight = maxInt(0, 100-step)
 
 	case StateDegraded, StateObserving, StateRecovering:
-		// 普通传输波动可以降低本地健康权重，破坏性动作则由
-		// 持久化确认、熔断和存活底线共同裁决，本地阈值不得触发远程写。
-		out.NextState = StateDegraded
-		out.Weight = maxInt(1, in.CurrentWeight-step)
+		if out.ConsecutiveFailures >= failureThreshold(in.Policy) {
+			cooldownUntil := in.Now.Add(cooldownWindow(in.Policy))
+			out.NextState = StateSuspended
+			out.Weight = 0
+			out.CooldownUntil = &cooldownUntil
+			out.TriggerRemoteDegrade = true
+		} else {
+			out.NextState = StateDegraded
+			out.Weight = maxInt(0, in.CurrentWeight-step)
+		}
 
 	case StateSuspended:
 		cooldownUntil := in.Now.Add(cooldownWindow(in.Policy))
@@ -319,17 +264,14 @@ func transitionOnSoftFailure(in TransitionInput, step int) TransitionOutput {
 }
 
 func transitionOnHardFailure(in TransitionInput) TransitionOutput {
-	// Hard failures are observations until the persistent confirmation worker
-	// completes floor reservation, remote mutation, and readback. Keeping the
-	// state/weight unchanged also prevents the normal priority loop from turning
-	// a single unconfirmed response into an upstream priority mutation.
+	cooldownUntil := in.Now.Add(cooldownWindow(in.Policy))
 	return TransitionOutput{
-		NextState:            in.Current,
-		Weight:               in.CurrentWeight,
+		NextState:            StateSuspended,
+		Weight:               0,
 		ConsecutiveFailures:  in.ConsecutiveFailures + 1,
 		ConsecutiveSuccesses: 0,
-		CooldownUntil:        in.CooldownUntil,
-		ObservingUntil:       in.ObservingUntil,
+		CooldownUntil:        &cooldownUntil,
+		TriggerRemoteDegrade: in.Current != StateSuspended,
 	}
 }
 

@@ -2,14 +2,8 @@ package connection_health
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"errors"
 	"log"
 	"sort"
-	"strconv"
-	"strings"
-	"time"
 
 	"transithub/backend/internal/modules/upstream"
 )
@@ -18,87 +12,6 @@ import (
 // 平台更新 New API channel 或 Sub2API account 的 priority，并由 upstream 模块保证字段级写入安全。
 type TargetPriorityActioner interface {
 	UpdateAdminTargetPriority(session upstream.Session, targetID string, priority int) error
-}
-
-type TargetPriorityContextActioner interface {
-	UpdateAdminTargetPriorityContext(ctx context.Context, session upstream.Session, targetID string, priority int) error
-}
-
-type TargetPriorityPreparedContextActioner interface {
-	UpdateAdminTargetPriorityPreparedContext(ctx context.Context, session upstream.Session, targetID string, priority int, beforeWrite func() error) error
-}
-
-func (s *Service) updateAdminTargetPriority(ctx context.Context, session upstream.Session, targetID string, priority int) error {
-	return s.updateAdminTargetPriorityWithBeforeWrite(ctx, session, targetID, priority, nil)
-}
-
-func (s *Service) updateAdminTargetPriorityWithBeforeWrite(ctx context.Context, session upstream.Session, targetID string, priority int, beforeWrite func() error) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if actioner, ok := s.priorityActions.(TargetPriorityPreparedContextActioner); ok {
-		return actioner.UpdateAdminTargetPriorityPreparedContext(ctx, session, targetID, priority, beforeWrite)
-	}
-	if beforeWrite != nil {
-		if err := beforeWrite(); err != nil {
-			return err
-		}
-	}
-	if actioner, ok := s.priorityActions.(TargetPriorityContextActioner); ok {
-		return actioner.UpdateAdminTargetPriorityContext(ctx, session, targetID, priority)
-	}
-	return s.priorityActions.UpdateAdminTargetPriority(session, targetID, priority)
-}
-
-func clearPriorityPendingMetadata(state *PrioritySyncState) {
-	if state == nil {
-		return
-	}
-	state.PendingMutationGeneration = 0
-	state.PendingSource = ""
-	state.PendingEpoch = 0
-	state.PendingActionKey = ""
-}
-
-func clearPriorityPending(state *PrioritySyncState) {
-	if state == nil {
-		return
-	}
-	state.PendingPriority = nil
-	clearPriorityPendingMetadata(state)
-}
-
-func (s *Service) clearStalePriorityPending(ctx context.Context, session upstream.Session, state *PrioritySyncState, accountID string) (bool, error) {
-	if state == nil || state.PendingPriority == nil || session.Platform != upstream.PlatformSub2API {
-		return false, nil
-	}
-	if state.PendingSource == SafetySourceHealthIncident {
-		// Incident intent is owned by the abnormal queue/epoch worker. The normal
-		// one-second priority loop must not consume or revive it.
-		return true, nil
-	}
-	if state.PendingSource == "" {
-		// Rows created before mutation generations existed have no ownership
-		// metadata. Never consume them directly after upgrade; rebuild from the
-		// current inventory and generation in the normal evaluation below.
-		clearPriorityPending(state)
-		if err := s.repo.UpsertPrioritySyncState(ctx, *state); err != nil {
-			return false, err
-		}
-		return false, nil
-	}
-	generation, err := s.mutationGeneration(ctx, state.UserID, state.AdminAccountID, accountID)
-	if err != nil {
-		return false, err
-	}
-	if generation == state.PendingMutationGeneration {
-		return false, nil
-	}
-	clearPriorityPending(state)
-	if err := s.repo.UpsertPrioritySyncState(ctx, *state); err != nil {
-		return false, err
-	}
-	return false, nil
 }
 
 type priorityTargetInventory struct {
@@ -120,159 +33,6 @@ type healthPriorityCandidate struct {
 	expectedModels int
 	healthBand     int
 	latencyMs      *int
-}
-
-const (
-	priorityActionCombined  = "combined"
-	priorityActionProbe     = "probe"
-	priorityActionPolicy    = "policy_change"
-	priorityActionReconcile = "reconcile"
-	priorityActionWriteback = "writeback"
-)
-
-type prioritySyncRunMode struct {
-	source              string
-	reconcile           bool
-	write               bool
-	skipWorkspaceLease  bool
-	workspaceFilter     map[string]struct{}
-	workspaceIdentities map[string][2]string
-	persistenceContext  context.Context
-	snapshotGeneration  uint64
-}
-
-type priorityWriteBatch struct {
-	signature          string
-	snapshotGeneration uint64
-	spreadSeconds      int
-	targetIDs          []string
-	candidateTargetIDs []string
-	nextIndex          int
-	batchSize          int
-	deferredTargets    int
-	nextSlotAt         time.Time
-}
-
-type priorityWriteBatchSlot struct {
-	signature          string
-	snapshotGeneration uint64
-	start              int
-	end                int
-	targetIDs          []string
-	remainingAfter     int
-	deferredTargets    int
-	targetCount        int
-	final              bool
-}
-
-func (s *Service) preparePriorityWriteBatch(
-	workspaceKey string,
-	signature string,
-	snapshotGeneration uint64,
-	spreadSeconds int,
-	targetIDs []string,
-	now time.Time,
-	candidateTargetIDValues ...[]string,
-) (priorityWriteBatchSlot, bool, bool) {
-	s.priorityBatchMu.Lock()
-	defer s.priorityBatchMu.Unlock()
-	if s.priorityBatches == nil {
-		s.priorityBatches = make(map[string]priorityWriteBatch)
-	}
-	if len(targetIDs) == 0 {
-		delete(s.priorityBatches, workspaceKey)
-		return priorityWriteBatchSlot{signature: signature, snapshotGeneration: snapshotGeneration, final: true}, false, false
-	}
-	spreadSeconds = maxInt(1, minInt(10, spreadSeconds))
-	candidateTargetIDs := targetIDs
-	if len(candidateTargetIDValues) > 0 {
-		candidateTargetIDs = candidateTargetIDValues[0]
-	}
-	batch, exists := s.priorityBatches[workspaceKey]
-	if exists && (batch.signature != signature || batch.spreadSeconds != spreadSeconds || !samePriorityTargetIDs(batch.candidateTargetIDs, candidateTargetIDs)) {
-		delete(s.priorityBatches, workspaceKey)
-		if batch.nextIndex > 0 && batch.snapshotGeneration == snapshotGeneration {
-			return priorityWriteBatchSlot{}, false, true
-		}
-		exists = false
-	}
-	if exists && batch.snapshotGeneration != snapshotGeneration {
-		delete(s.priorityBatches, workspaceKey)
-		exists = false
-	}
-	if !exists {
-		batch = priorityWriteBatch{
-			signature: signature, snapshotGeneration: snapshotGeneration, spreadSeconds: spreadSeconds,
-			targetIDs: append([]string(nil), targetIDs...), candidateTargetIDs: append([]string(nil), candidateTargetIDs...),
-			batchSize:       (len(targetIDs) + spreadSeconds - 1) / spreadSeconds,
-			deferredTargets: len(candidateTargetIDs) - len(targetIDs), nextSlotAt: now,
-		}
-		s.priorityBatches[workspaceKey] = batch
-	}
-	if now.Before(batch.nextSlotAt) {
-		return priorityWriteBatchSlot{
-			signature: batch.signature, snapshotGeneration: batch.snapshotGeneration,
-			remainingAfter:  len(batch.targetIDs) - batch.nextIndex,
-			deferredTargets: batch.deferredTargets, targetCount: len(batch.targetIDs),
-		}, true, false
-	}
-	start := batch.nextIndex
-	end := minInt(len(batch.targetIDs), start+batch.batchSize)
-	return priorityWriteBatchSlot{
-		signature: batch.signature, snapshotGeneration: batch.snapshotGeneration,
-		start: start, end: end, targetIDs: append([]string(nil), batch.targetIDs[start:end]...),
-		remainingAfter: len(batch.targetIDs) - end, deferredTargets: batch.deferredTargets,
-		targetCount: len(batch.targetIDs), final: end == len(batch.targetIDs),
-	}, false, false
-}
-
-func samePriorityTargetIDs(left []string, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
-}
-
-func (s *Service) commitPriorityWriteBatchSlot(workspaceKey string, slot priorityWriteBatchSlot, now time.Time) bool {
-	s.priorityBatchMu.Lock()
-	defer s.priorityBatchMu.Unlock()
-	batch, exists := s.priorityBatches[workspaceKey]
-	if !exists || batch.signature != slot.signature || batch.snapshotGeneration != slot.snapshotGeneration || batch.nextIndex != slot.start {
-		return false
-	}
-	batch.nextIndex = slot.end
-	if slot.final {
-		delete(s.priorityBatches, workspaceKey)
-		return true
-	}
-	batch.nextSlotAt = now.Add(time.Second)
-	s.priorityBatches[workspaceKey] = batch
-	return true
-}
-
-func (s *Service) clearPriorityWriteBatch(workspaceKey string) {
-	s.priorityBatchMu.Lock()
-	defer s.priorityBatchMu.Unlock()
-	delete(s.priorityBatches, workspaceKey)
-}
-
-func (s *Service) priorityWriteBatchInProgress(workspaceKey string, signature string, snapshotGeneration uint64) bool {
-	s.priorityBatchMu.Lock()
-	defer s.priorityBatchMu.Unlock()
-	batch, exists := s.priorityBatches[workspaceKey]
-	return exists && batch.signature == signature && batch.snapshotGeneration == snapshotGeneration && batch.nextIndex > 0
-}
-
-func (s *Service) priorityWriteBatchSignatureInProgress(workspaceKey string, signature string) bool {
-	s.priorityBatchMu.Lock()
-	defer s.priorityBatchMu.Unlock()
-	batch, exists := s.priorityBatches[workspaceKey]
-	return exists && batch.signature == signature && batch.nextIndex > 0
 }
 
 // syncMultiplierPriorities 在每轮探活前同步上游优先级。普通倍率策略仍然「健康优先、倍率次之」，
@@ -336,90 +96,6 @@ func (s *Service) syncCurrentWorkspacePrioritiesLocked(ctx context.Context, user
 	s.syncMultiplierPrioritiesWithCacheLocked(ctx, enabled, assignments, groupAssignments, exclusions, states, make(adminInventoryCache))
 }
 
-// evaluateCurrentWorkspacePriorities records the newest local ordering without reading or
-// writing upstream inventory. It is used after probes and policy changes; the independent
-// reconcile and writeback loops handle those remote actions.
-func (s *Service) evaluateCurrentWorkspacePriorities(ctx context.Context, userID string, adminAccountID string, source string) {
-	if s.priorityActions == nil || s.platformGroups == nil {
-		return
-	}
-	s.ensureSchedulerSignals()
-	release, err := s.repo.AcquirePrioritySyncLease(ctx, userID, adminAccountID)
-	if err != nil {
-		log.Printf("[connection-health] priority evaluation acquire workspace lease failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
-		return
-	}
-	defer release()
-
-	policies, err := s.repo.ListPolicies(ctx, userID, adminAccountID)
-	if err != nil {
-		log.Printf("[connection-health] priority evaluation list policies failed: %v", err)
-		return
-	}
-	assignments, err := s.repo.ListPolicyAssignmentsByWorkspace(ctx, userID, adminAccountID)
-	if err != nil {
-		log.Printf("[connection-health] priority evaluation list target assignments failed: %v", err)
-		return
-	}
-	groupAssignments, err := s.repo.ListGroupPolicyAssignmentsByWorkspace(ctx, userID, adminAccountID)
-	if err != nil {
-		log.Printf("[connection-health] priority evaluation list group assignments failed: %v", err)
-		return
-	}
-	assignedPolicies := assignedPoliciesForWorkspace(policies, assignments, groupAssignments, userID, adminAccountID)
-	exclusions, err := s.repo.ListGroupTargetExclusionsByWorkspace(ctx, userID, adminAccountID)
-	if err != nil {
-		log.Printf("[connection-health] priority evaluation list exclusions failed: %v", err)
-		return
-	}
-	states, err := s.repo.ListPrioritySyncStates(ctx, userID, adminAccountID)
-	if err != nil {
-		log.Printf("[connection-health] priority evaluation list checkpoints failed: %v", err)
-		return
-	}
-	key := priorityWorkspaceKey(userID, adminAccountID)
-	identities := map[string][2]string{key: {userID, adminAccountID}}
-	cache := s.inventoryCacheForIdentities(identities)
-	if cache[key].err != nil {
-		s.recordInventorySnapshotMissLocked(ctx, userID, adminAccountID, assignedPolicies, source)
-		signalScheduler(s.priorityReconcileWake)
-		return
-	}
-	mode := prioritySyncRunMode{
-		source: source, skipWorkspaceLease: true, workspaceFilter: map[string]struct{}{key: {}},
-	}
-	s.syncMultiplierPrioritiesWithCacheRunMode(ctx, assignedPolicies, assignments, groupAssignments, exclusions, states, cache, mode)
-	signalScheduler(s.priorityWritebackWake)
-}
-
-func (s *Service) recordInventorySnapshotMissLocked(ctx context.Context, userID string, adminAccountID string, policies []Policy, source string) {
-	state, err := s.repo.GetPriorityWorkspaceSyncState(ctx, userID, adminAccountID)
-	if err != nil {
-		log.Printf("[connection-health] priority evaluation load workspace state failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
-		return
-	}
-	if state == nil {
-		state = &PriorityWorkspaceSyncState{UserID: userID, AdminAccountID: adminAccountID}
-	}
-	wasUnknown := state.InventoryStatus == "unknown"
-	applyPriorityPresetToState(state, prioritySyncPresetForPolicies(policies))
-	state.LastActionSource = source
-	state.PolicyVersion = priorityPolicyVersion(policies)
-	state.InventoryStatus = "unknown"
-	state.LastDecision = "suppressed"
-	state.LastSuppressionReason = "inventory_snapshot_unavailable"
-	state.SnapshotMissCount++
-	now := s.prioritySyncNow()
-	if !wasUnknown || state.NextReconcileAt == nil || !now.Before(*state.NextReconcileAt) {
-		state.NextReconcileAt = &now
-	}
-	if source == priorityActionProbe {
-		state.ProbeEvaluationCount++
-	}
-	updatePriorityPendingAge(state, now)
-	s.persistPriorityWorkspaceSyncState(ctx, state)
-}
-
 func (s *Service) syncMultiplierPrioritiesWithCache(
 	ctx context.Context,
 	policies []Policy,
@@ -454,21 +130,6 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 	inventoryCache adminInventoryCache,
 	acquireWorkspaceLease bool,
 ) {
-	s.syncMultiplierPrioritiesWithCacheRunMode(ctx, policies, targetAssignments, groupAssignments, exclusions, allSyncStates, inventoryCache, prioritySyncRunMode{
-		source: priorityActionCombined, reconcile: true, write: true, skipWorkspaceLease: !acquireWorkspaceLease,
-	})
-}
-
-func (s *Service) syncMultiplierPrioritiesWithCacheRunMode(
-	ctx context.Context,
-	policies []Policy,
-	targetAssignments []PolicyAssignment,
-	groupAssignments []GroupPolicyAssignment,
-	exclusions []GroupTargetExclusion,
-	allSyncStates []PrioritySyncState,
-	inventoryCache adminInventoryCache,
-	mode prioritySyncRunMode,
-) {
 	if s.priorityActions == nil || s.platformGroups == nil {
 		return
 	}
@@ -477,9 +138,6 @@ func (s *Service) syncMultiplierPrioritiesWithCacheRunMode(
 	assignedGroups := assignedEnabledPoliciesByGroup(policies, groupAssignments)
 	excluded := groupTargetExclusionIndex(exclusions)
 	workspaceIdentity := make(map[string][2]string)
-	for key, identity := range mode.workspaceIdentities {
-		workspaceIdentity[key] = identity
-	}
 	for _, state := range allSyncStates {
 		key := state.UserID + "|" + state.AdminAccountID
 		workspaceIdentity[key] = [2]string{state.UserID, state.AdminAccountID}
@@ -503,15 +161,10 @@ func (s *Service) syncMultiplierPrioritiesWithCacheRunMode(
 	}
 	sort.Strings(workspaceKeys)
 	for _, workspaceKey := range workspaceKeys {
-		if mode.workspaceFilter != nil {
-			if _, selected := mode.workspaceFilter[workspaceKey]; !selected {
-				continue
-			}
-		}
 		identity := workspaceIdentity[workspaceKey]
 		userID, adminAccountID := identity[0], identity[1]
 		release := func() {}
-		if !mode.skipWorkspaceLease {
+		if acquireWorkspaceLease {
 			var err error
 			release, err = s.repo.AcquirePrioritySyncLease(ctx, userID, adminAccountID)
 			if err != nil {
@@ -523,25 +176,11 @@ func (s *Service) syncMultiplierPrioritiesWithCacheRunMode(
 			defer release()
 			inventorySnapshot, err := s.loadAdminInventory(ctx, userID, adminAccountID, inventoryCache)
 			if err != nil {
-				if err == errInventorySnapshotUnavailable && mode.source != priorityActionCombined {
-					s.recordInventorySnapshotMissLocked(ctx, userID, adminAccountID, assignedPoliciesForWorkspace(policies, targetAssignments, groupAssignments, userID, adminAccountID), mode.source)
-					signalScheduler(s.priorityReconcileWake)
-					return
-				}
 				log.Printf("[connection-health] priority sync load admin inventory failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 				return
 			}
-			operationCtx, releaseSnapshot, operationErr := s.inventoryCacheOperationContext(ctx, userID, adminAccountID, inventoryCache)
-			if operationErr != nil {
-				if mode.source != priorityActionCombined {
-					s.recordInventorySnapshotMissLocked(ctx, userID, adminAccountID, assignedPoliciesForWorkspace(policies, targetAssignments, groupAssignments, userID, adminAccountID), mode.source)
-					signalScheduler(s.priorityReconcileWake)
-				}
-				return
-			}
-			defer releaseSnapshot()
 			session := inventorySnapshot.session
-			settings, err := s.repo.ListGroupProbeSortSettings(operationCtx, userID, adminAccountID)
+			settings, err := s.repo.ListGroupProbeSortSettings(ctx, userID, adminAccountID)
 			if err != nil {
 				log.Printf("[connection-health] priority sync list fallback multipliers failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 				return
@@ -550,10 +189,7 @@ func (s *Service) syncMultiplierPrioritiesWithCacheRunMode(
 			for _, setting := range settings {
 				fallbackByGroup[setting.AdminGroupID] = cloneFloat64Pointer(setting.FallbackMultiplier)
 			}
-			multiplierLookup := inventorySnapshot.multiplierLookup
-			if !inventorySnapshot.multiplierLookupLoaded {
-				multiplierLookup = s.upstreamMultiplierResolutionsByAdminAccount(operationCtx, userID, adminAccountID, string(session.Platform))
-			}
+			multiplierLookup := s.upstreamMultiplierResolutionsByAdminAccount(ctx, userID, adminAccountID, string(session.Platform))
 			inventory, inventoryComplete, err := s.priorityInventoryForSnapshot(
 				inventorySnapshot, adminAccountID, assignedTargets[workspaceKey], assignedGroups[workspaceKey], excluded[workspaceKey],
 				fallbackByGroup, multiplierLookup,
@@ -562,7 +198,7 @@ func (s *Service) syncMultiplierPrioritiesWithCacheRunMode(
 				log.Printf("[connection-health] priority sync inventory failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 				return
 			}
-			states, err := s.repo.ListStatesByWorkspace(operationCtx, userID, adminAccountID)
+			states, err := s.repo.ListStatesByWorkspace(ctx, userID, adminAccountID)
 			if err != nil {
 				log.Printf("[connection-health] priority sync list health states failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 				return
@@ -570,16 +206,12 @@ func (s *Service) syncMultiplierPrioritiesWithCacheRunMode(
 			// Checkpoints must be read after acquiring the same workspace lease that covers
 			// inventory reads and remote writes. A pre-lease snapshot can be stale even when
 			// the write phase itself is serialized.
-			syncStates, err := s.repo.ListPrioritySyncStates(operationCtx, userID, adminAccountID)
+			syncStates, err := s.repo.ListPrioritySyncStates(ctx, userID, adminAccountID)
 			if err != nil {
 				log.Printf("[connection-health] priority sync list checkpoints failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 				return
 			}
-			workspaceMode := mode
-			if entry, ok := inventoryCache[workspaceKey]; ok {
-				workspaceMode.snapshotGeneration = entry.snapshotGeneration
-			}
-			s.syncWorkspacePrioritiesRunMode(operationCtx, session, userID, adminAccountID, inventory, inventoryComplete, states, syncStates, workspaceMode)
+			s.syncWorkspacePriorities(ctx, session, userID, adminAccountID, inventory, inventoryComplete, states, syncStates)
 		}()
 	}
 }
@@ -647,43 +279,6 @@ func (s *Service) priorityInventoryForSnapshot(
 	return inventory, inventoryComplete, nil
 }
 
-type priorityWriteResult struct {
-	attempts              int
-	successes             int
-	failures              int
-	drifts                int
-	incidentHeld          int
-	remoteMutation        bool
-	mutationPersistFailed bool
-	reconcileRequired     bool
-	complete              bool
-}
-
-type priorityDriftObservation struct {
-	active int
-	new    int
-}
-
-type priorityWorkspacePlan struct {
-	signature                   string
-	preset                      PrioritySyncPreset
-	managed                     map[string]*priorityTargetInventory
-	desiredPriorityByTarget     map[string]int
-	effectiveMultiplierByTarget map[string]float64
-	orderedManagedTargetIDs     []string
-	missingSortTargets          map[string]struct{}
-	missingPriorityTargets      map[string]struct{}
-	missingSortInput            bool
-	missingPriorityInput        bool
-	inventoryComplete           bool
-	policyVersion               string
-}
-
-const priorityWorkspaceSignatureVersion = "desired-priority-v1"
-
-// syncWorkspacePriorities adds the B-phase gate around the existing per-target checkpoint
-// writer. The signature includes each target's desired priority, but excludes raw latency and
-// other observations that do not change the value written upstream.
 func (s *Service) syncWorkspacePriorities(
 	ctx context.Context,
 	session upstream.Session,
@@ -694,503 +289,26 @@ func (s *Service) syncWorkspacePriorities(
 	healthStates []ConnectionHealthState,
 	syncStates []PrioritySyncState,
 ) {
-	s.syncWorkspacePrioritiesRunMode(ctx, session, userID, adminAccountID, inventory, inventoryComplete, healthStates, syncStates, prioritySyncRunMode{
-		source: priorityActionCombined, reconcile: true, write: true,
-	})
-}
-
-func (s *Service) syncWorkspacePrioritiesRunMode(
-	ctx context.Context,
-	session upstream.Session,
-	userID string,
-	adminAccountID string,
-	inventory map[string]*priorityTargetInventory,
-	inventoryComplete bool,
-	healthStates []ConnectionHealthState,
-	syncStates []PrioritySyncState,
-	mode prioritySyncRunMode,
-) {
-	workspaceKey := priorityWorkspaceKey(userID, adminAccountID)
-	invalidateAfterPersist := false
-	defer func() {
-		if invalidateAfterPersist {
-			s.invalidateAdminInventorySnapshot(userID, adminAccountID)
-			signalScheduler(s.priorityReconcileWake)
-		}
-	}()
-	plan := buildPriorityWorkspacePlan(session, inventory, inventoryComplete, healthStates)
-	if session.Platform == upstream.PlatformSub2API && !plan.missingPriorityInput {
-		for _, stored := range syncStates {
-			if _, stillManaged := plan.managed[stored.TargetID]; stillManaged {
-				continue
-			}
-			item := inventory[stored.TargetID]
-			if item != nil && !item.priorityPresent {
-				plan.missingPriorityInput = true
-				plan.missingPriorityTargets[stored.TargetID] = struct{}{}
-				break
-			}
-		}
-	}
-	state, err := s.repo.GetPriorityWorkspaceSyncState(ctx, userID, adminAccountID)
-	if err != nil {
-		log.Printf("[connection-health] priority sync load workspace state failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
-		return
-	}
-	if state == nil {
-		state = &PriorityWorkspaceSyncState{UserID: userID, AdminAccountID: adminAccountID}
-	}
-	persistenceCtx := ctx
-	if mode.persistenceContext != nil {
-		persistenceCtx = mode.persistenceContext
-	}
-	persistWorkspace := func() bool {
-		return s.persistPriorityWorkspaceSyncState(persistenceCtx, state)
-	}
-	now := s.prioritySyncNow()
-	if state.InventoryStatus == "unknown" && state.LastInventoryError == "priority_batch_in_progress" {
-		batchOwned := s.priorityWriteBatchInProgress(workspaceKey, plan.signature, mode.snapshotGeneration)
-		if mode.source == priorityActionWriteback && !batchOwned {
-			return
-		}
-		if mode.source != priorityActionWriteback {
-			if state.PendingSignature == plan.signature {
-				return
-			}
-			s.clearPriorityWriteBatch(workspaceKey)
-			state.PendingSignature = plan.signature
-			state.LastInventoryError = "priority_plan_replaced"
-			state.NextReconcileAt = &now
-			state.LastDecision = "pending"
-			state.LastSuppressionReason = "writeback_queued"
-			if persistWorkspace() {
-				invalidateAfterPersist = true
-			}
-			return
-		}
-	}
-	state.LastEvaluationAt = &now
-	state.EvaluationCount++
-	state.LastActionSource = mode.source
-	if plan.policyVersion != "" {
-		state.PolicyVersion = plan.policyVersion
-	}
-	state.SnapshotHitCount++
-	state.InventoryStatus = "ready"
-	if mode.source == priorityActionProbe {
-		state.ProbeEvaluationCount++
-	}
-	applyPriorityPresetToState(state, plan.preset)
-	pendingOverdue := priorityPendingOverdue(*state, plan.preset, now)
-
-	if !plan.inventoryComplete {
-		state.InventoryStatus = "unknown"
-		state.LastInventoryError = "inventory_incomplete"
-		state.LastDecision = "suppressed"
-		state.LastSuppressionReason = "inventory_incomplete"
-		state.LastError = priorityPendingError(pendingOverdue)
-		persistWorkspace()
-		return
-	}
-	if plan.missingSortInput && len(plan.managed) == 0 {
-		state.LastDecision = "suppressed"
-		state.LastSuppressionReason = "sort_input_unavailable"
-		state.LastError = priorityPendingError(pendingOverdue)
-		persistWorkspace()
-		return
-	}
-	if plan.missingPriorityInput && len(plan.managed) == 0 {
-		state.LastDecision = "suppressed"
-		state.LastSuppressionReason = "priority_input_unavailable"
-		state.LastError = priorityPendingError(pendingOverdue)
-		persistWorkspace()
-		return
-	}
-
-	drift := priorityDriftObservation{}
-	for _, stored := range syncStates {
-		if stored.Conflict {
-			drift.active++
-		}
-	}
-	if mode.reconcile {
-		drift = s.observePriorityDrift(ctx, session, inventory, plan.managed, syncStates)
-	}
-	if mode.reconcile && drift.new > 0 {
-		refreshed, refreshErr := s.repo.ListPrioritySyncStates(ctx, userID, adminAccountID)
-		if refreshErr != nil {
-			state.LastDecision = "failed"
-			state.LastSuppressionReason = ""
-			state.LastError = "priority_checkpoint_read_failed"
-			persistWorkspace()
-			return
-		}
-		syncStates = refreshed
-	}
-	pendingTargetIDs, pendingTargetCount, urgentTargetCount := priorityPendingTargetIDs(session.Platform, plan, inventory, syncStates)
-	incidentHeldTargetCount := maxInt(0, pendingTargetCount-len(pendingTargetIDs))
-	state.PendingTargetCount = pendingTargetCount
-	pendingSignatureMatchedPlan := state.PendingSignature == plan.signature
-	writeFailurePending := priorityWriteFailurePending(*state)
-	if plan.signature == state.AppliedSignature && !priorityPlanHasUnsettledCheckpoints(session.Platform, plan, syncStates) {
-		s.clearPriorityWriteBatch(priorityWorkspaceKey(userID, adminAccountID))
-		state.PendingTargetCount = 0
-		if state.PendingSignature != "" {
-			state.PendingSignature = ""
-			state.PendingSince = nil
-			state.LastDecision = "signature_reverted"
-			state.LastSuppressionReason = ""
-		} else if drift.active > 0 {
-			state.LastDecision = "drift_alert"
-			state.LastSuppressionReason = "manual_priority_drift"
-			state.LastDriftAt = &now
-			state.DriftCount += int64(drift.new)
-		} else {
-			state.LastDecision = "skipped"
-			state.LastSuppressionReason = "signature_unchanged"
-			state.UnchangedSkipCount++
-		}
-		state.LastError = ""
-		persistWorkspace()
-		return
-	}
-
-	if state.PendingSignature != plan.signature {
-		if state.PendingSignature != "" {
-			// Keep the original pending time: this is a write-rate window, not a
-			// debounce that can postpone the latest state forever.
-			state.SignatureChangeCount++
-		} else {
-			state.SignatureChangeCount++
-			timeCopy := now
-			state.PendingSince = &timeCopy
-		}
-		state.PendingSignature = plan.signature
-	}
-	if !mode.write {
-		state.LastDecision = "pending"
-		state.LastSuppressionReason = "writeback_queued"
-		state.LastError = priorityPendingError(priorityPendingOverdue(*state, plan.preset, now))
-		persistWorkspace()
-		return
-	}
-
-	batchInProgress := mode.source == priorityActionWriteback && s.priorityWriteBatchInProgress(workspaceKey, plan.signature, mode.snapshotGeneration)
-	priorityRoundAlreadyStarted := pendingSignatureMatchedPlan &&
-		(batchInProgress ||
-			state.LastInventoryError == "priority_write_unconfirmed" ||
-			state.LastInventoryError == "priority_batch_in_progress" ||
-			(state.LastDecision == "failed" && writeFailurePending))
-	waitUntil, waitingForWindow := priorityWriteWaitUntil(*state, plan.preset)
-	windowWaiting := !batchInProgress && waitingForWindow && now.Before(waitUntil)
-	if mode.source == priorityActionWriteback && !writeFailurePending {
-		windowWaiting = false
-	}
-	if windowWaiting && (mode.source == priorityActionWriteback || urgentTargetCount == 0) {
-		state.LastDecision = "pending"
-		state.LastSuppressionReason = "min_write_interval"
-		state.LastError = priorityPendingError(priorityPendingOverdue(*state, plan.preset, now))
-		state.WindowSuppressionCount++
-		persistWorkspace()
-		return
-	}
-	executableTargetIDs := pendingTargetIDs
-	windowHeldTargetCount := 0
-	if windowWaiting {
-		executableTargetIDs = pendingTargetIDs[:urgentTargetCount]
-		windowHeldTargetCount = len(pendingTargetIDs) - urgentTargetCount
-	}
-	heldTargetCount := incidentHeldTargetCount + windowHeldTargetCount
-
-	pendingOverdue = priorityPendingOverdue(*state, plan.preset, now)
-	if pendingOverdue {
-		state.LastError = "priority_pending_overdue"
-	}
-	allowedTargetIDs := map[string]struct{}(nil)
-	batchSlot := priorityWriteBatchSlot{final: true}
-	batchMode := mode.source == priorityActionWriteback
-	if batchMode {
-		var waiting bool
-		var refreshRequired bool
-		batchSlot, waiting, refreshRequired = s.preparePriorityWriteBatch(
-			workspaceKey, plan.signature, mode.snapshotGeneration, plan.preset.WritebackSpreadSeconds,
-			executableTargetIDs, now, pendingTargetIDs,
-		)
-		windowHeldTargetCount = batchSlot.deferredTargets
-		heldTargetCount = incidentHeldTargetCount + windowHeldTargetCount
-		if refreshRequired {
-			state.InventoryStatus = "unknown"
-			state.LastInventoryError = "priority_plan_replaced"
-			nextReconcileAt := now
-			state.NextReconcileAt = &nextReconcileAt
-			state.LastDecision = "pending"
-			state.LastSuppressionReason = "writeback_queued"
-			if persistWorkspace() {
-				invalidateAfterPersist = true
-			}
-			return
-		}
-		if waiting {
-			state.PendingTargetCount = batchSlot.remainingAfter + heldTargetCount
-			state.LastDecision = "pending"
-			state.LastSuppressionReason = "writeback_spread"
-			state.LastError = priorityPendingError(pendingOverdue)
-			persistWorkspace()
-			return
-		}
-		if len(batchSlot.targetIDs) > 0 {
-			state.PendingTargetCount = len(batchSlot.targetIDs) + batchSlot.remainingAfter + heldTargetCount
-		}
-	} else if len(executableTargetIDs) != len(pendingTargetIDs) {
-		allowedTargetIDs = make(map[string]struct{}, len(executableTargetIDs))
-		for _, targetID := range executableTargetIDs {
-			allowedTargetIDs[targetID] = struct{}{}
-		}
-	}
-	confirmedNextReconcileAt := state.NextReconcileAt
-	if !batchMode || len(batchSlot.targetIDs) > 0 {
-		state.InventoryStatus = "unknown"
-		state.LastInventoryError = "priority_write_unconfirmed"
-		nextReconcileAt := now
-		state.NextReconcileAt = &nextReconcileAt
-		state.LastDecision = "pending"
-		state.LastSuppressionReason = "writeback_queued"
-		if session.Platform == upstream.PlatformSub2API && mode.source == priorityActionWriteback && batchSlot.start == 0 && batchSlot.targetCount > 0 && !priorityRoundAlreadyStarted {
-			state.LastWriteRoundTargetCount = batchSlot.targetCount
-		}
-		if !persistWorkspace() {
-			return
-		}
-	}
-	writeStartedAt := time.Now()
-	result := priorityWriteResult{complete: true}
-	if batchMode && len(batchSlot.targetIDs) > 0 {
-		result = s.applyWorkspacePrioritiesInOrder(ctx, persistenceCtx, session, userID, adminAccountID, inventory, plan, syncStates, batchSlot.targetIDs)
-	} else {
-		result = s.applyWorkspacePriorities(ctx, persistenceCtx, session, userID, adminAccountID, inventory, plan, syncStates, allowedTargetIDs)
-	}
-	if heldTargetCount > 0 {
-		result.complete = false
-	}
-	state.LastWriteDurationMs = time.Since(writeStartedAt).Milliseconds()
-	if result.attempts > 0 {
-		attemptedAt := now
-		state.LastWriteAttemptAt = &attemptedAt
-		state.WriteAttemptCount += int64(result.attempts)
-	}
-	state.WriteSuccessCount += int64(result.successes)
-	state.WriteFailureCount += int64(result.failures)
-	if result.reconcileRequired {
-		s.clearPriorityWriteBatch(workspaceKey)
-		state.InventoryStatus = "unknown"
-		state.LastInventoryError = "priority_snapshot_stale"
-		nextReconcileAt := now
-		state.NextReconcileAt = &nextReconcileAt
-		state.LastDecision = "pending"
-		state.LastSuppressionReason = "inventory_unknown"
-		if persistWorkspace() {
-			invalidateAfterPersist = true
-		}
-		return
-	}
-	if !result.remoteMutation {
-		state.InventoryStatus = "ready"
-		state.LastInventoryError = ""
-	}
-	if batchMode && len(batchSlot.targetIDs) > 0 {
-		if !s.commitPriorityWriteBatchSlot(workspaceKey, batchSlot, now) {
-			result.failures++
-			result.complete = false
-			state.InventoryStatus = "unknown"
-			state.LastInventoryError = "priority_batch_replaced"
-		} else {
-			// A failed target has already left this in-memory slot, but its normal
-			// checkpoint remains pending for the next authoritative reconcile.
-			state.PendingTargetCount = batchSlot.remainingAfter + heldTargetCount + result.failures
-		}
-	}
-	if result.drifts > 0 {
-		state.LastDriftAt = &now
-		state.DriftCount += int64(drift.new)
-	}
-	if result.attempts > 0 && result.failures == 0 && !result.mutationPersistFailed {
-		succeededAt := now
-		state.LastWriteSuccessAt = &succeededAt
-	}
-	persistAfterWrite := func() {
-		workspacePersisted := persistWorkspace()
-		if result.remoteMutation && !result.mutationPersistFailed && workspacePersisted && mode.source != priorityActionCombined {
-			invalidateAfterPersist = true
-		}
-	}
-	if batchMode && !batchSlot.final && result.failures == 0 && !result.mutationPersistFailed {
-		state.InventoryStatus = "unknown"
-		state.LastInventoryError = "priority_batch_in_progress"
-		state.NextReconcileAt = confirmedNextReconcileAt
-		state.LastDecision = "pending"
-		state.LastSuppressionReason = "writeback_spread"
-		state.LastError = priorityPendingError(pendingOverdue)
-		persistWorkspace()
-		return
-	}
-	if batchMode && (result.failures > 0 || result.mutationPersistFailed) {
-		s.clearPriorityWriteBatch(workspaceKey)
-	}
-	if heldTargetCount > 0 && result.failures == 0 {
-		state.LastDecision = "pending"
-		if windowHeldTargetCount > 0 {
-			state.LastSuppressionReason = "min_write_interval"
-		} else {
-			state.LastSuppressionReason = "writeback_queued"
-		}
-		state.LastError = priorityPendingError(pendingOverdue)
-		persistAfterWrite()
-		return
-	}
-	if !result.complete || result.failures > 0 {
-		state.LastDecision = "failed"
-		if pendingOverdue {
-			state.LastSuppressionReason = "priority_pending_overdue"
-		} else if result.drifts > 0 {
-			state.LastSuppressionReason = "manual_priority_drift"
-		} else {
-			state.LastSuppressionReason = ""
-		}
-		state.LastError = "priority_write_failed"
-		persistAfterWrite()
-		return
-	}
-	if result.drifts > 0 {
-		state.LastDecision = "drift_alert"
-		state.LastSuppressionReason = "manual_priority_drift"
-		if !pendingOverdue {
-			state.LastError = ""
-		}
-		state.AppliedSignature = plan.signature
-		state.PendingSignature = ""
-		state.PendingSince = nil
-		persistAfterWrite()
-		return
-	}
-
-	state.AppliedSignature = plan.signature
-	state.PendingSignature = ""
-	state.PendingSince = nil
-	if pendingOverdue {
-		state.LastSuppressionReason = "priority_pending_overdue"
-	} else {
-		state.LastSuppressionReason = ""
-	}
-	state.LastError = ""
-	if result.attempts == 0 {
-		state.LastDecision = "observed_applied"
-	} else {
-		state.LastDecision = "applied"
-	}
-	persistAfterWrite()
-}
-
-func (s *Service) prioritySyncNow() time.Time {
-	if s.now != nil {
-		return s.now().UTC()
-	}
-	return time.Now().UTC()
-}
-
-func (s *Service) persistPriorityWorkspaceSyncState(ctx context.Context, state *PriorityWorkspaceSyncState) bool {
-	updatePriorityPendingAge(state, s.prioritySyncNow())
-	if err := s.repo.UpsertPriorityWorkspaceSyncState(ctx, *state); err != nil {
-		log.Printf("[connection-health] priority sync save workspace state failed user_id=%s admin_account_id=%s err=%v", state.UserID, state.AdminAccountID, err)
-		return false
-	}
-	return true
-}
-
-func updatePriorityPendingAge(state *PriorityWorkspaceSyncState, now time.Time) {
-	state.PendingAgeSeconds = 0
-	if state.PendingSince != nil && now.After(*state.PendingSince) {
-		state.PendingAgeSeconds = int64(now.Sub(*state.PendingSince) / time.Second)
-	}
-}
-
-func priorityWriteWaitUntil(state PriorityWorkspaceSyncState, preset PrioritySyncPreset) (time.Time, bool) {
-	if state.PendingSince == nil {
-		return time.Time{}, false
-	}
-	// The first managed write has no earlier write to protect, preserving the A-stage
-	// immediate convergence after a policy save. Every following write is rate-limited.
-	if state.LastWriteAttemptAt == nil && state.LastWriteSuccessAt == nil {
-		return time.Time{}, false
-	}
-	interval := time.Duration(preset.MinWriteIntervalSeconds) * time.Second
-	waitUntil := time.Time{}
-	if state.LastWriteAttemptAt != nil && state.LastWriteAttemptAt.Add(interval).After(waitUntil) {
-		waitUntil = state.LastWriteAttemptAt.Add(interval)
-	}
-	if state.LastWriteSuccessAt != nil && state.LastWriteSuccessAt.Add(interval).After(waitUntil) {
-		waitUntil = state.LastWriteSuccessAt.Add(interval)
-	}
-	return waitUntil, true
-}
-
-func priorityWriteFailurePending(state PriorityWorkspaceSyncState) bool {
-	if state.LastWriteAttemptAt == nil {
-		return false
-	}
-	return state.LastWriteSuccessAt == nil || state.LastWriteAttemptAt.After(*state.LastWriteSuccessAt)
-}
-
-func priorityPendingOverdue(state PriorityWorkspaceSyncState, preset PrioritySyncPreset, now time.Time) bool {
-	return state.PendingSince != nil && now.Sub(*state.PendingSince) > time.Duration(preset.MaxPendingAgeSeconds)*time.Second
-}
-
-func priorityPendingError(overdue bool) string {
-	if overdue {
-		return "priority_pending_overdue"
-	}
-	return ""
-}
-
-func buildPriorityWorkspacePlan(
-	session upstream.Session,
-	inventory map[string]*priorityTargetInventory,
-	inventoryComplete bool,
-	healthStates []ConnectionHealthState,
-) priorityWorkspacePlan {
 	statesByTarget := make(map[string][]ConnectionHealthState)
 	for _, state := range healthStates {
 		if _, isTarget := parseTargetID(state.ConnectionID); isTarget {
 			statesByTarget[state.ConnectionID] = append(statesByTarget[state.ConnectionID], state)
 		}
 	}
+
 	managed := make(map[string]*priorityTargetInventory)
-	missingSortInput := false
-	missingPriorityInput := false
-	missingSortTargets := make(map[string]struct{})
-	missingPriorityTargets := make(map[string]struct{})
+	missingMultiplier := make(map[string]struct{})
 	effectiveMultiplierByTarget := make(map[string]float64)
-	desiredPriorityByTarget := make(map[string]int)
+	desiredByTarget := make(map[string]int)
 	multiplierOnlyTargets := make(map[string]float64)
 	healthCandidates := make([]healthPriorityCandidate, 0)
-	allPoliciesByID := make(map[string]Policy)
 	for targetID, item := range inventory {
 		if !hasMultiplierPriorityPolicy(item.policies) {
 			continue
 		}
-		for _, policy := range item.policies {
-			if policy.Enabled && normalizePriorityMode(policy.PriorityMode) == PriorityModeMultiplier {
-				allPoliciesByID[policy.ID] = policy
-			}
-		}
 		if hasMultiplierOnlyPolicy(item.policies) {
 			if len(item.multipliers) == 0 {
-				missingSortInput = true
-				missingSortTargets[targetID] = struct{}{}
-				continue
-			}
-			if session.Platform == upstream.PlatformSub2API && !item.priorityPresent {
-				missingPriorityInput = true
-				missingPriorityTargets[targetID] = struct{}{}
+				missingMultiplier[targetID] = struct{}{}
 				continue
 			}
 			multiplier := minFloat(item.multipliers)
@@ -1199,465 +317,65 @@ func buildPriorityWorkspacePlan(
 			multiplierOnlyTargets[targetID] = multiplier
 			continue
 		}
+
 		multiplier, available := effectiveHealthSortMultiplier(item)
 		if !available {
-			missingSortInput = true
-			missingSortTargets[targetID] = struct{}{}
-			continue
-		}
-		if session.Platform == upstream.PlatformSub2API && !item.priorityPresent {
-			missingPriorityInput = true
-			missingPriorityTargets[targetID] = struct{}{}
+			// Deterministic missing/conflict without a fallback and transient lookup
+			// failures both hold any existing checkpoint without guessing or restoring.
+			missingMultiplier[targetID] = struct{}{}
 			continue
 		}
 		activeModels := activeHealthPriorityModels(item)
 		activeStates := activeHealthPriorityStates(statesByTarget[targetID], activeModels)
-		managed[targetID] = item
-		effectiveMultiplierByTarget[targetID] = multiplier
-		healthCandidates = append(healthCandidates, healthPriorityCandidate{
+		candidate := healthPriorityCandidate{
 			targetID: targetID, item: item, multiplier: multiplier, states: activeStates,
 			expectedModels: len(activeModels), healthBand: priorityHealthBand(activeStates, len(activeModels)),
 			latencyMs: completeTargetSuccessLatency(activeStates, activeModels),
-		})
+		}
+		managed[targetID] = item
+		effectiveMultiplierByTarget[targetID] = multiplier
+		healthCandidates = append(healthCandidates, candidate)
 	}
 
-	type signatureEntry struct {
-		targetID        string
-		owner           string
-		order           int
-		desiredPriority int
-	}
-	entries := make([]signatureEntry, 0, len(managed))
-	multiplierTargetIDs := make([]string, 0, len(multiplierOnlyTargets))
-	for targetID := range multiplierOnlyTargets {
-		multiplierTargetIDs = append(multiplierTargetIDs, targetID)
-	}
-	sort.SliceStable(multiplierTargetIDs, func(i int, j int) bool {
-		left, right := multiplierOnlyTargets[multiplierTargetIDs[i]], multiplierOnlyTargets[multiplierTargetIDs[j]]
-		if left != right {
-			return left < right
-		}
-		return multiplierTargetIDs[i] < multiplierTargetIDs[j]
-	})
 	distinctMultiplierOnly := make([]float64, 0)
 	seenMultiplierOnly := make(map[float64]struct{})
 	for _, multiplier := range multiplierOnlyTargets {
-		if _, exists := seenMultiplierOnly[multiplier]; exists {
-			continue
+		if _, exists := seenMultiplierOnly[multiplier]; !exists {
+			seenMultiplierOnly[multiplier] = struct{}{}
+			distinctMultiplierOnly = append(distinctMultiplierOnly, multiplier)
 		}
-		seenMultiplierOnly[multiplier] = struct{}{}
-		distinctMultiplierOnly = append(distinctMultiplierOnly, multiplier)
 	}
 	sort.Float64s(distinctMultiplierOnly)
 	multiplierOnlyRank := make(map[float64]int, len(distinctMultiplierOnly))
 	for rank, multiplier := range distinctMultiplierOnly {
 		multiplierOnlyRank[multiplier] = rank
 	}
-	for index, targetID := range multiplierTargetIDs {
-		rank := multiplierOnlyRank[multiplierOnlyTargets[targetID]]
+	for targetID, multiplier := range multiplierOnlyTargets {
+		rank := multiplierOnlyRank[multiplier]
 		desired := desiredManagedPriorityForPlatformWithExpected(session.Platform, nil, rank, 0)
 		if session.Platform == upstream.PlatformSub2API {
 			desired = desiredSub2APIMultiplierOnlyPriority(rank)
 		}
-		desiredPriorityByTarget[targetID] = desired
-		entries = append(entries, signatureEntry{targetID: targetID, owner: StrategyModeMultiplierOnly, order: index, desiredPriority: desired})
+		desiredByTarget[targetID] = desired
 	}
+
 	sortHealthPriorityCandidates(healthCandidates)
 	currentBand, bandRank := -1, 0
-	for index, candidate := range healthCandidates {
+	for _, candidate := range healthCandidates {
 		if candidate.healthBand != currentBand {
 			currentBand = candidate.healthBand
 			bandRank = 0
 		}
-		desired := desiredHealthPriorityForPlatform(session.Platform, candidate.healthBand, bandRank)
+		desiredByTarget[candidate.targetID] = desiredHealthPriorityForPlatform(session.Platform, candidate.healthBand, bandRank)
 		bandRank++
-		desiredPriorityByTarget[candidate.targetID] = desired
-		entries = append(entries, signatureEntry{targetID: candidate.targetID, owner: StrategyModeHealthProbe, order: index, desiredPriority: desired})
 	}
-	// The two priority ownership domains have disjoint platform ranges. Preserve their
-	// production ordering while never serializing raw priority or latency into the signature.
-	sort.SliceStable(entries, func(i int, j int) bool {
-		if entries[i].owner != entries[j].owner {
-			if session.Platform == upstream.PlatformSub2API {
-				return entries[i].owner == StrategyModeMultiplierOnly
-			}
-			return entries[i].owner == StrategyModeHealthProbe
-		}
-		if entries[i].order != entries[j].order {
-			return entries[i].order < entries[j].order
-		}
-		return entries[i].targetID < entries[j].targetID
-	})
-	parts := make([]string, 0, len(entries)+1)
-	parts = append(parts, "version:"+priorityWorkspaceSignatureVersion)
-	orderedManagedTargetIDs := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		parts = append(parts, entry.owner+":"+entry.targetID+":"+strconv.Itoa(entry.desiredPriority))
-		orderedManagedTargetIDs = append(orderedManagedTargetIDs, entry.targetID)
-	}
-	missingParts := make([]string, 0, len(missingSortTargets)+len(missingPriorityTargets))
-	for targetID := range missingSortTargets {
-		missingParts = append(missingParts, "sort:"+targetID)
-	}
-	for targetID := range missingPriorityTargets {
-		missingParts = append(missingParts, "priority:"+targetID)
-	}
-	sort.Strings(missingParts)
-	parts = append(parts, missingParts...)
-	digest := sha256.Sum256([]byte(strings.Join(parts, "\n")))
-	allPolicies := make([]Policy, 0, len(allPoliciesByID))
-	for _, policy := range allPoliciesByID {
-		allPolicies = append(allPolicies, policy)
-	}
-	return priorityWorkspacePlan{
-		signature:                   hex.EncodeToString(digest[:]),
-		preset:                      prioritySyncPresetForPolicies(allPolicies),
-		managed:                     managed,
-		desiredPriorityByTarget:     desiredPriorityByTarget,
-		effectiveMultiplierByTarget: effectiveMultiplierByTarget,
-		orderedManagedTargetIDs:     orderedManagedTargetIDs,
-		missingSortTargets:          missingSortTargets,
-		missingPriorityTargets:      missingPriorityTargets,
-		missingSortInput:            missingSortInput,
-		missingPriorityInput:        missingPriorityInput,
-		inventoryComplete:           inventoryComplete,
-		policyVersion:               priorityPolicyVersion(allPolicies),
-	}
-}
-
-func priorityPlanHasCrossBandMismatch(platform upstream.Platform, plan priorityWorkspacePlan, syncStates []PrioritySyncState) bool {
-	storedByTarget := make(map[string]PrioritySyncState, len(syncStates))
-	for _, stored := range syncStates {
-		storedByTarget[stored.TargetID] = stored
-	}
-	for targetID, desired := range plan.desiredPriorityByTarget {
-		item := plan.managed[targetID]
-		if item == nil || (platform == upstream.PlatformSub2API && !item.priorityPresent) || item.currentPriority == desired {
-			continue
-		}
-		if stored, exists := storedByTarget[targetID]; exists && (stored.Conflict || stored.PendingSource == SafetySourceHealthIncident) {
-			continue
-		}
-		if priorityBandForPlatform(platform, item.currentPriority) != priorityBandForPlatform(platform, desired) {
-			return true
-		}
-	}
-	return false
-}
-
-func priorityBandForPlatform(platform upstream.Platform, priority int) int {
-	if platform == upstream.PlatformSub2API {
-		return sub2APIPriorityBand(priority)
-	}
-	switch {
-	case priority >= 40000:
-		return 0
-	case priority >= 30000:
-		return 1
-	case priority >= 20000:
-		return 2
-	case priority >= 10000:
-		return 3
-	default:
-		return 4
-	}
-}
-
-func sub2APIPriorityBand(priority int) int {
-	switch {
-	case priority < 10:
-		return 0
-	case priority < 100:
-		return 1
-	case priority < 1000:
-		return 2
-	case priority < 10000:
-		return 3
-	case priority < 100000:
-		return 4
-	default:
-		return 5
-	}
-}
-
-func priorityPlanHasUnsettledCheckpoints(platform upstream.Platform, plan priorityWorkspacePlan, syncStates []PrioritySyncState) bool {
-	for _, stored := range syncStates {
-		if stored.PendingPriority != nil {
-			return true
-		}
-	}
-	for targetID, desired := range plan.desiredPriorityByTarget {
-		item := plan.managed[targetID]
-		if item == nil || (platform == upstream.PlatformSub2API && !item.priorityPresent) || item.currentPriority == desired {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-func priorityPendingTargetIDs(platform upstream.Platform, plan priorityWorkspacePlan, inventory map[string]*priorityTargetInventory, syncStates []PrioritySyncState) ([]string, int, int) {
-	storedByTarget := make(map[string]PrioritySyncState, len(syncStates))
-	for _, stored := range syncStates {
-		storedByTarget[stored.TargetID] = stored
-	}
-	urgent := make([]string, 0)
-	normal := make([]string, 0)
-	pendingCount := 0
-	for _, targetID := range plan.orderedManagedTargetIDs {
-		item := plan.managed[targetID]
-		desired := plan.desiredPriorityByTarget[targetID]
-		if item == nil || (platform == upstream.PlatformSub2API && !item.priorityPresent) || item.currentPriority == desired {
-			continue
-		}
-		stored, exists := storedByTarget[targetID]
-		if exists && stored.Conflict {
-			continue
-		}
-		pendingCount++
-		if exists && stored.PendingSource == SafetySourceHealthIncident {
-			continue
-		}
-		if priorityBandForPlatform(platform, item.currentPriority) != priorityBandForPlatform(platform, desired) {
-			urgent = append(urgent, targetID)
-		} else {
-			normal = append(normal, targetID)
-		}
-	}
-	restoreIDs := make([]string, 0, len(storedByTarget))
-	for targetID := range storedByTarget {
-		restoreIDs = append(restoreIDs, targetID)
-	}
-	sort.Strings(restoreIDs)
-	for _, targetID := range restoreIDs {
-		stored := storedByTarget[targetID]
-		if _, managed := plan.managed[targetID]; managed || stored.Conflict {
-			continue
-		}
-		if _, missing := plan.missingSortTargets[targetID]; missing {
-			continue
-		}
-		if _, missing := plan.missingPriorityTargets[targetID]; missing {
-			continue
-		}
-		item := inventory[targetID]
-		if item != nil {
-			if platform == upstream.PlatformSub2API && !item.priorityPresent {
-				continue
-			}
-			if stored.PendingSource != SafetySourceHealthIncident && item.currentPriority == stored.OriginalPriority {
-				continue
-			}
-		}
-		pendingCount++
-		if stored.PendingSource == SafetySourceHealthIncident {
-			continue
-		}
-		if item != nil && priorityBandForPlatform(platform, item.currentPriority) != priorityBandForPlatform(platform, stored.OriginalPriority) {
-			urgent = append(urgent, targetID)
-		} else {
-			normal = append(normal, targetID)
-		}
-	}
-	return append(urgent, normal...), pendingCount, len(urgent)
-}
-
-func prioritySyncPresetForManagedTargets(managed map[string]*priorityTargetInventory) PrioritySyncPreset {
-	policies := make([]Policy, 0)
-	for _, item := range managed {
-		for _, policy := range item.policies {
-			if policy.Enabled && hasMultiplierPriorityPolicy([]Policy{policy}) {
-				policies = append(policies, policy)
-			}
-		}
-	}
-	return prioritySyncPresetForPolicies(policies)
-}
-
-func defaultPrioritySyncPreset() PrioritySyncPreset {
-	return PrioritySyncPreset{
-		MinWriteIntervalSeconds:        defaultPriorityMinWriteIntervalSeconds,
-		WritebackSpreadSeconds:         defaultPriorityWritebackSpreadSeconds,
-		MaxPendingAgeSeconds:           defaultPriorityMaxPendingAgeSeconds,
-		ReconcileIntervalSeconds:       defaultPriorityReconcileIntervalSeconds,
-		InventorySnapshotTTLSeconds:    defaultInventorySnapshotTTLSeconds,
-		ReconcileFailureBackoffSeconds: defaultReconcileFailureBackoffSeconds,
-		DriftAction:                    PriorityDriftActionAlertOnly,
-		ReadMode:                       PriorityReadModeInventory,
-	}
-}
-
-func policiesFromManagedInventory(managed map[string]*priorityTargetInventory) []Policy {
-	byID := make(map[string]Policy)
-	for _, item := range managed {
-		for _, policy := range item.policies {
-			if !policy.Enabled || !hasMultiplierPriorityPolicy([]Policy{policy}) {
-				continue
-			}
-			byID[policy.ID] = policy
-		}
-	}
-	result := make([]Policy, 0, len(byID))
-	for _, policy := range byID {
-		result = append(result, policy)
-	}
-	return result
-}
-
-func prioritySyncPresetForPolicies(policies []Policy) PrioritySyncPreset {
-	preset := defaultPrioritySyncPreset()
-	hasCandidate := false
-	for _, policy := range policies {
-		if !policy.Enabled {
-			continue
-		}
-		candidate, err := normalizePrioritySyncPreset(&policy.PrioritySyncPreset)
-		if err != nil {
-			continue
-		}
-		if !hasCandidate || candidate.MinWriteIntervalSeconds < preset.MinWriteIntervalSeconds {
-			preset.MinWriteIntervalSeconds = candidate.MinWriteIntervalSeconds
-		}
-		if !hasCandidate || candidate.WritebackSpreadSeconds > preset.WritebackSpreadSeconds {
-			preset.WritebackSpreadSeconds = candidate.WritebackSpreadSeconds
-		}
-		if !hasCandidate || candidate.MaxPendingAgeSeconds < preset.MaxPendingAgeSeconds {
-			preset.MaxPendingAgeSeconds = candidate.MaxPendingAgeSeconds
-		}
-		if !hasCandidate || candidate.ReconcileIntervalSeconds < preset.ReconcileIntervalSeconds {
-			preset.ReconcileIntervalSeconds = candidate.ReconcileIntervalSeconds
-		}
-		if !hasCandidate || candidate.InventorySnapshotTTLSeconds < preset.InventorySnapshotTTLSeconds {
-			preset.InventorySnapshotTTLSeconds = candidate.InventorySnapshotTTLSeconds
-		}
-		if !hasCandidate || candidate.ReconcileFailureBackoffSeconds < preset.ReconcileFailureBackoffSeconds {
-			preset.ReconcileFailureBackoffSeconds = candidate.ReconcileFailureBackoffSeconds
-		}
-		hasCandidate = true
-	}
-	if !hasCandidate {
-		return defaultPrioritySyncPreset()
-	}
-	return preset
-}
-
-func applyPriorityPresetToState(state *PriorityWorkspaceSyncState, preset PrioritySyncPreset) {
-	state.MinWriteIntervalSeconds = preset.MinWriteIntervalSeconds
-	state.WritebackSpreadSeconds = preset.WritebackSpreadSeconds
-	state.MaxPendingAgeSeconds = preset.MaxPendingAgeSeconds
-	state.ReconcileIntervalSeconds = preset.ReconcileIntervalSeconds
-	state.InventorySnapshotTTLSeconds = preset.InventorySnapshotTTLSeconds
-	state.ReconcileFailureBackoffSeconds = preset.ReconcileFailureBackoffSeconds
-	state.DriftAction = preset.DriftAction
-	state.ReadMode = preset.ReadMode
-}
-
-func priorityPolicyVersion(policies []Policy) string {
-	if len(policies) == 0 {
-		return ""
-	}
-	copyPolicies := append([]Policy(nil), policies...)
-	sort.Slice(copyPolicies, func(i int, j int) bool { return copyPolicies[i].ID < copyPolicies[j].ID })
-	parts := make([]string, 0, len(copyPolicies))
-	for _, policy := range copyPolicies {
-		preset, err := normalizePrioritySyncPreset(&policy.PrioritySyncPreset)
-		if err != nil {
-			preset = defaultPrioritySyncPreset()
-		}
-		parts = append(parts, strings.Join([]string{
-			policy.ID,
-			policy.UpdatedAt.UTC().Format(time.RFC3339Nano),
-			policy.StrategyMode,
-			policy.PriorityMode,
-			strconv.Itoa(preset.MinWriteIntervalSeconds),
-			strconv.Itoa(preset.WritebackSpreadSeconds),
-			strconv.Itoa(preset.MaxPendingAgeSeconds),
-			strconv.Itoa(preset.ReconcileIntervalSeconds),
-			strconv.Itoa(preset.InventorySnapshotTTLSeconds),
-			strconv.Itoa(preset.ReconcileFailureBackoffSeconds),
-		}, ":"))
-	}
-	digest := sha256.Sum256([]byte(strings.Join(parts, "\n")))
-	return hex.EncodeToString(digest[:])
-}
-
-func (s *Service) observePriorityDrift(
-	ctx context.Context,
-	session upstream.Session,
-	inventory map[string]*priorityTargetInventory,
-	managed map[string]*priorityTargetInventory,
-	syncStates []PrioritySyncState,
-) priorityDriftObservation {
-	observation := priorityDriftObservation{}
-	for _, stored := range syncStates {
-		item, isManaged := managed[stored.TargetID]
-		if !isManaged || (session.Platform == upstream.PlatformSub2API && !item.priorityPresent) {
-			continue
-		}
-		if stored.Conflict {
-			observation.active++
-			continue
-		}
-		if stored.PendingPriority != nil && stored.PendingSource != SafetySourceHealthIncident &&
-			item.currentPriority == *stored.PendingPriority {
-			stored.LastAppliedPriority = *stored.PendingPriority
-			clearPriorityPending(&stored)
-			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
-				log.Printf("[connection-health] priority sync confirm checkpoint failed target_id=%s err=%v", stored.TargetID, err)
-			}
-			continue
-		}
-		if skip, err := s.clearStalePriorityPending(ctx, session, &stored, item.target.AccountID); err != nil {
-			log.Printf("[connection-health] priority pending generation check failed target_id=%s err=%v", stored.TargetID, err)
-			continue
-		} else if skip {
-			continue
-		}
-		if item.currentPriority == stored.LastAppliedPriority {
-			continue
-		}
-		current := item.currentPriority
-		stored.Conflict = true
-		stored.LastConflictPriority = &current
-		if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
-			log.Printf("[connection-health] priority drift checkpoint failed target_id=%s err=%v", stored.TargetID, err)
-			continue
-		}
-		observation.active++
-		observation.new++
-	}
-	return observation
-}
-
-func (s *Service) applyWorkspacePriorities(
-	ctx context.Context,
-	checkpointCtx context.Context,
-	session upstream.Session,
-	userID string,
-	adminAccountID string,
-	inventory map[string]*priorityTargetInventory,
-	plan priorityWorkspacePlan,
-	syncStates []PrioritySyncState,
-	allowedTargetIDs map[string]struct{},
-) priorityWriteResult {
-	result := priorityWriteResult{complete: true}
-	managed := plan.managed
-	missingMultiplier := plan.missingSortTargets
-	effectiveMultiplierByTarget := plan.effectiveMultiplierByTarget
-	desiredByTarget := plan.desiredPriorityByTarget
 
 	storedByTarget := make(map[string]PrioritySyncState, len(syncStates))
 	for _, state := range syncStates {
 		storedByTarget[state.TargetID] = state
 	}
 
-	for _, targetID := range plan.orderedManagedTargetIDs {
-		if allowedTargetIDs != nil {
-			if _, allowed := allowedTargetIDs[targetID]; !allowed {
-				continue
-			}
-		}
-		item := managed[targetID]
+	for targetID, item := range managed {
 		// A missing upstream priority is a real value, not zero. The existing
 		// field-level priority API cannot clear a priority back to NULL safely,
 		// so leave such targets untouched rather than materializing 0.
@@ -1666,7 +384,6 @@ func (s *Service) applyWorkspacePriorities(
 		}
 		multiplier := effectiveMultiplierByTarget[targetID]
 		desired := desiredByTarget[targetID]
-		mutationSucceeded := false
 		stored, exists := storedByTarget[targetID]
 		if !exists {
 			stored = PrioritySyncState{
@@ -1675,129 +392,61 @@ func (s *Service) applyWorkspacePriorities(
 			}
 		}
 		if stored.Conflict {
-			result.drifts++
 			continue
 		}
-		if exists {
-			if stored.PendingPriority != nil && stored.PendingSource != SafetySourceHealthIncident {
-				if item.currentPriority == desired {
-					stored.LastAppliedPriority = desired
-					clearPriorityPending(&stored)
-				} else if item.currentPriority == *stored.PendingPriority {
-					stored.LastAppliedPriority = *stored.PendingPriority
-					clearPriorityPending(&stored)
-				}
-			}
-			skip, pendingErr := s.clearStalePriorityPending(ctx, session, &stored, item.target.AccountID)
-			if pendingErr != nil {
-				log.Printf("[connection-health] priority pending generation check failed target_id=%s err=%v", targetID, pendingErr)
-				result.failures++
-				result.complete = false
-				continue
-			}
-			if skip {
-				result.incidentHeld++
-				result.complete = false
-				continue
-			}
+		if stored.PendingPriority != nil && item.currentPriority == *stored.PendingPriority {
+			stored.LastAppliedPriority = *stored.PendingPriority
+			stored.PendingPriority = nil
 		}
 		if exists && item.currentPriority != stored.LastAppliedPriority && stored.PendingPriority == nil {
-			// A writeback snapshot may lag a target checkpoint committed by another
-			// process or an earlier batch slot. Only a fresh reconcile may classify
-			// that difference as manual drift.
-			result.reconcileRequired = true
-			result.complete = false
+			current := item.currentPriority
+			stored.Conflict = true
+			stored.LastConflictPriority = &current
+			stored.EffectiveMultiplier = multiplier
+			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
+				log.Printf("[connection-health] priority conflict state save failed target_id=%s err=%v", targetID, err)
+			}
 			continue
 		}
 		if exists && stored.PendingPriority != nil && item.currentPriority != stored.LastAppliedPriority {
-			result.reconcileRequired = true
-			result.complete = false
+			current := item.currentPriority
+			stored.Conflict = true
+			stored.LastConflictPriority = &current
+			stored.EffectiveMultiplier = multiplier
+			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
+				log.Printf("[connection-health] priority pending conflict state save failed target_id=%s err=%v", targetID, err)
+			}
 			continue
 		}
 		if item.currentPriority != desired {
 			pending := desired
 			stored.PendingPriority = &pending
-			stored.PendingSource = "normal"
-			stored.PendingEpoch = 0
-			stored.PendingActionKey = "priority:" + targetID + ":" + strconv.Itoa(desired)
-			if session.Platform == upstream.PlatformSub2API {
-				generation, generationErr := s.mutationGeneration(ctx, userID, adminAccountID, item.target.AccountID)
-				if generationErr != nil {
-					log.Printf("[connection-health] priority mutation generation read failed target_id=%s err=%v", targetID, generationErr)
-					result.failures++
-					result.complete = false
-					continue
-				}
-				stored.PendingMutationGeneration = generation
-			} else {
-				stored.PendingMutationGeneration = 0
-			}
 			stored.EffectiveMultiplier = multiplier
-			if err := s.repo.UpsertPrioritySyncState(checkpointCtx, stored); err != nil {
+			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
 				log.Printf("[connection-health] priority sync intent save failed target_id=%s err=%v", targetID, err)
-				result.failures++
-				result.complete = false
 				continue
 			}
-			result.attempts++
-			result.remoteMutation = true
-			if err := s.updateAutomaticTargetPriority(ctx, userID, adminAccountID, session, targetID, item.target.AccountID, desired, stored.PendingMutationGeneration, item.currentPriority); err != nil {
+			if err := s.priorityActions.UpdateAdminTargetPriority(session, item.target.AccountID, desired); err != nil {
 				log.Printf("[connection-health] priority sync update failed target_id=%s err=%v", targetID, err)
-				var mismatch *upstream.PriorityCompareAndSetError
-				if errors.As(err, &mismatch) {
-					stored.Conflict = true
-					stored.LastConflictPriority = mismatch.ActualPriority
-					clearPriorityPending(&stored)
-					if saveErr := s.repo.UpsertPrioritySyncState(checkpointCtx, stored); saveErr != nil {
-						log.Printf("[connection-health] priority compare-and-set conflict save failed target_id=%s err=%v", targetID, saveErr)
-						result.failures++
-						result.complete = false
-					}
-					result.drifts++
-					continue
-				}
-				result.failures++
-				result.complete = false
 				continue
 			}
-			result.successes++
-			mutationSucceeded = true
 		}
 		stored.LastAppliedPriority = desired
-		clearPriorityPending(&stored)
+		stored.PendingPriority = nil
 		stored.EffectiveMultiplier = multiplier
 		stored.Conflict = false
 		stored.LastConflictPriority = nil
-		if err := s.repo.UpsertPrioritySyncState(checkpointCtx, stored); err != nil {
+		if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
 			log.Printf("[connection-health] priority sync state save failed target_id=%s err=%v", targetID, err)
-			result.failures++
-			result.complete = false
-			if mutationSucceeded {
-				result.mutationPersistFailed = true
-			}
 		}
 	}
 
 	// 不再被任何倍率策略覆盖的目标恢复接管前优先级。若管理员已经人工改过，则保留人工值。
-	restoreTargetIDs := make([]string, 0, len(storedByTarget))
-	for targetID := range storedByTarget {
-		restoreTargetIDs = append(restoreTargetIDs, targetID)
-	}
-	sort.Strings(restoreTargetIDs)
-	for _, targetID := range restoreTargetIDs {
-		if allowedTargetIDs != nil {
-			if _, allowed := allowedTargetIDs[targetID]; !allowed {
-				continue
-			}
-		}
-		stored := storedByTarget[targetID]
+	for targetID, stored := range storedByTarget {
 		if _, stillManaged := managed[targetID]; stillManaged {
 			continue
 		}
 		if _, waitingForMultiplier := missingMultiplier[targetID]; waitingForMultiplier {
-			continue
-		}
-		if _, waitingForPriority := plan.missingPriorityTargets[targetID]; waitingForPriority {
 			continue
 		}
 		item := inventory[targetID]
@@ -1807,15 +456,14 @@ func (s *Service) applyWorkspacePriorities(
 			continue
 		}
 		if item == nil {
-			if !plan.inventoryComplete {
+			if !inventoryComplete {
 				// 分组读取失败时无法证明目标已经消失，保留当前优先级和同步快照，
 				// 等下一次完整扫描再决定是否恢复。
 				continue
 			}
 			if stored.Conflict {
-				result.drifts++
 				// 已确认目标不再受策略管理，但人工修改过的值不能被原始快照覆盖。
-				if err := s.repo.DeletePrioritySyncState(checkpointCtx, userID, adminAccountID, targetID); err != nil {
+				if err := s.repo.DeletePrioritySyncState(ctx, userID, adminAccountID, targetID); err != nil {
 					log.Printf("[connection-health] missing conflicted target priority state delete failed target_id=%s err=%v", targetID, err)
 				}
 				continue
@@ -1826,130 +474,39 @@ func (s *Service) applyWorkspacePriorities(
 			}
 			pending := stored.OriginalPriority
 			stored.PendingPriority = &pending
-			stored.PendingSource = "normal"
-			stored.PendingEpoch = 0
-			stored.PendingActionKey = "priority:" + targetID + ":" + strconv.Itoa(stored.OriginalPriority)
-			if session.Platform == upstream.PlatformSub2API {
-				generation, generationErr := s.mutationGeneration(ctx, userID, adminAccountID, parsed.accountID)
-				if generationErr != nil {
-					log.Printf("[connection-health] missing target priority generation read failed target_id=%s err=%v", targetID, generationErr)
-					result.failures++
-					result.complete = false
-					continue
-				}
-				stored.PendingMutationGeneration = generation
-			} else {
-				stored.PendingMutationGeneration = 0
-			}
-			if err := s.repo.UpsertPrioritySyncState(checkpointCtx, stored); err != nil {
+			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
 				log.Printf("[connection-health] missing target priority restore intent save failed target_id=%s err=%v", targetID, err)
-				result.failures++
-				result.complete = false
 				continue
 			}
-			result.attempts++
-			result.remoteMutation = true
-			if err := s.updateAutomaticTargetPriority(ctx, userID, adminAccountID, session, targetID, parsed.accountID, stored.OriginalPriority, stored.PendingMutationGeneration, stored.LastAppliedPriority); err != nil {
+			if err := s.priorityActions.UpdateAdminTargetPriority(session, parsed.accountID, stored.OriginalPriority); err != nil {
 				log.Printf("[connection-health] missing target priority restore failed target_id=%s err=%v", targetID, err)
-				result.failures++
-				result.complete = false
 				continue
 			}
-			result.successes++
-			if err := s.repo.DeletePrioritySyncState(checkpointCtx, userID, adminAccountID, targetID); err != nil {
+			if err := s.repo.DeletePrioritySyncState(ctx, userID, adminAccountID, targetID); err != nil {
 				log.Printf("[connection-health] missing target priority state delete failed target_id=%s err=%v", targetID, err)
-				result.failures++
-				result.complete = false
-				result.mutationPersistFailed = true
 			}
 			continue
 		}
-		if stored.PendingPriority != nil && stored.PendingSource != SafetySourceHealthIncident &&
-			item.currentPriority == *stored.PendingPriority {
+		if stored.PendingPriority != nil && item.currentPriority == *stored.PendingPriority {
 			stored.LastAppliedPriority = *stored.PendingPriority
-			clearPriorityPending(&stored)
-		}
-		if skip, pendingErr := s.clearStalePriorityPending(ctx, session, &stored, item.target.AccountID); pendingErr != nil {
-			log.Printf("[connection-health] priority restore pending generation check failed target_id=%s err=%v", targetID, pendingErr)
-			result.failures++
-			result.complete = false
-			continue
-		} else if skip {
-			result.incidentHeld++
-			result.complete = false
-			continue
+			stored.PendingPriority = nil
 		}
 		if !stored.Conflict && item.currentPriority == stored.LastAppliedPriority && item.currentPriority != stored.OriginalPriority {
 			pending := stored.OriginalPriority
 			stored.PendingPriority = &pending
-			stored.PendingSource = "normal"
-			stored.PendingEpoch = 0
-			stored.PendingActionKey = "priority:" + targetID + ":" + strconv.Itoa(stored.OriginalPriority)
-			if session.Platform == upstream.PlatformSub2API {
-				generation, generationErr := s.mutationGeneration(ctx, userID, adminAccountID, item.target.AccountID)
-				if generationErr != nil {
-					log.Printf("[connection-health] priority restore generation read failed target_id=%s err=%v", targetID, generationErr)
-					result.failures++
-					result.complete = false
-					continue
-				}
-				stored.PendingMutationGeneration = generation
-			} else {
-				stored.PendingMutationGeneration = 0
-			}
-			if err := s.repo.UpsertPrioritySyncState(checkpointCtx, stored); err != nil {
+			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
 				log.Printf("[connection-health] priority restore intent save failed target_id=%s err=%v", targetID, err)
-				result.failures++
-				result.complete = false
 				continue
 			}
-			result.attempts++
-			result.remoteMutation = true
-			if err := s.updateAutomaticTargetPriority(ctx, userID, adminAccountID, session, targetID, item.target.AccountID, stored.OriginalPriority, stored.PendingMutationGeneration, item.currentPriority); err != nil {
+			if err := s.priorityActions.UpdateAdminTargetPriority(session, item.target.AccountID, stored.OriginalPriority); err != nil {
 				log.Printf("[connection-health] priority restore failed target_id=%s err=%v", targetID, err)
-				result.failures++
-				result.complete = false
 				continue
 			}
-			result.successes++
 		}
-		if err := s.repo.DeletePrioritySyncState(checkpointCtx, userID, adminAccountID, targetID); err != nil {
+		if err := s.repo.DeletePrioritySyncState(ctx, userID, adminAccountID, targetID); err != nil {
 			log.Printf("[connection-health] priority sync state delete failed target_id=%s err=%v", targetID, err)
-			result.failures++
-			result.complete = false
-			if item.currentPriority != stored.OriginalPriority {
-				result.mutationPersistFailed = true
-			}
 		}
 	}
-	return result
-}
-
-func (s *Service) applyWorkspacePrioritiesInOrder(
-	ctx context.Context,
-	checkpointCtx context.Context,
-	session upstream.Session,
-	userID string,
-	adminAccountID string,
-	inventory map[string]*priorityTargetInventory,
-	plan priorityWorkspacePlan,
-	syncStates []PrioritySyncState,
-	targetIDs []string,
-) priorityWriteResult {
-	result := priorityWriteResult{complete: true}
-	for _, targetID := range targetIDs {
-		partial := s.applyWorkspacePriorities(ctx, checkpointCtx, session, userID, adminAccountID, inventory, plan, syncStates, map[string]struct{}{targetID: {}})
-		result.attempts += partial.attempts
-		result.successes += partial.successes
-		result.failures += partial.failures
-		result.drifts += partial.drifts
-		result.incidentHeld += partial.incidentHeld
-		result.remoteMutation = result.remoteMutation || partial.remoteMutation
-		result.mutationPersistFailed = result.mutationPersistFailed || partial.mutationPersistFailed
-		result.reconcileRequired = result.reconcileRequired || partial.reconcileRequired
-		result.complete = result.complete && partial.complete
-	}
-	return result
 }
 
 // desiredManagedPriorityForPlatform 按平台真实语义计算优先级：NewAPI 沿用「分数越高越优先」；

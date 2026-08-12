@@ -129,7 +129,8 @@ export function computeDelta(
     }
   }
 
-  // 成本未完整时不显示环比。
+  // 低质量部分结算或回退时不显示环比。
+  // partial_high（高质量部分结算）被视为有效结算，允许参与环比计算。
   if (last.status === 'fallback' || prev.status === 'fallback' || last.status === 'partial' || prev.status === 'partial') {
     return { amount: 0, direction: 'flat', unavailable: true, reason: 'partial_cost' }
   }

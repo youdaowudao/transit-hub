@@ -4,12 +4,13 @@ import "time"
 
 // 结算状态常量。
 const (
-	SettlementStatusProvisional = "provisional" // 首页访问写入的临时快照
-	SettlementStatusFallback    = "fallback"    // 首页使用同一业务日旧成本写入的可展示快照
-	SettlementStatusPartial     = "partial"     // 部分站点成功的日结结果
-	SettlementStatusFinal       = "final"       // 所有站点成功的完整日结结果
-	SettlementStatusMissing     = "missing"     // 占位：该日期无任何记录
-	SettlementStatusUnavailable = "unavailable" // 当前日没有可用于展示的成本/利润值
+	SettlementStatusProvisional = "provisional"  // 首页访问写入的临时快照
+	SettlementStatusFallback    = "fallback"     // 首页使用同一业务日旧成本写入的可展示快照
+	SettlementStatusPartialHigh = "partial_high" // 高质量部分结算（覆盖率≥90%）
+	SettlementStatusPartial     = "partial"      // 低质量部分结算（覆盖率<90%）
+	SettlementStatusFinal       = "final"        // 所有站点成功的完整日结结果
+	SettlementStatusMissing     = "missing"      // 占位：该日期无任何记录
+	SettlementStatusUnavailable = "unavailable"  // 当前日没有可用于展示的成本/利润值
 )
 
 // 数据来源常量。

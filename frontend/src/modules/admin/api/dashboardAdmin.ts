@@ -319,7 +319,7 @@ export interface SiteCostDetail {
 /** 单日结算数据。settlementStatus 为 "missing" 表示该日期无记录。 */
 export interface DailyStatItem {
   date: string
-  settlementStatus: 'missing' | 'provisional' | 'fallback' | 'partial' | 'final'
+  settlementStatus: 'missing' | 'provisional' | 'fallback' | 'partial_high' | 'partial' | 'final'
   snapshotSource?: string
   todayProfit?: number | null
   confirmedCost?: number | null

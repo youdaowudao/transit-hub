@@ -49,11 +49,12 @@ func TestHandlerRequiresWorkspaceAndDoesNotExposeHTML(t *testing.T) {
 
 func TestHandlerListUsersForwardsQuery(t *testing.T) {
 	mux := http.NewServeMux()
-	users := &fakeUsers{page: upstream.Sub2APIAdminUsersPage{Items: []upstream.Sub2APIAdminUser{{ID: "1", Email: "a@example.com"}}, Total: 1, Page: 3, PageSize: 40, Pages: 1}}
+	lastUsedAt := time.Date(2026, 8, 13, 4, 5, 6, 0, time.UTC)
+	users := &fakeUsers{page: upstream.Sub2APIAdminUsersPage{Items: []upstream.Sub2APIAdminUser{{ID: "1", Email: "a@example.com", LastUsedAt: &lastUsedAt}}, Total: 1, Page: 3, PageSize: 40, Pages: 1}}
 	service := newTestService(newFakeRepo(), users, nil)
 	RegisterRoutes(mux, service, fakeAccounts{"user-1": "admin-1"})
 
-	req := authedRequest(http.MethodGet, "/api/mass-email/users?page=3&page_size=40&status=active&role=admin&search=++Alice%2Bnotes+&sort_by=email&sort_order=asc&timezone=Asia%2FShanghai", "", "user-1")
+	req := authedRequest(http.MethodGet, "/api/mass-email/users?page=3&page_size=40&status=active&role=admin&search=++Alice%2Bnotes+&sort_by=last_used_at&sort_order=desc&timezone=Asia%2FShanghai", "", "user-1")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -61,8 +62,15 @@ func TestHandlerListUsersForwardsQuery(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	got := users.lastQuery
-	if got.Page != 3 || got.PageSize != 40 || got.Status != "active" || got.Role != "admin" || got.Search != "Alice+notes" || got.SortBy != "email" || got.SortOrder != "asc" || got.Timezone != "Asia/Shanghai" {
+	if got.Page != 3 || got.PageSize != 40 || got.Status != "active" || got.Role != "admin" || got.Search != "Alice+notes" || got.SortBy != "last_used_at" || got.SortOrder != "desc" || got.Timezone != "Asia/Shanghai" {
 		t.Fatalf("query not forwarded: %#v", got)
+	}
+	var response UsersPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("invalid response JSON: %v", err)
+	}
+	if len(response.Items) != 1 || response.Items[0].LastUsedAt == nil || !response.Items[0].LastUsedAt.Equal(lastUsedAt) {
+		t.Fatalf("lastUsedAt missing from response: %#v", response)
 	}
 }
 

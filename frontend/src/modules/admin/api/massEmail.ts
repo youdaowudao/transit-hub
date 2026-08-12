@@ -27,7 +27,11 @@ type AdminErrorPayload = {
   message?: string
 }
 
-const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
+const requestJson = async <T>(
+  path: string,
+  options: RequestInit = {},
+  preserveUpstreamAuthError = false,
+): Promise<T> => {
   let response: Response
   try {
     response = await fetch(endpoint(path), {
@@ -52,6 +56,9 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
   }
 
   if (!response.ok) {
+    if (preserveUpstreamAuthError && payload.message === 'admin.massEmail.errors.upstreamAuth') {
+      throw new Error(payload.message)
+    }
     if (isUnauthorizedApiResponse(response.status, payload)) {
       handleAuthExpired()
       throw new Error(authUnauthorizedErrorKey)
@@ -74,6 +81,10 @@ type PaginatedWire<T> = {
   total_pages?: number
 }
 
+type ListMassEmailUsersOptions = {
+  preserveUpstreamAuthError?: boolean
+}
+
 const normalizePaginated = <T>(payload: PaginatedWire<T>): { items: T[]; total: number; page: number; pageSize: number; totalPages: number } => ({
   items: payload.items ?? [],
   total: payload.total ?? 0,
@@ -84,6 +95,7 @@ const normalizePaginated = <T>(payload: PaginatedWire<T>): { items: T[]; total: 
 
 export const listMassEmailUsers = async (
   query: MassEmailUsersQuery,
+  options: ListMassEmailUsersOptions = {},
 ): Promise<PaginatedMassEmailUsersResponse> => {
   const params = new URLSearchParams({
     page: query.page.toString(),
@@ -96,7 +108,11 @@ export const listMassEmailUsers = async (
   if (query.role) params.set('role', query.role)
   if (query.search) params.set('search', query.search)
 
-  const payload = await requestJson<PaginatedWire<PaginatedMassEmailUsersResponse['items'][number]>>(`/mass-email/users?${params.toString()}`)
+  const payload = await requestJson<PaginatedWire<PaginatedMassEmailUsersResponse['items'][number]>>(
+    `/mass-email/users?${params.toString()}`,
+    {},
+    options.preserveUpstreamAuthError,
+  )
   return normalizePaginated(payload)
 }
 

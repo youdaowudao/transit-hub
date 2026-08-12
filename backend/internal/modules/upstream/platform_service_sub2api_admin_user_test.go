@@ -73,7 +73,7 @@ func TestFetchSub2APIAdminUsersPage_RequestQueryAuthAndParsing(t *testing.T) {
 		writeJSON(w, map[string]any{
 			"data": map[string]any{
 				"items": []map[string]any{
-					{"id": "42", "email": "user@example.com", "username": "alice", "role": "admin", "status": "active", "created_at": "2025-01-02T03:04:05Z"},
+					{"id": "42", "email": "user@example.com", "username": "alice", "role": "admin", "status": "active", "created_at": "2025-01-02T03:04:05Z", "last_used_at": "2025-01-03T04:05:06Z"},
 					{"id": "", "email": "ignored@example.com"},
 				},
 				"total":     101,
@@ -128,6 +128,31 @@ func TestFetchSub2APIAdminUsersPage_RequestQueryAuthAndParsing(t *testing.T) {
 	if item.CreatedAt == nil || !item.CreatedAt.Equal(wantTime) {
 		t.Fatalf("expected createdAt %v, got %+v", wantTime, item.CreatedAt)
 	}
+	wantLastUsedAt := time.Date(2025, 1, 3, 4, 5, 6, 0, time.UTC)
+	if item.LastUsedAt == nil || !item.LastUsedAt.Equal(wantLastUsedAt) {
+		t.Fatalf("expected lastUsedAt %v, got %+v", wantLastUsedAt, item.LastUsedAt)
+	}
+}
+
+func TestFetchSub2APIAdminUsersPage_AllowsLastUsedAtSort(t *testing.T) {
+	var gotQuery url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		writeJSON(w, map[string]any{"data": map[string]any{"items": []any{}, "total": 0, "page": 1, "page_size": 100, "pages": 1}})
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "admin-token", TokenType: "Bearer"}
+	_, err := service.FetchSub2APIAdminUsersPage(session, Sub2APIAdminUsersQuery{
+		Page: 1, PageSize: 100, SortBy: "last_used_at", SortOrder: "desc", Timezone: "Asia/Shanghai",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	assertQueryValue(t, gotQuery, "sort_by", "last_used_at")
+	assertQueryValue(t, gotQuery, "sort_order", "desc")
+	assertQueryValue(t, gotQuery, "timezone", "Asia/Shanghai")
 }
 
 func TestFetchSub2APIAdminUserBreakdown_RequestQueryAuthAndParsing(t *testing.T) {

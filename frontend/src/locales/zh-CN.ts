@@ -100,6 +100,7 @@ export default {
       settings: '系统设置',
       tickets: '工单',
       massEmail: '群发邮件',
+      userLastUsed: '用户最后使用',
       signOut: '退出登录'
     },
     leaderboard: {
@@ -2414,6 +2415,28 @@ export default {
         activeBatchExists: '当前工作区已有一个进行中的群发批次，请取消或等待完成后再创建。',
         recipientLimitReached: '本次选择超过 10,000 个收件人上限，请缩小筛选范围后重试。',
         itemGeneric: '该收件人发送失败，请稍后查看批次获取最新详情。'
+      }
+    },
+    userLastUsed: {
+      dateLabel: '使用日期',
+      addDate: '添加',
+      selectedDates: '已选日期',
+      removeDate: '移除 {date}',
+      keepOneDate: '至少保留一个日期',
+      refresh: '重新查询',
+      loading: '正在读取用户最后使用记录...',
+      total: '共 {count} 人',
+      dayCount: '{count} 人',
+      username: '用户名',
+      lastUsedAt: '最后使用时间',
+      copyUsername: '复制用户名',
+      copied: '已复制',
+      emptyAll: '所选日期暂无用户使用记录。',
+      emptyDay: '该日期暂无用户使用记录。',
+      errors: {
+        upstreamAuth: '当前工作区的 Sub2API 管理员会话已失效，请重新登录该工作区后再查询。',
+        request: '读取用户最后使用记录失败，请检查当前工作区的 Sub2API 管理员会话后重试。',
+        copy: '复制失败，请手动复制用户名。'
       }
     },
     settings: {

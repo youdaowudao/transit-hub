@@ -2563,6 +2563,7 @@ var (
 var sub2APIAdminUsersSortKeys = map[string]struct{}{
 	"created_at":   {},
 	"email":        {},
+	"last_used_at": {},
 	"username":     {},
 	"status":       {},
 	"role":         {},

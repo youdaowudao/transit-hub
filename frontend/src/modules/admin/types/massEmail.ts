@@ -2,7 +2,7 @@ export type MassEmailUserStatus = 'active' | 'disabled' | 'inactive' | 'banned'
 
 export type MassEmailUserRole = 'admin' | 'user'
 
-export type MassEmailUserSortBy = 'email' | 'username' | 'status' | 'role' | 'created_at'
+export type MassEmailUserSortBy = 'email' | 'username' | 'status' | 'role' | 'created_at' | 'last_used_at'
 
 export type MassEmailSortOrder = 'asc' | 'desc'
 
@@ -20,6 +20,7 @@ export interface MassEmailUser {
   name?: string | null
   username?: string | null
   createdAt?: string | null
+  lastUsedAt?: string | null
   updatedAt?: string | null
 }
 

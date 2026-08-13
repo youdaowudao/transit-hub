@@ -46,6 +46,8 @@ const (
 	ErrSendFailed            = requestError("admin.massEmail.errors.sendFailed")
 	ErrActiveBatchExists     = requestError("admin.massEmail.errors.activeBatchExists")
 	ErrRecipientLimitReached = requestError("admin.massEmail.errors.recipientLimitReached")
+	ErrRechargeQueryLimit    = requestError("admin.userRecharge.errors.limitReached")
+	ErrRechargeQueryChanged  = requestError("admin.userRecharge.errors.dataChanged")
 )
 
 type UserQuery struct {
@@ -75,6 +77,21 @@ type UsersPage struct {
 	Page     int       `json:"page"`
 	PageSize int       `json:"pageSize"`
 	Pages    int       `json:"pages"`
+}
+
+type SelfRechargeUserDTO struct {
+	UserID          string    `json:"userId"`
+	Email           string    `json:"email"`
+	RechargeCount   int       `json:"rechargeCount"`
+	TotalAmount     float64   `json:"totalAmount"`
+	LastRechargedAt time.Time `json:"lastRechargedAt"`
+}
+
+type SelfRechargeUsersResult struct {
+	Items        []SelfRechargeUserDTO `json:"items"`
+	TotalUsers   int                   `json:"totalUsers"`
+	TotalRecords int                   `json:"totalRecords"`
+	TotalAmount  float64               `json:"totalAmount"`
 }
 
 type BatchFilters struct {

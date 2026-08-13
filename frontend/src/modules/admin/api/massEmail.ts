@@ -5,6 +5,7 @@ import type {
   PaginatedMassEmailBatchItemsResponse,
   PaginatedMassEmailBatchesResponse,
   PaginatedMassEmailUsersResponse,
+	SelfRechargeUsersResponse,
 } from '../types/massEmail'
 import {
   authUnauthorizedErrorKey,
@@ -27,6 +28,10 @@ type AdminErrorPayload = {
   message?: string
 }
 
+const isAbortError = (error: unknown): boolean => (
+  typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError'
+)
+
 const requestJson = async <T>(
   path: string,
   options: RequestInit = {},
@@ -44,6 +49,7 @@ const requestJson = async <T>(
       },
     })
   } catch (error) {
+		if (isAbortError(error)) throw error
     throw new Error('admin.massEmail.errors.network')
   }
 
@@ -83,6 +89,7 @@ type PaginatedWire<T> = {
 
 type ListMassEmailUsersOptions = {
   preserveUpstreamAuthError?: boolean
+	signal?: AbortSignal
 }
 
 const normalizePaginated = <T>(payload: PaginatedWire<T>): { items: T[]; total: number; page: number; pageSize: number; totalPages: number } => ({
@@ -110,11 +117,19 @@ export const listMassEmailUsers = async (
 
   const payload = await requestJson<PaginatedWire<PaginatedMassEmailUsersResponse['items'][number]>>(
     `/mass-email/users?${params.toString()}`,
-    {},
+		{ signal: options.signal },
     options.preserveUpstreamAuthError,
   )
   return normalizePaginated(payload)
 }
+
+export const listSelfRechargeUsers = async (options: ListMassEmailUsersOptions = {}): Promise<SelfRechargeUsersResponse> => (
+	requestJson<SelfRechargeUsersResponse>(
+		'/mass-email/self-recharge-users',
+		{ signal: options.signal },
+		options.preserveUpstreamAuthError,
+	)
+)
 
 export const createMassEmailBatch = async (payload: CreateMassEmailBatchRequest): Promise<MassEmailBatch> => (
   requestJson<MassEmailBatch>('/mass-email/batches', {

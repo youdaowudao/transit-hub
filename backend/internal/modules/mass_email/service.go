@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"net/mail"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +23,12 @@ const (
 	maxSelectedUserIDs = 1000
 	maxBatchRecipients = 10000
 	maxUserSearchRunes = 100
+
+	selfRechargePageSize     = 100
+	maxSelfRechargeRecords   = 100000
+	maxSelfRechargePages     = maxSelfRechargeRecords / selfRechargePageSize
+	selfRechargeQueryTimeout = 30 * time.Second
+	selfRechargePageTimeout  = 8 * time.Second
 )
 
 type AdminSessionProvider interface {
@@ -29,8 +36,9 @@ type AdminSessionProvider interface {
 }
 
 type Sub2APIUsersClient interface {
-	FetchSub2APIAdminUsersPage(session upstream.Session, query upstream.Sub2APIAdminUsersQuery) (upstream.Sub2APIAdminUsersPage, error)
+	FetchSub2APIAdminUsersPageWithContext(ctx context.Context, session upstream.Session, query upstream.Sub2APIAdminUsersQuery) (upstream.Sub2APIAdminUsersPage, error)
 	FetchSub2APIAdminUser(session upstream.Session, userID string) (upstream.Sub2APIAdminUser, error)
+	FetchSub2APIAdminRedeemCodesPage(ctx context.Context, session upstream.Session, query upstream.Sub2APIAdminRedeemCodesQuery) (upstream.Sub2APIAdminRedeemCodesPage, error)
 }
 
 type SettingsProvider interface {
@@ -75,7 +83,7 @@ func (s *Service) ListUsers(ctx context.Context, userID string, adminAccountID s
 	if err != nil {
 		return UsersPage{}, mapUpstreamError(err)
 	}
-	page, err := s.users.FetchSub2APIAdminUsersPage(session, upstream.Sub2APIAdminUsersQuery{
+	page, err := s.users.FetchSub2APIAdminUsersPageWithContext(ctx, session, upstream.Sub2APIAdminUsersQuery{
 		Page:      clampInt(query.Page, 1, math.MaxInt, 1),
 		PageSize:  clampInt(query.PageSize, 1, maxUsersPageSize, defaultPageSize),
 		Status:    strings.TrimSpace(query.Status),
@@ -93,6 +101,101 @@ func (s *Service) ListUsers(ctx context.Context, userID string, adminAccountID s
 		items = append(items, userDTO(item))
 	}
 	return UsersPage{Items: items, Total: page.Total, Page: page.Page, PageSize: page.PageSize, Pages: page.Pages}, nil
+}
+
+// ListSelfRechargeUsers returns a full, read-only aggregate of users who have
+// redeemed positive normal balance codes. The fixed source contract excludes
+// Sub2API's admin_balance records, and the result is published only after the
+// entire stable page stream has been scanned.
+func (s *Service) ListSelfRechargeUsers(ctx context.Context, userID string, adminAccountID string) (SelfRechargeUsersResult, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, selfRechargeQueryTimeout)
+	defer cancel()
+
+	session, err := s.sessions.RequireSession(queryCtx, userID, adminAccountID)
+	if err != nil {
+		return SelfRechargeUsersResult{}, mapRechargeQueryError(err)
+	}
+
+	aggregates := make(map[string]SelfRechargeUserDTO)
+	seenCodeIDs := make(map[string]struct{})
+	expectedTotal := -1
+	for page := 1; ; page++ {
+		if page > maxSelfRechargePages {
+			return SelfRechargeUsersResult{}, ErrRechargeQueryLimit
+		}
+		pageCtx, pageCancel := context.WithTimeout(queryCtx, selfRechargePageTimeout)
+		result, fetchErr := s.users.FetchSub2APIAdminRedeemCodesPage(pageCtx, session, upstream.Sub2APIAdminRedeemCodesQuery{
+			Page: page, PageSize: selfRechargePageSize,
+		})
+		pageCancel()
+		if fetchErr != nil {
+			return SelfRechargeUsersResult{}, mapRechargeQueryError(fetchErr)
+		}
+		if !result.TotalKnown || result.Page != page || result.PageSize != selfRechargePageSize {
+			return SelfRechargeUsersResult{}, ErrUpstreamRequest
+		}
+		if result.Total > maxSelfRechargeRecords || result.Pages > maxSelfRechargePages {
+			return SelfRechargeUsersResult{}, ErrRechargeQueryLimit
+		}
+		if expectedTotal < 0 {
+			expectedTotal = result.Total
+		} else if result.Total != expectedTotal {
+			return SelfRechargeUsersResult{}, ErrRechargeQueryChanged
+		}
+
+		for _, code := range result.Items {
+			if code.ID == "" {
+				return SelfRechargeUsersResult{}, ErrUpstreamRequest
+			}
+			if _, duplicated := seenCodeIDs[code.ID]; duplicated {
+				return SelfRechargeUsersResult{}, ErrRechargeQueryChanged
+			}
+			seenCodeIDs[code.ID] = struct{}{}
+			if code.Type != "balance" || code.Status != "used" || code.Value <= 0 {
+				continue
+			}
+			if strings.TrimSpace(code.UsedBy) == "" || code.UsedAt == nil || !isValidRechargeEmail(code.User.Email) {
+				return SelfRechargeUsersResult{}, ErrUpstreamRequest
+			}
+			key := strings.TrimSpace(code.UsedBy)
+			item := aggregates[key]
+			if item.UserID == "" {
+				item = SelfRechargeUserDTO{UserID: key, Email: strings.TrimSpace(code.User.Email)}
+			}
+			item.RechargeCount++
+			item.TotalAmount += code.Value
+			if item.LastRechargedAt.IsZero() || code.UsedAt.After(item.LastRechargedAt) {
+				item.LastRechargedAt = *code.UsedAt
+			}
+			aggregates[key] = item
+		}
+
+		if len(seenCodeIDs) > maxSelfRechargeRecords {
+			return SelfRechargeUsersResult{}, ErrRechargeQueryLimit
+		}
+		if page >= result.Pages {
+			break
+		}
+	}
+
+	if expectedTotal != len(seenCodeIDs) {
+		return SelfRechargeUsersResult{}, ErrRechargeQueryChanged
+	}
+	items := make([]SelfRechargeUserDTO, 0, len(aggregates))
+	result := SelfRechargeUsersResult{Items: items, TotalRecords: 0}
+	for _, item := range aggregates {
+		result.Items = append(result.Items, item)
+		result.TotalRecords += item.RechargeCount
+		result.TotalAmount += item.TotalAmount
+	}
+	sort.Slice(result.Items, func(i, j int) bool {
+		if result.Items[i].LastRechargedAt.Equal(result.Items[j].LastRechargedAt) {
+			return strings.ToLower(result.Items[i].Email) < strings.ToLower(result.Items[j].Email)
+		}
+		return result.Items[i].LastRechargedAt.After(result.Items[j].LastRechargedAt)
+	})
+	result.TotalUsers = len(result.Items)
+	return result, nil
 }
 
 func (s *Service) CreateBatch(ctx context.Context, userID string, adminAccountID string, req CreateBatchRequest) (BatchDTO, error) {
@@ -299,7 +402,7 @@ func (s *Service) resolveAllRecipients(ctx context.Context, session upstream.Ses
 	maxAllowedPages := pages(maxBatchRecipients, maxUsersPageSize)
 	search := normalizeUserSearch(filters.Search)
 	for page := 1; ; page++ {
-		result, err := s.users.FetchSub2APIAdminUsersPage(session, upstream.Sub2APIAdminUsersQuery{Page: page, PageSize: maxUsersPageSize, Status: filters.Status, Role: filters.Role, Search: search, SortBy: "created_at", SortOrder: "desc"})
+		result, err := s.users.FetchSub2APIAdminUsersPageWithContext(ctx, session, upstream.Sub2APIAdminUsersQuery{Page: page, PageSize: maxUsersPageSize, Status: filters.Status, Role: filters.Role, Search: search, SortBy: "created_at", SortOrder: "desc"})
 		if err != nil {
 			return nil, 0, mapUpstreamError(err)
 		}
@@ -391,6 +494,15 @@ func normalizeEmailKey(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
+func isValidRechargeEmail(email string) bool {
+	trimmed := strings.TrimSpace(email)
+	if trimmed == "" || strings.ContainsAny(trimmed, "\r\n") {
+		return false
+	}
+	parsed, err := mail.ParseAddress(trimmed)
+	return err == nil && parsed.Name == "" && parsed.Address == trimmed
+}
+
 func mapSettingsError(err error) error {
 	switch {
 	case errors.Is(err, settings.ErrEmailTemplateNotFound):
@@ -408,6 +520,16 @@ func mapUpstreamError(err error) error {
 		return ErrUpstreamAuth
 	}
 	return fmt.Errorf("%w", ErrUpstreamRequest)
+}
+
+func mapRechargeQueryError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrUpstreamRequest
+	}
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
+	return mapUpstreamError(err)
 }
 
 func mapNotFound(err error) error {

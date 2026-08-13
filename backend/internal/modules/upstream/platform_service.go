@@ -35,6 +35,8 @@ const (
 	keyUsageRetryDelay      = 150 * time.Millisecond
 )
 
+const sub2APIAdminRedeemCodesResponseLimitBytes int64 = 2 * 1024 * 1024
+
 type PlatformService struct {
 	httpClient *HTTPClient
 }
@@ -2669,17 +2671,107 @@ func stringFromRecord(record map[string]any, keys []string, fallback string) str
 // 其中 search 会先做空白裁剪并限制为 100 个 Unicode rune，然后再写入 url.Values，避免 handler 直接拼接 URL
 // 或把任意客户端参数转发到上游。
 func (s *PlatformService) FetchSub2APIAdminUsersPage(session Session, query Sub2APIAdminUsersQuery) (Sub2APIAdminUsersPage, error) {
+	return s.FetchSub2APIAdminUsersPageWithContext(context.Background(), session, query)
+}
+
+// FetchSub2APIAdminUsersPageWithContext is the cancellation-aware variant used
+// by administrator query pages. The compatibility wrapper above remains for
+// existing callers that do not own a request context.
+func (s *PlatformService) FetchSub2APIAdminUsersPageWithContext(ctx context.Context, session Session, query Sub2APIAdminUsersQuery) (Sub2APIAdminUsersPage, error) {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
 		return Sub2APIAdminUsersPage{}, newRequestError(ErrorAuth, PlatformSub2API)
 	}
 	query = normalizeSub2APIAdminUsersQuery(query)
 	values := sanitizeSub2APIAdminUsersValues(query)
 	requestURL := session.BaseURL + "/api/v1/admin/users?" + values.Encode()
-	response, err := s.httpClient.requestJSON(requestURL, adminAuthOptions(session))
+	response, err := s.httpClient.requestJSONWithContext(ctx, requestURL, adminAuthOptions(session))
 	if err != nil {
 		return Sub2APIAdminUsersPage{}, err
 	}
 	return parseSub2APIAdminUsersPage(response.Payload, query), nil
+}
+
+// FetchSub2APIAdminRedeemCodesPage reads a bounded page of redeemed balance
+// codes. The caller supplies a request context so cancellation from TransitHub
+// closes the active upstream request instead of leaving a detached read alive.
+func (s *PlatformService) FetchSub2APIAdminRedeemCodesPage(ctx context.Context, session Session, query Sub2APIAdminRedeemCodesQuery) (Sub2APIAdminRedeemCodesPage, error) {
+	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
+		return Sub2APIAdminRedeemCodesPage{}, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	query = normalizeSub2APIAdminRedeemCodesQuery(query)
+	values := sanitizeSub2APIAdminRedeemCodesValues(query)
+	response, err := s.httpClient.requestJSONWithContextLimit(ctx, session.BaseURL+"/api/v1/admin/redeem-codes?"+values.Encode(), adminAuthOptions(session), sub2APIAdminRedeemCodesResponseLimitBytes)
+	if err != nil {
+		return Sub2APIAdminRedeemCodesPage{}, err
+	}
+	return parseSub2APIAdminRedeemCodesPage(response.Payload, query), nil
+}
+
+func normalizeSub2APIAdminRedeemCodesQuery(query Sub2APIAdminRedeemCodesQuery) Sub2APIAdminRedeemCodesQuery {
+	if query.Page < 1 {
+		query.Page = 1
+	}
+	if query.PageSize < 1 || query.PageSize > 100 {
+		query.PageSize = 100
+	}
+	// This endpoint is intentionally not a generic redeem-code browser. Its
+	// fixed source contract prevents administrator balance codes entering the
+	// self-recharge aggregate.
+	query.Type = "balance"
+	query.Status = "used"
+	query.SortBy = "used_at"
+	query.SortOrder = "desc"
+	return query
+}
+
+func sanitizeSub2APIAdminRedeemCodesValues(query Sub2APIAdminRedeemCodesQuery) url.Values {
+	query = normalizeSub2APIAdminRedeemCodesQuery(query)
+	values := url.Values{}
+	values.Set("page", strconv.Itoa(query.Page))
+	values.Set("page_size", strconv.Itoa(query.PageSize))
+	values.Set("type", query.Type)
+	values.Set("status", query.Status)
+	values.Set("sort_by", query.SortBy)
+	values.Set("sort_order", query.SortOrder)
+	return values
+}
+
+func parseSub2APIAdminRedeemCodesPage(payload any, fallback Sub2APIAdminRedeemCodesQuery) Sub2APIAdminRedeemCodesPage {
+	itemsRaw := dataArray(payload)
+	items := make([]Sub2APIAdminRedeemCode, 0, len(itemsRaw))
+	for _, raw := range itemsRaw {
+		items = append(items, parseSub2APIAdminRedeemCode(raw))
+	}
+	data := dataRecord(payload)
+	page := intFromRecord(data, []string{"page"}, fallback.Page)
+	pageSize := intFromRecord(data, []string{"page_size", "pageSize"}, fallback.PageSize)
+	total, totalKnown := intFromRecordOK(data, []string{"total", "count"})
+	pages, pagesKnown := intFromRecordOK(data, []string{"pages", "total_pages", "totalPages"})
+	if page < 1 {
+		page = fallback.Page
+	}
+	if pageSize < 1 {
+		pageSize = fallback.PageSize
+	}
+	if pages < 1 && pageSize > 0 && totalKnown {
+		pages = int(math.Ceil(float64(total) / float64(pageSize)))
+	}
+	return Sub2APIAdminRedeemCodesPage{Items: items, Total: total, Page: page, PageSize: pageSize, Pages: pages, TotalKnown: totalKnown, PagesKnown: pagesKnown || (totalKnown && pages > 0)}
+}
+
+func parseSub2APIAdminRedeemCode(value any) Sub2APIAdminRedeemCode {
+	item := Sub2APIAdminRedeemCode{
+		ID:     firstStringy(value, []string{"id"}),
+		Type:   firstStringy(value, []string{"type"}),
+		Status: firstStringy(value, []string{"status"}),
+		UsedBy: firstStringy(value, []string{"used_by", "usedBy"}),
+		User:   parseSub2APIAdminUser(firstAny(value, []string{"user"})),
+		UsedAt: parseFlexibleTime(firstAny(value, []string{"used_at", "usedAt"})),
+	}
+	if amount := firstNumber(value, []string{"value"}); amount != nil {
+		item.Value = *amount
+	}
+	return item
 }
 
 func sanitizeSub2APIAdminUsersValues(query Sub2APIAdminUsersQuery) url.Values {

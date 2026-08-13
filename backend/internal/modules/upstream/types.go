@@ -336,6 +336,37 @@ type Sub2APIAdminUsersPage struct {
 	PagesKnown bool
 }
 
+// Sub2APIAdminRedeemCode 是 Sub2API 管理端兑换码列表的一条只读记录。User 仅来自
+// 上游响应的关联用户，不额外逐用户查询，避免全量查询放大为 N+1 请求。
+type Sub2APIAdminRedeemCode struct {
+	ID     string
+	Type   string
+	Value  float64
+	Status string
+	UsedBy string
+	UsedAt *time.Time
+	User   Sub2APIAdminUser
+}
+
+type Sub2APIAdminRedeemCodesQuery struct {
+	Page      int
+	PageSize  int
+	Type      string
+	Status    string
+	SortBy    string
+	SortOrder string
+}
+
+type Sub2APIAdminRedeemCodesPage struct {
+	Items      []Sub2APIAdminRedeemCode
+	Total      int
+	Page       int
+	PageSize   int
+	Pages      int
+	TotalKnown bool
+	PagesKnown bool
+}
+
 // Sub2APIUserBreakdownQuery is the explicit contract for the Sub2API admin
 // leaderboard source endpoint. The upstream end_date is exclusive.
 type Sub2APIUserBreakdownQuery struct {

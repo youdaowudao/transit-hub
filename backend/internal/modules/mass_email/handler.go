@@ -27,10 +27,27 @@ const createBatchBodyLimitBytes = 128 * 1024
 func RegisterRoutes(mux *http.ServeMux, service *Service, accounts AdminAccountResolver) {
 	handler := &Handler{service: service, accounts: accounts}
 	mux.HandleFunc("GET /api/mass-email/users", handler.listUsers)
+	mux.HandleFunc("GET /api/mass-email/self-recharge-users", handler.listSelfRechargeUsers)
 	mux.HandleFunc("POST /api/mass-email/batches", handler.createBatch)
 	mux.HandleFunc("GET /api/mass-email/batches", handler.listBatches)
 	mux.HandleFunc("GET /api/mass-email/batches/", handler.getBatch)
 	mux.HandleFunc("POST /api/mass-email/batches/", handler.batchAction)
+}
+
+func (h *Handler) listSelfRechargeUsers(w http.ResponseWriter, r *http.Request) {
+	userID, adminAccountID, ok := h.workspace(w, r)
+	if !ok {
+		return
+	}
+	result, err := h.service.ListSelfRechargeUsers(r.Context(), userID, adminAccountID)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
+		writeDomainError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
 }
 
 func (h *Handler) listUsers(w http.ResponseWriter, r *http.Request) {

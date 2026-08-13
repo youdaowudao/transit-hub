@@ -43,6 +43,21 @@ export interface PaginatedMassEmailUsersResponse {
   totalPages: number
 }
 
+export interface SelfRechargeUser {
+	userId: string
+	email: string
+	rechargeCount: number
+	totalAmount: number
+	lastRechargedAt: string
+}
+
+export interface SelfRechargeUsersResponse {
+	items: SelfRechargeUser[]
+	totalUsers: number
+	totalRecords: number
+	totalAmount: number
+}
+
 export interface MassEmailBatchFilters {
   status: string
   role: string

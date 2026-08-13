@@ -74,6 +74,39 @@ func TestHandlerListUsersForwardsQuery(t *testing.T) {
 	}
 }
 
+func TestHandlerListsSelfRechargeUsersOnExistingQueryModule(t *testing.T) {
+	usedAt := time.Date(2026, 8, 13, 4, 5, 6, 0, time.UTC)
+	users := &fakeUsers{redeemPages: map[int]upstream.Sub2APIAdminRedeemCodesPage{
+		1: {
+			Items: []upstream.Sub2APIAdminRedeemCode{{
+				ID: "code-1", Type: "balance", Status: "used", Value: 8.5, UsedBy: "42", UsedAt: &usedAt,
+				User: upstream.Sub2APIAdminUser{ID: "42", Email: "payer@example.com", Username: "not-shown"},
+			}},
+			Total: 1, Page: 1, PageSize: 100, Pages: 1, TotalKnown: true, PagesKnown: true,
+		},
+	}}
+	mux := http.NewServeMux()
+	RegisterRoutes(mux, newTestService(newFakeRepo(), users, nil), fakeAccounts{"user-1": "admin-1"})
+
+	req := authedRequest(http.MethodGet, "/api/mass-email/self-recharge-users", "", "user-1")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response SelfRechargeUsersResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("invalid response JSON: %v", err)
+	}
+	if response.TotalUsers != 1 || response.TotalRecords != 1 || response.TotalAmount != 8.5 || len(response.Items) != 1 || response.Items[0].Email != "payer@example.com" {
+		t.Fatalf("unexpected recharge response: %+v", response)
+	}
+	if strings.Contains(rec.Body.String(), "not-shown") || strings.Contains(rec.Body.String(), "username") {
+		t.Fatalf("recharge response leaked username: %s", rec.Body.String())
+	}
+}
+
 func TestHandlerBatchDetailItemsAndCrossWorkspaceNotFound(t *testing.T) {
 	mux := http.NewServeMux()
 	repo := newFakeRepo()

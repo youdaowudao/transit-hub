@@ -49,6 +49,13 @@ func (c *HTTPClient) requestJSONWithTimeout(reqURL string, options requestOption
 }
 
 func (c *HTTPClient) requestJSONWithContext(ctx context.Context, reqURL string, options requestOptions) (jsonResponse, error) {
+	return c.requestJSONWithContextLimit(ctx, reqURL, options, 0)
+}
+
+// requestJSONWithContextLimit keeps one bounded read isolated to callers that
+// fetch potentially large paginated payloads. A zero limit preserves the
+// existing response handling used by the rest of the upstream client.
+func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL string, options requestOptions, maxResponseBytes int64) (jsonResponse, error) {
 	method := options.Method
 	if method == "" {
 		method = http.MethodGet
@@ -89,12 +96,15 @@ func (c *HTTPClient) requestJSONWithContext(ctx context.Context, reqURL string, 
 
 	response, err := c.client.Do(req)
 	if err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return jsonResponse{}, contextErr
+		}
 		log.Printf("[http-client] 请求失败 url=%s err=%v", reqURL, err)
 		return jsonResponse{}, newRequestError(ErrorNetwork, "")
 	}
 	defer response.Body.Close()
 
-	payload, err := parseJSON(response.Body, reqURL)
+	payload, err := parseJSONWithLimit(response.Body, reqURL, maxResponseBytes)
 	if err != nil {
 		return jsonResponse{}, err
 	}
@@ -130,9 +140,20 @@ func encodeBody(body any) (io.Reader, error) {
 }
 
 func parseJSON(reader io.Reader, reqURL string) (any, error) {
+	return parseJSONWithLimit(reader, reqURL, 0)
+}
+
+func parseJSONWithLimit(reader io.Reader, reqURL string, maxBytes int64) (any, error) {
+	if maxBytes > 0 {
+		reader = io.LimitReader(reader, maxBytes+1)
+	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		log.Printf("[http-client] 读取响应体失败 url=%s err=%v", reqURL, err)
+		return nil, newRequestError(ErrorInvalidResponse, "")
+	}
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		log.Printf("[http-client] 响应体超过限制 url=%s limit=%d", reqURL, maxBytes)
 		return nil, newRequestError(ErrorInvalidResponse, "")
 	}
 	if len(data) == 0 {

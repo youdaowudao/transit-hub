@@ -2418,6 +2418,10 @@ export default {
       }
     },
     userLastUsed: {
+		tabs: {
+			lastUsed: '最后使用记录',
+			recharge: '充值记录'
+		},
       dateLabel: '使用日期',
       addDate: '添加',
       selectedDates: '已选日期',
@@ -2427,18 +2431,36 @@ export default {
       loading: '正在读取用户最后使用记录...',
       total: '共 {count} 人',
       dayCount: '{count} 人',
-      username: '用户名',
+      email: '邮箱',
       lastUsedAt: '最后使用时间',
-      copyUsername: '复制用户名',
+      copyEmail: '复制邮箱',
       copied: '已复制',
       emptyAll: '所选日期暂无用户使用记录。',
       emptyDay: '该日期暂无用户使用记录。',
       errors: {
         upstreamAuth: '当前工作区的 Sub2API 管理员会话已失效，请重新登录该工作区后再查询。',
         request: '读取用户最后使用记录失败，请检查当前工作区的 Sub2API 管理员会话后重试。',
-        copy: '复制失败，请手动复制用户名。'
+        copy: '复制失败，请手动复制邮箱。'
       }
     },
+		userRecharge: {
+			source: '余额充值（兑换）',
+			refresh: '查询全部充值用户',
+			loading: '正在汇总全部兑换充值记录...',
+			totalUsers: '充值用户',
+			totalRecords: '兑换次数',
+			totalAmount: '累计充值余额',
+			email: '邮箱',
+			rechargeCount: '兑换充值次数',
+			lastRechargedAt: '最近兑换时间',
+			empty: '暂无余额充值（兑换）记录。',
+			errors: {
+				upstreamAuth: '当前工作区的 Sub2API 管理员会话已失效，请重新登录该工作区后再查询。',
+				request: '读取用户充值记录失败，请稍后重试。',
+				limitReached: '兑换记录超过单次查询上限，未返回部分结果。',
+				dataChanged: '查询期间兑换记录发生变化，请重新查询。'
+			}
+		},
     settings: {
       title: '系统设置',
       subtitle: '管理系统运行参数、通知渠道及自动化策略。',

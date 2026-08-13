@@ -38,6 +38,89 @@ func TestCreateBatchSelectedResolvesServerSideDedupeAndSkips(t *testing.T) {
 	}
 }
 
+func TestListSelfRechargeUsersAggregatesOnlyRedeemedBalanceCodes(t *testing.T) {
+	firstUsed := time.Date(2026, 8, 12, 7, 8, 9, 0, time.UTC)
+	lastUsed := time.Date(2026, 8, 13, 8, 9, 10, 0, time.UTC)
+	users := &fakeUsers{redeemPages: map[int]upstream.Sub2APIAdminRedeemCodesPage{
+		1: {
+			Items: []upstream.Sub2APIAdminRedeemCode{
+				{ID: "1", Type: "balance", Status: "used", Value: 3.5, UsedBy: "10", UsedAt: &firstUsed, User: upstream.Sub2APIAdminUser{ID: "10", Email: "alice@example.com"}},
+				{ID: "2", Type: "balance", Status: "used", Value: 6.5, UsedBy: "10", UsedAt: &lastUsed, User: upstream.Sub2APIAdminUser{ID: "10", Email: "alice@example.com"}},
+				{ID: "3", Type: "balance", Status: "used", Value: 1, UsedBy: "11", UsedAt: &firstUsed, User: upstream.Sub2APIAdminUser{ID: "11", Email: "bob@example.com"}},
+			},
+			Total: 3, Page: 1, PageSize: 100, Pages: 1, TotalKnown: true, PagesKnown: true,
+		},
+	}}
+
+	result, err := newTestService(newFakeRepo(), users, nil).ListSelfRechargeUsers(context.Background(), "user-1", "admin-1")
+	if err != nil {
+		t.Fatalf("ListSelfRechargeUsers returned error: %v", err)
+	}
+	if result.TotalUsers != 2 || result.TotalRecords != 3 || result.TotalAmount != 11 {
+		t.Fatalf("unexpected totals: %+v", result)
+	}
+	if len(result.Items) != 2 || result.Items[0].Email != "alice@example.com" || result.Items[0].RechargeCount != 2 || result.Items[0].TotalAmount != 10 || !result.Items[0].LastRechargedAt.Equal(lastUsed) {
+		t.Fatalf("unexpected aggregated first row: %+v", result.Items)
+	}
+	if len(users.redeemQueries) != 1 || users.redeemQueries[0].PageSize != 100 {
+		t.Fatalf("expected one fixed-size query, got %+v", users.redeemQueries)
+	}
+}
+
+func TestListSelfRechargeUsersRejectsChangingOrInvalidPageStream(t *testing.T) {
+	now := time.Date(2026, 8, 13, 8, 9, 10, 0, time.UTC)
+	tests := []struct {
+		name  string
+		pages map[int]upstream.Sub2APIAdminRedeemCodesPage
+		want  error
+	}{
+		{
+			name: "changed total", want: ErrRechargeQueryChanged,
+			pages: map[int]upstream.Sub2APIAdminRedeemCodesPage{
+				1: {Items: []upstream.Sub2APIAdminRedeemCode{{ID: "1", Type: "balance", Status: "used", Value: 1, UsedBy: "10", UsedAt: &now, User: upstream.Sub2APIAdminUser{Email: "a@example.com"}}}, Total: 101, Page: 1, PageSize: 100, Pages: 2, TotalKnown: true, PagesKnown: true},
+				2: {Items: []upstream.Sub2APIAdminRedeemCode{{ID: "2", Type: "balance", Status: "used", Value: 1, UsedBy: "11", UsedAt: &now, User: upstream.Sub2APIAdminUser{Email: "b@example.com"}}}, Total: 102, Page: 2, PageSize: 100, Pages: 2, TotalKnown: true, PagesKnown: true},
+			},
+		},
+		{
+			name: "missing associated email", want: ErrUpstreamRequest,
+			pages: map[int]upstream.Sub2APIAdminRedeemCodesPage{
+				1: {Items: []upstream.Sub2APIAdminRedeemCode{{ID: "1", Type: "balance", Status: "used", Value: 1, UsedBy: "10", UsedAt: &now}}, Total: 1, Page: 1, PageSize: 100, Pages: 1, TotalKnown: true, PagesKnown: true},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := newTestService(newFakeRepo(), &fakeUsers{redeemPages: tt.pages}, nil).ListSelfRechargeUsers(context.Background(), "user-1", "admin-1")
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("error = %v, want %v", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestListSelfRechargeUsersExcludesAdministratorAndNonPositiveRecords(t *testing.T) {
+	now := time.Date(2026, 8, 13, 8, 9, 10, 0, time.UTC)
+	users := &fakeUsers{redeemPages: map[int]upstream.Sub2APIAdminRedeemCodesPage{
+		1: {
+			Items: []upstream.Sub2APIAdminRedeemCode{
+				{ID: "1", Type: "admin_balance", Status: "used", Value: 99, UsedBy: "10", UsedAt: &now, User: upstream.Sub2APIAdminUser{Email: "admin@example.com"}},
+				{ID: "2", Type: "balance", Status: "used", Value: 0, UsedBy: "11", UsedAt: &now, User: upstream.Sub2APIAdminUser{Email: "zero@example.com"}},
+				{ID: "3", Type: "balance", Status: "used", Value: 5, UsedBy: "12", UsedAt: &now, User: upstream.Sub2APIAdminUser{Email: "payer@example.com"}},
+			},
+			Total: 3, Page: 1, PageSize: 100, Pages: 1, TotalKnown: true, PagesKnown: true,
+		},
+	}}
+
+	result, err := newTestService(newFakeRepo(), users, nil).ListSelfRechargeUsers(context.Background(), "user-1", "admin-1")
+	if err != nil {
+		t.Fatalf("ListSelfRechargeUsers returned error: %v", err)
+	}
+	if result.TotalUsers != 1 || result.TotalRecords != 1 || result.TotalAmount != 5 || len(result.Items) != 1 || result.Items[0].Email != "payer@example.com" {
+		t.Fatalf("administrator or non-positive record entered aggregate: %+v", result)
+	}
+}
+
 func TestCreateBatchDuplicateRequestIDReturnsExistingWithoutSideEffects(t *testing.T) {
 	repo := newFakeRepo()
 	existing := Batch{ID: "existing", UserID: "user-1", AdminAccountID: "admin-1", RequestID: "req-1", Status: BatchStatusQueued, CreatedAt: time.Now(), UpdatedAt: time.Now()}
@@ -358,16 +441,27 @@ type fakeUsers struct {
 	pages         map[int]upstream.Sub2APIAdminUsersPage
 	lastQuery     upstream.Sub2APIAdminUsersQuery
 	pageQueries   []upstream.Sub2APIAdminUsersQuery
+	redeemPages   map[int]upstream.Sub2APIAdminRedeemCodesPage
+	redeemErr     error
+	redeemQueries []upstream.Sub2APIAdminRedeemCodesQuery
 	fetchOneCalls int
 }
 
-func (f *fakeUsers) FetchSub2APIAdminUsersPage(session upstream.Session, query upstream.Sub2APIAdminUsersQuery) (upstream.Sub2APIAdminUsersPage, error) {
+func (f *fakeUsers) FetchSub2APIAdminUsersPageWithContext(ctx context.Context, session upstream.Session, query upstream.Sub2APIAdminUsersQuery) (upstream.Sub2APIAdminUsersPage, error) {
 	f.lastQuery = query
 	f.pageQueries = append(f.pageQueries, query)
 	if f.pages != nil {
 		return f.pages[query.Page], nil
 	}
 	return f.page, nil
+}
+
+func (f *fakeUsers) FetchSub2APIAdminRedeemCodesPage(ctx context.Context, session upstream.Session, query upstream.Sub2APIAdminRedeemCodesQuery) (upstream.Sub2APIAdminRedeemCodesPage, error) {
+	f.redeemQueries = append(f.redeemQueries, query)
+	if f.redeemErr != nil {
+		return upstream.Sub2APIAdminRedeemCodesPage{}, f.redeemErr
+	}
+	return f.redeemPages[query.Page], nil
 }
 
 func (f *fakeUsers) FetchSub2APIAdminUser(session upstream.Session, userID string) (upstream.Sub2APIAdminUser, error) {

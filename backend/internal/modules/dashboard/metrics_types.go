@@ -24,19 +24,22 @@ const (
 // 所有金额均以 CNY 计价，上游指标已乘以站点的 rechargeRate。
 // TodayProfit/TodayPurchase/NetProfit 为 *float64，nil 表示该指标不可用。
 type MetricsResponse struct {
-	Date             string            `json:"date"`                       // 指标所属的固定上海业务日
-	Timezone         string            `json:"timezone"`                   // 业务日时区，固定为 Asia/Shanghai
-	TodayProfit      *float64          `json:"todayProfit"`                // 今日盈利额度；nil 表示营收不可用
-	SiteBalance      float64           `json:"siteBalance"`                // 站点用户总余额：所有非 admin 用户余额之和
-	TodayPurchase    *float64          `json:"todayPurchase"`              // 今日进货额度；nil 表示成本不完整
-	NetProfit        *float64          `json:"netProfit"`                  // 今日净利润；任一分项为 nil 时为 nil
-	ConfirmedCost    *float64          `json:"confirmedCost,omitempty"`    // 部分成本时的已确认成本下限
-	NetProfitCeiling *float64          `json:"netProfitCeiling,omitempty"` // 部分成本时的暂估净利润上限
-	SettlementStatus string            `json:"settlementStatus,omitempty"` // final/fallback/partial/provisional/unavailable
-	UpstreamBalance  float64           `json:"upstreamBalance"`            // 上游总余额：所有上游站点余额（CNY）之和
-	GroupCount       int               `json:"groupCount"`                 // 管理员站点分组总数，省去前端单独请求
-	MetricErrors     map[string]string `json:"metricErrors,omitempty"`     // 局部指标拉取失败原因
-	CostQuality      *CostQuality      `json:"costQuality,omitempty"`      // 成本质量信息，成本不完整时必须存在
+	Date              string                 `json:"date"`                       // 指标所属的固定上海业务日
+	Timezone          string                 `json:"timezone"`                   // 业务日时区，固定为 Asia/Shanghai
+	TodayProfit       *float64               `json:"todayProfit"`                // 今日盈利额度；nil 表示营收不可用
+	SiteBalance       float64                `json:"siteBalance"`                // 站点用户总余额：所有非 admin 用户余额之和
+	TodayPurchase     *float64               `json:"todayPurchase"`              // 今日进货额度；nil 表示成本不完整
+	NetProfit         *float64               `json:"netProfit"`                  // 今日净利润；任一分项为 nil 时为 nil
+	ConfirmedCost     *float64               `json:"confirmedCost,omitempty"`    // 部分成本时的已确认成本下限
+	NetProfitCeiling  *float64               `json:"netProfitCeiling,omitempty"` // 部分成本时的暂估净利润上限
+	SettlementStatus  string                 `json:"settlementStatus,omitempty"` // final/fallback/partial/provisional/unavailable
+	UpstreamBalance   float64                `json:"upstreamBalance"`            // 上游总余额：所有上游站点余额（CNY）之和
+	GroupCount        int                    `json:"groupCount"`                 // 管理员站点分组总数，省去前端单独请求
+	MetricErrors      map[string]string      `json:"metricErrors,omitempty"`     // 局部指标拉取失败原因
+	CostQuality       *CostQuality           `json:"costQuality,omitempty"`      // 成本质量信息，成本不完整时必须存在
+	AdditionalCosts   *AdditionalCostSummary `json:"additionalCosts,omitempty"`
+	OperatingCost     *float64               `json:"operatingCost,omitempty"`
+	AdjustedNetProfit *float64               `json:"adjustedNetProfit,omitempty"`
 }
 
 // CostQuality 描述本次成本采集的完整性与质量信息，前端根据此字段分级展示。
@@ -79,29 +82,41 @@ type TrendPoint struct {
 	CostExpectedCount  *int     `json:"costExpectedCount,omitempty"`
 	CostCollectedCount *int     `json:"costCollectedCount,omitempty"`
 	UpstreamBalance    float64  `json:"upstreamBalance"`
+	AdditionalCost     *float64 `json:"additionalCost,omitempty"`
+	OperatingCost      *float64 `json:"operatingCost,omitempty"`
+	AdjustedNetProfit  *float64 `json:"adjustedNetProfit,omitempty"`
 }
 
 // DailySnapshot 是 dashboard_daily_stats 表的行结构。
 // 每天至多一行（user_id + admin_account_id + date 唯一）。
 // 金额字段允许 NULL：nil 表示该指标未采集到数据，0.0 表示真实零值。
 type DailySnapshot struct {
-	ID                 string
-	UserID             string
-	AdminAccountID     string
-	Date               time.Time
-	TodayProfit        *float64
-	SiteBalance        *float64
-	TodayPurchase      *float64
-	NetProfit          *float64
-	UpstreamBalance    *float64
-	CreatedAt          time.Time
-	SettlementStatus   string     // provisional/fallback/partial/final
-	SnapshotSource     string     // live_cache/dated_query/backfill
-	ObservedAt         *time.Time // 数据实际采集时间
-	FinalizedAt        *time.Time // 日结成功写入时间，仅 final 行有值
-	CostExpectedCount  *int       // 应包含的上游站点数
-	CostCollectedCount *int       // 实际成功取到成本的站点数
-	BalanceObservedAt  *time.Time // 余额观测时间
+	ID                    string
+	UserID                string
+	AdminAccountID        string
+	Date                  time.Time
+	TodayProfit           *float64
+	SiteBalance           *float64
+	TodayPurchase         *float64
+	NetProfit             *float64
+	UpstreamBalance       *float64
+	CreatedAt             time.Time
+	SettlementStatus      string     // provisional/fallback/partial/final
+	SnapshotSource        string     // live_cache/dated_query/backfill
+	ObservedAt            *time.Time // 数据实际采集时间
+	FinalizedAt           *time.Time // 日结成功写入时间，仅 final 行有值
+	CostExpectedCount     *int       // 应包含的上游站点数
+	CostCollectedCount    *int       // 实际成功取到成本的站点数
+	BalanceObservedAt     *time.Time // 余额观测时间
+	AdditionalCost        *float64
+	RechargeFee           *float64
+	RechargeFeeRate       *float64
+	PromotionCost         *float64
+	FixedCost             *float64
+	AdjustmentCost        *float64
+	AdditionalCostRecords []AdditionalCostRecord
+	OperatingCost         *float64
+	AdjustedNetProfit     *float64
 }
 
 // SiteDailyCost 是 upstream_site_daily_costs 表的行结构。
@@ -125,18 +140,21 @@ type SiteDailyCost struct {
 
 // DailyStatItem 是 GET /api/dashboard/daily-stats 返回的单日数据。
 type DailyStatItem struct {
-	Date               string           `json:"date"`
-	SettlementStatus   string           `json:"settlementStatus"` // missing/provisional/fallback/partial/final
-	SnapshotSource     string           `json:"snapshotSource,omitempty"`
-	TodayProfit        *float64         `json:"todayProfit,omitempty"`
-	ConfirmedCost      *float64         `json:"confirmedCost,omitempty"`    // 成本下限
-	NetProfitCeiling   *float64         `json:"netProfitCeiling,omitempty"` // 暂估上限：todayProfit - confirmedCost
-	MarginCeiling      *float64         `json:"marginCeiling,omitempty"`
-	CostExpectedCount  *int             `json:"costExpectedCount,omitempty"`
-	CostCollectedCount *int             `json:"costCollectedCount,omitempty"`
-	FinalizedAt        *string          `json:"finalizedAt,omitempty"`
-	SiteCosts          []SiteCostDetail `json:"siteCosts,omitempty"`          // expand=true 时填充
-	SiteCostsLoadError bool             `json:"siteCostsLoadError,omitempty"` // expand=true 但查询失败
+	Date               string                 `json:"date"`
+	SettlementStatus   string                 `json:"settlementStatus"` // missing/provisional/fallback/partial/final
+	SnapshotSource     string                 `json:"snapshotSource,omitempty"`
+	TodayProfit        *float64               `json:"todayProfit,omitempty"`
+	ConfirmedCost      *float64               `json:"confirmedCost,omitempty"`    // 成本下限
+	NetProfitCeiling   *float64               `json:"netProfitCeiling,omitempty"` // 暂估上限：todayProfit - confirmedCost
+	MarginCeiling      *float64               `json:"marginCeiling,omitempty"`
+	CostExpectedCount  *int                   `json:"costExpectedCount,omitempty"`
+	CostCollectedCount *int                   `json:"costCollectedCount,omitempty"`
+	FinalizedAt        *string                `json:"finalizedAt,omitempty"`
+	SiteCosts          []SiteCostDetail       `json:"siteCosts,omitempty"`          // expand=true 时填充
+	SiteCostsLoadError bool                   `json:"siteCostsLoadError,omitempty"` // expand=true 但查询失败
+	AdditionalCosts    *AdditionalCostSummary `json:"additionalCosts,omitempty"`
+	OperatingCost      *float64               `json:"operatingCost,omitempty"`
+	AdjustedNetProfit  *float64               `json:"adjustedNetProfit,omitempty"`
 }
 
 // SiteCostDetail 是逐日明细中单个站点的成本展示数据。

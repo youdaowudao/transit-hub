@@ -94,6 +94,44 @@ export interface DashboardMetricsResponse {
   groupCount: number
   metricErrors?: Partial<Record<DashboardMetricKey, string>>
   costQuality?: CostQuality
+  additionalCosts?: AdditionalCostSummary
+  operatingCost?: number | null
+  adjustedNetProfit?: number | null
+}
+
+export interface AdditionalCostRecord {
+  id: string
+  type: 'recharge_fee' | 'promotion' | 'fixed' | 'adjustment' | string
+  name: string
+  businessDate: string
+  amount: number
+  amountCents: number
+  originalAmount?: number
+  rate?: number
+  usageRate?: number
+  days?: number
+  note?: string
+  estimated: boolean
+  createdAt: string
+}
+
+export interface AdditionalCostSummary {
+  rechargeFee: number | null
+  promotion: number
+  fixed: number
+  adjustment: number
+  total: number | null
+  feeRate?: number
+  available: boolean
+  unavailableReason?: string
+  records?: AdditionalCostRecord[]
+}
+
+export interface RechargeFeeRate {
+  id: string
+  effectiveDate: string
+  rate: number
+  createdAt: string
 }
 
 /** 成本质量信息，描述缓存成本的完整性。 */
@@ -130,6 +168,9 @@ export interface DashboardTrendPoint {
   costExpectedCount?: number | null
   costCollectedCount?: number | null
   upstreamBalance: number
+  additionalCost?: number | null
+  operatingCost?: number | null
+  adjustedNetProfit?: number | null
 }
 
 /** 历史趋势响应。 */
@@ -179,6 +220,26 @@ export const getDashboardMetrics = async (): Promise<DashboardMetricsResponse> =
 /** 获取历史趋势数据，days 支持 7（周）或 30（月）。 */
 export const getDashboardTrends = async (days: number): Promise<DashboardTrendsResponse> =>
   requestJson<DashboardTrendsResponse>(`/dashboard/trends?days=${days}`)
+
+export const getRechargeFeeRate = async (date?: string): Promise<RechargeFeeRate> =>
+  requestJson<RechargeFeeRate>(`/dashboard/recharge-fee-rate${date ? `?date=${encodeURIComponent(date)}` : ''}`)
+
+export const saveRechargeFeeRate = async (input: { effectiveDate: string; rate: number }): Promise<RechargeFeeRate> =>
+  requestJson<RechargeFeeRate>('/dashboard/recharge-fee-rate', { method: 'PUT', body: JSON.stringify(input) })
+
+export const listAdditionalCosts = async (from: string, to: string = from): Promise<{ items: AdditionalCostRecord[] }> =>
+  requestJson<{ items: AdditionalCostRecord[] }>(`/dashboard/additional-costs?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
+
+export const createAdditionalCost = async (input: {
+  type: 'promotion' | 'fixed' | 'adjustment'
+  name: string
+  businessDate: string
+  amount: number
+  usageRate?: number
+  days?: number
+  note?: string
+}): Promise<{ items: AdditionalCostRecord[] }> =>
+  requestJson<{ items: AdditionalCostRecord[] }>('/dashboard/additional-costs', { method: 'POST', body: JSON.stringify(input) })
 
 /** 单个利润核算问题；只包含可安全展示的稳定 ID 和错误元数据。 */
 export interface ProfitIssue {
@@ -331,6 +392,9 @@ export interface DailyStatItem {
   finalizedAt?: string | null
   siteCosts?: SiteCostDetail[]
   siteCostsLoadError?: boolean  // expand=true 但站点明细查询失败时为 true
+  additionalCosts?: AdditionalCostSummary
+  operatingCost?: number | null
+  adjustedNetProfit?: number | null
 }
 
 /** 每日明细响应。 */

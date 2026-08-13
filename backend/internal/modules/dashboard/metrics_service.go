@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -67,6 +68,7 @@ type MetricsService struct {
 	realReconciler  RealConnectionReconciler
 	sessionSync     MySiteStateSync
 	refreshInterval time.Duration // 用于推导 maxStaleness；0 表示使用默认值 2h
+	additionalCosts AdditionalCostRepository
 }
 
 // SetRefreshInterval 注入上游站点同步间隔，用于推导缓存时效阈值。
@@ -139,7 +141,122 @@ func (s *MetricsService) freshAdminSession(ctx context.Context, userID string, a
 }
 
 func NewMetricsService(store SessionStore, platform PlatformClient, upstreams UpstreamLister, metricsRepo metricsStore, accounts AdminAccountService) *MetricsService {
-	return &MetricsService{store: store, platform: platform, upstreams: upstreams, metricsRepo: metricsRepo, accounts: accounts}
+	service := &MetricsService{store: store, platform: platform, upstreams: upstreams, metricsRepo: metricsRepo, accounts: accounts}
+	if repo, ok := metricsRepo.(AdditionalCostRepository); ok {
+		service.additionalCosts = repo
+	}
+	return service
+}
+
+func (s *MetricsService) AdditionalCostRepository() AdditionalCostRepository {
+	return s.additionalCosts
+}
+
+func (s *MetricsService) GetRechargeFeeRate(ctx context.Context, userID, date string) (RechargeFeeRate, error) {
+	if _, err := time.ParseInLocation("2006-01-02", date, businesstime.Location()); err != nil {
+		return RechargeFeeRate{}, ErrAdditionalCostInvalidDate
+	}
+	if s.additionalCosts == nil {
+		return RechargeFeeRate{Rate: defaultRechargeFeeRate, EffectiveDate: date}, nil
+	}
+	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
+	if err != nil {
+		return RechargeFeeRate{}, err
+	}
+	return s.additionalCosts.GetRechargeFeeRate(ctx, userID, adminAccountID, date)
+}
+
+func (s *MetricsService) SaveRechargeFeeRate(ctx context.Context, userID string, input RechargeFeeRateInput) (RechargeFeeRate, error) {
+	if s.additionalCosts == nil {
+		return RechargeFeeRate{}, errors.New("dashboard.additionalCost.errors.unavailable")
+	}
+	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
+	if err != nil {
+		return RechargeFeeRate{}, err
+	}
+	if input.Rate < 0 || input.Rate > 1 || math.IsNaN(input.Rate) || math.IsInf(input.Rate, 0) {
+		return RechargeFeeRate{}, ErrAdditionalCostInvalidRate
+	}
+	if _, err := time.ParseInLocation("2006-01-02", input.EffectiveDate, businesstime.Location()); err != nil {
+		return RechargeFeeRate{}, ErrAdditionalCostInvalidDate
+	}
+	rate := RechargeFeeRate{ID: mustMetricsID(), UserID: userID, AdminAccountID: adminAccountID, EffectiveDate: input.EffectiveDate, Rate: input.Rate, CreatedAt: time.Now()}
+	if err := s.additionalCosts.SaveRechargeFeeRate(ctx, rate); err != nil {
+		return RechargeFeeRate{}, err
+	}
+	return rate, nil
+}
+
+func (s *MetricsService) CreateAdditionalCost(ctx context.Context, userID string, input AdditionalCostInput) ([]AdditionalCostRecord, error) {
+	if s.additionalCosts == nil {
+		return nil, errors.New("dashboard.additionalCost.errors.unavailable")
+	}
+	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	records, err := buildAdditionalCostRecords(userID, adminAccountID, input, mustMetricsID())
+	if err != nil {
+		return nil, err
+	}
+	if err := s.additionalCosts.InsertAdditionalCosts(ctx, records); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func (s *MetricsService) ListAdditionalCosts(ctx context.Context, userID, from, to string) ([]AdditionalCostRecord, error) {
+	if s.additionalCosts == nil {
+		return []AdditionalCostRecord{}, nil
+	}
+	fromDate, err := time.ParseInLocation("2006-01-02", from, businesstime.Location())
+	if err != nil {
+		return nil, ErrAdditionalCostInvalidDate
+	}
+	toDate, err := time.ParseInLocation("2006-01-02", to, businesstime.Location())
+	if err != nil || toDate.Before(fromDate) {
+		return nil, ErrAdditionalCostInvalidDate
+	}
+	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return s.additionalCosts.ListAdditionalCosts(ctx, userID, adminAccountID, from, to)
+}
+
+func (s *MetricsService) additionalCostSummary(ctx context.Context, userID, adminAccountID, date string, revenue *float64) *AdditionalCostSummary {
+	if s.additionalCosts == nil {
+		return nil
+	}
+	items, err := s.additionalCosts.ListAdditionalCosts(ctx, userID, adminAccountID, date, date)
+	if err != nil {
+		return &AdditionalCostSummary{Available: false, UnavailableReason: err.Error()}
+	}
+	base := summarizeAdditionalCostRecords(items)
+	summary := &base
+	if revenue == nil {
+		summary.RechargeFee = nil
+		summary.Available = false
+		summary.UnavailableReason = "revenue_unavailable"
+	} else {
+		rate, rateErr := s.additionalCosts.GetRechargeFeeRate(ctx, userID, adminAccountID, date)
+		if rateErr != nil {
+			summary.Available = false
+			summary.UnavailableReason = rateErr.Error()
+		} else {
+			fee := math.Round(*revenue*rate.Rate*100) / 100
+			summary.RechargeFee = &fee
+			summary.FeeRate = &rate.Rate
+		}
+	}
+	if summary.Available {
+		total := summary.Promotion + summary.Fixed + summary.Adjustment
+		if summary.RechargeFee != nil {
+			total += *summary.RechargeFee
+		}
+		summary.Total = &total
+	}
+	return summary
 }
 
 // summarizeCachedUpstreamCosts 汇总已同步的上游站点缓存（简化版，供日结路径使用）。
@@ -424,20 +541,33 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	} else if confirmedCost != nil || todayProfit != nil {
 		settlementStatus = SettlementStatusPartial
 	}
+	additionalCosts := s.additionalCostSummary(ctx, userID, adminAccountID, today, todayProfit)
+	var operatingCost, adjustedNetProfit *float64
+	if additionalCosts != nil && additionalCosts.Total != nil && todayPurchase != nil {
+		value := *todayPurchase + *additionalCosts.Total
+		operatingCost = &value
+		if todayProfit != nil {
+			profit := *todayProfit - value
+			adjustedNetProfit = &profit
+		}
+	}
 
 	result := MetricsResponse{
-		Date:             today,
-		Timezone:         businesstime.Timezone,
-		TodayProfit:      todayProfit,
-		SiteBalance:      siteBalance,
-		TodayPurchase:    todayPurchase,
-		NetProfit:        netProfit,
-		ConfirmedCost:    confirmedCost,
-		NetProfitCeiling: netProfitCeiling,
-		SettlementStatus: settlementStatus,
-		UpstreamBalance:  upstreamBalance,
-		GroupCount:       groupCount,
-		CostQuality:      costQuality,
+		Date:              today,
+		Timezone:          businesstime.Timezone,
+		TodayProfit:       todayProfit,
+		SiteBalance:       siteBalance,
+		TodayPurchase:     todayPurchase,
+		NetProfit:         netProfit,
+		ConfirmedCost:     confirmedCost,
+		NetProfitCeiling:  netProfitCeiling,
+		SettlementStatus:  settlementStatus,
+		UpstreamBalance:   upstreamBalance,
+		GroupCount:        groupCount,
+		CostQuality:       costQuality,
+		AdditionalCosts:   additionalCosts,
+		OperatingCost:     operatingCost,
+		AdjustedNetProfit: adjustedNetProfit,
 	}
 
 	if todayProfitErr != nil {
@@ -498,6 +628,9 @@ func (s *MetricsService) Trends(ctx context.Context, userID string, days int) (T
 			CostExpectedCount:  snap.CostExpectedCount,
 			CostCollectedCount: snap.CostCollectedCount,
 			UpstreamBalance:    derefF64(snap.UpstreamBalance),
+			AdditionalCost:     snap.AdditionalCost,
+			OperatingCost:      snap.OperatingCost,
+			AdjustedNetProfit:  snap.AdjustedNetProfit,
 		})
 	}
 	return TrendResponse{Points: points}, nil
@@ -577,20 +710,40 @@ func (s *MetricsService) upsertSnapshot(ctx context.Context, userID, adminAccoun
 	if metrics.SettlementStatus == SettlementStatusFallback {
 		snapshotStatus = SettlementStatusFallback
 	}
+	var additionalCost *float64
+	var rechargeFee *float64
+	var rechargeFeeRate *float64
+	var promotionCost *float64
+	var fixedCost *float64
+	var adjustmentCost *float64
+	if metrics.AdditionalCosts != nil {
+		additionalCost = metrics.AdditionalCosts.Total
+		rechargeFee, rechargeFeeRate = rechargeFeeSummary(metrics.AdditionalCosts)
+		promotionCost, fixedCost, adjustmentCost = additionalCostCategorySummary(metrics.AdditionalCosts)
+	}
 	snapshot := DailySnapshot{
-		ID:               id,
-		UserID:           userID,
-		AdminAccountID:   adminAccountID,
-		Date:             parsedDate,
-		TodayProfit:      metrics.TodayProfit,
-		SiteBalance:      ptrF64(metrics.SiteBalance),
-		TodayPurchase:    metrics.TodayPurchase,
-		NetProfit:        metrics.NetProfit,
-		UpstreamBalance:  ptrF64(metrics.UpstreamBalance),
-		CreatedAt:        now,
-		SettlementStatus: snapshotStatus,
-		SnapshotSource:   SnapshotSourceLiveCache,
-		ObservedAt:       &now,
+		ID:                    id,
+		UserID:                userID,
+		AdminAccountID:        adminAccountID,
+		Date:                  parsedDate,
+		TodayProfit:           metrics.TodayProfit,
+		SiteBalance:           ptrF64(metrics.SiteBalance),
+		TodayPurchase:         metrics.TodayPurchase,
+		NetProfit:             metrics.NetProfit,
+		UpstreamBalance:       ptrF64(metrics.UpstreamBalance),
+		CreatedAt:             now,
+		SettlementStatus:      snapshotStatus,
+		SnapshotSource:        SnapshotSourceLiveCache,
+		ObservedAt:            &now,
+		AdditionalCost:        additionalCost,
+		RechargeFee:           rechargeFee,
+		RechargeFeeRate:       rechargeFeeRate,
+		PromotionCost:         promotionCost,
+		FixedCost:             fixedCost,
+		AdjustmentCost:        adjustmentCost,
+		AdditionalCostRecords: additionalCostRecords(metrics.AdditionalCosts),
+		OperatingCost:         metrics.OperatingCost,
+		AdjustedNetProfit:     metrics.AdjustedNetProfit,
 	}
 	if metrics.CostQuality != nil {
 		snapshot.CostExpectedCount = intPtr(metrics.CostQuality.ExpectedSites)
@@ -943,6 +1096,34 @@ func intPtr(v int) *int {
 	return &v
 }
 
+func additionalCostTotal(summary *AdditionalCostSummary) *float64 {
+	if summary == nil {
+		return nil
+	}
+	return summary.Total
+}
+
+func rechargeFeeSummary(summary *AdditionalCostSummary) (*float64, *float64) {
+	if summary == nil {
+		return nil, nil
+	}
+	return summary.RechargeFee, summary.FeeRate
+}
+
+func additionalCostCategorySummary(summary *AdditionalCostSummary) (*float64, *float64, *float64) {
+	if summary == nil {
+		return nil, nil, nil
+	}
+	return ptrF64(summary.Promotion), ptrF64(summary.Fixed), ptrF64(summary.Adjustment)
+}
+
+func additionalCostRecords(summary *AdditionalCostSummary) []AdditionalCostRecord {
+	if summary == nil {
+		return nil
+	}
+	return summary.Records
+}
+
 // finalizeBusinessDate 对指定 SessionRef 的指定上海业务日期执行精确日结。
 // date 由调用方传入（"2006-01-02"），函数内部禁止用 time.Now() 推导业务日期。
 // 记录 finalized_at、observed_at 使用 time.Now() 是合法的。
@@ -1068,23 +1249,42 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 		return idErr
 	}
 	np := revenue - totalCost
+	additionalCosts := s.additionalCostSummary(ctx, userID, adminAccountID, date, ptrF64(revenue))
+	var operatingCost, adjustedNetProfit *float64
+	if additionalCosts != nil && additionalCosts.Total != nil && status == SettlementStatusFinal {
+		value := totalCost + *additionalCosts.Total
+		operatingCost = &value
+		adjusted := revenue - value
+		adjustedNetProfit = &adjusted
+	}
+	rechargeFee, rechargeFeeRate := rechargeFeeSummary(additionalCosts)
+	promotionCost, fixedCost, adjustmentCost := additionalCostCategorySummary(additionalCosts)
 	snapshot := DailySnapshot{
-		ID:                 snapshotID,
-		UserID:             userID,
-		AdminAccountID:     adminAccountID,
-		Date:               parsedDate,
-		TodayProfit:        ptrF64(revenue),
-		SiteBalance:        nil,
-		TodayPurchase:      ptrF64(totalCost),
-		NetProfit:          &np,
-		UpstreamBalance:    nil,
-		CreatedAt:          now,
-		SettlementStatus:   status,
-		SnapshotSource:     snapshotSource,
-		ObservedAt:         &now,
-		FinalizedAt:        finalizedAt,
-		CostExpectedCount:  &expectedCount,
-		CostCollectedCount: &collectedCount,
+		ID:                    snapshotID,
+		UserID:                userID,
+		AdminAccountID:        adminAccountID,
+		Date:                  parsedDate,
+		TodayProfit:           ptrF64(revenue),
+		SiteBalance:           nil,
+		TodayPurchase:         ptrF64(totalCost),
+		NetProfit:             &np,
+		UpstreamBalance:       nil,
+		CreatedAt:             now,
+		SettlementStatus:      status,
+		SnapshotSource:        snapshotSource,
+		ObservedAt:            &now,
+		FinalizedAt:           finalizedAt,
+		CostExpectedCount:     &expectedCount,
+		CostCollectedCount:    &collectedCount,
+		AdditionalCost:        additionalCostTotal(additionalCosts),
+		RechargeFee:           rechargeFee,
+		RechargeFeeRate:       rechargeFeeRate,
+		PromotionCost:         promotionCost,
+		FixedCost:             fixedCost,
+		AdjustmentCost:        adjustmentCost,
+		AdditionalCostRecords: additionalCostRecords(additionalCosts),
+		OperatingCost:         operatingCost,
+		AdjustedNetProfit:     adjustedNetProfit,
 	}
 	if upsertErr := s.metricsRepo.Upsert(ctx, snapshot); upsertErr != nil {
 		log.Printf("dashboard finalize: upsert snapshot failed user_id=%s date=%s err=%v", userID, date, upsertErr)
@@ -1221,6 +1421,27 @@ func (s *MetricsService) DailyStats(ctx context.Context, userID string, from, to
 					margin := ceiling / *snap.TodayProfit * 100
 					item.MarginCeiling = &margin
 				}
+			}
+			item.OperatingCost = snap.OperatingCost
+			item.AdjustedNetProfit = snap.AdjustedNetProfit
+			if snap.AdditionalCost != nil {
+				summary := &AdditionalCostSummary{
+					Available:   true,
+					Total:       snap.AdditionalCost,
+					RechargeFee: snap.RechargeFee,
+					FeeRate:     snap.RechargeFeeRate,
+				}
+				if snap.PromotionCost != nil {
+					summary.Promotion = *snap.PromotionCost
+				}
+				if snap.FixedCost != nil {
+					summary.Fixed = *snap.FixedCost
+				}
+				if snap.AdjustmentCost != nil {
+					summary.Adjustment = *snap.AdjustmentCost
+				}
+				summary.Records = snap.AdditionalCostRecords
+				item.AdditionalCosts = summary
 			}
 			if snap.FinalizedAt != nil {
 				ts := snap.FinalizedAt.Format(time.RFC3339)

@@ -440,6 +440,17 @@ const cards = computed<DashboardCoreCard[]>(() => {
   return result
 })
 
+const additionalCostLines = computed(() => {
+  const summary = liveData.value?.additionalCosts
+  if (!summary) return []
+  return [
+    { label: `充值手续费${summary.feeRate != null ? ` (${(summary.feeRate * 100).toFixed(2)}%)` : ''}`, value: summary.rechargeFee },
+    { label: '活动赠送摊销', value: summary.promotion },
+    { label: '服务器及固定费用', value: summary.fixed },
+    { label: '手工调整', value: summary.adjustment },
+  ]
+})
+
 type GroupMetricMode = 'profit' | 'revenue'
 
 const groupMetricMode = ref<GroupMetricMode>('profit')
@@ -948,6 +959,27 @@ const lastProbeLabel = computed(() => {
             :negative-when-up="card.negativeWhenUp"
             @click="handleMetricCardClick(card.key)"
           />
+        </section>
+
+        <section v-if="liveData?.additionalCosts" class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <article class="rounded-lg border border-border/60 bg-card p-4 shadow-sm sm:p-5">
+            <div class="flex items-start justify-between gap-4">
+              <div><h2 class="text-base font-semibold text-foreground">今日经营成本</h2><p class="mt-1 text-sm text-muted-foreground">上游成本之外的手续费、分摊和调整。</p></div>
+              <div class="text-right"><p class="text-lg font-bold text-foreground">{{ formatCny(liveData.operatingCost) }}</p><p class="text-xs text-muted-foreground">经营总成本</p></div>
+            </div>
+            <dl class="mt-4 divide-y divide-border/60 border-y border-border/60">
+              <div v-for="item in additionalCostLines" :key="item.label" class="flex items-center justify-between gap-4 py-2 text-sm"><dt class="text-muted-foreground">{{ item.label }}</dt><dd class="font-medium tabular-nums text-foreground">{{ formatCny(item.value) }}</dd></div>
+              <div class="flex items-center justify-between gap-4 py-2 text-sm"><dt class="text-muted-foreground">附加成本合计</dt><dd class="font-semibold tabular-nums text-foreground">{{ formatCny(liveData.additionalCosts.total) }}</dd></div>
+            </dl>
+            <div v-if="liveData.additionalCosts.records?.length" class="mt-3 space-y-1 text-xs text-muted-foreground">
+              <div v-for="record in liveData.additionalCosts.records" :key="record.id" class="flex justify-between gap-4"><span>{{ record.name }}{{ record.estimated ? '（预估）' : '' }}</span><span class="tabular-nums">{{ formatCny(record.amount) }}</span></div>
+            </div>
+          </article>
+          <article class="rounded-lg border border-border/60 bg-card p-4 shadow-sm sm:p-5">
+            <p class="text-sm font-medium text-muted-foreground">调整后净利润</p>
+            <p class="mt-2 text-2xl font-bold tabular-nums text-foreground">{{ formatCny(liveData.adjustedNetProfit) }}</p>
+            <p class="mt-3 text-sm text-muted-foreground">营业额减上游直接成本及全部附加成本。负数调整会按录入当天直接参与计算。</p>
+          </article>
         </section>
 
         <section class="grid gap-4 xl:grid-cols-12">

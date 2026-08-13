@@ -6,29 +6,35 @@ const dashboardSource = readFileSync(
   'utf8',
 )
 
-describe('dashboard group profit display boundary', () => {
-  it('requires exact group status before plotting profit', () => {
-    expect(dashboardSource).toContain("item.status === 'exact' && item.todayProfit != null")
+describe('dashboard group contribution display', () => {
+  it('keeps the original revenue mode and adds a profit mode', () => {
+    expect(dashboardSource).toContain("type GroupMetricMode = 'profit' | 'revenue'")
+    expect(dashboardSource).toContain("const groupMetricModes: GroupMetricMode[] = ['profit', 'revenue']")
+    expect(dashboardSource).toContain("? 'admin.dashboard.groups.profitAmount'")
+    expect(dashboardSource).toContain(": 'admin.dashboard.groups.revenueAmount'")
   })
 
-  it('does not hide exact groups only because the global total is partial', () => {
-    expect(dashboardSource).not.toContain("if (groupMetricMode.value === 'profit' && !groupProfitAvailable.value) return []")
-    expect(dashboardSource).toContain("groupMetricMode === 'profit' && topGroups.length === 0 && !groupProfitAvailable")
+  it('keeps authoritative group revenue and shows only direct profit with an explicit remainder', () => {
+    expect(dashboardSource).toContain('const groupRevenueTotal = computed(() => groupUsage.value?.totalRevenue ?? groupUsage.value?.total ?? 0)')
+    expect(dashboardSource).toContain('liveData.value?.adjustedNetProfit != null')
+    expect(dashboardSource).toContain('.filter((item) => item.todayProfit != null)')
+    expect(dashboardSource).toContain("groupId: '__unallocated_profit__'")
+    expect(dashboardSource).toContain("groupName: t('admin.dashboard.groups.unallocatedProfit')")
+    expect(dashboardSource).toContain('const unallocatedProfit = (liveData.value?.adjustedNetProfit ?? 0) - directProfit')
+    expect(dashboardSource).toContain("item?.contributionKind === 'unallocated_profit'")
+    expect(dashboardSource).toContain('已归属营收')
+    expect(dashboardSource).toContain('已归属成本')
   })
 
-  it('keeps concentration unavailable until totalProfit is formal', () => {
-    expect(dashboardSource).toContain("? groupUsage.value?.totalProfit")
-    expect(dashboardSource).toContain('if (total == null || total <= 0) return null')
+  it('does not use connection coverage, key attribution, or unbound cost', () => {
+    expect(dashboardSource).not.toContain('groupProfitIssues')
+    expect(dashboardSource).not.toContain('unbound_upstream_cost')
+    expect(dashboardSource).toContain('item.todayProfit ?? null')
   })
 
-  it('keeps unbound cost as a separate diagnostic from blocking issues', () => {
-    expect(dashboardSource).toContain('const groupUnboundCost = computed')
-    expect(dashboardSource).toContain('groupProfitIssues.length')
-    expect(dashboardSource).toContain('groupUnboundCost != null')
-  })
-
-  it('shows unbound upstream cost only as a profit contribution', () => {
-    expect(dashboardSource).toContain("if (item.contributionKind === 'unbound_upstream_cost') return null")
-    expect(dashboardSource).toContain("item.contributionKind === 'unbound_upstream_cost'")
+  it('publishes group revenue before unrelated operational reads settle', () => {
+    expect(dashboardSource).toContain('const groupRequest = getGroupUsageToday()')
+    expect(dashboardSource).toContain('groupUsage.value = value')
+    expect(dashboardSource).toContain('const balanceRequest = getUpstreamBalanceBreakdown()')
   })
 })

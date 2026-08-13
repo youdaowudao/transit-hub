@@ -242,77 +242,35 @@ export const createAdditionalCost = async (input: {
   requestJson<{ items: AdditionalCostRecord[] }>('/dashboard/additional-costs', { method: 'POST', body: JSON.stringify(input) })
 
 /** 单个利润核算问题；只包含可安全展示的稳定 ID 和错误元数据。 */
-export interface ProfitIssue {
-  code: string
-  source?: string
-  stage?: string
-  connectionId?: string
-  siteId?: string
-  keyId?: string
-  accountId?: string
-  groupId?: string
-  httpStatus?: number
-  retryable?: boolean
-  detail?: string
-  observedAt?: string
-  runId?: string
-}
-
-export interface GroupProfitQuality {
-  status: 'exact' | 'partial' | 'unavailable' | string
-  expectedConnections: number
-  resolvedConnections: number
-  unallocatableConnections: number
-  failedConnections: number
-  businessDate: string
-  observedAt?: string
-  runId?: string
-}
-
-export interface GroupProfitConnection {
-  connectionId: string
-  accountId: string
-  groupId: string
-  siteId: string
-  keyId: string
-  revenue?: number | null
-  cost?: number | null
-  profit?: number | null
-  status: string
-}
-
-/** 单个分组的今日营收、成本与利润。todayAmount 保留为营收兼容字段。 */
+/** 单个主站分组的今日营收。todayAmount 保留为兼容字段。 */
 export interface GroupUsageTodayItem {
   groupName: string
-  contributionKind?: 'unbound_upstream_cost' | string
   todayAmount: number
   todayRevenue: number
-  todayCost?: number | null
-  todayProfit?: number | null
   groupId?: string
-  status?: string
-  issues?: ProfitIssue[]
-  connections?: GroupProfitConnection[]
+  directRevenue?: number | null
+  directCost?: number | null
+  todayProfit?: number | null
 }
 
-/** 分组今日营收明细，以及在成本口径完整时实时派生的利润明细。 */
+/** 主站返回的分组今日营收明细。 */
 export interface GroupUsageTodayResponse {
   date: string
   total: number
   totalRevenue: number
-  totalCost?: number | null
-  totalProfit?: number | null
-  profitAvailable: boolean
-  profitUnavailableReason?: string
-  quality?: GroupProfitQuality
-  issues?: ProfitIssue[]
-  unboundUpstreamCost?: number | null
   groups: GroupUsageTodayItem[]
 }
 
-/** 获取当前工作区「我的站点」所有分组今日营收及实时利润。首页运营区和弹窗按需调用。 */
-export const getGroupUsageToday = async (): Promise<GroupUsageTodayResponse> =>
-  requestJson<GroupUsageTodayResponse>('/dashboard/group-usage-today')
+/** 获取主站所有分组的今日营收。首页运营区和弹窗按需调用。 */
+export const getGroupUsageToday = async (): Promise<GroupUsageTodayResponse> => {
+  const controller = new AbortController()
+  const timeout = globalThis.setTimeout(() => controller.abort(), 15_000)
+  try {
+    return await requestJson<GroupUsageTodayResponse>('/dashboard/group-usage-today', { signal: controller.signal })
+  } finally {
+    globalThis.clearTimeout(timeout)
+  }
+}
 
 /** 单个 key 的今日消费明细（「今日成本」下钻）。TodayAmount 已乘以站点 rechargeRate，RawAmount 为上游平台原始金额。 */
 export interface UpstreamKeyUsageTodayItem {

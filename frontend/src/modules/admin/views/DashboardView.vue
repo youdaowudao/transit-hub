@@ -8,6 +8,7 @@ import {
   AlertTriangle,
   ArrowRight,
   CircleCheckBig,
+  ChevronDown,
   Clock3,
   Gauge,
   Landmark,
@@ -34,7 +35,6 @@ import {
   getDashboardTrends,
   getGroupUsageToday,
   getUpstreamBalanceBreakdown,
-  type ProfitIssue,
   type GroupUsageTodayResponse,
   type UpstreamBalanceBreakdownResponse,
 } from '../api/dashboardAdmin'
@@ -98,6 +98,7 @@ const groupUsageTodayOpen = ref(false)
 const upstreamKeyUsageTodayOpen = ref(false)
 const upstreamBalanceBreakdownOpen = ref(false)
 const dailyStatsPanelOpen = ref(false)
+const additionalCostsExpanded = ref(false)
 
 const openBalanceFilter = () => { balanceFilterOpen.value = true }
 const closeBalanceFilter = () => { balanceFilterOpen.value = false }
@@ -163,17 +164,47 @@ hydrateSnapshot(initialSnapshot)
 const loadOperationalData = async () => {
   operationalLoading.value = true
   operationalLoadError.value = false
+  groupUsageLoadError.value = false
+  balanceLoadError.value = false
+  healthLoadError.value = false
+
+  // Each panel publishes as soon as its own read completes. A slow balance or
+  // health request must not keep authoritative group revenue in a spinner.
+  const groupRequest = getGroupUsageToday()
+    .then((value) => {
+      groupUsage.value = value
+      return value
+    })
+    .catch((error) => {
+      groupUsageLoadError.value = true
+      throw error
+    })
+  const balanceRequest = getUpstreamBalanceBreakdown()
+    .then((value) => {
+      balanceBreakdown.value = value
+      return value
+    })
+    .catch((error) => {
+      balanceLoadError.value = true
+      throw error
+    })
+  const healthRequest = getConnectionHealthStoredSummary()
+    .then((value) => {
+      healthSummary.value = value
+      return value
+    })
+    .catch((error) => {
+      healthLoadError.value = true
+      throw error
+    })
   const [groupResult, balanceResult, healthResult] = await Promise.allSettled([
-    getGroupUsageToday(),
-    getUpstreamBalanceBreakdown(),
-    getConnectionHealthStoredSummary(),
+    groupRequest,
+    balanceRequest,
+    healthRequest,
   ])
   groupUsageLoadError.value = groupResult.status === 'rejected'
   balanceLoadError.value = balanceResult.status === 'rejected'
   healthLoadError.value = healthResult.status === 'rejected'
-  if (groupResult.status === 'fulfilled') groupUsage.value = groupResult.value
-  if (balanceResult.status === 'fulfilled') balanceBreakdown.value = balanceResult.value
-  if (healthResult.status === 'fulfilled') healthSummary.value = healthResult.value
   operationalLoadError.value = groupUsageLoadError.value || balanceLoadError.value || healthLoadError.value
   operationalLoading.value = false
 
@@ -452,47 +483,14 @@ const additionalCostLines = computed(() => {
 })
 
 type GroupMetricMode = 'profit' | 'revenue'
+type GroupContributionItem = GroupUsageTodayResponse['groups'][number] & {
+  contributionKind?: 'unallocated_profit'
+}
 
 const groupMetricMode = ref<GroupMetricMode>('profit')
 const groupMetricModes: GroupMetricMode[] = ['profit', 'revenue']
-const groupProfitAvailable = computed(() => groupUsage.value?.profitAvailable === true)
-const groupProfitQuality = computed(() => groupUsage.value?.quality ?? null)
-const groupProfitIssues = computed(() => groupUsage.value?.issues ?? [])
-const groupUnboundCost = computed(() => groupUsage.value?.unboundUpstreamCost ?? null)
-const groupProfitStatusText = computed(() => {
-  const status = groupProfitQuality.value?.status
-  if (status === 'exact') return t('admin.dashboard.groupUsage.statusExact')
-  if (status === 'partial') return t('admin.dashboard.groupUsage.statusPartial')
-  return t('admin.dashboard.groupUsage.statusUnavailable')
-})
-const groupProfitSummary = computed(() => {
-  const quality = groupProfitQuality.value
-  if (!quality) return t('admin.dashboard.groups.profitUnavailable')
-  return t('admin.dashboard.groupUsage.quality', {
-    status: groupProfitStatusText.value,
-    resolved: quality.resolvedConnections,
-    expected: quality.expectedConnections,
-  })
-})
-const formatProfitIssueScope = (issue: ProfitIssue) => {
-  const ids = [
-    issue.connectionId ? `连接 ${issue.connectionId}` : '',
-    issue.accountId ? `账号 ${issue.accountId}` : '',
-    issue.groupId ? `分组 ${issue.groupId}` : '',
-    issue.siteId ? `站点 ${issue.siteId}` : '',
-    issue.keyId ? `Key ${issue.keyId}` : '',
-  ].filter(Boolean)
-  return ids.join(' · ') || t('admin.dashboard.groupUsage.noDetail')
-}
-const formatProfitIssueMeta = (issue: ProfitIssue) => {
-  const status = issue.httpStatus ? `HTTP ${issue.httpStatus}` : ''
-  const retryable = issue.httpStatus != null || issue.retryable
-    ? (issue.retryable
-      ? t('admin.dashboard.groupUsage.retryable')
-      : t('admin.dashboard.groupUsage.nonRetryable'))
-    : ''
-  return [status, retryable].filter(Boolean).join(' · ')
-}
+const groupRevenueTotal = computed(() => groupUsage.value?.totalRevenue ?? groupUsage.value?.total ?? 0)
+const groupProfitAvailable = computed(() => liveData.value?.adjustedNetProfit != null)
 const groupMetricLabel = computed(() => t(
   groupMetricMode.value === 'profit'
     ? 'admin.dashboard.groups.profitAmount'
@@ -508,18 +506,11 @@ const groupTopThreeLabel = computed(() => t(
     ? 'admin.dashboard.groups.topThreeProfitShare'
     : 'admin.dashboard.groups.topThreeRevenueShare',
 ))
-const groupMetricValue = (item: GroupUsageTodayResponse['groups'][number]): number | null => {
-  if (groupMetricMode.value === 'profit') {
-    return item.status === 'exact' && item.todayProfit != null ? item.todayProfit : null
-  }
-  if (item.contributionKind === 'unbound_upstream_cost') return null
-  return item.todayRevenue ?? item.todayAmount
+const groupMetricValue = (item: GroupContributionItem): number | null => {
+  if (groupMetricMode.value === 'revenue') return item.todayRevenue ?? item.todayAmount
+  return item.todayProfit ?? null
 }
-const groupDisplayName = (item: GroupUsageTodayResponse['groups'][number]) => (
-  item.contributionKind === 'unbound_upstream_cost'
-    ? t('admin.dashboard.groupUsage.unboundContribution')
-    : item.groupName
-)
+const groupDisplayName = (item: GroupContributionItem) => item.groupName
 
 const period = ref<DashboardPeriod>('week')
 const periods: DashboardPeriod[] = ['week', 'month']
@@ -653,17 +644,44 @@ const performanceChartOption = computed<EChartsCoreOption>(() => {
   }
 })
 
+const profitContributionGroups = computed<GroupContributionItem[]>(() => {
+  if (!groupProfitAvailable.value) return []
+  const directGroups = (groupUsage.value?.groups ?? [])
+    .filter((item) => item.todayProfit != null)
+  const directProfit = directGroups.reduce((total, item) => total + (item.todayProfit ?? 0), 0)
+  const unallocatedProfit = (liveData.value?.adjustedNetProfit ?? 0) - directProfit
+  return [
+    ...directGroups,
+    {
+      groupId: '__unallocated_profit__',
+      groupName: t('admin.dashboard.groups.unallocatedProfit'),
+      todayAmount: 0,
+      todayRevenue: 0,
+      todayProfit: unallocatedProfit,
+      contributionKind: 'unallocated_profit',
+    },
+  ]
+})
+const displayGroups = computed<GroupContributionItem[]>(() => (
+  groupMetricMode.value === 'profit'
+    ? profitContributionGroups.value
+    : (groupUsage.value?.groups ?? [])
+))
 const sortedGroups = computed(() => {
-  return [...(groupUsage.value?.groups ?? [])]
+  return [...displayGroups.value]
     .filter((item) => groupMetricValue(item) != null)
     .sort((a, b) => (groupMetricValue(b) ?? 0) - (groupMetricValue(a) ?? 0))
 })
-const topGroups = computed(() => sortedGroups.value.slice(0, 6))
+const topGroups = computed(() => {
+  if (groupMetricMode.value !== 'profit') return sortedGroups.value.slice(0, 6)
+  const unallocated = sortedGroups.value.find((item) => item.contributionKind === 'unallocated_profit')
+  const direct = sortedGroups.value
+    .filter((item) => item.contributionKind !== 'unallocated_profit')
+    .slice(0, unallocated ? 5 : 6)
+  return unallocated ? [...direct, unallocated] : direct
+})
 const groupConcentration = computed(() => {
-  if (groupMetricMode.value === 'profit' && groupUnboundCost.value != null) return null
-  const total = groupMetricMode.value === 'profit'
-    ? groupUsage.value?.totalProfit
-    : (groupUsage.value?.totalRevenue ?? groupUsage.value?.total)
+  const total = groupMetricMode.value === 'profit' ? null : groupRevenueTotal.value
   if (total == null || total <= 0) return null
   return sortedGroups.value.slice(0, 3).reduce((sum, item) => sum + (groupMetricValue(item) ?? 0), 0) / total
 })
@@ -686,6 +704,23 @@ const groupTooltipContent = (params: unknown, mutedColor: string, foregroundColo
   const amount = Number(point.value)
   const value = escapeTooltipHtml(formatCny(Number.isFinite(amount) ? amount : 0))
   const label = escapeTooltipHtml(groupMetricLabel.value)
+  const item = topGroups.value.find((group) => groupDisplayName(group) === String(point.name ?? ''))
+  if (groupMetricMode.value === 'profit' && item?.contributionKind === 'unallocated_profit') {
+    return `<div style="margin-bottom:6px;color:${foregroundColor};font-weight:600">${name}</div>`
+      + `<div style="display:flex;min-width:160px;justify-content:space-between;gap:20px;color:${mutedColor}">`
+      + `<span>${label}</span><strong style="color:${foregroundColor}">${value}</strong></div>`
+  }
+  if (groupMetricMode.value === 'profit' && item?.directRevenue != null && item.directCost != null) {
+    const directRevenue = escapeTooltipHtml(formatCny(item.directRevenue))
+    const directCost = escapeTooltipHtml(formatCny(item.directCost))
+    return `<div style="margin-bottom:6px;color:${foregroundColor};font-weight:600">${name}</div>`
+      + `<div style="display:flex;min-width:160px;justify-content:space-between;gap:20px;color:${mutedColor}">`
+      + `<span>已归属营收</span><strong style="color:${foregroundColor}">${directRevenue}</strong></div>`
+      + `<div style="display:flex;min-width:160px;justify-content:space-between;gap:20px;color:${mutedColor}">`
+      + `<span>已归属成本</span><strong style="color:${foregroundColor}">${directCost}</strong></div>`
+      + `<div style="display:flex;min-width:160px;justify-content:space-between;gap:20px;color:${mutedColor}">`
+      + `<span>${label}</span><strong style="color:${foregroundColor}">${value}</strong></div>`
+  }
   return `<div style="margin-bottom:6px;color:${foregroundColor};font-weight:600">${name}</div>`
     + `<div style="display:flex;min-width:160px;justify-content:space-between;gap:20px;color:${mutedColor}">`
     + `<span>${label}</span><strong style="color:${foregroundColor}">${value}</strong></div>`
@@ -961,24 +996,49 @@ const lastProbeLabel = computed(() => {
           />
         </section>
 
-        <section v-if="liveData?.additionalCosts" class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-          <article class="rounded-lg border border-border/60 bg-card p-4 shadow-sm sm:p-5">
-            <div class="flex items-start justify-between gap-4">
-              <div><h2 class="text-base font-semibold text-foreground">今日经营成本</h2><p class="mt-1 text-sm text-muted-foreground">上游成本之外的手续费、分摊和调整。</p></div>
-              <div class="text-right"><p class="text-lg font-bold text-foreground">{{ formatCny(liveData.operatingCost) }}</p><p class="text-xs text-muted-foreground">经营总成本</p></div>
+        <section v-if="liveData?.additionalCosts">
+          <article class="overflow-hidden rounded-lg border border-border/60 bg-card shadow-sm">
+            <button
+              type="button"
+              class="grid w-full grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-4 px-4 py-3 text-left transition-colors hover:bg-surface/40 sm:px-5"
+              :aria-expanded="additionalCostsExpanded"
+              aria-controls="dashboard-operating-cost-details"
+              @click="additionalCostsExpanded = !additionalCostsExpanded"
+            >
+              <span class="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-3">
+                <span class="text-sm font-medium text-muted-foreground">今日经营成本</span>
+                <span class="text-lg font-bold tabular-nums text-foreground">{{ formatCny(liveData.operatingCost) }}</span>
+              </span>
+              <span class="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-3">
+                <span class="text-sm font-medium text-muted-foreground">调整后净利润</span>
+                <span class="text-lg font-bold tabular-nums text-foreground">{{ formatCny(liveData.adjustedNetProfit) }}</span>
+              </span>
+              <ChevronDown
+                class="h-4 w-4 text-muted-foreground transition-transform"
+                :class="additionalCostsExpanded ? 'rotate-180' : ''"
+                aria-hidden="true"
+              />
+            </button>
+            <div
+              v-if="additionalCostsExpanded"
+              id="dashboard-operating-cost-details"
+              class="border-t border-border/60 px-4 pb-3 sm:px-5"
+            >
+              <dl class="divide-y divide-border/60">
+                <div class="flex items-center justify-between gap-4 py-2 text-sm">
+                  <dt class="text-muted-foreground">上游直接成本</dt>
+                  <dd class="font-medium tabular-nums text-foreground">{{ formatCny(liveData.todayPurchase) }}</dd>
+                </div>
+                <div v-for="item in additionalCostLines" :key="item.label" class="flex items-center justify-between gap-4 py-2 text-sm">
+                  <dt class="text-muted-foreground">{{ item.label }}</dt>
+                  <dd class="font-medium tabular-nums text-foreground">{{ formatCny(item.value) }}</dd>
+                </div>
+                <div class="flex items-center justify-between gap-4 py-2 text-sm">
+                  <dt class="text-muted-foreground">附加成本合计</dt>
+                  <dd class="font-semibold tabular-nums text-foreground">{{ formatCny(liveData.additionalCosts.total) }}</dd>
+                </div>
+              </dl>
             </div>
-            <dl class="mt-4 divide-y divide-border/60 border-y border-border/60">
-              <div v-for="item in additionalCostLines" :key="item.label" class="flex items-center justify-between gap-4 py-2 text-sm"><dt class="text-muted-foreground">{{ item.label }}</dt><dd class="font-medium tabular-nums text-foreground">{{ formatCny(item.value) }}</dd></div>
-              <div class="flex items-center justify-between gap-4 py-2 text-sm"><dt class="text-muted-foreground">附加成本合计</dt><dd class="font-semibold tabular-nums text-foreground">{{ formatCny(liveData.additionalCosts.total) }}</dd></div>
-            </dl>
-            <div v-if="liveData.additionalCosts.records?.length" class="mt-3 space-y-1 text-xs text-muted-foreground">
-              <div v-for="record in liveData.additionalCosts.records" :key="record.id" class="flex justify-between gap-4"><span>{{ record.name }}{{ record.estimated ? '（预估）' : '' }}</span><span class="tabular-nums">{{ formatCny(record.amount) }}</span></div>
-            </div>
-          </article>
-          <article class="rounded-lg border border-border/60 bg-card p-4 shadow-sm sm:p-5">
-            <p class="text-sm font-medium text-muted-foreground">调整后净利润</p>
-            <p class="mt-2 text-2xl font-bold tabular-nums text-foreground">{{ formatCny(liveData.adjustedNetProfit) }}</p>
-            <p class="mt-3 text-sm text-muted-foreground">营业额减上游直接成本及全部附加成本。负数调整会按录入当天直接参与计算。</p>
           </article>
         </section>
 
@@ -1127,38 +1187,8 @@ const lastProbeLabel = computed(() => {
             </div>
 
             <div v-else>
-              <div
-                v-if="groupMetricMode === 'profit' && groupProfitQuality"
-                class="mt-4 space-y-3 rounded-lg px-3 py-3 text-xs"
-                :class="groupProfitIssues.length ? 'border border-warning/30 bg-warning/5' : 'border border-border/60 bg-surface/40'"
-              >
-                <div class="flex flex-wrap items-center justify-between gap-2">
-                  <span class="font-medium text-foreground">{{ groupProfitSummary }}</span>
-                  <span v-if="groupProfitIssues.length" class="text-warning">
-                    {{ t('admin.dashboard.groupUsage.issuesTitle', { count: groupProfitIssues.length }) }}
-                  </span>
-                </div>
-                <p v-if="groupUnboundCost != null" class="text-muted-foreground">
-                  {{ t('admin.dashboard.groupUsage.unboundCost', { cost: formatCny(groupUnboundCost) }) }}
-                </p>
-                <ul v-if="groupProfitIssues.length" class="space-y-2 border-t border-warning/20 pt-2 text-muted-foreground">
-                  <li v-for="issue in groupProfitIssues.slice(0, 5)" :key="`${issue.code}-${issue.connectionId ?? issue.groupId ?? issue.keyId ?? 'global'}`" class="space-y-0.5">
-                    <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-                      <span class="font-medium text-foreground">{{ issue.code }}</span>
-                      <span>{{ formatProfitIssueMeta(issue) }}</span>
-                    </div>
-                    <div>{{ formatProfitIssueScope(issue) }}</div>
-                    <div v-if="issue.detail">{{ issue.detail }}</div>
-                  </li>
-                  <li v-if="groupProfitIssues.length > 5" class="text-muted-foreground">
-                    +{{ groupProfitIssues.length - 5 }} 项问题未展开
-                  </li>
-                </ul>
-              </div>
-
-              <div v-if="groupMetricMode === 'profit' && topGroups.length === 0 && !groupProfitAvailable" class="flex h-[280px] flex-col items-center justify-center gap-3 text-center text-sm text-muted-foreground">
-                <AlertTriangle class="h-5 w-5 text-warning" />
-                <span>{{ groupProfitSummary }}</span>
+              <div v-if="groupMetricMode === 'profit' && !groupProfitAvailable" class="flex h-[280px] items-center justify-center text-sm text-muted-foreground">
+                {{ t('admin.dashboard.groups.profitUnavailable') }}
               </div>
               <div v-else-if="topGroups.length > 0" class="mt-4 h-[280px]">
                 <DashboardEChart

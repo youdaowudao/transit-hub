@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -101,6 +103,15 @@ func (r *MetricsRepository) EnsureSchema(ctx context.Context) error {
 			ALTER TABLE dashboard_daily_stats ADD COLUMN balance_observed_at timestamptz;
 		EXCEPTION WHEN duplicate_column THEN NULL;
 		END $$;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS additional_cost double precision;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS recharge_fee double precision;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS recharge_fee_rate double precision;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS promotion_cost double precision;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS fixed_cost double precision;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS adjustment_cost double precision;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS additional_cost_records jsonb;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS operating_cost double precision;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS adjusted_net_profit double precision;
 
 		-- V0.1.16：金额字段改为允许 NULL，区分”真零消费”(0.0)与”无数据”(NULL)。
 		-- 只在字段仍为 NOT NULL 时执行，已经是 nullable 的字段直接跳过；
@@ -167,22 +178,138 @@ func (r *MetricsRepository) EnsureSchema(ctx context.Context) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_upstream_site_daily_costs_date
 			ON upstream_site_daily_costs (user_id, admin_account_id, date);
+
+		CREATE TABLE IF NOT EXISTS dashboard_recharge_fee_rates (
+			id               text PRIMARY KEY,
+			user_id          text NOT NULL,
+			admin_account_id text NOT NULL,
+			effective_date   date NOT NULL,
+			rate             numeric NOT NULL,
+			created_at       timestamptz NOT NULL DEFAULT now(),
+			UNIQUE (user_id, admin_account_id, effective_date)
+		);
+		CREATE INDEX IF NOT EXISTS idx_dashboard_recharge_fee_rates_date
+			ON dashboard_recharge_fee_rates (user_id, admin_account_id, effective_date DESC);
+
+		CREATE TABLE IF NOT EXISTS dashboard_additional_costs (
+			id               text PRIMARY KEY,
+			user_id          text NOT NULL,
+			admin_account_id text NOT NULL,
+			type             text NOT NULL,
+			name             text NOT NULL,
+			business_date    date NOT NULL,
+			amount_cents     bigint NOT NULL,
+			original_amount  numeric NOT NULL DEFAULT 0,
+			rate             numeric NOT NULL DEFAULT 0,
+			usage_rate       numeric NOT NULL DEFAULT 0,
+			days             integer NOT NULL DEFAULT 0,
+			source_id        text NOT NULL DEFAULT '',
+			note             text NOT NULL DEFAULT '',
+			estimated        boolean NOT NULL DEFAULT false,
+			created_at       timestamptz NOT NULL DEFAULT now()
+		);
+		CREATE INDEX IF NOT EXISTS idx_dashboard_additional_costs_date
+			ON dashboard_additional_costs (user_id, admin_account_id, business_date);
 	`)
 	return err
+}
+
+func (r *MetricsRepository) GetRechargeFeeRate(ctx context.Context, userID, adminAccountID, date string) (RechargeFeeRate, error) {
+	rate := RechargeFeeRate{UserID: userID, AdminAccountID: adminAccountID, Rate: defaultRechargeFeeRate, EffectiveDate: date}
+	err := r.db.QueryRow(ctx, `
+		SELECT id, effective_date::text, rate, created_at
+		FROM dashboard_recharge_fee_rates
+		WHERE user_id = $1 AND admin_account_id = $2 AND effective_date <= $3::date
+		ORDER BY effective_date DESC, created_at DESC, id DESC LIMIT 1
+	`, userID, adminAccountID, date).Scan(&rate.ID, &rate.EffectiveDate, &rate.Rate, &rate.CreatedAt)
+	if err == pgx.ErrNoRows {
+		return rate, nil
+	}
+	return rate, err
+}
+
+func (r *MetricsRepository) SaveRechargeFeeRate(ctx context.Context, rate RechargeFeeRate) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO dashboard_recharge_fee_rates (id, user_id, admin_account_id, effective_date, rate)
+		VALUES ($1, $2, $3, $4::date, $5)
+		ON CONFLICT (user_id, admin_account_id, effective_date) DO UPDATE SET
+			id = EXCLUDED.id, rate = EXCLUDED.rate, created_at = now()
+	`, rate.ID, rate.UserID, rate.AdminAccountID, rate.EffectiveDate, rate.Rate)
+	return err
+}
+
+func (r *MetricsRepository) InsertAdditionalCosts(ctx context.Context, records []AdditionalCostRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(records))
+	args := make([]any, 0, len(records)*14)
+	for i, record := range records {
+		base := i * 14
+		values = append(values, fmt.Sprintf(
+			"($%d, $%d, $%d, $%d, $%d, $%d::date, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9, base+10, base+11, base+12, base+13, base+14,
+		))
+		args = append(args,
+			record.ID, record.UserID, record.AdminAccountID, record.Type, record.Name, record.BusinessDate,
+			record.AmountCents, record.OriginalAmount, record.Rate, record.UsageRate, record.Days,
+			record.SourceID, record.Note, record.Estimated,
+		)
+	}
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO dashboard_additional_costs (
+			id, user_id, admin_account_id, type, name, business_date, amount_cents,
+			original_amount, rate, usage_rate, days, source_id, note, estimated
+		) VALUES `+strings.Join(values, ", "), args...)
+	return err
+}
+
+func (r *MetricsRepository) ListAdditionalCosts(ctx context.Context, userID, adminAccountID, from, to string) ([]AdditionalCostRecord, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, type, name, business_date::text, amount_cents, original_amount, rate, usage_rate,
+		       days, source_id, note, estimated, created_at
+		FROM dashboard_additional_costs
+		WHERE user_id = $1 AND admin_account_id = $2 AND business_date >= $3::date AND business_date <= $4::date
+		ORDER BY business_date ASC, created_at ASC, id ASC
+	`, userID, adminAccountID, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]AdditionalCostRecord, 0)
+	for rows.Next() {
+		var item AdditionalCostRecord
+		if err := rows.Scan(&item.ID, &item.Type, &item.Name, &item.BusinessDate, &item.AmountCents,
+			&item.OriginalAmount, &item.Rate, &item.UsageRate, &item.Days, &item.SourceID, &item.Note,
+			&item.Estimated, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.UserID = userID
+		item.AdminAccountID = adminAccountID
+		item.Amount = float64(item.AmountCents) / 100
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 // Upsert 插入或更新指定用户指定工作区指定日期的快照行。
 // final 保护：settlement_status = 'final' 的行不允许被 snapshot_source = 'live_cache' 的写入覆盖。
 // 条件：目标行不是 final，或者来源不是 live_cache（dated_query/backfill 允许覆盖 provisional/partial）。
 func (r *MetricsRepository) Upsert(ctx context.Context, snapshot DailySnapshot) error {
-	_, err := r.db.Exec(ctx, `
+	recordsJSON, err := json.Marshal(snapshot.AdditionalCostRecords)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(ctx, `
 		INSERT INTO dashboard_daily_stats (
 			id, user_id, admin_account_id, date,
 			today_profit, site_balance, today_purchase, net_profit, upstream_balance,
 			created_at, settlement_status, snapshot_source, observed_at,
-			finalized_at, cost_expected_count, cost_collected_count, balance_observed_at
+			finalized_at, cost_expected_count, cost_collected_count, balance_observed_at,
+			additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost,
+			adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit
 		)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb, $25, $26
 		WHERE EXISTS (SELECT 1 FROM admin_accounts WHERE user_id = $2 AND id = $3)
 		ON CONFLICT (user_id, admin_account_id, date) DO UPDATE SET
 			today_profit        = EXCLUDED.today_profit,
@@ -198,7 +325,16 @@ func (r *MetricsRepository) Upsert(ctx context.Context, snapshot DailySnapshot) 
 			finalized_at        = EXCLUDED.finalized_at,
 			cost_expected_count = EXCLUDED.cost_expected_count,
 			cost_collected_count = EXCLUDED.cost_collected_count,
-			balance_observed_at = COALESCE(EXCLUDED.balance_observed_at, dashboard_daily_stats.balance_observed_at)
+			balance_observed_at = COALESCE(EXCLUDED.balance_observed_at, dashboard_daily_stats.balance_observed_at),
+			additional_cost    = EXCLUDED.additional_cost,
+			recharge_fee       = EXCLUDED.recharge_fee,
+			recharge_fee_rate  = EXCLUDED.recharge_fee_rate,
+			promotion_cost     = EXCLUDED.promotion_cost,
+			fixed_cost         = EXCLUDED.fixed_cost,
+			adjustment_cost    = EXCLUDED.adjustment_cost,
+			additional_cost_records = EXCLUDED.additional_cost_records,
+			operating_cost     = EXCLUDED.operating_cost,
+			adjusted_net_profit = EXCLUDED.adjusted_net_profit
 		WHERE EXISTS (SELECT 1 FROM admin_accounts WHERE user_id = EXCLUDED.user_id AND id = EXCLUDED.admin_account_id)
 		  AND (dashboard_daily_stats.settlement_status != 'final' OR EXCLUDED.snapshot_source != 'live_cache')
 	`, snapshot.ID, snapshot.UserID, snapshot.AdminAccountID, snapshot.Date,
@@ -206,7 +342,9 @@ func (r *MetricsRepository) Upsert(ctx context.Context, snapshot DailySnapshot) 
 		snapshot.NetProfit, snapshot.UpstreamBalance, snapshot.CreatedAt,
 		snapshot.SettlementStatus, snapshot.SnapshotSource, snapshot.ObservedAt,
 		snapshot.FinalizedAt, snapshot.CostExpectedCount, snapshot.CostCollectedCount,
-		snapshot.BalanceObservedAt)
+		snapshot.BalanceObservedAt, snapshot.AdditionalCost, snapshot.RechargeFee, snapshot.RechargeFeeRate,
+		snapshot.PromotionCost, snapshot.FixedCost, snapshot.AdjustmentCost, recordsJSON,
+		snapshot.OperatingCost, snapshot.AdjustedNetProfit)
 	return err
 }
 
@@ -214,7 +352,7 @@ func (r *MetricsRepository) Upsert(ctx context.Context, snapshot DailySnapshot) 
 // 包含结算状态，供前端判断环比是否可信。
 func (r *MetricsRepository) ListRange(ctx context.Context, userID, adminAccountID string, days int, businessDate string) ([]DailySnapshot, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, user_id, admin_account_id, date, today_profit, site_balance, today_purchase, net_profit, upstream_balance, created_at, settlement_status
+		SELECT id, user_id, admin_account_id, date, today_profit, site_balance, today_purchase, net_profit, upstream_balance, created_at, settlement_status, additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost, adjustment_cost, operating_cost, adjusted_net_profit
 		FROM dashboard_daily_stats
 		WHERE user_id = $1 AND admin_account_id = $2 AND date >= ($3::date - $4::int) AND date < $3::date
 		ORDER BY date ASC
@@ -228,7 +366,9 @@ func (r *MetricsRepository) ListRange(ctx context.Context, userID, adminAccountI
 	for rows.Next() {
 		var s DailySnapshot
 		if err := rows.Scan(&s.ID, &s.UserID, &s.AdminAccountID, &s.Date, &s.TodayProfit, &s.SiteBalance,
-			&s.TodayPurchase, &s.NetProfit, &s.UpstreamBalance, &s.CreatedAt, &s.SettlementStatus); err != nil {
+			&s.TodayPurchase, &s.NetProfit, &s.UpstreamBalance, &s.CreatedAt, &s.SettlementStatus,
+			&s.AdditionalCost, &s.RechargeFee, &s.RechargeFeeRate, &s.PromotionCost, &s.FixedCost,
+			&s.AdjustmentCost, &s.OperatingCost, &s.AdjustedNetProfit); err != nil {
 			return nil, err
 		}
 		if s.SnapshotSource == "" {
@@ -358,7 +498,9 @@ func (r *MetricsRepository) ListDailyStats(ctx context.Context, userID, adminAcc
 		SELECT id, user_id, admin_account_id, date,
 		       today_profit, site_balance, today_purchase, net_profit, upstream_balance,
 		       created_at, settlement_status, snapshot_source, observed_at,
-		       finalized_at, cost_expected_count, cost_collected_count, balance_observed_at
+		       finalized_at, cost_expected_count, cost_collected_count, balance_observed_at,
+		       additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost,
+		       adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit
 		FROM dashboard_daily_stats
 		WHERE user_id = $1 AND admin_account_id = $2
 		  AND date >= $3::date AND date <= $4::date
@@ -372,13 +514,21 @@ func (r *MetricsRepository) ListDailyStats(ctx context.Context, userID, adminAcc
 	snapshots := make([]DailySnapshot, 0)
 	for rows.Next() {
 		var s DailySnapshot
+		var recordsJSON []byte
 		if err := rows.Scan(
 			&s.ID, &s.UserID, &s.AdminAccountID, &s.Date,
 			&s.TodayProfit, &s.SiteBalance, &s.TodayPurchase, &s.NetProfit, &s.UpstreamBalance,
 			&s.CreatedAt, &s.SettlementStatus, &s.SnapshotSource, &s.ObservedAt,
 			&s.FinalizedAt, &s.CostExpectedCount, &s.CostCollectedCount, &s.BalanceObservedAt,
+			&s.AdditionalCost, &s.RechargeFee, &s.RechargeFeeRate, &s.PromotionCost, &s.FixedCost,
+			&s.AdjustmentCost, &recordsJSON, &s.OperatingCost, &s.AdjustedNetProfit,
 		); err != nil {
 			return nil, err
+		}
+		if len(recordsJSON) > 0 && string(recordsJSON) != "null" {
+			if err := json.Unmarshal(recordsJSON, &s.AdditionalCostRecords); err != nil {
+				return nil, err
+			}
 		}
 		snapshots = append(snapshots, s)
 	}

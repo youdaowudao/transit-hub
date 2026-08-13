@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"math"
+	"sort"
 	"strings"
 
 	"transithub/backend/internal/modules/my_sites"
@@ -8,11 +10,18 @@ import (
 
 const (
 	ProfitAllocationExact         = "exact"
+	ProfitAllocationFailed        = "failed"
+	ProfitAllocationPending       = "pending"
 	ProfitAllocationUnallocatable = "unallocatable"
 	ProfitAllocationUnavailable   = "unavailable"
-	ProfitIssueDuplicateBinding   = "duplicate_binding"
-	ProfitIssueMultiGroup         = "multi_group_unallocatable"
-	ProfitIssueKeyMissing         = "upstream_key_missing"
+
+	ProfitIssueConnectionIncomplete = "real_connection_incomplete"
+	ProfitIssueDuplicateBinding     = "duplicate_binding"
+	ProfitIssueGroupRevenueMismatch = "group_revenue_mismatch"
+	ProfitIssueMultiGroup           = "multi_group_unallocatable"
+	ProfitIssueKeyMissing           = "upstream_key_missing"
+
+	profitAmountTolerance = 0.000001
 )
 
 // ProfitIssue is a sanitized attribution failure returned to the dashboard.
@@ -38,9 +47,21 @@ type profitAllocationGroup struct {
 	Status string
 }
 
+type profitConnectionState struct {
+	Connection my_sites.RealConnection
+	GroupIDs   []string
+	GroupID    string
+	Status     string
+	Revenue    *float64
+	Cost       *float64
+	Profit     *float64
+	Issues     []ProfitIssue
+}
+
 type profitAllocationResult struct {
 	Groups                   map[string]profitAllocationGroup
 	Connections              map[string]profitAllocationGroup
+	ConnectionRevenue        map[string]*float64
 	Issues                   []ProfitIssue
 	UnboundCost              float64
 	ResolvedConnections      int
@@ -48,126 +69,192 @@ type profitAllocationResult struct {
 	FailedConnections        int
 }
 
-// allocateRealConnectionProfit applies the strict V2.0.5 attribution boundary.
-// It only allocates a key to one group when the persisted relationship is active,
-// complete, and one-to-one. Unknown or ambiguous costs remain nil.
-func allocateRealConnectionProfit(
-	connections []my_sites.RealConnection,
-	revenueByGroup map[string]float64,
-	costByKey map[string]float64,
-) profitAllocationResult {
-	result := profitAllocationResult{
-		Groups:      make(map[string]profitAllocationGroup, len(revenueByGroup)),
-		Connections: make(map[string]profitAllocationGroup, len(connections)),
+func newProfitConnectionStates(connections []my_sites.RealConnection) []*profitConnectionState {
+	states := make([]*profitConnectionState, 0, len(connections))
+	keyOwners := make(map[string][]*profitConnectionState)
+	accountOwners := make(map[string][]*profitConnectionState)
+
+	for _, connection := range connections {
+		state := &profitConnectionState{
+			Connection: connection,
+			GroupIDs:   normalizedIDs(connection.OwnGroupIDs),
+			Status:     ProfitAllocationPending,
+		}
+		states = append(states, state)
+		if strings.TrimSpace(connection.UpstreamSiteID) != "" && strings.TrimSpace(connection.UpstreamKeyID) != "" {
+			keyOwners[profitKey(connection)] = append(keyOwners[profitKey(connection)], state)
+		}
+		if accountID := strings.TrimSpace(connection.AdminAccountID); accountID != "" {
+			accountOwners[accountID] = append(accountOwners[accountID], state)
+		}
+		if len(state.GroupIDs) != 1 {
+			markProfitConnection(state, ProfitAllocationUnallocatable, connectionProfitIssue(connection, ProfitIssueMultiGroup, "real_connections", "binding", strings.Join(state.GroupIDs, ",")))
+			continue
+		}
+		state.GroupID = state.GroupIDs[0]
+		if strings.TrimSpace(connection.UpstreamSiteID) == "" || strings.TrimSpace(connection.UpstreamKeyID) == "" || strings.TrimSpace(connection.AdminAccountID) == "" {
+			markProfitConnection(state, ProfitAllocationFailed, connectionProfitIssue(connection, ProfitIssueConnectionIncomplete, "real_connections", "binding", state.GroupID))
+			continue
+		}
 	}
-	for groupID := range revenueByGroup {
+
+	for _, state := range states {
+		if len(keyOwners[profitKey(state.Connection)]) > 1 {
+			issue := connectionProfitIssue(state.Connection, ProfitIssueDuplicateBinding, "real_connections", "binding", state.GroupID)
+			issue.Detail = "duplicate_key"
+			markProfitConnection(state, ProfitAllocationUnallocatable, issue)
+		}
+		if len(accountOwners[strings.TrimSpace(state.Connection.AdminAccountID)]) > 1 {
+			issue := connectionProfitIssue(state.Connection, ProfitIssueDuplicateBinding, "real_connections", "binding", state.GroupID)
+			issue.Detail = "duplicate_account"
+			markProfitConnection(state, ProfitAllocationUnallocatable, issue)
+		}
+	}
+	return states
+}
+
+func finalizeRealConnectionProfit(states []*profitConnectionState, displayRevenueByGroup, costByKey map[string]float64) profitAllocationResult {
+	result := profitAllocationResult{
+		Groups:            make(map[string]profitAllocationGroup, len(displayRevenueByGroup)),
+		Connections:       make(map[string]profitAllocationGroup, len(states)),
+		ConnectionRevenue: make(map[string]*float64, len(states)),
+	}
+	for groupID := range displayRevenueByGroup {
 		result.Groups[groupID] = profitAllocationGroup{Status: ProfitAllocationUnavailable}
 	}
 
-	keyOwners := make(map[string][]string)
-	accountOwners := make(map[string][]string)
-	validConnections := make(map[string]my_sites.RealConnection)
-	for _, connection := range connections {
-		if strings.TrimSpace(connection.Status) != "active" {
+	for _, state := range states {
+		if state.Status != ProfitAllocationPending {
 			continue
 		}
-		groupIDs := normalizedIDs(connection.OwnGroupIDs)
-		if len(groupIDs) != 1 {
-			for _, groupID := range groupIDs {
-				result.Groups[groupID] = profitAllocationGroup{Status: ProfitAllocationUnallocatable}
-			}
-			result.Connections[connection.ID] = profitAllocationGroup{Status: ProfitAllocationUnallocatable}
-			result.Issues = append(result.Issues, ProfitIssue{Code: ProfitIssueMultiGroup, Source: "real_connections", Stage: "binding", GroupID: strings.Join(groupIDs, ","), ConnectionID: connection.ID, AccountID: connection.AdminAccountID, SiteID: connection.UpstreamSiteID, KeyID: connection.UpstreamKeyID})
-			result.UnallocatableConnections++
+		cost, ok := costByKey[profitKey(state.Connection)]
+		if !ok {
+			markProfitConnection(state, ProfitAllocationFailed, connectionProfitIssue(state.Connection, ProfitIssueKeyMissing, "upstream", "key_cost", state.GroupID))
 			continue
 		}
-		groupID := groupIDs[0]
-		key := strings.TrimSpace(connection.UpstreamSiteID) + "\x00" + strings.TrimSpace(connection.UpstreamKeyID)
-		if strings.TrimSpace(connection.UpstreamSiteID) == "" || strings.TrimSpace(connection.UpstreamKeyID) == "" || strings.TrimSpace(connection.AdminAccountID) == "" {
-			result.Groups[groupID] = profitAllocationGroup{Status: ProfitAllocationUnavailable}
-			result.Connections[connection.ID] = profitAllocationGroup{Status: ProfitAllocationUnavailable}
-			result.Issues = append(result.Issues, ProfitIssue{Code: ProfitIssueKeyMissing, Source: "upstream", Stage: "key_cost", GroupID: groupID, ConnectionID: connection.ID, AccountID: connection.AdminAccountID, SiteID: connection.UpstreamSiteID, KeyID: connection.UpstreamKeyID})
-			result.FailedConnections++
+		if state.Revenue == nil {
+			markProfitConnection(state, ProfitAllocationFailed, connectionProfitIssue(state.Connection, "usage_stats_missing", "main_admin", "revenue", state.GroupID))
 			continue
 		}
-		keyOwners[key] = append(keyOwners[key], connection.ID)
-		accountOwners[strings.TrimSpace(connection.AdminAccountID)] = append(accountOwners[strings.TrimSpace(connection.AdminAccountID)], connection.ID)
-		validConnections[key] = connection
+		state.Status = ProfitAllocationExact
+		state.Cost = floatPtr(cost)
+		state.Profit = floatPtr(*state.Revenue - cost)
 	}
 
-	conflictedConnections := make(map[string]struct{})
-	for key, owners := range keyOwners {
-		if len(owners) < 2 {
-			continue
-		}
-		parts := strings.SplitN(key, "\x00", 2)
-		issue := ProfitIssue{Code: ProfitIssueDuplicateBinding, Source: "real_connections", Stage: "binding", ConnectionID: strings.Join(owners, ",")}
-		if len(parts) == 2 {
-			issue.SiteID, issue.KeyID = parts[0], parts[1]
-		}
-		issue.GroupID = connectionGroups(connections, owners)
-		result.Issues = append(result.Issues, issue)
-		for _, ownerID := range owners {
-			conflictedConnections[ownerID] = struct{}{}
+	statesByGroup := make(map[string][]*profitConnectionState)
+	for _, state := range states {
+		for _, groupID := range state.GroupIDs {
+			statesByGroup[groupID] = append(statesByGroup[groupID], state)
 		}
 	}
-	for accountID, owners := range accountOwners {
-		if len(owners) < 2 {
-			continue
-		}
-		result.Issues = append(result.Issues, ProfitIssue{Code: ProfitIssueDuplicateBinding, Source: "real_connections", Stage: "binding", AccountID: accountID, GroupID: connectionGroups(connections, owners), ConnectionID: strings.Join(owners, ",")})
-		for _, ownerID := range owners {
-			conflictedConnections[ownerID] = struct{}{}
-		}
+	groupIDs := make([]string, 0, len(statesByGroup))
+	for groupID := range statesByGroup {
+		groupIDs = append(groupIDs, groupID)
 	}
-	for _, connection := range connections {
-		if _, conflicted := conflictedConnections[connection.ID]; !conflicted {
-			continue
+	sort.Strings(groupIDs)
+	for _, groupID := range groupIDs {
+		groupStates := statesByGroup[groupID]
+		allExact := len(groupStates) > 0
+		hasUnallocatable := false
+		var connectionRevenueTotal float64
+		var costTotal float64
+		for _, state := range groupStates {
+			if state.Status != ProfitAllocationExact || state.GroupID != groupID {
+				allExact = false
+			}
+			if state.Status == ProfitAllocationUnallocatable {
+				hasUnallocatable = true
+			}
+			if state.Status == ProfitAllocationExact {
+				connectionRevenueTotal += *state.Revenue
+				costTotal += *state.Cost
+			}
 		}
-		groupIDs := normalizedIDs(connection.OwnGroupIDs)
-		if len(groupIDs) != 1 {
-			continue
+		displayRevenue, hasDisplayRevenue := displayRevenueByGroup[groupID]
+		if allExact && (!hasDisplayRevenue || !profitAmountsEqual(connectionRevenueTotal, displayRevenue)) {
+			for _, state := range groupStates {
+				issue := connectionProfitIssue(state.Connection, ProfitIssueGroupRevenueMismatch, "main_admin", "reconciliation", groupID)
+				issue.Detail = "connection_revenue_total_mismatch"
+				markProfitConnection(state, ProfitAllocationFailed, issue)
+			}
+			allExact = false
 		}
-		result.Groups[groupIDs[0]] = profitAllocationGroup{Status: ProfitAllocationUnallocatable}
-		result.Connections[connection.ID] = profitAllocationGroup{Status: ProfitAllocationUnallocatable}
-		result.UnallocatableConnections++
+		if allExact {
+			result.Groups[groupID] = profitAllocationGroup{
+				Cost:   floatPtr(costTotal),
+				Profit: floatPtr(displayRevenue - costTotal),
+				Status: ProfitAllocationExact,
+			}
+		} else if hasUnallocatable {
+			result.Groups[groupID] = profitAllocationGroup{Status: ProfitAllocationUnallocatable}
+		} else {
+			result.Groups[groupID] = profitAllocationGroup{Status: ProfitAllocationUnavailable}
+		}
 	}
 
 	usedCosts := make(map[string]struct{})
-	for _, connection := range validConnections {
-		groupID := normalizedIDs(connection.OwnGroupIDs)[0]
-		key := strings.TrimSpace(connection.UpstreamSiteID) + "\x00" + strings.TrimSpace(connection.UpstreamKeyID)
-		if _, conflicted := conflictedConnections[connection.ID]; conflicted {
-			continue
+	for _, state := range states {
+		allocation := profitAllocationGroup{Status: state.Status}
+		if state.Revenue != nil {
+			result.ConnectionRevenue[state.Connection.ID] = floatPtr(*state.Revenue)
 		}
-		cost, ok := costByKey[key]
-		if !ok {
-			result.Groups[groupID] = profitAllocationGroup{Status: ProfitAllocationUnavailable}
-			result.Connections[connection.ID] = profitAllocationGroup{Status: ProfitAllocationUnavailable}
-			result.Issues = append(result.Issues, ProfitIssue{Code: ProfitIssueKeyMissing, Source: "upstream", Stage: "key_cost", GroupID: groupID, ConnectionID: connection.ID, AccountID: connection.AdminAccountID, SiteID: connection.UpstreamSiteID, KeyID: connection.UpstreamKeyID})
+		if state.Status == ProfitAllocationExact {
+			allocation.Cost = floatPtr(*state.Cost)
+			allocation.Profit = floatPtr(*state.Profit)
+			usedCosts[profitKey(state.Connection)] = struct{}{}
+			result.ResolvedConnections++
+		} else if state.Status == ProfitAllocationUnallocatable {
+			result.UnallocatableConnections++
+		} else {
 			result.FailedConnections++
-			continue
 		}
-		revenue, revenueOK := revenueByGroup[groupID]
-		if !revenueOK {
-			result.Groups[groupID] = profitAllocationGroup{Status: ProfitAllocationUnavailable}
-			result.Connections[connection.ID] = profitAllocationGroup{Status: ProfitAllocationUnavailable}
-			continue
-		}
-		profit := revenue - cost
-		allocated := profitAllocationGroup{Cost: floatPtr(cost), Profit: floatPtr(profit), Status: ProfitAllocationExact}
-		result.Groups[groupID] = allocated
-		result.Connections[connection.ID] = allocated
-		result.ResolvedConnections++
-		usedCosts[key] = struct{}{}
+		result.Connections[state.Connection.ID] = allocation
+		result.Issues = append(result.Issues, state.Issues...)
 	}
-
-	for key, cost := range costByKey {
+	costKeys := make([]string, 0, len(costByKey))
+	for key := range costByKey {
+		costKeys = append(costKeys, key)
+	}
+	sort.Strings(costKeys)
+	for _, key := range costKeys {
+		cost := costByKey[key]
 		if _, used := usedCosts[key]; !used {
 			result.UnboundCost += cost
 		}
 	}
 	return result
+}
+
+func markProfitConnection(state *profitConnectionState, status string, issue ProfitIssue) {
+	if state.Status == ProfitAllocationExact && status != ProfitAllocationExact {
+		state.Cost = nil
+		state.Profit = nil
+	}
+	if state.Status == ProfitAllocationPending || state.Status == ProfitAllocationExact {
+		state.Status = status
+	}
+	state.Issues = append(state.Issues, issue)
+}
+
+func connectionProfitIssue(connection my_sites.RealConnection, code, source, stage, groupID string) ProfitIssue {
+	return ProfitIssue{
+		Code:         code,
+		Source:       source,
+		Stage:        stage,
+		ConnectionID: connection.ID,
+		SiteID:       strings.TrimSpace(connection.UpstreamSiteID),
+		KeyID:        strings.TrimSpace(connection.UpstreamKeyID),
+		AccountID:    strings.TrimSpace(connection.AdminAccountID),
+		GroupID:      groupID,
+	}
+}
+
+func profitKey(connection my_sites.RealConnection) string {
+	return strings.TrimSpace(connection.UpstreamSiteID) + "\x00" + strings.TrimSpace(connection.UpstreamKeyID)
+}
+
+func profitAmountsEqual(left, right float64) bool {
+	return math.Abs(left-right) <= profitAmountTolerance
 }
 
 func normalizedIDs(values []string) []string {
@@ -185,26 +272,6 @@ func normalizedIDs(values []string) []string {
 		result = append(result, value)
 	}
 	return result
-}
-
-func connectionGroups(connections []my_sites.RealConnection, ownerIDs []string) string {
-	seen := make(map[string]struct{})
-	groups := make([]string, 0, len(ownerIDs))
-	for _, ownerID := range ownerIDs {
-		for _, connection := range connections {
-			if connection.ID != ownerID {
-				continue
-			}
-			for _, groupID := range normalizedIDs(connection.OwnGroupIDs) {
-				if _, exists := seen[groupID]; exists {
-					continue
-				}
-				seen[groupID] = struct{}{}
-				groups = append(groups, groupID)
-			}
-		}
-	}
-	return strings.Join(groups, ",")
 }
 
 func hasProfitIssue(issues []ProfitIssue, code string) bool {

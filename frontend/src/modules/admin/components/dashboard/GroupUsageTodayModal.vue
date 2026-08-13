@@ -24,16 +24,20 @@ const groups = ref<GroupUsageTodayItem[]>([])
 const total = ref(0)
 const quality = ref<GroupProfitQuality | null>(null)
 const issues = ref<ProfitIssue[]>([])
+const unboundCost = ref<number | null>(null)
 // 默认按金额从高到低排序；toggle 后按金额从低到高，金额相同时用分组名排序，均不触发新的请求。
 const sortAsc = ref(false)
 
 const sortedGroups = computed(() => {
-  return [...groups.value].sort((a, b) => {
+  return groups.value
+    .filter(group => group.contributionKind !== 'unbound_upstream_cost')
+    .sort((a, b) => {
     const diff = sortAsc.value ? a.todayAmount - b.todayAmount : b.todayAmount - a.todayAmount
     if (diff !== 0) return diff
     return a.groupName.localeCompare(b.groupName)
-  })
+    })
 })
+const displayedGroupCount = computed(() => sortedGroups.value.length)
 
 const toggleSort = () => {
   sortAsc.value = !sortAsc.value
@@ -70,12 +74,14 @@ const loadData = async () => {
   error.value = null
   quality.value = null
   issues.value = []
+  unboundCost.value = null
   try {
     const response = await getGroupUsageToday()
     groups.value = response.groups ?? []
     total.value = response.total ?? 0
     quality.value = response.quality ?? null
     issues.value = response.issues ?? []
+    unboundCost.value = response.unboundUpstreamCost ?? null
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'admin.dashboard.groupUsage.loadError'
   } finally {
@@ -110,7 +116,7 @@ watch(() => props.open, (isOpen) => {
             <div>
               <h2 class="text-lg font-semibold text-foreground">{{ t('admin.dashboard.groupUsage.title') }}</h2>
               <p class="text-sm text-muted-foreground">
-                {{ t('admin.dashboard.groupUsage.subtitle', { count: groups.length, total: formatCny(total) }) }}
+                {{ t('admin.dashboard.groupUsage.subtitle', { count: displayedGroupCount, total: formatCny(total) }) }}
               </p>
             </div>
           </div>
@@ -137,7 +143,11 @@ watch(() => props.open, (isOpen) => {
         </div>
 
         <div class="px-6 py-6">
-          <div v-if="quality" class="mb-4 space-y-3 rounded-lg border border-warning/30 bg-warning/5 px-3 py-3 text-xs">
+          <div
+            v-if="quality"
+            class="mb-4 space-y-3 rounded-lg px-3 py-3 text-xs"
+            :class="issues.length ? 'border border-warning/30 bg-warning/5' : 'border border-border/60 bg-surface/40'"
+          >
             <div class="flex flex-wrap items-center justify-between gap-2">
               <span class="font-medium text-foreground">
                 {{ t('admin.dashboard.groupUsage.quality', {
@@ -150,6 +160,9 @@ watch(() => props.open, (isOpen) => {
                 {{ t('admin.dashboard.groupUsage.issuesTitle', { count: issues.length }) }}
               </span>
             </div>
+            <p v-if="unboundCost != null" class="text-muted-foreground">
+              {{ t('admin.dashboard.groupUsage.unboundCost', { cost: formatCny(unboundCost) }) }}
+            </p>
             <ul v-if="issues.length" class="space-y-2 border-t border-warning/20 pt-2 text-muted-foreground">
               <li v-for="issue in issues" :key="`${issue.code}-${issue.connectionId ?? issue.groupId ?? issue.keyId ?? 'global'}`" class="space-y-0.5">
                 <div class="flex flex-wrap items-center gap-x-2 gap-y-1">

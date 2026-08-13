@@ -92,9 +92,17 @@
                 {{ t('admin.dashboard.dailyStats.loadError') }}
               </td>
             </tr>
-            <tr v-else-if="expandedDates.has(item.date) && item.siteCosts && item.siteCosts.length > 0" class="bg-muted/30">
+            <tr v-else-if="expandedDates.has(item.date)" class="bg-muted/30">
               <td colspan="6" class="py-2 pl-8 pr-4">
-                <div class="space-y-1">
+                <div v-if="item.additionalCosts" class="mb-3 grid gap-1 border-b border-border/60 pb-3 text-xs text-muted-foreground sm:grid-cols-2">
+                  <span>充值手续费{{ item.additionalCosts.feeRate != null ? ` (${(item.additionalCosts.feeRate * 100).toFixed(2)}%)` : '' }}：{{ formatCny(item.additionalCosts.rechargeFee) }}</span>
+                  <span>活动赠送摊销：{{ formatCny(item.additionalCosts.promotion) }}</span>
+                  <span>服务器及固定费用：{{ formatCny(item.additionalCosts.fixed) }}</span>
+                  <span>手工调整：{{ formatCny(item.additionalCosts.adjustment) }}</span>
+                  <span class="font-medium text-foreground">经营总成本：{{ formatCny(item.operatingCost) }}</span>
+                  <span class="font-medium text-foreground">调整后净利润：{{ formatCny(item.adjustedNetProfit) }}</span>
+                </div>
+                <div v-if="item.siteCosts && item.siteCosts.length > 0" class="space-y-1">
                   <div
                     v-for="sc in item.siteCosts"
                     :key="sc.siteId"
@@ -107,10 +115,14 @@
                     </span>
                   </div>
                 </div>
+                <div v-if="item.additionalCosts?.records?.length" class="mt-3 space-y-1 border-t border-border/60 pt-3 text-xs text-muted-foreground">
+                  <div v-for="record in item.additionalCosts.records" :key="record.id" class="flex justify-between gap-4">
+                    <span>{{ record.name }}{{ record.estimated ? '（预估）' : '' }}</span>
+                    <span class="tabular-nums">{{ formatCny(record.amount) }}</span>
+                  </div>
+                </div>
+                <p v-else-if="!item.additionalCosts" class="text-xs text-muted-foreground">{{ t('admin.dashboard.dailyStats.noData') }}</p>
               </td>
-            </tr>
-            <tr v-else-if="expandedDates.has(item.date)" class="bg-muted/30">
-              <td colspan="6" class="py-2 pl-8 pr-4 text-xs text-muted-foreground">{{ t('admin.dashboard.dailyStats.noData') }}</td>
             </tr>
           </template>
         </tbody>

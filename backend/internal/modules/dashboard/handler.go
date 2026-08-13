@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"transithub/backend/internal/shared/authctx"
+	"transithub/backend/internal/shared/businesstime"
 	"transithub/backend/internal/shared/httpjson"
 )
 
@@ -33,6 +34,88 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, metricsService *Metric
 	mux.HandleFunc("PUT /api/dashboard/balance-filter", handler.saveBalanceFilter)
 	mux.HandleFunc("GET /api/dashboard/daily-stats", handler.dailyStats)
 	mux.HandleFunc("POST /api/dashboard/backfill", handler.backfill)
+	mux.HandleFunc("GET /api/dashboard/additional-costs", handler.listAdditionalCosts)
+	mux.HandleFunc("POST /api/dashboard/additional-costs", handler.createAdditionalCost)
+	mux.HandleFunc("GET /api/dashboard/recharge-fee-rate", handler.getRechargeFeeRate)
+	mux.HandleFunc("PUT /api/dashboard/recharge-fee-rate", handler.saveRechargeFeeRate)
+}
+
+func (h *Handler) getRechargeFeeRate(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	date := r.URL.Query().Get("date")
+	if date == "" {
+		date = businesstime.Today()
+	}
+	value, err := h.metricsService.GetRechargeFeeRate(r.Context(), userID, date)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, value)
+}
+
+func (h *Handler) saveRechargeFeeRate(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input RechargeFeeRateInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	value, err := h.metricsService.SaveRechargeFeeRate(r.Context(), userID, input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, value)
+}
+
+func (h *Handler) listAdditionalCosts(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	q := r.URL.Query()
+	from, to := q.Get("from"), q.Get("to")
+	if from == "" {
+		from = businesstime.Today()
+	}
+	if to == "" {
+		to = from
+	}
+	items, err := h.metricsService.ListAdditionalCosts(r.Context(), userID, from, to)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *Handler) createAdditionalCost(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input AdditionalCostInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	items, err := h.metricsService.CreateAdditionalCost(r.Context(), userID, input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusCreated, map[string]any{"items": items})
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
@@ -230,6 +313,10 @@ func (h *Handler) saveBalanceFilter(w http.ResponseWriter, r *http.Request) {
 
 // writeError 把 service 的业务错误映射成合适的 HTTP 状态码与 i18n 错误 key。
 func writeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrAdditionalCostInvalidType) || errors.Is(err, ErrAdditionalCostInvalidAmount) || errors.Is(err, ErrAdditionalCostInvalidDate) || errors.Is(err, ErrAdditionalCostInvalidDays) || errors.Is(err, ErrAdditionalCostInvalidRate) {
+		httpjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	var requestErr requestError
 	if errors.As(err, &requestErr) {
 		status := http.StatusBadRequest

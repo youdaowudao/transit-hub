@@ -440,6 +440,17 @@ const cards = computed<DashboardCoreCard[]>(() => {
   return result
 })
 
+const additionalCostLines = computed(() => {
+  const summary = liveData.value?.additionalCosts
+  if (!summary) return []
+  return [
+    { label: `充值手续费${summary.feeRate != null ? ` (${(summary.feeRate * 100).toFixed(2)}%)` : ''}`, value: summary.rechargeFee },
+    { label: '活动赠送摊销', value: summary.promotion },
+    { label: '服务器及固定费用', value: summary.fixed },
+    { label: '手工调整', value: summary.adjustment },
+  ]
+})
+
 type GroupMetricMode = 'profit' | 'revenue'
 
 const groupMetricMode = ref<GroupMetricMode>('profit')
@@ -447,6 +458,7 @@ const groupMetricModes: GroupMetricMode[] = ['profit', 'revenue']
 const groupProfitAvailable = computed(() => groupUsage.value?.profitAvailable === true)
 const groupProfitQuality = computed(() => groupUsage.value?.quality ?? null)
 const groupProfitIssues = computed(() => groupUsage.value?.issues ?? [])
+const groupUnboundCost = computed(() => groupUsage.value?.unboundUpstreamCost ?? null)
 const groupProfitStatusText = computed(() => {
   const status = groupProfitQuality.value?.status
   if (status === 'exact') return t('admin.dashboard.groupUsage.statusExact')
@@ -497,9 +509,17 @@ const groupTopThreeLabel = computed(() => t(
     : 'admin.dashboard.groups.topThreeRevenueShare',
 ))
 const groupMetricValue = (item: GroupUsageTodayResponse['groups'][number]): number | null => {
-  if (groupMetricMode.value === 'profit') return item.todayProfit ?? null
+  if (groupMetricMode.value === 'profit') {
+    return item.status === 'exact' && item.todayProfit != null ? item.todayProfit : null
+  }
+  if (item.contributionKind === 'unbound_upstream_cost') return null
   return item.todayRevenue ?? item.todayAmount
 }
+const groupDisplayName = (item: GroupUsageTodayResponse['groups'][number]) => (
+  item.contributionKind === 'unbound_upstream_cost'
+    ? t('admin.dashboard.groupUsage.unboundContribution')
+    : item.groupName
+)
 
 const period = ref<DashboardPeriod>('week')
 const periods: DashboardPeriod[] = ['week', 'month']
@@ -634,14 +654,13 @@ const performanceChartOption = computed<EChartsCoreOption>(() => {
 })
 
 const sortedGroups = computed(() => {
-  if (groupMetricMode.value === 'profit' && !groupProfitAvailable.value) return []
   return [...(groupUsage.value?.groups ?? [])]
     .filter((item) => groupMetricValue(item) != null)
     .sort((a, b) => (groupMetricValue(b) ?? 0) - (groupMetricValue(a) ?? 0))
 })
 const topGroups = computed(() => sortedGroups.value.slice(0, 6))
 const groupConcentration = computed(() => {
-  if (groupMetricMode.value === 'profit' && !groupProfitAvailable.value) return null
+  if (groupMetricMode.value === 'profit' && groupUnboundCost.value != null) return null
   const total = groupMetricMode.value === 'profit'
     ? groupUsage.value?.totalProfit
     : (groupUsage.value?.totalRevenue ?? groupUsage.value?.total)
@@ -695,7 +714,7 @@ const groupChartOption = computed<EChartsCoreOption>(() => {
     yAxis: {
       type: 'category',
       inverse: true,
-      data: topGroups.value.map(item => item.groupName),
+      data: topGroups.value.map(item => groupDisplayName(item)),
       axisLine: { show: false },
       axisTick: { show: false },
       axisLabel: {
@@ -942,6 +961,27 @@ const lastProbeLabel = computed(() => {
           />
         </section>
 
+        <section v-if="liveData?.additionalCosts" class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          <article class="rounded-lg border border-border/60 bg-card p-4 shadow-sm sm:p-5">
+            <div class="flex items-start justify-between gap-4">
+              <div><h2 class="text-base font-semibold text-foreground">今日经营成本</h2><p class="mt-1 text-sm text-muted-foreground">上游成本之外的手续费、分摊和调整。</p></div>
+              <div class="text-right"><p class="text-lg font-bold text-foreground">{{ formatCny(liveData.operatingCost) }}</p><p class="text-xs text-muted-foreground">经营总成本</p></div>
+            </div>
+            <dl class="mt-4 divide-y divide-border/60 border-y border-border/60">
+              <div v-for="item in additionalCostLines" :key="item.label" class="flex items-center justify-between gap-4 py-2 text-sm"><dt class="text-muted-foreground">{{ item.label }}</dt><dd class="font-medium tabular-nums text-foreground">{{ formatCny(item.value) }}</dd></div>
+              <div class="flex items-center justify-between gap-4 py-2 text-sm"><dt class="text-muted-foreground">附加成本合计</dt><dd class="font-semibold tabular-nums text-foreground">{{ formatCny(liveData.additionalCosts.total) }}</dd></div>
+            </dl>
+            <div v-if="liveData.additionalCosts.records?.length" class="mt-3 space-y-1 text-xs text-muted-foreground">
+              <div v-for="record in liveData.additionalCosts.records" :key="record.id" class="flex justify-between gap-4"><span>{{ record.name }}{{ record.estimated ? '（预估）' : '' }}</span><span class="tabular-nums">{{ formatCny(record.amount) }}</span></div>
+            </div>
+          </article>
+          <article class="rounded-lg border border-border/60 bg-card p-4 shadow-sm sm:p-5">
+            <p class="text-sm font-medium text-muted-foreground">调整后净利润</p>
+            <p class="mt-2 text-2xl font-bold tabular-nums text-foreground">{{ formatCny(liveData.adjustedNetProfit) }}</p>
+            <p class="mt-3 text-sm text-muted-foreground">营业额减上游直接成本及全部附加成本。负数调整会按录入当天直接参与计算。</p>
+          </article>
+        </section>
+
         <section class="grid gap-4 xl:grid-cols-12">
           <article class="min-w-0 rounded-lg border border-border/60 bg-card p-4 shadow-sm sm:p-5 xl:col-span-8">
             <div class="flex flex-wrap items-start justify-between gap-4">
@@ -1089,7 +1129,8 @@ const lastProbeLabel = computed(() => {
             <div v-else>
               <div
                 v-if="groupMetricMode === 'profit' && groupProfitQuality"
-                class="mt-4 space-y-3 rounded-lg border border-warning/30 bg-warning/5 px-3 py-3 text-xs"
+                class="mt-4 space-y-3 rounded-lg px-3 py-3 text-xs"
+                :class="groupProfitIssues.length ? 'border border-warning/30 bg-warning/5' : 'border border-border/60 bg-surface/40'"
               >
                 <div class="flex flex-wrap items-center justify-between gap-2">
                   <span class="font-medium text-foreground">{{ groupProfitSummary }}</span>
@@ -1097,8 +1138,8 @@ const lastProbeLabel = computed(() => {
                     {{ t('admin.dashboard.groupUsage.issuesTitle', { count: groupProfitIssues.length }) }}
                   </span>
                 </div>
-                <p v-if="groupUsage?.unboundUpstreamCost != null" class="text-muted-foreground">
-                  {{ t('admin.dashboard.groupUsage.unboundCost', { cost: formatCny(groupUsage.unboundUpstreamCost) }) }}
+                <p v-if="groupUnboundCost != null" class="text-muted-foreground">
+                  {{ t('admin.dashboard.groupUsage.unboundCost', { cost: formatCny(groupUnboundCost) }) }}
                 </p>
                 <ul v-if="groupProfitIssues.length" class="space-y-2 border-t border-warning/20 pt-2 text-muted-foreground">
                   <li v-for="issue in groupProfitIssues.slice(0, 5)" :key="`${issue.code}-${issue.connectionId ?? issue.groupId ?? issue.keyId ?? 'global'}`" class="space-y-0.5">
@@ -1115,7 +1156,7 @@ const lastProbeLabel = computed(() => {
                 </ul>
               </div>
 
-              <div v-if="groupMetricMode === 'profit' && !groupProfitAvailable" class="flex h-[280px] flex-col items-center justify-center gap-3 text-center text-sm text-muted-foreground">
+              <div v-if="groupMetricMode === 'profit' && topGroups.length === 0 && !groupProfitAvailable" class="flex h-[280px] flex-col items-center justify-center gap-3 text-center text-sm text-muted-foreground">
                 <AlertTriangle class="h-5 w-5 text-warning" />
                 <span>{{ groupProfitSummary }}</span>
               </div>

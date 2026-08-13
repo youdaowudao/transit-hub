@@ -126,6 +126,104 @@ func TestFetchAdminGroupDailyStatsForDate_Sub2APIUsesRequestedBusinessDate(t *te
 	}
 }
 
+func TestFetchSub2APIAdminGroupDailyStatsByIDForDateUsesStableIDs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/admin/dashboard/groups" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		for key, want := range map[string]string{
+			"start_date": "2026-08-13",
+			"end_date":   "2026-08-13",
+			"timezone":   "Asia/Shanghai",
+		} {
+			if got := r.URL.Query().Get(key); got != want {
+				t.Fatalf("%s = %q, want %q", key, got, want)
+			}
+		}
+		if got := r.Header.Get("x-api-key"); got != "admin-key" {
+			t.Fatalf("x-api-key = %q, want admin-key", got)
+		}
+		writeJSON(w, map[string]any{"data": []map[string]any{
+			{"id": 901, "group_id": 11, "group_name": "同名分组", "today_actual_cost": 12.5},
+			{"id": 902, "group_id": 12, "group_name": "同名分组", "today_actual_cost": 7.25},
+		}})
+	}))
+	defer server.Close()
+
+	stats, err := NewPlatformService(NewHTTPClient(server.Client())).FetchSub2APIAdminGroupDailyStatsByIDForDate(
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AdminAPIKey: "admin-key"},
+		"2026-08-13",
+	)
+	if err != nil {
+		t.Fatalf("FetchSub2APIAdminGroupDailyStatsByIDForDate() error: %v", err)
+	}
+	if len(stats) != 2 || stats[0].GroupID != "11" || stats[1].GroupID != "12" {
+		t.Fatalf("stable group IDs were lost: %+v", stats)
+	}
+	if stats[0].GroupName != "同名分组" || stats[1].GroupName != "同名分组" || stats[0].TodayActualCost != 12.5 || stats[1].TodayActualCost != 7.25 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+}
+
+func TestFetchSub2APIAdminGroupDailyStatsByIDForDateRejectsIncompleteRows(t *testing.T) {
+	for name, rows := range map[string][]map[string]any{
+		"missing group id": {{"today_actual_cost": 1.0}},
+		"missing amount":   {{"group_id": 11}},
+		"duplicate group": {
+			{"group_id": 11, "today_actual_cost": 1.0},
+			{"group_id": 11, "today_actual_cost": 2.0},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, map[string]any{"data": rows})
+			}))
+			defer server.Close()
+
+			_, err := NewPlatformService(NewHTTPClient(server.Client())).FetchSub2APIAdminGroupDailyStatsByIDForDate(
+				Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token"},
+				"2026-08-13",
+			)
+			if err == nil {
+				t.Fatal("expected incomplete row to fail")
+			}
+		})
+	}
+}
+
+func TestFetchSub2APIAdminGroupDailyStatsByIDForDateAcceptsExplicitEmptyGroups(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"data": map[string]any{"groups": []map[string]any{}}})
+	}))
+	defer server.Close()
+
+	stats, err := NewPlatformService(NewHTTPClient(server.Client())).FetchSub2APIAdminGroupDailyStatsByIDForDate(
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token"},
+		"2026-08-13",
+	)
+	if err != nil {
+		t.Fatalf("explicit empty groups must be a valid zero-revenue response: %v", err)
+	}
+	if len(stats) != 0 {
+		t.Fatalf("stats = %+v, want empty", stats)
+	}
+}
+
+func TestFetchSub2APIAdminGroupDailyStatsByIDForDateRejectsMissingGroupsField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"data": map[string]any{"start_date": "2026-08-13"}})
+	}))
+	defer server.Close()
+
+	_, err := NewPlatformService(NewHTTPClient(server.Client())).FetchSub2APIAdminGroupDailyStatsByIDForDate(
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token"},
+		"2026-08-13",
+	)
+	if err == nil {
+		t.Fatal("missing groups field must fail")
+	}
+}
+
 func TestFetchAdminGroupDailyStatsForDate_NewAPIUsesOneRequestedBusinessDay(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/log/self/stat" {

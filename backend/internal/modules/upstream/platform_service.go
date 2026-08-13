@@ -455,6 +455,62 @@ func (s *PlatformService) FetchSub2APIGroupDailyStatsForDate(session Session, da
 	return stats, nil
 }
 
+// FetchSub2APIAdminGroupDailyStatsByIDForDate 读取指定上海业务日的主站分组营收。
+// 严格归因依赖稳定 group_id，因此该方法不使用逐 Key 或分组名称回退。
+func (s *PlatformService) FetchSub2APIAdminGroupDailyStatsByIDForDate(session Session, date string) ([]GroupDailyStat, error) {
+	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
+		return nil, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	statsURL := session.BaseURL + "/api/v1/admin/dashboard/groups?start_date=" + date + "&end_date=" + date + "&timezone=" + url.QueryEscape(businesstime.Timezone)
+	response, err := s.httpClient.requestJSON(statsURL, adminAuthOptions(session))
+	if err != nil {
+		return nil, err
+	}
+	items, ok := sub2APIAdminDashboardGroupItems(response.Payload)
+	if !ok {
+		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	stats := make([]GroupDailyStat, 0, len(items))
+	seenGroupIDs := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		id := strings.TrimSpace(firstStringy(item, []string{"group_id", "groupId"}))
+		cost := sub2APIGroupDailyCostPtr(item)
+		if id == "" || cost == nil {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		if _, duplicate := seenGroupIDs[id]; duplicate {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		seenGroupIDs[id] = struct{}{}
+		name := ""
+		if value := firstString(item, []string{"group_name", "groupName", "name"}); value != nil {
+			name = strings.TrimSpace(*value)
+		}
+		stats = append(stats, GroupDailyStat{GroupID: id, GroupName: name, TodayActualCost: *cost})
+	}
+	return stats, nil
+}
+
+func sub2APIAdminDashboardGroupItems(payload any) ([]any, bool) {
+	record, ok := payload.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	if rawData, exists := record["data"]; exists {
+		switch data := rawData.(type) {
+		case []any:
+			return data, true
+		case map[string]any:
+			groups, ok := data["groups"].([]any)
+			return groups, ok
+		default:
+			return nil, false
+		}
+	}
+	groups, ok := record["groups"].([]any)
+	return groups, ok
+}
+
 // FetchSub2APIAdminUsageStats 调用管理员的 sub2api 站点 /api/v1/admin/usage/stats 接口，
 // 查询指定日期范围内的总实际消费（即站点的盈利额度）。
 // startDate 和 endDate 格式为 "2006-01-02"，查询当天数据时两者传同一天即可。
@@ -994,11 +1050,15 @@ func sub2APIUsageStatsCost(item any) float64 {
 }
 
 func sub2APIGroupDailyCost(item any) float64 {
-	cost := firstNumber(item, []string{"today_actual_cost", "todayActualCost", "actual_cost", "actualCost", "cost", "today_cost", "todayCost", "usage", "used"})
+	cost := sub2APIGroupDailyCostPtr(item)
 	if cost == nil {
 		return 0
 	}
 	return *cost
+}
+
+func sub2APIGroupDailyCostPtr(item any) *float64 {
+	return firstNumber(item, []string{"today_actual_cost", "todayActualCost", "actual_cost", "actualCost", "cost", "today_cost", "todayCost", "usage", "used"})
 }
 
 func (s *PlatformService) FetchNewAPIGroupDailyStats(session Session, groups []GroupInfo) ([]GroupDailyStat, error) {

@@ -33,6 +33,13 @@ type RealConnectionRepository interface {
 	DeleteRealConnection(ctx context.Context, id string, userID string, adminAccountID string) error
 }
 
+// RealConnectionReconciler 供仪表盘在确认主站账号已切组后修正本地绑定。
+// 转移只更新 TransitHub 本地关系；退出只解绑本地记录，不删除上游账号或 Key。
+type RealConnectionReconciler interface {
+	ReassignRealConnectionGroups(ctx context.Context, conn RealConnection, ownGroupIDs []string, ownGroupNames []string) error
+	RetireRealConnection(ctx context.Context, conn RealConnection) error
+}
+
 type AtomicRealDisconnectRepository interface {
 	RemoveUpstreamMappingAndDeleteConnection(ctx context.Context, userID string, adminAccountID string, connectionID string, siteID string, groupName string) error
 }
@@ -597,6 +604,31 @@ func (s *Service) ListRealConnectionsForWorkspace(ctx context.Context, userID st
 		return nil, nil
 	}
 	return s.connRepository.ListRealConnections(ctx, userID, adminAccountID)
+}
+
+// ReassignRealConnectionGroups 原子地把本地真实对接转移到新的自有分组。
+func (s *Service) ReassignRealConnectionGroups(ctx context.Context, conn RealConnection, ownGroupIDs []string, ownGroupNames []string) error {
+	if s.connRepository == nil {
+		return requestError(ErrorRequest)
+	}
+	repo, ok := s.connRepository.(interface {
+		ReassignRealConnectionGroups(ctx context.Context, conn RealConnection, ownGroupIDs []string, ownGroupNames []string) error
+	})
+	if !ok {
+		return requestError(ErrorRequest)
+	}
+	return repo.ReassignRealConnectionGroups(ctx, conn, ownGroupIDs, ownGroupNames)
+}
+
+// RetireRealConnection 只解绑本地绑定并清理其价格映射，不触碰上游资源。
+func (s *Service) RetireRealConnection(ctx context.Context, conn RealConnection) error {
+	if s.connRepository == nil {
+		return requestError(ErrorRequest)
+	}
+	if repo, ok := s.connRepository.(ScopedRealDisconnectRepository); ok {
+		return repo.DeleteRealConnectionWithPricingMapping(ctx, conn, conn.PricingMappingEnabled)
+	}
+	return s.connRepository.DeleteRealConnection(ctx, conn.ID, conn.UserID, conn.WorkspaceAdminAccountID)
 }
 
 // RealDisconnect 取消真实对接：根据 mode 决定是仅删除记录还是同时清理远端资源。

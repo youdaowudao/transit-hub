@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -465,6 +466,102 @@ func (r *Repository) DeleteRealConnection(ctx context.Context, id string, userID
 	return err
 }
 
+// ReassignRealConnectionGroups atomically updates the local group binding and
+// its pricing mapping. It never calls an upstream API.
+func (r *Repository) ReassignRealConnectionGroups(ctx context.Context, conn RealConnection, ownGroupIDs []string, ownGroupNames []string) error {
+	ownGroupIDsJSON, err := json.Marshal(ownGroupIDs)
+	if err != nil {
+		return err
+	}
+	ownGroupNamesJSON, err := json.Marshal(ownGroupNames)
+	if err != nil {
+		return err
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
+	if err != nil {
+		return err
+	}
+	if state != nil {
+		if conn.PricingMappingEnabled {
+			target := UpstreamGroupRef{SiteID: conn.UpstreamSiteID, GroupName: conn.UpstreamGroupName}
+			for _, oldName := range normalizedConnectionGroupNames(conn.OwnGroupNames) {
+				var shared bool
+				if err := tx.QueryRow(ctx, `
+					SELECT EXISTS (
+						SELECT 1 FROM real_connections
+						WHERE user_id = $1 AND workspace_admin_account_id = $2 AND id <> $3
+							AND pricing_mapping_enabled
+							AND upstream_site_id = $4 AND upstream_group_name = $5
+							AND own_group_names ? $6
+					)
+				`, conn.UserID, conn.WorkspaceAdminAccountID, conn.ID, conn.UpstreamSiteID, conn.UpstreamGroupName, oldName).Scan(&shared); err != nil {
+					return err
+				}
+				if !shared {
+					removeMappingTargetForOwnGroups(state, []string{oldName}, target)
+				}
+			}
+			addMappingTargetForOwnGroups(state, ownGroupNames, target)
+		}
+		sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(*state)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE my_site_states
+			SET base_url = $3, email = $4, session = $5::jsonb, mappings = $6::jsonb,
+				own_groups = $7::jsonb, updated_at = now()
+			WHERE user_id = $1 AND admin_account_id = $2
+		`, state.UserID, state.AdminAccountID, state.BaseURL, state.Email, string(sessionJSON), string(mappingsJSON), string(ownGroupsJSON)); err != nil {
+			return err
+		}
+	}
+	commandTag, err := tx.Exec(ctx, `
+		UPDATE real_connections
+		SET own_group_ids = $4::jsonb, own_group_names = $5::jsonb
+		WHERE id = $1 AND user_id = $2 AND workspace_admin_account_id = $3
+	`, conn.ID, conn.UserID, conn.WorkspaceAdminAccountID, string(ownGroupIDsJSON), string(ownGroupNamesJSON))
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return fmt.Errorf("reassign real connection: no rows affected")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func normalizedConnectionGroupNames(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
 // DeleteRealConnectionWithPricingMapping removes only the mappings created for
 // this connection. If another pricing-enabled connection still references the
 // same target, its shared mapping is preserved.
@@ -481,27 +578,31 @@ func (r *Repository) DeleteRealConnectionWithPricingMapping(ctx context.Context,
 	}()
 
 	if removePricingMapping && conn.PricingMappingEnabled {
-		var shared bool
-		if err := tx.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM real_connections
-				WHERE user_id = $1 AND workspace_admin_account_id = $2 AND id <> $3
-					AND pricing_mapping_enabled
-					AND upstream_site_id = $4 AND upstream_group_name = $5
-			)
-		`, conn.UserID, conn.WorkspaceAdminAccountID, conn.ID, conn.UpstreamSiteID, conn.UpstreamGroupName).Scan(&shared); err != nil {
+		state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
+		if err != nil {
 			return err
 		}
-		if !shared {
-			state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
-			if err != nil {
-				return err
-			}
-			if state != nil {
-				removeMappingTargetForOwnGroups(state, conn.OwnGroupNames, UpstreamGroupRef{SiteID: conn.UpstreamSiteID, GroupName: conn.UpstreamGroupName})
-				if err := updateStateInTx(ctx, tx, *state); err != nil {
+		if state != nil {
+			target := UpstreamGroupRef{SiteID: conn.UpstreamSiteID, GroupName: conn.UpstreamGroupName}
+			for _, oldName := range normalizedConnectionGroupNames(conn.OwnGroupNames) {
+				var shared bool
+				if err := tx.QueryRow(ctx, `
+					SELECT EXISTS (
+						SELECT 1 FROM real_connections
+						WHERE user_id = $1 AND workspace_admin_account_id = $2 AND id <> $3
+							AND pricing_mapping_enabled
+							AND upstream_site_id = $4 AND upstream_group_name = $5
+							AND own_group_names ? $6
+					)
+				`, conn.UserID, conn.WorkspaceAdminAccountID, conn.ID, conn.UpstreamSiteID, conn.UpstreamGroupName, oldName).Scan(&shared); err != nil {
 					return err
 				}
+				if !shared {
+					removeMappingTargetForOwnGroups(state, []string{oldName}, target)
+				}
+			}
+			if err := updateStateInTx(ctx, tx, *state); err != nil {
+				return err
 			}
 		}
 	}

@@ -195,15 +195,16 @@ type GroupProfitQuality struct {
 
 // GroupUsageTodayItem 是单个分组的今日营收、成本及实时利润。
 type GroupUsageTodayItem struct {
-	GroupID      string                  `json:"groupId,omitempty"`
-	GroupName    string                  `json:"groupName"`
-	TodayAmount  float64                 `json:"todayAmount"` // 兼容字段：今日营收
-	TodayRevenue float64                 `json:"todayRevenue"`
-	TodayCost    *float64                `json:"todayCost,omitempty"`
-	TodayProfit  *float64                `json:"todayProfit,omitempty"`
-	Status       string                  `json:"status,omitempty"` // exact/partial/unavailable/unallocatable
-	Issues       []ProfitIssue           `json:"issues,omitempty"`
-	Connections  []GroupProfitConnection `json:"connections,omitempty"`
+	GroupID          string                  `json:"groupId,omitempty"`
+	GroupName        string                  `json:"groupName"`
+	ContributionKind string                  `json:"contributionKind,omitempty"` // unbound_upstream_cost 表示分组外成本，不是主站分组
+	TodayAmount      float64                 `json:"todayAmount"`                // 兼容字段：今日营收
+	TodayRevenue     float64                 `json:"todayRevenue"`
+	TodayCost        *float64                `json:"todayCost,omitempty"`
+	TodayProfit      *float64                `json:"todayProfit,omitempty"`
+	Status           string                  `json:"status,omitempty"` // exact/partial/unavailable/unallocatable
+	Issues           []ProfitIssue           `json:"issues,omitempty"`
+	Connections      []GroupProfitConnection `json:"connections,omitempty"`
 }
 
 type GroupProfitConnection struct {

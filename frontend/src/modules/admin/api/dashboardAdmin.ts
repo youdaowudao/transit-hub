@@ -223,6 +223,7 @@ export interface GroupProfitConnection {
 /** 单个分组的今日营收、成本与利润。todayAmount 保留为营收兼容字段。 */
 export interface GroupUsageTodayItem {
   groupName: string
+  contributionKind?: 'unbound_upstream_cost' | string
   todayAmount: number
   todayRevenue: number
   todayCost?: number | null

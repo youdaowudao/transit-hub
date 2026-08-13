@@ -15,6 +15,47 @@ type fakeRealConnectionReader struct {
 	err         error
 }
 
+type fakeRealConnectionReconciler struct {
+	reassigned []struct {
+		id     string
+		groups []string
+		names  []string
+	}
+	retired []string
+	err     error
+}
+
+func (f *fakeRealConnectionReconciler) ReassignRealConnectionGroups(ctx context.Context, conn my_sites.RealConnection, ownGroupIDs []string, ownGroupNames []string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.reassigned = append(f.reassigned, struct {
+		id     string
+		groups []string
+		names  []string
+	}{id: conn.ID, groups: append([]string(nil), ownGroupIDs...), names: append([]string(nil), ownGroupNames...)})
+	return nil
+}
+
+func (f *fakeRealConnectionReconciler) RetireRealConnection(ctx context.Context, conn my_sites.RealConnection) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.retired = append(f.retired, conn.ID)
+	return nil
+}
+
+func groupUsageItemByID(t *testing.T, groups []GroupUsageTodayItem, groupID string) GroupUsageTodayItem {
+	t.Helper()
+	for _, group := range groups {
+		if group.GroupID == groupID {
+			return group
+		}
+	}
+	t.Fatalf("group %q not found in %+v", groupID, groups)
+	return GroupUsageTodayItem{}
+}
+
 func (f *fakeRealConnectionReader) ListRealConnectionsForWorkspace(ctx context.Context, userID, adminAccountID string) ([]my_sites.RealConnection, error) {
 	return f.connections, f.err
 }
@@ -190,6 +231,12 @@ func (f *fakePlatformClient) FetchAdminGroupDailyStats(session upstream.Session,
 }
 
 func (f *fakePlatformClient) FetchAdminGroupDailyStatsForDate(session upstream.Session, groups []upstream.GroupInfo, date string) ([]upstream.GroupDailyStat, error) {
+	f.capturedSession = session
+	f.capturedGroupDate = date
+	return f.dailyStats, f.dailyStatsErr
+}
+
+func (f *fakePlatformClient) FetchSub2APIAdminGroupDailyStatsByIDForDate(session upstream.Session, date string) ([]upstream.GroupDailyStat, error) {
 	f.capturedSession = session
 	f.capturedGroupDate = date
 	return f.dailyStats, f.dailyStatsErr
@@ -412,6 +459,10 @@ func TestGroupUsageToday_RealConnectionsKeepConfirmedGroupsDuringPartialCostColl
 	store.set("user-1", "workspace-1", AdminSession{Session: authenticatedSession()})
 	accounts := &fakeAdminAccounts{current: map[string]string{"user-1": "workspace-1"}}
 	platform := &fakePlatformClient{
+		dailyStats: []upstream.GroupDailyStat{
+			{GroupID: "group-1", GroupName: "改名后的分组", TodayActualCost: 100},
+			{GroupID: "group-2", GroupName: "另一个分组", TodayActualCost: 50},
+		},
 		adminGroups: []upstream.AdminGroupInfo{
 			{ID: "group-1", Name: "改名后的分组"},
 			{ID: "group-2", Name: "另一个分组"},
@@ -468,8 +519,8 @@ func TestGroupUsageToday_RealConnectionsKeepConfirmedGroupsDuringPartialCostColl
 	if response.UnboundUpstreamCost == nil || *response.UnboundUpstreamCost != 30 {
 		t.Fatalf("unbound cost = %v, want 30", response.UnboundUpstreamCost)
 	}
-	if !hasProfitIssue(response.Issues, "unbound_upstream_cost") {
-		t.Fatalf("missing unbound upstream cost issue: %+v", response.Issues)
+	if hasProfitIssue(response.Issues, "unbound_upstream_cost") {
+		t.Fatalf("unbound upstream cost must remain a diagnostic, not a blocking issue: %+v", response.Issues)
 	}
 	for _, issue := range response.Issues {
 		if issue.RunID != response.Quality.RunID || issue.ObservedAt == "" {
@@ -478,12 +529,12 @@ func TestGroupUsageToday_RealConnectionsKeepConfirmedGroupsDuringPartialCostColl
 	}
 }
 
-func TestGroupUsageToday_DoesNotUseGroupRevenueFallbackForBoundConnection(t *testing.T) {
+func TestGroupUsageToday_KeepsDisplayRevenueWhenConnectionRevenueFails(t *testing.T) {
 	store := newFakeSessionStore()
 	store.set("user-1", "workspace-1", AdminSession{Session: authenticatedSession()})
 	accounts := &fakeAdminAccounts{current: map[string]string{"user-1": "workspace-1"}}
 	platform := &fakePlatformClient{
-		usageStats:  999,
+		dailyStats:  []upstream.GroupDailyStat{{GroupID: "group-1", GroupName: "绑定分组", TodayActualCost: 999}},
 		adminGroups: []upstream.AdminGroupInfo{{ID: "group-1", Name: "绑定分组"}},
 		groupAccounts: map[string][]upstream.AdminGroupAccountInfo{
 			"group-1": {{ID: "account-1"}},
@@ -507,15 +558,334 @@ func TestGroupUsageToday_DoesNotUseGroupRevenueFallbackForBoundConnection(t *tes
 	if err != nil {
 		t.Fatalf("GroupUsageToday() error: %v", err)
 	}
+	group := groupUsageItemByID(t, response.Groups, "group-1")
+	if group.TodayRevenue != 999 || group.TodayCost != nil || group.TodayProfit != nil {
+		t.Fatalf("connection revenue failure must preserve display revenue only, got %+v", group)
+	}
+	if response.Quality == nil || response.Quality.Status != ProfitAllocationUnavailable {
+		t.Fatalf("quality = %+v, want unavailable", response.Quality)
+	}
+}
+
+func TestGroupUsageToday_ReassignsMovedAccountBeforeAccounting(t *testing.T) {
+	store := newFakeSessionStore()
+	store.set("user-1", "workspace-1", AdminSession{Session: authenticatedSession()})
+	accounts := &fakeAdminAccounts{current: map[string]string{"user-1": "workspace-1"}}
+	platform := &fakePlatformClient{
+		dailyStats: []upstream.GroupDailyStat{{GroupID: "group-new", GroupName: "新分组", TodayActualCost: 100}},
+		adminGroups: []upstream.AdminGroupInfo{
+			{ID: "group-old", Name: "旧分组", Status: "active"},
+			{ID: "group-new", Name: "新分组", Status: "active"},
+		},
+		groupAccounts: map[string][]upstream.AdminGroupAccountInfo{
+			"group-old": {},
+			"group-new": {{ID: "account-1", Status: "active"}},
+		},
+		scopeUsage: map[string]upstream.AdminUsageStats{
+			"account-1|group-new": {TotalActualCost: 100},
+		},
+	}
+	upstreams := &fakeUpstreamLister{
+		cachedSites:   []upstream.Response{{ID: "site-a", RechargeRate: 1, Status: upstream.StatusConnected, Metrics: todayCachedMetrics(30)}},
+		keyUsageItems: []upstream.KeyUsageTodayItem{{SiteID: "site-a", KeyID: "key-1", TodayAmount: 30}},
+	}
+	connections := &fakeRealConnectionReader{connections: []my_sites.RealConnection{{
+		ID: "connection-1", Status: "active", UpstreamSiteID: "site-a", UpstreamGroupName: "upstream-group", UpstreamKeyID: "key-1",
+		AdminAccountID: "account-1", OwnGroupIDs: []string{"group-old"}, OwnGroupNames: []string{"旧分组"},
+	}}}
+	reconciler := &fakeRealConnectionReconciler{}
+	service := NewMetricsService(store, platform, upstreams, nil, accounts)
+	service.SetRealConnectionReader(connections)
+	service.SetRealConnectionReconciler(reconciler)
+
+	response, err := service.GroupUsageToday(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GroupUsageToday() error: %v", err)
+	}
+	if len(reconciler.reassigned) != 1 || reconciler.reassigned[0].id != "connection-1" || len(reconciler.reassigned[0].groups) != 1 || reconciler.reassigned[0].groups[0] != "group-new" {
+		t.Fatalf("unexpected reassign calls: %+v", reconciler.reassigned)
+	}
+	if len(reconciler.retired) != 0 {
+		t.Fatalf("moved account must not be retired: %+v", reconciler.retired)
+	}
+	if response.Quality == nil || response.Quality.Status != ProfitAllocationExact || response.Quality.ExpectedConnections != 1 || response.Quality.ResolvedConnections != 1 || len(response.Issues) != 0 {
+		t.Fatalf("moved account did not close exactly: %+v", response)
+	}
+	byID := map[string]GroupUsageTodayItem{}
+	for _, group := range response.Groups {
+		byID[group.GroupID] = group
+	}
+	if byID["group-new"].TodayProfit == nil || *byID["group-new"].TodayProfit != 70 {
+		t.Fatalf("new group profit = %+v, want 70", byID["group-new"])
+	}
+}
+
+func TestGroupUsageToday_ReassignsInactiveAccountWhenKeyStillExists(t *testing.T) {
+	store := newFakeSessionStore()
+	store.set("user-1", "workspace-1", AdminSession{Session: authenticatedSession()})
+	accounts := &fakeAdminAccounts{current: map[string]string{"user-1": "workspace-1"}}
+	platform := &fakePlatformClient{
+		dailyStats:  []upstream.GroupDailyStat{{GroupID: "group-new", GroupName: "新分组", TodayActualCost: 30}},
+		adminGroups: []upstream.AdminGroupInfo{{ID: "group-old", Name: "旧分组", Status: "active"}, {ID: "group-new", Name: "新分组", Status: "active"}},
+		groupAccounts: map[string][]upstream.AdminGroupAccountInfo{
+			"group-old": {},
+			"group-new": {{ID: "account-1", Status: "inactive"}},
+		},
+		scopeUsage: map[string]upstream.AdminUsageStats{"account-1|group-new": {TotalActualCost: 30}},
+	}
+	upstreams := &fakeUpstreamLister{
+		cachedSites:   []upstream.Response{{ID: "site-a", RechargeRate: 1, Status: upstream.StatusConnected, Metrics: todayCachedMetrics(10)}},
+		keyUsageItems: []upstream.KeyUsageTodayItem{{SiteID: "site-a", KeyID: "key-1", TodayAmount: 10}},
+	}
+	connections := &fakeRealConnectionReader{connections: []my_sites.RealConnection{{
+		ID: "connection-1", Status: "active", UpstreamSiteID: "site-a", UpstreamGroupName: "upstream-group", UpstreamKeyID: "key-1",
+		AdminAccountID: "account-1", OwnGroupIDs: []string{"group-old"}, OwnGroupNames: []string{"旧分组"},
+	}}}
+	reconciler := &fakeRealConnectionReconciler{}
+	service := NewMetricsService(store, platform, upstreams, nil, accounts)
+	service.SetRealConnectionReader(connections)
+	service.SetRealConnectionReconciler(reconciler)
+
+	response, err := service.GroupUsageToday(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GroupUsageToday() error: %v", err)
+	}
+	if len(reconciler.reassigned) != 1 || len(reconciler.retired) != 0 {
+		t.Fatalf("inactive account with an existing key must be reassigned: reassigned=%+v retired=%+v", reconciler.reassigned, reconciler.retired)
+	}
+	if response.Quality == nil || response.Quality.Status != ProfitAllocationExact || response.Quality.ResolvedConnections != 1 {
+		t.Fatalf("inactive account revenue must remain accounted: %+v", response)
+	}
+}
+
+func TestGroupUsageToday_UnboundCostRemainsOutsideGroupContribution(t *testing.T) {
+	store := newFakeSessionStore()
+	store.set("user-1", "workspace-1", AdminSession{Session: authenticatedSession()})
+	accounts := &fakeAdminAccounts{current: map[string]string{"user-1": "workspace-1"}}
+	platform := &fakePlatformClient{
+		dailyStats:  []upstream.GroupDailyStat{{GroupID: "group-1", GroupName: "已绑定分组", TodayActualCost: 10}},
+		adminGroups: []upstream.AdminGroupInfo{{ID: "group-1", Name: "已绑定分组", Status: "active"}},
+		groupAccounts: map[string][]upstream.AdminGroupAccountInfo{
+			"group-1": {{ID: "account-1", Status: "active"}},
+		},
+		scopeUsage: map[string]upstream.AdminUsageStats{"account-1|group-1": {TotalActualCost: 10}},
+	}
+	upstreams := &fakeUpstreamLister{
+		cachedSites: []upstream.Response{{ID: "site-a", RechargeRate: 1, Status: upstream.StatusConnected, Metrics: todayCachedMetrics(12)}},
+		keyUsageItems: []upstream.KeyUsageTodayItem{
+			{SiteID: "site-a", KeyID: "bound-key", TodayAmount: 3},
+			{SiteID: "site-a", KeyID: "unbound-key", TodayAmount: 9},
+		},
+	}
+	connections := &fakeRealConnectionReader{connections: []my_sites.RealConnection{{
+		ID: "connection-1", Status: "active", UpstreamSiteID: "site-a", UpstreamKeyID: "bound-key",
+		AdminAccountID: "account-1", OwnGroupIDs: []string{"group-1"}, OwnGroupNames: []string{"已绑定分组"},
+	}}}
+	reconciler := &fakeRealConnectionReconciler{}
+	service := NewMetricsService(store, platform, upstreams, nil, accounts)
+	service.SetRealConnectionReader(connections)
+	service.SetRealConnectionReconciler(reconciler)
+
+	response, err := service.GroupUsageToday(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GroupUsageToday() error: %v", err)
+	}
+	if response.Quality == nil || response.Quality.Status != ProfitAllocationExact || !response.ProfitAvailable {
+		t.Fatalf("bound group contribution must remain exact: %+v", response)
+	}
+	if response.TotalCost == nil || *response.TotalCost != 12 || response.TotalProfit == nil || *response.TotalProfit != -2 || response.UnboundUpstreamCost == nil || *response.UnboundUpstreamCost != 9 {
+		t.Fatalf("unbound cost must remain visible in contribution totals: %+v", response)
+	}
+	group := groupUsageItemByID(t, response.Groups, "group-1")
+	if group.Status != ProfitAllocationExact || group.TodayProfit == nil || *group.TodayProfit != 7 {
+		t.Fatalf("exact group must remain readable: %+v", response.Groups)
+	}
+	unbound := groupUsageItemByID(t, response.Groups, "__unbound_upstream_cost__")
+	if unbound.ContributionKind != "unbound_upstream_cost" || unbound.TodayRevenue != 0 || unbound.TodayCost == nil || *unbound.TodayCost != 9 || unbound.TodayProfit == nil || *unbound.TodayProfit != -9 {
+		t.Fatalf("unbound cost contribution = %+v", unbound)
+	}
+}
+
+func TestGroupUsageToday_RetiresMissingKeyWithoutIssue(t *testing.T) {
+	store := newFakeSessionStore()
+	store.set("user-1", "workspace-1", AdminSession{Session: authenticatedSession()})
+	accounts := &fakeAdminAccounts{current: map[string]string{"user-1": "workspace-1"}}
+	platform := &fakePlatformClient{
+		dailyStats:  []upstream.GroupDailyStat{{GroupID: "group-1", GroupName: "分组", TodayActualCost: 0}},
+		adminGroups: []upstream.AdminGroupInfo{{ID: "group-1", Name: "分组", Status: "active"}},
+		groupAccounts: map[string][]upstream.AdminGroupAccountInfo{
+			"group-1": {{ID: "account-1", Status: "active"}},
+		},
+	}
+	upstreams := &fakeUpstreamLister{
+		cachedSites:   []upstream.Response{{ID: "site-a", RechargeRate: 1, Status: upstream.StatusConnected, Metrics: todayCachedMetrics(0)}},
+		keyUsageItems: []upstream.KeyUsageTodayItem{},
+	}
+	connections := &fakeRealConnectionReader{connections: []my_sites.RealConnection{{
+		ID: "connection-1", Status: "active", UpstreamSiteID: "site-a", UpstreamKeyID: "missing-key",
+		AdminAccountID: "account-1", OwnGroupIDs: []string{"group-1"}, OwnGroupNames: []string{"分组"},
+	}}}
+	reconciler := &fakeRealConnectionReconciler{}
+	service := NewMetricsService(store, platform, upstreams, nil, accounts)
+	service.SetRealConnectionReader(connections)
+	service.SetRealConnectionReconciler(reconciler)
+
+	response, err := service.GroupUsageToday(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GroupUsageToday() error: %v", err)
+	}
+	if len(reconciler.retired) != 1 || reconciler.retired[0] != "connection-1" || len(reconciler.reassigned) != 0 {
+		t.Fatalf("unexpected reconcile calls: retired=%+v reassigned=%+v", reconciler.retired, reconciler.reassigned)
+	}
+	if response.Quality == nil || response.Quality.ExpectedConnections != 0 || response.Quality.FailedConnections != 0 || response.Quality.UnallocatableConnections != 0 || len(response.Issues) != 0 {
+		t.Fatalf("retired binding must leave no accounting problem: %+v", response)
+	}
+}
+
+func TestGroupUsageToday_AggregatesSameGroupAndReturnsFormalTotals(t *testing.T) {
+	store := newFakeSessionStore()
+	store.set("user-1", "workspace-1", AdminSession{Session: authenticatedSession()})
+	accounts := &fakeAdminAccounts{current: map[string]string{"user-1": "workspace-1"}}
+	platform := &fakePlatformClient{
+		dailyStats:  []upstream.GroupDailyStat{{GroupID: "group-1", GroupName: "核心分组", TodayActualCost: 100}},
+		adminGroups: []upstream.AdminGroupInfo{{ID: "group-1", Name: "核心分组", Status: "active"}},
+		groupAccounts: map[string][]upstream.AdminGroupAccountInfo{
+			"group-1": {{ID: "account-1"}, {ID: "account-2"}},
+		},
+		scopeUsage: map[string]upstream.AdminUsageStats{
+			"account-1|group-1": {TotalActualCost: 60},
+			"account-2|group-1": {TotalActualCost: 40},
+		},
+	}
+	upstreams := &fakeUpstreamLister{
+		cachedSites: []upstream.Response{{ID: "site-a", RechargeRate: 1, Status: upstream.StatusConnected, Metrics: todayCachedMetrics(12)}},
+		keyUsageItems: []upstream.KeyUsageTodayItem{
+			{SiteID: "site-a", KeyID: "key-1", TodayAmount: 30},
+			{SiteID: "site-a", KeyID: "key-2", TodayAmount: 20},
+		},
+	}
+	connections := &fakeRealConnectionReader{connections: []my_sites.RealConnection{
+		{ID: "connection-1", Status: "active", UpstreamSiteID: "site-a", UpstreamKeyID: "key-1", AdminAccountID: "account-1", OwnGroupIDs: []string{"group-1"}},
+		{ID: "connection-2", Status: "active", UpstreamSiteID: "site-a", UpstreamKeyID: "key-2", AdminAccountID: "account-2", OwnGroupIDs: []string{"group-1"}},
+	}}
+	service := NewMetricsService(store, platform, upstreams, nil, accounts)
+	service.SetRealConnectionReader(connections)
+
+	response, err := service.GroupUsageToday(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GroupUsageToday() error: %v", err)
+	}
 	if len(response.Groups) != 1 {
 		t.Fatalf("groups = %+v, want one group", response.Groups)
 	}
 	group := response.Groups[0]
-	if group.TodayRevenue != 0 || group.TodayCost != nil || group.TodayProfit != nil {
-		t.Fatalf("scoped revenue failure must remain unknown, got %+v", group)
+	if group.Status != ProfitAllocationExact || group.TodayRevenue != 100 || group.TodayCost == nil || *group.TodayCost != 50 || group.TodayProfit == nil || *group.TodayProfit != 50 {
+		t.Fatalf("unexpected exact group: %+v", group)
 	}
-	if response.Quality == nil || response.Quality.Status != ProfitAllocationUnavailable {
-		t.Fatalf("quality = %+v, want unavailable", response.Quality)
+	if len(group.Connections) != 2 || group.Connections[0].Profit == nil || group.Connections[1].Profit == nil {
+		t.Fatalf("connection profit detail missing: %+v", group.Connections)
+	}
+	if !response.ProfitAvailable || response.TotalCost == nil || *response.TotalCost != 50 || response.TotalProfit == nil || *response.TotalProfit != 50 {
+		t.Fatalf("formal totals missing: %+v", response)
+	}
+	if response.Quality == nil || response.Quality.Status != ProfitAllocationExact || response.Quality.ExpectedConnections != 2 || response.Quality.ResolvedConnections != 2 || response.Quality.FailedConnections != 0 || response.Quality.UnallocatableConnections != 0 {
+		t.Fatalf("quality did not close: %+v", response.Quality)
+	}
+}
+
+func TestGroupUsageToday_PartialKeepsOnlyUnrelatedExactGroupProfit(t *testing.T) {
+	store := newFakeSessionStore()
+	store.set("user-1", "workspace-1", AdminSession{Session: authenticatedSession()})
+	accounts := &fakeAdminAccounts{current: map[string]string{"user-1": "workspace-1"}}
+	platform := &fakePlatformClient{
+		dailyStats: []upstream.GroupDailyStat{
+			{GroupID: "group-1", GroupName: "精确分组", TodayActualCost: 60},
+			{GroupID: "group-2", GroupName: "失败分组", TodayActualCost: 40},
+		},
+		adminGroups: []upstream.AdminGroupInfo{
+			{ID: "group-1", Name: "精确分组", Status: "active"},
+			{ID: "group-2", Name: "失败分组", Status: "active"},
+		},
+		groupAccounts: map[string][]upstream.AdminGroupAccountInfo{
+			"group-1": {{ID: "account-1"}},
+			"group-2": {{ID: "account-2"}},
+		},
+		scopeUsage: map[string]upstream.AdminUsageStats{
+			"account-1|group-1": {TotalActualCost: 60},
+			"account-2|group-2": {TotalActualCost: 40},
+		},
+	}
+	upstreams := &fakeUpstreamLister{
+		cachedSites:   []upstream.Response{{ID: "site-a", RechargeRate: 1, Status: upstream.StatusConnected, Metrics: todayCachedMetrics(12)}},
+		keyUsageItems: []upstream.KeyUsageTodayItem{{SiteID: "site-a", KeyID: "key-1", TodayAmount: 30}},
+	}
+	connections := &fakeRealConnectionReader{connections: []my_sites.RealConnection{
+		{ID: "connection-1", Status: "active", UpstreamSiteID: "site-a", UpstreamKeyID: "key-1", AdminAccountID: "account-1", OwnGroupIDs: []string{"group-1"}},
+		{ID: "connection-2", Status: "active", UpstreamSiteID: "site-a", UpstreamKeyID: "key-2", AdminAccountID: "account-2", OwnGroupIDs: []string{"group-2"}},
+	}}
+	service := NewMetricsService(store, platform, upstreams, nil, accounts)
+	service.SetRealConnectionReader(connections)
+
+	response, err := service.GroupUsageToday(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GroupUsageToday() error: %v", err)
+	}
+	byID := map[string]GroupUsageTodayItem{}
+	for _, group := range response.Groups {
+		byID[group.GroupID] = group
+	}
+	if group := byID["group-1"]; group.Status != ProfitAllocationExact || group.TodayProfit == nil || *group.TodayProfit != 30 {
+		t.Fatalf("unrelated exact group was hidden: %+v", group)
+	}
+	if group := byID["group-2"]; group.TodayRevenue != 40 || group.TodayCost != nil || group.TodayProfit != nil {
+		t.Fatalf("failed group did not keep revenue-only boundary: %+v", group)
+	}
+	if response.ProfitAvailable || response.TotalCost != nil || response.TotalProfit != nil {
+		t.Fatalf("partial response returned formal totals: %+v", response)
+	}
+	if response.Quality == nil || response.Quality.Status != "partial" || response.Quality.ExpectedConnections != 2 || response.Quality.ResolvedConnections != 1 || response.Quality.FailedConnections != 1 || response.Quality.UnallocatableConnections != 0 {
+		t.Fatalf("partial quality did not close: %+v", response.Quality)
+	}
+	if !hasConnectionProfitIssue(response.Issues, ProfitIssueKeyMissing, "connection-2") {
+		t.Fatalf("missing failed connection issue: %+v", response.Issues)
+	}
+}
+
+func TestGroupUsageToday_MultiGroupConnectionIsCountedAndReported(t *testing.T) {
+	store := newFakeSessionStore()
+	store.set("user-1", "workspace-1", AdminSession{Session: authenticatedSession()})
+	accounts := &fakeAdminAccounts{current: map[string]string{"user-1": "workspace-1"}}
+	platform := &fakePlatformClient{
+		dailyStats: []upstream.GroupDailyStat{
+			{GroupID: "group-1", GroupName: "分组一", TodayActualCost: 60},
+			{GroupID: "group-2", GroupName: "分组二", TodayActualCost: 40},
+		},
+		adminGroups: []upstream.AdminGroupInfo{{ID: "group-1", Name: "分组一"}, {ID: "group-2", Name: "分组二"}},
+	}
+	upstreams := &fakeUpstreamLister{
+		cachedSites:   []upstream.Response{{ID: "site-a", RechargeRate: 1, Status: upstream.StatusConnected, Metrics: todayCachedMetrics(12)}},
+		keyUsageItems: []upstream.KeyUsageTodayItem{{SiteID: "site-a", KeyID: "key-1", TodayAmount: 30}},
+	}
+	connections := &fakeRealConnectionReader{connections: []my_sites.RealConnection{{
+		ID: "connection-1", Status: "active", UpstreamSiteID: "site-a", UpstreamKeyID: "key-1", AdminAccountID: "account-1", OwnGroupIDs: []string{"group-1", "group-2"},
+	}}}
+	service := NewMetricsService(store, platform, upstreams, nil, accounts)
+	service.SetRealConnectionReader(connections)
+
+	response, err := service.GroupUsageToday(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GroupUsageToday() error: %v", err)
+	}
+	if response.Quality == nil || response.Quality.ExpectedConnections != 1 || response.Quality.ResolvedConnections != 0 || response.Quality.FailedConnections != 0 || response.Quality.UnallocatableConnections != 1 {
+		t.Fatalf("multi-group connection was silently skipped: %+v", response.Quality)
+	}
+	if !hasConnectionProfitIssue(response.Issues, ProfitIssueMultiGroup, "connection-1") {
+		t.Fatalf("multi-group issue lacks connection scope: %+v", response.Issues)
+	}
+	for _, issue := range response.Issues {
+		if issue.Code == ProfitIssueMultiGroup && (issue.RunID == "" || issue.ObservedAt == "") {
+			t.Fatalf("multi-group issue lacks trace metadata: %+v", issue)
+		}
 	}
 }
 

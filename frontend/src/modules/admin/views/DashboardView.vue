@@ -447,6 +447,7 @@ const groupMetricModes: GroupMetricMode[] = ['profit', 'revenue']
 const groupProfitAvailable = computed(() => groupUsage.value?.profitAvailable === true)
 const groupProfitQuality = computed(() => groupUsage.value?.quality ?? null)
 const groupProfitIssues = computed(() => groupUsage.value?.issues ?? [])
+const groupUnboundCost = computed(() => groupUsage.value?.unboundUpstreamCost ?? null)
 const groupProfitStatusText = computed(() => {
   const status = groupProfitQuality.value?.status
   if (status === 'exact') return t('admin.dashboard.groupUsage.statusExact')
@@ -497,9 +498,17 @@ const groupTopThreeLabel = computed(() => t(
     : 'admin.dashboard.groups.topThreeRevenueShare',
 ))
 const groupMetricValue = (item: GroupUsageTodayResponse['groups'][number]): number | null => {
-  if (groupMetricMode.value === 'profit') return item.todayProfit ?? null
+  if (groupMetricMode.value === 'profit') {
+    return item.status === 'exact' && item.todayProfit != null ? item.todayProfit : null
+  }
+  if (item.contributionKind === 'unbound_upstream_cost') return null
   return item.todayRevenue ?? item.todayAmount
 }
+const groupDisplayName = (item: GroupUsageTodayResponse['groups'][number]) => (
+  item.contributionKind === 'unbound_upstream_cost'
+    ? t('admin.dashboard.groupUsage.unboundContribution')
+    : item.groupName
+)
 
 const period = ref<DashboardPeriod>('week')
 const periods: DashboardPeriod[] = ['week', 'month']
@@ -634,14 +643,13 @@ const performanceChartOption = computed<EChartsCoreOption>(() => {
 })
 
 const sortedGroups = computed(() => {
-  if (groupMetricMode.value === 'profit' && !groupProfitAvailable.value) return []
   return [...(groupUsage.value?.groups ?? [])]
     .filter((item) => groupMetricValue(item) != null)
     .sort((a, b) => (groupMetricValue(b) ?? 0) - (groupMetricValue(a) ?? 0))
 })
 const topGroups = computed(() => sortedGroups.value.slice(0, 6))
 const groupConcentration = computed(() => {
-  if (groupMetricMode.value === 'profit' && !groupProfitAvailable.value) return null
+  if (groupMetricMode.value === 'profit' && groupUnboundCost.value != null) return null
   const total = groupMetricMode.value === 'profit'
     ? groupUsage.value?.totalProfit
     : (groupUsage.value?.totalRevenue ?? groupUsage.value?.total)
@@ -695,7 +703,7 @@ const groupChartOption = computed<EChartsCoreOption>(() => {
     yAxis: {
       type: 'category',
       inverse: true,
-      data: topGroups.value.map(item => item.groupName),
+      data: topGroups.value.map(item => groupDisplayName(item)),
       axisLine: { show: false },
       axisTick: { show: false },
       axisLabel: {
@@ -1089,7 +1097,8 @@ const lastProbeLabel = computed(() => {
             <div v-else>
               <div
                 v-if="groupMetricMode === 'profit' && groupProfitQuality"
-                class="mt-4 space-y-3 rounded-lg border border-warning/30 bg-warning/5 px-3 py-3 text-xs"
+                class="mt-4 space-y-3 rounded-lg px-3 py-3 text-xs"
+                :class="groupProfitIssues.length ? 'border border-warning/30 bg-warning/5' : 'border border-border/60 bg-surface/40'"
               >
                 <div class="flex flex-wrap items-center justify-between gap-2">
                   <span class="font-medium text-foreground">{{ groupProfitSummary }}</span>
@@ -1097,8 +1106,8 @@ const lastProbeLabel = computed(() => {
                     {{ t('admin.dashboard.groupUsage.issuesTitle', { count: groupProfitIssues.length }) }}
                   </span>
                 </div>
-                <p v-if="groupUsage?.unboundUpstreamCost != null" class="text-muted-foreground">
-                  {{ t('admin.dashboard.groupUsage.unboundCost', { cost: formatCny(groupUsage.unboundUpstreamCost) }) }}
+                <p v-if="groupUnboundCost != null" class="text-muted-foreground">
+                  {{ t('admin.dashboard.groupUsage.unboundCost', { cost: formatCny(groupUnboundCost) }) }}
                 </p>
                 <ul v-if="groupProfitIssues.length" class="space-y-2 border-t border-warning/20 pt-2 text-muted-foreground">
                   <li v-for="issue in groupProfitIssues.slice(0, 5)" :key="`${issue.code}-${issue.connectionId ?? issue.groupId ?? issue.keyId ?? 'global'}`" class="space-y-0.5">
@@ -1115,7 +1124,7 @@ const lastProbeLabel = computed(() => {
                 </ul>
               </div>
 
-              <div v-if="groupMetricMode === 'profit' && !groupProfitAvailable" class="flex h-[280px] flex-col items-center justify-center gap-3 text-center text-sm text-muted-foreground">
+              <div v-if="groupMetricMode === 'profit' && topGroups.length === 0 && !groupProfitAvailable" class="flex h-[280px] flex-col items-center justify-center gap-3 text-center text-sm text-muted-foreground">
                 <AlertTriangle class="h-5 w-5 text-warning" />
                 <span>{{ groupProfitSummary }}</span>
               </div>

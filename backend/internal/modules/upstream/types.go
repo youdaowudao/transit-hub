@@ -269,6 +269,7 @@ type LoginResult struct {
 }
 
 type GroupDailyStat struct {
+	GroupID         string  `json:"groupId,omitempty"`
 	GroupName       string  `json:"groupName"`
 	TodayActualCost float64 `json:"todayActualCost"`
 }

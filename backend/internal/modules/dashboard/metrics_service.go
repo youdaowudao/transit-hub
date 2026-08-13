@@ -38,6 +38,13 @@ type RealConnectionReader interface {
 	ListRealConnectionsForWorkspace(ctx context.Context, userID, adminAccountID string) ([]my_sites.RealConnection, error)
 }
 
+// RealConnectionReconciler repairs a local binding after the upstream admin
+// account has moved groups. Implementations must not mutate upstream resources.
+type RealConnectionReconciler interface {
+	ReassignRealConnectionGroups(ctx context.Context, conn my_sites.RealConnection, ownGroupIDs []string, ownGroupNames []string) error
+	RetireRealConnection(ctx context.Context, conn my_sites.RealConnection) error
+}
+
 type metricsStore interface {
 	Upsert(ctx context.Context, snapshot DailySnapshot) error
 	ListRange(ctx context.Context, userID, adminAccountID string, days int, businessDate string) ([]DailySnapshot, error)
@@ -57,6 +64,7 @@ type MetricsService struct {
 	metricsRepo     metricsStore
 	accounts        AdminAccountService
 	realConnections RealConnectionReader
+	realReconciler  RealConnectionReconciler
 	sessionSync     MySiteStateSync
 	refreshInterval time.Duration // 用于推导 maxStaleness；0 表示使用默认值 2h
 }
@@ -85,6 +93,10 @@ func (s *MetricsService) SetMySiteSync(sync MySiteStateSync) {
 
 func (s *MetricsService) SetRealConnectionReader(reader RealConnectionReader) {
 	s.realConnections = reader
+}
+
+func (s *MetricsService) SetRealConnectionReconciler(reconciler RealConnectionReconciler) {
+	s.realReconciler = reconciler
 }
 
 func (s *MetricsService) freshAdminSession(ctx context.Context, userID string, adminAccountID string, record *AdminSession) (upstream.Session, error) {

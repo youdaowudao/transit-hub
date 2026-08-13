@@ -35,15 +35,10 @@ type UpstreamLister interface {
 	FetchSiteCostsForDate(ctx context.Context, userID, adminAccountID, date string) ([]upstream.SiteCostForDateResult, error)
 }
 
+// RealConnectionReader only supplies existing local bindings for the optional
+// direct-profit view. Dashboard reads never reconcile or modify a connection.
 type RealConnectionReader interface {
 	ListRealConnectionsForWorkspace(ctx context.Context, userID, adminAccountID string) ([]my_sites.RealConnection, error)
-}
-
-// RealConnectionReconciler repairs a local binding after the upstream admin
-// account has moved groups. Implementations must not mutate upstream resources.
-type RealConnectionReconciler interface {
-	ReassignRealConnectionGroups(ctx context.Context, conn my_sites.RealConnection, ownGroupIDs []string, ownGroupNames []string) error
-	RetireRealConnection(ctx context.Context, conn my_sites.RealConnection) error
 }
 
 type metricsStore interface {
@@ -65,7 +60,6 @@ type MetricsService struct {
 	metricsRepo     metricsStore
 	accounts        AdminAccountService
 	realConnections RealConnectionReader
-	realReconciler  RealConnectionReconciler
 	sessionSync     MySiteStateSync
 	refreshInterval time.Duration // 用于推导 maxStaleness；0 表示使用默认值 2h
 	additionalCosts AdditionalCostRepository
@@ -95,10 +89,6 @@ func (s *MetricsService) SetMySiteSync(sync MySiteStateSync) {
 
 func (s *MetricsService) SetRealConnectionReader(reader RealConnectionReader) {
 	s.realConnections = reader
-}
-
-func (s *MetricsService) SetRealConnectionReconciler(reconciler RealConnectionReconciler) {
-	s.realReconciler = reconciler
 }
 
 func (s *MetricsService) freshAdminSession(ctx context.Context, userID string, adminAccountID string, record *AdminSession) (upstream.Session, error) {
@@ -794,8 +784,8 @@ func (s *MetricsService) AdminGroups(ctx context.Context, userID string) (AdminG
 	return AdminGroupsResponse{Count: len(items), Groups: items}, nil
 }
 
-// GroupUsageToday 获取当前工作区「我的站点」所有分组今日的营收，并在成本口径完整时实时派生利润（平台中性）。
-// 数据只在首页运营区加载时按需请求，不参与 LiveMetrics 的批量指标计算。
+// GroupUsageToday 获取主站按 group_id 汇总的今日营收。成本和净利润由 LiveMetrics
+// 按全站点总账计算；它只读已有连接补充可直接归属的利润，绝不修改连接。
 func (s *MetricsService) GroupUsageToday(ctx context.Context, userID string) (GroupUsageTodayResponse, error) {
 	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
 	if err != nil {
@@ -819,121 +809,7 @@ func (s *MetricsService) GroupUsageToday(ctx context.Context, userID string) (Gr
 	}
 
 	date := businesstime.Today()
-	if s.realConnections != nil {
-		return s.realGroupUsageToday(ctx, userID, adminAccountID, session, date)
-	}
-	groups, err := s.platform.FetchAdminGroups(session)
-	if err != nil {
-		return GroupUsageTodayResponse{}, err
-	}
-
-	stats, err := s.platform.FetchAdminGroupDailyStatsForDate(session, groups, date)
-	if err != nil {
-		return GroupUsageTodayResponse{}, err
-	}
-
-	// 归一化：分组名去空格、空名跳过、重名分组合并求和；顺序按首次出现排列。
-	order := make([]string, 0, len(stats))
-	totals := make(map[string]float64, len(stats))
-	for _, stat := range stats {
-		name := strings.TrimSpace(stat.GroupName)
-		if name == "" {
-			continue
-		}
-		if _, exists := totals[name]; !exists {
-			order = append(order, name)
-		}
-		totals[name] += stat.TodayActualCost
-	}
-
-	items := make([]GroupUsageTodayItem, 0, len(order))
-	var total float64
-	revenueByName := make(map[string]float64, len(order))
-	for _, name := range order {
-		amount := totals[name]
-		items = append(items, GroupUsageTodayItem{
-			GroupName:    name,
-			TodayAmount:  amount,
-			TodayRevenue: amount,
-		})
-		revenueByName[name] = amount
-		total += amount
-	}
-
-	response := GroupUsageTodayResponse{
-		Date:         date,
-		Total:        total,
-		TotalRevenue: total,
-		Groups:       items,
-	}
-
-	// 分组利润只在当前上游成本完整、且营收与成本的分组名可对齐时生成。
-	// 成本采集失败时保留营收响应，避免把未知成本静默当作零。
-	if s.upstreams == nil {
-		response.ProfitUnavailableReason = "upstream_cost_unavailable"
-		return response, nil
-	}
-	costResponse, costErr := s.UpstreamKeyUsageToday(ctx, userID)
-	if costErr != nil || costResponse.FailedSites > 0 {
-		response.ProfitUnavailableReason = "upstream_cost_unavailable"
-		return response, nil
-	}
-
-	costByName := make(map[string]float64)
-	for _, item := range costResponse.Keys {
-		name := strings.TrimSpace(item.GroupName)
-		if name == "" {
-			continue
-		}
-		costByName[name] += item.TodayAmount
-	}
-
-	// 缓存中的上游分组列表用于区分“当日零成本”和“根本无法对齐”。
-	knownUpstreamGroups := make(map[string]struct{})
-	for _, site := range s.upstreams.List(ctx, userID) {
-		if !site.IsEnabled() || site.RechargeRate <= 0 {
-			continue
-		}
-		for _, group := range site.Metrics.Groups {
-			name := strings.TrimSpace(group.Name)
-			if name != "" {
-				knownUpstreamGroups[name] = struct{}{}
-			}
-		}
-	}
-
-	for name := range costByName {
-		if _, exists := revenueByName[name]; !exists {
-			response.ProfitUnavailableReason = "group_name_unmatched"
-			return response, nil
-		}
-	}
-	if costResponse.TotalSites > 0 {
-		for name := range revenueByName {
-			if _, hasCost := costByName[name]; hasCost {
-				continue
-			}
-			if _, known := knownUpstreamGroups[name]; !known {
-				response.ProfitUnavailableReason = "group_name_unmatched"
-				return response, nil
-			}
-		}
-	}
-
-	var totalCost float64
-	for index := range response.Groups {
-		name := response.Groups[index].GroupName
-		cost := costByName[name]
-		profit := response.Groups[index].TodayRevenue - cost
-		response.Groups[index].TodayCost = ptrF64(cost)
-		response.Groups[index].TodayProfit = ptrF64(profit)
-		totalCost += cost
-	}
-	totalProfit := response.TotalRevenue - totalCost
-	response.TotalCost = ptrF64(totalCost)
-	response.TotalProfit = ptrF64(totalProfit)
-	response.ProfitAvailable = true
-	return response, nil
+	return s.realGroupUsageToday(ctx, userID, adminAccountID, session, date)
 }
 
 // UpstreamKeyUsageToday 获取当前工作区所有上游站点中，今天有消费的 key 明细（仪表盘「今日成本」下钻）。
@@ -962,8 +838,10 @@ func (s *MetricsService) upstreamKeyUsageTodayForDate(ctx context.Context, userI
 		if !errors.As(err, &collectionErr) || collectionErr.TotalSites <= 0 || collectionErr.FailedSites >= collectionErr.TotalSites {
 			return UpstreamKeyUsageTodayResponse{}, requestError(ErrorUpstreamKeyUsageUnavailable)
 		}
-		if totalSites == 0 {
+		if collectionErr.FailedSites > failedSites {
 			failedSites = collectionErr.FailedSites
+		}
+		if collectionErr.TotalSites > totalSites {
 			totalSites = collectionErr.TotalSites
 		}
 		log.Printf("dashboard key usage: partial upstream failure user_id=%s failed_sites=%d total_sites=%d", userID, collectionErr.FailedSites, collectionErr.TotalSites)

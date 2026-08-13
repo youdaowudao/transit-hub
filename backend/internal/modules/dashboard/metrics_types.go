@@ -185,56 +185,24 @@ type AdminGroupItem struct {
 	Multiplier string `json:"multiplier"`
 }
 
-// GroupUsageTodayResponse 是 GET /api/dashboard/group-usage-today 返回的分组今日营收及实时利润明细。
+// GroupUsageTodayResponse 是 GET /api/dashboard/group-usage-today 返回的主站分组今日营收明细。
 type GroupUsageTodayResponse struct {
-	Date                    string                `json:"date"`
-	Total                   float64               `json:"total"` // 兼容字段：今日营收
-	TotalRevenue            float64               `json:"totalRevenue"`
-	TotalCost               *float64              `json:"totalCost,omitempty"`
-	TotalProfit             *float64              `json:"totalProfit,omitempty"`
-	ProfitAvailable         bool                  `json:"profitAvailable"`
-	ProfitUnavailableReason string                `json:"profitUnavailableReason,omitempty"`
-	Quality                 *GroupProfitQuality   `json:"quality,omitempty"`
-	Issues                  []ProfitIssue         `json:"issues,omitempty"`
-	UnboundUpstreamCost     *float64              `json:"unboundUpstreamCost,omitempty"`
-	Groups                  []GroupUsageTodayItem `json:"groups"`
+	Date         string                `json:"date"`
+	Total        float64               `json:"total"` // 兼容字段：今日营收
+	TotalRevenue float64               `json:"totalRevenue"`
+	Groups       []GroupUsageTodayItem `json:"groups"`
 }
 
-type GroupProfitQuality struct {
-	Status                   string `json:"status"` // exact/partial/unavailable
-	ExpectedConnections      int    `json:"expectedConnections"`
-	ResolvedConnections      int    `json:"resolvedConnections"`
-	UnallocatableConnections int    `json:"unallocatableConnections"`
-	FailedConnections        int    `json:"failedConnections"`
-	BusinessDate             string `json:"businessDate"`
-	ObservedAt               string `json:"observedAt,omitempty"`
-	RunID                    string `json:"runId,omitempty"`
-}
-
-// GroupUsageTodayItem 是单个分组的今日营收、成本及实时利润。
+// GroupUsageTodayItem 是单个主站分组的今日营收。
+// Direct* 只代表可由唯一真实连接直接归属的部分，不要求覆盖该分组全部营收。
 type GroupUsageTodayItem struct {
-	GroupID          string                  `json:"groupId,omitempty"`
-	GroupName        string                  `json:"groupName"`
-	ContributionKind string                  `json:"contributionKind,omitempty"` // unbound_upstream_cost 表示分组外成本，不是主站分组
-	TodayAmount      float64                 `json:"todayAmount"`                // 兼容字段：今日营收
-	TodayRevenue     float64                 `json:"todayRevenue"`
-	TodayCost        *float64                `json:"todayCost,omitempty"`
-	TodayProfit      *float64                `json:"todayProfit,omitempty"`
-	Status           string                  `json:"status,omitempty"` // exact/partial/unavailable/unallocatable
-	Issues           []ProfitIssue           `json:"issues,omitempty"`
-	Connections      []GroupProfitConnection `json:"connections,omitempty"`
-}
-
-type GroupProfitConnection struct {
-	ConnectionID string   `json:"connectionId"`
-	AccountID    string   `json:"accountId"`
-	GroupID      string   `json:"groupId"`
-	SiteID       string   `json:"siteId"`
-	KeyID        string   `json:"keyId"`
-	Revenue      *float64 `json:"revenue,omitempty"`
-	Cost         *float64 `json:"cost,omitempty"`
-	Profit       *float64 `json:"profit,omitempty"`
-	Status       string   `json:"status"`
+	GroupID       string   `json:"groupId,omitempty"`
+	GroupName     string   `json:"groupName"`
+	TodayAmount   float64  `json:"todayAmount"` // 兼容字段：今日营收
+	TodayRevenue  float64  `json:"todayRevenue"`
+	DirectRevenue *float64 `json:"directRevenue,omitempty"`
+	DirectCost    *float64 `json:"directCost,omitempty"`
+	TodayProfit   *float64 `json:"todayProfit,omitempty"`
 }
 
 // UpstreamKeyUsageTodayResponse 是 GET /api/dashboard/upstream-key-usage-today 返回的

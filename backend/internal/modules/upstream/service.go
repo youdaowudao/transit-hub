@@ -291,9 +291,15 @@ func (s *Service) keyUsageToday(ctx context.Context, userID string, includeZero 
 		}
 	}
 
+siteLoop:
 	for _, site := range targets {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			recordFailure(ctx.Err())
+			break siteLoop
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(site *Site) {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -301,7 +307,7 @@ func (s *Service) keyUsageToday(ctx context.Context, userID string, includeZero 
 			session := *site.Session
 			groups := append([]GroupInfo(nil), site.Metrics.Groups...)
 
-			refreshedSession, refreshErr := s.platformService.RefreshSession(session)
+			refreshedSession, refreshErr := s.platformService.RefreshSessionContext(ctx, session)
 			if refreshErr != nil {
 				recordFailure(refreshErr)
 				return
@@ -310,9 +316,9 @@ func (s *Service) keyUsageToday(ctx context.Context, userID string, includeZero 
 			var stats []KeyUsageTodayStat
 			var fetchErr error
 			if includeZero {
-				stats, fetchErr = s.platformService.FetchKeyUsageTodayIncludingZero(refreshedSession, groups, date)
+				stats, fetchErr = s.platformService.FetchKeyUsageTodayIncludingZeroWithContext(ctx, refreshedSession, groups, date)
 			} else {
-				stats, fetchErr = s.platformService.FetchKeyUsageToday(refreshedSession, groups)
+				stats, fetchErr = s.platformService.FetchKeyUsageTodayWithContext(ctx, refreshedSession, groups)
 			}
 			if fetchErr != nil {
 				recordFailure(fetchErr)

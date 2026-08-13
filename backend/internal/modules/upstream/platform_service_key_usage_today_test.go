@@ -1,12 +1,15 @@
 package upstream
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestFetchKeyUsageToday_Sub2API_PaginatesKeysAndFiltersZeroCost 覆盖测试要求 5：
@@ -115,6 +118,28 @@ func TestFetchKeyUsageTodayIncludingZero_Sub2APIKeepsExistingZeroCostKey(t *test
 	}
 	if byID["1"] != 0 || byID["2"] != 4.5 {
 		t.Fatalf("unexpected zero-inclusive key costs: %+v", byID)
+	}
+}
+
+func TestFetchKeyUsageToday_Sub2APIHonorsCallerDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := NewPlatformService(NewHTTPClient(server.Client())).FetchKeyUsageTodayWithContext(
+		ctx,
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token"},
+		nil,
+	)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("request ignored caller deadline and took %s", elapsed)
 	}
 }
 

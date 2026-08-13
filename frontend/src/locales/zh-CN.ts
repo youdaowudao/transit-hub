@@ -425,7 +425,7 @@ export default {
       groups: {
         title: '分组贡献',
         subtitleRevenue: '今日营收最高的分组',
-        subtitleProfit: '今日利润最高的分组',
+        subtitleProfit: '已可靠归属的真实利润，差额单独保留',
         total: '{count} 个分组',
         modeLabel: '分组贡献显示方式',
         modeRevenue: '营收',
@@ -435,6 +435,7 @@ export default {
         topThreeRevenueShare: '前三分组营收占比',
         topThreeProfitShare: '前三分组利润占比',
         profitUnavailable: '利润数据暂不可用，请先查看营收。',
+        unallocatedProfit: '未纳入分组利润核算',
         empty: '暂无分组营收数据。',
         loadError: '分组贡献数据暂时无法加载。',
         chartAriaRevenue: '今日分组营收贡献排名图',
@@ -526,7 +527,7 @@ export default {
       groupUsage: {
         title: '今日营收分组明细',
         subtitle: '共 {count} 个分组，合计 {total}',
-        quality: '利润核算：{status}，已核算 {resolved}/{expected} 条真实接入',
+        quality: '利润核算：{status}，真实接入成本 {resolved}/{expected} 条',
         statusExact: '精确',
         statusPartial: '部分核算',
         statusUnavailable: '无法精确核算',

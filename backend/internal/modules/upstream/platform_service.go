@@ -1094,10 +1094,14 @@ func (s *PlatformService) FetchNewAPIGroupDailyStatsForDate(session Session, gro
 // FetchKeyUsageToday 按平台分发获取上游站点今天各 key 的消费统计。
 // 返回值为上游平台原始金额，未乘以站点 rechargeRate；由 upstream.Service 层完成 CNY 换算和跨站点聚合。
 func (s *PlatformService) FetchKeyUsageToday(session Session, groups []GroupInfo) ([]KeyUsageTodayStat, error) {
+	return s.FetchKeyUsageTodayWithContext(context.Background(), session, groups)
+}
+
+func (s *PlatformService) FetchKeyUsageTodayWithContext(ctx context.Context, session Session, groups []GroupInfo) ([]KeyUsageTodayStat, error) {
 	date := businesstime.Today()
 	switch session.Platform {
 	case PlatformSub2API:
-		return s.fetchSub2APIKeyUsageToday(session, false, date)
+		return s.fetchSub2APIKeyUsageToday(ctx, session, false, date)
 	case PlatformNewAPI:
 		return s.fetchNewAPIKeyUsageToday(session, groups, false, date)
 	default:
@@ -1108,9 +1112,13 @@ func (s *PlatformService) FetchKeyUsageToday(session Session, groups []GroupInfo
 // FetchKeyUsageTodayIncludingZero 与 FetchKeyUsageToday 使用同一日期和权限口径，
 // 但保留真实存在且当日消费为 0 的 key。真实调度利润必须能区分“零成本”和“Key 缺失”。
 func (s *PlatformService) FetchKeyUsageTodayIncludingZero(session Session, groups []GroupInfo, date string) ([]KeyUsageTodayStat, error) {
+	return s.FetchKeyUsageTodayIncludingZeroWithContext(context.Background(), session, groups, date)
+}
+
+func (s *PlatformService) FetchKeyUsageTodayIncludingZeroWithContext(ctx context.Context, session Session, groups []GroupInfo, date string) ([]KeyUsageTodayStat, error) {
 	switch session.Platform {
 	case PlatformSub2API:
-		return s.fetchSub2APIKeyUsageToday(session, true, date)
+		return s.fetchSub2APIKeyUsageToday(ctx, session, true, date)
 	case PlatformNewAPI:
 		return s.fetchNewAPIKeyUsageToday(session, groups, true, date)
 	default:
@@ -1122,9 +1130,15 @@ func (s *PlatformService) FetchKeyUsageTodayIncludingZero(session Session, group
 // 瞬时网络、网关和解析异常不应让整张利润图立刻失效；鉴权和普通 4xx 仍直接失败，
 // 且重试耗尽后由上层继续按 fail-closed 处理，绝不把未知成本当作零。
 func (s *PlatformService) requestKeyUsageJSON(reqURL string, options requestOptions) (jsonResponse, error) {
+	return s.requestKeyUsageJSONWithContext(context.Background(), reqURL, options)
+}
+
+func (s *PlatformService) requestKeyUsageJSONWithContext(ctx context.Context, reqURL string, options requestOptions) (jsonResponse, error) {
 	var lastErr error
 	for attempt := 0; attempt < keyUsageRequestAttempts; attempt++ {
-		response, err := s.httpClient.requestJSONWithTimeout(reqURL, options, keyUsageRequestTimeout)
+		requestCtx, cancel := context.WithTimeout(ctx, keyUsageRequestTimeout)
+		response, err := s.httpClient.requestJSONWithContext(requestCtx, reqURL, options)
+		cancel()
 		if err == nil {
 			return response, nil
 		}
@@ -1132,7 +1146,11 @@ func (s *PlatformService) requestKeyUsageJSON(reqURL string, options requestOpti
 		if !retryableKeyUsageError(err) || attempt+1 == keyUsageRequestAttempts {
 			break
 		}
-		time.Sleep(keyUsageRetryDelay)
+		select {
+		case <-ctx.Done():
+			return jsonResponse{}, ctx.Err()
+		case <-time.After(keyUsageRetryDelay):
+		}
 	}
 	return jsonResponse{}, lastErr
 }
@@ -1161,7 +1179,7 @@ type sub2APIKeyRecord struct {
 
 // fetchSub2APIKeyUsageToday 分页拉取 sub2api 站点全部 key（不能只取第一页），
 // 再并发查询每个 key 的今日 usage stats（并发上限 maxKeyConcurrency），只保留消费 > 0 的 key。
-func (s *PlatformService) fetchSub2APIKeyUsageToday(session Session, includeZero bool, date string) ([]KeyUsageTodayStat, error) {
+func (s *PlatformService) fetchSub2APIKeyUsageToday(ctx context.Context, session Session, includeZero bool, date string) ([]KeyUsageTodayStat, error) {
 	if session.Platform != PlatformSub2API || strings.TrimSpace(session.AccessToken) == "" {
 		return nil, newRequestError(ErrorAuth, PlatformSub2API)
 	}
@@ -1172,7 +1190,7 @@ func (s *PlatformService) fetchSub2APIKeyUsageToday(session Session, includeZero
 	records := make([]sub2APIKeyRecord, 0)
 	for page := 1; page <= maxPages; page++ {
 		pageURL := session.BaseURL + "/api/v1/keys?page=" + strconvInt(int64(page)) + "&page_size=" + strconvInt(pageSize) + "&sort_by=created_at&sort_order=desc"
-		response, err := s.requestKeyUsageJSON(pageURL, authOptions)
+		response, err := s.requestKeyUsageJSONWithContext(ctx, pageURL, authOptions)
 		if err != nil {
 			return nil, err
 		}
@@ -1225,7 +1243,7 @@ func (s *PlatformService) fetchSub2APIKeyUsageToday(session Session, includeZero
 			defer func() { <-sem }()
 
 			statsURL := session.BaseURL + "/api/v1/usage/stats?start_date=" + date + "&end_date=" + date + "&api_key_id=" + record.id + "&timezone=Asia%2FShanghai"
-			response, err := s.requestKeyUsageJSON(statsURL, authOptions)
+			response, err := s.requestKeyUsageJSONWithContext(ctx, statsURL, authOptions)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {

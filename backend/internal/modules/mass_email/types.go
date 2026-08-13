@@ -60,12 +60,13 @@ type UserQuery struct {
 }
 
 type UserDTO struct {
-	ID        string     `json:"id"`
-	Email     string     `json:"email"`
-	Username  string     `json:"username"`
-	Role      string     `json:"role"`
-	Status    string     `json:"status"`
-	CreatedAt *time.Time `json:"createdAt,omitempty"`
+	ID         string     `json:"id"`
+	Email      string     `json:"email"`
+	Username   string     `json:"username"`
+	Role       string     `json:"role"`
+	Status     string     `json:"status"`
+	CreatedAt  *time.Time `json:"createdAt,omitempty"`
+	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
 }
 
 type UsersPage struct {

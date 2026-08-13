@@ -69,7 +69,7 @@
               <td class="text-right py-2 px-2">
                 <span v-if="item.netProfitCeiling != null" class="text-xs">
                   {{ formatCny(item.netProfitCeiling) }}
-                  <span v-if="item.settlementStatus !== 'final'" class="text-muted-foreground">*</span>
+                  <span v-if="item.settlementStatus !== 'final' && item.settlementStatus !== 'partial_high'" class="text-muted-foreground">*</span>
                 </span>
                 <span v-else class="text-muted-foreground">—</span>
               </td>
@@ -219,6 +219,7 @@ function statusLabel(status: DailyStatItem['settlementStatus']) {
   const map: Record<string, string> = {
     final: t('admin.dashboard.dailyStats.statusFinal'),
     fallback: t('admin.dashboard.dailyStats.statusFallback'),
+    partial_high: t('admin.dashboard.dailyStats.statusPartialHigh'),
     partial: t('admin.dashboard.dailyStats.statusPartial'),
     provisional: t('admin.dashboard.dailyStats.statusProvisional'),
     missing: t('admin.dashboard.dailyStats.statusMissing'),
@@ -229,6 +230,7 @@ function statusLabel(status: DailyStatItem['settlementStatus']) {
 function statusClass(status: DailyStatItem['settlementStatus']) {
   return {
     'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400': status === 'final',
+    'bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400': status === 'partial_high',
     'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400': status === 'fallback',
     'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400': status === 'partial',
     'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400': status === 'provisional',

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount, watch, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { LayoutDashboard, Network, Settings, LogOut, Moon, Sun, Percent, Megaphone, ChevronDown, ArrowRightLeft, FolderTree, Link2, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes } from 'lucide-vue-next'
+import { LayoutDashboard, Network, Settings, LogOut, Moon, Sun, Percent, Megaphone, ChevronDown, ArrowRightLeft, FolderTree, Link2, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes, Clock3 } from 'lucide-vue-next'
 import { useDark, useToggle } from '@vueuse/core'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import { clearAccessToken } from '@/modules/auth/api/auth'
@@ -113,6 +113,7 @@ const menuItems = computed<MenuEntry[]>(() => [
     ],
   },
   { type: 'leaf', name: t('admin.menu.massEmail'), path: '/admin/mass-email', icon: Mail },
+  { type: 'leaf', name: t('admin.menu.userLastUsed'), path: '/admin/user-last-used', icon: Clock3 },
   {
     type: 'group',
     id: 'embedded-features',

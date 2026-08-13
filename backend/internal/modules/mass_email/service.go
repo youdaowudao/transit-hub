@@ -418,7 +418,10 @@ func mapNotFound(err error) error {
 }
 
 func userDTO(user upstream.Sub2APIAdminUser) UserDTO {
-	return UserDTO{ID: user.ID, Email: user.Email, Username: user.Username, Role: user.Role, Status: user.Status, CreatedAt: user.CreatedAt}
+	return UserDTO{
+		ID: user.ID, Email: user.Email, Username: user.Username, Role: user.Role,
+		Status: user.Status, CreatedAt: user.CreatedAt, LastUsedAt: user.LastUsedAt,
+	}
 }
 
 func batchDTO(batch Batch) BatchDTO {

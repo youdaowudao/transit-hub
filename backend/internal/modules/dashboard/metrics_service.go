@@ -401,6 +401,14 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		} else {
 			settlementStatus = SettlementStatusFallback
 		}
+	} else if costQuality != nil && costQuality.Mode == "partial" {
+		// 部分成本：检查覆盖率决定 partial_high 还是 partial
+		const minSettlementCoverage = 0.90
+		if costQuality.ExpectedSites > 0 && float64(costQuality.CollectedSites)/float64(costQuality.ExpectedSites) >= minSettlementCoverage {
+			settlementStatus = SettlementStatusPartialHigh
+		} else {
+			settlementStatus = SettlementStatusPartial
+		}
 	} else if confirmedCost != nil || todayProfit != nil {
 		settlementStatus = SettlementStatusPartial
 	}
@@ -460,7 +468,7 @@ func (s *MetricsService) Trends(ctx context.Context, userID string, days int) (T
 		netProfit := snap.NetProfit
 		var confirmedCost *float64
 		var netProfitCeiling *float64
-		if status == SettlementStatusPartial || status == SettlementStatusProvisional {
+		if status == SettlementStatusPartial || status == SettlementStatusPartialHigh || status == SettlementStatusProvisional {
 			confirmedCost = snap.TodayPurchase
 			todayPurchase = nil
 			netProfitCeiling = snap.NetProfit
@@ -1024,12 +1032,21 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 			}
 		}
 	}
+	// 结算质量分级判定
+	const minSettlementCoverage = 0.90 // 90%覆盖率阈值
 	var status string
 	var finalizedAt *time.Time
+
 	if collectedCount == expectedCount && expectedCount > 0 && allAccountLevel {
+		// 完全结算：所有站点成功且均为账户级数据
 		status = SettlementStatusFinal
 		finalizedAt = &now
+	} else if expectedCount > 0 && float64(collectedCount)/float64(expectedCount) >= minSettlementCoverage {
+		// 高质量部分结算：覆盖率≥90%
+		status = SettlementStatusPartialHigh
+		finalizedAt = &now // 视为有效结算，记录完成时间
 	} else {
+		// 低质量部分结算：覆盖率<90%
 		status = SettlementStatusPartial
 	}
 

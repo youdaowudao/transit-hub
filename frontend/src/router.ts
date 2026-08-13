@@ -110,6 +110,12 @@ const routes = [
         component: () => import('./modules/admin/views/MassEmailView.vue')
       },
       {
+        path: 'user-last-used',
+        name: 'AdminUserLastUsed',
+        meta: { requiresWorkspace: true },
+        component: () => import('./modules/admin/views/UserLastUsedView.vue')
+      },
+      {
         path: 'accounts',
         name: 'AdminAccounts',
         component: () => import('./modules/admin/views/AdminAccountsView.vue')

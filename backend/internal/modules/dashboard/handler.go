@@ -28,6 +28,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, metricsService *Metric
 	mux.HandleFunc("GET /api/dashboard/trends", handler.trends)
 	mux.HandleFunc("GET /api/dashboard/groups", handler.adminGroups)
 	mux.HandleFunc("GET /api/dashboard/group-usage-today", handler.groupUsageToday)
+	mux.HandleFunc("GET /api/dashboard/group-profit-today", handler.groupProfitToday)
 	mux.HandleFunc("GET /api/dashboard/upstream-key-usage-today", handler.upstreamKeyUsageToday)
 	mux.HandleFunc("GET /api/dashboard/upstream-balance-breakdown", handler.upstreamBalanceBreakdown)
 	mux.HandleFunc("GET /api/dashboard/balance-filter", handler.getBalanceFilter)
@@ -236,6 +237,20 @@ func (h *Handler) groupUsageToday(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response, err := h.metricsService.GroupUsageToday(r.Context(), userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, response)
+}
+
+func (h *Handler) groupProfitToday(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	response, err := h.metricsService.GroupProfitToday(r.Context(), userID)
 	if err != nil {
 		writeError(w, err)
 		return

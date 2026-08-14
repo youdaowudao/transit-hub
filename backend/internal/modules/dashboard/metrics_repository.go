@@ -208,9 +208,23 @@ func (r *MetricsRepository) EnsureSchema(ctx context.Context) error {
 			estimated        boolean NOT NULL DEFAULT false,
 			created_at       timestamptz NOT NULL DEFAULT now()
 		);
-		CREATE INDEX IF NOT EXISTS idx_dashboard_additional_costs_date
-			ON dashboard_additional_costs (user_id, admin_account_id, business_date);
-	`)
+			CREATE INDEX IF NOT EXISTS idx_dashboard_additional_costs_date
+				ON dashboard_additional_costs (user_id, admin_account_id, business_date);
+
+			CREATE TABLE IF NOT EXISTS dashboard_group_metric_cache (
+				user_id          text NOT NULL,
+				admin_account_id text NOT NULL,
+				metric_type      text NOT NULL,
+				group_id         text NOT NULL,
+				group_name       text NOT NULL,
+				today_revenue    numeric,
+				direct_revenue   numeric,
+				direct_cost      numeric,
+				today_profit     numeric,
+				observed_at      timestamptz NOT NULL,
+				PRIMARY KEY (user_id, admin_account_id, metric_type, group_id)
+			);
+		`)
 	return err
 }
 
@@ -489,6 +503,127 @@ func (r *MetricsRepository) ListSiteCosts(ctx context.Context, userID, adminAcco
 		costs = append(costs, c)
 	}
 	return costs, rows.Err()
+}
+
+// ListLatestSiteCosts returns the most recent successful cost before or on the
+// requested business date for each site. It is used only as a display fallback
+// when the site's current refresh did not produce a value.
+func (r *MetricsRepository) ListLatestSiteCosts(ctx context.Context, userID, adminAccountID, date string) ([]SiteDailyCost, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT DISTINCT ON (site_id)
+		       id, user_id, admin_account_id, date, site_id, site_name, platform,
+		       raw_cost, recharge_rate, adjusted_cost, status, source, error_reason, observed_at
+		FROM upstream_site_daily_costs
+		WHERE user_id = $1 AND admin_account_id = $2
+		  AND date <= $3::date
+		  AND adjusted_cost IS NOT NULL
+		  AND status IN ('ok', 'partial')
+		ORDER BY site_id, date DESC, observed_at DESC
+	`, userID, adminAccountID, date)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	costs := make([]SiteDailyCost, 0)
+	for rows.Next() {
+		var cost SiteDailyCost
+		if err := rows.Scan(
+			&cost.ID, &cost.UserID, &cost.AdminAccountID, &cost.Date,
+			&cost.SiteID, &cost.SiteName, &cost.Platform,
+			&cost.RawCost, &cost.RechargeRate, &cost.AdjustedCost,
+			&cost.Status, &cost.Source, &cost.ErrorReason, &cost.ObservedAt,
+		); err != nil {
+			return nil, err
+		}
+		costs = append(costs, cost)
+	}
+	return costs, rows.Err()
+}
+
+func (r *MetricsRepository) LatestDashboardSnapshot(ctx context.Context, userID, adminAccountID, date string) (*DailySnapshot, error) {
+	var snapshot DailySnapshot
+	var recordsJSON []byte
+	err := r.db.QueryRow(ctx, `
+		SELECT id, user_id, admin_account_id, date,
+		       today_profit, site_balance, today_purchase, net_profit, upstream_balance,
+		       created_at, settlement_status, snapshot_source, observed_at,
+		       finalized_at, cost_expected_count, cost_collected_count, balance_observed_at,
+		       additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost,
+		       adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit
+		FROM dashboard_daily_stats
+		WHERE user_id = $1 AND admin_account_id = $2 AND date <= $3::date
+		ORDER BY date DESC, created_at DESC
+		LIMIT 1
+	`, userID, adminAccountID, date).Scan(
+		&snapshot.ID, &snapshot.UserID, &snapshot.AdminAccountID, &snapshot.Date,
+		&snapshot.TodayProfit, &snapshot.SiteBalance, &snapshot.TodayPurchase, &snapshot.NetProfit, &snapshot.UpstreamBalance,
+		&snapshot.CreatedAt, &snapshot.SettlementStatus, &snapshot.SnapshotSource, &snapshot.ObservedAt,
+		&snapshot.FinalizedAt, &snapshot.CostExpectedCount, &snapshot.CostCollectedCount, &snapshot.BalanceObservedAt,
+		&snapshot.AdditionalCost, &snapshot.RechargeFee, &snapshot.RechargeFeeRate, &snapshot.PromotionCost, &snapshot.FixedCost,
+		&snapshot.AdjustmentCost, &recordsJSON, &snapshot.OperatingCost, &snapshot.AdjustedNetProfit,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(recordsJSON) > 0 && string(recordsJSON) != "null" {
+		if err := json.Unmarshal(recordsJSON, &snapshot.AdditionalCostRecords); err != nil {
+			return nil, err
+		}
+	}
+	return &snapshot, nil
+}
+
+func (r *MetricsRepository) SaveGroupMetricCache(ctx context.Context, userID, adminAccountID string, items []GroupMetricCacheItem) error {
+	for _, item := range items {
+		if strings.TrimSpace(item.GroupID) == "" || strings.TrimSpace(item.MetricType) == "" {
+			continue
+		}
+		if _, err := r.db.Exec(ctx, `
+			INSERT INTO dashboard_group_metric_cache (
+				user_id, admin_account_id, metric_type, group_id, group_name,
+				today_revenue, direct_revenue, direct_cost, today_profit, observed_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			ON CONFLICT (user_id, admin_account_id, metric_type, group_id) DO UPDATE SET
+				group_name = EXCLUDED.group_name,
+				today_revenue = EXCLUDED.today_revenue,
+				direct_revenue = EXCLUDED.direct_revenue,
+				direct_cost = EXCLUDED.direct_cost,
+				today_profit = EXCLUDED.today_profit,
+				observed_at = EXCLUDED.observed_at
+		`, userID, adminAccountID, item.MetricType, item.GroupID, item.GroupName,
+			item.TodayRevenue, item.DirectRevenue, item.DirectCost, item.TodayProfit, item.ObservedAt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *MetricsRepository) ListGroupMetricCache(ctx context.Context, userID, adminAccountID, metricType string) ([]GroupMetricCacheItem, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT metric_type, group_id, group_name, today_revenue,
+		       direct_revenue, direct_cost, today_profit, observed_at
+		FROM dashboard_group_metric_cache
+		WHERE user_id = $1 AND admin_account_id = $2 AND metric_type = $3
+		ORDER BY group_id
+	`, userID, adminAccountID, metricType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]GroupMetricCacheItem, 0)
+	for rows.Next() {
+		var item GroupMetricCacheItem
+		if err := rows.Scan(&item.MetricType, &item.GroupID, &item.GroupName, &item.TodayRevenue,
+			&item.DirectRevenue, &item.DirectCost, &item.TodayProfit, &item.ObservedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 // ListDailyStats 查询指定日期范围内的快照记录，按日期升序返回。

@@ -1,6 +1,7 @@
 import type {
   DashboardMetricsResponse,
   DashboardTrendsResponse,
+  GroupProfitTodayResponse,
   GroupUsageTodayResponse,
   UpstreamBalanceBreakdownResponse,
 } from '../api/dashboardAdmin'
@@ -13,6 +14,7 @@ export interface DashboardDataSnapshot {
   trends: DashboardTrendsResponse
   updatedAt: number
   groupUsage?: GroupUsageTodayResponse
+  groupProfit?: GroupProfitTodayResponse
   balanceBreakdown?: UpstreamBalanceBreakdownResponse
   healthSummary?: ConnectionHealthStoredSummary
 }
@@ -33,7 +35,7 @@ export const saveDashboardDataSnapshot = (workspaceID: string, snapshot: Dashboa
 
 export const updateDashboardOperationalSnapshot = (
   workspaceID: string,
-  update: Partial<Pick<DashboardDataSnapshot, 'groupUsage' | 'balanceBreakdown' | 'healthSummary'>>,
+  update: Partial<Pick<DashboardDataSnapshot, 'groupUsage' | 'groupProfit' | 'balanceBreakdown' | 'healthSummary'>>,
 ) => {
   const current = getDashboardDataSnapshot(workspaceID)
   if (!current) return

@@ -259,6 +259,17 @@ export interface GroupUsageTodayResponse {
   total: number
   totalRevenue: number
   groups: GroupUsageTodayItem[]
+  fallback?: boolean
+  fallbackAt?: string | null
+}
+
+export interface GroupProfitTodayResponse {
+  date: string
+  totalProfit: number
+  groups: GroupUsageTodayItem[]
+  fallbackGroups?: number
+  unavailableGroups?: number
+  fallbackAt?: string | null
 }
 
 /** 获取主站所有分组的今日营收。首页运营区和弹窗按需调用。 */
@@ -267,6 +278,17 @@ export const getGroupUsageToday = async (): Promise<GroupUsageTodayResponse> => 
   const timeout = globalThis.setTimeout(() => controller.abort(), 15_000)
   try {
     return await requestJson<GroupUsageTodayResponse>('/dashboard/group-usage-today', { signal: controller.signal })
+  } finally {
+    globalThis.clearTimeout(timeout)
+  }
+}
+
+/** 获取已有可靠真实连接可归属的分组利润；与分组营收独立加载。 */
+export const getGroupProfitToday = async (): Promise<GroupProfitTodayResponse> => {
+  const controller = new AbortController()
+  const timeout = globalThis.setTimeout(() => controller.abort(), 15_000)
+  try {
+    return await requestJson<GroupProfitTodayResponse>('/dashboard/group-profit-today', { signal: controller.signal })
   } finally {
     globalThis.clearTimeout(timeout)
   }

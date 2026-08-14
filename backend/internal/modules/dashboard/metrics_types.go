@@ -191,6 +191,30 @@ type GroupUsageTodayResponse struct {
 	Total        float64               `json:"total"` // 兼容字段：今日营收
 	TotalRevenue float64               `json:"totalRevenue"`
 	Groups       []GroupUsageTodayItem `json:"groups"`
+	Fallback     bool                  `json:"fallback,omitempty"`
+	FallbackAt   *time.Time            `json:"fallbackAt,omitempty"`
+}
+
+// GroupProfitTodayResponse 是独立于分组营收的真实利润响应。
+// 某些分组本轮读取失败时会保留最后成功值并通过 FallbackGroups 提示。
+type GroupProfitTodayResponse struct {
+	Date              string                `json:"date"`
+	TotalProfit       float64               `json:"totalProfit"`
+	Groups            []GroupUsageTodayItem `json:"groups"`
+	FallbackGroups    int                   `json:"fallbackGroups,omitempty"`
+	UnavailableGroups int                   `json:"unavailableGroups,omitempty"`
+	FallbackAt        *time.Time            `json:"fallbackAt,omitempty"`
+}
+
+type GroupMetricCacheItem struct {
+	MetricType    string
+	GroupID       string
+	GroupName     string
+	TodayRevenue  *float64
+	DirectRevenue *float64
+	DirectCost    *float64
+	TodayProfit   *float64
+	ObservedAt    time.Time
 }
 
 // GroupUsageTodayItem 是单个主站分组的今日营收。

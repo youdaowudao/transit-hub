@@ -33,9 +33,11 @@ import DailyStatsPanel from '../components/dashboard/DailyStatsPanel.vue'
 import {
   getDashboardMetrics,
   getDashboardTrends,
+  getGroupProfitToday,
   getGroupUsageToday,
   getUpstreamBalanceBreakdown,
   type GroupUsageTodayResponse,
+  type GroupProfitTodayResponse,
   type UpstreamBalanceBreakdownResponse,
 } from '../api/dashboardAdmin'
 import { getConnectionHealthStoredSummary } from '../api/connectionHealth'
@@ -132,11 +134,15 @@ const handleMetricCardClick = (key: string) => {
 
 const groupCount = ref<number | null>(null)
 const groupUsage = ref<GroupUsageTodayResponse | null>(null)
+const groupProfit = ref<GroupProfitTodayResponse | null>(null)
 const balanceBreakdown = ref<UpstreamBalanceBreakdownResponse | null>(null)
 const healthSummary = ref<ConnectionHealthStoredSummary | null>(null)
 const operationalLoading = ref(false)
 const operationalLoadError = ref(false)
+const groupRevenueLoading = ref(false)
+const groupProfitLoading = ref(false)
 const groupUsageLoadError = ref(false)
+const groupProfitLoadError = ref(false)
 const balanceLoadError = ref(false)
 const healthLoadError = ref(false)
 const initialLoading = ref(true)
@@ -149,6 +155,7 @@ const hydrateSnapshot = (snapshot: DashboardDataSnapshot | null): boolean => {
   adminStatus.value = snapshot.adminStatus
   groupCount.value = snapshot.live.groupCount ?? null
   groupUsage.value = snapshot.groupUsage ?? null
+  groupProfit.value = snapshot.groupProfit ?? null
   balanceBreakdown.value = snapshot.balanceBreakdown ?? null
   healthSummary.value = snapshot.healthSummary ?? null
   applyRawData(snapshot.live, snapshot.trends)
@@ -164,7 +171,10 @@ hydrateSnapshot(initialSnapshot)
 const loadOperationalData = async () => {
   operationalLoading.value = true
   operationalLoadError.value = false
+  groupRevenueLoading.value = true
+  groupProfitLoading.value = true
   groupUsageLoadError.value = false
+  groupProfitLoadError.value = false
   balanceLoadError.value = false
   healthLoadError.value = false
 
@@ -178,6 +188,21 @@ const loadOperationalData = async () => {
     .catch((error) => {
       groupUsageLoadError.value = true
       throw error
+    })
+    .finally(() => {
+      groupRevenueLoading.value = false
+    })
+  const groupProfitRequest = getGroupProfitToday()
+    .then((value) => {
+      groupProfit.value = value
+      return value
+    })
+    .catch((error) => {
+      groupProfitLoadError.value = true
+      throw error
+    })
+    .finally(() => {
+      groupProfitLoading.value = false
     })
   const balanceRequest = getUpstreamBalanceBreakdown()
     .then((value) => {
@@ -197,21 +222,24 @@ const loadOperationalData = async () => {
       healthLoadError.value = true
       throw error
     })
-  const [groupResult, balanceResult, healthResult] = await Promise.allSettled([
+  const [groupResult, groupProfitResult, balanceResult, healthResult] = await Promise.allSettled([
     groupRequest,
+    groupProfitRequest,
     balanceRequest,
     healthRequest,
   ])
   groupUsageLoadError.value = groupResult.status === 'rejected'
+  groupProfitLoadError.value = groupProfitResult.status === 'rejected'
   balanceLoadError.value = balanceResult.status === 'rejected'
   healthLoadError.value = healthResult.status === 'rejected'
-  operationalLoadError.value = groupUsageLoadError.value || balanceLoadError.value || healthLoadError.value
+  operationalLoadError.value = groupUsageLoadError.value || groupProfitLoadError.value || balanceLoadError.value || healthLoadError.value
   operationalLoading.value = false
 
   const key = workspaceID.value
   if (key) {
     updateDashboardOperationalSnapshot(key, {
       ...(groupResult.status === 'fulfilled' ? { groupUsage: groupResult.value } : {}),
+      ...(groupProfitResult.status === 'fulfilled' ? { groupProfit: groupProfitResult.value } : {}),
       ...(balanceResult.status === 'fulfilled' ? { balanceBreakdown: balanceResult.value } : {}),
       ...(healthResult.status === 'fulfilled' ? { healthSummary: healthResult.value } : {}),
     })
@@ -232,29 +260,40 @@ const loadAllData = async (options: { skipStatusCheck?: boolean } = {}) => {
     return
   }
 
+  const trendsRequest = getDashboardTrends(30).catch(() => null)
   try {
-    const [liveData, trendsData] = await Promise.all([
-      getDashboardMetrics(),
-      getDashboardTrends(30),
-    ])
-    groupCount.value = liveData.groupCount ?? null
-    applyRawData(liveData, trendsData)
+    const live = await getDashboardMetrics()
+    const previous = getDashboardDataSnapshot(workspaceID.value)
+    const cachedTrends = previous?.trends ?? { points: [] }
+    groupCount.value = live.groupCount ?? null
+    applyRawData(live, cachedTrends)
     const updatedAt = Date.now()
     lastUpdatedAt.value = updatedAt
     const key = workspaceID.value
     if (key) {
-      const previous = getDashboardDataSnapshot(key)
       saveDashboardDataSnapshot(key, {
         adminStatus: { ...adminStatus.value },
-        live: liveData,
-        trends: trendsData,
+        live,
+        trends: cachedTrends,
         updatedAt,
         groupUsage: previous?.groupUsage,
+        groupProfit: previous?.groupProfit,
         balanceBreakdown: previous?.balanceBreakdown,
         healthSummary: previous?.healthSummary,
       })
     }
     void loadOperationalData()
+    void trendsRequest.then((trends) => {
+      if (!trends) {
+        refreshDataFailed.value = true
+        return
+      }
+      applyRawData(live, trends)
+      if (key) {
+        const current = getDashboardDataSnapshot(key)
+        if (current) saveDashboardDataSnapshot(key, { ...current, live, trends })
+      }
+    })
   } catch {
     refreshDataFailed.value = true
   } finally {
@@ -289,6 +328,7 @@ watch(() => adminStatus.value.authenticated, (authenticated) => {
 watch(workspaceID, (next, previous) => {
   if (!next || next === previous || isRefreshingData.value) return
   groupUsage.value = null
+  groupProfit.value = null
   balanceBreakdown.value = null
   healthSummary.value = null
   metrics.value = []
@@ -364,50 +404,6 @@ const cards = computed<DashboardCoreCard[]>(() => {
     if (!current) return []
     const delta = computeDashboardMetricDelta(key, current.series.month)
 
-    // todayPurchase：成本不完整时展示已确认成本 + 站点覆盖数
-    if (key === 'todayPurchase' && costIncomplete) {
-      const hasConfirmedCost = cq!.collectedSites > 0
-      return [{
-        key,
-        label: t('admin.dashboard.metrics.todayPurchase'),
-        icon: METRIC_META[key].icon,
-        color: METRIC_META[key].color,
-        value: formatCny(hasConfirmedCost ? cq!.confirmedCost : null),
-        deltaDirection: 'flat',
-        deltaText: '',
-        statusText: hasConfirmedCost
-          ? t('admin.dashboard.costQuality.partial', {
-              cost: formatCny(cq!.confirmedCost),
-              collected: cq!.collectedSites,
-              expected: cq!.expectedSites,
-            })
-          : t('admin.dashboard.costQuality.costUnavailable'),
-        clickable: true,
-        negativeWhenUp: true,
-      }]
-    }
-
-    // netProfit：成本不完整时展示暂估上限
-    if (key === 'netProfit' && costIncomplete) {
-      const revenue = metric('todayProfit')?.current
-      const hasConfirmedCost = cq!.collectedSites > 0
-      const ceiling = revenue != null && hasConfirmedCost ? revenue - cq!.confirmedCost : null
-      return [{
-        key,
-        label: t('admin.dashboard.metrics.netProfit'),
-        icon: METRIC_META[key].icon,
-        color: METRIC_META[key].color,
-        value: formatCny(ceiling),
-        deltaDirection: 'flat',
-        deltaText: '',
-        statusText: hasConfirmedCost
-          ? t('admin.dashboard.costQuality.netProfitCeiling', { value: formatCny(ceiling) })
-          : t('admin.dashboard.costQuality.costUnavailable'),
-        clickable: false,
-        negativeWhenUp: false,
-      }]
-    }
-
     const deltaUnavailable = delta.unavailable
     const fallbackStatus = costFallback && (key === 'todayPurchase' || key === 'netProfit')
       ? t('admin.dashboard.costQuality.fallback', {
@@ -415,6 +411,17 @@ const cards = computed<DashboardCoreCard[]>(() => {
           expected: cq?.expectedSites ?? 0,
           time: fallbackTime,
         })
+      : ''
+    const partialStatus = costIncomplete && (key === 'todayPurchase' || key === 'netProfit')
+      ? (current.current == null
+          ? t('admin.dashboard.costQuality.costUnavailable')
+          : key === 'todayPurchase'
+            ? t('admin.dashboard.costQuality.partial', {
+                cost: formatCny(current.current),
+                collected: cq?.collectedSites ?? 0,
+                expected: cq?.expectedSites ?? 0,
+              })
+            : t('admin.dashboard.costQuality.netProfitCeiling', { value: formatCny(current.current) }))
       : ''
     return [{
       key,
@@ -426,6 +433,7 @@ const cards = computed<DashboardCoreCard[]>(() => {
       deltaText: deltaUnavailable ? '' : formatCny(Math.abs(delta.amount)),
       statusText: metricErrorText(current.error)
         || fallbackStatus
+        || partialStatus
         || (deltaUnavailable ? t('admin.dashboard.costQuality.deltaUnsettled') : ''),
       clickable: key === 'todayProfit' || key === 'todayPurchase',
       negativeWhenUp: key === 'todayPurchase',
@@ -482,6 +490,24 @@ const additionalCostLines = computed(() => {
   ]
 })
 
+const displayedTodayRevenue = computed(() => liveData.value?.todayProfit ?? null)
+const displayedTodayCost = computed(() => {
+  if (liveData.value?.todayPurchase != null) return liveData.value.todayPurchase
+  const quality = liveData.value?.costQuality
+  return quality && quality.collectedSites > 0 ? quality.confirmedCost : null
+})
+const displayedOperatingCost = computed(() => {
+  const additionalCost = liveData.value?.additionalCosts?.total
+  return displayedTodayCost.value != null && additionalCost != null
+    ? displayedTodayCost.value + additionalCost
+    : null
+})
+const displayedAdjustedNetProfit = computed(() => (
+  displayedTodayRevenue.value != null && displayedOperatingCost.value != null
+    ? displayedTodayRevenue.value - displayedOperatingCost.value
+    : null
+))
+
 type GroupMetricMode = 'profit' | 'revenue'
 type GroupContributionItem = GroupUsageTodayResponse['groups'][number] & {
   contributionKind?: 'unallocated_profit'
@@ -490,7 +516,7 @@ type GroupContributionItem = GroupUsageTodayResponse['groups'][number] & {
 const groupMetricMode = ref<GroupMetricMode>('profit')
 const groupMetricModes: GroupMetricMode[] = ['profit', 'revenue']
 const groupRevenueTotal = computed(() => groupUsage.value?.totalRevenue ?? groupUsage.value?.total ?? 0)
-const groupProfitAvailable = computed(() => liveData.value?.adjustedNetProfit != null)
+const groupProfitAvailable = computed(() => groupProfit.value != null)
 const groupMetricLabel = computed(() => t(
   groupMetricMode.value === 'profit'
     ? 'admin.dashboard.groups.profitAmount'
@@ -646,10 +672,11 @@ const performanceChartOption = computed<EChartsCoreOption>(() => {
 
 const profitContributionGroups = computed<GroupContributionItem[]>(() => {
   if (!groupProfitAvailable.value) return []
-  const directGroups = (groupUsage.value?.groups ?? [])
+  const directGroups = (groupProfit.value?.groups ?? [])
     .filter((item) => item.todayProfit != null)
+  if (displayedAdjustedNetProfit.value == null) return directGroups
   const directProfit = directGroups.reduce((total, item) => total + (item.todayProfit ?? 0), 0)
-  const unallocatedProfit = (liveData.value?.adjustedNetProfit ?? 0) - directProfit
+  const unallocatedProfit = displayedAdjustedNetProfit.value - directProfit
   return [
     ...directGroups,
     {
@@ -667,6 +694,37 @@ const displayGroups = computed<GroupContributionItem[]>(() => (
     ? profitContributionGroups.value
     : (groupUsage.value?.groups ?? [])
 ))
+const activeGroupLoading = computed(() => groupMetricMode.value === 'profit'
+  ? groupProfitLoading.value
+  : groupRevenueLoading.value)
+const activeGroupLoadError = computed(() => groupMetricMode.value === 'profit'
+  ? groupProfitLoadError.value
+  : groupUsageLoadError.value)
+const activeGroupData = computed(() => groupMetricMode.value === 'profit'
+  ? groupProfit.value
+  : groupUsage.value)
+const groupFallbackText = computed(() => {
+  if (activeGroupLoadError.value && activeGroupData.value) {
+    return t('admin.dashboard.groups.refreshFailedUsingExisting')
+  }
+  if (groupMetricMode.value === 'revenue' && groupUsage.value?.fallback) {
+    return t('admin.dashboard.groups.revenueFallback', {
+      time: groupUsage.value.fallbackAt
+        ? formatDateTime(Date.parse(groupUsage.value.fallbackAt), locale) ?? t('admin.dashboard.common.unavailable')
+        : t('admin.dashboard.common.unavailable'),
+    })
+  }
+  if (groupMetricMode.value === 'profit' && (groupProfit.value?.fallbackGroups ?? 0) > 0) {
+    const fallback = t('admin.dashboard.groups.profitFallback', { count: groupProfit.value?.fallbackGroups ?? 0 })
+    return (groupProfit.value?.unavailableGroups ?? 0) > 0
+      ? `${fallback} ${t('admin.dashboard.groups.profitUnavailableGroups', { count: groupProfit.value?.unavailableGroups ?? 0 })}`
+      : fallback
+  }
+  if (groupMetricMode.value === 'profit' && (groupProfit.value?.unavailableGroups ?? 0) > 0) {
+    return t('admin.dashboard.groups.profitUnavailableGroups', { count: groupProfit.value?.unavailableGroups ?? 0 })
+  }
+  return ''
+})
 const sortedGroups = computed(() => {
   return [...displayGroups.value]
     .filter((item) => groupMetricValue(item) != null)
@@ -1007,11 +1065,11 @@ const lastProbeLabel = computed(() => {
             >
               <span class="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-3">
                 <span class="text-sm font-medium text-muted-foreground">今日经营成本</span>
-                <span class="text-lg font-bold tabular-nums text-foreground">{{ formatCny(liveData.operatingCost) }}</span>
+                <span class="text-lg font-bold tabular-nums text-foreground">{{ formatCny(displayedOperatingCost) }}</span>
               </span>
               <span class="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-3">
                 <span class="text-sm font-medium text-muted-foreground">调整后净利润</span>
-                <span class="text-lg font-bold tabular-nums text-foreground">{{ formatCny(liveData.adjustedNetProfit) }}</span>
+                <span class="text-lg font-bold tabular-nums text-foreground">{{ formatCny(displayedAdjustedNetProfit) }}</span>
               </span>
               <ChevronDown
                 class="h-4 w-4 text-muted-foreground transition-transform"
@@ -1027,7 +1085,7 @@ const lastProbeLabel = computed(() => {
               <dl class="divide-y divide-border/60">
                 <div class="flex items-center justify-between gap-4 py-2 text-sm">
                   <dt class="text-muted-foreground">上游直接成本</dt>
-                  <dd class="font-medium tabular-nums text-foreground">{{ formatCny(liveData.todayPurchase) }}</dd>
+                  <dd class="font-medium tabular-nums text-foreground">{{ formatCny(displayedTodayCost) }}</dd>
                 </div>
                 <div v-for="item in additionalCostLines" :key="item.label" class="flex items-center justify-between gap-4 py-2 text-sm">
                   <dt class="text-muted-foreground">{{ item.label }}</dt>
@@ -1175,10 +1233,11 @@ const lastProbeLabel = computed(() => {
               </div>
             </div>
 
-            <div v-if="operationalLoading && !groupUsage" class="flex h-[280px] items-center justify-center text-muted-foreground">
+            <p v-if="groupFallbackText" class="mt-3 text-xs text-warning">{{ groupFallbackText }}</p>
+            <div v-if="activeGroupLoading && !activeGroupData" class="flex h-[280px] items-center justify-center text-muted-foreground">
               <Loader2 class="h-5 w-5 animate-spin" />
             </div>
-            <div v-else-if="groupUsageLoadError && !groupUsage" class="flex h-[280px] flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+            <div v-else-if="activeGroupLoadError && !activeGroupData" class="flex h-[280px] flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
               <AlertTriangle class="h-5 w-5 text-warning" />
               <span>{{ t('admin.dashboard.groups.loadError') }}</span>
               <button type="button" class="text-sm font-medium text-primary hover:underline" @click="loadOperationalData">

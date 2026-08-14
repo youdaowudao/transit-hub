@@ -30,6 +30,12 @@ type fakeMetricsRepository struct {
 	balanceFilter        BalanceFilterConfig
 	balanceFilterErr     error
 	saveBalanceFilterErr error
+	latestSiteCosts      []SiteDailyCost
+	latestSiteCostsErr   error
+	groupMetricCache     []GroupMetricCacheItem
+	groupMetricCacheErr  error
+	latestSnapshot       *DailySnapshot
+	latestSnapshotErr    error
 }
 
 func (f *fakeMetricsRepository) Upsert(ctx context.Context, snapshot DailySnapshot) error {
@@ -56,6 +62,29 @@ func (f *fakeMetricsRepository) UpsertSiteCost(ctx context.Context, cost SiteDai
 
 func (f *fakeMetricsRepository) ListSiteCosts(ctx context.Context, userID, adminAccountID string, date string) ([]SiteDailyCost, error) {
 	return nil, nil
+}
+
+func (f *fakeMetricsRepository) ListLatestSiteCosts(ctx context.Context, userID, adminAccountID, date string) ([]SiteDailyCost, error) {
+	return f.latestSiteCosts, f.latestSiteCostsErr
+}
+
+func (f *fakeMetricsRepository) LatestDashboardSnapshot(ctx context.Context, userID, adminAccountID, date string) (*DailySnapshot, error) {
+	return f.latestSnapshot, f.latestSnapshotErr
+}
+
+func (f *fakeMetricsRepository) SaveGroupMetricCache(ctx context.Context, userID, adminAccountID string, items []GroupMetricCacheItem) error {
+	f.groupMetricCache = append(f.groupMetricCache, items...)
+	return f.groupMetricCacheErr
+}
+
+func (f *fakeMetricsRepository) ListGroupMetricCache(ctx context.Context, userID, adminAccountID, metricType string) ([]GroupMetricCacheItem, error) {
+	items := make([]GroupMetricCacheItem, 0)
+	for _, item := range f.groupMetricCache {
+		if item.MetricType == metricType {
+			items = append(items, item)
+		}
+	}
+	return items, f.groupMetricCacheErr
 }
 
 func (f *fakeMetricsRepository) ListDailyStats(ctx context.Context, userID, adminAccountID string, from, to string) ([]DailySnapshot, error) {
@@ -107,23 +136,22 @@ func TestLiveMetricsCostFailureStillPersistsRevenue(t *testing.T) {
 	if decoded["todayProfit"] != 30.0 {
 		t.Fatalf("todayProfit = %#v, want 30", decoded["todayProfit"])
 	}
-	// 成本全部失败：todayPurchase 和 netProfit 均为 null（不是 0.0）
-	if decoded["todayPurchase"] != nil || decoded["netProfit"] != nil {
+	// 上游本轮失败但仍保留最后值：成本和利润继续显示，并标记 fallback。
+	if decoded["todayPurchase"] != 20.0 || decoded["netProfit"] != 10.0 {
 		t.Fatalf("cost failure fallback amounts: todayPurchase=%#v netProfit=%#v", decoded["todayPurchase"], decoded["netProfit"])
 	}
 	// 新实现：成本质量通过 costQuality 字段暴露，不再写入 metricErrors
 	if cq, hasCq := decoded["costQuality"].(map[string]any); !hasCq || cq["complete"] != false {
 		t.Fatalf("costQuality.complete should be false, got %#v", decoded["costQuality"])
 	}
-	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayProfit == nil || *repo.snapshots[0].TodayProfit != 30 || repo.snapshots[0].TodayPurchase != nil {
-		t.Fatalf("revenue-only snapshot = %+v, want revenue 30 without cost", repo.snapshots)
+	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayProfit == nil || *repo.snapshots[0].TodayProfit != 30 || repo.snapshots[0].TodayPurchase == nil || *repo.snapshots[0].TodayPurchase != 20 {
+		t.Fatalf("fallback snapshot = %+v, want revenue 30 and cost 20", repo.snapshots)
 	}
 }
 
 func TestLiveMetricsUsesCachedCostsAndKeepsPartialSuccess(t *testing.T) {
 	failedKey := upstream.ErrorAuth
 	successCost := 3.0
-	staleFailedCost := 99.0
 	upstreams := &fakeUpstreamLister{cachedSites: []upstream.Response{
 		{
 			ID: "site-success", Status: upstream.StatusConnected, RechargeRate: 2,
@@ -131,7 +159,7 @@ func TestLiveMetricsUsesCachedCostsAndKeepsPartialSuccess(t *testing.T) {
 		},
 		{
 			ID: "site-failure", Status: upstream.StatusError, ErrorKey: &failedKey, RechargeRate: 2,
-			Metrics: upstream.Metrics{TodayConsume: upstream.MetricValue{Value: &staleFailedCost}},
+			Metrics: upstream.Metrics{},
 		},
 	}}
 	repo := &fakeMetricsRepository{}
@@ -141,8 +169,8 @@ func TestLiveMetricsUsesCachedCostsAndKeepsPartialSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LiveMetrics() error = %v, want partial response", err)
 	}
-	if response.TodayPurchase != nil || response.NetProfit != nil {
-		t.Fatalf("partial cached cost: todayPurchase=%v netProfit=%v, want both nil (incomplete)", response.TodayPurchase, response.NetProfit)
+	if response.TodayPurchase == nil || *response.TodayPurchase != 6 || response.NetProfit == nil || *response.NetProfit != 24 {
+		t.Fatalf("partial cached cost: todayPurchase=%v netProfit=%v, want 6 and 24", response.TodayPurchase, response.NetProfit)
 	}
 	if response.ConfirmedCost == nil || *response.ConfirmedCost != 6 {
 		t.Fatalf("confirmed cost = %v, want 6.00", response.ConfirmedCost)
@@ -161,13 +189,39 @@ func TestLiveMetricsUsesCachedCostsAndKeepsPartialSuccess(t *testing.T) {
 	}
 }
 
+func TestLiveMetricsUsesLatestPersistedSiteCostWhenCurrentValueMissing(t *testing.T) {
+	failedKey := upstream.ErrorNetwork
+	historicalCost := 8.0
+	observedAt := time.Now().Add(-4 * time.Hour)
+	repo := &fakeMetricsRepository{latestSiteCosts: []SiteDailyCost{{
+		SiteID: "site-failure", AdjustedCost: &historicalCost, ObservedAt: observedAt,
+	}}}
+	service := newLiveMetricsTestService(
+		&fakePlatformClient{usageStats: 30},
+		&fakeUpstreamLister{cachedSites: []upstream.Response{{
+			ID: "site-failure", Name: "上游一", Status: upstream.StatusError, ErrorKey: &failedKey, RechargeRate: 2,
+		}}},
+		repo,
+	)
+
+	response, err := service.LiveMetrics(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("LiveMetrics() error: %v", err)
+	}
+	if response.TodayPurchase == nil || *response.TodayPurchase != 8 || response.NetProfit == nil || *response.NetProfit != 22 {
+		t.Fatalf("historical fallback amounts: cost=%v net=%v", response.TodayPurchase, response.NetProfit)
+	}
+	if response.CostQuality == nil || response.CostQuality.Mode != "fallback" || response.CostQuality.FallbackSites != 1 || response.CostQuality.FallbackAt == nil || !response.CostQuality.FallbackAt.Equal(observedAt) {
+		t.Fatalf("historical fallback quality = %+v", response.CostQuality)
+	}
+}
+
 func TestLiveMetricsAllCachedCostsUnavailableReturnsZeroAndError(t *testing.T) {
 	errorKey := upstream.ErrorAuth
-	staleCost := 99.0
 	upstreams := &fakeUpstreamLister{cachedSites: []upstream.Response{
 		{
 			ID: "site-failure", Status: upstream.StatusError, ErrorKey: &errorKey, RechargeRate: 2,
-			Metrics: upstream.Metrics{TodayConsume: upstream.MetricValue{Value: &staleCost}},
+			Metrics: upstream.Metrics{},
 		},
 	}}
 	repo := &fakeMetricsRepository{}
@@ -238,11 +292,11 @@ func TestCachedCostUsesStaleSameDayValueAsFallback(t *testing.T) {
 	}
 }
 
-func TestCachedCostFallbackRejectsPreviousBusinessDay(t *testing.T) {
+func TestCachedCostFallbackAcceptsPreviousBusinessDay(t *testing.T) {
 	errorKey := upstream.ErrorNetwork
 	observedAt := time.Now().Add(-time.Hour)
 	cost := 10.0
-	_, quality := summarizeCachedUpstreamCostsWithQuality([]upstream.Response{{
+	total, quality := summarizeCachedUpstreamCostsWithQuality([]upstream.Response{{
 		Name: "old-site", Status: upstream.StatusError, ErrorKey: &errorKey, RechargeRate: 1,
 		Metrics: upstream.Metrics{
 			TodayConsume:     upstream.MetricValue{Value: &cost},
@@ -251,7 +305,7 @@ func TestCachedCostFallbackRejectsPreviousBusinessDay(t *testing.T) {
 		},
 	}}, "2026-08-08", 2*time.Hour)
 
-	if quality.Mode != "unavailable" || quality.CollectedSites != 0 || len(quality.Failures) != 1 || quality.Failures[0].Reason != "date_mismatch" {
+	if total != 10 || quality.Mode != "fallback" || quality.CollectedSites != 1 || quality.FallbackSites != 1 || len(quality.Failures) != 0 {
 		t.Fatalf("previous-day quality = %+v", quality)
 	}
 }
@@ -299,6 +353,30 @@ func TestLiveMetricsRevenueFailureDoesNotPersistSnapshot(t *testing.T) {
 	}
 	if len(repo.snapshots) != 0 {
 		t.Fatalf("revenue failure persisted %d snapshot(s): %+v", len(repo.snapshots), repo.snapshots)
+	}
+}
+
+func TestLiveMetricsRevenueFailureUsesLatestSnapshotWithoutOverwritingIt(t *testing.T) {
+	revenueErr := errors.New("admin usage unavailable")
+	previousRevenue := 30.0
+	repo := &fakeMetricsRepository{latestSnapshot: &DailySnapshot{TodayProfit: &previousRevenue}}
+	service := newLiveMetricsTestService(
+		&fakePlatformClient{usageStatsErr: revenueErr},
+		&fakeUpstreamLister{cachedSites: []upstream.Response{{
+			Status: upstream.StatusConnected, RechargeRate: 1, Metrics: todayCachedMetrics(2.5),
+		}}},
+		repo,
+	)
+
+	response, err := service.LiveMetrics(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("LiveMetrics() error: %v", err)
+	}
+	if response.TodayProfit == nil || *response.TodayProfit != 30 || response.NetProfit == nil || *response.NetProfit != 27.5 {
+		t.Fatalf("snapshot fallback amounts: revenue=%v net=%v", response.TodayProfit, response.NetProfit)
+	}
+	if len(repo.snapshots) != 0 {
+		t.Fatalf("fallback revenue overwrote snapshot: %+v", repo.snapshots)
 	}
 }
 

@@ -1131,9 +1131,11 @@ export default {
           upstreamKey: '上游 Key 倍率',
           missingFallback: '上游倍率缺失，已按本地回退',
           conflictFallback: '多 Key 冲突，已按本地回退',
-          unavailableHeld: '上游查询暂不可用，保持上次倍率和 priority',
-          unavailableUnmanaged: '首次查询暂不可用，未接管 priority',
-          fallbackRequired: '上游倍率与本地回退都不可用，回退倍率待配置'
+          unassociatedBandEnd: '未关联真实连接，已按当前健康档末位排序',
+          missingBandEnd: 'Key 分组或倍率缺失，已按当前健康档末位排序',
+          conflictBandEnd: '多 Key 或分组冲突，已按当前健康档末位排序',
+          unavailableBandEnd: '本轮上游查询暂不可用，已按当前健康档末位排序',
+          unknownBandEnd: '倍率来源未知，已按当前健康档末位排序'
         },
         upstreamMultiplierStatuses: {
           unassociated: '未关联真实连接',

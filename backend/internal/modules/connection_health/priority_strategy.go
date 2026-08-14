@@ -320,9 +320,11 @@ func (s *Service) syncWorkspacePriorities(
 
 		multiplier, available := effectiveHealthSortMultiplier(item)
 		if !available {
-			// Deterministic missing/conflict without a fallback and transient lookup
-			// failures both hold any existing checkpoint without guessing or restoring.
-			missingMultiplier[targetID] = struct{}{}
+			activeModels := activeHealthPriorityModels(item)
+			activeStates := activeHealthPriorityStates(statesByTarget[targetID], activeModels)
+			healthBand := priorityHealthBand(activeStates, len(activeModels))
+			managed[targetID] = item
+			desiredByTarget[targetID] = desiredHealthBandEndForPlatform(session.Platform, healthBand)
 			continue
 		}
 		activeModels := activeHealthPriorityModels(item)
@@ -382,7 +384,7 @@ func (s *Service) syncWorkspacePriorities(
 		if session.Platform == upstream.PlatformSub2API && !item.priorityPresent {
 			continue
 		}
-		multiplier := effectiveMultiplierByTarget[targetID]
+		multiplier, multiplierAvailable := effectiveMultiplierByTarget[targetID]
 		desired := desiredByTarget[targetID]
 		stored, exists := storedByTarget[targetID]
 		if !exists {
@@ -402,7 +404,9 @@ func (s *Service) syncWorkspacePriorities(
 			current := item.currentPriority
 			stored.Conflict = true
 			stored.LastConflictPriority = &current
-			stored.EffectiveMultiplier = multiplier
+			if multiplierAvailable {
+				stored.EffectiveMultiplier = multiplier
+			}
 			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
 				log.Printf("[connection-health] priority conflict state save failed target_id=%s err=%v", targetID, err)
 			}
@@ -412,7 +416,9 @@ func (s *Service) syncWorkspacePriorities(
 			current := item.currentPriority
 			stored.Conflict = true
 			stored.LastConflictPriority = &current
-			stored.EffectiveMultiplier = multiplier
+			if multiplierAvailable {
+				stored.EffectiveMultiplier = multiplier
+			}
 			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
 				log.Printf("[connection-health] priority pending conflict state save failed target_id=%s err=%v", targetID, err)
 			}
@@ -421,7 +427,9 @@ func (s *Service) syncWorkspacePriorities(
 		if item.currentPriority != desired {
 			pending := desired
 			stored.PendingPriority = &pending
-			stored.EffectiveMultiplier = multiplier
+			if multiplierAvailable {
+				stored.EffectiveMultiplier = multiplier
+			}
 			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
 				log.Printf("[connection-health] priority sync intent save failed target_id=%s err=%v", targetID, err)
 				continue
@@ -433,7 +441,9 @@ func (s *Service) syncWorkspacePriorities(
 		}
 		stored.LastAppliedPriority = desired
 		stored.PendingPriority = nil
-		stored.EffectiveMultiplier = multiplier
+		if multiplierAvailable {
+			stored.EffectiveMultiplier = multiplier
+		}
 		stored.Conflict = false
 		stored.LastConflictPriority = nil
 		if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
@@ -552,6 +562,16 @@ func desiredHealthPriorityForPlatform(platform upstream.Platform, healthBand int
 		return 1
 	}
 	return bases[healthBand] + maxInt(0, 999-tupleRank)
+}
+
+func desiredHealthBandEndForPlatform(platform upstream.Platform, healthBand int) int {
+	if healthBand < 0 || healthBand > 4 {
+		healthBand = 3
+	}
+	if platform == upstream.PlatformSub2API {
+		return []int{99, 999, 9999, 99999, 100000}[healthBand]
+	}
+	return []int{40000, 30000, 20000, 10000, 1}[healthBand]
 }
 
 // desiredSub2APIManagedPriority 使用 Sub2API「数值越小越优先」的原生语义，并为不同健康

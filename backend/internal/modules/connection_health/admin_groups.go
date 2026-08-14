@@ -461,13 +461,10 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 					}
 				}
 			}
-			if priorityManaged {
-				if effectiveMultiplier == nil {
-					value := priorityState.EffectiveMultiplier
-					effectiveMultiplier = &value
-				}
+			if priorityManaged && !usesHealthPriority && effectiveMultiplier == nil {
+				value := priorityState.EffectiveMultiplier
+				effectiveMultiplier = &value
 			}
-
 			item := AdminGroupAccount{
 				ID:                            acc.ID,
 				Name:                          acc.Name,

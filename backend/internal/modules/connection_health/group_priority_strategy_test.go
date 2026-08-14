@@ -780,6 +780,73 @@ func TestMultiplierPrioritySync_MissingMultiplierDoesNotWriteOrRestore(t *testin
 	}
 }
 
+func TestHealthPrioritySync_MissingMultiplierMovesToCurrentBandEnd(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  string
+		current int
+		state   State
+		want    int
+	}{
+		{name: "deterministic missing leaves suspended band", status: MultiplierResolutionMissing, current: 100000, state: StateHealthy, want: 99},
+		{name: "temporary unavailable leaves unprobed band", status: MultiplierResolutionUnavailable, current: 10000, state: StateHealthy, want: 99},
+		{name: "missing multiplier still enters degraded band", status: MultiplierResolutionMissing, current: 99, state: StateDegraded, want: 9999},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := newFakeRepository()
+			actions := &fakeTargetPriorityActioner{}
+			service := &Service{repo: repo, priorityActions: actions}
+			policy := probePolicy()
+			policy.AutoDegradeEnabled = true
+			policy.PriorityMode = PriorityModeMultiplier
+			policy.StrategyMode = StrategyModeHealthProbe
+			targetID := "sub2api:ws1:100"
+			historicalMultiplier := 0.08
+			stored := PrioritySyncState{
+				UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+				OriginalPriority: 7, LastAppliedPriority: test.current, EffectiveMultiplier: historicalMultiplier,
+			}
+			repo.priorityStates["user1|ws1|"+targetID] = stored
+			inventory := map[string]*priorityTargetInventory{
+				targetID: {
+					target:   AdminProbeTarget{TargetID: targetID, AccountID: "100", Models: []string{"gpt-4o"}},
+					policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{status: test.status},
+					currentPriority: test.current, priorityPresent: true,
+				},
+			}
+			states := []ConnectionHealthState{{ConnectionID: targetID, ModelName: "gpt-4o", State: test.state}}
+
+			service.syncWorkspacePriorities(
+				context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+				"user1", "ws1", inventory, true, states, []PrioritySyncState{stored},
+			)
+
+			if len(actions.calls) != 1 || actions.calls[0].priority != test.want {
+				t.Fatalf("missing multiplier must move to current health band end %d: %+v", test.want, actions.calls)
+			}
+			updated := repo.priorityStates["user1|ws1|"+targetID]
+			if updated.LastAppliedPriority != test.want || updated.EffectiveMultiplier != historicalMultiplier {
+				t.Fatalf("health band write must preserve historical multiplier checkpoint: %+v", updated)
+			}
+		})
+	}
+}
+
+func TestDesiredHealthBandEndForPlatform_UsesLowestPositionInsideEachBand(t *testing.T) {
+	sub2API := []int{99, 999, 9999, 99999, 100000}
+	newAPI := []int{40000, 30000, 20000, 10000, 1}
+	for band := 0; band < 5; band++ {
+		if got := desiredHealthBandEndForPlatform(upstream.PlatformSub2API, band); got != sub2API[band] {
+			t.Fatalf("Sub2API band %d end = %d, want %d", band, got, sub2API[band])
+		}
+		if got := desiredHealthBandEndForPlatform(upstream.PlatformNewAPI, band); got != newAPI[band] {
+			t.Fatalf("NewAPI band %d end = %d, want %d", band, got, newAPI[band])
+		}
+	}
+}
+
 func TestMultiplierPrioritySync_MissingConflictedTargetIsNotOverwritten(t *testing.T) {
 	repo := newFakeRepository()
 	priorityActions := &fakeTargetPriorityActioner{}
@@ -1027,7 +1094,7 @@ func TestHealthPrioritySync_NewAPITupleIsNotOverriddenByCurrentWeight(t *testing
 	}
 }
 
-func TestHealthPrioritySync_UsesFallbackOnlyForDeterministicMissing(t *testing.T) {
+func TestHealthPrioritySync_UsesFallbackForDeterministicMissingAndBandEndForUnavailable(t *testing.T) {
 	policy := Policy{
 		ID: "health", UserID: "user1", AdminAccountID: "ws1", Enabled: true,
 		StrategyMode: StrategyModeHealthProbe, PriorityMode: PriorityModeMultiplier, AutoDegradeEnabled: true,
@@ -1057,8 +1124,9 @@ func TestHealthPrioritySync_UsesFallbackOnlyForDeterministicMissing(t *testing.T
 	unavailableSites := fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI}}
 	service, repo, actions = newService(unavailableSites)
 	service.syncMultiplierPriorities(context.Background(), []Policy{policy}, nil, []GroupPolicyAssignment{assignment}, nil, nil)
-	if len(actions.calls) != 0 || len(repo.priorityStates) != 0 {
-		t.Fatalf("unavailable lookup must hold without fallback or new management: calls=%+v state=%+v", actions.calls, repo.priorityStates)
+	state := repo.priorityStates["user1|ws1|newapi:ws1:100"]
+	if len(actions.calls) != 1 || actions.calls[0].priority != 10000 || state.LastAppliedPriority != 10000 || state.EffectiveMultiplier != 0 {
+		t.Fatalf("unavailable lookup must enter the current health band end without a guessed multiplier: calls=%+v state=%+v", actions.calls, repo.priorityStates)
 	}
 }
 

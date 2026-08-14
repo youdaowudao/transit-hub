@@ -1611,8 +1611,8 @@ func todayEnd() int64 {
 	return end.Unix()
 }
 
-// ListSub2APIKeys 获取上游 Sub2API 站点的 API Key 列表。
-// 按创建时间倒序返回，最多 100 条。每条包含 ID、Key 值、名称、所属分组等信息。
+// ListSub2APIKeys 获取上游 Sub2API 站点的完整 API Key 列表。
+// 按创建时间倒序分页读取。每条包含 ID、Key 值、名称、所属分组等信息。
 func (s *PlatformService) ListSub2APIKeys(session Session) ([]Sub2APIKeyItem, error) {
 	return s.ListSub2APIKeysContext(context.Background(), session)
 }
@@ -1621,41 +1621,64 @@ func (s *PlatformService) ListSub2APIKeysContext(ctx context.Context, session Se
 	if session.Platform != PlatformSub2API || strings.TrimSpace(session.AccessToken) == "" {
 		return nil, newRequestError(ErrorAuth, PlatformSub2API)
 	}
-	response, err := s.httpClient.requestJSONWithContext(ctx,
-		session.BaseURL+"/api/v1/keys?page=1&page_size=100&sort_by=created_at&sort_order=desc",
-		requestOptions{
-			AccessToken: session.AccessToken,
-			TokenType:   session.TokenType,
-		},
-	)
-	if err != nil {
-		return nil, err
+	const pageSize = 100
+	const maxPages = 1000
+	keys := make([]Sub2APIKeyItem, 0)
+	fetched := 0
+	complete := false
+	for page := 1; page <= maxPages; page++ {
+		response, err := s.httpClient.requestJSONWithContext(ctx,
+			session.BaseURL+"/api/v1/keys?page="+strconv.Itoa(page)+"&page_size=100&sort_by=created_at&sort_order=desc",
+			requestOptions{AccessToken: session.AccessToken, TokenType: session.TokenType},
+		)
+		if err != nil {
+			return nil, err
+		}
+		items := dataArray(response.Payload)
+		total, hasTotal := paginationTotal(response.Payload)
+		if len(items) == 0 {
+			if hasTotal && fetched < total {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			complete = true
+			break
+		}
+		fetched += len(items)
+		for _, item := range items {
+			record, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			keyItem := Sub2APIKeyItem{ID: groupID2(record), Name: safeString(record, "name")}
+			if k := firstString(record, []string{"key", "token", "api_key"}); k != nil {
+				keyItem.Key = *k
+			}
+			if status := firstStringy(record, []string{"status"}); status != "" {
+				keyItem.Status = status
+			}
+			if gid := firstNumber(record, []string{"group_id"}); gid != nil {
+				keyItem.GroupID = strconv.FormatInt(int64(*gid), 10)
+			}
+			if group, ok := record["group"].(map[string]any); ok {
+				keyItem.GroupName = safeString(group, "name")
+			}
+			keys = append(keys, keyItem)
+		}
+		if hasTotal {
+			if fetched >= total {
+				complete = true
+				break
+			}
+			if len(items) < pageSize {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+		} else if len(items) < pageSize {
+			complete = true
+			break
+		}
 	}
-
-	items := dataArray(response.Payload)
-	keys := make([]Sub2APIKeyItem, 0, len(items))
-	for _, item := range items {
-		record, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		keyItem := Sub2APIKeyItem{
-			ID:   groupID2(record),
-			Name: safeString(record, "name"),
-		}
-		if k := firstString(record, []string{"key", "token", "api_key"}); k != nil {
-			keyItem.Key = *k
-		}
-		if s := firstString(record, []string{"status"}); s != nil {
-			keyItem.Status = *s
-		}
-		if gid := firstNumber(record, []string{"group_id"}); gid != nil {
-			keyItem.GroupID = strconv.FormatInt(int64(*gid), 10)
-		}
-		if group, ok := record["group"].(map[string]any); ok {
-			keyItem.GroupName = safeString(group, "name")
-		}
-		keys = append(keys, keyItem)
+	if !complete {
+		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
 	return keys, nil
 }
@@ -2178,39 +2201,63 @@ func (s *PlatformService) ListNewAPITokensContext(ctx context.Context, session S
 	if session.Platform != PlatformNewAPI {
 		return nil, newRequestError(ErrorAuth, PlatformNewAPI)
 	}
-	response, err := s.httpClient.requestJSONWithContext(ctx, session.BaseURL+"/api/token/?p=1&page_size=100", requestOptions{
-		Cookie:      session.Cookie,
-		UserID:      session.UserID,
-		AccessToken: session.AccessToken,
-		TokenType:   session.TokenType,
-	})
-	if err != nil {
-		return nil, err
+	const pageSize = 100
+	const maxPages = 1000
+	authOptions := requestOptions{
+		Cookie: session.Cookie, UserID: session.UserID,
+		AccessToken: session.AccessToken, TokenType: session.TokenType,
 	}
-	items := dataArray(response.Payload)
-	tokens := make([]Sub2APIKeyItem, 0, len(items))
-	for _, item := range items {
-		record, ok := item.(map[string]any)
-		if !ok {
-			continue
+	tokens := make([]Sub2APIKeyItem, 0)
+	fetched := 0
+	complete := false
+	for page := 1; page <= maxPages; page++ {
+		response, err := s.httpClient.requestJSONWithContext(ctx, session.BaseURL+"/api/token/?p="+strconv.Itoa(page)+"&page_size=100", authOptions)
+		if err != nil {
+			return nil, err
 		}
-		token := Sub2APIKeyItem{
-			ID:   groupID2(record),
-			Name: safeString(record, "name"),
+		items := dataArray(response.Payload)
+		total, hasTotal := paginationTotal(response.Payload)
+		if len(items) == 0 {
+			if hasTotal && fetched < total {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformNewAPI)
+			}
+			complete = true
+			break
 		}
-		if k := firstString(record, []string{"key"}); k != nil {
-			token.Key = *k
+		fetched += len(items)
+		for _, item := range items {
+			record, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			token := Sub2APIKeyItem{ID: groupID2(record), Name: safeString(record, "name")}
+			if k := firstString(record, []string{"key"}); k != nil {
+				token.Key = *k
+			}
+			if status := firstStringy(record, []string{"status"}); status != "" {
+				token.Status = status
+			}
+			if group := firstString(record, []string{"group"}); group != nil {
+				token.GroupID = *group
+				token.GroupName = *group
+			}
+			tokens = append(tokens, token)
 		}
-		if s := firstString(record, []string{"status"}); s != nil {
-			token.Status = *s
-		} else if statusNum := firstNumber(record, []string{"status"}); statusNum != nil {
-			token.Status = strconv.FormatInt(int64(*statusNum), 10)
+		if hasTotal {
+			if fetched >= total {
+				complete = true
+				break
+			}
+			if len(items) < pageSize {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformNewAPI)
+			}
+		} else if len(items) < pageSize {
+			complete = true
+			break
 		}
-		if g := firstString(record, []string{"group"}); g != nil {
-			token.GroupID = *g
-			token.GroupName = *g
-		}
-		tokens = append(tokens, token)
+	}
+	if !complete {
+		return nil, newRequestError(ErrorInvalidResponse, PlatformNewAPI)
 	}
 	return tokens, nil
 }

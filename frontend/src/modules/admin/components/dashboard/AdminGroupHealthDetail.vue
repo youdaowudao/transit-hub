@@ -484,12 +484,18 @@ const multiplierSourceLabel = (account: AdminGroupAccount): string => {
     if (account.multiplierResolutionStatus === 'conflict') return t(`${detailPrefix}.multiplierSources.conflictFallback`)
     return t(`${detailPrefix}.multiplierSources.missingFallback`)
   }
-  if (account.multiplierResolutionStatus === 'unavailable') {
-    return account.priorityManaged
-      ? t(`${detailPrefix}.multiplierSources.unavailableHeld`)
-      : t(`${detailPrefix}.multiplierSources.unavailableUnmanaged`)
+  switch (account.multiplierResolutionStatus) {
+    case 'unassociated':
+      return t(`${detailPrefix}.multiplierSources.unassociatedBandEnd`)
+    case 'missing':
+      return t(`${detailPrefix}.multiplierSources.missingBandEnd`)
+    case 'conflict':
+      return t(`${detailPrefix}.multiplierSources.conflictBandEnd`)
+    case 'unavailable':
+      return t(`${detailPrefix}.multiplierSources.unavailableBandEnd`)
+    default:
+      return t(`${detailPrefix}.multiplierSources.unknownBandEnd`)
   }
-  return t(`${detailPrefix}.multiplierSources.fallbackRequired`)
 }
 
 </script>

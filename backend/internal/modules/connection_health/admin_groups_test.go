@@ -459,6 +459,46 @@ func TestAdminGroups_ConflictingGroupFallbacksDoNotClaimLocalEffectiveMultiplier
 	}
 }
 
+func TestAdminGroups_UnresolvedMultiplierDoesNotExposeHistoricalCheckpointValue(t *testing.T) {
+	repo := newFakeRepository()
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	policy.StrategyMode = StrategyModeHealthProbe
+	repo.policies = []Policy{policy}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID,
+	}}
+	targetID := "sub2api:ws1:100"
+	repo.priorityStates["user1|ws1|"+targetID] = PrioritySyncState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		OriginalPriority: 7, LastAppliedPriority: 99, EffectiveMultiplier: 0.06,
+	}
+	priority := 99
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "100", Name: "account", Models: "gpt-4o", Priority: &priority}},
+		},
+	}
+	service := newAdminGroupsService(reader, fakeAdminGroupKeyReader{
+		fakeMySitesReader: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+	}, repo)
+	service.sites = fakeSiteLookup{}
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	account := groups[0].Accounts[0]
+	if account.MultiplierResolutionStatus != MultiplierResolutionUnassociated || account.MultiplierSource != MultiplierSourceNone {
+		t.Fatalf("unexpected unresolved multiplier state: %+v", account)
+	}
+	if !account.PriorityManaged || account.EffectiveMultiplier != nil {
+		t.Fatalf("managed band-end target must not expose historical multiplier as current: %+v", account)
+	}
+}
+
 func TestSortAdminGroupAccountsByProduction_ConflictUsesObservedPriority(t *testing.T) {
 	observedHigh, observedLow := 90, 10
 	staleLow, staleHigh := 1, 99

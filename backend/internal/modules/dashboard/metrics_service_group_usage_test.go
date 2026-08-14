@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"transithub/backend/internal/modules/admin_accounts"
 	"transithub/backend/internal/modules/my_sites"
@@ -229,6 +230,25 @@ func TestGroupUsageTodayUsesExplicitBusinessDate(t *testing.T) {
 	}
 }
 
+func TestGroupUsageTodayUsesLastSuccessfulRevenueWhenRefreshFails(t *testing.T) {
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	observedAt := time.Now().Add(-time.Hour)
+	revenue := 17.25
+	repo := &fakeMetricsRepository{groupMetricCache: []GroupMetricCacheItem{{
+		MetricType: "revenue", GroupID: "5", GroupName: "分组五", TodayRevenue: &revenue, ObservedAt: observedAt,
+	}}}
+	service := NewMetricsService(store, &fakePlatformClient{adminGroupsErr: errors.New("main group refresh failed")}, nil, repo, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+
+	response, err := service.GroupUsageToday(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GroupUsageToday() error: %v", err)
+	}
+	if !response.Fallback || response.FallbackAt == nil || !response.FallbackAt.Equal(observedAt) || response.TotalRevenue != 17.25 {
+		t.Fatalf("group revenue fallback = %+v", response)
+	}
+}
+
 type fakeRealConnectionReader struct {
 	connections []my_sites.RealConnection
 	err         error
@@ -238,7 +258,7 @@ func (f fakeRealConnectionReader) ListRealConnectionsForWorkspace(context.Contex
 	return f.connections, f.err
 }
 
-func TestGroupUsageTodayPublishesOnlyReliableDirectProfit(t *testing.T) {
+func TestGroupUsageTodayDoesNotWaitForDirectProfitReads(t *testing.T) {
 	store := newFakeSessionStore()
 	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
 	platform := &fakePlatformClient{
@@ -263,7 +283,71 @@ func TestGroupUsageTodayPublishesOnlyReliableDirectProfit(t *testing.T) {
 	if group.TodayRevenue != 17.25 {
 		t.Fatalf("authoritative group revenue = %.2f, want 17.25", group.TodayRevenue)
 	}
+	if group.DirectRevenue != nil || group.DirectCost != nil || group.TodayProfit != nil {
+		t.Fatalf("group revenue endpoint unexpectedly waited for direct profit: %+v", group)
+	}
+	if upstreams.keyUsageCalls != 0 {
+		t.Fatalf("GroupUsageToday() queried upstream key cost %d time(s)", upstreams.keyUsageCalls)
+	}
+}
+
+func TestGroupProfitTodayReturnsReliableDirectProfit(t *testing.T) {
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	platform := &fakePlatformClient{scopeUsage: map[string]upstream.AdminUsageStats{
+		"93|5": {TotalActualCost: 10},
+	}}
+	upstreams := &fakeUpstreamLister{keyUsageItems: []upstream.KeyUsageTodayItem{{SiteID: "site-1", KeyID: "key-93", TodayAmount: 4}}}
+	repo := &fakeMetricsRepository{}
+	service := NewMetricsService(store, platform, upstreams, repo, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+	service.SetRealConnectionReader(fakeRealConnectionReader{connections: []my_sites.RealConnection{{
+		ID: "connection-93", Status: "active", UpstreamSiteID: "site-1", UpstreamKeyID: "key-93",
+		AdminAccountID: "93", OwnGroupIDs: []string{"5"}, OwnGroupNames: []string{"分组五"},
+	}}})
+
+	response, err := service.GroupProfitToday(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GroupProfitToday() error: %v", err)
+	}
+	group := groupUsageItemByID(t, response.Groups, "5")
 	if group.DirectRevenue == nil || *group.DirectRevenue != 10 || group.DirectCost == nil || *group.DirectCost != 4 || group.TodayProfit == nil || *group.TodayProfit != 6 {
 		t.Fatalf("direct group profit = %+v, want revenue=10 cost=4 profit=6", group)
+	}
+	if response.TotalProfit != 6 || response.FallbackGroups != 0 || response.UnavailableGroups != 0 {
+		t.Fatalf("profit response = %+v", response)
+	}
+}
+
+func TestGroupProfitTodayUnauthenticated(t *testing.T) {
+	service := NewMetricsService(newFakeSessionStore(), &fakePlatformClient{}, nil, nil, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+	_, err := service.GroupProfitToday(context.Background(), "user-1")
+	var reqErr requestError
+	if !errors.As(err, &reqErr) || reqErr.Error() != ErrorAdminOnly {
+		t.Fatalf("expected ErrorAdminOnly, got %v", err)
+	}
+}
+
+func TestGroupProfitTodayKeepsLastSuccessfulValueForFailedGroup(t *testing.T) {
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	observedAt := time.Now().Add(-time.Hour)
+	oldRevenue, oldCost, oldProfit := 10.0, 4.0, 6.0
+	repo := &fakeMetricsRepository{groupMetricCache: []GroupMetricCacheItem{{
+		MetricType: "profit", GroupID: "5", GroupName: "分组五",
+		DirectRevenue: &oldRevenue, DirectCost: &oldCost, TodayProfit: &oldProfit, ObservedAt: observedAt,
+	}}}
+	service := NewMetricsService(store, &fakePlatformClient{}, &fakeUpstreamLister{keyUsageErr: errors.New("upstream unavailable")}, repo, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+	service.SetRealConnectionReader(fakeRealConnectionReader{connections: []my_sites.RealConnection{{
+		ID: "connection-93", Status: "active", UpstreamSiteID: "site-1", UpstreamKeyID: "key-93",
+		AdminAccountID: "93", OwnGroupIDs: []string{"5"}, OwnGroupNames: []string{"分组五"},
+	}}})
+
+	response, err := service.GroupProfitToday(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("GroupProfitToday() error: %v", err)
+	}
+	group := groupUsageItemByID(t, response.Groups, "5")
+	if group.TodayProfit == nil || *group.TodayProfit != 6 || response.FallbackGroups != 1 || response.UnavailableGroups != 0 {
+		t.Fatalf("profit fallback response = %+v", response)
 	}
 }

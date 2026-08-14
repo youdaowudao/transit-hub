@@ -16,6 +16,9 @@ describe('dashboard additional cost summary', () => {
   it('shows a complete cost breakdown without repeating raw records', () => {
     expect(dashboardSource).toContain('上游直接成本')
     expect(dashboardSource).toContain('additionalCostLines')
+    expect(dashboardSource).toContain('const displayedTodayCost = computed')
+    expect(dashboardSource).toContain('displayedTodayCost.value + additionalCost')
+    expect(dashboardSource).toContain('{{ formatCny(displayedTodayCost) }}')
     expect(dashboardSource).not.toContain('v-for="record in liveData.additionalCosts.records"')
   })
 })

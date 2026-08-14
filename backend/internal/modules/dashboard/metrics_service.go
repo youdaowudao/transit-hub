@@ -48,6 +48,10 @@ type metricsStore interface {
 	SaveBalanceFilter(ctx context.Context, config BalanceFilterConfig) error
 	UpsertSiteCost(ctx context.Context, cost SiteDailyCost) error
 	ListSiteCosts(ctx context.Context, userID, adminAccountID string, date string) ([]SiteDailyCost, error)
+	ListLatestSiteCosts(ctx context.Context, userID, adminAccountID, date string) ([]SiteDailyCost, error)
+	LatestDashboardSnapshot(ctx context.Context, userID, adminAccountID, date string) (*DailySnapshot, error)
+	SaveGroupMetricCache(ctx context.Context, userID, adminAccountID string, items []GroupMetricCacheItem) error
+	ListGroupMetricCache(ctx context.Context, userID, adminAccountID, metricType string) ([]GroupMetricCacheItem, error)
 	ListDailyStats(ctx context.Context, userID, adminAccountID string, from, to string) ([]DailySnapshot, error)
 }
 
@@ -287,6 +291,12 @@ func summarizeCachedUpstreamCosts(sites []upstream.Response) (total float64, com
 // businessDate：当次请求的上海业务日期（"2006-01-02"）。
 // maxStaleness：缓存最大有效时长；0 表示不检查时效。
 func summarizeCachedUpstreamCostsWithQuality(sites []upstream.Response, businessDate string, maxStaleness time.Duration) (total float64, quality *CostQuality) {
+	return summarizeCachedUpstreamCostsWithHistory(sites, businessDate, maxStaleness, nil)
+}
+
+// summarizeCachedUpstreamCostsWithHistory prefers a current cache value and
+// falls back to the site's latest successful persisted cost when necessary.
+func summarizeCachedUpstreamCostsWithHistory(sites []upstream.Response, businessDate string, maxStaleness time.Duration, history map[string]SiteDailyCost) (total float64, quality *CostQuality) {
 	now := time.Now()
 	quality = &CostQuality{
 		BusinessDate: businessDate,
@@ -299,47 +309,43 @@ func summarizeCachedUpstreamCostsWithQuality(sites []upstream.Response, business
 		}
 		quality.ExpectedSites++
 		metric := site.Metrics.TodayConsume
-
-		if site.Metrics.TodayConsumeDate != "" && site.Metrics.TodayConsumeDate != businessDate {
-			quality.FailedSites++
-			quality.Failures = append(quality.Failures, SiteCostFault{
-				SiteName: site.Name,
-				Reason:   "date_mismatch",
-			})
-			continue
-		}
-
-		if metric.Value == nil {
-			quality.FailedSites++
-			quality.Failures = append(quality.Failures, SiteCostFault{
-				SiteName: site.Name,
-				Reason:   "fetch_error",
-			})
-			continue
-		}
-
-		stale := maxStaleness > 0 && site.Metrics.TodayConsumeAt != nil &&
+		currentDateOK := site.Metrics.TodayConsumeDate == "" || site.Metrics.TodayConsumeDate == businessDate
+		stale := metric.Value != nil && maxStaleness > 0 && site.Metrics.TodayConsumeAt != nil &&
 			now.Sub(*site.Metrics.TodayConsumeAt) > maxStaleness
-		needsFallback := site.Status == upstream.StatusError || stale
-		if needsFallback && (site.Metrics.TodayConsumeDate != businessDate || site.Metrics.TodayConsumeAt == nil) {
-			reason := "fetch_error"
-			if stale {
-				reason = "stale"
+		needsFallback := metric.Value == nil || !currentDateOK || site.Status == upstream.StatusError || stale
+
+		if metric.Value != nil {
+			quality.CollectedSites++
+			quality.ConfirmedCost += *metric.Value * site.RechargeRate
+			if needsFallback {
+				quality.FallbackSites++
+				if site.Metrics.TodayConsumeAt != nil && (quality.FallbackAt == nil || site.Metrics.TodayConsumeAt.Before(*quality.FallbackAt)) {
+					observedAt := *site.Metrics.TodayConsumeAt
+					quality.FallbackAt = &observedAt
+				}
 			}
-			quality.FailedSites++
-			quality.Failures = append(quality.Failures, SiteCostFault{SiteName: site.Name, Reason: reason})
 			continue
 		}
 
-		quality.CollectedSites++
-		quality.ConfirmedCost += *metric.Value * site.RechargeRate
-		if needsFallback {
+		if previous, ok := history[site.ID]; ok && previous.AdjustedCost != nil {
+			quality.CollectedSites++
 			quality.FallbackSites++
-			if quality.FallbackAt == nil || site.Metrics.TodayConsumeAt.Before(*quality.FallbackAt) {
-				observedAt := *site.Metrics.TodayConsumeAt
+			quality.ConfirmedCost += *previous.AdjustedCost
+			if quality.FallbackAt == nil || previous.ObservedAt.Before(*quality.FallbackAt) {
+				observedAt := previous.ObservedAt
 				quality.FallbackAt = &observedAt
 			}
+			continue
 		}
+
+		quality.FailedSites++
+		reason := "fetch_error"
+		if !currentDateOK {
+			reason = "date_mismatch"
+		} else if stale {
+			reason = "stale"
+		}
+		quality.Failures = append(quality.Failures, SiteCostFault{SiteName: site.Name, Reason: reason})
 	}
 
 	if quality.ExpectedSites == 0 {
@@ -377,9 +383,9 @@ func cachedUpstreamCostSiteCounts(sites []upstream.Response) (totalSites, failed
 // 计算逻辑：
 //   - todayProfit:     管理员站点今日总实际消费，通过 sub2api /api/v1/admin/usage/stats 获取
 //   - siteBalance:     管理员站点所有非 admin 用户余额之和，通过 sub2api /api/v1/admin/users 分页求和
-//   - todayPurchase:   所有上游站点已同步的今日消费 × 站点倍率之和（成本不完整时为 nil）
+//   - todayPurchase:   所有上游站点当前值或最后成功值 × 站点倍率之和
 //   - upstreamBalance: 所有上游站点余额 × 站点倍率之和（复用已同步的内存数据）
-//   - netProfit:       todayProfit - todayPurchase；任一为 nil 时 netProfit 为 nil
+//   - netProfit:       todayProfit - todayPurchase；只有完全没有成本值时才为 nil
 func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (MetricsResponse, error) {
 	// 获取并校验 admin 会话（平台感知：sub2api 检查 AccessToken，new-api 检查 Cookie+UserID）。
 	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
@@ -413,8 +419,11 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		todayProfitVal  float64
 		todayProfitErr  error
 		siteBalance     float64
+		siteBalanceErr  error
 		groupCount      int
+		groupCountErr   error
 		upstreamBalance float64
+		knownBalances   int
 		costQuality     *CostQuality
 		wg              sync.WaitGroup
 	)
@@ -447,6 +456,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		})
 		if err != nil {
 			log.Printf("dashboard metrics: fetch site balance failed user_id=%s err=%v", userID, err)
+			siteBalanceErr = err
 			return
 		}
 		siteBalance = balanceResult.Balance
@@ -459,6 +469,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		groups, err := s.platform.FetchAdminAllGroups(session)
 		if err != nil {
 			log.Printf("dashboard metrics: fetch admin groups failed user_id=%s err=%v", userID, err)
+			groupCountErr = err
 			return
 		}
 		groupCount = len(groups)
@@ -470,7 +481,17 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	go func() {
 		defer wg.Done()
 		sites := s.upstreams.List(ctx, userID)
-		total, cq := summarizeCachedUpstreamCostsWithQuality(sites, today, s.maxStaleness())
+		history := make(map[string]SiteDailyCost)
+		if s.metricsRepo != nil {
+			if previous, historyErr := s.metricsRepo.ListLatestSiteCosts(ctx, userID, adminAccountID, today); historyErr == nil {
+				for _, cost := range previous {
+					history[cost.SiteID] = cost
+				}
+			} else {
+				log.Printf("dashboard metrics: load latest site costs failed user_id=%s err=%v", userID, historyErr)
+			}
+		}
+		total, cq := summarizeCachedUpstreamCostsWithHistory(sites, today, s.maxStaleness(), history)
 		costQuality = cq
 		for _, site := range sites {
 			if !site.IsEnabled() || site.RechargeRate <= 0 {
@@ -478,16 +499,35 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 			}
 			if site.Metrics.Balance.Value != nil {
 				upstreamBalance += *site.Metrics.Balance.Value * site.RechargeRate
+				knownBalances++
 			}
 		}
 		_ = total // total 在 costQuality.ConfirmedCost 中
 	}()
 
 	wg.Wait()
+	var latestSnapshot *DailySnapshot
+	if s.metricsRepo != nil {
+		latestSnapshot, _ = s.metricsRepo.LatestDashboardSnapshot(ctx, userID, adminAccountID, today)
+	}
+	if todayProfitErr != nil && latestSnapshot != nil && latestSnapshot.TodayProfit != nil {
+		todayProfitVal = *latestSnapshot.TodayProfit
+	}
+	if siteBalanceErr != nil && latestSnapshot != nil && latestSnapshot.SiteBalance != nil {
+		siteBalance = *latestSnapshot.SiteBalance
+	}
+	if knownBalances == 0 && latestSnapshot != nil && latestSnapshot.UpstreamBalance != nil {
+		upstreamBalance = *latestSnapshot.UpstreamBalance
+	}
+	if groupCountErr != nil && s.metricsRepo != nil {
+		if cachedGroups, cacheErr := s.metricsRepo.ListGroupMetricCache(ctx, userID, adminAccountID, "revenue"); cacheErr == nil {
+			groupCount = len(cachedGroups)
+		}
+	}
 
 	// 构建响应：使用指针类型区分"不可用"和"0"。
 	var todayProfit *float64
-	if todayProfitErr == nil {
+	if todayProfitErr == nil || latestSnapshot != nil && latestSnapshot.TodayProfit != nil {
 		todayProfit = ptrF64(todayProfitVal)
 	}
 	var confirmedCost *float64
@@ -505,20 +545,27 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		}
 	}
 	var todayPurchase *float64
-	if costQuality != nil && (costQuality.Mode == "exact" || costQuality.Mode == "fallback") {
+	if costQuality != nil && (costQuality.CollectedSites > 0 || costQuality.ExpectedSites == 0) {
 		todayPurchase = ptrF64(costQuality.ConfirmedCost)
-	} else if costQuality != nil {
-		// 部分成本：todayPurchase = nil（不能作为完整值），但 confirmedCost 是下限
-		todayPurchase = nil
 	}
 	var netProfit *float64
-	if todayProfit != nil && costQuality != nil && (costQuality.Mode == "exact" || costQuality.Mode == "fallback") {
+	if todayProfit != nil && todayPurchase != nil {
 		np := *todayProfit - costQuality.ConfirmedCost
 		netProfit = &np
-		if costQuality.Mode == "exact" {
+		switch costQuality.Mode {
+		case "exact":
 			settlementStatus = SettlementStatusFinal
-		} else {
+		case "fallback":
 			settlementStatus = SettlementStatusFallback
+		case "partial":
+			const minSettlementCoverage = 0.90
+			if costQuality.ExpectedSites > 0 && float64(costQuality.CollectedSites)/float64(costQuality.ExpectedSites) >= minSettlementCoverage {
+				settlementStatus = SettlementStatusPartialHigh
+			} else {
+				settlementStatus = SettlementStatusPartial
+			}
+		default:
+			settlementStatus = SettlementStatusPartial
 		}
 	} else if costQuality != nil && costQuality.Mode == "partial" {
 		// 部分成本：检查覆盖率决定 partial_high 还是 partial
@@ -567,7 +614,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	}
 
 	// 营收与成本独立保存；成本不完整时仍保留可用营收（live_cache 不覆盖 final 行）。
-	if todayProfit != nil {
+	if todayProfitErr == nil && todayProfit != nil {
 		s.upsertSnapshot(ctx, userID, adminAccountID, today, result)
 	}
 
@@ -810,6 +857,31 @@ func (s *MetricsService) GroupUsageToday(ctx context.Context, userID string) (Gr
 
 	date := businesstime.Today()
 	return s.realGroupUsageToday(ctx, userID, adminAccountID, session, date)
+}
+
+// GroupProfitToday independently reads safely attributable direct group
+// profit. It is intentionally separate from GroupUsageToday so a slow upstream
+// key or scoped-account read can never block authoritative group revenue.
+func (s *MetricsService) GroupProfitToday(ctx context.Context, userID string) (GroupProfitTodayResponse, error) {
+	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
+	if err != nil {
+		return GroupProfitTodayResponse{}, err
+	}
+	record, err := s.store.Get(ctx, userID, adminAccountID)
+	if err != nil {
+		return GroupProfitTodayResponse{}, err
+	}
+	if record == nil || !record.Session.IsAuthenticated() {
+		return GroupProfitTodayResponse{}, requestError(ErrorAdminOnly)
+	}
+	session, err := s.freshAdminSession(ctx, userID, adminAccountID, record)
+	if err != nil {
+		return GroupProfitTodayResponse{}, requestError(ErrorAdminOnly)
+	}
+	if err := s.platform.VerifyAdmin(session); err != nil {
+		return GroupProfitTodayResponse{}, requestError(ErrorAdminOnly)
+	}
+	return s.realGroupProfitToday(ctx, userID, adminAccountID, session, businesstime.Today())
 }
 
 // UpstreamKeyUsageToday 获取当前工作区所有上游站点中，今天有消费的 key 明细（仪表盘「今日成本」下钻）。

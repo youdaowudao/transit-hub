@@ -148,6 +148,11 @@ const handleEditSite = (site: UpstreamSite) => {
   isAddModalOpen.value = true
 }
 
+const editingSite = computed(() => {
+  if (!editingSiteId.value) return null
+  return upstreamSites.value.find(site => site.id === editingSiteId.value) ?? null
+})
+
 const closeSiteModal = () => {
   isAddModalOpen.value = false
   editingSiteId.value = null
@@ -915,33 +920,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div class="p-4 border-t border-border/40 flex items-center justify-between gap-4">
-            <div v-if="selectedSiteForGroups" class="flex items-center gap-4 min-w-0">
-              <div class="min-w-0">
-                <p class="text-sm font-medium text-foreground">{{ t('admin.upstream.lifecycle.label') }}</p>
-                <p class="mt-0.5 text-xs text-muted-foreground">
-                  {{ selectedSiteForGroups.enabled ? t('admin.upstream.lifecycle.enabledHelp') : t('admin.upstream.lifecycle.disabledHelp') }}
-                </p>
-                <p v-if="enabledErrorKeys.get(selectedSiteForGroups.id)" class="mt-1 text-xs text-destructive">
-                  {{ t(enabledErrorKeys.get(selectedSiteForGroups.id) ?? 'admin.upstream.errors.unknown') }}
-                </p>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                :aria-checked="selectedSiteForGroups.enabled"
-                :aria-label="t('admin.upstream.lifecycle.label')"
-                :disabled="enabledUpdatingIds.has(selectedSiteForGroups.id)"
-                class="relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-wait disabled:opacity-50"
-                :class="selectedSiteForGroups.enabled ? 'bg-primary' : 'bg-muted'"
-                @click="toggleSiteEnabled(selectedSiteForGroups!)"
-              >
-                <span
-                  class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200"
-                  :class="selectedSiteForGroups.enabled ? 'translate-x-5' : 'translate-x-0'"
-                />
-              </button>
-            </div>
+          <div class="p-4 border-t border-border/40 flex items-center justify-end">
             <Button variant="ghost" @click="closeGroupsModal">{{ t('admin.upstream.fields.closeGroupsModal') }}</Button>
           </div>
         </div>
@@ -973,6 +952,33 @@ onBeforeUnmount(() => {
             <div v-if="addErrorKey" class="mb-5 flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert" aria-live="polite">
               <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
               <span>{{ t(addErrorKey) }}</span>
+            </div>
+
+            <div v-if="editingSite" class="mb-5 flex items-center justify-between gap-4 rounded-xl border border-border/50 bg-surface px-4 py-3">
+              <div class="min-w-0">
+                <p class="text-sm font-medium text-foreground">{{ t('admin.upstream.lifecycle.label') }}</p>
+                <p class="mt-0.5 text-xs text-muted-foreground">
+                  {{ editingSite.enabled ? t('admin.upstream.lifecycle.enabledHelp') : t('admin.upstream.lifecycle.disabledHelp') }}
+                </p>
+                <p v-if="enabledErrorKeys.get(editingSite.id)" class="mt-1 text-xs text-destructive" role="alert" aria-live="polite">
+                  {{ t(enabledErrorKeys.get(editingSite.id) ?? 'admin.upstream.errors.unknown') }}
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="editingSite.enabled"
+                :aria-label="t('admin.upstream.lifecycle.label')"
+                :disabled="enabledUpdatingIds.has(editingSite.id)"
+                class="relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-wait disabled:opacity-50"
+                :class="editingSite.enabled ? 'bg-primary' : 'bg-muted'"
+                @click="toggleSiteEnabled(editingSite)"
+              >
+                <span
+                  class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200"
+                  :class="editingSite.enabled ? 'translate-x-5' : 'translate-x-0'"
+                />
+              </button>
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-5">

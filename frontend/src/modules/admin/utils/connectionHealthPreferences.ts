@@ -3,6 +3,7 @@ export interface ConnectionHealthPreferences {
   groupOrder: string[]
   hiddenGroupIds: string[]
   hideUnmonitoredAccounts: boolean
+  questionAnswerUnreadTargetIds: string[]
 }
 
 export const createDefaultConnectionHealthPreferences = (): ConnectionHealthPreferences => ({
@@ -10,6 +11,7 @@ export const createDefaultConnectionHealthPreferences = (): ConnectionHealthPref
   groupOrder: [],
   hiddenGroupIds: [],
   hideUnmonitoredAccounts: false,
+  questionAnswerUnreadTargetIds: [],
 })
 
 export const connectionHealthPreferencesStorageKey = (scope: string): string =>
@@ -35,6 +37,31 @@ const normalizePreferences = (value: unknown): ConnectionHealthPreferences => {
     groupOrder: normalizeIds(value.groupOrder),
     hiddenGroupIds: normalizeIds(value.hiddenGroupIds),
     hideUnmonitoredAccounts: value.hideUnmonitoredAccounts === true,
+    questionAnswerUnreadTargetIds: normalizeIds(value.questionAnswerUnreadTargetIds),
+  }
+}
+
+export const markQuestionAnswerUnread = (
+  preferences: ConnectionHealthPreferences,
+  targetId: string,
+): ConnectionHealthPreferences => {
+  const normalizedTargetId = targetId.trim()
+  if (!normalizedTargetId || preferences.questionAnswerUnreadTargetIds.includes(normalizedTargetId)) return preferences
+  return {
+    ...preferences,
+    questionAnswerUnreadTargetIds: [...preferences.questionAnswerUnreadTargetIds, normalizedTargetId],
+  }
+}
+
+export const clearQuestionAnswerUnread = (
+  preferences: ConnectionHealthPreferences,
+  targetId: string,
+): ConnectionHealthPreferences => {
+  const normalizedTargetId = targetId.trim()
+  if (!normalizedTargetId || !preferences.questionAnswerUnreadTargetIds.includes(normalizedTargetId)) return preferences
+  return {
+    ...preferences,
+    questionAnswerUnreadTargetIds: preferences.questionAnswerUnreadTargetIds.filter(id => id !== normalizedTargetId),
   }
 }
 

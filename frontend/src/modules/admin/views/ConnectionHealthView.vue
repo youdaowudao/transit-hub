@@ -37,7 +37,9 @@ import type {
 } from '../types/connectionHealth'
 import { resolveConnectionHealthStrategyMode } from '../utils/connectionHealthPolicy'
 import {
+  clearQuestionAnswerUnread,
   createDefaultConnectionHealthPreferences,
+  markQuestionAnswerUnread,
   mergeConnectionHealthGroupOrder,
   readConnectionHealthPreferences,
   type ConnectionHealthPreferences,
@@ -329,6 +331,14 @@ const onProbeAccount = (account: AdminGroupAccount) => {
 
 const onFormalProbeCompleted = async () => {
   await loadAdminGroups({ silent: true })
+}
+
+const onQuestionAnswerStarted = (targetId: string) => {
+  updatePreferences(current => markQuestionAnswerUnread(current, targetId))
+}
+
+const onQuestionAnswerViewed = (targetId: string) => {
+  updatePreferences(current => clearQuestionAnswerUnread(current, targetId))
 }
 
 // 策略探活事件。
@@ -623,6 +633,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           :key="selectedGroup.id"
           :group="selectedGroup"
           :hide-unmonitored-accounts="preferences.hideUnmonitoredAccounts"
+          :question-answer-unread-target-ids="preferences.questionAnswerUnreadTargetIds"
           :action-loading="isActionLoading"
           @setup="openSetup"
           @probe="onProbeAccount"
@@ -646,6 +657,8 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       :target="probeDialogTarget"
       @close="probeDialogOpen = false"
       @completed="onFormalProbeCompleted"
+      @question-answer-started="onQuestionAnswerStarted"
+      @question-answer-viewed="onQuestionAnswerViewed"
     />
 
     <ProbePolicyListDialog

@@ -29,7 +29,9 @@ describe('manual probe cancellation', () => {
 
   it('closes and aborts even while a test is running', () => {
     const closeBody = dialogSource.match(/const close = \(\) => \{([\s\S]*?)\n\}/)?.[1] ?? ''
-    expect(closeBody).toContain('cancelActiveRequest()')
+    const cleanupBody = dialogSource.match(/const cleanupFrontendWork = \(\) => \{([\s\S]*?)\n\}/)?.[1] ?? ''
+    expect(closeBody).toContain('cleanupFrontendWork()')
+    expect(cleanupBody).toContain('cancelActiveRequest()')
     expect(closeBody).toContain("emit('close')")
     expect(closeBody).not.toContain("phase.value === 'testing'")
     expect(dialogSource).toContain('controller.signal')

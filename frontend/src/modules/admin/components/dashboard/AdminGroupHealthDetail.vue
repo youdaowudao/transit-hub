@@ -37,6 +37,7 @@ import type {
 const props = defineProps<{
   group: AdminGroupHealth
   hideUnmonitoredAccounts: boolean
+  questionAnswerUnreadTargetIds: string[]
   actionLoading: boolean
 }>()
 
@@ -52,6 +53,8 @@ import { t, te } from '@/locales'
 const prefix = 'admin.connectionHealth'
 const detailPrefix = `${prefix}.groupDetail`
 const expandedTargetId = ref('')
+const hasUnreadQuestionAnswer = (account: AdminGroupAccount): boolean =>
+  props.questionAnswerUnreadTargetIds.includes(account.targetId)
 
 type GroupHealthFilter =
   | { kind: 'all' }
@@ -807,11 +810,14 @@ const multiplierSourceLabel = (account: AdminGroupAccount): string => {
                 </td>
                 <td class="px-3 py-3">
                   <div class="flex items-center justify-end gap-1">
-                    <Tooltip :text="t(`${prefix}.actions.probe`)">
+                    <Tooltip :text="hasUnreadQuestionAnswer(account) ? t(`${prefix}.actions.questionAnswerUnread`) : t(`${prefix}.actions.probe`)">
                       <button
                         type="button"
-                        class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface hover:text-primary disabled:opacity-35"
-                        :aria-label="t(`${prefix}.actions.probe`)"
+                        class="rounded-md p-1.5 transition-colors disabled:opacity-35"
+                        :class="hasUnreadQuestionAnswer(account)
+                          ? 'bg-amber-500 text-white shadow-sm ring-2 ring-amber-500/25 hover:bg-amber-600 hover:text-white dark:bg-amber-400 dark:text-zinc-950 dark:hover:bg-amber-300'
+                          : 'text-muted-foreground hover:bg-surface hover:text-primary'"
+                        :aria-label="hasUnreadQuestionAnswer(account) ? t(`${prefix}.actions.questionAnswerUnread`) : t(`${prefix}.actions.probe`)"
                         :disabled="!account.probeAvailable"
                         @click="emit('probe', account)"
                       >

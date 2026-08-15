@@ -48,6 +48,7 @@ type Server struct {
 	lotteryFrameAncestorOrigin     func(ctx context.Context, embedToken string) (string, bool)
 	lotteryCancel                  context.CancelFunc
 	lotteryWorker                  *lottery.Worker
+	connectionHealthService        *connection_health.Service
 }
 
 func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server {
@@ -226,6 +227,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	// 分组下账号/渠道，叠加 real_connections 探活状态。platformService 已实现所需方法。
 	connHealthService.SetPlatformGroupReader(platformService)
 	connection_health.RegisterRoutes(server.mux, connHealthService)
+	server.connectionHealthService = connHealthService
 
 	// 所有 workspace 表 schema 完成后再补 legacy 归属；随后才启动 restore、worker 和 scheduler，
 	// 避免后台任务在旧行尚未补齐 workspace 时读取或写回数据。
@@ -419,11 +421,17 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	var shutdownErrors []error
+	if s.connectionHealthService != nil {
+		if err := s.connectionHealthService.ShutdownQuestionAnswers(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
 	if s.lotteryCancel != nil {
 		s.lotteryCancel()
 	}
 	if s.lotteryWorker == nil {
-		return nil
+		return errors.Join(shutdownErrors...)
 	}
 	s.lotteryWorker.Stop()
 	done := make(chan struct{})
@@ -433,10 +441,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		shutdownErrors = append(shutdownErrors, ctx.Err())
 	case <-done:
-		return nil
 	}
+	return errors.Join(shutdownErrors...)
 }
 
 func (s *Server) protectedPath(path string) bool {

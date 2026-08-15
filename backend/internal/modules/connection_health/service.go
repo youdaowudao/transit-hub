@@ -62,30 +62,43 @@ type healthRepository interface {
 // Service 组装 connection_health 模块的全部业务逻辑：聚合查询、策略管理、手动动作、
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
-	repo               healthRepository
-	mySites            MySitesReader
-	sites              SiteLookup
-	accounts           AdminAccountResolver
-	dispatcher         RemoteActionRunner
-	probeRunner        *RealProbeRunner
-	modelDiscovery     *ModelDiscoveryRunner
-	platformGroups     PlatformGroupReader
-	priorityActions    TargetPriorityActioner
-	schedulableActions TargetSchedulableActioner
-	probeLimiterMu     sync.Mutex
-	probeLimiter       *probeConcurrencyLimiter
+	repo                 healthRepository
+	questionAnswers      questionAnswerRepository
+	mySites              MySitesReader
+	sites                SiteLookup
+	accounts             AdminAccountResolver
+	dispatcher           RemoteActionRunner
+	probeRunner          *RealProbeRunner
+	modelDiscovery       *ModelDiscoveryRunner
+	platformGroups       PlatformGroupReader
+	priorityActions      TargetPriorityActioner
+	schedulableActions   TargetSchedulableActioner
+	probeLimiterMu       sync.Mutex
+	probeLimiter         *probeConcurrencyLimiter
+	questionAnswerMu     sync.Mutex
+	questionAnswerCtx    context.Context
+	questionAnswerStop   context.CancelFunc
+	questionAnswerClosed bool
+	questionAnswerRuns   map[string]*activeQuestionAnswerBatch
+	questionAnswerWG     sync.WaitGroup
+	questionAnswerHTTP   *QuestionAnswerRunner
+	questionAnswerTTL    time.Duration
 }
 
 func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner) *Service {
 	service := &Service{
-		repo:           repo,
-		mySites:        mySites,
-		sites:          sites,
-		dispatcher:     newRemoteActionDispatcher(sites, mySites, platform),
-		probeRunner:    NewRealProbeRunner(),
-		modelDiscovery: NewModelDiscoveryRunner(),
-		probeLimiter:   newProbeConcurrencyLimiter(globalProbeConcurrency, perSiteProbeConcurrency),
+		repo:               repo,
+		questionAnswers:    repo,
+		mySites:            mySites,
+		sites:              sites,
+		dispatcher:         newRemoteActionDispatcher(sites, mySites, platform),
+		probeRunner:        NewRealProbeRunner(),
+		modelDiscovery:     NewModelDiscoveryRunner(),
+		probeLimiter:       newProbeConcurrencyLimiter(globalProbeConcurrency, perSiteProbeConcurrency),
+		questionAnswerHTTP: NewQuestionAnswerRunner(),
+		questionAnswerTTL:  QuestionAnswerRequestTimeout,
 	}
+	service.initializeQuestionAnswerRuntime()
 	// 真实 PlatformService 同时实现优先级更新能力；测试或旧注入器如果尚未实现，倍率策略会
 	// 安全跳过远端写入，不影响既有探活/降级流程。
 	if actions, ok := platform.(TargetPriorityActioner); ok {
@@ -98,7 +111,14 @@ func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platf
 }
 
 func (s *Service) EnsureSchema(ctx context.Context) error {
-	return s.repo.EnsureSchema(ctx)
+	if err := s.repo.EnsureSchema(ctx); err != nil {
+		return err
+	}
+	if s.questionAnswers == nil {
+		return nil
+	}
+	_, err := s.questionAnswers.FailAbandonedQuestionAnswers(ctx, QuestionAnswerErrorServiceRestarted)
+	return err
 }
 
 func (s *Service) SetAdminAccountResolver(accounts AdminAccountResolver) {

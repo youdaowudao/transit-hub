@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Plus, Save, Loader2, CheckCircle2, MessageSquare, Send, Trash2, Timer, AlertTriangle, TrendingUp, Info, Mail, RefreshCw, RotateCcw, ServerCog, Power, X, WalletCards } from 'lucide-vue-next'
+import { Plus, Save, Loader2, CheckCircle2, ListChecks, MessageSquare, Send, Trash2, Timer, AlertTriangle, TrendingUp, Info, Mail, RefreshCw, RotateCcw, ServerCog, Power, X, WalletCards } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import EmailTemplatesPanel from '../components/settings/EmailTemplatesPanel.vue'
 import NotificationTemplateEditor from '../components/settings/NotificationTemplateEditor.vue'
+import TestQuestionsPanel from '../components/settings/TestQuestionsPanel.vue'
 import {
   getSystemRestartStatus,
   getSystemRollbackStatus,
@@ -37,7 +38,7 @@ import type { NotificationChannel, NotificationChannelSettings, NotificationTemp
 
 import { t } from '@/locales'
 // Tab Settings
-const activeTab = ref<'strategy' | 'channels' | 'email' | 'system'>('strategy')
+const activeTab = ref<'strategy' | 'questions' | 'channels' | 'email' | 'system'>('strategy')
 
 // Save loading states
 const isSavingStrategy = ref(false)
@@ -1099,6 +1100,22 @@ onBeforeUnmount(() => {
           </div>
         </button>
         <button
+          id="settings-tab-questions"
+          type="button"
+          role="tab"
+          :aria-selected="activeTab === 'questions'"
+          aria-controls="settings-panel-questions"
+          @click="activeTab = 'questions'"
+          class="relative whitespace-nowrap rounded-md px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary sm:px-6"
+          :class="activeTab === 'questions' ? 'text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground hover:bg-surface/50'"
+        >
+          <div v-if="activeTab === 'questions'" class="absolute inset-0 -z-10 rounded-md border border-border/50 bg-background shadow-sm"></div>
+          <div class="flex items-center gap-2">
+            <ListChecks class="h-4 w-4" />
+            {{ t('admin.settings.tabs.questions') }}
+          </div>
+        </button>
+        <button
           id="settings-tab-channels"
           type="button"
           role="tab"
@@ -1345,6 +1362,13 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+        </div>
+
+        <!-- ============================================ -->
+        <!-- Test Questions Tab                           -->
+        <!-- ============================================ -->
+        <div v-else-if="activeTab === 'questions'" id="settings-panel-questions" role="tabpanel" aria-labelledby="settings-tab-questions">
+          <TestQuestionsPanel />
         </div>
 
         <!-- ============================================ -->

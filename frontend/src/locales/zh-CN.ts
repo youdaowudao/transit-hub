@@ -1310,6 +1310,7 @@ export default {
       },
       actions: {
         probe: '手动探活',
+        questionAnswerUnread: '有未查看的问答测试',
         disable: '禁用',
         restore: '恢复',
         viewEvents: '查看事件'
@@ -1592,11 +1593,13 @@ export default {
         formalSelectHint: '只显示当前生效策略内模型；可选择本次需要正式探活的模型。',
         modes: {
           formal: '正式手动探活',
-          once: '一次性测试'
+          once: '一次性测试',
+          questionAnswer: '问答测试'
         },
         modeDescriptions: {
           formal: '进入共同记录和健康调度，会更新健康状态与 manual 事件；完整响应超过 5000 ms 记为高延迟成功，10 秒超时按失败处理。仅在既有托管条件成立时更新主站 priority，不消耗自动预算，不修改 schedulable；schedulable=false 时自动探活默认降为 60 分钟一次。',
-          once: '只显示本次结果，不写事件、健康状态、priority、策略预算或远端动作。'
+          once: '只显示本次结果，不写事件、健康状态、priority、策略预算或远端动作。',
+          questionAnswer: '向所选模型分别发送预设问题并保存回答。每个模型和问题组合独立执行，不形成多轮对话，不修改健康状态或调度。'
         },
         contractLimit: '测试契约受限：当前只稳定复现 Base URL、API Key 和 OpenAI 兼容请求；上游专有代理、OAuth、TLS 或自定义请求头无法从现有数据取得时不会被复现。',
         startTest: '开始测试',
@@ -1613,7 +1616,66 @@ export default {
         resultEmpty: '尚未开始测试，选择模型后点击"开始测试"。',
         latency: '{ms}ms',
         selectedCount: '已选 {count} 个模型',
-        close: '关闭'
+        close: '关闭',
+        questionAnswer: {
+          loading: '正在读取测试问题和历史记录...',
+          questionsTitle: '选择测试问题',
+          noQuestions: '当前没有启用的测试问题，请前往设置页添加或启用。',
+          defaultQuestion: '默认',
+          selectedFormula: '模型 {models} 个 × 问题 {questions} 个 = 共 {total} 次请求',
+          start: '开始问答测试',
+          submitting: '正在提交...',
+          currentTitle: '当前批次',
+          submitted: '已提交 {count} 项',
+          progress: '完成 {completed}/{total}',
+          runningNow: '正在测试：{model} × {question}',
+          stop: '终止本次问答',
+          noBatch: '当前账号还没有问答批次。',
+          completedNotice: '本次问答已完成，结果和统计已刷新。',
+          questionLabel: '问题',
+          answerLabel: '回答',
+          waitingAnswer: '等待执行后生成回答。',
+          runningAnswer: '请求已发出，正在等待回答。',
+          expandCurrent: '展开详情',
+          collapseCurrent: '收起详情',
+          historyTitle: '历史记录',
+          noHistory: '暂无问答记录。',
+          noAnswer: '没有回答正文。',
+          fullQuestion: '完整问题',
+          fullAnswer: '完整回答',
+          markError: '标记为错误',
+          restoreNormal: '恢复为正常',
+          durationSeconds: '{seconds} 秒',
+          durationMinutesSeconds: '{minutes} 分 {seconds} 秒',
+          stats: {
+            allTime: '累计',
+            todayShanghai: '今日（东八区）',
+            total: '共 {total} 次',
+            normal: '正常',
+            errors: '错误'
+          },
+          status: {
+            pending: '等待中',
+            running: '进行中',
+            succeeded: '已完成',
+            failed: '失败',
+            cancelled: '已终止'
+          },
+          errorTypes: {
+            network: '网络请求失败。',
+            rate_limited: '上游请求被限流。',
+            auth: '上游鉴权失败。',
+            model_not_found: '上游未找到该模型。',
+            server_error: '上游服务返回错误。',
+            invalid_response: '上游响应格式无法识别。',
+            response_too_large: '上游响应超过大小限制。',
+            timeout: '单次问答超过 10 分钟。',
+            storage_error: '记录保存失败。',
+            service_restarted: '服务重启中断了未完成请求。',
+            service_shutdown: '服务关闭中断了未完成请求。',
+            unknown: '问答请求失败。'
+          }
+        }
       },
       policyAssignment: {
         title: '分配探活策略',
@@ -1649,7 +1711,15 @@ export default {
         probeBlockedCooldown: '该模型仍在健康冷却期，正式探活未发出请求。',
         probeBlockedFailureBackoff: '该模型仍在失败退避期，正式探活未发出请求。',
         probeConcurrencyLimited: '当前探活并发已满，请稍后再试；本次未发出请求。',
-        probeTargetLeaseBusy: '该目标正在执行其他探活或调度操作，请稍后再试；本次未发出请求。'
+        probeTargetLeaseBusy: '该目标正在执行其他探活或调度操作，请稍后再试；本次未发出请求。',
+        testQuestionInvalid: '问题名称和正文不能为空，名称最多 100 个字符，正文最多 4000 个字符。',
+        testQuestionNotFound: '测试问题不存在或无权访问。',
+        testQuestionDisabled: '所选测试问题已停用或不存在，请刷新后重新选择。',
+        questionAnswerSelection: '请至少选择一个模型和一个测试问题。',
+        questionAnswerActive: '该账号已有问答批次进行中。',
+        questionAnswerBatchNotFound: '问答批次不存在或无权访问。',
+        questionAnswerMarkForbidden: '只有成功回答可以切换人工错误标记。',
+        questionAnswerServiceStopped: '问答服务正在关闭，暂时不能开始新批次。'
       }
     },
       upstream: {
@@ -2532,10 +2602,36 @@ export default {
       emptyTelegram: '暂无 Telegram 机器人配置',
       tabs: {
         strategy: '自动化与策略',
+        questions: '测试问题',
         channels: '通知与渠道',
         templates: '消息模板',
         email: '邮件设置',
         system: '系统升级'
+      },
+      testQuestions: {
+        title: '测试问题',
+        description: '管理问答测试使用的问题。第一条问题会自动成为默认问题；停用或删除默认问题后不会自动改选其他问题。',
+        createTitle: '新增问题',
+        editTitle: '编辑问题',
+        name: '问题名称',
+        namePlaceholder: '例如：身份确认',
+        body: '问题正文',
+        bodyPlaceholder: '输入发送给模型的完整问题正文',
+        add: '新增问题',
+        saveEdit: '保存修改',
+        cancelEdit: '取消编辑',
+        listTitle: '问题列表',
+        loading: '正在加载测试问题...',
+        empty: '暂无测试问题。',
+        default: '默认',
+        enabled: '已启用',
+        disabled: '已停用',
+        setDefault: '设为默认',
+        enable: '启用',
+        disable: '停用',
+        edit: '编辑',
+        delete: '删除',
+        deleteConfirm: '确定删除“{name}”吗？历史记录仍会保留当时的问题快照。'
       },
       upgrade: {
         title: '源码升级',

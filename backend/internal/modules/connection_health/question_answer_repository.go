@@ -1,0 +1,450 @@
+package connection_health
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+)
+
+var (
+	errQuestionAnswerActive      = errors.New("question answer batch already active")
+	errQuestionAnswerUnavailable = errors.New("question answer question unavailable")
+)
+
+type questionAnswerRepository interface {
+	ListTestQuestions(ctx context.Context, userID string) ([]TestQuestion, error)
+	CreateTestQuestion(ctx context.Context, userID string, name string, body string) (TestQuestion, error)
+	UpdateTestQuestion(ctx context.Context, userID string, questionID string, name string, body string) (*TestQuestion, error)
+	SetTestQuestionEnabled(ctx context.Context, userID string, questionID string, enabled bool) (*TestQuestion, error)
+	SetDefaultTestQuestion(ctx context.Context, userID string, questionID string) (*TestQuestion, error)
+	DeleteTestQuestion(ctx context.Context, userID string, questionID string) (bool, error)
+	CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string) ([]QuestionAnswerRecord, error)
+	MarkQuestionAnswerRunning(ctx context.Context, userID string, batchID string, recordID string) (bool, error)
+	CompleteQuestionAnswer(ctx context.Context, userID string, batchID string, recordID string, status QuestionAnswerStatus, answerBody string, errorType string) (bool, error)
+	StopQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error)
+	FailAbandonedQuestionAnswers(ctx context.Context, errorType string) (int64, error)
+	ListQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string) ([]QuestionAnswerRecord, error)
+	LatestQuestionAnswerBatch(ctx context.Context, userID string, targetID string) ([]QuestionAnswerRecord, error)
+	ListQuestionAnswerHistory(ctx context.Context, userID string, targetID string, page int) (QuestionAnswerHistory, error)
+	SetQuestionAnswerManualError(ctx context.Context, userID string, targetID string, recordID string, manualError bool) (*QuestionAnswerRecord, error)
+}
+
+func (r *Repository) ListTestQuestions(ctx context.Context, userID string) ([]TestQuestion, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, name, body, enabled, is_default, created_at, updated_at
+		FROM connection_health_test_questions
+		WHERE user_id = $1
+		ORDER BY is_default DESC, created_at, id
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	questions := make([]TestQuestion, 0)
+	for rows.Next() {
+		var question TestQuestion
+		if err := rows.Scan(&question.ID, &question.Name, &question.Body, &question.Enabled, &question.IsDefault, &question.CreatedAt, &question.UpdatedAt); err != nil {
+			return nil, err
+		}
+		questions = append(questions, question)
+	}
+	return questions, rows.Err()
+}
+
+func (r *Repository) CreateTestQuestion(ctx context.Context, userID string, name string, body string) (TestQuestion, error) {
+	id, err := newID()
+	if err != nil {
+		return TestQuestion{}, err
+	}
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return TestQuestion{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "question-default|"+userID); err != nil {
+		return TestQuestion{}, err
+	}
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM connection_health_test_questions WHERE user_id = $1`, userID).Scan(&count); err != nil {
+		return TestQuestion{}, err
+	}
+	question := TestQuestion{ID: id, Name: name, Body: body, Enabled: true, IsDefault: count == 0}
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO connection_health_test_questions (id, user_id, name, body, enabled, is_default)
+		VALUES ($1, $2, $3, $4, true, $5)
+		RETURNING created_at, updated_at
+	`, question.ID, userID, question.Name, question.Body, question.IsDefault).Scan(&question.CreatedAt, &question.UpdatedAt); err != nil {
+		return TestQuestion{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return TestQuestion{}, err
+	}
+	return question, nil
+}
+
+func (r *Repository) UpdateTestQuestion(ctx context.Context, userID string, questionID string, name string, body string) (*TestQuestion, error) {
+	row := r.db.QueryRow(ctx, `
+		UPDATE connection_health_test_questions
+		SET name = $3, body = $4, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING id, name, body, enabled, is_default, created_at, updated_at
+	`, questionID, userID, name, body)
+	return scanTestQuestion(row)
+}
+
+func (r *Repository) SetTestQuestionEnabled(ctx context.Context, userID string, questionID string, enabled bool) (*TestQuestion, error) {
+	row := r.db.QueryRow(ctx, `
+		UPDATE connection_health_test_questions
+		SET enabled = $3, is_default = CASE WHEN $3 THEN is_default ELSE false END, updated_at = now()
+		WHERE id = $1 AND user_id = $2
+		RETURNING id, name, body, enabled, is_default, created_at, updated_at
+	`, questionID, userID, enabled)
+	return scanTestQuestion(row)
+}
+
+func (r *Repository) SetDefaultTestQuestion(ctx context.Context, userID string, questionID string) (*TestQuestion, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "question-default|"+userID); err != nil {
+		return nil, err
+	}
+	var enabled bool
+	if err := tx.QueryRow(ctx, `SELECT enabled FROM connection_health_test_questions WHERE id = $1 AND user_id = $2`, questionID, userID).Scan(&enabled); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !enabled {
+		return nil, errQuestionAnswerUnavailable
+	}
+	if _, err := tx.Exec(ctx, `UPDATE connection_health_test_questions SET is_default = false, updated_at = now() WHERE user_id = $1 AND is_default`, userID); err != nil {
+		return nil, err
+	}
+	row := tx.QueryRow(ctx, `
+		UPDATE connection_health_test_questions
+		SET is_default = true, updated_at = now()
+		WHERE id = $1 AND user_id = $2 AND enabled
+		RETURNING id, name, body, enabled, is_default, created_at, updated_at
+	`, questionID, userID)
+	question, err := scanTestQuestion(row)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return question, nil
+}
+
+func (r *Repository) DeleteTestQuestion(ctx context.Context, userID string, questionID string) (bool, error) {
+	result, err := r.db.Exec(ctx, `DELETE FROM connection_health_test_questions WHERE id = $1 AND user_id = $2`, questionID, userID)
+	return result.RowsAffected() > 0, err
+}
+
+func scanTestQuestion(row rowScanner) (*TestQuestion, error) {
+	var question TestQuestion
+	if err := row.Scan(&question.ID, &question.Name, &question.Body, &question.Enabled, &question.IsDefault, &question.CreatedAt, &question.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &question, nil
+}
+
+func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string) ([]QuestionAnswerRecord, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	lockKey := fmt.Sprintf("question-answer|%s|%s", userID, targetID)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+		return nil, err
+	}
+	var active bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM connection_health_question_answer_records
+			WHERE user_id = $1 AND target_id = $2 AND status IN ('pending', 'running')
+		)
+	`, userID, targetID).Scan(&active); err != nil {
+		return nil, err
+	}
+	if active {
+		return nil, errQuestionAnswerActive
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT id, name, body, enabled, is_default, created_at, updated_at
+		FROM connection_health_test_questions
+		WHERE user_id = $1 AND enabled AND id = ANY($2)
+	`, userID, questionIDs)
+	if err != nil {
+		return nil, err
+	}
+	questionsByID := make(map[string]TestQuestion, len(questionIDs))
+	for rows.Next() {
+		var question TestQuestion
+		if err := rows.Scan(&question.ID, &question.Name, &question.Body, &question.Enabled, &question.IsDefault, &question.CreatedAt, &question.UpdatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		questionsByID[question.ID] = question
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(questionsByID) != len(questionIDs) {
+		return nil, errQuestionAnswerUnavailable
+	}
+
+	records := make([]QuestionAnswerRecord, 0, len(models)*len(questionIDs))
+	for _, model := range models {
+		for _, questionID := range questionIDs {
+			question := questionsByID[questionID]
+			recordID, err := newID()
+			if err != nil {
+				return nil, err
+			}
+			record := QuestionAnswerRecord{
+				ID: recordID, TargetID: targetID, BatchID: batchID, ModelName: model,
+				QuestionID: question.ID, QuestionName: question.Name, QuestionBody: question.Body,
+				Status: QuestionAnswerPending,
+			}
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO connection_health_question_answer_records (
+					id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body, status
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending')
+				RETURNING created_at, updated_at
+			`, record.ID, userID, record.TargetID, record.BatchID, record.ModelName, record.QuestionID, record.QuestionName, record.QuestionBody).Scan(&record.CreatedAt, &record.UpdatedAt); err != nil {
+				return nil, err
+			}
+			records = append(records, record)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func (r *Repository) MarkQuestionAnswerRunning(ctx context.Context, userID string, batchID string, recordID string) (bool, error) {
+	result, err := r.db.Exec(ctx, `
+		UPDATE connection_health_question_answer_records
+		SET status = 'running', started_at = now(), updated_at = now()
+		WHERE id = $1 AND user_id = $2 AND batch_id = $3 AND status = 'pending'
+	`, recordID, userID, batchID)
+	return result.RowsAffected() > 0, err
+}
+
+func (r *Repository) CompleteQuestionAnswer(ctx context.Context, userID string, batchID string, recordID string, status QuestionAnswerStatus, answerBody string, errorType string) (bool, error) {
+	result, err := r.db.Exec(ctx, `
+		UPDATE connection_health_question_answer_records
+		SET status = $4, answer_body = $5, error_type = $6, completed_at = now(), updated_at = now()
+		WHERE id = $1 AND user_id = $2 AND batch_id = $3 AND status = 'running'
+	`, recordID, userID, batchID, status, answerBody, errorType)
+	return result.RowsAffected() > 0, err
+}
+
+func (r *Repository) StopQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var found bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM connection_health_question_answer_records
+			WHERE user_id = $1 AND target_id = $2 AND batch_id = $3
+		)
+	`, userID, targetID, batchID).Scan(&found); err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE connection_health_question_answer_records
+		SET status = $4, answer_body = '', error_type = $5, completed_at = now(), updated_at = now()
+		WHERE user_id = $1 AND target_id = $2 AND batch_id = $3 AND status IN ('pending', 'running')
+	`, userID, targetID, batchID, status, errorType); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *Repository) FailAbandonedQuestionAnswers(ctx context.Context, errorType string) (int64, error) {
+	result, err := r.db.Exec(ctx, `
+		UPDATE connection_health_question_answer_records
+		SET status = 'failed', answer_body = '', error_type = $1, completed_at = now(), updated_at = now()
+		WHERE status IN ('pending', 'running')
+	`, errorType)
+	return result.RowsAffected(), err
+}
+
+func (r *Repository) ListQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string) ([]QuestionAnswerRecord, error) {
+	rows, err := r.db.Query(ctx, questionAnswerRecordSelect+`
+		WHERE user_id = $1 AND target_id = $2 AND batch_id = $3
+		ORDER BY
+			CASE WHEN started_at IS NULL THEN 1 ELSE 0 END,
+			started_at,
+			completed_at NULLS LAST,
+			id
+	`, userID, targetID, batchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanQuestionAnswerRecords(rows)
+}
+
+func (r *Repository) LatestQuestionAnswerBatch(ctx context.Context, userID string, targetID string) ([]QuestionAnswerRecord, error) {
+	var batchID string
+	if err := r.db.QueryRow(ctx, `
+		SELECT batch_id FROM connection_health_question_answer_records
+		WHERE user_id = $1 AND target_id = $2
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+	`, userID, targetID).Scan(&batchID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return []QuestionAnswerRecord{}, nil
+		}
+		return nil, err
+	}
+	return r.ListQuestionAnswerBatch(ctx, userID, targetID, batchID)
+}
+
+func (r *Repository) ListQuestionAnswerHistory(ctx context.Context, userID string, targetID string, page int) (QuestionAnswerHistory, error) {
+	if page < 1 {
+		page = 1
+	}
+	var totalItems int
+	if err := r.db.QueryRow(ctx, `
+		SELECT count(*) FROM connection_health_question_answer_records WHERE user_id = $1 AND target_id = $2
+	`, userID, targetID).Scan(&totalItems); err != nil {
+		return QuestionAnswerHistory{}, err
+	}
+	stats, todayStats, err := r.questionAnswerStats(ctx, userID, targetID)
+	if err != nil {
+		return QuestionAnswerHistory{}, err
+	}
+	rows, err := r.db.Query(ctx, questionAnswerRecordSelect+`
+		WHERE user_id = $1 AND target_id = $2
+		ORDER BY created_at DESC, id DESC
+		LIMIT $3 OFFSET $4
+	`, userID, targetID, QuestionAnswerPageSize, (page-1)*QuestionAnswerPageSize)
+	if err != nil {
+		return QuestionAnswerHistory{}, err
+	}
+	defer rows.Close()
+	records, err := scanQuestionAnswerRecords(rows)
+	if err != nil {
+		return QuestionAnswerHistory{}, err
+	}
+	totalPages := 0
+	if totalItems > 0 {
+		totalPages = (totalItems + QuestionAnswerPageSize - 1) / QuestionAnswerPageSize
+	}
+	return QuestionAnswerHistory{
+		Records: records, Page: page, PageSize: QuestionAnswerPageSize,
+		TotalItems: totalItems, TotalPages: totalPages, Stats: stats, TodayStats: todayStats,
+	}, nil
+}
+
+func (r *Repository) questionAnswerStats(ctx context.Context, userID string, targetID string) (QuestionAnswerStats, QuestionAnswerStats, error) {
+	var stats QuestionAnswerStats
+	var todayStats QuestionAnswerStats
+	err := r.db.QueryRow(ctx, `
+		SELECT
+			count(*) FILTER (WHERE status IN ('succeeded', 'failed')),
+			count(*) FILTER (WHERE status = 'succeeded' AND NOT manual_error),
+			count(*) FILTER (WHERE status = 'failed' OR (status = 'succeeded' AND manual_error)),
+			count(*) FILTER (
+				WHERE status IN ('succeeded', 'failed')
+				AND (completed_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
+			),
+			count(*) FILTER (
+				WHERE status = 'succeeded' AND NOT manual_error
+				AND (completed_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
+			),
+			count(*) FILTER (
+				WHERE (status = 'failed' OR (status = 'succeeded' AND manual_error))
+				AND (completed_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
+			)
+		FROM connection_health_question_answer_records
+		WHERE user_id = $1 AND target_id = $2
+	`, userID, targetID).Scan(
+		&stats.Total, &stats.Normal, &stats.Errors,
+		&todayStats.Total, &todayStats.Normal, &todayStats.Errors,
+	)
+	return stats, todayStats, err
+}
+
+func (r *Repository) SetQuestionAnswerManualError(ctx context.Context, userID string, targetID string, recordID string, manualError bool) (*QuestionAnswerRecord, error) {
+	row := r.db.QueryRow(ctx, `
+		UPDATE connection_health_question_answer_records
+		SET manual_error = $4, updated_at = now()
+		WHERE id = $1 AND user_id = $2 AND target_id = $3 AND status = 'succeeded'
+		RETURNING id, target_id, batch_id, model_name, question_id, question_name, question_body,
+			answer_body, status, error_type, manual_error, created_at, started_at, completed_at, updated_at
+	`, recordID, userID, targetID, manualError)
+	record, err := scanQuestionAnswerRecord(row)
+	if err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
+const questionAnswerRecordSelect = `
+	SELECT id, target_id, batch_id, model_name, question_id, question_name, question_body,
+		answer_body, status, error_type, manual_error, created_at, started_at, completed_at, updated_at
+	FROM connection_health_question_answer_records
+`
+
+func scanQuestionAnswerRecords(rows pgx.Rows) ([]QuestionAnswerRecord, error) {
+	records := make([]QuestionAnswerRecord, 0)
+	for rows.Next() {
+		record, err := scanQuestionAnswerRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, *record)
+	}
+	return records, rows.Err()
+}
+
+func scanQuestionAnswerRecord(row rowScanner) (*QuestionAnswerRecord, error) {
+	var record QuestionAnswerRecord
+	if err := row.Scan(
+		&record.ID, &record.TargetID, &record.BatchID, &record.ModelName, &record.QuestionID,
+		&record.QuestionName, &record.QuestionBody, &record.AnswerBody, &record.Status,
+		&record.ErrorType, &record.ManualError, &record.CreatedAt, &record.StartedAt,
+		&record.CompletedAt, &record.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &record, nil
+}
+
+func cloneQuestionAnswerRecords(records []QuestionAnswerRecord) []QuestionAnswerRecord {
+	return append([]QuestionAnswerRecord(nil), records...)
+}

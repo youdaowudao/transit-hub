@@ -11,6 +11,11 @@ import type {
   ModelHealth,
   OwnGroupHealth,
   PolicyInput,
+  QuestionAnswerBatch,
+  QuestionAnswerHistory,
+  QuestionAnswerRecord,
+  TestQuestion,
+  TestQuestionInput,
   TargetPolicyAssignments,
 } from '../types/connectionHealth'
 import {
@@ -46,7 +51,8 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
         ...(options.headers ?? {}),
       },
     })
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error
     throw new Error('admin.connectionHealth.errors.network')
   }
 
@@ -201,6 +207,75 @@ export const manualProbeOnce = async (targetId: string, models: string[], signal
     body: JSON.stringify({ models }),
     signal,
   })
+
+export const listTestQuestions = async (signal?: AbortSignal): Promise<TestQuestion[]> =>
+  requestJson<TestQuestion[]>('/connection-health/test-questions', { signal })
+
+export const createTestQuestion = async (input: TestQuestionInput): Promise<TestQuestion> =>
+  requestJson<TestQuestion>('/connection-health/test-questions', { method: 'POST', body: JSON.stringify(input) })
+
+export const updateTestQuestion = async (questionId: string, input: TestQuestionInput): Promise<TestQuestion> =>
+  requestJson<TestQuestion>(`/connection-health/test-questions/${encodeURIComponent(questionId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
+
+export const setTestQuestionEnabled = async (questionId: string, enabled: boolean): Promise<TestQuestion> =>
+  requestJson<TestQuestion>(`/connection-health/test-questions/${encodeURIComponent(questionId)}/enabled`, {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  })
+
+export const setDefaultTestQuestion = async (questionId: string): Promise<TestQuestion> =>
+  requestJson<TestQuestion>(`/connection-health/test-questions/${encodeURIComponent(questionId)}/default`, { method: 'POST' })
+
+export const deleteTestQuestion = async (questionId: string): Promise<void> => {
+  await requestJson<{ ok: boolean }>(`/connection-health/test-questions/${encodeURIComponent(questionId)}`, { method: 'DELETE' })
+}
+
+export const startQuestionAnswerBatch = async (
+  targetId: string,
+  models: string[],
+  questionIds: string[],
+  signal?: AbortSignal,
+): Promise<QuestionAnswerBatch> =>
+  requestJson<QuestionAnswerBatch>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches`, {
+    method: 'POST',
+    body: JSON.stringify({ models, questionIds }),
+    signal,
+  })
+
+export const getLatestQuestionAnswerBatch = async (targetId: string, signal?: AbortSignal): Promise<QuestionAnswerBatch> =>
+  requestJson<QuestionAnswerBatch>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches/latest`, { signal })
+
+export const getQuestionAnswerBatch = async (targetId: string, batchId: string, signal?: AbortSignal): Promise<QuestionAnswerBatch> =>
+  requestJson<QuestionAnswerBatch>(
+    `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches/${encodeURIComponent(batchId)}`,
+    { signal },
+  )
+
+export const cancelQuestionAnswerBatch = async (targetId: string, batchId: string, signal?: AbortSignal): Promise<QuestionAnswerBatch> =>
+  requestJson<QuestionAnswerBatch>(
+    `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches/${encodeURIComponent(batchId)}/cancel`,
+    { method: 'POST', signal },
+  )
+
+export const getQuestionAnswerHistory = async (targetId: string, page: number, signal?: AbortSignal): Promise<QuestionAnswerHistory> =>
+  requestJson<QuestionAnswerHistory>(
+    `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/history?page=${page}`,
+    { signal },
+  )
+
+export const setQuestionAnswerManualError = async (
+  targetId: string,
+  recordId: string,
+  manualError: boolean,
+  signal?: AbortSignal,
+): Promise<QuestionAnswerRecord> =>
+  requestJson<QuestionAnswerRecord>(
+    `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/records/${encodeURIComponent(recordId)}/manual-error`,
+    { method: 'PUT', body: JSON.stringify({ manualError }), signal },
+  )
 
 export interface TargetSchedulableActionResult {
   targetId: string

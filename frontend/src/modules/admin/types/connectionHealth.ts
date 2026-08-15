@@ -331,6 +331,67 @@ export interface ManualProbeResult {
   probedAt: string
 }
 
+export interface TestQuestion {
+  id: string
+  name: string
+  body: string
+  enabled: boolean
+  isDefault: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface TestQuestionInput {
+  name: string
+  body: string
+}
+
+export type QuestionAnswerStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+export interface QuestionAnswerRecord {
+  id: string
+  targetId: string
+  batchId: string
+  modelName: string
+  questionId: string
+  questionName: string
+  questionBody: string
+  answerBody: string
+  status: QuestionAnswerStatus
+  errorType: string
+  manualError: boolean
+  createdAt: string
+  startedAt: string | null
+  completedAt: string | null
+  updatedAt: string
+}
+
+export interface QuestionAnswerStats {
+  total: number
+  normal: number
+  errors: number
+}
+
+export interface QuestionAnswerHistory {
+  records: QuestionAnswerRecord[]
+  page: number
+  pageSize: 20
+  totalItems: number
+  totalPages: number
+  stats: QuestionAnswerStats
+  todayStats: QuestionAnswerStats
+}
+
+export interface QuestionAnswerBatch {
+  batchId: string
+  records: QuestionAnswerRecord[]
+  submittedCount: number
+  completedCount: number
+  active: boolean
+  currentModel: string
+  currentQuestion: string
+}
+
 export interface PolicyInput {
   id?: string
   name: string

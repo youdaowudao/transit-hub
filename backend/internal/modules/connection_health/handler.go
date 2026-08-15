@@ -35,6 +35,18 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("DELETE /api/connection-health/policies/{id}", handler.deletePolicy)
 	mux.HandleFunc("GET /api/connection-health/targets/{id}/models", handler.discoverTargetModels)
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/manual-probe", handler.manualProbeTarget)
+	mux.HandleFunc("GET /api/connection-health/test-questions", handler.listTestQuestions)
+	mux.HandleFunc("POST /api/connection-health/test-questions", handler.createTestQuestion)
+	mux.HandleFunc("PUT /api/connection-health/test-questions/{questionId}", handler.updateTestQuestion)
+	mux.HandleFunc("POST /api/connection-health/test-questions/{questionId}/enabled", handler.setTestQuestionEnabled)
+	mux.HandleFunc("POST /api/connection-health/test-questions/{questionId}/default", handler.setDefaultTestQuestion)
+	mux.HandleFunc("DELETE /api/connection-health/test-questions/{questionId}", handler.deleteTestQuestion)
+	mux.HandleFunc("POST /api/connection-health/targets/{id}/question-answers/batches", handler.startQuestionAnswerBatch)
+	mux.HandleFunc("GET /api/connection-health/targets/{id}/question-answers/batches/latest", handler.latestQuestionAnswerBatch)
+	mux.HandleFunc("GET /api/connection-health/targets/{id}/question-answers/batches/{batchId}", handler.getQuestionAnswerBatch)
+	mux.HandleFunc("POST /api/connection-health/targets/{id}/question-answers/batches/{batchId}/cancel", handler.stopQuestionAnswerBatch)
+	mux.HandleFunc("GET /api/connection-health/targets/{id}/question-answers/history", handler.questionAnswerHistory)
+	mux.HandleFunc("PUT /api/connection-health/targets/{id}/question-answers/records/{recordId}/manual-error", handler.setQuestionAnswerManualError)
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/schedulable", handler.setTargetSchedulable)
 	mux.HandleFunc("GET /api/connection-health/targets/{id}/policy-assignments", handler.getPolicyAssignments)
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/policy-assignments", handler.putPolicyAssignments)
@@ -411,6 +423,211 @@ func (h *Handler) manualProbeTarget(w http.ResponseWriter, r *http.Request) {
 	httpjson.Write(w, http.StatusOK, results)
 }
 
+func (h *Handler) listTestQuestions(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	questions, err := h.service.ListTestQuestions(r.Context(), userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, questions)
+}
+
+func (h *Handler) createTestQuestion(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input TestQuestionInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	question, err := h.service.CreateTestQuestion(r.Context(), userID, input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusCreated, question)
+}
+
+func (h *Handler) updateTestQuestion(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input TestQuestionInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	question, err := h.service.UpdateTestQuestion(r.Context(), userID, r.PathValue("questionId"), input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, question)
+}
+
+func (h *Handler) setTestQuestionEnabled(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := httpjson.Decode(r, &input); err != nil || input.Enabled == nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	question, err := h.service.SetTestQuestionEnabled(r.Context(), userID, r.PathValue("questionId"), *input.Enabled)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, question)
+}
+
+func (h *Handler) setDefaultTestQuestion(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	question, err := h.service.SetDefaultTestQuestion(r.Context(), userID, r.PathValue("questionId"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, question)
+}
+
+func (h *Handler) deleteTestQuestion(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if err := h.service.DeleteTestQuestion(r.Context(), userID, r.PathValue("questionId")); err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Handler) startQuestionAnswerBatch(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input QuestionAnswerStartInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	batch, err := h.service.StartQuestionAnswerBatch(r.Context(), userID, r.PathValue("id"), input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusAccepted, batch)
+}
+
+func (h *Handler) latestQuestionAnswerBatch(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	batch, err := h.service.LatestQuestionAnswerBatch(r.Context(), userID, r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, batch)
+}
+
+func (h *Handler) getQuestionAnswerBatch(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	batch, err := h.service.GetQuestionAnswerBatch(r.Context(), userID, r.PathValue("id"), r.PathValue("batchId"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, batch)
+}
+
+func (h *Handler) stopQuestionAnswerBatch(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	batch, err := h.service.StopQuestionAnswerBatch(r.Context(), userID, r.PathValue("id"), r.PathValue("batchId"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, batch)
+}
+
+func (h *Handler) questionAnswerHistory(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	page := 1
+	if raw := r.URL.Query().Get("page"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+			return
+		}
+		page = parsed
+	}
+	history, err := h.service.QuestionAnswerHistory(r.Context(), userID, r.PathValue("id"), page)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, history)
+}
+
+func (h *Handler) setQuestionAnswerManualError(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input struct {
+		ManualError *bool `json:"manualError"`
+	}
+	if err := httpjson.Decode(r, &input); err != nil || input.ManualError == nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	record, err := h.service.SetQuestionAnswerManualError(r.Context(), userID, r.PathValue("id"), r.PathValue("recordId"), *input.ManualError)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, record)
+}
+
 func (h *Handler) getPolicyAssignments(w http.ResponseWriter, r *http.Request) {
 	userID, ok := authctx.UserID(r.Context())
 	if !ok {
@@ -490,10 +707,10 @@ func writeError(w http.ResponseWriter, err error) {
 	var requestErr requestError
 	if errors.As(err, &requestErr) {
 		status := http.StatusBadRequest
-		if requestErr == requestError(ErrorNotFound) {
+		if requestErr == requestError(ErrorNotFound) || requestErr == requestError(ErrorTestQuestionNotFound) || requestErr == requestError(ErrorQuestionAnswerBatchNotFound) {
 			status = http.StatusNotFound
 		}
-		if requestErr == requestError(ErrorNoCurrentAccount) {
+		if requestErr == requestError(ErrorNoCurrentAccount) || requestErr == requestError(ErrorQuestionAnswerActive) || requestErr == requestError(ErrorQuestionAnswerServiceStopped) {
 			status = http.StatusConflict
 		}
 		httpjson.WriteError(w, status, requestErr.Error())

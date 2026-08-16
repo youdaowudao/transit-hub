@@ -63,6 +63,15 @@ func (f fakeAdminGroupKeyReader) ListUpstreamKeys(ctx context.Context, userID st
 	return f.keysBySite[siteID], nil
 }
 
+type fakeGroupCostReader struct {
+	snapshots []upstream.GroupCostSnapshot
+	err       error
+}
+
+func (f fakeGroupCostReader) GroupCostSnapshots(context.Context, string, string) ([]upstream.GroupCostSnapshot, error) {
+	return f.snapshots, f.err
+}
+
 // probePolicy 返回一条启用策略，含一个启用的 gpt-4o 模型目标，供候选模型/可探活判断使用。
 func probePolicy() Policy {
 	return Policy{
@@ -333,6 +342,100 @@ func TestAdminGroups_UsesRealUpstreamAPIKeyGroupMultiplier(t *testing.T) {
 	}
 	if ambiguous := accountsByID["300"]; ambiguous.UpstreamKeyGroupMultiplier != nil || ambiguous.UpstreamKeyGroupName != "" {
 		t.Fatalf("account with an unresolved second connection must keep upstream API key group unknown, got %+v", ambiguous)
+	}
+}
+
+func TestAdminGroups_ExposesCostOnlyForUniqueUpstreamSource(t *testing.T) {
+	rawMultiplier := 0.5
+	todayCost := 21.0
+	recentHourCost := 4.2
+	observedAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	mySites := fakeAdminGroupKeyReader{
+		fakeMySitesReader: fakeMySitesReader{
+			session: upstream.Session{Platform: upstream.PlatformSub2API},
+			connections: []my_sites.RealConnection{{
+				UserID: "user1", WorkspaceAdminAccountID: "ws1", UpstreamSiteID: "site-1",
+				UpstreamKeyID: "key-9", AdminAccountID: "100", AdminPlatform: string(upstream.PlatformSub2API),
+			}},
+		},
+		keysBySite: map[string][]upstream.Sub2APIKeyItem{
+			"site-1": {{ID: "key-9", GroupID: "upstream-group-7", GroupName: "upstream-vip"}},
+		},
+	}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "own-group", Name: "own-vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"own-group": {{ID: "100", Name: "linked"}},
+		},
+	}
+	service := newAdminGroupsService(reader, mySites, newFakeRepository())
+	service.sites = fakeSiteLookup{site: &upstream.Site{
+		ID: "site-1", RechargeRate: 7,
+		Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{ID: "upstream-group-7", Name: "upstream-vip", Multiplier: &rawMultiplier}}},
+	}}
+	service.SetGroupCostReader(fakeGroupCostReader{snapshots: []upstream.GroupCostSnapshot{{
+		SiteID: "site-1", GroupID: "upstream-group-7", GroupName: "upstream-vip",
+		TodayCost: &todayCost, RecentHourCost: &recentHourCost, ObservedAt: &observedAt,
+	}}})
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("expected one group, got %+v", groups)
+	}
+	group := groups[0]
+	if group.TodayCost == nil || *group.TodayCost != todayCost || group.RecentHourCost == nil || *group.RecentHourCost != recentHourCost {
+		t.Fatalf("unique source cost was not exposed: %+v", group)
+	}
+	if group.CostObservedAt == nil || !group.CostObservedAt.Equal(observedAt) {
+		t.Fatalf("cost observed time = %v, want %v", group.CostObservedAt, observedAt)
+	}
+}
+
+func TestAdminGroups_HidesCostWhenSourceIsSharedAcrossGroups(t *testing.T) {
+	rawMultiplier := 0.5
+	todayCost := 21.0
+	mySites := fakeAdminGroupKeyReader{
+		fakeMySitesReader: fakeMySitesReader{
+			session: upstream.Session{Platform: upstream.PlatformSub2API},
+			connections: []my_sites.RealConnection{{
+				UserID: "user1", WorkspaceAdminAccountID: "ws1", UpstreamSiteID: "site-1",
+				UpstreamKeyID: "key-9", AdminAccountID: "100", AdminPlatform: string(upstream.PlatformSub2API),
+			}},
+		},
+		keysBySite: map[string][]upstream.Sub2APIKeyItem{
+			"site-1": {{ID: "key-9", GroupID: "upstream-group-7", GroupName: "upstream-vip"}},
+		},
+	}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "own-a", Name: "own-a"}, {ID: "own-b", Name: "own-b"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"own-a": {{ID: "100", Name: "shared"}},
+			"own-b": {{ID: "100", Name: "shared"}},
+		},
+	}
+	service := newAdminGroupsService(reader, mySites, newFakeRepository())
+	service.sites = fakeSiteLookup{site: &upstream.Site{
+		ID: "site-1", RechargeRate: 7,
+		Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{ID: "upstream-group-7", Name: "upstream-vip", Multiplier: &rawMultiplier}}},
+	}}
+	service.SetGroupCostReader(fakeGroupCostReader{snapshots: []upstream.GroupCostSnapshot{{
+		SiteID: "site-1", GroupID: "upstream-group-7", GroupName: "upstream-vip", TodayCost: &todayCost,
+	}}})
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 2 {
+		t.Fatalf("expected two groups, got %+v", groups)
+	}
+	for _, group := range groups {
+		if group.TodayCost != nil || group.RecentHourCost != nil || group.CostObservedAt != nil {
+			t.Fatalf("shared source cost must remain unknown: %+v", group)
+		}
 	}
 }
 

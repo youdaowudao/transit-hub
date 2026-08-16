@@ -66,6 +66,7 @@ type Service struct {
 	questionAnswers      questionAnswerRepository
 	mySites              MySitesReader
 	sites                SiteLookup
+	groupCosts           GroupCostReader
 	accounts             AdminAccountResolver
 	dispatcher           RemoteActionRunner
 	probeRunner          *RealProbeRunner

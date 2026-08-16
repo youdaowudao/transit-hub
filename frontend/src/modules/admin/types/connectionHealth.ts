@@ -198,6 +198,10 @@ export interface AdminGroupHealth {
   priorityConflicts?: AdminPriorityConflict[]
   probeModelsConfigured?: boolean
   healthSummary: AdminGroupHealthSummary
+  // 仅在上游来源唯一且短期样本可靠时返回；金额单位为人民币。
+  todayCost?: number | null
+  recentHourCost?: number | null
+  costObservedAt?: string | null
   minProductionRank?: number | null
   // accountsError 非空（i18n key）表示该分组账号列表加载失败，其余分组不受影响。
   accountsError?: string

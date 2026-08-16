@@ -31,6 +31,8 @@ export interface UpstreamGroupInfo {
   name: string
   platform: string | null
   multiplier: number | null
+  // 后端按站点充值倍率换算后的人民币今日累计成本；null 表示暂时没有可靠样本。
+  todayCost?: number | null
   multiplierDisplay: string
   multiplierMode?: 'fixed' | 'auto' | 'unknown' | string
   // 以下字段为 sub2api 专属倍率展示新增的可选字段：旧后端/旧缓存数据没有这些字段时，

@@ -84,6 +84,11 @@ let loadedPreferenceScope = ''
 const groupTypes = ['public', 'exclusive', 'subscription']
 const groupTypeLabel = (type: string): string => t(`admin.connectionHealth.groupTypes.${groupTypes.includes(type) ? type : 'public'}`)
 
+const groupCostDisplay = (value: number | null | undefined): string => {
+  if (value === null || value === undefined || !Number.isFinite(value)) return t('admin.connectionHealth.costUnknown')
+  return t('admin.upstream.currency.cnyValue', { amount: value.toFixed(2) })
+}
+
 const updatePreferences = (updater: (current: ConnectionHealthPreferences) => ConnectionHealthPreferences) => {
   const next = updater(preferences.value)
   preferences.value = next
@@ -617,6 +622,10 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
                   <span class="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
                     <span>{{ t('admin.connectionHealth.groupList.monitored', { count: group.monitoredAccountCount ?? 0, total: group.accountCount }) }}</span>
                     <span>{{ group.multiplierDisplay || '-' }}</span>
+                  </span>
+                  <span class="mt-1 grid grid-cols-2 gap-x-2 text-[11px] leading-tight text-muted-foreground/80">
+                    <span class="truncate">{{ t('admin.connectionHealth.groupList.recentHourCost') }} {{ groupCostDisplay(group.recentHourCost) }}</span>
+                    <span class="truncate text-right">{{ t('admin.connectionHealth.groupList.todayCost') }} {{ groupCostDisplay(group.todayCost) }}</span>
                   </span>
                 </span>
               </button>

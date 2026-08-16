@@ -44,6 +44,8 @@ type Service struct {
 	cache           SiteCache
 	accounts        AdminAccountResolver
 	refreshConfig   RefreshConfig
+	// groupCostSlots 限制跨站点成本采样的并发量；nil 仅用于不带 NewService 的单元测试。
+	groupCostSlots   chan struct{}
 	timers          map[string]*time.Timer
 	deletedSites    map[string]struct{}
 	mu              sync.Mutex
@@ -71,6 +73,7 @@ func NewService(platformService *PlatformService, repository SiteRepository, sna
 		snapshotWriter:  snapshotWriter,
 		repository:      repository,
 		cache:           cache,
+		groupCostSlots:  make(chan struct{}, 2),
 		timers:          make(map[string]*time.Timer),
 		deletedSites:    make(map[string]struct{}),
 	}
@@ -123,6 +126,11 @@ func (s *Service) RestoreSavedSites(ctx context.Context) error {
 	if err := s.cache.Flush(ctx); err != nil {
 		return err
 	}
+	if store := s.groupCostStore(); store != nil {
+		if err := store.ClearGroupCostSamples(ctx); err != nil {
+			return err
+		}
+	}
 
 	sites, err := s.repository.ListSites(ctx)
 	if err != nil {
@@ -164,7 +172,7 @@ func (s *Service) List(ctx context.Context, userID string) []Response {
 		if site.AdminAccountID != adminAccountID {
 			continue
 		}
-		responses = append(responses, toResponse(site))
+		responses = append(responses, s.toResponse(ctx, site))
 	}
 	return responses
 }
@@ -182,7 +190,7 @@ func (s *Service) ListForAccount(ctx context.Context, userID, adminAccountID str
 		if site.AdminAccountID != adminAccountID {
 			continue
 		}
-		responses = append(responses, toResponse(site))
+		responses = append(responses, s.toResponse(ctx, site))
 	}
 	return responses
 }
@@ -486,7 +494,7 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 	s.scheduleSyncLocked(id, site)
 	s.mu.Unlock()
 
-	response := toResponse(site)
+	response := s.toResponse(ctx, site)
 	if err := s.saveSite(ctx, site); err != nil {
 		return response, err
 	}
@@ -860,12 +868,13 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 	s.scheduleSyncLocked(id, site)
 	s.mu.Unlock()
 
-	response := toResponse(site)
+	response := s.toResponse(ctx, site)
 	if saveErr := s.saveSite(ctx, site); saveErr != nil {
 		return response, saveErr
 	}
 	if refreshErr == nil {
 		s.saveSnapshot(ctx, site)
+		go s.sampleGroupCosts(*site, refreshedSession, append([]GroupInfo(nil), site.Metrics.Groups...))
 		if s.AfterSync != nil {
 			go s.AfterSync(context.Background(), site.UserID, site.AdminAccountID, site.ID, site.Name, oldMetrics, metrics)
 		}
@@ -928,6 +937,11 @@ func (s *Service) Remove(ctx context.Context, userID string, id string) error {
 	if err := s.cache.Delete(ctx, id, userID); err != nil {
 		return err
 	}
+	if store := s.groupCostStore(); store != nil {
+		if err := store.DeleteGroupCostSamples(ctx, id); err != nil {
+			return err
+		}
+	}
 
 	// 删除数据库记录。失败时把站点还原回缓存。
 	if err := s.deleteSite(ctx, userID, id); err != nil {
@@ -965,6 +979,11 @@ func (s *Service) CleanupDeletedWorkspaceSites(ctx context.Context, userID strin
 	for _, id := range ids {
 		if err := s.cache.Delete(ctx, id, userID); err != nil {
 			errs = append(errs, err)
+		}
+		if store := s.groupCostStore(); store != nil {
+			if err := store.DeleteGroupCostSamples(ctx, id); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -1111,7 +1130,7 @@ func (s *Service) UpdateSettings(ctx context.Context, userID string, siteID stri
 	if saveErr := s.saveSite(ctx, site); saveErr != nil {
 		return Response{}, saveErr
 	}
-	return toResponse(site), nil
+	return s.toResponse(ctx, site), nil
 }
 
 // UpdateEnabled 只切换本地站点生命周期。停用后停止定时刷新并退出各统计入口；
@@ -1151,12 +1170,20 @@ func (s *Service) UpdateEnabled(ctx context.Context, userID string, siteID strin
 		s.scheduleSyncLocked(siteID, site)
 		s.mu.Unlock()
 	}
-	return toResponse(site), nil
+	return s.toResponse(ctx, site), nil
 }
 
 // GetSite 根据 ID 获取站点（供 alert 逻辑读取站点级配置）。
 func (s *Service) GetSite(ctx context.Context, siteID string) (*Site, error) {
 	return s.cache.Get(ctx, siteID)
+}
+
+func (s *Service) toResponse(ctx context.Context, site *Site) Response {
+	response := toResponse(site)
+	if snapshots, err := s.groupCostSnapshotsForSite(ctx, site); err == nil {
+		mergeGroupCostSnapshots(site, &response, snapshots)
+	}
+	return response
 }
 
 func toResponse(site *Site) Response {

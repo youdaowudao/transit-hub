@@ -301,6 +301,12 @@ type SiteLookup interface {
 	GetSite(ctx context.Context, siteID string) (*upstream.Site, error)
 }
 
+// GroupCostReader 只读取 upstream 模块已经采集到的短期成本快照，不触发上游请求。
+// 成本读取失败不能影响健康状态、探活或调度字段。
+type GroupCostReader interface {
+	GroupCostSnapshots(ctx context.Context, userID, adminAccountID string) ([]upstream.GroupCostSnapshot, error)
+}
+
 // PlatformGroupReader 是 connection_health 对 upstream.PlatformService 的窄只读依赖：
 // 读取当前 admin workspace 下的全量分组，以及某个分组下的账号(sub2api)/渠道(new-api)列表。
 // 供 admin 分组健康主列表聚合使用，返回值均不含敏感字段。

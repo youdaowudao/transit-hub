@@ -41,6 +41,9 @@ type AdminGroupHealth struct {
 	PriorityConflicts           []AdminPriorityConflict `json:"priorityConflicts,omitempty"`
 	ProbeModelsConfigured       bool                    `json:"probeModelsConfigured"`
 	HealthSummary               AdminGroupHealthSummary `json:"healthSummary"`
+	TodayCost                   *float64                `json:"todayCost,omitempty"`
+	RecentHourCost              *float64                `json:"recentHourCost,omitempty"`
+	CostObservedAt              *time.Time              `json:"costObservedAt,omitempty"`
 	// MinProductionRank 是该分组内目标的 workspace 全局生产 rank 最小值；空分组或
 	// 账号读取失败时为空，供多分组总览把未知分组稳定放在末尾。
 	MinProductionRank *int `json:"minProductionRank,omitempty"`
@@ -153,6 +156,11 @@ func (s *Service) SetPlatformGroupReader(reader PlatformGroupReader) {
 	s.platformGroups = reader
 }
 
+// SetGroupCostReader 注入 upstream 的只读成本快照，避免健康主列表重复访问平台。
+func (s *Service) SetGroupCostReader(reader GroupCostReader) {
+	s.groupCosts = reader
+}
+
 // AdminGroups 按「当前 admin workspace 下的 admin 全量分组 -> 分组下账号/渠道（独立探活目标）
 // -> 独立探活状态叠加」聚合分组健康主列表。探活状态来自以 targetId 为键的独立探活状态行，
 // 不依赖 real_connections。
@@ -254,6 +262,16 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 	// 真实上游 API Key 分组原始倍率和站点充值倍率用于计算有效倍率。读取失败时降级为空，
 	// 保证既有分组健康功能不会因为可选的倍率信息不可用而中断。
 	upstreamMultiplierLookup := s.upstreamMultiplierResolutionsByAdminAccount(ctx, userID, adminAccountID, platform)
+	costSnapshotsBySource := make(map[string]upstream.GroupCostSnapshot)
+	if s.groupCosts != nil {
+		if snapshots, costErr := s.groupCosts.GroupCostSnapshots(ctx, userID, adminAccountID); costErr != nil {
+			log.Printf("[connection-health] group cost snapshot unavailable workspace=%s err=%v", adminAccountID, costErr)
+		} else {
+			for _, snapshot := range snapshots {
+				costSnapshotsBySource[snapshot.SourceKey()] = snapshot
+			}
+		}
+	}
 
 	type groupAccountInventory struct {
 		accounts []upstream.AdminGroupAccountInfo
@@ -330,6 +348,9 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 
 	result := make([]AdminGroupHealth, 0, len(groups))
 	healthCandidatesByTarget := make(map[string]healthPriorityCandidate)
+	costSourcesByGroup := make(map[string]map[string]struct{}, len(groups))
+	costSourceGroups := make(map[string]map[string]struct{})
+	costSourceUnresolved := make(map[string]bool, len(groups))
 	for _, group := range groups {
 		health := AdminGroupHealth{
 			ID:                          group.ID,
@@ -361,6 +382,7 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 		if accErr != nil {
 			log.Printf("[connection-health] admin group accounts fetch failed group_id=%s group_name=%s err=%v", group.ID, group.Name, accErr)
 			health.AccountsError = ErrorAccountsFetch
+			costSourceUnresolved[group.ID] = true
 			result = append(result, health)
 			continue
 		}
@@ -370,6 +392,19 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 			targetID := buildTargetID(platform, adminAccountID, acc.ID)
 			multiplierResolution := resolutionForAdminAccount(upstreamMultiplierLookup, acc.ID)
 			upstreamKeyGroup := multiplierResolution.info
+			if multiplierResolution.status == MultiplierResolutionResolved && strings.TrimSpace(upstreamKeyGroup.siteID) != "" {
+				sourceKey := upstream.GroupCostSourceKey(upstreamKeyGroup.siteID, upstreamKeyGroup.groupID, upstreamKeyGroup.name)
+				if costSourcesByGroup[group.ID] == nil {
+					costSourcesByGroup[group.ID] = make(map[string]struct{})
+				}
+				costSourcesByGroup[group.ID][sourceKey] = struct{}{}
+				if costSourceGroups[sourceKey] == nil {
+					costSourceGroups[sourceKey] = make(map[string]struct{})
+				}
+				costSourceGroups[sourceKey][group.ID] = struct{}{}
+			} else {
+				costSourceUnresolved[group.ID] = true
+			}
 			available, reason := targetManualProbeAvailability(platform, acc.BaseURL)
 			excluded := false
 			if exclusions := excludedByGroup[group.ID]; exclusions != nil {
@@ -567,6 +602,31 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 		health.AccountCount = summary.TotalAccounts
 		health.HealthSummary = summary
 		result = append(result, health)
+	}
+	for index := range result {
+		group := &result[index]
+		if costSourceUnresolved[group.ID] {
+			continue
+		}
+		sources := costSourcesByGroup[group.ID]
+		if len(sources) != 1 {
+			continue
+		}
+		var sourceKey string
+		for key := range sources {
+			sourceKey = key
+		}
+		if len(costSourceGroups[sourceKey]) != 1 {
+			// 一个上游来源被多个自有分组共享时，不复制或比例分摊同一份成本。
+			continue
+		}
+		snapshot, ok := costSnapshotsBySource[sourceKey]
+		if !ok {
+			continue
+		}
+		group.TodayCost = cloneFloat64Pointer(snapshot.TodayCost)
+		group.RecentHourCost = cloneFloat64Pointer(snapshot.RecentHourCost)
+		group.CostObservedAt = utcTimePointer(snapshot.ObservedAt)
 	}
 	finalizeAdminGroupProductionOrder(result, session.Platform, healthCandidatesByTarget)
 	return result, nil

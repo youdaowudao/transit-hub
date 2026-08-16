@@ -405,7 +405,8 @@ func (s *Service) adminGroups(ctx context.Context, userID string, waitForFresh b
 					}
 				}
 			}
-			if hasHealthMultiplierPriorityPolicy(directPolicies) || hasHealthMultiplierPriorityPolicy(inheritedPolicies) {
+			effectivePolicies := effectivePoliciesForTarget(directPolicies, inheritedPolicies)
+			if hasHealthMultiplierPriorityPolicy(effectivePolicies) {
 				healthFallbacksByTarget[targetID] = append(healthFallbacksByTarget[targetID], *fallback)
 			}
 		}
@@ -497,12 +498,10 @@ func (s *Service) adminGroups(ctx context.Context, userID string, waitForFresh b
 			inheritedIDs := inheritedPolicyIDsByTarget[targetID]
 			assignedIDs := mergePolicyIDs(explicitIDs, inheritedIDs)
 			assignedIDs, assignedSummaries := assignedPolicySummariesFromIDs(assignedIDs, policyByID)
-			effectivePolicies := make([]Policy, 0, len(assignedIDs))
-			for _, policyID := range assignedIDs {
-				if policy, ok := policyByID[policyID]; ok {
-					effectivePolicies = append(effectivePolicies, policy)
-				}
-			}
+			effectivePolicies := effectivePoliciesForTarget(
+				policiesForIDs(explicitIDs, policyByID),
+				policiesForIDs(inheritedIDs, policyByID),
+			)
 			decisionAccount := decisionAccountByTarget[targetID]
 			activeSpecs := candidateModelSpecsForPlatform(splitModelList(decisionAccount.Models), effectivePolicies, platform)
 			hasProbePolicy := hasEnabledProbePolicy(effectivePolicies)
@@ -521,7 +520,24 @@ func (s *Service) adminGroups(ctx context.Context, userID string, waitForFresh b
 				available = false
 				reason = credentialReason
 			}
-			assignmentSource := policyAssignmentSource(explicitIDs, inheritedIDs)
+			assignmentSource := policyAssignmentSourceForPolicies(
+				policiesForIDs(explicitIDs, policyByID),
+				policiesForIDs(inheritedIDs, policyByID),
+			)
+			// 分组左侧摘要也要反映账号级独立策略，否则“分组没有策略、但账号已单独启用策略”
+			// 会在账号行正确监控、分组列表却显示未监控。
+			if len(effectivePolicies) > 0 {
+				health.HasAssignedPolicy = true
+			}
+			if len(effectivePolicies) > 0 {
+				health.HasEnabledPolicy = true
+			}
+			if hasProbePolicy {
+				health.HasEnabledProbePolicy = true
+			}
+			if hasHealthMultiplierPriorityPolicy(effectivePolicies) {
+				health.PriorityMode = PriorityModeMultiplier
+			}
 			priorityState, priorityManaged := priorityByTarget[targetID]
 			var priorityOriginal, priorityExpected, priorityConflictValue *int
 			var priorityConflictAt *time.Time
@@ -1628,19 +1644,6 @@ func mergePolicyIDs(groups ...[]string) []string {
 		}
 	}
 	return result
-}
-
-func policyAssignmentSource(explicitIDs []string, inheritedIDs []string) string {
-	switch {
-	case len(explicitIDs) > 0 && len(inheritedIDs) > 0:
-		return "mixed"
-	case len(explicitIDs) > 0:
-		return "target"
-	case len(inheritedIDs) > 0:
-		return "group"
-	default:
-		return "none"
-	}
 }
 
 // adminGroupType 把 upstream 的分组标志归一化为主列表展示用的类型：

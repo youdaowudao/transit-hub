@@ -37,6 +37,7 @@ type healthRepository interface {
 	AcquirePrioritySyncLease(ctx context.Context, userID string, adminAccountID string) (release func(), err error)
 	ListEnabledPolicies(ctx context.Context) ([]Policy, error)
 	ReplacePolicyAssignments(ctx context.Context, userID string, adminAccountID string, targetID string, policyIDs []string) error
+	ReplacePolicyAssignmentsAndRequestPrioritySync(ctx context.Context, userID string, adminAccountID string, targetID string, policyIDs []string, pendingSignature string) error
 	ListPolicyAssignmentsForTarget(ctx context.Context, userID string, adminAccountID string, targetID string) ([]PolicyAssignment, error)
 	ListPolicyAssignmentsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]PolicyAssignment, error)
 	ListAllPolicyAssignments(ctx context.Context) ([]PolicyAssignment, error)

@@ -88,9 +88,14 @@ func (s *Service) SetTargetPolicyAssignments(ctx context.Context, userID string,
 		deduped = append(deduped, trimmed)
 	}
 
-	if err := s.repo.ReplacePolicyAssignments(ctx, userID, adminAccountID, targetID, deduped); err != nil {
+	pendingSignature, err := newID()
+	if err != nil {
 		return TargetPolicyAssignments{}, err
 	}
+	if err := s.repo.ReplacePolicyAssignmentsAndRequestPrioritySync(ctx, userID, adminAccountID, targetID, deduped, pendingSignature); err != nil {
+		return TargetPolicyAssignments{}, err
+	}
+	s.triggerPrioritySync(userID, adminAccountID, pendingSignature)
 	return s.GetTargetPolicyAssignments(ctx, userID, targetID)
 }
 
@@ -201,4 +206,56 @@ func mergePoliciesByID(groups ...[]Policy) []Policy {
 		}
 	}
 	return result
+}
+
+// effectivePoliciesForTarget applies the account-level inheritance contract:
+// an enabled target policy set is authoritative; otherwise the target inherits
+// the policies supplied by its groups.
+func effectivePoliciesForTarget(targetPolicies []Policy, inheritedPolicies []Policy) []Policy {
+	enabledTargetPolicies := make([]Policy, 0, len(targetPolicies))
+	for _, policy := range targetPolicies {
+		if policy.Enabled {
+			enabledTargetPolicies = append(enabledTargetPolicies, policy)
+		}
+	}
+	if len(enabledTargetPolicies) > 0 {
+		return mergePoliciesByID(enabledTargetPolicies)
+	}
+	enabledInheritedPolicies := make([]Policy, 0, len(inheritedPolicies))
+	for _, policy := range inheritedPolicies {
+		if policy.Enabled {
+			enabledInheritedPolicies = append(enabledInheritedPolicies, policy)
+		}
+	}
+	return mergePoliciesByID(enabledInheritedPolicies)
+}
+
+func hasEnabledTargetPolicy(policies []Policy) bool {
+	for _, policy := range policies {
+		if policy.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+func policyAssignmentSourceForPolicies(targetPolicies []Policy, inheritedPolicies []Policy) string {
+	switch {
+	case hasEnabledTargetPolicy(targetPolicies):
+		return "target"
+	case len(effectivePoliciesForTarget(nil, inheritedPolicies)) > 0:
+		return "group"
+	default:
+		return "none"
+	}
+}
+
+func policiesForIDs(ids []string, policyByID map[string]Policy) []Policy {
+	policies := make([]Policy, 0, len(ids))
+	for _, id := range ids {
+		if policy, ok := policyByID[id]; ok {
+			policies = append(policies, policy)
+		}
+	}
+	return policies
 }

@@ -32,6 +32,7 @@ import type { ManualProbeTargetSummary } from '../components/dashboard/ManualOne
 import PolicyConfigDrawer from '../components/dashboard/PolicyConfigDrawer.vue'
 import type { OwnGroupOption } from '../components/dashboard/PolicyConfigDrawer.vue'
 import ProbePolicyListDialog from '../components/dashboard/ProbePolicyListDialog.vue'
+import TargetPolicyAssignmentDialog from '../components/dashboard/TargetPolicyAssignmentDialog.vue'
 import type {
   AdminGroupAccount,
   AdminGroupHealth,
@@ -379,6 +380,8 @@ const refreshSiteStatusLabel = (site: AdminGroupsRefreshSite): string => {
 // 分组启用/管理抽屉。
 const setupDrawerOpen = ref(false)
 const setupGroup = ref<AdminGroupHealth | null>(null)
+const policyAssignmentDialogOpen = ref(false)
+const policyAssignmentTarget = ref<AdminGroupAccount | null>(null)
 
 const openSetup = (group: AdminGroupHealth) => {
   setupGroup.value = group
@@ -392,6 +395,16 @@ const onSetupSaved = async (configuration?: AdminGroupPolicyConfiguration) => {
 		prioritySyncStatus.value = { workspaceId: currentAccount.value.id, status: 'pending', failedCount: 0 }
 	}
 	await Promise.all([loadPolicies(), loadPrioritySyncStatus()])
+}
+
+const onAssignPolicy = (account: AdminGroupAccount) => {
+  policyAssignmentTarget.value = account
+  policyAssignmentDialogOpen.value = true
+}
+
+const onTargetPolicySaved = async () => {
+  policyAssignmentDialogOpen.value = false
+  await Promise.all([loadAdminGroups({ silent: true }), loadPrioritySyncStatus()])
 }
 
 // 手动探活弹窗同时承载正式探活和隔离的一次性测试。
@@ -772,6 +785,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           @probe="onProbeAccount"
           @view-events="onViewEventsAccount"
           @set-schedulable="onSetTargetSchedulable"
+          @assign-policy="onAssignPolicy"
           @update:hide-unmonitored-accounts="setHideUnmonitoredAccounts"
         />
       </div>
@@ -783,6 +797,15 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       :policies="policies"
       @close="setupDrawerOpen = false"
       @saved="onSetupSaved"
+    />
+
+    <TargetPolicyAssignmentDialog
+      :open="policyAssignmentDialogOpen"
+      :target-id="policyAssignmentTarget?.targetId ?? ''"
+      :account-name="policyAssignmentTarget?.name || policyAssignmentTarget?.id || ''"
+      :policies="policies"
+      @close="policyAssignmentDialogOpen = false"
+      @saved="onTargetPolicySaved"
     />
 
     <ManualOneTimeProbeDialog

@@ -380,15 +380,15 @@ func (s *Service) currentScheduledProbeSpecs(ctx context.Context, userID string,
 		policyByID[policy.ID] = policy
 	}
 	policySources := make(map[string]probePolicyEventGroup)
-	effectivePolicies := make([]Policy, 0)
+	directPolicies := make([]Policy, 0, len(directAssignments))
 	for _, assignment := range directAssignments {
 		policy, exists := policyByID[assignment.PolicyID]
 		if !exists {
 			continue
 		}
-		effectivePolicies = mergePoliciesByID(effectivePolicies, []Policy{policy})
-		policySources[policy.ID] = probePolicyEventGroup{resolved: true}
+		directPolicies = append(directPolicies, policy)
 	}
+	inheritedPolicies := make([]Policy, 0)
 	excluded := groupTargetExclusionIndex(exclusions)[userID+"|"+adminAccountID]
 	for _, membership := range memberships {
 		if excluded[membership.groupID][target.TargetID] {
@@ -402,10 +402,26 @@ func (s *Service) currentScheduledProbeSpecs(ctx context.Context, userID string,
 			if !exists {
 				continue
 			}
-			effectivePolicies = mergePoliciesByID(effectivePolicies, []Policy{policy})
-			if _, resolved := policySources[policy.ID]; !resolved {
-				policySources[policy.ID] = probePolicyEventGroup{
-					resolved: true, adminGroupID: membership.groupID, adminGroupName: membership.groupName,
+			inheritedPolicies = append(inheritedPolicies, policy)
+		}
+	}
+	effectivePolicies := effectivePoliciesForTarget(directPolicies, inheritedPolicies)
+	if hasEnabledTargetPolicy(directPolicies) {
+		for _, policy := range effectivePolicies {
+			policySources[policy.ID] = probePolicyEventGroup{resolved: true}
+		}
+	} else {
+		for _, policy := range effectivePolicies {
+			for _, membership := range memberships {
+				if excluded[membership.groupID][target.TargetID] {
+					continue
+				}
+				for _, assignment := range groupAssignments {
+					if assignment.AdminGroupID == membership.groupID && assignment.PolicyID == policy.ID {
+						policySources[policy.ID] = probePolicyEventGroup{
+							resolved: true, adminGroupID: membership.groupID, adminGroupName: membership.groupName,
+						}
+					}
 				}
 			}
 		}
@@ -575,7 +591,7 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 				if excludedByWorkspace[key][group.ID][target.TargetID] {
 					inheritedPolicies = nil
 				}
-				effectivePolicies := mergePoliciesByID(assignedTargets[target.TargetID], inheritedPolicies)
+				effectivePolicies := effectivePoliciesForTarget(assignedTargets[target.TargetID], inheritedPolicies)
 				if len(effectivePolicies) == 0 {
 					continue
 				}
@@ -587,17 +603,20 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 					candidates[target.TargetID] = candidate
 					targetOrder = append(targetOrder, target.TargetID)
 				}
-				for _, policy := range assignedTargets[target.TargetID] {
-					// An explicit target assignment has no single group owner, even when the
-					// target is currently being enumerated through a group membership.
-					candidate.policySources[policy.ID] = probePolicyEventGroup{resolved: true}
-				}
-				for _, policy := range inheritedPolicies {
-					if _, alreadyResolved := candidate.policySources[policy.ID]; alreadyResolved {
-						continue
+				if hasEnabledTargetPolicy(assignedTargets[target.TargetID]) {
+					for _, policy := range effectivePolicies {
+						// An explicit target assignment has no single group owner, even when the
+						// target is currently being enumerated through a group membership.
+						candidate.policySources[policy.ID] = probePolicyEventGroup{resolved: true}
 					}
-					candidate.policySources[policy.ID] = probePolicyEventGroup{
-						resolved: true, adminGroupID: group.ID, adminGroupName: group.Name,
+				} else {
+					for _, policy := range inheritedPolicies {
+						if _, alreadyResolved := candidate.policySources[policy.ID]; alreadyResolved {
+							continue
+						}
+						candidate.policySources[policy.ID] = probePolicyEventGroup{
+							resolved: true, adminGroupID: group.ID, adminGroupName: group.Name,
+						}
 					}
 				}
 				candidate.policies = mergePoliciesByID(candidate.policies, effectivePolicies)

@@ -106,3 +106,27 @@ func TestSetTargetPolicyAssignments_DedupesPolicyIDs(t *testing.T) {
 		t.Fatalf("expected deduped to 1 policy id, got %+v", saved.PolicyIDs)
 	}
 }
+
+// TestSetTargetPolicyAssignments_RequestsPrioritySync 验证账号策略保存会登记 workspace
+// 级 Priority 重算请求；否则账号策略虽然已落库，倍率/优先级仍可能继续沿用旧配置。
+func TestSetTargetPolicyAssignments_RequestsPrioritySync(t *testing.T) {
+	repo := newFakeRepository()
+	repo.policies = []Policy{probePolicy()}
+	mySites := fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI}}
+	svc := newAdminGroupsService(fakePlatformGroupReader{}, mySites, repo)
+
+	if _, err := svc.SetTargetPolicyAssignments(context.Background(), "user1", "newapi:ws1:100", []string{"policy-1"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	state, err := repo.GetPriorityWorkspaceSyncState(context.Background(), "user1", "ws1")
+	if err != nil {
+		t.Fatalf("unexpected priority state error: %v", err)
+	}
+	if state == nil || state.PendingSignature == "" {
+		t.Fatalf("target policy save must create a pending priority generation, got %+v", state)
+	}
+	if state.LastActionSource != "target_policy_save" {
+		t.Fatalf("priority sync source = %q, want target_policy_save", state.LastActionSource)
+	}
+}

@@ -1521,6 +1521,50 @@ func TestMultiplierPrioritySync_ExplicitTargetSurvivesGroupExclusion(t *testing.
 	}
 }
 
+func TestPriorityInventory_EnabledTargetPolicyExcludesInheritedGroupPolicy(t *testing.T) {
+	multiplier := 0.2
+	priority := 1
+	direct := Policy{
+		ID: "direct", UserID: "user1", AdminAccountID: "ws1", Enabled: true,
+		StrategyMode: StrategyModeHealthProbe, PriorityMode: PriorityModeNone,
+		ModelTargets: []ModelTarget{{ModelName: "gpt-4o", Enabled: true}},
+	}
+	group := Policy{
+		ID: "group", UserID: "user1", AdminAccountID: "ws1", Enabled: true,
+		StrategyMode: StrategyModeMultiplierOnly, PriorityMode: PriorityModeMultiplier,
+		ModelTargets: []ModelTarget{{ModelName: "gpt-4o", Enabled: true}},
+	}
+	service := &Service{}
+	inventory, _, err := service.priorityInventoryForSnapshot(
+		&adminWorkspaceInventory{
+			session: upstream.Session{Platform: upstream.PlatformNewAPI},
+			groups: []adminInventoryGroup{{
+				group:    upstream.AdminGroupInfo{ID: "g1", Name: "vip", Multiplier: &multiplier},
+				accounts: []upstream.AdminGroupAccountInfo{{ID: "100", Priority: &priority, Models: "gpt-4o"}},
+			}},
+		},
+		"ws1",
+		map[string][]Policy{"newapi:ws1:100": {direct}},
+		map[string][]Policy{"g1": {group}},
+		map[string]map[string]bool{},
+		map[string]*float64{},
+		upstreamMultiplierLookup{},
+	)
+	if err != nil {
+		t.Fatalf("priorityInventoryForSnapshot() error = %v", err)
+	}
+	item := inventory["newapi:ws1:100"]
+	if item == nil {
+		t.Fatal("priority inventory did not include target")
+	}
+	if len(item.policies) != 1 || item.policies[0].ID != direct.ID {
+		t.Fatalf("enabled target policy must exclude inherited group policy, got %+v", item.policies)
+	}
+	if len(item.multipliers) != 0 {
+		t.Fatalf("non-multiplier target policy must not inherit group multiplier, got %+v", item.multipliers)
+	}
+}
+
 func TestHealthPrioritySync_UsesHealthThenUpstreamMultiplierThenSuccessLatency(t *testing.T) {
 	repo := newFakeRepository()
 	priorityActions := &fakeTargetPriorityActioner{}

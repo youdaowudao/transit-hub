@@ -345,6 +345,117 @@ func TestCurrentScheduledProbeSpecsDropsStalePolicyAndUsesCurrentAssignments(t *
 	}
 }
 
+func TestCurrentScheduledProbeSpecs_EnabledTargetPolicyOverridesGroupPolicies(t *testing.T) {
+	repo := newFakeRepository()
+	direct := schedulableProbePolicy("direct", true, 60)
+	direct.ModelTargets[0].ModelName = "direct-model"
+	group := schedulableProbePolicy("group", true, 60)
+	group.ModelTargets[0].ModelName = "group-model"
+	repo.policies = []Policy{direct, group}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "newapi:ws1:1515", PolicyID: direct.ID,
+	}}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "vip", PolicyID: group.ID,
+	}}
+
+	service := &Service{repo: repo}
+	all, _, ok := service.currentScheduledProbeSpecs(
+		context.Background(), "user1", "ws1",
+		AdminProbeTarget{TargetID: "newapi:ws1:1515"},
+		[]adminTargetMembership{{groupID: "g1", groupName: "vip"}}, nil,
+	)
+	if !ok {
+		t.Fatal("currentScheduledProbeSpecs returned unavailable")
+	}
+	if len(all) != 1 || all[0].modelName != "direct-model" || all[0].policy.ID != direct.ID {
+		t.Fatalf("enabled target policy must exclude group policies, got %+v", all)
+	}
+}
+
+func TestCurrentScheduledProbeSpecs_DisabledTargetPolicyFallsBackToGroupPolicies(t *testing.T) {
+	repo := newFakeRepository()
+	direct := schedulableProbePolicy("direct", true, 60)
+	direct.Enabled = false
+	direct.ModelTargets[0].ModelName = "disabled-direct-model"
+	group := schedulableProbePolicy("group", true, 60)
+	group.ModelTargets[0].ModelName = "group-model"
+	repo.policies = []Policy{direct, group}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "newapi:ws1:1515", PolicyID: direct.ID,
+	}}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "vip", PolicyID: group.ID,
+	}}
+
+	service := &Service{repo: repo}
+	all, _, ok := service.currentScheduledProbeSpecs(
+		context.Background(), "user1", "ws1",
+		AdminProbeTarget{TargetID: "newapi:ws1:1515"},
+		[]adminTargetMembership{{groupID: "g1", groupName: "vip"}}, nil,
+	)
+	if !ok {
+		t.Fatal("currentScheduledProbeSpecs returned unavailable")
+	}
+	if len(all) != 1 || all[0].modelName != "group-model" || all[0].policy.ID != group.ID {
+		t.Fatalf("disabled target policy must fall back to group policies, got %+v", all)
+	}
+}
+
+func TestCurrentScheduledProbeSpecs_NoTargetPolicyKeepsMultipleGroupPolicyUnion(t *testing.T) {
+	repo := newFakeRepository()
+	first := schedulableProbePolicy("first", true, 60)
+	first.ModelTargets[0].ModelName = "first-model"
+	second := schedulableProbePolicy("second", true, 60)
+	second.ModelTargets[0].ModelName = "second-model"
+	repo.policies = []Policy{first, second}
+	repo.groupAssignments = []GroupPolicyAssignment{
+		{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "first", PolicyID: first.ID},
+		{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g2", AdminGroupName: "second", PolicyID: second.ID},
+	}
+
+	service := &Service{repo: repo}
+	all, _, ok := service.currentScheduledProbeSpecs(
+		context.Background(), "user1", "ws1",
+		AdminProbeTarget{TargetID: "newapi:ws1:1515"},
+		[]adminTargetMembership{{groupID: "g1", groupName: "first"}, {groupID: "g2", groupName: "second"}}, nil,
+	)
+	if !ok {
+		t.Fatal("currentScheduledProbeSpecs returned unavailable")
+	}
+	if len(all) != 2 {
+		t.Fatalf("multiple group policies must remain a union without target policy, got %+v", all)
+	}
+}
+
+func TestCollectAdminProbeJobsWithGroups_EnabledTargetPolicyExcludesInheritedGroupPolicy(t *testing.T) {
+	repo := newFakeRepository()
+	direct := schedulableProbePolicy("direct", true, 60)
+	direct.ModelTargets[0].ModelName = "direct-model"
+	group := schedulableProbePolicy("group", true, 60)
+	group.ModelTargets[0].ModelName = "group-model"
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "100", Name: "account", BaseURL: "https://up", Models: "direct-model,group-model"}},
+		},
+	}
+	service := &Service{
+		repo: repo, mySites: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI}},
+		platformGroups: reader,
+	}
+	targetID := "newapi:ws1:100"
+	jobs := service.collectAdminProbeJobsWithGroups(
+		context.Background(), []Policy{direct, group},
+		[]PolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", TargetID: targetID, PolicyID: direct.ID}},
+		[]GroupPolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "vip", PolicyID: group.ID}},
+		nil,
+	)
+	if len(jobs) != 1 || len(jobs[0].dueSpecs) != 1 || jobs[0].dueSpecs[0].modelName != "direct-model" {
+		t.Fatalf("enabled target policy must exclude inherited group model, got %+v", jobs)
+	}
+}
+
 func TestCollectAdminProbeJobs_UnschedulableTargetUsesMinuteOverride(t *testing.T) {
 	repo := newFakeRepository()
 	service := &Service{

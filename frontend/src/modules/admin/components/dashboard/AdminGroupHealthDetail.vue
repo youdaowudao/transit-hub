@@ -47,6 +47,7 @@ const emit = defineEmits<{
   (event: 'view-events', account: AdminGroupAccount): void
   (event: 'update:hide-unmonitored-accounts', value: boolean): void
   (event: 'set-schedulable', account: AdminGroupAccount): void
+  (event: 'assign-policy', account: AdminGroupAccount): void
 }>()
 
 import { t, te } from '@/locales'
@@ -812,6 +813,16 @@ const multiplierSourceLabel = (account: AdminGroupAccount): string => {
                 </td>
                 <td class="px-3 py-3">
                   <div class="flex items-center justify-end gap-1">
+                    <Tooltip :text="t(`${detailPrefix}.actions.assignPolicy`)">
+                      <button
+                        type="button"
+                        class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface hover:text-primary"
+                        :aria-label="t(`${detailPrefix}.actions.assignPolicy`)"
+                        @click="emit('assign-policy', account)"
+                      >
+                        <ShieldCheck class="h-4 w-4" />
+                      </button>
+                    </Tooltip>
                     <Tooltip :text="hasUnreadQuestionAnswer(account) ? t(`${prefix}.actions.questionAnswerUnread`) : t(`${prefix}.actions.probe`)">
                       <button
                         type="button"

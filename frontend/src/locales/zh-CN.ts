@@ -980,6 +980,11 @@ export default {
       subtitle: '对当前 admin workspace 下分组内的账号/渠道做独立轻量探活，监控健康状态并支持自动降级/恢复。',
       adminSubtitle: '展示当前 admin workspace 下的全量分组，点击账号数查看分组下账号/渠道及独立探活状态。',
       simplifiedSubtitle: '以 admin 上游分组为单位配置探活、自动降级与流量优先级，新增账号或渠道会自动继承分组策略。',
+			prioritySync: {
+				pending: '工作区 {workspace} 的配置已保存，主站 Priority 正在后台同步。',
+				failed: '工作区 {workspace} 的主站 Priority 后台同步失败（{time}，{count} 项）：{reason}',
+				unknownTime: '时间未知',
+			},
       summaryLabel: '分组健康汇总',
       groupListLabel: '上游分组列表',
       refresh: '刷新',
@@ -1623,6 +1628,17 @@ export default {
         questionAnswer: {
           loading: '正在读取测试问题和历史记录...',
           questionsTitle: '选择测试问题',
+          reasoningEffort: {
+            title: '推理力度',
+            label: '推理力度',
+            unspecified: '未指定',
+            options: {
+              low: '低',
+              medium: '中',
+              high: '高',
+              xhigh: '非常高'
+            }
+          },
           noQuestions: '当前没有启用的测试问题，请前往设置页添加或启用。',
           defaultQuestion: '默认',
           selectedFormula: '模型 {models} 个 × 问题 {questions} 个 = 共 {total} 次请求',
@@ -1708,6 +1724,8 @@ export default {
         modelListUnavailable: '无法获取上游模型列表，请稍后重试。',
         modelListInvalid: '上游模型列表响应格式无法识别。',
         multiplierRequired: '当前分组没有有效倍率，请先在上游设置倍率后再启用倍率排序。',
+				priorityMetadataUnavailable: '上游倍率元数据不完整，系统已停止本轮 Priority 写回并将在后台重试。',
+				prioritySyncUnavailable: 'Priority 后台同步暂不可用，配置已保存，系统将在服务恢复后自动重试。',
         manualModelsRequired: '请至少选择一个模型再开始测试。',
         policyNotFound: '所选策略不存在或不属于当前工作区。',
         probeBlockedHealthDisabled: '该模型健康状态已禁用，正式探活未发出请求。',
@@ -1719,8 +1737,10 @@ export default {
         testQuestionNotFound: '测试问题不存在或无权访问。',
         testQuestionDisabled: '所选测试问题已停用或不存在，请刷新后重新选择。',
         questionAnswerSelection: '请至少选择一个模型和一个测试问题。',
+        questionAnswerReasoningEffort: '推理力度无效，请重新选择低、中、高或非常高。',
         questionAnswerActive: '该账号已有问答批次进行中。',
         questionAnswerBatchNotFound: '问答批次不存在或无权访问。',
+        questionAnswerStorage: '问答记录的推理力度快照不一致，请稍后重试。',
         questionAnswerMarkForbidden: '只有成功回答可以切换人工错误标记。',
         questionAnswerServiceStopped: '问答服务正在关闭，暂时不能开始新批次。'
       }

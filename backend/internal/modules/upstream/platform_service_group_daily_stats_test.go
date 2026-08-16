@@ -1,11 +1,220 @@
 package upstream
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
+
+func TestFetchGroupCostStatsForDateFallsBackToBoundedCompleteKeySet(t *testing.T) {
+	var usageRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/groups/available":
+			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "vip"}, {"id": 2, "name": "free"}}})
+		case "/api/v1/admin/groups/usage-summary":
+			http.Error(w, "forbidden", http.StatusForbidden)
+		case "/api/v1/keys":
+			writeJSON(w, map[string]any{"data": []map[string]any{
+				{"id": 11, "group_id": 1},
+				{"id": 12, "group_id": 2},
+			}, "total": 2})
+		case "/api/v1/usage/stats":
+			usageRequests++
+			if r.URL.Query().Get("api_key_id") == "11" {
+				writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 3.5}})
+				return
+			}
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 0.0}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewPlatformService(NewHTTPClient(server.Client())).FetchGroupCostStatsForDate(
+		context.Background(),
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "user-token"},
+		[]GroupInfo{{ID: "1", Name: "vip"}, {ID: "2", Name: "free"}},
+		"2026-08-16",
+		GroupCostSamplingState{},
+	)
+	if err != nil {
+		t.Fatalf("FetchGroupCostStatsForDate() error: %v", err)
+	}
+	if result.Source != GroupCostSourceKeyFallback || !result.Complete || len(result.Stats) != 2 || usageRequests != 2 {
+		t.Fatalf("unexpected fallback result: %+v usageRequests=%d", result, usageRequests)
+	}
+	if result.SiteReportedRawCost == nil || *result.SiteReportedRawCost != 3.5 || result.UnattributedRawCost == nil || *result.UnattributedRawCost != 0 {
+		t.Fatalf("unexpected reconciliation: %+v", result)
+	}
+}
+
+func TestFetchGroupCostStatsForDateDoesNotUseAdminKeyForKeyFallback(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/groups/available" {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		http.Error(w, "unexpected fallback request", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	_, err := NewPlatformService(NewHTTPClient(server.Client())).FetchGroupCostStatsForDate(
+		context.Background(),
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AdminAPIKey: "admin-key"},
+		[]GroupInfo{{ID: "1", Name: "vip"}},
+		"2026-08-16",
+		GroupCostSamplingState{},
+	)
+	if err == nil {
+		t.Fatal("admin key must not be used for user key fallback")
+	}
+}
+
+func TestFetchGroupCostStatsForDateRejectsIncompleteKeyUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/groups/available":
+			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "vip"}, {"id": 2, "name": "free"}}})
+		case "/api/v1/admin/groups/usage-summary":
+			http.Error(w, "forbidden", http.StatusForbidden)
+		case "/api/v1/keys":
+			if r.URL.Query().Get("page") == "2" {
+				writeJSON(w, map[string]any{"data": []map[string]any{}, "total": 2})
+				return
+			}
+			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 11, "group_id": 1}}, "total": 2})
+		case "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 1.0}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	_, err := NewPlatformService(NewHTTPClient(server.Client())).FetchGroupCostStatsForDate(
+		context.Background(),
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "user-token"},
+		[]GroupInfo{{ID: "1", Name: "vip"}, {ID: "2", Name: "free"}},
+		"2026-08-16",
+		GroupCostSamplingState{},
+	)
+	if err == nil {
+		t.Fatal("incomplete key usage must remain unknown")
+	}
+}
+
+func TestFetchGroupCostStatsForDateDoesNotFanOutOnSummaryNetworkFailure(t *testing.T) {
+	var keyRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/groups/available":
+			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "vip"}}})
+		case "/api/v1/admin/groups/usage-summary":
+			http.Error(w, "upstream unavailable", http.StatusBadGateway)
+		case "/api/v1/keys":
+			keyRequests++
+			writeJSON(w, map[string]any{"data": []map[string]any{}})
+		}
+	}))
+	defer server.Close()
+
+	_, err := NewPlatformService(NewHTTPClient(server.Client())).FetchGroupCostStatsForDate(
+		context.Background(),
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "user-token"},
+		[]GroupInfo{{ID: "1", Name: "vip"}},
+		"2026-08-16",
+		GroupCostSamplingState{},
+	)
+	if err == nil || keyRequests != 0 {
+		t.Fatalf("network/5xx summary failure must not fan out to keys: err=%v keyRequests=%d", err, keyRequests)
+	}
+}
+
+func TestFetchGroupCostStatsForDateTreatsCompleteEmptyKeySetAsZero(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/groups/available":
+			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "vip"}}})
+		case "/api/v1/admin/groups/usage-summary":
+			http.Error(w, "forbidden", http.StatusForbidden)
+		case "/api/v1/keys":
+			writeJSON(w, map[string]any{"data": []map[string]any{}, "total": 0})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewPlatformService(NewHTTPClient(server.Client())).FetchGroupCostStatsForDate(
+		context.Background(),
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "user-token"},
+		[]GroupInfo{{ID: "1", Name: "vip"}},
+		"2026-08-16",
+		GroupCostSamplingState{},
+	)
+	if err != nil || !result.Complete || len(result.Stats) != 1 || result.Stats[0].TodayActualCost != 0 {
+		t.Fatalf("complete empty key set must be a true zero: result=%+v err=%v", result, err)
+	}
+}
+
+func TestFetchGroupCostStatsForDateRejectsUnknownKeyGroup(t *testing.T) {
+	var usageRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/groups/available":
+			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "vip"}}})
+		case "/api/v1/admin/groups/usage-summary":
+			http.Error(w, "forbidden", http.StatusForbidden)
+		case "/api/v1/keys":
+			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 11, "group_id": 99}}, "total": 1})
+		case "/api/v1/usage/stats":
+			usageRequests++
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 1.0}})
+		}
+	}))
+	defer server.Close()
+
+	_, err := NewPlatformService(NewHTTPClient(server.Client())).FetchGroupCostStatsForDate(
+		context.Background(),
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "user-token"},
+		[]GroupInfo{{ID: "1", Name: "vip"}},
+		"2026-08-16",
+		GroupCostSamplingState{},
+	)
+	if err == nil || usageRequests != 0 {
+		t.Fatalf("unknown group mapping must reject whole batch before usage fan-out: err=%v usageRequests=%d", err, usageRequests)
+	}
+}
+
+func TestFetchGroupCostStatsForDateHonorsContextOnSummary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/groups/available" {
+			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "vip"}}})
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := NewPlatformService(NewHTTPClient(server.Client())).FetchGroupCostStatsForDate(
+		ctx,
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "user-token"},
+		[]GroupInfo{{ID: "1", Name: "vip"}},
+		"2026-08-16",
+		GroupCostSamplingState{},
+	)
+	if err == nil || time.Since(started) > time.Second {
+		t.Fatalf("summary request did not honor context: err=%v elapsed=%s", err, time.Since(started))
+	}
+}
 
 // TestFetchAdminGroupDailyStats_DispatchesByPlatform 验证平台中性包装方法按
 // session.Platform 正确路由到 sub2api / new-api 具体实现，不重复实现底层抓取逻辑。

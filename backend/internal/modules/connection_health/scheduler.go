@@ -84,14 +84,20 @@ func (s *Service) loadAdminInventory(ctx context.Context, userID string, adminAc
 		cache[key] = adminInventoryCacheEntry{err: err}
 		return nil, err
 	}
-	groups, err := s.platformGroups.FetchAdminAllGroups(session)
+	groups, err := s.fetchAdminAllGroups(ctx, session)
 	if err != nil {
 		cache[key] = adminInventoryCacheEntry{err: err}
 		return nil, err
 	}
 	inventory := &adminWorkspaceInventory{session: session, groups: make([]adminInventoryGroup, 0, len(groups))}
 	for _, group := range groups {
-		accounts, accountsErr := s.platformGroups.ListAdminGroupAccounts(session, group)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		accounts, accountsErr := s.listAdminGroupAccounts(ctx, session, group)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		inventory.groups = append(inventory.groups, adminInventoryGroup{group: group, accounts: accounts, err: accountsErr})
 	}
 	cache[key] = adminInventoryCacheEntry{inventory: inventory}
@@ -165,6 +171,16 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 	if err != nil {
 		log.Printf("[connection-health] scheduler list priority sync states failed: %v", err)
 		return
+	}
+	workspaceSyncStates, err := s.repo.ListAllPriorityWorkspaceSyncStates(ctx)
+	if err != nil {
+		log.Printf("[connection-health] scheduler list workspace priority sync states failed: %v", err)
+		return
+	}
+	for _, state := range workspaceSyncStates {
+		if state.PendingSignature != "" {
+			priorityStates = append(priorityStates, PrioritySyncState{UserID: state.UserID, AdminAccountID: state.AdminAccountID})
+		}
 	}
 	targetActionStates, err := s.repo.ListAllTargetActionStates(ctx)
 	if err != nil {

@@ -21,6 +21,115 @@ type blockingPrioritySyncRepository struct {
 	releaseFirst chan struct{}
 }
 
+type blockingPriorityAsyncRepository struct {
+	*fakeRepository
+	mu      sync.Mutex
+	active  int
+	max     int
+	entered chan struct{}
+	release chan struct{}
+}
+
+type contextBlockingInventoryReader struct {
+	fakePlatformGroupReader
+	accountsStarted chan struct{}
+}
+
+type contextBlockingPriorityActioner struct {
+	started  chan struct{}
+	oldCalls int
+}
+
+type panickingPriorityRepository struct {
+	*fakeRepository
+}
+
+func (r *panickingPriorityRepository) ListPolicies(ctx context.Context, userID string, adminAccountID string) ([]Policy, error) {
+	panic("simulated priority repository panic")
+}
+
+type panicFailureMarkPriorityRepository struct {
+	*fakeRepository
+	mu             sync.Mutex
+	listCalls      int
+	panicFailure   bool
+	secondRunStart chan struct{}
+}
+
+func (r *panicFailureMarkPriorityRepository) ListPolicies(ctx context.Context, userID string, adminAccountID string) ([]Policy, error) {
+	r.mu.Lock()
+	r.listCalls++
+	call := r.listCalls
+	r.mu.Unlock()
+	if call == 1 {
+		return nil, errors.New("simulated priority read failure")
+	}
+	select {
+	case r.secondRunStart <- struct{}{}:
+	default:
+	}
+	return r.fakeRepository.ListPolicies(ctx, userID, adminAccountID)
+}
+
+func (r *panicFailureMarkPriorityRepository) MarkPriorityWorkspaceSyncFailed(ctx context.Context, userID string, adminAccountID string, pendingSignature string, errorDetail string, failedCount int) (bool, error) {
+	r.mu.Lock()
+	shouldPanic := r.panicFailure
+	r.panicFailure = false
+	r.mu.Unlock()
+	if shouldPanic {
+		panic("simulated priority failure-state persistence panic")
+	}
+	return r.fakeRepository.MarkPriorityWorkspaceSyncFailed(ctx, userID, adminAccountID, pendingSignature, errorDetail, failedCount)
+}
+
+func (a *contextBlockingPriorityActioner) UpdateAdminTargetPriority(session upstream.Session, targetID string, priority int) error {
+	a.oldCalls++
+	return errors.New("legacy Priority write must not be used")
+}
+
+func (a *contextBlockingPriorityActioner) UpdateAdminTargetPriorityContext(ctx context.Context, session upstream.Session, targetID string, priority int) error {
+	select {
+	case a.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (r contextBlockingInventoryReader) FetchAdminAllGroupsContext(ctx context.Context, session upstream.Session) ([]upstream.AdminGroupInfo, error) {
+	return r.groups, nil
+}
+
+func (r contextBlockingInventoryReader) ListAdminGroupAccountsContext(ctx context.Context, session upstream.Session, group upstream.AdminGroupInfo) ([]upstream.AdminGroupAccountInfo, error) {
+	select {
+	case r.accountsStarted <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (r *blockingPriorityAsyncRepository) ListPolicies(ctx context.Context, userID string, adminAccountID string) ([]Policy, error) {
+	r.mu.Lock()
+	r.active++
+	if r.active > r.max {
+		r.max = r.active
+	}
+	r.mu.Unlock()
+	r.entered <- struct{}{}
+	defer func() {
+		r.mu.Lock()
+		r.active--
+		r.mu.Unlock()
+	}()
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return r.fakeRepository.ListPolicies(ctx, userID, adminAccountID)
+}
+
 func (r *blockingPrioritySyncRepository) ListPolicies(ctx context.Context, userID string, adminAccountID string) ([]Policy, error) {
 	r.mu.Lock()
 	r.calls++
@@ -75,6 +184,311 @@ func TestSyncCurrentWorkspacePriorities_SerializesSameWorkspace(t *testing.T) {
 	<-done
 	if repo.maxActive != 1 {
 		t.Fatalf("same-workspace priority snapshots overlapped: max active ListPolicies calls = %d", repo.maxActive)
+	}
+}
+
+func TestSyncCurrentWorkspacePriorities_ReadFailureMarksPendingForBackoff(t *testing.T) {
+	repo := newFakeRepository()
+	repo.listPoliciesErr = errors.New("database unavailable")
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-a", LastDecision: "pending",
+	}
+	service := &Service{
+		repo: repo, platformGroups: fakePlatformGroupReader{}, priorityActions: &fakeTargetPriorityActioner{},
+	}
+
+	service.syncCurrentWorkspacePriorities(context.Background(), "user1", "ws1")
+	state, err := repo.GetPriorityWorkspaceSyncState(context.Background(), "user1", "ws1")
+	if err != nil || state == nil {
+		t.Fatalf("workspace state err=%v state=%+v", err, state)
+	}
+	if state.LastDecision != "failed" || state.LastError != ErrorUnknown || state.NextReconcileAt == nil || !state.NextReconcileAt.After(time.Now()) {
+		t.Fatalf("read failure must be durable and back off, state=%+v", state)
+	}
+}
+
+func TestSyncCurrentWorkspacePriorities_MarkRunningFailureMarksPendingForBackoff(t *testing.T) {
+	repo := newFakeRepository()
+	repo.markPriorityRunningErr = errors.New("database unavailable")
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-a", LastDecision: "pending",
+	}
+	service := &Service{
+		repo: repo, platformGroups: fakePlatformGroupReader{}, priorityActions: &fakeTargetPriorityActioner{},
+	}
+
+	service.syncCurrentWorkspacePriorities(context.Background(), "user1", "ws1")
+	state, err := repo.GetPriorityWorkspaceSyncState(context.Background(), "user1", "ws1")
+	if err != nil || state == nil {
+		t.Fatalf("workspace state err=%v state=%+v", err, state)
+	}
+	if state.LastDecision != "failed" || state.LastError != ErrorUnknown || state.NextReconcileAt == nil || !state.NextReconcileAt.After(time.Now()) {
+		t.Fatalf("mark-running failure must be durable and back off, state=%+v", state)
+	}
+}
+
+func TestTriggerPrioritySyncWithoutDependenciesMarksSavedGenerationFailed(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-a", LastDecision: "pending",
+	}
+	service := &Service{repo: repo}
+
+	service.triggerPrioritySync("user1", "ws1", "generation-a")
+	state, err := repo.GetPriorityWorkspaceSyncState(context.Background(), "user1", "ws1")
+	if err != nil || state == nil {
+		t.Fatalf("workspace state err=%v state=%+v", err, state)
+	}
+	if state.LastDecision != "failed" || state.LastError != ErrorPrioritySyncUnavailable || state.NextReconcileAt == nil {
+		t.Fatalf("missing dependencies must persist a retryable failure, state=%+v", state)
+	}
+}
+
+func TestTriggerPrioritySyncBoundsGlobalAsyncWorkers(t *testing.T) {
+	repo := &blockingPriorityAsyncRepository{
+		fakeRepository: newFakeRepository(),
+		entered:        make(chan struct{}, 3),
+		release:        make(chan struct{}),
+	}
+	for _, workspaceID := range []string{"ws1", "ws2", "ws3"} {
+		repo.priorityWorkspaces["user1|"+workspaceID] = PriorityWorkspaceSyncState{
+			UserID: "user1", AdminAccountID: workspaceID, PendingSignature: workspaceID, LastDecision: "pending",
+		}
+	}
+	service := &Service{
+		repo:           repo,
+		mySites:        fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		platformGroups: fakePlatformGroupReader{}, priorityActions: &fakeTargetPriorityActioner{},
+	}
+	for _, workspaceID := range []string{"ws1", "ws2", "ws3"} {
+		service.triggerPrioritySync("user1", workspaceID, workspaceID)
+	}
+	for index := 0; index < priorityAsyncWorkerCount; index++ {
+		select {
+		case <-repo.entered:
+		case <-time.After(time.Second):
+			t.Fatal("asynchronous priority workers did not start")
+		}
+	}
+	repo.mu.Lock()
+	maxActive := repo.max
+	repo.mu.Unlock()
+	if maxActive != priorityAsyncWorkerCount {
+		t.Fatalf("active asynchronous priority workers=%d, want %d", maxActive, priorityAsyncWorkerCount)
+	}
+	close(repo.release)
+	select {
+	case <-repo.entered:
+	case <-time.After(time.Second):
+		t.Fatal("queued Priority synchronization did not run")
+	}
+}
+
+func TestQueuedPrioritySyncOldGenerationFailureDoesNotMarkNewGeneration(t *testing.T) {
+	repo := &blockingPrioritySyncRepository{
+		fakeRepository: newFakeRepository(),
+		firstEntered:   make(chan struct{}),
+		releaseFirst:   make(chan struct{}),
+	}
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-a", LastDecision: "pending",
+	}
+	service := &Service{
+		repo: repo, platformGroups: fakePlatformGroupReader{}, priorityActions: &fakeTargetPriorityActioner{},
+	}
+	done := make(chan struct{})
+	go func() {
+		service.runQueuedPrioritySync("user1", "ws1", "generation-a")
+		close(done)
+	}()
+	select {
+	case <-repo.firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("generation A did not reach its failing read")
+	}
+	repo.priorityWorkspaceMu.Lock()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-b", LastDecision: "pending",
+	}
+	repo.priorityWorkspaceMu.Unlock()
+	repo.listPoliciesErr = errors.New("database unavailable")
+	close(repo.releaseFirst)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("generation A did not stop")
+	}
+	state, err := repo.GetPriorityWorkspaceSyncState(context.Background(), "user1", "ws1")
+	if err != nil || state == nil {
+		t.Fatalf("workspace state err=%v state=%+v", err, state)
+	}
+	if state.PendingSignature != "generation-b" || state.LastDecision != "pending" || state.NextReconcileAt != nil {
+		t.Fatalf("generation A failure overwrote generation B: %+v", state)
+	}
+}
+
+func TestQueuedPrioritySyncPanicMarksGenerationFailedAndReleasesWorkspace(t *testing.T) {
+	repo := &panickingPriorityRepository{fakeRepository: newFakeRepository()}
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-a", LastDecision: "pending",
+	}
+	service := &Service{
+		repo: repo, platformGroups: fakePlatformGroupReader{}, priorityActions: &fakeTargetPriorityActioner{},
+		priorityTriggerRunning: map[string]bool{"user1\x00ws1": true},
+	}
+
+	service.runQueuedPrioritySync("user1", "ws1", "generation-a")
+	state, err := repo.GetPriorityWorkspaceSyncState(context.Background(), "user1", "ws1")
+	if err != nil || state == nil {
+		t.Fatalf("workspace state err=%v state=%+v", err, state)
+	}
+	if state.LastDecision != "failed" || state.LastError != ErrorUnknown || state.NextReconcileAt == nil {
+		t.Fatalf("panic must persist retryable failure: %+v", state)
+	}
+	service.priorityTriggerMu.Lock()
+	stillRunning := service.priorityTriggerRunning["user1\x00ws1"]
+	service.priorityTriggerMu.Unlock()
+	if stillRunning {
+		t.Fatal("panic must release the workspace trigger slot")
+	}
+}
+
+func TestQueuedPrioritySyncFailureStatePanicReleasesWorkspaceAndNewSaveQueues(t *testing.T) {
+	repo := &panicFailureMarkPriorityRepository{
+		fakeRepository: newFakeRepository(), panicFailure: true, secondRunStart: make(chan struct{}, 1),
+	}
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-a", LastDecision: "pending",
+	}
+	service := &Service{
+		repo:           repo,
+		mySites:        fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		platformGroups: fakePlatformGroupReader{}, priorityActions: &fakeTargetPriorityActioner{},
+		priorityTriggerRunning: map[string]bool{"user1\x00ws1": true},
+	}
+
+	service.runQueuedPrioritySync("user1", "ws1", "generation-a")
+	service.priorityTriggerMu.Lock()
+	stillRunning := service.priorityTriggerRunning["user1\x00ws1"]
+	service.priorityTriggerMu.Unlock()
+	if stillRunning {
+		t.Fatal("failure-state panic must release the workspace trigger slot")
+	}
+	state, err := repo.GetPriorityWorkspaceSyncState(context.Background(), "user1", "ws1")
+	if err != nil || state == nil {
+		t.Fatalf("workspace state err=%v state=%+v", err, state)
+	}
+	if state.LastDecision != "failed" || state.LastError != ErrorUnknown || state.NextReconcileAt == nil {
+		t.Fatalf("transient failure-state panic must become an immediate retryable failure: %+v", state)
+	}
+
+	// Simulate the next committed configuration generation after the failed task.
+	repo.priorityWorkspaceMu.Lock()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-b", LastDecision: "pending",
+	}
+	repo.priorityWorkspaceMu.Unlock()
+	service.triggerPrioritySync("user1", "ws1", "generation-b")
+	select {
+	case <-repo.secondRunStart:
+	case <-time.After(time.Second):
+		t.Fatal("new saved generation was not queued after failure-state panic")
+	}
+}
+
+func TestLoadAdminInventoryPropagatesContextToGroupAccounts(t *testing.T) {
+	reader := contextBlockingInventoryReader{
+		fakePlatformGroupReader: fakePlatformGroupReader{groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}}},
+		accountsStarted:         make(chan struct{}, 1),
+	}
+	service := &Service{
+		mySites:        fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		platformGroups: reader,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.loadAdminInventory(ctx, "user1", "ws1", make(adminInventoryCache))
+		done <- err
+	}()
+	select {
+	case <-reader.accountsStarted:
+	case <-time.After(time.Second):
+		t.Fatal("group accounts read did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("load inventory err=%v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("group accounts read ignored context cancellation")
+	}
+}
+
+func TestPriorityWriteUsesContextAndStopsOnCancellation(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-a", LastDecision: "running",
+	}
+	actions := &contextBlockingPriorityActioner{started: make(chan struct{}, 1)}
+	service := &Service{repo: repo, priorityActions: actions}
+	policy := Policy{ID: "p1", UserID: "user1", AdminAccountID: "ws1", Enabled: true, PriorityMode: PriorityModeMultiplier, StrategyMode: StrategyModeMultiplierOnly}
+	inventory := map[string]*priorityTargetInventory{
+		"sub2api:ws1:100": {
+			target: AdminProbeTarget{TargetID: "sub2api:ws1:100", AccountID: "100"}, policies: []Policy{policy},
+			multipliers: []float64{0.1}, currentPriority: 50, priorityPresent: true,
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		service.syncWorkspacePriorities(ctx, upstream.Session{Platform: upstream.PlatformSub2API}, "user1", "ws1", inventory, true, nil, nil, "generation-a")
+		close(done)
+	}()
+	select {
+	case <-actions.started:
+	case <-time.After(time.Second):
+		t.Fatal("context-aware Priority write did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Priority write ignored context cancellation")
+	}
+	if actions.oldCalls != 0 {
+		t.Fatalf("legacy Priority write calls=%d, want 0", actions.oldCalls)
+	}
+}
+
+func TestPriorityGenerationCheckFailureMarksPendingGenerationFailed(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityGenerationErr = errors.New("generation query unavailable")
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-a", LastDecision: "running",
+	}
+	actions := &fakeTargetPriorityActioner{}
+	service := &Service{repo: repo, priorityActions: actions}
+	policy := Policy{ID: "p1", UserID: "user1", AdminAccountID: "ws1", Enabled: true, PriorityMode: PriorityModeMultiplier, StrategyMode: StrategyModeMultiplierOnly}
+	inventory := map[string]*priorityTargetInventory{
+		"sub2api:ws1:100": {
+			target: AdminProbeTarget{TargetID: "sub2api:ws1:100", AccountID: "100"}, policies: []Policy{policy},
+			multipliers: []float64{0.1}, currentPriority: 50, priorityPresent: true,
+		},
+	}
+
+	service.syncWorkspacePriorities(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API}, "user1", "ws1", inventory, true, nil, nil, "generation-a")
+	if len(actions.calls) != 0 {
+		t.Fatalf("generation query failure must stop remote writes: %+v", actions.calls)
+	}
+	state, err := repo.GetPriorityWorkspaceSyncState(context.Background(), "user1", "ws1")
+	if err != nil || state == nil {
+		t.Fatalf("workspace state err=%v state=%+v", err, state)
+	}
+	if state.LastDecision != "failed" || state.LastError != ErrorUnknown || state.NextReconcileAt == nil {
+		t.Fatalf("generation query failure must persist retryable failure: %+v", state)
 	}
 }
 
@@ -251,7 +665,7 @@ func TestSetAdminGroupPolicyConfiguration_PersistsProbeSortFallbackMultiplier(t 
 	}
 }
 
-func TestSetAdminGroupPolicyConfiguration_SynchronizesPriorityImmediately(t *testing.T) {
+func TestSetAdminGroupPolicyConfiguration_QueuesPrioritySynchronization(t *testing.T) {
 	repo := newFakeRepository()
 	policy := probePolicy()
 	policy.PriorityMode = PriorityModeMultiplier
@@ -265,7 +679,7 @@ func TestSetAdminGroupPolicyConfiguration_SynchronizesPriorityImmediately(t *tes
 			"g1": {{ID: "100", Name: "cheap", Priority: &currentPriority, Models: "gpt-4o"}},
 		},
 	}
-	actions := &fakeTargetPriorityActioner{}
+	actions := &fakeTargetPriorityActioner{called: make(chan struct{}, 1)}
 	service := newAdminGroupsService(reader, fakeAdminGroupKeyReader{
 		fakeMySitesReader: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
 	}, repo)
@@ -273,13 +687,22 @@ func TestSetAdminGroupPolicyConfiguration_SynchronizesPriorityImmediately(t *tes
 	service.priorityActions = actions
 	fallback := 0.08
 
-	if _, err := service.SetAdminGroupPolicyConfiguration(context.Background(), "user1", "g1", AdminGroupPolicyConfigurationInput{
+	configuration, err := service.SetAdminGroupPolicyConfiguration(context.Background(), "user1", "g1", AdminGroupPolicyConfigurationInput{
 		PolicyIDs: []string{policy.ID}, ProbeSortFallbackMultiplier: &fallback,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("save group configuration: %v", err)
 	}
+	if configuration.PrioritySyncStatus != "pending" {
+		t.Fatalf("priority sync status = %q, want pending", configuration.PrioritySyncStatus)
+	}
+	select {
+	case <-actions.called:
+	case <-time.After(time.Second):
+		t.Fatal("background priority synchronization did not run")
+	}
 	if len(actions.calls) != 1 || actions.calls[0].targetID != "100" || actions.calls[0].priority != 10 {
-		t.Fatalf("priority must synchronize immediately after saving group configuration: %+v", actions.calls)
+		t.Fatalf("background priority synchronization calls = %+v", actions.calls)
 	}
 }
 
@@ -315,7 +738,7 @@ func TestV205PrioritySync_RecoveryLeavesSuspendedAndUnprobedBands(t *testing.T) 
 					"g1": {{ID: "100", Name: "account", Priority: &test.currentPriority, Models: "gpt-4o"}},
 				},
 			}
-			actions := &fakeTargetPriorityActioner{}
+			actions := &fakeTargetPriorityActioner{called: make(chan struct{}, 1)}
 			service := newAdminGroupsService(reader, fakeAdminGroupKeyReader{
 				fakeMySitesReader: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
 			}, repo)
@@ -327,6 +750,11 @@ func TestV205PrioritySync_RecoveryLeavesSuspendedAndUnprobedBands(t *testing.T) 
 				PolicyIDs: []string{policy.ID}, ProbeSortFallbackMultiplier: &fallback,
 			}); err != nil {
 				t.Fatalf("save group configuration: %v", err)
+			}
+			select {
+			case <-actions.called:
+			case <-time.After(time.Second):
+				t.Fatal("background priority synchronization did not run")
 			}
 			if len(actions.calls) != 1 || actions.calls[0].priority != test.wantPriority {
 				t.Fatalf("recovery must leave priority %d through the V2.0.5 path, calls=%+v", test.currentPriority, actions.calls)
@@ -461,11 +889,93 @@ func TestDesiredSub2APIMultiplierOnlyPriority_RetainsIndependentRange(t *testing
 }
 
 type fakeTargetPriorityActioner struct {
-	calls []priorityUpdateCall
+	calls  []priorityUpdateCall
+	called chan struct{}
+}
+
+type blockingGenerationPriorityActioner struct {
+	mu      sync.Mutex
+	calls   []priorityUpdateCall
+	started chan struct{}
+	release chan struct{}
+}
+
+func (f *blockingGenerationPriorityActioner) UpdateAdminTargetPriority(session upstream.Session, targetID string, priority int) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, priorityUpdateCall{targetID: targetID, priority: priority})
+	first := len(f.calls) == 1
+	f.mu.Unlock()
+	if first {
+		close(f.started)
+		<-f.release
+	}
+	return nil
+}
+
+func TestPrioritySyncOldGenerationStopsAfterInFlightWrite(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityWorkspaceMu.Lock()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-a", LastDecision: "running",
+	}
+	repo.priorityWorkspaceMu.Unlock()
+	actions := &blockingGenerationPriorityActioner{started: make(chan struct{}), release: make(chan struct{})}
+	service := &Service{repo: repo, priorityActions: actions}
+	policy := probePolicy()
+	policy.StrategyMode = StrategyModeMultiplierOnly
+	policy.PriorityMode = PriorityModeMultiplier
+	inventory := map[string]*priorityTargetInventory{
+		"sub2api:ws1:100": {
+			target: AdminProbeTarget{TargetID: "sub2api:ws1:100", AccountID: "100"}, policies: []Policy{policy},
+			multipliers: []float64{0.1}, currentPriority: 50, priorityPresent: true,
+		},
+		"sub2api:ws1:200": {
+			target: AdminProbeTarget{TargetID: "sub2api:ws1:200", AccountID: "200"}, policies: []Policy{policy},
+			multipliers: []float64{0.2}, currentPriority: 60, priorityPresent: true,
+		},
+	}
+	done := make(chan struct{})
+	go func() {
+		service.syncWorkspacePriorities(
+			context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+			"user1", "ws1", inventory, true, nil, nil, "generation-a",
+		)
+		close(done)
+	}()
+	select {
+	case <-actions.started:
+	case <-time.After(time.Second):
+		t.Fatal("generation A did not start its first remote write")
+	}
+	repo.priorityWorkspaceMu.Lock()
+	state := repo.priorityWorkspaces["user1|ws1"]
+	state.PendingSignature = "generation-b"
+	state.LastDecision = "pending"
+	repo.priorityWorkspaces["user1|ws1"] = state
+	repo.priorityWorkspaceMu.Unlock()
+	close(actions.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stale generation did not stop")
+	}
+	actions.mu.Lock()
+	callCount := len(actions.calls)
+	actions.mu.Unlock()
+	if callCount != 1 {
+		t.Fatalf("stale generation remote writes=%d, want only the already in-flight write", callCount)
+	}
+	workspaceState, err := repo.GetPriorityWorkspaceSyncState(context.Background(), "user1", "ws1")
+	if err != nil || workspaceState == nil || workspaceState.PendingSignature != "generation-b" || workspaceState.LastDecision != "pending" {
+		t.Fatalf("generation A overwrote generation B state: state=%+v err=%v", workspaceState, err)
+	}
 }
 
 func (f *fakeTargetPriorityActioner) UpdateAdminTargetPriority(session upstream.Session, targetID string, priority int) error {
 	f.calls = append(f.calls, priorityUpdateCall{targetID: targetID, priority: priority})
+	if f.called != nil {
+		f.called <- struct{}{}
+	}
 	return nil
 }
 
@@ -782,15 +1292,16 @@ func TestMultiplierPrioritySync_MissingMultiplierDoesNotWriteOrRestore(t *testin
 
 func TestHealthPrioritySync_MissingMultiplierMovesToCurrentBandEnd(t *testing.T) {
 	tests := []struct {
-		name    string
-		status  string
-		current int
-		state   State
-		want    int
+		name      string
+		status    string
+		current   int
+		state     State
+		want      int
+		wantWrite bool
 	}{
-		{name: "deterministic missing leaves suspended band", status: MultiplierResolutionMissing, current: 100000, state: StateHealthy, want: 99},
-		{name: "temporary unavailable leaves unprobed band", status: MultiplierResolutionUnavailable, current: 10000, state: StateHealthy, want: 99},
-		{name: "missing multiplier still enters degraded band", status: MultiplierResolutionMissing, current: 99, state: StateDegraded, want: 9999},
+		{name: "deterministic missing leaves suspended band", status: MultiplierResolutionMissing, current: 100000, state: StateHealthy, want: 99, wantWrite: true},
+		{name: "temporary unavailable keeps current priority", status: MultiplierResolutionUnavailable, current: 10000, state: StateHealthy},
+		{name: "missing multiplier still enters degraded band", status: MultiplierResolutionMissing, current: 99, state: StateDegraded, want: 9999, wantWrite: true},
 	}
 
 	for _, test := range tests {
@@ -823,14 +1334,60 @@ func TestHealthPrioritySync_MissingMultiplierMovesToCurrentBandEnd(t *testing.T)
 				"user1", "ws1", inventory, true, states, []PrioritySyncState{stored},
 			)
 
+			if !test.wantWrite {
+				if len(actions.calls) != 0 {
+					t.Fatalf("temporarily unavailable metadata must not write priority: %+v", actions.calls)
+				}
+				if updated := repo.priorityStates["user1|ws1|"+targetID]; updated.LastAppliedPriority != test.current {
+					t.Fatalf("temporarily unavailable metadata changed checkpoint: %+v", updated)
+				}
+				return
+			}
 			if len(actions.calls) != 1 || actions.calls[0].priority != test.want {
-				t.Fatalf("missing multiplier must move to current health band end %d: %+v", test.want, actions.calls)
+				t.Fatalf("complete deterministic missing metadata must move to health band end %d: %+v", test.want, actions.calls)
 			}
 			updated := repo.priorityStates["user1|ws1|"+targetID]
 			if updated.LastAppliedPriority != test.want || updated.EffectiveMultiplier != historicalMultiplier {
 				t.Fatalf("health band write must preserve historical multiplier checkpoint: %+v", updated)
 			}
 		})
+	}
+}
+
+func TestHealthPrioritySyncUnavailableTargetStopsWorkspaceHealthRanking(t *testing.T) {
+	repo := newFakeRepository()
+	actions := &fakeTargetPriorityActioner{}
+	service := &Service{repo: repo, priorityActions: actions}
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	policy.StrategyMode = StrategyModeHealthProbe
+	multiplier := 0.1
+	inventory := map[string]*priorityTargetInventory{
+		"sub2api:ws1:100": {
+			target:   AdminProbeTarget{TargetID: "sub2api:ws1:100", AccountID: "100", Models: []string{"gpt-4o"}},
+			policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{
+				status: MultiplierResolutionResolved, info: upstreamKeyGroupInfo{effectiveMultiplier: &multiplier},
+			},
+			currentPriority: 50, priorityPresent: true,
+		},
+		"sub2api:ws1:200": {
+			target:   AdminProbeTarget{TargetID: "sub2api:ws1:200", AccountID: "200", Models: []string{"gpt-4o"}},
+			policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{status: MultiplierResolutionUnavailable},
+			currentPriority: 60, priorityPresent: true,
+		},
+	}
+	states := []ConnectionHealthState{
+		{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy},
+		{ConnectionID: "sub2api:ws1:200", ModelName: "gpt-4o", State: StateHealthy},
+	}
+
+	service.syncWorkspacePriorities(
+		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true, states, nil,
+	)
+	if len(actions.calls) != 0 || len(repo.priorityStates) != 0 {
+		t.Fatalf("incomplete workspace health ranking wrote priority: calls=%+v states=%+v", actions.calls, repo.priorityStates)
 	}
 }
 
@@ -1124,9 +1681,8 @@ func TestHealthPrioritySync_UsesFallbackForDeterministicMissingAndBandEndForUnav
 	unavailableSites := fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI}}
 	service, repo, actions = newService(unavailableSites)
 	service.syncMultiplierPriorities(context.Background(), []Policy{policy}, nil, []GroupPolicyAssignment{assignment}, nil, nil)
-	state := repo.priorityStates["user1|ws1|newapi:ws1:100"]
-	if len(actions.calls) != 1 || actions.calls[0].priority != 10000 || state.LastAppliedPriority != 10000 || state.EffectiveMultiplier != 0 {
-		t.Fatalf("unavailable lookup must enter the current health band end without a guessed multiplier: calls=%+v state=%+v", actions.calls, repo.priorityStates)
+	if len(actions.calls) != 0 || len(repo.priorityStates) != 0 {
+		t.Fatalf("unavailable lookup must keep Priority untouched until metadata is complete: calls=%+v state=%+v", actions.calls, repo.priorityStates)
 	}
 }
 

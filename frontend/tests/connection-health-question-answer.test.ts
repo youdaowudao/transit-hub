@@ -54,6 +54,7 @@ const questionAnswerRecord = (
   questionId: `question-${id}`,
   questionName: `Question ${id}`,
   questionBody: `Body ${id}`,
+  reasoningEffort: null,
   answerBody: `Answer ${id}`,
   status,
   errorType: '',
@@ -148,7 +149,7 @@ describe('connection health question answers', () => {
     stubStorage()
     const batch = {
       batchId: 'batch-1', records: [], submittedCount: 4, completedCount: 0,
-      active: true, currentModel: 'model-a', currentQuestion: 'question-a',
+      reasoningEffort: 'high', active: true, currentModel: 'model-a', currentQuestion: 'question-a',
     }
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(batch), { status: 200 }))
@@ -160,6 +161,7 @@ describe('connection health question answers', () => {
       'sub2api:ws1:account-1',
       ['model-a', 'model-b'],
       ['question-a', 'question-b'],
+      'high',
       controller.signal,
     )).resolves.toEqual(batch)
     await cancelQuestionAnswerBatch('sub2api:ws1:account-1', 'batch-1')
@@ -169,7 +171,7 @@ describe('connection health question answers', () => {
       '/api/connection-health/targets/sub2api%3Aws1%3Aaccount-1/question-answers/batches',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ models: ['model-a', 'model-b'], questionIds: ['question-a', 'question-b'] }),
+        body: JSON.stringify({ models: ['model-a', 'model-b'], questionIds: ['question-a', 'question-b'], reasoningEffort: 'high' }),
         signal: controller.signal,
       }),
     )
@@ -178,6 +180,19 @@ describe('connection health question answers', () => {
       '/api/connection-health/targets/sub2api%3Aws1%3Aaccount-1/question-answers/batches/batch-1/cancel',
       expect.objectContaining({ method: 'POST' }),
     )
+  })
+
+  it('exposes the four reasoning-effort options, default, locking, restoration, and legacy label', () => {
+    expect(dialogSource).toContain("const qaReasoningEffort = ref<QuestionAnswerReasoningEffort>('medium')")
+    expect(dialogSource).toContain("{ value: 'low', labelKey: 'low' }")
+    expect(dialogSource).toContain("{ value: 'medium', labelKey: 'medium' }")
+    expect(dialogSource).toContain("{ value: 'high', labelKey: 'high' }")
+    expect(dialogSource).toContain("{ value: 'xhigh', labelKey: 'xhigh' }")
+    expect(dialogSource).toContain('if (batch.reasoningEffort)')
+    expect(dialogSource).toContain(':disabled="qaSelectionLocked"')
+    expect(dialogSource).toContain('questionAnswerReasoningEffortLabel(record.reasoningEffort)')
+    expect(dialogSource).toContain('questionAnswerReasoningEffortLabel(qaBatch.reasoningEffort)')
+    expect(dialogSource).toContain('reasoningEffort.unspecified')
   })
 
   it('uses page-scoped history and record-scoped automatic marking endpoints', async () => {

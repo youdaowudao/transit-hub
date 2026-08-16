@@ -202,6 +202,13 @@ export interface AdminGroupHealth {
   todayCost?: number | null
   recentHourCost?: number | null
   costObservedAt?: string | null
+  costMode?: 'exact' | 'retained' | 'unknown' | string
+  costSource?: string
+  costReason?: string
+  costComplete?: boolean
+  siteReportedCost?: number | null
+  groupAttributedCost?: number | null
+  unattributedCost?: number | null
   minProductionRank?: number | null
   // accountsError 非空（i18n key）表示该分组账号列表加载失败，其余分组不受影响。
   accountsError?: string
@@ -351,6 +358,7 @@ export interface TestQuestionInput {
 }
 
 export type QuestionAnswerStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type QuestionAnswerReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 
 export interface QuestionAnswerRecord {
   id: string
@@ -360,6 +368,7 @@ export interface QuestionAnswerRecord {
   questionId: string
   questionName: string
   questionBody: string
+  reasoningEffort: QuestionAnswerReasoningEffort | null
   answerBody: string
   status: QuestionAnswerStatus
   errorType: string
@@ -389,6 +398,7 @@ export interface QuestionAnswerHistory {
 export interface QuestionAnswerBatch {
   batchId: string
   records: QuestionAnswerRecord[]
+  reasoningEffort: QuestionAnswerReasoningEffort | null
   submittedCount: number
   completedCount: number
   active: boolean
@@ -431,6 +441,17 @@ export interface AdminGroupPolicyConfiguration {
   policies: TargetPolicyAssignmentSummary[]
   excludedTargetIds: string[]
   probeSortFallbackMultiplier?: number | null
+	prioritySyncStatus?: 'pending' | 'running' | 'success' | 'failed' | string
+}
+
+export interface PrioritySyncStatus {
+	workspaceId: string
+	status: 'idle' | 'pending' | 'running' | 'success' | 'failed' | string
+	errorKey?: string
+	pendingSince?: string | null
+	lastAttemptAt?: string | null
+	lastFailureAt?: string | null
+	failedCount: number
 }
 
 export interface AdminGroupPolicyConfigurationInput {

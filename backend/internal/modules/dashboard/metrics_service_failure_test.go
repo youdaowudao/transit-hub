@@ -136,16 +136,16 @@ func TestLiveMetricsCostFailureStillPersistsRevenue(t *testing.T) {
 	if decoded["todayProfit"] != 30.0 {
 		t.Fatalf("todayProfit = %#v, want 30", decoded["todayProfit"])
 	}
-	// 上游本轮失败但仍保留最后值：成本和利润继续显示，并标记 fallback。
-	if decoded["todayPurchase"] != 20.0 || decoded["netProfit"] != 10.0 {
-		t.Fatalf("cost failure fallback amounts: todayPurchase=%#v netProfit=%#v", decoded["todayPurchase"], decoded["netProfit"])
+	// 上游失败且没有同日确认值时，不得把无日期缓存当作今日成本。
+	if decoded["todayPurchase"] != nil || decoded["netProfit"] != nil {
+		t.Fatalf("cost failure must remain unavailable: todayPurchase=%#v netProfit=%#v", decoded["todayPurchase"], decoded["netProfit"])
 	}
 	// 新实现：成本质量通过 costQuality 字段暴露，不再写入 metricErrors
 	if cq, hasCq := decoded["costQuality"].(map[string]any); !hasCq || cq["complete"] != false {
 		t.Fatalf("costQuality.complete should be false, got %#v", decoded["costQuality"])
 	}
-	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayProfit == nil || *repo.snapshots[0].TodayProfit != 30 || repo.snapshots[0].TodayPurchase == nil || *repo.snapshots[0].TodayPurchase != 20 {
-		t.Fatalf("fallback snapshot = %+v, want revenue 30 and cost 20", repo.snapshots)
+	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayProfit == nil || *repo.snapshots[0].TodayProfit != 30 || repo.snapshots[0].TodayPurchase != nil {
+		t.Fatalf("unavailable cost snapshot = %+v, want revenue 30 and unknown cost", repo.snapshots)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestLiveMetricsUsesCachedCostsAndKeepsPartialSuccess(t *testing.T) {
 	upstreams := &fakeUpstreamLister{cachedSites: []upstream.Response{
 		{
 			ID: "site-success", Status: upstream.StatusConnected, RechargeRate: 2,
-			Metrics: upstream.Metrics{TodayConsume: upstream.MetricValue{Value: &successCost}},
+			Metrics: upstream.Metrics{TodayConsume: upstream.MetricValue{Value: &successCost}, TodayConsumeDate: businesstime.Today()},
 		},
 		{
 			ID: "site-failure", Status: upstream.StatusError, ErrorKey: &failedKey, RechargeRate: 2,
@@ -194,7 +194,7 @@ func TestLiveMetricsUsesLatestPersistedSiteCostWhenCurrentValueMissing(t *testin
 	historicalCost := 8.0
 	observedAt := time.Now().Add(-4 * time.Hour)
 	repo := &fakeMetricsRepository{latestSiteCosts: []SiteDailyCost{{
-		SiteID: "site-failure", AdjustedCost: &historicalCost, ObservedAt: observedAt,
+		SiteID: "site-failure", AdjustedCost: &historicalCost, ObservedAt: &observedAt,
 	}}}
 	service := newLiveMetricsTestService(
 		&fakePlatformClient{usageStats: 30},
@@ -211,7 +211,7 @@ func TestLiveMetricsUsesLatestPersistedSiteCostWhenCurrentValueMissing(t *testin
 	if response.TodayPurchase == nil || *response.TodayPurchase != 8 || response.NetProfit == nil || *response.NetProfit != 22 {
 		t.Fatalf("historical fallback amounts: cost=%v net=%v", response.TodayPurchase, response.NetProfit)
 	}
-	if response.CostQuality == nil || response.CostQuality.Mode != "fallback" || response.CostQuality.FallbackSites != 1 || response.CostQuality.FallbackAt == nil || !response.CostQuality.FallbackAt.Equal(observedAt) {
+	if response.CostQuality == nil || response.CostQuality.Mode != "retained" || response.CostQuality.RetainedSites != 1 || response.CostQuality.FallbackAt == nil || !response.CostQuality.FallbackAt.Equal(observedAt) || !response.CostQuality.Complete {
 		t.Fatalf("historical fallback quality = %+v", response.CostQuality)
 	}
 }
@@ -245,7 +245,7 @@ func TestLiveMetricsAllCachedCostsUnavailableReturnsZeroAndError(t *testing.T) {
 	}
 }
 
-func TestLiveMetricsUsesSameDayCachedCostAsFallback(t *testing.T) {
+func TestLiveMetricsDoesNotUseErroredCacheAsFallback(t *testing.T) {
 	errorKey := upstream.ErrorNetwork
 	metrics := todayCachedMetrics(10)
 	repo := &fakeMetricsRepository{}
@@ -261,21 +261,21 @@ func TestLiveMetricsUsesSameDayCachedCostAsFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LiveMetrics() error: %v", err)
 	}
-	if response.TodayPurchase == nil || *response.TodayPurchase != 20 || response.NetProfit == nil || *response.NetProfit != 10 {
-		t.Fatalf("fallback amounts: cost=%v net=%v", response.TodayPurchase, response.NetProfit)
+	if response.TodayPurchase != nil || response.NetProfit != nil {
+		t.Fatalf("errored cache must not become confirmed cost: cost=%v net=%v", response.TodayPurchase, response.NetProfit)
 	}
-	if response.CostQuality == nil || response.CostQuality.Mode != "fallback" || response.CostQuality.FallbackSites != 1 || response.CostQuality.FallbackAt == nil || response.CostQuality.Complete {
-		t.Fatalf("fallback quality = %+v", response.CostQuality)
+	if response.CostQuality == nil || response.CostQuality.Mode != "unavailable" || response.CostQuality.MissingSites != 1 || response.CostQuality.Complete {
+		t.Fatalf("unavailable quality = %+v", response.CostQuality)
 	}
-	if response.SettlementStatus != SettlementStatusFallback {
-		t.Fatalf("fallback settlement status = %q, want fallback", response.SettlementStatus)
+	if response.SettlementStatus != SettlementStatusPartial {
+		t.Fatalf("settlement status = %q, want partial", response.SettlementStatus)
 	}
-	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayPurchase == nil || *repo.snapshots[0].TodayPurchase != 20 || repo.snapshots[0].SettlementStatus != SettlementStatusFallback {
-		t.Fatalf("fallback snapshot = %+v", repo.snapshots)
+	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayPurchase != nil {
+		t.Fatalf("unknown-cost snapshot = %+v", repo.snapshots)
 	}
 }
 
-func TestCachedCostUsesStaleSameDayValueAsFallback(t *testing.T) {
+func TestCachedCostRejectsStaleSameDayValueWithoutConfirmation(t *testing.T) {
 	observedAt := time.Now().Add(-3 * time.Hour)
 	cost := 10.0
 	_, quality := summarizeCachedUpstreamCostsWithQuality([]upstream.Response{{
@@ -287,12 +287,12 @@ func TestCachedCostUsesStaleSameDayValueAsFallback(t *testing.T) {
 		},
 	}}, businesstime.Today(), 2*time.Hour)
 
-	if quality.Mode != "fallback" || quality.FallbackSites != 1 || quality.FallbackAt == nil || !quality.FallbackAt.Equal(observedAt) {
+	if quality.Mode != "unavailable" || quality.CollectedSites != 0 || quality.MissingSites != 1 {
 		t.Fatalf("stale same-day quality = %+v", quality)
 	}
 }
 
-func TestCachedCostFallbackAcceptsPreviousBusinessDay(t *testing.T) {
+func TestCachedCostRejectsPreviousBusinessDay(t *testing.T) {
 	errorKey := upstream.ErrorNetwork
 	observedAt := time.Now().Add(-time.Hour)
 	cost := 10.0
@@ -305,7 +305,7 @@ func TestCachedCostFallbackAcceptsPreviousBusinessDay(t *testing.T) {
 		},
 	}}, "2026-08-08", 2*time.Hour)
 
-	if total != 10 || quality.Mode != "fallback" || quality.CollectedSites != 1 || quality.FallbackSites != 1 || len(quality.Failures) != 0 {
+	if total != 0 || quality.Mode != "unavailable" || quality.CollectedSites != 0 || quality.MissingSites != 1 || len(quality.Failures) != 1 {
 		t.Fatalf("previous-day quality = %+v", quality)
 	}
 }

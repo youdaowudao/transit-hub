@@ -42,6 +42,8 @@ type healthRepository interface {
 	ListAllPolicyAssignments(ctx context.Context) ([]PolicyAssignment, error)
 	ReplaceGroupPolicyConfiguration(ctx context.Context, userID string, adminAccountID string, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64) error
 	CreatePolicyAndReplaceGroupConfiguration(ctx context.Context, policy Policy, targets []ModelTarget, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64) error
+	ReplaceGroupPolicyConfigurationAndRequestPrioritySync(ctx context.Context, userID string, adminAccountID string, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64, pendingSignature string) error
+	CreatePolicyAndReplaceGroupConfigurationAndRequestPrioritySync(ctx context.Context, policy Policy, targets []ModelTarget, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64, pendingSignature string) error
 	ListGroupPolicyAssignmentsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]GroupPolicyAssignment, error)
 	ListAllGroupPolicyAssignments(ctx context.Context) ([]GroupPolicyAssignment, error)
 	ListGroupTargetExclusionsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]GroupTargetExclusion, error)
@@ -51,6 +53,12 @@ type healthRepository interface {
 	ListAllPrioritySyncStates(ctx context.Context) ([]PrioritySyncState, error)
 	UpsertPrioritySyncState(ctx context.Context, state PrioritySyncState) error
 	DeletePrioritySyncState(ctx context.Context, userID string, adminAccountID string, targetID string) error
+	GetPriorityWorkspaceSyncState(ctx context.Context, userID string, adminAccountID string) (*PriorityWorkspaceSyncState, error)
+	ListAllPriorityWorkspaceSyncStates(ctx context.Context) ([]PriorityWorkspaceSyncState, error)
+	MarkPriorityWorkspaceSyncRunning(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error)
+	MarkPriorityWorkspaceSyncFailed(ctx context.Context, userID string, adminAccountID string, pendingSignature string, errorDetail string, failedCount int) (bool, error)
+	MarkPriorityWorkspaceSyncSucceeded(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error)
+	IsPriorityWorkspaceGenerationCurrent(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error)
 	GetTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) (*TargetActionState, error)
 	ListTargetActionStates(ctx context.Context, userID string, adminAccountID string) ([]TargetActionState, error)
 	ListAllTargetActionStates(ctx context.Context) ([]TargetActionState, error)
@@ -62,47 +70,55 @@ type healthRepository interface {
 // Service 组装 connection_health 模块的全部业务逻辑：聚合查询、策略管理、手动动作、
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
-	repo                 healthRepository
-	eventRetention       eventRetentionRepository
-	questionAnswers      questionAnswerRepository
-	mySites              MySitesReader
-	sites                SiteLookup
-	groupCosts           GroupCostReader
-	accounts             AdminAccountResolver
-	dispatcher           RemoteActionRunner
-	probeRunner          *RealProbeRunner
-	modelDiscovery       *ModelDiscoveryRunner
-	platformGroups       PlatformGroupReader
-	priorityActions      TargetPriorityActioner
-	schedulableActions   TargetSchedulableActioner
-	probeLimiterMu       sync.Mutex
-	probeLimiter         *probeConcurrencyLimiter
-	adminMultiplierMu    sync.Mutex
-	adminMultiplierCache map[string]adminMultiplierCacheEntry
-	questionAnswerMu     sync.Mutex
-	questionAnswerCtx    context.Context
-	questionAnswerStop   context.CancelFunc
-	questionAnswerClosed bool
-	questionAnswerRuns   map[string]*activeQuestionAnswerBatch
-	questionAnswerWG     sync.WaitGroup
-	questionAnswerHTTP   *QuestionAnswerRunner
-	questionAnswerTTL    time.Duration
+	repo                   healthRepository
+	eventRetention         eventRetentionRepository
+	questionAnswers        questionAnswerRepository
+	mySites                MySitesReader
+	sites                  SiteLookup
+	groupCosts             GroupCostReader
+	accounts               AdminAccountResolver
+	dispatcher             RemoteActionRunner
+	probeRunner            *RealProbeRunner
+	modelDiscovery         *ModelDiscoveryRunner
+	platformGroups         PlatformGroupReader
+	priorityActions        TargetPriorityActioner
+	schedulableActions     TargetSchedulableActioner
+	probeLimiterMu         sync.Mutex
+	probeLimiter           *probeConcurrencyLimiter
+	adminMultiplierMu      sync.Mutex
+	adminMultiplierCache   map[string]adminMultiplierCacheEntry
+	multiplierSnapshotMu   sync.Mutex
+	multiplierSnapshots    map[string]*multiplierSnapshotEntry
+	priorityTriggerMu      sync.Mutex
+	priorityTriggerRunning map[string]bool
+	priorityTriggerPending map[string]string
+	questionAnswerMu       sync.Mutex
+	questionAnswerCtx      context.Context
+	questionAnswerStop     context.CancelFunc
+	questionAnswerClosed   bool
+	questionAnswerRuns     map[string]*activeQuestionAnswerBatch
+	questionAnswerWG       sync.WaitGroup
+	questionAnswerHTTP     *QuestionAnswerRunner
+	questionAnswerTTL      time.Duration
 }
 
 func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner) *Service {
 	service := &Service{
-		repo:                 repo,
-		eventRetention:       repo,
-		questionAnswers:      repo,
-		mySites:              mySites,
-		sites:                sites,
-		dispatcher:           newRemoteActionDispatcher(sites, mySites, platform),
-		probeRunner:          NewRealProbeRunner(),
-		modelDiscovery:       NewModelDiscoveryRunner(),
-		probeLimiter:         newProbeConcurrencyLimiter(globalProbeConcurrency, perSiteProbeConcurrency),
-		adminMultiplierCache: make(map[string]adminMultiplierCacheEntry),
-		questionAnswerHTTP:   NewQuestionAnswerRunner(),
-		questionAnswerTTL:    QuestionAnswerRequestTimeout,
+		repo:                   repo,
+		eventRetention:         repo,
+		questionAnswers:        repo,
+		mySites:                mySites,
+		sites:                  sites,
+		dispatcher:             newRemoteActionDispatcher(sites, mySites, platform),
+		probeRunner:            NewRealProbeRunner(),
+		modelDiscovery:         NewModelDiscoveryRunner(),
+		probeLimiter:           newProbeConcurrencyLimiter(globalProbeConcurrency, perSiteProbeConcurrency),
+		adminMultiplierCache:   make(map[string]adminMultiplierCacheEntry),
+		multiplierSnapshots:    make(map[string]*multiplierSnapshotEntry),
+		priorityTriggerRunning: make(map[string]bool),
+		priorityTriggerPending: make(map[string]string),
+		questionAnswerHTTP:     NewQuestionAnswerRunner(),
+		questionAnswerTTL:      QuestionAnswerRequestTimeout,
 	}
 	service.initializeQuestionAnswerRuntime()
 	// 真实 PlatformService 同时实现优先级更新能力；测试或旧注入器如果尚未实现，倍率策略会

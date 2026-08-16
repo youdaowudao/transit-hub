@@ -14,6 +14,7 @@ import {
 } from 'lucide-vue-next'
 import { connectionHealthMessageKey, useConnectionHealth } from '../../composables/useConnectionHealth'
 import type {
+	AdminGroupPolicyConfiguration,
   AdminGroupAccount,
   AdminGroupHealth,
   ConnectionHealthPolicy,
@@ -33,7 +34,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: 'close'): void
-  (event: 'saved'): void
+	(event: 'saved', configuration?: AdminGroupPolicyConfiguration): void
 }>()
 
 import { t, te } from '@/locales'
@@ -377,7 +378,7 @@ const save = async () => {
       return
     }
     phase.value = 'ready'
-    emit('saved')
+		emit('saved')
     return
   }
 
@@ -398,7 +399,7 @@ const save = async () => {
         return
       }
       phase.value = 'ready'
-      emit('saved')
+			emit('saved')
       return
     }
     errorKey.value = outcome.errorKey
@@ -407,7 +408,7 @@ const save = async () => {
   }
   clearPendingLegacyPolicy(group)
   phase.value = 'ready'
-  emit('saved')
+	emit('saved', outcome.configuration)
 }
 
 const close = () => {

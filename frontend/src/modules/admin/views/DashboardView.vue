@@ -395,7 +395,7 @@ const cards = computed<DashboardCoreCard[]>(() => {
   const cq = liveData.value?.costQuality
   const costMode = cq?.mode ?? (cq?.complete ? 'exact' : 'partial')
   const costIncomplete = cq && (costMode === 'partial' || costMode === 'unavailable')
-  const costFallback = costMode === 'fallback'
+  const costFallback = costMode === 'fallback' || costMode === 'retained'
   const fallbackTime = cq?.fallbackAt
     ? formatDateTime(Date.parse(cq.fallbackAt), locale) ?? t('admin.dashboard.common.unavailable')
     : t('admin.dashboard.common.unavailable')

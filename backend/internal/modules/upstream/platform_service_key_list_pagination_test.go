@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -69,6 +70,46 @@ func TestListSub2APIKeysContext_DoesNotReturnPartialPages(t *testing.T) {
 	})
 	if err == nil || keys != nil {
 		t.Fatalf("partial key list must fail as a whole, keys=%d err=%v", len(keys), err)
+	}
+}
+
+func TestListSub2APIKeysUntilContextStopsWhenRequestedIDsAreFound(t *testing.T) {
+	pages := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		writeJSON(w, map[string]any{"data": keyListPage(page, true), "total": 1000})
+	}))
+	defer server.Close()
+
+	keys, err := NewPlatformService(NewHTTPClient(server.Client())).ListSub2APIKeysUntilContext(context.Background(), Session{
+		Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token",
+	}, []string{"1", "100"})
+	if err != nil {
+		t.Fatalf("ListSub2APIKeysUntilContext() error: %v", err)
+	}
+	if pages != 1 || len(keys) != 2 {
+		t.Fatalf("targeted key scan pages=%d keys=%d, want one page and only requested records", pages, len(keys))
+	}
+}
+
+func TestListNewAPITokensUntilContextStopsWhenRequestedIDsAreFound(t *testing.T) {
+	pages := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		page, _ := strconv.Atoi(r.URL.Query().Get("p"))
+		writeJSON(w, map[string]any{"data": map[string]any{"items": keyListPage(page, false), "total": 1000}})
+	}))
+	defer server.Close()
+
+	tokens, err := NewPlatformService(NewHTTPClient(server.Client())).ListNewAPITokensUntilContext(context.Background(), Session{
+		Platform: PlatformNewAPI, BaseURL: server.URL, Cookie: "session=abc", UserID: "1",
+	}, []string{"1", "100"})
+	if err != nil {
+		t.Fatalf("ListNewAPITokensUntilContext() error: %v", err)
+	}
+	if pages != 1 || len(tokens) != 2 {
+		t.Fatalf("targeted token scan pages=%d tokens=%d, want one page and only requested records", pages, len(tokens))
 	}
 }
 

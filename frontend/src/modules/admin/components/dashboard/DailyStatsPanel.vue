@@ -69,7 +69,7 @@
               <td class="text-right py-2 px-2">
                 <span v-if="item.netProfitCeiling != null" class="text-xs">
                   {{ formatCny(item.netProfitCeiling) }}
-                  <span v-if="item.settlementStatus !== 'final' && item.settlementStatus !== 'partial_high'" class="text-muted-foreground">*</span>
+                  <span v-if="item.settlementStatus !== 'final' || item.costQualityMode === 'retained'" class="text-muted-foreground">*</span>
                 </span>
                 <span v-else class="text-muted-foreground">—</span>
               </td>
@@ -83,7 +83,7 @@
                 <span
                   class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
                   :class="statusClass(item.settlementStatus)"
-                >{{ statusLabel(item.settlementStatus) }}</span>
+                >{{ item.costQualityMode === 'retained' ? '已结算（沿用确认值）' : statusLabel(item.settlementStatus) }}</span>
               </td>
             </tr>
             <!-- 展开站点明细 -->
@@ -112,6 +112,7 @@
                     <span>
                       <span v-if="sc.adjustedCost != null">{{ formatCny(sc.adjustedCost) }}</span>
                       <span v-else class="text-destructive">{{ sc.errorReason || sc.status }}</span>
+                      <span v-if="sc.lastAttemptError" class="ml-1 text-muted-foreground">({{ sc.lastAttemptError }})</span>
                     </span>
                   </div>
                 </div>

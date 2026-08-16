@@ -20,14 +20,16 @@ const (
 )
 
 const (
-	ErrorTestQuestionInvalid          = "admin.connectionHealth.errors.testQuestionInvalid"
-	ErrorTestQuestionNotFound         = "admin.connectionHealth.errors.testQuestionNotFound"
-	ErrorTestQuestionDisabled         = "admin.connectionHealth.errors.testQuestionDisabled"
-	ErrorQuestionAnswerSelection      = "admin.connectionHealth.errors.questionAnswerSelection"
-	ErrorQuestionAnswerActive         = "admin.connectionHealth.errors.questionAnswerActive"
-	ErrorQuestionAnswerBatchNotFound  = "admin.connectionHealth.errors.questionAnswerBatchNotFound"
-	ErrorQuestionAnswerMarkForbidden  = "admin.connectionHealth.errors.questionAnswerMarkForbidden"
-	ErrorQuestionAnswerServiceStopped = "admin.connectionHealth.errors.questionAnswerServiceStopped"
+	ErrorTestQuestionInvalid           = "admin.connectionHealth.errors.testQuestionInvalid"
+	ErrorTestQuestionNotFound          = "admin.connectionHealth.errors.testQuestionNotFound"
+	ErrorTestQuestionDisabled          = "admin.connectionHealth.errors.testQuestionDisabled"
+	ErrorQuestionAnswerSelection       = "admin.connectionHealth.errors.questionAnswerSelection"
+	ErrorQuestionAnswerReasoningEffort = "admin.connectionHealth.errors.questionAnswerReasoningEffort"
+	ErrorQuestionAnswerActive          = "admin.connectionHealth.errors.questionAnswerActive"
+	ErrorQuestionAnswerBatchNotFound   = "admin.connectionHealth.errors.questionAnswerBatchNotFound"
+	ErrorQuestionAnswerStorage         = "admin.connectionHealth.errors.questionAnswerStorage"
+	ErrorQuestionAnswerMarkForbidden   = "admin.connectionHealth.errors.questionAnswerMarkForbidden"
+	ErrorQuestionAnswerServiceStopped  = "admin.connectionHealth.errors.questionAnswerServiceStopped"
 )
 
 const (
@@ -45,6 +47,15 @@ const (
 )
 
 type QuestionAnswerStatus string
+
+type QuestionAnswerReasoningEffort string
+
+const (
+	QuestionAnswerReasoningEffortLow    QuestionAnswerReasoningEffort = "low"
+	QuestionAnswerReasoningEffortMedium QuestionAnswerReasoningEffort = "medium"
+	QuestionAnswerReasoningEffortHigh   QuestionAnswerReasoningEffort = "high"
+	QuestionAnswerReasoningEffortXHigh  QuestionAnswerReasoningEffort = "xhigh"
+)
 
 const (
 	QuestionAnswerPending   QuestionAnswerStatus = "pending"
@@ -70,21 +81,22 @@ type TestQuestionInput struct {
 }
 
 type QuestionAnswerRecord struct {
-	ID           string               `json:"id"`
-	TargetID     string               `json:"targetId"`
-	BatchID      string               `json:"batchId"`
-	ModelName    string               `json:"modelName"`
-	QuestionID   string               `json:"questionId"`
-	QuestionName string               `json:"questionName"`
-	QuestionBody string               `json:"questionBody"`
-	AnswerBody   string               `json:"answerBody"`
-	Status       QuestionAnswerStatus `json:"status"`
-	ErrorType    string               `json:"errorType"`
-	ManualError  bool                 `json:"manualError"`
-	CreatedAt    time.Time            `json:"createdAt"`
-	StartedAt    *time.Time           `json:"startedAt"`
-	CompletedAt  *time.Time           `json:"completedAt"`
-	UpdatedAt    time.Time            `json:"updatedAt"`
+	ID              string                         `json:"id"`
+	TargetID        string                         `json:"targetId"`
+	BatchID         string                         `json:"batchId"`
+	ModelName       string                         `json:"modelName"`
+	QuestionID      string                         `json:"questionId"`
+	QuestionName    string                         `json:"questionName"`
+	QuestionBody    string                         `json:"questionBody"`
+	ReasoningEffort *QuestionAnswerReasoningEffort `json:"reasoningEffort"`
+	AnswerBody      string                         `json:"answerBody"`
+	Status          QuestionAnswerStatus           `json:"status"`
+	ErrorType       string                         `json:"errorType"`
+	ManualError     bool                           `json:"manualError"`
+	CreatedAt       time.Time                      `json:"createdAt"`
+	StartedAt       *time.Time                     `json:"startedAt"`
+	CompletedAt     *time.Time                     `json:"completedAt"`
+	UpdatedAt       time.Time                      `json:"updatedAt"`
 }
 
 type QuestionAnswerStats struct {
@@ -104,18 +116,20 @@ type QuestionAnswerHistory struct {
 }
 
 type QuestionAnswerBatch struct {
-	BatchID         string                 `json:"batchId"`
-	Records         []QuestionAnswerRecord `json:"records"`
-	SubmittedCount  int                    `json:"submittedCount"`
-	CompletedCount  int                    `json:"completedCount"`
-	Active          bool                   `json:"active"`
-	CurrentModel    string                 `json:"currentModel"`
-	CurrentQuestion string                 `json:"currentQuestion"`
+	BatchID         string                         `json:"batchId"`
+	Records         []QuestionAnswerRecord         `json:"records"`
+	ReasoningEffort *QuestionAnswerReasoningEffort `json:"reasoningEffort"`
+	SubmittedCount  int                            `json:"submittedCount"`
+	CompletedCount  int                            `json:"completedCount"`
+	Active          bool                           `json:"active"`
+	CurrentModel    string                         `json:"currentModel"`
+	CurrentQuestion string                         `json:"currentQuestion"`
 }
 
 type QuestionAnswerStartInput struct {
-	Models      []string `json:"models"`
-	QuestionIDs []string `json:"questionIds"`
+	Models          []string `json:"models"`
+	QuestionIDs     []string `json:"questionIds"`
+	ReasoningEffort string   `json:"reasoningEffort"`
 }
 
 type activeQuestionAnswerBatch struct {
@@ -247,6 +261,10 @@ func validateTestQuestionInput(input TestQuestionInput) (string, string, error) 
 }
 
 func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, targetID string, input QuestionAnswerStartInput) (QuestionAnswerBatch, error) {
+	reasoningEffort, err := normalizeQuestionAnswerReasoningEffort(input.ReasoningEffort)
+	if err != nil {
+		return QuestionAnswerBatch{}, err
+	}
 	models := uniqueNonEmpty(input.Models)
 	questionIDs := uniqueNonEmpty(input.QuestionIDs)
 	if len(models) == 0 || len(questionIDs) == 0 {
@@ -312,7 +330,7 @@ func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, tar
 	s.questionAnswerWG.Add(1)
 	s.questionAnswerMu.Unlock()
 
-	records, err := s.questionAnswers.CreateQuestionAnswerBatch(startCtx, userID, targetID, batchID, models, questionIDs)
+	records, err := s.questionAnswers.CreateQuestionAnswerBatch(startCtx, userID, targetID, batchID, models, questionIDs, reasoningEffort)
 	if err != nil {
 		run.stop(QuestionAnswerErrorStorage)
 		s.removeQuestionAnswerRun(key, run)
@@ -342,8 +360,16 @@ func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, tar
 		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
 	}
 
+	batch, err := buildQuestionAnswerBatch(records)
+	if err != nil {
+		s.failQuestionAnswerRun(run, QuestionAnswerErrorStorage)
+		s.removeQuestionAnswerRun(key, run)
+		run.finish()
+		s.questionAnswerWG.Done()
+		return QuestionAnswerBatch{}, err
+	}
 	go s.runQuestionAnswerBatch(key, run, cloneQuestionAnswerRecords(records))
-	return buildQuestionAnswerBatch(records), nil
+	return batch, nil
 }
 
 func (s *Service) runQuestionAnswerBatch(key string, run *activeQuestionAnswerBatch, records []QuestionAnswerRecord) {
@@ -366,7 +392,7 @@ func (s *Service) runQuestionAnswerBatch(key string, run *activeQuestionAnswerBa
 		}
 
 		itemCtx, cancel := context.WithTimeout(run.ctx, s.questionAnswerTTL)
-		answer, errorType := s.questionAnswerHTTP.Ask(itemCtx, run.cred, record.ModelName, record.QuestionBody)
+		answer, errorType := s.questionAnswerHTTP.Ask(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort))
 		itemErr := itemCtx.Err()
 		cancel()
 		if run.stopped() != "" || (run.ctx.Err() != nil && !errors.Is(itemErr, context.DeadlineExceeded)) {
@@ -411,7 +437,7 @@ func (s *Service) LatestQuestionAnswerBatch(ctx context.Context, userID string, 
 	if err != nil {
 		return QuestionAnswerBatch{}, err
 	}
-	return buildQuestionAnswerBatch(records), nil
+	return buildQuestionAnswerBatch(records)
 }
 
 func (s *Service) GetQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string) (QuestionAnswerBatch, error) {
@@ -425,7 +451,7 @@ func (s *Service) GetQuestionAnswerBatch(ctx context.Context, userID string, tar
 	if len(records) == 0 {
 		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerBatchNotFound)
 	}
-	return buildQuestionAnswerBatch(records), nil
+	return buildQuestionAnswerBatch(records)
 }
 
 func (s *Service) StopQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string) (QuestionAnswerBatch, error) {
@@ -527,11 +553,15 @@ func (s *Service) ShutdownQuestionAnswers(ctx context.Context) error {
 	return errors.Join(stopErrors...)
 }
 
-func buildQuestionAnswerBatch(records []QuestionAnswerRecord) QuestionAnswerBatch {
-	batch := QuestionAnswerBatch{Records: cloneQuestionAnswerRecords(records), SubmittedCount: len(records)}
+func buildQuestionAnswerBatch(records []QuestionAnswerRecord) (QuestionAnswerBatch, error) {
+	reasoningEffort, err := aggregateQuestionAnswerReasoningEffort(records)
+	if err != nil {
+		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerStorage)
+	}
+	batch := QuestionAnswerBatch{Records: cloneQuestionAnswerRecords(records), ReasoningEffort: reasoningEffort, SubmittedCount: len(records)}
 	if len(records) == 0 {
 		batch.Records = []QuestionAnswerRecord{}
-		return batch
+		return batch, nil
 	}
 	batch.BatchID = records[0].BatchID
 	for _, record := range records {
@@ -548,7 +578,57 @@ func buildQuestionAnswerBatch(records []QuestionAnswerRecord) QuestionAnswerBatc
 			batch.CompletedCount++
 		}
 	}
-	return batch
+	return batch, nil
+}
+
+func normalizeQuestionAnswerReasoningEffort(value string) (QuestionAnswerReasoningEffort, error) {
+	switch strings.TrimSpace(value) {
+	case "":
+		return QuestionAnswerReasoningEffortMedium, nil
+	case string(QuestionAnswerReasoningEffortLow):
+		return QuestionAnswerReasoningEffortLow, nil
+	case string(QuestionAnswerReasoningEffortMedium):
+		return QuestionAnswerReasoningEffortMedium, nil
+	case string(QuestionAnswerReasoningEffortHigh):
+		return QuestionAnswerReasoningEffortHigh, nil
+	case string(QuestionAnswerReasoningEffortXHigh):
+		return QuestionAnswerReasoningEffortXHigh, nil
+	default:
+		return "", requestError(ErrorQuestionAnswerReasoningEffort)
+	}
+}
+
+func questionAnswerReasoningEffortOrDefault(value *QuestionAnswerReasoningEffort) QuestionAnswerReasoningEffort {
+	if value == nil {
+		return QuestionAnswerReasoningEffortMedium
+	}
+	return *value
+}
+
+func aggregateQuestionAnswerReasoningEffort(records []QuestionAnswerRecord) (*QuestionAnswerReasoningEffort, error) {
+	var selected *QuestionAnswerReasoningEffort
+	sawNull := false
+	for _, record := range records {
+		if record.ReasoningEffort == nil {
+			if selected != nil {
+				return nil, errors.New("question answer batch has mixed reasoning effort snapshots")
+			}
+			sawNull = true
+			continue
+		}
+		if sawNull {
+			return nil, errors.New("question answer batch has mixed reasoning effort snapshots")
+		}
+		if selected == nil {
+			value := *record.ReasoningEffort
+			selected = &value
+			continue
+		}
+		if *selected != *record.ReasoningEffort {
+			return nil, errors.New("question answer batch has mixed reasoning effort snapshots")
+		}
+	}
+	return selected, nil
 }
 
 func uniqueNonEmpty(values []string) []string {

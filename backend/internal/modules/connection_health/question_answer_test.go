@@ -111,7 +111,7 @@ func (f *fakeQuestionAnswerRepository) DeleteTestQuestion(_ context.Context, _ s
 	return true, nil
 }
 
-func (f *fakeQuestionAnswerRepository) CreateQuestionAnswerBatch(_ context.Context, _ string, targetID string, batchID string, models []string, questionIDs []string) ([]QuestionAnswerRecord, error) {
+func (f *fakeQuestionAnswerRepository) CreateQuestionAnswerBatch(_ context.Context, _ string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort) ([]QuestionAnswerRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, record := range f.records {
@@ -134,7 +134,8 @@ func (f *fakeQuestionAnswerRepository) CreateQuestionAnswerBatch(_ context.Conte
 			record := QuestionAnswerRecord{
 				ID: f.id("r"), TargetID: targetID, BatchID: batchID, ModelName: model,
 				QuestionID: question.ID, QuestionName: question.Name, QuestionBody: question.Body,
-				Status: QuestionAnswerPending, CreatedAt: now, UpdatedAt: now,
+				ReasoningEffort: questionAnswerReasoningEffortPointer(reasoningEffort),
+				Status:          QuestionAnswerPending, CreatedAt: now, UpdatedAt: now,
 			}
 			created = append(created, record)
 			f.records = append(f.records, record)
@@ -265,6 +266,20 @@ func (f *fakeQuestionAnswerRepository) SetQuestionAnswerManualError(_ context.Co
 	return nil, nil
 }
 
+type inconsistentQuestionAnswerRepository struct {
+	*fakeQuestionAnswerRepository
+}
+
+func (f *inconsistentQuestionAnswerRepository) CreateQuestionAnswerBatch(_ context.Context, _ string, targetID string, batchID string, _ []string, _ []string, _ QuestionAnswerReasoningEffort) ([]QuestionAnswerRecord, error) {
+	medium := QuestionAnswerReasoningEffortMedium
+	high := QuestionAnswerReasoningEffortHigh
+	now := time.Now()
+	return []QuestionAnswerRecord{
+		{ID: "mixed-1", TargetID: targetID, BatchID: batchID, ModelName: "model-a", QuestionID: "q1", QuestionName: "Q1", QuestionBody: "question", ReasoningEffort: &medium, Status: QuestionAnswerPending, CreatedAt: now, UpdatedAt: now},
+		{ID: "mixed-2", TargetID: targetID, BatchID: batchID, ModelName: "model-a", QuestionID: "q2", QuestionName: "Q2", QuestionBody: "question 2", ReasoningEffort: &high, Status: QuestionAnswerPending, CreatedAt: now, UpdatedAt: now},
+	}, nil
+}
+
 func newQuestionAnswerService(serverURL string, qaRepo *fakeQuestionAnswerRepository, healthRepo *fakeRepository) *Service {
 	reader := fakePlatformGroupReader{
 		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "group-1"}},
@@ -330,7 +345,7 @@ func TestQuestionAnswerBatchRunsDeduplicatedCombinationsInOrderWithoutMaxTokens(
 			question := messages[0].(map[string]any)["content"].(string)
 			model := payload["model"].(string)
 			mu.Lock()
-			requests = append(requests, model+"|"+question)
+			requests = append(requests, model+"|"+question+"|"+payload["reasoning_effort"].(string))
 			mu.Unlock()
 			_, _ = io.WriteString(w, fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, model+" answer"))
 		default:
@@ -348,7 +363,7 @@ func TestQuestionAnswerBatchRunsDeduplicatedCombinationsInOrderWithoutMaxTokens(
 	defer func() { _ = service.ShutdownQuestionAnswers(context.Background()) }()
 
 	batch, err := service.StartQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", QuestionAnswerStartInput{
-		Models: []string{"model-a", "model-a", "model-b"}, QuestionIDs: []string{"q1", "q1", "q2"},
+		Models: []string{"model-a", "model-a", "model-b"}, QuestionIDs: []string{"q1", "q1", "q2"}, ReasoningEffort: "high",
 	})
 	if err != nil {
 		t.Fatalf("start batch: %v", err)
@@ -360,12 +375,162 @@ func TestQuestionAnswerBatchRunsDeduplicatedCombinationsInOrderWithoutMaxTokens(
 	mu.Lock()
 	gotRequests := append([]string(nil), requests...)
 	mu.Unlock()
-	wantRequests := []string{"model-a|question one", "model-a|question two", "model-b|question one", "model-b|question two"}
+	wantRequests := []string{"model-a|question one|high", "model-a|question two|high", "model-b|question one|high", "model-b|question two|high"}
 	if fmt.Sprint(gotRequests) != fmt.Sprint(wantRequests) {
 		t.Fatalf("request order = %v, want %v", gotRequests, wantRequests)
 	}
+	if batch.ReasoningEffort == nil || *batch.ReasoningEffort != QuestionAnswerReasoningEffortHigh || completed.ReasoningEffort == nil || *completed.ReasoningEffort != QuestionAnswerReasoningEffortHigh {
+		t.Fatalf("reasoning effort snapshot = start=%v completed=%v", batch.ReasoningEffort, completed.ReasoningEffort)
+	}
 	if len(healthRepo.states) != 0 || len(healthRepo.events) != 0 || len(healthRepo.budgetClaims) != 0 {
 		t.Fatalf("question answers touched health state: states=%v events=%v budget=%v", healthRepo.states, healthRepo.events, healthRepo.budgetClaims)
+	}
+}
+
+func TestQuestionAnswerReasoningEffortDefaultsAndRejectsBeforeDiscovery(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path == "/v1/models" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-a"}]}`)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode default reasoning request: %v", err)
+		}
+		if payload["reasoning_effort"] != string(QuestionAnswerReasoningEffortMedium) {
+			t.Fatalf("default reasoning effort payload = %#v", payload["reasoning_effort"])
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"answer"}}]}`)
+	}))
+	defer server.Close()
+
+	qaRepo := newFakeQuestionAnswerRepository(TestQuestion{ID: "q1", Name: "Q1", Body: "question", Enabled: true})
+	service := newQuestionAnswerService(server.URL, qaRepo, newFakeRepository())
+	defer func() { _ = service.ShutdownQuestionAnswers(context.Background()) }()
+
+	_, err := service.StartQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", QuestionAnswerStartInput{
+		Models: []string{"model-a"}, QuestionIDs: []string{"q1"}, ReasoningEffort: "unsupported",
+	})
+	if err == nil || err.Error() != ErrorQuestionAnswerReasoningEffort {
+		t.Fatalf("invalid reasoning effort error = %v, want %s", err, ErrorQuestionAnswerReasoningEffort)
+	}
+	if requests != 0 || len(qaRepo.records) != 0 {
+		t.Fatalf("invalid reasoning effort touched upstream or repository: requests=%d records=%d", requests, len(qaRepo.records))
+	}
+
+	batch, err := service.StartQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", QuestionAnswerStartInput{
+		Models: []string{"model-a"}, QuestionIDs: []string{"q1"},
+	})
+	if err != nil {
+		t.Fatalf("default reasoning effort start: %v", err)
+	}
+	completed := waitQuestionAnswerBatch(t, service, batch.BatchID, false)
+	if completed.ReasoningEffort == nil || *completed.ReasoningEffort != QuestionAnswerReasoningEffortMedium || completed.Records[0].ReasoningEffort == nil || *completed.Records[0].ReasoningEffort != QuestionAnswerReasoningEffortMedium {
+		t.Fatalf("default reasoning effort snapshot = batch=%v record=%v", completed.ReasoningEffort, completed.Records[0].ReasoningEffort)
+	}
+}
+
+func TestQuestionAnswerUnsupportedReasoningEffortFailsOnceWithoutDowngrade(t *testing.T) {
+	var chatRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-a"}]}`)
+		case "/v1/chat/completions":
+			chatRequests++
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if payload["reasoning_effort"] != string(QuestionAnswerReasoningEffortXHigh) {
+				t.Fatalf("reasoning effort payload = %#v", payload["reasoning_effort"])
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = io.WriteString(w, `{"error":{"message":"reasoning_effort is unsupported"}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	qaRepo := newFakeQuestionAnswerRepository(TestQuestion{ID: "q1", Name: "Q1", Body: "question", Enabled: true})
+	service := newQuestionAnswerService(server.URL, qaRepo, newFakeRepository())
+	defer func() { _ = service.ShutdownQuestionAnswers(context.Background()) }()
+	batch, err := service.StartQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", QuestionAnswerStartInput{
+		Models: []string{"model-a"}, QuestionIDs: []string{"q1"}, ReasoningEffort: string(QuestionAnswerReasoningEffortXHigh),
+	})
+	if err != nil {
+		t.Fatalf("unsupported reasoning effort start: %v", err)
+	}
+	completed := waitQuestionAnswerBatch(t, service, batch.BatchID, false)
+	if chatRequests != 1 {
+		t.Fatalf("chat request count = %d, want 1", chatRequests)
+	}
+	if completed.Records[0].Status != QuestionAnswerFailed || completed.Records[0].ErrorType != QuestionAnswerErrorInvalidResponse {
+		t.Fatalf("unsupported reasoning effort record = %+v", completed.Records[0])
+	}
+}
+
+func TestBuildQuestionAnswerBatchReasoningEffortAggregation(t *testing.T) {
+	if batch, err := buildQuestionAnswerBatch(nil); err != nil || batch.ReasoningEffort != nil {
+		t.Fatalf("empty batch aggregation = %+v err=%v", batch, err)
+	}
+	nilRecord := QuestionAnswerRecord{BatchID: "batch-old"}
+	if batch, err := buildQuestionAnswerBatch([]QuestionAnswerRecord{nilRecord}); err != nil || batch.ReasoningEffort != nil {
+		t.Fatalf("old batch aggregation = %+v err=%v", batch, err)
+	}
+	medium := QuestionAnswerReasoningEffortMedium
+	if batch, err := buildQuestionAnswerBatch([]QuestionAnswerRecord{{BatchID: "batch-new", ReasoningEffort: &medium}}); err != nil || batch.ReasoningEffort == nil || *batch.ReasoningEffort != medium {
+		t.Fatalf("consistent batch aggregation = %+v err=%v", batch, err)
+	}
+	high := QuestionAnswerReasoningEffortHigh
+	if _, err := buildQuestionAnswerBatch([]QuestionAnswerRecord{{BatchID: "batch-mixed", ReasoningEffort: &medium}, {BatchID: "batch-mixed", ReasoningEffort: &high}}); err == nil || err.Error() != ErrorQuestionAnswerStorage {
+		t.Fatalf("mixed batch aggregation error = %v, want %s", err, ErrorQuestionAnswerStorage)
+	}
+	if _, err := buildQuestionAnswerBatch([]QuestionAnswerRecord{{BatchID: "batch-mixed-null", ReasoningEffort: nil}, {BatchID: "batch-mixed-null", ReasoningEffort: &medium}}); err == nil || err.Error() != ErrorQuestionAnswerStorage {
+		t.Fatalf("null and non-null batch aggregation error = %v, want %s", err, ErrorQuestionAnswerStorage)
+	}
+}
+
+func TestQuestionAnswerReasoningEffortErrorHTTPContracts(t *testing.T) {
+	badRequest := httptest.NewRecorder()
+	writeError(badRequest, requestError(ErrorQuestionAnswerReasoningEffort))
+	if badRequest.Code != http.StatusBadRequest || !strings.Contains(badRequest.Body.String(), ErrorQuestionAnswerReasoningEffort) {
+		t.Fatalf("invalid effort response status=%d body=%s", badRequest.Code, badRequest.Body.String())
+	}
+	storageError := httptest.NewRecorder()
+	writeError(storageError, requestError(ErrorQuestionAnswerStorage))
+	if storageError.Code != http.StatusInternalServerError || !strings.Contains(storageError.Body.String(), ErrorQuestionAnswerStorage) {
+		t.Fatalf("storage response status=%d body=%s", storageError.Code, storageError.Body.String())
+	}
+}
+
+func TestQuestionAnswerBatchAggregationFailureReleasesActiveRun(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-a"}]}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	base := newFakeQuestionAnswerRepository(TestQuestion{ID: "q1", Name: "Q1", Body: "question", Enabled: true})
+	service := newQuestionAnswerService(server.URL, base, newFakeRepository())
+	service.questionAnswers = &inconsistentQuestionAnswerRepository{fakeQuestionAnswerRepository: base}
+	defer func() { _ = service.ShutdownQuestionAnswers(context.Background()) }()
+
+	_, err := service.StartQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", QuestionAnswerStartInput{Models: []string{"model-a"}, QuestionIDs: []string{"q1"}})
+	if err == nil || err.Error() != ErrorQuestionAnswerStorage {
+		t.Fatalf("mixed snapshot start error = %v, want %s", err, ErrorQuestionAnswerStorage)
+	}
+	service.questionAnswerMu.Lock()
+	activeRuns := len(service.questionAnswerRuns)
+	service.questionAnswerMu.Unlock()
+	if activeRuns != 0 {
+		t.Fatalf("active runs after aggregation failure = %d, want 0", activeRuns)
 	}
 }
 
@@ -621,7 +786,7 @@ func (r contextBlockingRoundTripper) RoundTrip(request *http.Request) (*http.Res
 func TestQuestionAnswerRunnerClosesResponseBodyAndDiscardsRawPayload(t *testing.T) {
 	body := &trackingBody{Reader: strings.NewReader(`{"choices":[{"message":{"content":"answer"}}],"usage":{"secret":"raw-marker"}}`)}
 	runner := &QuestionAnswerRunner{client: &http.Client{Transport: fixedRoundTripper{body: body}}}
-	answer, errorType := runner.Ask(context.Background(), upstream.ProbeCredential{BaseURL: "https://example.test", Key: "secret-key"}, "model-a", "question")
+	answer, errorType := runner.Ask(context.Background(), upstream.ProbeCredential{BaseURL: "https://example.test", Key: "secret-key"}, "model-a", "question", QuestionAnswerReasoningEffortMedium)
 	if answer != "answer" || errorType != "" {
 		t.Fatalf("answer=%q errorType=%q", answer, errorType)
 	}

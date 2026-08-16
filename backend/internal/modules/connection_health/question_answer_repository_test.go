@@ -23,12 +23,17 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	if err := repository.EnsureSchema(ctx); err != nil {
 		t.Fatalf("EnsureSchema first run: %v", err)
 	}
-	migrationSQL, err := os.ReadFile("../../database/migrations/000025_connection_health_question_answers.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := pool.Exec(ctx, string(migrationSQL)); err != nil {
-		t.Fatalf("migration after EnsureSchema: %v", err)
+	for _, migrationPath := range []string{
+		"../../database/migrations/000025_connection_health_question_answers.sql",
+		"../../database/migrations/000026_connection_health_question_answer_reasoning_effort.sql",
+	} {
+		migrationSQL, err := os.ReadFile(migrationPath)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", migrationPath, err)
+		}
+		if _, err := pool.Exec(ctx, string(migrationSQL)); err != nil {
+			t.Fatalf("migration after EnsureSchema %s: %v", migrationPath, err)
+		}
 	}
 	if err := repository.EnsureSchema(ctx); err != nil {
 		t.Fatalf("EnsureSchema second run: %v", err)
@@ -66,11 +71,14 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	}
 
 	batchID := "batch-snapshot"
-	records, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", batchID, []string{"model-a"}, []string{q1.ID})
+	records, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", batchID, []string{"model-a"}, []string{q1.ID}, QuestionAnswerReasoningEffortHigh)
 	if err != nil || len(records) != 1 {
 		t.Fatalf("create snapshot batch records=%+v err=%v", records, err)
 	}
-	if _, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-duplicate", []string{"model-b"}, []string{q2.ID}); !errors.Is(err, errQuestionAnswerActive) {
+	if records[0].ReasoningEffort == nil || *records[0].ReasoningEffort != QuestionAnswerReasoningEffortHigh {
+		t.Fatalf("reasoning effort snapshot=%v", records[0].ReasoningEffort)
+	}
+	if _, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-duplicate", []string{"model-b"}, []string{q2.ID}, QuestionAnswerReasoningEffortHigh); !errors.Is(err, errQuestionAnswerActive) {
 		t.Fatalf("duplicate active batch error=%v", err)
 	}
 	if running, err := repository.MarkQuestionAnswerRunning(ctx, "user-1", batchID, records[0].ID); err != nil || !running {
@@ -93,6 +101,13 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	if err != nil || len(snapshotRecords) != 1 || snapshotRecords[0].QuestionName != "Question 1" || snapshotRecords[0].QuestionBody != "original body" || snapshotRecords[0].AnswerBody != "saved answer" {
 		t.Fatalf("history snapshot changed: records=%+v err=%v", snapshotRecords, err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE connection_health_question_answer_records SET reasoning_effort = NULL WHERE id = $1`, records[0].ID); err != nil {
+		t.Fatalf("clear legacy reasoning effort snapshot: %v", err)
+	}
+	legacyRecords, err := repository.ListQuestionAnswerBatch(ctx, "user-1", "target-1", batchID)
+	if err != nil || len(legacyRecords) != 1 || legacyRecords[0].ReasoningEffort != nil {
+		t.Fatalf("legacy null reasoning effort=%+v err=%v", legacyRecords, err)
+	}
 	marked, err := repository.SetQuestionAnswerManualError(ctx, "user-1", "target-1", records[0].ID, true)
 	if err != nil || marked == nil || !marked.ManualError {
 		t.Fatalf("manual mark=%+v err=%v", marked, err)
@@ -112,7 +127,7 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	for i := range models {
 		models[i] = fmt.Sprintf("model-%02d", i)
 	}
-	bulk, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-bulk", models, []string{q2.ID})
+	bulk, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-bulk", models, []string{q2.ID}, QuestionAnswerReasoningEffortMedium)
 	if err != nil || len(bulk) != 25 {
 		t.Fatalf("create bulk records=%d err=%v", len(bulk), err)
 	}
@@ -158,7 +173,7 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 		t.Fatalf("failed record manual mark=%+v err=%v", failedMark, err)
 	}
 
-	cancelled, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-cancelled", []string{"model-cancelled"}, []string{q2.ID})
+	cancelled, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-cancelled", []string{"model-cancelled"}, []string{q2.ID}, QuestionAnswerReasoningEffortLow)
 	if err != nil || len(cancelled) != 1 {
 		t.Fatalf("create cancelled batch=%+v err=%v", cancelled, err)
 	}
@@ -187,7 +202,7 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 		t.Fatalf("history user isolation=%+v err=%v", foreign, err)
 	}
 
-	abandoned, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-restart", "batch-restart", []string{"model-a"}, []string{q2.ID})
+	abandoned, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-restart", "batch-restart", []string{"model-a"}, []string{q2.ID}, QuestionAnswerReasoningEffortXHigh)
 	if err != nil || len(abandoned) != 1 {
 		t.Fatalf("create abandoned batch=%+v err=%v", abandoned, err)
 	}

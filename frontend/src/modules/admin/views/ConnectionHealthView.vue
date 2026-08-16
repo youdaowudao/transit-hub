@@ -18,6 +18,7 @@ import {
   ShieldCheck,
 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
+import { getPrioritySyncStatus } from '../api/connectionHealth'
 import { listUpstreamSites } from '../api/upstream'
 import { connectionHealthMessageKey, useConnectionHealth } from '../composables/useConnectionHealth'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
@@ -32,8 +33,10 @@ import ProbePolicyListDialog from '../components/dashboard/ProbePolicyListDialog
 import type {
   AdminGroupAccount,
   AdminGroupHealth,
+	AdminGroupPolicyConfiguration,
   ConnectionHealthPolicy,
   PolicyInput,
+	PrioritySyncStatus,
 } from '../types/connectionHealth'
 import { resolveConnectionHealthStrategyMode } from '../utils/connectionHealthPolicy'
 import {
@@ -78,6 +81,7 @@ let eventsOpenRequestSequence = 0
 const siteNameMap = ref<Map<string, string>>(new Map())
 const preferences = ref<ConnectionHealthPreferences>(createDefaultConnectionHealthPreferences())
 const groupManagerOpen = ref(false)
+const prioritySyncStatus = ref<PrioritySyncStatus | null>(null)
 const preferenceScope = computed(() => currentAccount.value?.id ?? 'anonymous')
 let loadedPreferenceScope = ''
 
@@ -223,6 +227,44 @@ const monitoredGroupCount = computed(() => adminGroups.value.filter(groupMonitor
 const conflictCount = computed(() => adminGroups.value.reduce((sum, group) => sum + (group.priorityConflictCount ?? 0), 0))
 const readableMessage = (rawKey: string): string => t(connectionHealthMessageKey(rawKey, te))
 
+const priorityFailureTime = computed(() => {
+	const raw = prioritySyncStatus.value?.lastFailureAt
+	if (!raw) return t('admin.connectionHealth.prioritySync.unknownTime')
+	const parsed = new Date(raw)
+	return Number.isNaN(parsed.getTime())
+		? t('admin.connectionHealth.prioritySync.unknownTime')
+		: parsed.toLocaleString('zh-CN', { hour12: false })
+})
+
+const loadPrioritySyncStatus = async () => {
+	try {
+		prioritySyncStatus.value = await getPrioritySyncStatus()
+	} catch {
+		// 同步状态是轻量辅助信息；读取失败不覆盖主列表的真实请求错误。
+	}
+}
+
+const applySavedGroupConfiguration = (configuration?: AdminGroupPolicyConfiguration) => {
+	if (!configuration) return
+	const index = adminGroups.value.findIndex(group => group.id === configuration.adminGroupId)
+	if (index < 0) return
+	const current = adminGroups.value[index]
+	const enabledPolicies = configuration.policies.filter(policy => policy.enabled)
+	const excluded = new Set(configuration.excludedTargetIds)
+	adminGroups.value[index] = {
+		...current,
+		assignedPolicyIds: [...configuration.policyIds],
+		assignedPolicies: [...configuration.policies],
+		hasAssignedPolicy: configuration.policyIds.length > 0,
+		hasEnabledPolicy: enabledPolicies.length > 0,
+		hasEnabledProbePolicy: enabledPolicies.some(policy => (policy.strategyMode ?? 'health_probe') === 'health_probe'),
+		priorityMode: enabledPolicies.some(policy => policy.priorityMode === 'multiplier') ? 'multiplier' : 'none',
+		probeSortFallbackMultiplier: configuration.probeSortFallbackMultiplier ?? null,
+		excludedAccountCount: current.accounts.filter(account => excluded.has(account.targetId)).length,
+		accounts: current.accounts.map(account => ({ ...account, excludedFromGroupPolicy: excluded.has(account.targetId) })),
+	}
+}
+
 const loadSiteNames = async () => {
   try {
     const sites = await listUpstreamSites()
@@ -264,6 +306,7 @@ const refreshOnEntry = () => {
   void loadEvents()
   void loadPolicies()
   void loadSiteNames()
+	void loadPrioritySyncStatus()
 }
 
 onMounted(refreshOnEntry)
@@ -275,7 +318,7 @@ const autoRefresh = async () => {
   if (documentVisibility.value !== 'visible' || autoRefreshInFlight || probeDialogOpen.value) return
   autoRefreshInFlight = true
   try {
-    await Promise.all([loadAll({ silent: true }), loadEvents(selectedConnectionId.value || undefined)])
+    await Promise.all([loadAll({ silent: true }), loadEvents(selectedConnectionId.value || undefined), loadPrioritySyncStatus()])
   } finally {
     autoRefreshInFlight = false
   }
@@ -287,7 +330,7 @@ watch(documentVisibility, (visibility) => {
 })
 
 const refresh = async () => {
-  await Promise.all([loadAll(), loadPolicies(), loadEvents()])
+  await Promise.all([loadAll(), loadPolicies(), loadEvents(), loadPrioritySyncStatus()])
 }
 
 const siteName = (siteId: string): string => siteNameMap.value.get(siteId) ?? siteId
@@ -301,9 +344,13 @@ const openSetup = (group: AdminGroupHealth) => {
   setupDrawerOpen.value = true
 }
 
-const onSetupSaved = async () => {
+const onSetupSaved = async (configuration?: AdminGroupPolicyConfiguration) => {
   setupDrawerOpen.value = false
-  await Promise.all([loadAll({ silent: true }), loadPolicies()])
+	applySavedGroupConfiguration(configuration)
+	if (configuration?.prioritySyncStatus === 'pending' && currentAccount.value?.id) {
+		prioritySyncStatus.value = { workspaceId: currentAccount.value.id, status: 'pending', failedCount: 0 }
+	}
+	await Promise.all([loadPolicies(), loadPrioritySyncStatus()])
 }
 
 // 手动探活弹窗同时承载正式探活和隔离的一次性测试。
@@ -477,6 +524,31 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
         </Button>
       </div>
     </header>
+
+		<div
+			v-if="prioritySyncStatus?.status === 'failed'"
+			class="flex items-start gap-3 rounded-lg border border-destructive/20 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+			role="alert"
+			aria-live="assertive"
+		>
+			<AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+			<p>
+				{{ t('admin.connectionHealth.prioritySync.failed', {
+					workspace: prioritySyncStatus.workspaceId,
+					time: priorityFailureTime,
+					count: prioritySyncStatus.failedCount,
+					reason: readableMessage(prioritySyncStatus.errorKey ?? ''),
+				}) }}
+			</p>
+		</div>
+		<div
+			v-else-if="prioritySyncStatus?.status === 'pending' || prioritySyncStatus?.status === 'running'"
+			class="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/40 px-4 py-3 text-sm text-muted-foreground"
+			aria-live="polite"
+		>
+			<Loader2 class="h-4 w-4 shrink-0 animate-spin" />
+			{{ t('admin.connectionHealth.prioritySync.pending', { workspace: prioritySyncStatus.workspaceId }) }}
+		</div>
 
     <!-- 汇总与主列表使用同一 admin target 数据源。 -->
     <section class="overflow-hidden rounded-lg border border-border/60 bg-card" :aria-label="t('admin.connectionHealth.summaryLabel')">

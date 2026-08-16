@@ -8,6 +8,7 @@ import {
   isWorkspaceActive,
   setWorkspaceChecked,
 } from './lib/workspaceGuard'
+import { clearRouteError, setRouteError } from './lib/routeError'
 
 const routes = [
   {
@@ -130,6 +131,7 @@ export const router = createRouter({
 })
 
 router.beforeEach(async (to) => {
+	clearRouteError()
   if (to.matched.some((route) => route.meta.requiresAuth) && !getAccessToken()) {
     return { path: '/login' }
   }
@@ -139,8 +141,13 @@ router.beforeEach(async (to) => {
       try {
         await getCurrentAdminAccount()
         setWorkspaceChecked(true, true)
-      } catch {
-        setWorkspaceChecked(true, false)
+		} catch (error) {
+			if (error instanceof Error && error.message === 'admin.adminAccounts.errors.noCurrentAccount') {
+				setWorkspaceChecked(true, false)
+			} else {
+				setRouteError(error)
+				return false
+			}
       }
     }
     if (!isWorkspaceActive()) {

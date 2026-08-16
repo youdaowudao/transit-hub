@@ -1648,8 +1648,22 @@ func (s *PlatformService) ListSub2APIKeys(session Session) ([]Sub2APIKeyItem, er
 }
 
 func (s *PlatformService) ListSub2APIKeysContext(ctx context.Context, session Session) ([]Sub2APIKeyItem, error) {
+	return s.listSub2APIKeysContext(ctx, session, nil)
+}
+
+// ListSub2APIKeysUntilContext scans pages only until every requested key ID is
+// found. Reaching the real end of the list is still a complete result and lets
+// callers distinguish a missing key from a partial response.
+func (s *PlatformService) ListSub2APIKeysUntilContext(ctx context.Context, session Session, keyIDs []string) ([]Sub2APIKeyItem, error) {
+	return s.listSub2APIKeysContext(ctx, session, stringSet(keyIDs))
+}
+
+func (s *PlatformService) listSub2APIKeysContext(ctx context.Context, session Session, remaining map[string]struct{}) ([]Sub2APIKeyItem, error) {
 	if session.Platform != PlatformSub2API || strings.TrimSpace(session.AccessToken) == "" {
 		return nil, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	if remaining != nil && len(remaining) == 0 {
+		return []Sub2APIKeyItem{}, nil
 	}
 	const pageSize = 100
 	const maxPages = 1000
@@ -1679,20 +1693,19 @@ func (s *PlatformService) ListSub2APIKeysContext(ctx context.Context, session Se
 			if !ok {
 				continue
 			}
-			keyItem := Sub2APIKeyItem{ID: groupID2(record), Name: safeString(record, "name")}
-			if k := firstString(record, []string{"key", "token", "api_key"}); k != nil {
-				keyItem.Key = *k
+			key := sub2APIKeyItemFromRecord(record)
+			if remaining != nil {
+				if _, needed := remaining[key.ID]; needed {
+					keys = append(keys, key)
+					delete(remaining, key.ID)
+				}
+			} else {
+				keys = append(keys, key)
 			}
-			if status := firstStringy(record, []string{"status"}); status != "" {
-				keyItem.Status = status
-			}
-			if gid := firstNumber(record, []string{"group_id"}); gid != nil {
-				keyItem.GroupID = strconv.FormatInt(int64(*gid), 10)
-			}
-			if group, ok := record["group"].(map[string]any); ok {
-				keyItem.GroupName = safeString(group, "name")
-			}
-			keys = append(keys, keyItem)
+		}
+		if remaining != nil && len(remaining) == 0 {
+			complete = true
+			break
 		}
 		if hasTotal {
 			if fetched >= total {
@@ -1711,6 +1724,59 @@ func (s *PlatformService) ListSub2APIKeysContext(ctx context.Context, session Se
 		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
 	return keys, nil
+}
+
+func stringSet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			set[value] = struct{}{}
+		}
+	}
+	return set
+}
+
+// GetSub2APIKeyContext reads one Sub2API key by ID. Callers that only need the
+// current group must prefer this bounded request over scanning the full key list.
+func (s *PlatformService) GetSub2APIKeyContext(ctx context.Context, session Session, keyID string) (Sub2APIKeyItem, error) {
+	keyID = strings.TrimSpace(keyID)
+	if session.Platform != PlatformSub2API || strings.TrimSpace(session.AccessToken) == "" {
+		return Sub2APIKeyItem{}, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	if keyID == "" {
+		return Sub2APIKeyItem{}, newRequestError(ErrorRequest, PlatformSub2API)
+	}
+	response, err := s.httpClient.requestJSONWithContext(
+		ctx,
+		session.BaseURL+"/api/v1/keys/"+url.PathEscape(keyID),
+		requestOptions{AccessToken: session.AccessToken, TokenType: session.TokenType},
+	)
+	if err != nil {
+		return Sub2APIKeyItem{}, err
+	}
+	record := dataRecord(response.Payload)
+	item := sub2APIKeyItemFromRecord(record)
+	if item.ID == "" || item.ID != keyID {
+		return Sub2APIKeyItem{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	return item, nil
+}
+
+func sub2APIKeyItemFromRecord(record map[string]any) Sub2APIKeyItem {
+	item := Sub2APIKeyItem{ID: groupID2(record), Name: safeString(record, "name")}
+	if key := firstString(record, []string{"key", "token", "api_key"}); key != nil {
+		item.Key = *key
+	}
+	if status := firstStringy(record, []string{"status"}); status != "" {
+		item.Status = status
+	}
+	if groupID := firstNumber(record, []string{"group_id"}); groupID != nil {
+		item.GroupID = strconv.FormatInt(int64(*groupID), 10)
+	}
+	if group, ok := record["group"].(map[string]any); ok {
+		item.GroupName = safeString(group, "name")
+	}
+	return item
 }
 
 // CreateSub2APIKey 在上游 Sub2API 站点创建一个 API Key。
@@ -2241,8 +2307,19 @@ func (s *PlatformService) ListNewAPITokens(session Session) ([]Sub2APIKeyItem, e
 }
 
 func (s *PlatformService) ListNewAPITokensContext(ctx context.Context, session Session) ([]Sub2APIKeyItem, error) {
+	return s.listNewAPITokensContext(ctx, session, nil)
+}
+
+func (s *PlatformService) ListNewAPITokensUntilContext(ctx context.Context, session Session, tokenIDs []string) ([]Sub2APIKeyItem, error) {
+	return s.listNewAPITokensContext(ctx, session, stringSet(tokenIDs))
+}
+
+func (s *PlatformService) listNewAPITokensContext(ctx context.Context, session Session, remaining map[string]struct{}) ([]Sub2APIKeyItem, error) {
 	if session.Platform != PlatformNewAPI {
 		return nil, newRequestError(ErrorAuth, PlatformNewAPI)
+	}
+	if remaining != nil && len(remaining) == 0 {
+		return []Sub2APIKeyItem{}, nil
 	}
 	const pageSize = 100
 	const maxPages = 1000
@@ -2284,7 +2361,18 @@ func (s *PlatformService) ListNewAPITokensContext(ctx context.Context, session S
 				token.GroupID = *group
 				token.GroupName = *group
 			}
-			tokens = append(tokens, token)
+			if remaining != nil {
+				if _, needed := remaining[token.ID]; needed {
+					tokens = append(tokens, token)
+					delete(remaining, token.ID)
+				}
+			} else {
+				tokens = append(tokens, token)
+			}
+		}
+		if remaining != nil && len(remaining) == 0 {
+			complete = true
+			break
 		}
 		if hasTotal {
 			if fetched >= total {

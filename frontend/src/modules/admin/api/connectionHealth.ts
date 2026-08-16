@@ -11,6 +11,7 @@ import type {
   ModelHealth,
   OwnGroupHealth,
   PolicyInput,
+	PrioritySyncStatus,
   QuestionAnswerBatch,
   QuestionAnswerHistory,
   QuestionAnswerRecord,
@@ -83,6 +84,9 @@ export const getConnectionHealthGroups = async (): Promise<OwnGroupHealth[]> =>
 // 对应后端新增路由，不影响旧的 getConnectionHealthGroups。
 export const getConnectionHealthAdminGroups = async (): Promise<AdminGroupHealth[]> =>
   requestJson<AdminGroupHealth[]>('/connection-health/admin-groups')
+
+export const getPrioritySyncStatus = async (): Promise<PrioritySyncStatus> =>
+	requestJson<PrioritySyncStatus>('/connection-health/priority-sync-status')
 
 export const getConnectionHealthEvents = async (connectionId?: string, limit = 100): Promise<ConnectionHealthEvent[]> => {
   const params = new URLSearchParams()

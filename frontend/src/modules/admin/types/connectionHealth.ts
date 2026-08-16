@@ -431,6 +431,17 @@ export interface AdminGroupPolicyConfiguration {
   policies: TargetPolicyAssignmentSummary[]
   excludedTargetIds: string[]
   probeSortFallbackMultiplier?: number | null
+	prioritySyncStatus?: 'pending' | 'running' | 'success' | 'failed' | string
+}
+
+export interface PrioritySyncStatus {
+	workspaceId: string
+	status: 'idle' | 'pending' | 'running' | 'success' | 'failed' | string
+	errorKey?: string
+	pendingSince?: string | null
+	lastAttemptAt?: string | null
+	lastFailureAt?: string | null
+	failedCount: number
 }
 
 export interface AdminGroupPolicyConfigurationInput {

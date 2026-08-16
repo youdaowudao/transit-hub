@@ -69,6 +69,12 @@ const (
 	ErrorUnknown          = "admin.connectionHealth.errors.unknown"
 	ErrorNotFound         = "admin.connectionHealth.errors.notFound"
 	ErrorNoCurrentAccount = "admin.adminAccounts.errors.noCurrentAccount"
+	// ErrorPriorityMetadataUnavailable means the local configuration was saved,
+	// but the asynchronous Priority write could not use a complete multiplier snapshot.
+	ErrorPriorityMetadataUnavailable = "admin.connectionHealth.errors.priorityMetadataUnavailable"
+	// ErrorPrioritySyncUnavailable means the local configuration was saved, but no
+	// bounded background Priority worker is currently available to process it.
+	ErrorPrioritySyncUnavailable = "admin.connectionHealth.errors.prioritySyncUnavailable"
 	// ErrorNoMatchingModels: 手动探活请求体显式指定了 models，但没有一个模型命中该连接
 	// 当前匹配到的启用策略/启用模型目标。与"models 为空时探活全部匹配目标但目标本身为空"
 	// 的旧行为（200 + 空数组）区分开，让前端能区分"策略配置问题"和"探活完成但结果为空"。
@@ -152,6 +158,26 @@ type PrioritySyncState struct {
 	Conflict             bool      `json:"conflict"`
 	LastConflictPriority *int      `json:"lastConflictPriority,omitempty"`
 	UpdatedAt            time.Time `json:"updatedAt"`
+}
+
+// PriorityWorkspaceSyncState is the durable workspace-level generation and
+// status used by asynchronous Priority reconciliation.
+type PriorityWorkspaceSyncState struct {
+	UserID                 string
+	AdminAccountID         string
+	AppliedSignature       string
+	PendingSignature       string
+	PendingSince           *time.Time
+	LastReconcileAttemptAt *time.Time
+	LastReconcileSuccessAt *time.Time
+	LastReconcileFailureAt *time.Time
+	NextReconcileAt        *time.Time
+	InventoryStatus        string
+	LastActionSource       string
+	LastDecision           string
+	LastError              string
+	PendingTargetCount     int
+	UpdatedAt              time.Time
 }
 
 // TargetActionState 记录分组健康首次接管账号/渠道启停或权重前的上游状态。
@@ -294,6 +320,17 @@ type MySitesReader interface {
 // *my_sites.Service 已结构性满足该接口。调用方只读取 ID/分组元数据，绝不记录或返回 Key 明文。
 type UpstreamKeyReader interface {
 	ListUpstreamKeys(ctx context.Context, userID string, siteID string) ([]upstream.Sub2APIKeyItem, error)
+}
+
+// UpstreamKeyMetadataReader exposes explicit-workspace reads for background
+// metadata refreshes. Production my_sites.Service implements both methods.
+type UpstreamKeyMetadataReader interface {
+	GetUpstreamKeyForWorkspace(ctx context.Context, userID string, adminAccountID string, siteID string, keyID string) (upstream.Sub2APIKeyItem, error)
+	ListUpstreamKeysForWorkspace(ctx context.Context, userID string, adminAccountID string, siteID string) ([]upstream.Sub2APIKeyItem, error)
+}
+
+type UpstreamKeyMetadataSelectiveReader interface {
+	ListUpstreamKeysForWorkspaceUntil(ctx context.Context, userID string, adminAccountID string, siteID string, keyIDs []string) ([]upstream.Sub2APIKeyItem, error)
 }
 
 // SiteLookup 是 connection_health 对 upstream 模块的只读依赖：按站点 ID 取 base_url 和平台类型。

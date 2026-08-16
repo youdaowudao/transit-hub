@@ -551,23 +551,77 @@ func (s *Service) ListUpstreamKeys(ctx context.Context, userID string, siteID st
 	if err != nil {
 		return nil, err
 	}
-	upstreamSite, err := s.upstreamLookup.GetSite(ctx, siteID)
-	if err != nil || upstreamSite == nil || upstreamSite.Session == nil || upstreamSite.UserID != userID || upstreamSite.AdminAccountID != adminAccountID {
-		return nil, requestError(ErrorRequest)
+	return s.ListUpstreamKeysForWorkspace(ctx, userID, adminAccountID, siteID)
+}
+
+// ListUpstreamKeysForWorkspace is the background-safe variant of ListUpstreamKeys.
+// It validates the explicit workspace instead of resolving request-local current state.
+func (s *Service) ListUpstreamKeysForWorkspace(ctx context.Context, userID string, adminAccountID string, siteID string) ([]upstream.Sub2APIKeyItem, error) {
+	return s.listUpstreamKeysForWorkspace(ctx, userID, adminAccountID, siteID, nil)
+}
+
+// ListUpstreamKeysForWorkspaceUntil is used by background metadata refreshes.
+// It stops pagination once every currently bound key ID has been found.
+func (s *Service) ListUpstreamKeysForWorkspaceUntil(ctx context.Context, userID string, adminAccountID string, siteID string, keyIDs []string) ([]upstream.Sub2APIKeyItem, error) {
+	return s.listUpstreamKeysForWorkspace(ctx, userID, adminAccountID, siteID, keyIDs)
+}
+
+func (s *Service) listUpstreamKeysForWorkspace(ctx context.Context, userID string, adminAccountID string, siteID string, keyIDs []string) ([]upstream.Sub2APIKeyItem, error) {
+	upstreamSite, err := s.workspaceUpstreamSite(ctx, userID, adminAccountID, siteID)
+	if err != nil {
+		return nil, err
 	}
 	session := *upstreamSite.Session
 	var keys []upstream.Sub2APIKeyItem
 	switch session.Platform {
 	case upstream.PlatformNewAPI:
-		keys, err = s.platformService.ListNewAPITokensContext(ctx, session)
+		if keyIDs == nil {
+			keys, err = s.platformService.ListNewAPITokensContext(ctx, session)
+		} else {
+			keys, err = s.platformService.ListNewAPITokensUntilContext(ctx, session, keyIDs)
+		}
 	default:
-		keys, err = s.platformService.ListSub2APIKeysContext(ctx, session)
+		if keyIDs == nil {
+			keys, err = s.platformService.ListSub2APIKeysContext(ctx, session)
+		} else {
+			keys, err = s.platformService.ListSub2APIKeysUntilContext(ctx, session, keyIDs)
+		}
 	}
 	if err != nil {
 		log.Printf("[list-upstream-keys] 获取上游 key 列表失败 site=%s platform=%s err=%v", upstreamSite.Name, session.Platform, err)
 		return nil, err
 	}
 	return keys, nil
+}
+
+// GetUpstreamKeyForWorkspace reads one Sub2API key without scanning the full
+// remote list. NewAPI does not expose equivalent group metadata here and keeps
+// using the bounded workspace list path.
+func (s *Service) GetUpstreamKeyForWorkspace(ctx context.Context, userID string, adminAccountID string, siteID string, keyID string) (upstream.Sub2APIKeyItem, error) {
+	upstreamSite, err := s.workspaceUpstreamSite(ctx, userID, adminAccountID, siteID)
+	if err != nil {
+		return upstream.Sub2APIKeyItem{}, err
+	}
+	if upstreamSite.Session.Platform != upstream.PlatformSub2API {
+		return upstream.Sub2APIKeyItem{}, &upstream.RequestError{MessageKey: upstream.ErrorUnsupported, Platform: upstreamSite.Session.Platform}
+	}
+	item, err := s.platformService.GetSub2APIKeyContext(ctx, *upstreamSite.Session, keyID)
+	if err != nil {
+		log.Printf("[get-upstream-key] 获取上游 key 失败 site=%s platform=%s key_id=%s err=%v", upstreamSite.Name, upstreamSite.Session.Platform, keyID, err)
+		return upstream.Sub2APIKeyItem{}, err
+	}
+	return item, nil
+}
+
+func (s *Service) workspaceUpstreamSite(ctx context.Context, userID string, adminAccountID string, siteID string) (*upstream.Site, error) {
+	if strings.TrimSpace(siteID) == "" || strings.TrimSpace(adminAccountID) == "" {
+		return nil, requestError(ErrorRequest)
+	}
+	upstreamSite, err := s.upstreamLookup.GetSite(ctx, siteID)
+	if err != nil || upstreamSite == nil || upstreamSite.Session == nil || upstreamSite.UserID != userID || upstreamSite.AdminAccountID != adminAccountID {
+		return nil, requestError(ErrorRequest)
+	}
+	return upstreamSite, nil
 }
 
 // RealBind 手动绑定已有的上游 Key/Token，仅创建绑定记录。

@@ -19,30 +19,36 @@ import (
 
 // fakeRepository 是 healthRepository 的内存实现，供 service 单测使用，不连接真实数据库。
 type fakeRepository struct {
-	policies           []Policy
-	states             map[string]map[string]ConnectionHealthState // connectionID -> modelName -> state
-	events             []ConnectionHealthEvent
-	assignments        []PolicyAssignment
-	groupAssignments   []GroupPolicyAssignment
-	groupExclusions    []GroupTargetExclusion
-	priorityStates     map[string]PrioritySyncState
-	targetActionStates map[string]TargetActionState
-	groupSortSettings  map[string]GroupProbeSortSetting
-	budgetClaims       map[string]int
-	insertEventErr     error
-	upsertStateErr     error
-	savePolicyErr      error
-	deletePolicyErr    error
-	targetLeaseBlocked bool
-	priorityLeaseMu    sync.Mutex
-	priorityLeases     map[string]*sync.Mutex
-	priorityLeaseCount map[string]int
+	policies               []Policy
+	states                 map[string]map[string]ConnectionHealthState // connectionID -> modelName -> state
+	events                 []ConnectionHealthEvent
+	assignments            []PolicyAssignment
+	groupAssignments       []GroupPolicyAssignment
+	groupExclusions        []GroupTargetExclusion
+	priorityStates         map[string]PrioritySyncState
+	priorityWorkspaces     map[string]PriorityWorkspaceSyncState
+	priorityWorkspaceMu    sync.Mutex
+	targetActionStates     map[string]TargetActionState
+	groupSortSettings      map[string]GroupProbeSortSetting
+	budgetClaims           map[string]int
+	insertEventErr         error
+	upsertStateErr         error
+	savePolicyErr          error
+	deletePolicyErr        error
+	listPoliciesErr        error
+	markPriorityRunningErr error
+	priorityGenerationErr  error
+	targetLeaseBlocked     bool
+	priorityLeaseMu        sync.Mutex
+	priorityLeases         map[string]*sync.Mutex
+	priorityLeaseCount     map[string]int
 }
 
 func newFakeRepository() *fakeRepository {
 	return &fakeRepository{
 		states:             map[string]map[string]ConnectionHealthState{},
 		priorityStates:     map[string]PrioritySyncState{},
+		priorityWorkspaces: map[string]PriorityWorkspaceSyncState{},
 		targetActionStates: map[string]TargetActionState{},
 		groupSortSettings:  map[string]GroupProbeSortSetting{},
 		budgetClaims:       map[string]int{},
@@ -54,6 +60,9 @@ func newFakeRepository() *fakeRepository {
 func (f *fakeRepository) EnsureSchema(ctx context.Context) error { return nil }
 
 func (f *fakeRepository) ListPolicies(ctx context.Context, userID string, adminAccountID string) ([]Policy, error) {
+	if f.listPoliciesErr != nil {
+		return nil, f.listPoliciesErr
+	}
 	out := make([]Policy, 0)
 	for _, p := range f.policies {
 		if p.UserID == userID && p.AdminAccountID == adminAccountID {
@@ -625,6 +634,32 @@ func (f *fakeRepository) CreatePolicyAndReplaceGroupConfiguration(ctx context.Co
 	return f.ReplaceGroupPolicyConfiguration(ctx, policy.UserID, policy.AdminAccountID, adminGroupID, adminGroupName, policyIDs, excludedTargetIDs, groupTargetIDs, fallbackMultiplier)
 }
 
+func (f *fakeRepository) ReplaceGroupPolicyConfigurationAndRequestPrioritySync(ctx context.Context, userID string, adminAccountID string, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64, pendingSignature string) error {
+	if err := f.ReplaceGroupPolicyConfiguration(ctx, userID, adminAccountID, adminGroupID, adminGroupName, policyIDs, excludedTargetIDs, groupTargetIDs, fallbackMultiplier); err != nil {
+		return err
+	}
+	f.priorityWorkspaceMu.Lock()
+	f.priorityWorkspaces[userID+"|"+adminAccountID] = PriorityWorkspaceSyncState{
+		UserID: userID, AdminAccountID: adminAccountID, PendingSignature: pendingSignature,
+		InventoryStatus: "pending", LastActionSource: "configuration_save", LastDecision: "pending",
+	}
+	f.priorityWorkspaceMu.Unlock()
+	return nil
+}
+
+func (f *fakeRepository) CreatePolicyAndReplaceGroupConfigurationAndRequestPrioritySync(ctx context.Context, policy Policy, targets []ModelTarget, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64, pendingSignature string) error {
+	if err := f.CreatePolicyAndReplaceGroupConfiguration(ctx, policy, targets, adminGroupID, adminGroupName, policyIDs, excludedTargetIDs, groupTargetIDs, fallbackMultiplier); err != nil {
+		return err
+	}
+	f.priorityWorkspaceMu.Lock()
+	f.priorityWorkspaces[policy.UserID+"|"+policy.AdminAccountID] = PriorityWorkspaceSyncState{
+		UserID: policy.UserID, AdminAccountID: policy.AdminAccountID, PendingSignature: pendingSignature,
+		InventoryStatus: "pending", LastActionSource: "configuration_save", LastDecision: "pending",
+	}
+	f.priorityWorkspaceMu.Unlock()
+	return nil
+}
+
 func (f *fakeRepository) ListGroupProbeSortSettings(ctx context.Context, userID string, adminAccountID string) ([]GroupProbeSortSetting, error) {
 	settings := make([]GroupProbeSortSetting, 0)
 	for _, setting := range f.groupSortSettings {
@@ -692,6 +727,94 @@ func (f *fakeRepository) UpsertPrioritySyncState(ctx context.Context, state Prio
 func (f *fakeRepository) DeletePrioritySyncState(ctx context.Context, userID string, adminAccountID string, targetID string) error {
 	delete(f.priorityStates, userID+"|"+adminAccountID+"|"+targetID)
 	return nil
+}
+
+func (f *fakeRepository) GetPriorityWorkspaceSyncState(ctx context.Context, userID string, adminAccountID string) (*PriorityWorkspaceSyncState, error) {
+	f.priorityWorkspaceMu.Lock()
+	defer f.priorityWorkspaceMu.Unlock()
+	state, ok := f.priorityWorkspaces[userID+"|"+adminAccountID]
+	if !ok {
+		return nil, nil
+	}
+	copy := state
+	return &copy, nil
+}
+
+func (f *fakeRepository) ListAllPriorityWorkspaceSyncStates(ctx context.Context) ([]PriorityWorkspaceSyncState, error) {
+	f.priorityWorkspaceMu.Lock()
+	defer f.priorityWorkspaceMu.Unlock()
+	states := make([]PriorityWorkspaceSyncState, 0, len(f.priorityWorkspaces))
+	for _, state := range f.priorityWorkspaces {
+		states = append(states, state)
+	}
+	return states, nil
+}
+
+func (f *fakeRepository) MarkPriorityWorkspaceSyncRunning(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error) {
+	if f.markPriorityRunningErr != nil {
+		return false, f.markPriorityRunningErr
+	}
+	f.priorityWorkspaceMu.Lock()
+	defer f.priorityWorkspaceMu.Unlock()
+	key := userID + "|" + adminAccountID
+	state, ok := f.priorityWorkspaces[key]
+	if !ok || state.PendingSignature != pendingSignature {
+		return false, nil
+	}
+	state.LastDecision = "running"
+	state.InventoryStatus = "refreshing"
+	f.priorityWorkspaces[key] = state
+	return true, nil
+}
+
+func (f *fakeRepository) MarkPriorityWorkspaceSyncFailed(ctx context.Context, userID string, adminAccountID string, pendingSignature string, errorDetail string, failedCount int) (bool, error) {
+	f.priorityWorkspaceMu.Lock()
+	defer f.priorityWorkspaceMu.Unlock()
+	key := userID + "|" + adminAccountID
+	state, ok := f.priorityWorkspaces[key]
+	if !ok || state.PendingSignature != pendingSignature {
+		return false, nil
+	}
+	next := time.Now().Add(time.Minute)
+	state.LastDecision = "failed"
+	state.InventoryStatus = "failed"
+	state.LastError = errorDetail
+	state.PendingTargetCount = failedCount
+	state.NextReconcileAt = &next
+	f.priorityWorkspaces[key] = state
+	return true, nil
+}
+
+func (f *fakeRepository) MarkPriorityWorkspaceSyncSucceeded(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error) {
+	f.priorityWorkspaceMu.Lock()
+	defer f.priorityWorkspaceMu.Unlock()
+	key := userID + "|" + adminAccountID
+	state, ok := f.priorityWorkspaces[key]
+	if !ok || state.PendingSignature != pendingSignature {
+		return false, nil
+	}
+	state.AppliedSignature = pendingSignature
+	state.PendingSignature = ""
+	state.LastDecision = "success"
+	state.InventoryStatus = "complete"
+	state.LastError = ""
+	state.PendingTargetCount = 0
+	state.NextReconcileAt = nil
+	f.priorityWorkspaces[key] = state
+	return true, nil
+}
+
+func (f *fakeRepository) IsPriorityWorkspaceGenerationCurrent(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error) {
+	if f.priorityGenerationErr != nil {
+		return false, f.priorityGenerationErr
+	}
+	f.priorityWorkspaceMu.Lock()
+	defer f.priorityWorkspaceMu.Unlock()
+	state, ok := f.priorityWorkspaces[userID+"|"+adminAccountID]
+	if !ok {
+		return pendingSignature == "", nil
+	}
+	return state.PendingSignature == pendingSignature, nil
 }
 
 func (f *fakeRepository) GetTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) (*TargetActionState, error) {

@@ -18,6 +18,7 @@ type AdminGroupPolicyConfiguration struct {
 	Policies                    []AssignedPolicySummary `json:"policies"`
 	ExcludedTargetIDs           []string                `json:"excludedTargetIds"`
 	ProbeSortFallbackMultiplier *float64                `json:"probeSortFallbackMultiplier,omitempty"`
+	PrioritySyncStatus          string                  `json:"prioritySyncStatus,omitempty"`
 }
 
 type AdminGroupPolicyConfigurationInput struct {
@@ -152,6 +153,10 @@ func (s *Service) SetAdminGroupPolicyConfiguration(ctx context.Context, userID s
 			activeTargetIDs[targetID] = struct{}{}
 		}
 	}
+	pendingSignature, err := newID()
+	if err != nil {
+		return AdminGroupPolicyConfiguration{}, err
+	}
 
 	if input.QuickPolicy != nil {
 		policyID, genErr := newID()
@@ -163,28 +168,25 @@ func (s *Service) SetAdminGroupPolicyConfiguration(ctx context.Context, userID s
 			return AdminGroupPolicyConfiguration{}, buildErr
 		}
 		policyIDs = append(policyIDs, policyID)
-		if err := s.repo.CreatePolicyAndReplaceGroupConfiguration(
+		if err := s.repo.CreatePolicyAndReplaceGroupConfigurationAndRequestPrioritySync(
 			ctx, policy, targets, groupContext.group.ID, groupContext.group.Name,
-			policyIDs, excludedTargetIDs, sortedStringSet(activeTargetIDs), input.ProbeSortFallbackMultiplier,
+			policyIDs, excludedTargetIDs, sortedStringSet(activeTargetIDs), input.ProbeSortFallbackMultiplier, pendingSignature,
 		); err != nil {
 			return AdminGroupPolicyConfiguration{}, err
 		}
 		responsePolicies = append(responsePolicies, policy)
-		// 分组配置保存后立即复用生产 priority 同步入口，避免页面刷新时仍展示保存前的同值 priority，
-		// 同时保持后台调度器下一轮扫描的最终兜底行为。
-		s.syncCurrentWorkspacePriorities(ctx, userID, groupContext.adminAccountID)
-		return savedAdminGroupPolicyConfiguration(groupContext.group, policyIDs, excludedTargetIDs, responsePolicies, input.ProbeSortFallbackMultiplier), nil
+		s.triggerPrioritySync(userID, groupContext.adminAccountID, pendingSignature)
+		return savedAdminGroupPolicyConfiguration(groupContext.group, policyIDs, excludedTargetIDs, responsePolicies, input.ProbeSortFallbackMultiplier, "pending"), nil
 	}
 
-	if err := s.repo.ReplaceGroupPolicyConfiguration(
+	if err := s.repo.ReplaceGroupPolicyConfigurationAndRequestPrioritySync(
 		ctx, userID, groupContext.adminAccountID, groupContext.group.ID, groupContext.group.Name,
-		policyIDs, excludedTargetIDs, sortedStringSet(activeTargetIDs), input.ProbeSortFallbackMultiplier,
+		policyIDs, excludedTargetIDs, sortedStringSet(activeTargetIDs), input.ProbeSortFallbackMultiplier, pendingSignature,
 	); err != nil {
 		return AdminGroupPolicyConfiguration{}, err
 	}
-	// 与首次向导保持一致：配置变更成功后立即刷新生产 priority，避免依赖 30 秒调度周期。
-	s.syncCurrentWorkspacePriorities(ctx, userID, groupContext.adminAccountID)
-	return savedAdminGroupPolicyConfiguration(groupContext.group, policyIDs, excludedTargetIDs, responsePolicies, input.ProbeSortFallbackMultiplier), nil
+	s.triggerPrioritySync(userID, groupContext.adminAccountID, pendingSignature)
+	return savedAdminGroupPolicyConfiguration(groupContext.group, policyIDs, excludedTargetIDs, responsePolicies, input.ProbeSortFallbackMultiplier, "pending"), nil
 }
 
 // groupConfigurationUsesMultiplier 判断本次将要保存的分组绑定是否包含启用中的倍率策略。
@@ -208,7 +210,7 @@ func groupConfigurationUsesMultiplier(policyIDs []string, quickPolicy *PolicyInp
 // Build the mutation response from values already validated before the transaction. Querying
 // again after commit can turn a successful write into an HTTP error and make a client retry
 // create a duplicate quick policy.
-func savedAdminGroupPolicyConfiguration(group upstream.AdminGroupInfo, policyIDs []string, excludedTargetIDs []string, policies []Policy, fallbackMultiplier *float64) AdminGroupPolicyConfiguration {
+func savedAdminGroupPolicyConfiguration(group upstream.AdminGroupInfo, policyIDs []string, excludedTargetIDs []string, policies []Policy, fallbackMultiplier *float64, prioritySyncStatus string) AdminGroupPolicyConfiguration {
 	policyByID := make(map[string]Policy, len(policies))
 	for _, policy := range policies {
 		policyByID[policy.ID] = policy
@@ -218,6 +220,7 @@ func savedAdminGroupPolicyConfiguration(group upstream.AdminGroupInfo, policyIDs
 		AdminGroupID: group.ID, AdminGroupName: group.Name,
 		PolicyIDs: policyIDs, Policies: summaries, ExcludedTargetIDs: dedupeStrings(excludedTargetIDs),
 		ProbeSortFallbackMultiplier: cloneFloat64Pointer(fallbackMultiplier),
+		PrioritySyncStatus:          prioritySyncStatus,
 	}
 }
 

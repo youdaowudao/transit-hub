@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -1150,6 +1151,21 @@ func (r *Repository) ReplaceGroupPolicyConfiguration(ctx context.Context, userID
 	return tx.Commit(ctx)
 }
 
+func (r *Repository) ReplaceGroupPolicyConfigurationAndRequestPrioritySync(ctx context.Context, userID string, adminAccountID string, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64, pendingSignature string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := replaceGroupPolicyConfigurationTx(ctx, tx, userID, adminAccountID, adminGroupID, adminGroupName, policyIDs, excludedTargetIDs, groupTargetIDs, fallbackMultiplier); err != nil {
+		return err
+	}
+	if err := requestPrioritySyncTx(ctx, tx, userID, adminAccountID, pendingSignature, "group_policy_save"); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // CreatePolicyAndReplaceGroupConfiguration 在一个事务里创建向导策略、模型目标和分组绑定。
 // 任意一步失败都会整体回滚，避免线上留下无法从向导继续使用的孤立策略。
 func (r *Repository) CreatePolicyAndReplaceGroupConfiguration(ctx context.Context, policy Policy, targets []ModelTarget, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64) error {
@@ -1187,6 +1203,76 @@ func (r *Repository) CreatePolicyAndReplaceGroupConfiguration(ctx context.Contex
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func (r *Repository) CreatePolicyAndReplaceGroupConfigurationAndRequestPrioritySync(ctx context.Context, policy Policy, targets []ModelTarget, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64, pendingSignature string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := insertPolicyWithTargetsTx(ctx, tx, policy, targets); err != nil {
+		return err
+	}
+	if err := replaceGroupPolicyConfigurationTx(ctx, tx, policy.UserID, policy.AdminAccountID, adminGroupID, adminGroupName, policyIDs, excludedTargetIDs, groupTargetIDs, fallbackMultiplier); err != nil {
+		return err
+	}
+	if err := requestPrioritySyncTx(ctx, tx, policy.UserID, policy.AdminAccountID, pendingSignature, "group_policy_save"); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func insertPolicyWithTargetsTx(ctx context.Context, tx pgx.Tx, policy Policy, targets []ModelTarget) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO connection_health_policies (
+			id, user_id, admin_account_id, name, enabled, own_group_id, own_group_name, model_pattern, probe_mode,
+			probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
+			failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
+			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,now(),now())
+	`, policy.ID, policy.UserID, policy.AdminAccountID, policy.Name, policy.Enabled, policy.OwnGroupID, policy.OwnGroupName,
+		policy.ModelPattern, policy.ProbeMode, policy.ProbeIntervalSeconds, policy.ContinueProbeWhenUnschedulable,
+		defaultInt(policy.UnschedulableProbeIntervalMinutes, 60), policy.FailureThreshold, policy.SuccessThreshold,
+		policy.CooldownSeconds, policy.ObservationSeconds, policy.RecoveryStepPercent, policy.AutoDegradeEnabled,
+		policy.AutoRemoteActionEnabled, normalizePriorityMode(policy.PriorityMode), normalizeStrategyMode(policy.StrategyMode),
+		policy.DailyProbeBudget); err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO connection_health_model_targets
+				(id, policy_id, user_id, admin_account_id, model_name, provider_family, enabled, probe_prompt, max_probe_tokens, created_at, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),now())
+		`, target.ID, target.PolicyID, target.UserID, target.AdminAccountID, target.ModelName, target.ProviderFamily,
+			target.Enabled, target.ProbePrompt, target.MaxProbeTokens); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func requestPrioritySyncTx(ctx context.Context, tx pgx.Tx, userID string, adminAccountID string, pendingSignature string, source string) error {
+	if strings.TrimSpace(pendingSignature) == "" {
+		return errors.New("priority sync pending signature is required")
+	}
+	_, err := tx.Exec(ctx, `
+		INSERT INTO connection_health_priority_workspace_sync_states (
+			user_id, admin_account_id, pending_signature, pending_since, last_decision,
+			last_error, last_action_source, next_reconcile_at, inventory_status, updated_at
+		) VALUES ($1,$2,$3,now(),'pending','',$4,now(),'pending',now())
+		ON CONFLICT (user_id, admin_account_id) DO UPDATE SET
+			pending_signature = EXCLUDED.pending_signature,
+			pending_since = EXCLUDED.pending_since,
+			last_decision = 'pending',
+			last_error = '',
+			last_action_source = EXCLUDED.last_action_source,
+			next_reconcile_at = now(),
+			inventory_status = 'pending',
+			pending_target_count = 0,
+			updated_at = now()
+	`, userID, adminAccountID, pendingSignature, source)
+	return err
 }
 
 func replaceGroupPolicyConfigurationTx(ctx context.Context, tx pgx.Tx, userID string, adminAccountID string, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64) error {
@@ -1426,6 +1512,114 @@ func (r *Repository) DeletePrioritySyncState(ctx context.Context, userID string,
 		WHERE user_id = $1 AND admin_account_id = $2 AND target_id = $3
 	`, userID, adminAccountID, targetID)
 	return err
+}
+
+func (r *Repository) GetPriorityWorkspaceSyncState(ctx context.Context, userID string, adminAccountID string) (*PriorityWorkspaceSyncState, error) {
+	row := r.db.QueryRow(ctx, `
+		SELECT user_id, admin_account_id, applied_signature, pending_signature, pending_since,
+			last_reconcile_attempt_at, last_reconcile_success_at, last_reconcile_failure_at,
+			next_reconcile_at, inventory_status, last_action_source, last_decision, last_error,
+			pending_target_count, updated_at
+		FROM connection_health_priority_workspace_sync_states
+		WHERE user_id = $1 AND admin_account_id = $2
+	`, userID, adminAccountID)
+	var state PriorityWorkspaceSyncState
+	if err := row.Scan(&state.UserID, &state.AdminAccountID, &state.AppliedSignature, &state.PendingSignature, &state.PendingSince,
+		&state.LastReconcileAttemptAt, &state.LastReconcileSuccessAt, &state.LastReconcileFailureAt,
+		&state.NextReconcileAt, &state.InventoryStatus, &state.LastActionSource, &state.LastDecision, &state.LastError,
+		&state.PendingTargetCount, &state.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &state, nil
+}
+
+func (r *Repository) ListAllPriorityWorkspaceSyncStates(ctx context.Context) ([]PriorityWorkspaceSyncState, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT user_id, admin_account_id, applied_signature, pending_signature, pending_since,
+			last_reconcile_attempt_at, last_reconcile_success_at, last_reconcile_failure_at,
+			next_reconcile_at, inventory_status, last_action_source, last_decision, last_error,
+			pending_target_count, updated_at
+		FROM connection_health_priority_workspace_sync_states
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := make([]PriorityWorkspaceSyncState, 0)
+	for rows.Next() {
+		var state PriorityWorkspaceSyncState
+		if err := rows.Scan(&state.UserID, &state.AdminAccountID, &state.AppliedSignature, &state.PendingSignature, &state.PendingSince,
+			&state.LastReconcileAttemptAt, &state.LastReconcileSuccessAt, &state.LastReconcileFailureAt,
+			&state.NextReconcileAt, &state.InventoryStatus, &state.LastActionSource, &state.LastDecision, &state.LastError,
+			&state.PendingTargetCount, &state.UpdatedAt); err != nil {
+			return nil, err
+		}
+		states = append(states, state)
+	}
+	return states, rows.Err()
+}
+
+func (r *Repository) MarkPriorityWorkspaceSyncRunning(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error) {
+	result, err := r.db.Exec(ctx, `
+		UPDATE connection_health_priority_workspace_sync_states
+		SET last_decision = 'running', last_error = '', inventory_status = 'refreshing',
+			last_reconcile_attempt_at = now(), reconcile_attempt_count = reconcile_attempt_count + 1,
+			updated_at = now()
+		WHERE user_id = $1 AND admin_account_id = $2 AND pending_signature = $3
+	`, userID, adminAccountID, pendingSignature)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, err
+}
+
+func (r *Repository) MarkPriorityWorkspaceSyncFailed(ctx context.Context, userID string, adminAccountID string, pendingSignature string, errorDetail string, failedCount int) (bool, error) {
+	result, err := r.db.Exec(ctx, `
+		UPDATE connection_health_priority_workspace_sync_states
+		SET last_decision = 'failed', last_error = $4, inventory_status = 'failed',
+			last_reconcile_failure_at = now(), next_reconcile_at = now() + make_interval(secs => reconcile_failure_backoff_seconds),
+			pending_target_count = $5, reconcile_failure_count = reconcile_failure_count + 1,
+			updated_at = now()
+		WHERE user_id = $1 AND admin_account_id = $2 AND pending_signature = $3
+	`, userID, adminAccountID, pendingSignature, errorDetail, failedCount)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, err
+}
+
+func (r *Repository) MarkPriorityWorkspaceSyncSucceeded(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error) {
+	result, err := r.db.Exec(ctx, `
+		UPDATE connection_health_priority_workspace_sync_states
+		SET applied_signature = $3, pending_signature = '', pending_since = NULL,
+			last_decision = 'success', last_error = '', inventory_status = 'complete',
+			last_reconcile_success_at = now(), last_write_success_at = now(), next_reconcile_at = NULL,
+			pending_target_count = 0, reconcile_success_count = reconcile_success_count + 1,
+			updated_at = now()
+		WHERE user_id = $1 AND admin_account_id = $2 AND pending_signature = $3
+	`, userID, adminAccountID, pendingSignature)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, err
+}
+
+func (r *Repository) IsPriorityWorkspaceGenerationCurrent(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error) {
+	var current string
+	err := r.db.QueryRow(ctx, `
+		SELECT pending_signature FROM connection_health_priority_workspace_sync_states
+		WHERE user_id = $1 AND admin_account_id = $2
+	`, userID, adminAccountID).Scan(&current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return pendingSignature == "", nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return current == pendingSignature, nil
 }
 
 func (r *Repository) GetTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) (*TargetActionState, error) {

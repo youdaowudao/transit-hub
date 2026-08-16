@@ -8,10 +8,19 @@ import (
 
 const (
 	eventRetentionWindow     = 24 * time.Hour
-	eventRetentionInterval   = 5 * time.Minute
 	eventRetentionBatchSize  = 1000
 	eventRetentionMaxBatches = 20
 )
+
+var eventRetentionLocation = func() *time.Location {
+	location, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		return time.FixedZone("CST", 8*60*60)
+	}
+	return location
+}()
+
+var eventRetentionRunHours = []int{3, 15}
 
 type eventRetentionRepository interface {
 	TryAcquireEventRetentionLease(ctx context.Context) (release func(), acquired bool, err error)
@@ -24,18 +33,39 @@ func (s *Service) startEventRetention(ctx context.Context) {
 		return
 	}
 	go func() {
-		s.runEventRetentionSafely(ctx)
-		ticker := time.NewTicker(eventRetentionInterval)
-		defer ticker.Stop()
 		for {
+			nextRun := nextEventRetentionRun(time.Now())
+			timer := time.NewTimer(time.Until(nextRun))
 			select {
 			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				return
-			case <-ticker.C:
+			case <-timer.C:
+				if ctx.Err() != nil {
+					return
+				}
 				s.runEventRetentionSafely(ctx)
 			}
 		}
 	}()
+}
+
+// nextEventRetentionRun intentionally returns a point strictly after now. A process that
+// starts at a fixed time does not treat that as a missed run and waits for the following one.
+func nextEventRetentionRun(now time.Time) time.Time {
+	localNow := now.In(eventRetentionLocation)
+	for _, hour := range eventRetentionRunHours {
+		candidate := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), hour, 0, 0, 0, eventRetentionLocation)
+		if candidate.After(localNow) {
+			return candidate
+		}
+	}
+	return time.Date(localNow.Year(), localNow.Month(), localNow.Day()+1, eventRetentionRunHours[0], 0, 0, 0, eventRetentionLocation)
 }
 
 func (s *Service) runEventRetentionSafely(ctx context.Context) {

@@ -412,7 +412,7 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 			targetID := buildTargetID(platform, adminAccountID, acc.ID)
 			multiplierResolution := resolutionForAdminAccount(upstreamMultiplierLookup, acc.ID)
 			upstreamKeyGroup := multiplierResolution.info
-			if multiplierResolution.status == MultiplierResolutionResolved && strings.TrimSpace(upstreamKeyGroup.siteID) != "" {
+			if (multiplierResolution.status == MultiplierResolutionResolved || multiplierResolution.status == MultiplierResolutionStale) && strings.TrimSpace(upstreamKeyGroup.siteID) != "" {
 				sourceKey := upstream.GroupCostSourceKey(upstreamKeyGroup.siteID, upstreamKeyGroup.groupID, upstreamKeyGroup.name)
 				if costSourcesByGroup[group.ID] == nil {
 					costSourcesByGroup[group.ID] = make(map[string]struct{})
@@ -506,7 +506,7 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 			usesHealthPriority := hasMultiplierPriorityPolicy(effectivePolicies) && !hasMultiplierOnlyPolicy(effectivePolicies)
 			if usesHealthPriority {
 				switch multiplierResolution.status {
-				case MultiplierResolutionResolved:
+				case MultiplierResolutionResolved, MultiplierResolutionStale:
 					effectiveMultiplier = cloneFloat64Pointer(upstreamKeyGroup.effectiveMultiplier)
 					multiplierSource = MultiplierSourceUpstreamKey
 				case MultiplierResolutionUnassociated, MultiplierResolutionMissing, MultiplierResolutionConflict:
@@ -836,6 +836,8 @@ const (
 	MultiplierResolutionMissing      = "missing"
 	MultiplierResolutionConflict     = "conflict"
 	MultiplierResolutionUnavailable  = "unavailable"
+	MultiplierResolutionStale        = multiplierResolutionStale
+	MultiplierResolutionUpdating     = multiplierResolutionUpdating
 
 	MultiplierSourceUpstreamKey   = "upstream_key"
 	MultiplierSourceLocalFallback = "local_fallback"
@@ -898,6 +900,13 @@ func (s *Service) upstreamKeyGroupsByAdminAccount(
 // recovered upstream is retried on the next refresh. Each cache miss keeps the caller's own
 // context and cancellation semantics instead of sharing another request's result.
 func (s *Service) cachedAdminGroupMultiplierLookup(ctx context.Context, userID string, adminAccountID string, platform string) upstreamMultiplierLookup {
+	if _, ok := s.mySites.(UpstreamKeyMetadataReader); ok {
+		return s.multiplierLookupForWorkspace(ctx, userID, adminAccountID, platform, true, false)
+	}
+	return s.legacyCachedAdminGroupMultiplierLookup(ctx, userID, adminAccountID, platform)
+}
+
+func (s *Service) legacyCachedAdminGroupMultiplierLookup(ctx context.Context, userID string, adminAccountID string, platform string) upstreamMultiplierLookup {
 	cacheKey := userID + "\x00" + adminAccountID + "\x00" + platform
 	now := time.Now()
 	s.adminMultiplierMu.Lock()
@@ -916,7 +925,7 @@ func (s *Service) cachedAdminGroupMultiplierLookup(ctx context.Context, userID s
 	}
 	s.adminMultiplierMu.Unlock()
 
-	lookup := s.upstreamMultiplierResolutionsByAdminAccount(ctx, userID, adminAccountID, platform)
+	lookup := s.upstreamMultiplierResolutionsByAdminAccountLegacy(ctx, userID, adminAccountID, platform)
 	if adminMultiplierLookupCacheable(lookup) {
 		s.adminMultiplierMu.Lock()
 		if current, ok := s.adminMultiplierCache[cacheKey]; !ok || current.expiresAt.Before(time.Now()) {
@@ -942,6 +951,18 @@ func adminMultiplierLookupCacheable(lookup upstreamMultiplierLookup) bool {
 }
 
 func (s *Service) upstreamMultiplierResolutionsByAdminAccount(
+	ctx context.Context,
+	userID string,
+	adminAccountID string,
+	adminPlatform string,
+) upstreamMultiplierLookup {
+	if _, ok := s.mySites.(UpstreamKeyMetadataReader); ok {
+		return s.multiplierLookupForWorkspace(ctx, userID, adminAccountID, adminPlatform, false, true)
+	}
+	return s.upstreamMultiplierResolutionsByAdminAccountLegacy(ctx, userID, adminAccountID, adminPlatform)
+}
+
+func (s *Service) upstreamMultiplierResolutionsByAdminAccountLegacy(
 	ctx context.Context,
 	userID string,
 	adminAccountID string,

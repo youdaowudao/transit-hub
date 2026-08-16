@@ -57,6 +57,43 @@ func TestRunEventRetentionSafelyRecoversPanic(t *testing.T) {
 	}
 }
 
+func TestNextEventRetentionRunUsesConfirmedBeijingTimesWithoutStartupCatchup(t *testing.T) {
+	beijing := eventRetentionLocation
+	tests := []struct {
+		name string
+		now  time.Time
+		want time.Time
+	}{
+		{
+			name: "before morning run", now: time.Date(2026, 8, 16, 2, 59, 59, 0, beijing),
+			want: time.Date(2026, 8, 16, 3, 0, 0, 0, beijing),
+		},
+		{
+			name: "exact morning start waits for afternoon", now: time.Date(2026, 8, 16, 3, 0, 0, 0, beijing),
+			want: time.Date(2026, 8, 16, 15, 0, 0, 0, beijing),
+		},
+		{
+			name: "between runs", now: time.Date(2026, 8, 16, 9, 30, 0, 0, beijing),
+			want: time.Date(2026, 8, 16, 15, 0, 0, 0, beijing),
+		},
+		{
+			name: "exact afternoon start waits for next day", now: time.Date(2026, 8, 16, 15, 0, 0, 0, beijing),
+			want: time.Date(2026, 8, 17, 3, 0, 0, 0, beijing),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := nextEventRetentionRun(test.now)
+			if !got.Equal(test.want) {
+				t.Fatalf("next run=%s want %s", got.Format(time.RFC3339), test.want.Format(time.RFC3339))
+			}
+			if !got.After(test.now) {
+				t.Fatalf("next run=%s must be after startup time=%s", got.Format(time.RFC3339), test.now.Format(time.RFC3339))
+			}
+		})
+	}
+}
+
 func TestRunEventRetentionAtDeletesBoundedBatches(t *testing.T) {
 	repository := &fakeEventRetentionRepository{
 		acquired:      true,

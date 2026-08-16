@@ -22,6 +22,7 @@ import {
   disableConnection,
   discoverTargetModels,
   getConnectionHealthAdminGroups,
+  refreshConnectionHealthAdminGroups,
   getConnectionHealthEvents,
   getConnectionHealthGroups,
   getConnectionHealthOverview,
@@ -37,7 +38,7 @@ import {
   setTargetSchedulable,
   updateConnectionHealthPolicy,
 } from '../api/connectionHealth'
-import type { ProbeTargetProgressPhase } from '../api/connectionHealth'
+import type { AdminGroupsRefreshSite, AdminGroupsRefreshSummary, ProbeTargetProgressPhase } from '../api/connectionHealth'
 
 const overview = ref<ConnectionHealthOverview | null>(null)
 const groups = ref<OwnGroupHealth[]>([])
@@ -49,12 +50,14 @@ const policies = ref<ConnectionHealthPolicy[]>([])
 const isLoading = ref(false)
 const isActionLoading = ref(false)
 const errorKey = ref('')
+const manualRefreshState = ref<AdminGroupsRefreshSummary['state'] | null>(null)
+const manualRefreshSites = ref<AdminGroupsRefreshSite[]>([])
 let eventsRequestSequence = 0
 let eventsAppliedSequence = 0
 let activeEventsScope = ''
 let adminGroupsRequestSequence = 0
 let adminGroupsLoadingRequests = 0
-let latestAdminGroupsRequest: Promise<boolean> | null = null
+const manualRefreshRequests = ref(0)
 
 const overviewFromAdminGroups = (groupList: AdminGroupHealth[]): ConnectionHealthOverview => {
   const result: ConnectionHealthOverview = {
@@ -152,12 +155,12 @@ export function useConnectionHealth() {
       errorKey.value = ''
       try {
         const nextGroups = await getConnectionHealthAdminGroups()
-        if (sequence !== adminGroupsRequestSequence) return latestAdminGroupsRequest ?? false
+        if (sequence !== adminGroupsRequestSequence) return false
         adminGroups.value = nextGroups
         overview.value = overviewFromAdminGroups(nextGroups)
         return true
       } catch (err) {
-        if (sequence !== adminGroupsRequestSequence) return latestAdminGroupsRequest ?? false
+        if (sequence !== adminGroupsRequestSequence) return false
         errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
         return false
       } finally {
@@ -167,8 +170,32 @@ export function useConnectionHealth() {
         }
       }
     })()
-    latestAdminGroupsRequest = request
     return request
+  }
+
+  // 方案 A 手动刷新：请求本身等待外部倍率任务全部终态，再返回一轮主站分组和账号。
+  // 失败时保留旧列表，避免手动刷新期间页面失去可查看内容。
+  const refreshAdminGroups = async (): Promise<boolean> => {
+    const sequence = ++adminGroupsRequestSequence
+    manualRefreshRequests.value++
+    errorKey.value = ''
+    try {
+      const response = await refreshConnectionHealthAdminGroups()
+      if (sequence !== adminGroupsRequestSequence) return false
+      adminGroups.value = response.groups
+      overview.value = overviewFromAdminGroups(response.groups)
+      manualRefreshState.value = response.refresh.state
+      manualRefreshSites.value = response.refresh.sites
+      return true
+    } catch (err) {
+      if (sequence !== adminGroupsRequestSequence) return false
+      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      manualRefreshState.value = 'failure'
+      manualRefreshSites.value = []
+      return false
+    } finally {
+      manualRefreshRequests.value--
+    }
   }
 
   // adminGroups 已包含主页面概览所需的全部状态；直接在本地聚合，避免 overview 后端再次
@@ -176,6 +203,7 @@ export function useConnectionHealth() {
   // 旧的 groups 仍需加载：探活事件弹窗按 connectionId 关联链路上下文、手动探活候选模型按
   // 链路所属 own group 匹配策略，都依赖这份数据；主列表展示已切换到 adminGroups。
   const loadAll = async (opts: { silent?: boolean } = {}) => {
+    if (manualRefreshRequests.value > 0) return
     await Promise.all([loadAdminGroups(opts), loadGroups({ silent: true })])
   }
 
@@ -343,7 +371,6 @@ export function useConnectionHealth() {
             }
           : account),
       }))
-      await loadAll({ silent: true })
       return true
     } catch (err) {
       errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
@@ -427,10 +454,13 @@ export function useConnectionHealth() {
     isLoading,
     isActionLoading,
     errorKey,
+    manualRefreshState,
+    manualRefreshSites,
     loadAll,
     loadOverview,
     loadGroups,
     loadAdminGroups,
+    refreshAdminGroups,
     loadEvents,
     loadPolicies,
     savePolicy,

@@ -494,6 +494,8 @@ const multiplierSourceLabel = (account: AdminGroupAccount): string => {
       return t(`${detailPrefix}.multiplierSources.missingBandEnd`)
     case 'conflict':
       return t(`${detailPrefix}.multiplierSources.conflictBandEnd`)
+    case 'stale':
+      return t(`${detailPrefix}.multiplierSources.staleBandEnd`)
     case 'unavailable':
       return t(`${detailPrefix}.multiplierSources.unavailableBandEnd`)
     default:

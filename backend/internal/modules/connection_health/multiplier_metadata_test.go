@@ -63,6 +63,16 @@ func (f *snapshotMetadataReader) currentMaxActive() int {
 	return f.maxActive
 }
 
+func (f *snapshotMetadataReader) activeAndDirectCalls() (int, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	totalCalls := 0
+	for _, calls := range f.directCalls {
+		totalCalls += calls
+	}
+	return f.active, totalCalls
+}
+
 func (f *snapshotMetadataReader) ListUpstreamKeysForWorkspace(ctx context.Context, userID string, adminAccountID string, siteID string) ([]upstream.Sub2APIKeyItem, error) {
 	return f.ListUpstreamKeysForWorkspaceUntil(ctx, userID, adminAccountID, siteID, nil)
 }
@@ -202,6 +212,50 @@ func TestMultiplierSnapshotFailureIsIsolatedPerSite(t *testing.T) {
 	}
 }
 
+func TestFreshMultiplierLookupRetainsOldSnapshotForDisplayAfterRefreshFailure(t *testing.T) {
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")}},
+		directItems:       map[string]upstream.Sub2APIKeyItem{"site-1|key-1": {ID: "key-1", GroupID: "group-1", GroupName: "vip"}},
+		directErrs:        map[string]error{},
+	}
+	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}}
+	first := service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if first.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("initial fresh lookup=%+v", first)
+	}
+	reader.directErrs["site-1"] = &upstream.RequestError{MessageKey: upstream.ErrorAuth, Platform: upstream.PlatformSub2API, StatusCode: 401}
+	service.multiplierSnapshotMu.Lock()
+	entry := service.multiplierSnapshots[multiplierSnapshotKey("user1", "ws1", "site-1")]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	entry.nextRetryAt = time.Time{}
+	service.multiplierSnapshotMu.Unlock()
+
+	second := service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if second.byAccount["account-1"].status != MultiplierResolutionStale {
+		t.Fatalf("failed refresh must retain stale display snapshot, lookup=%+v", second)
+	}
+}
+
+func TestFreshMultiplierLookupRefreshesHotSnapshot(t *testing.T) {
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")}},
+		directItems:       map[string]upstream.Sub2APIKeyItem{"site-1|key-1": {ID: "key-1", GroupID: "group-1", GroupName: "vip"}},
+	}
+	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}}
+
+	first := service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if first.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("initial fresh lookup=%+v", first)
+	}
+	second := service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if second.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("second fresh lookup=%+v", second)
+	}
+	if direct, _ := reader.callCounts("site-1"); direct != 2 {
+		t.Fatalf("hot snapshot direct reads=%d, want a new manual refresh", direct)
+	}
+}
+
 func TestMultiplierSnapshotAmbiguous404DefersPaginationToNextRound(t *testing.T) {
 	reader := &snapshotMetadataReader{
 		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")}},
@@ -321,6 +375,70 @@ func TestMultiplierSnapshotBoundsProcessWideRefreshWorkers(t *testing.T) {
 	case <-reader.started:
 	case <-time.After(time.Second):
 		t.Fatal("queued site refresh did not run after a worker became available")
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		active, calls := reader.activeAndDirectCalls()
+		if active == 0 && calls == len(connections) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	active, calls := reader.activeAndDirectCalls()
+	t.Fatalf("refresh workers did not settle: active=%d directCalls=%d want active=0 directCalls=%d", active, calls, len(connections))
+}
+
+func TestFreshMultiplierLookupWaitsForReplacementGeneration(t *testing.T) {
+	release := make(chan struct{})
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{
+			connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")},
+		},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-1|key-1": {ID: "key-1", GroupID: "group-1", GroupName: "vip"},
+			"site-1|key-2": {ID: "key-2", GroupID: "group-1", GroupName: "vip"},
+		},
+		started: make(chan string, 4),
+		release: release,
+	}
+	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}}
+
+	firstDone := make(chan struct{})
+	go func() {
+		service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+		close(firstDone)
+	}()
+	select {
+	case <-reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("first generation did not start")
+	}
+
+	reader.fakeMySitesReader.connections = []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-2")}
+	secondDone := make(chan struct{})
+	go func() {
+		service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+		close(secondDone)
+	}()
+	select {
+	case <-reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("replacement generation did not start")
+	}
+
+	select {
+	case <-firstDone:
+		t.Fatal("old waiter returned before replacement generation reached a terminal state")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	for _, done := range []<-chan struct{}{firstDone, secondDone} {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("fresh lookup did not finish after replacement generation release")
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,37 @@ import (
 
 	"transithub/backend/internal/shared/businesstime"
 )
+
+type nullableCostQualityMode struct {
+	value string
+	valid bool
+}
+
+var _ sql.Scanner = (*nullableCostQualityMode)(nil)
+
+func (mode *nullableCostQualityMode) Scan(src any) error {
+	switch value := src.(type) {
+	case nil:
+		mode.value = CostQualityModeUnknown
+		mode.valid = false
+	case string:
+		mode.value = value
+		mode.valid = true
+	case []byte:
+		mode.value = string(value)
+		mode.valid = true
+	default:
+		return fmt.Errorf("dashboard: cannot scan cost quality mode from %T", src)
+	}
+	return nil
+}
+
+func (mode nullableCostQualityMode) String() string {
+	if !mode.valid {
+		return CostQualityModeUnknown
+	}
+	return mode.value
+}
 
 type metricsDB interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -433,14 +465,16 @@ func (r *MetricsRepository) ListRange(ctx context.Context, userID, adminAccountI
 	snapshots := make([]DailySnapshot, 0)
 	for rows.Next() {
 		var s DailySnapshot
+		var costQualityMode nullableCostQualityMode
 		if err := rows.Scan(&s.ID, &s.UserID, &s.AdminAccountID, &s.Date, &s.TodayProfit, &s.SiteBalance,
 			&s.TodayPurchase, &s.NetProfit, &s.UpstreamBalance, &s.CreatedAt, &s.SettlementStatus,
 			&s.CostExpectedCount, &s.CostCollectedCount, &s.CostFreshCount, &s.CostRetainedCount,
-			&s.CostMissingCount, &s.CostQualityMode, &s.AdditionalCost, &s.RechargeFee,
+			&s.CostMissingCount, &costQualityMode, &s.AdditionalCost, &s.RechargeFee,
 			&s.RechargeFeeRate, &s.PromotionCost, &s.FixedCost, &s.AdjustmentCost,
 			&s.OperatingCost, &s.AdjustedNetProfit); err != nil {
 			return nil, err
 		}
+		s.CostQualityMode = costQualityMode.String()
 		if s.SnapshotSource == "" {
 			s.SnapshotSource = SnapshotSourceLiveCache
 		}
@@ -934,6 +968,7 @@ func (r *MetricsRepository) ListLatestSiteCosts(ctx context.Context, userID, adm
 
 func (r *MetricsRepository) LatestDashboardSnapshot(ctx context.Context, userID, adminAccountID, date string) (*DailySnapshot, error) {
 	var snapshot DailySnapshot
+	var costQualityMode nullableCostQualityMode
 	var recordsJSON []byte
 	err := r.db.QueryRow(ctx, `
 		SELECT id, user_id, admin_account_id, date,
@@ -952,7 +987,7 @@ func (r *MetricsRepository) LatestDashboardSnapshot(ctx context.Context, userID,
 		&snapshot.TodayProfit, &snapshot.SiteBalance, &snapshot.TodayPurchase, &snapshot.NetProfit, &snapshot.UpstreamBalance,
 		&snapshot.CreatedAt, &snapshot.SettlementStatus, &snapshot.SnapshotSource, &snapshot.ObservedAt,
 		&snapshot.FinalizedAt, &snapshot.CostExpectedCount, &snapshot.CostCollectedCount, &snapshot.BalanceObservedAt,
-		&snapshot.CostFreshCount, &snapshot.CostRetainedCount, &snapshot.CostMissingCount, &snapshot.CostQualityMode,
+		&snapshot.CostFreshCount, &snapshot.CostRetainedCount, &snapshot.CostMissingCount, &costQualityMode,
 		&snapshot.AdditionalCost, &snapshot.RechargeFee, &snapshot.RechargeFeeRate, &snapshot.PromotionCost, &snapshot.FixedCost,
 		&snapshot.AdjustmentCost, &recordsJSON, &snapshot.OperatingCost, &snapshot.AdjustedNetProfit,
 	)
@@ -962,6 +997,7 @@ func (r *MetricsRepository) LatestDashboardSnapshot(ctx context.Context, userID,
 	if err != nil {
 		return nil, err
 	}
+	snapshot.CostQualityMode = costQualityMode.String()
 	if len(recordsJSON) > 0 && string(recordsJSON) != "null" {
 		if err := json.Unmarshal(recordsJSON, &snapshot.AdditionalCostRecords); err != nil {
 			return nil, err
@@ -1043,18 +1079,20 @@ func (r *MetricsRepository) ListDailyStats(ctx context.Context, userID, adminAcc
 	snapshots := make([]DailySnapshot, 0)
 	for rows.Next() {
 		var s DailySnapshot
+		var costQualityMode nullableCostQualityMode
 		var recordsJSON []byte
 		if err := rows.Scan(
 			&s.ID, &s.UserID, &s.AdminAccountID, &s.Date,
 			&s.TodayProfit, &s.SiteBalance, &s.TodayPurchase, &s.NetProfit, &s.UpstreamBalance,
 			&s.CreatedAt, &s.SettlementStatus, &s.SnapshotSource, &s.ObservedAt,
 			&s.FinalizedAt, &s.CostExpectedCount, &s.CostCollectedCount, &s.BalanceObservedAt,
-			&s.CostFreshCount, &s.CostRetainedCount, &s.CostMissingCount, &s.CostQualityMode,
+			&s.CostFreshCount, &s.CostRetainedCount, &s.CostMissingCount, &costQualityMode,
 			&s.AdditionalCost, &s.RechargeFee, &s.RechargeFeeRate, &s.PromotionCost, &s.FixedCost,
 			&s.AdjustmentCost, &recordsJSON, &s.OperatingCost, &s.AdjustedNetProfit,
 		); err != nil {
 			return nil, err
 		}
+		s.CostQualityMode = costQualityMode.String()
 		if len(recordsJSON) > 0 && string(recordsJSON) != "null" {
 			if err := json.Unmarshal(recordsJSON, &s.AdditionalCostRecords); err != nil {
 				return nil, err

@@ -19,8 +19,10 @@ import {
 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { getPrioritySyncStatus } from '../api/connectionHealth'
+import type { AdminGroupsRefreshSite } from '../api/connectionHealth'
 import { listUpstreamSites } from '../api/upstream'
 import { connectionHealthMessageKey, useConnectionHealth } from '../composables/useConnectionHealth'
+import { createRefreshCoordinator } from '../utils/connectionHealthRefresh'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import AdminGroupHealthDetail from '../components/dashboard/AdminGroupHealthDetail.vue'
 import ConnectionHealthEventsDialog from '../components/dashboard/ConnectionHealthEventsDialog.vue'
@@ -61,8 +63,11 @@ const {
   isLoading,
   isActionLoading,
   errorKey,
+  manualRefreshState,
+  manualRefreshSites,
   loadAll,
   loadAdminGroups,
+  refreshAdminGroups,
   loadEvents,
   loadPolicies,
   removePolicy,
@@ -82,6 +87,8 @@ const siteNameMap = ref<Map<string, string>>(new Map())
 const preferences = ref<ConnectionHealthPreferences>(createDefaultConnectionHealthPreferences())
 const groupManagerOpen = ref(false)
 const prioritySyncStatus = ref<PrioritySyncStatus | null>(null)
+const manualRefreshLoading = ref(false)
+const refreshCoordinator = createRefreshCoordinator()
 const preferenceScope = computed(() => currentAccount.value?.id ?? 'anonymous')
 let loadedPreferenceScope = ''
 
@@ -311,12 +318,18 @@ const setHideUnmonitoredAccounts = (value: boolean) => {
   updatePreferences(current => ({ ...current, hideUnmonitoredAccounts: value }))
 }
 
+const loadMainListIfIdle = async (reload: () => Promise<unknown>): Promise<boolean> => {
+  if (refreshCoordinator.isManualRefreshActive()) return false
+  await reload()
+  return true
+}
+
 let lastEntryRefreshAt = 0
 const refreshOnEntry = () => {
   const now = Date.now()
   if (now - lastEntryRefreshAt < 500) return
   lastEntryRefreshAt = now
-  void loadAll()
+  if (!refreshCoordinator.isManualRefreshActive()) void loadAll()
   void loadEvents()
   void loadPolicies()
   void loadSiteNames()
@@ -329,7 +342,7 @@ onActivated(refreshOnEntry)
 const documentVisibility = useDocumentVisibility()
 let autoRefreshInFlight = false
 const autoRefresh = async () => {
-  if (documentVisibility.value !== 'visible' || autoRefreshInFlight || probeDialogOpen.value) return
+  if (documentVisibility.value !== 'visible' || autoRefreshInFlight || probeDialogOpen.value || !refreshCoordinator.shouldRunAutomaticRefresh()) return
   autoRefreshInFlight = true
   try {
     await Promise.all([loadAll({ silent: true }), loadEvents(selectedConnectionId.value || undefined), loadPrioritySyncStatus()])
@@ -344,10 +357,24 @@ watch(documentVisibility, (visibility) => {
 })
 
 const refresh = async () => {
-  await Promise.all([loadAll(), loadPolicies(), loadEvents(), loadPrioritySyncStatus()])
+  const generation = refreshCoordinator.begin()
+  if (generation === null) return
+  manualRefreshLoading.value = true
+  try {
+    await Promise.all([refreshAdminGroups(), loadPolicies(), loadEvents(), loadPrioritySyncStatus()])
+  } finally {
+    if (refreshCoordinator.complete(generation)) {
+      manualRefreshLoading.value = false
+    }
+  }
 }
 
 const siteName = (siteId: string): string => siteNameMap.value.get(siteId) ?? siteId
+
+const refreshSiteStatusLabel = (site: AdminGroupsRefreshSite): string => {
+  if (site.status === 'stale' && site.errorKey) return t(`admin.connectionHealth.refreshStatus.site.stale_${site.errorKey}`)
+  return t(`admin.connectionHealth.refreshStatus.site.${site.status}`)
+}
 
 // 分组启用/管理抽屉。
 const setupDrawerOpen = ref(false)
@@ -396,7 +423,7 @@ const onProbeAccount = (account: AdminGroupAccount) => {
 }
 
 const onFormalProbeCompleted = async () => {
-  await loadAdminGroups({ silent: true })
+  await loadMainListIfIdle(() => loadAdminGroups({ silent: true }))
 }
 
 const onQuestionAnswerStarted = (targetId: string) => {
@@ -432,7 +459,8 @@ const onSetTargetSchedulable = async (account: AdminGroupAccount) => {
   if (!account.targetId || !account.targetId.toLowerCase().startsWith('sub2api:') || account.schedulable == null) return
   const action = account.schedulable ? '关闭主站调度' : '恢复主站调度'
   if (!confirm(`确认对 ${account.targetId} 执行「${action}」？`)) return
-  await updateTargetSchedulable(account.targetId, !account.schedulable)
+  const updated = await updateTargetSchedulable(account.targetId, !account.schedulable)
+  if (updated) await loadMainListIfIdle(() => loadAll({ silent: true }))
 }
 
 const showAllEvents = async () => {
@@ -463,7 +491,7 @@ const openEditPolicy = (policy: ConnectionHealthPolicy) => {
 const handleSavePolicy = async (input: PolicyInput) => {
   if (await savePolicy(input)) {
     policyDrawerOpen.value = false
-    await loadAll({ silent: true })
+    await loadMainListIfIdle(() => loadAll({ silent: true }))
   }
 }
 
@@ -496,7 +524,7 @@ const togglePolicyEnabled = async (policy: ConnectionHealthPolicy) => {
       maxProbeTokens: model.maxProbeTokens,
     })),
   })
-  await loadAll({ silent: true })
+  await loadMainListIfIdle(() => loadAll({ silent: true }))
 }
 
 const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
@@ -505,7 +533,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
   deletePolicyError.value = ''
   try {
     if (await removePolicy(policy.id)) {
-      await loadAll({ silent: true })
+      await loadMainListIfIdle(() => loadAll({ silent: true }))
     } else {
       deletePolicyError.value = readableMessage(errorKey.value)
     }
@@ -531,13 +559,23 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           <Activity class="h-4 w-4" />
           {{ t('admin.connectionHealth.topActions.events') }}
         </Button>
-        <Button variant="secondary" size="sm" :disabled="isLoading" @click="refresh">
-          <Loader2 v-if="isLoading" class="h-4 w-4 animate-spin" />
+        <Button variant="secondary" size="sm" :disabled="isLoading || manualRefreshLoading" @click="refresh">
+          <Loader2 v-if="isLoading || manualRefreshLoading" class="h-4 w-4 animate-spin" />
           <RefreshCw v-else class="h-4 w-4" />
           {{ t('admin.connectionHealth.refresh') }}
         </Button>
+        <span v-if="manualRefreshState && !manualRefreshLoading" class="text-xs text-muted-foreground" aria-live="polite">
+          {{ t(`admin.connectionHealth.refreshStatus.${manualRefreshState}`) }}
+        </span>
       </div>
     </header>
+
+    <div v-if="manualRefreshSites.length > 0 && !manualRefreshLoading" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground" aria-live="polite">
+      <span class="font-medium text-foreground">{{ t('admin.connectionHealth.refreshStatus.sitesLabel') }}</span>
+      <span v-for="site in manualRefreshSites" :key="site.siteId">
+        {{ siteName(site.siteId) }}: {{ refreshSiteStatusLabel(site) }}
+      </span>
+    </div>
 
 		<div
 			v-if="prioritySyncStatus?.status === 'failed'"

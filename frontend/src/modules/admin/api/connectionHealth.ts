@@ -86,6 +86,47 @@ export const getConnectionHealthGroups = async (): Promise<OwnGroupHealth[]> =>
 export const getConnectionHealthAdminGroups = async (): Promise<AdminGroupHealth[]> =>
   requestJson<AdminGroupHealth[]>('/connection-health/admin-groups')
 
+export type AdminGroupsRefreshSite = {
+  siteId: string
+  status: 'success' | 'auth_failed' | 'stale' | 'unavailable' | 'timeout'
+  errorKey?: string
+}
+
+export type AdminGroupsRefreshSummary = {
+  state: 'success' | 'partial' | 'failure' | 'timeout'
+  sites: AdminGroupsRefreshSite[]
+}
+
+export type AdminGroupsFreshResponse = {
+  groups: AdminGroupHealth[]
+  refresh: AdminGroupsRefreshSummary
+}
+
+const terminalRefreshStates = new Set<AdminGroupsRefreshSummary['state']>(['success', 'partial', 'failure', 'timeout'])
+const terminalRefreshSiteStatuses = new Set<AdminGroupsRefreshSite['status']>(['success', 'auth_failed', 'stale', 'unavailable', 'timeout'])
+
+// 方案 A 手动刷新：后端等待涉及站点倍率任务全部进入终态后，只读取一轮主站分组和账号。
+// 不提供前端状态轮询，也不重复调用 admin-groups。
+export const refreshConnectionHealthAdminGroups = async (): Promise<AdminGroupsFreshResponse> => {
+  const payload = await requestJson<AdminGroupsFreshResponse | AdminGroupHealth[]>('/connection-health/admin-groups/refresh', { method: 'POST' })
+  if (
+    !payload
+    || Array.isArray(payload)
+    || !Array.isArray(payload.groups)
+    || !payload.refresh
+    || !terminalRefreshStates.has(payload.refresh.state)
+    || !Array.isArray(payload.refresh.sites)
+    || payload.refresh.sites.some(site => (
+      !site
+      || typeof site.siteId !== 'string'
+      || !terminalRefreshSiteStatuses.has(site.status)
+    ))
+  ) {
+    throw new Error('admin.connectionHealth.errors.request')
+  }
+  return payload
+}
+
 export const getPrioritySyncStatus = async (): Promise<PrioritySyncStatus> =>
 	requestJson<PrioritySyncStatus>('/connection-health/priority-sync-status')
 

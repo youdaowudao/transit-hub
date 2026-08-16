@@ -302,9 +302,13 @@ const loadAllData = async (options: { skipStatusCheck?: boolean } = {}) => {
   }
 }
 
-const adminExpiry = computed(
-  () => formatDateTime(adminStatus.value.expiresAt, locale) ?? t('admin.dashboard.adminAuth.timeUnknown'),
-)
+const adminExpiry = computed(() => {
+  // Admin Key sessions may not expose an access-token expiry; unknown is not expired.
+  if (adminStatus.value.authMethod === 'admin_key' && adminStatus.value.expiresAt == null) {
+    return t('admin.dashboard.adminAuth.timeUnknown')
+  }
+  return formatDateTime(adminStatus.value.expiresAt, locale) ?? t('admin.dashboard.adminAuth.timeUnknown')
+})
 
 const lastUpdatedLabel = computed(() => {
   if (lastUpdatedAt.value == null) return t('admin.dashboard.dataStatus.waiting')

@@ -23,6 +23,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("GET /api/connection-health/stored-summary", handler.storedSummary)
 	mux.HandleFunc("GET /api/connection-health/groups", handler.groups)
 	mux.HandleFunc("GET /api/connection-health/admin-groups", handler.adminGroups)
+	mux.HandleFunc("POST /api/connection-health/admin-groups/refresh", handler.refreshAdminGroups)
 	mux.HandleFunc("GET /api/connection-health/priority-sync-status", handler.prioritySyncStatus)
 	mux.HandleFunc("GET /api/connection-health/events", handler.events)
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/probe", handler.probe)
@@ -152,6 +153,26 @@ func (h *Handler) adminGroups(w http.ResponseWriter, r *http.Request) {
 		groups = []AdminGroupHealth{}
 	}
 	httpjson.Write(w, http.StatusOK, groups)
+}
+
+func (h *Handler) refreshAdminGroups(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	result, err := h.service.AdminGroupsFreshResult(r.Context(), userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if result.Groups == nil {
+		result.Groups = []AdminGroupHealth{}
+	}
+	if result.Refresh.Sites == nil {
+		result.Refresh.Sites = []AdminGroupsRefreshSite{}
+	}
+	httpjson.Write(w, http.StatusOK, result)
 }
 
 func (h *Handler) events(w http.ResponseWriter, r *http.Request) {

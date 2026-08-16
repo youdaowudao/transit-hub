@@ -25,6 +25,25 @@ type fakePlatformGroupReader struct {
 	credErr       map[string]error
 }
 
+type orderedPlatformGroupReader struct {
+	started chan<- string
+	groups  []upstream.AdminGroupInfo
+}
+
+func (f orderedPlatformGroupReader) FetchAdminAllGroups(session upstream.Session) ([]upstream.AdminGroupInfo, error) {
+	f.started <- "groups"
+	return f.groups, nil
+}
+
+func (f orderedPlatformGroupReader) ListAdminGroupAccounts(session upstream.Session, group upstream.AdminGroupInfo) ([]upstream.AdminGroupAccountInfo, error) {
+	f.started <- "accounts"
+	return nil, nil
+}
+
+func (f orderedPlatformGroupReader) ResolveProbeCredential(session upstream.Session, account upstream.AdminGroupAccountInfo) (upstream.ProbeCredential, error) {
+	return upstream.ProbeCredential{}, nil
+}
+
 func (f fakePlatformGroupReader) FetchAdminAllGroups(session upstream.Session) ([]upstream.AdminGroupInfo, error) {
 	return f.groups, nil
 }
@@ -51,6 +70,186 @@ func newAdminGroupsService(reader PlatformGroupReader, mySites MySitesReader, re
 		dispatcher:     noopRemoteActionRunner{},
 		probeRunner:    NewRealProbeRunner(),
 		platformGroups: reader,
+	}
+}
+
+func TestAdminGroupsFreshWaitsForExternalMultiplierBeforeReadingMainGroups(t *testing.T) {
+	started := make(chan string, 4)
+	release := make(chan struct{})
+	metadataReader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{
+			connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")},
+			session:     upstream.Session{Platform: upstream.PlatformSub2API},
+		},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-1|key-1": {ID: "key-1", GroupID: "group-1", GroupName: "vip"},
+		},
+		started: started,
+		release: release,
+	}
+	service := newAdminGroupsService(
+		orderedPlatformGroupReader{started: started, groups: []upstream.AdminGroupInfo{{ID: "group-1", Name: "group"}}},
+		metadataReader,
+		newFakeRepository(),
+	)
+	service.sites = snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}
+
+	freshService, ok := any(service).(interface {
+		AdminGroupsFresh(context.Context, string) ([]AdminGroupHealth, error)
+	})
+	if !ok {
+		t.Fatal("Service must expose the方案 A fresh admin-groups request")
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := freshService.AdminGroupsFresh(context.Background(), "user1")
+		done <- err
+	}()
+	select {
+	case event := <-started:
+		if event != "site-1" {
+			t.Fatalf("first external event = %q, want site-1", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh request did not start the external multiplier refresh")
+	}
+	select {
+	case event := <-started:
+		t.Fatalf("main-site read started before multiplier terminal state: %q", event)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("AdminGroupsFresh() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh request did not finish after multiplier release")
+	}
+	groupsReads := 0
+	accountReads := 0
+	for {
+		select {
+		case event := <-started:
+			switch event {
+			case "groups":
+				groupsReads++
+			case "accounts":
+				accountReads++
+			}
+		default:
+			goto drained
+		}
+	}
+drained:
+	if groupsReads != 1 || accountReads != 1 {
+		t.Fatalf("main site reads = groups:%d accounts:%d, want one round", groupsReads, accountReads)
+	}
+	if direct, _ := metadataReader.callCounts("site-1"); direct != 1 {
+		t.Fatalf("external site requests = %d, want one reused task", direct)
+	}
+}
+
+func TestAdminGroupsFreshCancellationDoesNotReadMainGroups(t *testing.T) {
+	started := make(chan string, 4)
+	release := make(chan struct{})
+	metadataReader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{
+			connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")},
+			session:     upstream.Session{Platform: upstream.PlatformSub2API},
+		},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-1|key-1": {ID: "key-1", GroupID: "group-1", GroupName: "vip"},
+		},
+		started: started,
+		release: release,
+	}
+	service := newAdminGroupsService(
+		orderedPlatformGroupReader{started: started, groups: []upstream.AdminGroupInfo{{ID: "group-1", Name: "group"}}},
+		metadataReader,
+		newFakeRepository(),
+	)
+	service.sites = snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.AdminGroupsFresh(ctx, "user1")
+		done <- err
+	}()
+	select {
+	case event := <-started:
+		if event != "site-1" {
+			t.Fatalf("first external event = %q, want site-1", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh request did not start the external multiplier refresh")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("AdminGroupsFresh() error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled fresh request did not finish")
+	}
+	for {
+		select {
+		case event := <-started:
+			if event == "groups" || event == "accounts" {
+				t.Fatalf("main-site read started after cancellation: %q", event)
+			}
+		default:
+			return
+		}
+	}
+}
+
+func TestAdminGroupsFreshResultReportsPerSiteTerminalStates(t *testing.T) {
+	metadataReader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{
+			connections: []my_sites.RealConnection{
+				snapshotConnection("account-1", "site-1", "key-1"),
+				snapshotConnection("account-2", "site-2", "key-2"),
+			},
+			session: upstream.Session{Platform: upstream.PlatformSub2API},
+		},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-1|key-1": {ID: "key-1", GroupID: "group-1", GroupName: "vip"},
+		},
+		directErrs: map[string]error{
+			"site-2": &upstream.RequestError{MessageKey: upstream.ErrorAuth, Platform: upstream.PlatformSub2API, StatusCode: 401},
+		},
+	}
+	service := newAdminGroupsService(
+		fakePlatformGroupReader{groups: []upstream.AdminGroupInfo{{ID: "group-1", Name: "group"}}},
+		metadataReader,
+		newFakeRepository(),
+	)
+	service.sites = snapshotSiteLookup{sites: map[string]*upstream.Site{
+		"site-1": snapshotSite("site-1"),
+		"site-2": snapshotSite("site-2"),
+	}}
+
+	result, err := service.AdminGroupsFreshResult(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("AdminGroupsFreshResult() error = %v", err)
+	}
+	if result.Refresh.State != "partial" {
+		t.Fatalf("refresh state = %q, want partial", result.Refresh.State)
+	}
+	statuses := make(map[string]string, len(result.Refresh.Sites))
+	for _, site := range result.Refresh.Sites {
+		statuses[site.SiteID] = site.Status
+	}
+	if statuses["site-1"] != "success" {
+		t.Fatalf("site-1 status = %q, want success", statuses["site-1"])
+	}
+	if statuses["site-2"] != "auth_failed" {
+		t.Fatalf("site-2 status = %q, want auth_failed", statuses["site-2"])
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -20,7 +21,7 @@ type questionAnswerRepository interface {
 	SetTestQuestionEnabled(ctx context.Context, userID string, questionID string, enabled bool) (*TestQuestion, error)
 	SetDefaultTestQuestion(ctx context.Context, userID string, questionID string) (*TestQuestion, error)
 	DeleteTestQuestion(ctx context.Context, userID string, questionID string) (bool, error)
-	CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string) ([]QuestionAnswerRecord, error)
+	CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort) ([]QuestionAnswerRecord, error)
 	MarkQuestionAnswerRunning(ctx context.Context, userID string, batchID string, recordID string) (bool, error)
 	CompleteQuestionAnswer(ctx context.Context, userID string, batchID string, recordID string, status QuestionAnswerStatus, answerBody string, errorType string) (bool, error)
 	StopQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error)
@@ -160,7 +161,7 @@ func scanTestQuestion(row rowScanner) (*TestQuestion, error) {
 	return &question, nil
 }
 
-func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string) ([]QuestionAnswerRecord, error) {
+func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort) ([]QuestionAnswerRecord, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -221,14 +222,15 @@ func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID strin
 			record := QuestionAnswerRecord{
 				ID: recordID, TargetID: targetID, BatchID: batchID, ModelName: model,
 				QuestionID: question.ID, QuestionName: question.Name, QuestionBody: question.Body,
-				Status: QuestionAnswerPending,
+				ReasoningEffort: questionAnswerReasoningEffortPointer(reasoningEffort),
+				Status:          QuestionAnswerPending,
 			}
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO connection_health_question_answer_records (
-					id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body, status
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending')
+					id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body, reasoning_effort, status
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')
 				RETURNING created_at, updated_at
-			`, record.ID, userID, record.TargetID, record.BatchID, record.ModelName, record.QuestionID, record.QuestionName, record.QuestionBody).Scan(&record.CreatedAt, &record.UpdatedAt); err != nil {
+			`, record.ID, userID, record.TargetID, record.BatchID, record.ModelName, record.QuestionID, record.QuestionName, record.QuestionBody, reasoningEffort).Scan(&record.CreatedAt, &record.UpdatedAt); err != nil {
 				return nil, err
 			}
 			records = append(records, record)
@@ -402,7 +404,7 @@ func (r *Repository) SetQuestionAnswerManualError(ctx context.Context, userID st
 		SET manual_error = $4, updated_at = now()
 		WHERE id = $1 AND user_id = $2 AND target_id = $3 AND status = 'succeeded'
 		RETURNING id, target_id, batch_id, model_name, question_id, question_name, question_body,
-			answer_body, status, error_type, manual_error, created_at, started_at, completed_at, updated_at
+			reasoning_effort, answer_body, status, error_type, manual_error, created_at, started_at, completed_at, updated_at
 	`, recordID, userID, targetID, manualError)
 	record, err := scanQuestionAnswerRecord(row)
 	if err != nil {
@@ -413,7 +415,7 @@ func (r *Repository) SetQuestionAnswerManualError(ctx context.Context, userID st
 
 const questionAnswerRecordSelect = `
 	SELECT id, target_id, batch_id, model_name, question_id, question_name, question_body,
-		answer_body, status, error_type, manual_error, created_at, started_at, completed_at, updated_at
+		reasoning_effort, answer_body, status, error_type, manual_error, created_at, started_at, completed_at, updated_at
 	FROM connection_health_question_answer_records
 `
 
@@ -431,9 +433,10 @@ func scanQuestionAnswerRecords(rows pgx.Rows) ([]QuestionAnswerRecord, error) {
 
 func scanQuestionAnswerRecord(row rowScanner) (*QuestionAnswerRecord, error) {
 	var record QuestionAnswerRecord
+	var reasoningEffort *string
 	if err := row.Scan(
 		&record.ID, &record.TargetID, &record.BatchID, &record.ModelName, &record.QuestionID,
-		&record.QuestionName, &record.QuestionBody, &record.AnswerBody, &record.Status,
+		&record.QuestionName, &record.QuestionBody, &reasoningEffort, &record.AnswerBody, &record.Status,
 		&record.ErrorType, &record.ManualError, &record.CreatedAt, &record.StartedAt,
 		&record.CompletedAt, &record.UpdatedAt,
 	); err != nil {
@@ -442,7 +445,18 @@ func scanQuestionAnswerRecord(row rowScanner) (*QuestionAnswerRecord, error) {
 		}
 		return nil, err
 	}
+	if reasoningEffort != nil {
+		normalized, err := normalizeQuestionAnswerReasoningEffort(*reasoningEffort)
+		if err != nil || strings.TrimSpace(*reasoningEffort) == "" {
+			return nil, fmt.Errorf("invalid question answer reasoning effort snapshot")
+		}
+		record.ReasoningEffort = questionAnswerReasoningEffortPointer(normalized)
+	}
 	return &record, nil
+}
+
+func questionAnswerReasoningEffortPointer(value QuestionAnswerReasoningEffort) *QuestionAnswerReasoningEffort {
+	return &value
 }
 
 func cloneQuestionAnswerRecords(records []QuestionAnswerRecord) []QuestionAnswerRecord {

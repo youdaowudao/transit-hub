@@ -18,11 +18,12 @@ func NewQuestionAnswerRunner() *QuestionAnswerRunner {
 	return &QuestionAnswerRunner{client: &http.Client{}}
 }
 
-func (r *QuestionAnswerRunner) Ask(ctx context.Context, cred upstream.ProbeCredential, model string, question string) (string, string) {
+func (r *QuestionAnswerRunner) Ask(ctx context.Context, cred upstream.ProbeCredential, model string, question string, reasoningEffort QuestionAnswerReasoningEffort) (string, string) {
 	endpoint := strings.TrimRight(cred.BaseURL, "/") + "/v1/chat/completions"
 	payload := map[string]any{
-		"model":    model,
-		"messages": []map[string]string{{"role": "user", "content": question}},
+		"model":            model,
+		"messages":         []map[string]string{{"role": "user", "content": question}},
+		"reasoning_effort": reasoningEffort,
 	}
 	request, err := newJSONRequest(ctx, http.MethodPost, endpoint, payload, map[string]string{"Authorization": "Bearer " + cred.Key})
 	if err != nil {

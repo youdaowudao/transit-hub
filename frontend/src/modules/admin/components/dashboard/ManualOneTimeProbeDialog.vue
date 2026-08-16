@@ -32,6 +32,7 @@ import type {
   ManualProbeResult,
   ModelHealth,
   QuestionAnswerBatch,
+  QuestionAnswerReasoningEffort,
   QuestionAnswerHistory,
   QuestionAnswerRecord,
   TestQuestion,
@@ -85,6 +86,13 @@ const formalProgress = ref<'starting' | 'queued' | 'direct' | 'running' | ''>(''
 
 const qaQuestions = ref<TestQuestion[]>([])
 const qaSelectedQuestions = ref<Set<string>>(new Set())
+const qaReasoningEffort = ref<QuestionAnswerReasoningEffort>('medium')
+const qaReasoningEffortOptions: Array<{ value: QuestionAnswerReasoningEffort; labelKey: string }> = [
+  { value: 'low', labelKey: 'low' },
+  { value: 'medium', labelKey: 'medium' },
+  { value: 'high', labelKey: 'high' },
+  { value: 'xhigh', labelKey: 'xhigh' },
+]
 const qaLoading = ref(false)
 const qaStarting = ref(false)
 const qaCancelling = ref(false)
@@ -202,6 +210,7 @@ const restoreActiveQuestionAnswerSelection = (batch: QuestionAnswerBatch | null)
   if (!batch?.active) return false
   selected.value = new Set(batch.records.map(record => record.modelName))
   qaSelectedQuestions.value = new Set(batch.records.map(record => record.questionId))
+  if (batch.reasoningEffort) qaReasoningEffort.value = batch.reasoningEffort
   return true
 }
 
@@ -233,6 +242,7 @@ watch(
     formalProgress.value = ''
     qaQuestions.value = []
     qaSelectedQuestions.value = new Set()
+    qaReasoningEffort.value = 'medium'
     qaBatch.value = null
     qaHistory.value = {
       records: [], page: 1, pageSize: 20, totalItems: 0, totalPages: 0,
@@ -444,6 +454,7 @@ const startQuestionAnswers = async () => {
       targetId,
       Array.from(selected.value),
       Array.from(qaSelectedQuestions.value),
+      qaReasoningEffort.value,
       controller.signal,
     )
     if (startSequence !== qaStartSequence || !questionAnswerScopeIsCurrent(scope)) return
@@ -671,6 +682,10 @@ const questionAnswerErrorLabel = (errorType: string): string => {
   const key = `${prefix}.questionAnswer.errorTypes.${errorType}`
   return errorType && te(key) ? t(key) : t(`${prefix}.questionAnswer.errorTypes.unknown`)
 }
+const questionAnswerReasoningEffortLabel = (value: QuestionAnswerReasoningEffort | null | undefined): string => {
+  if (!value) return t(`${prefix}.questionAnswer.reasoningEffort.unspecified`)
+  return t(`${prefix}.questionAnswer.reasoningEffort.options.${value}`)
+}
 const questionAnswerRecordClass = (record: QuestionAnswerRecord): string => {
   if (record.status === 'cancelled' || record.status === 'pending' || record.status === 'running') return 'border-border/50 bg-surface-line/20'
   if (record.status === 'failed' || record.manualError) return 'border-red-500/60 bg-red-500/20 dark:border-red-400/50 dark:bg-red-500/20'
@@ -825,6 +840,16 @@ const close = () => {
                     </div>
                   </div>
 
+                  <fieldset class="mt-5 border-t border-border/40 pt-4" :disabled="qaSelectionLocked">
+                    <legend class="mb-2 text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.reasoningEffort.title`) }}</legend>
+                    <div class="grid grid-cols-4 overflow-hidden rounded-lg border border-border/50 bg-surface-line/20">
+                      <label v-for="option in qaReasoningEffortOptions" :key="option.value" class="flex cursor-pointer items-center justify-center border-r border-border/40 px-2 py-2 text-xs transition-colors last:border-r-0" :class="qaReasoningEffort === option.value ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-surface-line/40'">
+                        <input v-model="qaReasoningEffort" class="sr-only" type="radio" name="question-answer-reasoning-effort" :value="option.value" />
+                        {{ t(`${prefix}.questionAnswer.reasoningEffort.options.${option.labelKey}`) }}
+                      </label>
+                    </div>
+                  </fieldset>
+
                   <p v-if="qaErrorKey" class="mt-4 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">{{ qaReadableError }}</p>
                   <p v-if="qaCompletedNotice" class="mt-4 rounded-lg bg-green-500/10 px-3 py-2 text-xs text-green-600 dark:text-green-400">{{ t(`${prefix}.questionAnswer.completedNotice`) }}</p>
 
@@ -834,6 +859,7 @@ const close = () => {
                         <h4 class="text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.currentTitle`) }}</h4>
                         <p v-if="qaBatch" class="mt-1 text-xs text-muted-foreground">
                           {{ t(`${prefix}.questionAnswer.submitted`, { count: qaBatch.submittedCount }) }} · {{ t(`${prefix}.questionAnswer.progress`, { completed: qaBatch.completedCount, total: qaBatch.submittedCount }) }}
+                          · {{ t(`${prefix}.questionAnswer.reasoningEffort.label`) }}: {{ questionAnswerReasoningEffortLabel(qaBatch.reasoningEffort) }}
                           <span v-if="qaBatch.active"> · {{ t(`${prefix}.questionAnswer.runningNow`, { model: qaBatch.currentModel || '-', question: qaBatch.currentQuestion || '-' }) }}</span>
                         </p>
                       </div>
@@ -897,6 +923,7 @@ const close = () => {
                             </div>
                             <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
                               <span>{{ record.modelName }}</span>
+                              <span>{{ t(`${prefix}.questionAnswer.reasoningEffort.label`) }}: {{ questionAnswerReasoningEffortLabel(record.reasoningEffort) }}</span>
                               <span>{{ formatConnectionHealthTime(record.createdAt) }}</span>
                               <span>{{ questionAnswerStatusLabel(record) }}</span>
                               <span v-if="questionAnswerElapsedLabel(record)">{{ questionAnswerElapsedLabel(record) }}</span>

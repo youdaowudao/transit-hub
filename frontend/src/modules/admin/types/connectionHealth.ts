@@ -351,6 +351,7 @@ export interface TestQuestionInput {
 }
 
 export type QuestionAnswerStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+export type QuestionAnswerReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 
 export interface QuestionAnswerRecord {
   id: string
@@ -360,6 +361,7 @@ export interface QuestionAnswerRecord {
   questionId: string
   questionName: string
   questionBody: string
+  reasoningEffort: QuestionAnswerReasoningEffort | null
   answerBody: string
   status: QuestionAnswerStatus
   errorType: string
@@ -389,6 +391,7 @@ export interface QuestionAnswerHistory {
 export interface QuestionAnswerBatch {
   batchId: string
   records: QuestionAnswerRecord[]
+  reasoningEffort: QuestionAnswerReasoningEffort | null
   submittedCount: number
   completedCount: number
   active: boolean

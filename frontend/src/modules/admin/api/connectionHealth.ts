@@ -13,6 +13,7 @@ import type {
   PolicyInput,
 	PrioritySyncStatus,
   QuestionAnswerBatch,
+  QuestionAnswerReasoningEffort,
   QuestionAnswerHistory,
   QuestionAnswerRecord,
   TestQuestion,
@@ -241,11 +242,12 @@ export const startQuestionAnswerBatch = async (
   targetId: string,
   models: string[],
   questionIds: string[],
+  reasoningEffort: QuestionAnswerReasoningEffort,
   signal?: AbortSignal,
 ): Promise<QuestionAnswerBatch> =>
   requestJson<QuestionAnswerBatch>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches`, {
     method: 'POST',
-    body: JSON.stringify({ models, questionIds }),
+    body: JSON.stringify({ models, questionIds, reasoningEffort }),
     signal,
   })
 

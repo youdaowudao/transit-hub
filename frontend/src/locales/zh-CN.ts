@@ -1628,6 +1628,17 @@ export default {
         questionAnswer: {
           loading: '正在读取测试问题和历史记录...',
           questionsTitle: '选择测试问题',
+          reasoningEffort: {
+            title: '推理力度',
+            label: '推理力度',
+            unspecified: '未指定',
+            options: {
+              low: '低',
+              medium: '中',
+              high: '高',
+              xhigh: '非常高'
+            }
+          },
           noQuestions: '当前没有启用的测试问题，请前往设置页添加或启用。',
           defaultQuestion: '默认',
           selectedFormula: '模型 {models} 个 × 问题 {questions} 个 = 共 {total} 次请求',
@@ -1726,8 +1737,10 @@ export default {
         testQuestionNotFound: '测试问题不存在或无权访问。',
         testQuestionDisabled: '所选测试问题已停用或不存在，请刷新后重新选择。',
         questionAnswerSelection: '请至少选择一个模型和一个测试问题。',
+        questionAnswerReasoningEffort: '推理力度无效，请重新选择低、中、高或非常高。',
         questionAnswerActive: '该账号已有问答批次进行中。',
         questionAnswerBatchNotFound: '问答批次不存在或无权访问。',
+        questionAnswerStorage: '问答记录的推理力度快照不一致，请稍后重试。',
         questionAnswerMarkForbidden: '只有成功回答可以切换人工错误标记。',
         questionAnswerServiceStopped: '问答服务正在关闭，暂时不能开始新批次。'
       }

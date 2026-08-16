@@ -270,6 +270,20 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			updated_at timestamptz NOT NULL DEFAULT now(),
 			CONSTRAINT connection_health_question_answer_status CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled'))
 		)`,
+		`ALTER TABLE connection_health_question_answer_records
+			ADD COLUMN IF NOT EXISTS reasoning_effort text NULL`,
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conrelid = 'connection_health_question_answer_records'::regclass
+				  AND conname = 'connection_health_question_answer_reasoning_effort'
+			) THEN
+				ALTER TABLE connection_health_question_answer_records
+					ADD CONSTRAINT connection_health_question_answer_reasoning_effort
+					CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh'));
+			END IF;
+		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_target_history ON connection_health_question_answer_records (user_id, target_id, created_at DESC, id DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_batch ON connection_health_question_answer_records (user_id, target_id, batch_id, created_at, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_active ON connection_health_question_answer_records (user_id, target_id, status) WHERE status IN ('pending', 'running')`,

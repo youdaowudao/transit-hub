@@ -559,9 +559,9 @@ func (s *Service) ListUpstreamKeys(ctx context.Context, userID string, siteID st
 	var keys []upstream.Sub2APIKeyItem
 	switch session.Platform {
 	case upstream.PlatformNewAPI:
-		keys, err = s.platformService.ListNewAPITokens(session)
+		keys, err = s.platformService.ListNewAPITokensContext(ctx, session)
 	default:
-		keys, err = s.platformService.ListSub2APIKeys(session)
+		keys, err = s.platformService.ListSub2APIKeysContext(ctx, session)
 	}
 	if err != nil {
 		log.Printf("[list-upstream-keys] 获取上游 key 列表失败 site=%s platform=%s err=%v", upstreamSite.Name, session.Platform, err)

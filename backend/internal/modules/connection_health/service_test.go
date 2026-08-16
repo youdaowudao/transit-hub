@@ -373,14 +373,14 @@ func (f *fakeRepository) ListRecentEventsByWorkspace(ctx context.Context, userID
 	return out, nil
 }
 
-func (f *fakeRepository) ListLatestProbeFailureEventsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]ConnectionHealthEvent, error) {
+func (f *fakeRepository) ListLatestProbeFailureEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error) {
 	type eventKey struct {
 		connectionID string
 		modelName    string
 	}
 	latest := make(map[eventKey]ConnectionHealthEvent)
 	for _, event := range f.events {
-		if event.UserID != userID || event.AdminAccountID != adminAccountID || !slices.Contains(probeFailureResultKeys(), event.Result) {
+		if event.UserID != userID || event.AdminAccountID != adminAccountID || event.CreatedAt.Before(since) || !slices.Contains(probeFailureResultKeys(), event.Result) {
 			continue
 		}
 		key := eventKey{connectionID: event.ConnectionID, modelName: event.ModelName}
@@ -396,10 +396,10 @@ func (f *fakeRepository) ListLatestProbeFailureEventsByWorkspace(ctx context.Con
 	return out, nil
 }
 
-func (f *fakeRepository) ListLatestSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]ConnectionHealthEvent, error) {
+func (f *fakeRepository) ListLatestSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error) {
 	latest := make(map[string]ConnectionHealthEvent)
 	for _, event := range f.events {
-		if event.UserID != userID || event.AdminAccountID != adminAccountID || event.ActionSource != ActionSourceUser {
+		if event.UserID != userID || event.AdminAccountID != adminAccountID || event.CreatedAt.Before(since) || event.ActionSource != ActionSourceUser {
 			continue
 		}
 		current, exists := latest[event.ConnectionID]
@@ -414,10 +414,10 @@ func (f *fakeRepository) ListLatestSchedulableActionEventsByWorkspace(ctx contex
 	return out, nil
 }
 
-func (f *fakeRepository) ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]ConnectionHealthEvent, error) {
+func (f *fakeRepository) ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error) {
 	latest := make(map[string]ConnectionHealthEvent)
 	for _, event := range f.events {
-		if event.UserID != userID || event.AdminAccountID != adminAccountID || event.ActionSource != ActionSourceUser || event.Result != SchedulableActionSucceeded {
+		if event.UserID != userID || event.AdminAccountID != adminAccountID || event.CreatedAt.Before(since) || event.ActionSource != ActionSourceUser || event.Result != SchedulableActionSucceeded {
 			continue
 		}
 		current, exists := latest[event.ConnectionID]

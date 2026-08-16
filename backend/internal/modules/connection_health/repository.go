@@ -731,7 +731,10 @@ func (r *Repository) ListEventsByConnection(ctx context.Context, connectionID st
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
 			latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
-		FROM connection_health_events WHERE connection_id = $1 AND user_id = $2 AND admin_account_id = $3 ORDER BY created_at DESC LIMIT $4
+		FROM connection_health_events
+		WHERE connection_id = $1 AND user_id = $2 AND admin_account_id = $3
+			AND created_at >= now() - interval '24 hours'
+		ORDER BY created_at DESC, id DESC LIMIT $4
 	`, connectionID, userID, adminAccountID, limit)
 	if err != nil {
 		return nil, err
@@ -749,7 +752,10 @@ func (r *Repository) ListRecentEventsByWorkspace(ctx context.Context, userID str
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
 			latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
-		FROM connection_health_events WHERE user_id = $1 AND admin_account_id = $2 ORDER BY created_at DESC LIMIT $3
+		FROM connection_health_events
+		WHERE user_id = $1 AND admin_account_id = $2
+			AND created_at >= now() - interval '24 hours'
+		ORDER BY created_at DESC, id DESC LIMIT $3
 	`, userID, adminAccountID, limit)
 	if err != nil {
 		return nil, err
@@ -761,7 +767,7 @@ func (r *Repository) ListRecentEventsByWorkspace(ctx context.Context, userID str
 // ListLatestProbeFailureEventsByWorkspace returns the latest real probe failure for
 // every target/model pair. Successful probes do not displace the error details that
 // explain the persisted last_failure_at value.
-func (r *Repository) ListLatestProbeFailureEventsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]ConnectionHealthEvent, error) {
+func (r *Repository) ListLatestProbeFailureEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
@@ -772,11 +778,11 @@ func (r *Repository) ListLatestProbeFailureEventsByWorkspace(ctx context.Context
 				upstream_site_id, upstream_group_name, result, from_state, to_state,
 				latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
 			FROM connection_health_events
-			WHERE user_id = $1 AND admin_account_id = $2 AND result = ANY($3)
-			ORDER BY connection_id, model_name, created_at DESC
+			WHERE user_id = $1 AND admin_account_id = $2 AND created_at >= $3 AND result = ANY($4)
+			ORDER BY connection_id, model_name, created_at DESC, id DESC
 		) latest
-		ORDER BY created_at DESC
-	`, userID, adminAccountID, probeFailureResultKeys())
+		ORDER BY created_at DESC, id DESC
+	`, userID, adminAccountID, since, probeFailureResultKeys())
 	if err != nil {
 		return nil, err
 	}
@@ -786,7 +792,7 @@ func (r *Repository) ListLatestProbeFailureEventsByWorkspace(ctx context.Context
 
 // ListLatestSchedulableActionEventsByWorkspace returns the latest user scheduling
 // attempt for every target, including failures, without being displaced by probe traffic.
-func (r *Repository) ListLatestSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]ConnectionHealthEvent, error) {
+func (r *Repository) ListLatestSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
@@ -797,12 +803,12 @@ func (r *Repository) ListLatestSchedulableActionEventsByWorkspace(ctx context.Co
 				upstream_site_id, upstream_group_name, result, from_state, to_state,
 					latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
 			FROM connection_health_events
-				WHERE user_id = $1 AND admin_account_id = $2
-					AND action_source = $3
-			ORDER BY connection_id, created_at DESC
+				WHERE user_id = $1 AND admin_account_id = $2 AND created_at >= $3
+					AND action_source = $4
+			ORDER BY connection_id, created_at DESC, id DESC
 		) latest
-		ORDER BY created_at DESC
-	`, userID, adminAccountID, ActionSourceUser)
+		ORDER BY created_at DESC, id DESC
+	`, userID, adminAccountID, since, ActionSourceUser)
 	if err != nil {
 		return nil, err
 	}
@@ -813,7 +819,7 @@ func (r *Repository) ListLatestSchedulableActionEventsByWorkspace(ctx context.Co
 // ListLatestSuccessfulSchedulableActionEventsByWorkspace keeps the action that can
 // explain the currently observed scheduling value separate from the latest attempt,
 // which may itself have failed without changing the upstream value.
-func (r *Repository) ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]ConnectionHealthEvent, error) {
+func (r *Repository) ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
@@ -824,12 +830,12 @@ func (r *Repository) ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx 
 				upstream_site_id, upstream_group_name, result, from_state, to_state,
 					latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
 			FROM connection_health_events
-			WHERE user_id = $1 AND admin_account_id = $2
-				AND action_source = $3 AND result = $4
-			ORDER BY connection_id, created_at DESC
+			WHERE user_id = $1 AND admin_account_id = $2 AND created_at >= $3
+				AND action_source = $4 AND result = $5
+			ORDER BY connection_id, created_at DESC, id DESC
 		) latest
-		ORDER BY created_at DESC
-	`, userID, adminAccountID, ActionSourceUser, SchedulableActionSucceeded)
+		ORDER BY created_at DESC, id DESC
+	`, userID, adminAccountID, since, ActionSourceUser, SchedulableActionSucceeded)
 	if err != nil {
 		return nil, err
 	}

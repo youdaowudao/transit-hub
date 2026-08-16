@@ -1530,6 +1530,51 @@ func TestAdminGroups_EnabledTargetPolicyDoesNotUseInheritedGroupPolicy(t *testin
 	if len(account.UnprobedModels) != 1 || account.UnprobedModels[0].ModelName != "direct-model" {
 		t.Fatalf("effective models must exclude inherited group policy, got %+v", account.UnprobedModels)
 	}
+	payload, err := json.Marshal(account)
+	if err != nil {
+		t.Fatalf("marshal account: %v", err)
+	}
+	var effective struct {
+		PolicyIDs []string                `json:"effectivePolicyIds"`
+		Policies  []AssignedPolicySummary `json:"effectivePolicies"`
+	}
+	if err := json.Unmarshal(payload, &effective); err != nil {
+		t.Fatalf("unmarshal effective policy fields: %v", err)
+	}
+	if len(effective.PolicyIDs) != 1 || effective.PolicyIDs[0] != direct.ID {
+		t.Fatalf("effective policy ids must contain only the enabled target policy, got %+v", effective.PolicyIDs)
+	}
+	if len(effective.Policies) != 1 || effective.Policies[0].PolicyID != direct.ID {
+		t.Fatalf("effective policies must exclude the inherited group policy, got %+v", effective.Policies)
+	}
+}
+
+func TestAdminGroups_AccountMultiplierOnlyPolicyMarksGroupPriorityMode(t *testing.T) {
+	repo := newFakeRepository()
+	direct := probePolicy()
+	direct.ID = "multiplier-only"
+	direct.StrategyMode = StrategyModeMultiplierOnly
+	direct.PriorityMode = PriorityModeMultiplier
+	direct.ModelTargets = nil
+	repo.policies = []Policy{direct}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "newapi:ws1:100", PolicyID: direct.ID,
+	}}
+	mySites := fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI}}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "100", Name: "assigned", BaseURL: "https://up", Models: "gpt-4o"}},
+		},
+	}
+
+	groups, err := newAdminGroupsService(reader, mySites, repo).AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 || groups[0].PriorityMode != PriorityModeMultiplier {
+		t.Fatalf("account-level multiplier-only policy must mark group priority mode, got %+v", groups)
+	}
 }
 
 func TestAdminGroups_AccountPolicyMarksGroupAsMonitored(t *testing.T) {

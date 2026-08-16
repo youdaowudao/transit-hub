@@ -473,7 +473,7 @@ const formatNumber = (value: number | null | undefined): string => value == null
 const formatMultiplier = (value: number | null | undefined): string => value == null ? '-' : `${value}x`
 
 const usesMultiplierOnly = (account: AdminGroupAccount): boolean =>
-  (account.assignedPolicies ?? []).some(policy => policy.enabled && policy.strategyMode === 'multiplier_only')
+  (account.effectivePolicies ?? []).some(policy => policy.enabled && policy.strategyMode === 'multiplier_only')
 
 const effectiveMultiplier = (account: AdminGroupAccount): number | null => {
   if (account.effectiveMultiplier != null) return account.effectiveMultiplier

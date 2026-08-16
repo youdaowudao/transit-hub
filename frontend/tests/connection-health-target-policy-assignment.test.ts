@@ -32,4 +32,8 @@ describe('connection health account policy assignment', () => {
     expect(dialogSource).toContain('let loadSequence = 0')
     expect(dialogSource).toContain('if (requestSequence !== loadSequence) return')
   })
+
+  it('uses effective policies for account multiplier display', () => {
+    expect(detailSource).toContain('(account.effectivePolicies ?? [])')
+  })
 })

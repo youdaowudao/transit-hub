@@ -137,8 +137,11 @@ type AdminGroupAccount struct {
 	UnprobedModels []AdminGroupUnprobedModel `json:"unprobedModels,omitempty"`
 	// 策略分配字段：与 ProbeAvailable 完全解耦——未分配策略的账号/渠道仍可手动一次性探活，
 	// 只是不会被调度器自动探活、不会进策略探活事件列表。
-	AssignedPolicyIDs          []string                `json:"assignedPolicyIds"`
-	AssignedPolicies           []AssignedPolicySummary `json:"assignedPolicies"`
+	AssignedPolicyIDs []string                `json:"assignedPolicyIds"`
+	AssignedPolicies  []AssignedPolicySummary `json:"assignedPolicies"`
+	// EffectivePolicy* 是经过账号级覆盖/分组继承解析后，实际用于该目标的启用策略。
+	EffectivePolicyIDs         []string                `json:"effectivePolicyIds"`
+	EffectivePolicies          []AssignedPolicySummary `json:"effectivePolicies"`
 	HasAssignedPolicy          bool                    `json:"hasAssignedPolicy"`
 	HasEnabledPolicy           bool                    `json:"hasEnabledPolicy"`
 	HasEnabledProbePolicy      bool                    `json:"hasEnabledProbePolicy"`
@@ -454,11 +457,8 @@ func (s *Service) adminGroups(ctx context.Context, userID string, waitForFresh b
 		health.HasAssignedPolicy = len(health.AssignedPolicyIDs) > 0
 		health.HasEnabledPolicy = hasEnabledAssignedPolicy(health.AssignedPolicies)
 		health.HasEnabledProbePolicy = hasEnabledProbePolicyByIDs(health.AssignedPolicyIDs, policyByID)
-		for _, policyID := range health.AssignedPolicyIDs {
-			if policy, ok := policyByID[policyID]; ok && policy.Enabled && normalizePriorityMode(policy.PriorityMode) == PriorityModeMultiplier {
-				health.PriorityMode = PriorityModeMultiplier
-				break
-			}
+		if hasMultiplierPriorityPolicy(policiesForIDs(health.AssignedPolicyIDs, policyByID)) {
+			health.PriorityMode = PriorityModeMultiplier
 		}
 
 		inventory := accountsByGroup[group.ID]
@@ -502,6 +502,11 @@ func (s *Service) adminGroups(ctx context.Context, userID string, waitForFresh b
 				policiesForIDs(explicitIDs, policyByID),
 				policiesForIDs(inheritedIDs, policyByID),
 			)
+			effectivePolicyIDs := make([]string, 0, len(effectivePolicies))
+			for _, policy := range effectivePolicies {
+				effectivePolicyIDs = append(effectivePolicyIDs, policy.ID)
+			}
+			effectivePolicyIDs, effectivePolicySummaries := assignedPolicySummariesFromIDs(effectivePolicyIDs, policyByID)
 			decisionAccount := decisionAccountByTarget[targetID]
 			activeSpecs := candidateModelSpecsForPlatform(splitModelList(decisionAccount.Models), effectivePolicies, platform)
 			hasProbePolicy := hasEnabledProbePolicy(effectivePolicies)
@@ -535,7 +540,7 @@ func (s *Service) adminGroups(ctx context.Context, userID string, waitForFresh b
 			if hasProbePolicy {
 				health.HasEnabledProbePolicy = true
 			}
-			if hasHealthMultiplierPriorityPolicy(effectivePolicies) {
+			if hasMultiplierPriorityPolicy(effectivePolicies) {
 				health.PriorityMode = PriorityModeMultiplier
 			}
 			priorityState, priorityManaged := priorityByTarget[targetID]
@@ -630,6 +635,8 @@ func (s *Service) adminGroups(ctx context.Context, userID string, waitForFresh b
 				UnprobedModels:                unprobedModels,
 				AssignedPolicyIDs:             assignedIDs,
 				AssignedPolicies:              assignedSummaries,
+				EffectivePolicyIDs:            effectivePolicyIDs,
+				EffectivePolicies:             effectivePolicySummaries,
 				HasAssignedPolicy:             len(assignedIDs) > 0,
 				HasEnabledPolicy:              hasEnabledAssignedPolicy(assignedSummaries),
 				HasEnabledProbePolicy:         hasProbePolicy,

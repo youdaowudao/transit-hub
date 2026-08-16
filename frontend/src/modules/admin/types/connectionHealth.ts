@@ -155,6 +155,9 @@ export interface AdminGroupAccount {
   // 调度器自动探活。旧后端响应不带这些字段时前端按「未分配」兜底展示，不强制要求存在。
   assignedPolicyIds?: string[]
   assignedPolicies?: TargetPolicyAssignmentSummary[]
+  // 实际经过账号级覆盖/分组继承解析后生效的策略，供倍率和健康摘要使用。
+  effectivePolicyIds?: string[]
+  effectivePolicies?: TargetPolicyAssignmentSummary[]
   hasAssignedPolicy?: boolean
   hasEnabledPolicy?: boolean
   hasEnabledProbePolicy?: boolean

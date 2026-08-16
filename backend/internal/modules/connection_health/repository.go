@@ -1077,6 +1077,30 @@ func (r *Repository) ReplacePolicyAssignments(ctx context.Context, userID string
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := replacePolicyAssignmentsTx(ctx, tx, userID, adminAccountID, targetID, policyIDs); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ReplacePolicyAssignmentsAndRequestPrioritySync 在同一事务中替换账号策略分配并登记
+// workspace 级 Priority 重算代号，确保页面保存成功后不会继续使用旧的倍率策略。
+func (r *Repository) ReplacePolicyAssignmentsAndRequestPrioritySync(ctx context.Context, userID string, adminAccountID string, targetID string, policyIDs []string, pendingSignature string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := replacePolicyAssignmentsTx(ctx, tx, userID, adminAccountID, targetID, policyIDs); err != nil {
+		return err
+	}
+	if err := requestPrioritySyncTx(ctx, tx, userID, adminAccountID, pendingSignature, "target_policy_save"); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func replacePolicyAssignmentsTx(ctx context.Context, tx pgx.Tx, userID string, adminAccountID string, targetID string, policyIDs []string) error {
 
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM connection_health_policy_assignments WHERE user_id = $1 AND admin_account_id = $2 AND target_id = $3
@@ -1095,7 +1119,7 @@ func (r *Repository) ReplacePolicyAssignments(ctx context.Context, userID string
 			return err
 		}
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // ListPolicyAssignmentsForTarget 返回某个 target 在当前 workspace 下已分配的全部策略行。

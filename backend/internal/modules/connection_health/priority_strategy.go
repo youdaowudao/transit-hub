@@ -385,19 +385,16 @@ func (s *Service) priorityInventoryForSnapshot(
 			if excluded {
 				inherited = nil
 			}
+			effectivePolicies := effectivePoliciesForTarget(targetPolicies[targetID], inherited)
 			// 倍率只来自目标实际参与策略继承的分组。先前在排除判断前收集倍率，会让已排除
 			// 或无倍率策略的其它成员分组错误地压低当前目标优先级。
-			explicitMultiplier := hasMultiplierPriorityPolicy(targetPolicies[targetID])
-			inheritedMultiplier := !excluded && hasMultiplierPriorityPolicy(inherited)
-			if group.Multiplier != nil && (explicitMultiplier || inheritedMultiplier) {
+			if group.Multiplier != nil && hasMultiplierPriorityPolicy(effectivePolicies) {
 				item.multipliers = append(item.multipliers, *group.Multiplier)
 			}
-			explicitHealthMultiplier := hasHealthMultiplierPriorityPolicy(targetPolicies[targetID])
-			inheritedHealthMultiplier := !excluded && hasHealthMultiplierPriorityPolicy(inherited)
-			if fallback := fallbackByGroup[group.ID]; fallback != nil && (explicitHealthMultiplier || inheritedHealthMultiplier) {
+			if fallback := fallbackByGroup[group.ID]; fallback != nil && hasHealthMultiplierPriorityPolicy(effectivePolicies) {
 				item.fallbackMultipliers = append(item.fallbackMultipliers, *fallback)
 			}
-			item.policies = mergePoliciesByID(item.policies, targetPolicies[targetID], inherited)
+			item.policies = mergePoliciesByID(item.policies, effectivePolicies)
 		}
 	}
 	return inventory, inventoryComplete, nil

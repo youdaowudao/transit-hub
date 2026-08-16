@@ -1086,6 +1086,7 @@ export default {
           unknown: '未知'
         },
         actions: {
+          assignPolicy: '设置账号策略',
           disableScheduling: '关闭主站调度',
           enableScheduling: '恢复主站调度'
         },

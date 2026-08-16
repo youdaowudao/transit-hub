@@ -1493,6 +1493,70 @@ func TestAdminGroups_AssignedPolicyFieldsReflectAssignments(t *testing.T) {
 	}
 }
 
+func TestAdminGroups_EnabledTargetPolicyDoesNotUseInheritedGroupPolicy(t *testing.T) {
+	repo := newFakeRepository()
+	direct := probePolicy()
+	direct.ModelTargets[0].ModelName = "direct-model"
+	group := probePolicy()
+	group.ID = "policy-group"
+	group.ModelTargets[0].PolicyID = group.ID
+	group.ModelTargets[0].ModelName = "group-model"
+	repo.policies = []Policy{direct, group}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "newapi:ws1:100", PolicyID: direct.ID,
+	}}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "vip", PolicyID: group.ID,
+	}}
+	mySites := fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI}}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "100", Name: "assigned", BaseURL: "https://up", Models: "direct-model,group-model"}},
+		},
+	}
+
+	groups, err := newAdminGroupsService(reader, mySites, repo).AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 || len(groups[0].Accounts) != 1 {
+		t.Fatalf("unexpected admin groups: %+v", groups)
+	}
+	account := groups[0].Accounts[0]
+	if account.PolicyAssignmentSource != "target" {
+		t.Fatalf("enabled target policy must override inherited group policy, source=%q", account.PolicyAssignmentSource)
+	}
+	if len(account.UnprobedModels) != 1 || account.UnprobedModels[0].ModelName != "direct-model" {
+		t.Fatalf("effective models must exclude inherited group policy, got %+v", account.UnprobedModels)
+	}
+}
+
+func TestAdminGroups_AccountPolicyMarksGroupAsMonitored(t *testing.T) {
+	repo := newFakeRepository()
+	direct := probePolicy()
+	direct.ModelTargets[0].ModelName = "direct-model"
+	repo.policies = []Policy{direct}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "newapi:ws1:100", PolicyID: direct.ID,
+	}}
+	mySites := fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI}}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "100", Name: "assigned", BaseURL: "https://up", Models: "direct-model"}},
+		},
+	}
+
+	groups, err := newAdminGroupsService(reader, mySites, repo).AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 || !groups[0].HasEnabledProbePolicy || !groups[0].HasEnabledPolicy {
+		t.Fatalf("account-level enabled policy must mark group as monitored, got %+v", groups)
+	}
+}
+
 func TestHasEnabledProbePolicyExcludesMultiplierOnly(t *testing.T) {
 	policies := []Policy{
 		{ID: "multiplier-only", Enabled: true, StrategyMode: StrategyModeMultiplierOnly},

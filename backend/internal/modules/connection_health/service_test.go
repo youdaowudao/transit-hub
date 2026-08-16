@@ -552,6 +552,19 @@ func (f *fakeRepository) ReplacePolicyAssignments(ctx context.Context, userID st
 	return nil
 }
 
+func (f *fakeRepository) ReplacePolicyAssignmentsAndRequestPrioritySync(ctx context.Context, userID string, adminAccountID string, targetID string, policyIDs []string, pendingSignature string) error {
+	if err := f.ReplacePolicyAssignments(ctx, userID, adminAccountID, targetID, policyIDs); err != nil {
+		return err
+	}
+	f.priorityWorkspaceMu.Lock()
+	f.priorityWorkspaces[userID+"|"+adminAccountID] = PriorityWorkspaceSyncState{
+		UserID: userID, AdminAccountID: adminAccountID, PendingSignature: pendingSignature,
+		InventoryStatus: "pending", LastActionSource: "target_policy_save", LastDecision: "pending",
+	}
+	f.priorityWorkspaceMu.Unlock()
+	return nil
+}
+
 func (f *fakeRepository) ListPolicyAssignmentsForTarget(ctx context.Context, userID string, adminAccountID string, targetID string) ([]PolicyAssignment, error) {
 	out := make([]PolicyAssignment, 0)
 	for _, a := range f.assignments {

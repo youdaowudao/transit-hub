@@ -390,6 +390,13 @@ const cnyMetricDisplay = (site: UpstreamSite, metric: UpstreamMetricValue): stri
   return t('admin.upstream.currency.cnyValue', { amount: (metric.value * site.rechargeRate).toFixed(2) })
 }
 
+const groupTodayCostDisplay = (group: UpstreamGroupInfo): string => {
+  if (group.todayCost === null || group.todayCost === undefined || !Number.isFinite(group.todayCost)) {
+    return t('admin.upstream.fields.costUnknown')
+  }
+  return t('admin.upstream.currency.cnyValue', { amount: group.todayCost.toFixed(2) })
+}
+
 const usdMetricDisplay = (metric: UpstreamMetricValue): string => {
   if (metric.display.toUpperCase().includes('USD')) return metric.display
   return t('admin.upstream.currency.usdValue', { amount: metric.display })
@@ -909,11 +916,8 @@ onBeforeUnmount(() => {
                       {{ t('admin.upstream.fields.dedicatedMultiplierBadge') }}
                     </span>
                   </template>
-                  <span v-if="group.multiplier !== null" class="mt-2 text-[18px] leading-tight text-muted-foreground">
-                    {{ t('admin.upstream.fields.upstreamMultiplier') }} {{ group.multiplierDisplay }}
-                  </span>
-                  <span v-else class="mt-2 text-[18px] leading-tight text-muted-foreground">
-                    {{ group.multiplierDisplay }}
+                  <span class="mt-2 text-[16px] leading-tight text-muted-foreground">
+                    {{ t('admin.upstream.fields.todayCost') }} {{ groupTodayCostDisplay(group) }}
                   </span>
                 </button>
               </div>

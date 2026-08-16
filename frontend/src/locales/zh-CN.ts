@@ -1015,8 +1015,11 @@ export default {
         noProbe: '{count} 个待探活'
       },
       groupList: {
-        monitored: '已监控 {count}/{total}'
+        monitored: '已监控 {count}/{total}',
+        recentHourCost: '近1小时',
+        todayCost: '今日累计'
       },
+      costUnknown: '—',
       groupDisplay: {
         manage: '管理分组显示',
         title: '分组显示顺序',
@@ -1801,6 +1804,8 @@ export default {
         viewAvailableGroups: '查看可用分组',
         closeGroupsModal: '关闭',
         effectiveCostMultiplier: '换算后成本倍率',
+        todayCost: '今日成本',
+        costUnknown: '—',
         upstreamMultiplier: '上游倍率',
         multiplierFormula: '上游 {upstream} × 充值系数 {recharge}',
         groupNotScheduling: '未调度',

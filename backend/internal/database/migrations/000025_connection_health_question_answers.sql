@@ -1,3 +1,4 @@
+-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）
 CREATE TABLE IF NOT EXISTS connection_health_test_questions (
     id text PRIMARY KEY,
     user_id text NOT NULL,

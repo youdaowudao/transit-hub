@@ -101,6 +101,7 @@ func (s *Service) loadAdminInventory(ctx context.Context, userID string, adminAc
 // StartScheduler 启动后台探活调度：立即跑一次，之后每 30s 一次。tick 和每个探活 goroutine
 // 都有独立的 panic recover，任意一次探活失败或 panic 都不能影响调度器持续运行。
 func (s *Service) StartScheduler(ctx context.Context) {
+	s.startEventRetention(ctx)
 	go func() {
 		s.runSchedulerTickSafely(ctx)
 		ticker := time.NewTicker(schedulerTickInterval)

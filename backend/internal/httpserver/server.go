@@ -223,6 +223,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		panic(err)
 	}
 	connHealthService.SetAdminAccountResolver(adminAccountsService)
+	connHealthService.SetGroupCostReader(upstreamService)
 	// 注入平台中性的分组/账号读取能力：admin 分组健康主列表用它拉取 admin 全量分组及
 	// 分组下账号/渠道，叠加 real_connections 探活状态。platformService 已实现所需方法。
 	connHealthService.SetPlatformGroupReader(platformService)

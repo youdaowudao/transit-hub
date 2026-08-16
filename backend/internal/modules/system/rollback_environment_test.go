@@ -142,6 +142,13 @@ func TestSourceRollbackScriptContract(t *testing.T) {
 	}
 }
 
+func TestQuestionAnswersMigrationDeclaresAdditiveRollbackSafety(t *testing.T) {
+	migration := readProjectFileForUpgradeTest(t,
+		"backend/internal/database/migrations/000025_connection_health_question_answers.sql")
+	requireTextContains(t, migration,
+		"-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）")
+}
+
 // 还原点必须记录升级前的 schema 版本，回滚判定依赖它比对档位。
 func TestUpgradeCapturesRollbackPointFields(t *testing.T) {
 	script := readProjectFileForUpgradeTest(t, "deploy/update-source.sh")

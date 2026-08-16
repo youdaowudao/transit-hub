@@ -25,9 +25,9 @@ type healthRepository interface {
 	InsertEvent(ctx context.Context, e ConnectionHealthEvent) error
 	ListEventsByConnection(ctx context.Context, connectionID string, userID string, adminAccountID string, limit int) ([]ConnectionHealthEvent, error)
 	ListRecentEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, limit int) ([]ConnectionHealthEvent, error)
-	ListLatestProbeFailureEventsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]ConnectionHealthEvent, error)
-	ListLatestSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]ConnectionHealthEvent, error)
-	ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]ConnectionHealthEvent, error)
+	ListLatestProbeFailureEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error)
+	ListLatestSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error)
+	ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error)
 	CountFailureEventsSince(ctx context.Context, userID string, adminAccountID string, since time.Time) (int, error)
 	CountProbesToday(ctx context.Context, userID string, adminAccountID string, policyID string, dayStart time.Time) (int, error)
 	TryConsumeProbeBudget(ctx context.Context, userID string, adminAccountID string, policyID string, dayStart time.Time, limit int) (bool, error)
@@ -63,9 +63,11 @@ type healthRepository interface {
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
 	repo                 healthRepository
+	eventRetention       eventRetentionRepository
 	questionAnswers      questionAnswerRepository
 	mySites              MySitesReader
 	sites                SiteLookup
+	groupCosts           GroupCostReader
 	accounts             AdminAccountResolver
 	dispatcher           RemoteActionRunner
 	probeRunner          *RealProbeRunner
@@ -75,6 +77,8 @@ type Service struct {
 	schedulableActions   TargetSchedulableActioner
 	probeLimiterMu       sync.Mutex
 	probeLimiter         *probeConcurrencyLimiter
+	adminMultiplierMu    sync.Mutex
+	adminMultiplierCache map[string]adminMultiplierCacheEntry
 	questionAnswerMu     sync.Mutex
 	questionAnswerCtx    context.Context
 	questionAnswerStop   context.CancelFunc
@@ -87,16 +91,18 @@ type Service struct {
 
 func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner) *Service {
 	service := &Service{
-		repo:               repo,
-		questionAnswers:    repo,
-		mySites:            mySites,
-		sites:              sites,
-		dispatcher:         newRemoteActionDispatcher(sites, mySites, platform),
-		probeRunner:        NewRealProbeRunner(),
-		modelDiscovery:     NewModelDiscoveryRunner(),
-		probeLimiter:       newProbeConcurrencyLimiter(globalProbeConcurrency, perSiteProbeConcurrency),
-		questionAnswerHTTP: NewQuestionAnswerRunner(),
-		questionAnswerTTL:  QuestionAnswerRequestTimeout,
+		repo:                 repo,
+		eventRetention:       repo,
+		questionAnswers:      repo,
+		mySites:              mySites,
+		sites:                sites,
+		dispatcher:           newRemoteActionDispatcher(sites, mySites, platform),
+		probeRunner:          NewRealProbeRunner(),
+		modelDiscovery:       NewModelDiscoveryRunner(),
+		probeLimiter:         newProbeConcurrencyLimiter(globalProbeConcurrency, perSiteProbeConcurrency),
+		adminMultiplierCache: make(map[string]adminMultiplierCacheEntry),
+		questionAnswerHTTP:   NewQuestionAnswerRunner(),
+		questionAnswerTTL:    QuestionAnswerRequestTimeout,
 	}
 	service.initializeQuestionAnswerRuntime()
 	// 真实 PlatformService 同时实现优先级更新能力；测试或旧注入器如果尚未实现，倍率策略会

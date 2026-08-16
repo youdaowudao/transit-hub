@@ -7,6 +7,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"transithub/backend/internal/modules/my_sites"
@@ -41,6 +42,9 @@ type AdminGroupHealth struct {
 	PriorityConflicts           []AdminPriorityConflict `json:"priorityConflicts,omitempty"`
 	ProbeModelsConfigured       bool                    `json:"probeModelsConfigured"`
 	HealthSummary               AdminGroupHealthSummary `json:"healthSummary"`
+	TodayCost                   *float64                `json:"todayCost,omitempty"`
+	RecentHourCost              *float64                `json:"recentHourCost,omitempty"`
+	CostObservedAt              *time.Time              `json:"costObservedAt,omitempty"`
 	// MinProductionRank 是该分组内目标的 workspace 全局生产 rank 最小值；空分组或
 	// 账号读取失败时为空，供多分组总览把未知分组稳定放在末尾。
 	MinProductionRank *int `json:"minProductionRank,omitempty"`
@@ -153,28 +157,43 @@ func (s *Service) SetPlatformGroupReader(reader PlatformGroupReader) {
 	s.platformGroups = reader
 }
 
+// SetGroupCostReader 注入 upstream 的只读成本快照，避免健康主列表重复访问平台。
+func (s *Service) SetGroupCostReader(reader GroupCostReader) {
+	s.groupCosts = reader
+}
+
 // AdminGroups 按「当前 admin workspace 下的 admin 全量分组 -> 分组下账号/渠道（独立探活目标）
 // -> 独立探活状态叠加」聚合分组健康主列表。探活状态来自以 targetId 为键的独立探活状态行，
 // 不依赖 real_connections。
 func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupHealth, error) {
+	requestStarted := time.Now()
+	workspaceStarted := time.Now()
 	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
+	workspaceDuration := time.Since(workspaceStarted)
 	if s.platformGroups == nil {
 		return nil, errors.New("connection_health: platform group reader not configured")
 	}
 
+	sessionStarted := time.Now()
 	session, err := s.mySites.RequireSession(ctx, userID, adminAccountID)
 	if err != nil {
 		return nil, err
 	}
+	sessionDuration := time.Since(sessionStarted)
 	platform := string(session.Platform)
 
+	groupFetchStarted := time.Now()
 	groups, err := s.fetchAdminAllGroups(ctx, session)
 	if err != nil {
 		return nil, err
 	}
+	groupFetchDuration := time.Since(groupFetchStarted)
+	localReadStarted := time.Now()
+	now := time.Now().UTC()
+	eventCutoff := now.Add(-eventRetentionWindow)
 	policies, err := s.repo.ListPolicies(ctx, userID, adminAccountID)
 	if err != nil {
 		return nil, err
@@ -207,18 +226,19 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 	for _, setting := range probeSortSettings {
 		fallbackByGroup[setting.AdminGroupID] = cloneFloat64Pointer(setting.FallbackMultiplier)
 	}
-	latestProbeFailureEvents, err := s.repo.ListLatestProbeFailureEventsByWorkspace(ctx, userID, adminAccountID)
+	latestProbeFailureEvents, err := s.repo.ListLatestProbeFailureEventsByWorkspace(ctx, userID, adminAccountID, eventCutoff)
 	if err != nil {
 		return nil, err
 	}
-	latestSchedulableEvents, err := s.repo.ListLatestSchedulableActionEventsByWorkspace(ctx, userID, adminAccountID)
+	latestSchedulableEvents, err := s.repo.ListLatestSchedulableActionEventsByWorkspace(ctx, userID, adminAccountID, eventCutoff)
 	if err != nil {
 		return nil, err
 	}
-	latestSuccessfulSchedulableEvents, err := s.repo.ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx, userID, adminAccountID)
+	latestSuccessfulSchedulableEvents, err := s.repo.ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx, userID, adminAccountID, eventCutoff)
 	if err != nil {
 		return nil, err
 	}
+	localReadDuration := time.Since(localReadStarted)
 	// assignmentsByTarget: targetId -> 该 target 已分配的全部策略行（不限已启用/禁用，
 	// 展示层需要如实反映分配关系，是否生效由调度器按启用状态另行判断）。
 	assignmentsByTarget := make(map[string][]PolicyAssignment, len(assignments))
@@ -249,11 +269,24 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 	latestSuccessfulSchedulableEvent := latestSchedulableEventsByTarget(latestSuccessfulSchedulableEvents)
 	budgetCounts := make(map[string]int)
 	budgetLoaded := make(map[string]bool)
-	now := time.Now().UTC()
 	budgetDayStart := probeBudgetDayStart(now)
 	// 真实上游 API Key 分组原始倍率和站点充值倍率用于计算有效倍率。读取失败时降级为空，
 	// 保证既有分组健康功能不会因为可选的倍率信息不可用而中断。
-	upstreamMultiplierLookup := s.upstreamMultiplierResolutionsByAdminAccount(ctx, userID, adminAccountID, platform)
+	multiplierStarted := time.Now()
+	upstreamMultiplierLookup := s.cachedAdminGroupMultiplierLookup(ctx, userID, adminAccountID, platform)
+	multiplierDuration := time.Since(multiplierStarted)
+	costSnapshotsBySource := make(map[string]upstream.GroupCostSnapshot)
+	costStarted := time.Now()
+	if s.groupCosts != nil {
+		if snapshots, costErr := s.groupCosts.GroupCostSnapshots(ctx, userID, adminAccountID); costErr != nil {
+			log.Printf("[connection-health] group cost snapshot unavailable workspace=%s err=%v", adminAccountID, costErr)
+		} else {
+			for _, snapshot := range snapshots {
+				costSnapshotsBySource[snapshot.SourceKey()] = snapshot
+			}
+		}
+	}
+	costDuration := time.Since(costStarted)
 
 	type groupAccountInventory struct {
 		accounts []upstream.AdminGroupAccountInfo
@@ -262,12 +295,15 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 	accountsByGroup := make(map[string]groupAccountInventory, len(groups))
 	inheritedPolicyIDsByTarget := make(map[string][]string)
 	decisionAccountByTarget := make(map[string]upstream.AdminGroupAccountInfo)
+	accountFetchStarted := time.Now()
+	accountCount := 0
 	for _, group := range groups {
 		accounts, accErr := s.listAdminGroupAccounts(ctx, session, group)
 		accountsByGroup[group.ID] = groupAccountInventory{accounts: accounts, err: accErr}
 		if accErr != nil {
 			continue
 		}
+		accountCount += len(accounts)
 		for _, acc := range accounts {
 			targetID := buildTargetID(platform, adminAccountID, acc.ID)
 			if _, exists := decisionAccountByTarget[targetID]; !exists {
@@ -281,6 +317,8 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 			inheritedPolicyIDsByTarget[targetID] = mergePolicyIDs(inheritedPolicyIDsByTarget[targetID], groupPolicyIDs[group.ID])
 		}
 	}
+	accountFetchDuration := time.Since(accountFetchStarted)
+	assemblyStarted := time.Now()
 	healthFallbacksByTarget := make(map[string][]float64)
 	for _, group := range groups {
 		fallback := fallbackByGroup[group.ID]
@@ -330,6 +368,9 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 
 	result := make([]AdminGroupHealth, 0, len(groups))
 	healthCandidatesByTarget := make(map[string]healthPriorityCandidate)
+	costSourcesByGroup := make(map[string]map[string]struct{}, len(groups))
+	costSourceGroups := make(map[string]map[string]struct{})
+	costSourceUnresolved := make(map[string]bool, len(groups))
 	for _, group := range groups {
 		health := AdminGroupHealth{
 			ID:                          group.ID,
@@ -361,6 +402,7 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 		if accErr != nil {
 			log.Printf("[connection-health] admin group accounts fetch failed group_id=%s group_name=%s err=%v", group.ID, group.Name, accErr)
 			health.AccountsError = ErrorAccountsFetch
+			costSourceUnresolved[group.ID] = true
 			result = append(result, health)
 			continue
 		}
@@ -370,6 +412,19 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 			targetID := buildTargetID(platform, adminAccountID, acc.ID)
 			multiplierResolution := resolutionForAdminAccount(upstreamMultiplierLookup, acc.ID)
 			upstreamKeyGroup := multiplierResolution.info
+			if multiplierResolution.status == MultiplierResolutionResolved && strings.TrimSpace(upstreamKeyGroup.siteID) != "" {
+				sourceKey := upstream.GroupCostSourceKey(upstreamKeyGroup.siteID, upstreamKeyGroup.groupID, upstreamKeyGroup.name)
+				if costSourcesByGroup[group.ID] == nil {
+					costSourcesByGroup[group.ID] = make(map[string]struct{})
+				}
+				costSourcesByGroup[group.ID][sourceKey] = struct{}{}
+				if costSourceGroups[sourceKey] == nil {
+					costSourceGroups[sourceKey] = make(map[string]struct{})
+				}
+				costSourceGroups[sourceKey][group.ID] = struct{}{}
+			} else {
+				costSourceUnresolved[group.ID] = true
+			}
 			available, reason := targetManualProbeAvailability(platform, acc.BaseURL)
 			excluded := false
 			if exclusions := excludedByGroup[group.ID]; exclusions != nil {
@@ -568,7 +623,47 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 		health.HealthSummary = summary
 		result = append(result, health)
 	}
+	for index := range result {
+		group := &result[index]
+		if costSourceUnresolved[group.ID] {
+			continue
+		}
+		sources := costSourcesByGroup[group.ID]
+		if len(sources) != 1 {
+			continue
+		}
+		var sourceKey string
+		for key := range sources {
+			sourceKey = key
+		}
+		if len(costSourceGroups[sourceKey]) != 1 {
+			// 一个上游来源被多个自有分组共享时，不复制或比例分摊同一份成本。
+			continue
+		}
+		snapshot, ok := costSnapshotsBySource[sourceKey]
+		if !ok {
+			continue
+		}
+		group.TodayCost = cloneFloat64Pointer(snapshot.TodayCost)
+		group.RecentHourCost = cloneFloat64Pointer(snapshot.RecentHourCost)
+		group.CostObservedAt = utcTimePointer(snapshot.ObservedAt)
+	}
 	finalizeAdminGroupProductionOrder(result, session.Platform, healthCandidatesByTarget)
+	log.Printf(
+		"[connection-health] admin groups timing workspace=%s groups=%d accounts=%d total=%s workspace_lookup=%s session=%s groups_fetch=%s local_reads=%s multiplier_reads=%s cost_reads=%s account_reads=%s assembly=%s",
+		adminAccountID,
+		len(groups),
+		accountCount,
+		time.Since(requestStarted),
+		workspaceDuration,
+		sessionDuration,
+		groupFetchDuration,
+		localReadDuration,
+		multiplierDuration,
+		costDuration,
+		accountFetchDuration,
+		time.Since(assemblyStarted),
+	)
 	return result, nil
 }
 
@@ -745,7 +840,15 @@ const (
 	MultiplierSourceUpstreamKey   = "upstream_key"
 	MultiplierSourceLocalFallback = "local_fallback"
 	MultiplierSourceNone          = "none"
+
+	upstreamMetadataFetchConcurrency = 4
+	adminMultiplierMetadataCacheTTL  = 15 * time.Second
 )
+
+type adminMultiplierCacheEntry struct {
+	lookup    upstreamMultiplierLookup
+	expiresAt time.Time
+}
 
 type upstreamMultiplierResolution struct {
 	status string
@@ -761,6 +864,14 @@ type upstreamKeyMetadata struct {
 	id        string
 	groupID   string
 	groupName string
+}
+
+type upstreamSiteMultiplierMetadata struct {
+	siteID     string
+	keys       []upstreamKeyMetadata
+	keyStatus  string
+	site       *upstream.Site
+	siteStatus string
 }
 
 // upstreamKeyGroupsByAdminAccount 构建 admin 转发账号 ID 到其当前真实上游 API Key 分组的映射。
@@ -780,6 +891,54 @@ func (s *Service) upstreamKeyGroupsByAdminAccount(
 		}
 	}
 	return result
+}
+
+// cachedAdminGroupMultiplierLookup caches only non-sensitive Key/Token group metadata for a
+// short window. Any lookup containing an unavailable site/account is never cached, so a
+// recovered upstream is retried on the next refresh. Each cache miss keeps the caller's own
+// context and cancellation semantics instead of sharing another request's result.
+func (s *Service) cachedAdminGroupMultiplierLookup(ctx context.Context, userID string, adminAccountID string, platform string) upstreamMultiplierLookup {
+	cacheKey := userID + "\x00" + adminAccountID + "\x00" + platform
+	now := time.Now()
+	s.adminMultiplierMu.Lock()
+	if entry, ok := s.adminMultiplierCache[cacheKey]; ok && entry.expiresAt.After(now) {
+		lookup := entry.lookup
+		s.adminMultiplierMu.Unlock()
+		return lookup
+	}
+	if s.adminMultiplierCache == nil {
+		s.adminMultiplierCache = make(map[string]adminMultiplierCacheEntry)
+	}
+	for key, entry := range s.adminMultiplierCache {
+		if !entry.expiresAt.After(now) {
+			delete(s.adminMultiplierCache, key)
+		}
+	}
+	s.adminMultiplierMu.Unlock()
+
+	lookup := s.upstreamMultiplierResolutionsByAdminAccount(ctx, userID, adminAccountID, platform)
+	if adminMultiplierLookupCacheable(lookup) {
+		s.adminMultiplierMu.Lock()
+		if current, ok := s.adminMultiplierCache[cacheKey]; !ok || current.expiresAt.Before(time.Now()) {
+			s.adminMultiplierCache[cacheKey] = adminMultiplierCacheEntry{
+				lookup: lookup, expiresAt: time.Now().Add(adminMultiplierMetadataCacheTTL),
+			}
+		}
+		s.adminMultiplierMu.Unlock()
+	}
+	return lookup
+}
+
+func adminMultiplierLookupCacheable(lookup upstreamMultiplierLookup) bool {
+	if lookup.unavailable {
+		return false
+	}
+	for _, resolution := range lookup.byAccount {
+		if resolution.status == MultiplierResolutionUnavailable {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Service) upstreamMultiplierResolutionsByAdminAccount(
@@ -807,6 +966,7 @@ func (s *Service) upstreamMultiplierResolutionsByAdminAccount(
 	}
 
 	connectionsByAccount := make(map[string][]my_sites.RealConnection)
+	neededSiteIDs := make(map[string]struct{})
 	for _, connection := range connections {
 		accountID := strings.TrimSpace(connection.AdminAccountID)
 		if accountID == "" {
@@ -816,14 +976,29 @@ func (s *Service) upstreamMultiplierResolutionsByAdminAccount(
 			continue
 		}
 		connectionsByAccount[accountID] = append(connectionsByAccount[accountID], connection)
+		if siteID := strings.TrimSpace(connection.UpstreamSiteID); siteID != "" && strings.TrimSpace(connection.UpstreamKeyID) != "" {
+			neededSiteIDs[siteID] = struct{}{}
+		}
 	}
 
-	// 站点、Key 元数据按站点缓存，避免同一页面为每个账号重复访问上游。Key 明文不会复制进
-	// 缓存，也不会进入日志或响应；这里只保留识别当前分组所需的 ID 和分组字段。
+	// 站点、Key 元数据按站点最多四路并发读取。每个站点只访问一次，且 Key 明文不会复制进
+	// 缓存、日志或响应；这里只保留识别当前分组所需的 ID 和分组字段。
 	siteCache := make(map[string]*upstream.Site)
 	siteStatuses := make(map[string]string)
 	keysBySite := make(map[string][]upstreamKeyMetadata)
 	keyStatuses := make(map[string]string)
+	for siteID, metadata := range s.prefetchUpstreamMultiplierMetadata(ctx, userID, keyReader, neededSiteIDs) {
+		if metadata.keyStatus != "" {
+			keyStatuses[siteID] = metadata.keyStatus
+		} else {
+			keysBySite[siteID] = metadata.keys
+		}
+		if metadata.siteStatus != "" {
+			siteStatuses[siteID] = metadata.siteStatus
+		} else if metadata.site != nil {
+			siteCache[siteID] = metadata.site
+		}
+	}
 	for accountID, accountConnections := range connectionsByAccount {
 		var resolved upstreamKeyGroupInfo
 		status := MultiplierResolutionResolved
@@ -859,6 +1034,82 @@ func (s *Service) upstreamMultiplierResolutionsByAdminAccount(
 		lookup.byAccount[accountID] = upstreamMultiplierResolution{status: status, info: resolved}
 	}
 	return lookup
+}
+
+func (s *Service) prefetchUpstreamMultiplierMetadata(
+	ctx context.Context,
+	userID string,
+	keyReader UpstreamKeyReader,
+	siteIDs map[string]struct{},
+) map[string]upstreamSiteMultiplierMetadata {
+	orderedSiteIDs := make([]string, 0, len(siteIDs))
+	for siteID := range siteIDs {
+		orderedSiteIDs = append(orderedSiteIDs, siteID)
+	}
+	sort.Strings(orderedSiteIDs)
+
+	results := make(chan upstreamSiteMultiplierMetadata, len(orderedSiteIDs))
+	semaphore := make(chan struct{}, upstreamMetadataFetchConcurrency)
+	var waitGroup sync.WaitGroup
+launchLoop:
+	for _, siteID := range orderedSiteIDs {
+		select {
+		case semaphore <- struct{}{}:
+		case <-ctx.Done():
+			break launchLoop
+		}
+		waitGroup.Add(1)
+		go func(siteID string) {
+			defer waitGroup.Done()
+			defer func() { <-semaphore }()
+			metadata := upstreamSiteMultiplierMetadata{siteID: siteID}
+			defer func() {
+				if recover() != nil {
+					metadata.keyStatus = MultiplierResolutionUnavailable
+					metadata.siteStatus = MultiplierResolutionUnavailable
+					log.Printf("[connection-health] upstream multiplier metadata panic recovered site_id=%s", siteID)
+				}
+				results <- metadata
+			}()
+			items, err := keyReader.ListUpstreamKeys(ctx, userID, siteID)
+			if err != nil {
+				metadata.keyStatus = MultiplierResolutionUnavailable
+				return
+			}
+			metadata.keys = make([]upstreamKeyMetadata, 0, len(items))
+			for _, item := range items {
+				metadata.keys = append(metadata.keys, upstreamKeyMetadata{
+					id:        strings.TrimSpace(item.ID),
+					groupID:   strings.TrimSpace(item.GroupID),
+					groupName: strings.TrimSpace(item.GroupName),
+				})
+			}
+			if len(metadata.keys) == 0 {
+				return
+			}
+			metadata.site, err = s.sites.GetSite(ctx, siteID)
+			if err != nil {
+				metadata.siteStatus = MultiplierResolutionUnavailable
+			} else if metadata.site == nil {
+				metadata.siteStatus = MultiplierResolutionMissing
+			}
+		}(siteID)
+	}
+	waitGroup.Wait()
+	close(results)
+
+	metadataBySite := make(map[string]upstreamSiteMultiplierMetadata, len(orderedSiteIDs))
+	for metadata := range results {
+		metadataBySite[metadata.siteID] = metadata
+	}
+	for _, siteID := range orderedSiteIDs {
+		if _, ok := metadataBySite[siteID]; !ok {
+			metadataBySite[siteID] = upstreamSiteMultiplierMetadata{
+				siteID: siteID, keyStatus: MultiplierResolutionUnavailable, siteStatus: MultiplierResolutionUnavailable,
+			}
+		}
+	}
+	return metadataBySite
 }
 
 func resolutionForAdminAccount(lookup upstreamMultiplierLookup, accountID string) upstreamMultiplierResolution {

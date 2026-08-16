@@ -424,6 +424,12 @@ func (s *PlatformService) FetchSub2APIGroupDailyStats(session Session, groups ..
 	return s.FetchSub2APIGroupDailyStatsForDate(session, businesstime.Today(), groups...)
 }
 
+// FetchSub2APIGroupUsageSummaryStats 只读取分组汇总接口，供短期成本采样使用。
+// 汇总失败时直接返回错误，禁止后台采样退回逐 Key 扫描。
+func (s *PlatformService) FetchSub2APIGroupUsageSummaryStats(session Session) ([]GroupDailyStat, error) {
+	return s.fetchSub2APIGroupUsageSummaryStats(session)
+}
+
 // FetchSub2APIGroupDailyStatsForDate 跳过无日期参数的 usage-summary，按指定上海业务日查询。
 func (s *PlatformService) FetchSub2APIGroupDailyStatsForDate(session Session, date string, groups ...[]GroupInfo) ([]GroupDailyStat, error) {
 	stats, err := s.fetchSub2APIKeyGroupDailyStatsForDate(session, date)
@@ -967,17 +973,29 @@ func (s *PlatformService) fetchSub2APIGroupUsageSummaryStats(session Session) ([
 		if name == "" {
 			continue
 		}
-		stats = append(stats, GroupDailyStat{GroupName: name, TodayActualCost: sub2APIUsageSummaryCost(item)})
+		cost, ok := sub2APIUsageSummaryCostValue(item)
+		if !ok {
+			continue
+		}
+		stats = append(stats, GroupDailyStat{GroupID: usageGroupID, GroupName: name, TodayActualCost: cost})
+	}
+	if len(stats) == 0 {
+		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
 	return stats, nil
 }
 
 func sub2APIUsageSummaryCost(item any) float64 {
+	cost, _ := sub2APIUsageSummaryCostValue(item)
+	return cost
+}
+
+func sub2APIUsageSummaryCostValue(item any) (float64, bool) {
 	cost := firstNumber(item, []string{"today_cost", "todayCost", "today_actual_cost", "todayActualCost"})
-	if cost == nil {
-		return 0
+	if cost == nil || math.IsNaN(*cost) || math.IsInf(*cost, 0) {
+		return 0, false
 	}
-	return *cost
+	return *cost, true
 }
 
 func (s *PlatformService) fetchSub2APIKeyGroupDailyStatsForDate(session Session, date string) ([]GroupDailyStat, error) {
@@ -1067,6 +1085,14 @@ func (s *PlatformService) FetchNewAPIGroupDailyStats(session Session, groups []G
 
 // FetchNewAPIGroupDailyStatsForDate 为所有分组复用同一个上海业务日起止时间戳。
 func (s *PlatformService) FetchNewAPIGroupDailyStatsForDate(session Session, groups []GroupInfo, date string) ([]GroupDailyStat, error) {
+	return s.fetchNewAPIGroupDailyStatsForDate(session, groups, date, false)
+}
+
+func (s *PlatformService) fetchNewAPIGroupCostStatsForDate(session Session, groups []GroupInfo, date string) ([]GroupDailyStat, error) {
+	return s.fetchNewAPIGroupDailyStatsForDate(session, groups, date, true)
+}
+
+func (s *PlatformService) fetchNewAPIGroupDailyStatsForDate(session Session, groups []GroupInfo, date string, rejectMissingCost bool) ([]GroupDailyStat, error) {
 	if session.Platform != PlatformNewAPI || !session.IsAuthenticated() {
 		return nil, newRequestError(ErrorAuth, PlatformNewAPI)
 	}
@@ -1086,7 +1112,11 @@ func (s *PlatformService) FetchNewAPIGroupDailyStatsForDate(session Session, gro
 		if err != nil {
 			return nil, err
 		}
-		stats = append(stats, GroupDailyStat{GroupName: name, TodayActualCost: quotaToUSDValueWithUnit(firstNumber(dataRecord(payload.Payload), []string{"quota"}), session.QuotaPerUnit)})
+		quota := firstNumber(dataRecord(payload.Payload), []string{"quota"})
+		if rejectMissingCost && quota == nil {
+			continue
+		}
+		stats = append(stats, GroupDailyStat{GroupName: name, TodayActualCost: quotaToUSDValueWithUnit(quota, session.QuotaPerUnit)})
 	}
 	return stats, nil
 }
@@ -1973,6 +2003,19 @@ func (s *PlatformService) FetchAdminGroupDailyStatsForDate(session Session, grou
 		return s.FetchNewAPIGroupDailyStatsForDate(session, groups, date)
 	default:
 		return s.FetchSub2APIGroupDailyStatsForDate(session, date, groups)
+	}
+}
+
+// FetchGroupCostStatsForDate 是后台短期成本采样专用入口。Sub2API 只使用分组汇总
+// 接口，汇总不可用时返回错误，不触发逐 Key 的高成本回退；NewAPI 复用现有逐组统计。
+func (s *PlatformService) FetchGroupCostStatsForDate(session Session, groups []GroupInfo, date string) ([]GroupDailyStat, error) {
+	switch session.Platform {
+	case PlatformNewAPI:
+		return s.fetchNewAPIGroupCostStatsForDate(session, groups, date)
+	case PlatformSub2API:
+		return s.FetchSub2APIGroupUsageSummaryStats(session)
+	default:
+		return nil, newRequestError(ErrorUnsupported, session.Platform)
 	}
 }
 

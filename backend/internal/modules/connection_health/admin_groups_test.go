@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,11 +65,230 @@ func (f fakeAdminGroupKeyReader) ListUpstreamKeys(ctx context.Context, userID st
 	return f.keysBySite[siteID], nil
 }
 
+type concurrentAdminGroupKeyReader struct {
+	fakeMySitesReader
+	started chan string
+	release chan struct{}
+	mu      sync.Mutex
+	active  int
+	max     int
+	calls   int
+	panicAt string
+}
+
+func (f *concurrentAdminGroupKeyReader) ListUpstreamKeys(ctx context.Context, userID string, siteID string) ([]upstream.Sub2APIKeyItem, error) {
+	f.mu.Lock()
+	f.active++
+	f.calls++
+	if f.active > f.max {
+		f.max = f.active
+	}
+	f.mu.Unlock()
+	f.started <- siteID
+	if f.panicAt == siteID {
+		panic("sensitive upstream panic")
+	}
+	select {
+	case <-ctx.Done():
+		f.mu.Lock()
+		f.active--
+		f.mu.Unlock()
+		return nil, ctx.Err()
+	case <-f.release:
+	}
+	f.mu.Lock()
+	f.active--
+	f.mu.Unlock()
+	return []upstream.Sub2APIKeyItem{{ID: "key-" + siteID, GroupID: "group-1", GroupName: "vip"}}, nil
+}
+
+func TestUpstreamMultiplierResolutionsRecoversPerSitePanic(t *testing.T) {
+	reader := &concurrentAdminGroupKeyReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{{
+			UserID: "user1", WorkspaceAdminAccountID: "ws1", AdminAccountID: "account-1",
+			AdminPlatform: string(upstream.PlatformSub2API), UpstreamSiteID: "site-1", UpstreamKeyID: "key-site-1",
+		}}},
+		started: make(chan string, 1), release: make(chan struct{}), panicAt: "site-1",
+	}
+	service := &Service{mySites: reader, sites: multiplierSiteLookup{}}
+
+	lookup := service.upstreamMultiplierResolutionsByAdminAccount(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+
+	resolution := lookup.byAccount["account-1"]
+	if resolution.status != MultiplierResolutionUnavailable {
+		t.Fatalf("resolution=%+v", resolution)
+	}
+}
+
+type multiplierSiteLookup struct{}
+
+func (multiplierSiteLookup) GetSite(ctx context.Context, siteID string) (*upstream.Site, error) {
+	multiplier := 0.5
+	return &upstream.Site{ID: siteID, RechargeRate: 1, Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{ID: "group-1", Name: "vip", Multiplier: &multiplier}}}}, nil
+}
+
+type fakeGroupCostReader struct {
+	snapshots []upstream.GroupCostSnapshot
+	err       error
+}
+
+func (f fakeGroupCostReader) GroupCostSnapshots(context.Context, string, string) ([]upstream.GroupCostSnapshot, error) {
+	return f.snapshots, f.err
+}
+
 // probePolicy 返回一条启用策略，含一个启用的 gpt-4o 模型目标，供候选模型/可探活判断使用。
 func probePolicy() Policy {
 	return Policy{
 		ID: "policy-1", UserID: "user1", AdminAccountID: "ws1", Name: "p", Enabled: true, DailyProbeBudget: 1000,
 		ModelTargets: []ModelTarget{{ID: "t1", PolicyID: "policy-1", ModelName: "gpt-4o", ProviderFamily: ProviderOpenAI, Enabled: true, MaxProbeTokens: 1}},
+	}
+}
+
+func TestUpstreamMultiplierResolutionsFetchesDistinctSitesWithBoundedConcurrency(t *testing.T) {
+	const siteCount = 6
+	connections := make([]my_sites.RealConnection, 0, siteCount)
+	for index := 0; index < siteCount; index++ {
+		siteID := fmt.Sprintf("site-%d", index)
+		connections = append(connections, my_sites.RealConnection{
+			UserID: "user1", WorkspaceAdminAccountID: "ws1", AdminAccountID: fmt.Sprintf("account-%d", index),
+			AdminPlatform: string(upstream.PlatformSub2API), UpstreamSiteID: siteID, UpstreamKeyID: "key-" + siteID,
+		})
+	}
+	reader := &concurrentAdminGroupKeyReader{
+		fakeMySitesReader: fakeMySitesReader{connections: connections},
+		started:           make(chan string, siteCount),
+		release:           make(chan struct{}),
+	}
+	service := &Service{mySites: reader, sites: multiplierSiteLookup{}}
+	done := make(chan upstreamMultiplierLookup, 1)
+	go func() {
+		done <- service.upstreamMultiplierResolutionsByAdminAccount(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	}()
+
+	for index := 0; index < upstreamMetadataFetchConcurrency; index++ {
+		select {
+		case <-reader.started:
+		case <-time.After(time.Second):
+			t.Fatal("parallel metadata fetch did not fill its concurrency limit")
+		}
+	}
+	select {
+	case siteID := <-reader.started:
+		t.Fatalf("metadata concurrency exceeded limit before release: %s", siteID)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(reader.release)
+
+	var lookup upstreamMultiplierLookup
+	select {
+	case lookup = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("metadata lookup did not finish")
+	}
+	reader.mu.Lock()
+	maxActive := reader.max
+	calls := reader.calls
+	reader.mu.Unlock()
+	if maxActive != upstreamMetadataFetchConcurrency || calls != siteCount {
+		t.Fatalf("max active=%d calls=%d", maxActive, calls)
+	}
+	if len(lookup.byAccount) != siteCount {
+		t.Fatalf("resolved accounts=%d want %d", len(lookup.byAccount), siteCount)
+	}
+	for accountID, resolution := range lookup.byAccount {
+		if resolution.status != MultiplierResolutionResolved || resolution.info.effectiveMultiplier == nil || *resolution.info.effectiveMultiplier != 0.5 {
+			t.Fatalf("account %s resolution=%+v", accountID, resolution)
+		}
+	}
+}
+
+func TestCachedAdminGroupMultiplierLookupCachesAndRefreshes(t *testing.T) {
+	reader := &concurrentAdminGroupKeyReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{{
+			UserID: "user1", WorkspaceAdminAccountID: "ws1", AdminAccountID: "account-1",
+			AdminPlatform: string(upstream.PlatformSub2API), UpstreamSiteID: "site-1", UpstreamKeyID: "key-site-1",
+		}}},
+		started: make(chan string, 2), release: make(chan struct{}),
+	}
+	service := &Service{mySites: reader, sites: multiplierSiteLookup{}}
+	done := make(chan upstreamMultiplierLookup, 1)
+	go func() {
+		done <- service.cachedAdminGroupMultiplierLookup(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	}()
+	select {
+	case <-reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("metadata lookup did not start")
+	}
+	close(reader.release)
+	select {
+	case lookup := <-done:
+		if lookup.byAccount["account-1"].status != MultiplierResolutionResolved {
+			t.Fatalf("lookup=%+v", lookup)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("metadata lookup did not finish")
+	}
+	third := service.cachedAdminGroupMultiplierLookup(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if third.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("cached lookup=%+v", third)
+	}
+	reader.mu.Lock()
+	calls := reader.calls
+	reader.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("upstream calls=%d want 1", calls)
+	}
+	cacheKey := "user1\x00ws1\x00" + string(upstream.PlatformSub2API)
+	service.adminMultiplierMu.Lock()
+	entry := service.adminMultiplierCache[cacheKey]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	service.adminMultiplierCache[cacheKey] = entry
+	service.adminMultiplierMu.Unlock()
+	refreshed := service.cachedAdminGroupMultiplierLookup(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if refreshed.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("refreshed lookup=%+v", refreshed)
+	}
+	reader.mu.Lock()
+	calls = reader.calls
+	reader.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("expired cache upstream calls=%d want 2", calls)
+	}
+}
+
+func TestCachedAdminGroupMultiplierLookupDoesNotCacheCancelledRead(t *testing.T) {
+	reader := &concurrentAdminGroupKeyReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{{
+			UserID: "user1", WorkspaceAdminAccountID: "ws1", AdminAccountID: "account-1",
+			AdminPlatform: string(upstream.PlatformSub2API), UpstreamSiteID: "site-1", UpstreamKeyID: "key-site-1",
+		}}},
+		started: make(chan string, 1), release: make(chan struct{}),
+	}
+	service := &Service{mySites: reader, sites: multiplierSiteLookup{}}
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	cancelled := service.cachedAdminGroupMultiplierLookup(cancelledCtx, "user1", "ws1", string(upstream.PlatformSub2API))
+	if cancelled.byAccount["account-1"].status != MultiplierResolutionUnavailable {
+		t.Fatalf("cancelled lookup=%+v", cancelled)
+	}
+	cacheKey := "user1\x00ws1\x00" + string(upstream.PlatformSub2API)
+	service.adminMultiplierMu.Lock()
+	_, cached := service.adminMultiplierCache[cacheKey]
+	service.adminMultiplierMu.Unlock()
+	if cached {
+		t.Fatal("cancelled lookup must not be cached")
+	}
+
+	select {
+	case <-reader.started:
+	default:
+	}
+	close(reader.release)
+	recovered := service.cachedAdminGroupMultiplierLookup(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if recovered.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("recovered lookup=%+v", recovered)
 	}
 }
 
@@ -150,7 +371,7 @@ func TestAdminGroups_PairsLastFailureTimeWithLatestFailureDetailsAfterRecovery(t
 	repo.groupAssignments = []GroupPolicyAssignment{{
 		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "vip", PolicyID: policy.ID,
 	}}
-	failureAt := time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC)
+	failureAt := time.Now().UTC().Add(-5 * time.Minute)
 	successAt := failureAt.Add(5 * time.Minute)
 	targetID := "newapi:ws1:100"
 	repo.states[targetID] = map[string]ConnectionHealthState{
@@ -212,7 +433,7 @@ func TestAdminGroups_UsesLatestAttemptButSuccessfulActionForSchedulableSource(t 
 	repo.groupAssignments = []GroupPolicyAssignment{{
 		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "vip", PolicyID: policy.ID,
 	}}
-	successAt := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	successAt := time.Now().UTC().Add(-5 * time.Minute)
 	repo.events = []ConnectionHealthEvent{
 		{
 			ID: "success", ConnectionID: "sub2api:ws1:100", ModelName: "*", UserID: "user1", AdminAccountID: "ws1",
@@ -333,6 +554,100 @@ func TestAdminGroups_UsesRealUpstreamAPIKeyGroupMultiplier(t *testing.T) {
 	}
 	if ambiguous := accountsByID["300"]; ambiguous.UpstreamKeyGroupMultiplier != nil || ambiguous.UpstreamKeyGroupName != "" {
 		t.Fatalf("account with an unresolved second connection must keep upstream API key group unknown, got %+v", ambiguous)
+	}
+}
+
+func TestAdminGroups_ExposesCostOnlyForUniqueUpstreamSource(t *testing.T) {
+	rawMultiplier := 0.5
+	todayCost := 21.0
+	recentHourCost := 4.2
+	observedAt := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	mySites := fakeAdminGroupKeyReader{
+		fakeMySitesReader: fakeMySitesReader{
+			session: upstream.Session{Platform: upstream.PlatformSub2API},
+			connections: []my_sites.RealConnection{{
+				UserID: "user1", WorkspaceAdminAccountID: "ws1", UpstreamSiteID: "site-1",
+				UpstreamKeyID: "key-9", AdminAccountID: "100", AdminPlatform: string(upstream.PlatformSub2API),
+			}},
+		},
+		keysBySite: map[string][]upstream.Sub2APIKeyItem{
+			"site-1": {{ID: "key-9", GroupID: "upstream-group-7", GroupName: "upstream-vip"}},
+		},
+	}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "own-group", Name: "own-vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"own-group": {{ID: "100", Name: "linked"}},
+		},
+	}
+	service := newAdminGroupsService(reader, mySites, newFakeRepository())
+	service.sites = fakeSiteLookup{site: &upstream.Site{
+		ID: "site-1", RechargeRate: 7,
+		Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{ID: "upstream-group-7", Name: "upstream-vip", Multiplier: &rawMultiplier}}},
+	}}
+	service.SetGroupCostReader(fakeGroupCostReader{snapshots: []upstream.GroupCostSnapshot{{
+		SiteID: "site-1", GroupID: "upstream-group-7", GroupName: "upstream-vip",
+		TodayCost: &todayCost, RecentHourCost: &recentHourCost, ObservedAt: &observedAt,
+	}}})
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("expected one group, got %+v", groups)
+	}
+	group := groups[0]
+	if group.TodayCost == nil || *group.TodayCost != todayCost || group.RecentHourCost == nil || *group.RecentHourCost != recentHourCost {
+		t.Fatalf("unique source cost was not exposed: %+v", group)
+	}
+	if group.CostObservedAt == nil || !group.CostObservedAt.Equal(observedAt) {
+		t.Fatalf("cost observed time = %v, want %v", group.CostObservedAt, observedAt)
+	}
+}
+
+func TestAdminGroups_HidesCostWhenSourceIsSharedAcrossGroups(t *testing.T) {
+	rawMultiplier := 0.5
+	todayCost := 21.0
+	mySites := fakeAdminGroupKeyReader{
+		fakeMySitesReader: fakeMySitesReader{
+			session: upstream.Session{Platform: upstream.PlatformSub2API},
+			connections: []my_sites.RealConnection{{
+				UserID: "user1", WorkspaceAdminAccountID: "ws1", UpstreamSiteID: "site-1",
+				UpstreamKeyID: "key-9", AdminAccountID: "100", AdminPlatform: string(upstream.PlatformSub2API),
+			}},
+		},
+		keysBySite: map[string][]upstream.Sub2APIKeyItem{
+			"site-1": {{ID: "key-9", GroupID: "upstream-group-7", GroupName: "upstream-vip"}},
+		},
+	}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "own-a", Name: "own-a"}, {ID: "own-b", Name: "own-b"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"own-a": {{ID: "100", Name: "shared"}},
+			"own-b": {{ID: "100", Name: "shared"}},
+		},
+	}
+	service := newAdminGroupsService(reader, mySites, newFakeRepository())
+	service.sites = fakeSiteLookup{site: &upstream.Site{
+		ID: "site-1", RechargeRate: 7,
+		Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{ID: "upstream-group-7", Name: "upstream-vip", Multiplier: &rawMultiplier}}},
+	}}
+	service.SetGroupCostReader(fakeGroupCostReader{snapshots: []upstream.GroupCostSnapshot{{
+		SiteID: "site-1", GroupID: "upstream-group-7", GroupName: "upstream-vip", TodayCost: &todayCost,
+	}}})
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 2 {
+		t.Fatalf("expected two groups, got %+v", groups)
+	}
+	for _, group := range groups {
+		if group.TodayCost != nil || group.RecentHourCost != nil || group.CostObservedAt != nil {
+			t.Fatalf("shared source cost must remain unknown: %+v", group)
+		}
 	}
 }
 

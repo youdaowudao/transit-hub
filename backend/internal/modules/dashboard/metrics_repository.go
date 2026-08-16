@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"transithub/backend/internal/shared/businesstime"
 )
 
 type metricsDB interface {
@@ -23,6 +25,10 @@ type metricsDB interface {
 // 与 Redis 的 SessionStore 独立，专门用于存储每日统计快照。
 type MetricsRepository struct {
 	db metricsDB
+}
+
+type metricsTxStarter interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
 func NewMetricsRepository(db *pgxpool.Pool) *MetricsRepository {
@@ -112,6 +118,10 @@ func (r *MetricsRepository) EnsureSchema(ctx context.Context) error {
 		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS additional_cost_records jsonb;
 		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS operating_cost double precision;
 		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS adjusted_net_profit double precision;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS cost_fresh_count integer;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS cost_retained_count integer;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS cost_missing_count integer;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS cost_quality_mode text;
 
 		-- V0.1.16：金额字段改为允许 NULL，区分”真零消费”(0.0)与”无数据”(NULL)。
 		-- 只在字段仍为 NOT NULL 时执行，已经是 nullable 的字段直接跳过；
@@ -178,6 +188,37 @@ func (r *MetricsRepository) EnsureSchema(ctx context.Context) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_upstream_site_daily_costs_date
 			ON upstream_site_daily_costs (user_id, admin_account_id, date);
+		ALTER TABLE upstream_site_daily_costs ALTER COLUMN observed_at DROP NOT NULL;
+		ALTER TABLE upstream_site_daily_costs ADD COLUMN IF NOT EXISTS last_attempt_status text;
+		ALTER TABLE upstream_site_daily_costs ADD COLUMN IF NOT EXISTS last_attempt_error text;
+		ALTER TABLE upstream_site_daily_costs ADD COLUMN IF NOT EXISTS last_attempt_at timestamptz;
+		ALTER TABLE upstream_site_daily_costs ADD COLUMN IF NOT EXISTS last_attempt_run_id text;
+
+		-- 日结目标集合在当天首次核算时冻结，避免站点后续停用或改名后改变既有日的覆盖口径。
+		CREATE TABLE IF NOT EXISTS dashboard_daily_cost_targets (
+			user_id          text NOT NULL,
+			admin_account_id text NOT NULL,
+			date             date NOT NULL,
+			site_id          text NOT NULL,
+			site_name        text NOT NULL,
+			platform         text NOT NULL,
+			recharge_rate    numeric NOT NULL,
+			created_at       timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, admin_account_id, date, site_id)
+		);
+
+		-- 旧 failed 行没有可确认成本。保留最后失败信息，不把它迁成已确认金额。
+		UPDATE upstream_site_daily_costs
+		SET status = 'missing',
+			source = 'none',
+			raw_cost = NULL,
+			adjusted_cost = NULL,
+			error_reason = NULL,
+			last_attempt_status = COALESCE(last_attempt_status, 'failed'),
+			last_attempt_error = COALESCE(last_attempt_error, error_reason),
+			last_attempt_at = COALESCE(last_attempt_at, observed_at),
+			observed_at = NULL
+		WHERE status = 'failed';
 
 		CREATE TABLE IF NOT EXISTS dashboard_recharge_fee_rates (
 			id               text PRIMARY KEY,
@@ -310,20 +351,25 @@ func (r *MetricsRepository) ListAdditionalCosts(ctx context.Context, userID, adm
 // final 保护：settlement_status = 'final' 的行不允许被 snapshot_source = 'live_cache' 的写入覆盖。
 // 条件：目标行不是 final，或者来源不是 live_cache（dated_query/backfill 允许覆盖 provisional/partial）。
 func (r *MetricsRepository) Upsert(ctx context.Context, snapshot DailySnapshot) error {
+	return r.upsert(ctx, r.db, snapshot)
+}
+
+func (r *MetricsRepository) upsert(ctx context.Context, db metricsDB, snapshot DailySnapshot) error {
 	recordsJSON, err := json.Marshal(snapshot.AdditionalCostRecords)
 	if err != nil {
 		return err
 	}
-	_, err = r.db.Exec(ctx, `
+	_, err = db.Exec(ctx, `
 		INSERT INTO dashboard_daily_stats (
 			id, user_id, admin_account_id, date,
 			today_profit, site_balance, today_purchase, net_profit, upstream_balance,
 			created_at, settlement_status, snapshot_source, observed_at,
 			finalized_at, cost_expected_count, cost_collected_count, balance_observed_at,
+			cost_fresh_count, cost_retained_count, cost_missing_count, cost_quality_mode,
 			additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost,
 			adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit
 		)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb, $25, $26
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28::jsonb, $29, $30
 		WHERE EXISTS (SELECT 1 FROM admin_accounts WHERE user_id = $2 AND id = $3)
 		ON CONFLICT (user_id, admin_account_id, date) DO UPDATE SET
 			today_profit        = EXCLUDED.today_profit,
@@ -339,6 +385,10 @@ func (r *MetricsRepository) Upsert(ctx context.Context, snapshot DailySnapshot) 
 			finalized_at        = EXCLUDED.finalized_at,
 			cost_expected_count = EXCLUDED.cost_expected_count,
 			cost_collected_count = EXCLUDED.cost_collected_count,
+			cost_fresh_count    = EXCLUDED.cost_fresh_count,
+			cost_retained_count = EXCLUDED.cost_retained_count,
+			cost_missing_count  = EXCLUDED.cost_missing_count,
+			cost_quality_mode   = EXCLUDED.cost_quality_mode,
 			balance_observed_at = COALESCE(EXCLUDED.balance_observed_at, dashboard_daily_stats.balance_observed_at),
 			additional_cost    = EXCLUDED.additional_cost,
 			recharge_fee       = EXCLUDED.recharge_fee,
@@ -356,9 +406,11 @@ func (r *MetricsRepository) Upsert(ctx context.Context, snapshot DailySnapshot) 
 		snapshot.NetProfit, snapshot.UpstreamBalance, snapshot.CreatedAt,
 		snapshot.SettlementStatus, snapshot.SnapshotSource, snapshot.ObservedAt,
 		snapshot.FinalizedAt, snapshot.CostExpectedCount, snapshot.CostCollectedCount,
-		snapshot.BalanceObservedAt, snapshot.AdditionalCost, snapshot.RechargeFee, snapshot.RechargeFeeRate,
-		snapshot.PromotionCost, snapshot.FixedCost, snapshot.AdjustmentCost, recordsJSON,
-		snapshot.OperatingCost, snapshot.AdjustedNetProfit)
+		snapshot.BalanceObservedAt, snapshot.CostFreshCount, snapshot.CostRetainedCount,
+		snapshot.CostMissingCount, snapshot.CostQualityMode, snapshot.AdditionalCost,
+		snapshot.RechargeFee, snapshot.RechargeFeeRate, snapshot.PromotionCost,
+		snapshot.FixedCost, snapshot.AdjustmentCost, recordsJSON, snapshot.OperatingCost,
+		snapshot.AdjustedNetProfit)
 	return err
 }
 
@@ -366,7 +418,9 @@ func (r *MetricsRepository) Upsert(ctx context.Context, snapshot DailySnapshot) 
 // 包含结算状态，供前端判断环比是否可信。
 func (r *MetricsRepository) ListRange(ctx context.Context, userID, adminAccountID string, days int, businessDate string) ([]DailySnapshot, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, user_id, admin_account_id, date, today_profit, site_balance, today_purchase, net_profit, upstream_balance, created_at, settlement_status, additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost, adjustment_cost, operating_cost, adjusted_net_profit
+		SELECT id, user_id, admin_account_id, date, today_profit, site_balance, today_purchase, net_profit, upstream_balance, created_at, settlement_status,
+		       cost_expected_count, cost_collected_count, cost_fresh_count, cost_retained_count, cost_missing_count, cost_quality_mode,
+		       additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost, adjustment_cost, operating_cost, adjusted_net_profit
 		FROM dashboard_daily_stats
 		WHERE user_id = $1 AND admin_account_id = $2 AND date >= ($3::date - $4::int) AND date < $3::date
 		ORDER BY date ASC
@@ -381,8 +435,10 @@ func (r *MetricsRepository) ListRange(ctx context.Context, userID, adminAccountI
 		var s DailySnapshot
 		if err := rows.Scan(&s.ID, &s.UserID, &s.AdminAccountID, &s.Date, &s.TodayProfit, &s.SiteBalance,
 			&s.TodayPurchase, &s.NetProfit, &s.UpstreamBalance, &s.CreatedAt, &s.SettlementStatus,
-			&s.AdditionalCost, &s.RechargeFee, &s.RechargeFeeRate, &s.PromotionCost, &s.FixedCost,
-			&s.AdjustmentCost, &s.OperatingCost, &s.AdjustedNetProfit); err != nil {
+			&s.CostExpectedCount, &s.CostCollectedCount, &s.CostFreshCount, &s.CostRetainedCount,
+			&s.CostMissingCount, &s.CostQualityMode, &s.AdditionalCost, &s.RechargeFee,
+			&s.RechargeFeeRate, &s.PromotionCost, &s.FixedCost, &s.AdjustmentCost,
+			&s.OperatingCost, &s.AdjustedNetProfit); err != nil {
 			return nil, err
 		}
 		if s.SnapshotSource == "" {
@@ -447,39 +503,124 @@ func (r *MetricsRepository) SaveBalanceFilter(ctx context.Context, config Balanc
 	return err
 }
 
-// UpsertSiteCost 插入或更新单个上游站点的日成本明细。
-// 保护规则：status='ok' 的行不允许被失败结果覆盖，避免重试时覆盖已成功的历史数据。
+// UpsertSiteCost 分开保存同日确认成本和最近一次查询尝试。
+// 失败尝试只能更新 last_attempt_*，不能清空或降级此前确认的金额。
 func (r *MetricsRepository) UpsertSiteCost(ctx context.Context, cost SiteDailyCost) error {
-	_, err := r.db.Exec(ctx, `
+	if err := r.upsertSiteCost(ctx, r.db, cost); err != nil {
+		return err
+	}
+	// 营收请求失败时，站点尝试会先单独落库。当前业务日也必须同时建立目标，
+	// 否则站点在下一次成功日结前被停用，会从当天覆盖集合中消失。
+	if cost.Date.Format("2006-01-02") == businesstime.Today() {
+		return r.upsertDailyCostTarget(ctx, r.db, cost)
+	}
+	return nil
+}
+
+func (r *MetricsRepository) upsertSiteCost(ctx context.Context, db metricsDB, cost SiteDailyCost) error {
+	attemptAt := cost.LastAttemptAt
+	if attemptAt == nil {
+		now := time.Now().UTC()
+		attemptAt = &now
+	}
+	if cost.Status == "" {
+		cost.Status = "missing"
+	}
+	if cost.LastAttemptStatus == "" {
+		if cost.Status == "ok" || cost.Status == "partial" {
+			cost.LastAttemptStatus = cost.Status
+		} else {
+			cost.LastAttemptStatus = "failed"
+		}
+	}
+	if cost.Source == "" {
+		cost.Source = "none"
+	}
+	_, err := db.Exec(ctx, `
 		INSERT INTO upstream_site_daily_costs (
 			id, user_id, admin_account_id, date,
 			site_id, site_name, platform,
 			raw_cost, recharge_rate, adjusted_cost,
-			status, source, error_reason, observed_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			status, source, error_reason, observed_at,
+			last_attempt_status, last_attempt_error, last_attempt_at, last_attempt_run_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 		ON CONFLICT (user_id, admin_account_id, date, site_id) DO UPDATE SET
 			site_name     = EXCLUDED.site_name,
 			platform      = EXCLUDED.platform,
-			raw_cost      = EXCLUDED.raw_cost,
 			recharge_rate = EXCLUDED.recharge_rate,
-			adjusted_cost = EXCLUDED.adjusted_cost,
-			status        = EXCLUDED.status,
-			source        = EXCLUDED.source,
-			error_reason  = EXCLUDED.error_reason,
-			observed_at   = EXCLUDED.observed_at
-		WHERE upstream_site_daily_costs.status != 'ok'
+			last_attempt_status = CASE
+				WHEN upstream_site_daily_costs.last_attempt_at IS NULL
+					OR EXCLUDED.last_attempt_at >= upstream_site_daily_costs.last_attempt_at
+				THEN EXCLUDED.last_attempt_status
+				ELSE upstream_site_daily_costs.last_attempt_status
+			END,
+			last_attempt_error = CASE
+				WHEN upstream_site_daily_costs.last_attempt_at IS NULL
+					OR EXCLUDED.last_attempt_at >= upstream_site_daily_costs.last_attempt_at
+				THEN EXCLUDED.last_attempt_error
+				ELSE upstream_site_daily_costs.last_attempt_error
+			END,
+			last_attempt_at = GREATEST(upstream_site_daily_costs.last_attempt_at, EXCLUDED.last_attempt_at),
+			last_attempt_run_id = CASE
+				WHEN upstream_site_daily_costs.last_attempt_at IS NULL
+					OR EXCLUDED.last_attempt_at >= upstream_site_daily_costs.last_attempt_at
+				THEN EXCLUDED.last_attempt_run_id
+				ELSE upstream_site_daily_costs.last_attempt_run_id
+			END,
+			raw_cost = CASE
+				WHEN EXCLUDED.last_attempt_status IN ('ok', 'partial')
+					AND (upstream_site_daily_costs.observed_at IS NULL OR EXCLUDED.observed_at >= upstream_site_daily_costs.observed_at)
+				THEN EXCLUDED.raw_cost
+				ELSE upstream_site_daily_costs.raw_cost
+			END,
+			adjusted_cost = CASE
+				WHEN EXCLUDED.last_attempt_status IN ('ok', 'partial')
+					AND (upstream_site_daily_costs.observed_at IS NULL OR EXCLUDED.observed_at >= upstream_site_daily_costs.observed_at)
+				THEN EXCLUDED.adjusted_cost
+				ELSE upstream_site_daily_costs.adjusted_cost
+			END,
+			status = CASE
+				WHEN EXCLUDED.last_attempt_status IN ('ok', 'partial')
+					AND (upstream_site_daily_costs.observed_at IS NULL OR EXCLUDED.observed_at >= upstream_site_daily_costs.observed_at)
+				THEN EXCLUDED.status
+				ELSE upstream_site_daily_costs.status
+			END,
+			source = CASE
+				WHEN EXCLUDED.last_attempt_status IN ('ok', 'partial')
+					AND (upstream_site_daily_costs.observed_at IS NULL OR EXCLUDED.observed_at >= upstream_site_daily_costs.observed_at)
+				THEN EXCLUDED.source
+				ELSE upstream_site_daily_costs.source
+			END,
+			error_reason = CASE
+				WHEN EXCLUDED.last_attempt_status IN ('ok', 'partial')
+					AND (upstream_site_daily_costs.observed_at IS NULL OR EXCLUDED.observed_at >= upstream_site_daily_costs.observed_at)
+				THEN EXCLUDED.error_reason
+				ELSE upstream_site_daily_costs.error_reason
+			END,
+			observed_at = CASE
+				WHEN EXCLUDED.last_attempt_status IN ('ok', 'partial')
+					AND (upstream_site_daily_costs.observed_at IS NULL OR EXCLUDED.observed_at >= upstream_site_daily_costs.observed_at)
+				THEN EXCLUDED.observed_at
+				ELSE upstream_site_daily_costs.observed_at
+			END
 	`, cost.ID, cost.UserID, cost.AdminAccountID, cost.Date,
 		cost.SiteID, cost.SiteName, cost.Platform,
 		cost.RawCost, cost.RechargeRate, cost.AdjustedCost,
-		cost.Status, cost.Source, cost.ErrorReason, cost.ObservedAt)
+		cost.Status, cost.Source, cost.ErrorReason, cost.ObservedAt,
+		cost.LastAttemptStatus, cost.LastAttemptError, attemptAt, cost.LastAttemptRunID)
 	return err
 }
 
 // ListSiteCosts 查询指定日期的所有站点成本明细，按 site_id 排序。
 func (r *MetricsRepository) ListSiteCosts(ctx context.Context, userID, adminAccountID string, date string) ([]SiteDailyCost, error) {
-	rows, err := r.db.Query(ctx, `
+	return r.listSiteCosts(ctx, r.db, userID, adminAccountID, date)
+}
+
+func (r *MetricsRepository) listSiteCosts(ctx context.Context, db metricsDB, userID, adminAccountID string, date string) ([]SiteDailyCost, error) {
+	rows, err := db.Query(ctx, `
 		SELECT id, user_id, admin_account_id, date, site_id, site_name, platform,
-		       raw_cost, recharge_rate, adjusted_cost, status, source, error_reason, observed_at
+		       raw_cost, recharge_rate, adjusted_cost, status, source, error_reason, observed_at,
+		       last_attempt_status, last_attempt_error, last_attempt_at, last_attempt_run_id
 		FROM upstream_site_daily_costs
 		WHERE user_id = $1 AND admin_account_id = $2 AND date = $3::date
 		ORDER BY site_id ASC
@@ -497,6 +638,7 @@ func (r *MetricsRepository) ListSiteCosts(ctx context.Context, userID, adminAcco
 			&c.SiteID, &c.SiteName, &c.Platform,
 			&c.RawCost, &c.RechargeRate, &c.AdjustedCost,
 			&c.Status, &c.Source, &c.ErrorReason, &c.ObservedAt,
+			&c.LastAttemptStatus, &c.LastAttemptError, &c.LastAttemptAt, &c.LastAttemptRunID,
 		); err != nil {
 			return nil, err
 		}
@@ -505,20 +647,268 @@ func (r *MetricsRepository) ListSiteCosts(ctx context.Context, userID, adminAcco
 	return costs, rows.Err()
 }
 
-// ListLatestSiteCosts returns the most recent successful cost before or on the
-// requested business date for each site. It is used only as a display fallback
-// when the site's current refresh did not produce a value.
+func (r *MetricsRepository) upsertDailyCostTarget(ctx context.Context, db metricsDB, target SiteDailyCost) error {
+	if strings.TrimSpace(target.SiteID) == "" {
+		return errors.New("daily cost target has empty site id")
+	}
+	_, err := db.Exec(ctx, `
+		INSERT INTO dashboard_daily_cost_targets (
+			user_id, admin_account_id, date, site_id, site_name, platform, recharge_rate
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (user_id, admin_account_id, date, site_id) DO NOTHING
+	`, target.UserID, target.AdminAccountID, target.Date, target.SiteID,
+		target.SiteName, target.Platform, target.RechargeRate)
+	return err
+}
+
+// dailyCostTargets 返回业务日稳定的站点目标集合。首建时先纳入该日已有成本明细，
+// 避免部署前已存在但当前已停用的站点被排除；只有当前业务日才允许追加新站点。
+func (r *MetricsRepository) dailyCostTargets(ctx context.Context, db metricsDB, snapshot DailySnapshot, attempts, preAttemptCosts []SiteDailyCost) ([]SiteDailyCost, error) {
+	const query = `
+		SELECT site_id, site_name, platform, recharge_rate
+		FROM dashboard_daily_cost_targets
+		WHERE user_id = $1 AND admin_account_id = $2 AND date = $3::date
+		ORDER BY site_id ASC
+	`
+	read := func() ([]SiteDailyCost, error) {
+		rows, err := db.Query(ctx, query, snapshot.UserID, snapshot.AdminAccountID, snapshot.Date.Format("2006-01-02"))
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		targets := make([]SiteDailyCost, 0)
+		for rows.Next() {
+			var target SiteDailyCost
+			if err := rows.Scan(&target.SiteID, &target.SiteName, &target.Platform, &target.RechargeRate); err != nil {
+				return nil, err
+			}
+			targets = append(targets, target)
+		}
+		return targets, rows.Err()
+	}
+
+	targets, err := read()
+	if err != nil {
+		return nil, err
+	}
+	// 没有冻结集合的旧业务日，优先用已落库的同日成本恢复旧口径。
+	candidates := mergeDailyCostTargetCandidates(
+		targets,
+		preAttemptCosts,
+		attempts,
+		snapshot.Date.Format("2006-01-02") == businesstime.Today(),
+	)
+	if len(candidates) == len(targets) {
+		return targets, nil
+	}
+	for _, target := range candidates {
+		target.UserID = snapshot.UserID
+		target.AdminAccountID = snapshot.AdminAccountID
+		target.Date = snapshot.Date
+		if err := r.upsertDailyCostTarget(ctx, db, target); err != nil {
+			return nil, err
+		}
+	}
+	return read()
+}
+
+func mergeDailyCostTargetCandidates(targets, existingCosts, attempts []SiteDailyCost, allowCurrentDayAppend bool) map[string]SiteDailyCost {
+	candidates := make(map[string]SiteDailyCost, len(targets)+len(existingCosts)+len(attempts))
+	for _, target := range targets {
+		candidates[target.SiteID] = target
+	}
+	if len(targets) == 0 {
+		for _, cost := range existingCosts {
+			candidates[cost.SiteID] = cost
+		}
+	}
+	if allowCurrentDayAppend {
+		for _, attempt := range attempts {
+			candidates[attempt.SiteID] = attempt
+		}
+	}
+	return candidates
+}
+
+type confirmedCostSummary struct {
+	total           float64
+	expected        int
+	collected       int
+	fresh           int
+	retained        int
+	missing         int
+	allAccountLevel bool
+	mode            string
+}
+
+func summarizeConfirmedSiteCosts(costs, expectedSites []SiteDailyCost, runID string) confirmedCostSummary {
+	if len(expectedSites) == 0 {
+		expectedSites = costs
+	}
+	bySite := make(map[string]SiteDailyCost, len(costs))
+	for _, cost := range costs {
+		current, exists := bySite[cost.SiteID]
+		if !exists || (cost.ObservedAt != nil && (current.ObservedAt == nil || cost.ObservedAt.After(*current.ObservedAt))) {
+			bySite[cost.SiteID] = cost
+		}
+	}
+	summary := confirmedCostSummary{allAccountLevel: true, mode: "unavailable"}
+	seen := make(map[string]struct{}, len(expectedSites))
+	for _, target := range expectedSites {
+		if _, exists := seen[target.SiteID]; exists {
+			continue
+		}
+		seen[target.SiteID] = struct{}{}
+		summary.expected++
+		cost, exists := bySite[target.SiteID]
+		if !exists {
+			summary.missing++
+			continue
+		}
+		confirmed := cost.AdjustedCost != nil && (cost.Status == "ok" || cost.Status == "partial")
+		if !confirmed {
+			summary.missing++
+			continue
+		}
+		summary.collected++
+		summary.total += *cost.AdjustedCost
+		if cost.Status != "ok" || cost.Source == "best_effort" {
+			summary.allAccountLevel = false
+		}
+		if runID != "" && cost.LastAttemptRunID == runID && (cost.LastAttemptStatus == "ok" || cost.LastAttemptStatus == "partial") {
+			summary.fresh++
+		} else {
+			summary.retained++
+		}
+	}
+	if summary.expected == 0 {
+		summary.allAccountLevel = true
+		summary.mode = "exact"
+		return summary
+	}
+	if summary.missing > 0 {
+		if summary.collected > 0 {
+			summary.mode = "partial"
+		}
+		return summary
+	}
+	if summary.retained > 0 {
+		summary.mode = "retained"
+	} else {
+		summary.mode = "exact"
+	}
+	return summary
+}
+
+// FinalizeDailySnapshot writes all completed upstream attempts, derives the
+// same-day confirmed set, and persists the daily snapshot under one advisory
+// lock and one short transaction. External upstream HTTP must finish before
+// this method is called.
+func (r *MetricsRepository) FinalizeDailySnapshot(ctx context.Context, snapshot DailySnapshot, attempts []SiteDailyCost) (DailySnapshot, error) {
+	starter, ok := r.db.(metricsTxStarter)
+	if !ok {
+		return DailySnapshot{}, errors.New("metrics repository does not support transactions")
+	}
+	tx, err := starter.Begin(ctx)
+	if err != nil {
+		return DailySnapshot{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	lockKey := "dashboard-daily-cost|" + snapshot.UserID + "|" + snapshot.AdminAccountID + "|" + snapshot.Date.Format("2006-01-02")
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+		return DailySnapshot{}, err
+	}
+	date := snapshot.Date.Format("2006-01-02")
+	var preAttemptCosts []SiteDailyCost
+	if date != businesstime.Today() {
+		preAttemptCosts, err = r.listSiteCosts(ctx, tx, snapshot.UserID, snapshot.AdminAccountID, date)
+		if err != nil {
+			return DailySnapshot{}, err
+		}
+	}
+	for _, attempt := range attempts {
+		if err := r.upsertSiteCost(ctx, tx, attempt); err != nil {
+			return DailySnapshot{}, err
+		}
+	}
+	targets, err := r.dailyCostTargets(ctx, tx, snapshot, attempts, preAttemptCosts)
+	if err != nil {
+		return DailySnapshot{}, err
+	}
+	if date != businesstime.Today() && len(targets) == 0 {
+		return DailySnapshot{}, errors.New("historical daily cost targets are unavailable")
+	}
+
+	costs, err := r.listSiteCosts(ctx, tx, snapshot.UserID, snapshot.AdminAccountID, date)
+	if err != nil {
+		return DailySnapshot{}, err
+	}
+	runID := ""
+	if len(attempts) > 0 {
+		runID = attempts[0].LastAttemptRunID
+	}
+	summary := summarizeConfirmedSiteCosts(costs, targets, runID)
+	if summary.expected > 0 && summary.collected == 0 {
+		if err := tx.Commit(ctx); err != nil {
+			return DailySnapshot{}, err
+		}
+		return DailySnapshot{}, errors.New("all upstream sites lack confirmed cost")
+	}
+
+	now := time.Now().UTC()
+	snapshot.TodayPurchase = ptrF64(summary.total)
+	snapshot.CostExpectedCount = intPtr(summary.expected)
+	snapshot.CostCollectedCount = intPtr(summary.collected)
+	snapshot.CostFreshCount = intPtr(summary.fresh)
+	snapshot.CostRetainedCount = intPtr(summary.retained)
+	snapshot.CostMissingCount = intPtr(summary.missing)
+	snapshot.CostQualityMode = summary.mode
+	if snapshot.TodayProfit != nil {
+		netProfit := *snapshot.TodayProfit - summary.total
+		snapshot.NetProfit = &netProfit
+	}
+	const minSettlementCoverage = 0.90
+	if summary.expected > 0 && summary.collected == summary.expected && summary.allAccountLevel {
+		snapshot.SettlementStatus = SettlementStatusFinal
+		snapshot.FinalizedAt = &now
+	} else if summary.expected > 0 && float64(summary.collected)/float64(summary.expected) >= minSettlementCoverage {
+		snapshot.SettlementStatus = SettlementStatusPartialHigh
+		snapshot.FinalizedAt = &now
+	} else {
+		snapshot.SettlementStatus = SettlementStatusPartial
+		snapshot.FinalizedAt = nil
+	}
+	if snapshot.AdditionalCost != nil && snapshot.SettlementStatus == SettlementStatusFinal {
+		operatingCost := summary.total + *snapshot.AdditionalCost
+		snapshot.OperatingCost = &operatingCost
+		if snapshot.TodayProfit != nil {
+			adjusted := *snapshot.TodayProfit - operatingCost
+			snapshot.AdjustedNetProfit = &adjusted
+		}
+	}
+	if err := r.upsert(ctx, tx, snapshot); err != nil {
+		return DailySnapshot{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return DailySnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+// ListLatestSiteCosts returns only an exact-business-date confirmed cost for
+// each site. A previous date must never be displayed as today's cost.
 func (r *MetricsRepository) ListLatestSiteCosts(ctx context.Context, userID, adminAccountID, date string) ([]SiteDailyCost, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT DISTINCT ON (site_id)
-		       id, user_id, admin_account_id, date, site_id, site_name, platform,
-		       raw_cost, recharge_rate, adjusted_cost, status, source, error_reason, observed_at
+		SELECT id, user_id, admin_account_id, date, site_id, site_name, platform,
+		       raw_cost, recharge_rate, adjusted_cost, status, source, error_reason, observed_at,
+		       last_attempt_status, last_attempt_error, last_attempt_at, last_attempt_run_id
 		FROM upstream_site_daily_costs
 		WHERE user_id = $1 AND admin_account_id = $2
-		  AND date <= $3::date
+		  AND date = $3::date
 		  AND adjusted_cost IS NOT NULL
 		  AND status IN ('ok', 'partial')
-		ORDER BY site_id, date DESC, observed_at DESC
+		ORDER BY site_id ASC
 	`, userID, adminAccountID, date)
 	if err != nil {
 		return nil, err
@@ -533,6 +923,7 @@ func (r *MetricsRepository) ListLatestSiteCosts(ctx context.Context, userID, adm
 			&cost.SiteID, &cost.SiteName, &cost.Platform,
 			&cost.RawCost, &cost.RechargeRate, &cost.AdjustedCost,
 			&cost.Status, &cost.Source, &cost.ErrorReason, &cost.ObservedAt,
+			&cost.LastAttemptStatus, &cost.LastAttemptError, &cost.LastAttemptAt, &cost.LastAttemptRunID,
 		); err != nil {
 			return nil, err
 		}
@@ -549,17 +940,19 @@ func (r *MetricsRepository) LatestDashboardSnapshot(ctx context.Context, userID,
 		       today_profit, site_balance, today_purchase, net_profit, upstream_balance,
 		       created_at, settlement_status, snapshot_source, observed_at,
 		       finalized_at, cost_expected_count, cost_collected_count, balance_observed_at,
+		       cost_fresh_count, cost_retained_count, cost_missing_count, cost_quality_mode,
 		       additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost,
 		       adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit
 		FROM dashboard_daily_stats
-		WHERE user_id = $1 AND admin_account_id = $2 AND date <= $3::date
-		ORDER BY date DESC, created_at DESC
+		WHERE user_id = $1 AND admin_account_id = $2 AND date = $3::date
+		ORDER BY created_at DESC
 		LIMIT 1
 	`, userID, adminAccountID, date).Scan(
 		&snapshot.ID, &snapshot.UserID, &snapshot.AdminAccountID, &snapshot.Date,
 		&snapshot.TodayProfit, &snapshot.SiteBalance, &snapshot.TodayPurchase, &snapshot.NetProfit, &snapshot.UpstreamBalance,
 		&snapshot.CreatedAt, &snapshot.SettlementStatus, &snapshot.SnapshotSource, &snapshot.ObservedAt,
 		&snapshot.FinalizedAt, &snapshot.CostExpectedCount, &snapshot.CostCollectedCount, &snapshot.BalanceObservedAt,
+		&snapshot.CostFreshCount, &snapshot.CostRetainedCount, &snapshot.CostMissingCount, &snapshot.CostQualityMode,
 		&snapshot.AdditionalCost, &snapshot.RechargeFee, &snapshot.RechargeFeeRate, &snapshot.PromotionCost, &snapshot.FixedCost,
 		&snapshot.AdjustmentCost, &recordsJSON, &snapshot.OperatingCost, &snapshot.AdjustedNetProfit,
 	)
@@ -634,6 +1027,7 @@ func (r *MetricsRepository) ListDailyStats(ctx context.Context, userID, adminAcc
 		       today_profit, site_balance, today_purchase, net_profit, upstream_balance,
 		       created_at, settlement_status, snapshot_source, observed_at,
 		       finalized_at, cost_expected_count, cost_collected_count, balance_observed_at,
+		       cost_fresh_count, cost_retained_count, cost_missing_count, cost_quality_mode,
 		       additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost,
 		       adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit
 		FROM dashboard_daily_stats
@@ -655,6 +1049,7 @@ func (r *MetricsRepository) ListDailyStats(ctx context.Context, userID, adminAcc
 			&s.TodayProfit, &s.SiteBalance, &s.TodayPurchase, &s.NetProfit, &s.UpstreamBalance,
 			&s.CreatedAt, &s.SettlementStatus, &s.SnapshotSource, &s.ObservedAt,
 			&s.FinalizedAt, &s.CostExpectedCount, &s.CostCollectedCount, &s.BalanceObservedAt,
+			&s.CostFreshCount, &s.CostRetainedCount, &s.CostMissingCount, &s.CostQualityMode,
 			&s.AdditionalCost, &s.RechargeFee, &s.RechargeFeeRate, &s.PromotionCost, &s.FixedCost,
 			&s.AdjustmentCost, &recordsJSON, &s.OperatingCost, &s.AdjustedNetProfit,
 		); err != nil {

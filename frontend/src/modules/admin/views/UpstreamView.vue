@@ -397,6 +397,20 @@ const groupTodayCostDisplay = (group: UpstreamGroupInfo): string => {
   return t('admin.upstream.currency.cnyValue', { amount: group.todayCost.toFixed(2) })
 }
 
+const groupCostReasonDisplay = (group: UpstreamGroupInfo): string => {
+  switch (group.costReason) {
+    case 'shared_source': return '成本来源被多个分组共享，暂不归属'
+    case 'unresolved_source': return '上游来源无法唯一确认'
+    case 'sample_decode_failed': return '成本样本损坏，等待重新采样'
+    case 'retained_sample': return '沿用最近一次已确认样本'
+    case 'auth_401': return '上游认证失败，等待退避后重试'
+    case 'auth_403': return '上游拒绝访问，等待退避后重试'
+    case 'network': return '上游网络不可达，等待退避后重试'
+    case 'sample_unavailable': return '当前没有可靠成本样本'
+    default: return group.costReason ? '成本暂不可确认' : ''
+  }
+}
+
 const usdMetricDisplay = (metric: UpstreamMetricValue): string => {
   if (metric.display.toUpperCase().includes('USD')) return metric.display
   return t('admin.upstream.currency.usdValue', { amount: metric.display })
@@ -881,7 +895,7 @@ onBeforeUnmount(() => {
               <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
                 <button
                   v-for="group in groups"
-                  :key="group.name"
+                  :key="group.id || group.name"
                   :style="GROUP_CARD_SIZE_STYLE"
                   class="group flex flex-col items-center justify-center rounded-xl border text-center transition-colors"
                   :class="groupCardClasses(selectedGroupSiteId, group)"
@@ -916,8 +930,10 @@ onBeforeUnmount(() => {
                       {{ t('admin.upstream.fields.dedicatedMultiplierBadge') }}
                     </span>
                   </template>
-                  <span class="mt-2 text-[16px] leading-tight text-muted-foreground">
+                  <span class="mt-2 text-[16px] leading-tight text-muted-foreground" :title="groupCostReasonDisplay(group)">
                     {{ t('admin.upstream.fields.todayCost') }} {{ groupTodayCostDisplay(group) }}
+                    <span v-if="group.costMode === 'retained'" class="ml-1 text-[11px]">(沿用)</span>
+                    <span v-if="group.costComplete === false" class="ml-1 text-[11px] text-warning">(未完全归属)</span>
                   </span>
                 </button>
               </div>

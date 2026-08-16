@@ -56,6 +56,10 @@ function buildMetricData(
     settlementStatus?: string
     costExpectedCount?: number | null
     costCollectedCount?: number | null
+    costFreshCount?: number | null
+    costRetainedCount?: number | null
+    costMissingCount?: number | null
+    costQualityMode?: string
     costMode?: string
     upstreamBalance: number
   }
@@ -72,7 +76,11 @@ function buildMetricData(
       settlementStatus: point.settlementStatus,
       costExpectedCount: point.costExpectedCount,
       costCollectedCount: point.costCollectedCount,
-      costMode: undefined,
+      costFreshCount: point.costFreshCount,
+      costRetainedCount: point.costRetainedCount,
+      costMissingCount: point.costMissingCount,
+      costQualityMode: point.costQualityMode,
+      costMode: point.costQualityMode,
       upstreamBalance: point.upstreamBalance,
     })
   }
@@ -89,6 +97,10 @@ function buildMetricData(
       settlementStatus: live.settlementStatus,
       costExpectedCount: live.costQuality?.expectedSites,
       costCollectedCount: live.costQuality?.collectedSites,
+      costFreshCount: live.costQuality?.freshSites,
+      costRetainedCount: live.costQuality?.retainedSites,
+      costMissingCount: live.costQuality?.missingSites,
+      costQualityMode: live.costQuality?.mode,
       costMode: live.costQuality?.mode,
       upstreamBalance: live.upstreamBalance,
     })
@@ -97,13 +109,13 @@ function buildMetricData(
   const monthPoints: TrendPoint[] = Array.from(pointsByDate.values())
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((p) => {
-      const provisionalQuality = p.costMode === 'fallback'
+      const provisionalQuality = p.costMode === 'fallback' || p.costMode === 'retained'
         ? 'fallback'
         : key === 'todayPurchase' ? 'confirmed' : 'ceiling'
       const provisionalValue = key === 'todayPurchase'
         ? p.confirmedCost
         : key === 'netProfit'
-          ? (p.costMode === 'fallback' ? p.netProfit : p.netProfitCeiling)
+          ? (p.costMode === 'fallback' || p.costMode === 'retained' ? p.netProfit : p.netProfitCeiling)
           : null
       const selected = selectDashboardTrendValue({
         formalValue: p[key] as number | null | undefined,

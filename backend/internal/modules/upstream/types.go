@@ -82,8 +82,16 @@ type GroupInfo struct {
 	MultiplierDisplay string   `json:"multiplierDisplay"`
 	// TodayCost 是上游分组当天累计成本的人民币展示值。它只在响应组装时从 Redis
 	// 短期样本合并，不写入上游平台分组配置。
-	TodayCost      *float64 `json:"todayCost,omitempty"`
-	MultiplierMode string   `json:"multiplierMode,omitempty"`
+	TodayCost           *float64   `json:"todayCost,omitempty"`
+	CostMode            string     `json:"costMode,omitempty"`
+	CostSource          string     `json:"costSource,omitempty"`
+	CostReason          string     `json:"costReason,omitempty"`
+	CostComplete        bool       `json:"costComplete"`
+	CostObservedAt      *time.Time `json:"costObservedAt,omitempty"`
+	SiteReportedCost    *float64   `json:"siteReportedCost,omitempty"`
+	GroupAttributedCost *float64   `json:"groupAttributedCost,omitempty"`
+	UnattributedCost    *float64   `json:"unattributedCost,omitempty"`
+	MultiplierMode      string     `json:"multiplierMode,omitempty"`
 	// 以下字段为 sub2api 专属倍率合并规则新增的向后兼容字段：/groups/available 默认倍率
 	// 与 /groups/rates 专属倍率覆盖后，Multiplier 始终表示最终生效倍率；这些字段仅供前端
 	// 展示"默认倍率 -> 专属倍率"提示，不参与业务计算。旧数据缺少这些字段时 omitempty 生效，

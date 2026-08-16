@@ -177,7 +177,7 @@ export function calculateProfitMargin(input: ProfitMarginInput): ProfitMarginRes
     return { value: null, mode: 'unavailable' }
   }
 
-  if (costMode === 'fallback') {
+  if (costMode === 'fallback' || costMode === 'retained') {
     const fallbackProfit = netProfit != null && Number.isFinite(netProfit)
       ? netProfit
       : confirmedCost != null && Number.isFinite(confirmedCost)

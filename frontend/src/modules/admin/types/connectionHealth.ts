@@ -202,6 +202,13 @@ export interface AdminGroupHealth {
   todayCost?: number | null
   recentHourCost?: number | null
   costObservedAt?: string | null
+  costMode?: 'exact' | 'retained' | 'unknown' | string
+  costSource?: string
+  costReason?: string
+  costComplete?: boolean
+  siteReportedCost?: number | null
+  groupAttributedCost?: number | null
+  unattributedCost?: number | null
   minProductionRank?: number | null
   // accountsError 非空（i18n key）表示该分组账号列表加载失败，其余分组不受影响。
   accountsError?: string

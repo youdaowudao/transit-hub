@@ -89,6 +89,20 @@ const groupCostDisplay = (value: number | null | undefined): string => {
   return t('admin.upstream.currency.cnyValue', { amount: value.toFixed(2) })
 }
 
+const groupCostReasonDisplay = (reason?: string): string => {
+  switch (reason) {
+    case 'shared_source': return '成本来源被多个分组共享，暂不归属'
+    case 'unresolved_source': return '上游来源无法唯一确认'
+    case 'sample_decode_failed': return '成本样本损坏，等待重新采样'
+    case 'retained_sample': return '沿用最近一次已确认样本'
+    case 'auth_401': return '上游认证失败，等待退避后重试'
+    case 'auth_403': return '上游拒绝访问，等待退避后重试'
+    case 'network': return '上游网络不可达，等待退避后重试'
+    case 'sample_unavailable': return '当前没有可靠成本样本'
+    default: return reason ? '成本暂不可确认' : ''
+  }
+}
+
 const updatePreferences = (updater: (current: ConnectionHealthPreferences) => ConnectionHealthPreferences) => {
   const next = updater(preferences.value)
   preferences.value = next
@@ -623,7 +637,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
                     <span>{{ t('admin.connectionHealth.groupList.monitored', { count: group.monitoredAccountCount ?? 0, total: group.accountCount }) }}</span>
                     <span>{{ group.multiplierDisplay || '-' }}</span>
                   </span>
-                  <span class="mt-1 grid grid-cols-2 gap-x-2 text-[11px] leading-tight text-muted-foreground/80">
+                  <span class="mt-1 grid grid-cols-2 gap-x-2 text-[11px] leading-tight text-muted-foreground/80" :title="groupCostReasonDisplay(group.costReason)">
                     <span class="truncate">{{ t('admin.connectionHealth.groupList.recentHourCost') }} {{ groupCostDisplay(group.recentHourCost) }}</span>
                     <span class="truncate text-right">{{ t('admin.connectionHealth.groupList.todayCost') }} {{ groupCostDisplay(group.todayCost) }}</span>
                   </span>

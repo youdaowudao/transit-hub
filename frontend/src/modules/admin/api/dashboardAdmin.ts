@@ -137,12 +137,14 @@ export interface RechargeFeeRate {
 /** 成本质量信息，描述缓存成本的完整性。 */
 export interface CostQuality {
   businessDate: string
-  mode?: 'exact' | 'fallback' | 'partial' | 'unavailable' | string
+  mode?: 'exact' | 'retained' | 'fallback' | 'partial' | 'unavailable' | string
   confirmedCost: number   // 已确认站点成本之和（真实下限）
   complete: boolean       // 所有目标站点均成功采集时为 true
   expectedSites: number
   collectedSites: number
   fallbackSites?: number
+  retainedSites?: number
+  missingSites?: number
   fallbackAt?: string
   failedSites: number
   observedAt?: string
@@ -167,6 +169,10 @@ export interface DashboardTrendPoint {
   settlementStatus?: 'final' | 'fallback' | 'partial' | 'provisional' | 'missing' | 'unavailable' | string
   costExpectedCount?: number | null
   costCollectedCount?: number | null
+  costFreshCount?: number | null
+  costRetainedCount?: number | null
+  costMissingCount?: number | null
+  costQualityMode?: string
   upstreamBalance: number
   additionalCost?: number | null
   operatingCost?: number | null
@@ -355,7 +361,11 @@ export interface SiteCostDetail {
   status: string
   source: string
   errorReason?: string
-  observedAt: string
+  observedAt?: string
+  lastAttemptStatus?: string
+  lastAttemptError?: string
+  lastAttemptAt?: string
+  lastAttemptRunId?: string
 }
 
 /** 单日结算数据。settlementStatus 为 "missing" 表示该日期无记录。 */
@@ -369,6 +379,10 @@ export interface DailyStatItem {
   marginCeiling?: number | null
   costExpectedCount?: number | null
   costCollectedCount?: number | null
+  costFreshCount?: number | null
+  costRetainedCount?: number | null
+  costMissingCount?: number | null
+  costQualityMode?: string
   finalizedAt?: string | null
   siteCosts?: SiteCostDetail[]
   siteCostsLoadError?: boolean  // expand=true 但站点明细查询失败时为 true

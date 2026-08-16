@@ -55,6 +55,10 @@ type metricsStore interface {
 	ListDailyStats(ctx context.Context, userID, adminAccountID string, from, to string) ([]DailySnapshot, error)
 }
 
+type dailySnapshotFinalizer interface {
+	FinalizeDailySnapshot(ctx context.Context, snapshot DailySnapshot, attempts []SiteDailyCost) (DailySnapshot, error)
+}
+
 // MetricsService 负责仪表盘指标的实时计算、历史快照存储与午夜调度。
 // 与同包的 Service（admin 会话管理）职责分离，共享 SessionStore 和 PlatformClient。
 type MetricsService struct {
@@ -309,36 +313,32 @@ func summarizeCachedUpstreamCostsWithHistory(sites []upstream.Response, business
 		}
 		quality.ExpectedSites++
 		metric := site.Metrics.TodayConsume
-		currentDateOK := site.Metrics.TodayConsumeDate == "" || site.Metrics.TodayConsumeDate == businessDate
+		currentDateOK := site.Metrics.TodayConsumeDate == businessDate
 		stale := metric.Value != nil && maxStaleness > 0 && site.Metrics.TodayConsumeAt != nil &&
 			now.Sub(*site.Metrics.TodayConsumeAt) > maxStaleness
 		needsFallback := metric.Value == nil || !currentDateOK || site.Status == upstream.StatusError || stale
 
-		if metric.Value != nil {
+		if !needsFallback {
 			quality.CollectedSites++
+			quality.FreshSites++
 			quality.ConfirmedCost += *metric.Value * site.RechargeRate
-			if needsFallback {
-				quality.FallbackSites++
-				if site.Metrics.TodayConsumeAt != nil && (quality.FallbackAt == nil || site.Metrics.TodayConsumeAt.Before(*quality.FallbackAt)) {
-					observedAt := *site.Metrics.TodayConsumeAt
-					quality.FallbackAt = &observedAt
-				}
-			}
 			continue
 		}
 
 		if previous, ok := history[site.ID]; ok && previous.AdjustedCost != nil {
 			quality.CollectedSites++
+			quality.RetainedSites++
 			quality.FallbackSites++
 			quality.ConfirmedCost += *previous.AdjustedCost
-			if quality.FallbackAt == nil || previous.ObservedAt.Before(*quality.FallbackAt) {
-				observedAt := previous.ObservedAt
+			if previous.ObservedAt != nil && (quality.FallbackAt == nil || previous.ObservedAt.Before(*quality.FallbackAt)) {
+				observedAt := *previous.ObservedAt
 				quality.FallbackAt = &observedAt
 			}
 			continue
 		}
 
 		quality.FailedSites++
+		quality.MissingSites++
 		reason := "fetch_error"
 		if !currentDateOK {
 			reason = "date_mismatch"
@@ -351,12 +351,13 @@ func summarizeCachedUpstreamCostsWithHistory(sites []upstream.Response, business
 	if quality.ExpectedSites == 0 {
 		quality.Complete = true
 		quality.Mode = "exact"
-	} else if quality.FailedSites > 0 && quality.CollectedSites == 0 {
+	} else if quality.MissingSites > 0 && quality.CollectedSites == 0 {
 		quality.Mode = "unavailable"
-	} else if quality.FailedSites > 0 {
+	} else if quality.MissingSites > 0 {
 		quality.Mode = "partial"
-	} else if quality.FallbackSites > 0 {
-		quality.Mode = "fallback"
+	} else if quality.RetainedSites > 0 {
+		quality.Complete = true
+		quality.Mode = "retained"
 	} else {
 		quality.Complete = true
 		quality.Mode = "exact"
@@ -534,7 +535,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	var netProfitCeiling *float64
 	settlementStatus := SettlementStatusUnavailable
 	if costQuality != nil {
-		if costQuality.Mode == "exact" || costQuality.Mode == "fallback" {
+		if costQuality.Mode == "exact" || costQuality.Mode == "retained" || costQuality.Mode == "fallback" {
 			confirmedCost = ptrF64(costQuality.ConfirmedCost)
 		} else if costQuality.CollectedSites > 0 {
 			confirmedCost = ptrF64(costQuality.ConfirmedCost)
@@ -555,7 +556,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		switch costQuality.Mode {
 		case "exact":
 			settlementStatus = SettlementStatusFinal
-		case "fallback":
+		case "retained", "fallback":
 			settlementStatus = SettlementStatusFallback
 		case "partial":
 			const minSettlementCoverage = 0.90
@@ -664,6 +665,10 @@ func (s *MetricsService) Trends(ctx context.Context, userID string, days int) (T
 			SettlementStatus:   status,
 			CostExpectedCount:  snap.CostExpectedCount,
 			CostCollectedCount: snap.CostCollectedCount,
+			CostFreshCount:     snap.CostFreshCount,
+			CostRetainedCount:  snap.CostRetainedCount,
+			CostMissingCount:   snap.CostMissingCount,
+			CostQualityMode:    snap.CostQualityMode,
 			UpstreamBalance:    derefF64(snap.UpstreamBalance),
 			AdditionalCost:     snap.AdditionalCost,
 			OperatingCost:      snap.OperatingCost,
@@ -785,6 +790,10 @@ func (s *MetricsService) upsertSnapshot(ctx context.Context, userID, adminAccoun
 	if metrics.CostQuality != nil {
 		snapshot.CostExpectedCount = intPtr(metrics.CostQuality.ExpectedSites)
 		snapshot.CostCollectedCount = intPtr(metrics.CostQuality.CollectedSites)
+		snapshot.CostFreshCount = intPtr(metrics.CostQuality.FreshSites)
+		snapshot.CostRetainedCount = intPtr(metrics.CostQuality.RetainedSites)
+		snapshot.CostMissingCount = intPtr(metrics.CostQuality.MissingSites)
+		snapshot.CostQualityMode = metrics.CostQuality.Mode
 	}
 	if err := s.metricsRepo.Upsert(ctx, snapshot); err != nil {
 		log.Printf("dashboard metrics: upsert snapshot failed user_id=%s date=%s err=%v", userID, date, err)
@@ -1103,35 +1112,39 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 		log.Printf("dashboard finalize: fetch site costs failed user_id=%s date=%s err=%v", userID, date, fetchErr)
 		return fetchErr
 	}
-	expectedCount := len(siteCostResults)
-	collectedCount := 0
-	now := time.Now()
-
+	now := time.Now().UTC()
+	attemptRunID, idErr := metricsRandomID()
+	if idErr != nil {
+		return idErr
+	}
+	attempts := make([]SiteDailyCost, 0, len(siteCostResults))
 	for _, r := range siteCostResults {
 		siteCostID, idErr := metricsRandomID()
 		if idErr != nil {
 			log.Printf("dashboard finalize: generate site cost id failed err=%v, skipping site %s", idErr, r.SiteID)
 			continue
 		}
+		attemptAt := r.Meta.ObservedAt
+		if attemptAt.IsZero() {
+			attemptAt = now
+		}
 		siteCost := SiteDailyCost{
-			ID:             siteCostID,
-			UserID:         userID,
-			AdminAccountID: adminAccountID,
-			Date:           parsedDate,
-			SiteID:         r.SiteID,
-			SiteName:       r.SiteName,
-			Platform:       string(r.Platform),
-			RechargeRate:   r.RechargeRate,
-			ObservedAt:     r.Meta.ObservedAt,
-			Source:         snapshotSource,
+			ID:                siteCostID,
+			UserID:            userID,
+			AdminAccountID:    adminAccountID,
+			Date:              parsedDate,
+			SiteID:            r.SiteID,
+			SiteName:          r.SiteName,
+			Platform:          string(r.Platform),
+			RechargeRate:      r.RechargeRate,
+			Status:            "missing",
+			Source:            "none",
+			LastAttemptStatus: "failed",
+			LastAttemptAt:     &attemptAt,
+			LastAttemptRunID:  attemptRunID,
 		}
 		if r.Err != nil {
-			siteCost.Status = "failed"
-			siteCost.ErrorReason = r.Err.Error()
-			if upsertErr := s.metricsRepo.UpsertSiteCost(ctx, siteCost); upsertErr != nil {
-				log.Printf("dashboard finalize: upsert site cost failed user_id=%s site_id=%s date=%s err=%v",
-					userID, r.SiteID, date, upsertErr)
-			}
+			siteCost.LastAttemptError = r.Err.Error()
 		} else {
 			adjusted := r.RawCost * r.RechargeRate
 			siteCost.RawCost = &r.RawCost
@@ -1141,56 +1154,23 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 				siteCost.Source = "best_effort"
 			} else {
 				siteCost.Status = "ok"
+				siteCost.Source = snapshotSource
 			}
-			// 只有站点成本记录写入成功时，才计入 collectedCount；
-			// 写入失败则降级处理（不计入），避免 final 汇总缺少明细行。
-			if upsertErr := s.metricsRepo.UpsertSiteCost(ctx, siteCost); upsertErr != nil {
-				log.Printf("dashboard finalize: upsert site cost failed user_id=%s site_id=%s date=%s err=%v",
-					userID, r.SiteID, date, upsertErr)
-			} else {
-				collectedCount++
-			}
+			siteCost.ObservedAt = &attemptAt
+			siteCost.LastAttemptStatus = siteCost.Status
 		}
+		attempts = append(attempts, siteCost)
 	}
 
-	// 营收失败或全部站点失败：不写快照，等待重试。
+	// 先记录站点尝试；营收失败时不写快照，等待下一轮重试。
 	if revenueErr != nil {
+		for _, attempt := range attempts {
+			if upsertErr := s.metricsRepo.UpsertSiteCost(ctx, attempt); upsertErr != nil {
+				log.Printf("dashboard finalize: upsert site attempt failed user_id=%s site_id=%s date=%s err=%v", userID, attempt.SiteID, date, upsertErr)
+			}
+		}
 		log.Printf("dashboard finalize: revenue failed user_id=%s date=%s err=%v", userID, date, revenueErr)
 		return revenueErr
-	}
-	if expectedCount > 0 && collectedCount == 0 {
-		log.Printf("dashboard finalize: all sites failed user_id=%s date=%s", userID, date)
-		return errors.New("all upstream sites failed")
-	}
-
-	// 汇总成本直接从本次采集结果计算，不读取DB已有数据，
-	// 避免重试时把旧站点成本混入本次结果。
-	var totalCost float64
-	allAccountLevel := true
-	for _, r := range siteCostResults {
-		if r.Err == nil {
-			totalCost += r.RawCost * r.RechargeRate
-			if r.Meta.Source == "key_sum_best_effort" {
-				allAccountLevel = false
-			}
-		}
-	}
-	// 结算质量分级判定
-	const minSettlementCoverage = 0.90 // 90%覆盖率阈值
-	var status string
-	var finalizedAt *time.Time
-
-	if collectedCount == expectedCount && expectedCount > 0 && allAccountLevel {
-		// 完全结算：所有站点成功且均为账户级数据
-		status = SettlementStatusFinal
-		finalizedAt = &now
-	} else if expectedCount > 0 && float64(collectedCount)/float64(expectedCount) >= minSettlementCoverage {
-		// 高质量部分结算：覆盖率≥90%
-		status = SettlementStatusPartialHigh
-		finalizedAt = &now // 视为有效结算，记录完成时间
-	} else {
-		// 低质量部分结算：覆盖率<90%
-		status = SettlementStatusPartial
 	}
 
 	snapshotID, idErr := metricsRandomID()
@@ -1198,15 +1178,7 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 		log.Printf("dashboard finalize: generate snapshot id failed err=%v", idErr)
 		return idErr
 	}
-	np := revenue - totalCost
 	additionalCosts := s.additionalCostSummary(ctx, userID, adminAccountID, date, ptrF64(revenue))
-	var operatingCost, adjustedNetProfit *float64
-	if additionalCosts != nil && additionalCosts.Total != nil && status == SettlementStatusFinal {
-		value := totalCost + *additionalCosts.Total
-		operatingCost = &value
-		adjusted := revenue - value
-		adjustedNetProfit = &adjusted
-	}
 	rechargeFee, rechargeFeeRate := rechargeFeeSummary(additionalCosts)
 	promotionCost, fixedCost, adjustmentCost := additionalCostCategorySummary(additionalCosts)
 	snapshot := DailySnapshot{
@@ -1216,16 +1188,14 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 		Date:                  parsedDate,
 		TodayProfit:           ptrF64(revenue),
 		SiteBalance:           nil,
-		TodayPurchase:         ptrF64(totalCost),
-		NetProfit:             &np,
+		TodayPurchase:         nil,
+		NetProfit:             nil,
 		UpstreamBalance:       nil,
 		CreatedAt:             now,
-		SettlementStatus:      status,
+		SettlementStatus:      SettlementStatusPartial,
 		SnapshotSource:        snapshotSource,
 		ObservedAt:            &now,
-		FinalizedAt:           finalizedAt,
-		CostExpectedCount:     &expectedCount,
-		CostCollectedCount:    &collectedCount,
+		FinalizedAt:           nil,
 		AdditionalCost:        additionalCostTotal(additionalCosts),
 		RechargeFee:           rechargeFee,
 		RechargeFeeRate:       rechargeFeeRate,
@@ -1233,14 +1203,57 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 		FixedCost:             fixedCost,
 		AdjustmentCost:        adjustmentCost,
 		AdditionalCostRecords: additionalCostRecords(additionalCosts),
-		OperatingCost:         operatingCost,
-		AdjustedNetProfit:     adjustedNetProfit,
 	}
-	if upsertErr := s.metricsRepo.Upsert(ctx, snapshot); upsertErr != nil {
-		log.Printf("dashboard finalize: upsert snapshot failed user_id=%s date=%s err=%v", userID, date, upsertErr)
-		return upsertErr
+	if finalizer, ok := s.metricsRepo.(dailySnapshotFinalizer); ok {
+		finalized, finalizeErr := finalizer.FinalizeDailySnapshot(ctx, snapshot, attempts)
+		if finalizeErr != nil {
+			log.Printf("dashboard finalize: finalize daily snapshot failed user_id=%s date=%s err=%v", userID, date, finalizeErr)
+			return finalizeErr
+		}
+		log.Printf("dashboard finalize: done user_id=%s date=%s status=%s", userID, date, finalized.SettlementStatus)
+		return nil
 	}
-	log.Printf("dashboard finalize: done user_id=%s date=%s status=%s", userID, date, status)
+
+	// 非 PostgreSQL fake/替身保留旧的逐行行为，仅用于不带事务数据库的单元测试。
+	collectedCount := 0
+	for _, attempt := range attempts {
+		if err := s.metricsRepo.UpsertSiteCost(ctx, attempt); err != nil {
+			log.Printf("dashboard finalize: upsert site attempt failed user_id=%s site_id=%s date=%s err=%v", userID, attempt.SiteID, date, err)
+			continue
+		}
+		if attempt.LastAttemptStatus == "ok" || attempt.LastAttemptStatus == "partial" {
+			collectedCount++
+		}
+	}
+	if len(attempts) > 0 && collectedCount == 0 {
+		return errors.New("all upstream sites failed")
+	}
+	var totalCost float64
+	allAccountLevel := true
+	for _, attempt := range attempts {
+		if attempt.AdjustedCost != nil {
+			totalCost += *attempt.AdjustedCost
+			if attempt.Status == "partial" {
+				allAccountLevel = false
+			}
+		}
+	}
+	if len(attempts) > 0 && collectedCount == len(attempts) && allAccountLevel {
+		snapshot.SettlementStatus = SettlementStatusFinal
+		snapshot.FinalizedAt = &now
+	} else if len(attempts) > 0 && float64(collectedCount)/float64(len(attempts)) >= 0.90 {
+		snapshot.SettlementStatus = SettlementStatusPartialHigh
+	}
+	snapshot.TodayPurchase = ptrF64(totalCost)
+	netProfit := revenue - totalCost
+	snapshot.NetProfit = &netProfit
+	snapshot.CostExpectedCount = intPtr(len(attempts))
+	snapshot.CostCollectedCount = intPtr(collectedCount)
+	if err := s.metricsRepo.Upsert(ctx, snapshot); err != nil {
+		log.Printf("dashboard finalize: upsert snapshot failed user_id=%s date=%s err=%v", userID, date, err)
+		return err
+	}
+	log.Printf("dashboard finalize: done user_id=%s date=%s status=%s", userID, date, snapshot.SettlementStatus)
 	return nil
 }
 
@@ -1360,6 +1373,10 @@ func (s *MetricsService) DailyStats(ctx context.Context, userID string, from, to
 				TodayProfit:        snap.TodayProfit,
 				CostExpectedCount:  snap.CostExpectedCount,
 				CostCollectedCount: snap.CostCollectedCount,
+				CostFreshCount:     snap.CostFreshCount,
+				CostRetainedCount:  snap.CostRetainedCount,
+				CostMissingCount:   snap.CostMissingCount,
+				CostQualityMode:    snap.CostQualityMode,
 			}
 			if snap.TodayPurchase != nil {
 				item.ConfirmedCost = snap.TodayPurchase
@@ -1406,17 +1423,25 @@ func (s *MetricsService) DailyStats(ctx context.Context, userID string, from, to
 					item.SiteCosts = make([]SiteCostDetail, 0, len(siteCosts))
 					for _, sc := range siteCosts {
 						item.SiteCosts = append(item.SiteCosts, SiteCostDetail{
-							SiteID:       sc.SiteID,
-							SiteName:     sc.SiteName,
-							Platform:     sc.Platform,
-							RawCost:      sc.RawCost,
-							RechargeRate: sc.RechargeRate,
-							AdjustedCost: sc.AdjustedCost,
-							Status:       sc.Status,
-							Source:       sc.Source,
-							ErrorReason:  sc.ErrorReason,
-							ObservedAt:   sc.ObservedAt.Format(time.RFC3339),
+							SiteID:            sc.SiteID,
+							SiteName:          sc.SiteName,
+							Platform:          sc.Platform,
+							RawCost:           sc.RawCost,
+							RechargeRate:      sc.RechargeRate,
+							AdjustedCost:      sc.AdjustedCost,
+							Status:            sc.Status,
+							Source:            sc.Source,
+							ErrorReason:       sc.ErrorReason,
+							LastAttemptStatus: sc.LastAttemptStatus,
+							LastAttemptError:  sc.LastAttemptError,
+							LastAttemptRunID:  sc.LastAttemptRunID,
 						})
+						if sc.ObservedAt != nil {
+							item.SiteCosts[len(item.SiteCosts)-1].ObservedAt = sc.ObservedAt.Format(time.RFC3339)
+						}
+						if sc.LastAttemptAt != nil {
+							item.SiteCosts[len(item.SiteCosts)-1].LastAttemptAt = sc.LastAttemptAt.Format(time.RFC3339)
+						}
 					}
 				}
 			}

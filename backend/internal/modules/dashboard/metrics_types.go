@@ -44,17 +44,21 @@ type MetricsResponse struct {
 
 // CostQuality 描述本次成本采集的完整性与质量信息，前端根据此字段分级展示。
 type CostQuality struct {
-	BusinessDate   string          `json:"businessDate"`
-	Mode           string          `json:"mode"`          // exact/fallback/partial/unavailable
-	ConfirmedCost  float64         `json:"confirmedCost"` // exact/fallback 时为可展示成本，partial 时为已确认下限
-	Complete       bool            `json:"complete"`      // 所有目标站点均为本次有效采集时为 true
-	ExpectedSites  int             `json:"expectedSites"`
-	CollectedSites int             `json:"collectedSites"`
-	FallbackSites  int             `json:"fallbackSites"`
-	FallbackAt     *time.Time      `json:"fallbackAt,omitempty"` // fallback 站点中最早的最后成功采集时间
-	FailedSites    int             `json:"failedSites"`
-	ObservedAt     *time.Time      `json:"observedAt,omitempty"`
-	Failures       []SiteCostFault `json:"failures,omitempty"` // 失败站点脱敏原因
+	BusinessDate   string  `json:"businessDate"`
+	Mode           string  `json:"mode"`          // exact/retained/fallback/partial/unavailable
+	ConfirmedCost  float64 `json:"confirmedCost"` // exact/retained 时为可展示成本，partial 时为已确认下限
+	Complete       bool    `json:"complete"`      // 所有目标站点都有同日确认成本时为 true
+	ExpectedSites  int     `json:"expectedSites"`
+	CollectedSites int     `json:"collectedSites"`
+	FreshSites     int     `json:"freshSites"`
+	RetainedSites  int     `json:"retainedSites"`
+	MissingSites   int     `json:"missingSites"`
+	// FallbackSites/FallbackAt 保留给已存的 fallback 响应和旧客户端。
+	FallbackSites int             `json:"fallbackSites"`
+	FallbackAt    *time.Time      `json:"fallbackAt,omitempty"` // fallback 站点中最早的最后成功采集时间
+	FailedSites   int             `json:"failedSites"`
+	ObservedAt    *time.Time      `json:"observedAt,omitempty"`
+	Failures      []SiteCostFault `json:"failures,omitempty"` // 失败站点脱敏原因
 }
 
 // SiteCostFault 记录单个站点的成本采集失败原因。
@@ -81,6 +85,10 @@ type TrendPoint struct {
 	SettlementStatus   string   `json:"settlementStatus,omitempty"` // final/fallback/partial/provisional/missing
 	CostExpectedCount  *int     `json:"costExpectedCount,omitempty"`
 	CostCollectedCount *int     `json:"costCollectedCount,omitempty"`
+	CostFreshCount     *int     `json:"costFreshCount,omitempty"`
+	CostRetainedCount  *int     `json:"costRetainedCount,omitempty"`
+	CostMissingCount   *int     `json:"costMissingCount,omitempty"`
+	CostQualityMode    string   `json:"costQualityMode,omitempty"`
 	UpstreamBalance    float64  `json:"upstreamBalance"`
 	AdditionalCost     *float64 `json:"additionalCost,omitempty"`
 	OperatingCost      *float64 `json:"operatingCost,omitempty"`
@@ -106,7 +114,11 @@ type DailySnapshot struct {
 	ObservedAt            *time.Time // 数据实际采集时间
 	FinalizedAt           *time.Time // 日结成功写入时间，仅 final 行有值
 	CostExpectedCount     *int       // 应包含的上游站点数
-	CostCollectedCount    *int       // 实际成功取到成本的站点数
+	CostCollectedCount    *int       // 有同日确认成本的站点数
+	CostFreshCount        *int       // 本次尝试新确认的站点数
+	CostRetainedCount     *int       // 本次失败但沿用同日确认值的站点数
+	CostMissingCount      *int       // 没有同日确认值的站点数
+	CostQualityMode       string     // exact/retained/partial/unavailable
 	BalanceObservedAt     *time.Time // 余额观测时间
 	AdditionalCost        *float64
 	RechargeFee           *float64
@@ -132,10 +144,16 @@ type SiteDailyCost struct {
 	RawCost        *float64 // 上游原始成本（允许 NULL）
 	RechargeRate   float64
 	AdjustedCost   *float64 // raw_cost × recharge_rate（允许 NULL）
-	Status         string   // ok/partial/failed/expired/date_mismatch
-	Source         string   // dated_query/backfill/best_effort
-	ErrorReason    string
-	ObservedAt     time.Time
+	// 下列确认字段只表示最近一次同日成功确认；失败不会覆盖它们。
+	Status      string     // ok/partial/missing
+	Source      string     // dated_query/backfill/best_effort/none
+	ErrorReason string     // 仅说明已确认 partial 成本的口径
+	ObservedAt  *time.Time // 最近一次成功确认时间；missing 时为 nil
+
+	LastAttemptStatus string     // ok/partial/failed
+	LastAttemptError  string     // 脱敏后的最近失败原因
+	LastAttemptAt     *time.Time // 最近尝试时间
+	LastAttemptRunID  string
 }
 
 // DailyStatItem 是 GET /api/dashboard/daily-stats 返回的单日数据。
@@ -149,6 +167,10 @@ type DailyStatItem struct {
 	MarginCeiling      *float64               `json:"marginCeiling,omitempty"`
 	CostExpectedCount  *int                   `json:"costExpectedCount,omitempty"`
 	CostCollectedCount *int                   `json:"costCollectedCount,omitempty"`
+	CostFreshCount     *int                   `json:"costFreshCount,omitempty"`
+	CostRetainedCount  *int                   `json:"costRetainedCount,omitempty"`
+	CostMissingCount   *int                   `json:"costMissingCount,omitempty"`
+	CostQualityMode    string                 `json:"costQualityMode,omitempty"`
 	FinalizedAt        *string                `json:"finalizedAt,omitempty"`
 	SiteCosts          []SiteCostDetail       `json:"siteCosts,omitempty"`          // expand=true 时填充
 	SiteCostsLoadError bool                   `json:"siteCostsLoadError,omitempty"` // expand=true 但查询失败
@@ -159,16 +181,20 @@ type DailyStatItem struct {
 
 // SiteCostDetail 是逐日明细中单个站点的成本展示数据。
 type SiteCostDetail struct {
-	SiteID       string   `json:"siteId"`
-	SiteName     string   `json:"siteName"`
-	Platform     string   `json:"platform"`
-	RawCost      *float64 `json:"rawCost,omitempty"`
-	RechargeRate float64  `json:"rechargeRate"`
-	AdjustedCost *float64 `json:"adjustedCost,omitempty"` // rawCost × rechargeRate
-	Status       string   `json:"status"`                 // ok/partial/failed/expired/date_mismatch
-	Source       string   `json:"source"`                 // dated_query/backfill/best_effort
-	ErrorReason  string   `json:"errorReason,omitempty"`
-	ObservedAt   string   `json:"observedAt"`
+	SiteID            string   `json:"siteId"`
+	SiteName          string   `json:"siteName"`
+	Platform          string   `json:"platform"`
+	RawCost           *float64 `json:"rawCost,omitempty"`
+	RechargeRate      float64  `json:"rechargeRate"`
+	AdjustedCost      *float64 `json:"adjustedCost,omitempty"` // rawCost × rechargeRate
+	Status            string   `json:"status"`                 // ok/partial/missing
+	Source            string   `json:"source"`
+	ErrorReason       string   `json:"errorReason,omitempty"`
+	ObservedAt        string   `json:"observedAt,omitempty"`
+	LastAttemptStatus string   `json:"lastAttemptStatus,omitempty"`
+	LastAttemptError  string   `json:"lastAttemptError,omitempty"`
+	LastAttemptAt     string   `json:"lastAttemptAt,omitempty"`
+	LastAttemptRunID  string   `json:"lastAttemptRunId,omitempty"`
 }
 
 // AdminGroupsResponse 是 GET /api/dashboard/groups 返回的管理员站点分组数据。

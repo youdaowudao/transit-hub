@@ -13,6 +13,7 @@ const (
 	groupCostKeyPrefix         = "upstream:group-cost:"
 	groupCostSampleKeyPrefix   = groupCostKeyPrefix + "samples:"
 	groupCostSamplingKeyPrefix = groupCostKeyPrefix + "sampling:"
+	groupCostStateKeyPrefix    = groupCostKeyPrefix + "state:"
 )
 
 func groupCostKeyPart(value string) string {
@@ -27,8 +28,35 @@ func groupCostSamplingKey(siteID string) string {
 	return groupCostSamplingKeyPrefix + groupCostKeyPart(siteID)
 }
 
+func groupCostStateKey(siteID string) string {
+	return groupCostStateKeyPrefix + groupCostKeyPart(siteID)
+}
+
 func (c *RedisSiteCache) TryStartGroupCostSampling(ctx context.Context, siteID string, ttl time.Duration) (bool, error) {
 	return c.client.SetNX(ctx, groupCostSamplingKey(siteID), "1", ttl).Result()
+}
+
+func (c *RedisSiteCache) GetGroupCostSamplingState(ctx context.Context, siteID string) (GroupCostSamplingState, error) {
+	payload, err := c.client.Get(ctx, groupCostStateKey(siteID)).Bytes()
+	if err == redis.Nil {
+		return GroupCostSamplingState{}, nil
+	}
+	if err != nil {
+		return GroupCostSamplingState{}, err
+	}
+	var state GroupCostSamplingState
+	if err := json.Unmarshal(payload, &state); err != nil {
+		return GroupCostSamplingState{}, err
+	}
+	return state, nil
+}
+
+func (c *RedisSiteCache) SetGroupCostSamplingState(ctx context.Context, siteID string, state GroupCostSamplingState, ttl time.Duration) error {
+	payload, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return c.client.Set(ctx, groupCostStateKey(siteID), payload, ttl).Err()
 }
 
 func (c *RedisSiteCache) AppendGroupCostSamples(
@@ -81,7 +109,7 @@ func (c *RedisSiteCache) DeleteGroupCostSamples(ctx context.Context, siteID stri
 	if err := deleteRedisKeysByPattern(ctx, c.client, pattern); err != nil {
 		return err
 	}
-	return c.client.Del(ctx, groupCostSamplingKey(siteID)).Err()
+	return c.client.Del(ctx, groupCostSamplingKey(siteID), groupCostStateKey(siteID)).Err()
 }
 
 func (c *RedisSiteCache) ClearGroupCostSamples(ctx context.Context) error {

@@ -103,19 +103,19 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 		return jsonResponse{}, newRequestError(ErrorNetwork, "")
 	}
 	defer response.Body.Close()
-
-	payload, err := parseJSONWithLimit(response.Body, reqURL, maxResponseBytes)
-	if err != nil {
-		return jsonResponse{}, err
-	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		log.Printf("[http-client] 非 2xx 响应 url=%s status=%d", reqURL, response.StatusCode)
-		// 保留原有全局行为（仅 401 归类为 ErrorAuth），但把真实 status code 一并带出，
-		// 供需要区分 403 等细分状态的调用方判断，不改变其它调用方的既有语义。
+		// 错误响应不要求是 JSON；先按状态码分类，确保非 JSON 的 401/403
+		// 也能进入认证退避，而不会被误报成响应格式错误。
 		if response.StatusCode == http.StatusUnauthorized {
 			return jsonResponse{}, newRequestErrorWithStatus(ErrorAuth, "", response.StatusCode)
 		}
 		return jsonResponse{}, newRequestErrorWithStatus(ErrorRequest, "", response.StatusCode)
+	}
+
+	payload, err := parseJSONWithLimit(response.Body, reqURL, maxResponseBytes)
+	if err != nil {
+		return jsonResponse{}, err
 	}
 	// new-api commonly reports authentication/authorization failures as HTTP 200
 	// with {"success": false}. Treat that envelope as an error so Root/Admin

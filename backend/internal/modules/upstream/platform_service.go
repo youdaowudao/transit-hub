@@ -427,7 +427,11 @@ func (s *PlatformService) FetchSub2APIGroupDailyStats(session Session, groups ..
 // FetchSub2APIGroupUsageSummaryStats 只读取分组汇总接口，供短期成本采样使用。
 // 汇总失败时直接返回错误，禁止后台采样退回逐 Key 扫描。
 func (s *PlatformService) FetchSub2APIGroupUsageSummaryStats(session Session) ([]GroupDailyStat, error) {
-	return s.fetchSub2APIGroupUsageSummaryStats(session)
+	return s.fetchSub2APIGroupUsageSummaryStatsContext(context.Background(), session)
+}
+
+func (s *PlatformService) FetchSub2APIGroupUsageSummaryStatsContext(ctx context.Context, session Session) ([]GroupDailyStat, error) {
+	return s.fetchSub2APIGroupUsageSummaryStatsContext(ctx, session)
 }
 
 // FetchSub2APIGroupDailyStatsForDate 跳过无日期参数的 usage-summary，按指定上海业务日查询。
@@ -924,12 +928,16 @@ func balanceExcluded(balance float64, excludes []float64) bool {
 }
 
 func (s *PlatformService) fetchSub2APIGroupUsageSummaryStats(session Session) ([]GroupDailyStat, error) {
+	return s.fetchSub2APIGroupUsageSummaryStatsContext(context.Background(), session)
+}
+
+func (s *PlatformService) fetchSub2APIGroupUsageSummaryStatsContext(ctx context.Context, session Session) ([]GroupDailyStat, error) {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
 		return nil, newRequestError(ErrorAuth, PlatformSub2API)
 	}
 	groupNames := map[string]string{}
 	if strings.TrimSpace(session.AdminAPIKey) != "" {
-		groups, err := s.FetchSub2APIAdminAllGroups(session)
+		groups, err := s.fetchSub2APIAdminAllGroupsContext(ctx, session)
 		if err != nil {
 			return nil, err
 		}
@@ -939,7 +947,7 @@ func (s *PlatformService) fetchSub2APIGroupUsageSummaryStats(session Session) ([
 			}
 		}
 	} else {
-		groupsResponse, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/groups/available", sub2APIUserAuthOptions(session))
+		groupsResponse, err := s.httpClient.requestJSONWithContext(ctx, session.BaseURL+"/api/v1/groups/available", sub2APIUserAuthOptions(session))
 		if err != nil {
 			return nil, err
 		}
@@ -955,7 +963,7 @@ func (s *PlatformService) fetchSub2APIGroupUsageSummaryStats(session Session) ([
 	if len(groupNames) == 0 {
 		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
-	usageResponse, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/admin/groups/usage-summary", adminAuthOptions(session))
+	usageResponse, err := s.httpClient.requestJSONWithContext(ctx, session.BaseURL+"/api/v1/admin/groups/usage-summary", adminAuthOptions(session))
 	if err != nil {
 		return nil, err
 	}
@@ -1089,10 +1097,18 @@ func (s *PlatformService) FetchNewAPIGroupDailyStatsForDate(session Session, gro
 }
 
 func (s *PlatformService) fetchNewAPIGroupCostStatsForDate(session Session, groups []GroupInfo, date string) ([]GroupDailyStat, error) {
-	return s.fetchNewAPIGroupDailyStatsForDate(session, groups, date, true)
+	return s.fetchNewAPIGroupCostStatsForDateContext(context.Background(), session, groups, date)
+}
+
+func (s *PlatformService) fetchNewAPIGroupCostStatsForDateContext(ctx context.Context, session Session, groups []GroupInfo, date string) ([]GroupDailyStat, error) {
+	return s.fetchNewAPIGroupDailyStatsForDateContext(ctx, session, groups, date, true)
 }
 
 func (s *PlatformService) fetchNewAPIGroupDailyStatsForDate(session Session, groups []GroupInfo, date string, rejectMissingCost bool) ([]GroupDailyStat, error) {
+	return s.fetchNewAPIGroupDailyStatsForDateContext(context.Background(), session, groups, date, rejectMissingCost)
+}
+
+func (s *PlatformService) fetchNewAPIGroupDailyStatsForDateContext(ctx context.Context, session Session, groups []GroupInfo, date string, rejectMissingCost bool) ([]GroupDailyStat, error) {
 	if session.Platform != PlatformNewAPI || !session.IsAuthenticated() {
 		return nil, newRequestError(ErrorAuth, PlatformNewAPI)
 	}
@@ -1108,7 +1124,7 @@ func (s *PlatformService) fetchNewAPIGroupDailyStatsForDate(session Session, gro
 			continue
 		}
 		statURL := session.BaseURL + "/api/log/self/stat?type=2&start_timestamp=" + strconvInt(start) + "&end_timestamp=" + strconvInt(end) + "&group=" + url.QueryEscape(name)
-		payload, err := s.httpClient.requestJSON(statURL, cookieOptions)
+		payload, err := s.httpClient.requestJSONWithContext(ctx, statURL, cookieOptions)
 		if err != nil {
 			return nil, err
 		}
@@ -2006,18 +2022,322 @@ func (s *PlatformService) FetchAdminGroupDailyStatsForDate(session Session, grou
 	}
 }
 
-// FetchGroupCostStatsForDate 是后台短期成本采样专用入口。Sub2API 只使用分组汇总
-// 接口，汇总不可用时返回错误，不触发逐 Key 的高成本回退；NewAPI 复用现有逐组统计。
-func (s *PlatformService) FetchGroupCostStatsForDate(session Session, groups []GroupInfo, date string) ([]GroupDailyStat, error) {
+type GroupCostFetchResult struct {
+	Stats                  []GroupDailyStat
+	Source                 string
+	Complete               bool
+	SiteReportedRawCost    *float64
+	GroupAttributedRawCost *float64
+	UnattributedRawCost    *float64
+	// SummaryFailureClass 仅供采样状态机记忆汇总链路的独立退避；不写入分组成本样本。
+	SummaryFailureClass string
+}
+
+// FetchGroupCostStatsForDate 是后台短期成本采样专用入口。Sub2API 首先读取轻量分组
+// 汇总；汇总失败时，仅在拥有用户 AccessToken 且站点处于回退窗口外时，读取完整且有硬上限
+// 的 Key 列表。Admin API Key 不会被猜测为普通用户凭证。
+func (s *PlatformService) FetchGroupCostStatsForDate(ctx context.Context, session Session, groups []GroupInfo, date string, state GroupCostSamplingState) (GroupCostFetchResult, error) {
 	switch session.Platform {
 	case PlatformNewAPI:
-		return s.fetchNewAPIGroupCostStatsForDate(session, groups, date)
+		stats, err := s.fetchNewAPIGroupCostStatsForDateContext(ctx, session, groups, date)
+		if err != nil {
+			return GroupCostFetchResult{}, &groupCostFetchError{err: err, path: "summary"}
+		}
+		return completeGroupCostResult(stats, groups, GroupCostSourceSummary)
 	case PlatformSub2API:
-		return s.FetchSub2APIGroupUsageSummaryStats(session)
+		now := time.Now().UTC()
+		var summaryErr error
+		if state.summaryAllowed(now) {
+			stats, err := s.FetchSub2APIGroupUsageSummaryStatsContext(ctx, session)
+			if err == nil {
+				if result, validateErr := completeGroupCostResult(stats, groups, GroupCostSourceSummary); validateErr == nil {
+					return result, nil
+				} else {
+					err = validateErr
+				}
+			}
+			summaryErr = err
+			if !shouldUseGroupCostKeyFallback(summaryErr) {
+				return GroupCostFetchResult{}, &groupCostFetchError{err: summaryErr, path: "summary"}
+			}
+		}
+		if strings.TrimSpace(session.AccessToken) == "" {
+			if summaryErr != nil {
+				return GroupCostFetchResult{}, &groupCostFetchError{err: summaryErr, path: "summary"}
+			}
+			return GroupCostFetchResult{}, groupCostCooldownError{}
+		}
+		if !state.fallbackAllowed(now) {
+			if summaryErr != nil {
+				return GroupCostFetchResult{}, &groupCostFetchError{err: summaryErr, path: "summary"}
+			}
+			return GroupCostFetchResult{}, groupCostCooldownError{}
+		}
+		result, err := s.fetchSub2APIGroupCostByKeys(ctx, session, groups, date)
+		if err != nil {
+			summaryFailureClass := ""
+			if summaryErr != nil {
+				summaryFailureClass = groupCostFailureClass(summaryErr)
+			}
+			return GroupCostFetchResult{}, &groupCostFetchError{
+				err:                 err,
+				path:                "fallback",
+				summaryFailureClass: summaryFailureClass,
+			}
+		}
+		if summaryErr != nil {
+			result.SummaryFailureClass = groupCostFailureClass(summaryErr)
+		}
+		return result, nil
 	default:
-		return nil, newRequestError(ErrorUnsupported, session.Platform)
+		return GroupCostFetchResult{}, newRequestError(ErrorUnsupported, session.Platform)
 	}
 }
+
+// shouldUseGroupCostKeyFallback 只接受认证、路由或汇总格式/覆盖范围问题。网络、5xx
+// 和上下文超时保持未知，避免单个故障站点被放大成全量 Key 请求。
+func shouldUseGroupCostKeyFallback(err error) bool {
+	var requestErr *RequestError
+	if !errors.As(err, &requestErr) {
+		return false
+	}
+	if requestErr.MessageKey == ErrorInvalidResponse {
+		return true
+	}
+	switch requestErr.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed:
+		return true
+	default:
+		return false
+	}
+}
+
+func completeGroupCostResult(stats []GroupDailyStat, groups []GroupInfo, source string) (GroupCostFetchResult, error) {
+	expected := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		key := strings.TrimSpace(group.ID)
+		if key == "" {
+			key = strings.TrimSpace(group.Name)
+		}
+		if key == "" {
+			continue
+		}
+		if _, exists := expected[key]; exists {
+			return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		expected[key] = struct{}{}
+	}
+	if len(expected) == 0 {
+		return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	seen := make(map[string]struct{}, len(stats))
+	var total float64
+	for _, stat := range stats {
+		key := strings.TrimSpace(stat.GroupID)
+		if key == "" {
+			key = strings.TrimSpace(stat.GroupName)
+		}
+		if key == "" || math.IsNaN(stat.TodayActualCost) || math.IsInf(stat.TodayActualCost, 0) || stat.TodayActualCost < 0 {
+			return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		if _, ok := expected[key]; !ok {
+			return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		seen[key] = struct{}{}
+		total += stat.TodayActualCost
+	}
+	if len(seen) != len(expected) {
+		return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	return GroupCostFetchResult{
+		Stats:                  stats,
+		Source:                 source,
+		Complete:               true,
+		SiteReportedRawCost:    float64Pointer(total),
+		GroupAttributedRawCost: float64Pointer(total),
+		UnattributedRawCost:    float64Pointer(0),
+	}, nil
+}
+
+func (s *PlatformService) fetchSub2APIGroupCostByKeys(ctx context.Context, session Session, groups []GroupInfo, date string) (GroupCostFetchResult, error) {
+	if session.Platform != PlatformSub2API || strings.TrimSpace(session.AccessToken) == "" {
+		return GroupCostFetchResult{}, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	const (
+		pageSize         = 100
+		maxPages         = 5
+		maxKeys          = 120
+		maxResponseBytes = 2 * 1024 * 1024
+	)
+	authOptions := requestOptions{AccessToken: session.AccessToken, TokenType: session.TokenType}
+	expected := make(map[string]GroupInfo, len(groups))
+	expectedOrder := make([]string, 0, len(groups))
+	for _, group := range groups {
+		id := strings.TrimSpace(group.ID)
+		if id == "" || strings.TrimSpace(group.Name) == "" {
+			return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		if _, exists := expected[id]; exists {
+			return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		expected[id] = group
+		expectedOrder = append(expectedOrder, id)
+	}
+	type keyRecord struct{ id, groupID, groupName string }
+	keys := make([]keyRecord, 0, maxKeys)
+	complete := false
+	for page := 1; page <= maxPages; page++ {
+		query := session.BaseURL + "/api/v1/keys?page=" + strconv.Itoa(page) + "&page_size=" + strconv.Itoa(pageSize) + "&sort_by=created_at&sort_order=desc"
+		response, err := s.httpClient.requestJSONWithContextLimit(ctx, query, authOptions, maxResponseBytes)
+		if err != nil {
+			return GroupCostFetchResult{}, err
+		}
+		items := dataArray(response.Payload)
+		total, hasTotal := paginationTotal(response.Payload)
+		if len(items) == 0 {
+			if hasTotal && len(keys) < total {
+				return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			complete = true
+			break
+		}
+		for _, item := range items {
+			record, ok := item.(map[string]any)
+			if !ok {
+				return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			id := groupID2(record)
+			groupID := sub2APIKeyGroupID(record)
+			if id == "" || groupID == "" {
+				return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			if len(keys) >= maxKeys {
+				return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			keys = append(keys, keyRecord{id: id, groupID: groupID, groupName: sub2APIKeyGroupName(record)})
+		}
+		if hasTotal {
+			if total > maxPages*pageSize || total > maxKeys {
+				return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			if len(keys) >= total {
+				complete = true
+				break
+			}
+		} else if len(items) < pageSize {
+			complete = true
+			break
+		}
+	}
+	if !complete {
+		return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	if len(keys) == 0 {
+		return zeroGroupCostResult(expected, expectedOrder)
+	}
+	for _, key := range keys {
+		if _, ok := expected[key.groupID]; !ok {
+			// Key 的稳定 group_id 无法映射时，整批未知，严禁把总站点成本分摊或当作完整值。
+			return GroupCostFetchResult{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+	}
+
+	totals := make(map[string]float64, len(expected))
+	var totalRaw float64
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 2)
+	var firstErr error
+	for _, key := range keys {
+		key := key
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = ctx.Err()
+				}
+				mu.Unlock()
+				return
+			}
+			defer func() { <-sem }()
+			query := session.BaseURL + "/api/v1/usage/stats?start_date=" + url.QueryEscape(date) + "&end_date=" + url.QueryEscape(date) + "&api_key_id=" + url.QueryEscape(key.id) + "&timezone=" + url.QueryEscape(businesstime.Timezone)
+			response, err := s.httpClient.requestJSONWithContextLimit(ctx, query, authOptions, 256*1024)
+			if err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
+			}
+			cost := sub2APIUsageStatsCostPtr(dataRecord(response.Payload))
+			if cost == nil || math.IsNaN(*cost) || math.IsInf(*cost, 0) || *cost < 0 {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = newRequestError(ErrorInvalidResponse, PlatformSub2API)
+				}
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			totalRaw += *cost
+			totals[key.groupID] += *cost
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return GroupCostFetchResult{}, firstErr
+	}
+	stats := make([]GroupDailyStat, 0, len(expectedOrder))
+	for _, id := range expectedOrder {
+		group := expected[id]
+		stats = append(stats, GroupDailyStat{GroupID: id, GroupName: group.Name, TodayActualCost: totals[id]})
+	}
+	return GroupCostFetchResult{
+		Stats:                  stats,
+		Source:                 GroupCostSourceKeyFallback,
+		Complete:               true,
+		SiteReportedRawCost:    float64Pointer(totalRaw),
+		GroupAttributedRawCost: float64Pointer(totalRaw),
+		UnattributedRawCost:    float64Pointer(0),
+	}, nil
+}
+
+func zeroGroupCostResult(expected map[string]GroupInfo, expectedOrder []string) (GroupCostFetchResult, error) {
+	stats := make([]GroupDailyStat, 0, len(expectedOrder))
+	for _, id := range expectedOrder {
+		group := expected[id]
+		stats = append(stats, GroupDailyStat{GroupID: id, GroupName: group.Name, TodayActualCost: 0})
+	}
+	return GroupCostFetchResult{
+		Stats:                  stats,
+		Source:                 GroupCostSourceKeyFallback,
+		Complete:               true,
+		SiteReportedRawCost:    float64Pointer(0),
+		GroupAttributedRawCost: float64Pointer(0),
+		UnattributedRawCost:    float64Pointer(0),
+	}, nil
+}
+
+func sub2APIKeyGroupID(item map[string]any) string {
+	if id := strings.TrimSpace(firstStringy(item, []string{"group_id", "groupId"})); id != "" {
+		return id
+	}
+	if group, ok := item["group"].(map[string]any); ok {
+		return strings.TrimSpace(firstStringy(group, []string{"id", "group_id", "groupId"}))
+	}
+	return ""
+}
+
+func float64Pointer(value float64) *float64 { return &value }
 
 // FetchAdminAllGroups 平台中性的全量分组列表获取（包含管理端专有字段）。
 func (s *PlatformService) FetchAdminAllGroups(session Session) ([]AdminGroupInfo, error) {

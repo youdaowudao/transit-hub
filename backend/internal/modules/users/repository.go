@@ -10,16 +10,18 @@ type Repository struct {
 	db *pgxpool.Pool
 }
 
+const findUserByIDSQL = `
+	SELECT id, email, NULL::text AS name, ''::text AS "passwordHash", "createdAt", "updatedAt"
+	FROM users
+	WHERE id = $1
+`
+
 func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}
 }
 
-func (r *Repository) FindAll(ctx context.Context) ([]User, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT id, email, NULL::text AS name, ''::text AS "passwordHash", "createdAt", "updatedAt"
-		FROM users
-		ORDER BY "createdAt" DESC
-	`)
+func (r *Repository) FindByID(ctx context.Context, userID string) ([]User, error) {
+	rows, err := r.db.Query(ctx, findUserByIDSQL, userID)
 	if err != nil {
 		return nil, err
 	}

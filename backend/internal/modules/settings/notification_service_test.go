@@ -10,6 +10,26 @@ import (
 	"testing"
 )
 
+type fakeNotificationRepository struct {
+	channels NotificationChannelSettings
+}
+
+func (r *fakeNotificationRepository) GetNotificationChannels(context.Context, string, string) (NotificationChannelSettings, error) {
+	return r.channels, nil
+}
+
+func (r *fakeNotificationRepository) SaveNotificationChannels(context.Context, string, string, NotificationChannelSettings) error {
+	return nil
+}
+
+type fixedSettingsAccountResolver struct {
+	id string
+}
+
+func (r fixedSettingsAccountResolver) RequireCurrentID(context.Context, string) (string, error) {
+	return r.id, nil
+}
+
 func TestWecomNotificationReusesTextWebhookWithoutSigning(t *testing.T) {
 	type webhookPayload struct {
 		MessageType string `json:"msgtype"`
@@ -200,5 +220,29 @@ func TestNotificationSettingsWithoutNewChannelsRemainCompatible(t *testing.T) {
 	}
 	if settings.QQ == nil || len(settings.QQ) != 0 {
 		t.Fatalf("expected an empty non-nil QQ settings list, got %#v", settings.QQ)
+	}
+}
+
+func TestSendToBotsSkipsDisabledChannel(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	service := NewService(server.Client(), nil)
+	service.notificationRepo = &fakeNotificationRepository{channels: NotificationChannelSettings{
+		Wecom: []WebhookChannelSettings{{
+			ID:      "disabled-bot",
+			Enabled: false,
+			Webhook: server.URL,
+		}},
+	}}
+	service.SetAdminAccountResolver(fixedSettingsAccountResolver{id: "workspace-1"})
+
+	service.SendToBots(context.Background(), "user-1", []string{"disabled-bot"}, "sensitive alert")
+	if requests != 0 {
+		t.Fatalf("disabled channel received %d requests, want 0", requests)
 	}
 }

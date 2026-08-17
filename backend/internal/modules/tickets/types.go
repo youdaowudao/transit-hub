@@ -59,6 +59,8 @@ const (
 	ErrorEmbedInvalidEmail    = "embed.tickets.errors.invalidEmail"
 	ErrorEmbedTitleRequired   = "embed.tickets.errors.titleRequired"
 	ErrorEmbedBodyRequired    = "embed.tickets.errors.bodyRequired"
+	ErrorEmbedContentTooLong  = "embed.tickets.errors.contentTooLong"
+	ErrorBodyTooLong          = "admin.tickets.errors.bodyTooLong"
 
 	// 图片附件相关错误（第三阶段新增）。
 	ErrorInvalidMaxImages      = "admin.tickets.errors.invalidMaxImages"
@@ -226,7 +228,11 @@ type EmbedTicketListItem struct {
 }
 
 type EmbedTicketListResponse struct {
-	Items []EmbedTicketListItem `json:"items"`
+	Items      []EmbedTicketListItem `json:"items"`
+	Total      int                   `json:"total"`
+	Page       int                   `json:"page"`
+	PageSize   int                   `json:"pageSize"`
+	TotalPages int                   `json:"totalPages"`
 }
 
 // TicketAttachmentView 是附件在工单详情响应中的展示形状，只暴露展示所需的 metadata；
@@ -250,7 +256,11 @@ type TicketMessageView struct {
 
 type EmbedTicketDetail struct {
 	EmbedTicketListItem
-	Messages []TicketMessageView `json:"messages"`
+	Messages          []TicketMessageView `json:"messages"`
+	MessageTotal      int                 `json:"messageTotal"`
+	MessagePage       int                 `json:"messagePage"`
+	MessagePageSize   int                 `json:"messagePageSize"`
+	MessageTotalPages int                 `json:"messageTotalPages"`
 }
 
 type CreateTicketRequest struct {
@@ -263,6 +273,16 @@ type CreateTicketRequest struct {
 
 type CreateMessageRequest struct {
 	Body string `json:"body"`
+}
+
+type EmbedListQuery struct {
+	Page     int
+	PageSize int
+}
+
+type MessagePageQuery struct {
+	Page     int
+	PageSize int
 }
 
 // ---- TransitHub 后台接口 DTO ----
@@ -415,7 +435,19 @@ func isValidEmbedTemplate(template string) bool {
 const (
 	maxImagesPerTicketLowerBound = 0
 	maxImagesPerTicketUpperBound = 9
+	maxJSONRequestBytes          = int64(64 << 10)
+	maxTicketEmailLength         = 254
+	maxTicketTitleLength         = 200
+	maxTicketBodyLength          = 20000
+	maxEmbedTokenLength          = 256
+	maxSub2APITokenLength        = 16384
+	maxEmbedUserIDLength         = 256
+	maxEmbedSourceLength         = 4096
 )
+
+func exceedsRuneLimit(value string, limit int) bool {
+	return utf8.RuneCountInString(value) > limit
+}
 
 func isValidMaxImagesPerTicket(value int) bool {
 	return value >= maxImagesPerTicketLowerBound && value <= maxImagesPerTicketUpperBound

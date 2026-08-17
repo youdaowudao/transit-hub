@@ -63,8 +63,8 @@ export const createEmbedSession = async (
   })
 )
 
-export const listEmbedTickets = async (): Promise<EmbedTicketListResponse> => (
-  requestJson<EmbedTicketListResponse>('/embed/tickets')
+export const listEmbedTickets = async (page = 1, pageSize = 20): Promise<EmbedTicketListResponse> => (
+  requestJson<EmbedTicketListResponse>(`/embed/tickets?page=${page}&pageSize=${pageSize}`)
 )
 
 // createEmbedTicket 没有图片时继续走旧的 JSON 请求体（兼容第一版接口行为）；
@@ -95,8 +95,8 @@ export const createEmbedTicket = async (
   })
 }
 
-export const getEmbedTicket = async (id: string): Promise<EmbedTicketDetail> => (
-  requestJson<EmbedTicketDetail>(`/embed/tickets/${encodeURIComponent(id)}`)
+export const getEmbedTicket = async (id: string, messagePage = 1, messagePageSize = 50): Promise<EmbedTicketDetail> => (
+  requestJson<EmbedTicketDetail>(`/embed/tickets/${encodeURIComponent(id)}?messagePage=${messagePage}&messagePageSize=${messagePageSize}`)
 )
 
 export const replyEmbedTicket = async (id: string, body: string): Promise<EmbedTicketDetail> => (

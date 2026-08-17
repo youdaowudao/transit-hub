@@ -145,7 +145,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	server.lotteryFrameAncestorOrigin = lotteryService.FrameAncestorOrigin
 	lottery.RegisterRoutes(server.mux, lotteryService)
 
-	settingsService := settings.NewService(http.DefaultClient, settings.NewRepository(db))
+	settingsService := settings.NewService(&http.Client{Timeout: upstreamRequestTimeout}, settings.NewRepository(db))
 	settingsService.SetAdminAccountResolver(adminAccountsService)
 	if err := settingsService.EnsureSchema(context.Background()); err != nil {
 		panic(err)
@@ -249,27 +249,27 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	connHealthService.StartScheduler(context.Background())
 
 	// 策略设置变更时通知上游服务更新定时同步配置。
-	applyRefreshConfig := func(s settings.StrategySettings) {
-		upstreamService.SetRefreshConfig(upstream.RefreshConfig{
+	applyRefreshConfig := func(userID, adminAccountID string, s settings.StrategySettings) {
+		upstreamService.SetWorkspaceRefreshConfig(userID, adminAccountID, upstream.RefreshConfig{
 			Enabled:  s.EnableRefreshInterval,
 			Interval: time.Duration(s.RefreshInterval) * time.Second,
 		})
 	}
 	settingsService.OnStrategyChanged = applyRefreshConfig
 
-	// 启动时读取已保存的策略设置，按配置决定是否开启定时同步。
-	if strategy, err := settingsService.GetFirstStrategy(context.Background()); err == nil {
-		applyRefreshConfig(strategy)
+	// 启动时恢复所有工作区的策略设置，按各自配置决定是否开启定时同步。
+	if err := restoreWorkspaceRefreshConfigs(context.Background(), settingsService, upstreamService); err != nil {
+		log.Printf("[settings] 恢复工作区刷新配置失败: %v", err)
 	}
 
 	// 站点同步成功后检查余额预警和倍率变更，按配置发送通知。
 	upstreamService.AfterSync = func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics) {
-		strategy, err := settingsService.GetFirstStrategy(ctx)
+		strategy, err := settingsService.GetStrategyForWorkspace(ctx, userID, adminAccountID)
 		if err != nil {
 			return
 		}
-		checkBalanceWarning(ctx, settingsService, upstreamService, strategy, userID, siteID, siteName, oldMetrics, newMetrics)
-		checkMultiplierChanges(ctx, settingsService, strategy, userID, siteID, siteName, oldMetrics, newMetrics)
+		checkBalanceWarning(ctx, settingsService, upstreamService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
+		checkMultiplierChanges(ctx, settingsService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
 		// 自动调价：分组级 enableAutoPricing 是唯一开关，Service 内部逐 mapping 判断。
 		mySitesService.ApplyAutoPricingAfterSync(ctx, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
 	}
@@ -307,6 +307,28 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	system.RegisterRoutes(server.mux, systemService)
 
 	return server
+}
+
+type workspaceStrategyProvider interface {
+	ListStrategies(ctx context.Context) ([]settings.WorkspaceStrategy, error)
+}
+
+type workspaceRefreshConfigurator interface {
+	SetWorkspaceRefreshConfig(userID, adminAccountID string, config upstream.RefreshConfig)
+}
+
+func restoreWorkspaceRefreshConfigs(ctx context.Context, provider workspaceStrategyProvider, refresher workspaceRefreshConfigurator) error {
+	strategies, err := provider.ListStrategies(ctx)
+	if err != nil {
+		return err
+	}
+	for _, item := range strategies {
+		refresher.SetWorkspaceRefreshConfig(item.UserID, item.AdminAccountID, upstream.RefreshConfig{
+			Enabled:  item.Settings.EnableRefreshInterval,
+			Interval: time.Duration(item.Settings.RefreshInterval) * time.Second,
+		})
+	}
+	return nil
 }
 
 type groupRateSnapshotWriter struct {
@@ -558,7 +580,7 @@ const balanceAlertCooldown = 1 * time.Hour
 // checkBalanceWarning 检测余额是否低于阈值并发送通知。
 // 采用冷却机制：首次低于阈值立即通知，之后在冷却期内不再重复；冷却期过后若仍低于阈值再次通知。
 // 优先使用站点级 BalanceThreshold 覆盖全局 DefaultBalanceThreshold；站点设置为 nil 时降级到全局。
-func checkBalanceWarning(ctx context.Context, svc *settings.Service, uSvc *upstream.Service, strategy settings.StrategySettings, userID, siteID, siteName string, _ /* oldMetrics */, newMetrics upstream.Metrics) {
+func checkBalanceWarning(ctx context.Context, svc *settings.Service, uSvc *upstream.Service, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, _ /* oldMetrics */, newMetrics upstream.Metrics) {
 	if !strategy.EnableBalanceWarning || len(strategy.BalanceNotifyBotIDs) == 0 {
 		return
 	}
@@ -603,12 +625,12 @@ func checkBalanceWarning(ctx context.Context, svc *settings.Service, uSvc *upstr
 
 	msg := formatBalanceWarning(siteName, newBalCNY, threshold, strategy.BalanceTemplate)
 	log.Printf("[alert] 余额预警触发 site=%s balanceCNY=%.2f threshold=%.2f rechargeRate=%.2f", siteName, newBalCNY, threshold, rechargeRate)
-	svc.SendFormattedToBots(ctx, userID, strategy.BalanceNotifyBotIDs, msg, strategy.BalanceTemplateFormat)
+	svc.SendFormattedToWorkspaceBots(ctx, userID, adminAccountID, strategy.BalanceNotifyBotIDs, msg, strategy.BalanceTemplateFormat)
 }
 
 // checkMultiplierChanges 对比同步前后的分组倍率，任何变化都发送通知。
 // 只受系统设置全局开关 strategy.EnableMultiplierAlert 控制。
-func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy settings.StrategySettings, userID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics) {
+func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics) {
 	_ = siteID
 	if !strategy.EnableMultiplierAlert || len(strategy.MultiplierNotifyBotIDs) == 0 {
 		return
@@ -633,7 +655,7 @@ func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy
 		}
 		msg := formatMultiplierChange(siteName, g.Name, oldVal, *g.Multiplier, strategy.MultiplierTemplate)
 		log.Printf("[alert] 倍率变更触发 site=%s group=%s old=%.4f new=%.4f", siteName, g.Name, oldVal, *g.Multiplier)
-		svc.SendFormattedToBots(ctx, userID, strategy.MultiplierNotifyBotIDs, msg, strategy.MultiplierTemplateFormat)
+		svc.SendFormattedToWorkspaceBots(ctx, userID, adminAccountID, strategy.MultiplierNotifyBotIDs, msg, strategy.MultiplierTemplateFormat)
 	}
 }
 

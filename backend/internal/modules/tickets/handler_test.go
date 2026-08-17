@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"transithub/backend/internal/shared/authctx"
@@ -204,6 +205,22 @@ func TestCreateEmbedTicket_JSONPersistsCategoryAndPriority(t *testing.T) {
 	}
 	if detail.Category != "通用问题" || detail.Priority != "普通" {
 		t.Fatalf("expected category/priority to be parsed and persisted, got %+v", detail)
+	}
+}
+
+func TestCreateEmbedTicketRejectsOversizedJSONBody(t *testing.T) {
+	repository := newFakeTicketRepository()
+	service := newTestService(repository, newFakeSessionStore(), &fakeSub2API{}, nil)
+	sessionToken := establishedSession(service, t)
+	payload := `{"manualEmail":"user@example.com","title":"help","body":"` + strings.Repeat("x", int(maxJSONRequestBytes)) + `","category":"通用问题","priority":"普通"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/embed/tickets", bytes.NewBufferString(payload))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+sessionToken)
+	recorder := httptest.NewRecorder()
+
+	(&Handler{service: service}).createEmbedTicket(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("oversized JSON status = %d, want %d", recorder.Code, http.StatusBadRequest)
 	}
 }
 

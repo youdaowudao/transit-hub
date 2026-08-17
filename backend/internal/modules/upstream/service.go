@@ -34,6 +34,11 @@ type RefreshConfig struct {
 	Interval time.Duration
 }
 
+type refreshWorkspaceKey struct {
+	userID         string
+	adminAccountID string
+}
+
 // Service 管理上游站点的生命周期（创建、编辑、同步、删除）。
 // 站点运行时状态缓存在 Redis（通过 SiteCache），PostgreSQL 负责持久化。
 // 当系统设置开启了数据刷新频率时，定时器按配置的间隔自动同步各站点。
@@ -43,12 +48,12 @@ type Service struct {
 	repository      SiteRepository
 	cache           SiteCache
 	accounts        AdminAccountResolver
-	refreshConfig   RefreshConfig
+	refreshConfigs  map[refreshWorkspaceKey]RefreshConfig
 	// groupCostSlots 限制跨站点成本采样的并发量；nil 仅用于不带 NewService 的单元测试。
-	groupCostSlots   chan struct{}
-	timers          map[string]*time.Timer
-	deletedSites    map[string]struct{}
-	mu              sync.Mutex
+	groupCostSlots chan struct{}
+	timers         map[string]*time.Timer
+	deletedSites   map[string]struct{}
+	mu             sync.Mutex
 	// AfterSync 在站点同步成功后被调用，传入同步前后的指标数据。
 	// 由系统设置模块注入，用于余额预警和倍率变更检测。
 	AfterSync func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics Metrics)
@@ -75,33 +80,23 @@ func NewService(platformService *PlatformService, repository SiteRepository, sna
 		cache:           cache,
 		groupCostSlots:  make(chan struct{}, 2),
 		timers:          make(map[string]*time.Timer),
+		refreshConfigs:  make(map[refreshWorkspaceKey]RefreshConfig),
 		deletedSites:    make(map[string]struct{}),
 	}
 }
 
-// SetRefreshConfig 更新后台定时同步配置。
-// 开启时为所有有会话的站点启动定时器；关闭时清除所有定时器。
-// 由系统设置模块在启动和保存策略时调用。
-func (s *Service) SetRefreshConfig(config RefreshConfig) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.refreshConfig
-	s.refreshConfig = config
-
-	if !config.Enabled {
-		// 关闭：清除所有定时器。
-		for id := range s.timers {
-			s.clearTimerLocked(id)
-		}
-		if prev.Enabled {
-			log.Printf("[upstream] 后台定时同步已关闭")
-		}
+// SetWorkspaceRefreshConfig 只更新指定工作区的后台定时同步配置。
+func (s *Service) SetWorkspaceRefreshConfig(userID, adminAccountID string, config RefreshConfig) {
+	userID = strings.TrimSpace(userID)
+	adminAccountID = strings.TrimSpace(adminAccountID)
+	if userID == "" || adminAccountID == "" {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := refreshWorkspaceKey{userID: userID, adminAccountID: adminAccountID}
+	s.refreshConfigs[key] = config
 
-	log.Printf("[upstream] 后台定时同步已开启 interval=%s", config.Interval)
-
-	// 开启或间隔变更：重新调度所有有会话的站点。
 	if s.repository == nil {
 		return
 	}
@@ -111,8 +106,11 @@ func (s *Service) SetRefreshConfig(config RefreshConfig) {
 		return
 	}
 	for i := range sites {
-		s.scheduleSyncLocked(sites[i].ID, &sites[i])
+		if sites[i].UserID == userID && sites[i].AdminAccountID == adminAccountID {
+			s.scheduleSyncLocked(sites[i].ID, &sites[i])
+		}
 	}
+	log.Printf("[upstream] 工作区后台定时同步配置已更新 user_id=%s admin_account_id=%s enabled=%t interval=%s", userID, adminAccountID, config.Enabled, config.Interval)
 }
 
 // RestoreSavedSites 从 PostgreSQL 恢复所有站点到 Redis 缓存。
@@ -1005,10 +1003,14 @@ func (s *Service) scheduleSyncLocked(id string, site *Site) {
 	if _, deleted := s.deletedSites[id]; deleted {
 		return
 	}
-	if !s.refreshConfig.Enabled || site == nil || !site.IsEnabled() || site.Session == nil {
+	if site == nil || !site.IsEnabled() || site.Session == nil {
 		return
 	}
-	delay := s.refreshConfig.Interval
+	config, ok := s.refreshConfigs[refreshWorkspaceKey{userID: site.UserID, adminAccountID: site.AdminAccountID}]
+	if !ok || !config.Enabled || config.Interval <= 0 {
+		return
+	}
+	delay := config.Interval
 	log.Printf("[upstream-timer] 定时同步已调度 id=%s delay=%s", id, delay)
 	s.timers[id] = time.AfterFunc(delay, func() {
 		log.Printf("[upstream-timer] 定时同步触发 id=%s", id)

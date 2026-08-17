@@ -145,6 +145,7 @@ const submit = async () => {
                 </label>
                 <input
                   v-model="manualEmail"
+                  :maxlength="254"
                   type="email"
                   class="h-10 w-full rounded-lg border border-border/50 bg-surface px-3 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   :placeholder="t('embed.tickets.form.manualEmailPlaceholder')"
@@ -157,6 +158,7 @@ const submit = async () => {
                 </label>
                 <input
                   v-model="title"
+                  :maxlength="200"
                   type="text"
                   class="h-10 w-full rounded-lg border border-border/50 bg-surface px-3 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   :placeholder="t('embed.tickets.form.titlePlaceholder')"
@@ -169,6 +171,7 @@ const submit = async () => {
                 </label>
                 <textarea
                   v-model="body"
+                  :maxlength="20000"
                   rows="4"
                   class="w-full rounded-lg border border-border/50 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   :placeholder="t('embed.tickets.form.bodyPlaceholder')"

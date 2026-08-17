@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -48,8 +49,10 @@ var (
 type Service struct {
 	client            *http.Client
 	repository        *Repository
+	notificationRepo  notificationRepository
+	strategyRepo      strategyRepository
 	accounts          AdminAccountResolver
-	OnStrategyChanged func(StrategySettings)
+	OnStrategyChanged func(userID, adminAccountID string, settings StrategySettings)
 
 	// smtpRepo 是 SMTP 存储层的窄接口，由 *Repository 结构性满足；测试可注入内存 fake。
 	smtpRepo smtpRepository
@@ -70,13 +73,36 @@ type AdminAccountResolver interface {
 	RequireCurrentID(ctx context.Context, userID string) (string, error)
 }
 
+type notificationRepository interface {
+	GetNotificationChannels(ctx context.Context, userID string, adminAccountID string) (NotificationChannelSettings, error)
+	SaveNotificationChannels(ctx context.Context, userID string, adminAccountID string, settings NotificationChannelSettings) error
+}
+
+type strategyRepository interface {
+	GetStrategy(ctx context.Context, userID string, adminAccountID string) (StrategySettings, error)
+	ListStrategies(ctx context.Context) ([]WorkspaceStrategy, error)
+	SaveStrategy(ctx context.Context, userID string, adminAccountID string, settings StrategySettings) error
+}
+
 func NewService(client *http.Client, repository *Repository) *Service {
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{}
+	}
+	clone := *client
+	if clone.Timeout <= 0 {
+		clone.Timeout = notificationRequestTimeout
+	}
+	if clone.Transport == nil || clone.Transport == http.DefaultTransport {
+		clone.Transport = newSafeSettingsTransport(net.DefaultResolver)
+	}
+	clone.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return errors.New("notification redirects are not allowed")
 	}
 	return &Service{
-		client:            client,
+		client:            &clone,
 		repository:        repository,
+		notificationRepo:  repository,
+		strategyRepo:      repository,
 		smtpRepo:          repository,
 		emailTemplateRepo: repository,
 		qqTokens:          newQQTokenCache(),
@@ -114,20 +140,20 @@ func (s *Service) GetNotificationChannels(ctx context.Context, userID string) (N
 	if err != nil {
 		return NotificationChannelSettings{}, err
 	}
-	settings, err := s.repository.GetNotificationChannels(ctx, userID, adminAccountID)
+	settings, err := s.notificationRepo.GetNotificationChannels(ctx, userID, adminAccountID)
 	if err != nil {
 		return settings, err
 	}
 	normalized := normalizeNotificationChannelSettings(settings)
 	// 如果 normalize 修正了 ID（空值或重复），自动回写到数据库以持久化唯一 ID。
 	if needsPersist(settings, normalized) {
-		_ = s.repository.SaveNotificationChannels(ctx, userID, adminAccountID, normalized)
+		_ = s.notificationRepo.SaveNotificationChannels(ctx, userID, adminAccountID, normalized)
 	}
 	return normalized, nil
 }
 
-func (s *Service) GetFirstStrategy(ctx context.Context) (StrategySettings, error) {
-	return s.repository.GetFirstStrategy(ctx)
+func (s *Service) ListStrategies(ctx context.Context) ([]WorkspaceStrategy, error) {
+	return s.strategyRepo.ListStrategies(ctx)
 }
 
 func (s *Service) GetStrategy(ctx context.Context, userID string) (StrategySettings, error) {
@@ -135,7 +161,11 @@ func (s *Service) GetStrategy(ctx context.Context, userID string) (StrategySetti
 	if err != nil {
 		return StrategySettings{}, err
 	}
-	return s.repository.GetStrategy(ctx, userID, adminAccountID)
+	return s.strategyRepo.GetStrategy(ctx, userID, adminAccountID)
+}
+
+func (s *Service) GetStrategyForWorkspace(ctx context.Context, userID, adminAccountID string) (StrategySettings, error) {
+	return s.strategyRepo.GetStrategy(ctx, userID, adminAccountID)
 }
 
 func (s *Service) SaveStrategy(ctx context.Context, userID string, settings StrategySettings) (StrategySettings, error) {
@@ -144,11 +174,11 @@ func (s *Service) SaveStrategy(ctx context.Context, userID string, settings Stra
 	if err != nil {
 		return StrategySettings{}, err
 	}
-	if err := s.repository.SaveStrategy(ctx, userID, adminAccountID, settings); err != nil {
+	if err := s.strategyRepo.SaveStrategy(ctx, userID, adminAccountID, settings); err != nil {
 		return StrategySettings{}, err
 	}
 	if s.OnStrategyChanged != nil {
-		s.OnStrategyChanged(settings)
+		s.OnStrategyChanged(userID, adminAccountID, settings)
 	}
 	return settings, nil
 }
@@ -159,7 +189,7 @@ func (s *Service) SaveNotificationChannels(ctx context.Context, userID string, s
 	if err != nil {
 		return NotificationChannelSettings{}, err
 	}
-	if err := s.repository.SaveNotificationChannels(ctx, userID, adminAccountID, settings); err != nil {
+	if err := s.notificationRepo.SaveNotificationChannels(ctx, userID, adminAccountID, settings); err != nil {
 		return NotificationChannelSettings{}, err
 	}
 	return settings, nil
@@ -345,6 +375,13 @@ func (s *Service) SendFormattedToBots(ctx context.Context, userID string, botIDs
 	})
 }
 
+func (s *Service) SendFormattedToWorkspaceBots(ctx context.Context, userID, adminAccountID string, botIDs []string, message string, format NotificationTemplateFormat) {
+	s.sendNotificationToWorkspaceBots(ctx, userID, adminAccountID, botIDs, notificationMessage{
+		Content: message,
+		Format:  normalizeNotificationTemplateFormat(format),
+	})
+}
+
 // sendNotificationToBots 从数据库加载用户的渠道配置，匹配 ID 后逐个发送。
 // 单个渠道失败只记录日志，不中断其他机器人发送（fire-and-forget）。
 func (s *Service) sendNotificationToBots(ctx context.Context, userID string, botIDs []string, message notificationMessage) {
@@ -356,7 +393,14 @@ func (s *Service) sendNotificationToBots(ctx context.Context, userID string, bot
 		log.Printf("[settings] 当前 admin workspace 缺失 user_id=%s err=%v", userID, err)
 		return
 	}
-	channels, err := s.repository.GetNotificationChannels(ctx, userID, adminAccountID)
+	s.sendNotificationToWorkspaceBots(ctx, userID, adminAccountID, botIDs, message)
+}
+
+func (s *Service) sendNotificationToWorkspaceBots(ctx context.Context, userID, adminAccountID string, botIDs []string, message notificationMessage) {
+	if len(botIDs) == 0 || message.Content == "" {
+		return
+	}
+	channels, err := s.notificationRepo.GetNotificationChannels(ctx, userID, adminAccountID)
 	if err != nil {
 		log.Printf("[settings] 加载通知渠道配置失败 user_id=%s err=%v", userID, err)
 		return
@@ -368,35 +412,35 @@ func (s *Service) sendNotificationToBots(ctx context.Context, userID string, bot
 	}
 
 	for _, bot := range channels.Dingtalk {
-		if _, ok := idSet[bot.ID]; ok {
+		if _, ok := idSet[bot.ID]; ok && bot.Enabled {
 			if err := s.sendDingtalkMessage(ctx, bot.Webhook, bot.Secret, message); err != nil {
 				log.Printf("[settings] 钉钉通知发送失败 bot=%s err=%v", bot.Name, err)
 			}
 		}
 	}
 	for _, bot := range channels.Feishu {
-		if _, ok := idSet[bot.ID]; ok {
+		if _, ok := idSet[bot.ID]; ok && bot.Enabled {
 			if err := s.sendFeishuMessage(ctx, bot.Webhook, bot.Secret, message); err != nil {
 				log.Printf("[settings] 飞书通知发送失败 bot=%s err=%v", bot.Name, err)
 			}
 		}
 	}
 	for _, bot := range channels.Wecom {
-		if _, ok := idSet[bot.ID]; ok {
+		if _, ok := idSet[bot.ID]; ok && bot.Enabled {
 			if err := s.sendWecomMessage(ctx, bot.Webhook, message); err != nil {
 				log.Printf("[settings] 企业微信通知发送失败 bot=%s err=%v", bot.Name, err)
 			}
 		}
 	}
 	for _, bot := range channels.QQ {
-		if _, ok := idSet[bot.ID]; ok {
+		if _, ok := idSet[bot.ID]; ok && bot.Enabled {
 			if err := s.sendQQMessage(ctx, bot.AppID, bot.ClientSecret, bot.UserOpenID, message); err != nil {
 				log.Printf("[settings] QQ 通知发送失败 bot=%s err=%v", bot.Name, err)
 			}
 		}
 	}
 	for _, bot := range channels.Telegram {
-		if _, ok := idSet[bot.ID]; ok {
+		if _, ok := idSet[bot.ID]; ok && bot.Enabled {
 			if err := s.sendTelegramMessage(ctx, bot.BotToken, bot.ChatID, bot.ProxyURL, message); err != nil {
 				log.Printf("[settings] Telegram 通知发送失败 bot=%s err=%v", bot.Name, err)
 			}
@@ -546,9 +590,12 @@ func (s *Service) telegramClient(proxyURL string) *http.Client {
 	if err != nil {
 		return s.client
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport := newSafeSettingsTransport(net.DefaultResolver)
+	if current, ok := s.client.Transport.(*http.Transport); ok {
+		transport = current.Clone()
+	}
 	transport.Proxy = http.ProxyURL(parsedProxy)
-	return &http.Client{Transport: transport, Timeout: s.client.Timeout}
+	return &http.Client{Transport: transport, Timeout: s.client.Timeout, CheckRedirect: s.client.CheckRedirect}
 }
 
 func dingtalkSignedWebhook(webhook string, secret string) (string, error) {

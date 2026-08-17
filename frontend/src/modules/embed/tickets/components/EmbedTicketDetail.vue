@@ -24,6 +24,7 @@ const errorKey = ref<string | null>(null)
 const replyBody = ref('')
 const isReplying = ref(false)
 const replyErrorKey = ref<string | null>(null)
+const isLoadingOlder = ref(false)
 
 const load = async () => {
   isLoading.value = true
@@ -38,6 +39,26 @@ const load = async () => {
 }
 
 watch(() => props.ticketId, load, { immediate: true })
+
+const loadOlderMessages = async () => {
+  if (!detail.value || isLoadingOlder.value || detail.value.messagePage >= detail.value.messageTotalPages) return
+  isLoadingOlder.value = true
+  errorKey.value = null
+  try {
+    const older = await getEmbedTicket(props.ticketId, detail.value.messagePage + 1, detail.value.messagePageSize)
+    detail.value = {
+      ...detail.value,
+      messages: [...older.messages, ...detail.value.messages],
+      messagePage: older.messagePage,
+      messageTotal: older.messageTotal,
+      messageTotalPages: older.messageTotalPages,
+    }
+  } catch (error) {
+    errorKey.value = error instanceof Error ? error.message : 'embed.tickets.errors.unknown'
+  } finally {
+    isLoadingOlder.value = false
+  }
+}
 
 const submitReply = async () => {
   if (!replyBody.value.trim()) return
@@ -173,6 +194,17 @@ const closedNoticeClass = computed(() => (
       </div>
 
       <div :class="messagesWrapperClass">
+        <div v-if="detail.messagePage < detail.messageTotalPages" class="flex justify-center">
+          <button
+            type="button"
+            class="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border/50 px-3 text-xs text-muted-foreground transition-colors hover:bg-surface-elevated hover:text-foreground disabled:opacity-50"
+            :disabled="isLoadingOlder"
+            @click="loadOlderMessages"
+          >
+            <Loader2 v-if="isLoadingOlder" class="h-3.5 w-3.5 animate-spin" />
+            {{ t('embed.tickets.detail.loadOlder') }}
+          </button>
+        </div>
         <div v-for="message in detail.messages" :key="message.id" :class="messageRowClass(message.authorType)">
           <div class="flex items-center gap-2 text-xs text-muted-foreground" :class="template === 'support' ? 'justify-between w-full max-w-[85%]' : 'justify-between'">
             <span class="font-medium text-foreground">
@@ -195,6 +227,7 @@ const closedNoticeClass = computed(() => (
         <textarea
           v-model="replyBody"
           :rows="replyRows"
+          :maxlength="20000"
           class="w-full rounded-lg border border-border/50 bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary"
           :placeholder="t('embed.tickets.detail.replyPlaceholder')"
         />

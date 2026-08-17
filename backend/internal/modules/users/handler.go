@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 
+	"transithub/backend/internal/shared/authctx"
 	"transithub/backend/internal/shared/httpjson"
 )
 
@@ -17,7 +18,12 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 }
 
 func (h *Handler) findAll(w http.ResponseWriter, r *http.Request) {
-	users, err := h.service.FindAll(r.Context())
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	users, err := h.service.FindAll(r.Context(), userID)
 	if err != nil {
 		log.Printf("list users: %v", err)
 		httpjson.WriteError(w, http.StatusInternalServerError, "Failed to list users")

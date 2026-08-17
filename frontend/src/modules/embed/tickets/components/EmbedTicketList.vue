@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { AlertCircle, Inbox, Loader2, Plus, RefreshCw } from 'lucide-vue-next'
+import { AlertCircle, ChevronLeft, ChevronRight, Inbox, Loader2, Plus, RefreshCw } from 'lucide-vue-next'
 import EmbedTicketCreateModal from './EmbedTicketCreateModal.vue'
 import type { EmbedTicketListItem, TicketEmbedTemplate } from '../types'
 
@@ -12,17 +12,22 @@ const props = withDefaults(defineProps<{
   maxImages?: number
   categoryOptions?: string[]
   priorityOptions?: string[]
+  page?: number
+  totalPages?: number
 }>(), {
   template: 'default',
   maxImages: 0,
   categoryOptions: () => [],
   priorityOptions: () => [],
+  page: 1,
+  totalPages: 0,
 })
 
 const emit = defineEmits<{
   (event: 'select', id: string): void
   (event: 'refresh'): void
   (event: 'created', id: string): void
+  (event: 'page-change', page: number): void
 }>()
 
 import { t, locale } from '@/locales'
@@ -159,6 +164,28 @@ const emptyCardClass = computed(() => {
           <span class="truncate">{{ ticket.manualEmail }}</span>
           <span class="shrink-0">{{ formatDateTime(ticket.lastMessageAt) }}</span>
         </div>
+      </button>
+    </div>
+
+    <div v-if="totalPages > 1" class="flex items-center justify-center gap-3 border-t border-border/40 pt-4">
+      <button
+        type="button"
+        class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-border/50 text-muted-foreground transition-colors hover:bg-surface-elevated hover:text-foreground disabled:opacity-40"
+        :disabled="isLoading || page <= 1"
+        :title="t('embed.tickets.list.previousPage')"
+        @click="emit('page-change', page - 1)"
+      >
+        <ChevronLeft class="h-4 w-4" />
+      </button>
+      <span class="text-xs text-muted-foreground">{{ t('embed.tickets.list.currentPage', { page, totalPages }) }}</span>
+      <button
+        type="button"
+        class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-border/50 text-muted-foreground transition-colors hover:bg-surface-elevated hover:text-foreground disabled:opacity-40"
+        :disabled="isLoading || page >= totalPages"
+        :title="t('embed.tickets.list.nextPage')"
+        @click="emit('page-change', page + 1)"
+      >
+        <ChevronRight class="h-4 w-4" />
       </button>
     </div>
 

@@ -2285,6 +2285,7 @@ export default {
         notFound: '工单不存在。',
         invalidStatus: '无效的工单状态。',
         bodyRequired: '回复内容不能为空。',
+        bodyTooLong: '回复内容不能超过 20000 个字符。',
         ticketClosed: '工单已关闭，无法继续回复。',
         noCurrentAccount: '请先选择一个工作区。',
         invalidTemplate: '不支持的嵌入页面模板。',
@@ -2918,6 +2919,9 @@ export default {
         refresh: '刷新',
         create: '新建工单',
         loading: '正在加载工单...',
+        previousPage: '上一页',
+        nextPage: '下一页',
+        currentPage: '第 {page} / {totalPages} 页',
         emptyTitle: '暂无工单',
         emptyDescription: '点击"新建工单"提交你的第一个问题。'
       },
@@ -2949,6 +2953,7 @@ export default {
         you: '我',
         replyPlaceholder: '输入回复内容...',
         send: '发送',
+        loadOlder: '加载更早消息',
         closedNotice: '该工单已关闭，无法继续回复。'
       },
       attachments: {
@@ -2977,6 +2982,7 @@ export default {
         invalidEmail: '请输入有效的邮箱地址。',
         titleRequired: '请输入标题。',
         bodyRequired: '请输入问题详情。',
+        contentTooLong: '邮箱、标题或内容超过长度限制，请缩短后重试。',
         categoryRequired: '请选择分类。',
         priorityRequired: '请选择优先级。',
         invalidCategory: '所选分类不属于当前工单系统的配置，请重新选择。',

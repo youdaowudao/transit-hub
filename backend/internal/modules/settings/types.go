@@ -53,6 +53,12 @@ type StrategySettings struct {
 	EnableAutoChangeMultiplier bool                       `json:"enableAutoChangeMultiplier"`
 }
 
+type WorkspaceStrategy struct {
+	UserID         string
+	AdminAccountID string
+	Settings       StrategySettings
+}
+
 // NotificationTemplateFormat 描述预警模板的源格式。空值和未知值都会在保存及发送前
 // 归一化为 text，从而让升级前已保存的纯文本模板保持完全相同的发送行为。
 type NotificationTemplateFormat string

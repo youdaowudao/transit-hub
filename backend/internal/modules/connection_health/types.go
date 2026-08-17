@@ -338,6 +338,12 @@ type SiteLookup interface {
 	GetSite(ctx context.Context, siteID string) (*upstream.Site, error)
 }
 
+// UpstreamSyncCoordinator 是完整刷新对上游模块的窄依赖。force=true 强制同步相关站点；
+// force=false 只等待已经在途的同站点同步，不主动发起新的完整同步。
+type UpstreamSyncCoordinator interface {
+	SyncSites(ctx context.Context, userID string, adminAccountID string, siteIDs []string, force bool) []upstream.SyncSiteResult
+}
+
 // GroupCostReader 只读取 upstream 模块已经采集到的短期成本快照，不触发上游请求。
 // 成本读取失败不能影响健康状态、探活或调度字段。
 type GroupCostReader interface {

@@ -994,6 +994,8 @@ export default {
         failure: '本轮刷新失败，已保留旧数据',
         timeout: '本轮刷新包含超时站点',
         sitesLabel: '站点终态',
+        failedSitesLabel: '失败站点',
+        successfulSitesLabel: '成功站点',
         site: {
           success: '成功',
           auth_failed: '鉴权失败',

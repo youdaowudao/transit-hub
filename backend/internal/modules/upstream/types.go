@@ -61,6 +61,14 @@ type SyncEvent struct {
 // 负责将事件序列化并写入 ResponseWriter。
 type SyncEventCallback func(SyncEvent)
 
+// SyncSiteResult 是站点同步的安全终态，仅用于进程内刷新编排和页面结果。
+// 它不包含上游响应体、URL 参数或任何凭据。
+type SyncSiteResult struct {
+	SiteID   string `json:"siteId"`
+	Status   string `json:"status"`
+	ErrorKey string `json:"errorKey,omitempty"`
+}
+
 type AuthMode string
 
 const (
@@ -213,6 +221,7 @@ type Response struct {
 	Metrics           Metrics      `json:"metrics"`
 	Settings          SiteSettings `json:"settings"`
 	LastSyncedAt      *int64       `json:"lastSyncedAt"`
+	syncTimedOut      bool
 }
 
 func enabledOrDefault(enabled *bool) bool {

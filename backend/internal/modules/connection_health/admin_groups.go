@@ -69,8 +69,9 @@ type AdminGroupsFreshResult struct {
 }
 
 type AdminGroupsRefreshSummary struct {
-	State string                   `json:"state"`
-	Sites []AdminGroupsRefreshSite `json:"sites"`
+	State    string                   `json:"state"`
+	ErrorKey string                   `json:"errorKey,omitempty"`
+	Sites    []AdminGroupsRefreshSite `json:"sites"`
 }
 
 type AdminGroupsRefreshSite struct {
@@ -194,31 +195,49 @@ func (s *Service) SetGroupCostReader(reader GroupCostReader) {
 // -> 独立探活状态叠加」聚合分组健康主列表。探活状态来自以 targetId 为键的独立探活状态行，
 // 不依赖 real_connections。普通读取保持现有静默后台刷新语义。
 func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupHealth, error) {
-	return s.adminGroups(ctx, userID, false)
+	return s.adminGroups(ctx, userID, false, false)
 }
 
 // AdminGroupsFresh implements方案 A：等待当前请求涉及的外部倍率任务全部进入终态，
 // 再读取一轮主站实时分组和账号。它不创建任务表、不提供轮询状态，也不改变普通自动刷新路径。
 func (s *Service) AdminGroupsFresh(ctx context.Context, userID string) ([]AdminGroupHealth, error) {
-	return s.adminGroups(ctx, userID, true)
+	return s.adminGroups(ctx, userID, true, true)
 }
 
 func (s *Service) AdminGroupsFreshResult(ctx context.Context, userID string) (AdminGroupsFreshResult, error) {
-	groups, err := s.AdminGroupsFresh(ctx, userID)
+	return s.adminGroupsRefreshResult(ctx, userID, true)
+}
+
+// AdminGroupsAutoFreshResult waits for currently relevant terminal data without
+// starting a new complete upstream-site sync when none is already in flight.
+func (s *Service) AdminGroupsAutoFreshResult(ctx context.Context, userID string) (AdminGroupsFreshResult, error) {
+	return s.adminGroupsRefreshResult(ctx, userID, false)
+}
+
+func (s *Service) adminGroupsRefreshResult(ctx context.Context, userID string, force bool) (AdminGroupsFreshResult, error) {
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
 	if err != nil {
 		return AdminGroupsFreshResult{}, err
 	}
-	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	syncSites, connections, connectionsReady, syncErrorKey := s.refreshRelatedUpstreamSites(ctx, userID, adminAccountID, force)
+	if err := ctx.Err(); err != nil {
+		return AdminGroupsFreshResult{}, err
+	}
+	groups, err := s.adminGroupsWithConnections(ctx, userID, true, force, connections, connectionsReady)
 	if err != nil {
 		return AdminGroupsFreshResult{}, err
 	}
 	return AdminGroupsFreshResult{
 		Groups:  groups,
-		Refresh: s.multiplierRefreshSummary(userID, adminAccountID),
+		Refresh: mergeAdminGroupsRefreshSummary(syncSites, s.multiplierRefreshSummary(userID, adminAccountID), syncErrorKey),
 	}, nil
 }
 
-func (s *Service) adminGroups(ctx context.Context, userID string, waitForFresh bool) ([]AdminGroupHealth, error) {
+func (s *Service) adminGroups(ctx context.Context, userID string, waitForFresh bool, forceMultiplierRefresh bool) ([]AdminGroupHealth, error) {
+	return s.adminGroupsWithConnections(ctx, userID, waitForFresh, forceMultiplierRefresh, nil, false)
+}
+
+func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string, waitForFresh bool, forceMultiplierRefresh bool, connections []my_sites.RealConnection, connectionsReady bool) ([]AdminGroupHealth, error) {
 	requestStarted := time.Now()
 	workspaceStarted := time.Now()
 	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
@@ -241,7 +260,11 @@ func (s *Service) adminGroups(ctx context.Context, userID string, waitForFresh b
 	var multiplierDuration time.Duration
 	if waitForFresh {
 		multiplierStarted := time.Now()
-		upstreamMultiplierLookup = s.freshMultiplierLookupForWorkspace(ctx, userID, adminAccountID, platform)
+		if connectionsReady {
+			upstreamMultiplierLookup = s.multiplierLookupForWorkspaceWithConnections(ctx, userID, adminAccountID, platform, connections, true, true, true, forceMultiplierRefresh)
+		} else {
+			upstreamMultiplierLookup = s.freshMultiplierLookupForWorkspaceWithOptions(ctx, userID, adminAccountID, platform, forceMultiplierRefresh)
+		}
 		multiplierDuration = time.Since(multiplierStarted)
 		log.Printf("[connection-health] fresh multiplier refresh completed workspace=%s duration=%s", adminAccountID, multiplierDuration)
 		if err := ctx.Err(); err != nil {

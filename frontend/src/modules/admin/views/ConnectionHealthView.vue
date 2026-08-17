@@ -64,11 +64,12 @@ const {
   isLoading,
   isActionLoading,
   errorKey,
-  manualRefreshState,
-  manualRefreshSites,
+  terminalRefreshSummary,
   loadAll,
+  loadGroups,
   loadAdminGroups,
   refreshAdminGroups,
+  refreshAdminGroupsAutomatically: refreshAdminGroupsAutomaticallyRequest,
   loadEvents,
   loadPolicies,
   removePolicy,
@@ -88,7 +89,7 @@ const siteNameMap = ref<Map<string, string>>(new Map())
 const preferences = ref<ConnectionHealthPreferences>(createDefaultConnectionHealthPreferences())
 const groupManagerOpen = ref(false)
 const prioritySyncStatus = ref<PrioritySyncStatus | null>(null)
-const manualRefreshLoading = ref(false)
+const refreshLoading = ref(false)
 const refreshCoordinator = createRefreshCoordinator()
 const preferenceScope = computed(() => currentAccount.value?.id ?? 'anonymous')
 let loadedPreferenceScope = ''
@@ -320,7 +321,7 @@ const setHideUnmonitoredAccounts = (value: boolean) => {
 }
 
 const loadMainListIfIdle = async (reload: () => Promise<unknown>): Promise<boolean> => {
-  if (refreshCoordinator.isManualRefreshActive()) return false
+  if (refreshCoordinator.isRefreshActive()) return false
   await reload()
   return true
 }
@@ -330,7 +331,8 @@ const refreshOnEntry = () => {
   const now = Date.now()
   if (now - lastEntryRefreshAt < 500) return
   lastEntryRefreshAt = now
-  if (!refreshCoordinator.isManualRefreshActive()) void loadAll()
+  if (!refreshCoordinator.isManualRefreshActive()) void refreshAdminGroupsAutomatically()
+  void loadGroups({ silent: true })
   void loadEvents()
   void loadPolicies()
   void loadSiteNames()
@@ -341,15 +343,14 @@ onMounted(refreshOnEntry)
 onActivated(refreshOnEntry)
 
 const documentVisibility = useDocumentVisibility()
-let autoRefreshInFlight = false
 const autoRefresh = async () => {
-  if (documentVisibility.value !== 'visible' || autoRefreshInFlight || probeDialogOpen.value || !refreshCoordinator.shouldRunAutomaticRefresh()) return
-  autoRefreshInFlight = true
-  try {
-    await Promise.all([loadAll({ silent: true }), loadEvents(selectedConnectionId.value || undefined), loadPrioritySyncStatus()])
-  } finally {
-    autoRefreshInFlight = false
-  }
+  if (documentVisibility.value !== 'visible' || probeDialogOpen.value || !refreshCoordinator.shouldRunAutomaticRefresh()) return
+  await Promise.all([
+    refreshAdminGroupsAutomatically(),
+    loadGroups({ silent: true }),
+    loadEvents(selectedConnectionId.value || undefined),
+    loadPrioritySyncStatus(),
+  ])
 }
 // immediate=false 会让 VueUse 的 interval 保持暂停；这里只关闭首次回调，计时器本身必须启动。
 useIntervalFn(() => void autoRefresh(), 30_000, { immediate: true, immediateCallback: false })
@@ -357,15 +358,26 @@ watch(documentVisibility, (visibility) => {
   if (visibility === 'visible') void autoRefresh()
 })
 
+const refreshAdminGroupsAutomatically = async (): Promise<boolean> => {
+  const generation = refreshCoordinator.beginAutomatic()
+  if (generation === null) return false
+  refreshLoading.value = true
+  try {
+    return await refreshAdminGroupsAutomaticallyRequest()
+  } finally {
+    if (refreshCoordinator.complete(generation)) refreshLoading.value = false
+  }
+}
+
 const refresh = async () => {
   const generation = refreshCoordinator.begin()
   if (generation === null) return
-  manualRefreshLoading.value = true
+  refreshLoading.value = true
   try {
     await Promise.all([refreshAdminGroups(), loadPolicies(), loadEvents(), loadPrioritySyncStatus()])
   } finally {
     if (refreshCoordinator.complete(generation)) {
-      manualRefreshLoading.value = false
+      refreshLoading.value = false
     }
   }
 }
@@ -376,6 +388,10 @@ const refreshSiteStatusLabel = (site: AdminGroupsRefreshSite): string => {
   if (site.status === 'stale' && site.errorKey) return t(`admin.connectionHealth.refreshStatus.site.stale_${site.errorKey}`)
   return t(`admin.connectionHealth.refreshStatus.site.${site.status}`)
 }
+
+const failedRefreshSites = computed(() => (terminalRefreshSummary.value?.sites ?? []).filter(site => site.status !== 'success'))
+const successfulRefreshSites = computed(() => (terminalRefreshSummary.value?.sites ?? []).filter(site => site.status === 'success'))
+const refreshSummaryState = computed(() => terminalRefreshSummary.value?.state ?? null)
 
 // 分组启用/管理抽屉。
 const setupDrawerOpen = ref(false)
@@ -572,22 +588,30 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           <Activity class="h-4 w-4" />
           {{ t('admin.connectionHealth.topActions.events') }}
         </Button>
-        <Button variant="secondary" size="sm" :disabled="isLoading || manualRefreshLoading" @click="refresh">
-          <Loader2 v-if="isLoading || manualRefreshLoading" class="h-4 w-4 animate-spin" />
+        <Button variant="secondary" size="sm" :disabled="isLoading || refreshLoading" @click="refresh">
+          <Loader2 v-if="isLoading || refreshLoading" class="h-4 w-4 animate-spin" />
           <RefreshCw v-else class="h-4 w-4" />
           {{ t('admin.connectionHealth.refresh') }}
         </Button>
-        <span v-if="manualRefreshState && !manualRefreshLoading" class="text-xs text-muted-foreground" aria-live="polite">
-          {{ t(`admin.connectionHealth.refreshStatus.${manualRefreshState}`) }}
+        <span v-if="refreshSummaryState && !refreshLoading" class="text-xs text-muted-foreground" aria-live="polite">
+          {{ t(`admin.connectionHealth.refreshStatus.${refreshSummaryState}`) }}
         </span>
       </div>
     </header>
 
-    <div v-if="manualRefreshSites.length > 0 && !manualRefreshLoading" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground" aria-live="polite">
-      <span class="font-medium text-foreground">{{ t('admin.connectionHealth.refreshStatus.sitesLabel') }}</span>
-      <span v-for="site in manualRefreshSites" :key="site.siteId">
-        {{ siteName(site.siteId) }}: {{ refreshSiteStatusLabel(site) }}
-      </span>
+    <div v-if="!refreshLoading" class="space-y-1 text-xs text-muted-foreground" aria-live="polite">
+      <div v-if="failedRefreshSites.length > 0" class="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span class="font-medium text-destructive">{{ t('admin.connectionHealth.refreshStatus.failedSitesLabel') }}</span>
+        <span v-for="site in failedRefreshSites" :key="`failed:${site.siteId}`">
+          {{ siteName(site.siteId) }}: {{ refreshSiteStatusLabel(site) }}
+        </span>
+      </div>
+      <div v-if="successfulRefreshSites.length > 0" class="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span class="font-medium text-emerald-600 dark:text-emerald-400">{{ t('admin.connectionHealth.refreshStatus.successfulSitesLabel') }}</span>
+        <span v-for="site in successfulRefreshSites" :key="`success:${site.siteId}`">
+          {{ siteName(site.siteId) }}: {{ refreshSiteStatusLabel(site) }}
+        </span>
+      </div>
     </div>
 
 		<div

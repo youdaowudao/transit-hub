@@ -1,0 +1,40 @@
+{
+  "scenario": "健康档 Priority 恢复时，倍率资料不完整不能冻结健康目标，也不能把旧倍率当成精确倍率",
+  "cases": [
+    {
+      "name": "deterministic missing leaves suspended band",
+      "multiplier_status": "missing",
+      "current_priority": 100000,
+      "health_state": "healthy",
+      "expected_priority": 99
+    },
+    {
+      "name": "temporary unavailable moves healthy target to band end",
+      "multiplier_status": "unavailable",
+      "current_priority": 10000,
+      "health_state": "healthy",
+      "expected_priority": 99
+    },
+    {
+      "name": "stale multiplier moves healthy target to band end",
+      "multiplier_status": "stale",
+      "current_priority": 10000,
+      "health_state": "healthy",
+      "expected_priority": 99
+    },
+    {
+      "name": "updating multiplier moves healthy target to band end",
+      "multiplier_status": "updating",
+      "current_priority": 10000,
+      "health_state": "healthy",
+      "expected_priority": 99
+    },
+    {
+      "name": "missing multiplier still enters degraded band",
+      "multiplier_status": "missing",
+      "current_priority": 99,
+      "health_state": "degraded",
+      "expected_priority": 9999
+    }
+  ]
+}

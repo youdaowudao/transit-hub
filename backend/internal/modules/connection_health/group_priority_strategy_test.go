@@ -893,6 +893,11 @@ type fakeTargetPriorityActioner struct {
 	called chan struct{}
 }
 
+type failingTargetPriorityActioner struct {
+	calls []priorityUpdateCall
+	err   error
+}
+
 type blockingGenerationPriorityActioner struct {
 	mu      sync.Mutex
 	calls   []priorityUpdateCall
@@ -977,6 +982,14 @@ func (f *fakeTargetPriorityActioner) UpdateAdminTargetPriority(session upstream.
 		f.called <- struct{}{}
 	}
 	return nil
+}
+
+func (f *failingTargetPriorityActioner) UpdateAdminTargetPriority(session upstream.Session, targetID string, priority int) error {
+	f.calls = append(f.calls, priorityUpdateCall{targetID: targetID, priority: priority})
+	if f.err != nil {
+		return f.err
+	}
+	return errors.New("simulated priority update failure")
 }
 
 func TestMultiplierPrioritySyncAndManualConflict(t *testing.T) {
@@ -1291,21 +1304,9 @@ func TestMultiplierPrioritySync_MissingMultiplierDoesNotWriteOrRestore(t *testin
 }
 
 func TestHealthPrioritySync_MissingMultiplierMovesToCurrentBandEnd(t *testing.T) {
-	tests := []struct {
-		name      string
-		status    string
-		current   int
-		state     State
-		want      int
-		wantWrite bool
-	}{
-		{name: "deterministic missing leaves suspended band", status: MultiplierResolutionMissing, current: 100000, state: StateHealthy, want: 99, wantWrite: true},
-		{name: "temporary unavailable keeps current priority", status: MultiplierResolutionUnavailable, current: 10000, state: StateHealthy},
-		{name: "missing multiplier still enters degraded band", status: MultiplierResolutionMissing, current: 99, state: StateDegraded, want: 9999, wantWrite: true},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
+	fixture := loadPriorityRecoveryFixture(t)
+	for _, test := range fixture.Cases {
+		t.Run(test.Name, func(t *testing.T) {
 			repo := newFakeRepository()
 			actions := &fakeTargetPriorityActioner{}
 			service := &Service{repo: repo, priorityActions: actions}
@@ -1317,44 +1318,35 @@ func TestHealthPrioritySync_MissingMultiplierMovesToCurrentBandEnd(t *testing.T)
 			historicalMultiplier := 0.08
 			stored := PrioritySyncState{
 				UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
-				OriginalPriority: 7, LastAppliedPriority: test.current, EffectiveMultiplier: historicalMultiplier,
+				OriginalPriority: 7, LastAppliedPriority: test.CurrentPriority, EffectiveMultiplier: historicalMultiplier,
 			}
 			repo.priorityStates["user1|ws1|"+targetID] = stored
 			inventory := map[string]*priorityTargetInventory{
 				targetID: {
 					target:   AdminProbeTarget{TargetID: targetID, AccountID: "100", Models: []string{"gpt-4o"}},
-					policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{status: test.status},
-					currentPriority: test.current, priorityPresent: true,
+					policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{status: test.MultiplierStatus},
+					currentPriority: test.CurrentPriority, priorityPresent: true,
 				},
 			}
-			states := []ConnectionHealthState{{ConnectionID: targetID, ModelName: "gpt-4o", State: test.state}}
+			states := []ConnectionHealthState{{ConnectionID: targetID, ModelName: "gpt-4o", State: test.HealthState}}
 
 			service.syncWorkspacePriorities(
 				context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
 				"user1", "ws1", inventory, true, states, []PrioritySyncState{stored},
 			)
 
-			if !test.wantWrite {
-				if len(actions.calls) != 0 {
-					t.Fatalf("temporarily unavailable metadata must not write priority: %+v", actions.calls)
-				}
-				if updated := repo.priorityStates["user1|ws1|"+targetID]; updated.LastAppliedPriority != test.current {
-					t.Fatalf("temporarily unavailable metadata changed checkpoint: %+v", updated)
-				}
-				return
-			}
-			if len(actions.calls) != 1 || actions.calls[0].priority != test.want {
-				t.Fatalf("complete deterministic missing metadata must move to health band end %d: %+v", test.want, actions.calls)
+			if len(actions.calls) != 1 || actions.calls[0].priority != test.ExpectedPriority {
+				t.Fatalf("incomplete multiplier metadata must move to health band end %d: %+v", test.ExpectedPriority, actions.calls)
 			}
 			updated := repo.priorityStates["user1|ws1|"+targetID]
-			if updated.LastAppliedPriority != test.want || updated.EffectiveMultiplier != historicalMultiplier {
+			if updated.LastAppliedPriority != test.ExpectedPriority || updated.EffectiveMultiplier != historicalMultiplier {
 				t.Fatalf("health band write must preserve historical multiplier checkpoint: %+v", updated)
 			}
 		})
 	}
 }
 
-func TestHealthPrioritySyncUnavailableTargetStopsWorkspaceHealthRanking(t *testing.T) {
+func TestHealthPrioritySyncUnavailableTargetStillWritesHealthyTargets(t *testing.T) {
 	repo := newFakeRepository()
 	actions := &fakeTargetPriorityActioner{}
 	service := &Service{repo: repo, priorityActions: actions}
@@ -1386,8 +1378,124 @@ func TestHealthPrioritySyncUnavailableTargetStopsWorkspaceHealthRanking(t *testi
 		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
 		"user1", "ws1", inventory, true, states, nil,
 	)
-	if len(actions.calls) != 0 || len(repo.priorityStates) != 0 {
-		t.Fatalf("incomplete workspace health ranking wrote priority: calls=%+v states=%+v", actions.calls, repo.priorityStates)
+	if len(actions.calls) != 2 {
+		t.Fatalf("incomplete workspace health ranking must still write both targets: calls=%+v states=%+v", actions.calls, repo.priorityStates)
+	}
+	want := map[string]int{
+		"100": 10,
+		"200": 99,
+	}
+	for _, call := range actions.calls {
+		wantPriority, ok := want[call.targetID]
+		if !ok {
+			t.Fatalf("unexpected priority write: %+v", call)
+		}
+		if call.priority != wantPriority {
+			t.Fatalf("priority write for %s = %d, want %d", call.targetID, call.priority, wantPriority)
+		}
+		delete(want, call.targetID)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing priority writes: %+v", want)
+	}
+	if got := repo.priorityStates["user1|ws1|sub2api:ws1:100"]; got.LastAppliedPriority != 10 || got.EffectiveMultiplier != multiplier {
+		t.Fatalf("healthy target should be written at exact priority: %+v", got)
+	}
+	if got := repo.priorityStates["user1|ws1|sub2api:ws1:200"]; got.LastAppliedPriority != 99 {
+		t.Fatalf("unavailable target should fall back to band end: %+v", got)
+	}
+}
+
+func TestHealthPrioritySyncWithoutPendingSignatureRecordsFailureState(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", AppliedSignature: "generation-done",
+		PendingSignature: "", LastDecision: "success", InventoryStatus: "complete",
+	}
+	actions := &failingTargetPriorityActioner{}
+	service := &Service{repo: repo, priorityActions: actions}
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	policy.StrategyMode = StrategyModeHealthProbe
+	multiplier := 0.1
+	inventory := map[string]*priorityTargetInventory{
+		"sub2api:ws1:100": {
+			target:   AdminProbeTarget{TargetID: "sub2api:ws1:100", AccountID: "100", Models: []string{"gpt-4o"}},
+			policies: []Policy{policy},
+			upstreamMultiplier: upstreamMultiplierResolution{
+				status: MultiplierResolutionResolved, info: upstreamKeyGroupInfo{effectiveMultiplier: &multiplier},
+			},
+			currentPriority: 50, priorityPresent: true,
+		},
+	}
+	states := []ConnectionHealthState{{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy}}
+
+	service.syncWorkspacePriorities(
+		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true, states, nil,
+	)
+
+	workspaceState, err := repo.GetPriorityWorkspaceSyncState(context.Background(), "user1", "ws1")
+	if err != nil || workspaceState == nil {
+		t.Fatalf("workspace state err=%v state=%+v", err, workspaceState)
+	}
+	if workspaceState.LastDecision != "failed" || workspaceState.InventoryStatus != "failed" || workspaceState.LastError != ErrorUnknown {
+		t.Fatalf("missing pending signature must still record a failure state: %+v", workspaceState)
+	}
+	if workspaceState.AppliedSignature != "generation-done" || workspaceState.PendingSignature != "" {
+		t.Fatalf("health failure state must not mutate configuration signatures: %+v", workspaceState)
+	}
+	if workspaceState.NextReconcileAt == nil || !workspaceState.NextReconcileAt.After(time.Now()) {
+		t.Fatalf("failure state must carry next reconcile time: %+v", workspaceState)
+	}
+	if len(actions.calls) != 1 || actions.calls[0].priority != 10 {
+		t.Fatalf("priority write should still have been attempted before failure state: %+v", actions.calls)
+	}
+}
+
+func TestHealthPrioritySyncWithoutPendingSignatureRecordsSuccessState(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", AppliedSignature: "generation-done",
+		PendingSignature: "", LastDecision: "failed", InventoryStatus: "failed", LastError: ErrorPriorityMetadataUnavailable,
+	}
+	actions := &fakeTargetPriorityActioner{}
+	service := &Service{repo: repo, priorityActions: actions}
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	policy.StrategyMode = StrategyModeHealthProbe
+	multiplier := 0.1
+	inventory := map[string]*priorityTargetInventory{
+		"sub2api:ws1:100": {
+			target:   AdminProbeTarget{TargetID: "sub2api:ws1:100", AccountID: "100", Models: []string{"gpt-4o"}},
+			policies: []Policy{policy},
+			upstreamMultiplier: upstreamMultiplierResolution{
+				status: MultiplierResolutionResolved, info: upstreamKeyGroupInfo{effectiveMultiplier: &multiplier},
+			},
+			currentPriority: 10, priorityPresent: true,
+		},
+	}
+	states := []ConnectionHealthState{{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy}}
+
+	service.syncWorkspacePriorities(
+		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true, states, nil,
+	)
+
+	workspaceState, err := repo.GetPriorityWorkspaceSyncState(context.Background(), "user1", "ws1")
+	if err != nil || workspaceState == nil {
+		t.Fatalf("workspace state err=%v state=%+v", err, workspaceState)
+	}
+	if workspaceState.LastDecision != "success" || workspaceState.InventoryStatus != "complete" || workspaceState.LastError != "" {
+		t.Fatalf("missing pending signature must still record a success state: %+v", workspaceState)
+	}
+	if workspaceState.AppliedSignature != "generation-done" || workspaceState.PendingSignature != "" {
+		t.Fatalf("health success state must not mutate configuration signatures: %+v", workspaceState)
+	}
+	if len(actions.calls) != 0 {
+		t.Fatalf("already-correct priority should not be rewritten: %+v", actions.calls)
 	}
 }
 
@@ -1725,8 +1833,11 @@ func TestHealthPrioritySync_UsesFallbackForDeterministicMissingAndBandEndForUnav
 	unavailableSites := fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI}}
 	service, repo, actions = newService(unavailableSites)
 	service.syncMultiplierPriorities(context.Background(), []Policy{policy}, nil, []GroupPolicyAssignment{assignment}, nil, nil)
-	if len(actions.calls) != 0 || len(repo.priorityStates) != 0 {
-		t.Fatalf("unavailable lookup must keep Priority untouched until metadata is complete: calls=%+v state=%+v", actions.calls, repo.priorityStates)
+	if len(actions.calls) != 1 || actions.calls[0].priority != 10000 {
+		t.Fatalf("unavailable lookup must move the healthy target to the band end: calls=%+v state=%+v", actions.calls, repo.priorityStates)
+	}
+	if got := repo.priorityStates["user1|ws1|newapi:ws1:100"]; got.LastAppliedPriority != 10000 {
+		t.Fatalf("unavailable lookup must persist the band-end checkpoint: %+v", got)
 	}
 }
 

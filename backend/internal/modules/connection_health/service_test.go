@@ -780,6 +780,45 @@ func (f *fakeRepository) MarkPriorityWorkspaceSyncRunning(ctx context.Context, u
 	return true, nil
 }
 
+func (f *fakeRepository) MarkPriorityWorkspaceHealthSyncFailed(ctx context.Context, userID string, adminAccountID string, errorDetail string, failedCount int) (bool, error) {
+	f.priorityWorkspaceMu.Lock()
+	defer f.priorityWorkspaceMu.Unlock()
+	key := userID + "|" + adminAccountID
+	state, ok := f.priorityWorkspaces[key]
+	if !ok || state.PendingSignature != "" {
+		return false, nil
+	}
+	now := time.Now()
+	state.LastDecision = "failed"
+	state.InventoryStatus = "failed"
+	state.LastError = errorDetail
+	state.PendingTargetCount = failedCount
+	state.LastReconcileFailureAt = &now
+	next := now.Add(time.Minute)
+	state.NextReconcileAt = &next
+	f.priorityWorkspaces[key] = state
+	return true, nil
+}
+
+func (f *fakeRepository) MarkPriorityWorkspaceHealthSyncSucceeded(ctx context.Context, userID string, adminAccountID string) (bool, error) {
+	f.priorityWorkspaceMu.Lock()
+	defer f.priorityWorkspaceMu.Unlock()
+	key := userID + "|" + adminAccountID
+	state, ok := f.priorityWorkspaces[key]
+	if !ok || state.PendingSignature != "" {
+		return false, nil
+	}
+	now := time.Now()
+	state.LastDecision = "success"
+	state.InventoryStatus = "complete"
+	state.LastError = ""
+	state.PendingTargetCount = 0
+	state.LastReconcileSuccessAt = &now
+	state.NextReconcileAt = nil
+	f.priorityWorkspaces[key] = state
+	return true, nil
+}
+
 func (f *fakeRepository) MarkPriorityWorkspaceSyncFailed(ctx context.Context, userID string, adminAccountID string, pendingSignature string, errorDetail string, failedCount int) (bool, error) {
 	f.priorityWorkspaceMu.Lock()
 	defer f.priorityWorkspaceMu.Unlock()

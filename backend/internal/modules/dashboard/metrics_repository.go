@@ -755,6 +755,13 @@ func mergeDailyCostTargetCandidates(targets, existingCosts, attempts []SiteDaily
 		for _, cost := range existingCosts {
 			candidates[cost.SiteID] = cost
 		}
+		// 历史日期首次补结时可能还没有旧成本明细；此时必须用本轮
+		// 尝试结果建立冻结集合，否则永远无法进入日结汇总。
+		if len(candidates) == 0 {
+			for _, attempt := range attempts {
+				candidates[attempt.SiteID] = attempt
+			}
+		}
 	}
 	if allowCurrentDayAppend {
 		for _, attempt := range attempts {

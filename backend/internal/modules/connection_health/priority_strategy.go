@@ -258,9 +258,6 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 				}
 			}
 			failGeneration := func(syncErr error) {
-				if expectedPendingSignature == "" {
-					return
-				}
 				s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, syncErr, 1)
 			}
 			if expectedPendingSignature != "" {
@@ -456,7 +453,6 @@ func (s *Service) syncWorkspacePriorities(
 		if item.upstreamMultiplier.status == MultiplierResolutionUnavailable || item.upstreamMultiplier.status == MultiplierResolutionStale || item.upstreamMultiplier.status == MultiplierResolutionUpdating {
 			missingMultiplier[targetID] = struct{}{}
 			unavailableCount++
-			continue
 		}
 
 		multiplier, available := effectiveHealthSortMultiplier(item)
@@ -478,22 +474,6 @@ func (s *Service) syncWorkspacePriorities(
 		managed[targetID] = item
 		effectiveMultiplierByTarget[targetID] = multiplier
 		healthCandidates = append(healthCandidates, candidate)
-	}
-	if unavailableCount > 0 {
-		// Health+multiplier priorities are ranked across the whole workspace. If any
-		// required external multiplier is unavailable, writing the remaining ranks
-		// would still be based on an incomplete set. Keep every health-ranked target
-		// untouched; multiplier-only targets use the main-site group multiplier and
-		// remain independent from this external metadata failure.
-		for targetID, item := range managed {
-			if hasMultiplierOnlyPolicy(item.policies) {
-				continue
-			}
-			delete(managed, targetID)
-			delete(effectiveMultiplierByTarget, targetID)
-			missingMultiplier[targetID] = struct{}{}
-		}
-		healthCandidates = nil
 	}
 
 	distinctMultiplierOnly := make([]float64, 0)
@@ -704,7 +684,7 @@ func (s *Service) syncWorkspacePriorities(
 			failedCount++
 		}
 	}
-	if expectedPendingSignature == "" || !generationCurrent() {
+	if !generationCurrent() {
 		return
 	}
 	if failedCount+unavailableCount > 0 {
@@ -868,10 +848,12 @@ func hasHealthMultiplierPriorityPolicy(policies []Policy) bool {
 }
 
 func effectiveHealthSortMultiplier(item *priorityTargetInventory) (float64, bool) {
-	if item.upstreamMultiplier.status == MultiplierResolutionResolved && item.upstreamMultiplier.info.effectiveMultiplier != nil {
-		return *item.upstreamMultiplier.info.effectiveMultiplier, true
-	}
-	if item.upstreamMultiplier.status == MultiplierResolutionUnavailable {
+	switch item.upstreamMultiplier.status {
+	case MultiplierResolutionResolved:
+		if item.upstreamMultiplier.info.effectiveMultiplier != nil {
+			return *item.upstreamMultiplier.info.effectiveMultiplier, true
+		}
+	case MultiplierResolutionUnavailable, MultiplierResolutionStale, MultiplierResolutionUpdating:
 		return 0, false
 	}
 	return uniqueFloat(item.fallbackMultipliers)

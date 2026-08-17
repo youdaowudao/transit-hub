@@ -1645,6 +1645,36 @@ func (r *Repository) MarkPriorityWorkspaceSyncSucceeded(ctx context.Context, use
 	return result.RowsAffected() == 1, err
 }
 
+func (r *Repository) MarkPriorityWorkspaceHealthSyncFailed(ctx context.Context, userID string, adminAccountID string, errorDetail string, failedCount int) (bool, error) {
+	result, err := r.db.Exec(ctx, `
+		UPDATE connection_health_priority_workspace_sync_states
+		SET last_decision = 'failed', last_error = $3, inventory_status = 'failed',
+			last_reconcile_failure_at = now(), next_reconcile_at = now() + make_interval(secs => reconcile_failure_backoff_seconds),
+			pending_target_count = $4, reconcile_failure_count = reconcile_failure_count + 1,
+			updated_at = now()
+		WHERE user_id = $1 AND admin_account_id = $2 AND pending_signature = ''
+	`, userID, adminAccountID, errorDetail, failedCount)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, err
+}
+
+func (r *Repository) MarkPriorityWorkspaceHealthSyncSucceeded(ctx context.Context, userID string, adminAccountID string) (bool, error) {
+	result, err := r.db.Exec(ctx, `
+		UPDATE connection_health_priority_workspace_sync_states
+		SET last_decision = 'success', last_error = '', inventory_status = 'complete',
+			last_reconcile_success_at = now(), next_reconcile_at = NULL,
+			pending_target_count = 0, reconcile_success_count = reconcile_success_count + 1,
+			updated_at = now()
+		WHERE user_id = $1 AND admin_account_id = $2 AND pending_signature = ''
+	`, userID, adminAccountID)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, err
+}
+
 func (r *Repository) IsPriorityWorkspaceGenerationCurrent(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error) {
 	var current string
 	err := r.db.QueryRow(ctx, `

@@ -59,6 +59,8 @@ type healthRepository interface {
 	MarkPriorityWorkspaceSyncRunning(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error)
 	MarkPriorityWorkspaceSyncFailed(ctx context.Context, userID string, adminAccountID string, pendingSignature string, errorDetail string, failedCount int) (bool, error)
 	MarkPriorityWorkspaceSyncSucceeded(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error)
+	MarkPriorityWorkspaceHealthSyncFailed(ctx context.Context, userID string, adminAccountID string, errorDetail string, failedCount int) (bool, error)
+	MarkPriorityWorkspaceHealthSyncSucceeded(ctx context.Context, userID string, adminAccountID string) (bool, error)
 	IsPriorityWorkspaceGenerationCurrent(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error)
 	GetTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) (*TargetActionState, error)
 	ListTargetActionStates(ctx context.Context, userID string, adminAccountID string) ([]TargetActionState, error)

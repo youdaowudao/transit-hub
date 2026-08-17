@@ -667,15 +667,21 @@ func (r *MetricsRepository) listSiteCosts(ctx context.Context, db metricsDB, use
 	costs := make([]SiteDailyCost, 0)
 	for rows.Next() {
 		var c SiteDailyCost
+		var errorReason sql.NullString
+		var lastAttemptStatus, lastAttemptError, lastAttemptRunID sql.NullString
 		if err := rows.Scan(
 			&c.ID, &c.UserID, &c.AdminAccountID, &c.Date,
 			&c.SiteID, &c.SiteName, &c.Platform,
 			&c.RawCost, &c.RechargeRate, &c.AdjustedCost,
-			&c.Status, &c.Source, &c.ErrorReason, &c.ObservedAt,
-			&c.LastAttemptStatus, &c.LastAttemptError, &c.LastAttemptAt, &c.LastAttemptRunID,
+			&c.Status, &c.Source, &errorReason, &c.ObservedAt,
+			&lastAttemptStatus, &lastAttemptError, &c.LastAttemptAt, &lastAttemptRunID,
 		); err != nil {
 			return nil, err
 		}
+		c.ErrorReason = errorReason.String
+		c.LastAttemptStatus = lastAttemptStatus.String
+		c.LastAttemptError = lastAttemptError.String
+		c.LastAttemptRunID = lastAttemptRunID.String
 		costs = append(costs, c)
 	}
 	return costs, rows.Err()
@@ -959,15 +965,21 @@ func (r *MetricsRepository) ListLatestSiteCosts(ctx context.Context, userID, adm
 	costs := make([]SiteDailyCost, 0)
 	for rows.Next() {
 		var cost SiteDailyCost
+		var errorReason sql.NullString
+		var lastAttemptStatus, lastAttemptError, lastAttemptRunID sql.NullString
 		if err := rows.Scan(
 			&cost.ID, &cost.UserID, &cost.AdminAccountID, &cost.Date,
 			&cost.SiteID, &cost.SiteName, &cost.Platform,
 			&cost.RawCost, &cost.RechargeRate, &cost.AdjustedCost,
-			&cost.Status, &cost.Source, &cost.ErrorReason, &cost.ObservedAt,
-			&cost.LastAttemptStatus, &cost.LastAttemptError, &cost.LastAttemptAt, &cost.LastAttemptRunID,
+			&cost.Status, &cost.Source, &errorReason, &cost.ObservedAt,
+			&lastAttemptStatus, &lastAttemptError, &cost.LastAttemptAt, &lastAttemptRunID,
 		); err != nil {
 			return nil, err
 		}
+		cost.ErrorReason = errorReason.String
+		cost.LastAttemptStatus = lastAttemptStatus.String
+		cost.LastAttemptError = lastAttemptError.String
+		cost.LastAttemptRunID = lastAttemptRunID.String
 		costs = append(costs, cost)
 	}
 	return costs, rows.Err()

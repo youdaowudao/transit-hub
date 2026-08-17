@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"transithub/backend/internal/modules/upstream"
@@ -65,6 +66,34 @@ func TestFinalizeBusinessDateErrorsWhenSiteCostFetchFails(t *testing.T) {
 	}
 	if len(repo.snapshots) != 0 {
 		t.Fatalf("成本采集失败时不得写 %d 个快照", len(repo.snapshots))
+	}
+}
+
+// TestFinalizeBusinessDateErrorsWhenSiteCostTargetsAreEmpty 验证没有任何站点成本尝试时不写误导性快照。
+func TestFinalizeBusinessDateErrorsWhenSiteCostTargetsAreEmpty(t *testing.T) {
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+
+	repo := &fakeMetricsRepository{}
+	upstreams := &fakeUpstreamLister{siteCostResults: []upstream.SiteCostForDateResult{}}
+	service := NewMetricsService(
+		store,
+		&fakePlatformClient{usageStats: 10},
+		upstreams,
+		repo,
+		&fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}},
+	)
+
+	ref := ActiveSessionRef{UserID: "user-1", AdminAccountID: "account-1"}
+	err := service.finalizeBusinessDate(context.Background(), ref, "2026-08-01", SnapshotSourceDatedQuery)
+	if err == nil {
+		t.Fatal("没有站点成本目标时 finalizeBusinessDate 应返回错误")
+	}
+	if !strings.Contains(err.Error(), "no upstream site cost targets") {
+		t.Fatalf("错误应说明没有站点成本目标，实际: %v", err)
+	}
+	if len(repo.snapshots) != 0 {
+		t.Fatalf("没有站点成本目标时不得写 %d 个快照", len(repo.snapshots))
 	}
 }
 

@@ -2,6 +2,10 @@ package system
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -140,6 +144,183 @@ func TestSourceRollbackScriptContract(t *testing.T) {
 	} {
 		requireTextContains(t, script, want)
 	}
+}
+
+func TestRollbackHealthProbeTreatsConnectionRefusalAsExpectedControlFlow(t *testing.T) {
+	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
+	waitSection := script[strings.Index(script, "wait_for_health() {"):strings.Index(script, "\n}\n\ncleanup()")]
+	requireTextContains(t, waitSection, `if health_response="$(curl -fsS --max-time 2 "$HEALTH_URL" 2>&1)"; then`)
+	requireTextNotContains(t, waitSection, "set +e")
+	requireTextNotContains(t, waitSection, "set -e")
+}
+
+func TestRollbackWaitForHealthRetriesConnectionFailureThenSucceeds(t *testing.T) {
+	output, attempts, exitCode := runRollbackWaitForHealth(t, 2, false)
+	if exitCode != 0 {
+		t.Fatalf("wait_for_health exit code = %d, output=%s", exitCode, output)
+	}
+	if attempts != 3 {
+		t.Fatalf("curl attempts = %d, want 3 after two connection failures", attempts)
+	}
+}
+
+func TestRollbackWaitForHealthReturnsNonZeroAfterPersistentFailure(t *testing.T) {
+	output, attempts, exitCode := runRollbackWaitForHealth(t, 0, true)
+	if exitCode == 0 {
+		t.Fatalf("persistent health failure unexpectedly succeeded: %s", output)
+	}
+	if attempts != 3 {
+		t.Fatalf("curl attempts = %d, want bounded three attempts", attempts)
+	}
+}
+
+func TestRollbackReportsBothOriginalAndRecoveryErrors(t *testing.T) {
+	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
+	restoreStart := strings.Index(script, "restore_previous_artifacts() {")
+	restoreEnd := strings.Index(script[restoreStart:], "\n}\n\non_error()")
+	if restoreStart < 0 || restoreEnd < 0 {
+		t.Fatal("unable to extract restore_previous_artifacts")
+	}
+	restoreSection := script[restoreStart : restoreStart+restoreEnd+2]
+	requireTextContains(t, restoreSection, "local restore_error=''")
+	requireTextContains(t, restoreSection, "恢复错误")
+	requireTextContains(t, restoreSection, "systemctl restart")
+	requireTextContains(t, restoreSection, "wait_for_health")
+}
+
+func TestRollbackReportsArtifactRestoreFailureEvenWhenHealthRecovers(t *testing.T) {
+	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
+	restoreStart := strings.Index(script, "restore_previous_artifacts() {")
+	restoreEnd := strings.Index(script[restoreStart:], "\n}\n\non_error()")
+	if restoreStart < 0 || restoreEnd < 0 {
+		t.Fatal("unable to extract restore_previous_artifacts")
+	}
+	restoreSection := script[restoreStart : restoreStart+restoreEnd+2]
+	tempDir := t.TempDir()
+	binaryPrevious := filepath.Join(tempDir, "transithub-api.previous")
+	if err := os.WriteFile(binaryPrevious, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	distPrevious := filepath.Join(tempDir, "dist.previous")
+	if err := os.Mkdir(distPrevious, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	distDir := filepath.Join(tempDir, "dist")
+	if err := os.Mkdir(distDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mvPath := filepath.Join(tempDir, "mv")
+	mvScript := fmt.Sprintf(`#!/usr/bin/env bash
+if [[ "$2" == %q ]]; then
+  exit 7
+fi
+exec /bin/mv "$@"
+`, binaryPrevious)
+	if err := os.WriteFile(mvPath, []byte(mvScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrapperPath := filepath.Join(tempDir, "restore.sh")
+	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
+set -Eeuo pipefail
+export PATH=%q:$PATH
+PROJECT_DIR=%q
+SERVICE='transithub-api.service'
+BINARY=%q
+BINARY_PREVIOUS=%q
+DIST_DIR=%q
+DIST_PREVIOUS=%q
+origin_commit=''
+artifacts_switched=1
+sudo() { return 0; }
+wait_for_health() { return 0; }
+%s
+if restore_previous_artifacts; then
+  exit 0
+else
+  exit $?
+fi
+`, tempDir, tempDir, filepath.Join(tempDir, "transithub-api"), binaryPrevious, distDir, distPrevious, restoreSection)
+	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command("bash", wrapperPath).CombinedOutput()
+	if err == nil {
+		t.Fatalf("artifact restore unexpectedly succeeded: %s", output)
+	}
+	if !strings.Contains(string(output), "恢复错误") || !strings.Contains(string(output), "binary") {
+		t.Fatalf("artifact restore error was not reported: %s", output)
+	}
+}
+
+func runRollbackWaitForHealth(t *testing.T, succeedAfter int, alwaysFail bool) (string, int, int) {
+	t.Helper()
+	tempDir := t.TempDir()
+	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
+	start := strings.Index(script, "wait_for_health() {")
+	endRelative := strings.Index(script[start:], "\n}\n\ncleanup()")
+	if start < 0 || endRelative < 0 {
+		t.Fatal("unable to extract wait_for_health")
+	}
+	waitFunction := script[start : start+endRelative+2]
+	statePath := filepath.Join(tempDir, "curl-count")
+	if err := os.WriteFile(statePath, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	curlPath := filepath.Join(tempDir, "curl")
+	curlScript := fmt.Sprintf(`#!/usr/bin/env bash
+set -eu
+state=%q
+count=$(cat "$state")
+count=$((count + 1))
+printf '%%s\n' "$count" >"$state"
+if %t; then
+  exit 7
+fi
+if ((count <= %d)); then
+  exit 7
+fi
+printf '{"status":"ok"}\n'
+`, statePath, alwaysFail, succeedAfter)
+	if err := os.WriteFile(curlPath, []byte(curlScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrapperPath := filepath.Join(tempDir, "wait.sh")
+	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
+set -Eeuo pipefail
+export PATH=%q:$PATH
+HEALTH_URL='http://127.0.0.1:1/health'
+HEALTH_TIMEOUT_SECONDS=3
+sleep() { SECONDS=$((SECONDS + 1)); }
+%s
+if wait_for_health; then
+  exit 0
+else
+  code=$?
+  exit "$code"
+fi
+`, tempDir, waitFunction)
+	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", wrapperPath)
+	result, err := cmd.CombinedOutput()
+	exitCode := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			t.Fatal(err)
+		}
+	}
+	countBytes, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	if _, err := fmt.Sscanf(string(countBytes), "%d", &attempts); err != nil {
+		t.Fatal(err)
+	}
+	return string(result), attempts, exitCode
 }
 
 func TestQuestionAnswersMigrationDeclaresAdditiveRollbackSafety(t *testing.T) {

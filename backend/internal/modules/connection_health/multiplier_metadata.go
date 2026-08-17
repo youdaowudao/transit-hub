@@ -106,8 +106,10 @@ type multiplierSnapshotEntry struct {
 	nextRetryAt      time.Time
 	lastAccessAt     time.Time
 	lastError        string
+	lastOutcome      string
 	inFlight         bool
 	done             chan struct{}
+	supersededDone   []chan struct{}
 }
 
 // multiplierSiteMetadata is deliberately narrower than upstream.Site. A snapshot must not
@@ -118,6 +120,10 @@ type multiplierSiteMetadata struct {
 }
 
 func (s *Service) multiplierLookupForWorkspace(ctx context.Context, userID string, adminAccountID string, platform string, allowStale bool, waitForFresh bool) upstreamMultiplierLookup {
+	return s.multiplierLookupForWorkspaceWithOptions(ctx, userID, adminAccountID, platform, allowStale, waitForFresh, false)
+}
+
+func (s *Service) multiplierLookupForWorkspaceWithOptions(ctx context.Context, userID string, adminAccountID string, platform string, allowStale bool, waitForFresh bool, forceRefresh bool) upstreamMultiplierLookup {
 	lookup := upstreamMultiplierLookup{byAccount: make(map[string]upstreamMultiplierResolution)}
 	if s.mySites == nil || s.sites == nil {
 		lookup.unavailable = true
@@ -154,7 +160,11 @@ func (s *Service) multiplierLookupForWorkspace(ctx context.Context, userID strin
 		bindingKeys[siteID][keyID] = struct{}{}
 	}
 
-	s.prepareMultiplierSnapshots(ctx, metadataReader, userID, adminAccountID, upstream.Platform(platform), bindingKeys, waitForFresh)
+	freshReady := s.prepareMultiplierSnapshots(ctx, metadataReader, userID, adminAccountID, upstream.Platform(platform), bindingKeys, waitForFresh, forceRefresh)
+	if waitForFresh && !freshReady {
+		lookup.unavailable = true
+		return lookup
+	}
 	s.multiplierSnapshotMu.Lock()
 	defer s.multiplierSnapshotMu.Unlock()
 	for accountID, accountConnections := range connectionsByAccount {
@@ -194,7 +204,7 @@ func (s *Service) multiplierLookupForWorkspace(ctx context.Context, userID strin
 	return lookup
 }
 
-func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader UpstreamKeyMetadataReader, userID string, adminAccountID string, platform upstream.Platform, bindingKeys map[string]map[string]struct{}, waitForFresh bool) {
+func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader UpstreamKeyMetadataReader, userID string, adminAccountID string, platform upstream.Platform, bindingKeys map[string]map[string]struct{}, waitForFresh bool, forceRefresh bool) bool {
 	orderedSites := make([]string, 0, len(bindingKeys))
 	for siteID := range bindingKeys {
 		orderedSites = append(orderedSites, siteID)
@@ -235,19 +245,19 @@ func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader Upstrea
 		fingerprint := currentFingerprints[siteID]
 		if entry == nil || entry.bindingSignature != signature || entry.platform != platform || (fingerprint != "" && entry.siteFingerprint != "" && entry.siteFingerprint != fingerprint) {
 			generation := uint64(1)
+			var supersededDone []chan struct{}
 			if entry != nil {
 				generation = entry.generation + 1
+				supersededDone = append(supersededDone, entry.supersededDone...)
 				if entry.inFlight && entry.done != nil {
-					close(entry.done)
-					entry.done = nil
-					entry.inFlight = false
+					supersededDone = append(supersededDone, entry.done)
 				}
 			}
 			entry = &multiplierSnapshotEntry{
 				workspaceKey: cacheKey, siteID: siteID, userID: userID, adminAccountID: adminAccountID,
 				platform: platform, bindingSignature: signature, keyIDs: keyIDs, generation: generation,
 				capability: multiplierDirectUnknown, keys: make(map[string]upstreamKeyMetadata), siteFingerprint: fingerprint,
-				status: multiplierResolutionUpdating, lastAccessAt: now,
+				status: multiplierResolutionUpdating, lastAccessAt: now, supersededDone: supersededDone,
 			}
 			s.multiplierSnapshots[cacheKey] = entry
 		}
@@ -261,10 +271,10 @@ func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader Upstrea
 			}
 			continue
 		}
-		if entry.status == "complete" && entry.expiresAt.After(now) {
+		if !forceRefresh && entry.status == "complete" && entry.expiresAt.After(now) {
 			continue
 		}
-		if now.Before(entry.nextRetryAt) {
+		if !forceRefresh && now.Before(entry.nextRetryAt) {
 			continue
 		}
 		entry.inFlight = true
@@ -295,22 +305,23 @@ func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader Upstrea
 			}
 			entry.nextRetryAt = now.Add(multiplierFailureBackoff)
 			entry.lastError = "multiplier metadata refresh queue is full"
-			close(entry.done)
-			entry.done = nil
+			entry.lastOutcome = "unavailable"
+			closeMultiplierSnapshotWaiters(entry)
 		}
 	}
 	s.multiplierSnapshotMu.Unlock()
 
 	if !waitForFresh {
-		return
+		return true
 	}
 	for _, done := range waiters {
 		select {
 		case <-done:
 		case <-ctx.Done():
-			return
+			return false
 		}
 	}
+	return true
 }
 
 func (s *Service) refreshMultiplierSnapshot(parent context.Context, reader UpstreamKeyMetadataReader, captured *multiplierSnapshotEntry, target *multiplierSnapshotEntry) {
@@ -419,6 +430,7 @@ func (s *Service) finishMultiplierSnapshot(target *multiplierSnapshotEntry, capt
 		current.expiresAt = current.fetchedAt.Add(multiplierSnapshotTTL)
 		current.nextRetryAt = time.Time{}
 		current.lastError = ""
+		current.lastOutcome = "success"
 		current.capability = captured.capability
 	} else {
 		if len(current.keys) == 0 {
@@ -428,15 +440,91 @@ func (s *Service) finishMultiplierSnapshot(target *multiplierSnapshotEntry, capt
 		}
 		current.nextRetryAt = time.Now().Add(multiplierFailureBackoff)
 		current.lastError = err.Error()
+		current.lastOutcome = multiplierRefreshOutcome(err)
 		if errors.Is(err, errMultiplierDirectLookupAmbiguous) {
 			current.capability = multiplierDirectUnsupported
 		}
 	}
 	current.inFlight = false
-	if current.done != nil {
-		close(current.done)
-		current.done = nil
+	closeMultiplierSnapshotWaiters(current)
+}
+
+func closeMultiplierSnapshotWaiters(entry *multiplierSnapshotEntry) {
+	if entry.done != nil {
+		close(entry.done)
+		entry.done = nil
 	}
+	for _, done := range entry.supersededDone {
+		close(done)
+	}
+	entry.supersededDone = nil
+}
+
+func multiplierRefreshOutcome(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var requestErr *upstream.RequestError
+	if errors.As(err, &requestErr) && (requestErr.StatusCode == http.StatusUnauthorized || requestErr.StatusCode == http.StatusForbidden || requestErr.MessageKey == upstream.ErrorAuth) {
+		return "auth_failed"
+	}
+	return "unavailable"
+}
+
+func (s *Service) multiplierRefreshSummary(userID string, adminAccountID string) AdminGroupsRefreshSummary {
+	prefix := userID + "\x00" + adminAccountID + "\x00"
+	s.multiplierSnapshotMu.Lock()
+	sites := make([]AdminGroupsRefreshSite, 0)
+	anySuccess := false
+	anyFailure := false
+	anyTimeout := false
+	for key, entry := range s.multiplierSnapshots {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		status := entry.lastOutcome
+		errorKey := ""
+		switch {
+		case entry.status == "complete":
+			status = "success"
+			anySuccess = true
+		case entry.status == multiplierResolutionStale:
+			status = "stale"
+			anyFailure = true
+			if entry.lastOutcome == "timeout" {
+				errorKey = "timeout"
+				anyTimeout = true
+			} else if entry.lastOutcome == "auth_failed" {
+				errorKey = "auth"
+			}
+		case entry.lastOutcome == "timeout":
+			status = "timeout"
+			anyFailure = true
+			anyTimeout = true
+		case entry.lastOutcome == "auth_failed":
+			status = "auth_failed"
+			anyFailure = true
+			errorKey = "auth"
+		default:
+			status = "unavailable"
+			anyFailure = true
+		}
+		sites = append(sites, AdminGroupsRefreshSite{SiteID: entry.siteID, Status: status, ErrorKey: errorKey})
+	}
+	s.multiplierSnapshotMu.Unlock()
+	sort.Slice(sites, func(i, j int) bool { return sites[i].SiteID < sites[j].SiteID })
+	state := "success"
+	switch {
+	case len(sites) == 0:
+		state = "success"
+	case anyTimeout:
+		state = "timeout"
+	case anyFailure && anySuccess:
+		state = "partial"
+	case anyFailure:
+		state = "failure"
+	}
+	return AdminGroupsRefreshSummary{State: state, Sites: sites}
 }
 
 func (s *Service) resolveMultiplierSnapshotLocked(connection my_sites.RealConnection, userID string, adminAccountID string, allowStale bool) upstreamMultiplierResolution {
@@ -569,5 +657,16 @@ func stringSet(values []string) map[string]struct{} {
 }
 
 func (s *Service) legacyMultiplierLookup(ctx context.Context, userID string, adminAccountID string, platform string) upstreamMultiplierLookup {
+	return s.upstreamMultiplierResolutionsByAdminAccountLegacy(ctx, userID, adminAccountID, platform)
+}
+
+// freshMultiplierLookupForWorkspace waits for this request's external refreshes but
+// allows a retained in-process snapshot to remain visible when a site refresh fails.
+// The retained value is display-only; Priority decisions continue through their existing
+// safety checks and are not changed by this lookup.
+func (s *Service) freshMultiplierLookupForWorkspace(ctx context.Context, userID string, adminAccountID string, platform string) upstreamMultiplierLookup {
+	if _, ok := s.mySites.(UpstreamKeyMetadataReader); ok {
+		return s.multiplierLookupForWorkspaceWithOptions(ctx, userID, adminAccountID, platform, true, true, true)
+	}
 	return s.upstreamMultiplierResolutionsByAdminAccountLegacy(ctx, userID, adminAccountID, platform)
 }

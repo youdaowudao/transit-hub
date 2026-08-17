@@ -27,17 +27,21 @@ const selected = ref<Set<string>>(new Set())
 const loadErrorKey = ref('')
 const saveErrorKey = ref('')
 const readableMessage = (rawKey: string): string => t(connectionHealthMessageKey(rawKey, te))
+let loadSequence = 0
 
 watch(
   () => [props.open, props.targetId],
   async ([isOpen]) => {
-    if (!isOpen || !props.targetId) return
+    const requestSequence = ++loadSequence
+    const targetId = props.targetId
+    if (!isOpen || !targetId) return
     phase.value = 'loading'
     selected.value = new Set()
     loadErrorKey.value = ''
     saveErrorKey.value = ''
 
-    const outcome = await loadTargetPolicyAssignments(props.targetId)
+    const outcome = await loadTargetPolicyAssignments(targetId)
+    if (requestSequence !== loadSequence) return
     if ('errorKey' in outcome) {
       loadErrorKey.value = outcome.errorKey
       phase.value = 'error'

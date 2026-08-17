@@ -719,6 +719,54 @@ func TestRestoreUnmanagedTargetActions_RestoresWhenAutoDegradeDisabled(t *testin
 	}
 }
 
+func TestRestoreUnmanagedTargetActions_IgnoresInheritedRemoteActionWhenTargetPolicyIsEnabled(t *testing.T) {
+	repo := newFakeRepository()
+	platform := &fakePlatformActioner{}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "acc-1", Status: "inactive", Models: "direct-model,group-model"}},
+		},
+	}
+	service := &Service{
+		repo: repo, mySites: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		platformGroups: reader, dispatcher: newRemoteActionDispatcher(nil, nil, platform),
+	}
+	targetID := "sub2api:ws1:acc-1"
+	stored := TargetActionState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		OriginalStatus: "active", LastAppliedStatus: "inactive",
+	}
+	repo.targetActionStates["user1|ws1|"+targetID] = stored
+	direct := Policy{
+		ID: "direct", UserID: "user1", AdminAccountID: "ws1", Enabled: true,
+		AutoDegradeEnabled: true, AutoRemoteActionEnabled: false,
+		ModelTargets: []ModelTarget{{ModelName: "direct-model", Enabled: true}},
+	}
+	group := Policy{
+		ID: "group", UserID: "user1", AdminAccountID: "ws1", Enabled: true,
+		AutoDegradeEnabled: true, AutoRemoteActionEnabled: true,
+		ModelTargets: []ModelTarget{{ModelName: "group-model", Enabled: true}},
+	}
+	targetAssignment := PolicyAssignment{UserID: "user1", AdminAccountID: "ws1", TargetID: targetID, PolicyID: direct.ID}
+	groupAssignment := GroupPolicyAssignment{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: group.ID}
+	if !hasRemoteActionModel(candidateModelSpecs([]string{"direct-model", "group-model"}, []Policy{direct, group})) {
+		t.Fatal("test setup must include a remote-action group model")
+	}
+	current := mergePoliciesByID([]Policy{direct}, []Policy{group})
+	if !hasRemoteActionModel(candidateModelSpecs([]string{"direct-model", "group-model"}, current)) {
+		t.Fatal("merged target and group policies must retain the remote-action model")
+	}
+
+	service.restoreUnmanagedTargetActions(
+		context.Background(), []Policy{direct, group}, []PolicyAssignment{targetAssignment},
+		[]GroupPolicyAssignment{groupAssignment}, nil, []TargetActionState{stored}, make(adminInventoryCache),
+	)
+	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].status != "active" {
+		t.Fatalf("inherited remote action must not survive enabled target policy override: %+v", platform.sub2APICalls)
+	}
+}
+
 func TestRestoreUnmanagedTargetActions_RestoresTargetRemovedFromAllGroups(t *testing.T) {
 	repo := newFakeRepository()
 	platform := &fakePlatformActioner{}

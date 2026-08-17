@@ -36,6 +36,8 @@ type fakeMetricsRepository struct {
 	groupMetricCacheErr  error
 	latestSnapshot       *DailySnapshot
 	latestSnapshotErr    error
+	dailyStatsSnapshots  []DailySnapshot
+	dailyStatsCalls      int
 }
 
 func (f *fakeMetricsRepository) Upsert(ctx context.Context, snapshot DailySnapshot) error {
@@ -88,7 +90,8 @@ func (f *fakeMetricsRepository) ListGroupMetricCache(ctx context.Context, userID
 }
 
 func (f *fakeMetricsRepository) ListDailyStats(ctx context.Context, userID, adminAccountID string, from, to string) ([]DailySnapshot, error) {
-	return nil, nil
+	f.dailyStatsCalls++
+	return f.dailyStatsSnapshots, nil
 }
 
 func newLiveMetricsTestService(platform *fakePlatformClient, upstreams *fakeUpstreamLister, metricsRepo *fakeMetricsRepository) *MetricsService {
@@ -146,6 +149,32 @@ func TestLiveMetricsCostFailureStillPersistsRevenue(t *testing.T) {
 	}
 	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayProfit == nil || *repo.snapshots[0].TodayProfit != 30 || repo.snapshots[0].TodayPurchase != nil {
 		t.Fatalf("unavailable cost snapshot = %+v, want revenue 30 and unknown cost", repo.snapshots)
+	}
+}
+
+func TestStartupRecoveryScansUnknownCostQualityModeWithoutDroppingSnapshot(t *testing.T) {
+	loc := businesstime.Location()
+	yesterday := businesstime.DateAt(time.Now().In(loc).AddDate(0, 0, -1))
+	t.Setenv("SETTLEMENT_BASELINE_DATE", yesterday)
+	date, err := time.ParseInLocation("2006-01-02", yesterday, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := &fakeMetricsRepository{dailyStatsSnapshots: []DailySnapshot{{
+		Date: date, SettlementStatus: SettlementStatusFinal, CostQualityMode: CostQualityModeUnknown,
+	}}}
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	store.activeSessions = []ActiveSessionRef{{UserID: "user-1", AdminAccountID: "account-1"}}
+	service := NewMetricsService(store, &fakePlatformClient{}, &fakeUpstreamLister{}, repo, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+
+	service.startupRecovery(context.Background())
+
+	if repo.dailyStatsCalls != 1 {
+		t.Fatalf("startup recovery ListDailyStats calls = %d, want 1", repo.dailyStatsCalls)
+	}
+	if repo.dailyStatsSnapshots[0].CostQualityMode != CostQualityModeUnknown {
+		t.Fatalf("startup recovery changed cost quality mode = %q", repo.dailyStatsSnapshots[0].CostQualityMode)
 	}
 }
 

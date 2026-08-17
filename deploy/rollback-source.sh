@@ -33,30 +33,45 @@ artifacts_switched=0
 # 只回退代码与产物，不动数据库：本方案自始不做数据库还原，
 # 且 A/B 档的前提就是新结构对旧代码兼容，反向同样成立。
 restore_previous_artifacts() {
+    local restore_error=''
     printf '正在恢复回滚前的版本，请稍候。\n' >&2
 
     if ((artifacts_switched == 1)); then
         if [[ -x "$BINARY_PREVIOUS" ]]; then
-            mv -f "$BINARY_PREVIOUS" "$BINARY" || true
+            if ! mv -f "$BINARY_PREVIOUS" "$BINARY"; then
+                restore_error="${restore_error:+$restore_error; }binary artifact restore failed"
+            fi
         fi
         if [[ -d "$DIST_PREVIOUS" ]]; then
-            rm -rf "$DIST_DIR" || true
-            mv -f "$DIST_PREVIOUS" "$DIST_DIR" || true
+            if ! rm -rf "$DIST_DIR"; then
+                restore_error="${restore_error:+$restore_error; }frontend dist cleanup failed"
+            elif ! mv -f "$DIST_PREVIOUS" "$DIST_DIR"; then
+                restore_error="${restore_error:+$restore_error; }frontend dist restore failed"
+            fi
         fi
     fi
 
     if [[ -n "$origin_commit" ]]; then
-        git -C "$PROJECT_DIR" switch --detach "$origin_commit" || true
+        if ! git -C "$PROJECT_DIR" switch --detach "$origin_commit"; then
+            restore_error="${restore_error:+$restore_error; }source commit restore failed"
+        fi
     fi
 
     if sudo systemctl restart "$SERVICE"; then
         if wait_for_health >/dev/null 2>&1; then
-            printf '已恢复到回滚前的版本，服务通过健康检查。原回滚失败原因见上。\n' >&2
-            return 0
+            if [[ -z "$restore_error" ]]; then
+                printf '已恢复到回滚前的版本，服务通过健康检查。原回滚失败原因见上。\n' >&2
+                return 0
+            fi
+        else
+            restore_error="${restore_error:+$restore_error; }wait_for_health exit=$?"
         fi
+    else
+        restore_error="${restore_error:+$restore_error; }systemctl restart exit=$?"
     fi
 
-    printf '自动恢复未通过健康检查，服务当前不可用，必须人工介入。\n' >&2
+    printf '自动恢复失败：恢复错误：%s；服务当前不可用，必须人工介入。原回滚失败原因见上。\n' \
+        "$restore_error" >&2
     return 1
 }
 
@@ -87,17 +102,13 @@ prepare_go_environment() {
 wait_for_health() {
     local deadline=$((SECONDS + HEALTH_TIMEOUT_SECONDS))
     local health_response=''
-    local health_exit_code
 
     while ((SECONDS < deadline)); do
-        set +e
-        health_response="$(curl -fsS --max-time 2 "$HEALTH_URL" 2>&1)"
-        health_exit_code=$?
-        set -e
-        if ((health_exit_code == 0)) &&
-            [[ "$health_response" =~ \"status\"[[:space:]]*:[[:space:]]*\"ok\" ]]; then
-            printf '%s\n' "$health_response"
-            return 0
+        if health_response="$(curl -fsS --max-time 2 "$HEALTH_URL" 2>&1)"; then
+            if [[ "$health_response" =~ \"status\"[[:space:]]*:[[:space:]]*\"ok\" ]]; then
+                printf '%s\n' "$health_response"
+                return 0
+            fi
         fi
         sleep 1
     done
@@ -375,4 +386,3 @@ mark_verified_commit "$target_commit" "$target_version" "$point_schema_version"
 sudo journalctl -u "$SERVICE" -n 100 --no-pager
 printf '回滚成功：源码已退回 %s（%s），服务已重启并通过健康检查。\n' \
     "$target_version" "$target_commit"
-

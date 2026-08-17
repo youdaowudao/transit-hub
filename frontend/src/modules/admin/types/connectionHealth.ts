@@ -155,6 +155,9 @@ export interface AdminGroupAccount {
   // 调度器自动探活。旧后端响应不带这些字段时前端按「未分配」兜底展示，不强制要求存在。
   assignedPolicyIds?: string[]
   assignedPolicies?: TargetPolicyAssignmentSummary[]
+  // 实际经过账号级覆盖/分组继承解析后生效的策略，供倍率和健康摘要使用。
+  effectivePolicyIds?: string[]
+  effectivePolicies?: TargetPolicyAssignmentSummary[]
   hasAssignedPolicy?: boolean
   hasEnabledPolicy?: boolean
   hasEnabledProbePolicy?: boolean
@@ -168,7 +171,7 @@ export interface AdminGroupAccount {
   priorityConflictAt?: string | null
   probeModelsConfigured?: boolean
   effectiveMultiplier?: number | null
-  multiplierResolutionStatus?: 'resolved' | 'unassociated' | 'missing' | 'conflict' | 'unavailable' | string
+  multiplierResolutionStatus?: 'resolved' | 'unassociated' | 'missing' | 'conflict' | 'stale' | 'unavailable' | string
   multiplierSource?: 'upstream_key' | 'local_fallback' | 'none' | string
   localFallbackMultiplier?: number | null
   productionSortOrder?: number

@@ -25,6 +25,25 @@ type fakePlatformGroupReader struct {
 	credErr       map[string]error
 }
 
+type orderedPlatformGroupReader struct {
+	started chan<- string
+	groups  []upstream.AdminGroupInfo
+}
+
+func (f orderedPlatformGroupReader) FetchAdminAllGroups(session upstream.Session) ([]upstream.AdminGroupInfo, error) {
+	f.started <- "groups"
+	return f.groups, nil
+}
+
+func (f orderedPlatformGroupReader) ListAdminGroupAccounts(session upstream.Session, group upstream.AdminGroupInfo) ([]upstream.AdminGroupAccountInfo, error) {
+	f.started <- "accounts"
+	return nil, nil
+}
+
+func (f orderedPlatformGroupReader) ResolveProbeCredential(session upstream.Session, account upstream.AdminGroupAccountInfo) (upstream.ProbeCredential, error) {
+	return upstream.ProbeCredential{}, nil
+}
+
 func (f fakePlatformGroupReader) FetchAdminAllGroups(session upstream.Session) ([]upstream.AdminGroupInfo, error) {
 	return f.groups, nil
 }
@@ -51,6 +70,186 @@ func newAdminGroupsService(reader PlatformGroupReader, mySites MySitesReader, re
 		dispatcher:     noopRemoteActionRunner{},
 		probeRunner:    NewRealProbeRunner(),
 		platformGroups: reader,
+	}
+}
+
+func TestAdminGroupsFreshWaitsForExternalMultiplierBeforeReadingMainGroups(t *testing.T) {
+	started := make(chan string, 4)
+	release := make(chan struct{})
+	metadataReader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{
+			connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")},
+			session:     upstream.Session{Platform: upstream.PlatformSub2API},
+		},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-1|key-1": {ID: "key-1", GroupID: "group-1", GroupName: "vip"},
+		},
+		started: started,
+		release: release,
+	}
+	service := newAdminGroupsService(
+		orderedPlatformGroupReader{started: started, groups: []upstream.AdminGroupInfo{{ID: "group-1", Name: "group"}}},
+		metadataReader,
+		newFakeRepository(),
+	)
+	service.sites = snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}
+
+	freshService, ok := any(service).(interface {
+		AdminGroupsFresh(context.Context, string) ([]AdminGroupHealth, error)
+	})
+	if !ok {
+		t.Fatal("Service must expose the方案 A fresh admin-groups request")
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := freshService.AdminGroupsFresh(context.Background(), "user1")
+		done <- err
+	}()
+	select {
+	case event := <-started:
+		if event != "site-1" {
+			t.Fatalf("first external event = %q, want site-1", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh request did not start the external multiplier refresh")
+	}
+	select {
+	case event := <-started:
+		t.Fatalf("main-site read started before multiplier terminal state: %q", event)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("AdminGroupsFresh() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh request did not finish after multiplier release")
+	}
+	groupsReads := 0
+	accountReads := 0
+	for {
+		select {
+		case event := <-started:
+			switch event {
+			case "groups":
+				groupsReads++
+			case "accounts":
+				accountReads++
+			}
+		default:
+			goto drained
+		}
+	}
+drained:
+	if groupsReads != 1 || accountReads != 1 {
+		t.Fatalf("main site reads = groups:%d accounts:%d, want one round", groupsReads, accountReads)
+	}
+	if direct, _ := metadataReader.callCounts("site-1"); direct != 1 {
+		t.Fatalf("external site requests = %d, want one reused task", direct)
+	}
+}
+
+func TestAdminGroupsFreshCancellationDoesNotReadMainGroups(t *testing.T) {
+	started := make(chan string, 4)
+	release := make(chan struct{})
+	metadataReader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{
+			connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")},
+			session:     upstream.Session{Platform: upstream.PlatformSub2API},
+		},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-1|key-1": {ID: "key-1", GroupID: "group-1", GroupName: "vip"},
+		},
+		started: started,
+		release: release,
+	}
+	service := newAdminGroupsService(
+		orderedPlatformGroupReader{started: started, groups: []upstream.AdminGroupInfo{{ID: "group-1", Name: "group"}}},
+		metadataReader,
+		newFakeRepository(),
+	)
+	service.sites = snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.AdminGroupsFresh(ctx, "user1")
+		done <- err
+	}()
+	select {
+	case event := <-started:
+		if event != "site-1" {
+			t.Fatalf("first external event = %q, want site-1", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fresh request did not start the external multiplier refresh")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("AdminGroupsFresh() error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled fresh request did not finish")
+	}
+	for {
+		select {
+		case event := <-started:
+			if event == "groups" || event == "accounts" {
+				t.Fatalf("main-site read started after cancellation: %q", event)
+			}
+		default:
+			return
+		}
+	}
+}
+
+func TestAdminGroupsFreshResultReportsPerSiteTerminalStates(t *testing.T) {
+	metadataReader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{
+			connections: []my_sites.RealConnection{
+				snapshotConnection("account-1", "site-1", "key-1"),
+				snapshotConnection("account-2", "site-2", "key-2"),
+			},
+			session: upstream.Session{Platform: upstream.PlatformSub2API},
+		},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-1|key-1": {ID: "key-1", GroupID: "group-1", GroupName: "vip"},
+		},
+		directErrs: map[string]error{
+			"site-2": &upstream.RequestError{MessageKey: upstream.ErrorAuth, Platform: upstream.PlatformSub2API, StatusCode: 401},
+		},
+	}
+	service := newAdminGroupsService(
+		fakePlatformGroupReader{groups: []upstream.AdminGroupInfo{{ID: "group-1", Name: "group"}}},
+		metadataReader,
+		newFakeRepository(),
+	)
+	service.sites = snapshotSiteLookup{sites: map[string]*upstream.Site{
+		"site-1": snapshotSite("site-1"),
+		"site-2": snapshotSite("site-2"),
+	}}
+
+	result, err := service.AdminGroupsFreshResult(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("AdminGroupsFreshResult() error = %v", err)
+	}
+	if result.Refresh.State != "partial" {
+		t.Fatalf("refresh state = %q, want partial", result.Refresh.State)
+	}
+	statuses := make(map[string]string, len(result.Refresh.Sites))
+	for _, site := range result.Refresh.Sites {
+		statuses[site.SiteID] = site.Status
+	}
+	if statuses["site-1"] != "success" {
+		t.Fatalf("site-1 status = %q, want success", statuses["site-1"])
+	}
+	if statuses["site-2"] != "auth_failed" {
+		t.Fatalf("site-2 status = %q, want auth_failed", statuses["site-2"])
 	}
 }
 
@@ -1291,6 +1490,115 @@ func TestAdminGroups_AssignedPolicyFieldsReflectAssignments(t *testing.T) {
 	// 未分配策略不影响是否可手动探活：账号 200 仍然凭 base_url + 策略模型池可探活。
 	if !unassigned.ProbeAvailable {
 		t.Fatalf("unassigned account should still be manually probeable, got %+v", unassigned)
+	}
+}
+
+func TestAdminGroups_EnabledTargetPolicyDoesNotUseInheritedGroupPolicy(t *testing.T) {
+	repo := newFakeRepository()
+	direct := probePolicy()
+	direct.ModelTargets[0].ModelName = "direct-model"
+	group := probePolicy()
+	group.ID = "policy-group"
+	group.ModelTargets[0].PolicyID = group.ID
+	group.ModelTargets[0].ModelName = "group-model"
+	repo.policies = []Policy{direct, group}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "newapi:ws1:100", PolicyID: direct.ID,
+	}}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "vip", PolicyID: group.ID,
+	}}
+	mySites := fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI}}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "100", Name: "assigned", BaseURL: "https://up", Models: "direct-model,group-model"}},
+		},
+	}
+
+	groups, err := newAdminGroupsService(reader, mySites, repo).AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 || len(groups[0].Accounts) != 1 {
+		t.Fatalf("unexpected admin groups: %+v", groups)
+	}
+	account := groups[0].Accounts[0]
+	if account.PolicyAssignmentSource != "target" {
+		t.Fatalf("enabled target policy must override inherited group policy, source=%q", account.PolicyAssignmentSource)
+	}
+	if len(account.UnprobedModels) != 1 || account.UnprobedModels[0].ModelName != "direct-model" {
+		t.Fatalf("effective models must exclude inherited group policy, got %+v", account.UnprobedModels)
+	}
+	payload, err := json.Marshal(account)
+	if err != nil {
+		t.Fatalf("marshal account: %v", err)
+	}
+	var effective struct {
+		PolicyIDs []string                `json:"effectivePolicyIds"`
+		Policies  []AssignedPolicySummary `json:"effectivePolicies"`
+	}
+	if err := json.Unmarshal(payload, &effective); err != nil {
+		t.Fatalf("unmarshal effective policy fields: %v", err)
+	}
+	if len(effective.PolicyIDs) != 1 || effective.PolicyIDs[0] != direct.ID {
+		t.Fatalf("effective policy ids must contain only the enabled target policy, got %+v", effective.PolicyIDs)
+	}
+	if len(effective.Policies) != 1 || effective.Policies[0].PolicyID != direct.ID {
+		t.Fatalf("effective policies must exclude the inherited group policy, got %+v", effective.Policies)
+	}
+}
+
+func TestAdminGroups_AccountMultiplierOnlyPolicyMarksGroupPriorityMode(t *testing.T) {
+	repo := newFakeRepository()
+	direct := probePolicy()
+	direct.ID = "multiplier-only"
+	direct.StrategyMode = StrategyModeMultiplierOnly
+	direct.PriorityMode = PriorityModeMultiplier
+	direct.ModelTargets = nil
+	repo.policies = []Policy{direct}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "newapi:ws1:100", PolicyID: direct.ID,
+	}}
+	mySites := fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI}}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "100", Name: "assigned", BaseURL: "https://up", Models: "gpt-4o"}},
+		},
+	}
+
+	groups, err := newAdminGroupsService(reader, mySites, repo).AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 || groups[0].PriorityMode != PriorityModeMultiplier {
+		t.Fatalf("account-level multiplier-only policy must mark group priority mode, got %+v", groups)
+	}
+}
+
+func TestAdminGroups_AccountPolicyMarksGroupAsMonitored(t *testing.T) {
+	repo := newFakeRepository()
+	direct := probePolicy()
+	direct.ModelTargets[0].ModelName = "direct-model"
+	repo.policies = []Policy{direct}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "newapi:ws1:100", PolicyID: direct.ID,
+	}}
+	mySites := fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI}}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "100", Name: "assigned", BaseURL: "https://up", Models: "direct-model"}},
+		},
+	}
+
+	groups, err := newAdminGroupsService(reader, mySites, repo).AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 || !groups[0].HasEnabledProbePolicy || !groups[0].HasEnabledPolicy {
+		t.Fatalf("account-level enabled policy must mark group as monitored, got %+v", groups)
 	}
 }
 

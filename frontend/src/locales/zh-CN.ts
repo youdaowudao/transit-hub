@@ -988,6 +988,22 @@ export default {
       summaryLabel: '分组健康汇总',
       groupListLabel: '上游分组列表',
       refresh: '刷新',
+      refreshStatus: {
+        success: '本轮刷新完成',
+        partial: '本轮刷新部分完成',
+        failure: '本轮刷新失败，已保留旧数据',
+        timeout: '本轮刷新包含超时站点',
+        sitesLabel: '站点终态',
+        site: {
+          success: '成功',
+          auth_failed: '鉴权失败',
+          stale: '旧快照',
+          stale_auth: '旧快照（鉴权失败）',
+          stale_timeout: '旧快照（超时）',
+          unavailable: '不可用',
+          timeout: '超时'
+        }
+      },
       empty: '当前 admin workspace 下暂无可探活的账号/渠道。',
       adminEmpty: '当前 admin workspace 下暂无分组。',
       notConnected: '未对接',
@@ -1070,6 +1086,7 @@ export default {
           unknown: '未知'
         },
         actions: {
+          assignPolicy: '设置账号策略',
           disableScheduling: '关闭主站调度',
           enableScheduling: '恢复主站调度'
         },
@@ -1142,6 +1159,7 @@ export default {
           unassociatedBandEnd: '未关联真实连接，已按当前健康档末位排序',
           missingBandEnd: 'Key 分组或倍率缺失，已按当前健康档末位排序',
           conflictBandEnd: '多 Key 或分组冲突，已按当前健康档末位排序',
+          staleBandEnd: '本轮查询失败，已沿用旧快照并按当前健康档末位排序',
           unavailableBandEnd: '本轮上游查询暂不可用，已按当前健康档末位排序',
           unknownBandEnd: '倍率来源未知，已按当前健康档末位排序'
         },

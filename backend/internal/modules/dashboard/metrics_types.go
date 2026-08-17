@@ -13,6 +13,9 @@ const (
 	SettlementStatusUnavailable = "unavailable"  // 当前日没有可用于展示的成本/利润值
 )
 
+// CostQualityModeUnknown 表示历史快照没有记录成本质量元数据；它不表示金额字段不可用。
+const CostQualityModeUnknown = "unknown"
+
 // 数据来源常量。
 const (
 	SnapshotSourceLiveCache  = "live_cache"  // 首页请求时从内存缓存写入
@@ -118,7 +121,7 @@ type DailySnapshot struct {
 	CostFreshCount        *int       // 本次尝试新确认的站点数
 	CostRetainedCount     *int       // 本次失败但沿用同日确认值的站点数
 	CostMissingCount      *int       // 没有同日确认值的站点数
-	CostQualityMode       string     // exact/retained/partial/unavailable
+	CostQualityMode       string     // exact/retained/partial/unavailable/unknown
 	BalanceObservedAt     *time.Time // 余额观测时间
 	AdditionalCost        *float64
 	RechargeFee           *float64

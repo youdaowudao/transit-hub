@@ -320,7 +320,8 @@ func (s *Service) restoreUnmanagedTargetActions(
 		}
 		var target AdminProbeTarget
 		found := false
-		effectivePolicies := append([]Policy(nil), targetPolicies[stored.UserID+"|"+stored.AdminAccountID][stored.TargetID]...)
+		targetPolicySet := targetPolicies[stored.UserID+"|"+stored.AdminAccountID][stored.TargetID]
+		inheritedPolicies := make([]Policy, 0)
 		for _, groupInventory := range inventory.groups {
 			if groupInventory.err != nil {
 				continue
@@ -342,10 +343,11 @@ func (s *Service) restoreUnmanagedTargetActions(
 				}
 				workspaceKey := stored.UserID + "|" + stored.AdminAccountID
 				if !excluded[workspaceKey][groupInventory.group.ID][targetID] {
-					effectivePolicies = mergePoliciesByID(effectivePolicies, groupPolicies[workspaceKey][groupInventory.group.ID])
+					inheritedPolicies = mergePoliciesByID(inheritedPolicies, groupPolicies[workspaceKey][groupInventory.group.ID])
 				}
 			}
 		}
+		effectivePolicies := effectivePoliciesForTarget(targetPolicySet, inheritedPolicies)
 		if hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies)) {
 			continue
 		}

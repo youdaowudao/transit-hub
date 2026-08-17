@@ -61,6 +61,24 @@ type AdminGroupHealth struct {
 	Accounts      []AdminGroupAccount `json:"accounts"`
 }
 
+// AdminGroupsFreshResult is the one-shot方案 A response. Refresh contains only
+// this request's in-memory terminal summary; it is not a persisted task state.
+type AdminGroupsFreshResult struct {
+	Groups  []AdminGroupHealth        `json:"groups"`
+	Refresh AdminGroupsRefreshSummary `json:"refresh"`
+}
+
+type AdminGroupsRefreshSummary struct {
+	State string                   `json:"state"`
+	Sites []AdminGroupsRefreshSite `json:"sites"`
+}
+
+type AdminGroupsRefreshSite struct {
+	SiteID   string `json:"siteId"`
+	Status   string `json:"status"`
+	ErrorKey string `json:"errorKey,omitempty"`
+}
+
 // AdminGroupHealthSummary 是单个 admin 分组的探活健康概览，用于主列表快速展示。
 // 独立探活语义下：ProbeableAccounts = 可探活账号数，UnprobeableAccounts = 不可探活账号数
 // （缺密钥/缺 base_url/缺模型等）。
@@ -119,8 +137,11 @@ type AdminGroupAccount struct {
 	UnprobedModels []AdminGroupUnprobedModel `json:"unprobedModels,omitempty"`
 	// 策略分配字段：与 ProbeAvailable 完全解耦——未分配策略的账号/渠道仍可手动一次性探活，
 	// 只是不会被调度器自动探活、不会进策略探活事件列表。
-	AssignedPolicyIDs          []string                `json:"assignedPolicyIds"`
-	AssignedPolicies           []AssignedPolicySummary `json:"assignedPolicies"`
+	AssignedPolicyIDs []string                `json:"assignedPolicyIds"`
+	AssignedPolicies  []AssignedPolicySummary `json:"assignedPolicies"`
+	// EffectivePolicy* 是经过账号级覆盖/分组继承解析后，实际用于该目标的启用策略。
+	EffectivePolicyIDs         []string                `json:"effectivePolicyIds"`
+	EffectivePolicies          []AssignedPolicySummary `json:"effectivePolicies"`
 	HasAssignedPolicy          bool                    `json:"hasAssignedPolicy"`
 	HasEnabledPolicy           bool                    `json:"hasEnabledPolicy"`
 	HasEnabledProbePolicy      bool                    `json:"hasEnabledProbePolicy"`
@@ -171,8 +192,33 @@ func (s *Service) SetGroupCostReader(reader GroupCostReader) {
 
 // AdminGroups 按「当前 admin workspace 下的 admin 全量分组 -> 分组下账号/渠道（独立探活目标）
 // -> 独立探活状态叠加」聚合分组健康主列表。探活状态来自以 targetId 为键的独立探活状态行，
-// 不依赖 real_connections。
+// 不依赖 real_connections。普通读取保持现有静默后台刷新语义。
 func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupHealth, error) {
+	return s.adminGroups(ctx, userID, false)
+}
+
+// AdminGroupsFresh implements方案 A：等待当前请求涉及的外部倍率任务全部进入终态，
+// 再读取一轮主站实时分组和账号。它不创建任务表、不提供轮询状态，也不改变普通自动刷新路径。
+func (s *Service) AdminGroupsFresh(ctx context.Context, userID string) ([]AdminGroupHealth, error) {
+	return s.adminGroups(ctx, userID, true)
+}
+
+func (s *Service) AdminGroupsFreshResult(ctx context.Context, userID string) (AdminGroupsFreshResult, error) {
+	groups, err := s.AdminGroupsFresh(ctx, userID)
+	if err != nil {
+		return AdminGroupsFreshResult{}, err
+	}
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return AdminGroupsFreshResult{}, err
+	}
+	return AdminGroupsFreshResult{
+		Groups:  groups,
+		Refresh: s.multiplierRefreshSummary(userID, adminAccountID),
+	}, nil
+}
+
+func (s *Service) adminGroups(ctx context.Context, userID string, waitForFresh bool) ([]AdminGroupHealth, error) {
 	requestStarted := time.Now()
 	workspaceStarted := time.Now()
 	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
@@ -191,6 +237,17 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 	}
 	sessionDuration := time.Since(sessionStarted)
 	platform := string(session.Platform)
+	var upstreamMultiplierLookup upstreamMultiplierLookup
+	var multiplierDuration time.Duration
+	if waitForFresh {
+		multiplierStarted := time.Now()
+		upstreamMultiplierLookup = s.freshMultiplierLookupForWorkspace(ctx, userID, adminAccountID, platform)
+		multiplierDuration = time.Since(multiplierStarted)
+		log.Printf("[connection-health] fresh multiplier refresh completed workspace=%s duration=%s", adminAccountID, multiplierDuration)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 
 	groupFetchStarted := time.Now()
 	groups, err := s.fetchAdminAllGroups(ctx, session)
@@ -279,9 +336,11 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 	budgetDayStart := probeBudgetDayStart(now)
 	// 真实上游 API Key 分组原始倍率和站点充值倍率用于计算有效倍率。读取失败时降级为空，
 	// 保证既有分组健康功能不会因为可选的倍率信息不可用而中断。
-	multiplierStarted := time.Now()
-	upstreamMultiplierLookup := s.cachedAdminGroupMultiplierLookup(ctx, userID, adminAccountID, platform)
-	multiplierDuration := time.Since(multiplierStarted)
+	if !waitForFresh {
+		multiplierStarted := time.Now()
+		upstreamMultiplierLookup = s.cachedAdminGroupMultiplierLookup(ctx, userID, adminAccountID, platform)
+		multiplierDuration = time.Since(multiplierStarted)
+	}
 	costSnapshotsBySource := make(map[string]upstream.GroupCostSnapshot)
 	costStarted := time.Now()
 	if s.groupCosts != nil {
@@ -349,7 +408,8 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 					}
 				}
 			}
-			if hasHealthMultiplierPriorityPolicy(directPolicies) || hasHealthMultiplierPriorityPolicy(inheritedPolicies) {
+			effectivePolicies := effectivePoliciesForTarget(directPolicies, inheritedPolicies)
+			if hasHealthMultiplierPriorityPolicy(effectivePolicies) {
 				healthFallbacksByTarget[targetID] = append(healthFallbacksByTarget[targetID], *fallback)
 			}
 		}
@@ -397,11 +457,8 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 		health.HasAssignedPolicy = len(health.AssignedPolicyIDs) > 0
 		health.HasEnabledPolicy = hasEnabledAssignedPolicy(health.AssignedPolicies)
 		health.HasEnabledProbePolicy = hasEnabledProbePolicyByIDs(health.AssignedPolicyIDs, policyByID)
-		for _, policyID := range health.AssignedPolicyIDs {
-			if policy, ok := policyByID[policyID]; ok && policy.Enabled && normalizePriorityMode(policy.PriorityMode) == PriorityModeMultiplier {
-				health.PriorityMode = PriorityModeMultiplier
-				break
-			}
+		if hasMultiplierPriorityPolicy(policiesForIDs(health.AssignedPolicyIDs, policyByID)) {
+			health.PriorityMode = PriorityModeMultiplier
 		}
 
 		inventory := accountsByGroup[group.ID]
@@ -441,12 +498,15 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 			inheritedIDs := inheritedPolicyIDsByTarget[targetID]
 			assignedIDs := mergePolicyIDs(explicitIDs, inheritedIDs)
 			assignedIDs, assignedSummaries := assignedPolicySummariesFromIDs(assignedIDs, policyByID)
-			effectivePolicies := make([]Policy, 0, len(assignedIDs))
-			for _, policyID := range assignedIDs {
-				if policy, ok := policyByID[policyID]; ok {
-					effectivePolicies = append(effectivePolicies, policy)
-				}
+			effectivePolicies := effectivePoliciesForTarget(
+				policiesForIDs(explicitIDs, policyByID),
+				policiesForIDs(inheritedIDs, policyByID),
+			)
+			effectivePolicyIDs := make([]string, 0, len(effectivePolicies))
+			for _, policy := range effectivePolicies {
+				effectivePolicyIDs = append(effectivePolicyIDs, policy.ID)
 			}
+			effectivePolicyIDs, effectivePolicySummaries := assignedPolicySummariesFromIDs(effectivePolicyIDs, policyByID)
 			decisionAccount := decisionAccountByTarget[targetID]
 			activeSpecs := candidateModelSpecsForPlatform(splitModelList(decisionAccount.Models), effectivePolicies, platform)
 			hasProbePolicy := hasEnabledProbePolicy(effectivePolicies)
@@ -465,7 +525,24 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 				available = false
 				reason = credentialReason
 			}
-			assignmentSource := policyAssignmentSource(explicitIDs, inheritedIDs)
+			assignmentSource := policyAssignmentSourceForPolicies(
+				policiesForIDs(explicitIDs, policyByID),
+				policiesForIDs(inheritedIDs, policyByID),
+			)
+			// 分组左侧摘要也要反映账号级独立策略，否则“分组没有策略、但账号已单独启用策略”
+			// 会在账号行正确监控、分组列表却显示未监控。
+			if len(effectivePolicies) > 0 {
+				health.HasAssignedPolicy = true
+			}
+			if len(effectivePolicies) > 0 {
+				health.HasEnabledPolicy = true
+			}
+			if hasProbePolicy {
+				health.HasEnabledProbePolicy = true
+			}
+			if hasMultiplierPriorityPolicy(effectivePolicies) {
+				health.PriorityMode = PriorityModeMultiplier
+			}
 			priorityState, priorityManaged := priorityByTarget[targetID]
 			var priorityOriginal, priorityExpected, priorityConflictValue *int
 			var priorityConflictAt *time.Time
@@ -558,6 +635,8 @@ func (s *Service) AdminGroups(ctx context.Context, userID string) ([]AdminGroupH
 				UnprobedModels:                unprobedModels,
 				AssignedPolicyIDs:             assignedIDs,
 				AssignedPolicies:              assignedSummaries,
+				EffectivePolicyIDs:            effectivePolicyIDs,
+				EffectivePolicies:             effectivePolicySummaries,
 				HasAssignedPolicy:             len(assignedIDs) > 0,
 				HasEnabledPolicy:              hasEnabledAssignedPolicy(assignedSummaries),
 				HasEnabledProbePolicy:         hasProbePolicy,
@@ -1572,19 +1651,6 @@ func mergePolicyIDs(groups ...[]string) []string {
 		}
 	}
 	return result
-}
-
-func policyAssignmentSource(explicitIDs []string, inheritedIDs []string) string {
-	switch {
-	case len(explicitIDs) > 0 && len(inheritedIDs) > 0:
-		return "mixed"
-	case len(explicitIDs) > 0:
-		return "target"
-	case len(inheritedIDs) > 0:
-		return "group"
-	default:
-		return "none"
-	}
 }
 
 // adminGroupType 把 upstream 的分组标志归一化为主列表展示用的类型：

@@ -25,7 +25,7 @@ describe('connection health account policy assignment', () => {
     expect(viewSource).toContain("import TargetPolicyAssignmentDialog from '../components/dashboard/TargetPolicyAssignmentDialog.vue'")
     expect(viewSource).toContain('@assign-policy="onAssignPolicy"')
     expect(viewSource).toContain(':target-id="policyAssignmentTarget?.targetId ?? \'\'"')
-    expect(viewSource).toContain('await Promise.all([loadAdminGroups({ silent: true }), loadPrioritySyncStatus()])')
+    expect(viewSource).toContain("await Promise.all([loadAdminGroups({ silent: true }), runAuxiliaryRequest('priority', loadPrioritySyncStatus)])")
   })
 
   it('ignores stale target-policy reads after the dialog target changes', () => {

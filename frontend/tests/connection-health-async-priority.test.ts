@@ -16,13 +16,13 @@ describe('connection health asynchronous Priority synchronization', () => {
   it('keeps the saved group update local instead of reloading the full health page', () => {
     const handler = healthViewSource.match(/const onSetupSaved = async[\s\S]*?\n}\n\n\/\/ 手动探活弹窗/)?.[0] ?? ''
     expect(handler).toContain('applySavedGroupConfiguration(configuration)')
-    expect(handler).toContain('loadPrioritySyncStatus()')
-    expect(handler).toContain('loadPolicies()')
+    expect(handler).toContain("runAuxiliaryRequest('priority', loadPrioritySyncStatus)")
+    expect(handler).toContain("runAuxiliaryRequest('policies'")
     expect(handler).not.toContain('loadAll(')
   })
 
   it('shows persisted asynchronous failure after entering the page again while local save failures keep the drawer open', () => {
-    expect(healthViewSource).toContain('void loadPrioritySyncStatus()')
+    expect(healthViewSource).toContain("void runAuxiliaryRequest('priority', loadPrioritySyncStatus)")
     expect(healthViewSource).toContain("prioritySyncStatus?.status === 'failed'")
     expect(healthViewSource).toContain("prioritySyncStatus?.status === 'pending' || prioritySyncStatus?.status === 'running'")
 

@@ -125,6 +125,10 @@ const isNotProbed = (account: AdminGroupAccount): boolean =>
   account.probeAvailable && account.probeModelsConfigured !== false && (unprobedModels(account).length > 0 || account.modelHealth.length === 0)
 
 const isSub2API = (account: AdminGroupAccount): boolean => account.targetId.toLowerCase().startsWith('sub2api:')
+const hasMainSiteError = (account: AdminGroupAccount): boolean =>
+  isSub2API(account) && (account.status?.toLowerCase() === 'error' || Boolean(account.mainSiteError?.trim()))
+const mainSiteErrorReason = (account: AdminGroupAccount): string =>
+  account.mainSiteError?.trim() || t(`${detailPrefix}.mainSiteErrorReasonUnavailable`)
 const schedulableLabel = (account: AdminGroupAccount): string => {
   if (!isSub2API(account)) return t(`${detailPrefix}.notApplicable`)
   if (account.schedulable == null) return t(`${detailPrefix}.schedulableUnknown`)
@@ -736,6 +740,10 @@ const multiplierSourceLabel = (account: AdminGroupAccount): string => {
                     <p class="truncate font-medium text-foreground">{{ account.name || account.id }}</p>
                     <p class="mt-0.5 truncate text-xs text-muted-foreground">
                       {{ account.platform || account.type || '-' }} · {{ upstreamStatusLabel(account) }} · {{ schedulableLabel(account) }}
+                    </p>
+                    <p v-if="hasMainSiteError(account)" class="mt-0.5 flex items-center gap-1 truncate text-xs font-medium text-destructive">
+                      <AlertTriangle class="h-3 w-3 shrink-0" />
+                      {{ t(`${detailPrefix}.mainSiteError`, { reason: mainSiteErrorReason(account) }) }}
                     </p>
                     <p class="mt-0.5 truncate text-[11px] text-muted-foreground">
                       {{ t(`${detailPrefix}.statusSources`, { upstream: statusSourceLabel(account.upstreamStatusSource), health: statusSourceLabel(account.healthStatusSource), schedulable: statusSourceLabel(account.schedulableSource) }) }}

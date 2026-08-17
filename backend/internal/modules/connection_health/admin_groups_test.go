@@ -563,6 +563,53 @@ func TestAdminGroups_TargetIDProbeAvailableAndModelHealth(t *testing.T) {
 	}
 }
 
+func TestAdminGroups_PreservesMainSiteErrorAlongsideStatusSchedulableAndModelHealth(t *testing.T) {
+	repo := newFakeRepository()
+	schedulable := true
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{
+				ID:           "100",
+				Name:         "broken-account",
+				Status:       "active",
+				ErrorMessage: "upstream returned 503",
+				Schedulable:  &schedulable,
+				Models:       "gpt-4o",
+			}},
+		},
+	}
+	service := newAdminGroupsService(
+		reader,
+		fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		repo,
+	)
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 || len(groups[0].Accounts) != 1 {
+		t.Fatalf("unexpected groups: %+v", groups)
+	}
+	account := groups[0].Accounts[0]
+	if account.Status != "active" {
+		t.Fatalf("main-site status = %q, want active", account.Status)
+	}
+	if account.Schedulable == nil || !*account.Schedulable {
+		t.Fatalf("schedulable = %v, want true", account.Schedulable)
+	}
+	if account.MainSiteError != "upstream returned 503" {
+		t.Fatalf("main-site error = %q, want upstream returned 503", account.MainSiteError)
+	}
+	if account.ModelHealth == nil {
+		t.Fatal("modelHealth must remain a non-nil independent field")
+	}
+	if len(repo.events) != 0 {
+		t.Fatalf("main-site error projection must not write health events: %+v", repo.events)
+	}
+}
+
 func TestAdminGroups_PairsLastFailureTimeWithLatestFailureDetailsAfterRecovery(t *testing.T) {
 	repo := newFakeRepository()
 	policy := probePolicy()

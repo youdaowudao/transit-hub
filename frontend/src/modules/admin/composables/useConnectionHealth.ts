@@ -195,10 +195,11 @@ export function useConnectionHealth() {
       return true
     } catch (err) {
       if (sequence !== adminGroupsRequestSequence) return false
-      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      const refreshErrorKey = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      errorKey.value = refreshErrorKey
       manualRefreshState.value = 'failure'
       manualRefreshSites.value = []
-      terminalRefreshSummary.value = { state: 'failure', sites: [] }
+      terminalRefreshSummary.value = { state: 'failure', errorKey: refreshErrorKey, sites: [] }
       return false
     } finally {
       manualRefreshRequests.value--
@@ -219,8 +220,9 @@ export function useConnectionHealth() {
       return true
     } catch (err) {
       if (sequence !== adminGroupsRequestSequence) return false
-      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
-      terminalRefreshSummary.value = { state: 'failure', sites: [] }
+      const refreshErrorKey = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      errorKey.value = refreshErrorKey
+      terminalRefreshSummary.value = { state: 'failure', errorKey: refreshErrorKey, sites: [] }
       return false
     } finally {
       terminalRefreshRequests.value--
@@ -236,7 +238,7 @@ export function useConnectionHealth() {
     await Promise.all([loadAdminGroups(opts), loadGroups({ silent: true })])
   }
 
-  const loadEvents = async (connectionId?: string): Promise<boolean> => {
+  const loadEvents = async (connectionId?: string, opts: { recordError?: boolean } = {}): Promise<boolean> => {
     const sequence = ++eventsRequestSequence
     const scope = connectionId ?? ''
     activeEventsScope = scope
@@ -250,18 +252,24 @@ export function useConnectionHealth() {
       return true
     } catch (err) {
       if (scope === activeEventsScope && sequence >= eventsAppliedSequence) {
-        events.value = []
-        errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+        if (opts.recordError !== false) {
+          events.value = []
+          errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+        }
       }
       return false
     }
   }
 
-  const loadPolicies = async () => {
+  const loadPolicies = async (opts: { recordError?: boolean } = {}) => {
     try {
       policies.value = await listConnectionHealthPolicies()
+      return true
     } catch (err) {
-      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      if (opts.recordError !== false) {
+        errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      }
+      return false
     }
   }
 

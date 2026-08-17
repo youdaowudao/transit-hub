@@ -24,6 +24,7 @@ type AdminGroupAccountInfo struct {
 	Platform       string     // 上游平台标识（openai / anthropic / ...），可能为空
 	Type           string     // sub2api 账号类型 / new-api channel 类型（数值转字符串）
 	Status         string     // 状态（字符串或数值转字符串）
+	ErrorMessage   string     `json:"-"` // Sub2API 主站运行错误原因；只保留脱敏后的短文本
 	Priority       *int       // 优先级
 	Concurrency    *int       // 并发（sub2api）
 	RateMultiplier *float64   // Sub2API admin 转发账号记录自身的 rate_multiplier，不代表上游 API Key 所属分组倍率。
@@ -104,11 +105,16 @@ func (s *PlatformService) listSub2APIGroupAccountsContext(ctx context.Context, s
 
 // parseSub2APIAccount 把 sub2api 账号原始记录解析为平台中性结构，主动丢弃 credentials 等敏感字段。
 func parseSub2APIAccount(record map[string]any) AdminGroupAccountInfo {
+	var errorMessage string
+	if value := firstString(record, []string{"error_message", "errorMessage"}); value != nil {
+		errorMessage = *value
+	}
 	account := AdminGroupAccountInfo{
 		ID:             groupID2(record),
 		Name:           safeString(record, "name"),
 		Type:           stringOrNumberField(record, []string{"type"}),
 		Status:         stringOrNumberField(record, []string{"status"}),
+		ErrorMessage:   sanitizeSub2APIErrorMessage(errorMessage),
 		Priority:       firstInt(record, []string{"priority"}),
 		Concurrency:    firstInt(record, []string{"concurrency"}),
 		RateMultiplier: firstNumber(record, []string{"rate_multiplier", "rateMultiplier"}),
@@ -124,6 +130,69 @@ func parseSub2APIAccount(record map[string]any) AdminGroupAccountInfo {
 		account.Models = *m
 	}
 	return account
+}
+
+func sanitizeSub2APIErrorMessage(raw string) string {
+	value := strings.Join(strings.Fields(strings.TrimSpace(raw)), " ")
+	if value == "" {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	for _, marker := range []string{
+		"access_token=",
+		"access_token:",
+		"access_token",
+		"refresh_token=",
+		"refresh_token:",
+		"refresh_token",
+		"api_key=",
+		"api_key:",
+		"api_key",
+		"api key",
+		"apikey=",
+		"apikey:",
+		"apikey",
+		"api-key=",
+		"api-key:",
+		"api-key",
+		"authorization=",
+		"authorization:",
+		"authorization ",
+		"bearer ",
+		"cookie=",
+		"cookie:",
+		"cookie ",
+		"credentials=",
+		"credentials:",
+		"credentials",
+		"client_secret=",
+		"client_secret:",
+		"client_secret",
+		"password=",
+		"password:",
+		"password",
+		"secret=",
+		"secret:",
+		"secret",
+		"token=",
+		"token:",
+		"token ",
+		"x-api-key=",
+		"x-api-key:",
+		"x-api-key",
+	} {
+		if strings.Contains(lower, marker) {
+			return ""
+		}
+	}
+	if strings.Contains(value, "://") || strings.Contains(value, "?") || strings.Contains(value, "&") {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) > 160 {
+		runes = runes[:160]
+	}
+	return string(runes)
 }
 
 // listNewAPIGroupChannels 读取 new-api 某分组下的 channel 列表。

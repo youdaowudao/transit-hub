@@ -57,10 +57,9 @@ describe('connection health terminal refresh flow', () => {
     expect(viewSource).toContain('terminalRefreshSummary.value?.sites')
   })
 
-  it('renders failed and successful site results in separate rows', () => {
+  it('renders only failed site results', () => {
     expect(viewSource).toContain('failedRefreshSites')
-    expect(viewSource).toContain('successfulRefreshSites')
     expect(viewSource).toContain('failedRefreshSites.length > 0')
-    expect(viewSource).toContain('successfulRefreshSites.length > 0')
+    expect(viewSource).not.toContain('successfulRefreshSites')
   })
 })

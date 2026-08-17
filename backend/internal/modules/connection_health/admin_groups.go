@@ -107,6 +107,7 @@ type AdminGroupAccount struct {
 	Platform                      string     `json:"platform"`
 	Type                          string     `json:"type"`
 	Status                        string     `json:"status"`
+	MainSiteError                 string     `json:"mainSiteError,omitempty"`
 	Schedulable                   *bool      `json:"schedulable,omitempty"`
 	SchedulableSource             string     `json:"schedulableSource"`
 	SchedulableChangedAt          *time.Time `json:"schedulableChangedAt,omitempty"`
@@ -633,6 +634,7 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 				Platform:                      acc.Platform,
 				Type:                          acc.Type,
 				Status:                        acc.Status,
+				MainSiteError:                 mainSiteErrorForAccount(platform, acc),
 				Schedulable:                   decisionAccount.Schedulable,
 				SchedulableSource:             schedulableSource,
 				SchedulableChangedAt:          schedulableChangedAt,
@@ -793,6 +795,13 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 		time.Since(assemblyStarted),
 	)
 	return result, nil
+}
+
+func mainSiteErrorForAccount(platform string, account upstream.AdminGroupAccountInfo) string {
+	if platform != string(upstream.PlatformSub2API) {
+		return ""
+	}
+	return account.ErrorMessage
 }
 
 func finalizeAdminGroupProductionOrder(groups []AdminGroupHealth, platform upstream.Platform, healthCandidatesByTarget map[string]healthPriorityCandidate) {

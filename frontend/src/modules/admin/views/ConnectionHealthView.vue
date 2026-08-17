@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -90,9 +90,19 @@ const preferences = ref<ConnectionHealthPreferences>(createDefaultConnectionHeal
 const groupManagerOpen = ref(false)
 const prioritySyncStatus = ref<PrioritySyncStatus | null>(null)
 const refreshLoading = ref(false)
+const refreshStartedAt = ref<number | null>(null)
+const refreshWaitSeconds = ref(0)
+let refreshWaitTimer: ReturnType<typeof setInterval> | null = null
 const refreshCoordinator = createRefreshCoordinator()
 const preferenceScope = computed(() => currentAccount.value?.id ?? 'anonymous')
 let loadedPreferenceScope = ''
+
+type AuxiliaryFailureSource = 'policies' | 'events' | 'priority' | 'siteNames'
+type AuxiliaryFailure = {
+  source: AuxiliaryFailureSource
+  reasonKey: string
+}
+const auxiliaryFailures = ref<AuxiliaryFailure[]>([])
 
 const groupTypes = ['public', 'exclusive', 'subscription']
 const groupTypeLabel = (type: string): string => t(`admin.connectionHealth.groupTypes.${groupTypes.includes(type) ? type : 'public'}`)
@@ -249,6 +259,41 @@ const clearGroupHighlight = () => {
 const monitoredGroupCount = computed(() => adminGroups.value.filter(groupMonitoringEnabled).length)
 const conflictCount = computed(() => adminGroups.value.reduce((sum, group) => sum + (group.priorityConflictCount ?? 0), 0))
 const readableMessage = (rawKey: string): string => t(connectionHealthMessageKey(rawKey, te))
+const auxiliarySourceLabel = (source: AuxiliaryFailureSource): string =>
+  t(`admin.connectionHealth.refreshStatus.auxiliarySource.${source}`)
+const auxiliaryFailureText = (failure: AuxiliaryFailure): string =>
+  t('admin.connectionHealth.refreshStatus.auxiliaryFailure', {
+    source: auxiliarySourceLabel(failure.source),
+    reason: readableMessage(failure.reasonKey),
+  })
+
+const setAuxiliaryFailure = (source: AuxiliaryFailureSource, reasonKey: string) => {
+  auxiliaryFailures.value = [
+    ...auxiliaryFailures.value.filter(failure => failure.source !== source),
+    { source, reasonKey },
+  ]
+}
+
+const clearAuxiliaryFailure = (source: AuxiliaryFailureSource) => {
+  auxiliaryFailures.value = auxiliaryFailures.value.filter(failure => failure.source !== source)
+}
+
+const runAuxiliaryRequest = async (source: AuxiliaryFailureSource, request: () => Promise<boolean | void>): Promise<boolean> => {
+  clearAuxiliaryFailure(source)
+  try {
+    const ok = await request()
+    if (ok === false) {
+      const reasonKey = 'admin.connectionHealth.errors.request'
+      setAuxiliaryFailure(source, reasonKey)
+      return false
+    }
+    return true
+  } catch (err) {
+    const reasonKey = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+    setAuxiliaryFailure(source, reasonKey)
+    return false
+  }
+}
 
 const priorityFailureTime = computed(() => {
 	const raw = prioritySyncStatus.value?.lastFailureAt
@@ -259,11 +304,13 @@ const priorityFailureTime = computed(() => {
 		: parsed.toLocaleString('zh-CN', { hour12: false })
 })
 
-const loadPrioritySyncStatus = async () => {
+const loadPrioritySyncStatus = async (): Promise<boolean> => {
 	try {
 		prioritySyncStatus.value = await getPrioritySyncStatus()
+    return true
 	} catch {
 		// 同步状态是轻量辅助信息；读取失败不覆盖主列表的真实请求错误。
+    return false
 	}
 }
 
@@ -288,12 +335,14 @@ const applySavedGroupConfiguration = (configuration?: AdminGroupPolicyConfigurat
 	}
 }
 
-const loadSiteNames = async () => {
+const loadSiteNames = async (): Promise<boolean> => {
   try {
     const sites = await listUpstreamSites()
     siteNameMap.value = new Map(sites.map((site) => [site.id, site.name]))
+    return true
   } catch {
     // 站点名称仅用于事件展示，失败时保留 ID，不阻塞健康主流程。
+    return false
   }
 }
 
@@ -320,6 +369,31 @@ const setHideUnmonitoredAccounts = (value: boolean) => {
   updatePreferences(current => ({ ...current, hideUnmonitoredAccounts: value }))
 }
 
+const stopRefreshWaitTimer = () => {
+  if (refreshWaitTimer !== null) {
+    clearInterval(refreshWaitTimer)
+    refreshWaitTimer = null
+  }
+  refreshStartedAt.value = null
+  refreshWaitSeconds.value = 0
+}
+
+const startRefreshWaitTimer = () => {
+  stopRefreshWaitTimer()
+  refreshStartedAt.value = Date.now()
+  refreshWaitSeconds.value = 0
+  refreshWaitTimer = setInterval(() => {
+    if (refreshStartedAt.value === null) return
+    refreshWaitSeconds.value = Math.floor((Date.now() - refreshStartedAt.value) / 1000)
+  }, 1000)
+}
+
+const completeRefresh = (generation: number) => {
+  if (!refreshCoordinator.complete(generation)) return
+  refreshLoading.value = false
+  stopRefreshWaitTimer()
+}
+
 const loadMainListIfIdle = async (reload: () => Promise<unknown>): Promise<boolean> => {
   if (refreshCoordinator.isRefreshActive()) return false
   await reload()
@@ -333,10 +407,10 @@ const refreshOnEntry = () => {
   lastEntryRefreshAt = now
   if (!refreshCoordinator.isManualRefreshActive()) void refreshAdminGroupsAutomatically()
   void loadGroups({ silent: true })
-  void loadEvents()
-  void loadPolicies()
-  void loadSiteNames()
-	void loadPrioritySyncStatus()
+  void runAuxiliaryRequest('events', () => loadEvents(undefined, { recordError: false }))
+  void runAuxiliaryRequest('policies', () => loadPolicies({ recordError: false }))
+  void runAuxiliaryRequest('siteNames', loadSiteNames)
+	void runAuxiliaryRequest('priority', loadPrioritySyncStatus)
 }
 
 onMounted(refreshOnEntry)
@@ -348,8 +422,8 @@ const autoRefresh = async () => {
   await Promise.all([
     refreshAdminGroupsAutomatically(),
     loadGroups({ silent: true }),
-    loadEvents(selectedConnectionId.value || undefined),
-    loadPrioritySyncStatus(),
+    runAuxiliaryRequest('events', () => loadEvents(selectedConnectionId.value || undefined, { recordError: false })),
+    runAuxiliaryRequest('priority', loadPrioritySyncStatus),
   ])
 }
 // immediate=false 会让 VueUse 的 interval 保持暂停；这里只关闭首次回调，计时器本身必须启动。
@@ -362,10 +436,11 @@ const refreshAdminGroupsAutomatically = async (): Promise<boolean> => {
   const generation = refreshCoordinator.beginAutomatic()
   if (generation === null) return false
   refreshLoading.value = true
+  startRefreshWaitTimer()
   try {
     return await refreshAdminGroupsAutomaticallyRequest()
   } finally {
-    if (refreshCoordinator.complete(generation)) refreshLoading.value = false
+    completeRefresh(generation)
   }
 }
 
@@ -373,25 +448,82 @@ const refresh = async () => {
   const generation = refreshCoordinator.begin()
   if (generation === null) return
   refreshLoading.value = true
+  startRefreshWaitTimer()
   try {
-    await Promise.all([refreshAdminGroups(), loadPolicies(), loadEvents(), loadPrioritySyncStatus()])
+    await Promise.all([
+      refreshAdminGroups(),
+      runAuxiliaryRequest('policies', () => loadPolicies({ recordError: false })),
+      runAuxiliaryRequest('events', () => loadEvents(undefined, { recordError: false })),
+      runAuxiliaryRequest('priority', loadPrioritySyncStatus),
+    ])
   } finally {
-    if (refreshCoordinator.complete(generation)) {
-      refreshLoading.value = false
-    }
+    completeRefresh(generation)
   }
 }
 
+onBeforeUnmount(() => {
+  stopRefreshWaitTimer()
+})
+
 const siteName = (siteId: string): string => siteNameMap.value.get(siteId) ?? siteId
 
+type RefreshFailureMessage = {
+  phase: 'siteSync' | 'multiplier' | 'refresh'
+  reason: 'auth' | 'network' | 'invalidResponse' | 'request' | 'timeout' | 'connections' | 'unavailable' | 'disabled' | 'session' | 'updating' | 'cancelled' | 'stale'
+}
+
+const refreshFailureMessages: Record<string, RefreshFailureMessage> = {
+  site_sync_connections: { phase: 'siteSync', reason: 'connections' },
+  site_sync_auth: { phase: 'siteSync', reason: 'auth' },
+  site_sync_network: { phase: 'siteSync', reason: 'network' },
+  site_sync_invalid_response: { phase: 'siteSync', reason: 'invalidResponse' },
+  site_sync_request: { phase: 'siteSync', reason: 'request' },
+  site_sync_timeout: { phase: 'siteSync', reason: 'timeout' },
+  site_sync_unavailable: { phase: 'siteSync', reason: 'unavailable' },
+  site_sync_disabled: { phase: 'siteSync', reason: 'disabled' },
+  site_sync_session: { phase: 'siteSync', reason: 'session' },
+  site_sync_cancelled: { phase: 'siteSync', reason: 'cancelled' },
+  site_sync_updating: { phase: 'siteSync', reason: 'updating' },
+  site_sync_failed: { phase: 'siteSync', reason: 'request' },
+  multiplier_auth: { phase: 'multiplier', reason: 'auth' },
+  multiplier_timeout: { phase: 'multiplier', reason: 'timeout' },
+  multiplier_unavailable: { phase: 'multiplier', reason: 'unavailable' },
+  multiplier_network: { phase: 'multiplier', reason: 'network' },
+  multiplier_invalid_response: { phase: 'multiplier', reason: 'invalidResponse' },
+  multiplier_request: { phase: 'multiplier', reason: 'request' },
+}
+
+const refreshFailureMessagesByStatus: Record<string, RefreshFailureMessage> = {
+  'admin.connectionHealth.errors.network': { phase: 'refresh', reason: 'network' },
+  'admin.connectionHealth.errors.request': { phase: 'refresh', reason: 'request' },
+  auth_failed: { phase: 'refresh', reason: 'auth' },
+  stale: { phase: 'multiplier', reason: 'stale' },
+  unavailable: { phase: 'refresh', reason: 'unavailable' },
+  timeout: { phase: 'refresh', reason: 'timeout' },
+}
+
+const refreshFailureLabel = (errorKey: string, status: string, retained = false): string => {
+  const failureMessage = refreshFailureMessages[errorKey] ?? refreshFailureMessagesByStatus[status]
+  const phase = t(`admin.connectionHealth.refreshStatus.failurePhase.${failureMessage?.phase ?? 'unknown'}`)
+  const reason = t(`admin.connectionHealth.refreshStatus.failureReason.${failureMessage?.reason ?? 'unknown'}`)
+  const retainedSuffix = retained
+    ? `，${t('admin.connectionHealth.refreshStatus.retainedSnapshot')}`
+    : ''
+  return `${phase}：${reason}${retainedSuffix}`
+}
+
 const refreshSiteStatusLabel = (site: AdminGroupsRefreshSite): string => {
-  if (site.status === 'stale' && site.errorKey) return t(`admin.connectionHealth.refreshStatus.site.stale_${site.errorKey}`)
-  return t(`admin.connectionHealth.refreshStatus.site.${site.status}`)
+  const errorKey = site.errorKey?.trim() ?? ''
+  return refreshFailureLabel(errorKey, site.status, site.status === 'stale')
 }
 
 const failedRefreshSites = computed(() => (terminalRefreshSummary.value?.sites ?? []).filter(site => site.status !== 'success'))
-const successfulRefreshSites = computed(() => (terminalRefreshSummary.value?.sites ?? []).filter(site => site.status === 'success'))
 const refreshSummaryState = computed(() => terminalRefreshSummary.value?.state ?? null)
+const refreshSummaryErrorKey = computed(() => {
+  const errorKey = terminalRefreshSummary.value?.errorKey?.trim() ?? ''
+  return errorKey && failedRefreshSites.value.length === 0 ? errorKey : ''
+})
+const refreshSummaryErrorLabel = computed(() => refreshFailureLabel(refreshSummaryErrorKey.value, refreshSummaryState.value ?? 'failure'))
 
 // 分组启用/管理抽屉。
 const setupDrawerOpen = ref(false)
@@ -410,7 +542,10 @@ const onSetupSaved = async (configuration?: AdminGroupPolicyConfiguration) => {
 	if (configuration?.prioritySyncStatus === 'pending' && currentAccount.value?.id) {
 		prioritySyncStatus.value = { workspaceId: currentAccount.value.id, status: 'pending', failedCount: 0 }
 	}
-	await Promise.all([loadPolicies(), loadPrioritySyncStatus()])
+	await Promise.all([
+    runAuxiliaryRequest('policies', () => loadPolicies({ recordError: false })),
+    runAuxiliaryRequest('priority', loadPrioritySyncStatus),
+  ])
 }
 
 const onAssignPolicy = (account: AdminGroupAccount) => {
@@ -420,7 +555,7 @@ const onAssignPolicy = (account: AdminGroupAccount) => {
 
 const onTargetPolicySaved = async () => {
   policyAssignmentDialogOpen.value = false
-  await Promise.all([loadAdminGroups({ silent: true }), loadPrioritySyncStatus()])
+  await Promise.all([loadAdminGroups({ silent: true }), runAuxiliaryRequest('priority', loadPrioritySyncStatus)])
 }
 
 // 手动探活弹窗同时承载正式探活和隔离的一次性测试。
@@ -468,7 +603,7 @@ const openAllEvents = async () => {
   const requestSequence = ++eventsOpenRequestSequence
   const previousConnectionId = selectedConnectionId.value
   selectedConnectionId.value = ''
-  const eventsLoaded = await loadEvents()
+  const eventsLoaded = await runAuxiliaryRequest('events', () => loadEvents(undefined, { recordError: false }))
   if (requestSequence !== eventsOpenRequestSequence) return
   if (eventsLoaded) eventsDialogOpen.value = true
   else selectedConnectionId.value = previousConnectionId
@@ -478,7 +613,7 @@ const onViewEventsAccount = async (account: AdminGroupAccount) => {
   const requestSequence = ++eventsOpenRequestSequence
   const previousConnectionId = selectedConnectionId.value
   selectedConnectionId.value = account.targetId
-  const eventsLoaded = await loadEvents(account.targetId)
+  const eventsLoaded = await runAuxiliaryRequest('events', () => loadEvents(account.targetId, { recordError: false }))
   if (requestSequence !== eventsOpenRequestSequence) return
   if (eventsLoaded) eventsDialogOpen.value = true
   else selectedConnectionId.value = previousConnectionId
@@ -494,7 +629,7 @@ const onSetTargetSchedulable = async (account: AdminGroupAccount) => {
 
 const showAllEvents = async () => {
   const requestSequence = ++eventsOpenRequestSequence
-  const eventsLoaded = await loadEvents()
+  const eventsLoaded = await runAuxiliaryRequest('events', () => loadEvents(undefined, { recordError: false }))
   if (requestSequence !== eventsOpenRequestSequence) return
   if (eventsLoaded) selectedConnectionId.value = ''
 }
@@ -593,7 +728,13 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           <RefreshCw v-else class="h-4 w-4" />
           {{ t('admin.connectionHealth.refresh') }}
         </Button>
-        <span v-if="refreshSummaryState && !refreshLoading" class="text-xs text-muted-foreground" aria-live="polite">
+        <span v-if="refreshLoading" class="text-xs text-muted-foreground" aria-live="polite">
+          {{ t('admin.connectionHealth.refreshStatus.running', { seconds: refreshWaitSeconds }) }}
+        </span>
+        <span v-else-if="refreshSummaryState === 'success'" class="text-xs text-emerald-600 dark:text-emerald-400" aria-live="polite">
+          {{ t('admin.connectionHealth.refreshStatus.success') }}
+        </span>
+        <span v-else-if="refreshSummaryState" class="text-xs text-muted-foreground" aria-live="polite">
           {{ t(`admin.connectionHealth.refreshStatus.${refreshSummaryState}`) }}
         </span>
       </div>
@@ -606,12 +747,16 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           {{ siteName(site.siteId) }}: {{ refreshSiteStatusLabel(site) }}
         </span>
       </div>
-      <div v-if="successfulRefreshSites.length > 0" class="flex flex-wrap items-center gap-x-4 gap-y-1">
-        <span class="font-medium text-emerald-600 dark:text-emerald-400">{{ t('admin.connectionHealth.refreshStatus.successfulSitesLabel') }}</span>
-        <span v-for="site in successfulRefreshSites" :key="`success:${site.siteId}`">
-          {{ siteName(site.siteId) }}: {{ refreshSiteStatusLabel(site) }}
-        </span>
+      <div v-else-if="refreshSummaryErrorKey" class="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span class="font-medium text-destructive">{{ t('admin.connectionHealth.refreshStatus.summaryFailureLabel') }}</span>
+        <span>{{ refreshSummaryErrorLabel }}</span>
       </div>
+    </div>
+
+    <div v-if="auxiliaryFailures.length > 0" class="space-y-1 text-xs text-amber-600 dark:text-amber-400" aria-live="polite">
+      <p v-for="failure in auxiliaryFailures" :key="failure.source">
+        {{ auxiliaryFailureText(failure) }}
+      </p>
     </div>
 
 		<div

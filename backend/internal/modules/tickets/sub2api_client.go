@@ -1,13 +1,25 @@
 package tickets
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
+
+	"transithub/backend/internal/shared/netguard"
 )
+
+const sub2APIRequestTimeout = 30 * time.Second
+
+type ticketIPResolver interface {
+	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
+}
 
 // Sub2APIUser 是从 Sub2API `/api/v1/auth/me` 响应中解析出的用户身份，字段名做了常见形式兼容
 // （id/user_id/userId），因为不同 Sub2API 部署返回的字段命名可能不完全一致。
@@ -34,7 +46,20 @@ type Sub2APIClient struct {
 }
 
 func NewSub2APIClient(client *http.Client) *Sub2APIClient {
-	return &Sub2APIClient{client: client}
+	if client == nil {
+		client = &http.Client{}
+	}
+	clone := *client
+	if clone.Timeout <= 0 {
+		clone.Timeout = sub2APIRequestTimeout
+	}
+	if clone.Transport == nil || clone.Transport == http.DefaultTransport {
+		clone.Transport = newSafeTicketTransport(net.DefaultResolver)
+	}
+	clone.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return errors.New("sub2api redirects are not allowed")
+	}
+	return &Sub2APIClient{client: &clone}
 }
 
 // FetchCurrentUser 用用户的 Sub2API token 向 srcHost 请求当前用户信息。
@@ -110,4 +135,48 @@ func firstStringField(fields map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func newSafeTicketTransport(resolver ticketIPResolver) *http.Transport {
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.Proxy = nil
+	dialer := &net.Dialer{Timeout: sub2APIRequestTimeout, KeepAlive: sub2APIRequestTimeout}
+	base.DialContext = func(ctx context.Context, network string, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		ip, err := resolveSafeTicketIP(ctx, resolver, host)
+		if err != nil {
+			return nil, err
+		}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+	}
+	return base
+}
+
+func resolveSafeTicketIP(ctx context.Context, resolver ticketIPResolver, host string) (net.IP, error) {
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isSafeTicketDialIP(ip) {
+			return ip, nil
+		}
+		return nil, errors.New("sub2api target ip is not public")
+	}
+	addresses, err := resolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, address := range addresses {
+		if isSafeTicketDialIP(address.IP) {
+			return address.IP, nil
+		}
+	}
+	return nil, errors.New("sub2api target resolved to no public addresses")
+}
+
+func isSafeTicketDialIP(ip net.IP) bool {
+	return netguard.IsPublicIP(ip)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -38,6 +39,8 @@ type fakeMetricsRepository struct {
 	latestSnapshotErr    error
 	dailyStatsSnapshots  []DailySnapshot
 	dailyStatsCalls      int
+	dailyStatsFrom       string
+	dailyStatsTo         string
 }
 
 func (f *fakeMetricsRepository) Upsert(ctx context.Context, snapshot DailySnapshot) error {
@@ -91,6 +94,8 @@ func (f *fakeMetricsRepository) ListGroupMetricCache(ctx context.Context, userID
 
 func (f *fakeMetricsRepository) ListDailyStats(ctx context.Context, userID, adminAccountID string, from, to string) ([]DailySnapshot, error) {
 	f.dailyStatsCalls++
+	f.dailyStatsFrom = from
+	f.dailyStatsTo = to
 	return f.dailyStatsSnapshots, nil
 }
 
@@ -116,6 +121,23 @@ func metricsResponseJSON(t *testing.T, response MetricsResponse) map[string]any 
 
 func ptrFloat64(value float64) *float64 {
 	return &value
+}
+
+func parseBusinessDateForTest(t *testing.T, date string) time.Time {
+	t.Helper()
+	parsed, err := time.ParseInLocation("2006-01-02", date, businesstime.Location())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
+}
+
+func snapshotBusinessDates(snapshots []DailySnapshot) []string {
+	dates := make([]string, 0, len(snapshots))
+	for _, snapshot := range snapshots {
+		dates = append(dates, snapshot.Date.Format("2006-01-02"))
+	}
+	return dates
 }
 
 func TestLiveMetricsCostFailureStillPersistsRevenue(t *testing.T) {
@@ -175,6 +197,123 @@ func TestStartupRecoveryScansUnknownCostQualityModeWithoutDroppingSnapshot(t *te
 	}
 	if repo.dailyStatsSnapshots[0].CostQualityMode != CostQualityModeUnknown {
 		t.Fatalf("startup recovery changed cost quality mode = %q", repo.dailyStatsSnapshots[0].CostQualityMode)
+	}
+}
+
+func TestStartupRecoveryRetriesRecentNonFinalSnapshotsWithoutBaseline(t *testing.T) {
+	t.Setenv("SETTLEMENT_BASELINE_DATE", "")
+	loc := businesstime.Location()
+	stuckDate := businesstime.DateAt(time.Now().In(loc).AddDate(0, 0, -2))
+	parsedStuckDate, err := time.ParseInLocation("2006-01-02", stuckDate, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := &fakeMetricsRepository{dailyStatsSnapshots: []DailySnapshot{{
+		Date: parsedStuckDate, SettlementStatus: SettlementStatusPartialHigh,
+	}}}
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	store.activeSessions = []ActiveSessionRef{{UserID: "user-1", AdminAccountID: "account-1"}}
+	upstreams := &fakeUpstreamLister{siteCostResults: []upstream.SiteCostForDateResult{{
+		SiteID: "site-1", SiteName: "site one", Platform: upstream.PlatformSub2API, RechargeRate: 1, RawCost: 5,
+		Meta: upstream.CostFetchMeta{Source: "account_level"},
+	}}}
+	service := NewMetricsService(store, &fakePlatformClient{usageStats: 20}, upstreams, repo, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+
+	service.startupRecovery(context.Background())
+
+	for _, snapshot := range repo.snapshots {
+		if snapshot.Date.Format("2006-01-02") == stuckDate {
+			return
+		}
+	}
+	t.Fatalf("startup recovery snapshots = %+v, want retry for recent non-final date %s", repo.snapshots, stuckDate)
+}
+
+func TestStartupRecoveryWithoutBaselineUsesRecentWindowAndLimitedMissingBackfill(t *testing.T) {
+	t.Setenv("SETTLEMENT_BASELINE_DATE", "")
+	loc := businesstime.Location()
+	yesterdayTime := time.Now().In(loc).AddDate(0, 0, -1)
+	yesterday := businesstime.DateAt(yesterdayTime)
+	windowStart := businesstime.DateAt(yesterdayTime.AddDate(0, 0, -(startupRecoveryRecentDays - 1)))
+	finalDate := businesstime.DateAt(yesterdayTime.AddDate(0, 0, -5))
+	nonFinalDate := businesstime.DateAt(yesterdayTime.AddDate(0, 0, -2))
+
+	repo := &fakeMetricsRepository{dailyStatsSnapshots: []DailySnapshot{
+		{Date: parseBusinessDateForTest(t, finalDate), SettlementStatus: SettlementStatusFinal},
+		{Date: parseBusinessDateForTest(t, nonFinalDate), SettlementStatus: SettlementStatusPartialHigh},
+	}}
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	store.activeSessions = []ActiveSessionRef{{UserID: "user-1", AdminAccountID: "account-1"}}
+	upstreams := &fakeUpstreamLister{siteCostResults: []upstream.SiteCostForDateResult{{
+		SiteID: "site-1", SiteName: "site one", Platform: upstream.PlatformSub2API, RechargeRate: 1, RawCost: 5,
+		Meta: upstream.CostFetchMeta{Source: "account_level"},
+	}}}
+	service := NewMetricsService(store, &fakePlatformClient{usageStats: 20}, upstreams, repo, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+
+	service.startupRecovery(context.Background())
+
+	if repo.dailyStatsFrom != windowStart || repo.dailyStatsTo != yesterday {
+		t.Fatalf("ListDailyStats range = %s..%s, want %s..%s", repo.dailyStatsFrom, repo.dailyStatsTo, windowStart, yesterday)
+	}
+	wantDates := []string{nonFinalDate, yesterday}
+	if gotDates := snapshotBusinessDates(repo.snapshots); !reflect.DeepEqual(gotDates, wantDates) {
+		t.Fatalf("startup recovery finalized dates = %v, want %v", gotDates, wantDates)
+	}
+}
+
+func TestStartupRecoveryExplicitBaselinePreservesRangeGapBackfill(t *testing.T) {
+	loc := businesstime.Location()
+	yesterdayTime := time.Now().In(loc).AddDate(0, 0, -1)
+	yesterday := businesstime.DateAt(yesterdayTime)
+	baseline := businesstime.DateAt(yesterdayTime.AddDate(0, 0, -3))
+	finalDate := businesstime.DateAt(yesterdayTime.AddDate(0, 0, -2))
+	missingDate := businesstime.DateAt(yesterdayTime.AddDate(0, 0, -1))
+	t.Setenv("SETTLEMENT_BASELINE_DATE", baseline)
+
+	repo := &fakeMetricsRepository{dailyStatsSnapshots: []DailySnapshot{
+		{Date: parseBusinessDateForTest(t, finalDate), SettlementStatus: SettlementStatusFinal},
+	}}
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	store.activeSessions = []ActiveSessionRef{{UserID: "user-1", AdminAccountID: "account-1"}}
+	upstreams := &fakeUpstreamLister{siteCostResults: []upstream.SiteCostForDateResult{{
+		SiteID: "site-1", SiteName: "site one", Platform: upstream.PlatformSub2API, RechargeRate: 1, RawCost: 5,
+		Meta: upstream.CostFetchMeta{Source: "account_level"},
+	}}}
+	service := NewMetricsService(store, &fakePlatformClient{usageStats: 20}, upstreams, repo, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+
+	service.startupRecovery(context.Background())
+
+	if repo.dailyStatsFrom != baseline || repo.dailyStatsTo != yesterday {
+		t.Fatalf("ListDailyStats range = %s..%s, want %s..%s", repo.dailyStatsFrom, repo.dailyStatsTo, baseline, yesterday)
+	}
+	wantDates := []string{baseline, missingDate, yesterday}
+	if gotDates := snapshotBusinessDates(repo.snapshots); !reflect.DeepEqual(gotDates, wantDates) {
+		t.Fatalf("startup recovery finalized dates = %v, want %v", gotDates, wantDates)
+	}
+}
+
+func TestStartupRecoveryRejectsBlankExplicitBaseline(t *testing.T) {
+	t.Setenv("SETTLEMENT_BASELINE_DATE", "   ")
+	repo := &fakeMetricsRepository{}
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	store.activeSessions = []ActiveSessionRef{{UserID: "user-1", AdminAccountID: "account-1"}}
+	upstreams := &fakeUpstreamLister{siteCostResults: []upstream.SiteCostForDateResult{{
+		SiteID: "site-1", SiteName: "site one", Platform: upstream.PlatformSub2API, RechargeRate: 1, RawCost: 5,
+		Meta: upstream.CostFetchMeta{Source: "account_level"},
+	}}}
+	service := NewMetricsService(store, &fakePlatformClient{usageStats: 20}, upstreams, repo, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+
+	service.startupRecovery(context.Background())
+
+	if repo.dailyStatsCalls != 0 {
+		t.Fatalf("blank explicit baseline should be rejected before ListDailyStats, calls = %d", repo.dailyStatsCalls)
+	}
+	if len(repo.snapshots) != 0 {
+		t.Fatalf("blank explicit baseline should not finalize snapshots, got %v", snapshotBusinessDates(repo.snapshots))
 	}
 }
 

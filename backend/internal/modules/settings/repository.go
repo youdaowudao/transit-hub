@@ -85,22 +85,29 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 	return nil
 }
 
-// GetFirstStrategy 返回任意一条策略设置（不指定用户）。
-// 启动时用于初始化上游定时同步配置，在单管理员场景下等同于获取唯一的设置记录。
-func (r *Repository) GetFirstStrategy(ctx context.Context) (StrategySettings, error) {
-	settings := DefaultStrategySettings()
-	row := r.db.QueryRow(ctx, `SELECT settings FROM strategy_settings LIMIT 1`)
-	var settingsJSON []byte
-	if err := row.Scan(&settingsJSON); err != nil {
-		if err == pgx.ErrNoRows {
-			return settings, nil
+func (r *Repository) ListStrategies(ctx context.Context) ([]WorkspaceStrategy, error) {
+	rows, err := r.db.Query(ctx, `SELECT user_id, admin_account_id, settings FROM strategy_settings ORDER BY user_id, admin_account_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	strategies := make([]WorkspaceStrategy, 0)
+	for rows.Next() {
+		item := WorkspaceStrategy{Settings: DefaultStrategySettings()}
+		var settingsJSON []byte
+		if err := rows.Scan(&item.UserID, &item.AdminAccountID, &settingsJSON); err != nil {
+			return nil, err
 		}
-		return settings, err
+		if err := json.Unmarshal(settingsJSON, &item.Settings); err != nil {
+			return nil, err
+		}
+		item.Settings = normalizeStrategySettings(item.Settings)
+		strategies = append(strategies, item)
 	}
-	if err := json.Unmarshal(settingsJSON, &settings); err != nil {
-		return settings, err
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
-	return settings, nil
+	return strategies, nil
 }
 
 func (r *Repository) GetStrategy(ctx context.Context, userID string, adminAccountID string) (StrategySettings, error) {

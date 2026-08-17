@@ -35,7 +35,7 @@ func TestUpdateEnabledStopsAndRestoresSchedulingWithoutImmediateSync(t *testing.
 	cache.add(site)
 	service := NewService(nil, repository, nil, cache)
 	service.SetAdminAccountResolver(&fakeAccountResolver{current: map[string]string{"user-1": "acc-1"}})
-	service.SetRefreshConfig(RefreshConfig{Enabled: true, Interval: time.Hour})
+	service.SetWorkspaceRefreshConfig("user-1", "acc-1", RefreshConfig{Enabled: true, Interval: time.Hour})
 	t.Cleanup(service.Close)
 
 	if service.timers[site.ID] == nil {

@@ -195,6 +195,140 @@ func TestLatestDashboardSnapshotPreservesSnapshotWhenCostQualityModeIsNull(t *te
 	}
 }
 
+func TestListSiteCostsPreservesRowsWhenLastAttemptFieldsAreNull(t *testing.T) {
+	observedAt := time.Date(2026, 8, 16, 0, 5, 0, 0, time.UTC)
+	rows := &nullableCostQualityRows{values: [][]any{{
+		"cost-1", "user-1", "account-1", observedAt,
+		"site-1", "site one", "sub2api",
+		12.5, 1.0, 12.5, "ok", "dated_query", "", observedAt,
+		nil, nil, nil, nil,
+	}}}
+	repo := newMetricsRepository(&nullableCostQualityDB{rows: rows})
+
+	costs, err := repo.ListSiteCosts(context.Background(), "user-1", "account-1", "2026-08-15")
+	if err != nil {
+		t.Fatalf("ListSiteCosts() error = %v, want NULL last attempt fields to be tolerated", err)
+	}
+	if len(costs) != 1 {
+		t.Fatalf("ListSiteCosts() returned %d rows, want 1", len(costs))
+	}
+	if costs[0].LastAttemptStatus != "" || costs[0].LastAttemptError != "" || costs[0].LastAttemptRunID != "" {
+		t.Fatalf("last attempt fields = status %q error %q run %q, want empty strings", costs[0].LastAttemptStatus, costs[0].LastAttemptError, costs[0].LastAttemptRunID)
+	}
+}
+
+func TestListLatestSiteCostsPreservesRowsWhenLastAttemptFieldsAreNull(t *testing.T) {
+	observedAt := time.Date(2026, 8, 16, 0, 5, 0, 0, time.UTC)
+	rows := &nullableCostQualityRows{values: [][]any{{
+		"cost-1", "user-1", "account-1", observedAt,
+		"site-1", "site one", "sub2api",
+		12.5, 1.0, 12.5, "ok", "dated_query", "", observedAt,
+		nil, nil, nil, nil,
+	}}}
+	repo := newMetricsRepository(&nullableCostQualityDB{rows: rows})
+
+	costs, err := repo.ListLatestSiteCosts(context.Background(), "user-1", "account-1", "2026-08-15")
+	if err != nil {
+		t.Fatalf("ListLatestSiteCosts() error = %v, want NULL last attempt fields to be tolerated", err)
+	}
+	if len(costs) != 1 {
+		t.Fatalf("ListLatestSiteCosts() returned %d rows, want 1", len(costs))
+	}
+	if costs[0].LastAttemptStatus != "" || costs[0].LastAttemptError != "" || costs[0].LastAttemptRunID != "" {
+		t.Fatalf("last attempt fields = status %q error %q run %q, want empty strings", costs[0].LastAttemptStatus, costs[0].LastAttemptError, costs[0].LastAttemptRunID)
+	}
+}
+
+func TestListSiteCostsPreservesRowsWhenErrorReasonIsNull(t *testing.T) {
+	observedAt := time.Date(2026, 8, 16, 0, 5, 0, 0, time.UTC)
+	rows := &nullableCostQualityRows{values: [][]any{{
+		"cost-1", "user-1", "account-1", observedAt,
+		"site-1", "site one", "sub2api",
+		12.5, 1.0, 12.5, "ok", "dated_query", nil, observedAt,
+		"ok", "", nil, "",
+	}}}
+	repo := newMetricsRepository(&nullableCostQualityDB{rows: rows})
+
+	costs, err := repo.ListSiteCosts(context.Background(), "user-1", "account-1", "2026-08-15")
+	if err != nil {
+		t.Fatalf("ListSiteCosts() error = %v, want NULL error reason to be tolerated", err)
+	}
+	if len(costs) != 1 {
+		t.Fatalf("ListSiteCosts() returned %d rows, want 1", len(costs))
+	}
+	if costs[0].ErrorReason != "" {
+		t.Fatalf("ErrorReason = %q, want empty string", costs[0].ErrorReason)
+	}
+}
+
+func TestListLatestSiteCostsPreservesRowsWhenErrorReasonIsNull(t *testing.T) {
+	observedAt := time.Date(2026, 8, 16, 0, 5, 0, 0, time.UTC)
+	rows := &nullableCostQualityRows{values: [][]any{{
+		"cost-1", "user-1", "account-1", observedAt,
+		"site-1", "site one", "sub2api",
+		12.5, 1.0, 12.5, "ok", "dated_query", nil, observedAt,
+		"ok", "", nil, "",
+	}}}
+	repo := newMetricsRepository(&nullableCostQualityDB{rows: rows})
+
+	costs, err := repo.ListLatestSiteCosts(context.Background(), "user-1", "account-1", "2026-08-15")
+	if err != nil {
+		t.Fatalf("ListLatestSiteCosts() error = %v, want NULL error reason to be tolerated", err)
+	}
+	if len(costs) != 1 {
+		t.Fatalf("ListLatestSiteCosts() returned %d rows, want 1", len(costs))
+	}
+	if costs[0].ErrorReason != "" {
+		t.Fatalf("ErrorReason = %q, want empty string", costs[0].ErrorReason)
+	}
+}
+
+func TestListSiteCostsPreservesNonNullNullableTextFields(t *testing.T) {
+	observedAt := time.Date(2026, 8, 16, 0, 5, 0, 0, time.UTC)
+	rows := &nullableCostQualityRows{values: [][]any{{
+		"cost-1", "user-1", "account-1", observedAt,
+		"site-1", "site one", "sub2api",
+		12.5, 1.0, 12.5, "partial", "best_effort", "key sum fallback", observedAt,
+		"failed", "timeout", observedAt, "run-1",
+	}}}
+	repo := newMetricsRepository(&nullableCostQualityDB{rows: rows})
+
+	costs, err := repo.ListSiteCosts(context.Background(), "user-1", "account-1", "2026-08-15")
+	if err != nil {
+		t.Fatalf("ListSiteCosts() error = %v", err)
+	}
+	if len(costs) != 1 {
+		t.Fatalf("ListSiteCosts() returned %d rows, want 1", len(costs))
+	}
+	cost := costs[0]
+	if cost.ErrorReason != "key sum fallback" || cost.LastAttemptStatus != "failed" || cost.LastAttemptError != "timeout" || cost.LastAttemptRunID != "run-1" {
+		t.Fatalf("nullable text fields were not preserved: error_reason=%q last_status=%q last_error=%q run_id=%q", cost.ErrorReason, cost.LastAttemptStatus, cost.LastAttemptError, cost.LastAttemptRunID)
+	}
+}
+
+func TestListLatestSiteCostsPreservesNonNullNullableTextFields(t *testing.T) {
+	observedAt := time.Date(2026, 8, 16, 0, 5, 0, 0, time.UTC)
+	rows := &nullableCostQualityRows{values: [][]any{{
+		"cost-1", "user-1", "account-1", observedAt,
+		"site-1", "site one", "sub2api",
+		12.5, 1.0, 12.5, "partial", "best_effort", "key sum fallback", observedAt,
+		"failed", "timeout", observedAt, "run-1",
+	}}}
+	repo := newMetricsRepository(&nullableCostQualityDB{rows: rows})
+
+	costs, err := repo.ListLatestSiteCosts(context.Background(), "user-1", "account-1", "2026-08-15")
+	if err != nil {
+		t.Fatalf("ListLatestSiteCosts() error = %v", err)
+	}
+	if len(costs) != 1 {
+		t.Fatalf("ListLatestSiteCosts() returned %d rows, want 1", len(costs))
+	}
+	cost := costs[0]
+	if cost.ErrorReason != "key sum fallback" || cost.LastAttemptStatus != "failed" || cost.LastAttemptError != "timeout" || cost.LastAttemptRunID != "run-1" {
+		t.Fatalf("nullable text fields were not preserved: error_reason=%q last_status=%q last_error=%q run_id=%q", cost.ErrorReason, cost.LastAttemptStatus, cost.LastAttemptError, cost.LastAttemptRunID)
+	}
+}
+
 type latestSnapshotDB struct{ row pgx.Row }
 
 func (f *latestSnapshotDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {

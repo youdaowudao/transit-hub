@@ -15,7 +15,17 @@ import (
 )
 
 type Service struct {
-	repository *Repository
+	repository authRepository
+}
+
+type authRepository interface {
+	EnsureSchema(ctx context.Context) error
+	CountUsers(ctx context.Context) (int, error)
+	CreateUser(ctx context.Context, email string, passwordHash string) error
+	PasswordHashByEmail(ctx context.Context, email string) (string, error)
+	UserIDBySessionToken(ctx context.Context, tokenHash string) (string, error)
+	UserIDByEmail(ctx context.Context, email string) (string, error)
+	CreateSession(ctx context.Context, userID string, tokenHash string, expiresAt time.Time) error
 }
 
 type LoginRequest struct {
@@ -42,7 +52,7 @@ func (e *RequestError) Error() string {
 	return e.Message
 }
 
-func NewService(repository *Repository) *Service {
+func NewService(repository authRepository) *Service {
 	return &Service{repository: repository}
 }
 
@@ -67,6 +77,9 @@ func (s *Service) BootstrapAdmin(ctx context.Context, email, password string) er
 	password = strings.TrimSpace(password)
 	if email == "" || password == "" {
 		return fmt.Errorf("bootstrap admin: ADMIN_EMAIL and ADMIN_PASSWORD are required when no users exist")
+	}
+	if email == "admin@example.com" || strings.HasPrefix(strings.ToLower(password), "change-this-") {
+		return fmt.Errorf("bootstrap admin: refusing published placeholder credentials")
 	}
 
 	hash, err := hashPassword(password)

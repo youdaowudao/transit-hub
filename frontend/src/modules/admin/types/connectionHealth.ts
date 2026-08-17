@@ -123,6 +123,7 @@ export interface AdminGroupAccount {
   platform: string
   type: string
   status: string
+  mainSiteError?: string
   schedulable?: boolean
   schedulableSource?: string
   schedulableChangedAt?: string | null

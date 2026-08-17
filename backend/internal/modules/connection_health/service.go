@@ -76,6 +76,7 @@ type Service struct {
 	questionAnswers        questionAnswerRepository
 	mySites                MySitesReader
 	sites                  SiteLookup
+	upstreamSync           UpstreamSyncCoordinator
 	groupCosts             GroupCostReader
 	accounts               AdminAccountResolver
 	dispatcher             RemoteActionRunner
@@ -146,6 +147,10 @@ func (s *Service) EnsureSchema(ctx context.Context) error {
 
 func (s *Service) SetAdminAccountResolver(accounts AdminAccountResolver) {
 	s.accounts = accounts
+}
+
+func (s *Service) SetUpstreamSyncCoordinator(coordinator UpstreamSyncCoordinator) {
+	s.upstreamSync = coordinator
 }
 
 func (s *Service) currentAdminAccountID(ctx context.Context, userID string) (string, error) {

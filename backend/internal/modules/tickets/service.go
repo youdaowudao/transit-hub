@@ -29,9 +29,10 @@ type ticketRepository interface {
 	InsertTicketWithMessage(ctx context.Context, t Ticket, m TicketMessage, attachments []TicketAttachment) error
 	InsertMessage(ctx context.Context, m TicketMessage) error
 	ListMessages(ctx context.Context, ticketID string) ([]TicketMessage, error)
+	ListMessagesPage(ctx context.Context, ticketID string, page int, pageSize int) ([]TicketMessage, int, error)
 	ListAttachmentsByTicket(ctx context.Context, ticketID string) ([]TicketAttachment, error)
 	GetAttachmentByID(ctx context.Context, id string) (*TicketAttachment, error)
-	ListEmbedTickets(ctx context.Context, userID string, adminAccountID string, srcHost string, sub2apiUserID string) ([]Ticket, error)
+	ListEmbedTicketsPage(ctx context.Context, userID string, adminAccountID string, srcHost string, sub2apiUserID string, page int, pageSize int) ([]Ticket, int, error)
 	GetEmbedTicket(ctx context.Context, userID string, adminAccountID string, srcHost string, sub2apiUserID string, id string) (*Ticket, error)
 	ListAdminTickets(ctx context.Context, userID string, adminAccountID string, status string, page int, pageSize int) ([]Ticket, int, error)
 	GetAdminTicket(ctx context.Context, userID string, adminAccountID string, id string) (*Ticket, error)
@@ -141,6 +142,11 @@ func (s *Service) CreateEmbedSession(ctx context.Context, req CreateSessionReque
 	if embedToken == "" || sub2apiToken == "" {
 		return CreateSessionResponse{}, requestError(ErrorEmbedRequest)
 	}
+	if exceedsRuneLimit(embedToken, maxEmbedTokenLength) || exceedsRuneLimit(sub2apiToken, maxSub2APITokenLength) ||
+		exceedsRuneLimit(strings.TrimSpace(req.UrlUserID), maxEmbedUserIDLength) || exceedsRuneLimit(strings.TrimSpace(req.SrcHost), maxEmbedSourceLength) ||
+		exceedsRuneLimit(strings.TrimSpace(req.SrcURL), maxEmbedSourceLength) {
+		return CreateSessionResponse{}, requestError(ErrorEmbedContentTooLong)
+	}
 
 	config, err := s.repository.GetEmbedConfigByToken(ctx, embedToken)
 	if err != nil {
@@ -223,11 +229,16 @@ func (s *Service) requireSession(ctx context.Context, sessionToken string) (*Emb
 }
 
 func (s *Service) ListMyTickets(ctx context.Context, sessionToken string) (EmbedTicketListResponse, error) {
+	return s.ListMyTicketsPage(ctx, sessionToken, EmbedListQuery{})
+}
+
+func (s *Service) ListMyTicketsPage(ctx context.Context, sessionToken string, query EmbedListQuery) (EmbedTicketListResponse, error) {
 	session, err := s.requireSession(ctx, sessionToken)
 	if err != nil {
 		return EmbedTicketListResponse{}, err
 	}
-	tickets, err := s.repository.ListEmbedTickets(ctx, session.UserID, session.AdminAccountID, session.SrcHost, session.Sub2apiUserID)
+	query = normalizeEmbedListQuery(query)
+	tickets, total, err := s.repository.ListEmbedTicketsPage(ctx, session.UserID, session.AdminAccountID, session.SrcHost, session.Sub2apiUserID, query.Page, query.PageSize)
 	if err != nil {
 		return EmbedTicketListResponse{}, err
 	}
@@ -235,7 +246,7 @@ func (s *Service) ListMyTickets(ctx context.Context, sessionToken string) (Embed
 	for _, t := range tickets {
 		items = append(items, toEmbedTicketListItem(t))
 	}
-	return EmbedTicketListResponse{Items: items}, nil
+	return EmbedTicketListResponse{Items: items, Total: total, Page: query.Page, PageSize: query.PageSize, TotalPages: totalPages(total, query.PageSize)}, nil
 }
 
 // CreateTicket 创建工单，可选携带图片附件（新建工单场景是第一版唯一支持上传图片的入口，
@@ -262,6 +273,9 @@ func (s *Service) CreateTicket(ctx context.Context, sessionToken string, req Cre
 	}
 	if body == "" {
 		return EmbedTicketDetail{}, requestError(ErrorEmbedBodyRequired)
+	}
+	if exceedsRuneLimit(manualEmail, maxTicketEmailLength) || exceedsRuneLimit(title, maxTicketTitleLength) || exceedsRuneLimit(body, maxTicketBodyLength) {
+		return EmbedTicketDetail{}, requestError(ErrorEmbedContentTooLong)
 	}
 
 	// 分类/优先级必须按当前 workspace 的实时配置校验（不是 embed session 建立时刻的快照，
@@ -410,6 +424,10 @@ func sanitizeAttachmentName(name string) string {
 }
 
 func (s *Service) GetMyTicket(ctx context.Context, sessionToken string, id string) (EmbedTicketDetail, error) {
+	return s.GetMyTicketPage(ctx, sessionToken, id, MessagePageQuery{})
+}
+
+func (s *Service) GetMyTicketPage(ctx context.Context, sessionToken string, id string, query MessagePageQuery) (EmbedTicketDetail, error) {
 	session, err := s.requireSession(ctx, sessionToken)
 	if err != nil {
 		return EmbedTicketDetail{}, err
@@ -421,11 +439,33 @@ func (s *Service) GetMyTicket(ctx context.Context, sessionToken string, id strin
 	if ticket == nil {
 		return EmbedTicketDetail{}, requestError(ErrorNotFound)
 	}
-	messages, attachmentsByMessage, err := s.loadMessagesWithAttachments(ctx, id)
+	query = normalizeMessagePageQuery(query)
+	messages, total, attachmentsByMessage, err := s.loadMessagePageWithAttachments(ctx, id, query.Page, query.PageSize)
 	if err != nil {
 		return EmbedTicketDetail{}, err
 	}
-	return toEmbedTicketDetail(*ticket, messages, attachmentsByMessage), nil
+	detail := toEmbedTicketDetail(*ticket, messages, attachmentsByMessage)
+	detail.MessageTotal = total
+	detail.MessagePage = query.Page
+	detail.MessagePageSize = query.PageSize
+	detail.MessageTotalPages = totalPages(total, query.PageSize)
+	return detail, nil
+}
+
+func (s *Service) loadMessagePageWithAttachments(ctx context.Context, ticketID string, page, pageSize int) ([]TicketMessage, int, map[string][]TicketAttachment, error) {
+	messages, total, err := s.repository.ListMessagesPage(ctx, ticketID, page, pageSize)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	attachments, err := s.repository.ListAttachmentsByTicket(ctx, ticketID)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	byMessage := make(map[string][]TicketAttachment, len(attachments))
+	for _, attachment := range attachments {
+		byMessage[attachment.MessageID] = append(byMessage[attachment.MessageID], attachment)
+	}
+	return messages, total, byMessage, nil
 }
 
 // loadMessagesWithAttachments 一次性拉取一个工单的全部消息和全部附件，并把附件按 message_id
@@ -495,6 +535,9 @@ func (s *Service) AddCustomerMessage(ctx context.Context, sessionToken string, i
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
 		return EmbedTicketDetail{}, requestError(ErrorEmbedBodyRequired)
+	}
+	if exceedsRuneLimit(body, maxTicketBodyLength) {
+		return EmbedTicketDetail{}, requestError(ErrorEmbedContentTooLong)
 	}
 
 	messageID, err := s.newID()
@@ -701,6 +744,9 @@ func (s *Service) AddAdminMessage(ctx context.Context, userID string, id string,
 	body := strings.TrimSpace(req.Body)
 	if body == "" {
 		return AdminTicketDetail{}, requestError(ErrorBodyRequired)
+	}
+	if exceedsRuneLimit(body, maxTicketBodyLength) {
+		return AdminTicketDetail{}, requestError(ErrorBodyTooLong)
 	}
 
 	messageID, err := s.newID()
@@ -977,6 +1023,32 @@ func normalizeAdminListQuery(q AdminListQuery) AdminListQuery {
 		q.PageSize = 100
 	}
 	q.Status = strings.TrimSpace(q.Status)
+	return q
+}
+
+func normalizeEmbedListQuery(q EmbedListQuery) EmbedListQuery {
+	if q.Page < 1 {
+		q.Page = 1
+	}
+	if q.PageSize < 1 {
+		q.PageSize = 20
+	}
+	if q.PageSize > 100 {
+		q.PageSize = 100
+	}
+	return q
+}
+
+func normalizeMessagePageQuery(q MessagePageQuery) MessagePageQuery {
+	if q.Page < 1 {
+		q.Page = 1
+	}
+	if q.PageSize < 1 {
+		q.PageSize = 50
+	}
+	if q.PageSize > 100 {
+		q.PageSize = 100
+	}
 	return q
 }
 

@@ -94,6 +94,7 @@ export type AdminGroupsRefreshSite = {
 
 export type AdminGroupsRefreshSummary = {
   state: 'success' | 'partial' | 'failure' | 'timeout'
+  errorKey?: string
   sites: AdminGroupsRefreshSite[]
 }
 
@@ -107,8 +108,7 @@ const terminalRefreshSiteStatuses = new Set<AdminGroupsRefreshSite['status']>(['
 
 // 方案 A 手动刷新：后端等待涉及站点倍率任务全部进入终态后，只读取一轮主站分组和账号。
 // 不提供前端状态轮询，也不重复调用 admin-groups。
-export const refreshConnectionHealthAdminGroups = async (): Promise<AdminGroupsFreshResponse> => {
-  const payload = await requestJson<AdminGroupsFreshResponse | AdminGroupHealth[]>('/connection-health/admin-groups/refresh', { method: 'POST' })
+const parseAdminGroupsFreshResponse = (payload: AdminGroupsFreshResponse | AdminGroupHealth[]): AdminGroupsFreshResponse => {
   if (
     !payload
     || Array.isArray(payload)
@@ -126,6 +126,12 @@ export const refreshConnectionHealthAdminGroups = async (): Promise<AdminGroupsF
   }
   return payload
 }
+
+export const refreshConnectionHealthAdminGroups = async (): Promise<AdminGroupsFreshResponse> =>
+  parseAdminGroupsFreshResponse(await requestJson<AdminGroupsFreshResponse | AdminGroupHealth[]>('/connection-health/admin-groups/refresh', { method: 'POST' }))
+
+export const refreshConnectionHealthAdminGroupsAutomatically = async (): Promise<AdminGroupsFreshResponse> =>
+  parseAdminGroupsFreshResponse(await requestJson<AdminGroupsFreshResponse | AdminGroupHealth[]>('/connection-health/admin-groups/refresh'))
 
 export const getPrioritySyncStatus = async (): Promise<PrioritySyncStatus> =>
 	requestJson<PrioritySyncStatus>('/connection-health/priority-sync-status')

@@ -23,6 +23,7 @@ import {
   discoverTargetModels,
   getConnectionHealthAdminGroups,
   refreshConnectionHealthAdminGroups,
+  refreshConnectionHealthAdminGroupsAutomatically,
   getConnectionHealthEvents,
   getConnectionHealthGroups,
   getConnectionHealthOverview,
@@ -52,12 +53,14 @@ const isActionLoading = ref(false)
 const errorKey = ref('')
 const manualRefreshState = ref<AdminGroupsRefreshSummary['state'] | null>(null)
 const manualRefreshSites = ref<AdminGroupsRefreshSite[]>([])
+const terminalRefreshSummary = ref<AdminGroupsRefreshSummary | null>(null)
 let eventsRequestSequence = 0
 let eventsAppliedSequence = 0
 let activeEventsScope = ''
 let adminGroupsRequestSequence = 0
 let adminGroupsLoadingRequests = 0
 const manualRefreshRequests = ref(0)
+const terminalRefreshRequests = ref(0)
 
 const overviewFromAdminGroups = (groupList: AdminGroupHealth[]): ConnectionHealthOverview => {
   const result: ConnectionHealthOverview = {
@@ -146,6 +149,7 @@ export function useConnectionHealth() {
 
   // loadAdminGroups 载入新的主列表数据源（admin 全量分组）。silent 语义同 loadGroups。
   const loadAdminGroups = (opts: { silent?: boolean } = {}): Promise<boolean> => {
+    if (terminalRefreshRequests.value > 0) return Promise.resolve(false)
     const sequence = ++adminGroupsRequestSequence
     const request = (async () => {
       if (!opts.silent) {
@@ -178,6 +182,7 @@ export function useConnectionHealth() {
   const refreshAdminGroups = async (): Promise<boolean> => {
     const sequence = ++adminGroupsRequestSequence
     manualRefreshRequests.value++
+    terminalRefreshRequests.value++
     errorKey.value = ''
     try {
       const response = await refreshConnectionHealthAdminGroups()
@@ -186,15 +191,41 @@ export function useConnectionHealth() {
       overview.value = overviewFromAdminGroups(response.groups)
       manualRefreshState.value = response.refresh.state
       manualRefreshSites.value = response.refresh.sites
+      terminalRefreshSummary.value = response.refresh
       return true
     } catch (err) {
       if (sequence !== adminGroupsRequestSequence) return false
-      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      const refreshErrorKey = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      errorKey.value = refreshErrorKey
       manualRefreshState.value = 'failure'
       manualRefreshSites.value = []
+      terminalRefreshSummary.value = { state: 'failure', errorKey: refreshErrorKey, sites: [] }
       return false
     } finally {
       manualRefreshRequests.value--
+      terminalRefreshRequests.value--
+    }
+  }
+
+  const refreshAdminGroupsAutomatically = async (): Promise<boolean> => {
+    const sequence = ++adminGroupsRequestSequence
+    terminalRefreshRequests.value++
+    errorKey.value = ''
+    try {
+      const response = await refreshConnectionHealthAdminGroupsAutomatically()
+      if (sequence !== adminGroupsRequestSequence) return false
+      adminGroups.value = response.groups
+      overview.value = overviewFromAdminGroups(response.groups)
+      terminalRefreshSummary.value = response.refresh
+      return true
+    } catch (err) {
+      if (sequence !== adminGroupsRequestSequence) return false
+      const refreshErrorKey = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      errorKey.value = refreshErrorKey
+      terminalRefreshSummary.value = { state: 'failure', errorKey: refreshErrorKey, sites: [] }
+      return false
+    } finally {
+      terminalRefreshRequests.value--
     }
   }
 
@@ -203,11 +234,11 @@ export function useConnectionHealth() {
   // 旧的 groups 仍需加载：探活事件弹窗按 connectionId 关联链路上下文、手动探活候选模型按
   // 链路所属 own group 匹配策略，都依赖这份数据；主列表展示已切换到 adminGroups。
   const loadAll = async (opts: { silent?: boolean } = {}) => {
-    if (manualRefreshRequests.value > 0) return
+    if (manualRefreshRequests.value > 0 || terminalRefreshRequests.value > 0) return
     await Promise.all([loadAdminGroups(opts), loadGroups({ silent: true })])
   }
 
-  const loadEvents = async (connectionId?: string): Promise<boolean> => {
+  const loadEvents = async (connectionId?: string, opts: { recordError?: boolean } = {}): Promise<boolean> => {
     const sequence = ++eventsRequestSequence
     const scope = connectionId ?? ''
     activeEventsScope = scope
@@ -221,18 +252,24 @@ export function useConnectionHealth() {
       return true
     } catch (err) {
       if (scope === activeEventsScope && sequence >= eventsAppliedSequence) {
-        events.value = []
-        errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+        if (opts.recordError !== false) {
+          events.value = []
+          errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+        }
       }
       return false
     }
   }
 
-  const loadPolicies = async () => {
+  const loadPolicies = async (opts: { recordError?: boolean } = {}) => {
     try {
       policies.value = await listConnectionHealthPolicies()
+      return true
     } catch (err) {
-      errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      if (opts.recordError !== false) {
+        errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+      }
+      return false
     }
   }
 
@@ -456,11 +493,13 @@ export function useConnectionHealth() {
     errorKey,
     manualRefreshState,
     manualRefreshSites,
+    terminalRefreshSummary,
     loadAll,
     loadOverview,
     loadGroups,
     loadAdminGroups,
     refreshAdminGroups,
+    refreshAdminGroupsAutomatically,
     loadEvents,
     loadPolicies,
     savePolicy,

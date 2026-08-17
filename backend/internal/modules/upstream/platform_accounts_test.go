@@ -106,6 +106,93 @@ func TestListAdminGroupAccounts_Sub2APIGroupQueryPagingAndFields(t *testing.T) {
 	}
 }
 
+func TestListAdminGroupAccounts_Sub2APIParsesSafeErrorStatusAndReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/admin/accounts" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		writeJSON(w, map[string]any{
+			"data": []map[string]any{
+				{"id": 201, "status": "error", "error_message": "upstream returned 503"},
+				{"id": 202, "status": "error", "error_message": "request failed https://provider.example.test/v1?token=SECRET-TOKEN"},
+				{"id": 203, "status": "error", "error_message": "x-api-key: sk-secret"},
+				{"id": 204, "status": "error", "error_message": "\"access_token\":\"SECRET\""},
+				{"id": 205, "status": "error", "error_message": "client_secret: SECRET"},
+				{"id": 206, "status": "error", "error_message": "connect provider.example.test/v1?key=SECRET"},
+				{"id": 207, "status": "error", "error_message": "API key sk-live-secret rejected"},
+				{"id": 208, "status": "error", "error_message": "Token abc123 expired"},
+				{"id": 209, "status": "error", "error_message": "Authorization Basic abc123 rejected"},
+				{"id": 210, "status": "error", "error_message": "Cookie session=abc123 expired"},
+			},
+			"total": 10,
+		})
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	accounts, err := service.ListAdminGroupAccounts(
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "admin-token"},
+		AdminGroupInfo{ID: "42", Name: "vip"},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(accounts) != 10 {
+		t.Fatalf("accounts = %d, want 10", len(accounts))
+	}
+	if accounts[0].Status != "error" || accounts[0].ErrorMessage != "upstream returned 503" {
+		t.Fatalf("safe status/reason = %+v", accounts[0])
+	}
+	if accounts[1].ErrorMessage != "" {
+		t.Fatalf("unsafe URL query must be omitted from the parsed reason, got %q", accounts[1].ErrorMessage)
+	}
+	for i := 2; i < len(accounts); i++ {
+		if accounts[i].ErrorMessage != "" {
+			t.Fatalf("sensitive reason for account %s must be omitted, got %q", accounts[i].ID, accounts[i].ErrorMessage)
+		}
+	}
+}
+
+func TestListAdminGroupAccounts_Sub2APIDoesNotSerializeSensitiveErrorFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"data": []map[string]any{{
+				"id":            203,
+				"status":        "error",
+				"error_message": "token=SECRET-TOKEN api_key=sk-super-secret https://provider.example.test/v1?key=SECRET-URL",
+				"credentials":   map[string]any{"access_token": "SECRET-CREDENTIAL"},
+				"api_key":       "sk-super-secret",
+			}},
+			"total": 1,
+		})
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	accounts, err := service.ListAdminGroupAccounts(
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "admin-token"},
+		AdminGroupInfo{ID: "42", Name: "vip"},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	encoded, _ := json.Marshal(accounts)
+	for _, secret := range []string{
+		"SECRET-TOKEN",
+		"sk-super-secret",
+		"SECRET-CREDENTIAL",
+		"SECRET-URL",
+		"credentials",
+		"access_token",
+		"api_key",
+		"provider.example.test",
+	} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("sensitive error field %q leaked into accounts response: %s", secret, encoded)
+		}
+	}
+}
+
 // TestListAdminGroupAccounts_NewAPIUsesSearchPath 验证 new-api 优先走 /api/channel/search?group=<分组名>，
 // 并正确解析 channel 字段（含 weight），key 不外泄。
 func TestListAdminGroupAccounts_NewAPIUsesSearchPath(t *testing.T) {

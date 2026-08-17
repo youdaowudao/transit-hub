@@ -61,7 +61,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 
 func (h *Handler) createEmbedSession(w http.ResponseWriter, r *http.Request) {
 	var req CreateSessionRequest
-	if err := httpjson.Decode(r, &req); err != nil {
+	if err := decodeLimitedJSON(w, r, &req); err != nil {
 		httpjson.WriteError(w, http.StatusBadRequest, ErrorEmbedRequest)
 		return
 	}
@@ -74,7 +74,11 @@ func (h *Handler) createEmbedSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listEmbedTickets(w http.ResponseWriter, r *http.Request) {
-	resp, err := h.service.ListMyTickets(r.Context(), embedSessionToken(r))
+	query := r.URL.Query()
+	resp, err := h.service.ListMyTicketsPage(r.Context(), embedSessionToken(r), EmbedListQuery{
+		Page:     intQuery(query.Get("page"), 1),
+		PageSize: intQuery(query.Get("pageSize"), 20),
+	})
 	if err != nil {
 		writeEmbedError(w, err)
 		return
@@ -97,7 +101,7 @@ func (h *Handler) createEmbedTicket(w http.ResponseWriter, r *http.Request) {
 			httpjson.WriteError(w, http.StatusBadRequest, ErrorEmbedRequest)
 			return
 		}
-	} else if err := httpjson.Decode(r, &req); err != nil {
+	} else if err := decodeLimitedJSON(w, r, &req); err != nil {
 		httpjson.WriteError(w, http.StatusBadRequest, ErrorEmbedRequest)
 		return
 	}
@@ -172,7 +176,11 @@ func readMultipartFile(fileHeader *multipart.FileHeader) ([]byte, error) {
 }
 
 func (h *Handler) getEmbedTicket(w http.ResponseWriter, r *http.Request) {
-	resp, err := h.service.GetMyTicket(r.Context(), embedSessionToken(r), r.PathValue("id"))
+	query := r.URL.Query()
+	resp, err := h.service.GetMyTicketPage(r.Context(), embedSessionToken(r), r.PathValue("id"), MessagePageQuery{
+		Page:     intQuery(query.Get("messagePage"), 1),
+		PageSize: intQuery(query.Get("messagePageSize"), 50),
+	})
 	if err != nil {
 		writeEmbedError(w, err)
 		return
@@ -201,7 +209,7 @@ func writeAttachment(w http.ResponseWriter, attachment TicketAttachment, data []
 
 func (h *Handler) addEmbedMessage(w http.ResponseWriter, r *http.Request) {
 	var req CreateMessageRequest
-	if err := httpjson.Decode(r, &req); err != nil {
+	if err := decodeLimitedJSON(w, r, &req); err != nil {
 		httpjson.WriteError(w, http.StatusBadRequest, ErrorEmbedRequest)
 		return
 	}
@@ -309,7 +317,7 @@ func (h *Handler) addAdminMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req CreateMessageRequest
-	if err := httpjson.Decode(r, &req); err != nil {
+	if err := decodeLimitedJSON(w, r, &req); err != nil {
 		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
 		return
 	}
@@ -328,7 +336,7 @@ func (h *Handler) updateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateStatusRequest
-	if err := httpjson.Decode(r, &req); err != nil {
+	if err := decodeLimitedJSON(w, r, &req); err != nil {
 		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
 		return
 	}
@@ -361,7 +369,7 @@ func (h *Handler) updateEmbedConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpdateEmbedConfigRequest
-	if err := httpjson.Decode(r, &req); err != nil {
+	if err := decodeLimitedJSON(w, r, &req); err != nil {
 		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
 		return
 	}
@@ -438,6 +446,11 @@ func intQuery(value string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func decodeLimitedJSON(w http.ResponseWriter, r *http.Request, target any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONRequestBytes)
+	return httpjson.Decode(r, target)
 }
 
 // writeEmbedError 把公开 iframe 接口的领域错误映射为 HTTP 状态码。会话/校验失败一律只返回

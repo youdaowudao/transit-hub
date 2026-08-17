@@ -22,12 +22,17 @@ LOCK_FILE='/run/lock/transithub-maintenance.lock'
 MIGRATIONS_DIR="$PROJECT_DIR/backend/internal/database/migrations"
 BINARY="$PROJECT_DIR/transithub-api"
 BINARY_PREVIOUS="$PROJECT_DIR/transithub-api.previous"
+BINARY_PREVIOUS_NEXT="$PROJECT_DIR/transithub-api.previous.next"
 DIST_DIR="$PROJECT_DIR/frontend/dist"
 DIST_PREVIOUS="$PROJECT_DIR/frontend/dist.previous"
 
-# 记录回滚前的 HEAD 与产物是否已切换，供失败时原样恢复。
+# 记录回滚前的 HEAD 与每个产物的备份/切换阶段，供任一步失败时原样恢复。
 origin_commit=''
-artifacts_switched=0
+recovery_armed=0
+dist_backup_ready=0
+binary_backup_ready=0
+dist_switched=0
+binary_switched=0
 
 # 回滚目标自身起不来时，把服务恢复到回滚前的可用状态。
 # 只回退代码与产物，不动数据库：本方案自始不做数据库还原，
@@ -36,18 +41,28 @@ restore_previous_artifacts() {
     local restore_error=''
     printf '正在恢复回滚前的版本，请稍候。\n' >&2
 
-    if ((artifacts_switched == 1)); then
+    if ((binary_switched == 1)); then
         if [[ -x "$BINARY_PREVIOUS" ]]; then
             if ! mv -f "$BINARY_PREVIOUS" "$BINARY"; then
                 restore_error="${restore_error:+$restore_error; }binary artifact restore failed"
             fi
+        elif ! rm -f "$BINARY"; then
+            restore_error="${restore_error:+$restore_error; }new binary cleanup failed"
         fi
-        if [[ -d "$DIST_PREVIOUS" ]]; then
-            if ! rm -rf "$DIST_DIR"; then
-                restore_error="${restore_error:+$restore_error; }frontend dist cleanup failed"
-            elif ! mv -f "$DIST_PREVIOUS" "$DIST_DIR"; then
-                restore_error="${restore_error:+$restore_error; }frontend dist restore failed"
-            fi
+    elif ((binary_backup_ready == 1)); then
+        if ! rm -f "$BINARY_PREVIOUS"; then
+            restore_error="${restore_error:+$restore_error; }unused binary backup cleanup failed"
+        fi
+    fi
+
+    if ((dist_switched == 1)); then
+        if ! rm -rf "$DIST_DIR"; then
+            restore_error="${restore_error:+$restore_error; }frontend dist cleanup failed"
+        fi
+    fi
+    if ((dist_backup_ready == 1)) && [[ -d "$DIST_PREVIOUS" ]]; then
+        if ! mv -f "$DIST_PREVIOUS" "$DIST_DIR"; then
+            restore_error="${restore_error:+$restore_error; }frontend dist restore failed"
         fi
     fi
 
@@ -77,12 +92,15 @@ restore_previous_artifacts() {
 
 on_error() {
     local exit_code=$?
+    trap - ERR
+    trap '' INT TERM HUP
     printf '回滚失败（第 %s 行，退出码 %s）：%s\n' "$1" "$exit_code" "$2" >&2
     if [[ "$2" == *systemctl* || "$2" == *curl* || "$2" == *health_response* ]]; then
         print_service_diagnostics
     fi
-    trap - ERR
-    restore_previous_artifacts || true
+    if ((recovery_armed == 1)); then
+        restore_previous_artifacts || true
+    fi
     exit "$exit_code"
 }
 
@@ -125,10 +143,16 @@ cleanup() {
     sudo rm -f "$PRE_ROLLBACK_NEXT" >/dev/null 2>&1 || true
     sudo rm -rf "$PROJECT_DIR/frontend/dist.next" >/dev/null 2>&1 || true
     sudo rm -f "$PROJECT_DIR/transithub-api.next" >/dev/null 2>&1 || true
+    sudo rm -f "$BINARY_PREVIOUS_NEXT" >/dev/null 2>&1 || true
 }
 
 on_signal() {
+    trap - ERR
+    trap '' INT TERM HUP
     printf '回滚失败：收到 %s 信号，已停止执行。\n' "$1" >&2
+    if ((recovery_armed == 1)); then
+        restore_previous_artifacts || true
+    fi
     exit "$2"
 }
 
@@ -341,6 +365,7 @@ dump_current_database
 
 # 构建失败也要能切回原提交，因此在 switch 之前记录当前 HEAD。
 origin_commit="$(git rev-parse HEAD)"
+recovery_armed=1
 
 git switch --detach "$target_commit"
 
@@ -360,15 +385,20 @@ test -x "$PROJECT_DIR/transithub-api.next"
 # 二进制与 dist 都先留一份，回滚目标起不来时 restore_previous_artifacts 依赖它们。
 rm -rf "$DIST_PREVIOUS"
 rm -f "$BINARY_PREVIOUS"
+rm -f "$BINARY_PREVIOUS_NEXT"
 if [[ -d "$DIST_DIR" ]]; then
+    dist_backup_ready=1
     mv -f "$DIST_DIR" "$DIST_PREVIOUS"
 fi
 if [[ -x "$BINARY" ]]; then
-    cp -p "$BINARY" "$BINARY_PREVIOUS"
+    cp -p "$BINARY" "$BINARY_PREVIOUS_NEXT"
+    binary_backup_ready=1
+    mv -f "$BINARY_PREVIOUS_NEXT" "$BINARY_PREVIOUS"
 fi
+dist_switched=1
 mv -f "$PROJECT_DIR/frontend/dist.next" "$DIST_DIR"
+binary_switched=1
 mv -f "$PROJECT_DIR/transithub-api.next" "$BINARY"
-artifacts_switched=1
 
 sudo systemctl restart "$SERVICE"
 sudo systemctl is-active --quiet "$SERVICE"
@@ -376,7 +406,14 @@ sudo systemctl is-active --quiet "$SERVICE"
 health_response="$(wait_for_health)"
 printf '%s\n' "$health_response"
 
-# 健康检查通过后才丢弃回滚前的产物。
+# 健康检查通过即以新产物为准。先解除自动恢复，再清理备份和更新验证点；
+# 后续若只是清理或元数据写入失败，不能再删除已经验证可用的当前产物。
+recovery_armed=0
+origin_commit=''
+dist_backup_ready=0
+binary_backup_ready=0
+dist_switched=0
+binary_switched=0
 rm -rf "$DIST_PREVIOUS"
 rm -f "$BINARY_PREVIOUS"
 

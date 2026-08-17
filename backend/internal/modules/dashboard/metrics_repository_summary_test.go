@@ -71,3 +71,12 @@ func TestMergeDailyCostTargetCandidatesDoesNotAddNewAttemptsToHistoricalDate(t *
 		t.Fatalf("historical targets must not absorb current attempts: %+v", targets)
 	}
 }
+
+func TestMergeDailyCostTargetCandidatesBuildsFirstHistoricalTargetSetFromAttempts(t *testing.T) {
+	attempts := []SiteDailyCost{{SiteID: "site-from-first-historical-attempt"}}
+
+	targets := mergeDailyCostTargetCandidates(nil, nil, attempts, false)
+	if len(targets) != 1 || targets["site-from-first-historical-attempt"].SiteID == "" {
+		t.Fatalf("first historical settlement must freeze targets from its attempts: %+v", targets)
+	}
+}

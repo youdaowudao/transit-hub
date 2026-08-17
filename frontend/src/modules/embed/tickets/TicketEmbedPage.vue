@@ -32,6 +32,8 @@ const selectedTicketId = ref<string | null>(null)
 const tickets = ref<EmbedTicketListItem[]>([])
 const isListLoading = ref(false)
 const listErrorKey = ref<string | null>(null)
+const listPage = ref(1)
+const listTotalPages = ref(0)
 
 // vue-router 的 query 值类型是 string | null | (string | null)[]，这里统一收敛成 string，
 // 缺失/非字符串一律当作空字符串处理。
@@ -64,12 +66,14 @@ const stripTokenFromUrl = () => {
   window.history.replaceState(window.history.state, '', nextUrl)
 }
 
-const loadList = async () => {
+const loadList = async (page = listPage.value) => {
   isListLoading.value = true
   listErrorKey.value = null
   try {
-    const response = await listEmbedTickets()
+    const response = await listEmbedTickets(page)
     tickets.value = response.items
+    listPage.value = response.page
+    listTotalPages.value = response.totalPages
   } catch (error) {
     listErrorKey.value = error instanceof Error ? error.message : 'embed.tickets.errors.unknown'
   } finally {
@@ -89,8 +93,14 @@ const backToList = () => {
 }
 
 const handleCreated = (id: string) => {
+  listPage.value = 1
   openDetail(id)
-  void loadList()
+  void loadList(1)
+}
+
+const changeListPage = (page: number) => {
+  if (page < 1 || page > listTotalPages.value || page === listPage.value) return
+  void loadList(page)
 }
 
 onMounted(async () => {
@@ -183,8 +193,11 @@ const pageShellClass = computed(() => (
             :max-images="maxImages"
             :category-options="categoryOptions"
             :priority-options="priorityOptions"
+            :page="listPage"
+            :total-pages="listTotalPages"
             @select="openDetail"
             @refresh="loadList"
+            @page-change="changeListPage"
             @created="handleCreated"
           />
           <EmbedTicketDetail

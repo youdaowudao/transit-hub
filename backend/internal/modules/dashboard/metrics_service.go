@@ -1112,6 +1112,11 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 		log.Printf("dashboard finalize: fetch site costs failed user_id=%s date=%s err=%v", userID, date, fetchErr)
 		return fetchErr
 	}
+	if len(siteCostResults) == 0 {
+		err := errors.New("no upstream site cost targets")
+		log.Printf("dashboard finalize: no upstream site cost targets user_id=%s admin_account_id=%s date=%s", userID, adminAccountID, date)
+		return err
+	}
 	now := time.Now().UTC()
 	attemptRunID, idErr := metricsRandomID()
 	if idErr != nil {
@@ -1257,15 +1262,20 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 	return nil
 }
 
+const startupRecoveryRecentDays = 7
+
 // startupRecovery 扫描从 SETTLEMENT_BASELINE_DATE 到昨日的缺口，逐日补结算。
-// 不处理 SETTLEMENT_BASELINE_DATE 之前的日期。
+// 未配置 SETTLEMENT_BASELINE_DATE 时，只重试最近窗口内已有的非 final 快照，并保留昨日缺口补结。
+// 不处理扫描窗口之前的日期。
 func (s *MetricsService) startupRecovery(ctx context.Context) {
 	loc := businesstime.Location()
 	yesterday := businesstime.DateAt(time.Now().In(loc).AddDate(0, 0, -1))
 
 	baselineStr := os.Getenv("SETTLEMENT_BASELINE_DATE")
-	if baselineStr == "" {
-		baselineStr = yesterday
+	explicitBaseline := baselineStr != ""
+	if !explicitBaseline {
+		yesterdayTime, _ := time.ParseInLocation("2006-01-02", yesterday, loc)
+		baselineStr = businesstime.DateAt(yesterdayTime.AddDate(0, 0, -(startupRecoveryRecentDays - 1)))
 	}
 	baseline, err := time.ParseInLocation("2006-01-02", baselineStr, loc)
 	if err != nil {
@@ -1304,8 +1314,12 @@ func (s *MetricsService) startupRecovery(ctx context.Context) {
 		for !current.After(yesterdayTime) {
 			d := current.Format("2006-01-02")
 			current = current.AddDate(0, 0, 1)
-			if status, ok := existingMap[d]; ok && status == SettlementStatusFinal {
+			status, exists := existingMap[d]
+			if exists && status == SettlementStatusFinal {
 				continue // 已结算，跳过
+			}
+			if !explicitBaseline && !exists && d != yesterday {
+				continue
 			}
 			if err := s.finalizeBusinessDate(ctx, ref, d, SnapshotSourceDatedQuery); err != nil {
 				log.Printf("dashboard startup recovery: finalize failed user_id=%s date=%s err=%v", ref.UserID, d, err)

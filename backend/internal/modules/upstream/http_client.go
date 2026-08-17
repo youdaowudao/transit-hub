@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"time"
 )
@@ -98,6 +100,10 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return jsonResponse{}, contextErr
+		}
+		var netErr net.Error
+		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+			return jsonResponse{}, &RequestError{MessageKey: ErrorNetwork, Timeout: true}
 		}
 		log.Printf("[http-client] 请求失败 url=%s err=%v", reqURL, err)
 		return jsonResponse{}, newRequestError(ErrorNetwork, "")

@@ -97,8 +97,11 @@ it('guards composable loadAll while the manual refresh request is active', () =>
   expect(loadAllBody).toContain('manualRefreshRequests.value > 0')
 })
 
-it('renders per-site terminal results after the one-shot request', () => {
+it('renders failed per-site terminal results after the one-shot request', () => {
   const source = readFileSync(new URL('../src/modules/admin/views/ConnectionHealthView.vue', import.meta.url), 'utf8')
-  expect(source).toContain('manualRefreshSites')
-  expect(source).toContain('refreshStatus.site')
+  expect(source).toContain('terminalRefreshSummary')
+  expect(source).toContain('failedRefreshSites')
+  expect(source).not.toContain('successfulRefreshSites')
+  expect(source).toContain('refreshStatus.failurePhase')
+  expect(source).toContain('refreshStatus.failureReason')
 })

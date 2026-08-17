@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -139,14 +140,42 @@ func (f *fakeTicketRepository) ListMessages(ctx context.Context, ticketID string
 	return out, nil
 }
 
-func (f *fakeTicketRepository) ListEmbedTickets(ctx context.Context, userID string, adminAccountID string, srcHost string, sub2apiUserID string) ([]Ticket, error) {
-	out := make([]Ticket, 0)
-	for _, t := range f.tickets {
-		if t.UserID == userID && t.AdminAccountID == adminAccountID && t.Sub2apiSrcHost == srcHost && t.Sub2apiUserID == sub2apiUserID {
-			out = append(out, *t)
+func (f *fakeTicketRepository) ListMessagesPage(_ context.Context, ticketID string, page, pageSize int) ([]TicketMessage, int, error) {
+	all := f.messages[ticketID]
+	total := len(all)
+	end := total - (page-1)*pageSize
+	if end < 0 {
+		end = 0
+	}
+	start := end - pageSize
+	if start < 0 {
+		start = 0
+	}
+	out := make([]TicketMessage, 0, end-start)
+	for _, message := range all[start:end] {
+		out = append(out, *message)
+	}
+	return out, total, nil
+}
+
+func (f *fakeTicketRepository) ListEmbedTicketsPage(_ context.Context, userID, adminAccountID, srcHost, sub2apiUserID string, page, pageSize int) ([]Ticket, int, error) {
+	matched := make([]Ticket, 0)
+	for _, ticket := range f.tickets {
+		if ticket.UserID == userID && ticket.AdminAccountID == adminAccountID && ticket.Sub2apiSrcHost == srcHost && ticket.Sub2apiUserID == sub2apiUserID {
+			matched = append(matched, *ticket)
 		}
 	}
-	return out, nil
+	sort.Slice(matched, func(i, j int) bool { return matched[i].UpdatedAt.After(matched[j].UpdatedAt) })
+	total := len(matched)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return matched[start:end], total, nil
 }
 
 func (f *fakeTicketRepository) GetEmbedTicket(ctx context.Context, userID string, adminAccountID string, srcHost string, sub2apiUserID string, id string) (*Ticket, error) {
@@ -535,6 +564,42 @@ func TestCreateTicket_ManualEmailRequired(t *testing.T) {
 	}
 }
 
+func TestCreateTicketRejectsOversizedFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*CreateTicketRequest)
+	}{
+		{name: "email", mutate: func(request *CreateTicketRequest) {
+			request.ManualEmail = strings.Repeat("a", maxTicketEmailLength) + "@example.com"
+		}},
+		{name: "title", mutate: func(request *CreateTicketRequest) { request.Title = strings.Repeat("t", maxTicketTitleLength+1) }},
+		{name: "body", mutate: func(request *CreateTicketRequest) { request.Body = strings.Repeat("b", maxTicketBodyLength+1) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := newFakeTicketRepository()
+			service := newTestService(repository, newFakeSessionStore(), &fakeSub2API{}, nil)
+			sessionToken := establishedSession(service, t)
+			request := CreateTicketRequest{ManualEmail: "user@example.com", Title: "help", Body: "body", Category: "通用问题", Priority: "普通"}
+			test.mutate(&request)
+			if _, err := service.CreateTicket(context.Background(), sessionToken, request, nil); !errors.Is(err, requestError(ErrorEmbedContentTooLong)) {
+				t.Fatalf("CreateTicket() error = %v, want %s", err, ErrorEmbedContentTooLong)
+			}
+		})
+	}
+}
+
+func TestAddCustomerMessageRejectsOversizedBody(t *testing.T) {
+	repository := newFakeTicketRepository()
+	repository.tickets["ticket-1"] = &Ticket{ID: "ticket-1", UserID: "user1", AdminAccountID: "account1", Sub2apiSrcHost: "https://web.example.com", Sub2apiUserID: "42", ManualEmail: "user@example.com", Status: StatusOpen}
+	service := newTestService(repository, newFakeSessionStore(), &fakeSub2API{}, nil)
+	sessionToken := establishedSession(service, t)
+	_, err := service.AddCustomerMessage(context.Background(), sessionToken, "ticket-1", CreateMessageRequest{Body: strings.Repeat("b", maxTicketBodyLength+1)})
+	if !errors.Is(err, requestError(ErrorEmbedContentTooLong)) {
+		t.Fatalf("AddCustomerMessage() error = %v, want %s", err, ErrorEmbedContentTooLong)
+	}
+}
+
 func TestCreateTicket_Success(t *testing.T) {
 	repo := newFakeTicketRepository()
 	svc := newTestService(repo, newFakeSessionStore(), &fakeSub2API{}, nil)
@@ -576,6 +641,46 @@ func TestListMyTickets_OnlyOwnTickets(t *testing.T) {
 	}
 	if len(resp.Items) != 1 || resp.Items[0].ID != "t1" {
 		t.Fatalf("expected only own ticket t1, got %+v", resp.Items)
+	}
+}
+
+func TestListMyTicketsPageReturnsBoundedPageAndMetadata(t *testing.T) {
+	repository := newFakeTicketRepository()
+	base := time.Date(2026, 8, 17, 0, 0, 0, 0, time.UTC)
+	for index := 0; index < 25; index++ {
+		id := fmt.Sprintf("ticket-%02d", index)
+		repository.tickets[id] = &Ticket{ID: id, UserID: "user1", AdminAccountID: "account1", Sub2apiSrcHost: "https://web.example.com", Sub2apiUserID: "42", UpdatedAt: base.Add(time.Duration(index) * time.Minute)}
+	}
+	service := newTestService(repository, newFakeSessionStore(), &fakeSub2API{}, nil)
+	sessionToken := establishedSession(service, t)
+
+	response, err := service.ListMyTicketsPage(context.Background(), sessionToken, EmbedListQuery{Page: 3, PageSize: 10})
+	if err != nil {
+		t.Fatalf("ListMyTicketsPage() error = %v", err)
+	}
+	if len(response.Items) != 5 || response.Total != 25 || response.Page != 3 || response.PageSize != 10 || response.TotalPages != 3 {
+		t.Fatalf("ListMyTicketsPage() response = %#v", response)
+	}
+}
+
+func TestGetMyTicketPageReturnsLatestMessagesWithMetadata(t *testing.T) {
+	repository := newFakeTicketRepository()
+	repository.tickets["ticket-1"] = &Ticket{ID: "ticket-1", UserID: "user1", AdminAccountID: "account1", Sub2apiSrcHost: "https://web.example.com", Sub2apiUserID: "42"}
+	for index := 0; index < 120; index++ {
+		repository.messages["ticket-1"] = append(repository.messages["ticket-1"], &TicketMessage{ID: fmt.Sprintf("message-%03d", index), TicketID: "ticket-1", Body: fmt.Sprintf("message-%03d", index)})
+	}
+	service := newTestService(repository, newFakeSessionStore(), &fakeSub2API{}, nil)
+	sessionToken := establishedSession(service, t)
+
+	response, err := service.GetMyTicketPage(context.Background(), sessionToken, "ticket-1", MessagePageQuery{Page: 1, PageSize: 50})
+	if err != nil {
+		t.Fatalf("GetMyTicketPage() error = %v", err)
+	}
+	if len(response.Messages) != 50 || response.Messages[0].Body != "message-070" || response.Messages[49].Body != "message-119" {
+		t.Fatalf("latest messages = %#v", response.Messages)
+	}
+	if response.MessageTotal != 120 || response.MessagePage != 1 || response.MessagePageSize != 50 || response.MessageTotalPages != 3 {
+		t.Fatalf("message pagination = %#v", response)
 	}
 }
 

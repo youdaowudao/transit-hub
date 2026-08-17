@@ -14,6 +14,10 @@ export interface EmbedTicketListItem {
 
 export interface EmbedTicketListResponse {
   items: EmbedTicketListItem[]
+  total: number
+  page: number
+  pageSize: number
+  totalPages: number
 }
 
 export interface EmbedTicketAttachment {
@@ -35,6 +39,10 @@ export interface EmbedTicketMessage {
 
 export interface EmbedTicketDetail extends EmbedTicketListItem {
   messages: EmbedTicketMessage[]
+  messageTotal: number
+  messagePage: number
+  messagePageSize: number
+  messageTotalPages: number
 }
 
 export interface CreateEmbedSessionRequest {

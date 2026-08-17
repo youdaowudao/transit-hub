@@ -146,6 +146,22 @@ func TestSourceRollbackScriptContract(t *testing.T) {
 	}
 }
 
+func TestProductionComposeUsesCurrentVersionAndRequiredCredentials(t *testing.T) {
+	compose := readProjectFileForUpgradeTest(t, "deploy/docker-compose.prod.yml")
+	for _, required := range []string{
+		"image: deviseo/transithub:v2.3.7",
+		"${DATABASE_URL:?",
+		"${POSTGRES_PASSWORD:?",
+		"${ADMIN_EMAIL:?",
+		"${ADMIN_PASSWORD:?",
+	} {
+		requireTextContains(t, compose, required)
+	}
+	for _, forbidden := range []string{"v2.1.17", "admin@example.com", "change-this-"} {
+		requireTextNotContains(t, compose, forbidden)
+	}
+}
+
 func TestRollbackHealthProbeTreatsConnectionRefusalAsExpectedControlFlow(t *testing.T) {
 	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
 	waitSection := script[strings.Index(script, "wait_for_health() {"):strings.Index(script, "\n}\n\ncleanup()")]
@@ -230,7 +246,10 @@ BINARY_PREVIOUS=%q
 DIST_DIR=%q
 DIST_PREVIOUS=%q
 origin_commit=''
-artifacts_switched=1
+dist_backup_ready=1
+binary_backup_ready=1
+dist_switched=1
+binary_switched=1
 sudo() { return 0; }
 wait_for_health() { return 0; }
 %s
@@ -249,6 +268,341 @@ fi
 	}
 	if !strings.Contains(string(output), "恢复错误") || !strings.Contains(string(output), "binary") {
 		t.Fatalf("artifact restore error was not reported: %s", output)
+	}
+}
+
+func TestRollbackRestoresFrontendWhenFailureOccursAfterBackup(t *testing.T) {
+	distDir, distPrevious := runPartialArtifactRestore(t, false)
+	assertFileContent(t, filepath.Join(distDir, "marker"), "old frontend")
+	if _, err := os.Stat(distPrevious); !os.IsNotExist(err) {
+		t.Fatalf("dist.previous still exists after restore: %v", err)
+	}
+}
+
+func TestRollbackRestoresFrontendWhenBackendSwitchFails(t *testing.T) {
+	distDir, distPrevious := runPartialArtifactRestore(t, true)
+	assertFileContent(t, filepath.Join(distDir, "marker"), "old frontend")
+	if _, err := os.Stat(distPrevious); !os.IsNotExist(err) {
+		t.Fatalf("dist.previous still exists after restore: %v", err)
+	}
+}
+
+func TestRollbackSignalHandlerRestoresPartialSwitch(t *testing.T) {
+	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
+	start := strings.Index(script, "on_signal() {")
+	endRelative := strings.Index(script[start:], "\n}\n\nacquire_maintenance_lock()")
+	if start < 0 || endRelative < 0 {
+		t.Fatal("unable to extract on_signal")
+	}
+	signalHandler := script[start : start+endRelative+2]
+	requireTextContains(t, signalHandler, "restore_previous_artifacts")
+}
+
+func TestRollbackArmsRecoveryBeforeArtifactMutations(t *testing.T) {
+	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
+	start := strings.Index(script, "# 前后端产物都构建成功后才落位")
+	end := strings.Index(script[start:], "\nsudo systemctl restart")
+	if start < 0 || end < 0 {
+		t.Fatal("unable to extract artifact switch section")
+	}
+	section := script[start : start+end]
+	for _, check := range []struct {
+		flag     string
+		mutation string
+	}{
+		{flag: "dist_backup_ready=1", mutation: `mv -f "$DIST_DIR" "$DIST_PREVIOUS"`},
+		{flag: "binary_backup_ready=1", mutation: `mv -f "$BINARY_PREVIOUS_NEXT" "$BINARY_PREVIOUS"`},
+		{flag: "dist_switched=1", mutation: `mv -f "$PROJECT_DIR/frontend/dist.next" "$DIST_DIR"`},
+		{flag: "binary_switched=1", mutation: `mv -f "$PROJECT_DIR/transithub-api.next" "$BINARY"`},
+	} {
+		flagAt := strings.Index(section, check.flag)
+		mutationAt := strings.Index(section, check.mutation)
+		if flagAt < 0 || mutationAt < 0 || flagAt > mutationAt {
+			t.Fatalf("%s must be set before %s", check.flag, check.mutation)
+		}
+	}
+	copyAt := strings.Index(section, `cp -p "$BINARY" "$BINARY_PREVIOUS_NEXT"`)
+	backupFlagAt := strings.Index(section, "binary_backup_ready=1")
+	if copyAt < 0 || backupFlagAt < 0 || copyAt > backupFlagAt {
+		t.Fatal("binary backup must be fully copied before its published-backup flag is armed")
+	}
+}
+
+func TestRollbackDisarmsRecoveryBeforeDiscardingBackups(t *testing.T) {
+	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
+	healthAt := strings.Index(script, `health_response="$(wait_for_health)"`)
+	backupRemovalAt := strings.Index(script[healthAt:], `rm -rf "$DIST_PREVIOUS"`)
+	if healthAt < 0 || backupRemovalAt < 0 {
+		t.Fatal("unable to extract successful rollback finalization")
+	}
+	section := script[healthAt : healthAt+backupRemovalAt]
+	for _, want := range []string{
+		"recovery_armed=0",
+		"origin_commit=''",
+		"dist_backup_ready=0",
+		"binary_backup_ready=0",
+		"dist_switched=0",
+		"binary_switched=0",
+	} {
+		requireTextContains(t, section, want)
+	}
+	for _, handlerName := range []string{"on_error() {", "on_signal() {"} {
+		start := strings.Index(script, handlerName)
+		end := strings.Index(script[start:], "\n}")
+		if start < 0 || end < 0 {
+			t.Fatalf("unable to extract %s", handlerName)
+		}
+		requireTextContains(t, script[start:start+end], "recovery_armed")
+	}
+}
+
+func TestRollbackRestoresArtifactsWhenSignalArrivesImmediatelyAfterMutation(t *testing.T) {
+	for _, stage := range []string{"dist-backup", "binary-backup", "dist-switch", "binary-switch"} {
+		t.Run(stage, func(t *testing.T) {
+			distDir, binary, distPrevious, binaryPrevious := runArtifactSignalAfterMutation(t, stage)
+			assertFileContent(t, filepath.Join(distDir, "marker"), "old frontend")
+			assertFileContent(t, binary, "old backend")
+			if _, err := os.Stat(distPrevious); !os.IsNotExist(err) {
+				t.Fatalf("dist.previous still exists after signal restore: %v", err)
+			}
+			if _, err := os.Stat(binaryPrevious); !os.IsNotExist(err) {
+				t.Fatalf("binary.previous still exists after signal restore: %v", err)
+			}
+		})
+	}
+}
+
+func TestRollbackIgnoresSecondTerminationSignalDuringRecovery(t *testing.T) {
+	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
+	restoreStart := strings.Index(script, "restore_previous_artifacts() {")
+	restoreEnd := strings.Index(script[restoreStart:], "\n}\n\non_error()")
+	signalStart := strings.Index(script, "on_signal() {")
+	signalEnd := strings.Index(script[signalStart:], "\n}\n\nacquire_maintenance_lock()")
+	if restoreStart < 0 || restoreEnd < 0 || signalStart < 0 || signalEnd < 0 {
+		t.Fatal("unable to extract rollback recovery functions")
+	}
+	restoreFunction := script[restoreStart : restoreStart+restoreEnd+2]
+	signalFunction := script[signalStart : signalStart+signalEnd+2]
+
+	tempDir := t.TempDir()
+	distDir := filepath.Join(tempDir, "dist")
+	distPrevious := filepath.Join(tempDir, "dist.previous")
+	for path, marker := range map[string]string{distDir: "new frontend", distPrevious: "old frontend"} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "marker"), []byte(marker), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	binary := filepath.Join(tempDir, "transithub-api")
+	binaryPrevious := filepath.Join(tempDir, "transithub-api.previous")
+	if err := os.WriteFile(binary, []byte("new backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(binaryPrevious, []byte("old backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	wrapperPath := filepath.Join(tempDir, "double-signal.sh")
+	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
+set -Eeuo pipefail
+PROJECT_DIR=%q
+SERVICE='transithub-api.service'
+BINARY=%q
+BINARY_PREVIOUS=%q
+DIST_DIR=%q
+DIST_PREVIOUS=%q
+origin_commit=''
+recovery_armed=1
+dist_backup_ready=1
+binary_backup_ready=1
+dist_switched=1
+binary_switched=1
+health_calls=0
+sudo() { return 0; }
+wait_for_health() {
+  health_calls=$((health_calls + 1))
+  if ((health_calls == 1)); then
+    kill -INT "$$"
+  fi
+  return 0
+}
+%s
+%s
+trap 'on_signal INT 130' INT
+trap 'on_signal TERM 143' TERM
+kill -TERM "$$"
+`, tempDir, binary, binaryPrevious, distDir, distPrevious, restoreFunction, signalFunction)
+	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command("bash", wrapperPath).CombinedOutput()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 143 {
+		t.Fatalf("double signal exit = %v, want 143, output=%s", err, output)
+	}
+	assertFileContent(t, filepath.Join(distDir, "marker"), "old frontend")
+	assertFileContent(t, binary, "old backend")
+}
+
+func runArtifactSignalAfterMutation(t *testing.T, stage string) (string, string, string, string) {
+	t.Helper()
+	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
+	restoreStart := strings.Index(script, "restore_previous_artifacts() {")
+	restoreEnd := strings.Index(script[restoreStart:], "\n}\n\non_error()")
+	signalStart := strings.Index(script, "on_signal() {")
+	signalEnd := strings.Index(script[signalStart:], "\n}\n\nacquire_maintenance_lock()")
+	switchStart := strings.Index(script, "# 前后端产物都构建成功后才落位")
+	switchEnd := strings.Index(script[switchStart:], "\nsudo systemctl restart")
+	if restoreStart < 0 || restoreEnd < 0 || signalStart < 0 || signalEnd < 0 || switchStart < 0 || switchEnd < 0 {
+		t.Fatal("unable to extract rollback signal test sections")
+	}
+	restoreFunction := script[restoreStart : restoreStart+restoreEnd+2]
+	signalFunction := script[signalStart : signalStart+signalEnd+2]
+	switchSection := script[switchStart : switchStart+switchEnd]
+
+	tempDir := t.TempDir()
+	distDir := filepath.Join(tempDir, "frontend", "dist")
+	distNext := filepath.Join(tempDir, "frontend", "dist.next")
+	distPrevious := filepath.Join(tempDir, "frontend", "dist.previous")
+	for path, marker := range map[string]string{distDir: "old frontend", distNext: "new frontend"} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "marker"), []byte(marker), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	binary := filepath.Join(tempDir, "transithub-api")
+	binaryNext := filepath.Join(tempDir, "transithub-api.next")
+	binaryPrevious := filepath.Join(tempDir, "transithub-api.previous")
+	if err := os.WriteFile(binary, []byte("old backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(binaryNext, []byte("new backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	wrapperPath := filepath.Join(tempDir, "signal-window.sh")
+	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
+set -Eeuo pipefail
+PROJECT_DIR=%q
+SERVICE='transithub-api.service'
+BINARY=%q
+BINARY_PREVIOUS=%q
+BINARY_PREVIOUS_NEXT=%q
+DIST_DIR=%q
+DIST_PREVIOUS=%q
+origin_commit=''
+recovery_armed=1
+dist_backup_ready=0
+binary_backup_ready=0
+dist_switched=0
+binary_switched=0
+signal_after=%q
+sudo() { return 0; }
+wait_for_health() { return 0; }
+mv() {
+  /bin/mv "$@"
+  if [[ "$signal_after" == 'dist-backup' && "$2" == "$DIST_DIR" && "$3" == "$DIST_PREVIOUS" ]] ||
+     [[ "$signal_after" == 'binary-backup' && "$2" == "$BINARY_PREVIOUS_NEXT" && "$3" == "$BINARY_PREVIOUS" ]] ||
+     [[ "$signal_after" == 'dist-switch' && "$2" == "$PROJECT_DIR/frontend/dist.next" && "$3" == "$DIST_DIR" ]] ||
+     [[ "$signal_after" == 'binary-switch' && "$2" == "$PROJECT_DIR/transithub-api.next" && "$3" == "$BINARY" ]]; then
+    signal_after=''
+    kill -TERM "$$"
+  fi
+}
+%s
+%s
+trap 'on_signal TERM 143' TERM
+%s
+`, tempDir, binary, binaryPrevious, binaryPrevious+".next", distDir, distPrevious, stage, restoreFunction, signalFunction, switchSection)
+	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command("bash", wrapperPath).CombinedOutput()
+	if err == nil {
+		t.Fatalf("signal window unexpectedly completed: %s", output)
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 143 {
+		t.Fatalf("signal window exit = %v, output=%s", err, output)
+	}
+	return distDir, binary, distPrevious, binaryPrevious
+}
+
+func runPartialArtifactRestore(t *testing.T, frontendSwitched bool) (string, string) {
+	t.Helper()
+	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
+	start := strings.Index(script, "restore_previous_artifacts() {")
+	endRelative := strings.Index(script[start:], "\n}\n\non_error()")
+	if start < 0 || endRelative < 0 {
+		t.Fatal("unable to extract restore_previous_artifacts")
+	}
+	restoreFunction := script[start : start+endRelative+2]
+
+	tempDir := t.TempDir()
+	distDir := filepath.Join(tempDir, "dist")
+	distPrevious := filepath.Join(tempDir, "dist.previous")
+	if err := os.Mkdir(distPrevious, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(distPrevious, "marker"), []byte("old frontend"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if frontendSwitched {
+		if err := os.Mkdir(distDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(distDir, "marker"), []byte("new frontend"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wrapperPath := filepath.Join(tempDir, "restore.sh")
+	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
+set -Eeuo pipefail
+PROJECT_DIR=%q
+SERVICE='transithub-api.service'
+BINARY=%q
+BINARY_PREVIOUS=%q
+DIST_DIR=%q
+DIST_PREVIOUS=%q
+origin_commit=''
+dist_backup_ready=1
+dist_switched=%d
+binary_backup_ready=0
+binary_switched=0
+sudo() { return 0; }
+wait_for_health() { return 0; }
+%s
+restore_previous_artifacts
+`, tempDir, filepath.Join(tempDir, "transithub-api"), filepath.Join(tempDir, "transithub-api.previous"), distDir, distPrevious, boolInt(frontendSwitched), restoreFunction)
+	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("bash", wrapperPath).CombinedOutput(); err != nil {
+		t.Fatalf("partial artifact restore failed: %v output=%s", err, output)
+	}
+	return distDir, distPrevious
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func assertFileContent(t *testing.T, path, want string) {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if string(content) != want {
+		t.Fatalf("%s content = %q, want %q", path, content, want)
 	}
 }
 

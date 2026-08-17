@@ -327,20 +327,60 @@ func (r *Repository) ListMessages(ctx context.Context, ticketID string) ([]Ticke
 	return messages, rows.Err()
 }
 
-// ListEmbedTickets 只返回同时匹配 workspace + Sub2API 来源域名 + Sub2API 用户 ID 的工单，
-// 是"iframe 用户只能看到自己工单"这条安全边界在数据库层面的强制执行点。
-func (r *Repository) ListEmbedTickets(ctx context.Context, userID string, adminAccountID string, srcHost string, sub2apiUserID string) ([]Ticket, error) {
+func (r *Repository) ListMessagesPage(ctx context.Context, ticketID string, page int, pageSize int) ([]TicketMessage, int, error) {
+	var total int
+	if err := r.db.QueryRow(ctx, `SELECT count(*) FROM ticket_messages WHERE ticket_id = $1`, ticketID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	offset := (page - 1) * pageSize
+	rows, err := r.db.Query(ctx, `
+		SELECT id, ticket_id, user_id, admin_account_id, author_type, author_name, body, created_at
+		FROM (
+			SELECT id, ticket_id, user_id, admin_account_id, author_type, author_name, body, created_at
+			FROM ticket_messages
+			WHERE ticket_id = $1
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2 OFFSET $3
+		) recent
+		ORDER BY created_at ASC, id ASC
+	`, ticketID, pageSize, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	messages := make([]TicketMessage, 0, pageSize)
+	for rows.Next() {
+		var message TicketMessage
+		if err := rows.Scan(&message.ID, &message.TicketID, &message.UserID, &message.AdminAccountID, &message.AuthorType, &message.AuthorName, &message.Body, &message.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, total, rows.Err()
+}
+
+func (r *Repository) ListEmbedTicketsPage(ctx context.Context, userID string, adminAccountID string, srcHost string, sub2apiUserID string, page int, pageSize int) ([]Ticket, int, error) {
+	var total int
+	if err := r.db.QueryRow(ctx, `
+		SELECT count(*) FROM tickets
+		WHERE user_id = $1 AND admin_account_id = $2 AND sub2api_src_host = $3 AND sub2api_user_id = $4
+	`, userID, adminAccountID, srcHost, sub2apiUserID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	offset := (page - 1) * pageSize
 	rows, err := r.db.Query(ctx, `
 		SELECT `+ticketColumns+`
 		FROM tickets
 		WHERE user_id = $1 AND admin_account_id = $2 AND sub2api_src_host = $3 AND sub2api_user_id = $4
 		ORDER BY updated_at DESC
-	`, userID, adminAccountID, srcHost, sub2apiUserID)
+		LIMIT $5 OFFSET $6
+	`, userID, adminAccountID, srcHost, sub2apiUserID, pageSize, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
-	return scanTicketRows(rows)
+	tickets, err := scanTicketRows(rows)
+	return tickets, total, err
 }
 
 // GetEmbedTicket 按同样的四段过滤条件读取单个工单，防止 iframe 用户通过猜测工单 ID

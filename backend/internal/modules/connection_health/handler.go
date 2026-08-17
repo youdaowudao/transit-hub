@@ -23,6 +23,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("GET /api/connection-health/stored-summary", handler.storedSummary)
 	mux.HandleFunc("GET /api/connection-health/groups", handler.groups)
 	mux.HandleFunc("GET /api/connection-health/admin-groups", handler.adminGroups)
+	mux.HandleFunc("GET /api/connection-health/admin-groups/refresh", handler.refreshAdminGroups)
 	mux.HandleFunc("POST /api/connection-health/admin-groups/refresh", handler.refreshAdminGroups)
 	mux.HandleFunc("GET /api/connection-health/priority-sync-status", handler.prioritySyncStatus)
 	mux.HandleFunc("GET /api/connection-health/events", handler.events)
@@ -161,7 +162,13 @@ func (h *Handler) refreshAdminGroups(w http.ResponseWriter, r *http.Request) {
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
 		return
 	}
-	result, err := h.service.AdminGroupsFreshResult(r.Context(), userID)
+	var result AdminGroupsFreshResult
+	var err error
+	if r.Method == http.MethodGet {
+		result, err = h.service.AdminGroupsAutoFreshResult(r.Context(), userID)
+	} else {
+		result, err = h.service.AdminGroupsFreshResult(r.Context(), userID)
+	}
 	if err != nil {
 		writeError(w, err)
 		return

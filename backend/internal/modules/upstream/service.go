@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,17 @@ type RefreshConfig struct {
 	Interval time.Duration
 }
 
+type refreshWorkspaceKey struct {
+	userID         string
+	adminAccountID string
+}
+
+type syncFlight struct {
+	done     chan struct{}
+	response Response
+	err      error
+}
+
 // Service 管理上游站点的生命周期（创建、编辑、同步、删除）。
 // 站点运行时状态缓存在 Redis（通过 SiteCache），PostgreSQL 负责持久化。
 // 当系统设置开启了数据刷新频率时，定时器按配置的间隔自动同步各站点。
@@ -43,12 +55,13 @@ type Service struct {
 	repository      SiteRepository
 	cache           SiteCache
 	accounts        AdminAccountResolver
-	refreshConfig   RefreshConfig
+	refreshConfigs  map[refreshWorkspaceKey]RefreshConfig
 	// groupCostSlots 限制跨站点成本采样的并发量；nil 仅用于不带 NewService 的单元测试。
-	groupCostSlots   chan struct{}
-	timers          map[string]*time.Timer
-	deletedSites    map[string]struct{}
-	mu              sync.Mutex
+	groupCostSlots chan struct{}
+	timers         map[string]*time.Timer
+	deletedSites   map[string]struct{}
+	syncFlights    map[string]*syncFlight
+	mu             sync.Mutex
 	// AfterSync 在站点同步成功后被调用，传入同步前后的指标数据。
 	// 由系统设置模块注入，用于余额预警和倍率变更检测。
 	AfterSync func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics Metrics)
@@ -75,33 +88,24 @@ func NewService(platformService *PlatformService, repository SiteRepository, sna
 		cache:           cache,
 		groupCostSlots:  make(chan struct{}, 2),
 		timers:          make(map[string]*time.Timer),
+		refreshConfigs:  make(map[refreshWorkspaceKey]RefreshConfig),
 		deletedSites:    make(map[string]struct{}),
+		syncFlights:     make(map[string]*syncFlight),
 	}
 }
 
-// SetRefreshConfig 更新后台定时同步配置。
-// 开启时为所有有会话的站点启动定时器；关闭时清除所有定时器。
-// 由系统设置模块在启动和保存策略时调用。
-func (s *Service) SetRefreshConfig(config RefreshConfig) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	prev := s.refreshConfig
-	s.refreshConfig = config
-
-	if !config.Enabled {
-		// 关闭：清除所有定时器。
-		for id := range s.timers {
-			s.clearTimerLocked(id)
-		}
-		if prev.Enabled {
-			log.Printf("[upstream] 后台定时同步已关闭")
-		}
+// SetWorkspaceRefreshConfig 只更新指定工作区的后台定时同步配置。
+func (s *Service) SetWorkspaceRefreshConfig(userID, adminAccountID string, config RefreshConfig) {
+	userID = strings.TrimSpace(userID)
+	adminAccountID = strings.TrimSpace(adminAccountID)
+	if userID == "" || adminAccountID == "" {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := refreshWorkspaceKey{userID: userID, adminAccountID: adminAccountID}
+	s.refreshConfigs[key] = config
 
-	log.Printf("[upstream] 后台定时同步已开启 interval=%s", config.Interval)
-
-	// 开启或间隔变更：重新调度所有有会话的站点。
 	if s.repository == nil {
 		return
 	}
@@ -111,8 +115,11 @@ func (s *Service) SetRefreshConfig(config RefreshConfig) {
 		return
 	}
 	for i := range sites {
-		s.scheduleSyncLocked(sites[i].ID, &sites[i])
+		if sites[i].UserID == userID && sites[i].AdminAccountID == adminAccountID {
+			s.scheduleSyncLocked(sites[i].ID, &sites[i])
+		}
 	}
+	log.Printf("[upstream] 工作区后台定时同步配置已更新 user_id=%s admin_account_id=%s enabled=%t interval=%s", userID, adminAccountID, config.Enabled, config.Interval)
 }
 
 // RestoreSavedSites 从 PostgreSQL 恢复所有站点到 Redis 缓存。
@@ -670,6 +677,114 @@ func (s *Service) Sync(ctx context.Context, userID string, id string) (Response,
 	return s.sync(ctx, id)
 }
 
+const relevantSiteSyncConcurrency = 5
+
+// SyncSites 按显式 workspace 同步或等待指定站点。force=false 时只复用已经在途的
+// 同站点同步，不会为了页面自动刷新启动新的上游同步。
+func (s *Service) SyncSites(ctx context.Context, userID string, adminAccountID string, siteIDs []string, force bool) []SyncSiteResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ids := normalizedSiteIDs(siteIDs)
+	results := make([]SyncSiteResult, len(ids))
+	sem := make(chan struct{}, relevantSiteSyncConcurrency)
+	var wg sync.WaitGroup
+	for index, id := range ids {
+		wg.Add(1)
+		go func(index int, id string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[index] = SyncSiteResult{SiteID: id, Status: "unavailable", ErrorKey: "site_sync_cancelled"}
+				return
+			}
+			results[index] = s.syncSiteForWorkspace(ctx, userID, adminAccountID, id, force)
+		}(index, id)
+	}
+	wg.Wait()
+	return results
+}
+
+func normalizedSiteIDs(siteIDs []string) []string {
+	seen := make(map[string]struct{}, len(siteIDs))
+	for _, siteID := range siteIDs {
+		siteID = strings.TrimSpace(siteID)
+		if siteID != "" {
+			seen[siteID] = struct{}{}
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for siteID := range seen {
+		ids = append(ids, siteID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (s *Service) syncSiteForWorkspace(ctx context.Context, userID string, adminAccountID string, siteID string, force bool) SyncSiteResult {
+	site, err := s.cache.Get(ctx, siteID)
+	if err != nil || site == nil || site.UserID != userID || site.AdminAccountID != adminAccountID {
+		return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_unavailable"}
+	}
+	if !site.IsEnabled() {
+		return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_disabled"}
+	}
+	if site.Session == nil {
+		return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_session"}
+	}
+	if !force {
+		s.mu.Lock()
+		flight := s.syncFlights[siteID]
+		s.mu.Unlock()
+		if flight == nil {
+			return syncSiteResult(siteID, toResponse(site), nil)
+		}
+		response, err := waitForSyncFlight(ctx, flight)
+		return syncSiteResult(siteID, response, err)
+	}
+	response, err := s.sync(ctx, siteID)
+	return syncSiteResult(siteID, response, err)
+}
+
+func waitForSyncFlight(ctx context.Context, flight *syncFlight) (Response, error) {
+	select {
+	case <-flight.done:
+		return flight.response, flight.err
+	case <-ctx.Done():
+		return Response{}, ctx.Err()
+	}
+}
+
+func syncSiteResult(siteID string, response Response, err error) SyncSiteResult {
+	if errors.Is(err, context.DeadlineExceeded) || response.syncTimedOut {
+		return SyncSiteResult{SiteID: siteID, Status: "timeout", ErrorKey: "site_sync_timeout"}
+	}
+	if err != nil {
+		return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_failed"}
+	}
+	if response.Status == StatusConnected {
+		return SyncSiteResult{SiteID: siteID, Status: "success"}
+	}
+	if response.Status == StatusSyncing {
+		return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_updating"}
+	}
+	if response.ErrorKey != nil {
+		switch *response.ErrorKey {
+		case ErrorAuth:
+			return SyncSiteResult{SiteID: siteID, Status: "auth_failed", ErrorKey: "site_sync_auth"}
+		case ErrorNetwork:
+			return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_network"}
+		case ErrorInvalidResponse:
+			return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_invalid_response"}
+		case ErrorRequest:
+			return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_request"}
+		}
+	}
+	return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_failed"}
+}
+
 // SyncAll 并发同步指定用户当前工作区的所有站点。
 // 有会话的站点并行同步，无会话的直接返回当前状态。
 func (s *Service) SyncAll(ctx context.Context, userID string) ([]Response, error) {
@@ -804,8 +919,45 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 	return nil
 }
 
-// sync 执行单个站点的同步流程：刷新会话 → 拉取最新指标 → 更新缓存和数据库。
+// sync 复用同一站点正在进行的同步。调用者取消只结束自身等待，底层同步继续完成。
 func (s *Service) sync(ctx context.Context, id string) (Response, error) {
+	s.mu.Lock()
+	if s.syncFlights == nil {
+		s.syncFlights = make(map[string]*syncFlight)
+	}
+	flight := s.syncFlights[id]
+	if flight == nil {
+		flight = &syncFlight{done: make(chan struct{})}
+		s.syncFlights[id] = flight
+		go s.runSyncFlight(id, flight)
+	}
+	s.mu.Unlock()
+
+	return waitForSyncFlight(ctx, flight)
+}
+
+func (s *Service) runSyncFlight(id string, flight *syncFlight) {
+	response := Response{}
+	var err error
+	defer func() {
+		if recover() != nil {
+			err = newRequestError(ErrorUnknown, "")
+			log.Printf("[upstream] sync panic recovered id=%s", id)
+		}
+		s.mu.Lock()
+		flight.response = response
+		flight.err = err
+		if s.syncFlights[id] == flight {
+			delete(s.syncFlights, id)
+		}
+		close(flight.done)
+		s.mu.Unlock()
+	}()
+	response, err = s.syncOnce(context.Background(), id)
+}
+
+// syncOnce 执行单个站点的同步流程：刷新会话 → 拉取最新指标 → 更新缓存和数据库。
+func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	site, err := s.cache.Get(ctx, id)
 	if err != nil {
 		return Response{}, err
@@ -869,6 +1021,7 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 	s.mu.Unlock()
 
 	response := s.toResponse(ctx, site)
+	response.syncTimedOut = requestTimedOut(refreshErr)
 	if saveErr := s.saveSite(ctx, site); saveErr != nil {
 		return response, saveErr
 	}
@@ -1005,10 +1158,14 @@ func (s *Service) scheduleSyncLocked(id string, site *Site) {
 	if _, deleted := s.deletedSites[id]; deleted {
 		return
 	}
-	if !s.refreshConfig.Enabled || site == nil || !site.IsEnabled() || site.Session == nil {
+	if site == nil || !site.IsEnabled() || site.Session == nil {
 		return
 	}
-	delay := s.refreshConfig.Interval
+	config, ok := s.refreshConfigs[refreshWorkspaceKey{userID: site.UserID, adminAccountID: site.AdminAccountID}]
+	if !ok || !config.Enabled || config.Interval <= 0 {
+		return
+	}
+	delay := config.Interval
 	log.Printf("[upstream-timer] 定时同步已调度 id=%s delay=%s", id, delay)
 	s.timers[id] = time.AfterFunc(delay, func() {
 		log.Printf("[upstream-timer] 定时同步触发 id=%s", id)

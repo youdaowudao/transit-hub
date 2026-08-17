@@ -124,6 +124,19 @@ func (s *Service) multiplierLookupForWorkspace(ctx context.Context, userID strin
 }
 
 func (s *Service) multiplierLookupForWorkspaceWithOptions(ctx context.Context, userID string, adminAccountID string, platform string, allowStale bool, waitForFresh bool, forceRefresh bool) upstreamMultiplierLookup {
+	if s.mySites == nil || s.sites == nil {
+		return upstreamMultiplierLookup{byAccount: make(map[string]upstreamMultiplierResolution), unavailable: true}
+	}
+	_, ok := s.mySites.(UpstreamKeyMetadataReader)
+	if !ok {
+		// Test doubles and older injected readers keep the old bounded behavior.
+		return s.legacyMultiplierLookup(ctx, userID, adminAccountID, platform)
+	}
+	connections, err := s.mySites.ListRealConnectionsForWorkspace(ctx, userID, adminAccountID)
+	return s.multiplierLookupForWorkspaceWithConnections(ctx, userID, adminAccountID, platform, connections, err == nil, allowStale, waitForFresh, forceRefresh)
+}
+
+func (s *Service) multiplierLookupForWorkspaceWithConnections(ctx context.Context, userID string, adminAccountID string, platform string, connections []my_sites.RealConnection, connectionsReady bool, allowStale bool, waitForFresh bool, forceRefresh bool) upstreamMultiplierLookup {
 	lookup := upstreamMultiplierLookup{byAccount: make(map[string]upstreamMultiplierResolution)}
 	if s.mySites == nil || s.sites == nil {
 		lookup.unavailable = true
@@ -131,11 +144,9 @@ func (s *Service) multiplierLookupForWorkspaceWithOptions(ctx context.Context, u
 	}
 	metadataReader, ok := s.mySites.(UpstreamKeyMetadataReader)
 	if !ok {
-		// Test doubles and older injected readers keep the old bounded behavior.
 		return s.legacyMultiplierLookup(ctx, userID, adminAccountID, platform)
 	}
-	connections, err := s.mySites.ListRealConnectionsForWorkspace(ctx, userID, adminAccountID)
-	if err != nil {
+	if !connectionsReady {
 		lookup.unavailable = true
 		return lookup
 	}
@@ -491,16 +502,15 @@ func (s *Service) multiplierRefreshSummary(userID string, adminAccountID string)
 		case entry.status == multiplierResolutionStale:
 			status = "stale"
 			anyFailure = true
+			errorKey = multiplierOutcomeErrorKey(entry.lastOutcome)
 			if entry.lastOutcome == "timeout" {
-				errorKey = "timeout"
 				anyTimeout = true
-			} else if entry.lastOutcome == "auth_failed" {
-				errorKey = "auth"
 			}
 		case entry.lastOutcome == "timeout":
 			status = "timeout"
 			anyFailure = true
 			anyTimeout = true
+			errorKey = "timeout"
 		case entry.lastOutcome == "auth_failed":
 			status = "auth_failed"
 			anyFailure = true
@@ -508,6 +518,7 @@ func (s *Service) multiplierRefreshSummary(userID string, adminAccountID string)
 		default:
 			status = "unavailable"
 			anyFailure = true
+			errorKey = multiplierOutcomeErrorKey(entry.lastOutcome)
 		}
 		sites = append(sites, AdminGroupsRefreshSite{SiteID: entry.siteID, Status: status, ErrorKey: errorKey})
 	}
@@ -525,6 +536,19 @@ func (s *Service) multiplierRefreshSummary(userID string, adminAccountID string)
 		state = "failure"
 	}
 	return AdminGroupsRefreshSummary{State: state, Sites: sites}
+}
+
+func multiplierOutcomeErrorKey(outcome string) string {
+	switch outcome {
+	case "timeout":
+		return "timeout"
+	case "auth_failed":
+		return "auth"
+	case "unavailable":
+		return "unavailable"
+	default:
+		return "unavailable"
+	}
 }
 
 func (s *Service) resolveMultiplierSnapshotLocked(connection my_sites.RealConnection, userID string, adminAccountID string, allowStale bool) upstreamMultiplierResolution {
@@ -665,8 +689,12 @@ func (s *Service) legacyMultiplierLookup(ctx context.Context, userID string, adm
 // The retained value is display-only; Priority decisions continue through their existing
 // safety checks and are not changed by this lookup.
 func (s *Service) freshMultiplierLookupForWorkspace(ctx context.Context, userID string, adminAccountID string, platform string) upstreamMultiplierLookup {
+	return s.freshMultiplierLookupForWorkspaceWithOptions(ctx, userID, adminAccountID, platform, true)
+}
+
+func (s *Service) freshMultiplierLookupForWorkspaceWithOptions(ctx context.Context, userID string, adminAccountID string, platform string, forceRefresh bool) upstreamMultiplierLookup {
 	if _, ok := s.mySites.(UpstreamKeyMetadataReader); ok {
-		return s.multiplierLookupForWorkspaceWithOptions(ctx, userID, adminAccountID, platform, true, true, true)
+		return s.multiplierLookupForWorkspaceWithOptions(ctx, userID, adminAccountID, platform, true, true, forceRefresh)
 	}
 	return s.upstreamMultiplierResolutionsByAdminAccountLegacy(ctx, userID, adminAccountID, platform)
 }

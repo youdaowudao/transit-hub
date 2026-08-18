@@ -271,52 +271,57 @@ func isCredentialUnavailableReason(reason string) bool {
 // 不解析凭据（凭据解析由调用方按需调用 ResolveProbeCredential），因为策略分配管理等轻量场景
 // 不需要真的打上游拿明文 key。
 func (s *Service) resolveManualTarget(ctx context.Context, userID string, targetID string) (upstream.Session, AdminProbeTarget, upstream.AdminGroupAccountInfo, string, error) {
-	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	session, refresh, adminAccountID, err := s.resolveManualTargetWithRefresh(ctx, userID, targetID)
+	return session, refresh.target, refresh.account, adminAccountID, err
+}
+
+func (s *Service) resolveManualTargetWithRefresh(ctx context.Context, userID string, targetID string) (upstream.Session, adminTargetRefresh, string, error) {
+	session, adminAccountID, accountID, err := s.resolveManualSession(ctx, userID, targetID)
 	if err != nil {
-		return upstream.Session{}, AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, "", err
-	}
-	if s.platformGroups == nil {
-		return upstream.Session{}, AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, "", requestError(ErrorUnknown)
-	}
-
-	// 校验目标归属当前 workspace：targetId 内嵌的 adminAccountID 必须等于当前 workspace，
-	// 防止用别的 workspace 的 targetId 越权操作。
-	parsed, ok := parseTargetID(targetID)
-	if !ok || parsed.adminAccountID != adminAccountID {
-		return upstream.Session{}, AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, "", requestError(ErrorProbeTargetNotFound)
-	}
-
-	session, err := s.mySites.RequireSession(ctx, userID, adminAccountID)
-	if err != nil {
-		return upstream.Session{}, AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, "", err
-	}
-
-	// 校验 targetId 的 platform 段与当前 workspace 的 session 平台一致。否则 platform 段被伪造
-	// （如 session 是 new-api 却传 sub2api:ws1:100）时，findAdminTarget 会用 session 平台重建
-	// 出 canonical targetId（newapi:ws1:100），导致请求 targetId 与状态/事件 key 不一致。
-	if parsed.platform != string(session.Platform) {
-		return upstream.Session{}, AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, "", requestError(ErrorProbeTargetNotFound)
+		return upstream.Session{}, adminTargetRefresh{}, "", err
 	}
 
 	// 重新解析目标账号（不信任前端），拿到 base_url/models 等探活必需信息。
-	target, account, found, accountsReadError, err := s.findAdminTarget(ctx, session, adminAccountID, parsed.accountID)
+	refresh, err := s.refreshAdminTarget(ctx, session, adminAccountID, accountID)
 	if err != nil {
-		return upstream.Session{}, AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, "", err
+		return upstream.Session{}, adminTargetRefresh{}, "", err
 	}
-	if !found {
+	if !refresh.found {
 		// 目标未找到时，若过程中发生过账号列表读取错误，说明可能是上游临时故障而非目标不存在，
 		// 返回账号列表读取错误（安全 i18n key，不含上游明文），避免掩盖真实上游故障。
-		if accountsReadError {
-			return upstream.Session{}, AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, "", requestError(ErrorAccountsFetch)
+		if refresh.accountsReadError {
+			return upstream.Session{}, adminTargetRefresh{}, "", requestError(ErrorAccountsFetch)
 		}
-		return upstream.Session{}, AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, "", requestError(ErrorProbeTargetNotFound)
+		return upstream.Session{}, adminTargetRefresh{}, "", requestError(ErrorProbeTargetNotFound)
 	}
 	// canonical 校验：重建出的 targetId 必须与请求完全一致，杜绝任何 targetId 段不一致的写入。
-	if target.TargetID != targetID {
-		return upstream.Session{}, AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, "", requestError(ErrorProbeTargetNotFound)
+	if refresh.target.TargetID != targetID {
+		return upstream.Session{}, adminTargetRefresh{}, "", requestError(ErrorProbeTargetNotFound)
 	}
 
-	return session, target, account, adminAccountID, nil
+	return session, refresh, adminAccountID, nil
+}
+
+func (s *Service) resolveManualSession(ctx context.Context, userID string, targetID string) (upstream.Session, string, string, error) {
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return upstream.Session{}, "", "", err
+	}
+	if s.platformGroups == nil {
+		return upstream.Session{}, "", "", requestError(ErrorUnknown)
+	}
+	parsed, ok := parseTargetID(targetID)
+	if !ok || parsed.adminAccountID != adminAccountID {
+		return upstream.Session{}, "", "", requestError(ErrorProbeTargetNotFound)
+	}
+	session, err := s.mySites.RequireSession(ctx, userID, adminAccountID)
+	if err != nil {
+		return upstream.Session{}, "", "", err
+	}
+	if parsed.platform != string(session.Platform) {
+		return upstream.Session{}, "", "", requestError(ErrorProbeTargetNotFound)
+	}
+	return session, adminAccountID, parsed.accountID, nil
 }
 
 // ProbeTarget 手动探活一个独立目标：前端传 targetId + models（不再传 connectionId/base_url/key）。
@@ -489,6 +494,45 @@ func (s *Service) findAdminTargetWithMemberships(ctx context.Context, session up
 		return AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, nil, false, false, err
 	}
 	return refresh.target, refresh.account, refresh.memberships, refresh.found, refresh.accountsReadError, nil
+}
+
+func (s *Service) readbackManualTarget(ctx context.Context, session upstream.Session, adminAccountID string, accountID string, memberships []adminTargetMembership) (AdminProbeTarget, upstream.AdminGroupAccountInfo, bool, bool, error) {
+	if len(memberships) == 0 {
+		return AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, false, false, nil
+	}
+	var lastErr error
+	for _, membership := range memberships {
+		accounts, err := s.listAdminGroupAccounts(ctx, session, upstream.AdminGroupInfo{ID: membership.groupID, Name: membership.groupName})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for _, account := range accounts {
+			if account.ID == accountID {
+				return adminProbeTargetFromAccount(session, adminAccountID, membership.groupID, membership.groupName, account), account, true, false, nil
+			}
+		}
+	}
+	if lastErr != nil {
+		return AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, false, true, lastErr
+	}
+	return AdminProbeTarget{}, upstream.AdminGroupAccountInfo{}, false, false, nil
+}
+
+func adminProbeTargetFromAccount(session upstream.Session, adminAccountID string, groupID string, groupName string, account upstream.AdminGroupAccountInfo) AdminProbeTarget {
+	return AdminProbeTarget{
+		TargetID:       buildTargetID(string(session.Platform), adminAccountID, account.ID),
+		Platform:       string(session.Platform),
+		AdminGroupID:   groupID,
+		AdminGroupName: groupName,
+		AccountID:      account.ID,
+		AccountName:    account.Name,
+		AccountStatus:  account.Status,
+		Schedulable:    cloneBoolPointer(account.Schedulable),
+		AccountWeight:  cloneIntPointer(account.Weight),
+		ProviderFamily: account.Platform,
+		Models:         splitModelList(account.Models),
+	}
 }
 
 // refreshAdminTarget keeps the existing execution-time refresh as one complete snapshot.

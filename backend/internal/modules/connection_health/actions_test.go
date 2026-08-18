@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"transithub/backend/internal/modules/my_sites"
 	"transithub/backend/internal/modules/upstream"
@@ -156,6 +157,193 @@ func TestActions_Sub2APIRestoreUpdatesAccountActive(t *testing.T) {
 	}
 	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].accountID != "sub-account-1" || platform.sub2APICalls[0].status != "active" {
 		t.Fatalf("expected one call with accountID=sub-account-1 status=active, got %+v", platform.sub2APICalls)
+	}
+}
+
+func TestDisableConnection_RejectsLastUsableSub2APIAccount(t *testing.T) {
+	repo := newFakeRepository()
+	platform := &fakePlatformActioner{}
+	mySites := fakeMySitesReader{
+		connections: []my_sites.RealConnection{{
+			ID: "conn-1", UserID: "user1", WorkspaceAdminAccountID: "ws1",
+			UpstreamSiteID: "site-1", AdminAccountID: "1515",
+		}},
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+	}
+	site := fakeSiteLookup{site: &upstream.Site{ID: "site-1", Platform: upstream.PlatformSub2API}}
+	service := &Service{
+		repo: repo, mySites: mySites, accounts: fakeAdminAccountResolver{id: "ws1"},
+		sites: site,
+		platformGroups: fakePlatformGroupReader{
+			groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "only", Platform: string(upstream.PlatformSub2API)}},
+			accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+				"g1": {{ID: "1515", Status: "active", Schedulable: boolPointer(true)}},
+			},
+		},
+		dispatcher: newRemoteActionDispatcher(site, mySites, platform),
+	}
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+		groups: []adminInventoryGroup{{
+			group:    upstream.AdminGroupInfo{ID: "g1", Name: "only"},
+			accounts: []upstream.AdminGroupAccountInfo{{ID: "1515", Status: "active", Schedulable: boolPointer(true)}},
+		}},
+	})
+
+	err := service.DisableConnection(context.Background(), "user1", "conn-1")
+	if err == nil {
+		t.Fatal("legacy disable must reject closing the only active and schedulable account")
+	}
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("legacy disable must not write the last usable account upstream: %+v", platform.sub2APICalls)
+	}
+	if len(repo.events) != 1 {
+		t.Fatalf("blocked legacy disable must leave one audit event, got %+v", repo.events)
+	}
+	event := repo.events[0]
+	if event.Result != SchedulableActionFailed || event.ErrorKey != ErrorSub2APIGroupLastUsable || event.RemoteAction != RemoteActionSkippedSub2APILastUsable || event.AdminGroupID != "g1" || event.OwnGroupName != "only" {
+		t.Fatalf("blocked legacy disable audit = %+v", event)
+	}
+}
+
+func TestDisableConnection_AllowsClosingOneOfTwoUsableSub2APIAccountsFromCachedInventory(t *testing.T) {
+	repo := newFakeRepository()
+	platform := &fakePlatformActioner{}
+	mySites := fakeMySitesReader{
+		connections: []my_sites.RealConnection{{
+			ID: "conn-1", UserID: "user1", WorkspaceAdminAccountID: "ws1",
+			UpstreamSiteID: "site-1", AdminAccountID: "1515",
+		}},
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+	}
+	site := fakeSiteLookup{site: &upstream.Site{ID: "site-1", Platform: upstream.PlatformSub2API}}
+	service := &Service{
+		repo: repo, mySites: mySites, accounts: fakeAdminAccountResolver{id: "ws1"},
+		sites:          site,
+		platformGroups: fakePlatformGroupReader{},
+		dispatcher:     newRemoteActionDispatcher(site, mySites, platform),
+	}
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+		groups: []adminInventoryGroup{{
+			group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"},
+			accounts: []upstream.AdminGroupAccountInfo{
+				{ID: "1515", Status: "active", Schedulable: boolPointer(true)},
+				{ID: "1616", Status: "active", Schedulable: boolPointer(true)},
+			},
+		}},
+	})
+
+	if err := service.DisableConnection(context.Background(), "user1", "conn-1"); err != nil {
+		t.Fatalf("closing one of two usable accounts should succeed: %v", err)
+	}
+	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].accountID != "1515" || platform.sub2APICalls[0].status != "inactive" {
+		t.Fatalf("expected one inactive write from cached inventory, got %+v", platform.sub2APICalls)
+	}
+}
+
+func TestDisableConnection_AllowsIdempotentInactiveTargetWithIncompleteOtherGroup(t *testing.T) {
+	repo := newFakeRepository()
+	platform := &fakePlatformActioner{}
+	mySites := fakeMySitesReader{
+		connections: []my_sites.RealConnection{{
+			ID: "conn-1", UserID: "user1", WorkspaceAdminAccountID: "ws1",
+			UpstreamSiteID: "site-1", AdminAccountID: "1515",
+		}},
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+	}
+	site := fakeSiteLookup{site: &upstream.Site{ID: "site-1", Platform: upstream.PlatformSub2API}}
+	service := &Service{
+		repo: repo, mySites: mySites, accounts: fakeAdminAccountResolver{id: "ws1"},
+		sites: site, platformGroups: fakePlatformGroupReader{},
+		dispatcher: newRemoteActionDispatcher(site, mySites, platform),
+	}
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+		groups: []adminInventoryGroup{
+			{group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"}, accounts: []upstream.AdminGroupAccountInfo{{ID: "1515", Status: "inactive", Schedulable: boolPointer(true)}}},
+			{group: upstream.AdminGroupInfo{ID: "g2", Name: "unreadable"}, err: errors.New("upstream unavailable")},
+		},
+	})
+
+	if err := service.DisableConnection(context.Background(), "user1", "conn-1"); err != nil {
+		t.Fatalf("idempotent disable must ignore unrelated incomplete inventory: %v", err)
+	}
+}
+
+func TestDisableConnection_RejectsConflictingSharedAccountState(t *testing.T) {
+	repo := newFakeRepository()
+	platform := &fakePlatformActioner{}
+	mySites := fakeMySitesReader{
+		connections: []my_sites.RealConnection{{
+			ID: "conn-1", UserID: "user1", WorkspaceAdminAccountID: "ws1",
+			UpstreamSiteID: "site-1", AdminAccountID: "1515",
+		}},
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+	}
+	site := fakeSiteLookup{site: &upstream.Site{ID: "site-1", Platform: upstream.PlatformSub2API}}
+	service := &Service{
+		repo: repo, mySites: mySites, accounts: fakeAdminAccountResolver{id: "ws1"},
+		sites: site, platformGroups: fakePlatformGroupReader{},
+		dispatcher: newRemoteActionDispatcher(site, mySites, platform),
+	}
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+		groups: []adminInventoryGroup{
+			{group: upstream.AdminGroupInfo{ID: "g1", Name: "first"}, accounts: []upstream.AdminGroupAccountInfo{{ID: "1515", Status: "active", Schedulable: boolPointer(false)}}},
+			{group: upstream.AdminGroupInfo{ID: "g2", Name: "second"}, accounts: []upstream.AdminGroupAccountInfo{{ID: "1515", Status: "active", Schedulable: boolPointer(true)}}},
+		},
+	})
+
+	err := service.DisableConnection(context.Background(), "user1", "conn-1")
+	if err == nil || err.Error() != ErrorSub2APIInventoryIncomplete {
+		t.Fatalf("conflicting shared account state must fail closed: %v", err)
+	}
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("conflicting shared account state must not write upstream: %+v", platform.sub2APICalls)
+	}
+	if len(repo.events) != 1 || repo.events[0].RemoteAction != RemoteActionSkippedSub2APIInventory {
+		t.Fatalf("conflicting shared account audit = %+v", repo.events)
+	}
+}
+
+func TestDisableConnection_RejectsStaleCachedSub2APIInventory(t *testing.T) {
+	repo := newFakeRepository()
+	platform := &fakePlatformActioner{}
+	mySites := fakeMySitesReader{
+		connections: []my_sites.RealConnection{{
+			ID: "conn-1", UserID: "user1", WorkspaceAdminAccountID: "ws1",
+			UpstreamSiteID: "site-1", AdminAccountID: "1515",
+		}},
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+	}
+	site := fakeSiteLookup{site: &upstream.Site{ID: "site-1", Platform: upstream.PlatformSub2API}}
+	service := &Service{
+		repo: repo, mySites: mySites, accounts: fakeAdminAccountResolver{id: "ws1"},
+		sites: site, platformGroups: fakePlatformGroupReader{},
+		dispatcher: newRemoteActionDispatcher(site, mySites, platform),
+	}
+	guard := service.sub2APIFloorGuardFor("user1", "ws1")
+	guard.rememberInventory(adminWorkspaceInventory{
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+		groups: []adminInventoryGroup{{
+			group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"},
+			accounts: []upstream.AdminGroupAccountInfo{
+				{ID: "1515", Status: "active", Schedulable: boolPointer(true)},
+				{ID: "1616", Status: "active", Schedulable: boolPointer(true)},
+			},
+		}},
+	})
+	guard.mu.Lock()
+	guard.snapshotAt = time.Now().Add(-2 * schedulerTickInterval)
+	guard.mu.Unlock()
+
+	err := service.DisableConnection(context.Background(), "user1", "conn-1")
+	if err == nil || err.Error() != ErrorSub2APIInventoryIncomplete {
+		t.Fatalf("stale cached inventory error = %v", err)
+	}
+	if len(platform.sub2APICalls) != 0 || len(repo.events) != 1 {
+		t.Fatalf("stale inventory must not write upstream and must audit, calls=%+v events=%+v", platform.sub2APICalls, repo.events)
 	}
 }
 

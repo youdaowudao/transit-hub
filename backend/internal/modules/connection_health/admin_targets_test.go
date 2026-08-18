@@ -614,7 +614,7 @@ func TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds(t *testi
 	reader := fakePlatformGroupReader{
 		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
 		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
-			"g1": {{ID: "1515", Name: "acc", Status: "active", Models: "gpt-4o"}, {ID: "1516", Name: "reserve", Status: "active", Models: "gpt-4o"}},
+			"g1": {{ID: "1515", Name: "acc", Status: "active", Schedulable: boolPointer(true), Models: "gpt-4o"}, {ID: "1516", Name: "reserve", Status: "active", Schedulable: boolPointer(true), Models: "gpt-4o"}},
 		},
 		credByAccount: map[string]upstream.ProbeCredential{"1515": {BaseURL: server.URL, Key: "probe-key"}},
 	}

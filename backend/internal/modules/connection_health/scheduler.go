@@ -231,6 +231,7 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 		}
 		if floorGuards[wsKey] == nil {
 			floorGuards[wsKey] = newWorkspaceFloorGuard()
+			s.setSub2APIFloorGuard(j.userID, j.adminAccountID, floorGuards[wsKey])
 		}
 		j.floorGuard = floorGuards[wsKey]
 
@@ -269,6 +270,7 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 	}
 	j.target = refresh.target
 	j.account = refresh.account
+	j.floorGuard.rememberInventory(refresh.inventory)
 	currentSpecs, queuedSpecs, policyOK := s.currentScheduledProbeSpecs(ctx, j.userID, j.adminAccountID, j.target, refresh.memberships, j.dueSpecs)
 	if !policyOK {
 		log.Printf("[connection-health] refresh scheduled policy decision failed target_id=%s", j.target.TargetID)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"transithub/backend/internal/modules/my_sites"
+	"transithub/backend/internal/modules/upstream"
 )
 
 // healthRepository 是 Service 对存储层的全部依赖，由 *Repository 结构性满足。
@@ -34,6 +35,7 @@ type healthRepository interface {
 	TryAcquireSchedulerLease(ctx context.Context) (release func(), acquired bool, err error)
 	AcquireTargetLease(ctx context.Context, targetID string) (release func(), err error)
 	TryAcquireTargetLease(ctx context.Context, targetID string) (release func(), acquired bool, err error)
+	AcquireSub2APIMutationLease(ctx context.Context, userID string, adminAccountID string) (release func(), err error)
 	AcquirePrioritySyncLease(ctx context.Context, userID string, adminAccountID string) (release func(), err error)
 	ListEnabledPolicies(ctx context.Context) ([]Policy, error)
 	ReplacePolicyAssignments(ctx context.Context, userID string, adminAccountID string, targetID string, policyIDs []string) error
@@ -98,6 +100,8 @@ type Service struct {
 	priorityTriggerPending map[string]string
 	priorityHealthRunning  map[string]bool
 	priorityHealthPending  map[string]bool
+	sub2APIFloorMu         sync.Mutex
+	sub2APIFloorGuards     map[string]*workspaceFloorGuard
 	questionAnswerMu       sync.Mutex
 	questionAnswerCtx      context.Context
 	questionAnswerStop     context.CancelFunc
@@ -125,6 +129,7 @@ func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platf
 		priorityTriggerPending: make(map[string]string),
 		priorityHealthRunning:  make(map[string]bool),
 		priorityHealthPending:  make(map[string]bool),
+		sub2APIFloorGuards:     make(map[string]*workspaceFloorGuard),
 		questionAnswerHTTP:     NewQuestionAnswerRunner(),
 		questionAnswerTTL:      QuestionAnswerRequestTimeout,
 	}
@@ -138,6 +143,34 @@ func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platf
 		service.schedulableActions = actions
 	}
 	return service
+}
+
+func (s *Service) sub2APIFloorGuardFor(userID string, adminAccountID string) *workspaceFloorGuard {
+	key := userID + "|" + adminAccountID
+	s.sub2APIFloorMu.Lock()
+	defer s.sub2APIFloorMu.Unlock()
+	if s.sub2APIFloorGuards == nil {
+		s.sub2APIFloorGuards = make(map[string]*workspaceFloorGuard)
+	}
+	guard := s.sub2APIFloorGuards[key]
+	if guard == nil {
+		guard = newWorkspaceFloorGuard()
+		s.sub2APIFloorGuards[key] = guard
+	}
+	return guard
+}
+
+func (s *Service) setSub2APIFloorGuard(userID string, adminAccountID string, guard *workspaceFloorGuard) {
+	if guard == nil {
+		return
+	}
+	key := userID + "|" + adminAccountID
+	s.sub2APIFloorMu.Lock()
+	defer s.sub2APIFloorMu.Unlock()
+	if s.sub2APIFloorGuards == nil {
+		s.sub2APIFloorGuards = make(map[string]*workspaceFloorGuard)
+	}
+	s.sub2APIFloorGuards[key] = guard
 }
 
 func (s *Service) EnsureSchema(ctx context.Context) error {
@@ -1010,6 +1043,67 @@ func (s *Service) DisableConnection(ctx context.Context, userID string, connecti
 	}
 	if len(states) == 0 {
 		states = []ConnectionHealthState{s.defaultState(*conn, "*")}
+	}
+
+	platform := conn.UpstreamPlatform
+	if platform == "" && s.sites != nil {
+		site, siteErr := s.sites.GetSite(ctx, conn.UpstreamSiteID)
+		if siteErr != nil {
+			return siteErr
+		}
+		if site != nil {
+			platform = string(site.Platform)
+		}
+	}
+	var releaseTarget func()
+	var releaseMutation func()
+	if platform == string(upstream.PlatformSub2API) {
+		targetID := buildTargetID(platform, adminAccountID, conn.AdminAccountID)
+		var leaseErr error
+		releaseTarget, leaseErr = s.repo.AcquireTargetLease(ctx, targetID)
+		if leaseErr != nil {
+			return leaseErr
+		}
+		defer releaseTarget()
+		releaseMutation, leaseErr = s.repo.AcquireSub2APIMutationLease(ctx, userID, adminAccountID)
+		if leaseErr != nil {
+			return leaseErr
+		}
+		defer releaseMutation()
+		guard := s.sub2APIFloorGuardFor(userID, adminAccountID)
+		inventory, ok := guard.latestInventory(schedulerTickInterval)
+		if !ok {
+			blockedTarget := AdminProbeTarget{
+				TargetID: targetID, Platform: platform, AccountID: conn.AdminAccountID,
+				AdminGroupID: conn.UpstreamGroupID, AdminGroupName: conn.UpstreamGroupName,
+			}
+			if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, blockedTarget, SchedulableActionFailed, ErrorSub2APIInventoryIncomplete, RemoteActionSkippedSub2APIInventory); auditErr != nil {
+				log.Printf("[connection-health] audit blocked legacy disable failed target_id=%s err=%v", targetID, auditErr)
+			}
+			return requestError(ErrorSub2APIInventoryIncomplete)
+		}
+		var floorResult targetRemoteActionResult
+		if !inventoryTargetAlreadyUnavailable(*inventory, targetID) {
+			floorResult = guard.reserveSub2APIInactive(AdminProbeTarget{
+				TargetID: targetID, Platform: platform, AccountID: conn.AdminAccountID,
+			}, *inventory)
+		}
+		if floorResult.remoteAction != "" {
+			blockedTarget := AdminProbeTarget{
+				TargetID: targetID, Platform: platform, AccountID: conn.AdminAccountID,
+				AdminGroupID: floorResult.adminGroupID, AdminGroupName: floorResult.adminGroupName,
+			}
+			if floorResult.remoteAction == RemoteActionSkippedSub2APIInventory {
+				if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, blockedTarget, SchedulableActionFailed, ErrorSub2APIInventoryIncomplete, RemoteActionSkippedSub2APIInventory); auditErr != nil {
+					log.Printf("[connection-health] audit blocked legacy disable failed target_id=%s err=%v", targetID, auditErr)
+				}
+				return requestError(ErrorSub2APIInventoryIncomplete)
+			}
+			if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, blockedTarget, SchedulableActionFailed, ErrorSub2APIGroupLastUsable, RemoteActionSkippedSub2APILastUsable); auditErr != nil {
+				log.Printf("[connection-health] audit blocked legacy disable failed target_id=%s err=%v", targetID, auditErr)
+			}
+			return requestError(ErrorSub2APIGroupLastUsable)
+		}
 	}
 
 	remoteAction := ""

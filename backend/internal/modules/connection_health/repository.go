@@ -952,6 +952,12 @@ func (r *Repository) TryAcquireTargetLease(ctx context.Context, targetID string)
 	return r.acquireRuntimeLease(ctx, "connection-health:target:"+targetID, false)
 }
 
+func (r *Repository) AcquireSub2APIMutationLease(ctx context.Context, userID string, adminAccountID string) (func(), error) {
+	key := "connection-health:sub2api-mutation:" + strconv.Itoa(len(userID)) + ":" + userID + adminAccountID
+	release, _, err := r.acquireRuntimeLease(ctx, key, true)
+	return release, err
+}
+
 func (r *Repository) AcquirePrioritySyncLease(ctx context.Context, userID string, adminAccountID string) (func(), error) {
 	// userID 使用长度前缀分隔，避免包含冒号的标识组合出相同租约键。
 	key := "connection-health:priority-sync:" + strconv.Itoa(len(userID)) + ":" + userID + adminAccountID

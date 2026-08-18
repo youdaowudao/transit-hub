@@ -96,6 +96,8 @@ type Service struct {
 	priorityTriggerMu      sync.Mutex
 	priorityTriggerRunning map[string]bool
 	priorityTriggerPending map[string]string
+	priorityHealthRunning  map[string]bool
+	priorityHealthPending  map[string]bool
 	questionAnswerMu       sync.Mutex
 	questionAnswerCtx      context.Context
 	questionAnswerStop     context.CancelFunc
@@ -121,6 +123,8 @@ func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platf
 		multiplierSnapshots:    make(map[string]*multiplierSnapshotEntry),
 		priorityTriggerRunning: make(map[string]bool),
 		priorityTriggerPending: make(map[string]string),
+		priorityHealthRunning:  make(map[string]bool),
+		priorityHealthPending:  make(map[string]bool),
 		questionAnswerHTTP:     NewQuestionAnswerRunner(),
 		questionAnswerTTL:      QuestionAnswerRequestTimeout,
 	}

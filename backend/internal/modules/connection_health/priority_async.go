@@ -26,6 +26,7 @@ type priorityAsyncJob struct {
 	userID           string
 	adminAccountID   string
 	pendingSignature string
+	healthSync       bool
 }
 
 // priorityAsyncDispatcher provides one process-wide bounded queue. A save can only
@@ -60,7 +61,11 @@ func runPriorityAsyncWorker() {
 	for {
 		select {
 		case job := <-priorityAsyncDispatcher.queue:
-			job.service.runQueuedPrioritySync(job.userID, job.adminAccountID, job.pendingSignature)
+			if job.healthSync {
+				job.service.runQueuedHealthPrioritySync(job.userID, job.adminAccountID)
+			} else {
+				job.service.runQueuedPrioritySync(job.userID, job.adminAccountID, job.pendingSignature)
+			}
 		default:
 			priorityAsyncDispatcher.mu.Lock()
 			if len(priorityAsyncDispatcher.queue) == 0 {
@@ -138,6 +143,12 @@ func (s *Service) markPriorityWorkspaceHealthSyncFailed(userID string, adminAcco
 	if err != nil || !allowWrite {
 		return
 	}
+	s.markPriorityWorkspaceHealthSyncFailedDirect(userID, adminAccountID, syncErr, failedCount)
+}
+
+func (s *Service) markPriorityWorkspaceHealthSyncFailedDirect(userID string, adminAccountID string, syncErr error, failedCount int) {
+	ctx, cancel := context.WithTimeout(context.Background(), priorityStateWriteTimeout)
+	defer cancel()
 	errorDetail := prioritySyncErrorDetail(syncErr)
 	marked, err := s.repo.MarkPriorityWorkspaceHealthSyncFailed(ctx, userID, adminAccountID, errorDetail, failedCount)
 	if err != nil {
@@ -255,7 +266,90 @@ func (s *Service) triggerPrioritySync(userID string, adminAccountID string, pend
 	s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, pendingSignature, requestError(ErrorPrioritySyncUnavailable), 1)
 }
 
+// triggerHealthPrioritySyncAfterCommit queues a health-driven reconciliation after
+// the health state has been committed. It deliberately has no generation signature:
+// health sync must not overwrite configuration generations, and its durable failure
+// state is guarded by an empty pending signature.
+func (s *Service) triggerHealthPrioritySyncAfterCommit(userID string, adminAccountID string) {
+	if s.priorityActions == nil || s.platformGroups == nil {
+		s.markPriorityWorkspaceHealthSyncFailed(userID, adminAccountID, requestError(ErrorPrioritySyncUnavailable), 1)
+		return
+	}
+	key := userID + "\x00" + adminAccountID
+	s.priorityTriggerMu.Lock()
+	if s.priorityHealthRunning == nil {
+		s.priorityHealthRunning = make(map[string]bool)
+	}
+	if s.priorityHealthPending == nil {
+		s.priorityHealthPending = make(map[string]bool)
+	}
+	if s.priorityHealthRunning[key] {
+		s.priorityHealthPending[key] = true
+		s.priorityTriggerMu.Unlock()
+		return
+	}
+	s.priorityHealthRunning[key] = true
+	s.priorityTriggerMu.Unlock()
+
+	if enqueuePriorityAsync(priorityAsyncJob{
+		service:        s,
+		userID:         userID,
+		adminAccountID: adminAccountID,
+		healthSync:     true,
+	}) {
+		return
+	}
+	s.startHealthPriorityFailureFallback(key, userID, adminAccountID)
+}
+
 func (s *Service) runQueuedPrioritySync(userID string, adminAccountID string, pendingSignature string) {
+	s.runQueuedPrioritySyncWithKind(userID, adminAccountID, pendingSignature, false)
+}
+
+func (s *Service) runQueuedHealthPrioritySync(userID string, adminAccountID string) {
+	s.runQueuedPrioritySyncWithKind(userID, adminAccountID, "", true)
+}
+
+func (s *Service) startHealthPriorityFailureFallback(key string, userID string, adminAccountID string) {
+	go s.runHealthPriorityFailureFallback(key, userID, adminAccountID)
+}
+
+func (s *Service) runHealthPriorityFailureFallback(key string, userID string, adminAccountID string) {
+	defer func() {
+		if recover() != nil {
+			log.Printf("[connection-health] health priority failure fallback panic recovered user_id=%s admin_account_id=%s", userID, adminAccountID)
+		}
+		s.finishHealthPriorityFailureFallback(key, userID, adminAccountID)
+	}()
+	s.markPriorityWorkspaceHealthSyncFailed(userID, adminAccountID, requestError(ErrorPrioritySyncUnavailable), 1)
+}
+
+func (s *Service) finishHealthPriorityFailureFallback(key string, userID string, adminAccountID string) {
+	s.priorityTriggerMu.Lock()
+	nextHealthSync := s.priorityHealthPending[key]
+	if nextHealthSync {
+		delete(s.priorityHealthPending, key)
+	} else {
+		delete(s.priorityHealthRunning, key)
+	}
+	s.priorityTriggerMu.Unlock()
+	if !nextHealthSync {
+		return
+	}
+	if enqueuePriorityAsync(priorityAsyncJob{
+		service:        s,
+		userID:         userID,
+		adminAccountID: adminAccountID,
+		healthSync:     true,
+	}) {
+		return
+	}
+	s.priorityTriggerMu.Lock()
+	delete(s.priorityHealthRunning, key)
+	s.priorityTriggerMu.Unlock()
+}
+
+func (s *Service) runQueuedPrioritySyncWithKind(userID string, adminAccountID string, pendingSignature string, healthSync bool) {
 	key := userID + "\x00" + adminAccountID
 	// This recovery covers not only the synchronization itself but also failure-state
 	// persistence. The deferred trigger cleanup always runs first, so a broken error
@@ -265,7 +359,7 @@ func (s *Service) runQueuedPrioritySync(userID string, adminAccountID string, pe
 			log.Printf("[connection-health] asynchronous priority job panic recovered user_id=%s admin_account_id=%s", userID, adminAccountID)
 		}
 	}()
-	defer s.finishQueuedPrioritySync(key, userID, adminAccountID)
+	defer s.finishQueuedPrioritySync(key, userID, adminAccountID, healthSync)
 	runErr := func() (syncErr error) {
 		defer func() {
 			if recover() != nil {
@@ -287,8 +381,30 @@ func (s *Service) runQueuedPrioritySync(userID string, adminAccountID string, pe
 // finishQueuedPrioritySync releases the in-memory reservation on every exit path.
 // Only a save that arrived after the job was reserved gets an immediate second run;
 // ordinary failures continue through the persisted scheduler backoff.
-func (s *Service) finishQueuedPrioritySync(key string, userID string, adminAccountID string) {
+func (s *Service) finishQueuedPrioritySync(key string, userID string, adminAccountID string, healthSync bool) {
 	s.priorityTriggerMu.Lock()
+	if healthSync {
+		nextHealthSync := s.priorityHealthPending[key]
+		if nextHealthSync {
+			delete(s.priorityHealthPending, key)
+		} else {
+			delete(s.priorityHealthRunning, key)
+		}
+		s.priorityTriggerMu.Unlock()
+		if !nextHealthSync {
+			return
+		}
+		if enqueuePriorityAsync(priorityAsyncJob{
+			service:        s,
+			userID:         userID,
+			adminAccountID: adminAccountID,
+			healthSync:     true,
+		}) {
+			return
+		}
+		s.startHealthPriorityFailureFallback(key, userID, adminAccountID)
+		return
+	}
 	nextPendingSignature := s.priorityTriggerPending[key]
 	if nextPendingSignature != "" {
 		delete(s.priorityTriggerPending, key)

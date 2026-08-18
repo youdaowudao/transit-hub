@@ -437,20 +437,24 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 
 	results := make([]ModelHealth, 0, len(specs))
 	probeResults := make([]targetProbeResult, 0, len(specs))
+	healthStateCommitted := false
+	defer func() {
+		if healthStateCommitted {
+			s.triggerHealthPrioritySyncAfterCommit(userID, adminAccountID)
+		}
+	}()
 	for _, spec := range specs {
 		result, probeErr := s.probeTargetOnce(ctx, userID, adminAccountID, target, cred, spec, false)
 		if probeErr != nil {
 			return nil, probeErr
 		}
 		if result != nil {
+			healthStateCommitted = true
 			probeResults = append(probeResults, *result)
 		}
 	}
 	if err := s.finishTargetProbeBatch(ctx, userID, adminAccountID, session, target, allSpecs, probeResults, EventSourceManual); err != nil {
 		return nil, err
-	}
-	if len(probeResults) > 0 {
-		s.syncCurrentWorkspacePriorities(ctx, userID, adminAccountID)
 	}
 	for _, result := range probeResults {
 		modelHealth := toModelHealth(result.spec.modelName, *result.state)

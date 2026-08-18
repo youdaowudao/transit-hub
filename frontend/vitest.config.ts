@@ -1,6 +1,8 @@
 import path from 'node:path'
 import { defineConfig } from 'vitest/config'
 
+const isCI = process.env.CI === 'true'
+
 export default defineConfig({
   resolve: {
     alias: {
@@ -11,8 +13,7 @@ export default defineConfig({
     environment: 'node',
     include: ['tests/**/*.test.ts'],
     pool: 'forks',
-    maxWorkers: 2,
-    minWorkers: 1,
+    ...(isCI ? {} : { maxWorkers: 2, minWorkers: 1 }),
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json-summary'],

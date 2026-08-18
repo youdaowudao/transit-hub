@@ -67,6 +67,7 @@ func (s *Service) syncCurrentWorkspacePriorities(ctx context.Context, userID str
 	pendingSignature, signatureErr := s.pendingPrioritySyncGeneration(ctx, userID, adminAccountID)
 	if signatureErr != nil {
 		log.Printf("[connection-health] priority sync load workspace generation failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, signatureErr)
+		s.markPriorityWorkspaceHealthSyncFailedDirect(userID, adminAccountID, signatureErr, 1)
 		return
 	}
 	if err := s.syncCurrentWorkspacePrioritiesWithResult(ctx, userID, adminAccountID, pendingSignature); err != nil {
@@ -248,6 +249,7 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 				workspaceState, err := s.repo.GetPriorityWorkspaceSyncState(ctx, userID, adminAccountID)
 				if err != nil {
 					log.Printf("[connection-health] priority sync load workspace generation failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
+					s.markPriorityWorkspaceHealthSyncFailedDirect(userID, adminAccountID, err, 1)
 					return
 				}
 				if workspaceState != nil {
@@ -422,6 +424,7 @@ func (s *Service) syncWorkspacePriorities(
 	}
 	failedCount := 0
 	unavailableCount := 0
+	incompleteCount := 0
 	statesByTarget := make(map[string][]ConnectionHealthState)
 	for _, state := range healthStates {
 		if _, isTarget := parseTargetID(state.ConnectionID); isTarget {
@@ -617,6 +620,7 @@ func (s *Service) syncWorkspacePriorities(
 			if !inventoryComplete {
 				// 分组读取失败时无法证明目标已经消失，保留当前优先级和同步快照，
 				// 等下一次完整扫描再决定是否恢复。
+				incompleteCount++
 				continue
 			}
 			if stored.Conflict {
@@ -685,6 +689,20 @@ func (s *Service) syncWorkspacePriorities(
 		}
 	}
 	if !generationCurrent() {
+		return
+	}
+	if !inventoryComplete {
+		incompleteFailures := failedCount + unavailableCount + incompleteCount
+		if incompleteFailures == 0 {
+			incompleteFailures = 1
+		}
+		s.markPriorityWorkspaceSyncFailed(
+			userID,
+			adminAccountID,
+			expectedPendingSignature,
+			requestError(ErrorPriorityMetadataUnavailable),
+			incompleteFailures,
+		)
 		return
 	}
 	if failedCount+unavailableCount > 0 {

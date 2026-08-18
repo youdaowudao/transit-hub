@@ -9,10 +9,12 @@ import (
 )
 
 const (
-	ErrorSchedulableActionFailed   = "admin.connectionHealth.errors.schedulableActionFailed"
-	ErrorSchedulableReadbackFailed = "admin.connectionHealth.errors.schedulableReadbackFailed"
-	ErrorSchedulableAuditFailed    = "admin.connectionHealth.errors.schedulableAuditFailed"
-	ErrorSchedulableUnsupported    = "admin.connectionHealth.errors.schedulableUnsupported"
+	ErrorSchedulableActionFailed    = "admin.connectionHealth.errors.schedulableActionFailed"
+	ErrorSchedulableReadbackFailed  = "admin.connectionHealth.errors.schedulableReadbackFailed"
+	ErrorSchedulableAuditFailed     = "admin.connectionHealth.errors.schedulableAuditFailed"
+	ErrorSchedulableUnsupported     = "admin.connectionHealth.errors.schedulableUnsupported"
+	ErrorSub2APIGroupLastUsable     = "admin.connectionHealth.errors.sub2apiGroupLastUsable"
+	ErrorSub2APIInventoryIncomplete = "admin.connectionHealth.errors.sub2apiInventoryIncomplete"
 
 	SchedulableActionSucceeded = "schedulable_user_action_succeeded"
 	SchedulableActionFailed    = "schedulable_user_action_failed"
@@ -41,7 +43,7 @@ type TargetSchedulableActionResult struct {
 // SetTargetSchedulable executes an explicit user command, then re-reads the upstream
 // account. A successful write without a matching, parseable readback is still a failure.
 func (s *Service) SetTargetSchedulable(ctx context.Context, userID string, targetID string, schedulable bool) (TargetSchedulableActionResult, error) {
-	session, target, _, adminAccountID, err := s.resolveManualTarget(ctx, userID, targetID)
+	session, adminAccountID, accountID, err := s.resolveManualSession(ctx, userID, targetID)
 	if err != nil {
 		return TargetSchedulableActionResult{}, err
 	}
@@ -53,11 +55,45 @@ func (s *Service) SetTargetSchedulable(ctx context.Context, userID string, targe
 		return TargetSchedulableActionResult{}, err
 	}
 	defer release()
-	// The scheduler uses the same target lease. Resolve again after acquiring it
-	// so a queued user command cannot write from a pre-probe account snapshot.
-	session, target, _, adminAccountID, err = s.resolveManualTarget(ctx, userID, targetID)
+	mutationRelease, err := s.repo.AcquireSub2APIMutationLease(ctx, userID, adminAccountID)
 	if err != nil {
 		return TargetSchedulableActionResult{}, err
+	}
+	defer mutationRelease()
+	// The scheduler uses the same target and workspace leases. Resolve the complete
+	// inventory once after acquiring both so a queued user command cannot write from
+	// a pre-mutation snapshot.
+	refresh, err := s.refreshAdminTarget(ctx, session, adminAccountID, accountID)
+	if err != nil {
+		return TargetSchedulableActionResult{}, err
+	}
+	if !refresh.found {
+		if refresh.accountsReadError {
+			return TargetSchedulableActionResult{}, requestError(ErrorAccountsFetch)
+		}
+		return TargetSchedulableActionResult{}, requestError(ErrorProbeTargetNotFound)
+	}
+	if refresh.target.TargetID != targetID {
+		return TargetSchedulableActionResult{}, requestError(ErrorProbeTargetNotFound)
+	}
+	target := refresh.target
+	guard := s.sub2APIFloorGuardFor(userID, adminAccountID)
+	guard.rememberInventory(refresh.inventory)
+	if !schedulable && !inventoryTargetAlreadyUnavailable(refresh.inventory, targetID) {
+		floorResult := guard.reserveSub2APISchedulableFalse(target, refresh.inventory)
+		if floorResult.remoteAction != "" {
+			blockedTarget := target
+			blockedTarget.AdminGroupID = floorResult.adminGroupID
+			blockedTarget.AdminGroupName = floorResult.adminGroupName
+			errorKey := ErrorSub2APIGroupLastUsable
+			if floorResult.remoteAction == RemoteActionSkippedSub2APIInventory {
+				errorKey = ErrorSub2APIInventoryIncomplete
+			}
+			if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, blockedTarget, SchedulableActionFailed, errorKey, floorResult.remoteAction); auditErr != nil {
+				log.Printf("[connection-health] audit blocked schedulable action failed target_id=%s err=%v", target.TargetID, auditErr)
+			}
+			return TargetSchedulableActionResult{}, requestError(errorKey)
+		}
 	}
 	remoteAction := schedulableRemoteAction(schedulable)
 	if err := s.schedulableActions.SetSub2APIAdminAccountSchedulable(session, target.AccountID, schedulable); err != nil {
@@ -67,7 +103,7 @@ func (s *Service) SetTargetSchedulable(ctx context.Context, userID string, targe
 		return TargetSchedulableActionResult{}, requestError(ErrorSchedulableActionFailed)
 	}
 
-	readbackTarget, readbackAccount, found, _, readbackErr := s.findAdminTarget(ctx, session, adminAccountID, target.AccountID)
+	readbackTarget, readbackAccount, found, _, readbackErr := s.readbackManualTarget(ctx, session, adminAccountID, target.AccountID, refresh.memberships)
 	if readbackErr != nil || !found || readbackTarget.TargetID != targetID || readbackAccount.Schedulable == nil || *readbackAccount.Schedulable != schedulable {
 		if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, target, SchedulableActionFailed, ErrorSchedulableReadbackFailed, schedulableFailedRemoteAction(schedulable)); auditErr != nil {
 			log.Printf("[connection-health] audit failed schedulable readback target_id=%s err=%v", target.TargetID, auditErr)

@@ -10,6 +10,14 @@ const viewSource = readFileSync(
   new URL('../src/modules/admin/views/ConnectionHealthView.vue', import.meta.url),
   'utf8',
 )
+const composableSource = readFileSync(
+  new URL('../src/modules/admin/composables/useConnectionHealth.ts', import.meta.url),
+  'utf8',
+)
+const localeSource = readFileSync(
+  new URL('../src/locales/zh-CN.ts', import.meta.url),
+  'utf8',
+)
 
 describe('connection health scheduling button state', () => {
   it('uses a persistent green button for schedulable accounts', () => {
@@ -30,5 +38,12 @@ describe('connection health scheduling button state', () => {
 
     expect(confirmIndex).toBeGreaterThan(-1)
     expect(updateIndex).toBeGreaterThan(confirmIndex)
+  })
+
+  it('maps the last-usable-account guard to a visible Chinese message', () => {
+    expect(composableSource).toContain('skipped_sub2api_group_last_usable')
+    expect(localeSource).toContain('skippedSub2apiLastUsable')
+    expect(localeSource).toContain('最后一个可用账号')
+    expect(localeSource).toContain('sub2apiGroupLastUsable')
   })
 })

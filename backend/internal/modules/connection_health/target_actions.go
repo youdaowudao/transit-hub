@@ -2,10 +2,12 @@ package connection_health
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"transithub/backend/internal/modules/upstream"
 )
@@ -15,6 +17,7 @@ const (
 	RemoteActionSkippedTargetInitiallyDisabled = "skipped_target_initially_disabled"
 	RemoteActionSkippedUpstreamScheduling      = "skipped_upstream_scheduling_disabled"
 	RemoteActionSkippedSub2APILastActive       = "skipped_sub2api_group_last_active"
+	RemoteActionSkippedSub2APILastUsable       = "skipped_sub2api_group_last_usable"
 	RemoteActionSkippedSub2APIInventory        = "skipped_sub2api_group_inventory_incomplete"
 )
 
@@ -24,16 +27,78 @@ type targetRemoteActionResult struct {
 	adminGroupName string
 }
 
+type targetInventoryObservation struct {
+	groupID        string
+	groupName      string
+	status         string
+	statusKnown    bool
+	schedulable    bool
+	schedulableSet bool
+}
+
 type workspaceFloorGuard struct {
-	mu               sync.Mutex
-	reservedInactive map[string]struct{}
+	mu                   sync.Mutex
+	reservedUnavailable  map[string]struct{}
+	inventory            *adminWorkspaceInventory
+	inventoryFingerprint string
+	snapshotAt           time.Time
 }
 
 func newWorkspaceFloorGuard() *workspaceFloorGuard {
-	return &workspaceFloorGuard{reservedInactive: make(map[string]struct{})}
+	return &workspaceFloorGuard{reservedUnavailable: make(map[string]struct{})}
 }
 
 func (g *workspaceFloorGuard) reserveSub2APIInactive(target AdminProbeTarget, inventory adminWorkspaceInventory) targetRemoteActionResult {
+	return g.reserveSub2APIMutation(target, inventory)
+}
+
+func (g *workspaceFloorGuard) reserveSub2APISchedulableFalse(target AdminProbeTarget, inventory adminWorkspaceInventory) targetRemoteActionResult {
+	return g.reserveSub2APIMutation(target, inventory)
+}
+
+func (g *workspaceFloorGuard) rememberInventory(inventory adminWorkspaceInventory) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.rememberInventoryLocked(inventory)
+}
+
+func (g *workspaceFloorGuard) rememberInventoryLocked(inventory adminWorkspaceInventory) {
+	if adminInventoryComplete(inventory) {
+		fingerprint := adminInventoryFingerprint(inventory)
+		if g.inventoryFingerprint != fingerprint {
+			g.reservedUnavailable = make(map[string]struct{})
+			g.inventoryFingerprint = fingerprint
+		}
+	}
+	g.inventory = &inventory
+	g.snapshotAt = time.Now().UTC()
+}
+
+func adminInventoryComplete(inventory adminWorkspaceInventory) bool {
+	for _, group := range inventory.groups {
+		if group.err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (g *workspaceFloorGuard) latestInventory(maxAge time.Duration) (*adminWorkspaceInventory, bool) {
+	if g == nil {
+		return nil, false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.inventory == nil || g.snapshotAt.IsZero() || time.Since(g.snapshotAt) > maxAge {
+		return nil, false
+	}
+	return g.inventory, true
+}
+
+func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, inventory adminWorkspaceInventory) targetRemoteActionResult {
 	if g == nil {
 		return targetRemoteActionResult{}
 	}
@@ -43,9 +108,12 @@ func (g *workspaceFloorGuard) reserveSub2APIInactive(target AdminProbeTarget, in
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.rememberInventoryLocked(inventory)
 
-	activeByGroup := make(map[string]map[string]struct{}, len(inventory.groups))
+	usableByGroup := make(map[string]map[string]struct{}, len(inventory.groups))
+	unknownByGroup := make(map[string]bool, len(inventory.groups))
 	memberships := make(map[string]string)
+	targetObservations := make([]targetInventoryObservation, 0)
 	for _, groupInventory := range inventory.groups {
 		if groupInventory.err != nil {
 			return targetRemoteActionResult{
@@ -53,20 +121,46 @@ func (g *workspaceFloorGuard) reserveSub2APIInactive(target AdminProbeTarget, in
 				adminGroupID: groupInventory.group.ID, adminGroupName: groupInventory.group.Name,
 			}
 		}
-		activeTargets := make(map[string]struct{})
+		usableTargets := make(map[string]struct{})
 		for _, account := range groupInventory.accounts {
 			targetID := buildTargetID(target.Platform, parsed.adminAccountID, account.ID)
 			if targetID == target.TargetID {
 				memberships[groupInventory.group.ID] = groupInventory.group.Name
 			}
-			if targetStatusEnabled(target.Platform, normalizeTargetStatus(target.Platform, account.Status)) {
-				activeTargets[targetID] = struct{}{}
+			status, statusKnown := normalizeFloorTargetStatus(target.Platform, account.Status)
+			if targetID == target.TargetID {
+				observation := targetInventoryObservation{
+					groupID: groupInventory.group.ID, groupName: groupInventory.group.Name,
+					status: status, statusKnown: statusKnown,
+					schedulableSet: account.Schedulable != nil,
+				}
+				if account.Schedulable != nil {
+					observation.schedulable = *account.Schedulable
+				}
+				targetObservations = append(targetObservations, observation)
+			}
+			if target.Platform == string(upstream.PlatformSub2API) && !statusKnown {
+				unknownByGroup[groupInventory.group.ID] = true
+				continue
+			}
+			if targetStatusEnabled(target.Platform, status) && account.Schedulable == nil {
+				unknownByGroup[groupInventory.group.ID] = true
+			}
+			if targetStatusEnabled(target.Platform, status) && account.Schedulable != nil && *account.Schedulable {
+				usableTargets[targetID] = struct{}{}
 			}
 		}
-		activeByGroup[groupInventory.group.ID] = activeTargets
+		usableByGroup[groupInventory.group.ID] = usableTargets
 	}
 	if len(memberships) == 0 {
 		return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APIInventory}
+	}
+	if conflictingTargetInventory(targetObservations) {
+		observation := targetObservations[0]
+		return targetRemoteActionResult{
+			remoteAction: RemoteActionSkippedSub2APIInventory,
+			adminGroupID: observation.groupID, adminGroupName: observation.groupName,
+		}
 	}
 
 	groupIDs := make([]string, 0, len(memberships))
@@ -76,16 +170,27 @@ func (g *workspaceFloorGuard) reserveSub2APIInactive(target AdminProbeTarget, in
 	sort.Strings(groupIDs)
 	for _, groupID := range groupIDs {
 		remaining := 0
-		candidateActive := false
-		for targetID := range activeByGroup[groupID] {
+		candidateUsable := false
+		for targetID := range usableByGroup[groupID] {
 			if targetID == target.TargetID {
-				candidateActive = true
+				candidateUsable = true
 			}
-			if _, reserved := g.reservedInactive[targetID]; !reserved {
+			if _, reserved := g.reservedUnavailable[targetID]; !reserved {
 				remaining++
 			}
 		}
-		if !candidateActive {
+		if !candidateUsable {
+			if unknownByGroup[groupID] {
+				return targetRemoteActionResult{
+					remoteAction: RemoteActionSkippedSub2APIInventory,
+					adminGroupID: groupID, adminGroupName: memberships[groupID],
+				}
+			}
+			// The candidate is already unusable, so the requested destructive action does not
+			// consume the last usable slot in this group.
+			continue
+		}
+		if unknownByGroup[groupID] && remaining <= 1 {
 			return targetRemoteActionResult{
 				remoteAction: RemoteActionSkippedSub2APIInventory,
 				adminGroupID: groupID, adminGroupName: memberships[groupID],
@@ -98,13 +203,127 @@ func (g *workspaceFloorGuard) reserveSub2APIInactive(target AdminProbeTarget, in
 			}
 		}
 	}
-	g.reservedInactive[target.TargetID] = struct{}{}
+	g.reservedUnavailable[target.TargetID] = struct{}{}
 	return targetRemoteActionResult{}
+}
+
+func normalizeFloorTargetStatus(platform string, status string) (string, bool) {
+	if platform != string(upstream.PlatformSub2API) {
+		return normalizeTargetStatus(platform, status), true
+	}
+	normalized := strings.ToLower(strings.TrimSpace(status))
+	switch normalized {
+	case "active":
+		return "active", true
+	case "inactive", "disabled", "2":
+		return "inactive", true
+	default:
+		return "", false
+	}
+}
+
+func adminInventoryFingerprint(inventory adminWorkspaceInventory) string {
+	type accountSnapshot struct {
+		id, name, status, platform, models string
+		schedulable, weight                string
+	}
+	type groupSnapshot struct {
+		id, name, err string
+		accounts      []accountSnapshot
+	}
+	groups := make([]groupSnapshot, 0, len(inventory.groups))
+	for _, group := range inventory.groups {
+		snapshot := groupSnapshot{id: group.group.ID, name: group.group.Name}
+		if group.err != nil {
+			snapshot.err = group.err.Error()
+		}
+		for _, account := range group.accounts {
+			accountSnapshot := accountSnapshot{
+				id: account.ID, name: account.Name, status: account.Status,
+				platform: account.Platform, models: account.Models,
+				schedulable: fmt.Sprintf("%t", account.Schedulable != nil && *account.Schedulable),
+			}
+			if account.Schedulable == nil {
+				accountSnapshot.schedulable = "nil"
+			}
+			if account.Weight != nil {
+				accountSnapshot.weight = fmt.Sprintf("%d", *account.Weight)
+			} else {
+				accountSnapshot.weight = "nil"
+			}
+			snapshot.accounts = append(snapshot.accounts, accountSnapshot)
+		}
+		sort.Slice(snapshot.accounts, func(i, j int) bool { return snapshot.accounts[i].id < snapshot.accounts[j].id })
+		groups = append(groups, snapshot)
+	}
+	sort.Slice(groups, func(i, j int) bool { return groups[i].id < groups[j].id })
+	var builder strings.Builder
+	builder.WriteString(string(inventory.session.Platform))
+	for _, group := range groups {
+		fmt.Fprintf(&builder, "|g:%s:%s:%s", group.id, group.name, group.err)
+		for _, account := range group.accounts {
+			fmt.Fprintf(&builder, "|a:%s:%s:%s:%s:%s:%s:%s", account.id, account.name, account.status, account.platform, account.models, account.schedulable, account.weight)
+		}
+	}
+	return builder.String()
+}
+
+func inventoryTargetAlreadyUnavailable(inventory adminWorkspaceInventory, targetID string) bool {
+	parsed, ok := parseTargetID(targetID)
+	if !ok || parsed.platform != string(upstream.PlatformSub2API) {
+		return false
+	}
+	observations := make([]targetInventoryObservation, 0)
+	for _, group := range inventory.groups {
+		for _, account := range group.accounts {
+			if account.ID != parsed.accountID {
+				continue
+			}
+			status, known := normalizeFloorTargetStatus(parsed.platform, account.Status)
+			observation := targetInventoryObservation{
+				groupID: group.group.ID, groupName: group.group.Name,
+				status: status, statusKnown: known,
+				schedulableSet: account.Schedulable != nil,
+			}
+			if account.Schedulable != nil {
+				observation.schedulable = *account.Schedulable
+			}
+			observations = append(observations, observation)
+		}
+	}
+	if conflictingTargetInventory(observations) {
+		return false
+	}
+	for _, observation := range observations {
+		if observation.status != "inactive" && observation.schedulable {
+			return false
+		}
+	}
+	return len(observations) > 0
+}
+
+func conflictingTargetInventory(observations []targetInventoryObservation) bool {
+	if len(observations) == 0 {
+		return true
+	}
+	first := observations[0]
+	if !first.statusKnown || !first.schedulableSet {
+		return true
+	}
+	for _, observation := range observations[1:] {
+		if !observation.statusKnown || !observation.schedulableSet {
+			return true
+		}
+		if observation.status != first.status || observation.schedulable != first.schedulable {
+			return true
+		}
+	}
+	return false
 }
 
 func targetActionAuditOnly(action string) bool {
 	switch action {
-	case RemoteActionSkippedUpstreamScheduling, RemoteActionSkippedSub2APILastActive, RemoteActionSkippedSub2APIInventory:
+	case RemoteActionSkippedUpstreamScheduling, RemoteActionSkippedSub2APILastActive, RemoteActionSkippedSub2APILastUsable, RemoteActionSkippedSub2APIInventory:
 		return true
 	default:
 		return false
@@ -250,7 +469,21 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 
 	if target.Platform == string(upstream.PlatformSub2API) &&
 		normalizeTargetStatus(target.Platform, desiredStatus) == "inactive" &&
-		targetStatusEnabled(target.Platform, currentStatus) && floorGuard != nil && inventory != nil {
+		targetStatusEnabled(target.Platform, currentStatus) {
+		if floorGuard == nil || inventory == nil {
+			stored.PendingStatus = ""
+			stored.PendingWeight = nil
+			if err := s.repo.UpsertTargetActionState(ctx, *stored); err != nil {
+				return targetRemoteActionResult{}, err
+			}
+			return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APIInventory}, nil
+		}
+		mutationRelease, err := s.repo.AcquireSub2APIMutationLease(ctx, userID, adminAccountID)
+		if err != nil {
+			return targetRemoteActionResult{}, err
+		}
+		defer mutationRelease()
+		floorGuard.rememberInventory(*inventory)
 		floorResult := floorGuard.reserveSub2APIInactive(target, *inventory)
 		if floorResult.remoteAction != "" {
 			stored.PendingStatus = ""

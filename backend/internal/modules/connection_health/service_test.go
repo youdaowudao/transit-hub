@@ -40,6 +40,8 @@ type fakeRepository struct {
 	priorityGenerationErr     error
 	priorityWorkspaceStateErr error
 	targetLeaseBlocked        bool
+	sub2APIMutationLeaseMu    sync.Mutex
+	sub2APIMutationLeases     map[string]*sync.Mutex
 	priorityLeaseMu           sync.Mutex
 	priorityLeases            map[string]*sync.Mutex
 	priorityLeaseCount        map[string]int
@@ -47,14 +49,15 @@ type fakeRepository struct {
 
 func newFakeRepository() *fakeRepository {
 	return &fakeRepository{
-		states:             map[string]map[string]ConnectionHealthState{},
-		priorityStates:     map[string]PrioritySyncState{},
-		priorityWorkspaces: map[string]PriorityWorkspaceSyncState{},
-		targetActionStates: map[string]TargetActionState{},
-		groupSortSettings:  map[string]GroupProbeSortSetting{},
-		budgetClaims:       map[string]int{},
-		priorityLeases:     map[string]*sync.Mutex{},
-		priorityLeaseCount: map[string]int{},
+		states:                map[string]map[string]ConnectionHealthState{},
+		priorityStates:        map[string]PrioritySyncState{},
+		priorityWorkspaces:    map[string]PriorityWorkspaceSyncState{},
+		targetActionStates:    map[string]TargetActionState{},
+		groupSortSettings:     map[string]GroupProbeSortSetting{},
+		budgetClaims:          map[string]int{},
+		sub2APIMutationLeases: map[string]*sync.Mutex{},
+		priorityLeases:        map[string]*sync.Mutex{},
+		priorityLeaseCount:    map[string]int{},
 	}
 }
 
@@ -497,6 +500,19 @@ func (f *fakeRepository) TryAcquireTargetLease(ctx context.Context, targetID str
 		return nil, false, nil
 	}
 	return func() {}, true, nil
+}
+
+func (f *fakeRepository) AcquireSub2APIMutationLease(ctx context.Context, userID string, adminAccountID string) (func(), error) {
+	key := userID + "|" + adminAccountID
+	f.sub2APIMutationLeaseMu.Lock()
+	lease := f.sub2APIMutationLeases[key]
+	if lease == nil {
+		lease = &sync.Mutex{}
+		f.sub2APIMutationLeases[key] = lease
+	}
+	f.sub2APIMutationLeaseMu.Unlock()
+	lease.Lock()
+	return lease.Unlock, nil
 }
 
 func (f *fakeRepository) AcquirePrioritySyncLease(ctx context.Context, userID string, adminAccountID string) (func(), error) {

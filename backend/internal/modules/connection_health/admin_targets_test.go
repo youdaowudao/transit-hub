@@ -112,9 +112,25 @@ func TestProbeTarget_FormalProbeUsesEffectiveStrategyWithoutConsumingBudget(t *t
 	if err != nil || !allowed {
 		t.Fatalf("automatic probe must retain its full budget after formal manual probe: allowed=%v err=%v", allowed, err)
 	}
-	if repo.priorityLeaseCount["user1|ws1"] != 1 {
-		t.Fatalf("formal probe priority refresh must use the workspace lease: %+v", repo.priorityLeaseCount)
+	waitForPriorityLeaseCount(t, repo, "user1|ws1", 1)
+}
+
+func waitForPriorityLeaseCount(t *testing.T, repo *fakeRepository, key string, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		repo.priorityLeaseMu.Lock()
+		got := repo.priorityLeaseCount[key]
+		repo.priorityLeaseMu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
+	repo.priorityLeaseMu.Lock()
+	got := repo.priorityLeaseCount[key]
+	repo.priorityLeaseMu.Unlock()
+	t.Fatalf("priority refresh lease count = %d, want %d", got, want)
 }
 
 func TestProbeTarget_QueuedManualProbeStopsWhenRequestIsCancelled(t *testing.T) {

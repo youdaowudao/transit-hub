@@ -19,29 +19,30 @@ import (
 
 // fakeRepository 是 healthRepository 的内存实现，供 service 单测使用，不连接真实数据库。
 type fakeRepository struct {
-	policies               []Policy
-	states                 map[string]map[string]ConnectionHealthState // connectionID -> modelName -> state
-	events                 []ConnectionHealthEvent
-	assignments            []PolicyAssignment
-	groupAssignments       []GroupPolicyAssignment
-	groupExclusions        []GroupTargetExclusion
-	priorityStates         map[string]PrioritySyncState
-	priorityWorkspaces     map[string]PriorityWorkspaceSyncState
-	priorityWorkspaceMu    sync.Mutex
-	targetActionStates     map[string]TargetActionState
-	groupSortSettings      map[string]GroupProbeSortSetting
-	budgetClaims           map[string]int
-	insertEventErr         error
-	upsertStateErr         error
-	savePolicyErr          error
-	deletePolicyErr        error
-	listPoliciesErr        error
-	markPriorityRunningErr error
-	priorityGenerationErr  error
-	targetLeaseBlocked     bool
-	priorityLeaseMu        sync.Mutex
-	priorityLeases         map[string]*sync.Mutex
-	priorityLeaseCount     map[string]int
+	policies                  []Policy
+	states                    map[string]map[string]ConnectionHealthState // connectionID -> modelName -> state
+	events                    []ConnectionHealthEvent
+	assignments               []PolicyAssignment
+	groupAssignments          []GroupPolicyAssignment
+	groupExclusions           []GroupTargetExclusion
+	priorityStates            map[string]PrioritySyncState
+	priorityWorkspaces        map[string]PriorityWorkspaceSyncState
+	priorityWorkspaceMu       sync.Mutex
+	targetActionStates        map[string]TargetActionState
+	groupSortSettings         map[string]GroupProbeSortSetting
+	budgetClaims              map[string]int
+	insertEventErr            error
+	upsertStateErr            error
+	savePolicyErr             error
+	deletePolicyErr           error
+	listPoliciesErr           error
+	markPriorityRunningErr    error
+	priorityGenerationErr     error
+	priorityWorkspaceStateErr error
+	targetLeaseBlocked        bool
+	priorityLeaseMu           sync.Mutex
+	priorityLeases            map[string]*sync.Mutex
+	priorityLeaseCount        map[string]int
 }
 
 func newFakeRepository() *fakeRepository {
@@ -743,6 +744,9 @@ func (f *fakeRepository) DeletePrioritySyncState(ctx context.Context, userID str
 }
 
 func (f *fakeRepository) GetPriorityWorkspaceSyncState(ctx context.Context, userID string, adminAccountID string) (*PriorityWorkspaceSyncState, error) {
+	if f.priorityWorkspaceStateErr != nil {
+		return nil, f.priorityWorkspaceStateErr
+	}
 	f.priorityWorkspaceMu.Lock()
 	defer f.priorityWorkspaceMu.Unlock()
 	state, ok := f.priorityWorkspaces[userID+"|"+adminAccountID]

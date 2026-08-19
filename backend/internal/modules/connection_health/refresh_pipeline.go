@@ -50,6 +50,9 @@ func mergeAdminGroupsRefreshSummary(syncSites []upstream.SyncSiteResult, multipl
 			continue
 		}
 		result := AdminGroupsRefreshSite{SiteID: site.SiteID, Status: site.Status, ErrorKey: site.ErrorKey}
+		if site.ErrorKey == "site_sync_disabled" {
+			result.Status = "disabled"
+		}
 		if site.Status == "success" {
 			if _, exists := merged[site.SiteID]; !exists {
 				merged[site.SiteID] = result
@@ -86,6 +89,9 @@ func refreshSummaryState(sites []AdminGroupsRefreshSite) string {
 	anyFailure := false
 	anyTimeout := false
 	for _, site := range sites {
+		if site.Status == "disabled" {
+			continue
+		}
 		if site.Status == "success" {
 			anySuccess = true
 			continue

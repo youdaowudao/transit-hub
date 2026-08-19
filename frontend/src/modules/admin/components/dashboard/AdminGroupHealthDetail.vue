@@ -503,6 +503,8 @@ const multiplierSourceLabel = (account: AdminGroupAccount): string => {
       return t(`${detailPrefix}.multiplierSources.staleBandEnd`)
     case 'unavailable':
       return t(`${detailPrefix}.multiplierSources.unavailableBandEnd`)
+    case 'disabled':
+      return t(`${detailPrefix}.multiplierSources.disabledNonParticipating`)
     default:
       return t(`${detailPrefix}.multiplierSources.unknownBandEnd`)
   }

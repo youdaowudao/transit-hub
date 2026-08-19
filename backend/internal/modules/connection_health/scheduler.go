@@ -19,14 +19,15 @@ const (
 // adminProbeJob 是调度器一轮扫描出的、针对一个独立探活目标的到期任务集合。
 // 一个目标下可能有多个到期模型，共用一次凭据解析（避免重复命中受保护的 key 接口）。
 type adminProbeJob struct {
-	userID         string
-	adminAccountID string
-	session        upstream.Session
-	target         AdminProbeTarget
-	account        upstream.AdminGroupAccountInfo
-	models         []probeModelSpec
-	dueSpecs       []probeModelSpec
-	floorGuard     *workspaceFloorGuard
+	userID          string
+	adminAccountID  string
+	session         upstream.Session
+	target          AdminProbeTarget
+	account         upstream.AdminGroupAccountInfo
+	models          []probeModelSpec
+	dueSpecs        []probeModelSpec
+	floorGuard      *workspaceFloorGuard
+	monitoringScope adminMonitoringScope
 }
 
 type probePolicyEventGroup struct {
@@ -271,6 +272,12 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 	j.target = refresh.target
 	j.account = refresh.account
 	j.floorGuard.rememberInventory(refresh.inventory)
+	monitoringScope, scopeErr := s.loadAdminMonitoringScope(ctx, j.userID, j.adminAccountID, refresh.inventory)
+	if scopeErr != nil {
+		log.Printf("[connection-health] refresh scheduled monitoring scope failed target_id=%s err=%v", j.target.TargetID, scopeErr)
+		monitoringScope = adminMonitoringScope{}
+	}
+	j.monitoringScope = monitoringScope
 	currentSpecs, queuedSpecs, policyOK := s.currentScheduledProbeSpecs(ctx, j.userID, j.adminAccountID, j.target, refresh.memberships, j.dueSpecs)
 	if !policyOK {
 		log.Printf("[connection-health] refresh scheduled policy decision failed target_id=%s", j.target.TargetID)
@@ -299,7 +306,7 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 			results = append(results, *result)
 		}
 	}
-	if err := s.finishTargetProbeBatchWithFloor(ctx, j.userID, j.adminAccountID, j.session, j.target, j.models, results, EventSourceScheduled, j.floorGuard, &refresh.inventory); err != nil {
+	if err := s.finishTargetProbeBatchWithFloor(ctx, j.userID, j.adminAccountID, j.session, j.target, j.models, results, EventSourceScheduled, j.floorGuard, &refresh.inventory, j.monitoringScope); err != nil {
 		log.Printf("[connection-health] finish scheduled target probe failed target_id=%s err=%v", j.target.TargetID, err)
 	}
 }
@@ -555,6 +562,13 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 		}
 		session := inventory.session
 		platform := string(session.Platform)
+		monitoringScope, scopeErr := buildAdminMonitoringScope(
+			ws.userID, ws.adminAccountID, *inventory, policies, assignments, groupAssignments, exclusions,
+		)
+		if scopeErr != nil {
+			log.Printf("[connection-health] scheduler build monitoring scope failed user_id=%s admin_account_id=%s err=%v", ws.userID, ws.adminAccountID, scopeErr)
+			monitoringScope = adminMonitoringScope{}
+		}
 
 		// 账号/渠道可能同时属于多个 admin 分组。先按稳定 targetId 合并所有来源策略，再生成
 		// 一次任务，避免同一目标在一轮中被重复探活。
@@ -576,6 +590,9 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 				continue
 			}
 			for _, acc := range groupInventory.accounts {
+				if accountHardExcludedFromAdminMonitoring(platform, acc) {
+					continue
+				}
 				target := AdminProbeTarget{
 					TargetID:       buildTargetID(platform, ws.adminAccountID, acc.ID),
 					Platform:       platform,
@@ -693,6 +710,7 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 				jobs = append(jobs, adminProbeJob{
 					userID: ws.userID, adminAccountID: ws.adminAccountID, session: session,
 					target: candidate.target, account: candidate.account, models: specs, dueSpecs: dueSpecs,
+					monitoringScope: monitoringScope,
 				})
 			}
 		}

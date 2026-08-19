@@ -49,6 +49,129 @@ func sub2APITestInventory(groups ...adminInventoryGroup) *adminWorkspaceInventor
 	}
 }
 
+func floorTestMonitoringScope(fingerprint string, groups map[string][]string) adminMonitoringScope {
+	monitoredByGroup := make(map[string]map[string]struct{}, len(groups))
+	for groupID, accountIDs := range groups {
+		monitoredByGroup[groupID] = make(map[string]struct{}, len(accountIDs))
+		for _, accountID := range accountIDs {
+			targetID := buildTargetID(string(upstream.PlatformSub2API), "ws1", accountID)
+			monitoredByGroup[groupID][targetID] = struct{}{}
+		}
+	}
+	return adminMonitoringScope{monitoredByGroup: monitoredByGroup, complete: true, fingerprint: fingerprint}
+}
+
+func fullFloorTestMonitoringScope(inventory adminWorkspaceInventory) adminMonitoringScope {
+	groups := make(map[string][]string, len(inventory.groups))
+	for _, group := range inventory.groups {
+		for _, account := range group.accounts {
+			groups[group.group.ID] = append(groups[group.group.ID], account.ID)
+		}
+	}
+	return floorTestMonitoringScope("all:"+adminInventoryFingerprint(inventory), groups)
+}
+
+func TestWorkspaceFloorGuard_IgnoresUnmonitoredUsableAccounts(t *testing.T) {
+	inventory := sub2APITestInventory(adminInventoryGroup{
+		group: upstream.AdminGroupInfo{ID: "g1", Name: "monitored"},
+		accounts: []upstream.AdminGroupAccountInfo{
+			{ID: "acc-1", Status: "active"},
+			{ID: "acc-2", Status: "active"},
+			{ID: "acc-3", Status: "active"},
+		},
+	})
+	scope := floorTestMonitoringScope("only-acc-1", map[string][]string{"g1": {"acc-1"}})
+	target := sub2APISuspendedTargetFixture(newFakeRepository(), "acc-1")
+
+	result := newWorkspaceFloorGuard().reserveSub2APIInactive(target, *inventory, scope)
+	if result.remoteAction != RemoteActionSkippedSub2APILastActive || result.adminGroupID != "g1" {
+		t.Fatalf("unmonitored usable accounts released the monitored floor: %+v", result)
+	}
+}
+
+func TestWorkspaceFloorGuard_CountsOnlyMonitoredMembersAcrossTwoClosures(t *testing.T) {
+	inventory := sub2APITestInventory(adminInventoryGroup{
+		group: upstream.AdminGroupInfo{ID: "g1", Name: "monitored"},
+		accounts: []upstream.AdminGroupAccountInfo{
+			{ID: "acc-1", Status: "active"},
+			{ID: "acc-2", Status: "active"},
+			{ID: "acc-3", Status: "active"},
+		},
+	})
+	scope := floorTestMonitoringScope("acc-1-and-acc-2", map[string][]string{"g1": {"acc-1", "acc-2"}})
+	guard := newWorkspaceFloorGuard()
+
+	first := guard.reserveSub2APIInactive(sub2APISuspendedTargetFixture(newFakeRepository(), "acc-1"), *inventory, scope)
+	if first.remoteAction != "" {
+		t.Fatalf("first monitored closure should consume one slot: %+v", first)
+	}
+	second := guard.reserveSub2APIInactive(sub2APISuspendedTargetFixture(newFakeRepository(), "acc-2"), *inventory, scope)
+	if second.remoteAction != RemoteActionSkippedSub2APILastActive || second.adminGroupID != "g1" {
+		t.Fatalf("second monitored closure was released by an unmonitored peer: %+v", second)
+	}
+}
+
+func TestWorkspaceFloorGuard_KeepsReservationWhenMonitoringScopeShrinksOnSameInventory(t *testing.T) {
+	inventory := sub2APITestInventory(adminInventoryGroup{
+		group: upstream.AdminGroupInfo{ID: "g1", Name: "monitored"},
+		accounts: []upstream.AdminGroupAccountInfo{
+			{ID: "acc-1", Status: "active"},
+			{ID: "acc-2", Status: "active"},
+			{ID: "acc-3", Status: "active"},
+		},
+	})
+	guard := newWorkspaceFloorGuard()
+	initial := floorTestMonitoringScope("three-members", map[string][]string{"g1": {"acc-1", "acc-2", "acc-3"}})
+	changed := floorTestMonitoringScope("two-members", map[string][]string{"g1": {"acc-1", "acc-2"}})
+
+	if result := guard.reserveSub2APIInactive(sub2APISuspendedTargetFixture(newFakeRepository(), "acc-1"), *inventory, initial); result.remoteAction != "" {
+		t.Fatalf("initial reservation should succeed: %+v", result)
+	}
+	if result := guard.reserveSub2APIInactive(sub2APISuspendedTargetFixture(newFakeRepository(), "acc-2"), *inventory, changed); result.remoteAction != RemoteActionSkippedSub2APILastActive {
+		t.Fatalf("scope shrink on stale inventory must keep the first closure reserved: %+v", result)
+	}
+}
+
+func TestWorkspaceFloorGuard_ConcurrentClosuresUseOnlyMonitoredMembers(t *testing.T) {
+	inventory := sub2APITestInventory(adminInventoryGroup{
+		group: upstream.AdminGroupInfo{ID: "g1", Name: "monitored"},
+		accounts: []upstream.AdminGroupAccountInfo{
+			{ID: "acc-1", Status: "active"},
+			{ID: "acc-2", Status: "active"},
+			{ID: "acc-3", Status: "active"},
+		},
+	})
+	scope := floorTestMonitoringScope("two-monitored", map[string][]string{"g1": {"acc-1", "acc-2"}})
+	guard := newWorkspaceFloorGuard()
+	results := make(chan targetRemoteActionResult, 2)
+	var wg sync.WaitGroup
+	for _, accountID := range []string{"acc-1", "acc-2"} {
+		accountID := accountID
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- guard.reserveSub2APIInactive(sub2APISuspendedTargetFixture(newFakeRepository(), accountID), *inventory, scope)
+		}()
+	}
+	wg.Wait()
+	close(results)
+	allowed := 0
+	protected := 0
+	for result := range results {
+		switch result.remoteAction {
+		case "":
+			allowed++
+		case RemoteActionSkippedSub2APILastActive:
+			protected++
+		default:
+			t.Fatalf("unexpected concurrent floor result: %+v", result)
+		}
+	}
+	if allowed != 1 || protected != 1 {
+		t.Fatalf("monitored concurrent closures allowed=%d protected=%d", allowed, protected)
+	}
+}
+
 func TestReconcileTargetRemoteAction_LastActiveSkipsWithoutPendingCheckpoint(t *testing.T) {
 	repo := newFakeRepository()
 	platform := &fakePlatformActioner{}
@@ -66,7 +189,7 @@ func TestReconcileTargetRemoteAction_LastActiveSkipsWithoutPendingCheckpoint(t *
 
 	result, err := service.reconcileTargetRemoteActionWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, target,
-		[]probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory,
+		[]probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -99,7 +222,7 @@ func TestReconcileTargetRemoteAction_LastUsableSkipsWhenRemainingActiveIsUnsched
 
 	result, err := service.reconcileTargetRemoteActionWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, target,
-		[]probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory,
+		[]probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -131,7 +254,7 @@ func TestReconcileTargetRemoteAction_LastUsableFailsClosedWhenSurvivorSchedulabl
 
 	result, err := service.reconcileTargetRemoteActionWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, target,
-		[]probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory,
+		[]probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -164,7 +287,7 @@ func TestWorkspaceFloorGuard_RejectsUnknownSub2APIStatus(t *testing.T) {
 					{ID: "acc-2", Status: tt.survivorStatus, Schedulable: boolPointer(true)},
 				},
 			})
-			result := newWorkspaceFloorGuard().reserveSub2APIInactive(sub2APISuspendedTargetFixture(newFakeRepository(), "acc-1"), *inventory)
+			result := newWorkspaceFloorGuard().reserveSub2APIInactive(sub2APISuspendedTargetFixture(newFakeRepository(), "acc-1"), *inventory, fullFloorTestMonitoringScope(*inventory))
 			if result.remoteAction != RemoteActionSkippedSub2APIInventory || result.adminGroupID != tt.wantBlockingGroup {
 				t.Fatalf("unknown status must fail closed: %+v", result)
 			}
@@ -212,7 +335,7 @@ func TestReconcileTargetRemoteAction_WaitsForWorkspaceMutationLease(t *testing.T
 	go func() {
 		_, _ = service.reconcileTargetRemoteActionWithFloor(
 			context.Background(), "user1", "ws1", inventory.session, target,
-			[]probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory,
+			[]probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
 		)
 		close(done)
 	}()
@@ -246,7 +369,7 @@ func TestFinishTargetProbeBatch_LastActiveSkipAuditsBlockingGroup(t *testing.T) 
 	err := service.finishTargetProbeBatchWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, target,
 		[]probeModelSpec{spec}, []targetProbeResult{{state: &state, previousState: StateDegraded, outcome: ProbeOutcome{Result: ResultAuth}, spec: spec}},
-		EventSourceScheduled, newWorkspaceFloorGuard(), inventory,
+		EventSourceScheduled, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
 	)
 	if err != nil {
 		t.Fatalf("finish scheduled batch failed: %v", err)
@@ -259,6 +382,44 @@ func TestFinishTargetProbeBatch_LastActiveSkipAuditsBlockingGroup(t *testing.T) 
 	}
 	if len(platform.sub2APICalls) != 0 {
 		t.Fatalf("last active skip wrote remote status: %+v", platform.sub2APICalls)
+	}
+}
+
+func TestFinishTargetProbeBatch_UsesCurrentMonitoringScopeForInactive(t *testing.T) {
+	repo := newFakeRepository()
+	platform := &fakePlatformActioner{}
+	service := &Service{repo: repo, dispatcher: newRemoteActionDispatcher(nil, nil, platform)}
+	target := sub2APISuspendedTargetFixture(repo, "acc-1")
+	state := repo.states[target.TargetID]["model-a"]
+	state.LastRemoteAction = RemoteActionSub2APIStatusActive
+	repo.states[target.TargetID]["model-a"] = state
+	spec := sub2APIActionTestSpec()
+	inventory := sub2APITestInventory(adminInventoryGroup{
+		group: upstream.AdminGroupInfo{ID: "g1", Name: "monitored"},
+		accounts: []upstream.AdminGroupAccountInfo{
+			{ID: "acc-1", Status: "active", Models: "model-a"},
+			{ID: "acc-2", Status: "active", Models: "model-a"},
+		},
+	})
+	scope := floorTestMonitoringScope("only-acc-1", map[string][]string{"g1": {"acc-1"}})
+
+	err := service.finishTargetProbeBatchWithFloor(
+		context.Background(), "user1", "ws1", inventory.session, target,
+		[]probeModelSpec{spec}, []targetProbeResult{{state: &state, previousState: StateDegraded, outcome: ProbeOutcome{Result: ResultAuth}, spec: spec}},
+		EventSourceScheduled, newWorkspaceFloorGuard(), inventory, scope,
+	)
+	if err != nil {
+		t.Fatalf("finish scheduled batch failed: %v", err)
+	}
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("unmonitored usable peer released automatic inactive: %+v", platform.sub2APICalls)
+	}
+	if len(repo.events) != 1 || repo.events[0].RemoteAction != RemoteActionSkippedSub2APILastActive || repo.events[0].AdminGroupID != "g1" {
+		t.Fatalf("automatic monitored floor audit = %+v", repo.events)
+	}
+	stored := repo.states[target.TargetID]["model-a"]
+	if stored.State != StateSuspended || stored.LastRemoteAction != RemoteActionSub2APIStatusActive {
+		t.Fatalf("blocked automatic action corrupted health or prior action state: %+v", stored)
 	}
 }
 
@@ -278,7 +439,7 @@ func TestFinishTargetProbeBatch_LastActiveIsReevaluatedEveryBatch(t *testing.T) 
 		if err := service.finishTargetProbeBatchWithFloor(
 			context.Background(), "user1", "ws1", inventory.session, target,
 			[]probeModelSpec{spec}, []targetProbeResult{{state: &state, previousState: StateSuspended, outcome: ProbeOutcome{Result: ResultAuth}, spec: spec}},
-			EventSourceScheduled, newWorkspaceFloorGuard(), inventory,
+			EventSourceScheduled, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
 		); err != nil {
 			t.Fatalf("batch %d failed: %v", batch+1, err)
 		}
@@ -309,7 +470,7 @@ func TestReconcileTargetRemoteAction_FailedInactiveKeepsCurrentTickReservation(t
 
 	result, err := service.reconcileTargetRemoteActionWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, first,
-		[]probeModelSpec{sub2APIActionTestSpec()}, guard, inventory,
+		[]probeModelSpec{sub2APIActionTestSpec()}, guard, inventory, fullFloorTestMonitoringScope(*inventory),
 	)
 	if err == nil || result.remoteAction != RemoteActionSub2APIStatusInactiveFailed {
 		t.Fatalf("first inactive should fail after reserving: result=%+v err=%v", result, err)
@@ -321,7 +482,7 @@ func TestReconcileTargetRemoteAction_FailedInactiveKeepsCurrentTickReservation(t
 	platform.sub2APIErr = nil
 	result, err = service.reconcileTargetRemoteActionWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, second,
-		[]probeModelSpec{sub2APIActionTestSpec()}, guard, inventory,
+		[]probeModelSpec{sub2APIActionTestSpec()}, guard, inventory, fullFloorTestMonitoringScope(*inventory),
 	)
 	if err != nil || result.remoteAction != RemoteActionSkippedSub2APILastActive {
 		t.Fatalf("second candidate must be protected in the same tick: result=%+v err=%v", result, err)
@@ -352,7 +513,7 @@ func TestWorkspaceFloorGuard_ConcurrentCandidatesNeverReachZero(t *testing.T) {
 					results <- guard.reserveSub2APIInactive(AdminProbeTarget{
 						TargetID: buildTargetID(string(upstream.PlatformSub2API), "ws1", accountID),
 						Platform: string(upstream.PlatformSub2API), AccountID: accountID, AccountStatus: "active",
-					}, *inventory)
+					}, *inventory, fullFloorTestMonitoringScope(*inventory))
 				}()
 			}
 			wg.Wait()
@@ -391,7 +552,7 @@ func TestWorkspaceFloorGuard_CrossGroupAndIncompleteInventoryFailClosed(t *testi
 			accounts: []upstream.AdminGroupAccountInfo{{ID: "acc-1", Status: "active"}, {ID: "acc-2", Status: "active"}},
 		},
 	)
-	result := newWorkspaceFloorGuard().reserveSub2APIInactive(target, *crossGroup)
+	result := newWorkspaceFloorGuard().reserveSub2APIInactive(target, *crossGroup, fullFloorTestMonitoringScope(*crossGroup))
 	if result.remoteAction != RemoteActionSkippedSub2APILastActive || result.adminGroupID != "g1" {
 		t.Fatalf("cross-group target must be protected by its single-member group: %+v", result)
 	}
@@ -403,7 +564,7 @@ func TestWorkspaceFloorGuard_CrossGroupAndIncompleteInventoryFailClosed(t *testi
 		},
 		adminInventoryGroup{group: upstream.AdminGroupInfo{ID: "g2", Name: "failed"}, err: errors.New("temporary read error")},
 	)
-	result = newWorkspaceFloorGuard().reserveSub2APIInactive(target, *incomplete)
+	result = newWorkspaceFloorGuard().reserveSub2APIInactive(target, *incomplete, fullFloorTestMonitoringScope(*incomplete))
 	if result.remoteAction != RemoteActionSkippedSub2APIInventory || result.adminGroupID != "g2" {
 		t.Fatalf("incomplete inventory must fail closed with the failed group: %+v", result)
 	}
@@ -421,13 +582,13 @@ func TestWorkspaceFloorGuard_FailedWriteKeepsReservationOnlyForCurrentTick(t *te
 		}
 	}
 	guard := newWorkspaceFloorGuard()
-	if result := guard.reserveSub2APIInactive(target("acc-1"), *inventory); result.remoteAction != "" {
+	if result := guard.reserveSub2APIInactive(target("acc-1"), *inventory, fullFloorTestMonitoringScope(*inventory)); result.remoteAction != "" {
 		t.Fatalf("first candidate should reserve the available slot: %+v", result)
 	}
-	if result := guard.reserveSub2APIInactive(target("acc-2"), *inventory); result.remoteAction != RemoteActionSkippedSub2APILastActive {
+	if result := guard.reserveSub2APIInactive(target("acc-2"), *inventory, fullFloorTestMonitoringScope(*inventory)); result.remoteAction != RemoteActionSkippedSub2APILastActive {
 		t.Fatalf("same tick must keep the failed/unknown reservation: %+v", result)
 	}
-	if result := newWorkspaceFloorGuard().reserveSub2APIInactive(target("acc-2"), *inventory); result.remoteAction != "" {
+	if result := newWorkspaceFloorGuard().reserveSub2APIInactive(target("acc-2"), *inventory, fullFloorTestMonitoringScope(*inventory)); result.remoteAction != "" {
 		t.Fatalf("next tick must rebuild reservations and reconsider: %+v", result)
 	}
 }
@@ -444,7 +605,7 @@ func TestWorkspaceFloorGuard_NewInventoryClearsPersistentReservation(t *testing.
 		}
 	}
 	guard := newWorkspaceFloorGuard()
-	if result := guard.reserveSub2APIInactive(target("acc-1"), initial); result.remoteAction != "" {
+	if result := guard.reserveSub2APIInactive(target("acc-1"), initial, fullFloorTestMonitoringScope(initial)); result.remoteAction != "" {
 		t.Fatalf("first reservation should be accepted: %+v", result)
 	}
 
@@ -454,7 +615,7 @@ func TestWorkspaceFloorGuard_NewInventoryClearsPersistentReservation(t *testing.
 	})
 	guard.rememberInventory(afterClose)
 	guard.rememberInventory(initial)
-	if result := guard.reserveSub2APIInactive(target("acc-2"), initial); result.remoteAction != "" {
+	if result := guard.reserveSub2APIInactive(target("acc-2"), initial, fullFloorTestMonitoringScope(initial)); result.remoteAction != "" {
 		t.Fatalf("fresh inventory after restore must clear the old reservation: %+v", result)
 	}
 }
@@ -471,14 +632,14 @@ func TestWorkspaceFloorGuard_IncompleteInventoryKeepsPersistentReservation(t *te
 		}
 	}
 	guard := newWorkspaceFloorGuard()
-	if result := guard.reserveSub2APIInactive(target("acc-1"), inventory); result.remoteAction != "" {
+	if result := guard.reserveSub2APIInactive(target("acc-1"), inventory, fullFloorTestMonitoringScope(inventory)); result.remoteAction != "" {
 		t.Fatalf("first reservation should be accepted: %+v", result)
 	}
 	guard.rememberInventory(*sub2APITestInventory(
 		adminInventoryGroup{group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"}, accounts: inventory.groups[0].accounts},
 		adminInventoryGroup{group: upstream.AdminGroupInfo{ID: "g2", Name: "unreadable"}, err: errors.New("accounts unavailable")},
 	))
-	if result := guard.reserveSub2APIInactive(target("acc-2"), inventory); result.remoteAction != RemoteActionSkippedSub2APILastActive {
+	if result := guard.reserveSub2APIInactive(target("acc-2"), inventory, fullFloorTestMonitoringScope(inventory)); result.remoteAction != RemoteActionSkippedSub2APILastActive {
 		t.Fatalf("incomplete snapshot must not discard an unresolved reservation: %+v", result)
 	}
 }
@@ -492,7 +653,7 @@ func TestWorkspaceFloorGuard_ReconsidersAfterPeerBecomesActive(t *testing.T) {
 		group:    upstream.AdminGroupInfo{ID: "g1", Name: "shared"},
 		accounts: []upstream.AdminGroupAccountInfo{{ID: "acc-1", Status: "active"}},
 	})
-	if result := newWorkspaceFloorGuard().reserveSub2APIInactive(target, *single); result.remoteAction != RemoteActionSkippedSub2APILastActive {
+	if result := newWorkspaceFloorGuard().reserveSub2APIInactive(target, *single, fullFloorTestMonitoringScope(*single)); result.remoteAction != RemoteActionSkippedSub2APILastActive {
 		t.Fatalf("single active target must be protected: %+v", result)
 	}
 	withRecoveredPeer := sub2APITestInventory(adminInventoryGroup{
@@ -501,7 +662,7 @@ func TestWorkspaceFloorGuard_ReconsidersAfterPeerBecomesActive(t *testing.T) {
 			{ID: "acc-1", Status: "active"}, {ID: "acc-2", Status: "active"},
 		},
 	})
-	if result := newWorkspaceFloorGuard().reserveSub2APIInactive(target, *withRecoveredPeer); result.remoteAction != "" {
+	if result := newWorkspaceFloorGuard().reserveSub2APIInactive(target, *withRecoveredPeer, fullFloorTestMonitoringScope(*withRecoveredPeer)); result.remoteAction != "" {
 		t.Fatalf("next tick must allow inactive after a peer becomes active: %+v", result)
 	}
 }
@@ -620,7 +781,7 @@ func TestAdminTargetRefresh_FloorGuardReusesInventoryWithoutExtraReads(t *testin
 	if reader.fetchCalls != 1 || reader.listCalls != 2 {
 		t.Fatalf("execution refresh calls = fetch:%d list:%d", reader.fetchCalls, reader.listCalls)
 	}
-	result := newWorkspaceFloorGuard().reserveSub2APIInactive(refresh.target, refresh.inventory)
+	result := newWorkspaceFloorGuard().reserveSub2APIInactive(refresh.target, refresh.inventory, fullFloorTestMonitoringScope(refresh.inventory))
 	if result.remoteAction != "" {
 		t.Fatalf("two active targets per membership should allow reservation: %+v", result)
 	}

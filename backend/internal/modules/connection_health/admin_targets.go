@@ -662,7 +662,7 @@ func probeBudgetLimit(policy Policy) int {
 }
 
 func (s *Service) finishTargetProbeBatch(ctx context.Context, userID string, adminAccountID string, session upstream.Session, target AdminProbeTarget, specs []probeModelSpec, results []targetProbeResult, source string) error {
-	return s.finishTargetProbeBatchWithFloor(ctx, userID, adminAccountID, session, target, specs, results, source, nil, nil)
+	return s.finishTargetProbeBatchWithFloor(ctx, userID, adminAccountID, session, target, specs, results, source, nil, nil, adminMonitoringScope{})
 }
 
 func (s *Service) finishTargetProbeBatchWithFloor(
@@ -676,6 +676,7 @@ func (s *Service) finishTargetProbeBatchWithFloor(
 	source string,
 	floorGuard *workspaceFloorGuard,
 	inventory *adminWorkspaceInventory,
+	monitoringScope adminMonitoringScope,
 ) error {
 	if len(results) == 0 {
 		return nil
@@ -683,7 +684,7 @@ func (s *Service) finishTargetProbeBatchWithFloor(
 	actionResult := targetRemoteActionResult{}
 	var actionErr error
 	actionResult, actionErr = s.reconcileTargetRemoteActionWithFloorMode(
-		ctx, userID, adminAccountID, session, target, specs, floorGuard, inventory,
+		ctx, userID, adminAccountID, session, target, specs, floorGuard, inventory, monitoringScope,
 		source != EventSourceManual,
 	)
 	remoteAction := actionResult.remoteAction

@@ -48,12 +48,12 @@ func newWorkspaceFloorGuard() *workspaceFloorGuard {
 	return &workspaceFloorGuard{reservedUnavailable: make(map[string]struct{})}
 }
 
-func (g *workspaceFloorGuard) reserveSub2APIInactive(target AdminProbeTarget, inventory adminWorkspaceInventory) targetRemoteActionResult {
-	return g.reserveSub2APIMutation(target, inventory)
+func (g *workspaceFloorGuard) reserveSub2APIInactive(target AdminProbeTarget, inventory adminWorkspaceInventory, scope adminMonitoringScope) targetRemoteActionResult {
+	return g.reserveSub2APIMutation(target, inventory, scope)
 }
 
-func (g *workspaceFloorGuard) reserveSub2APISchedulableFalse(target AdminProbeTarget, inventory adminWorkspaceInventory) targetRemoteActionResult {
-	return g.reserveSub2APIMutation(target, inventory)
+func (g *workspaceFloorGuard) reserveSub2APISchedulableFalse(target AdminProbeTarget, inventory adminWorkspaceInventory, scope adminMonitoringScope) targetRemoteActionResult {
+	return g.reserveSub2APIMutation(target, inventory, scope)
 }
 
 func (g *workspaceFloorGuard) rememberInventory(inventory adminWorkspaceInventory) {
@@ -98,9 +98,23 @@ func (g *workspaceFloorGuard) latestInventory(maxAge time.Duration) (*adminWorks
 	return g.inventory, true
 }
 
-func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, inventory adminWorkspaceInventory) targetRemoteActionResult {
+func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, inventory adminWorkspaceInventory, scope adminMonitoringScope) targetRemoteActionResult {
 	if g == nil {
 		return targetRemoteActionResult{}
+	}
+	for _, groupInventory := range inventory.groups {
+		if groupInventory.err != nil {
+			return targetRemoteActionResult{
+				remoteAction: RemoteActionSkippedSub2APIInventory,
+				adminGroupID: groupInventory.group.ID, adminGroupName: groupInventory.group.Name,
+			}
+		}
+	}
+	if !scope.complete {
+		return targetRemoteActionResult{
+			remoteAction: RemoteActionSkippedSub2APIInventory,
+			adminGroupID: target.AdminGroupID, adminGroupName: target.AdminGroupName,
+		}
 	}
 	parsed, ok := parseTargetID(target.TargetID)
 	if !ok {
@@ -109,24 +123,32 @@ func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, in
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.rememberInventoryLocked(inventory)
+	// A reservation represents a destructive account mutation already admitted against
+	// the cached upstream inventory. A policy/scope change alone cannot prove that the
+	// upstream account has become usable again, so reservations remain until a new
+	// inventory fingerprint is observed by rememberInventoryLocked.
+
+	monitoredMemberships := make(map[string]struct{})
+	for groupID, monitoredTargets := range scope.monitoredByGroup {
+		if _, monitored := monitoredTargets[target.TargetID]; monitored {
+			monitoredMemberships[groupID] = struct{}{}
+		}
+	}
+	if len(monitoredMemberships) == 0 {
+		return targetRemoteActionResult{}
+	}
 
 	usableByGroup := make(map[string]map[string]struct{}, len(inventory.groups))
 	unknownByGroup := make(map[string]bool, len(inventory.groups))
 	memberships := make(map[string]string)
+	seenMonitoredByGroup := make(map[string]map[string]struct{}, len(inventory.groups))
 	targetObservations := make([]targetInventoryObservation, 0)
 	for _, groupInventory := range inventory.groups {
-		if groupInventory.err != nil {
-			return targetRemoteActionResult{
-				remoteAction: RemoteActionSkippedSub2APIInventory,
-				adminGroupID: groupInventory.group.ID, adminGroupName: groupInventory.group.Name,
-			}
-		}
+		monitoredTargets := scope.monitoredByGroup[groupInventory.group.ID]
 		usableTargets := make(map[string]struct{})
+		seenTargets := make(map[string]struct{})
 		for _, account := range groupInventory.accounts {
 			targetID := buildTargetID(target.Platform, parsed.adminAccountID, account.ID)
-			if targetID == target.TargetID {
-				memberships[groupInventory.group.ID] = groupInventory.group.Name
-			}
 			status, statusKnown := normalizeFloorTargetStatus(target.Platform, account.Status)
 			if targetID == target.TargetID {
 				observation := targetInventoryObservation{
@@ -139,6 +161,13 @@ func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, in
 				}
 				targetObservations = append(targetObservations, observation)
 			}
+			if _, monitored := monitoredTargets[targetID]; !monitored {
+				continue
+			}
+			seenTargets[targetID] = struct{}{}
+			if targetID == target.TargetID {
+				memberships[groupInventory.group.ID] = groupInventory.group.Name
+			}
 			if target.Platform == string(upstream.PlatformSub2API) && !statusKnown {
 				unknownByGroup[groupInventory.group.ID] = true
 				continue
@@ -150,7 +179,23 @@ func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, in
 				usableTargets[targetID] = struct{}{}
 			}
 		}
-		usableByGroup[groupInventory.group.ID] = usableTargets
+		if monitoredTargets != nil {
+			usableByGroup[groupInventory.group.ID] = usableTargets
+			seenMonitoredByGroup[groupInventory.group.ID] = seenTargets
+		}
+	}
+	for groupID := range monitoredMemberships {
+		if _, found := memberships[groupID]; !found {
+			return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APIInventory, adminGroupID: groupID}
+		}
+		for targetID := range scope.monitoredByGroup[groupID] {
+			if _, found := seenMonitoredByGroup[groupID][targetID]; !found {
+				return targetRemoteActionResult{
+					remoteAction: RemoteActionSkippedSub2APIInventory,
+					adminGroupID: groupID, adminGroupName: memberships[groupID],
+				}
+			}
+		}
 	}
 	if len(memberships) == 0 {
 		return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APIInventory}
@@ -340,7 +385,7 @@ func (s *Service) reconcileTargetRemoteAction(
 	target AdminProbeTarget,
 	specs []probeModelSpec,
 ) (string, error) {
-	result, err := s.reconcileTargetRemoteActionWithFloor(ctx, userID, adminAccountID, session, target, specs, nil, nil)
+	result, err := s.reconcileTargetRemoteActionWithFloor(ctx, userID, adminAccountID, session, target, specs, nil, nil, adminMonitoringScope{})
 	return result.remoteAction, err
 }
 
@@ -353,8 +398,9 @@ func (s *Service) reconcileTargetRemoteActionWithFloor(
 	specs []probeModelSpec,
 	floorGuard *workspaceFloorGuard,
 	inventory *adminWorkspaceInventory,
+	monitoringScope adminMonitoringScope,
 ) (targetRemoteActionResult, error) {
-	return s.reconcileTargetRemoteActionWithFloorMode(ctx, userID, adminAccountID, session, target, specs, floorGuard, inventory, true)
+	return s.reconcileTargetRemoteActionWithFloorMode(ctx, userID, adminAccountID, session, target, specs, floorGuard, inventory, monitoringScope, true)
 }
 
 func (s *Service) reconcileTargetRemoteActionWithFloorMode(
@@ -366,6 +412,7 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 	specs []probeModelSpec,
 	floorGuard *workspaceFloorGuard,
 	inventory *adminWorkspaceInventory,
+	monitoringScope adminMonitoringScope,
 	allowSub2APIInactive bool,
 ) (targetRemoteActionResult, error) {
 	controlledModels := make(map[string]struct{})
@@ -484,7 +531,7 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 		}
 		defer mutationRelease()
 		floorGuard.rememberInventory(*inventory)
-		floorResult := floorGuard.reserveSub2APIInactive(target, *inventory)
+		floorResult := floorGuard.reserveSub2APIInactive(target, *inventory, monitoringScope)
 		if floorResult.remoteAction != "" {
 			stored.PendingStatus = ""
 			stored.PendingWeight = nil

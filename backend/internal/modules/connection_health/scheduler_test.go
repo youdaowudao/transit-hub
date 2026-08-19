@@ -265,6 +265,38 @@ func TestCollectAdminProbeJobs_UnschedulableTargetCanStopAutomaticMonitoring(t *
 	}
 }
 
+func TestCollectAdminProbeJobs_CarriesWorkspaceMonitoringScope(t *testing.T) {
+	repo := newFakeRepository()
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "default", Platform: string(upstream.PlatformSub2API)}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {
+				{ID: "1515", Name: "monitored", Models: "gpt-4o", Status: "active", Schedulable: boolPointer(true)},
+				{ID: "1616", Name: "unmonitored", Models: "gpt-4o", Status: "active", Schedulable: boolPointer(true)},
+			},
+		},
+	}
+	service := &Service{
+		repo: repo, mySites: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		platformGroups: reader,
+	}
+	policy := schedulableProbePolicy("direct", true, 60)
+	assignments := []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:1515", PolicyID: policy.ID,
+	}}
+
+	jobs := service.collectAdminProbeJobs(context.Background(), []Policy{policy}, assignments)
+	if len(jobs) != 1 {
+		t.Fatalf("jobs = %+v, want one monitored target", jobs)
+	}
+	if !jobs[0].monitoringScope.complete || !monitoringScopeContains(jobs[0].monitoringScope, "g1", "1515") {
+		t.Fatalf("scheduled job lost monitored member: %+v", jobs[0].monitoringScope)
+	}
+	if monitoringScopeContains(jobs[0].monitoringScope, "g1", "1616") {
+		t.Fatalf("scheduled job counted unassigned upstream peer: %+v", jobs[0].monitoringScope)
+	}
+}
+
 func TestRecheckAdminProbeSpecs_UsesFreshUnschedulableDecision(t *testing.T) {
 	now := time.Now().UTC()
 	targetID := "sub2api:ws1:1515"
@@ -639,6 +671,40 @@ func TestCollectAdminProbeJobs_MultiplierOnlyNeverScheduled(t *testing.T) {
 	jobs := svc.collectAdminProbeJobs(context.Background(), policies, assignments)
 	if len(jobs) != 0 {
 		t.Fatalf("multiplier-only policy must never generate probe jobs: %+v", jobs)
+	}
+}
+
+func TestCollectAdminProbeJobs_Sub2APIManualPriorityNeverScheduled(t *testing.T) {
+	repo := newFakeRepository()
+	manualPriority := 1
+	managedPriority := 10
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "default", Platform: string(upstream.PlatformSub2API)}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {
+				{ID: "manual", Name: "manual", Models: "gpt-4o", Priority: &manualPriority},
+				{ID: "managed", Name: "managed", Models: "gpt-4o", Priority: &managedPriority},
+			},
+		},
+	}
+	svc := &Service{
+		repo: repo, mySites: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		platformGroups: reader,
+	}
+	policy := schedulableProbePolicy("p1", true, 60)
+	assignments := []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:manual", PolicyID: policy.ID,
+	}}
+	groupAssignments := []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID,
+	}}
+
+	jobs := svc.collectAdminProbeJobsWithGroups(context.Background(), []Policy{policy}, assignments, groupAssignments, nil)
+	if len(jobs) != 1 {
+		t.Fatalf("expected only priority 10 target to be scheduled, got %+v", jobs)
+	}
+	if jobs[0].target.TargetID != "sub2api:ws1:managed" {
+		t.Fatalf("scheduled target = %q, want priority 10 target", jobs[0].target.TargetID)
 	}
 }
 

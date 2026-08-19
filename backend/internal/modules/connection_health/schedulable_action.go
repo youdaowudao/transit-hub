@@ -80,7 +80,19 @@ func (s *Service) SetTargetSchedulable(ctx context.Context, userID string, targe
 	guard := s.sub2APIFloorGuardFor(userID, adminAccountID)
 	guard.rememberInventory(refresh.inventory)
 	if !schedulable && !inventoryTargetAlreadyUnavailable(refresh.inventory, targetID) {
-		floorResult := guard.reserveSub2APISchedulableFalse(target, refresh.inventory)
+		monitoringScope, scopeErr := s.loadAdminMonitoringScope(ctx, userID, adminAccountID, refresh.inventory)
+		if scopeErr != nil {
+			blockedTarget := target
+			if groupID, groupName, incomplete := firstIncompleteAdminInventoryGroup(refresh.inventory); incomplete {
+				blockedTarget.AdminGroupID = groupID
+				blockedTarget.AdminGroupName = groupName
+			}
+			if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, blockedTarget, SchedulableActionFailed, ErrorSub2APIInventoryIncomplete, RemoteActionSkippedSub2APIInventory); auditErr != nil {
+				log.Printf("[connection-health] audit incomplete schedulable monitoring scope failed target_id=%s err=%v", target.TargetID, auditErr)
+			}
+			return TargetSchedulableActionResult{}, requestError(ErrorSub2APIInventoryIncomplete)
+		}
+		floorResult := guard.reserveSub2APISchedulableFalse(target, refresh.inventory, monitoringScope)
 		if floorResult.remoteAction != "" {
 			blockedTarget := target
 			blockedTarget.AdminGroupID = floorResult.adminGroupID

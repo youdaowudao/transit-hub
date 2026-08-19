@@ -162,6 +162,11 @@ func TestActions_Sub2APIRestoreUpdatesAccountActive(t *testing.T) {
 
 func TestDisableConnection_RejectsLastUsableSub2APIAccount(t *testing.T) {
 	repo := newFakeRepository()
+	policy := monitoringScopeTestPolicy("direct-policy")
+	repo.policies = []Policy{policy}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:1515", PolicyID: policy.ID,
+	}}
 	platform := &fakePlatformActioner{}
 	mySites := fakeMySitesReader{
 		connections: []my_sites.RealConnection{{
@@ -208,6 +213,12 @@ func TestDisableConnection_RejectsLastUsableSub2APIAccount(t *testing.T) {
 
 func TestDisableConnection_AllowsClosingOneOfTwoUsableSub2APIAccountsFromCachedInventory(t *testing.T) {
 	repo := newFakeRepository()
+	policy := monitoringScopeTestPolicy("direct-policy")
+	repo.policies = []Policy{policy}
+	repo.assignments = []PolicyAssignment{
+		{UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:1515", PolicyID: policy.ID},
+		{UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:1616", PolicyID: policy.ID},
+	}
 	platform := &fakePlatformActioner{}
 	mySites := fakeMySitesReader{
 		connections: []my_sites.RealConnection{{
@@ -242,6 +253,137 @@ func TestDisableConnection_AllowsClosingOneOfTwoUsableSub2APIAccountsFromCachedI
 	}
 }
 
+func TestDisableConnection_ScopeShrinkOnCachedInventoryStillProtectsLastUsableAccount(t *testing.T) {
+	repo := newFakeRepository()
+	policy := monitoringScopeTestPolicy("direct-policy")
+	repo.policies = []Policy{policy}
+	repo.assignments = []PolicyAssignment{
+		{UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:1515", PolicyID: policy.ID},
+		{UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:1616", PolicyID: policy.ID},
+		{UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:1717", PolicyID: policy.ID},
+	}
+	platform := &fakePlatformActioner{}
+	mySites := fakeMySitesReader{
+		connections: []my_sites.RealConnection{
+			{ID: "conn-1", UserID: "user1", WorkspaceAdminAccountID: "ws1", UpstreamSiteID: "site-1", AdminAccountID: "1515"},
+			{ID: "conn-2", UserID: "user1", WorkspaceAdminAccountID: "ws1", UpstreamSiteID: "site-1", AdminAccountID: "1616"},
+		},
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+	}
+	site := fakeSiteLookup{site: &upstream.Site{ID: "site-1", Platform: upstream.PlatformSub2API}}
+	service := &Service{
+		repo: repo, mySites: mySites, accounts: fakeAdminAccountResolver{id: "ws1"}, sites: site,
+		platformGroups: fakePlatformGroupReader{},
+		dispatcher:     newRemoteActionDispatcher(site, mySites, platform),
+	}
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+		groups: []adminInventoryGroup{{
+			group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"},
+			accounts: []upstream.AdminGroupAccountInfo{
+				{ID: "1515", Status: "active", Schedulable: boolPointer(true), Models: "gpt-4o"},
+				{ID: "1616", Status: "active", Schedulable: boolPointer(true), Models: "gpt-4o"},
+				{ID: "1717", Status: "active", Schedulable: boolPointer(true), Models: "gpt-4o"},
+			},
+		}},
+	})
+
+	if err := service.DisableConnection(context.Background(), "user1", "conn-1"); err != nil {
+		t.Fatalf("first closure with three monitored accounts should succeed: %v", err)
+	}
+	repo.assignments = repo.assignments[:2]
+	if err := service.DisableConnection(context.Background(), "user1", "conn-2"); err == nil || err.Error() != ErrorSub2APIGroupLastUsable {
+		t.Fatalf("scope shrink on cached inventory must protect the last usable monitored account: %v", err)
+	}
+	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].accountID != "1515" || platform.sub2APICalls[0].status != "inactive" {
+		t.Fatalf("second legacy disable must not write inactive upstream: %+v", platform.sub2APICalls)
+	}
+}
+
+func legacyDisableMonitoringScopeService(repo *fakeRepository, platform *fakePlatformActioner, accounts []upstream.AdminGroupAccountInfo) *Service {
+	mySites := fakeMySitesReader{
+		connections: []my_sites.RealConnection{{
+			ID: "conn-1", UserID: "user1", WorkspaceAdminAccountID: "ws1",
+			UpstreamSiteID: "site-1", AdminAccountID: "1515",
+		}},
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+	}
+	site := fakeSiteLookup{site: &upstream.Site{ID: "site-1", Platform: upstream.PlatformSub2API}}
+	service := &Service{
+		repo: repo, mySites: mySites, accounts: fakeAdminAccountResolver{id: "ws1"}, sites: site,
+		platformGroups: fakePlatformGroupReader{},
+		dispatcher:     newRemoteActionDispatcher(site, mySites, platform),
+	}
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{
+		session: upstream.Session{Platform: upstream.PlatformSub2API},
+		groups: []adminInventoryGroup{{
+			group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"}, accounts: accounts,
+		}},
+	})
+	return service
+}
+
+func TestDisableConnection_UsesMonitoringScopeNotWholeUpstreamGroup(t *testing.T) {
+	repo := newFakeRepository()
+	policy := monitoringScopeTestPolicy("direct-policy")
+	repo.policies = []Policy{policy}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:1515", PolicyID: policy.ID,
+	}}
+	platform := &fakePlatformActioner{}
+	service := legacyDisableMonitoringScopeService(repo, platform, []upstream.AdminGroupAccountInfo{
+		{ID: "1515", Status: "active", Schedulable: boolPointer(true), Models: "gpt-4o"},
+		{ID: "1616", Status: "active", Schedulable: boolPointer(true), Models: "gpt-4o"},
+	})
+
+	err := service.DisableConnection(context.Background(), "user1", "conn-1")
+	if err == nil || err.Error() != ErrorSub2APIGroupLastUsable {
+		t.Fatalf("unmonitored upstream peer must not release legacy floor: %v", err)
+	}
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("blocked legacy target was written upstream: %+v", platform.sub2APICalls)
+	}
+	if len(repo.events) != 1 || repo.events[0].RemoteAction != RemoteActionSkippedSub2APILastUsable || repo.events[0].AdminGroupID != "g1" {
+		t.Fatalf("blocked legacy target audit = %+v", repo.events)
+	}
+}
+
+func TestDisableConnection_AllowsTargetOutsideMonitoringScope(t *testing.T) {
+	repo := newFakeRepository()
+	platform := &fakePlatformActioner{}
+	service := legacyDisableMonitoringScopeService(repo, platform, []upstream.AdminGroupAccountInfo{{
+		ID: "1515", Status: "active", Schedulable: boolPointer(true), Models: "gpt-4o",
+	}})
+
+	if err := service.DisableConnection(context.Background(), "user1", "conn-1"); err != nil {
+		t.Fatalf("target outside monitoring scope should retain legacy close semantics: %v", err)
+	}
+	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].status != "inactive" {
+		t.Fatalf("unmonitored legacy target write = %+v", platform.sub2APICalls)
+	}
+}
+
+func TestDisableConnection_MonitoringScopeReadFailureFailsClosed(t *testing.T) {
+	repo := newFakeRepository()
+	repo.listPoliciesErr = errors.New("policy snapshot unavailable")
+	platform := &fakePlatformActioner{}
+	service := legacyDisableMonitoringScopeService(repo, platform, []upstream.AdminGroupAccountInfo{
+		{ID: "1515", Status: "active", Schedulable: boolPointer(true), Models: "gpt-4o"},
+		{ID: "1616", Status: "active", Schedulable: boolPointer(true), Models: "gpt-4o"},
+	})
+
+	err := service.DisableConnection(context.Background(), "user1", "conn-1")
+	if err == nil || err.Error() != ErrorSub2APIInventoryIncomplete {
+		t.Fatalf("monitoring scope read failure must fail closed: %v", err)
+	}
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("scope read failure wrote legacy target upstream: %+v", platform.sub2APICalls)
+	}
+	if len(repo.events) != 1 || repo.events[0].RemoteAction != RemoteActionSkippedSub2APIInventory {
+		t.Fatalf("scope read failure audit = %+v", repo.events)
+	}
+}
+
 func TestDisableConnection_AllowsIdempotentInactiveTargetWithIncompleteOtherGroup(t *testing.T) {
 	repo := newFakeRepository()
 	platform := &fakePlatformActioner{}
@@ -273,6 +415,11 @@ func TestDisableConnection_AllowsIdempotentInactiveTargetWithIncompleteOtherGrou
 
 func TestDisableConnection_RejectsConflictingSharedAccountState(t *testing.T) {
 	repo := newFakeRepository()
+	policy := monitoringScopeTestPolicy("direct-policy")
+	repo.policies = []Policy{policy}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:1515", PolicyID: policy.ID,
+	}}
 	platform := &fakePlatformActioner{}
 	mySites := fakeMySitesReader{
 		connections: []my_sites.RealConnection{{

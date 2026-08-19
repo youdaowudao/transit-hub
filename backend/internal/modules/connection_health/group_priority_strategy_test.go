@@ -1406,6 +1406,110 @@ func TestHealthPrioritySyncUnavailableTargetStillWritesHealthyTargets(t *testing
 	}
 }
 
+func TestHealthPrioritySyncDisabledMultiplierUsesBandEndWithoutFailure(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running",
+	}
+	actions := &fakeTargetPriorityActioner{}
+	service := &Service{repo: repo, priorityActions: actions}
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	policy.StrategyMode = StrategyModeHealthProbe
+	activeMultiplier := 0.1
+	disabledFallback := 0.05
+	inventory := map[string]*priorityTargetInventory{
+		"sub2api:ws1:100": {
+			target:   AdminProbeTarget{TargetID: "sub2api:ws1:100", AccountID: "100", Models: []string{"gpt-4o"}},
+			policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{
+				status: MultiplierResolutionResolved, info: upstreamKeyGroupInfo{effectiveMultiplier: &activeMultiplier},
+			},
+			currentPriority: 50, priorityPresent: true,
+		},
+		"sub2api:ws1:200": {
+			target:              AdminProbeTarget{TargetID: "sub2api:ws1:200", AccountID: "200", Models: []string{"gpt-4o"}},
+			policies:            []Policy{policy},
+			upstreamMultiplier:  upstreamMultiplierResolution{status: MultiplierResolutionDisabled},
+			fallbackMultipliers: []float64{disabledFallback},
+			currentPriority:     60, priorityPresent: true,
+		},
+	}
+	states := []ConnectionHealthState{
+		{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy},
+		{ConnectionID: "sub2api:ws1:200", ModelName: "gpt-4o", State: StateHealthy},
+	}
+
+	service.syncWorkspacePriorities(
+		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true, states, nil, "generation-1",
+	)
+
+	writes := make(map[string]int, len(actions.calls))
+	for _, call := range actions.calls {
+		writes[call.targetID] = call.priority
+	}
+	if writes["100"] != 10 || writes["200"] != 99 {
+		t.Fatalf("priority writes = %+v, want active=10 disabled=99", writes)
+	}
+	workspaceState := repo.priorityWorkspaces["user1|ws1"]
+	if workspaceState.LastDecision != "success" || workspaceState.PendingTargetCount != 0 {
+		t.Fatalf("disabled target must not fail workspace sync: %+v", workspaceState)
+	}
+}
+
+func TestHealthPrioritySyncMissingMultiplierUsesBandEndAndCountsAffectedTarget(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running",
+	}
+	actions := &fakeTargetPriorityActioner{}
+	service := &Service{repo: repo, priorityActions: actions}
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	policy.StrategyMode = StrategyModeHealthProbe
+	activeMultiplier := 0.1
+	missingFallback := 0.05
+	inventory := map[string]*priorityTargetInventory{
+		"sub2api:ws1:100": {
+			target:   AdminProbeTarget{TargetID: "sub2api:ws1:100", AccountID: "100", Models: []string{"gpt-4o"}},
+			policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{
+				status: MultiplierResolutionResolved, info: upstreamKeyGroupInfo{effectiveMultiplier: &activeMultiplier},
+			},
+			currentPriority: 50, priorityPresent: true,
+		},
+		"sub2api:ws1:200": {
+			target:              AdminProbeTarget{TargetID: "sub2api:ws1:200", AccountID: "200", Models: []string{"gpt-4o"}},
+			policies:            []Policy{policy},
+			upstreamMultiplier:  upstreamMultiplierResolution{status: MultiplierResolutionMissing},
+			fallbackMultipliers: []float64{missingFallback},
+			currentPriority:     60, priorityPresent: true,
+		},
+	}
+	states := []ConnectionHealthState{
+		{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy},
+		{ConnectionID: "sub2api:ws1:200", ModelName: "gpt-4o", State: StateHealthy},
+	}
+
+	service.syncWorkspacePriorities(
+		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true, states, nil, "generation-1",
+	)
+
+	writes := make(map[string]int, len(actions.calls))
+	for _, call := range actions.calls {
+		writes[call.targetID] = call.priority
+	}
+	if writes["100"] != 10 || writes["200"] != 99 {
+		t.Fatalf("priority writes = %+v, want active=10 missing=99", writes)
+	}
+	workspaceState := repo.priorityWorkspaces["user1|ws1"]
+	if workspaceState.LastDecision != "failed" || workspaceState.PendingTargetCount != 1 || workspaceState.LastError != ErrorPriorityMetadataUnavailable {
+		t.Fatalf("missing target must fail workspace sync with one affected target: %+v", workspaceState)
+	}
+}
+
 func TestHealthPrioritySyncWithoutPendingSignatureRecordsFailureState(t *testing.T) {
 	repo := newFakeRepository()
 	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{

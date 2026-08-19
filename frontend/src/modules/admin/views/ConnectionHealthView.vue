@@ -500,6 +500,7 @@ const refreshFailureMessagesByStatus: Record<string, RefreshFailureMessage> = {
   stale: { phase: 'multiplier', reason: 'stale' },
   unavailable: { phase: 'refresh', reason: 'unavailable' },
   timeout: { phase: 'refresh', reason: 'timeout' },
+  disabled: { phase: 'siteSync', reason: 'disabled' },
 }
 
 const refreshFailureLabel = (errorKey: string, status: string, retained = false): string => {
@@ -517,7 +518,8 @@ const refreshSiteStatusLabel = (site: AdminGroupsRefreshSite): string => {
   return refreshFailureLabel(errorKey, site.status, site.status === 'stale')
 }
 
-const failedRefreshSites = computed(() => (terminalRefreshSummary.value?.sites ?? []).filter(site => site.status !== 'success'))
+const nonParticipatingRefreshSites = computed(() => (terminalRefreshSummary.value?.sites ?? []).filter(site => site.status === 'disabled'))
+const failedRefreshSites = computed(() => (terminalRefreshSummary.value?.sites ?? []).filter(site => site.status !== 'success' && site.status !== 'disabled'))
 const refreshSummaryState = computed(() => terminalRefreshSummary.value?.state ?? null)
 const refreshSummaryErrorKey = computed(() => {
   const errorKey = terminalRefreshSummary.value?.errorKey?.trim() ?? ''
@@ -744,6 +746,12 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       <div v-if="failedRefreshSites.length > 0" class="flex flex-wrap items-center gap-x-4 gap-y-1">
         <span class="font-medium text-destructive">{{ t('admin.connectionHealth.refreshStatus.failedSitesLabel') }}</span>
         <span v-for="site in failedRefreshSites" :key="`failed:${site.siteId}`">
+          {{ siteName(site.siteId) }}: {{ refreshSiteStatusLabel(site) }}
+        </span>
+      </div>
+      <div v-if="nonParticipatingRefreshSites.length > 0" class="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span class="font-medium text-muted-foreground">{{ t('admin.connectionHealth.refreshStatus.nonParticipatingSitesLabel') }}</span>
+        <span v-for="site in nonParticipatingRefreshSites" :key="`disabled:${site.siteId}`">
           {{ siteName(site.siteId) }}: {{ refreshSiteStatusLabel(site) }}
         </span>
       </div>

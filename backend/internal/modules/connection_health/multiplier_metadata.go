@@ -152,6 +152,8 @@ func (s *Service) multiplierLookupForWorkspaceWithConnections(ctx context.Contex
 	}
 	connectionsByAccount := make(map[string][]my_sites.RealConnection)
 	bindingKeys := make(map[string]map[string]struct{})
+	disabledSiteByAccount := make(map[string]string)
+	siteEnabled := make(map[string]*bool)
 	for _, connection := range connections {
 		accountID := strings.TrimSpace(connection.AdminAccountID)
 		if accountID == "" {
@@ -160,8 +162,22 @@ func (s *Service) multiplierLookupForWorkspaceWithConnections(ctx context.Contex
 		if connectionPlatform := strings.TrimSpace(connection.AdminPlatform); connectionPlatform != "" && !strings.EqualFold(connectionPlatform, platform) {
 			continue
 		}
-		connectionsByAccount[accountID] = append(connectionsByAccount[accountID], connection)
 		siteID, keyID := strings.TrimSpace(connection.UpstreamSiteID), strings.TrimSpace(connection.UpstreamKeyID)
+		if siteID != "" {
+			enabled, checked := siteEnabled[siteID]
+			if !checked {
+				if site, siteErr := s.sites.GetSite(ctx, siteID); siteErr == nil && site != nil {
+					value := site.IsEnabled()
+					enabled = &value
+				}
+				siteEnabled[siteID] = enabled
+			}
+			if enabled != nil && !*enabled {
+				disabledSiteByAccount[accountID] = siteID
+				continue
+			}
+		}
+		connectionsByAccount[accountID] = append(connectionsByAccount[accountID], connection)
 		if siteID == "" || keyID == "" {
 			continue
 		}
@@ -205,6 +221,15 @@ func (s *Service) multiplierLookupForWorkspaceWithConnections(ctx context.Contex
 			resolved = candidate.info
 		}
 		lookup.byAccount[accountID] = upstreamMultiplierResolution{status: status, info: resolved}
+	}
+	for accountID, siteID := range disabledSiteByAccount {
+		if _, active := connectionsByAccount[accountID]; active {
+			continue
+		}
+		lookup.byAccount[accountID] = upstreamMultiplierResolution{
+			status: MultiplierResolutionDisabled,
+			info:   upstreamKeyGroupInfo{siteID: siteID},
+		}
 	}
 	for siteID := range bindingKeys {
 		entry := s.multiplierSnapshots[multiplierSnapshotKey(userID, adminAccountID, siteID)]
@@ -378,12 +403,14 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 	if site.Platform == upstream.PlatformSub2API {
 		if entry.capability != multiplierDirectUnsupported {
 			keys := make(map[string]upstreamKeyMetadata, len(entry.keyIDs))
+			fallbackToList := false
 			for _, keyID := range entry.keyIDs {
 				item, getErr := reader.GetUpstreamKeyForWorkspace(ctx, entry.userID, entry.adminAccountID, entry.siteID, keyID)
 				if getErr != nil {
 					var requestErr *upstream.RequestError
 					if errors.As(getErr, &requestErr) && requestErr.StatusCode == http.StatusNotFound {
-						return nil, siteMetadata, multiplierDirectUnknown, errMultiplierDirectLookupAmbiguous
+						fallbackToList = true
+						break
 					}
 					if errors.As(getErr, &requestErr) && requestErr.MessageKey == upstream.ErrorInvalidResponse && requestErr.StatusCode == 0 {
 						return nil, siteMetadata, entry.capability, errMultiplierDirectLookupInvalid
@@ -395,7 +422,9 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 				}
 				keys[keyID] = upstreamKeyMetadata{id: item.ID, groupID: strings.TrimSpace(item.GroupID), groupName: strings.TrimSpace(item.GroupName)}
 			}
-			return keys, siteMetadata, multiplierDirectSupported, nil
+			if !fallbackToList {
+				return keys, siteMetadata, multiplierDirectSupported, nil
+			}
 		}
 	}
 	var items []upstream.Sub2APIKeyItem
@@ -419,7 +448,7 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 		}
 	}
 	capability := entry.capability
-	if site.Platform == upstream.PlatformSub2API && capability == multiplierDirectUnknown {
+	if site.Platform == upstream.PlatformSub2API && capability != multiplierDirectUnsupported {
 		capability = multiplierDirectUnsupported
 	}
 	return keys, siteMetadata, capability, nil
@@ -635,18 +664,15 @@ func multiplierSiteFingerprint(site *upstream.Site) string {
 		string(site.Platform), string(site.RequestedPlatform), strings.TrimSpace(site.BaseURL), string(site.Status),
 		strconv.FormatBool(site.IsEnabled()), strconv.FormatFloat(site.RechargeRate, 'g', -1, 64),
 	}
-	if site.LastSyncedAt != nil {
-		parts = append(parts, strconv.FormatInt(*site.LastSyncedAt, 10))
-	}
 	if session := site.Session; session != nil {
 		parts = append(parts, string(session.Platform), strings.TrimSpace(session.BaseURL), strings.TrimSpace(session.UserID), strings.TrimSpace(session.TokenType))
 		if session.ExpiresAt != nil {
 			parts = append(parts, strconv.FormatInt(*session.ExpiresAt, 10))
 		}
 		// The Redis cache deserializes a new Session pointer on every read, so pointer
-		// identity must never take part in this version. LastSyncedAt changes when a
-		// site reconnects or refreshes credentials; these booleans cover credential
-		// shape changes without retaining or hashing credential values.
+		// identity and the routine LastSyncedAt timestamp must never take part in this
+		// version. These booleans cover credential shape changes without retaining or
+		// hashing credential values.
 		parts = append(parts, strconv.FormatBool(session.Cookie != ""), strconv.FormatBool(session.AccessToken != ""), strconv.FormatBool(session.AdminAPIKey != ""), strconv.FormatBool(session.RefreshToken != ""))
 	}
 	for _, group := range site.Metrics.Groups {

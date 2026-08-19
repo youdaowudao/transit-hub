@@ -996,6 +996,7 @@ export default {
 	        timeout: '本轮刷新包含超时站点',
 	        sitesLabel: '站点终态',
 	        failedSitesLabel: '失败站点',
+	        nonParticipatingSitesLabel: '未参与本轮',
 	        summaryFailureLabel: '本轮刷新失败阶段',
 	        auxiliaryFailure: '辅助读取失败（{source}）：{reason}',
         auxiliarySource: {
@@ -1195,13 +1196,15 @@ export default {
           conflictBandEnd: '多 Key 或分组冲突，已按当前健康档末位排序',
           staleBandEnd: '本轮查询失败，已沿用旧快照并按当前健康档末位排序',
           unavailableBandEnd: '本轮上游查询暂不可用，已按当前健康档末位排序',
+          disabledNonParticipating: '上游站点已禁用，未参与本轮倍率读取',
           unknownBandEnd: '倍率来源未知，已按当前健康档末位排序'
         },
         upstreamMultiplierStatuses: {
           unassociated: '未关联真实连接',
           missing: 'Key 分组或倍率缺失',
           conflict: '多 Key 或分组冲突',
-          unavailable: '本轮上游查询暂不可用'
+          unavailable: '本轮上游查询暂不可用',
+          disabled: '上游站点已禁用，未参与本轮倍率读取'
         },
         models: {
           empty: '该目标还没有模型探活结果。',

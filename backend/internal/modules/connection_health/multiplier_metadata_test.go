@@ -12,16 +12,17 @@ import (
 
 type snapshotMetadataReader struct {
 	fakeMySitesReader
-	mu          sync.Mutex
-	directItems map[string]upstream.Sub2APIKeyItem
-	directErrs  map[string]error
-	listItems   map[string][]upstream.Sub2APIKeyItem
-	directCalls map[string]int
-	listCalls   map[string]int
-	started     chan string
-	release     chan struct{}
-	active      int
-	maxActive   int
+	mu            sync.Mutex
+	directItems   map[string]upstream.Sub2APIKeyItem
+	directErrs    map[string]error
+	directKeyErrs map[string]error
+	listItems     map[string][]upstream.Sub2APIKeyItem
+	directCalls   map[string]int
+	listCalls     map[string]int
+	started       chan string
+	release       chan struct{}
+	active        int
+	maxActive     int
 }
 
 func (f *snapshotMetadataReader) GetUpstreamKeyForWorkspace(ctx context.Context, userID string, adminAccountID string, siteID string, keyID string) (upstream.Sub2APIKeyItem, error) {
@@ -30,7 +31,10 @@ func (f *snapshotMetadataReader) GetUpstreamKeyForWorkspace(ctx context.Context,
 		f.directCalls = make(map[string]int)
 	}
 	f.directCalls[siteID]++
-	err := f.directErrs[siteID]
+	err := f.directKeyErrs[siteID+"|"+keyID]
+	if err == nil {
+		err = f.directErrs[siteID]
+	}
 	item := f.directItems[siteID+"|"+keyID]
 	f.mu.Unlock()
 	if f.started != nil {
@@ -144,6 +148,13 @@ func snapshotSite(siteID string) *upstream.Site {
 	}
 }
 
+func disabledSnapshotSite(siteID string) *upstream.Site {
+	site := snapshotSite(siteID)
+	enabled := false
+	site.Enabled = &enabled
+	return site
+}
+
 func snapshotConnection(accountID string, siteID string, keyID string) my_sites.RealConnection {
 	return my_sites.RealConnection{
 		UserID: "user1", WorkspaceAdminAccountID: "ws1", AdminAccountID: accountID,
@@ -212,6 +223,35 @@ func TestMultiplierSnapshotFailureIsIsolatedPerSite(t *testing.T) {
 	}
 }
 
+func TestFreshMultiplierLookupTreatsDisabledSiteAsNonParticipating(t *testing.T) {
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{
+			snapshotConnection("account-active", "site-active", "key-active"),
+			snapshotConnection("account-disabled", "site-disabled", "key-disabled"),
+		}},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-active|key-active": {ID: "key-active", GroupID: "group-1", GroupName: "vip"},
+		},
+	}
+	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{
+		"site-active": snapshotSite("site-active"), "site-disabled": disabledSnapshotSite("site-disabled"),
+	}}}
+
+	lookup := service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if lookup.byAccount["account-active"].status != MultiplierResolutionResolved {
+		t.Fatalf("active account resolution = %+v", lookup.byAccount["account-active"])
+	}
+	if lookup.byAccount["account-disabled"].status != "disabled" {
+		t.Fatalf("disabled account resolution = %+v, want disabled", lookup.byAccount["account-disabled"])
+	}
+	if lookup.unavailable {
+		t.Fatalf("disabled site must not make workspace multiplier lookup unavailable: %+v", lookup)
+	}
+	if direct, lists := reader.callCounts("site-disabled"); direct != 0 || lists != 0 {
+		t.Fatalf("disabled site metadata reads = direct:%d list:%d, want zero", direct, lists)
+	}
+}
+
 func TestFreshMultiplierLookupRetainsOldSnapshotForDisplayAfterRefreshFailure(t *testing.T) {
 	reader := &snapshotMetadataReader{
 		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")}},
@@ -256,7 +296,7 @@ func TestFreshMultiplierLookupRefreshesHotSnapshot(t *testing.T) {
 	}
 }
 
-func TestMultiplierSnapshotAmbiguous404DefersPaginationToNextRound(t *testing.T) {
+func TestMultiplierSnapshot404UsesSameRoundListFallbackAndRemembersCapability(t *testing.T) {
 	reader := &snapshotMetadataReader{
 		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")}},
 		directErrs: map[string]error{"site-1": &upstream.RequestError{
@@ -267,26 +307,134 @@ func TestMultiplierSnapshotAmbiguous404DefersPaginationToNextRound(t *testing.T)
 	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}}
 
 	first := service.upstreamMultiplierResolutionsByAdminAccount(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
-	if first.byAccount["account-1"].status != MultiplierResolutionUnavailable {
-		t.Fatalf("ambiguous first round=%+v", first)
+	if first.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("same-round list fallback did not resolve metadata: %+v", first)
 	}
-	if _, lists := reader.callCounts("site-1"); lists != 0 {
-		t.Fatalf("ambiguous 404 triggered same-round pagination calls=%d", lists)
+	if direct, lists := reader.callCounts("site-1"); direct != 1 || lists != 1 {
+		t.Fatalf("first round direct=%d list=%d, want one direct and one fallback", direct, lists)
 	}
 
 	service.multiplierSnapshotMu.Lock()
-	service.multiplierSnapshots[multiplierSnapshotKey("user1", "ws1", "site-1")].nextRetryAt = time.Now().Add(-time.Second)
+	service.multiplierSnapshots[multiplierSnapshotKey("user1", "ws1", "site-1")].expiresAt = time.Now().Add(-time.Second)
 	service.multiplierSnapshotMu.Unlock()
 	second := service.upstreamMultiplierResolutionsByAdminAccount(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
 	if second.byAccount["account-1"].status != MultiplierResolutionResolved {
-		t.Fatalf("safe next-round pagination did not resolve metadata: %+v", second)
+		t.Fatalf("remembered list capability did not resolve metadata: %+v", second)
 	}
-	if direct, lists := reader.callCounts("site-1"); direct != 1 || lists != 1 {
-		t.Fatalf("direct=%d list=%d, want one direct round and one fallback round", direct, lists)
+	if direct, lists := reader.callCounts("site-1"); direct != 1 || lists != 2 {
+		t.Fatalf("second round direct=%d list=%d, want no repeated direct lookup and two total list reads", direct, lists)
 	}
 }
 
-func TestMultiplierSnapshotReusesDeepCopiedSiteUntilStableVersionChanges(t *testing.T) {
+func TestMultiplierSnapshot404DowngradesPreviouslySupportedCapability(t *testing.T) {
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")}},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-1|key-1": {ID: "key-1", GroupID: "group-1", GroupName: "vip"},
+		},
+		listItems: map[string][]upstream.Sub2APIKeyItem{
+			"site-1": {{ID: "key-1", GroupID: "group-1", GroupName: "vip"}},
+		},
+	}
+	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}}
+
+	first := service.upstreamMultiplierResolutionsByAdminAccount(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if first.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("initial direct lookup = %+v", first)
+	}
+	reader.mu.Lock()
+	reader.directErrs = map[string]error{"site-1": &upstream.RequestError{
+		MessageKey: upstream.ErrorNotFound, Platform: upstream.PlatformSub2API, StatusCode: 404,
+	}}
+	reader.mu.Unlock()
+	service.multiplierSnapshotMu.Lock()
+	service.multiplierSnapshots[multiplierSnapshotKey("user1", "ws1", "site-1")].expiresAt = time.Now().Add(-time.Second)
+	service.multiplierSnapshotMu.Unlock()
+
+	second := service.upstreamMultiplierResolutionsByAdminAccount(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if second.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("404 fallback lookup = %+v", second)
+	}
+	service.multiplierSnapshotMu.Lock()
+	entry := service.multiplierSnapshots[multiplierSnapshotKey("user1", "ws1", "site-1")]
+	service.multiplierSnapshotMu.Unlock()
+	if entry == nil || entry.capability != multiplierDirectUnsupported {
+		t.Fatalf("404 fallback capability = %q, want %q", entry.capability, multiplierDirectUnsupported)
+	}
+
+	service.multiplierSnapshotMu.Lock()
+	entry.expiresAt = time.Now().Add(-time.Second)
+	service.multiplierSnapshotMu.Unlock()
+	third := service.upstreamMultiplierResolutionsByAdminAccount(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if third.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("remembered list capability lookup = %+v", third)
+	}
+	if direct, lists := reader.callCounts("site-1"); direct != 2 || lists != 2 {
+		t.Fatalf("post-downgrade reads = direct:%d list:%d, want two direct and two list reads", direct, lists)
+	}
+}
+
+func TestMultiplierSnapshotIsolatesMissingKeyWithSameRoundListFallback(t *testing.T) {
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{
+			snapshotConnection("account-missing", "site-1", "key-bad"),
+			snapshotConnection("account-valid", "site-1", "key-good"),
+		}},
+		directKeyErrs: map[string]error{
+			"site-1|key-bad": &upstream.RequestError{MessageKey: upstream.ErrorNotFound, Platform: upstream.PlatformSub2API, StatusCode: 404},
+		},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-1|key-good": {ID: "key-good", GroupID: "group-1", GroupName: "vip"},
+		},
+		listItems: map[string][]upstream.Sub2APIKeyItem{
+			"site-1": {{ID: "key-good", GroupID: "group-1", GroupName: "vip"}},
+		},
+	}
+	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}}
+
+	lookup := service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if lookup.byAccount["account-valid"].status != MultiplierResolutionResolved {
+		t.Fatalf("valid key resolution = %+v, want resolved", lookup.byAccount["account-valid"])
+	}
+	if lookup.byAccount["account-missing"].status != MultiplierResolutionMissing {
+		t.Fatalf("missing key resolution = %+v, want missing", lookup.byAccount["account-missing"])
+	}
+	if lookup.unavailable {
+		t.Fatalf("one missing key must not make the site unavailable: %+v", lookup)
+	}
+	if _, lists := reader.callCounts("site-1"); lists != 1 {
+		t.Fatalf("full-list fallback calls = %d, want 1", lists)
+	}
+}
+
+func TestMultiplierSnapshotLastSyncedAtChangePreservesListFallbackCapability(t *testing.T) {
+	site := snapshotSite("site-1")
+	lastSyncedAt := int64(100)
+	site.LastSyncedAt = &lastSyncedAt
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")}},
+		directErrs: map[string]error{"site-1": &upstream.RequestError{
+			MessageKey: upstream.ErrorNotFound, Platform: upstream.PlatformSub2API, StatusCode: 404,
+		}},
+		listItems: map[string][]upstream.Sub2APIKeyItem{"site-1": {{ID: "key-1", GroupID: "group-1", GroupName: "vip"}}},
+	}
+	service := &Service{mySites: reader, sites: cloningSnapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": site}}}
+
+	first := service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if first.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("initial list fallback = %+v", first)
+	}
+	lastSyncedAt++
+	second := service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if second.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("post-sync list fallback = %+v", second)
+	}
+	if direct, lists := reader.callCounts("site-1"); direct != 1 || lists != 2 {
+		t.Fatalf("post-sync reads = direct:%d list:%d, want retained list capability", direct, lists)
+	}
+}
+
+func TestMultiplierSnapshotReusesDeepCopiedSiteUntilContentChanges(t *testing.T) {
 	site := snapshotSite("site-1")
 	lastSyncedAt := int64(100)
 	site.LastSyncedAt = &lastSyncedAt
@@ -315,15 +463,25 @@ func TestMultiplierSnapshotReusesDeepCopiedSiteUntilStableVersionChanges(t *test
 		t.Fatalf("deep-copied stable site invalidated the snapshot, direct reads=%d", direct)
 	}
 
-	// Upstream reconnect/credential refresh updates LastSyncedAt. That stable version
-	// signal must invalidate the cached key metadata even though Redis still deep-copies.
+	// A routine successful sync updates only LastSyncedAt. It must not invalidate the
+	// metadata contents or reset the site's confirmed direct/list capability.
 	lastSyncedAt++
 	third := service.upstreamMultiplierResolutionsByAdminAccount(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
 	if third.byAccount["account-1"].status != MultiplierResolutionResolved {
-		t.Fatalf("credential-refresh lookup=%+v", third)
+		t.Fatalf("routine-sync lookup=%+v", third)
+	}
+	if direct, _ := reader.callCounts("site-1"); direct != 1 {
+		t.Fatalf("LastSyncedAt invalidated stable metadata, direct reads=%d", direct)
+	}
+
+	changedMultiplier := 0.75
+	site.Metrics.Groups[0].Multiplier = &changedMultiplier
+	fourth := service.upstreamMultiplierResolutionsByAdminAccount(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if fourth.byAccount["account-1"].status != MultiplierResolutionResolved {
+		t.Fatalf("content-change lookup=%+v", fourth)
 	}
 	if direct, _ := reader.callCounts("site-1"); direct != 2 {
-		t.Fatalf("stable site version change did not invalidate snapshot, direct reads=%d", direct)
+		t.Fatalf("group multiplier change did not invalidate snapshot, direct reads=%d", direct)
 	}
 
 	service.multiplierSnapshotMu.Lock()

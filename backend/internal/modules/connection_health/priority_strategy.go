@@ -453,7 +453,7 @@ func (s *Service) syncWorkspacePriorities(
 			multiplierOnlyTargets[targetID] = multiplier
 			continue
 		}
-		if item.upstreamMultiplier.status == MultiplierResolutionUnavailable || item.upstreamMultiplier.status == MultiplierResolutionStale || item.upstreamMultiplier.status == MultiplierResolutionUpdating {
+		if item.upstreamMultiplier.status == MultiplierResolutionUnavailable || item.upstreamMultiplier.status == MultiplierResolutionStale || item.upstreamMultiplier.status == MultiplierResolutionUpdating || item.upstreamMultiplier.status == MultiplierResolutionMissing {
 			missingMultiplier[targetID] = struct{}{}
 			unavailableCount++
 		}
@@ -871,7 +871,7 @@ func effectiveHealthSortMultiplier(item *priorityTargetInventory) (float64, bool
 		if item.upstreamMultiplier.info.effectiveMultiplier != nil {
 			return *item.upstreamMultiplier.info.effectiveMultiplier, true
 		}
-	case MultiplierResolutionUnavailable, MultiplierResolutionStale, MultiplierResolutionUpdating:
+	case MultiplierResolutionDisabled, MultiplierResolutionUnavailable, MultiplierResolutionStale, MultiplierResolutionUpdating, MultiplierResolutionMissing:
 		return 0, false
 	}
 	return uniqueFloat(item.fallbackMultipliers)

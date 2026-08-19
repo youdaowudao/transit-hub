@@ -56,6 +56,20 @@ describe('connection health fresh refresh API', () => {
     expect(result.refresh.sites[0]).toMatchObject({ siteId: 'site-1', status: 'auth_failed' })
   })
 
+  it('keeps disabled sites in the terminal refresh summary as non-participating', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      groups: [],
+      refresh: { state: 'success', sites: [{ siteId: 'site-disabled', status: 'disabled', errorKey: 'site_sync_disabled' }] },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal('localStorage', { getItem: () => null })
+
+    const result = await refreshConnectionHealthAdminGroups()
+    expect(result.refresh.sites).toEqual([
+      { siteId: 'site-disabled', status: 'disabled', errorKey: 'site_sync_disabled' },
+    ])
+  })
+
   it('rejects non-terminal refresh states and site statuses', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       groups: [],

@@ -87,6 +87,21 @@ func TestAdminGroupsFreshRefreshPipelineIncludesSiteSyncFailureInTerminalSummary
 	}
 }
 
+func TestMergeAdminGroupsRefreshSummaryTreatsDisabledSiteAsNonParticipating(t *testing.T) {
+	result := mergeAdminGroupsRefreshSummary(
+		[]upstream.SyncSiteResult{{SiteID: "site-disabled", Status: "unavailable", ErrorKey: "site_sync_disabled"}},
+		AdminGroupsRefreshSummary{},
+		"",
+	)
+
+	if result.State != "success" {
+		t.Fatalf("refresh state = %q, want success for disabled-only sites", result.State)
+	}
+	if len(result.Sites) != 1 || result.Sites[0].SiteID != "site-disabled" || result.Sites[0].Status != "disabled" || result.Sites[0].ErrorKey != "site_sync_disabled" {
+		t.Fatalf("refresh sites = %+v, want disabled non-participating terminal", result.Sites)
+	}
+}
+
 func TestAdminGroupsFreshRefreshPipelineReadsWorkspaceConnectionsOnce(t *testing.T) {
 	metadataReader := &countingPipelineMetadataReader{snapshotMetadataReader: &snapshotMetadataReader{
 		fakeMySitesReader: fakeMySitesReader{

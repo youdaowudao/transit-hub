@@ -88,7 +88,7 @@ export const getConnectionHealthAdminGroups = async (): Promise<AdminGroupHealth
 
 export type AdminGroupsRefreshSite = {
   siteId: string
-  status: 'success' | 'auth_failed' | 'stale' | 'unavailable' | 'timeout'
+  status: 'success' | 'auth_failed' | 'stale' | 'unavailable' | 'timeout' | 'disabled'
   errorKey?: string
 }
 
@@ -104,7 +104,7 @@ export type AdminGroupsFreshResponse = {
 }
 
 const terminalRefreshStates = new Set<AdminGroupsRefreshSummary['state']>(['success', 'partial', 'failure', 'timeout'])
-const terminalRefreshSiteStatuses = new Set<AdminGroupsRefreshSite['status']>(['success', 'auth_failed', 'stale', 'unavailable', 'timeout'])
+const terminalRefreshSiteStatuses = new Set<AdminGroupsRefreshSite['status']>(['success', 'auth_failed', 'stale', 'unavailable', 'timeout', 'disabled'])
 
 // 方案 A 手动刷新：后端等待涉及站点倍率任务全部进入终态后，只读取一轮主站分组和账号。
 // 不提供前端状态轮询，也不重复调用 admin-groups。

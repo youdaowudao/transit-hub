@@ -19,10 +19,25 @@ describe('connection health refresh prompt', () => {
   })
 
   it('shows only failed sites and keeps stale sites in the failure list', () => {
-    expect(viewSource).toContain("filter(site => site.status !== 'success')")
+    expect(viewSource).toContain("site.status !== 'success' && site.status !== 'disabled'")
     expect(viewSource).toContain('failedRefreshSites')
     expect(viewSource).toContain('retainedSnapshot')
     expect(localeSource).toContain('沿用旧数据')
+  })
+
+  it('separates disabled sites from active refresh failures', () => {
+    expect(viewSource).toContain("site.status !== 'success' && site.status !== 'disabled'")
+    expect(viewSource).toContain('nonParticipatingRefreshSites')
+    expect(localeSource).toContain('未参与本轮')
+  })
+
+  it('labels disabled multiplier accounts explicitly instead of unknown', () => {
+    const detailSource = readFileSync(
+      new URL('../src/modules/admin/components/dashboard/AdminGroupHealthDetail.vue', import.meta.url),
+      'utf8',
+    )
+    expect(detailSource).toContain("case 'disabled':")
+    expect(localeSource).toContain('上游站点已禁用，未参与本轮倍率读取')
   })
 
   it('shows a summary-level refresh failure phase when no site result is available', () => {

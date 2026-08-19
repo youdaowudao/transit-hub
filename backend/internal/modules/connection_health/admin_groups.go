@@ -972,6 +972,7 @@ const (
 	MultiplierResolutionUnassociated = "unassociated"
 	MultiplierResolutionMissing      = "missing"
 	MultiplierResolutionConflict     = "conflict"
+	MultiplierResolutionDisabled     = "disabled"
 	MultiplierResolutionUnavailable  = "unavailable"
 	MultiplierResolutionStale        = multiplierResolutionStale
 	MultiplierResolutionUpdating     = multiplierResolutionUpdating

@@ -102,6 +102,21 @@ func schedulableActionServiceWithGroups(
 	}
 	service := newAdminGroupsService(reader, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, repo)
 	service.schedulableActions = actioner
+	policy := monitoringScopeTestPolicy("fixture-monitoring-policy")
+	repo.policies = []Policy{policy}
+	seenTargets := make(map[string]struct{})
+	for _, accounts := range accountsByGroup {
+		for _, account := range accounts {
+			targetID := buildTargetID(string(upstream.PlatformSub2API), "ws1", account.ID)
+			if _, seen := seenTargets[targetID]; seen {
+				continue
+			}
+			seenTargets[targetID] = struct{}{}
+			repo.assignments = append(repo.assignments, PolicyAssignment{
+				UserID: "user1", AdminAccountID: "ws1", TargetID: targetID, PolicyID: policy.ID,
+			})
+		}
+	}
 	return service, repo
 }
 
@@ -247,6 +262,57 @@ func TestSetTargetSchedulable_AllowsDisablingOneOfTwoUsableAccounts(t *testing.T
 	}
 	if result.Schedulable || actioner.calls != 1 || len(repo.events) != 1 || repo.events[0].Result != SchedulableActionSucceeded {
 		t.Fatalf("unexpected successful partial closure: result=%+v calls=%d events=%+v", result, actioner.calls, repo.events)
+	}
+}
+
+func TestSetTargetSchedulable_UsesMonitoringScopeNotWholeUpstreamGroup(t *testing.T) {
+	actioner := &fakeTargetSchedulableActioner{wantAccount: "1515"}
+	service, repo := schedulableActionServiceWithSurvivor(boolPointer(true), actioner)
+	policy := monitoringScopeTestPolicy("direct-policy")
+	repo.policies = []Policy{policy}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:1515", PolicyID: policy.ID,
+	}}
+
+	_, err := service.SetTargetSchedulable(context.Background(), "user1", "sub2api:ws1:1515", false)
+	if err == nil || err.Error() != ErrorSub2APIGroupLastUsable {
+		t.Fatalf("unmonitored upstream peer must not release the monitored floor: %v", err)
+	}
+	if actioner.calls != 0 {
+		t.Fatalf("blocked monitored target was written upstream, calls=%d", actioner.calls)
+	}
+	if len(repo.events) != 1 || repo.events[0].RemoteAction != RemoteActionSkippedSub2APILastActive || repo.events[0].AdminGroupID != "g1" {
+		t.Fatalf("blocked monitored target audit = %+v", repo.events)
+	}
+}
+
+func TestSetTargetSchedulable_AllowsTargetOutsideMonitoringScope(t *testing.T) {
+	actioner := &fakeTargetSchedulableActioner{wantAccount: "1515"}
+	service, repo := schedulableActionService(boolPointer(true), actioner)
+
+	result, err := service.SetTargetSchedulable(context.Background(), "user1", "sub2api:ws1:1515", false)
+	if err != nil {
+		t.Fatalf("target outside monitoring scope should retain manual close semantics: %v", err)
+	}
+	if result.Schedulable || actioner.calls != 1 || len(repo.events) != 1 || repo.events[0].Result != SchedulableActionSucceeded {
+		t.Fatalf("unexpected unmonitored close result=%+v calls=%d events=%+v", result, actioner.calls, repo.events)
+	}
+}
+
+func TestSetTargetSchedulable_MonitoringScopeReadFailureFailsClosed(t *testing.T) {
+	actioner := &fakeTargetSchedulableActioner{wantAccount: "1515"}
+	service, repo := schedulableActionServiceWithSurvivor(boolPointer(true), actioner)
+	repo.listPoliciesErr = errors.New("policy snapshot unavailable")
+
+	_, err := service.SetTargetSchedulable(context.Background(), "user1", "sub2api:ws1:1515", false)
+	if err == nil || err.Error() != ErrorSub2APIInventoryIncomplete {
+		t.Fatalf("monitoring scope read failure must fail closed: %v", err)
+	}
+	if actioner.calls != 0 {
+		t.Fatalf("scope read failure wrote upstream, calls=%d", actioner.calls)
+	}
+	if len(repo.events) != 1 || repo.events[0].RemoteAction != RemoteActionSkippedSub2APIInventory {
+		t.Fatalf("scope read failure audit = %+v", repo.events)
 	}
 }
 
@@ -534,7 +600,12 @@ func TestSetTargetSchedulableHandler_RequiresBooleanField(t *testing.T) {
 
 func TestSetTargetSchedulableHandler_ReturnsConflictForLastUsableGuard(t *testing.T) {
 	actioner := &fakeTargetSchedulableActioner{}
-	service, _ := schedulableActionService(boolPointer(true), actioner)
+	service, repo := schedulableActionService(boolPointer(true), actioner)
+	policy := monitoringScopeTestPolicy("direct-policy")
+	repo.policies = []Policy{policy}
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:1515", PolicyID: policy.ID,
+	}}
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, service)
 

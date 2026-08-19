@@ -36,6 +36,9 @@ type fakeRepository struct {
 	savePolicyErr             error
 	deletePolicyErr           error
 	listPoliciesErr           error
+	listAssignmentsErr        error
+	listGroupAssignmentsErr   error
+	listGroupExclusionsErr    error
 	markPriorityRunningErr    error
 	priorityGenerationErr     error
 	priorityWorkspaceStateErr error
@@ -593,6 +596,9 @@ func (f *fakeRepository) ListPolicyAssignmentsForTarget(ctx context.Context, use
 }
 
 func (f *fakeRepository) ListPolicyAssignmentsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]PolicyAssignment, error) {
+	if f.listAssignmentsErr != nil {
+		return nil, f.listAssignmentsErr
+	}
 	out := make([]PolicyAssignment, 0)
 	for _, a := range f.assignments {
 		if a.UserID == userID && a.AdminAccountID == adminAccountID {
@@ -701,6 +707,9 @@ func (f *fakeRepository) ListGroupProbeSortSettings(ctx context.Context, userID 
 }
 
 func (f *fakeRepository) ListGroupPolicyAssignmentsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]GroupPolicyAssignment, error) {
+	if f.listGroupAssignmentsErr != nil {
+		return nil, f.listGroupAssignmentsErr
+	}
 	out := make([]GroupPolicyAssignment, 0)
 	for _, assignment := range f.groupAssignments {
 		if assignment.UserID == userID && assignment.AdminAccountID == adminAccountID {
@@ -715,6 +724,9 @@ func (f *fakeRepository) ListAllGroupPolicyAssignments(ctx context.Context) ([]G
 }
 
 func (f *fakeRepository) ListGroupTargetExclusionsByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]GroupTargetExclusion, error) {
+	if f.listGroupExclusionsErr != nil {
+		return nil, f.listGroupExclusionsErr
+	}
 	out := make([]GroupTargetExclusion, 0)
 	for _, exclusion := range f.groupExclusions {
 		if exclusion.UserID == userID && exclusion.AdminAccountID == adminAccountID {

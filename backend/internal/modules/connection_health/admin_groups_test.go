@@ -1649,6 +1649,78 @@ func TestAdminGroups_AccountPolicyMarksGroupAsMonitored(t *testing.T) {
 	}
 }
 
+func TestAdminGroups_Sub2APIManualPriorityIsNotShownAsMonitored(t *testing.T) {
+	repo := newFakeRepository()
+	policy := probePolicy()
+	repo.policies = []Policy{policy}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "vip", PolicyID: policy.ID,
+	}}
+	manualPriority := 1
+	managedPriority := 10
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip", Platform: string(upstream.PlatformSub2API)}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {
+				{ID: "manual", Name: "manual", Models: "gpt-4o", Priority: &manualPriority},
+				{ID: "managed", Name: "managed", Models: "gpt-4o", Priority: &managedPriority},
+			},
+		},
+	}
+
+	groups, err := newAdminGroupsService(reader, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, repo).AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 || len(groups[0].Accounts) != 2 {
+		t.Fatalf("unexpected groups: %+v", groups)
+	}
+	accounts := map[string]AdminGroupAccount{}
+	for _, account := range groups[0].Accounts {
+		accounts[account.ID] = account
+	}
+	manual := accounts["manual"]
+	managed := accounts["managed"]
+	if manual.HasEnabledProbePolicy || len(manual.ModelHealth) != 0 || len(manual.UnprobedModels) != 0 || manual.ProbeModelsConfigured {
+		t.Fatalf("Sub2API priority 1 account must not be shown as monitored: %+v", manual)
+	}
+	if !managed.HasEnabledProbePolicy || len(managed.UnprobedModels) != 1 || !managed.ProbeModelsConfigured {
+		t.Fatalf("Sub2API priority 10 account should remain monitored: %+v", managed)
+	}
+	if groups[0].MonitoredAccountCount != 1 {
+		t.Fatalf("monitored account count = %d, want 1", groups[0].MonitoredAccountCount)
+	}
+}
+
+func TestAdminGroups_Sub2APIManualPriorityOnlyGroupIsNotMonitored(t *testing.T) {
+	repo := newFakeRepository()
+	policy := probePolicy()
+	repo.policies = []Policy{policy}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", AdminGroupName: "vip", PolicyID: policy.ID,
+	}}
+	manualPriority := 9
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip", Platform: string(upstream.PlatformSub2API)}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {
+				{ID: "manual", Name: "manual", Models: "gpt-4o", Priority: &manualPriority},
+			},
+		},
+	}
+
+	groups, err := newAdminGroupsService(reader, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, repo).AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("unexpected groups: %+v", groups)
+	}
+	if groups[0].HasEnabledProbePolicy || groups[0].MonitoredAccountCount != 0 || groups[0].ProbeModelsConfigured {
+		t.Fatalf("Sub2API priority 1-9 only group must not be shown as monitored: %+v", groups[0])
+	}
+}
+
 func TestHasEnabledProbePolicyExcludesMultiplierOnly(t *testing.T) {
 	policies := []Policy{
 		{ID: "multiplier-only", Enabled: true, StrategyMode: StrategyModeMultiplierOnly},

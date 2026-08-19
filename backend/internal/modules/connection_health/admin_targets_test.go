@@ -646,7 +646,7 @@ func TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds(t *testi
 	if err := svc.finishTargetProbeBatchWithFloor(
 		context.Background(), "user1", "ws1", mySites.session, refresh.target,
 		[]probeModelSpec{spec}, []targetProbeResult{{state: &state, previousState: StateHealthy, outcome: ProbeOutcome{Result: ResultServerError}, spec: spec}},
-		EventSourceScheduled, newWorkspaceFloorGuard(), &refresh.inventory,
+		EventSourceScheduled, newWorkspaceFloorGuard(), &refresh.inventory, fullFloorTestMonitoringScope(refresh.inventory),
 	); err != nil {
 		t.Fatalf("scheduled target action failed: %v", err)
 	}

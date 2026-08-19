@@ -526,14 +526,18 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 				policiesForIDs(explicitIDs, policyByID),
 				policiesForIDs(inheritedIDs, policyByID),
 			)
-			effectivePolicyIDs := make([]string, 0, len(effectivePolicies))
-			for _, policy := range effectivePolicies {
+			decisionAccount := decisionAccountByTarget[targetID]
+			monitoringPolicies := effectivePolicies
+			if accountHardExcludedFromAdminMonitoring(platform, decisionAccount) {
+				monitoringPolicies = nil
+			}
+			effectivePolicyIDs := make([]string, 0, len(monitoringPolicies))
+			for _, policy := range monitoringPolicies {
 				effectivePolicyIDs = append(effectivePolicyIDs, policy.ID)
 			}
 			effectivePolicyIDs, effectivePolicySummaries := assignedPolicySummariesFromIDs(effectivePolicyIDs, policyByID)
-			decisionAccount := decisionAccountByTarget[targetID]
-			activeSpecs := candidateModelSpecsForPlatform(splitModelList(decisionAccount.Models), effectivePolicies, platform)
-			hasProbePolicy := hasEnabledProbePolicy(effectivePolicies)
+			activeSpecs := candidateModelSpecsForPlatform(splitModelList(decisionAccount.Models), monitoringPolicies, platform)
+			hasProbePolicy := hasEnabledProbePolicy(monitoringPolicies)
 			budgetUsage, budgetReady := s.loadProbeBudgetUsage(ctx, userID, adminAccountID, activeSpecs, decisionAccount.Schedulable, budgetCounts, budgetLoaded, budgetDayStart)
 			if !budgetReady {
 				budgetUsage = nil
@@ -564,7 +568,7 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 			if hasProbePolicy {
 				health.HasEnabledProbePolicy = true
 			}
-			if hasMultiplierPriorityPolicy(effectivePolicies) {
+			if hasMultiplierPriorityPolicy(monitoringPolicies) {
 				health.PriorityMode = PriorityModeMultiplier
 			}
 			priorityState, priorityManaged := priorityByTarget[targetID]
@@ -611,7 +615,7 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 			var effectiveMultiplier *float64
 			multiplierSource := MultiplierSourceNone
 			localFallback := cloneFloat64Pointer(effectiveFallbackByTarget[targetID])
-			usesHealthPriority := hasMultiplierPriorityPolicy(effectivePolicies) && !hasMultiplierOnlyPolicy(effectivePolicies)
+			usesHealthPriority := hasMultiplierPriorityPolicy(monitoringPolicies) && !hasMultiplierOnlyPolicy(monitoringPolicies)
 			if usesHealthPriority {
 				switch multiplierResolution.status {
 				case MultiplierResolutionResolved, MultiplierResolutionStale:
@@ -729,6 +733,9 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 			}
 
 			health.Accounts = append(health.Accounts, item)
+		}
+		if platform == string(upstream.PlatformSub2API) {
+			health.HasEnabledProbePolicy = health.MonitoredAccountCount > 0
 		}
 		health.AccountCount = summary.TotalAccounts
 		health.HealthSummary = summary

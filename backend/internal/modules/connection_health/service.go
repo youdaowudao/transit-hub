@@ -1084,9 +1084,24 @@ func (s *Service) DisableConnection(ctx context.Context, userID string, connecti
 		}
 		var floorResult targetRemoteActionResult
 		if !inventoryTargetAlreadyUnavailable(*inventory, targetID) {
+			monitoringScope, scopeErr := s.loadAdminMonitoringScope(ctx, userID, adminAccountID, *inventory)
+			if scopeErr != nil {
+				blockedTarget := AdminProbeTarget{
+					TargetID: targetID, Platform: platform, AccountID: conn.AdminAccountID,
+					AdminGroupID: conn.UpstreamGroupID, AdminGroupName: conn.UpstreamGroupName,
+				}
+				if groupID, groupName, incomplete := firstIncompleteAdminInventoryGroup(*inventory); incomplete {
+					blockedTarget.AdminGroupID = groupID
+					blockedTarget.AdminGroupName = groupName
+				}
+				if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, blockedTarget, SchedulableActionFailed, ErrorSub2APIInventoryIncomplete, RemoteActionSkippedSub2APIInventory); auditErr != nil {
+					log.Printf("[connection-health] audit incomplete legacy monitoring scope failed target_id=%s err=%v", targetID, auditErr)
+				}
+				return requestError(ErrorSub2APIInventoryIncomplete)
+			}
 			floorResult = guard.reserveSub2APIInactive(AdminProbeTarget{
 				TargetID: targetID, Platform: platform, AccountID: conn.AdminAccountID,
-			}, *inventory)
+			}, *inventory, monitoringScope)
 		}
 		if floorResult.remoteAction != "" {
 			blockedTarget := AdminProbeTarget{

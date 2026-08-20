@@ -522,7 +522,7 @@ func (s *Service) Overview(ctx context.Context, userID string) (OverviewResponse
 	targets := make(map[string]*overviewTarget)
 	for _, group := range groups {
 		for _, account := range group.Accounts {
-			if !account.HasEnabledPolicy {
+			if !account.HasEnabledProbePolicy {
 				continue
 			}
 			target := targets[account.TargetID]

@@ -42,6 +42,7 @@ import type {
 	PrioritySyncStatus,
 } from '../types/connectionHealth'
 import { resolveConnectionHealthStrategyMode } from '../utils/connectionHealthPolicy'
+import { resolvePrioritySyncFailureMessage } from '../utils/connectionHealthMultiplier'
 import {
   clearQuestionAnswerUnread,
   createDefaultConnectionHealthPreferences,
@@ -302,6 +303,16 @@ const priorityFailureTime = computed(() => {
 	return Number.isNaN(parsed.getTime())
 		? t('admin.connectionHealth.prioritySync.unknownTime')
 		: parsed.toLocaleString('zh-CN', { hour12: false })
+})
+const priorityFailureText = computed(() => {
+	const status = prioritySyncStatus.value
+	if (!status || status.status !== 'failed') return ''
+	const message = resolvePrioritySyncFailureMessage(
+		status,
+		priorityFailureTime.value,
+		readableMessage(status.errorKey ?? ''),
+	)
+	return t(message.key, message.params)
 })
 
 const loadPrioritySyncStatus = async (): Promise<boolean> => {
@@ -774,14 +785,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
 			aria-live="assertive"
 		>
 			<AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
-			<p>
-				{{ t('admin.connectionHealth.prioritySync.failed', {
-					workspace: prioritySyncStatus.workspaceId,
-					time: priorityFailureTime,
-					count: prioritySyncStatus.failedCount,
-					reason: readableMessage(prioritySyncStatus.errorKey ?? ''),
-				}) }}
-			</p>
+			<p>{{ priorityFailureText }}</p>
 		</div>
 		<div
 			v-else-if="prioritySyncStatus?.status === 'pending' || prioritySyncStatus?.status === 'running'"

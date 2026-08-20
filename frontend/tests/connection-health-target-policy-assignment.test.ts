@@ -33,7 +33,8 @@ describe('connection health account policy assignment', () => {
     expect(dialogSource).toContain('if (requestSequence !== loadSequence) return')
   })
 
-  it('uses effective policies for account multiplier display', () => {
-    expect(detailSource).toContain('(account.effectivePolicies ?? [])')
+  it('delegates account multiplier display to the shared resolver', () => {
+    expect(detailSource).toContain("import { resolveConnectionHealthMultiplierDisplay } from '../../utils/connectionHealthMultiplier'")
+    expect(detailSource).toContain('resolveConnectionHealthMultiplierDisplay(account, props.group.multiplier)')
   })
 })

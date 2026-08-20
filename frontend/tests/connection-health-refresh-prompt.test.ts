@@ -2,6 +2,9 @@ import { readFileSync } from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
 
+import type { AdminGroupAccount } from '../src/modules/admin/types/connectionHealth'
+import { resolveConnectionHealthMultiplierDisplay } from '../src/modules/admin/utils/connectionHealthMultiplier'
+
 const viewSource = readFileSync(
   new URL('../src/modules/admin/views/ConnectionHealthView.vue', import.meta.url),
   'utf8',
@@ -32,11 +35,21 @@ describe('connection health refresh prompt', () => {
   })
 
   it('labels disabled multiplier accounts explicitly instead of unknown', () => {
-    const detailSource = readFileSync(
-      new URL('../src/modules/admin/components/dashboard/AdminGroupHealthDetail.vue', import.meta.url),
-      'utf8',
-    )
-    expect(detailSource).toContain("case 'disabled':")
+    const disabledAccount = {
+      id: 'disabled',
+      name: 'disabled',
+      platform: 'sub2api',
+      type: '',
+      status: 'active',
+      targetId: 'sub2api:ws1:disabled',
+      probeAvailable: true,
+      modelHealth: [],
+      multiplierResolutionStatus: 'disabled',
+      multiplierSource: 'none',
+    } satisfies AdminGroupAccount
+
+    expect(resolveConnectionHealthMultiplierDisplay(disabledAccount, null))
+      .toEqual({ value: null, sourceKey: 'disabledNonParticipating' })
     expect(localeSource).toContain('上游站点已禁用，未参与本轮倍率读取')
   })
 

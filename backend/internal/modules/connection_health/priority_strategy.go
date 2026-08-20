@@ -433,6 +433,7 @@ func (s *Service) syncWorkspacePriorities(
 	}
 
 	managed := make(map[string]*priorityTargetInventory)
+	hardExcludedHealthTargets := make(map[string]struct{})
 	missingMultiplier := make(map[string]struct{})
 	effectiveMultiplierByTarget := make(map[string]float64)
 	desiredByTarget := make(map[string]int)
@@ -440,6 +441,11 @@ func (s *Service) syncWorkspacePriorities(
 	healthCandidates := make([]healthPriorityCandidate, 0)
 	for targetID, item := range inventory {
 		if !hasMultiplierPriorityPolicy(item.policies) {
+			continue
+		}
+		if accountHardExcludedFromAdminMonitoring(string(session.Platform), item.account) && !hasMultiplierOnlyPolicy(item.policies) {
+			managed[targetID] = item
+			hardExcludedHealthTargets[targetID] = struct{}{}
 			continue
 		}
 		if hasMultiplierOnlyPolicy(item.policies) {
@@ -536,9 +542,11 @@ func (s *Service) syncWorkspacePriorities(
 		if stored.Conflict {
 			continue
 		}
+		pendingConfirmed := false
 		if stored.PendingPriority != nil && item.currentPriority == *stored.PendingPriority {
 			stored.LastAppliedPriority = *stored.PendingPriority
 			stored.PendingPriority = nil
+			pendingConfirmed = true
 		}
 		if exists && item.currentPriority != stored.LastAppliedPriority && stored.PendingPriority == nil {
 			current := item.currentPriority
@@ -563,6 +571,15 @@ func (s *Service) syncWorkspacePriorities(
 			if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
 				log.Printf("[connection-health] priority pending conflict state save failed target_id=%s err=%v", targetID, err)
 				failedCount++
+			}
+			continue
+		}
+		if _, hardExcluded := hardExcludedHealthTargets[targetID]; hardExcluded {
+			if pendingConfirmed {
+				if err := s.repo.UpsertPrioritySyncState(ctx, stored); err != nil {
+					log.Printf("[connection-health] hard-excluded priority confirmation save failed target_id=%s err=%v", targetID, err)
+					failedCount++
+				}
 			}
 			continue
 		}

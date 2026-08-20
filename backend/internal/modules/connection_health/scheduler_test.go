@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -294,6 +295,56 @@ func TestCollectAdminProbeJobs_CarriesWorkspaceMonitoringScope(t *testing.T) {
 	}
 	if monitoringScopeContains(jobs[0].monitoringScope, "g1", "1616") {
 		t.Fatalf("scheduled job counted unassigned upstream peer: %+v", jobs[0].monitoringScope)
+	}
+}
+
+func TestRunAdminProbeJob_ScopeBuildFailureStopsBeforeProbe(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer server.Close()
+
+	repo := newFakeRepository()
+	policy := schedulableProbePolicy("direct", true, 60)
+	policy.AutoDegradeEnabled = true
+	policy.AutoRemoteActionEnabled = false
+	repo.policies = []Policy{policy}
+	targetID := buildTargetID(string(upstream.PlatformSub2API), "ws1", "acc-1")
+	repo.assignments = []PolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID, PolicyID: policy.ID,
+	}}
+	reader := fakePlatformGroupReader{
+		// An empty group ID makes the refreshed inventory invalid for monitoring scope,
+		// while the target itself remains readable and otherwise probeable.
+		groups: []upstream.AdminGroupInfo{{ID: "", Name: "malformed"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"": {{ID: "acc-1", BaseURL: server.URL, Models: "gpt-4o", Schedulable: boolPointer(true)}},
+		},
+		credByAccount: map[string]upstream.ProbeCredential{
+			"acc-1": {BaseURL: server.URL, Key: "secret"},
+		},
+	}
+	service := &Service{
+		repo: repo, mySites: fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		platformGroups: reader, probeRunner: NewRealProbeRunner(),
+	}
+	dueSpec := probeModelSpec{modelName: "gpt-4o", policy: policy, policies: []Policy{policy}}
+	job := adminProbeJob{
+		userID: "user1", adminAccountID: "ws1", session: upstream.Session{Platform: upstream.PlatformSub2API},
+		target: AdminProbeTarget{
+			TargetID: targetID, Platform: string(upstream.PlatformSub2API), AccountID: "acc-1",
+			AccountStatus: "active", Schedulable: boolPointer(true), Models: []string{"gpt-4o"},
+		},
+		dueSpecs: []probeModelSpec{dueSpec}, floorGuard: newWorkspaceFloorGuard(),
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	service.runAdminProbeJob(context.Background(), job, func() {}, &wg)
+	wg.Wait()
+
+	if len(repo.events) != 0 || len(repo.states[targetID]) != 0 {
+		t.Fatalf("scope build failure must close the scheduler before probing: events=%+v states=%+v", repo.events, repo.states[targetID])
 	}
 }
 

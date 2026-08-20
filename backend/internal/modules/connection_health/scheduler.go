@@ -273,9 +273,9 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 	j.account = refresh.account
 	j.floorGuard.rememberInventory(refresh.inventory)
 	monitoringScope, scopeErr := s.loadAdminMonitoringScope(ctx, j.userID, j.adminAccountID, refresh.inventory)
-	if scopeErr != nil {
-		log.Printf("[connection-health] refresh scheduled monitoring scope failed target_id=%s err=%v", j.target.TargetID, scopeErr)
-		monitoringScope = adminMonitoringScope{}
+	if scopeErr != nil || !adminMonitoringScopeContainsTarget(monitoringScope, j.target.TargetID) {
+		log.Printf("[connection-health] refresh scheduled monitoring scope blocked target_id=%s in_scope=%t err=%v", j.target.TargetID, adminMonitoringScopeContainsTarget(monitoringScope, j.target.TargetID), scopeErr)
+		return
 	}
 	j.monitoringScope = monitoringScope
 	currentSpecs, queuedSpecs, policyOK := s.currentScheduledProbeSpecs(ctx, j.userID, j.adminAccountID, j.target, refresh.memberships, j.dueSpecs)
@@ -567,7 +567,7 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 		)
 		if scopeErr != nil {
 			log.Printf("[connection-health] scheduler build monitoring scope failed user_id=%s admin_account_id=%s err=%v", ws.userID, ws.adminAccountID, scopeErr)
-			monitoringScope = adminMonitoringScope{}
+			continue
 		}
 
 		// 账号/渠道可能同时属于多个 admin 分组。先按稳定 targetId 合并所有来源策略，再生成

@@ -15,6 +15,18 @@ type adminMonitoringScope struct {
 	fingerprint      string
 }
 
+func adminMonitoringScopeContainsTarget(scope adminMonitoringScope, targetID string) bool {
+	if !scope.complete {
+		return false
+	}
+	for _, monitoredTargets := range scope.monitoredByGroup {
+		if _, monitored := monitoredTargets[targetID]; monitored {
+			return true
+		}
+	}
+	return false
+}
+
 func accountHardExcludedFromAdminMonitoring(platform string, account upstream.AdminGroupAccountInfo) bool {
 	if platform != string(upstream.PlatformSub2API) || account.Priority == nil {
 		return false

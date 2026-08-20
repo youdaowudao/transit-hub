@@ -383,7 +383,6 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 		err      error
 	}
 	accountsByGroup := make(map[string]groupAccountInventory, len(groups))
-	inheritedPolicyIDsByTarget := make(map[string][]string)
 	decisionAccountByTarget := make(map[string]upstream.AdminGroupAccountInfo)
 	accountFetchStarted := time.Now()
 	accountCount := 0
@@ -404,7 +403,6 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 					continue
 				}
 			}
-			inheritedPolicyIDsByTarget[targetID] = mergePolicyIDs(inheritedPolicyIDsByTarget[targetID], groupPolicyIDs[group.ID])
 		}
 	}
 	accountFetchDuration := time.Since(accountFetchStarted)
@@ -519,7 +517,10 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 				_, excluded = exclusions[targetID]
 			}
 			explicitIDs, _ := assignedPolicySummaries(assignmentsByTarget[targetID], policyByID)
-			inheritedIDs := inheritedPolicyIDsByTarget[targetID]
+			inheritedIDs := groupPolicyIDs[group.ID]
+			if excluded {
+				inheritedIDs = nil
+			}
 			assignedIDs := mergePolicyIDs(explicitIDs, inheritedIDs)
 			assignedIDs, assignedSummaries := assignedPolicySummariesFromIDs(assignedIDs, policyByID)
 			effectivePolicies := effectivePoliciesForTarget(

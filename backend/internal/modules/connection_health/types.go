@@ -72,6 +72,9 @@ const (
 	// ErrorPriorityMetadataUnavailable means the local configuration was saved,
 	// but the asynchronous Priority write could not use a complete multiplier snapshot.
 	ErrorPriorityMetadataUnavailable = "admin.connectionHealth.errors.priorityMetadataUnavailable"
+	// ErrorPriorityInventoryIncomplete means at least one main-site group inventory
+	// could not be read, so the completed writes may cover only part of the workspace.
+	ErrorPriorityInventoryIncomplete = "admin.connectionHealth.errors.priorityInventoryIncomplete"
 	// ErrorPrioritySyncUnavailable means the local configuration was saved, but no
 	// bounded background Priority worker is currently available to process it.
 	ErrorPrioritySyncUnavailable = "admin.connectionHealth.errors.prioritySyncUnavailable"

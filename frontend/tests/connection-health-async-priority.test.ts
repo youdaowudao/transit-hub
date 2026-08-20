@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
 
+import { resolvePrioritySyncFailureMessage } from '../src/modules/admin/utils/connectionHealthMultiplier'
+
 const healthViewSource = readFileSync(
   new URL('../src/modules/admin/views/ConnectionHealthView.vue', import.meta.url),
   'utf8',
@@ -37,5 +39,33 @@ describe('connection health asynchronous Priority synchronization', () => {
     expect(routerSource).toContain('setWorkspaceChecked(true, false)')
     expect(routerSource).toContain('setRouteError(error)')
     expect(routerSource).toContain('return false')
+  })
+
+  it('shows an exact blocker count only for multiplier metadata failures', () => {
+    const message = resolvePrioritySyncFailureMessage({
+      workspaceId: 'ws1',
+      status: 'failed',
+      errorKey: 'admin.connectionHealth.errors.priorityMetadataUnavailable',
+      failedCount: 3,
+    }, '2026/8/20 22:01:05', '倍率资料不完整')
+
+    expect(message.key).toBe('admin.connectionHealth.prioritySync.failed')
+    expect(message.params).toMatchObject({ workspace: 'ws1', count: 3 })
+  })
+
+  it('does not present inventory failure estimates as an exact account count', () => {
+    const message = resolvePrioritySyncFailureMessage({
+      workspaceId: 'ws1',
+      status: 'failed',
+      errorKey: 'admin.connectionHealth.errors.priorityInventoryIncomplete',
+      failedCount: 1,
+    }, '2026/8/20 22:01:05', '主站分组库存不完整')
+
+    expect(message.key).toBe('admin.connectionHealth.prioritySync.failedWithoutCount')
+    expect(message.params).toEqual({
+      workspace: 'ws1',
+      time: '2026/8/20 22:01:05',
+      reason: '主站分组库存不完整',
+    })
   })
 })

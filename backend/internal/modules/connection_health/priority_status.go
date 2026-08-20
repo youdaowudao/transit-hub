@@ -30,7 +30,11 @@ func (s *Service) PrioritySyncStatus(ctx context.Context, userID string) (Priori
 	view.LastFailureAt = state.LastReconcileFailureAt
 	view.FailedCount = state.PendingTargetCount
 	if state.PendingSignature == "" {
-		if state.LastDecision == "success" {
+		switch state.LastDecision {
+		case "failed":
+			view.Status = "failed"
+			view.ErrorKey = state.LastError
+		case "success":
 			view.Status = "success"
 		}
 		return view, nil

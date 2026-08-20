@@ -633,6 +633,11 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 				value := priorityState.EffectiveMultiplier
 				effectiveMultiplier = &value
 			}
+			if usesHealthPriority && priorityManaged && effectiveMultiplier == nil && isPriorityMultiplierBlocker(multiplierResolution.status) && validConfirmedMultiplier(priorityState.EffectiveMultiplier) {
+				value := priorityState.EffectiveMultiplier
+				effectiveMultiplier = &value
+				multiplierSource = MultiplierSourceLastConfirmed
+			}
 			item := AdminGroupAccount{
 				ID:                            acc.ID,
 				Name:                          acc.Name,
@@ -684,7 +689,7 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 				MultiplierSource:              multiplierSource,
 				LocalFallbackMultiplier:       localFallback,
 			}
-			if _, exists := healthCandidatesByTarget[targetID]; !exists && priorityManaged && !item.PriorityConflict && usesHealthPriority && multiplierSource != MultiplierSourceNone && effectiveMultiplier != nil {
+			if _, exists := healthCandidatesByTarget[targetID]; !exists && priorityManaged && !item.PriorityConflict && usesHealthPriority && multiplierSource != MultiplierSourceNone && multiplierSource != MultiplierSourceLastConfirmed && effectiveMultiplier != nil {
 				activeModels := make(map[string]struct{}, len(activeSpecs))
 				for _, spec := range activeSpecs {
 					if spec.policy.AutoDegradeEnabled {
@@ -987,6 +992,7 @@ const (
 
 	MultiplierSourceUpstreamKey   = "upstream_key"
 	MultiplierSourceLocalFallback = "local_fallback"
+	MultiplierSourceLastConfirmed = "last_confirmed"
 	MultiplierSourceNone          = "none"
 
 	upstreamMetadataFetchConcurrency = 4
@@ -1001,6 +1007,19 @@ type adminMultiplierCacheEntry struct {
 type upstreamMultiplierResolution struct {
 	status string
 	info   upstreamKeyGroupInfo
+}
+
+func isPriorityMultiplierBlocker(status string) bool {
+	switch status {
+	case MultiplierResolutionMissing, MultiplierResolutionUnavailable, MultiplierResolutionStale, MultiplierResolutionUpdating:
+		return true
+	default:
+		return false
+	}
+}
+
+func validConfirmedMultiplier(value float64) bool {
+	return value > 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 type upstreamMultiplierLookup struct {

@@ -191,15 +191,32 @@ func newPostCommitProbeService(baseRepo *fakeRepository, repo healthRepository, 
 		},
 		credByAccount: map[string]upstream.ProbeCredential{"acc-1": {BaseURL: serverURL, Key: "k"}},
 	}}
-	return &Service{
+	service := &Service{
 		repo:            repo,
-		mySites:         fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
 		accounts:        fakeAdminAccountResolver{id: "ws1"},
 		dispatcher:      noopRemoteActionRunner{},
 		probeRunner:     NewRealProbeRunner(),
 		platformGroups:  reader,
 		priorityActions: priorityActions,
 	}
+	configureResolvedPriorityMultiplier(service)
+	return service
+}
+
+func configureResolvedPriorityMultiplier(service *Service) {
+	service.mySites = fakeAdminGroupKeyReader{
+		fakeMySitesReader: fakeMySitesReader{
+			session: upstream.Session{Platform: upstream.PlatformSub2API},
+			connections: []my_sites.RealConnection{{
+				UserID: "user1", WorkspaceAdminAccountID: "ws1", AdminAccountID: "acc-1",
+				AdminPlatform: string(upstream.PlatformSub2API), UpstreamSiteID: "site-1", UpstreamKeyID: "key-1",
+			}},
+		},
+		keysBySite: map[string][]upstream.Sub2APIKeyItem{
+			"site-1": {{ID: "key-1", GroupID: "group-1", GroupName: "vip"}},
+		},
+	}
+	service.sites = multiplierSiteLookup{}
 }
 
 func TestProbeTarget_PostCommitPrioritySyncDoesNotInheritCanceledRequestContext(t *testing.T) {
@@ -232,13 +249,13 @@ func TestProbeTarget_PostCommitPrioritySyncDoesNotInheritCanceledRequestContext(
 	priorityActions := &fakeTargetPriorityActioner{called: make(chan struct{}, 1)}
 	service := &Service{
 		repo:            repo,
-		mySites:         fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
 		accounts:        fakeAdminAccountResolver{id: "ws1"},
 		dispatcher:      noopRemoteActionRunner{},
 		probeRunner:     NewRealProbeRunner(),
 		platformGroups:  reader,
 		priorityActions: priorityActions,
 	}
+	configureResolvedPriorityMultiplier(service)
 
 	results, err := service.ProbeTarget(requestCtx, "user1", targetID, []string{"gpt-4o"})
 	if err != nil {
@@ -632,7 +649,7 @@ func TestPrioritySyncIncompleteGroupInventoryDoesNotMarkWorkspaceSuccess(t *test
 		InventoryStatus:  "complete",
 	}
 	multiplier := 0.05
-	accountPriority := 10
+	accountPriority := 50
 	inventory := map[string]*priorityTargetInventory{
 		"sub2api:ws1:acc-a": {
 			target: AdminProbeTarget{
@@ -659,10 +676,8 @@ func TestPrioritySyncIncompleteGroupInventoryDoesNotMarkWorkspaceSuccess(t *test
 		{ConnectionID: "sub2api:ws1:acc-a", ModelName: "gpt-4o", UserID: "user1", AdminAccountID: "ws1", State: StateHealthy},
 		{ConnectionID: omittedTargetID, ModelName: "gpt-4o", UserID: "user1", AdminAccountID: "ws1", State: StateHealthy},
 	}
-	service := &Service{
-		repo:            repo,
-		priorityActions: &fakeTargetPriorityActioner{},
-	}
+	priorityActions := &fakeTargetPriorityActioner{}
+	service := &Service{repo: repo, priorityActions: priorityActions}
 
 	service.syncWorkspacePriorities(
 		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
@@ -678,6 +693,15 @@ func TestPrioritySyncIncompleteGroupInventoryDoesNotMarkWorkspaceSuccess(t *test
 	}
 	if workspaceState.NextReconcileAt == nil {
 		t.Fatalf("incomplete inventory must leave a retry time: %+v", workspaceState)
+	}
+	if workspaceState.LastError != "admin.connectionHealth.errors.priorityInventoryIncomplete" {
+		t.Fatalf("incomplete inventory must use its dedicated error key: %+v", workspaceState)
+	}
+	if len(priorityActions.calls) != 1 || priorityActions.calls[0].targetID != "acc-a" || priorityActions.calls[0].priority != 10 {
+		t.Fatalf("readable target must still complete its normal partial write: %+v", priorityActions.calls)
+	}
+	if got := repo.priorityStates["user1|ws1|sub2api:ws1:acc-a"]; got.LastAppliedPriority != 10 || got.PendingPriority != nil || got.EffectiveMultiplier != multiplier {
+		t.Fatalf("readable target checkpoint must close after the partial write: %+v", got)
 	}
 	if _, ok := repo.priorityStates["user1|ws1|"+omittedTargetID]; !ok {
 		t.Fatalf("omitted target checkpoint must remain retryable")

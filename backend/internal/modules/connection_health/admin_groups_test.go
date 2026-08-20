@@ -1020,7 +1020,7 @@ func TestAdminGroups_ConflictingGroupFallbacksDoNotClaimLocalEffectiveMultiplier
 	}
 }
 
-func TestAdminGroups_UnresolvedMultiplierDoesNotExposeHistoricalCheckpointValue(t *testing.T) {
+func TestAdminGroups_UnassociatedMultiplierDoesNotExposeHistoricalCheckpointValue(t *testing.T) {
 	repo := newFakeRepository()
 	policy := probePolicy()
 	policy.AutoDegradeEnabled = true
@@ -1056,7 +1056,184 @@ func TestAdminGroups_UnresolvedMultiplierDoesNotExposeHistoricalCheckpointValue(
 		t.Fatalf("unexpected unresolved multiplier state: %+v", account)
 	}
 	if !account.PriorityManaged || account.EffectiveMultiplier != nil {
-		t.Fatalf("managed band-end target must not expose historical multiplier as current: %+v", account)
+		t.Fatalf("unassociated target must not expose a historical multiplier: %+v", account)
+	}
+}
+
+func TestAdminGroups_BlockedMultiplierUsesLastConfirmedCheckpointForDisplay(t *testing.T) {
+	for _, status := range []string{
+		MultiplierResolutionMissing,
+		MultiplierResolutionUnavailable,
+		MultiplierResolutionStale,
+		MultiplierResolutionUpdating,
+	} {
+		t.Run(status, func(t *testing.T) {
+			repo := newFakeRepository()
+			policy := probePolicy()
+			policy.AutoDegradeEnabled = true
+			policy.PriorityMode = PriorityModeMultiplier
+			policy.StrategyMode = StrategyModeHealthProbe
+			repo.policies = []Policy{policy}
+			repo.groupAssignments = []GroupPolicyAssignment{{
+				UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID,
+			}}
+			targetID := "sub2api:ws1:100"
+			repo.priorityStates["user1|ws1|"+targetID] = PrioritySyncState{
+				UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+				OriginalPriority: 7, LastAppliedPriority: 99, EffectiveMultiplier: 0.06,
+			}
+			priority := 99
+			reader := fakePlatformGroupReader{
+				groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+				accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+					"g1": {{ID: "100", Name: "account", Models: "gpt-4o", Priority: &priority}},
+				},
+			}
+			service := newAdminGroupsService(reader, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, repo)
+			cacheKey := "user1\x00ws1\x00" + string(upstream.PlatformSub2API)
+			service.adminMultiplierCache = map[string]adminMultiplierCacheEntry{
+				cacheKey: {
+					lookup: upstreamMultiplierLookup{byAccount: map[string]upstreamMultiplierResolution{
+						"100": {status: status},
+					}},
+					expiresAt: time.Now().Add(time.Minute),
+				},
+			}
+
+			groups, err := service.AdminGroups(context.Background(), "user1")
+			if err != nil {
+				t.Fatalf("AdminGroups() error = %v", err)
+			}
+			account := groups[0].Accounts[0]
+			if account.MultiplierResolutionStatus != status || account.MultiplierSource != "last_confirmed" || account.EffectiveMultiplier == nil || *account.EffectiveMultiplier != 0.06 {
+				t.Fatalf("blocked multiplier must expose only the last confirmed checkpoint: %+v", account)
+			}
+		})
+	}
+}
+
+func TestAdminGroups_LastConfirmedMultiplierMustBeFiniteAndPositive(t *testing.T) {
+	for _, historical := range []float64{0, -0.1, math.NaN(), math.Inf(1)} {
+		repo := newFakeRepository()
+		policy := probePolicy()
+		policy.AutoDegradeEnabled = true
+		policy.PriorityMode = PriorityModeMultiplier
+		repo.policies = []Policy{policy}
+		repo.groupAssignments = []GroupPolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID}}
+		targetID := "sub2api:ws1:100"
+		repo.priorityStates["user1|ws1|"+targetID] = PrioritySyncState{
+			UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+			OriginalPriority: 7, LastAppliedPriority: 99, EffectiveMultiplier: historical,
+		}
+		priority := 99
+		service := newAdminGroupsService(fakePlatformGroupReader{
+			groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+			accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+				"g1": {{ID: "100", Name: "account", Models: "gpt-4o", Priority: &priority}},
+			},
+		}, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, repo)
+		cacheKey := "user1\x00ws1\x00" + string(upstream.PlatformSub2API)
+		service.adminMultiplierCache = map[string]adminMultiplierCacheEntry{
+			cacheKey: {
+				lookup: upstreamMultiplierLookup{byAccount: map[string]upstreamMultiplierResolution{
+					"100": {status: MultiplierResolutionMissing},
+				}},
+				expiresAt: time.Now().Add(time.Minute),
+			},
+		}
+
+		groups, err := service.AdminGroups(context.Background(), "user1")
+		if err != nil {
+			t.Fatalf("AdminGroups() error = %v", err)
+		}
+		account := groups[0].Accounts[0]
+		if account.EffectiveMultiplier != nil || account.MultiplierSource != MultiplierSourceNone {
+			t.Fatalf("invalid historical multiplier %v must stay hidden: %+v", historical, account)
+		}
+	}
+}
+
+func TestAdminGroups_StaleSnapshotValuePrecedesLastConfirmedCheckpoint(t *testing.T) {
+	repo := newFakeRepository()
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	repo.policies = []Policy{policy}
+	repo.groupAssignments = []GroupPolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID}}
+	targetID := "sub2api:ws1:100"
+	repo.priorityStates["user1|ws1|"+targetID] = PrioritySyncState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		OriginalPriority: 7, LastAppliedPriority: 99, EffectiveMultiplier: 0.06,
+	}
+	priority := 99
+	service := newAdminGroupsService(fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "100", Name: "account", Models: "gpt-4o", Priority: &priority}},
+		},
+	}, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, repo)
+	cacheKey := "user1\x00ws1\x00" + string(upstream.PlatformSub2API)
+	staleMultiplier := 0.2
+	service.adminMultiplierCache = map[string]adminMultiplierCacheEntry{
+		cacheKey: {
+			lookup: upstreamMultiplierLookup{byAccount: map[string]upstreamMultiplierResolution{
+				"100": {status: MultiplierResolutionStale, info: upstreamKeyGroupInfo{effectiveMultiplier: &staleMultiplier}},
+			}},
+			expiresAt: time.Now().Add(time.Minute),
+		},
+	}
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("AdminGroups() error = %v", err)
+	}
+	account := groups[0].Accounts[0]
+	if account.MultiplierSource != MultiplierSourceUpstreamKey || account.EffectiveMultiplier == nil || *account.EffectiveMultiplier != staleMultiplier {
+		t.Fatalf("stale snapshot value must remain the preferred display source: %+v", account)
+	}
+}
+
+func TestAdminGroups_LastConfirmedMultiplierDoesNotEnterProductionSort(t *testing.T) {
+	repo := newFakeRepository()
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	repo.policies = []Policy{policy}
+	repo.groupAssignments = []GroupPolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID}}
+	priority := 10
+	for _, state := range []PrioritySyncState{
+		{UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:100", OriginalPriority: 7, LastAppliedPriority: 10, EffectiveMultiplier: 0.1},
+		{UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:200", OriginalPriority: 8, LastAppliedPriority: 10, EffectiveMultiplier: 0.01},
+	} {
+		repo.priorityStates["user1|ws1|"+state.TargetID] = state
+	}
+	service := newAdminGroupsService(fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {
+				{ID: "200", Name: "historical", Models: "gpt-4o", Priority: &priority},
+				{ID: "100", Name: "current", Models: "gpt-4o", Priority: &priority},
+			},
+		},
+	}, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, repo)
+	cacheKey := "user1\x00ws1\x00" + string(upstream.PlatformSub2API)
+	currentMultiplier := 0.1
+	service.adminMultiplierCache = map[string]adminMultiplierCacheEntry{
+		cacheKey: {
+			lookup: upstreamMultiplierLookup{byAccount: map[string]upstreamMultiplierResolution{
+				"100": {status: MultiplierResolutionResolved, info: upstreamKeyGroupInfo{effectiveMultiplier: &currentMultiplier}},
+				"200": {status: MultiplierResolutionMissing},
+			}},
+			expiresAt: time.Now().Add(time.Minute),
+		},
+	}
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("AdminGroups() error = %v", err)
+	}
+	if got := []string{groups[0].Accounts[0].ID, groups[0].Accounts[1].ID}; got[0] != "100" || got[1] != "200" {
+		t.Fatalf("last confirmed multiplier changed production order: %v", got)
 	}
 }
 

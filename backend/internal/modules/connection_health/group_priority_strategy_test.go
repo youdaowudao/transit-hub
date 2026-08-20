@@ -1303,11 +1303,14 @@ func TestMultiplierPrioritySync_MissingMultiplierDoesNotWriteOrRestore(t *testin
 	}
 }
 
-func TestHealthPrioritySync_MissingMultiplierMovesToCurrentBandEnd(t *testing.T) {
+func TestHealthPrioritySync_IncompleteMultiplierFreezesWorkspace(t *testing.T) {
 	fixture := loadPriorityRecoveryFixture(t)
 	for _, test := range fixture.Cases {
 		t.Run(test.Name, func(t *testing.T) {
 			repo := newFakeRepository()
+			repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+				UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running",
+			}
 			actions := &fakeTargetPriorityActioner{}
 			service := &Service{repo: repo, priorityActions: actions}
 			policy := probePolicy()
@@ -1316,9 +1319,11 @@ func TestHealthPrioritySync_MissingMultiplierMovesToCurrentBandEnd(t *testing.T)
 			policy.StrategyMode = StrategyModeHealthProbe
 			targetID := "sub2api:ws1:100"
 			historicalMultiplier := 0.08
+			existingPending := test.CurrentPriority + 7
 			stored := PrioritySyncState{
 				UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
-				OriginalPriority: 7, LastAppliedPriority: test.CurrentPriority, EffectiveMultiplier: historicalMultiplier,
+				OriginalPriority: 7, LastAppliedPriority: test.CurrentPriority, PendingPriority: &existingPending,
+				EffectiveMultiplier: historicalMultiplier,
 			}
 			repo.priorityStates["user1|ws1|"+targetID] = stored
 			inventory := map[string]*priorityTargetInventory{
@@ -1332,22 +1337,29 @@ func TestHealthPrioritySync_MissingMultiplierMovesToCurrentBandEnd(t *testing.T)
 
 			service.syncWorkspacePriorities(
 				context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
-				"user1", "ws1", inventory, true, states, []PrioritySyncState{stored},
+				"user1", "ws1", inventory, true, states, []PrioritySyncState{stored}, "generation-1",
 			)
 
-			if len(actions.calls) != 1 || actions.calls[0].priority != test.ExpectedPriority {
-				t.Fatalf("incomplete multiplier metadata must move to health band end %d: %+v", test.ExpectedPriority, actions.calls)
+			if len(actions.calls) != 0 {
+				t.Fatalf("incomplete multiplier metadata must freeze all Priority writes: %+v", actions.calls)
 			}
 			updated := repo.priorityStates["user1|ws1|"+targetID]
-			if updated.LastAppliedPriority != test.ExpectedPriority || updated.EffectiveMultiplier != historicalMultiplier {
-				t.Fatalf("health band write must preserve historical multiplier checkpoint: %+v", updated)
+			if updated.LastAppliedPriority != test.ExpectedPriority || updated.EffectiveMultiplier != historicalMultiplier || updated.PendingPriority == nil || *updated.PendingPriority != existingPending {
+				t.Fatalf("frozen round must preserve the existing target checkpoint: %+v", updated)
+			}
+			workspaceState := repo.priorityWorkspaces["user1|ws1"]
+			if workspaceState.LastDecision != "failed" || workspaceState.PendingSignature != "generation-1" || workspaceState.PendingTargetCount != 1 || workspaceState.LastError != ErrorPriorityMetadataUnavailable {
+				t.Fatalf("frozen round must stay retryable with one blocker: %+v", workspaceState)
 			}
 		})
 	}
 }
 
-func TestHealthPrioritySyncUnavailableTargetStillWritesHealthyTargets(t *testing.T) {
+func TestHealthPrioritySyncIncompleteTargetFreezesHealthyTargets(t *testing.T) {
 	repo := newFakeRepository()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running",
+	}
 	actions := &fakeTargetPriorityActioner{}
 	service := &Service{repo: repo, priorityActions: actions}
 	policy := probePolicy()
@@ -1376,33 +1388,17 @@ func TestHealthPrioritySyncUnavailableTargetStillWritesHealthyTargets(t *testing
 
 	service.syncWorkspacePriorities(
 		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
-		"user1", "ws1", inventory, true, states, nil,
+		"user1", "ws1", inventory, true, states, nil, "generation-1",
 	)
-	if len(actions.calls) != 2 {
-		t.Fatalf("incomplete workspace health ranking must still write both targets: calls=%+v states=%+v", actions.calls, repo.priorityStates)
+	if len(actions.calls) != 0 {
+		t.Fatalf("one incomplete target must freeze every workspace Priority write: calls=%+v states=%+v", actions.calls, repo.priorityStates)
 	}
-	want := map[string]int{
-		"100": 10,
-		"200": 99,
+	if len(repo.priorityStates) != 0 {
+		t.Fatalf("frozen round must not create target intents or checkpoints: %+v", repo.priorityStates)
 	}
-	for _, call := range actions.calls {
-		wantPriority, ok := want[call.targetID]
-		if !ok {
-			t.Fatalf("unexpected priority write: %+v", call)
-		}
-		if call.priority != wantPriority {
-			t.Fatalf("priority write for %s = %d, want %d", call.targetID, call.priority, wantPriority)
-		}
-		delete(want, call.targetID)
-	}
-	if len(want) != 0 {
-		t.Fatalf("missing priority writes: %+v", want)
-	}
-	if got := repo.priorityStates["user1|ws1|sub2api:ws1:100"]; got.LastAppliedPriority != 10 || got.EffectiveMultiplier != multiplier {
-		t.Fatalf("healthy target should be written at exact priority: %+v", got)
-	}
-	if got := repo.priorityStates["user1|ws1|sub2api:ws1:200"]; got.LastAppliedPriority != 99 {
-		t.Fatalf("unavailable target should fall back to band end: %+v", got)
+	workspaceState := repo.priorityWorkspaces["user1|ws1"]
+	if workspaceState.LastDecision != "failed" || workspaceState.PendingTargetCount != 1 || workspaceState.LastError != ErrorPriorityMetadataUnavailable {
+		t.Fatalf("workspace failure must report only the blocker: %+v", workspaceState)
 	}
 }
 
@@ -1458,7 +1454,7 @@ func TestHealthPrioritySyncDisabledMultiplierUsesBandEndWithoutFailure(t *testin
 	}
 }
 
-func TestHealthPrioritySyncMissingMultiplierUsesBandEndAndCountsAffectedTarget(t *testing.T) {
+func TestHealthPrioritySyncMissingMultiplierFreezesWorkspaceAndCountsAffectedTarget(t *testing.T) {
 	repo := newFakeRepository()
 	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
 		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running",
@@ -1497,16 +1493,176 @@ func TestHealthPrioritySyncMissingMultiplierUsesBandEndAndCountsAffectedTarget(t
 		"user1", "ws1", inventory, true, states, nil, "generation-1",
 	)
 
-	writes := make(map[string]int, len(actions.calls))
-	for _, call := range actions.calls {
-		writes[call.targetID] = call.priority
+	if len(actions.calls) != 0 {
+		t.Fatalf("missing multiplier must freeze the whole workspace: %+v", actions.calls)
 	}
-	if writes["100"] != 10 || writes["200"] != 99 {
-		t.Fatalf("priority writes = %+v, want active=10 missing=99", writes)
+	if len(repo.priorityStates) != 0 {
+		t.Fatalf("frozen round must not add target checkpoints: %+v", repo.priorityStates)
 	}
 	workspaceState := repo.priorityWorkspaces["user1|ws1"]
 	if workspaceState.LastDecision != "failed" || workspaceState.PendingTargetCount != 1 || workspaceState.LastError != ErrorPriorityMetadataUnavailable {
 		t.Fatalf("missing target must fail workspace sync with one affected target: %+v", workspaceState)
+	}
+}
+
+func TestHealthPrioritySyncConflictedMultiplierDoesNotFreezeManagedTargets(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running",
+	}
+	actions := &fakeTargetPriorityActioner{}
+	service := &Service{repo: repo, priorityActions: actions}
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	policy.StrategyMode = StrategyModeHealthProbe
+	activeMultiplier := 0.1
+	existingPending := 77
+	conflicted := PrioritySyncState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:200",
+		OriginalPriority: 60, LastAppliedPriority: 60, PendingPriority: &existingPending,
+		EffectiveMultiplier: 0.05, Conflict: true, LastConflictPriority: intPtr(61),
+	}
+	repo.priorityStates["user1|ws1|"+conflicted.TargetID] = conflicted
+	inventory := map[string]*priorityTargetInventory{
+		"sub2api:ws1:100": {
+			target:   AdminProbeTarget{TargetID: "sub2api:ws1:100", AccountID: "100", Models: []string{"gpt-4o"}},
+			policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{
+				status: MultiplierResolutionResolved, info: upstreamKeyGroupInfo{effectiveMultiplier: &activeMultiplier},
+			},
+			currentPriority: 50, priorityPresent: true,
+		},
+		"sub2api:ws1:200": {
+			target:   AdminProbeTarget{TargetID: "sub2api:ws1:200", AccountID: "200", Models: []string{"gpt-4o"}},
+			policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{status: MultiplierResolutionMissing},
+			currentPriority: 61, priorityPresent: true,
+		},
+	}
+	healthStates := []ConnectionHealthState{
+		{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy},
+		{ConnectionID: "sub2api:ws1:200", ModelName: "gpt-4o", State: StateHealthy},
+	}
+
+	service.syncWorkspacePriorities(
+		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true, healthStates, []PrioritySyncState{conflicted}, "generation-1",
+	)
+
+	if len(actions.calls) != 1 || actions.calls[0].targetID != "100" || actions.calls[0].priority != 10 {
+		t.Fatalf("conflicted multiplier must not block the managed target: %+v", actions.calls)
+	}
+	if got := repo.priorityStates["user1|ws1|"+conflicted.TargetID]; !got.Conflict || got.LastAppliedPriority != conflicted.LastAppliedPriority || got.PendingPriority == nil || *got.PendingPriority != existingPending || got.EffectiveMultiplier != conflicted.EffectiveMultiplier || got.LastConflictPriority == nil || *got.LastConflictPriority != 61 {
+		t.Fatalf("conflicted checkpoint must remain unchanged: %+v", got)
+	}
+	workspaceState := repo.priorityWorkspaces["user1|ws1"]
+	if workspaceState.LastDecision != "success" || workspaceState.PendingTargetCount != 0 {
+		t.Fatalf("conflicted multiplier alone must not fail the workspace: %+v", workspaceState)
+	}
+}
+
+func TestHealthPrioritySyncBlockedOldGenerationDoesNotMutateCheckpoint(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-b", LastDecision: "pending",
+	}
+	actions := &fakeTargetPriorityActioner{}
+	service := &Service{repo: repo, priorityActions: actions}
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	targetID := "sub2api:ws1:100"
+	existingPending := 77
+	stored := PrioritySyncState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		OriginalPriority: 7, LastAppliedPriority: 50, PendingPriority: &existingPending, EffectiveMultiplier: 0.08,
+	}
+	repo.priorityStates["user1|ws1|"+targetID] = stored
+	inventory := map[string]*priorityTargetInventory{
+		targetID: {
+			target:   AdminProbeTarget{TargetID: targetID, AccountID: "100", Models: []string{"gpt-4o"}},
+			policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{status: MultiplierResolutionMissing},
+			currentPriority: 50, priorityPresent: true,
+		},
+	}
+
+	service.syncWorkspacePriorities(
+		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true,
+		[]ConnectionHealthState{{ConnectionID: targetID, ModelName: "gpt-4o", State: StateHealthy}},
+		[]PrioritySyncState{stored}, "generation-a",
+	)
+
+	if len(actions.calls) != 0 {
+		t.Fatalf("stale generation must not write Priority: %+v", actions.calls)
+	}
+	got := repo.priorityStates["user1|ws1|"+targetID]
+	if got.LastAppliedPriority != stored.LastAppliedPriority || got.PendingPriority == nil || *got.PendingPriority != existingPending || got.EffectiveMultiplier != stored.EffectiveMultiplier {
+		t.Fatalf("stale generation mutated target checkpoint: %+v", got)
+	}
+	workspaceState := repo.priorityWorkspaces["user1|ws1"]
+	if workspaceState.PendingSignature != "generation-b" || workspaceState.LastDecision != "pending" {
+		t.Fatalf("stale generation overwrote current generation: %+v", workspaceState)
+	}
+}
+
+func TestHealthPrioritySyncWritesAfterBlockedMultiplierRecovers(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running",
+	}
+	actions := &fakeTargetPriorityActioner{}
+	service := &Service{repo: repo, priorityActions: actions}
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	targetID := "sub2api:ws1:100"
+	existingPending := 77
+	stored := PrioritySyncState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		OriginalPriority: 7, LastAppliedPriority: 50, PendingPriority: &existingPending, EffectiveMultiplier: 0.08,
+	}
+	repo.priorityStates["user1|ws1|"+targetID] = stored
+	inventory := map[string]*priorityTargetInventory{
+		targetID: {
+			target:   AdminProbeTarget{TargetID: targetID, AccountID: "100", Models: []string{"gpt-4o"}},
+			policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{status: MultiplierResolutionMissing},
+			currentPriority: 50, priorityPresent: true,
+		},
+	}
+	healthStates := []ConnectionHealthState{{ConnectionID: targetID, ModelName: "gpt-4o", State: StateHealthy}}
+
+	service.syncWorkspacePriorities(
+		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true, healthStates, []PrioritySyncState{stored}, "generation-1",
+	)
+	if len(actions.calls) != 0 {
+		t.Fatalf("blocked round must not write Priority: %+v", actions.calls)
+	}
+	blockedState := repo.priorityStates["user1|ws1|"+targetID]
+	if blockedState.PendingPriority == nil || *blockedState.PendingPriority != existingPending {
+		t.Fatalf("blocked round must preserve pending checkpoint: %+v", blockedState)
+	}
+
+	currentMultiplier := 0.05
+	inventory[targetID].upstreamMultiplier = upstreamMultiplierResolution{
+		status: MultiplierResolutionResolved,
+		info:   upstreamKeyGroupInfo{effectiveMultiplier: &currentMultiplier},
+	}
+	service.syncWorkspacePriorities(
+		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true, healthStates, []PrioritySyncState{blockedState}, "generation-1",
+	)
+
+	if len(actions.calls) != 1 || actions.calls[0].targetID != "100" || actions.calls[0].priority != 10 {
+		t.Fatalf("recovered multiplier must resume the normal write: %+v", actions.calls)
+	}
+	recovered := repo.priorityStates["user1|ws1|"+targetID]
+	if recovered.LastAppliedPriority != 10 || recovered.PendingPriority != nil || recovered.EffectiveMultiplier != currentMultiplier {
+		t.Fatalf("recovered checkpoint did not close normally: %+v", recovered)
+	}
+	workspaceState := repo.priorityWorkspaces["user1|ws1"]
+	if workspaceState.LastDecision != "success" || workspaceState.AppliedSignature != "generation-1" || workspaceState.PendingSignature != "" {
+		t.Fatalf("recovered workspace generation did not close: %+v", workspaceState)
 	}
 }
 
@@ -1907,7 +2063,7 @@ func TestHealthPrioritySync_NewAPITupleIsNotOverriddenByCurrentWeight(t *testing
 	}
 }
 
-func TestHealthPrioritySync_UsesFallbackForDeterministicMissingAndBandEndForUnavailable(t *testing.T) {
+func TestHealthPrioritySync_UsesFallbackForDeterministicMissingAndFreezesOnUnavailable(t *testing.T) {
 	policy := Policy{
 		ID: "health", UserID: "user1", AdminAccountID: "ws1", Enabled: true,
 		StrategyMode: StrategyModeHealthProbe, PriorityMode: PriorityModeMultiplier, AutoDegradeEnabled: true,
@@ -1936,12 +2092,19 @@ func TestHealthPrioritySync_UsesFallbackForDeterministicMissingAndBandEndForUnav
 
 	unavailableSites := fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI}}
 	service, repo, actions = newService(unavailableSites)
-	service.syncMultiplierPriorities(context.Background(), []Policy{policy}, nil, []GroupPolicyAssignment{assignment}, nil, nil)
-	if len(actions.calls) != 1 || actions.calls[0].priority != 10000 {
-		t.Fatalf("unavailable lookup must move the healthy target to the band end: calls=%+v state=%+v", actions.calls, repo.priorityStates)
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", LastDecision: "success", InventoryStatus: "complete",
 	}
-	if got := repo.priorityStates["user1|ws1|newapi:ws1:100"]; got.LastAppliedPriority != 10000 {
-		t.Fatalf("unavailable lookup must persist the band-end checkpoint: %+v", got)
+	service.syncMultiplierPriorities(context.Background(), []Policy{policy}, nil, []GroupPolicyAssignment{assignment}, nil, nil)
+	if len(actions.calls) != 0 {
+		t.Fatalf("unavailable lookup must freeze the workspace: calls=%+v state=%+v", actions.calls, repo.priorityStates)
+	}
+	if len(repo.priorityStates) != 0 {
+		t.Fatalf("unavailable lookup must not create a target checkpoint: %+v", repo.priorityStates)
+	}
+	workspaceState := repo.priorityWorkspaces["user1|ws1"]
+	if workspaceState.LastDecision != "failed" || workspaceState.PendingTargetCount != 1 || workspaceState.LastError != ErrorPriorityMetadataUnavailable || workspaceState.NextReconcileAt == nil {
+		t.Fatalf("unavailable lookup must persist one retryable blocker: %+v", workspaceState)
 	}
 }
 

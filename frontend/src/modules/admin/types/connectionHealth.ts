@@ -172,8 +172,8 @@ export interface AdminGroupAccount {
   priorityConflictAt?: string | null
   probeModelsConfigured?: boolean
   effectiveMultiplier?: number | null
-  multiplierResolutionStatus?: 'resolved' | 'unassociated' | 'missing' | 'conflict' | 'stale' | 'unavailable' | string
-  multiplierSource?: 'upstream_key' | 'local_fallback' | 'none' | string
+  multiplierResolutionStatus?: 'resolved' | 'unassociated' | 'missing' | 'conflict' | 'stale' | 'unavailable' | 'updating' | string
+  multiplierSource?: 'upstream_key' | 'local_fallback' | 'last_confirmed' | 'none' | string
   localFallbackMultiplier?: number | null
   productionSortOrder?: number
 }

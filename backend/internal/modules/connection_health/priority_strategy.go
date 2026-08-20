@@ -423,13 +423,18 @@ func (s *Service) syncWorkspacePriorities(
 		return current
 	}
 	failedCount := 0
-	unavailableCount := 0
+	blockedMultiplierCount := 0
 	incompleteCount := 0
 	statesByTarget := make(map[string][]ConnectionHealthState)
 	for _, state := range healthStates {
 		if _, isTarget := parseTargetID(state.ConnectionID); isTarget {
 			statesByTarget[state.ConnectionID] = append(statesByTarget[state.ConnectionID], state)
 		}
+	}
+
+	storedByTarget := make(map[string]PrioritySyncState, len(syncStates))
+	for _, state := range syncStates {
+		storedByTarget[state.TargetID] = state
 	}
 
 	managed := make(map[string]*priorityTargetInventory)
@@ -459,9 +464,11 @@ func (s *Service) syncWorkspacePriorities(
 			multiplierOnlyTargets[targetID] = multiplier
 			continue
 		}
-		if item.upstreamMultiplier.status == MultiplierResolutionUnavailable || item.upstreamMultiplier.status == MultiplierResolutionStale || item.upstreamMultiplier.status == MultiplierResolutionUpdating || item.upstreamMultiplier.status == MultiplierResolutionMissing {
+		if isPriorityMultiplierBlocker(item.upstreamMultiplier.status) {
 			missingMultiplier[targetID] = struct{}{}
-			unavailableCount++
+			if stored, exists := storedByTarget[targetID]; !exists || !stored.Conflict {
+				blockedMultiplierCount++
+			}
 		}
 
 		multiplier, available := effectiveHealthSortMultiplier(item)
@@ -483,6 +490,19 @@ func (s *Service) syncWorkspacePriorities(
 		managed[targetID] = item
 		effectiveMultiplierByTarget[targetID] = multiplier
 		healthCandidates = append(healthCandidates, candidate)
+	}
+	if blockedMultiplierCount > 0 {
+		if !generationCurrent() {
+			return
+		}
+		s.markPriorityWorkspaceSyncFailed(
+			userID,
+			adminAccountID,
+			expectedPendingSignature,
+			requestError(ErrorPriorityMetadataUnavailable),
+			blockedMultiplierCount,
+		)
+		return
 	}
 
 	distinctMultiplierOnly := make([]float64, 0)
@@ -516,11 +536,6 @@ func (s *Service) syncWorkspacePriorities(
 		}
 		desiredByTarget[candidate.targetID] = desiredHealthPriorityForPlatform(session.Platform, candidate.healthBand, bandRank)
 		bandRank++
-	}
-
-	storedByTarget := make(map[string]PrioritySyncState, len(syncStates))
-	for _, state := range syncStates {
-		storedByTarget[state.TargetID] = state
 	}
 
 	for targetID, item := range managed {
@@ -709,7 +724,7 @@ func (s *Service) syncWorkspacePriorities(
 		return
 	}
 	if !inventoryComplete {
-		incompleteFailures := failedCount + unavailableCount + incompleteCount
+		incompleteFailures := failedCount + incompleteCount
 		if incompleteFailures == 0 {
 			incompleteFailures = 1
 		}
@@ -717,17 +732,13 @@ func (s *Service) syncWorkspacePriorities(
 			userID,
 			adminAccountID,
 			expectedPendingSignature,
-			requestError(ErrorPriorityMetadataUnavailable),
+			requestError(ErrorPriorityInventoryIncomplete),
 			incompleteFailures,
 		)
 		return
 	}
-	if failedCount+unavailableCount > 0 {
-		detail := requestError(ErrorUnknown)
-		if unavailableCount > 0 {
-			detail = requestError(ErrorPriorityMetadataUnavailable)
-		}
-		s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, detail, failedCount+unavailableCount)
+	if failedCount > 0 {
+		s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, requestError(ErrorUnknown), failedCount)
 		return
 	}
 	s.markPriorityWorkspaceSyncSucceeded(userID, adminAccountID, expectedPendingSignature)

@@ -33,6 +33,7 @@ import type {
   AdminGroupHealth,
   ConnectionHealthState,
 } from '../../types/connectionHealth'
+import { resolveConnectionHealthMultiplierDisplay } from '../../utils/connectionHealthMultiplier'
 
 const props = defineProps<{
   group: AdminGroupHealth
@@ -476,38 +477,13 @@ watch(() => props.group.id, () => {
 const formatNumber = (value: number | null | undefined): string => value == null ? '-' : String(value)
 const formatMultiplier = (value: number | null | undefined): string => value == null ? '-' : `${value}x`
 
-const usesMultiplierOnly = (account: AdminGroupAccount): boolean =>
-  (account.effectivePolicies ?? []).some(policy => policy.enabled && policy.strategyMode === 'multiplier_only')
+const multiplierDisplay = (account: AdminGroupAccount) =>
+  resolveConnectionHealthMultiplierDisplay(account, props.group.multiplier)
 
-const effectiveMultiplier = (account: AdminGroupAccount): number | null => {
-  if (account.effectiveMultiplier != null) return account.effectiveMultiplier
-  if (usesMultiplierOnly(account)) return props.group.multiplier
-  return null
-}
+const effectiveMultiplier = (account: AdminGroupAccount): number | null => multiplierDisplay(account).value
 
 const multiplierSourceLabel = (account: AdminGroupAccount): string => {
-  if (usesMultiplierOnly(account)) return t(`${detailPrefix}.multiplierSources.adminGroup`)
-  if (account.multiplierSource === 'upstream_key') return t(`${detailPrefix}.multiplierSources.upstreamKey`)
-  if (account.multiplierSource === 'local_fallback') {
-    if (account.multiplierResolutionStatus === 'conflict') return t(`${detailPrefix}.multiplierSources.conflictFallback`)
-    return t(`${detailPrefix}.multiplierSources.missingFallback`)
-  }
-  switch (account.multiplierResolutionStatus) {
-    case 'unassociated':
-      return t(`${detailPrefix}.multiplierSources.unassociatedBandEnd`)
-    case 'missing':
-      return t(`${detailPrefix}.multiplierSources.missingBandEnd`)
-    case 'conflict':
-      return t(`${detailPrefix}.multiplierSources.conflictBandEnd`)
-    case 'stale':
-      return t(`${detailPrefix}.multiplierSources.staleBandEnd`)
-    case 'unavailable':
-      return t(`${detailPrefix}.multiplierSources.unavailableBandEnd`)
-    case 'disabled':
-      return t(`${detailPrefix}.multiplierSources.disabledNonParticipating`)
-    default:
-      return t(`${detailPrefix}.multiplierSources.unknownBandEnd`)
-  }
+  return t(`${detailPrefix}.multiplierSources.${multiplierDisplay(account).sourceKey}`)
 }
 
 </script>

@@ -1330,14 +1330,22 @@ func TestAdminGroups_SharedTargetUsesOneMergedDecisionAcrossGroups(t *testing.T)
 	if len(groups) != 2 || len(groups[0].Accounts) != 1 || len(groups[1].Accounts) != 1 {
 		t.Fatalf("unexpected shared-target response: %+v", groups)
 	}
+	wantByGroup := map[string]struct {
+		policyID        string
+		intervalSeconds int
+	}{
+		"g1": {policyID: stop.ID, intervalSeconds: 60 * 60},
+		"g2": {policyID: keep.ID, intervalSeconds: 120 * 60},
+	}
 	for _, group := range groups {
 		got := group.Accounts[0]
-		if len(got.AssignedPolicyIDs) != 2 || len(got.UnprobedModels) != 1 {
-			t.Fatalf("group %s did not expose the merged target decision: %+v", group.ID, got)
+		want := wantByGroup[group.ID]
+		if len(got.AssignedPolicyIDs) != 1 || got.AssignedPolicyIDs[0] != want.policyID || len(got.UnprobedModels) != 1 {
+			t.Fatalf("group %s did not keep its own group policy decision: %+v", group.ID, got)
 		}
 		decision := got.UnprobedModels[0]
-		if decision.BudgetPolicyID != keep.ID || decision.EffectiveIntervalSeconds != 120*60 || len(decision.EffectivePolicySources) != 2 {
-			t.Fatalf("group %s has a non-authoritative decision: %+v", group.ID, decision)
+		if decision.BudgetPolicyID != want.policyID || decision.EffectiveIntervalSeconds != want.intervalSeconds || len(decision.EffectivePolicySources) != 1 {
+			t.Fatalf("group %s has a cross-group policy decision: %+v", group.ID, decision)
 		}
 	}
 }

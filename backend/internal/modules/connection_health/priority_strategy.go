@@ -424,6 +424,7 @@ func (s *Service) syncWorkspacePriorities(
 	}
 	failedCount := 0
 	blockedMultiplierCount := 0
+	processableMultiplierCount := 0
 	incompleteCount := 0
 	statesByTarget := make(map[string][]ConnectionHealthState)
 	for _, state := range healthStates {
@@ -469,7 +470,9 @@ func (s *Service) syncWorkspacePriorities(
 			if stored, exists := storedByTarget[targetID]; !exists || !stored.Conflict {
 				blockedMultiplierCount++
 			}
+			continue
 		}
+		processableMultiplierCount++
 
 		multiplier, available := effectiveHealthSortMultiplier(item)
 		if !available {
@@ -491,20 +494,6 @@ func (s *Service) syncWorkspacePriorities(
 		effectiveMultiplierByTarget[targetID] = multiplier
 		healthCandidates = append(healthCandidates, candidate)
 	}
-	if blockedMultiplierCount > 0 {
-		if !generationCurrent() {
-			return
-		}
-		s.markPriorityWorkspaceSyncFailed(
-			userID,
-			adminAccountID,
-			expectedPendingSignature,
-			requestError(ErrorPriorityMetadataUnavailable),
-			blockedMultiplierCount,
-		)
-		return
-	}
-
 	distinctMultiplierOnly := make([]float64, 0)
 	seenMultiplierOnly := make(map[float64]struct{})
 	for _, multiplier := range multiplierOnlyTargets {
@@ -739,6 +728,17 @@ func (s *Service) syncWorkspacePriorities(
 	}
 	if failedCount > 0 {
 		s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, requestError(ErrorUnknown), failedCount)
+		return
+	}
+	if blockedMultiplierCount > 0 {
+		if processableMultiplierCount == 0 {
+			s.markPriorityWorkspaceSyncFailed(
+				userID, adminAccountID, expectedPendingSignature,
+				requestError(ErrorPriorityMetadataUnavailable), blockedMultiplierCount,
+			)
+			return
+		}
+		s.markPriorityWorkspaceSyncPartial(userID, adminAccountID, expectedPendingSignature, blockedMultiplierCount)
 		return
 	}
 	s.markPriorityWorkspaceSyncSucceeded(userID, adminAccountID, expectedPendingSignature)

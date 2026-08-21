@@ -1061,13 +1061,22 @@ func TestAdminGroups_UnassociatedMultiplierDoesNotExposeHistoricalCheckpointValu
 }
 
 func TestAdminGroups_BlockedMultiplierUsesLastConfirmedCheckpointForDisplay(t *testing.T) {
-	for _, status := range []string{
-		MultiplierResolutionMissing,
-		MultiplierResolutionUnavailable,
-		MultiplierResolutionStale,
-		MultiplierResolutionUpdating,
-	} {
-		t.Run(status, func(t *testing.T) {
+	tests := []struct {
+		status string
+		reason string
+	}{
+		{MultiplierResolutionMissing, MultiplierReasonBindingMissing},
+		{MultiplierResolutionUnavailable, MultiplierReasonSiteUnavailable},
+		{MultiplierResolutionUnavailable, MultiplierReasonKeyUnavailable},
+		{MultiplierResolutionMissing, MultiplierReasonKeyMissing},
+		{MultiplierResolutionMissing, MultiplierReasonGroupsUnavailable},
+		{MultiplierResolutionMissing, MultiplierReasonGroupNotFound},
+		{MultiplierResolutionMissing, MultiplierReasonMultiplierMissing},
+		{MultiplierResolutionStale, MultiplierReasonSnapshotStale},
+		{MultiplierResolutionUpdating, MultiplierReasonSnapshotUpdating},
+	}
+	for _, test := range tests {
+		t.Run(test.reason, func(t *testing.T) {
 			repo := newFakeRepository()
 			policy := probePolicy()
 			policy.AutoDegradeEnabled = true
@@ -1094,7 +1103,11 @@ func TestAdminGroups_BlockedMultiplierUsesLastConfirmedCheckpointForDisplay(t *t
 			service.adminMultiplierCache = map[string]adminMultiplierCacheEntry{
 				cacheKey: {
 					lookup: upstreamMultiplierLookup{byAccount: map[string]upstreamMultiplierResolution{
-						"100": {status: status},
+						"100": {
+							status: test.status,
+							reason: test.reason,
+							info:   upstreamKeyGroupInfo{siteID: "site-1"},
+						},
 					}},
 					expiresAt: time.Now().Add(time.Minute),
 				},
@@ -1105,10 +1118,23 @@ func TestAdminGroups_BlockedMultiplierUsesLastConfirmedCheckpointForDisplay(t *t
 				t.Fatalf("AdminGroups() error = %v", err)
 			}
 			account := groups[0].Accounts[0]
-			if account.MultiplierResolutionStatus != status || account.MultiplierSource != "last_confirmed" || account.EffectiveMultiplier == nil || *account.EffectiveMultiplier != 0.06 {
+			if account.MultiplierResolutionStatus != test.status || account.MultiplierSource != "last_confirmed" || account.EffectiveMultiplier == nil || *account.EffectiveMultiplier != 0.06 {
 				t.Fatalf("blocked multiplier must expose only the last confirmed checkpoint: %+v", account)
 			}
+			if !account.PrioritySyncBlocked || account.PrioritySyncBlockReason != test.reason || account.UpstreamSiteID != "site-1" {
+				t.Fatalf("blocked multiplier must expose the exact account reason and site: %+v", account)
+			}
 		})
+	}
+}
+
+func TestSafeMultiplierBlockReasonRejectsUnknownText(t *testing.T) {
+	resolution := upstreamMultiplierResolution{
+		status: MultiplierResolutionMissing,
+		reason: "raw upstream response with credential",
+	}
+	if got := safeMultiplierBlockReason(resolution); got != MultiplierReasonMultiplierMissing {
+		t.Fatalf("unknown internal reason must use a fixed safe fallback, got %q", got)
 	}
 }
 

@@ -1,4 +1,4 @@
-import type { AdminGroupAccount, PrioritySyncStatus } from '../types/connectionHealth'
+import type { AdminGroupAccount, AdminGroupHealth, PrioritySyncStatus } from '../types/connectionHealth'
 
 export interface ConnectionHealthMultiplierDisplay {
   value: number | null
@@ -59,6 +59,49 @@ export interface PrioritySyncFailureMessage {
   params: Record<string, string | number>
 }
 
+const PRIORITY_SYNC_BLOCK_REASONS = new Set([
+  'binding_missing',
+  'site_unavailable',
+  'key_unavailable',
+  'key_missing',
+  'groups_unavailable',
+  'group_not_found',
+  'multiplier_missing',
+  'snapshot_stale',
+  'snapshot_updating',
+])
+
+export const prioritySyncBlockReasonKey = (reason: string | null | undefined): string =>
+  reason && PRIORITY_SYNC_BLOCK_REASONS.has(reason) ? reason : 'unknown'
+
+export interface PrioritySyncBlocker {
+  targetId: string
+  accountName: string
+  siteId: string
+  reason: string
+}
+
+export const collectPrioritySyncBlockers = (groups: AdminGroupHealth[]): PrioritySyncBlocker[] => {
+  const byTarget = new Map<string, PrioritySyncBlocker>()
+  for (const group of groups) {
+    for (const account of group.accounts ?? []) {
+      if (!account.prioritySyncBlocked || byTarget.has(account.targetId)) continue
+      byTarget.set(account.targetId, {
+        targetId: account.targetId,
+        accountName: account.name || account.id,
+        siteId: account.upstreamSiteId ?? '',
+        reason: prioritySyncBlockReasonKey(account.prioritySyncBlockReason),
+      })
+    }
+  }
+  return [...byTarget.values()]
+}
+
+export const resolvePriorityWorkspaceLabel = (
+  displayName: string | null | undefined,
+  workspaceId: string,
+): string => displayName?.trim() || workspaceId
+
 export const resolvePrioritySyncFailureMessage = (
   status: PrioritySyncStatus,
   time: string,
@@ -68,6 +111,12 @@ export const resolvePrioritySyncFailureMessage = (
     workspace: status.workspaceId,
     time,
     reason,
+  }
+  if (status.status === 'partial') {
+    return {
+      key: 'admin.connectionHealth.prioritySync.partial',
+      params: { ...params, count: status.failedCount },
+    }
   }
   if (status.errorKey === 'admin.connectionHealth.errors.priorityInventoryIncomplete') {
     return { key: 'admin.connectionHealth.prioritySync.failedWithoutCount', params }

@@ -34,7 +34,7 @@ describe('connection health account policy assignment', () => {
   })
 
   it('delegates account multiplier display to the shared resolver', () => {
-    expect(detailSource).toContain("import { resolveConnectionHealthMultiplierDisplay } from '../../utils/connectionHealthMultiplier'")
+    expect(detailSource).toMatch(/import\s*{[^}]*resolveConnectionHealthMultiplierDisplay[^}]*}\s*from '\.\.\/\.\.\/utils\/connectionHealthMultiplier'/s)
     expect(detailSource).toContain('resolveConnectionHealthMultiplierDisplay(account, props.group.multiplier)')
   })
 })

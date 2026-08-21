@@ -832,6 +832,26 @@ func (f *fakeRepository) MarkPriorityWorkspaceHealthSyncFailed(ctx context.Conte
 	return true, nil
 }
 
+func (f *fakeRepository) MarkPriorityWorkspaceHealthSyncPartial(ctx context.Context, userID string, adminAccountID string, errorDetail string, blockedCount int) (bool, error) {
+	f.priorityWorkspaceMu.Lock()
+	defer f.priorityWorkspaceMu.Unlock()
+	key := userID + "|" + adminAccountID
+	state, ok := f.priorityWorkspaces[key]
+	if !ok || state.PendingSignature != "" {
+		return false, nil
+	}
+	now := time.Now()
+	state.LastDecision = "partial"
+	state.InventoryStatus = "partial"
+	state.LastError = errorDetail
+	state.PendingTargetCount = blockedCount
+	state.LastReconcileFailureAt = &now
+	next := now.Add(time.Minute)
+	state.NextReconcileAt = &next
+	f.priorityWorkspaces[key] = state
+	return true, nil
+}
+
 func (f *fakeRepository) MarkPriorityWorkspaceHealthSyncSucceeded(ctx context.Context, userID string, adminAccountID string) (bool, error) {
 	f.priorityWorkspaceMu.Lock()
 	defer f.priorityWorkspaceMu.Unlock()
@@ -864,6 +884,26 @@ func (f *fakeRepository) MarkPriorityWorkspaceSyncFailed(ctx context.Context, us
 	state.InventoryStatus = "failed"
 	state.LastError = errorDetail
 	state.PendingTargetCount = failedCount
+	state.NextReconcileAt = &next
+	f.priorityWorkspaces[key] = state
+	return true, nil
+}
+
+func (f *fakeRepository) MarkPriorityWorkspaceSyncPartial(ctx context.Context, userID string, adminAccountID string, pendingSignature string, errorDetail string, blockedCount int) (bool, error) {
+	f.priorityWorkspaceMu.Lock()
+	defer f.priorityWorkspaceMu.Unlock()
+	key := userID + "|" + adminAccountID
+	state, ok := f.priorityWorkspaces[key]
+	if !ok || state.PendingSignature != pendingSignature {
+		return false, nil
+	}
+	now := time.Now()
+	state.LastDecision = "partial"
+	state.InventoryStatus = "partial"
+	state.LastError = errorDetail
+	state.PendingTargetCount = blockedCount
+	state.LastReconcileFailureAt = &now
+	next := now.Add(time.Minute)
 	state.NextReconcileAt = &next
 	f.priorityWorkspaces[key] = state
 	return true, nil

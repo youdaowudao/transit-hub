@@ -1355,7 +1355,50 @@ func TestHealthPrioritySync_IncompleteMultiplierFreezesWorkspace(t *testing.T) {
 	}
 }
 
-func TestHealthPrioritySyncIncompleteTargetFreezesHealthyTargets(t *testing.T) {
+func TestHealthPrioritySyncAllHealthTargetsBlockedRemainsFailedWithMultiplierOnlyTarget(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running",
+	}
+	actions := &fakeTargetPriorityActioner{}
+	service := &Service{repo: repo, priorityActions: actions}
+	healthPolicy := probePolicy()
+	healthPolicy.AutoDegradeEnabled = true
+	healthPolicy.PriorityMode = PriorityModeMultiplier
+	healthPolicy.StrategyMode = StrategyModeHealthProbe
+	multiplierOnlyPolicy := probePolicy()
+	multiplierOnlyPolicy.ID = "multiplier-only"
+	multiplierOnlyPolicy.PriorityMode = PriorityModeMultiplier
+	multiplierOnlyPolicy.StrategyMode = StrategyModeMultiplierOnly
+	inventory := map[string]*priorityTargetInventory{
+		"sub2api:ws1:100": {
+			target:   AdminProbeTarget{TargetID: "sub2api:ws1:100", AccountID: "100", Models: []string{"gpt-4o"}},
+			policies: []Policy{healthPolicy}, upstreamMultiplier: upstreamMultiplierResolution{status: MultiplierResolutionUnavailable},
+			currentPriority: 60, priorityPresent: true,
+		},
+		"sub2api:ws1:200": {
+			target:   AdminProbeTarget{TargetID: "sub2api:ws1:200", AccountID: "200"},
+			policies: []Policy{multiplierOnlyPolicy}, multipliers: []float64{0.2},
+			currentPriority: 9, priorityPresent: true,
+		},
+	}
+	states := []ConnectionHealthState{{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy}}
+
+	service.syncWorkspacePriorities(
+		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true, states, nil, "generation-1",
+	)
+
+	if len(actions.calls) != 1 || actions.calls[0].targetID != "200" {
+		t.Fatalf("multiplier-only target must keep its independent write: %+v", actions.calls)
+	}
+	workspaceState := repo.priorityWorkspaces["user1|ws1"]
+	if workspaceState.LastDecision != "failed" || workspaceState.PendingTargetCount != 1 || workspaceState.LastError != ErrorPriorityMetadataUnavailable {
+		t.Fatalf("all health multiplier targets blocked must remain failed: %+v", workspaceState)
+	}
+}
+
+func TestHealthPrioritySyncIncompleteTargetDoesNotFreezeHealthyTargets(t *testing.T) {
 	repo := newFakeRepository()
 	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
 		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running",
@@ -1390,15 +1433,76 @@ func TestHealthPrioritySyncIncompleteTargetFreezesHealthyTargets(t *testing.T) {
 		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
 		"user1", "ws1", inventory, true, states, nil, "generation-1",
 	)
-	if len(actions.calls) != 0 {
-		t.Fatalf("one incomplete target must freeze every workspace Priority write: calls=%+v states=%+v", actions.calls, repo.priorityStates)
+	if len(actions.calls) != 1 || actions.calls[0].targetID != "100" || actions.calls[0].priority != 10 {
+		t.Fatalf("resolved target must continue writing while the incomplete target stays unchanged: calls=%+v states=%+v", actions.calls, repo.priorityStates)
 	}
-	if len(repo.priorityStates) != 0 {
-		t.Fatalf("frozen round must not create target intents or checkpoints: %+v", repo.priorityStates)
+	if _, exists := repo.priorityStates["user1|ws1|sub2api:ws1:200"]; exists {
+		t.Fatalf("incomplete target must not create a checkpoint: %+v", repo.priorityStates)
 	}
 	workspaceState := repo.priorityWorkspaces["user1|ws1"]
-	if workspaceState.LastDecision != "failed" || workspaceState.PendingTargetCount != 1 || workspaceState.LastError != ErrorPriorityMetadataUnavailable {
-		t.Fatalf("workspace failure must report only the blocker: %+v", workspaceState)
+	if workspaceState.LastDecision != "partial" || workspaceState.PendingTargetCount != 1 || workspaceState.LastError != ErrorPriorityMetadataUnavailable {
+		t.Fatalf("workspace partial result must report only the blocker: %+v", workspaceState)
+	}
+}
+
+func TestHealthPrioritySyncIsolatesBlockedTargetAndWritesHealthyTarget(t *testing.T) {
+	repo := newFakeRepository()
+	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
+		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running",
+	}
+	actions := &fakeTargetPriorityActioner{}
+	service := &Service{repo: repo, priorityActions: actions}
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	policy.StrategyMode = StrategyModeHealthProbe
+	resolvedMultiplier := 0.1
+	blockedTargetID := "sub2api:ws1:200"
+	blockedPending := 77
+	blockedState := PrioritySyncState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: blockedTargetID,
+		OriginalPriority: 8, LastAppliedPriority: 60, PendingPriority: &blockedPending,
+		EffectiveMultiplier: 0.08,
+	}
+	repo.priorityStates["user1|ws1|"+blockedTargetID] = blockedState
+	inventory := map[string]*priorityTargetInventory{
+		"sub2api:ws1:100": {
+			target:   AdminProbeTarget{TargetID: "sub2api:ws1:100", AccountID: "100", Models: []string{"gpt-4o"}},
+			policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{
+				status: MultiplierResolutionResolved, info: upstreamKeyGroupInfo{effectiveMultiplier: &resolvedMultiplier},
+			},
+			currentPriority: 50, priorityPresent: true,
+		},
+		blockedTargetID: {
+			target:   AdminProbeTarget{TargetID: blockedTargetID, AccountID: "200", Models: []string{"gpt-4o"}},
+			policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{status: MultiplierResolutionUnavailable},
+			currentPriority: 60, priorityPresent: true,
+		},
+	}
+	states := []ConnectionHealthState{
+		{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy},
+		{ConnectionID: blockedTargetID, ModelName: "gpt-4o", State: StateHealthy},
+	}
+
+	service.syncWorkspacePriorities(
+		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
+		"user1", "ws1", inventory, true, states, []PrioritySyncState{blockedState}, "generation-1",
+	)
+
+	if len(actions.calls) != 1 || actions.calls[0].targetID != "100" || actions.calls[0].priority != 10 {
+		t.Fatalf("resolved target must continue its normal Priority write: %+v", actions.calls)
+	}
+	updatedBlocked := repo.priorityStates["user1|ws1|"+blockedTargetID]
+	if updatedBlocked.LastAppliedPriority != blockedState.LastAppliedPriority ||
+		updatedBlocked.EffectiveMultiplier != blockedState.EffectiveMultiplier ||
+		updatedBlocked.PendingPriority == nil || *updatedBlocked.PendingPriority != blockedPending {
+		t.Fatalf("blocked target checkpoint must remain unchanged: %+v", updatedBlocked)
+	}
+	workspaceState := repo.priorityWorkspaces["user1|ws1"]
+	if workspaceState.LastDecision != "partial" || workspaceState.PendingSignature != "generation-1" ||
+		workspaceState.PendingTargetCount != 1 || workspaceState.LastError != ErrorPriorityMetadataUnavailable ||
+		workspaceState.NextReconcileAt == nil {
+		t.Fatalf("mixed metadata result must stay retryable as partial: %+v", workspaceState)
 	}
 }
 
@@ -1454,7 +1558,7 @@ func TestHealthPrioritySyncDisabledMultiplierUsesBandEndWithoutFailure(t *testin
 	}
 }
 
-func TestHealthPrioritySyncMissingMultiplierFreezesWorkspaceAndCountsAffectedTarget(t *testing.T) {
+func TestHealthPrioritySyncMissingMultiplierKeepsTargetAndCountsPartialResult(t *testing.T) {
 	repo := newFakeRepository()
 	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
 		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running",
@@ -1493,15 +1597,15 @@ func TestHealthPrioritySyncMissingMultiplierFreezesWorkspaceAndCountsAffectedTar
 		"user1", "ws1", inventory, true, states, nil, "generation-1",
 	)
 
-	if len(actions.calls) != 0 {
-		t.Fatalf("missing multiplier must freeze the whole workspace: %+v", actions.calls)
+	if len(actions.calls) != 1 || actions.calls[0].targetID != "100" || actions.calls[0].priority != 10 {
+		t.Fatalf("resolved target must continue while missing multiplier target stays unchanged: %+v", actions.calls)
 	}
-	if len(repo.priorityStates) != 0 {
-		t.Fatalf("frozen round must not add target checkpoints: %+v", repo.priorityStates)
+	if _, exists := repo.priorityStates["user1|ws1|sub2api:ws1:200"]; exists {
+		t.Fatalf("missing multiplier target must not add a checkpoint: %+v", repo.priorityStates)
 	}
 	workspaceState := repo.priorityWorkspaces["user1|ws1"]
-	if workspaceState.LastDecision != "failed" || workspaceState.PendingTargetCount != 1 || workspaceState.LastError != ErrorPriorityMetadataUnavailable {
-		t.Fatalf("missing target must fail workspace sync with one affected target: %+v", workspaceState)
+	if workspaceState.LastDecision != "partial" || workspaceState.PendingTargetCount != 1 || workspaceState.LastError != ErrorPriorityMetadataUnavailable {
+		t.Fatalf("missing target must keep a partial workspace result with one affected target: %+v", workspaceState)
 	}
 }
 

@@ -160,6 +160,9 @@ type AdminGroupAccount struct {
 	MultiplierResolutionStatus string                  `json:"multiplierResolutionStatus"`
 	MultiplierSource           string                  `json:"multiplierSource"`
 	LocalFallbackMultiplier    *float64                `json:"localFallbackMultiplier,omitempty"`
+	UpstreamSiteID             string                  `json:"upstreamSiteId,omitempty"`
+	PrioritySyncBlocked        bool                    `json:"prioritySyncBlocked"`
+	PrioritySyncBlockReason    string                  `json:"prioritySyncBlockReason,omitempty"`
 	// ProductionSortOrder 是去重目标在当前 workspace 的全局生产顺序，不是分组内局部序号。
 	ProductionSortOrder int `json:"productionSortOrder"`
 }
@@ -638,6 +641,11 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 				effectiveMultiplier = &value
 				multiplierSource = MultiplierSourceLastConfirmed
 			}
+			prioritySyncBlocked := usesHealthPriority && !(priorityManaged && priorityState.Conflict) && isPriorityMultiplierBlocker(multiplierResolution.status)
+			prioritySyncBlockReason := ""
+			if prioritySyncBlocked {
+				prioritySyncBlockReason = safeMultiplierBlockReason(multiplierResolution)
+			}
 			item := AdminGroupAccount{
 				ID:                            acc.ID,
 				Name:                          acc.Name,
@@ -688,6 +696,9 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 				MultiplierResolutionStatus:    multiplierResolution.status,
 				MultiplierSource:              multiplierSource,
 				LocalFallbackMultiplier:       localFallback,
+				UpstreamSiteID:                multiplierResolution.info.siteID,
+				PrioritySyncBlocked:           prioritySyncBlocked,
+				PrioritySyncBlockReason:       prioritySyncBlockReason,
 			}
 			if _, exists := healthCandidatesByTarget[targetID]; !exists && priorityManaged && !item.PriorityConflict && usesHealthPriority && multiplierSource != MultiplierSourceNone && multiplierSource != MultiplierSourceLastConfirmed && effectiveMultiplier != nil {
 				activeModels := make(map[string]struct{}, len(activeSpecs))
@@ -990,6 +1001,16 @@ const (
 	MultiplierResolutionStale        = multiplierResolutionStale
 	MultiplierResolutionUpdating     = multiplierResolutionUpdating
 
+	MultiplierReasonBindingMissing    = "binding_missing"
+	MultiplierReasonSiteUnavailable   = "site_unavailable"
+	MultiplierReasonKeyUnavailable    = "key_unavailable"
+	MultiplierReasonKeyMissing        = "key_missing"
+	MultiplierReasonGroupsUnavailable = "groups_unavailable"
+	MultiplierReasonGroupNotFound     = "group_not_found"
+	MultiplierReasonMultiplierMissing = "multiplier_missing"
+	MultiplierReasonSnapshotStale     = "snapshot_stale"
+	MultiplierReasonSnapshotUpdating  = "snapshot_updating"
+
 	MultiplierSourceUpstreamKey   = "upstream_key"
 	MultiplierSourceLocalFallback = "local_fallback"
 	MultiplierSourceLastConfirmed = "last_confirmed"
@@ -1006,6 +1027,7 @@ type adminMultiplierCacheEntry struct {
 
 type upstreamMultiplierResolution struct {
 	status string
+	reason string
 	info   upstreamKeyGroupInfo
 }
 
@@ -1015,6 +1037,33 @@ func isPriorityMultiplierBlocker(status string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func safeMultiplierBlockReason(resolution upstreamMultiplierResolution) string {
+	switch resolution.reason {
+	case MultiplierReasonBindingMissing,
+		MultiplierReasonSiteUnavailable,
+		MultiplierReasonKeyUnavailable,
+		MultiplierReasonKeyMissing,
+		MultiplierReasonGroupsUnavailable,
+		MultiplierReasonGroupNotFound,
+		MultiplierReasonMultiplierMissing,
+		MultiplierReasonSnapshotStale,
+		MultiplierReasonSnapshotUpdating:
+		return resolution.reason
+	}
+	switch resolution.status {
+	case MultiplierResolutionMissing:
+		return MultiplierReasonMultiplierMissing
+	case MultiplierResolutionUnavailable:
+		return MultiplierReasonSiteUnavailable
+	case MultiplierResolutionStale:
+		return MultiplierReasonSnapshotStale
+	case MultiplierResolutionUpdating:
+		return MultiplierReasonSnapshotUpdating
+	default:
+		return ""
 	}
 }
 
@@ -1303,7 +1352,7 @@ func resolutionForAdminAccount(lookup upstreamMultiplierLookup, accountID string
 		return resolution
 	}
 	if lookup.unavailable {
-		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable}
+		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSiteUnavailable}
 	}
 	return upstreamMultiplierResolution{status: MultiplierResolutionUnassociated}
 }

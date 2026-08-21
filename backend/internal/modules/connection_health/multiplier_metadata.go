@@ -24,6 +24,7 @@ const (
 	multiplierSnapshotRetention  = 10 * time.Minute
 	multiplierResolutionStale    = "stale"
 	multiplierResolutionUpdating = "updating"
+	multiplierResolutionPartial  = "partial"
 	multiplierDirectUnknown      = "unknown"
 	multiplierDirectSupported    = "supported"
 	multiplierDirectUnsupported  = "unsupported"
@@ -31,8 +32,6 @@ const (
 )
 
 var errMultiplierDirectLookupAmbiguous = errors.New("direct key lookup returned ambiguous not found")
-
-var errMultiplierDirectLookupInvalid = errors.New("direct key lookup returned invalid metadata")
 
 type multiplierRefreshJob struct {
 	service  *Service
@@ -98,6 +97,7 @@ type multiplierSnapshotEntry struct {
 	generation       uint64
 	capability       string
 	keys             map[string]upstreamKeyMetadata
+	keyFailures      map[string]string
 	site             multiplierSiteMetadata
 	siteFingerprint  string
 	status           string
@@ -196,22 +196,29 @@ func (s *Service) multiplierLookupForWorkspaceWithConnections(ctx context.Contex
 	defer s.multiplierSnapshotMu.Unlock()
 	for accountID, accountConnections := range connectionsByAccount {
 		status := MultiplierResolutionResolved
+		reason := ""
 		var resolved upstreamKeyGroupInfo
 		for index, connection := range accountConnections {
 			candidate := s.resolveMultiplierSnapshotLocked(connection, userID, adminAccountID, allowStale)
 			if candidate.status == MultiplierResolutionUnavailable || candidate.status == multiplierResolutionUpdating {
 				status = MultiplierResolutionUnavailable
+				reason = candidate.reason
+				resolved = candidate.info
 				break
 			}
 			if candidate.status == multiplierResolutionStale && status == MultiplierResolutionResolved {
 				status = multiplierResolutionStale
+				reason = candidate.reason
 			}
 			if candidate.status != MultiplierResolutionResolved && candidate.status != multiplierResolutionStale {
 				if len(accountConnections) > 1 {
 					status = MultiplierResolutionConflict
+					reason = ""
 				} else {
 					status = candidate.status
+					reason = candidate.reason
 				}
+				resolved = candidate.info
 				break
 			}
 			if index > 0 && !sameUpstreamKeyGroup(resolved, candidate.info) {
@@ -220,7 +227,7 @@ func (s *Service) multiplierLookupForWorkspaceWithConnections(ctx context.Contex
 			}
 			resolved = candidate.info
 		}
-		lookup.byAccount[accountID] = upstreamMultiplierResolution{status: status, info: resolved}
+		lookup.byAccount[accountID] = upstreamMultiplierResolution{status: status, reason: reason, info: resolved}
 	}
 	for accountID, siteID := range disabledSiteByAccount {
 		if _, active := connectionsByAccount[accountID]; active {
@@ -363,7 +370,7 @@ func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader Upstrea
 func (s *Service) refreshMultiplierSnapshot(parent context.Context, reader UpstreamKeyMetadataReader, captured *multiplierSnapshotEntry, target *multiplierSnapshotEntry) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			s.finishMultiplierSnapshot(target, captured, nil, multiplierSiteMetadata{}, errors.New("multiplier snapshot refresh panic"))
+			s.finishMultiplierSnapshot(target, captured, nil, nil, multiplierSiteMetadata{}, errors.New("multiplier snapshot refresh panic"))
 			log.Printf("[connection-health] multiplier snapshot refresh panic recovered site_id=%s", captured.siteID)
 		}
 	}()
@@ -376,9 +383,9 @@ func (s *Service) refreshMultiplierSnapshot(parent context.Context, reader Upstr
 	ctx, cancel := context.WithTimeout(parent, multiplierRefreshTimeout)
 	defer cancel()
 
-	keys, site, capability, err := s.fetchMultiplierSnapshot(ctx, reader, captured)
+	keys, keyFailures, site, capability, err := s.fetchMultiplierSnapshot(ctx, reader, captured)
 	captured.capability = capability
-	s.finishMultiplierSnapshot(target, captured, keys, site, err)
+	s.finishMultiplierSnapshot(target, captured, keys, keyFailures, site, err)
 	if err != nil {
 		log.Printf("[connection-health] multiplier snapshot refresh failed site_id=%s err=%v", captured.siteID, err)
 	}
@@ -391,50 +398,64 @@ func (s *Service) multiplierSnapshotRefreshCurrent(target *multiplierSnapshotEnt
 	return current == target && current.generation == captured.generation && current.bindingSignature == captured.bindingSignature
 }
 
-func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKeyMetadataReader, entry *multiplierSnapshotEntry) (map[string]upstreamKeyMetadata, multiplierSiteMetadata, string, error) {
+func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKeyMetadataReader, entry *multiplierSnapshotEntry) (map[string]upstreamKeyMetadata, map[string]string, multiplierSiteMetadata, string, error) {
 	site, err := s.sites.GetSite(ctx, entry.siteID)
 	if err != nil || site == nil || site.Session == nil {
 		if err == nil {
 			err = errors.New("site session unavailable")
 		}
-		return nil, multiplierSiteMetadata{}, entry.capability, err
+		return nil, nil, multiplierSiteMetadata{}, entry.capability, err
 	}
 	siteMetadata := newMultiplierSiteMetadata(site)
 	if site.Platform == upstream.PlatformSub2API {
 		if entry.capability != multiplierDirectUnsupported {
 			keys := make(map[string]upstreamKeyMetadata, len(entry.keyIDs))
-			fallbackToList := false
+			keyFailures := make(map[string]string)
+			fallbackKeyIDs := make([]string, 0)
 			for _, keyID := range entry.keyIDs {
 				item, getErr := reader.GetUpstreamKeyForWorkspace(ctx, entry.userID, entry.adminAccountID, entry.siteID, keyID)
 				if getErr != nil {
 					var requestErr *upstream.RequestError
 					if errors.As(getErr, &requestErr) && requestErr.StatusCode == http.StatusNotFound {
-						fallbackToList = true
-						break
+						fallbackKeyIDs = append(fallbackKeyIDs, keyID)
+						continue
 					}
-					if errors.As(getErr, &requestErr) && requestErr.MessageKey == upstream.ErrorInvalidResponse && requestErr.StatusCode == 0 {
-						return nil, siteMetadata, entry.capability, errMultiplierDirectLookupInvalid
-					}
-					return nil, siteMetadata, entry.capability, getErr
+					keyFailures[keyID] = multiplierRefreshOutcome(getErr)
+					continue
 				}
 				if strings.TrimSpace(item.ID) != keyID {
-					return nil, siteMetadata, entry.capability, errMultiplierDirectLookupInvalid
+					keyFailures[keyID] = "invalid"
+					continue
 				}
 				keys[keyID] = upstreamKeyMetadata{id: item.ID, groupID: strings.TrimSpace(item.GroupID), groupName: strings.TrimSpace(item.GroupName)}
 			}
-			if !fallbackToList {
-				return keys, siteMetadata, multiplierDirectSupported, nil
+			if len(fallbackKeyIDs) == 0 {
+				return keys, keyFailures, siteMetadata, multiplierDirectSupported, nil
 			}
+			items, listErr := listMultiplierKeys(ctx, reader, entry, fallbackKeyIDs)
+			if listErr != nil {
+				for _, keyID := range fallbackKeyIDs {
+					keyFailures[keyID] = multiplierRefreshOutcome(listErr)
+				}
+				return keys, keyFailures, siteMetadata, entry.capability, nil
+			}
+			fallbackSet := stringSet(fallbackKeyIDs)
+			for _, item := range items {
+				id := strings.TrimSpace(item.ID)
+				if _, needed := fallbackSet[id]; id != "" && needed {
+					keys[id] = upstreamKeyMetadata{id: id, groupID: strings.TrimSpace(item.GroupID), groupName: strings.TrimSpace(item.GroupName)}
+				}
+			}
+			capability := entry.capability
+			if len(fallbackKeyIDs) == len(entry.keyIDs) && len(keys) == len(fallbackKeyIDs) {
+				capability = multiplierDirectUnsupported
+			}
+			return keys, keyFailures, siteMetadata, capability, nil
 		}
 	}
-	var items []upstream.Sub2APIKeyItem
-	if selective, ok := reader.(UpstreamKeyMetadataSelectiveReader); ok {
-		items, err = selective.ListUpstreamKeysForWorkspaceUntil(ctx, entry.userID, entry.adminAccountID, entry.siteID, entry.keyIDs)
-	} else {
-		items, err = reader.ListUpstreamKeysForWorkspace(ctx, entry.userID, entry.adminAccountID, entry.siteID)
-	}
+	items, err := listMultiplierKeys(ctx, reader, entry, entry.keyIDs)
 	if err != nil {
-		return nil, siteMetadata, entry.capability, err
+		return nil, nil, siteMetadata, entry.capability, err
 	}
 	keys := make(map[string]upstreamKeyMetadata, len(items))
 	neededIDs := stringSet(entry.keyIDs)
@@ -451,10 +472,17 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 	if site.Platform == upstream.PlatformSub2API && capability != multiplierDirectUnsupported {
 		capability = multiplierDirectUnsupported
 	}
-	return keys, siteMetadata, capability, nil
+	return keys, nil, siteMetadata, capability, nil
 }
 
-func (s *Service) finishMultiplierSnapshot(target *multiplierSnapshotEntry, captured *multiplierSnapshotEntry, keys map[string]upstreamKeyMetadata, site multiplierSiteMetadata, err error) {
+func listMultiplierKeys(ctx context.Context, reader UpstreamKeyMetadataReader, entry *multiplierSnapshotEntry, keyIDs []string) ([]upstream.Sub2APIKeyItem, error) {
+	if selective, ok := reader.(UpstreamKeyMetadataSelectiveReader); ok {
+		return selective.ListUpstreamKeysForWorkspaceUntil(ctx, entry.userID, entry.adminAccountID, entry.siteID, keyIDs)
+	}
+	return reader.ListUpstreamKeysForWorkspace(ctx, entry.userID, entry.adminAccountID, entry.siteID)
+}
+
+func (s *Service) finishMultiplierSnapshot(target *multiplierSnapshotEntry, captured *multiplierSnapshotEntry, keys map[string]upstreamKeyMetadata, keyFailures map[string]string, site multiplierSiteMetadata, err error) {
 	s.multiplierSnapshotMu.Lock()
 	defer s.multiplierSnapshotMu.Unlock()
 	current := s.multiplierSnapshots[target.workspaceKey]
@@ -462,16 +490,35 @@ func (s *Service) finishMultiplierSnapshot(target *multiplierSnapshotEntry, capt
 		return
 	}
 	if err == nil {
-		current.keys = keys
-		current.site = site
-		current.siteFingerprint = captured.siteFingerprint
-		current.status = "complete"
-		current.fetchedAt = time.Now()
-		current.expiresAt = current.fetchedAt.Add(multiplierSnapshotTTL)
-		current.nextRetryAt = time.Time{}
-		current.lastError = ""
-		current.lastOutcome = "success"
-		current.capability = captured.capability
+		now := time.Now()
+		keyFailureOutcome := multiplierKeyFailuresOutcome(keyFailures)
+		if len(keyFailures) > 0 && len(keys) == 0 && len(current.keys) > 0 {
+			current.status = multiplierResolutionStale
+			current.nextRetryAt = now.Add(multiplierFailureBackoff)
+			current.lastError = "key metadata unavailable"
+			current.lastOutcome = keyFailureOutcome
+		} else {
+			current.keys = keys
+			current.keyFailures = keyFailures
+			current.site = site
+			current.siteFingerprint = captured.siteFingerprint
+			current.status = "complete"
+			if len(keyFailures) > 0 {
+				current.status = multiplierResolutionPartial
+				if len(keys) == 0 {
+					current.status = "unavailable"
+				}
+			}
+			current.fetchedAt = now
+			current.expiresAt = current.fetchedAt.Add(multiplierSnapshotTTL)
+			current.nextRetryAt = time.Time{}
+			if len(keyFailures) > 0 {
+				current.nextRetryAt = current.fetchedAt.Add(multiplierFailureBackoff)
+			}
+			current.lastError = ""
+			current.lastOutcome = keyFailureOutcome
+			current.capability = captured.capability
+		}
 	} else {
 		if len(current.keys) == 0 {
 			current.status = "unavailable"
@@ -511,6 +558,23 @@ func multiplierRefreshOutcome(err error) string {
 	return "unavailable"
 }
 
+func multiplierKeyFailuresOutcome(keyFailures map[string]string) string {
+	outcome := ""
+	for _, candidate := range keyFailures {
+		if outcome == "" {
+			outcome = candidate
+			continue
+		}
+		if candidate != outcome {
+			return "unavailable"
+		}
+	}
+	if outcome == "" {
+		return "success"
+	}
+	return outcome
+}
+
 func (s *Service) multiplierRefreshSummary(userID string, adminAccountID string) AdminGroupsRefreshSummary {
 	prefix := userID + "\x00" + adminAccountID + "\x00"
 	s.multiplierSnapshotMu.Lock()
@@ -528,6 +592,11 @@ func (s *Service) multiplierRefreshSummary(userID string, adminAccountID string)
 		case entry.status == "complete":
 			status = "success"
 			anySuccess = true
+		case entry.status == multiplierResolutionPartial:
+			status = "partial"
+			anySuccess = true
+			anyFailure = true
+			errorKey = "unavailable"
 		case entry.status == multiplierResolutionStale:
 			status = "stale"
 			anyFailure = true
@@ -582,39 +651,54 @@ func multiplierOutcomeErrorKey(outcome string) string {
 
 func (s *Service) resolveMultiplierSnapshotLocked(connection my_sites.RealConnection, userID string, adminAccountID string, allowStale bool) upstreamMultiplierResolution {
 	siteID, keyID := strings.TrimSpace(connection.UpstreamSiteID), strings.TrimSpace(connection.UpstreamKeyID)
+	info := upstreamKeyGroupInfo{siteID: siteID, keyID: keyID}
 	if siteID == "" || keyID == "" {
-		return upstreamMultiplierResolution{status: MultiplierResolutionMissing}
+		return upstreamMultiplierResolution{status: MultiplierResolutionMissing, reason: MultiplierReasonBindingMissing, info: info}
 	}
 	entry := s.multiplierSnapshots[multiplierSnapshotKey(userID, adminAccountID, siteID)]
-	if entry == nil || entry.status == "unavailable" || entry.status == multiplierResolutionUpdating {
-		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable}
+	if entry == nil {
+		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSiteUnavailable, info: info}
+	}
+	if entry.status == multiplierResolutionUpdating {
+		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSnapshotUpdating, info: info}
+	}
+	if _, failed := entry.keyFailures[keyID]; failed {
+		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonKeyUnavailable, info: info}
+	}
+	if entry.status == "unavailable" {
+		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSiteUnavailable, info: info}
 	}
 	if entry.status == multiplierResolutionStale && !allowStale {
-		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable}
+		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSnapshotStale, info: info}
 	}
 	key, ok := entry.keys[keyID]
 	if !ok {
 		if entry.status == "complete" || entry.status == multiplierResolutionStale {
-			return upstreamMultiplierResolution{status: MultiplierResolutionMissing}
+			return upstreamMultiplierResolution{status: MultiplierResolutionMissing, reason: MultiplierReasonKeyMissing, info: info}
 		}
-		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable}
+		if entry.status == multiplierResolutionPartial {
+			return upstreamMultiplierResolution{status: MultiplierResolutionMissing, reason: MultiplierReasonKeyMissing, info: info}
+		}
+		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSiteUnavailable, info: info}
 	}
 	if len(entry.site.groups) == 0 {
-		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable}
+		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonGroupsUnavailable, info: info}
 	}
 	matched := findSiteGroup(entry.site.groups, key)
 	if matched == nil {
-		return upstreamMultiplierResolution{status: MultiplierResolutionMissing}
+		return upstreamMultiplierResolution{status: MultiplierResolutionMissing, reason: MultiplierReasonGroupNotFound, info: info}
 	}
-	info := newUpstreamKeyGroupInfo(siteID, keyID, *matched, entry.site.rechargeRate)
+	info = newUpstreamKeyGroupInfo(siteID, keyID, *matched, entry.site.rechargeRate)
 	if info.multiplier == nil || info.effectiveMultiplier == nil {
-		return upstreamMultiplierResolution{status: MultiplierResolutionMissing, info: info}
+		return upstreamMultiplierResolution{status: MultiplierResolutionMissing, reason: MultiplierReasonMultiplierMissing, info: info}
 	}
 	status := MultiplierResolutionResolved
+	reason := ""
 	if entry.status == multiplierResolutionStale {
 		status = multiplierResolutionStale
+		reason = MultiplierReasonSnapshotStale
 	}
-	return upstreamMultiplierResolution{status: status, info: info}
+	return upstreamMultiplierResolution{status: status, reason: reason, info: info}
 }
 
 func findSiteGroup(groups []upstream.GroupInfo, key upstreamKeyMetadata) *upstream.GroupInfo {

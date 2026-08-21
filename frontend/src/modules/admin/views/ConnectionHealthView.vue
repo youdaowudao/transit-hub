@@ -42,7 +42,12 @@ import type {
 	PrioritySyncStatus,
 } from '../types/connectionHealth'
 import { resolveConnectionHealthStrategyMode } from '../utils/connectionHealthPolicy'
-import { resolvePrioritySyncFailureMessage } from '../utils/connectionHealthMultiplier'
+import {
+  collectPrioritySyncBlockers,
+  prioritySyncBlockReasonKey,
+  resolvePrioritySyncFailureMessage,
+  resolvePriorityWorkspaceLabel,
+} from '../utils/connectionHealthMultiplier'
 import {
   clearQuestionAnswerUnread,
   createDefaultConnectionHealthPreferences,
@@ -304,15 +309,29 @@ const priorityFailureTime = computed(() => {
 		? t('admin.connectionHealth.prioritySync.unknownTime')
 		: parsed.toLocaleString('zh-CN', { hour12: false })
 })
+const prioritySyncBlockers = computed(() => collectPrioritySyncBlockers(adminGroups.value))
+const priorityWorkspaceLabel = computed(() => resolvePriorityWorkspaceLabel(
+  currentAccount.value?.displayName,
+  prioritySyncStatus.value?.workspaceId ?? currentAccount.value?.id ?? '',
+))
 const priorityFailureText = computed(() => {
 	const status = prioritySyncStatus.value
-	if (!status || status.status !== 'failed') return ''
+	if (!status || (status.status !== 'failed' && status.status !== 'partial')) return ''
 	const message = resolvePrioritySyncFailureMessage(
-		status,
+		{ ...status, workspaceId: priorityWorkspaceLabel.value },
 		priorityFailureTime.value,
 		readableMessage(status.errorKey ?? ''),
 	)
 	return t(message.key, message.params)
+})
+const priorityBlockReasonLabel = (reason: string): string =>
+  t(`admin.connectionHealth.prioritySync.blockReasons.${prioritySyncBlockReasonKey(reason)}`)
+const priorityBlockerSiteLabel = (siteId: string): string =>
+  siteId ? siteName(siteId) : t('admin.connectionHealth.prioritySync.siteUnknown')
+const priorityBlockerDetailsChanged = computed(() => {
+  const status = prioritySyncStatus.value
+  if (!status || (status.status !== 'partial' && status.errorKey !== 'admin.connectionHealth.errors.priorityMetadataUnavailable')) return false
+  return status.failedCount !== prioritySyncBlockers.value.length
 })
 
 const loadPrioritySyncStatus = async (): Promise<boolean> => {
@@ -779,13 +798,30 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
     </div>
 
 		<div
-			v-if="prioritySyncStatus?.status === 'failed'"
-			class="flex items-start gap-3 rounded-lg border border-destructive/20 bg-destructive/10 px-4 py-3 text-sm text-destructive"
-			role="alert"
-			aria-live="assertive"
+			v-if="prioritySyncStatus?.status === 'failed' || prioritySyncStatus?.status === 'partial'"
+			class="flex items-start gap-3 rounded-lg border px-4 py-3 text-sm"
+			:class="prioritySyncStatus.status === 'partial'
+				? 'border-amber-500/25 bg-amber-500/[0.07] text-amber-700 dark:text-amber-400'
+				: 'border-destructive/20 bg-destructive/10 text-destructive'"
+			:role="prioritySyncStatus.status === 'failed' ? 'alert' : 'status'"
+			:aria-live="prioritySyncStatus.status === 'failed' ? 'assertive' : 'polite'"
 		>
 			<AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
-			<p>{{ priorityFailureText }}</p>
+			<div class="min-w-0">
+				<p>{{ priorityFailureText }}</p>
+				<ul v-if="prioritySyncBlockers.length > 0" class="mt-2 space-y-1 text-xs">
+					<li v-for="blocker in prioritySyncBlockers" :key="blocker.targetId" class="break-words">
+						{{ t('admin.connectionHealth.prioritySync.blockedTarget', {
+							account: blocker.accountName,
+							site: priorityBlockerSiteLabel(blocker.siteId),
+							reason: priorityBlockReasonLabel(blocker.reason),
+						}) }}
+					</li>
+				</ul>
+				<p v-if="priorityBlockerDetailsChanged" class="mt-2 text-xs opacity-80">
+					{{ t('admin.connectionHealth.prioritySync.detailsChanged') }}
+				</p>
+			</div>
 		</div>
 		<div
 			v-else-if="prioritySyncStatus?.status === 'pending' || prioritySyncStatus?.status === 'running'"
@@ -793,7 +829,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
 			aria-live="polite"
 		>
 			<Loader2 class="h-4 w-4 shrink-0 animate-spin" />
-			{{ t('admin.connectionHealth.prioritySync.pending', { workspace: prioritySyncStatus.workspaceId }) }}
+			{{ t('admin.connectionHealth.prioritySync.pending', { workspace: priorityWorkspaceLabel }) }}
 		</div>
 
     <!-- 汇总与主列表使用同一 admin target 数据源。 -->

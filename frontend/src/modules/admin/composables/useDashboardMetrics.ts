@@ -41,7 +41,11 @@ function buildMetricData(
   trendPoints: DashboardTrendPoint[],
 ): DashboardMetricData {
   // 对于 nullable 指标，取值时需区分 null（不可用）和 0（真实零值）。
-  const rawValue = live[key]
+  const rawValue = key === 'todayPurchase'
+    ? live.operatingCost
+    : key === 'netProfit'
+      ? live.adjustedNetProfit
+      : live[key]
   const current = typeof rawValue === 'number' ? rawValue : (rawValue ?? null)
 
   // 使用本地类型，允许 nullable 字段携带 null（live 数据来源可能为 null）
@@ -62,6 +66,8 @@ function buildMetricData(
     costQualityMode?: string
     costMode?: string
     upstreamBalance: number
+    operatingCost?: number | null
+    adjustedNetProfit?: number | null
   }
   const pointsByDate = new Map<string, LivePoint>()
   for (const point of trendPoints) {
@@ -69,8 +75,8 @@ function buildMetricData(
       date: point.date,
       todayProfit: point.todayProfit,
       siteBalance: point.siteBalance,
-      todayPurchase: point.todayPurchase,
-      netProfit: point.netProfit,
+      todayPurchase: point.operatingCost ?? null,
+      netProfit: point.adjustedNetProfit ?? null,
       confirmedCost: point.confirmedCost,
       netProfitCeiling: point.netProfitCeiling,
       settlementStatus: point.settlementStatus,
@@ -82,6 +88,8 @@ function buildMetricData(
       costQualityMode: point.costQualityMode,
       costMode: point.costQualityMode,
       upstreamBalance: point.upstreamBalance,
+      operatingCost: point.operatingCost,
+      adjustedNetProfit: point.adjustedNetProfit,
     })
   }
   if (live.date) {
@@ -90,10 +98,10 @@ function buildMetricData(
       date: live.date,
       todayProfit: live.todayProfit,
       siteBalance: live.siteBalance,
-      todayPurchase: live.todayPurchase,
-      netProfit: live.netProfit,
-      confirmedCost: live.confirmedCost,
-      netProfitCeiling: live.netProfitCeiling,
+      todayPurchase: live.operatingCost ?? null,
+      netProfit: live.adjustedNetProfit ?? null,
+      confirmedCost: live.operatingCost ?? null,
+      netProfitCeiling: live.adjustedNetProfit ?? null,
       settlementStatus: live.settlementStatus,
       costExpectedCount: live.costQuality?.expectedSites,
       costCollectedCount: live.costQuality?.collectedSites,
@@ -103,6 +111,8 @@ function buildMetricData(
       costQualityMode: live.costQuality?.mode,
       costMode: live.costQuality?.mode,
       upstreamBalance: live.upstreamBalance,
+      operatingCost: live.operatingCost,
+      adjustedNetProfit: live.adjustedNetProfit,
     })
   }
 

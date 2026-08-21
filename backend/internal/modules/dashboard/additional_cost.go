@@ -14,10 +14,12 @@ import (
 const defaultRechargeFeeRate = 0.016
 
 const (
-	AdditionalCostRechargeFee = "recharge_fee"
-	AdditionalCostPromotion   = "promotion"
-	AdditionalCostFixed       = "fixed"
-	AdditionalCostAdjustment  = "adjustment"
+	AdditionalCostRechargeFee     = "recharge_fee"
+	AdditionalCostPromotion       = "promotion"
+	AdditionalCostFixed           = "fixed"
+	AdditionalCostAdjustment      = "adjustment"
+	AdditionalCostAccountPurchase = "account_purchase"
+	AdditionalCostAccountRefund   = "account_refund"
 )
 
 var (
@@ -51,21 +53,27 @@ type AdditionalCostRecord struct {
 	UsageRate      float64   `json:"usageRate,omitempty"`
 	Days           int       `json:"days,omitempty"`
 	SourceID       string    `json:"sourceId,omitempty"`
+	BatchID        string    `json:"batchId,omitempty"`
+	AccountAssetID string    `json:"accountAssetId,omitempty"`
 	Note           string    `json:"note,omitempty"`
 	Estimated      bool      `json:"estimated"`
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
 type AdditionalCostSummary struct {
-	RechargeFee       *float64               `json:"rechargeFee"`
-	Promotion         float64                `json:"promotion"`
-	Fixed             float64                `json:"fixed"`
-	Adjustment        float64                `json:"adjustment"`
-	Total             *float64               `json:"total"`
-	Records           []AdditionalCostRecord `json:"records,omitempty"`
-	FeeRate           *float64               `json:"feeRate,omitempty"`
-	Available         bool                   `json:"available"`
-	UnavailableReason string                 `json:"unavailableReason,omitempty"`
+	RechargeFee          *float64               `json:"rechargeFee"`
+	AccountPurchase      float64                `json:"accountPurchase"`
+	AccountRefund        float64                `json:"accountRefund"`
+	ReplacementDeduction *float64               `json:"replacementDeduction,omitempty"`
+	AccountQuality       string                 `json:"accountQuality,omitempty"`
+	Promotion            float64                `json:"promotion"`
+	Fixed                float64                `json:"fixed"`
+	Adjustment           float64                `json:"adjustment"`
+	Total                *float64               `json:"total"`
+	Records              []AdditionalCostRecord `json:"records,omitempty"`
+	FeeRate              *float64               `json:"feeRate,omitempty"`
+	Available            bool                   `json:"available"`
+	UnavailableReason    string                 `json:"unavailableReason,omitempty"`
 }
 
 type AdditionalCostInput struct {
@@ -176,6 +184,10 @@ func summarizeAdditionalCostRecords(items []AdditionalCostRecord) AdditionalCost
 			summary.Fixed += item.Amount
 		case AdditionalCostAdjustment:
 			summary.Adjustment += item.Amount
+		case AdditionalCostAccountPurchase:
+			summary.AccountPurchase += item.Amount
+		case AdditionalCostAccountRefund:
+			summary.AccountRefund += item.Amount
 		}
 	}
 	return summary

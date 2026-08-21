@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -298,7 +299,10 @@ func (r *MetricsRepository) EnsureSchema(ctx context.Context) error {
 				PRIMARY KEY (user_id, admin_account_id, metric_type, group_id)
 			);
 		`)
-	return err
+	if err != nil {
+		return err
+	}
+	return r.ensureAccountAssetSchema(ctx)
 }
 
 func (r *MetricsRepository) GetRechargeFeeRate(ctx context.Context, userID, adminAccountID, date string) (RechargeFeeRate, error) {
@@ -326,35 +330,165 @@ func (r *MetricsRepository) SaveRechargeFeeRate(ctx context.Context, rate Rechar
 }
 
 func (r *MetricsRepository) InsertAdditionalCosts(ctx context.Context, records []AdditionalCostRecord) error {
+	return r.insertAdditionalCosts(ctx, r.db, records)
+}
+
+func (r *MetricsRepository) insertAdditionalCosts(ctx context.Context, db metricsDB, records []AdditionalCostRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
 	values := make([]string, 0, len(records))
-	args := make([]any, 0, len(records)*14)
+	args := make([]any, 0, len(records)*16)
 	for i, record := range records {
-		base := i * 14
+		base := i * 16
 		values = append(values, fmt.Sprintf(
-			"($%d, $%d, $%d, $%d, $%d, $%d::date, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9, base+10, base+11, base+12, base+13, base+14,
+			"($%d, $%d, $%d, $%d, $%d, $%d::date, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+			base+1, base+2, base+3, base+4, base+5, base+6, base+7, base+8, base+9, base+10, base+11, base+12, base+13, base+14, base+15, base+16,
 		))
 		args = append(args,
 			record.ID, record.UserID, record.AdminAccountID, record.Type, record.Name, record.BusinessDate,
 			record.AmountCents, record.OriginalAmount, record.Rate, record.UsageRate, record.Days,
-			record.SourceID, record.Note, record.Estimated,
+			record.SourceID, record.BatchID, record.AccountAssetID, record.Note, record.Estimated,
 		)
 	}
-	_, err := r.db.Exec(ctx, `
+	_, err := db.Exec(ctx, `
 		INSERT INTO dashboard_additional_costs (
 			id, user_id, admin_account_id, type, name, business_date, amount_cents,
-			original_amount, rate, usage_rate, days, source_id, note, estimated
+			original_amount, rate, usage_rate, days, source_id, batch_id, account_asset_id, note, estimated
 		) VALUES `+strings.Join(values, ", "), args...)
-	return err
+	if err != nil {
+		return err
+	}
+	return r.reprojectDailySnapshotsForCosts(ctx, db, records)
+}
+
+func (r *MetricsRepository) reprojectDailySnapshotsForCosts(ctx context.Context, db metricsDB, records []AdditionalCostRecord) error {
+	type affectedDate struct{ userID, adminAccountID, date string }
+	affected := make(map[affectedDate]struct{})
+	for _, record := range records {
+		affected[affectedDate{record.UserID, record.AdminAccountID, record.BusinessDate}] = struct{}{}
+	}
+	for key := range affected {
+		snapshot, found, err := loadDashboardSnapshotForUpdate(ctx, db, key.userID, key.adminAccountID, key.date)
+		if err != nil {
+			return err
+		}
+		if !found {
+			continue
+		}
+		items, err := listAdditionalCostsForDate(ctx, db, key.userID, key.adminAccountID, key.date)
+		if err != nil {
+			return err
+		}
+		summary := summarizeAdditionalCostRecords(items)
+		if snapshot.TodayProfit == nil {
+			summary.Available = false
+			summary.UnavailableReason = "revenue_unavailable"
+		} else {
+			rate := defaultRechargeFeeRate
+			err := db.QueryRow(ctx, `
+				SELECT rate FROM dashboard_recharge_fee_rates
+				WHERE user_id=$1 AND admin_account_id=$2 AND effective_date <= $3::date
+				ORDER BY effective_date DESC,created_at DESC,id DESC LIMIT 1
+			`, key.userID, key.adminAccountID, key.date).Scan(&rate)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			fee := math.Round(*snapshot.TodayProfit*rate*100) / 100
+			summary.RechargeFee, summary.FeeRate = &fee, &rate
+			total := summary.Promotion + summary.Fixed + summary.Adjustment + summary.AccountPurchase + summary.AccountRefund + fee
+			summary.Total = &total
+		}
+		snapshot.AdditionalCost = summary.Total
+		snapshot.RechargeFee, snapshot.RechargeFeeRate = summary.RechargeFee, summary.FeeRate
+		snapshot.PromotionCost, snapshot.FixedCost, snapshot.AdjustmentCost = ptrF64(summary.Promotion), ptrF64(summary.Fixed), ptrF64(summary.Adjustment)
+		snapshot.AdditionalCostRecords = items
+		accountPurchase := summary.AccountPurchase
+		snapshot.AccountPurchaseCost = &accountPurchase
+		components, componentErr := r.accountCostComponentsForDate(ctx, db, key.userID, key.adminAccountID, key.date, snapshot.AccountSnapshotRunID, false)
+		snapshot.OperatingCost, snapshot.AdjustedNetProfit, _ = projectOperatingCost(
+			snapshot.TodayPurchase, snapshot.TodayProfit, &summary, components, componentErr,
+		)
+		snapshot.ReplacementDeduction = summary.ReplacementDeduction
+		if err := r.upsert(ctx, db, snapshot); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func loadDashboardSnapshotForUpdate(ctx context.Context, db metricsDB, userID, adminAccountID, date string) (DailySnapshot, bool, error) {
+	var snapshot DailySnapshot
+	var costQualityMode nullableCostQualityMode
+	var accountSnapshotRunID, accountStatsQuality sql.NullString
+	var recordsJSON []byte
+	err := db.QueryRow(ctx, `
+		SELECT id,user_id,admin_account_id,date,today_profit,site_balance,today_purchase,net_profit,upstream_balance,
+		       created_at,settlement_status,snapshot_source,observed_at,finalized_at,cost_expected_count,cost_collected_count,
+		       balance_observed_at,cost_fresh_count,cost_retained_count,cost_missing_count,cost_quality_mode,
+		       additional_cost,recharge_fee,recharge_fee_rate,promotion_cost,fixed_cost,adjustment_cost,
+		       additional_cost_records,operating_cost,adjusted_net_profit,COALESCE(account_snapshot_run_id,''),
+		       account_expected_count,account_completed_count,COALESCE(account_stats_quality,'missing'),account_purchase_cost,replacement_deduction
+		FROM dashboard_daily_stats
+		WHERE user_id=$1 AND admin_account_id=$2 AND date=$3::date FOR UPDATE
+	`, userID, adminAccountID, date).Scan(
+		&snapshot.ID, &snapshot.UserID, &snapshot.AdminAccountID, &snapshot.Date,
+		&snapshot.TodayProfit, &snapshot.SiteBalance, &snapshot.TodayPurchase, &snapshot.NetProfit, &snapshot.UpstreamBalance,
+		&snapshot.CreatedAt, &snapshot.SettlementStatus, &snapshot.SnapshotSource, &snapshot.ObservedAt,
+		&snapshot.FinalizedAt, &snapshot.CostExpectedCount, &snapshot.CostCollectedCount, &snapshot.BalanceObservedAt,
+		&snapshot.CostFreshCount, &snapshot.CostRetainedCount, &snapshot.CostMissingCount, &costQualityMode,
+		&snapshot.AdditionalCost, &snapshot.RechargeFee, &snapshot.RechargeFeeRate, &snapshot.PromotionCost, &snapshot.FixedCost,
+		&snapshot.AdjustmentCost, &recordsJSON, &snapshot.OperatingCost, &snapshot.AdjustedNetProfit,
+		&accountSnapshotRunID, &snapshot.AccountExpectedCount, &snapshot.AccountCompletedCount,
+		&accountStatsQuality, &snapshot.AccountPurchaseCost, &snapshot.ReplacementDeduction,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DailySnapshot{}, false, nil
+	}
+	if err != nil {
+		return DailySnapshot{}, false, err
+	}
+	snapshot.CostQualityMode = costQualityMode.String()
+	applyAccountSnapshotState(&snapshot, accountSnapshotRunID, accountStatsQuality)
+	if len(recordsJSON) > 0 && string(recordsJSON) != "null" {
+		if err := json.Unmarshal(recordsJSON, &snapshot.AdditionalCostRecords); err != nil {
+			return DailySnapshot{}, false, err
+		}
+	}
+	return snapshot, true, nil
+}
+
+func listAdditionalCostsForDate(ctx context.Context, db metricsDB, userID, adminAccountID, date string) ([]AdditionalCostRecord, error) {
+	rows, err := db.Query(ctx, `
+		SELECT id,type,name,business_date::text,amount_cents,original_amount,rate,usage_rate,days,
+		       source_id,batch_id,account_asset_id,note,estimated,created_at
+		FROM dashboard_additional_costs
+		WHERE user_id=$1 AND admin_account_id=$2 AND business_date=$3::date
+		ORDER BY created_at,id
+	`, userID, adminAccountID, date)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]AdditionalCostRecord, 0)
+	for rows.Next() {
+		var item AdditionalCostRecord
+		if err := rows.Scan(&item.ID, &item.Type, &item.Name, &item.BusinessDate, &item.AmountCents,
+			&item.OriginalAmount, &item.Rate, &item.UsageRate, &item.Days, &item.SourceID, &item.BatchID,
+			&item.AccountAssetID, &item.Note, &item.Estimated, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.UserID, item.AdminAccountID = userID, adminAccountID
+		item.Amount = float64(item.AmountCents) / 100
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (r *MetricsRepository) ListAdditionalCosts(ctx context.Context, userID, adminAccountID, from, to string) ([]AdditionalCostRecord, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, type, name, business_date::text, amount_cents, original_amount, rate, usage_rate,
-		       days, source_id, note, estimated, created_at
+		       days, source_id, batch_id, account_asset_id, note, estimated, created_at
 		FROM dashboard_additional_costs
 		WHERE user_id = $1 AND admin_account_id = $2 AND business_date >= $3::date AND business_date <= $4::date
 		ORDER BY business_date ASC, created_at ASC, id ASC
@@ -367,7 +501,7 @@ func (r *MetricsRepository) ListAdditionalCosts(ctx context.Context, userID, adm
 	for rows.Next() {
 		var item AdditionalCostRecord
 		if err := rows.Scan(&item.ID, &item.Type, &item.Name, &item.BusinessDate, &item.AmountCents,
-			&item.OriginalAmount, &item.Rate, &item.UsageRate, &item.Days, &item.SourceID, &item.Note,
+			&item.OriginalAmount, &item.Rate, &item.UsageRate, &item.Days, &item.SourceID, &item.BatchID, &item.AccountAssetID, &item.Note,
 			&item.Estimated, &item.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -399,9 +533,11 @@ func (r *MetricsRepository) upsert(ctx context.Context, db metricsDB, snapshot D
 			finalized_at, cost_expected_count, cost_collected_count, balance_observed_at,
 			cost_fresh_count, cost_retained_count, cost_missing_count, cost_quality_mode,
 			additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost,
-			adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit
+			adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit,
+			account_snapshot_run_id,account_expected_count,account_completed_count,account_stats_quality,
+			account_purchase_cost,replacement_deduction
 		)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28::jsonb, $29, $30
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28::jsonb, $29, $30, $31, $32, $33, $34, $35, $36
 		WHERE EXISTS (SELECT 1 FROM admin_accounts WHERE user_id = $2 AND id = $3)
 		ON CONFLICT (user_id, admin_account_id, date) DO UPDATE SET
 			today_profit        = EXCLUDED.today_profit,
@@ -430,7 +566,13 @@ func (r *MetricsRepository) upsert(ctx context.Context, db metricsDB, snapshot D
 			adjustment_cost    = EXCLUDED.adjustment_cost,
 			additional_cost_records = EXCLUDED.additional_cost_records,
 			operating_cost     = EXCLUDED.operating_cost,
-			adjusted_net_profit = EXCLUDED.adjusted_net_profit
+			adjusted_net_profit = EXCLUDED.adjusted_net_profit,
+			account_snapshot_run_id = EXCLUDED.account_snapshot_run_id,
+			account_expected_count = EXCLUDED.account_expected_count,
+			account_completed_count = EXCLUDED.account_completed_count,
+			account_stats_quality = EXCLUDED.account_stats_quality,
+			account_purchase_cost = EXCLUDED.account_purchase_cost,
+			replacement_deduction = EXCLUDED.replacement_deduction
 		WHERE EXISTS (SELECT 1 FROM admin_accounts WHERE user_id = EXCLUDED.user_id AND id = EXCLUDED.admin_account_id)
 		  AND (dashboard_daily_stats.settlement_status != 'final' OR EXCLUDED.snapshot_source != 'live_cache')
 	`, snapshot.ID, snapshot.UserID, snapshot.AdminAccountID, snapshot.Date,
@@ -442,7 +584,9 @@ func (r *MetricsRepository) upsert(ctx context.Context, db metricsDB, snapshot D
 		snapshot.CostMissingCount, snapshot.CostQualityMode, snapshot.AdditionalCost,
 		snapshot.RechargeFee, snapshot.RechargeFeeRate, snapshot.PromotionCost,
 		snapshot.FixedCost, snapshot.AdjustmentCost, recordsJSON, snapshot.OperatingCost,
-		snapshot.AdjustedNetProfit)
+		snapshot.AdjustedNetProfit, snapshot.AccountSnapshotRunID, snapshot.AccountExpectedCount,
+		snapshot.AccountCompletedCount, snapshot.AccountStatsQuality, snapshot.AccountPurchaseCost,
+		snapshot.ReplacementDeduction)
 	return err
 }
 
@@ -452,7 +596,9 @@ func (r *MetricsRepository) ListRange(ctx context.Context, userID, adminAccountI
 	rows, err := r.db.Query(ctx, `
 		SELECT id, user_id, admin_account_id, date, today_profit, site_balance, today_purchase, net_profit, upstream_balance, created_at, settlement_status,
 		       cost_expected_count, cost_collected_count, cost_fresh_count, cost_retained_count, cost_missing_count, cost_quality_mode,
-		       additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost, adjustment_cost, operating_cost, adjusted_net_profit
+		       additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost, adjustment_cost, operating_cost, adjusted_net_profit,
+		       COALESCE(account_snapshot_run_id,''),account_expected_count,account_completed_count,
+		       COALESCE(account_stats_quality,'missing'),account_purchase_cost,replacement_deduction
 		FROM dashboard_daily_stats
 		WHERE user_id = $1 AND admin_account_id = $2 AND date >= ($3::date - $4::int) AND date < $3::date
 		ORDER BY date ASC
@@ -466,15 +612,18 @@ func (r *MetricsRepository) ListRange(ctx context.Context, userID, adminAccountI
 	for rows.Next() {
 		var s DailySnapshot
 		var costQualityMode nullableCostQualityMode
+		var accountSnapshotRunID, accountStatsQuality sql.NullString
 		if err := rows.Scan(&s.ID, &s.UserID, &s.AdminAccountID, &s.Date, &s.TodayProfit, &s.SiteBalance,
 			&s.TodayPurchase, &s.NetProfit, &s.UpstreamBalance, &s.CreatedAt, &s.SettlementStatus,
 			&s.CostExpectedCount, &s.CostCollectedCount, &s.CostFreshCount, &s.CostRetainedCount,
 			&s.CostMissingCount, &costQualityMode, &s.AdditionalCost, &s.RechargeFee,
 			&s.RechargeFeeRate, &s.PromotionCost, &s.FixedCost, &s.AdjustmentCost,
-			&s.OperatingCost, &s.AdjustedNetProfit); err != nil {
+			&s.OperatingCost, &s.AdjustedNetProfit, &accountSnapshotRunID, &s.AccountExpectedCount,
+			&s.AccountCompletedCount, &accountStatsQuality, &s.AccountPurchaseCost, &s.ReplacementDeduction); err != nil {
 			return nil, err
 		}
 		s.CostQualityMode = costQualityMode.String()
+		applyAccountSnapshotState(&s, accountSnapshotRunID, accountStatsQuality)
 		if s.SnapshotSource == "" {
 			s.SnapshotSource = SnapshotSourceLiveCache
 		}
@@ -852,6 +1001,14 @@ func summarizeConfirmedSiteCosts(costs, expectedSites []SiteDailyCost, runID str
 // lock and one short transaction. External upstream HTTP must finish before
 // this method is called.
 func (r *MetricsRepository) FinalizeDailySnapshot(ctx context.Context, snapshot DailySnapshot, attempts []SiteDailyCost) (DailySnapshot, error) {
+	return r.finalizeDailySnapshot(ctx, snapshot, attempts, nil)
+}
+
+func (r *MetricsRepository) FinalizeDailySnapshotWithKeyRuns(ctx context.Context, snapshot DailySnapshot, attempts []SiteDailyCost, keyRuns []UpstreamKeyCostRun) (DailySnapshot, error) {
+	return r.finalizeDailySnapshot(ctx, snapshot, attempts, keyRuns)
+}
+
+func (r *MetricsRepository) finalizeDailySnapshot(ctx context.Context, snapshot DailySnapshot, attempts []SiteDailyCost, keyRuns []UpstreamKeyCostRun) (DailySnapshot, error) {
 	starter, ok := r.db.(metricsTxStarter)
 	if !ok {
 		return DailySnapshot{}, errors.New("metrics repository does not support transactions")
@@ -864,6 +1021,9 @@ func (r *MetricsRepository) FinalizeDailySnapshot(ctx context.Context, snapshot 
 
 	lockKey := "dashboard-daily-cost|" + snapshot.UserID + "|" + snapshot.AdminAccountID + "|" + snapshot.Date.Format("2006-01-02")
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+		return DailySnapshot{}, err
+	}
+	if err := r.saveUpstreamKeyCostRuns(ctx, tx, keyRuns); err != nil {
 		return DailySnapshot{}, err
 	}
 	date := snapshot.Date.Format("2006-01-02")
@@ -926,13 +1086,21 @@ func (r *MetricsRepository) FinalizeDailySnapshot(ctx context.Context, snapshot 
 		snapshot.SettlementStatus = SettlementStatusPartial
 		snapshot.FinalizedAt = nil
 	}
-	if snapshot.AdditionalCost != nil && snapshot.SettlementStatus == SettlementStatusFinal {
-		operatingCost := summary.total + *snapshot.AdditionalCost
-		snapshot.OperatingCost = &operatingCost
-		if snapshot.TodayProfit != nil {
-			adjusted := *snapshot.TodayProfit - operatingCost
-			snapshot.AdjustedNetProfit = &adjusted
+	requiredSnapshotRunID := completeAccountKeySnapshotRunID(keyRuns)
+	if snapshot.SettlementStatus == SettlementStatusFinal && requiredSnapshotRunID != "" {
+		snapshot.AccountSnapshotRunID = requiredSnapshotRunID
+		if snapshot.AccountStatsQuality == "" {
+			snapshot.AccountStatsQuality = KeyCostQualityMissing
 		}
+	}
+	if snapshot.AdditionalCost != nil && snapshot.SettlementStatus == SettlementStatusFinal {
+		components, componentErr := r.accountCostComponentsForDate(ctx, tx, snapshot.UserID, snapshot.AdminAccountID, date, requiredSnapshotRunID, false)
+		costSummary := summarizeAdditionalCostRecords(snapshot.AdditionalCostRecords)
+		costSummary.Total = snapshot.AdditionalCost
+		costSummary.RechargeFee = snapshot.RechargeFee
+		costSummary.Available = true
+		directCost := summary.total
+		snapshot.OperatingCost, snapshot.AdjustedNetProfit, _ = projectOperatingCost(&directCost, snapshot.TodayProfit, &costSummary, components, componentErr)
 	}
 	if err := r.upsert(ctx, tx, snapshot); err != nil {
 		return DailySnapshot{}, err
@@ -988,6 +1156,7 @@ func (r *MetricsRepository) ListLatestSiteCosts(ctx context.Context, userID, adm
 func (r *MetricsRepository) LatestDashboardSnapshot(ctx context.Context, userID, adminAccountID, date string) (*DailySnapshot, error) {
 	var snapshot DailySnapshot
 	var costQualityMode nullableCostQualityMode
+	var accountSnapshotRunID, accountStatsQuality sql.NullString
 	var recordsJSON []byte
 	err := r.db.QueryRow(ctx, `
 		SELECT id, user_id, admin_account_id, date,
@@ -996,7 +1165,10 @@ func (r *MetricsRepository) LatestDashboardSnapshot(ctx context.Context, userID,
 		       finalized_at, cost_expected_count, cost_collected_count, balance_observed_at,
 		       cost_fresh_count, cost_retained_count, cost_missing_count, cost_quality_mode,
 		       additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost,
-		       adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit
+		       adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit,
+		       COALESCE(account_snapshot_run_id,''),account_expected_count,account_completed_count,
+		       COALESCE(account_stats_quality,'missing'),
+		       account_purchase_cost,replacement_deduction
 		FROM dashboard_daily_stats
 		WHERE user_id = $1 AND admin_account_id = $2 AND date = $3::date
 		ORDER BY created_at DESC
@@ -1009,6 +1181,8 @@ func (r *MetricsRepository) LatestDashboardSnapshot(ctx context.Context, userID,
 		&snapshot.CostFreshCount, &snapshot.CostRetainedCount, &snapshot.CostMissingCount, &costQualityMode,
 		&snapshot.AdditionalCost, &snapshot.RechargeFee, &snapshot.RechargeFeeRate, &snapshot.PromotionCost, &snapshot.FixedCost,
 		&snapshot.AdjustmentCost, &recordsJSON, &snapshot.OperatingCost, &snapshot.AdjustedNetProfit,
+		&accountSnapshotRunID, &snapshot.AccountExpectedCount, &snapshot.AccountCompletedCount,
+		&accountStatsQuality, &snapshot.AccountPurchaseCost, &snapshot.ReplacementDeduction,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -1017,6 +1191,7 @@ func (r *MetricsRepository) LatestDashboardSnapshot(ctx context.Context, userID,
 		return nil, err
 	}
 	snapshot.CostQualityMode = costQualityMode.String()
+	applyAccountSnapshotState(&snapshot, accountSnapshotRunID, accountStatsQuality)
 	if len(recordsJSON) > 0 && string(recordsJSON) != "null" {
 		if err := json.Unmarshal(recordsJSON, &snapshot.AdditionalCostRecords); err != nil {
 			return nil, err
@@ -1084,7 +1259,10 @@ func (r *MetricsRepository) ListDailyStats(ctx context.Context, userID, adminAcc
 		       finalized_at, cost_expected_count, cost_collected_count, balance_observed_at,
 		       cost_fresh_count, cost_retained_count, cost_missing_count, cost_quality_mode,
 		       additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost,
-		       adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit
+		       adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit,
+		       COALESCE(account_snapshot_run_id,''),account_expected_count,account_completed_count,
+		       COALESCE(account_stats_quality,'missing'),
+		       account_purchase_cost,replacement_deduction
 		FROM dashboard_daily_stats
 		WHERE user_id = $1 AND admin_account_id = $2
 		  AND date >= $3::date AND date <= $4::date
@@ -1099,6 +1277,7 @@ func (r *MetricsRepository) ListDailyStats(ctx context.Context, userID, adminAcc
 	for rows.Next() {
 		var s DailySnapshot
 		var costQualityMode nullableCostQualityMode
+		var accountSnapshotRunID, accountStatsQuality sql.NullString
 		var recordsJSON []byte
 		if err := rows.Scan(
 			&s.ID, &s.UserID, &s.AdminAccountID, &s.Date,
@@ -1108,10 +1287,13 @@ func (r *MetricsRepository) ListDailyStats(ctx context.Context, userID, adminAcc
 			&s.CostFreshCount, &s.CostRetainedCount, &s.CostMissingCount, &costQualityMode,
 			&s.AdditionalCost, &s.RechargeFee, &s.RechargeFeeRate, &s.PromotionCost, &s.FixedCost,
 			&s.AdjustmentCost, &recordsJSON, &s.OperatingCost, &s.AdjustedNetProfit,
+			&accountSnapshotRunID, &s.AccountExpectedCount, &s.AccountCompletedCount,
+			&accountStatsQuality, &s.AccountPurchaseCost, &s.ReplacementDeduction,
 		); err != nil {
 			return nil, err
 		}
 		s.CostQualityMode = costQualityMode.String()
+		applyAccountSnapshotState(&s, accountSnapshotRunID, accountStatsQuality)
 		if len(recordsJSON) > 0 && string(recordsJSON) != "null" {
 			if err := json.Unmarshal(recordsJSON, &s.AdditionalCostRecords); err != nil {
 				return nil, err
@@ -1120,4 +1302,12 @@ func (r *MetricsRepository) ListDailyStats(ctx context.Context, userID, adminAcc
 		snapshots = append(snapshots, s)
 	}
 	return snapshots, rows.Err()
+}
+
+func applyAccountSnapshotState(snapshot *DailySnapshot, runID, quality sql.NullString) {
+	snapshot.AccountSnapshotRunID = runID.String
+	snapshot.AccountStatsQuality = KeyCostQualityMissing
+	if quality.Valid && quality.String != "" {
+		snapshot.AccountStatsQuality = quality.String
+	}
 }

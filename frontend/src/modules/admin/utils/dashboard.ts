@@ -75,6 +75,19 @@ export interface DashboardTrendValue {
   quality: TrendValueQuality
 }
 
+export interface AccountStatsRefreshResult {
+  quality: string
+  completedAccounts: number
+  expectedAccounts: number
+}
+
+/** 空账号集无需提示；有待统计账号时才报告本轮未完成数量。 */
+export function formatAccountStatsRefreshNotice(result: AccountStatsRefreshResult): string {
+  if (result.expectedAccounts === 0) return ''
+  if (result.quality === 'complete' && result.completedAccounts === result.expectedAccounts) return ''
+  return `账号自动统计未完成（${result.completedAccounts}/${result.expectedAccounts}），首页保留上一轮同日已确认数据`
+}
+
 /** 选择趋势图可展示的正式值或暂估值，绝不把未知数据转换成零。 */
 export function selectDashboardTrendValue(input: DashboardTrendValueInput): DashboardTrendValue {
   if (input.status === 'fallback'

@@ -456,6 +456,23 @@ type KeyUsageTodayItem struct {
 	RechargeRate float64
 }
 
+type KeyUsageSiteResult struct {
+	SiteID       string
+	SiteName     string
+	Platform     Platform
+	RechargeRate float64
+	Complete     bool
+	Error        string
+	Items        []KeyUsageTodayItem
+}
+
+type KeyUsageForDateResult struct {
+	BusinessDate   string
+	ExpectedSites  int
+	CompletedSites int
+	Sites          []KeyUsageSiteResult
+}
+
 // KeyUsageCollectionError 表示跨多个上游站点采集 Key 用量时有站点失败。
 // Items 仍由调用方通过正常返回值获得；FailedSites < TotalSites 时属于部分成功，
 // 调用方可以展示已成功数据并明确标注缺失范围，而不必把失败站点静默当成零消费。

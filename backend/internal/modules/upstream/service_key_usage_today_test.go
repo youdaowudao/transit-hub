@@ -243,6 +243,59 @@ func TestServiceKeyUsageToday_PartialFailureKeepsSuccessfulItems(t *testing.T) {
 	}
 }
 
+func TestServiceKeyUsageForDateReportsCompleteAndFailedSitesWithoutDroppingZeroKeys(t *testing.T) {
+	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/keys":
+			writeJSON(w, map[string]any{"data": []map[string]any{
+				{"id": "1", "name": "zero", "group": map[string]any{"name": "vip"}},
+				{"id": "2", "name": "used", "group": map[string]any{"name": "vip"}},
+			}, "total": 2})
+		case "/api/v1/usage/stats":
+			if r.URL.Query().Get("start_date") != "2026-08-22" || r.URL.Query().Get("end_date") != "2026-08-22" {
+				t.Fatalf("unexpected business date: %s", r.URL.RawQuery)
+			}
+			amount := 0.0
+			if r.URL.Query().Get("api_key_id") == "2" {
+				amount = 5
+			}
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": amount}})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer successServer.Close()
+	failingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusBadGateway)
+	}))
+	defer failingServer.Close()
+
+	cache := newFakeSiteCache()
+	cache.add(newTestSite("site-success", "user-1", "acc-1", 2, &Session{Platform: PlatformSub2API, BaseURL: successServer.URL, AccessToken: "token"}))
+	cache.add(newTestSite("site-failed", "user-1", "acc-1", 2, &Session{Platform: PlatformSub2API, BaseURL: failingServer.URL, AccessToken: "token"}))
+	cache.add(newTestSite("site-current-other", "user-1", "acc-other", 2, &Session{Platform: PlatformSub2API, BaseURL: successServer.URL, AccessToken: "token"}))
+	service := NewService(NewPlatformService(NewHTTPClient(http.DefaultClient)), nil, nil, cache)
+	service.SetAdminAccountResolver(&fakeAccountResolver{current: map[string]string{"user-1": "acc-other"}})
+
+	result, err := service.KeyUsageForDate(context.Background(), "user-1", "acc-1", "2026-08-22")
+	if err != nil {
+		t.Fatalf("KeyUsageForDate() error: %v", err)
+	}
+	if len(result.Sites) != 2 || result.ExpectedSites != 2 || result.CompletedSites != 1 {
+		t.Fatalf("site completeness = %#v", result)
+	}
+	bySite := map[string]KeyUsageSiteResult{}
+	for _, site := range result.Sites {
+		bySite[site.SiteID] = site
+	}
+	if !bySite["site-success"].Complete || len(bySite["site-success"].Items) != 2 {
+		t.Fatalf("successful site = %#v", bySite["site-success"])
+	}
+	if bySite["site-failed"].Complete || bySite["site-failed"].Error == "" {
+		t.Fatalf("failed site = %#v", bySite["site-failed"])
+	}
+}
+
 // TestServiceBalanceBreakdown_SortsDescendingWithUnknownBalanceLast 覆盖测试要求 7、8：
 // 按 balance 降序排序，未知余额（rechargeRate<=0）站点排在最后；total 等于已知余额之和，
 // 与 LiveMetrics 中 upstreamBalance 的计算口径一致（rechargeRate<=0 站点不计入 total）。

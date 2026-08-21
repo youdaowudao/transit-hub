@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { Plus, Save, Loader2, CheckCircle2, ListChecks, MessageSquare, Send, Trash2, Timer, AlertTriangle, TrendingUp, Info, Mail, RefreshCw, RotateCcw, ServerCog, Power, X, WalletCards } from 'lucide-vue-next'
+import { Plus, Save, Loader2, CheckCircle2, ListChecks, MessageSquare, Send, Trash2, Timer, AlertTriangle, TrendingUp, Info, Mail, RefreshCw, RotateCcw, ServerCog, Power, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import EmailTemplatesPanel from '../components/settings/EmailTemplatesPanel.vue'
@@ -33,7 +33,6 @@ import {
   testNotificationChannel,
   testSmtpEmail,
 } from '../api/settings'
-import { createAdditionalCost, getRechargeFeeRate, saveRechargeFeeRate } from '../api/dashboardAdmin'
 import type { NotificationChannel, NotificationChannelSettings, NotificationTemplateFormat, SmtpSettings, SmtpTlsMode, StrategySettings, TestNotificationChannelPayload } from '../types/settings'
 
 import { t } from '@/locales'
@@ -55,48 +54,6 @@ const errorChannels = ref('')
 const enableRefreshInterval = ref(false)
 const refreshInterval = ref('60')
 const minimumRefreshInterval = 60
-
-const shanghaiToday = () => new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
-const feeRate = ref('1.6')
-const feeEffectiveDate = ref(shanghaiToday())
-const costType = ref<'promotion' | 'fixed' | 'adjustment'>('promotion')
-const costName = ref('')
-const costAmount = ref('')
-const costUsageRate = ref('80')
-const costDays = ref('10')
-const costDate = ref(shanghaiToday())
-const costNote = ref('')
-const isSavingCost = ref(false)
-const costError = ref('')
-const costSuccess = ref(false)
-const costErrorText = computed(() => costError.value.startsWith('admin.') ? t(costError.value) : costError.value)
-
-const saveFeeRate = async () => {
-  if (isSavingCost.value) return
-  const rate = Number.parseFloat(feeRate.value) / 100
-  if (!Number.isFinite(rate) || rate < 0 || rate > 1) { costError.value = '手续费率必须在 0% 到 100% 之间'; return }
-  isSavingCost.value = true; costError.value = ''; costSuccess.value = false
-  try { await saveRechargeFeeRate({ effectiveDate: feeEffectiveDate.value, rate }); costSuccess.value = true } catch (error) { costError.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown' } finally { isSavingCost.value = false }
-}
-
-const saveAdditionalCost = async () => {
-  if (isSavingCost.value) return
-  const amount = Number.parseFloat(costAmount.value)
-  const days = Number.parseInt(costDays.value, 10)
-  const usageRate = Number.parseFloat(costUsageRate.value) / 100
-  if (!Number.isFinite(amount) || (costType.value !== 'adjustment' && amount < 0)) { costError.value = '请输入有效金额'; return }
-  if (costType.value !== 'adjustment' && (!Number.isInteger(days) || days <= 0)) { costError.value = '分摊天数必须大于 0'; return }
-  if (costType.value === 'promotion' && (!Number.isFinite(usageRate) || usageRate < 0 || usageRate > 1)) { costError.value = '预计使用率必须在 0% 到 100% 之间'; return }
-  isSavingCost.value = true; costError.value = ''; costSuccess.value = false
-  try {
-    await createAdditionalCost({ type: costType.value, name: costName.value.trim(), businessDate: costDate.value, amount, usageRate: costType.value === 'promotion' ? usageRate : 0, days: costType.value === 'adjustment' ? 0 : days, note: costNote.value.trim() })
-    costSuccess.value = true; costName.value = ''; costAmount.value = ''; costNote.value = ''
-  } catch (error) { costError.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown' } finally { isSavingCost.value = false }
-}
-
-const loadRechargeFeeRate = async () => {
-  try { const rate = await getRechargeFeeRate(); feeRate.value = String(rate.rate * 100) } catch { /* 费率区不阻断现有策略设置。 */ }
-}
 
 const enableBalanceWarning = ref(false)
 const defaultBalanceThreshold = ref('10.00')
@@ -1063,7 +1020,6 @@ const loadCurrentVersion = async () => {
 onMounted(async () => {
   await loadChannels()
   void loadStrategy()
-  void loadRechargeFeeRate()
   void loadSmtp()
   void loadCurrentVersion()
   void restoreUpgradeStatus()
@@ -1197,35 +1153,6 @@ onBeforeUnmount(() => {
           <p v-if="errorStrategy" class="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             {{ t(errorStrategy) }}
           </p>
-
-          <div class="rounded-2xl border border-border/50 bg-card shadow-sm overflow-hidden">
-            <div class="p-5 flex items-start gap-3">
-              <div class="p-2 bg-amber-500/10 text-amber-600 rounded-xl shrink-0"><WalletCards class="w-5 h-5" /></div>
-              <div class="min-w-0">
-                <h4 class="text-sm font-semibold text-foreground">首页附加成本</h4>
-                <p class="text-xs text-muted-foreground mt-0.5">手续费按当天营业额计算；活动和固定费用按你填写的周期分摊。修正直接新增负数记录。</p>
-              </div>
-            </div>
-            <div class="border-t border-border/50 p-5 space-y-5">
-              <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
-                <label class="space-y-1"><span class="text-xs text-muted-foreground">充值手续费率（%）</span><Input v-model="feeRate" type="number" min="0" max="100" step="0.01" /></label>
-                <label class="space-y-1"><span class="text-xs text-muted-foreground">生效业务日</span><Input v-model="feeEffectiveDate" type="date" /></label>
-                <Button :disabled="isSavingCost" @click="saveFeeRate"><Save class="mr-2 h-4 w-4" />保存费率</Button>
-              </div>
-              <div class="border-t border-border/50 pt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <label class="space-y-1"><span class="text-xs text-muted-foreground">成本类型</span><select v-model="costType" class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="promotion">活动赠送</option><option value="fixed">服务器/固定费用</option><option value="adjustment">手工调整</option></select></label>
-                <label class="space-y-1"><span class="text-xs text-muted-foreground">名称</span><Input v-model="costName" placeholder="例如：夏季活动" /></label>
-                <label class="space-y-1"><span class="text-xs text-muted-foreground">金额（元）</span><Input v-model="costAmount" type="number" step="0.01" :placeholder="costType === 'adjustment' ? '可填负数' : '0.00'" /></label>
-                <label class="space-y-1"><span class="text-xs text-muted-foreground">开始业务日</span><Input v-model="costDate" type="date" /></label>
-                <label v-if="costType === 'promotion'" class="space-y-1"><span class="text-xs text-muted-foreground">预计使用率（%）</span><Input v-model="costUsageRate" type="number" min="0" max="100" step="1" /></label>
-                <label v-if="costType !== 'adjustment'" class="space-y-1"><span class="text-xs text-muted-foreground">分摊天数</span><Input v-model="costDays" type="number" min="1" step="1" /></label>
-                <label class="space-y-1 sm:col-span-2"><span class="text-xs text-muted-foreground">说明</span><Input v-model="costNote" placeholder="可选" /></label>
-                <div class="flex items-end"><Button :disabled="isSavingCost" @click="saveAdditionalCost"><Loader2 v-if="isSavingCost" class="mr-2 h-4 w-4 animate-spin" /><Plus v-else class="mr-2 h-4 w-4" />新增记录</Button></div>
-              </div>
-              <p v-if="costError" class="text-sm text-destructive">{{ costErrorText }}</p>
-              <p v-else-if="costSuccess" class="text-sm text-emerald-600">已保存。首页刷新后会按当天业务日重新汇总。</p>
-            </div>
-          </div>
 
           <!-- Card 1: Data Refresh -->
           <div class="rounded-2xl border border-border/50 bg-card shadow-sm overflow-hidden">

@@ -8,7 +8,6 @@ import {
   AlertTriangle,
   ArrowRight,
   CircleCheckBig,
-  ChevronDown,
   Clock3,
   Gauge,
   Landmark,
@@ -30,12 +29,14 @@ import StatCard from '../components/dashboard/StatCard.vue'
 import UpstreamBalanceBreakdownModal from '../components/dashboard/UpstreamBalanceBreakdownModal.vue'
 import UpstreamKeyUsageTodayModal from '../components/dashboard/UpstreamKeyUsageTodayModal.vue'
 import DailyStatsPanel from '../components/dashboard/DailyStatsPanel.vue'
+import AccountCostWorkspace from '../components/dashboard/AccountCostWorkspace.vue'
 import {
   getDashboardMetrics,
   getDashboardTrends,
   getGroupProfitToday,
   getGroupUsageToday,
   getUpstreamBalanceBreakdown,
+  refreshAccountStats,
   type GroupUsageTodayResponse,
   type GroupProfitTodayResponse,
   type UpstreamBalanceBreakdownResponse,
@@ -59,6 +60,7 @@ import {
   calculateProfitMargin,
   computeDelta,
   computeDashboardMetricDelta,
+  formatAccountStatsRefreshNotice,
   formatCny,
   formatDateTime,
 } from '../utils/dashboard'
@@ -100,7 +102,8 @@ const groupUsageTodayOpen = ref(false)
 const upstreamKeyUsageTodayOpen = ref(false)
 const upstreamBalanceBreakdownOpen = ref(false)
 const dailyStatsPanelOpen = ref(false)
-const additionalCostsExpanded = ref(false)
+const accountCostWorkspaceOpen = ref(false)
+const accountCostInitialTab = ref<'today' | 'assets' | 'ledger' | 'rules'>('today')
 
 const openBalanceFilter = () => { balanceFilterOpen.value = true }
 const closeBalanceFilter = () => { balanceFilterOpen.value = false }
@@ -113,6 +116,11 @@ const openUpstreamBalanceBreakdown = () => { upstreamBalanceBreakdownOpen.value 
 const closeUpstreamBalanceBreakdown = () => { upstreamBalanceBreakdownOpen.value = false }
 const openDailyStatsPanel = () => { dailyStatsPanelOpen.value = true }
 const closeDailyStatsPanel = () => { dailyStatsPanelOpen.value = false }
+const openAccountCostWorkspace = (tab: 'today' | 'assets' | 'ledger' | 'rules' = 'today') => {
+	accountCostInitialTab.value = tab
+	accountCostWorkspaceOpen.value = true
+}
+const closeAccountCostWorkspace = () => { accountCostWorkspaceOpen.value = false }
 const openGroupList = () => { void router.push({ name: 'AdminGroupAssociations' }) }
 
 const handleMetricCardClick = (key: string) => {
@@ -121,7 +129,7 @@ const handleMetricCardClick = (key: string) => {
       openGroupUsageToday()
       break
     case 'todayPurchase':
-      openUpstreamKeyUsageToday()
+      openAccountCostWorkspace()
       break
     case 'upstreamBalance':
       openUpstreamBalanceBreakdown()
@@ -149,6 +157,8 @@ const initialLoading = ref(true)
 const isRefreshingData = ref(false)
 const refreshDataFailed = ref(false)
 const lastUpdatedAt = ref<number | null>(null)
+const accountStatsRefreshKey = ref('')
+const accountStatsRefreshNotice = ref('')
 
 const hydrateSnapshot = (snapshot: DashboardDataSnapshot | null): boolean => {
   if (!snapshot) return false
@@ -267,6 +277,17 @@ const loadAllData = async (options: { skipStatusCheck?: boolean } = {}) => {
     const cachedTrends = previous?.trends ?? { points: [] }
     groupCount.value = live.groupCount ?? null
     applyRawData(live, cachedTrends)
+	const refreshKey = `${workspaceID.value}:${live.date}`
+		if (accountStatsRefreshKey.value !== refreshKey) {
+			accountStatsRefreshKey.value = refreshKey
+			void refreshAccountStats(live.date).then(async (result) => {
+				accountStatsRefreshNotice.value = formatAccountStatsRefreshNotice(result)
+			const refreshed = await getDashboardMetrics()
+			applyRawData(refreshed, cachedTrends)
+		}).catch(() => {
+			accountStatsRefreshNotice.value = '账号自动统计刷新失败，首页保留上一轮同日已确认数据'
+		})
+	}
     const updatedAt = Date.now()
     lastUpdatedAt.value = updatedAt
     const key = workspaceID.value
@@ -366,9 +387,12 @@ const numberFormatter = computed(() => new Intl.NumberFormat(locale, { maximumFr
 
 const profitMarginState = computed(() => {
   const cq = liveData.value?.costQuality
+	if (liveData.value?.adjustedProfitMargin != null) {
+		return { value: liveData.value.adjustedProfitMargin, mode: 'exact' as const }
+	}
   return calculateProfitMargin({
     revenue: metric('todayProfit')?.current,
-    netProfit: metric('netProfit')?.current,
+    netProfit: liveData.value?.adjustedNetProfit ?? null,
     costComplete: cq?.complete,
     costMode: cq?.mode,
     confirmedCost: cq?.confirmedCost,
@@ -483,17 +507,6 @@ const cards = computed<DashboardCoreCard[]>(() => {
   return result
 })
 
-const additionalCostLines = computed(() => {
-  const summary = liveData.value?.additionalCosts
-  if (!summary) return []
-  return [
-    { label: `充值手续费${summary.feeRate != null ? ` (${(summary.feeRate * 100).toFixed(2)}%)` : ''}`, value: summary.rechargeFee },
-    { label: '活动赠送摊销', value: summary.promotion },
-    { label: '服务器及固定费用', value: summary.fixed },
-    { label: '手工调整', value: summary.adjustment },
-  ]
-})
-
 const displayedTodayRevenue = computed(() => liveData.value?.todayProfit ?? null)
 const displayedTodayCost = computed(() => {
   if (liveData.value?.todayPurchase != null) return liveData.value.todayPurchase
@@ -501,16 +514,9 @@ const displayedTodayCost = computed(() => {
   return quality && quality.collectedSites > 0 ? quality.confirmedCost : null
 })
 const displayedOperatingCost = computed(() => {
-  const additionalCost = liveData.value?.additionalCosts?.total
-  return displayedTodayCost.value != null && additionalCost != null
-    ? displayedTodayCost.value + additionalCost
-    : null
+	return liveData.value?.operatingCost ?? null
 })
-const displayedAdjustedNetProfit = computed(() => (
-  displayedTodayRevenue.value != null && displayedOperatingCost.value != null
-    ? displayedTodayRevenue.value - displayedOperatingCost.value
-    : null
-))
+const displayedAdjustedNetProfit = computed(() => liveData.value?.adjustedNetProfit ?? null)
 
 type GroupMetricMode = 'profit' | 'revenue'
 type GroupContributionItem = GroupUsageTodayResponse['groups'][number] & {
@@ -968,6 +974,15 @@ const lastProbeLabel = computed(() => {
     </div>
 
     <div
+      v-if="adminStatus.authenticated && accountStatsRefreshNotice"
+      class="flex flex-wrap items-center justify-between gap-2 border-y border-warning/40 bg-warning/5 px-4 py-2 text-sm"
+      role="status"
+    >
+      <span class="flex items-center gap-2 text-muted-foreground"><AlertTriangle class="h-4 w-4 shrink-0 text-warning" />{{ accountStatsRefreshNotice }}</span>
+      <button type="button" class="rounded-md px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-warning/10" @click="openAccountCostWorkspace('assets')">查看买号资产</button>
+    </div>
+
+    <div
       v-else-if="!initialLoading && !adminModalOpen"
       class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-2.5"
     >
@@ -1058,51 +1073,18 @@ const lastProbeLabel = computed(() => {
           />
         </section>
 
-        <section v-if="liveData?.additionalCosts">
-          <article class="overflow-hidden rounded-lg border border-border/60 bg-card shadow-sm">
-            <button
-              type="button"
-              class="grid w-full grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-4 px-4 py-3 text-left transition-colors hover:bg-surface/40 sm:px-5"
-              :aria-expanded="additionalCostsExpanded"
-              aria-controls="dashboard-operating-cost-details"
-              @click="additionalCostsExpanded = !additionalCostsExpanded"
-            >
-              <span class="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-3">
-                <span class="text-sm font-medium text-muted-foreground">今日经营成本</span>
-                <span class="text-lg font-bold tabular-nums text-foreground">{{ formatCny(displayedOperatingCost) }}</span>
-              </span>
-              <span class="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-baseline sm:gap-3">
-                <span class="text-sm font-medium text-muted-foreground">调整后净利润</span>
-                <span class="text-lg font-bold tabular-nums text-foreground">{{ formatCny(displayedAdjustedNetProfit) }}</span>
-              </span>
-              <ChevronDown
-                class="h-4 w-4 text-muted-foreground transition-transform"
-                :class="additionalCostsExpanded ? 'rotate-180' : ''"
-                aria-hidden="true"
-              />
-            </button>
-            <div
-              v-if="additionalCostsExpanded"
-              id="dashboard-operating-cost-details"
-              class="border-t border-border/60 px-4 pb-3 sm:px-5"
-            >
-              <dl class="divide-y divide-border/60">
-                <div class="flex items-center justify-between gap-4 py-2 text-sm">
-                  <dt class="text-muted-foreground">上游直接成本</dt>
-                  <dd class="font-medium tabular-nums text-foreground">{{ formatCny(displayedTodayCost) }}</dd>
-                </div>
-                <div v-for="item in additionalCostLines" :key="item.label" class="flex items-center justify-between gap-4 py-2 text-sm">
-                  <dt class="text-muted-foreground">{{ item.label }}</dt>
-                  <dd class="font-medium tabular-nums text-foreground">{{ formatCny(item.value) }}</dd>
-                </div>
-                <div class="flex items-center justify-between gap-4 py-2 text-sm">
-                  <dt class="text-muted-foreground">附加成本合计</dt>
-                  <dd class="font-semibold tabular-nums text-foreground">{{ formatCny(liveData.additionalCosts.total) }}</dd>
-                </div>
-              </dl>
-            </div>
-          </article>
-        </section>
+		<section class="flex flex-col gap-3 border-y border-border/60 py-3 sm:flex-row sm:items-center sm:justify-between">
+			<div class="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1 text-sm">
+				<span class="font-medium text-foreground">成本构成</span>
+				<span class="text-muted-foreground">上游 {{ formatCny(displayedTodayCost) }}</span>
+				<span class="text-muted-foreground">买号 {{ formatCny(liveData?.additionalCosts?.accountPurchase ?? null) }}</span>
+				<span class="text-muted-foreground">其他 {{ formatCny(liveData?.additionalCosts?.total == null ? null : liveData.additionalCosts.total - (liveData.additionalCosts.accountPurchase ?? 0) - (liveData.additionalCosts.accountRefund ?? 0)) }}</span>
+			</div>
+			<div class="flex shrink-0 gap-2">
+				<button type="button" class="h-8 rounded-md border border-border px-3 text-xs font-medium hover:bg-surface-elevated" @click="openAccountCostWorkspace('today')">记一笔成本</button>
+				<button type="button" class="h-8 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90" @click="openAccountCostWorkspace('assets')">录入买号</button>
+			</div>
+		</section>
 
         <section class="grid gap-4 xl:grid-cols-12">
           <article class="min-w-0 rounded-lg border border-border/60 bg-card p-4 shadow-sm sm:p-5 xl:col-span-8">
@@ -1362,6 +1344,18 @@ const lastProbeLabel = computed(() => {
       </button>
     </div>
 
+    <AccountCostWorkspace
+      :open="accountCostWorkspaceOpen"
+      :business-date="liveData?.date ?? ''"
+      :direct-cost="displayedTodayCost"
+      :operating-cost="liveData?.operatingCost ?? null"
+      :adjusted-net-profit="liveData?.adjustedNetProfit ?? null"
+      :summary="liveData?.additionalCosts"
+      :initial-tab="accountCostInitialTab"
+      :workspace-id="workspaceID"
+      @close="closeAccountCostWorkspace"
+      @updated="loadAllData({ skipStatusCheck: true })"
+    />
     <AdminLoginModal
       :open="adminModalOpen"
       :submitting="adminSubmitting"

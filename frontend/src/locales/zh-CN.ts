@@ -376,7 +376,7 @@ export default {
       metrics: {
         todayProfit: '今日营收',
         siteBalance: '站点用户总余额',
-        todayPurchase: '今日成本',
+        todayPurchase: '今日总成本',
         netProfit: '今日净利润',
         upstreamBalance: '上游总余额',
         profitMargin: '今日利润率',

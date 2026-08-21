@@ -59,6 +59,22 @@ type dailySnapshotFinalizer interface {
 	FinalizeDailySnapshot(ctx context.Context, snapshot DailySnapshot, attempts []SiteDailyCost) (DailySnapshot, error)
 }
 
+type dailySnapshotAccountFinalizer interface {
+	FinalizeDailySnapshotWithKeyRuns(ctx context.Context, snapshot DailySnapshot, attempts []SiteDailyCost, keyRuns []UpstreamKeyCostRun) (DailySnapshot, error)
+}
+
+type accountCostComponentRepository interface {
+	AccountCostComponentsForSnapshotRun(ctx context.Context, userID, adminAccountID, date, snapshotRunID string) (AccountCostComponents, error)
+}
+
+type accountSubstateRecoveryRepository interface {
+	LatestCompleteAccountKeyCostRuns(ctx context.Context, userID, adminAccountID, date string) (string, []UpstreamKeyCostRun, error)
+}
+
+type accountSnapshotRunRepository interface {
+	AccountKeyCostRunsForSnapshot(ctx context.Context, userID, adminAccountID, date, snapshotRunID string) ([]UpstreamKeyCostRun, error)
+}
+
 // MetricsService 负责仪表盘指标的实时计算、历史快照存储与午夜调度。
 // 与同包的 Service（admin 会话管理）职责分离，共享 SessionStore 和 PlatformClient。
 type MetricsService struct {
@@ -71,6 +87,11 @@ type MetricsService struct {
 	sessionSync     MySiteStateSync
 	refreshInterval time.Duration // 用于推导 maxStaleness；0 表示使用默认值 2h
 	additionalCosts AdditionalCostRepository
+	accountCosts    accountCostComponentRepository
+	accountAssets   *AccountAssetService
+	keyUsageForDate upstreamKeyUsageForDateReader
+	keyCostRuns     accountKeyCostRunRepository
+	accountStats    automaticAccountStatsRepository
 }
 
 // SetRefreshInterval 注入上游站点同步间隔，用于推导缓存时效阈值。
@@ -97,6 +118,9 @@ func (s *MetricsService) SetMySiteSync(sync MySiteStateSync) {
 
 func (s *MetricsService) SetRealConnectionReader(reader RealConnectionReader) {
 	s.realConnections = reader
+	if s.accountAssets != nil {
+		s.accountAssets.connections = reader
+	}
 }
 
 func (s *MetricsService) freshAdminSession(ctx context.Context, userID string, adminAccountID string, record *AdminSession) (upstream.Session, error) {
@@ -142,6 +166,21 @@ func NewMetricsService(store SessionStore, platform PlatformClient, upstreams Up
 	service := &MetricsService{store: store, platform: platform, upstreams: upstreams, metricsRepo: metricsRepo, accounts: accounts}
 	if repo, ok := metricsRepo.(AdditionalCostRepository); ok {
 		service.additionalCosts = repo
+	}
+	if repo, ok := metricsRepo.(accountCostComponentRepository); ok {
+		service.accountCosts = repo
+	}
+	if repo, ok := metricsRepo.(AccountAssetRepository); ok {
+		service.accountAssets = NewAccountAssetService(repo, accounts, nil)
+	}
+	if reader, ok := upstreams.(upstreamKeyUsageForDateReader); ok {
+		service.keyUsageForDate = reader
+	}
+	if repo, ok := metricsRepo.(accountKeyCostRunRepository); ok {
+		service.keyCostRuns = repo
+	}
+	if repo, ok := metricsRepo.(automaticAccountStatsRepository); ok {
+		service.accountStats = repo
 	}
 	return service
 }
@@ -248,7 +287,7 @@ func (s *MetricsService) additionalCostSummary(ctx context.Context, userID, admi
 		}
 	}
 	if summary.Available {
-		total := summary.Promotion + summary.Fixed + summary.Adjustment
+		total := summary.Promotion + summary.Fixed + summary.Adjustment + summary.AccountPurchase + summary.AccountRefund
 		if summary.RechargeFee != nil {
 			total += *summary.RechargeFee
 		}
@@ -511,6 +550,19 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	if s.metricsRepo != nil {
 		latestSnapshot, _ = s.metricsRepo.LatestDashboardSnapshot(ctx, userID, adminAccountID, today)
 	}
+	if latestSnapshot != nil && latestSnapshot.AccountSnapshotRunID != "" &&
+		latestSnapshot.AccountStatsQuality == KeyCostQualityComplete && latestSnapshot.TodayPurchase != nil &&
+		latestSnapshot.CostExpectedCount != nil && latestSnapshot.CostCollectedCount != nil &&
+		latestSnapshot.CostFreshCount != nil && latestSnapshot.CostRetainedCount != nil &&
+		latestSnapshot.CostMissingCount != nil && latestSnapshot.CostQualityMode == "exact" {
+		costQuality = &CostQuality{
+			BusinessDate: today, Mode: latestSnapshot.CostQualityMode, ConfirmedCost: *latestSnapshot.TodayPurchase,
+			Complete:      *latestSnapshot.CostExpectedCount == *latestSnapshot.CostCollectedCount,
+			ExpectedSites: *latestSnapshot.CostExpectedCount, CollectedSites: *latestSnapshot.CostCollectedCount,
+			FreshSites: *latestSnapshot.CostFreshCount, RetainedSites: *latestSnapshot.CostRetainedCount,
+			MissingSites: *latestSnapshot.CostMissingCount, ObservedAt: latestSnapshot.ObservedAt,
+		}
+	}
 	if todayProfitErr != nil && latestSnapshot != nil && latestSnapshot.TodayProfit != nil {
 		todayProfitVal = *latestSnapshot.TodayProfit
 	}
@@ -580,32 +632,59 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		settlementStatus = SettlementStatusPartial
 	}
 	additionalCosts := s.additionalCostSummary(ctx, userID, adminAccountID, today, todayProfit)
-	var operatingCost, adjustedNetProfit *float64
-	if additionalCosts != nil && additionalCosts.Total != nil && todayPurchase != nil {
-		value := *todayPurchase + *additionalCosts.Total
-		operatingCost = &value
-		if todayProfit != nil {
-			profit := *todayProfit - value
-			adjustedNetProfit = &profit
+	var components AccountCostComponents
+	var componentErr error
+	accountSnapshotRunID := ""
+	if s.accountCosts != nil {
+		if latestSnapshot != nil && latestSnapshot.AccountStatsQuality == KeyCostQualityComplete {
+			accountSnapshotRunID = latestSnapshot.AccountSnapshotRunID
+		}
+		components, componentErr = s.accountCosts.AccountCostComponentsForSnapshotRun(ctx, userID, adminAccountID, today, accountSnapshotRunID)
+		if componentErr == nil && components.SnapshotRunID == "" && !components.RequiresReplacementDeduction {
+			components.SnapshotRunID = accountSnapshotRunID
+		}
+	}
+	operatingCost, adjustedNetProfit, adjustedProfitMargin := projectOperatingCost(todayPurchase, todayProfit, additionalCosts, components, componentErr)
+	var accountPurchaseCost, replacementDeduction *float64
+	accountStatsQuality := ""
+	var accountExpectedCount, accountCompletedCount *int
+	if latestSnapshot != nil && latestSnapshot.AccountSnapshotRunID == components.SnapshotRunID {
+		accountStatsQuality = latestSnapshot.AccountStatsQuality
+		accountExpectedCount = latestSnapshot.AccountExpectedCount
+		accountCompletedCount = latestSnapshot.AccountCompletedCount
+	}
+	if additionalCosts != nil {
+		purchase := float64(components.AccountPurchaseCostCents) / 100
+		accountPurchaseCost = &purchase
+		replacementDeduction = additionalCosts.ReplacementDeduction
+		if additionalCosts.AccountQuality != "" {
+			accountStatsQuality = additionalCosts.AccountQuality
 		}
 	}
 
 	result := MetricsResponse{
-		Date:              today,
-		Timezone:          businesstime.Timezone,
-		TodayProfit:       todayProfit,
-		SiteBalance:       siteBalance,
-		TodayPurchase:     todayPurchase,
-		NetProfit:         netProfit,
-		ConfirmedCost:     confirmedCost,
-		NetProfitCeiling:  netProfitCeiling,
-		SettlementStatus:  settlementStatus,
-		UpstreamBalance:   upstreamBalance,
-		GroupCount:        groupCount,
-		CostQuality:       costQuality,
-		AdditionalCosts:   additionalCosts,
-		OperatingCost:     operatingCost,
-		AdjustedNetProfit: adjustedNetProfit,
+		Date:                  today,
+		Timezone:              businesstime.Timezone,
+		TodayProfit:           todayProfit,
+		SiteBalance:           siteBalance,
+		TodayPurchase:         todayPurchase,
+		NetProfit:             netProfit,
+		ConfirmedCost:         confirmedCost,
+		NetProfitCeiling:      netProfitCeiling,
+		SettlementStatus:      settlementStatus,
+		UpstreamBalance:       upstreamBalance,
+		GroupCount:            groupCount,
+		CostQuality:           costQuality,
+		AdditionalCosts:       additionalCosts,
+		OperatingCost:         operatingCost,
+		AdjustedNetProfit:     adjustedNetProfit,
+		AdjustedProfitMargin:  adjustedProfitMargin,
+		AccountSnapshotRunID:  components.SnapshotRunID,
+		AccountExpectedCount:  accountExpectedCount,
+		AccountCompletedCount: accountCompletedCount,
+		AccountStatsQuality:   accountStatsQuality,
+		AccountPurchaseCost:   accountPurchaseCost,
+		ReplacementDeduction:  replacementDeduction,
 	}
 
 	if todayProfitErr != nil {
@@ -786,6 +865,12 @@ func (s *MetricsService) upsertSnapshot(ctx context.Context, userID, adminAccoun
 		AdditionalCostRecords: additionalCostRecords(metrics.AdditionalCosts),
 		OperatingCost:         metrics.OperatingCost,
 		AdjustedNetProfit:     metrics.AdjustedNetProfit,
+		AccountSnapshotRunID:  metrics.AccountSnapshotRunID,
+		AccountExpectedCount:  metrics.AccountExpectedCount,
+		AccountCompletedCount: metrics.AccountCompletedCount,
+		AccountStatsQuality:   metrics.AccountStatsQuality,
+		AccountPurchaseCost:   metrics.AccountPurchaseCost,
+		ReplacementDeduction:  metrics.ReplacementDeduction,
 	}
 	if metrics.CostQuality != nil {
 		snapshot.CostExpectedCount = intPtr(metrics.CostQuality.ExpectedSites)
@@ -1122,6 +1207,15 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 	if idErr != nil {
 		return idErr
 	}
+	var keyRuns []UpstreamKeyCostRun
+	if s.keyUsageForDate != nil {
+		keyResult, keyErr := s.keyUsageForDate.KeyUsageForDate(ctx, userID, adminAccountID, date)
+		if keyErr != nil {
+			log.Printf("dashboard finalize: account key snapshot unavailable user_id=%s date=%s err=%v", userID, date, keyErr)
+		} else {
+			keyRuns = buildAccountKeyCostRuns(userID, adminAccountID, attemptRunID, date, siteCostResults, keyResult, now)
+		}
+	}
 	attempts := make([]SiteDailyCost, 0, len(siteCostResults))
 	for _, r := range siteCostResults {
 		siteCostID, idErr := metricsRandomID()
@@ -1208,6 +1302,21 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 		FixedCost:             fixedCost,
 		AdjustmentCost:        adjustmentCost,
 		AdditionalCostRecords: additionalCostRecords(additionalCosts),
+	}
+	if finalizer, ok := s.metricsRepo.(dailySnapshotAccountFinalizer); ok {
+		finalized, finalizeErr := finalizer.FinalizeDailySnapshotWithKeyRuns(ctx, snapshot, attempts, keyRuns)
+		if finalizeErr != nil {
+			log.Printf("dashboard finalize: finalize daily snapshot failed user_id=%s date=%s err=%v", userID, date, finalizeErr)
+			return finalizeErr
+		}
+		if s.accountStats != nil {
+			if accountErr := s.finalizeAutomaticAccountSubstate(ctx, finalized, attemptRunID, date, keyRuns, session); accountErr != nil {
+				log.Printf("dashboard finalize: account substate incomplete user_id=%s date=%s err=%v", userID, date, accountErr)
+				return accountErr
+			}
+		}
+		log.Printf("dashboard finalize: done user_id=%s date=%s status=%s", userID, date, finalized.SettlementStatus)
+		return nil
 	}
 	if finalizer, ok := s.metricsRepo.(dailySnapshotFinalizer); ok {
 		finalized, finalizeErr := finalizer.FinalizeDailySnapshot(ctx, snapshot, attempts)
@@ -1304,9 +1413,9 @@ func (s *MetricsService) startupRecovery(ctx context.Context) {
 			log.Printf("dashboard startup recovery: list stats failed user_id=%s err=%v", ref.UserID, err)
 			continue
 		}
-		existingMap := make(map[string]string)
+		existingMap := make(map[string]DailySnapshot)
 		for _, snap := range existing {
-			existingMap[snap.Date.Format("2006-01-02")] = snap.SettlementStatus
+			existingMap[snap.Date.Format("2006-01-02")] = snap
 		}
 
 		// 逐日检查，补结未 final 的日期。
@@ -1314,11 +1423,18 @@ func (s *MetricsService) startupRecovery(ctx context.Context) {
 		for !current.After(yesterdayTime) {
 			d := current.Format("2006-01-02")
 			current = current.AddDate(0, 0, 1)
-			status, exists := existingMap[d]
-			if exists && status == SettlementStatusFinal {
+			snapshot, exists := existingMap[d]
+			if exists && snapshot.SettlementStatus == SettlementStatusFinal &&
+				(s.accountStats == nil || snapshot.AccountStatsQuality == KeyCostQualityComplete) {
 				continue // 已结算，跳过
 			}
 			if !explicitBaseline && !exists && d != yesterday {
+				continue
+			}
+			if exists && snapshot.SettlementStatus == SettlementStatusFinal && s.accountStats != nil {
+				if err := s.retryAutomaticAccountSubstate(ctx, ref, snapshot); err != nil {
+					log.Printf("dashboard startup recovery: account retry failed user_id=%s date=%s err=%v", ref.UserID, d, err)
+				}
 				continue
 			}
 			if err := s.finalizeBusinessDate(ctx, ref, d, SnapshotSourceDatedQuery); err != nil {
@@ -1332,6 +1448,34 @@ func (s *MetricsService) startupRecovery(ctx context.Context) {
 		}
 	}
 	log.Printf("dashboard startup recovery: completed")
+}
+
+func (s *MetricsService) retryAutomaticAccountSubstate(ctx context.Context, ref ActiveSessionRef, snapshot DailySnapshot) error {
+	repository, ok := s.metricsRepo.(accountSnapshotRunRepository)
+	if !ok || s.accountStats == nil {
+		return errors.New("account substate recovery is unavailable")
+	}
+	date := snapshot.Date.Format("2006-01-02")
+	runID := snapshot.AccountSnapshotRunID
+	if runID == "" {
+		return errors.New("frozen account key snapshot is unavailable")
+	}
+	runs, err := repository.AccountKeyCostRunsForSnapshot(ctx, ref.UserID, ref.AdminAccountID, date, runID)
+	if err != nil {
+		return err
+	}
+	if len(runs) == 0 {
+		return errors.New("complete account key snapshot is unavailable")
+	}
+	record, err := s.store.Get(ctx, ref.UserID, ref.AdminAccountID)
+	if err != nil || record == nil || !record.Session.IsAuthenticated() {
+		return errors.New("no authenticated session")
+	}
+	session, err := s.freshAdminSession(ctx, ref.UserID, ref.AdminAccountID, record)
+	if err != nil {
+		return err
+	}
+	return s.finalizeAutomaticAccountSubstate(ctx, snapshot, runID, date, runs, session)
 }
 
 // DailyStats 查询指定日期范围内每天的结算状态，缺失日期返回 missing 占位。
@@ -1381,16 +1525,22 @@ func (s *MetricsService) DailyStats(ctx context.Context, userID string, from, to
 		dateStr := d.Format("2006-01-02")
 		if snap, ok := snapMap[dateStr]; ok {
 			item := DailyStatItem{
-				Date:               dateStr,
-				SettlementStatus:   snap.SettlementStatus,
-				SnapshotSource:     snap.SnapshotSource,
-				TodayProfit:        snap.TodayProfit,
-				CostExpectedCount:  snap.CostExpectedCount,
-				CostCollectedCount: snap.CostCollectedCount,
-				CostFreshCount:     snap.CostFreshCount,
-				CostRetainedCount:  snap.CostRetainedCount,
-				CostMissingCount:   snap.CostMissingCount,
-				CostQualityMode:    snap.CostQualityMode,
+				Date:                  dateStr,
+				SettlementStatus:      snap.SettlementStatus,
+				SnapshotSource:        snap.SnapshotSource,
+				TodayProfit:           snap.TodayProfit,
+				CostExpectedCount:     snap.CostExpectedCount,
+				CostCollectedCount:    snap.CostCollectedCount,
+				CostFreshCount:        snap.CostFreshCount,
+				CostRetainedCount:     snap.CostRetainedCount,
+				CostMissingCount:      snap.CostMissingCount,
+				CostQualityMode:       snap.CostQualityMode,
+				AccountSnapshotRunID:  snap.AccountSnapshotRunID,
+				AccountExpectedCount:  snap.AccountExpectedCount,
+				AccountCompletedCount: snap.AccountCompletedCount,
+				AccountStatsQuality:   snap.AccountStatsQuality,
+				AccountPurchaseCost:   snap.AccountPurchaseCost,
+				ReplacementDeduction:  snap.ReplacementDeduction,
 			}
 			if snap.TodayPurchase != nil {
 				item.ConfirmedCost = snap.TodayPurchase
@@ -1406,12 +1556,11 @@ func (s *MetricsService) DailyStats(ctx context.Context, userID string, from, to
 			item.OperatingCost = snap.OperatingCost
 			item.AdjustedNetProfit = snap.AdjustedNetProfit
 			if snap.AdditionalCost != nil {
-				summary := &AdditionalCostSummary{
-					Available:   true,
-					Total:       snap.AdditionalCost,
-					RechargeFee: snap.RechargeFee,
-					FeeRate:     snap.RechargeFeeRate,
-				}
+				summary := summarizeAdditionalCostRecords(snap.AdditionalCostRecords)
+				summary.Available = true
+				summary.Total = snap.AdditionalCost
+				summary.RechargeFee = snap.RechargeFee
+				summary.FeeRate = snap.RechargeFeeRate
 				if snap.PromotionCost != nil {
 					summary.Promotion = *snap.PromotionCost
 				}
@@ -1422,7 +1571,7 @@ func (s *MetricsService) DailyStats(ctx context.Context, userID string, from, to
 					summary.Adjustment = *snap.AdjustmentCost
 				}
 				summary.Records = snap.AdditionalCostRecords
-				item.AdditionalCosts = summary
+				item.AdditionalCosts = &summary
 			}
 			if snap.FinalizedAt != nil {
 				ts := snap.FinalizedAt.Format(time.RFC3339)
@@ -1560,6 +1709,7 @@ func (s *MetricsService) Backfill(ctx context.Context, userID string, req Backfi
 		// 处理保护规则：force=false 时跳过已 final 且非 backfill 的行。
 		if !req.Force && existingSnap != nil &&
 			existingSnap.SettlementStatus == SettlementStatusFinal &&
+			(s.accountStats == nil || existingSnap.AccountStatsQuality == KeyCostQualityComplete) &&
 			existingSnap.SnapshotSource != SnapshotSourceBackfill {
 			result.Status = "skipped"
 			result.Reason = "final_row_protected"
@@ -1573,7 +1723,20 @@ func (s *MetricsService) Backfill(ctx context.Context, userID string, req Backfi
 			continue
 		}
 
-		if req.DryRun {
+		accountOnlyRetry := !req.Force && existingSnap != nil && existingSnap.SettlementStatus == SettlementStatusFinal &&
+			s.accountStats != nil && existingSnap.AccountStatsQuality != KeyCostQualityComplete
+		if accountOnlyRetry && req.DryRun {
+			result.Status = "pending"
+			result.Reason = "account_substate_only"
+		} else if accountOnlyRetry {
+			ref := ActiveSessionRef{UserID: userID, AdminAccountID: adminAccountID}
+			if err := s.retryAutomaticAccountSubstate(ctx, ref, *existingSnap); err != nil {
+				result.Status = "failed"
+				result.Reason = err.Error()
+				results = append(results, result)
+				continue
+			}
+		} else if req.DryRun {
 			// dryRun：查询上游数据以计算预览值，不写库。
 			// 错误必须传播：查询失败不能返回伪造的零值预览。
 			rec, recErr := s.store.Get(ctx, userID, adminAccountID)

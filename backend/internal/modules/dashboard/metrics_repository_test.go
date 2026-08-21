@@ -153,6 +153,7 @@ func TestListRangePreservesSnapshotWhenCostQualityModeIsNull(t *testing.T) {
 		profit, nil, nil, nil, nil, createdAt, "final",
 		nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil,
 	}}}
 	repo := newMetricsRepository(&nullableCostQualityDB{rows: rows})
 
@@ -169,6 +170,9 @@ func TestListRangePreservesSnapshotWhenCostQualityModeIsNull(t *testing.T) {
 	if snapshots[0].CostQualityMode != "unknown" {
 		t.Fatalf("CostQualityMode = %q, want unknown", snapshots[0].CostQualityMode)
 	}
+	if snapshots[0].AccountSnapshotRunID != "" || snapshots[0].AccountStatsQuality != KeyCostQualityMissing {
+		t.Fatalf("legacy account state = run %q quality %q", snapshots[0].AccountSnapshotRunID, snapshots[0].AccountStatsQuality)
+	}
 }
 
 func TestLatestDashboardSnapshotPreservesSnapshotWhenCostQualityModeIsNull(t *testing.T) {
@@ -179,6 +183,7 @@ func TestLatestDashboardSnapshotPreservesSnapshotWhenCostQualityModeIsNull(t *te
 		profit, nil, nil, nil, nil, createdAt, "final", "live_cache", nil,
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil,
 	}}
 	db := &latestSnapshotDB{row: row}
 	repo := newMetricsRepository(db)
@@ -192,6 +197,9 @@ func TestLatestDashboardSnapshotPreservesSnapshotWhenCostQualityModeIsNull(t *te
 	}
 	if snapshot.CostQualityMode != "unknown" {
 		t.Fatalf("CostQualityMode = %q, want unknown", snapshot.CostQualityMode)
+	}
+	if snapshot.AccountSnapshotRunID != "" || snapshot.AccountStatsQuality != KeyCostQualityMissing {
+		t.Fatalf("legacy account state = run %q quality %q", snapshot.AccountSnapshotRunID, snapshot.AccountStatsQuality)
 	}
 }
 
@@ -347,6 +355,7 @@ func TestListDailyStatsPreservesSnapshotWhenCostQualityModeIsNull(t *testing.T) 
 		profit, nil, nil, nil, nil, createdAt, "final", "live_cache", nil,
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil,
+		"", nil, nil, "missing", nil, nil,
 	}}}
 	repo := newMetricsRepository(&nullableCostQualityDB{rows: rows})
 

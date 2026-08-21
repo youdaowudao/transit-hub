@@ -46,6 +46,7 @@
             <th class="text-right py-2 px-2 font-medium">{{ t('admin.dashboard.dailyStats.colRevenue') }}</th>
             <th class="text-right py-2 px-2 font-medium">{{ t('admin.dashboard.dailyStats.colCost') }}</th>
             <th class="text-right py-2 px-2 font-medium">{{ t('admin.dashboard.dailyStats.colNetProfit') }}</th>
+            <th class="text-right py-2 px-2 font-medium">调整后利润率</th>
             <th class="text-center py-2 px-2 font-medium">{{ t('admin.dashboard.dailyStats.colCoverage') }}</th>
             <th class="text-center py-2 pl-2 font-medium">{{ t('admin.dashboard.dailyStats.colStatus') }}</th>
           </tr>
@@ -63,16 +64,14 @@
                 <span v-else class="text-muted-foreground">—</span>
               </td>
               <td class="text-right py-2 px-2">
-                <span v-if="item.confirmedCost != null">{{ formatCny(item.confirmedCost) }}</span>
-                <span v-else class="text-muted-foreground">—</span>
+                <span v-if="item.operatingCost != null">{{ formatCny(item.operatingCost) }}</span>
+                <span v-else class="text-muted-foreground" title="历史口径不完整">—</span>
               </td>
               <td class="text-right py-2 px-2">
-                <span v-if="item.netProfitCeiling != null" class="text-xs">
-                  {{ formatCny(item.netProfitCeiling) }}
-                  <span v-if="item.settlementStatus !== 'final' || item.costQualityMode === 'retained'" class="text-muted-foreground">*</span>
-                </span>
+                <span v-if="item.adjustedNetProfit != null" class="text-xs">{{ formatCny(item.adjustedNetProfit) }}</span>
                 <span v-else class="text-muted-foreground">—</span>
               </td>
+              <td class="text-right py-2 px-2"><span v-if="adjustedMargin(item) != null">{{ adjustedMargin(item)?.toFixed(1) }}%</span><span v-else class="text-muted-foreground">—</span></td>
               <td class="text-center py-2 px-2 text-xs">
                 <span v-if="item.costCollectedCount != null && item.costExpectedCount != null">
                   {{ item.costCollectedCount }}/{{ item.costExpectedCount }}
@@ -88,17 +87,21 @@
             </tr>
             <!-- 展开站点明细 -->
             <tr v-if="expandedDates.has(item.date) && item.siteCostsLoadError" class="bg-muted/30">
-              <td colspan="6" class="py-2 pl-8 pr-4 text-xs text-destructive">
+              <td colspan="7" class="py-2 pl-8 pr-4 text-xs text-destructive">
                 {{ t('admin.dashboard.dailyStats.loadError') }}
               </td>
             </tr>
             <tr v-else-if="expandedDates.has(item.date)" class="bg-muted/30">
-              <td colspan="6" class="py-2 pl-8 pr-4">
+              <td colspan="7" class="py-2 pl-8 pr-4">
                 <div v-if="item.additionalCosts" class="mb-3 grid gap-1 border-b border-border/60 pb-3 text-xs text-muted-foreground sm:grid-cols-2">
                   <span>充值手续费{{ item.additionalCosts.feeRate != null ? ` (${(item.additionalCosts.feeRate * 100).toFixed(2)}%)` : '' }}：{{ formatCny(item.additionalCosts.rechargeFee) }}</span>
                   <span>活动赠送摊销：{{ formatCny(item.additionalCosts.promotion) }}</span>
                   <span>服务器及固定费用：{{ formatCny(item.additionalCosts.fixed) }}</span>
                   <span>手工调整：{{ formatCny(item.additionalCosts.adjustment) }}</span>
+                  <span>买号确认：{{ formatCny(item.additionalCosts.accountPurchase) }}</span>
+                  <span>退款冲减：{{ formatCny(item.additionalCosts.accountRefund) }}</span>
+                  <span>替代成本扣减：{{ item.replacementDeduction == null ? '暂无可靠数据' : formatCny(-item.replacementDeduction) }}</span>
+                  <span>账号快照：{{ item.accountStatsQuality === 'complete' ? `${item.accountCompletedCount ?? 0}/${item.accountExpectedCount ?? 0} 完整` : '历史口径不完整' }}</span>
                   <span class="font-medium text-foreground">经营总成本：{{ formatCny(item.operatingCost) }}</span>
                   <span class="font-medium text-foreground">调整后净利润：{{ formatCny(item.adjustedNetProfit) }}</span>
                 </div>
@@ -187,6 +190,12 @@ const items = ref<DailyStatItem[]>([])
 const loading = ref(false)
 const loadError = ref(false)
 const expandedDates = ref(new Set<string>())
+
+const adjustedMargin = (item: DailyStatItem): number | null => (
+  item.todayProfit != null && item.todayProfit > 0 && item.adjustedNetProfit != null
+    ? item.adjustedNetProfit / item.todayProfit * 100
+    : null
+)
 
 function applyShortcut(sc: Shortcut) {
   fromInput.value = sc.from

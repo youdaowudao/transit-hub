@@ -96,3 +96,27 @@ func TestAdditionalCostSummaryKeepsTotalUnavailableWithoutRevenue(t *testing.T) 
 		t.Fatalf("summary = %+v, want unavailable without total", summary)
 	}
 }
+
+func TestAdditionalCostSummaryIncludesAccountPurchaseAndRefundWithLedgerSigns(t *testing.T) {
+	summary := summarizeAdditionalCostRecords([]AdditionalCostRecord{
+		{Type: AdditionalCostFixed, Amount: 5},
+		{Type: AdditionalCostAccountPurchase, Amount: 10},
+		{Type: AdditionalCostAccountRefund, Amount: -3},
+	})
+	if summary.AccountPurchase != 10 || summary.AccountRefund != -3 {
+		t.Fatalf("account cost summary = %#v", summary)
+	}
+	if summary.Promotion != 0 || summary.Fixed != 5 || summary.Adjustment != 0 {
+		t.Fatalf("other cost summary changed = %#v", summary)
+	}
+	revenue := 100.0
+	repository := &fakeAdditionalCostRepository{
+		rate:  RechargeFeeRate{Rate: 0.02},
+		items: summary.Records,
+	}
+	service := &MetricsService{additionalCosts: repository}
+	withFee := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-08-13", &revenue)
+	if withFee.Total == nil || *withFee.Total != 14 {
+		t.Fatalf("ledger total = %#v, want fixed 5 + purchase 10 - refund 3 + fee 2 = 14", withFee.Total)
+	}
+}

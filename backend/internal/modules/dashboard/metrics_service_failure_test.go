@@ -43,6 +43,50 @@ type fakeMetricsRepository struct {
 	dailyStatsTo         string
 }
 
+type liveMetricsAccountingRepository struct {
+	*fakeMetricsRepository
+	*fakeAdditionalCostRepository
+	components        AccountCostComponents
+	componentErr      error
+	requestedSnapshot string
+}
+
+type fakeAccountSubstateRecoveryRepository struct {
+	*fakeMetricsRepository
+	*fakeAutomaticAccountStatsRepository
+	runID          string
+	runs           []UpstreamKeyCostRun
+	requestedRunID string
+}
+
+func (f *fakeAccountSubstateRecoveryRepository) LatestCompleteAccountKeyCostRuns(context.Context, string, string, string) (string, []UpstreamKeyCostRun, error) {
+	return f.runID, append([]UpstreamKeyCostRun(nil), f.runs...), nil
+}
+
+func (f *fakeAccountSubstateRecoveryRepository) AccountKeyCostRunsForSnapshot(_ context.Context, _, _, _, snapshotRunID string) ([]UpstreamKeyCostRun, error) {
+	f.requestedRunID = snapshotRunID
+	if snapshotRunID != f.runID {
+		return nil, nil
+	}
+	return append([]UpstreamKeyCostRun(nil), f.runs...), nil
+}
+
+func (r *liveMetricsAccountingRepository) AccountCostComponentsForDate(context.Context, string, string, string) (AccountCostComponents, error) {
+	return r.components, r.componentErr
+}
+
+func (r *liveMetricsAccountingRepository) AccountCostComponentsForSnapshotRun(_ context.Context, _, _, _, snapshotRunID string) (AccountCostComponents, error) {
+	r.requestedSnapshot = snapshotRunID
+	return r.components, r.componentErr
+}
+
+func (r *liveMetricsAccountingRepository) LatestCompleteAccountKeyCostRuns(context.Context, string, string, string) (string, []UpstreamKeyCostRun, error) {
+	if r.components.SnapshotRunID == "" {
+		return "", nil, nil
+	}
+	return r.components.SnapshotRunID, []UpstreamKeyCostRun{{SnapshotRunID: r.components.SnapshotRunID, Complete: true}}, nil
+}
+
 func (f *fakeMetricsRepository) Upsert(ctx context.Context, snapshot DailySnapshot) error {
 	f.snapshots = append(f.snapshots, snapshot)
 	return f.upsertErr
@@ -197,6 +241,92 @@ func TestStartupRecoveryScansUnknownCostQualityModeWithoutDroppingSnapshot(t *te
 	}
 	if repo.dailyStatsSnapshots[0].CostQualityMode != CostQualityModeUnknown {
 		t.Fatalf("startup recovery changed cost quality mode = %q", repo.dailyStatsSnapshots[0].CostQualityMode)
+	}
+}
+
+func TestStartupRecoveryRetriesOnlyMissingAccountSubstateForFinalSnapshot(t *testing.T) {
+	loc := businesstime.Location()
+	yesterday := businesstime.DateAt(time.Now().In(loc).AddDate(0, 0, -1))
+	t.Setenv("SETTLEMENT_BASELINE_DATE", yesterday)
+	date := parseBusinessDateForTest(t, yesterday)
+	revenue, siteCost := 80.0, 20.0
+	base := &fakeMetricsRepository{dailyStatsSnapshots: []DailySnapshot{{
+		ID: "snapshot-final", UserID: "user-1", AdminAccountID: "account-1", Date: date,
+		TodayProfit: &revenue, TodayPurchase: &siteCost, SettlementStatus: SettlementStatusFinal,
+		AccountStatsQuality: KeyCostQualityMissing, AccountSnapshotRunID: "account-run-1",
+	}}}
+	automatic := &fakeAutomaticAccountStatsRepository{targets: []AutomaticAccountTarget{{
+		Asset: AccountAsset{ID: "asset-1", AccountingMode: AccountingModeReplace},
+		Link:  AccountLink{UpstreamSiteID: "site-1", UpstreamKeyID: "key-1", ScopeAdminAccountID: "scope-1", OwnGroupID: "group-1"},
+	}}}
+	repository := &fakeAccountSubstateRecoveryRepository{
+		fakeMetricsRepository: base, fakeAutomaticAccountStatsRepository: automatic, runID: "account-run-1",
+		runs: []UpstreamKeyCostRun{{
+			ID: "site-run-1", SnapshotRunID: "account-run-1", SiteID: "site-1", Complete: true,
+			Items: []UpstreamKeyDailyCost{{KeyID: "key-1", RawAmountMicros: 10_000_000, AdjustedCostCents: 200}},
+		}},
+	}
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	store.activeSessions = []ActiveSessionRef{{UserID: "user-1", AdminAccountID: "account-1"}}
+	upstreams := &fakeUpstreamLister{siteCostErr: errors.New("base costs must not be fetched")}
+	platform := &fakePlatformClient{scopeUsage: map[string]upstream.AdminUsageStats{"scope-1|group-1": {TotalActualCost: 30}}}
+	service := NewMetricsService(store, platform, upstreams, repository, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+
+	service.startupRecovery(context.Background())
+
+	if len(automatic.stats) != 1 || len(base.snapshots) != 1 {
+		t.Fatalf("account retry stats=%#v snapshots=%#v", automatic.stats, base.snapshots)
+	}
+	updated := base.snapshots[0]
+	if updated.TodayProfit == nil || *updated.TodayProfit != revenue || updated.TodayPurchase == nil || *updated.TodayPurchase != siteCost {
+		t.Fatalf("account-only retry rewrote base amounts: %#v", updated)
+	}
+	if updated.AccountStatsQuality != KeyCostQualityComplete || updated.AccountSnapshotRunID != "account-run-1" {
+		t.Fatalf("account substate was not completed: %#v", updated)
+	}
+	if repository.requestedRunID != "account-run-1" {
+		t.Fatalf("account retry requested run %q, want frozen account-run-1", repository.requestedRunID)
+	}
+}
+
+func TestBackfillRetriesOnlyMissingAccountSubstateForProtectedFinalSnapshot(t *testing.T) {
+	dateText := time.Now().In(businesstime.Location()).AddDate(0, 0, -1).Format("2006-01-02")
+	date := parseBusinessDateForTest(t, dateText)
+	revenue, siteCost := 80.0, 20.0
+	base := &fakeMetricsRepository{dailyStatsSnapshots: []DailySnapshot{{
+		ID: "snapshot-final", UserID: "user-1", AdminAccountID: "account-1", Date: date,
+		TodayProfit: &revenue, TodayPurchase: &siteCost, SettlementStatus: SettlementStatusFinal,
+		SnapshotSource: SnapshotSourceDatedQuery, AccountStatsQuality: KeyCostQualityMissing,
+		AccountSnapshotRunID: "account-run-1",
+	}}}
+	automatic := &fakeAutomaticAccountStatsRepository{targets: []AutomaticAccountTarget{{
+		Asset: AccountAsset{ID: "asset-1", AccountingMode: AccountingModeReplace},
+		Link:  AccountLink{UpstreamSiteID: "site-1", UpstreamKeyID: "key-1", ScopeAdminAccountID: "scope-1", OwnGroupID: "group-1"},
+	}}}
+	repository := &fakeAccountSubstateRecoveryRepository{
+		fakeMetricsRepository: base, fakeAutomaticAccountStatsRepository: automatic, runID: "account-run-1",
+		runs: []UpstreamKeyCostRun{{
+			ID: "site-run-1", SnapshotRunID: "account-run-1", SiteID: "site-1", Complete: true,
+			Items: []UpstreamKeyDailyCost{{KeyID: "key-1", RawAmountMicros: 10_000_000, AdjustedCostCents: 200}},
+		}},
+	}
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	upstreams := &fakeUpstreamLister{siteCostErr: errors.New("base costs must not be fetched")}
+	platform := &fakePlatformClient{scopeUsage: map[string]upstream.AdminUsageStats{"scope-1|group-1": {TotalActualCost: 30}}}
+	service := NewMetricsService(store, platform, upstreams, repository, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+
+	response, err := service.Backfill(context.Background(), "user-1", BackfillRequest{From: dateText, To: dateText})
+	if err != nil {
+		t.Fatalf("Backfill() error: %v", err)
+	}
+	if len(response.Results) != 1 || response.Results[0].Status != "updated" || len(automatic.stats) != 1 || len(base.snapshots) != 1 {
+		t.Fatalf("account-only backfill response=%#v stats=%#v snapshots=%#v", response, automatic.stats, base.snapshots)
+	}
+	updated := base.snapshots[0]
+	if updated.TodayProfit == nil || *updated.TodayProfit != revenue || updated.TodayPurchase == nil || *updated.TodayPurchase != siteCost {
+		t.Fatalf("account-only backfill rewrote base amounts: %#v", updated)
 	}
 }
 
@@ -580,6 +710,121 @@ func TestLiveMetricsSuccessPersistsSameDayAmounts(t *testing.T) {
 		persisted.NetProfit == nil || *persisted.NetProfit != 27.5 {
 		t.Fatalf("unexpected persisted snapshot: profit=%v purchase=%v net=%v",
 			persisted.TodayProfit, persisted.TodayPurchase, persisted.NetProfit)
+	}
+}
+
+func TestLiveMetricsProjectsReplacementAccountCostIntoPrimaryOperatingMetrics(t *testing.T) {
+	deduction := int64(3000)
+	reconciled := int64(10_000)
+	publishedCost := 100.0
+	expectedAccounts, completedAccounts := 1, 1
+	repository := &liveMetricsAccountingRepository{
+		fakeMetricsRepository: &fakeMetricsRepository{latestSnapshot: &DailySnapshot{
+			TodayPurchase: &publishedCost, AccountSnapshotRunID: "account-run-live",
+			AccountExpectedCount: &expectedAccounts, AccountCompletedCount: &completedAccounts,
+			AccountStatsQuality: KeyCostQualityComplete,
+			CostExpectedCount:   intPtr(1), CostCollectedCount: intPtr(1), CostFreshCount: intPtr(1),
+			CostRetainedCount: intPtr(0), CostMissingCount: intPtr(0), CostQualityMode: "exact",
+		}},
+		fakeAdditionalCostRepository: &fakeAdditionalCostRepository{
+			rate: RechargeFeeRate{Rate: 0},
+			items: []AdditionalCostRecord{
+				{Type: AdditionalCostAccountPurchase, Amount: 40},
+				{Type: AdditionalCostFixed, Amount: 20},
+			},
+		},
+		components: AccountCostComponents{
+			AccountPurchaseCostCents:          4000,
+			ReplacementDeductionCents:         &deduction,
+			RequiresReplacementDeduction:      true,
+			ReconciledUpstreamDirectCostCents: &reconciled,
+			SnapshotRunID:                     "account-run-live",
+		},
+	}
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	service := NewMetricsService(
+		store,
+		&fakePlatformClient{usageStats: 200},
+		&fakeUpstreamLister{cachedSites: []upstream.Response{{
+			Status: upstream.StatusConnected, RechargeRate: 1, Metrics: todayCachedMetrics(100),
+		}}},
+		repository,
+		&fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}},
+	)
+
+	response, err := service.LiveMetrics(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("LiveMetrics() error: %v", err)
+	}
+	if response.TodayPurchase == nil || *response.TodayPurchase != 100 {
+		t.Fatalf("direct cost = %#v, want 100", response.TodayPurchase)
+	}
+	if response.OperatingCost == nil || *response.OperatingCost != 130 {
+		t.Fatalf("operating cost = %#v, want 100 - 30 + 40 + 20 = 130", response.OperatingCost)
+	}
+	if response.AdjustedNetProfit == nil || *response.AdjustedNetProfit != 70 {
+		t.Fatalf("adjusted net profit = %#v, want 70", response.AdjustedNetProfit)
+	}
+	if response.AdjustedProfitMargin == nil || *response.AdjustedProfitMargin != 35 {
+		t.Fatalf("adjusted profit margin = %#v, want 35", response.AdjustedProfitMargin)
+	}
+	if repository.requestedSnapshot != "account-run-live" {
+		t.Fatalf("account cost requested snapshot = %q, want account-run-live", repository.requestedSnapshot)
+	}
+	if len(repository.snapshots) != 1 || repository.snapshots[0].AccountSnapshotRunID != "account-run-live" ||
+		repository.snapshots[0].ReplacementDeduction == nil || *repository.snapshots[0].ReplacementDeduction != 30 {
+		t.Fatalf("published live snapshot did not preserve account run binding: %#v", repository.snapshots)
+	}
+}
+
+func TestLiveMetricsKeepsAtomicallyPublishedAccountRunAndDirectCostTogether(t *testing.T) {
+	deduction := int64(3000)
+	reconciled := int64(10_000)
+	publishedCost := 100.0
+	expectedAccounts, completedAccounts := 1, 1
+	repository := &liveMetricsAccountingRepository{
+		fakeMetricsRepository: &fakeMetricsRepository{latestSnapshot: &DailySnapshot{
+			TodayPurchase: &publishedCost, AccountSnapshotRunID: "published-run",
+			AccountExpectedCount: &expectedAccounts, AccountCompletedCount: &completedAccounts,
+			AccountStatsQuality: KeyCostQualityComplete,
+			CostExpectedCount:   intPtr(1), CostCollectedCount: intPtr(1), CostFreshCount: intPtr(1),
+			CostRetainedCount: intPtr(0), CostMissingCount: intPtr(0), CostQualityMode: "exact",
+		}},
+		fakeAdditionalCostRepository: &fakeAdditionalCostRepository{rate: RechargeFeeRate{Rate: 0}},
+		components: AccountCostComponents{
+			ReplacementDeductionCents: &deduction, RequiresReplacementDeduction: true,
+			ReconciledUpstreamDirectCostCents: &reconciled, SnapshotRunID: "published-run",
+		},
+	}
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	service := NewMetricsService(
+		store,
+		&fakePlatformClient{usageStats: 200},
+		&fakeUpstreamLister{cachedSites: []upstream.Response{{
+			Status: upstream.StatusConnected, RechargeRate: 1, Metrics: todayCachedMetrics(120),
+		}}},
+		repository,
+		&fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}},
+	)
+
+	response, err := service.LiveMetrics(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("LiveMetrics() error: %v", err)
+	}
+	if response.TodayPurchase == nil || *response.TodayPurchase != 100 || response.AccountSnapshotRunID != "published-run" ||
+		response.AccountExpectedCount == nil || *response.AccountExpectedCount != 1 ||
+		response.AccountCompletedCount == nil || *response.AccountCompletedCount != 1 {
+		t.Fatalf("published run/cost group was not preserved: %#v", response)
+	}
+	if repository.requestedSnapshot != "published-run" {
+		t.Fatalf("account components requested run %q, want published-run", repository.requestedSnapshot)
+	}
+	if len(repository.snapshots) != 1 || repository.snapshots[0].TodayPurchase == nil || *repository.snapshots[0].TodayPurchase != 100 ||
+		repository.snapshots[0].AccountSnapshotRunID != "published-run" ||
+		repository.snapshots[0].AccountExpectedCount == nil || *repository.snapshots[0].AccountExpectedCount != 1 {
+		t.Fatalf("live upsert broke the published group: %#v", repository.snapshots)
 	}
 }
 

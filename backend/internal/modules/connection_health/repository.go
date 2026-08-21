@@ -1635,6 +1635,21 @@ func (r *Repository) MarkPriorityWorkspaceSyncFailed(ctx context.Context, userID
 	return result.RowsAffected() == 1, err
 }
 
+func (r *Repository) MarkPriorityWorkspaceSyncPartial(ctx context.Context, userID string, adminAccountID string, pendingSignature string, errorDetail string, blockedCount int) (bool, error) {
+	result, err := r.db.Exec(ctx, `
+		UPDATE connection_health_priority_workspace_sync_states
+		SET last_decision = 'partial', last_error = $4, inventory_status = 'partial',
+			last_reconcile_failure_at = now(), next_reconcile_at = now() + make_interval(secs => reconcile_failure_backoff_seconds),
+			pending_target_count = $5, reconcile_failure_count = reconcile_failure_count + 1,
+			updated_at = now()
+		WHERE user_id = $1 AND admin_account_id = $2 AND pending_signature = $3
+	`, userID, adminAccountID, pendingSignature, errorDetail, blockedCount)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, err
+}
+
 func (r *Repository) MarkPriorityWorkspaceSyncSucceeded(ctx context.Context, userID string, adminAccountID string, pendingSignature string) (bool, error) {
 	result, err := r.db.Exec(ctx, `
 		UPDATE connection_health_priority_workspace_sync_states
@@ -1660,6 +1675,21 @@ func (r *Repository) MarkPriorityWorkspaceHealthSyncFailed(ctx context.Context, 
 			updated_at = now()
 		WHERE user_id = $1 AND admin_account_id = $2 AND pending_signature = ''
 	`, userID, adminAccountID, errorDetail, failedCount)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, err
+}
+
+func (r *Repository) MarkPriorityWorkspaceHealthSyncPartial(ctx context.Context, userID string, adminAccountID string, errorDetail string, blockedCount int) (bool, error) {
+	result, err := r.db.Exec(ctx, `
+		UPDATE connection_health_priority_workspace_sync_states
+		SET last_decision = 'partial', last_error = $3, inventory_status = 'partial',
+			last_reconcile_failure_at = now(), next_reconcile_at = now() + make_interval(secs => reconcile_failure_backoff_seconds),
+			pending_target_count = $4, reconcile_failure_count = reconcile_failure_count + 1,
+			updated_at = now()
+		WHERE user_id = $1 AND admin_account_id = $2 AND pending_signature = ''
+	`, userID, adminAccountID, errorDetail, blockedCount)
 	if err != nil {
 		return false, err
 	}

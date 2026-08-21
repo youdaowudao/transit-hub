@@ -3,9 +3,16 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 import type { AdminGroupAccount } from '../src/modules/admin/types/connectionHealth'
-import { resolveConnectionHealthMultiplierDisplay } from '../src/modules/admin/utils/connectionHealthMultiplier'
+import {
+  prioritySyncBlockReasonKey,
+  resolveConnectionHealthMultiplierDisplay,
+} from '../src/modules/admin/utils/connectionHealthMultiplier'
 
 const localeSource = readFileSync(new URL('../src/locales/zh-CN.ts', import.meta.url), 'utf8')
+const detailSource = readFileSync(
+  new URL('../src/modules/admin/components/dashboard/AdminGroupHealthDetail.vue', import.meta.url),
+  'utf8',
+)
 
 const account = (overrides: Partial<AdminGroupAccount>): AdminGroupAccount => ({
   id: '100',
@@ -84,5 +91,19 @@ describe('connection health multiplier resolution display', () => {
     expect(localeSource).toContain('最后确认倍率')
     expect(localeSource).toContain('本轮未用于 Priority 写回')
     expect(localeSource).toContain('已保留主站现有 Priority')
+  })
+
+  it('maps only fixed safe blocker reasons and falls back for unknown values', () => {
+    expect(prioritySyncBlockReasonKey('binding_missing')).toBe('binding_missing')
+    expect(prioritySyncBlockReasonKey('key_unavailable')).toBe('key_unavailable')
+    expect(prioritySyncBlockReasonKey('snapshot_stale')).toBe('snapshot_stale')
+    expect(prioritySyncBlockReasonKey('raw upstream response')).toBe('unknown')
+    expect(prioritySyncBlockReasonKey(undefined)).toBe('unknown')
+  })
+
+  it('shows the blocker reason beside the unchanged current Priority value', () => {
+    expect(detailSource).toContain('{{ formatNumber(account.priority) }}')
+    expect(detailSource).toContain('account.prioritySyncBlocked')
+    expect(detailSource).toContain('prioritySyncBlockReasonLabel(account)')
   })
 })

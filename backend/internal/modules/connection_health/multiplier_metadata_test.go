@@ -17,6 +17,7 @@ type snapshotMetadataReader struct {
 	directErrs    map[string]error
 	directKeyErrs map[string]error
 	listItems     map[string][]upstream.Sub2APIKeyItem
+	listErrs      map[string]error
 	directCalls   map[string]int
 	listCalls     map[string]int
 	started       chan string
@@ -88,7 +89,7 @@ func (f *snapshotMetadataReader) ListUpstreamKeysForWorkspaceUntil(ctx context.C
 		f.listCalls = make(map[string]int)
 	}
 	f.listCalls[siteID]++
-	return append([]upstream.Sub2APIKeyItem(nil), f.listItems[siteID]...), nil
+	return append([]upstream.Sub2APIKeyItem(nil), f.listItems[siteID]...), f.listErrs[siteID]
 }
 
 func (f *snapshotMetadataReader) callCounts(siteID string) (int, int) {
@@ -600,7 +601,62 @@ func TestFreshMultiplierLookupWaitsForReplacementGeneration(t *testing.T) {
 	}
 }
 
-func TestMultiplierSnapshotInvalidDirectMetadataFailsTheWholeSite(t *testing.T) {
+func TestMultiplierSnapshotIsolatesRequestFailurePerKey(t *testing.T) {
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{
+			snapshotConnection("account-bad", "site-1", "key-bad"),
+			snapshotConnection("account-good", "site-1", "key-good"),
+		}},
+		directKeyErrs: map[string]error{
+			"site-1|key-bad": &upstream.RequestError{MessageKey: upstream.ErrorUnknown, Platform: upstream.PlatformSub2API},
+		},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-1|key-good": {ID: "key-good", GroupID: "group-1", GroupName: "vip"},
+		},
+	}
+	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}}
+
+	lookup := service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if lookup.byAccount["account-good"].status != MultiplierResolutionResolved {
+		t.Fatalf("successful key must remain resolved when another key request fails: %+v", lookup)
+	}
+	if lookup.byAccount["account-bad"].status != MultiplierResolutionUnavailable {
+		t.Fatalf("failed key resolution = %+v, want unavailable", lookup.byAccount["account-bad"])
+	}
+	if lookup.byAccount["account-bad"].reason != "key_unavailable" || lookup.byAccount["account-bad"].info.siteID != "site-1" {
+		t.Fatalf("failed key must expose only its safe reason and site: %+v", lookup.byAccount["account-bad"])
+	}
+}
+
+func TestMultiplierSnapshotRetainsDirectSuccessWhenListFallbackFails(t *testing.T) {
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{
+			snapshotConnection("account-fallback", "site-1", "key-fallback"),
+			snapshotConnection("account-direct", "site-1", "key-direct"),
+		}},
+		directKeyErrs: map[string]error{
+			"site-1|key-fallback": &upstream.RequestError{MessageKey: upstream.ErrorNotFound, Platform: upstream.PlatformSub2API, StatusCode: 404},
+		},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-1|key-direct": {ID: "key-direct", GroupID: "group-1", GroupName: "vip"},
+		},
+		listErrs: map[string]error{
+			"site-1": &upstream.RequestError{MessageKey: upstream.ErrorUnknown, Platform: upstream.PlatformSub2API},
+		},
+	}
+	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}}
+
+	lookup := service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if lookup.byAccount["account-direct"].status != MultiplierResolutionResolved {
+		t.Fatalf("direct success must survive another key's list fallback failure: %+v", lookup)
+	}
+	fallback := lookup.byAccount["account-fallback"]
+	if fallback.status != MultiplierResolutionUnavailable || fallback.reason != MultiplierReasonKeyUnavailable {
+		t.Fatalf("fallback key resolution = %+v, want unavailable key reason", fallback)
+	}
+}
+
+func TestMultiplierSnapshotInvalidDirectMetadataLeavesSiteUnavailableWhenNoKeySucceeds(t *testing.T) {
 	tests := []struct {
 		name       string
 		directItem upstream.Sub2APIKeyItem

@@ -160,6 +160,44 @@ func (s *Service) markPriorityWorkspaceHealthSyncFailedDirect(userID string, adm
 	}
 }
 
+func (s *Service) markPriorityWorkspaceSyncPartial(userID string, adminAccountID string, pendingSignature string, blockedCount int) {
+	if pendingSignature == "" {
+		s.markPriorityWorkspaceHealthSyncPartial(userID, adminAccountID, blockedCount)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), priorityStateWriteTimeout)
+	defer cancel()
+	marked, err := s.repo.MarkPriorityWorkspaceSyncPartial(
+		ctx, userID, adminAccountID, pendingSignature, ErrorPriorityMetadataUnavailable, blockedCount,
+	)
+	if err != nil {
+		log.Printf("[connection-health] priority sync mark partial state failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
+		return
+	}
+	if !marked {
+		log.Printf("[connection-health] priority sync partial state skipped stale generation user_id=%s admin_account_id=%s", userID, adminAccountID)
+	}
+}
+
+func (s *Service) markPriorityWorkspaceHealthSyncPartial(userID string, adminAccountID string, blockedCount int) {
+	ctx, cancel := context.WithTimeout(context.Background(), priorityStateWriteTimeout)
+	defer cancel()
+	allowWrite, err := s.priorityWorkspaceEmptySignatureWritable(ctx, userID, adminAccountID)
+	if err != nil || !allowWrite {
+		return
+	}
+	marked, err := s.repo.MarkPriorityWorkspaceHealthSyncPartial(
+		ctx, userID, adminAccountID, ErrorPriorityMetadataUnavailable, blockedCount,
+	)
+	if err != nil {
+		log.Printf("[connection-health] priority sync health partial state failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
+		return
+	}
+	if !marked {
+		return
+	}
+}
+
 func (s *Service) tryMarkPriorityWorkspaceSyncFailed(ctx context.Context, userID string, adminAccountID string, pendingSignature string, errorDetail string, failedCount int) (marked bool, err error, panicked bool) {
 	defer func() {
 		if recover() != nil {

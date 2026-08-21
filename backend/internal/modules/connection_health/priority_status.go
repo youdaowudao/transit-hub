@@ -34,6 +34,9 @@ func (s *Service) PrioritySyncStatus(ctx context.Context, userID string) (Priori
 		case "failed":
 			view.Status = "failed"
 			view.ErrorKey = state.LastError
+		case "partial":
+			view.Status = "partial"
+			view.ErrorKey = state.LastError
 		case "success":
 			view.Status = "success"
 		}
@@ -42,6 +45,9 @@ func (s *Service) PrioritySyncStatus(ctx context.Context, userID string) (Priori
 	switch state.LastDecision {
 	case "failed":
 		view.Status = "failed"
+		view.ErrorKey = state.LastError
+	case "partial":
+		view.Status = "partial"
 		view.ErrorKey = state.LastError
 	case "running":
 		view.Status = "running"

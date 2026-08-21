@@ -2,7 +2,12 @@ import { readFileSync } from 'node:fs'
 
 import { describe, expect, it } from 'vitest'
 
-import { resolvePrioritySyncFailureMessage } from '../src/modules/admin/utils/connectionHealthMultiplier'
+import {
+  collectPrioritySyncBlockers,
+  resolvePrioritySyncFailureMessage,
+  resolvePriorityWorkspaceLabel,
+} from '../src/modules/admin/utils/connectionHealthMultiplier'
+import type { AdminGroupHealth } from '../src/modules/admin/types/connectionHealth'
 
 const healthViewSource = readFileSync(
   new URL('../src/modules/admin/views/ConnectionHealthView.vue', import.meta.url),
@@ -67,5 +72,62 @@ describe('connection health asynchronous Priority synchronization', () => {
       time: '2026/8/20 22:01:05',
       reason: '主站分组库存不完整',
     })
+  })
+
+  it('deduplicates blocked accounts across groups and keeps only safe projection fields', () => {
+    const groups = [{
+      id: 'g1',
+      accounts: [{
+        id: '100',
+        name: '异常账号',
+        targetId: 'sub2api:ws1:100',
+        upstreamSiteId: 'site-1',
+        prioritySyncBlocked: true,
+        prioritySyncBlockReason: 'key_unavailable',
+      }],
+    }, {
+      id: 'g2',
+      accounts: [{
+        id: '100',
+        name: '异常账号',
+        targetId: 'sub2api:ws1:100',
+        upstreamSiteId: 'site-1',
+        prioritySyncBlocked: true,
+        prioritySyncBlockReason: 'key_unavailable',
+      }, {
+        id: '200',
+        name: '正常账号',
+        targetId: 'sub2api:ws1:200',
+        prioritySyncBlocked: false,
+      }],
+    }] as AdminGroupHealth[]
+
+    expect(collectPrioritySyncBlockers(groups)).toEqual([{
+      targetId: 'sub2api:ws1:100',
+      accountName: '异常账号',
+      siteId: 'site-1',
+      reason: 'key_unavailable',
+    }])
+  })
+
+  it('uses the workspace display name and projects partial status separately from failure', () => {
+    expect(resolvePriorityWorkspaceLabel(' 主站工作区 ', 'adminacct_hash')).toBe('主站工作区')
+    expect(resolvePriorityWorkspaceLabel('', 'adminacct_hash')).toBe('adminacct_hash')
+
+    const message = resolvePrioritySyncFailureMessage({
+      workspaceId: '主站工作区',
+      status: 'partial',
+      errorKey: 'admin.connectionHealth.errors.priorityMetadataUnavailable',
+      failedCount: 1,
+    }, '2026/8/21 12:00:00', '倍率资料不完整')
+    expect(message.key).toBe('admin.connectionHealth.prioritySync.partial')
+    expect(message.params).toMatchObject({ workspace: '主站工作区', count: 1 })
+  })
+
+  it('wires the current workspace name and blocker list into the top status area', () => {
+    expect(healthViewSource).toContain('collectPrioritySyncBlockers(adminGroups.value)')
+    expect(healthViewSource).toContain('currentAccount.value?.displayName')
+    expect(healthViewSource).toContain("prioritySyncStatus?.status === 'partial'")
+    expect(healthViewSource).toContain('prioritySyncBlockers')
   })
 })

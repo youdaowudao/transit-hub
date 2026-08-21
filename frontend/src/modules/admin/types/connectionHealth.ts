@@ -75,6 +75,17 @@ export type AdminProbeUnavailableReason =
   | 'export_unavailable'
   | 'credentials_redacted'
 
+export type PrioritySyncBlockReason =
+  | 'binding_missing'
+  | 'site_unavailable'
+  | 'key_unavailable'
+  | 'key_missing'
+  | 'groups_unavailable'
+  | 'group_not_found'
+  | 'multiplier_missing'
+  | 'snapshot_stale'
+  | 'snapshot_updating'
+
 export interface AdminGroupHealthSummary {
   totalAccounts: number
   probeableAccounts: number
@@ -175,6 +186,9 @@ export interface AdminGroupAccount {
   multiplierResolutionStatus?: 'resolved' | 'unassociated' | 'missing' | 'conflict' | 'stale' | 'unavailable' | 'updating' | string
   multiplierSource?: 'upstream_key' | 'local_fallback' | 'last_confirmed' | 'none' | string
   localFallbackMultiplier?: number | null
+  upstreamSiteId?: string
+  prioritySyncBlocked?: boolean
+  prioritySyncBlockReason?: PrioritySyncBlockReason | string
   productionSortOrder?: number
 }
 
@@ -445,12 +459,12 @@ export interface AdminGroupPolicyConfiguration {
   policies: TargetPolicyAssignmentSummary[]
   excludedTargetIds: string[]
   probeSortFallbackMultiplier?: number | null
-	prioritySyncStatus?: 'pending' | 'running' | 'success' | 'failed' | string
+	prioritySyncStatus?: 'pending' | 'running' | 'partial' | 'success' | 'failed' | string
 }
 
 export interface PrioritySyncStatus {
 	workspaceId: string
-	status: 'idle' | 'pending' | 'running' | 'success' | 'failed' | string
+	status: 'idle' | 'pending' | 'running' | 'partial' | 'success' | 'failed' | string
 	errorKey?: string
 	pendingSince?: string | null
 	lastAttemptAt?: string | null

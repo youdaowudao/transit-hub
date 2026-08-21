@@ -408,6 +408,48 @@ func TestMultiplierSnapshotIsolatesMissingKeyWithSameRoundListFallback(t *testin
 	}
 }
 
+func TestMultiplierSnapshotMixedDirectSupportSurvivesLaterListFailure(t *testing.T) {
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{
+			snapshotConnection("account-missing", "site-1", "key-missing"),
+			snapshotConnection("account-direct", "site-1", "key-direct"),
+		}},
+		directKeyErrs: map[string]error{
+			"site-1|key-missing": &upstream.RequestError{MessageKey: upstream.ErrorNotFound, Platform: upstream.PlatformSub2API, StatusCode: 404},
+		},
+		directItems: map[string]upstream.Sub2APIKeyItem{
+			"site-1|key-direct": {ID: "key-direct", GroupID: "group-1", GroupName: "vip"},
+		},
+	}
+	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}}
+
+	first := service.upstreamMultiplierResolutionsByAdminAccount(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if first.byAccount["account-direct"].status != MultiplierResolutionResolved || first.byAccount["account-missing"].status != MultiplierResolutionMissing {
+		t.Fatalf("first mixed lookup must isolate the missing key: %+v", first)
+	}
+
+	reader.mu.Lock()
+	reader.listErrs = map[string]error{
+		"site-1": &upstream.RequestError{MessageKey: upstream.ErrorUnknown, Platform: upstream.PlatformSub2API},
+	}
+	reader.mu.Unlock()
+	service.multiplierSnapshotMu.Lock()
+	service.multiplierSnapshots[multiplierSnapshotKey("user1", "ws1", "site-1")].expiresAt = time.Now().Add(-time.Second)
+	service.multiplierSnapshotMu.Unlock()
+
+	second := service.upstreamMultiplierResolutionsByAdminAccount(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	if second.byAccount["account-direct"].status != MultiplierResolutionResolved {
+		t.Fatalf("later list failure must not discard a key that still supports direct lookup: %+v", second)
+	}
+	missing := second.byAccount["account-missing"]
+	if missing.status != MultiplierResolutionUnavailable || missing.reason != MultiplierReasonKeyUnavailable {
+		t.Fatalf("missing key after list failure = %+v, want unavailable key reason", missing)
+	}
+	if direct, lists := reader.callCounts("site-1"); direct != 4 || lists != 2 {
+		t.Fatalf("mixed capability reads = direct:%d list:%d, want direct:4 list:2", direct, lists)
+	}
+}
+
 func TestMultiplierSnapshotLastSyncedAtChangePreservesListFallbackCapability(t *testing.T) {
 	site := snapshotSite("site-1")
 	lastSyncedAt := int64(100)

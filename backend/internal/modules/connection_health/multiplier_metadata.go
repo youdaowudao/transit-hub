@@ -447,7 +447,7 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 				}
 			}
 			capability := entry.capability
-			if len(keys) == len(fallbackKeyIDs) {
+			if len(fallbackKeyIDs) == len(entry.keyIDs) && len(keys) == len(fallbackKeyIDs) {
 				capability = multiplierDirectUnsupported
 			}
 			return keys, keyFailures, siteMetadata, capability, nil

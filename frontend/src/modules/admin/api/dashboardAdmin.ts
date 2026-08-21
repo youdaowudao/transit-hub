@@ -97,11 +97,12 @@ export interface DashboardMetricsResponse {
   additionalCosts?: AdditionalCostSummary
   operatingCost?: number | null
   adjustedNetProfit?: number | null
+  adjustedProfitMargin?: number | null
 }
 
 export interface AdditionalCostRecord {
   id: string
-  type: 'recharge_fee' | 'promotion' | 'fixed' | 'adjustment' | string
+  type: 'recharge_fee' | 'promotion' | 'fixed' | 'adjustment' | 'account_purchase' | 'account_refund' | string
   name: string
   businessDate: string
   amount: number
@@ -111,12 +112,18 @@ export interface AdditionalCostRecord {
   usageRate?: number
   days?: number
   note?: string
+  batchId?: string
+  accountAssetId?: string
   estimated: boolean
   createdAt: string
 }
 
 export interface AdditionalCostSummary {
   rechargeFee: number | null
+  accountPurchase: number
+  accountRefund: number
+  replacementDeduction?: number | null
+  accountQuality?: string
   promotion: number
   fixed: number
   adjustment: number
@@ -126,6 +133,155 @@ export interface AdditionalCostSummary {
   unavailableReason?: string
   records?: AdditionalCostRecord[]
 }
+
+export type AccountStatus = 'unactivated' | 'active' | 'exhausted' | 'dead' | 'closed'
+export type AccountEventType = 'status' | 'restore' | 'refund' | 'quota_observation' | 'manual_observation' | 'link_change' | 'stats_mode_change' | 'metadata_correction'
+
+export interface AccountPerformance {
+  averageSaleMultiplier?: number | null
+  costRecoveryMultiple?: number | null
+  breakevenDifferenceCents?: number | null
+  finalProfitCents?: number | null
+  roi?: number | null
+  missingFields?: string[]
+}
+
+export interface AccountBatchInput {
+  batchName: string
+  platform: string
+  channel: string
+  accountType: string
+  purchaseDate: string
+  purchaseUrl: string
+  defaultUpstreamReferenceUrl: string
+  quantity: number
+  totalAmountCents: number
+  identifiers: string[]
+  accounts: Array<{
+    identifier: string
+    quotaTotalMicros?: number | null
+    connectionId?: string
+    upstreamReferenceUrl?: string
+    linkEffectiveFrom?: string
+    manualSameDaySplit?: boolean
+  }>
+  accountingMode: 'replace_upstream' | 'additive_upstream'
+  recognitionMode: 'immediate' | 'daily' | 'quota'
+  recognitionStartDate: string
+  recognitionDays: number
+  statsMode: 'automatic' | 'manual'
+  note: string
+}
+
+export interface AccountAsset {
+  id: string
+  batchId: string
+  identifier: string
+  platform: string
+  channel: string
+  accountType: string
+  purchaseCostCents: number
+  quotaTotalMicros?: number | null
+  accountingMode: string
+  recognitionMode: string
+  recognitionStartDate: string
+  recognitionDays: number
+  statsMode: string
+  currentStatus: AccountStatus
+  upstreamReferenceUrl?: string
+  quotaUsedMicros?: number | null
+  statsQuality?: string
+  hasActiveLink: boolean
+  performance?: AccountPerformance | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AccountBatchResult {
+  batch: { id: string; batchName: string; purchaseUrl?: string; quantity: number; totalAmountCents: number }
+  assets: AccountAsset[]
+}
+
+export interface AccountEventInput {
+  eventType: AccountEventType
+  effectiveDate: string
+  status?: AccountStatus
+  quotaUsedMicros?: number
+  revenueCents?: number
+  refundCents?: number
+  upstreamCostCents?: number
+  statsMode?: 'automatic' | 'manual'
+  identifier?: string
+  platform?: string
+  channel?: string
+  accountType?: string
+  purchaseUrl?: string
+  upstreamReferenceUrl?: string
+  note?: string
+}
+
+export interface AccountAssetDetail {
+  asset: AccountAsset
+  batch: AccountBatchResult['batch'] & { purchaseUrl?: string; defaultUpstreamReferenceUrl?: string; note?: string }
+  links: Array<{ id: string; connectionId: string; connectionName: string; siteName: string; keyName: string; ownGroupName: string; upstreamReferenceUrl?: string; effectiveFrom: string; effectiveTo?: string | null }>
+  events: Array<AccountEventInput & { id: string; createdAt: string }>
+  dailyStats: Array<{ businessDate: string; source: string; quality: string; keyCostRunId?: string; rawQuotaUsedMicros?: number | null; revenueCents?: number | null; upstreamCostCents?: number | null; recognizedCostCents: number; replacementDeductionCents?: number | null }>
+  performance: AccountPerformance
+}
+
+export const createAccountBatch = async (input: AccountBatchInput, idempotencyKey: string): Promise<AccountBatchResult> =>
+  requestJson<AccountBatchResult>('/dashboard/account-batches', {
+    method: 'POST', body: JSON.stringify(input), headers: { 'Idempotency-Key': idempotencyKey },
+  })
+
+export const listAccountAssets = async (filters: Record<string, string | number | undefined> = {}): Promise<{ items: AccountAsset[]; hasMore: boolean }> => {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
+  return requestJson<{ items: AccountAsset[]; hasMore: boolean }>(`/dashboard/account-assets${params.size ? `?${params}` : ''}`)
+}
+
+export const getAccountAsset = async (assetId: string): Promise<AccountAssetDetail> =>
+  requestJson<AccountAssetDetail>(`/dashboard/account-assets/${encodeURIComponent(assetId)}`)
+
+export const createAccountEvent = async (assetId: string, input: AccountEventInput, idempotencyKey: string) =>
+  requestJson(`/dashboard/account-assets/${encodeURIComponent(assetId)}/events`, {
+    method: 'POST', body: JSON.stringify(input), headers: { 'Idempotency-Key': idempotencyKey },
+  })
+
+export const replaceAccountLink = async (assetId: string, input: {
+  connectionId?: string
+  upstreamReferenceUrl: string
+  effectiveFrom: string
+  manualSameDaySplit: boolean
+  previousQuotaUsedMicros?: number
+  previousRevenueCents?: number
+  replacementQuotaUsedMicros?: number
+  replacementRevenueCents?: number
+  note?: string
+}, idempotencyKey: string): Promise<AccountAssetDetail> =>
+  requestJson<AccountAssetDetail>(`/dashboard/account-assets/${encodeURIComponent(assetId)}/link`, {
+    method: 'PUT', body: JSON.stringify(input), headers: { 'Idempotency-Key': idempotencyKey },
+  })
+
+export const listAccountCostLedger = async (filters: Record<string, string | number | undefined> = {}): Promise<{ items: AdditionalCostRecord[]; hasMore: boolean }> => {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
+  return requestJson<{ items: AdditionalCostRecord[]; hasMore: boolean }>(`/dashboard/cost-ledger${params.size ? `?${params}` : ''}`)
+}
+
+export const refreshAccountStats = async (date: string): Promise<{
+  date: string
+  snapshotRunId: string
+  expectedSites: number
+  completedSites: number
+  quality: string
+  expectedAccounts: number
+  completedAccounts: number
+}> =>
+  requestJson('/dashboard/account-stats/refresh', {
+	method: 'POST', body: JSON.stringify({ date }),
+	headers: { 'Idempotency-Key': `account-refresh-${date}-${Date.now()}-${Math.random().toString(36).slice(2)}` },
+  })
 
 export interface RechargeFeeRate {
   id: string
@@ -178,6 +334,12 @@ export interface DashboardTrendPoint {
   additionalCost?: number | null
   operatingCost?: number | null
   adjustedNetProfit?: number | null
+  accountSnapshotRunId?: string
+  accountExpectedCount?: number | null
+  accountCompletedCount?: number | null
+  accountStatsQuality?: string
+  accountPurchaseCost?: number | null
+  replacementDeduction?: number | null
 }
 
 /** 历史趋势响应。 */
@@ -390,6 +552,12 @@ export interface DailyStatItem {
   additionalCosts?: AdditionalCostSummary
   operatingCost?: number | null
   adjustedNetProfit?: number | null
+  accountSnapshotRunId?: string
+  accountExpectedCount?: number | null
+  accountCompletedCount?: number | null
+  accountStatsQuality?: string
+  accountPurchaseCost?: number | null
+  replacementDeduction?: number | null
 }
 
 /** 每日明细响应。 */

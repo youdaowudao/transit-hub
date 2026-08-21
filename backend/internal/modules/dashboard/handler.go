@@ -39,6 +39,173 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, metricsService *Metric
 	mux.HandleFunc("POST /api/dashboard/additional-costs", handler.createAdditionalCost)
 	mux.HandleFunc("GET /api/dashboard/recharge-fee-rate", handler.getRechargeFeeRate)
 	mux.HandleFunc("PUT /api/dashboard/recharge-fee-rate", handler.saveRechargeFeeRate)
+	mux.HandleFunc("POST /api/dashboard/account-batches", handler.createAccountBatch)
+	mux.HandleFunc("GET /api/dashboard/account-assets", handler.listAccountAssets)
+	mux.HandleFunc("GET /api/dashboard/account-assets/{id}", handler.getAccountAsset)
+	mux.HandleFunc("POST /api/dashboard/account-assets/{id}/events", handler.createAccountEvent)
+	mux.HandleFunc("PUT /api/dashboard/account-assets/{id}/link", handler.replaceAccountLink)
+	mux.HandleFunc("GET /api/dashboard/cost-ledger", handler.listAccountCostLedger)
+	mux.HandleFunc("POST /api/dashboard/account-stats/refresh", handler.refreshAccountStats)
+}
+
+func (h *Handler) replaceAccountLink(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if h.metricsService == nil || h.metricsService.accountAssets == nil {
+		httpjson.WriteError(w, http.StatusServiceUnavailable, "dashboard.accountAsset.errors.unavailable")
+		return
+	}
+	var input AccountLinkInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	result, err := h.metricsService.accountAssets.ReplaceLink(
+		r.Context(), userID, r.PathValue("id"), r.Header.Get("Idempotency-Key"), input,
+	)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) refreshAccountStats(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input struct {
+		Date string `json:"date"`
+	}
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	result, err := h.metricsService.RefreshAccountStats(r.Context(), userID, input.Date, r.Header.Get("Idempotency-Key"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) listAccountCostLedger(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if h.metricsService == nil || h.metricsService.accountAssets == nil {
+		httpjson.WriteError(w, http.StatusServiceUnavailable, "dashboard.accountAsset.errors.unavailable")
+		return
+	}
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
+	result, err := h.metricsService.accountAssets.ListCostLedger(r.Context(), userID, AccountCostLedgerFilter{
+		From: r.URL.Query().Get("from"), To: r.URL.Query().Get("to"), Type: r.URL.Query().Get("type"),
+		Platform: r.URL.Query().Get("platform"), Channel: r.URL.Query().Get("channel"),
+		BatchID: r.URL.Query().Get("batchId"), AccountAssetID: r.URL.Query().Get("accountAssetId"),
+		Page: page, PageSize: pageSize,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) createAccountBatch(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if h.metricsService == nil || h.metricsService.accountAssets == nil {
+		httpjson.WriteError(w, http.StatusServiceUnavailable, "dashboard.accountAsset.errors.unavailable")
+		return
+	}
+	var input AccountBatchInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	input.IdempotencyKey = r.Header.Get("Idempotency-Key")
+	result, err := h.metricsService.accountAssets.CreateBatch(r.Context(), userID, input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusCreated, result)
+}
+
+func (h *Handler) listAccountAssets(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if h.metricsService == nil || h.metricsService.accountAssets == nil {
+		httpjson.WriteError(w, http.StatusServiceUnavailable, "dashboard.accountAsset.errors.unavailable")
+		return
+	}
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("pageSize"))
+	result, err := h.metricsService.accountAssets.ListAssets(r.Context(), userID, AccountAssetFilter{
+		Platform: r.URL.Query().Get("platform"), Channel: r.URL.Query().Get("channel"),
+		AccountType: r.URL.Query().Get("accountType"), Status: r.URL.Query().Get("status"),
+		Search: r.URL.Query().Get("search"), Page: page, PageSize: pageSize,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) getAccountAsset(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if h.metricsService == nil || h.metricsService.accountAssets == nil {
+		httpjson.WriteError(w, http.StatusServiceUnavailable, "dashboard.accountAsset.errors.unavailable")
+		return
+	}
+	detail, err := h.metricsService.accountAssets.GetAssetDetail(r.Context(), userID, r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, detail)
+}
+
+func (h *Handler) createAccountEvent(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if h.metricsService == nil || h.metricsService.accountAssets == nil {
+		httpjson.WriteError(w, http.StatusServiceUnavailable, "dashboard.accountAsset.errors.unavailable")
+		return
+	}
+	var event AccountEvent
+	if err := httpjson.Decode(r, &event); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	result, err := h.metricsService.accountAssets.AppendEvent(r.Context(), userID, r.PathValue("id"), r.Header.Get("Idempotency-Key"), event)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusCreated, result)
 }
 
 func (h *Handler) getRechargeFeeRate(w http.ResponseWriter, r *http.Request) {
@@ -328,6 +495,14 @@ func (h *Handler) saveBalanceFilter(w http.ResponseWriter, r *http.Request) {
 
 // writeError 把 service 的业务错误映射成合适的 HTTP 状态码与 i18n 错误 key。
 func writeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errInvalidAccountBatch) || errors.Is(err, errInvalidAllocationCount) {
+		httpjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if errors.Is(err, ErrAccountAssetNotFound) {
+		httpjson.WriteError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	if errors.Is(err, ErrAdditionalCostInvalidType) || errors.Is(err, ErrAdditionalCostInvalidAmount) || errors.Is(err, ErrAdditionalCostInvalidDate) || errors.Is(err, ErrAdditionalCostInvalidDays) || errors.Is(err, ErrAdditionalCostInvalidRate) {
 		httpjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return

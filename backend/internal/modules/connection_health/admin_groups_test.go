@@ -1070,6 +1070,8 @@ func TestAdminGroups_BlockedMultiplierUsesLastConfirmedCheckpointForDisplay(t *t
 		{MultiplierResolutionUnavailable, MultiplierReasonKeyUnavailable},
 		{MultiplierResolutionMissing, MultiplierReasonKeyMissing},
 		{MultiplierResolutionMissing, MultiplierReasonGroupsUnavailable},
+		{MultiplierResolutionMissing, MultiplierReasonGroupMissing},
+		{MultiplierResolutionMissing, MultiplierReasonGroupAmbiguous},
 		{MultiplierResolutionMissing, MultiplierReasonGroupNotFound},
 		{MultiplierResolutionMissing, MultiplierReasonMultiplierMissing},
 		{MultiplierResolutionStale, MultiplierReasonSnapshotStale},
@@ -1135,6 +1137,57 @@ func TestSafeMultiplierBlockReasonRejectsUnknownText(t *testing.T) {
 	}
 	if got := safeMultiplierBlockReason(resolution); got != MultiplierReasonMultiplierMissing {
 		t.Fatalf("unknown internal reason must use a fixed safe fallback, got %q", got)
+	}
+}
+
+func TestAdminGroups_BlockedUpstreamGroupProjectsSafeReference(t *testing.T) {
+	repo := newFakeRepository()
+	policy := probePolicy()
+	policy.AutoDegradeEnabled = true
+	policy.PriorityMode = PriorityModeMultiplier
+	policy.StrategyMode = StrategyModeHealthProbe
+	repo.policies = []Policy{policy}
+	repo.groupAssignments = []GroupPolicyAssignment{{
+		UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID,
+	}}
+	priority := 99
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {{ID: "100", Name: "account", Models: "gpt-4o", Priority: &priority}},
+		},
+	}
+	service := newAdminGroupsService(reader, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, repo)
+	cacheKey := "user1\x00ws1\x00" + string(upstream.PlatformSub2API)
+	service.adminMultiplierCache = map[string]adminMultiplierCacheEntry{
+		cacheKey: {
+			lookup: upstreamMultiplierLookup{byAccount: map[string]upstreamMultiplierResolution{
+				"100": {
+					status: MultiplierResolutionMissing,
+					reason: "group_missing",
+					info: upstreamKeyGroupInfo{
+						siteID: "site-1", groupID: "14", name: "GPT Plus - 特惠",
+					},
+				},
+			}},
+			expiresAt: time.Now().Add(time.Minute),
+		},
+	}
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("AdminGroups() error = %v", err)
+	}
+	payload, err := json.Marshal(groups[0].Accounts[0])
+	if err != nil {
+		t.Fatalf("marshal account: %v", err)
+	}
+	jsonText := string(payload)
+	if !strings.Contains(jsonText, `"prioritySyncBlockReason":"group_missing"`) {
+		t.Fatalf("safe missing reason not projected: %s", jsonText)
+	}
+	if !strings.Contains(jsonText, `"upstreamKeyGroupName":"GPT Plus - 特惠"`) || !strings.Contains(jsonText, `"upstreamKeyGroupId":"14"`) {
+		t.Fatalf("safe upstream group reference not projected: %s", jsonText)
 	}
 }
 

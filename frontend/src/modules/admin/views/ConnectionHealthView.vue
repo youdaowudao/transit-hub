@@ -44,7 +44,8 @@ import type {
 import { resolveConnectionHealthStrategyMode } from '../utils/connectionHealthPolicy'
 import {
   collectPrioritySyncBlockers,
-  prioritySyncBlockReasonKey,
+  type PrioritySyncBlocker,
+  resolvePrioritySyncBlockReasonMessage,
   resolvePrioritySyncFailureMessage,
   resolvePriorityWorkspaceLabel,
 } from '../utils/connectionHealthMultiplier'
@@ -324,8 +325,10 @@ const priorityFailureText = computed(() => {
 	)
 	return t(message.key, message.params)
 })
-const priorityBlockReasonLabel = (reason: string): string =>
-  t(`admin.connectionHealth.prioritySync.blockReasons.${prioritySyncBlockReasonKey(reason)}`)
+const priorityBlockReasonLabel = (blocker: PrioritySyncBlocker): string => {
+  const message = resolvePrioritySyncBlockReasonMessage(blocker.reason, blocker.groupName, blocker.groupId)
+  return t(`admin.connectionHealth.prioritySync.blockReasons.${message.key}`, message.params)
+}
 const priorityBlockerSiteLabel = (siteId: string): string =>
   siteId ? siteName(siteId) : t('admin.connectionHealth.prioritySync.siteUnknown')
 const priorityBlockerDetailsChanged = computed(() => {
@@ -814,7 +817,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
 						{{ t('admin.connectionHealth.prioritySync.blockedTarget', {
 							account: blocker.accountName,
 							site: priorityBlockerSiteLabel(blocker.siteId),
-							reason: priorityBlockReasonLabel(blocker.reason),
+							reason: priorityBlockReasonLabel(blocker),
 						}) }}
 					</li>
 				</ul>

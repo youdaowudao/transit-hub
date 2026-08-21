@@ -681,12 +681,17 @@ func (s *Service) resolveMultiplierSnapshotLocked(connection my_sites.RealConnec
 		}
 		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSiteUnavailable, info: info}
 	}
+	info.groupID = strings.TrimSpace(key.groupID)
+	info.name = strings.TrimSpace(key.groupName)
 	if len(entry.site.groups) == 0 {
 		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonGroupsUnavailable, info: info}
 	}
-	matched := findSiteGroup(entry.site.groups, key)
+	matched, ambiguous := findSiteGroup(entry.site.groups, key)
+	if ambiguous {
+		return upstreamMultiplierResolution{status: MultiplierResolutionMissing, reason: MultiplierReasonGroupAmbiguous, info: info}
+	}
 	if matched == nil {
-		return upstreamMultiplierResolution{status: MultiplierResolutionMissing, reason: MultiplierReasonGroupNotFound, info: info}
+		return upstreamMultiplierResolution{status: MultiplierResolutionMissing, reason: MultiplierReasonGroupMissing, info: info}
 	}
 	info = newUpstreamKeyGroupInfo(siteID, keyID, *matched, entry.site.rechargeRate)
 	if info.multiplier == nil || info.effectiveMultiplier == nil {
@@ -701,13 +706,13 @@ func (s *Service) resolveMultiplierSnapshotLocked(connection my_sites.RealConnec
 	return upstreamMultiplierResolution{status: status, reason: reason, info: info}
 }
 
-func findSiteGroup(groups []upstream.GroupInfo, key upstreamKeyMetadata) *upstream.GroupInfo {
+func findSiteGroup(groups []upstream.GroupInfo, key upstreamKeyMetadata) (*upstream.GroupInfo, bool) {
 	var matched *upstream.GroupInfo
 	if key.groupID != "" {
 		for index := range groups {
 			if strings.TrimSpace(groups[index].ID) == key.groupID {
 				if matched != nil {
-					return nil
+					return nil, true
 				}
 				matched = &groups[index]
 			}
@@ -717,13 +722,13 @@ func findSiteGroup(groups []upstream.GroupInfo, key upstreamKeyMetadata) *upstre
 		for index := range groups {
 			if strings.EqualFold(strings.TrimSpace(groups[index].Name), key.groupName) {
 				if matched != nil {
-					return nil
+					return nil, true
 				}
 				matched = &groups[index]
 			}
 		}
 	}
-	return matched
+	return matched, false
 }
 
 func newMultiplierSiteMetadata(site *upstream.Site) multiplierSiteMetadata {

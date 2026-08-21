@@ -81,6 +81,8 @@ export type PrioritySyncBlockReason =
   | 'key_unavailable'
   | 'key_missing'
   | 'groups_unavailable'
+  | 'group_missing'
+  | 'group_ambiguous'
   | 'group_not_found'
   | 'multiplier_missing'
   | 'snapshot_stale'
@@ -153,8 +155,9 @@ export interface AdminGroupAccount {
   models?: string
   groupIds?: string[]
   // 真实对接记录中该转发账号所使用的上游 API Key 所属分组及其当前倍率。
-  // 旧后端或无法可靠关联的账号不返回这两个字段，前端按未知值展示。
+  // 旧后端或无法可靠关联的账号不返回这些字段，前端按未知值展示。
   upstreamKeyGroupName?: string
+  upstreamKeyGroupId?: string
   upstreamKeyGroupMultiplier?: number
   // 独立探活字段：targetId 是稳定探活目标 ID，手动探活/事件按 targetId 走。
   targetId: string

@@ -269,6 +269,86 @@ func (s *Service) KeyUsageTodayIncludingZeroForDate(ctx context.Context, userID,
 	return s.keyUsageToday(ctx, userID, true, date)
 }
 
+func (s *Service) KeyUsageForDate(ctx context.Context, userID, adminAccountID, date string) (KeyUsageForDateResult, error) {
+	if strings.TrimSpace(date) == "" {
+		date = businesstime.Today()
+	}
+	if strings.TrimSpace(adminAccountID) == "" {
+		return KeyUsageForDateResult{}, errors.New("admin account id is required")
+	}
+	sites, err := s.cache.ListByUser(ctx, userID)
+	if err != nil {
+		return KeyUsageForDateResult{}, err
+	}
+	targets := make([]*Site, 0, len(sites))
+	for _, site := range sites {
+		if site.AdminAccountID != adminAccountID || !site.IsEnabled() || site.Session == nil || site.RechargeRate <= 0 {
+			continue
+		}
+		targets = append(targets, site)
+	}
+	result := KeyUsageForDateResult{BusinessDate: date, ExpectedSites: len(targets), Sites: make([]KeyUsageSiteResult, len(targets))}
+	const maxSiteConcurrency = 4
+	sem := make(chan struct{}, maxSiteConcurrency)
+	var wg sync.WaitGroup
+	for index, site := range targets {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return KeyUsageForDateResult{}, ctx.Err()
+		}
+		wg.Add(1)
+		go func(index int, site *Site) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			siteResult := KeyUsageSiteResult{
+				SiteID: site.ID, SiteName: site.Name, Platform: site.Platform,
+				RechargeRate: site.RechargeRate, Items: []KeyUsageTodayItem{},
+			}
+			session := *site.Session
+			groups := append([]GroupInfo(nil), site.Metrics.Groups...)
+			refreshedSession, refreshErr := s.platformService.RefreshSessionContext(ctx, session)
+			if refreshErr != nil {
+				siteResult.Error = ErrorRequest
+				result.Sites[index] = siteResult
+				return
+			}
+			stats, fetchErr := s.platformService.FetchKeyUsageTodayIncludingZeroWithContext(ctx, refreshedSession, groups, date)
+			if fetchErr != nil {
+				siteResult.Error = ErrorRequest
+				result.Sites[index] = siteResult
+				return
+			}
+			if cached, cacheErr := s.cache.Get(ctx, site.ID); cacheErr == nil && cached != nil && cached.UserID == site.UserID && cached.IsEnabled() {
+				cached.Session = &refreshedSession
+				_ = s.setCachedSite(ctx, cached)
+				_ = s.saveSite(ctx, cached)
+			}
+			for _, stat := range stats {
+				groupName := strings.TrimSpace(stat.GroupName)
+				if groupName == "" {
+					groupName = "Ungrouped"
+				}
+				siteResult.Items = append(siteResult.Items, KeyUsageTodayItem{
+					SiteID: site.ID, SiteName: site.Name, Platform: site.Platform,
+					KeyID: stat.KeyID, KeyName: stat.KeyName, GroupName: groupName,
+					TodayAmount: stat.TodayAmount * site.RechargeRate,
+					RawAmount:   stat.TodayAmount, RechargeRate: site.RechargeRate,
+				})
+			}
+			siteResult.Complete = true
+			result.Sites[index] = siteResult
+		}(index, site)
+	}
+	wg.Wait()
+	for _, site := range result.Sites {
+		if site.Complete {
+			result.CompletedSites++
+		}
+	}
+	return result, nil
+}
+
 func (s *Service) keyUsageToday(ctx context.Context, userID string, includeZero bool, date string) ([]KeyUsageTodayItem, error) {
 	if strings.TrimSpace(date) == "" {
 		date = businesstime.Today()

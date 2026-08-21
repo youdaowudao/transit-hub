@@ -128,6 +128,7 @@ type AdminGroupAccount struct {
 	// 分组，再以站点缓存的 Groups 解析其当前倍率。无法可靠关联时保持空值，绝不使用
 	// admin 转发账号自身的 rate_multiplier 猜测。
 	UpstreamKeyGroupName       string   `json:"upstreamKeyGroupName,omitempty"`
+	UpstreamKeyGroupID         string   `json:"upstreamKeyGroupId,omitempty"`
 	UpstreamKeyGroupMultiplier *float64 `json:"upstreamKeyGroupMultiplier,omitempty"`
 	// 独立探活字段。
 	TargetID               string        `json:"targetId"`
@@ -670,6 +671,7 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 				Models:                        acc.Models,
 				GroupIDs:                      acc.GroupIDs,
 				UpstreamKeyGroupName:          upstreamKeyGroup.name,
+				UpstreamKeyGroupID:            upstreamKeyGroup.groupID,
 				UpstreamKeyGroupMultiplier:    upstreamKeyGroup.multiplier,
 				TargetID:                      targetID,
 				ProbeAvailable:                available,
@@ -1006,6 +1008,9 @@ const (
 	MultiplierReasonKeyUnavailable    = "key_unavailable"
 	MultiplierReasonKeyMissing        = "key_missing"
 	MultiplierReasonGroupsUnavailable = "groups_unavailable"
+	MultiplierReasonGroupMissing      = "group_missing"
+	MultiplierReasonGroupAmbiguous    = "group_ambiguous"
+	// MultiplierReasonGroupNotFound is retained for safe display compatibility with older responses.
 	MultiplierReasonGroupNotFound     = "group_not_found"
 	MultiplierReasonMultiplierMissing = "multiplier_missing"
 	MultiplierReasonSnapshotStale     = "snapshot_stale"
@@ -1047,6 +1052,8 @@ func safeMultiplierBlockReason(resolution upstreamMultiplierResolution) string {
 		MultiplierReasonKeyUnavailable,
 		MultiplierReasonKeyMissing,
 		MultiplierReasonGroupsUnavailable,
+		MultiplierReasonGroupMissing,
+		MultiplierReasonGroupAmbiguous,
 		MultiplierReasonGroupNotFound,
 		MultiplierReasonMultiplierMissing,
 		MultiplierReasonSnapshotStale,
@@ -1429,33 +1436,18 @@ func (s *Service) upstreamKeyGroupForConnection(
 		siteCache[siteID] = site
 	}
 
-	var matched *upstream.GroupInfo
-	if currentKey.groupID != "" {
-		for index := range site.Metrics.Groups {
-			if strings.TrimSpace(site.Metrics.Groups[index].ID) != currentKey.groupID {
-				continue
-			}
-			if matched != nil {
-				return upstreamMultiplierResolution{status: MultiplierResolutionMissing}
-			}
-			matched = &site.Metrics.Groups[index]
-		}
+	reference := upstreamKeyGroupInfo{
+		siteID:  siteID,
+		keyID:   keyID,
+		groupID: strings.TrimSpace(currentKey.groupID),
+		name:    strings.TrimSpace(currentKey.groupName),
 	}
-	// 有些兼容实现不返回分组 ID，或站点缓存的 ID 形态与 Key 接口不同；此时仅在完整
-	// 分组名唯一命中时回退。模糊、部分匹配会把倍率关联到错误分组，因此明确禁止。
-	if matched == nil && currentKey.groupName != "" {
-		for index := range site.Metrics.Groups {
-			if !strings.EqualFold(strings.TrimSpace(site.Metrics.Groups[index].Name), currentKey.groupName) {
-				continue
-			}
-			if matched != nil {
-				return upstreamMultiplierResolution{status: MultiplierResolutionMissing}
-			}
-			matched = &site.Metrics.Groups[index]
-		}
+	matched, ambiguous := findSiteGroup(site.Metrics.Groups, *currentKey)
+	if ambiguous {
+		return upstreamMultiplierResolution{status: MultiplierResolutionMissing, reason: MultiplierReasonGroupAmbiguous, info: reference}
 	}
 	if matched == nil {
-		return upstreamMultiplierResolution{status: MultiplierResolutionMissing}
+		return upstreamMultiplierResolution{status: MultiplierResolutionMissing, reason: MultiplierReasonGroupMissing, info: reference}
 	}
 	info := newUpstreamKeyGroupInfo(siteID, keyID, *matched, site.RechargeRate)
 	if info.multiplier == nil || info.effectiveMultiplier == nil {

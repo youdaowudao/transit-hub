@@ -40,6 +40,14 @@ func TestWorkspaceDeleteStatementsCoverAllWorkspaceTables(t *testing.T) {
 		"smtp_settings",
 		"email_templates",
 		"my_site_states",
+		"dashboard_account_daily_stats",
+		"dashboard_account_events",
+		"dashboard_account_links",
+		"dashboard_additional_costs",
+		"dashboard_account_assets",
+		"dashboard_account_batches",
+		"dashboard_upstream_key_daily_costs",
+		"dashboard_upstream_key_cost_runs",
 		"real_connections",
 		"dashboard_daily_stats",
 		"dashboard_balance_filter",
@@ -126,6 +134,11 @@ func TestWorkspaceDeleteStatementsDeleteChildrenBeforeParents(t *testing.T) {
 	assertBefore("connection_health_group_policy_assignments", "connection_health_policies")
 	assertBefore("connection_health_policy_assignments", "connection_health_policies")
 	assertBefore("connection_health_model_targets", "connection_health_policies")
+	assertBefore("dashboard_account_daily_stats", "dashboard_account_assets")
+	assertBefore("dashboard_account_events", "dashboard_account_assets")
+	assertBefore("dashboard_account_links", "dashboard_account_assets")
+	assertBefore("dashboard_account_assets", "dashboard_account_batches")
+	assertBefore("dashboard_upstream_key_daily_costs", "dashboard_upstream_key_cost_runs")
 }
 
 func TestWorkspaceDeleteSQLDocumentsCurrentFallbackAndLocks(t *testing.T) {

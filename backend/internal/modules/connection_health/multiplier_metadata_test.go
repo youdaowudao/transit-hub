@@ -106,6 +106,61 @@ func (f snapshotSiteLookup) GetSite(ctx context.Context, siteID string) (*upstre
 	return f.sites[siteID], nil
 }
 
+func TestResolveMultiplierSnapshotLocked_DistinguishesMissingAndAmbiguousUpstreamGroups(t *testing.T) {
+	multiplier := 0.08
+	tests := []struct {
+		name       string
+		key        upstreamKeyMetadata
+		groups     []upstream.GroupInfo
+		wantReason string
+	}{
+		{
+			name:       "bound upstream group no longer exists",
+			key:        upstreamKeyMetadata{id: "key-1", groupID: "14", groupName: "GPT Plus - 特惠"},
+			groups:     []upstream.GroupInfo{{ID: "36", Name: "GPT Plus - 稳定", Multiplier: &multiplier}},
+			wantReason: "group_missing",
+		},
+		{
+			name: "duplicate upstream group names are ambiguous",
+			key:  upstreamKeyMetadata{id: "key-1", groupName: "同名分组"},
+			groups: []upstream.GroupInfo{
+				{ID: "20", Name: "同名分组", Multiplier: &multiplier},
+				{ID: "21", Name: "同名分组", Multiplier: &multiplier},
+			},
+			wantReason: "group_ambiguous",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &Service{multiplierSnapshots: map[string]*multiplierSnapshotEntry{
+				multiplierSnapshotKey("user1", "ws1", "site-1"): {
+					status: "complete",
+					keys: map[string]upstreamKeyMetadata{
+						"key-1": test.key,
+					},
+					keyFailures: map[string]string{},
+					site: multiplierSiteMetadata{
+						rechargeRate: 1,
+						groups:       test.groups,
+					},
+				},
+			}}
+			resolution := service.resolveMultiplierSnapshotLocked(my_sites.RealConnection{
+				UpstreamSiteID: "site-1",
+				UpstreamKeyID:  "key-1",
+			}, "user1", "ws1", false)
+
+			if resolution.status != MultiplierResolutionMissing || resolution.reason != test.wantReason {
+				t.Fatalf("resolution = %+v, want missing/%s", resolution, test.wantReason)
+			}
+			if resolution.info.groupID != test.key.groupID || resolution.info.name != test.key.groupName {
+				t.Fatalf("safe upstream group reference = %+v, want id=%q name=%q", resolution.info, test.key.groupID, test.key.groupName)
+			}
+		})
+	}
+}
+
 type cloningSnapshotSiteLookup struct {
 	sites map[string]*upstream.Site
 }

@@ -82,8 +82,10 @@ describe('connection health asynchronous Priority synchronization', () => {
         name: '异常账号',
         targetId: 'sub2api:ws1:100',
         upstreamSiteId: 'site-1',
+        upstreamKeyGroupName: 'GPT Plus - 特惠',
+        upstreamKeyGroupId: '14',
         prioritySyncBlocked: true,
-        prioritySyncBlockReason: 'key_unavailable',
+        prioritySyncBlockReason: 'group_missing',
       }],
     }, {
       id: 'g2',
@@ -92,8 +94,10 @@ describe('connection health asynchronous Priority synchronization', () => {
         name: '异常账号',
         targetId: 'sub2api:ws1:100',
         upstreamSiteId: 'site-1',
+        upstreamKeyGroupName: 'GPT Plus - 特惠',
+        upstreamKeyGroupId: '14',
         prioritySyncBlocked: true,
-        prioritySyncBlockReason: 'key_unavailable',
+        prioritySyncBlockReason: 'group_missing',
       }, {
         id: '200',
         name: '正常账号',
@@ -106,7 +110,9 @@ describe('connection health asynchronous Priority synchronization', () => {
       targetId: 'sub2api:ws1:100',
       accountName: '异常账号',
       siteId: 'site-1',
-      reason: 'key_unavailable',
+      groupName: 'GPT Plus - 特惠',
+      groupId: '14',
+      reason: 'group_missing',
     }])
   })
 

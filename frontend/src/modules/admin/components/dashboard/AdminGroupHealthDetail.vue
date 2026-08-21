@@ -34,8 +34,8 @@ import type {
   ConnectionHealthState,
 } from '../../types/connectionHealth'
 import {
-  prioritySyncBlockReasonKey,
   resolveConnectionHealthMultiplierDisplay,
+  resolvePrioritySyncBlockReasonMessage,
 } from '../../utils/connectionHealthMultiplier'
 
 const props = defineProps<{
@@ -489,8 +489,14 @@ const multiplierSourceLabel = (account: AdminGroupAccount): string => {
   return t(`${detailPrefix}.multiplierSources.${multiplierDisplay(account).sourceKey}`)
 }
 
-const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string =>
-  t(`${prefix}.prioritySync.blockReasons.${prioritySyncBlockReasonKey(account.prioritySyncBlockReason)}`)
+const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
+  const message = resolvePrioritySyncBlockReasonMessage(
+    account.prioritySyncBlockReason,
+    account.upstreamKeyGroupName,
+    account.upstreamKeyGroupId,
+  )
+  return t(`${prefix}.prioritySync.blockReasons.${message.key}`, message.params)
+}
 
 </script>
 
@@ -774,7 +780,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string =>
                     <ArrowDownUp v-else-if="account.priorityManaged" class="h-3.5 w-3.5 text-primary" />
                   </div>
                   <p class="mt-0.5 text-[11px] text-muted-foreground">{{ priorityStateLabel(account) }}</p>
-                  <p v-if="account.prioritySyncBlocked" class="mt-1 flex max-w-44 items-start gap-1 text-[11px] leading-4 text-amber-600 dark:text-amber-400">
+                  <p v-if="account.prioritySyncBlocked" class="mt-1 flex max-w-72 items-start gap-1 text-[11px] leading-4 text-amber-600 dark:text-amber-400">
                     <AlertTriangle class="mt-0.5 h-3 w-3 shrink-0" />
                     <span class="break-words">{{ prioritySyncBlockReasonLabel(account) }}</span>
                   </p>

@@ -6,6 +6,7 @@ import type { AdminGroupAccount } from '../src/modules/admin/types/connectionHea
 import {
   prioritySyncBlockReasonKey,
   resolveConnectionHealthMultiplierDisplay,
+  resolvePrioritySyncBlockReasonMessage,
 } from '../src/modules/admin/utils/connectionHealthMultiplier'
 
 const localeSource = readFileSync(new URL('../src/locales/zh-CN.ts', import.meta.url), 'utf8')
@@ -101,9 +102,37 @@ describe('connection health multiplier resolution display', () => {
     expect(prioritySyncBlockReasonKey(undefined)).toBe('unknown')
   })
 
+  it('describes a missing or ambiguous upstream group with its safe reference', () => {
+    expect(resolvePrioritySyncBlockReasonMessage('group_missing', 'GPT Plus - 特惠', '14')).toEqual({
+      key: 'group_missing',
+      params: { group: '“GPT Plus - 特惠”（ID 14）' },
+    })
+    expect(resolvePrioritySyncBlockReasonMessage('group_ambiguous', '同名分组', '')).toEqual({
+      key: 'group_ambiguous',
+      params: { group: '“同名分组”' },
+    })
+    expect(resolvePrioritySyncBlockReasonMessage('group_missing', '', '14')).toEqual({
+      key: 'group_missing',
+      params: { group: '（ID 14）' },
+    })
+    expect(resolvePrioritySyncBlockReasonMessage('group_missing', '', '')).toEqual({
+      key: 'group_missing',
+      params: { group: '' },
+    })
+    expect(resolvePrioritySyncBlockReasonMessage('raw upstream response', '', '')).toEqual({
+      key: 'unknown',
+      params: { group: '' },
+    })
+    expect(localeSource).toContain('上游分组{group}已不存在')
+    expect(localeSource).toContain('不再使用则删除绑定')
+    expect(localeSource).toContain('匹配到多个同名分组')
+  })
+
   it('shows the blocker reason beside the unchanged current Priority value', () => {
     expect(detailSource).toContain('{{ formatNumber(account.priority) }}')
     expect(detailSource).toContain('account.prioritySyncBlocked')
     expect(detailSource).toContain('prioritySyncBlockReasonLabel(account)')
+    expect(detailSource).toContain('account.upstreamKeyGroupName')
+    expect(detailSource).toContain('account.upstreamKeyGroupId')
   })
 })

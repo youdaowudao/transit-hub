@@ -65,6 +65,8 @@ const PRIORITY_SYNC_BLOCK_REASONS = new Set([
   'key_unavailable',
   'key_missing',
   'groups_unavailable',
+  'group_missing',
+  'group_ambiguous',
   'group_not_found',
   'multiplier_missing',
   'snapshot_stale',
@@ -78,8 +80,33 @@ export interface PrioritySyncBlocker {
   targetId: string
   accountName: string
   siteId: string
+  groupName: string
+  groupId: string
   reason: string
 }
+
+export interface PrioritySyncBlockReasonMessage {
+  key: string
+  params: { group: string }
+}
+
+const upstreamGroupReference = (groupName: string, groupId: string): string => {
+  const name = groupName.trim()
+  const id = groupId.trim()
+  if (name && id) return `“${name}”（ID ${id}）`
+  if (name) return `“${name}”`
+  if (id) return `（ID ${id}）`
+  return ''
+}
+
+export const resolvePrioritySyncBlockReasonMessage = (
+  reason: string | null | undefined,
+  groupName: string | null | undefined,
+  groupId: string | null | undefined,
+): PrioritySyncBlockReasonMessage => ({
+  key: prioritySyncBlockReasonKey(reason),
+  params: { group: upstreamGroupReference(groupName ?? '', groupId ?? '') },
+})
 
 export const collectPrioritySyncBlockers = (groups: AdminGroupHealth[]): PrioritySyncBlocker[] => {
   const byTarget = new Map<string, PrioritySyncBlocker>()
@@ -90,6 +117,8 @@ export const collectPrioritySyncBlockers = (groups: AdminGroupHealth[]): Priorit
         targetId: account.targetId,
         accountName: account.name || account.id,
         siteId: account.upstreamSiteId ?? '',
+        groupName: account.upstreamKeyGroupName ?? '',
+        groupId: account.upstreamKeyGroupId ?? '',
         reason: prioritySyncBlockReasonKey(account.prioritySyncBlockReason),
       })
     }

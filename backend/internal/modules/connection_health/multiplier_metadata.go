@@ -491,11 +491,12 @@ func (s *Service) finishMultiplierSnapshot(target *multiplierSnapshotEntry, capt
 	}
 	if err == nil {
 		now := time.Now()
+		keyFailureOutcome := multiplierKeyFailuresOutcome(keyFailures)
 		if len(keyFailures) > 0 && len(keys) == 0 && len(current.keys) > 0 {
 			current.status = multiplierResolutionStale
 			current.nextRetryAt = now.Add(multiplierFailureBackoff)
 			current.lastError = "key metadata unavailable"
-			current.lastOutcome = "unavailable"
+			current.lastOutcome = keyFailureOutcome
 		} else {
 			current.keys = keys
 			current.keyFailures = keyFailures
@@ -515,10 +516,7 @@ func (s *Service) finishMultiplierSnapshot(target *multiplierSnapshotEntry, capt
 				current.nextRetryAt = current.fetchedAt.Add(multiplierFailureBackoff)
 			}
 			current.lastError = ""
-			current.lastOutcome = "success"
-			if len(keyFailures) > 0 {
-				current.lastOutcome = "unavailable"
-			}
+			current.lastOutcome = keyFailureOutcome
 			current.capability = captured.capability
 		}
 	} else {
@@ -558,6 +556,23 @@ func multiplierRefreshOutcome(err error) string {
 		return "auth_failed"
 	}
 	return "unavailable"
+}
+
+func multiplierKeyFailuresOutcome(keyFailures map[string]string) string {
+	outcome := ""
+	for _, candidate := range keyFailures {
+		if outcome == "" {
+			outcome = candidate
+			continue
+		}
+		if candidate != outcome {
+			return "unavailable"
+		}
+	}
+	if outcome == "" {
+		return "success"
+	}
+	return outcome
 }
 
 func (s *Service) multiplierRefreshSummary(userID string, adminAccountID string) AdminGroupsRefreshSummary {

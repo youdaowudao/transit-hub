@@ -6,19 +6,20 @@ const dashboardSource = readFileSync(
   'utf8',
 )
 
-describe('dashboard additional cost summary', () => {
-  it('starts collapsed and exposes one expandable summary', () => {
-    expect(dashboardSource).toContain('const additionalCostsExpanded = ref(false)')
-    expect(dashboardSource).toContain(':aria-expanded="additionalCostsExpanded"')
-    expect(dashboardSource).toContain('v-if="additionalCostsExpanded"')
+describe('dashboard cost composition', () => {
+  it('replaces the old expandable duplicate summary with one inline composition', () => {
+    expect(dashboardSource).toContain('成本构成')
+    expect(dashboardSource).not.toContain('additionalCostsExpanded')
+    expect(dashboardSource).not.toContain('dashboard-operating-cost-details')
   })
 
-  it('shows a complete cost breakdown without repeating raw records', () => {
-    expect(dashboardSource).toContain('上游直接成本')
-    expect(dashboardSource).toContain('additionalCostLines')
+  it('shows the three cost components and direct account-cost actions without raw records', () => {
+    expect(dashboardSource).toContain('上游 {{ formatCny(displayedTodayCost) }}')
+    expect(dashboardSource).toContain('买号 {{ formatCny(liveData?.additionalCosts?.accountPurchase ?? null) }}')
+    expect(dashboardSource).toContain('其他 {{ formatCny(')
     expect(dashboardSource).toContain('const displayedTodayCost = computed')
-    expect(dashboardSource).toContain('displayedTodayCost.value + additionalCost')
-    expect(dashboardSource).toContain('{{ formatCny(displayedTodayCost) }}')
+    expect(dashboardSource).toContain("@click=\"openAccountCostWorkspace('today')\">记一笔成本")
+    expect(dashboardSource).toContain("@click=\"openAccountCostWorkspace('assets')\">录入买号")
     expect(dashboardSource).not.toContain('v-for="record in liveData.additionalCosts.records"')
   })
 })

@@ -33,6 +33,12 @@ type RealConnectionRepository interface {
 	DeleteRealConnection(ctx context.Context, id string, userID string, adminAccountID string) error
 }
 
+// realConnectionSiteNameProvider marks repositories whose list query is the
+// authoritative source for SiteName, including a legitimately empty name.
+type realConnectionSiteNameProvider interface {
+	realConnectionSiteNamesProvided()
+}
+
 // RealConnectionReconciler 供仪表盘在确认主站账号已切组后修正本地绑定。
 // 转移只更新 TransitHub 本地关系；退出只解绑本地记录，不删除上游账号或 Key。
 type RealConnectionReconciler interface {
@@ -643,7 +649,19 @@ func (s *Service) ListRealConnections(ctx context.Context, userID string) ([]Rea
 	if err != nil {
 		return nil, err
 	}
+	_, siteNamesProvided := s.connRepository.(realConnectionSiteNameProvider)
 	for i := range connections {
+		connections[i].ConnectionName = strings.TrimSpace(connections[i].AdminAccountName)
+		connections[i].KeyName = safeCredentialPreview(connections[i].UpstreamKey)
+		if len(connections[i].OwnGroupNames) > 0 {
+			connections[i].OwnGroupName = strings.TrimSpace(connections[i].OwnGroupNames[0])
+		}
+		if !siteNamesProvided && strings.TrimSpace(connections[i].SiteName) == "" && s.upstreamLookup != nil {
+			site, lookupErr := s.upstreamLookup.GetSite(ctx, connections[i].UpstreamSiteID)
+			if lookupErr == nil && site != nil && site.UserID == userID && site.AdminAccountID == adminAccountID {
+				connections[i].SiteName = strings.TrimSpace(site.Name)
+			}
+		}
 		connections[i] = publicRealConnection(connections[i])
 	}
 	return connections, nil

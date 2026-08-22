@@ -245,6 +245,10 @@ type RealConnection struct {
 	UpstreamGroupName       string   `json:"upstreamGroupName"`
 	UpstreamKeyID           string   `json:"upstreamKeyId"`
 	UpstreamKey             string   `json:"upstreamKey"`
+	SiteName                string   `json:"siteName,omitempty"`
+	ConnectionName          string   `json:"connectionName,omitempty"`
+	KeyName                 string   `json:"keyName,omitempty"`
+	OwnGroupName            string   `json:"ownGroupName,omitempty"`
 	AdminAccountID          string   `json:"adminAccountId"` // 上游平台 admin 转发账号 ID（业务字段）
 	AdminAccountName        string   `json:"adminAccountName"`
 	OwnGroupIDs             []string `json:"ownGroupIds"`

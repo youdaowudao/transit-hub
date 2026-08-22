@@ -13,10 +13,11 @@ describe('dashboard cost composition', () => {
     expect(dashboardSource).not.toContain('dashboard-operating-cost-details')
   })
 
-  it('shows the three cost components and direct account-cost actions without raw records', () => {
-    expect(dashboardSource).toContain('上游 {{ formatCny(displayedTodayCost) }}')
-    expect(dashboardSource).toContain('买号 {{ formatCny(liveData?.additionalCosts?.accountPurchase ?? null) }}')
-    expect(dashboardSource).toContain('其他 {{ formatCny(')
+  it('shows the six fixed cost components and direct account-cost actions without raw records', () => {
+    for (const label of ['上游直接', '买号确认', '手续费', '活动', '固定', '调整']) {
+      expect(dashboardSource).toContain(`{ label: '${label}', value:`)
+    }
+    expect(dashboardSource).not.toContain("{ label: '其他', value:")
     expect(dashboardSource).toContain('const displayedTodayCost = computed')
     expect(dashboardSource).toContain("@click=\"openAccountCostWorkspace('today')\">记一笔成本")
     expect(dashboardSource).toContain("@click=\"openAccountCostWorkspace('assets')\">录入买号")

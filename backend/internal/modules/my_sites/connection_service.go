@@ -351,8 +351,11 @@ func safeCredentialPreview(value string) string {
 	if value == "" {
 		return ""
 	}
-	if len(value) <= 12 {
-		return value
+	if len(value) <= 8 {
+		return "****"
+	}
+	if len(value) <= 14 {
+		return "****" + value[len(value)-4:]
 	}
 	return value[:6] + "..." + value[len(value)-4:]
 }

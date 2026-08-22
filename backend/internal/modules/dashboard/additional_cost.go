@@ -106,6 +106,10 @@ type AdditionalCostRepository interface {
 	InsertAdditionalCosts(ctx context.Context, records []AdditionalCostRecord) error
 }
 
+type rechargeFeeRateHistoryRepository interface {
+	ListRechargeFeeRates(ctx context.Context, userID, adminAccountID string) ([]RechargeFeeRate, error)
+}
+
 func normalizeAdditionalCostInput(input AdditionalCostInput) (AdditionalCostInput, error) {
 	input.Type = strings.TrimSpace(input.Type)
 	input.Name = strings.TrimSpace(input.Name)

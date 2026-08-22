@@ -38,6 +38,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, metricsService *Metric
 	mux.HandleFunc("GET /api/dashboard/additional-costs", handler.listAdditionalCosts)
 	mux.HandleFunc("POST /api/dashboard/additional-costs", handler.createAdditionalCost)
 	mux.HandleFunc("GET /api/dashboard/recharge-fee-rate", handler.getRechargeFeeRate)
+	mux.HandleFunc("GET /api/dashboard/recharge-fee-rates", handler.listRechargeFeeRates)
 	mux.HandleFunc("PUT /api/dashboard/recharge-fee-rate", handler.saveRechargeFeeRate)
 	mux.HandleFunc("POST /api/dashboard/account-batches", handler.createAccountBatch)
 	mux.HandleFunc("GET /api/dashboard/account-assets", handler.listAccountAssets)
@@ -224,6 +225,20 @@ func (h *Handler) getRechargeFeeRate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpjson.Write(w, http.StatusOK, value)
+}
+
+func (h *Handler) listRechargeFeeRates(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	items, err := h.metricsService.ListRechargeFeeRates(r.Context(), userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (h *Handler) saveRechargeFeeRate(w http.ResponseWriter, r *http.Request) {

@@ -203,6 +203,34 @@ func (s *MetricsService) GetRechargeFeeRate(ctx context.Context, userID, date st
 	return s.additionalCosts.GetRechargeFeeRate(ctx, userID, adminAccountID, date)
 }
 
+func (s *MetricsService) ListRechargeFeeRates(ctx context.Context, userID string) ([]RechargeFeeRate, error) {
+	repository, ok := s.additionalCosts.(rechargeFeeRateHistoryRepository)
+	if !ok {
+		return nil, errors.New("dashboard.additionalCost.errors.unavailable")
+	}
+	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	items, err := repository.ListRechargeFeeRates(ctx, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
+	if items == nil {
+		items = make([]RechargeFeeRate, 0)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].EffectiveDate != items[j].EffectiveDate {
+			return items[i].EffectiveDate > items[j].EffectiveDate
+		}
+		if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].CreatedAt.After(items[j].CreatedAt)
+		}
+		return items[i].ID > items[j].ID
+	})
+	return items, nil
+}
+
 func (s *MetricsService) SaveRechargeFeeRate(ctx context.Context, userID string, input RechargeFeeRateInput) (RechargeFeeRate, error) {
 	if s.additionalCosts == nil {
 		return RechargeFeeRate{}, errors.New("dashboard.additionalCost.errors.unavailable")

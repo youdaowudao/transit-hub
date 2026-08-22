@@ -319,6 +319,32 @@ func (r *MetricsRepository) GetRechargeFeeRate(ctx context.Context, userID, admi
 	return rate, err
 }
 
+func (r *MetricsRepository) ListRechargeFeeRates(ctx context.Context, userID, adminAccountID string) ([]RechargeFeeRate, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT id, effective_date::text, rate, created_at
+		FROM dashboard_recharge_fee_rates
+		WHERE user_id = $1 AND admin_account_id = $2
+		ORDER BY effective_date DESC, created_at DESC, id DESC
+	`, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]RechargeFeeRate, 0)
+	for rows.Next() {
+		item := RechargeFeeRate{UserID: userID, AdminAccountID: adminAccountID}
+		if err := rows.Scan(&item.ID, &item.EffectiveDate, &item.Rate, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 func (r *MetricsRepository) SaveRechargeFeeRate(ctx context.Context, rate RechargeFeeRate) error {
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO dashboard_recharge_fee_rates (id, user_id, admin_account_id, effective_date, rate)

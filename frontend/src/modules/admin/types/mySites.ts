@@ -174,14 +174,18 @@ export const LEGACY_NEW_API_CHANNEL_SUGGESTIONS: Record<string, number> = {
 export interface RealConnection {
   id: string
   upstreamSiteId: string
+  siteName?: string
   upstreamGroupId: string
   upstreamGroupName: string
   upstreamKeyId: string
   upstreamKey?: string
+  keyName?: string
   adminAccountId: string
   adminAccountName: string
+  connectionName?: string
   ownGroupIds: string[]
   ownGroupNames?: string[]
+  ownGroupName?: string
   groupType: string
   provisioningMode?: 'legacy' | 'managed' | 'existing' | string
   status?: string

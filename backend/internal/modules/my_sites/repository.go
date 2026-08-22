@@ -22,6 +22,8 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 	return &Repository{db: db}
 }
 
+func (*Repository) realConnectionSiteNamesProvided() {}
+
 func (r *Repository) EnsureSchema(ctx context.Context) error {
 	_, err := r.db.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS my_site_states (
@@ -371,18 +373,30 @@ type realConnectionScanner interface {
 }
 
 func scanRealConnection(row realConnectionScanner) (*RealConnection, error) {
+	return scanRealConnectionColumns(row, false)
+}
+
+func scanListedRealConnection(row realConnectionScanner) (*RealConnection, error) {
+	return scanRealConnectionColumns(row, true)
+}
+
+func scanRealConnectionColumns(row realConnectionScanner, includeSiteName bool) (*RealConnection, error) {
 	var conn RealConnection
 	var ownGroupIDsJSON []byte
 	var ownGroupNamesJSON []byte
 	var createdAt time.Time
-	if err := row.Scan(
+	destinations := []any{
 		&conn.ID, &conn.UserID, &conn.WorkspaceAdminAccountID, &conn.UpstreamSiteID,
 		&conn.UpstreamGroupID, &conn.UpstreamGroupName, &conn.UpstreamKeyID,
 		&conn.UpstreamKey, &conn.AdminAccountID, &conn.AdminAccountName,
 		&ownGroupIDsJSON, &ownGroupNamesJSON, &conn.GroupType, &conn.ProvisioningMode,
 		&conn.Status, &conn.UpstreamPlatform, &conn.AdminPlatform,
 		&conn.PricingMappingEnabled, &conn.OperationID, &createdAt,
-	); err != nil {
+	}
+	if includeSiteName {
+		destinations = append(destinations, &conn.SiteName)
+	}
+	if err := row.Scan(destinations...); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(ownGroupIDsJSON, &conn.OwnGroupIDs); err != nil {
@@ -396,15 +410,40 @@ func scanRealConnection(row realConnectionScanner) (*RealConnection, error) {
 	return &conn, nil
 }
 
+type realConnectionRows interface {
+	realConnectionScanner
+	Close()
+	Next() bool
+	Err() error
+}
+
+type realConnectionQuery func(context.Context, string, ...any) (realConnectionRows, error)
+
+const listRealConnectionsSQL = `
+	SELECT connection_row.id, connection_row.user_id, connection_row.workspace_admin_account_id,
+	       connection_row.upstream_site_id, connection_row.upstream_group_id, connection_row.upstream_group_name,
+	       connection_row.upstream_key_id, connection_row.upstream_key, connection_row.admin_account_id,
+	       connection_row.admin_account_name, connection_row.own_group_ids, connection_row.own_group_names,
+	       connection_row.group_type, connection_row.provisioning_mode, connection_row.status,
+	       connection_row.upstream_platform, connection_row.admin_platform, connection_row.pricing_mapping_enabled,
+	       connection_row.operation_id, connection_row.created_at, COALESCE(site.name, '')
+	FROM real_connections connection_row
+	LEFT JOIN upstream_sites site ON site.id = connection_row.upstream_site_id
+		AND site.user_id = connection_row.user_id
+		AND site.admin_account_id = connection_row.workspace_admin_account_id
+	WHERE connection_row.user_id = $1 AND connection_row.workspace_admin_account_id = $2
+	ORDER BY connection_row.created_at DESC
+`
+
 // ListRealConnections 查询指定用户的所有真实对接绑定记录，按创建时间倒序。
 func (r *Repository) ListRealConnections(ctx context.Context, userID string, adminAccountID string) ([]RealConnection, error) {
-	rows, err := r.db.Query(ctx, `
-		SELECT id, user_id, workspace_admin_account_id, upstream_site_id, upstream_group_id, upstream_group_name,
-		       upstream_key_id, upstream_key, admin_account_id, admin_account_name,
-		       own_group_ids, own_group_names, group_type, provisioning_mode, status,
-		       upstream_platform, admin_platform, pricing_mapping_enabled, operation_id, created_at
-		FROM real_connections WHERE user_id = $1 AND workspace_admin_account_id = $2 ORDER BY created_at DESC
-	`, userID, adminAccountID)
+	return listRealConnections(ctx, userID, adminAccountID, func(ctx context.Context, query string, args ...any) (realConnectionRows, error) {
+		return r.db.Query(ctx, query, args...)
+	})
+}
+
+func listRealConnections(ctx context.Context, userID string, adminAccountID string, query realConnectionQuery) ([]RealConnection, error) {
+	rows, err := query(ctx, listRealConnectionsSQL, userID, adminAccountID)
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +451,7 @@ func (r *Repository) ListRealConnections(ctx context.Context, userID string, adm
 
 	var connections []RealConnection
 	for rows.Next() {
-		conn, err := scanRealConnection(rows)
+		conn, err := scanListedRealConnection(rows)
 		if err != nil {
 			return nil, err
 		}

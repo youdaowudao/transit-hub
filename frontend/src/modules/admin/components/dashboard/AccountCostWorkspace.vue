@@ -10,6 +10,7 @@ import {
   createAdditionalCost,
   getAccountAsset,
   getRechargeFeeRate,
+  listRechargeFeeRateHistory,
   listAccountAssets,
   listAccountCostLedger,
   replaceAccountLink,
@@ -21,6 +22,7 @@ import {
   type AccountEventInput,
   type AdditionalCostRecord,
   type AdditionalCostSummary,
+  type RechargeFeeRate,
 } from '../../api/dashboardAdmin'
 import { listRealConnections } from '../../api/mySites'
 import type { RealConnection } from '../../types/mySites'
@@ -37,14 +39,17 @@ const props = defineProps<{
   directCost: number | null
   operatingCost: number | null
   adjustedNetProfit: number | null
-	summary?: AdditionalCostSummary | null
-	initialTab?: WorkspaceTab
-	workspaceId: string
+  todayRevenue?: number | null
+  profitMargin?: number | null
+  summary?: AdditionalCostSummary | null
+  initialTab?: WorkspaceTab
+  workspaceId: string
 }>()
 
 const emit = defineEmits<{
   (event: 'close'): void
   (event: 'updated'): void
+  (event: 'open-upstream-details'): void
 }>()
 
 const tabs: Array<{ key: WorkspaceTab; label: string }> = [
@@ -60,7 +65,11 @@ const saving = ref(false)
 const errorText = ref('')
 const assets = ref<AccountAsset[]>([])
 const ledger = ref<AdditionalCostRecord[]>([])
+const todayLedger = ref<AdditionalCostRecord[]>([])
+const todayLedgerLoadFailed = ref(false)
 const connections = ref<RealConnection[]>([])
+const feeRateHistory = ref<RechargeFeeRate[]>([])
+const feeRateHistoryLoadFailed = ref(false)
 const selectedDetail = ref<AccountAssetDetail | null>(null)
 const showBatchForm = ref(false)
 const recentBatch = ref<{ id: string; name: string; quantity: number } | null>(null)
@@ -165,17 +174,17 @@ const connectionGroups = computed(() => {
   const groups = new Map<string, { label: string; items: RealConnection[] }>()
   for (const connection of eligibleConnections.value) {
     const key = connection.upstreamSiteId
-    const group = groups.get(key) ?? { label: connection.upstreamPlatform || connection.upstreamSiteId, items: [] }
+    const group = groups.get(key) ?? { label: connection.siteName || connection.upstreamPlatform || connection.upstreamSiteId, items: [] }
     group.items.push(connection)
     groups.set(key, group)
   }
   return [...groups.values()]
 })
 const connectionLabel = (connection: RealConnection) => [
-  connection.upstreamPlatform || connection.upstreamSiteId,
-  connection.upstreamGroupName,
-  connection.adminAccountName,
-  connection.ownGroupNames?.[0],
+  connection.siteName || connection.upstreamPlatform || connection.upstreamSiteId,
+  connection.connectionName || connection.adminAccountName,
+  connection.keyName || connection.upstreamKeyId,
+  connection.ownGroupName || connection.ownGroupNames?.[0],
 ].filter(Boolean).join(' · ')
 
 const quotaText = (asset: AccountAsset) => {
@@ -209,6 +218,7 @@ const ledgerGroups = computed(() => {
 
 const filterStorageKey = computed(() => `transithub.account-assets.filters.v1:${props.workspaceId || 'unknown'}`)
 watch(() => props.workspaceId, () => {
+	Object.assign(assetFilters, { platform: '', channel: '', accountType: '', status: '', search: '' })
   try {
     const saved = localStorage.getItem(filterStorageKey.value)
     if (saved) Object.assign(assetFilters, JSON.parse(saved))
@@ -240,9 +250,28 @@ const loadAssets = async () => {
 }
 
 const loadLedger = async () => {
-	  const result = await listAccountCostLedger({ ...ledgerFilters, page: ledgerPage.value, pageSize: 100 })
-	  ledger.value = result.items
-	  ledgerHasMore.value = result.hasMore
+  const result = await listAccountCostLedger({ ...ledgerFilters, page: ledgerPage.value, pageSize: 100 })
+  ledger.value = result.items
+  ledgerHasMore.value = result.hasMore
+}
+
+const loadTodayLedger = async () => {
+	todayLedgerLoadFailed.value = false
+	try {
+		const businessDate = today()
+		const records: AdditionalCostRecord[] = []
+		let page = 1
+		for (;;) {
+			const result = await listAccountCostLedger({ from: businessDate, to: businessDate, page, pageSize: 100 })
+			records.push(...result.items)
+			if (!result.hasMore) break
+			page += 1
+		}
+		todayLedger.value = records
+	} catch {
+		todayLedger.value = []
+		todayLedgerLoadFailed.value = true
+	}
 }
 
 const searchAssets = () => { assetPage.value = 1; void loadAssets() }
@@ -254,8 +283,21 @@ const openUpstreamManagement = () => {
 	void router.push({ name: 'AdminUpstream' })
 }
 
+const loadFeeRateHistory = async () => {
+	feeRateHistoryLoadFailed.value = false
+	try {
+		const history = await listRechargeFeeRateHistory()
+		feeRateHistory.value = history.items
+	} catch {
+		feeRateHistoryLoadFailed.value = true
+	}
+}
+
 const loadRules = async () => {
-  const result = await getRechargeFeeRate(today())
+	const [result] = await Promise.all([
+		getRechargeFeeRate(today()),
+		loadFeeRateHistory(),
+	])
   feeForm.rate = String(result.rate * 100)
   feeForm.effectiveDate = result.effectiveDate || today()
 }
@@ -263,8 +305,9 @@ const loadRules = async () => {
 const loadTab = async () => {
   loading.value = true
   errorText.value = ''
-  try {
-    if (activeTab.value === 'assets') await loadAssets()
+	try {
+		if (activeTab.value === 'today') await loadTodayLedger()
+		if (activeTab.value === 'assets') await loadAssets()
     if (activeTab.value === 'ledger') await loadLedger()
     if (activeTab.value === 'rules') await loadRules()
   } catch (error) {
@@ -469,7 +512,8 @@ const submitFee = async () => {
   saving.value = true
   errorText.value = ''
   try {
-    await saveRechargeFeeRate({ effectiveDate: feeForm.effectiveDate, rate: Number(feeForm.rate) / 100 })
+		await saveRechargeFeeRate({ effectiveDate: feeForm.effectiveDate, rate: Number(feeForm.rate) / 100 })
+		await loadRules()
     emit('updated')
   } catch (error) { errorText.value = error instanceof Error ? error.message : '保存失败' }
   finally { saving.value = false }
@@ -508,6 +552,9 @@ const centsText = (value?: number | null) => value == null ? '暂无可靠数据
 const ratioText = (value?: number | null) => value == null ? '暂无可靠数据' : `${value.toFixed(2)}x`
 const missingFieldText = (field: string) => ({ dailyStats: '完整单号日快照', revenue: '累计营收', quotaUsed: '累计额度', upstreamCost: '叠加上游成本' }[field] ?? field)
 const eventTypeText = (eventType: string) => ({ status: '状态变化', restore: '恢复使用', refund: '退款', quota_observation: '额度观察', manual_observation: '手工经营数据', link_change: '关联变化', stats_mode_change: '统计方式变化', metadata_correction: '资料更正' }[eventType] ?? eventType)
+const costTypeText = (type: string) => ({ recharge_fee: '手续费', promotion: '活动', fixed: '固定', adjustment: '调整', account_purchase: '买号确认', account_refund: '退款冲减' }[type] ?? type)
+const percentageText = (value?: number | null) => value == null ? '暂无可靠数据' : `${value.toFixed(1)}%`
+const historyCreatedAtText = (value: string) => value.slice(0, 16).replace('T', ' ')
 const eventSummary = (event: AccountAssetDetail['events'][number]) => {
 	const values: string[] = [eventTypeText(event.eventType)]
 	if (event.status) values.push(statusText(event.status))
@@ -543,15 +590,19 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
           <div v-if="loading" class="flex justify-center py-16"><Loader2 class="h-6 w-6 animate-spin text-muted-foreground" /></div>
 
           <section v-else-if="activeTab === 'today'" class="space-y-6">
-            <div class="flex justify-end"><Button variant="secondary" :disabled="saving" @click="refreshStats"><RefreshCw class="mr-2 h-4 w-4" :class="saving ? 'animate-spin' : ''" />刷新账号统计</Button></div>
+            <div class="flex flex-wrap justify-end gap-2"><Button variant="secondary" @click="emit('open-upstream-details')"><ExternalLink class="mr-2 h-4 w-4" />查看上游成本明细</Button><Button variant="secondary" :disabled="saving" @click="refreshStats"><RefreshCw class="mr-2 h-4 w-4" :class="saving ? 'animate-spin' : ''" />刷新账号统计</Button></div>
             <div class="grid gap-3 sm:grid-cols-3">
-              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日总成本</p><p class="mt-1 text-xl font-bold tabular-nums">{{ formatCny(operatingCost) }}</p></div>
-              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">调整后净利润</p><p class="mt-1 text-xl font-bold tabular-nums">{{ formatCny(adjustedNetProfit) }}</p></div>
+              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日营收</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatCny(todayRevenue ?? null) }}</p></div>
+              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日总成本</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatCny(operatingCost) }}</p></div>
+              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日净利润</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatCny(adjustedNetProfit) }}</p></div>
+              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日利润率</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ percentageText(profitMargin) }}</p></div>
               <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">账号统计质量</p><p class="mt-1 text-sm font-semibold">{{ summary?.accountQuality === 'complete' ? '完整' : summary?.accountQuality ? '部分数据' : '暂无可靠数据' }}</p></div>
             </div>
+            <div class="space-y-1 text-sm text-muted-foreground"><p>净利润 = 营收 - 总成本</p><p>利润率 = 净利润 ÷ 营收</p></div>
             <div class="grid gap-x-8 sm:grid-cols-2">
               <div v-for="line in costLines" :key="line.label" class="flex items-center justify-between border-b border-border/50 py-2.5 text-sm"><span class="text-muted-foreground">{{ line.label }}</span><span class="font-medium tabular-nums">{{ formatCny(line.value) }}</span></div>
             </div>
+            <div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">当日成本变动</h3><p v-if="todayLedgerLoadFailed" class="py-5 text-sm text-destructive">当日成本变动加载失败</p><p v-else-if="!todayLedger.length" class="py-5 text-sm text-muted-foreground">当日暂无成本变动</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="record in todayLedger" :key="record.id" class="grid gap-1 py-2.5 text-sm sm:grid-cols-[5rem_1fr_auto]"><span class="text-muted-foreground">{{ costTypeText(record.type) }}</span><span class="min-w-0 break-all">{{ record.name }}<span class="ml-2 text-xs text-muted-foreground">来源 {{ record.sourceId || record.batchId || record.accountAssetId || record.id }}</span></span><span class="font-medium tabular-nums">{{ formatCny(record.amount) }}</span></div></div></div>
             <form class="space-y-3 border-t border-border/60 pt-5" @submit.prevent="submitCost">
               <div class="flex items-center justify-between"><h3 class="text-sm font-semibold">记一笔成本</h3><Button type="button" variant="secondary" @click="activeTab = 'assets'; showBatchForm = true"><Plus class="mr-2 h-4 w-4" />录入买号</Button></div>
               <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -646,7 +697,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
               </div>
             </template>
             <template v-else>
-              <div class="flex flex-wrap items-center justify-between gap-3"><div class="flex flex-1 flex-wrap gap-2"><Input v-model="assetFilters.search" class="max-w-52" placeholder="搜索账号标识" /><Input v-model="assetFilters.platform" class="max-w-40" placeholder="平台" /><Input v-model="assetFilters.channel" class="max-w-40" placeholder="渠道" /><Input v-model="assetFilters.accountType" class="max-w-40" placeholder="账号类型" /><select v-model="assetFilters.status" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="">全部状态</option><option value="active">使用中</option><option value="dead">死号</option><option value="exhausted">已耗尽</option><option value="closed">已关闭</option></select><Button variant="secondary" title="查询" @click="searchAssets"><Search class="h-4 w-4" /></Button></div><Button @click="showBatchForm = !showBatchForm"><Plus class="mr-2 h-4 w-4" />录入买号</Button></div>
+              <div class="flex flex-wrap items-center justify-between gap-3"><div class="flex flex-1 flex-wrap gap-2"><Input v-model="assetFilters.search" class="max-w-52" placeholder="搜索账号标识" /><Input v-model="assetFilters.platform" class="max-w-40" placeholder="平台" /><Input v-model="assetFilters.channel" class="max-w-40" placeholder="渠道" /><Input v-model="assetFilters.accountType" class="max-w-40" placeholder="账号类型" /><select v-model="assetFilters.status" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="">全部状态</option><option value="unactivated">未激活</option><option value="active">使用中</option><option value="exhausted">已耗尽</option><option value="dead">死号</option><option value="closed">已关闭</option></select><Button variant="secondary" title="查询" @click="searchAssets"><Search class="h-4 w-4" /></Button></div><Button @click="showBatchForm = !showBatchForm"><Plus class="mr-2 h-4 w-4" />录入买号</Button></div>
               <form v-if="showBatchForm" class="space-y-4 border-y border-border/60 py-4" @submit.prevent="submitBatch">
                 <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <Input v-model="batchForm.batchName" placeholder="批次名称（可选）" /><Input v-model="batchForm.platform" list="account-platforms" placeholder="平台" required /><Input v-model="batchForm.channel" list="account-channels" placeholder="购买渠道" required /><Input v-model="batchForm.accountType" list="account-types" placeholder="账号类型" required />
@@ -691,7 +742,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
 
           <section v-else-if="activeTab === 'ledger'" class="space-y-4"><div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><Input v-model="ledgerFilters.from" type="date" /><Input v-model="ledgerFilters.to" type="date" /><select v-model="ledgerFilters.type" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="">全部类型</option><option value="account_purchase">买号确认</option><option value="account_refund">退款冲减</option><option value="recharge_fee">手续费</option><option value="promotion">活动</option><option value="fixed">固定</option><option value="adjustment">调整</option></select><Input v-model="ledgerFilters.platform" placeholder="平台" /><Input v-model="ledgerFilters.channel" placeholder="渠道" /><Input v-model="ledgerFilters.batchId" placeholder="批次 ID" /><Input v-model="ledgerFilters.accountAssetId" placeholder="单号 ID" /><Button variant="secondary" @click="searchLedger"><Search class="mr-2 h-4 w-4" />查询账本</Button></div><div class="divide-y divide-border/50"><details v-for="group in ledgerGroups" :key="group.key" class="group py-3"><summary class="grid cursor-pointer list-none grid-cols-[1fr_auto] items-center gap-3 text-sm sm:grid-cols-[1fr_9rem_8rem]"><div class="min-w-0"><p class="truncate font-medium">{{ group.name }}</p><p class="text-xs text-muted-foreground">{{ group.type }} · {{ group.records.length }} 条确认记录</p></div><span class="hidden text-xs text-muted-foreground sm:block">{{ group.records[0]?.businessDate }}</span><span class="text-right font-semibold tabular-nums" :class="group.amount < 0 ? 'text-emerald-600' : ''">{{ formatCny(group.amount) }}</span></summary><div class="mt-3 overflow-x-auto border-t border-border/40"><table class="w-full min-w-[680px] text-left text-xs"><thead class="text-muted-foreground"><tr><th class="py-2">业务日</th><th>金额</th><th>批次 / 单号</th><th>质量</th><th>录入时间</th></tr></thead><tbody><tr v-for="record in group.records" :key="record.id" class="border-t border-border/30"><td class="py-2">{{ record.businessDate }}</td><td>{{ formatCny(record.amount) }}</td><td>{{ record.batchId || '—' }} / {{ record.accountAssetId || '—' }}</td><td>{{ record.estimated ? '估算' : '已确认' }}</td><td>{{ record.createdAt.slice(0, 16).replace('T', ' ') }}</td></tr></tbody></table></div></details><p v-if="!ledgerGroups.length" class="py-12 text-center text-sm text-muted-foreground">所选范围暂无记录</p></div><div v-if="ledger.length || ledgerPage > 1" class="flex items-center justify-end gap-2"><Button variant="secondary" size="sm" title="上一页" :disabled="ledgerPage === 1" @click="changeLedgerPage(-1)"><ArrowLeft class="h-4 w-4" /></Button><span class="text-xs text-muted-foreground">第 {{ ledgerPage }} 页</span><Button variant="secondary" size="sm" title="下一页" :disabled="!ledgerHasMore" @click="changeLedgerPage(1)"><ArrowRight class="h-4 w-4" /></Button></div></section>
 
-          <section v-else class="max-w-3xl space-y-6"><div><h3 class="text-sm font-semibold">充值手续费</h3><div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]"><Input v-model="feeForm.rate" type="number" min="0" max="100" step="0.01" placeholder="费率 %" /><Input v-model="feeForm.effectiveDate" type="date" /><Button :disabled="saving" @click="submitFee"><Save class="mr-2 h-4 w-4" />保存费率</Button></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">核算说明</h3><dl class="mt-3 space-y-3 text-sm"><div><dt class="font-medium">替代上游成本</dt><dd class="mt-1 text-muted-foreground">购买价包含额度时，从上游直接成本扣除该账号已对账 Key 成本，再计入买号确认成本。</dd></div><div><dt class="font-medium">叠加上游成本</dt><dd class="mt-1 text-muted-foreground">购买价是订阅或接入费时，买号确认成本与关联上游按量成本同时计入。</dd></div><div><dt class="font-medium">历史不可改写</dt><dd class="mt-1 text-muted-foreground">成本、退款和状态均追加记录；更正通过冲销或新事件完成。</dd></div></dl></div></section>
+          <section v-else class="max-w-3xl space-y-6"><div><h3 class="text-sm font-semibold">充值手续费</h3><div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]"><Input v-model="feeForm.rate" type="number" min="0" max="100" step="0.01" placeholder="费率 %" /><Input v-model="feeForm.effectiveDate" type="date" /><Button :disabled="saving" @click="submitFee"><Save class="mr-2 h-4 w-4" />保存费率</Button></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">费率生效历史</h3><p v-if="feeRateHistoryLoadFailed" class="py-5 text-sm text-destructive">费率历史加载失败</p><p v-else-if="!feeRateHistory.length" class="py-5 text-sm text-muted-foreground">暂无费率历史</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in feeRateHistory" :key="rate.id" class="grid gap-1 py-2.5 text-sm sm:grid-cols-[7rem_1fr_auto]"><span>{{ rate.effectiveDate }}</span><span>{{ (rate.rate * 100).toFixed(2) }}% · {{ rate.id }}</span><span class="text-xs text-muted-foreground">{{ historyCreatedAtText(rate.createdAt) }}</span></div></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">核算说明</h3><dl class="mt-3 space-y-3 text-sm"><div><dt class="font-medium">替代上游成本</dt><dd class="mt-1 text-muted-foreground">购买价包含额度时，从上游直接成本扣除该账号已对账 Key 成本，再计入买号确认成本。</dd></div><div><dt class="font-medium">叠加上游成本</dt><dd class="mt-1 text-muted-foreground">购买价是订阅或接入费时，买号确认成本与关联上游按量成本同时计入。</dd></div><div><dt class="font-medium">历史不可改写</dt><dd class="mt-1 text-muted-foreground">成本、退款和状态均追加记录；更正通过冲销或新事件完成。</dd></div></dl></div></section>
         </main>
       </section>
     </div>

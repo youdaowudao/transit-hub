@@ -112,6 +112,7 @@ export interface AdditionalCostRecord {
   usageRate?: number
   days?: number
   note?: string
+  sourceId?: string
   batchId?: string
   accountAssetId?: string
   estimated: boolean
@@ -392,6 +393,9 @@ export const getDashboardTrends = async (days: number): Promise<DashboardTrendsR
 
 export const getRechargeFeeRate = async (date?: string): Promise<RechargeFeeRate> =>
   requestJson<RechargeFeeRate>(`/dashboard/recharge-fee-rate${date ? `?date=${encodeURIComponent(date)}` : ''}`)
+
+export const listRechargeFeeRateHistory = async (): Promise<{ items: RechargeFeeRate[] }> =>
+  requestJson<{ items: RechargeFeeRate[] }>('/dashboard/recharge-fee-rates')
 
 export const saveRechargeFeeRate = async (input: { effectiveDate: string; rate: number }): Promise<RechargeFeeRate> =>
   requestJson<RechargeFeeRate>('/dashboard/recharge-fee-rate', { method: 'PUT', body: JSON.stringify(input) })

@@ -121,6 +121,10 @@ const openAccountCostWorkspace = (tab: 'today' | 'assets' | 'ledger' | 'rules' =
 	accountCostWorkspaceOpen.value = true
 }
 const closeAccountCostWorkspace = () => { accountCostWorkspaceOpen.value = false }
+const openUpstreamDetailsFromAccountCost = () => {
+	closeAccountCostWorkspace()
+	openUpstreamKeyUsageToday()
+}
 const openGroupList = () => { void router.push({ name: 'AdminGroupAssociations' }) }
 
 const handleMetricCardClick = (key: string) => {
@@ -131,6 +135,10 @@ const handleMetricCardClick = (key: string) => {
     case 'todayPurchase':
       openAccountCostWorkspace()
       break
+		case 'netProfit':
+		case 'profitMargin':
+			openAccountCostWorkspace()
+			break
     case 'upstreamBalance':
       openUpstreamBalanceBreakdown()
       break
@@ -463,7 +471,7 @@ const cards = computed<DashboardCoreCard[]>(() => {
         || fallbackStatus
         || partialStatus
         || (deltaUnavailable ? t('admin.dashboard.costQuality.deltaUnsettled') : ''),
-      clickable: key === 'todayProfit' || key === 'todayPurchase',
+      clickable: key === 'todayProfit' || key === 'todayPurchase' || key === 'netProfit',
       negativeWhenUp: key === 'todayPurchase',
     }]
   })
@@ -501,7 +509,7 @@ const cards = computed<DashboardCoreCard[]>(() => {
       ? ''
       : t('admin.dashboard.delta.percentagePoints', { value: numberFormatter.value.format(Math.abs(marginDelta.amount)) }),
     statusText: marginStatusText,
-    clickable: false,
+    clickable: true,
     negativeWhenUp: false,
   })
   return result
@@ -517,6 +525,25 @@ const displayedOperatingCost = computed(() => {
 	return liveData.value?.operatingCost ?? null
 })
 const displayedAdjustedNetProfit = computed(() => liveData.value?.adjustedNetProfit ?? null)
+const displayedNetUpstreamCost = computed(() => {
+	const direct = displayedTodayCost.value
+	if (direct == null) return null
+	const summary = liveData.value?.additionalCosts
+	if (summary?.replacementDeduction != null) return direct - summary.replacementDeduction
+	return summary?.available && summary.accountQuality === 'complete' ? direct : null
+})
+const displayedNetAccountPurchase = computed(() => {
+	const summary = liveData.value?.additionalCosts
+	return summary == null ? null : summary.accountPurchase + summary.accountRefund
+})
+const homepageCostLines = computed(() => [
+	{ label: '上游直接', value: displayedNetUpstreamCost.value },
+	{ label: '买号确认', value: displayedNetAccountPurchase.value },
+	{ label: '手续费', value: liveData.value?.additionalCosts?.rechargeFee ?? null },
+	{ label: '活动', value: liveData.value?.additionalCosts?.promotion ?? null },
+	{ label: '固定', value: liveData.value?.additionalCosts?.fixed ?? null },
+	{ label: '调整', value: liveData.value?.additionalCosts?.adjustment ?? null },
+])
 
 type GroupMetricMode = 'profit' | 'revenue'
 type GroupContributionItem = GroupUsageTodayResponse['groups'][number] & {
@@ -983,7 +1010,7 @@ const lastProbeLabel = computed(() => {
     </div>
 
     <div
-      v-else-if="!initialLoading && !adminModalOpen"
+      v-if="!adminStatus.authenticated && !initialLoading && !adminModalOpen"
       class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-2.5"
     >
       <div class="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1076,9 +1103,7 @@ const lastProbeLabel = computed(() => {
 		<section class="flex flex-col gap-3 border-y border-border/60 py-3 sm:flex-row sm:items-center sm:justify-between">
 			<div class="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1 text-sm">
 				<span class="font-medium text-foreground">成本构成</span>
-				<span class="text-muted-foreground">上游 {{ formatCny(displayedTodayCost) }}</span>
-				<span class="text-muted-foreground">买号 {{ formatCny(liveData?.additionalCosts?.accountPurchase ?? null) }}</span>
-				<span class="text-muted-foreground">其他 {{ formatCny(liveData?.additionalCosts?.total == null ? null : liveData.additionalCosts.total - (liveData.additionalCosts.accountPurchase ?? 0) - (liveData.additionalCosts.accountRefund ?? 0)) }}</span>
+				<span v-for="line in homepageCostLines" :key="line.label" class="text-muted-foreground">{{ line.label }} {{ formatCny(line.value) }}</span>
 			</div>
 			<div class="flex shrink-0 gap-2">
 				<button type="button" class="h-8 rounded-md border border-border px-3 text-xs font-medium hover:bg-surface-elevated" @click="openAccountCostWorkspace('today')">记一笔成本</button>
@@ -1350,10 +1375,13 @@ const lastProbeLabel = computed(() => {
       :direct-cost="displayedTodayCost"
       :operating-cost="liveData?.operatingCost ?? null"
       :adjusted-net-profit="liveData?.adjustedNetProfit ?? null"
+			:today-revenue="displayedTodayRevenue"
+			:profit-margin="profitMarginState.mode === 'exact' ? profitMarginState.value : null"
       :summary="liveData?.additionalCosts"
       :initial-tab="accountCostInitialTab"
       :workspace-id="workspaceID"
       @close="closeAccountCostWorkspace"
+			@open-upstream-details="openUpstreamDetailsFromAccountCost"
       @updated="loadAllData({ skipStatusCheck: true })"
     />
     <AdminLoginModal

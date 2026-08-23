@@ -347,6 +347,10 @@ type UpstreamSyncCoordinator interface {
 	SyncSites(ctx context.Context, userID string, adminAccountID string, siteIDs []string, force bool) []upstream.SyncSiteResult
 }
 
+type UpstreamSyncProgressCoordinator interface {
+	SyncSitesProgress(ctx context.Context, userID string, adminAccountID string, siteIDs []string, force bool, completed func(upstream.SyncSiteResult)) []upstream.SyncSiteResult
+}
+
 // GroupCostReader 只读取 upstream 模块已经采集到的短期成本快照，不触发上游请求。
 // 成本读取失败不能影响健康状态、探活或调度字段。
 type GroupCostReader interface {

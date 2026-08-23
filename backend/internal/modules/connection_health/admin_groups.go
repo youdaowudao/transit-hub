@@ -243,6 +243,10 @@ func (s *Service) adminGroups(ctx context.Context, userID string, waitForFresh b
 }
 
 func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string, waitForFresh bool, forceMultiplierRefresh bool, connections []my_sites.RealConnection, connectionsReady bool) ([]AdminGroupHealth, error) {
+	return s.adminGroupsWithConnectionsProgress(ctx, userID, waitForFresh, forceMultiplierRefresh, connections, connectionsReady, nil, nil)
+}
+
+func (s *Service) adminGroupsWithConnectionsProgress(ctx context.Context, userID string, waitForFresh bool, forceMultiplierRefresh bool, connections []my_sites.RealConnection, connectionsReady bool, multiplierSiteComplete func(AdminGroupsRefreshSite), multiplierComplete func(AdminGroupsRefreshSummary)) ([]AdminGroupHealth, error) {
 	requestStarted := time.Now()
 	workspaceStarted := time.Now()
 	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
@@ -250,6 +254,14 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 		return nil, err
 	}
 	workspaceDuration := time.Since(workspaceStarted)
+	return s.adminGroupsForWorkspaceWithConnectionsProgress(
+		ctx, userID, adminAccountID, waitForFresh, forceMultiplierRefresh,
+		connections, connectionsReady, nil, multiplierSiteComplete, multiplierComplete,
+		requestStarted, workspaceDuration,
+	)
+}
+
+func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Context, userID string, adminAccountID string, waitForFresh bool, forceMultiplierRefresh bool, connections []my_sites.RealConnection, connectionsReady bool, multiplierSitesStarted func([]string), multiplierSiteComplete func(AdminGroupsRefreshSite), multiplierComplete func(AdminGroupsRefreshSummary), requestStarted time.Time, workspaceDuration time.Duration) ([]AdminGroupHealth, error) {
 	if s.platformGroups == nil {
 		return nil, errors.New("connection_health: platform group reader not configured")
 	}
@@ -266,7 +278,17 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 	if waitForFresh {
 		multiplierStarted := time.Now()
 		if connectionsReady {
-			upstreamMultiplierLookup = s.multiplierLookupForWorkspaceWithConnections(ctx, userID, adminAccountID, platform, connections, true, true, true, forceMultiplierRefresh)
+			upstreamMultiplierLookup = s.multiplierLookupForWorkspaceWithConnectionsProgress(ctx, userID, adminAccountID, platform, connections, true, true, true, forceMultiplierRefresh, multiplierSitesStarted, func(siteID string) {
+				if multiplierSiteComplete == nil {
+					return
+				}
+				for _, site := range s.multiplierRefreshSummary(userID, adminAccountID).Sites {
+					if site.SiteID == siteID {
+						multiplierSiteComplete(site)
+						return
+					}
+				}
+			})
 		} else {
 			upstreamMultiplierLookup = s.freshMultiplierLookupForWorkspaceWithOptions(ctx, userID, adminAccountID, platform, forceMultiplierRefresh)
 		}
@@ -275,6 +297,9 @@ func (s *Service) adminGroupsWithConnections(ctx context.Context, userID string,
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+	}
+	if multiplierComplete != nil {
+		multiplierComplete(s.multiplierRefreshSummary(userID, adminAccountID))
 	}
 
 	groupFetchStarted := time.Now()

@@ -72,6 +72,11 @@ const {
   isActionLoading,
   errorKey,
   terminalRefreshSummary,
+  refreshRunSnapshot,
+  refreshConflictNotice,
+  refreshConnectionState,
+  cancelAdminGroupsRefresh,
+  setAdminGroupsWorkspace,
   loadAll,
   loadGroups,
   loadAdminGroups,
@@ -145,7 +150,10 @@ const loadPreferences = (scope: string) => {
   loadedPreferenceScope = scope
 }
 
-watch(preferenceScope, loadPreferences, { immediate: true })
+watch(preferenceScope, (scope) => {
+  setAdminGroupsWorkspace(scope)
+  loadPreferences(scope)
+}, { immediate: true })
 
 const filteredGroups = computed(() => {
   const keyword = searchText.value.trim().toLocaleLowerCase()
@@ -482,27 +490,26 @@ const refresh = async () => {
   if (generation === null) return
   refreshLoading.value = true
   startRefreshWaitTimer()
+  void runAuxiliaryRequest('policies', () => loadPolicies({ recordError: false }))
+  void runAuxiliaryRequest('events', () => loadEvents(undefined, { recordError: false }))
+  void runAuxiliaryRequest('priority', loadPrioritySyncStatus)
   try {
-    await Promise.all([
-      refreshAdminGroups(),
-      runAuxiliaryRequest('policies', () => loadPolicies({ recordError: false })),
-      runAuxiliaryRequest('events', () => loadEvents(undefined, { recordError: false })),
-      runAuxiliaryRequest('priority', loadPrioritySyncStatus),
-    ])
+    await refreshAdminGroups()
   } finally {
     completeRefresh(generation)
   }
 }
 
 onBeforeUnmount(() => {
+  cancelAdminGroupsRefresh()
   stopRefreshWaitTimer()
 })
 
 const siteName = (siteId: string): string => siteNameMap.value.get(siteId) ?? siteId
 
 type RefreshFailureMessage = {
-  phase: 'siteSync' | 'multiplier' | 'refresh'
-  reason: 'auth' | 'network' | 'invalidResponse' | 'request' | 'timeout' | 'connections' | 'unavailable' | 'disabled' | 'session' | 'updating' | 'cancelled' | 'stale'
+  phase: 'siteSync' | 'multiplier' | 'mainGroups' | 'refresh'
+  reason: 'auth' | 'network' | 'invalidResponse' | 'request' | 'timeout' | 'queueTimeout' | 'requestTimeout' | 'connections' | 'unavailable' | 'disabled' | 'session' | 'updating' | 'cancelled' | 'stale'
 }
 
 const refreshFailureMessages: Record<string, RefreshFailureMessage> = {
@@ -520,10 +527,13 @@ const refreshFailureMessages: Record<string, RefreshFailureMessage> = {
   site_sync_failed: { phase: 'siteSync', reason: 'request' },
   multiplier_auth: { phase: 'multiplier', reason: 'auth' },
   multiplier_timeout: { phase: 'multiplier', reason: 'timeout' },
+  multiplier_queue_timeout: { phase: 'multiplier', reason: 'queueTimeout' },
+  multiplier_request_timeout: { phase: 'multiplier', reason: 'requestTimeout' },
   multiplier_unavailable: { phase: 'multiplier', reason: 'unavailable' },
   multiplier_network: { phase: 'multiplier', reason: 'network' },
   multiplier_invalid_response: { phase: 'multiplier', reason: 'invalidResponse' },
   multiplier_request: { phase: 'multiplier', reason: 'request' },
+  main_groups_unavailable: { phase: 'mainGroups', reason: 'unavailable' },
 }
 
 const refreshFailureMessagesByStatus: Record<string, RefreshFailureMessage> = {
@@ -556,9 +566,33 @@ const failedRefreshSites = computed(() => (terminalRefreshSummary.value?.sites ?
 const refreshSummaryState = computed(() => terminalRefreshSummary.value?.state ?? null)
 const refreshSummaryErrorKey = computed(() => {
   const errorKey = terminalRefreshSummary.value?.errorKey?.trim() ?? ''
-  return errorKey && failedRefreshSites.value.length === 0 ? errorKey : ''
+  const representedBySiteFailure = failedRefreshSites.value.some(site => site.errorKey?.trim() === errorKey)
+  return errorKey && !representedBySiteFailure ? errorKey : ''
 })
 const refreshSummaryErrorLabel = computed(() => refreshFailureLabel(refreshSummaryErrorKey.value, refreshSummaryState.value ?? 'failure'))
+const refreshConflictText = computed(() => {
+  const notice = refreshConflictNotice.value.trim()
+  return notice.startsWith('admin.') ? readableMessage(notice) : notice
+})
+const refreshStageLabel = (stage: string): string => {
+  const knownStages = ['discovering', 'site_sync', 'multiplier_refresh', 'main_groups', 'complete']
+  return t(`admin.connectionHealth.refreshStatus.stage.${knownStages.includes(stage) ? stage : 'unknown'}`)
+}
+const refreshProgressLabel = computed(() => refreshRunSnapshot.value
+  ? t('admin.connectionHealth.refreshStatus.progress', {
+      stage: refreshStageLabel(refreshRunSnapshot.value.stage),
+      completed: refreshRunSnapshot.value.stageCompletedSites ?? 0,
+      total: refreshRunSnapshot.value.stageTotalSites ?? 0,
+    })
+  : '')
+const refreshWaitingLabel = (siteName: string, phase: string, elapsedSeconds: number): string =>
+  t('admin.connectionHealth.refreshStatus.waitingSite', {
+    site: siteName,
+    phase: refreshStageLabel(phase),
+    seconds: elapsedSeconds,
+  })
+const refreshIssueLabel = (issue: { errorKey: string; status: string }): string =>
+  refreshFailureLabel(issue.errorKey, issue.status)
 
 // 分组启用/管理抽屉。
 const setupDrawerOpen = ref(false)
@@ -758,8 +792,8 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           <Activity class="h-4 w-4" />
           {{ t('admin.connectionHealth.topActions.events') }}
         </Button>
-        <Button variant="secondary" size="sm" :disabled="isLoading || refreshLoading" @click="refresh">
-          <Loader2 v-if="isLoading || refreshLoading" class="h-4 w-4 animate-spin" />
+        <Button variant="secondary" size="sm" :disabled="refreshLoading" @click="refresh">
+          <Loader2 v-if="refreshLoading" class="h-4 w-4 animate-spin" />
           <RefreshCw v-else class="h-4 w-4" />
           {{ t('admin.connectionHealth.refresh') }}
         </Button>
@@ -775,6 +809,43 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       </div>
     </header>
 
+    <p
+      v-if="refreshConflictText"
+      class="text-sm text-amber-600 dark:text-amber-400"
+      role="status"
+      aria-live="polite"
+    >
+      {{ refreshConflictText }}
+    </p>
+
+    <p
+      v-if="refreshConnectionState === 'reconnecting'"
+      class="text-xs text-amber-600 dark:text-amber-400"
+      aria-live="polite"
+    >
+      {{ t('admin.connectionHealth.refreshStatus.reconnecting') }}
+    </p>
+
+    <div
+      v-if="refreshLoading && refreshRunSnapshot"
+      class="space-y-2 text-sm text-muted-foreground"
+      aria-live="polite"
+    >
+      <p class="font-medium text-foreground">{{ refreshProgressLabel }}</p>
+      <div v-if="refreshRunSnapshot.waiting?.length" class="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+        <span class="font-medium">{{ t('admin.connectionHealth.refreshStatus.waitingLabel') }}</span>
+        <span v-for="waiting in refreshRunSnapshot.waiting" :key="`${waiting.siteId}:${waiting.phase}`">
+          {{ refreshWaitingLabel(waiting.siteName || siteName(waiting.siteId), waiting.phase, waiting.elapsedSeconds) }}
+        </span>
+      </div>
+      <div v-if="refreshRunSnapshot.issues?.length" class="space-y-1 text-xs text-destructive">
+        <p class="font-medium">{{ t('admin.connectionHealth.refreshStatus.issuesLabel') }}</p>
+        <p v-for="issue in refreshRunSnapshot.issues" :key="`${issue.siteId}:${issue.phase}:${issue.errorKey}`">
+          {{ issue.siteName || siteName(issue.siteId || '') }}: {{ refreshIssueLabel(issue) }}
+        </p>
+      </div>
+    </div>
+
     <div v-if="!refreshLoading" class="space-y-1 text-xs text-muted-foreground" aria-live="polite">
       <div v-if="failedRefreshSites.length > 0" class="flex flex-wrap items-center gap-x-4 gap-y-1">
         <span class="font-medium text-destructive">{{ t('admin.connectionHealth.refreshStatus.failedSitesLabel') }}</span>
@@ -788,7 +859,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           {{ siteName(site.siteId) }}: {{ refreshSiteStatusLabel(site) }}
         </span>
       </div>
-      <div v-else-if="refreshSummaryErrorKey" class="flex flex-wrap items-center gap-x-4 gap-y-1">
+      <div v-if="refreshSummaryErrorKey" class="flex flex-wrap items-center gap-x-4 gap-y-1">
         <span class="font-medium text-destructive">{{ t('admin.connectionHealth.refreshStatus.summaryFailureLabel') }}</span>
         <span>{{ refreshSummaryErrorLabel }}</span>
       </div>

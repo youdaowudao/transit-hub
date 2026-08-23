@@ -257,6 +257,62 @@ func TestMultiplierSnapshotPageReturnsWhileBackgroundRefreshIsBlocked(t *testing
 	t.Fatalf("completed background snapshot was not reused: %+v", lookup)
 }
 
+func TestMultiplierBackgroundRefreshStopsWithServiceShutdown(t *testing.T) {
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")}},
+		directItems:       map[string]upstream.Sub2APIKeyItem{"site-1|key-1": {ID: "key-1", GroupID: "group-1", GroupName: "vip"}},
+		started:           make(chan string, 1),
+		release:           make(chan struct{}),
+	}
+	service := &Service{
+		mySites: reader,
+		sites:   snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}},
+	}
+
+	service.cachedAdminGroupMultiplierLookup(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+	select {
+	case <-reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("background multiplier request did not start")
+	}
+	service.multiplierSnapshotMu.Lock()
+	entry := service.multiplierSnapshots[multiplierSnapshotKey("user1", "ws1", "site-1")]
+	if entry == nil || entry.done == nil {
+		service.multiplierSnapshotMu.Unlock()
+		t.Fatalf("started multiplier entry = %+v, want owned waiter", entry)
+	}
+	waiter := entry.done
+	service.multiplierSnapshotMu.Unlock()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := service.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("shutdown service with background multiplier request: %v", err)
+	}
+	select {
+	case <-waiter:
+	default:
+		t.Fatal("service shutdown did not release multiplier waiter")
+	}
+	active, calls := reader.activeAndDirectCalls()
+	if active != 0 || calls != 1 {
+		t.Fatalf("reader after shutdown active=%d calls=%d, want active=0 calls=1", active, calls)
+	}
+	service.multiplierSnapshotMu.Lock()
+	inFlight, done := entry.inFlight, entry.done
+	service.multiplierSnapshotMu.Unlock()
+	if inFlight || done != nil {
+		t.Fatalf("entry after shutdown inFlight=%v done=%v, want terminated", inFlight, done)
+	}
+	service.refreshRunMu.Lock()
+	jobs := service.multiplierRefreshJobs
+	closed := service.refreshRunClosed
+	service.refreshRunMu.Unlock()
+	if jobs != 0 || !closed {
+		t.Fatalf("service lifecycle after shutdown jobs=%d closed=%v, want zero/true", jobs, closed)
+	}
+}
+
 func TestMultiplierSnapshotFailureIsIsolatedPerSite(t *testing.T) {
 	reader := &snapshotMetadataReader{
 		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{
@@ -329,6 +385,112 @@ func TestFreshMultiplierLookupRetainsOldSnapshotForDisplayAfterRefreshFailure(t 
 	second := service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
 	if second.byAccount["account-1"].status != MultiplierResolutionStale {
 		t.Fatalf("failed refresh must retain stale display snapshot, lookup=%+v", second)
+	}
+}
+
+func TestMultiplierRefreshSummaryKeepsTimeoutStateForStaleSnapshot(t *testing.T) {
+	for _, outcome := range []string{"queue_timeout", "request_timeout"} {
+		t.Run(outcome, func(t *testing.T) {
+			service := &Service{multiplierSnapshots: map[string]*multiplierSnapshotEntry{
+				multiplierSnapshotKey("user1", "ws1", "site-1"): {
+					siteID:      "site-1",
+					status:      multiplierResolutionStale,
+					lastOutcome: outcome,
+				},
+			}}
+
+			summary := service.multiplierRefreshSummary("user1", "ws1")
+
+			if summary.State != "timeout" {
+				t.Fatalf("stale %s summary state = %q, want timeout", outcome, summary.State)
+			}
+			if got := summary.Sites[0].ErrorKey; got != outcome {
+				t.Fatalf("stale %s errorKey = %q, want %s", outcome, got, outcome)
+			}
+		})
+	}
+}
+
+func TestMultiplierCanceledBeforeWorkerReleasesWaiterWithoutTimeout(t *testing.T) {
+	key := multiplierSnapshotKey("user1", "ws1", "site-1")
+	target := &multiplierSnapshotEntry{
+		workspaceKey: key, siteID: "site-1", userID: "user1", adminAccountID: "ws1",
+		platform: upstream.PlatformSub2API, bindingSignature: "key-1", keyIDs: []string{"key-1"},
+		generation: 1, capability: multiplierDirectUnknown, status: multiplierResolutionUpdating,
+		inFlight: true, done: make(chan struct{}),
+	}
+	captured := *target
+	captured.keyIDs = append([]string(nil), target.keyIDs...)
+	reader := &snapshotMetadataReader{}
+	service := &Service{
+		sites:               snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}},
+		multiplierSnapshots: map[string]*multiplierSnapshotEntry{key: target},
+	}
+	waiter := target.done
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	service.refreshMultiplierSnapshot(ctx, reader, &captured, target)
+
+	if direct, lists := reader.callCounts("site-1"); direct != 0 || lists != 0 {
+		t.Fatalf("canceled queued refresh made upstream calls direct=%d list=%d, want zero", direct, lists)
+	}
+	summary := mergeAdminGroupsRefreshSummary(nil, service.multiplierRefreshSummary("user1", "ws1"), "")
+	if summary.State == "timeout" || summary.Sites[0].ErrorKey != "multiplier_unavailable" {
+		t.Fatalf("canceled queued refresh summary = %+v, want non-timeout unavailable", summary)
+	}
+	select {
+	case <-waiter:
+	default:
+		t.Fatal("canceled queued refresh did not release its waiter")
+	}
+}
+
+func TestMultiplierQueueFullTerminatesUnavailableAndReleasesWaiter(t *testing.T) {
+	multiplierRefreshDispatcher.mu.Lock()
+	if multiplierRefreshDispatcher.workers != 0 || len(multiplierRefreshDispatcher.queue) != 0 {
+		workers, queued := multiplierRefreshDispatcher.workers, len(multiplierRefreshDispatcher.queue)
+		multiplierRefreshDispatcher.mu.Unlock()
+		t.Fatalf("multiplier dispatcher is not idle before queue-full test: workers=%d queued=%d", workers, queued)
+	}
+	originalQueue := multiplierRefreshDispatcher.queue
+	fullQueue := make(chan multiplierRefreshJob, 1)
+	fullQueue <- multiplierRefreshJob{}
+	multiplierRefreshDispatcher.queue = fullQueue
+	multiplierRefreshDispatcher.mu.Unlock()
+	t.Cleanup(func() {
+		multiplierRefreshDispatcher.mu.Lock()
+		select {
+		case <-fullQueue:
+		default:
+		}
+		multiplierRefreshDispatcher.queue = originalQueue
+		multiplierRefreshDispatcher.mu.Unlock()
+	})
+
+	reader := &snapshotMetadataReader{
+		fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{snapshotConnection("account-1", "site-1", "key-1")}},
+	}
+	service := &Service{
+		mySites: reader,
+		sites:   snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}},
+	}
+
+	lookup := service.freshMultiplierLookupForWorkspace(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
+
+	if !lookup.unavailable {
+		t.Fatalf("queue-full lookup = %+v, want unavailable", lookup)
+	}
+	if direct, lists := reader.callCounts("site-1"); direct != 0 || lists != 0 {
+		t.Fatalf("queue-full refresh made upstream calls direct=%d list=%d, want zero", direct, lists)
+	}
+	entry := service.multiplierSnapshots[multiplierSnapshotKey("user1", "ws1", "site-1")]
+	if entry == nil || entry.inFlight || entry.done != nil || len(entry.supersededDone) != 0 {
+		t.Fatalf("queue-full entry retained waiter ownership: %+v", entry)
+	}
+	summary := mergeAdminGroupsRefreshSummary(nil, service.multiplierRefreshSummary("user1", "ws1"), "")
+	if summary.State != "failure" || summary.Sites[0].ErrorKey != "multiplier_unavailable" {
+		t.Fatalf("queue-full summary = %+v, want unavailable failure", summary)
 	}
 }
 

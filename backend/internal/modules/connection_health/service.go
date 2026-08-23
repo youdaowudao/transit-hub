@@ -112,6 +112,20 @@ type Service struct {
 	questionAnswerWG       sync.WaitGroup
 	questionAnswerHTTP     *QuestionAnswerRunner
 	questionAnswerTTL      time.Duration
+	refreshRunMu           sync.Mutex
+	refreshRootCtx         context.Context
+	refreshRootCancel      context.CancelFunc
+	refreshRunClosed       bool
+	refreshRunWG           sync.WaitGroup
+	multiplierRefreshWG    sync.WaitGroup
+	multiplierRefreshJobs  int
+	// Refresh run ownership is process-local. Multi-process coordination is intentionally out of scope.
+	refreshActive          map[adminGroupsRefreshWorkspaceKey]*adminGroupsRefreshRun
+	refreshRunsByID        map[string]*adminGroupsRefreshRun
+	refreshRetained        map[adminGroupsRefreshWorkspaceKey]*adminGroupsRefreshRun
+	refreshRetentionTimers map[adminGroupsRefreshWorkspaceKey]*time.Timer
+	refreshHeartbeat       time.Duration
+	refreshRetention       time.Duration
 }
 
 func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner) *Service {
@@ -136,6 +150,7 @@ func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platf
 		questionAnswerTTL:      QuestionAnswerRequestTimeout,
 	}
 	service.initializeQuestionAnswerRuntime()
+	service.initializeAdminGroupsRefreshRuntime()
 	// 真实 PlatformService 同时实现优先级更新能力；测试或旧注入器如果尚未实现，倍率策略会
 	// 安全跳过远端写入，不影响既有探活/降级流程。
 	if actions, ok := platform.(TargetPriorityActioner); ok {

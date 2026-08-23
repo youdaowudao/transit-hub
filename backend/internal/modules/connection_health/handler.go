@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"transithub/backend/internal/shared/authctx"
 	"transithub/backend/internal/shared/httpjson"
@@ -162,22 +163,136 @@ func (h *Handler) refreshAdminGroups(w http.ResponseWriter, r *http.Request) {
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
 		return
 	}
-	var result AdminGroupsFreshResult
+	wantsSSE := strings.Contains(strings.ToLower(r.Header.Get("Accept")), "text/event-stream")
+	var flusher http.Flusher
+	if wantsSSE {
+		var supported bool
+		flusher, supported = w.(http.Flusher)
+		if !supported {
+			httpjson.WriteError(w, http.StatusInternalServerError, ErrorUnknown)
+			return
+		}
+	}
+
+	runID := strings.TrimSpace(r.URL.Query().Get("run_id"))
+	var run *adminGroupsRefreshRun
+	disposition := adminGroupsRefreshRunJoined
 	var err error
-	if r.Method == http.MethodGet {
-		result, err = h.service.AdminGroupsAutoFreshResult(r.Context(), userID)
+	if runID != "" {
+		if r.Method != http.MethodGet {
+			httpjson.WriteError(w, http.StatusBadRequest, "refresh_run_invalid_reconnect")
+			return
+		}
+		var found bool
+		run, found = h.service.adminGroupsRefreshRunByID(r.Context(), userID, runID)
+		if !found {
+			httpjson.WriteError(w, http.StatusNotFound, "refresh_run_not_found")
+			return
+		}
 	} else {
-		result, err = h.service.AdminGroupsFreshResult(r.Context(), userID)
+		mode := adminGroupsRefreshModeAutomatic
+		if r.Method == http.MethodPost {
+			mode = adminGroupsRefreshModeManual
+		}
+		run, disposition, err = h.service.startOrJoinAdminGroupsRefreshRun(r.Context(), userID, mode)
 	}
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	if disposition == adminGroupsRefreshRunConflict {
+		httpjson.Write(w, http.StatusConflict, struct {
+			ErrorKey string `json:"errorKey"`
+			RunID    string `json:"runId"`
+		}{ErrorKey: "refresh_run_conflict", RunID: run.id})
+		return
+	}
+
+	if wantsSSE {
+		h.streamAdminGroupsRefreshRun(w, r, flusher, run, disposition == adminGroupsRefreshRunStarted)
+		return
+	}
+	h.waitAdminGroupsRefreshRunJSON(w, r, run)
+}
+
+func (h *Handler) streamAdminGroupsRefreshRun(w http.ResponseWriter, r *http.Request, flusher http.Flusher, run *adminGroupsRefreshRun, started bool) {
+	subscription, current := run.subscribe()
+	defer run.unsubscribe(subscription.ID)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	lastRevision := int64(0)
+	emitSnapshot := func(snapshot adminGroupsRefreshSnapshot) bool {
+		if snapshot.Revision <= lastRevision {
+			return snapshot.Terminal == nil
+		}
+		eventName := "snapshot"
+		payload := any(snapshot)
+		if snapshot.Terminal != nil {
+			eventName = "terminal"
+			payload = snapshot.Terminal
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return false
+		}
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventName, data); err != nil {
+			return false
+		}
+		flusher.Flush()
+		lastRevision = snapshot.Revision
+		return snapshot.Terminal == nil
+	}
+
+	if started {
+		if !emitSnapshot(run.initialSnapshot()) {
+			return
+		}
+	}
+	if !emitSnapshot(current) {
+		return
+	}
+	for {
+		select {
+		case _, open := <-subscription.Signals:
+			latest := run.latest()
+			if !emitSnapshot(latest) || !open {
+				return
+			}
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (h *Handler) waitAdminGroupsRefreshRunJSON(w http.ResponseWriter, r *http.Request, run *adminGroupsRefreshRun) {
+	subscription, snapshot := run.subscribe()
+	defer run.unsubscribe(subscription.ID)
+	for snapshot.Terminal == nil {
+		select {
+		case <-subscription.Signals:
+			snapshot = run.latest()
+		case <-r.Context().Done():
+			return
+		}
+	}
+	terminal := snapshot.Terminal
+	if terminal.Status != "success" || terminal.Groups == nil {
+		// JSON callers keep the pre-streaming failure contract; detailed safe run failures
+		// are exposed only by the SSE terminal union.
+		httpjson.WriteError(w, http.StatusInternalServerError, ErrorUnknown)
+		return
+	}
+	result := AdminGroupsFreshResult{
+		Groups:  append([]AdminGroupHealth{}, (*terminal.Groups)...),
+		Refresh: normalizeAdminGroupsRefreshSummary(terminal.Refresh),
+	}
 	if result.Groups == nil {
 		result.Groups = []AdminGroupHealth{}
-	}
-	if result.Refresh.Sites == nil {
-		result.Refresh.Sites = []AdminGroupsRefreshSite{}
 	}
 	httpjson.Write(w, http.StatusOK, result)
 }

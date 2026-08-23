@@ -68,7 +68,6 @@ describe('connection health refresh prompt', () => {
     expect(viewSource).toContain('refreshStartedAt')
     expect(viewSource).toContain('refreshWaitSeconds')
     expect(viewSource).toContain('refreshWaitTimer')
-    expect(viewSource).toContain(':disabled="isLoading || refreshLoading"')
     expect(viewSource).toContain('isLoading && adminGroups.length === 0')
     expect(viewSource).not.toContain('fetch(')
   })

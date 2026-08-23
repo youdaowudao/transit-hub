@@ -206,6 +206,69 @@ func TestSyncSitesAutomaticReusesCachedStateAndEnforcesWorkspace(t *testing.T) {
 	}
 }
 
+func TestSyncSitesProgressPublishesFastTerminalBeforeBlockedSite(t *testing.T) {
+	cache := newSyncTestCache(
+		newTestSite("site-fast", "user-1", "workspace-1", 1, &Session{Platform: PlatformSub2API, AccessToken: "token-fast"}),
+		newTestSite("site-slow", "user-1", "workspace-1", 1, &Session{Platform: PlatformSub2API, AccessToken: "token-slow"}),
+	)
+	cache.sites["site-fast"].Status = StatusConnected
+	cache.sites["site-slow"].Status = StatusConnected
+	service := NewService(nil, nil, nil, cache)
+	flight := &syncFlight{done: make(chan struct{})}
+	service.syncFlights["site-slow"] = flight
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			service.mu.Lock()
+			flight.response = Response{Status: StatusConnected}
+			delete(service.syncFlights, "site-slow")
+			close(flight.done)
+			service.mu.Unlock()
+		})
+	}
+	t.Cleanup(release)
+
+	completed := make(chan SyncSiteResult, 2)
+	results := make(chan []SyncSiteResult, 1)
+	go func() {
+		results <- service.SyncSitesProgress(context.Background(), "user-1", "workspace-1", []string{"site-slow", "site-fast"}, false, func(result SyncSiteResult) {
+			completed <- result
+		})
+	}()
+
+	select {
+	case result := <-completed:
+		if result.SiteID != "site-fast" || result.Status != "success" {
+			t.Fatalf("first progressive result = %#v, want fast success", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fast site terminal was not published")
+	}
+	select {
+	case result := <-results:
+		t.Fatalf("progressive sync returned before slow terminal: %#v", result)
+	default:
+	}
+
+	release()
+	select {
+	case result := <-completed:
+		if result.SiteID != "site-slow" || result.Status != "success" {
+			t.Fatalf("second progressive result = %#v, want slow success", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow site terminal was not published after release")
+	}
+	select {
+	case result := <-results:
+		if len(result) != 2 {
+			t.Fatalf("progressive results = %#v, want two terminals", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("progressive sync did not return after both terminals")
+	}
+}
+
 func TestSyncReleaseMapsUpstreamFailureStages(t *testing.T) {
 	keys := []struct {
 		upstreamKey string

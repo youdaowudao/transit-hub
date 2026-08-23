@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"hash/fnv"
 	"log"
 	"sort"
 	"strings"
@@ -50,12 +51,13 @@ type syncFlight struct {
 // 站点运行时状态缓存在 Redis（通过 SiteCache），PostgreSQL 负责持久化。
 // 当系统设置开启了数据刷新频率时，定时器按配置的间隔自动同步各站点。
 type Service struct {
-	platformService *PlatformService
-	snapshotWriter  SnapshotWriter
-	repository      SiteRepository
-	cache           SiteCache
-	accounts        AdminAccountResolver
-	refreshConfigs  map[refreshWorkspaceKey]RefreshConfig
+	platformService  *PlatformService
+	snapshotWriter   SnapshotWriter
+	repository       SiteRepository
+	cache            SiteCache
+	accounts         AdminAccountResolver
+	refreshConfigs   map[refreshWorkspaceKey]RefreshConfig
+	initialSchedules map[refreshWorkspaceKey]bool
 	// groupCostSlots 限制跨站点成本采样的并发量；nil 仅用于不带 NewService 的单元测试。
 	groupCostSlots chan struct{}
 	timers         map[string]*time.Timer
@@ -82,15 +84,16 @@ func (s *Service) requireCurrentAdminAccountID(ctx context.Context, userID strin
 
 func NewService(platformService *PlatformService, repository SiteRepository, snapshotWriter SnapshotWriter, cache SiteCache) *Service {
 	return &Service{
-		platformService: platformService,
-		snapshotWriter:  snapshotWriter,
-		repository:      repository,
-		cache:           cache,
-		groupCostSlots:  make(chan struct{}, 2),
-		timers:          make(map[string]*time.Timer),
-		refreshConfigs:  make(map[refreshWorkspaceKey]RefreshConfig),
-		deletedSites:    make(map[string]struct{}),
-		syncFlights:     make(map[string]*syncFlight),
+		platformService:  platformService,
+		snapshotWriter:   snapshotWriter,
+		repository:       repository,
+		cache:            cache,
+		groupCostSlots:   make(chan struct{}, 2),
+		timers:           make(map[string]*time.Timer),
+		refreshConfigs:   make(map[refreshWorkspaceKey]RefreshConfig),
+		initialSchedules: make(map[refreshWorkspaceKey]bool),
+		deletedSites:     make(map[string]struct{}),
+		syncFlights:      make(map[string]*syncFlight),
 	}
 }
 
@@ -105,6 +108,7 @@ func (s *Service) SetWorkspaceRefreshConfig(userID, adminAccountID string, confi
 	defer s.mu.Unlock()
 	key := refreshWorkspaceKey{userID: userID, adminAccountID: adminAccountID}
 	s.refreshConfigs[key] = config
+	initial := !s.initialSchedules[key]
 
 	if s.repository == nil {
 		return
@@ -114,10 +118,18 @@ func (s *Service) SetWorkspaceRefreshConfig(userID, adminAccountID string, confi
 		log.Printf("[upstream] 无法读取站点列表来调度定时器: %v", err)
 		return
 	}
+	initialScheduled := false
 	for i := range sites {
 		if sites[i].UserID == userID && sites[i].AdminAccountID == adminAccountID {
-			s.scheduleSyncLocked(sites[i].ID, &sites[i])
+			if initial {
+				initialScheduled = s.scheduleInitialSyncLocked(sites[i].ID, &sites[i]) || initialScheduled
+			} else {
+				s.scheduleSyncLocked(sites[i].ID, &sites[i])
+			}
 		}
+	}
+	if initialScheduled {
+		s.initialSchedules[key] = true
 	}
 	log.Printf("[upstream] 工作区后台定时同步配置已更新 user_id=%s admin_account_id=%s enabled=%t interval=%s", userID, adminAccountID, config.Enabled, config.Interval)
 }
@@ -146,6 +158,7 @@ func (s *Service) RestoreSavedSites(ctx context.Context) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	initialWorkspaces := make(map[refreshWorkspaceKey]struct{})
 	for i := range sites {
 		if strings.TrimSpace(sites[i].UserID) == "" {
 			continue
@@ -157,7 +170,17 @@ func (s *Service) RestoreSavedSites(ctx context.Context) error {
 		if err := s.cache.Set(ctx, site); err != nil {
 			return err
 		}
-		s.scheduleSyncLocked(site.ID, site)
+		key := refreshWorkspaceKey{userID: site.UserID, adminAccountID: site.AdminAccountID}
+		if _, configured := s.refreshConfigs[key]; configured && !s.initialSchedules[key] {
+			if s.scheduleInitialSyncLocked(site.ID, site) {
+				initialWorkspaces[key] = struct{}{}
+			}
+		} else {
+			s.scheduleSyncLocked(site.ID, site)
+		}
+	}
+	for key := range initialWorkspaces {
+		s.initialSchedules[key] = true
 	}
 	return nil
 }
@@ -762,6 +785,11 @@ const relevantSiteSyncConcurrency = 5
 // SyncSites 按显式 workspace 同步或等待指定站点。force=false 时只复用已经在途的
 // 同站点同步，不会为了页面自动刷新启动新的上游同步。
 func (s *Service) SyncSites(ctx context.Context, userID string, adminAccountID string, siteIDs []string, force bool) []SyncSiteResult {
+	return s.SyncSitesProgress(ctx, userID, adminAccountID, siteIDs, force, nil)
+}
+
+// SyncSitesProgress 保留 SyncSites 的返回顺序，并在每个唯一站点真实终结时立即通知调用方。
+func (s *Service) SyncSitesProgress(ctx context.Context, userID string, adminAccountID string, siteIDs []string, force bool, completed func(SyncSiteResult)) []SyncSiteResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -769,6 +797,15 @@ func (s *Service) SyncSites(ctx context.Context, userID string, adminAccountID s
 	results := make([]SyncSiteResult, len(ids))
 	sem := make(chan struct{}, relevantSiteSyncConcurrency)
 	var wg sync.WaitGroup
+	var completedMu sync.Mutex
+	notifyCompleted := func(result SyncSiteResult) {
+		if completed == nil {
+			return
+		}
+		completedMu.Lock()
+		defer completedMu.Unlock()
+		completed(result)
+	}
 	for index, id := range ids {
 		wg.Add(1)
 		go func(index int, id string) {
@@ -778,9 +815,11 @@ func (s *Service) SyncSites(ctx context.Context, userID string, adminAccountID s
 				defer func() { <-sem }()
 			case <-ctx.Done():
 				results[index] = SyncSiteResult{SiteID: id, Status: "unavailable", ErrorKey: "site_sync_cancelled"}
+				notifyCompleted(results[index])
 				return
 			}
 			results[index] = s.syncSiteForWorkspace(ctx, userID, adminAccountID, id, force)
+			notifyCompleted(results[index])
 		}(index, id)
 	}
 	wg.Wait()
@@ -980,12 +1019,17 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 			safeEmit(SyncEvent{Event: SyncEventSyncing, SiteID: id})
 
 			response, syncErr := s.sync(ctx, id)
-			if syncErr != nil {
+			if syncErr != nil || response.Status != StatusConnected {
 				log.Printf("[upstream-stream] 同步失败 id=%s err=%v", id, syncErr)
 				if cached, cacheErr := s.cache.Get(ctx, id); cacheErr == nil && cached != nil {
 					response = toResponse(cached)
 				}
-				key := errorKey(syncErr)
+				key := ErrorUnknown
+				if syncErr != nil {
+					key = errorKey(syncErr)
+				} else if response.ErrorKey != nil && *response.ErrorKey != "" {
+					key = *response.ErrorKey
+				}
 				safeEmit(SyncEvent{Event: SyncEventError, SiteID: id, ErrorKey: key, Site: &response})
 			} else {
 				log.Printf("[upstream-stream] 同步成功 id=%s", id)
@@ -1233,24 +1277,49 @@ func (s *Service) Close() {
 // scheduleSyncLocked 根据刷新配置为站点调度下一次定时同步。
 // 仅在系统设置开启了数据刷新频率时才实际调度，否则为 no-op。
 // 调用方必须持有 s.mu 锁。
-func (s *Service) scheduleSyncLocked(id string, site *Site) {
+func (s *Service) scheduleSyncLocked(id string, site *Site) bool {
+	return s.scheduleSyncWithModeLocked(id, site, false)
+}
+
+func (s *Service) scheduleInitialSyncLocked(id string, site *Site) bool {
+	return s.scheduleSyncWithModeLocked(id, site, true)
+}
+
+func (s *Service) scheduleSyncWithModeLocked(id string, site *Site, initial bool) bool {
 	s.clearTimerLocked(id)
 	if _, deleted := s.deletedSites[id]; deleted {
-		return
+		return false
 	}
 	if site == nil || !site.IsEnabled() || site.Session == nil {
-		return
+		return false
 	}
 	config, ok := s.refreshConfigs[refreshWorkspaceKey{userID: site.UserID, adminAccountID: site.AdminAccountID}]
 	if !ok || !config.Enabled || config.Interval <= 0 {
-		return
+		return false
 	}
 	delay := config.Interval
+	if initial {
+		delay = initialSyncDelay(id, config.Interval)
+	}
 	log.Printf("[upstream-timer] 定时同步已调度 id=%s delay=%s", id, delay)
 	s.timers[id] = time.AfterFunc(delay, func() {
 		log.Printf("[upstream-timer] 定时同步触发 id=%s", id)
 		s.sync(context.Background(), id)
 	})
+	return true
+}
+
+func initialSyncDelay(siteID string, interval time.Duration) time.Duration {
+	window := interval / 10
+	if window > time.Minute {
+		window = time.Minute
+	}
+	if window < time.Second {
+		return interval
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(siteID))
+	return interval + time.Duration(hash.Sum64()%uint64(window))
 }
 
 func (s *Service) clearTimerLocked(id string) {

@@ -31,14 +31,45 @@ const (
 	multiplierRefreshQueueSize   = 64
 )
 
-var errMultiplierDirectLookupAmbiguous = errors.New("direct key lookup returned ambiguous not found")
+var (
+	errMultiplierDirectLookupAmbiguous = errors.New("direct key lookup returned ambiguous not found")
+	errMultiplierQueueFull             = errors.New("multiplier metadata refresh queue is full")
+	errMultiplierQueueTimeout          = errors.New("multiplier refresh queue timeout")
+	errMultiplierRequestTimeout        = errors.New("multiplier refresh request timeout")
+)
 
 type multiplierRefreshJob struct {
-	service  *Service
-	parent   context.Context
-	reader   UpstreamKeyMetadataReader
-	captured *multiplierSnapshotEntry
-	target   *multiplierSnapshotEntry
+	service   *Service
+	parent    context.Context
+	reader    UpstreamKeyMetadataReader
+	captured  *multiplierSnapshotEntry
+	target    *multiplierSnapshotEntry
+	lifecycle *multiplierRefreshJobLifecycle
+}
+
+type multiplierRefreshJobLifecycle struct {
+	once       sync.Once
+	service    *Service
+	cancel     context.CancelFunc
+	stopParent func() bool
+}
+
+func (lifecycle *multiplierRefreshJobLifecycle) finish() {
+	if lifecycle == nil {
+		return
+	}
+	lifecycle.once.Do(func() {
+		if lifecycle.stopParent != nil {
+			lifecycle.stopParent()
+		}
+		if lifecycle.cancel != nil {
+			lifecycle.cancel()
+		}
+		lifecycle.service.refreshRunMu.Lock()
+		lifecycle.service.multiplierRefreshJobs--
+		lifecycle.service.refreshRunMu.Unlock()
+		lifecycle.service.multiplierRefreshWG.Done()
+	})
 }
 
 // multiplierRefreshDispatcher bounds the whole process, rather than only one HTTP
@@ -73,7 +104,10 @@ func runMultiplierRefreshWorker() {
 	for {
 		select {
 		case job := <-multiplierRefreshDispatcher.queue:
-			job.service.refreshMultiplierSnapshot(job.parent, job.reader, job.captured, job.target)
+			func() {
+				defer job.lifecycle.finish()
+				job.service.refreshMultiplierSnapshot(job.parent, job.reader, job.captured, job.target)
+			}()
 		default:
 			multiplierRefreshDispatcher.mu.Lock()
 			if len(multiplierRefreshDispatcher.queue) == 0 {
@@ -110,6 +144,7 @@ type multiplierSnapshotEntry struct {
 	inFlight         bool
 	done             chan struct{}
 	supersededDone   []chan struct{}
+	enqueuedAt       time.Time
 }
 
 // multiplierSiteMetadata is deliberately narrower than upstream.Site. A snapshot must not
@@ -137,6 +172,10 @@ func (s *Service) multiplierLookupForWorkspaceWithOptions(ctx context.Context, u
 }
 
 func (s *Service) multiplierLookupForWorkspaceWithConnections(ctx context.Context, userID string, adminAccountID string, platform string, connections []my_sites.RealConnection, connectionsReady bool, allowStale bool, waitForFresh bool, forceRefresh bool) upstreamMultiplierLookup {
+	return s.multiplierLookupForWorkspaceWithConnectionsProgress(ctx, userID, adminAccountID, platform, connections, connectionsReady, allowStale, waitForFresh, forceRefresh, nil, nil)
+}
+
+func (s *Service) multiplierLookupForWorkspaceWithConnectionsProgress(ctx context.Context, userID string, adminAccountID string, platform string, connections []my_sites.RealConnection, connectionsReady bool, allowStale bool, waitForFresh bool, forceRefresh bool, started func([]string), completed func(string)) upstreamMultiplierLookup {
 	lookup := upstreamMultiplierLookup{byAccount: make(map[string]upstreamMultiplierResolution)}
 	if s.mySites == nil || s.sites == nil {
 		lookup.unavailable = true
@@ -187,7 +226,7 @@ func (s *Service) multiplierLookupForWorkspaceWithConnections(ctx context.Contex
 		bindingKeys[siteID][keyID] = struct{}{}
 	}
 
-	freshReady := s.prepareMultiplierSnapshots(ctx, metadataReader, userID, adminAccountID, upstream.Platform(platform), bindingKeys, waitForFresh, forceRefresh)
+	freshReady := s.prepareMultiplierSnapshotsProgress(ctx, metadataReader, userID, adminAccountID, upstream.Platform(platform), bindingKeys, waitForFresh, forceRefresh, started, completed)
 	if waitForFresh && !freshReady {
 		lookup.unavailable = true
 		return lookup
@@ -248,13 +287,23 @@ func (s *Service) multiplierLookupForWorkspaceWithConnections(ctx context.Contex
 }
 
 func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader UpstreamKeyMetadataReader, userID string, adminAccountID string, platform upstream.Platform, bindingKeys map[string]map[string]struct{}, waitForFresh bool, forceRefresh bool) bool {
+	return s.prepareMultiplierSnapshotsProgress(ctx, reader, userID, adminAccountID, platform, bindingKeys, waitForFresh, forceRefresh, nil, nil)
+}
+
+type multiplierSnapshotWaiter struct {
+	siteID string
+	done   <-chan struct{}
+}
+
+func (s *Service) prepareMultiplierSnapshotsProgress(ctx context.Context, reader UpstreamKeyMetadataReader, userID string, adminAccountID string, platform upstream.Platform, bindingKeys map[string]map[string]struct{}, waitForFresh bool, forceRefresh bool, started func([]string), completed func(string)) bool {
 	orderedSites := make([]string, 0, len(bindingKeys))
 	for siteID := range bindingKeys {
 		orderedSites = append(orderedSites, siteID)
 	}
 	sort.Strings(orderedSites)
 	now := time.Now()
-	waiters := make([]chan struct{}, 0, len(orderedSites))
+	waiters := make([]multiplierSnapshotWaiter, 0, len(orderedSites))
+	immediate := make([]string, 0, len(orderedSites))
 	// This is a local cache read, not an upstream request. It invalidates a fresh snapshot
 	// immediately when a site, its group metadata, or its session identity changes.
 	currentFingerprints := make(map[string]string, len(orderedSites))
@@ -271,11 +320,13 @@ func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader Upstrea
 	prefix := userID + "\x00" + adminAccountID + "\x00"
 	for key, entry := range s.multiplierSnapshots {
 		if !entry.inFlight && !entry.lastAccessAt.IsZero() && now.Sub(entry.lastAccessAt) > multiplierSnapshotRetention {
+			closeMultiplierSnapshotWaiters(entry)
 			delete(s.multiplierSnapshots, key)
 			continue
 		}
 		if strings.HasPrefix(key, prefix) {
 			if _, needed := bindingKeys[entry.siteID]; !needed {
+				closeMultiplierSnapshotWaiters(entry)
 				delete(s.multiplierSnapshots, key)
 			}
 		}
@@ -291,10 +342,7 @@ func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader Upstrea
 			var supersededDone []chan struct{}
 			if entry != nil {
 				generation = entry.generation + 1
-				supersededDone = append(supersededDone, entry.supersededDone...)
-				if entry.inFlight && entry.done != nil {
-					supersededDone = append(supersededDone, entry.done)
-				}
+				supersededDone = transferMultiplierSnapshotWaiters(entry)
 			}
 			entry = &multiplierSnapshotEntry{
 				workspaceKey: cacheKey, siteID: siteID, userID: userID, adminAccountID: adminAccountID,
@@ -310,14 +358,20 @@ func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader Upstrea
 		entry.lastAccessAt = now
 		if entry.inFlight {
 			if waitForFresh {
-				waiters = append(waiters, entry.done)
+				waiters = append(waiters, multiplierSnapshotWaiter{siteID: siteID, done: entry.done})
 			}
 			continue
 		}
 		if !forceRefresh && entry.status == "complete" && entry.expiresAt.After(now) {
+			if waitForFresh {
+				immediate = append(immediate, siteID)
+			}
 			continue
 		}
 		if !forceRefresh && now.Before(entry.nextRetryAt) {
+			if waitForFresh {
+				immediate = append(immediate, siteID)
+			}
 			continue
 		}
 		entry.inFlight = true
@@ -327,29 +381,31 @@ func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader Upstrea
 		} else {
 			entry.status = multiplierResolutionStale
 		}
-		if waitForFresh {
-			waiters = append(waiters, entry.done)
-		}
 		captured := *entry
 		captured.keyIDs = append([]string(nil), entry.keyIDs...)
 		captured.keys = nil
-		refreshContext := ctx
-		if !waitForFresh {
-			refreshContext = context.Background()
+		captured.enqueuedAt = time.Now()
+		var callerContext context.Context
+		if waitForFresh {
+			callerContext = ctx
 		}
-		if !enqueueMultiplierRefresh(multiplierRefreshJob{
-			service: s, parent: refreshContext, reader: reader, captured: &captured, target: entry,
-		}) {
-			entry.inFlight = false
-			if len(entry.keys) == 0 {
-				entry.status = "unavailable"
-			} else {
-				entry.status = multiplierResolutionStale
+		refreshContext, lifecycle, registered := s.registerMultiplierRefreshJob(callerContext)
+		if !registered {
+			s.finishMultiplierSnapshotLocked(entry, &captured, nil, nil, multiplierSiteMetadata{}, context.Canceled)
+			if waitForFresh {
+				immediate = append(immediate, siteID)
 			}
-			entry.nextRetryAt = now.Add(multiplierFailureBackoff)
-			entry.lastError = "multiplier metadata refresh queue is full"
-			entry.lastOutcome = "unavailable"
-			closeMultiplierSnapshotWaiters(entry)
+			continue
+		}
+		if waitForFresh {
+			waiters = append(waiters, multiplierSnapshotWaiter{siteID: siteID, done: entry.done})
+		}
+		job := multiplierRefreshJob{
+			service: s, parent: refreshContext, reader: reader, captured: &captured, target: entry, lifecycle: lifecycle,
+		}
+		if !enqueueMultiplierRefresh(job) {
+			s.finishMultiplierSnapshotLocked(entry, &captured, nil, nil, multiplierSiteMetadata{}, errMultiplierQueueFull)
+			lifecycle.finish()
 		}
 	}
 	s.multiplierSnapshotMu.Unlock()
@@ -357,14 +413,64 @@ func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader Upstrea
 	if !waitForFresh {
 		return true
 	}
-	for _, done := range waiters {
+	progressSites := make(map[string]struct{}, len(waiters))
+	startedSiteIDs := make([]string, 0, len(waiters))
+	for _, waiter := range waiters {
+		if _, duplicate := progressSites[waiter.siteID]; duplicate {
+			continue
+		}
+		progressSites[waiter.siteID] = struct{}{}
+		startedSiteIDs = append(startedSiteIDs, waiter.siteID)
+	}
+	if started != nil {
+		started(startedSiteIDs)
+	}
+	terminals := make(chan string, len(orderedSites))
+	for _, siteID := range immediate {
+		terminals <- siteID
+	}
+	for _, waiter := range waiters {
+		go func(waiter multiplierSnapshotWaiter) {
+			select {
+			case <-waiter.done:
+				terminals <- waiter.siteID
+			case <-ctx.Done():
+			}
+		}(waiter)
+	}
+	seen := make(map[string]struct{}, len(orderedSites))
+	for len(seen) < len(orderedSites) {
 		select {
-		case <-done:
+		case siteID := <-terminals:
+			if _, duplicate := seen[siteID]; duplicate {
+				continue
+			}
+			seen[siteID] = struct{}{}
+			if _, reportsProgress := progressSites[siteID]; reportsProgress && completed != nil {
+				completed(siteID)
+			}
 		case <-ctx.Done():
 			return false
 		}
 	}
 	return true
+}
+
+func (s *Service) registerMultiplierRefreshJob(parent context.Context) (context.Context, *multiplierRefreshJobLifecycle, bool) {
+	s.refreshRunMu.Lock()
+	defer s.refreshRunMu.Unlock()
+	s.initializeAdminGroupsRefreshRuntimeLocked()
+	if s.refreshRunClosed {
+		return nil, nil, false
+	}
+	ctx, cancel := context.WithCancel(s.refreshRootCtx)
+	lifecycle := &multiplierRefreshJobLifecycle{service: s, cancel: cancel}
+	if parent != nil {
+		lifecycle.stopParent = context.AfterFunc(parent, cancel)
+	}
+	s.multiplierRefreshWG.Add(1)
+	s.multiplierRefreshJobs++
+	return ctx, lifecycle, true
 }
 
 func (s *Service) refreshMultiplierSnapshot(parent context.Context, reader UpstreamKeyMetadataReader, captured *multiplierSnapshotEntry, target *multiplierSnapshotEntry) {
@@ -380,10 +486,36 @@ func (s *Service) refreshMultiplierSnapshot(parent context.Context, reader Upstr
 	if !s.multiplierSnapshotRefreshCurrent(target, captured) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(parent, multiplierRefreshTimeout)
+	enqueuedAt := captured.enqueuedAt
+	if enqueuedAt.IsZero() {
+		enqueuedAt = captured.lastAccessAt
+	}
+	if enqueuedAt.IsZero() {
+		enqueuedAt = time.Now()
+	}
+	deadline := enqueuedAt.Add(multiplierRefreshTimeout)
+	if !time.Now().Before(deadline) {
+		s.finishMultiplierSnapshot(target, captured, nil, nil, multiplierSiteMetadata{}, errMultiplierQueueTimeout)
+		return
+	}
+	if err := parent.Err(); err != nil {
+		s.finishMultiplierSnapshot(target, captured, nil, nil, multiplierSiteMetadata{}, err)
+		return
+	}
+	ctx, cancel := context.WithDeadline(parent, deadline)
 	defer cancel()
 
-	keys, keyFailures, site, capability, err := s.fetchMultiplierSnapshot(ctx, reader, captured)
+	upstreamRequestStarted := false
+	keys, keyFailures, site, capability, err := s.fetchMultiplierSnapshot(ctx, reader, captured, &upstreamRequestStarted)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if upstreamRequestStarted {
+			err = errMultiplierRequestTimeout
+		} else {
+			err = errMultiplierQueueTimeout
+		}
+		keys = nil
+		keyFailures = nil
+	}
 	captured.capability = capability
 	s.finishMultiplierSnapshot(target, captured, keys, keyFailures, site, err)
 	if err != nil {
@@ -398,7 +530,7 @@ func (s *Service) multiplierSnapshotRefreshCurrent(target *multiplierSnapshotEnt
 	return current == target && current.generation == captured.generation && current.bindingSignature == captured.bindingSignature
 }
 
-func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKeyMetadataReader, entry *multiplierSnapshotEntry) (map[string]upstreamKeyMetadata, map[string]string, multiplierSiteMetadata, string, error) {
+func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKeyMetadataReader, entry *multiplierSnapshotEntry, upstreamRequestStarted *bool) (map[string]upstreamKeyMetadata, map[string]string, multiplierSiteMetadata, string, error) {
 	site, err := s.sites.GetSite(ctx, entry.siteID)
 	if err != nil || site == nil || site.Session == nil {
 		if err == nil {
@@ -413,6 +545,7 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 			keyFailures := make(map[string]string)
 			fallbackKeyIDs := make([]string, 0)
 			for _, keyID := range entry.keyIDs {
+				*upstreamRequestStarted = true
 				item, getErr := reader.GetUpstreamKeyForWorkspace(ctx, entry.userID, entry.adminAccountID, entry.siteID, keyID)
 				if getErr != nil {
 					var requestErr *upstream.RequestError
@@ -432,6 +565,7 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 			if len(fallbackKeyIDs) == 0 {
 				return keys, keyFailures, siteMetadata, multiplierDirectSupported, nil
 			}
+			*upstreamRequestStarted = true
 			items, listErr := listMultiplierKeys(ctx, reader, entry, fallbackKeyIDs)
 			if listErr != nil {
 				for _, keyID := range fallbackKeyIDs {
@@ -453,6 +587,7 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 			return keys, keyFailures, siteMetadata, capability, nil
 		}
 	}
+	*upstreamRequestStarted = true
 	items, err := listMultiplierKeys(ctx, reader, entry, entry.keyIDs)
 	if err != nil {
 		return nil, nil, siteMetadata, entry.capability, err
@@ -485,6 +620,10 @@ func listMultiplierKeys(ctx context.Context, reader UpstreamKeyMetadataReader, e
 func (s *Service) finishMultiplierSnapshot(target *multiplierSnapshotEntry, captured *multiplierSnapshotEntry, keys map[string]upstreamKeyMetadata, keyFailures map[string]string, site multiplierSiteMetadata, err error) {
 	s.multiplierSnapshotMu.Lock()
 	defer s.multiplierSnapshotMu.Unlock()
+	s.finishMultiplierSnapshotLocked(target, captured, keys, keyFailures, site, err)
+}
+
+func (s *Service) finishMultiplierSnapshotLocked(target *multiplierSnapshotEntry, captured *multiplierSnapshotEntry, keys map[string]upstreamKeyMetadata, keyFailures map[string]string, site multiplierSiteMetadata, err error) {
 	current := s.multiplierSnapshots[target.workspaceKey]
 	if current != target || current.generation != captured.generation || current.bindingSignature != captured.bindingSignature {
 		return
@@ -537,17 +676,46 @@ func (s *Service) finishMultiplierSnapshot(target *multiplierSnapshotEntry, capt
 }
 
 func closeMultiplierSnapshotWaiters(entry *multiplierSnapshotEntry) {
+	if entry == nil {
+		return
+	}
+	entry.inFlight = false
+	seen := make(map[chan struct{}]struct{}, len(entry.supersededDone)+1)
 	if entry.done != nil {
-		close(entry.done)
+		seen[entry.done] = struct{}{}
 		entry.done = nil
 	}
 	for _, done := range entry.supersededDone {
-		close(done)
+		if done != nil {
+			seen[done] = struct{}{}
+		}
 	}
 	entry.supersededDone = nil
+	for done := range seen {
+		close(done)
+	}
+}
+
+func transferMultiplierSnapshotWaiters(entry *multiplierSnapshotEntry) []chan struct{} {
+	if entry == nil {
+		return nil
+	}
+	waiters := append([]chan struct{}(nil), entry.supersededDone...)
+	entry.supersededDone = nil
+	if entry.done != nil {
+		waiters = append(waiters, entry.done)
+		entry.done = nil
+	}
+	return waiters
 }
 
 func multiplierRefreshOutcome(err error) string {
+	if errors.Is(err, errMultiplierQueueTimeout) {
+		return "queue_timeout"
+	}
+	if errors.Is(err, errMultiplierRequestTimeout) {
+		return "request_timeout"
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
 	}
@@ -601,14 +769,14 @@ func (s *Service) multiplierRefreshSummary(userID string, adminAccountID string)
 			status = "stale"
 			anyFailure = true
 			errorKey = multiplierOutcomeErrorKey(entry.lastOutcome)
-			if entry.lastOutcome == "timeout" {
+			if isMultiplierTimeoutOutcome(entry.lastOutcome) {
 				anyTimeout = true
 			}
-		case entry.lastOutcome == "timeout":
+		case isMultiplierTimeoutOutcome(entry.lastOutcome):
 			status = "timeout"
 			anyFailure = true
 			anyTimeout = true
-			errorKey = "timeout"
+			errorKey = multiplierOutcomeErrorKey(entry.lastOutcome)
 		case entry.lastOutcome == "auth_failed":
 			status = "auth_failed"
 			anyFailure = true
@@ -638,6 +806,10 @@ func (s *Service) multiplierRefreshSummary(userID string, adminAccountID string)
 
 func multiplierOutcomeErrorKey(outcome string) string {
 	switch outcome {
+	case "queue_timeout":
+		return "queue_timeout"
+	case "request_timeout":
+		return "request_timeout"
 	case "timeout":
 		return "timeout"
 	case "auth_failed":
@@ -647,6 +819,10 @@ func multiplierOutcomeErrorKey(outcome string) string {
 	default:
 		return "unavailable"
 	}
+}
+
+func isMultiplierTimeoutOutcome(outcome string) bool {
+	return outcome == "timeout" || outcome == "queue_timeout" || outcome == "request_timeout"
 }
 
 func (s *Service) resolveMultiplierSnapshotLocked(connection my_sites.RealConnection, userID string, adminAccountID string, allowStale bool) upstreamMultiplierResolution {

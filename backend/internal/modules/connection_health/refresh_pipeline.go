@@ -11,6 +11,10 @@ import (
 )
 
 func (s *Service) refreshRelatedUpstreamSites(ctx context.Context, userID string, adminAccountID string, force bool) ([]upstream.SyncSiteResult, []my_sites.RealConnection, bool, string) {
+	return s.refreshRelatedUpstreamSitesProgress(ctx, userID, adminAccountID, force, nil, nil)
+}
+
+func (s *Service) refreshRelatedUpstreamSitesProgress(ctx context.Context, userID string, adminAccountID string, force bool, discovered func([]my_sites.RealConnection), completed func(upstream.SyncSiteResult)) ([]upstream.SyncSiteResult, []my_sites.RealConnection, bool, string) {
 	if s.upstreamSync == nil || s.mySites == nil {
 		return nil, nil, false, ""
 	}
@@ -18,6 +22,12 @@ func (s *Service) refreshRelatedUpstreamSites(ctx context.Context, userID string
 	if err != nil {
 		log.Printf("[connection-health] relevant site refresh skipped workspace=%s err=%v", adminAccountID, err)
 		return nil, nil, false, "site_sync_connections"
+	}
+	if discovered != nil {
+		discovered(connections)
+	}
+	if progressive, ok := s.upstreamSync.(UpstreamSyncProgressCoordinator); ok {
+		return progressive.SyncSitesProgress(ctx, userID, adminAccountID, relatedUpstreamSiteIDs(connections), force, completed), connections, true, ""
 	}
 	return s.upstreamSync.SyncSites(ctx, userID, adminAccountID, relatedUpstreamSiteIDs(connections), force), connections, true, ""
 }

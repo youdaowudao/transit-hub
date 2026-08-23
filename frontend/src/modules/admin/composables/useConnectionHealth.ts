@@ -39,7 +39,16 @@ import {
   setTargetSchedulable,
   updateConnectionHealthPolicy,
 } from '../api/connectionHealth'
-import type { AdminGroupsRefreshSite, AdminGroupsRefreshSummary, ProbeTargetProgressPhase } from '../api/connectionHealth'
+import type {
+  AdminGroupsRefreshConflict,
+  AdminGroupsRefreshConnectionState,
+  AdminGroupsRefreshResult,
+  AdminGroupsRefreshSite,
+  AdminGroupsRefreshSnapshot,
+  AdminGroupsRefreshSummary,
+  AdminGroupsRefreshTerminal,
+  ProbeTargetProgressPhase,
+} from '../api/connectionHealth'
 
 const overview = ref<ConnectionHealthOverview | null>(null)
 const groups = ref<OwnGroupHealth[]>([])
@@ -54,11 +63,16 @@ const errorKey = ref('')
 const manualRefreshState = ref<AdminGroupsRefreshSummary['state'] | null>(null)
 const manualRefreshSites = ref<AdminGroupsRefreshSite[]>([])
 const terminalRefreshSummary = ref<AdminGroupsRefreshSummary | null>(null)
+const refreshRunSnapshot = ref<AdminGroupsRefreshSnapshot | null>(null)
+const refreshConflictNotice = ref('')
+const refreshConnectionState = ref<AdminGroupsRefreshConnectionState>('connected')
 let eventsRequestSequence = 0
 let eventsAppliedSequence = 0
 let activeEventsScope = ''
 let adminGroupsRequestSequence = 0
 let adminGroupsLoadingRequests = 0
+let adminGroupsWorkspace = ''
+let adminGroupsRefreshController: AbortController | null = null
 const manualRefreshRequests = ref(0)
 const terminalRefreshRequests = ref(0)
 
@@ -125,6 +139,27 @@ const overviewFromAdminGroups = (groupList: AdminGroupHealth[]): ConnectionHealt
 }
 
 export function useConnectionHealth() {
+  const cancelAdminGroupsRefresh = () => {
+    // 先让所有旧回调失效，再触发 abort；AbortError 只代表浏览器订阅取消。
+    adminGroupsRequestSequence++
+    adminGroupsRefreshController?.abort()
+    refreshConnectionState.value = 'connected'
+  }
+
+  const setAdminGroupsWorkspace = (workspaceId: string) => {
+    if (workspaceId === adminGroupsWorkspace) return
+    cancelAdminGroupsRefresh()
+    adminGroupsWorkspace = workspaceId
+    adminGroups.value = []
+    overview.value = null
+    manualRefreshState.value = null
+    manualRefreshSites.value = []
+    terminalRefreshSummary.value = null
+    refreshRunSnapshot.value = null
+    refreshConflictNotice.value = ''
+    errorKey.value = ''
+  }
+
   const loadOverview = async () => {
     try {
       overview.value = await getConnectionHealthOverview()
@@ -177,57 +212,151 @@ export function useConnectionHealth() {
     return request
   }
 
-  // 方案 A 手动刷新：请求本身等待外部倍率任务全部终态，再返回一轮主站分组和账号。
-  // 失败时保留旧列表，避免手动刷新期间页面失去可查看内容。
-  const refreshAdminGroups = async (): Promise<boolean> => {
+  type RefreshApplicationState = {
+    runId: string
+    revision: number
+    terminalAccepted: boolean
+    terminalSucceeded: boolean
+  }
+
+  const applyRefreshSnapshot = (
+    sequence: number,
+    state: RefreshApplicationState,
+    snapshot: AdminGroupsRefreshSnapshot,
+  ) => {
+    if (sequence !== adminGroupsRequestSequence || state.terminalAccepted) return
+    if (state.runId && snapshot.runId !== state.runId) return
+    if (snapshot.revision <= state.revision) return
+    state.runId = snapshot.runId
+    state.revision = snapshot.revision
+    refreshRunSnapshot.value = snapshot
+  }
+
+  const applyRefreshTerminal = (
+    sequence: number,
+    state: RefreshApplicationState,
+    terminal: AdminGroupsRefreshTerminal,
+    manual: boolean,
+  ): boolean | null => {
+    if (sequence !== adminGroupsRequestSequence || state.terminalAccepted) return null
+    if (state.runId && terminal.runId && terminal.runId !== state.runId) return null
+    if (terminal.revision !== undefined && terminal.revision <= state.revision) return null
+
+    if (terminal.runId) state.runId = terminal.runId
+    if (terminal.revision !== undefined) state.revision = terminal.revision
+    state.terminalAccepted = true
+    state.terminalSucceeded = terminal.status === 'success'
+    const failedStageErrorKey = terminal.failedStage === 'main_groups'
+      ? 'main_groups_unavailable'
+      : terminal.failedStage === 'multiplier_refresh'
+        ? 'multiplier_unavailable'
+        : terminal.failedStage === 'site_sync'
+          ? 'site_sync_unavailable'
+          : 'admin.connectionHealth.errors.request'
+    const summary: AdminGroupsRefreshSummary = terminal.status === 'failed'
+      ? {
+          state: 'failure',
+          errorKey: terminal.errorKey?.trim() || terminal.refresh.errorKey?.trim() || failedStageErrorKey,
+          sites: terminal.refresh.sites,
+        }
+      : terminal.refresh
+    terminalRefreshSummary.value = summary
+    if (manual) {
+      manualRefreshState.value = summary.state
+      manualRefreshSites.value = summary.sites
+    }
+    if (terminal.status === 'success' && terminal.groups) {
+      adminGroups.value = terminal.groups
+      overview.value = overviewFromAdminGroups(terminal.groups)
+    }
+    return state.terminalSucceeded
+  }
+
+  const normalizeRefreshResult = (response: AdminGroupsRefreshResult): AdminGroupsRefreshTerminal => {
+    if (response.status === 'success' || response.status === 'failed') return response
+    const legacy = response as AdminGroupsRefreshResult & { groups?: AdminGroupHealth[] }
+    return {
+      status: 'success',
+      groups: legacy.groups ?? [],
+      refresh: legacy.refresh,
+    }
+  }
+
+  const recordRefreshConflict = (sequence: number, conflict: AdminGroupsRefreshConflict) => {
+    if (sequence !== adminGroupsRequestSequence) return
+    refreshConflictNotice.value = conflict.errorKey === 'refresh_run_conflict'
+      ? 'admin.connectionHealth.refreshStatus.conflictAutomatic'
+      : conflict.errorKey
+  }
+
+  const runAdminGroupsRefresh = async (manual: boolean): Promise<boolean> => {
     const sequence = ++adminGroupsRequestSequence
-    manualRefreshRequests.value++
+    const previousController = adminGroupsRefreshController
+    previousController?.abort()
+    const controller = new AbortController()
+    adminGroupsRefreshController = controller
+    if (manual) manualRefreshRequests.value++
     terminalRefreshRequests.value++
     errorKey.value = ''
+    refreshConflictNotice.value = ''
+    refreshRunSnapshot.value = null
+    refreshConnectionState.value = 'connected'
+    const application: RefreshApplicationState = {
+      runId: '',
+      revision: -1,
+      terminalAccepted: false,
+      terminalSucceeded: false,
+    }
     try {
-      const response = await refreshConnectionHealthAdminGroups()
-      if (sequence !== adminGroupsRequestSequence) return false
-      adminGroups.value = response.groups
-      overview.value = overviewFromAdminGroups(response.groups)
-      manualRefreshState.value = response.refresh.state
-      manualRefreshSites.value = response.refresh.sites
-      terminalRefreshSummary.value = response.refresh
-      return true
+      const request = manual
+        ? refreshConnectionHealthAdminGroups
+        : refreshConnectionHealthAdminGroupsAutomatically
+      const response = await request({
+        onSnapshot: snapshot => {
+          if (!controller.signal.aborted) applyRefreshSnapshot(sequence, application, snapshot)
+        },
+        onTerminal: terminal => {
+          if (!controller.signal.aborted) applyRefreshTerminal(sequence, application, terminal, manual)
+        },
+        onConflict: conflict => {
+          if (!controller.signal.aborted) recordRefreshConflict(sequence, conflict)
+        },
+        onConnectionState: state => {
+          if (!controller.signal.aborted && sequence === adminGroupsRequestSequence && !application.terminalAccepted) {
+            refreshConnectionState.value = state
+          }
+        },
+        signal: controller.signal,
+      })
+      if (controller.signal.aborted || sequence !== adminGroupsRequestSequence) return false
+      if (response.conflict) recordRefreshConflict(sequence, response.conflict)
+      if (!application.terminalAccepted) {
+        applyRefreshTerminal(sequence, application, normalizeRefreshResult(response), manual)
+      }
+      return application.terminalAccepted && application.terminalSucceeded
     } catch (err) {
-      if (sequence !== adminGroupsRequestSequence) return false
+      if (controller.signal.aborted || sequence !== adminGroupsRequestSequence) return false
+      if (err instanceof Error && err.name === 'AbortError') return false
       const refreshErrorKey = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
       errorKey.value = refreshErrorKey
-      manualRefreshState.value = 'failure'
-      manualRefreshSites.value = []
+      if (manual) {
+        manualRefreshState.value = 'failure'
+        manualRefreshSites.value = []
+      }
       terminalRefreshSummary.value = { state: 'failure', errorKey: refreshErrorKey, sites: [] }
       return false
     } finally {
-      manualRefreshRequests.value--
+      if (adminGroupsRefreshController === controller) adminGroupsRefreshController = null
+      if (sequence === adminGroupsRequestSequence) refreshConnectionState.value = 'connected'
+      if (manual) manualRefreshRequests.value--
       terminalRefreshRequests.value--
     }
   }
 
-  const refreshAdminGroupsAutomatically = async (): Promise<boolean> => {
-    const sequence = ++adminGroupsRequestSequence
-    terminalRefreshRequests.value++
-    errorKey.value = ''
-    try {
-      const response = await refreshConnectionHealthAdminGroupsAutomatically()
-      if (sequence !== adminGroupsRequestSequence) return false
-      adminGroups.value = response.groups
-      overview.value = overviewFromAdminGroups(response.groups)
-      terminalRefreshSummary.value = response.refresh
-      return true
-    } catch (err) {
-      if (sequence !== adminGroupsRequestSequence) return false
-      const refreshErrorKey = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
-      errorKey.value = refreshErrorKey
-      terminalRefreshSummary.value = { state: 'failure', errorKey: refreshErrorKey, sites: [] }
-      return false
-    } finally {
-      terminalRefreshRequests.value--
-    }
-  }
+  // 失败 terminal 只更新终态摘要，不覆盖当前列表；成功 terminal 才一次性替换权威分组。
+  const refreshAdminGroups = async (): Promise<boolean> => runAdminGroupsRefresh(true)
+
+  const refreshAdminGroupsAutomatically = async (): Promise<boolean> => runAdminGroupsRefresh(false)
 
   // adminGroups 已包含主页面概览所需的全部状态；直接在本地聚合，避免 overview 后端再次
   // 完整扫描一遍上游分组和账号。loadOverview 保留给旧调用方作为兼容入口。
@@ -494,6 +623,11 @@ export function useConnectionHealth() {
     manualRefreshState,
     manualRefreshSites,
     terminalRefreshSummary,
+    refreshRunSnapshot,
+    refreshConflictNotice,
+    refreshConnectionState,
+    cancelAdminGroupsRefresh,
+    setAdminGroupsWorkspace,
     loadAll,
     loadOverview,
     loadGroups,

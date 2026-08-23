@@ -103,6 +103,66 @@ export type AdminGroupsFreshResponse = {
   refresh: AdminGroupsRefreshSummary
 }
 
+export type AdminGroupsRefreshStage = 'discovering' | 'site_sync' | 'multiplier_refresh' | 'main_groups' | 'complete'
+
+export type AdminGroupsRefreshWaiting = {
+  siteId: string
+  siteName: string
+  phase: string
+  elapsedSeconds: number
+}
+
+export type AdminGroupsRefreshIssue = {
+  siteId?: string
+  siteName?: string
+  phase: string
+  status: string
+  errorKey: string
+}
+
+export type AdminGroupsRefreshSnapshot = {
+  runId: string
+  mode?: 'manual' | 'automatic'
+  runState: 'running' | 'complete'
+  stage: AdminGroupsRefreshStage
+  revision: number
+  startedAt?: string
+  updatedAt?: string
+  stageCompletedSites?: number
+  stageTotalSites?: number
+  waiting?: AdminGroupsRefreshWaiting[]
+  issues?: AdminGroupsRefreshIssue[]
+}
+
+export type AdminGroupsRefreshTerminal = {
+  status: 'success' | 'failed'
+  runId?: string
+  revision?: number
+  groups?: AdminGroupHealth[]
+  refresh: AdminGroupsRefreshSummary
+  errorKey?: string
+  failedStage?: AdminGroupsRefreshStage
+}
+
+export type AdminGroupsRefreshConflict = {
+  errorKey: string
+  runId: string
+}
+
+export type AdminGroupsRefreshResult = AdminGroupsRefreshTerminal & {
+  conflict?: AdminGroupsRefreshConflict
+}
+
+export type AdminGroupsRefreshConnectionState = 'connected' | 'reconnecting'
+
+export type AdminGroupsRefreshStreamOptions = {
+  onSnapshot?: (snapshot: AdminGroupsRefreshSnapshot) => void
+  onTerminal?: (terminal: AdminGroupsRefreshTerminal) => void
+  onConflict?: (conflict: AdminGroupsRefreshConflict) => void
+  onConnectionState?: (state: AdminGroupsRefreshConnectionState) => void
+  signal?: AbortSignal
+}
+
 const terminalRefreshStates = new Set<AdminGroupsRefreshSummary['state']>(['success', 'partial', 'failure', 'timeout'])
 const terminalRefreshSiteStatuses = new Set<AdminGroupsRefreshSite['status']>(['success', 'auth_failed', 'stale', 'unavailable', 'timeout', 'disabled'])
 
@@ -127,11 +187,290 @@ const parseAdminGroupsFreshResponse = (payload: AdminGroupsFreshResponse | Admin
   return payload
 }
 
-export const refreshConnectionHealthAdminGroups = async (): Promise<AdminGroupsFreshResponse> =>
-  parseAdminGroupsFreshResponse(await requestJson<AdminGroupsFreshResponse | AdminGroupHealth[]>('/connection-health/admin-groups/refresh', { method: 'POST' }))
+const refreshReconnectDelays = [250, 500, 1_000, 2_000]
 
-export const refreshConnectionHealthAdminGroupsAutomatically = async (): Promise<AdminGroupsFreshResponse> =>
-  parseAdminGroupsFreshResponse(await requestJson<AdminGroupsFreshResponse | AdminGroupHealth[]>('/connection-health/admin-groups/refresh'))
+class RefreshStreamProtocolError extends Error {}
+
+const refreshStreamProtocolError = (): RefreshStreamProtocolError =>
+  new RefreshStreamProtocolError('admin.connectionHealth.errors.request')
+
+const parseRefreshTerminal = (payload: unknown): AdminGroupsRefreshTerminal => {
+  if (!payload || typeof payload !== 'object') throw refreshStreamProtocolError()
+  const terminal = payload as Partial<AdminGroupsRefreshTerminal>
+  if (
+    (terminal.status !== 'success' && terminal.status !== 'failed')
+    || !terminal.refresh
+    || !terminalRefreshStates.has(terminal.refresh.state)
+    || !Array.isArray(terminal.refresh.sites)
+  ) {
+    throw refreshStreamProtocolError()
+  }
+  if (terminal.status === 'success' && !Array.isArray(terminal.groups)) {
+    throw refreshStreamProtocolError()
+  }
+  return terminal as AdminGroupsRefreshTerminal
+}
+
+const parseRefreshSnapshot = (payload: unknown): AdminGroupsRefreshSnapshot => {
+  if (!payload || typeof payload !== 'object') throw refreshStreamProtocolError()
+  const snapshot = payload as Partial<AdminGroupsRefreshSnapshot>
+  if (
+    typeof snapshot.runId !== 'string'
+    || !snapshot.runId
+    || typeof snapshot.revision !== 'number'
+    || snapshot.runState !== 'running'
+    || typeof snapshot.stage !== 'string'
+  ) {
+    throw refreshStreamProtocolError()
+  }
+  return snapshot as AdminGroupsRefreshSnapshot
+}
+
+const parseRefreshErrorPayload = async (response: Response): Promise<ApiErrorPayload & Partial<AdminGroupsRefreshConflict>> => {
+  try {
+    const text = await response.text()
+    return text ? JSON.parse(text) as ApiErrorPayload & Partial<AdminGroupsRefreshConflict> : {}
+  } catch {
+    return {}
+  }
+}
+
+const waitForRefreshReconnect = (delay: number, signal?: AbortSignal): Promise<void> => new Promise((resolve, reject) => {
+  if (signal?.aborted) {
+    reject(new DOMException('Aborted', 'AbortError'))
+    return
+  }
+  const timer = setTimeout(() => {
+    signal?.removeEventListener('abort', abort)
+    resolve()
+  }, delay)
+  const abort = () => {
+    clearTimeout(timer)
+    reject(new DOMException('Aborted', 'AbortError'))
+  }
+  signal?.addEventListener('abort', abort, { once: true })
+})
+
+type RefreshStreamReadResult = {
+  runId: string
+  terminal: AdminGroupsRefreshTerminal | null
+}
+
+const readRefreshStream = async (
+  response: Response,
+  options: AdminGroupsRefreshStreamOptions,
+  initialRunId: string,
+  onRunId: (runId: string) => void,
+): Promise<RefreshStreamReadResult> => {
+  if (!response.body) throw refreshStreamProtocolError()
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let runId = initialRunId
+  let terminal: AdminGroupsRefreshTerminal | null = null
+
+  const notify = <T>(observer: ((value: T) => void) | undefined, value: T) => {
+    try {
+      observer?.(value)
+    } catch {
+      // 观察回调不参与传输控制，尤其不能让已收到的 terminal 重新触发请求。
+    }
+  }
+
+  const consume = (block: string) => {
+    if (terminal) return
+    const lines = block.split(/\r?\n/)
+    const eventName = lines.find(line => line.startsWith('event:'))?.slice(6).trim() ?? ''
+    const data = lines
+      .filter(line => line.startsWith('data:'))
+      .map(line => line.slice(5).trimStart())
+      .join('\n')
+    if (!data) return
+    let payload: unknown
+    try {
+      payload = JSON.parse(data) as unknown
+    } catch {
+      throw refreshStreamProtocolError()
+    }
+    if (eventName === 'snapshot') {
+      const snapshot = parseRefreshSnapshot(payload)
+      runId = snapshot.runId
+      onRunId(runId)
+      notify(options.onSnapshot, snapshot)
+      return
+    }
+    if (eventName === 'terminal') {
+      terminal = parseRefreshTerminal(payload)
+      if (terminal.runId) {
+        runId = terminal.runId
+        onRunId(runId)
+      }
+      notify(options.onTerminal, terminal)
+    }
+  }
+
+  while (!terminal) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parts = buffer.split(/\r?\n\r?\n/)
+    buffer = parts.pop() ?? ''
+    for (const part of parts) {
+      consume(part)
+      if (terminal) break
+    }
+  }
+  buffer += decoder.decode()
+  // EOF 残留没有 SSE 空行边界，交给外层按断线处理，不能尝试解析半截 JSON。
+  if (terminal) {
+    try {
+      await reader.cancel()
+    } catch {
+      // terminal 已是权威终态，取消底层 reader 失败不改变业务结果。
+    }
+  }
+  return { runId, terminal }
+}
+
+const refreshAdminGroupsWithStream = async (
+  initialMethod: 'GET' | 'POST',
+  options: AdminGroupsRefreshStreamOptions = {},
+): Promise<AdminGroupsRefreshResult> => {
+  let method = initialMethod
+  let runId = ''
+  let conflict: AdminGroupsRefreshConflict | undefined
+  let reconnectAttempt = 0
+  let reconnecting = false
+
+  const notifyConnectionState = (state: AdminGroupsRefreshConnectionState) => {
+    try {
+      options.onConnectionState?.(state)
+    } catch {
+      // 连接状态只用于可见反馈，不参与传输控制。
+    }
+  }
+
+  for (;;) {
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    if (options.signal?.aborted) controller.abort()
+    else options.signal?.addEventListener('abort', abort, { once: true })
+
+    let reconnectReason: 'network' | 'eof' | null = null
+    try {
+      const query = runId ? `?${new URLSearchParams({ run_id: runId }).toString()}` : ''
+      let response: Response | null = null
+      try {
+        response = await fetch(endpoint(`/connection-health/admin-groups/refresh${query}`), {
+          method,
+          headers: {
+            Accept: 'text/event-stream',
+            'Content-Type': 'application/json',
+            ...authHeaders(),
+          },
+          signal: controller.signal,
+        })
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') throw error
+        if (!runId) throw new Error('admin.connectionHealth.errors.network')
+        reconnectReason = 'network'
+      }
+
+      if (response && !response.ok) {
+        const payload = await parseRefreshErrorPayload(response)
+        if (
+          response.status === 409
+          && method === 'POST'
+          && !conflict
+          && typeof payload.runId === 'string'
+          && payload.runId
+        ) {
+          conflict = {
+            errorKey: typeof payload.errorKey === 'string' && payload.errorKey ? payload.errorKey : 'refresh_run_conflict',
+            runId: payload.runId,
+          }
+          runId = payload.runId
+          method = 'GET'
+          try {
+            options.onConflict?.(conflict)
+          } catch {
+            // 冲突提示是观察状态，不得阻断接入已有 run。
+          }
+          continue
+        }
+        if (isUnauthorizedApiResponse(response.status, payload)) {
+          handleAuthExpired()
+          throw new Error(authUnauthorizedErrorKey)
+        }
+        throw new Error(payload.errorKey ?? payload.message ?? 'admin.connectionHealth.errors.request')
+      }
+
+      if (response && reconnecting) {
+        reconnecting = false
+        notifyConnectionState('connected')
+      }
+
+      const contentType = response?.headers.get('Content-Type')?.toLowerCase() ?? ''
+      if (response && !contentType.includes('text/event-stream')) {
+        let rawPayload: AdminGroupsFreshResponse | AdminGroupHealth[]
+        try {
+          rawPayload = await response.json() as AdminGroupsFreshResponse | AdminGroupHealth[]
+        } catch {
+          throw refreshStreamProtocolError()
+        }
+        const payload = parseAdminGroupsFreshResponse(rawPayload)
+        const terminal: AdminGroupsRefreshTerminal = {
+          status: 'success',
+          groups: payload.groups,
+          refresh: payload.refresh,
+        }
+        try {
+          options.onTerminal?.(terminal)
+        } catch {
+          // JSON fallback 与 SSE 一致，终态观察回调不改变已经取得的终态。
+        }
+        return { ...terminal, conflict }
+      }
+
+      if (response) {
+        let stream: RefreshStreamReadResult
+        try {
+          stream = await readRefreshStream(response, options, runId, nextRunId => { runId = nextRunId })
+        } catch (error) {
+          if (error instanceof Error && error.name === 'AbortError') throw error
+          if (error instanceof RefreshStreamProtocolError) throw error
+          if (!runId) throw new Error('admin.connectionHealth.errors.network')
+          reconnectReason = 'network'
+          stream = { runId, terminal: null }
+        }
+        runId = stream.runId
+        if (stream.terminal) return { ...stream.terminal, conflict }
+        reconnectReason = 'eof'
+      }
+    } finally {
+      options.signal?.removeEventListener('abort', abort)
+    }
+
+    if (!runId || reconnectAttempt >= refreshReconnectDelays.length) {
+      throw new Error(reconnectReason === 'network'
+        ? 'admin.connectionHealth.errors.network'
+        : 'admin.connectionHealth.errors.request')
+    }
+    reconnecting = true
+    notifyConnectionState('reconnecting')
+    await waitForRefreshReconnect(refreshReconnectDelays[reconnectAttempt], options.signal)
+    reconnectAttempt++
+    method = 'GET'
+  }
+}
+
+export const refreshConnectionHealthAdminGroups = async (
+  options: AdminGroupsRefreshStreamOptions = {},
+): Promise<AdminGroupsRefreshResult> => refreshAdminGroupsWithStream('POST', options)
+
+export const refreshConnectionHealthAdminGroupsAutomatically = async (
+  options: AdminGroupsRefreshStreamOptions = {},
+): Promise<AdminGroupsRefreshResult> => refreshAdminGroupsWithStream('GET', options)
 
 export const getPrioritySyncStatus = async (): Promise<PrioritySyncStatus> =>
 	requestJson<PrioritySyncStatus>('/connection-health/priority-sync-status')

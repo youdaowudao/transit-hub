@@ -447,7 +447,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) Shutdown(ctx context.Context) error {
 	var shutdownErrors []error
 	if s.connectionHealthService != nil {
-		if err := s.connectionHealthService.ShutdownQuestionAnswers(ctx); err != nil {
+		if err := s.connectionHealthService.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
 		}
 	}

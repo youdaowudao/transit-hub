@@ -180,61 +180,73 @@ func TestAccountAssetRepositoryLifecycleEventsAreAppendOnlyIdempotentAndCostCons
 	if _, err := pool.Exec(ctx, `INSERT INTO admin_accounts (id, user_id) VALUES ('workspace-1','user-1')`); err != nil {
 		t.Fatalf("insert admin account: %v", err)
 	}
-	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	today, err := time.ParseInLocation("2006-01-02", businesstime.Today(), businesstime.Location())
+	if err != nil {
+		t.Fatalf("parse business date: %v", err)
+	}
+	startDate := today.AddDate(0, 0, -4).Format("2006-01-02")
+	deadDate := today.AddDate(0, 0, -3).Format("2006-01-02")
+	restoreDate := today.AddDate(0, 0, -2).Format("2006-01-02")
+	refundDate := today.AddDate(0, 0, -1).Format("2006-01-02")
+	excessiveRefundDate := today.Format("2006-01-02")
+	now := today.Add(10 * time.Hour)
 	batch := repositoryTestBatch("batch-life", "idem-life", now)
+	batch.PurchaseDate = startDate
+	batch.RecognitionStartDate = startDate
 	batch.RecognitionMode = RecognitionModeDaily
 	batch.RecognitionDays = 3
 	asset := repositoryTestAsset("asset-life", batch.ID, "life-account", 1000, now)
+	asset.RecognitionStartDate = startDate
 	asset.RecognitionMode = RecognitionModeDaily
 	asset.RecognitionDays = 3
 	link := AccountLink{
 		ID: "link-life", UserID: "user-1", AdminAccountID: "workspace-1", AccountAssetID: asset.ID,
 		ConnectionID: "connection-life", UpstreamSiteID: "site-life", UpstreamKeyID: "key-life",
-		ScopeAdminAccountID: "scope-life", OwnGroupID: "group-life", EffectiveFrom: "2026-08-22", CreatedAt: now,
+		ScopeAdminAccountID: "scope-life", OwnGroupID: "group-life", EffectiveFrom: startDate, CreatedAt: now,
 	}
 	costs := []AdditionalCostRecord{
-		repositoryTestDatedCost("cost-life-1", batch.ID, asset.ID, "2026-08-22", 333, now),
-		repositoryTestDatedCost("cost-life-2", batch.ID, asset.ID, "2026-08-23", 333, now),
-		repositoryTestDatedCost("cost-life-3", batch.ID, asset.ID, "2026-08-24", 334, now),
+		repositoryTestDatedCost("cost-life-1", batch.ID, asset.ID, startDate, 333, now),
+		repositoryTestDatedCost("cost-life-2", batch.ID, asset.ID, deadDate, 333, now),
+		repositoryTestDatedCost("cost-life-3", batch.ID, asset.ID, restoreDate, 334, now),
 	}
 	if _, err := repo.CreateAccountBatch(ctx, batch, []AccountAsset{asset}, []AccountLink{link}, costs); err != nil {
 		t.Fatalf("CreateAccountBatch() error: %v", err)
 	}
 	if _, err := repo.AppendAccountEvent(ctx, AccountEvent{
 		ID: "event-active", UserID: "user-1", AdminAccountID: "workspace-1", AccountAssetID: asset.ID,
-		EventType: AccountEventStatus, EffectiveDate: "2026-08-22", Status: AccountStatusActive,
+		EventType: AccountEventStatus, EffectiveDate: startDate, Status: AccountStatusActive,
 		IdempotencyKey: "active", CreatedAt: now,
 	}); err != nil {
 		t.Fatalf("activate event: %v", err)
 	}
 	dead := AccountEvent{
 		ID: "event-dead", UserID: "user-1", AdminAccountID: "workspace-1", AccountAssetID: asset.ID,
-		EventType: AccountEventStatus, EffectiveDate: "2026-08-23", Status: AccountStatusDead,
+		EventType: AccountEventStatus, EffectiveDate: deadDate, Status: AccountStatusDead,
 		IdempotencyKey: "dead", CreatedAt: now.Add(time.Minute),
 	}
 	if _, err := repo.AppendAccountEvent(ctx, dead); err != nil {
 		t.Fatalf("dead event: %v", err)
 	}
-	assertAccountLinkEffectiveTo(t, pool, link.ID, "2026-08-23")
+	assertAccountLinkEffectiveTo(t, pool, link.ID, deadDate)
 	if _, err := repo.AppendAccountEvent(ctx, dead); err != nil {
 		t.Fatalf("idempotent dead event: %v", err)
 	}
 	assertAccountPurchaseCost(t, pool, asset.ID, 1000)
-	assertAccountDateCost(t, pool, asset.ID, "2026-08-24", 0)
+	assertAccountDateCost(t, pool, asset.ID, restoreDate, 0)
 
 	if _, err := repo.AppendAccountEvent(ctx, AccountEvent{
 		ID: "event-restore", UserID: "user-1", AdminAccountID: "workspace-1", AccountAssetID: asset.ID,
-		EventType: AccountEventRestore, EffectiveDate: "2026-08-24", Status: AccountStatusActive,
+		EventType: AccountEventRestore, EffectiveDate: restoreDate, Status: AccountStatusActive,
 		IdempotencyKey: "restore", CreatedAt: now.Add(2 * time.Minute),
 	}); err != nil {
 		t.Fatalf("restore event: %v", err)
 	}
-	assertAccountLinkEffectiveTo(t, pool, link.ID, "2026-08-23")
+	assertAccountLinkEffectiveTo(t, pool, link.ID, deadDate)
 	assertAccountPurchaseCost(t, pool, asset.ID, 1000)
 
 	if _, err := repo.AppendAccountEvent(ctx, AccountEvent{
 		ID: "event-refund", UserID: "user-1", AdminAccountID: "workspace-1", AccountAssetID: asset.ID,
-		EventType: AccountEventRefund, EffectiveDate: "2026-08-25", RefundCents: int64Pointer(400),
+		EventType: AccountEventRefund, EffectiveDate: refundDate, RefundCents: int64Pointer(400),
 		IdempotencyKey: "refund", CreatedAt: now.Add(3 * time.Minute),
 	}); err != nil {
 		t.Fatalf("partial refund event: %v", err)
@@ -247,7 +259,7 @@ func TestAccountAssetRepositoryLifecycleEventsAreAppendOnlyIdempotentAndCostCons
 
 	if _, err := repo.AppendAccountEvent(ctx, AccountEvent{
 		ID: "event-refund-too-much", UserID: "user-1", AdminAccountID: "workspace-1", AccountAssetID: asset.ID,
-		EventType: AccountEventRefund, EffectiveDate: "2026-08-26", RefundCents: int64Pointer(601),
+		EventType: AccountEventRefund, EffectiveDate: excessiveRefundDate, RefundCents: int64Pointer(601),
 		IdempotencyKey: "refund-too-much", CreatedAt: now.Add(4 * time.Minute),
 	}); err == nil {
 		t.Fatal("cumulative refund above purchase cost was accepted")

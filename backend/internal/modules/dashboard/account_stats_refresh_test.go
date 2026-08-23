@@ -48,12 +48,17 @@ func (f *fakeAccountKeyRunRepository) GetPublishedAccountStatsRefresh(_ context.
 }
 
 func TestRefreshAccountStatsPublishesOnlyACompleteCentReconciledRun(t *testing.T) {
-	observed := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	today := businesstime.Today()
+	observedDate, err := time.ParseInLocation("2006-01-02", today, businesstime.Location())
+	if err != nil {
+		t.Fatalf("parse business date: %v", err)
+	}
+	observed := observedDate.Add(12 * time.Hour)
 	upstreams := &fakeAccountStatsUpstreams{
 		fakeUpstreamLister: &fakeUpstreamLister{siteCostResults: []upstream.SiteCostForDateResult{{
 			SiteID: "site-1", RechargeRate: 2, RawCost: 5, Meta: upstream.CostFetchMeta{ObservedAt: observed},
 		}}},
-		keyResult: upstream.KeyUsageForDateResult{BusinessDate: "2026-08-22", ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{
+		keyResult: upstream.KeyUsageForDateResult{BusinessDate: today, ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{
 			SiteID: "site-1", Complete: true, Items: []upstream.KeyUsageTodayItem{{SiteID: "site-1", KeyID: "key-1", RawAmount: 5, TodayAmount: 10}},
 		}}},
 	}
@@ -63,7 +68,7 @@ func TestRefreshAccountStatsPublishesOnlyACompleteCentReconciledRun(t *testing.T
 		keyUsageForDate: upstreams, keyCostRuns: repository,
 	}
 
-	result, err := service.RefreshAccountStats(context.Background(), "user-1", "2026-08-22", "refresh-1")
+	result, err := service.RefreshAccountStats(context.Background(), "user-1", today, "refresh-1")
 	if err != nil {
 		t.Fatalf("RefreshAccountStats() error: %v", err)
 	}
@@ -118,18 +123,19 @@ func TestRefreshAccountStatsReturnsPublishedIdempotentResultWithoutRefetching(t 
 }
 
 func TestRefreshAccountStatsKeepsMismatchExplicitlyIncomplete(t *testing.T) {
+	today := businesstime.Today()
 	upstreams := &fakeAccountStatsUpstreams{
 		fakeUpstreamLister: &fakeUpstreamLister{siteCostResults: []upstream.SiteCostForDateResult{
 			{SiteID: "site-1", RechargeRate: 1, RawCost: 10.01},
 		}},
-		keyResult: upstream.KeyUsageForDateResult{ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{
+		keyResult: upstream.KeyUsageForDateResult{BusinessDate: today, ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{
 			SiteID: "site-1", Complete: true, Items: []upstream.KeyUsageTodayItem{{SiteID: "site-1", KeyID: "key-1", TodayAmount: 10}},
 		}}},
 	}
 	repository := &fakeAccountKeyRunRepository{}
 	service := &MetricsService{upstreams: upstreams, accounts: &fakeAdminAccounts{current: map[string]string{"user-1": "workspace-1"}}, keyUsageForDate: upstreams, keyCostRuns: repository}
 
-	result, err := service.RefreshAccountStats(context.Background(), "user-1", "2026-08-22", "refresh-mismatch")
+	result, err := service.RefreshAccountStats(context.Background(), "user-1", today, "refresh-mismatch")
 	if err != nil {
 		t.Fatalf("RefreshAccountStats() error: %v", err)
 	}

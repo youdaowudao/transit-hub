@@ -5,40 +5,99 @@ export interface ConnectionHealthMultiplierDisplay {
   sourceKey: string
 }
 
-const usesMultiplierOnly = (account: AdminGroupAccount): boolean =>
-  (account.effectivePolicies ?? []).some(policy => policy.enabled && policy.strategyMode === 'multiplier_only')
+type MultiplierParticipation = 'multiplier_only' | 'health_multiplier' | 'not_participating' | 'unknown'
+
+const resolveMultiplierParticipation = (account: AdminGroupAccount): MultiplierParticipation => {
+  if (!Array.isArray(account.effectivePolicies)) return 'unknown'
+
+  const projectionIsValid = account.effectivePolicies.every((policy) => {
+    if (!policy || typeof policy !== 'object') return false
+    if (typeof policy.enabled !== 'boolean') return false
+    if (policy.strategyMode === 'multiplier_only') return policy.priorityMode === 'multiplier'
+    if (policy.strategyMode === 'health_probe') {
+      return policy.priorityMode === 'none' || policy.priorityMode === 'multiplier'
+    }
+    return false
+  })
+  if (!projectionIsValid) return 'unknown'
+
+  if (account.effectivePolicies.some(policy => policy.enabled && policy.strategyMode === 'multiplier_only')) {
+    return 'multiplier_only'
+  }
+  if (account.effectivePolicies.some(policy =>
+    policy.enabled && policy.priorityMode === 'multiplier' && policy.strategyMode === 'health_probe',
+  )) {
+    return 'health_multiplier'
+  }
+  return 'not_participating'
+}
+
+const unknownMultiplierDisplay = (account: AdminGroupAccount): ConnectionHealthMultiplierDisplay => ({
+  value: account.effectiveMultiplier ?? null,
+  sourceKey: 'unknown',
+})
+
+const hasValidEffectiveMultiplier = (account: AdminGroupAccount): boolean =>
+  typeof account.effectiveMultiplier === 'number'
+  && Number.isFinite(account.effectiveMultiplier)
+  && account.effectiveMultiplier > 0
 
 export const resolveConnectionHealthMultiplierDisplay = (
   account: AdminGroupAccount,
   groupMultiplier: number | null | undefined,
 ): ConnectionHealthMultiplierDisplay => {
-  if (usesMultiplierOnly(account)) {
+  const participation = resolveMultiplierParticipation(account)
+  if (participation === 'unknown') return unknownMultiplierDisplay(account)
+  if (participation === 'multiplier_only') {
     return { value: groupMultiplier ?? null, sourceKey: 'adminGroup' }
   }
+  if (participation === 'not_participating') {
+    if (account.multiplierSource !== 'none') return unknownMultiplierDisplay(account)
+    return { value: account.effectiveMultiplier ?? null, sourceKey: 'notParticipating' }
+  }
+
   if (account.multiplierSource === 'upstream_key') {
+    if (!hasValidEffectiveMultiplier(account)) return unknownMultiplierDisplay(account)
+    if (account.multiplierResolutionStatus !== 'resolved' && account.multiplierResolutionStatus !== 'stale') {
+      return unknownMultiplierDisplay(account)
+    }
     return {
       value: account.effectiveMultiplier ?? null,
       sourceKey: account.multiplierResolutionStatus === 'stale' ? 'staleSnapshot' : 'upstreamKey',
     }
   }
   if (account.multiplierSource === 'local_fallback') {
+    if (!hasValidEffectiveMultiplier(account)) return unknownMultiplierDisplay(account)
+    if (
+      account.multiplierResolutionStatus !== 'unassociated'
+      && account.multiplierResolutionStatus !== 'missing'
+      && account.multiplierResolutionStatus !== 'conflict'
+    ) {
+      return unknownMultiplierDisplay(account)
+    }
     return {
       value: account.effectiveMultiplier ?? null,
       sourceKey: account.multiplierResolutionStatus === 'conflict' ? 'conflictFallback' : 'missingFallback',
     }
   }
   if (account.multiplierSource === 'last_confirmed') {
+    if (!hasValidEffectiveMultiplier(account)) return unknownMultiplierDisplay(account)
     const sourceKeyByStatus: Record<string, string> = {
       missing: 'lastConfirmedMissing',
       unavailable: 'lastConfirmedUnavailable',
       stale: 'lastConfirmedStale',
       updating: 'lastConfirmedUpdating',
     }
+    const sourceKey = sourceKeyByStatus[account.multiplierResolutionStatus ?? '']
+    if (!sourceKey) return unknownMultiplierDisplay(account)
     return {
       value: account.effectiveMultiplier ?? null,
-      sourceKey: sourceKeyByStatus[account.multiplierResolutionStatus ?? ''] ?? 'lastConfirmedUnavailable',
+      sourceKey,
     }
   }
+  if (account.multiplierSource !== 'none') return unknownMultiplierDisplay(account)
+  if (account.effectiveMultiplier != null) return unknownMultiplierDisplay(account)
+
   const sourceKeyByStatus: Record<string, string> = {
     unassociated: 'unassociatedBandEnd',
     missing: 'missingFrozen',
@@ -50,7 +109,7 @@ export const resolveConnectionHealthMultiplierDisplay = (
   }
   return {
     value: account.effectiveMultiplier ?? null,
-    sourceKey: sourceKeyByStatus[account.multiplierResolutionStatus ?? ''] ?? 'unknownBandEnd',
+    sourceKey: sourceKeyByStatus[account.multiplierResolutionStatus ?? ''] ?? 'unknown',
   }
 }
 

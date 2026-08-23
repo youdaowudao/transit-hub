@@ -1239,7 +1239,8 @@ export default {
           unavailableFrozen: '本轮上游查询暂不可用，已保留主站现有 Priority',
           updatingFrozen: '本轮倍率正在更新，已保留主站现有 Priority',
           disabledNonParticipating: '上游站点已禁用，未参与本轮倍率读取',
-          unknownBandEnd: '倍率来源未知，已按当前健康档末位排序'
+          notParticipating: '当前策略未使用倍率排序',
+          unknown: '倍率状态未知，未确认参与当前排序'
         },
         upstreamMultiplierStatuses: {
           unassociated: '未关联真实连接',

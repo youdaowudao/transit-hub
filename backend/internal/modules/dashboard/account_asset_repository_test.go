@@ -498,14 +498,24 @@ func TestAccountAssetRepositoryReplacesLinkWithEffectiveHistoryAndIdempotency(t 
 	if _, err := pool.Exec(ctx, `INSERT INTO admin_accounts (id,user_id) VALUES ('workspace-1','user-1'),('workspace-2','user-1')`); err != nil {
 		t.Fatalf("insert admin accounts: %v", err)
 	}
-	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	today, err := time.ParseInLocation("2006-01-02", businesstime.Today(), businesstime.Location())
+	if err != nil {
+		t.Fatalf("parse business date: %v", err)
+	}
+	oldEffectiveDate := today.AddDate(0, 0, -1).Format("2006-01-02")
+	currentEffectiveDate := today.Format("2006-01-02")
+	newEffectiveDate := today.AddDate(0, 0, 1).Format("2006-01-02")
+	now := today.Add(10 * time.Hour)
 	batch := repositoryTestBatch("batch-link", "batch-link-idem", now)
+	batch.PurchaseDate = oldEffectiveDate
+	batch.RecognitionStartDate = oldEffectiveDate
 	asset := repositoryTestAsset("asset-link", batch.ID, "linked-account", 1000, now)
+	asset.RecognitionStartDate = oldEffectiveDate
 	asset.UpstreamReferenceURL = "https://supplier.example/old"
 	oldLink := AccountLink{
 		ID: "link-old", UserID: "user-1", AdminAccountID: "workspace-1", AccountAssetID: asset.ID,
 		ConnectionID: "connection-old", UpstreamSiteID: "site-old", UpstreamKeyID: "key-old",
-		ScopeAdminAccountID: "scope-old", OwnGroupID: "group-old", EffectiveFrom: "2026-08-22",
+		ScopeAdminAccountID: "scope-old", OwnGroupID: "group-old", EffectiveFrom: oldEffectiveDate,
 		UpstreamReferenceURL: "https://supplier.example/old", CreatedAt: now,
 	}
 	if _, err := repo.CreateAccountBatch(ctx, batch, []AccountAsset{asset}, []AccountLink{oldLink}, nil); err != nil {
@@ -514,12 +524,12 @@ func TestAccountAssetRepositoryReplacesLinkWithEffectiveHistoryAndIdempotency(t 
 	newLink := AccountLink{
 		ID: "link-new", UserID: "user-1", AdminAccountID: "workspace-1", AccountAssetID: asset.ID,
 		ConnectionID: "connection-new", UpstreamSiteID: "site-new", UpstreamKeyID: "key-new",
-		ScopeAdminAccountID: "scope-new", OwnGroupID: "group-new", EffectiveFrom: "2026-08-24",
+		ScopeAdminAccountID: "scope-new", OwnGroupID: "group-new", EffectiveFrom: newEffectiveDate,
 		UpstreamReferenceURL: "https://supplier.example/new", CreatedAt: now.Add(time.Minute),
 	}
 	event := AccountEvent{
 		ID: "event-link", UserID: "user-1", AdminAccountID: "workspace-1", AccountAssetID: asset.ID,
-		EventType: AccountEventLinkChange, EffectiveDate: "2026-08-24", Note: "换号",
+		EventType: AccountEventLinkChange, EffectiveDate: newEffectiveDate, Note: "换号",
 		IdempotencyKey: "link-change", CreatedAt: now.Add(time.Minute),
 	}
 	if err := repo.ReplaceAccountLink(ctx, event, &newLink, newLink.UpstreamReferenceURL); err != nil {
@@ -530,7 +540,7 @@ func TestAccountAssetRepositoryReplacesLinkWithEffectiveHistoryAndIdempotency(t 
 	}
 	if _, err := repo.AppendAccountEvent(ctx, AccountEvent{
 		ID: "event-stats-mode", UserID: "user-1", AdminAccountID: "workspace-1", AccountAssetID: asset.ID,
-		EventType: AccountEventStatsModeChange, EffectiveDate: businesstime.Today(), StatsMode: StatsModeAutomatic,
+		EventType: AccountEventStatsModeChange, EffectiveDate: currentEffectiveDate, StatsMode: StatsModeAutomatic,
 		IdempotencyKey: "stats-mode", CreatedAt: now.Add(2 * time.Minute),
 	}); err != nil {
 		t.Fatalf("automatic stats mode event: %v", err)
@@ -539,13 +549,13 @@ func TestAccountAssetRepositoryReplacesLinkWithEffectiveHistoryAndIdempotency(t 
 	if err != nil {
 		t.Fatalf("GetAccountAssetDetail() error: %v", err)
 	}
-	if len(detail.Links) != 2 || detail.Links[0].EffectiveTo == nil || *detail.Links[0].EffectiveTo != "2026-08-23" || detail.Links[1].EffectiveTo != nil {
+	if len(detail.Links) != 2 || detail.Links[0].EffectiveTo == nil || *detail.Links[0].EffectiveTo != currentEffectiveDate || detail.Links[1].EffectiveTo != nil {
 		t.Fatalf("link history = %#v", detail.Links)
 	}
 	if detail.Asset.UpstreamReferenceURL != oldLink.UpstreamReferenceURL || detail.Links[1].UpstreamReferenceURL != newLink.UpstreamReferenceURL {
 		t.Fatalf("reference history asset=%#v links=%#v", detail.Asset, detail.Links)
 	}
-	projectedLink, err := projectAccountMetadataAtDate(ctx, pool, detail.Asset, "2026-08-24")
+	projectedLink, err := projectAccountMetadataAtDate(ctx, pool, detail.Asset, newEffectiveDate)
 	if err != nil || projectedLink.UpstreamReferenceURL != newLink.UpstreamReferenceURL {
 		t.Fatalf("future link reference projection = %#v, err=%v", projectedLink, err)
 	}

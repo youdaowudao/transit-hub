@@ -33,6 +33,29 @@ type AdminErrorPayload = {
   message?: string
 }
 
+type MySiteMappingRequest = Omit<MySiteMapping, 'lastAutoPricingRun'>
+
+const toMappingRequest = (mapping: MySiteMapping): MySiteMappingRequest => ({
+  ownGroup: mapping.ownGroup,
+  upstreamTargets: mapping.upstreamTargets.map(target => ({
+    siteId: target.siteId,
+    groupName: target.groupName,
+  })),
+  enableAutoPricing: mapping.enableAutoPricing,
+  autoPricingSource: mapping.autoPricingSource,
+  primaryUpstreamSiteId: mapping.primaryUpstreamSiteId,
+  primaryUpstreamGroupName: mapping.primaryUpstreamGroupName,
+  autoPricingStrategy: mapping.autoPricingStrategy,
+  fixedIncrease: mapping.fixedIncrease,
+  percentageIncrease: mapping.percentageIncrease,
+  adjustThresholdPercent: mapping.adjustThresholdPercent,
+  minMultiplier: mapping.minMultiplier,
+  maxMultiplier: mapping.maxMultiplier,
+  enableAutoPricingNotify: mapping.enableAutoPricingNotify,
+  autoPricingNotifyBotIds: mapping.autoPricingNotifyBotIds,
+  autoPricingNotifyTemplate: mapping.autoPricingNotifyTemplate,
+})
+
 const normalizeMappings = (value: unknown): MySiteMapping[] => {
   if (!Array.isArray(value)) return []
   return value.flatMap((entry) => {
@@ -110,7 +133,7 @@ export const getMySiteMappingOptions = async (): Promise<MySiteMappingOptionsRes
 export const saveMySiteMappings = async (mappings: MySiteMapping[]): Promise<MySiteStatus> => (
   normalizeStatus(await requestJson<MySiteStatus>('/my-sites/mappings', {
     method: 'PUT',
-    body: JSON.stringify({ mappings }),
+    body: JSON.stringify({ mappings: mappings.map(toMappingRequest) }),
   }))
 )
 
@@ -173,7 +196,7 @@ export const saveMySiteMapping = async (mapping: MySiteMapping, currentMappings:
   try {
     return normalizeStatus(await requestJson<MySiteStatus>('/my-sites/mappings', {
       method: 'PATCH',
-      body: JSON.stringify({ mapping }),
+      body: JSON.stringify({ mapping: toMappingRequest(mapping) }),
     }))
   } catch (error) {
     if (!(error instanceof Error) || error.message !== 'admin.mySites.errors.request') throw error

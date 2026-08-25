@@ -36,6 +36,12 @@ run_step() {
 run_connection_health_gate() {
   run_step "git diff whitespace check" git -C "$ROOT_DIR" diff --check
 
+  run_step "test calendar boundary guard tests" \
+    node --test "$ROOT_DIR/scripts/check-test-calendar-boundaries.test.mjs"
+
+  run_step "test calendar boundary guard" \
+    node "$ROOT_DIR/scripts/check-test-calendar-boundaries.mjs" --root "$ROOT_DIR"
+
   run_step "backend connection_health and upstream tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test ./internal/modules/connection_health ./internal/modules/upstream -count=1"
 

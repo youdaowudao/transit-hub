@@ -44,6 +44,13 @@ describe('connection health refresh prompt', () => {
       targetId: 'sub2api:ws1:disabled',
       probeAvailable: true,
       modelHealth: [],
+      effectivePolicies: [{
+        policyId: 'health-multiplier',
+        policyName: 'health multiplier',
+        enabled: true,
+        priorityMode: 'multiplier',
+        strategyMode: 'health_probe',
+      }],
       multiplierResolutionStatus: 'disabled',
       multiplierSource: 'none',
     } satisfies AdminGroupAccount

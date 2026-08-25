@@ -62,6 +62,26 @@ func (f *snapshotMetadataReader) GetUpstreamKeyForWorkspace(ctx context.Context,
 	return item, err
 }
 
+func waitForMultiplierRefreshDispatcherIdle(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		multiplierRefreshDispatcher.mu.Lock()
+		workers := multiplierRefreshDispatcher.workers
+		queued := len(multiplierRefreshDispatcher.queue)
+		multiplierRefreshDispatcher.mu.Unlock()
+		if workers == 0 && queued == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	multiplierRefreshDispatcher.mu.Lock()
+	workers := multiplierRefreshDispatcher.workers
+	queued := len(multiplierRefreshDispatcher.queue)
+	multiplierRefreshDispatcher.mu.Unlock()
+	t.Fatalf("multiplier dispatcher did not become idle: workers=%d queued=%d", workers, queued)
+}
+
 func (f *snapshotMetadataReader) currentMaxActive() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -447,6 +467,7 @@ func TestMultiplierCanceledBeforeWorkerReleasesWaiterWithoutTimeout(t *testing.T
 }
 
 func TestMultiplierQueueFullTerminatesUnavailableAndReleasesWaiter(t *testing.T) {
+	waitForMultiplierRefreshDispatcherIdle(t)
 	multiplierRefreshDispatcher.mu.Lock()
 	if multiplierRefreshDispatcher.workers != 0 || len(multiplierRefreshDispatcher.queue) != 0 {
 		workers, queued := multiplierRefreshDispatcher.workers, len(multiplierRefreshDispatcher.queue)

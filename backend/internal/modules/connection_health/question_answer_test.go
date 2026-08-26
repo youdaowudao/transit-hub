@@ -3,6 +3,7 @@ package connection_health
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -326,7 +327,358 @@ func waitQuestionAnswerRunReleased(t *testing.T, service *Service) {
 	t.Fatal("question answer run was not released")
 }
 
-func TestQuestionAnswerBatchRunsDeduplicatedCombinationsInOrderWithoutMaxTokens(t *testing.T) {
+type controlledQuestionAnswerRoundTripper struct {
+	started   chan string
+	release   chan struct{}
+	cancelled chan string
+
+	mu        sync.Mutex
+	active    int
+	maxActive int
+}
+
+func newControlledQuestionAnswerRoundTripper(size int) *controlledQuestionAnswerRoundTripper {
+	return &controlledQuestionAnswerRoundTripper{
+		started:   make(chan string, size),
+		release:   make(chan struct{}, size),
+		cancelled: make(chan string, size),
+	}
+}
+
+func (r *controlledQuestionAnswerRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	var payload struct {
+		Messages []struct {
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	question := ""
+	if len(payload.Messages) > 0 {
+		question = payload.Messages[0].Content
+	}
+	r.mu.Lock()
+	r.active++
+	if r.active > r.maxActive {
+		r.maxActive = r.active
+	}
+	r.mu.Unlock()
+	r.started <- question
+
+	select {
+	case <-r.release:
+	case <-request.Context().Done():
+		r.mu.Lock()
+		r.active--
+		r.mu.Unlock()
+		r.cancelled <- question
+		return nil, request.Context().Err()
+	}
+	r.mu.Lock()
+	r.active--
+	r.mu.Unlock()
+	body := io.NopCloser(strings.NewReader(`{"choices":[{"message":{"content":"answer"}}]}`))
+	return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
+}
+
+func (r *controlledQuestionAnswerRoundTripper) peak() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.maxActive
+}
+
+func TestQuestionAnswerBatchRunsFiveCombinationsAndRefillsOneOpenSlot(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/v1/models" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-a"}]}`)
+			return
+		}
+		http.NotFound(w, request)
+	}))
+	defer server.Close()
+
+	questions := make([]TestQuestion, 0, 6)
+	questionIDs := make([]string, 0, 6)
+	for i := 1; i <= 6; i++ {
+		id := fmt.Sprintf("q%d", i)
+		questionIDs = append(questionIDs, id)
+		questions = append(questions, TestQuestion{ID: id, Name: id, Body: "question " + id, Enabled: true})
+	}
+	qaRepo := newFakeQuestionAnswerRepository(questions...)
+	service := newQuestionAnswerService(server.URL, qaRepo, newFakeRepository())
+	transport := newControlledQuestionAnswerRoundTripper(len(questionIDs))
+	service.questionAnswerHTTP = &QuestionAnswerRunner{client: &http.Client{Transport: transport}}
+	defer func() { _ = service.ShutdownQuestionAnswers(context.Background()) }()
+
+	batch, err := service.StartQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", QuestionAnswerStartInput{
+		Models: []string{"model-a"}, QuestionIDs: questionIDs,
+	})
+	if err != nil {
+		t.Fatalf("start batch: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		select {
+		case <-transport.started:
+		case <-time.After(time.Second):
+			t.Fatalf("request %d did not start before the five-request concurrency window", i+1)
+		}
+	}
+	select {
+	case question := <-transport.started:
+		t.Fatalf("sixth request %q started before a concurrency slot opened", question)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	transport.release <- struct{}{}
+	select {
+	case <-transport.started:
+	case <-time.After(time.Second):
+		t.Fatal("sixth request did not start after a concurrency slot opened")
+	}
+	if peak := transport.peak(); peak != 5 {
+		t.Fatalf("peak concurrent requests = %d, want 5", peak)
+	}
+	for i := 0; i < 5; i++ {
+		transport.release <- struct{}{}
+	}
+	completed := waitQuestionAnswerBatch(t, service, batch.BatchID, false)
+	for _, record := range completed.Records {
+		if record.Status != QuestionAnswerSucceeded || record.AnswerBody != "answer" {
+			t.Fatalf("completed record = %+v", record)
+		}
+	}
+}
+
+func TestQuestionAnswerCancelStopsFiveInFlightRequestsAndOneWaitingRecord(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/v1/models" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-a"}]}`)
+			return
+		}
+		http.NotFound(w, request)
+	}))
+	defer server.Close()
+
+	questions := make([]TestQuestion, 0, 6)
+	questionIDs := make([]string, 0, 6)
+	for i := 1; i <= 6; i++ {
+		id := fmt.Sprintf("q%d", i)
+		questionIDs = append(questionIDs, id)
+		questions = append(questions, TestQuestion{ID: id, Name: id, Body: "question " + id, Enabled: true})
+	}
+	qaRepo := newFakeQuestionAnswerRepository(questions...)
+	service := newQuestionAnswerService(server.URL, qaRepo, newFakeRepository())
+	transport := newControlledQuestionAnswerRoundTripper(len(questionIDs))
+	service.questionAnswerHTTP = &QuestionAnswerRunner{client: &http.Client{Transport: transport}}
+	defer func() { _ = service.ShutdownQuestionAnswers(context.Background()) }()
+
+	batch, err := service.StartQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", QuestionAnswerStartInput{
+		Models: []string{"model-a"}, QuestionIDs: questionIDs,
+	})
+	if err != nil {
+		t.Fatalf("start batch: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		select {
+		case <-transport.started:
+		case <-time.After(time.Second):
+			t.Fatalf("in-flight request %d did not start", i+1)
+		}
+	}
+	stopped, err := service.StopQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", batch.BatchID)
+	if err != nil {
+		t.Fatalf("stop batch: %v", err)
+	}
+	if stopped.Active || stopped.RunningCount != 0 {
+		t.Fatalf("stopped batch remains active: %+v", stopped)
+	}
+	for _, record := range stopped.Records {
+		if record.Status != QuestionAnswerCancelled {
+			t.Fatalf("record after cancellation = %+v", record)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		select {
+		case <-transport.cancelled:
+		case <-time.After(time.Second):
+			t.Fatalf("in-flight request %d did not observe cancellation", i+1)
+		}
+	}
+	select {
+	case question := <-transport.started:
+		t.Fatalf("waiting request %q started during cancellation", question)
+	default:
+	}
+	waitQuestionAnswerRunReleased(t, service)
+}
+
+type cancellingMarkQuestionAnswerRepository struct {
+	*fakeQuestionAnswerRepository
+
+	markStarted chan struct{}
+	markOnce    sync.Once
+	mu          sync.Mutex
+	stopCalls   []struct {
+		status    QuestionAnswerStatus
+		errorType string
+	}
+}
+
+func newCancellingMarkQuestionAnswerRepository(base *fakeQuestionAnswerRepository) *cancellingMarkQuestionAnswerRepository {
+	return &cancellingMarkQuestionAnswerRepository{
+		fakeQuestionAnswerRepository: base,
+		markStarted:                  make(chan struct{}),
+	}
+}
+
+func (r *cancellingMarkQuestionAnswerRepository) MarkQuestionAnswerRunning(ctx context.Context, _ string, _ string, _ string) (bool, error) {
+	r.markOnce.Do(func() { close(r.markStarted) })
+	<-ctx.Done()
+	return false, ctx.Err()
+}
+
+func (r *cancellingMarkQuestionAnswerRepository) StopQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
+	r.mu.Lock()
+	r.stopCalls = append(r.stopCalls, struct {
+		status    QuestionAnswerStatus
+		errorType string
+	}{status: status, errorType: errorType})
+	r.mu.Unlock()
+	return r.fakeQuestionAnswerRepository.StopQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType)
+}
+
+func (r *cancellingMarkQuestionAnswerRepository) stops() []struct {
+	status    QuestionAnswerStatus
+	errorType string
+} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]struct {
+		status    QuestionAnswerStatus
+		errorType string
+	}(nil), r.stopCalls...)
+}
+
+func TestQuestionAnswerCancelDuringMarkRunningIsNotReportedAsStorageFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/v1/models" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-a"}]}`)
+			return
+		}
+		http.NotFound(w, request)
+	}))
+	defer server.Close()
+
+	base := newFakeQuestionAnswerRepository(TestQuestion{ID: "q1", Name: "q1", Body: "question 1", Enabled: true})
+	repository := newCancellingMarkQuestionAnswerRepository(base)
+	service := newQuestionAnswerService(server.URL, base, newFakeRepository())
+	service.questionAnswers = repository
+	defer func() { _ = service.ShutdownQuestionAnswers(context.Background()) }()
+
+	batch, err := service.StartQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", QuestionAnswerStartInput{
+		Models: []string{"model-a"}, QuestionIDs: []string{"q1"},
+	})
+	if err != nil {
+		t.Fatalf("start batch: %v", err)
+	}
+	select {
+	case <-repository.markStarted:
+	case <-time.After(time.Second):
+		t.Fatal("mark-running operation did not start")
+	}
+	stopped, err := service.StopQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", batch.BatchID)
+	if err != nil {
+		t.Fatalf("stop batch: %v", err)
+	}
+	waitQuestionAnswerRunReleased(t, service)
+
+	if stopped.Active || len(stopped.Records) != 1 || stopped.Records[0].Status != QuestionAnswerCancelled {
+		t.Fatalf("stopped batch = %+v", stopped)
+	}
+	stopCalls := repository.stops()
+	if len(stopCalls) != 1 || stopCalls[0].status != QuestionAnswerCancelled || stopCalls[0].errorType != "" {
+		t.Fatalf("stop calls = %+v, want one cancellation without a storage failure", stopCalls)
+	}
+}
+
+type concurrentCompletionFailureRepository struct {
+	*fakeQuestionAnswerRepository
+
+	mu            sync.Mutex
+	completeCalls int
+	stopCalls     int
+	completes     chan struct{}
+}
+
+func newConcurrentCompletionFailureRepository(base *fakeQuestionAnswerRepository) *concurrentCompletionFailureRepository {
+	return &concurrentCompletionFailureRepository{fakeQuestionAnswerRepository: base, completes: make(chan struct{})}
+}
+
+func (r *concurrentCompletionFailureRepository) CompleteQuestionAnswer(context.Context, string, string, string, QuestionAnswerStatus, string, string) (bool, error) {
+	r.mu.Lock()
+	r.completeCalls++
+	if r.completeCalls == 2 {
+		close(r.completes)
+	}
+	r.mu.Unlock()
+	<-r.completes
+	return false, errors.New("complete storage failure")
+}
+
+func (r *concurrentCompletionFailureRepository) StopQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
+	r.mu.Lock()
+	r.stopCalls++
+	r.mu.Unlock()
+	return r.fakeQuestionAnswerRepository.StopQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType)
+}
+
+func (r *concurrentCompletionFailureRepository) stopCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stopCalls
+}
+
+func TestQuestionAnswerConcurrentStorageFailuresStopBatchOnce(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/models":
+			_, _ = io.WriteString(w, `{"data":[{"id":"model-a"}]}`)
+		case "/v1/chat/completions":
+			_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"answer"}}]}`)
+		default:
+			http.NotFound(w, request)
+		}
+	}))
+	defer server.Close()
+
+	base := newFakeQuestionAnswerRepository(
+		TestQuestion{ID: "q1", Name: "q1", Body: "question 1", Enabled: true},
+		TestQuestion{ID: "q2", Name: "q2", Body: "question 2", Enabled: true},
+	)
+	repository := newConcurrentCompletionFailureRepository(base)
+	service := newQuestionAnswerService(server.URL, base, newFakeRepository())
+	service.questionAnswers = repository
+	defer func() { _ = service.ShutdownQuestionAnswers(context.Background()) }()
+
+	batch, err := service.StartQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", QuestionAnswerStartInput{
+		Models: []string{"model-a"}, QuestionIDs: []string{"q1", "q2"},
+	})
+	if err != nil {
+		t.Fatalf("start batch: %v", err)
+	}
+	completed := waitQuestionAnswerBatch(t, service, batch.BatchID, false)
+	if calls := repository.stopCount(); calls != 1 {
+		t.Fatalf("batch stop calls = %d, want 1 after concurrent storage failures", calls)
+	}
+	for _, record := range completed.Records {
+		if record.Status != QuestionAnswerFailed || record.ErrorType != QuestionAnswerErrorStorage {
+			t.Fatalf("record after storage failure = %+v", record)
+		}
+	}
+}
+
+func TestQuestionAnswerBatchRunsEveryDeduplicatedCombinationWithoutMaxTokens(t *testing.T) {
 	var mu sync.Mutex
 	requests := make([]string, 0)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -376,8 +728,18 @@ func TestQuestionAnswerBatchRunsDeduplicatedCombinationsInOrderWithoutMaxTokens(
 	gotRequests := append([]string(nil), requests...)
 	mu.Unlock()
 	wantRequests := []string{"model-a|question one|high", "model-a|question two|high", "model-b|question one|high", "model-b|question two|high"}
+	sort.Strings(gotRequests)
+	sort.Strings(wantRequests)
 	if fmt.Sprint(gotRequests) != fmt.Sprint(wantRequests) {
-		t.Fatalf("request order = %v, want %v", gotRequests, wantRequests)
+		t.Fatalf("requests = %v, want %v", gotRequests, wantRequests)
+	}
+	gotRecords := make([]string, 0, len(completed.Records))
+	for _, record := range completed.Records {
+		gotRecords = append(gotRecords, record.ModelName+"|"+record.QuestionBody)
+	}
+	wantRecords := []string{"model-a|question one", "model-a|question two", "model-b|question one", "model-b|question two"}
+	if fmt.Sprint(gotRecords) != fmt.Sprint(wantRecords) {
+		t.Fatalf("record order = %v, want %v", gotRecords, wantRecords)
 	}
 	if batch.ReasoningEffort == nil || *batch.ReasoningEffort != QuestionAnswerReasoningEffortHigh || completed.ReasoningEffort == nil || *completed.ReasoningEffort != QuestionAnswerReasoningEffortHigh {
 		t.Fatalf("reasoning effort snapshot = start=%v completed=%v", batch.ReasoningEffort, completed.ReasoningEffort)
@@ -491,6 +853,30 @@ func TestBuildQuestionAnswerBatchReasoningEffortAggregation(t *testing.T) {
 	}
 	if _, err := buildQuestionAnswerBatch([]QuestionAnswerRecord{{BatchID: "batch-mixed-null", ReasoningEffort: nil}, {BatchID: "batch-mixed-null", ReasoningEffort: &medium}}); err == nil || err.Error() != ErrorQuestionAnswerStorage {
 		t.Fatalf("null and non-null batch aggregation error = %v, want %s", err, ErrorQuestionAnswerStorage)
+	}
+}
+
+func TestBuildQuestionAnswerBatchReportsActualRunningCount(t *testing.T) {
+	records := []QuestionAnswerRecord{
+		{BatchID: "batch-running", Status: QuestionAnswerRunning},
+		{BatchID: "batch-running", Status: QuestionAnswerPending},
+		{BatchID: "batch-running", Status: QuestionAnswerRunning},
+		{BatchID: "batch-running", Status: QuestionAnswerSucceeded},
+	}
+	batch, err := buildQuestionAnswerBatch(records)
+	if err != nil {
+		t.Fatalf("build batch: %v", err)
+	}
+	encoded, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatalf("marshal batch: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatalf("decode batch JSON: %v", err)
+	}
+	if payload["runningCount"] != float64(2) {
+		t.Fatalf("runningCount = %#v, want 2", payload["runningCount"])
 	}
 }
 
@@ -617,7 +1003,7 @@ func TestQuestionAnswerBatchRejectsDuplicateStartAndCancelIsIdempotent(t *testin
 
 	qaRepo := newFakeQuestionAnswerRepository(TestQuestion{ID: "q1", Name: "Q1", Body: "question", Enabled: true})
 	service := newQuestionAnswerService(server.URL, qaRepo, newFakeRepository())
-	service.questionAnswerHTTP = &QuestionAnswerRunner{client: &http.Client{Transport: contextBlockingRoundTripper{started: started, cancelled: cancelled}}}
+	service.questionAnswerHTTP = &QuestionAnswerRunner{client: &http.Client{Transport: &contextBlockingRoundTripper{started: started, cancelled: cancelled}}}
 	defer func() { _ = service.ShutdownQuestionAnswers(context.Background()) }()
 	batch, err := service.StartQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", QuestionAnswerStartInput{Models: []string{"model-a"}, QuestionIDs: []string{"q1"}})
 	if err != nil {
@@ -654,7 +1040,8 @@ func TestQuestionAnswerBatchRejectsDuplicateStartAndCancelIsIdempotent(t *testin
 	}
 }
 
-func TestQuestionAnswerTimeoutContinuesNextCombinationAndShutdownReleasesRun(t *testing.T) {
+func TestQuestionAnswerSlowTimeoutDoesNotBlockFastCombinationAndShutdownReleasesRun(t *testing.T) {
+	fastCompleted := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			_, _ = io.WriteString(w, `{"data":[{"id":"model-a"}]}`)
@@ -671,6 +1058,7 @@ func TestQuestionAnswerTimeoutContinuesNextCombinationAndShutdownReleasesRun(t *
 			return
 		}
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"fast answer"}}]}`)
+		close(fastCompleted)
 	}))
 	defer server.Close()
 
@@ -679,10 +1067,15 @@ func TestQuestionAnswerTimeoutContinuesNextCombinationAndShutdownReleasesRun(t *
 		TestQuestion{ID: "q2", Name: "fast", Body: "fast question", Enabled: true},
 	)
 	service := newQuestionAnswerService(server.URL, qaRepo, newFakeRepository())
-	service.questionAnswerTTL = 20 * time.Millisecond
+	service.questionAnswerTTL = 250 * time.Millisecond
 	batch, err := service.StartQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", QuestionAnswerStartInput{Models: []string{"model-a"}, QuestionIDs: []string{"q1", "q2"}})
 	if err != nil {
 		t.Fatalf("start batch: %v", err)
+	}
+	select {
+	case <-fastCompleted:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("fast combination was blocked behind the slow request")
 	}
 	completed := waitQuestionAnswerBatch(t, service, batch.BatchID, false)
 	if completed.Records[0].Status != QuestionAnswerFailed || completed.Records[0].ErrorType != QuestionAnswerErrorTimeout {
@@ -721,7 +1114,7 @@ func TestQuestionAnswerShutdownFailsActiveBatchAndReleasesRun(t *testing.T) {
 		TestQuestion{ID: "q2", Name: "Q2", Body: "question two", Enabled: true},
 	)
 	service := newQuestionAnswerService(server.URL, qaRepo, newFakeRepository())
-	service.questionAnswerHTTP = &QuestionAnswerRunner{client: &http.Client{Transport: contextBlockingRoundTripper{started: started, cancelled: cancelled}}}
+	service.questionAnswerHTTP = &QuestionAnswerRunner{client: &http.Client{Transport: &contextBlockingRoundTripper{started: started, cancelled: cancelled}}}
 	batch, err := service.StartQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", QuestionAnswerStartInput{Models: []string{"model-a"}, QuestionIDs: []string{"q1", "q2"}})
 	if err != nil {
 		t.Fatalf("start batch: %v", err)
@@ -771,15 +1164,16 @@ func (r fixedRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 }
 
 type contextBlockingRoundTripper struct {
-	started   chan struct{}
-	cancelled chan struct{}
-	once      sync.Once
+	started       chan struct{}
+	cancelled     chan struct{}
+	startedOnce   sync.Once
+	cancelledOnce sync.Once
 }
 
-func (r contextBlockingRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
-	r.once.Do(func() { close(r.started) })
+func (r *contextBlockingRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	r.startedOnce.Do(func() { close(r.started) })
 	<-request.Context().Done()
-	close(r.cancelled)
+	r.cancelledOnce.Do(func() { close(r.cancelled) })
 	return nil, request.Context().Err()
 }
 

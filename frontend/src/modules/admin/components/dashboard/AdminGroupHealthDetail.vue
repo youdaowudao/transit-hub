@@ -130,7 +130,7 @@ const isNotProbed = (account: AdminGroupAccount): boolean =>
 
 const isSub2API = (account: AdminGroupAccount): boolean => account.targetId.toLowerCase().startsWith('sub2api:')
 const hasMainSiteError = (account: AdminGroupAccount): boolean =>
-  isSub2API(account) && (account.status?.toLowerCase() === 'error' || Boolean(account.mainSiteError?.trim()))
+  isSub2API(account) && account.status?.trim().toLowerCase() === 'error'
 const mainSiteErrorReason = (account: AdminGroupAccount): string =>
   account.mainSiteError?.trim() || t(`${detailPrefix}.mainSiteErrorReasonUnavailable`)
 const schedulableLabel = (account: AdminGroupAccount): string => {

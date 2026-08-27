@@ -849,7 +849,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 }
 
 func mainSiteErrorForAccount(platform string, account upstream.AdminGroupAccountInfo) string {
-	if platform != string(upstream.PlatformSub2API) {
+	if platform != string(upstream.PlatformSub2API) || !strings.EqualFold(strings.TrimSpace(account.Status), "error") {
 		return ""
 	}
 	return account.ErrorMessage

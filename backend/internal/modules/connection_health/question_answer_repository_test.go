@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -213,6 +214,99 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	restarted, err := repository.ListQuestionAnswerBatch(ctx, "user-1", "target-restart", "batch-restart")
 	if err != nil || len(restarted) != 1 || restarted[0].Status != QuestionAnswerFailed || restarted[0].ErrorType != QuestionAnswerErrorServiceRestarted {
 		t.Fatalf("restarted records=%+v err=%v", restarted, err)
+	}
+}
+
+func TestQuestionAnswerRepositoryPostgresConcurrentCompletionAndStopHaveOneTerminalResult(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	repository := NewRepository(pool)
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	question, err := repository.CreateTestQuestion(ctx, "race-user", "Race question", "race body")
+	if err != nil {
+		t.Fatalf("create question: %v", err)
+	}
+
+	for i := 0; i < 10; i++ {
+		targetID := fmt.Sprintf("race-target-%d", i)
+		batchID := fmt.Sprintf("race-batch-%d", i)
+		records, err := repository.CreateQuestionAnswerBatch(ctx, "race-user", targetID, batchID, []string{"model-a"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium)
+		if err != nil || len(records) != 1 {
+			t.Fatalf("create race batch %d: records=%+v err=%v", i, records, err)
+		}
+		if running, err := repository.MarkQuestionAnswerRunning(ctx, "race-user", batchID, records[0].ID); err != nil || !running {
+			t.Fatalf("mark race record running %d: running=%v err=%v", i, running, err)
+		}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var completeResult, stopResult bool
+		var completeErr, stopErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			completeResult, completeErr = repository.CompleteQuestionAnswer(ctx, "race-user", batchID, records[0].ID, QuestionAnswerSucceeded, "race answer", "")
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			stopResult, stopErr = repository.StopQuestionAnswerBatch(ctx, "race-user", targetID, batchID, QuestionAnswerCancelled, "")
+		}()
+		close(start)
+		wg.Wait()
+		if completeErr != nil || stopErr != nil || !stopResult {
+			t.Fatalf("race %d results: complete=%v err=%v stop=%v err=%v", i, completeResult, completeErr, stopResult, stopErr)
+		}
+		stored, err := repository.ListQuestionAnswerBatch(ctx, "race-user", targetID, batchID)
+		if err != nil || len(stored) != 1 {
+			t.Fatalf("list race batch %d: records=%+v err=%v", i, stored, err)
+		}
+		switch stored[0].Status {
+		case QuestionAnswerSucceeded:
+			if !completeResult || stored[0].AnswerBody != "race answer" {
+				t.Fatalf("race %d succeeded without the winning completion: result=%v record=%+v", i, completeResult, stored[0])
+			}
+		case QuestionAnswerCancelled:
+			if completeResult || stored[0].AnswerBody != "" {
+				t.Fatalf("race %d cancellation was overwritten by completion: result=%v record=%+v", i, completeResult, stored[0])
+			}
+		default:
+			t.Fatalf("race %d left non-terminal status: %+v", i, stored[0])
+		}
+	}
+
+	preserveRecords, err := repository.CreateQuestionAnswerBatch(ctx, "race-user", "preserve-target", "preserve-batch", []string{"model-a", "model-b"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium)
+	if err != nil || len(preserveRecords) != 2 {
+		t.Fatalf("create preserve batch: records=%+v err=%v", preserveRecords, err)
+	}
+	for _, record := range preserveRecords {
+		if running, err := repository.MarkQuestionAnswerRunning(ctx, "race-user", "preserve-batch", record.ID); err != nil || !running {
+			t.Fatalf("mark preserve record running: record=%s running=%v err=%v", record.ID, running, err)
+		}
+	}
+	if completed, err := repository.CompleteQuestionAnswer(ctx, "race-user", "preserve-batch", preserveRecords[0].ID, QuestionAnswerSucceeded, "kept answer", ""); err != nil || !completed {
+		t.Fatalf("complete preserved record: completed=%v err=%v", completed, err)
+	}
+	if found, err := repository.StopQuestionAnswerBatch(ctx, "race-user", "preserve-target", "preserve-batch", QuestionAnswerCancelled, ""); err != nil || !found {
+		t.Fatalf("stop preserve batch: found=%v err=%v", found, err)
+	}
+	if late, err := repository.CompleteQuestionAnswer(ctx, "race-user", "preserve-batch", preserveRecords[1].ID, QuestionAnswerSucceeded, "late answer", ""); err != nil || late {
+		t.Fatalf("late completion after stop: completed=%v err=%v", late, err)
+	}
+	stored, err := repository.ListQuestionAnswerBatch(ctx, "race-user", "preserve-target", "preserve-batch")
+	if err != nil || len(stored) != 2 {
+		t.Fatalf("list preserve batch: records=%+v err=%v", stored, err)
+	}
+	statuses := map[QuestionAnswerStatus]QuestionAnswerRecord{}
+	for _, record := range stored {
+		statuses[record.Status] = record
+	}
+	if statuses[QuestionAnswerSucceeded].AnswerBody != "kept answer" || statuses[QuestionAnswerCancelled].AnswerBody != "" {
+		t.Fatalf("preserve batch terminal records=%+v", stored)
 	}
 }
 

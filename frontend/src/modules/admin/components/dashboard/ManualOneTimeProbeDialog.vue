@@ -860,7 +860,7 @@ const close = () => {
                         <p v-if="qaBatch" class="mt-1 text-xs text-muted-foreground">
                           {{ t(`${prefix}.questionAnswer.submitted`, { count: qaBatch.submittedCount }) }} · {{ t(`${prefix}.questionAnswer.progress`, { completed: qaBatch.completedCount, total: qaBatch.submittedCount }) }}
                           · {{ t(`${prefix}.questionAnswer.reasoningEffort.label`) }}: {{ questionAnswerReasoningEffortLabel(qaBatch.reasoningEffort) }}
-                          <span v-if="qaBatch.active"> · {{ t(`${prefix}.questionAnswer.runningNow`, { model: qaBatch.currentModel || '-', question: qaBatch.currentQuestion || '-' }) }}</span>
+                          <span v-if="qaBatch.active"> · {{ t(`${prefix}.questionAnswer.runningCount`, { count: qaBatch.runningCount }) }}</span>
                         </p>
                       </div>
                       <button v-if="qaBatch?.active" type="button" class="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400" :disabled="qaCancelling" @click="stopQuestionAnswers">

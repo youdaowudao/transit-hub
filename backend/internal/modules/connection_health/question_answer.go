@@ -15,6 +15,7 @@ import (
 const (
 	QuestionAnswerPageSize       = 20
 	QuestionAnswerRequestTimeout = 10 * time.Minute
+	questionAnswerConcurrency    = 5
 	TestQuestionNameLimit        = 100
 	TestQuestionBodyLimit        = 4000
 )
@@ -121,6 +122,7 @@ type QuestionAnswerBatch struct {
 	ReasoningEffort *QuestionAnswerReasoningEffort `json:"reasoningEffort"`
 	SubmittedCount  int                            `json:"submittedCount"`
 	CompletedCount  int                            `json:"completedCount"`
+	RunningCount    int                            `json:"runningCount"`
 	Active          bool                           `json:"active"`
 	CurrentModel    string                         `json:"currentModel"`
 	CurrentQuestion string                         `json:"currentQuestion"`
@@ -143,6 +145,7 @@ type activeQuestionAnswerBatch struct {
 	reason   string
 	done     chan struct{}
 	doneOnce sync.Once
+	failOnce sync.Once
 }
 
 func (b *activeQuestionAnswerBatch) stop(reason string) {
@@ -378,47 +381,71 @@ func (s *Service) runQuestionAnswerBatch(key string, run *activeQuestionAnswerBa
 	defer run.cancel()
 	defer s.removeQuestionAnswerRun(key, run)
 
+	slots := make(chan struct{}, questionAnswerConcurrency)
+	var workers sync.WaitGroup
+
+dispatch:
 	for _, record := range records {
 		if run.stopped() != "" || run.ctx.Err() != nil {
-			return
+			break
+		}
+		select {
+		case slots <- struct{}{}:
+		case <-run.ctx.Done():
+			break dispatch
 		}
 		running, err := s.questionAnswers.MarkQuestionAnswerRunning(run.ctx, run.userID, run.batchID, record.ID)
 		if err != nil {
+			<-slots
+			if run.stopped() != "" || run.ctx.Err() != nil {
+				break
+			}
 			s.failQuestionAnswerRun(run, QuestionAnswerErrorStorage)
-			return
+			break
 		}
 		if !running {
+			<-slots
 			continue
 		}
+		workers.Add(1)
+		go func(record QuestionAnswerRecord) {
+			defer workers.Done()
+			defer func() { <-slots }()
+			s.runQuestionAnswerRecord(run, record)
+		}(record)
+	}
+	workers.Wait()
+}
 
-		itemCtx, cancel := context.WithTimeout(run.ctx, s.questionAnswerTTL)
-		answer, errorType := s.questionAnswerHTTP.Ask(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort))
-		itemErr := itemCtx.Err()
-		cancel()
-		if run.stopped() != "" || (run.ctx.Err() != nil && !errors.Is(itemErr, context.DeadlineExceeded)) {
-			return
-		}
-		status := QuestionAnswerSucceeded
-		if errors.Is(itemErr, context.DeadlineExceeded) {
-			status = QuestionAnswerFailed
-			answer = ""
-			errorType = QuestionAnswerErrorTimeout
-		} else if errorType != "" {
-			status = QuestionAnswerFailed
-			answer = ""
-		}
-		if _, err := s.questionAnswers.CompleteQuestionAnswer(run.ctx, run.userID, run.batchID, record.ID, status, answer, errorType); err != nil {
-			s.failQuestionAnswerRun(run, QuestionAnswerErrorStorage)
-			return
-		}
+func (s *Service) runQuestionAnswerRecord(run *activeQuestionAnswerBatch, record QuestionAnswerRecord) {
+	itemCtx, cancel := context.WithTimeout(run.ctx, s.questionAnswerTTL)
+	answer, errorType := s.questionAnswerHTTP.Ask(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort))
+	itemErr := itemCtx.Err()
+	cancel()
+	if run.stopped() != "" || (run.ctx.Err() != nil && !errors.Is(itemErr, context.DeadlineExceeded)) {
+		return
+	}
+	status := QuestionAnswerSucceeded
+	if errors.Is(itemErr, context.DeadlineExceeded) {
+		status = QuestionAnswerFailed
+		answer = ""
+		errorType = QuestionAnswerErrorTimeout
+	} else if errorType != "" {
+		status = QuestionAnswerFailed
+		answer = ""
+	}
+	if _, err := s.questionAnswers.CompleteQuestionAnswer(run.ctx, run.userID, run.batchID, record.ID, status, answer, errorType); err != nil {
+		s.failQuestionAnswerRun(run, QuestionAnswerErrorStorage)
 	}
 }
 
 func (s *Service) failQuestionAnswerRun(run *activeQuestionAnswerBatch, errorType string) {
-	run.stop(errorType)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_, _ = s.questionAnswers.StopQuestionAnswerBatch(ctx, run.userID, run.targetID, run.batchID, QuestionAnswerFailed, errorType)
+	run.failOnce.Do(func() {
+		run.stop(errorType)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = s.questionAnswers.StopQuestionAnswerBatch(ctx, run.userID, run.targetID, run.batchID, QuestionAnswerFailed, errorType)
+	})
 }
 
 func (s *Service) removeQuestionAnswerRun(key string, run *activeQuestionAnswerBatch) {
@@ -573,6 +600,7 @@ func buildQuestionAnswerBatch(records []QuestionAnswerRecord) (QuestionAnswerBat
 			}
 		case QuestionAnswerRunning:
 			batch.Active = true
+			batch.RunningCount++
 			batch.CurrentModel, batch.CurrentQuestion = record.ModelName, record.QuestionName
 		case QuestionAnswerSucceeded, QuestionAnswerFailed, QuestionAnswerCancelled:
 			batch.CompletedCount++

@@ -1747,6 +1747,7 @@ export default {
           submitted: '已提交 {count} 项',
           progress: '完成 {completed}/{total}',
           runningNow: '正在测试：{model} × {question}',
+          runningCount: '正在处理 {count} 项',
           stop: '终止本次问答',
           noBatch: '当前账号还没有问答批次。',
           completedNotice: '本次问答已完成，结果和统计已刷新。',

@@ -422,6 +422,7 @@ export interface QuestionAnswerBatch {
   reasoningEffort: QuestionAnswerReasoningEffort | null
   submittedCount: number
   completedCount: number
+  runningCount: number
   active: boolean
   currentModel: string
   currentQuestion: string

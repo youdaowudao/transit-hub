@@ -563,7 +563,87 @@ func TestAdminGroups_TargetIDProbeAvailableAndModelHealth(t *testing.T) {
 	}
 }
 
-func TestAdminGroups_PreservesMainSiteErrorAlongsideStatusSchedulableAndModelHealth(t *testing.T) {
+func TestAdminGroups_ProjectsCurrentMainSiteErrorOnly(t *testing.T) {
+	tests := []struct {
+		name         string
+		platform     upstream.Platform
+		status       string
+		errorMessage string
+		wantError    string
+	}{
+		{
+			name:         "current error keeps reason",
+			platform:     upstream.PlatformSub2API,
+			status:       "error",
+			errorMessage: "upstream returned 503",
+			wantError:    "upstream returned 503",
+		},
+		{
+			name:         "normalized current error keeps reason",
+			platform:     upstream.PlatformSub2API,
+			status:       " ERROR ",
+			errorMessage: "upstream returned 503",
+			wantError:    "upstream returned 503",
+		},
+		{
+			name:         "active ignores stale reason",
+			platform:     upstream.PlatformSub2API,
+			status:       "active",
+			errorMessage: "old 403",
+			wantError:    "",
+		},
+		{
+			name:         "inactive ignores stale reason",
+			platform:     upstream.PlatformSub2API,
+			status:       "inactive",
+			errorMessage: "old 402",
+			wantError:    "",
+		},
+		{
+			name:         "newapi never projects main-site errors",
+			platform:     upstream.PlatformNewAPI,
+			status:       "error",
+			errorMessage: "not a main-site error",
+			wantError:    "",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			repo := newFakeRepository()
+			reader := fakePlatformGroupReader{
+				groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
+				accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+					"g1": {{
+						ID:           "100",
+						Name:         "account",
+						Status:       testCase.status,
+						ErrorMessage: testCase.errorMessage,
+						Models:       "gpt-4o",
+					}},
+				},
+			}
+			service := newAdminGroupsService(
+				reader,
+				fakeMySitesReader{session: upstream.Session{Platform: testCase.platform}},
+				repo,
+			)
+
+			groups, err := service.AdminGroups(context.Background(), "user1")
+			if err != nil {
+				t.Fatalf("AdminGroups() error = %v", err)
+			}
+			if len(groups) != 1 || len(groups[0].Accounts) != 1 {
+				t.Fatalf("AdminGroups() groups = %+v, want one account", groups)
+			}
+			if got := groups[0].Accounts[0].MainSiteError; got != testCase.wantError {
+				t.Fatalf("MainSiteError = %q, want %q", got, testCase.wantError)
+			}
+		})
+	}
+}
+
+func TestAdminGroups_KeepsMainSiteFieldsIndependent(t *testing.T) {
 	repo := newFakeRepository()
 	schedulable := true
 	reader := fakePlatformGroupReader{
@@ -599,8 +679,8 @@ func TestAdminGroups_PreservesMainSiteErrorAlongsideStatusSchedulableAndModelHea
 	if account.Schedulable == nil || !*account.Schedulable {
 		t.Fatalf("schedulable = %v, want true", account.Schedulable)
 	}
-	if account.MainSiteError != "upstream returned 503" {
-		t.Fatalf("main-site error = %q, want upstream returned 503", account.MainSiteError)
+	if account.MainSiteError != "" {
+		t.Fatalf("main-site error = %q, want stale reason hidden", account.MainSiteError)
 	}
 	if account.ModelHealth == nil {
 		t.Fatal("modelHealth must remain a non-nil independent field")

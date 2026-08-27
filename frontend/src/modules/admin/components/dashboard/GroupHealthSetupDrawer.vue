@@ -14,12 +14,13 @@ import {
 } from 'lucide-vue-next'
 import { connectionHealthMessageKey, useConnectionHealth } from '../../composables/useConnectionHealth'
 import type {
-	AdminGroupPolicyConfiguration,
+  AdminGroupPolicyConfiguration,
   AdminGroupAccount,
   AdminGroupHealth,
   ConnectionHealthPolicy,
   ConnectionHealthPriorityMode,
   PolicyInput,
+  TargetPolicyAssignmentSummary,
 } from '../../types/connectionHealth'
 
 type SetupMode = 'stable' | 'multiplier' | 'multiplierOnly' | 'monitor' | 'existing'
@@ -30,6 +31,7 @@ const props = defineProps<{
   open: boolean
   group: AdminGroupHealth | null
   policies: ConnectionHealthPolicy[]
+  allGroups: AdminGroupHealth[]
 }>()
 
 const emit = defineEmits<{
@@ -50,6 +52,7 @@ const phase = ref<Phase>('loading')
 const step = ref(1)
 const mode = ref<SetupMode>('multiplier')
 const selectedTargetIds = ref<Set<string>>(new Set())
+const initialExcludedTargetIds = ref<Set<string>>(new Set())
 const selectedPolicyIds = ref<Set<string>>(new Set())
 const modelText = ref('')
 const providerFamily = ref('openai')
@@ -162,6 +165,9 @@ const reset = async () => {
   step.value = 1
   errorKey.value = ''
   selectedTargetIds.value = new Set(group.accounts.map((account) => account.targetId))
+	initialExcludedTargetIds.value = new Set(group.accounts
+		.filter((account) => account.excludedFromGroupPolicy)
+		.map((account) => account.targetId))
   selectedPolicyIds.value = new Set()
   modelsTouched.value = false
   applyModelSuggestion(group)
@@ -182,6 +188,7 @@ const reset = async () => {
 	fallbackMultiplierText.value = configuration.probeSortFallbackMultiplier == null ? '' : String(configuration.probeSortFallbackMultiplier)
   selectedPolicyIds.value = new Set(configuration.policyIds)
   const excluded = new Set(configuration.excludedTargetIds)
+	initialExcludedTargetIds.value = excluded
   selectedTargetIds.value = new Set(group.accounts.filter((account) => !excluded.has(account.targetId)).map((account) => account.targetId))
   if (configuration.policyIds.length > 0) {
     mode.value = 'existing'
@@ -206,10 +213,162 @@ const selectedCount = computed(() => selectedTargetIds.value.size)
 const excludedCount = computed(() => Math.max(0, (props.group?.accounts.length ?? 0) - selectedCount.value))
 const models = computed(() => dedupeModels(modelText.value))
 const readableMessage = (rawKey: string): string => t(connectionHealthMessageKey(rawKey, te))
+
+type OutcomePolicy = {
+	id: string
+	name: string
+	enabled: boolean
+	detailsAvailable: boolean
+	strategyMode: string
+	continueProbeWhenUnschedulable: boolean
+	unschedulableProbeIntervalMinutes: number
+	modelNames: string[]
+}
+
+type ExclusionOutcome = {
+	kind: 'direct' | 'direct-no-probe' | 'groups' | 'stopped' | 'unknown'
+	lines: string[]
+}
+
+const policyById = computed(() => new Map(props.policies.map(policy => [policy.id, policy])))
+
+const outcomePolicies = (
+	ids: string[] | undefined,
+	summaries: TargetPolicyAssignmentSummary[] | undefined,
+): OutcomePolicy[] => {
+	const summaryById = new Map((summaries ?? []).map(summary => [summary.policyId, summary]))
+	const orderedIds = Array.from(new Set([...(ids ?? []), ...(summaries ?? []).map(summary => summary.policyId)]))
+	return orderedIds.map((id) => {
+		const policy = policyById.value.get(id)
+		const summary = summaryById.get(id)
+		return {
+			id,
+			name: policy?.name ?? summary?.policyName ?? id,
+			enabled: policy?.enabled ?? summary?.enabled ?? false,
+			detailsAvailable: Boolean(policy),
+			strategyMode: policy?.strategyMode ?? summary?.strategyMode ?? 'health_probe',
+			continueProbeWhenUnschedulable: policy?.continueProbeWhenUnschedulable ?? false,
+			unschedulableProbeIntervalMinutes: policy?.unschedulableProbeIntervalMinutes ?? 0,
+			modelNames: policy?.modelTargets
+				.filter(target => target.enabled && target.modelName.trim())
+				.map(target => target.modelName.trim()) ?? [],
+		}
+	})
+}
+
+const policyAppliesToAccount = (account: AdminGroupAccount, policy: OutcomePolicy): boolean => {
+	if (!account.probeModelsConfigured || policy.modelNames.length === 0) return false
+	const availableModels = accountModels(account)
+	if (availableModels.length === 0) return true
+	const available = new Set(availableModels)
+	return policy.modelNames.some(modelName => available.has(modelName))
+}
+
+const schedulableOutcomeLines = (account: AdminGroupAccount, policies: OutcomePolicy[]): string[] => {
+	if (account.schedulable !== false || policies.length === 0) return []
+	if (!policies.some(policy => policy.continueProbeWhenUnschedulable)) {
+		return [t(`${prefix}.scope.unschedulableStops`)]
+	}
+	return policies.map((policy) => policy.continueProbeWhenUnschedulable
+		? t(`${prefix}.scope.unschedulableContinues`, {
+			name: policy.name,
+			minutes: policy.unschedulableProbeIntervalMinutes,
+		})
+		: t(`${prefix}.scope.unschedulablePolicyStops`, { name: policy.name }))
+}
+
+const buildExclusionOutcome = (account: AdminGroupAccount): ExclusionOutcome => {
+	const directPolicyProjection = outcomePolicies(account.effectivePolicyIds, account.effectivePolicies)
+	if (account.policyAssignmentSource === 'target') {
+		if (directPolicyProjection.length === 0 || directPolicyProjection.some(policy => !policy.detailsAvailable)) {
+			return { kind: 'unknown', lines: [t(`${prefix}.scope.outcomeUnknown`)] }
+		}
+		const directPolicies = directPolicyProjection.filter(policy => policy.enabled)
+		const probePolicies = directPolicies.filter(policy => (
+			policy.strategyMode !== 'multiplier_only'
+			&& account.hasEnabledProbePolicy === true
+			&& policyAppliesToAccount(account, policy)
+		))
+		if (probePolicies.length === 0) {
+			return {
+				kind: 'direct-no-probe',
+				lines: [t(`${prefix}.scope.directNoProbe`, { policies: directPolicies.map(policy => policy.name).join('、') })],
+			}
+		}
+		return {
+			kind: 'direct',
+			lines: [
+				t(`${prefix}.scope.directMonitoring`, { policies: probePolicies.map(policy => policy.name).join('、') }),
+				...schedulableOutcomeLines(account, probePolicies),
+			],
+		}
+	}
+
+	let policyDetailsIncomplete = false
+	const sources = props.allGroups
+		.filter(group => group.id !== props.group?.id)
+		.flatMap((group) => {
+			const membership = group.accounts.find(candidate => candidate.targetId === account.targetId)
+			if (!membership || membership.excludedFromGroupPolicy || membership.policyAssignmentSource !== 'group') return []
+			const policyProjection = outcomePolicies(group.assignedPolicyIds, group.assignedPolicies)
+			if (policyProjection.some(policy => policy.enabled && !policy.detailsAvailable)) {
+				policyDetailsIncomplete = true
+			}
+			const policies = policyProjection
+				.filter(policy => (
+					policy.enabled
+					&& policy.strategyMode !== 'multiplier_only'
+					&& membership.hasEnabledProbePolicy === true
+					&& policyAppliesToAccount(membership, policy)
+				))
+			return policies.length > 0 ? [{ group, policies }] : []
+		})
+
+	if (policyDetailsIncomplete) {
+		return { kind: 'unknown', lines: [t(`${prefix}.scope.outcomeUnknown`)] }
+	}
+
+	if (sources.length > 0) {
+		const sourceLines = sources.map(source => t(`${prefix}.scope.groupMonitoring`, {
+			group: source.group.name,
+			policies: source.policies.map(policy => policy.name).join('、'),
+		}))
+		const remainingPolicies = Array.from(new Map(
+			sources.flatMap(source => source.policies).map(policy => [policy.id, policy]),
+		).values())
+		return {
+			kind: 'groups',
+			lines: [...sourceLines, ...schedulableOutcomeLines(account, remainingPolicies)],
+		}
+	}
+
+	const incomplete = props.allGroups.some(group => group.id !== props.group?.id && Boolean(group.accountsError))
+	return incomplete
+		? { kind: 'unknown', lines: [t(`${prefix}.scope.outcomeUnknown`)] }
+		: { kind: 'stopped', lines: [t(`${prefix}.scope.probingStops`)] }
+}
+
+const exclusionOutcomes = computed(() => new Map(
+	(props.group?.accounts ?? []).map(account => [account.targetId, buildExclusionOutcome(account)]),
+))
+
+const exclusionOutcome = (account: AdminGroupAccount): ExclusionOutcome => exclusionOutcomes.value.get(account.targetId)
+	?? { kind: 'unknown', lines: [t(`${prefix}.scope.outcomeUnknown`)] }
+
+const changedAccounts = computed(() => (props.group?.accounts ?? []).flatMap((account) => {
+	const wasExcluded = initialExcludedTargetIds.value.has(account.targetId)
+	const isExcluded = !selectedTargetIds.value.has(account.targetId)
+	if (wasExcluded === isExcluded) return []
+	return [{ account, change: isExcluded ? 'excluded' as const : 'included' as const }]
+}))
+
 const effectivePriorityMode = computed<ConnectionHealthPriorityMode>(() =>
   mode.value === 'multiplier' || mode.value === 'multiplierOnly' ? 'multiplier' : 'none',
 )
 const selectedExistingPolicies = computed(() => props.policies.filter((policy) => selectedPolicyIds.value.has(policy.id)))
+const includedStrategyNames = computed(() => mode.value === 'existing'
+	? selectedExistingPolicies.value.map(policy => policy.name).join('、')
+	: t(`${prefix}.strategy.options.${mode.value}.title`))
 const hasGroupMultiplier = computed(() => typeof props.group?.multiplier === 'number' && Number.isFinite(props.group.multiplier))
 const requiresGroupMultiplier = computed(() => {
 	if (mode.value === 'multiplierOnly') return true
@@ -505,6 +664,16 @@ const close = () => {
                         <span class="text-xs text-muted-foreground">{{ account.status || '-' }}</span>
                       </span>
                       <span class="mt-1 block truncate text-xs text-muted-foreground">{{ account.models || t(`${prefix}.scope.modelsUnknown`) }}</span>
+                      <span v-if="!selectedTargetIds.has(account.targetId)" class="mt-2 block space-y-1 border-l-2 border-amber-500/40 pl-2">
+                        <span class="block text-xs font-medium text-amber-700 dark:text-amber-400">{{ t(`${prefix}.scope.currentGroupOnly`) }}</span>
+                        <span
+                          v-for="(line, index) in exclusionOutcome(account).lines"
+                          :key="`${account.targetId}-${index}`"
+                          class="block text-xs leading-5 text-muted-foreground"
+                        >
+                          {{ line }}
+                        </span>
+                      </span>
                     </span>
                     <span class="shrink-0 text-xs" :class="account.probeAvailable ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'">
                       {{ t(`${prefix}.scope.${account.probeAvailable ? 'probeable' : 'pending'}`) }}
@@ -655,6 +824,27 @@ const close = () => {
 						<dd class="text-right text-sm font-medium text-foreground">{{ fallbackMultiplier == null ? t(`${prefix}.confirm.notConfigured`) : `${fallbackMultiplier}x` }}</dd>
 					</div>
                 </dl>
+                <div v-if="changedAccounts.length > 0" class="space-y-2">
+                  <h4 class="text-xs font-semibold text-foreground">{{ t(`${prefix}.confirm.accountChanges`) }}</h4>
+                  <div class="divide-y divide-border/50 rounded-lg border border-border/60">
+                    <div v-for="change in changedAccounts" :key="change.account.targetId" class="px-4 py-3">
+                      <p class="text-sm font-medium text-foreground">{{ change.account.name || change.account.id }}</p>
+                      <template v-if="change.change === 'excluded'">
+                        <p class="mt-1 text-xs font-medium text-amber-700 dark:text-amber-400">{{ t(`${prefix}.scope.currentGroupOnly`) }}</p>
+                        <p
+                          v-for="(line, index) in exclusionOutcome(change.account).lines"
+                          :key="`${change.account.targetId}-confirm-${index}`"
+                          class="mt-1 text-xs leading-5 text-muted-foreground"
+                        >
+                          {{ line }}
+                        </p>
+                      </template>
+                      <p v-else class="mt-1 text-xs leading-5 text-muted-foreground">
+                        {{ t(`${prefix}.confirm.reincluded`, { policies: includedStrategyNames }) }}
+                      </p>
+                    </div>
+                  </div>
+                </div>
                 <div v-if="mode === 'multiplier'" class="rounded-lg border border-primary/25 bg-primary/[0.05] px-4 py-3 text-xs leading-5 text-muted-foreground">
                   {{ t(`${prefix}.confirm.multiplierRule`) }}
                 </div>

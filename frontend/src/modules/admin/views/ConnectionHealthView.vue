@@ -429,16 +429,30 @@ const startRefreshWaitTimer = () => {
   }, 1000)
 }
 
-const completeRefresh = (generation: number) => {
-  if (!refreshCoordinator.complete(generation)) return
-  refreshLoading.value = false
-  stopRefreshWaitTimer()
-}
-
 const loadMainListIfIdle = async (reload: () => Promise<unknown>): Promise<boolean> => {
   if (refreshCoordinator.isRefreshActive()) return false
   await reload()
   return true
+}
+
+let setupGroupReloadPending = false
+const reloadSetupGroupsAuthoritatively = async () => {
+	const started = await loadMainListIfIdle(() => loadAdminGroups({ silent: true }))
+	if (!started) setupGroupReloadPending = true
+}
+
+const flushPendingSetupGroupReload = async () => {
+	if (!setupGroupReloadPending) return
+	setupGroupReloadPending = false
+	const started = await loadMainListIfIdle(() => loadAdminGroups({ silent: true }))
+	if (!started) setupGroupReloadPending = true
+}
+
+const completeRefresh = (generation: number) => {
+	if (!refreshCoordinator.complete(generation)) return
+	refreshLoading.value = false
+	stopRefreshWaitTimer()
+	void flushPendingSetupGroupReload()
 }
 
 let lastEntryRefreshAt = 0
@@ -503,6 +517,7 @@ const refresh = async () => {
 onBeforeUnmount(() => {
   cancelAdminGroupsRefresh()
   stopRefreshWaitTimer()
+	setupGroupReloadPending = false
 })
 
 const siteName = (siteId: string): string => siteNameMap.value.get(siteId) ?? siteId
@@ -597,21 +612,24 @@ const refreshIssueLabel = (issue: { errorKey: string; status: string }): string 
 // 分组启用/管理抽屉。
 const setupDrawerOpen = ref(false)
 const setupGroup = ref<AdminGroupHealth | null>(null)
+const setupGroupsSnapshot = ref<AdminGroupHealth[]>([])
 const policyAssignmentDialogOpen = ref(false)
 const policyAssignmentTarget = ref<AdminGroupAccount | null>(null)
 
 const openSetup = (group: AdminGroupHealth) => {
-  setupGroup.value = group
+	setupGroupsSnapshot.value = adminGroups.value
+	setupGroup.value = setupGroupsSnapshot.value.find(candidate => candidate.id === group.id) ?? group
   setupDrawerOpen.value = true
 }
 
 const onSetupSaved = async (configuration?: AdminGroupPolicyConfiguration) => {
   setupDrawerOpen.value = false
-	applySavedGroupConfiguration(configuration)
-	if (configuration?.prioritySyncStatus === 'pending' && currentAccount.value?.id) {
-		prioritySyncStatus.value = { workspaceId: currentAccount.value.id, status: 'pending', failedCount: 0 }
-	}
-	await Promise.all([
+  applySavedGroupConfiguration(configuration)
+  if (configuration?.prioritySyncStatus === 'pending' && currentAccount.value?.id) {
+    prioritySyncStatus.value = { workspaceId: currentAccount.value.id, status: 'pending', failedCount: 0 }
+  }
+  await Promise.all([
+    reloadSetupGroupsAuthoritatively(),
     runAuxiliaryRequest('policies', () => loadPolicies({ recordError: false })),
     runAuxiliaryRequest('priority', loadPrioritySyncStatus),
   ])
@@ -1086,6 +1104,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       :open="setupDrawerOpen"
       :group="setupGroup"
       :policies="policies"
+      :all-groups="setupDrawerOpen ? setupGroupsSnapshot : adminGroups"
       @close="setupDrawerOpen = false"
       @saved="onSetupSaved"
     />

@@ -27,6 +27,12 @@ const siteLogo = (name: string): string => name.trim().charAt(0).toUpperCase() |
 
 const emptyMetric = (): UpstreamMetricValue => ({ value: null, display: '-' })
 
+const safeUpstreamErrorKey = (error: unknown): string => {
+  const key = error instanceof Error ? error.message.trim() : ''
+  if (/^(?:admin\.upstream\.errors\.[A-Za-z][A-Za-z0-9]*|auth\.errors\.unauthorized)$/.test(key)) return key
+  return 'admin.upstream.errors.unknown'
+}
+
 const normalizeMetrics = (metrics: UpstreamSiteResponse['metrics'] | null | undefined): UpstreamMetrics => ({
   balance: metrics?.balance ?? emptyMetric(),
   todayConsume: metrics?.todayConsume ?? emptyMetric(),
@@ -121,9 +127,15 @@ export const useUpstreamSites = () => {
   const refreshSingleSite = async (id: string) => {
     const site = sites.value.find((item) => item.id === id)
     if (!site?.enabled || syncingSiteIds.value.has(id)) return
+    siteSyncStates.value.delete(id)
     syncingSiteIds.value = new Set([...syncingSiteIds.value, id])
     try {
       await syncSite(id)
+    } catch (error) {
+      siteSyncStates.value.set(id, {
+        phase: 'error',
+        errorKey: safeUpstreamErrorKey(error),
+      })
     } finally {
       const next = new Set(syncingSiteIds.value)
       next.delete(id)

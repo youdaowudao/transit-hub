@@ -1274,11 +1274,20 @@ export default {
         retry: '重新加载',
         scope: {
           title: '选择策略生效目标',
-          description: '默认选择当前分组的全部账号或渠道。取消勾选的目标不会自动探活、自动降级或调整优先级。',
+          description: '默认选择当前分组的全部账号或渠道。取消勾选只会把目标从当前分组策略中排除，其他分组或账号独立策略可能继续生效。',
           modelsUnknown: '上游未返回模型列表',
           probeable: '可探活',
           pending: '凭据待完善',
-          futureHint: '以后加入该上游分组的新目标会自动继承本策略；已取消勾选的目标会继续保持排除。'
+          futureHint: '以后加入该上游分组的新目标会自动继承本策略；已取消勾选的目标会继续保持排除。',
+          currentGroupOnly: '仅从当前分组排除',
+          directMonitoring: '仍由账号独立策略“{policies}”监控',
+          directNoProbe: '账号独立策略“{policies}”当前不产生自动探活',
+          groupMonitoring: '仍由“{group}”监控：{policies}',
+          probingStops: '从本分组排除后，将停止自动探活',
+          outcomeUnknown: '当前资料不完整，暂无法确认是否会停止自动探活',
+          unschedulableContinues: '策略“{name}”：主站关闭调度后继续自动探活（每 {minutes} 分钟）',
+          unschedulablePolicyStops: '策略“{name}”：主站关闭调度期间不会自动探活',
+          unschedulableStops: '仍绑定上述策略，但主站关闭调度期间不会自动探活'
         },
         strategy: {
           title: '选择运行策略',
@@ -1335,6 +1344,8 @@ export default {
           notApplicable: '不需要',
           remoteAction: '上游自动动作',
           fallbackMultiplier: '本地探活排序回退倍率',
+          accountChanges: '本次账号变更',
+          reincluded: '重新纳入当前分组：{policies}',
           notConfigured: '未配置',
           enabled: '已启用',
           disabled: '未启用',

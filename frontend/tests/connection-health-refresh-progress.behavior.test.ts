@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { nextTick } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ConnectionHealthView from '@/modules/admin/views/ConnectionHealthView.vue'
@@ -88,7 +88,7 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', async () => {
 
 const mountedWrappers: VueWrapper[] = []
 
-const mountView = async () => {
+const mountView = async (componentStubs: Record<string, unknown> = {}) => {
   const wrapper = mount(ConnectionHealthView, {
     global: {
       stubs: {
@@ -100,6 +100,7 @@ const mountView = async () => {
         PolicyConfigDrawer: true,
         ProbePolicyListDialog: true,
         TargetPolicyAssignmentDialog: true,
+        ...componentStubs,
       },
     },
   })
@@ -156,6 +157,195 @@ afterEach(() => {
 })
 
 describe('connection health refresh progress behavior', () => {
+  it('passes the complete workspace group snapshot to the setup drawer', async () => {
+    harness.activeWorkspaceScope = 'ws1'
+    harness.refs.adminGroups.value = [
+      { id: 'group-visible', name: '当前可见分组', platform: 'sub2api', type: 'public', accountCount: 0, accounts: [] },
+      { id: 'group-hidden', name: '仍需参与来源判断的分组', platform: 'sub2api', type: 'public', accountCount: 0, accounts: [] },
+    ]
+    const SetupGroupsProbe = defineComponent({
+      name: 'GroupHealthSetupDrawer',
+      props: {
+        allGroups: { type: Array, default: () => [] },
+      },
+      setup(props) {
+        return () => h('div', { 'data-test': 'setup-all-groups' }, (props.allGroups as Array<{ name: string }>).map(group => group.name).join(','))
+      },
+    })
+
+    const wrapper = await mountView({ GroupHealthSetupDrawer: SetupGroupsProbe })
+
+    expect(wrapper.get('[data-test="setup-all-groups"]').text()).toBe('当前可见分组,仍需参与来源判断的分组')
+  })
+
+  it('keeps the setup group and complete group list on the same opening snapshot during a refresh', async () => {
+    harness.activeWorkspaceScope = 'ws1'
+    harness.refs.adminGroups.value = [
+      { id: 'group-current', name: '打开时当前分组', platform: 'sub2api', type: 'public', accountCount: 0, accounts: [] },
+      { id: 'group-remaining', name: '打开时剩余分组', platform: 'sub2api', type: 'public', accountCount: 0, accounts: [] },
+    ]
+    const GroupDetailProbe = defineComponent({
+      name: 'AdminGroupHealthDetail',
+      props: { group: { type: Object, required: true } },
+      emits: ['setup'],
+      setup(props, { emit }) {
+        return () => h('button', {
+          'data-test': 'open-setup',
+          onClick: () => emit('setup', props.group),
+        }, (props.group as { name: string }).name)
+      },
+    })
+    const SetupSnapshotProbe = defineComponent({
+      name: 'GroupHealthSetupDrawer',
+      props: {
+        open: Boolean,
+        group: { type: Object, default: null },
+        allGroups: { type: Array, default: () => [] },
+      },
+      setup(props) {
+        return () => props.open
+          ? h('div', { 'data-test': 'setup-snapshot' }, [
+              (props.group as { name?: string } | null)?.name ?? '',
+              '|',
+              (props.allGroups as Array<{ name: string }>).map(group => group.name).join(','),
+            ])
+          : null
+      },
+    })
+    const wrapper = await mountView({
+      AdminGroupHealthDetail: GroupDetailProbe,
+      GroupHealthSetupDrawer: SetupSnapshotProbe,
+    })
+
+    await wrapper.get('[data-test="open-setup"]').trigger('click')
+    const openedGroupName = wrapper.get('[data-test="open-setup"]').text()
+    expect(wrapper.get('[data-test="setup-snapshot"]').text()).toBe(
+      `${openedGroupName}|打开时当前分组,打开时剩余分组`,
+    )
+
+    harness.refs.adminGroups.value = [
+      { id: 'group-current', name: '刷新后当前分组', platform: 'sub2api', type: 'public', accountCount: 0, accounts: [] },
+      { id: 'group-remaining', name: '刷新后剩余分组', platform: 'sub2api', type: 'public', accountCount: 0, accounts: [] },
+    ]
+    await nextTick()
+
+    expect(wrapper.get('[data-test="open-setup"]').text()).toBe(openedGroupName.replace('打开时', '刷新后'))
+    expect(wrapper.get('[data-test="setup-snapshot"]').text()).toBe(
+      `${openedGroupName}|打开时当前分组,打开时剩余分组`,
+    )
+  })
+
+  it('reloads the main group list after a successful setup save and renders the refreshed result', async () => {
+    harness.activeWorkspaceScope = 'ws1'
+    harness.refs.adminGroups.value = [{
+      id: 'group-a', name: '保存前局部结果', platform: 'sub2api', type: 'public', accountCount: 0, accounts: [],
+    }]
+    harness.loadAdminGroups.mockImplementationOnce(async () => {
+      harness.refs.adminGroups.value = [{
+        id: 'group-a', name: '后端重新读取结果', platform: 'sub2api', type: 'public', accountCount: 0, accounts: [],
+      }]
+      return true
+    })
+    const GroupDetailProbe = defineComponent({
+      name: 'AdminGroupHealthDetail',
+      props: { group: { type: Object, required: true } },
+      emits: ['setup'],
+      setup(props, { emit }) {
+        return () => h('button', {
+          'data-test': 'open-setup',
+          onClick: () => emit('setup', props.group),
+        }, (props.group as { name: string }).name)
+      },
+    })
+    const SetupSaveProbe = defineComponent({
+      name: 'GroupHealthSetupDrawer',
+      props: { open: Boolean },
+      emits: ['saved'],
+      setup(props, { emit }) {
+        return () => props.open
+          ? h('button', {
+              'data-test': 'save-setup',
+              onClick: () => emit('saved', {
+                adminGroupId: 'group-a', adminGroupName: '保存前局部结果',
+                policyIds: [], policies: [], excludedTargetIds: [], prioritySyncStatus: 'success',
+              }),
+            }, '保存配置')
+          : null
+      },
+    })
+    const wrapper = await mountView({
+      AdminGroupHealthDetail: GroupDetailProbe,
+      GroupHealthSetupDrawer: SetupSaveProbe,
+    })
+
+    expect(wrapper.get('[data-test="open-setup"]').text()).toBe('保存前局部结果')
+    await wrapper.get('[data-test="open-setup"]').trigger('click')
+    await wrapper.get('[data-test="save-setup"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="open-setup"]').text()).toBe('后端重新读取结果')
+  })
+
+  it('retries the authoritative group reload after an overlapping terminal refresh finishes', async () => {
+    harness.activeWorkspaceScope = 'ws1'
+    harness.refs.adminGroups.value = [{
+      id: 'group-a', name: '保存前局部结果', platform: 'sub2api', type: 'public', accountCount: 0, accounts: [],
+    }]
+    const refresh = deferred<boolean>()
+    let refreshActive = true
+    harness.refreshAdminGroups.mockReset().mockReturnValueOnce(refresh.promise)
+    harness.loadAdminGroups.mockImplementation(async () => {
+      if (refreshActive) return false
+      harness.refs.adminGroups.value = [{
+        id: 'group-a', name: '刷新收口后的权威结果', platform: 'sub2api', type: 'public', accountCount: 0, accounts: [],
+      }]
+      return true
+    })
+    const GroupDetailProbe = defineComponent({
+      name: 'AdminGroupHealthDetail',
+      props: { group: { type: Object, required: true } },
+      emits: ['setup'],
+      setup(props, { emit }) {
+        return () => h('button', {
+          'data-test': 'open-setup',
+          onClick: () => emit('setup', props.group),
+        }, (props.group as { name: string }).name)
+      },
+    })
+    const SetupSaveProbe = defineComponent({
+      name: 'GroupHealthSetupDrawer',
+      props: { open: Boolean },
+      emits: ['saved'],
+      setup(props, { emit }) {
+        return () => props.open
+          ? h('button', {
+              'data-test': 'save-setup',
+              onClick: () => emit('saved', {
+                adminGroupId: 'group-a', adminGroupName: '保存前局部结果',
+                policyIds: [], policies: [], excludedTargetIds: [], prioritySyncStatus: 'success',
+              }),
+            }, '保存配置')
+          : null
+      },
+    })
+    const wrapper = await mountView({
+      AdminGroupHealthDetail: GroupDetailProbe,
+      GroupHealthSetupDrawer: SetupSaveProbe,
+    })
+
+    await findButton(wrapper, '刷新').trigger('click')
+    await wrapper.get('[data-test="open-setup"]').trigger('click')
+    await wrapper.get('[data-test="save-setup"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="open-setup"]').text()).toBe('保存前局部结果')
+
+    refreshActive = false
+    refresh.resolve(true)
+    await flushPromises()
+
+    expect(wrapper.get('[data-test="open-setup"]').text()).toBe('刷新收口后的权威结果')
+  })
+
   it('ends the primary spinner when terminal arrives even if every auxiliary promise remains pending', async () => {
     const refresh = deferred<boolean>()
     const never = new Promise<boolean>(() => undefined)

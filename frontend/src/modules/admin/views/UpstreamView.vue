@@ -423,6 +423,12 @@ const lastUpdatedDisplay = (site: UpstreamSite): string => {
   return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(value)
 }
 
+const siteFailureKey = (site: UpstreamSite): string | null => {
+  const syncState = siteSyncStates.value.get(site.id)
+  if (syncState?.phase === 'error' && syncState.errorKey) return syncState.errorKey
+  return site.errorKey
+}
+
 onMounted(() => {
   void Promise.all([loadRefreshSettings(), loadGroupNavigationData()])
   void runRefresh()
@@ -506,12 +512,11 @@ onBeforeUnmount(() => {
       >
         <!-- Sync Progress Overlay -->
         <div
-          v-if="site.enabled && siteSyncStates.get(site.id)?.phase && siteSyncStates.get(site.id)?.phase !== 'idle'"
+          v-if="site.enabled && (siteSyncStates.get(site.id)?.phase === 'syncing' || siteSyncStates.get(site.id)?.phase === 'done')"
           class="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-2xl backdrop-blur-sm transition-all"
           :class="{
             'bg-background/60': siteSyncStates.get(site.id)?.phase === 'syncing',
             'bg-signal/10 dark:bg-signal/5': siteSyncStates.get(site.id)?.phase === 'done',
-            'bg-destructive/10 dark:bg-destructive/5': siteSyncStates.get(site.id)?.phase === 'error',
           }"
         >
           <template v-if="siteSyncStates.get(site.id)?.phase === 'syncing'">
@@ -521,10 +526,6 @@ onBeforeUnmount(() => {
           <template v-else-if="siteSyncStates.get(site.id)?.phase === 'done'">
             <CheckCircle2 class="h-6 w-6 text-signal" />
             <span class="mt-2 text-sm font-medium text-signal">{{ t('admin.upstream.syncStream.done') }}</span>
-          </template>
-          <template v-else-if="siteSyncStates.get(site.id)?.phase === 'error'">
-            <XCircle class="h-6 w-6 text-destructive" />
-            <span class="mt-2 text-sm font-medium text-destructive">{{ t('admin.upstream.syncStream.error') }}</span>
           </template>
         </div>
 
@@ -647,9 +648,12 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-if="site.enabled && site.errorKey" class="mt-4 flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning">
+        <div v-if="site.enabled && siteFailureKey(site)" class="mt-4 flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning" role="alert" aria-live="polite">
           <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>{{ t(site.errorKey) }}</span>
+          <span>
+            <span class="font-medium">{{ t('admin.upstream.syncStream.error') }}：</span>
+            {{ t(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') }}
+          </span>
         </div>
 
       </div>
@@ -710,20 +714,17 @@ onBeforeUnmount(() => {
               </td>
               <td class="px-6 py-4">
                 <div
-                  v-if="site.enabled && siteSyncStates.get(site.id)?.phase && siteSyncStates.get(site.id)?.phase !== 'idle'"
+                  v-if="site.enabled && (siteSyncStates.get(site.id)?.phase === 'syncing' || siteSyncStates.get(site.id)?.phase === 'done')"
                   class="inline-flex items-center gap-1.5 text-xs font-medium"
                   :class="{
                     'text-primary': siteSyncStates.get(site.id)?.phase === 'syncing',
                     'text-signal': siteSyncStates.get(site.id)?.phase === 'done',
-                    'text-destructive': siteSyncStates.get(site.id)?.phase === 'error',
                   }"
                 >
                   <Loader2 v-if="siteSyncStates.get(site.id)?.phase === 'syncing'" class="w-3.5 h-3.5 animate-spin" />
-                  <CheckCircle2 v-else-if="siteSyncStates.get(site.id)?.phase === 'done'" class="w-3.5 h-3.5" />
-                  <XCircle v-else class="w-3.5 h-3.5" />
+                  <CheckCircle2 v-else class="w-3.5 h-3.5" />
                   <template v-if="siteSyncStates.get(site.id)?.phase === 'syncing'">{{ t('admin.upstream.syncStream.syncing') }}</template>
-                  <template v-else-if="siteSyncStates.get(site.id)?.phase === 'done'">{{ t('admin.upstream.syncStream.done') }}</template>
-                  <template v-else>{{ t('admin.upstream.syncStream.error') }}</template>
+                  <template v-else>{{ t('admin.upstream.syncStream.done') }}</template>
                 </div>
                 <div
                   v-else
@@ -734,6 +735,13 @@ onBeforeUnmount(() => {
                   <CheckCircle2 v-else-if="site.enabled && site.status === 'connected'" class="w-3.5 h-3.5" />
                   <XCircle v-else class="w-3.5 h-3.5" />
                   {{ site.enabled ? statusLabel(site.status) : t('admin.upstream.status.disabled') }}
+                </div>
+                <div v-if="site.enabled && siteFailureKey(site)" class="mt-2 flex max-w-xs items-start gap-1.5 text-xs leading-5 text-destructive" role="alert" aria-live="polite">
+                  <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    <span class="font-medium">{{ t('admin.upstream.syncStream.error') }}：</span>
+                    {{ t(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') }}
+                  </span>
                 </div>
               </td>
               <td class="px-6 py-4">

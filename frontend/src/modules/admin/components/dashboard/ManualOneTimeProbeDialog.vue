@@ -145,6 +145,8 @@ let qaHistorySequence = 0
 let qaHistoryIntentPage = 1
 let qaJudgmentRefreshSequence = 0
 let qaJudgmentSessionSequence = 0
+let qaPollSequence = 0
+let qaRuntimeSnapshotSequence = 0
 
 const cancelActiveRequest = () => {
   activeRequestController?.abort()
@@ -179,6 +181,7 @@ const finishModelDiscovery = (controller: AbortController) => {
 }
 
 const clearQuestionAnswerPolling = () => {
+  qaPollSequence++
   if (qaPollTimer) clearTimeout(qaPollTimer)
   qaPollTimer = null
   qaPollController?.abort()
@@ -239,6 +242,14 @@ const resetQuestionAnswerViewState = () => {
   qaShowAll.value = false
 }
 
+const cancelQuestionAnswerJudgments = () => {
+  for (const controller of qaJudgmentControllers.values()) controller.abort()
+  qaJudgmentControllers.clear()
+  qaJudgmentRefreshSequences.clear()
+  qaJudgmentSessionSequence++
+  qaMarking.value = new Set()
+}
+
 const cancelQuestionAnswerRequests = () => {
   clearQuestionAnswerPolling()
   clearQuestionAnswerClock()
@@ -247,11 +258,8 @@ const cancelQuestionAnswerRequests = () => {
   qaLoading.value = false
   qaCancelController?.abort()
   qaCancelController = null
-  for (const controller of qaJudgmentControllers.values()) controller.abort()
-  qaJudgmentControllers.clear()
-  qaJudgmentRefreshSequences.clear()
-  qaJudgmentSessionSequence++
-  qaMarking.value = new Set()
+  cancelQuestionAnswerJudgments()
+  qaRuntimeSnapshotSequence++
   qaCancelSequence++
   qaCancelling.value = false
 }
@@ -521,6 +529,11 @@ const questionAnswerScopeIsCurrent = (scope: QuestionAnswerOperationScope): bool
   })
 )
 
+const questionAnswerPollIsCurrent = (
+  pollSequence: number,
+  scope: QuestionAnswerOperationScope,
+): boolean => pollSequence === qaPollSequence && questionAnswerScopeIsCurrent(scope)
+
 const applyRuntimeQuestionAnswerBatch = (batch: QuestionAnswerBatch) => {
   qaRuntimeBatch.value = batch
   if (!qaReviewBatch.value || qaReviewBatch.value.batchId === batch.batchId) {
@@ -541,18 +554,39 @@ const pollQuestionAnswerBatch = async () => {
   const batchId = qaRuntimeBatch.value.batchId
   const sequence = loadSequence
   const scope = { sequence, targetId, batchId }
+  const pollSequence = qaPollSequence
+  const runtimeSnapshotSequence = ++qaRuntimeSnapshotSequence
   const controller = new AbortController()
   qaPollController = controller
+  let historySequence: number | null = null
   try {
     let batch = await getQuestionAnswerBatch(targetId, batchId, controller.signal)
-    if (!questionAnswerScopeIsCurrent(scope)) return
-    applyRuntimeQuestionAnswerBatch(batch)
+    if (!questionAnswerPollIsCurrent(pollSequence, scope)) return
     if (batch.active) {
+      if (!qaRuntimeBatch.value?.active) {
+        clearQuestionAnswerClock()
+        return
+      }
+      if (runtimeSnapshotSequence !== qaRuntimeSnapshotSequence) {
+        scheduleQuestionAnswerPoll()
+        return
+      }
+      applyRuntimeQuestionAnswerBatch(batch)
       scheduleQuestionAnswerPoll()
       return
     }
     batch = await getQuestionAnswerBatch(targetId, batchId, controller.signal)
-    if (!questionAnswerScopeIsCurrent(scope)) return
+    if (!questionAnswerPollIsCurrent(pollSequence, scope)) return
+    if (batch.active) {
+      if (!qaRuntimeBatch.value?.active) {
+        clearQuestionAnswerClock()
+        return
+      }
+      if (runtimeSnapshotSequence === qaRuntimeSnapshotSequence) applyRuntimeQuestionAnswerBatch(batch)
+      if (qaRuntimeBatch.value?.active) scheduleQuestionAnswerPoll()
+      else clearQuestionAnswerClock()
+      return
+    }
     const reviewFollowsRuntime = qaReviewLoadingBatchId.value === null
       && qaReviewBatch.value?.batchId === batch.batchId
     applyRuntimeQuestionAnswerBatch(batch)
@@ -561,9 +595,9 @@ const pollQuestionAnswerBatch = async () => {
       qaCurrentExpanded.value = new Set()
     }
     const historyPage = reviewFollowsRuntime ? 1 : qaHistoryIntentPage
-    const historySequence = beginQuestionAnswerHistoryIntent(historyPage)
+    historySequence = beginQuestionAnswerHistoryIntent(historyPage)
     const history = await getQuestionAnswerHistory(targetId, historyPage, controller.signal)
-    if (!questionAnswerScopeIsCurrent(scope)) return
+    if (!questionAnswerPollIsCurrent(pollSequence, scope)) return
     if (
       questionAnswerHistoryIntentIsCurrent(historySequence)
       && qaHistoryIntentPage === historyPage
@@ -575,7 +609,20 @@ const pollQuestionAnswerBatch = async () => {
     clearQuestionAnswerPolling()
     clearQuestionAnswerClock()
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') return
+    if (
+      (error instanceof Error && error.name === 'AbortError')
+      || !questionAnswerPollIsCurrent(pollSequence, scope)
+    ) return
+    if (historySequence !== null && !questionAnswerHistoryIntentIsCurrent(historySequence)) {
+      qaCompletedNotice.value = true
+      clearQuestionAnswerPolling()
+      clearQuestionAnswerClock()
+      return
+    }
+    if (historySequence === null && !qaRuntimeBatch.value?.active) {
+      clearQuestionAnswerClock()
+      return
+    }
     qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
     if (qaRuntimeBatch.value?.active) scheduleQuestionAnswerPoll()
     else clearQuestionAnswerClock()
@@ -587,6 +634,7 @@ const pollQuestionAnswerBatch = async () => {
 const startQuestionAnswers = async () => {
   if (!canStartTest.value || !props.target) return
   cancelQuestionAnswerReview()
+  cancelQuestionAnswerJudgments()
   qaStarting.value = true
   qaErrorKey.value = ''
   qaCompletedNotice.value = false
@@ -604,6 +652,7 @@ const startQuestionAnswers = async () => {
       controller.signal,
     )
     if (startSequence !== qaStartSequence || !questionAnswerScopeIsCurrent(scope)) return
+    qaErrorKey.value = ''
     qaRuntimeBatch.value = batch
     qaReviewBatch.value = batch
     qaShowAll.value = false
@@ -656,9 +705,14 @@ const stopQuestionAnswers = async () => {
   qaCancelling.value = true
   qaErrorKey.value = ''
   clearQuestionAnswerPolling()
+  let historySequence: number | null = null
   try {
     const batch = await cancelQuestionAnswerBatch(targetId, batchId, controller.signal)
     if (cancelSequence !== qaCancelSequence || !questionAnswerScopeIsCurrent(scope)) return
+    if (!qaRuntimeBatch.value?.active) {
+      clearQuestionAnswerClock()
+      return
+    }
     const reviewFollowsRuntime = qaReviewLoadingBatchId.value === null
       && qaReviewBatch.value?.batchId === batch.batchId
     applyRuntimeQuestionAnswerBatch(batch)
@@ -668,7 +722,7 @@ const stopQuestionAnswers = async () => {
     }
     clearQuestionAnswerClock()
     const historyPage = reviewFollowsRuntime ? 1 : qaHistoryIntentPage
-    const historySequence = beginQuestionAnswerHistoryIntent(historyPage)
+    historySequence = beginQuestionAnswerHistoryIntent(historyPage)
     const history = await getQuestionAnswerHistory(targetId, historyPage, controller.signal)
     if (cancelSequence !== qaCancelSequence || !questionAnswerScopeIsCurrent(scope)) return
     if (
@@ -680,7 +734,15 @@ const stopQuestionAnswers = async () => {
     }
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
-    if (cancelSequence === qaCancelSequence && questionAnswerScopeIsCurrent(scope)) {
+    if (historySequence === null && !qaRuntimeBatch.value?.active) {
+      clearQuestionAnswerClock()
+      return
+    }
+    if (
+      cancelSequence === qaCancelSequence
+      && questionAnswerScopeIsCurrent(scope)
+      && (historySequence === null || questionAnswerHistoryIntentIsCurrent(historySequence))
+    ) {
       qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
       if (qaRuntimeBatch.value?.active) scheduleQuestionAnswerPoll()
     }
@@ -695,6 +757,9 @@ const reviewQuestionAnswerBatch = async (batchId: string) => {
   const targetId = props.target.targetId
   const sequence = loadSequence
   const reviewSequence = cancelQuestionAnswerReview()
+  const runtimeSelectionSequence = qaRuntimeBatch.value?.batchId === batchId && qaRuntimeBatch.value.active
+    ? ++qaRuntimeSnapshotSequence
+    : null
   qaReviewJudgmentRefreshSequence = qaJudgmentRefreshSequences.get(batchId) ?? 0
   const controller = new AbortController()
   qaReviewController = controller
@@ -709,11 +774,23 @@ const reviewQuestionAnswerBatch = async (batchId: string) => {
       || props.target?.targetId !== targetId
     ) return
     const runtimeBatch = qaRuntimeBatch.value
-    qaReviewBatch.value = batch.active
-      && runtimeBatch?.batchId === batch.batchId
-      && !runtimeBatch.active
-      ? runtimeBatch
-      : batch
+    if (runtimeSelectionSequence !== null && runtimeBatch?.batchId === batch.batchId) {
+      if (
+        runtimeBatch.active
+        && (runtimeSelectionSequence === qaRuntimeSnapshotSequence || !batch.active)
+      ) qaRuntimeBatch.value = batch
+      const currentRuntime = qaRuntimeBatch.value
+      qaReviewBatch.value = currentRuntime?.batchId === batch.batchId
+        ? currentRuntime
+        : batch
+      if (!qaRuntimeBatch.value?.active) clearQuestionAnswerClock()
+    } else {
+      qaReviewBatch.value = batch.active
+        && runtimeBatch?.batchId === batch.batchId
+        && !runtimeBatch.active
+        ? runtimeBatch
+        : batch
+    }
     qaShowAll.value = false
     qaCurrentExpanded.value = new Set()
   } catch (error) {
@@ -727,6 +804,13 @@ const reviewQuestionAnswerBatch = async (batchId: string) => {
       qaReviewLoadingBatchId.value = null
       qaReviewJudgmentRefreshSequence = 0
     }
+    if (
+      runtimeSelectionSequence !== null
+      && runtimeSelectionSequence === qaRuntimeSnapshotSequence
+      && reviewSequence === qaReviewSequence
+      && qaRuntimeBatch.value?.batchId === batchId
+      && qaRuntimeBatch.value.active
+    ) scheduleQuestionAnswerPoll()
   }
 }
 
@@ -739,7 +823,7 @@ const reviewLatestQuestionAnswerBatch = () => {
 }
 
 const goQuestionAnswerPage = async (page: number) => {
-  if (!props.target || page < 1 || page > qaHistory.value.totalPages || page === qaHistory.value.page) return
+  if (!props.target || page < 1 || page > qaHistory.value.totalPages || page === qaHistoryIntentPage) return
   const targetId = props.target.targetId
   const sequence = loadSequence
   const historySequence = beginQuestionAnswerHistoryIntent(page)
@@ -798,20 +882,45 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
   nextMarking.add(record.id)
   qaMarking.value = nextMarking
   qaErrorKey.value = ''
+  let pollingPausedForRuntime = false
+  let judgmentRefreshSequence: number | null = null
+  let historySequence: number | null = null
+  let judgmentRefreshStage: 'put' | 'batch' | 'history' = 'put'
+  const resumeRuntimePolling = () => {
+    if (
+      pollingPausedForRuntime
+      && judgmentRefreshSequence !== null
+      && judgmentSessionSequence === qaJudgmentSessionSequence
+      && qaJudgmentRefreshSequences.get(record.batchId) === judgmentRefreshSequence
+      && questionAnswerScopeIsCurrent(scope)
+      && qaRuntimeBatch.value?.batchId === record.batchId
+      && qaRuntimeBatch.value.active
+    ) {
+      pollingPausedForRuntime = false
+      scheduleQuestionAnswerPoll()
+    }
+  }
   try {
     await setQuestionAnswerJudgment(targetId, record.id, judgment, controller.signal)
     if (
       judgmentSessionSequence !== qaJudgmentSessionSequence
       || !questionAnswerScopeIsCurrent(scope)
     ) return
+    if (qaRuntimeBatch.value?.batchId === record.batchId) {
+      clearQuestionAnswerPolling()
+      pollingPausedForRuntime = true
+    }
     const historyPage = qaHistoryIntentPage
-    const historySequence = beginQuestionAnswerHistoryIntent()
-    const judgmentRefreshSequence = ++qaJudgmentRefreshSequence
+    historySequence = beginQuestionAnswerHistoryIntent()
+    judgmentRefreshSequence = ++qaJudgmentRefreshSequence
     qaJudgmentRefreshSequences.set(record.batchId, judgmentRefreshSequence)
-    const [batch, history] = await Promise.all([
-      getQuestionAnswerBatch(targetId, record.batchId, controller.signal),
-      getQuestionAnswerHistory(targetId, historyPage, controller.signal),
-    ])
+    judgmentRefreshStage = 'batch'
+    const batchPromise = getQuestionAnswerBatch(targetId, record.batchId, controller.signal)
+    const historyOutcomePromise = getQuestionAnswerHistory(targetId, historyPage, controller.signal).then(
+      history => ({ ok: true as const, history }),
+      error => ({ ok: false as const, error }),
+    )
+    const batch = await batchPromise
     if (
       judgmentSessionSequence !== qaJudgmentSessionSequence
       || qaJudgmentRefreshSequences.get(record.batchId) !== judgmentRefreshSequence
@@ -834,6 +943,16 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
     if (qaRuntimeBatch.value?.batchId === batch.batchId && (qaRuntimeBatch.value.active || !batch.active)) {
       qaRuntimeBatch.value = batch
     }
+    resumeRuntimePolling()
+    judgmentRefreshStage = 'history'
+    const historyOutcome = await historyOutcomePromise
+    if (!historyOutcome.ok) throw historyOutcome.error
+    const history = historyOutcome.history
+    if (
+      judgmentSessionSequence !== qaJudgmentSessionSequence
+      || qaJudgmentRefreshSequences.get(record.batchId) !== judgmentRefreshSequence
+      || !questionAnswerScopeIsCurrent(scope)
+    ) return
     if (
       questionAnswerHistoryIntentIsCurrent(historySequence)
       && qaHistoryIntentPage === historyPage
@@ -846,6 +965,15 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
     if (
       judgmentSessionSequence === qaJudgmentSessionSequence
       && questionAnswerScopeIsCurrent(scope)
+      && (
+        judgmentRefreshSequence === null
+        || qaJudgmentRefreshSequences.get(record.batchId) === judgmentRefreshSequence
+      )
+      && (
+        judgmentRefreshStage !== 'history'
+        || historySequence === null
+        || questionAnswerHistoryIntentIsCurrent(historySequence)
+      )
     ) {
       qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
     }
@@ -861,6 +989,7 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
         qaMarking.value = marking
       }
     }
+    resumeRuntimePolling()
   }
 }
 

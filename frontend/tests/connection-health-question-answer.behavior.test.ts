@@ -1872,4 +1872,671 @@ describe('question-answer batch behavior', () => {
       shortQuestionAnswerBatchId(oldBatch.batchId),
     )
   })
+
+  it('does not let a late poll overwrite a newer judgment refresh', async () => {
+    vi.useFakeTimers()
+    const judgableRuntime = batchWithStatuses(
+      ['succeeded', 'running', 'running', 'running', 'running', 'running'],
+      true,
+    )
+    const judgedRecords = judgableRuntime.records.map((record, index) => (
+      index === 0 ? { ...record, answerJudgment: 'correct' as const } : record
+    ))
+    const judgedRuntime = {
+      ...judgableRuntime,
+      records: judgedRecords,
+      stats: {
+        ...judgableRuntime.stats,
+        reviews: { unreviewed: 0, correct: 1, incorrect: 0 },
+      },
+    }
+    let resolveLatePoll: ((batch: typeof judgableRuntime) => void) | undefined
+    let batchReads = 0
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(judgableRuntime)
+    harness.getQuestionAnswerBatch.mockImplementation(() => {
+      batchReads++
+      if (batchReads === 1) {
+        return new Promise<typeof judgableRuntime>(resolve => { resolveLatePoll = resolve })
+      }
+      return Promise.resolve(judgedRuntime)
+    })
+    harness.setQuestionAnswerJudgment.mockResolvedValue(judgedRecords[0])
+
+    const wrapper = await mountQuestionAnswerDialog()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    const correct = judgmentButtons(rowContaining(wrapper, 'Question 1')).find(
+      button => button.text().trim() === '正确',
+    )
+    if (!correct) throw new Error('missing active-runtime judgment action')
+    await correct.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('正确1')
+
+    resolveLatePoll?.(judgableRuntime)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('正确1')
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('待复审0')
+  })
+
+  it('does not let a late poll revive a stopped runtime', async () => {
+    vi.useFakeTimers()
+    const stoppedRuntime = batchWithStatuses(
+      ['cancelled', 'cancelled', 'cancelled', 'cancelled', 'cancelled', 'cancelled'],
+      false,
+    )
+    let resolveLatePoll: ((batch: typeof activeBatch) => void) | undefined
+    harness.getQuestionAnswerBatch.mockImplementation(() => (
+      new Promise<typeof activeBatch>(resolve => { resolveLatePoll = resolve })
+    ))
+    harness.cancelQuestionAnswerBatch.mockResolvedValue(stoppedRuntime)
+
+    const wrapper = await mountQuestionAnswerDialog()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    const stop = wrapper.findAll('button').find(button => button.text().includes('终止本次问答'))
+    if (!stop) throw new Error('missing active-runtime stop action')
+    await stop.trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('button').some(button => button.text().includes('终止本次问答'))).toBe(false)
+
+    resolveLatePoll?.(activeBatch)
+    await flushPromises()
+
+    expect(wrapper.findAll('button').some(button => button.text().includes('终止本次问答'))).toBe(false)
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('进行中0')
+  })
+
+  it('does not let a late judgment failure pollute a newly started batch', async () => {
+    const newRuntimeBatchId = 'runtime-after-late-judgment'
+    const newRuntime = {
+      ...activeBatch,
+      batchId: newRuntimeBatchId,
+      records: activeBatch.records.map(record => ({ ...record, batchId: newRuntimeBatchId })),
+    }
+    let rejectOldJudgment: ((error: Error) => void) | undefined
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch())
+    harness.getQuestionAnswerHistory.mockResolvedValue(terminalReviewHistory())
+    harness.setQuestionAnswerJudgment.mockImplementation(() => new Promise((_, reject) => {
+      rejectOldJudgment = reject
+    }))
+    harness.startQuestionAnswerBatch.mockResolvedValue(newRuntime)
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const correct = judgmentButtons(rowContaining(wrapper, 'Unreviewed one')).find(
+      button => button.text().trim() === '正确',
+    )
+    if (!correct) throw new Error('missing old-batch judgment action')
+    await correct.trigger('click')
+    await flushPromises()
+    const start = wrapper.findAll('button').find(button => button.text().trim() === '开始问答测试')
+    if (!start) throw new Error('missing question-answer start action')
+    await start.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="question-answer-review-batch"]').text()).toContain(
+      shortQuestionAnswerBatchId(newRuntimeBatchId),
+    )
+
+    rejectOldJudgment?.(new Error('admin.connectionHealth.errors.request'))
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('操作失败，请稍后重试。')
+    expect(wrapper.findAll('button').some(button => button.text().includes('终止本次问答'))).toBe(true)
+  })
+
+  it('keeps page one when clicking back before a late page-two response', async () => {
+    const pageOneRecord = {
+      ...reviewRecords[2], id: 'intent-page-one', batchId: 'page-one-intent-batch',
+      questionName: 'Intent page one result',
+    }
+    const pageTwoRecord = {
+      ...reviewRecords[3], id: 'intent-page-two', batchId: 'page-two-intent-batch',
+      questionName: 'Intent page two result',
+    }
+    const pageOne = {
+      ...terminalReviewHistory([pageOneRecord]), page: 1, totalItems: 21, totalPages: 2,
+    }
+    const pageTwo = {
+      ...terminalReviewHistory([pageTwoRecord]), page: 2, totalItems: 21, totalPages: 2,
+    }
+    let resolveLatePageTwo: ((history: typeof pageTwo) => void) | undefined
+    let pageOneReads = 0
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch())
+    harness.getQuestionAnswerHistory.mockImplementation((_targetId: string, page: number) => {
+      if (page === 2) {
+        return new Promise<typeof pageTwo>(resolve => { resolveLatePageTwo = resolve })
+      }
+      pageOneReads++
+      return Promise.resolve(pageOne)
+    })
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const pageTwoButton = wrapper.findAll('button').find(button => button.text().trim() === '2')
+    if (!pageTwoButton) throw new Error('missing history page two')
+    await pageTwoButton.trigger('click')
+    await flushPromises()
+    const pageOneButton = wrapper.findAll('button').find(button => button.text().trim() === '1')
+    if (!pageOneButton) throw new Error('missing history page one')
+    await pageOneButton.trigger('click')
+    await flushPromises()
+    expect(pageOneReads).toBe(2)
+
+    resolveLatePageTwo?.(pageTwo)
+    await flushPromises()
+
+    expect(wrapper.findAll('button').find(button => button.text().trim() === '1')?.classes()).toContain('bg-primary')
+    expect(wrapper.text()).toContain(shortQuestionAnswerBatchId(pageOneRecord.batchId))
+    expect(wrapper.text()).not.toContain(shortQuestionAnswerBatchId(pageTwoRecord.batchId))
+  })
+
+  it('does not show a late poll-history failure after a newer page intent', async () => {
+    vi.useFakeTimers()
+    const completedRuntime = batchWithStatuses(
+      ['succeeded', 'succeeded', 'succeeded', 'succeeded', 'succeeded', 'succeeded'],
+      false,
+    )
+    const pageOne = { ...terminalReviewHistory(), page: 1, totalItems: 21, totalPages: 2 }
+    const pageTwo = {
+      ...terminalReviewHistory([reviewRecords[2]]), page: 2, totalItems: 21, totalPages: 2,
+    }
+    let pageOneReads = 0
+    let rejectPollHistory: ((error: Error) => void) | undefined
+    harness.getQuestionAnswerBatch.mockResolvedValue(completedRuntime)
+    harness.getQuestionAnswerHistory.mockImplementation((_targetId: string, page: number) => {
+      if (page === 2) return Promise.resolve(pageTwo)
+      pageOneReads++
+      if (pageOneReads === 1) return Promise.resolve(pageOne)
+      return new Promise((_, reject) => { rejectPollHistory = reject })
+    })
+
+    const wrapper = await mountQuestionAnswerDialog()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    const pageTwoButton = wrapper.findAll('button').find(button => button.text().trim() === '2')
+    if (!pageTwoButton) throw new Error('missing poll-history page two')
+    await pageTwoButton.trigger('click')
+    await flushPromises()
+    rejectPollHistory?.(new Error('admin.connectionHealth.errors.request'))
+    await flushPromises()
+
+    expect(wrapper.findAll('button').find(button => button.text().trim() === '2')?.classes()).toContain('bg-primary')
+    expect(wrapper.text()).not.toContain('操作失败，请稍后重试。')
+  })
+
+  it('does not show a late stop-history failure after a newer page intent', async () => {
+    const stoppedRuntime = batchWithStatuses(
+      ['cancelled', 'cancelled', 'cancelled', 'cancelled', 'cancelled', 'cancelled'],
+      false,
+    )
+    const pageOne = { ...terminalReviewHistory(), page: 1, totalItems: 21, totalPages: 2 }
+    const pageTwo = {
+      ...terminalReviewHistory([reviewRecords[2]]), page: 2, totalItems: 21, totalPages: 2,
+    }
+    let pageOneReads = 0
+    let rejectStopHistory: ((error: Error) => void) | undefined
+    harness.cancelQuestionAnswerBatch.mockResolvedValue(stoppedRuntime)
+    harness.getQuestionAnswerHistory.mockImplementation((_targetId: string, page: number) => {
+      if (page === 2) return Promise.resolve(pageTwo)
+      pageOneReads++
+      if (pageOneReads === 1) return Promise.resolve(pageOne)
+      return new Promise((_, reject) => { rejectStopHistory = reject })
+    })
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const stop = wrapper.findAll('button').find(button => button.text().includes('终止本次问答'))
+    if (!stop) throw new Error('missing stop-history action')
+    await stop.trigger('click')
+    await flushPromises()
+    const pageTwoButton = wrapper.findAll('button').find(button => button.text().trim() === '2')
+    if (!pageTwoButton) throw new Error('missing stop-history page two')
+    await pageTwoButton.trigger('click')
+    await flushPromises()
+    rejectStopHistory?.(new Error('admin.connectionHealth.errors.request'))
+    await flushPromises()
+
+    expect(wrapper.findAll('button').find(button => button.text().trim() === '2')?.classes()).toContain('bg-primary')
+    expect(wrapper.text()).not.toContain('操作失败，请稍后重试。')
+  })
+
+  it('does not show a late judgment-history failure after a newer page intent', async () => {
+    const updatedRecords = reviewRecords.map((record, index) => (
+      index === 0 ? { ...record, answerJudgment: 'correct' as const } : record
+    ))
+    const updatedBatch = terminalReviewBatch(updatedRecords)
+    const pageOne = { ...terminalReviewHistory(), page: 1, totalItems: 21, totalPages: 2 }
+    const pageTwo = {
+      ...terminalReviewHistory([reviewRecords[2]]), page: 2, totalItems: 21, totalPages: 2,
+    }
+    let pageOneReads = 0
+    let rejectJudgmentHistory: ((error: Error) => void) | undefined
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch())
+    harness.getQuestionAnswerBatch.mockResolvedValue(updatedBatch)
+    harness.setQuestionAnswerJudgment.mockResolvedValue(updatedRecords[0])
+    harness.getQuestionAnswerHistory.mockImplementation((_targetId: string, page: number) => {
+      if (page === 2) return Promise.resolve(pageTwo)
+      pageOneReads++
+      if (pageOneReads === 1) return Promise.resolve(pageOne)
+      return new Promise((_, reject) => { rejectJudgmentHistory = reject })
+    })
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const correct = judgmentButtons(rowContaining(wrapper, 'Unreviewed one')).find(
+      button => button.text().trim() === '正确',
+    )
+    if (!correct) throw new Error('missing judgment-history action')
+    await correct.trigger('click')
+    await flushPromises()
+    const pageTwoButton = wrapper.findAll('button').find(button => button.text().trim() === '2')
+    if (!pageTwoButton) throw new Error('missing judgment-history page two')
+    await pageTwoButton.trigger('click')
+    await flushPromises()
+    rejectJudgmentHistory?.(new Error('admin.connectionHealth.errors.request'))
+    await flushPromises()
+
+    expect(wrapper.findAll('button').find(button => button.text().trim() === '2')?.classes()).toContain('bg-primary')
+    expect(wrapper.text()).not.toContain('操作失败，请稍后重试。')
+  })
+
+  it('does not show an older same-batch judgment-refresh failure after a newer success', async () => {
+    const initialRecords = reviewRecords.slice(0, 2)
+    const newerRecords = initialRecords.map((record, index) => (
+      index === 1 ? { ...record, answerJudgment: 'correct' as const } : record
+    ))
+    const initialBatch = terminalReviewBatch(initialRecords)
+    const newerBatch = terminalReviewBatch(newerRecords)
+    let rejectOlderRefresh: ((error: Error) => void) | undefined
+    let batchReads = 0
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(initialBatch)
+    harness.getQuestionAnswerHistory.mockResolvedValue(terminalReviewHistory(initialRecords))
+    harness.getQuestionAnswerBatch.mockImplementation(() => {
+      batchReads++
+      if (batchReads === 1) return new Promise((_, reject) => { rejectOlderRefresh = reject })
+      return Promise.resolve(newerBatch)
+    })
+    harness.setQuestionAnswerJudgment.mockResolvedValue(newerRecords[1])
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const firstCorrect = judgmentButtons(rowContaining(wrapper, 'Unreviewed one')).find(
+      button => button.text().trim() === '正确',
+    )
+    if (!firstCorrect) throw new Error('missing older judgment action')
+    await firstCorrect.trigger('click')
+    await flushPromises()
+    const secondCorrect = judgmentButtons(rowContaining(wrapper, 'Unreviewed long')).find(
+      button => button.text().trim() === '正确',
+    )
+    if (!secondCorrect) throw new Error('missing newer judgment action')
+    await secondCorrect.trigger('click')
+    await flushPromises()
+    rejectOlderRefresh?.(new Error('admin.connectionHealth.errors.request'))
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('正确1')
+    expect(wrapper.text()).not.toContain('操作失败，请稍后重试。')
+  })
+
+  it('does not let an old poll overwrite a newer active-runtime selection', async () => {
+    vi.useFakeTimers()
+    const oldBatch = historicalBatch('poll-selection-old', 'Poll selection old review')
+    const runtimeWithAnswer = batchWithStatuses(
+      ['succeeded', 'running', 'running', 'running', 'running', 'running'],
+      true,
+    )
+    const selectedRecords = runtimeWithAnswer.records.map((record, index) => (
+      index === 0 ? { ...record, answerJudgment: 'correct' as const } : record
+    ))
+    const selectedRuntime = {
+      ...runtimeWithAnswer,
+      records: selectedRecords,
+      stats: { ...runtimeWithAnswer.stats, reviews: { unreviewed: 0, correct: 1, incorrect: 0 } },
+    }
+    const history = {
+      ...emptyHistory,
+      records: [oldBatch.records[0], runtimeWithAnswer.records[0]],
+      totalItems: 2,
+      totalPages: 1,
+    }
+    let runtimeReads = 0
+    let resolveOldPoll: ((batch: typeof runtimeWithAnswer) => void) | undefined
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(runtimeWithAnswer)
+    harness.getQuestionAnswerHistory.mockResolvedValue(history)
+    harness.getQuestionAnswerBatch.mockImplementation((_targetId: string, batchId: string) => {
+      if (batchId === oldBatch.batchId) return Promise.resolve(oldBatch)
+      runtimeReads++
+      if (runtimeReads === 1) {
+        return new Promise<typeof runtimeWithAnswer>(resolve => { resolveOldPoll = resolve })
+      }
+      return Promise.resolve(selectedRuntime)
+    })
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const reviewOld = wrapper.findAll('button').find(button => button.text().trim() === '复审此批次')
+    if (!reviewOld) throw new Error('missing old batch before runtime selection')
+    await reviewOld.trigger('click')
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    const reviewRuntime = wrapper.findAll('button').find(button => button.text().trim() === '复审此批次')
+    if (!reviewRuntime) throw new Error('missing active runtime selection')
+    await reviewRuntime.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('正确1')
+
+    resolveOldPoll?.(runtimeWithAnswer)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('正确1')
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('待复审0')
+  })
+
+  it('does not let an old active poll revive a terminal runtime selection', async () => {
+    vi.useFakeTimers()
+    const oldBatch = historicalBatch('poll-terminal-old', 'Poll terminal old review')
+    const completedRuntime = batchWithStatuses(
+      ['succeeded', 'succeeded', 'succeeded', 'succeeded', 'succeeded', 'succeeded'],
+      false,
+    )
+    const history = {
+      ...emptyHistory,
+      records: [oldBatch.records[0], activeBatch.records[0]],
+      totalItems: 2,
+      totalPages: 1,
+    }
+    let runtimeReads = 0
+    let resolveOldPoll: ((batch: typeof activeBatch) => void) | undefined
+    harness.getQuestionAnswerHistory.mockResolvedValue(history)
+    harness.getQuestionAnswerBatch.mockImplementation((_targetId: string, batchId: string) => {
+      if (batchId === oldBatch.batchId) return Promise.resolve(oldBatch)
+      runtimeReads++
+      if (runtimeReads === 1) {
+        return new Promise<typeof activeBatch>(resolve => { resolveOldPoll = resolve })
+      }
+      return Promise.resolve(completedRuntime)
+    })
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const reviewOld = wrapper.findAll('button').find(button => button.text().trim() === '复审此批次')
+    if (!reviewOld) throw new Error('missing old batch before terminal runtime selection')
+    await reviewOld.trigger('click')
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    const reviewRuntime = wrapper.findAll('button').find(button => button.text().trim() === '复审此批次')
+    if (!reviewRuntime) throw new Error('missing terminal runtime selection')
+    await reviewRuntime.trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('button').some(button => button.text().includes('终止本次问答'))).toBe(false)
+
+    resolveOldPoll?.(activeBatch)
+    await flushPromises()
+
+    expect(wrapper.findAll('button').some(button => button.text().includes('终止本次问答'))).toBe(false)
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('进行中0')
+  })
+
+  it('does not cancel a newer poll when an older runtime selection returns first', async () => {
+    vi.useFakeTimers()
+    const oldBatch = historicalBatch('selection-before-poll-old', 'Selection before poll old review')
+    const runtimeWithAnswer = batchWithStatuses(
+      ['succeeded', 'running', 'running', 'running', 'running', 'running'],
+      true,
+    )
+    const polledRecords = runtimeWithAnswer.records.map((record, index) => (
+      index === 0 ? { ...record, answerJudgment: 'correct' as const } : record
+    ))
+    const polledRuntime = {
+      ...runtimeWithAnswer,
+      records: polledRecords,
+      stats: { ...runtimeWithAnswer.stats, reviews: { unreviewed: 0, correct: 1, incorrect: 0 } },
+    }
+    const history = {
+      ...emptyHistory,
+      records: [oldBatch.records[0], runtimeWithAnswer.records[0]],
+      totalItems: 2,
+      totalPages: 1,
+    }
+    let runtimeReads = 0
+    let resolveSelection: ((batch: typeof runtimeWithAnswer) => void) | undefined
+    let resolveNewerPoll: ((batch: typeof polledRuntime) => void) | undefined
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(runtimeWithAnswer)
+    harness.getQuestionAnswerHistory.mockResolvedValue(history)
+    harness.getQuestionAnswerBatch.mockImplementation((_targetId: string, batchId: string) => {
+      if (batchId === oldBatch.batchId) return Promise.resolve(oldBatch)
+      runtimeReads++
+      if (runtimeReads === 1) {
+        return new Promise<typeof runtimeWithAnswer>(resolve => { resolveSelection = resolve })
+      }
+      return new Promise<typeof polledRuntime>(resolve => { resolveNewerPoll = resolve })
+    })
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const reviewOld = wrapper.findAll('button').find(button => button.text().trim() === '复审此批次')
+    if (!reviewOld) throw new Error('missing old batch before selection-first race')
+    await reviewOld.trigger('click')
+    await flushPromises()
+    const reviewRuntime = wrapper.findAll('button').find(button => button.text().trim() === '复审此批次')
+    if (!reviewRuntime) throw new Error('missing runtime selection before newer poll')
+    await reviewRuntime.trigger('click')
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+
+    resolveSelection?.(runtimeWithAnswer)
+    await flushPromises()
+    resolveNewerPoll?.(polledRuntime)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('正确1')
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('待复审0')
+  })
+
+  it('does not let a newer active poll revive a terminal runtime selection', async () => {
+    vi.useFakeTimers()
+    const oldBatch = historicalBatch('terminal-selection-before-poll', 'Terminal selection before poll')
+    const completedRuntime = batchWithStatuses(
+      ['succeeded', 'succeeded', 'succeeded', 'succeeded', 'succeeded', 'succeeded'],
+      false,
+    )
+    const history = {
+      ...emptyHistory,
+      records: [oldBatch.records[0], activeBatch.records[0]],
+      totalItems: 2,
+      totalPages: 1,
+    }
+    let runtimeReads = 0
+    let resolveSelection: ((batch: typeof completedRuntime) => void) | undefined
+    let resolveNewerPoll: ((batch: typeof activeBatch) => void) | undefined
+    harness.getQuestionAnswerHistory.mockResolvedValue(history)
+    harness.getQuestionAnswerBatch.mockImplementation((_targetId: string, batchId: string) => {
+      if (batchId === oldBatch.batchId) return Promise.resolve(oldBatch)
+      runtimeReads++
+      if (runtimeReads === 1) {
+        return new Promise<typeof completedRuntime>(resolve => { resolveSelection = resolve })
+      }
+      return new Promise<typeof activeBatch>(resolve => { resolveNewerPoll = resolve })
+    })
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const reviewOld = wrapper.findAll('button').find(button => button.text().trim() === '复审此批次')
+    if (!reviewOld) throw new Error('missing old batch before terminal selection race')
+    await reviewOld.trigger('click')
+    await flushPromises()
+    const reviewRuntime = wrapper.findAll('button').find(button => button.text().trim() === '复审此批次')
+    if (!reviewRuntime) throw new Error('missing terminal runtime selection before newer poll')
+    await reviewRuntime.trigger('click')
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    resolveSelection?.(completedRuntime)
+    await flushPromises()
+    expect(wrapper.findAll('button').some(button => button.text().includes('终止本次问答'))).toBe(false)
+
+    resolveNewerPoll?.(activeBatch)
+    await flushPromises()
+
+    expect(wrapper.findAll('button').some(button => button.text().includes('终止本次问答'))).toBe(false)
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('进行中0')
+  })
+
+  it('does not show a newer poll failure after a terminal runtime selection', async () => {
+    vi.useFakeTimers()
+    const oldBatch = historicalBatch('terminal-before-poll-failure', 'Terminal before poll failure')
+    const completedRuntime = batchWithStatuses(
+      ['succeeded', 'succeeded', 'succeeded', 'succeeded', 'succeeded', 'succeeded'],
+      false,
+    )
+    const history = {
+      ...emptyHistory,
+      records: [oldBatch.records[0], activeBatch.records[0]],
+      totalItems: 2,
+      totalPages: 1,
+    }
+    let runtimeReads = 0
+    let resolveSelection: ((batch: typeof completedRuntime) => void) | undefined
+    let rejectNewerPoll: ((error: Error) => void) | undefined
+    harness.getQuestionAnswerHistory.mockResolvedValue(history)
+    harness.getQuestionAnswerBatch.mockImplementation((_targetId: string, batchId: string) => {
+      if (batchId === oldBatch.batchId) return Promise.resolve(oldBatch)
+      runtimeReads++
+      if (runtimeReads === 1) {
+        return new Promise<typeof completedRuntime>(resolve => { resolveSelection = resolve })
+      }
+      return new Promise((_, reject) => { rejectNewerPoll = reject })
+    })
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const reviewOld = wrapper.findAll('button').find(button => button.text().trim() === '复审此批次')
+    if (!reviewOld) throw new Error('missing old batch before terminal poll failure')
+    await reviewOld.trigger('click')
+    await flushPromises()
+    const reviewRuntime = wrapper.findAll('button').find(button => button.text().trim() === '复审此批次')
+    if (!reviewRuntime) throw new Error('missing terminal selection before poll failure')
+    await reviewRuntime.trigger('click')
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    resolveSelection?.(completedRuntime)
+    await flushPromises()
+
+    rejectNewerPoll?.(new Error('admin.connectionHealth.errors.request'))
+    await flushPromises()
+
+    expect(wrapper.findAll('button').some(button => button.text().includes('终止本次问答'))).toBe(false)
+    expect(wrapper.text()).not.toContain('操作失败，请稍后重试。')
+  })
+
+  it('does not let a late stop response erase a newer terminal judgment refresh', async () => {
+    const runtimeWithAnswer = batchWithStatuses(
+      ['succeeded', 'running', 'running', 'running', 'running', 'running'],
+      true,
+    )
+    const judgedRecords = runtimeWithAnswer.records.map((record, index) => (
+      index === 0 ? { ...record, answerJudgment: 'correct' as const } : record
+    ))
+    const judgedTerminal = {
+      ...batchWithStatuses(
+        ['succeeded', 'cancelled', 'cancelled', 'cancelled', 'cancelled', 'cancelled'],
+        false,
+      ),
+      records: judgedRecords.map((record, index) => (
+        index === 0
+          ? { ...record, status: 'succeeded' as const, completedAt: '2026-08-26T12:00:02Z' }
+          : { ...record, status: 'cancelled' as const, answerJudgment: null, completedAt: '2026-08-26T12:00:02Z' }
+      )),
+      stats: {
+        requests: { submitted: 6, inProgress: 0, succeeded: 1, failed: 0, cancelled: 5 },
+        reviews: { unreviewed: 0, correct: 1, incorrect: 0 },
+      },
+    }
+    const staleStopped = batchWithStatuses(
+      ['succeeded', 'cancelled', 'cancelled', 'cancelled', 'cancelled', 'cancelled'],
+      false,
+    )
+    let resolveJudgmentBatch: ((batch: typeof judgedTerminal) => void) | undefined
+    let resolveStop: ((batch: typeof staleStopped) => void) | undefined
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(runtimeWithAnswer)
+    harness.getQuestionAnswerBatch.mockImplementation(() => (
+      new Promise<typeof judgedTerminal>(resolve => { resolveJudgmentBatch = resolve })
+    ))
+    harness.cancelQuestionAnswerBatch.mockImplementation(() => (
+      new Promise<typeof staleStopped>(resolve => { resolveStop = resolve })
+    ))
+    harness.setQuestionAnswerJudgment.mockResolvedValue(judgedRecords[0])
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const stop = wrapper.findAll('button').find(button => button.text().includes('终止本次问答'))
+    if (!stop) throw new Error('missing stop before judgment refresh')
+    await stop.trigger('click')
+    await flushPromises()
+    const correct = judgmentButtons(rowContaining(wrapper, 'Question 1')).find(
+      button => button.text().trim() === '正确',
+    )
+    if (!correct) throw new Error('missing judgment before late stop response')
+    await correct.trigger('click')
+    await flushPromises()
+
+    resolveJudgmentBatch?.(judgedTerminal)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('正确1')
+
+    resolveStop?.(staleStopped)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('正确1')
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('待复审0')
+  })
+
+  it('does not show a late stop failure after a newer terminal judgment refresh', async () => {
+    const runtimeWithAnswer = batchWithStatuses(
+      ['succeeded', 'running', 'running', 'running', 'running', 'running'],
+      true,
+    )
+    const judgedRecords = runtimeWithAnswer.records.map((record, index) => (
+      index === 0 ? { ...record, answerJudgment: 'correct' as const } : record
+    ))
+    const judgedTerminal = {
+      ...batchWithStatuses(
+        ['succeeded', 'cancelled', 'cancelled', 'cancelled', 'cancelled', 'cancelled'],
+        false,
+      ),
+      records: judgedRecords.map((record, index) => (
+        index === 0
+          ? { ...record, status: 'succeeded' as const, completedAt: '2026-08-26T12:00:02Z' }
+          : { ...record, status: 'cancelled' as const, answerJudgment: null, completedAt: '2026-08-26T12:00:02Z' }
+      )),
+      stats: {
+        requests: { submitted: 6, inProgress: 0, succeeded: 1, failed: 0, cancelled: 5 },
+        reviews: { unreviewed: 0, correct: 1, incorrect: 0 },
+      },
+    }
+    let resolveJudgmentBatch: ((batch: typeof judgedTerminal) => void) | undefined
+    let rejectStop: ((error: Error) => void) | undefined
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(runtimeWithAnswer)
+    harness.getQuestionAnswerBatch.mockImplementation(() => (
+      new Promise<typeof judgedTerminal>(resolve => { resolveJudgmentBatch = resolve })
+    ))
+    harness.cancelQuestionAnswerBatch.mockImplementation(() => (
+      new Promise((_, reject) => { rejectStop = reject })
+    ))
+    harness.setQuestionAnswerJudgment.mockResolvedValue(judgedRecords[0])
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const stop = wrapper.findAll('button').find(button => button.text().includes('终止本次问答'))
+    if (!stop) throw new Error('missing stop before terminal judgment refresh')
+    await stop.trigger('click')
+    await flushPromises()
+    const correct = judgmentButtons(rowContaining(wrapper, 'Question 1')).find(
+      button => button.text().trim() === '正确',
+    )
+    if (!correct) throw new Error('missing judgment before late stop failure')
+    await correct.trigger('click')
+    await flushPromises()
+
+    resolveJudgmentBatch?.(judgedTerminal)
+    await flushPromises()
+    rejectStop?.(new Error('admin.connectionHealth.errors.request'))
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('正确1')
+    expect(wrapper.text()).not.toContain('操作失败，请稍后重试。')
+  })
+
 })

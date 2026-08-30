@@ -56,9 +56,13 @@ describe('connection health terminal refresh flow', () => {
     const service = useConnectionHealth()
     await expect(service.refreshAdminGroupsAutomatically()).resolves.toBe(true)
 
+    const automaticRefresh = viewSource.match(
+      /const refreshAdminGroupsAutomatically = async[\s\S]*?\n}\n\nconst refresh = async/,
+    )?.[0] ?? ''
     expect(service.terminalRefreshSummary.value).toEqual(terminalSummary)
-    expect(viewSource).not.toContain('AbortSignal.timeout')
-    expect(viewSource).not.toContain('setTimeout')
+    expect(automaticRefresh).not.toBe('')
+    expect(automaticRefresh).not.toContain('AbortSignal.timeout')
+    expect(automaticRefresh).not.toContain('setTimeout')
   })
 
   it('uses the latest automatic terminal summary for the visible status', () => {

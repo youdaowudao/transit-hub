@@ -45,13 +45,13 @@ const props = withDefaults(defineProps<{
   hideUnmonitoredAccounts: boolean
   questionAnswerUnreadTargetIds: string[]
   actionLoading: boolean
-  quickProbeTargetId?: string
-  quickProbePhase?: 'starting' | 'queued' | 'running' | ''
+  quickProbePhases?: Record<string, 'starting' | 'queued' | 'running'>
   quickProbeErrors?: Record<string, string>
+  quickProbeSuccesses?: Record<string, { modelName: string; latencyMs: number }>
 }>(), {
-  quickProbeTargetId: '',
-  quickProbePhase: '',
+  quickProbePhases: () => ({}),
   quickProbeErrors: () => ({}),
+  quickProbeSuccesses: () => ({}),
 })
 
 const emit = defineEmits<{
@@ -95,15 +95,15 @@ const quickProbeLabel = (account: AdminGroupAccount): string => {
   const unavailableReason = quickProbeUnavailableReason(account)
   if (unavailableReason) return t(`${detailPrefix}.quickProbe.disabled`, { reason: unavailableReason })
   const model = quickProbeModel(account)
-  if (props.quickProbeTargetId === account.targetId) {
-    const phase = props.quickProbePhase || 'starting'
+  const phase = props.quickProbePhases[account.targetId]
+  if (phase) {
     return t(`${detailPrefix}.quickProbe.${phase}`, { model })
   }
   return t(`${detailPrefix}.quickProbe.ready`, { model })
 }
 
 const quickProbeDisabled = (account: AdminGroupAccount): boolean =>
-  Boolean(props.quickProbeTargetId) || Boolean(quickProbeUnavailableReason(account))
+  Boolean(props.quickProbePhases[account.targetId]) || Boolean(quickProbeUnavailableReason(account))
 
 const emitQuickProbe = (account: AdminGroupAccount) => {
   if (quickProbeDisabled(account)) return
@@ -895,7 +895,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                         :disabled="quickProbeDisabled(account)"
                         @click="emitQuickProbe(account)"
                       >
-                        <Loader2 v-if="quickProbeTargetId === account.targetId" class="h-4 w-4 animate-spin" />
+                        <Loader2 v-if="quickProbePhases[account.targetId]" class="h-4 w-4 animate-spin" />
                         <Bolt v-else class="h-4 w-4" />
                       </button>
                     </Tooltip>
@@ -924,6 +924,14 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                       </button>
                     </Tooltip>
                   </div>
+                </td>
+              </tr>
+              <tr v-if="quickProbeSuccesses[account.targetId]" class="quick-probe-success-row border-t border-emerald-500/20 bg-emerald-500/[0.06]">
+                <td colspan="9" class="px-12 py-3 text-sm text-emerald-700 dark:text-emerald-400">
+                  {{ t(`${detailPrefix}.quickProbe.completed`, {
+                    model: quickProbeSuccesses[account.targetId].modelName,
+                    latency: quickProbeSuccesses[account.targetId].latencyMs,
+                  }) }}
                 </td>
               </tr>
               <tr v-if="quickProbeErrors[account.targetId]" class="quick-probe-error-row border-t border-destructive/20 bg-destructive/[0.06]">

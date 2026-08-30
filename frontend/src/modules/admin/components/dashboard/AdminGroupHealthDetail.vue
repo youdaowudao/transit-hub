@@ -4,12 +4,14 @@ import {
   Activity,
   AlertTriangle,
   ArrowDownUp,
+  Bolt,
   ChevronDown,
   ChevronRight,
   ChevronUp,
   Clock3,
   Eye,
   Gauge,
+  Loader2,
   Radar,
   Settings2,
   ShieldCheck,
@@ -38,16 +40,24 @@ import {
   resolvePrioritySyncBlockReasonMessage,
 } from '../../utils/connectionHealthMultiplier'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   group: AdminGroupHealth
   hideUnmonitoredAccounts: boolean
   questionAnswerUnreadTargetIds: string[]
   actionLoading: boolean
-}>()
+  quickProbeTargetId?: string
+  quickProbePhase?: 'starting' | 'queued' | 'running' | ''
+  quickProbeErrors?: Record<string, string>
+}>(), {
+  quickProbeTargetId: '',
+  quickProbePhase: '',
+  quickProbeErrors: () => ({}),
+})
 
 const emit = defineEmits<{
   (event: 'setup', group: AdminGroupHealth): void
   (event: 'probe', account: AdminGroupAccount): void
+  (event: 'quick-probe', account: AdminGroupAccount): void
   (event: 'view-events', account: AdminGroupAccount): void
   (event: 'update:hide-unmonitored-accounts', value: boolean): void
   (event: 'set-schedulable', account: AdminGroupAccount): void
@@ -60,6 +70,45 @@ const detailPrefix = `${prefix}.groupDetail`
 const expandedTargetId = ref('')
 const hasUnreadQuestionAnswer = (account: AdminGroupAccount): boolean =>
   props.questionAnswerUnreadTargetIds.includes(account.targetId)
+
+const formalProbeModels = (account: AdminGroupAccount): string[] => {
+  const models = [...(account.modelHealth ?? []), ...(account.unprobedModels ?? [])]
+  return Array.from(new Set(models.map(model => model.modelName).filter(Boolean)))
+}
+
+const quickProbeModel = (account: AdminGroupAccount): string => {
+  const models = formalProbeModels(account)
+  return models.includes('gpt-5.6-sol') ? 'gpt-5.6-sol' : (models[0] ?? '')
+}
+
+const quickProbeUnavailableReason = (account: AdminGroupAccount): string => {
+  if (!account.probeAvailable) {
+    const reasonKey = `${prefix}.probeUnavailableReasons.${account.probeUnavailableReason ?? ''}`
+    return te(reasonKey) ? t(reasonKey) : t(`${detailPrefix}.quickProbe.unavailable`)
+  }
+  if (!account.hasEnabledProbePolicy) return t(`${detailPrefix}.quickProbe.noPolicy`)
+  if (!quickProbeModel(account)) return t(`${detailPrefix}.quickProbe.noModels`)
+  return ''
+}
+
+const quickProbeLabel = (account: AdminGroupAccount): string => {
+  const unavailableReason = quickProbeUnavailableReason(account)
+  if (unavailableReason) return t(`${detailPrefix}.quickProbe.disabled`, { reason: unavailableReason })
+  const model = quickProbeModel(account)
+  if (props.quickProbeTargetId === account.targetId) {
+    const phase = props.quickProbePhase || 'starting'
+    return t(`${detailPrefix}.quickProbe.${phase}`, { model })
+  }
+  return t(`${detailPrefix}.quickProbe.ready`, { model })
+}
+
+const quickProbeDisabled = (account: AdminGroupAccount): boolean =>
+  Boolean(props.quickProbeTargetId) || Boolean(quickProbeUnavailableReason(account))
+
+const emitQuickProbe = (account: AdminGroupAccount) => {
+  if (quickProbeDisabled(account)) return
+  emit('quick-probe', account)
+}
 
 type GroupHealthFilter =
   | { kind: 'all' }
@@ -792,8 +841,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                   </span>
                 </td>
                 <td class="px-3 py-3 tabular-nums">
-                  <span v-if="aggregateState(account) === 'suspended'" class="text-destructive">-</span>
-                  <span v-else-if="accountLatency(account) == null" class="text-muted-foreground">-</span>
+                  <span v-if="accountLatency(account) == null" class="text-muted-foreground">-</span>
                   <span v-else :class="accountHasSlowResponse(account) ? 'text-amber-600 dark:text-amber-400' : 'text-foreground'">
                     {{ accountLatency(account) }} ms
                   </span>
@@ -839,6 +887,18 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                         <Zap class="h-4 w-4" />
                       </button>
                     </Tooltip>
+                    <Tooltip :text="quickProbeLabel(account)">
+                      <button
+                        type="button"
+                        class="rounded-md bg-primary p-1.5 text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-35"
+                        :aria-label="quickProbeLabel(account)"
+                        :disabled="quickProbeDisabled(account)"
+                        @click="emitQuickProbe(account)"
+                      >
+                        <Loader2 v-if="quickProbeTargetId === account.targetId" class="h-4 w-4 animate-spin" />
+                        <Bolt v-else class="h-4 w-4" />
+                      </button>
+                    </Tooltip>
                     <Tooltip v-if="isSub2API(account) && account.schedulable != null" :text="account.schedulable ? t(`${detailPrefix}.actions.disableScheduling`) : t(`${detailPrefix}.actions.enableScheduling`)" wide>
                       <button
                         type="button"
@@ -864,6 +924,11 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                       </button>
                     </Tooltip>
                   </div>
+                </td>
+              </tr>
+              <tr v-if="quickProbeErrors[account.targetId]" class="quick-probe-error-row border-t border-destructive/20 bg-destructive/[0.06]">
+                <td colspan="9" class="whitespace-pre-wrap break-words px-12 py-3 text-sm text-destructive">
+                  {{ quickProbeErrors[account.targetId] }}
                 </td>
               </tr>
               <tr v-if="expandedTargetId === account.targetId" class="border-t border-border/40 bg-surface/25">

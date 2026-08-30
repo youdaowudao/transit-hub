@@ -110,11 +110,16 @@ const refreshCoordinator = createRefreshCoordinator()
 const preferenceScope = computed(() => currentAccount.value?.id ?? 'anonymous')
 let loadedPreferenceScope = ''
 
-type QuickProbePhase = 'starting' | ProbeTargetProgressPhase | ''
+type QuickProbePhase = 'starting' | ProbeTargetProgressPhase
 type QuickProbeSessionIdentity = {
-  sequence: number
+  targetId: string
   workspaceId: string
+  workspaceLifecycle: number
   controller: AbortController
+}
+type QuickProbeSuccess = {
+  modelName: string
+  latencyMs: number
 }
 type QuickProbeReloadObligation = {
   workspaceLifecycle: number
@@ -122,28 +127,60 @@ type QuickProbeReloadObligation = {
   version: number
 }
 
-const quickProbeTargetId = ref('')
-const quickProbePhase = ref<QuickProbePhase>('')
+const quickProbePhases = ref<Record<string, QuickProbePhase>>({})
 const quickProbeErrors = ref<Record<string, string>>({})
-let quickProbeSequence = 0
-let quickProbeController: AbortController | null = null
+const quickProbeSuccesses = ref<Record<string, QuickProbeSuccess>>({})
+const quickProbeSessions = new Map<string, QuickProbeSessionIdentity>()
+const quickProbeSuccessTimers = new Map<string, ReturnType<typeof setTimeout>>()
 let quickProbeWorkspaceLifecycle = 0
 let quickProbeReloadVersion = 0
 let quickProbeReloadSettledVersion = 0
 let quickProbeReloadPendingVersion = 0
 let quickProbeReloadInFlight: Promise<boolean> | null = null
 
+const clearQuickProbeSuccess = (targetId: string) => {
+  const timer = quickProbeSuccessTimers.get(targetId)
+  if (timer) clearTimeout(timer)
+  quickProbeSuccessTimers.delete(targetId)
+  if (!quickProbeSuccesses.value[targetId]) return
+  const next = { ...quickProbeSuccesses.value }
+  delete next[targetId]
+  quickProbeSuccesses.value = next
+}
+
+const clearAllQuickProbeSuccesses = () => {
+  for (const timer of quickProbeSuccessTimers.values()) clearTimeout(timer)
+  quickProbeSuccessTimers.clear()
+  quickProbeSuccesses.value = {}
+}
+
+const setQuickProbeSuccess = (targetId: string, success: QuickProbeSuccess) => {
+  clearQuickProbeSuccess(targetId)
+  const workspaceLifecycle = quickProbeWorkspaceLifecycle
+  quickProbeSuccesses.value = { ...quickProbeSuccesses.value, [targetId]: success }
+  const timer = setTimeout(() => {
+    if (
+      workspaceLifecycle !== quickProbeWorkspaceLifecycle
+      || quickProbeSuccessTimers.get(targetId) !== timer
+    ) return
+    quickProbeSuccessTimers.delete(targetId)
+    const next = { ...quickProbeSuccesses.value }
+    delete next[targetId]
+    quickProbeSuccesses.value = next
+  }, 20_000)
+  quickProbeSuccessTimers.set(targetId, timer)
+}
+
 const invalidateQuickProbeSession = (clearErrors: boolean) => {
-  quickProbeSequence++
   quickProbeWorkspaceLifecycle++
-  quickProbeController?.abort()
-  quickProbeController = null
+  for (const identity of quickProbeSessions.values()) identity.controller.abort()
+  quickProbeSessions.clear()
   quickProbeReloadVersion = 0
   quickProbeReloadSettledVersion = 0
   quickProbeReloadPendingVersion = 0
   quickProbeReloadInFlight = null
-  quickProbeTargetId.value = ''
-  quickProbePhase.value = ''
+  quickProbePhases.value = {}
+  clearAllQuickProbeSuccesses()
   if (clearErrors) quickProbeErrors.value = {}
 }
 
@@ -475,12 +512,12 @@ const loadMainListIfIdle = async (reload: () => Promise<unknown>): Promise<boole
 }
 
 const quickProbeIdentityIsCurrent = (identity: QuickProbeSessionIdentity): boolean =>
-  identity.sequence === quickProbeSequence
+  identity.workspaceLifecycle === quickProbeWorkspaceLifecycle
   && identity.workspaceId === preferenceScope.value
   && !identity.controller.signal.aborted
 
 const activeQuickProbeIsCurrent = (identity: QuickProbeSessionIdentity): boolean =>
-  quickProbeIdentityIsCurrent(identity) && quickProbeController === identity.controller
+  quickProbeIdentityIsCurrent(identity) && quickProbeSessions.get(identity.targetId) === identity
 
 const quickProbeReloadWorkspaceIsCurrent = (obligation: QuickProbeReloadObligation): boolean =>
   obligation.workspaceLifecycle === quickProbeWorkspaceLifecycle
@@ -614,6 +651,7 @@ const refreshAdminGroupsAutomatically = async (): Promise<boolean> => {
 
 const refresh = async () => {
   quickProbeErrors.value = {}
+  clearAllQuickProbeSuccesses()
   const generation = refreshCoordinator.begin()
   if (generation === null) return
   refreshLoading.value = true
@@ -810,6 +848,7 @@ const clearQuickProbeError = (targetId: string) => {
 }
 
 const setQuickProbeError = (targetId: string, message: string) => {
+  clearQuickProbeSuccess(targetId)
   quickProbeErrors.value = { ...quickProbeErrors.value, [targetId]: message }
 }
 
@@ -844,41 +883,45 @@ const mergeQuickProbeResults = (targetId: string, results: ModelHealth[]) => {
   }))
 }
 
-const applyQuickProbeResultError = (targetId: string, results: ModelHealth[]) => {
+const applyQuickProbeResultError = (targetId: string, results: ModelHealth[]): boolean => {
   const failure = results.find(result => !['ok', 'slow_response'].includes(result.probeResult ?? ''))
   if (!failure) {
     clearQuickProbeError(targetId)
-    return
+    return false
   }
   const detail = failure.lastErrorDetail ?? ''
   setQuickProbeError(
     targetId,
     detail.trim() ? detail : safeQuickProbeErrorMessage(failure.lastErrorKey || 'admin.connectionHealth.errors.unknown'),
   )
+  return true
 }
 
 const onQuickProbeAccount = async (account: AdminGroupAccount) => {
-  if (quickProbeController || quickProbeTargetId.value) return
+  if (quickProbeSessions.has(account.targetId)) return
   const model = defaultQuickProbeModel(account)
   if (!account.probeAvailable || !account.hasEnabledProbePolicy || !model) return
 
   const controller = new AbortController()
   const identity: QuickProbeSessionIdentity = {
-    sequence: ++quickProbeSequence,
+    targetId: account.targetId,
     workspaceId: preferenceScope.value,
+    workspaceLifecycle: quickProbeWorkspaceLifecycle,
     controller,
   }
-  quickProbeController = controller
-  quickProbeTargetId.value = account.targetId
-  quickProbePhase.value = 'starting'
+  quickProbeSessions.set(account.targetId, identity)
+  quickProbePhases.value = { ...quickProbePhases.value, [account.targetId]: 'starting' }
   clearQuickProbeError(account.targetId)
+  clearQuickProbeSuccess(account.targetId)
 
   try {
     const results = await probeTargetWithProgress(
       account.targetId,
       [model],
       (phase) => {
-        if (activeQuickProbeIsCurrent(identity)) quickProbePhase.value = phase
+        if (activeQuickProbeIsCurrent(identity)) {
+          quickProbePhases.value = { ...quickProbePhases.value, [account.targetId]: phase }
+        }
       },
       controller.signal,
     )
@@ -889,7 +932,18 @@ const onQuickProbeAccount = async (account: AdminGroupAccount) => {
       return
     }
     mergeQuickProbeResults(account.targetId, results)
-    applyQuickProbeResultError(account.targetId, results)
+    const failed = applyQuickProbeResultError(account.targetId, results)
+    if (!failed) {
+      const completed = results.find(result => (
+        result.modelName === model
+        && ['ok', 'slow_response'].includes(result.probeResult ?? '')
+        && result.lastLatencyMs != null
+        && Number.isFinite(result.lastLatencyMs)
+      ))
+      if (completed?.lastLatencyMs != null) {
+        setQuickProbeSuccess(account.targetId, { modelName: completed.modelName, latencyMs: completed.lastLatencyMs })
+      }
+    }
     await reloadQuickProbeAuthoritatively(identity)
   } catch (err) {
     if (!activeQuickProbeIsCurrent(identity)) return
@@ -898,9 +952,10 @@ const onQuickProbeAccount = async (account: AdminGroupAccount) => {
     setQuickProbeError(account.targetId, safeQuickProbeErrorMessage(key))
   } finally {
     if (!activeQuickProbeIsCurrent(identity)) return
-    quickProbeController = null
-    quickProbeTargetId.value = ''
-    quickProbePhase.value = ''
+    quickProbeSessions.delete(account.targetId)
+    const nextPhases = { ...quickProbePhases.value }
+    delete nextPhases[account.targetId]
+    quickProbePhases.value = nextPhases
   }
 }
 
@@ -1321,9 +1376,9 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           :hide-unmonitored-accounts="preferences.hideUnmonitoredAccounts"
           :question-answer-unread-target-ids="preferences.questionAnswerUnreadTargetIds"
           :action-loading="isActionLoading"
-          :quick-probe-target-id="quickProbeTargetId"
-          :quick-probe-phase="quickProbePhase"
+          :quick-probe-phases="quickProbePhases"
           :quick-probe-errors="quickProbeErrors"
+          :quick-probe-successes="quickProbeSuccesses"
           @setup="openSetup"
           @probe="onProbeAccount"
           @quick-probe="onQuickProbeAccount"

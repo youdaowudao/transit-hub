@@ -13,6 +13,12 @@ import type {
 } from '@/modules/admin/types/connectionHealth'
 
 type QuickProbePhase = 'starting' | 'queued' | 'running' | ''
+type ActiveQuickProbePhase = Exclude<QuickProbePhase, ''>
+
+interface QuickProbeSuccess {
+  modelName: string
+  latencyMs: number
+}
 
 const harness = vi.hoisted(() => ({
   refs: {} as Record<string, { value: any }>,
@@ -285,9 +291,9 @@ const buttonByText = (wrapper: VueWrapper, text: string): VueWrapper => {
 
 const mountDetail = (
   accounts: AdminGroupAccount[],
-  quickProbeTargetId = '',
-  quickProbePhase: QuickProbePhase = '',
+  quickProbePhases: Record<string, ActiveQuickProbePhase> = {},
   quickProbeErrors: Record<string, string> = {},
+  quickProbeSuccesses: Record<string, QuickProbeSuccess> = {},
   unreadTargetIds: string[] = [],
 ) => {
   const wrapper = mount(AdminGroupHealthDetail, {
@@ -296,10 +302,10 @@ const mountDetail = (
       hideUnmonitoredAccounts: false,
       questionAnswerUnreadTargetIds: unreadTargetIds,
       actionLoading: false,
-      quickProbeTargetId,
-      quickProbePhase,
+      quickProbePhases,
       quickProbeErrors,
-    },
+      quickProbeSuccesses,
+    } as any,
   })
   mountedWrappers.push(wrapper)
   return wrapper
@@ -381,6 +387,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   for (const wrapper of mountedWrappers.splice(0)) wrapper.unmount()
   document.body.innerHTML = ''
   localStorage.clear()
@@ -389,7 +396,7 @@ afterEach(() => {
 describe('AdminGroupHealthDetail quick formal probe behavior', () => {
   it('keeps the old unread Zap event and gives the new Bolt its own event without sharing unread styling', async () => {
     const account = makeAccount()
-    const wrapper = mountDetail([account], '', '', {}, [account.targetId])
+    const wrapper = mountDetail([account], {}, {}, {}, [account.targetId])
     const row = rowFor(wrapper, account.name)
 
     const oldProbe = buttonByAria(row, '有未查看的问答测试')
@@ -444,22 +451,29 @@ describe('AdminGroupHealthDetail quick formal probe behavior', () => {
     expect(buttonByAria(noModelsRow, '手动探活').attributes('disabled')).toBeUndefined()
   })
 
-  it('maps starting, queued, and running only onto the active quick button while old actions stay enabled', async () => {
+  it('maps each phase only onto its account, blocks a duplicate, and leaves another quick button clickable', async () => {
     const first = makeAccount({ id: 'first', name: '运行账号', targetId: 'sub2api:ws1:first' })
     const second = makeAccount({ id: 'second', name: '旁路账号', targetId: 'sub2api:ws1:second' })
-    const wrapper = mountDetail([first, second], first.targetId, 'starting')
+    const wrapper = mountDetail([first, second], { [first.targetId]: 'starting' })
 
-    const expectedLabels: Array<[QuickProbePhase, string]> = [
+    const expectedLabels: Array<[ActiveQuickProbePhase, string]> = [
       ['starting', '正在提交正式探活：gpt-5.6-sol'],
       ['queued', '正式探活排队中：gpt-5.6-sol'],
       ['running', '正式探活进行中：gpt-5.6-sol'],
     ]
     for (const [phase, label] of expectedLabels) {
-      await wrapper.setProps({ quickProbePhase: phase })
+      await wrapper.setProps({ quickProbePhases: { [first.targetId]: phase } } as any)
       expect(buttonByAria(rowFor(wrapper, first.name), label).attributes('disabled')).toBeDefined()
     }
 
-    expect(buttonByAriaFragment(rowFor(wrapper, second.name), '一键正式探活').attributes('disabled')).toBeDefined()
+    await buttonByAriaFragment(rowFor(wrapper, first.name), '正式探活进行中').trigger('click')
+    expect(wrapper.emitted('quick-probe')).toBeUndefined()
+
+    const secondQuickProbe = buttonByAria(rowFor(wrapper, second.name), '一键正式探活：gpt-5.6-sol')
+    expect(secondQuickProbe.attributes('disabled')).toBeUndefined()
+    await secondQuickProbe.trigger('click')
+    expect(wrapper.emitted('quick-probe')).toEqual([[second]])
+
     expect(buttonByAria(rowFor(wrapper, first.name), '手动探活').attributes('disabled')).toBeUndefined()
     expect(buttonByAria(rowFor(wrapper, first.name), '设置账号策略').attributes('disabled')).toBeUndefined()
     expect(buttonByAria(rowFor(wrapper, first.name), '查看事件').attributes('disabled')).toBeUndefined()
@@ -482,7 +496,7 @@ describe('AdminGroupHealthDetail quick formal probe behavior', () => {
         lastLatencyMs: 7654, lastErrorKey: 'server_error', lastErrorDetail: '失败',
       })],
     })
-    const wrapper = mountDetail([withHistory, withoutHistory], '', '', { [withHistory.targetId]: longError })
+    const wrapper = mountDetail([withHistory, withoutHistory], {}, { [withHistory.targetId]: longError })
 
     const historyRow = rowFor(wrapper, withHistory.name)
     expect(historyRow.text()).toContain('321 ms')
@@ -544,27 +558,38 @@ describe('ConnectionHealthView quick formal probe session behavior', () => {
     )
   })
 
-  it('renders stream stages, disables only quick buttons, and leaves the automatic refresh and other operations usable', async () => {
-    const pending = deferred<ModelHealth[]>()
-    let onPhase: ((phase: 'queued' | 'running') => void) | undefined
-    harness.probeTargetWithProgress.mockImplementation((_targetId, _models, phaseCallback) => {
-      onPhase = phaseCallback
+  it('submits different accounts independently, renders their own stream stages, and blocks only same-account duplicates', async () => {
+    const pendingByTarget = new Map<string, ReturnType<typeof deferred<ModelHealth[]>>>()
+    const phaseByTarget = new Map<string, (phase: 'queued' | 'running') => void>()
+    harness.probeTargetWithProgress.mockImplementation((targetId, _models, phaseCallback) => {
+      const pending = deferred<ModelHealth[]>()
+      pendingByTarget.set(targetId, pending)
+      phaseByTarget.set(targetId, phaseCallback)
       return pending.promise
     })
     const first = makeAccount({ id: 'first', name: '运行账号', targetId: 'sub2api:ws1:first' })
     const second = makeAccount({ id: 'second', name: '旁路账号', targetId: 'sub2api:ws1:second' })
-    const wrapper = await mountView([makeGroup([first, second])])
+    const third = makeAccount({ id: 'third', name: '待点击账号', targetId: 'sub2api:ws1:third' })
+    const wrapper = await mountView([makeGroup([first, second, third])])
     harness.refreshAdminGroupsAutomatically.mockClear()
 
     await buttonByAria(rowFor(wrapper, first.name), '一键正式探活：gpt-5.6-sol').trigger('click')
     expect(buttonByAria(rowFor(wrapper, first.name), '正在提交正式探活：gpt-5.6-sol').attributes('disabled')).toBeDefined()
-    onPhase?.('queued')
-    await nextTick()
-    expect(buttonByAria(rowFor(wrapper, first.name), '正式探活排队中：gpt-5.6-sol').attributes('disabled')).toBeDefined()
-    onPhase?.('running')
+    expect(buttonByAria(rowFor(wrapper, second.name), '一键正式探活：gpt-5.6-sol').attributes('disabled')).toBeUndefined()
+
+    await buttonByAriaFragment(rowFor(wrapper, first.name), '正在提交正式探活').trigger('click')
+    expect(harness.probeTargetWithProgress).toHaveBeenCalledTimes(1)
+
+    await buttonByAria(rowFor(wrapper, second.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    expect(harness.probeTargetWithProgress).toHaveBeenCalledTimes(2)
+    expect(buttonByAria(rowFor(wrapper, second.name), '正在提交正式探活：gpt-5.6-sol').attributes('disabled')).toBeDefined()
+    expect(buttonByAria(rowFor(wrapper, third.name), '一键正式探活：gpt-5.6-sol').attributes('disabled')).toBeUndefined()
+
+    phaseByTarget.get(first.targetId)?.('running')
+    phaseByTarget.get(second.targetId)?.('queued')
     await nextTick()
     expect(buttonByAria(rowFor(wrapper, first.name), '正式探活进行中：gpt-5.6-sol').attributes('disabled')).toBeDefined()
-    expect(buttonByAriaFragment(rowFor(wrapper, second.name), '一键正式探活').attributes('disabled')).toBeDefined()
+    expect(buttonByAria(rowFor(wrapper, second.name), '正式探活排队中：gpt-5.6-sol').attributes('disabled')).toBeDefined()
 
     expect(buttonByAria(rowFor(wrapper, first.name), '手动探活').attributes('disabled')).toBeUndefined()
     expect(buttonByAria(rowFor(wrapper, first.name), '设置账号策略').attributes('disabled')).toBeUndefined()
@@ -579,7 +604,8 @@ describe('ConnectionHealthView quick formal probe session behavior', () => {
     await flushPromises()
     expect(harness.refreshAdminGroupsAutomatically).toHaveBeenCalledTimes(1)
 
-    pending.resolve([successResult(180)])
+    pendingByTarget.get(first.targetId)?.resolve([successResult(180)])
+    pendingByTarget.get(second.targetId)?.resolve([successResult(190)])
     await flushPromises()
   })
 
@@ -632,6 +658,53 @@ describe('ConnectionHealthView quick formal probe session behavior', () => {
     }
     expect(rowFor(wrapper, accountFromHealth.name).text()).toContain(`${latency} ms`)
     expect(wrapper.find('.quick-probe-error-row').exists()).toBe(false)
+    expect(wrapper.find('.quick-probe-success-row').text()).toContain(`正式探活完成：gpt-5.6-sol · 本次延迟 ${latency} ms`)
+  })
+
+  it('shows the completed model and current probe latency for twenty seconds while the account latency stays the projected maximum', async () => {
+    vi.useFakeTimers()
+    const account = makeAccount({
+      modelHealth: [
+        makeModel({ modelName: 'gpt-5.6-sol', lastLatencyMs: 120, lastSuccessLatencyMs: 120 }),
+        makeModel({ modelName: 'historical-slower-model', lastLatencyMs: 900, lastSuccessLatencyMs: 900 }),
+      ],
+    })
+    harness.probeTargetWithProgress.mockResolvedValue([successResult(246)])
+    const wrapper = await mountView([makeGroup([account])])
+
+    await buttonByAria(rowFor(wrapper, account.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    await flushPromises()
+
+    expect(rowFor(wrapper, account.name).text()).toContain('900 ms')
+    expect(rowFor(wrapper, account.name).text()).not.toContain('246 ms')
+    const successRow = wrapper.find('.quick-probe-success-row')
+    expect(successRow.exists()).toBe(true)
+    expect(successRow.text()).toContain('正式探活完成：gpt-5.6-sol · 本次延迟 246 ms')
+    expect(wrapper.find('.quick-probe-error-row').exists()).toBe(false)
+
+    vi.advanceTimersByTime(19_999)
+    await nextTick()
+    expect(wrapper.find('.quick-probe-success-row').exists()).toBe(true)
+
+    vi.advanceTimersByTime(1)
+    await nextTick()
+    expect(wrapper.find('.quick-probe-success-row').exists()).toBe(false)
+  })
+
+  it('clears a completed notice on explicit refresh without changing the authoritative latency semantics', async () => {
+    const account = makeAccount()
+    harness.probeTargetWithProgress.mockResolvedValue([successResult(246)])
+    const wrapper = await mountView([makeGroup([account])])
+
+    await buttonByAria(rowFor(wrapper, account.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.quick-probe-success-row').text()).toContain('本次延迟 246 ms')
+
+    await buttonByText(wrapper, '刷新').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.quick-probe-success-row').exists()).toBe(false)
+    expect(rowFor(wrapper, account.name).text()).toContain('246 ms')
   })
 
   it('uses probeResult for a failed result, preserves historical success latency, and never presents failed elapsed time as success latency', async () => {
@@ -648,6 +721,7 @@ describe('ConnectionHealthView quick formal probe session behavior', () => {
     expect(row.text()).toContain('321 ms')
     expect(row.text()).not.toContain('9876 ms')
     expect(wrapper.text()).toContain('本次正式探活返回安全失败详情')
+    expect(wrapper.find('.quick-probe-success-row').exists()).toBe(false)
   })
 
   it.each([
@@ -706,6 +780,7 @@ describe('ConnectionHealthView quick formal probe session behavior', () => {
 
     expect(wrapper.text()).toContain('正式探活已完成，但没有返回模型结果')
     expect(rowFor(wrapper, account.name).text()).not.toContain('0 ms')
+    expect(wrapper.find('.quick-probe-success-row').exists()).toBe(false)
   })
 
   it('clears only the retried account, preserves other account errors, and clears the retried account after success', async () => {
@@ -869,6 +944,72 @@ describe('ConnectionHealthView quick formal probe session behavior', () => {
     expect(rowFor(wrapper, first.name).text()).not.toContain('111 ms')
   })
 
+  it('keeps one authoritative read in flight and drains the newer obligation when different accounts finish together', async () => {
+    const first = makeAccount({ id: 'first', name: '并发账号甲', targetId: 'sub2api:ws1:first' })
+    const second = makeAccount({ id: 'second', name: '并发账号乙', targetId: 'sub2api:ws1:second' })
+    const firstProbe = deferred<ModelHealth[]>()
+    const secondProbe = deferred<ModelHealth[]>()
+    const firstAuthorityRead = deferred<boolean>()
+    let authorityReadsInFlight = 0
+    let maxAuthorityReadsInFlight = 0
+    let authorityReadSequence = 0
+
+    harness.probeTargetWithProgress.mockImplementation((targetId) => (
+      targetId === first.targetId ? firstProbe.promise : secondProbe.promise
+    ))
+    harness.loadAdminGroups.mockReset().mockImplementation(async () => {
+      const sequence = ++authorityReadSequence
+      authorityReadsInFlight++
+      maxAuthorityReadsInFlight = Math.max(maxAuthorityReadsInFlight, authorityReadsInFlight)
+      try {
+        if (sequence === 1) await firstAuthorityRead.promise
+        if (sequence === 2) {
+          harness.refs.adminGroups.value = [makeGroup([
+            makeAccount({
+              id: first.id,
+              name: first.name,
+              targetId: first.targetId,
+              modelHealth: [makeModel({ lastLatencyMs: 444, lastSuccessLatencyMs: 444 })],
+            }),
+            makeAccount({
+              id: second.id,
+              name: second.name,
+              targetId: second.targetId,
+              modelHealth: [makeModel({ lastLatencyMs: 555, lastSuccessLatencyMs: 555 })],
+            }),
+          ])]
+        }
+        return true
+      } finally {
+        authorityReadsInFlight--
+      }
+    })
+    const wrapper = await mountView([makeGroup([first, second])])
+
+    await buttonByAria(rowFor(wrapper, first.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    await buttonByAria(rowFor(wrapper, second.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    expect(harness.probeTargetWithProgress).toHaveBeenCalledTimes(2)
+
+    firstProbe.resolve([successResult(111)])
+    await flushPromises()
+    expect(harness.loadAdminGroups).toHaveBeenCalledTimes(1)
+
+    secondProbe.resolve([successResult(222)])
+    await flushPromises()
+    expect(rowFor(wrapper, second.name).text()).toContain('222 ms')
+    expect(harness.loadAdminGroups).toHaveBeenCalledTimes(1)
+    expect(maxAuthorityReadsInFlight).toBe(1)
+
+    firstAuthorityRead.resolve(true)
+    await flushPromises()
+
+    expect(harness.loadAdminGroups).toHaveBeenCalledTimes(2)
+    expect(maxAuthorityReadsInFlight).toBe(1)
+    expect(rowFor(wrapper, first.name).text()).toContain('444 ms')
+    expect(rowFor(wrapper, second.name).text()).toContain('555 ms')
+    expect(rowFor(wrapper, second.name).text()).not.toContain('222 ms')
+  })
+
   it('serializes authoritative reads so a later failed read cannot invalidate the earlier read or lose the latest obligation', async () => {
     const first = makeAccount({ id: 'first', name: '先完成账号', targetId: 'sub2api:ws1:first' })
     const second = makeAccount({ id: 'second', name: '后完成账号', targetId: 'sub2api:ws1:second' })
@@ -967,6 +1108,50 @@ describe('ConnectionHealthView quick formal probe session behavior', () => {
     expect(rowFor(wrapper, account.name).text()).toContain('555 ms')
   })
 
+  it('aborts every workspace-A request before switching and rejects all late phases, results, notices, and reloads', async () => {
+    const firstA = makeAccount({ id: 'first-a', name: '工作区 A 账号甲', targetId: 'sub2api:workspace-a:first-a' })
+    const secondA = makeAccount({ id: 'second-a', name: '工作区 A 账号乙', targetId: 'sub2api:workspace-a:second-a' })
+    const accountB = makeAccount({ id: 'account-b', name: '工作区 B 账号', targetId: 'sub2api:workspace-b:account-b' })
+    const pendingByTarget = new Map<string, ReturnType<typeof deferred<ModelHealth[]>>>()
+    const signalByTarget = new Map<string, AbortSignal>()
+    const phaseByTarget = new Map<string, (phase: 'queued' | 'running') => void>()
+    harness.currentAccount.value = { id: 'workspace-a', displayName: '工作区 A' }
+    harness.activeWorkspaceScope = 'workspace-a'
+    harness.probeTargetWithProgress.mockImplementation((targetId, _models, phaseCallback, signal) => {
+      const pending = deferred<ModelHealth[]>()
+      pendingByTarget.set(targetId, pending)
+      signalByTarget.set(targetId, signal)
+      phaseByTarget.set(targetId, phaseCallback)
+      return pending.promise
+    })
+    const wrapper = await mountView([makeGroup([firstA, secondA], { id: 'group-a', name: '工作区 A 分组' })])
+    harness.loadAdminGroups.mockClear()
+
+    await buttonByAria(rowFor(wrapper, firstA.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    await buttonByAria(rowFor(wrapper, secondA.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    expect(harness.probeTargetWithProgress).toHaveBeenCalledTimes(2)
+
+    harness.workspaceGroups['workspace-b'] = [makeGroup([accountB], { id: 'group-b', name: '工作区 B 分组' })]
+    harness.currentAccount.value = { id: 'workspace-b', displayName: '工作区 B' }
+    await flushPromises()
+
+    expect(signalByTarget.get(firstA.targetId)?.aborted).toBe(true)
+    expect(signalByTarget.get(secondA.targetId)?.aborted).toBe(true)
+    phaseByTarget.get(firstA.targetId)?.('running')
+    phaseByTarget.get(secondA.targetId)?.('queued')
+    pendingByTarget.get(firstA.targetId)?.resolve([successResult(888)])
+    pendingByTarget.get(secondA.targetId)?.resolve([successResult(999)])
+    await flushPromises()
+
+    expect(wrapper.text()).toContain(accountB.name)
+    expect(wrapper.text()).not.toContain(firstA.name)
+    expect(wrapper.text()).not.toContain(secondA.name)
+    expect(wrapper.text()).not.toContain('888 ms')
+    expect(wrapper.text()).not.toContain('999 ms')
+    expect(wrapper.find('.quick-probe-success-row').exists()).toBe(false)
+    expect(harness.loadAdminGroups).not.toHaveBeenCalled()
+  })
+
   it.each(['success', 'failure'] as const)('invalidates and aborts a workspace-A request before a late %s can write phase, result, error, reload, or final state into workspace B', async (outcome) => {
     const accountA = makeAccount({ id: 'account-a', name: '工作区 A 账号', targetId: 'sub2api:workspace-a:account-a' })
     const accountB = makeAccount({ id: 'account-b', name: '工作区 B 账号', targetId: 'sub2api:workspace-b:account-b' })
@@ -1030,24 +1215,32 @@ describe('ConnectionHealthView quick formal probe session behavior', () => {
     expect(wrapper.text()).not.toContain('工作区 A 临时错误')
   })
 
-  it('invalidates and aborts the active quick request on unmount before late completion', async () => {
-    const account = makeAccount()
-    const pending = deferred<ModelHealth[]>()
-    let requestSignal: AbortSignal | undefined
-    harness.probeTargetWithProgress.mockImplementation((_targetId, _models, _onPhase, signal) => {
-      requestSignal = signal
+  it('invalidates and aborts every active quick request on unmount before late completion', async () => {
+    const first = makeAccount({ id: 'first', name: '卸载账号甲', targetId: 'sub2api:ws1:first' })
+    const second = makeAccount({ id: 'second', name: '卸载账号乙', targetId: 'sub2api:ws1:second' })
+    const pendingByTarget = new Map<string, ReturnType<typeof deferred<ModelHealth[]>>>()
+    const signalByTarget = new Map<string, AbortSignal>()
+    harness.probeTargetWithProgress.mockImplementation((targetId, _models, _onPhase, signal) => {
+      const pending = deferred<ModelHealth[]>()
+      pendingByTarget.set(targetId, pending)
+      signalByTarget.set(targetId, signal)
       return pending.promise
     })
-    const wrapper = await mountView([makeGroup([account])])
+    const wrapper = await mountView([makeGroup([first, second])])
     harness.loadAdminGroups.mockClear()
-    await buttonByAria(rowFor(wrapper, account.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    await buttonByAria(rowFor(wrapper, first.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    await buttonByAria(rowFor(wrapper, second.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    expect(harness.probeTargetWithProgress).toHaveBeenCalledTimes(2)
 
     wrapper.unmount()
     removeMountedWrapper(wrapper)
-    expect(requestSignal?.aborted).toBe(true)
-    pending.resolve([successResult(777)])
+    expect(signalByTarget.get(first.targetId)?.aborted).toBe(true)
+    expect(signalByTarget.get(second.targetId)?.aborted).toBe(true)
+    pendingByTarget.get(first.targetId)?.resolve([successResult(777)])
+    pendingByTarget.get(second.targetId)?.resolve([successResult(888)])
     await flushPromises()
     expect(harness.loadAdminGroups).not.toHaveBeenCalled()
     expect((harness.refs.adminGroups.value as AdminGroupHealth[])[0].accounts[0].modelHealth[0].lastSuccessLatencyMs).toBe(120)
+    expect((harness.refs.adminGroups.value as AdminGroupHealth[])[0].accounts[1].modelHealth[0].lastSuccessLatencyMs).toBe(120)
   })
 })

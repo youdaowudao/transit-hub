@@ -1170,6 +1170,7 @@ export default {
           unavailable: '当前账号暂不可正式探活',
           noPolicy: '未启用正式探活策略',
           noModels: '没有正式探活模型',
+          completed: '正式探活完成：{model} · 本次延迟 {latency} ms',
           emptyResult: '正式探活已完成，但没有返回模型结果',
           requestFailed: '正式探活失败，请稍后重试。'
         },

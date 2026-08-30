@@ -21,16 +21,17 @@ const (
 )
 
 const (
-	ErrorTestQuestionInvalid           = "admin.connectionHealth.errors.testQuestionInvalid"
-	ErrorTestQuestionNotFound          = "admin.connectionHealth.errors.testQuestionNotFound"
-	ErrorTestQuestionDisabled          = "admin.connectionHealth.errors.testQuestionDisabled"
-	ErrorQuestionAnswerSelection       = "admin.connectionHealth.errors.questionAnswerSelection"
-	ErrorQuestionAnswerReasoningEffort = "admin.connectionHealth.errors.questionAnswerReasoningEffort"
-	ErrorQuestionAnswerActive          = "admin.connectionHealth.errors.questionAnswerActive"
-	ErrorQuestionAnswerBatchNotFound   = "admin.connectionHealth.errors.questionAnswerBatchNotFound"
-	ErrorQuestionAnswerStorage         = "admin.connectionHealth.errors.questionAnswerStorage"
-	ErrorQuestionAnswerMarkForbidden   = "admin.connectionHealth.errors.questionAnswerMarkForbidden"
-	ErrorQuestionAnswerServiceStopped  = "admin.connectionHealth.errors.questionAnswerServiceStopped"
+	ErrorTestQuestionInvalid             = "admin.connectionHealth.errors.testQuestionInvalid"
+	ErrorTestQuestionNotFound            = "admin.connectionHealth.errors.testQuestionNotFound"
+	ErrorTestQuestionDisabled            = "admin.connectionHealth.errors.testQuestionDisabled"
+	ErrorQuestionAnswerSelection         = "admin.connectionHealth.errors.questionAnswerSelection"
+	ErrorQuestionAnswerReasoningEffort   = "admin.connectionHealth.errors.questionAnswerReasoningEffort"
+	ErrorQuestionAnswerActive            = "admin.connectionHealth.errors.questionAnswerActive"
+	ErrorQuestionAnswerBatchNotFound     = "admin.connectionHealth.errors.questionAnswerBatchNotFound"
+	ErrorQuestionAnswerStorage           = "admin.connectionHealth.errors.questionAnswerStorage"
+	ErrorQuestionAnswerContractMismatch  = "admin.connectionHealth.errors.questionAnswerContractMismatch"
+	ErrorQuestionAnswerJudgmentForbidden = "admin.connectionHealth.errors.questionAnswerJudgmentForbidden"
+	ErrorQuestionAnswerServiceStopped    = "admin.connectionHealth.errors.questionAnswerServiceStopped"
 )
 
 const (
@@ -49,6 +50,8 @@ const (
 
 type QuestionAnswerStatus string
 
+type QuestionAnswerJudgment string
+
 type QuestionAnswerReasoningEffort string
 
 const (
@@ -56,6 +59,12 @@ const (
 	QuestionAnswerReasoningEffortMedium QuestionAnswerReasoningEffort = "medium"
 	QuestionAnswerReasoningEffortHigh   QuestionAnswerReasoningEffort = "high"
 	QuestionAnswerReasoningEffortXHigh  QuestionAnswerReasoningEffort = "xhigh"
+)
+
+const (
+	QuestionAnswerUnreviewed QuestionAnswerJudgment = "unreviewed"
+	QuestionAnswerCorrect    QuestionAnswerJudgment = "correct"
+	QuestionAnswerIncorrect  QuestionAnswerJudgment = "incorrect"
 )
 
 const (
@@ -93,6 +102,7 @@ type QuestionAnswerRecord struct {
 	AnswerBody      string                         `json:"answerBody"`
 	Status          QuestionAnswerStatus           `json:"status"`
 	ErrorType       string                         `json:"errorType"`
+	AnswerJudgment  *QuestionAnswerJudgment        `json:"answerJudgment"`
 	ManualError     bool                           `json:"manualError"`
 	CreatedAt       time.Time                      `json:"createdAt"`
 	StartedAt       *time.Time                     `json:"startedAt"`
@@ -100,10 +110,23 @@ type QuestionAnswerRecord struct {
 	UpdatedAt       time.Time                      `json:"updatedAt"`
 }
 
+type QuestionAnswerRequestStats struct {
+	Submitted  int `json:"submitted"`
+	InProgress int `json:"inProgress"`
+	Succeeded  int `json:"succeeded"`
+	Failed     int `json:"failed"`
+	Cancelled  int `json:"cancelled"`
+}
+
+type QuestionAnswerReviewStats struct {
+	Unreviewed int `json:"unreviewed"`
+	Correct    int `json:"correct"`
+	Incorrect  int `json:"incorrect"`
+}
+
 type QuestionAnswerStats struct {
-	Total  int `json:"total"`
-	Normal int `json:"normal"`
-	Errors int `json:"errors"`
+	Requests QuestionAnswerRequestStats `json:"requests"`
+	Reviews  QuestionAnswerReviewStats  `json:"reviews"`
 }
 
 type QuestionAnswerHistory struct {
@@ -126,6 +149,7 @@ type QuestionAnswerBatch struct {
 	Active          bool                           `json:"active"`
 	CurrentModel    string                         `json:"currentModel"`
 	CurrentQuestion string                         `json:"currentQuestion"`
+	Stats           QuestionAnswerStats            `json:"stats"`
 }
 
 type QuestionAnswerStartInput struct {
@@ -518,18 +542,30 @@ func (s *Service) QuestionAnswerHistory(ctx context.Context, userID string, targ
 	return s.questionAnswers.ListQuestionAnswerHistory(ctx, userID, targetID, page)
 }
 
-func (s *Service) SetQuestionAnswerManualError(ctx context.Context, userID string, targetID string, recordID string, manualError bool) (QuestionAnswerRecord, error) {
+func (s *Service) SetQuestionAnswerJudgment(ctx context.Context, userID string, targetID string, recordID string, judgment QuestionAnswerJudgment) (QuestionAnswerRecord, error) {
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerRecord{}, err
 	}
-	record, err := s.questionAnswers.SetQuestionAnswerManualError(ctx, userID, targetID, strings.TrimSpace(recordID), manualError)
+	if !validQuestionAnswerJudgment(judgment) {
+		return QuestionAnswerRecord{}, requestError(ErrorRequest)
+	}
+	record, err := s.questionAnswers.SetQuestionAnswerJudgment(ctx, userID, targetID, strings.TrimSpace(recordID), judgment)
 	if err != nil {
 		return QuestionAnswerRecord{}, err
 	}
 	if record == nil {
-		return QuestionAnswerRecord{}, requestError(ErrorQuestionAnswerMarkForbidden)
+		return QuestionAnswerRecord{}, requestError(ErrorQuestionAnswerJudgmentForbidden)
 	}
 	return *record, nil
+}
+
+func validQuestionAnswerJudgment(judgment QuestionAnswerJudgment) bool {
+	switch judgment {
+	case QuestionAnswerUnreviewed, QuestionAnswerCorrect, QuestionAnswerIncorrect:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) validateQuestionAnswerTarget(ctx context.Context, userID string, targetID string) error {
@@ -594,18 +630,36 @@ func buildQuestionAnswerBatch(records []QuestionAnswerRecord) (QuestionAnswerBat
 	for _, record := range records {
 		switch record.Status {
 		case QuestionAnswerPending:
+			batch.Stats.Requests.InProgress++
 			batch.Active = true
 			if batch.CurrentModel == "" {
 				batch.CurrentModel, batch.CurrentQuestion = record.ModelName, record.QuestionName
 			}
 		case QuestionAnswerRunning:
+			batch.Stats.Requests.InProgress++
 			batch.Active = true
 			batch.RunningCount++
 			batch.CurrentModel, batch.CurrentQuestion = record.ModelName, record.QuestionName
-		case QuestionAnswerSucceeded, QuestionAnswerFailed, QuestionAnswerCancelled:
+		case QuestionAnswerSucceeded:
+			batch.Stats.Requests.Succeeded++
+			switch {
+			case record.AnswerJudgment != nil && *record.AnswerJudgment == QuestionAnswerCorrect:
+				batch.Stats.Reviews.Correct++
+			case record.AnswerJudgment != nil && *record.AnswerJudgment == QuestionAnswerIncorrect:
+				batch.Stats.Reviews.Incorrect++
+			default:
+				batch.Stats.Reviews.Unreviewed++
+			}
+			batch.CompletedCount++
+		case QuestionAnswerFailed:
+			batch.Stats.Requests.Failed++
+			batch.CompletedCount++
+		case QuestionAnswerCancelled:
+			batch.Stats.Requests.Cancelled++
 			batch.CompletedCount++
 		}
 	}
+	batch.Stats.Requests.Submitted = len(records)
 	return batch, nil
 }
 

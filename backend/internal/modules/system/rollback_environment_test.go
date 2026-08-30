@@ -684,6 +684,65 @@ func TestQuestionAnswersMigrationDeclaresAdditiveRollbackSafety(t *testing.T) {
 		"-- rollback-safe: additive（仅新增表、列或索引，旧代码可忽略多出的结构）")
 }
 
+func TestSourceRollbackRejectsQuestionAnswerJudgmentMigration(t *testing.T) {
+	migration := readProjectFileForUpgradeTest(t,
+		"backend/internal/database/migrations/000027_connection_health_question_answer_judgment.sql")
+	requireTextContains(t, migration, "-- rollback-safe: destructive")
+
+	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
+	start := strings.Index(script, "classify_rollback() {")
+	endRelative := strings.Index(script[start:], "\n}\n\nwrite_json_atomic()")
+	if start < 0 || endRelative < 0 {
+		t.Fatal("unable to extract classify_rollback")
+	}
+	classifyFunction := script[start : start+endRelative+2]
+
+	tempDir := t.TempDir()
+	migrationsDir := filepath.Join(tempDir, "migrations")
+	if err := os.Mkdir(migrationsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(migrationsDir, "000027_connection_health_question_answer_judgment.sql"),
+		[]byte(migration),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	switchMarker := filepath.Join(tempDir, "switched")
+	wrapperPath := filepath.Join(tempDir, "classify.sh")
+	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
+set -Eeuo pipefail
+MIGRATIONS_DIR=%q
+%s
+rollback_tier="$(classify_rollback 26 27)"
+if [[ "$rollback_tier" == 'destructive' ]]; then
+  exit 78
+fi
+touch %q
+`, migrationsDir, classifyFunction, switchMarker)
+	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command("bash", wrapperPath).CombinedOutput()
+	if err == nil {
+		t.Fatalf("destructive migration was accepted: %s", output)
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 78 {
+		t.Fatalf("rollback classification exit = %v, output=%s", err, output)
+	}
+	if _, err := os.Stat(switchMarker); !os.IsNotExist(err) {
+		t.Fatalf("code switch happened before destructive refusal: %v", err)
+	}
+
+	classifyAt := strings.Index(script, `rollback_tier="$(classify_rollback`)
+	switchAt := strings.Index(script, `git switch --detach "$target_commit"`)
+	if classifyAt < 0 || switchAt < 0 || classifyAt > switchAt {
+		t.Fatalf("destructive classification must precede code switch: classify=%d switch=%d", classifyAt, switchAt)
+	}
+}
+
 // 还原点必须记录升级前的 schema 版本，回滚判定依赖它比对档位。
 func TestUpgradeCapturesRollbackPointFields(t *testing.T) {
 	script := readProjectFileForUpgradeTest(t, "deploy/update-source.sh")

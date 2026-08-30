@@ -1,17 +1,20 @@
 import { readFileSync } from 'node:fs'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import * as connectionHealthApi from '../src/modules/admin/api/connectionHealth'
 import {
   cancelQuestionAnswerBatch,
+  getLatestQuestionAnswerBatch,
+  getQuestionAnswerBatch,
   getQuestionAnswerHistory,
-  setQuestionAnswerManualError,
   startQuestionAnswerBatch,
 } from '../src/modules/admin/api/connectionHealth'
 import type { QuestionAnswerRecord } from '../src/modules/admin/types/connectionHealth'
 import {
+  filterQuestionAnswerRecords,
   isCurrentQuestionAnswerOperation,
-  questionAnswerCompletedTodayInShanghai,
   questionAnswerElapsedMilliseconds,
+  questionAnswerStatsReconcile,
 } from '../src/modules/admin/utils/questionAnswers'
 import {
   clearQuestionAnswerUnread,
@@ -58,6 +61,7 @@ const questionAnswerRecord = (
   answerBody: `Answer ${id}`,
   status,
   errorType: '',
+  answerJudgment: status === 'succeeded' ? 'unreviewed' : null,
   manualError: false,
   createdAt: '2026-08-15T00:00:00.000Z',
   startedAt: completedAt,
@@ -88,7 +92,7 @@ describe('connection health question answers', () => {
     expect(isCurrentQuestionAnswerOperation(scope, { ...current, batchId: 'batch-b' })).toBe(false)
   })
 
-  it('calculates answer elapsed time and Shanghai calendar-day membership', () => {
+  it('calculates elapsed time for completed and running answers', () => {
     const completed = {
       ...questionAnswerRecord('timed', 'succeeded', '2026-08-14T16:00:03.250Z'),
       startedAt: '2026-08-14T16:00:01.000Z',
@@ -97,12 +101,32 @@ describe('connection health question answers', () => {
       ...questionAnswerRecord('running', 'running', null),
       startedAt: '2026-08-14T16:00:01.000Z',
     }
-    const now = new Date('2026-08-15T02:00:00.000Z')
-
     expect(questionAnswerElapsedMilliseconds(completed)).toBe(2250)
     expect(questionAnswerElapsedMilliseconds(running, Date.parse('2026-08-14T16:00:04.000Z'))).toBe(3000)
-    expect(questionAnswerCompletedTodayInShanghai(completed, now)).toBe(true)
-    expect(questionAnswerCompletedTodayInShanghai({ ...completed, completedAt: '2026-08-14T15:59:59.000Z' }, now)).toBe(false)
+  })
+
+  it('filters only succeeded unreviewed answers by default and reconciles both stats equations', () => {
+    const unreviewed = questionAnswerRecord('unreviewed', 'succeeded', '2026-08-15T00:00:02.000Z')
+    const correct = { ...questionAnswerRecord('correct', 'succeeded', '2026-08-15T00:00:02.000Z'), answerJudgment: 'correct' as const }
+    const incorrect = { ...questionAnswerRecord('incorrect', 'succeeded', '2026-08-15T00:00:02.000Z'), answerJudgment: 'incorrect' as const, manualError: true }
+    const failed = questionAnswerRecord('failed', 'failed', '2026-08-15T00:00:02.000Z')
+    const cancelled = questionAnswerRecord('cancelled', 'cancelled', '2026-08-15T00:00:02.000Z')
+    const all = [unreviewed, correct, incorrect, failed, cancelled]
+
+    expect(filterQuestionAnswerRecords(all, false).map(record => record.id)).toEqual(['unreviewed'])
+    expect(filterQuestionAnswerRecords(all, true)).toEqual(all)
+    expect(questionAnswerStatsReconcile({
+      requests: { submitted: 7, inProgress: 2, succeeded: 3, failed: 1, cancelled: 1 },
+      reviews: { unreviewed: 1, correct: 1, incorrect: 1 },
+    })).toBe(true)
+    expect(questionAnswerStatsReconcile({
+      requests: { submitted: 7, inProgress: 2, succeeded: 3, failed: 1, cancelled: 0 },
+      reviews: { unreviewed: 1, correct: 1, incorrect: 1 },
+    })).toBe(false)
+    expect(questionAnswerStatsReconcile({
+      requests: { submitted: 7, inProgress: 2, succeeded: 3, failed: 1, cancelled: 1 },
+      reviews: { unreviewed: 1, correct: 1, incorrect: 0 },
+    })).toBe(false)
   })
 
   it('keeps unread question-answer reminders by stable target ID until the question-answer view is opened', () => {
@@ -134,17 +158,6 @@ describe('connection health question answers', () => {
     expect(dialogSource).toContain('{{ questionAnswerCurrentAnswer(record) }}')
   })
 
-  it('emphasizes normal and error counts while keeping totals secondary', () => {
-    expect(dialogSource).toContain('questionAnswer.stats.total`, { total: qaHistory.stats.total }')
-    expect(dialogSource).toContain('questionAnswer.stats.total`, { total: qaHistory.todayStats.total }')
-    expect(dialogSource).toContain('<dd class="mt-0.5 text-2xl font-semibold text-foreground">{{ qaHistory.stats.normal }}</dd>')
-    expect(dialogSource).toContain('<dd class="mt-0.5 text-2xl font-semibold text-foreground">{{ qaHistory.stats.errors }}</dd>')
-    expect(dialogSource).toContain('<dd class="mt-0.5 text-2xl font-semibold text-foreground">{{ qaHistory.todayStats.normal }}</dd>')
-    expect(dialogSource).toContain('<dd class="mt-0.5 text-2xl font-semibold text-foreground">{{ qaHistory.todayStats.errors }}</dd>')
-    expect(dialogSource).not.toContain('text-2xl font-semibold text-foreground">{{ qaHistory.stats.total }}')
-    expect(dialogSource).not.toContain('text-2xl font-semibold text-foreground">{{ qaHistory.todayStats.total }}')
-  })
-
   it('submits model and question selections and exposes explicit cancellation', async () => {
     stubStorage()
     const batch = {
@@ -172,13 +185,17 @@ describe('connection health question answers', () => {
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({ models: ['model-a', 'model-b'], questionIds: ['question-a', 'question-b'], reasoningEffort: 'high' }),
+        headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '2' }),
         signal: controller.signal,
       }),
     )
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       '/api/connection-health/targets/sub2api%3Aws1%3Aaccount-1/question-answers/batches/batch-1/cancel',
-      expect.objectContaining({ method: 'POST' }),
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '2' }),
+      }),
     )
   })
 
@@ -195,31 +212,76 @@ describe('connection health question answers', () => {
     expect(dialogSource).toContain('reasoningEffort.unspecified')
   })
 
-  it('uses page-scoped history and record-scoped automatic marking endpoints', async () => {
+  it('sends contract 2 on every question-answer read', async () => {
     stubStorage()
+    const batch = {
+      batchId: 'batch-1', records: [], reasoningEffort: 'medium', submittedCount: 0,
+      completedCount: 0, runningCount: 0, active: false, currentModel: '', currentQuestion: '',
+      stats: {
+        requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
+        reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+      },
+    }
     const history = {
       records: [], page: 2, pageSize: 20, totalItems: 21, totalPages: 2,
-      stats: { total: 20, normal: 18, errors: 2 },
-      todayStats: { total: 4, normal: 3, errors: 1 },
+      stats: {
+        requests: { submitted: 20, inProgress: 0, succeeded: 18, failed: 1, cancelled: 1 },
+        reviews: { unreviewed: 2, correct: 15, incorrect: 1 },
+      },
+      todayStats: {
+        requests: { submitted: 4, inProgress: 1, succeeded: 2, failed: 1, cancelled: 0 },
+        reviews: { unreviewed: 1, correct: 1, incorrect: 0 },
+      },
     }
-    const record = { id: 'record-9', manualError: true }
     const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(batch), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(batch), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify(history), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify(record), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
 
+    await expect(getLatestQuestionAnswerBatch('sub2api:ws1:account-1')).resolves.toEqual(batch)
+    await expect(getQuestionAnswerBatch('sub2api:ws1:account-1', 'batch-1')).resolves.toEqual(batch)
     await expect(getQuestionAnswerHistory('sub2api:ws1:account-1', 2)).resolves.toEqual(history)
-    await expect(setQuestionAnswerManualError('sub2api:ws1:account-1', 'record-9', true)).resolves.toEqual(record)
 
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      1,
-      '/api/connection-health/targets/sub2api%3Aws1%3Aaccount-1/question-answers/history?page=2',
-      expect.any(Object),
-    )
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      2,
-      '/api/connection-health/targets/sub2api%3Aws1%3Aaccount-1/question-answers/records/record-9/manual-error',
-      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ manualError: true }) }),
+    for (const call of fetchMock.mock.calls) {
+      expect(call[1]).toEqual(expect.objectContaining({
+        headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '2' }),
+      }))
+    }
+  })
+
+  it('uses the record-scoped three-state judgment endpoint without the old writer', async () => {
+    stubStorage()
+    const api = connectionHealthApi as unknown as {
+      setQuestionAnswerJudgment?: (
+        targetId: string,
+        recordId: string,
+        judgment: 'unreviewed' | 'correct' | 'incorrect',
+        signal?: AbortSignal,
+      ) => Promise<unknown>
+    }
+    expect(typeof api.setQuestionAnswerJudgment).toBe('function')
+    if (!api.setQuestionAnswerJudgment) return
+
+    const record = { id: 'record-9', answerJudgment: 'incorrect', manualError: true }
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(record), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+
+    await expect(api.setQuestionAnswerJudgment(
+      'sub2api:ws1:account-1',
+      'record-9',
+      'incorrect',
+      controller.signal,
+    )).resolves.toEqual(record)
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/connection-health/targets/sub2api%3Aws1%3Aaccount-1/question-answers/records/record-9/judgment',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ judgment: 'incorrect' }),
+        headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '2' }),
+        signal: controller.signal,
+      }),
     )
   })
 
@@ -253,7 +315,7 @@ describe('connection health question answers', () => {
     expect(dialogSource).toContain("mode !== 'questionAnswer'")
     expect(dialogSource).toContain("record.status === 'pending' || record.status === 'running'")
     expect(dialogSource).toContain('questionAnswerElapsedLabel(record)')
-    expect(dialogSource).toContain('qaHistory.todayStats.total')
+    expect(dialogSource).toContain('qaHistory.todayStats.requests.submitted')
     expect(dialogSource).toContain('questionAnswer.stats.todayShanghai')
     expect(startBody.indexOf('scheduleQuestionAnswerPoll()')).toBeLessThan(startBody.indexOf('getQuestionAnswerHistory(targetId, 1, controller.signal)'))
     expect(stopBody).toContain('cancelQuestionAnswerBatch(targetId, batchId, controller.signal)')
@@ -262,20 +324,6 @@ describe('connection health question answers', () => {
     expect(modelIndex).toBeLessThan(questionIndex)
     expect(questionIndex).toBeLessThan(currentIndex)
     expect(currentIndex).toBeLessThan(historyIndex)
-  })
-
-  it('uses record IDs, fixed status semantics, and optimistic marking rollback', () => {
-    expect(dialogSource.match(/:key="record.id"/g)).toHaveLength(2)
-    expect(dialogSource).toContain("record.status === 'failed' || record.manualError")
-    expect(dialogSource).toContain("record.status === 'cancelled' || record.status === 'pending' || record.status === 'running'")
-    expect(dialogSource).toContain("record.status !== 'succeeded'")
-    expect(dialogSource).toContain('manualError: nextValue')
-    expect(dialogSource).toContain('manualError: record.manualError')
-    expect(dialogSource).toContain("record.manualError ? 'border-red-500/60 bg-red-500/20")
-    expect(dialogSource).toContain('<XCircle v-else-if="record.manualError" class="h-5 w-5" />')
-    expect(dialogSource).toContain('<CheckCircle2 v-else class="h-5 w-5" />')
-    expect(dialogSource).toContain('updateQuestionAnswerStatsForMark(record, nextValue, 1)')
-    expect(dialogSource).toContain('updateQuestionAnswerStatsForMark(record, nextValue, -1)')
   })
 
   it('adds the existing-style settings entry and enforces question limits in the editor', () => {

@@ -13,6 +13,7 @@ import type {
   PolicyInput,
 	PrioritySyncStatus,
   QuestionAnswerBatch,
+  QuestionAnswerJudgment,
   QuestionAnswerReasoningEffort,
   QuestionAnswerHistory,
   QuestionAnswerRecord,
@@ -35,6 +36,10 @@ const authHeaders = (): HeadersInit => {
   const token = getAccessToken()
   if (!token) return {}
   return { Authorization: `Bearer ${token}` }
+}
+
+const questionAnswerContractHeaders: HeadersInit = {
+  'X-TransitHub-Question-Answer-Contract': '2',
 }
 
 type ApiErrorPayload = {
@@ -633,40 +638,44 @@ export const startQuestionAnswerBatch = async (
 ): Promise<QuestionAnswerBatch> =>
   requestJson<QuestionAnswerBatch>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches`, {
     method: 'POST',
+    headers: questionAnswerContractHeaders,
     body: JSON.stringify({ models, questionIds, reasoningEffort }),
     signal,
   })
 
 export const getLatestQuestionAnswerBatch = async (targetId: string, signal?: AbortSignal): Promise<QuestionAnswerBatch> =>
-  requestJson<QuestionAnswerBatch>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches/latest`, { signal })
+  requestJson<QuestionAnswerBatch>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches/latest`, {
+    headers: questionAnswerContractHeaders,
+    signal,
+  })
 
 export const getQuestionAnswerBatch = async (targetId: string, batchId: string, signal?: AbortSignal): Promise<QuestionAnswerBatch> =>
   requestJson<QuestionAnswerBatch>(
     `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches/${encodeURIComponent(batchId)}`,
-    { signal },
+    { headers: questionAnswerContractHeaders, signal },
   )
 
 export const cancelQuestionAnswerBatch = async (targetId: string, batchId: string, signal?: AbortSignal): Promise<QuestionAnswerBatch> =>
   requestJson<QuestionAnswerBatch>(
     `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches/${encodeURIComponent(batchId)}/cancel`,
-    { method: 'POST', signal },
+    { method: 'POST', headers: questionAnswerContractHeaders, signal },
   )
 
 export const getQuestionAnswerHistory = async (targetId: string, page: number, signal?: AbortSignal): Promise<QuestionAnswerHistory> =>
   requestJson<QuestionAnswerHistory>(
     `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/history?page=${page}`,
-    { signal },
+    { headers: questionAnswerContractHeaders, signal },
   )
 
-export const setQuestionAnswerManualError = async (
+export const setQuestionAnswerJudgment = async (
   targetId: string,
   recordId: string,
-  manualError: boolean,
+  judgment: QuestionAnswerJudgment,
   signal?: AbortSignal,
 ): Promise<QuestionAnswerRecord> =>
   requestJson<QuestionAnswerRecord>(
-    `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/records/${encodeURIComponent(recordId)}/manual-error`,
-    { method: 'PUT', body: JSON.stringify({ manualError }), signal },
+    `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/records/${encodeURIComponent(recordId)}/judgment`,
+    { method: 'PUT', headers: questionAnswerContractHeaders, body: JSON.stringify({ judgment }), signal },
   )
 
 export interface TargetSchedulableActionResult {

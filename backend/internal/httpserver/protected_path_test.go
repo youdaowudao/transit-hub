@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"transithub/backend/internal/config"
@@ -70,6 +71,34 @@ func TestCORSExplicitlyConfiguredOriginIsAuthorized(t *testing.T) {
 	}
 	if got := recorder.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
 		t.Fatalf("configured origin credentials = %q, want true", got)
+	}
+}
+
+func TestCORSAllowsQuestionAnswerContractHeaderForConfiguredOrigins(t *testing.T) {
+	origin := "https://app.example.com"
+	cfg := config.Config{CORSOrigins: []string{origin}}
+	server := &Server{cfg: cfg, allowed: makeAllowedOrigins(cfg.CORSOrigins)}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodOptions, "/api/connection-health/targets/target-1/question-answers/records/record-1/judgment", nil)
+	request.Header.Set("Origin", origin)
+	request.Header.Set("Access-Control-Request-Method", http.MethodPut)
+	request.Header.Set("Access-Control-Request-Headers", "content-type,authorization,x-transithub-question-answer-contract")
+
+	server.cors(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("CORS preflight must not reach the application handler")
+	})).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, want %d", recorder.Code, http.StatusNoContent)
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Origin"); got != origin {
+		t.Fatalf("preflight allowed origin = %q, want %q", got, origin)
+	}
+	if got := recorder.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("preflight credentials = %q, want true", got)
+	}
+	if got := strings.ToLower(recorder.Header().Get("Access-Control-Allow-Headers")); !strings.Contains(got, "x-transithub-question-answer-contract") {
+		t.Fatalf("preflight allowed headers = %q, want question-answer contract header", got)
 	}
 }
 

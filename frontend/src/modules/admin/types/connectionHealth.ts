@@ -380,6 +380,7 @@ export interface TestQuestionInput {
 
 export type QuestionAnswerStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 export type QuestionAnswerReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
+export type QuestionAnswerJudgment = 'unreviewed' | 'correct' | 'incorrect'
 
 export interface QuestionAnswerRecord {
   id: string
@@ -393,6 +394,7 @@ export interface QuestionAnswerRecord {
   answerBody: string
   status: QuestionAnswerStatus
   errorType: string
+  answerJudgment: QuestionAnswerJudgment | null
   manualError: boolean
   createdAt: string
   startedAt: string | null
@@ -400,10 +402,23 @@ export interface QuestionAnswerRecord {
   updatedAt: string
 }
 
+export interface QuestionAnswerRequestStats {
+  submitted: number
+  inProgress: number
+  succeeded: number
+  failed: number
+  cancelled: number
+}
+
+export interface QuestionAnswerReviewStats {
+  unreviewed: number
+  correct: number
+  incorrect: number
+}
+
 export interface QuestionAnswerStats {
-  total: number
-  normal: number
-  errors: number
+  requests: QuestionAnswerRequestStats
+  reviews: QuestionAnswerReviewStats
 }
 
 export interface QuestionAnswerHistory {
@@ -426,6 +441,7 @@ export interface QuestionAnswerBatch {
   active: boolean
   currentModel: string
   currentQuestion: string
+  stats: QuestionAnswerStats
 }
 
 export interface PolicyInput {

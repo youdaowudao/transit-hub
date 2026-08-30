@@ -17,6 +17,11 @@ type Handler struct {
 	service *Service
 }
 
+const (
+	questionAnswerContractHeaderName = "X-TransitHub-Question-Answer-Contract"
+	questionAnswerContractVersion    = "2"
+)
+
 // RegisterRoutes 注册链路健康探活模块的全部路由。响应体一律不含 upstream_key。
 func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	handler := &Handler{service: service}
@@ -51,6 +56,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/question-answers/batches/{batchId}/cancel", handler.stopQuestionAnswerBatch)
 	mux.HandleFunc("GET /api/connection-health/targets/{id}/question-answers/history", handler.questionAnswerHistory)
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/question-answers/records/{recordId}/manual-error", handler.setQuestionAnswerManualError)
+	mux.HandleFunc("PUT /api/connection-health/targets/{id}/question-answers/records/{recordId}/judgment", handler.setQuestionAnswerJudgment)
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/schedulable", handler.setTargetSchedulable)
 	mux.HandleFunc("GET /api/connection-health/targets/{id}/policy-assignments", handler.getPolicyAssignments)
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/policy-assignments", handler.putPolicyAssignments)
@@ -687,6 +693,9 @@ func (h *Handler) startQuestionAnswerBatch(w http.ResponseWriter, r *http.Reques
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
 		return
 	}
+	if rejectQuestionAnswerContractMismatch(w, r) {
+		return
+	}
 	var input QuestionAnswerStartInput
 	if err := httpjson.Decode(r, &input); err != nil {
 		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
@@ -706,6 +715,9 @@ func (h *Handler) latestQuestionAnswerBatch(w http.ResponseWriter, r *http.Reque
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
 		return
 	}
+	if rejectQuestionAnswerContractMismatch(w, r) {
+		return
+	}
 	batch, err := h.service.LatestQuestionAnswerBatch(r.Context(), userID, r.PathValue("id"))
 	if err != nil {
 		writeError(w, err)
@@ -718,6 +730,9 @@ func (h *Handler) getQuestionAnswerBatch(w http.ResponseWriter, r *http.Request)
 	userID, ok := authctx.UserID(r.Context())
 	if !ok {
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if rejectQuestionAnswerContractMismatch(w, r) {
 		return
 	}
 	batch, err := h.service.GetQuestionAnswerBatch(r.Context(), userID, r.PathValue("id"), r.PathValue("batchId"))
@@ -734,6 +749,9 @@ func (h *Handler) stopQuestionAnswerBatch(w http.ResponseWriter, r *http.Request
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
 		return
 	}
+	if rejectQuestionAnswerContractMismatch(w, r) {
+		return
+	}
 	batch, err := h.service.StopQuestionAnswerBatch(r.Context(), userID, r.PathValue("id"), r.PathValue("batchId"))
 	if err != nil {
 		writeError(w, err)
@@ -746,6 +764,9 @@ func (h *Handler) questionAnswerHistory(w http.ResponseWriter, r *http.Request) 
 	userID, ok := authctx.UserID(r.Context())
 	if !ok {
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if rejectQuestionAnswerContractMismatch(w, r) {
 		return
 	}
 	page := 1
@@ -766,24 +787,44 @@ func (h *Handler) questionAnswerHistory(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *Handler) setQuestionAnswerManualError(w http.ResponseWriter, r *http.Request) {
+	_, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	httpjson.WriteError(w, http.StatusConflict, ErrorQuestionAnswerContractMismatch)
+}
+
+func (h *Handler) setQuestionAnswerJudgment(w http.ResponseWriter, r *http.Request) {
 	userID, ok := authctx.UserID(r.Context())
 	if !ok {
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
 		return
 	}
-	var input struct {
-		ManualError *bool `json:"manualError"`
+	if rejectQuestionAnswerContractMismatch(w, r) {
+		return
 	}
-	if err := httpjson.Decode(r, &input); err != nil || input.ManualError == nil {
+	var input struct {
+		Judgment QuestionAnswerJudgment `json:"judgment"`
+	}
+	if err := httpjson.Decode(r, &input); err != nil || !validQuestionAnswerJudgment(input.Judgment) {
 		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
 		return
 	}
-	record, err := h.service.SetQuestionAnswerManualError(r.Context(), userID, r.PathValue("id"), r.PathValue("recordId"), *input.ManualError)
+	record, err := h.service.SetQuestionAnswerJudgment(r.Context(), userID, r.PathValue("id"), r.PathValue("recordId"), input.Judgment)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	httpjson.Write(w, http.StatusOK, record)
+}
+
+func rejectQuestionAnswerContractMismatch(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get(questionAnswerContractHeaderName) == questionAnswerContractVersion {
+		return false
+	}
+	httpjson.WriteError(w, http.StatusConflict, ErrorQuestionAnswerContractMismatch)
+	return true
 }
 
 func (h *Handler) getPolicyAssignments(w http.ResponseWriter, r *http.Request) {
@@ -869,6 +910,9 @@ func writeError(w http.ResponseWriter, err error) {
 			status = http.StatusNotFound
 		}
 		if requestErr == requestError(ErrorNoCurrentAccount) || requestErr == requestError(ErrorQuestionAnswerActive) || requestErr == requestError(ErrorQuestionAnswerServiceStopped) {
+			status = http.StatusConflict
+		}
+		if requestErr == requestError(ErrorQuestionAnswerContractMismatch) || requestErr == requestError(ErrorQuestionAnswerJudgmentForbidden) {
 			status = http.StatusConflict
 		}
 		if requestErr == requestError(ErrorSub2APIGroupLastUsable) || requestErr == requestError(ErrorSub2APIInventoryIncomplete) {

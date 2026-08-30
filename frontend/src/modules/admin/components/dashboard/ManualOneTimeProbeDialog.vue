@@ -39,9 +39,12 @@ import type {
   TestQuestion,
 } from '../../types/connectionHealth'
 import {
-  isCurrentQuestionAnswerOperation,
   filterQuestionAnswerRecords,
+  groupQuestionAnswerHistoryByBatch,
+  isCurrentQuestionAnswerOperation,
+  questionAnswerBatchCompletedAt,
   questionAnswerElapsedMilliseconds,
+  shortQuestionAnswerBatchId,
   type QuestionAnswerOperationScope,
 } from '../../utils/questionAnswers'
 import { t, te } from '@/locales'
@@ -97,7 +100,9 @@ const qaReasoningEffortOptions: Array<{ value: QuestionAnswerReasoningEffort; la
 const qaLoading = ref(false)
 const qaStarting = ref(false)
 const qaCancelling = ref(false)
-const qaBatch = ref<QuestionAnswerBatch | null>(null)
+const qaRuntimeBatch = ref<QuestionAnswerBatch | null>(null)
+const qaReviewBatch = ref<QuestionAnswerBatch | null>(null)
+const qaReviewLoadingBatchId = ref<string | null>(null)
 const qaHistory = ref<QuestionAnswerHistory>({
   records: [],
   page: 1,
@@ -128,10 +133,20 @@ let qaDataController: AbortController | null = null
 let qaPollController: AbortController | null = null
 let qaCancelController: AbortController | null = null
 const qaJudgmentControllers = new Map<string, AbortController>()
+const qaJudgmentRefreshSequences = new Map<string, number>()
 let qaPollTimer: ReturnType<typeof setTimeout> | null = null
 let qaClockTimer: ReturnType<typeof setInterval> | null = null
 let qaStartSequence = 0
 let qaCancelSequence = 0
+let qaReviewSequence = 0
+let qaReviewController: AbortController | null = null
+let qaReviewJudgmentRefreshSequence = 0
+let qaHistorySequence = 0
+let qaHistoryIntentPage = 1
+let qaJudgmentRefreshSequence = 0
+let qaJudgmentSessionSequence = 0
+let qaPollSequence = 0
+let qaRuntimeSnapshotSequence = 0
 
 const cancelActiveRequest = () => {
   activeRequestController?.abort()
@@ -166,6 +181,7 @@ const finishModelDiscovery = (controller: AbortController) => {
 }
 
 const clearQuestionAnswerPolling = () => {
+  qaPollSequence++
   if (qaPollTimer) clearTimeout(qaPollTimer)
   qaPollTimer = null
   qaPollController?.abort()
@@ -185,16 +201,65 @@ const startQuestionAnswerClock = () => {
   }, 1000)
 }
 
+const cancelQuestionAnswerReview = (): number => {
+  const sequence = ++qaReviewSequence
+  qaReviewController?.abort()
+  qaReviewController = null
+  qaReviewLoadingBatchId.value = null
+  qaReviewJudgmentRefreshSequence = 0
+  return sequence
+}
+
+const beginQuestionAnswerHistoryIntent = (page = qaHistoryIntentPage): number => {
+  qaHistoryIntentPage = page
+  const sequence = ++qaHistorySequence
+  qaDataController?.abort()
+  qaDataController = null
+  return sequence
+}
+
+const questionAnswerHistoryIntentIsCurrent = (sequence: number): boolean => (
+  sequence === qaHistorySequence
+)
+
+const resetQuestionAnswerViewState = () => {
+  qaRuntimeBatch.value = null
+  qaReviewBatch.value = null
+  qaHistoryIntentPage = 1
+  qaHistory.value = {
+    records: [], page: 1, pageSize: 20, totalItems: 0, totalPages: 0,
+    stats: {
+      requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+    },
+    todayStats: {
+      requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+    },
+  }
+  qaCurrentExpanded.value = new Set()
+  qaExpanded.value = new Set()
+  qaShowAll.value = false
+}
+
+const cancelQuestionAnswerJudgments = () => {
+  for (const controller of qaJudgmentControllers.values()) controller.abort()
+  qaJudgmentControllers.clear()
+  qaJudgmentRefreshSequences.clear()
+  qaJudgmentSessionSequence++
+  qaMarking.value = new Set()
+}
+
 const cancelQuestionAnswerRequests = () => {
   clearQuestionAnswerPolling()
   clearQuestionAnswerClock()
-  qaDataController?.abort()
-  qaDataController = null
+  cancelQuestionAnswerReview()
+  beginQuestionAnswerHistoryIntent()
+  qaLoading.value = false
   qaCancelController?.abort()
   qaCancelController = null
-  for (const controller of qaJudgmentControllers.values()) controller.abort()
-  qaJudgmentControllers.clear()
-  qaMarking.value = new Set()
+  cancelQuestionAnswerJudgments()
+  qaRuntimeSnapshotSequence++
   qaCancelSequence++
   qaCancelling.value = false
 }
@@ -255,7 +320,9 @@ watch(
     qaQuestions.value = []
     qaSelectedQuestions.value = new Set()
     qaReasoningEffort.value = 'medium'
-    qaBatch.value = null
+    qaRuntimeBatch.value = null
+    qaReviewBatch.value = null
+    qaHistoryIntentPage = 1
     qaHistory.value = {
       records: [], page: 1, pageSize: 20, totalItems: 0, totalPages: 0,
       stats: {
@@ -287,7 +354,7 @@ watch(
     onceLoadState.value = 'ready'
     if (mode.value === 'formal') return
     models.value = onceModels.value
-    if (!restoreActiveQuestionAnswerSelection(qaBatch.value)) selected.value = defaultSelection(outcome.models)
+    if (!restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)) selected.value = defaultSelection(outcome.models)
     phase.value = 'ready'
   },
 )
@@ -297,7 +364,10 @@ watch(mode, (nextMode) => {
   testErrorKey.value = ''
   formalProgress.value = ''
   qaCompletedNotice.value = false
-  if (nextMode !== 'questionAnswer') cancelQuestionAnswerStart()
+  if (nextMode !== 'questionAnswer') {
+    cancelQuestionAnswerStart()
+    resetQuestionAnswerViewState()
+  }
   cancelQuestionAnswerRequests()
   if (nextMode === 'formal') {
     models.value = props.target?.formalModels ?? []
@@ -315,7 +385,7 @@ watch(mode, (nextMode) => {
 })
 
 const hasModels = computed(() => models.value.length > 0)
-const qaActive = computed(() => Boolean(qaBatch.value?.active))
+const qaActive = computed(() => Boolean(qaRuntimeBatch.value?.active))
 const qaSelectionLocked = computed(() => qaStarting.value || qaActive.value)
 const canStartTest = computed(() => {
   if (!hasModels.value || selected.value.size === 0 || phase.value === 'testing') return false
@@ -324,18 +394,23 @@ const canStartTest = computed(() => {
 })
 const qaRequestCount = computed(() => selected.value.size * qaSelectedQuestions.value.size)
 const qaCurrentRecords = computed(() => {
-  if (!qaBatch.value) return []
-  return qaBatch.value.active
-    ? qaBatch.value.records
-    : filterQuestionAnswerRecords(qaBatch.value.records, qaShowAll.value)
+  if (!qaReviewBatch.value) return []
+  return qaReviewBatch.value.active
+    ? qaReviewBatch.value.records
+    : filterQuestionAnswerRecords(qaReviewBatch.value.records, qaShowAll.value)
 })
-const qaHistoryRecords = computed(() => {
-  if (!qaBatch.value?.active && !qaShowAll.value) return []
-  const currentRecordIDs = new Set(qaBatch.value?.records.map(record => record.id) ?? [])
-  return qaHistory.value.records.filter(record => !currentRecordIDs.has(record.id))
+const qaReviewCompletedAt = computed(() => (
+  qaReviewBatch.value ? questionAnswerBatchCompletedAt(qaReviewBatch.value) : null
+))
+const qaHistoryBatchGroups = computed(() => {
+  const reviewRecordIDs = new Set(qaReviewBatch.value?.records.map(record => record.id) ?? [])
+  return groupQuestionAnswerHistoryByBatch(
+    qaHistory.value.records.filter(record => !reviewRecordIDs.has(record.id)),
+  )
 })
+const qaHistoryRowsVisible = computed(() => Boolean(qaRuntimeBatch.value?.active || qaShowAll.value))
 const currentBatchGridClass = computed(() => {
-  if (qaBatch.value && !qaBatch.value.active && !qaShowAll.value) return 'grid-cols-1'
+  if (qaReviewBatch.value && !qaReviewBatch.value.active && !qaShowAll.value) return 'grid-cols-1'
   const count = qaCurrentRecords.value.length
   if (count <= 1) return 'grid-cols-1'
   if (count === 2) return 'grid-cols-1 md:grid-cols-2'
@@ -395,7 +470,7 @@ const loadQuestionAnswerData = async (
   historyPage = 1,
   preserveQuestionSelection = false,
 ) => {
-  qaDataController?.abort()
+  const historySequence = beginQuestionAnswerHistoryIntent(historyPage)
   const controller = new AbortController()
   qaDataController = controller
   qaLoading.value = true
@@ -406,7 +481,12 @@ const loadQuestionAnswerData = async (
       getQuestionAnswerHistory(targetId, historyPage, controller.signal),
       getLatestQuestionAnswerBatch(targetId, controller.signal),
     ])
-    if (sequence !== loadSequence || mode.value !== 'questionAnswer' || props.target?.targetId !== targetId) return
+    if (
+      sequence !== loadSequence
+      || !questionAnswerHistoryIntentIsCurrent(historySequence)
+      || mode.value !== 'questionAnswer'
+      || props.target?.targetId !== targetId
+    ) return
     qaQuestions.value = questions.filter(question => question.enabled)
     const enabledQuestionIDs = new Set(qaQuestions.value.map(question => question.id))
     const preservedQuestions = preserveQuestionSelection
@@ -417,16 +497,25 @@ const loadQuestionAnswerData = async (
       ? preservedQuestions
       : new Set(defaultQuestion ? [defaultQuestion.id] : [])
     qaHistory.value = history
-    qaBatch.value = batch.batchId ? batch : null
-    restoreActiveQuestionAnswerSelection(qaBatch.value)
+    qaHistoryIntentPage = history.page
+    qaRuntimeBatch.value = batch.batchId ? batch : null
+    qaReviewBatch.value = qaRuntimeBatch.value
+    qaShowAll.value = false
+    qaCurrentExpanded.value = new Set()
+    restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)
     if (batch.active) scheduleQuestionAnswerPoll()
     else clearQuestionAnswerClock()
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
-    qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+    if (
+      sequence === loadSequence
+      && questionAnswerHistoryIntentIsCurrent(historySequence)
+      && mode.value === 'questionAnswer'
+      && props.target?.targetId === targetId
+    ) qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
   } finally {
     if (qaDataController === controller) qaDataController = null
-    if (sequence === loadSequence) qaLoading.value = false
+    if (sequence === loadSequence && questionAnswerHistoryIntentIsCurrent(historySequence)) qaLoading.value = false
   }
 }
 
@@ -436,45 +525,106 @@ const questionAnswerScopeIsCurrent = (scope: QuestionAnswerOperationScope): bool
     open: props.open,
     mode: mode.value,
     targetId: props.target?.targetId ?? null,
-    batchId: qaBatch.value?.batchId ?? null,
+    batchId: qaRuntimeBatch.value?.batchId ?? null,
   })
 )
 
+const questionAnswerPollIsCurrent = (
+  pollSequence: number,
+  scope: QuestionAnswerOperationScope,
+): boolean => pollSequence === qaPollSequence && questionAnswerScopeIsCurrent(scope)
+
+const applyRuntimeQuestionAnswerBatch = (batch: QuestionAnswerBatch) => {
+  qaRuntimeBatch.value = batch
+  if (!qaReviewBatch.value || qaReviewBatch.value.batchId === batch.batchId) {
+    qaReviewBatch.value = batch
+  }
+}
+
 const scheduleQuestionAnswerPoll = () => {
   clearQuestionAnswerPolling()
-  if (!props.open || mode.value !== 'questionAnswer' || !qaBatch.value?.active) return
+  if (!props.open || mode.value !== 'questionAnswer' || !qaRuntimeBatch.value?.active) return
   startQuestionAnswerClock()
   qaPollTimer = setTimeout(() => void pollQuestionAnswerBatch(), 2000)
 }
 
 const pollQuestionAnswerBatch = async () => {
-  if (!props.target || !qaBatch.value?.batchId || !props.open || mode.value !== 'questionAnswer') return
+  if (!props.target || !qaRuntimeBatch.value?.batchId || !props.open || mode.value !== 'questionAnswer') return
   const targetId = props.target.targetId
-  const batchId = qaBatch.value.batchId
+  const batchId = qaRuntimeBatch.value.batchId
   const sequence = loadSequence
+  const scope = { sequence, targetId, batchId }
+  const pollSequence = qaPollSequence
+  const runtimeSnapshotSequence = ++qaRuntimeSnapshotSequence
   const controller = new AbortController()
   qaPollController = controller
+  let historySequence: number | null = null
   try {
     let batch = await getQuestionAnswerBatch(targetId, batchId, controller.signal)
-    if (sequence !== loadSequence || mode.value !== 'questionAnswer' || props.target?.targetId !== targetId) return
-    qaBatch.value = batch
+    if (!questionAnswerPollIsCurrent(pollSequence, scope)) return
     if (batch.active) {
+      if (!qaRuntimeBatch.value?.active) {
+        clearQuestionAnswerClock()
+        return
+      }
+      if (runtimeSnapshotSequence !== qaRuntimeSnapshotSequence) {
+        scheduleQuestionAnswerPoll()
+        return
+      }
+      applyRuntimeQuestionAnswerBatch(batch)
       scheduleQuestionAnswerPoll()
       return
     }
     batch = await getQuestionAnswerBatch(targetId, batchId, controller.signal)
-    if (sequence !== loadSequence || mode.value !== 'questionAnswer') return
-    qaBatch.value = batch
-    const history = await getQuestionAnswerHistory(targetId, 1, controller.signal)
-    if (sequence !== loadSequence || mode.value !== 'questionAnswer' || props.target?.targetId !== targetId) return
-    qaHistory.value = history
+    if (!questionAnswerPollIsCurrent(pollSequence, scope)) return
+    if (batch.active) {
+      if (!qaRuntimeBatch.value?.active) {
+        clearQuestionAnswerClock()
+        return
+      }
+      if (runtimeSnapshotSequence === qaRuntimeSnapshotSequence) applyRuntimeQuestionAnswerBatch(batch)
+      if (qaRuntimeBatch.value?.active) scheduleQuestionAnswerPoll()
+      else clearQuestionAnswerClock()
+      return
+    }
+    const reviewFollowsRuntime = qaReviewLoadingBatchId.value === null
+      && qaReviewBatch.value?.batchId === batch.batchId
+    applyRuntimeQuestionAnswerBatch(batch)
+    if (reviewFollowsRuntime) {
+      qaShowAll.value = false
+      qaCurrentExpanded.value = new Set()
+    }
+    const historyPage = reviewFollowsRuntime ? 1 : qaHistoryIntentPage
+    historySequence = beginQuestionAnswerHistoryIntent(historyPage)
+    const history = await getQuestionAnswerHistory(targetId, historyPage, controller.signal)
+    if (!questionAnswerPollIsCurrent(pollSequence, scope)) return
+    if (
+      questionAnswerHistoryIntentIsCurrent(historySequence)
+      && qaHistoryIntentPage === historyPage
+    ) {
+      qaHistory.value = history
+      qaHistoryIntentPage = history.page
+    }
     qaCompletedNotice.value = true
     clearQuestionAnswerPolling()
     clearQuestionAnswerClock()
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') return
+    if (
+      (error instanceof Error && error.name === 'AbortError')
+      || !questionAnswerPollIsCurrent(pollSequence, scope)
+    ) return
+    if (historySequence !== null && !questionAnswerHistoryIntentIsCurrent(historySequence)) {
+      qaCompletedNotice.value = true
+      clearQuestionAnswerPolling()
+      clearQuestionAnswerClock()
+      return
+    }
+    if (historySequence === null && !qaRuntimeBatch.value?.active) {
+      clearQuestionAnswerClock()
+      return
+    }
     qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
-    if (qaBatch.value?.active) scheduleQuestionAnswerPoll()
+    if (qaRuntimeBatch.value?.active) scheduleQuestionAnswerPoll()
     else clearQuestionAnswerClock()
   } finally {
     if (qaPollController === controller) qaPollController = null
@@ -483,6 +633,8 @@ const pollQuestionAnswerBatch = async () => {
 
 const startQuestionAnswers = async () => {
   if (!canStartTest.value || !props.target) return
+  cancelQuestionAnswerReview()
+  cancelQuestionAnswerJudgments()
   qaStarting.value = true
   qaErrorKey.value = ''
   qaCompletedNotice.value = false
@@ -500,18 +652,32 @@ const startQuestionAnswers = async () => {
       controller.signal,
     )
     if (startSequence !== qaStartSequence || !questionAnswerScopeIsCurrent(scope)) return
-    qaBatch.value = batch
+    qaErrorKey.value = ''
+    qaRuntimeBatch.value = batch
+    qaReviewBatch.value = batch
     qaShowAll.value = false
     qaCurrentExpanded.value = new Set()
     emit('question-answer-started', targetId)
+    const historySequence = beginQuestionAnswerHistoryIntent(1)
     qaHistory.value.page = 1
     scheduleQuestionAnswerPoll()
     try {
       const history = await getQuestionAnswerHistory(targetId, 1, controller.signal)
-      if (startSequence === qaStartSequence && questionAnswerScopeIsCurrent(scope)) qaHistory.value = history
+      if (
+        startSequence === qaStartSequence
+        && questionAnswerHistoryIntentIsCurrent(historySequence)
+        && questionAnswerScopeIsCurrent(scope)
+      ) {
+        qaHistory.value = history
+        qaHistoryIntentPage = history.page
+      }
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') return
-      if (startSequence === qaStartSequence && questionAnswerScopeIsCurrent(scope)) {
+      if (
+        startSequence === qaStartSequence
+        && questionAnswerHistoryIntentIsCurrent(historySequence)
+        && questionAnswerScopeIsCurrent(scope)
+      ) {
         qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
       }
     }
@@ -527,9 +693,9 @@ const startQuestionAnswers = async () => {
 }
 
 const stopQuestionAnswers = async () => {
-  if (!props.target || !qaBatch.value?.batchId || qaCancelling.value) return
+  if (!props.target || !qaRuntimeBatch.value?.batchId || qaCancelling.value) return
   const targetId = props.target.targetId
-  const batchId = qaBatch.value.batchId
+  const batchId = qaRuntimeBatch.value.batchId
   const sequence = loadSequence
   const cancelSequence = ++qaCancelSequence
   const scope = { sequence, targetId, batchId }
@@ -539,20 +705,46 @@ const stopQuestionAnswers = async () => {
   qaCancelling.value = true
   qaErrorKey.value = ''
   clearQuestionAnswerPolling()
+  let historySequence: number | null = null
   try {
     const batch = await cancelQuestionAnswerBatch(targetId, batchId, controller.signal)
     if (cancelSequence !== qaCancelSequence || !questionAnswerScopeIsCurrent(scope)) return
-    qaBatch.value = batch
-    qaShowAll.value = false
+    if (!qaRuntimeBatch.value?.active) {
+      clearQuestionAnswerClock()
+      return
+    }
+    const reviewFollowsRuntime = qaReviewLoadingBatchId.value === null
+      && qaReviewBatch.value?.batchId === batch.batchId
+    applyRuntimeQuestionAnswerBatch(batch)
+    if (reviewFollowsRuntime) {
+      qaShowAll.value = false
+      qaCurrentExpanded.value = new Set()
+    }
     clearQuestionAnswerClock()
-    const history = await getQuestionAnswerHistory(targetId, 1, controller.signal)
+    const historyPage = reviewFollowsRuntime ? 1 : qaHistoryIntentPage
+    historySequence = beginQuestionAnswerHistoryIntent(historyPage)
+    const history = await getQuestionAnswerHistory(targetId, historyPage, controller.signal)
     if (cancelSequence !== qaCancelSequence || !questionAnswerScopeIsCurrent(scope)) return
-    qaHistory.value = history
+    if (
+      questionAnswerHistoryIntentIsCurrent(historySequence)
+      && qaHistoryIntentPage === historyPage
+    ) {
+      qaHistory.value = history
+      qaHistoryIntentPage = history.page
+    }
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
-    if (cancelSequence === qaCancelSequence && questionAnswerScopeIsCurrent(scope)) {
+    if (historySequence === null && !qaRuntimeBatch.value?.active) {
+      clearQuestionAnswerClock()
+      return
+    }
+    if (
+      cancelSequence === qaCancelSequence
+      && questionAnswerScopeIsCurrent(scope)
+      && (historySequence === null || questionAnswerHistoryIntentIsCurrent(historySequence))
+    ) {
       qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
-      if (qaBatch.value?.active) scheduleQuestionAnswerPoll()
+      if (qaRuntimeBatch.value?.active) scheduleQuestionAnswerPoll()
     }
   } finally {
     if (qaCancelController === controller) qaCancelController = null
@@ -560,21 +752,105 @@ const stopQuestionAnswers = async () => {
   }
 }
 
-const goQuestionAnswerPage = async (page: number) => {
-  if (!props.target || page < 1 || page > qaHistory.value.totalPages || page === qaHistory.value.page) return
+const reviewQuestionAnswerBatch = async (batchId: string) => {
+  if (!props.target || qaReviewLoadingBatchId.value === batchId) return
   const targetId = props.target.targetId
   const sequence = loadSequence
-  qaDataController?.abort()
+  const reviewSequence = cancelQuestionAnswerReview()
+  const runtimeSelectionSequence = qaRuntimeBatch.value?.batchId === batchId && qaRuntimeBatch.value.active
+    ? ++qaRuntimeSnapshotSequence
+    : null
+  qaReviewJudgmentRefreshSequence = qaJudgmentRefreshSequences.get(batchId) ?? 0
+  const controller = new AbortController()
+  qaReviewController = controller
+  qaReviewLoadingBatchId.value = batchId
+  qaErrorKey.value = ''
+  try {
+    const batch = await getQuestionAnswerBatch(targetId, batchId, controller.signal)
+    if (
+      sequence !== loadSequence
+      || reviewSequence !== qaReviewSequence
+      || mode.value !== 'questionAnswer'
+      || props.target?.targetId !== targetId
+    ) return
+    const runtimeBatch = qaRuntimeBatch.value
+    if (runtimeSelectionSequence !== null && runtimeBatch?.batchId === batch.batchId) {
+      if (
+        runtimeBatch.active
+        && (runtimeSelectionSequence === qaRuntimeSnapshotSequence || !batch.active)
+      ) qaRuntimeBatch.value = batch
+      const currentRuntime = qaRuntimeBatch.value
+      qaReviewBatch.value = currentRuntime?.batchId === batch.batchId
+        ? currentRuntime
+        : batch
+      if (!qaRuntimeBatch.value?.active) clearQuestionAnswerClock()
+    } else {
+      qaReviewBatch.value = batch.active
+        && runtimeBatch?.batchId === batch.batchId
+        && !runtimeBatch.active
+        ? runtimeBatch
+        : batch
+    }
+    qaShowAll.value = false
+    qaCurrentExpanded.value = new Set()
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') return
+    if (sequence === loadSequence && reviewSequence === qaReviewSequence) {
+      qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+    }
+  } finally {
+    if (qaReviewController === controller) qaReviewController = null
+    if (reviewSequence === qaReviewSequence) {
+      qaReviewLoadingBatchId.value = null
+      qaReviewJudgmentRefreshSequence = 0
+    }
+    if (
+      runtimeSelectionSequence !== null
+      && runtimeSelectionSequence === qaRuntimeSnapshotSequence
+      && reviewSequence === qaReviewSequence
+      && qaRuntimeBatch.value?.batchId === batchId
+      && qaRuntimeBatch.value.active
+    ) scheduleQuestionAnswerPoll()
+  }
+}
+
+const reviewLatestQuestionAnswerBatch = () => {
+  if (!qaRuntimeBatch.value) return
+  cancelQuestionAnswerReview()
+  qaReviewBatch.value = qaRuntimeBatch.value
+  qaShowAll.value = false
+  qaCurrentExpanded.value = new Set()
+}
+
+const goQuestionAnswerPage = async (page: number) => {
+  if (!props.target || page < 1 || page > qaHistory.value.totalPages || page === qaHistoryIntentPage) return
+  const targetId = props.target.targetId
+  const sequence = loadSequence
+  const historySequence = beginQuestionAnswerHistoryIntent(page)
   const controller = new AbortController()
   qaDataController = controller
   qaErrorKey.value = ''
   try {
     const history = await getQuestionAnswerHistory(targetId, page, controller.signal)
-    if (sequence !== loadSequence || mode.value !== 'questionAnswer' || props.target?.targetId !== targetId) return
+    if (
+      sequence !== loadSequence
+      || !questionAnswerHistoryIntentIsCurrent(historySequence)
+      || mode.value !== 'questionAnswer'
+      || props.target?.targetId !== targetId
+    ) return
     qaHistory.value = history
+    qaHistoryIntentPage = history.page
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
-    qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+    if (
+      sequence === loadSequence
+      && questionAnswerHistoryIntentIsCurrent(historySequence)
+      && mode.value === 'questionAnswer'
+      && props.target?.targetId === targetId
+    ) {
+      qaHistoryIntentPage = qaHistory.value.page
+      qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+    }
   } finally {
     if (qaDataController === controller) qaDataController = null
   }
@@ -599,29 +875,121 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
   const targetId = props.target.targetId
   const sequence = loadSequence
   const scope = { sequence, targetId }
+  const judgmentSessionSequence = qaJudgmentSessionSequence
   const controller = new AbortController()
   qaJudgmentControllers.set(record.id, controller)
   const nextMarking = new Set(qaMarking.value)
   nextMarking.add(record.id)
   qaMarking.value = nextMarking
   qaErrorKey.value = ''
+  let pollingPausedForRuntime = false
+  let judgmentRefreshSequence: number | null = null
+  let historySequence: number | null = null
+  let judgmentRefreshStage: 'put' | 'batch' | 'history' = 'put'
+  const resumeRuntimePolling = () => {
+    if (
+      pollingPausedForRuntime
+      && judgmentRefreshSequence !== null
+      && judgmentSessionSequence === qaJudgmentSessionSequence
+      && qaJudgmentRefreshSequences.get(record.batchId) === judgmentRefreshSequence
+      && questionAnswerScopeIsCurrent(scope)
+      && qaRuntimeBatch.value?.batchId === record.batchId
+      && qaRuntimeBatch.value.active
+    ) {
+      pollingPausedForRuntime = false
+      scheduleQuestionAnswerPoll()
+    }
+  }
   try {
     await setQuestionAnswerJudgment(targetId, record.id, judgment, controller.signal)
-    if (!questionAnswerScopeIsCurrent(scope)) return
-    const historyPage = qaBatch.value?.active || qaShowAll.value ? qaHistory.value.page : 1
-    await loadQuestionAnswerData(targetId, sequence, historyPage, true)
+    if (
+      judgmentSessionSequence !== qaJudgmentSessionSequence
+      || !questionAnswerScopeIsCurrent(scope)
+    ) return
+    if (qaRuntimeBatch.value?.batchId === record.batchId) {
+      clearQuestionAnswerPolling()
+      pollingPausedForRuntime = true
+    }
+    const historyPage = qaHistoryIntentPage
+    historySequence = beginQuestionAnswerHistoryIntent()
+    judgmentRefreshSequence = ++qaJudgmentRefreshSequence
+    qaJudgmentRefreshSequences.set(record.batchId, judgmentRefreshSequence)
+    judgmentRefreshStage = 'batch'
+    const batchPromise = getQuestionAnswerBatch(targetId, record.batchId, controller.signal)
+    const historyOutcomePromise = getQuestionAnswerHistory(targetId, historyPage, controller.signal).then(
+      history => ({ ok: true as const, history }),
+      error => ({ ok: false as const, error }),
+    )
+    const batch = await batchPromise
+    if (
+      judgmentSessionSequence !== qaJudgmentSessionSequence
+      || qaJudgmentRefreshSequences.get(record.batchId) !== judgmentRefreshSequence
+      || !questionAnswerScopeIsCurrent(scope)
+    ) return
+    if (
+      qaReviewLoadingBatchId.value === batch.batchId
+      && qaReviewJudgmentRefreshSequence < judgmentRefreshSequence
+    ) {
+      cancelQuestionAnswerReview()
+      const runtimeBatch = qaRuntimeBatch.value
+      qaReviewBatch.value = batch.active
+        && runtimeBatch?.batchId === batch.batchId
+        && !runtimeBatch.active
+        ? runtimeBatch
+        : batch
+    } else if (qaReviewBatch.value?.batchId === batch.batchId && (qaReviewBatch.value.active || !batch.active)) {
+      qaReviewBatch.value = batch
+    }
+    if (qaRuntimeBatch.value?.batchId === batch.batchId && (qaRuntimeBatch.value.active || !batch.active)) {
+      qaRuntimeBatch.value = batch
+    }
+    resumeRuntimePolling()
+    judgmentRefreshStage = 'history'
+    const historyOutcome = await historyOutcomePromise
+    if (!historyOutcome.ok) throw historyOutcome.error
+    const history = historyOutcome.history
+    if (
+      judgmentSessionSequence !== qaJudgmentSessionSequence
+      || qaJudgmentRefreshSequences.get(record.batchId) !== judgmentRefreshSequence
+      || !questionAnswerScopeIsCurrent(scope)
+    ) return
+    if (
+      questionAnswerHistoryIntentIsCurrent(historySequence)
+      && qaHistoryIntentPage === historyPage
+    ) {
+      qaHistory.value = history
+      qaHistoryIntentPage = history.page
+    }
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
-    if (questionAnswerScopeIsCurrent(scope)) {
+    if (
+      judgmentSessionSequence === qaJudgmentSessionSequence
+      && questionAnswerScopeIsCurrent(scope)
+      && (
+        judgmentRefreshSequence === null
+        || qaJudgmentRefreshSequences.get(record.batchId) === judgmentRefreshSequence
+      )
+      && (
+        judgmentRefreshStage !== 'history'
+        || historySequence === null
+        || questionAnswerHistoryIntentIsCurrent(historySequence)
+      )
+    ) {
       qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
     }
   } finally {
-    if (qaJudgmentControllers.get(record.id) === controller) qaJudgmentControllers.delete(record.id)
-    if (questionAnswerScopeIsCurrent(scope)) {
-      const marking = new Set(qaMarking.value)
-      marking.delete(record.id)
-      qaMarking.value = marking
+    if (qaJudgmentControllers.get(record.id) === controller) {
+      qaJudgmentControllers.delete(record.id)
+      if (
+        judgmentSessionSequence === qaJudgmentSessionSequence
+        && questionAnswerScopeIsCurrent(scope)
+      ) {
+        const marking = new Set(qaMarking.value)
+        marking.delete(record.id)
+        qaMarking.value = marking
+      }
     }
+    resumeRuntimePolling()
   }
 }
 
@@ -794,23 +1162,23 @@ const close = () => {
               </div>
 
               <template v-else>
-                <div v-if="mode === 'questionAnswer'" class="mb-4 grid overflow-hidden rounded-lg border border-border/50 bg-surface-line/20" :class="qaBatch ? 'grid-cols-3' : 'grid-cols-2'">
-                  <div v-if="qaBatch" class="px-4 py-3">
+                <div v-if="mode === 'questionAnswer'" class="mb-4 grid overflow-hidden rounded-lg border border-border/50 bg-surface-line/20" :class="qaReviewBatch ? 'grid-cols-3' : 'grid-cols-2'">
+                  <div v-if="qaReviewBatch" data-testid="question-answer-review-stats" class="px-4 py-3">
                     <div class="flex items-center justify-between gap-3">
-                      <p class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.batch`) }}</p>
-                      <p class="text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.submitted`, { count: qaBatch.stats.requests.submitted }) }}</p>
+                      <p class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.reviewTitle`) }}</p>
+                      <p class="text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.submitted`, { count: qaReviewBatch.stats.requests.submitted }) }}</p>
                     </div>
                     <dl class="mt-3 grid grid-cols-4 gap-x-3 gap-y-2">
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.inProgress`) }}</dt><dd class="font-semibold text-foreground">{{ qaBatch.stats.requests.inProgress }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.succeeded`) }}</dt><dd class="font-semibold text-foreground">{{ qaBatch.stats.requests.succeeded }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.failed`) }}</dt><dd class="font-semibold text-foreground">{{ qaBatch.stats.requests.failed }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.cancelled`) }}</dt><dd class="font-semibold text-foreground">{{ qaBatch.stats.requests.cancelled }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.unreviewed`) }}</dt><dd class="font-semibold text-foreground">{{ qaBatch.stats.reviews.unreviewed }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="font-semibold text-foreground">{{ qaBatch.stats.reviews.correct }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="font-semibold text-foreground">{{ qaBatch.stats.reviews.incorrect }}</dd></div>
+                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.inProgress`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.requests.inProgress }}</dd></div>
+                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.succeeded`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.requests.succeeded }}</dd></div>
+                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.failed`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.requests.failed }}</dd></div>
+                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.cancelled`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.requests.cancelled }}</dd></div>
+                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.unreviewed`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.reviews.unreviewed }}</dd></div>
+                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.reviews.correct }}</dd></div>
+                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.reviews.incorrect }}</dd></div>
                     </dl>
                   </div>
-                  <div class="px-4 py-3" :class="qaBatch ? 'border-l border-border/50' : ''">
+                  <div class="px-4 py-3" :class="qaReviewBatch ? 'border-l border-border/50' : ''">
                     <div class="flex items-center justify-between gap-3">
                       <p class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.allTime`) }}</p>
                       <p class="text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.submitted`, { count: qaHistory.stats.requests.submitted }) }}</p>
@@ -899,24 +1267,40 @@ const close = () => {
                     <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <h4 class="text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.currentTitle`) }}</h4>
-                        <p v-if="qaBatch" class="mt-1 text-xs text-muted-foreground">
-                          {{ t(`${prefix}.questionAnswer.submitted`, { count: qaBatch.stats.requests.submitted }) }} · {{ t(`${prefix}.questionAnswer.progress`, { completed: qaBatch.stats.requests.succeeded + qaBatch.stats.requests.failed + qaBatch.stats.requests.cancelled, total: qaBatch.stats.requests.submitted }) }}
-                          · {{ t(`${prefix}.questionAnswer.reasoningEffort.label`) }}: {{ questionAnswerReasoningEffortLabel(qaBatch.reasoningEffort) }}
-                          <span v-if="qaBatch.active"> · {{ t(`${prefix}.questionAnswer.runningCount`, { count: qaBatch.runningCount }) }}</span>
+                        <p v-if="qaReviewBatch" class="mt-1 text-xs text-muted-foreground">
+                          {{ t(`${prefix}.questionAnswer.submitted`, { count: qaReviewBatch.stats.requests.submitted }) }} · {{ t(`${prefix}.questionAnswer.progress`, { completed: qaReviewBatch.stats.requests.succeeded + qaReviewBatch.stats.requests.failed + qaReviewBatch.stats.requests.cancelled, total: qaReviewBatch.stats.requests.submitted }) }}
+                          · {{ t(`${prefix}.questionAnswer.reasoningEffort.label`) }}: {{ questionAnswerReasoningEffortLabel(qaReviewBatch.reasoningEffort) }}
+                          <span v-if="qaReviewBatch.active"> · {{ t(`${prefix}.questionAnswer.runningCount`, { count: qaReviewBatch.runningCount }) }}</span>
+                        </p>
+                        <p v-if="qaReviewBatch" data-testid="question-answer-review-batch" class="mt-1 text-xs text-muted-foreground">
+                          {{ t(`${prefix}.questionAnswer.reviewBatchId`, { id: shortQuestionAnswerBatchId(qaReviewBatch.batchId) }) }}
+                          <span v-if="qaReviewBatch.active"> · {{ t(`${prefix}.questionAnswer.batchStillRunning`) }}</span>
+                          <span v-else-if="qaReviewCompletedAt"> · {{ t(`${prefix}.questionAnswer.batchCompletedAt`, { time: formatConnectionHealthTime(qaReviewCompletedAt) }) }}</span>
+                          <span v-else> · {{ t(`${prefix}.questionAnswer.batchTimeUnknown`) }}</span>
+                        </p>
+                        <p v-if="qaRuntimeBatch?.active && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" class="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                          {{ t(`${prefix}.questionAnswer.latestBatchStillRunning`, {
+                            completed: qaRuntimeBatch.stats.requests.succeeded + qaRuntimeBatch.stats.requests.failed + qaRuntimeBatch.stats.requests.cancelled,
+                            total: qaRuntimeBatch.stats.requests.submitted,
+                            running: qaRuntimeBatch.runningCount,
+                          }) }}
                         </p>
                       </div>
-                      <div class="flex items-center gap-2">
-                        <button v-if="qaBatch && !qaBatch.active" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line" @click="qaShowAll = !qaShowAll">
+                      <div class="flex flex-wrap items-center justify-end gap-2">
+                        <button v-if="qaReviewBatch && !qaReviewBatch.active" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line" @click="qaShowAll = !qaShowAll">
                           {{ qaShowAll ? t(`${prefix}.questionAnswer.onlyUnreviewed`) : t(`${prefix}.questionAnswer.showAll`) }}
                         </button>
-                        <button v-if="qaBatch?.active" type="button" class="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400" :disabled="qaCancelling" @click="stopQuestionAnswers">
+                        <button v-if="qaRuntimeBatch && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line" @click="reviewLatestQuestionAnswerBatch">
+                          {{ t(`${prefix}.questionAnswer.reviewLatestBatch`) }}
+                        </button>
+                        <button v-if="qaRuntimeBatch?.active" type="button" class="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400" :disabled="qaCancelling" @click="stopQuestionAnswers">
                           <Loader2 v-if="qaCancelling" class="h-3.5 w-3.5 animate-spin" />
                           <StopCircle v-else class="h-3.5 w-3.5" />
                           {{ t(`${prefix}.questionAnswer.stop`) }}
                         </button>
                       </div>
                     </div>
-                    <div v-if="!qaBatch" class="rounded-lg border border-dashed border-border/50 px-3 py-5 text-center text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.noBatch`) }}</div>
+                    <div v-if="!qaReviewBatch" class="rounded-lg border border-dashed border-border/50 px-3 py-5 text-center text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.noBatch`) }}</div>
                     <div v-else>
                       <ul class="grid items-stretch gap-3" :class="currentBatchGridClass">
                         <li v-for="record in qaCurrentRecords" :key="record.id" class="flex min-h-56 flex-col rounded-lg border p-3" :class="questionAnswerRecordClass(record)">
@@ -941,11 +1325,11 @@ const close = () => {
                           <div class="mt-3 flex-1 space-y-3 border-t border-border/40 pt-3">
                             <div>
                               <p class="text-[11px] font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.questionLabel`) }}</p>
-                              <p class="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-foreground" :class="qaBatch.active || qaShowAll ? (qaCurrentExpanded.has(record.id) ? '' : 'line-clamp-2') : ''">{{ record.questionBody }}</p>
+                              <p class="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-foreground" :class="qaReviewBatch.active || qaShowAll ? (qaCurrentExpanded.has(record.id) ? '' : 'line-clamp-2') : ''">{{ record.questionBody }}</p>
                             </div>
                             <div>
                               <p class="text-[11px] font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.answerLabel`) }}</p>
-                              <p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground" :class="qaBatch.active || qaShowAll ? (qaCurrentExpanded.has(record.id) ? '' : 'line-clamp-4') : ''">{{ questionAnswerCurrentAnswer(record) }}</p>
+                              <p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground" :class="qaReviewBatch.active || qaShowAll ? (qaCurrentExpanded.has(record.id) ? '' : 'line-clamp-4') : ''">{{ questionAnswerCurrentAnswer(record) }}</p>
                             </div>
                           </div>
 
@@ -959,7 +1343,7 @@ const close = () => {
                             <Loader2 v-if="qaMarking.has(record.id)" class="h-4 w-4 animate-spin text-muted-foreground" />
                           </div>
 
-                          <button v-if="qaBatch.active || qaShowAll" type="button" class="mt-3 inline-flex items-center justify-end gap-1 self-end text-xs font-medium text-muted-foreground hover:text-foreground" @click="toggleCurrentQuestionAnswerExpanded(record.id)">
+                          <button v-if="qaReviewBatch.active || qaShowAll" type="button" class="mt-3 inline-flex items-center justify-end gap-1 self-end text-xs font-medium text-muted-foreground hover:text-foreground" @click="toggleCurrentQuestionAnswerExpanded(record.id)">
                             {{ qaCurrentExpanded.has(record.id) ? t(`${prefix}.questionAnswer.collapseCurrent`) : t(`${prefix}.questionAnswer.expandCurrent`) }}
                             <ChevronUp v-if="qaCurrentExpanded.has(record.id)" class="h-3.5 w-3.5" />
                             <ChevronDown v-else class="h-3.5 w-3.5" />
@@ -969,45 +1353,56 @@ const close = () => {
                     </div>
                   </section>
 
-                  <section v-if="qaBatch?.active || qaShowAll" class="mt-5 border-t border-border/40 pt-4">
+                  <section class="mt-5 border-t border-border/40 pt-4">
                     <h4 class="mb-3 text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.historyTitle`) }}</h4>
-                    <div v-if="qaHistoryRecords.length === 0" class="rounded-lg border border-dashed border-border/50 px-3 py-5 text-center text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.noHistory`) }}</div>
-                    <ul v-else class="space-y-2">
-                      <li v-for="record in qaHistoryRecords" :key="record.id" class="rounded-lg border px-3 py-2.5" :class="questionAnswerRecordClass(record)">
-                        <div class="flex items-start justify-between gap-3">
-                          <button type="button" class="min-w-0 flex-1 text-left" @click="toggleQuestionAnswerExpanded(record.id)">
-                            <div class="flex min-w-0 items-center gap-2">
-                              <span class="truncate text-sm font-medium text-foreground">{{ record.questionName }}</span>
-                            </div>
-                            <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                              <span>{{ record.modelName }}</span>
-                              <span>{{ t(`${prefix}.questionAnswer.reasoningEffort.label`) }}: {{ questionAnswerReasoningEffortLabel(record.reasoningEffort) }}</span>
-                              <span>{{ formatConnectionHealthTime(record.createdAt) }}</span>
-                              <span>{{ questionAnswerStatusLabel(record) }}</span>
-                              <span v-if="questionAnswerElapsedLabel(record)">{{ questionAnswerElapsedLabel(record) }}</span>
-                            </div>
-                            <p v-if="!qaExpanded.has(record.id)" class="mt-2 truncate text-xs text-muted-foreground">{{ answerSummary(record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(`${prefix}.questionAnswer.noAnswer`))) }}</p>
+                    <div v-if="qaHistoryBatchGroups.length === 0" class="rounded-lg border border-dashed border-border/50 px-3 py-5 text-center text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.noHistory`) }}</div>
+                    <div v-else class="space-y-3">
+                      <div v-for="group in qaHistoryBatchGroups" :key="group.batchId" class="rounded-lg border border-border/50 bg-surface-line/10 p-3">
+                        <div class="flex flex-wrap items-center justify-between gap-3">
+                          <p class="text-xs font-medium text-foreground">{{ t(`${prefix}.questionAnswer.reviewBatchId`, { id: shortQuestionAnswerBatchId(group.batchId) }) }}</p>
+                          <button type="button" class="inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line disabled:opacity-50" :disabled="qaReviewLoadingBatchId === group.batchId" @click="reviewQuestionAnswerBatch(group.batchId)">
+                            <Loader2 v-if="qaReviewLoadingBatchId === group.batchId" class="h-3.5 w-3.5 animate-spin" />
+                            {{ t(`${prefix}.questionAnswer.reviewThisBatch`) }}
                           </button>
-                          <div class="flex shrink-0 items-center gap-1.5">
-                            <template v-if="record.status === 'succeeded'">
-                              <button type="button" class="rounded-md border border-green-500/40 px-2.5 py-1.5 text-xs text-green-700 disabled:opacity-50 dark:text-green-400" :class="record.answerJudgment === 'correct' ? 'bg-green-500/20' : 'hover:bg-green-500/10'" :aria-pressed="record.answerJudgment === 'correct'" :disabled="qaMarking.has(record.id)" @click="saveQuestionAnswerJudgment(record, 'correct')">{{ t(`${prefix}.questionAnswer.correct`) }}</button>
-                              <button type="button" class="rounded-md border border-red-500/40 px-2.5 py-1.5 text-xs text-red-700 disabled:opacity-50 dark:text-red-400" :class="record.answerJudgment === 'incorrect' ? 'bg-red-500/20' : 'hover:bg-red-500/10'" :aria-pressed="record.answerJudgment === 'incorrect'" :disabled="qaMarking.has(record.id)" @click="saveQuestionAnswerJudgment(record, 'incorrect')">{{ t(`${prefix}.questionAnswer.incorrect`) }}</button>
-                            </template>
-                            <XCircle v-else-if="record.status === 'failed'" class="h-6 w-6 text-red-600 dark:text-red-400" />
-                            <StopCircle v-else-if="record.status === 'cancelled'" class="h-6 w-6 text-muted-foreground" />
-                            <Loader2 v-else-if="record.status === 'pending' || record.status === 'running'" class="h-6 w-6 animate-spin text-primary" />
-                            <button type="button" class="rounded-md p-1.5 text-muted-foreground hover:bg-surface-elevated hover:text-foreground" @click="toggleQuestionAnswerExpanded(record.id)">
-                              <ChevronUp v-if="qaExpanded.has(record.id)" class="h-4 w-4" />
-                              <ChevronDown v-else class="h-4 w-4" />
-                            </button>
-                          </div>
                         </div>
-                        <div v-if="qaExpanded.has(record.id)" class="mt-3 space-y-3 border-t border-border/40 pt-3">
-                          <div><p class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.fullQuestion`) }}</p><p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{{ record.questionBody }}</p></div>
-                          <div><p class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.fullAnswer`) }}</p><p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{{ record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(`${prefix}.questionAnswer.noAnswer`)) }}</p></div>
-                        </div>
-                      </li>
-                    </ul>
+                        <ul v-if="qaHistoryRowsVisible" class="mt-3 space-y-2 border-t border-border/40 pt-3">
+                          <li v-for="record in group.records" :key="record.id" class="rounded-lg border px-3 py-2.5" :class="questionAnswerRecordClass(record)">
+                            <div class="flex items-start justify-between gap-3">
+                              <button type="button" class="min-w-0 flex-1 text-left" @click="toggleQuestionAnswerExpanded(record.id)">
+                                <div class="flex min-w-0 items-center gap-2">
+                                  <span class="truncate text-sm font-medium text-foreground">{{ record.questionName }}</span>
+                                </div>
+                                <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                                  <span>{{ record.modelName }}</span>
+                                  <span>{{ t(`${prefix}.questionAnswer.reasoningEffort.label`) }}: {{ questionAnswerReasoningEffortLabel(record.reasoningEffort) }}</span>
+                                  <span>{{ formatConnectionHealthTime(record.createdAt) }}</span>
+                                  <span>{{ questionAnswerStatusLabel(record) }}</span>
+                                  <span v-if="questionAnswerElapsedLabel(record)">{{ questionAnswerElapsedLabel(record) }}</span>
+                                </div>
+                                <p v-if="!qaExpanded.has(record.id)" class="mt-2 truncate text-xs text-muted-foreground">{{ answerSummary(record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(`${prefix}.questionAnswer.noAnswer`))) }}</p>
+                              </button>
+                              <div class="flex shrink-0 items-center gap-1.5">
+                                <template v-if="record.status === 'succeeded'">
+                                  <button type="button" class="rounded-md border border-green-500/40 px-2.5 py-1.5 text-xs text-green-700 disabled:opacity-50 dark:text-green-400" :class="record.answerJudgment === 'correct' ? 'bg-green-500/20' : 'hover:bg-green-500/10'" :aria-pressed="record.answerJudgment === 'correct'" :disabled="qaMarking.has(record.id)" @click="saveQuestionAnswerJudgment(record, 'correct')">{{ t(`${prefix}.questionAnswer.correct`) }}</button>
+                                  <button type="button" class="rounded-md border border-red-500/40 px-2.5 py-1.5 text-xs text-red-700 disabled:opacity-50 dark:text-red-400" :class="record.answerJudgment === 'incorrect' ? 'bg-red-500/20' : 'hover:bg-red-500/10'" :aria-pressed="record.answerJudgment === 'incorrect'" :disabled="qaMarking.has(record.id)" @click="saveQuestionAnswerJudgment(record, 'incorrect')">{{ t(`${prefix}.questionAnswer.incorrect`) }}</button>
+                                </template>
+                                <XCircle v-else-if="record.status === 'failed'" class="h-6 w-6 text-red-600 dark:text-red-400" />
+                                <StopCircle v-else-if="record.status === 'cancelled'" class="h-6 w-6 text-muted-foreground" />
+                                <Loader2 v-else-if="record.status === 'pending' || record.status === 'running'" class="h-6 w-6 animate-spin text-primary" />
+                                <button type="button" class="rounded-md p-1.5 text-muted-foreground hover:bg-surface-elevated hover:text-foreground" @click="toggleQuestionAnswerExpanded(record.id)">
+                                  <ChevronUp v-if="qaExpanded.has(record.id)" class="h-4 w-4" />
+                                  <ChevronDown v-else class="h-4 w-4" />
+                                </button>
+                              </div>
+                            </div>
+                            <div v-if="qaExpanded.has(record.id)" class="mt-3 space-y-3 border-t border-border/40 pt-3">
+                              <div><p class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.fullQuestion`) }}</p><p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{{ record.questionBody }}</p></div>
+                              <div><p class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.fullAnswer`) }}</p><p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{{ record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(`${prefix}.questionAnswer.noAnswer`)) }}</p></div>
+                            </div>
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
                     <div v-if="qaHistory.totalPages > 1" class="mt-4 flex flex-wrap items-center justify-center gap-1.5">
                       <template v-for="(page, index) in qaPageNumbers" :key="page">
                         <span v-if="index > 0 && page - qaPageNumbers[index - 1] > 1" class="px-1 text-xs text-muted-foreground">…</span>

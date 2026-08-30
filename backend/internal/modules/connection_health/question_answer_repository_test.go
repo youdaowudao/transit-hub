@@ -744,6 +744,170 @@ func TestQuestionAnswerBrowserFixtureSQLConflictsAndRollsBack(t *testing.T) {
 	}
 }
 
+func TestQuestionAnswerTask2BrowserFixturePostgresContract(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	repository := NewRepository(pool)
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	connection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire fixture connection: %v", err)
+	}
+	defer connection.Release()
+	const userID, targetID = "task2-fixture-user", "sub2api:task2-fixture-target"
+	const activeSentinelID, terminalSentinelID = "task2-non-fixture-active", "task2-non-fixture-terminal"
+	if _, err := connection.Exec(ctx, `
+		SELECT set_config('task2.user_id', $1, false), set_config('task2.target_id', $2, false)
+	`, userID, targetID); err != nil {
+		t.Fatalf("set fixture scope: %v", err)
+	}
+	batchIDs := []string{"task2-active-20260830", "task2-bulk-20260830", "task2-older-20260830"}
+	defer func() {
+		_, _ = connection.Exec(context.Background(), `
+			DELETE FROM connection_health_question_answer_records
+			WHERE user_id = $1 AND target_id = $2
+			  AND (batch_id = ANY($3) OR id = ANY($4))
+		`, userID, targetID, batchIDs, []string{activeSentinelID, terminalSentinelID})
+	}()
+	countRows := func() int {
+		t.Helper()
+		var count int
+		if err := connection.QueryRow(ctx, `
+			SELECT count(*) FROM connection_health_question_answer_records
+			WHERE user_id = $1 AND target_id = $2 AND batch_id = ANY($3)
+		`, userID, targetID, batchIDs).Scan(&count); err != nil {
+			t.Fatalf("count fixture: %v", err)
+		}
+		return count
+	}
+	countBatch := func(records []QuestionAnswerRecord, batchID string) int {
+		count := 0
+		for _, record := range records {
+			if record.BatchID == batchID {
+				count++
+			}
+		}
+		return count
+	}
+	countSentinel := func(id string) int {
+		t.Helper()
+		var count int
+		if err := connection.QueryRow(ctx, `
+			SELECT count(*) FROM connection_health_question_answer_records
+			WHERE user_id = $1 AND target_id = $2 AND id = $3
+		`, userID, targetID, id).Scan(&count); err != nil {
+			t.Fatalf("count sentinel %s: %v", id, err)
+		}
+		return count
+	}
+
+	if _, err := connection.Exec(ctx, `
+		INSERT INTO connection_health_question_answer_records (
+			id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body, status
+		) VALUES ($1, $2, $3, 'task2-non-fixture-active-batch', 'model', 'q', 'Q', 'Body', 'pending')
+	`, activeSentinelID, userID, targetID); err != nil {
+		t.Fatalf("insert non-fixture active sentinel: %v", err)
+	}
+	if err := runQuestionAnswerTask2FixtureAction(ctx, connection, "prepare"); err == nil || !strings.Contains(err.Error(), "non-fixture active batch exists") {
+		t.Fatalf("active conflict prepare error=%v", err)
+	}
+	if got := countRows(); got != 0 {
+		t.Fatalf("active conflict left %d fixture rows", got)
+	}
+	if got := countSentinel(activeSentinelID); got != 1 {
+		t.Fatalf("active conflict changed sentinel count=%d, want 1", got)
+	}
+	if _, err := connection.Exec(ctx, `DELETE FROM connection_health_question_answer_records WHERE id = $1`, activeSentinelID); err != nil {
+		t.Fatalf("delete non-fixture active sentinel: %v", err)
+	}
+	if err := runQuestionAnswerTask2FixtureAction(ctx, connection, "prepare"); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if got := countRows(); got != 29 {
+		t.Fatalf("prepared rows=%d, want 29", got)
+	}
+	if err := runQuestionAnswerTask2FixtureAction(ctx, connection, "prepare"); err == nil || !strings.Contains(err.Error(), "fixture id already exists") {
+		t.Fatalf("duplicate prepare error=%v", err)
+	}
+	latest, err := repository.LatestQuestionAnswerBatch(ctx, userID, targetID)
+	if err != nil || len(latest) != 2 || countBatch(latest, "task2-active-20260830") != 2 {
+		t.Fatalf("latest=%+v err=%v", latest, err)
+	}
+	bulk, err := repository.ListQuestionAnswerBatch(ctx, userID, targetID, "task2-bulk-20260830")
+	if err != nil || len(bulk) != 25 {
+		t.Fatalf("bulk records=%d err=%v", len(bulk), err)
+	}
+	page1, err := repository.ListQuestionAnswerHistory(ctx, userID, targetID, 1)
+	if err != nil || len(page1.Records) != 20 || page1.TotalItems != 29 || page1.TotalPages != 2 ||
+		countBatch(page1.Records, "task2-active-20260830") != 2 ||
+		countBatch(page1.Records, "task2-bulk-20260830") != 18 {
+		t.Fatalf("page1=%+v err=%v", page1, err)
+	}
+	page2, err := repository.ListQuestionAnswerHistory(ctx, userID, targetID, 2)
+	if err != nil || len(page2.Records) != 9 ||
+		countBatch(page2.Records, "task2-bulk-20260830") != 7 ||
+		countBatch(page2.Records, "task2-older-20260830") != 2 {
+		t.Fatalf("page2=%+v err=%v", page2, err)
+	}
+	if _, err := connection.Exec(ctx, `
+		INSERT INTO connection_health_question_answer_records (
+			id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body,
+			status, created_at, completed_at, updated_at
+		) VALUES ($1, $2, $3, 'task2-non-fixture-terminal-batch', 'model', 'q', 'Q', 'Body',
+			'cancelled', now() - interval '1 day', now() - interval '1 day', now() - interval '1 day')
+	`, terminalSentinelID, userID, targetID); err != nil {
+		t.Fatalf("insert non-fixture terminal sentinel: %v", err)
+	}
+	if err := runQuestionAnswerTask2FixtureAction(ctx, connection, "cleanup"); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if got := countRows(); got != 0 {
+		t.Fatalf("rows after cleanup=%d", got)
+	}
+	if got := countSentinel(terminalSentinelID); got != 1 {
+		t.Fatalf("cleanup changed non-fixture terminal sentinel count=%d, want 1", got)
+	}
+
+	if err := runQuestionAnswerTask2FixtureAction(ctx, connection, "prepare"); err != nil {
+		t.Fatalf("prepare short cleanup: %v", err)
+	}
+	if _, err := connection.Exec(ctx, `DELETE FROM connection_health_question_answer_records WHERE id = 'task2-bulk-20260830-25'`); err != nil {
+		t.Fatalf("remove one fixture row: %v", err)
+	}
+	if err := runQuestionAnswerTask2FixtureAction(ctx, connection, "cleanup"); err == nil || !strings.Contains(err.Error(), "expected exactly twenty-nine deleted rows") {
+		t.Fatalf("short cleanup error=%v", err)
+	}
+	if got := countRows(); got != 28 {
+		t.Fatalf("failed cleanup rows=%d, want 28", got)
+	}
+}
+
+func runQuestionAnswerTask2FixtureAction(ctx context.Context, connection *pgxpool.Conn, action string) error {
+	fixtureSQL, err := os.ReadFile("testdata/task2_question_answer_batch_review_browser_fixture.sql")
+	if err != nil {
+		return fmt.Errorf("read task2 fixture SQL: %w", err)
+	}
+	source := string(fixtureSQL)
+	startMarker := "\\if :" + action + "\n"
+	start := strings.Index(source, startMarker)
+	if start < 0 {
+		return fmt.Errorf("task2 fixture action %s not found", action)
+	}
+	start += len(startMarker)
+	endRelative := strings.Index(source[start:], "\n\\endif")
+	if endRelative < 0 {
+		return fmt.Errorf("task2 fixture action %s end not found", action)
+	}
+	_, err = connection.Exec(ctx, source[start:start+endRelative])
+	if err != nil {
+		_, _ = connection.Exec(ctx, "ROLLBACK")
+	}
+	return err
+}
+
 func runQuestionAnswerBrowserFixtureAction(ctx context.Context, connection *pgxpool.Conn, action string) error {
 	fixtureSQL, err := os.ReadFile("testdata/task1_question_answer_browser_fixture.sql")
 	if err != nil {

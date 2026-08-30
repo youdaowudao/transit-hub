@@ -30,6 +30,12 @@ run_step "test calendar boundary guard tests" \
 run_step "test calendar boundary guard" \
   node "$ROOT_DIR/scripts/check-test-calendar-boundaries.mjs" --root "$ROOT_DIR"
 
+run_step "question answer fixture safety tests" \
+  node --test "$ROOT_DIR/scripts/question-answer-review-fixture.test.mjs"
+
+run_step "core regression membership tests" \
+  node --test "$ROOT_DIR/scripts/test-core-regression-membership.test.mjs"
+
 run_step "backend full Go test suite" \
   bash -c "cd '$ROOT_DIR/backend' && go test ./... -count=1"
 

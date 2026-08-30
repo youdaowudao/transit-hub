@@ -1786,16 +1786,24 @@ export default {
           noAnswer: '没有回答正文。',
           fullQuestion: '完整问题',
           fullAnswer: '完整回答',
-          markError: '标记为错误',
-          restoreNormal: '恢复为正常',
+          showAll: '查看全部',
+          onlyUnreviewed: '只看未复审',
+          correct: '正确',
+          incorrect: '错误',
           durationSeconds: '{seconds} 秒',
           durationMinutesSeconds: '{minutes} 分 {seconds} 秒',
           stats: {
+            batch: '当前批次',
             allTime: '累计',
             todayShanghai: '今日（东八区）',
-            total: '共 {total} 次',
-            normal: '正常',
-            errors: '错误'
+            submitted: '提交 {count} 项',
+            inProgress: '进行中',
+            succeeded: '成功回答',
+            failed: '请求失败',
+            cancelled: '已取消',
+            unreviewed: '待复审',
+            correct: '正确',
+            incorrect: '错误'
           },
           status: {
             pending: '等待中',
@@ -1868,7 +1876,8 @@ export default {
         questionAnswerActive: '该账号已有问答批次进行中。',
         questionAnswerBatchNotFound: '问答批次不存在或无权访问。',
         questionAnswerStorage: '问答记录的推理力度快照不一致，请稍后重试。',
-        questionAnswerMarkForbidden: '只有成功回答可以切换人工错误标记。',
+        questionAnswerContractMismatch: '页面版本已更新，请刷新后重试。',
+        questionAnswerJudgmentForbidden: '只有成功回答可以判定正确或错误。',
         questionAnswerServiceStopped: '问答服务正在关闭，暂时不能开始新批次。'
       }
     },

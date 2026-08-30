@@ -29,7 +29,7 @@ type questionAnswerRepository interface {
 	ListQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string) ([]QuestionAnswerRecord, error)
 	LatestQuestionAnswerBatch(ctx context.Context, userID string, targetID string) ([]QuestionAnswerRecord, error)
 	ListQuestionAnswerHistory(ctx context.Context, userID string, targetID string, page int) (QuestionAnswerHistory, error)
-	SetQuestionAnswerManualError(ctx context.Context, userID string, targetID string, recordID string, manualError bool) (*QuestionAnswerRecord, error)
+	SetQuestionAnswerJudgment(ctx context.Context, userID string, targetID string, recordID string, judgment QuestionAnswerJudgment) (*QuestionAnswerRecord, error)
 }
 
 func (r *Repository) ListTestQuestions(ctx context.Context, userID string) ([]TestQuestion, error) {
@@ -254,7 +254,13 @@ func (r *Repository) MarkQuestionAnswerRunning(ctx context.Context, userID strin
 func (r *Repository) CompleteQuestionAnswer(ctx context.Context, userID string, batchID string, recordID string, status QuestionAnswerStatus, answerBody string, errorType string) (bool, error) {
 	result, err := r.db.Exec(ctx, `
 		UPDATE connection_health_question_answer_records
-		SET status = $4, answer_body = $5, error_type = $6, completed_at = now(), updated_at = now()
+		SET status = $4,
+			answer_body = $5,
+			error_type = $6,
+			answer_judgment = CASE WHEN $4 = 'succeeded' THEN 'unreviewed' ELSE NULL END,
+			manual_error = false,
+			completed_at = now(),
+			updated_at = now()
 		WHERE id = $1 AND user_id = $2 AND batch_id = $3 AND status = 'running'
 	`, recordID, userID, batchID, status, answerBody, errorType)
 	return result.RowsAffected() > 0, err
@@ -280,7 +286,7 @@ func (r *Repository) StopQuestionAnswerBatch(ctx context.Context, userID string,
 	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE connection_health_question_answer_records
-		SET status = $4, answer_body = '', error_type = $5, completed_at = now(), updated_at = now()
+		SET status = $4, answer_body = '', error_type = $5, answer_judgment = NULL, manual_error = false, completed_at = now(), updated_at = now()
 		WHERE user_id = $1 AND target_id = $2 AND batch_id = $3 AND status IN ('pending', 'running')
 	`, userID, targetID, batchID, status, errorType); err != nil {
 		return false, err
@@ -294,7 +300,7 @@ func (r *Repository) StopQuestionAnswerBatch(ctx context.Context, userID string,
 func (r *Repository) FailAbandonedQuestionAnswers(ctx context.Context, errorType string) (int64, error) {
 	result, err := r.db.Exec(ctx, `
 		UPDATE connection_health_question_answer_records
-		SET status = 'failed', answer_body = '', error_type = $1, completed_at = now(), updated_at = now()
+		SET status = 'failed', answer_body = '', error_type = $1, answer_judgment = NULL, manual_error = false, completed_at = now(), updated_at = now()
 		WHERE status IN ('pending', 'running')
 	`, errorType)
 	return result.RowsAffected(), err
@@ -374,48 +380,52 @@ func (r *Repository) questionAnswerStats(ctx context.Context, userID string, tar
 	var todayStats QuestionAnswerStats
 	err := r.db.QueryRow(ctx, `
 		SELECT
-			count(*) FILTER (WHERE status IN ('succeeded', 'failed')),
-			count(*) FILTER (WHERE status = 'succeeded' AND NOT manual_error),
-			count(*) FILTER (WHERE status = 'failed' OR (status = 'succeeded' AND manual_error)),
-			count(*) FILTER (
-				WHERE status IN ('succeeded', 'failed')
-				AND (completed_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
-			),
-			count(*) FILTER (
-				WHERE status = 'succeeded' AND NOT manual_error
-				AND (completed_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
-			),
-			count(*) FILTER (
-				WHERE (status = 'failed' OR (status = 'succeeded' AND manual_error))
-				AND (completed_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
-			)
+			count(*),
+			count(*) FILTER (WHERE status IN ('pending', 'running')),
+			count(*) FILTER (WHERE status = 'succeeded'),
+			count(*) FILTER (WHERE status = 'failed'),
+			count(*) FILTER (WHERE status = 'cancelled'),
+			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'unreviewed'),
+			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'correct'),
+			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'incorrect'),
+			count(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
+			count(*) FILTER (WHERE status IN ('pending', 'running') AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
+			count(*) FILTER (WHERE status = 'succeeded' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
+			count(*) FILTER (WHERE status = 'failed' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
+			count(*) FILTER (WHERE status = 'cancelled' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
+			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'unreviewed' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
+			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'correct' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
+			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'incorrect' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date)
 		FROM connection_health_question_answer_records
 		WHERE user_id = $1 AND target_id = $2
 	`, userID, targetID).Scan(
-		&stats.Total, &stats.Normal, &stats.Errors,
-		&todayStats.Total, &todayStats.Normal, &todayStats.Errors,
+		&stats.Requests.Submitted, &stats.Requests.InProgress, &stats.Requests.Succeeded, &stats.Requests.Failed, &stats.Requests.Cancelled,
+		&stats.Reviews.Unreviewed, &stats.Reviews.Correct, &stats.Reviews.Incorrect,
+		&todayStats.Requests.Submitted, &todayStats.Requests.InProgress, &todayStats.Requests.Succeeded, &todayStats.Requests.Failed, &todayStats.Requests.Cancelled,
+		&todayStats.Reviews.Unreviewed, &todayStats.Reviews.Correct, &todayStats.Reviews.Incorrect,
 	)
 	return stats, todayStats, err
 }
 
-func (r *Repository) SetQuestionAnswerManualError(ctx context.Context, userID string, targetID string, recordID string, manualError bool) (*QuestionAnswerRecord, error) {
+func (r *Repository) SetQuestionAnswerJudgment(ctx context.Context, userID string, targetID string, recordID string, judgment QuestionAnswerJudgment) (*QuestionAnswerRecord, error) {
 	row := r.db.QueryRow(ctx, `
 		UPDATE connection_health_question_answer_records
-		SET manual_error = $4, updated_at = now()
+		SET answer_judgment = $4,
+			manual_error = ($4 = 'incorrect'),
+			updated_at = CASE
+				WHEN answer_judgment IS DISTINCT FROM $4 OR manual_error IS DISTINCT FROM ($4 = 'incorrect') THEN now()
+				ELSE updated_at
+			END
 		WHERE id = $1 AND user_id = $2 AND target_id = $3 AND status = 'succeeded'
 		RETURNING id, target_id, batch_id, model_name, question_id, question_name, question_body,
-			reasoning_effort, answer_body, status, error_type, manual_error, created_at, started_at, completed_at, updated_at
-	`, recordID, userID, targetID, manualError)
-	record, err := scanQuestionAnswerRecord(row)
-	if err != nil {
-		return nil, err
-	}
-	return record, nil
+			reasoning_effort, answer_body, status, error_type, answer_judgment, created_at, started_at, completed_at, updated_at
+	`, recordID, userID, targetID, judgment)
+	return scanQuestionAnswerRecord(row)
 }
 
 const questionAnswerRecordSelect = `
 	SELECT id, target_id, batch_id, model_name, question_id, question_name, question_body,
-		reasoning_effort, answer_body, status, error_type, manual_error, created_at, started_at, completed_at, updated_at
+		reasoning_effort, answer_body, status, error_type, answer_judgment, created_at, started_at, completed_at, updated_at
 	FROM connection_health_question_answer_records
 `
 
@@ -437,7 +447,7 @@ func scanQuestionAnswerRecord(row rowScanner) (*QuestionAnswerRecord, error) {
 	if err := row.Scan(
 		&record.ID, &record.TargetID, &record.BatchID, &record.ModelName, &record.QuestionID,
 		&record.QuestionName, &record.QuestionBody, &reasoningEffort, &record.AnswerBody, &record.Status,
-		&record.ErrorType, &record.ManualError, &record.CreatedAt, &record.StartedAt,
+		&record.ErrorType, &record.AnswerJudgment, &record.CreatedAt, &record.StartedAt,
 		&record.CompletedAt, &record.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -452,6 +462,7 @@ func scanQuestionAnswerRecord(row rowScanner) (*QuestionAnswerRecord, error) {
 		}
 		record.ReasoningEffort = questionAnswerReasoningEffortPointer(normalized)
 	}
+	record.ManualError = record.AnswerJudgment != nil && *record.AnswerJudgment == QuestionAnswerIncorrect
 	return &record, nil
 }
 

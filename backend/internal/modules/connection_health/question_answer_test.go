@@ -233,13 +233,23 @@ func (f *fakeQuestionAnswerRepository) ListQuestionAnswerHistory(_ context.Conte
 			continue
 		}
 		all = append(all, record)
-		if record.Status == QuestionAnswerSucceeded || record.Status == QuestionAnswerFailed {
-			stats.Total++
-			if record.Status == QuestionAnswerFailed || record.ManualError {
-				stats.Errors++
+		stats.Requests.Submitted++
+		switch record.Status {
+		case QuestionAnswerPending, QuestionAnswerRunning:
+			stats.Requests.InProgress++
+		case QuestionAnswerSucceeded:
+			stats.Requests.Succeeded++
+			if record.AnswerJudgment != nil && *record.AnswerJudgment == QuestionAnswerIncorrect {
+				stats.Reviews.Incorrect++
+			} else if record.AnswerJudgment != nil && *record.AnswerJudgment == QuestionAnswerCorrect {
+				stats.Reviews.Correct++
 			} else {
-				stats.Normal++
+				stats.Reviews.Unreviewed++
 			}
+		case QuestionAnswerFailed:
+			stats.Requests.Failed++
+		case QuestionAnswerCancelled:
+			stats.Requests.Cancelled++
 		}
 	}
 	start := (page - 1) * QuestionAnswerPageSize
@@ -254,17 +264,22 @@ func (f *fakeQuestionAnswerRepository) ListQuestionAnswerHistory(_ context.Conte
 	return QuestionAnswerHistory{Records: cloneQuestionAnswerRecords(all[start:end]), Page: page, PageSize: QuestionAnswerPageSize, TotalItems: len(all), TotalPages: totalPages, Stats: stats}, nil
 }
 
-func (f *fakeQuestionAnswerRepository) SetQuestionAnswerManualError(_ context.Context, _ string, targetID string, recordID string, manualError bool) (*QuestionAnswerRecord, error) {
+func (f *fakeQuestionAnswerRepository) SetQuestionAnswerJudgment(_ context.Context, _ string, targetID string, recordID string, judgment QuestionAnswerJudgment) (*QuestionAnswerRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i := range f.records {
 		if f.records[i].ID == recordID && f.records[i].TargetID == targetID && f.records[i].Status == QuestionAnswerSucceeded {
-			f.records[i].ManualError = manualError
+			f.records[i].AnswerJudgment = questionAnswerJudgmentPointer(judgment)
+			f.records[i].ManualError = judgment == QuestionAnswerIncorrect
 			result := f.records[i]
 			return &result, nil
 		}
 	}
 	return nil, nil
+}
+
+func questionAnswerJudgmentPointer(value QuestionAnswerJudgment) *QuestionAnswerJudgment {
+	return &value
 }
 
 type inconsistentQuestionAnswerRepository struct {
@@ -877,6 +892,63 @@ func TestBuildQuestionAnswerBatchReportsActualRunningCount(t *testing.T) {
 	}
 	if payload["runningCount"] != float64(2) {
 		t.Fatalf("runningCount = %#v, want 2", payload["runningCount"])
+	}
+}
+
+func TestQuestionAnswerBatchSeparatesRequestAndReviewStats(t *testing.T) {
+	var records []QuestionAnswerRecord
+	if err := json.Unmarshal([]byte(`[
+		{"id":"pending","batchId":"batch-stats","status":"pending","answerJudgment":null},
+		{"id":"running","batchId":"batch-stats","status":"running","answerJudgment":null},
+		{"id":"unreviewed","batchId":"batch-stats","status":"succeeded","answerJudgment":"unreviewed","manualError":false},
+		{"id":"correct","batchId":"batch-stats","status":"succeeded","answerJudgment":"correct","manualError":false},
+		{"id":"incorrect","batchId":"batch-stats","status":"succeeded","answerJudgment":"incorrect","manualError":true},
+		{"id":"failed","batchId":"batch-stats","status":"failed","answerJudgment":null},
+		{"id":"cancelled","batchId":"batch-stats","status":"cancelled","answerJudgment":null}
+	]`), &records); err != nil {
+		t.Fatalf("decode hand-checked records: %v", err)
+	}
+
+	batch, err := buildQuestionAnswerBatch(records)
+	if err != nil {
+		t.Fatalf("build batch: %v", err)
+	}
+	encoded, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatalf("marshal batch: %v", err)
+	}
+	var payload struct {
+		Stats struct {
+			Requests struct {
+				Submitted  int `json:"submitted"`
+				InProgress int `json:"inProgress"`
+				Succeeded  int `json:"succeeded"`
+				Failed     int `json:"failed"`
+				Cancelled  int `json:"cancelled"`
+			} `json:"requests"`
+			Reviews struct {
+				Unreviewed int `json:"unreviewed"`
+				Correct    int `json:"correct"`
+				Incorrect  int `json:"incorrect"`
+			} `json:"reviews"`
+		} `json:"stats"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatalf("decode batch contract: %v", err)
+	}
+	requests := payload.Stats.Requests
+	if requests.Submitted != 7 || requests.InProgress != 2 || requests.Succeeded != 3 || requests.Failed != 1 || requests.Cancelled != 1 {
+		t.Fatalf("request stats = %+v, want submitted=7 inProgress=2 succeeded=3 failed=1 cancelled=1", requests)
+	}
+	reviews := payload.Stats.Reviews
+	if reviews.Unreviewed != 1 || reviews.Correct != 1 || reviews.Incorrect != 1 {
+		t.Fatalf("review stats = %+v, want unreviewed=1 correct=1 incorrect=1", reviews)
+	}
+	if requests.Submitted != requests.InProgress+requests.Succeeded+requests.Failed+requests.Cancelled {
+		t.Fatalf("request stats do not reconcile: %+v", requests)
+	}
+	if requests.Succeeded != reviews.Unreviewed+reviews.Correct+reviews.Incorrect {
+		t.Fatalf("review stats do not reconcile: requests=%+v reviews=%+v", requests, reviews)
 	}
 }
 

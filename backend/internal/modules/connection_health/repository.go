@@ -264,6 +264,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			status text NOT NULL DEFAULT 'pending',
 			error_type text NOT NULL DEFAULT '',
 			manual_error boolean NOT NULL DEFAULT false,
+			answer_judgment text NULL,
 			created_at timestamptz NOT NULL DEFAULT now(),
 			started_at timestamptz NULL,
 			completed_at timestamptz NULL,
@@ -272,6 +273,14 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		)`,
 		`ALTER TABLE connection_health_question_answer_records
 			ADD COLUMN IF NOT EXISTS reasoning_effort text NULL`,
+		`ALTER TABLE connection_health_question_answer_records
+			ADD COLUMN IF NOT EXISTS answer_judgment text NULL`,
+		`UPDATE connection_health_question_answer_records
+			SET answer_judgment = CASE WHEN manual_error THEN 'incorrect' ELSE 'unreviewed' END
+			WHERE status = 'succeeded' AND answer_judgment IS NULL`,
+		`UPDATE connection_health_question_answer_records
+			SET answer_judgment = NULL
+			WHERE status <> 'succeeded' AND answer_judgment IS NOT NULL`,
 		`DO $$
 		BEGIN
 			IF NOT EXISTS (
@@ -282,6 +291,24 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 				ALTER TABLE connection_health_question_answer_records
 					ADD CONSTRAINT connection_health_question_answer_reasoning_effort
 					CHECK (reasoning_effort IS NULL OR reasoning_effort IN ('low', 'medium', 'high', 'xhigh'));
+			END IF;
+		END $$`,
+		`DO $$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM pg_constraint
+				WHERE conrelid = 'connection_health_question_answer_records'::regclass
+				  AND conname = 'connection_health_question_answer_judgment'
+			) THEN
+				ALTER TABLE connection_health_question_answer_records
+					ADD CONSTRAINT connection_health_question_answer_judgment
+					CHECK (
+						(status = 'succeeded'
+							AND answer_judgment IS NOT NULL
+							AND answer_judgment IN ('unreviewed', 'correct', 'incorrect'))
+						OR
+						(status <> 'succeeded' AND answer_judgment IS NULL)
+					);
 			END IF;
 		END $$`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_target_history ON connection_health_question_answer_records (user_id, target_id, created_at DESC, id DESC)`,

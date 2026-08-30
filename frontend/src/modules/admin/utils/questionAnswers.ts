@@ -1,4 +1,4 @@
-import type { QuestionAnswerRecord } from '../types/connectionHealth'
+import type { QuestionAnswerRecord, QuestionAnswerStats } from '../types/connectionHealth'
 
 export interface QuestionAnswerOperationScope {
   sequence: number
@@ -36,20 +36,19 @@ export const questionAnswerElapsedMilliseconds = (
   return Math.max(0, completedAt - startedAt)
 }
 
-const shanghaiDateKey = (value: string | Date): string | null => {
-  const date = value instanceof Date ? value : new Date(value)
-  if (Number.isNaN(date.getTime())) return null
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(date)
-  const values = Object.fromEntries(parts.map(part => [part.type, part.value]))
-  return `${values.year}-${values.month}-${values.day}`
-}
+export const filterQuestionAnswerRecords = (
+  records: QuestionAnswerRecord[],
+  showAll: boolean,
+): QuestionAnswerRecord[] => showAll
+  ? records
+  : records.filter(record => record.status === 'succeeded' && record.answerJudgment === 'unreviewed')
 
-export const questionAnswerCompletedTodayInShanghai = (
-  record: QuestionAnswerRecord,
-  now = new Date(),
-): boolean => Boolean(record.completedAt && shanghaiDateKey(record.completedAt) === shanghaiDateKey(now))
+export const questionAnswerStatsReconcile = (stats: QuestionAnswerStats): boolean => (
+  stats.requests.submitted === stats.requests.inProgress
+    + stats.requests.succeeded
+    + stats.requests.failed
+    + stats.requests.cancelled
+  && stats.requests.succeeded === stats.reviews.unreviewed
+    + stats.reviews.correct
+    + stats.reviews.incorrect
+)

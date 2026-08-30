@@ -18,8 +18,8 @@ import {
   ShieldCheck,
 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
-import { getPrioritySyncStatus } from '../api/connectionHealth'
-import type { AdminGroupsRefreshSite } from '../api/connectionHealth'
+import { getPrioritySyncStatus, probeTargetWithProgress } from '../api/connectionHealth'
+import type { AdminGroupsRefreshSite, ProbeTargetProgressPhase } from '../api/connectionHealth'
 import { listUpstreamSites } from '../api/upstream'
 import { connectionHealthMessageKey, useConnectionHealth } from '../composables/useConnectionHealth'
 import { createRefreshCoordinator } from '../utils/connectionHealthRefresh'
@@ -38,6 +38,7 @@ import type {
   AdminGroupHealth,
 	AdminGroupPolicyConfiguration,
   ConnectionHealthPolicy,
+  ModelHealth,
   PolicyInput,
 	PrioritySyncStatus,
 } from '../types/connectionHealth'
@@ -109,6 +110,43 @@ const refreshCoordinator = createRefreshCoordinator()
 const preferenceScope = computed(() => currentAccount.value?.id ?? 'anonymous')
 let loadedPreferenceScope = ''
 
+type QuickProbePhase = 'starting' | ProbeTargetProgressPhase | ''
+type QuickProbeSessionIdentity = {
+  sequence: number
+  workspaceId: string
+  controller: AbortController
+}
+type QuickProbeReloadObligation = {
+  workspaceLifecycle: number
+  workspaceId: string
+  version: number
+}
+
+const quickProbeTargetId = ref('')
+const quickProbePhase = ref<QuickProbePhase>('')
+const quickProbeErrors = ref<Record<string, string>>({})
+let quickProbeSequence = 0
+let quickProbeController: AbortController | null = null
+let quickProbeWorkspaceLifecycle = 0
+let quickProbeReloadVersion = 0
+let quickProbeReloadSettledVersion = 0
+let quickProbeReloadPendingVersion = 0
+let quickProbeReloadInFlight: Promise<boolean> | null = null
+
+const invalidateQuickProbeSession = (clearErrors: boolean) => {
+  quickProbeSequence++
+  quickProbeWorkspaceLifecycle++
+  quickProbeController?.abort()
+  quickProbeController = null
+  quickProbeReloadVersion = 0
+  quickProbeReloadSettledVersion = 0
+  quickProbeReloadPendingVersion = 0
+  quickProbeReloadInFlight = null
+  quickProbeTargetId.value = ''
+  quickProbePhase.value = ''
+  if (clearErrors) quickProbeErrors.value = {}
+}
+
 type AuxiliaryFailureSource = 'policies' | 'events' | 'priority' | 'siteNames'
 type AuxiliaryFailure = {
   source: AuxiliaryFailureSource
@@ -151,6 +189,7 @@ const loadPreferences = (scope: string) => {
 }
 
 watch(preferenceScope, (scope) => {
+  invalidateQuickProbeSession(true)
   setAdminGroupsWorkspace(scope)
   loadPreferences(scope)
 }, { immediate: true })
@@ -435,6 +474,79 @@ const loadMainListIfIdle = async (reload: () => Promise<unknown>): Promise<boole
   return true
 }
 
+const quickProbeIdentityIsCurrent = (identity: QuickProbeSessionIdentity): boolean =>
+  identity.sequence === quickProbeSequence
+  && identity.workspaceId === preferenceScope.value
+  && !identity.controller.signal.aborted
+
+const activeQuickProbeIsCurrent = (identity: QuickProbeSessionIdentity): boolean =>
+  quickProbeIdentityIsCurrent(identity) && quickProbeController === identity.controller
+
+const quickProbeReloadWorkspaceIsCurrent = (obligation: QuickProbeReloadObligation): boolean =>
+  obligation.workspaceLifecycle === quickProbeWorkspaceLifecycle
+  && obligation.workspaceId === preferenceScope.value
+
+const runQuickProbeAuthoritativeReload = async (obligation: QuickProbeReloadObligation) => {
+  if (!quickProbeReloadWorkspaceIsCurrent(obligation)) return
+  quickProbeReloadPendingVersion = Math.max(quickProbeReloadPendingVersion, obligation.version)
+
+  while (
+    quickProbeReloadWorkspaceIsCurrent(obligation)
+    && quickProbeReloadPendingVersion > quickProbeReloadSettledVersion
+  ) {
+    if (refreshCoordinator.isRefreshActive()) return
+    if (quickProbeReloadInFlight) {
+      const loaded = await quickProbeReloadInFlight
+      if (!loaded) return
+      continue
+    }
+
+    const version = quickProbeReloadPendingVersion
+    let trackedRead!: Promise<boolean>
+    trackedRead = (async () => {
+      let loaded = false
+      try {
+        loaded = await loadAdminGroups({ silent: true })
+      } catch {
+        // 权威补读失败不能覆盖正式探活已经确认的本次成功或失败结论；留待下一轮刷新补读。
+      }
+      if (!quickProbeReloadWorkspaceIsCurrent(obligation)) return false
+      if (!loaded) {
+        quickProbeReloadPendingVersion = Math.max(quickProbeReloadPendingVersion, version)
+        return false
+      }
+
+      quickProbeReloadSettledVersion = Math.max(quickProbeReloadSettledVersion, version)
+      if (quickProbeReloadSettledVersion >= quickProbeReloadPendingVersion) quickProbeReloadPendingVersion = 0
+      return true
+    })().finally(() => {
+      if (quickProbeReloadInFlight === trackedRead) quickProbeReloadInFlight = null
+    })
+    quickProbeReloadInFlight = trackedRead
+    if (!await trackedRead) return
+  }
+}
+
+const reloadQuickProbeAuthoritatively = async (identity: QuickProbeSessionIdentity) => {
+  if (!quickProbeIdentityIsCurrent(identity)) return
+  const obligation: QuickProbeReloadObligation = {
+    workspaceLifecycle: quickProbeWorkspaceLifecycle,
+    workspaceId: identity.workspaceId,
+    version: ++quickProbeReloadVersion,
+  }
+  quickProbeReloadPendingVersion = Math.max(quickProbeReloadPendingVersion, obligation.version)
+  await runQuickProbeAuthoritativeReload(obligation)
+}
+
+const flushPendingQuickProbeReload = async () => {
+  if (quickProbeReloadPendingVersion <= quickProbeReloadSettledVersion) return
+  await runQuickProbeAuthoritativeReload({
+    workspaceLifecycle: quickProbeWorkspaceLifecycle,
+    workspaceId: preferenceScope.value,
+    version: quickProbeReloadPendingVersion,
+  })
+}
+
 let setupGroupReloadPending = false
 const reloadSetupGroupsAuthoritatively = async () => {
 	const started = await loadMainListIfIdle(() => loadAdminGroups({ silent: true }))
@@ -453,6 +565,7 @@ const completeRefresh = (generation: number) => {
 	refreshLoading.value = false
 	stopRefreshWaitTimer()
 	void flushPendingSetupGroupReload()
+	void flushPendingQuickProbeReload()
 }
 
 let lastEntryRefreshAt = 0
@@ -500,6 +613,7 @@ const refreshAdminGroupsAutomatically = async (): Promise<boolean> => {
 }
 
 const refresh = async () => {
+  quickProbeErrors.value = {}
   const generation = refreshCoordinator.begin()
   if (generation === null) return
   refreshLoading.value = true
@@ -515,6 +629,7 @@ const refresh = async () => {
 }
 
 onBeforeUnmount(() => {
+  invalidateQuickProbeSession(true)
   cancelAdminGroupsRefresh()
   stopRefreshWaitTimer()
 	setupGroupReloadPending = false
@@ -671,6 +786,122 @@ const onProbeAccount = (account: AdminGroupAccount) => {
     formalModels: Array.from(formalModelMap.values()),
   }
   probeDialogOpen.value = true
+}
+
+const formalProbeModels = (account: AdminGroupAccount): string[] => {
+  if (!account.hasEnabledProbePolicy) return []
+  return Array.from(new Set(
+    [...(account.modelHealth ?? []), ...(account.unprobedModels ?? [])]
+      .map(model => model.modelName)
+      .filter(Boolean),
+  ))
+}
+
+const defaultQuickProbeModel = (account: AdminGroupAccount): string => {
+  const models = formalProbeModels(account)
+  return models.includes('gpt-5.6-sol') ? 'gpt-5.6-sol' : (models[0] ?? '')
+}
+
+const clearQuickProbeError = (targetId: string) => {
+  if (!quickProbeErrors.value[targetId]) return
+  const next = { ...quickProbeErrors.value }
+  delete next[targetId]
+  quickProbeErrors.value = next
+}
+
+const setQuickProbeError = (targetId: string, message: string) => {
+  quickProbeErrors.value = { ...quickProbeErrors.value, [targetId]: message }
+}
+
+const safeQuickProbeErrorMessage = (rawKey: string): string => {
+  const key = connectionHealthMessageKey(rawKey.trim(), te)
+  return te(key) ? t(key) : t('admin.connectionHealth.groupDetail.quickProbe.requestFailed')
+}
+
+const mergeQuickProbeResults = (targetId: string, results: ModelHealth[]) => {
+  adminGroups.value = adminGroups.value.map(group => ({
+    ...group,
+    accounts: group.accounts.map((account) => {
+      if (account.targetId !== targetId) return account
+      const modelHealth = [...(account.modelHealth ?? [])]
+      let unprobedModels = [...(account.unprobedModels ?? [])]
+      for (const result of results) {
+        const existingIndex = modelHealth.findIndex(model => model.modelName === result.modelName)
+        const projected = existingIndex >= 0
+          ? modelHealth[existingIndex]
+          : unprobedModels.find(model => model.modelName === result.modelName)
+        const merged = {
+          ...(projected ?? {}),
+          ...result,
+          providerFamily: result.providerFamily.trim() || projected?.providerFamily || '',
+        } as ModelHealth
+        if (existingIndex >= 0) modelHealth[existingIndex] = merged
+        else modelHealth.push(merged)
+        unprobedModels = unprobedModels.filter(model => model.modelName !== result.modelName)
+      }
+      return { ...account, modelHealth, unprobedModels }
+    }),
+  }))
+}
+
+const applyQuickProbeResultError = (targetId: string, results: ModelHealth[]) => {
+  const failure = results.find(result => !['ok', 'slow_response'].includes(result.probeResult ?? ''))
+  if (!failure) {
+    clearQuickProbeError(targetId)
+    return
+  }
+  const detail = failure.lastErrorDetail ?? ''
+  setQuickProbeError(
+    targetId,
+    detail.trim() ? detail : safeQuickProbeErrorMessage(failure.lastErrorKey || 'admin.connectionHealth.errors.unknown'),
+  )
+}
+
+const onQuickProbeAccount = async (account: AdminGroupAccount) => {
+  if (quickProbeController || quickProbeTargetId.value) return
+  const model = defaultQuickProbeModel(account)
+  if (!account.probeAvailable || !account.hasEnabledProbePolicy || !model) return
+
+  const controller = new AbortController()
+  const identity: QuickProbeSessionIdentity = {
+    sequence: ++quickProbeSequence,
+    workspaceId: preferenceScope.value,
+    controller,
+  }
+  quickProbeController = controller
+  quickProbeTargetId.value = account.targetId
+  quickProbePhase.value = 'starting'
+  clearQuickProbeError(account.targetId)
+
+  try {
+    const results = await probeTargetWithProgress(
+      account.targetId,
+      [model],
+      (phase) => {
+        if (activeQuickProbeIsCurrent(identity)) quickProbePhase.value = phase
+      },
+      controller.signal,
+    )
+    if (!activeQuickProbeIsCurrent(identity)) return
+    if (results.length === 0) {
+      setQuickProbeError(account.targetId, t('admin.connectionHealth.groupDetail.quickProbe.emptyResult'))
+      await reloadQuickProbeAuthoritatively(identity)
+      return
+    }
+    mergeQuickProbeResults(account.targetId, results)
+    applyQuickProbeResultError(account.targetId, results)
+    await reloadQuickProbeAuthoritatively(identity)
+  } catch (err) {
+    if (!activeQuickProbeIsCurrent(identity)) return
+    if (err instanceof Error && err.name === 'AbortError') return
+    const key = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+    setQuickProbeError(account.targetId, safeQuickProbeErrorMessage(key))
+  } finally {
+    if (!activeQuickProbeIsCurrent(identity)) return
+    quickProbeController = null
+    quickProbeTargetId.value = ''
+    quickProbePhase.value = ''
+  }
 }
 
 const onFormalProbeCompleted = async () => {
@@ -1090,8 +1321,12 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           :hide-unmonitored-accounts="preferences.hideUnmonitoredAccounts"
           :question-answer-unread-target-ids="preferences.questionAnswerUnreadTargetIds"
           :action-loading="isActionLoading"
+          :quick-probe-target-id="quickProbeTargetId"
+          :quick-probe-phase="quickProbePhase"
+          :quick-probe-errors="quickProbeErrors"
           @setup="openSetup"
           @probe="onProbeAccount"
+          @quick-probe="onQuickProbeAccount"
           @view-events="onViewEventsAccount"
           @set-schedulable="onSetTargetSchedulable"
           @assign-policy="onAssignPolicy"

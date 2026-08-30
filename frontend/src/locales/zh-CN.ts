@@ -1161,6 +1161,18 @@ export default {
           disableScheduling: '关闭主站调度',
           enableScheduling: '恢复主站调度'
         },
+        quickProbe: {
+          ready: '一键正式探活：{model}',
+          starting: '正在提交正式探活：{model}',
+          queued: '正式探活排队中：{model}',
+          running: '正式探活进行中：{model}',
+          disabled: '一键正式探活不可用：{reason}',
+          unavailable: '当前账号暂不可正式探活',
+          noPolicy: '未启用正式探活策略',
+          noModels: '没有正式探活模型',
+          emptyResult: '正式探活已完成，但没有返回模型结果',
+          requestFailed: '正式探活失败，请稍后重试。'
+        },
         priorityConflict: '检测到 {count} 个上游优先级被人工修改。为避免覆盖人工设置，系统已停止管理这些目标的优先级。重新保存分组策略后可重新接管。',
         priorityConflictShort: '上游优先级已被人工修改，系统已停止自动覆盖',
         priorityConflictTarget: '{target}：当前 {current}，期望 {expected}，发现于 {time}',

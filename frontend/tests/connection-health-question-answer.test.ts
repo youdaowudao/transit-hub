@@ -12,9 +12,12 @@ import {
 import type { QuestionAnswerRecord } from '../src/modules/admin/types/connectionHealth'
 import {
   filterQuestionAnswerRecords,
+  groupQuestionAnswerHistoryByBatch,
   isCurrentQuestionAnswerOperation,
+  questionAnswerBatchCompletedAt,
   questionAnswerElapsedMilliseconds,
   questionAnswerStatsReconcile,
+  shortQuestionAnswerBatchId,
 } from '../src/modules/admin/utils/questionAnswers'
 import {
   clearQuestionAnswerUnread,
@@ -74,6 +77,72 @@ afterEach(() => {
 })
 
 describe('connection health question answers', () => {
+  it('groups the current history page by first batch appearance', () => {
+    const records = [
+      { ...questionAnswerRecord('a1', 'succeeded', '2026-08-30T01:00:01Z'), batchId: 'batch-aaaaaaaa' },
+      { ...questionAnswerRecord('a2', 'succeeded', '2026-08-30T01:00:02Z'), batchId: 'batch-aaaaaaaa' },
+      { ...questionAnswerRecord('b1', 'failed', '2026-08-30T01:00:03Z'), batchId: 'batch-bbbbbbbb' },
+    ]
+
+    expect(groupQuestionAnswerHistoryByBatch(records).map(group => ({
+      batchId: group.batchId,
+      ids: group.records.map(record => record.id),
+    }))).toEqual([
+      { batchId: 'batch-aaaaaaaa', ids: ['a1', 'a2'] },
+      { batchId: 'batch-bbbbbbbb', ids: ['b1'] },
+    ])
+  })
+
+  it('shortens only long batch IDs for display', () => {
+    expect(shortQuestionAnswerBatchId('1234567890')).toBe('12345678')
+    expect(shortQuestionAnswerBatchId('short')).toBe('short')
+  })
+
+  it('derives completion only from a complete terminal batch', () => {
+    const terminal = {
+      batchId: 'batch-terminal',
+      records: [
+        questionAnswerRecord('first', 'succeeded', '2026-08-30T01:00:01Z'),
+        questionAnswerRecord('last', 'failed', '2026-08-30T01:00:09Z'),
+      ],
+      reasoningEffort: null,
+      submittedCount: 2,
+      completedCount: 2,
+      runningCount: 0,
+      active: false,
+      currentModel: '',
+      currentQuestion: '',
+      stats: {
+        requests: { submitted: 2, inProgress: 0, succeeded: 1, failed: 1, cancelled: 0 },
+        reviews: { unreviewed: 1, correct: 0, incorrect: 0 },
+      },
+    }
+
+    expect(questionAnswerBatchCompletedAt(terminal)).toBe('2026-08-30T01:00:09Z')
+    expect(questionAnswerBatchCompletedAt({ ...terminal, active: true })).toBeNull()
+    expect(questionAnswerBatchCompletedAt({ ...terminal, records: [] })).toBeNull()
+    expect(questionAnswerBatchCompletedAt({
+      ...terminal,
+      records: [{ ...terminal.records[0], completedAt: null }],
+    })).toBeNull()
+    expect(questionAnswerBatchCompletedAt({
+      ...terminal,
+      records: [{ ...terminal.records[0], completedAt: 'not-a-time' }],
+    })).toBeNull()
+    expect(questionAnswerBatchCompletedAt({
+      ...terminal,
+      records: [{ ...terminal.records[0], completedAt: '0' }],
+    })).toBeNull()
+    expect(questionAnswerBatchCompletedAt({
+      ...terminal,
+      records: [{ ...terminal.records[0], completedAt: '2026-02-30T01:00:00Z' }],
+    })).toBeNull()
+    expect(questionAnswerBatchCompletedAt({
+      ...terminal,
+      records: [{ ...terminal.records[0], completedAt: '2024-02-29T01:00:00Z' }],
+    })).toBe('2024-02-29T01:00:00Z')
+  })
+
   it('rejects late question-answer responses after close, mode switch, or target replacement', () => {
     const scope = { sequence: 7, targetId: 'target-a', batchId: 'batch-a' }
     const current = {
@@ -208,7 +277,7 @@ describe('connection health question answers', () => {
     expect(dialogSource).toContain('if (batch.reasoningEffort)')
     expect(dialogSource).toContain(':disabled="qaSelectionLocked"')
     expect(dialogSource).toContain('questionAnswerReasoningEffortLabel(record.reasoningEffort)')
-    expect(dialogSource).toContain('questionAnswerReasoningEffortLabel(qaBatch.reasoningEffort)')
+    expect(dialogSource).toContain('questionAnswerReasoningEffortLabel(qaReviewBatch.reasoningEffort)')
     expect(dialogSource).toContain('reasoningEffort.unspecified')
   })
 
@@ -302,7 +371,9 @@ describe('connection health question answers', () => {
     expect(dialogSource).toContain('batch.records.map(record => record.questionId)')
     expect(dialogSource).toContain('selected.value.size * qaSelectedQuestions.value.size')
     expect(dialogSource).toContain('setTimeout(() => void pollQuestionAnswerBatch(), 2000)')
-    expect(dialogSource.match(/getQuestionAnswerBatch\(targetId, batchId, controller.signal\)/g)).toHaveLength(2)
+    expect(dialogSource).toContain('const batchId = qaRuntimeBatch.value.batchId')
+    expect(dialogSource).toContain('getQuestionAnswerBatch(targetId, record.batchId, controller.signal)')
+    expect(dialogSource).toContain('reviewQuestionAnswerBatch(group.batchId)')
     expect(dialogSource).toContain('qaCompletedNotice.value = true')
     expect(dialogSource).toContain('onBeforeUnmount(cleanupFrontendWork)')
     expect(closeBody).toContain('cleanupFrontendWork()')

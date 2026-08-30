@@ -42,8 +42,11 @@ run_connection_health_gate() {
   run_step "test calendar boundary guard" \
     node "$ROOT_DIR/scripts/check-test-calendar-boundaries.mjs" --root "$ROOT_DIR"
 
-  run_step "question answer fixture and core membership tests" \
-    node --test "$ROOT_DIR/scripts/question-answer-review-fixture.test.mjs" "$ROOT_DIR/scripts/test-core-regression-membership.test.mjs"
+  run_step "question answer browser fixture safety tests" \
+    node --test \
+      "$ROOT_DIR/scripts/question-answer-review-fixture.test.mjs" \
+      "$ROOT_DIR/scripts/question-answer-batch-review-fixture.test.mjs" \
+      "$ROOT_DIR/scripts/test-core-regression-membership.test.mjs"
 
   run_step "backend connection_health and upstream tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test ./internal/modules/connection_health ./internal/modules/upstream -count=1"

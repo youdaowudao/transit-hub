@@ -192,6 +192,8 @@ export interface AdminGroupAccount {
   upstreamSiteId?: string
   prioritySyncBlocked?: boolean
   prioritySyncBlockReason?: PrioritySyncBlockReason | string
+  todayQuestionAnswerSubmitted?: number
+  todayQuestionAnswerCorrect?: number
   productionSortOrder?: number
 }
 

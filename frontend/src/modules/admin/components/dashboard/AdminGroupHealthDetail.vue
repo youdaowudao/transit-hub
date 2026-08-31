@@ -128,6 +128,7 @@ type AccountSortField =
   | 'upstreamMultiplier'
   | 'latency'
   | 'stability'
+  | 'todayAccuracy'
 
 type SortDirection = 'asc' | 'desc'
 type StateBreakdownItem = {
@@ -272,6 +273,7 @@ const DEFAULT_SORT_DIRECTIONS: Record<AccountSortField, SortDirection> = {
   upstreamMultiplier: 'asc',
   latency: 'asc',
   stability: 'asc',
+  todayAccuracy: 'desc',
 }
 
 const HEALTH_SORT_RANK: Record<ConnectionHealthState, number> = {
@@ -433,6 +435,19 @@ const accountHealthRank = (account: AdminGroupAccount): number => {
   return HEALTH_SORT_RANK[state] ?? 6
 }
 
+const accountTodayAccuracy = (account: AdminGroupAccount): number | null => {
+  const submitted = account.todayQuestionAnswerSubmitted ?? 0
+  if (submitted <= 0) return null
+  return (account.todayQuestionAnswerCorrect ?? 0) / submitted
+}
+
+const formatTodayAccuracy = (account: AdminGroupAccount): string => {
+  const accuracy = accountTodayAccuracy(account)
+  if (accuracy == null) return '-'
+  const roundedPercent = Math.round(accuracy * 1000) / 10
+  return `${Number.isInteger(roundedPercent) ? roundedPercent.toFixed(0) : roundedPercent.toFixed(1)}%`
+}
+
 const accountSortValue = (account: AdminGroupAccount, field: AccountSortField): string | number | null => {
   switch (field) {
     case 'account':
@@ -451,6 +466,8 @@ const accountSortValue = (account: AdminGroupAccount, field: AccountSortField): 
       return accountLatency(account)
     case 'stability':
       return accountStabilityRank(account)
+    case 'todayAccuracy':
+      return accountTodayAccuracy(account)
   }
 }
 
@@ -752,12 +769,20 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                   <ArrowDownUp v-else class="h-3.5 w-3.5 opacity-50" />
                 </button>
               </th>
-              <th class="px-3 py-2.5 text-right font-medium">{{ t(`${detailPrefix}.columns.actions`) }}</th>
+              <th class="w-28 px-3 py-2.5 text-right font-medium" :aria-sort="ariaSort('todayAccuracy')">
+                <button type="button" class="inline-flex items-center justify-end gap-1.5 text-right hover:text-foreground" @click="toggleSort('todayAccuracy')">
+                  {{ t(`${detailPrefix}.columns.todayAccuracy`) }}
+                  <ChevronUp v-if="customSortActive && sortField === 'todayAccuracy' && sortDirection === 'asc'" class="h-3.5 w-3.5" />
+                  <ChevronDown v-else-if="customSortActive && sortField === 'todayAccuracy'" class="h-3.5 w-3.5" />
+                  <ArrowDownUp v-else class="h-3.5 w-3.5 opacity-50" />
+                </button>
+              </th>
+              <th class="w-28 px-3 py-2.5 text-right font-medium">{{ t(`${detailPrefix}.columns.actions`) }}</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="sortedAccounts.length === 0">
-              <td colspan="9" class="px-4 py-12 text-center text-sm text-muted-foreground">
+              <td colspan="10" class="px-4 py-12 text-center text-sm text-muted-foreground">
                 {{ t(`${detailPrefix}.filters.noMatches`) }}
               </td>
             </tr>
@@ -861,9 +886,18 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     </span>
                   </div>
                 </td>
-                <td class="px-3 py-3">
-                  <div class="flex items-center justify-end gap-1">
-                    <Tooltip :text="t(`${detailPrefix}.actions.assignPolicy`)">
+                <td class="w-28 px-3 py-3 text-right tabular-nums">
+                  <span :class="accountTodayAccuracy(account) == null ? 'text-muted-foreground' : 'font-medium text-foreground'">
+                    {{ formatTodayAccuracy(account) }}
+                  </span>
+                  <span v-if="accountTodayAccuracy(account) != null" class="mt-0.5 block text-[11px] text-muted-foreground">
+                    {{ account.todayQuestionAnswerCorrect ?? 0 }}/{{ account.todayQuestionAnswerSubmitted ?? 0 }}
+                  </span>
+                </td>
+                <td class="w-28 px-3 py-3">
+                  <div class="account-actions flex flex-col items-end gap-1">
+                    <div class="account-actions-primary flex items-center justify-end gap-1">
+                      <Tooltip :text="t(`${detailPrefix}.actions.assignPolicy`)">
                       <button
                         type="button"
                         class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface hover:text-primary"
@@ -872,8 +906,8 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                       >
                         <ShieldCheck class="h-4 w-4" />
                       </button>
-                    </Tooltip>
-                    <Tooltip :text="hasUnreadQuestionAnswer(account) ? t(`${prefix}.actions.questionAnswerUnread`) : t(`${prefix}.actions.probe`)">
+                      </Tooltip>
+                      <Tooltip :text="hasUnreadQuestionAnswer(account) ? t(`${prefix}.actions.questionAnswerUnread`) : t(`${prefix}.actions.probe`)">
                       <button
                         type="button"
                         class="rounded-md p-1.5 transition-colors disabled:opacity-35"
@@ -886,8 +920,8 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                       >
                         <Zap class="h-4 w-4" />
                       </button>
-                    </Tooltip>
-                    <Tooltip :text="quickProbeLabel(account)">
+                      </Tooltip>
+                      <Tooltip :text="quickProbeLabel(account)">
                       <button
                         type="button"
                         class="rounded-md bg-primary p-1.5 text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-35"
@@ -898,8 +932,10 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                         <Loader2 v-if="quickProbePhases[account.targetId]" class="h-4 w-4 animate-spin" />
                         <Bolt v-else class="h-4 w-4" />
                       </button>
-                    </Tooltip>
-                    <Tooltip v-if="isSub2API(account) && account.schedulable != null" :text="account.schedulable ? t(`${detailPrefix}.actions.disableScheduling`) : t(`${detailPrefix}.actions.enableScheduling`)" wide>
+                      </Tooltip>
+                    </div>
+                    <div class="account-actions-secondary flex items-center justify-end gap-1">
+                      <Tooltip v-if="isSub2API(account) && account.schedulable != null" :text="account.schedulable ? t(`${detailPrefix}.actions.disableScheduling`) : t(`${detailPrefix}.actions.enableScheduling`)" wide>
                       <button
                         type="button"
                         class="rounded-md p-1.5 transition-colors disabled:cursor-not-allowed disabled:opacity-35"
@@ -912,8 +948,8 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                       >
                         <Power class="h-4 w-4" />
                       </button>
-                    </Tooltip>
-                    <Tooltip :text="t(`${prefix}.actions.viewEvents`)">
+                      </Tooltip>
+                      <Tooltip :text="t(`${prefix}.actions.viewEvents`)">
                       <button
                         type="button"
                         class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface hover:text-foreground"
@@ -922,12 +958,13 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                       >
                         <Eye class="h-4 w-4" />
                       </button>
-                    </Tooltip>
+                      </Tooltip>
+                    </div>
                   </div>
                 </td>
               </tr>
               <tr v-if="quickProbeSuccesses[account.targetId]" class="quick-probe-success-row border-t border-emerald-500/20 bg-emerald-500/[0.06]">
-                <td colspan="9" class="px-12 py-3 text-sm text-emerald-700 dark:text-emerald-400">
+                <td colspan="10" class="px-12 py-3 text-sm text-emerald-700 dark:text-emerald-400">
                   {{ t(`${detailPrefix}.quickProbe.completed`, {
                     model: quickProbeSuccesses[account.targetId].modelName,
                     latency: quickProbeSuccesses[account.targetId].latencyMs,
@@ -935,12 +972,12 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                 </td>
               </tr>
               <tr v-if="quickProbeErrors[account.targetId]" class="quick-probe-error-row border-t border-destructive/20 bg-destructive/[0.06]">
-                <td colspan="9" class="whitespace-pre-wrap break-words px-12 py-3 text-sm text-destructive">
+                <td colspan="10" class="whitespace-pre-wrap break-words px-12 py-3 text-sm text-destructive">
                   {{ quickProbeErrors[account.targetId] }}
                 </td>
               </tr>
               <tr v-if="expandedTargetId === account.targetId" class="border-t border-border/40 bg-surface/25">
-                <td colspan="9" class="px-12 py-4">
+                <td colspan="10" class="px-12 py-4">
                   <div v-if="filteredModelHealth(account).length === 0 && filteredUnprobedModels(account).length === 0" class="text-xs text-muted-foreground">{{ t(`${detailPrefix}.models.empty`) }}</div>
                   <div v-else class="grid gap-2 lg:grid-cols-2">
                     <div v-for="model in filteredModelHealth(account)" :key="model.modelName" class="rounded-lg border border-border/50 bg-background px-2.5 py-2">

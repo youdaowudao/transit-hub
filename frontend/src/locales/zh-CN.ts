@@ -1224,6 +1224,7 @@ export default {
           upstreamMultiplier: '上游 API Key 倍率',
           latency: '延迟',
           stability: '最近中断',
+          todayAccuracy: '今日正确率',
           actions: '操作'
         },
         stabilityColumn: {

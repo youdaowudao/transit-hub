@@ -421,6 +421,39 @@ func (r *Repository) ListQuestionAnswerHistory(ctx context.Context, userID strin
 	}, nil
 }
 
+func (r *Repository) ListQuestionAnswerTodaySummaries(ctx context.Context, userID string, targetIDs []string) (map[string]QuestionAnswerTodaySummary, error) {
+	summaries := make(map[string]QuestionAnswerTodaySummary)
+	if len(targetIDs) == 0 {
+		return summaries, nil
+	}
+	rows, err := r.db.Query(ctx, `
+		SELECT target_id,
+			count(*),
+			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'correct')
+		FROM connection_health_question_answer_records
+		WHERE user_id = $1
+			AND target_id = ANY($2::text[])
+			AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
+		GROUP BY target_id
+	`, userID, targetIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var targetID string
+		var summary QuestionAnswerTodaySummary
+		if err := rows.Scan(&targetID, &summary.Submitted, &summary.Correct); err != nil {
+			return nil, err
+		}
+		summaries[targetID] = summary
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return summaries, nil
+}
+
 func (r *Repository) questionAnswerStats(ctx context.Context, userID string, targetID string) (QuestionAnswerStats, QuestionAnswerStats, error) {
 	stats := QuestionAnswerStats{ByModel: []QuestionAnswerModelStats{}}
 	todayStats := QuestionAnswerStats{ByModel: []QuestionAnswerModelStats{}}

@@ -19,6 +19,52 @@ import (
 
 const questionAnswerPostgresTimeout = 15 * time.Second
 
+func TestQuestionAnswerRepositoryListsTodaySummariesForDeduplicatedTargets(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	repository := NewRepository(pool)
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO connection_health_question_answer_records (
+			id, user_id, target_id, batch_id, model_name, question_id, question_name,
+			question_body, status, answer_judgment, created_at
+		) VALUES
+			('today-a-correct-1', 'today-user', 'target-a', 'batch-a', 'model', 'q', 'Q', 'Body', 'succeeded', 'correct', now()),
+			('today-a-correct-2', 'today-user', 'target-a', 'batch-a', 'model', 'q', 'Q', 'Body', 'succeeded', 'correct', now()),
+			('today-a-correct-3', 'today-user', 'target-a', 'batch-a', 'model', 'q', 'Q', 'Body', 'succeeded', 'correct', now()),
+			('today-a-pending', 'today-user', 'target-a', 'batch-a', 'model', 'q', 'Q', 'Body', 'pending', NULL, now()),
+			('today-b-correct-1', 'today-user', 'target-b', 'batch-b', 'model', 'q', 'Q', 'Body', 'succeeded', 'correct', now()),
+			('today-b-correct-2', 'today-user', 'target-b', 'batch-b', 'model', 'q', 'Q', 'Body', 'succeeded', 'correct', now()),
+			('today-b-failed', 'today-user', 'target-b', 'batch-b', 'model', 'q', 'Q', 'Body', 'failed', NULL, now()),
+			('yesterday-a-correct', 'today-user', 'target-a', 'batch-old', 'model', 'q', 'Q', 'Body', 'succeeded', 'correct', now() - interval '1 day'),
+			('foreign-user-a-correct', 'foreign-user', 'target-a', 'batch-foreign', 'model', 'q', 'Q', 'Body', 'succeeded', 'correct', now()),
+			('unrequested-c-correct', 'today-user', 'target-c', 'batch-c', 'model', 'q', 'Q', 'Body', 'succeeded', 'correct', now())
+	`); err != nil {
+		t.Fatalf("insert today summary fixtures: %v", err)
+	}
+
+	summaries, err := repository.ListQuestionAnswerTodaySummaries(ctx, "today-user", []string{"target-b", "target-a", "target-b", "missing"})
+	if err != nil {
+		t.Fatalf("ListQuestionAnswerTodaySummaries: %v", err)
+	}
+	if got := summaries["target-a"]; got.Submitted != 4 || got.Correct != 3 {
+		t.Fatalf("target-a summary=%+v want submitted=4 correct=3", got)
+	}
+	if got := summaries["target-b"]; got.Submitted != 3 || got.Correct != 2 {
+		t.Fatalf("target-b summary=%+v want submitted=3 correct=2", got)
+	}
+	if _, ok := summaries["missing"]; ok {
+		t.Fatalf("missing target unexpectedly has summary: %+v", summaries["missing"])
+	}
+	if _, ok := summaries["target-c"]; ok {
+		t.Fatalf("unrequested target unexpectedly returned: %+v", summaries["target-c"])
+	}
+}
+
 func TestQuestionAnswerRepositoryRepeatExpansionPersistsIndependentOrderedRecords(t *testing.T) {
 	pool := openQuestionAnswerPostgresPool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)

@@ -29,6 +29,7 @@ import ConnectionHealthEventsDialog from '../components/dashboard/ConnectionHeal
 import GroupHealthSetupDrawer from '../components/dashboard/GroupHealthSetupDrawer.vue'
 import ManualOneTimeProbeDialog from '../components/dashboard/ManualOneTimeProbeDialog.vue'
 import type { ManualProbeTargetSummary } from '../components/dashboard/ManualOneTimeProbeDialog.vue'
+import QuestionAnswerBatchDrawer from '../components/dashboard/QuestionAnswerBatchDrawer.vue'
 import PolicyConfigDrawer from '../components/dashboard/PolicyConfigDrawer.vue'
 import type { OwnGroupOption } from '../components/dashboard/PolicyConfigDrawer.vue'
 import ProbePolicyListDialog from '../components/dashboard/ProbePolicyListDialog.vue'
@@ -57,6 +58,8 @@ import {
   mergeConnectionHealthGroupOrder,
   readConnectionHealthPreferences,
   type ConnectionHealthPreferences,
+  type QuestionAnswerPreferences,
+  type QuestionAnswerSelectionPreferences,
   writeConnectionHealthPreferences,
 } from '../utils/connectionHealthPreferences'
 
@@ -971,6 +974,23 @@ const onQuestionAnswerViewed = (targetId: string) => {
   updatePreferences(current => clearQuestionAnswerUnread(current, targetId))
 }
 
+const onQuestionAnswerPreferencesChanged = (selection: QuestionAnswerSelectionPreferences) => {
+  updatePreferences(current => ({
+    ...current,
+    questionAnswer: {
+      ...current.questionAnswer,
+      modelIds: selection.modelIds,
+      questionIds: selection.questionIds,
+      reasoningEffort: selection.reasoningEffort,
+      repeatCount: selection.repeatCount,
+    },
+  }))
+}
+
+const onQuestionAnswerPreferencesReplaced = (value: QuestionAnswerPreferences) => {
+  updatePreferences(current => ({ ...current, questionAnswer: value }))
+}
+
 // 策略探活事件。
 const openAllEvents = async () => {
   const requestSequence = ++eventsOpenRequestSequence
@@ -1257,6 +1277,13 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
 
       <div v-else class="grid min-h-[34rem] lg:grid-cols-[19rem_minmax(0,1fr)]">
         <aside class="flex min-h-0 flex-col border-b border-border/50 lg:border-b-0 lg:border-r">
+          <QuestionAnswerBatchDrawer
+            :groups="orderedGroups"
+            :preference-scope="preferenceScope"
+            :preferences="preferences.questionAnswer"
+            @preferences-changed="onQuestionAnswerPreferencesReplaced"
+            @question-answer-started="onQuestionAnswerStarted"
+          />
           <div class="space-y-3 border-b border-border/50 p-4">
             <div class="relative">
               <Search class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -1411,10 +1438,12 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
     <ManualOneTimeProbeDialog
       :open="probeDialogOpen"
       :target="probeDialogTarget"
+      :question-answer-preferences="preferences.questionAnswer"
       @close="probeDialogOpen = false"
       @completed="onFormalProbeCompleted"
       @question-answer-started="onQuestionAnswerStarted"
       @question-answer-viewed="onQuestionAnswerViewed"
+      @question-answer-preferences-changed="onQuestionAnswerPreferencesChanged"
     />
 
     <ProbePolicyListDialog

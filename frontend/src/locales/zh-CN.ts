@@ -1446,6 +1446,46 @@ export default {
         restore: '恢复',
         viewEvents: '查看事件'
       },
+      questionAnswerBatch: {
+        entry: '批量问答测试',
+        entrySummary: '{time} 开始 · 已处理 {processed}/{total} · 已启动 {started} · 已跳过 {skipped} · 失败 {failed} · 实际接受总量 {accepted}',
+        title: '批量问答测试',
+        workspace: '工作区 {scope}',
+        close: '关闭',
+        incomplete: '账号列表尚未完整，请刷新后再准备批量问答。',
+        selectGroup: '全选分组',
+        clearGroup: '清空分组',
+        source: '配置来源：{account}（{targetId}）',
+        configModels: '模型：{models}',
+        configQuestions: '启用问题：{questions}',
+        configEffort: '思考力度：{effort}',
+        configRepeat: '每组合 {repeat} 次',
+        compatibleModels: '兼容模型：{models}',
+        incompatibleModels: '不兼容模型：{models}',
+        requestCount: '{count} 次请求',
+        previewTotal: '共 {total} 次请求 · 预览总量 {total}',
+        runPreviewTotal: '上轮预览总量 {total}',
+        processed: '已处理 {processed}/{total}',
+        started: '已启动 {count}',
+        skipped: '已跳过 {count}',
+        failed: '失败 {count}',
+        acceptedTotal: '实际接受总量 {total}',
+        start: '开始批量问答',
+        errors: {
+          questionsLoad: '读取启用问题失败，请刷新后重试。',
+          sourceDiscovery: '配置来源模型发现失败，请检查该账号连接后重试。',
+          noSourceModel: '配置来源没有可用模型，请更换首个账号或检查模型能力。',
+          noEnabledQuestions: '没有启用问题，请先启用至少一个测试问题。',
+          overLimit: '单账号请求超过 50，请减少模型、问题或次数。'
+        },
+        outcomes: {
+          activeBatch: '已有活动批次，已跳过',
+          noCompatibleModels: '无兼容模型，已跳过',
+          discoveryFailed: '模型发现失败',
+          startFailed: '启动失败',
+          started: '已启动'
+        }
+      },
       errorKeys: {
         ok: '正常',
         slow_response: '高延迟成功',

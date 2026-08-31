@@ -45,11 +45,16 @@ import {
   questionAnswerBatchCompletedAt,
   questionAnswerElapsedMilliseconds,
   questionAnswerReviewStatsFromRecords,
+  resolveQuestionAnswerSelection,
   questionAnswerSubmissionSummary,
   replaceQuestionAnswerRecord,
   shortQuestionAnswerBatchId,
   type QuestionAnswerOperationScope,
 } from '../../utils/questionAnswers'
+import {
+  createDefaultQuestionAnswerPreferences,
+  type QuestionAnswerSelectionPreferences,
+} from '../../utils/connectionHealthPreferences'
 import QuestionAnswerHighlightedText from './QuestionAnswerHighlightedText.vue'
 import { t, te } from '@/locales'
 
@@ -63,16 +68,20 @@ export interface ManualProbeTargetSummary {
   formalModels: ManualProbeModelOption[]
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   open: boolean
   target: ManualProbeTargetSummary | null
-}>()
+  questionAnswerPreferences?: QuestionAnswerSelectionPreferences
+}>(), {
+  questionAnswerPreferences: () => createDefaultQuestionAnswerPreferences(),
+})
 
 const emit = defineEmits<{
   (event: 'close'): void
   (event: 'completed'): void
   (event: 'question-answer-started', targetId: string): void
   (event: 'question-answer-viewed', targetId: string): void
+  (event: 'question-answer-preferences-changed', preferences: QuestionAnswerSelectionPreferences): void
 }>()
 
 const prefix = 'admin.connectionHealth.manualProbeDialog'
@@ -104,6 +113,13 @@ const qaReasoningEffortOptions: Array<{ value: QuestionAnswerReasoningEffort; la
 ]
 const qaRepeatCount = ref(1)
 const qaRepeatCountOptions = Array.from({ length: 10 }, (_, index) => index + 1)
+const createQuestionAnswerPreferenceDraft = (): QuestionAnswerSelectionPreferences => ({
+  modelIds: [...props.questionAnswerPreferences.modelIds],
+  questionIds: [...props.questionAnswerPreferences.questionIds],
+  reasoningEffort: props.questionAnswerPreferences.reasoningEffort,
+  repeatCount: props.questionAnswerPreferences.repeatCount,
+})
+const qaPreferenceDraft = ref<QuestionAnswerSelectionPreferences>(createQuestionAnswerPreferenceDraft())
 const qaLoading = ref(false)
 const qaStarting = ref(false)
 const qaCancelling = ref(false)
@@ -157,6 +173,7 @@ let qaJudgmentSessionSequence = 0
 let qaPollSequence = 0
 let qaRuntimeSnapshotSequence = 0
 let skipInitializedQuestionAnswerModeLoad = false
+let qaSelectionDataReady = false
 
 const cancelActiveRequest = () => {
   activeRequestController?.abort()
@@ -256,6 +273,7 @@ const resetQuestionAnswerViewState = () => {
 
 const resetQuestionAnswerTargetState = () => {
   resetQuestionAnswerViewState()
+  qaPreferenceDraft.value = createQuestionAnswerPreferenceDraft()
   qaQuestions.value = []
   qaSelectedQuestions.value = new Set()
   qaReasoningEffort.value = 'medium'
@@ -263,6 +281,7 @@ const resetQuestionAnswerTargetState = () => {
   qaMarking.value = new Map()
   qaErrorKey.value = ''
   qaCompletedNotice.value = false
+  qaSelectionDataReady = false
 }
 
 const cancelQuestionAnswerJudgments = () => {
@@ -315,6 +334,77 @@ const restoreActiveQuestionAnswerSelection = (batch: QuestionAnswerBatch | null)
   return true
 }
 
+const restoreSavedQuestionAnswerSelection = (): boolean => {
+  if (
+    mode.value !== 'questionAnswer'
+    || qaRuntimeBatch.value?.active
+    || onceLoadState.value !== 'ready'
+    || !qaSelectionDataReady
+  ) return false
+  const restored = resolveQuestionAnswerSelection(
+    props.questionAnswerPreferences,
+    onceModels.value,
+    qaQuestions.value,
+  )
+  selected.value = new Set(restored.modelIds)
+  qaSelectedQuestions.value = new Set(restored.questionIds)
+  qaReasoningEffort.value = restored.reasoningEffort
+  qaRepeatCount.value = restored.repeatCount
+  return true
+}
+
+const mergeVisibleQuestionAnswerIds = (
+  savedIds: string[],
+  visibleIds: string[],
+  selectedVisibleIds: string[],
+): string[] => {
+  const visible = new Set(visibleIds)
+  const selected = Array.from(new Set(selectedVisibleIds.filter(id => visible.has(id))))
+  const merged: string[] = []
+  let insertedVisible = false
+  for (const id of savedIds) {
+    if (visible.has(id)) {
+      if (!insertedVisible) {
+        merged.push(...selected)
+        insertedVisible = true
+      }
+      continue
+    }
+    if (!merged.includes(id)) merged.push(id)
+  }
+  if (!insertedVisible) merged.push(...selected)
+  return Array.from(new Set(merged))
+}
+
+type QuestionAnswerPreferenceField = 'models' | 'questions' | 'reasoningEffort' | 'repeatCount'
+
+const emitQuestionAnswerPreferences = (changedField: QuestionAnswerPreferenceField) => {
+  if (mode.value !== 'questionAnswer') return
+  if (changedField === 'models') {
+    qaPreferenceDraft.value.modelIds = mergeVisibleQuestionAnswerIds(
+      qaPreferenceDraft.value.modelIds,
+      models.value.map(model => model.id),
+      models.value.filter(model => selected.value.has(model.id)).map(model => model.id),
+    )
+  } else if (changedField === 'questions') {
+    qaPreferenceDraft.value.questionIds = mergeVisibleQuestionAnswerIds(
+      qaPreferenceDraft.value.questionIds,
+      qaQuestions.value.map(question => question.id),
+      qaQuestions.value.filter(question => qaSelectedQuestions.value.has(question.id)).map(question => question.id),
+    )
+  } else if (changedField === 'reasoningEffort') {
+    qaPreferenceDraft.value.reasoningEffort = qaReasoningEffort.value
+  } else {
+    qaPreferenceDraft.value.repeatCount = qaRepeatCount.value
+  }
+  emit('question-answer-preferences-changed', {
+    modelIds: [...qaPreferenceDraft.value.modelIds],
+    questionIds: [...qaPreferenceDraft.value.questionIds],
+    reasoningEffort: qaPreferenceDraft.value.reasoningEffort,
+    repeatCount: qaPreferenceDraft.value.repeatCount,
+  })
+}
+
 const readableMessage = (rawKey: string): string => t(connectionHealthMessageKey(rawKey, te))
 const qaReadableError = computed(() => qaErrorKey.value.startsWith('admin.')
   ? t(qaErrorKey.value)
@@ -359,7 +449,10 @@ watch(
     onceLoadState.value = 'ready'
     if (currentProbeMode() === 'formal') return
     models.value = onceModels.value
-    if (!restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)) selected.value = defaultSelection(outcome.models)
+    if (
+      !restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)
+      && !restoreSavedQuestionAnswerSelection()
+    ) selected.value = defaultSelection(outcome.models)
     phase.value = 'ready'
   },
 )
@@ -388,6 +481,7 @@ watch(mode, (nextMode) => {
   selected.value = defaultSelection(models.value)
   phase.value = onceLoadState.value
   if (nextMode === 'questionAnswer' && props.open && props.target) {
+    qaSelectionDataReady = false
     emit('question-answer-viewed', props.target.targetId)
     void loadQuestionAnswerData(props.target.targetId, loadSequence)
   }
@@ -451,6 +545,7 @@ const toggle = (modelId: string) => {
   if (next.has(modelId)) next.delete(modelId)
   else next.add(modelId)
   selected.value = next
+  if (mode.value === 'questionAnswer') emitQuestionAnswerPreferences('models')
 }
 
 const toggleQuestion = (questionId: string) => {
@@ -459,6 +554,21 @@ const toggleQuestion = (questionId: string) => {
   if (next.has(questionId)) next.delete(questionId)
   else next.add(questionId)
   qaSelectedQuestions.value = next
+  emitQuestionAnswerPreferences('questions')
+}
+
+const selectQuestionAnswerReasoningEffort = (value: QuestionAnswerReasoningEffort) => {
+  if (qaSelectionLocked.value || qaReasoningEffort.value === value) return
+  qaReasoningEffort.value = value
+  emitQuestionAnswerPreferences('reasoningEffort')
+}
+
+const selectQuestionAnswerRepeatCount = (event: Event) => {
+  if (qaSelectionLocked.value) return
+  const value = Number((event.target as HTMLSelectElement).value)
+  if (!Number.isInteger(value) || value < 1 || value > 10 || qaRepeatCount.value === value) return
+  qaRepeatCount.value = value
+  emitQuestionAnswerPreferences('repeatCount')
 }
 
 const retryLoad = async () => {
@@ -481,7 +591,10 @@ const retryLoad = async () => {
   onceModels.value = outcome.models
   onceLoadState.value = 'ready'
   models.value = outcome.models
-  selected.value = defaultSelection(outcome.models)
+  if (
+    !restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)
+    && !restoreSavedQuestionAnswerSelection()
+  ) selected.value = defaultSelection(outcome.models)
   phase.value = 'ready'
 }
 
@@ -523,7 +636,8 @@ const loadQuestionAnswerData = async (
     qaReviewBatch.value = qaRuntimeBatch.value
     qaShowAll.value = false
     qaCurrentExpanded.value = new Set()
-    restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)
+    qaSelectionDataReady = true
+    if (!restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)) restoreSavedQuestionAnswerSelection()
     if (batch.active) scheduleQuestionAnswerPoll()
     else clearQuestionAnswerClock()
   } catch (error) {
@@ -1339,12 +1453,12 @@ const close = () => {
                       <legend class="mb-2 text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.reasoningEffort.title`) }}</legend>
                       <div class="grid grid-cols-4 overflow-hidden rounded-lg border border-border/50 bg-surface-line/20 xl:grid-cols-1">
                         <label v-for="option in qaReasoningEffortOptions" :key="option.value" class="flex cursor-pointer items-center justify-center border-r border-border/40 px-2 py-2 text-xs transition-colors last:border-r-0 xl:border-b xl:border-r-0 xl:last:border-b-0" :class="qaReasoningEffort === option.value ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-surface-line/40'">
-                          <input v-model="qaReasoningEffort" class="sr-only" type="radio" name="question-answer-reasoning-effort" :value="option.value" />
+                          <input :checked="qaReasoningEffort === option.value" class="sr-only" type="radio" name="question-answer-reasoning-effort" :value="option.value" @change="selectQuestionAnswerReasoningEffort(option.value)" />
                           {{ t(`${prefix}.questionAnswer.reasoningEffort.options.${option.labelKey}`) }}
                         </label>
                       </div>
                       <label class="mt-3 block text-xs font-semibold text-foreground" for="question-answer-repeat-count">{{ t(`${prefix}.questionAnswer.repeatCount`) }}</label>
-                      <select id="question-answer-repeat-count" v-model.number="qaRepeatCount" class="mt-2 w-full rounded-lg border border-border/50 bg-background px-3 py-2 text-xs text-foreground" :disabled="qaSelectionLocked">
+                      <select id="question-answer-repeat-count" :value="qaRepeatCount" class="mt-2 w-full rounded-lg border border-border/50 bg-background px-3 py-2 text-xs text-foreground" :disabled="qaSelectionLocked" @change="selectQuestionAnswerRepeatCount">
                         <option v-for="option in qaRepeatCountOptions" :key="option" :value="option">{{ option }}</option>
                       </select>
                     </fieldset>

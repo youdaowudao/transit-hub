@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -42,22 +43,23 @@ func (f *fakeQuestionAnswerRepository) ListTestQuestions(context.Context, string
 	defer f.mu.Unlock()
 	result := make([]TestQuestion, 0, len(f.questions))
 	for _, question := range f.questions {
+		question.Keywords = append([]string{}, question.Keywords...)
 		result = append(result, question)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, nil
 }
 
-func (f *fakeQuestionAnswerRepository) CreateTestQuestion(_ context.Context, _ string, name string, body string) (TestQuestion, error) {
+func (f *fakeQuestionAnswerRepository) CreateTestQuestion(_ context.Context, _ string, name string, body string, keywords []string) (TestQuestion, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	now := time.Now()
-	question := TestQuestion{ID: f.id("q"), Name: name, Body: body, Enabled: true, IsDefault: len(f.questions) == 0, CreatedAt: now, UpdatedAt: now}
+	question := TestQuestion{ID: f.id("q"), Name: name, Body: body, Keywords: append([]string{}, keywords...), Enabled: true, IsDefault: len(f.questions) == 0, CreatedAt: now, UpdatedAt: now}
 	f.questions[question.ID] = question
 	return question, nil
 }
 
-func (f *fakeQuestionAnswerRepository) UpdateTestQuestion(_ context.Context, _ string, questionID string, name string, body string) (*TestQuestion, error) {
+func (f *fakeQuestionAnswerRepository) UpdateTestQuestion(_ context.Context, _ string, questionID string, name string, body string, keywords *[]string) (*TestQuestion, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	question, ok := f.questions[questionID]
@@ -65,6 +67,9 @@ func (f *fakeQuestionAnswerRepository) UpdateTestQuestion(_ context.Context, _ s
 		return nil, nil
 	}
 	question.Name, question.Body, question.UpdatedAt = name, body, time.Now()
+	if keywords != nil {
+		question.Keywords = append([]string{}, (*keywords)...)
+	}
 	f.questions[questionID] = question
 	return &question, nil
 }
@@ -135,8 +140,9 @@ func (f *fakeQuestionAnswerRepository) CreateQuestionAnswerBatch(_ context.Conte
 			record := QuestionAnswerRecord{
 				ID: f.id("r"), TargetID: targetID, BatchID: batchID, ModelName: model,
 				QuestionID: question.ID, QuestionName: question.Name, QuestionBody: question.Body,
-				ReasoningEffort: questionAnswerReasoningEffortPointer(reasoningEffort),
-				Status:          QuestionAnswerPending, CreatedAt: now, UpdatedAt: now,
+				QuestionKeywordSnapshot: append([]string{}, question.Keywords...),
+				ReasoningEffort:         questionAnswerReasoningEffortPointer(reasoningEffort),
+				Status:                  QuestionAnswerPending, CreatedAt: now, UpdatedAt: now,
 			}
 			created = append(created, record)
 			f.records = append(f.records, record)
@@ -311,6 +317,118 @@ func newQuestionAnswerService(serverURL string, qaRepo *fakeQuestionAnswerReposi
 	service.questionAnswerTTL = QuestionAnswerRequestTimeout
 	service.initializeQuestionAnswerRuntime()
 	return service
+}
+
+func TestQuestionAnswerKeywordsNormalizeAndRejectCapacity(t *testing.T) {
+	assertError := func(t *testing.T, input []string, want string) {
+		t.Helper()
+		_, err := normalizeTestQuestionKeywords(&input)
+		if err == nil || err.Error() != want {
+			t.Fatalf("normalize error = %v, want %s", err, want)
+		}
+	}
+
+	t.Run("trim ASCII-fold deduplicate and preserve first spelling", func(t *testing.T) {
+		input := []string{"  错误码  ", "Error", "error", "[done]", "Ä", "ä"}
+		got, err := normalizeTestQuestionKeywords(&input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"错误码", "Error", "[done]", "Ä", "ä"}
+		if got == nil || !reflect.DeepEqual(*got, want) {
+			t.Fatalf("keywords = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("missing and explicit empty remain distinct", func(t *testing.T) {
+		got, err := normalizeTestQuestionKeywords(nil)
+		if err != nil || got != nil {
+			t.Fatalf("missing keywords = %#v err=%v, want nil nil", got, err)
+		}
+		empty := []string{}
+		got, err = normalizeTestQuestionKeywords(&empty)
+		if err != nil || got == nil || *got == nil || len(*got) != 0 {
+			t.Fatalf("explicit empty keywords = %#v err=%v, want non-nil empty", got, err)
+		}
+	})
+
+	t.Run("blank item is rejected before deduplication", func(t *testing.T) {
+		assertError(t, []string{"valid", " \t\r\n "}, ErrorTestQuestionKeywordBlank)
+	})
+
+	t.Run("count limit accepts twenty and rejects twenty one", func(t *testing.T) {
+		keywords := make([]string, TestQuestionKeywordCountLimit)
+		for i := range keywords {
+			keywords[i] = fmt.Sprintf("keyword-%02d", i)
+		}
+		if got, err := normalizeTestQuestionKeywords(&keywords); err != nil || got == nil || len(*got) != TestQuestionKeywordCountLimit {
+			t.Fatalf("twenty keywords = %#v err=%v", got, err)
+		}
+		assertError(t, append(keywords, "overflow"), ErrorTestQuestionKeywordCount)
+	})
+
+	t.Run("rune limit accepts sixty four and rejects sixty five", func(t *testing.T) {
+		valid := []string{strings.Repeat("界", TestQuestionKeywordRuneLimit)}
+		if _, err := normalizeTestQuestionKeywords(&valid); err != nil {
+			t.Fatalf("64-rune keyword: %v", err)
+		}
+		assertError(t, []string{strings.Repeat("界", TestQuestionKeywordRuneLimit+1)}, ErrorTestQuestionKeywordLength)
+	})
+
+	t.Run("UTF-8 byte limit accepts 2048 and rejects 2049", func(t *testing.T) {
+		runes := []string{"😀", "😁", "😂", "😃", "😄", "😅", "😆", "😉"}
+		keywords := make([]string, len(runes))
+		for i, value := range runes {
+			keywords[i] = strings.Repeat(value, TestQuestionKeywordRuneLimit)
+		}
+		if got, err := normalizeTestQuestionKeywords(&keywords); err != nil || got == nil || len(*got) != len(keywords) {
+			t.Fatalf("2048-byte keywords = %#v err=%v", got, err)
+		}
+		assertError(t, append(keywords, "x"), ErrorTestQuestionKeywordBytes)
+	})
+}
+
+func TestQuestionAnswerKeywordsPreserveOldClientCreateAndUpdateSemantics(t *testing.T) {
+	repo := newFakeQuestionAnswerRepository(
+		TestQuestion{ID: "existing", Name: "Existing", Body: "Existing body", Keywords: []string{"keep"}, Enabled: true},
+		TestQuestion{ID: "legacy", Name: "Legacy", Body: "Legacy body", Keywords: nil, Enabled: true},
+	)
+	service := &Service{questionAnswers: repo}
+
+	created, err := service.CreateTestQuestion(context.Background(), "user", TestQuestionInput{Name: "Created", Body: "Created body"})
+	if err != nil {
+		t.Fatalf("create without keywords: %v", err)
+	}
+	if created.Keywords == nil || len(created.Keywords) != 0 {
+		t.Fatalf("created keywords = %#v, want non-nil empty", created.Keywords)
+	}
+
+	updated, err := service.UpdateTestQuestion(context.Background(), "user", "existing", TestQuestionInput{Name: "Existing changed", Body: "Existing body changed"})
+	if err != nil {
+		t.Fatalf("update without keywords: %v", err)
+	}
+	if !reflect.DeepEqual(updated.Keywords, []string{"keep"}) {
+		t.Fatalf("missing update keywords = %#v, want preserved", updated.Keywords)
+	}
+
+	empty := []string{}
+	updated, err = service.UpdateTestQuestion(context.Background(), "user", "existing", TestQuestionInput{Name: "Existing cleared", Body: "Existing body cleared", Keywords: &empty})
+	if err != nil {
+		t.Fatalf("explicit keyword clear: %v", err)
+	}
+	if updated.Keywords == nil || len(updated.Keywords) != 0 {
+		t.Fatalf("cleared keywords = %#v, want non-nil empty", updated.Keywords)
+	}
+
+	questions, err := service.ListTestQuestions(context.Background(), "user")
+	if err != nil {
+		t.Fatalf("list questions: %v", err)
+	}
+	for _, question := range questions {
+		if question.Keywords == nil {
+			t.Fatalf("question %s returned null keywords", question.ID)
+		}
+	}
 }
 
 func waitQuestionAnswerBatch(t *testing.T, service *Service, batchID string, wantActive bool) QuestionAnswerBatch {

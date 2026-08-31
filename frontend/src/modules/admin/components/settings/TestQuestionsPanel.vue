@@ -13,6 +13,13 @@ import {
   updateTestQuestion,
 } from '../../api/connectionHealth'
 import type { TestQuestion } from '../../types/connectionHealth'
+import {
+  TEST_QUESTION_KEYWORD_BYTES_LIMIT,
+  TEST_QUESTION_KEYWORD_COUNT_LIMIT,
+  TEST_QUESTION_KEYWORD_RUNE_LIMIT,
+  parseTestQuestionKeywords,
+  testQuestionKeywordBytes,
+} from '../../utils/questionAnswers'
 
 const questions = ref<TestQuestion[]>([])
 const loading = ref(true)
@@ -22,9 +29,24 @@ const errorKey = ref('')
 const editingId = ref('')
 const name = ref('')
 const body = ref('')
+const keywordInput = ref('')
 
 const nameLength = computed(() => Array.from(name.value).length)
 const bodyLength = computed(() => Array.from(body.value).length)
+const parsedKeywords = computed(() => parseTestQuestionKeywords(keywordInput.value))
+const keywordBytes = computed(() => testQuestionKeywordBytes(parsedKeywords.value))
+const keywordValidationErrorKey = computed(() => {
+  if (parsedKeywords.value.some(keyword => Array.from(keyword).length > TEST_QUESTION_KEYWORD_RUNE_LIMIT)) {
+    return 'admin.connectionHealth.errors.testQuestionKeywordLength'
+  }
+  if (parsedKeywords.value.length > TEST_QUESTION_KEYWORD_COUNT_LIMIT) {
+    return 'admin.connectionHealth.errors.testQuestionKeywordCount'
+  }
+  if (keywordBytes.value > TEST_QUESTION_KEYWORD_BYTES_LIMIT) {
+    return 'admin.connectionHealth.errors.testQuestionKeywordBytes'
+  }
+  return ''
+})
 const showValidationError = computed(() => (
   (name.value.length > 0 || body.value.length > 0)
   && (name.value.trim().length === 0 || body.value.trim().length === 0 || nameLength.value > 100 || bodyLength.value > 4000)
@@ -34,6 +56,7 @@ const canSave = computed(() => (
   && body.value.trim().length > 0
   && nameLength.value <= 100
   && bodyLength.value <= 4000
+  && !keywordValidationErrorKey.value
   && !saving.value
 ))
 const errorText = computed(() => errorKey.value.startsWith('admin.') ? t(errorKey.value) : errorKey.value)
@@ -54,12 +77,14 @@ const resetForm = () => {
   editingId.value = ''
   name.value = ''
   body.value = ''
+  keywordInput.value = ''
 }
 
 const edit = (question: TestQuestion) => {
   editingId.value = question.id
   name.value = question.name
   body.value = question.body
+  keywordInput.value = question.keywords.join('\n')
   errorKey.value = ''
 }
 
@@ -68,10 +93,15 @@ const save = async () => {
   saving.value = true
   errorKey.value = ''
   try {
+    const input = {
+      name: name.value.trim(),
+      body: body.value.trim(),
+      keywords: [...parsedKeywords.value],
+    }
     if (editingId.value) {
-      await updateTestQuestion(editingId.value, { name: name.value.trim(), body: body.value.trim() })
+      await updateTestQuestion(editingId.value, input)
     } else {
-      await createTestQuestion({ name: name.value.trim(), body: body.value.trim() })
+      await createTestQuestion(input)
     }
     resetForm()
     await load()
@@ -175,8 +205,28 @@ onMounted(load)
             :placeholder="t('admin.settings.testQuestions.bodyPlaceholder')"
            />
          </div>
+        <div class="grid gap-2">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <label for="test-question-keywords" class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.testQuestions.keywords') }}</label>
+            <div class="flex items-center gap-3 text-xs text-muted-foreground">
+              <span data-testid="test-question-keyword-count">{{ parsedKeywords.length }}/{{ TEST_QUESTION_KEYWORD_COUNT_LIMIT }}</span>
+              <span data-testid="test-question-keyword-bytes">{{ keywordBytes }}/{{ TEST_QUESTION_KEYWORD_BYTES_LIMIT }}</span>
+            </div>
+          </div>
+          <textarea
+            id="test-question-keywords"
+            v-model="keywordInput"
+            rows="3"
+            class="w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-primary"
+            :placeholder="t('admin.settings.testQuestions.keywordsPlaceholder')"
+          />
+          <p class="text-xs text-muted-foreground">{{ t('admin.settings.testQuestions.keywordsHint') }}</p>
+        </div>
         <p v-if="showValidationError" class="text-xs text-destructive">
           {{ t('admin.connectionHealth.errors.testQuestionInvalid') }}
+        </p>
+        <p v-if="keywordValidationErrorKey" class="text-xs text-destructive">
+          {{ t(keywordValidationErrorKey) }}
         </p>
          <div class="flex justify-end">
           <Button :disabled="!canSave" @click="save">
@@ -214,6 +264,10 @@ onMounted(load)
               </span>
             </div>
             <p class="mt-2 line-clamp-3 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{{ question.body }}</p>
+            <p class="mt-2 text-xs leading-5 text-muted-foreground">
+              <span class="font-medium text-foreground">{{ t('admin.settings.testQuestions.keywords') }}：</span>
+              {{ question.keywords.length > 0 ? question.keywords.join('、') : t('admin.settings.testQuestions.noKeywords') }}
+            </p>
           </div>
           <div class="flex shrink-0 items-center gap-1">
             <button

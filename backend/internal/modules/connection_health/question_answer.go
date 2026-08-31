@@ -13,15 +13,22 @@ import (
 )
 
 const (
-	QuestionAnswerPageSize       = 20
-	QuestionAnswerRequestTimeout = 10 * time.Minute
-	questionAnswerConcurrency    = 5
-	TestQuestionNameLimit        = 100
-	TestQuestionBodyLimit        = 4000
+	QuestionAnswerPageSize        = 20
+	QuestionAnswerRequestTimeout  = 10 * time.Minute
+	questionAnswerConcurrency     = 5
+	TestQuestionNameLimit         = 100
+	TestQuestionBodyLimit         = 4000
+	TestQuestionKeywordCountLimit = 20
+	TestQuestionKeywordRuneLimit  = 64
+	TestQuestionKeywordBytesLimit = 2048
 )
 
 const (
 	ErrorTestQuestionInvalid             = "admin.connectionHealth.errors.testQuestionInvalid"
+	ErrorTestQuestionKeywordBlank        = "admin.connectionHealth.errors.testQuestionKeywordBlank"
+	ErrorTestQuestionKeywordCount        = "admin.connectionHealth.errors.testQuestionKeywordCount"
+	ErrorTestQuestionKeywordLength       = "admin.connectionHealth.errors.testQuestionKeywordLength"
+	ErrorTestQuestionKeywordBytes        = "admin.connectionHealth.errors.testQuestionKeywordBytes"
 	ErrorTestQuestionNotFound            = "admin.connectionHealth.errors.testQuestionNotFound"
 	ErrorTestQuestionDisabled            = "admin.connectionHealth.errors.testQuestionDisabled"
 	ErrorQuestionAnswerSelection         = "admin.connectionHealth.errors.questionAnswerSelection"
@@ -79,6 +86,7 @@ type TestQuestion struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
 	Body      string    `json:"body"`
+	Keywords  []string  `json:"keywords"`
 	Enabled   bool      `json:"enabled"`
 	IsDefault bool      `json:"isDefault"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -86,28 +94,30 @@ type TestQuestion struct {
 }
 
 type TestQuestionInput struct {
-	Name string `json:"name"`
-	Body string `json:"body"`
+	Name     string    `json:"name"`
+	Body     string    `json:"body"`
+	Keywords *[]string `json:"keywords"`
 }
 
 type QuestionAnswerRecord struct {
-	ID              string                         `json:"id"`
-	TargetID        string                         `json:"targetId"`
-	BatchID         string                         `json:"batchId"`
-	ModelName       string                         `json:"modelName"`
-	QuestionID      string                         `json:"questionId"`
-	QuestionName    string                         `json:"questionName"`
-	QuestionBody    string                         `json:"questionBody"`
-	ReasoningEffort *QuestionAnswerReasoningEffort `json:"reasoningEffort"`
-	AnswerBody      string                         `json:"answerBody"`
-	Status          QuestionAnswerStatus           `json:"status"`
-	ErrorType       string                         `json:"errorType"`
-	AnswerJudgment  *QuestionAnswerJudgment        `json:"answerJudgment"`
-	ManualError     bool                           `json:"manualError"`
-	CreatedAt       time.Time                      `json:"createdAt"`
-	StartedAt       *time.Time                     `json:"startedAt"`
-	CompletedAt     *time.Time                     `json:"completedAt"`
-	UpdatedAt       time.Time                      `json:"updatedAt"`
+	ID                      string                         `json:"id"`
+	TargetID                string                         `json:"targetId"`
+	BatchID                 string                         `json:"batchId"`
+	ModelName               string                         `json:"modelName"`
+	QuestionID              string                         `json:"questionId"`
+	QuestionName            string                         `json:"questionName"`
+	QuestionBody            string                         `json:"questionBody"`
+	QuestionKeywordSnapshot []string                       `json:"questionKeywordSnapshot"`
+	ReasoningEffort         *QuestionAnswerReasoningEffort `json:"reasoningEffort"`
+	AnswerBody              string                         `json:"answerBody"`
+	Status                  QuestionAnswerStatus           `json:"status"`
+	ErrorType               string                         `json:"errorType"`
+	AnswerJudgment          *QuestionAnswerJudgment        `json:"answerJudgment"`
+	ManualError             bool                           `json:"manualError"`
+	CreatedAt               time.Time                      `json:"createdAt"`
+	StartedAt               *time.Time                     `json:"startedAt"`
+	CompletedAt             *time.Time                     `json:"completedAt"`
+	UpdatedAt               time.Time                      `json:"updatedAt"`
 }
 
 type QuestionAnswerRequestStats struct {
@@ -216,6 +226,9 @@ func (s *Service) ListTestQuestions(ctx context.Context, userID string) ([]TestQ
 	if questions == nil {
 		questions = []TestQuestion{}
 	}
+	for i := range questions {
+		questions[i] = normalizeTestQuestionOutput(questions[i])
+	}
 	return questions, err
 }
 
@@ -224,7 +237,16 @@ func (s *Service) CreateTestQuestion(ctx context.Context, userID string, input T
 	if err != nil {
 		return TestQuestion{}, err
 	}
-	return s.questionAnswers.CreateTestQuestion(ctx, userID, name, body)
+	keywords, err := normalizeTestQuestionKeywords(input.Keywords)
+	if err != nil {
+		return TestQuestion{}, err
+	}
+	if keywords == nil {
+		empty := []string{}
+		keywords = &empty
+	}
+	question, err := s.questionAnswers.CreateTestQuestion(ctx, userID, name, body, *keywords)
+	return normalizeTestQuestionOutput(question), err
 }
 
 func (s *Service) UpdateTestQuestion(ctx context.Context, userID string, questionID string, input TestQuestionInput) (TestQuestion, error) {
@@ -232,14 +254,18 @@ func (s *Service) UpdateTestQuestion(ctx context.Context, userID string, questio
 	if err != nil {
 		return TestQuestion{}, err
 	}
-	question, err := s.questionAnswers.UpdateTestQuestion(ctx, userID, strings.TrimSpace(questionID), name, body)
+	keywords, err := normalizeTestQuestionKeywords(input.Keywords)
+	if err != nil {
+		return TestQuestion{}, err
+	}
+	question, err := s.questionAnswers.UpdateTestQuestion(ctx, userID, strings.TrimSpace(questionID), name, body, keywords)
 	if err != nil {
 		return TestQuestion{}, err
 	}
 	if question == nil {
 		return TestQuestion{}, requestError(ErrorTestQuestionNotFound)
 	}
-	return *question, nil
+	return normalizeTestQuestionOutput(*question), nil
 }
 
 func (s *Service) SetTestQuestionEnabled(ctx context.Context, userID string, questionID string, enabled bool) (TestQuestion, error) {
@@ -250,7 +276,7 @@ func (s *Service) SetTestQuestionEnabled(ctx context.Context, userID string, que
 	if question == nil {
 		return TestQuestion{}, requestError(ErrorTestQuestionNotFound)
 	}
-	return *question, nil
+	return normalizeTestQuestionOutput(*question), nil
 }
 
 func (s *Service) SetDefaultTestQuestion(ctx context.Context, userID string, questionID string) (TestQuestion, error) {
@@ -264,7 +290,7 @@ func (s *Service) SetDefaultTestQuestion(ctx context.Context, userID string, que
 	if question == nil {
 		return TestQuestion{}, requestError(ErrorTestQuestionNotFound)
 	}
-	return *question, nil
+	return normalizeTestQuestionOutput(*question), nil
 }
 
 func (s *Service) DeleteTestQuestion(ctx context.Context, userID string, questionID string) error {
@@ -285,6 +311,60 @@ func validateTestQuestionInput(input TestQuestionInput) (string, string, error) 
 		return "", "", requestError(ErrorTestQuestionInvalid)
 	}
 	return name, body, nil
+}
+
+func normalizeTestQuestionKeywords(input *[]string) (*[]string, error) {
+	if input == nil {
+		return nil, nil
+	}
+
+	normalized := make([]string, 0, len(*input))
+	seen := make(map[string]struct{}, len(*input))
+	totalBytes := 0
+	for _, value := range *input {
+		keyword := strings.TrimSpace(value)
+		if keyword == "" {
+			return nil, requestError(ErrorTestQuestionKeywordBlank)
+		}
+		if utf8.RuneCountInString(keyword) > TestQuestionKeywordRuneLimit {
+			return nil, requestError(ErrorTestQuestionKeywordLength)
+		}
+
+		folded := asciiFoldTestQuestionKeyword(keyword)
+		if _, exists := seen[folded]; exists {
+			continue
+		}
+		seen[folded] = struct{}{}
+		normalized = append(normalized, keyword)
+		totalBytes += len(keyword)
+	}
+
+	if len(normalized) > TestQuestionKeywordCountLimit {
+		return nil, requestError(ErrorTestQuestionKeywordCount)
+	}
+	if totalBytes > TestQuestionKeywordBytesLimit {
+		return nil, requestError(ErrorTestQuestionKeywordBytes)
+	}
+	return &normalized, nil
+}
+
+func asciiFoldTestQuestionKeyword(value string) string {
+	folded := []byte(value)
+	for i, char := range folded {
+		if char >= 'A' && char <= 'Z' {
+			folded[i] = char + ('a' - 'A')
+		}
+	}
+	return string(folded)
+}
+
+func normalizeTestQuestionOutput(question TestQuestion) TestQuestion {
+	if question.Keywords == nil {
+		question.Keywords = []string{}
+		return question
+	}
+	question.Keywords = append([]string{}, question.Keywords...)
+	return question
 }
 
 func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, targetID string, input QuestionAnswerStartInput) (QuestionAnswerBatch, error) {

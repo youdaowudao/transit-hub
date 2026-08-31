@@ -1,4 +1,131 @@
-import type { QuestionAnswerBatch, QuestionAnswerRecord, QuestionAnswerStats } from '../types/connectionHealth'
+import type {
+  QuestionAnswerBatch,
+  QuestionAnswerRecord,
+  QuestionAnswerReviewStats,
+  QuestionAnswerStats,
+} from '../types/connectionHealth'
+
+export const TEST_QUESTION_KEYWORD_COUNT_LIMIT = 20
+export const TEST_QUESTION_KEYWORD_RUNE_LIMIT = 64
+export const TEST_QUESTION_KEYWORD_BYTES_LIMIT = 2048
+
+export interface QuestionAnswerHighlightSegment {
+  text: string
+  highlighted: boolean
+}
+
+const asciiFoldQuestionAnswerText = (value: string): string => {
+  let folded = ''
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    folded += code >= 65 && code <= 90 ? String.fromCharCode(code + 32) : value[index]
+  }
+  return folded
+}
+
+export const parseTestQuestionKeywords = (value: string): string[] => {
+  const keywords: string[] = []
+  const seen = new Set<string>()
+  for (const item of value.split(/[,\r\n]+/u)) {
+    const keyword = item.trim()
+    if (!keyword) continue
+    const folded = asciiFoldQuestionAnswerText(keyword)
+    if (seen.has(folded)) continue
+    seen.add(folded)
+    keywords.push(keyword)
+  }
+  return keywords
+}
+
+export const testQuestionKeywordBytes = (keywords: string[]): number => {
+  const encoder = new TextEncoder()
+  return keywords.reduce((total, keyword) => total + encoder.encode(keyword).byteLength, 0)
+}
+
+export const highlightQuestionAnswer = (
+  answer: string,
+  snapshot: string[],
+): QuestionAnswerHighlightSegment[] => {
+  if (!answer) return []
+
+  const foldedAnswer = asciiFoldQuestionAnswerText(answer)
+  const occupied = new Uint8Array(answer.length)
+  const selected: Array<{ start: number; end: number }> = []
+  const keywords = snapshot
+    .map((keyword, index) => ({ keyword, index, codePointLength: Array.from(keyword).length }))
+    .filter(({ keyword }) => keyword.length > 0)
+    .sort((left, right) => right.codePointLength - left.codePointLength || left.index - right.index)
+
+  for (const { keyword } of keywords) {
+    const foldedKeyword = asciiFoldQuestionAnswerText(keyword)
+    let searchFrom = 0
+    while (searchFrom <= foldedAnswer.length - foldedKeyword.length) {
+      const start = foldedAnswer.indexOf(foldedKeyword, searchFrom)
+      if (start < 0) break
+      const end = start + foldedKeyword.length
+      let overlaps = false
+      for (let index = start; index < end; index += 1) {
+        if (occupied[index]) {
+          overlaps = true
+          break
+        }
+      }
+      if (!overlaps) {
+        occupied.fill(1, start, end)
+        selected.push({ start, end })
+      }
+      searchFrom = start + 1
+    }
+  }
+
+  if (selected.length === 0) return [{ text: answer, highlighted: false }]
+  selected.sort((left, right) => left.start - right.start)
+  const visibleIntervals = selected.slice(0, 3)
+  const segments: QuestionAnswerHighlightSegment[] = []
+  const appendSegment = (text: string, highlighted: boolean) => {
+    if (!text) return
+    const previous = segments[segments.length - 1]
+    if (previous?.highlighted === highlighted) previous.text += text
+    else segments.push({ text, highlighted })
+  }
+  let cursor = 0
+  for (const interval of visibleIntervals) {
+    appendSegment(answer.slice(cursor, interval.start), false)
+    appendSegment(answer.slice(interval.start, interval.end), true)
+    cursor = interval.end
+  }
+  appendSegment(answer.slice(cursor), false)
+  return segments
+}
+
+export const replaceQuestionAnswerRecord = (
+  records: QuestionAnswerRecord[],
+  authoritative: QuestionAnswerRecord,
+): QuestionAnswerRecord[] => {
+  const result = [...records]
+  const index = result.findIndex(record => record.id === authoritative.id)
+  if (index < 0) return result
+  result[index] = {
+    ...authoritative,
+    questionKeywordSnapshot: authoritative.questionKeywordSnapshot === null
+      ? null
+      : [...authoritative.questionKeywordSnapshot],
+  }
+  return result
+}
+
+export const questionAnswerReviewStatsFromRecords = (
+  records: QuestionAnswerRecord[],
+): QuestionAnswerReviewStats => {
+  const stats: QuestionAnswerReviewStats = { unreviewed: 0, correct: 0, incorrect: 0 }
+  for (const record of records) {
+    if (record.status !== 'succeeded') continue
+    if (record.answerJudgment === 'correct') stats.correct += 1
+    else if (record.answerJudgment === 'incorrect') stats.incorrect += 1
+    else stats.unreviewed += 1
+  }
+  return stats
+}
 
 export interface QuestionAnswerHistoryBatchGroup {
   batchId: string

@@ -44,9 +44,12 @@ import {
   isCurrentQuestionAnswerOperation,
   questionAnswerBatchCompletedAt,
   questionAnswerElapsedMilliseconds,
+  questionAnswerReviewStatsFromRecords,
+  replaceQuestionAnswerRecord,
   shortQuestionAnswerBatchId,
   type QuestionAnswerOperationScope,
 } from '../../utils/questionAnswers'
+import QuestionAnswerHighlightedText from './QuestionAnswerHighlightedText.vue'
 import { t, te } from '@/locales'
 
 export interface ManualProbeTargetSummary {
@@ -78,7 +81,8 @@ type Phase = 'loading' | 'ready' | 'testing' | 'error'
 type ProbeMode = 'once' | 'formal' | 'questionAnswer'
 
 const phase = ref<Phase>('loading')
-const mode = ref<ProbeMode>('once')
+const mode = ref<ProbeMode>('questionAnswer')
+const currentProbeMode = (): ProbeMode => mode.value
 const models = ref<ManualProbeModelOption[]>([])
 const onceModels = ref<ManualProbeModelOption[]>([])
 const onceLoadState = ref<'loading' | 'ready' | 'error'>('loading')
@@ -120,7 +124,7 @@ const qaHistory = ref<QuestionAnswerHistory>({
 })
 const qaCurrentExpanded = ref<Set<string>>(new Set())
 const qaExpanded = ref<Set<string>>(new Set())
-const qaMarking = ref<Set<string>>(new Set())
+const qaMarking = ref<Map<string, QuestionAnswerJudgment>>(new Map())
 const qaShowAll = ref(false)
 const qaErrorKey = ref('')
 const qaCompletedNotice = ref(false)
@@ -147,6 +151,7 @@ let qaJudgmentRefreshSequence = 0
 let qaJudgmentSessionSequence = 0
 let qaPollSequence = 0
 let qaRuntimeSnapshotSequence = 0
+let skipInitializedQuestionAnswerModeLoad = false
 
 const cancelActiveRequest = () => {
   activeRequestController?.abort()
@@ -242,12 +247,22 @@ const resetQuestionAnswerViewState = () => {
   qaShowAll.value = false
 }
 
+const resetQuestionAnswerTargetState = () => {
+  resetQuestionAnswerViewState()
+  qaQuestions.value = []
+  qaSelectedQuestions.value = new Set()
+  qaReasoningEffort.value = 'medium'
+  qaMarking.value = new Map()
+  qaErrorKey.value = ''
+  qaCompletedNotice.value = false
+}
+
 const cancelQuestionAnswerJudgments = () => {
   for (const controller of qaJudgmentControllers.values()) controller.abort()
   qaJudgmentControllers.clear()
   qaJudgmentRefreshSequences.clear()
   qaJudgmentSessionSequence++
-  qaMarking.value = new Set()
+  qaMarking.value = new Map()
 }
 
 const cancelQuestionAnswerRequests = () => {
@@ -299,6 +314,7 @@ const qaReadableError = computed(() => qaErrorKey.value.startsWith('admin.')
 watch(
   () => [props.open, props.target?.targetId],
   async ([isOpen]) => {
+    resetQuestionAnswerTargetState()
     if (!isOpen || !props.target) {
       cleanupFrontendWork()
       return
@@ -307,39 +323,19 @@ watch(
     const targetId = props.target.targetId
     const sequence = loadSequence
     const controller = beginModelDiscovery()
-    const formalModels = props.target.formalModels ?? []
-    mode.value = formalModels.length > 0 ? 'formal' : 'once'
-    models.value = formalModels
+    if (mode.value !== 'questionAnswer') skipInitializedQuestionAnswerModeLoad = true
+    mode.value = 'questionAnswer'
+    models.value = []
     onceModels.value = []
     onceLoadState.value = 'loading'
-    selected.value = defaultSelection(formalModels)
+    selected.value = new Set()
     results.value = []
     loadErrorKey.value = ''
     testErrorKey.value = ''
     formalProgress.value = ''
-    qaQuestions.value = []
-    qaSelectedQuestions.value = new Set()
-    qaReasoningEffort.value = 'medium'
-    qaRuntimeBatch.value = null
-    qaReviewBatch.value = null
-    qaHistoryIntentPage = 1
-    qaHistory.value = {
-      records: [], page: 1, pageSize: 20, totalItems: 0, totalPages: 0,
-      stats: {
-        requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
-        reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
-      },
-      todayStats: {
-        requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
-        reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
-      },
-    }
-    qaCurrentExpanded.value = new Set()
-    qaExpanded.value = new Set()
-    qaShowAll.value = false
-    qaErrorKey.value = ''
-    qaCompletedNotice.value = false
-    phase.value = formalModels.length > 0 ? 'ready' : 'loading'
+    phase.value = 'loading'
+    emit('question-answer-viewed', targetId)
+    void loadQuestionAnswerData(targetId, sequence)
 
     const outcome = await discoverModels(targetId, controller.signal)
     finishModelDiscovery(controller)
@@ -347,12 +343,12 @@ watch(
     if ('errorKey' in outcome) {
       loadErrorKey.value = outcome.errorKey
       onceLoadState.value = 'error'
-      if (mode.value !== 'formal') phase.value = 'error'
+      if (currentProbeMode() !== 'formal') phase.value = 'error'
       return
     }
     onceModels.value = outcome.models
     onceLoadState.value = 'ready'
-    if (mode.value === 'formal') return
+    if (currentProbeMode() === 'formal') return
     models.value = onceModels.value
     if (!restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)) selected.value = defaultSelection(outcome.models)
     phase.value = 'ready'
@@ -360,6 +356,10 @@ watch(
 )
 
 watch(mode, (nextMode) => {
+  if (nextMode === 'questionAnswer' && skipInitializedQuestionAnswerModeLoad) {
+    skipInitializedQuestionAnswerModeLoad = false
+    return
+  }
   results.value = []
   testErrorKey.value = ''
   formalProgress.value = ''
@@ -870,6 +870,39 @@ const toggleCurrentQuestionAnswerExpanded = (recordId: string) => {
   qaCurrentExpanded.value = next
 }
 
+const replaceQuestionAnswerBatchRecord = (
+  batch: QuestionAnswerBatch | null,
+  authoritative: QuestionAnswerRecord,
+): QuestionAnswerBatch | null => {
+  if (!batch || !batch.records.some(record => record.id === authoritative.id)) return batch
+  const records = replaceQuestionAnswerRecord(batch.records, authoritative)
+  return {
+    ...batch,
+    records,
+    stats: {
+      ...batch.stats,
+      reviews: questionAnswerReviewStatsFromRecords(records),
+    },
+  }
+}
+
+const applyAuthoritativeQuestionAnswerRecord = (authoritative: QuestionAnswerRecord) => {
+  qaRuntimeBatch.value = replaceQuestionAnswerBatchRecord(qaRuntimeBatch.value, authoritative)
+  qaReviewBatch.value = replaceQuestionAnswerBatchRecord(qaReviewBatch.value, authoritative)
+  if (qaHistory.value.records.some(record => record.id === authoritative.id)) {
+    qaHistory.value = {
+      ...qaHistory.value,
+      records: replaceQuestionAnswerRecord(qaHistory.value.records, authoritative),
+    }
+  }
+}
+
+const clearQuestionAnswerMarking = (recordId: string) => {
+  const marking = new Map(qaMarking.value)
+  marking.delete(recordId)
+  qaMarking.value = marking
+}
+
 const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment: QuestionAnswerJudgment) => {
   if (!props.target || record.status !== 'succeeded' || qaMarking.value.has(record.id)) return
   const targetId = props.target.targetId
@@ -878,10 +911,11 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
   const judgmentSessionSequence = qaJudgmentSessionSequence
   const controller = new AbortController()
   qaJudgmentControllers.set(record.id, controller)
-  const nextMarking = new Set(qaMarking.value)
-  nextMarking.add(record.id)
+  const nextMarking = new Map(qaMarking.value)
+  nextMarking.set(record.id, judgment)
   qaMarking.value = nextMarking
   qaErrorKey.value = ''
+  let judgmentSaved = false
   let pollingPausedForRuntime = false
   let judgmentRefreshSequence: number | null = null
   let historySequence: number | null = null
@@ -901,11 +935,14 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
     }
   }
   try {
-    await setQuestionAnswerJudgment(targetId, record.id, judgment, controller.signal)
+    const authoritative = await setQuestionAnswerJudgment(targetId, record.id, judgment, controller.signal)
     if (
       judgmentSessionSequence !== qaJudgmentSessionSequence
       || !questionAnswerScopeIsCurrent(scope)
     ) return
+    applyAuthoritativeQuestionAnswerRecord(authoritative)
+    judgmentSaved = true
+    clearQuestionAnswerMarking(record.id)
     if (qaRuntimeBatch.value?.batchId === record.batchId) {
       clearQuestionAnswerPolling()
       pollingPausedForRuntime = true
@@ -975,7 +1012,9 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
         || questionAnswerHistoryIntentIsCurrent(historySequence)
       )
     ) {
-      qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+      qaErrorKey.value = judgmentSaved
+        ? `${prefix}.questionAnswer.judgmentRefreshFailed`
+        : (error instanceof Error ? error.message : 'admin.connectionHealth.errors.request')
     }
   } finally {
     if (qaJudgmentControllers.get(record.id) === controller) {
@@ -984,9 +1023,7 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
         judgmentSessionSequence === qaJudgmentSessionSequence
         && questionAnswerScopeIsCurrent(scope)
       ) {
-        const marking = new Set(qaMarking.value)
-        marking.delete(record.id)
-        qaMarking.value = marking
+        clearQuestionAnswerMarking(record.id)
       }
     }
     resumeRuntimePolling()
@@ -1105,10 +1142,10 @@ const close = () => {
       leave-from-class="opacity-100"
       leave-to-class="opacity-0"
     >
-      <div v-if="open && target" class="fixed inset-0 z-[150] flex items-center justify-center p-4">
+      <div v-if="open && target" class="fixed inset-0 z-[150] flex items-center justify-center p-2">
         <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="close" />
 
-        <div role="dialog" aria-modal="true" :aria-label="t(`${prefix}.title`)" class="relative flex h-[min(760px,calc(100dvh-2rem))] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-border/60 bg-card shadow-2xl">
+        <div role="dialog" aria-modal="true" :aria-label="t(`${prefix}.title`)" class="relative flex h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-none flex-col overflow-hidden rounded-2xl border border-border/60 bg-card shadow-2xl">
           <div class="flex shrink-0 items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
             <div class="flex min-w-0 items-center gap-2.5">
               <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -1128,14 +1165,14 @@ const close = () => {
 
           <div class="flex-1 overflow-y-auto px-5 py-4">
             <div class="mb-4 inline-flex max-w-full overflow-x-auto rounded-lg border border-border/60 bg-surface-line/30 p-1">
+              <button type="button" class="whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors" :class="mode === 'questionAnswer' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :disabled="phase === 'testing'" @click="mode = 'questionAnswer'">
+                {{ t(`${prefix}.modes.questionAnswer`) }}
+              </button>
               <button type="button" class="whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors" :class="mode === 'formal' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :disabled="phase === 'testing'" @click="mode = 'formal'">
                 {{ t(`${prefix}.modes.formal`) }}
               </button>
               <button type="button" class="whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors" :class="mode === 'once' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :disabled="phase === 'testing'" @click="mode = 'once'">
                 {{ t(`${prefix}.modes.once`) }}
-              </button>
-              <button type="button" class="whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors" :class="mode === 'questionAnswer' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :disabled="phase === 'testing'" @click="mode = 'questionAnswer'">
-                {{ t(`${prefix}.modes.questionAnswer`) }}
               </button>
             </div>
 
@@ -1210,21 +1247,32 @@ const close = () => {
                   </div>
                 </div>
 
-                <p class="mb-3 text-xs text-muted-foreground">
-                  {{ t(`${prefix}.${mode === 'formal' ? 'formalSelectHint' : 'selectHint'}`) }}
-                </p>
-                <div class="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  <label v-for="model in models" :key="model.id" class="flex cursor-pointer items-start gap-2 rounded-lg border border-border/40 px-3 py-2.5 transition-colors" :class="selected.has(model.id) ? 'border-primary/50 bg-primary/5' : 'hover:bg-surface-line/40'">
-                    <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-border/60" :disabled="phase === 'testing' || (mode === 'questionAnswer' && qaSelectionLocked)" :checked="selected.has(model.id)" @change="toggle(model.id)" />
-                    <div class="min-w-0 flex-1">
-                      <p class="truncate text-sm font-medium text-foreground">{{ model.name }}</p>
-                      <p v-if="model.ownedBy" class="truncate text-xs text-muted-foreground">{{ model.ownedBy }}</p>
-                    </div>
-                  </label>
-                </div>
-
                 <template v-if="mode === 'questionAnswer'">
-                  <div class="mt-5 border-t border-border/40 pt-4">
+                  <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
+                    <div data-testid="question-answer-models">
+                      <p class="mb-3 text-xs text-muted-foreground">{{ t(`${prefix}.selectHint`) }}</p>
+                      <div class="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                        <label v-for="model in models" :key="model.id" class="flex cursor-pointer items-start gap-2 rounded-lg border border-border/40 px-3 py-2.5 transition-colors" :class="selected.has(model.id) ? 'border-primary/50 bg-primary/5' : 'hover:bg-surface-line/40'">
+                          <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-border/60" :disabled="phase === 'testing' || qaSelectionLocked" :checked="selected.has(model.id)" @change="toggle(model.id)" />
+                          <div class="min-w-0 flex-1">
+                            <p class="truncate text-sm font-medium text-foreground">{{ model.name }}</p>
+                            <p v-if="model.ownedBy" class="truncate text-xs text-muted-foreground">{{ model.ownedBy }}</p>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+                    <fieldset data-testid="question-answer-reasoning" :disabled="qaSelectionLocked">
+                      <legend class="mb-2 text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.reasoningEffort.title`) }}</legend>
+                      <div class="grid grid-cols-4 overflow-hidden rounded-lg border border-border/50 bg-surface-line/20 xl:grid-cols-1">
+                        <label v-for="option in qaReasoningEffortOptions" :key="option.value" class="flex cursor-pointer items-center justify-center border-r border-border/40 px-2 py-2 text-xs transition-colors last:border-r-0 xl:border-b xl:border-r-0 xl:last:border-b-0" :class="qaReasoningEffort === option.value ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-surface-line/40'">
+                          <input v-model="qaReasoningEffort" class="sr-only" type="radio" name="question-answer-reasoning-effort" :value="option.value" />
+                          {{ t(`${prefix}.questionAnswer.reasoningEffort.options.${option.labelKey}`) }}
+                        </label>
+                      </div>
+                    </fieldset>
+                  </div>
+
+                  <div data-testid="question-answer-questions" class="mt-5 border-t border-border/40 pt-4">
                     <div class="mb-3 flex items-center justify-between gap-3">
                       <h4 class="text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.questionsTitle`) }}</h4>
                       <span class="text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.selectedFormula`, { models: selected.size, questions: qaSelectedQuestions.size, total: qaRequestCount }) }}</span>
@@ -1249,16 +1297,6 @@ const close = () => {
                       </label>
                     </div>
                   </div>
-
-                  <fieldset class="mt-5 border-t border-border/40 pt-4" :disabled="qaSelectionLocked">
-                    <legend class="mb-2 text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.reasoningEffort.title`) }}</legend>
-                    <div class="grid grid-cols-4 overflow-hidden rounded-lg border border-border/50 bg-surface-line/20">
-                      <label v-for="option in qaReasoningEffortOptions" :key="option.value" class="flex cursor-pointer items-center justify-center border-r border-border/40 px-2 py-2 text-xs transition-colors last:border-r-0" :class="qaReasoningEffort === option.value ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-surface-line/40'">
-                        <input v-model="qaReasoningEffort" class="sr-only" type="radio" name="question-answer-reasoning-effort" :value="option.value" />
-                        {{ t(`${prefix}.questionAnswer.reasoningEffort.options.${option.labelKey}`) }}
-                      </label>
-                    </div>
-                  </fieldset>
 
                   <p v-if="qaErrorKey" class="mt-4 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">{{ qaReadableError }}</p>
                   <p v-if="qaCompletedNotice" class="mt-4 rounded-lg bg-green-500/10 px-3 py-2 text-xs text-green-600 dark:text-green-400">{{ t(`${prefix}.questionAnswer.completedNotice`) }}</p>
@@ -1303,50 +1341,90 @@ const close = () => {
                     <div v-if="!qaReviewBatch" class="rounded-lg border border-dashed border-border/50 px-3 py-5 text-center text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.noBatch`) }}</div>
                     <div v-else>
                       <ul class="grid items-stretch gap-3" :class="currentBatchGridClass">
-                        <li v-for="record in qaCurrentRecords" :key="record.id" class="flex min-h-56 flex-col rounded-lg border p-3" :class="questionAnswerRecordClass(record)">
-                          <div class="flex items-start justify-between gap-3">
-                            <div class="flex min-w-0 items-start gap-2">
-                              <Loader2 v-if="record.status === 'pending' || record.status === 'running'" class="mt-0.5 h-5 w-5 shrink-0 animate-spin text-primary" />
-                              <CheckCircle2 v-else-if="record.answerJudgment === 'correct'" class="mt-0.5 h-5 w-5 shrink-0 text-green-600 dark:text-green-400" />
-                              <XCircle v-else-if="record.status === 'failed' || record.answerJudgment === 'incorrect'" class="mt-0.5 h-5 w-5 shrink-0 text-red-600 dark:text-red-400" />
-                              <AlertTriangle v-else-if="record.answerJudgment === 'unreviewed'" class="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
-                              <StopCircle v-else-if="record.status === 'cancelled'" class="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
-                              <div class="min-w-0">
-                                <p class="truncate text-sm font-semibold text-foreground">{{ record.questionName }}</p>
-                                <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ record.modelName }}</p>
+                        <li
+                          v-for="record in qaCurrentRecords"
+                          :key="record.id"
+                          class="grid min-h-56 gap-6 rounded-lg border p-3"
+                          :class="[
+                            questionAnswerRecordClass(record),
+                            record.status === 'succeeded'
+                              ? 'md:grid-cols-[minmax(0,1fr)_12rem] md:grid-rows-2'
+                              : 'md:grid-cols-1',
+                          ]"
+                        >
+                          <button
+                            v-if="record.status === 'succeeded'"
+                            type="button"
+                            class="inline-flex min-h-14 items-center justify-center gap-2 rounded-md border border-green-500/40 px-4 py-3 text-sm font-medium text-green-700 disabled:opacity-50 dark:text-green-400 md:col-start-2 md:row-start-1"
+                            :class="qaMarking.has(record.id)
+                              ? (qaMarking.get(record.id) === 'correct' ? 'bg-green-500/20' : 'hover:bg-green-500/10')
+                              : (record.answerJudgment === 'correct' ? 'bg-green-500/20' : 'hover:bg-green-500/10')"
+                            :aria-pressed="record.answerJudgment === 'correct'"
+                            :disabled="qaMarking.has(record.id)"
+                            @click="saveQuestionAnswerJudgment(record, 'correct')"
+                          >
+                            <Loader2 v-if="qaMarking.get(record.id) === 'correct'" class="h-4 w-4 animate-spin" />
+                            {{ t(`${prefix}.questionAnswer.correct`) }}<span v-if="qaMarking.get(record.id) === 'correct'"> · {{ t(`${prefix}.questionAnswer.saving`) }}</span>
+                          </button>
+
+                          <div class="min-w-0" :class="record.status === 'succeeded' ? 'md:col-start-1 md:row-span-2 md:row-start-1' : ''">
+                            <div class="flex items-start justify-between gap-3">
+                              <div class="flex min-w-0 items-start gap-2">
+                                <Loader2 v-if="record.status === 'pending' || record.status === 'running'" class="mt-0.5 h-5 w-5 shrink-0 animate-spin text-primary" />
+                                <CheckCircle2 v-else-if="record.answerJudgment === 'correct'" class="mt-0.5 h-5 w-5 shrink-0 text-green-600 dark:text-green-400" />
+                                <XCircle v-else-if="record.status === 'failed' || record.answerJudgment === 'incorrect'" class="mt-0.5 h-5 w-5 shrink-0 text-red-600 dark:text-red-400" />
+                                <AlertTriangle v-else-if="record.answerJudgment === 'unreviewed'" class="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
+                                <StopCircle v-else-if="record.status === 'cancelled'" class="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
+                                <div class="min-w-0">
+                                  <p class="truncate text-sm font-semibold text-foreground">{{ record.questionName }}</p>
+                                  <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ record.modelName }}</p>
+                                </div>
+                              </div>
+                              <div class="shrink-0 text-right text-xs text-muted-foreground">
+                                <p>{{ questionAnswerStatusLabel(record) }}</p>
+                                <p v-if="questionAnswerElapsedLabel(record)" class="mt-0.5">{{ questionAnswerElapsedLabel(record) }}</p>
                               </div>
                             </div>
-                            <div class="shrink-0 text-right text-xs text-muted-foreground">
-                              <p>{{ questionAnswerStatusLabel(record) }}</p>
-                              <p v-if="questionAnswerElapsedLabel(record)" class="mt-0.5">{{ questionAnswerElapsedLabel(record) }}</p>
-                            </div>
-                          </div>
 
-                          <div class="mt-3 flex-1 space-y-3 border-t border-border/40 pt-3">
-                            <div>
-                              <p class="text-[11px] font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.questionLabel`) }}</p>
-                              <p class="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-foreground" :class="qaReviewBatch.active || qaShowAll ? (qaCurrentExpanded.has(record.id) ? '' : 'line-clamp-2') : ''">{{ record.questionBody }}</p>
+                            <div class="mt-3 space-y-3 border-t border-border/40 pt-3">
+                              <div>
+                                <p class="text-[11px] font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.questionLabel`) }}</p>
+                                <p class="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-foreground" :class="qaReviewBatch.active || qaShowAll ? (qaCurrentExpanded.has(record.id) ? '' : 'line-clamp-2') : ''">{{ record.questionBody }}</p>
+                              </div>
+                              <div>
+                                <p class="text-[11px] font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.answerLabel`) }}</p>
+                                <QuestionAnswerHighlightedText
+                                  v-if="record.status === 'succeeded' && record.answerJudgment === 'unreviewed' && record.questionKeywordSnapshot !== null && record.questionKeywordSnapshot.length > 0"
+                                  class="mt-1"
+                                  :class="qaReviewBatch.active || qaShowAll ? (qaCurrentExpanded.has(record.id) ? '' : 'line-clamp-4') : ''"
+                                  :answer="questionAnswerCurrentAnswer(record)"
+                                  :snapshot="record.questionKeywordSnapshot"
+                                />
+                                <p v-else class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground" :class="qaReviewBatch.active || qaShowAll ? (qaCurrentExpanded.has(record.id) ? '' : 'line-clamp-4') : ''">{{ questionAnswerCurrentAnswer(record) }}</p>
+                                <p v-if="record.status === 'succeeded' && record.questionKeywordSnapshot === null" class="mt-1 text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.noKeywordSnapshot`) }}</p>
+                              </div>
                             </div>
-                            <div>
-                              <p class="text-[11px] font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.answerLabel`) }}</p>
-                              <p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground" :class="qaReviewBatch.active || qaShowAll ? (qaCurrentExpanded.has(record.id) ? '' : 'line-clamp-4') : ''">{{ questionAnswerCurrentAnswer(record) }}</p>
-                            </div>
-                          </div>
 
-                          <div v-if="record.status === 'succeeded'" class="mt-3 flex flex-wrap items-center justify-end gap-2 border-t border-border/40 pt-3">
-                            <button type="button" class="rounded-md border border-green-500/40 px-3 py-1.5 text-xs font-medium text-green-700 disabled:opacity-50 dark:text-green-400" :class="record.answerJudgment === 'correct' ? 'bg-green-500/20' : 'hover:bg-green-500/10'" :aria-pressed="record.answerJudgment === 'correct'" :disabled="qaMarking.has(record.id)" @click="saveQuestionAnswerJudgment(record, 'correct')">
-                              {{ t(`${prefix}.questionAnswer.correct`) }}
+                            <button v-if="qaReviewBatch.active || qaShowAll" type="button" class="mt-3 inline-flex items-center justify-end gap-1 text-xs font-medium text-muted-foreground hover:text-foreground" @click="toggleCurrentQuestionAnswerExpanded(record.id)">
+                              {{ qaCurrentExpanded.has(record.id) ? t(`${prefix}.questionAnswer.collapseCurrent`) : t(`${prefix}.questionAnswer.expandCurrent`) }}
+                              <ChevronUp v-if="qaCurrentExpanded.has(record.id)" class="h-3.5 w-3.5" />
+                              <ChevronDown v-else class="h-3.5 w-3.5" />
                             </button>
-                            <button type="button" class="rounded-md border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-700 disabled:opacity-50 dark:text-red-400" :class="record.answerJudgment === 'incorrect' ? 'bg-red-500/20' : 'hover:bg-red-500/10'" :aria-pressed="record.answerJudgment === 'incorrect'" :disabled="qaMarking.has(record.id)" @click="saveQuestionAnswerJudgment(record, 'incorrect')">
-                              {{ t(`${prefix}.questionAnswer.incorrect`) }}
-                            </button>
-                            <Loader2 v-if="qaMarking.has(record.id)" class="h-4 w-4 animate-spin text-muted-foreground" />
                           </div>
 
-                          <button v-if="qaReviewBatch.active || qaShowAll" type="button" class="mt-3 inline-flex items-center justify-end gap-1 self-end text-xs font-medium text-muted-foreground hover:text-foreground" @click="toggleCurrentQuestionAnswerExpanded(record.id)">
-                            {{ qaCurrentExpanded.has(record.id) ? t(`${prefix}.questionAnswer.collapseCurrent`) : t(`${prefix}.questionAnswer.expandCurrent`) }}
-                            <ChevronUp v-if="qaCurrentExpanded.has(record.id)" class="h-3.5 w-3.5" />
-                            <ChevronDown v-else class="h-3.5 w-3.5" />
+                          <button
+                            v-if="record.status === 'succeeded'"
+                            type="button"
+                            class="inline-flex min-h-14 items-center justify-center gap-2 rounded-md border border-red-500/40 px-4 py-3 text-sm font-medium text-red-700 disabled:opacity-50 dark:text-red-400 md:col-start-2 md:row-start-2"
+                            :class="qaMarking.has(record.id)
+                              ? (qaMarking.get(record.id) === 'incorrect' ? 'bg-red-500/20' : 'hover:bg-red-500/10')
+                              : (record.answerJudgment === 'incorrect' ? 'bg-red-500/20' : 'hover:bg-red-500/10')"
+                            :aria-pressed="record.answerJudgment === 'incorrect'"
+                            :disabled="qaMarking.has(record.id)"
+                            @click="saveQuestionAnswerJudgment(record, 'incorrect')"
+                          >
+                            <Loader2 v-if="qaMarking.get(record.id) === 'incorrect'" class="h-4 w-4 animate-spin" />
+                            {{ t(`${prefix}.questionAnswer.incorrect`) }}<span v-if="qaMarking.get(record.id) === 'incorrect'"> · {{ t(`${prefix}.questionAnswer.saving`) }}</span>
                           </button>
                         </li>
                       </ul>
@@ -1381,11 +1459,35 @@ const close = () => {
                                 </div>
                                 <p v-if="!qaExpanded.has(record.id)" class="mt-2 truncate text-xs text-muted-foreground">{{ answerSummary(record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(`${prefix}.questionAnswer.noAnswer`))) }}</p>
                               </button>
-                              <div class="flex shrink-0 items-center gap-1.5">
-                                <template v-if="record.status === 'succeeded'">
-                                  <button type="button" class="rounded-md border border-green-500/40 px-2.5 py-1.5 text-xs text-green-700 disabled:opacity-50 dark:text-green-400" :class="record.answerJudgment === 'correct' ? 'bg-green-500/20' : 'hover:bg-green-500/10'" :aria-pressed="record.answerJudgment === 'correct'" :disabled="qaMarking.has(record.id)" @click="saveQuestionAnswerJudgment(record, 'correct')">{{ t(`${prefix}.questionAnswer.correct`) }}</button>
-                                  <button type="button" class="rounded-md border border-red-500/40 px-2.5 py-1.5 text-xs text-red-700 disabled:opacity-50 dark:text-red-400" :class="record.answerJudgment === 'incorrect' ? 'bg-red-500/20' : 'hover:bg-red-500/10'" :aria-pressed="record.answerJudgment === 'incorrect'" :disabled="qaMarking.has(record.id)" @click="saveQuestionAnswerJudgment(record, 'incorrect')">{{ t(`${prefix}.questionAnswer.incorrect`) }}</button>
-                                </template>
+                              <div class="flex shrink-0 items-center gap-3">
+                                <div v-if="record.status === 'succeeded'" class="grid gap-6">
+                                  <button
+                                    type="button"
+                                    class="inline-flex min-h-14 items-center justify-center gap-2 rounded-md border border-green-500/40 px-3 py-2 text-xs text-green-700 disabled:opacity-50 dark:text-green-400"
+                                    :class="qaMarking.has(record.id)
+                                      ? (qaMarking.get(record.id) === 'correct' ? 'bg-green-500/20' : 'hover:bg-green-500/10')
+                                      : (record.answerJudgment === 'correct' ? 'bg-green-500/20' : 'hover:bg-green-500/10')"
+                                    :aria-pressed="record.answerJudgment === 'correct'"
+                                    :disabled="qaMarking.has(record.id)"
+                                    @click="saveQuestionAnswerJudgment(record, 'correct')"
+                                  >
+                                    <Loader2 v-if="qaMarking.get(record.id) === 'correct'" class="h-4 w-4 animate-spin" />
+                                    {{ t(`${prefix}.questionAnswer.correct`) }}<span v-if="qaMarking.get(record.id) === 'correct'"> · {{ t(`${prefix}.questionAnswer.saving`) }}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    class="inline-flex min-h-14 items-center justify-center gap-2 rounded-md border border-red-500/40 px-3 py-2 text-xs text-red-700 disabled:opacity-50 dark:text-red-400"
+                                    :class="qaMarking.has(record.id)
+                                      ? (qaMarking.get(record.id) === 'incorrect' ? 'bg-red-500/20' : 'hover:bg-red-500/10')
+                                      : (record.answerJudgment === 'incorrect' ? 'bg-red-500/20' : 'hover:bg-red-500/10')"
+                                    :aria-pressed="record.answerJudgment === 'incorrect'"
+                                    :disabled="qaMarking.has(record.id)"
+                                    @click="saveQuestionAnswerJudgment(record, 'incorrect')"
+                                  >
+                                    <Loader2 v-if="qaMarking.get(record.id) === 'incorrect'" class="h-4 w-4 animate-spin" />
+                                    {{ t(`${prefix}.questionAnswer.incorrect`) }}<span v-if="qaMarking.get(record.id) === 'incorrect'"> · {{ t(`${prefix}.questionAnswer.saving`) }}</span>
+                                  </button>
+                                </div>
                                 <XCircle v-else-if="record.status === 'failed'" class="h-6 w-6 text-red-600 dark:text-red-400" />
                                 <StopCircle v-else-if="record.status === 'cancelled'" class="h-6 w-6 text-muted-foreground" />
                                 <Loader2 v-else-if="record.status === 'pending' || record.status === 'running'" class="h-6 w-6 animate-spin text-primary" />
@@ -1413,6 +1515,18 @@ const close = () => {
                 </template>
 
                 <template v-else>
+                  <p class="mb-3 text-xs text-muted-foreground">
+                    {{ t(`${prefix}.${mode === 'formal' ? 'formalSelectHint' : 'selectHint'}`) }}
+                  </p>
+                  <div class="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                    <label v-for="model in models" :key="model.id" class="flex cursor-pointer items-start gap-2 rounded-lg border border-border/40 px-3 py-2.5 transition-colors" :class="selected.has(model.id) ? 'border-primary/50 bg-primary/5' : 'hover:bg-surface-line/40'">
+                      <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-border/60" :disabled="phase === 'testing'" :checked="selected.has(model.id)" @change="toggle(model.id)" />
+                      <div class="min-w-0 flex-1">
+                        <p class="truncate text-sm font-medium text-foreground">{{ model.name }}</p>
+                        <p v-if="model.ownedBy" class="truncate text-xs text-muted-foreground">{{ model.ownedBy }}</p>
+                      </div>
+                    </label>
+                  </div>
                   <p v-if="testErrorKey" class="mt-4 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">{{ readableMessage(testErrorKey) }}</p>
                   <p v-if="mode === 'formal' && phase === 'testing' && formalProgress" class="mt-4 flex items-center gap-2 rounded-lg bg-primary/5 px-3 py-2 text-xs text-primary">
                     <Loader2 v-if="formalProgress !== 'direct'" class="h-3.5 w-3.5 animate-spin" />

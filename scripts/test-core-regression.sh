@@ -46,6 +46,7 @@ run_connection_health_gate() {
     node --test \
       "$ROOT_DIR/scripts/question-answer-review-fixture.test.mjs" \
       "$ROOT_DIR/scripts/question-answer-batch-review-fixture.test.mjs" \
+      "$ROOT_DIR/scripts/question-answer-keyword-highlight-fixture.test.mjs" \
       "$ROOT_DIR/scripts/test-core-regression-membership.test.mjs"
 
   run_step "backend connection_health and upstream tests" \
@@ -57,8 +58,11 @@ run_connection_health_gate() {
   run_step "backend question answer race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/connection_health -run 'Test.*QuestionAnswer' -count=1"
 
+  run_step "backend question answer keyword tests" \
+    bash -c "cd '$ROOT_DIR/backend' && go test ./internal/modules/connection_health -run 'Test.*QuestionAnswerKeyword' -count=1"
+
   run_step "frontend connection health regression tests" \
-    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- connection-health-async-priority.test.ts connection-health-main-site-error.test.ts connection-health-main-site-error.behavior.test.ts connection-health-multiplier-resolution.test.ts connection-health-production-rank.test.ts connection-health-question-answer.test.ts connection-health-question-answer.behavior.test.ts connection-health-refresh-coordinator.test.ts connection-health-refresh-flow.test.ts use-connection-health-race.test.ts"
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- connection-health-async-priority.test.ts connection-health-main-site-error.test.ts connection-health-main-site-error.behavior.test.ts connection-health-multiplier-resolution.test.ts connection-health-production-rank.test.ts connection-health-question-answer.test.ts connection-health-question-answer.behavior.test.ts connection-health-question-keywords.behavior.test.ts connection-health-refresh-coordinator.test.ts connection-health-refresh-flow.test.ts use-connection-health-race.test.ts"
 
   run_step "frontend typecheck" \
     bash -c "cd '$ROOT_DIR/frontend' && npm run typecheck"

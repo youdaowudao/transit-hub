@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,6 +30,8 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	for _, migrationPath := range []string{
 		"../../database/migrations/000025_connection_health_question_answers.sql",
 		"../../database/migrations/000026_connection_health_question_answer_reasoning_effort.sql",
+		"../../database/migrations/000027_connection_health_question_answer_judgment.sql",
+		"../../database/migrations/000028_connection_health_question_keywords.sql",
 	} {
 		migrationSQL, err := os.ReadFile(migrationPath)
 		if err != nil {
@@ -41,15 +45,15 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 		t.Fatalf("EnsureSchema second run: %v", err)
 	}
 
-	q1, err := repository.CreateTestQuestion(ctx, "user-1", "Question 1", "original body")
+	q1, err := repository.CreateTestQuestion(ctx, "user-1", "Question 1", "original body", []string{})
 	if err != nil || !q1.IsDefault || !q1.Enabled {
 		t.Fatalf("first question = %+v err=%v", q1, err)
 	}
-	q2, err := repository.CreateTestQuestion(ctx, "user-1", "Question 2", "second body")
+	q2, err := repository.CreateTestQuestion(ctx, "user-1", "Question 2", "second body", []string{})
 	if err != nil || q2.IsDefault {
 		t.Fatalf("second question = %+v err=%v", q2, err)
 	}
-	if _, err := repository.CreateTestQuestion(ctx, "user-2", "Other user", "private body"); err != nil {
+	if _, err := repository.CreateTestQuestion(ctx, "user-2", "Other user", "private body", []string{}); err != nil {
 		t.Fatalf("create other user question: %v", err)
 	}
 	user1Questions, err := repository.ListTestQuestions(ctx, "user-1")
@@ -89,7 +93,7 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	if completed, err := repository.CompleteQuestionAnswer(ctx, "user-1", batchID, records[0].ID, QuestionAnswerSucceeded, "saved answer", ""); err != nil || !completed {
 		t.Fatalf("complete succeeded=%v err=%v", completed, err)
 	}
-	if _, err := repository.UpdateTestQuestion(ctx, "user-1", q1.ID, "Question 1 changed", "changed body"); err != nil {
+	if _, err := repository.UpdateTestQuestion(ctx, "user-1", q1.ID, "Question 1 changed", "changed body", nil); err != nil {
 		t.Fatalf("edit question: %v", err)
 	}
 	if deleted, err := repository.DeleteTestQuestion(ctx, "user-1", q1.ID); err != nil || !deleted {
@@ -224,6 +228,166 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	}
 }
 
+func TestQuestionAnswerKeywordSnapshotPersistsWithNilAndEmptyDistinction(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	repository := NewRepository(pool)
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO connection_health_test_questions (id, user_id, name, body)
+		VALUES ('legacy-keyword-question', 'keyword-user', 'Legacy question', 'Legacy body')
+	`); err != nil {
+		t.Fatalf("insert legacy question: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO connection_health_question_answer_records (
+			id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body,
+			reasoning_effort, answer_body, status, answer_judgment
+		) VALUES (
+			'legacy-keyword-record', 'keyword-user', 'legacy-keyword-target', 'legacy-keyword-batch',
+			'model-legacy', 'legacy-keyword-question', 'Legacy question', 'Legacy body',
+			'medium', 'legacy answer', 'succeeded', 'unreviewed'
+		)
+	`); err != nil {
+		t.Fatalf("insert legacy record: %v", err)
+	}
+
+	questions, err := repository.ListTestQuestions(ctx, "keyword-user")
+	if err != nil || len(questions) != 1 || questions[0].Keywords == nil || len(questions[0].Keywords) != 0 {
+		t.Fatalf("legacy question keywords=%+v err=%v, want non-nil empty", questions, err)
+	}
+	legacyRecords, err := repository.ListQuestionAnswerBatch(ctx, "keyword-user", "legacy-keyword-target", "legacy-keyword-batch")
+	if err != nil || len(legacyRecords) != 1 || legacyRecords[0].QuestionKeywordSnapshot != nil {
+		t.Fatalf("legacy snapshot=%+v err=%v, want nil", legacyRecords, err)
+	}
+
+	emptyQuestion, err := repository.CreateTestQuestion(ctx, "keyword-user", "Empty keywords", "Empty body", []string{})
+	if err != nil || emptyQuestion.Keywords == nil || len(emptyQuestion.Keywords) != 0 {
+		t.Fatalf("empty question=%+v err=%v", emptyQuestion, err)
+	}
+	emptyRecords, err := repository.CreateQuestionAnswerBatch(
+		ctx, "keyword-user", "empty-keyword-target", "empty-keyword-batch",
+		[]string{"model-empty"}, []string{emptyQuestion.ID}, QuestionAnswerReasoningEffortMedium,
+	)
+	if err != nil || len(emptyRecords) != 1 || emptyRecords[0].QuestionKeywordSnapshot == nil || len(emptyRecords[0].QuestionKeywordSnapshot) != 0 {
+		t.Fatalf("empty snapshot=%+v err=%v, want non-nil empty", emptyRecords, err)
+	}
+
+	wantSnapshot := []string{"Error", "错误码"}
+	configuredQuestion, err := repository.CreateTestQuestion(ctx, "keyword-user", "Configured keywords", "Configured body", wantSnapshot)
+	if err != nil || !reflect.DeepEqual(configuredQuestion.Keywords, wantSnapshot) {
+		t.Fatalf("configured question=%+v err=%v", configuredQuestion, err)
+	}
+	configuredRecords, err := repository.CreateQuestionAnswerBatch(
+		ctx, "keyword-user", "configured-keyword-target", "configured-keyword-batch",
+		[]string{"model-a", "model-b"}, []string{configuredQuestion.ID}, QuestionAnswerReasoningEffortHigh,
+	)
+	if err != nil || len(configuredRecords) != 2 {
+		t.Fatalf("configured records=%+v err=%v", configuredRecords, err)
+	}
+	for _, record := range configuredRecords {
+		if !reflect.DeepEqual(record.QuestionKeywordSnapshot, wantSnapshot) {
+			t.Fatalf("record %s snapshot=%#v, want %#v", record.ID, record.QuestionKeywordSnapshot, wantSnapshot)
+		}
+	}
+	configuredRecords[0].QuestionKeywordSnapshot[0] = "mutated caller copy"
+	if !reflect.DeepEqual(configuredRecords[1].QuestionKeywordSnapshot, wantSnapshot) {
+		t.Fatalf("record snapshots share a mutable slice: %#v", configuredRecords[1].QuestionKeywordSnapshot)
+	}
+
+	newKeywords := []string{"new"}
+	updated, err := repository.UpdateTestQuestion(
+		ctx, "keyword-user", configuredQuestion.ID, "Configured keywords changed", "Configured body changed", &newKeywords,
+	)
+	if err != nil || updated == nil || !reflect.DeepEqual(updated.Keywords, newKeywords) {
+		t.Fatalf("updated question=%+v err=%v", updated, err)
+	}
+	persistedRecords, err := repository.ListQuestionAnswerBatch(ctx, "keyword-user", "configured-keyword-target", "configured-keyword-batch")
+	if err != nil || len(persistedRecords) != 2 {
+		t.Fatalf("read configured batch=%+v err=%v", persistedRecords, err)
+	}
+	for _, record := range persistedRecords {
+		if !reflect.DeepEqual(record.QuestionKeywordSnapshot, wantSnapshot) {
+			t.Fatalf("snapshot changed with question: %#v, want %#v", record.QuestionKeywordSnapshot, wantSnapshot)
+		}
+	}
+
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema second run: %v", err)
+	}
+	questions, err = repository.ListTestQuestions(ctx, "keyword-user")
+	if err != nil {
+		t.Fatalf("list after second EnsureSchema: %v", err)
+	}
+	var configuredAfterEnsure *TestQuestion
+	for i := range questions {
+		if questions[i].ID == configuredQuestion.ID {
+			configuredAfterEnsure = &questions[i]
+			break
+		}
+	}
+	if configuredAfterEnsure == nil || !reflect.DeepEqual(configuredAfterEnsure.Keywords, newKeywords) {
+		t.Fatalf("EnsureSchema changed current keywords: %+v", configuredAfterEnsure)
+	}
+	persistedRecords, err = repository.ListQuestionAnswerBatch(ctx, "keyword-user", "configured-keyword-target", "configured-keyword-batch")
+	if err != nil || len(persistedRecords) != 2 || !reflect.DeepEqual(persistedRecords[0].QuestionKeywordSnapshot, wantSnapshot) {
+		t.Fatalf("EnsureSchema changed historical snapshot=%+v err=%v", persistedRecords, err)
+	}
+
+	foreignUpdate := []string{"foreign"}
+	foreignQuestion, err := repository.UpdateTestQuestion(
+		ctx, "other-keyword-user", configuredQuestion.ID, "Foreign", "Foreign body", &foreignUpdate,
+	)
+	if err != nil || foreignQuestion != nil {
+		t.Fatalf("cross-user update=%+v err=%v, want nil", foreignQuestion, err)
+	}
+	foreignRecords, err := repository.ListQuestionAnswerBatch(ctx, "other-keyword-user", "configured-keyword-target", "configured-keyword-batch")
+	if err != nil || len(foreignRecords) != 0 {
+		t.Fatalf("cross-user records=%+v err=%v", foreignRecords, err)
+	}
+}
+
+func TestQuestionAnswerKeywordMigrationBeforeEnsureSchemaIsIdempotent(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	for _, migrationPath := range []string{
+		"../../database/migrations/000025_connection_health_question_answers.sql",
+		"../../database/migrations/000026_connection_health_question_answer_reasoning_effort.sql",
+		"../../database/migrations/000027_connection_health_question_answer_judgment.sql",
+		"../../database/migrations/000028_connection_health_question_keywords.sql",
+	} {
+		applyQuestionAnswerMigrationForTest(t, ctx, pool, migrationPath)
+	}
+	repository := NewRepository(pool)
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema after migrations: %v", err)
+	}
+	keywords := []string{"Error", "错误码"}
+	question, err := repository.CreateTestQuestion(ctx, "migration-order-user", "Migration order", "Migration body", keywords)
+	if err != nil || !reflect.DeepEqual(question.Keywords, keywords) {
+		t.Fatalf("question after migrations=%+v err=%v", question, err)
+	}
+	records, err := repository.CreateQuestionAnswerBatch(
+		ctx, "migration-order-user", "migration-order-target", "migration-order-batch",
+		[]string{"model"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium,
+	)
+	if err != nil || len(records) != 1 || !reflect.DeepEqual(records[0].QuestionKeywordSnapshot, keywords) {
+		t.Fatalf("records after migrations=%+v err=%v", records, err)
+	}
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("second EnsureSchema after migrations: %v", err)
+	}
+	records, err = repository.ListQuestionAnswerBatch(ctx, "migration-order-user", "migration-order-target", "migration-order-batch")
+	if err != nil || len(records) != 1 || !reflect.DeepEqual(records[0].QuestionKeywordSnapshot, keywords) {
+		t.Fatalf("idempotent snapshot=%+v err=%v", records, err)
+	}
+}
+
 func TestQuestionAnswerRepositoryPostgresConcurrentCompletionAndStopHaveOneTerminalResult(t *testing.T) {
 	pool := openQuestionAnswerPostgresPool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
@@ -232,7 +396,7 @@ func TestQuestionAnswerRepositoryPostgresConcurrentCompletionAndStopHaveOneTermi
 	if err := repository.EnsureSchema(ctx); err != nil {
 		t.Fatalf("ensure schema: %v", err)
 	}
-	question, err := repository.CreateTestQuestion(ctx, "race-user", "Race question", "race body")
+	question, err := repository.CreateTestQuestion(ctx, "race-user", "Race question", "race body", []string{})
 	if err != nil {
 		t.Fatalf("create question: %v", err)
 	}
@@ -325,7 +489,7 @@ func TestQuestionAnswerRepositoryPostgresConcurrentOppositeJudgmentsNeverReturnM
 	if err := repository.EnsureSchema(ctx); err != nil {
 		t.Fatalf("ensure schema: %v", err)
 	}
-	question, err := repository.CreateTestQuestion(ctx, "judgment-race-user", "Judgment race", "Race body")
+	question, err := repository.CreateTestQuestion(ctx, "judgment-race-user", "Judgment race", "Race body", []string{})
 	if err != nil {
 		t.Fatalf("create question: %v", err)
 	}
@@ -536,7 +700,7 @@ func TestQuestionAnswerRepositoryCompletesWithJudgmentAndReconciledStats(t *test
 	if err := repository.EnsureSchema(ctx); err != nil {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
-	question, err := repository.CreateTestQuestion(ctx, "stats-user", "Stats question", "Stats body")
+	question, err := repository.CreateTestQuestion(ctx, "stats-user", "Stats question", "Stats body", []string{})
 	if err != nil {
 		t.Fatalf("create stats question: %v", err)
 	}
@@ -883,6 +1047,229 @@ func TestQuestionAnswerTask2BrowserFixturePostgresContract(t *testing.T) {
 	if got := countRows(); got != 28 {
 		t.Fatalf("failed cleanup rows=%d, want 28", got)
 	}
+}
+
+func TestQuestionAnswerKeywordHighlightBrowserFixturePostgresContract(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	repository := NewRepository(pool)
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	connection, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire fixture connection: %v", err)
+	}
+	defer connection.Release()
+
+	const userID, targetID = "task3-fixture-user", "sub2api:task3-fixture-target"
+	const activeSentinelID = "task3-non-fixture-active"
+	const terminalSentinelID = "task3-non-fixture-terminal"
+	batchIDs := []string{
+		"task3-latest-20260831",
+		"task3-old-snapshot-20260831",
+		"task3-highlight-limit-20260831",
+		"task3-highlight-overlap-20260831",
+	}
+	if _, err := connection.Exec(ctx, `
+		SELECT set_config('task3.user_id', $1, false), set_config('task3.target_id', $2, false)
+	`, userID, targetID); err != nil {
+		t.Fatalf("set fixture scope: %v", err)
+	}
+	defer func() {
+		_, _ = connection.Exec(context.Background(), `
+			DELETE FROM connection_health_question_answer_records
+			WHERE user_id = $1 AND target_id = $2
+			  AND (batch_id = ANY($3) OR id = ANY($4))
+		`, userID, targetID, batchIDs, []string{activeSentinelID, terminalSentinelID})
+	}()
+
+	countFixture := func() int {
+		t.Helper()
+		var count int
+		if err := connection.QueryRow(ctx, `
+			SELECT count(*) FROM connection_health_question_answer_records
+			WHERE user_id = $1 AND target_id = $2 AND batch_id = ANY($3)
+		`, userID, targetID, batchIDs).Scan(&count); err != nil {
+			t.Fatalf("count task3 fixture: %v", err)
+		}
+		return count
+	}
+	countSentinel := func(id string) int {
+		t.Helper()
+		var count int
+		if err := connection.QueryRow(ctx, `
+			SELECT count(*) FROM connection_health_question_answer_records
+			WHERE user_id = $1 AND target_id = $2 AND id = $3
+		`, userID, targetID, id).Scan(&count); err != nil {
+			t.Fatalf("count sentinel %s: %v", id, err)
+		}
+		return count
+	}
+	findRecord := func(records []QuestionAnswerRecord, id string) QuestionAnswerRecord {
+		t.Helper()
+		for _, record := range records {
+			if record.ID == id {
+				return record
+			}
+		}
+		t.Fatalf("record %s not found in %+v", id, records)
+		return QuestionAnswerRecord{}
+	}
+
+	if _, err := connection.Exec(ctx, `
+		INSERT INTO connection_health_question_answer_records (
+			id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body, status
+		) VALUES ($1, $2, $3, 'task3-non-fixture-active-batch', 'model', 'q', 'Q', 'Body', 'pending')
+	`, activeSentinelID, userID, targetID); err != nil {
+		t.Fatalf("insert active sentinel: %v", err)
+	}
+	if err := runQuestionAnswerTask3FixtureAction(ctx, connection, "prepare"); err == nil || !strings.Contains(err.Error(), "non-fixture active batch exists") {
+		t.Fatalf("active conflict prepare error=%v", err)
+	}
+	if got := countFixture(); got != 0 {
+		t.Fatalf("active conflict left %d task3 fixture rows", got)
+	}
+	if got := countSentinel(activeSentinelID); got != 1 {
+		t.Fatalf("active conflict changed sentinel count=%d, want 1", got)
+	}
+	if _, err := connection.Exec(ctx, `DELETE FROM connection_health_question_answer_records WHERE id = $1`, activeSentinelID); err != nil {
+		t.Fatalf("delete active sentinel: %v", err)
+	}
+
+	if err := runQuestionAnswerTask3FixtureAction(ctx, connection, "prepare"); err != nil {
+		t.Fatalf("prepare task3 fixture: %v", err)
+	}
+	if got := countFixture(); got != 10 {
+		t.Fatalf("prepared task3 rows=%d, want 10", got)
+	}
+	if err := runQuestionAnswerTask3FixtureAction(ctx, connection, "prepare"); err == nil || !strings.Contains(err.Error(), "fixture id already exists") {
+		t.Fatalf("duplicate task3 prepare error=%v", err)
+	}
+
+	latest, err := repository.LatestQuestionAnswerBatch(ctx, userID, targetID)
+	if err != nil || len(latest) != 7 {
+		t.Fatalf("latest task3 records=%d err=%v", len(latest), err)
+	}
+	unreviewed := findRecord(latest, "task3-latest-unreviewed")
+	if unreviewed.AnswerJudgment == nil || *unreviewed.AnswerJudgment != QuestionAnswerUnreviewed ||
+		!reflect.DeepEqual(unreviewed.QuestionKeywordSnapshot, []string{"错误码", "Error"}) {
+		t.Fatalf("latest unreviewed=%+v", unreviewed)
+	}
+	correct := findRecord(latest, "task3-latest-correct")
+	incorrect := findRecord(latest, "task3-latest-incorrect")
+	if correct.AnswerJudgment == nil || *correct.AnswerJudgment != QuestionAnswerCorrect ||
+		incorrect.AnswerJudgment == nil || *incorrect.AnswerJudgment != QuestionAnswerIncorrect {
+		t.Fatalf("judged records correct=%+v incorrect=%+v", correct, incorrect)
+	}
+	nullSnapshot := findRecord(latest, "task3-latest-null")
+	emptySnapshot := findRecord(latest, "task3-latest-empty")
+	if nullSnapshot.QuestionKeywordSnapshot != nil {
+		t.Fatalf("null snapshot=%#v, want nil", nullSnapshot.QuestionKeywordSnapshot)
+	}
+	if emptySnapshot.QuestionKeywordSnapshot == nil || len(emptySnapshot.QuestionKeywordSnapshot) != 0 {
+		t.Fatalf("empty snapshot=%#v, want non-nil empty", emptySnapshot.QuestionKeywordSnapshot)
+	}
+	htmlRecord := findRecord(latest, "task3-latest-html")
+	if !strings.Contains(htmlRecord.AnswerBody, "<script>alert(1)</script>") ||
+		!reflect.DeepEqual(htmlRecord.QuestionKeywordSnapshot, []string{"<script>", "[done]"}) {
+		t.Fatalf("HTML literal record=%+v", htmlRecord)
+	}
+	maximum := findRecord(latest, "task3-latest-max-keywords")
+	if len(maximum.QuestionKeywordSnapshot) != 20 {
+		t.Fatalf("maximum keyword count=%d, want 20", len(maximum.QuestionKeywordSnapshot))
+	}
+	keywordBytes := 0
+	seenKeywords := make(map[string]struct{}, len(maximum.QuestionKeywordSnapshot))
+	for _, keyword := range maximum.QuestionKeywordSnapshot {
+		keywordBytes += len([]byte(keyword))
+		if utf8.RuneCountInString(keyword) > 64 {
+			t.Fatalf("maximum keyword rune count=%d, want <=64", utf8.RuneCountInString(keyword))
+		}
+		folded := strings.ToLower(keyword)
+		if _, exists := seenKeywords[folded]; exists {
+			t.Fatalf("maximum keyword duplicated: %q", keyword)
+		}
+		seenKeywords[folded] = struct{}{}
+	}
+	if keywordBytes != 2048 {
+		t.Fatalf("maximum keyword bytes=%d, want 2048", keywordBytes)
+	}
+
+	oldBatch, err := repository.ListQuestionAnswerBatch(ctx, userID, targetID, "task3-old-snapshot-20260831")
+	if err != nil || len(oldBatch) != 1 ||
+		!reflect.DeepEqual(oldBatch[0].QuestionKeywordSnapshot, []string{"旧关键字"}) ||
+		!strings.Contains(oldBatch[0].AnswerBody, "当前配置关键字") {
+		t.Fatalf("old snapshot batch=%+v err=%v", oldBatch, err)
+	}
+	highlightLimit, err := repository.ListQuestionAnswerBatch(ctx, userID, targetID, "task3-highlight-limit-20260831")
+	if err != nil || len(highlightLimit) != 1 ||
+		highlightLimit[0].AnswerBody != "Error one. Error two. Error three. Error four." ||
+		!reflect.DeepEqual(highlightLimit[0].QuestionKeywordSnapshot, []string{"Error"}) {
+		t.Fatalf("highlight-limit batch=%+v err=%v", highlightLimit, err)
+	}
+	highlightOverlap, err := repository.ListQuestionAnswerBatch(ctx, userID, targetID, "task3-highlight-overlap-20260831")
+	if err != nil || len(highlightOverlap) != 1 ||
+		highlightOverlap[0].AnswerBody != "错误码 one；错误码 two；错误码 three；错误码 four。" ||
+		!reflect.DeepEqual(highlightOverlap[0].QuestionKeywordSnapshot, []string{"错误", "错误码"}) {
+		t.Fatalf("highlight-overlap batch=%+v err=%v", highlightOverlap, err)
+	}
+
+	if _, err := connection.Exec(ctx, `
+		INSERT INTO connection_health_question_answer_records (
+			id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body,
+			status, created_at, completed_at, updated_at
+		) VALUES ($1, $2, $3, 'task3-non-fixture-terminal-batch', 'model', 'q', 'Q', 'Body',
+			'cancelled', now() - interval '1 day', now() - interval '1 day', now() - interval '1 day')
+	`, terminalSentinelID, userID, targetID); err != nil {
+		t.Fatalf("insert terminal sentinel: %v", err)
+	}
+	if err := runQuestionAnswerTask3FixtureAction(ctx, connection, "cleanup"); err != nil {
+		t.Fatalf("cleanup task3 fixture: %v", err)
+	}
+	if got := countFixture(); got != 0 {
+		t.Fatalf("task3 rows after cleanup=%d", got)
+	}
+	if got := countSentinel(terminalSentinelID); got != 1 {
+		t.Fatalf("cleanup changed terminal sentinel count=%d, want 1", got)
+	}
+
+	if err := runQuestionAnswerTask3FixtureAction(ctx, connection, "prepare"); err != nil {
+		t.Fatalf("prepare short cleanup task3 fixture: %v", err)
+	}
+	if _, err := connection.Exec(ctx, `DELETE FROM connection_health_question_answer_records WHERE id = 'task3-highlight-overlap'`); err != nil {
+		t.Fatalf("remove one task3 fixture row: %v", err)
+	}
+	if err := runQuestionAnswerTask3FixtureAction(ctx, connection, "cleanup"); err == nil || !strings.Contains(err.Error(), "expected exactly ten deleted rows") {
+		t.Fatalf("short task3 cleanup error=%v", err)
+	}
+	if got := countFixture(); got != 9 {
+		t.Fatalf("failed task3 cleanup rows=%d, want 9", got)
+	}
+}
+
+func runQuestionAnswerTask3FixtureAction(ctx context.Context, connection *pgxpool.Conn, action string) error {
+	fixtureSQL, err := os.ReadFile("testdata/task3_question_answer_keyword_highlight_browser_fixture.sql")
+	if err != nil {
+		return fmt.Errorf("read task3 fixture SQL: %w", err)
+	}
+	source := string(fixtureSQL)
+	startMarker := "\\if :" + action + "\n"
+	start := strings.Index(source, startMarker)
+	if start < 0 {
+		return fmt.Errorf("task3 fixture action %s not found", action)
+	}
+	start += len(startMarker)
+	endRelative := strings.Index(source[start:], "\n\\endif")
+	if endRelative < 0 {
+		return fmt.Errorf("task3 fixture action %s end not found", action)
+	}
+	_, err = connection.Exec(ctx, source[start:start+endRelative])
+	if err != nil {
+		_, _ = connection.Exec(ctx, "ROLLBACK")
+	}
+	return err
 }
 
 func runQuestionAnswerTask2FixtureAction(ctx context.Context, connection *pgxpool.Conn, action string) error {

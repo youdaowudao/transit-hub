@@ -44,6 +44,7 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
 const emptyStats = {
   requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
   reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+  byModel: [],
 }
 
 const records = Array.from({ length: 6 }, (_, index) => ({
@@ -71,6 +72,7 @@ const activeBatch = {
   batchId: 'batch-running',
   records,
   reasoningEffort: 'medium' as const,
+  repeatCount: 1,
   submittedCount: 6,
   completedCount: 0,
   runningCount: 5,
@@ -80,6 +82,7 @@ const activeBatch = {
   stats: {
     requests: { submitted: 6, inProgress: 6, succeeded: 0, failed: 0, cancelled: 0 },
     reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+    byModel: [],
   },
 }
 
@@ -141,6 +144,7 @@ const terminalReviewBatch = (nextRecords = reviewRecords) => ({
       correct: nextRecords.filter(record => record.answerJudgment === 'correct').length,
       incorrect: nextRecords.filter(record => record.answerJudgment === 'incorrect').length,
     },
+    byModel: [],
   },
 })
 
@@ -266,6 +270,7 @@ const batchWithStatuses = (
       correct: 0,
       incorrect: 0,
     },
+    byModel: [],
   },
 })
 
@@ -707,6 +712,7 @@ describe('question-answer batch behavior', () => {
       stats: {
         requests: { submitted: 5, inProgress: 2, succeeded: 1, failed: 1, cancelled: 1 },
         reviews: { unreviewed: 1, correct: 0, incorrect: 0 },
+        byModel: [],
       },
     })
 
@@ -739,6 +745,7 @@ describe('question-answer batch behavior', () => {
     const historyStats = {
       requests: { submitted: 21, inProgress: 0, succeeded: 21, failed: 0, cancelled: 0 },
       reviews: { unreviewed: 0, correct: 21, incorrect: 0 },
+      byModel: [],
     }
     let pageTwoReads = 0
     harness.getQuestionAnswerHistory.mockImplementation(async (_targetId: string, page: number) => {
@@ -1200,6 +1207,7 @@ describe('question-answer batch behavior', () => {
       stats: {
         requests: { submitted: 25, inProgress: 0, succeeded: 25, failed: 0, cancelled: 0 },
         reviews: { unreviewed: 25, correct: 0, incorrect: 0 },
+        byModel: [],
       },
     }
     harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch())
@@ -1235,6 +1243,7 @@ describe('question-answer batch behavior', () => {
       stats: {
         requests: { submitted: 6, inProgress: 0, succeeded: 0, failed: 0, cancelled: 6 },
         reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+        byModel: [],
       },
     }
     harness.getQuestionAnswerHistory.mockResolvedValue(terminalReviewHistory([oldBatch.records[0]]))
@@ -1352,6 +1361,7 @@ describe('question-answer batch behavior', () => {
       stats: {
         requests: { submitted: 6, inProgress: 0, succeeded: 0, failed: 0, cancelled: 6 },
         reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+        byModel: [],
       },
     }
     let resolveSelection: ((batch: ReturnType<typeof historicalBatch>) => void) | undefined
@@ -1728,6 +1738,7 @@ describe('question-answer batch behavior', () => {
           correct: nextRecords.filter(record => record.answerJudgment === 'correct').length,
           incorrect: 0,
         },
+        byModel: [],
       },
     })
     const initialBatch = batchWithReviewStats(initialRecords)
@@ -1792,6 +1803,7 @@ describe('question-answer batch behavior', () => {
           correct: nextRecords.filter(record => record.answerJudgment === 'correct').length,
           incorrect: 0,
         },
+        byModel: [],
       },
     })
     const historyWithReviewStats = (nextRecords: typeof afterBothRecords) => ({
@@ -1914,6 +1926,7 @@ describe('question-answer batch behavior', () => {
       stats: {
         requests: { submitted: 6, inProgress: 0, succeeded: 0, failed: 0, cancelled: 6 },
         reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+        byModel: [],
       },
     }
     let pageTwoCalls = 0
@@ -2009,6 +2022,7 @@ describe('question-answer batch behavior', () => {
       stats: {
         requests: { submitted: 6, inProgress: 0, succeeded: 0, failed: 0, cancelled: 6 },
         reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+        byModel: [],
       },
     }
     harness.getQuestionAnswerHistory.mockImplementation(async (_targetId: string, page: number) => (
@@ -2813,6 +2827,7 @@ describe('question-answer batch behavior', () => {
       stats: {
         requests: { submitted: 6, inProgress: 0, succeeded: 1, failed: 0, cancelled: 5 },
         reviews: { unreviewed: 0, correct: 1, incorrect: 0 },
+        byModel: [],
       },
     }
     const staleStopped = batchWithStatuses(
@@ -2874,6 +2889,7 @@ describe('question-answer batch behavior', () => {
       stats: {
         requests: { submitted: 6, inProgress: 0, succeeded: 1, failed: 0, cancelled: 5 },
         reviews: { unreviewed: 0, correct: 1, incorrect: 0 },
+        byModel: [],
       },
     }
     let resolveJudgmentBatch: ((batch: typeof judgedTerminal) => void) | undefined

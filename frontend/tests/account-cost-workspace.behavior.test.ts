@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { DOMWrapper, flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AccountCostWorkspace from '@/modules/admin/components/dashboard/AccountCostWorkspace.vue'
 
 const harness = vi.hoisted(() => ({
+  createAdditionalCost: vi.fn(),
   getRechargeFeeRate: vi.fn(),
   listRechargeFeeRateHistory: vi.fn(),
   listAccountAssets: vi.fn(),
@@ -22,7 +23,7 @@ vi.mock('vue-router', () => ({
 vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
   createAccountBatch: vi.fn(),
   createAccountEvent: vi.fn(),
-  createAdditionalCost: vi.fn(),
+  createAdditionalCost: harness.createAdditionalCost,
   getAccountAsset: vi.fn(),
   getRechargeFeeRate: harness.getRechargeFeeRate,
   listRechargeFeeRateHistory: harness.listRechargeFeeRateHistory,
@@ -71,6 +72,20 @@ const mountWorkspace = async (initialTab: 'today' | 'assets' | 'ledger' | 'rules
   return wrapper
 }
 
+const mountWorkspaceWithRealTeleport = async () => {
+  const wrapper = mount(AccountCostWorkspace, {
+    props: defaultProps,
+    attachTo: document.body,
+  })
+  mountedWrappers.push(wrapper)
+  await wrapper.setProps({ open: true })
+  await flushPromises()
+
+  const formElement = [...document.body.querySelectorAll('form')].find(item => item.textContent?.includes('记一笔成本'))
+  if (!formElement) throw new Error('missing teleported manual cost form')
+  return { wrapper, form: new DOMWrapper(formElement) }
+}
+
 const findButton = (wrapper: VueWrapper, label: string) => {
   const button = wrapper.findAll('button').find(item => (
     item.text().includes(label) || item.attributes('title') === label || item.attributes('aria-label') === label
@@ -87,6 +102,7 @@ const statusSelect = (wrapper: VueWrapper) => {
 
 beforeEach(() => {
   localStorage.clear()
+  harness.createAdditionalCost.mockReset().mockResolvedValue({ items: [] })
   harness.getRechargeFeeRate.mockReset().mockResolvedValue({
     id: 'rate-current', effectiveDate: '2026-08-22', rate: 0.016, createdAt: '2026-08-22T08:00:00Z',
   })
@@ -103,6 +119,43 @@ afterEach(() => {
 })
 
 describe('AccountCostWorkspace regression behavior', () => {
+  it('submits a valid manual cost when the user clicks 保存记录', async () => {
+    const { wrapper, form } = await mountWorkspaceWithRealTeleport()
+
+    await form.find('select').setValue('fixed')
+    await form.find('input[placeholder="名称"]').setValue('本地服务器')
+    await form.find('input[placeholder="金额（元）"]').setValue('12.34')
+    await form.find('input[type="date"]').setValue('2026-08-22')
+    await form.find('input[placeholder="分摊天数"]').setValue('1')
+    await form.find('input[placeholder="说明（可选）"]').setValue('月度固定费用')
+
+    const saveButton = form.findAll('button').find(item => item.text().includes('保存记录'))
+    if (!saveButton) throw new Error('missing save cost button')
+    expect(saveButton.attributes('type')).toBe('submit')
+    expect(form.element.isConnected).toBe(true)
+    expect((saveButton.element as HTMLButtonElement).form).toBe(form.element)
+    expect((form.element as HTMLFormElement).checkValidity()).toBe(true)
+    ;(saveButton.element as HTMLButtonElement).click()
+    await vi.waitFor(() => expect(wrapper.emitted('updated')).toHaveLength(1))
+    await nextTick()
+
+    expect(harness.createAdditionalCost).toHaveBeenCalledOnce()
+  })
+
+  it('keeps an invalid manual cost from submitting when the user clicks 保存记录', async () => {
+    const { wrapper, form } = await mountWorkspaceWithRealTeleport()
+    const saveButton = form.findAll('button').find(item => item.text().includes('保存记录'))
+    if (!saveButton) throw new Error('missing save cost button')
+
+    expect(saveButton.attributes('type')).toBe('submit')
+    expect((form.element as HTMLFormElement).checkValidity()).toBe(false)
+    ;(saveButton.element as HTMLButtonElement).click()
+    await flushPromises()
+
+    expect(harness.createAdditionalCost).not.toHaveBeenCalled()
+    expect(wrapper.emitted('updated')).toBeUndefined()
+  })
+
   it('R06 queries and renders current-day ledger changes with type, name, amount and source', async () => {
     harness.listAccountCostLedger.mockResolvedValue({
       items: [{

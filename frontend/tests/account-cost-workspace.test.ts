@@ -16,7 +16,8 @@ describe('account cost workspace', () => {
     expect(source).toContain('逐号分摊预览')
     expect(source).toContain('实际平均售出倍率')
     expect(source).toContain('最终盈亏')
-		expect(source.match(/<Button type="submit" :disabled="saving">/g)).toHaveLength(3)
+		const submitButtons = source.match(/<Button\b(?=[^>]*\btype="submit")(?=[^>]*:disabled="saving")[^>]*>/g) ?? []
+		expect(submitButtons).toHaveLength(4)
   })
 
   it('uses real connection choices, explicit refund closing and responsive asset views', () => {

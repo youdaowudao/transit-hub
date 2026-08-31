@@ -164,6 +164,9 @@ type AdminGroupAccount struct {
 	UpstreamSiteID             string                  `json:"upstreamSiteId,omitempty"`
 	PrioritySyncBlocked        bool                    `json:"prioritySyncBlocked"`
 	PrioritySyncBlockReason    string                  `json:"prioritySyncBlockReason,omitempty"`
+
+	TodayQuestionAnswerSubmitted int `json:"todayQuestionAnswerSubmitted"`
+	TodayQuestionAnswerCorrect   int `json:"todayQuestionAnswerCorrect"`
 	// ProductionSortOrder 是去重目标在当前 workspace 的全局生产顺序，不是分组内局部序号。
 	ProductionSortOrder int `json:"productionSortOrder"`
 }
@@ -435,6 +438,19 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		}
 	}
 	accountFetchDuration := time.Since(accountFetchStarted)
+	todayQuestionAnswerTargetIDs := make([]string, 0, len(decisionAccountByTarget))
+	for targetID := range decisionAccountByTarget {
+		todayQuestionAnswerTargetIDs = append(todayQuestionAnswerTargetIDs, targetID)
+	}
+	sort.Strings(todayQuestionAnswerTargetIDs)
+	todayQuestionAnswerByTarget := make(map[string]QuestionAnswerTodaySummary)
+	if len(todayQuestionAnswerTargetIDs) > 0 {
+		var summaryErr error
+		todayQuestionAnswerByTarget, summaryErr = s.repo.ListQuestionAnswerTodaySummaries(ctx, userID, todayQuestionAnswerTargetIDs)
+		if summaryErr != nil {
+			return nil, summaryErr
+		}
+	}
 	assemblyStarted := time.Now()
 	healthFallbacksByTarget := make(map[string][]float64)
 	for _, group := range groups {
@@ -525,6 +541,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		summary := AdminGroupHealthSummary{TotalAccounts: len(accounts)}
 		for _, acc := range accounts {
 			targetID := buildTargetID(platform, adminAccountID, acc.ID)
+			todayQuestionAnswer := todayQuestionAnswerByTarget[targetID]
 			multiplierResolution := resolutionForAdminAccount(upstreamMultiplierLookup, acc.ID)
 			upstreamKeyGroup := multiplierResolution.info
 			if (multiplierResolution.status == MultiplierResolutionResolved || multiplierResolution.status == MultiplierResolutionStale) && strings.TrimSpace(upstreamKeyGroup.siteID) != "" {
@@ -726,6 +743,8 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				UpstreamSiteID:                multiplierResolution.info.siteID,
 				PrioritySyncBlocked:           prioritySyncBlocked,
 				PrioritySyncBlockReason:       prioritySyncBlockReason,
+				TodayQuestionAnswerSubmitted:  todayQuestionAnswer.Submitted,
+				TodayQuestionAnswerCorrect:    todayQuestionAnswer.Correct,
 			}
 			if _, exists := healthCandidatesByTarget[targetID]; !exists && priorityManaged && !item.PriorityConflict && usesHealthPriority && multiplierSource != MultiplierSourceNone && multiplierSource != MultiplierSourceLastConfirmed && effectiveMultiplier != nil {
 				activeModels := make(map[string]struct{}, len(activeSpecs))

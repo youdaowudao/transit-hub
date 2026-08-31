@@ -614,7 +614,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
                 <Input v-if="costForm.type !== 'adjustment'" v-model="costForm.days" type="number" min="1" placeholder="分摊天数" />
                 <Input v-model="costForm.note" class="sm:col-span-2" placeholder="说明（可选）" />
               </div>
-              <Button :disabled="saving"><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" /><Save v-else class="mr-2 h-4 w-4" />保存记录</Button>
+              <Button :disabled="saving" type="submit"><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" /><Save v-else class="mr-2 h-4 w-4" />保存记录</Button>
             </form>
           </section>
 

@@ -22,6 +22,7 @@ import {
   questionAnswerBatchCompletedAt,
   questionAnswerElapsedMilliseconds,
   questionAnswerReviewStatsFromRecords,
+  questionAnswerSubmissionSummary,
   questionAnswerStatsReconcile,
   replaceQuestionAnswerRecord,
   shortQuestionAnswerBatchId,
@@ -86,6 +87,39 @@ afterEach(() => {
 })
 
 describe('connection health question answers', () => {
+  it('computes the exact model-question-repeat request total without correcting invalid repeat counts', () => {
+    expect(questionAnswerSubmissionSummary(2, 3, 4)).toEqual({
+      modelCount: 2,
+      questionCount: 3,
+      repeatCount: 4,
+      total: 24,
+      validRepeatCount: true,
+      withinBatchLimit: true,
+    })
+    expect(questionAnswerSubmissionSummary(1, 5, 10).total).toBe(50)
+    expect(questionAnswerSubmissionSummary(1, 5, 10).withinBatchLimit).toBe(true)
+    expect(questionAnswerSubmissionSummary(1, 6, 10).total).toBe(60)
+    expect(questionAnswerSubmissionSummary(1, 6, 10).withinBatchLimit).toBe(false)
+    expect(questionAnswerSubmissionSummary(1, 1, 0)).toMatchObject({
+      repeatCount: 0,
+      total: 0,
+      validRepeatCount: false,
+      withinBatchLimit: false,
+    })
+    expect(questionAnswerSubmissionSummary(1, 1, 11)).toMatchObject({
+      repeatCount: 11,
+      total: 11,
+      validRepeatCount: false,
+      withinBatchLimit: false,
+    })
+    expect(questionAnswerSubmissionSummary(1, 1, 1.5)).toMatchObject({
+      repeatCount: 1.5,
+      total: 1.5,
+      validRepeatCount: false,
+      withinBatchLimit: false,
+    })
+  })
+
   it('parses, deduplicates and highlights only the first three literal matches with longer overlap first', () => {
     expect(parseTestQuestionKeywords(' 错误,Error\nerror\r\n错误码 ')).toEqual([
       '错误', 'Error', '错误码',
@@ -206,9 +240,53 @@ describe('connection health question answers', () => {
     const judgment = await connectionHealthApi.setQuestionAnswerJudgment('target-old', 'old', 'correct')
     for (const normalized of [start, latest, batch, cancelled]) {
       expect(normalized.records[0].questionKeywordSnapshot).toBeNull()
+      expect(normalized.repeatCount).toBe(1)
+      expect(normalized.stats.byModel).toEqual([])
     }
     expect(history.records[0].questionKeywordSnapshot).toBeNull()
+    expect(history.stats.byModel).toEqual([])
+    expect(history.todayStats.byModel).toEqual([])
     expect(judgment.questionKeywordSnapshot).toBeNull()
+  })
+
+  it('deep-copies server model statistics and keeps models whose requests all failed', async () => {
+    stubStorage()
+    const failedModel = {
+      modelName: 'failed-model',
+      requests: { submitted: 2, inProgress: 0, succeeded: 0, failed: 2, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+    }
+    const stats = {
+      requests: { submitted: 2, inProgress: 0, succeeded: 0, failed: 2, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+      byModel: [failedModel],
+    }
+    const payloadBatch = {
+      batchId: 'batch-failed', records: [], reasoningEffort: 'medium', repeatCount: 2,
+      submittedCount: 2, completedCount: 2, runningCount: 0, active: false,
+      currentModel: '', currentQuestion: '', stats,
+    }
+    const payloadHistory = {
+      records: [], page: 1, pageSize: 20, totalItems: 2, totalPages: 1,
+      stats, todayStats: stats,
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(payloadBatch), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify(payloadHistory), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const batch = await getLatestQuestionAnswerBatch('target-failed')
+    const history = await getQuestionAnswerHistory('target-failed', 1)
+
+    expect(batch.stats.byModel).toEqual([failedModel])
+    expect(history.stats.byModel).toEqual([failedModel])
+    expect(history.todayStats.byModel).toEqual([failedModel])
+    expect(batch.stats.byModel).not.toBe(payloadBatch.stats.byModel)
+    expect(batch.stats.byModel[0]).not.toBe(payloadBatch.stats.byModel[0])
+    expect(batch.stats.byModel[0].requests).not.toBe(payloadBatch.stats.byModel[0].requests)
+    expect(batch.stats.byModel[0].reviews).not.toBe(payloadBatch.stats.byModel[0].reviews)
+    batch.stats.byModel[0].requests.failed = 0
+    expect(payloadBatch.stats.byModel[0].requests.failed).toBe(2)
   })
 
   it('groups the current history page by first batch appearance', () => {
@@ -364,8 +442,14 @@ describe('connection health question answers', () => {
   it('submits model and question selections and exposes explicit cancellation', async () => {
     stubStorage()
     const batch = {
-      batchId: 'batch-1', records: [], submittedCount: 4, completedCount: 0,
-      reasoningEffort: 'high', active: true, currentModel: 'model-a', currentQuestion: 'question-a',
+      batchId: 'batch-1', records: [], submittedCount: 16, completedCount: 0,
+      reasoningEffort: 'high', repeatCount: 4, active: true, runningCount: 0,
+      currentModel: 'model-a', currentQuestion: 'question-a',
+      stats: {
+        requests: { submitted: 16, inProgress: 16, succeeded: 0, failed: 0, cancelled: 0 },
+        reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+        byModel: [],
+      },
     }
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(batch), { status: 200 }))
@@ -378,6 +462,7 @@ describe('connection health question answers', () => {
       ['model-a', 'model-b'],
       ['question-a', 'question-b'],
       'high',
+      4,
       controller.signal,
     )).resolves.toEqual(batch)
     await cancelQuestionAnswerBatch('sub2api:ws1:account-1', 'batch-1')
@@ -387,7 +472,12 @@ describe('connection health question answers', () => {
       '/api/connection-health/targets/sub2api%3Aws1%3Aaccount-1/question-answers/batches',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ models: ['model-a', 'model-b'], questionIds: ['question-a', 'question-b'], reasoningEffort: 'high' }),
+        body: JSON.stringify({
+          models: ['model-a', 'model-b'],
+          questionIds: ['question-a', 'question-b'],
+          reasoningEffort: 'high',
+          repeatCount: 4,
+        }),
         headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '2' }),
         signal: controller.signal,
       }),
@@ -442,9 +532,19 @@ describe('connection health question answers', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify(history), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(getLatestQuestionAnswerBatch('sub2api:ws1:account-1')).resolves.toEqual(batch)
-    await expect(getQuestionAnswerBatch('sub2api:ws1:account-1', 'batch-1')).resolves.toEqual(batch)
-    await expect(getQuestionAnswerHistory('sub2api:ws1:account-1', 2)).resolves.toEqual(history)
+    const normalizedBatch = {
+      ...batch,
+      repeatCount: 1,
+      stats: { ...batch.stats, byModel: [] },
+    }
+    const normalizedHistory = {
+      ...history,
+      stats: { ...history.stats, byModel: [] },
+      todayStats: { ...history.todayStats, byModel: [] },
+    }
+    await expect(getLatestQuestionAnswerBatch('sub2api:ws1:account-1')).resolves.toEqual(normalizedBatch)
+    await expect(getQuestionAnswerBatch('sub2api:ws1:account-1', 'batch-1')).resolves.toEqual(normalizedBatch)
+    await expect(getQuestionAnswerHistory('sub2api:ws1:account-1', 2)).resolves.toEqual(normalizedHistory)
 
     for (const call of fetchMock.mock.calls) {
       expect(call[1]).toEqual(expect.objectContaining({
@@ -505,7 +605,9 @@ describe('connection health question answers', () => {
     expect(dialogSource).toContain('question => question.isDefault')
     expect(dialogSource).toContain('batch.records.map(record => record.modelName)')
     expect(dialogSource).toContain('batch.records.map(record => record.questionId)')
-    expect(dialogSource).toContain('selected.value.size * qaSelectedQuestions.value.size')
+    expect(dialogSource).toContain('const qaSubmission = computed(() => questionAnswerSubmissionSummary(')
+    expect(dialogSource).toContain('qaRepeatCount.value')
+    expect(dialogSource).not.toContain('selected.value.size * qaSelectedQuestions.value.size')
     expect(dialogSource).toContain('setTimeout(() => void pollQuestionAnswerBatch(), 2000)')
     expect(dialogSource).toContain('const batchId = qaRuntimeBatch.value.batchId')
     expect(dialogSource).toContain('getQuestionAnswerBatch(targetId, record.batchId, controller.signal)')

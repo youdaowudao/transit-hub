@@ -192,6 +192,8 @@ export interface AdminGroupAccount {
   upstreamSiteId?: string
   prioritySyncBlocked?: boolean
   prioritySyncBlockReason?: PrioritySyncBlockReason | string
+  todayQuestionAnswerSubmitted?: number
+  todayQuestionAnswerCorrect?: number
   productionSortOrder?: number
 }
 
@@ -419,9 +421,16 @@ export interface QuestionAnswerReviewStats {
   incorrect: number
 }
 
+export interface QuestionAnswerModelStats {
+  modelName: string
+  requests: QuestionAnswerRequestStats
+  reviews: QuestionAnswerReviewStats
+}
+
 export interface QuestionAnswerStats {
   requests: QuestionAnswerRequestStats
   reviews: QuestionAnswerReviewStats
+  byModel: QuestionAnswerModelStats[]
 }
 
 export interface QuestionAnswerHistory {
@@ -438,6 +447,7 @@ export interface QuestionAnswerBatch {
   batchId: string
   records: QuestionAnswerRecord[]
   reasoningEffort: QuestionAnswerReasoningEffort | null
+  repeatCount: number
   submittedCount: number
   completedCount: number
   runningCount: number
@@ -445,6 +455,15 @@ export interface QuestionAnswerBatch {
   currentModel: string
   currentQuestion: string
   stats: QuestionAnswerStats
+}
+
+export interface QuestionAnswerSubmissionSummary {
+  modelCount: number
+  questionCount: number
+  repeatCount: number
+  total: number
+  validRepeatCount: boolean
+  withinBatchLimit: boolean
 }
 
 export interface PolicyInput {

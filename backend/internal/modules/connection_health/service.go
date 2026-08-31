@@ -29,6 +29,7 @@ type healthRepository interface {
 	ListLatestProbeFailureEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error)
 	ListLatestSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error)
 	ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error)
+	ListQuestionAnswerTodaySummaries(ctx context.Context, userID string, targetIDs []string) (map[string]QuestionAnswerTodaySummary, error)
 	CountFailureEventsSince(ctx context.Context, userID string, adminAccountID string, since time.Time) (int, error)
 	CountProbesToday(ctx context.Context, userID string, adminAccountID string, policyID string, dayStart time.Time) (int, error)
 	TryConsumeProbeBudget(ctx context.Context, userID string, adminAccountID string, policyID string, dayStart time.Time, limit int) (bool, error)
@@ -77,48 +78,55 @@ type healthRepository interface {
 // Service 组装 connection_health 模块的全部业务逻辑：聚合查询、策略管理、手动动作、
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
-	repo                   healthRepository
-	eventRetention         eventRetentionRepository
-	questionAnswers        questionAnswerRepository
-	mySites                MySitesReader
-	sites                  SiteLookup
-	upstreamSync           UpstreamSyncCoordinator
-	groupCosts             GroupCostReader
-	accounts               AdminAccountResolver
-	dispatcher             RemoteActionRunner
-	probeRunner            *RealProbeRunner
-	modelDiscovery         *ModelDiscoveryRunner
-	platformGroups         PlatformGroupReader
-	priorityActions        TargetPriorityActioner
-	schedulableActions     TargetSchedulableActioner
-	probeLimiterMu         sync.Mutex
-	probeLimiter           *probeConcurrencyLimiter
-	adminMultiplierMu      sync.Mutex
-	adminMultiplierCache   map[string]adminMultiplierCacheEntry
-	multiplierSnapshotMu   sync.Mutex
-	multiplierSnapshots    map[string]*multiplierSnapshotEntry
-	priorityTriggerMu      sync.Mutex
-	priorityTriggerRunning map[string]bool
-	priorityTriggerPending map[string]string
-	priorityHealthRunning  map[string]bool
-	priorityHealthPending  map[string]bool
-	sub2APIFloorMu         sync.Mutex
-	sub2APIFloorGuards     map[string]*workspaceFloorGuard
-	questionAnswerMu       sync.Mutex
-	questionAnswerCtx      context.Context
-	questionAnswerStop     context.CancelFunc
-	questionAnswerClosed   bool
-	questionAnswerRuns     map[string]*activeQuestionAnswerBatch
-	questionAnswerWG       sync.WaitGroup
-	questionAnswerHTTP     *QuestionAnswerRunner
-	questionAnswerTTL      time.Duration
-	refreshRunMu           sync.Mutex
-	refreshRootCtx         context.Context
-	refreshRootCancel      context.CancelFunc
-	refreshRunClosed       bool
-	refreshRunWG           sync.WaitGroup
-	multiplierRefreshWG    sync.WaitGroup
-	multiplierRefreshJobs  int
+	repo                         healthRepository
+	eventRetention               eventRetentionRepository
+	questionAnswers              questionAnswerRepository
+	mySites                      MySitesReader
+	sites                        SiteLookup
+	upstreamSync                 UpstreamSyncCoordinator
+	groupCosts                   GroupCostReader
+	accounts                     AdminAccountResolver
+	dispatcher                   RemoteActionRunner
+	probeRunner                  *RealProbeRunner
+	modelDiscovery               *ModelDiscoveryRunner
+	platformGroups               PlatformGroupReader
+	priorityActions              TargetPriorityActioner
+	schedulableActions           TargetSchedulableActioner
+	probeLimiterMu               sync.Mutex
+	probeLimiter                 *probeConcurrencyLimiter
+	adminMultiplierMu            sync.Mutex
+	adminMultiplierCache         map[string]adminMultiplierCacheEntry
+	multiplierSnapshotMu         sync.Mutex
+	multiplierSnapshots          map[string]*multiplierSnapshotEntry
+	priorityTriggerMu            sync.Mutex
+	priorityTriggerRunning       map[string]bool
+	priorityTriggerPending       map[string]string
+	priorityHealthRunning        map[string]bool
+	priorityHealthPending        map[string]bool
+	sub2APIFloorMu               sync.Mutex
+	sub2APIFloorGuards           map[string]*workspaceFloorGuard
+	questionAnswerMu             sync.Mutex
+	questionAnswerCtx            context.Context
+	questionAnswerStop           context.CancelFunc
+	questionAnswerClosed         bool
+	questionAnswerRuns           map[string]*activeQuestionAnswerBatch
+	questionAnswerOrder          []string
+	questionAnswerLastKey        string
+	questionAnswerWake           chan struct{}
+	questionAnswerDispatcherDone chan struct{}
+	questionAnswerInFlight       int
+	questionAnswerStorageTimeout time.Duration
+	questionAnswerWG             sync.WaitGroup
+	questionAnswerShutdown       *questionAnswerShutdownAttempt
+	questionAnswerHTTP           *QuestionAnswerRunner
+	questionAnswerTTL            time.Duration
+	refreshRunMu                 sync.Mutex
+	refreshRootCtx               context.Context
+	refreshRootCancel            context.CancelFunc
+	refreshRunClosed             bool
+	refreshRunWG                 sync.WaitGroup
+	multiplierRefreshWG          sync.WaitGroup
+	multiplierRefreshJobs        int
 	// Refresh run ownership is process-local. Multi-process coordination is intentionally out of scope.
 	refreshActive          map[adminGroupsRefreshWorkspaceKey]*adminGroupsRefreshRun
 	refreshRunsByID        map[string]*adminGroupsRefreshRun

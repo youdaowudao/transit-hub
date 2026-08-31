@@ -48,6 +48,10 @@ type fakeRepository struct {
 	priorityLeaseMu           sync.Mutex
 	priorityLeases            map[string]*sync.Mutex
 	priorityLeaseCount        map[string]int
+	qaToday                   map[string]QuestionAnswerTodaySummary
+	qaTodayCalls              int
+	qaTodayTargetIDs          []string
+	qaTodayErr                error
 }
 
 func newFakeRepository() *fakeRepository {
@@ -61,10 +65,26 @@ func newFakeRepository() *fakeRepository {
 		sub2APIMutationLeases: map[string]*sync.Mutex{},
 		priorityLeases:        map[string]*sync.Mutex{},
 		priorityLeaseCount:    map[string]int{},
+		qaToday:               map[string]QuestionAnswerTodaySummary{},
 	}
 }
 
 func (f *fakeRepository) EnsureSchema(ctx context.Context) error { return nil }
+
+func (f *fakeRepository) ListQuestionAnswerTodaySummaries(ctx context.Context, userID string, targetIDs []string) (map[string]QuestionAnswerTodaySummary, error) {
+	f.qaTodayCalls++
+	f.qaTodayTargetIDs = append([]string(nil), targetIDs...)
+	if f.qaTodayErr != nil {
+		return nil, f.qaTodayErr
+	}
+	out := make(map[string]QuestionAnswerTodaySummary, len(targetIDs))
+	for _, targetID := range targetIDs {
+		if summary, ok := f.qaToday[targetID]; ok {
+			out[targetID] = summary
+		}
+	}
+	return out, nil
+}
 
 func (f *fakeRepository) ListPolicies(ctx context.Context, userID string, adminAccountID string) ([]Policy, error) {
 	if f.listPoliciesErr != nil {

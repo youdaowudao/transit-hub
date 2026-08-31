@@ -563,6 +563,67 @@ func TestAdminGroups_TargetIDProbeAvailableAndModelHealth(t *testing.T) {
 	}
 }
 
+func TestAdminGroups_ProjectsTodayQuestionAnswerSummaryOnceForSharedTargets(t *testing.T) {
+	repo := newFakeRepository()
+	repo.qaToday = map[string]QuestionAnswerTodaySummary{
+		"sub2api:ws1:shared": {Submitted: 4, Correct: 3},
+		"sub2api:ws1:other":  {Submitted: 3, Correct: 2},
+	}
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{
+			{ID: "g1", Name: "group-1", Platform: "sub2api", Status: "active"},
+			{ID: "g2", Name: "group-2", Platform: "sub2api", Status: "active"},
+		},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{
+			"g1": {
+				{ID: "shared", Name: "shared-one", BaseURL: "https://up.example.com"},
+				{ID: "other", Name: "other", BaseURL: "https://up.example.com"},
+			},
+			"g2": {
+				{ID: "shared", Name: "shared-two", BaseURL: "https://up.example.com"},
+			},
+		},
+	}
+	service := newAdminGroupsService(
+		reader,
+		fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		repo,
+	)
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("AdminGroups: %v", err)
+	}
+	if repo.qaTodayCalls != 1 {
+		t.Fatalf("today summary calls=%d want=1", repo.qaTodayCalls)
+	}
+	if len(repo.qaTodayTargetIDs) != 2 || repo.qaTodayTargetIDs[0] != "sub2api:ws1:other" || repo.qaTodayTargetIDs[1] != "sub2api:ws1:shared" {
+		t.Fatalf("today summary target IDs=%v want sorted deduplicated targets", repo.qaTodayTargetIDs)
+	}
+	if len(groups) != 2 || len(groups[0].Accounts) != 2 || len(groups[1].Accounts) != 1 {
+		t.Fatalf("unexpected groups: %+v", groups)
+	}
+	sharedOne := groups[0].Accounts[1]
+	if groups[0].Accounts[0].ID == "shared" {
+		sharedOne = groups[0].Accounts[0]
+	}
+	sharedTwo := groups[1].Accounts[0]
+	for _, account := range []AdminGroupAccount{sharedOne, sharedTwo} {
+		if account.TodayQuestionAnswerSubmitted != 4 || account.TodayQuestionAnswerCorrect != 3 {
+			t.Fatalf("shared account summary=%+v want submitted=4 correct=3", account)
+		}
+	}
+	var other AdminGroupAccount
+	for _, account := range groups[0].Accounts {
+		if account.ID == "other" {
+			other = account
+		}
+	}
+	if other.TodayQuestionAnswerSubmitted != 3 || other.TodayQuestionAnswerCorrect != 2 {
+		t.Fatalf("other summary=%+v want submitted=3 correct=2", other)
+	}
+}
+
 func TestAdminGroups_ProjectsCurrentMainSiteErrorOnly(t *testing.T) {
 	tests := []struct {
 		name         string

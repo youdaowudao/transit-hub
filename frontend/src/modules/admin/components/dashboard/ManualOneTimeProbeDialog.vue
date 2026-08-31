@@ -45,6 +45,7 @@ import {
   questionAnswerBatchCompletedAt,
   questionAnswerElapsedMilliseconds,
   questionAnswerReviewStatsFromRecords,
+  questionAnswerSubmissionSummary,
   replaceQuestionAnswerRecord,
   shortQuestionAnswerBatchId,
   type QuestionAnswerOperationScope,
@@ -101,6 +102,8 @@ const qaReasoningEffortOptions: Array<{ value: QuestionAnswerReasoningEffort; la
   { value: 'high', labelKey: 'high' },
   { value: 'xhigh', labelKey: 'xhigh' },
 ]
+const qaRepeatCount = ref(1)
+const qaRepeatCountOptions = Array.from({ length: 10 }, (_, index) => index + 1)
 const qaLoading = ref(false)
 const qaStarting = ref(false)
 const qaCancelling = ref(false)
@@ -116,10 +119,12 @@ const qaHistory = ref<QuestionAnswerHistory>({
   stats: {
     requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
     reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+    byModel: [],
   },
   todayStats: {
     requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
     reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+    byModel: [],
   },
 })
 const qaCurrentExpanded = ref<Set<string>>(new Set())
@@ -236,10 +241,12 @@ const resetQuestionAnswerViewState = () => {
     stats: {
       requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
       reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+      byModel: [],
     },
     todayStats: {
       requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
       reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+      byModel: [],
     },
   }
   qaCurrentExpanded.value = new Set()
@@ -252,6 +259,7 @@ const resetQuestionAnswerTargetState = () => {
   qaQuestions.value = []
   qaSelectedQuestions.value = new Set()
   qaReasoningEffort.value = 'medium'
+  qaRepeatCount.value = 1
   qaMarking.value = new Map()
   qaErrorKey.value = ''
   qaCompletedNotice.value = false
@@ -303,6 +311,7 @@ const restoreActiveQuestionAnswerSelection = (batch: QuestionAnswerBatch | null)
   selected.value = new Set(batch.records.map(record => record.modelName))
   qaSelectedQuestions.value = new Set(batch.records.map(record => record.questionId))
   if (batch.reasoningEffort) qaReasoningEffort.value = batch.reasoningEffort
+  qaRepeatCount.value = batch.repeatCount
   return true
 }
 
@@ -387,12 +396,24 @@ watch(mode, (nextMode) => {
 const hasModels = computed(() => models.value.length > 0)
 const qaActive = computed(() => Boolean(qaRuntimeBatch.value?.active))
 const qaSelectionLocked = computed(() => qaStarting.value || qaActive.value)
+const qaSubmission = computed(() => questionAnswerSubmissionSummary(
+  selected.value.size,
+  qaSelectedQuestions.value.size,
+  qaRepeatCount.value,
+))
 const canStartTest = computed(() => {
   if (!hasModels.value || selected.value.size === 0 || phase.value === 'testing') return false
   if (mode.value !== 'questionAnswer') return true
-  return qaSelectedQuestions.value.size > 0 && !qaSelectionLocked.value && !qaLoading.value
+  return qaSelectedQuestions.value.size > 0
+    && qaSubmission.value.validRepeatCount
+    && qaSubmission.value.withinBatchLimit
+    && !qaSelectionLocked.value
+    && !qaLoading.value
 })
-const qaRequestCount = computed(() => selected.value.size * qaSelectedQuestions.value.size)
+const qaWaitingCount = computed(() => Math.max(
+  0,
+  (qaRuntimeBatch.value?.stats.requests.inProgress ?? 0) - (qaRuntimeBatch.value?.runningCount ?? 0),
+))
 const qaCurrentRecords = computed(() => {
   if (!qaReviewBatch.value) return []
   return qaReviewBatch.value.active
@@ -649,6 +670,7 @@ const startQuestionAnswers = async () => {
       Array.from(selected.value),
       Array.from(qaSelectedQuestions.value),
       qaReasoningEffort.value,
+      qaRepeatCount.value,
       controller.signal,
     )
     if (startSequence !== qaStartSequence || !questionAnswerScopeIsCurrent(scope)) return
@@ -882,6 +904,13 @@ const replaceQuestionAnswerBatchRecord = (
     stats: {
       ...batch.stats,
       reviews: questionAnswerReviewStatsFromRecords(records),
+      byModel: batch.stats.byModel.map(item => ({
+        ...item,
+        requests: { ...item.requests },
+        reviews: questionAnswerReviewStatsFromRecords(
+          records.filter(record => record.modelName === item.modelName),
+        ),
+      })),
     },
   }
 }
@@ -1214,6 +1243,21 @@ const close = () => {
                       <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.reviews.correct }}</dd></div>
                       <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.reviews.incorrect }}</dd></div>
                     </dl>
+                    <div v-if="qaReviewBatch.stats.byModel.length" class="mt-3 space-y-2 border-t border-border/40 pt-3">
+                      <div v-for="item in qaReviewBatch.stats.byModel" :key="item.modelName" data-testid="question-answer-model-stats" class="rounded-md border border-border/40 p-2">
+	                        <p class="break-all text-xs font-medium text-foreground">{{ item.modelName }}</p>
+	                        <dl class="mt-2 grid grid-cols-4 gap-x-2 gap-y-1">
+	                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.submitted`, { count: item.requests.submitted }) }}</dt><dd class="sr-only">{{ item.requests.submitted }}</dd></div>
+	                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.inProgress`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.inProgress }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.succeeded`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.succeeded }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.failed`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.failed }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.cancelled`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.cancelled }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.unreviewed`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.unreviewed }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.correct }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.incorrect }}</dd></div>
+                        </dl>
+                      </div>
+                    </div>
                   </div>
                   <div class="px-4 py-3" :class="qaReviewBatch ? 'border-l border-border/50' : ''">
                     <div class="flex items-center justify-between gap-3">
@@ -1229,6 +1273,21 @@ const close = () => {
                       <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.stats.reviews.correct }}</dd></div>
                       <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.stats.reviews.incorrect }}</dd></div>
                     </dl>
+                    <div v-if="qaHistory.stats.byModel.length" class="mt-3 space-y-2 border-t border-border/40 pt-3">
+                      <div v-for="item in qaHistory.stats.byModel" :key="item.modelName" data-testid="question-answer-model-stats" class="rounded-md border border-border/40 p-2">
+	                        <p class="break-all text-xs font-medium text-foreground">{{ item.modelName }}</p>
+	                        <dl class="mt-2 grid grid-cols-4 gap-x-2 gap-y-1">
+	                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.submitted`, { count: item.requests.submitted }) }}</dt><dd class="sr-only">{{ item.requests.submitted }}</dd></div>
+	                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.inProgress`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.inProgress }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.succeeded`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.succeeded }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.failed`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.failed }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.cancelled`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.cancelled }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.unreviewed`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.unreviewed }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.correct }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.incorrect }}</dd></div>
+                        </dl>
+                      </div>
+                    </div>
                   </div>
                   <div class="border-l border-border/50 px-4 py-3">
                     <div class="flex items-center justify-between gap-3">
@@ -1244,6 +1303,21 @@ const close = () => {
                       <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.todayStats.reviews.correct }}</dd></div>
                       <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.todayStats.reviews.incorrect }}</dd></div>
                     </dl>
+                    <div v-if="qaHistory.todayStats.byModel.length" class="mt-3 space-y-2 border-t border-border/40 pt-3">
+                      <div v-for="item in qaHistory.todayStats.byModel" :key="item.modelName" data-testid="question-answer-model-stats" class="rounded-md border border-border/40 p-2">
+	                        <p class="break-all text-xs font-medium text-foreground">{{ item.modelName }}</p>
+	                        <dl class="mt-2 grid grid-cols-4 gap-x-2 gap-y-1">
+	                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.submitted`, { count: item.requests.submitted }) }}</dt><dd class="sr-only">{{ item.requests.submitted }}</dd></div>
+	                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.inProgress`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.inProgress }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.succeeded`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.succeeded }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.failed`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.failed }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.cancelled`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.cancelled }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.unreviewed`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.unreviewed }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.correct }}</dd></div>
+                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.incorrect }}</dd></div>
+                        </dl>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
@@ -1269,13 +1343,17 @@ const close = () => {
                           {{ t(`${prefix}.questionAnswer.reasoningEffort.options.${option.labelKey}`) }}
                         </label>
                       </div>
+                      <label class="mt-3 block text-xs font-semibold text-foreground" for="question-answer-repeat-count">{{ t(`${prefix}.questionAnswer.repeatCount`) }}</label>
+                      <select id="question-answer-repeat-count" v-model.number="qaRepeatCount" class="mt-2 w-full rounded-lg border border-border/50 bg-background px-3 py-2 text-xs text-foreground" :disabled="qaSelectionLocked">
+                        <option v-for="option in qaRepeatCountOptions" :key="option" :value="option">{{ option }}</option>
+                      </select>
                     </fieldset>
                   </div>
 
                   <div data-testid="question-answer-questions" class="mt-5 border-t border-border/40 pt-4">
                     <div class="mb-3 flex items-center justify-between gap-3">
                       <h4 class="text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.questionsTitle`) }}</h4>
-                      <span class="text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.selectedFormula`, { models: selected.size, questions: qaSelectedQuestions.size, total: qaRequestCount }) }}</span>
+                      <span class="text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.selectedFormula`, { models: qaSubmission.modelCount, questions: qaSubmission.questionCount, repeat: qaSubmission.repeatCount, total: qaSubmission.total }) }}</span>
                     </div>
                     <div v-if="qaLoading" class="flex items-center gap-2 rounded-lg border border-dashed border-border/50 px-3 py-5 text-xs text-muted-foreground">
                       <Loader2 class="h-4 w-4 animate-spin" />
@@ -1296,6 +1374,8 @@ const close = () => {
                         </div>
                       </label>
                     </div>
+                    <p v-if="!qaSubmission.validRepeatCount" class="mt-2 text-xs text-red-600 dark:text-red-400">{{ t(`${prefix}.questionAnswer.repeatCountInvalid`) }}</p>
+                    <p v-else-if="!qaSubmission.withinBatchLimit" class="mt-2 text-xs text-red-600 dark:text-red-400">{{ t(`${prefix}.questionAnswer.batchLimit`, { total: qaSubmission.total }) }}</p>
                   </div>
 
                   <p v-if="qaErrorKey" class="mt-4 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">{{ qaReadableError }}</p>
@@ -1316,6 +1396,8 @@ const close = () => {
                           <span v-else-if="qaReviewCompletedAt"> · {{ t(`${prefix}.questionAnswer.batchCompletedAt`, { time: formatConnectionHealthTime(qaReviewCompletedAt) }) }}</span>
                           <span v-else> · {{ t(`${prefix}.questionAnswer.batchTimeUnknown`) }}</span>
                         </p>
+                        <p v-if="qaRuntimeBatch?.active" class="mt-1 text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.queueProgress`, { waiting: qaWaitingCount, running: qaRuntimeBatch.runningCount, completed: qaRuntimeBatch.completedCount }) }}</p>
+                        <p v-if="qaRuntimeBatch?.active && qaWaitingCount > 0" class="mt-1 text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.queueNotice`) }}</p>
                         <p v-if="qaRuntimeBatch?.active && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" class="mt-2 text-xs text-amber-700 dark:text-amber-300">
                           {{ t(`${prefix}.questionAnswer.latestBatchStillRunning`, {
                             completed: qaRuntimeBatch.stats.requests.succeeded + qaRuntimeBatch.stats.requests.failed + qaRuntimeBatch.stats.requests.cancelled,
@@ -1565,7 +1647,7 @@ const close = () => {
             <p v-if="hasModels" class="flex items-center gap-1 text-xs text-muted-foreground">
               <AlertTriangle v-if="selected.size === 0 || (mode === 'questionAnswer' && qaSelectedQuestions.size === 0)" class="h-3.5 w-3.5" />
               {{ mode === 'questionAnswer'
-                ? t(`${prefix}.questionAnswer.selectedFormula`, { models: selected.size, questions: qaSelectedQuestions.size, total: qaRequestCount })
+                ? t(`${prefix}.questionAnswer.selectedFormula`, { models: qaSubmission.modelCount, questions: qaSubmission.questionCount, repeat: qaSubmission.repeatCount, total: qaSubmission.total })
                 : t(`${prefix}.selectedCount`, { count: selected.size }) }}
             </p>
             <div v-else />

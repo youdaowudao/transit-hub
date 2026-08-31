@@ -1460,6 +1460,16 @@ func TestQuestionAnswerTask2BrowserFixturePostgresContract(t *testing.T) {
 	`, userID, targetID); err != nil {
 		t.Fatalf("set fixture scope: %v", err)
 	}
+	var fixtureNow time.Time
+	if err := connection.QueryRow(ctx, `
+		SELECT (date_trunc('day', now() AT TIME ZONE 'Asia/Shanghai') + interval '1 minute')
+			AT TIME ZONE 'Asia/Shanghai'
+	`).Scan(&fixtureNow); err != nil {
+		t.Fatalf("build fixture midnight boundary time: %v", err)
+	}
+	if _, err := connection.Exec(ctx, `SELECT set_config('task2.fixture_now', $1, false)`, fixtureNow.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("set fixture midnight boundary time: %v", err)
+	}
 	batchIDs := []string{"task2-active-20260830", "task2-bulk-20260830", "task2-older-20260830"}
 	defer func() {
 		_, _ = connection.Exec(context.Background(), `
@@ -1524,6 +1534,24 @@ func TestQuestionAnswerTask2BrowserFixturePostgresContract(t *testing.T) {
 	}
 	if got := countRows(); got != 29 {
 		t.Fatalf("prepared rows=%d, want 29", got)
+	}
+	var timestampsValid bool
+	if err := connection.QueryRow(ctx, `
+		SELECT bool_and(
+			(created_at AT TIME ZONE 'Asia/Shanghai')::date = ($4 AT TIME ZONE 'Asia/Shanghai')::date
+			AND created_at <= $4
+			AND (started_at IS NULL OR (started_at >= created_at AND started_at <= $4))
+			AND (completed_at IS NULL OR (completed_at >= COALESCE(started_at, created_at) AND completed_at <= $4))
+			AND updated_at >= created_at
+			AND updated_at <= $4
+		)
+		FROM connection_health_question_answer_records
+		WHERE user_id = $1 AND target_id = $2 AND batch_id = ANY($3)
+	`, userID, targetID, batchIDs, fixtureNow).Scan(&timestampsValid); err != nil {
+		t.Fatalf("validate midnight fixture timestamps: %v", err)
+	}
+	if !timestampsValid {
+		t.Fatalf("fixture timestamps crossed the Shanghai day, entered the future, or reversed lifecycle order at %s", fixtureNow)
 	}
 	if err := runQuestionAnswerTask2FixtureAction(ctx, connection, "prepare"); err == nil || !strings.Contains(err.Error(), "fixture id already exists") {
 		t.Fatalf("duplicate prepare error=%v", err)

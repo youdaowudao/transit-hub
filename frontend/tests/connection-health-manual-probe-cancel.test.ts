@@ -73,6 +73,10 @@ const mountFormalDialog = async () => {
   mountedWrappers.push(wrapper)
   await wrapper.setProps({ open: true })
   await flushPromises()
+  const formalMode = wrapper.findAll('button').find(candidate => candidate.text().trim() === '正式手动探活')
+  if (!formalMode) throw new Error('missing formal-probe mode button')
+  await formalMode.trigger('click')
+  await flushPromises()
   return wrapper
 }
 

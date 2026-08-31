@@ -33,7 +33,8 @@ run_step "test calendar boundary guard" \
 run_step "question answer fixture safety tests" \
   node --test \
     "$ROOT_DIR/scripts/question-answer-review-fixture.test.mjs" \
-    "$ROOT_DIR/scripts/question-answer-batch-review-fixture.test.mjs"
+    "$ROOT_DIR/scripts/question-answer-batch-review-fixture.test.mjs" \
+    "$ROOT_DIR/scripts/question-answer-keyword-highlight-fixture.test.mjs"
 
 run_step "core regression membership tests" \
   node --test "$ROOT_DIR/scripts/test-core-regression-membership.test.mjs"

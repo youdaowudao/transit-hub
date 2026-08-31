@@ -11,9 +11,12 @@ test('connection-health core gate keeps every question-answer regression member'
   for (const member of [
     'connection-health-question-answer.test.ts',
     'connection-health-question-answer.behavior.test.ts',
+    'connection-health-question-keywords.behavior.test.ts',
     'question-answer-review-fixture.test.mjs',
     'question-answer-batch-review-fixture.test.mjs',
+    'question-answer-keyword-highlight-fixture.test.mjs',
     "Test.*QuestionAnswer",
+    "Test.*QuestionAnswerKeyword",
   ]) {
     assert.match(script, new RegExp(member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
@@ -25,6 +28,7 @@ test('full gate runs fixture safety and guards core membership', async () => {
   for (const member of [
     'question-answer-review-fixture.test.mjs',
     'question-answer-batch-review-fixture.test.mjs',
+    'question-answer-keyword-highlight-fixture.test.mjs',
     'test-core-regression-membership.test.mjs',
   ]) {
     assert.match(script, new RegExp(member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))

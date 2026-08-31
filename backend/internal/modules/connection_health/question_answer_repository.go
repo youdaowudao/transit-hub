@@ -16,8 +16,8 @@ var (
 
 type questionAnswerRepository interface {
 	ListTestQuestions(ctx context.Context, userID string) ([]TestQuestion, error)
-	CreateTestQuestion(ctx context.Context, userID string, name string, body string) (TestQuestion, error)
-	UpdateTestQuestion(ctx context.Context, userID string, questionID string, name string, body string) (*TestQuestion, error)
+	CreateTestQuestion(ctx context.Context, userID string, name string, body string, keywords []string) (TestQuestion, error)
+	UpdateTestQuestion(ctx context.Context, userID string, questionID string, name string, body string, keywords *[]string) (*TestQuestion, error)
 	SetTestQuestionEnabled(ctx context.Context, userID string, questionID string, enabled bool) (*TestQuestion, error)
 	SetDefaultTestQuestion(ctx context.Context, userID string, questionID string) (*TestQuestion, error)
 	DeleteTestQuestion(ctx context.Context, userID string, questionID string) (bool, error)
@@ -34,7 +34,7 @@ type questionAnswerRepository interface {
 
 func (r *Repository) ListTestQuestions(ctx context.Context, userID string) ([]TestQuestion, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT id, name, body, enabled, is_default, created_at, updated_at
+		SELECT id, name, body, keywords, enabled, is_default, created_at, updated_at
 		FROM connection_health_test_questions
 		WHERE user_id = $1
 		ORDER BY is_default DESC, created_at, id
@@ -47,7 +47,7 @@ func (r *Repository) ListTestQuestions(ctx context.Context, userID string) ([]Te
 	questions := make([]TestQuestion, 0)
 	for rows.Next() {
 		var question TestQuestion
-		if err := rows.Scan(&question.ID, &question.Name, &question.Body, &question.Enabled, &question.IsDefault, &question.CreatedAt, &question.UpdatedAt); err != nil {
+		if err := rows.Scan(&question.ID, &question.Name, &question.Body, &question.Keywords, &question.Enabled, &question.IsDefault, &question.CreatedAt, &question.UpdatedAt); err != nil {
 			return nil, err
 		}
 		questions = append(questions, question)
@@ -55,7 +55,7 @@ func (r *Repository) ListTestQuestions(ctx context.Context, userID string) ([]Te
 	return questions, rows.Err()
 }
 
-func (r *Repository) CreateTestQuestion(ctx context.Context, userID string, name string, body string) (TestQuestion, error) {
+func (r *Repository) CreateTestQuestion(ctx context.Context, userID string, name string, body string, keywords []string) (TestQuestion, error) {
 	id, err := newID()
 	if err != nil {
 		return TestQuestion{}, err
@@ -75,10 +75,10 @@ func (r *Repository) CreateTestQuestion(ctx context.Context, userID string, name
 	}
 	question := TestQuestion{ID: id, Name: name, Body: body, Enabled: true, IsDefault: count == 0}
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO connection_health_test_questions (id, user_id, name, body, enabled, is_default)
-		VALUES ($1, $2, $3, $4, true, $5)
-		RETURNING created_at, updated_at
-	`, question.ID, userID, question.Name, question.Body, question.IsDefault).Scan(&question.CreatedAt, &question.UpdatedAt); err != nil {
+		INSERT INTO connection_health_test_questions (id, user_id, name, body, keywords, enabled, is_default)
+		VALUES ($1, $2, $3, $4, $5, true, $6)
+		RETURNING keywords, created_at, updated_at
+	`, question.ID, userID, question.Name, question.Body, keywords, question.IsDefault).Scan(&question.Keywords, &question.CreatedAt, &question.UpdatedAt); err != nil {
 		return TestQuestion{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -87,13 +87,13 @@ func (r *Repository) CreateTestQuestion(ctx context.Context, userID string, name
 	return question, nil
 }
 
-func (r *Repository) UpdateTestQuestion(ctx context.Context, userID string, questionID string, name string, body string) (*TestQuestion, error) {
+func (r *Repository) UpdateTestQuestion(ctx context.Context, userID string, questionID string, name string, body string, keywords *[]string) (*TestQuestion, error) {
 	row := r.db.QueryRow(ctx, `
 		UPDATE connection_health_test_questions
-		SET name = $3, body = $4, updated_at = now()
+		SET name = $3, body = $4, keywords = COALESCE($5::text[], keywords), updated_at = now()
 		WHERE id = $1 AND user_id = $2
-		RETURNING id, name, body, enabled, is_default, created_at, updated_at
-	`, questionID, userID, name, body)
+		RETURNING id, name, body, keywords, enabled, is_default, created_at, updated_at
+	`, questionID, userID, name, body, keywords)
 	return scanTestQuestion(row)
 }
 
@@ -102,7 +102,7 @@ func (r *Repository) SetTestQuestionEnabled(ctx context.Context, userID string, 
 		UPDATE connection_health_test_questions
 		SET enabled = $3, is_default = CASE WHEN $3 THEN is_default ELSE false END, updated_at = now()
 		WHERE id = $1 AND user_id = $2
-		RETURNING id, name, body, enabled, is_default, created_at, updated_at
+		RETURNING id, name, body, keywords, enabled, is_default, created_at, updated_at
 	`, questionID, userID, enabled)
 	return scanTestQuestion(row)
 }
@@ -133,7 +133,7 @@ func (r *Repository) SetDefaultTestQuestion(ctx context.Context, userID string, 
 		UPDATE connection_health_test_questions
 		SET is_default = true, updated_at = now()
 		WHERE id = $1 AND user_id = $2 AND enabled
-		RETURNING id, name, body, enabled, is_default, created_at, updated_at
+		RETURNING id, name, body, keywords, enabled, is_default, created_at, updated_at
 	`, questionID, userID)
 	question, err := scanTestQuestion(row)
 	if err != nil {
@@ -152,7 +152,7 @@ func (r *Repository) DeleteTestQuestion(ctx context.Context, userID string, ques
 
 func scanTestQuestion(row rowScanner) (*TestQuestion, error) {
 	var question TestQuestion
-	if err := row.Scan(&question.ID, &question.Name, &question.Body, &question.Enabled, &question.IsDefault, &question.CreatedAt, &question.UpdatedAt); err != nil {
+	if err := row.Scan(&question.ID, &question.Name, &question.Body, &question.Keywords, &question.Enabled, &question.IsDefault, &question.CreatedAt, &question.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -186,7 +186,7 @@ func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID strin
 	}
 
 	rows, err := tx.Query(ctx, `
-		SELECT id, name, body, enabled, is_default, created_at, updated_at
+		SELECT id, name, body, keywords, enabled, is_default, created_at, updated_at
 		FROM connection_health_test_questions
 		WHERE user_id = $1 AND enabled AND id = ANY($2)
 	`, userID, questionIDs)
@@ -196,7 +196,7 @@ func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID strin
 	questionsByID := make(map[string]TestQuestion, len(questionIDs))
 	for rows.Next() {
 		var question TestQuestion
-		if err := rows.Scan(&question.ID, &question.Name, &question.Body, &question.Enabled, &question.IsDefault, &question.CreatedAt, &question.UpdatedAt); err != nil {
+		if err := rows.Scan(&question.ID, &question.Name, &question.Body, &question.Keywords, &question.Enabled, &question.IsDefault, &question.CreatedAt, &question.UpdatedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -222,15 +222,17 @@ func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID strin
 			record := QuestionAnswerRecord{
 				ID: recordID, TargetID: targetID, BatchID: batchID, ModelName: model,
 				QuestionID: question.ID, QuestionName: question.Name, QuestionBody: question.Body,
-				ReasoningEffort: questionAnswerReasoningEffortPointer(reasoningEffort),
-				Status:          QuestionAnswerPending,
+				QuestionKeywordSnapshot: append([]string{}, question.Keywords...),
+				ReasoningEffort:         questionAnswerReasoningEffortPointer(reasoningEffort),
+				Status:                  QuestionAnswerPending,
 			}
 			if err := tx.QueryRow(ctx, `
 				INSERT INTO connection_health_question_answer_records (
-					id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body, reasoning_effort, status
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending')
+					id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body,
+					question_keyword_snapshot, reasoning_effort, status
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
 				RETURNING created_at, updated_at
-			`, record.ID, userID, record.TargetID, record.BatchID, record.ModelName, record.QuestionID, record.QuestionName, record.QuestionBody, reasoningEffort).Scan(&record.CreatedAt, &record.UpdatedAt); err != nil {
+			`, record.ID, userID, record.TargetID, record.BatchID, record.ModelName, record.QuestionID, record.QuestionName, record.QuestionBody, record.QuestionKeywordSnapshot, reasoningEffort).Scan(&record.CreatedAt, &record.UpdatedAt); err != nil {
 				return nil, err
 			}
 			records = append(records, record)
@@ -417,14 +419,14 @@ func (r *Repository) SetQuestionAnswerJudgment(ctx context.Context, userID strin
 				ELSE updated_at
 			END
 		WHERE id = $1 AND user_id = $2 AND target_id = $3 AND status = 'succeeded'
-		RETURNING id, target_id, batch_id, model_name, question_id, question_name, question_body,
+		RETURNING id, target_id, batch_id, model_name, question_id, question_name, question_body, question_keyword_snapshot,
 			reasoning_effort, answer_body, status, error_type, answer_judgment, created_at, started_at, completed_at, updated_at
 	`, recordID, userID, targetID, judgment)
 	return scanQuestionAnswerRecord(row)
 }
 
 const questionAnswerRecordSelect = `
-	SELECT id, target_id, batch_id, model_name, question_id, question_name, question_body,
+	SELECT id, target_id, batch_id, model_name, question_id, question_name, question_body, question_keyword_snapshot,
 		reasoning_effort, answer_body, status, error_type, answer_judgment, created_at, started_at, completed_at, updated_at
 	FROM connection_health_question_answer_records
 `
@@ -446,7 +448,7 @@ func scanQuestionAnswerRecord(row rowScanner) (*QuestionAnswerRecord, error) {
 	var reasoningEffort *string
 	if err := row.Scan(
 		&record.ID, &record.TargetID, &record.BatchID, &record.ModelName, &record.QuestionID,
-		&record.QuestionName, &record.QuestionBody, &reasoningEffort, &record.AnswerBody, &record.Status,
+		&record.QuestionName, &record.QuestionBody, &record.QuestionKeywordSnapshot, &reasoningEffort, &record.AnswerBody, &record.Status,
 		&record.ErrorType, &record.AnswerJudgment, &record.CreatedAt, &record.StartedAt,
 		&record.CompletedAt, &record.UpdatedAt,
 	); err != nil {
@@ -471,5 +473,11 @@ func questionAnswerReasoningEffortPointer(value QuestionAnswerReasoningEffort) *
 }
 
 func cloneQuestionAnswerRecords(records []QuestionAnswerRecord) []QuestionAnswerRecord {
-	return append([]QuestionAnswerRecord(nil), records...)
+	cloned := append([]QuestionAnswerRecord(nil), records...)
+	for i := range cloned {
+		if cloned[i].QuestionKeywordSnapshot != nil {
+			cloned[i].QuestionKeywordSnapshot = append([]string{}, cloned[i].QuestionKeywordSnapshot...)
+		}
+	}
+	return cloned
 }

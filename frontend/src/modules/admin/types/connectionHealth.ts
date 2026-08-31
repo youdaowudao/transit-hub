@@ -367,6 +367,7 @@ export interface TestQuestion {
   id: string
   name: string
   body: string
+  keywords: string[]
   enabled: boolean
   isDefault: boolean
   createdAt: string
@@ -376,6 +377,7 @@ export interface TestQuestion {
 export interface TestQuestionInput {
   name: string
   body: string
+  keywords?: string[] | null
 }
 
 export type QuestionAnswerStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
@@ -390,6 +392,7 @@ export interface QuestionAnswerRecord {
   questionId: string
   questionName: string
   questionBody: string
+  questionKeywordSnapshot: string[] | null
   reasoningEffort: QuestionAnswerReasoningEffort | null
   answerBody: string
   status: QuestionAnswerStatus

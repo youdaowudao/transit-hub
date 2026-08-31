@@ -240,6 +240,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			user_id text NOT NULL,
 			name text NOT NULL,
 			body text NOT NULL,
+			keywords text[] NOT NULL DEFAULT ARRAY[]::text[],
 			enabled boolean NOT NULL DEFAULT true,
 			is_default boolean NOT NULL DEFAULT false,
 			created_at timestamptz NOT NULL DEFAULT now(),
@@ -248,6 +249,8 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			CONSTRAINT connection_health_test_questions_body_length CHECK (char_length(btrim(body)) BETWEEN 1 AND 4000),
 			CONSTRAINT connection_health_test_questions_default_enabled CHECK (NOT is_default OR enabled)
 		)`,
+		`ALTER TABLE connection_health_test_questions
+			ADD COLUMN IF NOT EXISTS keywords text[] NOT NULL DEFAULT ARRAY[]::text[]`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_test_questions_user_created ON connection_health_test_questions (user_id, created_at, id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_connection_health_test_questions_one_default ON connection_health_test_questions (user_id) WHERE is_default AND enabled`,
 
@@ -260,6 +263,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			question_id text NOT NULL,
 			question_name text NOT NULL,
 			question_body text NOT NULL,
+			question_keyword_snapshot text[] NULL,
 			answer_body text NOT NULL DEFAULT '',
 			status text NOT NULL DEFAULT 'pending',
 			error_type text NOT NULL DEFAULT '',
@@ -271,6 +275,8 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			updated_at timestamptz NOT NULL DEFAULT now(),
 			CONSTRAINT connection_health_question_answer_status CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'cancelled'))
 		)`,
+		`ALTER TABLE connection_health_question_answer_records
+			ADD COLUMN IF NOT EXISTS question_keyword_snapshot text[] NULL`,
 		`ALTER TABLE connection_health_question_answer_records
 			ADD COLUMN IF NOT EXISTS reasoning_effort text NULL`,
 		`ALTER TABLE connection_health_question_answer_records

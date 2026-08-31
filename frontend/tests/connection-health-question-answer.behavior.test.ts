@@ -3,7 +3,9 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import ManualOneTimeProbeDialog from '@/modules/admin/components/dashboard/ManualOneTimeProbeDialog.vue'
+import ManualOneTimeProbeDialog, {
+  type ManualProbeTargetSummary,
+} from '@/modules/admin/components/dashboard/ManualOneTimeProbeDialog.vue'
 import { shortQuestionAnswerBatchId } from '@/modules/admin/utils/questionAnswers'
 
 const harness = vi.hoisted(() => ({
@@ -52,6 +54,7 @@ const records = Array.from({ length: 6 }, (_, index) => ({
   questionId: `q${index + 1}`,
   questionName: `Question ${index + 1}`,
   questionBody: `Question body ${index + 1}`,
+  questionKeywordSnapshot: null,
   reasoningEffort: 'medium' as const,
   answerBody: '',
   status: index < 5 ? 'running' as const : 'pending' as const,
@@ -162,12 +165,30 @@ const historicalBatch = (batchId: string, firstQuestionName = 'Unreviewed one') 
 
 const mountedWrappers: VueWrapper[] = []
 
+const primaryTarget: ManualProbeTargetSummary = {
+  targetId: 'sub2api:ws1:acc-1',
+  accountName: 'Concurrent Account',
+  platform: 'sub2api',
+  type: 'subscription',
+  status: 'active',
+  groupName: 'Group A',
+  formalModels: [],
+}
+
+const secondaryTarget: ManualProbeTargetSummary = {
+  ...primaryTarget,
+  targetId: 'sub2api:ws1:acc-2',
+  accountName: 'Second Account',
+  groupName: 'Group B',
+}
+
 beforeEach(() => {
   harness.discoverModels.mockReset().mockResolvedValue({ models: [{ id: 'model-a', name: 'Model A' }] })
   harness.listTestQuestions.mockReset().mockResolvedValue(records.map((record, index) => ({
     id: record.questionId,
     name: record.questionName,
     body: record.questionBody,
+    keywords: ['当前配置关键字'],
     enabled: true,
     isDefault: index === 0,
     createdAt: record.createdAt,
@@ -191,15 +212,7 @@ const mountQuestionAnswerDialog = async () => {
   const wrapper = mount(ManualOneTimeProbeDialog, {
     props: {
       open: false,
-      target: {
-        targetId: 'sub2api:ws1:acc-1',
-        accountName: 'Concurrent Account',
-        platform: 'sub2api',
-        type: 'subscription',
-        status: 'active',
-        groupName: 'Group A',
-        formalModels: [],
-      },
+      target: primaryTarget,
     },
     global: { stubs: { Teleport: true, Transition: false } },
   })
@@ -211,6 +224,15 @@ const mountQuestionAnswerDialog = async () => {
   if (!questionAnswerButton) throw new Error('missing question-answer mode button')
   await questionAnswerButton.trigger('click')
   await flushPromises()
+  return wrapper
+}
+
+const mountClosedDialog = () => {
+  const wrapper = mount(ManualOneTimeProbeDialog, {
+    props: { open: false, target: primaryTarget },
+    global: { stubs: { Teleport: true, Transition: false } },
+  })
+  mountedWrappers.push(wrapper)
   return wrapper
 }
 
@@ -255,7 +277,349 @@ const rowContaining = (wrapper: VueWrapper, text: string) => {
 
 const judgmentButtons = (wrapper: ReturnType<typeof rowContaining>) => wrapper.findAll('button').filter((button) => {
   const text = button.text().trim()
-  return text === '正确' || text === '错误'
+  return text.startsWith('正确') || text.startsWith('错误')
+})
+
+const appearsBefore = (first: Element, second: Element) => Boolean(
+  first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING,
+)
+
+describe('question-answer low-operation review', () => {
+  it('opens and reopens in the first question-answer mode with one initialization and the fixed near-viewport layout', async () => {
+    const wrapper = mountClosedDialog()
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+
+    const modeLabels = new Set(['问答测试', '正式手动探活', '一次性测试'])
+    const modeButtons = wrapper.findAll('button').filter(button => modeLabels.has(button.text().trim()))
+    expect(modeButtons.map(button => button.text().trim())).toEqual([
+      '问答测试',
+      '正式手动探活',
+      '一次性测试',
+    ])
+    expect(modeButtons[0].classes()).toContain('bg-background')
+    expect(harness.listTestQuestions).toHaveBeenCalledTimes(1)
+    expect(harness.getLatestQuestionAnswerBatch).toHaveBeenCalledTimes(1)
+    expect(harness.getQuestionAnswerHistory).toHaveBeenCalledTimes(1)
+
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.classes()).toEqual(expect.arrayContaining([
+      'h-[calc(100dvh-1rem)]',
+      'w-[calc(100vw-1rem)]',
+      'max-w-none',
+    ]))
+    expect(dialog.classes()).not.toContain('max-w-6xl')
+    expect(dialog.classes().some(className => className.includes('760px'))).toBe(false)
+    expect(dialog.element.parentElement?.classList.contains('p-2')).toBe(true)
+
+    const models = wrapper.get('[data-testid="question-answer-models"]')
+    const reasoning = wrapper.get('[data-testid="question-answer-reasoning"]')
+    const questions = wrapper.get('[data-testid="question-answer-questions"]')
+    expect(models.element.parentElement).toBe(reasoning.element.parentElement)
+    expect(models.element.parentElement?.classList.contains('grid')).toBe(true)
+    expect(models.element.parentElement?.classList.contains('gap-4')).toBe(true)
+    expect(models.element.parentElement?.classList.contains('xl:grid-cols-[minmax(0,1fr)_20rem]')).toBe(true)
+    expect(appearsBefore(models.element.parentElement as Element, questions.element)).toBe(true)
+
+    await modeButtons[1].trigger('click')
+    expect(modeButtons[1].classes()).toContain('bg-background')
+    await modeButtons[2].trigger('click')
+    expect(modeButtons[2].classes()).toContain('bg-background')
+
+    await wrapper.setProps({ open: false })
+    await flushPromises()
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+
+    const reopenedQuestionAnswer = wrapper.findAll('button').find(button => button.text().trim() === '问答测试')
+    expect(reopenedQuestionAnswer?.classes()).toContain('bg-background')
+    expect(harness.listTestQuestions).toHaveBeenCalledTimes(2)
+    expect(harness.getLatestQuestionAnswerBatch).toHaveBeenCalledTimes(2)
+    expect(harness.getQuestionAnswerHistory).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears account A immediately and initializes account B exactly once without accepting A judgment work', async () => {
+    const targetBRecord = {
+      ...reviewRecords[0],
+      id: 'target-b-record',
+      targetId: secondaryTarget.targetId,
+      batchId: 'batch-target-b',
+      questionName: 'Second target question',
+      answerBody: 'Second target answer',
+      questionKeywordSnapshot: ['Second'],
+    }
+    const targetBBatch = terminalReviewBatch([targetBRecord])
+    let resolveTargetB: ((batch: typeof targetBBatch) => void) | undefined
+    harness.getLatestQuestionAnswerBatch.mockImplementation((targetId: string) => {
+      if (targetId === primaryTarget.targetId) return Promise.resolve(terminalReviewBatch())
+      return new Promise<typeof targetBBatch>(resolve => { resolveTargetB = resolve })
+    })
+    harness.getQuestionAnswerHistory.mockImplementation(async (targetId: string) => (
+      targetId === primaryTarget.targetId ? terminalReviewHistory() : emptyHistory
+    ))
+    let oldJudgmentAborted = false
+    harness.setQuestionAnswerJudgment.mockImplementation((
+      _targetId: string,
+      _recordId: string,
+      _judgment: string,
+      signal: AbortSignal,
+    ) => new Promise((_, reject) => {
+      signal.addEventListener('abort', () => {
+        oldJudgmentAborted = true
+        reject(new DOMException('Aborted', 'AbortError'))
+      }, { once: true })
+    }))
+
+    const wrapper = mountClosedDialog()
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+    expect(wrapper.text()).toContain('Answer unreviewed one')
+
+    const correct = judgmentButtons(rowContaining(wrapper, 'Unreviewed one')).find(
+      button => button.text().startsWith('正确'),
+    )
+    if (!correct) throw new Error('missing account A judgment button')
+    await correct.trigger('click')
+    await wrapper.setProps({ target: secondaryTarget })
+    await flushPromises()
+
+    expect(oldJudgmentAborted).toBe(true)
+    expect(wrapper.text()).not.toContain('Answer unreviewed one')
+    expect(harness.listTestQuestions).toHaveBeenCalledTimes(2)
+    expect(harness.getLatestQuestionAnswerBatch.mock.calls.map(call => call[0])).toEqual([
+      primaryTarget.targetId,
+      secondaryTarget.targetId,
+    ])
+    expect(harness.getQuestionAnswerHistory.mock.calls.map(call => call[0])).toEqual([
+      primaryTarget.targetId,
+      secondaryTarget.targetId,
+    ])
+
+    resolveTargetB?.(targetBBatch)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Second target answer')
+    expect(wrapper.text()).not.toContain('Answer unreviewed one')
+  })
+
+  it('highlights only succeeded unreviewed main cards from their own snapshot and never folded history', async () => {
+    const base = {
+      ...reviewRecords[0],
+      batchId: 'batch-highlight-matrix',
+      answerBody: '错误码 当前配置关键字 <script>alert(1)</script> [done] Error',
+      questionKeywordSnapshot: ['错误', '错误码', '<script>', '[done]', 'Error'] as string[] | null,
+    }
+    const matrix = [
+      { ...base, id: 'highlight-unreviewed', questionName: 'Highlight unreviewed' },
+      { ...base, id: 'highlight-correct', questionName: 'Highlight correct', answerJudgment: 'correct' as const },
+      { ...base, id: 'highlight-incorrect', questionName: 'Highlight incorrect', answerJudgment: 'incorrect' as const, manualError: true },
+      { ...base, id: 'highlight-null', questionName: 'Highlight null', questionKeywordSnapshot: null },
+      { ...base, id: 'highlight-empty', questionName: 'Highlight empty', questionKeywordSnapshot: [] },
+      { ...base, id: 'highlight-no-hit', questionName: 'Highlight no hit', questionKeywordSnapshot: ['不存在'] },
+      { ...base, id: 'highlight-failed', questionName: 'Highlight failed', status: 'failed' as const, answerJudgment: null, errorType: 'network' },
+    ]
+    const foldedHistoryRecord = {
+      ...base,
+      id: 'folded-history-highlight',
+      batchId: 'batch-old-snapshot',
+      questionName: 'Folded history highlight',
+      answerBody: '旧关键字 当前配置关键字',
+      questionKeywordSnapshot: ['旧关键字'],
+    }
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch(matrix))
+    harness.getQuestionAnswerHistory.mockResolvedValue(terminalReviewHistory([foldedHistoryRecord]))
+    harness.getQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch([foldedHistoryRecord]))
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const unreviewed = rowContaining(wrapper, 'Highlight unreviewed')
+    expect(unreviewed.findAll('mark').map(mark => mark.text())).toEqual(['错误码', '<script>', '[done]'])
+    expect(unreviewed.findAll('mark').map(mark => mark.text())).not.toContain('当前配置关键字')
+    expect(unreviewed.findAll('mark').map(mark => mark.text())).not.toContain('Error')
+    expect(unreviewed.text()).toContain('[done] Error')
+    expect(unreviewed.find('script').exists()).toBe(false)
+    expect(rowContaining(wrapper, 'Highlight null').findAll('mark')).toHaveLength(0)
+    expect(rowContaining(wrapper, 'Highlight null').text()).toContain('无关键字快照')
+    expect(rowContaining(wrapper, 'Highlight empty').findAll('mark')).toHaveLength(0)
+    expect(rowContaining(wrapper, 'Highlight empty').text()).not.toContain('无关键字快照')
+    expect(rowContaining(wrapper, 'Highlight no hit').findAll('mark')).toHaveLength(0)
+
+    const showAll = wrapper.findAll('button').find(button => button.text().trim() === '查看全部')
+    if (!showAll) throw new Error('missing show-all for highlight matrix')
+    await showAll.trigger('click')
+    for (const questionName of ['Highlight correct', 'Highlight incorrect', 'Highlight failed']) {
+      expect(rowContaining(wrapper, questionName).findAll('mark')).toHaveLength(0)
+    }
+    expect(rowContaining(wrapper, 'Folded history highlight').findAll('mark')).toHaveLength(0)
+
+    const reviewOldBatch = wrapper.findAll('button').find(button => button.text().trim() === '复审此批次')
+    if (!reviewOldBatch) throw new Error('missing old-batch review action')
+    await reviewOldBatch.trigger('click')
+    await flushPromises()
+    const selectedOldBatch = rowContaining(wrapper, 'Folded history highlight')
+    expect(selectedOldBatch.findAll('mark').map(mark => mark.text())).toEqual(['旧关键字'])
+    expect(selectedOldBatch.findAll('mark').map(mark => mark.text())).not.toContain('当前配置关键字')
+  })
+
+  it('places every judgment pair vertically with large correct-above-error actions', async () => {
+    const currentRecord = {
+      ...reviewRecords[0],
+      id: 'large-current-actions',
+      batchId: 'batch-large-actions',
+      questionName: 'Large current actions',
+      answerBody: 'Large current answer',
+      questionKeywordSnapshot: ['Large'],
+    }
+    const historyRecord = {
+      ...currentRecord,
+      id: 'large-history-actions',
+      batchId: 'batch-large-history-actions',
+      questionName: 'Large history actions',
+      answerBody: 'Large history answer',
+    }
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch([currentRecord]))
+    harness.getQuestionAnswerHistory.mockResolvedValue(terminalReviewHistory([historyRecord]))
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const showAll = wrapper.findAll('button').find(button => button.text().trim() === '查看全部')
+    if (!showAll) throw new Error('missing show-all for judgment layout')
+    await showAll.trigger('click')
+
+    const currentRow = rowContaining(wrapper, 'Large current actions')
+    const currentButtons = judgmentButtons(currentRow)
+    const currentAnswer = currentRow.findAll('p').find(paragraph => paragraph.text().includes('Large current answer'))
+    if (!currentAnswer) throw new Error('missing current answer text')
+    expect(currentButtons.map(button => button.text().trim())).toEqual(['正确', '错误'])
+    expect(currentButtons.every(button => button.classes().includes('min-h-14'))).toBe(true)
+    expect(currentRow.classes()).toContain('grid')
+    expect(currentRow.classes()).toContain('gap-6')
+    expect(currentRow.classes().some(className => className.startsWith('md:grid-cols-'))).toBe(true)
+    expect(currentRow.classes()).toContain('md:grid-rows-2')
+    expect(appearsBefore(currentButtons[0].element, currentAnswer.element)).toBe(true)
+    expect(appearsBefore(currentAnswer.element, currentButtons[1].element)).toBe(true)
+
+    const historyRow = rowContaining(wrapper, 'Large history actions')
+    const historyButtons = judgmentButtons(historyRow)
+    expect(historyButtons.map(button => button.text().trim())).toEqual(['正确', '错误'])
+    expect(historyButtons.every(button => button.classes().includes('min-h-14'))).toBe(true)
+    expect(historyButtons[0].element.parentElement).toBe(historyButtons[1].element.parentElement)
+    expect(historyButtons[0].element.parentElement?.classList.contains('grid')).toBe(true)
+    expect(historyButtons[0].element.parentElement?.classList.contains('gap-6')).toBe(true)
+  })
+
+  it('shows an immediate colored saving intent without changing judgment, stats or highlight on failure', async () => {
+    const pendingRecord = {
+      ...reviewRecords[0],
+      id: 'pending-intent-record',
+      batchId: 'batch-pending-intent',
+      questionName: 'Pending intent record',
+      answerBody: '错误码 pending intent',
+      questionKeywordSnapshot: ['错误码'],
+    }
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch([pendingRecord]))
+    harness.getQuestionAnswerHistory.mockResolvedValue(emptyHistory)
+    let rejectJudgment: ((error: Error) => void) | undefined
+    harness.setQuestionAnswerJudgment.mockImplementation(() => new Promise((_, reject) => {
+      rejectJudgment = reject
+    }))
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const row = rowContaining(wrapper, 'Pending intent record')
+    const incorrect = judgmentButtons(row).find(button => button.text().startsWith('错误'))
+    if (!incorrect) throw new Error('missing incorrect intent action')
+    await incorrect.trigger('click')
+    await flushPromises()
+
+    const savingRow = rowContaining(wrapper, 'Pending intent record')
+    const savingButtons = judgmentButtons(savingRow)
+    const savingIncorrect = savingButtons.find(button => button.text().startsWith('错误'))
+    expect(savingButtons.every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    expect(savingIncorrect?.classes()).toContain('bg-red-500/20')
+    expect(savingIncorrect?.text()).toContain('保存中')
+    expect(savingIncorrect?.attributes('aria-pressed')).toBe('false')
+    expect(savingRow.findAll('mark').map(mark => mark.text())).toEqual(['错误码'])
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('待复审1')
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('错误0')
+
+    rejectJudgment?.(new Error('admin.connectionHealth.errors.request'))
+    await flushPromises()
+    const failedRow = rowContaining(wrapper, 'Pending intent record')
+    const failedIncorrect = judgmentButtons(failedRow).find(button => button.text().startsWith('错误'))
+    expect(failedIncorrect?.text()).not.toContain('保存中')
+    expect(failedIncorrect?.classes()).not.toContain('bg-red-500/20')
+    expect(failedIncorrect?.attributes('disabled')).toBeUndefined()
+    expect(failedRow.findAll('mark').map(mark => mark.text())).toEqual(['错误码'])
+    expect(wrapper.text()).toContain('操作失败')
+  })
+
+  it('applies the returned authoritative record before batch refresh and removes it from the default queue', async () => {
+    const pendingRecord = {
+      ...reviewRecords[0],
+      id: 'authoritative-default-record',
+      batchId: 'batch-authoritative-default',
+      questionName: 'Authoritative default record',
+      answerBody: '错误码 authoritative default',
+      questionKeywordSnapshot: ['错误码'],
+    }
+    const authoritativeRecord = { ...pendingRecord, answerJudgment: 'correct' as const, manualError: false }
+    const refreshedBatch = terminalReviewBatch([authoritativeRecord])
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch([pendingRecord]))
+    harness.getQuestionAnswerHistory.mockResolvedValue(emptyHistory)
+    let resolveJudgment: ((record: typeof authoritativeRecord) => void) | undefined
+    let resolveBatchRefresh: ((batch: typeof refreshedBatch) => void) | undefined
+    harness.setQuestionAnswerJudgment.mockImplementation(() => new Promise(resolve => { resolveJudgment = resolve }))
+    harness.getQuestionAnswerBatch.mockImplementation(() => new Promise(resolve => { resolveBatchRefresh = resolve }))
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const correct = judgmentButtons(rowContaining(wrapper, 'Authoritative default record')).find(
+      button => button.text().startsWith('正确'),
+    )
+    if (!correct) throw new Error('missing authoritative correct action')
+    await correct.trigger('click')
+    resolveJudgment?.(authoritativeRecord)
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('Authoritative default record')
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('待复审0')
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('正确1')
+
+    resolveBatchRefresh?.(refreshedBatch)
+    await flushPromises()
+  })
+
+  it('keeps the authoritative all-record color when statistics refresh fails and reports the partial outcome', async () => {
+    const pendingRecord = {
+      ...reviewRecords[0],
+      id: 'authoritative-show-all-record',
+      batchId: 'batch-authoritative-show-all',
+      questionName: 'Authoritative show-all record',
+      answerBody: '错误码 authoritative show all',
+      questionKeywordSnapshot: ['错误码'],
+    }
+    const authoritativeRecord = { ...pendingRecord, answerJudgment: 'incorrect' as const, manualError: true }
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch([pendingRecord]))
+    harness.getQuestionAnswerHistory.mockResolvedValue(emptyHistory)
+    harness.setQuestionAnswerJudgment.mockResolvedValue(authoritativeRecord)
+    harness.getQuestionAnswerBatch.mockRejectedValue(new Error('statistics refresh failed'))
+
+    const wrapper = await mountQuestionAnswerDialog()
+    const showAll = wrapper.findAll('button').find(button => button.text().trim() === '查看全部')
+    if (!showAll) throw new Error('missing show-all for authoritative refresh failure')
+    await showAll.trigger('click')
+    const incorrect = judgmentButtons(rowContaining(wrapper, 'Authoritative show-all record')).find(
+      button => button.text().startsWith('错误'),
+    )
+    if (!incorrect) throw new Error('missing authoritative incorrect action')
+    await incorrect.trigger('click')
+    await flushPromises()
+
+    const row = rowContaining(wrapper, 'Authoritative show-all record')
+    const savedIncorrect = judgmentButtons(row).find(button => button.text().startsWith('错误'))
+    expect(row.classes()).toContain('bg-red-500/20')
+    expect(savedIncorrect?.classes()).toContain('bg-red-500/20')
+    expect(savedIncorrect?.attributes('aria-pressed')).toBe('true')
+    expect(row.findAll('mark')).toHaveLength(0)
+    expect(wrapper.text()).toContain('判定已保存，统计刷新失败')
+    expect(wrapper.text()).not.toContain('判定保存失败')
+  })
 })
 
 describe('question-answer batch behavior', () => {
@@ -2140,9 +2504,11 @@ describe('question-answer batch behavior', () => {
 
   it('does not show an older same-batch judgment-refresh failure after a newer success', async () => {
     const initialRecords = reviewRecords.slice(0, 2)
-    const newerRecords = initialRecords.map((record, index) => (
-      index === 1 ? { ...record, answerJudgment: 'correct' as const } : record
-    ))
+    const newerRecords = initialRecords.map(record => ({
+      ...record,
+      answerJudgment: 'correct' as const,
+      manualError: false,
+    }))
     const initialBatch = terminalReviewBatch(initialRecords)
     const newerBatch = terminalReviewBatch(newerRecords)
     let rejectOlderRefresh: ((error: Error) => void) | undefined
@@ -2154,7 +2520,10 @@ describe('question-answer batch behavior', () => {
       if (batchReads === 1) return new Promise((_, reject) => { rejectOlderRefresh = reject })
       return Promise.resolve(newerBatch)
     })
-    harness.setQuestionAnswerJudgment.mockResolvedValue(newerRecords[1])
+    harness.setQuestionAnswerJudgment.mockImplementation((
+      _targetId: string,
+      recordId: string,
+    ) => Promise.resolve(recordId === newerRecords[0].id ? newerRecords[0] : newerRecords[1]))
 
     const wrapper = await mountQuestionAnswerDialog()
     const firstCorrect = judgmentButtons(rowContaining(wrapper, 'Unreviewed one')).find(
@@ -2172,7 +2541,7 @@ describe('question-answer batch behavior', () => {
     rejectOlderRefresh?.(new Error('admin.connectionHealth.errors.request'))
     await flushPromises()
 
-    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('正确1')
+    expect(wrapper.get('[data-testid="question-answer-review-stats"]').text()).toContain('正确2')
     expect(wrapper.text()).not.toContain('操作失败，请稍后重试。')
   })
 

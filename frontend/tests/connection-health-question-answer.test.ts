@@ -11,13 +11,21 @@ import {
 } from '../src/modules/admin/api/connectionHealth'
 import type { QuestionAnswerRecord } from '../src/modules/admin/types/connectionHealth'
 import {
+  TEST_QUESTION_KEYWORD_BYTES_LIMIT,
+  TEST_QUESTION_KEYWORD_COUNT_LIMIT,
+  TEST_QUESTION_KEYWORD_RUNE_LIMIT,
   filterQuestionAnswerRecords,
   groupQuestionAnswerHistoryByBatch,
+  highlightQuestionAnswer,
   isCurrentQuestionAnswerOperation,
+  parseTestQuestionKeywords,
   questionAnswerBatchCompletedAt,
   questionAnswerElapsedMilliseconds,
+  questionAnswerReviewStatsFromRecords,
   questionAnswerStatsReconcile,
+  replaceQuestionAnswerRecord,
   shortQuestionAnswerBatchId,
+  testQuestionKeywordBytes,
 } from '../src/modules/admin/utils/questionAnswers'
 import {
   clearQuestionAnswerUnread,
@@ -60,6 +68,7 @@ const questionAnswerRecord = (
   questionId: `question-${id}`,
   questionName: `Question ${id}`,
   questionBody: `Body ${id}`,
+  questionKeywordSnapshot: null,
   reasoningEffort: null,
   answerBody: `Answer ${id}`,
   status,
@@ -77,6 +86,131 @@ afterEach(() => {
 })
 
 describe('connection health question answers', () => {
+  it('parses, deduplicates and highlights only the first three literal matches with longer overlap first', () => {
+    expect(parseTestQuestionKeywords(' 错误,Error\nerror\r\n错误码 ')).toEqual([
+      '错误', 'Error', '错误码',
+    ])
+
+    const answer = '错误码 ERROR [done] <script>alert(1)</script>'
+    const segments = highlightQuestionAnswer(
+      answer,
+      ['错误', '错误码', 'error', '[done]', '<script>'],
+    )
+    expect(segments.filter(segment => segment.highlighted).map(segment => segment.text)).toEqual([
+      '错误码', 'ERROR', '[done]',
+    ])
+    expect(segments.map(segment => segment.text).join('')).toBe(answer)
+    expect(segments.filter(segment => !segment.highlighted).map(segment => segment.text).join('')).toContain(
+      '<script>alert(1)</script>',
+    )
+    expect(highlightQuestionAnswer('abcde', ['ab', 'bcde'])
+      .filter(segment => segment.highlighted).map(segment => segment.text)).toEqual(['bcde'])
+    expect(highlightQuestionAnswer('ERROR错误码', ['error', '错误码'])).toEqual([
+      { text: 'ERROR错误码', highlighted: true },
+    ])
+    expect(highlightQuestionAnswer('plain answer', [])).toEqual([
+      { text: 'plain answer', highlighted: false },
+    ])
+    expect(highlightQuestionAnswer('plain answer', ['missing'])).toEqual([
+      { text: 'plain answer', highlighted: false },
+    ])
+    expect(highlightQuestionAnswer('', ['answer'])).toEqual([])
+  })
+
+  it('uses the same 20, 64-code-point and 2048-byte keyword boundaries as the server', () => {
+    expect(TEST_QUESTION_KEYWORD_COUNT_LIMIT).toBe(20)
+    expect(TEST_QUESTION_KEYWORD_RUNE_LIMIT).toBe(64)
+    expect(TEST_QUESTION_KEYWORD_BYTES_LIMIT).toBe(2048)
+
+    const twenty = Array.from({ length: TEST_QUESTION_KEYWORD_COUNT_LIMIT }, (_, index) => `keyword-${index}`)
+    expect(parseTestQuestionKeywords(twenty.join(','))).toEqual(twenty)
+    const sixtyFourRunes = '界'.repeat(TEST_QUESTION_KEYWORD_RUNE_LIMIT)
+    expect(Array.from(sixtyFourRunes)).toHaveLength(64)
+
+    const exactBytes = ['😀', '😁', '😂', '😃', '😄', '😅', '😆', '😉']
+      .map(value => value.repeat(TEST_QUESTION_KEYWORD_RUNE_LIMIT))
+    expect(testQuestionKeywordBytes(exactBytes)).toBe(TEST_QUESTION_KEYWORD_BYTES_LIMIT)
+    expect(testQuestionKeywordBytes([...exactBytes, 'x'])).toBe(TEST_QUESTION_KEYWORD_BYTES_LIMIT + 1)
+  })
+
+  it('replaces only the authoritative record with a deep-copied snapshot and recalculates review stats', () => {
+    const records: QuestionAnswerRecord[] = [
+      { ...questionAnswerRecord('one', 'succeeded', '2026-08-15T00:00:02Z'), questionKeywordSnapshot: ['old'] },
+      { ...questionAnswerRecord('two', 'succeeded', '2026-08-15T00:00:03Z'), answerJudgment: 'correct' },
+      { ...questionAnswerRecord('three', 'succeeded', '2026-08-15T00:00:04Z'), answerJudgment: 'incorrect' },
+      { ...questionAnswerRecord('four', 'succeeded', '2026-08-15T00:00:05Z'), answerJudgment: null },
+      questionAnswerRecord('failed', 'failed', '2026-08-15T00:00:06Z'),
+    ]
+    const authoritative: QuestionAnswerRecord = {
+      ...records[0],
+      answerJudgment: 'correct',
+      questionKeywordSnapshot: ['new'],
+    }
+
+    const replaced = replaceQuestionAnswerRecord(records, authoritative)
+    expect(replaced.map(record => record.id)).toEqual(records.map(record => record.id))
+    expect(replaced[0]).toEqual(authoritative)
+    expect(replaced[1]).toBe(records[1])
+    replaced[0].questionKeywordSnapshot![0] = 'mutated copy'
+    expect(authoritative.questionKeywordSnapshot).toEqual(['new'])
+    expect(replaceQuestionAnswerRecord(records, { ...authoritative, id: 'missing' })).toEqual(records)
+
+    expect(questionAnswerReviewStatsFromRecords(records)).toEqual({
+      unreviewed: 2,
+      correct: 1,
+      incorrect: 1,
+    })
+  })
+
+  it('normalizes missing keyword fields on every old-backend response without inventing snapshots', async () => {
+    stubStorage()
+    const legacyQuestion = {
+      id: 'question-old', name: 'Old question', body: 'Old body', enabled: true, isDefault: true,
+      createdAt: '2026-08-15T00:00:00Z', updatedAt: '2026-08-15T00:00:00Z',
+    }
+    const currentRecord = questionAnswerRecord('old', 'succeeded', '2026-08-15T00:00:02Z')
+    const { questionKeywordSnapshot: _snapshot, ...legacyRecord } = currentRecord
+    const legacyBatch = {
+      batchId: 'batch-old', records: [legacyRecord], reasoningEffort: 'medium', submittedCount: 1,
+      completedCount: 1, runningCount: 0, active: false, currentModel: '', currentQuestion: '',
+      stats: {
+        requests: { submitted: 1, inProgress: 0, succeeded: 1, failed: 0, cancelled: 0 },
+        reviews: { unreviewed: 1, correct: 0, incorrect: 0 },
+      },
+    }
+    const legacyHistory = {
+      records: [legacyRecord], page: 1, pageSize: 20, totalItems: 1, totalPages: 1,
+      stats: legacyBatch.stats, todayStats: legacyBatch.stats,
+    }
+    const responses = [
+      [legacyQuestion], legacyQuestion, legacyQuestion, legacyQuestion, legacyQuestion,
+      legacyBatch, legacyBatch, legacyBatch, legacyBatch, legacyHistory, legacyRecord,
+    ]
+    const fetchMock = vi.fn()
+    for (const payload of responses) {
+      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 200 }))
+    }
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(connectionHealthApi.listTestQuestions()).resolves.toMatchObject([{ keywords: [] }])
+    await expect(connectionHealthApi.createTestQuestion({ name: 'Old question', body: 'Old body' })).resolves.toMatchObject({ keywords: [] })
+    await expect(connectionHealthApi.updateTestQuestion('question-old', { name: 'Old question', body: 'Old body' })).resolves.toMatchObject({ keywords: [] })
+    await expect(connectionHealthApi.setTestQuestionEnabled('question-old', true)).resolves.toMatchObject({ keywords: [] })
+    await expect(connectionHealthApi.setDefaultTestQuestion('question-old')).resolves.toMatchObject({ keywords: [] })
+
+    const start = await connectionHealthApi.startQuestionAnswerBatch('target-old', ['model'], ['question-old'], 'medium')
+    const latest = await connectionHealthApi.getLatestQuestionAnswerBatch('target-old')
+    const batch = await connectionHealthApi.getQuestionAnswerBatch('target-old', 'batch-old')
+    const cancelled = await connectionHealthApi.cancelQuestionAnswerBatch('target-old', 'batch-old')
+    const history = await connectionHealthApi.getQuestionAnswerHistory('target-old', 1)
+    const judgment = await connectionHealthApi.setQuestionAnswerJudgment('target-old', 'old', 'correct')
+    for (const normalized of [start, latest, batch, cancelled]) {
+      expect(normalized.records[0].questionKeywordSnapshot).toBeNull()
+    }
+    expect(history.records[0].questionKeywordSnapshot).toBeNull()
+    expect(judgment.questionKeywordSnapshot).toBeNull()
+  })
+
   it('groups the current history page by first batch appearance', () => {
     const records = [
       { ...questionAnswerRecord('a1', 'succeeded', '2026-08-30T01:00:01Z'), batchId: 'batch-aaaaaaaa' },
@@ -333,6 +467,7 @@ describe('connection health question answers', () => {
     if (!api.setQuestionAnswerJudgment) return
 
     const record = { id: 'record-9', answerJudgment: 'incorrect', manualError: true }
+    const normalizedRecord = { ...record, questionKeywordSnapshot: null }
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(record), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
     const controller = new AbortController()
@@ -342,7 +477,7 @@ describe('connection health question answers', () => {
       'record-9',
       'incorrect',
       controller.signal,
-    )).resolves.toEqual(record)
+    )).resolves.toEqual(normalizedRecord)
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/connection-health/targets/sub2api%3Aws1%3Aaccount-1/question-answers/records/record-9/judgment',
       expect.objectContaining({
@@ -354,7 +489,7 @@ describe('connection health question answers', () => {
     )
   })
 
-  it('keeps the existing dialog frame and polls without cancelling background work on close', () => {
+  it('uses the fixed near-viewport dialog frame and polls without cancelling background work on close', () => {
     const closeBody = dialogSource.match(/const close = \(\) => \{([\s\S]*?)\n\}/)?.[1] ?? ''
     const cleanupBody = dialogSource.match(/const cleanupFrontendWork = \(\) => \{([\s\S]*?)\n\}/)?.[1] ?? ''
     const startBody = dialogSource.match(/const startQuestionAnswers = async \(\) => \{([\s\S]*?)\n\}/)?.[1] ?? ''
@@ -365,7 +500,8 @@ describe('connection health question answers', () => {
     const historyIndex = dialogSource.indexOf('questionAnswer.historyTitle')
 
     expect(dialogSource).toContain("type ProbeMode = 'once' | 'formal' | 'questionAnswer'")
-    expect(dialogSource).toContain('h-[min(760px,calc(100dvh-2rem))] w-full max-w-6xl')
+    expect(dialogSource).toContain('h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-none')
+    expect(dialogSource).not.toContain('h-[min(760px,calc(100dvh-2rem))] w-full max-w-6xl')
     expect(dialogSource).toContain('question => question.isDefault')
     expect(dialogSource).toContain('batch.records.map(record => record.modelName)')
     expect(dialogSource).toContain('batch.records.map(record => record.questionId)')

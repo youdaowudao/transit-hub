@@ -604,26 +604,65 @@ export const manualProbeOnce = async (targetId: string, models: string[], signal
     signal,
   })
 
-export const listTestQuestions = async (signal?: AbortSignal): Promise<TestQuestion[]> =>
-  requestJson<TestQuestion[]>('/connection-health/test-questions', { signal })
+type TestQuestionPayload = Omit<TestQuestion, 'keywords'> & { keywords?: unknown }
+type QuestionAnswerRecordPayload = Omit<QuestionAnswerRecord, 'questionKeywordSnapshot'> & {
+  questionKeywordSnapshot?: unknown
+}
+type QuestionAnswerBatchPayload = Omit<QuestionAnswerBatch, 'records'> & { records: QuestionAnswerRecordPayload[] }
+type QuestionAnswerHistoryPayload = Omit<QuestionAnswerHistory, 'records'> & { records: QuestionAnswerRecordPayload[] }
 
-export const createTestQuestion = async (input: TestQuestionInput): Promise<TestQuestion> =>
-  requestJson<TestQuestion>('/connection-health/test-questions', { method: 'POST', body: JSON.stringify(input) })
+const normalizeTestQuestion = (question: TestQuestionPayload): TestQuestion => ({
+  ...question,
+  keywords: Array.isArray(question.keywords) ? [...question.keywords] : [],
+})
 
-export const updateTestQuestion = async (questionId: string, input: TestQuestionInput): Promise<TestQuestion> =>
-  requestJson<TestQuestion>(`/connection-health/test-questions/${encodeURIComponent(questionId)}`, {
+const normalizeQuestionAnswerRecord = (record: QuestionAnswerRecordPayload): QuestionAnswerRecord => ({
+  ...record,
+  questionKeywordSnapshot: Array.isArray(record.questionKeywordSnapshot)
+    ? [...record.questionKeywordSnapshot]
+    : null,
+})
+
+const normalizeQuestionAnswerBatch = (batch: QuestionAnswerBatchPayload): QuestionAnswerBatch => ({
+  ...batch,
+  records: batch.records.map(normalizeQuestionAnswerRecord),
+})
+
+const normalizeQuestionAnswerHistory = (history: QuestionAnswerHistoryPayload): QuestionAnswerHistory => ({
+  ...history,
+  records: history.records.map(normalizeQuestionAnswerRecord),
+})
+
+export const listTestQuestions = async (signal?: AbortSignal): Promise<TestQuestion[]> => {
+  const questions = await requestJson<TestQuestionPayload[]>('/connection-health/test-questions', { signal })
+  return questions.map(normalizeTestQuestion)
+}
+
+export const createTestQuestion = async (input: TestQuestionInput): Promise<TestQuestion> => {
+  const question = await requestJson<TestQuestionPayload>('/connection-health/test-questions', { method: 'POST', body: JSON.stringify(input) })
+  return normalizeTestQuestion(question)
+}
+
+export const updateTestQuestion = async (questionId: string, input: TestQuestionInput): Promise<TestQuestion> => {
+  const question = await requestJson<TestQuestionPayload>(`/connection-health/test-questions/${encodeURIComponent(questionId)}`, {
     method: 'PUT',
     body: JSON.stringify(input),
   })
+  return normalizeTestQuestion(question)
+}
 
-export const setTestQuestionEnabled = async (questionId: string, enabled: boolean): Promise<TestQuestion> =>
-  requestJson<TestQuestion>(`/connection-health/test-questions/${encodeURIComponent(questionId)}/enabled`, {
+export const setTestQuestionEnabled = async (questionId: string, enabled: boolean): Promise<TestQuestion> => {
+  const question = await requestJson<TestQuestionPayload>(`/connection-health/test-questions/${encodeURIComponent(questionId)}/enabled`, {
     method: 'POST',
     body: JSON.stringify({ enabled }),
   })
+  return normalizeTestQuestion(question)
+}
 
-export const setDefaultTestQuestion = async (questionId: string): Promise<TestQuestion> =>
-  requestJson<TestQuestion>(`/connection-health/test-questions/${encodeURIComponent(questionId)}/default`, { method: 'POST' })
+export const setDefaultTestQuestion = async (questionId: string): Promise<TestQuestion> => {
+  const question = await requestJson<TestQuestionPayload>(`/connection-health/test-questions/${encodeURIComponent(questionId)}/default`, { method: 'POST' })
+  return normalizeTestQuestion(question)
+}
 
 export const deleteTestQuestion = async (questionId: string): Promise<void> => {
   await requestJson<{ ok: boolean }>(`/connection-health/test-questions/${encodeURIComponent(questionId)}`, { method: 'DELETE' })
@@ -635,48 +674,60 @@ export const startQuestionAnswerBatch = async (
   questionIds: string[],
   reasoningEffort: QuestionAnswerReasoningEffort,
   signal?: AbortSignal,
-): Promise<QuestionAnswerBatch> =>
-  requestJson<QuestionAnswerBatch>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches`, {
+): Promise<QuestionAnswerBatch> => {
+  const batch = await requestJson<QuestionAnswerBatchPayload>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches`, {
     method: 'POST',
     headers: questionAnswerContractHeaders,
     body: JSON.stringify({ models, questionIds, reasoningEffort }),
     signal,
   })
+  return normalizeQuestionAnswerBatch(batch)
+}
 
-export const getLatestQuestionAnswerBatch = async (targetId: string, signal?: AbortSignal): Promise<QuestionAnswerBatch> =>
-  requestJson<QuestionAnswerBatch>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches/latest`, {
+export const getLatestQuestionAnswerBatch = async (targetId: string, signal?: AbortSignal): Promise<QuestionAnswerBatch> => {
+  const batch = await requestJson<QuestionAnswerBatchPayload>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches/latest`, {
     headers: questionAnswerContractHeaders,
     signal,
   })
+  return normalizeQuestionAnswerBatch(batch)
+}
 
-export const getQuestionAnswerBatch = async (targetId: string, batchId: string, signal?: AbortSignal): Promise<QuestionAnswerBatch> =>
-  requestJson<QuestionAnswerBatch>(
+export const getQuestionAnswerBatch = async (targetId: string, batchId: string, signal?: AbortSignal): Promise<QuestionAnswerBatch> => {
+  const batch = await requestJson<QuestionAnswerBatchPayload>(
     `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches/${encodeURIComponent(batchId)}`,
     { headers: questionAnswerContractHeaders, signal },
   )
+  return normalizeQuestionAnswerBatch(batch)
+}
 
-export const cancelQuestionAnswerBatch = async (targetId: string, batchId: string, signal?: AbortSignal): Promise<QuestionAnswerBatch> =>
-  requestJson<QuestionAnswerBatch>(
+export const cancelQuestionAnswerBatch = async (targetId: string, batchId: string, signal?: AbortSignal): Promise<QuestionAnswerBatch> => {
+  const batch = await requestJson<QuestionAnswerBatchPayload>(
     `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches/${encodeURIComponent(batchId)}/cancel`,
     { method: 'POST', headers: questionAnswerContractHeaders, signal },
   )
+  return normalizeQuestionAnswerBatch(batch)
+}
 
-export const getQuestionAnswerHistory = async (targetId: string, page: number, signal?: AbortSignal): Promise<QuestionAnswerHistory> =>
-  requestJson<QuestionAnswerHistory>(
+export const getQuestionAnswerHistory = async (targetId: string, page: number, signal?: AbortSignal): Promise<QuestionAnswerHistory> => {
+  const history = await requestJson<QuestionAnswerHistoryPayload>(
     `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/history?page=${page}`,
     { headers: questionAnswerContractHeaders, signal },
   )
+  return normalizeQuestionAnswerHistory(history)
+}
 
 export const setQuestionAnswerJudgment = async (
   targetId: string,
   recordId: string,
   judgment: QuestionAnswerJudgment,
   signal?: AbortSignal,
-): Promise<QuestionAnswerRecord> =>
-  requestJson<QuestionAnswerRecord>(
+): Promise<QuestionAnswerRecord> => {
+  const record = await requestJson<QuestionAnswerRecordPayload>(
     `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/records/${encodeURIComponent(recordId)}/judgment`,
     { method: 'PUT', headers: questionAnswerContractHeaders, body: JSON.stringify({ judgment }), signal },
   )
+  return normalizeQuestionAnswerRecord(record)
+}
 
 export interface TargetSchedulableActionResult {
   targetId: string

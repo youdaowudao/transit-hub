@@ -52,7 +52,8 @@ const makeAccount = (
   productionSortOrder,
   todayQuestionAnswerSubmitted: submitted,
   todayQuestionAnswerCorrect: correct,
-})
+  intelligenceWeight: null,
+} as AdminGroupAccount)
 
 const makeGroup = (accounts: AdminGroupAccount[]): AdminGroupHealth => ({
   id: 'group-1',
@@ -138,6 +139,11 @@ describe('AdminGroupHealthDetail today question-answer accuracy', () => {
     expect(rowFor(wrapper, 'Zero').findAll('td')[8].text()).toContain('0/5')
     expect(rowFor(wrapper, 'None').findAll('td')[8].text()).toBe('-')
 
+    const intelligenceHeader = wrapper.findAll('thead th').find(header => header.text().includes('智商权重'))
+    if (!intelligenceHeader) throw new Error('missing intelligence weight header')
+    expect(intelligenceHeader.find('button').exists()).toBe(false)
+    expect(rowFor(wrapper, 'Prod Second').findAll('td')[9].text()).toContain('未评分')
+
     const accuracyHeader = wrapper.findAll('thead th').find(header => header.text().includes('今日正确率'))
     if (!accuracyHeader) throw new Error('missing today accuracy header')
     await accuracyHeader.get('button').trigger('click')
@@ -157,6 +163,7 @@ describe('AdminGroupHealthDetail today question-answer accuracy', () => {
     const account = makeAccount('actions', 'Action Account', 0, 1, 1)
     const wrapper = mountDetail([account])
     const row = rowFor(wrapper, account.name)
+    expect(row.findAll('td')).toHaveLength(11)
     const primary = row.get('.account-actions-primary')
     const secondary = row.get('.account-actions-secondary')
 

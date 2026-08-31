@@ -24,6 +24,7 @@ const account = (overrides: Partial<AdminGroupAccount>): AdminGroupAccount => ({
   targetId: 'sub2api:ws1:100',
   probeAvailable: true,
   modelHealth: [],
+  intelligenceWeight: null,
   ...overrides,
 })
 

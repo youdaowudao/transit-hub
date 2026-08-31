@@ -255,6 +255,39 @@ export const questionAnswerReviewStatsFromRecords = (
   return stats
 }
 
+export const questionAnswerAccuracy = (stats: QuestionAnswerStats): number | null => {
+  if (stats.requests.submitted <= 0) return null
+  return Math.round((stats.reviews.correct / stats.requests.submitted) * 1000) / 10
+}
+
+export const formatQuestionAnswerAccuracy = (accuracy: number | null): string => {
+  if (accuracy === null) return '-'
+  return `${Number.isInteger(accuracy) ? accuracy : accuracy.toFixed(1)}%`
+}
+
+export interface QuestionAnswerReviewRecordPartition {
+  pendingReview: QuestionAnswerRecord[]
+  reviewed: QuestionAnswerRecord[]
+  failed: QuestionAnswerRecord[]
+}
+
+export const partitionQuestionAnswerReviewRecords = (
+  records: QuestionAnswerRecord[],
+): QuestionAnswerReviewRecordPartition => {
+  const result: QuestionAnswerReviewRecordPartition = {
+    pendingReview: [],
+    reviewed: [],
+    failed: [],
+  }
+  for (const record of records) {
+    if (record.status === 'failed') result.failed.push(record)
+    else if (record.status === 'succeeded' && (record.answerJudgment === 'correct' || record.answerJudgment === 'incorrect')) {
+      result.reviewed.push(record)
+    } else if (record.status === 'succeeded') result.pendingReview.push(record)
+  }
+  return result
+}
+
 export interface QuestionAnswerHistoryBatchGroup {
   batchId: string
   records: QuestionAnswerRecord[]

@@ -15,6 +15,8 @@ import (
 // 定义为接口而不是直接依赖 *Repository 具体类型，使聚合、策略、手动动作等核心流程
 // 可以在不连接真实数据库的情况下用内存假实现单测覆盖（同 group_rate_campaigns 的做法）。
 type healthRepository interface {
+	ListAccountConfigs(ctx context.Context, userID string, adminAccountID string) ([]AccountConfig, error)
+	UpsertAccountIntelligenceWeight(ctx context.Context, userID string, adminAccountID string, targetID string, intelligenceWeight *int) (AccountConfig, error)
 	ListPolicies(ctx context.Context, userID string, adminAccountID string) ([]Policy, error)
 	GetPolicy(ctx context.Context, id string, userID string, adminAccountID string) (*Policy, error)
 	SavePolicyWithTargets(ctx context.Context, p Policy, targets []ModelTarget) error

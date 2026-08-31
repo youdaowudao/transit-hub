@@ -37,6 +37,7 @@ const harness = vi.hoisted(() => ({
   cancelQuestionAnswerBatch: vi.fn(),
   startQuestionAnswerBatch: vi.fn(),
   setQuestionAnswerJudgment: vi.fn(),
+  setTargetIntelligenceWeight: vi.fn(),
   getPrioritySyncStatus: vi.fn(),
   probeTargetWithProgress: vi.fn(),
   listUpstreamSites: vi.fn(),
@@ -121,6 +122,7 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
   getPrioritySyncStatus: harness.getPrioritySyncStatus,
   probeTargetWithProgress: harness.probeTargetWithProgress,
   setQuestionAnswerJudgment: harness.setQuestionAnswerJudgment,
+  setTargetIntelligenceWeight: harness.setTargetIntelligenceWeight,
   startQuestionAnswerBatch: harness.startQuestionAnswerBatch,
 }))
 
@@ -200,7 +202,8 @@ const target = (targetId: string): ManualProbeTargetSummary => ({
   status: 'active',
   groupName: 'Group A',
   formalModels: [],
-})
+  intelligenceWeight: null,
+} as ManualProbeTargetSummary)
 
 const savedSelection = (overrides: Partial<QuestionAnswerSelectionPreferences> = {}): QuestionAnswerSelectionPreferences => ({
   modelIds: ['model-a', 'model-b'],
@@ -234,6 +237,7 @@ beforeEach(() => {
   harness.cancelQuestionAnswerBatch.mockReset().mockResolvedValue(emptyBatch())
   harness.startQuestionAnswerBatch.mockReset().mockResolvedValue(emptyBatch({ batchId: 'batch-started' }))
   harness.setQuestionAnswerJudgment.mockReset()
+  harness.setTargetIntelligenceWeight.mockReset()
   harness.discoverTargetModels.mockReset().mockResolvedValue([
     { id: 'model-a', name: 'Model A' },
     { id: 'model-b', name: 'Model B' },
@@ -278,6 +282,16 @@ const mountDialog = async (
   return wrapper
 }
 
+const openConfiguration = async (wrapper: VueWrapper) => {
+  const configuration = wrapper.find('[data-testid="question-answer-configuration"]')
+  if (configuration.find('[data-testid="question-answer-models"]').exists()) return
+  const modify = configuration.findAll('button')
+    .find(button => button.text().trim() === '修改')
+  if (!modify) throw new Error('missing editable question-answer configuration')
+  await modify.trigger('click')
+  await flushPromises()
+}
+
 const checkedLabels = (wrapper: VueWrapper, testId: string): string[] => wrapper
   .find(`[data-testid="${testId}"]`)
   .findAll('label')
@@ -298,7 +312,7 @@ const toggleLabeledCheckbox = async (wrapper: VueWrapper, testId: string, text: 
 }
 
 const startButton = (wrapper: VueWrapper) => {
-  const button = wrapper.findAll('button').find(candidate => candidate.text().trim() === '开始问答测试')
+  const button = wrapper.findAll('button').find(candidate => candidate.text().trim() === '开始回答')
   if (!button) throw new Error('missing start question-answer button')
   return button
 }
@@ -320,8 +334,9 @@ const account = (
   targetId,
   probeAvailable: true,
   modelHealth: [],
+  intelligenceWeight: null,
   ...overrides,
-})
+} as AdminGroupAccount)
 
 const adminGroup = (
   id: string,
@@ -430,9 +445,55 @@ const openPreparedBatch = async (
   return { wrapper, drawer }
 }
 
+describe('intelligence weight page projection', () => {
+  it('synchronizes one authoritative result across both groups and the open dialog, then accepts a normal refresh', async () => {
+    const targetId = 'shared-target'
+    const firstGroups = [
+      adminGroup('g1', [account(targetId, { intelligenceWeight: 4 })]),
+      adminGroup('g2', [account(targetId, { intelligenceWeight: 4 })]),
+    ]
+    const wrapper = await mountView(firstGroups)
+    let detail = wrapper.findComponent({ name: 'AdminGroupHealthDetail' })
+    expect(detail.props('group').id).toBe('g1')
+
+    detail.vm.$emit('intelligence-weight-saved', { targetId, intelligenceWeight: 25 })
+    await nextTick()
+    detail = wrapper.findComponent({ name: 'AdminGroupHealthDetail' })
+    expect(detail.props('group').accounts[0].intelligenceWeight).toBe(25)
+
+    detail.vm.$emit('probe', detail.props('group').accounts[0])
+    await nextTick()
+    const dialog = wrapper.findComponent({ name: 'ManualOneTimeProbeDialog' })
+    expect(dialog.props('target').intelligenceWeight).toBe(25)
+
+    dialog.vm.$emit('intelligence-weight-saved', { targetId, intelligenceWeight: 77 })
+    await nextTick()
+    expect(dialog.props('target').intelligenceWeight).toBe(77)
+
+    const secondGroupButton = wrapper.findAll('aside nav button')
+      .find(button => button.text().includes('Group g2'))
+    if (!secondGroupButton) throw new Error('missing second group button')
+    await secondGroupButton.trigger('click')
+    await nextTick()
+    detail = wrapper.findComponent({ name: 'AdminGroupHealthDetail' })
+    expect(detail.props('group').id).toBe('g2')
+    expect(detail.props('group').accounts[0].intelligenceWeight).toBe(77)
+
+    harness.refs.adminGroups.value = [
+      adminGroup('g1', [account(targetId, { intelligenceWeight: 88 })]),
+      adminGroup('g2', [account(targetId, { intelligenceWeight: 88 })]),
+    ]
+    await nextTick()
+    detail = wrapper.findComponent({ name: 'AdminGroupHealthDetail' })
+    expect(detail.props('group').accounts[0].intelligenceWeight).toBe(88)
+    expect(harness.setTargetIntelligenceWeight).not.toHaveBeenCalled()
+  })
+})
+
 describe('single-account preferences', () => {
   it('restores legal saved choices after async data loads and does not persist target filtering', async () => {
     const wrapper = await mountDialog(savedSelection())
+    await openConfiguration(wrapper)
 
     expect(checkedLabels(wrapper, 'question-answer-models')).toEqual(['Model A', 'Model B'])
     const restoredQuestions = checkedLabels(wrapper, 'question-answer-questions')
@@ -445,11 +506,13 @@ describe('single-account preferences', () => {
 
     await wrapper.setProps({ target: target('target-b') })
     await flushPromises()
+    await openConfiguration(wrapper)
     expect(checkedLabels(wrapper, 'question-answer-models')).toEqual(['Model B'])
     expect(wrapper.emitted('question-answer-preferences-changed')).toBeUndefined()
 
     await wrapper.setProps({ target: target('target-a') })
     await flushPromises()
+    await openConfiguration(wrapper)
     expect(checkedLabels(wrapper, 'question-answer-models')).toEqual(['Model A', 'Model B'])
     expect(wrapper.emitted('question-answer-preferences-changed')).toBeUndefined()
   })
@@ -477,12 +540,11 @@ describe('single-account preferences', () => {
       repeatCount: 8,
     }))
 
-    expect(checkedLabels(wrapper, 'question-answer-models')).toEqual(['Model B'])
-    const activeQuestions = checkedLabels(wrapper, 'question-answer-questions')
-    expect(activeQuestions).toHaveLength(1)
-    expect(activeQuestions[0]).toContain('Question q2')
-    expect((wrapper.find('input[name="question-answer-reasoning-effort"][value="low"]').element as HTMLInputElement).checked).toBe(true)
-    expect((repeatSelect(wrapper).element as HTMLSelectElement).value).toBe('3')
+    const configuration = wrapper.get('[data-testid="question-answer-configuration"]')
+    expect(configuration.text()).toContain('Model B')
+    expect(configuration.text()).toContain('问题 1 个 · 推理力度 低 · 每组合 3 次')
+    expect(configuration.text()).toContain('当前进行中批次使用此配置')
+    expect(configuration.find('[data-testid="question-answer-models"]').exists()).toBe(false)
     expect(wrapper.emitted('question-answer-preferences-changed')).toBeUndefined()
   })
 
@@ -493,6 +555,7 @@ describe('single-account preferences', () => {
       reasoningEffort: 'medium',
       repeatCount: 1,
     }))
+    await openConfiguration(wrapper)
 
     await toggleLabeledCheckbox(wrapper, 'question-answer-models', 'Model B')
     expect(lastPreferenceEvent(wrapper)).toEqual({
@@ -517,6 +580,7 @@ describe('single-account preferences', () => {
 
   it('preserves saved choices hidden by the current target when the user changes another visible field', async () => {
     const wrapper = await mountDialog(savedSelection(), target('target-b'))
+    await openConfiguration(wrapper)
     expect(checkedLabels(wrapper, 'question-answer-models')).toEqual(['Model B'])
 
     await repeatSelect(wrapper).setValue('7')
@@ -605,10 +669,11 @@ describe('single-account preferences', () => {
     await retry!.trigger('click')
     await flushPromises()
 
-    expect(checkedLabels(wrapper, 'question-answer-models')).toEqual(['Model B'])
-    expect(checkedLabels(wrapper, 'question-answer-questions')[0]).toContain('Question q2')
-    expect((wrapper.find('input[name="question-answer-reasoning-effort"][value="low"]').element as HTMLInputElement).checked).toBe(true)
-    expect((repeatSelect(wrapper).element as HTMLSelectElement).value).toBe('3')
+    const configuration = wrapper.get('[data-testid="question-answer-configuration"]')
+    expect(configuration.text()).toContain('Model B')
+    expect(configuration.text()).toContain('问题 1 个 · 推理力度 低 · 每组合 3 次')
+    expect(configuration.text()).toContain('当前进行中批次使用此配置')
+    expect(configuration.find('[data-testid="question-answer-models"]').exists()).toBe(false)
     expect(wrapper.emitted('question-answer-preferences-changed')).toBeUndefined()
   })
 

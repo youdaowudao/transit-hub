@@ -19,6 +19,7 @@ func TestWorkspaceDeleteStatementsCoverAllWorkspaceTables(t *testing.T) {
 		"mass_email_batches",
 		"group_rate_campaign_items",
 		"group_rate_campaigns",
+		"connection_health_account_configs",
 		"connection_health_target_action_states",
 		"connection_health_probe_budget_usage",
 		"connection_health_priority_sync_states",

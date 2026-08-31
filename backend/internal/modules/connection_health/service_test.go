@@ -19,6 +19,10 @@ import (
 
 // fakeRepository 是 healthRepository 的内存实现，供 service 单测使用，不连接真实数据库。
 type fakeRepository struct {
+	accountConfigs            map[string]AccountConfig
+	listAccountConfigsErr     error
+	listAccountConfigsCalls   int
+	upsertAccountConfigCalls  int
 	policies                  []Policy
 	states                    map[string]map[string]ConnectionHealthState // connectionID -> modelName -> state
 	events                    []ConnectionHealthEvent
@@ -56,6 +60,7 @@ type fakeRepository struct {
 
 func newFakeRepository() *fakeRepository {
 	return &fakeRepository{
+		accountConfigs:        map[string]AccountConfig{},
 		states:                map[string]map[string]ConnectionHealthState{},
 		priorityStates:        map[string]PrioritySyncState{},
 		priorityWorkspaces:    map[string]PriorityWorkspaceSyncState{},
@@ -70,6 +75,50 @@ func newFakeRepository() *fakeRepository {
 }
 
 func (f *fakeRepository) EnsureSchema(ctx context.Context) error { return nil }
+
+func fakeAccountConfigKey(userID string, adminAccountID string, targetID string) string {
+	return userID + "\x00" + adminAccountID + "\x00" + targetID
+}
+
+func (f *fakeRepository) ListAccountConfigs(ctx context.Context, userID string, adminAccountID string) ([]AccountConfig, error) {
+	f.listAccountConfigsCalls++
+	if f.listAccountConfigsErr != nil {
+		return nil, f.listAccountConfigsErr
+	}
+	configs := make([]AccountConfig, 0)
+	for _, config := range f.accountConfigs {
+		if config.UserID == userID && config.AdminAccountID == adminAccountID {
+			config.IntelligenceWeight = cloneIntPointer(config.IntelligenceWeight)
+			configs = append(configs, config)
+		}
+	}
+	return configs, nil
+}
+
+func (f *fakeRepository) UpsertAccountIntelligenceWeight(
+	ctx context.Context,
+	userID string,
+	adminAccountID string,
+	targetID string,
+	intelligenceWeight *int,
+) (AccountConfig, error) {
+	f.upsertAccountConfigCalls++
+	if f.accountConfigs == nil {
+		f.accountConfigs = make(map[string]AccountConfig)
+	}
+	now := time.Now().UTC()
+	key := fakeAccountConfigKey(userID, adminAccountID, targetID)
+	createdAt := now
+	if existing, ok := f.accountConfigs[key]; ok {
+		createdAt = existing.CreatedAt
+	}
+	config := AccountConfig{
+		UserID: userID, AdminAccountID: adminAccountID, TargetID: targetID,
+		IntelligenceWeight: cloneIntPointer(intelligenceWeight), CreatedAt: createdAt, UpdatedAt: now,
+	}
+	f.accountConfigs[key] = config
+	return config, nil
+}
 
 func (f *fakeRepository) ListQuestionAnswerTodaySummaries(ctx context.Context, userID string, targetIDs []string) (map[string]QuestionAnswerTodaySummary, error) {
 	f.qaTodayCalls++

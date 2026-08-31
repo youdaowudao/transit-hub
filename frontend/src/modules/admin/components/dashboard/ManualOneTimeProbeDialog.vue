@@ -39,9 +39,9 @@ import type {
   TestQuestion,
 } from '../../types/connectionHealth'
 import {
-  filterQuestionAnswerRecords,
   groupQuestionAnswerHistoryByBatch,
   isCurrentQuestionAnswerOperation,
+  partitionQuestionAnswerReviewRecords,
   questionAnswerBatchCompletedAt,
   questionAnswerElapsedMilliseconds,
   questionAnswerReviewStatsFromRecords,
@@ -56,7 +56,10 @@ import {
   type QuestionAnswerSelectionPreferences,
 } from '../../utils/connectionHealthPreferences'
 import QuestionAnswerHighlightedText from './QuestionAnswerHighlightedText.vue'
+import QuestionAnswerStatsBar from './QuestionAnswerStatsBar.vue'
+import AccountIntelligenceWeightEditor from './AccountIntelligenceWeightEditor.vue'
 import { t, te } from '@/locales'
+import type { TargetIntelligenceWeightResult } from '../../types/connectionHealth'
 
 export interface ManualProbeTargetSummary {
   targetId: string
@@ -66,6 +69,7 @@ export interface ManualProbeTargetSummary {
   status: string
   groupName: string
   formalModels: ManualProbeModelOption[]
+  intelligenceWeight: number | null
 }
 
 const props = withDefaults(defineProps<{
@@ -82,6 +86,7 @@ const emit = defineEmits<{
   (event: 'question-answer-started', targetId: string): void
   (event: 'question-answer-viewed', targetId: string): void
   (event: 'question-answer-preferences-changed', preferences: QuestionAnswerSelectionPreferences): void
+  (event: 'intelligence-weight-saved', result: TargetIntelligenceWeightResult): void
 }>()
 
 const prefix = 'admin.connectionHealth.manualProbeDialog'
@@ -143,10 +148,13 @@ const qaHistory = ref<QuestionAnswerHistory>({
     byModel: [],
   },
 })
-const qaCurrentExpanded = ref<Set<string>>(new Set())
-const qaExpanded = ref<Set<string>>(new Set())
 const qaMarking = ref<Map<string, QuestionAnswerJudgment>>(new Map())
-const qaShowAll = ref(false)
+const qaExpanded = ref<Set<string>>(new Set())
+const qaProcessedOpen = ref(false)
+const qaFailedOpen = ref(false)
+const qaConfigOpen = ref(true)
+const qaHistoryOpen = ref(false)
+const qaHistoryLoaded = ref(false)
 const qaErrorKey = ref('')
 const qaCompletedNotice = ref(false)
 const qaClockNow = ref(Date.now())
@@ -174,6 +182,7 @@ let qaPollSequence = 0
 let qaRuntimeSnapshotSequence = 0
 let skipInitializedQuestionAnswerModeLoad = false
 let qaSelectionDataReady = false
+let qaConfigVisibilityInitialized = false
 
 const cancelActiveRequest = () => {
   activeRequestController?.abort()
@@ -266,9 +275,13 @@ const resetQuestionAnswerViewState = () => {
       byModel: [],
     },
   }
-  qaCurrentExpanded.value = new Set()
+  qaProcessedOpen.value = false
+  qaFailedOpen.value = false
   qaExpanded.value = new Set()
-  qaShowAll.value = false
+  qaConfigOpen.value = true
+  qaHistoryOpen.value = false
+  qaHistoryLoaded.value = false
+  qaConfigVisibilityInitialized = false
 }
 
 const resetQuestionAnswerTargetState = () => {
@@ -453,6 +466,7 @@ watch(
       !restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)
       && !restoreSavedQuestionAnswerSelection()
     ) selected.value = defaultSelection(outcome.models)
+    initializeQuestionAnswerConfigurationVisibility()
     phase.value = 'ready'
   },
 )
@@ -504,33 +518,76 @@ const canStartTest = computed(() => {
     && !qaSelectionLocked.value
     && !qaLoading.value
 })
-const qaWaitingCount = computed(() => Math.max(
-  0,
-  (qaRuntimeBatch.value?.stats.requests.inProgress ?? 0) - (qaRuntimeBatch.value?.runningCount ?? 0),
-))
-const qaCurrentRecords = computed(() => {
-  if (!qaReviewBatch.value) return []
-  return qaReviewBatch.value.active
-    ? qaReviewBatch.value.records
-    : filterQuestionAnswerRecords(qaReviewBatch.value.records, qaShowAll.value)
+const qaStartBlockedReason = computed(() => {
+  if (mode.value !== 'questionAnswer') return ''
+  if (qaLoading.value) return t(`${prefix}.questionAnswer.loading`)
+  if (!hasModels.value || selected.value.size === 0 || qaSelectedQuestions.value.size === 0) {
+    return t(`${prefix}.questionAnswer.selectionRequired`)
+  }
+  if (!qaSubmission.value.validRepeatCount) return t(`${prefix}.questionAnswer.repeatCountInvalid`)
+  if (!qaSubmission.value.withinBatchLimit) {
+    return t(`${prefix}.questionAnswer.batchLimit`, { total: qaSubmission.value.total })
+  }
+  if (qaStarting.value) return t(`${prefix}.questionAnswer.submitting`)
+  if (qaActive.value) return t(`${prefix}.questionAnswer.activeStartBlocked`)
+  return ''
 })
+const qaReviewPartition = computed(() => partitionQuestionAnswerReviewRecords(qaReviewBatch.value?.records ?? []))
+const qaPendingReviewRecords = computed(() => qaReviewPartition.value.pendingReview)
+const qaReviewedRecords = computed(() => qaReviewPartition.value.reviewed)
+const qaFailedRecords = computed(() => qaReviewPartition.value.failed)
+const qaReviewedCorrectCount = computed(() => qaReviewedRecords.value.filter(record => record.answerJudgment === 'correct').length)
+const qaReviewedIncorrectCount = computed(() => qaReviewedRecords.value.filter(record => record.answerJudgment === 'incorrect').length)
 const qaReviewCompletedAt = computed(() => (
   qaReviewBatch.value ? questionAnswerBatchCompletedAt(qaReviewBatch.value) : null
 ))
 const qaHistoryBatchGroups = computed(() => {
   const reviewRecordIDs = new Set(qaReviewBatch.value?.records.map(record => record.id) ?? [])
   return groupQuestionAnswerHistoryByBatch(
-    qaHistory.value.records.filter(record => !reviewRecordIDs.has(record.id)),
+    qaHistory.value.records.filter(record => !reviewRecordIDs.has(record.id) && record.status !== 'cancelled'),
   )
 })
-const qaHistoryRowsVisible = computed(() => Boolean(qaRuntimeBatch.value?.active || qaShowAll.value))
-const currentBatchGridClass = computed(() => {
-  if (qaReviewBatch.value && !qaReviewBatch.value.active && !qaShowAll.value) return 'grid-cols-1'
-  const count = qaCurrentRecords.value.length
-  if (count <= 1) return 'grid-cols-1'
-  if (count === 2) return 'grid-cols-1 md:grid-cols-2'
-  return 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3'
+const qaSavedPreferenceValid = computed(() => {
+  const modelIDs = new Set(models.value.map(model => model.id))
+  const questionIDs = new Set(qaQuestions.value.map(question => question.id))
+  const compatibleModels = Array.from(new Set(props.questionAnswerPreferences.modelIds)).filter(id => modelIDs.has(id))
+  const compatibleQuestions = Array.from(new Set(props.questionAnswerPreferences.questionIds)).filter(id => questionIDs.has(id))
+  const repeatCount = props.questionAnswerPreferences.repeatCount
+  return compatibleModels.length > 0
+    && compatibleQuestions.length > 0
+    && ['low', 'medium', 'high', 'xhigh'].includes(props.questionAnswerPreferences.reasoningEffort)
+    && Number.isInteger(repeatCount)
+    && repeatCount >= 1
+    && repeatCount <= 10
+    && compatibleModels.length * compatibleQuestions.length * repeatCount <= 50
 })
+const initializeQuestionAnswerConfigurationVisibility = () => {
+  if (qaConfigVisibilityInitialized || !qaSelectionDataReady) return
+  if (qaRuntimeBatch.value?.active) {
+    qaConfigOpen.value = false
+    qaConfigVisibilityInitialized = true
+    return
+  }
+  if (onceLoadState.value !== 'ready') return
+  qaConfigOpen.value = !qaSavedPreferenceValid.value
+  qaConfigVisibilityInitialized = true
+}
+const qaSummaryModelNames = computed(() => {
+  if (qaRuntimeBatch.value?.active) {
+    const namesByID = new Map(models.value.map(model => [model.id, model.name]))
+    return Array.from(new Set(qaRuntimeBatch.value.records.map(record => namesByID.get(record.modelName) ?? record.modelName)))
+  }
+  return models.value.filter(model => selected.value.has(model.id)).map(model => model.name)
+})
+const qaSummaryQuestionCount = computed(() => qaRuntimeBatch.value?.active
+  ? new Set(qaRuntimeBatch.value.records.map(record => record.questionId)).size
+  : qaSelectedQuestions.value.size)
+const qaSummaryReasoningEffort = computed(() => qaRuntimeBatch.value?.active
+  ? qaRuntimeBatch.value.reasoningEffort
+  : qaReasoningEffort.value)
+const qaSummaryRepeatCount = computed(() => qaRuntimeBatch.value?.active
+  ? qaRuntimeBatch.value.repeatCount
+  : qaRepeatCount.value)
 const qaPageNumbers = computed(() => {
   const total = qaHistory.value.totalPages
   if (total <= 7) return Array.from({ length: total }, (_, index) => index + 1)
@@ -595,6 +652,7 @@ const retryLoad = async () => {
     !restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)
     && !restoreSavedQuestionAnswerSelection()
   ) selected.value = defaultSelection(outcome.models)
+  initializeQuestionAnswerConfigurationVisibility()
   phase.value = 'ready'
 }
 
@@ -631,13 +689,15 @@ const loadQuestionAnswerData = async (
       ? preservedQuestions
       : new Set(defaultQuestion ? [defaultQuestion.id] : [])
     qaHistory.value = history
+    qaHistoryLoaded.value = true
     qaHistoryIntentPage = history.page
     qaRuntimeBatch.value = batch.batchId ? batch : null
     qaReviewBatch.value = qaRuntimeBatch.value
-    qaShowAll.value = false
-    qaCurrentExpanded.value = new Set()
+    qaProcessedOpen.value = false
+    qaFailedOpen.value = false
     qaSelectionDataReady = true
     if (!restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)) restoreSavedQuestionAnswerSelection()
+    initializeQuestionAnswerConfigurationVisibility()
     if (batch.active) scheduleQuestionAnswerPoll()
     else clearQuestionAnswerClock()
   } catch (error) {
@@ -726,8 +786,8 @@ const pollQuestionAnswerBatch = async () => {
       && qaReviewBatch.value?.batchId === batch.batchId
     applyRuntimeQuestionAnswerBatch(batch)
     if (reviewFollowsRuntime) {
-      qaShowAll.value = false
-      qaCurrentExpanded.value = new Set()
+      qaProcessedOpen.value = false
+      qaFailedOpen.value = false
     }
     const historyPage = reviewFollowsRuntime ? 1 : qaHistoryIntentPage
     historySequence = beginQuestionAnswerHistoryIntent(historyPage)
@@ -791,8 +851,8 @@ const startQuestionAnswers = async () => {
     qaErrorKey.value = ''
     qaRuntimeBatch.value = batch
     qaReviewBatch.value = batch
-    qaShowAll.value = false
-    qaCurrentExpanded.value = new Set()
+    qaProcessedOpen.value = false
+    qaFailedOpen.value = false
     emit('question-answer-started', targetId)
     const historySequence = beginQuestionAnswerHistoryIntent(1)
     qaHistory.value.page = 1
@@ -853,8 +913,8 @@ const stopQuestionAnswers = async () => {
       && qaReviewBatch.value?.batchId === batch.batchId
     applyRuntimeQuestionAnswerBatch(batch)
     if (reviewFollowsRuntime) {
-      qaShowAll.value = false
-      qaCurrentExpanded.value = new Set()
+      qaProcessedOpen.value = false
+      qaFailedOpen.value = false
     }
     clearQuestionAnswerClock()
     const historyPage = reviewFollowsRuntime ? 1 : qaHistoryIntentPage
@@ -927,8 +987,8 @@ const reviewQuestionAnswerBatch = async (batchId: string) => {
         ? runtimeBatch
         : batch
     }
-    qaShowAll.value = false
-    qaCurrentExpanded.value = new Set()
+    qaProcessedOpen.value = false
+    qaFailedOpen.value = false
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
     if (sequence === loadSequence && reviewSequence === qaReviewSequence) {
@@ -954,8 +1014,8 @@ const reviewLatestQuestionAnswerBatch = () => {
   if (!qaRuntimeBatch.value) return
   cancelQuestionAnswerReview()
   qaReviewBatch.value = qaRuntimeBatch.value
-  qaShowAll.value = false
-  qaCurrentExpanded.value = new Set()
+  qaProcessedOpen.value = false
+  qaFailedOpen.value = false
 }
 
 const goQuestionAnswerPage = async (page: number) => {
@@ -997,13 +1057,6 @@ const toggleQuestionAnswerExpanded = (recordId: string) => {
   if (next.has(recordId)) next.delete(recordId)
   else next.add(recordId)
   qaExpanded.value = next
-}
-
-const toggleCurrentQuestionAnswerExpanded = (recordId: string) => {
-  const next = new Set(qaCurrentExpanded.value)
-  if (next.has(recordId)) next.delete(recordId)
-  else next.add(recordId)
-  qaCurrentExpanded.value = next
 }
 
 const replaceQuestionAnswerBatchRecord = (
@@ -1290,7 +1343,7 @@ const close = () => {
 
         <div role="dialog" aria-modal="true" :aria-label="t(`${prefix}.title`)" class="relative flex h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-none flex-col overflow-hidden rounded-2xl border border-border/60 bg-card shadow-2xl">
           <div class="flex shrink-0 items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
-            <div class="flex min-w-0 items-center gap-2.5">
+            <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2.5">
               <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
                 <Zap class="h-4 w-4" />
               </div>
@@ -1300,15 +1353,21 @@ const close = () => {
                   {{ target.accountName }} · {{ target.platform || '-' }} · {{ target.type || '-' }} · {{ target.status || '-' }} · {{ target.groupName }}
                 </p>
               </div>
+              <AccountIntelligenceWeightEditor
+                :target-id="target.targetId"
+                :model-value="target.intelligenceWeight"
+                compact
+                @saved="emit('intelligence-weight-saved', $event)"
+              />
             </div>
             <button type="button" class="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface-elevated hover:text-foreground" @click="close">
               <X class="h-4 w-4" />
             </button>
           </div>
 
-          <div class="flex-1 overflow-y-auto px-5 py-4">
-            <div class="mb-4 inline-flex max-w-full overflow-x-auto rounded-lg border border-border/60 bg-surface-line/30 p-1">
-              <button type="button" class="whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors" :class="mode === 'questionAnswer' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :disabled="phase === 'testing'" @click="mode = 'questionAnswer'">
+          <div data-testid="question-answer-scroll" class="flex-1 overflow-y-auto px-5 py-4">
+            <div v-if="mode !== 'questionAnswer'" class="mb-4 inline-flex max-w-full overflow-x-auto rounded-lg border border-border/60 bg-surface-line/30 p-1">
+              <button type="button" class="whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground" :disabled="phase === 'testing'" @click="mode = 'questionAnswer'">
                 {{ t(`${prefix}.modes.questionAnswer`) }}
               </button>
               <button type="button" class="whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-colors" :class="mode === 'formal' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'" :disabled="phase === 'testing'" @click="mode = 'formal'">
@@ -1342,370 +1401,319 @@ const close = () => {
               </div>
 
               <template v-else>
-                <div v-if="mode === 'questionAnswer'" class="mb-4 grid overflow-hidden rounded-lg border border-border/50 bg-surface-line/20" :class="qaReviewBatch ? 'grid-cols-3' : 'grid-cols-2'">
-                  <div v-if="qaReviewBatch" data-testid="question-answer-review-stats" class="px-4 py-3">
-                    <div class="flex items-center justify-between gap-3">
-                      <p class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.reviewTitle`) }}</p>
-                      <p class="text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.submitted`, { count: qaReviewBatch.stats.requests.submitted }) }}</p>
-                    </div>
-                    <dl class="mt-3 grid grid-cols-4 gap-x-3 gap-y-2">
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.inProgress`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.requests.inProgress }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.succeeded`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.requests.succeeded }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.failed`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.requests.failed }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.cancelled`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.requests.cancelled }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.unreviewed`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.reviews.unreviewed }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.reviews.correct }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="font-semibold text-foreground">{{ qaReviewBatch.stats.reviews.incorrect }}</dd></div>
-                    </dl>
-                    <div v-if="qaReviewBatch.stats.byModel.length" class="mt-3 space-y-2 border-t border-border/40 pt-3">
-                      <div v-for="item in qaReviewBatch.stats.byModel" :key="item.modelName" data-testid="question-answer-model-stats" class="rounded-md border border-border/40 p-2">
-	                        <p class="break-all text-xs font-medium text-foreground">{{ item.modelName }}</p>
-	                        <dl class="mt-2 grid grid-cols-4 gap-x-2 gap-y-1">
-	                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.submitted`, { count: item.requests.submitted }) }}</dt><dd class="sr-only">{{ item.requests.submitted }}</dd></div>
-	                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.inProgress`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.inProgress }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.succeeded`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.succeeded }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.failed`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.failed }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.cancelled`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.cancelled }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.unreviewed`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.unreviewed }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.correct }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.incorrect }}</dd></div>
-                        </dl>
-                      </div>
-                    </div>
+                <section
+                  v-if="mode === 'questionAnswer' && !qaHistoryLoaded"
+                  data-question-answer-section="stats"
+                  class="mb-3 rounded-lg border border-border/50 bg-surface-line/20 px-3 py-4"
+                >
+                  <div v-if="qaLoading" data-testid="question-answer-stats-loading" class="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 class="h-4 w-4 animate-spin" />
+                    {{ t(prefix + '.questionAnswer.loading') }}
                   </div>
-                  <div class="px-4 py-3" :class="qaReviewBatch ? 'border-l border-border/50' : ''">
-                    <div class="flex items-center justify-between gap-3">
-                      <p class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.allTime`) }}</p>
-                      <p class="text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.submitted`, { count: qaHistory.stats.requests.submitted }) }}</p>
-                    </div>
-                    <dl class="mt-3 grid grid-cols-4 gap-x-3 gap-y-2">
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.inProgress`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.stats.requests.inProgress }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.succeeded`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.stats.requests.succeeded }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.failed`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.stats.requests.failed }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.cancelled`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.stats.requests.cancelled }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.unreviewed`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.stats.reviews.unreviewed }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.stats.reviews.correct }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.stats.reviews.incorrect }}</dd></div>
-                    </dl>
-                    <div v-if="qaHistory.stats.byModel.length" class="mt-3 space-y-2 border-t border-border/40 pt-3">
-                      <div v-for="item in qaHistory.stats.byModel" :key="item.modelName" data-testid="question-answer-model-stats" class="rounded-md border border-border/40 p-2">
-	                        <p class="break-all text-xs font-medium text-foreground">{{ item.modelName }}</p>
-	                        <dl class="mt-2 grid grid-cols-4 gap-x-2 gap-y-1">
-	                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.submitted`, { count: item.requests.submitted }) }}</dt><dd class="sr-only">{{ item.requests.submitted }}</dd></div>
-	                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.inProgress`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.inProgress }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.succeeded`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.succeeded }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.failed`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.failed }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.cancelled`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.cancelled }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.unreviewed`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.unreviewed }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.correct }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.incorrect }}</dd></div>
-                        </dl>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="border-l border-border/50 px-4 py-3">
-                    <div class="flex items-center justify-between gap-3">
-                      <p class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.todayShanghai`) }}</p>
-                      <p class="text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.submitted`, { count: qaHistory.todayStats.requests.submitted }) }}</p>
-                    </div>
-                    <dl class="mt-3 grid grid-cols-4 gap-x-3 gap-y-2">
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.inProgress`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.todayStats.requests.inProgress }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.succeeded`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.todayStats.requests.succeeded }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.failed`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.todayStats.requests.failed }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.cancelled`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.todayStats.requests.cancelled }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.unreviewed`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.todayStats.reviews.unreviewed }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.todayStats.reviews.correct }}</dd></div>
-                      <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="font-semibold text-foreground">{{ qaHistory.todayStats.reviews.incorrect }}</dd></div>
-                    </dl>
-                    <div v-if="qaHistory.todayStats.byModel.length" class="mt-3 space-y-2 border-t border-border/40 pt-3">
-                      <div v-for="item in qaHistory.todayStats.byModel" :key="item.modelName" data-testid="question-answer-model-stats" class="rounded-md border border-border/40 p-2">
-	                        <p class="break-all text-xs font-medium text-foreground">{{ item.modelName }}</p>
-	                        <dl class="mt-2 grid grid-cols-4 gap-x-2 gap-y-1">
-	                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.submitted`, { count: item.requests.submitted }) }}</dt><dd class="sr-only">{{ item.requests.submitted }}</dd></div>
-	                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.inProgress`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.inProgress }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.succeeded`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.succeeded }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.failed`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.failed }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.cancelled`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.requests.cancelled }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.unreviewed`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.unreviewed }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.correct`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.correct }}</dd></div>
-                          <div><dt class="text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.stats.incorrect`) }}</dt><dd class="text-xs font-semibold text-foreground">{{ item.reviews.incorrect }}</dd></div>
-                        </dl>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
+                  <p v-else data-testid="question-answer-stats-error" class="text-xs text-red-600 dark:text-red-400">{{ qaReadableError }}</p>
+                </section>
+                <QuestionAnswerStatsBar
+                  v-else-if="mode === 'questionAnswer'"
+                  data-question-answer-section="stats"
+                  :review-stats="qaReviewBatch?.stats ?? null"
+                  :today-stats="qaHistory.todayStats"
+                  :lifetime-stats="qaHistory.stats"
+                />
                 <template v-if="mode === 'questionAnswer'">
-                  <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
-                    <div data-testid="question-answer-models">
-                      <p class="mb-3 text-xs text-muted-foreground">{{ t(`${prefix}.selectHint`) }}</p>
-                      <div class="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                        <label v-for="model in models" :key="model.id" class="flex cursor-pointer items-start gap-2 rounded-lg border border-border/40 px-3 py-2.5 transition-colors" :class="selected.has(model.id) ? 'border-primary/50 bg-primary/5' : 'hover:bg-surface-line/40'">
-                          <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-border/60" :disabled="phase === 'testing' || qaSelectionLocked" :checked="selected.has(model.id)" @change="toggle(model.id)" />
-                          <div class="min-w-0 flex-1">
-                            <p class="truncate text-sm font-medium text-foreground">{{ model.name }}</p>
-                            <p v-if="model.ownedBy" class="truncate text-xs text-muted-foreground">{{ model.ownedBy }}</p>
-                          </div>
-                        </label>
-                      </div>
-                    </div>
-                    <fieldset data-testid="question-answer-reasoning" :disabled="qaSelectionLocked">
-                      <legend class="mb-2 text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.reasoningEffort.title`) }}</legend>
-                      <div class="grid grid-cols-4 overflow-hidden rounded-lg border border-border/50 bg-surface-line/20 xl:grid-cols-1">
-                        <label v-for="option in qaReasoningEffortOptions" :key="option.value" class="flex cursor-pointer items-center justify-center border-r border-border/40 px-2 py-2 text-xs transition-colors last:border-r-0 xl:border-b xl:border-r-0 xl:last:border-b-0" :class="qaReasoningEffort === option.value ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-surface-line/40'">
-                          <input :checked="qaReasoningEffort === option.value" class="sr-only" type="radio" name="question-answer-reasoning-effort" :value="option.value" @change="selectQuestionAnswerReasoningEffort(option.value)" />
-                          {{ t(`${prefix}.questionAnswer.reasoningEffort.options.${option.labelKey}`) }}
-                        </label>
-                      </div>
-                      <label class="mt-3 block text-xs font-semibold text-foreground" for="question-answer-repeat-count">{{ t(`${prefix}.questionAnswer.repeatCount`) }}</label>
-                      <select id="question-answer-repeat-count" :value="qaRepeatCount" class="mt-2 w-full rounded-lg border border-border/50 bg-background px-3 py-2 text-xs text-foreground" :disabled="qaSelectionLocked" @change="selectQuestionAnswerRepeatCount">
-                        <option v-for="option in qaRepeatCountOptions" :key="option" :value="option">{{ option }}</option>
-                      </select>
-                    </fieldset>
-                  </div>
-
-                  <div data-testid="question-answer-questions" class="mt-5 border-t border-border/40 pt-4">
-                    <div class="mb-3 flex items-center justify-between gap-3">
-                      <h4 class="text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.questionsTitle`) }}</h4>
-                      <span class="text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.selectedFormula`, { models: qaSubmission.modelCount, questions: qaSubmission.questionCount, repeat: qaSubmission.repeatCount, total: qaSubmission.total }) }}</span>
-                    </div>
-                    <div v-if="qaLoading" class="flex items-center gap-2 rounded-lg border border-dashed border-border/50 px-3 py-5 text-xs text-muted-foreground">
-                      <Loader2 class="h-4 w-4 animate-spin" />
-                      {{ t(`${prefix}.questionAnswer.loading`) }}
-                    </div>
-                    <div v-else-if="qaQuestions.length === 0" class="rounded-lg border border-dashed border-border/50 px-3 py-5 text-center text-xs text-muted-foreground">
-                      {{ t(`${prefix}.questionAnswer.noQuestions`) }}
-                    </div>
-                    <div v-else class="space-y-1.5">
-                      <label v-for="question in qaQuestions" :key="question.id" class="flex cursor-pointer items-start gap-2 rounded-md border border-border/40 px-3 py-2 transition-colors" :class="qaSelectedQuestions.has(question.id) ? 'border-primary/40 bg-primary/5' : 'hover:bg-surface-line/30'">
-                        <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-border/60" :disabled="qaSelectionLocked" :checked="qaSelectedQuestions.has(question.id)" @change="toggleQuestion(question.id)" />
-                        <div class="min-w-0 flex-1">
-                          <div class="flex items-center gap-2">
-                            <span class="truncate text-xs font-medium text-foreground">{{ question.name }}</span>
-                            <span v-if="question.isDefault" class="shrink-0 rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-600 dark:text-amber-400">{{ t(`${prefix}.questionAnswer.defaultQuestion`) }}</span>
-                          </div>
-                          <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ answerSummary(question.body) }}</p>
-                        </div>
-                      </label>
-                    </div>
-                    <p v-if="!qaSubmission.validRepeatCount" class="mt-2 text-xs text-red-600 dark:text-red-400">{{ t(`${prefix}.questionAnswer.repeatCountInvalid`) }}</p>
-                    <p v-else-if="!qaSubmission.withinBatchLimit" class="mt-2 text-xs text-red-600 dark:text-red-400">{{ t(`${prefix}.questionAnswer.batchLimit`, { total: qaSubmission.total }) }}</p>
-                  </div>
-
-                  <p v-if="qaErrorKey" class="mt-4 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">{{ qaReadableError }}</p>
-                  <p v-if="qaCompletedNotice" class="mt-4 rounded-lg bg-green-500/10 px-3 py-2 text-xs text-green-600 dark:text-green-400">{{ t(`${prefix}.questionAnswer.completedNotice`) }}</p>
-
-                  <section class="mt-5 border-t border-border/40 pt-4">
-                    <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+                  <section data-question-answer-section="pending" data-testid="question-answer-pending" class="rounded-lg border border-border/50 bg-card p-3">
+                    <div class="flex flex-wrap items-center justify-between gap-3">
                       <div>
-                        <h4 class="text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.currentTitle`) }}</h4>
-                        <p v-if="qaReviewBatch" class="mt-1 text-xs text-muted-foreground">
-                          {{ t(`${prefix}.questionAnswer.submitted`, { count: qaReviewBatch.stats.requests.submitted }) }} · {{ t(`${prefix}.questionAnswer.progress`, { completed: qaReviewBatch.stats.requests.succeeded + qaReviewBatch.stats.requests.failed + qaReviewBatch.stats.requests.cancelled, total: qaReviewBatch.stats.requests.submitted }) }}
-                          · {{ t(`${prefix}.questionAnswer.reasoningEffort.label`) }}: {{ questionAnswerReasoningEffortLabel(qaReviewBatch.reasoningEffort) }}
-                          <span v-if="qaReviewBatch.active"> · {{ t(`${prefix}.questionAnswer.runningCount`, { count: qaReviewBatch.runningCount }) }}</span>
-                        </p>
+                        <h4 class="text-sm font-semibold text-foreground">{{ t(prefix + '.questionAnswer.pendingReviewTitle') }}</h4>
                         <p v-if="qaReviewBatch" data-testid="question-answer-review-batch" class="mt-1 text-xs text-muted-foreground">
-                          {{ t(`${prefix}.questionAnswer.reviewBatchId`, { id: shortQuestionAnswerBatchId(qaReviewBatch.batchId) }) }}
-                          <span v-if="qaReviewBatch.active"> · {{ t(`${prefix}.questionAnswer.batchStillRunning`) }}</span>
-                          <span v-else-if="qaReviewCompletedAt"> · {{ t(`${prefix}.questionAnswer.batchCompletedAt`, { time: formatConnectionHealthTime(qaReviewCompletedAt) }) }}</span>
-                          <span v-else> · {{ t(`${prefix}.questionAnswer.batchTimeUnknown`) }}</span>
+                          {{ t(prefix + '.questionAnswer.reviewBatchId', { id: shortQuestionAnswerBatchId(qaReviewBatch.batchId) }) }}
+                          <span v-if="qaReviewBatch.active"> · {{ t(prefix + '.questionAnswer.batchStillRunning') }}</span>
+                          <span v-else-if="qaReviewCompletedAt"> · {{ t(prefix + '.questionAnswer.batchCompletedAt', { time: formatConnectionHealthTime(qaReviewCompletedAt) }) }}</span>
                         </p>
-                        <p v-if="qaRuntimeBatch?.active" class="mt-1 text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.queueProgress`, { waiting: qaWaitingCount, running: qaRuntimeBatch.runningCount, completed: qaRuntimeBatch.completedCount }) }}</p>
-                        <p v-if="qaRuntimeBatch?.active && qaWaitingCount > 0" class="mt-1 text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.queueNotice`) }}</p>
-                        <p v-if="qaRuntimeBatch?.active && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" class="mt-2 text-xs text-amber-700 dark:text-amber-300">
-                          {{ t(`${prefix}.questionAnswer.latestBatchStillRunning`, {
-                            completed: qaRuntimeBatch.stats.requests.succeeded + qaRuntimeBatch.stats.requests.failed + qaRuntimeBatch.stats.requests.cancelled,
-                            total: qaRuntimeBatch.stats.requests.submitted,
-                            running: qaRuntimeBatch.runningCount,
-                          }) }}
+                        <p
+                          v-if="qaRuntimeBatch?.active && qaReviewBatch && qaReviewBatch.batchId !== qaRuntimeBatch.batchId"
+                          data-testid="question-answer-latest-running-hint"
+                          class="mt-1 text-xs text-primary"
+                        >
+                          {{ t(prefix + '.questionAnswer.latestBatchStillRunning') }}
                         </p>
                       </div>
-                      <div class="flex flex-wrap items-center justify-end gap-2">
-                        <button v-if="qaReviewBatch && !qaReviewBatch.active" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line" @click="qaShowAll = !qaShowAll">
-                          {{ qaShowAll ? t(`${prefix}.questionAnswer.onlyUnreviewed`) : t(`${prefix}.questionAnswer.showAll`) }}
-                        </button>
+                      <div class="flex items-center gap-2">
                         <button v-if="qaRuntimeBatch && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line" @click="reviewLatestQuestionAnswerBatch">
-                          {{ t(`${prefix}.questionAnswer.reviewLatestBatch`) }}
+                          {{ t(prefix + '.questionAnswer.reviewLatestBatch') }}
                         </button>
                         <button v-if="qaRuntimeBatch?.active" type="button" class="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400" :disabled="qaCancelling" @click="stopQuestionAnswers">
                           <Loader2 v-if="qaCancelling" class="h-3.5 w-3.5 animate-spin" />
                           <StopCircle v-else class="h-3.5 w-3.5" />
-                          {{ t(`${prefix}.questionAnswer.stop`) }}
+                          {{ t(prefix + '.questionAnswer.stop') }}
                         </button>
                       </div>
                     </div>
-                    <div v-if="!qaReviewBatch" class="rounded-lg border border-dashed border-border/50 px-3 py-5 text-center text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.noBatch`) }}</div>
-                    <div v-else>
-                      <ul class="grid items-stretch gap-3" :class="currentBatchGridClass">
-                        <li
-                          v-for="record in qaCurrentRecords"
-                          :key="record.id"
-                          class="grid min-h-56 gap-6 rounded-lg border p-3"
-                          :class="[
-                            questionAnswerRecordClass(record),
-                            record.status === 'succeeded'
-                              ? 'md:grid-cols-[minmax(0,1fr)_12rem] md:grid-rows-2'
-                              : 'md:grid-cols-1',
-                          ]"
-                        >
-                          <button
-                            v-if="record.status === 'succeeded'"
-                            type="button"
-                            class="inline-flex min-h-14 items-center justify-center gap-2 rounded-md border border-green-500/40 px-4 py-3 text-sm font-medium text-green-700 disabled:opacity-50 dark:text-green-400 md:col-start-2 md:row-start-1"
-                            :class="qaMarking.has(record.id)
-                              ? (qaMarking.get(record.id) === 'correct' ? 'bg-green-500/20' : 'hover:bg-green-500/10')
-                              : (record.answerJudgment === 'correct' ? 'bg-green-500/20' : 'hover:bg-green-500/10')"
-                            :aria-pressed="record.answerJudgment === 'correct'"
-                            :disabled="qaMarking.has(record.id)"
-                            @click="saveQuestionAnswerJudgment(record, 'correct')"
-                          >
-                            <Loader2 v-if="qaMarking.get(record.id) === 'correct'" class="h-4 w-4 animate-spin" />
-                            {{ t(`${prefix}.questionAnswer.correct`) }}<span v-if="qaMarking.get(record.id) === 'correct'"> · {{ t(`${prefix}.questionAnswer.saving`) }}</span>
-                          </button>
-
-                          <div class="min-w-0" :class="record.status === 'succeeded' ? 'md:col-start-1 md:row-span-2 md:row-start-1' : ''">
-                            <div class="flex items-start justify-between gap-3">
-                              <div class="flex min-w-0 items-start gap-2">
-                                <Loader2 v-if="record.status === 'pending' || record.status === 'running'" class="mt-0.5 h-5 w-5 shrink-0 animate-spin text-primary" />
-                                <CheckCircle2 v-else-if="record.answerJudgment === 'correct'" class="mt-0.5 h-5 w-5 shrink-0 text-green-600 dark:text-green-400" />
-                                <XCircle v-else-if="record.status === 'failed' || record.answerJudgment === 'incorrect'" class="mt-0.5 h-5 w-5 shrink-0 text-red-600 dark:text-red-400" />
-                                <AlertTriangle v-else-if="record.answerJudgment === 'unreviewed'" class="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
-                                <StopCircle v-else-if="record.status === 'cancelled'" class="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
-                                <div class="min-w-0">
-                                  <p class="truncate text-sm font-semibold text-foreground">{{ record.questionName }}</p>
-                                  <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ record.modelName }}</p>
-                                </div>
-                              </div>
-                              <div class="shrink-0 text-right text-xs text-muted-foreground">
-                                <p>{{ questionAnswerStatusLabel(record) }}</p>
-                                <p v-if="questionAnswerElapsedLabel(record)" class="mt-0.5">{{ questionAnswerElapsedLabel(record) }}</p>
-                              </div>
-                            </div>
-
-                            <div class="mt-3 space-y-3 border-t border-border/40 pt-3">
-                              <div>
-                                <p class="text-[11px] font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.questionLabel`) }}</p>
-                                <p class="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-foreground" :class="qaReviewBatch.active || qaShowAll ? (qaCurrentExpanded.has(record.id) ? '' : 'line-clamp-2') : ''">{{ record.questionBody }}</p>
-                              </div>
-                              <div>
-                                <p class="text-[11px] font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.answerLabel`) }}</p>
-                                <QuestionAnswerHighlightedText
-                                  v-if="record.status === 'succeeded' && record.answerJudgment === 'unreviewed' && record.questionKeywordSnapshot !== null && record.questionKeywordSnapshot.length > 0"
-                                  class="mt-1"
-                                  :class="qaReviewBatch.active || qaShowAll ? (qaCurrentExpanded.has(record.id) ? '' : 'line-clamp-4') : ''"
-                                  :answer="questionAnswerCurrentAnswer(record)"
-                                  :snapshot="record.questionKeywordSnapshot"
-                                />
-                                <p v-else class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground" :class="qaReviewBatch.active || qaShowAll ? (qaCurrentExpanded.has(record.id) ? '' : 'line-clamp-4') : ''">{{ questionAnswerCurrentAnswer(record) }}</p>
-                                <p v-if="record.status === 'succeeded' && record.questionKeywordSnapshot === null" class="mt-1 text-[11px] text-muted-foreground">{{ t(`${prefix}.questionAnswer.noKeywordSnapshot`) }}</p>
-                              </div>
-                            </div>
-
-                            <button v-if="qaReviewBatch.active || qaShowAll" type="button" class="mt-3 inline-flex items-center justify-end gap-1 text-xs font-medium text-muted-foreground hover:text-foreground" @click="toggleCurrentQuestionAnswerExpanded(record.id)">
-                              {{ qaCurrentExpanded.has(record.id) ? t(`${prefix}.questionAnswer.collapseCurrent`) : t(`${prefix}.questionAnswer.expandCurrent`) }}
-                              <ChevronUp v-if="qaCurrentExpanded.has(record.id)" class="h-3.5 w-3.5" />
-                              <ChevronDown v-else class="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-
-                          <button
-                            v-if="record.status === 'succeeded'"
-                            type="button"
-                            class="inline-flex min-h-14 items-center justify-center gap-2 rounded-md border border-red-500/40 px-4 py-3 text-sm font-medium text-red-700 disabled:opacity-50 dark:text-red-400 md:col-start-2 md:row-start-2"
-                            :class="qaMarking.has(record.id)
-                              ? (qaMarking.get(record.id) === 'incorrect' ? 'bg-red-500/20' : 'hover:bg-red-500/10')
-                              : (record.answerJudgment === 'incorrect' ? 'bg-red-500/20' : 'hover:bg-red-500/10')"
-                            :aria-pressed="record.answerJudgment === 'incorrect'"
-                            :disabled="qaMarking.has(record.id)"
-                            @click="saveQuestionAnswerJudgment(record, 'incorrect')"
-                          >
-                            <Loader2 v-if="qaMarking.get(record.id) === 'incorrect'" class="h-4 w-4 animate-spin" />
-                            {{ t(`${prefix}.questionAnswer.incorrect`) }}<span v-if="qaMarking.get(record.id) === 'incorrect'"> · {{ t(`${prefix}.questionAnswer.saving`) }}</span>
-                          </button>
-                        </li>
-                      </ul>
+                    <div v-if="!qaReviewBatch" class="mt-3 rounded-lg border border-dashed border-border/50 px-3 py-4 text-center text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.noBatch') }}</div>
+                    <div v-else-if="qaPendingReviewRecords.length === 0" class="mt-3 rounded-lg border border-dashed border-border/50 px-3 py-4 text-center text-xs text-muted-foreground">
+                      {{ qaReviewBatch.active ? t(prefix + '.questionAnswer.waitingForReviewableAnswer') : t(prefix + '.questionAnswer.noPendingReview') }}
                     </div>
+                    <ul v-else class="mt-3 space-y-3">
+                      <li v-for="record in qaPendingReviewRecords" :key="record.id" class="grid gap-6 rounded-lg border border-border/60 bg-card p-3 md:grid-cols-[minmax(0,1fr)_10rem] md:grid-rows-2">
+                        <button
+                          type="button"
+                          class="inline-flex min-h-14 items-center justify-center gap-2 rounded-md border border-green-500/40 px-4 py-2 text-sm font-medium text-green-700 hover:bg-green-500/10 disabled:opacity-50 dark:text-green-400 md:col-start-2 md:row-start-1"
+                          :class="qaMarking.get(record.id) === 'correct' ? 'bg-green-500/20' : ''"
+                          :aria-pressed="record.answerJudgment === 'correct'"
+                          :disabled="qaMarking.has(record.id)"
+                          @click="saveQuestionAnswerJudgment(record, 'correct')"
+                        >
+                          <Loader2 v-if="qaMarking.get(record.id) === 'correct'" class="h-4 w-4 animate-spin" />
+                          {{ t(prefix + '.questionAnswer.correct') }}<span v-if="qaMarking.get(record.id) === 'correct'"> · {{ t(prefix + '.questionAnswer.saving') }}</span>
+                        </button>
+                        <div class="min-w-0 md:col-start-1 md:row-span-2 md:row-start-1">
+                          <div class="flex items-start justify-between gap-3">
+                            <div class="min-w-0">
+                              <p class="text-sm font-semibold text-foreground">{{ record.questionName }}</p>
+                              <p class="mt-0.5 text-xs text-muted-foreground">{{ record.modelName }}</p>
+                            </div>
+                            <span v-if="questionAnswerElapsedLabel(record)" class="shrink-0 text-xs text-muted-foreground">{{ questionAnswerElapsedLabel(record) }}</span>
+                          </div>
+                          <div class="mt-3 space-y-3 border-t border-border/40 pt-3">
+                            <div>
+                              <p class="text-[11px] font-medium text-muted-foreground">{{ t(prefix + '.questionAnswer.questionLabel') }}</p>
+                              <p class="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-foreground">{{ record.questionBody }}</p>
+                            </div>
+                            <div>
+                              <p class="text-[11px] font-medium text-muted-foreground">{{ t(prefix + '.questionAnswer.answerLabel') }}</p>
+                              <QuestionAnswerHighlightedText
+                                v-if="record.questionKeywordSnapshot !== null && record.questionKeywordSnapshot.length > 0"
+                                class="mt-1"
+                                :answer="questionAnswerCurrentAnswer(record)"
+                                :snapshot="record.questionKeywordSnapshot"
+                              />
+                              <p v-else class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{{ questionAnswerCurrentAnswer(record) }}</p>
+                              <p v-if="record.questionKeywordSnapshot === null" class="mt-1 text-[11px] text-muted-foreground">{{ t(prefix + '.questionAnswer.noKeywordSnapshot') }}</p>
+                            </div>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          class="inline-flex min-h-14 items-center justify-center gap-2 rounded-md border border-red-500/40 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400 md:col-start-2 md:row-start-2"
+                          :class="qaMarking.get(record.id) === 'incorrect' ? 'bg-red-500/20' : ''"
+                          :aria-pressed="record.answerJudgment === 'incorrect'"
+                          :disabled="qaMarking.has(record.id)"
+                          @click="saveQuestionAnswerJudgment(record, 'incorrect')"
+                        >
+                          <Loader2 v-if="qaMarking.get(record.id) === 'incorrect'" class="h-4 w-4 animate-spin" />
+                          {{ t(prefix + '.questionAnswer.incorrect') }}<span v-if="qaMarking.get(record.id) === 'incorrect'"> · {{ t(prefix + '.questionAnswer.saving') }}</span>
+                        </button>
+                      </li>
+                    </ul>
                   </section>
 
-                  <section class="mt-5 border-t border-border/40 pt-4">
-                    <h4 class="mb-3 text-xs font-semibold text-foreground">{{ t(`${prefix}.questionAnswer.historyTitle`) }}</h4>
-                    <div v-if="qaHistoryBatchGroups.length === 0" class="rounded-lg border border-dashed border-border/50 px-3 py-5 text-center text-xs text-muted-foreground">{{ t(`${prefix}.questionAnswer.noHistory`) }}</div>
-                    <div v-else class="space-y-3">
-                      <div v-for="group in qaHistoryBatchGroups" :key="group.batchId" class="rounded-lg border border-border/50 bg-surface-line/10 p-3">
-                        <div class="flex flex-wrap items-center justify-between gap-3">
-                          <p class="text-xs font-medium text-foreground">{{ t(`${prefix}.questionAnswer.reviewBatchId`, { id: shortQuestionAnswerBatchId(group.batchId) }) }}</p>
-                          <button type="button" class="inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line disabled:opacity-50" :disabled="qaReviewLoadingBatchId === group.batchId" @click="reviewQuestionAnswerBatch(group.batchId)">
-                            <Loader2 v-if="qaReviewLoadingBatchId === group.batchId" class="h-3.5 w-3.5 animate-spin" />
-                            {{ t(`${prefix}.questionAnswer.reviewThisBatch`) }}
-                          </button>
-                        </div>
-                        <ul v-if="qaHistoryRowsVisible" class="mt-3 space-y-2 border-t border-border/40 pt-3">
-                          <li v-for="record in group.records" :key="record.id" class="rounded-lg border px-3 py-2.5" :class="questionAnswerRecordClass(record)">
-                            <div class="flex items-start justify-between gap-3">
-                              <button type="button" class="min-w-0 flex-1 text-left" @click="toggleQuestionAnswerExpanded(record.id)">
-                                <div class="flex min-w-0 items-center gap-2">
-                                  <span class="truncate text-sm font-medium text-foreground">{{ record.questionName }}</span>
-                                </div>
-                                <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                                  <span>{{ record.modelName }}</span>
-                                  <span>{{ t(`${prefix}.questionAnswer.reasoningEffort.label`) }}: {{ questionAnswerReasoningEffortLabel(record.reasoningEffort) }}</span>
-                                  <span>{{ formatConnectionHealthTime(record.createdAt) }}</span>
-                                  <span>{{ questionAnswerStatusLabel(record) }}</span>
-                                  <span v-if="questionAnswerElapsedLabel(record)">{{ questionAnswerElapsedLabel(record) }}</span>
-                                </div>
-                                <p v-if="!qaExpanded.has(record.id)" class="mt-2 truncate text-xs text-muted-foreground">{{ answerSummary(record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(`${prefix}.questionAnswer.noAnswer`))) }}</p>
-                              </button>
-                              <div class="flex shrink-0 items-center gap-3">
-                                <div v-if="record.status === 'succeeded'" class="grid gap-6">
-                                  <button
-                                    type="button"
-                                    class="inline-flex min-h-14 items-center justify-center gap-2 rounded-md border border-green-500/40 px-3 py-2 text-xs text-green-700 disabled:opacity-50 dark:text-green-400"
-                                    :class="qaMarking.has(record.id)
-                                      ? (qaMarking.get(record.id) === 'correct' ? 'bg-green-500/20' : 'hover:bg-green-500/10')
-                                      : (record.answerJudgment === 'correct' ? 'bg-green-500/20' : 'hover:bg-green-500/10')"
-                                    :aria-pressed="record.answerJudgment === 'correct'"
-                                    :disabled="qaMarking.has(record.id)"
-                                    @click="saveQuestionAnswerJudgment(record, 'correct')"
-                                  >
-                                    <Loader2 v-if="qaMarking.get(record.id) === 'correct'" class="h-4 w-4 animate-spin" />
-                                    {{ t(`${prefix}.questionAnswer.correct`) }}<span v-if="qaMarking.get(record.id) === 'correct'"> · {{ t(`${prefix}.questionAnswer.saving`) }}</span>
-                                  </button>
-                                  <button
-                                    type="button"
-                                    class="inline-flex min-h-14 items-center justify-center gap-2 rounded-md border border-red-500/40 px-3 py-2 text-xs text-red-700 disabled:opacity-50 dark:text-red-400"
-                                    :class="qaMarking.has(record.id)
-                                      ? (qaMarking.get(record.id) === 'incorrect' ? 'bg-red-500/20' : 'hover:bg-red-500/10')
-                                      : (record.answerJudgment === 'incorrect' ? 'bg-red-500/20' : 'hover:bg-red-500/10')"
-                                    :aria-pressed="record.answerJudgment === 'incorrect'"
-                                    :disabled="qaMarking.has(record.id)"
-                                    @click="saveQuestionAnswerJudgment(record, 'incorrect')"
-                                  >
-                                    <Loader2 v-if="qaMarking.get(record.id) === 'incorrect'" class="h-4 w-4 animate-spin" />
-                                    {{ t(`${prefix}.questionAnswer.incorrect`) }}<span v-if="qaMarking.get(record.id) === 'incorrect'"> · {{ t(`${prefix}.questionAnswer.saving`) }}</span>
-                                  </button>
-                                </div>
-                                <XCircle v-else-if="record.status === 'failed'" class="h-6 w-6 text-red-600 dark:text-red-400" />
-                                <StopCircle v-else-if="record.status === 'cancelled'" class="h-6 w-6 text-muted-foreground" />
-                                <Loader2 v-else-if="record.status === 'pending' || record.status === 'running'" class="h-6 w-6 animate-spin text-primary" />
-                                <button type="button" class="rounded-md p-1.5 text-muted-foreground hover:bg-surface-elevated hover:text-foreground" @click="toggleQuestionAnswerExpanded(record.id)">
-                                  <ChevronUp v-if="qaExpanded.has(record.id)" class="h-4 w-4" />
-                                  <ChevronDown v-else class="h-4 w-4" />
-                                </button>
+                  <section v-if="qaReviewedRecords.length > 0 || qaFailedRecords.length > 0" data-question-answer-section="processed" data-testid="question-answer-processed" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
+                    <button type="button" class="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left" @click="qaProcessedOpen = !qaProcessedOpen">
+                      <span class="text-xs font-semibold text-foreground">
+                        {{ t(prefix + '.questionAnswer.processedSummary', { total: qaReviewedRecords.length, correct: qaReviewedCorrectCount, incorrect: qaReviewedIncorrectCount }) }}
+                      </span>
+                      <ChevronUp v-if="qaProcessedOpen" class="h-4 w-4 text-muted-foreground" />
+                      <ChevronDown v-else class="h-4 w-4 text-muted-foreground" />
+                    </button>
+                    <div v-if="qaProcessedOpen" data-testid="question-answer-processed-content" class="border-t border-border/40 p-3">
+                      <div v-if="qaReviewedRecords.length === 0" class="rounded-md border border-dashed border-border/50 px-3 py-3 text-center text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.noProcessedAnswers') }}</div>
+                      <ul v-else class="space-y-2">
+                        <li v-for="record in qaReviewedRecords" :key="record.id" class="grid gap-3 rounded-md border p-3 md:grid-cols-[minmax(0,1fr)_9rem]" :class="questionAnswerRecordClass(record)">
+                          <div class="min-w-0">
+                            <div class="flex items-center justify-between gap-3">
+                              <div class="min-w-0">
+                                <p class="truncate text-sm font-semibold text-foreground">{{ record.questionName }}</p>
+                                <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ record.modelName }}</p>
                               </div>
+                              <span class="shrink-0 text-xs text-muted-foreground">{{ questionAnswerStatusLabel(record) }}</span>
                             </div>
-                            <div v-if="qaExpanded.has(record.id)" class="mt-3 space-y-3 border-t border-border/40 pt-3">
-                              <div><p class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.fullQuestion`) }}</p><p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{{ record.questionBody }}</p></div>
-                              <div><p class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.questionAnswer.fullAnswer`) }}</p><p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{{ record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(`${prefix}.questionAnswer.noAnswer`)) }}</p></div>
+                            <p class="mt-2 whitespace-pre-wrap break-words text-xs leading-5 text-foreground">{{ record.questionBody }}</p>
+                            <p class="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{{ questionAnswerCurrentAnswer(record) }}</p>
+                          </div>
+                          <div class="grid grid-cols-2 gap-2 md:grid-cols-1">
+                            <button
+                              type="button"
+                              class="rounded-md border border-green-500/40 px-3 py-2 text-xs font-medium text-green-700 hover:bg-green-500/10 disabled:opacity-50 dark:text-green-400"
+                              :class="record.answerJudgment === 'correct' ? 'bg-green-500/20' : ''"
+                              :aria-pressed="record.answerJudgment === 'correct'"
+                              :disabled="qaMarking.has(record.id)"
+                              @click="saveQuestionAnswerJudgment(record, 'correct')"
+                            >
+                              {{ t(prefix + '.questionAnswer.correct') }}
+                            </button>
+                            <button
+                              type="button"
+                              class="rounded-md border border-red-500/40 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400"
+                              :class="record.answerJudgment === 'incorrect' ? 'bg-red-500/20' : ''"
+                              :aria-pressed="record.answerJudgment === 'incorrect'"
+                              :disabled="qaMarking.has(record.id)"
+                              @click="saveQuestionAnswerJudgment(record, 'incorrect')"
+                            >
+                              {{ t(prefix + '.questionAnswer.incorrect') }}
+                            </button>
+                          </div>
+                        </li>
+                      </ul>
+                      <div v-if="qaFailedRecords.length > 0" class="mt-3 border-t border-border/40 pt-3">
+                        <button type="button" class="inline-flex items-center gap-1 text-xs font-medium text-red-600 dark:text-red-400" @click="qaFailedOpen = !qaFailedOpen">
+                          {{ t(prefix + '.questionAnswer.failedSummary', { count: qaFailedRecords.length }) }}
+                          <ChevronUp v-if="qaFailedOpen" class="h-3.5 w-3.5" />
+                          <ChevronDown v-else class="h-3.5 w-3.5" />
+                        </button>
+                        <ul v-if="qaFailedOpen" data-testid="question-answer-failed-content" class="mt-2 space-y-2">
+                          <li v-for="record in qaFailedRecords" :key="record.id" class="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2">
+                            <div class="flex items-center justify-between gap-3">
+                              <div class="min-w-0">
+                                <p class="truncate text-sm font-medium text-foreground">{{ record.questionName }}</p>
+                                <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ record.modelName }}</p>
+                                <p class="mt-1 text-xs text-foreground">{{ record.questionBody }}</p>
+                              </div>
+                              <span class="shrink-0 text-xs text-red-600 dark:text-red-400">{{ questionAnswerErrorLabel(record.errorType) }}</span>
                             </div>
                           </li>
                         </ul>
                       </div>
                     </div>
-                    <div v-if="qaHistory.totalPages > 1" class="mt-4 flex flex-wrap items-center justify-center gap-1.5">
-                      <template v-for="(page, index) in qaPageNumbers" :key="page">
-                        <span v-if="index > 0 && page - qaPageNumbers[index - 1] > 1" class="px-1 text-xs text-muted-foreground">…</span>
-                        <button type="button" class="h-8 min-w-8 rounded-md border px-2 text-xs" :class="page === qaHistory.page ? 'border-primary bg-primary text-primary-foreground' : 'border-border/50 text-muted-foreground hover:bg-surface-elevated'" @click="goQuestionAnswerPage(page)">{{ page }}</button>
-                      </template>
+                  </section>
+
+                  <section data-question-answer-section="configuration" data-testid="question-answer-configuration" class="mt-3 rounded-lg border border-border/50 bg-card p-3">
+                    <div class="inline-flex max-w-full overflow-x-auto rounded-lg border border-border/60 bg-surface-line/30 p-1">
+                      <button type="button" class="whitespace-nowrap rounded-md bg-background px-3 py-1.5 text-xs font-medium text-foreground shadow-sm" :disabled="phase === 'testing'">{{ t(prefix + '.modes.questionAnswer') }}</button>
+                      <button type="button" class="whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground" :disabled="phase === 'testing'" @click="mode = 'formal'">{{ t(prefix + '.modes.formal') }}</button>
+                      <button type="button" class="whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground" :disabled="phase === 'testing'" @click="mode = 'once'">{{ t(prefix + '.modes.once') }}</button>
+                    </div>
+                    <p v-if="qaErrorKey && qaHistoryLoaded" class="mt-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">{{ qaReadableError }}</p>
+                    <p v-if="qaCompletedNotice" class="mt-3 rounded-lg bg-green-500/10 px-3 py-2 text-xs text-green-600 dark:text-green-400">{{ t(prefix + '.questionAnswer.completedNotice') }}</p>
+
+                    <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+                      <h4 class="text-sm font-semibold text-foreground">{{ t(prefix + '.questionAnswer.newTestConfiguration') }}</h4>
+                      <button
+                        v-if="!qaSelectionLocked && (!qaConfigOpen || qaSavedPreferenceValid)"
+                        type="button"
+                        class="rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium text-foreground hover:bg-surface-line"
+                        @click="qaConfigOpen = !qaConfigOpen"
+                      >
+                        {{ qaConfigOpen ? t(prefix + '.questionAnswer.collapseConfiguration') : t(prefix + '.questionAnswer.modifyConfiguration') }}
+                      </button>
+                    </div>
+                    <div v-if="!qaConfigOpen" class="mt-3 rounded-lg bg-surface-line/30 px-3 py-2.5">
+                      <p class="break-words text-sm font-medium text-foreground">{{ qaSummaryModelNames.join('、') || '-' }}</p>
+                      <p class="mt-1 text-xs text-muted-foreground">
+                        {{ t(prefix + '.questionAnswer.configurationSummary', {
+                          questions: qaSummaryQuestionCount,
+                          effort: questionAnswerReasoningEffortLabel(qaSummaryReasoningEffort),
+                          repeat: qaSummaryRepeatCount,
+                        }) }}
+                      </p>
+                      <p class="mt-1 text-xs text-primary">
+                        {{ qaRuntimeBatch?.active ? t(prefix + '.questionAnswer.activeConfiguration') : t(prefix + '.questionAnswer.rememberedConfiguration') }}
+                      </p>
+                    </div>
+                    <div v-else class="mt-3">
+                      <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
+                        <div data-testid="question-answer-models">
+                          <p class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.selectHint') }}</p>
+                          <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                            <label v-for="model in models" :key="model.id" class="flex cursor-pointer items-start gap-2 rounded-lg border border-border/40 px-3 py-2 transition-colors" :class="selected.has(model.id) ? 'border-primary/50 bg-primary/5' : 'hover:bg-surface-line/40'">
+                              <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-border/60" :disabled="qaSelectionLocked" :checked="selected.has(model.id)" @change="toggle(model.id)" />
+                              <div class="min-w-0 flex-1">
+                                <p class="truncate text-sm font-medium text-foreground">{{ model.name }}</p>
+                                <p v-if="model.ownedBy" class="truncate text-xs text-muted-foreground">{{ model.ownedBy }}</p>
+                              </div>
+                            </label>
+                          </div>
+                        </div>
+                        <fieldset data-testid="question-answer-reasoning" :disabled="qaSelectionLocked">
+                          <legend class="mb-2 text-xs font-semibold text-foreground">{{ t(prefix + '.questionAnswer.reasoningEffort.title') }}</legend>
+                          <div class="grid grid-cols-4 overflow-hidden rounded-lg border border-border/50 bg-surface-line/20 xl:grid-cols-1">
+                            <label v-for="option in qaReasoningEffortOptions" :key="option.value" class="flex cursor-pointer items-center justify-center border-r border-border/40 px-2 py-2 text-xs transition-colors last:border-r-0 xl:border-b xl:border-r-0 xl:last:border-b-0" :class="qaReasoningEffort === option.value ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-surface-line/40'">
+                              <input :checked="qaReasoningEffort === option.value" class="sr-only" type="radio" name="question-answer-reasoning-effort" :value="option.value" @change="selectQuestionAnswerReasoningEffort(option.value)" />
+                              {{ t(prefix + '.questionAnswer.reasoningEffort.options.' + option.labelKey) }}
+                            </label>
+                          </div>
+                          <label class="mt-3 block text-xs font-semibold text-foreground" for="question-answer-repeat-count">{{ t(prefix + '.questionAnswer.repeatCount') }}</label>
+                          <select id="question-answer-repeat-count" :value="qaRepeatCount" class="mt-2 w-full rounded-lg border border-border/50 bg-background px-3 py-2 text-xs text-foreground" :disabled="qaSelectionLocked" @change="selectQuestionAnswerRepeatCount">
+                            <option v-for="option in qaRepeatCountOptions" :key="option" :value="option">{{ option }}</option>
+                          </select>
+                        </fieldset>
+                      </div>
+                      <div data-testid="question-answer-questions" class="mt-4 border-t border-border/40 pt-3">
+                        <div class="mb-2 flex items-center justify-between gap-3">
+                          <h4 class="text-xs font-semibold text-foreground">{{ t(prefix + '.questionAnswer.questionsTitle') }}</h4>
+                          <span class="text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.selectedFormula', { models: qaSubmission.modelCount, questions: qaSubmission.questionCount, repeat: qaSubmission.repeatCount, total: qaSubmission.total }) }}</span>
+                        </div>
+                        <div v-if="qaLoading" class="flex items-center gap-2 rounded-lg border border-dashed border-border/50 px-3 py-4 text-xs text-muted-foreground">
+                          <Loader2 class="h-4 w-4 animate-spin" />
+                          {{ t(prefix + '.questionAnswer.loading') }}
+                        </div>
+                        <div v-else-if="qaQuestions.length === 0" class="rounded-lg border border-dashed border-border/50 px-3 py-4 text-center text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.noQuestions') }}</div>
+                        <div v-else class="space-y-1.5">
+                          <label v-for="question in qaQuestions" :key="question.id" class="flex cursor-pointer items-start gap-2 rounded-md border border-border/40 px-3 py-2 transition-colors" :class="qaSelectedQuestions.has(question.id) ? 'border-primary/40 bg-primary/5' : 'hover:bg-surface-line/30'">
+                            <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-border/60" :disabled="qaSelectionLocked" :checked="qaSelectedQuestions.has(question.id)" @change="toggleQuestion(question.id)" />
+                            <div class="min-w-0 flex-1">
+                              <div class="flex items-center gap-2">
+                                <span class="truncate text-xs font-medium text-foreground">{{ question.name }}</span>
+                                <span v-if="question.isDefault" class="shrink-0 rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-600 dark:text-amber-400">{{ t(prefix + '.questionAnswer.defaultQuestion') }}</span>
+                              </div>
+                              <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ answerSummary(question.body) }}</p>
+                            </div>
+                          </label>
+                        </div>
+                        <p v-if="!qaSubmission.validRepeatCount" class="mt-2 text-xs text-red-600 dark:text-red-400">{{ t(prefix + '.questionAnswer.repeatCountInvalid') }}</p>
+                        <p v-else-if="!qaSubmission.withinBatchLimit" class="mt-2 text-xs text-red-600 dark:text-red-400">{{ t(prefix + '.questionAnswer.batchLimit', { total: qaSubmission.total }) }}</p>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section data-question-answer-section="history" data-testid="question-answer-history" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
+                    <button type="button" class="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left" @click="qaHistoryOpen = !qaHistoryOpen">
+                      <span class="text-xs font-semibold text-foreground">{{ t(prefix + '.questionAnswer.todayHistoryTitle') }}</span>
+                      <ChevronUp v-if="qaHistoryOpen" class="h-4 w-4 text-muted-foreground" />
+                      <ChevronDown v-else class="h-4 w-4 text-muted-foreground" />
+                    </button>
+                    <div v-if="qaHistoryOpen" data-testid="question-answer-history-content" class="border-t border-border/40 p-3">
+                      <div v-if="qaHistoryBatchGroups.length === 0" class="rounded-lg border border-dashed border-border/50 px-3 py-4 text-center text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.noHistory') }}</div>
+                      <div v-else class="space-y-3">
+                        <div v-for="group in qaHistoryBatchGroups" :key="group.batchId" class="rounded-lg border border-border/50 bg-card p-3">
+                          <div class="flex flex-wrap items-center justify-between gap-3">
+                            <p class="text-xs font-medium text-foreground">{{ t(prefix + '.questionAnswer.reviewBatchId', { id: shortQuestionAnswerBatchId(group.batchId) }) }}</p>
+                            <button type="button" class="inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line disabled:opacity-50" :disabled="qaReviewLoadingBatchId === group.batchId" @click="reviewQuestionAnswerBatch(group.batchId)">
+                              <Loader2 v-if="qaReviewLoadingBatchId === group.batchId" class="h-3.5 w-3.5 animate-spin" />
+                              {{ t(prefix + '.questionAnswer.reviewThisBatch') }}
+                            </button>
+                          </div>
+                          <ul class="mt-2 space-y-1.5 border-t border-border/40 pt-2">
+                            <li v-for="record in group.records" :key="record.id" class="rounded-md border border-border/40 px-3 py-2">
+                              <div class="flex items-center justify-between gap-3">
+                                <button type="button" class="min-w-0 flex-1 text-left" @click="toggleQuestionAnswerExpanded(record.id)">
+                                  <p class="truncate text-xs font-medium text-foreground">{{ record.questionName }}</p>
+                                  <p class="mt-0.5 truncate text-[11px] text-muted-foreground">{{ record.modelName }} · {{ answerSummary(record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(prefix + '.questionAnswer.noAnswer'))) }}</p>
+                                </button>
+                                <div class="flex shrink-0 items-center gap-2">
+                                  <div v-if="record.status === 'succeeded'" class="grid gap-2">
+                                    <button type="button" class="min-h-12 rounded-md border border-green-500/40 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-500/10 disabled:opacity-50 dark:text-green-400" :class="record.answerJudgment === 'correct' ? 'bg-green-500/20' : ''" :aria-pressed="record.answerJudgment === 'correct'" :disabled="qaMarking.has(record.id)" @click="saveQuestionAnswerJudgment(record, 'correct')">{{ t(prefix + '.questionAnswer.correct') }}</button>
+                                    <button type="button" class="min-h-12 rounded-md border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400" :class="record.answerJudgment === 'incorrect' ? 'bg-red-500/20' : ''" :aria-pressed="record.answerJudgment === 'incorrect'" :disabled="qaMarking.has(record.id)" @click="saveQuestionAnswerJudgment(record, 'incorrect')">{{ t(prefix + '.questionAnswer.incorrect') }}</button>
+                                  </div>
+                                  <span v-else class="text-[11px] text-muted-foreground">{{ questionAnswerStatusLabel(record) }}</span>
+                                  <button type="button" class="rounded-md p-1 text-muted-foreground hover:bg-surface-elevated" @click="toggleQuestionAnswerExpanded(record.id)">
+                                    <ChevronUp v-if="qaExpanded.has(record.id)" class="h-4 w-4" />
+                                    <ChevronDown v-else class="h-4 w-4" />
+                                  </button>
+                                </div>
+                              </div>
+                              <div v-if="qaExpanded.has(record.id)" class="mt-2 space-y-2 border-t border-border/40 pt-2">
+                                <div><p class="text-[11px] font-medium text-muted-foreground">{{ t(prefix + '.questionAnswer.fullQuestion') }}</p><p class="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-foreground">{{ record.questionBody }}</p></div>
+                                <div><p class="text-[11px] font-medium text-muted-foreground">{{ t(prefix + '.questionAnswer.fullAnswer') }}</p><p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{{ record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(prefix + '.questionAnswer.noAnswer')) }}</p></div>
+                              </div>
+                            </li>
+                          </ul>
+                        </div>
+                      </div>
+                      <div v-if="qaHistory.totalPages > 1" class="mt-4 flex flex-wrap items-center justify-center gap-1.5">
+                        <template v-for="(page, index) in qaPageNumbers" :key="page">
+                          <span v-if="index > 0 && page - qaPageNumbers[index - 1] > 1" class="px-1 text-xs text-muted-foreground">…</span>
+                          <button type="button" class="h-8 min-w-8 rounded-md border px-2 text-xs" :class="page === qaHistory.page ? 'border-primary bg-primary text-primary-foreground' : 'border-border/50 text-muted-foreground hover:bg-surface-elevated'" @click="goQuestionAnswerPage(page)">{{ page }}</button>
+                        </template>
+                      </div>
                     </div>
                   </section>
                 </template>
@@ -1757,20 +1765,20 @@ const close = () => {
             </template>
           </div>
 
-          <div class="flex shrink-0 items-center justify-between gap-3 border-t border-border/60 px-5 py-4">
-            <p v-if="hasModels" class="flex items-center gap-1 text-xs text-muted-foreground">
+          <div data-testid="question-answer-footer" class="flex shrink-0 items-center justify-between gap-3 border-t border-border/60 px-5 py-4">
+            <p v-if="mode === 'questionAnswer' || hasModels" class="flex items-center gap-1 text-xs text-muted-foreground">
               <AlertTriangle v-if="selected.size === 0 || (mode === 'questionAnswer' && qaSelectedQuestions.size === 0)" class="h-3.5 w-3.5" />
               {{ mode === 'questionAnswer'
-                ? t(`${prefix}.questionAnswer.selectedFormula`, { models: qaSubmission.modelCount, questions: qaSubmission.questionCount, repeat: qaSubmission.repeatCount, total: qaSubmission.total })
+                ? (qaStartBlockedReason || t(`${prefix}.questionAnswer.selectedFormula`, { models: qaSubmission.modelCount, questions: qaSubmission.questionCount, repeat: qaSubmission.repeatCount, total: qaSubmission.total }))
                 : t(`${prefix}.selectedCount`, { count: selected.size }) }}
             </p>
             <div v-else />
             <div class="flex items-center gap-2">
-              <button type="button" class="rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:bg-surface-line" @click="close">{{ t(`${prefix}.close`) }}</button>
+              <button type="button" class="rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:bg-surface-line" @click="close">{{ mode === 'questionAnswer' ? t(`${prefix}.questionAnswer.leave`) : t(`${prefix}.close`) }}</button>
               <button type="button" class="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50" :disabled="!canStartTest" @click="startTest">
                 <Loader2 v-if="phase === 'testing' || qaStarting" class="h-4 w-4 animate-spin" />
                 {{ mode === 'questionAnswer'
-                  ? (qaStarting ? t(`${prefix}.questionAnswer.submitting`) : t(`${prefix}.questionAnswer.start`))
+                  ? (qaStarting ? t(`${prefix}.questionAnswer.submitting`) : t(`${prefix}.questionAnswer.startAnswer`))
                   : (phase === 'testing'
                     ? t(`${prefix}.${mode === 'formal' && formalProgress === 'queued' ? 'queueing' : 'testing'}`)
                     : t(`${prefix}.${mode === 'formal' ? 'startFormal' : 'startTest'}`)) }}

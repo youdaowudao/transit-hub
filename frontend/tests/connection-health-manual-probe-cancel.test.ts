@@ -66,6 +66,7 @@ const mountFormalDialog = async () => {
         status: 'active',
         groupName: '正式探活分组',
         formalModels: [{ id: 'gpt-5.6-sol', name: 'gpt-5.6-sol', providerFamily: 'openai' }],
+        intelligenceWeight: null,
       },
     },
     global: { stubs: { Teleport: true, Transition: false } },

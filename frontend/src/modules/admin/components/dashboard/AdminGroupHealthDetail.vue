@@ -34,7 +34,9 @@ import type {
   AdminGroupAccount,
   AdminGroupHealth,
   ConnectionHealthState,
+  TargetIntelligenceWeightResult,
 } from '../../types/connectionHealth'
+import AccountIntelligenceWeightEditor from './AccountIntelligenceWeightEditor.vue'
 import {
   resolveConnectionHealthMultiplierDisplay,
   resolvePrioritySyncBlockReasonMessage,
@@ -62,6 +64,7 @@ const emit = defineEmits<{
   (event: 'update:hide-unmonitored-accounts', value: boolean): void
   (event: 'set-schedulable', account: AdminGroupAccount): void
   (event: 'assign-policy', account: AdminGroupAccount): void
+  (event: 'intelligence-weight-saved', result: TargetIntelligenceWeightResult): void
 }>()
 
 import { t, te } from '@/locales'
@@ -777,12 +780,13 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                   <ArrowDownUp v-else class="h-3.5 w-3.5 opacity-50" />
                 </button>
               </th>
+              <th class="w-32 px-3 py-2.5 text-right font-medium">{{ t(`${detailPrefix}.columns.intelligenceWeight`) }}</th>
               <th class="w-28 px-3 py-2.5 text-right font-medium">{{ t(`${detailPrefix}.columns.actions`) }}</th>
             </tr>
           </thead>
           <tbody>
             <tr v-if="sortedAccounts.length === 0">
-              <td colspan="10" class="px-4 py-12 text-center text-sm text-muted-foreground">
+              <td colspan="11" class="px-4 py-12 text-center text-sm text-muted-foreground">
                 {{ t(`${detailPrefix}.filters.noMatches`) }}
               </td>
             </tr>
@@ -894,6 +898,14 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     {{ account.todayQuestionAnswerCorrect ?? 0 }}/{{ account.todayQuestionAnswerSubmitted ?? 0 }}
                   </span>
                 </td>
+                <td class="w-32 px-3 py-3 text-right tabular-nums">
+                  <AccountIntelligenceWeightEditor
+                    :target-id="account.targetId"
+                    :model-value="account.intelligenceWeight"
+                    compact
+                    @saved="emit('intelligence-weight-saved', $event)"
+                  />
+                </td>
                 <td class="w-28 px-3 py-3">
                   <div class="account-actions flex flex-col items-end gap-1">
                     <div class="account-actions-primary flex items-center justify-end gap-1">
@@ -964,7 +976,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                 </td>
               </tr>
               <tr v-if="quickProbeSuccesses[account.targetId]" class="quick-probe-success-row border-t border-emerald-500/20 bg-emerald-500/[0.06]">
-                <td colspan="10" class="px-12 py-3 text-sm text-emerald-700 dark:text-emerald-400">
+                <td colspan="11" class="px-12 py-3 text-sm text-emerald-700 dark:text-emerald-400">
                   {{ t(`${detailPrefix}.quickProbe.completed`, {
                     model: quickProbeSuccesses[account.targetId].modelName,
                     latency: quickProbeSuccesses[account.targetId].latencyMs,
@@ -972,12 +984,12 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                 </td>
               </tr>
               <tr v-if="quickProbeErrors[account.targetId]" class="quick-probe-error-row border-t border-destructive/20 bg-destructive/[0.06]">
-                <td colspan="10" class="whitespace-pre-wrap break-words px-12 py-3 text-sm text-destructive">
+                <td colspan="11" class="whitespace-pre-wrap break-words px-12 py-3 text-sm text-destructive">
                   {{ quickProbeErrors[account.targetId] }}
                 </td>
               </tr>
               <tr v-if="expandedTargetId === account.targetId" class="border-t border-border/40 bg-surface/25">
-                <td colspan="10" class="px-12 py-4">
+                <td colspan="11" class="px-12 py-4">
                   <div v-if="filteredModelHealth(account).length === 0 && filteredUnprobedModels(account).length === 0" class="text-xs text-muted-foreground">{{ t(`${detailPrefix}.models.empty`) }}</div>
                   <div v-else class="grid gap-2 lg:grid-cols-2">
                     <div v-for="model in filteredModelHealth(account)" :key="model.modelName" class="rounded-lg border border-border/50 bg-background px-2.5 py-2">

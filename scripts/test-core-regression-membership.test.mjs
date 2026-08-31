@@ -11,16 +11,19 @@ test('connection-health core gate keeps every question-answer regression member'
   for (const member of [
     'connection-health-question-answer.test.ts',
     'connection-health-question-answer.behavior.test.ts',
+    'connection-health-question-answer-compact-layout.behavior.test.ts',
     'connection-health-question-answer-repeat-queue.behavior.test.ts',
     'connection-health-question-answer-preferences.test.ts',
     'connection-health-question-answer-batch.behavior.test.ts',
     'connection-health-question-keywords.behavior.test.ts',
     'connection-health-today-accuracy.behavior.test.ts',
+    'connection-health-intelligence-weight.behavior.test.ts',
     'question-answer-review-fixture.test.mjs',
     'question-answer-batch-review-fixture.test.mjs',
     'question-answer-keyword-highlight-fixture.test.mjs',
     "Test.*QuestionAnswer",
     "Test.*QuestionAnswerKeyword",
+    "Test(AccountIntelligenceWeight|AdminGroups.*IntelligenceWeight|Handler.*IntelligenceWeight)",
   ]) {
     assert.match(script, new RegExp(member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }

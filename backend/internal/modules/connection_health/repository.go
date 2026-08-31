@@ -28,6 +28,18 @@ func NewRepository(db *pgxpool.Pool) *Repository {
 // 已上线实例可以原地升级；旧策略的 priority_mode / strategy_mode 均使用兼容默认值。
 func (r *Repository) EnsureSchema(ctx context.Context) error {
 	statements := []string{
+		`CREATE TABLE IF NOT EXISTS connection_health_account_configs (
+			user_id text NOT NULL,
+			admin_account_id text NOT NULL DEFAULT '',
+			target_id text NOT NULL,
+			intelligence_weight integer NULL,
+			created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, admin_account_id, target_id),
+			CONSTRAINT connection_health_account_configs_intelligence_weight
+				CHECK (intelligence_weight IS NULL OR intelligence_weight BETWEEN 0 AND 100)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_connection_health_account_configs_workspace ON connection_health_account_configs (user_id, admin_account_id)`,
 		`CREATE TABLE IF NOT EXISTS connection_health_policies (
 			id text PRIMARY KEY,
 			user_id text NOT NULL,

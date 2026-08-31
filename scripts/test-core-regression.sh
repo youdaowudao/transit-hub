@@ -61,8 +61,11 @@ run_connection_health_gate() {
   run_step "backend question answer keyword tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test ./internal/modules/connection_health -run 'Test.*QuestionAnswerKeyword' -count=1"
 
+  run_step "backend account intelligence weight race tests" \
+    bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/connection_health -run 'Test(AccountIntelligenceWeight|AdminGroups.*IntelligenceWeight|Handler.*IntelligenceWeight)' -count=1"
+
   run_step "frontend connection health regression tests" \
-    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- connection-health-async-priority.test.ts connection-health-main-site-error.test.ts connection-health-main-site-error.behavior.test.ts connection-health-multiplier-resolution.test.ts connection-health-production-rank.test.ts connection-health-question-answer.test.ts connection-health-question-answer.behavior.test.ts connection-health-question-answer-preferences.test.ts connection-health-question-answer-batch.behavior.test.ts connection-health-question-answer-repeat-queue.behavior.test.ts connection-health-question-keywords.behavior.test.ts connection-health-today-accuracy.behavior.test.ts connection-health-refresh-coordinator.test.ts connection-health-refresh-flow.test.ts use-connection-health-race.test.ts"
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- connection-health-async-priority.test.ts connection-health-main-site-error.test.ts connection-health-main-site-error.behavior.test.ts connection-health-multiplier-resolution.test.ts connection-health-production-rank.test.ts connection-health-question-answer.test.ts connection-health-question-answer.behavior.test.ts connection-health-question-answer-compact-layout.behavior.test.ts connection-health-question-answer-preferences.test.ts connection-health-question-answer-batch.behavior.test.ts connection-health-question-answer-repeat-queue.behavior.test.ts connection-health-question-keywords.behavior.test.ts connection-health-today-accuracy.behavior.test.ts connection-health-intelligence-weight.behavior.test.ts connection-health-refresh-coordinator.test.ts connection-health-refresh-flow.test.ts use-connection-health-race.test.ts"
 
   run_step "frontend typecheck" \
     bash -c "cd '$ROOT_DIR/frontend' && npm run typecheck"

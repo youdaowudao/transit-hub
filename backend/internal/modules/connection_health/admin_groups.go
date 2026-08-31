@@ -165,8 +165,9 @@ type AdminGroupAccount struct {
 	PrioritySyncBlocked        bool                    `json:"prioritySyncBlocked"`
 	PrioritySyncBlockReason    string                  `json:"prioritySyncBlockReason,omitempty"`
 
-	TodayQuestionAnswerSubmitted int `json:"todayQuestionAnswerSubmitted"`
-	TodayQuestionAnswerCorrect   int `json:"todayQuestionAnswerCorrect"`
+	TodayQuestionAnswerSubmitted int  `json:"todayQuestionAnswerSubmitted"`
+	TodayQuestionAnswerCorrect   int  `json:"todayQuestionAnswerCorrect"`
+	IntelligenceWeight           *int `json:"intelligenceWeight"`
 	// ProductionSortOrder 是去重目标在当前 workspace 的全局生产顺序，不是分组内局部序号。
 	ProductionSortOrder int `json:"productionSortOrder"`
 }
@@ -341,6 +342,14 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 	probeSortSettings, err := s.repo.ListGroupProbeSortSettings(ctx, userID, adminAccountID)
 	if err != nil {
 		return nil, err
+	}
+	accountConfigs, err := s.repo.ListAccountConfigs(ctx, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
+	intelligenceWeightByTarget := make(map[string]*int, len(accountConfigs))
+	for _, config := range accountConfigs {
+		intelligenceWeightByTarget[config.TargetID] = cloneIntPointer(config.IntelligenceWeight)
 	}
 	fallbackByGroup := make(map[string]*float64, len(probeSortSettings))
 	for _, setting := range probeSortSettings {
@@ -745,6 +754,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				PrioritySyncBlockReason:       prioritySyncBlockReason,
 				TodayQuestionAnswerSubmitted:  todayQuestionAnswer.Submitted,
 				TodayQuestionAnswerCorrect:    todayQuestionAnswer.Correct,
+				IntelligenceWeight:            cloneIntPointer(intelligenceWeightByTarget[targetID]),
 			}
 			if _, exists := healthCandidatesByTarget[targetID]; !exists && priorityManaged && !item.PriorityConflict && usesHealthPriority && multiplierSource != MultiplierSourceNone && multiplierSource != MultiplierSourceLastConfirmed && effectiveMultiplier != nil {
 				activeModels := make(map[string]struct{}, len(activeSpecs))

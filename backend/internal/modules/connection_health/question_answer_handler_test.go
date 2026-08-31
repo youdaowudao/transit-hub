@@ -43,7 +43,7 @@ func newQuestionAnswerHandlerFixture(t *testing.T) questionAnswerHandlerFixture 
 	}
 	targetID := "sub2api:ws1:handler-account"
 	succeededBatchID := "handler-succeeded"
-	succeeded, err := repository.CreateQuestionAnswerBatch(ctx, "handler-user", targetID, succeededBatchID, []string{"model-a"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium)
+	succeeded, err := repository.CreateQuestionAnswerBatch(ctx, "handler-user", targetID, succeededBatchID, []string{"model-a"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1)
 	if err != nil || len(succeeded) != 1 {
 		t.Fatalf("create succeeded handler record: records=%+v err=%v", succeeded, err)
 	}
@@ -55,7 +55,7 @@ func newQuestionAnswerHandlerFixture(t *testing.T) questionAnswerHandlerFixture 
 	}
 
 	failedBatchID := "handler-failed"
-	failed, err := repository.CreateQuestionAnswerBatch(ctx, "handler-user", targetID, failedBatchID, []string{"model-b"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium)
+	failed, err := repository.CreateQuestionAnswerBatch(ctx, "handler-user", targetID, failedBatchID, []string{"model-b"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1)
 	if err != nil || len(failed) != 1 {
 		t.Fatalf("create failed handler record: records=%+v err=%v", failed, err)
 	}
@@ -295,7 +295,7 @@ func TestQuestionAnswerKeywordSnapshotAppearsAcrossReadAndJudgmentHandlers(t *te
 	emptyBatchID := "handler-empty-snapshot"
 	emptyRecords, err := repository.CreateQuestionAnswerBatch(
 		context.Background(), "handler-user", fixture.targetID, emptyBatchID,
-		[]string{"model-empty"}, []string{emptyQuestion.ID}, QuestionAnswerReasoningEffortMedium,
+		[]string{"model-empty"}, []string{emptyQuestion.ID}, QuestionAnswerReasoningEffortMedium, 1,
 	)
 	if err != nil || len(emptyRecords) != 1 {
 		t.Fatalf("create empty snapshot batch=%+v err=%v", emptyRecords, err)
@@ -419,6 +419,85 @@ func TestQuestionAnswerKeywordSnapshotAppearsInStartHandlerResponse(t *testing.T
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("question answer worker did not start")
+	}
+}
+
+func TestQuestionAnswerHandlerRepeatCountRejectsInvalidBeforeWrite(t *testing.T) {
+	fixture := newQuestionAnswerHandlerFixture(t)
+	path := "/api/connection-health/targets/" + fixture.targetID + "/question-answers/batches"
+	var countBefore int
+	if err := fixture.pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM connection_health_question_answer_records WHERE user_id = 'handler-user'
+	`).Scan(&countBefore); err != nil {
+		t.Fatalf("count records before invalid repeat requests: %v", err)
+	}
+
+	models := make([]string, 17)
+	for i := range models {
+		models[i] = fmt.Sprintf("model-%02d", i+1)
+	}
+	overLimitBody, err := json.Marshal(map[string]any{
+		"models": models, "questionIds": []string{"q1", "q2", "q3"}, "reasoningEffort": "medium", "repeatCount": 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name     string
+		body     string
+		errorKey string
+	}{
+		{name: "null", body: `{"models":["model-a"],"questionIds":["` + fixture.questionID + `"],"repeatCount":null}`, errorKey: ErrorQuestionAnswerRepeatCount},
+		{name: "negative", body: `{"models":["model-a"],"questionIds":["` + fixture.questionID + `"],"repeatCount":-1}`, errorKey: ErrorQuestionAnswerRepeatCount},
+		{name: "fraction", body: `{"models":["model-a"],"questionIds":["` + fixture.questionID + `"],"repeatCount":1.5}`, errorKey: ErrorQuestionAnswerRepeatCount},
+		{name: "string", body: `{"models":["model-a"],"questionIds":["` + fixture.questionID + `"],"repeatCount":"2"}`, errorKey: ErrorQuestionAnswerRepeatCount},
+		{name: "total 51", body: string(overLimitBody), errorKey: ErrorQuestionAnswerBatchLimit},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := fixture.request(t, http.MethodPost, path, test.body, "2")
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), test.errorKey) {
+				t.Fatalf("status=%d body=%s want=400 %s", response.Code, response.Body.String(), test.errorKey)
+			}
+		})
+	}
+
+	var countAfter int
+	if err := fixture.pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM connection_health_question_answer_records WHERE user_id = 'handler-user'
+	`).Scan(&countAfter); err != nil {
+		t.Fatalf("count records after invalid repeat requests: %v", err)
+	}
+	if countAfter != countBefore {
+		t.Fatalf("invalid repeat requests changed record count %d -> %d", countBefore, countAfter)
+	}
+	if len(fixture.priorityActions.calls) != 0 {
+		t.Fatalf("question-answer validation touched Priority: %+v", fixture.priorityActions.calls)
+	}
+}
+
+func TestQuestionAnswerHandlerModelStatsEmptyArrays(t *testing.T) {
+	fixture := newQuestionAnswerHandlerFixture(t)
+	path := "/api/connection-health/targets/sub2api:ws1:empty-model-stats/question-answers/history?page=1"
+	response := fixture.request(t, http.MethodGet, path, "", "2")
+	if response.Code != http.StatusOK {
+		t.Fatalf("empty history status=%d body=%s", response.Code, response.Body.String())
+	}
+	var history map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &history); err != nil {
+		t.Fatalf("decode empty history: %v", err)
+	}
+	for _, key := range []string{"stats", "todayStats"} {
+		stats, ok := history[key].(map[string]any)
+		if !ok {
+			t.Fatalf("%s=%#v want object", key, history[key])
+		}
+		byModel, ok := stats["byModel"].([]any)
+		if !ok || len(byModel) != 0 {
+			t.Fatalf("%s.byModel=%#v want []", key, stats["byModel"])
+		}
+	}
+	if len(fixture.priorityActions.calls) != 0 {
+		t.Fatalf("model stats read touched Priority: %+v", fixture.priorityActions.calls)
 	}
 }
 

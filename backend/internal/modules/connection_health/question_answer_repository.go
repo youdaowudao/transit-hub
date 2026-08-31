@@ -14,6 +14,27 @@ var (
 	errQuestionAnswerUnavailable = errors.New("question answer question unavailable")
 )
 
+type uncertainQuestionAnswerCreateError struct {
+	cause error
+}
+
+func (e *uncertainQuestionAnswerCreateError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *uncertainQuestionAnswerCreateError) Unwrap() error {
+	return e.cause
+}
+
+func (*uncertainQuestionAnswerCreateError) questionAnswerCreateResultUncertain() {}
+
+func isQuestionAnswerCreateResultUncertain(err error) bool {
+	var uncertain interface {
+		questionAnswerCreateResultUncertain()
+	}
+	return errors.As(err, &uncertain)
+}
+
 type questionAnswerRepository interface {
 	ListTestQuestions(ctx context.Context, userID string) ([]TestQuestion, error)
 	CreateTestQuestion(ctx context.Context, userID string, name string, body string, keywords []string) (TestQuestion, error)
@@ -21,10 +42,11 @@ type questionAnswerRepository interface {
 	SetTestQuestionEnabled(ctx context.Context, userID string, questionID string, enabled bool) (*TestQuestion, error)
 	SetDefaultTestQuestion(ctx context.Context, userID string, questionID string) (*TestQuestion, error)
 	DeleteTestQuestion(ctx context.Context, userID string, questionID string) (bool, error)
-	CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort) ([]QuestionAnswerRecord, error)
+	CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort, repeatCount int) ([]QuestionAnswerRecord, error)
 	MarkQuestionAnswerRunning(ctx context.Context, userID string, batchID string, recordID string) (bool, error)
 	CompleteQuestionAnswer(ctx context.Context, userID string, batchID string, recordID string, status QuestionAnswerStatus, answerBody string, errorType string) (bool, error)
-	StopQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error)
+	StopPendingQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error)
+	FinalizeQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error)
 	FailAbandonedQuestionAnswers(ctx context.Context, errorType string) (int64, error)
 	ListQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string) ([]QuestionAnswerRecord, error)
 	LatestQuestionAnswerBatch(ctx context.Context, userID string, targetID string) ([]QuestionAnswerRecord, error)
@@ -161,7 +183,7 @@ func scanTestQuestion(row rowScanner) (*TestQuestion, error) {
 	return &question, nil
 }
 
-func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort) ([]QuestionAnswerRecord, error) {
+func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort, repeatCount int) ([]QuestionAnswerRecord, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -211,35 +233,40 @@ func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID strin
 		return nil, errQuestionAnswerUnavailable
 	}
 
-	records := make([]QuestionAnswerRecord, 0, len(models)*len(questionIDs))
+	records := make([]QuestionAnswerRecord, 0, len(models)*len(questionIDs)*repeatCount)
 	for _, model := range models {
 		for _, questionID := range questionIDs {
 			question := questionsByID[questionID]
-			recordID, err := newID()
-			if err != nil {
-				return nil, err
+			for sample := 0; sample < repeatCount; sample++ {
+				recordID, err := newID()
+				if err != nil {
+					return nil, err
+				}
+				record := QuestionAnswerRecord{
+					ID: recordID, TargetID: targetID, BatchID: batchID, ModelName: model,
+					QuestionID: question.ID, QuestionName: question.Name, QuestionBody: question.Body,
+					QuestionKeywordSnapshot: append([]string{}, question.Keywords...),
+					ReasoningEffort:         questionAnswerReasoningEffortPointer(reasoningEffort),
+					Status:                  QuestionAnswerPending,
+				}
+				if err := tx.QueryRow(ctx, `
+					INSERT INTO connection_health_question_answer_records (
+						id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body,
+						question_keyword_snapshot, reasoning_effort, status
+					) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
+					RETURNING created_at, updated_at
+				`, record.ID, userID, record.TargetID, record.BatchID, record.ModelName, record.QuestionID, record.QuestionName, record.QuestionBody, record.QuestionKeywordSnapshot, reasoningEffort).Scan(&record.CreatedAt, &record.UpdatedAt); err != nil {
+					return nil, err
+				}
+				records = append(records, record)
 			}
-			record := QuestionAnswerRecord{
-				ID: recordID, TargetID: targetID, BatchID: batchID, ModelName: model,
-				QuestionID: question.ID, QuestionName: question.Name, QuestionBody: question.Body,
-				QuestionKeywordSnapshot: append([]string{}, question.Keywords...),
-				ReasoningEffort:         questionAnswerReasoningEffortPointer(reasoningEffort),
-				Status:                  QuestionAnswerPending,
-			}
-			if err := tx.QueryRow(ctx, `
-				INSERT INTO connection_health_question_answer_records (
-					id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body,
-					question_keyword_snapshot, reasoning_effort, status
-				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
-				RETURNING created_at, updated_at
-			`, record.ID, userID, record.TargetID, record.BatchID, record.ModelName, record.QuestionID, record.QuestionName, record.QuestionBody, record.QuestionKeywordSnapshot, reasoningEffort).Scan(&record.CreatedAt, &record.UpdatedAt); err != nil {
-				return nil, err
-			}
-			records = append(records, record)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return nil, err
+		if errors.Is(err, pgx.ErrTxCommitRollback) {
+			return nil, err
+		}
+		return nil, &uncertainQuestionAnswerCreateError{cause: err}
 	}
 	return records, nil
 }
@@ -268,12 +295,24 @@ func (r *Repository) CompleteQuestionAnswer(ctx context.Context, userID string, 
 	return result.RowsAffected() > 0, err
 }
 
-func (r *Repository) StopQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
+func (r *Repository) StopPendingQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
+	return r.stopQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType, false)
+}
+
+func (r *Repository) FinalizeQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
+	return r.stopQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType, true)
+}
+
+func (r *Repository) stopQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string, includeRunning bool) (bool, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	lockKey := fmt.Sprintf("question-answer|%s|%s", userID, targetID)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+		return false, err
+	}
 	var found bool
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS (
@@ -286,11 +325,16 @@ func (r *Repository) StopQuestionAnswerBatch(ctx context.Context, userID string,
 	if !found {
 		return false, nil
 	}
+	statusPredicate := "status = 'pending'"
+	if includeRunning {
+		statusPredicate = "status IN ('pending', 'running')"
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE connection_health_question_answer_records
 		SET status = $4, answer_body = '', error_type = $5, answer_judgment = NULL, manual_error = false, completed_at = now(), updated_at = now()
-		WHERE user_id = $1 AND target_id = $2 AND batch_id = $3 AND status IN ('pending', 'running')
-	`, userID, targetID, batchID, status, errorType); err != nil {
+		WHERE user_id = $1 AND target_id = $2 AND batch_id = $3 AND `+statusPredicate,
+		userID, targetID, batchID, status, errorType,
+	); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -378,10 +422,10 @@ func (r *Repository) ListQuestionAnswerHistory(ctx context.Context, userID strin
 }
 
 func (r *Repository) questionAnswerStats(ctx context.Context, userID string, targetID string) (QuestionAnswerStats, QuestionAnswerStats, error) {
-	var stats QuestionAnswerStats
-	var todayStats QuestionAnswerStats
-	err := r.db.QueryRow(ctx, `
-		SELECT
+	stats := QuestionAnswerStats{ByModel: []QuestionAnswerModelStats{}}
+	todayStats := QuestionAnswerStats{ByModel: []QuestionAnswerModelStats{}}
+	rows, err := r.db.Query(ctx, `
+		SELECT model_name,
 			count(*),
 			count(*) FILTER (WHERE status IN ('pending', 'running')),
 			count(*) FILTER (WHERE status = 'succeeded'),
@@ -400,13 +444,47 @@ func (r *Repository) questionAnswerStats(ctx context.Context, userID string, tar
 			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'incorrect' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date)
 		FROM connection_health_question_answer_records
 		WHERE user_id = $1 AND target_id = $2
-	`, userID, targetID).Scan(
-		&stats.Requests.Submitted, &stats.Requests.InProgress, &stats.Requests.Succeeded, &stats.Requests.Failed, &stats.Requests.Cancelled,
-		&stats.Reviews.Unreviewed, &stats.Reviews.Correct, &stats.Reviews.Incorrect,
-		&todayStats.Requests.Submitted, &todayStats.Requests.InProgress, &todayStats.Requests.Succeeded, &todayStats.Requests.Failed, &todayStats.Requests.Cancelled,
-		&todayStats.Reviews.Unreviewed, &todayStats.Reviews.Correct, &todayStats.Reviews.Incorrect,
-	)
-	return stats, todayStats, err
+		GROUP BY model_name
+		ORDER BY model_name
+	`, userID, targetID)
+	if err != nil {
+		return stats, todayStats, err
+	}
+	defer rows.Close()
+
+	addModel := func(total *QuestionAnswerStats, model QuestionAnswerModelStats) {
+		total.ByModel = append(total.ByModel, model)
+		total.Requests.Submitted += model.Requests.Submitted
+		total.Requests.InProgress += model.Requests.InProgress
+		total.Requests.Succeeded += model.Requests.Succeeded
+		total.Requests.Failed += model.Requests.Failed
+		total.Requests.Cancelled += model.Requests.Cancelled
+		total.Reviews.Unreviewed += model.Reviews.Unreviewed
+		total.Reviews.Correct += model.Reviews.Correct
+		total.Reviews.Incorrect += model.Reviews.Incorrect
+	}
+	for rows.Next() {
+		var model QuestionAnswerModelStats
+		var today QuestionAnswerModelStats
+		if err := rows.Scan(
+			&model.ModelName,
+			&model.Requests.Submitted, &model.Requests.InProgress, &model.Requests.Succeeded, &model.Requests.Failed, &model.Requests.Cancelled,
+			&model.Reviews.Unreviewed, &model.Reviews.Correct, &model.Reviews.Incorrect,
+			&today.Requests.Submitted, &today.Requests.InProgress, &today.Requests.Succeeded, &today.Requests.Failed, &today.Requests.Cancelled,
+			&today.Reviews.Unreviewed, &today.Reviews.Correct, &today.Reviews.Incorrect,
+		); err != nil {
+			return stats, todayStats, err
+		}
+		today.ModelName = model.ModelName
+		addModel(&stats, model)
+		if today.Requests.Submitted > 0 {
+			addModel(&todayStats, today)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return stats, todayStats, err
+	}
+	return stats, todayStats, nil
 }
 
 func (r *Repository) SetQuestionAnswerJudgment(ctx context.Context, userID string, targetID string, recordID string, judgment QuestionAnswerJudgment) (*QuestionAnswerRecord, error) {

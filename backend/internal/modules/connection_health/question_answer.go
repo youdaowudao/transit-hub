@@ -2,10 +2,10 @@ package connection_health
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -13,14 +13,16 @@ import (
 )
 
 const (
-	QuestionAnswerPageSize        = 20
-	QuestionAnswerRequestTimeout  = 10 * time.Minute
-	questionAnswerConcurrency     = 5
-	TestQuestionNameLimit         = 100
-	TestQuestionBodyLimit         = 4000
-	TestQuestionKeywordCountLimit = 20
-	TestQuestionKeywordRuneLimit  = 64
-	TestQuestionKeywordBytesLimit = 2048
+	QuestionAnswerPageSize         = 20
+	QuestionAnswerRequestTimeout   = 10 * time.Minute
+	QuestionAnswerRepeatCountLimit = 10
+	QuestionAnswerBatchRecordLimit = 50
+	questionAnswerConcurrency      = 5
+	TestQuestionNameLimit          = 100
+	TestQuestionBodyLimit          = 4000
+	TestQuestionKeywordCountLimit  = 20
+	TestQuestionKeywordRuneLimit   = 64
+	TestQuestionKeywordBytesLimit  = 2048
 )
 
 const (
@@ -33,6 +35,8 @@ const (
 	ErrorTestQuestionDisabled            = "admin.connectionHealth.errors.testQuestionDisabled"
 	ErrorQuestionAnswerSelection         = "admin.connectionHealth.errors.questionAnswerSelection"
 	ErrorQuestionAnswerReasoningEffort   = "admin.connectionHealth.errors.questionAnswerReasoningEffort"
+	ErrorQuestionAnswerRepeatCount       = "admin.connectionHealth.errors.questionAnswerRepeatCount"
+	ErrorQuestionAnswerBatchLimit        = "admin.connectionHealth.errors.questionAnswerBatchLimit"
 	ErrorQuestionAnswerActive            = "admin.connectionHealth.errors.questionAnswerActive"
 	ErrorQuestionAnswerBatchNotFound     = "admin.connectionHealth.errors.questionAnswerBatchNotFound"
 	ErrorQuestionAnswerStorage           = "admin.connectionHealth.errors.questionAnswerStorage"
@@ -134,9 +138,16 @@ type QuestionAnswerReviewStats struct {
 	Incorrect  int `json:"incorrect"`
 }
 
+type QuestionAnswerModelStats struct {
+	ModelName string                     `json:"modelName"`
+	Requests  QuestionAnswerRequestStats `json:"requests"`
+	Reviews   QuestionAnswerReviewStats  `json:"reviews"`
+}
+
 type QuestionAnswerStats struct {
 	Requests QuestionAnswerRequestStats `json:"requests"`
 	Reviews  QuestionAnswerReviewStats  `json:"reviews"`
+	ByModel  []QuestionAnswerModelStats `json:"byModel"`
 }
 
 type QuestionAnswerHistory struct {
@@ -153,6 +164,7 @@ type QuestionAnswerBatch struct {
 	BatchID         string                         `json:"batchId"`
 	Records         []QuestionAnswerRecord         `json:"records"`
 	ReasoningEffort *QuestionAnswerReasoningEffort `json:"reasoningEffort"`
+	RepeatCount     int                            `json:"repeatCount"`
 	SubmittedCount  int                            `json:"submittedCount"`
 	CompletedCount  int                            `json:"completedCount"`
 	RunningCount    int                            `json:"runningCount"`
@@ -163,59 +175,70 @@ type QuestionAnswerBatch struct {
 }
 
 type QuestionAnswerStartInput struct {
-	Models          []string `json:"models"`
-	QuestionIDs     []string `json:"questionIds"`
-	ReasoningEffort string   `json:"reasoningEffort"`
+	Models          []string        `json:"models"`
+	QuestionIDs     []string        `json:"questionIds"`
+	ReasoningEffort string          `json:"reasoningEffort"`
+	RepeatCount     json.RawMessage `json:"repeatCount"`
 }
 
 type activeQuestionAnswerBatch struct {
-	userID   string
-	targetID string
-	batchID  string
-	cred     upstream.ProbeCredential
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	reason   string
-	done     chan struct{}
-	doneOnce sync.Once
-	failOnce sync.Once
+	userID             string
+	targetID           string
+	batchID            string
+	cred               upstream.ProbeCredential
+	ctx                context.Context
+	cancel             context.CancelFunc
+	records            []QuestionAnswerRecord
+	next               int
+	inFlight           int
+	heldSlots          int
+	finalizing         bool
+	stopReason         string
+	finalErr           error
+	done               chan struct{}
+	finalizeSettled    chan struct{}
+	finalizeGeneration uint64
+	finalizeResults    map[uint64]error
 }
 
-func (b *activeQuestionAnswerBatch) stop(reason string) {
-	b.mu.Lock()
-	if b.reason == "" {
-		b.reason = reason
-	}
-	b.mu.Unlock()
-	b.cancel()
+type questionAnswerShutdownAttempt struct {
+	done chan struct{}
+	err  error
 }
 
-func (b *activeQuestionAnswerBatch) stopped() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.reason
-}
-
-func (b *activeQuestionAnswerBatch) finish() {
-	b.doneOnce.Do(func() { close(b.done) })
+type questionAnswerShutdownRun struct {
+	key             string
+	run             *activeQuestionAnswerBatch
+	entryGeneration uint64
+	retryExisting   bool
 }
 
 func (s *Service) initializeQuestionAnswerRuntime() {
 	s.questionAnswerMu.Lock()
-	defer s.questionAnswerMu.Unlock()
 	if s.questionAnswerCtx != nil {
+		s.questionAnswerMu.Unlock()
 		return
 	}
 	s.questionAnswerCtx, s.questionAnswerStop = context.WithCancel(context.Background())
 	s.questionAnswerClosed = false
 	s.questionAnswerRuns = make(map[string]*activeQuestionAnswerBatch)
+	s.questionAnswerOrder = []string{}
+	s.questionAnswerLastKey = ""
+	s.questionAnswerWake = make(chan struct{}, 1)
+	s.questionAnswerDispatcherDone = make(chan struct{})
+	s.questionAnswerInFlight = 0
+	s.questionAnswerShutdown = nil
+	if s.questionAnswerStorageTimeout <= 0 {
+		s.questionAnswerStorageTimeout = 5 * time.Second
+	}
 	if s.questionAnswerHTTP == nil {
 		s.questionAnswerHTTP = NewQuestionAnswerRunner()
 	}
 	if s.questionAnswerTTL <= 0 {
 		s.questionAnswerTTL = QuestionAnswerRequestTimeout
 	}
+	s.questionAnswerMu.Unlock()
+	go s.runQuestionAnswerDispatcher()
 }
 
 func (s *Service) ListTestQuestions(ctx context.Context, userID string) ([]TestQuestion, error) {
@@ -374,8 +397,12 @@ func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, tar
 	}
 	models := uniqueNonEmpty(input.Models)
 	questionIDs := uniqueNonEmpty(input.QuestionIDs)
-	if len(models) == 0 || len(questionIDs) == 0 {
-		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerSelection)
+	repeatCount, err := normalizeQuestionAnswerRepeatCount(input.RepeatCount)
+	if err != nil {
+		return QuestionAnswerBatch{}, err
+	}
+	if _, err := questionAnswerSubmissionCount(len(models), len(questionIDs), repeatCount); err != nil {
+		return QuestionAnswerBatch{}, err
 	}
 	s.initializeQuestionAnswerRuntime()
 	s.questionAnswerMu.Lock()
@@ -432,132 +459,143 @@ func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, tar
 		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerActive)
 	}
 	batchCtx, cancel := context.WithCancel(s.questionAnswerCtx)
-	run := &activeQuestionAnswerBatch{userID: userID, targetID: targetID, batchID: batchID, cred: cred, ctx: batchCtx, cancel: cancel, done: make(chan struct{})}
+	run := &activeQuestionAnswerBatch{
+		userID: userID, targetID: targetID, batchID: batchID, cred: cred,
+		ctx: batchCtx, cancel: cancel, records: []QuestionAnswerRecord{},
+		done: make(chan struct{}), finalizeSettled: make(chan struct{}),
+		finalizeGeneration: 1, finalizeResults: make(map[uint64]error),
+	}
 	s.questionAnswerRuns[key] = run
-	s.questionAnswerWG.Add(1)
+	s.questionAnswerOrder = append(s.questionAnswerOrder, key)
 	s.questionAnswerMu.Unlock()
 
-	records, err := s.questionAnswers.CreateQuestionAnswerBatch(startCtx, userID, targetID, batchID, models, questionIDs, reasoningEffort)
+	records, err := s.questionAnswers.CreateQuestionAnswerBatch(startCtx, userID, targetID, batchID, models, questionIDs, reasoningEffort, repeatCount)
 	if err != nil {
-		run.stop(QuestionAnswerErrorStorage)
-		s.removeQuestionAnswerRun(key, run)
-		run.finish()
-		s.questionAnswerWG.Done()
+		var startErr error
+		stopReason := QuestionAnswerErrorStorage
 		if startCtx.Err() != nil {
-			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
+			startErr = requestError(ErrorQuestionAnswerServiceStopped)
+			stopReason = QuestionAnswerErrorServiceShutdown
+		} else if errors.Is(err, errQuestionAnswerActive) {
+			startErr = requestError(ErrorQuestionAnswerActive)
+		} else if errors.Is(err, errQuestionAnswerUnavailable) {
+			startErr = requestError(ErrorTestQuestionDisabled)
+		} else {
+			startErr = err
 		}
-		if errors.Is(err, errQuestionAnswerActive) {
-			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerActive)
+		if !isQuestionAnswerCreateResultUncertain(err) {
+			s.discardQuestionAnswerStartReservation(key, run)
+			return QuestionAnswerBatch{}, startErr
 		}
-		if errors.Is(err, errQuestionAnswerUnavailable) {
-			return QuestionAnswerBatch{}, requestError(ErrorTestQuestionDisabled)
-		}
-		return QuestionAnswerBatch{}, err
-	}
-	if reason := run.stopped(); reason != "" || startCtx.Err() != nil {
-		if reason == "" {
-			reason = QuestionAnswerErrorServiceShutdown
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, _ = s.questionAnswers.StopQuestionAnswerBatch(ctx, userID, targetID, batchID, QuestionAnswerFailed, reason)
-		cancel()
-		s.removeQuestionAnswerRun(key, run)
-		run.finish()
-		s.questionAnswerWG.Done()
-		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
+		return QuestionAnswerBatch{}, s.finishFailedQuestionAnswerStart(key, run, nil, stopReason, startErr)
 	}
 
 	batch, err := buildQuestionAnswerBatch(records)
 	if err != nil {
-		s.failQuestionAnswerRun(run, QuestionAnswerErrorStorage)
-		s.removeQuestionAnswerRun(key, run)
-		run.finish()
-		s.questionAnswerWG.Done()
-		return QuestionAnswerBatch{}, err
+		return QuestionAnswerBatch{}, s.finishFailedQuestionAnswerStart(key, run, records, QuestionAnswerErrorStorage, err)
 	}
-	go s.runQuestionAnswerBatch(key, run, cloneQuestionAnswerRecords(records))
+	s.questionAnswerMu.Lock()
+	current := s.questionAnswerRuns[key]
+	if current == run {
+		run.records = cloneQuestionAnswerRecords(records)
+	}
+	closed = s.questionAnswerClosed || s.questionAnswerCtx.Err() != nil || current != run
+	shutdownAttempt := s.questionAnswerShutdown
+	if closed {
+		if current == run && run.stopReason == "" {
+			run.stopReason = QuestionAnswerErrorServiceShutdown
+		}
+		s.questionAnswerMu.Unlock()
+		run.cancel()
+		cleanupErr := s.waitQuestionAnswerShutdownAttempt(shutdownAttempt)
+		if cleanupErr == nil && current == run && shutdownAttempt == nil {
+			cleanupErr = s.finalizeFailedQuestionAnswerStart(key, run)
+		}
+		return QuestionAnswerBatch{}, errors.Join(requestError(ErrorQuestionAnswerServiceStopped), cleanupErr)
+	}
+	s.questionAnswerMu.Unlock()
+	s.wakeQuestionAnswerDispatcher()
 	return batch, nil
 }
 
-func (s *Service) runQuestionAnswerBatch(key string, run *activeQuestionAnswerBatch, records []QuestionAnswerRecord) {
-	defer s.questionAnswerWG.Done()
-	defer run.finish()
-	defer run.cancel()
-	defer s.removeQuestionAnswerRun(key, run)
-
-	slots := make(chan struct{}, questionAnswerConcurrency)
-	var workers sync.WaitGroup
-
-dispatch:
-	for _, record := range records {
-		if run.stopped() != "" || run.ctx.Err() != nil {
-			break
-		}
-		select {
-		case slots <- struct{}{}:
-		case <-run.ctx.Done():
-			break dispatch
-		}
-		running, err := s.questionAnswers.MarkQuestionAnswerRunning(run.ctx, run.userID, run.batchID, record.ID)
-		if err != nil {
-			<-slots
-			if run.stopped() != "" || run.ctx.Err() != nil {
-				break
-			}
-			s.failQuestionAnswerRun(run, QuestionAnswerErrorStorage)
-			break
-		}
-		if !running {
-			<-slots
-			continue
-		}
-		workers.Add(1)
-		go func(record QuestionAnswerRecord) {
-			defer workers.Done()
-			defer func() { <-slots }()
-			s.runQuestionAnswerRecord(run, record)
-		}(record)
-	}
-	workers.Wait()
-}
-
-func (s *Service) runQuestionAnswerRecord(run *activeQuestionAnswerBatch, record QuestionAnswerRecord) {
-	itemCtx, cancel := context.WithTimeout(run.ctx, s.questionAnswerTTL)
-	answer, errorType := s.questionAnswerHTTP.Ask(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort))
-	itemErr := itemCtx.Err()
-	cancel()
-	if run.stopped() != "" || (run.ctx.Err() != nil && !errors.Is(itemErr, context.DeadlineExceeded)) {
+func (s *Service) discardQuestionAnswerStartReservation(key string, run *activeQuestionAnswerBatch) {
+	s.questionAnswerMu.Lock()
+	if current := s.questionAnswerRuns[key]; current != run {
+		s.questionAnswerMu.Unlock()
+		run.cancel()
 		return
 	}
-	status := QuestionAnswerSucceeded
-	if errors.Is(itemErr, context.DeadlineExceeded) {
-		status = QuestionAnswerFailed
-		answer = ""
-		errorType = QuestionAnswerErrorTimeout
-	} else if errorType != "" {
-		status = QuestionAnswerFailed
-		answer = ""
+	if !run.finalizing {
+		s.removeQuestionAnswerRunLocked(key, run)
+		close(run.done)
+		s.questionAnswerMu.Unlock()
+		run.cancel()
+		return
 	}
-	if _, err := s.questionAnswers.CompleteQuestionAnswer(run.ctx, run.userID, run.batchID, record.ID, status, answer, errorType); err != nil {
-		s.failQuestionAnswerRun(run, QuestionAnswerErrorStorage)
-	}
-}
-
-func (s *Service) failQuestionAnswerRun(run *activeQuestionAnswerBatch, errorType string) {
-	run.failOnce.Do(func() {
-		run.stop(errorType)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, _ = s.questionAnswers.StopQuestionAnswerBatch(ctx, run.userID, run.targetID, run.batchID, QuestionAnswerFailed, errorType)
-	})
-}
-
-func (s *Service) removeQuestionAnswerRun(key string, run *activeQuestionAnswerBatch) {
+	settled := run.finalizeSettled
+	s.questionAnswerMu.Unlock()
+	<-settled
 	s.questionAnswerMu.Lock()
 	if current := s.questionAnswerRuns[key]; current == run {
-		delete(s.questionAnswerRuns, key)
+		s.removeQuestionAnswerRunLocked(key, run)
+		close(run.done)
 	}
 	s.questionAnswerMu.Unlock()
+	run.cancel()
+}
+
+func (s *Service) finishFailedQuestionAnswerStart(key string, run *activeQuestionAnswerBatch, records []QuestionAnswerRecord, reason string, cause error) error {
+	s.questionAnswerMu.Lock()
+	if current := s.questionAnswerRuns[key]; current != run {
+		shutdownAttempt := s.questionAnswerShutdown
+		s.questionAnswerMu.Unlock()
+		return errors.Join(cause, s.waitQuestionAnswerShutdownAttempt(shutdownAttempt))
+	}
+	run.records = cloneQuestionAnswerRecords(records)
+	if run.stopReason == "" {
+		run.stopReason = reason
+	}
+	shutdownAttempt := s.questionAnswerShutdown
+	closed := s.questionAnswerClosed || s.questionAnswerCtx.Err() != nil
+	s.questionAnswerMu.Unlock()
+	run.cancel()
+	if closed && shutdownAttempt != nil {
+		return errors.Join(cause, s.waitQuestionAnswerShutdownAttempt(shutdownAttempt))
+	}
+	return errors.Join(cause, s.finalizeFailedQuestionAnswerStart(key, run))
+}
+
+func (s *Service) finalizeFailedQuestionAnswerStart(key string, run *activeQuestionAnswerBatch) error {
+	s.questionAnswerMu.Lock()
+	status, errorType := questionAnswerRunFinalState(run, QuestionAnswerErrorStorage)
+	s.questionAnswerMu.Unlock()
+	stopCtx, cancel := s.questionAnswerStorageContext(context.Background())
+	_, stopErr := s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, run.userID, run.targetID, run.batchID, status, errorType)
+	cancel()
+	s.questionAnswerMu.Lock()
+	shouldFinalize := s.beginQuestionAnswerRunFinalizationLocked(key, run)
+	generation := run.finalizeGeneration
+	settled := run.finalizeSettled
+	s.questionAnswerMu.Unlock()
+	if shouldFinalize {
+		go func() { _ = s.finalizeQuestionAnswerRun(key, run) }()
+	}
+	<-settled
+	s.questionAnswerMu.Lock()
+	finalErr := run.finalizeResults[generation]
+	s.questionAnswerMu.Unlock()
+	return errors.Join(stopErr, finalErr)
+}
+
+func (s *Service) waitQuestionAnswerShutdownAttempt(attempt *questionAnswerShutdownAttempt) error {
+	if attempt == nil {
+		return nil
+	}
+	<-attempt.done
+	s.questionAnswerMu.Lock()
+	err := attempt.err
+	s.questionAnswerMu.Unlock()
+	return err
 }
 
 func (s *Service) LatestQuestionAnswerBatch(ctx context.Context, userID string, targetID string) (QuestionAnswerBatch, error) {
@@ -589,28 +627,70 @@ func (s *Service) StopQuestionAnswerBatch(ctx context.Context, userID string, ta
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerBatch{}, err
 	}
+	batchID = strings.TrimSpace(batchID)
 	key := questionAnswerRunKey(userID, targetID)
 	s.questionAnswerMu.Lock()
 	run := s.questionAnswerRuns[key]
+	if run != nil && run.batchID != batchID {
+		run = nil
+	}
+	entryGeneration := uint64(0)
+	retryExisting := false
+	if run != nil {
+		s.ensureQuestionAnswerFinalizationLocked(run)
+		entryGeneration = run.finalizeGeneration
+		_, settled := run.finalizeResults[entryGeneration]
+		retryExisting = settled && run.finalErr != nil && !run.finalizing && run.inFlight == 0
+	}
+	if run != nil && run.stopReason == "" {
+		run.stopReason = string(QuestionAnswerCancelled)
+	}
+	status, errorType := questionAnswerRunFinalState(run, string(QuestionAnswerCancelled))
 	s.questionAnswerMu.Unlock()
-	if run != nil && run.batchID == batchID {
-		run.stop(string(QuestionAnswerCancelled))
+	if run != nil {
+		run.cancel()
+		s.wakeQuestionAnswerDispatcher()
 	}
-	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	found, err := s.questionAnswers.StopQuestionAnswerBatch(stopCtx, userID, targetID, batchID, QuestionAnswerCancelled, "")
+	stopCtx, cancel := s.questionAnswerStorageContext(ctx)
+	found, stopErr := s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, userID, targetID, batchID, status, errorType)
 	cancel()
-	if err != nil {
-		return QuestionAnswerBatch{}, err
-	}
-	if !found {
+	if stopErr == nil && !found {
 		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerBatchNotFound)
 	}
-	if run != nil && run.batchID == batchID {
-		select {
-		case <-run.done:
-		case <-ctx.Done():
-			return QuestionAnswerBatch{}, ctx.Err()
+	if run == nil {
+		if stopErr != nil {
+			return QuestionAnswerBatch{}, stopErr
 		}
+		return s.GetQuestionAnswerBatch(ctx, userID, targetID, batchID)
+	}
+
+	s.questionAnswerMu.Lock()
+	if retryExisting {
+		if current := s.questionAnswerRuns[key]; current == run && !run.finalizing && run.inFlight == 0 && run.finalizeGeneration == entryGeneration && run.finalErr != nil {
+			s.resetQuestionAnswerFinalizationLocked(run)
+		}
+	}
+	shouldFinalize := s.beginQuestionAnswerRunFinalizationLocked(key, run)
+	generation := run.finalizeGeneration
+	settled := run.finalizeSettled
+	s.questionAnswerMu.Unlock()
+	if shouldFinalize {
+		go func() { _ = s.finalizeQuestionAnswerRun(key, run) }()
+	}
+
+	select {
+	case <-settled:
+	case <-ctx.Done():
+		s.questionAnswerMu.Lock()
+		finalErr := run.finalizeResults[generation]
+		s.questionAnswerMu.Unlock()
+		return QuestionAnswerBatch{}, errors.Join(stopErr, finalErr, ctx.Err())
+	}
+	s.questionAnswerMu.Lock()
+	finalErr := run.finalizeResults[generation]
+	s.questionAnswerMu.Unlock()
+	if err := errors.Join(stopErr, finalErr); err != nil {
+		return QuestionAnswerBatch{}, err
 	}
 	return s.GetQuestionAnswerBatch(ctx, userID, targetID, batchID)
 }
@@ -667,33 +747,113 @@ func (s *Service) ShutdownQuestionAnswers(ctx context.Context) error {
 	s.initializeQuestionAnswerRuntime()
 	s.questionAnswerMu.Lock()
 	s.questionAnswerClosed = true
-	runs := make([]*activeQuestionAnswerBatch, 0, len(s.questionAnswerRuns))
-	for _, run := range s.questionAnswerRuns {
-		runs = append(runs, run)
+	runs := make([]questionAnswerShutdownRun, 0, len(s.questionAnswerRuns))
+	for key, run := range s.questionAnswerRuns {
+		if run.stopReason == "" {
+			run.stopReason = QuestionAnswerErrorServiceShutdown
+		}
+		s.ensureQuestionAnswerFinalizationLocked(run)
+		generation := run.finalizeGeneration
+		_, settled := run.finalizeResults[generation]
+		runs = append(runs, questionAnswerShutdownRun{
+			key: key, run: run, entryGeneration: generation,
+			retryExisting: settled && run.finalErr != nil && !run.finalizing,
+		})
 	}
-	if s.questionAnswerStop != nil {
-		s.questionAnswerStop()
+	rootStop := s.questionAnswerStop
+	dispatcherDone := s.questionAnswerDispatcherDone
+	attempt := s.questionAnswerShutdown
+	startAttempt := attempt == nil
+	if attempt != nil && questionAnswerChannelClosed(attempt.done) && attempt.err != nil {
+		startAttempt = true
+	}
+	if startAttempt {
+		attempt = &questionAnswerShutdownAttempt{done: make(chan struct{})}
+		s.questionAnswerShutdown = attempt
 	}
 	s.questionAnswerMu.Unlock()
+	if startAttempt {
+		for _, item := range runs {
+			item.run.cancel()
+		}
+		if rootStop != nil {
+			rootStop()
+		}
+		s.wakeQuestionAnswerDispatcher()
+		go s.runQuestionAnswerShutdown(attempt, runs, dispatcherDone)
+	}
 
+	select {
+	case <-attempt.done:
+		s.questionAnswerMu.Lock()
+		err := attempt.err
+		s.questionAnswerMu.Unlock()
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Service) runQuestionAnswerShutdown(attempt *questionAnswerShutdownAttempt, runs []questionAnswerShutdownRun, dispatcherDone <-chan struct{}) {
 	var stopErrors []error
-	for _, run := range runs {
-		run.stop(QuestionAnswerErrorServiceShutdown)
-		if _, err := s.questionAnswers.StopQuestionAnswerBatch(ctx, run.userID, run.targetID, run.batchID, QuestionAnswerFailed, QuestionAnswerErrorServiceShutdown); err != nil {
+	for _, item := range runs {
+		s.questionAnswerMu.Lock()
+		status, errorType := questionAnswerRunFinalState(item.run, QuestionAnswerErrorServiceShutdown)
+		s.questionAnswerMu.Unlock()
+		stopCtx, cancel := s.questionAnswerStorageContext(context.Background())
+		_, err := s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, item.run.userID, item.run.targetID, item.run.batchID, status, errorType)
+		cancel()
+		if err != nil {
 			stopErrors = append(stopErrors, err)
 		}
 	}
-	done := make(chan struct{})
-	go func() {
-		s.questionAnswerWG.Wait()
-		close(done)
-	}()
-	select {
-	case <-ctx.Done():
-		stopErrors = append(stopErrors, ctx.Err())
-	case <-done:
+	if dispatcherDone != nil {
+		<-dispatcherDone
 	}
-	return errors.Join(stopErrors...)
+	s.questionAnswerWG.Wait()
+
+	type finalizationWait struct {
+		run        *activeQuestionAnswerBatch
+		generation uint64
+		settled    <-chan struct{}
+		start      bool
+		key        string
+	}
+	waits := make([]finalizationWait, 0, len(runs))
+	s.questionAnswerMu.Lock()
+	for _, item := range runs {
+		if current := s.questionAnswerRuns[item.key]; current != item.run {
+			continue
+		}
+		if item.retryExisting && !item.run.finalizing && item.run.inFlight == 0 && item.run.finalizeGeneration == item.entryGeneration && item.run.finalErr != nil {
+			s.resetQuestionAnswerFinalizationLocked(item.run)
+		}
+		start := s.beginQuestionAnswerRunFinalizationLocked(item.key, item.run)
+		waits = append(waits, finalizationWait{
+			run: item.run, generation: item.run.finalizeGeneration,
+			settled: item.run.finalizeSettled, start: start, key: item.key,
+		})
+	}
+	s.questionAnswerMu.Unlock()
+	for _, item := range waits {
+		if item.start {
+			go func(key string, run *activeQuestionAnswerBatch) { _ = s.finalizeQuestionAnswerRun(key, run) }(item.key, item.run)
+		}
+	}
+	for _, item := range waits {
+		<-item.settled
+		s.questionAnswerMu.Lock()
+		finalErr := item.run.finalizeResults[item.generation]
+		s.questionAnswerMu.Unlock()
+		if finalErr != nil {
+			stopErrors = append(stopErrors, finalErr)
+		}
+	}
+
+	s.questionAnswerMu.Lock()
+	attempt.err = errors.Join(stopErrors...)
+	close(attempt.done)
+	s.questionAnswerMu.Unlock()
 }
 
 func buildQuestionAnswerBatch(records []QuestionAnswerRecord) (QuestionAnswerBatch, error) {
@@ -701,46 +861,79 @@ func buildQuestionAnswerBatch(records []QuestionAnswerRecord) (QuestionAnswerBat
 	if err != nil {
 		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerStorage)
 	}
-	batch := QuestionAnswerBatch{Records: cloneQuestionAnswerRecords(records), ReasoningEffort: reasoningEffort, SubmittedCount: len(records)}
+	repeatCount, err := aggregateQuestionAnswerRepeatCount(records)
+	if err != nil {
+		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerStorage)
+	}
+	batch := QuestionAnswerBatch{
+		Records:         cloneQuestionAnswerRecords(records),
+		ReasoningEffort: reasoningEffort,
+		RepeatCount:     repeatCount,
+		SubmittedCount:  len(records),
+		Stats:           QuestionAnswerStats{ByModel: []QuestionAnswerModelStats{}},
+	}
 	if len(records) == 0 {
 		batch.Records = []QuestionAnswerRecord{}
 		return batch, nil
 	}
 	batch.BatchID = records[0].BatchID
+	modelIndexes := make(map[string]int)
 	for _, record := range records {
+		addQuestionAnswerRecordStats(&batch.Stats, record)
+		modelIndex, exists := modelIndexes[record.ModelName]
+		if !exists {
+			modelIndex = len(batch.Stats.ByModel)
+			modelIndexes[record.ModelName] = modelIndex
+			batch.Stats.ByModel = append(batch.Stats.ByModel, QuestionAnswerModelStats{ModelName: record.ModelName})
+		}
+		modelStats := QuestionAnswerStats{
+			Requests: batch.Stats.ByModel[modelIndex].Requests,
+			Reviews:  batch.Stats.ByModel[modelIndex].Reviews,
+		}
+		addQuestionAnswerRecordStats(&modelStats, record)
+		batch.Stats.ByModel[modelIndex].Requests = modelStats.Requests
+		batch.Stats.ByModel[modelIndex].Reviews = modelStats.Reviews
+
 		switch record.Status {
 		case QuestionAnswerPending:
-			batch.Stats.Requests.InProgress++
 			batch.Active = true
 			if batch.CurrentModel == "" {
 				batch.CurrentModel, batch.CurrentQuestion = record.ModelName, record.QuestionName
 			}
 		case QuestionAnswerRunning:
-			batch.Stats.Requests.InProgress++
 			batch.Active = true
 			batch.RunningCount++
 			batch.CurrentModel, batch.CurrentQuestion = record.ModelName, record.QuestionName
 		case QuestionAnswerSucceeded:
-			batch.Stats.Requests.Succeeded++
-			switch {
-			case record.AnswerJudgment != nil && *record.AnswerJudgment == QuestionAnswerCorrect:
-				batch.Stats.Reviews.Correct++
-			case record.AnswerJudgment != nil && *record.AnswerJudgment == QuestionAnswerIncorrect:
-				batch.Stats.Reviews.Incorrect++
-			default:
-				batch.Stats.Reviews.Unreviewed++
-			}
 			batch.CompletedCount++
 		case QuestionAnswerFailed:
-			batch.Stats.Requests.Failed++
 			batch.CompletedCount++
 		case QuestionAnswerCancelled:
-			batch.Stats.Requests.Cancelled++
 			batch.CompletedCount++
 		}
 	}
-	batch.Stats.Requests.Submitted = len(records)
 	return batch, nil
+}
+
+func addQuestionAnswerRecordStats(stats *QuestionAnswerStats, record QuestionAnswerRecord) {
+	stats.Requests.Submitted++
+	switch record.Status {
+	case QuestionAnswerPending, QuestionAnswerRunning:
+		stats.Requests.InProgress++
+	case QuestionAnswerSucceeded:
+		stats.Requests.Succeeded++
+		if record.AnswerJudgment != nil && *record.AnswerJudgment == QuestionAnswerCorrect {
+			stats.Reviews.Correct++
+		} else if record.AnswerJudgment != nil && *record.AnswerJudgment == QuestionAnswerIncorrect {
+			stats.Reviews.Incorrect++
+		} else {
+			stats.Reviews.Unreviewed++
+		}
+	case QuestionAnswerFailed:
+		stats.Requests.Failed++
+	case QuestionAnswerCancelled:
+		stats.Requests.Cancelled++
+	}
 }
 
 func normalizeQuestionAnswerReasoningEffort(value string) (QuestionAnswerReasoningEffort, error) {
@@ -758,6 +951,69 @@ func normalizeQuestionAnswerReasoningEffort(value string) (QuestionAnswerReasoni
 	default:
 		return "", requestError(ErrorQuestionAnswerReasoningEffort)
 	}
+}
+
+func normalizeQuestionAnswerRepeatCount(raw json.RawMessage) (int, error) {
+	if len(raw) == 0 {
+		return 1, nil
+	}
+	var value int
+	if err := json.Unmarshal(raw, &value); err != nil || value < 1 || value > QuestionAnswerRepeatCountLimit {
+		return 0, requestError(ErrorQuestionAnswerRepeatCount)
+	}
+	return value, nil
+}
+
+func questionAnswerSubmissionCount(modelCount, questionCount, repeatCount int) (int, error) {
+	if repeatCount < 1 || repeatCount > QuestionAnswerRepeatCountLimit {
+		return 0, requestError(ErrorQuestionAnswerRepeatCount)
+	}
+	if modelCount == 0 || questionCount == 0 {
+		return 0, requestError(ErrorQuestionAnswerSelection)
+	}
+	if modelCount > QuestionAnswerBatchRecordLimit || questionCount > QuestionAnswerBatchRecordLimit {
+		return QuestionAnswerBatchRecordLimit + 1, requestError(ErrorQuestionAnswerBatchLimit)
+	}
+	combinations := modelCount * questionCount
+	if combinations > QuestionAnswerBatchRecordLimit/repeatCount {
+		return combinations * repeatCount, requestError(ErrorQuestionAnswerBatchLimit)
+	}
+	return combinations * repeatCount, nil
+}
+
+func aggregateQuestionAnswerRepeatCount(records []QuestionAnswerRecord) (int, error) {
+	if len(records) == 0 {
+		return 1, nil
+	}
+	type combination struct {
+		modelName  string
+		questionID string
+	}
+	models := make(map[string]struct{})
+	questions := make(map[string]struct{})
+	counts := make(map[combination]int)
+	for _, record := range records {
+		models[record.ModelName] = struct{}{}
+		questions[record.QuestionID] = struct{}{}
+		counts[combination{modelName: record.ModelName, questionID: record.QuestionID}]++
+	}
+	if len(counts) != len(models)*len(questions) {
+		return 0, errors.New("question answer batch has missing model-question combinations")
+	}
+	repeatCount := 0
+	for _, count := range counts {
+		if count < 1 || count > QuestionAnswerRepeatCountLimit {
+			return 0, errors.New("question answer batch has invalid repeat count")
+		}
+		if repeatCount == 0 {
+			repeatCount = count
+			continue
+		}
+		if count != repeatCount {
+			return 0, errors.New("question answer batch has inconsistent repeat counts")
+		}
+	}
+	return repeatCount, nil
 }
 
 func questionAnswerReasoningEffortOrDefault(value *QuestionAnswerReasoningEffort) QuestionAnswerReasoningEffort {

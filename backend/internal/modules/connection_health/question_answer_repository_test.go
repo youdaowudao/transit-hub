@@ -19,6 +19,105 @@ import (
 
 const questionAnswerPostgresTimeout = 15 * time.Second
 
+func TestQuestionAnswerRepositoryRepeatExpansionPersistsIndependentOrderedRecords(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	repository := NewRepository(pool)
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	q1, err := repository.CreateTestQuestion(ctx, "repeat-user", "Question 1", "Body 1", []string{"one"})
+	if err != nil {
+		t.Fatalf("create q1: %v", err)
+	}
+	q2, err := repository.CreateTestQuestion(ctx, "repeat-user", "Question 2", "Body 2", []string{"two", "二"})
+	if err != nil {
+		t.Fatalf("create q2: %v", err)
+	}
+	q3, err := repository.CreateTestQuestion(ctx, "repeat-user", "Question 3", "Body 3", []string{})
+	if err != nil {
+		t.Fatalf("create q3: %v", err)
+	}
+	questions := []TestQuestion{q1, q2, q3}
+	models := []string{"model-a", "model-b"}
+	records, err := repository.CreateQuestionAnswerBatch(
+		ctx, "repeat-user", "repeat-target", "repeat-batch",
+		models, []string{q1.ID, q2.ID, q3.ID}, QuestionAnswerReasoningEffortHigh, 4,
+	)
+	if err != nil {
+		t.Fatalf("create repeat batch: %v", err)
+	}
+	if len(records) != 24 {
+		t.Fatalf("created records=%d want=24", len(records))
+	}
+	wantOrder := []string{
+		"model-a/" + q1.ID, "model-a/" + q1.ID, "model-a/" + q1.ID, "model-a/" + q1.ID,
+		"model-a/" + q2.ID, "model-a/" + q2.ID, "model-a/" + q2.ID, "model-a/" + q2.ID,
+		"model-a/" + q3.ID, "model-a/" + q3.ID, "model-a/" + q3.ID, "model-a/" + q3.ID,
+		"model-b/" + q1.ID, "model-b/" + q1.ID, "model-b/" + q1.ID, "model-b/" + q1.ID,
+		"model-b/" + q2.ID, "model-b/" + q2.ID, "model-b/" + q2.ID, "model-b/" + q2.ID,
+		"model-b/" + q3.ID, "model-b/" + q3.ID, "model-b/" + q3.ID, "model-b/" + q3.ID,
+	}
+	ids := make(map[string]struct{}, len(records))
+	for i, record := range records {
+		if got := record.ModelName + "/" + record.QuestionID; got != wantOrder[i] {
+			t.Fatalf("create order[%d]=%s want=%s", i, got, wantOrder[i])
+		}
+		if _, duplicate := ids[record.ID]; duplicate {
+			t.Fatalf("duplicate record id %q", record.ID)
+		}
+		ids[record.ID] = struct{}{}
+	}
+	var storedCount, distinctIDCount int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*), count(DISTINCT id)
+		FROM connection_health_question_answer_records
+		WHERE user_id = 'repeat-user' AND target_id = 'repeat-target' AND batch_id = 'repeat-batch'
+	`).Scan(&storedCount, &distinctIDCount); err != nil {
+		t.Fatalf("count stored repeat records: %v", err)
+	}
+	if storedCount != 24 || distinctIDCount != 24 {
+		t.Fatalf("stored=%d distinct_ids=%d want=24/24", storedCount, distinctIDCount)
+	}
+	persisted, err := repository.ListQuestionAnswerBatch(ctx, "repeat-user", "repeat-target", "repeat-batch")
+	if err != nil || len(persisted) != 24 {
+		t.Fatalf("list repeat batch records=%d err=%v", len(persisted), err)
+	}
+	questionByID := make(map[string]TestQuestion, len(questions))
+	combinationCounts := make(map[string]int, 6)
+	for _, question := range questions {
+		questionByID[question.ID] = question
+	}
+	for _, record := range persisted {
+		question := questionByID[record.QuestionID]
+		if record.QuestionName != question.Name || record.QuestionBody != question.Body || !reflect.DeepEqual(record.QuestionKeywordSnapshot, question.Keywords) {
+			t.Fatalf("stored snapshot=%+v want question=%+v", record, question)
+		}
+		if record.ReasoningEffort == nil || *record.ReasoningEffort != QuestionAnswerReasoningEffortHigh {
+			t.Fatalf("stored reasoning effort=%v", record.ReasoningEffort)
+		}
+		combinationCounts[record.ModelName+"/"+record.QuestionID]++
+	}
+	for combination, count := range combinationCounts {
+		if count != 4 {
+			t.Fatalf("combination %s count=%d want=4", combination, count)
+		}
+	}
+	if len(combinationCounts) != 6 {
+		t.Fatalf("combination count=%d want=6", len(combinationCounts))
+	}
+
+	repeatOne, err := repository.CreateQuestionAnswerBatch(
+		ctx, "repeat-user", "repeat-one-target", "repeat-one-batch",
+		models, []string{q1.ID, q2.ID, q3.ID}, QuestionAnswerReasoningEffortMedium, 1,
+	)
+	if err != nil || len(repeatOne) != 6 {
+		t.Fatalf("repeat one records=%d err=%v want=6", len(repeatOne), err)
+	}
+}
+
 func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	pool := openQuestionAnswerPostgresPool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
@@ -77,14 +176,14 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	}
 
 	batchID := "batch-snapshot"
-	records, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", batchID, []string{"model-a"}, []string{q1.ID}, QuestionAnswerReasoningEffortHigh)
+	records, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", batchID, []string{"model-a"}, []string{q1.ID}, QuestionAnswerReasoningEffortHigh, 1)
 	if err != nil || len(records) != 1 {
 		t.Fatalf("create snapshot batch records=%+v err=%v", records, err)
 	}
 	if records[0].ReasoningEffort == nil || *records[0].ReasoningEffort != QuestionAnswerReasoningEffortHigh {
 		t.Fatalf("reasoning effort snapshot=%v", records[0].ReasoningEffort)
 	}
-	if _, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-duplicate", []string{"model-b"}, []string{q2.ID}, QuestionAnswerReasoningEffortHigh); !errors.Is(err, errQuestionAnswerActive) {
+	if _, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-duplicate", []string{"model-b"}, []string{q2.ID}, QuestionAnswerReasoningEffortHigh, 1); !errors.Is(err, errQuestionAnswerActive) {
 		t.Fatalf("duplicate active batch error=%v", err)
 	}
 	if running, err := repository.MarkQuestionAnswerRunning(ctx, "user-1", batchID, records[0].ID); err != nil || !running {
@@ -133,7 +232,7 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	for i := range models {
 		models[i] = fmt.Sprintf("model-%02d", i)
 	}
-	bulk, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-bulk", models, []string{q2.ID}, QuestionAnswerReasoningEffortMedium)
+	bulk, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-bulk", models, []string{q2.ID}, QuestionAnswerReasoningEffortMedium, 1)
 	if err != nil || len(bulk) != 25 {
 		t.Fatalf("create bulk records=%d err=%v", len(bulk), err)
 	}
@@ -179,11 +278,11 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 		t.Fatalf("failed record judgment=%+v err=%v", failedMark, err)
 	}
 
-	cancelled, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-cancelled", []string{"model-cancelled"}, []string{q2.ID}, QuestionAnswerReasoningEffortLow)
+	cancelled, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-cancelled", []string{"model-cancelled"}, []string{q2.ID}, QuestionAnswerReasoningEffortLow, 1)
 	if err != nil || len(cancelled) != 1 {
 		t.Fatalf("create cancelled batch=%+v err=%v", cancelled, err)
 	}
-	if found, err := repository.StopQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-cancelled", QuestionAnswerCancelled, ""); err != nil || !found {
+	if found, err := repository.StopPendingQuestionAnswerBatch(ctx, "user-1", "target-1", "batch-cancelled", QuestionAnswerCancelled, ""); err != nil || !found {
 		t.Fatalf("cancel batch found=%v err=%v", found, err)
 	}
 
@@ -214,7 +313,7 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 		t.Fatalf("history user isolation=%+v err=%v", foreign, err)
 	}
 
-	abandoned, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-restart", "batch-restart", []string{"model-a"}, []string{q2.ID}, QuestionAnswerReasoningEffortXHigh)
+	abandoned, err := repository.CreateQuestionAnswerBatch(ctx, "user-1", "target-restart", "batch-restart", []string{"model-a"}, []string{q2.ID}, QuestionAnswerReasoningEffortXHigh, 1)
 	if err != nil || len(abandoned) != 1 {
 		t.Fatalf("create abandoned batch=%+v err=%v", abandoned, err)
 	}
@@ -271,7 +370,7 @@ func TestQuestionAnswerKeywordSnapshotPersistsWithNilAndEmptyDistinction(t *test
 	}
 	emptyRecords, err := repository.CreateQuestionAnswerBatch(
 		ctx, "keyword-user", "empty-keyword-target", "empty-keyword-batch",
-		[]string{"model-empty"}, []string{emptyQuestion.ID}, QuestionAnswerReasoningEffortMedium,
+		[]string{"model-empty"}, []string{emptyQuestion.ID}, QuestionAnswerReasoningEffortMedium, 1,
 	)
 	if err != nil || len(emptyRecords) != 1 || emptyRecords[0].QuestionKeywordSnapshot == nil || len(emptyRecords[0].QuestionKeywordSnapshot) != 0 {
 		t.Fatalf("empty snapshot=%+v err=%v, want non-nil empty", emptyRecords, err)
@@ -284,7 +383,7 @@ func TestQuestionAnswerKeywordSnapshotPersistsWithNilAndEmptyDistinction(t *test
 	}
 	configuredRecords, err := repository.CreateQuestionAnswerBatch(
 		ctx, "keyword-user", "configured-keyword-target", "configured-keyword-batch",
-		[]string{"model-a", "model-b"}, []string{configuredQuestion.ID}, QuestionAnswerReasoningEffortHigh,
+		[]string{"model-a", "model-b"}, []string{configuredQuestion.ID}, QuestionAnswerReasoningEffortHigh, 1,
 	)
 	if err != nil || len(configuredRecords) != 2 {
 		t.Fatalf("configured records=%+v err=%v", configuredRecords, err)
@@ -374,7 +473,7 @@ func TestQuestionAnswerKeywordMigrationBeforeEnsureSchemaIsIdempotent(t *testing
 	}
 	records, err := repository.CreateQuestionAnswerBatch(
 		ctx, "migration-order-user", "migration-order-target", "migration-order-batch",
-		[]string{"model"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium,
+		[]string{"model"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1,
 	)
 	if err != nil || len(records) != 1 || !reflect.DeepEqual(records[0].QuestionKeywordSnapshot, keywords) {
 		t.Fatalf("records after migrations=%+v err=%v", records, err)
@@ -404,7 +503,7 @@ func TestQuestionAnswerRepositoryPostgresConcurrentCompletionAndStopHaveOneTermi
 	for i := 0; i < 10; i++ {
 		targetID := fmt.Sprintf("race-target-%d", i)
 		batchID := fmt.Sprintf("race-batch-%d", i)
-		records, err := repository.CreateQuestionAnswerBatch(ctx, "race-user", targetID, batchID, []string{"model-a"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium)
+		records, err := repository.CreateQuestionAnswerBatch(ctx, "race-user", targetID, batchID, []string{"model-a"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1)
 		if err != nil || len(records) != 1 {
 			t.Fatalf("create race batch %d: records=%+v err=%v", i, records, err)
 		}
@@ -425,7 +524,7 @@ func TestQuestionAnswerRepositoryPostgresConcurrentCompletionAndStopHaveOneTermi
 		go func() {
 			defer wg.Done()
 			<-start
-			stopResult, stopErr = repository.StopQuestionAnswerBatch(ctx, "race-user", targetID, batchID, QuestionAnswerCancelled, "")
+			stopResult, stopErr = repository.FinalizeQuestionAnswerBatch(ctx, "race-user", targetID, batchID, QuestionAnswerCancelled, "")
 		}()
 		close(start)
 		wg.Wait()
@@ -450,7 +549,7 @@ func TestQuestionAnswerRepositoryPostgresConcurrentCompletionAndStopHaveOneTermi
 		}
 	}
 
-	preserveRecords, err := repository.CreateQuestionAnswerBatch(ctx, "race-user", "preserve-target", "preserve-batch", []string{"model-a", "model-b"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium)
+	preserveRecords, err := repository.CreateQuestionAnswerBatch(ctx, "race-user", "preserve-target", "preserve-batch", []string{"model-a", "model-b"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1)
 	if err != nil || len(preserveRecords) != 2 {
 		t.Fatalf("create preserve batch: records=%+v err=%v", preserveRecords, err)
 	}
@@ -462,7 +561,7 @@ func TestQuestionAnswerRepositoryPostgresConcurrentCompletionAndStopHaveOneTermi
 	if completed, err := repository.CompleteQuestionAnswer(ctx, "race-user", "preserve-batch", preserveRecords[0].ID, QuestionAnswerSucceeded, "kept answer", ""); err != nil || !completed {
 		t.Fatalf("complete preserved record: completed=%v err=%v", completed, err)
 	}
-	if found, err := repository.StopQuestionAnswerBatch(ctx, "race-user", "preserve-target", "preserve-batch", QuestionAnswerCancelled, ""); err != nil || !found {
+	if found, err := repository.FinalizeQuestionAnswerBatch(ctx, "race-user", "preserve-target", "preserve-batch", QuestionAnswerCancelled, ""); err != nil || !found {
 		t.Fatalf("stop preserve batch: found=%v err=%v", found, err)
 	}
 	if late, err := repository.CompleteQuestionAnswer(ctx, "race-user", "preserve-batch", preserveRecords[1].ID, QuestionAnswerSucceeded, "late answer", ""); err != nil || late {
@@ -478,6 +577,174 @@ func TestQuestionAnswerRepositoryPostgresConcurrentCompletionAndStopHaveOneTermi
 	}
 	if statuses[QuestionAnswerSucceeded].AnswerBody != "kept answer" || statuses[QuestionAnswerCancelled].AnswerBody != "" {
 		t.Fatalf("preserve batch terminal records=%+v", stored)
+	}
+}
+
+func TestQuestionAnswerRepositoryStopFinalizeStateTransitions(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	repository := NewRepository(pool)
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	question, err := repository.CreateTestQuestion(ctx, "stop-finalize-user", "Stop/finalize", "Body", []string{})
+	if err != nil {
+		t.Fatalf("create stop/finalize question: %v", err)
+	}
+	records, err := repository.CreateQuestionAnswerBatch(
+		ctx, "stop-finalize-user", "stop-finalize-target", "stop-finalize-batch",
+		[]string{"model-a"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 5,
+	)
+	if err != nil || len(records) != 5 {
+		t.Fatalf("create stop/finalize records=%d err=%v", len(records), err)
+	}
+	for _, record := range records {
+		if running, err := repository.MarkQuestionAnswerRunning(ctx, "stop-finalize-user", record.BatchID, record.ID); err != nil || !running {
+			t.Fatalf("mark record %s running=%v err=%v", record.ID, running, err)
+		}
+	}
+	if found, err := repository.StopPendingQuestionAnswerBatch(ctx, "stop-finalize-user", "stop-finalize-target", "stop-finalize-batch", QuestionAnswerCancelled, ""); err != nil || !found {
+		t.Fatalf("stop pending on all-running batch found=%v err=%v", found, err)
+	}
+	allRunning, err := repository.ListQuestionAnswerBatch(ctx, "stop-finalize-user", "stop-finalize-target", "stop-finalize-batch")
+	if err != nil || len(allRunning) != 5 {
+		t.Fatalf("list all-running batch records=%d err=%v", len(allRunning), err)
+	}
+	for _, record := range allRunning {
+		if record.Status != QuestionAnswerRunning {
+			t.Fatalf("StopPending changed running record: %+v", record)
+		}
+	}
+	if completed, err := repository.CompleteQuestionAnswer(ctx, "stop-finalize-user", "stop-finalize-batch", records[0].ID, QuestionAnswerSucceeded, "kept", ""); err != nil || !completed {
+		t.Fatalf("complete terminal record before finalizer=%v err=%v", completed, err)
+	}
+	if found, err := repository.FinalizeQuestionAnswerBatch(ctx, "stop-finalize-user", "stop-finalize-target", "stop-finalize-batch", QuestionAnswerCancelled, ""); err != nil || !found {
+		t.Fatalf("finalize batch found=%v err=%v", found, err)
+	}
+	finalized, err := repository.ListQuestionAnswerBatch(ctx, "stop-finalize-user", "stop-finalize-target", "stop-finalize-batch")
+	if err != nil || len(finalized) != 5 {
+		t.Fatalf("list finalized batch records=%d err=%v", len(finalized), err)
+	}
+	for _, record := range finalized {
+		if record.ID == records[0].ID {
+			if record.Status != QuestionAnswerSucceeded || record.AnswerBody != "kept" {
+				t.Fatalf("finalizer overwrote existing terminal record: %+v", record)
+			}
+		} else if record.Status != QuestionAnswerCancelled || record.AnswerBody != "" {
+			t.Fatalf("finalizer did not close residual running record: %+v", record)
+		}
+	}
+	for _, operation := range []struct {
+		name string
+		call func() (bool, error)
+	}{
+		{name: "stop pending terminal", call: func() (bool, error) {
+			return repository.StopPendingQuestionAnswerBatch(ctx, "stop-finalize-user", "stop-finalize-target", "stop-finalize-batch", QuestionAnswerCancelled, "")
+		}},
+		{name: "finalize terminal", call: func() (bool, error) {
+			return repository.FinalizeQuestionAnswerBatch(ctx, "stop-finalize-user", "stop-finalize-target", "stop-finalize-batch", QuestionAnswerCancelled, "")
+		}},
+	} {
+		found, err := operation.call()
+		if err != nil || !found {
+			t.Fatalf("%s found=%v err=%v want existing batch", operation.name, found, err)
+		}
+	}
+	if found, err := repository.StopPendingQuestionAnswerBatch(ctx, "stop-finalize-user", "missing-target", "missing-batch", QuestionAnswerCancelled, ""); err != nil || found {
+		t.Fatalf("missing StopPending found=%v err=%v", found, err)
+	}
+	if found, err := repository.FinalizeQuestionAnswerBatch(ctx, "stop-finalize-user", "missing-target", "missing-batch", QuestionAnswerCancelled, ""); err != nil || found {
+		t.Fatalf("missing Finalize found=%v err=%v", found, err)
+	}
+
+	pending, err := repository.CreateQuestionAnswerBatch(
+		ctx, "stop-finalize-user", "pending-stop-target", "pending-stop-batch",
+		[]string{"model-a"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 2,
+	)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("create pending stop batch records=%d err=%v", len(pending), err)
+	}
+	if found, err := repository.StopPendingQuestionAnswerBatch(ctx, "stop-finalize-user", "pending-stop-target", "pending-stop-batch", QuestionAnswerFailed, QuestionAnswerErrorStorage); err != nil || !found {
+		t.Fatalf("stop pending batch found=%v err=%v", found, err)
+	}
+	pendingStopped, err := repository.ListQuestionAnswerBatch(ctx, "stop-finalize-user", "pending-stop-target", "pending-stop-batch")
+	if err != nil || len(pendingStopped) != 2 {
+		t.Fatalf("list stopped pending batch records=%d err=%v", len(pendingStopped), err)
+	}
+	for _, record := range pendingStopped {
+		if record.Status != QuestionAnswerFailed || record.ErrorType != QuestionAnswerErrorStorage {
+			t.Fatalf("pending stop record=%+v", record)
+		}
+	}
+}
+
+func TestQuestionAnswerRepositoryFinalizeWaitsForInFlightCreateTransaction(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	repository := NewRepository(pool)
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("ensure schema: %v", err)
+	}
+	question, err := repository.CreateTestQuestion(ctx, "create-race-user", "Create race", "Create race body", []string{})
+	if err != nil {
+		t.Fatalf("create question: %v", err)
+	}
+
+	const targetID = "create-race-target"
+	const batchID = "create-race-batch"
+	createTx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin create transaction: %v", err)
+	}
+	defer func() { _ = createTx.Rollback(context.Background()) }()
+	lockKey := fmt.Sprintf("question-answer|%s|%s", "create-race-user", targetID)
+	if _, err := createTx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
+		t.Fatalf("lock create transaction: %v", err)
+	}
+	if _, err := createTx.Exec(ctx, `
+		INSERT INTO connection_health_question_answer_records (
+			id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body,
+			question_keyword_snapshot, reasoning_effort, status
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
+	`, "create-race-record", "create-race-user", targetID, batchID, "model-a", question.ID, question.Name, question.Body, []string{}, QuestionAnswerReasoningEffortMedium); err != nil {
+		t.Fatalf("insert uncommitted batch: %v", err)
+	}
+
+	type finalizeResult struct {
+		found bool
+		err   error
+	}
+	result := make(chan finalizeResult, 1)
+	go func() {
+		found, finalizeErr := repository.FinalizeQuestionAnswerBatch(
+			ctx, "create-race-user", targetID, batchID, QuestionAnswerFailed, QuestionAnswerErrorServiceShutdown,
+		)
+		result <- finalizeResult{found: found, err: finalizeErr}
+	}()
+	select {
+	case early := <-result:
+		t.Fatalf("finalizer returned before create transaction settled: found=%v err=%v", early.found, early.err)
+	case <-time.After(250 * time.Millisecond):
+	}
+	if err := createTx.Commit(ctx); err != nil {
+		t.Fatalf("commit create transaction: %v", err)
+	}
+	select {
+	case finalized := <-result:
+		if finalized.err != nil || !finalized.found {
+			t.Fatalf("finalize committed batch: found=%v err=%v", finalized.found, finalized.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("finalizer did not continue after create transaction committed")
+	}
+	records, err := repository.ListQuestionAnswerBatch(ctx, "create-race-user", targetID, batchID)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("list finalized create-race batch: records=%+v err=%v", records, err)
+	}
+	if records[0].Status != QuestionAnswerFailed || records[0].ErrorType != QuestionAnswerErrorServiceShutdown {
+		t.Fatalf("finalized create-race record=%+v", records[0])
 	}
 }
 
@@ -501,6 +768,7 @@ func TestQuestionAnswerRepositoryPostgresConcurrentOppositeJudgmentsNeverReturnM
 		[]string{"model-a"},
 		[]string{question.ID},
 		QuestionAnswerReasoningEffortMedium,
+		1,
 	)
 	if err != nil || len(records) != 1 {
 		t.Fatalf("create race record: records=%+v err=%v", records, err)
@@ -704,7 +972,7 @@ func TestQuestionAnswerRepositoryCompletesWithJudgmentAndReconciledStats(t *test
 	if err != nil {
 		t.Fatalf("create stats question: %v", err)
 	}
-	success, err := repository.CreateQuestionAnswerBatch(ctx, "stats-user", "stats-target", "stats-success", []string{"success-model"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium)
+	success, err := repository.CreateQuestionAnswerBatch(ctx, "stats-user", "stats-target", "stats-success", []string{"success-model"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1)
 	if err != nil || len(success) != 1 {
 		t.Fatalf("create success record: records=%+v err=%v", success, err)
 	}
@@ -723,7 +991,7 @@ func TestQuestionAnswerRepositoryCompletesWithJudgmentAndReconciledStats(t *test
 		t.Fatalf("completed success judgment=%v manualError=%v", successJudgment, successManualError)
 	}
 
-	failed, err := repository.CreateQuestionAnswerBatch(ctx, "stats-user", "stats-target", "stats-failed", []string{"failed-model"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium)
+	failed, err := repository.CreateQuestionAnswerBatch(ctx, "stats-user", "stats-target", "stats-failed", []string{"failed-model"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1)
 	if err != nil || len(failed) != 1 {
 		t.Fatalf("create failed record: records=%+v err=%v", failed, err)
 	}
@@ -774,6 +1042,127 @@ func TestQuestionAnswerRepositoryCompletesWithJudgmentAndReconciledStats(t *test
 	}
 	if reviews.Unreviewed != 1 || reviews.Correct != 0 || reviews.Incorrect != 0 {
 		t.Fatalf("history review stats = %+v", reviews)
+	}
+}
+
+func TestQuestionAnswerRepositoryModelStatsLifetimeTodayAndEmptyArrays(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	repository := NewRepository(pool)
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO connection_health_question_answer_records (
+			id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body,
+			status, answer_judgment, answer_body, completed_at
+		) VALUES
+			('stats-a-correct',    'model-stats-user', 'model-stats-target', 'stats-a', 'model-a',      'q1', 'Q1', 'Body', 'succeeded', 'correct',    'answer', now()),
+			('stats-a-unreviewed', 'model-stats-user', 'model-stats-target', 'stats-a', 'model-a',      'q2', 'Q2', 'Body', 'succeeded', 'unreviewed', 'answer', now()),
+			('stats-a-failed',     'model-stats-user', 'model-stats-target', 'stats-a', 'model-a',      'q3', 'Q3', 'Body', 'failed',    NULL,         '',       now()),
+			('stats-b-incorrect',  'model-stats-user', 'model-stats-target', 'stats-b', 'model-b',      'q1', 'Q1', 'Body', 'succeeded', 'incorrect',  'answer', now()),
+			('stats-b-cancelled',  'model-stats-user', 'model-stats-target', 'stats-b', 'model-b',      'q2', 'Q2', 'Body', 'cancelled', NULL,         '',       now()),
+			('stats-failed-1',     'model-stats-user', 'model-stats-target', 'stats-f', 'model-failed', 'q1', 'Q1', 'Body', 'failed',    NULL,         '',       now()),
+			('stats-failed-2',     'model-stats-user', 'model-stats-target', 'stats-f', 'model-failed', 'q2', 'Q2', 'Body', 'failed',    NULL,         '',       now())
+	`); err != nil {
+		t.Fatalf("insert model stats fixtures: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		UPDATE connection_health_question_answer_records
+		SET created_at = (((now() AT TIME ZONE 'Asia/Shanghai')::date - interval '1 second') AT TIME ZONE 'Asia/Shanghai')
+		WHERE id = 'stats-a-correct'
+	`); err != nil {
+		t.Fatalf("move one model-a record before Shanghai today: %v", err)
+	}
+
+	history, err := repository.ListQuestionAnswerHistory(ctx, "model-stats-user", "model-stats-target", 1)
+	if err != nil {
+		t.Fatalf("list model stats history: %v", err)
+	}
+	wantLifetime := QuestionAnswerStats{
+		Requests: QuestionAnswerRequestStats{Submitted: 7, Succeeded: 3, Failed: 3, Cancelled: 1},
+		Reviews:  QuestionAnswerReviewStats{Unreviewed: 1, Correct: 1, Incorrect: 1},
+		ByModel: []QuestionAnswerModelStats{
+			{ModelName: "model-a", Requests: QuestionAnswerRequestStats{Submitted: 3, Succeeded: 2, Failed: 1}, Reviews: QuestionAnswerReviewStats{Unreviewed: 1, Correct: 1}},
+			{ModelName: "model-b", Requests: QuestionAnswerRequestStats{Submitted: 2, Succeeded: 1, Cancelled: 1}, Reviews: QuestionAnswerReviewStats{Incorrect: 1}},
+			{ModelName: "model-failed", Requests: QuestionAnswerRequestStats{Submitted: 2, Failed: 2}},
+		},
+	}
+	wantToday := QuestionAnswerStats{
+		Requests: QuestionAnswerRequestStats{Submitted: 6, Succeeded: 2, Failed: 3, Cancelled: 1},
+		Reviews:  QuestionAnswerReviewStats{Unreviewed: 1, Incorrect: 1},
+		ByModel: []QuestionAnswerModelStats{
+			{ModelName: "model-a", Requests: QuestionAnswerRequestStats{Submitted: 2, Succeeded: 1, Failed: 1}, Reviews: QuestionAnswerReviewStats{Unreviewed: 1}},
+			{ModelName: "model-b", Requests: QuestionAnswerRequestStats{Submitted: 2, Succeeded: 1, Cancelled: 1}, Reviews: QuestionAnswerReviewStats{Incorrect: 1}},
+			{ModelName: "model-failed", Requests: QuestionAnswerRequestStats{Submitted: 2, Failed: 2}},
+		},
+	}
+	if !reflect.DeepEqual(history.Stats, wantLifetime) {
+		t.Fatalf("lifetime stats=%+v want=%+v", history.Stats, wantLifetime)
+	}
+	if !reflect.DeepEqual(history.TodayStats, wantToday) {
+		t.Fatalf("today stats=%+v want=%+v", history.TodayStats, wantToday)
+	}
+	assertQuestionAnswerStatsReconcile(t, history.Stats)
+	assertQuestionAnswerStatsReconcile(t, history.TodayStats)
+	assertQuestionAnswerModelSumEqualsTotal(t, history.Stats)
+	assertQuestionAnswerModelSumEqualsTotal(t, history.TodayStats)
+
+	pageTwo, err := repository.ListQuestionAnswerHistory(ctx, "model-stats-user", "model-stats-target", 2)
+	if err != nil || len(pageTwo.Records) != 0 || !reflect.DeepEqual(pageTwo.Stats, history.Stats) || !reflect.DeepEqual(pageTwo.TodayStats, history.TodayStats) {
+		t.Fatalf("page two stats changed with pagination: records=%d history=%+v err=%v", len(pageTwo.Records), pageTwo, err)
+	}
+	empty, err := repository.ListQuestionAnswerHistory(ctx, "model-stats-user", "empty-model-stats-target", 1)
+	if err != nil {
+		t.Fatalf("list empty model stats history: %v", err)
+	}
+	if empty.Stats.ByModel == nil || empty.TodayStats.ByModel == nil || len(empty.Stats.ByModel) != 0 || len(empty.TodayStats.ByModel) != 0 {
+		t.Fatalf("empty byModel arrays lifetime=%#v today=%#v", empty.Stats.ByModel, empty.TodayStats.ByModel)
+	}
+	encoded, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatalf("marshal empty history: %v", err)
+	}
+	if strings.Count(string(encoded), `"byModel":[]`) != 2 {
+		t.Fatalf("empty history JSON=%s want two byModel arrays", encoded)
+	}
+}
+
+func assertQuestionAnswerStatsReconcile(t *testing.T, stats QuestionAnswerStats) {
+	t.Helper()
+	if stats.Requests.Submitted != stats.Requests.InProgress+stats.Requests.Succeeded+stats.Requests.Failed+stats.Requests.Cancelled {
+		t.Fatalf("request stats do not reconcile: %+v", stats.Requests)
+	}
+	if stats.Requests.Succeeded != stats.Reviews.Unreviewed+stats.Reviews.Correct+stats.Reviews.Incorrect {
+		t.Fatalf("review stats do not reconcile: requests=%+v reviews=%+v", stats.Requests, stats.Reviews)
+	}
+	for _, model := range stats.ByModel {
+		if model.Requests.Submitted != model.Requests.InProgress+model.Requests.Succeeded+model.Requests.Failed+model.Requests.Cancelled {
+			t.Fatalf("model %s request stats do not reconcile: %+v", model.ModelName, model.Requests)
+		}
+		if model.Requests.Succeeded != model.Reviews.Unreviewed+model.Reviews.Correct+model.Reviews.Incorrect {
+			t.Fatalf("model %s review stats do not reconcile: requests=%+v reviews=%+v", model.ModelName, model.Requests, model.Reviews)
+		}
+	}
+}
+
+func assertQuestionAnswerModelSumEqualsTotal(t *testing.T, stats QuestionAnswerStats) {
+	t.Helper()
+	var requests QuestionAnswerRequestStats
+	var reviews QuestionAnswerReviewStats
+	for _, model := range stats.ByModel {
+		requests.Submitted += model.Requests.Submitted
+		requests.InProgress += model.Requests.InProgress
+		requests.Succeeded += model.Requests.Succeeded
+		requests.Failed += model.Requests.Failed
+		requests.Cancelled += model.Requests.Cancelled
+		reviews.Unreviewed += model.Reviews.Unreviewed
+		reviews.Correct += model.Reviews.Correct
+		reviews.Incorrect += model.Reviews.Incorrect
+	}
+	if !reflect.DeepEqual(requests, stats.Requests) || !reflect.DeepEqual(reviews, stats.Reviews) {
+		t.Fatalf("model sums requests=%+v reviews=%+v total requests=%+v reviews=%+v", requests, reviews, stats.Requests, stats.Reviews)
 	}
 }
 

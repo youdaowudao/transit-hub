@@ -608,8 +608,17 @@ type TestQuestionPayload = Omit<TestQuestion, 'keywords'> & { keywords?: unknown
 type QuestionAnswerRecordPayload = Omit<QuestionAnswerRecord, 'questionKeywordSnapshot'> & {
   questionKeywordSnapshot?: unknown
 }
-type QuestionAnswerBatchPayload = Omit<QuestionAnswerBatch, 'records'> & { records: QuestionAnswerRecordPayload[] }
-type QuestionAnswerHistoryPayload = Omit<QuestionAnswerHistory, 'records'> & { records: QuestionAnswerRecordPayload[] }
+type QuestionAnswerStatsPayload = Omit<QuestionAnswerBatch['stats'], 'byModel'> & { byModel?: unknown }
+type QuestionAnswerBatchPayload = Omit<QuestionAnswerBatch, 'records' | 'repeatCount' | 'stats'> & {
+  records: QuestionAnswerRecordPayload[]
+  repeatCount?: unknown
+  stats: QuestionAnswerStatsPayload
+}
+type QuestionAnswerHistoryPayload = Omit<QuestionAnswerHistory, 'records' | 'stats' | 'todayStats'> & {
+  records: QuestionAnswerRecordPayload[]
+  stats: QuestionAnswerStatsPayload
+  todayStats: QuestionAnswerStatsPayload
+}
 
 const normalizeTestQuestion = (question: TestQuestionPayload): TestQuestion => ({
   ...question,
@@ -623,14 +632,31 @@ const normalizeQuestionAnswerRecord = (record: QuestionAnswerRecordPayload): Que
     : null,
 })
 
+const normalizeQuestionAnswerStats = (stats: QuestionAnswerStatsPayload): QuestionAnswerBatch['stats'] => ({
+  ...stats,
+  requests: { ...stats.requests },
+  reviews: { ...stats.reviews },
+  byModel: Array.isArray(stats.byModel)
+    ? stats.byModel.map(item => ({
+      ...item,
+      requests: { ...item.requests },
+      reviews: { ...item.reviews },
+    }))
+    : [],
+})
+
 const normalizeQuestionAnswerBatch = (batch: QuestionAnswerBatchPayload): QuestionAnswerBatch => ({
   ...batch,
+  repeatCount: typeof batch.repeatCount === 'number' ? batch.repeatCount : 1,
   records: batch.records.map(normalizeQuestionAnswerRecord),
+  stats: normalizeQuestionAnswerStats(batch.stats),
 })
 
 const normalizeQuestionAnswerHistory = (history: QuestionAnswerHistoryPayload): QuestionAnswerHistory => ({
   ...history,
   records: history.records.map(normalizeQuestionAnswerRecord),
+  stats: normalizeQuestionAnswerStats(history.stats),
+  todayStats: normalizeQuestionAnswerStats(history.todayStats),
 })
 
 export const listTestQuestions = async (signal?: AbortSignal): Promise<TestQuestion[]> => {
@@ -673,12 +699,15 @@ export const startQuestionAnswerBatch = async (
   models: string[],
   questionIds: string[],
   reasoningEffort: QuestionAnswerReasoningEffort,
-  signal?: AbortSignal,
+  repeatCountOrSignal: number | AbortSignal = 1,
+  nextSignal?: AbortSignal,
 ): Promise<QuestionAnswerBatch> => {
+  const repeatCount = typeof repeatCountOrSignal === 'number' ? repeatCountOrSignal : 1
+  const signal = typeof repeatCountOrSignal === 'number' ? nextSignal : repeatCountOrSignal
   const batch = await requestJson<QuestionAnswerBatchPayload>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches`, {
     method: 'POST',
     headers: questionAnswerContractHeaders,
-    body: JSON.stringify({ models, questionIds, reasoningEffort }),
+    body: JSON.stringify({ models, questionIds, reasoningEffort, repeatCount }),
     signal,
   })
   return normalizeQuestionAnswerBatch(batch)

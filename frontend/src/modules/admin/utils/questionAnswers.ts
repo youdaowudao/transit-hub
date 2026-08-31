@@ -3,11 +3,29 @@ import type {
   QuestionAnswerRecord,
   QuestionAnswerReviewStats,
   QuestionAnswerStats,
+  QuestionAnswerSubmissionSummary,
 } from '../types/connectionHealth'
 
 export const TEST_QUESTION_KEYWORD_COUNT_LIMIT = 20
 export const TEST_QUESTION_KEYWORD_RUNE_LIMIT = 64
 export const TEST_QUESTION_KEYWORD_BYTES_LIMIT = 2048
+
+export const questionAnswerSubmissionSummary = (
+  modelCount: number,
+  questionCount: number,
+  repeatCount: number,
+): QuestionAnswerSubmissionSummary => {
+  const validRepeatCount = Number.isInteger(repeatCount) && repeatCount >= 1 && repeatCount <= 10
+  const total = modelCount * questionCount * repeatCount
+  return {
+    modelCount,
+    questionCount,
+    repeatCount,
+    total,
+    validRepeatCount,
+    withinBatchLimit: validRepeatCount && total <= 50,
+  }
+}
 
 export interface QuestionAnswerHighlightSegment {
   text: string

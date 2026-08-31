@@ -980,6 +980,17 @@ export default {
       subtitle: '对当前 admin workspace 下分组内的账号/渠道做独立轻量探活，监控健康状态并支持自动降级/恢复。',
       adminSubtitle: '展示当前 admin workspace 下的全量分组，点击账号数查看分组下账号/渠道及独立探活状态。',
       simplifiedSubtitle: '以 admin 上游分组为单位配置探活、自动降级与流量优先级，新增账号或渠道会自动继承分组策略。',
+      intelligenceWeight: {
+        label: '智商权重',
+        unscored: '未评分',
+        edit: '编辑智商权重',
+        save: '保存',
+        clear: '设为未评分',
+        cancel: '取消',
+        invalid: '请输入 0-100 的整数',
+        saveFailed: '保存失败，请重试',
+        contractInvalid: '保存响应无效，请刷新后重试'
+      },
 			prioritySync: {
 				pending: '工作区 {workspace} 的配置已保存，主站 Priority 正在后台同步。',
 				failed: '工作区 {workspace} 的主站 Priority 后台同步失败（{time}，{count} 项）：{reason}',
@@ -1225,6 +1236,7 @@ export default {
           latency: '延迟',
           stability: '最近中断',
           todayAccuracy: '今日正确率',
+          intelligenceWeight: '智商权重',
           actions: '操作'
         },
         stabilityColumn: {
@@ -1923,6 +1935,7 @@ export default {
         noMatchingModels: '所选模型未匹配当前探活策略。',
         accountsFetch: '该分组账号列表加载失败。',
         targetNotFound: '探活目标不存在或不属于当前工作区。',
+        intelligenceWeightInvalid: '智商权重必须是 0-100 的整数或明确设为未评分。',
         schedulableActionFailed: '主站调度开关修改失败，实际状态未确认。',
         schedulableReadbackFailed: '主站已返回但调度状态回读失败或不一致，未显示为成功。',
         schedulableAuditFailed: '主站状态已修改，但动作记录保存失败，请刷新后核对。',

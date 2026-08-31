@@ -23,6 +23,7 @@ const harness = vi.hoisted(() => ({
   cancelQuestionAnswerBatch: vi.fn(),
   startQuestionAnswerBatch: vi.fn(),
   setQuestionAnswerJudgment: vi.fn(),
+  setTargetIntelligenceWeight: vi.fn(),
 }))
 
 vi.mock('@/modules/admin/composables/useConnectionHealth', () => ({
@@ -44,6 +45,7 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
   getQuestionAnswerHistory: harness.getQuestionAnswerHistory,
   listTestQuestions: harness.listTestQuestions,
   setQuestionAnswerJudgment: harness.setQuestionAnswerJudgment,
+  setTargetIntelligenceWeight: harness.setTargetIntelligenceWeight,
   startQuestionAnswerBatch: harness.startQuestionAnswerBatch,
 }))
 
@@ -142,6 +144,7 @@ const primaryTarget: ManualProbeTargetSummary = {
   status: 'active',
   groupName: 'Group Repeat',
   formalModels: [],
+  intelligenceWeight: null,
 }
 
 const mountedWrappers: VueWrapper[] = []

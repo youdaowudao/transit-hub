@@ -57,7 +57,9 @@ import {
 } from '../../utils/connectionHealthPreferences'
 import QuestionAnswerHighlightedText from './QuestionAnswerHighlightedText.vue'
 import QuestionAnswerStatsBar from './QuestionAnswerStatsBar.vue'
+import AccountIntelligenceWeightEditor from './AccountIntelligenceWeightEditor.vue'
 import { t, te } from '@/locales'
+import type { TargetIntelligenceWeightResult } from '../../types/connectionHealth'
 
 export interface ManualProbeTargetSummary {
   targetId: string
@@ -67,6 +69,7 @@ export interface ManualProbeTargetSummary {
   status: string
   groupName: string
   formalModels: ManualProbeModelOption[]
+  intelligenceWeight: number | null
 }
 
 const props = withDefaults(defineProps<{
@@ -83,6 +86,7 @@ const emit = defineEmits<{
   (event: 'question-answer-started', targetId: string): void
   (event: 'question-answer-viewed', targetId: string): void
   (event: 'question-answer-preferences-changed', preferences: QuestionAnswerSelectionPreferences): void
+  (event: 'intelligence-weight-saved', result: TargetIntelligenceWeightResult): void
 }>()
 
 const prefix = 'admin.connectionHealth.manualProbeDialog'
@@ -1339,7 +1343,7 @@ const close = () => {
 
         <div role="dialog" aria-modal="true" :aria-label="t(`${prefix}.title`)" class="relative flex h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-none flex-col overflow-hidden rounded-2xl border border-border/60 bg-card shadow-2xl">
           <div class="flex shrink-0 items-center justify-between gap-3 border-b border-border/60 px-5 py-4">
-            <div class="flex min-w-0 items-center gap-2.5">
+            <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2.5">
               <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
                 <Zap class="h-4 w-4" />
               </div>
@@ -1349,6 +1353,12 @@ const close = () => {
                   {{ target.accountName }} · {{ target.platform || '-' }} · {{ target.type || '-' }} · {{ target.status || '-' }} · {{ target.groupName }}
                 </p>
               </div>
+              <AccountIntelligenceWeightEditor
+                :target-id="target.targetId"
+                :model-value="target.intelligenceWeight"
+                compact
+                @saved="emit('intelligence-weight-saved', $event)"
+              />
             </div>
             <button type="button" class="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface-elevated hover:text-foreground" @click="close">
               <X class="h-4 w-4" />

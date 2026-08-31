@@ -17,6 +17,7 @@ const harness = vi.hoisted(() => ({
   cancelQuestionAnswerBatch: vi.fn(),
   startQuestionAnswerBatch: vi.fn(),
   setQuestionAnswerJudgment: vi.fn(),
+  setTargetIntelligenceWeight: vi.fn(),
 }))
 
 vi.mock('@/modules/admin/composables/useConnectionHealth', () => ({
@@ -38,6 +39,7 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
   getQuestionAnswerHistory: harness.getQuestionAnswerHistory,
   listTestQuestions: harness.listTestQuestions,
   setQuestionAnswerJudgment: harness.setQuestionAnswerJudgment,
+  setTargetIntelligenceWeight: harness.setTargetIntelligenceWeight,
   startQuestionAnswerBatch: harness.startQuestionAnswerBatch,
 }))
 
@@ -177,6 +179,7 @@ const primaryTarget: ManualProbeTargetSummary = {
   status: 'active',
   groupName: 'Group A',
   formalModels: [],
+  intelligenceWeight: null,
 }
 
 const secondaryTarget: ManualProbeTargetSummary = {
@@ -1036,6 +1039,7 @@ describe('question-answer batch behavior', () => {
         status: 'active',
         groupName: 'Group B',
         formalModels: [],
+        intelligenceWeight: null,
       },
     })
     await flushPromises()
@@ -1081,6 +1085,7 @@ describe('question-answer batch behavior', () => {
         status: 'active',
         groupName: 'Group B',
         formalModels: [],
+        intelligenceWeight: null,
       },
     })
     await flushPromises()

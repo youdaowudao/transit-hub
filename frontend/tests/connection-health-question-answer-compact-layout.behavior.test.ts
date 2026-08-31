@@ -24,6 +24,7 @@ const harness = vi.hoisted(() => ({
   cancelQuestionAnswerBatch: vi.fn(),
   startQuestionAnswerBatch: vi.fn(),
   setQuestionAnswerJudgment: vi.fn(),
+  setTargetIntelligenceWeight: vi.fn(),
 }))
 
 vi.mock('@/modules/admin/composables/useConnectionHealth', () => ({
@@ -45,6 +46,7 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
   getQuestionAnswerHistory: harness.getQuestionAnswerHistory,
   listTestQuestions: harness.listTestQuestions,
   setQuestionAnswerJudgment: harness.setQuestionAnswerJudgment,
+  setTargetIntelligenceWeight: harness.setTargetIntelligenceWeight,
   startQuestionAnswerBatch: harness.startQuestionAnswerBatch,
 }))
 
@@ -99,7 +101,8 @@ const target: ManualProbeTargetSummary = {
   status: 'active',
   groupName: 'OpenAI Group A',
   formalModels: [],
-}
+  intelligenceWeight: null,
+} as ManualProbeTargetSummary
 
 const history = (lifetime: QuestionAnswerStats, today: QuestionAnswerStats): QuestionAnswerHistory => ({
   records: [],
@@ -158,6 +161,7 @@ beforeEach(() => {
   harness.cancelQuestionAnswerBatch.mockReset()
   harness.startQuestionAnswerBatch.mockReset()
   harness.setQuestionAnswerJudgment.mockReset()
+  harness.setTargetIntelligenceWeight.mockReset()
 })
 
 afterEach(() => {
@@ -182,6 +186,52 @@ const mountDialog = async (questionAnswerPreferences?: {
 }
 
 describe('question-answer compact layout primitives', () => {
+  it('keeps the shared intelligence editor in the account title ahead of the unchanged question-answer regions', async () => {
+    const empty = stats(0, 0, 0, 0, 0)
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(empty, empty))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(batch(empty))
+
+    const wrapper = await mountDialog()
+    const editor = wrapper.get('[data-testid="account-intelligence-weight-editor"]')
+    const scroll = wrapper.get('[data-testid="question-answer-scroll"]')
+
+    expect(scroll.element.contains(editor.element)).toBe(false)
+    expect(editor.element.compareDocumentPosition(scroll.element) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(wrapper.findAll('[data-question-answer-section]').map(section => section.attributes('data-question-answer-section'))).toEqual([
+      'stats', 'pending', 'configuration', 'history',
+    ])
+  })
+
+  it('forwards only a successful shared-editor result from the dialog', async () => {
+    const empty = stats(0, 0, 0, 0, 0)
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(empty, empty))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(batch(empty))
+    harness.setTargetIntelligenceWeight.mockResolvedValue({
+      targetId: target.targetId,
+      intelligenceWeight: 42,
+    })
+    const wrapper = await mountDialog()
+    const editor = wrapper.get('[data-testid="account-intelligence-weight-editor"]')
+    await editor.get('button[aria-label="编辑智商权重"]').trigger('click')
+    await editor.get('[data-testid="intelligence-weight-input"]').setValue('42')
+    await editor.get('[data-testid="intelligence-weight-save"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('intelligence-weight-saved')).toEqual([[
+      { targetId: target.targetId, intelligenceWeight: 42 },
+    ]])
+
+    harness.setTargetIntelligenceWeight.mockRejectedValue(new Error('write failed'))
+    const failed = await mountDialog()
+    const failedEditor = failed.get('[data-testid="account-intelligence-weight-editor"]')
+    await failedEditor.get('button[aria-label="编辑智商权重"]').trigger('click')
+    await failedEditor.get('[data-testid="intelligence-weight-input"]').setValue('43')
+    await failedEditor.get('[data-testid="intelligence-weight-save"]').trigger('click')
+    await flushPromises()
+
+    expect(failed.emitted('intelligence-weight-saved')).toBeUndefined()
+  })
+
   it('calculates accuracy from all submitted answers and formats one meaningful decimal', () => {
     const accuracy = (questionAnswerUtils as typeof questionAnswerUtils & {
       questionAnswerAccuracy?: (value: QuestionAnswerStats) => number | null

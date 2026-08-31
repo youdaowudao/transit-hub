@@ -194,7 +194,13 @@ export interface AdminGroupAccount {
   prioritySyncBlockReason?: PrioritySyncBlockReason | string
   todayQuestionAnswerSubmitted?: number
   todayQuestionAnswerCorrect?: number
+  intelligenceWeight: number | null
   productionSortOrder?: number
+}
+
+export interface TargetIntelligenceWeightResult {
+  targetId: string
+  intelligenceWeight: number | null
 }
 
 export interface AdminGroupHealth {

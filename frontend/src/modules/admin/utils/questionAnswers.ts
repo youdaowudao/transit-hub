@@ -1,14 +1,124 @@
 import type {
+  AdminGroupHealth,
+  ManualProbeModelOption,
   QuestionAnswerBatch,
+  QuestionAnswerReasoningEffort,
   QuestionAnswerRecord,
   QuestionAnswerReviewStats,
   QuestionAnswerStats,
   QuestionAnswerSubmissionSummary,
+  TestQuestion,
 } from '../types/connectionHealth'
+import type { QuestionAnswerSelectionPreferences } from './connectionHealthPreferences'
 
 export const TEST_QUESTION_KEYWORD_COUNT_LIMIT = 20
 export const TEST_QUESTION_KEYWORD_RUNE_LIMIT = 64
 export const TEST_QUESTION_KEYWORD_BYTES_LIMIT = 2048
+
+export interface QuestionAnswerResolvedSelection {
+  modelIds: string[]
+  questionIds: string[]
+  reasoningEffort: QuestionAnswerReasoningEffort
+  repeatCount: number
+}
+
+export interface QuestionAnswerBatchTarget {
+  targetId: string
+  accountName: string
+  platform: string
+  type: string
+  status: string
+  groupIds: string[]
+  groupNames: string[]
+}
+
+const stableUniqueIds = (ids: string[]): string[] => Array.from(new Set(ids))
+
+export const resolveQuestionAnswerSelection = (
+  preferences: QuestionAnswerSelectionPreferences,
+  models: ManualProbeModelOption[],
+  questions: TestQuestion[],
+): QuestionAnswerResolvedSelection => {
+  const availableModelIds = new Set(models.map(model => model.id))
+  const selectedModelIds = stableUniqueIds(preferences.modelIds)
+    .filter(modelId => availableModelIds.has(modelId))
+  const enabledQuestions = questions.filter(question => question.enabled)
+  const enabledQuestionIds = new Set(enabledQuestions.map(question => question.id))
+  const selectedQuestionIds = stableUniqueIds(preferences.questionIds)
+    .filter(questionId => enabledQuestionIds.has(questionId))
+  const defaultQuestionId = enabledQuestions.find(question => question.isDefault)?.id
+
+  return {
+    modelIds: selectedModelIds.length > 0
+      ? selectedModelIds
+      : models.length > 0
+        ? [models.find(model => model.id === 'gpt-5.6-sol')?.id ?? models[0].id]
+        : [],
+    questionIds: selectedQuestionIds.length > 0
+      ? selectedQuestionIds
+      : defaultQuestionId
+        ? [defaultQuestionId]
+        : [],
+    reasoningEffort: preferences.reasoningEffort,
+    repeatCount: preferences.repeatCount,
+  }
+}
+
+export const collectQuestionAnswerBatchTargets = (
+  groups: AdminGroupHealth[],
+): QuestionAnswerBatchTarget[] => {
+  const targets = new Map<string, QuestionAnswerBatchTarget>()
+  for (const group of groups) {
+    for (const account of group.accounts) {
+      const targetId = account.targetId.trim()
+      if (!targetId) continue
+      const existing = targets.get(targetId)
+      if (existing) {
+        if (!existing.groupIds.includes(group.id)) existing.groupIds.push(group.id)
+        if (!existing.groupNames.includes(group.name)) existing.groupNames.push(group.name)
+        continue
+      }
+      targets.set(targetId, {
+        targetId,
+        accountName: account.name,
+        platform: account.platform,
+        type: account.type,
+        status: account.status,
+        groupIds: [group.id],
+        groupNames: [group.name],
+      })
+    }
+  }
+  return Array.from(targets.values())
+}
+
+export const reconcileQuestionAnswerBatchTargetIds = (
+  storedIds: string[],
+  targets: QuestionAnswerBatchTarget[],
+): string[] => {
+  const targetIds = new Set(targets.map(target => target.targetId))
+  return stableUniqueIds(storedIds).filter(targetId => targetIds.has(targetId))
+}
+
+export const selectQuestionAnswerBatchTargets = (
+  targets: QuestionAnswerBatchTarget[],
+  selectedIds: string[],
+): QuestionAnswerBatchTarget[] => {
+  const selectedIdSet = new Set(selectedIds)
+  return targets.filter(target => selectedIdSet.has(target.targetId))
+}
+
+export const compatibleQuestionAnswerModelIds = (
+  selectedModelIds: string[],
+  availableModels: ManualProbeModelOption[],
+): { compatible: string[]; incompatible: string[] } => {
+  const availableModelIds = new Set(availableModels.map(model => model.id))
+  const selectedIds = stableUniqueIds(selectedModelIds)
+  return {
+    compatible: selectedIds.filter(modelId => availableModelIds.has(modelId)),
+    incompatible: selectedIds.filter(modelId => !availableModelIds.has(modelId)),
+  }
+}
 
 export const questionAnswerSubmissionSummary = (
   modelCount: number,

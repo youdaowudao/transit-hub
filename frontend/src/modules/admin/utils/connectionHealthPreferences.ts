@@ -1,10 +1,32 @@
+import type { QuestionAnswerReasoningEffort } from '../types/connectionHealth'
+
+export interface QuestionAnswerSelectionPreferences {
+  modelIds: string[]
+  questionIds: string[]
+  reasoningEffort: QuestionAnswerReasoningEffort
+  repeatCount: number
+}
+
+export interface QuestionAnswerPreferences extends QuestionAnswerSelectionPreferences {
+  batchTargetIds: string[]
+}
+
 export interface ConnectionHealthPreferences {
   version: 1
   groupOrder: string[]
   hiddenGroupIds: string[]
   hideUnmonitoredAccounts: boolean
   questionAnswerUnreadTargetIds: string[]
+  questionAnswer: QuestionAnswerPreferences
 }
+
+export const createDefaultQuestionAnswerPreferences = (): QuestionAnswerPreferences => ({
+  modelIds: [],
+  questionIds: [],
+  reasoningEffort: 'medium',
+  repeatCount: 1,
+  batchTargetIds: [],
+})
 
 export const createDefaultConnectionHealthPreferences = (): ConnectionHealthPreferences => ({
   version: 1,
@@ -12,6 +34,7 @@ export const createDefaultConnectionHealthPreferences = (): ConnectionHealthPref
   hiddenGroupIds: [],
   hideUnmonitoredAccounts: false,
   questionAnswerUnreadTargetIds: [],
+  questionAnswer: createDefaultQuestionAnswerPreferences(),
 })
 
 export const connectionHealthPreferencesStorageKey = (scope: string): string =>
@@ -30,6 +53,28 @@ const normalizeIds = (value: unknown): string[] => {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null
 
+const normalizeQuestionAnswerPreferences = (value: unknown): QuestionAnswerPreferences => {
+  if (!isRecord(value)) return createDefaultQuestionAnswerPreferences()
+  const reasoningEfforts: QuestionAnswerReasoningEffort[] = ['low', 'medium', 'high', 'xhigh']
+  const reasoningEffort = typeof value.reasoningEffort === 'string'
+    && reasoningEfforts.includes(value.reasoningEffort as QuestionAnswerReasoningEffort)
+    ? value.reasoningEffort as QuestionAnswerReasoningEffort
+    : 'medium'
+  const repeatCount = typeof value.repeatCount === 'number'
+    && Number.isInteger(value.repeatCount)
+    && value.repeatCount >= 1
+    && value.repeatCount <= 10
+    ? value.repeatCount
+    : 1
+  return {
+    modelIds: normalizeIds(value.modelIds),
+    questionIds: normalizeIds(value.questionIds),
+    reasoningEffort,
+    repeatCount,
+    batchTargetIds: normalizeIds(value.batchTargetIds),
+  }
+}
+
 const normalizePreferences = (value: unknown): ConnectionHealthPreferences => {
   if (!isRecord(value) || value.version !== 1) return createDefaultConnectionHealthPreferences()
   return {
@@ -38,6 +83,7 @@ const normalizePreferences = (value: unknown): ConnectionHealthPreferences => {
     hiddenGroupIds: normalizeIds(value.hiddenGroupIds),
     hideUnmonitoredAccounts: value.hideUnmonitoredAccounts === true,
     questionAnswerUnreadTargetIds: normalizeIds(value.questionAnswerUnreadTargetIds),
+    questionAnswer: normalizeQuestionAnswerPreferences(value.questionAnswer),
   }
 }
 

@@ -65,6 +65,103 @@ func TestQuestionAnswerRepositoryListsTodaySummariesForDeduplicatedTargets(t *te
 	}
 }
 
+func TestQuestionAnswerRepositoryHistoryOnlyReturnsShanghaiTodayWithoutDeletingOlderRecords(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	repository := NewRepository(pool)
+	if err := repository.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO connection_health_question_answer_records (
+			id, user_id, target_id, batch_id, model_name, question_id, question_name,
+			question_body, status, answer_judgment, answer_body, created_at, completed_at
+		)
+		SELECT
+			'history-today-' || sequence,
+			'history-user',
+			'history-target',
+			'history-today-batch',
+			'answer-model',
+			'q-' || sequence,
+			'Question ' || sequence,
+			'Body ' || sequence,
+			'succeeded',
+			CASE WHEN sequence <= 14 THEN 'correct' ELSE 'incorrect' END,
+			'Answer ' || sequence,
+			(((now() AT TIME ZONE 'Asia/Shanghai')::date + time '12:00:00') AT TIME ZONE 'Asia/Shanghai') - (sequence * interval '1 second'),
+			(((now() AT TIME ZONE 'Asia/Shanghai')::date + time '12:00:00') AT TIME ZONE 'Asia/Shanghai') - (sequence * interval '1 second')
+		FROM generate_series(1, 21) AS sequence
+	`); err != nil {
+		t.Fatalf("insert today history fixtures: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO connection_health_question_answer_records (
+			id, user_id, target_id, batch_id, model_name, question_id, question_name,
+			question_body, status, answer_judgment, answer_body, created_at, completed_at
+		) VALUES
+			('history-yesterday', 'history-user', 'history-target', 'history-yesterday-batch', 'answer-model', 'q-old', 'Old', 'Old body', 'succeeded', 'correct', 'Old answer', (((now() AT TIME ZONE 'Asia/Shanghai')::date - 1 + time '12:00:00') AT TIME ZONE 'Asia/Shanghai'), (((now() AT TIME ZONE 'Asia/Shanghai')::date - 1 + time '12:00:00') AT TIME ZONE 'Asia/Shanghai')),
+			('history-yesterday-active', 'history-user', 'history-target', 'history-yesterday-active-batch', 'answer-model', 'q-active', 'Active', 'Active body', 'pending', NULL, '', (((now() AT TIME ZONE 'Asia/Shanghai')::date - 1 + time '12:00:00') AT TIME ZONE 'Asia/Shanghai'), NULL),
+			('history-foreign-user', 'foreign-history-user', 'history-target', 'foreign-batch', 'answer-model', 'q-foreign', 'Foreign', 'Foreign body', 'succeeded', 'correct', 'Foreign answer', now(), now()),
+			('history-foreign-target', 'history-user', 'foreign-history-target', 'foreign-target-batch', 'answer-model', 'q-foreign-target', 'Foreign target', 'Foreign target body', 'succeeded', 'correct', 'Foreign answer', now(), now())
+	`); err != nil {
+		t.Fatalf("insert history isolation fixtures: %v", err)
+	}
+
+	var databaseDate string
+	if err := pool.QueryRow(ctx, `SELECT (now() AT TIME ZONE 'Asia/Shanghai')::date::text`).Scan(&databaseDate); err != nil {
+		t.Fatalf("read Shanghai database date: %v", err)
+	}
+	countAll := func() int {
+		t.Helper()
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM connection_health_question_answer_records`).Scan(&count); err != nil {
+			t.Fatalf("count all question answers: %v", err)
+		}
+		return count
+	}
+	beforeCount := countAll()
+
+	pageOne, err := repository.ListQuestionAnswerHistory(ctx, "history-user", "history-target", 1)
+	if err != nil {
+		t.Fatalf("list today history page one: %v", err)
+	}
+	pageTwo, err := repository.ListQuestionAnswerHistory(ctx, "history-user", "history-target", 2)
+	if err != nil {
+		t.Fatalf("list today history page two: %v", err)
+	}
+	if pageOne.TotalItems != 21 || pageOne.TotalPages != 2 || len(pageOne.Records) != 20 {
+		t.Fatalf("page one items=%d pages=%d records=%d, want 21/2/20", pageOne.TotalItems, pageOne.TotalPages, len(pageOne.Records))
+	}
+	if pageTwo.TotalItems != 21 || pageTwo.TotalPages != 2 || len(pageTwo.Records) != 1 {
+		t.Fatalf("page two items=%d pages=%d records=%d, want 21/2/1", pageTwo.TotalItems, pageTwo.TotalPages, len(pageTwo.Records))
+	}
+	for _, record := range append(append([]QuestionAnswerRecord{}, pageOne.Records...), pageTwo.Records...) {
+		var createdDate string
+		if err := pool.QueryRow(ctx, `SELECT (created_at AT TIME ZONE 'Asia/Shanghai')::date::text FROM connection_health_question_answer_records WHERE id = $1`, record.ID).Scan(&createdDate); err != nil {
+			t.Fatalf("read record %s Shanghai date: %v", record.ID, err)
+		}
+		if createdDate != databaseDate {
+			t.Fatalf("history record %s date=%s, want today %s", record.ID, createdDate, databaseDate)
+		}
+	}
+	if pageOne.Stats.Requests.Submitted != 23 || pageOne.Stats.Requests.InProgress != 1 || pageOne.Stats.Requests.Succeeded != 22 || pageOne.Stats.Reviews.Correct != 15 || pageOne.Stats.Reviews.Incorrect != 7 {
+		t.Fatalf("lifetime stats=%+v", pageOne.Stats)
+	}
+	if pageOne.TodayStats.Requests.Submitted != 21 || pageOne.TodayStats.Requests.InProgress != 0 || pageOne.TodayStats.Requests.Succeeded != 21 || pageOne.TodayStats.Reviews.Correct != 14 || pageOne.TodayStats.Reviews.Incorrect != 7 {
+		t.Fatalf("today stats=%+v", pageOne.TodayStats)
+	}
+	active, err := repository.ListQuestionAnswerBatch(ctx, "history-user", "history-target", "history-yesterday-active-batch")
+	if err != nil || len(active) != 1 || active[0].Status != QuestionAnswerPending {
+		t.Fatalf("cross-midnight active batch=%+v err=%v", active, err)
+	}
+	if afterCount := countAll(); afterCount != beforeCount {
+		t.Fatalf("history query changed stored rows: before=%d after=%d", beforeCount, afterCount)
+	}
+}
+
 func TestQuestionAnswerRepositoryRepeatExpansionPersistsIndependentOrderedRecords(t *testing.T) {
 	pool := openQuestionAnswerPostgresPool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)

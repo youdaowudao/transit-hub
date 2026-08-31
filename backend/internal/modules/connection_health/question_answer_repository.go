@@ -390,7 +390,9 @@ func (r *Repository) ListQuestionAnswerHistory(ctx context.Context, userID strin
 	}
 	var totalItems int
 	if err := r.db.QueryRow(ctx, `
-		SELECT count(*) FROM connection_health_question_answer_records WHERE user_id = $1 AND target_id = $2
+		SELECT count(*) FROM connection_health_question_answer_records
+		WHERE user_id = $1 AND target_id = $2
+			AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
 	`, userID, targetID).Scan(&totalItems); err != nil {
 		return QuestionAnswerHistory{}, err
 	}
@@ -400,6 +402,7 @@ func (r *Repository) ListQuestionAnswerHistory(ctx context.Context, userID strin
 	}
 	rows, err := r.db.Query(ctx, questionAnswerRecordSelect+`
 		WHERE user_id = $1 AND target_id = $2
+			AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
 		ORDER BY created_at DESC, id DESC
 		LIMIT $3 OFFSET $4
 	`, userID, targetID, QuestionAnswerPageSize, (page-1)*QuestionAnswerPageSize)

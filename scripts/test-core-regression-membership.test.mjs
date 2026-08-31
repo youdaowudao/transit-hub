@@ -11,6 +11,7 @@ test('connection-health core gate keeps every question-answer regression member'
   for (const member of [
     'connection-health-question-answer.test.ts',
     'connection-health-question-answer.behavior.test.ts',
+    'connection-health-question-answer-compact-layout.behavior.test.ts',
     'connection-health-question-answer-repeat-queue.behavior.test.ts',
     'connection-health-question-answer-preferences.test.ts',
     'connection-health-question-answer-batch.behavior.test.ts',

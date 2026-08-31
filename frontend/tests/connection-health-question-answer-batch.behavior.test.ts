@@ -278,6 +278,16 @@ const mountDialog = async (
   return wrapper
 }
 
+const openConfiguration = async (wrapper: VueWrapper) => {
+  const configuration = wrapper.find('[data-testid="question-answer-configuration"]')
+  if (configuration.find('[data-testid="question-answer-models"]').exists()) return
+  const modify = configuration.findAll('button')
+    .find(button => button.text().trim() === '修改')
+  if (!modify) throw new Error('missing editable question-answer configuration')
+  await modify.trigger('click')
+  await flushPromises()
+}
+
 const checkedLabels = (wrapper: VueWrapper, testId: string): string[] => wrapper
   .find(`[data-testid="${testId}"]`)
   .findAll('label')
@@ -298,7 +308,7 @@ const toggleLabeledCheckbox = async (wrapper: VueWrapper, testId: string, text: 
 }
 
 const startButton = (wrapper: VueWrapper) => {
-  const button = wrapper.findAll('button').find(candidate => candidate.text().trim() === '开始问答测试')
+  const button = wrapper.findAll('button').find(candidate => candidate.text().trim() === '开始回答')
   if (!button) throw new Error('missing start question-answer button')
   return button
 }
@@ -433,6 +443,7 @@ const openPreparedBatch = async (
 describe('single-account preferences', () => {
   it('restores legal saved choices after async data loads and does not persist target filtering', async () => {
     const wrapper = await mountDialog(savedSelection())
+    await openConfiguration(wrapper)
 
     expect(checkedLabels(wrapper, 'question-answer-models')).toEqual(['Model A', 'Model B'])
     const restoredQuestions = checkedLabels(wrapper, 'question-answer-questions')
@@ -445,11 +456,13 @@ describe('single-account preferences', () => {
 
     await wrapper.setProps({ target: target('target-b') })
     await flushPromises()
+    await openConfiguration(wrapper)
     expect(checkedLabels(wrapper, 'question-answer-models')).toEqual(['Model B'])
     expect(wrapper.emitted('question-answer-preferences-changed')).toBeUndefined()
 
     await wrapper.setProps({ target: target('target-a') })
     await flushPromises()
+    await openConfiguration(wrapper)
     expect(checkedLabels(wrapper, 'question-answer-models')).toEqual(['Model A', 'Model B'])
     expect(wrapper.emitted('question-answer-preferences-changed')).toBeUndefined()
   })
@@ -477,12 +490,11 @@ describe('single-account preferences', () => {
       repeatCount: 8,
     }))
 
-    expect(checkedLabels(wrapper, 'question-answer-models')).toEqual(['Model B'])
-    const activeQuestions = checkedLabels(wrapper, 'question-answer-questions')
-    expect(activeQuestions).toHaveLength(1)
-    expect(activeQuestions[0]).toContain('Question q2')
-    expect((wrapper.find('input[name="question-answer-reasoning-effort"][value="low"]').element as HTMLInputElement).checked).toBe(true)
-    expect((repeatSelect(wrapper).element as HTMLSelectElement).value).toBe('3')
+    const configuration = wrapper.get('[data-testid="question-answer-configuration"]')
+    expect(configuration.text()).toContain('Model B')
+    expect(configuration.text()).toContain('问题 1 个 · 推理力度 低 · 每组合 3 次')
+    expect(configuration.text()).toContain('当前进行中批次使用此配置')
+    expect(configuration.find('[data-testid="question-answer-models"]').exists()).toBe(false)
     expect(wrapper.emitted('question-answer-preferences-changed')).toBeUndefined()
   })
 
@@ -493,6 +505,7 @@ describe('single-account preferences', () => {
       reasoningEffort: 'medium',
       repeatCount: 1,
     }))
+    await openConfiguration(wrapper)
 
     await toggleLabeledCheckbox(wrapper, 'question-answer-models', 'Model B')
     expect(lastPreferenceEvent(wrapper)).toEqual({
@@ -517,6 +530,7 @@ describe('single-account preferences', () => {
 
   it('preserves saved choices hidden by the current target when the user changes another visible field', async () => {
     const wrapper = await mountDialog(savedSelection(), target('target-b'))
+    await openConfiguration(wrapper)
     expect(checkedLabels(wrapper, 'question-answer-models')).toEqual(['Model B'])
 
     await repeatSelect(wrapper).setValue('7')
@@ -605,10 +619,11 @@ describe('single-account preferences', () => {
     await retry!.trigger('click')
     await flushPromises()
 
-    expect(checkedLabels(wrapper, 'question-answer-models')).toEqual(['Model B'])
-    expect(checkedLabels(wrapper, 'question-answer-questions')[0]).toContain('Question q2')
-    expect((wrapper.find('input[name="question-answer-reasoning-effort"][value="low"]').element as HTMLInputElement).checked).toBe(true)
-    expect((repeatSelect(wrapper).element as HTMLSelectElement).value).toBe('3')
+    const configuration = wrapper.get('[data-testid="question-answer-configuration"]')
+    expect(configuration.text()).toContain('Model B')
+    expect(configuration.text()).toContain('问题 1 个 · 推理力度 低 · 每组合 3 次')
+    expect(configuration.text()).toContain('当前进行中批次使用此配置')
+    expect(configuration.find('[data-testid="question-answer-models"]').exists()).toBe(false)
     expect(wrapper.emitted('question-answer-preferences-changed')).toBeUndefined()
   })
 

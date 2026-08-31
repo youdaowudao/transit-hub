@@ -192,7 +192,7 @@ const toggleLabeledCheckbox = async (wrapper: VueWrapper, testId: string, labelT
 }
 
 const startButton = (wrapper: VueWrapper) => {
-  const button = wrapper.findAll('button').find(candidate => candidate.text().trim() === '开始问答测试')
+  const button = wrapper.findAll('button').find(candidate => candidate.text().trim() === '开始回答')
   if (!button) throw new Error('missing start question-answer button')
   return button
 }
@@ -311,10 +311,14 @@ describe('question-answer repeat, queue and model statistics', () => {
 
     const wrapper = await mountDialog()
 
-    expect((repeatSelect(wrapper).element as HTMLSelectElement).value).toBe('4')
-    expect(wrapper.text()).toContain('等待 3 · 运行 2 · 完成 7')
-    expect(wrapper.text()).toContain('正在排队，会自动开始，请勿重复提交')
+    expect(wrapper.get('[data-testid="question-answer-configuration"]').text()).toContain('每组合 4 次')
+    expect(wrapper.text()).toContain('问答仍在运行，正在等待可复审回答。')
+    expect(wrapper.text()).not.toContain('等待 3 · 运行 2 · 完成 7')
+    expect(wrapper.text()).not.toContain('正在排队，会自动开始，请勿重复提交')
     expect(wrapper.text()).not.toMatch(/队列第|预计完成|前面还有/)
+    const modelStatsToggle = wrapper.findAll('button').find(button => button.text().trim() === '按模型查看')
+    if (!modelStatsToggle) throw new Error('missing collapsed model statistics action')
+    await modelStatsToggle.trigger('click')
     const modelBucketTexts = wrapper.findAll('[data-testid="question-answer-model-stats"]')
       .map(bucket => bucket.text())
     const modelBucketText = modelBucketTexts.join('\n')
@@ -323,10 +327,10 @@ describe('question-answer repeat, queue and model statistics', () => {
     expect(modelBucketText).toContain('lifetime-failed')
     expect(modelBucketText).toContain('today-model')
     expect(modelBucketText).not.toContain('discovery-only-model')
-    expect(modelBucketTexts.find(text => text.includes('model-active'))).toContain('提交 10 项')
-    expect(modelBucketTexts.find(text => text.includes('current-failed'))).toContain('提交 2 项')
-    expect(modelBucketTexts.find(text => text.includes('lifetime-failed'))).toContain('提交 3 项')
-    expect(modelBucketTexts.find(text => text.includes('today-model'))).toContain('提交 1 项')
+    expect(modelBucketTexts.find(text => text.includes('model-active'))).toContain('失败数5')
+    expect(modelBucketTexts.find(text => text.includes('current-failed'))).toContain('失败数2')
+    expect(modelBucketTexts.find(text => text.includes('lifetime-failed'))).toContain('失败数3')
+    expect(modelBucketTexts.find(text => text.includes('today-model'))).toContain('回答数1')
   })
 
   it('never shows queue wording or invented position and ETA for a terminal batch', async () => {
@@ -398,13 +402,15 @@ describe('question-answer repeat, queue and model statistics', () => {
 
     expect(harness.setQuestionAnswerJudgment).toHaveBeenCalledTimes(1)
     expect(harness.getQuestionAnswerBatch).toHaveBeenCalledTimes(1)
-    const currentStats = wrapper.find('[data-testid="question-answer-review-stats"]')
-    expect(currentStats.text()).toMatch(/待复审\s*0/)
+    const currentStats = wrapper.find('[data-testid="question-answer-stats-review"]')
+    expect(wrapper.find('[data-testid="question-answer-pending"]').findAll('li')).toHaveLength(0)
     expect(currentStats.text()).toMatch(/正确\s*1/)
-    const judgeModel = currentStats.findAll('[data-testid="question-answer-model-stats"]')
+    const modelStatsToggle = wrapper.findAll('button').find(button => button.text().trim() === '按模型查看')
+    if (!modelStatsToggle) throw new Error('missing model statistics action after judgment')
+    await modelStatsToggle.trigger('click')
+    const judgeModel = wrapper.findAll('[data-testid="question-answer-model-stats"]')
       .find(bucket => bucket.text().includes('judge-model'))
     if (!judgeModel) throw new Error('missing judge-model statistics')
-    expect(judgeModel.text()).toMatch(/待复审\s*0/)
     expect(judgeModel.text()).toMatch(/正确\s*1/)
   })
 })

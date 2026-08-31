@@ -428,13 +428,12 @@ describe('connection health question answers', () => {
     expect(groupDetailSource).toContain('bg-amber-500 text-white')
   })
 
-  it('renders the current batch as expandable responsive result cards without a duplicate latest-answer block', () => {
+  it('renders the pending review as one continuous answer column without a duplicate latest-answer block', () => {
     expect(dialogSource).not.toContain('latestBatchAnswer')
-    expect(dialogSource).toContain("if (count === 2) return 'grid-cols-1 md:grid-cols-2'")
-    expect(dialogSource).toContain("return 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3'")
-    expect(dialogSource).toContain(':class="currentBatchGridClass"')
-    expect(dialogSource).toContain('qaCurrentExpanded.has(record.id)')
-    expect(dialogSource).toContain('toggleCurrentQuestionAnswerExpanded(record.id)')
+    expect(dialogSource).not.toContain('currentBatchGridClass')
+    expect(dialogSource).toContain('data-testid="question-answer-pending"')
+    expect(dialogSource).toContain('v-for="record in qaPendingReviewRecords"')
+    expect(dialogSource).toContain('class="grid gap-6 rounded-lg border')
     expect(dialogSource).toContain('{{ record.questionBody }}')
     expect(dialogSource).toContain('{{ questionAnswerCurrentAnswer(record) }}')
   })
@@ -500,8 +499,7 @@ describe('connection health question answers', () => {
     expect(dialogSource).toContain("{ value: 'xhigh', labelKey: 'xhigh' }")
     expect(dialogSource).toContain('if (batch.reasoningEffort)')
     expect(dialogSource).toContain(':disabled="qaSelectionLocked"')
-    expect(dialogSource).toContain('questionAnswerReasoningEffortLabel(record.reasoningEffort)')
-    expect(dialogSource).toContain('questionAnswerReasoningEffortLabel(qaReviewBatch.reasoningEffort)')
+    expect(dialogSource).toContain('questionAnswerReasoningEffortLabel(qaSummaryReasoningEffort)')
     expect(dialogSource).toContain('reasoningEffort.unspecified')
   })
 
@@ -594,10 +592,13 @@ describe('connection health question answers', () => {
     const cleanupBody = dialogSource.match(/const cleanupFrontendWork = \(\) => \{([\s\S]*?)\n\}/)?.[1] ?? ''
     const startBody = dialogSource.match(/const startQuestionAnswers = async \(\) => \{([\s\S]*?)\n\}/)?.[1] ?? ''
     const stopBody = dialogSource.match(/const stopQuestionAnswers = async \(\) => \{([\s\S]*?)\n\}/)?.[1] ?? ''
-    const modelIndex = dialogSource.indexOf('v-for="model in models"')
-    const questionIndex = dialogSource.indexOf('questionAnswer.questionsTitle')
-    const currentIndex = dialogSource.indexOf('questionAnswer.currentTitle')
-    const historyIndex = dialogSource.indexOf('questionAnswer.historyTitle')
+    const statsIndex = dialogSource.indexOf('<QuestionAnswerStatsBar')
+    const pendingIndex = dialogSource.indexOf('data-question-answer-section="pending"')
+    const processedIndex = dialogSource.indexOf('data-question-answer-section="processed"')
+    const configurationIndex = dialogSource.indexOf('data-question-answer-section="configuration"')
+    const historyIndex = dialogSource.indexOf('data-question-answer-section="history"')
+    const modelIndex = dialogSource.indexOf('v-for="model in models"', configurationIndex)
+    const questionIndex = dialogSource.indexOf('questionAnswer.questionsTitle', configurationIndex)
 
     expect(dialogSource).toContain("type ProbeMode = 'once' | 'formal' | 'questionAnswer'")
     expect(dialogSource).toContain('h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-none')
@@ -624,15 +625,18 @@ describe('connection health question answers', () => {
     expect(dialogSource).toContain("mode !== 'questionAnswer'")
     expect(dialogSource).toContain("record.status === 'pending' || record.status === 'running'")
     expect(dialogSource).toContain('questionAnswerElapsedLabel(record)')
-    expect(dialogSource).toContain('qaHistory.todayStats.requests.submitted')
-    expect(dialogSource).toContain('questionAnswer.stats.todayShanghai')
+    expect(dialogSource).toContain(':today-stats="qaHistory.todayStats"')
     expect(startBody.indexOf('scheduleQuestionAnswerPoll()')).toBeLessThan(startBody.indexOf('getQuestionAnswerHistory(targetId, 1, controller.signal)'))
     expect(stopBody).toContain('cancelQuestionAnswerBatch(targetId, batchId, controller.signal)')
     expect(stopBody).toContain('questionAnswerScopeIsCurrent(scope)')
-    expect(modelIndex).toBeGreaterThan(-1)
+    expect(statsIndex).toBeGreaterThan(-1)
+    expect(statsIndex).toBeLessThan(pendingIndex)
+    expect(pendingIndex).toBeLessThan(processedIndex)
+    expect(processedIndex).toBeLessThan(configurationIndex)
+    expect(configurationIndex).toBeLessThan(historyIndex)
+    expect(modelIndex).toBeGreaterThan(configurationIndex)
     expect(modelIndex).toBeLessThan(questionIndex)
-    expect(questionIndex).toBeLessThan(currentIndex)
-    expect(currentIndex).toBeLessThan(historyIndex)
+    expect(questionIndex).toBeLessThan(historyIndex)
   })
 
   it('adds the existing-style settings entry and enforces question limits in the editor', () => {

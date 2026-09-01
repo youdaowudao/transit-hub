@@ -8,6 +8,8 @@ import {
   createAccountBatch,
   createAccountEvent,
   createAdditionalCost,
+  getAdditionalCost,
+  updateAdditionalCost,
   getAccountAsset,
   getRechargeFeeRate,
   listRechargeFeeRateHistory,
@@ -77,6 +79,9 @@ const assetPage = ref(1)
 const assetHasMore = ref(false)
 const ledgerPage = ref(1)
 const ledgerHasMore = ref(false)
+const editingCost = ref<{ sourceId: string; type: 'promotion' | 'fixed' | 'adjustment' } | null>(null)
+// 每次切换工作区都递增，所有异步读请求只允许把结果写回发起时的工作区。
+const workspaceGeneration = ref(0)
 
 const batchAttempt = ref<IdempotentSubmission | null>(null)
 const eventAttempt = ref<IdempotentSubmission | null>(null)
@@ -98,6 +103,12 @@ const batchForm = reactive({
   recognitionMode: 'immediate', recognitionStartDate: today(), recognitionDays: '30', statsMode: 'manual', note: '',
 })
 const accountRows = ref<AccountRow[]>([{ identifier: '', quota: '', connectionId: '', upstreamReferenceUrl: '' }])
+
+type WorkspaceRequest = { workspaceId: string; generation: number }
+const currentWorkspaceRequest = (): WorkspaceRequest => ({ workspaceId: props.workspaceId, generation: workspaceGeneration.value })
+const isCurrentWorkspaceRequest = (request: WorkspaceRequest) => (
+  request.workspaceId === props.workspaceId && request.generation === workspaceGeneration.value
+)
 
 watch(() => batchForm.quantity, (quantity) => {
   const safe = Math.max(1, Math.min(500, Number(quantity) || 1))
@@ -207,7 +218,7 @@ const outcomeText = (asset: AccountAsset) => {
 const ledgerGroups = computed(() => {
   const groups = new Map<string, { key: string; name: string; type: string; amount: number; records: AdditionalCostRecord[] }>()
   for (const record of ledger.value) {
-    const key = `${record.type}:${record.batchId || ''}:${record.accountAssetId || ''}:${record.name}`
+    const key = `${record.type}:${record.batchId || ''}:${record.accountAssetId || ''}:${record.sourceId || record.id}`
     const group = groups.get(key) ?? { key, name: record.name, type: record.type, amount: 0, records: [] }
     group.amount += record.amount
     group.records.push(record)
@@ -216,13 +227,87 @@ const ledgerGroups = computed(() => {
   return [...groups.values()]
 })
 
+const beginCostEdit = async (group: { records: AdditionalCostRecord[] }) => {
+  const first = group.records[0]
+  if (!first || !['promotion', 'fixed', 'adjustment'].includes(first.type)) return
+  const sourceId = first.sourceId || first.id
+  const request = currentWorkspaceRequest()
+  errorText.value = ''
+  try {
+    const result = await getAdditionalCost(sourceId)
+    if (!isCurrentWorkspaceRequest(request)) return
+    const records = result.items.slice().sort((left, right) => left.businessDate.localeCompare(right.businessDate))
+    const source = records[0]
+    if (!source) return
+    editingCost.value = { sourceId, type: source.type as 'promotion' | 'fixed' | 'adjustment' }
+    costForm.type = editingCost.value.type
+    costForm.name = source.name
+    costForm.amount = String(source.originalAmount ?? source.amount)
+    costForm.businessDate = source.businessDate
+    costForm.usageRate = String((source.usageRate ?? 0) * 100)
+    costForm.days = String(source.days ?? records.length)
+    costForm.note = source.note || ''
+    activeTab.value = 'today'
+  } catch (error) {
+    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '成本读取失败'
+  }
+}
+
+const cancelCostEdit = () => {
+  editingCost.value = null
+  costForm.type = 'fixed'
+  costForm.name = ''
+  costForm.amount = ''
+  costForm.businessDate = today()
+  costForm.usageRate = '80'
+  costForm.days = '30'
+  costForm.note = ''
+}
+
+const resetWorkspaceData = () => {
+  saving.value = false
+  loading.value = false
+  selectedDetail.value = null
+  editingCost.value = null
+  batchAttempt.value = null
+  eventAttempt.value = null
+  linkAttempt.value = null
+  statsModeAttempt.value = null
+  showBatchForm.value = false
+  recentBatch.value = null
+  assets.value = []
+  ledger.value = []
+  todayLedger.value = []
+  connections.value = []
+  feeRateHistory.value = []
+  todayLedgerLoadFailed.value = false
+  feeRateHistoryLoadFailed.value = false
+  assetPage.value = 1
+  assetHasMore.value = false
+  ledgerPage.value = 1
+  ledgerHasMore.value = false
+  ledgerFilters.from = today()
+  ledgerFilters.to = today()
+  ledgerFilters.type = ''
+  ledgerFilters.platform = ''
+  ledgerFilters.channel = ''
+  ledgerFilters.batchId = ''
+  ledgerFilters.accountAssetId = ''
+  cancelCostEdit()
+}
+
 const filterStorageKey = computed(() => `transithub.account-assets.filters.v1:${props.workspaceId || 'unknown'}`)
 watch(() => props.workspaceId, () => {
+	workspaceGeneration.value += 1
 	Object.assign(assetFilters, { platform: '', channel: '', accountType: '', status: '', search: '' })
+	resetWorkspaceData()
+	errorText.value = ''
   try {
     const saved = localStorage.getItem(filterStorageKey.value)
     if (saved) Object.assign(assetFilters, JSON.parse(saved))
   } catch { /* ignore invalid local preference */ }
+  // 该 watcher 注册在加载函数之前；用微任务推迟首次加载，兼容组件以 open=true 初始挂载。
+  if (props.open) void Promise.resolve().then(() => reloadActiveTab())
 }, { immediate: true })
 watch(assetFilters, () => {
   try { localStorage.setItem(filterStorageKey.value, JSON.stringify(assetFilters)) } catch { /* storage unavailable */ }
@@ -239,23 +324,25 @@ const costLines = computed(() => [
   { label: '手工调整', value: props.summary?.adjustment ?? 0 },
 ])
 
-const loadAssets = async () => {
+const loadAssets = async (request = currentWorkspaceRequest()) => {
 	const [result, availableConnections] = await Promise.all([
 		listAccountAssets({ ...assetFilters, page: assetPage.value, pageSize: 50 }),
 		listRealConnections(),
 	])
+	if (!isCurrentWorkspaceRequest(request)) return
   assets.value = result.items
 	assetHasMore.value = result.hasMore
 	connections.value = availableConnections
 }
 
-const loadLedger = async () => {
+const loadLedger = async (request = currentWorkspaceRequest()) => {
   const result = await listAccountCostLedger({ ...ledgerFilters, page: ledgerPage.value, pageSize: 100 })
+	if (!isCurrentWorkspaceRequest(request)) return
   ledger.value = result.items
   ledgerHasMore.value = result.hasMore
 }
 
-const loadTodayLedger = async () => {
+const loadTodayLedger = async (request = currentWorkspaceRequest()) => {
 	todayLedgerLoadFailed.value = false
 	try {
 		const businessDate = today()
@@ -263,14 +350,17 @@ const loadTodayLedger = async () => {
 		let page = 1
 		for (;;) {
 			const result = await listAccountCostLedger({ from: businessDate, to: businessDate, page, pageSize: 100 })
+			if (!isCurrentWorkspaceRequest(request)) return
 			records.push(...result.items)
 			if (!result.hasMore) break
 			page += 1
 		}
-		todayLedger.value = records
+		if (isCurrentWorkspaceRequest(request)) todayLedger.value = records
 	} catch {
-		todayLedger.value = []
-		todayLedgerLoadFailed.value = true
+		if (isCurrentWorkspaceRequest(request)) {
+			todayLedger.value = []
+			todayLedgerLoadFailed.value = true
+		}
 	}
 }
 
@@ -283,42 +373,60 @@ const openUpstreamManagement = () => {
 	void router.push({ name: 'AdminUpstream' })
 }
 
-const loadFeeRateHistory = async () => {
+const loadFeeRateHistory = async (request = currentWorkspaceRequest()) => {
 	feeRateHistoryLoadFailed.value = false
 	try {
 		const history = await listRechargeFeeRateHistory()
-		feeRateHistory.value = history.items
+		if (isCurrentWorkspaceRequest(request)) feeRateHistory.value = history.items
 	} catch {
-		feeRateHistoryLoadFailed.value = true
+		if (isCurrentWorkspaceRequest(request)) feeRateHistoryLoadFailed.value = true
 	}
 }
 
-const loadRules = async () => {
+const loadRules = async (request = currentWorkspaceRequest()) => {
 	const [result] = await Promise.all([
 		getRechargeFeeRate(today()),
-		loadFeeRateHistory(),
+		loadFeeRateHistory(request),
 	])
+	if (!isCurrentWorkspaceRequest(request)) return
   feeForm.rate = String(result.rate * 100)
   feeForm.effectiveDate = result.effectiveDate || today()
 }
 
 const loadTab = async () => {
+  const request = currentWorkspaceRequest()
   loading.value = true
   errorText.value = ''
 	try {
-		if (activeTab.value === 'today') await loadTodayLedger()
-		if (activeTab.value === 'assets') await loadAssets()
-    if (activeTab.value === 'ledger') await loadLedger()
-    if (activeTab.value === 'rules') await loadRules()
+		if (activeTab.value === 'today') await loadTodayLedger(request)
+		if (activeTab.value === 'assets') await loadAssets(request)
+    if (activeTab.value === 'ledger') await loadLedger(request)
+    if (activeTab.value === 'rules') await loadRules(request)
   } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '加载失败'
+    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '加载失败'
   } finally {
-    loading.value = false
+    if (isCurrentWorkspaceRequest(request)) loading.value = false
+  }
+}
+
+const reloadActiveTab = async () => {
+  const request = currentWorkspaceRequest()
+  try {
+    if (activeTab.value === 'today') await loadTodayLedger(request)
+    if (activeTab.value === 'assets') await loadAssets(request)
+    if (activeTab.value === 'ledger') await loadLedger(request)
+    if (activeTab.value === 'rules') await loadRules(request)
+  } catch (error) {
+    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '加载失败'
   }
 }
 
 watch(() => props.open, (open) => {
-  if (!open) return
+	if (!open) {
+		editingCost.value = null
+		selectedDetail.value = null
+		return
+	}
 	const nextTab = props.initialTab ?? 'today'
 	const changed = activeTab.value !== nextTab
 	activeTab.value = nextTab
@@ -345,6 +453,7 @@ const submitBatch = async () => {
 		errorText.value = `第 ${missingQuota + 1} 个账号未填写有效总额度`
 		return
 	}
+  const request = currentWorkspaceRequest()
   saving.value = true
   errorText.value = ''
   try {
@@ -364,25 +473,29 @@ const submitBatch = async () => {
     }
 		batchAttempt.value = prepareIdempotentSubmission(batchAttempt.value, 'account-batch', input)
 	    const result = await createAccountBatch(input, batchAttempt.value.key)
+	if (!isCurrentWorkspaceRequest(request)) return
     showBatchForm.value = false
     selectedDetail.value = null
     recentBatch.value = { id: result.batch.id, name: result.batch.batchName, quantity: result.assets.length }
     assetPage.value = 1
-    await loadAssets()
+    await loadAssets(request)
     emit('updated')
 		batchAttempt.value = null
   } catch (error) {
-    errorText.value = error instanceof Error ? error.message : '保存失败'
+    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '保存失败'
   } finally {
-    saving.value = false
+    if (isCurrentWorkspaceRequest(request)) saving.value = false
   }
 }
 
 const openAsset = async (asset: AccountAsset) => {
+  const request = currentWorkspaceRequest()
   loading.value = true
   errorText.value = ''
   try {
-	selectedDetail.value = await getAccountAsset(asset.id)
+	const detail = await getAccountAsset(asset.id)
+	if (!isCurrentWorkspaceRequest(request)) return
+	selectedDetail.value = detail
 	linkForm.upstreamReferenceUrl = selectedDetail.value.asset.upstreamReferenceUrl || ''
 	linkForm.connectionId = ''
 	linkForm.effectiveFrom = ''
@@ -400,12 +513,16 @@ const openAsset = async (asset: AccountAsset) => {
 		eventForm.purchaseUrl = selectedDetail.value.batch.purchaseUrl || ''
 		eventForm.upstreamReferenceUrl = selectedDetail.value.asset.upstreamReferenceUrl || ''
   }
-  catch (error) { errorText.value = error instanceof Error ? error.message : '加载失败' }
-  finally { loading.value = false }
+  catch (error) {
+    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '加载失败'
+  }
+  finally { if (isCurrentWorkspaceRequest(request)) loading.value = false }
 }
 
 const submitEvent = async () => {
   if (!selectedDetail.value) return
+  const request = currentWorkspaceRequest()
+  const assetId = selectedDetail.value.asset.id
   const input: AccountEventInput = { eventType: eventForm.eventType as AccountEventInput['eventType'], effectiveDate: eventForm.effectiveDate, note: eventForm.note.trim() }
 	if (input.eventType === 'status' || input.eventType === 'restore') input.status = (input.eventType === 'restore' ? 'active' : eventForm.status) as AccountEventInput['status']
 	if (input.eventType === 'refund' && eventForm.refundClose) input.status = 'closed'
@@ -428,16 +545,21 @@ const submitEvent = async () => {
   errorText.value = ''
   try {
 		eventAttempt.value = prepareIdempotentSubmission(eventAttempt.value, 'account-event', {
-			assetId: selectedDetail.value.asset.id,
+			assetId,
 			input,
 		})
-	    await createAccountEvent(selectedDetail.value.asset.id, input, eventAttempt.value.key)
-    selectedDetail.value = await getAccountAsset(selectedDetail.value.asset.id)
-    await loadAssets()
+	    await createAccountEvent(assetId, input, eventAttempt.value.key)
+	if (!isCurrentWorkspaceRequest(request)) return
+    const refreshed = await getAccountAsset(assetId)
+	if (!isCurrentWorkspaceRequest(request)) return
+    selectedDetail.value = refreshed
+    await loadAssets(request)
     emit('updated')
 		eventAttempt.value = null
-  } catch (error) { errorText.value = error instanceof Error ? error.message : '保存失败' }
-  finally { saving.value = false }
+  } catch (error) {
+    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '保存失败'
+  }
+  finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
 }
 
 const submitLink = async () => {
@@ -446,6 +568,8 @@ const submitLink = async () => {
 		errorText.value = '当天换号必须填写旧号和新号的当日额度、营收'
 		return
 	}
+  const request = currentWorkspaceRequest()
+  const assetId = selectedDetail.value.asset.id
   saving.value = true
 	  errorText.value = ''
 	  try {
@@ -461,19 +585,25 @@ const submitLink = async () => {
 			note: linkForm.note.trim(),
 		}
 		linkAttempt.value = prepareIdempotentSubmission(linkAttempt.value, 'account-link', {
-			assetId: selectedDetail.value.asset.id,
+			assetId,
 			input,
 		})
-		selectedDetail.value = await replaceAccountLink(selectedDetail.value.asset.id, input, linkAttempt.value.key)
-	await loadAssets()
+		const refreshed = await replaceAccountLink(assetId, input, linkAttempt.value.key)
+	if (!isCurrentWorkspaceRequest(request)) return
+		selectedDetail.value = refreshed
+	await loadAssets(request)
 	emit('updated')
 		linkAttempt.value = null
-  } catch (error) { errorText.value = error instanceof Error ? error.message : '关联保存失败' }
-  finally { saving.value = false }
+  } catch (error) {
+    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '关联保存失败'
+  }
+  finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
 }
 
 const submitStatsMode = async () => {
   if (!selectedDetail.value) return
+	const request = currentWorkspaceRequest()
+	const assetId = selectedDetail.value.asset.id
 	  saving.value = true
 	  errorText.value = ''
 	  try {
@@ -482,51 +612,75 @@ const submitStatsMode = async () => {
 			note: '统计方式切换',
 		}
 		statsModeAttempt.value = prepareIdempotentSubmission(statsModeAttempt.value, 'account-stats-mode', {
-			assetId: selectedDetail.value.asset.id,
+			assetId,
 			input,
 		})
-		await createAccountEvent(selectedDetail.value.asset.id, input, statsModeAttempt.value.key)
-	selectedDetail.value = await getAccountAsset(selectedDetail.value.asset.id)
-	await loadAssets()
+		await createAccountEvent(assetId, input, statsModeAttempt.value.key)
+	if (!isCurrentWorkspaceRequest(request)) return
+	const refreshed = await getAccountAsset(assetId)
+	if (!isCurrentWorkspaceRequest(request)) return
+	selectedDetail.value = refreshed
+	await loadAssets(request)
 		statsModeAttempt.value = null
-  } catch (error) { errorText.value = error instanceof Error ? error.message : '统计方式保存失败' }
-  finally { saving.value = false }
+  } catch (error) {
+    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '统计方式保存失败'
+  }
+  finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
 }
 
 const submitCost = async () => {
+  if (saving.value) return
+  const request = currentWorkspaceRequest()
   saving.value = true
   errorText.value = ''
   try {
-    await createAdditionalCost({
+    const input = {
       type: costForm.type, name: costForm.name.trim(), businessDate: costForm.businessDate,
       amount: Number(costForm.amount), usageRate: costForm.type === 'promotion' ? Number(costForm.usageRate) / 100 : 0,
       days: costForm.type === 'adjustment' ? 0 : Number(costForm.days), note: costForm.note.trim(),
-    })
+    }
+    if (editingCost.value) await updateAdditionalCost(editingCost.value.sourceId, input)
+    else await createAdditionalCost(input)
+    if (!isCurrentWorkspaceRequest(request)) return
+    await Promise.all([loadLedger(request), loadTodayLedger(request)])
+    if (!isCurrentWorkspaceRequest(request)) return
+    editingCost.value = null
     costForm.name = ''; costForm.amount = ''; costForm.note = ''
     emit('updated')
-  } catch (error) { errorText.value = error instanceof Error ? error.message : '保存失败' }
-  finally { saving.value = false }
+  } catch (error) {
+    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '保存失败'
+  }
+  finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
 }
 
 const submitFee = async () => {
+  const request = currentWorkspaceRequest()
   saving.value = true
   errorText.value = ''
   try {
 		await saveRechargeFeeRate({ effectiveDate: feeForm.effectiveDate, rate: Number(feeForm.rate) / 100 })
-		await loadRules()
-    emit('updated')
-  } catch (error) { errorText.value = error instanceof Error ? error.message : '保存失败' }
-  finally { saving.value = false }
+	if (!isCurrentWorkspaceRequest(request)) return
+		await loadRules(request)
+	if (!isCurrentWorkspaceRequest(request)) return
+		emit('updated')
+  } catch (error) {
+    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '保存失败'
+  }
+  finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
 }
 
 const refreshStats = async () => {
+	const request = currentWorkspaceRequest()
 	saving.value = true
 	errorText.value = ''
 	try {
 		await refreshAccountStats(today())
+		if (!isCurrentWorkspaceRequest(request)) return
 		emit('updated')
-	} catch (error) { errorText.value = error instanceof Error ? error.message : '刷新失败' }
-	finally { saving.value = false }
+	} catch (error) {
+		if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '刷新失败'
+	}
+	finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
 }
 
 const detailTotals = computed(() => {
@@ -586,6 +740,11 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
         </nav>
 
         <main class="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
+          <div v-if="activeTab === 'ledger' && ledgerGroups.length" class="mb-4 flex flex-wrap gap-2">
+            <template v-for="group in ledgerGroups" :key="`edit-${group.key}`">
+              <Button v-if="['promotion', 'fixed', 'adjustment'].includes(group.type)" size="sm" variant="secondary" type="button" @click="beginCostEdit(group)">编辑 {{ group.name }}</Button>
+            </template>
+          </div>
           <p v-if="errorText" class="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{{ errorText }}</p>
           <div v-if="loading" class="flex justify-center py-16"><Loader2 class="h-6 w-6 animate-spin text-muted-foreground" /></div>
 
@@ -604,7 +763,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
             </div>
             <div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">当日成本变动</h3><p v-if="todayLedgerLoadFailed" class="py-5 text-sm text-destructive">当日成本变动加载失败</p><p v-else-if="!todayLedger.length" class="py-5 text-sm text-muted-foreground">当日暂无成本变动</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="record in todayLedger" :key="record.id" class="grid gap-1 py-2.5 text-sm sm:grid-cols-[5rem_1fr_auto]"><span class="text-muted-foreground">{{ costTypeText(record.type) }}</span><span class="min-w-0 break-all">{{ record.name }}<span class="ml-2 text-xs text-muted-foreground">来源 {{ record.sourceId || record.batchId || record.accountAssetId || record.id }}</span></span><span class="font-medium tabular-nums">{{ formatCny(record.amount) }}</span></div></div></div>
             <form class="space-y-3 border-t border-border/60 pt-5" @submit.prevent="submitCost">
-              <div class="flex items-center justify-between"><h3 class="text-sm font-semibold">记一笔成本</h3><Button type="button" variant="secondary" @click="activeTab = 'assets'; showBatchForm = true"><Plus class="mr-2 h-4 w-4" />录入买号</Button></div>
+              <div class="flex flex-wrap items-center justify-between gap-2"><div><h3 class="text-sm font-semibold">{{ editingCost ? '编辑手工成本' : '记一笔成本' }}</h3><p v-if="editingCost" class="mt-1 text-xs text-muted-foreground">来源 {{ editingCost.sourceId }} · 保存后会重算旧日期和新日期</p></div><div class="flex gap-2"><Button v-if="editingCost" type="button" variant="ghost" @click="cancelCostEdit">取消编辑</Button><Button v-else type="button" variant="secondary" @click="activeTab = 'assets'; showBatchForm = true"><Plus class="mr-2 h-4 w-4" />录入买号</Button></div></div>
               <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <select v-model="costForm.type" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="promotion">活动赠送</option><option value="fixed">固定费用</option><option value="adjustment">手工调整</option></select>
                 <Input v-model="costForm.name" placeholder="名称" required />
@@ -742,7 +901,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
 
           <section v-else-if="activeTab === 'ledger'" class="space-y-4"><div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><Input v-model="ledgerFilters.from" type="date" /><Input v-model="ledgerFilters.to" type="date" /><select v-model="ledgerFilters.type" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="">全部类型</option><option value="account_purchase">买号确认</option><option value="account_refund">退款冲减</option><option value="recharge_fee">手续费</option><option value="promotion">活动</option><option value="fixed">固定</option><option value="adjustment">调整</option></select><Input v-model="ledgerFilters.platform" placeholder="平台" /><Input v-model="ledgerFilters.channel" placeholder="渠道" /><Input v-model="ledgerFilters.batchId" placeholder="批次 ID" /><Input v-model="ledgerFilters.accountAssetId" placeholder="单号 ID" /><Button variant="secondary" @click="searchLedger"><Search class="mr-2 h-4 w-4" />查询账本</Button></div><div class="divide-y divide-border/50"><details v-for="group in ledgerGroups" :key="group.key" class="group py-3"><summary class="grid cursor-pointer list-none grid-cols-[1fr_auto] items-center gap-3 text-sm sm:grid-cols-[1fr_9rem_8rem]"><div class="min-w-0"><p class="truncate font-medium">{{ group.name }}</p><p class="text-xs text-muted-foreground">{{ group.type }} · {{ group.records.length }} 条确认记录</p></div><span class="hidden text-xs text-muted-foreground sm:block">{{ group.records[0]?.businessDate }}</span><span class="text-right font-semibold tabular-nums" :class="group.amount < 0 ? 'text-emerald-600' : ''">{{ formatCny(group.amount) }}</span></summary><div class="mt-3 overflow-x-auto border-t border-border/40"><table class="w-full min-w-[680px] text-left text-xs"><thead class="text-muted-foreground"><tr><th class="py-2">业务日</th><th>金额</th><th>批次 / 单号</th><th>质量</th><th>录入时间</th></tr></thead><tbody><tr v-for="record in group.records" :key="record.id" class="border-t border-border/30"><td class="py-2">{{ record.businessDate }}</td><td>{{ formatCny(record.amount) }}</td><td>{{ record.batchId || '—' }} / {{ record.accountAssetId || '—' }}</td><td>{{ record.estimated ? '估算' : '已确认' }}</td><td>{{ record.createdAt.slice(0, 16).replace('T', ' ') }}</td></tr></tbody></table></div></details><p v-if="!ledgerGroups.length" class="py-12 text-center text-sm text-muted-foreground">所选范围暂无记录</p></div><div v-if="ledger.length || ledgerPage > 1" class="flex items-center justify-end gap-2"><Button variant="secondary" size="sm" title="上一页" :disabled="ledgerPage === 1" @click="changeLedgerPage(-1)"><ArrowLeft class="h-4 w-4" /></Button><span class="text-xs text-muted-foreground">第 {{ ledgerPage }} 页</span><Button variant="secondary" size="sm" title="下一页" :disabled="!ledgerHasMore" @click="changeLedgerPage(1)"><ArrowRight class="h-4 w-4" /></Button></div></section>
 
-          <section v-else class="max-w-3xl space-y-6"><div><h3 class="text-sm font-semibold">充值手续费</h3><div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]"><Input v-model="feeForm.rate" type="number" min="0" max="100" step="0.01" placeholder="费率 %" /><Input v-model="feeForm.effectiveDate" type="date" /><Button :disabled="saving" @click="submitFee"><Save class="mr-2 h-4 w-4" />保存费率</Button></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">费率生效历史</h3><p v-if="feeRateHistoryLoadFailed" class="py-5 text-sm text-destructive">费率历史加载失败</p><p v-else-if="!feeRateHistory.length" class="py-5 text-sm text-muted-foreground">暂无费率历史</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in feeRateHistory" :key="rate.id" class="grid gap-1 py-2.5 text-sm sm:grid-cols-[7rem_1fr_auto]"><span>{{ rate.effectiveDate }}</span><span>{{ (rate.rate * 100).toFixed(2) }}% · {{ rate.id }}</span><span class="text-xs text-muted-foreground">{{ historyCreatedAtText(rate.createdAt) }}</span></div></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">核算说明</h3><dl class="mt-3 space-y-3 text-sm"><div><dt class="font-medium">替代上游成本</dt><dd class="mt-1 text-muted-foreground">购买价包含额度时，从上游直接成本扣除该账号已对账 Key 成本，再计入买号确认成本。</dd></div><div><dt class="font-medium">叠加上游成本</dt><dd class="mt-1 text-muted-foreground">购买价是订阅或接入费时，买号确认成本与关联上游按量成本同时计入。</dd></div><div><dt class="font-medium">历史不可改写</dt><dd class="mt-1 text-muted-foreground">成本、退款和状态均追加记录；更正通过冲销或新事件完成。</dd></div></dl></div></section>
+          <section v-else class="max-w-3xl space-y-6"><div><h3 class="text-sm font-semibold">充值手续费</h3><div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]"><Input v-model="feeForm.rate" type="number" min="0" max="100" step="0.01" placeholder="费率 %" /><Input v-model="feeForm.effectiveDate" type="date" /><Button :disabled="saving" @click="submitFee"><Save class="mr-2 h-4 w-4" />保存费率</Button></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">费率生效历史</h3><p v-if="feeRateHistoryLoadFailed" class="py-5 text-sm text-destructive">费率历史加载失败</p><p v-else-if="!feeRateHistory.length" class="py-5 text-sm text-muted-foreground">暂无费率历史</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in feeRateHistory" :key="rate.id" class="grid gap-1 py-2.5 text-sm sm:grid-cols-[7rem_1fr_auto]"><span>{{ rate.effectiveDate }}</span><span>{{ (rate.rate * 100).toFixed(2) }}% · {{ rate.id }}</span><span class="text-xs text-muted-foreground">{{ historyCreatedAtText(rate.createdAt) }}</span></div></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">核算说明</h3><dl class="mt-3 space-y-3 text-sm"><div><dt class="font-medium">替代上游成本</dt><dd class="mt-1 text-muted-foreground">购买价包含额度时，从上游直接成本扣除该账号已对账 Key 成本，再计入买号确认成本。</dd></div><div><dt class="font-medium">叠加上游成本</dt><dd class="mt-1 text-muted-foreground">购买价是订阅或接入费时，买号确认成本与关联上游按量成本同时计入。</dd></div><div><dt class="font-medium">历史成本更正</dt><dd class="mt-1 text-muted-foreground">手工成本可以直接编辑，保存后会重算受影响历史日；买号购买、退款和状态仍按事件追加记录。</dd></div></dl></div></section>
         </main>
       </section>
     </div>

@@ -559,10 +559,10 @@ func (r *MetricsRepository) ListAccountCostLedger(ctx context.Context, userID, a
 			  ),asset.initial_channel)=$7)
 			  AND ($8='' OR cost.batch_id=$8) AND ($9='' OR cost.account_asset_id=$9)
 		), selected_groups AS (
-			SELECT type,batch_id,account_asset_id,name,max(business_date) AS latest_date,
+			SELECT type,batch_id,account_asset_id,name,COALESCE(NULLIF(source_id,''),id) AS entry_key,max(business_date) AS latest_date,
 			       max(created_at) AS latest_created,count(*) OVER() AS total_groups
 			FROM matching
-			GROUP BY type,batch_id,account_asset_id,name
+			GROUP BY type,batch_id,account_asset_id,name,COALESCE(NULLIF(source_id,''),id)
 			ORDER BY latest_date DESC,latest_created DESC,type,batch_id,account_asset_id,name
 			LIMIT $10 OFFSET $11
 		)
@@ -571,7 +571,8 @@ func (r *MetricsRepository) ListAccountCostLedger(ctx context.Context, userID, a
 		       cost.batch_id,cost.account_asset_id,cost.note,cost.estimated,cost.created_at,selected.total_groups
 		FROM matching cost
 		JOIN selected_groups selected ON selected.type=cost.type AND selected.batch_id=cost.batch_id
-		 AND selected.account_asset_id=cost.account_asset_id AND selected.name=cost.name
+			 AND selected.account_asset_id=cost.account_asset_id AND selected.name=cost.name
+			 AND selected.entry_key=COALESCE(NULLIF(cost.source_id,''),cost.id)
 		ORDER BY selected.latest_date DESC,selected.latest_created DESC,cost.business_date DESC,cost.created_at DESC,cost.id DESC
 	`, userID, adminAccountID, strings.TrimSpace(filter.From), strings.TrimSpace(filter.To), strings.TrimSpace(filter.Type),
 		strings.TrimSpace(filter.Platform), strings.TrimSpace(filter.Channel), strings.TrimSpace(filter.BatchID),

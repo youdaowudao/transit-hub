@@ -28,6 +28,8 @@ var (
 	ErrAdditionalCostInvalidDate   = errors.New("dashboard.additionalCost.errors.invalidDate")
 	ErrAdditionalCostInvalidDays   = errors.New("dashboard.additionalCost.errors.invalidDays")
 	ErrAdditionalCostInvalidRate   = errors.New("dashboard.additionalCost.errors.invalidRate")
+	ErrAdditionalCostNotFound      = errors.New("dashboard.additionalCost.errors.notFound")
+	ErrAdditionalCostProtected     = errors.New("dashboard.additionalCost.errors.protected")
 )
 
 type RechargeFeeRate struct {
@@ -102,8 +104,10 @@ func mustMetricsID() string {
 type AdditionalCostRepository interface {
 	GetRechargeFeeRate(ctx context.Context, userID, adminAccountID, date string) (RechargeFeeRate, error)
 	ListAdditionalCosts(ctx context.Context, userID, adminAccountID, from, to string) ([]AdditionalCostRecord, error)
+	GetAdditionalCost(ctx context.Context, userID, adminAccountID, sourceID string) ([]AdditionalCostRecord, error)
 	SaveRechargeFeeRate(ctx context.Context, rate RechargeFeeRate) error
 	InsertAdditionalCosts(ctx context.Context, records []AdditionalCostRecord) error
+	ReplaceAdditionalCost(ctx context.Context, userID, adminAccountID, sourceID string, input AdditionalCostInput) ([]AdditionalCostRecord, error)
 }
 
 type rechargeFeeRateHistoryRepository interface {
@@ -152,7 +156,7 @@ func buildAdditionalCostRecords(userID, adminAccountID string, input AdditionalC
 	}
 	totalCents := cents(total)
 	if input.Type == AdditionalCostAdjustment {
-		return []AdditionalCostRecord{{ID: idPrefix, UserID: userID, AdminAccountID: adminAccountID, Type: input.Type, Name: input.Name, BusinessDate: input.BusinessDate, AmountCents: cents(input.Amount), Amount: float64(cents(input.Amount)) / 100, OriginalAmount: input.Amount, Note: input.Note, CreatedAt: time.Now()}}, nil
+		return []AdditionalCostRecord{{ID: idPrefix, UserID: userID, AdminAccountID: adminAccountID, Type: input.Type, Name: input.Name, BusinessDate: input.BusinessDate, AmountCents: cents(input.Amount), Amount: float64(cents(input.Amount)) / 100, OriginalAmount: input.Amount, SourceID: idPrefix, Note: input.Note, CreatedAt: time.Now()}}, nil
 	}
 	if input.Days <= 0 {
 		return nil, ErrAdditionalCostInvalidDays
@@ -176,6 +180,16 @@ func buildAdditionalCostRecords(userID, adminAccountID string, input AdditionalC
 		})
 	}
 	return records, nil
+}
+
+func validateEditableAdditionalCostRecord(item AdditionalCostRecord) error {
+	if item.Type != AdditionalCostPromotion && item.Type != AdditionalCostFixed && item.Type != AdditionalCostAdjustment {
+		return ErrAdditionalCostProtected
+	}
+	if item.BatchID != "" || item.AccountAssetID != "" {
+		return ErrAdditionalCostProtected
+	}
+	return nil
 }
 
 func summarizeAdditionalCostRecords(items []AdditionalCostRecord) AdditionalCostSummary {

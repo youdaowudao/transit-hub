@@ -1527,6 +1527,109 @@ func TestAccountLedgerWritesReprojectExistingDailySnapshotWithoutChangingBaseAmo
 	}
 }
 
+func TestAdditionalCostReplacementRebuildsOldAndNewDatesAtomically(t *testing.T) {
+	pool := accountAssetTestPool(t)
+	ctx := context.Background()
+	repo := NewMetricsRepository(pool)
+	if err := repo.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema() error: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `CREATE TABLE admin_accounts (id text PRIMARY KEY,user_id text NOT NULL)`); err != nil {
+		t.Fatalf("create admin_accounts: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO admin_accounts (id,user_id) VALUES ('workspace-1','user-1')`); err != nil {
+		t.Fatalf("insert admin account: %v", err)
+	}
+	now := time.Date(2026, 8, 20, 10, 0, 0, 0, time.UTC)
+	for _, date := range []string{"2026-08-20", "2026-08-21", "2026-08-22"} {
+		revenue, direct, net := 100.0, 20.0, 80.0
+		businessDate, err := time.ParseInLocation("2006-01-02", date, businesstime.Location())
+		if err != nil {
+			t.Fatalf("parse snapshot date %s: %v", date, err)
+		}
+		if err := repo.Upsert(ctx, DailySnapshot{
+			ID: "snapshot-" + date, UserID: "user-1", AdminAccountID: "workspace-1", Date: businessDate,
+			TodayProfit: &revenue, TodayPurchase: &direct, NetProfit: &net, CreatedAt: now,
+			SettlementStatus: SettlementStatusProvisional, SnapshotSource: SnapshotSourceDatedQuery,
+		}); err != nil {
+			t.Fatalf("Upsert(%s): %v", date, err)
+		}
+	}
+	records, err := buildAdditionalCostRecords("user-1", "workspace-1", AdditionalCostInput{
+		Type: AdditionalCostFixed, Name: "历史服务器", BusinessDate: "2026-08-20", Amount: 100, Days: 3,
+	}, "source-replace-1")
+	if err != nil {
+		t.Fatalf("build source: %v", err)
+	}
+	if err := repo.InsertAdditionalCosts(ctx, records); err != nil {
+		t.Fatalf("InsertAdditionalCosts(): %v", err)
+	}
+	replacement, err := repo.ReplaceAdditionalCost(ctx, "user-1", "workspace-1", "source-replace-1", AdditionalCostInput{
+		Type: AdditionalCostFixed, Name: "历史服务器", BusinessDate: "2026-08-20", Amount: 100, Days: 2,
+	})
+	if err != nil {
+		t.Fatalf("ReplaceAdditionalCost(): %v", err)
+	}
+	if len(replacement) != 2 || replacement[0].AmountCents != 5000 || replacement[1].AmountCents != 5000 {
+		t.Fatalf("replacement rows = %#v, want two 5000-cent rows", replacement)
+	}
+	items, err := repo.ListAdditionalCosts(ctx, "user-1", "workspace-1", "2026-08-20", "2026-08-22")
+	if err != nil {
+		t.Fatalf("ListAdditionalCosts(): %v", err)
+	}
+	if len(items) != 2 || items[0].BusinessDate != "2026-08-20" || items[1].BusinessDate != "2026-08-21" {
+		t.Fatalf("stored rows = %#v, want old final date removed", items)
+	}
+	for _, date := range []string{"2026-08-20", "2026-08-21"} {
+		snapshot, err := repo.LatestDashboardSnapshot(ctx, "user-1", "workspace-1", date)
+		if err != nil || snapshot == nil || snapshot.FixedCost == nil || *snapshot.FixedCost != 50 {
+			t.Fatalf("snapshot %s = %#v, err=%v, want fixed cost 50", date, snapshot, err)
+		}
+		if snapshot.TodayProfit == nil || *snapshot.TodayProfit != 100 || snapshot.TodayPurchase == nil || *snapshot.TodayPurchase != 20 {
+			t.Fatalf("snapshot %s base fields changed: %#v", date, snapshot)
+		}
+	}
+	oldFinal, err := repo.LatestDashboardSnapshot(ctx, "user-1", "workspace-1", "2026-08-22")
+	if err != nil || oldFinal == nil || oldFinal.FixedCost == nil || *oldFinal.FixedCost != 0 || len(oldFinal.AdditionalCostRecords) != 0 {
+		t.Fatalf("old final-date snapshot = %#v, err=%v, want source removed", oldFinal, err)
+	}
+}
+
+func TestAdditionalCostReplacementAllowsFinalLiveCacheCostBackfill(t *testing.T) {
+	pool := accountAssetTestPool(t)
+	ctx := context.Background()
+	repo := NewMetricsRepository(pool)
+	if err := repo.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema() error: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `CREATE TABLE admin_accounts (id text PRIMARY KEY,user_id text NOT NULL)`); err != nil {
+		t.Fatalf("create admin_accounts: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO admin_accounts (id,user_id) VALUES ('workspace-1','user-1')`); err != nil {
+		t.Fatalf("insert admin account: %v", err)
+	}
+	revenue, direct, net := 100.0, 20.0, 80.0
+	businessDate, err := time.ParseInLocation("2006-01-02", "2026-08-20", businesstime.Location())
+	if err != nil {
+		t.Fatalf("parse final snapshot date: %v", err)
+	}
+	if err := repo.Upsert(ctx, DailySnapshot{
+		ID: "snapshot-final-live", UserID: "user-1", AdminAccountID: "workspace-1", Date: businessDate,
+		TodayProfit: &revenue, TodayPurchase: &direct, NetProfit: &net, CreatedAt: time.Now().UTC(),
+		SettlementStatus: SettlementStatusFinal, SnapshotSource: SnapshotSourceLiveCache,
+	}); err != nil {
+		t.Fatalf("Upsert(final live cache): %v", err)
+	}
+	records, _ := buildAdditionalCostRecords("user-1", "workspace-1", AdditionalCostInput{Type: AdditionalCostFixed, Name: "final", BusinessDate: "2026-08-20", Amount: 10, Days: 1}, "source-final")
+	if err := repo.InsertAdditionalCosts(ctx, records); err != nil {
+		t.Fatalf("InsertAdditionalCosts(final): %v", err)
+	}
+	snapshot, err := repo.LatestDashboardSnapshot(ctx, "user-1", "workspace-1", "2026-08-20")
+	if err != nil || snapshot == nil || snapshot.SettlementStatus != SettlementStatusFinal || snapshot.SnapshotSource != SnapshotSourceLiveCache || snapshot.FixedCost == nil || *snapshot.FixedCost != 10 {
+		t.Fatalf("final live-cache snapshot = %#v, err=%v, want final live-cache with fixed cost", snapshot, err)
+	}
+}
+
 func accountAssetTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	databaseURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))

@@ -8,6 +8,8 @@ import AccountCostWorkspace from '@/modules/admin/components/dashboard/AccountCo
 
 const harness = vi.hoisted(() => ({
   createAdditionalCost: vi.fn(),
+  getAdditionalCost: vi.fn(),
+  updateAdditionalCost: vi.fn(),
   getRechargeFeeRate: vi.fn(),
   listRechargeFeeRateHistory: vi.fn(),
   listAccountAssets: vi.fn(),
@@ -24,6 +26,8 @@ vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
   createAccountBatch: vi.fn(),
   createAccountEvent: vi.fn(),
   createAdditionalCost: harness.createAdditionalCost,
+  getAdditionalCost: harness.getAdditionalCost,
+  updateAdditionalCost: harness.updateAdditionalCost,
   getAccountAsset: vi.fn(),
   getRechargeFeeRate: harness.getRechargeFeeRate,
   listRechargeFeeRateHistory: harness.listRechargeFeeRateHistory,
@@ -103,6 +107,8 @@ const statusSelect = (wrapper: VueWrapper) => {
 beforeEach(() => {
   localStorage.clear()
   harness.createAdditionalCost.mockReset().mockResolvedValue({ items: [] })
+  harness.getAdditionalCost.mockReset().mockResolvedValue({ items: [] })
+  harness.updateAdditionalCost.mockReset().mockResolvedValue({ items: [] })
   harness.getRechargeFeeRate.mockReset().mockResolvedValue({
     id: 'rate-current', effectiveDate: '2026-08-22', rate: 0.016, createdAt: '2026-08-22T08:00:00Z',
   })
@@ -186,6 +192,143 @@ describe('AccountCostWorkspace regression behavior', () => {
     const failedWrapper = await mountWorkspace('today')
     expect(failedWrapper.text()).toContain('当日成本变动加载失败')
     expect(failedWrapper.text()).not.toContain('当日暂无成本变动')
+  })
+
+  it('edits a complete source using its earliest day and refreshes both ledger views', async () => {
+    const latest = {
+      id: 'source-edit-1-1', type: 'fixed', name: '跨日服务器', businessDate: '2026-08-22',
+      amount: 33.34, amountCents: 3334, originalAmount: 100, days: 3, sourceId: 'source-edit-1', estimated: false,
+      createdAt: '2026-08-22T10:00:00+08:00',
+    }
+    const first = { ...latest, id: 'source-edit-1-0', businessDate: '2026-08-20', amount: 33.33, amountCents: 3333 }
+    harness.listAccountCostLedger.mockResolvedValue({ items: [latest, first], hasMore: false })
+    harness.getAdditionalCost.mockResolvedValue({ items: [latest, first] })
+    harness.updateAdditionalCost.mockResolvedValue({ items: [
+      { ...latest, businessDate: '2026-08-20', amount: 50, amountCents: 5000, days: 2 },
+      { ...latest, id: 'source-edit-1-1', businessDate: '2026-08-21', amount: 50, amountCents: 5000, days: 2 },
+    ] })
+
+    const wrapper = await mountWorkspace('ledger')
+    await findButton(wrapper, '编辑 跨日服务器').trigger('click')
+    await flushPromises()
+
+    expect(harness.getAdditionalCost).toHaveBeenCalledWith('source-edit-1')
+    expect(wrapper.find('input[type="date"]').element).toHaveProperty('value', '2026-08-20')
+    expect(wrapper.find('input[placeholder="金额（元）"]').element).toHaveProperty('value', '100')
+
+    await wrapper.find('input[placeholder="分摊天数"]').setValue('2')
+    await wrapper.find('form').trigger('submit')
+    await vi.waitFor(() => expect(harness.updateAdditionalCost).toHaveBeenCalledOnce())
+    await flushPromises()
+
+    expect(harness.updateAdditionalCost).toHaveBeenCalledWith('source-edit-1', expect.objectContaining({
+      type: 'fixed', businessDate: '2026-08-20', amount: 100, days: 2,
+    }))
+    expect(harness.listAccountCostLedger.mock.calls.length).toBeGreaterThanOrEqual(3)
+    expect(wrapper.emitted('updated')).toHaveLength(1)
+  })
+
+  it('does not render edit actions for account purchase or refund records', async () => {
+    harness.listAccountCostLedger.mockResolvedValue({ items: [
+      { id: 'purchase-1', type: 'account_purchase', name: '买号', businessDate: '2026-08-22', amount: 10, amountCents: 1000, sourceId: 'asset-1', estimated: false, createdAt: '2026-08-22T10:00:00+08:00' },
+      { id: 'refund-1', type: 'account_refund', name: '退款', businessDate: '2026-08-22', amount: -2, amountCents: -200, sourceId: 'asset-1', estimated: false, createdAt: '2026-08-22T10:01:00+08:00' },
+    ], hasMore: false })
+    const wrapper = await mountWorkspace('ledger')
+    expect(wrapper.text()).not.toContain('编辑 买号')
+    expect(wrapper.text()).not.toContain('编辑 退款')
+  })
+
+  it('keeps the source form and edit mode when the replacement request fails', async () => {
+    const source = {
+      id: 'source-fail-1-0', type: 'fixed', name: '失败后保留', businessDate: '2026-08-20',
+      amount: 100, amountCents: 10000, originalAmount: 100, days: 3, sourceId: 'source-fail-1',
+      estimated: false, createdAt: '2026-08-20T10:00:00+08:00',
+    }
+    harness.listAccountCostLedger.mockResolvedValue({ items: [source], hasMore: false })
+    harness.getAdditionalCost.mockResolvedValue({ items: [source] })
+    harness.updateAdditionalCost.mockRejectedValueOnce(new Error('replacement failed'))
+
+    const wrapper = await mountWorkspace('ledger')
+    await findButton(wrapper, '编辑 失败后保留').trigger('click')
+    await flushPromises()
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(harness.updateAdditionalCost).toHaveBeenCalledOnce()
+    expect(wrapper.text()).toContain('编辑手工成本')
+    expect(wrapper.text()).toContain('replacement failed')
+    expect(wrapper.find('input[placeholder="金额（元）"]').element).toHaveProperty('value', '100')
+    expect(wrapper.emitted('updated')).toBeUndefined()
+  })
+
+  it('prevents a second replacement request while the first one is pending', async () => {
+    const source = {
+      id: 'source-pending-1-0', type: 'fixed', name: '防重复提交', businessDate: '2026-08-20',
+      amount: 100, amountCents: 10000, originalAmount: 100, days: 3, sourceId: 'source-pending-1',
+      estimated: false, createdAt: '2026-08-20T10:00:00+08:00',
+    }
+    harness.listAccountCostLedger.mockResolvedValue({ items: [source], hasMore: false })
+    harness.getAdditionalCost.mockResolvedValue({ items: [source] })
+    let resolveUpdate: (value: { items: Array<typeof source> }) => void = () => undefined
+    harness.updateAdditionalCost.mockImplementationOnce(() => new Promise(resolve => { resolveUpdate = resolve }))
+
+    const wrapper = await mountWorkspace('ledger')
+    await findButton(wrapper, '编辑 防重复提交').trigger('click')
+    await flushPromises()
+    const form = wrapper.find('form')
+    await form.trigger('submit')
+    await form.trigger('submit')
+    await nextTick()
+
+    expect(harness.updateAdditionalCost).toHaveBeenCalledOnce()
+    resolveUpdate({ items: [source] })
+    await flushPromises()
+  })
+
+  it('clears the edit source and reloads the active view when the workspace changes', async () => {
+    const source = {
+      id: 'source-switch-1-0', type: 'fixed', name: '切换工作区', businessDate: '2026-08-20',
+      amount: 100, amountCents: 10000, originalAmount: 100, days: 3, sourceId: 'source-switch-1',
+      estimated: false, createdAt: '2026-08-20T10:00:00+08:00',
+    }
+    harness.listAccountCostLedger.mockResolvedValue({ items: [source], hasMore: false })
+    harness.getAdditionalCost.mockResolvedValue({ items: [source] })
+
+    const wrapper = await mountWorkspace('ledger')
+    await findButton(wrapper, '编辑 切换工作区').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('编辑手工成本')
+
+    await wrapper.setProps({ workspaceId: 'workspace-b' })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('编辑手工成本')
+    expect(wrapper.text()).toContain('记一笔成本')
+    expect(harness.listAccountCostLedger.mock.calls.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it('clears workspace-scoped lists and ignores a late response from the previous workspace', async () => {
+    const source = {
+      id: 'source-late-a-0', type: 'fixed', name: '工作区 A 旧成本', businessDate: '2026-08-20',
+      amount: 100, amountCents: 10000, originalAmount: 100, days: 3, sourceId: 'source-late-a',
+      estimated: false, createdAt: '2026-08-20T10:00:00+08:00',
+    }
+    let resolveWorkspaceA: (value: { items: Array<typeof source>; hasMore: boolean }) => void = () => undefined
+    harness.listAccountCostLedger.mockImplementationOnce(() => new Promise(resolve => { resolveWorkspaceA = resolve }))
+    harness.listAccountCostLedger.mockResolvedValue({ items: [], hasMore: false })
+
+    const wrapper = await mountWorkspace('ledger')
+    expect(wrapper.text()).not.toContain('工作区 A 旧成本')
+
+    await wrapper.setProps({ workspaceId: 'workspace-b' })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('工作区 A 旧成本')
+    expect(wrapper.text()).toContain('所选范围暂无记录')
+    expect(wrapper.find('input[placeholder="金额（元）"]').exists()).toBe(false)
+
+    resolveWorkspaceA({ items: [source], hasMore: false })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('工作区 A 旧成本')
   })
 
   it('R07 loads and renders recharge fee history from the current workspace Rules tab', async () => {

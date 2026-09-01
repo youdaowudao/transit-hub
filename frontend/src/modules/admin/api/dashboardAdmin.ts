@@ -414,6 +414,20 @@ export const createAdditionalCost = async (input: {
 }): Promise<{ items: AdditionalCostRecord[] }> =>
   requestJson<{ items: AdditionalCostRecord[] }>('/dashboard/additional-costs', { method: 'POST', body: JSON.stringify(input) })
 
+export const getAdditionalCost = async (sourceId: string): Promise<{ items: AdditionalCostRecord[] }> =>
+  requestJson<{ items: AdditionalCostRecord[] }>(`/dashboard/additional-costs/${encodeURIComponent(sourceId)}`)
+
+export const updateAdditionalCost = async (sourceId: string, input: {
+  type: 'promotion' | 'fixed' | 'adjustment'
+  name: string
+  businessDate: string
+  amount: number
+  usageRate?: number
+  days?: number
+  note?: string
+}): Promise<{ items: AdditionalCostRecord[] }> =>
+  requestJson<{ items: AdditionalCostRecord[] }>(`/dashboard/additional-costs/${encodeURIComponent(sourceId)}`, { method: 'PUT', body: JSON.stringify(input) })
+
 /** 单个利润核算问题；只包含可安全展示的稳定 ID 和错误元数据。 */
 /** 单个主站分组的今日营收。todayAmount 保留为兼容字段。 */
 export interface GroupUsageTodayItem {

@@ -107,6 +107,8 @@ vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
   createAccountBatch: vi.fn(),
   createAccountEvent: vi.fn(),
   createAdditionalCost: vi.fn(),
+  getAdditionalCost: vi.fn(),
+  updateAdditionalCost: vi.fn(),
   getAccountAsset: vi.fn(),
   getRechargeFeeRate: vi.fn(async () => ({ id: 'rate-current', effectiveDate: '2026-08-22', rate: 0.016, createdAt: '2026-08-22T00:00:00Z' })),
   listRechargeFeeRateHistory: vi.fn(async () => ({ items: [] })),

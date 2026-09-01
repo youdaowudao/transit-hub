@@ -24,12 +24,20 @@ func (r *rechargeFeeHistoryRepository) ListAdditionalCosts(context.Context, stri
 	return nil, nil
 }
 
+func (r *rechargeFeeHistoryRepository) GetAdditionalCost(context.Context, string, string, string) ([]AdditionalCostRecord, error) {
+	return nil, nil
+}
+
 func (r *rechargeFeeHistoryRepository) SaveRechargeFeeRate(context.Context, RechargeFeeRate) error {
 	return nil
 }
 
 func (r *rechargeFeeHistoryRepository) InsertAdditionalCosts(context.Context, []AdditionalCostRecord) error {
 	return nil
+}
+
+func (r *rechargeFeeHistoryRepository) ReplaceAdditionalCost(context.Context, string, string, string, AdditionalCostInput) ([]AdditionalCostRecord, error) {
+	return nil, nil
 }
 
 func (r *rechargeFeeHistoryRepository) ListRechargeFeeRates(_ context.Context, userID, adminAccountID string) ([]RechargeFeeRate, error) {

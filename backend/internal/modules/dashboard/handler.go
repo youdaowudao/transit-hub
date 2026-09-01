@@ -36,7 +36,9 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, metricsService *Metric
 	mux.HandleFunc("GET /api/dashboard/daily-stats", handler.dailyStats)
 	mux.HandleFunc("POST /api/dashboard/backfill", handler.backfill)
 	mux.HandleFunc("GET /api/dashboard/additional-costs", handler.listAdditionalCosts)
+	mux.HandleFunc("GET /api/dashboard/additional-costs/{id}", handler.getAdditionalCost)
 	mux.HandleFunc("POST /api/dashboard/additional-costs", handler.createAdditionalCost)
+	mux.HandleFunc("PUT /api/dashboard/additional-costs/{id}", handler.updateAdditionalCost)
 	mux.HandleFunc("GET /api/dashboard/recharge-fee-rate", handler.getRechargeFeeRate)
 	mux.HandleFunc("GET /api/dashboard/recharge-fee-rates", handler.listRechargeFeeRates)
 	mux.HandleFunc("PUT /api/dashboard/recharge-fee-rate", handler.saveRechargeFeeRate)
@@ -301,6 +303,39 @@ func (h *Handler) createAdditionalCost(w http.ResponseWriter, r *http.Request) {
 	httpjson.Write(w, http.StatusCreated, map[string]any{"items": items})
 }
 
+func (h *Handler) getAdditionalCost(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	items, err := h.metricsService.GetAdditionalCost(r.Context(), userID, r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *Handler) updateAdditionalCost(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input AdditionalCostInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	items, err := h.metricsService.UpdateAdditionalCost(r.Context(), userID, r.PathValue("id"), input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, map[string]any{"items": items})
+}
+
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 	userID, ok := authctx.UserID(r.Context())
 	if !ok {
@@ -520,6 +555,14 @@ func writeError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, ErrAdditionalCostInvalidType) || errors.Is(err, ErrAdditionalCostInvalidAmount) || errors.Is(err, ErrAdditionalCostInvalidDate) || errors.Is(err, ErrAdditionalCostInvalidDays) || errors.Is(err, ErrAdditionalCostInvalidRate) {
 		httpjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if errors.Is(err, ErrAdditionalCostNotFound) {
+		httpjson.WriteError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if errors.Is(err, ErrAdditionalCostProtected) {
+		httpjson.WriteError(w, http.StatusConflict, err.Error())
 		return
 	}
 	var requestErr requestError

@@ -2,12 +2,19 @@ package dashboard
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
 type fakeAdditionalCostRepository struct {
-	rate  RechargeFeeRate
-	items []AdditionalCostRecord
+	rate          RechargeFeeRate
+	items         []AdditionalCostRecord
+	updatedSource string
+	updatedUser   string
+	updatedAdmin  string
+	updatedInput  AdditionalCostInput
+	getErr        error
+	updateErr     error
 }
 
 func (f *fakeAdditionalCostRepository) GetRechargeFeeRate(context.Context, string, string, string) (RechargeFeeRate, error) {
@@ -18,12 +25,29 @@ func (f *fakeAdditionalCostRepository) ListAdditionalCosts(context.Context, stri
 	return f.items, nil
 }
 
+func (f *fakeAdditionalCostRepository) GetAdditionalCost(context.Context, string, string, string) ([]AdditionalCostRecord, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	for _, item := range f.items {
+		if err := validateEditableAdditionalCostRecord(item); err != nil {
+			return nil, err
+		}
+	}
+	return f.items, nil
+}
+
 func (f *fakeAdditionalCostRepository) SaveRechargeFeeRate(context.Context, RechargeFeeRate) error {
 	return nil
 }
 
 func (f *fakeAdditionalCostRepository) InsertAdditionalCosts(context.Context, []AdditionalCostRecord) error {
 	return nil
+}
+
+func (f *fakeAdditionalCostRepository) ReplaceAdditionalCost(_ context.Context, userID, adminAccountID, sourceID string, input AdditionalCostInput) ([]AdditionalCostRecord, error) {
+	f.updatedUser, f.updatedAdmin, f.updatedSource, f.updatedInput = userID, adminAccountID, sourceID, input
+	return f.items, f.updateErr
 }
 
 func TestBuildPromotionAdditionalCostUsesConfiguredUsageRateAndPeriod(t *testing.T) {
@@ -67,8 +91,26 @@ func TestBuildAdjustmentAllowsNegativeAmountWithoutRewritingExistingRecord(t *te
 	if err != nil {
 		t.Fatalf("buildAdditionalCostRecords() error: %v", err)
 	}
-	if len(records) != 1 || records[0].AmountCents != -4235 || records[0].Amount != -42.35 {
+	if len(records) != 1 || records[0].AmountCents != -4235 || records[0].Amount != -42.35 || records[0].SourceID != "adjustment-1" {
 		t.Fatalf("adjustment = %+v", records)
+	}
+}
+
+func TestValidateEditableAdditionalCostRecordProtectsSystemSources(t *testing.T) {
+	for name, item := range map[string]AdditionalCostRecord{
+		"account purchase": {Type: AdditionalCostAccountPurchase},
+		"account refund":   {Type: AdditionalCostAccountRefund},
+		"batch-linked":     {Type: AdditionalCostFixed, BatchID: "batch-1"},
+		"asset-linked":     {Type: AdditionalCostFixed, AccountAssetID: "asset-1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateEditableAdditionalCostRecord(item); !errors.Is(err, ErrAdditionalCostProtected) {
+				t.Fatalf("validateEditableAdditionalCostRecord() = %v, want ErrAdditionalCostProtected", err)
+			}
+		})
+	}
+	if err := validateEditableAdditionalCostRecord(AdditionalCostRecord{Type: AdditionalCostFixed}); err != nil {
+		t.Fatalf("manual cost unexpectedly protected: %v", err)
 	}
 }
 

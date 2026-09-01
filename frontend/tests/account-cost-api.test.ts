@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createAccountBatch, createAccountEvent, listAccountCostLedger, replaceAccountLink } from '../src/modules/admin/api/dashboardAdmin'
+import { createAccountBatch, createAccountEvent, getAdditionalCost, listAccountCostLedger, replaceAccountLink, updateAdditionalCost } from '../src/modules/admin/api/dashboardAdmin'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -51,5 +51,27 @@ describe('account cost API', () => {
     expect(url).toContain('accountAssetId=asset-1')
     expect(url).not.toContain('adminAccountId')
     expect(url).not.toContain('userId')
+  })
+
+  it('reads and replaces one manual source without sending workspace fields', async () => {
+	vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null) })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ items: [{ id: 'source-1-0', sourceId: 'source-1', businessDate: '2026-08-20' }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ items: [] }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await getAdditionalCost('source/1')
+    await updateAdditionalCost('source/1', {
+      type: 'fixed', name: '服务器', businessDate: '2026-08-20', amount: 100, days: 2, note: '更正',
+    })
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain('/dashboard/additional-costs/source%2F1')
+    expect(fetchMock.mock.calls[0][1].method).toBeUndefined()
+    const [url, options] = fetchMock.mock.calls[1]
+    expect(String(url)).toContain('/dashboard/additional-costs/source%2F1')
+    expect(options.method).toBe('PUT')
+    expect(JSON.parse(options.body)).toEqual(expect.objectContaining({ type: 'fixed', amount: 100, days: 2 }))
+    expect(options.body).not.toContain('workspaceId')
+    expect(options.body).not.toContain('userId')
   })
 })

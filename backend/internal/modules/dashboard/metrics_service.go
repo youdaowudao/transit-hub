@@ -270,6 +270,33 @@ func (s *MetricsService) CreateAdditionalCost(ctx context.Context, userID string
 	return records, nil
 }
 
+// UpdateAdditionalCost 用完整的原始输入替换一笔手工成本。sourceID 是稳定的根来源 ID，
+// 不接受 account_purchase/account_refund 等系统成本的编辑。
+func (s *MetricsService) UpdateAdditionalCost(ctx context.Context, userID, sourceID string, input AdditionalCostInput) ([]AdditionalCostRecord, error) {
+	if s.additionalCosts == nil {
+		return nil, errors.New("dashboard.additionalCost.errors.unavailable")
+	}
+	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(sourceID) == "" {
+		return nil, ErrAdditionalCostNotFound
+	}
+	return s.additionalCosts.ReplaceAdditionalCost(ctx, userID, adminAccountID, sourceID, input)
+}
+
+func (s *MetricsService) GetAdditionalCost(ctx context.Context, userID, sourceID string) ([]AdditionalCostRecord, error) {
+	if s.additionalCosts == nil {
+		return nil, errors.New("dashboard.additionalCost.errors.unavailable")
+	}
+	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return s.additionalCosts.GetAdditionalCost(ctx, userID, adminAccountID, sourceID)
+}
+
 func (s *MetricsService) ListAdditionalCosts(ctx context.Context, userID, from, to string) ([]AdditionalCostRecord, error) {
 	if s.additionalCosts == nil {
 		return []AdditionalCostRecord{}, nil

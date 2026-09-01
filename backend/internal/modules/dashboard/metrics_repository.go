@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -282,6 +283,10 @@ func (r *MetricsRepository) EnsureSchema(ctx context.Context) error {
 			estimated        boolean NOT NULL DEFAULT false,
 			created_at       timestamptz NOT NULL DEFAULT now()
 		);
+		-- 为历史手工成本补齐来源根身份；只改身份字段，不改金额、日期或快照。
+		UPDATE dashboard_additional_costs
+		SET source_id = id
+		WHERE source_id = '' AND type IN ('promotion','fixed','adjustment');
 			CREATE INDEX IF NOT EXISTS idx_dashboard_additional_costs_date
 				ON dashboard_additional_costs (user_id, admin_account_id, business_date);
 
@@ -356,10 +361,150 @@ func (r *MetricsRepository) SaveRechargeFeeRate(ctx context.Context, rate Rechar
 }
 
 func (r *MetricsRepository) InsertAdditionalCosts(ctx context.Context, records []AdditionalCostRecord) error {
-	return r.insertAdditionalCosts(ctx, r.db, records)
+	if len(records) == 0 {
+		return nil
+	}
+	starter, ok := r.db.(metricsTxStarter)
+	if !ok {
+		return errors.New("dashboard.additionalCost.errors.unavailable")
+	}
+	tx, err := starter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := r.insertAdditionalCosts(ctx, tx, records); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ReplaceAdditionalCost 在一个事务中删除旧分摊、写入新分摊，并重投影旧日期与新日期的并集。
+func (r *MetricsRepository) ReplaceAdditionalCost(ctx context.Context, userID, adminAccountID, sourceID string, input AdditionalCostInput) ([]AdditionalCostRecord, error) {
+	if sourceID == "" {
+		return nil, ErrAdditionalCostNotFound
+	}
+	starter, ok := r.db.(metricsTxStarter)
+	if !ok {
+		return nil, errors.New("dashboard.additionalCost.errors.unavailable")
+	}
+	tx, err := starter.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	// 来源锁串行化同一笔成本的编辑，避免两个更新互相覆盖部分分摊。
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "dashboard-additional-cost|"+userID+"|"+adminAccountID+"|"+sourceID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT id,type,name,business_date::text,amount_cents,original_amount,rate,usage_rate,days,source_id,batch_id,account_asset_id,note,estimated,created_at
+		FROM dashboard_additional_costs
+		WHERE user_id=$1 AND admin_account_id=$2 AND ((source_id=$3 AND source_id <> '') OR (id=$3 AND source_id=''))
+		ORDER BY business_date,id FOR UPDATE
+	`, userID, adminAccountID, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	old := make([]AdditionalCostRecord, 0)
+	for rows.Next() {
+		var item AdditionalCostRecord
+		if err := rows.Scan(&item.ID, &item.Type, &item.Name, &item.BusinessDate, &item.AmountCents, &item.OriginalAmount, &item.Rate, &item.UsageRate, &item.Days, &item.SourceID, &item.BatchID, &item.AccountAssetID, &item.Note, &item.Estimated, &item.CreatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		item.UserID, item.AdminAccountID = userID, adminAccountID
+		item.Amount = float64(item.AmountCents) / 100
+		old = append(old, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(old) == 0 {
+		return nil, ErrAdditionalCostNotFound
+	}
+	for _, item := range old {
+		if err := validateEditableAdditionalCostRecord(item); err != nil {
+			return nil, err
+		}
+	}
+	replacement, err := buildAdditionalCostRecords(userID, adminAccountID, input, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range replacement {
+		if item.Type != AdditionalCostPromotion && item.Type != AdditionalCostFixed && item.Type != AdditionalCostAdjustment {
+			return nil, ErrAdditionalCostProtected
+		}
+	}
+	dateSet := make(map[string]struct{}, len(old)+len(replacement))
+	for _, item := range old {
+		dateSet[item.BusinessDate] = struct{}{}
+	}
+	for _, item := range replacement {
+		dateSet[item.BusinessDate] = struct{}{}
+	}
+	dates := make([]string, 0, len(dateSet))
+	for date := range dateSet {
+		dates = append(dates, date)
+	}
+	sort.Strings(dates)
+	for _, date := range dates {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "dashboard-daily-cost|"+userID+"|"+adminAccountID+"|"+date); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM dashboard_additional_costs WHERE user_id=$1 AND admin_account_id=$2 AND ((source_id=$3 AND source_id <> '') OR (id=$3 AND source_id=''))`, userID, adminAccountID, sourceID); err != nil {
+		return nil, err
+	}
+	if err := r.insertAdditionalCostRows(ctx, tx, replacement); err != nil {
+		return nil, err
+	}
+	if err := r.reprojectDailySnapshotsForDates(ctx, tx, userID, adminAccountID, dates); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return replacement, nil
 }
 
 func (r *MetricsRepository) insertAdditionalCosts(ctx context.Context, db metricsDB, records []AdditionalCostRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	if err := lockAdditionalCostDates(ctx, db, records); err != nil {
+		return err
+	}
+	if err := r.insertAdditionalCostRows(ctx, db, records); err != nil {
+		return err
+	}
+	return r.reprojectDailySnapshotsForCosts(ctx, db, records)
+}
+
+func lockAdditionalCostDates(ctx context.Context, db metricsDB, records []AdditionalCostRecord) error {
+	seen := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		key := record.UserID + "\x00" + record.AdminAccountID + "\x00" + record.BusinessDate
+		seen[key] = struct{}{}
+	}
+	keys := make([]string, 0, len(seen))
+	for key := range seen {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		parts := strings.Split(key, "\x00")
+		if _, err := db.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "dashboard-daily-cost|"+parts[0]+"|"+parts[1]+"|"+parts[2]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *MetricsRepository) insertAdditionalCostRows(ctx context.Context, db metricsDB, records []AdditionalCostRecord) error {
 	if len(records) == 0 {
 		return nil
 	}
@@ -385,7 +530,7 @@ func (r *MetricsRepository) insertAdditionalCosts(ctx context.Context, db metric
 	if err != nil {
 		return err
 	}
-	return r.reprojectDailySnapshotsForCosts(ctx, db, records)
+	return nil
 }
 
 func (r *MetricsRepository) reprojectDailySnapshotsForCosts(ctx context.Context, db metricsDB, records []AdditionalCostRecord) error {
@@ -394,53 +539,110 @@ func (r *MetricsRepository) reprojectDailySnapshotsForCosts(ctx context.Context,
 	for _, record := range records {
 		affected[affectedDate{record.UserID, record.AdminAccountID, record.BusinessDate}] = struct{}{}
 	}
+	keys := make([]string, 0, len(affected))
 	for key := range affected {
-		snapshot, found, err := loadDashboardSnapshotForUpdate(ctx, db, key.userID, key.adminAccountID, key.date)
-		if err != nil {
-			return err
-		}
-		if !found {
-			continue
-		}
-		items, err := listAdditionalCostsForDate(ctx, db, key.userID, key.adminAccountID, key.date)
-		if err != nil {
-			return err
-		}
-		summary := summarizeAdditionalCostRecords(items)
-		if snapshot.TodayProfit == nil {
-			summary.Available = false
-			summary.UnavailableReason = "revenue_unavailable"
-		} else {
-			rate := defaultRechargeFeeRate
-			err := db.QueryRow(ctx, `
-				SELECT rate FROM dashboard_recharge_fee_rates
-				WHERE user_id=$1 AND admin_account_id=$2 AND effective_date <= $3::date
-				ORDER BY effective_date DESC,created_at DESC,id DESC LIMIT 1
-			`, key.userID, key.adminAccountID, key.date).Scan(&rate)
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				return err
-			}
-			fee := math.Round(*snapshot.TodayProfit*rate*100) / 100
-			summary.RechargeFee, summary.FeeRate = &fee, &rate
-			total := summary.Promotion + summary.Fixed + summary.Adjustment + summary.AccountPurchase + summary.AccountRefund + fee
-			summary.Total = &total
-		}
-		snapshot.AdditionalCost = summary.Total
-		snapshot.RechargeFee, snapshot.RechargeFeeRate = summary.RechargeFee, summary.FeeRate
-		snapshot.PromotionCost, snapshot.FixedCost, snapshot.AdjustmentCost = ptrF64(summary.Promotion), ptrF64(summary.Fixed), ptrF64(summary.Adjustment)
-		snapshot.AdditionalCostRecords = items
-		accountPurchase := summary.AccountPurchase
-		snapshot.AccountPurchaseCost = &accountPurchase
-		components, componentErr := r.accountCostComponentsForDate(ctx, db, key.userID, key.adminAccountID, key.date, snapshot.AccountSnapshotRunID, false)
-		snapshot.OperatingCost, snapshot.AdjustedNetProfit, _ = projectOperatingCost(
-			snapshot.TodayPurchase, snapshot.TodayProfit, &summary, components, componentErr,
-		)
-		snapshot.ReplacementDeduction = summary.ReplacementDeduction
-		if err := r.upsert(ctx, db, snapshot); err != nil {
+		keys = append(keys, key.userID+"\x00"+key.adminAccountID+"\x00"+key.date)
+	}
+	sort.Strings(keys)
+	dates := make([]affectedDate, 0, len(keys))
+	for _, key := range keys {
+		parts := strings.Split(key, "\x00")
+		dates = append(dates, affectedDate{parts[0], parts[1], parts[2]})
+	}
+	for _, key := range dates {
+		if err := r.reprojectDailySnapshotForDate(ctx, db, key.userID, key.adminAccountID, key.date); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (r *MetricsRepository) reprojectDailySnapshotsForDates(ctx context.Context, db metricsDB, userID, adminAccountID string, dates []string) error {
+	for _, date := range dates {
+		if err := r.reprojectDailySnapshotForDate(ctx, db, userID, adminAccountID, date); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *MetricsRepository) reprojectDailySnapshotForDate(ctx context.Context, db metricsDB, userID, adminAccountID, date string) error {
+	snapshot, found, err := loadDashboardSnapshotForUpdate(ctx, db, userID, adminAccountID, date)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	items, err := listAdditionalCostsForDate(ctx, db, userID, adminAccountID, date)
+	if err != nil {
+		return err
+	}
+	summary := summarizeAdditionalCostRecords(items)
+	if snapshot.TodayProfit == nil {
+		summary.Available = false
+		summary.UnavailableReason = "revenue_unavailable"
+	} else {
+		rate := defaultRechargeFeeRate
+		if snapshot.RechargeFeeRate != nil {
+			rate = *snapshot.RechargeFeeRate
+		} else {
+			err := db.QueryRow(ctx, `
+				SELECT rate FROM dashboard_recharge_fee_rates
+				WHERE user_id=$1 AND admin_account_id=$2 AND effective_date <= $3::date
+				ORDER BY effective_date DESC,created_at DESC,id DESC LIMIT 1
+			`, userID, adminAccountID, date).Scan(&rate)
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+		}
+		fee := math.Round(*snapshot.TodayProfit*rate*100) / 100
+		summary.RechargeFee, summary.FeeRate = &fee, &rate
+		total := summary.Promotion + summary.Fixed + summary.Adjustment + summary.AccountPurchase + summary.AccountRefund + fee
+		summary.Total = &total
+	}
+	snapshot.AdditionalCost = summary.Total
+	snapshot.RechargeFee, snapshot.RechargeFeeRate = summary.RechargeFee, summary.FeeRate
+	snapshot.PromotionCost, snapshot.FixedCost, snapshot.AdjustmentCost = ptrF64(summary.Promotion), ptrF64(summary.Fixed), ptrF64(summary.Adjustment)
+	snapshot.AdditionalCostRecords = items
+	accountPurchase := summary.AccountPurchase
+	snapshot.AccountPurchaseCost = &accountPurchase
+	components, componentErr := r.accountCostComponentsForDate(ctx, db, userID, adminAccountID, date, snapshot.AccountSnapshotRunID, false)
+	snapshot.OperatingCost, snapshot.AdjustedNetProfit, _ = projectOperatingCost(
+		snapshot.TodayPurchase, snapshot.TodayProfit, &summary, components, componentErr,
+	)
+	snapshot.ReplacementDeduction = summary.ReplacementDeduction
+	// 手工成本回填允许刷新 final/live_cache 的成本投影；保持 final 和 live_cache
+	// 来源不变，避免为了绕过 live_cache 保护而改写非成本字段。
+	if snapshot.SettlementStatus == SettlementStatusFinal && snapshot.SnapshotSource == SnapshotSourceLiveCache {
+		return r.updateDailySnapshotCostProjection(ctx, db, snapshot)
+	}
+	if err := r.upsert(ctx, db, snapshot); err != nil {
+		return err
+	}
+	return nil
+}
+
+// updateDailySnapshotCostProjection 只更新附加成本投影列，供 final/live_cache 快照回填。
+// 调用方已通过 loadDashboardSnapshotForUpdate 持有目标行锁，因此不会覆盖并发中的上游字段。
+func (r *MetricsRepository) updateDailySnapshotCostProjection(ctx context.Context, db metricsDB, snapshot DailySnapshot) error {
+	recordsJSON, err := json.Marshal(snapshot.AdditionalCostRecords)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `
+		UPDATE dashboard_daily_stats SET
+			additional_cost=$1, recharge_fee=$2, recharge_fee_rate=$3,
+			promotion_cost=$4, fixed_cost=$5, adjustment_cost=$6,
+			additional_cost_records=$7::jsonb, operating_cost=$8,
+			adjusted_net_profit=$9, account_purchase_cost=$10, replacement_deduction=$11
+		WHERE user_id=$12 AND admin_account_id=$13 AND date=$14::date
+	`, snapshot.AdditionalCost, snapshot.RechargeFee, snapshot.RechargeFeeRate,
+		snapshot.PromotionCost, snapshot.FixedCost, snapshot.AdjustmentCost,
+		recordsJSON, snapshot.OperatingCost, snapshot.AdjustedNetProfit,
+		snapshot.AccountPurchaseCost, snapshot.ReplacementDeduction,
+		snapshot.UserID, snapshot.AdminAccountID, snapshot.Date)
+	return err
 }
 
 func loadDashboardSnapshotForUpdate(ctx context.Context, db metricsDB, userID, adminAccountID, date string) (DailySnapshot, bool, error) {
@@ -537,6 +739,45 @@ func (r *MetricsRepository) ListAdditionalCosts(ctx context.Context, userID, adm
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (r *MetricsRepository) GetAdditionalCost(ctx context.Context, userID, adminAccountID, sourceID string) ([]AdditionalCostRecord, error) {
+	return r.listAdditionalCostsBySource(ctx, r.db, userID, adminAccountID, sourceID)
+}
+
+func (r *MetricsRepository) listAdditionalCostsBySource(ctx context.Context, db metricsDB, userID, adminAccountID, sourceID string) ([]AdditionalCostRecord, error) {
+	rows, err := db.Query(ctx, `
+		SELECT id,type,name,business_date::text,amount_cents,original_amount,rate,usage_rate,days,source_id,batch_id,account_asset_id,note,estimated,created_at
+		FROM dashboard_additional_costs
+		WHERE user_id=$1 AND admin_account_id=$2 AND ((source_id=$3 AND source_id <> '') OR (id=$3 AND source_id=''))
+		ORDER BY business_date,id
+	`, userID, adminAccountID, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]AdditionalCostRecord, 0)
+	for rows.Next() {
+		var item AdditionalCostRecord
+		if err := rows.Scan(&item.ID, &item.Type, &item.Name, &item.BusinessDate, &item.AmountCents, &item.OriginalAmount, &item.Rate, &item.UsageRate, &item.Days, &item.SourceID, &item.BatchID, &item.AccountAssetID, &item.Note, &item.Estimated, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		item.UserID, item.AdminAccountID = userID, adminAccountID
+		item.Amount = float64(item.AmountCents) / 100
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, ErrAdditionalCostNotFound
+	}
+	for _, item := range items {
+		if err := validateEditableAdditionalCostRecord(item); err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
 }
 
 // Upsert 插入或更新指定用户指定工作区指定日期的快照行。

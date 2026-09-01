@@ -871,11 +871,11 @@ describe('question-answer batch behavior', () => {
       expect.any(AbortSignal),
     )
     expect(wrapper.text()).not.toContain('正在处理')
-    expect(wrapper.text()).not.toContain('已终止')
+    expect(wrapper.text()).toContain('已终止')
     expect(wrapper.findAll('button').some(button => button.text().includes('终止本次问答'))).toBe(false)
 
-    expect(wrapper.find('[data-testid="question-answer-processed"]').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('已终止')
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+    expect(processed.text()).toContain('本批次已处理 0 条 · 正确 0 · 错误 0')
   })
 
   it('allows judgment only for succeeded records while a batch is active', async () => {

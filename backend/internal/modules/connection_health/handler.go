@@ -36,7 +36,8 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/probe", handler.probe)
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/probe", handler.probeTarget)
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/probe-stream", handler.probeTargetStream)
-	mux.HandleFunc("PUT /api/connection-health/targets/{id}/intelligence-weight", handler.setTargetIntelligenceWeight)
+	// Retain the retired route so older clients can roll forward without an error.
+	mux.HandleFunc("PUT /api/connection-health/targets/{id}/intelligence-weight", handler.ignoreRetiredIntelligenceWeight)
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/disable", handler.disable)
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/restore", handler.restore)
 	mux.HandleFunc("GET /api/connection-health/policies", handler.listPolicies)
@@ -100,25 +101,13 @@ func (h *Handler) setTargetSchedulable(w http.ResponseWriter, r *http.Request) {
 	httpjson.Write(w, http.StatusOK, result)
 }
 
-func (h *Handler) setTargetIntelligenceWeight(w http.ResponseWriter, r *http.Request) {
-	userID, ok := authctx.UserID(r.Context())
+func (h *Handler) ignoreRetiredIntelligenceWeight(w http.ResponseWriter, r *http.Request) {
+	_, ok := authctx.UserID(r.Context())
 	if !ok {
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
 		return
 	}
-	var input UpdateTargetIntelligenceWeightInput
-	if err := httpjson.Decode(r, &input); err != nil || !input.IntelligenceWeight.Set {
-		httpjson.WriteError(w, http.StatusBadRequest, ErrorIntelligenceWeightInvalid)
-		return
-	}
-	result, err := h.service.SetTargetIntelligenceWeight(
-		r.Context(), userID, r.PathValue("id"), input.IntelligenceWeight.Value,
-	)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	httpjson.Write(w, http.StatusOK, result)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) storedSummary(w http.ResponseWriter, r *http.Request) {

@@ -39,10 +39,9 @@ import type {
   AdminGroupHealth,
 	AdminGroupPolicyConfiguration,
   ConnectionHealthPolicy,
-  ModelHealth,
-  PolicyInput,
+	ModelHealth,
+	PolicyInput,
 	PrioritySyncStatus,
-  TargetIntelligenceWeightResult,
 } from '../types/connectionHealth'
 import { resolveConnectionHealthStrategyMode } from '../utils/connectionHealthPolicy'
 import {
@@ -806,21 +805,6 @@ const onTargetPolicySaved = async () => {
 const probeDialogOpen = ref(false)
 const probeDialogTarget = ref<ManualProbeTargetSummary | null>(null)
 
-const applyTargetIntelligenceWeight = (result: TargetIntelligenceWeightResult) => {
-  adminGroups.value = adminGroups.value.map(group => ({
-    ...group,
-    accounts: group.accounts.map(account => account.targetId === result.targetId
-      ? { ...account, intelligenceWeight: result.intelligenceWeight }
-      : account),
-  }))
-  if (probeDialogTarget.value?.targetId === result.targetId) {
-    probeDialogTarget.value = {
-      ...probeDialogTarget.value,
-      intelligenceWeight: result.intelligenceWeight,
-    }
-  }
-}
-
 const onProbeAccount = (account: AdminGroupAccount) => {
   if (!selectedGroup.value || !account.probeAvailable) return
   const formalModelMap = new Map<string, { id: string; name: string; providerFamily?: string }>()
@@ -841,7 +825,6 @@ const onProbeAccount = (account: AdminGroupAccount) => {
     status: account.status,
     groupName: selectedGroup.value.name,
     formalModels: Array.from(formalModelMap.values()),
-    intelligenceWeight: account.intelligenceWeight,
   }
   probeDialogOpen.value = true
 }
@@ -1429,7 +1412,6 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           @view-events="onViewEventsAccount"
           @set-schedulable="onSetTargetSchedulable"
           @assign-policy="onAssignPolicy"
-          @intelligence-weight-saved="applyTargetIntelligenceWeight"
           @update:hide-unmonitored-accounts="setHideUnmonitoredAccounts"
         />
       </div>
@@ -1462,7 +1444,6 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       @question-answer-started="onQuestionAnswerStarted"
       @question-answer-viewed="onQuestionAnswerViewed"
       @question-answer-preferences-changed="onQuestionAnswerPreferencesChanged"
-      @intelligence-weight-saved="applyTargetIntelligenceWeight"
     />
 
     <ProbePolicyListDialog

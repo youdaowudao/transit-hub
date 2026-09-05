@@ -25,7 +25,6 @@ import {
   getQuestionAnswerHistory,
   listTestQuestions,
   setQuestionAnswerJudgment,
-  setTargetIntelligenceWeight,
   startQuestionAnswerBatch,
 } from '../../api/connectionHealth'
 import type {
@@ -45,14 +44,12 @@ import {
   partitionQuestionAnswerReviewRecords,
   questionAnswerBatchCompletedAt,
   questionAnswerElapsedMilliseconds,
-  questionAnswerIntelligenceSuggestion,
   questionAnswerReviewStatsFromRecords,
   questionAnswerStatsReconcile,
   resolveQuestionAnswerSelection,
   questionAnswerSubmissionSummary,
   replaceQuestionAnswerRecord,
   shortQuestionAnswerBatchId,
-  type QuestionAnswerIntelligenceSuggestion,
   type QuestionAnswerOperationScope,
 } from '../../utils/questionAnswers'
 import {
@@ -61,9 +58,7 @@ import {
 } from '../../utils/connectionHealthPreferences'
 import QuestionAnswerHighlightedText from './QuestionAnswerHighlightedText.vue'
 import QuestionAnswerStatsBar from './QuestionAnswerStatsBar.vue'
-import AccountIntelligenceWeightEditor from './AccountIntelligenceWeightEditor.vue'
 import { t, te } from '@/locales'
-import type { TargetIntelligenceWeightResult } from '../../types/connectionHealth'
 
 export interface ManualProbeTargetSummary {
   targetId: string
@@ -73,7 +68,6 @@ export interface ManualProbeTargetSummary {
   status: string
   groupName: string
   formalModels: ManualProbeModelOption[]
-  intelligenceWeight: number | null
 }
 
 const props = withDefaults(defineProps<{
@@ -90,7 +84,6 @@ const emit = defineEmits<{
   (event: 'question-answer-started', targetId: string): void
   (event: 'question-answer-viewed', targetId: string): void
   (event: 'question-answer-preferences-changed', preferences: QuestionAnswerSelectionPreferences): void
-  (event: 'intelligence-weight-saved', result: TargetIntelligenceWeightResult): void
 }>()
 
 const prefix = 'admin.connectionHealth.manualProbeDialog'
@@ -135,8 +128,6 @@ const qaCancelling = ref(false)
 const qaRuntimeBatch = ref<QuestionAnswerBatch | null>(null)
 const qaReviewBatch = ref<QuestionAnswerBatch | null>(null)
 const qaReviewBatchSyncFailed = ref(false)
-const qaAdoptingIntelligenceWeight = ref(false)
-const qaAdoptionErrorKey = ref('')
 const qaReviewLoadingBatchId = ref<string | null>(null)
 const qaHistory = ref<QuestionAnswerHistory>({
   records: [],
@@ -302,7 +293,6 @@ const resetQuestionAnswerTargetState = () => {
   qaMarking.value = new Map()
   qaErrorKey.value = ''
   qaReviewBatchSyncFailed.value = false
-  qaAdoptionErrorKey.value = ''
   qaCompletedNotice.value = false
   qaSelectionDataReady = false
 }
@@ -551,11 +541,6 @@ const qaStartBlockedReason = computed(() => {
   return ''
 })
 const qaReviewPartition = computed(() => partitionQuestionAnswerReviewRecords(qaReviewBatch.value?.records ?? []))
-const qaIntelligenceSuggestion = computed<QuestionAnswerIntelligenceSuggestion>(() => (
-  qaReviewBatch.value
-    ? questionAnswerIntelligenceSuggestion(qaReviewBatch.value)
-    : { status: 'blocked' }
-))
 const qaPendingReviewRecords = computed(() => qaReviewPartition.value.pendingReview)
 const qaReviewedRecords = computed(() => qaReviewPartition.value.reviewed)
 const qaFailedRecords = computed(() => qaReviewPartition.value.failed)
@@ -1275,45 +1260,6 @@ const clearQuestionAnswerMarking = (recordId: string) => {
   qaMarking.value = marking
 }
 
-const isTargetIntelligenceWeightResult = (
-  result: unknown,
-  targetId: string,
-): result is TargetIntelligenceWeightResult => {
-  if (!result || typeof result !== 'object') return false
-  const value = result as Partial<TargetIntelligenceWeightResult>
-  return value.targetId === targetId
-    && Object.prototype.hasOwnProperty.call(value, 'intelligenceWeight')
-    && (value.intelligenceWeight === null
-      || (typeof value.intelligenceWeight === 'number'
-        && Number.isInteger(value.intelligenceWeight)
-        && value.intelligenceWeight >= 0
-        && value.intelligenceWeight <= 100))
-}
-
-const adoptQuestionAnswerIntelligenceWeight = async () => {
-  if (
-    !props.target
-    || qaIntelligenceSuggestion.value.status !== 'ready'
-    || qaAdoptingIntelligenceWeight.value
-  ) return
-  const targetId = props.target.targetId
-  const suggestedValue = qaIntelligenceSuggestion.value.value
-  qaAdoptingIntelligenceWeight.value = true
-  qaAdoptionErrorKey.value = ''
-  try {
-    const result = await setTargetIntelligenceWeight(targetId, suggestedValue)
-    if (!isTargetIntelligenceWeightResult(result, targetId)) {
-      qaAdoptionErrorKey.value = 'admin.connectionHealth.intelligenceWeight.contractInvalid'
-      return
-    }
-    emit('intelligence-weight-saved', result)
-  } catch {
-    qaAdoptionErrorKey.value = 'admin.connectionHealth.manualProbeDialog.questionAnswer.adoptFailed'
-  } finally {
-    qaAdoptingIntelligenceWeight.value = false
-  }
-}
-
 const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment: QuestionAnswerJudgment) => {
   if (!props.target || record.status !== 'succeeded' || qaMarking.value.has(record.id)) return
   const targetId = props.target.targetId
@@ -1568,12 +1514,6 @@ const close = () => {
                   {{ target.accountName }} · {{ target.platform || '-' }} · {{ target.type || '-' }} · {{ target.status || '-' }} · {{ target.groupName }}
                 </p>
               </div>
-              <AccountIntelligenceWeightEditor
-                :target-id="target.targetId"
-                :model-value="target.intelligenceWeight"
-                compact
-                @saved="emit('intelligence-weight-saved', $event)"
-              />
             </div>
             <button type="button" class="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface-elevated hover:text-foreground" @click="close">
               <X class="h-4 w-4" />
@@ -1651,22 +1591,6 @@ const close = () => {
                         >
                           {{ t(prefix + '.questionAnswer.latestBatchStillRunning') }}
                         </p>
-                        <div v-if="qaIntelligenceSuggestion.status !== 'blocked'" data-testid="question-answer-suggestion" class="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                          <span v-if="qaIntelligenceSuggestion.status === 'none'">{{ t(prefix + '.questionAnswer.suggestionNone') }}</span>
-                          <template v-else>
-                            <span>{{ t(prefix + '.questionAnswer.suggestionValue', { value: qaIntelligenceSuggestion.value }) }}</span>
-                            <button
-                              type="button"
-                              data-testid="question-answer-adopt"
-                              class="rounded-md border border-primary/40 px-2.5 py-1.5 font-medium text-primary disabled:opacity-50"
-                              :disabled="qaAdoptingIntelligenceWeight"
-                              @click="adoptQuestionAnswerIntelligenceWeight"
-                            >
-                              {{ qaAdoptingIntelligenceWeight ? t(prefix + '.questionAnswer.adopting') : t(prefix + '.questionAnswer.adopt') }}
-                            </button>
-                          </template>
-                          <span v-if="qaAdoptionErrorKey" data-testid="question-answer-adopt-error" class="text-red-600 dark:text-red-400">{{ t(qaAdoptionErrorKey) }}</span>
-                        </div>
                       </div>
                       <div class="flex items-center gap-2">
                         <button v-if="qaRuntimeBatch && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line" @click="reviewLatestQuestionAnswerBatch">

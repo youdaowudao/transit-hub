@@ -17,7 +17,6 @@ const harness = vi.hoisted(() => ({
   cancelQuestionAnswerBatch: vi.fn(),
   startQuestionAnswerBatch: vi.fn(),
   setQuestionAnswerJudgment: vi.fn(),
-  setTargetIntelligenceWeight: vi.fn(),
 }))
 
 vi.mock('@/modules/admin/composables/useConnectionHealth', () => ({
@@ -39,7 +38,6 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
   getQuestionAnswerHistory: harness.getQuestionAnswerHistory,
   listTestQuestions: harness.listTestQuestions,
   setQuestionAnswerJudgment: harness.setQuestionAnswerJudgment,
-  setTargetIntelligenceWeight: harness.setTargetIntelligenceWeight,
   startQuestionAnswerBatch: harness.startQuestionAnswerBatch,
 }))
 
@@ -159,34 +157,6 @@ const terminalReviewHistory = (nextRecords = reviewRecords) => ({
   todayStats: terminalReviewBatch(nextRecords).stats,
 })
 
-const task7Batch = (nextRecords: typeof reviewRecords, overrides: Partial<typeof activeBatch> = {}) => {
-  const batchRecords = nextRecords.map(record => ({ ...record, batchId: 'batch-task7' }))
-  const succeeded = batchRecords.filter(record => record.status === 'succeeded').length
-  const failed = batchRecords.filter(record => record.status === 'failed').length
-  const cancelled = batchRecords.filter(record => record.status === 'cancelled').length
-  return {
-    ...activeBatch,
-    batchId: 'batch-task7',
-    records: batchRecords,
-    submittedCount: batchRecords.length,
-    completedCount: batchRecords.length,
-    runningCount: 0,
-    active: false,
-    currentModel: '',
-    currentQuestion: '',
-    stats: {
-      requests: { submitted: batchRecords.length, inProgress: 0, succeeded, failed, cancelled },
-      reviews: {
-        unreviewed: batchRecords.filter(record => record.answerJudgment === 'unreviewed').length,
-        correct: batchRecords.filter(record => record.answerJudgment === 'correct').length,
-        incorrect: batchRecords.filter(record => record.answerJudgment === 'incorrect').length,
-      },
-      byModel: [],
-    },
-    ...overrides,
-  }
-}
-
 const historicalBatch = (batchId: string, firstQuestionName = 'Unreviewed one') => {
   const batchRecords = reviewRecords.map((record, index) => ({
     ...record,
@@ -207,7 +177,6 @@ const primaryTarget: ManualProbeTargetSummary = {
   status: 'active',
   groupName: 'Group A',
   formalModels: [],
-  intelligenceWeight: null,
 }
 
 const secondaryTarget: ManualProbeTargetSummary = {
@@ -235,7 +204,6 @@ beforeEach(() => {
   harness.cancelQuestionAnswerBatch.mockReset().mockResolvedValue({ ...activeBatch, active: false, runningCount: 0 })
   harness.startQuestionAnswerBatch.mockReset().mockResolvedValue(activeBatch)
   harness.setQuestionAnswerJudgment.mockReset()
-  harness.setTargetIntelligenceWeight.mockReset()
 })
 
 afterEach(() => {
@@ -344,140 +312,19 @@ const appearsBefore = (first: Element, second: Element) => Boolean(
 )
 
 describe('question-answer low-operation review', () => {
-  it('hides intelligence suggestion until the current batch is terminal and fully reviewed', async () => {
+  it('keeps manual review and accuracy while hiding retired intelligence controls', async () => {
     harness.getQuestionAnswerHistory.mockResolvedValue(emptyHistory)
-    harness.getLatestQuestionAnswerBatch.mockResolvedValue(task7Batch([
-      { ...reviewRecords[2], id: 'task7-active-reviewed', answerJudgment: 'correct' },
-    ], { active: true }))
-    const activeWrapper = await mountQuestionAnswerDialog()
-    expect(activeWrapper.find('[data-testid="question-answer-suggestion"]').exists()).toBe(false)
-    activeWrapper.unmount()
-
-    harness.getLatestQuestionAnswerBatch.mockResolvedValue(task7Batch([
-      { ...reviewRecords[4], id: 'task7-failed', status: 'failed', answerJudgment: null },
-      { ...reviewRecords[5], id: 'task7-cancelled', status: 'cancelled', answerJudgment: null },
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch([
+      { ...reviewRecords[2], id: 'retired-correct', answerJudgment: 'correct' },
+      { ...reviewRecords[3], id: 'retired-incorrect', answerJudgment: 'incorrect' },
+      { ...reviewRecords[0], id: 'retired-unreviewed', answerJudgment: 'unreviewed' },
     ]))
-    const noneWrapper = await mountQuestionAnswerDialog()
-    expect(noneWrapper.get('[data-testid="question-answer-suggestion"]').text()).toContain('无建议')
-    expect(noneWrapper.find('[data-testid="question-answer-adopt"]').exists()).toBe(false)
-  })
-
-  it('renders the equal-weight suggestion from the current full batch', async () => {
-    harness.getQuestionAnswerHistory.mockResolvedValue(emptyHistory)
-    harness.getLatestQuestionAnswerBatch.mockResolvedValue(task7Batch([
-      { ...reviewRecords[2], id: 'task7-correct-1', answerJudgment: 'correct' },
-      { ...reviewRecords[2], id: 'task7-correct-2', answerJudgment: 'correct' },
-      { ...reviewRecords[3], id: 'task7-incorrect', answerJudgment: 'incorrect' },
-      { ...reviewRecords[4], id: 'task7-failed', status: 'failed', answerJudgment: null },
-    ]))
-    const wrapper = await mountQuestionAnswerDialog()
-    expect(wrapper.get('[data-testid="question-answer-suggestion"]').text()).toContain('67')
-    expect(wrapper.get('[data-testid="question-answer-adopt"]').exists()).toBe(true)
-  })
-
-  it('adopts once on a double click and forwards the authoritative result', async () => {
-    harness.getQuestionAnswerHistory.mockResolvedValue(emptyHistory)
-    harness.getLatestQuestionAnswerBatch.mockResolvedValue(task7Batch([
-      { ...reviewRecords[2], id: 'task7-c1', answerJudgment: 'correct' },
-      { ...reviewRecords[2], id: 'task7-c2', answerJudgment: 'correct' },
-      { ...reviewRecords[3], id: 'task7-i1', answerJudgment: 'incorrect' },
-    ]))
-    harness.setTargetIntelligenceWeight.mockResolvedValue({ targetId: primaryTarget.targetId, intelligenceWeight: 67 })
-    const wrapper = await mountQuestionAnswerDialog()
-    const adopt = wrapper.get('[data-testid="question-answer-adopt"]')
-    await Promise.all([adopt.trigger('click'), adopt.trigger('click')])
-    await flushPromises()
-    expect(harness.setTargetIntelligenceWeight).toHaveBeenCalledTimes(1)
-    expect(harness.setTargetIntelligenceWeight).toHaveBeenCalledWith(primaryTarget.targetId, 67)
-    expect(wrapper.emitted('intelligence-weight-saved')).toEqual([[
-      { targetId: primaryTarget.targetId, intelligenceWeight: 67 },
-    ]])
-  })
-
-  it('keeps the suggestion and original value when adoption fails', async () => {
-    harness.getQuestionAnswerHistory.mockResolvedValue(emptyHistory)
-    harness.getLatestQuestionAnswerBatch.mockResolvedValue(task7Batch([
-      { ...reviewRecords[3], id: 'task7-only-incorrect', answerJudgment: 'incorrect' },
-    ]))
-    harness.setTargetIntelligenceWeight.mockRejectedValue(new Error('write failed'))
-    const wrapper = await mountQuestionAnswerDialog({ ...primaryTarget, intelligenceWeight: 42 })
-    await wrapper.get('[data-testid="question-answer-adopt"]').trigger('click')
-    await flushPromises()
-    expect(wrapper.get('[data-testid="question-answer-suggestion"]').text()).toContain('0')
-    expect(wrapper.get('[data-testid="question-answer-adopt-error"]').exists()).toBe(true)
-    expect(wrapper.emitted('intelligence-weight-saved')).toBeUndefined()
-    expect(wrapper.get('[data-testid="intelligence-weight-current"]').text()).toBe('42')
-  })
-
-  it.each([
-    undefined,
-    { targetId: 'other-target', intelligenceWeight: 101 },
-    { targetId: primaryTarget.targetId },
-    { targetId: primaryTarget.targetId, intelligenceWeight: '67' },
-  ])('rejects malformed adoption response %# without changing the original value', async (malformed) => {
-    harness.getQuestionAnswerHistory.mockResolvedValue(emptyHistory)
-    harness.getLatestQuestionAnswerBatch.mockResolvedValue(task7Batch([
-      { ...reviewRecords[2], id: 'task7-only-correct', answerJudgment: 'correct' },
-    ]))
-    harness.setTargetIntelligenceWeight.mockResolvedValue(malformed)
-    const wrapper = await mountQuestionAnswerDialog({ ...primaryTarget, intelligenceWeight: 42 })
-    await wrapper.get('[data-testid="question-answer-adopt"]').trigger('click')
-    await flushPromises()
-    expect(wrapper.get('[data-testid="question-answer-adopt-error"]').exists()).toBe(true)
-    expect(wrapper.emitted('intelligence-weight-saved')).toBeUndefined()
-    expect(wrapper.get('[data-testid="intelligence-weight-current"]').text()).toBe('42')
-  })
-
-  it('rejudges without auto-adopting the refreshed suggestion', async () => {
-    const initialRecords = [
-      { ...reviewRecords[2], id: 'task7-review-correct', answerJudgment: 'correct' as const },
-      { ...reviewRecords[3], id: 'task7-review-incorrect', answerJudgment: 'incorrect' as const },
-    ]
-    const correctedRecords = initialRecords.map(record => ({
-      ...record,
-      answerJudgment: 'correct' as const,
-      manualError: false,
-    }))
-    let historyReads = 0
-    harness.getLatestQuestionAnswerBatch.mockResolvedValue(task7Batch(initialRecords))
-    harness.getQuestionAnswerBatch.mockResolvedValue(task7Batch(correctedRecords))
-    harness.getQuestionAnswerHistory.mockImplementation(() => (
-      historyReads++ === 0
-        ? terminalReviewHistory(initialRecords)
-        : terminalReviewHistory(correctedRecords)
-    ))
-    harness.setQuestionAnswerJudgment.mockResolvedValue(correctedRecords[1])
-    harness.setTargetIntelligenceWeight
-      .mockResolvedValueOnce({ targetId: primaryTarget.targetId, intelligenceWeight: 50 })
-      .mockResolvedValueOnce({ targetId: primaryTarget.targetId, intelligenceWeight: 100 })
 
     const wrapper = await mountQuestionAnswerDialog()
-    expect(wrapper.get('[data-testid="question-answer-suggestion"]').text()).toContain('50')
-    await wrapper.get('[data-testid="question-answer-adopt"]').trigger('click')
-    await flushPromises()
-    expect(harness.setTargetIntelligenceWeight).toHaveBeenCalledTimes(1)
-    expect(wrapper.emitted('intelligence-weight-saved')).toEqual([[
-      { targetId: primaryTarget.targetId, intelligenceWeight: 50 },
-    ]])
 
-    await openProcessedAnswers(wrapper)
-    const incorrectRow = rowContaining(wrapper, 'Reviewed incorrect')
-    const correct = judgmentButtons(incorrectRow).find(button => button.text().trim() === '正确')
-    if (!correct) throw new Error('missing task7 rejudgment action')
-    await correct.trigger('click')
-    await flushPromises()
-    expect(wrapper.get('[data-testid="question-answer-suggestion"]').text()).toContain('100')
-    expect(harness.setTargetIntelligenceWeight).toHaveBeenCalledTimes(1)
-    expect(wrapper.emitted('intelligence-weight-saved')).toHaveLength(1)
-
-    await wrapper.get('[data-testid="question-answer-adopt"]').trigger('click')
-    await flushPromises()
-    expect(harness.setTargetIntelligenceWeight).toHaveBeenCalledTimes(2)
-    expect(harness.setTargetIntelligenceWeight).toHaveBeenLastCalledWith(primaryTarget.targetId, 100)
-    expect(wrapper.emitted('intelligence-weight-saved')).toEqual([
-      [{ targetId: primaryTarget.targetId, intelligenceWeight: 50 }],
-      [{ targetId: primaryTarget.targetId, intelligenceWeight: 100 }],
-    ])
+    expect(wrapper.find('[data-testid="account-intelligence-weight-editor"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="question-answer-stats-bar"]').text()).toContain('正确率')
+    expect(judgmentButtons(wrapper.get('[data-testid="question-answer-pending"]'))).not.toHaveLength(0)
   })
 
   it('opens and reopens in the first question-answer mode with one initialization and the fixed near-viewport layout', async () => {
@@ -1204,7 +1051,6 @@ describe('question-answer batch behavior', () => {
         status: 'active',
         groupName: 'Group B',
         formalModels: [],
-        intelligenceWeight: null,
       },
     })
     await flushPromises()
@@ -1250,7 +1096,6 @@ describe('question-answer batch behavior', () => {
         status: 'active',
         groupName: 'Group B',
         formalModels: [],
-        intelligenceWeight: null,
       },
     })
     await flushPromises()

@@ -108,7 +108,6 @@ const makeAccount = (
   policyAssignmentSource: 'none',
   excludedFromGroupPolicy: false,
   probeModelsConfigured: false,
-  intelligenceWeight: null,
   ...overrides,
 })
 

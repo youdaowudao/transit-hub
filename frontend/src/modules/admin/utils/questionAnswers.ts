@@ -33,11 +33,6 @@ export interface QuestionAnswerBatchTarget {
   groupNames: string[]
 }
 
-export type QuestionAnswerIntelligenceSuggestion =
-  | { status: 'blocked' }
-  | { status: 'none' }
-  | { status: 'ready'; value: number }
-
 const stableUniqueIds = (ids: string[]): string[] => Array.from(new Set(ids))
 
 export const resolveQuestionAnswerSelection = (
@@ -403,28 +398,4 @@ export const questionAnswerBatchCompletedAt = (batch: QuestionAnswerBatch): stri
     if (!latest || milliseconds > latest.milliseconds) latest = { value: record.completedAt, milliseconds }
   }
   return latest?.value ?? null
-}
-
-const questionAnswerTerminalStatuses = new Set<QuestionAnswerStatus>([
-  'succeeded',
-  'failed',
-  'cancelled',
-])
-
-export const questionAnswerIntelligenceSuggestion = (
-  batch: QuestionAnswerBatch,
-): QuestionAnswerIntelligenceSuggestion => {
-  if (
-    batch.active
-    || batch.records.some(record => !questionAnswerTerminalStatuses.has(record.status))
-  ) return { status: 'blocked' }
-
-  const successful = batch.records.filter(record => record.status === 'succeeded')
-  if (successful.some(record => (
-    record.answerJudgment !== 'correct' && record.answerJudgment !== 'incorrect'
-  ))) return { status: 'blocked' }
-  if (successful.length === 0) return { status: 'none' }
-
-  const correct = successful.filter(record => record.answerJudgment === 'correct').length
-  return { status: 'ready', value: Math.round((correct / successful.length) * 100) }
 }

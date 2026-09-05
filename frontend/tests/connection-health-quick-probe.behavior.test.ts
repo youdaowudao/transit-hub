@@ -182,7 +182,6 @@ const makeAccount = (overrides: Partial<AdminGroupAccount> = {}): AdminGroupAcco
   hasEnabledProbePolicy: true,
   priorityManaged: true,
   probeModelsConfigured: true,
-  intelligenceWeight: null,
   ...overrides,
 })
 

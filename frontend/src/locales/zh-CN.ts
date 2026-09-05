@@ -976,6 +976,14 @@ export default {
       saveError: '保存失败，请重试。'
     },
     connectionHealth: {
+      accountTier: {
+        label: '账号层级',
+        first: '第一层',
+        second: '第二层',
+        edit: '编辑账号层级',
+        save: '保存账号层级',
+        cancel: '取消编辑层级',
+      },
       title: '分组健康',
       subtitle: '对当前 admin workspace 下分组内的账号/渠道做独立轻量探活，监控健康状态并支持自动降级/恢复。',
       adminSubtitle: '展示当前 admin workspace 下的全量分组，点击账号数查看分组下账号/渠道及独立探活状态。',

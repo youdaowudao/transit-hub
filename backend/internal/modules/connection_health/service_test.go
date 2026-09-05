@@ -19,6 +19,7 @@ import (
 
 // fakeRepository 是 healthRepository 的内存实现，供 service 单测使用，不连接真实数据库。
 type fakeRepository struct {
+	accountTiers              map[string]int
 	policies                  []Policy
 	states                    map[string]map[string]ConnectionHealthState // connectionID -> modelName -> state
 	events                    []ConnectionHealthEvent

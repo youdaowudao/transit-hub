@@ -21,6 +21,7 @@ import {
   Zap,
 } from 'lucide-vue-next'
 import { Tooltip } from '@/components/ui/tooltip'
+import AccountTierEditor from './AccountTierEditor.vue'
 import {
   connectionHealthMessageKey,
   connectionHealthStateBadgeClass,
@@ -31,6 +32,7 @@ import {
   remoteActionLabelKey,
 } from '../../composables/useConnectionHealth'
 import type {
+  AccountTierResult,
   AdminGroupAccount,
   AdminGroupHealth,
   ConnectionHealthState,
@@ -55,6 +57,7 @@ const props = withDefaults(defineProps<{
 })
 
 const emit = defineEmits<{
+  (event: 'tier-saved', result: AccountTierResult): void
   (event: 'setup', group: AdminGroupHealth): void
   (event: 'probe', account: AdminGroupAccount): void
   (event: 'quick-probe', account: AdminGroupAccount): void
@@ -802,6 +805,12 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                 <td class="px-3 py-3">
                   <div class="max-w-56">
                     <p class="truncate font-medium text-foreground">{{ account.name || account.id }}</p>
+                    <AccountTierEditor
+                      v-if="isSub2API(account)"
+                      :target-id="account.targetId"
+                      :account-tier="account.accountTier"
+                      @saved="emit('tier-saved', $event)"
+                    />
                     <p class="mt-0.5 truncate text-xs text-muted-foreground">
                       {{ account.platform || account.type || '-' }} · {{ upstreamStatusLabel(account) }} · {{ schedulableLabel(account) }}
                     </p>

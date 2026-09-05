@@ -130,12 +130,20 @@ export interface AdminGroupUnprobedModel {
   budgetPolicyId?: string
 }
 
+export type AccountTier = 1 | 2
+
+export interface AccountTierResult {
+  targetId: string
+  accountTier: AccountTier
+}
+
 export interface AdminGroupAccount {
   id: string
   name: string
   platform: string
   type: string
   status: string
+  accountTier?: AccountTier
   mainSiteError?: string
   schedulable?: boolean
   schedulableSource?: string

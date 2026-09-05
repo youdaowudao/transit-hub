@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import type {
+  AccountTierResult,
   AdminGroupPolicyConfiguration,
   AdminGroupPolicyConfigurationInput,
   AdminGroupHealth,
@@ -72,6 +73,8 @@ let activeEventsScope = ''
 let adminGroupsRequestSequence = 0
 let adminGroupsLoadingRequests = 0
 let adminGroupsWorkspace = ''
+let accountTierRevision = 0
+const savedAccountTiers = new Map<string, AccountTierResult & { revision: number }>()
 let adminGroupsRefreshController: AbortController | null = null
 const manualRefreshRequests = ref(0)
 const terminalRefreshRequests = ref(0)
@@ -150,6 +153,8 @@ export function useConnectionHealth() {
     if (workspaceId === adminGroupsWorkspace) return
     cancelAdminGroupsRefresh()
     adminGroupsWorkspace = workspaceId
+    accountTierRevision = 0
+    savedAccountTiers.clear()
     adminGroups.value = []
     overview.value = null
     manualRefreshState.value = null
@@ -159,6 +164,31 @@ export function useConnectionHealth() {
     refreshConflictNotice.value = ''
     errorKey.value = ''
   }
+
+  const applyAccountTier = (result: AccountTierResult) => {
+    if (!adminGroupsWorkspace || !result.targetId.startsWith(`sub2api:${adminGroupsWorkspace}:`)
+      || (result.accountTier !== 1 && result.accountTier !== 2)) return
+    savedAccountTiers.set(result.targetId, { ...result, revision: ++accountTierRevision })
+    adminGroups.value = adminGroups.value.map(group => ({
+      ...group,
+      accounts: group.accounts.map(account => account.targetId === result.targetId
+        ? { ...account, accountTier: result.accountTier }
+        : account),
+    }))
+  }
+
+  // A read started before a successful save may contain the previous tier.
+  // Preserve only that field; the rest of the response keeps its existing authority.
+  const preserveSavedAccountTiers = (nextGroups: AdminGroupHealth[], readRevision: number): AdminGroupHealth[] =>
+    nextGroups.map(group => ({
+      ...group,
+      accounts: group.accounts.map(account => {
+        const saved = savedAccountTiers.get(account.targetId)
+        return saved && saved.revision > readRevision
+          ? { ...account, accountTier: saved.accountTier }
+          : account
+      }),
+    }))
 
   const loadOverview = async () => {
     try {
@@ -186,6 +216,7 @@ export function useConnectionHealth() {
   const loadAdminGroups = (opts: { silent?: boolean } = {}): Promise<boolean> => {
     if (terminalRefreshRequests.value > 0) return Promise.resolve(false)
     const sequence = ++adminGroupsRequestSequence
+    const tierRevision = accountTierRevision
     const request = (async () => {
       if (!opts.silent) {
         adminGroupsLoadingRequests++
@@ -195,7 +226,7 @@ export function useConnectionHealth() {
       try {
         const nextGroups = await getConnectionHealthAdminGroups()
         if (sequence !== adminGroupsRequestSequence) return false
-        adminGroups.value = nextGroups
+        adminGroups.value = preserveSavedAccountTiers(nextGroups, tierRevision)
         overview.value = overviewFromAdminGroups(nextGroups)
         return true
       } catch (err) {
@@ -213,6 +244,7 @@ export function useConnectionHealth() {
   }
 
   type RefreshApplicationState = {
+    tierRevision: number
     runId: string
     revision: number
     terminalAccepted: boolean
@@ -266,7 +298,7 @@ export function useConnectionHealth() {
       manualRefreshSites.value = summary.sites
     }
     if (terminal.status === 'success' && terminal.groups) {
-      adminGroups.value = terminal.groups
+      adminGroups.value = preserveSavedAccountTiers(terminal.groups, state.tierRevision)
       overview.value = overviewFromAdminGroups(terminal.groups)
     }
     return state.terminalSucceeded
@@ -302,6 +334,7 @@ export function useConnectionHealth() {
     refreshRunSnapshot.value = null
     refreshConnectionState.value = 'connected'
     const application: RefreshApplicationState = {
+      tierRevision: accountTierRevision,
       runId: '',
       revision: -1,
       terminalAccepted: false,
@@ -628,6 +661,7 @@ export function useConnectionHealth() {
     refreshConnectionState,
     cancelAdminGroupsRefresh,
     setAdminGroupsWorkspace,
+    applyAccountTier,
     loadAll,
     loadOverview,
     loadGroups,

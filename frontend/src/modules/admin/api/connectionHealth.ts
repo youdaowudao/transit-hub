@@ -1,4 +1,6 @@
 import type {
+  AccountTier,
+  AccountTierResult,
   AdminGroupPolicyConfiguration,
   AdminGroupPolicyConfigurationInput,
   AdminGroupHealth,
@@ -85,6 +87,25 @@ export const getConnectionHealthStoredSummary = async (): Promise<ConnectionHeal
 
 export const getConnectionHealthGroups = async (): Promise<OwnGroupHealth[]> =>
   requestJson<OwnGroupHealth[]>('/connection-health/groups')
+
+const parseAccountTier = (payload: unknown, targetId: string, expectedTier?: AccountTier): AccountTierResult => {
+  if (!payload || typeof payload !== 'object') throw new Error('admin.connectionHealth.errors.request')
+  const result = payload as Partial<AccountTierResult>
+  if (result.targetId !== targetId || (result.accountTier !== 1 && result.accountTier !== 2)
+    || (expectedTier !== undefined && result.accountTier !== expectedTier)) {
+    throw new Error('admin.connectionHealth.errors.request')
+  }
+  return { targetId, accountTier: result.accountTier }
+}
+
+export const getAccountTier = async (targetId: string): Promise<AccountTierResult> =>
+  parseAccountTier(await requestJson<unknown>(`/connection-health/targets/${encodeURIComponent(targetId)}/tier`), targetId)
+
+export const saveAccountTier = async (targetId: string, accountTier: AccountTier): Promise<AccountTierResult> =>
+  parseAccountTier(await requestJson<unknown>(`/connection-health/targets/${encodeURIComponent(targetId)}/tier`, {
+    method: 'PUT',
+    body: JSON.stringify({ accountTier }),
+  }), targetId, accountTier)
 
 const parseAdminGroupHealth = (payload: unknown): AdminGroupHealth[] => {
   if (!Array.isArray(payload)) throw new Error('admin.connectionHealth.errors.request')

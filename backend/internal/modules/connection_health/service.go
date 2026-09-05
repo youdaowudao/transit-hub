@@ -30,6 +30,9 @@ type healthRepository interface {
 	ListLatestSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error)
 	ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error)
 	ListQuestionAnswerTodaySummaries(ctx context.Context, userID string, targetIDs []string) (map[string]QuestionAnswerTodaySummary, error)
+	GetAccountTier(ctx context.Context, userID string, adminAccountID string, targetID string) (int, error)
+	SaveAccountTier(ctx context.Context, userID string, adminAccountID string, targetID string, tier int) error
+	ListAccountTiers(ctx context.Context, userID string, adminAccountID string) (map[string]int, error)
 	CountFailureEventsSince(ctx context.Context, userID string, adminAccountID string, since time.Time) (int, error)
 	CountProbesToday(ctx context.Context, userID string, adminAccountID string, policyID string, dayStart time.Time) (int, error)
 	TryConsumeProbeBudget(ctx context.Context, userID string, adminAccountID string, policyID string, dayStart time.Time, limit int) (bool, error)

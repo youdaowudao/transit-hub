@@ -38,6 +38,8 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/probe-stream", handler.probeTargetStream)
 	// Retain the retired route so older clients can roll forward without an error.
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/intelligence-weight", handler.ignoreRetiredIntelligenceWeight)
+	mux.HandleFunc("GET /api/connection-health/targets/{id}/tier", handler.getAccountTier)
+	mux.HandleFunc("PUT /api/connection-health/targets/{id}/tier", handler.putAccountTier)
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/disable", handler.disable)
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/restore", handler.restore)
 	mux.HandleFunc("GET /api/connection-health/policies", handler.listPolicies)

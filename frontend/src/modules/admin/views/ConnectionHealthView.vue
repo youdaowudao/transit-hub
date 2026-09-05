@@ -35,6 +35,7 @@ import type { OwnGroupOption } from '../components/dashboard/PolicyConfigDrawer.
 import ProbePolicyListDialog from '../components/dashboard/ProbePolicyListDialog.vue'
 import TargetPolicyAssignmentDialog from '../components/dashboard/TargetPolicyAssignmentDialog.vue'
 import type {
+  AccountTierResult,
   AdminGroupAccount,
   AdminGroupHealth,
 	AdminGroupPolicyConfiguration,
@@ -81,6 +82,7 @@ const {
   refreshConnectionState,
   cancelAdminGroupsRefresh,
   setAdminGroupsWorkspace,
+  applyAccountTier,
   loadAll,
   loadGroups,
   loadAdminGroups,
@@ -805,6 +807,24 @@ const onTargetPolicySaved = async () => {
 const probeDialogOpen = ref(false)
 const probeDialogTarget = ref<ManualProbeTargetSummary | null>(null)
 
+const onAccountTierSaved = (result: AccountTierResult) => {
+  const workspaceId = currentAccount.value?.id
+  if (!workspaceId || !result.targetId.startsWith(`sub2api:${workspaceId}:`)) return
+  applyAccountTier(result)
+  if (probeDialogTarget.value?.targetId === result.targetId) {
+    probeDialogTarget.value = { ...probeDialogTarget.value, accountTier: result.accountTier }
+  }
+}
+
+watch(() => {
+  const targetId = probeDialogTarget.value?.targetId
+  return adminGroups.value.flatMap(group => group.accounts).find(account => account.targetId === targetId)?.accountTier
+}, accountTier => {
+  if (probeDialogTarget.value && accountTier !== undefined) {
+    probeDialogTarget.value = { ...probeDialogTarget.value, accountTier }
+  }
+})
+
 const onProbeAccount = (account: AdminGroupAccount) => {
   if (!selectedGroup.value || !account.probeAvailable) return
   const formalModelMap = new Map<string, { id: string; name: string; providerFamily?: string }>()
@@ -819,6 +839,7 @@ const onProbeAccount = (account: AdminGroupAccount) => {
   }
   probeDialogTarget.value = {
     targetId: account.targetId,
+    accountTier: account.accountTier,
     accountName: account.name || account.id,
     platform: selectedGroup.value.platform,
     type: account.type,
@@ -1412,6 +1433,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           @view-events="onViewEventsAccount"
           @set-schedulable="onSetTargetSchedulable"
           @assign-policy="onAssignPolicy"
+          @tier-saved="onAccountTierSaved"
           @update:hide-unmonitored-accounts="setHideUnmonitoredAccounts"
         />
       </div>
@@ -1441,6 +1463,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       :question-answer-preferences="preferences.questionAnswer"
       @close="probeDialogOpen = false"
       @completed="onFormalProbeCompleted"
+      @tier-saved="onAccountTierSaved"
       @question-answer-started="onQuestionAnswerStarted"
       @question-answer-viewed="onQuestionAnswerViewed"
       @question-answer-preferences-changed="onQuestionAnswerPreferencesChanged"

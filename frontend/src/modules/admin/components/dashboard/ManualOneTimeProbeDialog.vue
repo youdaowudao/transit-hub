@@ -28,6 +28,8 @@ import {
   startQuestionAnswerBatch,
 } from '../../api/connectionHealth'
 import type {
+  AccountTier,
+  AccountTierResult,
   ManualProbeModelOption,
   ManualProbeResult,
   ModelHealth,
@@ -58,10 +60,12 @@ import {
 } from '../../utils/connectionHealthPreferences'
 import QuestionAnswerHighlightedText from './QuestionAnswerHighlightedText.vue'
 import QuestionAnswerStatsBar from './QuestionAnswerStatsBar.vue'
+import AccountTierEditor from './AccountTierEditor.vue'
 import { t, te } from '@/locales'
 
 export interface ManualProbeTargetSummary {
   targetId: string
+  accountTier?: AccountTier
   accountName: string
   platform: string
   type: string
@@ -79,6 +83,7 @@ const props = withDefaults(defineProps<{
 })
 
 const emit = defineEmits<{
+  (event: 'tier-saved', result: AccountTierResult): void
   (event: 'close'): void
   (event: 'completed'): void
   (event: 'question-answer-started', targetId: string): void
@@ -1514,6 +1519,12 @@ const close = () => {
                   {{ target.accountName }} · {{ target.platform || '-' }} · {{ target.type || '-' }} · {{ target.status || '-' }} · {{ target.groupName }}
                 </p>
               </div>
+              <AccountTierEditor
+                v-if="target.targetId.toLowerCase().startsWith('sub2api:')"
+                :target-id="target.targetId"
+                :account-tier="target.accountTier"
+                @saved="emit('tier-saved', $event)"
+              />
             </div>
             <button type="button" class="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface-elevated hover:text-foreground" @click="close">
               <X class="h-4 w-4" />

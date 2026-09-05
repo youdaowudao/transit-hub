@@ -132,6 +132,7 @@ type AdminGroupAccount struct {
 	UpstreamKeyGroupMultiplier *float64 `json:"upstreamKeyGroupMultiplier,omitempty"`
 	// 独立探活字段。
 	TargetID               string        `json:"targetId"`
+	AccountTier            int           `json:"accountTier"`
 	ProbeAvailable         bool          `json:"probeAvailable"`
 	ProbeUnavailableReason string        `json:"probeUnavailableReason,omitempty"`
 	ModelHealth            []ModelHealth `json:"modelHealth"`
@@ -312,6 +313,13 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 	}
 	groupFetchDuration := time.Since(groupFetchStarted)
 	localReadStarted := time.Now()
+	accountTiers := make(map[string]int)
+	if session.Platform == upstream.PlatformSub2API {
+		accountTiers, err = s.repo.ListAccountTiers(ctx, userID, adminAccountID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	now := time.Now().UTC()
 	eventCutoff := now.Add(-eventRetentionWindow)
 	policies, err := s.repo.ListPolicies(ctx, userID, adminAccountID)
@@ -716,6 +724,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				UpstreamKeyGroupID:            upstreamKeyGroup.groupID,
 				UpstreamKeyGroupMultiplier:    upstreamKeyGroup.multiplier,
 				TargetID:                      targetID,
+				AccountTier:                   effectiveAccountTier(accountTiers[targetID]),
 				ProbeAvailable:                available,
 				ProbeUnavailableReason:        reason,
 				ModelHealth:                   modelHealth,

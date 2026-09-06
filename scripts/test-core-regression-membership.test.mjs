@@ -19,6 +19,8 @@ test('connection-health core gate keeps every question-answer regression member'
     'connection-health-today-accuracy.behavior.test.ts',
     'connection-health-intelligence-weight.behavior.test.ts',
     'connection-health-account-tier.behavior.test.ts',
+    'connection-health-priority-candidates.behavior.test.ts',
+    'connection-health-quick-probe.behavior.test.ts',
     'question-answer-review-fixture.test.mjs',
     'question-answer-batch-review-fixture.test.mjs',
     'question-answer-keyword-highlight-fixture.test.mjs',

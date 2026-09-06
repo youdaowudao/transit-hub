@@ -16,6 +16,9 @@ const account = (): AdminGroupAccount => ({
   hasEnabledPolicy: false, hasEnabledProbePolicy: false, priorityManaged: false,
   priorityConflict: true, prioritySyncBlocked: true, prioritySyncBlockReason: 'manual_priority',
   probeModelsConfigured: false, productionSortOrder: 0,
+  priorityCandidate: {
+    state: 'out_of_scope', reason: 'priority_conflict', priorityEvidence: 'conflict', blocksTakeover: true,
+  },
   todayQuestionAnswerSubmitted: 10, todayQuestionAnswerCorrect: 7,
 })
 const groups = (): AdminGroupHealth[] => ['one', 'two'].map(id => ({
@@ -23,14 +26,20 @@ const groups = (): AdminGroupHealth[] => ['one', 'two'].map(id => ({
   subscriptionType: '', multiplier: null, multiplierDisplay: '-', accountCount: 1, monitoredAccountCount: 0,
   healthSummary: { totalAccounts: 1, probeableAccounts: 1, unprobeableAccounts: 0, healthyModels: 0,
     degradedModels: 0, suspendedModels: 0, disabledModels: 0, unconfiguredModels: 0, lastProbeAt: null },
+  priorityCandidateSummary: {
+    mode: 'safety_lock', candidatePriorityReady: false, safetyReason: 'priority_conflict',
+    candidateCount: 0, outOfScopeCount: 1, blockerCount: 1, capacities: [],
+  },
   accounts: [account()],
 }))
 const wrappers: VueWrapper[] = []
 const service = useConnectionHealth() as ReturnType<typeof useConnectionHealth> & {
   applyAccountTier: (result: TierResult) => void
+  adminGroupsLoaded?: { value: boolean }
 }
 let stored: 1 | 2 | undefined
 let failSave = false
+let failGroups = false
 let invalidResponse = false
 let saveRequests: Array<{ url: string; body: unknown }> = []
 let deferGroups: (() => Promise<Response>) | undefined
@@ -41,10 +50,10 @@ const stats = { requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0
 
 beforeEach(() => {
   service.setAdminGroupsWorkspace(''); service.setAdminGroupsWorkspace('ws1')
-  stored = undefined; failSave = false; invalidResponse = false; saveRequests = []; deferGroups = undefined; deferSave = undefined
+  stored = undefined; failSave = false; failGroups = false; invalidResponse = false; saveRequests = []; deferGroups = undefined; deferSave = undefined
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = decodeURIComponent(String(input))
-    if (url.endsWith('/admin-groups')) return deferGroups ? deferGroups() : json(payload())
+    if (url.endsWith('/admin-groups')) return deferGroups ? deferGroups() : failGroups ? json({ message: 'admin.connectionHealth.errors.request' }, 500) : json(payload())
     if (url.endsWith('/tier')) {
       if (init?.method === 'PUT') {
         const body = JSON.parse(String(init.body)); saveRequests.push({ url, body })
@@ -88,7 +97,10 @@ const save = async (wrapper: VueWrapper, value: 1 | 2, index = 0) => {
   await editor.get('button[aria-label="保存账号层级"]').trigger('click'); await flushPromises()
 }
 const tiers = () => service.adminGroups.value.map(group => (group.accounts[0] as AdminGroupAccount & { accountTier?: number }).accountTier ?? 2)
-const withoutTiers = () => JSON.parse(JSON.stringify(service.adminGroups.value, (key, value) => key === 'accountTier' ? undefined : value))
+const withoutTiers = () => JSON.parse(JSON.stringify(service.adminGroups.value, (key, value) =>
+  key === 'accountTier' || key === 'priorityCandidate' || key === 'priorityCandidateSummary' ? undefined : value))
+const candidatePlanVisible = () => service.adminGroups.value.length > 0
+  && service.adminGroups.value.every(group => group.priorityCandidateSummary && group.accounts.every(row => row.priorityCandidate))
 
 describe('account-global tier editing', () => {
   it('mounts the real list with default second tier and retains existing account controls and statuses', async () => {
@@ -137,15 +149,33 @@ describe('account-global tier editing', () => {
     expect(tiers()).toEqual([1, 1]); expect(editor.find('[role="alert"]').exists()).toBe(false)
   })
 
-  it('an older list response cannot overwrite a tier saved while that read was in flight', async () => {
+  it('invalidates the whole candidate plan on save and rejects a pre-save response until a newer read succeeds', async () => {
     const wrapper = await mountRows()
+    expect(candidatePlanVisible()).toBe(true)
     let release!: (response: Response) => void
     const stale = payload(); deferGroups = () => new Promise(resolve => { release = resolve })
     const read = service.loadAdminGroups({ silent: true })
-    await save(wrapper, 1); expect(tiers()).toEqual([1, 1])
+    await save(wrapper, 1)
+    expect(tiers()).toEqual([1, 1])
+    expect.soft(candidatePlanVisible(), 'save must invalidate the previously loaded candidate plan').toBe(false)
     release(json(stale)); await read; await flushPromises()
     expect(tiers()).toEqual([1, 1])
+    expect(candidatePlanVisible(), 'a response issued before the save must not restore the stale candidate plan').toBe(false)
     expect(editors(wrapper).every(editor => editor.text().includes('第一层'))).toBe(true)
+    deferGroups = undefined
+    await service.loadAdminGroups({ silent: true }); await flushPromises()
+    expect(candidatePlanVisible()).toBe(true)
+  })
+
+  it('marks admin groups loaded only after an accepted successful read', async () => {
+    expect(service.adminGroupsLoaded?.value).toBe(false)
+    expect(await service.loadAdminGroups()).toBe(true)
+    expect(service.adminGroupsLoaded?.value).toBe(true)
+    service.setAdminGroupsWorkspace('ws2')
+    expect(service.adminGroupsLoaded?.value).toBe(false)
+    failGroups = true
+    expect(await service.loadAdminGroups()).toBe(false)
+    expect(service.adminGroupsLoaded?.value).toBe(false)
   })
 
   it('serializes the same target across two real editors so a late first save cannot overwrite the final second tier', async () => {

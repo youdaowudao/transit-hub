@@ -25,6 +25,7 @@ import { connectionHealthMessageKey, useConnectionHealth } from '../composables/
 import { createRefreshCoordinator } from '../utils/connectionHealthRefresh'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import AdminGroupHealthDetail from '../components/dashboard/AdminGroupHealthDetail.vue'
+import PriorityCandidatePreview from '../components/dashboard/PriorityCandidatePreview.vue'
 import ConnectionHealthEventsDialog from '../components/dashboard/ConnectionHealthEventsDialog.vue'
 import GroupHealthSetupDrawer from '../components/dashboard/GroupHealthSetupDrawer.vue'
 import ManualOneTimeProbeDialog from '../components/dashboard/ManualOneTimeProbeDialog.vue'
@@ -71,6 +72,7 @@ const {
   overview,
   groups,
   adminGroups,
+  adminGroupsLoaded,
   events,
   policies,
   isLoading,
@@ -82,6 +84,7 @@ const {
   refreshConnectionState,
   cancelAdminGroupsRefresh,
   setAdminGroupsWorkspace,
+  invalidatePriorityCandidatePlanNow,
   applyAccountTier,
   loadAll,
   loadGroups,
@@ -955,6 +958,7 @@ const onQuickProbeAccount = async (account: AdminGroupAccount) => {
       await reloadQuickProbeAuthoritatively(identity)
       return
     }
+    invalidatePriorityCandidatePlanNow()
     mergeQuickProbeResults(account.targetId, results)
     const failed = applyQuickProbeResultError(account.targetId, results)
     if (!failed) {
@@ -1282,6 +1286,12 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
     </section>
 
     <p v-if="errorKey" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">{{ readableMessage(errorKey) }}</p>
+
+    <PriorityCandidatePreview
+      :groups="adminGroups"
+      :loaded="adminGroupsLoaded"
+      :platform="currentAccount?.platform ?? ''"
+    />
 
     <section class="overflow-hidden rounded-lg border border-border/60 bg-card text-card-foreground shadow-sm">
       <div v-if="isLoading && adminGroups.length === 0" class="grid min-h-[34rem] lg:grid-cols-[19rem_minmax(0,1fr)]">

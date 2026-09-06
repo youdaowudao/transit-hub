@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"log"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
@@ -74,6 +75,9 @@ func (s *PlatformService) listSub2APIGroupAccountsContext(ctx context.Context, s
 	const pageSize = 100
 	const maxPages = 100 // 安全上限，防止上游分页字段异常导致死循环
 	accounts := make([]AdminGroupAccountInfo, 0)
+	seenAccountIDs := make(map[string]struct{})
+	expectedTotal := 0
+	hasExpectedTotal := false
 	for page := 1; page <= maxPages; page++ {
 		pageURL := session.BaseURL + "/api/v1/admin/accounts?group=" + url.QueryEscape(group.ID) +
 			"&page=" + strconvInt(int64(page)) + "&page_size=" + strconvInt(pageSize)
@@ -81,26 +85,98 @@ func (s *PlatformService) listSub2APIGroupAccountsContext(ctx context.Context, s
 		if err != nil {
 			return nil, err
 		}
-		items := dataArray(response.Payload)
-		if len(items) == 0 {
-			break
+		items, validItems := sub2APIAccountPageItems(response.Payload)
+		if !validItems {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		total, hasTotal, validTotal := sub2APIAccountPaginationTotal(response.Payload)
+		if !validTotal {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		if hasExpectedTotal {
+			if !hasTotal || total != expectedTotal {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+		} else if hasTotal {
+			expectedTotal = total
+			hasExpectedTotal = true
 		}
 		for _, item := range items {
 			record, ok := item.(map[string]any)
 			if !ok {
-				continue
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 			}
-			accounts = append(accounts, parseSub2APIAccount(record))
+			account := parseSub2APIAccount(record)
+			accountID := strings.TrimSpace(account.ID)
+			if accountID == "" {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			if _, duplicate := seenAccountIDs[accountID]; duplicate {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			seenAccountIDs[accountID] = struct{}{}
+			accounts = append(accounts, account)
 		}
-		total, hasTotal := paginationTotal(response.Payload)
-		if hasTotal && page*pageSize >= total {
-			break
+		if hasExpectedTotal {
+			if len(accounts) > expectedTotal {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			if len(accounts) == expectedTotal {
+				return accounts, nil
+			}
+			if len(items) < pageSize {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			continue
 		}
-		if !hasTotal && len(items) < pageSize {
-			break
+		if len(items) < pageSize {
+			return accounts, nil
 		}
 	}
-	return accounts, nil
+	return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+}
+
+func sub2APIAccountPageItems(value any) ([]any, bool) {
+	record, ok := value.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	if items, ok := record["data"].([]any); ok {
+		return items, true
+	}
+	if items, ok := record["items"].([]any); ok {
+		return items, true
+	}
+	if data, ok := record["data"].(map[string]any); ok {
+		for _, key := range []string{"items", "list", "records"} {
+			if items, ok := data[key].([]any); ok {
+				return items, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func sub2APIAccountPaginationTotal(value any) (int, bool, bool) {
+	record, ok := value.(map[string]any)
+	if !ok {
+		return 0, false, false
+	}
+	if data, ok := record["data"].(map[string]any); ok {
+		record = data
+	}
+	for _, key := range []string{"total", "count"} {
+		raw, exists := record[key]
+		if !exists {
+			continue
+		}
+		number := readNumber(raw)
+		if number == nil || *number < 0 || math.Trunc(*number) != *number || *number > float64(int(^uint(0)>>1)) {
+			return 0, true, false
+		}
+		return int(*number), true, true
+	}
+	return 0, false, true
 }
 
 // parseSub2APIAccount 把 sub2api 账号原始记录解析为平台中性结构，主动丢弃 credentials 等敏感字段。

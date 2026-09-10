@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { Check, CircleOff, Edit3, Loader2, Plus, Save, Star, Trash2, X } from 'lucide-vue-next'
+import { Check, CircleOff, Copy, Edit3, Loader2, Plus, Save, Star, Trash2, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { t } from '@/locales'
@@ -26,6 +26,7 @@ const loading = ref(true)
 const saving = ref(false)
 const actionId = ref('')
 const errorKey = ref('')
+const copiedId = ref('')
 const editingId = ref('')
 const name = ref('')
 const body = ref('')
@@ -136,6 +137,20 @@ const makeDefault = async (question: TestQuestion) => {
     errorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
   } finally {
     actionId.value = ''
+  }
+}
+
+const copyBody = async (question: TestQuestion) => {
+  errorKey.value = ''
+  copiedId.value = ''
+  try {
+    await navigator.clipboard.writeText(question.body)
+    copiedId.value = question.id
+    setTimeout(() => {
+      if (copiedId.value === question.id) copiedId.value = ''
+    }, 1500)
+  } catch {
+    errorKey.value = 'admin.settings.testQuestions.copyFailed'
   }
 }
 
@@ -270,6 +285,16 @@ onMounted(load)
             </p>
           </div>
           <div class="flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              class="rounded-md p-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground"
+              :title="t(copiedId === question.id ? 'admin.settings.testQuestions.copySuccess' : 'admin.settings.testQuestions.copy')"
+              :aria-label="t(copiedId === question.id ? 'admin.settings.testQuestions.copySuccess' : 'admin.settings.testQuestions.copy')"
+              @click="copyBody(question)"
+            >
+              <Check v-if="copiedId === question.id" class="h-4 w-4 text-signal" />
+              <Copy v-else class="h-4 w-4" />
+            </button>
             <button
               type="button"
               class="rounded-md p-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground disabled:opacity-40"

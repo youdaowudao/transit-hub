@@ -158,12 +158,15 @@ describe('account-global tier editing', () => {
     await save(wrapper, 1)
     expect(tiers()).toEqual([1, 1])
     expect.soft(candidatePlanVisible(), 'save must invalidate the previously loaded candidate plan').toBe(false)
+    let releaseReload!: (response: Response) => void
+    deferGroups = () => new Promise(resolve => { releaseReload = resolve })
     release(json(stale)); await read; await flushPromises()
     expect(tiers()).toEqual([1, 1])
     expect(candidatePlanVisible(), 'a response issued before the save must not restore the stale candidate plan').toBe(false)
     expect(editors(wrapper).every(editor => editor.text().includes('第一层'))).toBe(true)
+    const reload = service.loadAdminGroups({ silent: true })
     deferGroups = undefined
-    await service.loadAdminGroups({ silent: true }); await flushPromises()
+    releaseReload(json(payload())); await reload; await flushPromises()
     expect(candidatePlanVisible()).toBe(true)
   })
 

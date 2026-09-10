@@ -57,8 +57,9 @@ type AdminGroupHealth struct {
 	MinProductionRank *int `json:"minProductionRank,omitempty"`
 	// AccountsError 非空时表示该分组的账号/渠道列表拉取失败（i18n key）；此时 accountCount=0、
 	// accounts 为空，但主列表其余分组不受影响，不会整页崩溃。
-	AccountsError string              `json:"accountsError,omitempty"`
-	Accounts      []AdminGroupAccount `json:"accounts"`
+	AccountsError            string                    `json:"accountsError,omitempty"`
+	PriorityCandidateSummary *PriorityCandidateSummary `json:"priorityCandidateSummary,omitempty"`
+	Accounts                 []AdminGroupAccount       `json:"accounts"`
 }
 
 // AdminGroupsFreshResult is the one-shot方案 A response. Refresh contains only
@@ -132,6 +133,7 @@ type AdminGroupAccount struct {
 	UpstreamKeyGroupMultiplier *float64 `json:"upstreamKeyGroupMultiplier,omitempty"`
 	// 独立探活字段。
 	TargetID               string        `json:"targetId"`
+	AccountTier            int           `json:"accountTier"`
 	ProbeAvailable         bool          `json:"probeAvailable"`
 	ProbeUnavailableReason string        `json:"probeUnavailableReason,omitempty"`
 	ModelHealth            []ModelHealth `json:"modelHealth"`
@@ -165,11 +167,11 @@ type AdminGroupAccount struct {
 	PrioritySyncBlocked        bool                    `json:"prioritySyncBlocked"`
 	PrioritySyncBlockReason    string                  `json:"prioritySyncBlockReason,omitempty"`
 
-	TodayQuestionAnswerSubmitted int  `json:"todayQuestionAnswerSubmitted"`
-	TodayQuestionAnswerCorrect   int  `json:"todayQuestionAnswerCorrect"`
-	IntelligenceWeight           *int `json:"intelligenceWeight"`
+	TodayQuestionAnswerSubmitted int `json:"todayQuestionAnswerSubmitted"`
+	TodayQuestionAnswerCorrect   int `json:"todayQuestionAnswerCorrect"`
 	// ProductionSortOrder 是去重目标在当前 workspace 的全局生产顺序，不是分组内局部序号。
-	ProductionSortOrder int `json:"productionSortOrder"`
+	ProductionSortOrder int                          `json:"productionSortOrder"`
+	PriorityCandidate   *PriorityCandidateProjection `json:"priorityCandidate,omitempty"`
 }
 
 type AdminPriorityConflict struct {
@@ -313,6 +315,13 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 	}
 	groupFetchDuration := time.Since(groupFetchStarted)
 	localReadStarted := time.Now()
+	accountTiers := make(map[string]int)
+	if session.Platform == upstream.PlatformSub2API {
+		accountTiers, err = s.repo.ListAccountTiers(ctx, userID, adminAccountID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	now := time.Now().UTC()
 	eventCutoff := now.Add(-eventRetentionWindow)
 	policies, err := s.repo.ListPolicies(ctx, userID, adminAccountID)
@@ -342,14 +351,6 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 	probeSortSettings, err := s.repo.ListGroupProbeSortSettings(ctx, userID, adminAccountID)
 	if err != nil {
 		return nil, err
-	}
-	accountConfigs, err := s.repo.ListAccountConfigs(ctx, userID, adminAccountID)
-	if err != nil {
-		return nil, err
-	}
-	intelligenceWeightByTarget := make(map[string]*int, len(accountConfigs))
-	for _, config := range accountConfigs {
-		intelligenceWeightByTarget[config.TargetID] = cloneIntPointer(config.IntelligenceWeight)
 	}
 	fallbackByGroup := make(map[string]*float64, len(probeSortSettings))
 	for _, setting := range probeSortSettings {
@@ -425,17 +426,21 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 	}
 	accountsByGroup := make(map[string]groupAccountInventory, len(groups))
 	decisionAccountByTarget := make(map[string]upstream.AdminGroupAccountInfo)
+	observationsByTarget := make(map[string][]upstream.AdminGroupAccountInfo)
+	inventoryComplete := true
 	accountFetchStarted := time.Now()
 	accountCount := 0
 	for _, group := range groups {
 		accounts, accErr := s.listAdminGroupAccounts(ctx, session, group)
 		accountsByGroup[group.ID] = groupAccountInventory{accounts: accounts, err: accErr}
 		if accErr != nil {
+			inventoryComplete = false
 			continue
 		}
 		accountCount += len(accounts)
 		for _, acc := range accounts {
 			targetID := buildTargetID(platform, adminAccountID, acc.ID)
+			observationsByTarget[targetID] = append(observationsByTarget[targetID], acc)
 			if _, exists := decisionAccountByTarget[targetID]; !exists {
 				decisionAccountByTarget[targetID] = acc
 			}
@@ -462,10 +467,11 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 	}
 	assemblyStarted := time.Now()
 	healthFallbacksByTarget := make(map[string][]float64)
+	priorityCandidatePoliciesByTarget := make(map[string][]Policy)
 	for _, group := range groups {
 		fallback := fallbackByGroup[group.ID]
 		inventory := accountsByGroup[group.ID]
-		if fallback == nil || inventory.err != nil {
+		if inventory.err != nil {
 			continue
 		}
 		for _, account := range inventory.accounts {
@@ -485,7 +491,10 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				}
 			}
 			effectivePolicies := effectivePoliciesForTarget(directPolicies, inheritedPolicies)
-			if hasHealthMultiplierPriorityPolicy(effectivePolicies) {
+			priorityCandidatePoliciesByTarget[targetID] = mergePoliciesByID(
+				priorityCandidatePoliciesByTarget[targetID], effectivePolicies,
+			)
+			if fallback != nil && hasHealthMultiplierPriorityPolicy(effectivePolicies) {
 				healthFallbacksByTarget[targetID] = append(healthFallbacksByTarget[targetID], *fallback)
 			}
 		}
@@ -507,6 +516,25 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 			stateIndex[st.ConnectionID] = byModel
 		}
 		byModel[st.ModelName] = st
+	}
+	priorityCandidateEvidenceByTarget := make(map[string]priorityCandidateSortEvidence, len(decisionAccountByTarget))
+	for targetID, account := range decisionAccountByTarget {
+		targetStates := make([]ConnectionHealthState, 0, len(stateIndex[targetID]))
+		for _, state := range stateIndex[targetID] {
+			targetStates = append(targetStates, state)
+		}
+		item := &priorityTargetInventory{
+			target: AdminProbeTarget{
+				TargetID:  targetID,
+				Platform:  platform,
+				AccountID: account.ID,
+				Models:    splitModelList(account.Models),
+			},
+			policies:            priorityCandidatePoliciesByTarget[targetID],
+			fallbackMultipliers: healthFallbacksByTarget[targetID],
+			upstreamMultiplier:  resolutionForAdminAccount(upstreamMultiplierLookup, account.ID),
+		}
+		priorityCandidateEvidenceByTarget[targetID] = buildPriorityCandidateSortEvidence(item, targetStates)
 	}
 
 	result := make([]AdminGroupHealth, 0, len(groups))
@@ -725,6 +753,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				UpstreamKeyGroupID:            upstreamKeyGroup.groupID,
 				UpstreamKeyGroupMultiplier:    upstreamKeyGroup.multiplier,
 				TargetID:                      targetID,
+				AccountTier:                   effectiveAccountTier(accountTiers[targetID]),
 				ProbeAvailable:                available,
 				ProbeUnavailableReason:        reason,
 				ModelHealth:                   modelHealth,
@@ -754,7 +783,6 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				PrioritySyncBlockReason:       prioritySyncBlockReason,
 				TodayQuestionAnswerSubmitted:  todayQuestionAnswer.Submitted,
 				TodayQuestionAnswerCorrect:    todayQuestionAnswer.Correct,
-				IntelligenceWeight:            cloneIntPointer(intelligenceWeightByTarget[targetID]),
 			}
 			if _, exists := healthCandidatesByTarget[targetID]; !exists && priorityManaged && !item.PriorityConflict && usesHealthPriority && multiplierSource != MultiplierSourceNone && multiplierSource != MultiplierSourceLastConfirmed && effectiveMultiplier != nil {
 				activeModels := make(map[string]struct{}, len(activeSpecs))
@@ -859,6 +887,21 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		group.UnattributedCost = cloneFloat64Pointer(snapshot.UnattributedCost)
 	}
 	finalizeAdminGroupProductionOrder(result, session.Platform, healthCandidatesByTarget)
+	if session.Platform == upstream.PlatformSub2API {
+		summary, projections := buildSub2APIPriorityCandidatePlan(
+			result, priorityStates, observationsByTarget, inventoryComplete, priorityCandidateEvidenceByTarget,
+		)
+		for groupIndex := range result {
+			result[groupIndex].PriorityCandidateSummary = &summary
+			for accountIndex := range result[groupIndex].Accounts {
+				projection, ok := projections[result[groupIndex].Accounts[accountIndex].TargetID]
+				if !ok {
+					continue
+				}
+				result[groupIndex].Accounts[accountIndex].PriorityCandidate = &projection
+			}
+		}
+	}
 	log.Printf(
 		"[connection-health] admin groups timing workspace=%s groups=%d accounts=%d total=%s workspace_lookup=%s session=%s groups_fetch=%s local_reads=%s multiplier_reads=%s cost_reads=%s account_reads=%s assembly=%s",
 		adminAccountID,

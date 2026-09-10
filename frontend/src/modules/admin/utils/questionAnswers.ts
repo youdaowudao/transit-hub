@@ -4,6 +4,7 @@ import type {
   QuestionAnswerBatch,
   QuestionAnswerReasoningEffort,
   QuestionAnswerRecord,
+  QuestionAnswerStatus,
   QuestionAnswerReviewStats,
   QuestionAnswerStats,
   QuestionAnswerSubmissionSummary,

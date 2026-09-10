@@ -4,6 +4,11 @@ const getConnectionHealthAdminGroupsMock = vi.hoisted(() => vi.fn())
 const refreshConnectionHealthAdminGroupsMock = vi.hoisted(() => vi.fn())
 const refreshConnectionHealthAdminGroupsAutomaticallyMock = vi.hoisted(() => vi.fn())
 const getConnectionHealthEventsMock = vi.hoisted(() => vi.fn())
+const setTargetSchedulableMock = vi.hoisted(() => vi.fn())
+const setTargetPolicyAssignmentsMock = vi.hoisted(() => vi.fn())
+const listConnectionHealthPoliciesMock = vi.hoisted(() => vi.fn())
+const createConnectionHealthPolicyMock = vi.hoisted(() => vi.fn())
+const updateConnectionHealthPolicyMock = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/modules/admin/api/connectionHealth', async () => {
   const actual = await vi.importActual<typeof import('../src/modules/admin/api/connectionHealth')>('../src/modules/admin/api/connectionHealth')
@@ -13,6 +18,11 @@ vi.mock('../src/modules/admin/api/connectionHealth', async () => {
     refreshConnectionHealthAdminGroups: refreshConnectionHealthAdminGroupsMock,
     refreshConnectionHealthAdminGroupsAutomatically: refreshConnectionHealthAdminGroupsAutomaticallyMock,
     getConnectionHealthEvents: getConnectionHealthEventsMock,
+    setTargetSchedulable: setTargetSchedulableMock,
+    setTargetPolicyAssignments: setTargetPolicyAssignmentsMock,
+    listConnectionHealthPolicies: listConnectionHealthPoliciesMock,
+    createConnectionHealthPolicy: createConnectionHealthPolicyMock,
+    updateConnectionHealthPolicy: updateConnectionHealthPolicyMock,
   }
 })
 vi.mock('@/modules/admin/api/connectionHealth', async () => {
@@ -23,12 +33,18 @@ vi.mock('@/modules/admin/api/connectionHealth', async () => {
     refreshConnectionHealthAdminGroups: refreshConnectionHealthAdminGroupsMock,
     refreshConnectionHealthAdminGroupsAutomatically: refreshConnectionHealthAdminGroupsAutomaticallyMock,
     getConnectionHealthEvents: getConnectionHealthEventsMock,
+    setTargetSchedulable: setTargetSchedulableMock,
+    setTargetPolicyAssignments: setTargetPolicyAssignmentsMock,
+    listConnectionHealthPolicies: listConnectionHealthPoliciesMock,
+    createConnectionHealthPolicy: createConnectionHealthPolicyMock,
+    updateConnectionHealthPolicy: updateConnectionHealthPolicyMock,
   }
 })
 
 import { useConnectionHealth } from '@/modules/admin/composables/useConnectionHealth'
+import type { ConnectionHealthPolicy, PolicyInput } from '@/modules/admin/types/connectionHealth'
 
-afterEach(() => vi.clearAllMocks())
+afterEach(() => vi.resetAllMocks())
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void
@@ -55,7 +71,304 @@ const setRefreshWorkspace = (service: RefreshLifecycleService, workspaceId: stri
 
 const group = (id: string) => ({ id, name: id, platform: 'sub2api', type: 'public', accounts: [] })
 
+const candidateGroup = (schedulable: boolean, state: 'candidate' | 'safety_lock' = 'candidate') => ({
+  id: 'candidate-group',
+  name: 'candidate-group',
+  platform: 'sub2api',
+  type: 'public',
+  priorityCandidateSummary: state === 'candidate'
+    ? { mode: 'first_active', candidatePriorityReady: true, candidateCount: 1, outOfScopeCount: 0, blockerCount: 0, capacities: [] }
+    : { mode: 'safety_lock', candidatePriorityReady: false, safetyReason: 'unavailable', candidateCount: 0, outOfScopeCount: 0, blockerCount: 0, capacities: [] },
+  accounts: [{
+    id: 'candidate-account',
+    targetId: 'sub2api:workspace-candidate:candidate-account',
+    name: 'Candidate account',
+    schedulable,
+    probeAvailable: true,
+    hasAssignedPolicy: true,
+    hasEnabledPolicy: true,
+    hasEnabledProbePolicy: true,
+    modelHealth: [],
+    priorityCandidate: state === 'candidate'
+      ? { state: 'candidate', rank: 1, priority: 10, region: 'normal', healthBand: 'healthy', successLatencyMs: 10, multiplier: 1, priorityEvidence: 'last_applied', blocksTakeover: false }
+      : { state: 'safety_lock', reason: 'unavailable', priorityEvidence: 'last_applied', blocksTakeover: false },
+  }],
+})
+
+const candidatePlanPresent = (service: ReturnType<typeof useConnectionHealth>) =>
+  service.adminGroups.value.some(groupItem => groupItem.priorityCandidateSummary
+    || groupItem.accounts.some(account => account.priorityCandidate))
+
+const policyInput = (enabled: boolean, id?: string): PolicyInput => ({
+  id,
+  name: id ? `Policy ${id}` : 'New policy',
+  enabled,
+  ownGroupId: '',
+  ownGroupName: '',
+  autoDegradeEnabled: true,
+  autoRemoteActionEnabled: false,
+  priorityMode: 'multiplier',
+  strategyMode: 'health_probe',
+  modelTargets: [{ modelName: 'gpt-5.6-sol', providerFamily: 'openai', enabled: true }],
+})
+
+const policyResult = (input: PolicyInput): ConnectionHealthPolicy => ({
+  id: input.id ?? 'policy-created',
+  name: input.name,
+  enabled: input.enabled,
+  ownGroupId: input.ownGroupId,
+  ownGroupName: input.ownGroupName,
+  modelPattern: '',
+  probeMode: 'responses',
+  probeIntervalSeconds: 60,
+  continueProbeWhenUnschedulable: false,
+  unschedulableProbeIntervalMinutes: 30,
+  failureThreshold: 2,
+  successThreshold: 2,
+  cooldownSeconds: 60,
+  observationSeconds: 60,
+  recoveryStepPercent: 10,
+  autoDegradeEnabled: input.autoDegradeEnabled,
+  autoRemoteActionEnabled: input.autoRemoteActionEnabled,
+  priorityMode: input.priorityMode,
+  strategyMode: input.strategyMode,
+  dailyProbeBudget: 100,
+  createdAt: '2026-09-06T00:00:00Z',
+  updatedAt: '2026-09-06T00:00:00Z',
+  modelTargets: [{
+    id: 'model-target-1',
+    policyId: input.id ?? 'policy-created',
+    modelName: 'gpt-5.6-sol',
+    providerFamily: 'openai',
+    enabled: true,
+    probePrompt: '',
+    maxProbeTokens: 1,
+    createdAt: '2026-09-06T00:00:00Z',
+    updatedAt: '2026-09-06T00:00:00Z',
+  }],
+})
+
+const policyMutationCases = [
+  {
+    name: 'policy creation',
+    input: policyInput(true),
+    invoke: (service: ReturnType<typeof useConnectionHealth>, input: PolicyInput) => service.savePolicy(input),
+  },
+  {
+    name: 'policy update',
+    input: policyInput(true, 'policy-update'),
+    invoke: (service: ReturnType<typeof useConnectionHealth>, input: PolicyInput) => service.savePolicy(input),
+  },
+  {
+    name: 'policy enable',
+    input: policyInput(true, 'policy-enable'),
+    invoke: (service: ReturnType<typeof useConnectionHealth>, input: PolicyInput) => service.savePolicy(input),
+  },
+  {
+    name: 'policy disable',
+    input: policyInput(false, 'policy-disable'),
+    invoke: (service: ReturnType<typeof useConnectionHealth>, input: PolicyInput) => service.savePolicy(input),
+  },
+  {
+    name: 'setup policy creation',
+    input: policyInput(true),
+    invoke: (service: ReturnType<typeof useConnectionHealth>, input: PolicyInput) => service.createPolicyForSetup(input),
+  },
+  {
+    name: 'setup policy update',
+    input: policyInput(true, 'policy-setup-update'),
+    invoke: (service: ReturnType<typeof useConnectionHealth>, input: PolicyInput) => service.updatePolicyForSetup(input.id!, input),
+  },
+]
+
 describe('useConnectionHealth request generations', () => {
+  it('invalidates candidates after a schedulable change and rejects the older refresh terminal before a fresh reload', async () => {
+    const targetId = 'sub2api:workspace-candidate:candidate-account'
+    const staleTerminal = {
+      status: 'success' as const,
+      runId: 'candidate-stale-refresh',
+      revision: 1,
+      groups: [candidateGroup(true)],
+      refresh: { state: 'success' as const, sites: [] },
+    }
+    const pendingRefresh = deferred<typeof staleTerminal>()
+    let refreshOptions: any
+    getConnectionHealthAdminGroupsMock
+      .mockResolvedValueOnce([candidateGroup(true)])
+      .mockResolvedValueOnce([candidateGroup(false, 'safety_lock')])
+    refreshConnectionHealthAdminGroupsMock.mockImplementationOnce((options: any) => {
+      refreshOptions = options
+      return pendingRefresh.promise
+    })
+    setTargetSchedulableMock.mockResolvedValueOnce({
+      targetId,
+      schedulable: false,
+      actionSource: 'user',
+      actionAt: '2026-09-06T00:00:00Z',
+    })
+
+    const service = useConnectionHealth() as RefreshLifecycleService
+    setRefreshWorkspace(service, 'workspace-candidate')
+    let immediateSchedulable: boolean | undefined
+    let immediatePlanPresent = true
+    let finalSchedulable: boolean | undefined
+    let finalReady: boolean | undefined
+    let finalCandidateState: string | undefined
+    let reloadRequests = 0
+    try {
+      await expect(service.loadAdminGroups({ silent: true })).resolves.toBe(true)
+      expect(candidatePlanPresent(service)).toBe(true)
+
+      const refresh = service.refreshAdminGroups()
+      await Promise.resolve()
+      await expect(service.updateTargetSchedulable(targetId, false)).resolves.toBe(true)
+      immediateSchedulable = service.adminGroups.value[0]?.accounts[0]?.schedulable
+      immediatePlanPresent = candidatePlanPresent(service)
+
+      refreshOptions.onTerminal(staleTerminal)
+      pendingRefresh.resolve(staleTerminal)
+      await expect(refresh).resolves.toBe(true)
+      await Promise.resolve()
+      await Promise.resolve()
+
+      reloadRequests = getConnectionHealthAdminGroupsMock.mock.calls.length
+      finalSchedulable = service.adminGroups.value[0]?.accounts[0]?.schedulable
+      finalReady = service.adminGroups.value[0]?.priorityCandidateSummary?.candidatePriorityReady
+      finalCandidateState = service.adminGroups.value[0]?.accounts[0]?.priorityCandidate?.state
+    } finally {
+      cancelRefreshSubscription(service)
+      setRefreshWorkspace(service, '')
+    }
+
+    expect(immediateSchedulable).toBe(false)
+    expect(immediatePlanPresent).toBe(false)
+    expect(reloadRequests).toBe(2)
+    expect(finalSchedulable).toBe(false)
+    expect(finalReady).toBe(false)
+    expect(finalCandidateState).toBe('safety_lock')
+  })
+
+  it('invalidates candidates after a target policy save and rejects an older ordinary read', async () => {
+    const targetId = 'sub2api:workspace-candidate:candidate-account'
+    const staleRead = deferred<ReturnType<typeof candidateGroup>[]>()
+    const freshRead = deferred<ReturnType<typeof candidateGroup>[]>()
+    getConnectionHealthAdminGroupsMock
+      .mockResolvedValueOnce([candidateGroup(true)])
+      .mockReturnValueOnce(staleRead.promise)
+      .mockReturnValueOnce(freshRead.promise)
+    setTargetPolicyAssignmentsMock.mockResolvedValueOnce({ targetId, policyIds: ['policy-next'], policies: [] })
+
+    const service = useConnectionHealth() as RefreshLifecycleService
+    setRefreshWorkspace(service, 'workspace-candidate')
+    let planAfterSave = true
+    let oldReadResult = true
+    let planAfterOldRead = true
+    let planAfterFreshRead = false
+    try {
+      await expect(service.loadAdminGroups({ silent: true })).resolves.toBe(true)
+      const oldRead = service.loadAdminGroups({ silent: true })
+
+      await expect(service.saveTargetPolicyAssignments(targetId, ['policy-next'])).resolves.toEqual({
+        assignments: { targetId, policyIds: ['policy-next'], policies: [] },
+      })
+      planAfterSave = candidatePlanPresent(service)
+
+      staleRead.resolve([candidateGroup(true)])
+      oldReadResult = await oldRead
+      planAfterOldRead = candidatePlanPresent(service)
+
+      freshRead.resolve([candidateGroup(true)])
+      await vi.waitFor(() => expect(getConnectionHealthAdminGroupsMock).toHaveBeenCalledTimes(3))
+      planAfterFreshRead = candidatePlanPresent(service)
+    } finally {
+      cancelRefreshSubscription(service)
+      setRefreshWorkspace(service, '')
+    }
+
+    expect(planAfterSave).toBe(false)
+    expect(oldReadResult).toBe(false)
+    expect(planAfterOldRead).toBe(false)
+    expect(planAfterFreshRead).toBe(true)
+  })
+
+  it.each(policyMutationCases)('immediately invalidates candidates after $name succeeds while the policy reload hangs and fails', async ({ input, invoke }) => {
+    const staleRead = deferred<ReturnType<typeof candidateGroup>[]>()
+    const authoritativeRead = deferred<ReturnType<typeof candidateGroup>[]>()
+    const policyReload = deferred<ConnectionHealthPolicy[]>()
+    getConnectionHealthAdminGroupsMock
+      .mockResolvedValueOnce([candidateGroup(true)])
+      .mockReturnValueOnce(staleRead.promise)
+      .mockReturnValueOnce(authoritativeRead.promise)
+    const result = policyResult(input)
+    createConnectionHealthPolicyMock.mockResolvedValueOnce(result)
+    updateConnectionHealthPolicyMock.mockResolvedValueOnce(result)
+    listConnectionHealthPoliciesMock.mockReturnValueOnce(policyReload.promise)
+
+    const service = useConnectionHealth() as RefreshLifecycleService
+    setRefreshWorkspace(service, 'workspace-candidate')
+    let oldRead: Promise<boolean> | undefined
+    let mutation: Promise<unknown> | undefined
+    try {
+      await expect(service.loadAdminGroups({ silent: true })).resolves.toBe(true)
+      expect(candidatePlanPresent(service)).toBe(true)
+      oldRead = service.loadAdminGroups({ silent: true })
+
+      mutation = invoke(service, input)
+      await vi.waitFor(() => expect(listConnectionHealthPoliciesMock).toHaveBeenCalledTimes(1))
+
+      expect(candidatePlanPresent(service), 'the successful write must invalidate candidates before policy reload settles').toBe(false)
+
+      staleRead.resolve([candidateGroup(true)])
+      await expect(oldRead).resolves.toBe(false)
+      expect(candidatePlanPresent(service), 'a read started before the write must not restore its candidate plan').toBe(false)
+
+      policyReload.reject(new Error('admin.connectionHealth.errors.network'))
+      await expect(mutation).resolves.not.toHaveProperty('errorKey')
+      expect(candidatePlanPresent(service), 'a failed policy reload must leave the old candidate plan invalidated').toBe(false)
+
+      await vi.waitFor(() => expect(getConnectionHealthAdminGroupsMock).toHaveBeenCalledTimes(3))
+      authoritativeRead.resolve([candidateGroup(false, 'safety_lock')])
+      await vi.waitFor(() => expect(service.adminGroups.value[0]?.accounts[0]?.priorityCandidate?.state).toBe('safety_lock'))
+    } finally {
+      staleRead.resolve([candidateGroup(true)])
+      authoritativeRead.resolve([candidateGroup(false, 'safety_lock')])
+      policyReload.reject(new Error('admin.connectionHealth.errors.network'))
+      await Promise.allSettled([oldRead, mutation].filter((request): request is Promise<unknown> => Boolean(request)))
+      cancelRefreshSubscription(service)
+      setRefreshWorkspace(service, '')
+    }
+  })
+
+  it('keeps the successful candidate reload when the page requests the same authoritative read after a policy save', async () => {
+    const authoritativeRead = deferred<ReturnType<typeof candidateGroup>[]>()
+    getConnectionHealthAdminGroupsMock
+      .mockResolvedValueOnce([candidateGroup(true)])
+      .mockReturnValueOnce(authoritativeRead.promise)
+      .mockRejectedValueOnce(new Error('admin.connectionHealth.errors.network'))
+    createConnectionHealthPolicyMock.mockResolvedValueOnce(policyResult(policyInput(true)))
+    listConnectionHealthPoliciesMock.mockResolvedValueOnce([])
+
+    const service = useConnectionHealth() as RefreshLifecycleService
+    setRefreshWorkspace(service, 'workspace-candidate')
+    try {
+      await expect(service.loadAdminGroups({ silent: true })).resolves.toBe(true)
+      await expect(service.savePolicy(policyInput(true))).resolves.toBe(true)
+      await vi.waitFor(() => expect(getConnectionHealthAdminGroupsMock).toHaveBeenCalledTimes(2))
+
+      const pageRead = service.loadAdminGroups({ silent: true })
+      authoritativeRead.resolve([candidateGroup(false, 'safety_lock')])
+
+      await expect(pageRead).resolves.toBe(true)
+      expect(getConnectionHealthAdminGroupsMock).toHaveBeenCalledTimes(2)
+      expect(service.adminGroups.value[0]?.priorityCandidateSummary?.candidatePriorityReady).toBe(false)
+      expect(service.adminGroups.value[0]?.accounts[0]?.priorityCandidate?.state).toBe('safety_lock')
+    } finally {
+      authoritativeRead.resolve([candidateGroup(false, 'safety_lock')])
+      cancelRefreshSubscription(service)
+      setRefreshWorkspace(service, '')
+    }
+  })
+
   it('settles an old admin-group request when manual refresh supersedes it', async () => {
     const first = deferred<[]>()
     const manual = deferred<{ groups: []; refresh: { state: 'success'; sites: [] } }>()

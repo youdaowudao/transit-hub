@@ -894,15 +894,19 @@ func hasHealthMultiplierPriorityPolicy(policies []Policy) bool {
 }
 
 func effectiveHealthSortMultiplier(item *priorityTargetInventory) (float64, bool) {
-	switch item.upstreamMultiplier.status {
+	return effectiveHealthSortMultiplierFromResolution(item.upstreamMultiplier, item.fallbackMultipliers)
+}
+
+func effectiveHealthSortMultiplierFromResolution(resolution upstreamMultiplierResolution, fallbackMultipliers []float64) (float64, bool) {
+	switch resolution.status {
 	case MultiplierResolutionResolved:
-		if item.upstreamMultiplier.info.effectiveMultiplier != nil {
-			return *item.upstreamMultiplier.info.effectiveMultiplier, true
+		if resolution.info.effectiveMultiplier != nil {
+			return *resolution.info.effectiveMultiplier, true
 		}
 	case MultiplierResolutionDisabled, MultiplierResolutionUnavailable, MultiplierResolutionStale, MultiplierResolutionUpdating, MultiplierResolutionMissing:
 		return 0, false
 	}
-	return uniqueFloat(item.fallbackMultipliers)
+	return uniqueFloat(fallbackMultipliers)
 }
 
 func uniqueFloat(values []float64) (float64, bool) {

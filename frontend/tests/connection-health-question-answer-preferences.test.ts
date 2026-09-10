@@ -80,7 +80,6 @@ const account = (
   targetId,
   probeAvailable: true,
   modelHealth: [],
-  intelligenceWeight: null,
   ...overrides,
 })
 

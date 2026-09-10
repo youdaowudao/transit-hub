@@ -28,6 +28,8 @@ import {
   startQuestionAnswerBatch,
 } from '../../api/connectionHealth'
 import type {
+  AccountTier,
+  AccountTierResult,
   ManualProbeModelOption,
   ManualProbeResult,
   ModelHealth,
@@ -45,6 +47,7 @@ import {
   questionAnswerBatchCompletedAt,
   questionAnswerElapsedMilliseconds,
   questionAnswerReviewStatsFromRecords,
+  questionAnswerStatsReconcile,
   resolveQuestionAnswerSelection,
   questionAnswerSubmissionSummary,
   replaceQuestionAnswerRecord,
@@ -57,19 +60,18 @@ import {
 } from '../../utils/connectionHealthPreferences'
 import QuestionAnswerHighlightedText from './QuestionAnswerHighlightedText.vue'
 import QuestionAnswerStatsBar from './QuestionAnswerStatsBar.vue'
-import AccountIntelligenceWeightEditor from './AccountIntelligenceWeightEditor.vue'
+import AccountTierEditor from './AccountTierEditor.vue'
 import { t, te } from '@/locales'
-import type { TargetIntelligenceWeightResult } from '../../types/connectionHealth'
 
 export interface ManualProbeTargetSummary {
   targetId: string
+  accountTier?: AccountTier
   accountName: string
   platform: string
   type: string
   status: string
   groupName: string
   formalModels: ManualProbeModelOption[]
-  intelligenceWeight: number | null
 }
 
 const props = withDefaults(defineProps<{
@@ -81,12 +83,12 @@ const props = withDefaults(defineProps<{
 })
 
 const emit = defineEmits<{
+  (event: 'tier-saved', result: AccountTierResult): void
   (event: 'close'): void
   (event: 'completed'): void
   (event: 'question-answer-started', targetId: string): void
   (event: 'question-answer-viewed', targetId: string): void
   (event: 'question-answer-preferences-changed', preferences: QuestionAnswerSelectionPreferences): void
-  (event: 'intelligence-weight-saved', result: TargetIntelligenceWeightResult): void
 }>()
 
 const prefix = 'admin.connectionHealth.manualProbeDialog'
@@ -130,6 +132,7 @@ const qaStarting = ref(false)
 const qaCancelling = ref(false)
 const qaRuntimeBatch = ref<QuestionAnswerBatch | null>(null)
 const qaReviewBatch = ref<QuestionAnswerBatch | null>(null)
+const qaReviewBatchSyncFailed = ref(false)
 const qaReviewLoadingBatchId = ref<string | null>(null)
 const qaHistory = ref<QuestionAnswerHistory>({
   records: [],
@@ -261,6 +264,7 @@ const questionAnswerHistoryIntentIsCurrent = (sequence: number): boolean => (
 const resetQuestionAnswerViewState = () => {
   qaRuntimeBatch.value = null
   qaReviewBatch.value = null
+  qaReviewBatchSyncFailed.value = false
   qaHistoryIntentPage = 1
   qaHistory.value = {
     records: [], page: 1, pageSize: 20, totalItems: 0, totalPages: 0,
@@ -293,6 +297,7 @@ const resetQuestionAnswerTargetState = () => {
   qaRepeatCount.value = 1
   qaMarking.value = new Map()
   qaErrorKey.value = ''
+  qaReviewBatchSyncFailed.value = false
   qaCompletedNotice.value = false
   qaSelectionDataReady = false
 }
@@ -501,6 +506,14 @@ watch(mode, (nextMode) => {
   }
 })
 
+watch(
+  () => Boolean(qaReviewBatch.value?.active),
+  (active) => {
+    if (active) startQuestionAnswerClock()
+    else if (!qaRuntimeBatch.value?.active) clearQuestionAnswerClock()
+  },
+)
+
 const hasModels = computed(() => models.value.length > 0)
 const qaActive = computed(() => Boolean(qaRuntimeBatch.value?.active))
 const qaSelectionLocked = computed(() => qaStarting.value || qaActive.value)
@@ -538,9 +551,146 @@ const qaReviewedRecords = computed(() => qaReviewPartition.value.reviewed)
 const qaFailedRecords = computed(() => qaReviewPartition.value.failed)
 const qaReviewedCorrectCount = computed(() => qaReviewedRecords.value.filter(record => record.answerJudgment === 'correct').length)
 const qaReviewedIncorrectCount = computed(() => qaReviewedRecords.value.filter(record => record.answerJudgment === 'incorrect').length)
+const qaProcessedSectionVisible = computed(() => {
+  const batch = qaReviewBatch.value
+  if (!batch) return false
+  return batch.active
+    || qaReviewBatchSyncFailed.value
+    || qaReviewedRecords.value.length > 0
+    || qaFailedRecords.value.length > 0
+    || (!batch.active && batch.records.length > 0)
+})
 const qaReviewCompletedAt = computed(() => (
   qaReviewBatch.value ? questionAnswerBatchCompletedAt(qaReviewBatch.value) : null
 ))
+const qaReviewBatchStartedAtMilliseconds = computed(() => {
+  const batch = qaReviewBatch.value
+  if (!batch || batch.records.length === 0) return null
+  const timestamps = batch.records
+    .flatMap(record => [record.createdAt, record.startedAt])
+    .map(value => value ? Date.parse(value) : Number.NaN)
+    .filter(Number.isFinite)
+  return timestamps.length > 0 ? Math.min(...timestamps) : null
+})
+const qaReviewBatchElapsedMilliseconds = computed(() => {
+  const batch = qaReviewBatch.value
+  const startedAt = qaReviewBatchStartedAtMilliseconds.value
+  if (!batch || startedAt === null) return null
+  const completedAt = batch.active
+    ? qaClockNow.value
+    : qaReviewCompletedAt.value
+      ? Date.parse(qaReviewCompletedAt.value)
+      : Number.NaN
+  if (!Number.isFinite(completedAt)) return null
+  return Math.max(0, completedAt - startedAt)
+})
+const qaReviewBatchDurationLabel = computed(() => {
+  const elapsedMs = qaReviewBatchElapsedMilliseconds.value
+  if (elapsedMs === null) return t(`${prefix}.questionAnswer.batchElapsedUnknown`)
+  const totalSeconds = Math.floor(elapsedMs / 1000)
+  if (totalSeconds < 60) return t(`${prefix}.questionAnswer.durationSeconds`, { seconds: totalSeconds })
+  return t(`${prefix}.questionAnswer.durationMinutesSeconds`, {
+    minutes: Math.floor(totalSeconds / 60),
+    seconds: String(totalSeconds % 60).padStart(2, '0'),
+  })
+})
+const qaReviewBatchRequestStatsReliable = computed(() => {
+  const batch = qaReviewBatch.value
+  if (!batch) return false
+  const counts = batch.records.reduce((result, record) => {
+    if (record.status === 'pending' || record.status === 'running') {
+      result.inProgress++
+      if (record.status === 'running') result.running++
+    }
+    else if (record.status === 'succeeded') result.succeeded++
+    else if (record.status === 'failed') result.failed++
+    else if (record.status === 'cancelled') result.cancelled++
+    else result.unknown++
+    return result
+  }, { inProgress: 0, running: 0, succeeded: 0, failed: 0, cancelled: 0, unknown: 0 })
+  const requests = batch.stats.requests
+  const recordReviews = questionAnswerReviewStatsFromRecords(batch.records)
+  const reviews = batch.stats.reviews
+  return counts.unknown === 0
+    && requests.submitted === batch.submittedCount
+    && requests.submitted === batch.records.length
+    && requests.inProgress === counts.inProgress
+    && requests.succeeded === counts.succeeded
+    && requests.failed === counts.failed
+    && requests.cancelled === counts.cancelled
+    && batch.completedCount === counts.succeeded + counts.failed + counts.cancelled
+    && batch.runningCount === counts.running
+    && questionAnswerStatsReconcile(batch.stats)
+    && reviews.unreviewed === recordReviews.unreviewed
+    && reviews.correct === recordReviews.correct
+    && reviews.incorrect === recordReviews.incorrect
+})
+type QuestionAnswerBatchDisplayStatus = 'active' | 'slow' | 'completed' | 'terminated' | 'unknown' | 'syncFailed'
+const qaReviewBatchDisplayStatus = computed<QuestionAnswerBatchDisplayStatus>(() => {
+  const batch = qaReviewBatch.value
+  if (!batch) return 'unknown'
+  if (qaReviewBatchSyncFailed.value) return 'syncFailed'
+  const hasUnfinishedRecord = batch.records.some(record => record.status === 'pending' || record.status === 'running')
+  if (batch.active) {
+    return qaReviewBatchElapsedMilliseconds.value !== null
+      && qaReviewBatchElapsedMilliseconds.value > 3 * 60 * 1000
+      ? 'slow'
+      : 'active'
+  }
+  if (batch.stats.requests.inProgress > 0 || hasUnfinishedRecord) return 'unknown'
+  if (batch.records.length === 0 && batch.submittedCount > 0) return 'unknown'
+  if (!qaReviewBatchRequestStatsReliable.value) return 'unknown'
+  if (batch.stats.requests.cancelled > 0 || batch.records.some(record => record.status === 'cancelled')) return 'terminated'
+  return 'completed'
+})
+const qaReviewBatchStatusLabel = computed(() => {
+  const batch = qaReviewBatch.value
+  if (!batch) return ''
+  const total = batch.submittedCount
+  const duration = qaReviewBatchDurationLabel.value
+  if (qaReviewBatchDisplayStatus.value === 'syncFailed') {
+    return t(`${prefix}.questionAnswer.batchSyncFailedSummary`, { total, duration })
+  }
+  if (qaReviewBatchDisplayStatus.value === 'slow') {
+    return t(`${prefix}.questionAnswer.batchSlowSummary`, {
+      total,
+      inProgress: batch.stats.requests.inProgress,
+      duration,
+    })
+  }
+  if (qaReviewBatchDisplayStatus.value === 'active') {
+    return t(`${prefix}.questionAnswer.batchActiveSummary`, {
+      total,
+      inProgress: batch.stats.requests.inProgress,
+      duration,
+    })
+  }
+  if (qaReviewBatchDisplayStatus.value === 'terminated') {
+    return t(`${prefix}.questionAnswer.batchTerminatedSummary`, { total, duration })
+  }
+  if (qaReviewBatchDisplayStatus.value === 'completed') {
+    return qaPendingReviewRecords.value.length > 0
+      ? t(`${prefix}.questionAnswer.batchCompletedPendingSummary`, {
+        total,
+        pending: qaPendingReviewRecords.value.length,
+        duration,
+      })
+      : t(`${prefix}.questionAnswer.batchCompletedSummary`, {
+        total,
+        reviewed: qaReviewedRecords.value.length,
+        duration,
+      })
+  }
+  return t(`${prefix}.questionAnswer.batchUnknownSummary`, { total, duration })
+})
+const qaReviewBatchStatusClass = computed(() => {
+  if (qaReviewBatchDisplayStatus.value === 'terminated' || qaReviewBatchDisplayStatus.value === 'syncFailed') {
+    return 'text-red-600 dark:text-red-400'
+  }
+  if (qaReviewBatchDisplayStatus.value === 'slow') return 'text-amber-600 dark:text-amber-400'
+  if (qaReviewBatchDisplayStatus.value === 'completed') return 'text-green-600 dark:text-green-400'
+  return 'text-primary'
+})
 const qaHistoryBatchGroups = computed(() => {
   const reviewRecordIDs = new Set(qaReviewBatch.value?.records.map(record => record.id) ?? [])
   return groupQuestionAnswerHistoryByBatch(
@@ -693,6 +843,7 @@ const loadQuestionAnswerData = async (
     qaHistoryIntentPage = history.page
     qaRuntimeBatch.value = batch.batchId ? batch : null
     qaReviewBatch.value = qaRuntimeBatch.value
+    qaReviewBatchSyncFailed.value = false
     qaProcessedOpen.value = false
     qaFailedOpen.value = false
     qaSelectionDataReady = true
@@ -708,6 +859,9 @@ const loadQuestionAnswerData = async (
       && mode.value === 'questionAnswer'
       && props.target?.targetId === targetId
     ) qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+    if (sequence === loadSequence && mode.value === 'questionAnswer' && props.target?.targetId === targetId) {
+      qaReviewBatchSyncFailed.value = true
+    }
   } finally {
     if (qaDataController === controller) qaDataController = null
     if (sequence === loadSequence && questionAnswerHistoryIntentIsCurrent(historySequence)) qaLoading.value = false
@@ -733,6 +887,7 @@ const applyRuntimeQuestionAnswerBatch = (batch: QuestionAnswerBatch) => {
   qaRuntimeBatch.value = batch
   if (!qaReviewBatch.value || qaReviewBatch.value.batchId === batch.batchId) {
     qaReviewBatch.value = batch
+    qaReviewBatchSyncFailed.value = false
   }
 }
 
@@ -819,6 +974,9 @@ const pollQuestionAnswerBatch = async () => {
       return
     }
     qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+    if (!qaReviewBatch.value || qaReviewBatch.value.batchId === batchId) {
+      qaReviewBatchSyncFailed.value = true
+    }
     if (qaRuntimeBatch.value?.active) scheduleQuestionAnswerPoll()
     else clearQuestionAnswerClock()
   } finally {
@@ -851,6 +1009,8 @@ const startQuestionAnswers = async () => {
     qaErrorKey.value = ''
     qaRuntimeBatch.value = batch
     qaReviewBatch.value = batch
+    qaReviewBatchSyncFailed.value = false
+    qaConfigOpen.value = false
     qaProcessedOpen.value = false
     qaFailedOpen.value = false
     emit('question-answer-started', targetId)
@@ -979,6 +1139,7 @@ const reviewQuestionAnswerBatch = async (batchId: string) => {
       qaReviewBatch.value = currentRuntime?.batchId === batch.batchId
         ? currentRuntime
         : batch
+      qaReviewBatchSyncFailed.value = false
       if (!qaRuntimeBatch.value?.active) clearQuestionAnswerClock()
     } else {
       qaReviewBatch.value = batch.active
@@ -986,6 +1147,7 @@ const reviewQuestionAnswerBatch = async (batchId: string) => {
         && !runtimeBatch.active
         ? runtimeBatch
         : batch
+      qaReviewBatchSyncFailed.value = false
     }
     qaProcessedOpen.value = false
     qaFailedOpen.value = false
@@ -993,6 +1155,9 @@ const reviewQuestionAnswerBatch = async (batchId: string) => {
     if (error instanceof Error && error.name === 'AbortError') return
     if (sequence === loadSequence && reviewSequence === qaReviewSequence) {
       qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+      if (qaReviewBatch.value?.batchId === batchId) {
+        qaReviewBatchSyncFailed.value = true
+      }
     }
   } finally {
     if (qaReviewController === controller) qaReviewController = null
@@ -1014,6 +1179,7 @@ const reviewLatestQuestionAnswerBatch = () => {
   if (!qaRuntimeBatch.value) return
   cancelQuestionAnswerReview()
   qaReviewBatch.value = qaRuntimeBatch.value
+  qaReviewBatchSyncFailed.value = false
   qaProcessedOpen.value = false
   qaFailedOpen.value = false
 }
@@ -1353,11 +1519,11 @@ const close = () => {
                   {{ target.accountName }} · {{ target.platform || '-' }} · {{ target.type || '-' }} · {{ target.status || '-' }} · {{ target.groupName }}
                 </p>
               </div>
-              <AccountIntelligenceWeightEditor
+              <AccountTierEditor
+                v-if="target.targetId.toLowerCase().startsWith('sub2api:')"
                 :target-id="target.targetId"
-                :model-value="target.intelligenceWeight"
-                compact
-                @saved="emit('intelligence-weight-saved', $event)"
+                :account-tier="target.accountTier"
+                @saved="emit('tier-saved', $event)"
               />
             </div>
             <button type="button" class="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface-elevated hover:text-foreground" @click="close">
@@ -1424,7 +1590,7 @@ const close = () => {
                     <div class="flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <h4 class="text-sm font-semibold text-foreground">{{ t(prefix + '.questionAnswer.pendingReviewTitle') }}</h4>
-                        <p v-if="qaReviewBatch" data-testid="question-answer-review-batch" class="mt-1 text-xs text-muted-foreground">
+                        <p v-if="qaReviewBatch" data-testid="question-answer-review-batch" class="mt-1 text-sm font-semibold tabular-nums text-foreground">
                           {{ t(prefix + '.questionAnswer.reviewBatchId', { id: shortQuestionAnswerBatchId(qaReviewBatch.batchId) }) }}
                           <span v-if="qaReviewBatch.active"> · {{ t(prefix + '.questionAnswer.batchStillRunning') }}</span>
                           <span v-else-if="qaReviewCompletedAt"> · {{ t(prefix + '.questionAnswer.batchCompletedAt', { time: formatConnectionHealthTime(qaReviewCompletedAt) }) }}</span>
@@ -1506,10 +1672,11 @@ const close = () => {
                     </ul>
                   </section>
 
-                  <section v-if="qaReviewedRecords.length > 0 || qaFailedRecords.length > 0" data-question-answer-section="processed" data-testid="question-answer-processed" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
-                    <button type="button" class="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left" @click="qaProcessedOpen = !qaProcessedOpen">
-                      <span class="text-xs font-semibold text-foreground">
-                        {{ t(prefix + '.questionAnswer.processedSummary', { total: qaReviewedRecords.length, correct: qaReviewedCorrectCount, incorrect: qaReviewedIncorrectCount }) }}
+                  <section v-if="qaProcessedSectionVisible" data-question-answer-section="processed" data-testid="question-answer-processed" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
+                    <button type="button" class="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left" :aria-expanded="qaProcessedOpen" @click="qaProcessedOpen = !qaProcessedOpen">
+                      <span data-testid="question-answer-processed-summary" class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold tabular-nums text-foreground">
+                        <span>{{ t(prefix + '.questionAnswer.processedSummary', { total: qaReviewedRecords.length, correct: qaReviewedCorrectCount, incorrect: qaReviewedIncorrectCount }) }}</span>
+                        <span :class="qaReviewBatchStatusClass"> · {{ qaReviewBatchStatusLabel }}</span>
                       </span>
                       <ChevronUp v-if="qaProcessedOpen" class="h-4 w-4 text-muted-foreground" />
                       <ChevronDown v-else class="h-4 w-4 text-muted-foreground" />
@@ -1585,7 +1752,18 @@ const close = () => {
                     <p v-if="qaCompletedNotice" class="mt-3 rounded-lg bg-green-500/10 px-3 py-2 text-xs text-green-600 dark:text-green-400">{{ t(prefix + '.questionAnswer.completedNotice') }}</p>
 
                     <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
-                      <h4 class="text-sm font-semibold text-foreground">{{ t(prefix + '.questionAnswer.newTestConfiguration') }}</h4>
+                      <button
+                        type="button"
+                        data-testid="question-answer-configuration-toggle"
+                        class="inline-flex items-center gap-1 rounded-md text-left text-sm font-semibold text-foreground hover:text-primary"
+                        :aria-expanded="qaConfigOpen"
+                        aria-controls="question-answer-configuration-content"
+                        @click="qaConfigOpen = !qaConfigOpen"
+                      >
+                        <span>{{ t(prefix + '.questionAnswer.newTestConfiguration') }}</span>
+                        <ChevronUp v-if="qaConfigOpen" class="h-4 w-4 text-muted-foreground" />
+                        <ChevronDown v-else class="h-4 w-4 text-muted-foreground" />
+                      </button>
                       <button
                         v-if="!qaSelectionLocked && (!qaConfigOpen || qaSavedPreferenceValid)"
                         type="button"
@@ -1595,7 +1773,7 @@ const close = () => {
                         {{ qaConfigOpen ? t(prefix + '.questionAnswer.collapseConfiguration') : t(prefix + '.questionAnswer.modifyConfiguration') }}
                       </button>
                     </div>
-                    <div v-if="!qaConfigOpen" class="mt-3 rounded-lg bg-surface-line/30 px-3 py-2.5">
+                    <div v-if="!qaConfigOpen" id="question-answer-configuration-content" class="mt-3 rounded-lg bg-surface-line/30 px-3 py-2.5">
                       <p class="break-words text-sm font-medium text-foreground">{{ qaSummaryModelNames.join('、') || '-' }}</p>
                       <p class="mt-1 text-xs text-muted-foreground">
                         {{ t(prefix + '.questionAnswer.configurationSummary', {
@@ -1608,7 +1786,7 @@ const close = () => {
                         {{ qaRuntimeBatch?.active ? t(prefix + '.questionAnswer.activeConfiguration') : t(prefix + '.questionAnswer.rememberedConfiguration') }}
                       </p>
                     </div>
-                    <div v-else class="mt-3">
+                    <div v-else id="question-answer-configuration-content" class="mt-3">
                       <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
                         <div data-testid="question-answer-models">
                           <p class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.selectHint') }}</p>

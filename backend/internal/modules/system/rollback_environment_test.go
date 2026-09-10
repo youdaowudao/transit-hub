@@ -171,7 +171,7 @@ func TestRollbackHealthProbeTreatsConnectionRefusalAsExpectedControlFlow(t *test
 }
 
 func TestRollbackWaitForHealthRetriesConnectionFailureThenSucceeds(t *testing.T) {
-	output, attempts, exitCode := runRollbackWaitForHealth(t, 2, false)
+	output, attempts, exitCode := runRollbackWaitForHealth(t, 2, false, 5)
 	if exitCode != 0 {
 		t.Fatalf("wait_for_health exit code = %d, output=%s", exitCode, output)
 	}
@@ -181,7 +181,7 @@ func TestRollbackWaitForHealthRetriesConnectionFailureThenSucceeds(t *testing.T)
 }
 
 func TestRollbackWaitForHealthReturnsNonZeroAfterPersistentFailure(t *testing.T) {
-	output, attempts, exitCode := runRollbackWaitForHealth(t, 0, true)
+	output, attempts, exitCode := runRollbackWaitForHealth(t, 0, true, 3)
 	if exitCode == 0 {
 		t.Fatalf("persistent health failure unexpectedly succeeded: %s", output)
 	}
@@ -606,7 +606,7 @@ func assertFileContent(t *testing.T, path, want string) {
 	}
 }
 
-func runRollbackWaitForHealth(t *testing.T, succeedAfter int, alwaysFail bool) (string, int, int) {
+func runRollbackWaitForHealth(t *testing.T, succeedAfter int, alwaysFail bool, timeoutSeconds int) (string, int, int) {
 	t.Helper()
 	tempDir := t.TempDir()
 	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
@@ -643,7 +643,7 @@ printf '{"status":"ok"}\n'
 set -Eeuo pipefail
 export PATH=%q:$PATH
 HEALTH_URL='http://127.0.0.1:1/health'
-HEALTH_TIMEOUT_SECONDS=3
+HEALTH_TIMEOUT_SECONDS=%d
 sleep() { SECONDS=$((SECONDS + 1)); }
 %s
 if wait_for_health; then
@@ -652,7 +652,7 @@ else
   code=$?
   exit "$code"
 fi
-`, tempDir, waitFunction)
+`, tempDir, timeoutSeconds, waitFunction)
 	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o755); err != nil {
 		t.Fatal(err)
 	}

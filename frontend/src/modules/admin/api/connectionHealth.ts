@@ -1,4 +1,6 @@
 import type {
+  AccountTier,
+  AccountTierResult,
   AdminGroupPolicyConfiguration,
   AdminGroupPolicyConfigurationInput,
   AdminGroupHealth,
@@ -20,7 +22,6 @@ import type {
   TestQuestion,
   TestQuestionInput,
   TargetPolicyAssignments,
-  TargetIntelligenceWeightResult,
 } from '../types/connectionHealth'
 import {
   authUnauthorizedErrorKey,
@@ -87,23 +88,30 @@ export const getConnectionHealthStoredSummary = async (): Promise<ConnectionHeal
 export const getConnectionHealthGroups = async (): Promise<OwnGroupHealth[]> =>
   requestJson<OwnGroupHealth[]>('/connection-health/groups')
 
-const parseAdminGroupIntelligenceWeights = (payload: unknown): AdminGroupHealth[] => {
+const parseAccountTier = (payload: unknown, targetId: string, expectedTier?: AccountTier): AccountTierResult => {
+  if (!payload || typeof payload !== 'object') throw new Error('admin.connectionHealth.errors.request')
+  const result = payload as Partial<AccountTierResult>
+  if (result.targetId !== targetId || (result.accountTier !== 1 && result.accountTier !== 2)
+    || (expectedTier !== undefined && result.accountTier !== expectedTier)) {
+    throw new Error('admin.connectionHealth.errors.request')
+  }
+  return { targetId, accountTier: result.accountTier }
+}
+
+export const getAccountTier = async (targetId: string): Promise<AccountTierResult> =>
+  parseAccountTier(await requestJson<unknown>(`/connection-health/targets/${encodeURIComponent(targetId)}/tier`), targetId)
+
+export const saveAccountTier = async (targetId: string, accountTier: AccountTier): Promise<AccountTierResult> =>
+  parseAccountTier(await requestJson<unknown>(`/connection-health/targets/${encodeURIComponent(targetId)}/tier`, {
+    method: 'PUT',
+    body: JSON.stringify({ accountTier }),
+  }), targetId, accountTier)
+
+const parseAdminGroupHealth = (payload: unknown): AdminGroupHealth[] => {
   if (!Array.isArray(payload)) throw new Error('admin.connectionHealth.errors.request')
   for (const group of payload) {
     if (!group || typeof group !== 'object' || !Array.isArray((group as { accounts?: unknown }).accounts)) {
       throw new Error('admin.connectionHealth.errors.request')
-    }
-    for (const account of (group as { accounts: unknown[] }).accounts) {
-      if (!account || typeof account !== 'object' || !Object.prototype.hasOwnProperty.call(account, 'intelligenceWeight')) {
-        throw new Error('admin.connectionHealth.errors.request')
-      }
-      const value = (account as { intelligenceWeight?: unknown }).intelligenceWeight
-      if (
-        value !== null
-        && (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 100)
-      ) {
-        throw new Error('admin.connectionHealth.errors.request')
-      }
     }
   }
   return payload as AdminGroupHealth[]
@@ -112,7 +120,7 @@ const parseAdminGroupIntelligenceWeights = (payload: unknown): AdminGroupHealth[
 // getConnectionHealthAdminGroups 拉取 admin 全量分组健康主列表（含账号/渠道与探活叠加）。
 // 对应后端新增路由，不影响旧的 getConnectionHealthGroups。
 export const getConnectionHealthAdminGroups = async (): Promise<AdminGroupHealth[]> =>
-  parseAdminGroupIntelligenceWeights(await requestJson<unknown>('/connection-health/admin-groups'))
+  parseAdminGroupHealth(await requestJson<unknown>('/connection-health/admin-groups'))
 
 export type AdminGroupsRefreshSite = {
   siteId: string
@@ -214,7 +222,7 @@ const parseAdminGroupsFreshResponse = (payload: AdminGroupsFreshResponse | Admin
   }
   return {
     ...payload,
-    groups: parseAdminGroupIntelligenceWeights(payload.groups),
+    groups: parseAdminGroupHealth(payload.groups),
   }
 }
 
@@ -241,7 +249,7 @@ const parseRefreshTerminal = (payload: unknown): AdminGroupsRefreshTerminal => {
   }
   if (terminal.status === 'success') {
     try {
-      terminal.groups = parseAdminGroupIntelligenceWeights(terminal.groups)
+      terminal.groups = parseAdminGroupHealth(terminal.groups)
     } catch {
       throw refreshStreamProtocolError()
     }
@@ -802,15 +810,6 @@ export const setTargetSchedulable = async (targetId: string, schedulable: boolea
   requestJson<TargetSchedulableActionResult>(`/connection-health/targets/${encodeURIComponent(targetId)}/schedulable`, {
     method: 'POST',
     body: JSON.stringify({ schedulable }),
-  })
-
-export const setTargetIntelligenceWeight = async (
-  targetId: string,
-  intelligenceWeight: number | null,
-): Promise<TargetIntelligenceWeightResult> =>
-  requestJson<TargetIntelligenceWeightResult>(`/connection-health/targets/${encodeURIComponent(targetId)}/intelligence-weight`, {
-    method: 'PUT',
-    body: JSON.stringify({ intelligenceWeight }),
   })
 
 // getTargetPolicyAssignments / setTargetPolicyAssignments 管理「账号/channel 显式分配策略」

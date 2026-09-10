@@ -2,11 +2,20 @@ package upstream
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func sub2APIPaginationItems(count int) []map[string]any {
+	items := make([]map[string]any, 0, count)
+	for index := 0; index < count; index++ {
+		items = append(items, map[string]any{"id": index + 1, "name": "fixture", "status": "active"})
+	}
+	return items
+}
 
 // TestListAdminGroupAccounts_Sub2APIGroupQueryPagingAndFields 验证 sub2api 分组账号读取：
 //   - query 参数是 group=<分组ID>（不是 group_id）。
@@ -103,6 +112,194 @@ func TestListAdminGroupAccounts_Sub2APIGroupQueryPagingAndFields(t *testing.T) {
 		if strings.Contains(string(encoded), secret) {
 			t.Fatalf("sensitive field %q leaked into accounts response: %s", secret, encoded)
 		}
+	}
+}
+
+// Regression mutation guarded: an incomplete or contradictory total must never return a partial
+// account inventory as success, because downstream Priority capacity would then be unsafe.
+func TestListAdminGroupAccounts_Sub2APIRejectsIncompleteOrContradictoryPagination(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload func(page string) map[string]any
+	}{
+		{
+			name: "known total ends with an empty page",
+			payload: func(page string) map[string]any {
+				if page == "1" {
+					return map[string]any{"data": sub2APIPaginationItems(100), "total": 150}
+				}
+				return map[string]any{"data": []map[string]any{}, "total": 150}
+			},
+		},
+		{
+			name: "known total ends with a short page before exact closure",
+			payload: func(string) map[string]any {
+				return map[string]any{"data": sub2APIPaginationItems(50), "total": 100}
+			},
+		},
+		{
+			name: "raw item count exceeds total",
+			payload: func(string) map[string]any {
+				return map[string]any{"data": sub2APIPaginationItems(2), "total": 1}
+			},
+		},
+		{
+			name: "total changes after the first page",
+			payload: func(page string) map[string]any {
+				if page == "1" {
+					return map[string]any{"data": sub2APIPaginationItems(100), "total": 101}
+				}
+				return map[string]any{"data": sub2APIPaginationItems(1), "total": 102}
+			},
+		},
+		{
+			name: "total disappears after the first page",
+			payload: func(page string) map[string]any {
+				if page == "1" {
+					return map[string]any{"data": sub2APIPaginationItems(100), "total": 101}
+				}
+				return map[string]any{"data": sub2APIPaginationItems(1)}
+			},
+		},
+		{
+			name: "negative total",
+			payload: func(string) map[string]any {
+				return map[string]any{"data": sub2APIPaginationItems(1), "total": -1}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, test.payload(r.URL.Query().Get("page")))
+			}))
+			defer server.Close()
+			service := NewPlatformService(NewHTTPClient(server.Client()))
+			accounts, err := service.ListAdminGroupAccounts(
+				Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token"},
+				AdminGroupInfo{ID: "42", Name: "vip"},
+			)
+			if len(accounts) != 0 {
+				t.Fatalf("invalid pagination returned %d partial accounts", len(accounts))
+			}
+			var requestErr *RequestError
+			if !errors.As(err, &requestErr) || requestErr.MessageKey != ErrorInvalidResponse || requestErr.Platform != PlatformSub2API {
+				t.Fatalf("error=%#v want Sub2API %s", err, ErrorInvalidResponse)
+			}
+		})
+	}
+}
+
+func TestListAdminGroupAccounts_Sub2APIRejectsMalformedOrDuplicateInventory(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload func(page string) map[string]any
+	}{
+		{
+			name: "non-object item counted toward total",
+			payload: func(string) map[string]any {
+				return map[string]any{
+					"data":  []any{map[string]any{"id": 1, "name": "valid", "status": "active"}, "invalid"},
+					"total": 2,
+				}
+			},
+		},
+		{
+			name: "account without id counted toward total",
+			payload: func(string) map[string]any {
+				return map[string]any{"data": []map[string]any{{"name": "missing-id", "status": "active"}}, "total": 1}
+			},
+		},
+		{
+			name: "duplicate account across pages closes total",
+			payload: func(page string) map[string]any {
+				if page == "1" {
+					return map[string]any{"data": sub2APIPaginationItems(100), "total": 101}
+				}
+				return map[string]any{"data": []map[string]any{{"id": 100, "name": "duplicate", "status": "active"}}, "total": 101}
+			},
+		},
+		{
+			name: "fractional total",
+			payload: func(string) map[string]any {
+				return map[string]any{"data": sub2APIPaginationItems(1), "total": 1.5}
+			},
+		},
+		{
+			name: "missing account array",
+			payload: func(string) map[string]any {
+				return map[string]any{"total": 0}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, test.payload(r.URL.Query().Get("page")))
+			}))
+			defer server.Close()
+			service := NewPlatformService(NewHTTPClient(server.Client()))
+			accounts, err := service.ListAdminGroupAccounts(
+				Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token"},
+				AdminGroupInfo{ID: "42", Name: "vip"},
+			)
+			if len(accounts) != 0 {
+				t.Fatalf("invalid inventory returned %d accounts", len(accounts))
+			}
+			var requestErr *RequestError
+			if !errors.As(err, &requestErr) || requestErr.MessageKey != ErrorInvalidResponse || requestErr.Platform != PlatformSub2API {
+				t.Fatalf("error=%#v want Sub2API %s", err, ErrorInvalidResponse)
+			}
+		})
+	}
+}
+
+func TestListAdminGroupAccounts_Sub2APIRejectsFullUnknownTotalAtPageLimit(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		items := sub2APIPaginationItems(100)
+		for index := range items {
+			items[index]["id"] = (requests-1)*100 + index + 1
+		}
+		writeJSON(w, map[string]any{"data": items})
+	}))
+	defer server.Close()
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	accounts, err := service.ListAdminGroupAccounts(
+		Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token"},
+		AdminGroupInfo{ID: "42", Name: "vip"},
+	)
+	if requests != 100 {
+		t.Fatalf("requests=%d want bounded page limit 100", requests)
+	}
+	if len(accounts) != 0 {
+		t.Fatalf("page limit returned %d partial accounts", len(accounts))
+	}
+	var requestErr *RequestError
+	if !errors.As(err, &requestErr) || requestErr.MessageKey != ErrorInvalidResponse || requestErr.Platform != PlatformSub2API {
+		t.Fatalf("error=%#v want Sub2API %s", err, ErrorInvalidResponse)
+	}
+}
+
+func TestListAdminGroupAccounts_Sub2APIAcceptsUnknownTotalOnlyAtNaturalEnd(t *testing.T) {
+	for _, count := range []int{0, 37} {
+		t.Run(strconvInt(int64(count)), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, map[string]any{"data": sub2APIPaginationItems(count)})
+			}))
+			defer server.Close()
+			service := NewPlatformService(NewHTTPClient(server.Client()))
+			accounts, err := service.ListAdminGroupAccounts(
+				Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token"},
+				AdminGroupInfo{ID: "42", Name: "vip"},
+			)
+			if err != nil || len(accounts) != count {
+				t.Fatalf("natural end count=%d accounts=%d error=%v", count, len(accounts), err)
+			}
+		})
 	}
 }
 

@@ -17,7 +17,6 @@ const harness = vi.hoisted(() => ({
   cancelQuestionAnswerBatch: vi.fn(),
   startQuestionAnswerBatch: vi.fn(),
   setQuestionAnswerJudgment: vi.fn(),
-  setTargetIntelligenceWeight: vi.fn(),
 }))
 
 vi.mock('@/modules/admin/composables/useConnectionHealth', () => ({
@@ -39,7 +38,6 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
   getQuestionAnswerHistory: harness.getQuestionAnswerHistory,
   listTestQuestions: harness.listTestQuestions,
   setQuestionAnswerJudgment: harness.setQuestionAnswerJudgment,
-  setTargetIntelligenceWeight: harness.setTargetIntelligenceWeight,
   startQuestionAnswerBatch: harness.startQuestionAnswerBatch,
 }))
 
@@ -179,7 +177,6 @@ const primaryTarget: ManualProbeTargetSummary = {
   status: 'active',
   groupName: 'Group A',
   formalModels: [],
-  intelligenceWeight: null,
 }
 
 const secondaryTarget: ManualProbeTargetSummary = {
@@ -215,11 +212,11 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
-const mountQuestionAnswerDialog = async () => {
+const mountQuestionAnswerDialog = async (target = primaryTarget) => {
   const wrapper = mount(ManualOneTimeProbeDialog, {
     props: {
       open: false,
-      target: primaryTarget,
+      target,
     },
     global: { stubs: { Teleport: true, Transition: false } },
   })
@@ -315,6 +312,21 @@ const appearsBefore = (first: Element, second: Element) => Boolean(
 )
 
 describe('question-answer low-operation review', () => {
+  it('keeps manual review and accuracy while hiding retired intelligence controls', async () => {
+    harness.getQuestionAnswerHistory.mockResolvedValue(emptyHistory)
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch([
+      { ...reviewRecords[2], id: 'retired-correct', answerJudgment: 'correct' },
+      { ...reviewRecords[3], id: 'retired-incorrect', answerJudgment: 'incorrect' },
+      { ...reviewRecords[0], id: 'retired-unreviewed', answerJudgment: 'unreviewed' },
+    ]))
+
+    const wrapper = await mountQuestionAnswerDialog()
+
+    expect(wrapper.find('[data-testid="account-intelligence-weight-editor"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="question-answer-stats-bar"]').text()).toContain('正确率')
+    expect(judgmentButtons(wrapper.get('[data-testid="question-answer-pending"]'))).not.toHaveLength(0)
+  })
+
   it('opens and reopens in the first question-answer mode with one initialization and the fixed near-viewport layout', async () => {
     const wrapper = mountClosedDialog()
     await wrapper.setProps({ open: true })
@@ -706,11 +718,11 @@ describe('question-answer batch behavior', () => {
       expect.any(AbortSignal),
     )
     expect(wrapper.text()).not.toContain('正在处理')
-    expect(wrapper.text()).not.toContain('已终止')
+    expect(wrapper.text()).toContain('已终止')
     expect(wrapper.findAll('button').some(button => button.text().includes('终止本次问答'))).toBe(false)
 
-    expect(wrapper.find('[data-testid="question-answer-processed"]').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('已终止')
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+    expect(processed.text()).toContain('本批次已处理 0 条 · 正确 0 · 错误 0')
   })
 
   it('allows judgment only for succeeded records while a batch is active', async () => {
@@ -1039,7 +1051,6 @@ describe('question-answer batch behavior', () => {
         status: 'active',
         groupName: 'Group B',
         formalModels: [],
-        intelligenceWeight: null,
       },
     })
     await flushPromises()
@@ -1085,7 +1096,6 @@ describe('question-answer batch behavior', () => {
         status: 'active',
         groupName: 'Group B',
         formalModels: [],
-        intelligenceWeight: null,
       },
     })
     await flushPromises()

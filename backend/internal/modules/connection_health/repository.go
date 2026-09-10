@@ -39,6 +39,8 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			CONSTRAINT connection_health_account_configs_intelligence_weight
 				CHECK (intelligence_weight IS NULL OR intelligence_weight BETWEEN 0 AND 100)
 		)`,
+		`ALTER TABLE connection_health_account_configs ADD COLUMN IF NOT EXISTS account_tier integer NULL
+			CONSTRAINT connection_health_account_configs_account_tier CHECK (account_tier IS NULL OR account_tier IN (1, 2))`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_account_configs_workspace ON connection_health_account_configs (user_id, admin_account_id)`,
 		`CREATE TABLE IF NOT EXISTS connection_health_policies (
 			id text PRIMARY KEY,

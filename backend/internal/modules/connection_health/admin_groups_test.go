@@ -1565,6 +1565,427 @@ func TestAdminGroups_SingleGroupAccountsErrorDoesNotBreakList(t *testing.T) {
 	}
 }
 
+func candidateAdminGroupsPolicy(id, modelName string, autoDegrade, autoRemote bool) Policy {
+	policy := probePolicy()
+	policy.ID = id
+	policy.Name = id
+	policy.AutoDegradeEnabled = autoDegrade
+	policy.AutoRemoteActionEnabled = autoRemote
+	policy.PriorityMode = PriorityModeMultiplier
+	policy.StrategyMode = StrategyModeHealthProbe
+	policy.ModelTargets = []ModelTarget{{
+		ID: id + "-target", PolicyID: id, ModelName: modelName,
+		ProviderFamily: ProviderOpenAI, Enabled: true, MaxProbeTokens: 1,
+	}}
+	return policy
+}
+
+func candidateAdminGroupsState(targetID, modelName string, state State, latency *int) ConnectionHealthState {
+	return ConnectionHealthState{
+		ConnectionID: targetID, ModelName: modelName, UserID: "user1", AdminAccountID: "ws1",
+		State: state, LastSuccessLatencyMs: latency,
+	}
+}
+
+func candidateAdminGroupsService(
+	t *testing.T,
+	repo *fakeRepository,
+	groups []upstream.AdminGroupInfo,
+	accountsByGroup map[string][]upstream.AdminGroupAccountInfo,
+	multipliers map[string]float64,
+) *Service {
+	t.Helper()
+	service := newAdminGroupsService(
+		fakePlatformGroupReader{groups: groups, accountsByGrp: accountsByGroup},
+		fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		repo,
+	)
+	lookup := upstreamMultiplierLookup{byAccount: make(map[string]upstreamMultiplierResolution, len(multipliers))}
+	for accountID, multiplier := range multipliers {
+		value := multiplier
+		lookup.byAccount[accountID] = upstreamMultiplierResolution{
+			status: MultiplierResolutionResolved,
+			info:   upstreamKeyGroupInfo{effectiveMultiplier: &value},
+		}
+	}
+	cacheKey := "user1\x00ws1\x00" + string(upstream.PlatformSub2API)
+	service.adminMultiplierCache = map[string]adminMultiplierCacheEntry{
+		cacheKey: {lookup: lookup, expiresAt: time.Now().Add(time.Minute)},
+	}
+	return service
+}
+
+// Regression mutation guarded: display-only probe models must not make a healthy auto-degrade
+// target unavailable or cancel a protected account that can outrank a promoted second layer.
+func TestAdminGroupsPriorityCandidateIgnoresDisabledProbeOnlyModelForAvailabilityAndProtection(t *testing.T) {
+	autoPolicy := candidateAdminGroupsPolicy("auto", "sort-model", true, true)
+	probeOnlyPolicy := candidateAdminGroupsPolicy("probe-only", "probe-model", false, false)
+	repo := newFakeRepository()
+	repo.policies = []Policy{autoPolicy, probeOnlyPolicy}
+	repo.groupAssignments = []GroupPolicyAssignment{
+		{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: autoPolicy.ID},
+		{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: probeOnlyPolicy.ID},
+	}
+	repo.accountTiers = map[string]int{"user1|ws1|sub2api:ws1:first": 1}
+	for _, fixture := range []struct {
+		accountID string
+		priority  int
+		sortState State
+		managed   bool
+	}{
+		{accountID: "first", priority: 20, sortState: StateDisabled, managed: true},
+		{accountID: "second", priority: 21, sortState: StateHealthy, managed: true},
+		{accountID: "protected", priority: 7, sortState: StateHealthy, managed: false},
+	} {
+		targetID := "sub2api:ws1:" + fixture.accountID
+		repo.states[targetID] = map[string]ConnectionHealthState{
+			"sort-model":  candidateAdminGroupsState(targetID, "sort-model", fixture.sortState, intPointer(20)),
+			"probe-model": candidateAdminGroupsState(targetID, "probe-model", StateDisabled, nil),
+		}
+		if fixture.managed {
+			repo.priorityStates["user1|ws1|"+targetID] = PrioritySyncState{
+				UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+				LastAppliedPriority: fixture.priority, EffectiveMultiplier: 1,
+			}
+		}
+	}
+	schedulable := true
+	priorities := map[string]int{"first": 20, "second": 21, "protected": 7}
+	accounts := make([]upstream.AdminGroupAccountInfo, 0, len(priorities))
+	for _, accountID := range []string{"first", "second", "protected"} {
+		priority := priorities[accountID]
+		accounts = append(accounts, upstream.AdminGroupAccountInfo{
+			ID: accountID, Name: accountID, Models: "sort-model,probe-model", Status: "active",
+			Schedulable: &schedulable, Priority: &priority,
+		})
+	}
+	service := candidateAdminGroupsService(t, repo,
+		[]upstream.AdminGroupInfo{{ID: "g1", Name: "one"}},
+		map[string][]upstream.AdminGroupAccountInfo{"g1": accounts},
+		map[string]float64{"first": 1, "second": 1, "protected": 1},
+	)
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("AdminGroups() error = %v", err)
+	}
+	summary := groups[0].PriorityCandidateSummary
+	if summary == nil || summary.Mode != "safety_lock" || summary.SafetyReason != "protected_account_blocker" || summary.CandidatePriorityReady {
+		t.Fatalf("protected account must block the otherwise valid second-layer takeover: %+v", summary)
+	}
+	byID := make(map[string]PriorityCandidateProjection)
+	for _, account := range groups[0].Accounts {
+		if account.PriorityCandidate != nil {
+			byID[account.ID] = *account.PriorityCandidate
+		}
+	}
+	if got := byID["first"]; got.State != "unavailable" {
+		t.Fatalf("disabled auto-degrade model must make first layer unavailable: %+v", got)
+	}
+	if got := byID["second"]; got.State != "candidate" || got.HealthBand != "healthy" || got.SuccessLatencyMs == nil || *got.SuccessLatencyMs != 20 || got.Priority != nil {
+		t.Fatalf("probe-only disabled model must not change the valid but protected second-layer candidate: %+v", got)
+	}
+	if got := byID["protected"]; !got.BlocksTakeover {
+		t.Fatalf("probe-only disabled model must not cancel the protected blocker: %+v", got)
+	}
+}
+
+// Regression mutation guarded: display-only probe latency must not replace the complete latency
+// of the auto-degrade model set or reverse otherwise equal candidate ordering.
+func TestAdminGroupsPriorityCandidateIgnoresProbeOnlyLatencyForBandLatencyAndOrder(t *testing.T) {
+	autoPolicy := candidateAdminGroupsPolicy("auto", "sort-model", true, true)
+	probeOnlyPolicy := candidateAdminGroupsPolicy("probe-only", "probe-model", false, false)
+	repo := newFakeRepository()
+	repo.policies = []Policy{autoPolicy, probeOnlyPolicy}
+	repo.groupAssignments = []GroupPolicyAssignment{
+		{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: autoPolicy.ID},
+		{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: probeOnlyPolicy.ID},
+	}
+	repo.accountTiers = map[string]int{
+		"user1|ws1|sub2api:ws1:a": 1,
+		"user1|ws1|sub2api:ws1:b": 1,
+	}
+	for _, fixture := range []struct {
+		accountID    string
+		priority     int
+		sortLatency  int
+		probeLatency int
+	}{
+		{accountID: "a", priority: 20, sortLatency: 20, probeLatency: 9000},
+		{accountID: "b", priority: 21, sortLatency: 30, probeLatency: 1},
+	} {
+		targetID := "sub2api:ws1:" + fixture.accountID
+		repo.states[targetID] = map[string]ConnectionHealthState{
+			"sort-model":  candidateAdminGroupsState(targetID, "sort-model", StateHealthy, intPointer(fixture.sortLatency)),
+			"probe-model": candidateAdminGroupsState(targetID, "probe-model", StateHealthy, intPointer(fixture.probeLatency)),
+		}
+		repo.priorityStates["user1|ws1|"+targetID] = PrioritySyncState{
+			UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+			LastAppliedPriority: fixture.priority, EffectiveMultiplier: 1,
+		}
+	}
+	schedulable := true
+	priorityA, priorityB := 20, 21
+	service := candidateAdminGroupsService(t, repo,
+		[]upstream.AdminGroupInfo{{ID: "g1", Name: "one"}},
+		map[string][]upstream.AdminGroupAccountInfo{"g1": {
+			{ID: "a", Name: "a", Models: "sort-model,probe-model", Status: "active", Schedulable: &schedulable, Priority: &priorityA},
+			{ID: "b", Name: "b", Models: "sort-model,probe-model", Status: "active", Schedulable: &schedulable, Priority: &priorityB},
+		}},
+		map[string]float64{"a": 1, "b": 1},
+	)
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("AdminGroups() error = %v", err)
+	}
+	byID := make(map[string]PriorityCandidateProjection)
+	for _, account := range groups[0].Accounts {
+		if account.PriorityCandidate != nil {
+			byID[account.ID] = *account.PriorityCandidate
+		}
+	}
+	if got := byID["a"]; got.Rank == nil || *got.Rank != 1 || got.HealthBand != "healthy" || got.SuccessLatencyMs == nil || *got.SuccessLatencyMs != 20 {
+		t.Fatalf("candidate a must use only auto-degrade evidence and rank first: %+v", got)
+	}
+	if got := byID["b"]; got.Rank == nil || *got.Rank != 2 || got.SuccessLatencyMs == nil || *got.SuccessLatencyMs != 30 {
+		t.Fatalf("candidate b must retain its auto-degrade latency and rank second: %+v", got)
+	}
+	encoded, err := json.Marshal(byID["a"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"multiplier":1`) {
+		t.Fatalf("candidate projection must carry the actual sort multiplier: %s", encoded)
+	}
+}
+
+// Regression mutation guarded: selecting auto-degrade models per group before target-wide policy
+// merge can choose a different policy for a duplicated model than production Priority sorting.
+func TestAdminGroupsPriorityCandidateMergesTargetPoliciesBeforeSelectingAutoDegradeModels(t *testing.T) {
+	autoPolicy := candidateAdminGroupsPolicy("z-auto", "shared-model", true, true)
+	probeOnlyPolicy := candidateAdminGroupsPolicy("a-probe-only", "shared-model", false, false)
+	repo := newFakeRepository()
+	repo.policies = []Policy{autoPolicy, probeOnlyPolicy}
+	repo.groupAssignments = []GroupPolicyAssignment{
+		{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g-auto", PolicyID: autoPolicy.ID},
+		{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g-probe", PolicyID: probeOnlyPolicy.ID},
+	}
+	targetID := "sub2api:ws1:shared"
+	repo.accountTiers = map[string]int{"user1|ws1|" + targetID: 1}
+	repo.states[targetID] = map[string]ConnectionHealthState{
+		"shared-model": candidateAdminGroupsState(targetID, "shared-model", StateHealthy, intPointer(10)),
+	}
+	repo.priorityStates["user1|ws1|"+targetID] = PrioritySyncState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		LastAppliedPriority: 20, EffectiveMultiplier: 1,
+	}
+	schedulable := true
+	priority := 20
+	shared := upstream.AdminGroupAccountInfo{
+		ID: "shared", Name: "shared", Models: "shared-model", Status: "active",
+		Schedulable: &schedulable, Priority: &priority,
+	}
+	service := candidateAdminGroupsService(t, repo,
+		[]upstream.AdminGroupInfo{{ID: "g-auto", Name: "auto"}, {ID: "g-probe", Name: "probe"}},
+		map[string][]upstream.AdminGroupAccountInfo{"g-auto": {shared}, "g-probe": {shared}},
+		map[string]float64{"shared": 1},
+	)
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("AdminGroups() error = %v", err)
+	}
+	summary := groups[0].PriorityCandidateSummary
+	projection := groups[0].Accounts[0].PriorityCandidate
+	if summary == nil || summary.Mode != "safety_lock" || summary.SafetyReason != "health_incomplete" || summary.CandidatePriorityReady {
+		t.Fatalf("target-wide production policy preference must leave no auto-degrade model: %+v", summary)
+	}
+	if projection == nil || projection.State != "safety_lock" || projection.Reason != "health_incomplete" || projection.Priority != nil {
+		t.Fatalf("candidate must fail closed when target-wide model selection has no auto-degrade model: %+v", projection)
+	}
+}
+
+// Regression mutation guarded: duplicated target observations must not let group order choose
+// the model inventory used for a candidate. Formatting-only differences remain equivalent.
+func TestAdminGroupsPriorityCandidateFailsClosedOnConflictingCrossGroupModelInventory(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		first      string
+		second     string
+		wantLocked bool
+	}{
+		{name: "different model sets lock", first: "sort-model", second: "sort-model,other-model", wantLocked: true},
+		{name: "order whitespace and duplicates are equivalent", first: "other-model, sort-model", second: " sort-model,other-model,sort-model ", wantLocked: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			policy := candidateAdminGroupsPolicy("auto", "sort-model", true, true)
+			repo := newFakeRepository()
+			repo.policies = []Policy{policy}
+			repo.groupAssignments = []GroupPolicyAssignment{
+				{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID},
+				{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g2", PolicyID: policy.ID},
+			}
+			targetID := "sub2api:ws1:shared"
+			repo.accountTiers = map[string]int{"user1|ws1|" + targetID: 1}
+			repo.states[targetID] = map[string]ConnectionHealthState{
+				"sort-model": candidateAdminGroupsState(targetID, "sort-model", StateHealthy, intPointer(10)),
+			}
+			repo.priorityStates["user1|ws1|"+targetID] = PrioritySyncState{
+				UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+				LastAppliedPriority: 20, EffectiveMultiplier: 1,
+			}
+			schedulable := true
+			priority := 20
+			account := func(models string) upstream.AdminGroupAccountInfo {
+				return upstream.AdminGroupAccountInfo{
+					ID: "shared", Name: "shared", Models: models, Status: "active",
+					Schedulable: &schedulable, Priority: &priority,
+				}
+			}
+			service := candidateAdminGroupsService(t, repo,
+				[]upstream.AdminGroupInfo{{ID: "g1", Name: "one"}, {ID: "g2", Name: "two"}},
+				map[string][]upstream.AdminGroupAccountInfo{
+					"g1": {account(testCase.first)},
+					"g2": {account(testCase.second)},
+				},
+				map[string]float64{"shared": 1},
+			)
+
+			groups, err := service.AdminGroups(context.Background(), "user1")
+			if err != nil {
+				t.Fatalf("AdminGroups() error = %v", err)
+			}
+			summary := groups[0].PriorityCandidateSummary
+			projection := groups[0].Accounts[0].PriorityCandidate
+			if testCase.wantLocked {
+				if summary == nil || summary.Mode != "safety_lock" || summary.SafetyReason != "observation_conflict" || summary.CandidatePriorityReady {
+					t.Fatalf("conflicting cross-group model inventory must lock the candidate plan: %+v", summary)
+				}
+				if projection == nil || projection.State != "safety_lock" || projection.Reason != "observation_conflict" || projection.Priority != nil || projection.Multiplier != nil {
+					t.Fatalf("conflicting cross-group model inventory must not expose candidate values: %+v", projection)
+				}
+				return
+			}
+			if summary == nil || summary.Mode != "first_active" || !summary.CandidatePriorityReady {
+				t.Fatalf("equivalent normalized model inventories must remain a valid candidate: %+v", summary)
+			}
+			if projection == nil || projection.State != "candidate" || projection.Priority == nil || projection.Multiplier == nil {
+				t.Fatalf("equivalent normalized model inventories must retain candidate values: %+v", projection)
+			}
+		})
+	}
+}
+
+// Regression mutation guarded: a retained stale multiplier may remain visible, but it must never
+// become the sort multiplier used by the read-only candidate plan.
+func TestAdminGroupsPriorityCandidateRejectsStaleMultiplierWithDisplayValue(t *testing.T) {
+	policy := candidateAdminGroupsPolicy("auto", "sort-model", true, true)
+	repo := newFakeRepository()
+	repo.policies = []Policy{policy}
+	repo.groupAssignments = []GroupPolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID}}
+	targetID := "sub2api:ws1:stale"
+	repo.accountTiers = map[string]int{"user1|ws1|" + targetID: 1}
+	repo.states[targetID] = map[string]ConnectionHealthState{
+		"sort-model": candidateAdminGroupsState(targetID, "sort-model", StateHealthy, intPointer(10)),
+	}
+	repo.priorityStates["user1|ws1|"+targetID] = PrioritySyncState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		LastAppliedPriority: 20, EffectiveMultiplier: 0.25,
+	}
+	schedulable := true
+	priority := 20
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "one"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{"g1": {{
+			ID: "stale", Name: "stale", Models: "sort-model", Status: "active",
+			Schedulable: &schedulable, Priority: &priority,
+		}}},
+	}
+	service := newAdminGroupsService(reader, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, repo)
+	staleMultiplier := 0.25
+	cacheKey := "user1\x00ws1\x00" + string(upstream.PlatformSub2API)
+	service.adminMultiplierCache = map[string]adminMultiplierCacheEntry{
+		cacheKey: {
+			lookup: upstreamMultiplierLookup{byAccount: map[string]upstreamMultiplierResolution{
+				"stale": {
+					status: MultiplierResolutionStale,
+					reason: MultiplierReasonSnapshotStale,
+					info:   upstreamKeyGroupInfo{effectiveMultiplier: &staleMultiplier},
+				},
+			}},
+			expiresAt: time.Now().Add(time.Minute),
+		},
+	}
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("AdminGroups() error = %v", err)
+	}
+	account := groups[0].Accounts[0]
+	if account.EffectiveMultiplier == nil || *account.EffectiveMultiplier != staleMultiplier || account.MultiplierSource != MultiplierSourceUpstreamKey {
+		t.Fatalf("stale multiplier must remain visible without becoming authoritative: %+v", account)
+	}
+	if groups[0].PriorityCandidateSummary == nil || groups[0].PriorityCandidateSummary.SafetyReason != "multiplier_unavailable" || groups[0].PriorityCandidateSummary.CandidatePriorityReady {
+		t.Fatalf("stale multiplier must lock the candidate plan: %+v", groups[0].PriorityCandidateSummary)
+	}
+	if account.PriorityCandidate == nil || account.PriorityCandidate.State != "safety_lock" || account.PriorityCandidate.Reason != "multiplier_unavailable" || account.PriorityCandidate.Priority != nil {
+		t.Fatalf("stale multiplier candidate projection must fail closed: %+v", account.PriorityCandidate)
+	}
+}
+
+func TestAdminGroupsPriorityCandidateLocksAllPrioritiesWhenOneSub2APIGroupInventoryFails(t *testing.T) {
+	policy := candidateAdminGroupsPolicy("auto", "sort-model", true, true)
+	repo := newFakeRepository()
+	repo.policies = []Policy{policy}
+	repo.groupAssignments = []GroupPolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g-ok", PolicyID: policy.ID}}
+	targetID := "sub2api:ws1:a"
+	repo.accountTiers = map[string]int{"user1|ws1|" + targetID: 1}
+	repo.states[targetID] = map[string]ConnectionHealthState{
+		"sort-model": candidateAdminGroupsState(targetID, "sort-model", StateHealthy, intPointer(10)),
+	}
+	repo.priorityStates["user1|ws1|"+targetID] = PrioritySyncState{
+		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
+		LastAppliedPriority: 20, EffectiveMultiplier: 1,
+	}
+	schedulable := true
+	priority := 20
+	reader := fakePlatformGroupReader{
+		groups: []upstream.AdminGroupInfo{{ID: "g-ok", Name: "ok"}, {ID: "g-bad", Name: "bad"}},
+		accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{"g-ok": {{
+			ID: "a", Name: "a", Models: "sort-model", Status: "active", Schedulable: &schedulable, Priority: &priority,
+		}}},
+		errByGrp: map[string]error{"g-bad": errors.New("truncated inventory")},
+	}
+	service := newAdminGroupsService(reader, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, repo)
+	cacheKey := "user1\x00ws1\x00" + string(upstream.PlatformSub2API)
+	multiplier := 1.0
+	service.adminMultiplierCache = map[string]adminMultiplierCacheEntry{
+		cacheKey: {
+			lookup: upstreamMultiplierLookup{byAccount: map[string]upstreamMultiplierResolution{
+				"a": {status: MultiplierResolutionResolved, info: upstreamKeyGroupInfo{effectiveMultiplier: &multiplier}},
+			}},
+			expiresAt: time.Now().Add(time.Minute),
+		},
+	}
+
+	groups, err := service.AdminGroups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("whole list must preserve the existing per-group error contract: %v", err)
+	}
+	if len(groups) != 2 || groups[1].AccountsError != ErrorAccountsFetch {
+		t.Fatalf("failed group must retain accountsError in the array response: %+v", groups)
+	}
+	summary := groups[0].PriorityCandidateSummary
+	projection := groups[0].Accounts[0].PriorityCandidate
+	if summary == nil || summary.Mode != "safety_lock" || summary.SafetyReason != "inventory_incomplete" || summary.CandidatePriorityReady {
+		t.Fatalf("partial inventory must lock the whole candidate plan: %+v", summary)
+	}
+	if projection == nil || projection.State != "candidate" || projection.Priority != nil {
+		t.Fatalf("inventory lock may retain read-only ordering evidence but never a candidate Priority: %+v", projection)
+	}
+}
+
 // TestAdminGroups_WorkspaceIsolationAndNoSensitiveFields 验证 workspace 隔离与敏感字段不泄露：
 // 其它 workspace 的状态不叠加；响应里不出现 key/token/credentials 等字段。
 func TestAdminGroups_WorkspaceIsolationAndNoSensitiveFields(t *testing.T) {

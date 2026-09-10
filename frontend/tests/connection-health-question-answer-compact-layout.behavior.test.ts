@@ -24,7 +24,6 @@ const harness = vi.hoisted(() => ({
   cancelQuestionAnswerBatch: vi.fn(),
   startQuestionAnswerBatch: vi.fn(),
   setQuestionAnswerJudgment: vi.fn(),
-  setTargetIntelligenceWeight: vi.fn(),
 }))
 
 vi.mock('@/modules/admin/composables/useConnectionHealth', () => ({
@@ -46,7 +45,6 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
   getQuestionAnswerHistory: harness.getQuestionAnswerHistory,
   listTestQuestions: harness.listTestQuestions,
   setQuestionAnswerJudgment: harness.setQuestionAnswerJudgment,
-  setTargetIntelligenceWeight: harness.setTargetIntelligenceWeight,
   startQuestionAnswerBatch: harness.startQuestionAnswerBatch,
 }))
 
@@ -101,8 +99,7 @@ const target: ManualProbeTargetSummary = {
   status: 'active',
   groupName: 'OpenAI Group A',
   formalModels: [],
-  intelligenceWeight: null,
-} as ManualProbeTargetSummary
+}
 
 const history = (lifetime: QuestionAnswerStats, today: QuestionAnswerStats): QuestionAnswerHistory => ({
   records: [],
@@ -161,11 +158,11 @@ beforeEach(() => {
   harness.cancelQuestionAnswerBatch.mockReset()
   harness.startQuestionAnswerBatch.mockReset()
   harness.setQuestionAnswerJudgment.mockReset()
-  harness.setTargetIntelligenceWeight.mockReset()
 })
 
 afterEach(() => {
   for (const wrapper of mountedWrappers.splice(0)) wrapper.unmount()
+  vi.useRealTimers()
   document.body.innerHTML = ''
 })
 
@@ -186,52 +183,6 @@ const mountDialog = async (questionAnswerPreferences?: {
 }
 
 describe('question-answer compact layout primitives', () => {
-  it('keeps the shared intelligence editor in the account title ahead of the unchanged question-answer regions', async () => {
-    const empty = stats(0, 0, 0, 0, 0)
-    harness.getQuestionAnswerHistory.mockResolvedValue(history(empty, empty))
-    harness.getLatestQuestionAnswerBatch.mockResolvedValue(batch(empty))
-
-    const wrapper = await mountDialog()
-    const editor = wrapper.get('[data-testid="account-intelligence-weight-editor"]')
-    const scroll = wrapper.get('[data-testid="question-answer-scroll"]')
-
-    expect(scroll.element.contains(editor.element)).toBe(false)
-    expect(editor.element.compareDocumentPosition(scroll.element) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
-    expect(wrapper.findAll('[data-question-answer-section]').map(section => section.attributes('data-question-answer-section'))).toEqual([
-      'stats', 'pending', 'configuration', 'history',
-    ])
-  })
-
-  it('forwards only a successful shared-editor result from the dialog', async () => {
-    const empty = stats(0, 0, 0, 0, 0)
-    harness.getQuestionAnswerHistory.mockResolvedValue(history(empty, empty))
-    harness.getLatestQuestionAnswerBatch.mockResolvedValue(batch(empty))
-    harness.setTargetIntelligenceWeight.mockResolvedValue({
-      targetId: target.targetId,
-      intelligenceWeight: 42,
-    })
-    const wrapper = await mountDialog()
-    const editor = wrapper.get('[data-testid="account-intelligence-weight-editor"]')
-    await editor.get('button[aria-label="编辑智商权重"]').trigger('click')
-    await editor.get('[data-testid="intelligence-weight-input"]').setValue('42')
-    await editor.get('[data-testid="intelligence-weight-save"]').trigger('click')
-    await flushPromises()
-
-    expect(wrapper.emitted('intelligence-weight-saved')).toEqual([[
-      { targetId: target.targetId, intelligenceWeight: 42 },
-    ]])
-
-    harness.setTargetIntelligenceWeight.mockRejectedValue(new Error('write failed'))
-    const failed = await mountDialog()
-    const failedEditor = failed.get('[data-testid="account-intelligence-weight-editor"]')
-    await failedEditor.get('button[aria-label="编辑智商权重"]').trigger('click')
-    await failedEditor.get('[data-testid="intelligence-weight-input"]').setValue('43')
-    await failedEditor.get('[data-testid="intelligence-weight-save"]').trigger('click')
-    await flushPromises()
-
-    expect(failed.emitted('intelligence-weight-saved')).toBeUndefined()
-  })
-
   it('calculates accuracy from all submitted answers and formats one meaningful decimal', () => {
     const accuracy = (questionAnswerUtils as typeof questionAnswerUtils & {
       questionAnswerAccuracy?: (value: QuestionAnswerStats) => number | null
@@ -380,6 +331,500 @@ describe('question-answer compact layout primitives', () => {
     expect(processed.text()).toContain('Request failed detail')
   })
 
+  it('keeps the processed summary visible for an active batch with no reviewed answers', async () => {
+    const activeRecords = Array.from({ length: 6 }, (_, index) => record({
+      id: `active-progress-${index + 1}`,
+      batchId: 'batch-progress',
+      status: index === 0 ? 'running' : 'pending',
+      createdAt: '2026-09-01T00:00:00Z',
+      startedAt: index === 0 ? '2026-09-01T00:00:01Z' : null,
+    }))
+    const activeStats: QuestionAnswerStats = {
+      requests: { submitted: 6, inProgress: 6, succeeded: 0, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+      byModel: [],
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(activeStats, activeStats))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({
+      ...batch(activeStats),
+      batchId: 'batch-progress',
+      records: activeRecords,
+      submittedCount: 6,
+      completedCount: 0,
+      runningCount: 1,
+      active: true,
+    })
+
+    const wrapper = await mountDialog()
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+
+    expect(processed.text()).toContain('本批次已处理 0 条 · 正确 0 · 错误 0')
+    expect(processed.text()).toContain('共 6 条')
+    expect(processed.text()).toContain('未返回 6 条')
+    expect(processed.text()).toContain('进行中')
+    expect(processed.text()).toContain('已用时')
+    const summary = processed.get('[data-testid="question-answer-processed-summary"]')
+    expect(summary.classes()).toEqual(expect.arrayContaining(['text-sm', 'font-semibold', 'tabular-nums']))
+    const batchReminder = wrapper.get('[data-testid="question-answer-review-batch"]')
+    expect(batchReminder.classes()).toEqual(expect.arrayContaining(['text-sm', 'font-semibold', 'tabular-nums', 'text-foreground']))
+  })
+
+  it('uses inProgress for the visible waiting count when pending and running coexist', async () => {
+    const mixedRecords = [
+      record({ id: 'mixed-correct', batchId: 'batch-mixed', status: 'succeeded', answerJudgment: 'correct', answerBody: 'correct' }),
+      record({ id: 'mixed-incorrect', batchId: 'batch-mixed', status: 'succeeded', answerJudgment: 'incorrect', answerBody: 'incorrect' }),
+      record({ id: 'mixed-pending-1', batchId: 'batch-mixed', status: 'pending' }),
+      record({ id: 'mixed-pending-2', batchId: 'batch-mixed', status: 'pending' }),
+      record({ id: 'mixed-running', batchId: 'batch-mixed', status: 'running' }),
+    ]
+    const mixedStats: QuestionAnswerStats = {
+      requests: { submitted: 5, inProgress: 3, succeeded: 2, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 1, incorrect: 1 },
+      byModel: [],
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(mixedStats, mixedStats))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({
+      ...batch(mixedStats),
+      batchId: 'batch-mixed',
+      records: mixedRecords,
+      submittedCount: 5,
+      completedCount: 99,
+      runningCount: 1,
+      active: true,
+    })
+
+    const wrapper = await mountDialog()
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+
+    expect(processed.text()).toContain('本批次已处理 2 条 · 正确 1 · 错误 1')
+    expect(processed.text()).toContain('共 5 条')
+    expect(processed.text()).toContain('未返回 3 条')
+    expect(processed.text()).not.toContain('未返回 1 条')
+  })
+
+  it('shows terminal completion and remaining review count without replacing processed totals', async () => {
+    const terminalRecords = [
+      record({ id: 'terminal-unreviewed', batchId: 'batch-terminal', status: 'succeeded', answerJudgment: 'unreviewed', answerBody: 'pending review' }),
+      record({ id: 'terminal-correct', batchId: 'batch-terminal', status: 'succeeded', answerJudgment: 'correct', answerBody: 'correct' }),
+      record({ id: 'terminal-failed', batchId: 'batch-terminal', status: 'failed', answerJudgment: null, errorType: 'network' }),
+    ]
+    const terminalStats: QuestionAnswerStats = {
+      requests: { submitted: 3, inProgress: 0, succeeded: 2, failed: 1, cancelled: 0 },
+      reviews: { unreviewed: 1, correct: 1, incorrect: 0 },
+      byModel: [],
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(terminalStats, terminalStats))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({
+      ...batch(terminalStats),
+      batchId: 'batch-terminal',
+      records: terminalRecords,
+      submittedCount: 3,
+      completedCount: 3,
+      runningCount: 0,
+      active: false,
+    })
+
+    const wrapper = await mountDialog()
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+
+    expect(processed.text()).toContain('本批次已处理 1 条 · 正确 1 · 错误 0')
+    expect(processed.text()).toContain('共 3 条')
+    expect(processed.text()).toContain('待复审 1 条')
+    expect(processed.text()).toContain('已完成')
+    expect(processed.text()).toContain('已用时')
+  })
+
+  it('shows completed and pending-review status when every successful answer awaits review', async () => {
+    const pendingReviewStats: QuestionAnswerStats = {
+      requests: { submitted: 1, inProgress: 0, succeeded: 1, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 1, correct: 0, incorrect: 0 },
+      byModel: [],
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(pendingReviewStats, pendingReviewStats))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({
+      ...batch(pendingReviewStats),
+      batchId: 'batch-pending-review',
+      records: [record({
+        id: 'pending-review-only',
+        batchId: 'batch-pending-review',
+        status: 'succeeded',
+        answerJudgment: 'unreviewed',
+        answerBody: 'Pending review answer',
+        completedAt: '2026-08-31T00:00:03Z',
+      })],
+      submittedCount: 1,
+      completedCount: 1,
+      runningCount: 0,
+      active: false,
+    })
+
+    const wrapper = await mountDialog()
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+
+    expect(processed.text()).toContain('本批次已处理 0 条 · 正确 0 · 错误 0')
+    expect(processed.text()).toContain('共 1 条')
+    expect(processed.text()).toContain('待复审 1 条')
+    expect(processed.text()).toContain('已完成')
+  })
+
+  it('marks an all-cancelled terminal batch as terminated instead of completed', async () => {
+    const cancelledRecords = [
+      record({ id: 'cancelled-1', batchId: 'batch-cancelled', status: 'cancelled' }),
+      record({ id: 'cancelled-2', batchId: 'batch-cancelled', status: 'cancelled' }),
+    ]
+    const cancelledStats: QuestionAnswerStats = {
+      requests: { submitted: 2, inProgress: 0, succeeded: 0, failed: 0, cancelled: 2 },
+      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+      byModel: [],
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(cancelledStats, cancelledStats))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({
+      ...batch(cancelledStats),
+      batchId: 'batch-cancelled',
+      records: cancelledRecords,
+      submittedCount: 2,
+      completedCount: 2,
+      runningCount: 0,
+      active: false,
+    })
+
+    const wrapper = await mountDialog()
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+
+    expect(processed.text()).toContain('已终止')
+    expect(processed.text()).not.toContain('已完成')
+  })
+
+  it('marks a terminal batch with inconsistent request statistics as unknown', async () => {
+    const inconsistentStats: QuestionAnswerStats = {
+      requests: { submitted: 2, inProgress: 0, succeeded: 1, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 1, incorrect: 0 },
+      byModel: [],
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(inconsistentStats, inconsistentStats))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({
+      ...batch(inconsistentStats),
+      batchId: 'batch-inconsistent',
+      records: [record({ id: 'inconsistent-record', batchId: 'batch-inconsistent', status: 'succeeded', answerJudgment: 'correct' })],
+      submittedCount: 2,
+      completedCount: 1,
+      runningCount: 0,
+      active: false,
+    })
+
+    const wrapper = await mountDialog()
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+
+    expect(processed.text()).toContain('状态未知')
+    expect(processed.text()).not.toContain('已完成')
+  })
+
+  it('marks a terminal batch with inconsistent review statistics as unknown', async () => {
+    const inconsistentStats: QuestionAnswerStats = {
+      requests: { submitted: 1, inProgress: 0, succeeded: 1, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+      byModel: [],
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(inconsistentStats, inconsistentStats))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({
+      ...batch(inconsistentStats),
+      batchId: 'batch-inconsistent-reviews',
+      records: [record({ id: 'inconsistent-review-record', batchId: 'batch-inconsistent-reviews', status: 'succeeded', answerJudgment: 'correct' })],
+      submittedCount: 1,
+      completedCount: 1,
+      runningCount: 0,
+      active: false,
+    })
+
+    const wrapper = await mountDialog()
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+
+    expect(processed.text()).toContain('状态未知')
+    expect(processed.text()).not.toContain('已完成')
+  })
+
+  it('marks a terminal batch as unknown when review statistics disagree with record judgments', async () => {
+    const internallyConsistentStats: QuestionAnswerStats = {
+      requests: { submitted: 1, inProgress: 0, succeeded: 1, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 1, correct: 0, incorrect: 0 },
+      byModel: [],
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(internallyConsistentStats, internallyConsistentStats))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({
+      ...batch(internallyConsistentStats),
+      batchId: 'batch-review-record-mismatch',
+      records: [record({ id: 'review-record-mismatch', batchId: 'batch-review-record-mismatch', status: 'succeeded', answerJudgment: 'correct' })],
+      submittedCount: 1,
+      completedCount: 1,
+      runningCount: 0,
+      active: false,
+    })
+
+    const wrapper = await mountDialog()
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+
+    expect(processed.text()).toContain('状态未知')
+    expect(processed.text()).not.toContain('已完成')
+  })
+
+  it('keeps the processed row hidden for a terminal batch with no records', async () => {
+    const emptyTerminalStats: QuestionAnswerStats = {
+      requests: { submitted: 1, inProgress: 0, succeeded: 1, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 1, correct: 0, incorrect: 0 },
+      byModel: [],
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(emptyTerminalStats, emptyTerminalStats))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({
+      ...batch(emptyTerminalStats),
+      batchId: 'batch-empty-terminal',
+      records: [],
+      submittedCount: 1,
+      completedCount: 1,
+      runningCount: 0,
+      active: false,
+    })
+
+    const wrapper = await mountDialog()
+
+    expect(wrapper.find('[data-testid="question-answer-processed"]').exists()).toBe(false)
+  })
+
+  it('warns in the existing summary after three minutes without auto-terminating', async () => {
+    vi.useFakeTimers({ now: new Date('2026-09-01T00:04:00Z') })
+    const activeRecord = record({
+      id: 'slow-running',
+      batchId: 'batch-slow',
+      status: 'running',
+      createdAt: '2026-09-01T00:00:00Z',
+      startedAt: '2026-09-01T00:00:01Z',
+    })
+    const activeStats: QuestionAnswerStats = {
+      requests: { submitted: 1, inProgress: 1, succeeded: 0, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+      byModel: [],
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(activeStats, activeStats))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({
+      ...batch(activeStats),
+      batchId: 'batch-slow',
+      records: [activeRecord],
+      submittedCount: 1,
+      completedCount: 0,
+      runningCount: 1,
+      active: true,
+    })
+
+    const wrapper = await mountDialog()
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+
+    expect(processed.text()).toContain('已超过 3 分钟')
+    expect(processed.text()).toContain('未返回 1 条')
+    expect(harness.cancelQuestionAnswerBatch).not.toHaveBeenCalled()
+  })
+
+  it('shows synchronization failure instead of a stale completion conclusion', async () => {
+    vi.useFakeTimers({ now: new Date('2026-09-01T00:01:00Z') })
+    const activeRecord = record({
+      id: 'sync-failed-running',
+      batchId: 'batch-sync-failed',
+      status: 'running',
+      createdAt: '2026-09-01T00:00:00Z',
+      startedAt: '2026-09-01T00:00:01Z',
+    })
+    const activeStats: QuestionAnswerStats = {
+      requests: { submitted: 1, inProgress: 1, succeeded: 0, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+      byModel: [],
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(activeStats, activeStats))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({
+      ...batch(activeStats),
+      batchId: 'batch-sync-failed',
+      records: [activeRecord],
+      submittedCount: 1,
+      completedCount: 0,
+      runningCount: 1,
+      active: true,
+    })
+    harness.getQuestionAnswerBatch.mockRejectedValue(new Error('poll failed'))
+
+    const wrapper = await mountDialog()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushPromises()
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+
+    expect(processed.text()).toContain('同步失败')
+    expect(processed.text()).not.toContain('已完成')
+  })
+
+  it('toggles configuration by title and exposes the current expanded state', async () => {
+    const empty = stats(0, 0, 0, 0, 0)
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(empty, empty))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({ ...batch(empty), batchId: '' })
+    const wrapper = await mountDialog({
+      modelIds: ['gpt-5.6-sol'],
+      questionIds: ['question-1'],
+      reasoningEffort: 'high',
+      repeatCount: 1,
+    })
+
+    const configuration = wrapper.get('[data-testid="question-answer-configuration"]')
+    const toggle = configuration.find('[data-testid="question-answer-configuration-toggle"]')
+    expect(toggle.exists()).toBe(true)
+    if (!toggle.exists()) return
+
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(configuration.find('[data-testid="question-answer-models"]').exists()).toBe(false)
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect(configuration.find('[data-testid="question-answer-models"]').exists()).toBe(true)
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(configuration.find('[data-testid="question-answer-models"]').exists()).toBe(false)
+  })
+
+  it('collapses configuration when a new active batch starts', async () => {
+    const empty = stats(0, 0, 0, 0, 0)
+    const activeStats: QuestionAnswerStats = {
+      requests: { submitted: 1, inProgress: 1, succeeded: 0, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+      byModel: [],
+    }
+    const activeBatch: QuestionAnswerBatch = {
+      ...batch(activeStats),
+      batchId: 'batch-started',
+      records: [record({ id: 'started-pending', batchId: 'batch-started', status: 'pending' })],
+      submittedCount: 1,
+      completedCount: 0,
+      runningCount: 0,
+      active: true,
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue(history(empty, empty))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({ ...batch(empty), batchId: '' })
+    harness.startQuestionAnswerBatch.mockResolvedValue(activeBatch)
+
+    const wrapper = await mountDialog()
+    const configuration = wrapper.get('[data-testid="question-answer-configuration"]')
+    const start = wrapper.findAll('button').find(button => button.text().trim() === '开始回答')
+    if (!start) throw new Error('missing start question-answer button')
+    await start.trigger('click')
+    await flushPromises()
+
+    const toggle = configuration.get('[data-testid="question-answer-configuration-toggle"]')
+    expect(toggle.attributes('aria-expanded')).toBe('false')
+    expect(configuration.find('[data-testid="question-answer-models"]').exists()).toBe(false)
+    await toggle.trigger('click')
+    expect(configuration.find('[data-testid="question-answer-models"] input').attributes('disabled')).toBeDefined()
+    expect(configuration.find('#question-answer-repeat-count').attributes('disabled')).toBeDefined()
+  })
+
+  it('clears a prior review sync failure when switching back to the latest batch', async () => {
+    const activeStats: QuestionAnswerStats = {
+      requests: { submitted: 1, inProgress: 1, succeeded: 0, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+      byModel: [],
+    }
+    const oldRecord = record({
+      id: 'sync-failure-old-record',
+      batchId: 'batch-sync-failure-old',
+      status: 'succeeded',
+      answerJudgment: 'correct',
+      answerBody: 'Old answer',
+      completedAt: '2026-08-31T00:00:03Z',
+    })
+    const oldHistoryRecord = { ...oldRecord, id: 'sync-failure-old-history-record' }
+    const activeBatch: QuestionAnswerBatch = {
+      ...batch(activeStats),
+      batchId: 'batch-sync-failure-latest',
+      records: [record({ id: 'sync-failure-latest-record', batchId: 'batch-sync-failure-latest', status: 'running' })],
+      submittedCount: 1,
+      completedCount: 0,
+      runningCount: 1,
+      active: true,
+    }
+    const oldBatch: QuestionAnswerBatch = {
+      ...batch(stats(1, 1, 0, 1, 0)),
+      batchId: 'batch-sync-failure-old',
+      records: [oldRecord],
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue({
+      ...history(activeStats, activeStats),
+      records: [oldRecord, oldHistoryRecord],
+      totalItems: 2,
+      totalPages: 1,
+    })
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(activeBatch)
+    harness.getQuestionAnswerBatch
+      .mockResolvedValueOnce(oldBatch)
+      .mockRejectedValueOnce(new Error('review refresh failed'))
+
+    const wrapper = await mountDialog()
+    const todayHistory = wrapper.find('[data-testid="question-answer-history"]')
+    await todayHistory.find('button').trigger('click')
+    const reviewButtons = () => todayHistory.findAll('button').filter(button => button.text().trim() === '复审此批次')
+    const reviewButton = reviewButtons()[0]
+    if (!reviewButton) throw new Error('missing old batch review button')
+    await reviewButton.trigger('click')
+    await flushPromises()
+    const retryReviewButton = reviewButtons()[0]
+    if (!retryReviewButton) throw new Error('missing old batch retry button')
+    await retryReviewButton.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="question-answer-processed"]').text()).toContain('同步失败')
+    const latestButton = wrapper.get('[data-testid="question-answer-pending"]').findAll('button').find(button => button.text().trim() === '回到最新批次')
+    if (!latestButton) throw new Error('missing latest batch button')
+    await latestButton.trigger('click')
+
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+    expect(processed.text()).not.toContain('同步失败')
+    expect(processed.text()).toContain('进行中')
+  })
+
+  it('does not mark the currently viewed batch as sync-failed when another batch refresh fails', async () => {
+    const activeStats: QuestionAnswerStats = {
+      requests: { submitted: 1, inProgress: 1, succeeded: 0, failed: 0, cancelled: 0 },
+      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
+      byModel: [],
+    }
+    const oldRecord = record({
+      id: 'other-batch-record',
+      batchId: 'batch-other',
+      status: 'succeeded',
+      answerJudgment: 'unreviewed',
+      answerBody: 'Other batch answer',
+    })
+    const latestBatch: QuestionAnswerBatch = {
+      ...batch(activeStats),
+      batchId: 'batch-latest-view',
+      records: [record({ id: 'latest-view-record', batchId: 'batch-latest-view', status: 'running' })],
+      submittedCount: 1,
+      completedCount: 0,
+      runningCount: 1,
+      active: true,
+    }
+    harness.getQuestionAnswerHistory.mockResolvedValue({
+      ...history(activeStats, activeStats),
+      records: [oldRecord],
+      totalItems: 1,
+      totalPages: 1,
+    })
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(latestBatch)
+    harness.getQuestionAnswerBatch.mockRejectedValue(new Error('other batch refresh failed'))
+
+    const wrapper = await mountDialog()
+    const todayHistory = wrapper.find('[data-testid="question-answer-history"]')
+    await todayHistory.find('button').trigger('click')
+    const reviewButton = todayHistory.findAll('button').find(button => button.text().trim() === '复审此批次')
+    if (!reviewButton) throw new Error('missing other batch review button')
+    await reviewButton.trigger('click')
+    await flushPromises()
+
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+    expect(processed.text()).not.toContain('同步失败')
+    expect(processed.text()).toContain('进行中')
+  })
+
   it('moves a judged answer into the still-collapsed processed section and supports rejudgment', async () => {
     let serverRecords = [
       record({ id: 'first-review', questionName: 'First review', status: 'succeeded', answerJudgment: 'unreviewed', answerBody: 'First answer' }),
@@ -524,7 +969,7 @@ describe('question-answer compact layout primitives', () => {
     expect(wrapper.find('[data-testid="question-answer-stats-bar"]').exists()).toBe(false)
   })
 
-  it('hides the processed region when the batch has neither reviewed nor failed answers', async () => {
+  it('shows the terminal batch status when successful answers are still awaiting review', async () => {
     const pendingOnly = stats(1, 1, 0, 0, 0)
     harness.getQuestionAnswerHistory.mockResolvedValue(history(pendingOnly, pendingOnly))
     harness.getLatestQuestionAnswerBatch.mockResolvedValue({
@@ -535,7 +980,10 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
 
     expect(wrapper.find('[data-testid="question-answer-pending"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="question-answer-processed"]').exists()).toBe(false)
+    const processed = wrapper.get('[data-testid="question-answer-processed"]')
+    expect(processed.text()).toContain('共 1 条')
+    expect(processed.text()).toContain('待复审 1 条')
+    expect(processed.text()).toContain('已完成')
   })
 
   it('keeps a brief latest-running hint while reviewing an older batch', async () => {

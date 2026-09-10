@@ -38,6 +38,7 @@ const harness = vi.hoisted(() => ({
   listUpstreamSites: vi.fn(),
   cancelAdminGroupsRefresh: vi.fn(),
   setAdminGroupsWorkspace: vi.fn(),
+  invalidatePriorityCandidatePlanNow: vi.fn(),
   updateTargetSchedulable: vi.fn(),
   probeTargetWithProgress: vi.fn(),
 }))
@@ -85,6 +86,7 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal
     overview: ref(null),
     groups: ref([]),
     adminGroups: ref([]),
+    adminGroupsLoaded: ref(true),
     events: ref([]),
     policies: ref([]),
     isLoading: ref(false),
@@ -114,6 +116,7 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal
       loadPolicies: harness.loadPolicies,
       cancelAdminGroupsRefresh: harness.cancelAdminGroupsRefresh,
       setAdminGroupsWorkspace: harness.setAdminGroupsWorkspace,
+      invalidatePriorityCandidatePlanNow: harness.invalidatePriorityCandidatePlanNow,
       removePolicy: vi.fn(async () => true),
       savePolicy: vi.fn(async () => true),
       updateTargetSchedulable: harness.updateTargetSchedulable,
@@ -182,7 +185,6 @@ const makeAccount = (overrides: Partial<AdminGroupAccount> = {}): AdminGroupAcco
   hasEnabledProbePolicy: true,
   priorityManaged: true,
   probeModelsConfigured: true,
-  intelligenceWeight: null,
   ...overrides,
 })
 
@@ -355,6 +357,7 @@ const removeMountedWrapper = (wrapper: VueWrapper) => {
 beforeEach(() => {
   for (const refValue of Object.values(harness.refs)) refValue.value = Array.isArray(refValue.value) ? [] : null
   harness.refs.overview.value = null
+  harness.refs.adminGroupsLoaded.value = true
   harness.refs.isLoading.value = false
   harness.refs.isActionLoading.value = false
   harness.refs.errorKey.value = ''
@@ -375,6 +378,20 @@ beforeEach(() => {
   harness.getPrioritySyncStatus.mockReset().mockResolvedValue({ workspaceId: 'ws1', status: 'success', failedCount: 0 })
   harness.listUpstreamSites.mockReset().mockResolvedValue([])
   harness.cancelAdminGroupsRefresh.mockReset()
+  harness.invalidatePriorityCandidatePlanNow.mockReset().mockImplementation(() => {
+    harness.refs.adminGroups.value = (harness.refs.adminGroups.value as AdminGroupHealth[]).map(group => {
+      const nextGroup = {
+        ...group,
+        accounts: group.accounts.map(account => {
+          const nextAccount = { ...account }
+          delete nextAccount.priorityCandidate
+          return nextAccount
+        }),
+      }
+      delete nextGroup.priorityCandidateSummary
+      return nextGroup
+    })
+  })
   harness.updateTargetSchedulable.mockReset().mockResolvedValue(true)
   harness.probeTargetWithProgress.mockReset().mockResolvedValue([])
   harness.setAdminGroupsWorkspace.mockReset().mockImplementation((workspaceId: string) => {
@@ -769,6 +786,50 @@ describe('ConnectionHealthView quick formal probe session behavior', () => {
       expect(rowFor(wrapper, account.name).text()).toContain('246 ms')
       expect(wrapper.find('.quick-probe-error-row').exists()).toBe(false)
     }
+  })
+
+  it('invalidates the old Priority candidate plan before merging a confirmed quick probe result and keeps it invalidated when reload fails', async () => {
+    harness.currentAccount.value = { id: 'ws1', displayName: '测试工作区', platform: 'sub2api' }
+    const account = makeAccount({
+      modelHealth: [makeModel({ lastSuccessLatencyMs: 120, lastLatencyMs: 120 })],
+      priorityCandidate: {
+        state: 'candidate',
+        rank: 1,
+        priority: 10,
+        region: 'normal',
+        healthBand: 'healthy',
+        successLatencyMs: 120,
+        multiplier: 1,
+        priorityEvidence: 'last_applied',
+        blocksTakeover: false,
+      },
+    })
+    const group = makeGroup([account], {
+      priorityCandidateSummary: {
+        mode: 'first_active',
+        candidatePriorityReady: true,
+        candidateCount: 1,
+        outOfScopeCount: 0,
+        blockerCount: 0,
+        capacities: [],
+      },
+    })
+    harness.probeTargetWithProgress.mockResolvedValue([successResult(246)])
+    harness.loadAdminGroups.mockRejectedValue(new Error('admin.connectionHealth.errors.network'))
+    const wrapper = await mountView([group])
+
+    expect(wrapper.text()).toContain('只读候选排序')
+    expect((harness.refs.adminGroups.value as AdminGroupHealth[])[0]?.accounts[0]?.modelHealth[0]?.lastLatencyMs).toBe(120)
+
+    await buttonByAria(rowFor(wrapper, account.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    await flushPromises()
+
+    const updatedGroup = (harness.refs.adminGroups.value as AdminGroupHealth[])[0]
+    expect(updatedGroup?.priorityCandidateSummary).toBeUndefined()
+    expect(updatedGroup?.accounts[0]?.priorityCandidate).toBeUndefined()
+    expect(updatedGroup?.accounts[0]?.modelHealth[0]?.lastLatencyMs).toBe(246)
+    expect(wrapper.text()).not.toContain('只读候选排序')
+    expect(wrapper.text()).not.toContain('网络异常，请检查连接后重试。')
   })
 
   it('treats an empty result as an explicit error without inventing 0 ms', async () => {

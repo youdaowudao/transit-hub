@@ -25,6 +25,7 @@ import { connectionHealthMessageKey, useConnectionHealth } from '../composables/
 import { createRefreshCoordinator } from '../utils/connectionHealthRefresh'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import AdminGroupHealthDetail from '../components/dashboard/AdminGroupHealthDetail.vue'
+import PriorityCandidatePreview from '../components/dashboard/PriorityCandidatePreview.vue'
 import ConnectionHealthEventsDialog from '../components/dashboard/ConnectionHealthEventsDialog.vue'
 import GroupHealthSetupDrawer from '../components/dashboard/GroupHealthSetupDrawer.vue'
 import ManualOneTimeProbeDialog from '../components/dashboard/ManualOneTimeProbeDialog.vue'
@@ -35,14 +36,14 @@ import type { OwnGroupOption } from '../components/dashboard/PolicyConfigDrawer.
 import ProbePolicyListDialog from '../components/dashboard/ProbePolicyListDialog.vue'
 import TargetPolicyAssignmentDialog from '../components/dashboard/TargetPolicyAssignmentDialog.vue'
 import type {
+  AccountTierResult,
   AdminGroupAccount,
   AdminGroupHealth,
 	AdminGroupPolicyConfiguration,
   ConnectionHealthPolicy,
-  ModelHealth,
-  PolicyInput,
+	ModelHealth,
+	PolicyInput,
 	PrioritySyncStatus,
-  TargetIntelligenceWeightResult,
 } from '../types/connectionHealth'
 import { resolveConnectionHealthStrategyMode } from '../utils/connectionHealthPolicy'
 import {
@@ -71,6 +72,7 @@ const {
   overview,
   groups,
   adminGroups,
+  adminGroupsLoaded,
   events,
   policies,
   isLoading,
@@ -82,6 +84,8 @@ const {
   refreshConnectionState,
   cancelAdminGroupsRefresh,
   setAdminGroupsWorkspace,
+  invalidatePriorityCandidatePlanNow,
+  applyAccountTier,
   loadAll,
   loadGroups,
   loadAdminGroups,
@@ -806,20 +810,23 @@ const onTargetPolicySaved = async () => {
 const probeDialogOpen = ref(false)
 const probeDialogTarget = ref<ManualProbeTargetSummary | null>(null)
 
-const applyTargetIntelligenceWeight = (result: TargetIntelligenceWeightResult) => {
-  adminGroups.value = adminGroups.value.map(group => ({
-    ...group,
-    accounts: group.accounts.map(account => account.targetId === result.targetId
-      ? { ...account, intelligenceWeight: result.intelligenceWeight }
-      : account),
-  }))
+const onAccountTierSaved = (result: AccountTierResult) => {
+  const workspaceId = currentAccount.value?.id
+  if (!workspaceId || !result.targetId.startsWith(`sub2api:${workspaceId}:`)) return
+  applyAccountTier(result)
   if (probeDialogTarget.value?.targetId === result.targetId) {
-    probeDialogTarget.value = {
-      ...probeDialogTarget.value,
-      intelligenceWeight: result.intelligenceWeight,
-    }
+    probeDialogTarget.value = { ...probeDialogTarget.value, accountTier: result.accountTier }
   }
 }
+
+watch(() => {
+  const targetId = probeDialogTarget.value?.targetId
+  return adminGroups.value.flatMap(group => group.accounts).find(account => account.targetId === targetId)?.accountTier
+}, accountTier => {
+  if (probeDialogTarget.value && accountTier !== undefined) {
+    probeDialogTarget.value = { ...probeDialogTarget.value, accountTier }
+  }
+})
 
 const onProbeAccount = (account: AdminGroupAccount) => {
   if (!selectedGroup.value || !account.probeAvailable) return
@@ -835,13 +842,13 @@ const onProbeAccount = (account: AdminGroupAccount) => {
   }
   probeDialogTarget.value = {
     targetId: account.targetId,
+    accountTier: account.accountTier,
     accountName: account.name || account.id,
     platform: selectedGroup.value.platform,
     type: account.type,
     status: account.status,
     groupName: selectedGroup.value.name,
     formalModels: Array.from(formalModelMap.values()),
-    intelligenceWeight: account.intelligenceWeight,
   }
   probeDialogOpen.value = true
 }
@@ -951,6 +958,7 @@ const onQuickProbeAccount = async (account: AdminGroupAccount) => {
       await reloadQuickProbeAuthoritatively(identity)
       return
     }
+    invalidatePriorityCandidatePlanNow()
     mergeQuickProbeResults(account.targetId, results)
     const failed = applyQuickProbeResultError(account.targetId, results)
     if (!failed) {
@@ -1279,6 +1287,12 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
 
     <p v-if="errorKey" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">{{ readableMessage(errorKey) }}</p>
 
+    <PriorityCandidatePreview
+      :groups="adminGroups"
+      :loaded="adminGroupsLoaded"
+      :platform="currentAccount?.platform ?? ''"
+    />
+
     <section class="overflow-hidden rounded-lg border border-border/60 bg-card text-card-foreground shadow-sm">
       <div v-if="isLoading && adminGroups.length === 0" class="grid min-h-[34rem] lg:grid-cols-[19rem_minmax(0,1fr)]">
         <div class="space-y-3 border-r border-border/50 p-4">
@@ -1429,7 +1443,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           @view-events="onViewEventsAccount"
           @set-schedulable="onSetTargetSchedulable"
           @assign-policy="onAssignPolicy"
-          @intelligence-weight-saved="applyTargetIntelligenceWeight"
+          @tier-saved="onAccountTierSaved"
           @update:hide-unmonitored-accounts="setHideUnmonitoredAccounts"
         />
       </div>
@@ -1459,10 +1473,10 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       :question-answer-preferences="preferences.questionAnswer"
       @close="probeDialogOpen = false"
       @completed="onFormalProbeCompleted"
+      @tier-saved="onAccountTierSaved"
       @question-answer-started="onQuestionAnswerStarted"
       @question-answer-viewed="onQuestionAnswerViewed"
       @question-answer-preferences-changed="onQuestionAnswerPreferencesChanged"
-      @intelligence-weight-saved="applyTargetIntelligenceWeight"
     />
 
     <ProbePolicyListDialog

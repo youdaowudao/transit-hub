@@ -431,6 +431,20 @@ func summarizeCachedUpstreamCostsWithHistory(sites []upstream.Response, business
 			continue
 		}
 
+		// 同日同步失败时，缓存仍保留的是当天最后一次成功值，可以继续用于临时展示。
+		// 无日期或跨日缓存不能进入当天成本，避免把昨天的值带到今天。
+		if site.Status == upstream.StatusError && currentDateOK && metric.Value != nil {
+			quality.CollectedSites++
+			quality.RetainedSites++
+			quality.FallbackSites++
+			quality.ConfirmedCost += *metric.Value * site.RechargeRate
+			if site.Metrics.TodayConsumeAt != nil && (quality.FallbackAt == nil || site.Metrics.TodayConsumeAt.Before(*quality.FallbackAt)) {
+				fallbackAt := *site.Metrics.TodayConsumeAt
+				quality.FallbackAt = &fallbackAt
+			}
+			continue
+		}
+
 		quality.FailedSites++
 		quality.MissingSites++
 		reason := "fetch_error"
@@ -520,6 +534,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		upstreamBalance float64
 		knownBalances   int
 		costQuality     *CostQuality
+		temporaryZeroOK bool
 		wg              sync.WaitGroup
 	)
 
@@ -577,8 +592,10 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		defer wg.Done()
 		sites := s.upstreams.List(ctx, userID)
 		history := make(map[string]SiteDailyCost)
+		historyLoaded := false
 		if s.metricsRepo != nil {
 			if previous, historyErr := s.metricsRepo.ListLatestSiteCosts(ctx, userID, adminAccountID, today); historyErr == nil {
+				historyLoaded = true
 				for _, cost := range previous {
 					history[cost.SiteID] = cost
 				}
@@ -588,15 +605,22 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		}
 		total, cq := summarizeCachedUpstreamCostsWithHistory(sites, today, s.maxStaleness(), history)
 		costQuality = cq
+		targetSites := 0
+		allTargetsErrored := true
 		for _, site := range sites {
 			if !site.IsEnabled() || site.RechargeRate <= 0 {
 				continue
+			}
+			targetSites++
+			if site.Status != upstream.StatusError {
+				allTargetsErrored = false
 			}
 			if site.Metrics.Balance.Value != nil {
 				upstreamBalance += *site.Metrics.Balance.Value * site.RechargeRate
 				knownBalances++
 			}
 		}
+		temporaryZeroOK = historyLoaded && targetSites > 0 && allTargetsErrored
 		_ = total // total 在 costQuality.ConfirmedCost 中
 	}()
 
@@ -655,6 +679,10 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	var todayPurchase *float64
 	if costQuality != nil && (costQuality.CollectedSites > 0 || costQuality.ExpectedSites == 0) {
 		todayPurchase = ptrF64(costQuality.ConfirmedCost)
+	} else if costQuality != nil && costQuality.ExpectedSites > 0 && costQuality.MissingSites > 0 && temporaryZeroOK {
+		// 当天完全没有可沿用成本时，仅在实时响应中暂按 0 继续计算。
+		// CostQuality 仍保持 unavailable，写快照时不会把该值保存成已确认成本。
+		todayPurchase = ptrF64(0)
 	}
 	var netProfit *float64
 	if todayProfit != nil && todayPurchase != nil {
@@ -897,6 +925,18 @@ func (s *MetricsService) upsertSnapshot(ctx context.Context, userID, adminAccoun
 		rechargeFee, rechargeFeeRate = rechargeFeeSummary(metrics.AdditionalCosts)
 		promotionCost, fixedCost, adjustmentCost = additionalCostCategorySummary(metrics.AdditionalCosts)
 	}
+	snapshotTodayPurchase := metrics.TodayPurchase
+	snapshotNetProfit := metrics.NetProfit
+	snapshotOperatingCost := metrics.OperatingCost
+	snapshotAdjustedNetProfit := metrics.AdjustedNetProfit
+	if metrics.CostQuality != nil && metrics.CostQuality.ExpectedSites > 0 &&
+		metrics.CostQuality.CollectedSites == 0 && metrics.CostQuality.MissingSites > 0 {
+		// 临时按 0 只用于首页实时展示，不能写成当天已确认的历史成本或利润。
+		snapshotTodayPurchase = nil
+		snapshotNetProfit = nil
+		snapshotOperatingCost = nil
+		snapshotAdjustedNetProfit = nil
+	}
 	snapshot := DailySnapshot{
 		ID:                    id,
 		UserID:                userID,
@@ -904,8 +944,8 @@ func (s *MetricsService) upsertSnapshot(ctx context.Context, userID, adminAccoun
 		Date:                  parsedDate,
 		TodayProfit:           metrics.TodayProfit,
 		SiteBalance:           ptrF64(metrics.SiteBalance),
-		TodayPurchase:         metrics.TodayPurchase,
-		NetProfit:             metrics.NetProfit,
+		TodayPurchase:         snapshotTodayPurchase,
+		NetProfit:             snapshotNetProfit,
 		UpstreamBalance:       ptrF64(metrics.UpstreamBalance),
 		CreatedAt:             now,
 		SettlementStatus:      snapshotStatus,
@@ -918,8 +958,8 @@ func (s *MetricsService) upsertSnapshot(ctx context.Context, userID, adminAccoun
 		FixedCost:             fixedCost,
 		AdjustmentCost:        adjustmentCost,
 		AdditionalCostRecords: additionalCostRecords(metrics.AdditionalCosts),
-		OperatingCost:         metrics.OperatingCost,
-		AdjustedNetProfit:     metrics.AdjustedNetProfit,
+		OperatingCost:         snapshotOperatingCost,
+		AdjustedNetProfit:     snapshotAdjustedNetProfit,
 		AccountSnapshotRunID:  metrics.AccountSnapshotRunID,
 		AccountExpectedCount:  metrics.AccountExpectedCount,
 		AccountCompletedCount: metrics.AccountCompletedCount,

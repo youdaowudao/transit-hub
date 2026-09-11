@@ -452,11 +452,13 @@ const cards = computed<DashboardCoreCard[]>(() => {
       ? (current.current == null
           ? t('admin.dashboard.costQuality.costUnavailable')
           : key === 'todayPurchase'
-            ? t('admin.dashboard.costQuality.partial', {
-                cost: formatCny(current.current),
-                collected: cq?.collectedSites ?? 0,
-                expected: cq?.expectedSites ?? 0,
-              })
+            ? costMode === 'unavailable' && (cq?.collectedSites ?? 0) === 0 && (cq?.missingSites ?? 0) > 0
+              ? t('admin.dashboard.costQuality.temporaryZero', { missing: cq?.missingSites ?? 0 })
+              : t('admin.dashboard.costQuality.partial', {
+                  cost: formatCny(current.current),
+                  collected: cq?.collectedSites ?? 0,
+                  expected: cq?.expectedSites ?? 0,
+                })
             : t('admin.dashboard.costQuality.netProfitCeiling', { value: formatCny(current.current) }))
       : ''
     return [{

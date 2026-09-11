@@ -205,9 +205,9 @@ func TestLiveMetricsCostFailureStillPersistsRevenue(t *testing.T) {
 	if decoded["todayProfit"] != 30.0 {
 		t.Fatalf("todayProfit = %#v, want 30", decoded["todayProfit"])
 	}
-	// 上游失败且没有同日确认值时，不得把无日期缓存当作今日成本。
-	if decoded["todayPurchase"] != nil || decoded["netProfit"] != nil {
-		t.Fatalf("cost failure must remain unavailable: todayPurchase=%#v netProfit=%#v", decoded["todayPurchase"], decoded["netProfit"])
+	// 上游失败且没有同日确认值时，不使用无日期缓存，但实时响应暂按 0 继续计算。
+	if decoded["todayPurchase"] != 0.0 || decoded["netProfit"] != 30.0 {
+		t.Fatalf("cost failure should use temporary zero: todayPurchase=%#v netProfit=%#v", decoded["todayPurchase"], decoded["netProfit"])
 	}
 	// 新实现：成本质量通过 costQuality 字段暴露，不再写入 metricErrors
 	if cq, hasCq := decoded["costQuality"].(map[string]any); !hasCq || cq["complete"] != false {
@@ -498,6 +498,7 @@ func TestLiveMetricsUsesLatestPersistedSiteCostWhenCurrentValueMissing(t *testin
 		&fakePlatformClient{usageStats: 30},
 		&fakeUpstreamLister{cachedSites: []upstream.Response{{
 			ID: "site-failure", Name: "上游一", Status: upstream.StatusError, ErrorKey: &failedKey, RechargeRate: 2,
+			Metrics: todayCachedMetrics(10),
 		}}},
 		repo,
 	)
@@ -514,38 +515,66 @@ func TestLiveMetricsUsesLatestPersistedSiteCostWhenCurrentValueMissing(t *testin
 	}
 }
 
-func TestLiveMetricsAllCachedCostsUnavailableReturnsZeroAndError(t *testing.T) {
-	errorKey := upstream.ErrorAuth
+func TestLiveMetricsUsesTemporaryZeroWhenAllSameDayCostsAreMissing(t *testing.T) {
+	errorKey := upstream.ErrorNetwork
 	upstreams := &fakeUpstreamLister{cachedSites: []upstream.Response{
 		{
 			ID: "site-failure", Status: upstream.StatusError, ErrorKey: &errorKey, RechargeRate: 2,
 			Metrics: upstream.Metrics{},
 		},
 	}}
-	repo := &fakeMetricsRepository{}
-	service := newLiveMetricsTestService(&fakePlatformClient{usageStats: 30}, upstreams, repo)
+	repo := &liveMetricsAccountingRepository{
+		fakeMetricsRepository: &fakeMetricsRepository{},
+		fakeAdditionalCostRepository: &fakeAdditionalCostRepository{
+			rate:  RechargeFeeRate{Rate: 0},
+			items: []AdditionalCostRecord{{Type: AdditionalCostFixed, Amount: 5}},
+		},
+	}
+	store := newFakeSessionStore()
+	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
+	service := NewMetricsService(
+		store,
+		&fakePlatformClient{usageStats: 30},
+		upstreams,
+		repo,
+		&fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}},
+	)
 
 	response, err := service.LiveMetrics(context.Background(), "user-1")
 	if err != nil {
 		t.Fatalf("LiveMetrics() error = %v, want partial response", err)
 	}
-	decoded := metricsResponseJSON(t, response)
-	// 全部成本不可用：todayPurchase 和 netProfit 为 null
-	if decoded["todayPurchase"] != nil || decoded["netProfit"] != nil {
-		t.Fatalf("all cached costs unavailable: todayPurchase=%#v netProfit=%#v", decoded["todayPurchase"], decoded["netProfit"])
+	if response.TodayPurchase == nil || *response.TodayPurchase != 0 {
+		t.Fatalf("temporary direct cost = %#v, want 0", response.TodayPurchase)
 	}
-	// costQuality 标记不完整
-	if cq, hasCq := decoded["costQuality"].(map[string]any); !hasCq || cq["complete"] != false {
-		t.Fatalf("costQuality.complete should be false, got %#v", decoded["costQuality"])
+	if response.NetProfit == nil || *response.NetProfit != 30 {
+		t.Fatalf("temporary net profit = %#v, want 30", response.NetProfit)
 	}
-	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayProfit == nil || *repo.snapshots[0].TodayProfit != 30 {
-		t.Fatalf("unavailable cost did not preserve revenue snapshot: %+v", repo.snapshots)
+	if response.OperatingCost == nil || *response.OperatingCost != 5 || response.AdjustedNetProfit == nil || *response.AdjustedNetProfit != 25 {
+		t.Fatalf("temporary operating projection: operating=%#v adjustedNet=%#v, want 5 and 25", response.OperatingCost, response.AdjustedNetProfit)
+	}
+	if response.CostQuality == nil || response.CostQuality.Mode != "unavailable" || response.CostQuality.ExpectedSites != 1 || response.CostQuality.CollectedSites != 0 || response.CostQuality.MissingSites != 1 || response.CostQuality.FailedSites != 1 || response.CostQuality.Complete {
+		t.Fatalf("temporary zero quality = %+v", response.CostQuality)
+	}
+	if response.SettlementStatus != SettlementStatusPartial {
+		t.Fatalf("settlement status = %q, want partial", response.SettlementStatus)
+	}
+	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayProfit == nil || *repo.snapshots[0].TodayProfit != 30 ||
+		repo.snapshots[0].TodayPurchase != nil || repo.snapshots[0].NetProfit != nil ||
+		repo.snapshots[0].OperatingCost != nil || repo.snapshots[0].AdjustedNetProfit != nil {
+		t.Fatalf("temporary zero must not become confirmed snapshot cost: %+v", repo.snapshots)
 	}
 }
 
-func TestLiveMetricsDoesNotUseErroredCacheAsFallback(t *testing.T) {
+func TestLiveMetricsUsesErroredSameDayCacheAsRetainedCost(t *testing.T) {
 	errorKey := upstream.ErrorNetwork
-	metrics := todayCachedMetrics(10)
+	observedAt := time.Now().Add(-30 * time.Minute)
+	cost := 10.0
+	metrics := upstream.Metrics{
+		TodayConsume:     upstream.MetricValue{Value: &cost},
+		TodayConsumeDate: businesstime.Today(),
+		TodayConsumeAt:   &observedAt,
+	}
 	repo := &fakeMetricsRepository{}
 	service := newLiveMetricsTestService(
 		&fakePlatformClient{usageStats: 30},
@@ -559,17 +588,50 @@ func TestLiveMetricsDoesNotUseErroredCacheAsFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LiveMetrics() error: %v", err)
 	}
-	if response.TodayPurchase != nil || response.NetProfit != nil {
-		t.Fatalf("errored cache must not become confirmed cost: cost=%v net=%v", response.TodayPurchase, response.NetProfit)
+	if response.TodayPurchase == nil || *response.TodayPurchase != 20 || response.NetProfit == nil || *response.NetProfit != 10 {
+		t.Fatalf("retained same-day amounts: cost=%v net=%v, want 20 and 10", response.TodayPurchase, response.NetProfit)
 	}
-	if response.CostQuality == nil || response.CostQuality.Mode != "unavailable" || response.CostQuality.MissingSites != 1 || response.CostQuality.Complete {
-		t.Fatalf("unavailable quality = %+v", response.CostQuality)
+	if response.CostQuality == nil || response.CostQuality.Mode != "retained" || response.CostQuality.ExpectedSites != 1 || response.CostQuality.CollectedSites != 1 || response.CostQuality.RetainedSites != 1 || response.CostQuality.MissingSites != 0 || !response.CostQuality.Complete || response.CostQuality.FallbackAt == nil || !response.CostQuality.FallbackAt.Equal(observedAt) {
+		t.Fatalf("retained same-day quality = %+v", response.CostQuality)
 	}
-	if response.SettlementStatus != SettlementStatusPartial {
-		t.Fatalf("settlement status = %q, want partial", response.SettlementStatus)
+	if response.SettlementStatus != SettlementStatusFallback {
+		t.Fatalf("settlement status = %q, want fallback", response.SettlementStatus)
+	}
+	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayPurchase == nil || *repo.snapshots[0].TodayPurchase != 20 {
+		t.Fatalf("retained same-day snapshot = %+v", repo.snapshots)
+	}
+}
+
+func TestLiveMetricsUsesTemporaryZeroInsteadOfPreviousBusinessDayCache(t *testing.T) {
+	errorKey := upstream.ErrorNetwork
+	observedAt := time.Now().Add(-30 * time.Minute)
+	cost := 10.0
+	repo := &fakeMetricsRepository{}
+	service := newLiveMetricsTestService(
+		&fakePlatformClient{usageStats: 30},
+		&fakeUpstreamLister{cachedSites: []upstream.Response{{
+			ID: "site-previous-day", Name: "上游旧值", Status: upstream.StatusError, ErrorKey: &errorKey, RechargeRate: 2,
+			Metrics: upstream.Metrics{
+				TodayConsume:     upstream.MetricValue{Value: &cost},
+				TodayConsumeDate: "2000-01-01",
+				TodayConsumeAt:   &observedAt,
+			},
+		}}},
+		repo,
+	)
+
+	response, err := service.LiveMetrics(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("LiveMetrics() error: %v", err)
+	}
+	if response.TodayPurchase == nil || *response.TodayPurchase != 0 || response.NetProfit == nil || *response.NetProfit != 30 {
+		t.Fatalf("previous-day fallback amounts: cost=%v net=%v, want 0 and 30", response.TodayPurchase, response.NetProfit)
+	}
+	if response.CostQuality == nil || response.CostQuality.Mode != "unavailable" || response.CostQuality.ExpectedSites != 1 || response.CostQuality.CollectedSites != 0 || response.CostQuality.RetainedSites != 0 || response.CostQuality.MissingSites != 1 || response.CostQuality.Complete {
+		t.Fatalf("previous-day fallback quality = %+v", response.CostQuality)
 	}
 	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayPurchase != nil {
-		t.Fatalf("unknown-cost snapshot = %+v", repo.snapshots)
+		t.Fatalf("previous-day value must not become today's confirmed snapshot cost: %+v", repo.snapshots)
 	}
 }
 
@@ -587,6 +649,64 @@ func TestCachedCostRejectsStaleSameDayValueWithoutConfirmation(t *testing.T) {
 
 	if quality.Mode != "unavailable" || quality.CollectedSites != 0 || quality.MissingSites != 1 {
 		t.Fatalf("stale same-day quality = %+v", quality)
+	}
+}
+
+func TestLiveMetricsKeepsConnectedStaleCostUnavailable(t *testing.T) {
+	observedAt := time.Now().Add(-3 * time.Hour)
+	cost := 10.0
+	repo := &fakeMetricsRepository{}
+	service := newLiveMetricsTestService(
+		&fakePlatformClient{usageStats: 30},
+		&fakeUpstreamLister{cachedSites: []upstream.Response{{
+			Name: "stale-site", Status: upstream.StatusConnected, RechargeRate: 1,
+			Metrics: upstream.Metrics{
+				TodayConsume:     upstream.MetricValue{Value: &cost},
+				TodayConsumeDate: businesstime.Today(),
+				TodayConsumeAt:   &observedAt,
+			},
+		}}},
+		repo,
+	)
+
+	response, err := service.LiveMetrics(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("LiveMetrics() error: %v", err)
+	}
+	if response.TodayPurchase != nil || response.NetProfit != nil {
+		t.Fatalf("connected stale cost must keep the old unavailable response: cost=%v net=%v", response.TodayPurchase, response.NetProfit)
+	}
+	if response.CostQuality == nil || response.CostQuality.Mode != "unavailable" || response.CostQuality.MissingSites != 1 {
+		t.Fatalf("connected stale quality = %+v", response.CostQuality)
+	}
+	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayPurchase != nil || repo.snapshots[0].NetProfit != nil {
+		t.Fatalf("connected stale snapshot = %+v", repo.snapshots)
+	}
+}
+
+func TestLiveMetricsDoesNotUseTemporaryZeroWhenSameDayHistoryLookupFails(t *testing.T) {
+	errorKey := upstream.ErrorNetwork
+	repo := &fakeMetricsRepository{latestSiteCostsErr: errors.New("history unavailable")}
+	service := newLiveMetricsTestService(
+		&fakePlatformClient{usageStats: 30},
+		&fakeUpstreamLister{cachedSites: []upstream.Response{{
+			Name: "failed-site", Status: upstream.StatusError, ErrorKey: &errorKey, RechargeRate: 1,
+		}}},
+		repo,
+	)
+
+	response, err := service.LiveMetrics(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("LiveMetrics() error: %v", err)
+	}
+	if response.TodayPurchase != nil || response.NetProfit != nil {
+		t.Fatalf("history lookup failure must not be treated as confirmed absence: cost=%v net=%v", response.TodayPurchase, response.NetProfit)
+	}
+	if response.CostQuality == nil || response.CostQuality.Mode != "unavailable" || response.CostQuality.MissingSites != 1 {
+		t.Fatalf("history lookup failure quality = %+v", response.CostQuality)
+	}
+	if len(repo.snapshots) != 1 || repo.snapshots[0].TodayPurchase != nil || repo.snapshots[0].NetProfit != nil {
+		t.Fatalf("history lookup failure snapshot = %+v", repo.snapshots)
 	}
 }
 

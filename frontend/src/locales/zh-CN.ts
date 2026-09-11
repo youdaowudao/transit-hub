@@ -475,6 +475,7 @@ export default {
         marginCeiling: '暂估上限 {value}%',
         profitUnavailable: '营收不可用',
         costUnavailable: '成本暂不可用',
+        temporaryZero: '{missing} 个站点无同日记录，暂按 0',
         deltaPartial: '成本未完整，环比暂不可确定',
         deltaUnsettled: '昨日未结算',
         trendConfirmed: '已确认',

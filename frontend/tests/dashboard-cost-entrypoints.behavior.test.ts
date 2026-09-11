@@ -233,6 +233,33 @@ describe('Dashboard cost entrypoint behavior', () => {
     expect(findCard(wrapper, '今日总成本').props('value')).toBe('¥50.00')
   })
 
+  it('shows a numeric temporary zero and an explicit missing-site warning when no same-day upstream cost exists', async () => {
+    harness.getDashboardMetrics.mockResolvedValue({
+      ...liveMetrics,
+      todayPurchase: 0,
+      netProfit: 120,
+      operatingCost: 0,
+      adjustedNetProfit: 120,
+      adjustedProfitMargin: 100,
+      costQuality: {
+        mode: 'unavailable', complete: false, confirmedCost: 0,
+        expectedSites: 1, collectedSites: 0, freshSites: 0, retainedSites: 0,
+        missingSites: 1, failedSites: 1,
+      },
+      additionalCosts: {
+        rechargeFee: 0, accountPurchase: 0, accountRefund: 0,
+        promotion: 0, fixed: 0, adjustment: 0, total: 0, available: true,
+      },
+    })
+
+    const wrapper = await mountDashboard()
+    const card = findCard(wrapper, '今日总成本')
+
+    expect(card.props('value')).toBe('¥0.00')
+    expect(card.props('statusText')).toBe('1 个站点无同日记录，暂按 0')
+    expect(card.text()).not.toContain('成本暂不可用')
+  })
+
   it('R04 opens today cost from net profit and shows the revenue-cost-profit calculation', async () => {
     const wrapper = await mountDashboard()
 

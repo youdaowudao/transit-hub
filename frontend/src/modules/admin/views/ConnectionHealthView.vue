@@ -1307,7 +1307,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       </div>
 
       <div v-else class="grid min-h-[34rem] lg:grid-cols-[19rem_minmax(0,1fr)]">
-        <aside class="flex min-h-0 flex-col border-b border-border/50 lg:border-b-0 lg:border-r">
+        <aside class="flex min-h-0 flex-col border-b border-border/50 lg:max-h-[34rem] lg:border-b-0 lg:border-r">
           <QuestionAnswerBatchDrawer
             :groups="orderedGroups"
             :preference-scope="preferenceScope"
@@ -1383,7 +1383,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
             </div>
           </div>
 
-          <nav class="max-h-[28rem] flex-1 overflow-y-auto p-2 lg:max-h-[calc(100dvh-20rem)]" :aria-label="t('admin.connectionHealth.groupListLabel')">
+          <nav class="min-h-0 max-h-[28rem] flex-1 overflow-y-auto p-2 lg:max-h-none" :aria-label="t('admin.connectionHealth.groupListLabel')">
             <div v-if="filteredGroups.length === 0" class="flex min-h-48 flex-col items-center justify-center px-5 text-center">
               <Layers class="h-8 w-8 text-muted-foreground/40" />
               <p class="mt-3 text-sm text-muted-foreground">{{ emptyGroupMessage }}</p>

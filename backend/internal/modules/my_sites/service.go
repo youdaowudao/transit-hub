@@ -945,7 +945,7 @@ func buildAccountPayload(groupType, baseURL, apiKey string, ownGroupIDs []int, a
 		"name":        accountName,
 		"type":        "apikey",
 		"credentials": credentials,
-		"priority":    1,
+		"priority":    100,
 		"group_ids":   ownGroupIDs,
 	}
 

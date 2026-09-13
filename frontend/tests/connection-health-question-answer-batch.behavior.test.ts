@@ -409,6 +409,29 @@ const mountView = async (
   return wrapper
 }
 
+describe('connection health two-column layout', () => {
+  it('keeps the desktop group list inside a bounded scrolling sidebar', async () => {
+    const groups = Array.from(
+      { length: 6 },
+      (_, index) => adminGroup(`group-${index + 1}`, []),
+    )
+    const wrapper = await mountView(groups)
+
+    const nav = wrapper.get('nav[aria-label="上游分组列表"]')
+    const aside = nav.element.closest('aside')
+
+    expect(aside).not.toBeNull()
+    expect(Array.from(aside!.classList)).toContain('lg:max-h-[34rem]')
+    expect(nav.classes()).toEqual(expect.arrayContaining([
+      'min-h-0',
+      'flex-1',
+      'overflow-y-auto',
+      'lg:max-h-none',
+    ]))
+    expect(nav.classes()).not.toContain('lg:max-h-[calc(100dvh-20rem)]')
+  })
+})
+
 const openBatchDrawer = async (wrapper: VueWrapper) => {
   const button = wrapper.find('[data-testid="question-answer-batch-open"]')
   expect(button.exists()).toBe(true)

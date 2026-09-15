@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { saveMySiteMapping } from '../src/modules/admin/api/mySites'
+import { checkRealConnections, saveMySiteMapping } from '../src/modules/admin/api/mySites'
 import type { MySiteMapping } from '../src/modules/admin/types/mySites'
 
 const mappingWithLastRun = (): MySiteMapping => ({
@@ -34,6 +34,20 @@ const mappingWithLastRun = (): MySiteMapping => ({
 afterEach(() => vi.unstubAllGlobals())
 
 describe('my sites mapping API', () => {
+  it('checks real connections with a body-free POST request', async () => {
+    vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null) })
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      checked: 2,
+      active: 1,
+      missing: 1,
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(checkRealConnections()).resolves.toEqual({ checked: 2, active: 1, missing: 1 })
+    expect(fetchMock).toHaveBeenCalledWith('/api/my-sites/real-connections/check', expect.objectContaining({ method: 'POST' }))
+    expect(fetchMock.mock.calls[0][1]).not.toHaveProperty('body')
+  })
+
   it('serializes only writable fields in PATCH mapping saves', async () => {
     vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null) })
     const mapping = mappingWithLastRun()

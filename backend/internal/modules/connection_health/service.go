@@ -2,6 +2,7 @@ package connection_health
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"sync"
@@ -33,7 +34,7 @@ type healthRepository interface {
 	GetAccountTier(ctx context.Context, userID string, adminAccountID string, targetID string) (int, error)
 	SaveAccountTier(ctx context.Context, userID string, adminAccountID string, targetID string, tier int) error
 	ListAccountTiers(ctx context.Context, userID string, adminAccountID string) (map[string]int, error)
-	CountFailureEventsSince(ctx context.Context, userID string, adminAccountID string, since time.Time) (int, error)
+	CountFailureEventsSince(ctx context.Context, userID string, adminAccountID string, since time.Time, includedConnectionIDs []string) (int, error)
 	CountProbesToday(ctx context.Context, userID string, adminAccountID string, policyID string, dayStart time.Time) (int, error)
 	TryConsumeProbeBudget(ctx context.Context, userID string, adminAccountID string, policyID string, dayStart time.Time, limit int) (bool, error)
 	TryAcquireSchedulerLease(ctx context.Context) (release func(), acquired bool, err error)
@@ -332,11 +333,25 @@ func (s *Service) StoredSummary(ctx context.Context, userID string) (StoredSumma
 	if err != nil {
 		return StoredSummaryResponse{}, err
 	}
+	connections, err := s.mySites.ListRealConnectionsForWorkspace(ctx, userID, adminAccountID)
+	if err != nil {
+		return StoredSummaryResponse{}, err
+	}
+	usableConnectionIDs := make(map[string]struct{})
+	for _, connection := range connections {
+		if isUsableRealConnection(connection) {
+			usableConnectionIDs[connection.ID] = struct{}{}
+		}
+	}
+	includedConnectionIDs := make([]string, 0, len(usableConnectionIDs))
+	for connectionID := range usableConnectionIDs {
+		includedConnectionIDs = append(includedConnectionIDs, connectionID)
+	}
 	actionStates, err := s.repo.ListTargetActionStates(ctx, userID, adminAccountID)
 	if err != nil {
 		return StoredSummaryResponse{}, err
 	}
-	recentFailures, err := s.repo.CountFailureEventsSince(ctx, userID, adminAccountID, time.Now().Add(-24*time.Hour))
+	recentFailures, err := s.repo.CountFailureEventsSince(ctx, userID, adminAccountID, time.Now().Add(-24*time.Hour), includedConnectionIDs)
 	if err != nil {
 		return StoredSummaryResponse{}, err
 	}
@@ -349,6 +364,9 @@ func (s *Service) StoredSummary(ctx context.Context, userID string) (StoredSumma
 	targetRisk := make(map[string]int)
 	var lastProbeAt *time.Time
 	for _, state := range states {
+		if _, usable := usableConnectionIDs[state.ConnectionID]; !usable {
+			continue
+		}
 		risk := targetHealthy
 		switch state.State {
 		case StateSuspended, StateDisabled:
@@ -365,9 +383,15 @@ func (s *Service) StoredSummary(ctx context.Context, userID string) (StoredSumma
 		}
 	}
 
+	managedTargets := 0
+	for _, actionState := range actionStates {
+		if _, usable := usableConnectionIDs[actionState.TargetID]; usable {
+			managedTargets++
+		}
+	}
 	response := StoredSummaryResponse{
 		TotalTargets:        len(targetRisk),
-		ManagedTargets:      len(actionStates),
+		ManagedTargets:      managedTargets,
 		RecentFailureEvents: recentFailures,
 		LastProbeAt:         lastProbeAt,
 	}
@@ -429,6 +453,9 @@ func (s *Service) Groups(ctx context.Context, userID string) ([]OwnGroupHealth, 
 	}
 
 	for _, conn := range connections {
+		if !isUsableRealConnection(conn) {
+			continue
+		}
 		modelsByModelName := stateIndex[conn.ID]
 		models := make([]ModelHealth, 0, len(modelsByModelName))
 		for modelName, st := range modelsByModelName {
@@ -1292,11 +1319,29 @@ func (s *Service) findConnection(ctx context.Context, userID string, connectionI
 		return nil, err
 	}
 	for _, c := range connections {
-		if c.ID == connectionID {
+		if c.ID == connectionID && isUsableRealConnection(c) {
 			return &c, nil
 		}
 	}
 	return nil, nil
+}
+
+func isUsableRealConnection(connection my_sites.RealConnection) bool {
+	status := strings.TrimSpace(connection.Status)
+	return status == "" || status == my_sites.ConnectionStatusActive
+}
+
+// CleanupRealConnectionRuntime removes the mutable legacy health snapshot for
+// one local connection before that connection is unlinked. Audit events remain
+// available as historical records.
+func (s *Service) CleanupRealConnectionRuntime(ctx context.Context, userID string, adminAccountID string, connectionID string) error {
+	repository, ok := s.repo.(interface {
+		DeleteRuntimeByConnection(context.Context, string, string, string) error
+	})
+	if !ok {
+		return errors.New("connection health runtime cleanup unavailable")
+	}
+	return repository.DeleteRuntimeByConnection(ctx, userID, adminAccountID, connectionID)
 }
 
 func (s *Service) defaultState(conn my_sites.RealConnection, modelName string) ConnectionHealthState {

@@ -8,6 +8,7 @@ import type {
   RealConnectRequest,
   RealConnectResponse,
   RealConnection,
+  RealConnectionCheckResponse,
   RealDisconnectRequest,
   UpstreamKeyItem,
   AdminResourceOption,
@@ -146,6 +147,9 @@ export const realConnect = async (req: RealConnectRequest): Promise<RealConnectR
 
 export const listRealConnections = async (): Promise<RealConnection[]> =>
   requestJson<RealConnection[]>('/my-sites/real-connections')
+
+export const checkRealConnections = async (): Promise<RealConnectionCheckResponse> =>
+  requestJson<RealConnectionCheckResponse>('/my-sites/real-connections/check', { method: 'POST' })
 
 export const listUpstreamKeys = async (siteId: string, groupId: string, groupName: string): Promise<UpstreamKeyItem[]> => {
   const params = new URLSearchParams({ siteId, groupId, groupName })

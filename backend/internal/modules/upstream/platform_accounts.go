@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +56,73 @@ func (s *PlatformService) ListAdminGroupAccountsContext(ctx context.Context, ses
 	default:
 		return s.listSub2APIGroupAccountsContext(ctx, session, group)
 	}
+}
+
+// ListSub2APIAdminAccountsContext reads the complete Sub2API admin account
+// inventory without applying a group filter. Callers use this authoritative
+// inventory to distinguish a deleted main-site account from an account that
+// merely moved to another group.
+func (s *PlatformService) ListSub2APIAdminAccountsContext(ctx context.Context, session Session) ([]AdminGroupAccountInfo, error) {
+	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
+		return nil, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+
+	const pageSize = 100
+	const maxPages = 100
+	authOptions := adminAuthOptions(session)
+	accounts := make([]AdminGroupAccountInfo, 0)
+	seenAccountIDs := make(map[string]struct{})
+	expectedTotal := -1
+	for page := 1; page <= maxPages; page++ {
+		pageURL := session.BaseURL + "/api/v1/admin/accounts?page=" + strconvInt(int64(page)) +
+			"&page_size=" + strconvInt(pageSize)
+		response, err := s.httpClient.requestJSONWithContext(ctx, pageURL, authOptions)
+		if err != nil {
+			return nil, err
+		}
+		items, validItems := sub2APIAccountPageItems(response.Payload)
+		if !validItems {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		total, hasTotal, validTotal := sub2APIAccountPaginationTotal(response.Payload)
+		if !validTotal || !hasTotal {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		if len(items) > pageSize {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		if expectedTotal < 0 {
+			expectedTotal = total
+		} else if total != expectedTotal {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		for _, item := range items {
+			record, ok := item.(map[string]any)
+			if !ok {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			account := parseSub2APIAccount(record)
+			accountID := strings.TrimSpace(account.ID)
+			if accountID == "" {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			if _, duplicate := seenAccountIDs[accountID]; duplicate {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			seenAccountIDs[accountID] = struct{}{}
+			accounts = append(accounts, account)
+		}
+		if len(accounts) > expectedTotal {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		if len(accounts) == expectedTotal {
+			return accounts, nil
+		}
+		if len(items) < pageSize {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+	}
+	return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 }
 
 // listSub2APIGroupAccounts 分页拉取 sub2api 某分组下的账号。
@@ -136,25 +204,50 @@ func (s *PlatformService) listSub2APIGroupAccountsContext(ctx context.Context, s
 	return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 }
 
+// Sub2API 的账号接口在不同版本中使用过多种容器与分页字段。这里允许兼容字段并存，
+// 但只在其值完全一致时接受；任何歧义都必须让完整库存轮次失败，不能静默挑选一个字段。
 func sub2APIAccountPageItems(value any) ([]any, bool) {
 	record, ok := value.(map[string]any)
 	if !ok {
 		return nil, false
 	}
-	if items, ok := record["data"].([]any); ok {
-		return items, true
+
+	candidates := make([][]any, 0, 4)
+	appendCandidate := func(raw any) bool {
+		items, ok := raw.([]any)
+		if !ok {
+			return false
+		}
+		candidates = append(candidates, items)
+		return true
 	}
-	if items, ok := record["items"].([]any); ok {
-		return items, true
-	}
-	if data, ok := record["data"].(map[string]any); ok {
-		for _, key := range []string{"items", "list", "records"} {
-			if items, ok := data[key].([]any); ok {
-				return items, true
+
+	if rawData, exists := record["data"]; exists {
+		switch data := rawData.(type) {
+		case []any:
+			candidates = append(candidates, data)
+		case map[string]any:
+			for _, key := range []string{"items", "list", "records"} {
+				if rawItems, exists := data[key]; exists && !appendCandidate(rawItems) {
+					return nil, false
+				}
 			}
+		default:
+			return nil, false
 		}
 	}
-	return nil, false
+	if rawItems, exists := record["items"]; exists && !appendCandidate(rawItems) {
+		return nil, false
+	}
+	if len(candidates) == 0 {
+		return nil, false
+	}
+	for _, candidate := range candidates[1:] {
+		if !reflect.DeepEqual(candidates[0], candidate) {
+			return nil, false
+		}
+	}
+	return candidates[0], true
 }
 
 func sub2APIAccountPaginationTotal(value any) (int, bool, bool) {
@@ -162,21 +255,42 @@ func sub2APIAccountPaginationTotal(value any) (int, bool, bool) {
 	if !ok {
 		return 0, false, false
 	}
-	if data, ok := record["data"].(map[string]any); ok {
-		record = data
-	}
-	for _, key := range []string{"total", "count"} {
-		raw, exists := record[key]
-		if !exists {
-			continue
-		}
+
+	totals := make([]int, 0, 4)
+	appendTotal := func(raw any) bool {
 		number := readNumber(raw)
 		if number == nil || *number < 0 || math.Trunc(*number) != *number || *number > float64(int(^uint(0)>>1)) {
+			return false
+		}
+		totals = append(totals, int(*number))
+		return true
+	}
+	appendRecordTotals := func(candidate map[string]any) bool {
+		for _, key := range []string{"total", "count"} {
+			if raw, exists := candidate[key]; exists && !appendTotal(raw) {
+				return false
+			}
+		}
+		return true
+	}
+
+	if !appendRecordTotals(record) {
+		return 0, true, false
+	}
+	if data, ok := record["data"].(map[string]any); ok {
+		if !appendRecordTotals(data) {
 			return 0, true, false
 		}
-		return int(*number), true, true
 	}
-	return 0, false, true
+	if len(totals) == 0 {
+		return 0, false, true
+	}
+	for _, total := range totals[1:] {
+		if total != totals[0] {
+			return 0, true, false
+		}
+	}
+	return totals[0], true, true
 }
 
 // parseSub2APIAccount 把 sub2api 账号原始记录解析为平台中性结构，主动丢弃 credentials 等敏感字段。

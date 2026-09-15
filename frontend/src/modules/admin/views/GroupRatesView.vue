@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { AlertCircle, ArrowUpDown, Check, ChevronDown, History, KeyRound, Link2, Loader2, Megaphone, RefreshCw, Search, ServerCog, Sparkles, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
-import { getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, listRealConnections, realDisconnect } from '../api/mySites'
+import { checkRealConnections, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, listRealConnections, realDisconnect } from '../api/mySites'
 import { getDashboardAdminStatus } from '../api/dashboardAdmin'
 import { listUpstreamSites } from '../api/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
@@ -71,6 +71,8 @@ const disconnectMode = ref<'unlink' | 'full'>('unlink')
 const disconnectRemovePricing = ref(true)
 const isDisconnecting = ref(false)
 const disconnectError = ref('')
+const isCheckingConnections = ref(false)
+const connectionCheckError = ref('')
 const isAnyDialogOpen = computed(() => Boolean(isHistoryOpen.value || editingRate.value || connectingRate.value || disconnectingRate.value))
 let previouslyFocusedElement: HTMLElement | null = null
 let previousBodyOverflow = ''
@@ -196,21 +198,53 @@ const filteredOwnGroups = computed(() => {
   return ownGroups.value
 })
 
-const realConnectionForRate = (rate: GroupRate): RealConnection | undefined =>
-  realConnectionsData.value.find(c => (
+const realConnectionsForRate = (rate: GroupRate): RealConnection[] =>
+  realConnectionsData.value.filter(c => (
     c.upstreamSiteId === rate.siteId &&
     (c.upstreamGroupId === rate.groupId || ((!c.upstreamGroupId || !rate.groupId) && c.upstreamGroupName === rate.groupName))
   ))
 
-const isRealConnected = (rate: GroupRate): boolean => !!realConnectionForRate(rate)
+const realConnectionForRate = (rate: GroupRate): RealConnection | undefined => {
+  const matches = realConnectionsForRate(rate)
+  return matches.find(connection => !connection.status || connection.status === 'active') ?? matches[0]
+}
+
+const isRealConnected = (rate: GroupRate): boolean => {
+  const connection = realConnectionForRate(rate)
+  return Boolean(connection && (!connection.status || connection.status === 'active'))
+}
+const isMainAccountMissing = (rate: GroupRate): boolean => realConnectionForRate(rate)?.status === 'missing'
 const isPricingMapped = (rate: GroupRate): boolean => rate.pricingMapped ?? mappedOwnGroupsForRate(rate).length > 0
 const disconnectConnection = computed(() => disconnectingRate.value ? realConnectionForRate(disconnectingRate.value) : undefined)
 
-const loadRealConnections = async () => {
+const loadRealConnections = async (clearOnFailure = false): Promise<boolean> => {
   try {
     realConnectionsData.value = await listRealConnections()
+    return true
   } catch {
-    realConnectionsData.value = []
+    if (clearOnFailure) realConnectionsData.value = []
+    return false
+  }
+}
+
+const checkThenLoadRates = async () => {
+  if (isCheckingConnections.value) return
+  isCheckingConnections.value = true
+  connectionCheckError.value = ''
+  try {
+    let checkSucceeded = false
+    try {
+      await checkRealConnections()
+      checkSucceeded = true
+    } catch {
+      connectionCheckError.value = t('admin.groupRates.errors.connectionCheckFailed')
+    }
+    const [, connectionsLoaded] = await Promise.all([loadRates(), loadRealConnections(checkSucceeded)])
+    if (checkSucceeded && !connectionsLoaded) {
+      connectionCheckError.value = t('admin.groupRates.errors.connectionStatusLoadFailed')
+    }
+  } finally {
+    isCheckingConnections.value = false
   }
 }
 
@@ -291,7 +325,8 @@ watch(isAnyDialogOpen, async (open) => {
 
 onMounted(async () => {
   document.addEventListener('keydown', handleDialogKeydown)
-  await Promise.all([loadRates(), loadRealConnections(), loadAdminPlatform(), loadUpstreamSiteOptions()])
+  await checkThenLoadRates()
+  await Promise.all([loadAdminPlatform(), loadUpstreamSiteOptions()])
   await consumeRouteFocus()
 })
 
@@ -832,8 +867,8 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           <Megaphone class="h-4 w-4" />
           {{ t('admin.groupRates.actions.createCampaign') }}
         </Button>
-        <Button class="h-10 gap-2 shadow-sm" :disabled="isLoading" @click="loadRates">
-          <Loader2 v-if="isLoading" class="h-4 w-4 animate-spin" />
+        <Button class="h-10 gap-2 shadow-sm" :disabled="isLoading || isCheckingConnections" @click="checkThenLoadRates">
+          <Loader2 v-if="isLoading || isCheckingConnections" class="h-4 w-4 animate-spin" />
           <RefreshCw v-else class="h-4 w-4" />
           {{ t('admin.groupRates.actions.refresh') }}
         </Button>
@@ -843,6 +878,11 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
     <div v-if="errorKey" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
       <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
       <span>{{ t(errorKey) }}</span>
+    </div>
+
+    <div v-if="connectionCheckError" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
+      <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
+      <span>{{ connectionCheckError }}</span>
     </div>
 
     <div id="group-rates-panel" class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm" role="tabpanel">
@@ -888,6 +928,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 <div class="flex items-center gap-1.5">
                   <span class="font-medium text-foreground">{{ rate.groupName }}</span>
                   <span v-if="rate.deleted" class="inline-flex rounded-md border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-500">{{ t('admin.groupRates.status.deleted') }}</span>
+                  <span v-else-if="isMainAccountMissing(rate)" class="inline-flex rounded-md border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-600 dark:text-red-300">{{ t('admin.groupRates.status.mainAccountMissing') }}</span>
                   <span v-else-if="isRealConnected(rate)" class="inline-flex rounded-md border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-300">{{ t('admin.groupRates.status.mapped') }}</span>
                   <span v-if="!rate.deleted && isPricingMapped(rate)" class="inline-flex rounded-md border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300">{{ t('admin.groupRates.status.pricingMapped') }}</span>
                 </div>
@@ -929,7 +970,18 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <td class="px-4 py-2.5 text-right">
                 <div v-if="!rate.deleted" class="flex justify-end gap-2">
                   <Button
-                    v-if="isRealConnected(rate)"
+                    v-if="isMainAccountMissing(rate)"
+                    variant="destructive"
+                    size="sm"
+                    class="gap-1.5"
+                    :disabled="isActionLoading || isDisconnecting"
+                    @click="openDisconnect(rate)"
+                  >
+                    <X class="h-3.5 w-3.5" />
+                    {{ t('admin.groupRates.disconnect.cleanupMissing') }}
+                  </Button>
+                  <Button
+                    v-else-if="isRealConnected(rate)"
                     variant="destructive"
                     size="sm"
                     class="gap-1.5"
@@ -1383,7 +1435,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-disconnect-title" tabindex="-1" class="max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto overscroll-contain rounded-xl border border-border/50 bg-card shadow-xl">
         <div class="flex items-start justify-between gap-4 border-b border-border/50 p-6">
           <div>
-            <h2 id="group-rate-disconnect-title" class="text-xl font-semibold text-foreground">{{ t('admin.groupRates.disconnect.title') }}</h2>
+            <h2 id="group-rate-disconnect-title" class="text-xl font-semibold text-foreground">{{ t(disconnectConnection?.status === 'missing' ? 'admin.groupRates.disconnect.cleanupMissingTitle' : 'admin.groupRates.disconnect.title') }}</h2>
             <p class="mt-2 text-sm text-muted-foreground">
               {{ t('admin.groupRates.disconnect.description', { site: disconnectingRate.siteName, group: disconnectingRate.groupName }) }}
             </p>
@@ -1401,7 +1453,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         <div class="space-y-4 p-6">
           <div class="space-y-3">
             <label
-              v-if="disconnectConnection?.canDeleteRemote !== false"
+              v-if="disconnectConnection?.status === 'missing' || disconnectConnection?.canDeleteRemote !== false"
               class="flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition-colors"
               :class="disconnectMode === 'unlink'
                 ? 'border-primary bg-primary/5'
@@ -1415,12 +1467,13 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 :disabled="isDisconnecting"
               />
               <div>
-                <span class="text-sm font-medium text-foreground">{{ t('admin.groupRates.disconnect.unlinkOnly') }}</span>
-                <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.groupRates.disconnect.unlinkOnlyHint') }}</p>
+                <span class="text-sm font-medium text-foreground">{{ t(disconnectConnection?.status === 'missing' ? 'admin.groupRates.disconnect.cleanupLocalOnly' : 'admin.groupRates.disconnect.unlinkOnly') }}</span>
+                <p class="mt-1 text-xs text-muted-foreground">{{ t(disconnectConnection?.status === 'missing' ? 'admin.groupRates.disconnect.cleanupLocalOnlyHint' : 'admin.groupRates.disconnect.unlinkOnlyHint') }}</p>
               </div>
             </label>
 
             <label
+              v-if="disconnectConnection?.status !== 'missing'"
               class="flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition-colors"
               :class="disconnectMode === 'full'
                 ? 'border-red-500/50 bg-red-500/5'

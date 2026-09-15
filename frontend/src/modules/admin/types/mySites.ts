@@ -210,6 +210,12 @@ export interface RealBindRequest {
   operationId?: string
 }
 
+export interface RealConnectionCheckResponse {
+  checked: number
+  active: number
+  missing: number
+}
+
 export interface UpstreamKeyItem {
   id: string
   key?: string

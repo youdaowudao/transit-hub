@@ -469,9 +469,16 @@ func (f *fakeRepository) ListLatestSuccessfulSchedulableActionEventsByWorkspace(
 	return out, nil
 }
 
-func (f *fakeRepository) CountFailureEventsSince(ctx context.Context, userID string, adminAccountID string, since time.Time) (int, error) {
+func (f *fakeRepository) CountFailureEventsSince(ctx context.Context, userID string, adminAccountID string, since time.Time, includedConnectionIDs []string) (int, error) {
+	included := make(map[string]struct{}, len(includedConnectionIDs))
+	for _, connectionID := range includedConnectionIDs {
+		included[connectionID] = struct{}{}
+	}
 	count := 0
 	for _, event := range f.events {
+		if _, keep := included[event.ConnectionID]; !keep {
+			continue
+		}
 		if event.UserID == userID && event.AdminAccountID == adminAccountID && !event.CreatedAt.Before(since) && slices.Contains(probeFailureResultKeys(), event.Result) {
 			count++
 		}
@@ -1013,6 +1020,17 @@ func (f fakeMySitesReader) ListRealConnections(ctx context.Context, userID strin
 	return f.connections, nil
 }
 
+// switchingWorkspaceMySitesReader 模拟 StoredSummary 解析完 workspace 后，当前 workspace
+// 在后续管理态查询前发生切换。显式 workspace 查询仍应使用第一次解析出的 workspace。
+type switchingWorkspaceMySitesReader struct {
+	fakeMySitesReader
+	currentWorkspaceConnections []my_sites.RealConnection
+}
+
+func (f switchingWorkspaceMySitesReader) ListRealConnections(ctx context.Context, userID string) ([]my_sites.RealConnection, error) {
+	return f.currentWorkspaceConnections, nil
+}
+
 // ListRealConnectionsForWorkspace 模拟按显式 userID+adminAccountID 过滤的仓库行为，
 // 用 RealConnection.UserID / WorkspaceAdminAccountID 字段做匹配，供 scheduler 的多 workspace
 // 隔离测试使用；未设置这两个字段的旧 fixture 仍按零值（""）匹配，兼容既有测试用例。
@@ -1081,6 +1099,33 @@ func TestGroups_NoRealConnectionsShowsNotConnected(t *testing.T) {
 	}
 	if len(groups[0].Connections) != 0 {
 		t.Fatalf("expected zero connections listed")
+	}
+}
+
+func TestGroupsAndFindConnectionExcludeMissingManagementRows(t *testing.T) {
+	repo := newFakeRepository()
+	mySites := fakeMySitesReader{
+		ownGroups: []my_sites.MappingOwnGroupOption{{ID: "g1", GroupName: "group-one"}},
+		connections: []my_sites.RealConnection{
+			{ID: "active", Status: my_sites.ConnectionStatusActive, OwnGroupIDs: []string{"g1"}},
+			{ID: "legacy", Status: "", OwnGroupIDs: []string{"g1"}},
+			{ID: "missing", Status: my_sites.ConnectionStatusMissing, OwnGroupIDs: []string{"g1"}},
+		},
+	}
+	svc := &Service{repo: repo, mySites: mySites, accounts: fakeAdminAccountResolver{id: "ws1"}, dispatcher: noopRemoteActionRunner{}, probeRunner: NewRealProbeRunner()}
+
+	groups, err := svc.Groups(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("Groups: %v", err)
+	}
+	if len(groups) != 1 || len(groups[0].Connections) != 2 {
+		t.Fatalf("missing management row reached groups: %#v", groups)
+	}
+	if connection, err := svc.findConnection(context.Background(), "user1", "missing"); err != nil || connection != nil {
+		t.Fatalf("missing management row reached operational lookup: connection=%#v err=%v", connection, err)
+	}
+	if connection, err := svc.findConnection(context.Background(), "user1", "legacy"); err != nil || connection == nil {
+		t.Fatalf("legacy connection must remain usable: connection=%#v err=%v", connection, err)
 	}
 }
 
@@ -1176,6 +1221,7 @@ func TestStoredSummary_DeduplicatesTargetsAndKeepsWorkspaceIsolated(t *testing.T
 	now := time.Now()
 	olderProbe := now.Add(-2 * time.Hour)
 	latestProbe := now.Add(-30 * time.Minute)
+	missingProbe := now.Add(-5 * time.Minute)
 	repo := newFakeRepository()
 	repo.states["target-healthy"] = map[string]ConnectionHealthState{
 		"model-a": {ConnectionID: "target-healthy", ModelName: "model-a", UserID: "user1", AdminAccountID: "ws1", State: StateHealthy, LastProbeAt: &olderProbe},
@@ -1188,18 +1234,33 @@ func TestStoredSummary_DeduplicatesTargetsAndKeepsWorkspaceIsolated(t *testing.T
 	repo.states["target-suspended"] = map[string]ConnectionHealthState{
 		"model-a": {ConnectionID: "target-suspended", ModelName: "model-a", UserID: "user1", AdminAccountID: "ws1", State: StateDisabled},
 	}
+	repo.states["target-missing"] = map[string]ConnectionHealthState{
+		"model-a": {ConnectionID: "target-missing", ModelName: "model-a", UserID: "user1", AdminAccountID: "ws1", State: StateSuspended, LastProbeAt: &missingProbe},
+	}
 	repo.states["other-workspace"] = map[string]ConnectionHealthState{
 		"model-a": {ConnectionID: "other-workspace", ModelName: "model-a", UserID: "user1", AdminAccountID: "ws2", State: StateSuspended},
 	}
 	repo.targetActionStates["user1|ws1|target-suspended"] = TargetActionState{UserID: "user1", AdminAccountID: "ws1", TargetID: "target-suspended"}
+	repo.targetActionStates["user1|ws1|target-missing"] = TargetActionState{UserID: "user1", AdminAccountID: "ws1", TargetID: "target-missing"}
 	repo.targetActionStates["user1|ws2|other-workspace"] = TargetActionState{UserID: "user1", AdminAccountID: "ws2", TargetID: "other-workspace"}
 	repo.events = []ConnectionHealthEvent{
-		{ID: "failure-recent", UserID: "user1", AdminAccountID: "ws1", Result: string(ResultServerError), CreatedAt: now.Add(-time.Hour)},
+		{ID: "failure-recent", ConnectionID: "target-attention", UserID: "user1", AdminAccountID: "ws1", Result: string(ResultServerError), CreatedAt: now.Add(-time.Hour)},
+		{ID: "failure-missing", ConnectionID: "target-missing", UserID: "user1", AdminAccountID: "ws1", Result: string(ResultAuth), CreatedAt: now.Add(-10 * time.Minute)},
+		{ID: "failure-deleted", ConnectionID: "target-deleted", UserID: "user1", AdminAccountID: "ws1", Result: string(ResultAuth), CreatedAt: now.Add(-15 * time.Minute)},
 		{ID: "success-recent", UserID: "user1", AdminAccountID: "ws1", Result: string(ResultOK), CreatedAt: now.Add(-time.Hour)},
 		{ID: "failure-old", UserID: "user1", AdminAccountID: "ws1", Result: string(ResultAuth), CreatedAt: now.Add(-25 * time.Hour)},
 		{ID: "failure-other", UserID: "user1", AdminAccountID: "ws2", Result: string(ResultAuth), CreatedAt: now.Add(-time.Hour)},
 	}
-	service := &Service{repo: repo, accounts: fakeAdminAccountResolver{id: "ws1"}}
+	service := &Service{
+		repo:     repo,
+		accounts: fakeAdminAccountResolver{id: "ws1"},
+		mySites: fakeMySitesReader{connections: []my_sites.RealConnection{
+			{ID: "target-healthy", UserID: "user1", WorkspaceAdminAccountID: "ws1", Status: my_sites.ConnectionStatusActive},
+			{ID: "target-attention", UserID: "user1", WorkspaceAdminAccountID: "ws1", Status: my_sites.ConnectionStatusActive},
+			{ID: "target-suspended", UserID: "user1", WorkspaceAdminAccountID: "ws1", Status: ""},
+			{ID: "target-missing", UserID: "user1", WorkspaceAdminAccountID: "ws1", Status: my_sites.ConnectionStatusMissing},
+		}},
+	}
 
 	summary, err := service.StoredSummary(context.Background(), "user1")
 	if err != nil {
@@ -1213,6 +1274,68 @@ func TestStoredSummary_DeduplicatesTargetsAndKeepsWorkspaceIsolated(t *testing.T
 	}
 	if summary.LastProbeAt == nil || !summary.LastProbeAt.Equal(latestProbe) {
 		t.Fatalf("expected latest probe %v, got %v", latestProbe, summary.LastProbeAt)
+	}
+}
+
+func TestStoredSummaryUsesAlreadyResolvedWorkspaceForConnectionWhitelist(t *testing.T) {
+	now := time.Now()
+	probeAt := now.Add(-15 * time.Minute)
+	repo := newFakeRepository()
+	repo.states["target-a"] = map[string]ConnectionHealthState{
+		"model-a": {
+			ConnectionID:   "target-a",
+			ModelName:      "model-a",
+			UserID:         "user1",
+			AdminAccountID: "ws1",
+			State:          StateHealthy,
+			LastProbeAt:    &probeAt,
+		},
+	}
+	repo.targetActionStates["user1|ws1|target-a"] = TargetActionState{
+		UserID:         "user1",
+		AdminAccountID: "ws1",
+		TargetID:       "target-a",
+	}
+	repo.events = []ConnectionHealthEvent{{
+		ID:             "failure-a",
+		ConnectionID:   "target-a",
+		UserID:         "user1",
+		AdminAccountID: "ws1",
+		Result:         string(ResultServerError),
+		CreatedAt:      now.Add(-time.Hour),
+	}}
+
+	service := &Service{
+		repo:     repo,
+		accounts: fakeAdminAccountResolver{id: "ws1"},
+		mySites: switchingWorkspaceMySitesReader{
+			fakeMySitesReader: fakeMySitesReader{connections: []my_sites.RealConnection{{
+				ID:                      "target-a",
+				UserID:                  "user1",
+				WorkspaceAdminAccountID: "ws1",
+				Status:                  my_sites.ConnectionStatusActive,
+			}}},
+			currentWorkspaceConnections: []my_sites.RealConnection{{
+				ID:                      "target-b",
+				UserID:                  "user1",
+				WorkspaceAdminAccountID: "ws2",
+				Status:                  my_sites.ConnectionStatusActive,
+			}},
+		},
+	}
+
+	summary, err := service.StoredSummary(context.Background(), "user1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if summary.TotalTargets != 1 || summary.HealthyTargets != 1 || summary.AttentionTargets != 0 || summary.SuspendedTargets != 0 {
+		t.Fatalf("summary must stay scoped to the already resolved workspace: %+v", summary)
+	}
+	if summary.ManagedTargets != 1 || summary.RecentFailureEvents != 1 {
+		t.Fatalf("managed and failure counts must stay scoped to the already resolved workspace: %+v", summary)
+	}
+	if summary.LastProbeAt == nil || !summary.LastProbeAt.Equal(probeAt) {
+		t.Fatalf("expected probe time %v, got %v", probeAt, summary.LastProbeAt)
 	}
 }
 

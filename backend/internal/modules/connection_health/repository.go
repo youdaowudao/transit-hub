@@ -482,6 +482,17 @@ func (r *Repository) DeletePolicy(ctx context.Context, id string, userID string,
 	return true, nil
 }
 
+// DeleteRuntimeByConnection clears mutable legacy probe state for one real
+// connection. connection_health_events are audit history and are deliberately
+// retained.
+func (r *Repository) DeleteRuntimeByConnection(ctx context.Context, userID string, adminAccountID string, connectionID string) error {
+	_, err := r.db.Exec(ctx, `
+		DELETE FROM connection_health_states
+		WHERE connection_id = $1 AND user_id = $2 AND admin_account_id = $3
+	`, connectionID, userID, adminAccountID)
+	return err
+}
+
 func (r *Repository) ListModelTargets(ctx context.Context, policyID string) ([]ModelTarget, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, policy_id, user_id, admin_account_id, model_name, provider_family, enabled, probe_prompt, max_probe_tokens, created_at, updated_at
@@ -905,15 +916,16 @@ func (r *Repository) ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx 
 	return scanEvents(rows)
 }
 
-// CountFailureEventsSince 统计 workspace 在给定时间后的真实探活失败事件。该查询只返回
-// 聚合数字，避免工作台为了一个计数拉取并截断大量事件记录。
-func (r *Repository) CountFailureEventsSince(ctx context.Context, userID string, adminAccountID string, since time.Time) (int, error) {
+// CountFailureEventsSince 统计 workspace 当前可运行连接在给定时间后的真实探活失败事件。
+// 历史事件继续保留，但 missing 或已本地清理的连接不会再影响工作台运行态计数。
+func (r *Repository) CountFailureEventsSince(ctx context.Context, userID string, adminAccountID string, since time.Time, includedConnectionIDs []string) (int, error) {
 	row := r.db.QueryRow(ctx, `
 		SELECT count(*)
 		FROM connection_health_events
 		WHERE user_id = $1 AND admin_account_id = $2 AND created_at >= $3
 			AND result = ANY($4)
-	`, userID, adminAccountID, since, probeFailureResultKeys())
+			AND connection_id = ANY($5::text[])
+	`, userID, adminAccountID, since, probeFailureResultKeys(), includedConnectionIDs)
 	var count int
 	if err := row.Scan(&count); err != nil {
 		return 0, err

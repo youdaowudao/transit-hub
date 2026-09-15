@@ -65,6 +65,16 @@ type ScopedRealDisconnectRepository interface {
 	DeleteRealConnectionWithPricingMapping(ctx context.Context, conn RealConnection, removePricingMapping bool) error
 }
 
+type RealConnectionStatusRepository interface {
+	ReconcileRealConnectionStatuses(ctx context.Context, userID string, adminAccountID string, mainAccountIDs []string) (RealConnectionCheckResponse, error)
+}
+
+// ConnectionRuntimeCleaner removes only mutable runtime state for a local
+// connection. Historical health events are intentionally retained.
+type ConnectionRuntimeCleaner interface {
+	CleanupRealConnectionRuntime(ctx context.Context, userID string, adminAccountID string, connectionID string) error
+}
+
 // UpstreamSiteLookup 根据 ID 获取上游站点信息（含 Session），供真实对接流程使用。
 type UpstreamSiteLookup interface {
 	GetSite(ctx context.Context, siteID string) (*upstream.Site, error)
@@ -85,6 +95,7 @@ type Service struct {
 	upstreamLookup  UpstreamSiteLookup
 	botNotifier     BotNotifier
 	accounts        AdminAccountResolver
+	runtimeCleaner  ConnectionRuntimeCleaner
 }
 
 type AdminAccountResolver interface {
@@ -110,6 +121,10 @@ func (s *Service) SetBotNotifier(notifier BotNotifier) {
 
 func (s *Service) SetAdminAccountResolver(accounts AdminAccountResolver) {
 	s.accounts = accounts
+}
+
+func (s *Service) SetConnectionRuntimeCleaner(cleaner ConnectionRuntimeCleaner) {
+	s.runtimeCleaner = cleaner
 }
 
 // MappingOptions 获取分组映射选项：自有分组通过 admin 接口拉取全量，上游分组从缓存读取。
@@ -455,6 +470,18 @@ func (s *Service) RunAutoPricingNow(ctx context.Context, userID string, req Auto
 	if !ok || !mapping.EnableAutoPricing {
 		return AutoPricingRunResponse{}, requestError(ErrorRequest)
 	}
+	mapping, missingReason, err := s.withoutMissingConnectionTargets(ctx, userID, adminAccountID, mapping)
+	if err != nil {
+		return AutoPricingRunResponse{}, err
+	}
+	if missingReason != "" {
+		result := autoPricingResult{OwnGroup: mapping.OwnGroup, Status: "skipped", Reason: missingReason}
+		updatedMapping, persistErr := s.persistAutoPricingRunStatus(ctx, userID, adminAccountID, result, "manual", nil)
+		if persistErr != nil {
+			return AutoPricingRunResponse{}, persistErr
+		}
+		return AutoPricingRunResponse{Result: *updatedMapping.LastAutoPricingRun, Mapping: updatedMapping}, nil
+	}
 	adminGroups, err := s.platformService.FetchAdminAllGroups(state.Session)
 	if err != nil {
 		return AutoPricingRunResponse{}, err
@@ -675,7 +702,111 @@ func (s *Service) ListRealConnectionsForWorkspace(ctx context.Context, userID st
 	if s.connRepository == nil {
 		return nil, nil
 	}
-	return s.connRepository.ListRealConnections(ctx, userID, adminAccountID)
+	connections, err := s.connRepository.ListRealConnections(ctx, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
+	operational := make([]RealConnection, 0, len(connections))
+	for _, conn := range connections {
+		if isOperationalRealConnection(conn) {
+			operational = append(operational, conn)
+		}
+	}
+	return operational, nil
+}
+
+func isOperationalRealConnection(conn RealConnection) bool {
+	status := strings.TrimSpace(conn.Status)
+	return status == "" || status == ConnectionStatusActive
+}
+
+func realConnectionMatchesTarget(conn RealConnection, target UpstreamGroupRef) bool {
+	return conn.UpstreamSiteID == target.SiteID && conn.UpstreamGroupName == target.GroupName
+}
+
+// withoutMissingConnectionTargets removes targets that are backed only by a
+// missing main-site connection. Targets with no connection are intentional
+// manual mappings and remain usable; any active/legacy connection wins over a
+// missing duplicate for the same target.
+func (s *Service) withoutMissingConnectionTargets(ctx context.Context, userID string, adminAccountID string, mapping GroupMapping) (GroupMapping, string, error) {
+	if s.connRepository == nil {
+		return mapping, "", nil
+	}
+	connections, err := s.connRepository.ListRealConnections(ctx, userID, adminAccountID)
+	if err != nil {
+		return GroupMapping{}, "", err
+	}
+	isMissingOnly := func(target UpstreamGroupRef) bool {
+		hasMissing := false
+		for _, conn := range connections {
+			if !realConnectionMatchesTarget(conn, target) {
+				continue
+			}
+			if isOperationalRealConnection(conn) {
+				return false
+			}
+			if strings.TrimSpace(conn.Status) == ConnectionStatusMissing && conn.PricingMappingEnabled {
+				hasMissing = true
+			}
+		}
+		return hasMissing
+	}
+
+	if mapping.AutoPricingSource == "primary_upstream" {
+		primary := UpstreamGroupRef{SiteID: mapping.PrimaryUpstreamSiteID, GroupName: mapping.PrimaryUpstreamGroupName}
+		if isMissingOnly(primary) {
+			return mapping, "main_account_missing", nil
+		}
+		return mapping, "", nil
+	}
+
+	filtered := make([]UpstreamGroupRef, 0, len(mapping.UpstreamTargets))
+	hadMissing := false
+	for _, target := range mapping.UpstreamTargets {
+		if isMissingOnly(target) {
+			hadMissing = true
+			continue
+		}
+		filtered = append(filtered, target)
+	}
+	mapping.UpstreamTargets = filtered
+	if hadMissing && len(filtered) == 0 {
+		return mapping, "main_account_missing", nil
+	}
+	return mapping, "", nil
+}
+
+// CheckRealConnections compares the current workspace's stored Sub2API account
+// IDs with one complete, group-independent main-site account inventory. The
+// repository update only runs after the inventory was read successfully.
+func (s *Service) CheckRealConnections(ctx context.Context, userID string) (RealConnectionCheckResponse, error) {
+	if s.platformService == nil || s.connRepository == nil {
+		return RealConnectionCheckResponse{}, requestError(ErrorRequest)
+	}
+	repo, ok := s.connRepository.(RealConnectionStatusRepository)
+	if !ok {
+		return RealConnectionCheckResponse{}, requestError(ErrorRequest)
+	}
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return RealConnectionCheckResponse{}, err
+	}
+	state, err := s.authenticatedState(ctx, userID, adminAccountID)
+	if err != nil {
+		return RealConnectionCheckResponse{}, err
+	}
+	if state.Session.Platform != upstream.PlatformSub2API {
+		return RealConnectionCheckResponse{}, requestError(ErrorRequest)
+	}
+	accounts, err := s.platformService.ListSub2APIAdminAccountsContext(ctx, state.Session)
+	if err != nil {
+		return RealConnectionCheckResponse{}, err
+	}
+	accountIDs := make([]string, 0, len(accounts))
+	for _, account := range accounts {
+		accountIDs = append(accountIDs, strings.TrimSpace(account.ID))
+	}
+	return repo.ReconcileRealConnectionStatuses(ctx, userID, adminAccountID, accountIDs)
 }
 
 // ReassignRealConnectionGroups 原子地把本地真实对接转移到新的自有分组。
@@ -764,6 +895,9 @@ func applyMappingsFromRealConnections(state *State, idToName map[string]string, 
 	}
 
 	for _, conn := range connections {
+		if !isOperationalRealConnection(conn) {
+			continue
+		}
 		// Historical rows (and older in-memory callers) have no mode/flag but the
 		// legacy behavior always treated their target as a pricing source.
 		if !conn.PricingMappingEnabled && conn.ProvisioningMode != "" && conn.ProvisioningMode != ProvisioningModeLegacy {
@@ -1561,10 +1695,34 @@ func (s *Service) ApplyAutoPricingAfterSync(ctx context.Context, userID, adminAc
 	lookupFn := s.buildWorkspaceLookupMultiplier(ctx, userID, adminAccountID)
 	for _, mapping := range autoPricingMappings {
 		// 检查该 mapping 是否引用了本次同步站点中发生变化的任意上游分组
-		affected := false
+		originalAffected := false
 		for _, t := range mapping.UpstreamTargets {
 			if t.SiteID == siteID {
 				if _, changed := changesByGroup[t.GroupName]; changed {
+					originalAffected = true
+					break
+				}
+			}
+		}
+		if !originalAffected {
+			continue
+		}
+		filteredMapping, missingReason, filterErr := s.withoutMissingConnectionTargets(ctx, userID, adminAccountID, mapping)
+		if filterErr != nil {
+			log.Printf("[auto-pricing] 读取真实对接状态失败 user_id=%s err=%v", userID, filterErr)
+			return
+		}
+		if missingReason != "" {
+			result := autoPricingResult{OwnGroup: mapping.OwnGroup, Status: "skipped", Reason: missingReason}
+			if _, persistErr := s.persistAutoPricingRunStatus(ctx, userID, adminAccountID, result, "after_sync", nil); persistErr != nil {
+				log.Printf("[auto-pricing] 写入失效对接跳过状态失败 own_group=%s err=%v", mapping.OwnGroup, persistErr)
+			}
+			continue
+		}
+		affected := false
+		for _, target := range filteredMapping.UpstreamTargets {
+			if target.SiteID == siteID {
+				if _, changed := changesByGroup[target.GroupName]; changed {
 					affected = true
 					break
 				}
@@ -1574,7 +1732,7 @@ func (s *Service) ApplyAutoPricingAfterSync(ctx context.Context, userID, adminAc
 			continue
 		}
 
-		result := s.processAutoPricing(ctx, userID, adminAccountID, state, mapping, siteID, siteName, changesByGroup, newMetrics.Groups, adminGroupMap, lookupFn)
+		result := s.processAutoPricing(ctx, userID, adminAccountID, state, filteredMapping, siteID, siteName, changesByGroup, newMetrics.Groups, adminGroupMap, lookupFn)
 		logAutoPricingResult(siteName, result)
 	}
 }

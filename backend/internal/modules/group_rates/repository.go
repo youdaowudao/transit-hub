@@ -311,6 +311,7 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 					FROM real_connections AS connections
 					WHERE connections.user_id = latest.user_id
 						AND connections.workspace_admin_account_id = $2
+						AND (connections.status = '' OR connections.status = 'active')
 						AND connections.upstream_site_id = latest.site_id
 						AND (
 							connections.upstream_group_id = latest.group_id
@@ -644,6 +645,7 @@ func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccou
 					FROM real_connections AS connections
 					WHERE connections.user_id = latest.user_id
 						AND connections.workspace_admin_account_id = $2
+						AND (connections.status = '' OR connections.status = 'active')
 						AND connections.upstream_site_id = latest.site_id
 						AND (
 							connections.upstream_group_id = latest.group_id

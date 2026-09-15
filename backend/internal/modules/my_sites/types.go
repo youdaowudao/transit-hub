@@ -21,6 +21,7 @@ const (
 	ProvisioningModeManaged  = "managed"
 	ProvisioningModeExisting = "existing"
 	ConnectionStatusActive   = "active"
+	ConnectionStatusMissing  = "missing"
 )
 
 // MappingRequest 前端保存映射关系时的请求体，包含自动调价配置字段。
@@ -178,6 +179,14 @@ type RealDisconnectRequest struct {
 	ConnectionID         string `json:"connectionId"`
 	Mode                 string `json:"mode"`
 	RemovePricingMapping *bool  `json:"removePricingMapping"`
+}
+
+// RealConnectionCheckResponse summarizes one authoritative main-site account
+// inventory check for the current workspace.
+type RealConnectionCheckResponse struct {
+	Checked int `json:"checked"`
+	Active  int `json:"active"`
+	Missing int `json:"missing"`
 }
 
 // RealBindRequest 手动绑定请求体。

@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"transithub/backend/internal/modules/upstream"
 )
 
 // StateMutation mutates the locked latest my_site_states row before it is saved in the same transaction.
@@ -440,6 +442,52 @@ func (r *Repository) ListRealConnections(ctx context.Context, userID string, adm
 	return listRealConnections(ctx, userID, adminAccountID, func(ctx context.Context, query string, args ...any) (realConnectionRows, error) {
 		return r.db.Query(ctx, query, args...)
 	})
+}
+
+// ReconcileRealConnectionStatuses atomically updates every checkable Sub2API
+// main-site connection in one workspace from one complete account inventory.
+// Connections without an admin account ID and explicitly non-Sub2API rows are
+// outside this check and remain unchanged.
+func (r *Repository) ReconcileRealConnectionStatuses(ctx context.Context, userID string, adminAccountID string, mainAccountIDs []string) (RealConnectionCheckResponse, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return RealConnectionCheckResponse{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE real_connections
+		SET status = CASE
+			WHEN admin_account_id = ANY($3::text[]) THEN $4
+			ELSE $5
+		END
+		WHERE user_id = $1
+			AND workspace_admin_account_id = $2
+			AND btrim(admin_account_id) <> ''
+			AND (admin_platform = '' OR admin_platform = $6)
+	`, userID, adminAccountID, mainAccountIDs, ConnectionStatusActive, ConnectionStatusMissing, string(upstream.PlatformSub2API)); err != nil {
+		return RealConnectionCheckResponse{}, err
+	}
+
+	var response RealConnectionCheckResponse
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)::int,
+			count(*) FILTER (WHERE status = $3)::int,
+			count(*) FILTER (WHERE status = $4)::int
+		FROM real_connections
+		WHERE user_id = $1
+			AND workspace_admin_account_id = $2
+			AND btrim(admin_account_id) <> ''
+			AND (admin_platform = '' OR admin_platform = $5)
+	`, userID, adminAccountID, ConnectionStatusActive, ConnectionStatusMissing, string(upstream.PlatformSub2API)).Scan(
+		&response.Checked, &response.Active, &response.Missing,
+	); err != nil {
+		return RealConnectionCheckResponse{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RealConnectionCheckResponse{}, err
+	}
+	return response, nil
 }
 
 func listRealConnections(ctx context.Context, userID string, adminAccountID string, query realConnectionQuery) ([]RealConnection, error) {

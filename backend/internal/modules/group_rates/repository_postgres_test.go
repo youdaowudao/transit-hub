@@ -42,6 +42,30 @@ func TestRepositoryListMappedWithPostgres(t *testing.T) {
 			},
 		},
 		{
+			name:              "missing main account is not mapped but pricing mapping remains",
+			snapshotGroupID:   "54",
+			wantMapped:        false,
+			wantPricingMapped: true,
+			arrange: func(t *testing.T, pool *pgxpool.Pool) {
+				insertRealConnection(t, pool, "workspace-a", "54", "current-name")
+				if _, err := pool.Exec(context.Background(), `UPDATE real_connections SET status='missing' WHERE id='connection-a'`); err != nil {
+					t.Fatalf("mark connection missing: %v", err)
+				}
+				insertJSONMapping(t, pool, "workspace-a")
+			},
+		},
+		{
+			name:            "historical blank status remains mapped",
+			snapshotGroupID: "54",
+			wantMapped:      true,
+			arrange: func(t *testing.T, pool *pgxpool.Pool) {
+				insertRealConnection(t, pool, "workspace-a", "54", "current-name")
+				if _, err := pool.Exec(context.Background(), `UPDATE real_connections SET status='' WHERE id='connection-a'`); err != nil {
+					t.Fatalf("mark connection legacy: %v", err)
+				}
+			},
+		},
+		{
 			name:            "legacy connection without ID falls back to name",
 			snapshotGroupID: "54",
 			wantMapped:      true,
@@ -144,6 +168,100 @@ func TestRealConnectionIndexesExistInPostgres(t *testing.T) {
 	}
 	assertIndexColumns(t, indexes, "idx_real_connections_workspace_group_id", "(user_id, workspace_admin_account_id, upstream_site_id, upstream_group_id)")
 	assertIndexColumns(t, indexes, "idx_real_connections_workspace_group_name", "(user_id, workspace_admin_account_id, upstream_site_id, upstream_group_name)")
+}
+
+func TestReconcileRealConnectionStatusesIsWorkspaceScopedAndLeavesBlankIDsUntouched(t *testing.T) {
+	pool := openPostgresTestPool(t)
+	prepareGroupRatesRepository(t, pool)
+	ctx, cancel := context.WithTimeout(context.Background(), postgresTestTimeout)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO real_connections (
+			id, user_id, workspace_admin_account_id, upstream_site_id, upstream_group_id,
+			upstream_group_name, upstream_key_id, upstream_key, admin_account_id,
+			admin_account_name, own_group_ids, group_type, status, admin_platform
+		) VALUES
+			('existing', 'user-a', 'workspace-a', 'site-a', 'group-a', 'group-a', 'key-a', '', 'account-existing', '', '[]', 'openai', 'missing', 'sub2api'),
+			('deleted', 'user-a', 'workspace-a', 'site-a', 'group-a', 'group-a', 'key-b', '', 'account-deleted', '', '[]', 'openai', 'active', 'sub2api'),
+			('blank', 'user-a', 'workspace-a', 'site-a', 'group-a', 'group-a', 'key-c', '', '', '', '[]', 'openai', 'active', 'sub2api'),
+			('other-workspace', 'user-a', 'workspace-b', 'site-a', 'group-a', 'group-a', 'key-d', '', 'account-deleted', '', '[]', 'openai', 'active', 'sub2api'),
+			('other-platform', 'user-a', 'workspace-a', 'site-a', 'group-a', 'group-a', 'key-e', '', 'account-other', '', '[]', 'openai', 'active', 'newapi')
+	`); err != nil {
+		t.Fatalf("insert reconciliation fixture: %v", err)
+	}
+
+	response, err := mysites.NewRepository(pool).ReconcileRealConnectionStatuses(ctx, "user-a", "workspace-a", []string{"account-existing"})
+	if err != nil {
+		t.Fatalf("ReconcileRealConnectionStatuses: %v", err)
+	}
+	if response.Checked != 2 || response.Active != 1 || response.Missing != 1 {
+		t.Fatalf("unexpected response %#v", response)
+	}
+	rows, err := pool.Query(ctx, `SELECT id, status FROM real_connections ORDER BY id`)
+	if err != nil {
+		t.Fatalf("list reconciled fixture: %v", err)
+	}
+	defer rows.Close()
+	statuses := map[string]string{}
+	for rows.Next() {
+		var id, status string
+		if err := rows.Scan(&id, &status); err != nil {
+			t.Fatalf("scan reconciled fixture: %v", err)
+		}
+		statuses[id] = status
+	}
+	if statuses["existing"] != "active" || statuses["deleted"] != "missing" || statuses["blank"] != "active" || statuses["other-workspace"] != "active" || statuses["other-platform"] != "active" {
+		t.Fatalf("unexpected scoped statuses %#v", statuses)
+	}
+}
+
+func TestReconcileRealConnectionStatusesRollsBackAllRowsOnWriteFailure(t *testing.T) {
+	pool := openPostgresTestPool(t)
+	prepareGroupRatesRepository(t, pool)
+	ctx, cancel := context.WithTimeout(context.Background(), postgresTestTimeout)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO real_connections (
+			id, user_id, workspace_admin_account_id, upstream_site_id, upstream_group_id,
+			upstream_group_name, upstream_key_id, upstream_key, admin_account_id,
+			admin_account_name, own_group_ids, group_type, status, admin_platform
+		) VALUES
+			('would-reactivate', 'user-a', 'workspace-a', 'site-a', 'group-a', 'group-a', 'key-a', '', 'account-existing', '', '[]', 'openai', 'missing', 'sub2api'),
+			('would-fail', 'user-a', 'workspace-a', 'site-a', 'group-a', 'group-a', 'key-b', '', 'account-deleted', '', '[]', 'openai', 'active', 'sub2api');
+		CREATE FUNCTION reject_missing_status() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.id = 'would-fail' AND NEW.status = 'missing' THEN
+				RAISE EXCEPTION 'injected reconciliation failure';
+			END IF;
+			RETURN NEW;
+		END;
+		$$;
+		CREATE TRIGGER reject_missing_status
+			BEFORE UPDATE ON real_connections
+			FOR EACH ROW EXECUTE FUNCTION reject_missing_status();
+	`); err != nil {
+		t.Fatalf("insert rollback fixture: %v", err)
+	}
+
+	if _, err := mysites.NewRepository(pool).ReconcileRealConnectionStatuses(ctx, "user-a", "workspace-a", []string{"account-existing"}); err == nil {
+		t.Fatal("expected injected reconciliation failure")
+	}
+	rows, err := pool.Query(ctx, `SELECT id, status FROM real_connections ORDER BY id`)
+	if err != nil {
+		t.Fatalf("list rollback fixture: %v", err)
+	}
+	defer rows.Close()
+	statuses := map[string]string{}
+	for rows.Next() {
+		var id, status string
+		if err := rows.Scan(&id, &status); err != nil {
+			t.Fatalf("scan rollback fixture: %v", err)
+		}
+		statuses[id] = status
+	}
+	if statuses["would-reactivate"] != "missing" || statuses["would-fail"] != "active" {
+		t.Fatalf("failed reconciliation changed statuses %#v", statuses)
+	}
 }
 
 func TestLegacyRealConnectionWorkspaceIsAssignedInPostgres(t *testing.T) {

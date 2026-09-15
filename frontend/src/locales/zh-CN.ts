@@ -2278,6 +2278,7 @@ export default {
       status: {
         loading: '正在加载分组倍率...',
         mapped: '已对接',
+        mainAccountMissing: '主站账号已删除',
         pricingMapped: '已用于调价',
         unmapped: '未对接',
         deleted: '已删除'
@@ -2353,6 +2354,10 @@ export default {
       },
       disconnect: {
         action: '取消对接',
+        cleanupMissing: '清理本地失效对接',
+        cleanupMissingTitle: '清理本地失效对接',
+        cleanupLocalOnly: '仅清理本地记录',
+        cleanupLocalOnlyHint: '主站账号已不存在；不会再请求删除主站账号或上游 Key。',
         title: '取消对接',
         description: '确认取消 {site} · {group} 的真实对接？',
         unlinkOnly: '仅取消关联',
@@ -2373,7 +2378,9 @@ export default {
         network: '网络或 CORS 请求失败，请检查接口地址与跨域配置。',
         request: '分组倍率接口请求失败，请稍后重试。',
         unknown: '加载分组倍率时发生未知错误。',
-        refreshFailed: '变更已保存，但列表刷新失败。请重新刷新以更新视图。'
+        refreshFailed: '变更已保存，但列表刷新失败。请重新刷新以更新视图。',
+        connectionCheckFailed: '主站账号核对失败，当前仍显示上次数据。请重试刷新。',
+        connectionStatusLoadFailed: '主站账号核对已完成，但对接状态加载失败。为避免误显示，已隐藏旧对接状态，请重试刷新。'
       }
     },
     groupRateCampaigns: {

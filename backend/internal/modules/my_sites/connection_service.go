@@ -556,6 +556,9 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 	}
 
 	if req.Mode == "full" {
+		if conn.Status == ConnectionStatusMissing {
+			return requestError(ErrorManagedDeleteOnly)
+		}
 		legacyManaged := conn.ProvisioningMode == ProvisioningModeLegacy && strings.TrimSpace(conn.AdminAccountID) != ""
 		if conn.ProvisioningMode != ProvisioningModeManaged && !legacyManaged {
 			return requestError(ErrorManagedDeleteOnly)
@@ -588,6 +591,14 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 	if req.RemovePricingMapping != nil {
 		removePricing = *req.RemovePricingMapping
 	}
+	if conn.Status == ConnectionStatusMissing {
+		if s.runtimeCleaner == nil {
+			return requestError(ErrorRequest)
+		}
+		if err := s.runtimeCleaner.CleanupRealConnectionRuntime(ctx, userID, adminAccountID, conn.ID); err != nil {
+			return err
+		}
+	}
 	if repository, ok := s.connRepository.(ScopedRealDisconnectRepository); ok {
 		return repository.DeleteRealConnectionWithPricingMapping(ctx, *conn, removePricing)
 	}
@@ -602,5 +613,8 @@ func publicRealConnection(conn RealConnection) RealConnection {
 	conn.OperationID = ""
 	conn.CanDeleteRemote = conn.ProvisioningMode == ProvisioningModeManaged ||
 		(conn.ProvisioningMode == ProvisioningModeLegacy && conn.AdminAccountID != "")
+	if conn.Status == ConnectionStatusMissing {
+		conn.CanDeleteRemote = false
+	}
 	return conn
 }

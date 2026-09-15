@@ -17,6 +17,60 @@ func sub2APIPaginationItems(count int) []map[string]any {
 	return items
 }
 
+// 主站账号失效核对必须读取不带 group 筛选的完整库存；未分组账号也必须被收进来。
+// 任何一页不完整都会导致下游误标 missing，因此这里同时锁定严格 total 闭合。
+func TestListSub2APIAdminAccountsReadsCompleteUngroupedInventory(t *testing.T) {
+	var queries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/admin/accounts" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if _, exists := r.URL.Query()["group"]; exists {
+			t.Fatalf("full inventory must omit group query: %s", r.URL.RawQuery)
+		}
+		queries = append(queries, r.URL.RawQuery)
+		switch r.URL.Query().Get("page") {
+		case "1":
+			items := sub2APIPaginationItems(100)
+			items[0] = map[string]any{"id": 7001, "name": "未分组账号", "status": "inactive", "group_ids": []any{}}
+			writeJSON(w, map[string]any{"data": items, "total": 101})
+		case "2":
+			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 8001, "name": "错误但仍存在", "status": "error"}}, "total": 101})
+		default:
+			t.Fatalf("unexpected page: %s", r.URL.Query().Get("page"))
+		}
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token"}
+	accounts, err := service.ListSub2APIAdminAccountsContext(t.Context(), session)
+	if err != nil {
+		t.Fatalf("ListSub2APIAdminAccountsContext() error: %v", err)
+	}
+	if len(accounts) != 101 || accounts[0].ID != "7001" || len(accounts[0].GroupIDs) != 0 || accounts[100].ID != "8001" {
+		t.Fatalf("unexpected complete inventory: first=%#v last=%#v len=%d", accounts[0], accounts[len(accounts)-1], len(accounts))
+	}
+	if len(queries) != 2 {
+		t.Fatalf("queries = %#v, want two pages", queries)
+	}
+}
+
+func TestListSub2APIAdminAccountsRejectsPartialInventory(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"data": sub2APIPaginationItems(1), "total": 2})
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	accounts, err := service.ListSub2APIAdminAccountsContext(t.Context(), Session{
+		Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token",
+	})
+	if err == nil || accounts != nil {
+		t.Fatalf("partial inventory must fail closed, accounts=%#v err=%v", accounts, err)
+	}
+}
+
 // TestListAdminGroupAccounts_Sub2APIGroupQueryPagingAndFields 验证 sub2api 分组账号读取：
 //   - query 参数是 group=<分组ID>（不是 group_id）。
 //   - 分页拉取直到达到 total（覆盖两页）。

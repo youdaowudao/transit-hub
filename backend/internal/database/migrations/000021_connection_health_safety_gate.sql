@@ -191,6 +191,22 @@ CREATE TABLE IF NOT EXISTS connection_health_incident_survivors (
     PRIMARY KEY (user_id, admin_account_id, incident_id, scope_kind, scope_id)
 );
 
+-- Runtime EnsureSchema historically created this table after migrations ran.
+-- Fresh databases need the same base schema before the safety columns are added.
+CREATE TABLE IF NOT EXISTS connection_health_priority_sync_states (
+    user_id text NOT NULL,
+    admin_account_id text NOT NULL DEFAULT '',
+    target_id text NOT NULL,
+    original_priority integer NOT NULL DEFAULT 0,
+    last_applied_priority integer NOT NULL DEFAULT 0,
+    effective_multiplier double precision NOT NULL DEFAULT 0,
+    conflict boolean NOT NULL DEFAULT false,
+    last_conflict_priority integer NULL,
+    pending_priority integer NULL,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, admin_account_id, target_id)
+);
+
 ALTER TABLE connection_health_priority_sync_states
     ADD COLUMN IF NOT EXISTS pending_mutation_generation bigint NOT NULL DEFAULT 0;
 ALTER TABLE connection_health_priority_sync_states

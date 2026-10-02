@@ -715,7 +715,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
         <table class="w-full min-w-[72rem] text-sm">
           <thead class="bg-surface/60 text-left text-xs text-muted-foreground">
             <tr>
-              <th class="w-10 px-3 py-2.5 font-medium"><span class="sr-only">{{ t(`${detailPrefix}.columns.expand`) }}</span></th>
+              <th class="relative w-10 px-3 py-2.5 font-medium"><span class="sr-only">{{ t(`${detailPrefix}.columns.expand`) }}</span></th>
               <th class="px-3 py-2.5 font-medium" :aria-sort="ariaSort('account')">
                 <button type="button" class="inline-flex items-center gap-1.5 text-left hover:text-foreground" @click="toggleSort('account')">
                   {{ t(`${detailPrefix}.columns.account`) }}

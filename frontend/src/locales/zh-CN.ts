@@ -96,7 +96,7 @@ export default {
       groupAssociations: '调价映射',
       connectionHealth: '分组健康',
       groupRateCampaigns: '活动调价',
-      sub2apiFeatures: '嵌入功能',
+      sub2apiFeatures: '二级功能',
       settings: '系统设置',
       tickets: '工单',
       massEmail: '群发邮件',

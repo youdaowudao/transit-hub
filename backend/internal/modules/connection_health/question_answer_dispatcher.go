@@ -99,7 +99,11 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 	}
 
 	itemCtx, cancel := context.WithTimeout(run.ctx, s.questionAnswerTTL)
-	answer, errorType := s.questionAnswerHTTP.Ask(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort))
+	protocol := TestProtocolChatCompletions
+	if record.RequestProtocol != nil {
+		protocol = *record.RequestProtocol
+	}
+	answer, errorType := s.questionAnswerHTTP.Ask(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort), protocol)
 	itemErr := itemCtx.Err()
 	cancel()
 	if s.questionAnswerRunStopReason(run) != "" {

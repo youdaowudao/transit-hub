@@ -2,17 +2,19 @@ package connection_health
 
 import (
 	"context"
+	"sort"
 	"time"
 )
 
 type PrioritySyncStatusView struct {
-	WorkspaceID   string     `json:"workspaceId"`
-	Status        string     `json:"status"`
-	ErrorKey      string     `json:"errorKey,omitempty"`
-	PendingSince  *time.Time `json:"pendingSince,omitempty"`
-	LastAttemptAt *time.Time `json:"lastAttemptAt,omitempty"`
-	LastFailureAt *time.Time `json:"lastFailureAt,omitempty"`
-	FailedCount   int        `json:"failedCount"`
+	ActionDiagnostics []RemoteActionDiagnostic `json:"actionDiagnostics,omitempty"`
+	WorkspaceID       string                   `json:"workspaceId"`
+	Status            string                   `json:"status"`
+	ErrorKey          string                   `json:"errorKey,omitempty"`
+	PendingSince      *time.Time               `json:"pendingSince,omitempty"`
+	LastAttemptAt     *time.Time               `json:"lastAttemptAt,omitempty"`
+	LastFailureAt     *time.Time               `json:"lastFailureAt,omitempty"`
+	FailedCount       int                      `json:"failedCount"`
 }
 
 func (s *Service) PrioritySyncStatus(ctx context.Context, userID string) (PrioritySyncStatusView, error) {
@@ -21,6 +23,47 @@ func (s *Service) PrioritySyncStatus(ctx context.Context, userID string) (Priori
 		return PrioritySyncStatusView{}, err
 	}
 	view := PrioritySyncStatusView{WorkspaceID: adminAccountID, Status: "idle"}
+	priorityStates, err := s.repo.ListPrioritySyncStates(ctx, userID, adminAccountID)
+	if err != nil {
+		return view, err
+	}
+	targetStates, err := s.repo.ListTargetActionStates(ctx, userID, adminAccountID)
+	if err != nil {
+		return view, err
+	}
+	pairs := make(map[string]RemoteActionCheckpoints)
+	for _, state := range priorityStates {
+		if isSub2APIActionTarget(state.TargetID) {
+			pair := pairs[state.TargetID]
+			copy := state
+			pair.Priority = &copy
+			pairs[state.TargetID] = pair
+		}
+	}
+	for _, state := range targetStates {
+		if isSub2APIActionTarget(state.TargetID) {
+			pair := pairs[state.TargetID]
+			copy := state
+			pair.Target = &copy
+			pairs[state.TargetID] = pair
+		}
+	}
+	for targetID, pair := range pairs {
+		if pending := actionPendingView(pair.Priority, pair.Target); pending != nil {
+			view.ActionDiagnostics = append(view.ActionDiagnostics, RemoteActionDiagnostic{TargetID: targetID, RemoteActionPendingView: *pending})
+		}
+	}
+	view.ActionDiagnostics = append(view.ActionDiagnostics, s.invisibleActionDiagnostics(userID, adminAccountID, pairs)...)
+	sort.Slice(view.ActionDiagnostics, func(i, j int) bool {
+		left, right := view.ActionDiagnostics[i], view.ActionDiagnostics[j]
+		if left.TargetID != right.TargetID {
+			return left.TargetID < right.TargetID
+		}
+		if left.Action != right.Action {
+			return left.Action < right.Action
+		}
+		return left.Reason < right.Reason
+	})
 	state, err := s.repo.GetPriorityWorkspaceSyncState(ctx, userID, adminAccountID)
 	if err != nil || state == nil {
 		return view, err

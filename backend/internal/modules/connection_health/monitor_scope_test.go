@@ -17,7 +17,7 @@ func monitoringScopeTestPolicy(id string) Policy {
 }
 
 func monitoringScopeTestInventory(groups ...adminInventoryGroup) adminWorkspaceInventory {
-	return adminWorkspaceInventory{
+	return adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups:  groups,
 	}

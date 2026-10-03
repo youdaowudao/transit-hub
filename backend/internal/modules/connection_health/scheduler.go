@@ -43,8 +43,10 @@ type adminInventoryGroup struct {
 }
 
 type adminWorkspaceInventory struct {
-	session upstream.Session
-	groups  []adminInventoryGroup
+	snapshotStartedAt time.Time
+	groupsComplete    bool
+	session           upstream.Session
+	groups            []adminInventoryGroup
 }
 
 type adminInventoryCacheEntry struct {
@@ -85,12 +87,13 @@ func (s *Service) loadAdminInventory(ctx context.Context, userID string, adminAc
 		cache[key] = adminInventoryCacheEntry{err: err}
 		return nil, err
 	}
+	snapshotStartedAt := time.Now()
 	groups, err := s.fetchAdminAllGroups(ctx, session)
 	if err != nil {
 		cache[key] = adminInventoryCacheEntry{err: err}
 		return nil, err
 	}
-	inventory := &adminWorkspaceInventory{session: session, groups: make([]adminInventoryGroup, 0, len(groups))}
+	inventory := &adminWorkspaceInventory{snapshotStartedAt: snapshotStartedAt, groupsComplete: true, session: session, groups: make([]adminInventoryGroup, 0, len(groups))}
 	for _, group := range groups {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -101,6 +104,7 @@ func (s *Service) loadAdminInventory(ctx context.Context, userID string, adminAc
 		}
 		inventory.groups = append(inventory.groups, adminInventoryGroup{group: group, accounts: accounts, err: accountsErr})
 	}
+	s.rememberActionInventory(userID, adminAccountID, inventory)
 	cache[key] = adminInventoryCacheEntry{inventory: inventory}
 	return inventory, nil
 }
@@ -258,8 +262,8 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 			log.Printf("[connection-health] admin probe goroutine panic recovered target_id=%s: %v", j.target.TargetID, r)
 		}
 	}()
-	release, err := s.repo.AcquireTargetLease(ctx, j.target.TargetID)
-	if err != nil {
+	ctx, release, acquired, err := s.acquireActionTargetLease(ctx, j.target.TargetID, true)
+	if err != nil || !acquired {
 		log.Printf("[connection-health] acquire target lease failed target_id=%s err=%v", j.target.TargetID, err)
 		return
 	}
@@ -267,6 +271,9 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 	refresh, refreshErr := s.refreshAdminTarget(ctx, j.session, j.adminAccountID, j.target.AccountID)
 	if refreshErr != nil || refresh.accountsReadError || !refresh.found || refresh.target.TargetID != j.target.TargetID {
 		log.Printf("[connection-health] refresh scheduled target failed target_id=%s found=%t partial=%t err=%v", j.target.TargetID, refresh.found, refresh.accountsReadError, refreshErr)
+		return
+	}
+	if err := s.configureTestTarget(ctx, j.userID, j.adminAccountID, &refresh.target, refresh.memberships, !refresh.accountsReadError); err != nil {
 		return
 	}
 	j.target = refresh.target
@@ -464,23 +471,11 @@ func (s *Service) currentScheduledProbeSpecs(ctx context.Context, userID string,
 func (s *Service) recordTargetCredentialUnavailable(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, specs []probeModelSpec, reason string) {
 	now := time.Now()
 	for _, spec := range specs {
-		current, err := s.repo.GetState(ctx, target.TargetID, spec.modelName)
+		initial := defaultTargetState(userID, adminAccountID, target, spec.modelName)
+		// Credential preparation is a separate retry diagnostic. The repository
+		// updates only that diagnostic, without replaying a captured health row.
+		next, err := s.repo.RecordTargetCredentialFailure(ctx, initial, reason, now)
 		if err != nil {
-			log.Printf("[connection-health] get target state failed target_id=%s model=%s err=%v", target.TargetID, spec.modelName, err)
-			continue
-		}
-		var next ConnectionHealthState
-		if current == nil {
-			next = defaultTargetState(userID, adminAccountID, target, spec.modelName)
-		} else {
-			next = *current
-		}
-		next.UpdatedAt = now
-		next.LastErrorKey = reason
-		next.LastErrorDetail = ""
-		// LastRemoteAction 也是旧版本判断「该上游状态是否由健康模块接管」的兼容证据。
-		// 凭据暂时不可用只更新探活错误，不能抹掉此前成功执行的远端动作。
-		if err := s.repo.UpsertState(ctx, next); err != nil {
 			log.Printf("[connection-health] upsert unavailable target state failed target_id=%s model=%s err=%v", target.TargetID, spec.modelName, err)
 			continue
 		}
@@ -558,6 +553,13 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 		inventory, err := s.loadAdminInventory(ctx, ws.userID, ws.adminAccountID, inventoryCache)
 		if err != nil {
 			log.Printf("[connection-health] scheduler load admin inventory failed user_id=%s admin_account_id=%s err=%v", ws.userID, ws.adminAccountID, err)
+			continue
+		}
+		if !adminInventoryComplete(*inventory) {
+			continue
+		}
+		testConfigs, configErr := s.repo.ListGroupTestConfigurations(ctx, ws.userID, ws.adminAccountID)
+		if configErr != nil {
 			continue
 		}
 		session := inventory.session
@@ -647,6 +649,12 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 				break
 			}
 			candidate := candidates[targetID]
+			candidate.target.InventoryComplete = adminInventoryComplete(*inventory)
+			candidate.target.TestMemberships = inventoryTestMemberships(*inventory, candidate.target.AccountID)
+			candidate.target.TestConfiguration = ResolveGroupTestConfiguration(candidate.target.TestMemberships, candidate.target.InventoryComplete, testConfigs)
+			if !candidate.target.TestConfiguration.usable() {
+				continue
+			}
 			specs := candidateModelSpecsForPlatform(candidate.target.Models, candidate.policies, candidate.target.Platform)
 			for index := range specs {
 				specs[index].policySources = candidate.policySources

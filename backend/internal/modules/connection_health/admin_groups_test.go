@@ -1981,8 +1981,8 @@ func TestAdminGroupsPriorityCandidateLocksAllPrioritiesWhenOneSub2APIGroupInvent
 	if summary == nil || summary.Mode != "safety_lock" || summary.SafetyReason != "inventory_incomplete" || summary.CandidatePriorityReady {
 		t.Fatalf("partial inventory must lock the whole candidate plan: %+v", summary)
 	}
-	if projection == nil || projection.State != "candidate" || projection.Priority != nil {
-		t.Fatalf("inventory lock may retain read-only ordering evidence but never a candidate Priority: %+v", projection)
+	if projection == nil || projection.State != "safety_lock" || projection.Reason != "health_unknown" || projection.Priority != nil || projection.Rank != nil || projection.SuccessLatencyMs != nil {
+		t.Fatalf("unknown membership cannot establish current protocol health or candidate ordering: %+v", projection)
 	}
 }
 

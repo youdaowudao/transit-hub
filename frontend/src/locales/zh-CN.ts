@@ -977,6 +977,20 @@ export default {
       saveError: '保存失败，请重试。'
     },
     connectionHealth: {
+      testConfiguration: {
+        remoteActionPending: '远端动作待确认，需核对后收口。', targetNotVisible: '账号已离组，当前值无法核对，需人工处理。', title: '测试请求', protocol: '请求协议', timeout: '轻量探活超时（5–120 秒）',
+        help: '独立于自动策略保存，影响本组现有及新加入账号的新测试和新动作。已开始的动作可能继续完成。配置冲突也会阻断新问答；问答每题仍为 10 分钟。',
+        loading: '正在读取测试配置…', configured: '本组已单独配置', notConfigured: '未单独配置；无其他显式来源时沿用 Chat / 10 秒。',
+        responsesBudget: 'Responses 轻量探活至少请求 128 个输出 token；更高策略预算保留。实际成本还包含输入和推理，上游不一定严格遵守预算。',
+        impact: '本次可见成员 {count} 个，当前配置冲突 {conflicts} 个。保存后以服务端实际结果为准。',
+        clearHelp: '清除仅删除本组规则；账号可能改为继承其他组，或回到 Chat / 10 秒。查看和保存不会发起模型测试、Priority 或启停写入。',
+        save: '保存测试请求', clear: '清除本组配置', saved: '已保存，影响范围按上述服务端结果显示。',
+        inherited: '使用分组配置', default: '旧默认', conflict: '配置冲突', unavailable: '成员资料或配置无法确认',
+        changed: '配置已变化，此结果使用请求开始时的配置。', unverified: '当前协议待验证', legacy: '旧记录未记录协议', stale: '过期尝试', invalid: '本次测试结果无效',
+        requestPhases: { waiting_headers: '截止阶段：等待响应头', reading_body: '截止阶段：读取完整响应正文' },
+        questionAnswerTimeout: '上述超时用于轻量探活；问答每题仍为 10 分钟。',
+      },
+
       accountTier: {
         label: '账号层级',
         first: '第一层',
@@ -1431,7 +1445,7 @@ export default {
           notConfigured: '未配置',
           enabled: '已启用',
           disabled: '未启用',
-          multiplierRule: '健康探活排序：健康档位第一，账号唯一可靠的上游 Key 倍率第二；确定性缺失或多 Key 冲突时使用目标唯一一致的本地回退倍率；同倍率再比较完整响应延迟。>5000 ms 且在 10 秒内完成属于高延迟成功；10 秒超时按失败处理。主站 schedulable=false 时自动探活默认降为 60 分钟一次。一次性测试不留记录，正式手动探活进入共同状态和调度。',
+          multiplierRule: '健康探活排序：健康档位第一，账号唯一可靠的上游 Key 倍率第二；确定性缺失或多 Key 冲突时使用目标唯一一致的本地回退倍率；同倍率再比较完整响应延迟。>5000 ms 且在当前配置超时内完成属于高延迟成功；超过当前配置超时按失败处理。主站 schedulable=false 时自动探活默认降为 60 分钟一次。一次性测试不留记录，正式手动探活进入共同状态和调度。',
           multiplierOnlyRule: '仅倍率规则：不读取健康状态、不发起模型探活；同一目标属于多个分组时使用最低倍率。停用或解绑策略后会恢复接管前的优先级，人工修改仍受冲突保护。'
         },
         back: '上一步',
@@ -1837,7 +1851,7 @@ export default {
           questionAnswer: '问答测试'
         },
         modeDescriptions: {
-          formal: '进入共同记录和健康调度，会更新健康状态与 manual 事件；完整响应超过 5000 ms 记为高延迟成功，10 秒超时按失败处理。仅在既有托管条件成立时更新主站 priority，不消耗自动预算，不修改 schedulable；schedulable=false 时自动探活默认降为 60 分钟一次。',
+          formal: '进入共同记录和健康调度，会更新健康状态与 manual 事件；完整响应超过 5000 ms 且在当前配置超时内完成记为高延迟成功，超过配置超时按失败处理。仅在既有托管条件成立时更新主站 priority，不消耗自动预算，不修改 schedulable；schedulable=false 时自动探活默认降为 60 分钟一次。',
           once: '只显示本次结果，不写事件、健康状态、priority、策略预算或远端动作。',
           questionAnswer: '向所选模型分别发送预设问题并保存回答。每个模型和问题组合独立执行，不形成多轮对话，不修改健康状态或调度。'
         },
@@ -1920,6 +1934,14 @@ export default {
           queueProgress: '等待 {waiting} · 运行 {running} · 完成 {completed}',
           queueNotice: '正在排队，会自动开始，请勿重复提交',
           stop: '终止本次问答',
+          finalizationUnknown: '收口状态暂无法核对，请重新读取后再操作。',
+          finalizationBlocked: '此账号仍有待收口问答，完成收口后才能新建批次。',
+          finalizationFailed: '收口失败，账号占位仍保留。',
+          finalizationPending: '问答正在收口，请等待。',
+          finalizationBatch: '待收口批次：{id}',
+          finalizationShutdown: '需维护人员关闭服务后收口；没有可取消的批次记录，关闭会影响其他在途问答。',
+          finalizationRetry: '重试收口',
+          protocolSummary: '问答统计按全部协议汇总。',
           noBatch: '当前账号还没有问答批次。',
           completedNotice: '本次问答已完成，结果和统计已刷新。',
           questionLabel: '问题',
@@ -1994,6 +2016,9 @@ export default {
       errors: {
         request: '操作失败，请稍后重试。',
         unknown: '暂时无法读取分组健康数据，请稍后重试。',
+        testConfigurationConflict: '所属分组的测试协议或超时冲突，请在分组设置中统一配置。',
+        testConfigurationUnavailable: '成员资料或测试配置无法确认，暂不能发起新测试。',
+        currentProtocolUnverified: '当前协议待验证，历史状态暂不用于新的健康动作。',
         network: '网络异常，请检查连接后重试。',
         notFound: '探活目标不存在或无权访问。',
         noMatchingModels: '所选模型未匹配当前探活策略。',

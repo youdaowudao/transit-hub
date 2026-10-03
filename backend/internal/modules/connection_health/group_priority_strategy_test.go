@@ -670,8 +670,11 @@ func TestSetAdminGroupPolicyConfiguration_QueuesPrioritySynchronization(t *testi
 	policy := probePolicy()
 	policy.PriorityMode = PriorityModeMultiplier
 	policy.StrategyMode = StrategyModeHealthProbe
-	policy.AutoDegradeEnabled = false
+	policy.AutoDegradeEnabled = true
 	repo.policies = []Policy{policy}
+	repo.states["sub2api:ws1:100"] = map[string]ConnectionHealthState{
+		"gpt-4o": {ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", UserID: "user1", AdminAccountID: "ws1", State: StateHealthy, HealthEvidenceStatus: HealthEvidenceLegacy},
+	}
 	currentPriority := 11
 	reader := fakePlatformGroupReader{
 		groups: []upstream.AdminGroupInfo{{ID: "g1", Name: "vip"}},
@@ -1429,6 +1432,16 @@ func TestHealthPrioritySyncIncompleteTargetDoesNotFreezeHealthyTargets(t *testin
 		{ConnectionID: "sub2api:ws1:200", ModelName: "gpt-4o", State: StateHealthy},
 	}
 
+	for index := range states {
+		state := &states[index]
+		state.UserID, state.AdminAccountID = "user1", "ws1"
+		state.HealthEvidenceStatus = HealthEvidenceLegacy
+		if repo.states[state.ConnectionID] == nil {
+			repo.states[state.ConnectionID] = make(map[string]ConnectionHealthState)
+		}
+		repo.states[state.ConnectionID][state.ModelName] = *state
+	}
+
 	service.syncWorkspacePriorities(
 		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
 		"user1", "ws1", inventory, true, states, nil, "generation-1",
@@ -1482,6 +1495,16 @@ func TestHealthPrioritySyncIsolatesBlockedTargetAndWritesHealthyTarget(t *testin
 	states := []ConnectionHealthState{
 		{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy},
 		{ConnectionID: blockedTargetID, ModelName: "gpt-4o", State: StateHealthy},
+	}
+
+	for index := range states {
+		state := &states[index]
+		state.UserID, state.AdminAccountID = "user1", "ws1"
+		state.HealthEvidenceStatus = HealthEvidenceLegacy
+		if repo.states[state.ConnectionID] == nil {
+			repo.states[state.ConnectionID] = make(map[string]ConnectionHealthState)
+		}
+		repo.states[state.ConnectionID][state.ModelName] = *state
 	}
 
 	service.syncWorkspacePriorities(
@@ -1540,6 +1563,16 @@ func TestHealthPrioritySyncDisabledMultiplierUsesBandEndWithoutFailure(t *testin
 		{ConnectionID: "sub2api:ws1:200", ModelName: "gpt-4o", State: StateHealthy},
 	}
 
+	for index := range states {
+		state := &states[index]
+		state.UserID, state.AdminAccountID = "user1", "ws1"
+		state.HealthEvidenceStatus = HealthEvidenceLegacy
+		if repo.states[state.ConnectionID] == nil {
+			repo.states[state.ConnectionID] = make(map[string]ConnectionHealthState)
+		}
+		repo.states[state.ConnectionID][state.ModelName] = *state
+	}
+
 	service.syncWorkspacePriorities(
 		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
 		"user1", "ws1", inventory, true, states, nil, "generation-1",
@@ -1590,6 +1623,16 @@ func TestHealthPrioritySyncMissingMultiplierKeepsTargetAndCountsPartialResult(t 
 	states := []ConnectionHealthState{
 		{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy},
 		{ConnectionID: "sub2api:ws1:200", ModelName: "gpt-4o", State: StateHealthy},
+	}
+
+	for index := range states {
+		state := &states[index]
+		state.UserID, state.AdminAccountID = "user1", "ws1"
+		state.HealthEvidenceStatus = HealthEvidenceLegacy
+		if repo.states[state.ConnectionID] == nil {
+			repo.states[state.ConnectionID] = make(map[string]ConnectionHealthState)
+		}
+		repo.states[state.ConnectionID][state.ModelName] = *state
 	}
 
 	service.syncWorkspacePriorities(
@@ -1645,6 +1688,16 @@ func TestHealthPrioritySyncConflictedMultiplierDoesNotFreezeManagedTargets(t *te
 	healthStates := []ConnectionHealthState{
 		{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy},
 		{ConnectionID: "sub2api:ws1:200", ModelName: "gpt-4o", State: StateHealthy},
+	}
+
+	for index := range healthStates {
+		state := &healthStates[index]
+		state.UserID, state.AdminAccountID = "user1", "ws1"
+		state.HealthEvidenceStatus = HealthEvidenceLegacy
+		if repo.states[state.ConnectionID] == nil {
+			repo.states[state.ConnectionID] = make(map[string]ConnectionHealthState)
+		}
+		repo.states[state.ConnectionID][state.ModelName] = *state
 	}
 
 	service.syncWorkspacePriorities(
@@ -1710,63 +1763,56 @@ func TestHealthPrioritySyncBlockedOldGenerationDoesNotMutateCheckpoint(t *testin
 }
 
 func TestHealthPrioritySyncWritesAfterBlockedMultiplierRecovers(t *testing.T) {
-	repo := newFakeRepository()
-	repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{
-		UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running",
-	}
-	actions := &fakeTargetPriorityActioner{}
-	service := &Service{repo: repo, priorityActions: actions}
-	policy := probePolicy()
-	policy.AutoDegradeEnabled = true
-	policy.PriorityMode = PriorityModeMultiplier
-	targetID := "sub2api:ws1:100"
-	existingPending := 77
-	stored := PrioritySyncState{
-		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
-		OriginalPriority: 7, LastAppliedPriority: 50, PendingPriority: &existingPending, EffectiveMultiplier: 0.08,
-	}
-	repo.priorityStates["user1|ws1|"+targetID] = stored
-	inventory := map[string]*priorityTargetInventory{
-		targetID: {
-			target:   AdminProbeTarget{TargetID: targetID, AccountID: "100", Models: []string{"gpt-4o"}},
-			policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{status: MultiplierResolutionMissing},
-			currentPriority: 50, priorityPresent: true,
-		},
-	}
-	healthStates := []ConnectionHealthState{{ConnectionID: targetID, ModelName: "gpt-4o", State: StateHealthy}}
-
-	service.syncWorkspacePriorities(
-		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
-		"user1", "ws1", inventory, true, healthStates, []PrioritySyncState{stored}, "generation-1",
-	)
-	if len(actions.calls) != 0 {
-		t.Fatalf("blocked round must not write Priority: %+v", actions.calls)
-	}
-	blockedState := repo.priorityStates["user1|ws1|"+targetID]
-	if blockedState.PendingPriority == nil || *blockedState.PendingPriority != existingPending {
-		t.Fatalf("blocked round must preserve pending checkpoint: %+v", blockedState)
-	}
-
-	currentMultiplier := 0.05
-	inventory[targetID].upstreamMultiplier = upstreamMultiplierResolution{
-		status: MultiplierResolutionResolved,
-		info:   upstreamKeyGroupInfo{effectiveMultiplier: &currentMultiplier},
-	}
-	service.syncWorkspacePriorities(
-		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
-		"user1", "ws1", inventory, true, healthStates, []PrioritySyncState{blockedState}, "generation-1",
-	)
-
-	if len(actions.calls) != 1 || actions.calls[0].targetID != "100" || actions.calls[0].priority != 10 {
-		t.Fatalf("recovered multiplier must resume the normal write: %+v", actions.calls)
-	}
-	recovered := repo.priorityStates["user1|ws1|"+targetID]
-	if recovered.LastAppliedPriority != 10 || recovered.PendingPriority != nil || recovered.EffectiveMultiplier != currentMultiplier {
-		t.Fatalf("recovered checkpoint did not close normally: %+v", recovered)
-	}
-	workspaceState := repo.priorityWorkspaces["user1|ws1"]
-	if workspaceState.LastDecision != "success" || workspaceState.AppliedSignature != "generation-1" || workspaceState.PendingSignature != "" {
-		t.Fatalf("recovered workspace generation did not close: %+v", workspaceState)
+	for _, legacyPending := range []bool{false, true} {
+		t.Run(map[bool]string{false: "confirmed_idle", true: "legacy_uncertain"}[legacyPending], func(t *testing.T) {
+			repo := newFakeRepository()
+			repo.priorityWorkspaces["user1|ws1"] = PriorityWorkspaceSyncState{UserID: "user1", AdminAccountID: "ws1", PendingSignature: "generation-1", LastDecision: "running"}
+			actions := &fakeTargetPriorityActioner{}
+			service := &Service{repo: repo, priorityActions: actions}
+			policy := probePolicy()
+			policy.AutoDegradeEnabled = true
+			policy.PriorityMode = PriorityModeMultiplier
+			targetID := "sub2api:ws1:100"
+			stored := PrioritySyncState{UserID: "user1", AdminAccountID: "ws1", TargetID: targetID, OriginalPriority: 7, LastAppliedPriority: 50, EffectiveMultiplier: 0.08}
+			if legacyPending {
+				stored.PendingPriority = intPointer(77)
+			}
+			repo.priorityStates["user1|ws1|"+targetID] = stored
+			inventory := map[string]*priorityTargetInventory{targetID: {target: AdminProbeTarget{TargetID: targetID, Platform: "sub2api", AccountID: "100", Models: []string{"gpt-4o"}}, policies: []Policy{policy}, upstreamMultiplier: upstreamMultiplierResolution{status: MultiplierResolutionMissing}, currentPriority: 50, priorityPresent: true}}
+			healthStates := storePriorityFixtureStates(repo, []ConnectionHealthState{{ConnectionID: targetID, ModelName: "gpt-4o", State: StateHealthy}})
+			service.syncWorkspacePriorities(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API}, "user1", "ws1", inventory, true, healthStates, []PrioritySyncState{stored}, "generation-1")
+			blocked := repo.priorityStates["user1|ws1|"+targetID]
+			if len(actions.calls) != 0 || blocked.LastAppliedPriority != 50 || !equalIntPointers(blocked.PendingPriority, stored.PendingPriority) {
+				t.Fatalf("blocked multiplier changed original checkpoint: calls=%+v state=%+v", actions.calls, blocked)
+			}
+			currentMultiplier := 0.05
+			inventory[targetID].upstreamMultiplier = upstreamMultiplierResolution{status: MultiplierResolutionResolved, info: upstreamKeyGroupInfo{effectiveMultiplier: &currentMultiplier}}
+			service.syncWorkspacePriorities(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API}, "user1", "ws1", inventory, true, healthStates, []PrioritySyncState{blocked}, "generation-1")
+			recovered := repo.priorityStates["user1|ws1|"+targetID]
+			if legacyPending {
+				if len(actions.calls) != 0 || recovered.PendingPriority == nil || *recovered.PendingPriority != 77 || recovered.LastAppliedPriority != 50 {
+					t.Fatalf("multiplier recovery cannot release uncertain legacy dispatch: calls=%+v state=%+v", actions.calls, recovered)
+				}
+				return
+			}
+			if len(actions.calls) != 1 || actions.calls[0].targetID != "100" || actions.calls[0].priority != 10 {
+				t.Fatalf("recovered multiplier must resume normal write: %+v", actions.calls)
+			}
+			if recovered.LastAppliedPriority != 50 || recovered.PendingPriority == nil || *recovered.PendingPriority != 10 || recovered.PendingDispatchPhase != DispatchConfirmedApplied || recovered.EffectiveMultiplier != currentMultiplier {
+				t.Fatalf("confirmed receipt must wait for later inventory: %+v", recovered)
+			}
+			inventory[targetID].currentPriority = 10
+			inventory[targetID].snapshotStartedAt = time.Now()
+			service.syncWorkspacePriorities(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API}, "user1", "ws1", inventory, true, healthStates, []PrioritySyncState{recovered})
+			recovered = repo.priorityStates["user1|ws1|"+targetID]
+			if recovered.LastAppliedPriority != 10 || recovered.PendingPriority != nil || len(actions.calls) != 1 {
+				t.Fatalf("fresh confirmation must close checkpoint without duplicate: %+v calls=%+v", recovered, actions.calls)
+			}
+			workspaceState := repo.priorityWorkspaces["user1|ws1"]
+			if workspaceState.LastDecision != "success" || workspaceState.AppliedSignature != "generation-1" || workspaceState.PendingSignature != "" {
+				t.Fatalf("recovered workspace generation did not close: %+v", workspaceState)
+			}
+		})
 	}
 }
 
@@ -1794,6 +1840,16 @@ func TestHealthPrioritySyncWithoutPendingSignatureRecordsFailureState(t *testing
 		},
 	}
 	states := []ConnectionHealthState{{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy}}
+
+	for index := range states {
+		state := &states[index]
+		state.UserID, state.AdminAccountID = "user1", "ws1"
+		state.HealthEvidenceStatus = HealthEvidenceLegacy
+		if repo.states[state.ConnectionID] == nil {
+			repo.states[state.ConnectionID] = make(map[string]ConnectionHealthState)
+		}
+		repo.states[state.ConnectionID][state.ModelName] = *state
+	}
 
 	service.syncWorkspacePriorities(
 		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
@@ -1842,6 +1898,16 @@ func TestHealthPrioritySyncWithoutPendingSignatureRecordsSuccessState(t *testing
 		},
 	}
 	states := []ConnectionHealthState{{ConnectionID: "sub2api:ws1:100", ModelName: "gpt-4o", State: StateHealthy}}
+
+	for index := range states {
+		state := &states[index]
+		state.UserID, state.AdminAccountID = "user1", "ws1"
+		state.HealthEvidenceStatus = HealthEvidenceLegacy
+		if repo.states[state.ConnectionID] == nil {
+			repo.states[state.ConnectionID] = make(map[string]ConnectionHealthState)
+		}
+		repo.states[state.ConnectionID][state.ModelName] = *state
+	}
 
 	service.syncWorkspacePriorities(
 		context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},

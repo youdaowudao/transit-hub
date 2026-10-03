@@ -129,7 +129,17 @@ func openMigrationPostgresPool(t *testing.T) *pgxpool.Pool {
 	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+quotedSchema); err != nil {
 		t.Fatalf("create isolated migration test schema: %v", err)
 	}
+	if _, err := admin.Exec(ctx, "COMMENT ON SCHEMA "+quotedSchema+" IS 'FAKE TEST DATA ONLY: isolated migration regression fixtures, not business data'"); err != nil {
+		t.Fatalf("label migration test schema: %v", err)
+	}
+	retainSchema := os.Getenv("PROTOCOL_TEST_RETAIN_SCHEMAS") == "1"
+	if retainSchema {
+		t.Logf("retaining FAKE TEST DATA schema %s for %s", schema, t.Name())
+	}
 	t.Cleanup(func() {
+		if retainSchema {
+			return
+		}
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
 		if _, err := admin.Exec(cleanupCtx, "DROP SCHEMA "+quotedSchema+" CASCADE"); err != nil {

@@ -10,13 +10,16 @@ import {
   hasValidConnectionHealthTime,
   isConnectionHealthCurrentFailure,
   remoteActionLabelKey,
+  testProtocolName,
 } from '../../composables/useConnectionHealth'
-import type { ConnectionHealthEvent, ConnectionHealthState, EffectiveProbePolicySource } from '../../types/connectionHealth'
+import type { CurrentHealthResult, TestAttempt, ConnectionHealthEvent, ConnectionHealthState, EffectiveProbePolicySource } from '../../types/connectionHealth'
 
 // 链路详情健康卡片：链路详情弹窗（聚焦某条链路）和全局最近事件弹窗共用同一张卡片布局，
 // 数据聚合和"下次探活"文案计算都由父组件完成，这里只负责纯展示，避免两处弹窗各自维护
 // 一份几乎相同的卡片模板。
 const props = defineProps<{
+  currentHealthResult?: CurrentHealthResult
+  lastAttempt?: TestAttempt
   siteLabel: string
   upstreamGroupName: string
   accountName: string
@@ -63,7 +66,7 @@ const effectivePolicySourcesText = computed(() => props.effectivePolicySources.m
 })).join('；'))
 
 const budgetPolicyLabel = computed(() => props.effectivePolicySources.find((source) => source.policyId === props.budgetPolicyId)?.policyName || props.budgetPolicyId)
-const slowResponseCount = computed(() => props.records.filter(record => record.result === 'slow_response').length)
+const slowResponseCount = computed(() => props.records.filter(record => record.result === 'slow_response' && record.probeDisposition !== 'stale' && record.probeDisposition !== 'invalid').length)
 
 const eventSourceLabel = (source?: string): string => {
   const key = `${cardPrefix}.eventSources.${source || 'legacy'}`
@@ -83,7 +86,7 @@ const remoteActionText = computed(() => {
 })
 
 const hasFailureTime = computed(() => hasValidConnectionHealthTime(props.lastFailureAt))
-const currentFailure = computed(() => isConnectionHealthCurrentFailure({
+const currentFailure = computed(() => props.currentHealthResult ? props.currentHealthResult.status === 'failure' : isConnectionHealthCurrentFailure({
   lastFailureAt: props.lastFailureAt,
   lastProbeAt: props.lastProbeAt,
   lastSuccessAt: props.lastSuccessAt,
@@ -91,6 +94,8 @@ const currentFailure = computed(() => isConnectionHealthCurrentFailure({
 const elapsedText = computed(() => formatConnectionHealthElapsed(props.elapsedSeconds, props.lastFailureAt))
 const failureLabel = computed(() => t(`${cardPrefix}.${props.failureFromLoadedRecords ? 'loadedFailure' : currentFailure.value ? 'currentFailure' : 'historicalFailure'}`))
 const showErrorDetail = computed(() => props.isActionCard || hasFailureTime.value)
+const displayedErrorKey = computed(() => currentFailure.value ? (props.currentHealthResult?.errorKey ?? props.lastErrorKey) : props.lastErrorKey)
+const displayedErrorDetail = computed(() => currentFailure.value ? (props.currentHealthResult?.errorDetail ?? props.lastErrorDetail) : props.lastErrorDetail)
 </script>
 
 <template>
@@ -107,7 +112,8 @@ const showErrorDetail = computed(() => props.isActionCard || hasFailureTime.valu
         </div>
       </div>
       <div v-if="!isActionCard" class="flex shrink-0 flex-col items-end gap-1">
-        <span class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium" :class="connectionHealthStateBadgeClass(state)">
+        <span v-if="currentHealthResult?.status === 'unverified'" class="text-xs text-amber-700">{{ t('admin.connectionHealth.testConfiguration.unverified') }}</span>
+        <span v-else class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium" :class="connectionHealthStateBadgeClass(state)">
           {{ state ? t(`${prefix}.stateLabels.${state}`) : '—' }}
         </span>
         <span class="inline-flex items-center rounded-full bg-surface-elevated px-2 py-0.5 text-[11px] text-muted-foreground">
@@ -131,8 +137,12 @@ const showErrorDetail = computed(() => props.isActionCard || hasFailureTime.valu
       <span>{{ t(`${cardPrefix}.latencyLabel`) }}：{{ latestLatencyMs != null ? `${latestLatencyMs}ms` : t(`${cardPrefix}.noData`) }}</span>
       <span v-if="elapsedText" class="font-medium text-red-600 dark:text-red-400">{{ t(`${cardPrefix}.elapsed`, { value: elapsedText }) }}</span>
     </div>
-    <p v-if="showErrorDetail && lastErrorKey" class="mt-1 text-[11px] text-destructive/80">{{ readableMessage(lastErrorKey) }}</p>
-    <p v-if="showErrorDetail && lastErrorDetail" class="mt-0.5 break-words text-[11px] text-muted-foreground">{{ t(`${cardPrefix}.errorDetail`, { value: lastErrorDetail }) }}</p>
+    <p v-if="showErrorDetail && displayedErrorKey" class="mt-1 text-[11px] text-destructive/80">{{ readableMessage(displayedErrorKey) }}</p>
+    <p v-if="showErrorDetail && displayedErrorDetail" class="mt-0.5 whitespace-pre-wrap break-words text-[11px] text-muted-foreground">{{ t(`${cardPrefix}.errorDetail`, { value: displayedErrorDetail }) }}</p>
+    <div v-if="lastAttempt" class="mt-1 whitespace-pre-wrap break-words text-xs text-muted-foreground">
+      <p>{{ testProtocolName(lastAttempt.protocol) || t('admin.connectionHealth.testConfiguration.legacy') }}<template v-if="lastAttempt.probeTimeoutSeconds"> / {{ lastAttempt.probeTimeoutSeconds }}s</template> · {{ formatConnectionHealthTime(lastAttempt.at ?? null) }}</p>
+      <p v-if="lastAttempt.disposition === 'invalid'">{{ t('admin.connectionHealth.testConfiguration.invalid') }} · {{ lastAttempt.errorDetail || (lastAttempt.errorKey ? readableMessage(lastAttempt.errorKey) : '') }}</p>
+    </div>
 
     <div v-if="!isActionCard" class="mt-2.5">
       <p class="text-[11px] text-muted-foreground">{{ t(`${cardPrefix}.availabilityLabel`) }}</p>
@@ -165,7 +175,7 @@ const showErrorDetail = computed(() => props.isActionCard || hasFailureTime.valu
             :key="record.id"
             class="min-w-[2px] flex-1 rounded-[1px]"
             :class="connectionHealthRecordColorClass(record.result)"
-            :title="`${formatConnectionHealthTime(record.createdAt)} · ${readableMessage(record.result)} · ${eventSourceLabel(record.source)}`"
+            :title="`${formatConnectionHealthTime(record.createdAt)} · ${readableMessage(record.result)} · ${eventSourceLabel(record.source)} · ${testProtocolName(record.requestProtocol) || t('admin.connectionHealth.testConfiguration.legacy')}${record.requestTimeoutSeconds ? ` / ${record.requestTimeoutSeconds}s` : ''}${record.probeDisposition === 'stale' || record.probeDisposition === 'invalid' ? ` · ${t('admin.connectionHealth.testConfiguration.' + record.probeDisposition)}` : ''}`"
           />
         </div>
         <span class="text-[10px] text-muted-foreground">{{ t(`${cardPrefix}.now`) }}</span>

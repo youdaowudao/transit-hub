@@ -1,3 +1,4 @@
+import type { AdminGroupTestConfiguration, GroupTestConfiguration } from '../types/connectionHealth'
 import type {
   AccountTier,
   AccountTierResult,
@@ -869,3 +870,12 @@ export const deleteConnectionHealthPolicy = async (id: string): Promise<void> =>
     method: 'DELETE',
   })
 }
+
+
+export const getAdminGroupTestConfiguration = (adminGroupId: string): Promise<AdminGroupTestConfiguration> =>
+  requestJson(`/connection-health/admin-groups/${encodeURIComponent(adminGroupId)}/test-configuration`)
+
+export const setAdminGroupTestConfiguration = (adminGroupId: string, configuration: GroupTestConfiguration | null): Promise<AdminGroupTestConfiguration> =>
+  requestJson(`/connection-health/admin-groups/${encodeURIComponent(adminGroupId)}/test-configuration`, {
+    method: 'PUT', body: JSON.stringify({ configuration }),
+  })

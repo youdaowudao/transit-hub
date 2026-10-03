@@ -42,19 +42,22 @@ const (
 // AdminProbeTarget 是平台中性的独立探活目标：一个 admin 分组下的账号(sub2api)/渠道(new-api)。
 // 不再要求存在 real_connections。TargetID 稳定且可复算，是新状态/事件的核心键。
 type AdminProbeTarget struct {
-	TargetID               string   `json:"targetId"`
-	Platform               string   `json:"platform"`
-	AdminGroupID           string   `json:"adminGroupId"`
-	AdminGroupName         string   `json:"adminGroupName"`
-	AccountID              string   `json:"accountId"`
-	AccountName            string   `json:"accountName"`
-	AccountStatus          string   `json:"accountStatus"`
-	Schedulable            *bool    `json:"schedulable,omitempty"`
-	AccountWeight          *int     `json:"accountWeight,omitempty"`
-	ProviderFamily         string   `json:"providerFamily"`
-	Models                 []string `json:"models"`
-	ProbeAvailable         bool     `json:"probeAvailable"`
-	ProbeUnavailableReason string   `json:"probeUnavailableReason,omitempty"`
+	TestConfiguration      EffectiveTestConfiguration `json:"testConfiguration"`
+	TestMemberships        []TestConfigurationSource  `json:"-"`
+	InventoryComplete      bool                       `json:"-"`
+	TargetID               string                     `json:"targetId"`
+	Platform               string                     `json:"platform"`
+	AdminGroupID           string                     `json:"adminGroupId"`
+	AdminGroupName         string                     `json:"adminGroupName"`
+	AccountID              string                     `json:"accountId"`
+	AccountName            string                     `json:"accountName"`
+	AccountStatus          string                     `json:"accountStatus"`
+	Schedulable            *bool                      `json:"schedulable,omitempty"`
+	AccountWeight          *int                       `json:"accountWeight,omitempty"`
+	ProviderFamily         string                     `json:"providerFamily"`
+	Models                 []string                   `json:"models"`
+	ProbeAvailable         bool                       `json:"probeAvailable"`
+	ProbeUnavailableReason string                     `json:"probeUnavailableReason,omitempty"`
 }
 
 // probeModelSpec 是一个「目标 + 具体探活模型」的组合，携带该模型来自哪条策略的探活参数。
@@ -91,6 +94,10 @@ type adminTargetRefresh struct {
 // targetProbeResult 暂存单模型探活结果。一个账号的全部到期模型完成后，再统一决定一次上游
 // 动作并写事件，避免多模型按执行顺序互相启停同一个账号。
 type targetProbeResult struct {
+	completedAt     time.Time
+	configuration   EffectiveTestConfiguration
+	eventID         string
+	disposition     string
 	state           *ConnectionHealthState
 	previousState   State
 	outcome         ProbeOutcome
@@ -299,6 +306,8 @@ func (s *Service) resolveManualTargetWithRefresh(ctx context.Context, userID str
 		return upstream.Session{}, adminTargetRefresh{}, "", requestError(ErrorProbeTargetNotFound)
 	}
 
+	s.rememberActionInventory(userID, adminAccountID, &refresh.inventory)
+	_ = s.configureTestTarget(ctx, userID, adminAccountID, &refresh.target, refresh.memberships, !refresh.accountsReadError)
 	return session, refresh, adminAccountID, nil
 }
 
@@ -370,7 +379,7 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 		onPhase(ProbeTargetPhaseRunning)
 	}
 
-	release, acquired, err := s.repo.TryAcquireTargetLease(ctx, targetID)
+	ctx, release, acquired, err := s.acquireActionTargetLease(ctx, targetID, false)
 	if err != nil {
 		return nil, err
 	}
@@ -389,6 +398,9 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 			return nil, requestError(ErrorAccountsFetch)
 		}
 		return nil, requestError(ErrorProbeTargetNotFound)
+	}
+	if err := s.configureTestTarget(ctx, userID, adminAccountID, &target, memberships, !accountsReadError); err != nil {
+		return nil, err
 	}
 	allSpecs, _, policyOK := s.currentScheduledProbeSpecs(ctx, userID, adminAccountID, target, memberships, nil)
 	if !policyOK {
@@ -454,7 +466,9 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 			return nil, probeErr
 		}
 		if result != nil {
-			healthStateCommitted = true
+			if result.disposition == "applied" || result.disposition == "" {
+				healthStateCommitted = true
+			}
 			probeResults = append(probeResults, *result)
 		}
 	}
@@ -463,6 +477,31 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 	}
 	for _, result := range probeResults {
 		modelHealth := toModelHealth(result.spec.modelName, *result.state)
+		if target.Platform == string(upstream.PlatformSub2API) {
+			configuration := result.configuration
+			if configuration.Status == "" {
+				configuration = target.TestConfiguration
+			}
+			applyCurrentHealthProjection(&modelHealth, *result.state, configuration)
+			modelHealth.ProbeDisposition = result.disposition
+			modelHealth.RequestProtocol = protocolPointer(result.outcome.Protocol)
+			modelHealth.RequestTimeoutSeconds = intPtr(result.outcome.ProbeTimeoutSeconds)
+			modelHealth.RequestLatencyMs = intPtr(result.outcome.LatencyMs)
+			modelHealth.RequestPhase = result.outcome.RequestPhase
+			modelHealth.RequestAt = utcTimePointer(&result.completedAt)
+			if result.outcome.Result != ResultOK && result.outcome.Result != ResultSlowResponse {
+				modelHealth.RequestErrorKey = string(result.outcome.Result)
+				modelHealth.RequestErrorDetail = result.outcome.Detail
+			}
+			if result.disposition != "stale" && modelHealth.LastAttempt != nil {
+				modelHealth.LastAttempt.Result = string(result.outcome.Result)
+				modelHealth.LastAttempt.Disposition = result.disposition
+				modelHealth.LastAttempt.ErrorDetail = result.outcome.Detail
+				if result.outcome.Result != ResultOK && result.outcome.Result != ResultSlowResponse {
+					modelHealth.LastAttempt.ErrorKey = string(result.outcome.Result)
+				}
+			}
+		}
 		modelHealth.ProbeResult = string(result.outcome.Result)
 		results = append(results, modelHealth)
 	}
@@ -538,12 +577,13 @@ func adminProbeTargetFromAccount(session upstream.Session, adminAccountID string
 // refreshAdminTarget keeps the existing execution-time refresh as one complete snapshot.
 // Scheduler floor decisions consume this same result and must not re-read groups or accounts.
 func (s *Service) refreshAdminTarget(ctx context.Context, session upstream.Session, adminAccountID string, accountID string) (adminTargetRefresh, error) {
+	snapshotStartedAt := time.Now()
 	groups, err := s.fetchAdminAllGroups(ctx, session)
 	if err != nil {
 		return adminTargetRefresh{}, err
 	}
 	refresh := adminTargetRefresh{
-		inventory: adminWorkspaceInventory{session: session, groups: make([]adminInventoryGroup, 0, len(groups))},
+		inventory: adminWorkspaceInventory{snapshotStartedAt: snapshotStartedAt, groupsComplete: true, session: session, groups: make([]adminInventoryGroup, 0, len(groups))},
 	}
 	platform := string(session.Platform)
 	for _, group := range groups {
@@ -578,6 +618,8 @@ func (s *Service) refreshAdminTarget(ctx context.Context, session upstream.Sessi
 			}
 		}
 	}
+	refresh.target.InventoryComplete = !refresh.accountsReadError
+	refresh.target.TestMemberships = testConfigurationMemberships(refresh.memberships)
 	return refresh, nil
 }
 
@@ -604,6 +646,9 @@ func (s *Service) probeTargetOnce(ctx context.Context, userID string, adminAccou
 		current = &defaultState
 	}
 
+	if target.Platform == string(upstream.PlatformSub2API) && !target.TestConfiguration.usable() {
+		return nil, requestError(ErrorTestConfigurationUnavailable)
+	}
 	if consumeBudget {
 		dayStart := probeBudgetDayStart(time.Now())
 		budgetPolicy := spec.effectiveBudgetPolicy()
@@ -619,6 +664,22 @@ func (s *Service) probeTargetOnce(ctx context.Context, userID string, adminAccou
 	outcome := s.executeTargetProbe(ctx, target, cred, spec)
 
 	now := time.Now()
+	if target.Platform == string(upstream.PlatformSub2API) {
+		id, err := newID()
+		if err != nil {
+			return nil, err
+		}
+		eventTarget := targetForProbeSpec(target, spec)
+		source := EventSourceManual
+		if consumeBudget {
+			source = EventSourceScheduled
+		}
+		committed, err := s.repo.CommitTargetProbe(ctx, TargetProbeCommit{UserID: userID, AdminAccountID: adminAccountID, Target: target, ModelName: spec.modelName, Policy: spec.policy, Outcome: outcome, DecisionKey: probeDecisionKey(target, spec), Now: now, Event: ConnectionHealthEvent{ID: id, ConnectionID: target.TargetID, ModelName: spec.modelName, UserID: userID, AdminAccountID: adminAccountID, PolicyID: spec.effectiveBudgetPolicy().ID, AdminGroupID: eventTarget.AdminGroupID, OwnGroupName: eventTarget.AdminGroupName, Source: source}})
+		if err != nil {
+			return nil, err
+		}
+		return &targetProbeResult{state: &committed.State, previousState: committed.PreviousState, outcome: outcome, latencyMs: outcome.LatencyMs, spec: spec, triggeredRemote: committed.Transition.TriggerRemoteDegrade || committed.Transition.TriggerRemoteRestore, eventID: committed.EventID, disposition: committed.Disposition, configuration: committed.Configuration, completedAt: now}, nil
+	}
 	next, transitionOut := applyProbeOutcome(*current, outcome, spec.policy, now)
 	next.LastProbeDecisionKey = probeDecisionKey(target, spec)
 	latencyMs := outcome.LatencyMs
@@ -639,6 +700,7 @@ func (s *Service) executeTargetProbe(ctx context.Context, target AdminProbeTarge
 	}
 	return s.probeRunner.Probe(ctx, ProbeRequest{
 		BaseURL: cred.BaseURL, UpstreamKey: cred.Key, ProviderFamily: providerFamily,
+		Protocol: target.TestConfiguration.Protocol, ProbeTimeoutSeconds: target.TestConfiguration.ProbeTimeoutSeconds, LegacyCompatibility: target.Platform != string(upstream.PlatformSub2API),
 		ModelName: spec.modelName, MaxTokens: spec.maxProbeTokens, ProbePrompt: spec.probePrompt,
 	})
 }
@@ -679,6 +741,41 @@ func (s *Service) finishTargetProbeBatchWithFloor(
 	monitoringScope adminMonitoringScope,
 ) error {
 	if len(results) == 0 {
+		return nil
+	}
+	if target.Platform == string(upstream.PlatformSub2API) {
+		applied := []targetProbeResult{}
+		for _, result := range results {
+			if result.disposition == "applied" {
+				applied = append(applied, result)
+			}
+		}
+		if len(applied) == 0 {
+			return nil
+		}
+		actionResult, actionErr := s.reconcileTargetRemoteActionWithFloorMode(ctx, userID, adminAccountID, session, target, specs, floorGuard, inventory, monitoringScope, source != EventSourceManual)
+		if actionErr != nil {
+			log.Printf("[connection-health] reconcile target action failed target_id=%s action=%s", target.TargetID, actionResult.remoteAction)
+		}
+		remoteAction := actionResult.remoteAction
+		if remoteAction == "" {
+			for _, result := range applied {
+				if result.triggeredRemote && !policyRemoteActionEnabled(result.spec.policy) {
+					remoteAction = RemoteActionSkippedIndependentProbe
+					break
+				}
+			}
+		}
+		if remoteAction != "" {
+			eventID := applied[len(applied)-1].eventID
+			if err := s.repo.DecorateProbeEventAction(ctx, userID, adminAccountID, eventID, remoteAction, actionResult.adminGroupID, actionResult.adminGroupName); err != nil {
+				return err
+			}
+			if !targetActionAuditOnly(remoteAction) {
+				applied[len(applied)-1].state.LastRemoteAction = remoteAction
+			}
+			return nil
+		}
 		return nil
 	}
 	actionResult := targetRemoteActionResult{}
@@ -768,17 +865,18 @@ func targetForProbeSpec(target AdminProbeTarget, spec probeModelSpec) AdminProbe
 // upstream_group_name 字段里，复用现有列语义。
 func defaultTargetState(userID string, adminAccountID string, target AdminProbeTarget, modelName string) ConnectionHealthState {
 	return ConnectionHealthState{
-		ConnectionID:      target.TargetID,
-		ModelName:         modelName,
-		UserID:            userID,
-		AdminAccountID:    adminAccountID,
-		OwnGroupID:        target.AdminGroupID,
-		OwnGroupName:      target.AdminGroupName,
-		UpstreamSiteID:    "",
-		UpstreamGroupID:   target.AdminGroupID,
-		UpstreamGroupName: target.AdminGroupName,
-		State:             StateHealthy,
-		CurrentWeight:     100,
+		HealthEvidenceStatus: HealthEvidenceInvalid,
+		ConnectionID:         target.TargetID,
+		ModelName:            modelName,
+		UserID:               userID,
+		AdminAccountID:       adminAccountID,
+		OwnGroupID:           target.AdminGroupID,
+		OwnGroupName:         target.AdminGroupName,
+		UpstreamSiteID:       "",
+		UpstreamGroupID:      target.AdminGroupID,
+		UpstreamGroupName:    target.AdminGroupName,
+		State:                StateHealthy,
+		CurrentWeight:        100,
 	}
 }
 

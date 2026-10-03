@@ -105,6 +105,32 @@ func transitionOnSlowResponse(in TransitionInput) TransitionOutput {
 }
 
 func applyProbeOutcome(current ConnectionHealthState, outcome ProbeOutcome, policy Policy, now time.Time) (ConnectionHealthState, TransitionOutput) {
+	protocolAware := validTestProtocol(outcome.Protocol) && !outcome.LegacyCompatibility
+	if protocolAware && outcome.Result == ResultInvalidResponse {
+		next := current
+		next.LastProbeAt = &now
+		next.LastProbeProtocol = protocolPointer(outcome.Protocol)
+		next.LastProbeTimeoutSeconds = intPtr(outcome.ProbeTimeoutSeconds)
+		next.LastLatencyMs = intPtr(outcome.LatencyMs)
+		return next, TransitionOutput{NextState: current.State, Weight: current.CurrentWeight, ConsecutiveFailures: current.ConsecutiveFailures, ConsecutiveSuccesses: current.ConsecutiveSuccesses, CooldownUntil: current.CooldownUntil, ObservingUntil: current.ObservingUntil}
+	}
+	eligible := protocolAware && policy.AutoDegradeEnabled && current.State != StateDisabled
+	matched := healthEvidenceMatches(current, outcome.Protocol)
+	if eligible {
+		if !matched {
+			current.HealthEvidenceStatus = HealthEvidenceInvalid
+			current.HealthEvidenceProtocol = nil
+		}
+		counterProtocol := TestProtocolChatCompletions
+		if current.CounterProtocol != nil {
+			counterProtocol = *current.CounterProtocol
+		}
+		if counterProtocol != outcome.Protocol {
+			current.ConsecutiveFailures = 0
+			current.ConsecutiveSuccesses = 0
+		}
+		current.CounterProtocol = protocolPointer(outcome.Protocol)
+	}
 	transitionOut := Transition(TransitionInput{
 		Current: current.State, CurrentWeight: current.CurrentWeight,
 		ConsecutiveFailures: current.ConsecutiveFailures, ConsecutiveSuccesses: current.ConsecutiveSuccesses,
@@ -139,6 +165,27 @@ func applyProbeOutcome(current ConnectionHealthState, outcome ProbeOutcome, poli
 		next.LastFailureAt = &now
 		next.LastErrorKey = string(outcome.Result)
 		next.LastErrorDetail = outcome.Detail
+	}
+	if protocolAware {
+		next.LastProbeProtocol = protocolPointer(outcome.Protocol)
+		next.LastProbeTimeoutSeconds = intPtr(outcome.ProbeTimeoutSeconds)
+		next.LastAppliedProbeAt = &now
+		result := string(outcome.Result)
+		next.LastAppliedProbeResult = &result
+		next.LastAppliedProbeProtocol = protocolPointer(outcome.Protocol)
+		if outcome.Result == ResultOK || outcome.Result == ResultSlowResponse {
+			next.LastSuccessProtocol = protocolPointer(outcome.Protocol)
+		}
+		if eligible {
+			valid := matched || (isHardFailure(outcome.Result) && next.State == StateSuspended) ||
+				(isSoftFailure(outcome.Result) && (next.State == StateDegraded || (next.State == StateSuspended && next.ConsecutiveFailures >= failureThreshold(policy)))) ||
+				(outcome.Result == ResultOK && (next.State == StateHealthy || next.State == StateRecovering)) ||
+				(outcome.Result == ResultSlowResponse && next.State == StateDegraded)
+			if valid {
+				next.HealthEvidenceStatus = HealthEvidenceValid
+				next.HealthEvidenceProtocol = protocolPointer(outcome.Protocol)
+			}
+		}
 	}
 	return next, transitionOut
 }

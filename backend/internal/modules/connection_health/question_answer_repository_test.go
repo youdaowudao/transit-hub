@@ -1920,6 +1920,14 @@ func openQuestionAnswerPostgresPool(t *testing.T) *pgxpool.Pool {
 		adminPool.Close()
 		t.Fatalf("create test schema: %v", err)
 	}
+	if _, err := adminPool.Exec(ctx, "COMMENT ON SCHEMA "+quotedSchema+" IS 'FAKE TEST DATA ONLY: isolated regression fixtures, not business data'"); err != nil {
+		adminPool.Close()
+		t.Fatalf("label test schema: %v", err)
+	}
+	retainSchema := os.Getenv("PROTOCOL_TEST_RETAIN_SCHEMAS") == "1"
+	if retainSchema {
+		t.Logf("retaining FAKE TEST DATA schema %s for %s", schema, t.Name())
+	}
 	config, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
 		adminPool.Close()
@@ -1938,6 +1946,10 @@ func openQuestionAnswerPostgresPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(func() {
 		pool.Close()
+		if retainSchema {
+			adminPool.Close()
+			return
+		}
 		dropCtx, dropCancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
 		defer dropCancel()
 		if _, err := adminPool.Exec(dropCtx, "DROP SCHEMA "+quotedSchema+" CASCADE"); err != nil {
@@ -1946,4 +1958,204 @@ func openQuestionAnswerPostgresPool(t *testing.T) *pgxpool.Pool {
 		adminPool.Close()
 	})
 	return pool
+}
+
+// Explicitly gated by openQuestionAnswerPostgresPool: no default database or
+// listener is started. A server-observed blocked advisory lock is the barrier.
+func TestQuestionAnswerProtocolPostgresWorkspaceBeforeTargetLockAndSnapshot(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	repo := NewRepository(pool)
+	if err := repo.EnsureSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	question, err := repo.CreateTestQuestion(ctx, "qa-protocol-user", "Protocol", "fixture", []string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const user = "qa-protocol-user"
+	const workspace = "qa-protocol-workspace"
+	const target = "sub2api:qa-protocol-workspace:1"
+	snapshot := QuestionAnswerConfigurationSnapshot{AdminAccountID: workspace, InventoryComplete: true, Memberships: []TestConfigurationSource{{AdminGroupID: "g1"}}}
+	holder, err := repo.beginWorkspaceTransaction(ctx, user, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Rollback(context.Background())
+	var holderPID int32
+	if err := holder.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&holderPID); err != nil {
+		t.Fatal(err)
+	}
+	type createResult struct {
+		records []QuestionAnswerRecord
+		err     error
+	}
+	finished := make(chan createResult, 1)
+	go func() {
+		records, err := repo.CreateQuestionAnswerBatch(ctx, user, target, "protocol-batch", []string{"m"}, []string{question.ID}, QuestionAnswerReasoningEffortHigh, 2, snapshot)
+		finished <- createResult{records, err}
+	}()
+	// Observe that creation is waiting on this exact W before checking Q.
+	for {
+		var blocked bool
+		err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_locks waiter JOIN pg_locks owner
+   ON waiter.locktype=owner.locktype AND waiter.database=owner.database AND waiter.classid=owner.classid AND waiter.objid=owner.objid AND waiter.objsubid=owner.objsubid
+   WHERE owner.pid=$1 AND owner.granted AND NOT waiter.granted AND waiter.locktype='advisory')`, holderPID).Scan(&blocked)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			break
+		}
+		select {
+		case result := <-finished:
+			t.Fatalf("creation did not wait for W: %+v", result)
+		default:
+		}
+	}
+	qtx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var qAvailable bool
+	if err := qtx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtext($1))`, "question-answer|"+user+"|"+target).Scan(&qAvailable); err != nil {
+		t.Fatal(err)
+	}
+	if err := qtx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !qAvailable {
+		t.Fatal("creation acquired Q while blocked on W")
+	}
+	// This is a configuration save committed before the waiting creation.
+	if _, err := holder.Exec(ctx, `INSERT INTO connection_health_group_test_configs(user_id,admin_account_id,admin_group_id,protocol,probe_timeout_seconds) VALUES($1,$2,'g1','responses',30)`, user, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	result := <-finished
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if len(result.records) != 2 {
+		t.Fatalf("repeat records=%d", len(result.records))
+	}
+	for _, record := range result.records {
+		if record.RequestProtocol == nil || *record.RequestProtocol != TestProtocolResponses {
+			t.Fatalf("snapshot=%+v", record.RequestProtocol)
+		}
+	}
+	if err := repo.SaveGroupTestConfiguration(ctx, user, workspace, "g1", &GroupTestConfiguration{Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10}); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := repo.ListQuestionAnswerBatch(ctx, user, target, "protocol-batch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range persisted {
+		if record.RequestProtocol == nil || *record.RequestProtocol != TestProtocolResponses {
+			t.Fatal("later save mutated committed protocol snapshot")
+		}
+	}
+	if err := repo.SaveGroupTestConfiguration(ctx, user, workspace, "g2", &GroupTestConfiguration{Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 20}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Memberships = append(snapshot.Memberships, TestConfigurationSource{AdminGroupID: "g2"})
+	_, err = repo.CreateQuestionAnswerBatch(ctx, user, "sub2api:qa-protocol-workspace:2", "conflict-batch", []string{"m"}, []string{question.ID}, QuestionAnswerReasoningEffortHigh, 1, snapshot)
+	if err == nil || err.Error() != ErrorTestConfigurationConflict {
+		t.Fatalf("conflict error=%v", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM connection_health_question_answer_records WHERE batch_id='conflict-batch'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("conflict created %d records", count)
+	}
+}
+
+func TestQuestionAnswerProtocolSub2APIRequiresSnapshotBeforeTransaction(t *testing.T) {
+	valid := QuestionAnswerConfigurationSnapshot{AdminAccountID: "workspace", InventoryComplete: true, Memberships: []TestConfigurationSource{{AdminGroupID: "g1"}}}
+	for _, test := range []struct {
+		name      string
+		snapshots []QuestionAnswerConfigurationSnapshot
+	}{
+		{name: "missing"},
+		{name: "multiple", snapshots: []QuestionAnswerConfigurationSnapshot{valid, valid}},
+		{name: "missing_workspace", snapshots: []QuestionAnswerConfigurationSnapshot{{InventoryComplete: true, Memberships: valid.Memberships}}},
+		{name: "unrelated_workspace", snapshots: []QuestionAnswerConfigurationSnapshot{{AdminAccountID: "other-workspace", InventoryComplete: true, Memberships: valid.Memberships}}},
+		{name: "incomplete", snapshots: []QuestionAnswerConfigurationSnapshot{{AdminAccountID: "workspace", InventoryComplete: false, Memberships: valid.Memberships}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// A missing pool proves invalid admission cannot even begin a transaction.
+			repo := &Repository{}
+			records, err := repo.CreateQuestionAnswerBatch(context.Background(), "snapshot-user", "sub2api:workspace:1", "invalid-batch", []string{"m"}, []string{"q"}, QuestionAnswerReasoningEffortMedium, 1, test.snapshots...)
+			if err == nil || err.Error() != ErrorTestConfigurationUnavailable || len(records) != 0 {
+				t.Fatalf("invalid snapshot admission records=%+v err=%v", records, err)
+			}
+		})
+	}
+}
+
+func TestQuestionAnswerProtocolPostgresRequiresTargetWorkspaceSnapshot(t *testing.T) {
+	pool := openQuestionAnswerPostgresPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
+	defer cancel()
+	repo := NewRepository(pool)
+	if err := repo.EnsureSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	const user = "snapshot-required-user"
+	const workspace = "snapshot-required-workspace"
+	question, err := repo.CreateTestQuestion(ctx, user, "Snapshot admission", "fixture", []string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveGroupTestConfiguration(ctx, user, workspace, "g1", &GroupTestConfiguration{Protocol: TestProtocolResponses, ProbeTimeoutSeconds: 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveGroupTestConfiguration(ctx, user, "other-workspace", "g1", &GroupTestConfiguration{Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10}); err != nil {
+		t.Fatal(err)
+	}
+	valid := QuestionAnswerConfigurationSnapshot{AdminAccountID: workspace, InventoryComplete: true, Memberships: []TestConfigurationSource{{AdminGroupID: "g1"}}}
+	for _, test := range []struct {
+		name      string
+		snapshots []QuestionAnswerConfigurationSnapshot
+	}{
+		{name: "missing"},
+		{name: "multiple", snapshots: []QuestionAnswerConfigurationSnapshot{valid, valid}},
+		{name: "unrelated_workspace", snapshots: []QuestionAnswerConfigurationSnapshot{{AdminAccountID: "other-workspace", InventoryComplete: true, Memberships: valid.Memberships}}},
+		{name: "incomplete", snapshots: []QuestionAnswerConfigurationSnapshot{{AdminAccountID: workspace, InventoryComplete: false, Memberships: valid.Memberships}}},
+		{name: "invalid_membership", snapshots: []QuestionAnswerConfigurationSnapshot{{AdminAccountID: workspace, InventoryComplete: true, Memberships: []TestConfigurationSource{{AdminGroupID: " "}}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := "sub2api:" + workspace + ":" + test.name
+			records, err := repo.CreateQuestionAnswerBatch(ctx, user, target, "invalid-"+test.name, []string{"m"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1, test.snapshots...)
+			if err == nil || err.Error() != ErrorTestConfigurationUnavailable || len(records) != 0 {
+				t.Fatalf("invalid snapshot created records=%+v err=%v", records, err)
+			}
+			var recordCount, runningCount int
+			if err := pool.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE status = 'running' OR started_at IS NOT NULL) FROM connection_health_question_answer_records WHERE user_id = $1 AND target_id = $2`, user, target).Scan(&recordCount, &runningCount); err != nil {
+				t.Fatal(err)
+			}
+			if recordCount != 0 || runningCount != 0 {
+				t.Fatalf("invalid snapshot persisted records=%d running=%d", recordCount, runningCount)
+			}
+		})
+	}
+
+	// Omitting a snapshot remains compatible only for legacy connections and NewAPI.
+	for _, target := range []string{"legacy-connection-id", "newapi:" + workspace + ":1"} {
+		records, err := repo.CreateQuestionAnswerBatch(ctx, user, target, "compatible-"+target, []string{"m"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1)
+		if err != nil || len(records) != 1 || records[0].RequestProtocol == nil || *records[0].RequestProtocol != TestProtocolChatCompletions {
+			t.Fatalf("compatible target %s records=%+v err=%v", target, records, err)
+		}
+	}
+	// A valid Sub2API snapshot still reads the target workspace's stored configuration.
+	records, err := repo.CreateQuestionAnswerBatch(ctx, user, "sub2api:"+workspace+":valid", "valid-snapshot", []string{"m"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1, valid)
+	if err != nil || len(records) != 1 || records[0].RequestProtocol == nil || *records[0].RequestProtocol != TestProtocolResponses {
+		t.Fatalf("valid target snapshot records=%+v err=%v", records, err)
+	}
 }

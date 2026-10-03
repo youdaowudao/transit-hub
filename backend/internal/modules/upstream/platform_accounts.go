@@ -174,30 +174,23 @@ func (s *PlatformService) listSub2APIGroupAccountsContext(ctx context.Context, s
 			if !ok {
 				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 			}
-			account := parseSub2APIAccount(record)
-			accountID := strings.TrimSpace(account.ID)
-			if accountID == "" {
+			accountID, validID := strictSub2APIInventoryID(record["id"])
+			if !validID {
 				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 			}
 			if _, duplicate := seenAccountIDs[accountID]; duplicate {
 				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 			}
 			seenAccountIDs[accountID] = struct{}{}
+			account := parseSub2APIAccount(record)
+			account.ID = accountID
 			accounts = append(accounts, account)
 		}
-		if hasExpectedTotal {
-			if len(accounts) > expectedTotal {
-				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
-			}
-			if len(accounts) == expectedTotal {
-				return accounts, nil
-			}
-			if len(items) < pageSize {
-				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
-			}
-			continue
+		finished, validPage := sub2APIInventoryPageFinished(response.Payload, page, pageSize, len(items), len(accounts))
+		if !validPage {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 		}
-		if len(items) < pageSize {
+		if finished {
 			return accounts, nil
 		}
 	}

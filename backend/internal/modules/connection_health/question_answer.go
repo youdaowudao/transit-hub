@@ -103,7 +103,16 @@ type TestQuestionInput struct {
 	Keywords *[]string `json:"keywords"`
 }
 
+// QuestionAnswerConfigurationSnapshot carries membership evidence prepared outside W.
+// Configuration values themselves are always re-read inside the create transaction.
+type QuestionAnswerConfigurationSnapshot struct {
+	AdminAccountID    string
+	Memberships       []TestConfigurationSource
+	InventoryComplete bool
+}
+
 type QuestionAnswerRecord struct {
+	RequestProtocol         *TestProtocol                  `json:"requestProtocol"`
 	ID                      string                         `json:"id"`
 	TargetID                string                         `json:"targetId"`
 	BatchID                 string                         `json:"batchId"`
@@ -168,6 +177,7 @@ type QuestionAnswerHistory struct {
 }
 
 type QuestionAnswerBatch struct {
+	Finalization    *QuestionAnswerFinalization    `json:"finalization,omitempty"`
 	BatchID         string                         `json:"batchId"`
 	Records         []QuestionAnswerRecord         `json:"records"`
 	ReasoningEffort *QuestionAnswerReasoningEffort `json:"reasoningEffort"`
@@ -179,6 +189,14 @@ type QuestionAnswerBatch struct {
 	CurrentModel    string                         `json:"currentModel"`
 	CurrentQuestion string                         `json:"currentQuestion"`
 	Stats           QuestionAnswerStats            `json:"stats"`
+}
+
+// QuestionAnswerFinalization describes a retained runtime reservation. It is
+// independent of record status: StopPending may already have ended every row.
+type QuestionAnswerFinalization struct {
+	BatchID  string `json:"batchId"`
+	State    string `json:"state"`
+	Recovery string `json:"recovery"`
 }
 
 type QuestionAnswerStartInput struct {
@@ -420,12 +438,15 @@ func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, tar
 		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
 	}
 
-	session, _, account, _, err := s.resolveManualTarget(startCtx, userID, targetID)
+	session, target, account, adminAccountID, err := s.resolveManualTarget(startCtx, userID, targetID)
 	if err != nil {
 		if startCtx.Err() != nil {
 			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
 		}
 		return QuestionAnswerBatch{}, err
+	}
+	if !target.TestConfiguration.usable() {
+		return QuestionAnswerBatch{}, requestError(target.TestConfiguration.BlockedReason)
 	}
 	cred, err := s.resolveProbeCredential(startCtx, session, account)
 	if err != nil {
@@ -476,7 +497,7 @@ func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, tar
 	s.questionAnswerOrder = append(s.questionAnswerOrder, key)
 	s.questionAnswerMu.Unlock()
 
-	records, err := s.questionAnswers.CreateQuestionAnswerBatch(startCtx, userID, targetID, batchID, models, questionIDs, reasoningEffort, repeatCount)
+	records, err := s.questionAnswers.CreateQuestionAnswerBatch(startCtx, userID, targetID, batchID, models, questionIDs, reasoningEffort, repeatCount, QuestionAnswerConfigurationSnapshot{AdminAccountID: adminAccountID, Memberships: target.TestMemberships, InventoryComplete: target.InventoryComplete})
 	if err != nil {
 		var startErr error
 		stopReason := QuestionAnswerErrorStorage
@@ -609,11 +630,64 @@ func (s *Service) LatestQuestionAnswerBatch(ctx context.Context, userID string, 
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerBatch{}, err
 	}
-	records, err := s.questionAnswers.LatestQuestionAnswerBatch(ctx, userID, targetID)
-	if err != nil {
-		return QuestionAnswerBatch{}, err
+	for {
+		run := s.questionAnswerFinalizationRun(userID, targetID, "")
+		var records []QuestionAnswerRecord
+		var err error
+		if run != nil {
+			records, err = s.questionAnswers.ListQuestionAnswerBatch(ctx, userID, targetID, run.batchID)
+		} else {
+			records, err = s.questionAnswers.LatestQuestionAnswerBatch(ctx, userID, targetID)
+		}
+		if err != nil {
+			return QuestionAnswerBatch{}, err
+		}
+		projection, current := s.projectQuestionAnswerFinalization(userID, targetID, run, len(records) > 0)
+		if !current {
+			if err := ctx.Err(); err != nil {
+				return QuestionAnswerBatch{}, err
+			}
+			continue
+		}
+		batch, err := buildQuestionAnswerBatch(records)
+		batch.Finalization = projection
+		return batch, err
 	}
-	return buildQuestionAnswerBatch(records)
+}
+
+func (s *Service) questionAnswerFinalizationRun(userID, targetID, batchID string) *activeQuestionAnswerBatch {
+	s.questionAnswerMu.Lock()
+	defer s.questionAnswerMu.Unlock()
+	run := s.questionAnswerRuns[questionAnswerRunKey(userID, targetID)]
+	if run == nil || (batchID != "" && run.batchID != batchID) || (run.stopReason == "" && !run.finalizing && run.finalErr == nil) {
+		return nil
+	}
+	return run
+}
+
+func (s *Service) projectQuestionAnswerFinalization(userID, targetID string, run *activeQuestionAnswerBatch, hasRecords bool) (*QuestionAnswerFinalization, bool) {
+	s.questionAnswerMu.Lock()
+	defer s.questionAnswerMu.Unlock()
+	current := s.questionAnswerRuns[questionAnswerRunKey(userID, targetID)]
+	if current != nil && current.stopReason == "" && !current.finalizing && current.finalErr == nil {
+		current = nil
+	}
+	if current != run {
+		return nil, false
+	}
+	if run == nil {
+		return nil, true
+	}
+	projection := &QuestionAnswerFinalization{BatchID: run.batchID, State: "pending", Recovery: "unavailable"}
+	if run.finalErr != nil {
+		projection.State = "failed"
+	}
+	if !hasRecords {
+		projection.Recovery = "service_shutdown"
+	} else if run.finalErr != nil && !run.finalizing && run.inFlight == 0 {
+		projection.Recovery = "cancel"
+	}
+	return projection, true
 }
 
 func (s *Service) GetQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string) (QuestionAnswerBatch, error) {
@@ -627,7 +701,12 @@ func (s *Service) GetQuestionAnswerBatch(ctx context.Context, userID string, tar
 	if len(records) == 0 {
 		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerBatchNotFound)
 	}
-	return buildQuestionAnswerBatch(records)
+	batch, err := buildQuestionAnswerBatch(records)
+	run := s.questionAnswerFinalizationRun(userID, targetID, strings.TrimSpace(batchID))
+	if run != nil {
+		batch.Finalization, _ = s.projectQuestionAnswerFinalization(userID, targetID, run, true)
+	}
+	return batch, err
 }
 
 func (s *Service) StopQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string) (QuestionAnswerBatch, error) {
@@ -864,6 +943,15 @@ func (s *Service) runQuestionAnswerShutdown(attempt *questionAnswerShutdownAttem
 }
 
 func buildQuestionAnswerBatch(records []QuestionAnswerRecord) (QuestionAnswerBatch, error) {
+	if len(records) > 0 {
+		expected := records[0].RequestProtocol
+		for _, record := range records {
+			if (expected == nil) != (record.RequestProtocol == nil) || (record.RequestProtocol != nil && (!validTestProtocol(*record.RequestProtocol) || *record.RequestProtocol != *expected)) {
+				return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerStorage)
+			}
+		}
+	}
+
 	reasoningEffort, err := aggregateQuestionAnswerReasoningEffort(records)
 	if err != nil {
 		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerStorage)

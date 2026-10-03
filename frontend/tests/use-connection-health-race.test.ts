@@ -9,6 +9,7 @@ const setTargetPolicyAssignmentsMock = vi.hoisted(() => vi.fn())
 const listConnectionHealthPoliciesMock = vi.hoisted(() => vi.fn())
 const createConnectionHealthPolicyMock = vi.hoisted(() => vi.fn())
 const updateConnectionHealthPolicyMock = vi.hoisted(() => vi.fn())
+const setAdminGroupTestConfigurationMock = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/modules/admin/api/connectionHealth', async () => {
   const actual = await vi.importActual<typeof import('../src/modules/admin/api/connectionHealth')>('../src/modules/admin/api/connectionHealth')
@@ -23,6 +24,7 @@ vi.mock('../src/modules/admin/api/connectionHealth', async () => {
     listConnectionHealthPolicies: listConnectionHealthPoliciesMock,
     createConnectionHealthPolicy: createConnectionHealthPolicyMock,
     updateConnectionHealthPolicy: updateConnectionHealthPolicyMock,
+    setAdminGroupTestConfiguration: setAdminGroupTestConfigurationMock,
   }
 })
 vi.mock('@/modules/admin/api/connectionHealth', async () => {
@@ -38,6 +40,7 @@ vi.mock('@/modules/admin/api/connectionHealth', async () => {
     listConnectionHealthPolicies: listConnectionHealthPoliciesMock,
     createConnectionHealthPolicy: createConnectionHealthPolicyMock,
     updateConnectionHealthPolicy: updateConnectionHealthPolicyMock,
+    setAdminGroupTestConfiguration: setAdminGroupTestConfigurationMock,
   }
 })
 
@@ -678,5 +681,128 @@ describe('useConnectionHealth request generations', () => {
     expect(service.refreshRunSnapshot.value).toMatchObject({ runId: 'run-same-workspace', revision: 2 })
     expect(service.adminGroups.value).toEqual([group('workspace-same-terminal')])
     expect(service.errorKey.value).toBe('')
+  })
+})
+
+
+describe('test configuration save snapshot ordering', () => {
+  const configuredGroup = (protocol: string, timeout: number) => ({ ...group('g1'), accounts: [{
+    id: 'a', targetId: 'sub2api:protocol-race:a', modelHealth: [],
+    testConfiguration: { status: 'inherited', protocol, probeTimeoutSeconds: timeout, sourceGroups: [] },
+  }] })
+  const saved = () => ({ adminGroupId: 'g1', adminGroupName: 'Group', configuration: { protocol: 'responses', probeTimeoutSeconds: 30 }, inventoryComplete: true, affectedAccountCount: 1, conflictAccountCount: 0,
+    accounts: [{ targetId: 'sub2api:protocol-race:a', accountName: 'A', testConfiguration: configuredGroup('responses', 30).accounts[0].testConfiguration }],
+  })
+
+  const healthyGroup = () => ({
+    ...candidateGroup(true), id: 'g1',
+    healthSummary: { totalAccounts: 1, probeableAccounts: 1, unprobeableAccounts: 0, healthyModels: 1, degradedModels: 0, suspendedModels: 0, disabledModels: 0, unconfiguredModels: 0, lastProbeAt: null },
+    accounts: [{ ...candidateGroup(true).accounts[0], ...configuredGroup('chat_completions', 10).accounts[0],
+      modelHealth: [{ modelName: 'model-a', configured: true, state: 'healthy', lastSuccessLatencyMs: 123, currentHealthResult: { status: 'success', protocol: 'chat_completions' } }],
+    }],
+  })
+
+  it('excludes unverified old states when an SSE terminal supplies the new overview', async () => {
+    const service = useConnectionHealth()
+    service.setAdminGroupsWorkspace('protocol-race')
+    const next = healthyGroup()
+    next.accounts[0].modelHealth[0].currentHealthResult = { status: 'unverified', protocol: 'chat_completions' }
+    const terminal = { status: 'success' as const, runId: 'unverified-stream', revision: 1, groups: [next], refresh: { state: 'success' as const, sites: [] } }
+    refreshConnectionHealthAdminGroupsMock.mockImplementationOnce(async (options: any) => { options.onTerminal(terminal); return terminal })
+    try {
+      await expect(service.refreshAdminGroups()).resolves.toBe(true)
+      expect(service.overview.value).toMatchObject({ totalConnections: 1, healthy: 0, unconfigured: 1 })
+    } finally { service.setAdminGroupsWorkspace('') }
+  })
+
+  it.each(['explicit', 'legacy'] as const)('preserves applicable Chat evidence for a timeout-only save from %s configuration even if reload fails', async configurationKind => {
+    const service = useConnectionHealth()
+    service.setAdminGroupsWorkspace('protocol-race')
+    const previous = healthyGroup()
+    if (configurationKind === 'legacy') delete (previous.accounts[0] as any).testConfiguration
+    const next = saved()
+    next.configuration.protocol = 'chat_completions'
+    next.accounts[0].testConfiguration = configuredGroup('chat_completions', 30).accounts[0].testConfiguration
+    getConnectionHealthAdminGroupsMock.mockResolvedValueOnce([previous]).mockRejectedValue(new Error('reload unavailable'))
+    setAdminGroupTestConfigurationMock.mockResolvedValue(next)
+    try {
+      await service.loadAdminGroups({ silent: true })
+      await service.saveAdminGroupTestConfiguration('g1', { protocol: 'chat_completions', probeTimeoutSeconds: 30 })
+      const account = service.adminGroups.value[0].accounts[0]
+      expect(account.testConfiguration).toMatchObject({ protocol: 'chat_completions', probeTimeoutSeconds: 30 })
+      expect(account.modelHealth[0].currentHealthResult?.status).toBe('success')
+      expect(account.modelHealth[0].lastSuccessLatencyMs).toBe(123)
+      expect(service.adminGroups.value[0].healthSummary).toMatchObject({ healthyModels: 1, unconfiguredModels: 0 })
+      expect(service.overview.value).toMatchObject({ healthy: 1, unconfigured: 0 })
+      expect(candidatePlanPresent(service)).toBe(false)
+    } finally { service.setAdminGroupsWorkspace('') }
+  })
+
+  it('excludes unverified old-protocol state from overview after a successful reload', async () => {
+    const service = useConnectionHealth()
+    service.setAdminGroupsWorkspace('protocol-race')
+    const next = healthyGroup()
+    next.accounts[0].modelHealth[0].currentHealthResult = { status: 'unverified', protocol: 'chat_completions' }
+    getConnectionHealthAdminGroupsMock.mockResolvedValue([next])
+    try {
+      await expect(service.loadAdminGroups({ silent: true })).resolves.toBe(true)
+      expect(service.overview.value).toMatchObject({ totalConnections: 1, healthy: 0, unconfigured: 1 })
+    } finally { service.setAdminGroupsWorkspace('') }
+  })
+
+  it('invalidates summary and candidate evidence immediately when save succeeds but reload fails', async () => {
+    const service = useConnectionHealth()
+    service.setAdminGroupsWorkspace('protocol-race')
+    getConnectionHealthAdminGroupsMock.mockResolvedValueOnce([healthyGroup()]).mockRejectedValue(new Error('reload unavailable'))
+    setAdminGroupTestConfigurationMock.mockResolvedValue(saved())
+    try {
+      await expect(service.loadAdminGroups({ silent: true })).resolves.toBe(true)
+      expect(service.overview.value?.healthy).toBe(1)
+      expect(candidatePlanPresent(service)).toBe(true)
+      await expect(service.saveAdminGroupTestConfiguration('g1', { protocol: 'responses', probeTimeoutSeconds: 30 })).resolves.toHaveProperty('configuration')
+      expect(service.adminGroups.value[0].accounts[0].modelHealth[0].currentHealthResult?.status).toBe('unverified')
+      expect(service.adminGroups.value[0].healthSummary).toMatchObject({ healthyModels: 0, unconfiguredModels: 1 })
+      expect(service.overview.value).toMatchObject({ healthy: 0, unconfigured: 1 })
+      expect(candidatePlanPresent(service)).toBe(false)
+    } finally { service.setAdminGroupsWorkspace('') }
+  })
+
+  it('keeps saved configuration when an ordinary read started before save arrives late', async () => {
+    const service = useConnectionHealth()
+    service.setAdminGroupsWorkspace('protocol-race')
+    getConnectionHealthAdminGroupsMock.mockResolvedValueOnce([configuredGroup('chat_completions', 10)])
+    await service.loadAdminGroups()
+    const stale = deferred<unknown[]>()
+    getConnectionHealthAdminGroupsMock.mockReturnValueOnce(stale.promise).mockResolvedValue([configuredGroup('responses', 30)])
+    const oldRead = service.loadAdminGroups({ silent: true })
+    setAdminGroupTestConfigurationMock.mockResolvedValue(saved())
+    await service.saveAdminGroupTestConfiguration('g1', { protocol: 'responses', probeTimeoutSeconds: 30 })
+    expect(service.adminGroups.value[0].accounts[0].testConfiguration?.protocol).toBe('responses')
+    stale.resolve([configuredGroup('chat_completions', 10)])
+    await oldRead
+    await Promise.resolve()
+    expect(service.adminGroups.value[0].accounts[0].testConfiguration?.protocol).toBe('responses')
+    expect(service.adminGroups.value[0].accounts[0].testConfiguration?.probeTimeoutSeconds).toBe(30)
+  })
+
+  it('discards old SSE terminal data after a successful protocol save', async () => {
+    const service = useConnectionHealth()
+    service.setAdminGroupsWorkspace('protocol-race')
+    getConnectionHealthAdminGroupsMock.mockResolvedValueOnce([configuredGroup('chat_completions', 10)])
+    await service.loadAdminGroups()
+    const terminal = deferred<any>()
+    let options: any
+    refreshConnectionHealthAdminGroupsMock.mockImplementationOnce((value: any) => { options = value; return terminal.promise })
+    const refresh = service.refreshAdminGroups()
+    setAdminGroupTestConfigurationMock.mockResolvedValue(saved())
+    getConnectionHealthAdminGroupsMock.mockResolvedValue([configuredGroup('responses', 30)])
+    await service.saveAdminGroupTestConfiguration('g1', { protocol: 'responses', probeTimeoutSeconds: 30 })
+    const oldTerminal = { status: 'success', runId: 'old-run', revision: 1, groups: [configuredGroup('chat_completions', 10)], refresh: { state: 'success', sites: [] } }
+    options.onTerminal(oldTerminal)
+    expect(service.adminGroups.value[0].accounts[0].testConfiguration?.protocol).toBe('responses')
+    terminal.resolve(oldTerminal)
+    await refresh
+    await Promise.resolve()
+    expect(service.adminGroups.value[0].accounts[0].testConfiguration?.protocol).toBe('responses')
   })
 })

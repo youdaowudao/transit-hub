@@ -43,6 +43,7 @@ type PriorityCandidateProjection struct {
 }
 
 type priorityCandidateSortEvidence struct {
+	protocolUnverified  bool
 	activeModels        map[string]struct{}
 	states              []ConnectionHealthState
 	healthBand          int
@@ -56,10 +57,11 @@ func buildPriorityCandidateSortEvidence(item *priorityTargetInventory, states []
 	activeStates := activeHealthPriorityStates(states, activeModels)
 	multiplier, multiplierAvailable := effectiveHealthSortMultiplier(item)
 	return priorityCandidateSortEvidence{
+		protocolUnverified:  len(activeModels) > 0 && item.target.Platform == string(upstream.PlatformSub2API) && !healthStatesUsableForTarget(item.target, activeStates, len(activeModels)),
 		activeModels:        activeModels,
 		states:              activeStates,
 		healthBand:          priorityHealthBand(activeStates, len(activeModels)),
-		successLatencyMs:    completeTargetSuccessLatency(activeStates, activeModels),
+		successLatencyMs:    targetSuccessLatency(item.target, activeStates, activeModels),
 		multiplier:          multiplier,
 		multiplierAvailable: multiplierAvailable,
 	}
@@ -376,6 +378,9 @@ func classifyPriorityCandidateAvailability(
 ) (string, string) {
 	if target.tierConflict {
 		return "safety_lock", "tier_conflict"
+	}
+	if evidenceExists && evidence.protocolUnverified {
+		return "safety_lock", "health_unknown"
 	}
 	localUnavailable := evidenceExists && evidence.healthBand == 4
 	upstreamUnavailable, unsafeReason := priorityCandidateObservationState(observations)

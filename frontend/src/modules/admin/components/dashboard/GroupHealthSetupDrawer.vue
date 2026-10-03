@@ -14,6 +14,8 @@ import {
 } from 'lucide-vue-next'
 import { connectionHealthMessageKey, useConnectionHealth } from '../../composables/useConnectionHealth'
 import type {
+  AdminGroupTestConfiguration,
+  TestProtocol,
   AdminGroupPolicyConfiguration,
   AdminGroupAccount,
   AdminGroupHealth,
@@ -42,11 +44,63 @@ const emit = defineEmits<{
 import { t, te } from '@/locales'
 const prefix = 'admin.connectionHealth.setup'
 const {
+  loadAdminGroupTestConfiguration,
+  saveAdminGroupTestConfiguration,
   createPolicyForSetup,
   loadAdminGroupPolicyConfiguration,
   saveAdminGroupPolicyConfiguration,
   updatePolicyForSetup,
 } = useConnectionHealth()
+
+const testConfiguration = ref<AdminGroupTestConfiguration | null>(null)
+const testProtocol = ref<TestProtocol>('chat_completions')
+const testTimeout = ref('')
+const testLoading = ref(false)
+const testSaving = ref(false)
+const testError = ref('')
+const testSaved = ref(false)
+let testSequence = 0
+const validTestTimeout = computed(() => /^\d+$/.test(testTimeout.value) && Number(testTimeout.value) >= 5 && Number(testTimeout.value) <= 120)
+const setTestProtocol = (event: Event) => {
+  testProtocol.value = (event.target as HTMLSelectElement).value as TestProtocol
+  if (testTimeout.value === '') testTimeout.value = testProtocol.value === 'responses' ? '30' : '10'
+  testSaved.value = false
+}
+const applyTestConfiguration = (value: AdminGroupTestConfiguration) => {
+  testConfiguration.value = value
+  testProtocol.value = value.configuration?.protocol ?? 'chat_completions'
+  testTimeout.value = value.configuration ? String(value.configuration.probeTimeoutSeconds) : ''
+}
+const loadTestConfiguration = async () => {
+  const group = props.group
+  const sequence = ++testSequence
+  testConfiguration.value = null
+  testError.value = ''
+  testSaved.value = false
+  testTimeout.value = ''
+  testProtocol.value = 'chat_completions'
+  if (!group || group.platform !== 'sub2api') return
+  testLoading.value = true
+  const outcome = await loadAdminGroupTestConfiguration(group.id)
+  if (sequence !== testSequence || !props.open || props.group?.id !== group.id) return
+  testLoading.value = false
+  if (!outcome || 'errorKey' in outcome) { testError.value = outcome?.errorKey ?? 'admin.connectionHealth.errors.request'; return }
+  applyTestConfiguration(outcome.configuration)
+}
+const saveTestConfiguration = async (clear = false) => {
+  const group = props.group
+  if (!group || testSaving.value || testLoading.value || !testConfiguration.value?.inventoryComplete || (!clear && !validTestTimeout.value)) return
+  const sequence = ++testSequence
+  testSaving.value = true
+  testSaved.value = false
+  testError.value = ''
+  const outcome = await saveAdminGroupTestConfiguration(group.id, clear ? null : { protocol: testProtocol.value, probeTimeoutSeconds: Number(testTimeout.value) })
+  if (sequence !== testSequence || !props.open || props.group?.id !== group.id) return
+  testSaving.value = false
+  if ('errorKey' in outcome) { testError.value = outcome.errorKey; return }
+  applyTestConfiguration(outcome.configuration)
+  testSaved.value = true
+}
 
 const phase = ref<Phase>('loading')
 const step = ref(1)
@@ -199,8 +253,8 @@ const reset = async () => {
 watch(
   () => [props.open, props.group?.id],
   ([isOpen]) => {
-    if (isOpen && props.group) void reset()
-    else loadSequence++
+    if (isOpen && props.group) { void reset(); void loadTestConfiguration() }
+    else { loadSequence++; testSequence++; testSaving.value = false; testLoading.value = false }
   },
 )
 
@@ -571,7 +625,7 @@ const save = async () => {
 }
 
 const close = () => {
-  if (phase.value === 'saving') return
+  if (phase.value === 'saving' || testSaving.value) return
   emit('close')
 }
 </script>
@@ -625,6 +679,39 @@ const close = () => {
           </div>
 
           <div class="flex-1 overflow-y-auto px-6 py-5">
+            <section v-if="group.platform === 'sub2api'" data-testid="group-test-configuration" class="mb-6 space-y-3 rounded-lg border border-border/60 p-4">
+              <h3 class="text-sm font-semibold text-foreground">{{ t('admin.connectionHealth.testConfiguration.title') }}</h3>
+              <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.help') }}</p>
+              <p v-if="testLoading" class="text-xs text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.loading') }}</p>
+              <template v-else-if="testConfiguration">
+                <p class="text-xs">{{ t('admin.connectionHealth.testConfiguration.' + (testConfiguration.configuration ? 'configured' : 'notConfigured')) }}</p>
+                <div class="grid gap-3 sm:grid-cols-2">
+                  <label class="space-y-1 text-xs">{{ t('admin.connectionHealth.testConfiguration.protocol') }}
+                    <select data-testid="group-test-protocol" :value="testProtocol" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm" :disabled="testSaving" @change="setTestProtocol">
+                      <option value="chat_completions">Chat Completions</option><option value="responses">Responses</option>
+                    </select>
+                  </label>
+                  <label class="space-y-1 text-xs">{{ t('admin.connectionHealth.testConfiguration.timeout') }}
+                    <input v-model="testTimeout" data-testid="group-test-timeout" type="number" min="5" max="120" step="1" :placeholder="testProtocol === 'responses' ? '30' : '10'" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm" :disabled="testSaving" @input="testSaved = false">
+                  </label>
+                </div>
+                <p v-if="testProtocol === 'responses'" class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.responsesBudget') }}</p>
+                <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.impact', { count: testConfiguration.affectedAccountCount, conflicts: testConfiguration.conflictAccountCount }) }}</p>
+                <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.clearHelp') }}</p>
+                <ul v-if="testConfiguration.conflictAccountCount" class="space-y-1 text-xs text-amber-700 dark:text-amber-400">
+                  <li v-for="account in testConfiguration.accounts.filter(item => item.testConfiguration.status === 'conflict')" :key="account.targetId">
+                    {{ account.accountName }} · {{ account.testConfiguration.sourceGroups.map(source => `${source.adminGroupName || source.adminGroupId}: ${source.protocol} / ${source.probeTimeoutSeconds}s`).join('；') }}
+                  </li>
+                </ul>
+                <div class="flex flex-wrap gap-2">
+                  <button data-testid="group-test-save" type="button" class="rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground disabled:opacity-50" :disabled="testSaving || !validTestTimeout || !testConfiguration.inventoryComplete" @click="saveTestConfiguration()">{{ t('admin.connectionHealth.testConfiguration.save') }}</button>
+                  <button data-testid="group-test-clear" type="button" class="rounded-lg border border-border/60 px-3 py-2 text-xs disabled:opacity-50" :disabled="testSaving || !testConfiguration.configuration || !testConfiguration.inventoryComplete" @click="saveTestConfiguration(true)">{{ t('admin.connectionHealth.testConfiguration.clear') }}</button>
+                </div>
+                <p v-if="testSaved" class="text-xs text-emerald-700 dark:text-emerald-400">{{ t('admin.connectionHealth.testConfiguration.saved') }}</p>
+              </template>
+              <p v-if="testError" class="text-xs text-destructive">{{ readableMessage(testError) }}</p>
+            </section>
+
             <div v-if="phase === 'loading'" class="flex min-h-80 items-center justify-center">
               <Loader2 class="h-6 w-6 animate-spin text-primary" />
             </div>

@@ -187,7 +187,7 @@ func TestDisableConnection_RejectsLastUsableSub2APIAccount(t *testing.T) {
 		},
 		dispatcher: newRemoteActionDispatcher(site, mySites, platform),
 	}
-	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{{
 			group:    upstream.AdminGroupInfo{ID: "g1", Name: "only"},
@@ -234,7 +234,7 @@ func TestDisableConnection_AllowsClosingOneOfTwoUsableSub2APIAccountsFromCachedI
 		platformGroups: fakePlatformGroupReader{},
 		dispatcher:     newRemoteActionDispatcher(site, mySites, platform),
 	}
-	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{{
 			group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"},
@@ -276,7 +276,7 @@ func TestDisableConnection_ScopeShrinkOnCachedInventoryStillProtectsLastUsableAc
 		platformGroups: fakePlatformGroupReader{},
 		dispatcher:     newRemoteActionDispatcher(site, mySites, platform),
 	}
-	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{{
 			group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"},
@@ -314,7 +314,7 @@ func legacyDisableMonitoringScopeService(repo *fakeRepository, platform *fakePla
 		platformGroups: fakePlatformGroupReader{},
 		dispatcher:     newRemoteActionDispatcher(site, mySites, platform),
 	}
-	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{{
 			group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"}, accounts: accounts,
@@ -400,7 +400,7 @@ func TestDisableConnection_AllowsIdempotentInactiveTargetWithIncompleteOtherGrou
 		sites: site, platformGroups: fakePlatformGroupReader{},
 		dispatcher: newRemoteActionDispatcher(site, mySites, platform),
 	}
-	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{
 			{group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"}, accounts: []upstream.AdminGroupAccountInfo{{ID: "1515", Status: "inactive", Schedulable: boolPointer(true)}}},
@@ -434,7 +434,7 @@ func TestDisableConnection_RejectsConflictingSharedAccountState(t *testing.T) {
 		sites: site, platformGroups: fakePlatformGroupReader{},
 		dispatcher: newRemoteActionDispatcher(site, mySites, platform),
 	}
-	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{
 			{group: upstream.AdminGroupInfo{ID: "g1", Name: "first"}, accounts: []upstream.AdminGroupAccountInfo{{ID: "1515", Status: "active", Schedulable: boolPointer(false)}}},
@@ -471,7 +471,7 @@ func TestDisableConnection_RejectsStaleCachedSub2APIInventory(t *testing.T) {
 		dispatcher: newRemoteActionDispatcher(site, mySites, platform),
 	}
 	guard := service.sub2APIFloorGuardFor("user1", "ws1")
-	guard.rememberInventory(adminWorkspaceInventory{
+	guard.rememberInventory(adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{{
 			group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"},

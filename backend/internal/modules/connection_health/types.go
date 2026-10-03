@@ -156,11 +156,14 @@ type PrioritySyncState struct {
 	// PendingPriority is persisted before an upstream write. If the process dies or the
 	// database write after the upstream call fails, the next tick can confirm the value
 	// instead of treating a successful system write as a manual conflict.
-	PendingPriority      *int      `json:"-"`
-	EffectiveMultiplier  float64   `json:"effectiveMultiplier"`
-	Conflict             bool      `json:"conflict"`
-	LastConflictPriority *int      `json:"lastConflictPriority,omitempty"`
-	UpdatedAt            time.Time `json:"updatedAt"`
+	PendingPriority      *int                `json:"-"`
+	PendingDispatchID    string              `json:"pendingDispatchId,omitempty"`
+	PendingOwnerID       string              `json:"-"`
+	PendingDispatchPhase RemoteDispatchPhase `json:"pendingDispatchPhase,omitempty"`
+	EffectiveMultiplier  float64             `json:"effectiveMultiplier"`
+	Conflict             bool                `json:"conflict"`
+	LastConflictPriority *int                `json:"lastConflictPriority,omitempty"`
+	UpdatedAt            time.Time           `json:"updatedAt"`
 }
 
 // PriorityWorkspaceSyncState is the durable workspace-level generation and
@@ -186,17 +189,20 @@ type PriorityWorkspaceSyncState struct {
 // TargetActionState 记录分组健康首次接管账号/渠道启停或权重前的上游状态。
 // 健康恢复后只能恢复到这里保存的原值，不能假设账号原本一定启用或权重一定为 100。
 type TargetActionState struct {
-	UserID            string
-	AdminAccountID    string
-	TargetID          string
-	OriginalStatus    string
-	OriginalWeight    *int
-	LastAppliedStatus string
-	LastAppliedWeight *int
-	PendingStatus     string
-	PendingWeight     *int
-	Conflict          bool
-	UpdatedAt         time.Time
+	UserID               string
+	AdminAccountID       string
+	TargetID             string
+	OriginalStatus       string
+	OriginalWeight       *int
+	LastAppliedStatus    string
+	LastAppliedWeight    *int
+	PendingStatus        string
+	PendingWeight        *int
+	PendingDispatchID    string
+	PendingOwnerID       string
+	PendingDispatchPhase RemoteDispatchPhase
+	Conflict             bool
+	UpdatedAt            time.Time
 }
 
 // Policy 对应 connection_health_policies 表：一条健康探活/降级策略，
@@ -248,62 +254,80 @@ type ModelTarget struct {
 // ConnectionHealthState 对应 connection_health_states 表：一条对接链路在某个模型上的当前健康状态。
 // model_name 为 "*" 表示链路级（非模型级）状态。
 type ConnectionHealthState struct {
-	ConnectionID         string
-	ModelName            string
-	UserID               string
-	AdminAccountID       string
-	OwnGroupID           string
-	OwnGroupName         string
-	UpstreamSiteID       string
-	UpstreamGroupID      string
-	UpstreamGroupName    string
-	State                State
-	CurrentWeight        int
-	ConsecutiveFailures  int
-	ConsecutiveSuccesses int
-	LastProbeAt          *time.Time
-	LastProbeDecisionKey string
-	LastSuccessAt        *time.Time
-	LastFailureAt        *time.Time
-	CooldownUntil        *time.Time
-	ObservingUntil       *time.Time
-	LastLatencyMs        *int
-	LastSuccessLatencyMs *int
-	LastErrorKey         string
-	LastErrorDetail      string
-	LastRemoteAction     string
-	UpdatedAt            time.Time
+	LastProbeProtocol           *TestProtocol
+	LastProbeTimeoutSeconds     *int
+	LastAppliedProbeAt          *time.Time
+	LastAppliedProbeResult      *string
+	LastAppliedProbeProtocol    *TestProtocol
+	CounterProtocol             *TestProtocol
+	HealthEvidenceStatus        string
+	HealthEvidenceProtocol      *TestProtocol
+	LastSuccessProtocol         *TestProtocol
+	LastCredentialFailureAt     *time.Time
+	LastCredentialFailureReason string
+	ConnectionID                string
+	ModelName                   string
+	UserID                      string
+	AdminAccountID              string
+	OwnGroupID                  string
+	OwnGroupName                string
+	UpstreamSiteID              string
+	UpstreamGroupID             string
+	UpstreamGroupName           string
+	State                       State
+	CurrentWeight               int
+	ConsecutiveFailures         int
+	ConsecutiveSuccesses        int
+	LastProbeAt                 *time.Time
+	LastProbeDecisionKey        string
+	LastSuccessAt               *time.Time
+	LastFailureAt               *time.Time
+	CooldownUntil               *time.Time
+	ObservingUntil              *time.Time
+	LastLatencyMs               *int
+	LastSuccessLatencyMs        *int
+	LastErrorKey                string
+	LastErrorDetail             string
+	LastRemoteAction            string
+	UpdatedAt                   time.Time
 }
 
 // ConnectionHealthEvent 对应 connection_health_events 表：探活或远端动作的一条留痕记录。
 type ConnectionHealthEvent struct {
-	ID                string
-	ConnectionID      string
-	ModelName         string
-	UserID            string
-	AdminAccountID    string
-	PolicyID          string
-	AdminGroupID      string
-	OwnGroupName      string
-	UpstreamSiteID    string
-	UpstreamGroupName string
-	Result            string
-	FromState         string
-	ToState           string
-	LatencyMs         *int
-	ErrorKey          string
-	ErrorDetail       string
-	RemoteAction      string
-	ActionSource      string
-	Source            string
-	CreatedAt         time.Time
+	RequestProtocol       *TestProtocol `json:"requestProtocol"`
+	RequestTimeoutSeconds *int          `json:"requestTimeoutSeconds"`
+	ProbeDisposition      string        `json:"probeDisposition"`
+	ID                    string
+	ConnectionID          string
+	ModelName             string
+	UserID                string
+	AdminAccountID        string
+	PolicyID              string
+	AdminGroupID          string
+	OwnGroupName          string
+	UpstreamSiteID        string
+	UpstreamGroupName     string
+	Result                string
+	FromState             string
+	ToState               string
+	LatencyMs             *int
+	ErrorKey              string
+	ErrorDetail           string
+	RemoteAction          string
+	ActionSource          string
+	Source                string
+	CreatedAt             time.Time
 }
 
 // ProbeOutcome 是一次真实探活的结果，供状态机和事件记录消费。
 type ProbeOutcome struct {
-	Result    ResultKey
-	LatencyMs int
-	Detail    string
+	Protocol            TestProtocol `json:"protocol"`
+	ProbeTimeoutSeconds int          `json:"probeTimeoutSeconds"`
+	LegacyCompatibility bool         `json:"-"`
+	RequestPhase        string       `json:"requestPhase,omitempty"`
+	Result              ResultKey
+	LatencyMs           int
+	Detail              string
 }
 
 // MySitesReader 是 connection_health 对 my_sites 模块的全部只读依赖，

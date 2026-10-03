@@ -103,28 +103,30 @@ type AdminGroupHealthSummary struct {
 // 只要后端能安全解析 base_url + key + model 就可独立探活，不再需要 real_connections。
 // 绝不包含 key / token / cookie / credentials / secret / authorization 明文。
 type AdminGroupAccount struct {
-	ID                            string     `json:"id"`
-	Name                          string     `json:"name"`
-	Platform                      string     `json:"platform"`
-	Type                          string     `json:"type"`
-	Status                        string     `json:"status"`
-	MainSiteError                 string     `json:"mainSiteError,omitempty"`
-	Schedulable                   *bool      `json:"schedulable,omitempty"`
-	SchedulableSource             string     `json:"schedulableSource"`
-	SchedulableChangedAt          *time.Time `json:"schedulableChangedAt,omitempty"`
-	LastSchedulableAction         string     `json:"lastSchedulableAction,omitempty"`
-	LastSchedulableActionAt       *time.Time `json:"lastSchedulableActionAt,omitempty"`
-	LastSchedulableActionResult   string     `json:"lastSchedulableActionResult,omitempty"`
-	LastSchedulableActionErrorKey string     `json:"lastSchedulableActionErrorKey,omitempty"`
-	UpstreamStatusSource          string     `json:"upstreamStatusSource"`
-	HealthStatusSource            string     `json:"healthStatusSource"`
-	Priority                      *int       `json:"priority,omitempty"`
-	Concurrency                   *int       `json:"concurrency,omitempty"`
-	RateMultiplier                *float64   `json:"rateMultiplier,omitempty"`
-	LoadFactor                    *int       `json:"loadFactor,omitempty"`
-	Weight                        *int       `json:"weight,omitempty"`
-	Models                        string     `json:"models,omitempty"`
-	GroupIDs                      []string   `json:"groupIds,omitempty"`
+	TestConfiguration             EffectiveTestConfiguration `json:"testConfiguration"`
+	RemoteActionPending           *RemoteActionPendingView   `json:"remoteActionPending,omitempty"`
+	ID                            string                     `json:"id"`
+	Name                          string                     `json:"name"`
+	Platform                      string                     `json:"platform"`
+	Type                          string                     `json:"type"`
+	Status                        string                     `json:"status"`
+	MainSiteError                 string                     `json:"mainSiteError,omitempty"`
+	Schedulable                   *bool                      `json:"schedulable,omitempty"`
+	SchedulableSource             string                     `json:"schedulableSource"`
+	SchedulableChangedAt          *time.Time                 `json:"schedulableChangedAt,omitempty"`
+	LastSchedulableAction         string                     `json:"lastSchedulableAction,omitempty"`
+	LastSchedulableActionAt       *time.Time                 `json:"lastSchedulableActionAt,omitempty"`
+	LastSchedulableActionResult   string                     `json:"lastSchedulableActionResult,omitempty"`
+	LastSchedulableActionErrorKey string                     `json:"lastSchedulableActionErrorKey,omitempty"`
+	UpstreamStatusSource          string                     `json:"upstreamStatusSource"`
+	HealthStatusSource            string                     `json:"healthStatusSource"`
+	Priority                      *int                       `json:"priority,omitempty"`
+	Concurrency                   *int                       `json:"concurrency,omitempty"`
+	RateMultiplier                *float64                   `json:"rateMultiplier,omitempty"`
+	LoadFactor                    *int                       `json:"loadFactor,omitempty"`
+	Weight                        *int                       `json:"weight,omitempty"`
+	Models                        string                     `json:"models,omitempty"`
+	GroupIDs                      []string                   `json:"groupIds,omitempty"`
 	// UpstreamKeyGroup* 来自 real_connections 中该 admin 转发账号实际绑定的上游 API Key
 	// 分组，再以站点缓存的 Groups 解析其当前倍率。无法可靠关联时保持空值，绝不使用
 	// admin 转发账号自身的 rate_multiplier 猜测。
@@ -328,6 +330,15 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 	if err != nil {
 		return nil, err
 	}
+	testConfigs, testConfigErr := s.repo.ListGroupTestConfigurations(ctx, userID, adminAccountID)
+	targetActionStates, targetActionErr := s.repo.ListTargetActionStates(ctx, userID, adminAccountID)
+	if targetActionErr != nil {
+		return nil, targetActionErr
+	}
+	targetActionsByID := make(map[string]TargetActionState, len(targetActionStates))
+	for _, action := range targetActionStates {
+		targetActionsByID[action.TargetID] = action
+	}
 	states, err := s.repo.ListStatesByWorkspace(ctx, userID, adminAccountID)
 	if err != nil {
 		return nil, err
@@ -355,6 +366,10 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 	fallbackByGroup := make(map[string]*float64, len(probeSortSettings))
 	for _, setting := range probeSortSettings {
 		fallbackByGroup[setting.AdminGroupID] = cloneFloat64Pointer(setting.FallbackMultiplier)
+	}
+	latestAttemptEvents, err := s.repo.ListLatestProbeAttemptEventsByWorkspace(ctx, userID, adminAccountID, eventCutoff)
+	if err != nil {
+		return nil, err
 	}
 	latestProbeFailureEvents, err := s.repo.ListLatestProbeFailureEventsByWorkspace(ctx, userID, adminAccountID, eventCutoff)
 	if err != nil {
@@ -424,6 +439,8 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		accounts []upstream.AdminGroupAccountInfo
 		err      error
 	}
+	testMembershipsByTarget := make(map[string][]TestConfigurationSource)
+	testConfigurationByTarget := make(map[string]EffectiveTestConfiguration)
 	accountsByGroup := make(map[string]groupAccountInventory, len(groups))
 	decisionAccountByTarget := make(map[string]upstream.AdminGroupAccountInfo)
 	observationsByTarget := make(map[string][]upstream.AdminGroupAccountInfo)
@@ -441,6 +458,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		for _, acc := range accounts {
 			targetID := buildTargetID(platform, adminAccountID, acc.ID)
 			observationsByTarget[targetID] = append(observationsByTarget[targetID], acc)
+			testMembershipsByTarget[targetID] = append(testMembershipsByTarget[targetID], TestConfigurationSource{AdminGroupID: group.ID, AdminGroupName: group.Name})
 			if _, exists := decisionAccountByTarget[targetID]; !exists {
 				decisionAccountByTarget[targetID] = acc
 			}
@@ -451,6 +469,15 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 			}
 		}
 	}
+	for targetID, memberships := range testMembershipsByTarget {
+		testConfigurationByTarget[targetID] = ResolveGroupTestConfiguration(memberships, inventoryComplete && testConfigErr == nil, testConfigs)
+	}
+	snapshot := adminWorkspaceInventory{session: session, groupsComplete: true, snapshotStartedAt: groupFetchStarted}
+	for _, group := range groups {
+		members := accountsByGroup[group.ID]
+		snapshot.groups = append(snapshot.groups, adminInventoryGroup{group: group, accounts: members.accounts, err: members.err})
+	}
+	s.rememberActionInventory(userID, adminAccountID, &snapshot)
 	accountFetchDuration := time.Since(accountFetchStarted)
 	todayQuestionAnswerTargetIDs := make([]string, 0, len(decisionAccountByTarget))
 	for targetID := range decisionAccountByTarget {
@@ -525,6 +552,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		}
 		item := &priorityTargetInventory{
 			target: AdminProbeTarget{
+				TestConfiguration: testConfigurationByTarget[targetID], TestMemberships: testMembershipsByTarget[targetID], InventoryComplete: inventoryComplete,
 				TargetID:  targetID,
 				Platform:  platform,
 				AccountID: account.ID,
@@ -627,12 +655,18 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				budgetUsage = nil
 			}
 			decisionTarget := AdminProbeTarget{
+				TestConfiguration: testConfigurationByTarget[targetID], TestMemberships: testMembershipsByTarget[targetID], InventoryComplete: inventoryComplete,
 				TargetID: targetID, Platform: platform, ProviderFamily: decisionAccount.Platform,
 				Schedulable: cloneBoolPointer(decisionAccount.Schedulable),
 			}
 			modelHealth, unprobedModels := modelHealthForSpecs(stateIndex[targetID], activeSpecs, decisionTarget, now, budgetUsage, budgetReady)
+			if !decisionTarget.TestConfiguration.usable() {
+				available = false
+				reason = decisionTarget.TestConfiguration.BlockedReason
+			}
 			credentialReason := latestCredentialUnavailableReason(modelHealth)
 			applyLatestProbeFailureDetails(modelHealth, latestProbeFailureEvent[targetID])
+			applyLatestAttemptDetails(modelHealth, latestAttemptEvents, targetID)
 			if credentialReason != "" {
 				available = false
 				reason = credentialReason
@@ -726,7 +760,11 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 			if prioritySyncBlocked {
 				prioritySyncBlockReason = safeMultiplierBlockReason(multiplierResolution)
 			}
+			priorityCheckpoint := priorityByTarget[targetID]
+			actionCheckpoint := targetActionsByID[targetID]
 			item := AdminGroupAccount{
+				TestConfiguration:             testConfigurationByTarget[targetID],
+				RemoteActionPending:           actionPendingView(&priorityCheckpoint, &actionCheckpoint),
 				ID:                            acc.ID,
 				Name:                          acc.Name,
 				Platform:                      acc.Platform,
@@ -797,10 +835,12 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 						activeStates = append(activeStates, state)
 					}
 				}
-				healthCandidatesByTarget[targetID] = healthPriorityCandidate{
-					targetID: targetID, multiplier: *effectiveMultiplier, states: activeStates,
-					expectedModels: len(activeModels), healthBand: priorityHealthBand(activeStates, len(activeModels)),
-					latencyMs: completeTargetSuccessLatency(activeStates, activeModels),
+				if healthStatesUsableForTarget(decisionTarget, activeStates, len(activeModels)) {
+					healthCandidatesByTarget[targetID] = healthPriorityCandidate{
+						targetID: targetID, multiplier: *effectiveMultiplier, states: activeStates,
+						expectedModels: len(activeModels), healthBand: priorityHealthBand(activeStates, len(activeModels)),
+						latencyMs: targetSuccessLatency(decisionTarget, activeStates, activeModels),
+					}
 				}
 			}
 			if item.HasEnabledProbePolicy {
@@ -1599,14 +1639,21 @@ func modelHealthForConnection(byModel map[string]ConnectionHealthState) []ModelH
 func latestProbeFailureEventsByTargetModel(events []ConnectionHealthEvent) map[string]map[string]ConnectionHealthEvent {
 	latest := make(map[string]map[string]ConnectionHealthEvent)
 	for _, event := range events {
+		if event.ProbeDisposition == "stale" || event.ProbeDisposition == "invalid" {
+			continue
+		}
 		byModel := latest[event.ConnectionID]
 		if byModel == nil {
 			byModel = make(map[string]ConnectionHealthEvent)
 			latest[event.ConnectionID] = byModel
 		}
-		current, exists := byModel[event.ModelName]
+		key := event.ModelName
+		if event.RequestProtocol != nil {
+			key += "\x00" + string(*event.RequestProtocol)
+		}
+		current, exists := byModel[key]
 		if !exists || event.CreatedAt.After(current.CreatedAt) {
-			byModel[event.ModelName] = event
+			byModel[key] = event
 		}
 	}
 	return latest
@@ -1617,7 +1664,17 @@ func applyLatestProbeFailureDetails(models []ModelHealth, latestByModel map[stri
 		if models[i].LastFailureAt == nil {
 			continue
 		}
-		event, exists := latestByModel[models[i].ModelName]
+		protocol := TestProtocolChatCompletions
+		if models[i].CurrentHealthResult != nil {
+			protocol = models[i].CurrentHealthResult.Protocol
+			if models[i].CurrentHealthResult.Status != "failure" {
+				continue
+			}
+		}
+		event, exists := latestByModel[models[i].ModelName+"\x00"+string(protocol)]
+		if !exists && protocol == TestProtocolChatCompletions {
+			event, exists = latestByModel[models[i].ModelName]
+		}
 		if !exists || event.CreatedAt.Before(*models[i].LastFailureAt) {
 			continue
 		}
@@ -1626,6 +1683,10 @@ func applyLatestProbeFailureDetails(models []ModelHealth, latestByModel map[stri
 			models[i].LastErrorKey = event.Result
 		}
 		models[i].LastErrorDetail = event.ErrorDetail
+		if models[i].CurrentHealthResult != nil && models[i].CurrentHealthResult.Status == "failure" {
+			models[i].CurrentHealthResult.ErrorKey = models[i].LastErrorKey
+			models[i].CurrentHealthResult.ErrorDetail = models[i].LastErrorDetail
+		}
 	}
 }
 
@@ -1663,6 +1724,9 @@ func modelHealthForSpecs(byModel map[string]ConnectionHealthState, specs []probe
 		model.EffectivePolicySources = decision.SourcePolicies
 		model.BudgetPolicyID = decision.BudgetPolicyID
 		model.ElapsedSeconds = elapsedSince(model.LastFailureAt, model.LastProbeAt, now)
+		if target.Platform == string(upstream.PlatformSub2API) {
+			applyCurrentHealthProjection(&model, state, target.TestConfiguration)
+		}
 		models = append(models, model)
 	}
 	return models, unprobed
@@ -1676,13 +1740,17 @@ func latestCredentialUnavailableReason(models []ModelHealth) string {
 		if model.LastProbeAt != nil && (timestamp == nil || model.LastProbeAt.After(*timestamp)) {
 			timestamp = model.LastProbeAt
 		}
+		reason := modelCredentialUnavailableReason(model)
+		if model.CredentialUnavailableAt != nil {
+			timestamp = model.CredentialUnavailableAt
+		}
 		if timestamp == nil {
 			continue
 		}
 		if latest == nil || timestamp.After(*latest) {
 			value := *timestamp
 			latest = &value
-			latestErrorKey = model.LastErrorKey
+			latestErrorKey = reason
 		}
 	}
 	if isCredentialUnavailableReason(latestErrorKey) {
@@ -1749,7 +1817,11 @@ func healthStatusSource(models []ModelHealth, unprobed []AdminGroupUnprobedModel
 // counted separately by the caller, so a partially-probed account cannot hide them.
 func accumulateSummary(summary *AdminGroupHealthSummary, models []ModelHealth) {
 	for _, m := range models {
-		if isCredentialUnavailableReason(m.LastErrorKey) {
+		if m.CurrentHealthResult != nil && m.CurrentHealthResult.Status == "unverified" {
+			summary.UnconfiguredModels++
+			continue
+		}
+		if modelCredentialUnavailableReason(m) != "" {
 			summary.UnconfiguredModels++
 			continue
 		}

@@ -19,6 +19,11 @@ import (
 
 // fakeRepository 是 healthRepository 的内存实现，供 service 单测使用，不连接真实数据库。
 type fakeRepository struct {
+	actionMu                  sync.Mutex
+	actionLeases              map[string]*RuntimeLeaseHandle
+	testConfigurationMu       sync.Mutex
+	testConfigurations        []GroupTestConfig
+	testConfigurationErr      error
 	accountTiers              map[string]int
 	policies                  []Policy
 	states                    map[string]map[string]ConnectionHealthState // connectionID -> modelName -> state
@@ -414,13 +419,18 @@ func (f *fakeRepository) ListLatestProbeFailureEventsByWorkspace(ctx context.Con
 	type eventKey struct {
 		connectionID string
 		modelName    string
+		protocol     string
 	}
 	latest := make(map[eventKey]ConnectionHealthEvent)
 	for _, event := range f.events {
-		if event.UserID != userID || event.AdminAccountID != adminAccountID || event.CreatedAt.Before(since) || !slices.Contains(probeFailureResultKeys(), event.Result) {
+		if event.ProbeDisposition == "stale" || event.ProbeDisposition == "invalid" || event.UserID != userID || event.AdminAccountID != adminAccountID || event.CreatedAt.Before(since) || !slices.Contains(probeFailureResultKeys(), event.Result) {
 			continue
 		}
-		key := eventKey{connectionID: event.ConnectionID, modelName: event.ModelName}
+		protocol := ""
+		if event.RequestProtocol != nil {
+			protocol = string(*event.RequestProtocol)
+		}
+		key := eventKey{connectionID: event.ConnectionID, modelName: event.ModelName, protocol: protocol}
 		current, exists := latest[key]
 		if !exists || event.CreatedAt.After(current.CreatedAt) {
 			latest[key] = event
@@ -479,7 +489,7 @@ func (f *fakeRepository) CountFailureEventsSince(ctx context.Context, userID str
 		if _, keep := included[event.ConnectionID]; !keep {
 			continue
 		}
-		if event.UserID == userID && event.AdminAccountID == adminAccountID && !event.CreatedAt.Before(since) && slices.Contains(probeFailureResultKeys(), event.Result) {
+		if event.ProbeDisposition != "stale" && event.ProbeDisposition != "invalid" && event.UserID == userID && event.AdminAccountID == adminAccountID && !event.CreatedAt.Before(since) && slices.Contains(probeFailureResultKeys(), event.Result) {
 			count++
 		}
 	}
@@ -787,6 +797,11 @@ func (f *fakeRepository) ListAllPrioritySyncStates(ctx context.Context) ([]Prior
 }
 
 func (f *fakeRepository) UpsertPrioritySyncState(ctx context.Context, state PrioritySyncState) error {
+	f.actionMu.Lock()
+	defer f.actionMu.Unlock()
+	if err := validatePriorityCheckpointUpdate(f.actionPair(RemoteActionScope{state.UserID, state.AdminAccountID, state.TargetID}), state); err != nil {
+		return err
+	}
 	if f.priorityStates == nil {
 		f.priorityStates = map[string]PrioritySyncState{}
 	}
@@ -795,6 +810,11 @@ func (f *fakeRepository) UpsertPrioritySyncState(ctx context.Context, state Prio
 }
 
 func (f *fakeRepository) DeletePrioritySyncState(ctx context.Context, userID string, adminAccountID string, targetID string) error {
+	f.actionMu.Lock()
+	defer f.actionMu.Unlock()
+	if isSub2APIActionTarget(targetID) && f.actionPair(RemoteActionScope{userID, adminAccountID, targetID}).pendingCount() != 0 {
+		return ErrRemoteActionPending
+	}
 	delete(f.priorityStates, userID+"|"+adminAccountID+"|"+targetID)
 	return nil
 }
@@ -997,6 +1017,11 @@ func (f *fakeRepository) ListTargetActionStates(ctx context.Context, userID stri
 }
 
 func (f *fakeRepository) UpsertTargetActionState(ctx context.Context, state TargetActionState) error {
+	f.actionMu.Lock()
+	defer f.actionMu.Unlock()
+	if err := validateTargetCheckpointUpdate(f.actionPair(RemoteActionScope{state.UserID, state.AdminAccountID, state.TargetID}), state); err != nil {
+		return err
+	}
 	if f.targetActionStates == nil {
 		f.targetActionStates = map[string]TargetActionState{}
 	}
@@ -1005,6 +1030,11 @@ func (f *fakeRepository) UpsertTargetActionState(ctx context.Context, state Targ
 }
 
 func (f *fakeRepository) DeleteTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) error {
+	f.actionMu.Lock()
+	defer f.actionMu.Unlock()
+	if isSub2APIActionTarget(targetID) && f.actionPair(RemoteActionScope{userID, adminAccountID, targetID}).pendingCount() != 0 {
+		return ErrRemoteActionPending
+	}
 	delete(f.targetActionStates, userID+"|"+adminAccountID+"|"+targetID)
 	return nil
 }

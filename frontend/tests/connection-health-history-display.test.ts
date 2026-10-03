@@ -6,6 +6,7 @@ import {
   buildConnectionHealthRecordSummary,
   formatConnectionHealthElapsed,
   isConnectionHealthCurrentFailure,
+  hasCurrentHealthFailure,
   latestConnectionHealthProbeFailure,
 } from '../src/modules/admin/composables/useConnectionHealth'
 
@@ -90,8 +91,10 @@ describe('connection health historical failure display', () => {
 
   it('keeps the compact dropdown free of history detail and gates its reason on current failure', () => {
     expect(detailSource).toContain('hasValidConnectionHealthTime(model.lastFailureAt)')
-    expect(detailSource).toContain('isConnectionHealthCurrentFailure(model) && model.lastErrorKey')
-    expect(detailSource).not.toContain('model.lastErrorDetail')
+    const model = { lastProbeAt: '2026-10-02T10:05:00Z', lastFailureAt: '2026-10-02T10:00:00Z', lastSuccessAt: null, currentHealthResult: { status: 'failure' } } as Parameters<typeof hasCurrentHealthFailure>[0]
+    expect(hasCurrentHealthFailure(model)).toBe(true)
+    expect(hasCurrentHealthFailure({ ...model, currentHealthResult: { status: 'success' } })).toBe(false)
+    expect(hasCurrentHealthFailure({ ...model, currentHealthResult: { status: 'unverified' } })).toBe(false)
   })
 
   it('uses the shared event card gate in both focused and global dialog modes', () => {

@@ -28,15 +28,17 @@ type probeDecisionPolicyKey struct {
 }
 
 type probeDecisionKeyInput struct {
-	TargetID       string
-	Platform       string
-	ModelName      string
-	ProviderFamily string
-	MaxProbeTokens int
-	ProbePrompt    string
-	Schedulable    int
-	SelectedPolicy string
-	Policies       []probeDecisionPolicyKey
+	Protocol            TestProtocol
+	ProbeTimeoutSeconds int
+	TargetID            string
+	Platform            string
+	ModelName           string
+	ProviderFamily      string
+	MaxProbeTokens      int
+	ProbePrompt         string
+	Schedulable         int
+	SelectedPolicy      string
+	Policies            []probeDecisionPolicyKey
 }
 
 func probeDecisionKey(target AdminProbeTarget, spec probeModelSpec) string {
@@ -79,6 +81,7 @@ func probeDecisionKey(target AdminProbeTarget, spec probeModelSpec) string {
 	}
 	sort.Slice(policyKeys, func(i, j int) bool { return policyKeys[i].ID < policyKeys[j].ID })
 	payload, _ := json.Marshal(probeDecisionKeyInput{
+		Protocol: target.TestConfiguration.Protocol, ProbeTimeoutSeconds: target.TestConfiguration.ProbeTimeoutSeconds,
 		TargetID: target.TargetID, Platform: target.Platform, ModelName: spec.modelName,
 		ProviderFamily: providerFamily, MaxProbeTokens: maxProbeTokens, ProbePrompt: probePrompt,
 		Schedulable: schedulable, SelectedPolicy: spec.policy.ID,

@@ -8,6 +8,8 @@ import {
 } from '../../composables/useConnectionHealth'
 import ConnectionHealthLinkDetailCard from './ConnectionHealthLinkDetailCard.vue'
 import type {
+  CurrentHealthResult,
+  TestAttempt,
   ConnectionHealthEvent,
   ConnectionHealthState,
   AdminGroupHealth,
@@ -37,6 +39,8 @@ const cardPrefix = `${prefix}.eventsDialog.card`
 const VALID_STATES = new Set<ConnectionHealthState>(['healthy', 'degraded', 'suspended', 'observing', 'recovering', 'disabled'])
 
 interface StatusCard {
+  currentHealthResult?: CurrentHealthResult
+  lastAttempt?: TestAttempt
   key: string
   connectionId: string
   modelName: string
@@ -136,6 +140,8 @@ const connectionMeta = computed(() => {
 })
 
 type AdminTargetModelMeta = {
+  currentHealthResult?: CurrentHealthResult
+  lastAttempt?: TestAttempt
   providerFamily: string
   configured: boolean
   state: ConnectionHealthState | ''
@@ -170,6 +176,8 @@ const adminTargetMeta = computed(() => {
       const models = new Map<string, AdminTargetModelMeta>()
       for (const model of account.modelHealth ?? []) {
         models.set(model.modelName, {
+          currentHealthResult: model.currentHealthResult,
+          lastAttempt: model.lastAttempt,
           providerFamily: model.providerFamily || account.platform || 'custom',
           configured: model.configured,
           state: model.configured ? model.state : '',
@@ -340,8 +348,10 @@ const buildFocusedCards = (connectionId: string): StatusCard[] => {
         accountName: adminMeta.accountName,
         provider: modelMeta.providerFamily,
         isActionCard: false,
+        currentHealthResult: modelMeta.currentHealthResult,
+        lastAttempt: modelMeta.lastAttempt,
         state: modelMeta.state,
-        latestLatencyMs: eventsDesc[0]?.latencyMs ?? modelMeta.lastLatencyMs,
+        latestLatencyMs: modelMeta.lastLatencyMs,
         lastProbeAt: modelMeta.lastProbeAt,
         lastSuccessAt: modelMeta.lastSuccessAt,
         nextProbeAt: modelMeta.nextProbeAt,
@@ -460,8 +470,10 @@ const globalGroups = computed<GroupBlock[]>(() => {
         accountName: adminMeta?.accountName ?? '',
         provider: legacyModelMeta?.providerFamily ?? adminModelMeta?.providerFamily ?? 'custom',
         isActionCard: latest.modelName === '*' || latest.modelName === '',
+        currentHealthResult: adminModelMeta?.currentHealthResult,
+        lastAttempt: adminModelMeta?.lastAttempt,
         state,
-        latestLatencyMs: latest.latencyMs ?? adminModelMeta?.lastLatencyMs ?? null,
+        latestLatencyMs: adminModelMeta ? adminModelMeta.lastLatencyMs : latest.latencyMs ?? null,
         lastProbeAt: legacyModelMeta?.lastProbeAt ?? adminModelMeta?.lastProbeAt ?? null,
         lastSuccessAt: legacyModelMeta?.lastSuccessAt ?? adminModelMeta?.lastSuccessAt ?? null,
         nextProbeAt: legacyModelMeta?.nextProbeAt ?? adminModelMeta?.nextProbeAt ?? null,
@@ -616,6 +628,8 @@ const nextProbeLabel = (card: StatusCard): string => {
                   :provider="card.provider"
                   :is-action-card="card.isActionCard"
                   :state="card.state"
+                  :current-health-result="card.currentHealthResult"
+                  :last-attempt="card.lastAttempt"
                   :latest-latency-ms="card.latestLatencyMs"
                   :last-probe-at="card.lastProbeAt"
                   :last-success-at="card.lastSuccessAt"
@@ -659,6 +673,8 @@ const nextProbeLabel = (card: StatusCard): string => {
                       :provider="card.provider"
                       :is-action-card="card.isActionCard"
                       :state="card.state"
+                  :current-health-result="card.currentHealthResult"
+                  :last-attempt="card.lastAttempt"
                       :latest-latency-ms="card.latestLatencyMs"
                       :last-probe-at="card.lastProbeAt"
                       :last-success-at="card.lastSuccessAt"

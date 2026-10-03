@@ -34,6 +34,8 @@ import type {
   ManualProbeResult,
   ModelHealth,
   QuestionAnswerBatch,
+  QuestionAnswerFinalization,
+  EffectiveTestConfiguration,
   QuestionAnswerJudgment,
   QuestionAnswerReasoningEffort,
   QuestionAnswerHistory,
@@ -72,6 +74,7 @@ export interface ManualProbeTargetSummary {
   status: string
   groupName: string
   formalModels: ManualProbeModelOption[]
+  testConfiguration?: EffectiveTestConfiguration
 }
 
 const props = withDefaults(defineProps<{
@@ -130,6 +133,8 @@ const qaPreferenceDraft = ref<QuestionAnswerSelectionPreferences>(createQuestion
 const qaLoading = ref(false)
 const qaStarting = ref(false)
 const qaCancelling = ref(false)
+const qaFinalization = ref<QuestionAnswerFinalization | null>(null)
+const qaFinalizationUnknown = ref(false)
 const qaRuntimeBatch = ref<QuestionAnswerBatch | null>(null)
 const qaReviewBatch = ref<QuestionAnswerBatch | null>(null)
 const qaReviewBatchSyncFailed = ref(false)
@@ -262,6 +267,8 @@ const questionAnswerHistoryIntentIsCurrent = (sequence: number): boolean => (
 )
 
 const resetQuestionAnswerViewState = () => {
+  qaFinalization.value = null
+  qaFinalizationUnknown.value = false
   qaRuntimeBatch.value = null
   qaReviewBatch.value = null
   qaReviewBatchSyncFailed.value = false
@@ -454,6 +461,14 @@ watch(
     emit('question-answer-viewed', targetId)
     void loadQuestionAnswerData(targetId, sequence)
 
+    // Configuration blocks new tests, but persisted history and recovery remain readable.
+    if (props.target.testConfiguration?.status === 'conflict' || props.target.testConfiguration?.status === 'unavailable') {
+      finishModelDiscovery(controller)
+      onceLoadState.value = 'ready'
+      phase.value = 'ready'
+      return
+    }
+
     const outcome = await discoverModels(targetId, controller.signal)
     finishModelDiscovery(controller)
     if (sequence !== loadSequence || !props.open || props.target?.targetId !== targetId) return
@@ -516,13 +531,15 @@ watch(
 
 const hasModels = computed(() => models.value.length > 0)
 const qaActive = computed(() => Boolean(qaRuntimeBatch.value?.active))
-const qaSelectionLocked = computed(() => qaStarting.value || qaActive.value)
+const qaSelectionLocked = computed(() => qaStarting.value || qaActive.value || Boolean(qaFinalization.value) || qaFinalizationUnknown.value)
+const requestProtocolLabel = (protocol?: string | null) => protocol === 'responses' ? 'Responses' : protocol === 'chat_completions' ? 'Chat Completions' : t('admin.connectionHealth.testConfiguration.legacy')
 const qaSubmission = computed(() => questionAnswerSubmissionSummary(
   selected.value.size,
   qaSelectedQuestions.value.size,
   qaRepeatCount.value,
 ))
 const canStartTest = computed(() => {
+  if (props.target?.testConfiguration?.status === 'conflict' || props.target?.testConfiguration?.status === 'unavailable') return false
   if (!hasModels.value || selected.value.size === 0 || phase.value === 'testing') return false
   if (mode.value !== 'questionAnswer') return true
   return qaSelectedQuestions.value.size > 0
@@ -542,6 +559,8 @@ const qaStartBlockedReason = computed(() => {
     return t(`${prefix}.questionAnswer.batchLimit`, { total: qaSubmission.value.total })
   }
   if (qaStarting.value) return t(`${prefix}.questionAnswer.submitting`)
+  if (qaFinalizationUnknown.value) return t(`${prefix}.questionAnswer.finalizationUnknown`)
+  if (qaFinalization.value) return t(`${prefix}.questionAnswer.finalizationBlocked`)
   if (qaActive.value) return t(`${prefix}.questionAnswer.activeStartBlocked`)
   return ''
 })
@@ -841,6 +860,8 @@ const loadQuestionAnswerData = async (
     qaHistory.value = history
     qaHistoryLoaded.value = true
     qaHistoryIntentPage = history.page
+    qaFinalization.value = batch.finalization ?? null
+    qaFinalizationUnknown.value = false
     qaRuntimeBatch.value = batch.batchId ? batch : null
     qaReviewBatch.value = qaRuntimeBatch.value
     qaReviewBatchSyncFailed.value = false
@@ -874,7 +895,7 @@ const questionAnswerScopeIsCurrent = (scope: QuestionAnswerOperationScope): bool
     open: props.open,
     mode: mode.value,
     targetId: props.target?.targetId ?? null,
-    batchId: qaRuntimeBatch.value?.batchId ?? null,
+    batchId: qaFinalization.value?.batchId ?? qaRuntimeBatch.value?.batchId ?? null,
   })
 )
 
@@ -884,7 +905,9 @@ const questionAnswerPollIsCurrent = (
 ): boolean => pollSequence === qaPollSequence && questionAnswerScopeIsCurrent(scope)
 
 const applyRuntimeQuestionAnswerBatch = (batch: QuestionAnswerBatch) => {
-  qaRuntimeBatch.value = batch
+  qaFinalization.value = batch.finalization ?? null
+  qaFinalizationUnknown.value = false
+  qaRuntimeBatch.value = batch.batchId ? batch : null
   if (!qaReviewBatch.value || qaReviewBatch.value.batchId === batch.batchId) {
     qaReviewBatch.value = batch
     qaReviewBatchSyncFailed.value = false
@@ -984,6 +1007,19 @@ const pollQuestionAnswerBatch = async () => {
   }
 }
 
+const reconcileQuestionAnswerFinalization = async (scope: QuestionAnswerOperationScope, signal: AbortSignal) => {
+  const snapshotSequence = ++qaRuntimeSnapshotSequence
+  try {
+    const batch = await getLatestQuestionAnswerBatch(scope.targetId, signal)
+    if (!questionAnswerScopeIsCurrent(scope) || snapshotSequence !== qaRuntimeSnapshotSequence) return
+    applyRuntimeQuestionAnswerBatch(batch)
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') return
+    if (!questionAnswerScopeIsCurrent(scope) || snapshotSequence !== qaRuntimeSnapshotSequence) return
+    qaFinalizationUnknown.value = true
+  }
+}
+
 const startQuestionAnswers = async () => {
   if (!canStartTest.value || !props.target) return
   cancelQuestionAnswerReview()
@@ -1007,6 +1043,8 @@ const startQuestionAnswers = async () => {
     )
     if (startSequence !== qaStartSequence || !questionAnswerScopeIsCurrent(scope)) return
     qaErrorKey.value = ''
+    qaFinalization.value = batch.finalization ?? null
+    qaFinalizationUnknown.value = false
     qaRuntimeBatch.value = batch
     qaReviewBatch.value = batch
     qaReviewBatchSyncFailed.value = false
@@ -1041,6 +1079,7 @@ const startQuestionAnswers = async () => {
     if (error instanceof Error && error.name === 'AbortError') return
     if (startSequence === qaStartSequence && questionAnswerScopeIsCurrent(scope)) {
       qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+      await reconcileQuestionAnswerFinalization(scope, controller.signal)
     }
   } finally {
     finishRequest(controller)
@@ -1049,9 +1088,11 @@ const startQuestionAnswers = async () => {
 }
 
 const stopQuestionAnswers = async () => {
-  if (!props.target || !qaRuntimeBatch.value?.batchId || qaCancelling.value) return
+  const batchId = qaFinalization.value?.recovery === 'cancel' ? qaFinalization.value.batchId : qaRuntimeBatch.value?.batchId
+  if (!props.target || !batchId || qaCancelling.value || qaFinalizationUnknown.value) return
+  if (qaFinalization.value && qaFinalization.value.recovery !== 'cancel') return
   const targetId = props.target.targetId
-  const batchId = qaRuntimeBatch.value.batchId
+  const runtimeAtCancel = qaRuntimeBatch.value
   const sequence = loadSequence
   const cancelSequence = ++qaCancelSequence
   const scope = { sequence, targetId, batchId }
@@ -1065,10 +1106,7 @@ const stopQuestionAnswers = async () => {
   try {
     const batch = await cancelQuestionAnswerBatch(targetId, batchId, controller.signal)
     if (cancelSequence !== qaCancelSequence || !questionAnswerScopeIsCurrent(scope)) return
-    if (!qaRuntimeBatch.value?.active) {
-      clearQuestionAnswerClock()
-      return
-    }
+    if (qaRuntimeBatch.value !== runtimeAtCancel && !qaRuntimeBatch.value?.active && !qaFinalization.value) return
     const reviewFollowsRuntime = qaReviewLoadingBatchId.value === null
       && qaReviewBatch.value?.batchId === batch.batchId
     applyRuntimeQuestionAnswerBatch(batch)
@@ -1090,17 +1128,15 @@ const stopQuestionAnswers = async () => {
     }
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
-    if (historySequence === null && !qaRuntimeBatch.value?.active) {
-      clearQuestionAnswerClock()
-      return
-    }
+    if (qaRuntimeBatch.value !== runtimeAtCancel && !qaRuntimeBatch.value?.active && !qaFinalization.value) return
     if (
       cancelSequence === qaCancelSequence
       && questionAnswerScopeIsCurrent(scope)
       && (historySequence === null || questionAnswerHistoryIntentIsCurrent(historySequence))
     ) {
       qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
-      if (qaRuntimeBatch.value?.active) scheduleQuestionAnswerPoll()
+      if (historySequence === null) await reconcileQuestionAnswerFinalization(scope, controller.signal)
+      if (qaRuntimeBatch.value?.active && !qaFinalization.value && !qaFinalizationUnknown.value) scheduleQuestionAnswerPoll()
     }
   } finally {
     if (qaCancelController === controller) qaCancelController = null
@@ -1341,6 +1377,8 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
     }
     if (qaRuntimeBatch.value?.batchId === batch.batchId && (qaRuntimeBatch.value.active || !batch.active)) {
       qaRuntimeBatch.value = batch
+      qaFinalization.value = batch.finalization ?? null
+      qaFinalizationUnknown.value = false
     }
     resumeRuntimePolling()
     judgmentRefreshStage = 'history'
@@ -1440,13 +1478,17 @@ const startTest = async () => {
 }
 
 const formalProbeResult = (model: ModelHealth): ManualProbeResult => ({
+  requestPhase: model.requestPhase,
+  protocol: model.requestProtocol,
+  probeTimeoutSeconds: model.requestTimeoutSeconds,
+  probeDisposition: model.probeDisposition,
   modelName: model.modelName,
   result: model.probeResult || model.lastErrorKey || model.state,
-  healthy: model.probeResult === 'ok' || model.probeResult === 'slow_response',
-  latencyMs: model.lastLatencyMs,
-  errorKey: model.probeResult === 'ok' || model.probeResult === 'slow_response' ? '' : (model.probeResult || model.lastErrorKey),
-  errorDetail: model.lastErrorDetail,
-  probedAt: model.updatedAt ?? new Date().toISOString(),
+  healthy: model.probeDisposition !== 'stale' && model.probeDisposition !== 'invalid' && (model.probeResult === 'ok' || model.probeResult === 'slow_response'),
+  latencyMs: model.requestLatencyMs ?? model.lastLatencyMs,
+  errorKey: model.requestErrorKey ?? (model.probeResult === 'ok' || model.probeResult === 'slow_response' ? '' : (model.probeResult || model.lastErrorKey)),
+  errorDetail: model.requestErrorDetail ?? (model.probeDisposition === 'invalid' ? (model.lastAttempt?.errorDetail ?? '') : model.probeDisposition === 'stale' ? '' : model.lastErrorDetail),
+  probedAt: model.requestAt ?? model.updatedAt ?? new Date().toISOString(),
 })
 
 const resultLabel = (result: string): string => readableMessage(result)
@@ -1544,8 +1586,27 @@ const close = () => {
               </button>
             </div>
 
+            <p v-if="target?.testConfiguration" class="mb-3 whitespace-pre-wrap break-words text-xs text-muted-foreground">
+              {{ t('admin.connectionHealth.testConfiguration.' + target.testConfiguration.status) }}<template v-if="target.testConfiguration.protocol"> · {{ requestProtocolLabel(target.testConfiguration.protocol) }}</template><template v-if="target.testConfiguration.probeTimeoutSeconds"> / {{ target.testConfiguration.probeTimeoutSeconds }}s</template>
+              <span v-if="target.testConfiguration.sourceGroups.length"> · {{ target.testConfiguration.sourceGroups.map(source => `${source.adminGroupName || source.adminGroupId}: ${requestProtocolLabel(source.protocol)} / ${source.probeTimeoutSeconds}s`).join('；') }}</span>
+            </p>
+
             <p v-if="mode !== 'questionAnswer'" class="mb-4 text-xs text-muted-foreground">{{ t(`${prefix}.modeDescriptions.${mode}`) }}</p>
             <p v-if="mode !== 'questionAnswer'" class="mb-4 text-xs text-muted-foreground">{{ t(`${prefix}.contractLimit`) }}</p>
+            <p v-if="mode !== 'questionAnswer' && target?.testConfiguration?.protocol === 'responses'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.responsesBudget') }}</p>
+            <p v-if="mode === 'questionAnswer'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.questionAnswerTimeout') }}</p>
+
+            <div v-if="mode === 'questionAnswer' && (qaFinalization || qaFinalizationUnknown)" data-testid="question-answer-finalization" class="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
+              <p v-if="qaFinalizationUnknown">{{ t(prefix + '.questionAnswer.finalizationUnknown') }}</p>
+              <template v-else-if="qaFinalization">
+                <p>{{ t(prefix + '.questionAnswer.' + (qaFinalization.state === 'failed' ? 'finalizationFailed' : 'finalizationPending')) }}</p>
+                <p class="mt-1 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.finalizationBatch', { id: shortQuestionAnswerBatchId(qaFinalization.batchId) }) }}</p>
+                <p v-if="qaFinalization.recovery === 'service_shutdown'" class="mt-1 text-xs">{{ t(prefix + '.questionAnswer.finalizationShutdown') }}</p>
+                <button v-if="qaFinalization.recovery === 'cancel'" data-testid="question-answer-finalization-retry" type="button" class="mt-2 rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium disabled:opacity-50" :disabled="qaCancelling" @click="stopQuestionAnswers">
+                  {{ t(prefix + '.questionAnswer.finalizationRetry') }}
+                </button>
+              </template>
+            </div>
 
             <div v-if="phase === 'loading'" class="flex flex-col items-center justify-center gap-2 py-16 text-center">
               <Loader2 class="h-6 w-6 animate-spin text-primary/60" />
@@ -1561,7 +1622,7 @@ const close = () => {
             </div>
 
             <template v-else>
-              <div v-if="!hasModels" class="flex flex-col items-center justify-center gap-2 py-16 text-center">
+              <div v-if="!hasModels && mode !== 'questionAnswer'" class="flex flex-col items-center justify-center gap-2 py-16 text-center">
                 <ShieldAlert class="h-8 w-8 text-muted-foreground/40" />
                 <p class="text-sm text-muted-foreground">{{ t(`${prefix}.empty`) }}</p>
               </div>
@@ -1585,6 +1646,7 @@ const close = () => {
                   :today-stats="qaHistory.todayStats"
                   :lifetime-stats="qaHistory.stats"
                 />
+                <p v-if="mode === 'questionAnswer'" class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.protocolSummary') }}</p>
                 <template v-if="mode === 'questionAnswer'">
                   <section data-question-answer-section="pending" data-testid="question-answer-pending" class="rounded-lg border border-border/50 bg-card p-3">
                     <div class="flex flex-wrap items-center justify-between gap-3">
@@ -1607,7 +1669,7 @@ const close = () => {
                         <button v-if="qaRuntimeBatch && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line" @click="reviewLatestQuestionAnswerBatch">
                           {{ t(prefix + '.questionAnswer.reviewLatestBatch') }}
                         </button>
-                        <button v-if="qaRuntimeBatch?.active" type="button" class="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400" :disabled="qaCancelling" @click="stopQuestionAnswers">
+                        <button v-if="qaRuntimeBatch?.active && !qaFinalization && !qaFinalizationUnknown" type="button" class="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400" :disabled="qaCancelling" @click="stopQuestionAnswers">
                           <Loader2 v-if="qaCancelling" class="h-3.5 w-3.5 animate-spin" />
                           <StopCircle v-else class="h-3.5 w-3.5" />
                           {{ t(prefix + '.questionAnswer.stop') }}
@@ -1635,7 +1697,7 @@ const close = () => {
                           <div class="flex items-start justify-between gap-3">
                             <div class="min-w-0">
                               <p class="text-sm font-semibold text-foreground">{{ record.questionName }}</p>
-                              <p class="mt-0.5 text-xs text-muted-foreground">{{ record.modelName }}</p>
+                              <p class="mt-0.5 text-xs text-muted-foreground">{{ record.modelName }} · {{ requestProtocolLabel(record.requestProtocol) }}</p>
                             </div>
                             <span v-if="questionAnswerElapsedLabel(record)" class="shrink-0 text-xs text-muted-foreground">{{ questionAnswerElapsedLabel(record) }}</span>
                           </div>
@@ -1689,7 +1751,7 @@ const close = () => {
                             <div class="flex items-center justify-between gap-3">
                               <div class="min-w-0">
                                 <p class="truncate text-sm font-semibold text-foreground">{{ record.questionName }}</p>
-                                <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ record.modelName }}</p>
+                                <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ record.modelName }} · {{ requestProtocolLabel(record.requestProtocol) }}</p>
                               </div>
                               <span class="shrink-0 text-xs text-muted-foreground">{{ questionAnswerStatusLabel(record) }}</span>
                             </div>
@@ -1731,7 +1793,7 @@ const close = () => {
                             <div class="flex items-center justify-between gap-3">
                               <div class="min-w-0">
                                 <p class="truncate text-sm font-medium text-foreground">{{ record.questionName }}</p>
-                                <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ record.modelName }}</p>
+                                <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ record.modelName }} · {{ requestProtocolLabel(record.requestProtocol) }}</p>
                                 <p class="mt-1 text-xs text-foreground">{{ record.questionBody }}</p>
                               </div>
                               <span class="shrink-0 text-xs text-red-600 dark:text-red-400">{{ questionAnswerErrorLabel(record.errorType) }}</span>
@@ -1864,7 +1926,7 @@ const close = () => {
                               <div class="flex items-center justify-between gap-3">
                                 <button type="button" class="min-w-0 flex-1 text-left" @click="toggleQuestionAnswerExpanded(record.id)">
                                   <p class="truncate text-xs font-medium text-foreground">{{ record.questionName }}</p>
-                                  <p class="mt-0.5 truncate text-[11px] text-muted-foreground">{{ record.modelName }} · {{ answerSummary(record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(prefix + '.questionAnswer.noAnswer'))) }}</p>
+                                  <p class="mt-0.5 truncate text-[11px] text-muted-foreground">{{ record.modelName }} · {{ requestProtocolLabel(record.requestProtocol) }} · {{ answerSummary(record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(prefix + '.questionAnswer.noAnswer'))) }}</p>
                                 </button>
                                 <div class="flex shrink-0 items-center gap-2">
                                   <div v-if="record.status === 'succeeded'" class="grid gap-2">
@@ -1921,20 +1983,23 @@ const close = () => {
                     <ul v-else class="space-y-2">
                       <li v-for="result in results" :key="result.modelName" class="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/40 px-3 py-2.5">
                         <div class="flex min-w-0 items-center gap-2">
-                          <AlertTriangle v-if="resultIsSlow(result)" class="h-4 w-4 shrink-0 text-amber-500" />
+                          <AlertTriangle v-if="result.probeDisposition === 'stale' || resultIsSlow(result)" class="h-4 w-4 shrink-0 text-amber-500" />
                           <CheckCircle2 v-else-if="result.healthy" class="h-4 w-4 shrink-0 text-green-500" />
                           <XCircle v-else class="h-4 w-4 shrink-0 text-red-500" />
                           <span class="truncate text-sm font-medium text-foreground">{{ result.modelName }}</span>
                           <span class="inline-flex shrink-0 items-center gap-1 rounded-full bg-surface-elevated px-2 py-0.5 text-xs text-muted-foreground">
-                            <span class="h-1.5 w-1.5 rounded-full" :class="connectionHealthRecordColorClass(result.result)" />
-                            {{ resultLabel(result.result) }}
+                            <span class="h-1.5 w-1.5 rounded-full" :class="result.probeDisposition === 'stale' ? 'bg-muted-foreground' : connectionHealthRecordColorClass(result.result)" />
+                            {{ result.probeDisposition === 'stale' ? t('admin.connectionHealth.testConfiguration.stale') : resultLabel(result.result) }}
                           </span>
                         </div>
                         <div class="flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
+                          <span>{{ requestProtocolLabel(result.protocol) }}<template v-if="result.probeTimeoutSeconds"> / {{ result.probeTimeoutSeconds }}s</template></span>
+                          <span v-if="result.configurationChanged">{{ t('admin.connectionHealth.testConfiguration.changed') }}</span>
+                          <span v-if="result.requestPhase === 'waiting_headers' || result.requestPhase === 'reading_body'">{{ t('admin.connectionHealth.testConfiguration.requestPhases.' + result.requestPhase) }}</span>
                           <span v-if="result.latencyMs !== null">{{ t(`${prefix}.latency`, { ms: result.latencyMs }) }}</span>
                           <span>{{ formatConnectionHealthTime(result.probedAt) }}</span>
                         </div>
-                        <p v-if="!result.healthy && result.errorDetail" class="w-full truncate text-xs text-red-500/80">{{ result.errorDetail }}</p>
+                        <p v-if="!result.healthy && result.errorDetail" class="w-full whitespace-pre-wrap break-words text-xs text-red-500/80">{{ result.errorDetail }}</p>
                       </li>
                     </ul>
                   </div>

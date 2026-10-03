@@ -98,6 +98,7 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal
     refreshConnectionState: ref('connected'),
   }
   return {
+    ...actual,
     connectionHealthMessageKey: actual.connectionHealthMessageKey,
     connectionHealthStateBadgeClass: () => '',
     formatConnectionHealthTime: (value: string | null) => value ?? '-',
@@ -1304,5 +1305,142 @@ describe('ConnectionHealthView quick formal probe session behavior', () => {
     expect(harness.loadAdminGroups).not.toHaveBeenCalled()
     expect((harness.refs.adminGroups.value as AdminGroupHealth[])[0].accounts[0].modelHealth[0].lastSuccessLatencyMs).toBe(120)
     expect((harness.refs.adminGroups.value as AdminGroupHealth[])[0].accounts[1].modelHealth[0].lastSuccessLatencyMs).toBe(120)
+  })
+})
+
+
+describe('protocol and unresolved remote action safety display', () => {
+  it('expands only the models belonging to the selected current-state filter in a mixed account and preserves old unconfigured accounts', async () => {
+    const mixed = makeAccount({ name: 'Mixed account', modelHealth: [
+      makeModel({ modelName: 'old-healthy-pending', currentHealthResult: { status: 'unverified' } }),
+      makeModel({ modelName: 'current-healthy', currentHealthResult: { status: 'success' } }),
+    ] })
+    const oldUnconfigured = makeAccount({ id: 'old-unconfigured', targetId: 'sub2api:ws1:old-unconfigured', name: 'Old unconfigured account', probeModelsConfigured: false, modelHealth: [] })
+    const wrapper = mountDetail([mixed, oldUnconfigured])
+    const group = makeGroup([mixed, oldUnconfigured])
+    group.healthSummary.healthyModels = 1
+    group.healthSummary.unconfiguredModels = 2
+    await wrapper.setProps({ group })
+    const breakdown = wrapper.get('section[aria-label="当前分组探活状态"]')
+    await buttonByText(breakdown, '健康').trigger('click')
+    await buttonByAria(rowFor(wrapper, mixed.name), '展开模型结果').trigger('click')
+    expect(wrapper.findAll('tbody > tr')[1].text()).toContain('current-healthy')
+    expect(wrapper.findAll('tbody > tr')[1].text()).not.toContain('old-healthy-pending')
+    expect(wrapper.text()).not.toContain(oldUnconfigured.name)
+    await buttonByText(breakdown, '未配置').trigger('click')
+    await buttonByAria(rowFor(wrapper, mixed.name), '展开模型结果').trigger('click')
+    expect(wrapper.findAll('tbody > tr').find(row => row.text().includes('old-healthy-pending'))?.text()).not.toContain('current-healthy')
+    expect(wrapper.text()).toContain('old-healthy-pending')
+    expect(wrapper.text()).toContain(oldUnconfigured.name)
+  })
+
+  it('keeps the old credential-unavailable entry disabled even with a configuration conflict', async () => {
+    const account = makeAccount({ probeAvailable: false, probeUnavailableReason: 'credential_unavailable', testConfiguration: { status: 'conflict', sourceGroups: [] } })
+    const wrapper = await mountView([makeGroup([account])])
+    const entry = buttonByAria(rowFor(wrapper, account.name), '手动探活')
+    expect(entry.attributes('disabled')).toBeDefined()
+    await entry.trigger('click'); await flushPromises()
+    expect(wrapper.find('[data-test="manual-probe-dialog"]').exists()).toBe(false)
+  })
+
+  it.each([
+    ['testConfigurationUnavailable', '成员资料或测试配置无法确认，暂不能发起新测试。'],
+    ['currentProtocolUnverified', '当前协议待验证，历史状态暂不用于新的健康动作。'],
+  ])('renders the server %s error in the existing result area', async (key, message) => {
+    const account = makeAccount()
+    harness.probeTargetWithProgress.mockRejectedValue(new Error(`admin.connectionHealth.errors.${key}`))
+    const wrapper = await mountView([makeGroup([account])])
+    await buttonByAria(rowFor(wrapper, account.name), '一键正式探活：gpt-5.6-sol').trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain(message)
+    expect(wrapper.text()).not.toContain(`admin.connectionHealth.errors.${key}`)
+    expect(wrapper.text()).not.toContain('暂时无法读取分组健康数据')
+  })
+
+  it('filters current unverified models separately from historical healthy states', async () => {
+    const pending = makeAccount({ id: 'pending', targetId: 'sub2api:ws1:pending', name: '当前协议待验证账号',
+      modelHealth: [makeModel({ currentHealthResult: { status: 'unverified' } })],
+    })
+    const healthy = makeAccount({ id: 'current', targetId: 'sub2api:ws1:current', name: '当前协议已验证账号',
+      modelHealth: [makeModel({ currentHealthResult: { status: 'success', protocol: 'responses' } })],
+    })
+    const wrapper = mountDetail([pending, healthy])
+    const group = makeGroup([pending, healthy])
+    group.healthSummary.healthyModels = 1
+    group.healthSummary.unconfiguredModels = 1
+    await wrapper.setProps({ group })
+    const breakdown = wrapper.get('section[aria-label="当前分组探活状态"]')
+    await buttonByText(breakdown, '健康').trigger('click')
+    expect(wrapper.findAll('tbody > tr').map(row => row.text()).join(' ')).toContain(healthy.name)
+    expect(wrapper.findAll('tbody > tr').map(row => row.text()).join(' ')).not.toContain(pending.name)
+    await buttonByText(breakdown, '未配置').trigger('click')
+    expect(wrapper.findAll('tbody > tr').map(row => row.text()).join(' ')).toContain(pending.name)
+    expect(wrapper.findAll('tbody > tr').map(row => row.text()).join(' ')).not.toContain(healthy.name)
+  })
+
+  it.each(['conflict', 'unavailable'] as const)('keeps the existing question-answer dialog reachable when configuration is %s', async status => {
+    const account = makeAccount({ probeAvailable: false, probeUnavailableReason: 'test_configuration_unavailable',
+      testConfiguration: { status, sourceGroups: [], blockedReason: 'admin.connectionHealth.errors.testConfigurationUnavailable' },
+    })
+    const wrapper = await mountView([makeGroup([account])])
+    const row = rowFor(wrapper, account.name)
+    const historyEntry = buttonByAria(row, '手动探活')
+    expect(historyEntry.attributes('disabled')).toBeUndefined()
+    await historyEntry.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="manual-probe-dialog"]').text()).toContain(account.name)
+    expect(buttonByAriaFragment(row, '一键正式探活').attributes('disabled')).toBeDefined()
+    expect(harness.probeTargetWithProgress).not.toHaveBeenCalled()
+  })
+
+  it('shows the server configuration-conflict explanation without a raw key or generic fallback', async () => {
+    const account = makeAccount()
+    harness.probeTargetWithProgress.mockRejectedValue(new Error('admin.connectionHealth.errors.testConfigurationConflict'))
+    const wrapper = await mountView([makeGroup([account])])
+    await buttonByAria(rowFor(wrapper, account.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('所属分组的测试协议或超时冲突，请在分组设置中统一配置。')
+    expect(wrapper.text()).not.toContain('admin.connectionHealth.errors.testConfigurationConflict')
+    expect(wrapper.text()).not.toContain('暂时无法读取分组健康数据')
+  })
+
+  it('keeps unresolved visible and invisible targets in the existing status area without a clear control', async () => {
+    harness.getPrioritySyncStatus.mockResolvedValue({ workspaceId: 'ws1', status: 'success', failedCount: 0, actionDiagnostics: [
+      { targetId: 'sub2api:ws1:missing', action: 'priority', dispatchId: 'dispatch-missing', phase: 'uncertain', reason: 'target_not_visible' },
+      { targetId: 'sub2api:ws1:visible', action: 'target', dispatchId: 'dispatch-visible', phase: 'sending', reason: 'pending' },
+    ] })
+    const account = makeAccount({ remoteActionPending: { action: 'target', dispatchId: 'dispatch-visible', phase: 'sending', reason: 'pending' } })
+    const wrapper = await mountView([makeGroup([account])])
+    const diagnostics = wrapper.get('[data-testid="remote-action-diagnostics"]')
+    expect(diagnostics.text()).toContain('账号已离组，当前值无法核对，需人工处理')
+    expect(diagnostics.text()).toContain('dispatch-missing')
+    expect(diagnostics.text()).toContain('远端动作待确认')
+    expect(diagnostics.findAll('button')).toHaveLength(0)
+    expect(rowFor(wrapper, account.name).text()).toContain('dispatch-visible')
+  })
+
+  it('blocks a conflicted quick probe and explains its protocol sources', async () => {
+    const account = makeAccount({ testConfiguration: { status: 'conflict', blockedReason: 'admin.connectionHealth.errors.testConfigurationConflict', sourceGroups: [
+      { adminGroupId: 'g1', adminGroupName: 'Source One', protocol: 'responses', probeTimeoutSeconds: 30 },
+      { adminGroupId: 'g2', adminGroupName: 'Source Two', protocol: 'responses', probeTimeoutSeconds: 20 },
+    ] } })
+    const wrapper = mountDetail([account])
+    const button = buttonByAriaFragment(rowFor(wrapper, account.name), '一键正式探活')
+    expect(button.attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('配置冲突')
+    expect(wrapper.text()).toContain('Source One: Responses / 30s')
+    expect(wrapper.text()).toContain('Source Two: Responses / 20s')
+    await button.trigger('click')
+    expect(wrapper.emitted('quick-probe')).toBeUndefined()
+  })
+
+  it('labels stale formal completion without merging its old state or showing success', async () => {
+    const account = makeAccount({ modelHealth: [makeModel({ currentWeight: 45, state: 'degraded' })] })
+    harness.probeTargetWithProgress.mockResolvedValue([{ ...successResult(123), probeDisposition: 'stale', requestProtocol: 'chat_completions', requestTimeoutSeconds: 10 }])
+    const wrapper = await mountView([makeGroup([account])])
+    await buttonByAria(rowFor(wrapper, account.name), '一键正式探活：gpt-5.6-sol').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('过期尝试')
+    expect(wrapper.find('.quick-probe-success-row').exists()).toBe(false)
+    expect(harness.refs.adminGroups.value[0].accounts[0].modelHealth[0].currentWeight).toBe(45)
   })
 })

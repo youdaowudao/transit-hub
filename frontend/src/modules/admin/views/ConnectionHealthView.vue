@@ -21,7 +21,7 @@ import { Button } from '@/components/ui/button'
 import { getPrioritySyncStatus, probeTargetWithProgress } from '../api/connectionHealth'
 import type { AdminGroupsRefreshSite, ProbeTargetProgressPhase } from '../api/connectionHealth'
 import { listUpstreamSites } from '../api/upstream'
-import { connectionHealthMessageKey, useConnectionHealth } from '../composables/useConnectionHealth'
+import { canOpenManualProbeHistory, connectionHealthMessageKey, testProtocolName, useConnectionHealth } from '../composables/useConnectionHealth'
 import { createRefreshCoordinator } from '../utils/connectionHealthRefresh'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import AdminGroupHealthDetail from '../components/dashboard/AdminGroupHealthDetail.vue'
@@ -126,6 +126,8 @@ type QuickProbeSessionIdentity = {
   controller: AbortController
 }
 type QuickProbeSuccess = {
+  protocol?: string | null
+  timeoutSeconds?: number | null
   modelName: string
   latencyMs: number
 }
@@ -829,7 +831,7 @@ watch(() => {
 })
 
 const onProbeAccount = (account: AdminGroupAccount) => {
-  if (!selectedGroup.value || !account.probeAvailable) return
+  if (!selectedGroup.value || !canOpenManualProbeHistory(account)) return
   const formalModelMap = new Map<string, { id: string; name: string; providerFamily?: string }>()
   if (account.hasEnabledProbePolicy) {
     for (const model of [...(account.modelHealth ?? []), ...(account.unprobedModels ?? [])]) {
@@ -849,6 +851,7 @@ const onProbeAccount = (account: AdminGroupAccount) => {
     status: account.status,
     groupName: selectedGroup.value.name,
     formalModels: Array.from(formalModelMap.values()),
+    testConfiguration: account.testConfiguration,
   }
   probeDialogOpen.value = true
 }
@@ -892,6 +895,7 @@ const mergeQuickProbeResults = (targetId: string, results: ModelHealth[]) => {
       const modelHealth = [...(account.modelHealth ?? [])]
       let unprobedModels = [...(account.unprobedModels ?? [])]
       for (const result of results) {
+        if (result.probeDisposition === 'stale') continue
         const existingIndex = modelHealth.findIndex(model => model.modelName === result.modelName)
         const projected = existingIndex >= 0
           ? modelHealth[existingIndex]
@@ -911,15 +915,26 @@ const mergeQuickProbeResults = (targetId: string, results: ModelHealth[]) => {
 }
 
 const applyQuickProbeResultError = (targetId: string, results: ModelHealth[]): boolean => {
+  const requestMetadata = (result: ModelHealth): string => {
+    if (!result.requestProtocol) return ''
+    const phase = result.requestPhase === 'waiting_headers' || result.requestPhase === 'reading_body'
+      ? ` · ${t('admin.connectionHealth.testConfiguration.requestPhases.' + result.requestPhase)}` : ''
+    return ` · ${testProtocolName(result.requestProtocol)}${result.requestTimeoutSeconds ? ` / ${result.requestTimeoutSeconds}s` : ''}${result.requestLatencyMs != null ? ` · ${result.requestLatencyMs}ms` : ''}${phase}`
+  }
+  const stale = results.find(result => result.probeDisposition === 'stale')
+  if (stale) {
+    setQuickProbeError(targetId, t('admin.connectionHealth.testConfiguration.stale') + ' · ' + t('admin.connectionHealth.testConfiguration.changed') + requestMetadata(stale))
+    return true
+  }
   const failure = results.find(result => !['ok', 'slow_response'].includes(result.probeResult ?? ''))
   if (!failure) {
     clearQuickProbeError(targetId)
     return false
   }
-  const detail = failure.lastErrorDetail ?? ''
+  const detail = failure.requestErrorDetail ?? (failure.probeDisposition === 'invalid' ? (failure.lastAttempt?.errorDetail ?? '') : (failure.lastErrorDetail ?? ''))
   setQuickProbeError(
     targetId,
-    detail.trim() ? detail : safeQuickProbeErrorMessage(failure.lastErrorKey || 'admin.connectionHealth.errors.unknown'),
+    (detail.trim() ? detail : safeQuickProbeErrorMessage(failure.requestErrorKey || failure.lastErrorKey || 'admin.connectionHealth.errors.unknown')) + requestMetadata(failure),
   )
   return true
 }
@@ -927,7 +942,7 @@ const applyQuickProbeResultError = (targetId: string, results: ModelHealth[]): b
 const onQuickProbeAccount = async (account: AdminGroupAccount) => {
   if (quickProbeSessions.has(account.targetId)) return
   const model = defaultQuickProbeModel(account)
-  if (!account.probeAvailable || !account.hasEnabledProbePolicy || !model) return
+  if (!account.probeAvailable || !account.hasEnabledProbePolicy || !model || account.testConfiguration?.status === 'conflict' || account.testConfiguration?.status === 'unavailable') return
 
   const controller = new AbortController()
   const identity: QuickProbeSessionIdentity = {
@@ -969,7 +984,7 @@ const onQuickProbeAccount = async (account: AdminGroupAccount) => {
         && Number.isFinite(result.lastLatencyMs)
       ))
       if (completed?.lastLatencyMs != null) {
-        setQuickProbeSuccess(account.targetId, { modelName: completed.modelName, latencyMs: completed.lastLatencyMs })
+        setQuickProbeSuccess(account.targetId, { modelName: completed.modelName, latencyMs: completed.requestLatencyMs ?? completed.lastLatencyMs, protocol: completed.requestProtocol, timeoutSeconds: completed.requestTimeoutSeconds })
       }
     }
     await reloadQuickProbeAuthoritatively(identity)
@@ -1220,7 +1235,12 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       </p>
     </div>
 
-		<div
+		<div v-if="prioritySyncStatus?.actionDiagnostics?.length" data-testid="remote-action-diagnostics" class="mb-4 space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-800 dark:text-amber-300" role="status">
+        <p v-for="diagnostic in prioritySyncStatus.actionDiagnostics" :key="`${diagnostic.targetId}:${diagnostic.action}:${diagnostic.dispatchId || ''}:${diagnostic.reason}`" class="whitespace-pre-wrap break-words">
+          {{ t('admin.connectionHealth.testConfiguration.' + (diagnostic.reason === 'target_not_visible' ? 'targetNotVisible' : 'remoteActionPending')) }} · {{ diagnostic.targetId }} · {{ diagnostic.action }}<template v-if="diagnostic.dispatchId"> · {{ diagnostic.dispatchId }}</template>
+        </p>
+      </div>
+      <div
 			v-if="prioritySyncStatus?.status === 'failed' || prioritySyncStatus?.status === 'partial'"
 			class="flex items-start gap-3 rounded-lg border px-4 py-3 text-sm"
 			:class="prioritySyncStatus.status === 'partial'

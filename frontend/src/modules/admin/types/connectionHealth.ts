@@ -1,3 +1,45 @@
+export type TestProtocol = 'chat_completions' | 'responses'
+export interface GroupTestConfiguration {
+  protocol: TestProtocol
+  probeTimeoutSeconds: number
+}
+export interface TestConfigurationSource extends GroupTestConfiguration {
+  adminGroupId: string
+  adminGroupName: string
+}
+export interface EffectiveTestConfiguration {
+  protocol?: TestProtocol
+  probeTimeoutSeconds?: number
+  status: 'default' | 'inherited' | 'conflict' | 'unavailable'
+  sourceGroups: TestConfigurationSource[]
+  blockedReason?: string
+}
+export interface AdminGroupTestConfiguration {
+  adminGroupId: string
+  adminGroupName: string
+  configuration: GroupTestConfiguration | null
+  inventoryComplete: boolean
+  affectedAccountCount: number
+  conflictAccountCount: number
+  accounts: Array<{ targetId: string; accountName: string; testConfiguration: EffectiveTestConfiguration }>
+}
+export interface CurrentHealthResult {
+  protocol?: TestProtocol
+  status: 'failure' | 'success' | 'unverified'
+  at?: string | null
+  errorKey?: string
+  errorDetail?: string
+}
+export interface TestAttempt {
+  at?: string | null
+  protocol?: TestProtocol | null
+  probeTimeoutSeconds?: number | null
+  disposition?: 'applied' | 'invalid' | 'stale'
+  result?: string
+  errorKey?: string
+  errorDetail?: string
+}
+
 // 与后端 backend/internal/modules/connection_health 的 JSON 响应字段一一对应。
 // 所有类型都不含 upstream key 明文字段。
 
@@ -10,6 +52,18 @@ export type ConnectionHealthState =
   | 'disabled'
 
 export interface ModelHealth {
+  credentialUnavailableAt?: string | null
+  credentialUnavailableReason?: string
+  requestPhase?: 'waiting_headers' | 'reading_body' | string
+  requestLatencyMs?: number | null
+  requestAt?: string | null
+  requestErrorKey?: string
+  requestErrorDetail?: string
+  requestProtocol?: TestProtocol | null
+  requestTimeoutSeconds?: number | null
+  probeDisposition?: 'applied' | 'invalid' | 'stale' | null
+  currentHealthResult?: CurrentHealthResult
+  lastAttempt?: TestAttempt
   modelName: string
   providerFamily: string
   configured: boolean
@@ -177,6 +231,8 @@ export interface AccountTierResult {
 }
 
 export interface AdminGroupAccount {
+  remoteActionPending?: { action: string; dispatchId?: string; phase: string; reason: string }
+  testConfiguration?: EffectiveTestConfiguration
   id: string
   name: string
   platform: string
@@ -296,6 +352,10 @@ export interface AdminPriorityConflict {
 }
 
 export interface ConnectionHealthEvent {
+  requestPhase?: 'waiting_headers' | 'reading_body' | string
+  requestProtocol?: TestProtocol | null
+  requestTimeoutSeconds?: number | null
+  probeDisposition?: 'applied' | 'invalid' | 'stale' | null
   id: string
   connectionId: string
   modelName: string
@@ -405,6 +465,11 @@ export interface ManualProbeModelOption {
 // ManualProbeResult 是手动一次性探活单个模型的 transient 结果：只用于弹窗内展示，
 // 不对应任何落库的状态/事件记录。
 export interface ManualProbeResult {
+  requestPhase?: 'waiting_headers' | 'reading_body' | string
+  protocol?: TestProtocol | null
+  probeTimeoutSeconds?: number | null
+  probeDisposition?: 'applied' | 'invalid' | 'stale' | null
+  configurationChanged?: boolean
   modelName: string
   result: string
   healthy: boolean
@@ -436,6 +501,7 @@ export type QuestionAnswerReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 export type QuestionAnswerJudgment = 'unreviewed' | 'correct' | 'incorrect'
 
 export interface QuestionAnswerRecord {
+  requestProtocol?: TestProtocol | null
   id: string
   targetId: string
   batchId: string
@@ -492,7 +558,14 @@ export interface QuestionAnswerHistory {
   todayStats: QuestionAnswerStats
 }
 
+export interface QuestionAnswerFinalization {
+  batchId: string
+  state: 'pending' | 'failed'
+  recovery: 'cancel' | 'service_shutdown' | 'unavailable'
+}
+
 export interface QuestionAnswerBatch {
+  finalization?: QuestionAnswerFinalization | null
   batchId: string
   records: QuestionAnswerRecord[]
   reasoningEffort: QuestionAnswerReasoningEffort | null
@@ -554,6 +627,7 @@ export interface AdminGroupPolicyConfiguration {
 }
 
 export interface PrioritySyncStatus {
+  actionDiagnostics?: Array<{ targetId: string; action: string; dispatchId?: string; phase: string; reason: string; observedAt?: string }>
 	workspaceId: string
 	status: 'idle' | 'pending' | 'running' | 'partial' | 'success' | 'failed' | string
 	errorKey?: string

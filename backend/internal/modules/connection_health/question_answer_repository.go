@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"transithub/backend/internal/modules/upstream"
 )
 
 var (
@@ -42,7 +44,7 @@ type questionAnswerRepository interface {
 	SetTestQuestionEnabled(ctx context.Context, userID string, questionID string, enabled bool) (*TestQuestion, error)
 	SetDefaultTestQuestion(ctx context.Context, userID string, questionID string) (*TestQuestion, error)
 	DeleteTestQuestion(ctx context.Context, userID string, questionID string) (bool, error)
-	CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort, repeatCount int) ([]QuestionAnswerRecord, error)
+	CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort, repeatCount int, snapshots ...QuestionAnswerConfigurationSnapshot) ([]QuestionAnswerRecord, error)
 	MarkQuestionAnswerRunning(ctx context.Context, userID string, batchID string, recordID string) (bool, error)
 	CompleteQuestionAnswer(ctx context.Context, userID string, batchID string, recordID string, status QuestionAnswerStatus, answerBody string, errorType string) (bool, error)
 	StopPendingQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error)
@@ -183,8 +185,23 @@ func scanTestQuestion(row rowScanner) (*TestQuestion, error) {
 	return &question, nil
 }
 
-func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort, repeatCount int) ([]QuestionAnswerRecord, error) {
-	tx, err := r.db.Begin(ctx)
+func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort, repeatCount int, snapshots ...QuestionAnswerConfigurationSnapshot) ([]QuestionAnswerRecord, error) {
+	adminAccountID := ""
+	requiresSnapshot := false
+	if parsed, ok := parseTargetID(targetID); ok {
+		adminAccountID = parsed.adminAccountID
+		requiresSnapshot = parsed.platform == string(upstream.PlatformSub2API)
+	}
+	if len(snapshots) > 1 || (requiresSnapshot && len(snapshots) != 1) {
+		return nil, requestError(ErrorTestConfigurationUnavailable)
+	}
+	if len(snapshots) == 1 {
+		snapshot := snapshots[0]
+		if snapshot.AdminAccountID == "" || snapshot.AdminAccountID != adminAccountID || !snapshot.InventoryComplete {
+			return nil, requestError(ErrorTestConfigurationUnavailable)
+		}
+	}
+	tx, err := r.beginWorkspaceTransaction(ctx, userID, adminAccountID)
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +210,18 @@ func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID strin
 	lockKey := fmt.Sprintf("question-answer|%s|%s", userID, targetID)
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
 		return nil, err
+	}
+	protocol := TestProtocolChatCompletions
+	if len(snapshots) == 1 {
+		configurations, err := listGroupTestConfigurationsTx(ctx, tx, userID, adminAccountID)
+		if err != nil {
+			return nil, err
+		}
+		configuration := ResolveGroupTestConfiguration(snapshots[0].Memberships, snapshots[0].InventoryComplete, configurations)
+		if !configuration.usable() {
+			return nil, requestError(configuration.BlockedReason)
+		}
+		protocol = configuration.Protocol
 	}
 	var active bool
 	if err := tx.QueryRow(ctx, `
@@ -243,7 +272,7 @@ func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID strin
 					return nil, err
 				}
 				record := QuestionAnswerRecord{
-					ID: recordID, TargetID: targetID, BatchID: batchID, ModelName: model,
+					ID: recordID, TargetID: targetID, BatchID: batchID, ModelName: model, RequestProtocol: &protocol,
 					QuestionID: question.ID, QuestionName: question.Name, QuestionBody: question.Body,
 					QuestionKeywordSnapshot: append([]string{}, question.Keywords...),
 					ReasoningEffort:         questionAnswerReasoningEffortPointer(reasoningEffort),
@@ -252,10 +281,10 @@ func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID strin
 				if err := tx.QueryRow(ctx, `
 					INSERT INTO connection_health_question_answer_records (
 						id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body,
-						question_keyword_snapshot, reasoning_effort, status
-					) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
+						question_keyword_snapshot, reasoning_effort, request_protocol, status
+					) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending')
 					RETURNING created_at, updated_at
-				`, record.ID, userID, record.TargetID, record.BatchID, record.ModelName, record.QuestionID, record.QuestionName, record.QuestionBody, record.QuestionKeywordSnapshot, reasoningEffort).Scan(&record.CreatedAt, &record.UpdatedAt); err != nil {
+				`, record.ID, userID, record.TargetID, record.BatchID, record.ModelName, record.QuestionID, record.QuestionName, record.QuestionBody, record.QuestionKeywordSnapshot, reasoningEffort, protocol).Scan(&record.CreatedAt, &record.UpdatedAt); err != nil {
 					return nil, err
 				}
 				records = append(records, record)
@@ -534,14 +563,14 @@ func (r *Repository) SetQuestionAnswerJudgment(ctx context.Context, userID strin
 			END
 		WHERE id = $1 AND user_id = $2 AND target_id = $3 AND status = 'succeeded'
 		RETURNING id, target_id, batch_id, model_name, question_id, question_name, question_body, question_keyword_snapshot,
-			reasoning_effort, answer_body, status, error_type, answer_judgment, created_at, started_at, completed_at, updated_at
+			reasoning_effort, answer_body, status, error_type, answer_judgment, created_at, started_at, completed_at, updated_at, request_protocol
 	`, recordID, userID, targetID, judgment)
 	return scanQuestionAnswerRecord(row)
 }
 
 const questionAnswerRecordSelect = `
 	SELECT id, target_id, batch_id, model_name, question_id, question_name, question_body, question_keyword_snapshot,
-		reasoning_effort, answer_body, status, error_type, answer_judgment, created_at, started_at, completed_at, updated_at
+		reasoning_effort, answer_body, status, error_type, answer_judgment, created_at, started_at, completed_at, updated_at, request_protocol
 	FROM connection_health_question_answer_records
 `
 
@@ -564,12 +593,15 @@ func scanQuestionAnswerRecord(row rowScanner) (*QuestionAnswerRecord, error) {
 		&record.ID, &record.TargetID, &record.BatchID, &record.ModelName, &record.QuestionID,
 		&record.QuestionName, &record.QuestionBody, &record.QuestionKeywordSnapshot, &reasoningEffort, &record.AnswerBody, &record.Status,
 		&record.ErrorType, &record.AnswerJudgment, &record.CreatedAt, &record.StartedAt,
-		&record.CompletedAt, &record.UpdatedAt,
+		&record.CompletedAt, &record.UpdatedAt, &record.RequestProtocol,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if record.RequestProtocol != nil && !validTestProtocol(*record.RequestProtocol) {
+		return nil, fmt.Errorf("invalid question answer protocol snapshot")
 	}
 	if reasoningEffort != nil {
 		normalized, err := normalizeQuestionAnswerReasoningEffort(*reasoningEffort)

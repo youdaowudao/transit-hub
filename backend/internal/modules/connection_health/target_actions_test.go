@@ -28,6 +28,7 @@ func sub2APISuspendedTargetFixture(repo *fakeRepository, accountID string) Admin
 	}
 	return AdminProbeTarget{
 		TargetID: targetID, Platform: string(upstream.PlatformSub2API), AccountID: accountID, AccountStatus: "active", Schedulable: boolPointer(true),
+		InventoryComplete: true, TestConfiguration: defaultTestConfiguration(), TestMemberships: []TestConfigurationSource{{AdminGroupID: "g1"}},
 	}
 }
 
@@ -44,8 +45,9 @@ func sub2APITestInventory(groups ...adminInventoryGroup) *adminWorkspaceInventor
 		}
 	}
 	return &adminWorkspaceInventory{
-		session: upstream.Session{Platform: upstream.PlatformSub2API},
-		groups:  knownGroups,
+		session:        upstream.Session{Platform: upstream.PlatformSub2API},
+		groups:         knownGroups,
+		groupsComplete: true, snapshotStartedAt: time.Now(),
 	}
 }
 
@@ -172,7 +174,7 @@ func TestWorkspaceFloorGuard_ConcurrentClosuresUseOnlyMonitoredMembers(t *testin
 	}
 }
 
-func TestReconcileTargetRemoteAction_LastActiveSkipsWithoutPendingCheckpoint(t *testing.T) {
+func TestReconcileTargetRemoteAction_KeepsLegacyPendingAtLastActiveFloor(t *testing.T) {
 	repo := newFakeRepository()
 	platform := &fakePlatformActioner{}
 	service := &Service{repo: repo, dispatcher: newRemoteActionDispatcher(nil, nil, platform)}
@@ -194,15 +196,15 @@ func TestReconcileTargetRemoteAction_LastActiveSkipsWithoutPendingCheckpoint(t *
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.remoteAction != RemoteActionSkippedSub2APILastActive || result.adminGroupID != "g1" {
-		t.Fatalf("last active decision = %+v", result)
+	if result.remoteAction != RemoteActionAwaitingConfirmation {
+		t.Fatalf("legacy pending must remain awaiting confirmation: %+v", result)
 	}
 	if len(platform.sub2APICalls) != 0 {
 		t.Fatalf("last active target must not be disabled: %+v", platform.sub2APICalls)
 	}
 	stored = repo.targetActionStates["user1|ws1|"+target.TargetID]
-	if stored.PendingStatus != "" || stored.LastAppliedStatus != "active" || stored.Conflict {
-		t.Fatalf("skip must clear stale pending inactive without claiming a write: %+v", stored)
+	if stored.PendingStatus != "inactive" || stored.LastAppliedStatus != "active" || stored.Conflict {
+		t.Fatalf("floor safeguard must preserve uncertain legacy pending: %+v", stored)
 	}
 }
 
@@ -368,7 +370,7 @@ func TestFinishTargetProbeBatch_LastActiveSkipAuditsBlockingGroup(t *testing.T) 
 
 	err := service.finishTargetProbeBatchWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, target,
-		[]probeModelSpec{spec}, []targetProbeResult{{state: &state, previousState: StateDegraded, outcome: ProbeOutcome{Result: ResultAuth}, spec: spec}},
+		[]probeModelSpec{spec}, []targetProbeResult{commitTargetActionFixture(t, repo, target, spec, EventSourceScheduled)},
 		EventSourceScheduled, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
 	)
 	if err != nil {
@@ -405,7 +407,7 @@ func TestFinishTargetProbeBatch_UsesCurrentMonitoringScopeForInactive(t *testing
 
 	err := service.finishTargetProbeBatchWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, target,
-		[]probeModelSpec{spec}, []targetProbeResult{{state: &state, previousState: StateDegraded, outcome: ProbeOutcome{Result: ResultAuth}, spec: spec}},
+		[]probeModelSpec{spec}, []targetProbeResult{commitTargetActionFixture(t, repo, target, spec, EventSourceScheduled)},
 		EventSourceScheduled, newWorkspaceFloorGuard(), inventory, scope,
 	)
 	if err != nil {
@@ -435,10 +437,9 @@ func TestFinishTargetProbeBatch_LastActiveIsReevaluatedEveryBatch(t *testing.T) 
 	})
 
 	for batch := 0; batch < 3; batch++ {
-		state := repo.states[target.TargetID]["model-a"]
 		if err := service.finishTargetProbeBatchWithFloor(
 			context.Background(), "user1", "ws1", inventory.session, target,
-			[]probeModelSpec{spec}, []targetProbeResult{{state: &state, previousState: StateSuspended, outcome: ProbeOutcome{Result: ResultAuth}, spec: spec}},
+			[]probeModelSpec{spec}, []targetProbeResult{commitTargetActionFixture(t, repo, target, spec, EventSourceScheduled)},
 			EventSourceScheduled, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
 		); err != nil {
 			t.Fatalf("batch %d failed: %v", batch+1, err)
@@ -672,12 +673,11 @@ func TestFinishTargetProbeBatch_ManualProbeNeverWritesInactive(t *testing.T) {
 	platform := &fakePlatformActioner{}
 	service := &Service{repo: repo, dispatcher: newRemoteActionDispatcher(nil, nil, platform)}
 	target := sub2APISuspendedTargetFixture(repo, "acc-1")
-	state := repo.states[target.TargetID]["model-a"]
 	spec := sub2APIActionTestSpec()
 
 	err := service.finishTargetProbeBatch(
 		context.Background(), "user1", "ws1", upstream.Session{Platform: upstream.PlatformSub2API}, target,
-		[]probeModelSpec{spec}, []targetProbeResult{{state: &state, previousState: StateDegraded, outcome: ProbeOutcome{Result: ResultAuth}, spec: spec}},
+		[]probeModelSpec{spec}, []targetProbeResult{commitTargetActionFixture(t, repo, target, spec, EventSourceManual)},
 		EventSourceManual,
 	)
 	if err != nil {
@@ -716,8 +716,14 @@ func TestRestoreEmptySub2APIGroup_OnlyRestoresSystemOwnedAccount(t *testing.T) {
 		t.Fatalf("only the system-owned account may be restored: %+v", platform.sub2APICalls)
 	}
 	stored := repo.targetActionStates["user1|ws1|"+systemTargetID]
-	if stored.LastAppliedStatus != "active" || stored.PendingStatus != "" || stored.Conflict {
-		t.Fatalf("restored checkpoint not confirmed: %+v", stored)
+	if stored.LastAppliedStatus != "inactive" || stored.PendingStatus != "active" || stored.PendingDispatchPhase != DispatchConfirmedApplied || stored.Conflict {
+		t.Fatalf("receipt must preserve claim until a fresh inventory confirms it: %+v", stored)
+	}
+	reader.accountsByGrp["g1"][1].Status = "active"
+	service.restoreEmptySub2APIGroups(context.Background(), []TargetActionState{stored}, make(adminInventoryCache))
+	stored = repo.targetActionStates["user1|ws1|"+systemTargetID]
+	if stored.LastAppliedStatus != "active" || stored.PendingStatus != "" || len(platform.sub2APICalls) != 1 {
+		t.Fatalf("fresh confirmation must release pending without resending: state=%+v calls=%+v", stored, platform.sub2APICalls)
 	}
 	if len(repo.events) != 1 || repo.events[0].Result != "group_zero_restore" || repo.events[0].AdminGroupID != "g1" {
 		t.Fatalf("zero-group restore must be auditable: %+v", repo.events)
@@ -805,7 +811,7 @@ func TestReconcileTargetRemoteAction_SuspendedSiblingBlocksRestore(t *testing.T)
 	}
 	policy := Policy{ID: "p1", Enabled: true, AutoDegradeEnabled: true, AutoRemoteActionEnabled: true}
 	specs := []probeModelSpec{{modelName: "model-a", policy: policy}, {modelName: "model-b", policy: policy}}
-	target := AdminProbeTarget{TargetID: targetID, Platform: string(upstream.PlatformSub2API), AccountID: "acc-1", AccountStatus: "inactive"}
+	target := AdminProbeTarget{TargetID: targetID, Platform: string(upstream.PlatformSub2API), AccountID: "acc-1", AccountStatus: "inactive", InventoryComplete: true, TestConfiguration: ResolveGroupTestConfiguration(nil, true, nil)}
 
 	action, err := service.reconcileTargetRemoteAction(context.Background(), "user1", "ws1", upstream.Session{Platform: upstream.PlatformSub2API}, target, specs)
 	if err != nil {
@@ -988,7 +994,7 @@ func TestReconcileTargetRemoteAction_DoesNotReportSchedulingSkipWithoutRequested
 	}
 }
 
-func TestReconcileTargetRemoteAction_ConfirmsPendingSystemWrite(t *testing.T) {
+func TestReconcileTargetRemoteAction_KeepsLegacyPendingOnMatchingReadback(t *testing.T) {
 	repo := newFakeRepository()
 	platform := &fakePlatformActioner{}
 	service := &Service{repo: repo, dispatcher: newRemoteActionDispatcher(nil, nil, platform)}
@@ -1008,8 +1014,8 @@ func TestReconcileTargetRemoteAction_ConfirmsPendingSystemWrite(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	stored := repo.targetActionStates["user1|ws1|"+targetID]
-	if action != "" || stored.Conflict || stored.PendingStatus != "" || stored.LastAppliedStatus != "inactive" {
-		t.Fatalf("pending system write should be confirmed without conflict: action=%q stored=%+v", action, stored)
+	if action != RemoteActionAwaitingConfirmation || stored.Conflict || stored.PendingStatus != "inactive" || stored.LastAppliedStatus != "active" {
+		t.Fatalf("one matching readback cannot resolve uncertain legacy pending: action=%q stored=%+v", action, stored)
 	}
 	if len(platform.sub2APICalls) != 0 {
 		t.Fatalf("already-applied pending action must not be repeated: %+v", platform.sub2APICalls)
@@ -1040,8 +1046,14 @@ func TestRestoreUnmanagedTargetActions_RestoresAfterPolicyUnbound(t *testing.T) 
 	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].status != "active" {
 		t.Fatalf("unbound policy should restore the original upstream state: %+v", platform.sub2APICalls)
 	}
-	if _, exists := repo.targetActionStates["user1|ws1|"+targetID]; exists {
-		t.Fatal("restored unmanaged target must release its action snapshot")
+	stored = repo.targetActionStates["user1|ws1|"+targetID]
+	if stored.PendingStatus != "active" || stored.PendingDispatchPhase != DispatchConfirmedApplied || stored.LastAppliedStatus != "inactive" {
+		t.Fatalf("restore receipt must retain checkpoint until fresh confirmation: %+v", stored)
+	}
+	reader.accountsByGrp["g1"][0].Status = "active"
+	service.restoreUnmanagedTargetActions(context.Background(), nil, nil, nil, nil, []TargetActionState{stored}, make(adminInventoryCache))
+	if _, exists := repo.targetActionStates["user1|ws1|"+targetID]; exists || len(platform.sub2APICalls) != 1 {
+		t.Fatalf("fresh confirmed unmanaged target must release snapshot without resending: exists=%v calls=%+v", exists, platform.sub2APICalls)
 	}
 	if len(repo.events) != 1 || repo.events[0].Result != "policy_unmanaged_restore" {
 		t.Fatalf("restore should be traceable in events: %+v", repo.events)
@@ -1083,8 +1095,14 @@ func TestRestoreUnmanagedTargetActions_RestoresWhenAutoDegradeDisabled(t *testin
 	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].status != "active" {
 		t.Fatalf("turning off auto degrade must release the captured upstream state: %+v", platform.sub2APICalls)
 	}
-	if _, exists := repo.targetActionStates["user1|ws1|"+targetID]; exists {
-		t.Fatal("restored target must release its action snapshot")
+	stored = repo.targetActionStates["user1|ws1|"+targetID]
+	if stored.PendingStatus != "active" || stored.PendingDispatchPhase != DispatchConfirmedApplied || stored.LastAppliedStatus != "inactive" {
+		t.Fatalf("restore receipt must retain checkpoint until fresh confirmation: %+v", stored)
+	}
+	reader.accountsByGrp["g1"][0].Status = "active"
+	service.restoreUnmanagedTargetActions(context.Background(), []Policy{policy}, nil, []GroupPolicyAssignment{assignment}, nil, []TargetActionState{stored}, make(adminInventoryCache))
+	if _, exists := repo.targetActionStates["user1|ws1|"+targetID]; exists || len(platform.sub2APICalls) != 1 {
+		t.Fatalf("confirmed restore must release snapshot without resending: exists=%v calls=%+v", exists, platform.sub2APICalls)
 	}
 }
 
@@ -1136,7 +1154,7 @@ func TestRestoreUnmanagedTargetActions_IgnoresInheritedRemoteActionWhenTargetPol
 	}
 }
 
-func TestRestoreUnmanagedTargetActions_RestoresTargetRemovedFromAllGroups(t *testing.T) {
+func TestRestoreUnmanagedTargetActions_RetainsTargetRemovedFromAllGroups(t *testing.T) {
 	repo := newFakeRepository()
 	platform := &fakePlatformActioner{}
 	service := &Service{
@@ -1151,10 +1169,29 @@ func TestRestoreUnmanagedTargetActions_RestoresTargetRemovedFromAllGroups(t *tes
 	repo.targetActionStates["user1|ws1|"+targetID] = stored
 
 	service.restoreUnmanagedTargetActions(context.Background(), nil, nil, nil, nil, []TargetActionState{stored}, make(adminInventoryCache))
-	if len(platform.sub2APICalls) != 1 || platform.sub2APICalls[0].status != "active" {
-		t.Fatalf("target removed from every group should still restore by stable target id: %+v", platform.sub2APICalls)
+	if len(platform.sub2APICalls) != 0 {
+		t.Fatalf("invisible target must not be blindly restored: %+v", platform.sub2APICalls)
 	}
-	if _, exists := repo.targetActionStates["user1|ws1|"+targetID]; exists {
-		t.Fatal("restored missing target must release its action snapshot")
+	if checkpoint, exists := repo.targetActionStates["user1|ws1|"+targetID]; !exists || checkpoint.LastAppliedStatus != "inactive" || checkpoint.OriginalStatus != "active" {
+		t.Fatalf("invisible target must preserve original checkpoint for manual verification: %+v", checkpoint)
 	}
+}
+
+// Direct finish tests must first persist the same applied evidence as production;
+// an empty disposition would otherwise test the early-return guard only.
+func commitTargetActionFixture(t *testing.T, repo *fakeRepository, target AdminProbeTarget, spec probeModelSpec, source string) targetProbeResult {
+	t.Helper()
+	outcome := ProbeOutcome{Result: ResultAuth, Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10}
+	id, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed, err := repo.CommitTargetProbe(context.Background(), TargetProbeCommit{UserID: "user1", AdminAccountID: "ws1", Target: target, ModelName: spec.modelName, Policy: spec.policy, Outcome: outcome, DecisionKey: probeDecisionKey(target, spec), Now: time.Now(), Event: ConnectionHealthEvent{ID: id, UserID: "user1", AdminAccountID: "ws1", ConnectionID: target.TargetID, ModelName: spec.modelName, Source: source}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.Disposition != "applied" {
+		t.Fatalf("fixture must commit applied evidence: %+v", committed)
+	}
+	return targetProbeResult{state: &committed.State, previousState: committed.PreviousState, outcome: outcome, spec: spec, eventID: committed.EventID, disposition: committed.Disposition, configuration: committed.Configuration}
 }

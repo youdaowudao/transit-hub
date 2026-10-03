@@ -1,4 +1,5 @@
 import type {
+  EffectiveTestConfiguration,
   AdminGroupHealth,
   ManualProbeModelOption,
   QuestionAnswerBatch,
@@ -24,6 +25,7 @@ export interface QuestionAnswerResolvedSelection {
 }
 
 export interface QuestionAnswerBatchTarget {
+  testConfiguration?: EffectiveTestConfiguration
   targetId: string
   accountName: string
   platform: string
@@ -81,6 +83,7 @@ export const collectQuestionAnswerBatchTargets = (
       }
       targets.set(targetId, {
         targetId,
+        testConfiguration: account.testConfiguration,
         accountName: account.name,
         platform: account.platform,
         type: account.type,

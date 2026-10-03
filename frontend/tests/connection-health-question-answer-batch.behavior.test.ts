@@ -70,7 +70,8 @@ vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
   return { useAdminAccounts: () => ({ currentAccount: harness.currentAccount }) }
 })
 
-vi.mock('@/modules/admin/composables/useConnectionHealth', async () => {
+vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/modules/admin/composables/useConnectionHealth')>()
   const { ref } = await import('vue')
   harness.refs = {
     overview: ref(null),
@@ -87,6 +88,7 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', async () => {
     refreshConnectionState: ref('connected'),
   }
   return {
+    ...actual,
     connectionHealthMessageKey: (key: string) => key,
     connectionHealthRecordColorClass: () => '',
     formatConnectionHealthTime: (value: string) => value,

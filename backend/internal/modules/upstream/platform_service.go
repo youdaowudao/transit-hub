@@ -848,15 +848,19 @@ func (s *PlatformService) fetchSub2APIAdminAllGroupsContext(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
-	groups := make([]AdminGroupInfo, 0)
-	for _, item := range dataArray(response.Payload) {
-		id := groupID(item)
+	items, complete := strictSub2APIGroupItems(response.Payload)
+	if !complete {
+		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	groups := make([]AdminGroupInfo, 0, len(items))
+	for _, item := range items {
+		id, _ := strictSub2APIInventoryID(item["id"])
 		name := defaultDisplay
 		if value := firstString(item, []string{"name"}); value != nil {
 			name = *value
 		}
-		if name == defaultDisplay {
-			continue
+		if name == defaultDisplay || strings.TrimSpace(name) == "" {
+			name = "未命名分组（" + id + "）"
 		}
 		platform := ""
 		if value := firstString(item, []string{"platform"}); value != nil {
@@ -869,10 +873,8 @@ func (s *PlatformService) fetchSub2APIAdminAllGroupsContext(ctx context.Context,
 		}
 		// is_exclusive 标识专属分组
 		isExclusive := false
-		if record, ok := item.(map[string]any); ok {
-			if v, ok := record["is_exclusive"].(bool); ok {
-				isExclusive = v
-			}
+		if v, ok := item["is_exclusive"].(bool); ok {
+			isExclusive = v
 		}
 		// subscription_type 区分普通分组(standard)和订阅分组(subscription)
 		subscriptionType := ""

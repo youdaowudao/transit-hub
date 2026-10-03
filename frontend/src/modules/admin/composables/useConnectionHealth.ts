@@ -1,6 +1,9 @@
 import { ref } from 'vue'
 import type {
   AccountTierResult,
+  AdminGroupTestConfiguration,
+  GroupTestConfiguration,
+  EffectiveTestConfiguration,
   AdminGroupPolicyConfiguration,
   AdminGroupPolicyConfigurationInput,
   AdminGroupHealth,
@@ -18,6 +21,8 @@ import type {
 } from '../types/connectionHealth'
 import type { AdminGroupAccount } from '../types/connectionHealth'
 import {
+  getAdminGroupTestConfiguration,
+  setAdminGroupTestConfiguration,
   createConnectionHealthPolicy,
   deleteConnectionHealthPolicy,
   disableConnection,
@@ -138,7 +143,7 @@ const overviewFromAdminGroups = (groupList: AdminGroupHealth[]): ConnectionHealt
     }
     result.unconfigured += target.unprobed.size
     for (const model of target.models.values()) {
-      if (!model.configured) {
+      if (!model.configured || model.currentHealthResult?.status === 'unverified') {
         result.unconfigured++
         continue
       }
@@ -691,6 +696,52 @@ export function useConnectionHealth() {
     }
   }
 
+  const loadAdminGroupTestConfiguration = async (adminGroupId: string): Promise<{ configuration: AdminGroupTestConfiguration } | { errorKey: string }> => {
+    try { return { configuration: await getAdminGroupTestConfiguration(adminGroupId) } }
+    catch (err) { return { errorKey: err instanceof Error ? err.message : 'admin.connectionHealth.errors.request' } }
+  }
+
+  const saveAdminGroupTestConfiguration = async (adminGroupId: string, input: GroupTestConfiguration | null): Promise<{ configuration: AdminGroupTestConfiguration } | { errorKey: string }> => {
+    const workspace = adminGroupsWorkspace
+    try {
+      const configuration = await setAdminGroupTestConfiguration(adminGroupId, input)
+      if (workspace !== adminGroupsWorkspace) return { configuration }
+      // Discard reads and SSE snapshots that started before the committed save.
+      adminGroupsRequestSequence++
+      const byTarget = new Map(configuration.accounts.map(account => [account.targetId, account.testConfiguration]))
+      adminGroups.value = adminGroups.value.map(group => {
+        const healthSummary = { ...group.healthSummary }
+        const accounts = group.accounts.map(account => {
+          const nextConfiguration = byTarget.get(account.targetId)
+          if (!nextConfiguration) return account
+          const evidencePending = isTestConfigurationBlocked(nextConfiguration) || nextConfiguration.protocol !== (account.testConfiguration?.protocol ?? 'chat_completions')
+          const hasProbePolicy = account.hasEnabledProbePolicy ?? account.hasEnabledPolicy ?? Boolean(account.hasAssignedPolicy)
+          if (evidencePending && hasProbePolicy && account.probeAvailable && account.probeModelsConfigured !== false) {
+            for (const model of account.modelHealth) {
+              if (model.currentHealthResult?.status === 'unverified' || !model.configured) continue
+              const field = `${model.state}Models` as 'healthyModels' | 'degradedModels' | 'suspendedModels' | 'observingModels' | 'recoveringModels' | 'disabledModels'
+              healthSummary[field] = Math.max(0, (healthSummary[field] ?? 0) - 1)
+              // Backend degradedModels also includes observing and recovering.
+              if (model.state === 'observing' || model.state === 'recovering') healthSummary.degradedModels = Math.max(0, healthSummary.degradedModels - 1)
+              healthSummary.unconfiguredModels = (healthSummary.unconfiguredModels ?? 0) + 1
+            }
+          }
+          return { ...account, testConfiguration: nextConfiguration, ...(evidencePending ? {
+            modelHealth: account.modelHealth.map(model => ({ ...model, currentHealthResult: { status: 'unverified' as const }, lastSuccessLatencyMs: null })),
+          } : {}) }
+        })
+        return { ...group, accounts, healthSummary }
+      })
+      invalidatePriorityCandidatePlanNow()
+      overview.value = overviewFromAdminGroups(adminGroups.value)
+      if (terminalRefreshRequests.value > 0 || adminGroupsActiveRequests > 0) {
+        priorityCandidateReloadPending = true
+        void flushPriorityCandidateReload()
+      } else await loadAdminGroups({ silent: true })
+      return { configuration }
+    } catch (err) { return { errorKey: err instanceof Error ? err.message : 'admin.connectionHealth.errors.request' } }
+  }
+
   const loadAdminGroupPolicyConfiguration = async (adminGroupId: string): Promise<{ configuration: AdminGroupPolicyConfiguration } | { errorKey: string }> => {
     try {
       return { configuration: await getAdminGroupPolicyConfiguration(adminGroupId) }
@@ -783,6 +834,8 @@ export function useConnectionHealth() {
     updateTargetSchedulable,
     loadTargetPolicyAssignments,
     saveTargetPolicyAssignments,
+    loadAdminGroupTestConfiguration,
+    saveAdminGroupTestConfiguration,
     loadAdminGroupPolicyConfiguration,
     saveAdminGroupPolicyConfiguration,
     disable,
@@ -879,6 +932,19 @@ export function hasValidConnectionHealthTime(iso: string | null | undefined): bo
   return connectionHealthTimeMs(iso) != null
 }
 
+export const isTestConfigurationBlocked = (configuration?: EffectiveTestConfiguration): boolean =>
+  configuration?.status === 'conflict' || configuration?.status === 'unavailable'
+
+export const canOpenManualProbeHistory = (account: AdminGroupAccount): boolean => account.probeAvailable
+  || (isTestConfigurationBlocked(account.testConfiguration)
+    && ['', 'test_configuration_conflict', 'test_configuration_unavailable'].includes(account.probeUnavailableReason ?? ''))
+
+export const hasCurrentHealthFailure = (model: ModelHealth): boolean =>
+  model.currentHealthResult ? model.currentHealthResult.status === 'failure' : isConnectionHealthCurrentFailure(model)
+
+export const testProtocolName = (protocol?: string | null): string =>
+  protocol === 'responses' ? 'Responses' : protocol === 'chat_completions' ? 'Chat Completions' : ''
+
 export function isConnectionHealthCurrentFailure(input: {
   lastFailureAt: string | null | undefined
   lastProbeAt: string | null | undefined
@@ -926,12 +992,12 @@ export function isConnectionHealthProbeFailure(result: string): boolean {
   return PROBE_FAILURE_RESULTS.has(result)
 }
 
-export function buildConnectionHealthRecordSummary<T extends { result: string }>(eventsDesc: readonly T[]): {
+export function buildConnectionHealthRecordSummary<T extends { result: string; probeDisposition?: string | null }>(eventsDesc: readonly T[]): {
   records: T[]
   availabilityPct: number | null
 } {
   const records = eventsDesc.slice(0, 60).slice().reverse()
-  const probeRecords = records.filter((record) => CONNECTION_HEALTH_PROBE_RESULTS.has(record.result))
+  const probeRecords = records.filter((record) => record.probeDisposition !== 'invalid' && record.probeDisposition !== 'stale' && CONNECTION_HEALTH_PROBE_RESULTS.has(record.result))
   const okCount = probeRecords.filter((record) => record.result === 'ok' || record.result === 'slow_response').length
   return {
     records,
@@ -945,10 +1011,12 @@ export function latestConnectionHealthProbeFailure<T extends {
   modelName: string
   result: string
   createdAt: string
+  probeDisposition?: string | null
 }>(records: readonly T[]): T | null {
   let latest: T | null = null
   let latestAt = Number.NEGATIVE_INFINITY
   for (const record of records) {
+    if (record.probeDisposition === 'stale' || record.probeDisposition === 'invalid') continue
     if (!record.modelName || record.modelName === '*' || !isConnectionHealthProbeFailure(record.result)) continue
     const createdAt = connectionHealthTimeMs(record.createdAt)
     if (createdAt == null || createdAt <= latestAt) continue

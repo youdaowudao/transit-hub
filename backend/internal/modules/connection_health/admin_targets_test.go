@@ -641,11 +641,22 @@ func TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds(t *testi
 	if err != nil || !refresh.found || refresh.accountsReadError {
 		t.Fatalf("scheduled refresh failed: refresh=%+v err=%v", refresh, err)
 	}
-	state := repo.states[targetID]["gpt-4o"]
+	if err := svc.configureTestTarget(context.Background(), "user1", "ws1", &refresh.target, refresh.memberships, !refresh.accountsReadError); err != nil {
+		t.Fatal(err)
+	}
 	spec := probeModelSpec{modelName: "gpt-4o", policy: repo.policies[0]}
+	outcome := ProbeOutcome{Result: ResultServerError, Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10}
+	committed, err := repo.CommitTargetProbe(context.Background(), TargetProbeCommit{
+		UserID: "user1", AdminAccountID: "ws1", Target: refresh.target, ModelName: "gpt-4o", Policy: spec.policy, Outcome: outcome,
+		DecisionKey: probeDecisionKey(refresh.target, spec), Now: time.Now(),
+		Event: ConnectionHealthEvent{ID: "scheduled-combo-probe", UserID: "user1", AdminAccountID: "ws1", ConnectionID: targetID, ModelName: "gpt-4o", Source: EventSourceScheduled},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := svc.finishTargetProbeBatchWithFloor(
 		context.Background(), "user1", "ws1", mySites.session, refresh.target,
-		[]probeModelSpec{spec}, []targetProbeResult{{state: &state, previousState: StateHealthy, outcome: ProbeOutcome{Result: ResultServerError}, spec: spec}},
+		[]probeModelSpec{spec}, []targetProbeResult{{state: &committed.State, previousState: committed.PreviousState, outcome: outcome, spec: spec, eventID: committed.EventID, disposition: committed.Disposition, configuration: committed.Configuration}},
 		EventSourceScheduled, newWorkspaceFloorGuard(), &refresh.inventory, fullFloorTestMonitoringScope(refresh.inventory),
 	); err != nil {
 		t.Fatalf("scheduled target action failed: %v", err)

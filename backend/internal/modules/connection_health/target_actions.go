@@ -78,6 +78,9 @@ func (g *workspaceFloorGuard) rememberInventoryLocked(inventory adminWorkspaceIn
 }
 
 func adminInventoryComplete(inventory adminWorkspaceInventory) bool {
+	if inventory.session.Platform == upstream.PlatformSub2API && !inventory.groupsComplete {
+		return false
+	}
 	for _, group := range inventory.groups {
 		if group.err != nil {
 			return false
@@ -435,14 +438,24 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 			states = append(states, state)
 		}
 	}
-	if len(states) == 0 {
-		return targetRemoteActionResult{}, nil
-	}
 	statesComplete := len(states) == len(controlledModels)
 
 	stored, err := s.repo.GetTargetActionState(ctx, userID, adminAccountID, target.TargetID)
 	if err != nil {
 		return targetRemoteActionResult{}, err
+	}
+	if target.Platform == string(upstream.PlatformSub2API) {
+		pair, reconcileErr := s.reconcileActionObservation(ctx, targetObservation(userID, adminAccountID, target, inventory))
+		if reconcileErr != nil {
+			return targetRemoteActionResult{remoteAction: RemoteActionAwaitingConfirmation}, reconcileErr
+		}
+		stored = pair.Target
+		if pair.pendingCount() != 0 {
+			return targetRemoteActionResult{remoteAction: RemoteActionAwaitingConfirmation}, nil
+		}
+	}
+	if len(states) == 0 {
+		return targetRemoteActionResult{}, nil
 	}
 	allHealthy, blocked, minWeight := aggregateTargetStates(states)
 	allHealthy = allHealthy && statesComplete
@@ -491,6 +504,10 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 	}
 	if stored.Conflict {
 		return targetRemoteActionResult{remoteAction: RemoteActionSkippedTargetConflict}, nil
+	}
+
+	if target.Platform == string(upstream.PlatformSub2API) && !healthStatesUsableForTarget(target, states, len(controlledModels)) {
+		return targetRemoteActionResult{}, nil
 	}
 
 	desiredStatus, desiredWeight := desiredTargetState(target.Platform, allHealthy, blocked, minWeight, *stored)
@@ -542,6 +559,17 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 		}
 	}
 
+	if target.Platform == string(upstream.PlatformSub2API) {
+		stored.PendingStatus = desiredStatus
+		stored.PendingWeight = cloneIntPointer(desiredWeight)
+		models := make([]string, 0, len(controlledModels))
+		for model := range controlledModels {
+			models = append(models, model)
+		}
+		action, err := s.dispatchSafeTargetAction(ctx, session, target, *stored, actionGuardForTarget(target, states, models))
+		return targetRemoteActionResult{remoteAction: action}, err
+	}
+
 	// Persist the intended value before touching the upstream. A later database failure can
 	// then be recognized as a completed system write instead of a manual conflict.
 	stored.PendingStatus = desiredStatus
@@ -587,13 +615,8 @@ func (s *Service) restoreUnmanagedTargetActions(
 			log.Printf("[connection-health] restore unmanaged target inventory failed target_id=%s err=%v", stored.TargetID, err)
 			continue
 		}
-		inventoryComplete := true
-		for _, groupInventory := range inventory.groups {
-			if groupInventory.err != nil {
-				inventoryComplete = false
-				break
-			}
-		}
+		s.rememberActionInventory(stored.UserID, stored.AdminAccountID, inventory)
+		inventoryComplete := adminInventoryComplete(*inventory)
 		if !inventoryComplete {
 			// 任一分组成员读取失败时无法证明目标已经失去全部管理关系，保持当前状态更安全。
 			continue
@@ -627,11 +650,24 @@ func (s *Service) restoreUnmanagedTargetActions(
 				}
 			}
 		}
+		if found && inventory.session.Platform == upstream.PlatformSub2API {
+			pair, reconcileErr := s.reconcileActionObservation(ctx, targetObservation(stored.UserID, stored.AdminAccountID, target, inventory))
+			if reconcileErr != nil || pair.pendingCount() != 0 || pair.Target == nil {
+				continue
+			}
+			stored = *pair.Target
+		}
 		effectivePolicies := effectivePoliciesForTarget(targetPolicySet, inheritedPolicies)
 		if hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies)) {
 			continue
 		}
 		targetVisible := found
+		if !found && inventory.session.Platform == upstream.PlatformSub2API {
+			// Leaving all groups proves no current value. Keep the checkpoint for
+			// explicit manual verification rather than inventing LastApplied.
+			log.Printf("[connection-health] %s target_id=%s", RemoteActionTargetNotVisible, stored.TargetID)
+			continue
+		}
 		if !found {
 			parsed, ok := parseTargetID(stored.TargetID)
 			if !ok || parsed.adminAccountID != stored.AdminAccountID || parsed.platform != string(inventory.session.Platform) {
@@ -664,6 +700,16 @@ func (s *Service) restoreUnmanagedTargetActions(
 		}
 		stored.PendingStatus = stored.OriginalStatus
 		stored.PendingWeight = cloneIntPointer(stored.OriginalWeight)
+		if inventory.session.Platform == upstream.PlatformSub2API {
+			action, actionErr := s.dispatchSafeTargetAction(ctx, inventory.session, target, stored, RemoteActionHealthGuard{})
+			if actionErr != nil {
+				log.Printf("[connection-health] restore unmanaged target deferred target_id=%s err=%v", stored.TargetID, actionErr)
+				continue
+			}
+			updateAdminInventoryTargetState(inventory, target.AccountID, stored.OriginalStatus, stored.OriginalWeight)
+			_ = s.recordTargetEvent(ctx, stored.UserID, stored.AdminAccountID, target, "", "*", "policy_unmanaged_restore", "", "", nil, "", "", action, EventSourceScheduled)
+			continue
+		}
 		if err := s.repo.UpsertTargetActionState(ctx, stored); err != nil {
 			log.Printf("[connection-health] store unmanaged target restore intent failed target_id=%s err=%v", stored.TargetID, err)
 			continue
@@ -714,13 +760,8 @@ func (s *Service) restoreEmptySub2APIGroups(ctx context.Context, states []Target
 		if inventory.session.Platform != upstream.PlatformSub2API {
 			continue
 		}
-		inventoryComplete := true
-		for _, groupInventory := range inventory.groups {
-			if groupInventory.err != nil {
-				inventoryComplete = false
-				break
-			}
-		}
+		s.rememberActionInventory(ws.userID, ws.adminAccountID, inventory)
+		inventoryComplete := adminInventoryComplete(*inventory)
 		if !inventoryComplete {
 			continue
 		}
@@ -758,6 +799,16 @@ func (s *Service) restoreEmptySub2APIGroups(ctx context.Context, states []Target
 			activeByGroup[groupID] = activeTargets
 		}
 
+		for targetID, state := range stateByTarget {
+			if target, visible := targets[targetID]; visible {
+				pair, reconcileErr := s.reconcileActionObservation(ctx, targetObservation(ws.userID, ws.adminAccountID, target, inventory))
+				if reconcileErr == nil && pair.Target != nil {
+					stateByTarget[targetID] = *pair.Target
+				} else {
+					stateByTarget[targetID] = state
+				}
+			}
+		}
 		handledGroups := make(map[string]struct{})
 		for _, groupID := range groupOrder {
 			if _, handled := handledGroups[groupID]; handled || len(activeByGroup[groupID]) > 0 {
@@ -806,21 +857,9 @@ func (s *Service) restoreEmptySub2APIGroups(ctx context.Context, states []Target
 
 			chosen.state.PendingStatus = chosen.state.OriginalStatus
 			chosen.state.PendingWeight = cloneIntPointer(chosen.state.OriginalWeight)
-			if err := s.repo.UpsertTargetActionState(ctx, chosen.state); err != nil {
-				log.Printf("[connection-health] store empty group restore intent failed target_id=%s group_id=%s err=%v", chosen.target.TargetID, groupID, err)
-				continue
-			}
-			action, actionErr := s.dispatcher.ApplyTargetState(ctx, inventory.session, chosen.target, chosen.state.OriginalWeight, chosen.state.OriginalStatus)
+			action, actionErr := s.dispatchSafeTargetAction(ctx, inventory.session, chosen.target, chosen.state, RemoteActionHealthGuard{})
 			if actionErr != nil {
-				log.Printf("[connection-health] restore empty group target failed target_id=%s group_id=%s action=%s err=%v", chosen.target.TargetID, groupID, action, actionErr)
-				continue
-			}
-			chosen.state.LastAppliedStatus = chosen.state.OriginalStatus
-			chosen.state.LastAppliedWeight = cloneIntPointer(chosen.state.OriginalWeight)
-			chosen.state.PendingStatus = ""
-			chosen.state.PendingWeight = nil
-			if err := s.repo.UpsertTargetActionState(ctx, chosen.state); err != nil {
-				log.Printf("[connection-health] confirm empty group restore failed target_id=%s group_id=%s err=%v", chosen.target.TargetID, groupID, err)
+				log.Printf("[connection-health] restore empty group target deferred target_id=%s err=%v", chosen.target.TargetID, actionErr)
 				continue
 			}
 			updateAdminInventoryTargetState(inventory, chosen.target.AccountID, chosen.state.OriginalStatus, chosen.state.OriginalWeight)

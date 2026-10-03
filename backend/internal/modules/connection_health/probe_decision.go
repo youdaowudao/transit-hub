@@ -124,8 +124,8 @@ func policyNextProbeAtForDecision(state *ConnectionHealthState, intervalSeconds 
 	var lastAttemptAt *time.Time
 	if state != nil {
 		lastAttemptAt = state.LastProbeAt
-		if isCredentialUnavailableReason(state.LastErrorKey) && !state.UpdatedAt.IsZero() && (lastAttemptAt == nil || state.UpdatedAt.After(*lastAttemptAt)) {
-			lastAttemptAt = &state.UpdatedAt
+		if _, credentialAt := currentCredentialFailure(*state); credentialAt != nil && (lastAttemptAt == nil || credentialAt.After(*lastAttemptAt)) {
+			lastAttemptAt = credentialAt
 		}
 	}
 	if lastAttemptAt != nil {

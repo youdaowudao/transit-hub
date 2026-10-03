@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"transithub/backend/internal/modules/upstream"
 )
@@ -25,8 +26,8 @@ type failingPriorityConfirmationRepository struct {
 	err error
 }
 
-func (r *failingPriorityConfirmationRepository) UpsertPrioritySyncState(context.Context, PrioritySyncState) error {
-	return r.err
+func (r *failingPriorityConfirmationRepository) ReconcileRemoteAction(context.Context, RemoteActionObservation) (RemoteActionCheckpoints, error) {
+	return RemoteActionCheckpoints{}, r.err
 }
 
 func (r *mutableSub2APISchedulerReader) FetchAdminAllGroups(upstream.Session) ([]upstream.AdminGroupInfo, error) {
@@ -101,11 +102,12 @@ func TestHealthPrioritySync_Sub2APIManualPriorityNeverEntersManagedBand(t *testi
 					priorityPresent: true,
 				},
 			}
+			healthStates := storePriorityFixtureStates(repo, []ConnectionHealthState{{ConnectionID: targetID, ModelName: "gpt-4o", State: StateObserving}})
 			service := &Service{repo: repo, priorityActions: actions}
 
 			service.syncWorkspacePriorities(
 				context.Background(), upstream.Session{Platform: upstream.PlatformSub2API},
-				"user1", "ws1", inventory, true, nil, nil,
+				"user1", "ws1", inventory, true, healthStates, nil,
 			)
 
 			if test.wantPriorityWrite {
@@ -219,6 +221,7 @@ func TestHealthPrioritySync_Sub2APIManualPriorityDoesNotConsumeManagedRank(t *te
 		{ConnectionID: "sub2api:ws1:manual", ModelName: "gpt-4o", State: StateHealthy},
 		{ConnectionID: "sub2api:ws1:managed", ModelName: "gpt-4o", State: StateHealthy},
 	}
+	healthStates = storePriorityFixtureStates(repo, healthStates)
 	service := &Service{repo: repo, priorityActions: actions}
 
 	service.syncWorkspacePriorities(
@@ -274,6 +277,7 @@ func TestHealthPrioritySync_Sub2APIManualMultiplierFailureDoesNotFailWorkspace(t
 		{ConnectionID: "sub2api:ws1:manual", ModelName: "gpt-4o", State: StateHealthy},
 		{ConnectionID: "sub2api:ws1:managed", ModelName: "gpt-4o", State: StateHealthy},
 	}
+	healthStates = storePriorityFixtureStates(repo, healthStates)
 	service := &Service{repo: repo, priorityActions: actions}
 
 	service.syncWorkspacePriorities(
@@ -299,6 +303,7 @@ func TestHealthPrioritySync_Sub2APIHardExcludedPendingConfirmationPersists(t *te
 	stored := PrioritySyncState{
 		UserID: "user1", AdminAccountID: "ws1", TargetID: targetID,
 		OriginalPriority: 50, LastAppliedPriority: 50, PendingPriority: &pendingPriority,
+		PendingDispatchID: "known-write", PendingOwnerID: "previous-owner", PendingDispatchPhase: DispatchConfirmedApplied, UpdatedAt: time.Now().Add(-time.Minute),
 	}
 	repo.priorityStates["user1|ws1|"+targetID] = stored
 	inventory := map[string]*priorityTargetInventory{
@@ -307,10 +312,11 @@ func TestHealthPrioritySync_Sub2APIHardExcludedPendingConfirmationPersists(t *te
 				TargetID: targetID, Platform: string(upstream.PlatformSub2API),
 				AccountID: "manual", Models: []string{"gpt-4o"},
 			},
-			account:         upstream.AdminGroupAccountInfo{ID: "manual", Priority: &currentPriority, Models: "gpt-4o"},
-			policies:        []Policy{policy},
-			currentPriority: currentPriority,
-			priorityPresent: true,
+			account:           upstream.AdminGroupAccountInfo{ID: "manual", Priority: &currentPriority, Models: "gpt-4o"},
+			policies:          []Policy{policy},
+			currentPriority:   currentPriority,
+			priorityPresent:   true,
+			snapshotStartedAt: time.Now(),
 		},
 	}
 	service := &Service{repo: repo, priorityActions: actions}
@@ -406,8 +412,17 @@ func TestMultiplierPrioritySync_Sub2APIMultiplierOnlyStillUsesOneToNine(t *testi
 		t.Fatalf("multiplier_only must retain the Sub2API 1-9 range: %+v", actions.calls)
 	}
 	stored := repo.priorityStates["user1|ws1|"+targetID]
-	if stored.LastAppliedPriority != 1 || stored.OriginalPriority != currentPriority || stored.Conflict {
-		t.Fatalf("unexpected multiplier_only sync checkpoint: %+v", stored)
+	if stored.LastAppliedPriority != currentPriority || stored.OriginalPriority != currentPriority || stored.PendingPriority == nil || *stored.PendingPriority != 1 || stored.PendingDispatchPhase != DispatchConfirmedApplied || stored.Conflict {
+		t.Fatalf("multiplier receipt must retain pending until fresh confirmation: %+v", stored)
+	}
+	inventory[targetID].currentPriority = 1
+	inventory[targetID].account.Priority = intPointer(1)
+	inventory[targetID].target.InventoryComplete = true
+	inventory[targetID].snapshotStartedAt = time.Now().UTC()
+	service.syncWorkspacePriorities(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API}, "user1", "ws1", inventory, true, nil, []PrioritySyncState{stored})
+	stored = repo.priorityStates["user1|ws1|"+targetID]
+	if stored.LastAppliedPriority != 1 || stored.PendingPriority != nil || stored.OriginalPriority != currentPriority || stored.Conflict || len(actions.calls) != 1 {
+		t.Fatalf("fresh multiplier confirmation must resolve pending without resend: state=%+v calls=%+v", stored, actions.calls)
 	}
 }
 
@@ -609,4 +624,15 @@ func TestOverview_SharedHealthTargetAndMultiplierOnlyPeerAreCountedByProbePolicy
 	if overview.TotalConnections != 1 || overview.Unconfigured != 1 {
 		t.Fatalf("overview must count the shared health target once and exclude the multiplier_only peer: %+v", overview)
 	}
+}
+
+func storePriorityFixtureStates(repo *fakeRepository, states []ConnectionHealthState) []ConnectionHealthState {
+	for i := range states {
+		states[i].UserID, states[i].AdminAccountID = "user1", "ws1"
+		if repo.states[states[i].ConnectionID] == nil {
+			repo.states[states[i].ConnectionID] = make(map[string]ConnectionHealthState)
+		}
+		repo.states[states[i].ConnectionID][states[i].ModelName] = states[i]
+	}
+	return states
 }

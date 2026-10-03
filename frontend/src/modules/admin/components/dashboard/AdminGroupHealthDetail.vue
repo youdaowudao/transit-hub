@@ -28,7 +28,10 @@ import {
   formatConnectionHealthTime,
   formatConnectionHealthElapsed,
   hasValidConnectionHealthTime,
-  isConnectionHealthCurrentFailure,
+  hasCurrentHealthFailure,
+  canOpenManualProbeHistory,
+  isTestConfigurationBlocked,
+  testProtocolName,
   remoteActionLabelKey,
 } from '../../composables/useConnectionHealth'
 import type {
@@ -49,7 +52,7 @@ const props = withDefaults(defineProps<{
   actionLoading: boolean
   quickProbePhases?: Record<string, 'starting' | 'queued' | 'running'>
   quickProbeErrors?: Record<string, string>
-  quickProbeSuccesses?: Record<string, { modelName: string; latencyMs: number }>
+  quickProbeSuccesses?: Record<string, { modelName: string; latencyMs: number; protocol?: string | null; timeoutSeconds?: number | null }>
 }>(), {
   quickProbePhases: () => ({}),
   quickProbeErrors: () => ({}),
@@ -85,6 +88,7 @@ const quickProbeModel = (account: AdminGroupAccount): string => {
 }
 
 const quickProbeUnavailableReason = (account: AdminGroupAccount): string => {
+  if (isTestConfigurationBlocked(account.testConfiguration)) return readableMessage(account.testConfiguration?.blockedReason || 'admin.connectionHealth.errors.testConfigurationUnavailable')
   if (!account.probeAvailable) {
     const reasonKey = `${prefix}.probeUnavailableReasons.${account.probeUnavailableReason ?? ''}`
     return te(reasonKey) ? t(reasonKey) : t(`${detailPrefix}.quickProbe.unavailable`)
@@ -172,6 +176,7 @@ const stateBreakdown = computed<StateBreakdownItem[]>(() => [
 const readableMessage = (rawKey: string): string => t(connectionHealthMessageKey(rawKey, te))
 
 const STATE_PRIORITY: ConnectionHealthState[] = ['suspended', 'disabled', 'degraded', 'observing', 'recovering', 'healthy']
+const accountProtocolUnverified = (account: AdminGroupAccount): boolean => account.modelHealth.some(model => model.currentHealthResult?.status === 'unverified')
 const aggregateState = (account: AdminGroupAccount): ConnectionHealthState | '' => {
   const present = new Set((account.modelHealth ?? []).map((model) => model.state))
   return STATE_PRIORITY.find((state) => present.has(state)) ?? ''
@@ -333,8 +338,9 @@ const matchesFilter = (account: AdminGroupAccount): boolean => {
       return isNotProbed(account)
     case 'unconfigured':
       return Boolean(account.hasEnabledProbePolicy) && account.probeModelsConfigured === false
+        || account.modelHealth.some(model => model.currentHealthResult?.status === 'unverified')
     case 'modelState':
-      return account.modelHealth.some(model => model.state === filter.state)
+      return account.modelHealth.some(model => model.currentHealthResult?.status !== 'unverified' && model.state === filter.state)
     default:
       return true
   }
@@ -410,8 +416,8 @@ const hasStabilityReading = (account: AdminGroupAccount): boolean =>
 // 不能只凭它存在就展示，否则健康账号也会挂着旧报错。
 const accountCurrentErrorLabel = (account: AdminGroupAccount): string => {
   const failing = aggregatedModelHealth(account)
-    .filter(model => isConnectionHealthCurrentFailure(model) && model.lastErrorKey)
-  return failing.length > 0 ? readableMessage(failing[0].lastErrorKey) : ''
+    .filter(model => hasCurrentHealthFailure(model) && (model.currentHealthResult?.errorKey || model.lastErrorKey))
+  return failing.length > 0 ? readableMessage(failing[0].currentHealthResult?.errorKey || failing[0].lastErrorKey) : ''
 }
 
 // 副行压成一条：正常时只说最近一次中断，仍在故障时补上错误原因，
@@ -511,9 +517,10 @@ const sortedAccounts = computed(() => [...filteredAccounts.value].sort((first, s
 
 const filteredModelHealth = (account: AdminGroupAccount) => {
   const filter = activeFilter.value
-  if (filter.kind === 'notProbed' || filter.kind === 'unconfigured') return []
+  if (filter.kind === 'notProbed') return []
+  if (filter.kind === 'unconfigured') return account.modelHealth.filter(model => model.currentHealthResult?.status === 'unverified')
   if (filter.kind !== 'modelState') return account.modelHealth
-  return account.modelHealth.filter(model => model.state === filter.state)
+  return account.modelHealth.filter(model => model.currentHealthResult?.status !== 'unverified' && model.state === filter.state)
 }
 
 const filteredUnprobedModels = (account: AdminGroupAccount) => {
@@ -715,7 +722,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
         <table class="w-full min-w-[72rem] text-sm">
           <thead class="bg-surface/60 text-left text-xs text-muted-foreground">
             <tr>
-              <th class="w-10 px-3 py-2.5 font-medium"><span class="sr-only">{{ t(`${detailPrefix}.columns.expand`) }}</span></th>
+              <th class="relative w-10 px-3 py-2.5 font-medium"><span class="sr-only">{{ t(`${detailPrefix}.columns.expand`) }}</span></th>
               <th class="px-3 py-2.5 font-medium" :aria-sort="ariaSort('account')">
                 <button type="button" class="inline-flex items-center gap-1.5 text-left hover:text-foreground" @click="toggleSort('account')">
                   {{ t(`${detailPrefix}.columns.account`) }}
@@ -821,6 +828,14 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     <p class="mt-0.5 truncate text-[11px] text-muted-foreground">
                       {{ t(`${detailPrefix}.statusSources`, { upstream: statusSourceLabel(account.upstreamStatusSource), health: statusSourceLabel(account.healthStatusSource), schedulable: statusSourceLabel(account.schedulableSource) }) }}
                     </p>
+                    <p v-if="account.remoteActionPending" class="mt-1 whitespace-pre-wrap break-words text-xs text-amber-700 dark:text-amber-400">
+                      {{ t('admin.connectionHealth.testConfiguration.remoteActionPending') }} · {{ account.remoteActionPending.action }} · {{ account.remoteActionPending.dispatchId || '—' }}
+                    </p>
+                    <p v-if="account.testConfiguration" class="mt-1 whitespace-normal break-words text-xs text-muted-foreground">
+                      {{ t('admin.connectionHealth.testConfiguration.' + account.testConfiguration.status) }}
+                      <template v-if="!isTestConfigurationBlocked(account.testConfiguration)"> · {{ testProtocolName(account.testConfiguration.protocol) }} / {{ account.testConfiguration.probeTimeoutSeconds }}s</template>
+                      <span v-if="account.testConfiguration.sourceGroups.length"> · {{ account.testConfiguration.sourceGroups.map(source => `${source.adminGroupName || source.adminGroupId}: ${testProtocolName(source.protocol)} / ${source.probeTimeoutSeconds}s`).join('；') }}</span>
+                    </p>
                     <p v-if="account.schedulableChangedAt" class="mt-0.5 truncate text-[11px] text-muted-foreground">{{ t(`${detailPrefix}.schedulableChangedAt`, { time: formatConnectionHealthTime(account.schedulableChangedAt) }) }}</p>
                     <p v-if="account.lastSchedulableAction" class="mt-0.5 max-w-72 truncate text-[11px] text-muted-foreground" :title="lastSchedulableActionLabel(account)">{{ lastSchedulableActionLabel(account) }}</p>
                   </div>
@@ -836,6 +851,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     <span v-else-if="account.probeModelsConfigured === false" class="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
                       <Settings2 class="h-3 w-3" />{{ t(`${prefix}.notConfigured`) }}
                     </span>
+                    <span v-else-if="accountProtocolUnverified(account)" class="rounded-md bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-400">{{ t('admin.connectionHealth.testConfiguration.unverified') }}</span>
                     <span v-else-if="!aggregateState(account)" class="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
                       <ShieldQuestion class="h-3 w-3" />{{ t(`${prefix}.notProbed`) }}
                     </span>
@@ -924,7 +940,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                           ? 'bg-amber-500 text-white shadow-sm ring-2 ring-amber-500/25 hover:bg-amber-600 hover:text-white dark:bg-amber-400 dark:text-zinc-950 dark:hover:bg-amber-300'
                           : 'text-muted-foreground hover:bg-surface hover:text-primary'"
                         :aria-label="hasUnreadQuestionAnswer(account) ? t(`${prefix}.actions.questionAnswerUnread`) : t(`${prefix}.actions.probe`)"
-                        :disabled="!account.probeAvailable"
+                        :disabled="!canOpenManualProbeHistory(account)"
                         @click="emit('probe', account)"
                       >
                         <Zap class="h-4 w-4" />
@@ -978,6 +994,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     model: quickProbeSuccesses[account.targetId].modelName,
                     latency: quickProbeSuccesses[account.targetId].latencyMs,
                   }) }}
+                  · {{ testProtocolName(quickProbeSuccesses[account.targetId].protocol) || t('admin.connectionHealth.testConfiguration.legacy') }}<template v-if="quickProbeSuccesses[account.targetId].timeoutSeconds"> / {{ quickProbeSuccesses[account.targetId].timeoutSeconds }}s</template>
                 </td>
               </tr>
               <tr v-if="quickProbeErrors[account.targetId]" class="quick-probe-error-row border-t border-destructive/20 bg-destructive/[0.06]">
@@ -992,7 +1009,8 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     <div v-for="model in filteredModelHealth(account)" :key="model.modelName" class="rounded-lg border border-border/50 bg-background px-2.5 py-2">
                       <div class="flex items-center justify-between gap-3">
                         <span class="truncate text-sm font-medium text-foreground">{{ model.modelName }}</span>
-                        <span class="rounded-md px-2 py-0.5 text-xs font-medium" :class="model.configured ? connectionHealthStateBadgeClass(model.state) : 'bg-muted text-muted-foreground'">{{ model.configured ? t(`${prefix}.stateLabels.${model.state}`) : t(`${prefix}.notConfigured`) }}</span>
+                        <span v-if="model.currentHealthResult?.status === 'unverified'" class="text-xs text-amber-700">{{ t('admin.connectionHealth.testConfiguration.unverified') }}</span>
+                        <span v-else class="rounded-md px-2 py-0.5 text-xs font-medium" :class="model.configured ? connectionHealthStateBadgeClass(model.state) : 'bg-muted text-muted-foreground'">{{ model.configured ? t(`${prefix}.stateLabels.${model.state}`) : t(`${prefix}.notConfigured`) }}</span>
                       </div>
                       <div class="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                         <span :class="model.state === 'suspended' ? 'text-destructive' : ''">{{ t(`${detailPrefix}.models.latency`, { value: !model.configured || model.state === 'suspended' ? '-' : (model.lastLatencyMs ?? '-') }) }}</span>
@@ -1005,7 +1023,14 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                         <span class="font-medium text-destructive">{{ t(`${detailPrefix}.models.lastFailure`, { value: formatConnectionHealthTime(model.lastFailureAt) }) }}</span>
                         <span v-if="formatConnectionHealthElapsed(model.elapsedSeconds, model.lastFailureAt)" class="font-medium text-destructive">{{ t(`${detailPrefix}.models.elapsed`, { value: formatConnectionHealthElapsed(model.elapsedSeconds, model.lastFailureAt) }) }}</span>
                       </div>
-                      <p v-if="isConnectionHealthCurrentFailure(model) && model.lastErrorKey" class="mt-1 truncate text-[11px] text-destructive/80">{{ readableMessage(model.lastErrorKey) }}</p>
+                      <div v-if="hasCurrentHealthFailure(model)" class="mt-1 whitespace-pre-wrap break-words text-xs text-destructive/80">
+                        <p>{{ readableMessage(model.currentHealthResult?.errorKey || model.lastErrorKey) }}</p>
+                        <p>{{ model.currentHealthResult?.errorDetail || model.lastErrorDetail }}</p>
+                      </div>
+                      <div v-if="model.lastAttempt" class="mt-1 whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                        <p>{{ testProtocolName(model.lastAttempt.protocol) || t('admin.connectionHealth.testConfiguration.legacy') }}<template v-if="model.lastAttempt.probeTimeoutSeconds"> / {{ model.lastAttempt.probeTimeoutSeconds }}s</template> · {{ formatConnectionHealthTime(model.lastAttempt.at ?? null) }}</p>
+                        <p v-if="model.lastAttempt.disposition === 'invalid'">{{ t('admin.connectionHealth.testConfiguration.invalid') }} · {{ model.lastAttempt.errorDetail || (model.lastAttempt.errorKey ? readableMessage(model.lastAttempt.errorKey) : '') }}</p>
+                      </div>
                       <p v-if="effectiveSourcesLabel(model)" class="mt-1 text-xs text-muted-foreground">{{ effectiveSourcesLabel(model) }}</p>
                     </div>
                     <div v-for="model in filteredUnprobedModels(account)" :key="`unprobed:${model.modelName}`" class="rounded-lg border border-border/50 bg-background px-2.5 py-2">

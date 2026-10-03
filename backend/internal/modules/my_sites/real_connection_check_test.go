@@ -461,7 +461,7 @@ func TestAutomaticPricingMissingOnlyPersistsSkipWithoutRemoteWrite(t *testing.T)
 	remoteWrites := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/groups" {
-			writeConnectionTestJSON(w, map[string]any{"data": []map[string]any{{"id": "own-id", "name": "own", "rate_multiplier": 1.0}}})
+			writeConnectionTestJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "own", "rate_multiplier": 1.0}}})
 			return
 		}
 		if r.Method != http.MethodGet {

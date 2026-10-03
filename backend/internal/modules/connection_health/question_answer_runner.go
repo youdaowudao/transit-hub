@@ -18,14 +18,12 @@ func NewQuestionAnswerRunner() *QuestionAnswerRunner {
 	return &QuestionAnswerRunner{client: &http.Client{}}
 }
 
-func (r *QuestionAnswerRunner) Ask(ctx context.Context, cred upstream.ProbeCredential, model string, question string, reasoningEffort QuestionAnswerReasoningEffort) (string, string) {
-	endpoint := strings.TrimRight(cred.BaseURL, "/") + "/v1/chat/completions"
-	payload := map[string]any{
-		"model":            model,
-		"messages":         []map[string]string{{"role": "user", "content": question}},
-		"reasoning_effort": reasoningEffort,
+func (r *QuestionAnswerRunner) Ask(ctx context.Context, cred upstream.ProbeCredential, model string, question string, reasoningEffort QuestionAnswerReasoningEffort, protocols ...TestProtocol) (string, string) {
+	protocol := TestProtocolChatCompletions
+	if len(protocols) > 0 {
+		protocol = protocols[0]
 	}
-	request, err := newJSONRequest(ctx, http.MethodPost, endpoint, payload, map[string]string{"Authorization": "Bearer " + cred.Key})
+	request, err := buildTestRequest(ctx, testRequestInput{Protocol: protocol, BaseURL: cred.BaseURL, Key: cred.Key, Model: model, Prompt: question, ReasoningEffort: reasoningEffort, QuestionAnswer: true})
 	if err != nil {
 		return "", QuestionAnswerErrorInvalidResponse
 	}
@@ -39,15 +37,25 @@ func (r *QuestionAnswerRunner) Ask(ctx context.Context, cred upstream.ProbeCrede
 	defer response.Body.Close()
 	body, oversized, err := readProbeResponseBody(response.Body)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", QuestionAnswerErrorTimeout
+		}
 		return "", QuestionAnswerErrorNetwork
 	}
 	if oversized {
 		return "", QuestionAnswerErrorResponseTooLarge
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		outcome := classifyTestHTTPResponse(protocol, response.StatusCode, body, cred.Key, 0)
+		if outcome.Result == ResultInvalidResponse {
+			return "", QuestionAnswerErrorInvalidResponse
+		}
+		if outcome.Result == ResultModelNotFound {
+			return "", QuestionAnswerErrorModelNotFound
+		}
 		return "", questionAnswerHTTPError(response.StatusCode)
 	}
-	answer, ok := extractQuestionAnswer(body)
+	answer, ok := decodeTestResponse(protocol, body, true)
 	if !ok {
 		return "", QuestionAnswerErrorInvalidResponse
 	}

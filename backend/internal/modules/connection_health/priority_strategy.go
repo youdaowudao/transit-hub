@@ -30,6 +30,7 @@ func (s *Service) updateAdminTargetPriority(ctx context.Context, session upstrea
 }
 
 type priorityTargetInventory struct {
+	snapshotStartedAt   time.Time
 	target              AdminProbeTarget
 	account             upstream.AdminGroupAccountInfo
 	policies            []Policy
@@ -93,7 +94,7 @@ func (s *Service) syncCurrentWorkspacePrioritiesWithResult(ctx context.Context, 
 			return nil
 		}
 	}
-	release, err := s.repo.AcquirePrioritySyncLease(ctx, userID, adminAccountID)
+	ctx, release, _, err := s.acquireActionLease(ctx, priorityRuntimeLeaseKey(userID, adminAccountID), true)
 	if err != nil {
 		return err
 	}
@@ -224,15 +225,17 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 		identity := workspaceIdentity[workspaceKey]
 		userID, adminAccountID := identity[0], identity[1]
 		release := func() {}
+		workspaceCtx := ctx
 		if acquireWorkspaceLease {
 			var err error
-			release, err = s.repo.AcquirePrioritySyncLease(ctx, userID, adminAccountID)
+			workspaceCtx, release, _, err = s.acquireActionLease(ctx, priorityRuntimeLeaseKey(userID, adminAccountID), true)
 			if err != nil {
 				log.Printf("[connection-health] priority sync acquire workspace lease failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 				continue
 			}
 		}
 		func() {
+			ctx := workspaceCtx
 			defer release()
 			expectedPendingSignature, jobGeneration := expectedGenerations[workspaceKey]
 			if jobGeneration {
@@ -281,6 +284,7 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 				failGeneration(err)
 				return
 			}
+			s.rememberActionInventory(userID, adminAccountID, inventorySnapshot)
 			session := inventorySnapshot.session
 			settings, err := s.repo.ListGroupProbeSortSettings(ctx, userID, adminAccountID)
 			if err != nil {
@@ -351,7 +355,7 @@ func (s *Service) priorityInventoryForSnapshot(
 	session := snapshot.session
 	platform := string(session.Platform)
 	inventory := make(map[string]*priorityTargetInventory)
-	inventoryComplete := true
+	inventoryComplete := adminInventoryComplete(*snapshot)
 	for _, groupInventory := range snapshot.groups {
 		group := groupInventory.group
 		if groupInventory.err != nil {
@@ -365,6 +369,7 @@ func (s *Service) priorityInventoryForSnapshot(
 			item := inventory[targetID]
 			if item == nil {
 				item = &priorityTargetInventory{
+					snapshotStartedAt: snapshot.snapshotStartedAt,
 					target: AdminProbeTarget{
 						TargetID: targetID, Platform: platform, AdminGroupID: group.ID, AdminGroupName: group.Name,
 						AccountID: account.ID, AccountName: account.Name, AccountStatus: account.Status, AccountWeight: cloneIntPointer(account.Weight),
@@ -378,6 +383,8 @@ func (s *Service) priorityInventoryForSnapshot(
 				}
 				inventory[targetID] = item
 			}
+			item.target.TestMemberships = append(item.target.TestMemberships, TestConfigurationSource{AdminGroupID: group.ID, AdminGroupName: group.Name})
+			item.target.InventoryComplete = inventoryComplete
 			item.upstreamMultiplier = resolutionForAdminAccount(multiplierLookup, account.ID)
 			inherited := groupPolicies[group.ID]
 			excluded := excludedByGroup[group.ID][targetID]
@@ -422,6 +429,17 @@ func (s *Service) syncWorkspacePriorities(
 		}
 		return current
 	}
+	if session.Platform == upstream.PlatformSub2API {
+		configs, configErr := s.repo.ListGroupTestConfigurations(ctx, userID, adminAccountID)
+		for _, item := range inventory {
+			item.target.InventoryComplete = inventoryComplete
+			item.target.TestConfiguration = ResolveGroupTestConfiguration(item.target.TestMemberships, inventoryComplete && configErr == nil, configs)
+		}
+		if !inventoryComplete {
+			s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, requestError(ErrorPriorityInventoryIncomplete), 1)
+			return
+		}
+	}
 	failedCount := 0
 	blockedMultiplierCount := 0
 	processableMultiplierCount := 0
@@ -434,8 +452,35 @@ func (s *Service) syncWorkspacePriorities(
 	}
 
 	storedByTarget := make(map[string]PrioritySyncState, len(syncStates))
+	reconcileFailedTargets := make(map[string]struct{})
 	for _, state := range syncStates {
 		storedByTarget[state.TargetID] = state
+	}
+
+	if session.Platform == upstream.PlatformSub2API {
+		// Previously admitted calls may finish after configuration or multiplier
+		// eligibility changes. Their receipts still consume this existing refresh.
+		for targetID, stored := range storedByTarget {
+			item := inventory[targetID]
+			if item == nil {
+				continue
+			}
+			observation := RemoteActionObservation{RemoteActionScope: RemoteActionScope{userID, adminAccountID, targetID}, InventoryComplete: inventoryComplete, Visible: true, SnapshotStartedAt: item.snapshotStartedAt, Status: item.target.AccountStatus, Weight: item.target.AccountWeight}
+			if item.priorityPresent {
+				value := item.currentPriority
+				observation.Priority = &value
+			}
+			pair, reconcileErr := s.reconcileActionObservation(ctx, observation)
+			if reconcileErr != nil {
+				failedCount++
+				reconcileFailedTargets[targetID] = struct{}{}
+				continue
+			}
+			if pair.Priority != nil {
+				stored = *pair.Priority
+				storedByTarget[targetID] = stored
+			}
+		}
 	}
 
 	managed := make(map[string]*priorityTargetInventory)
@@ -446,6 +491,9 @@ func (s *Service) syncWorkspacePriorities(
 	multiplierOnlyTargets := make(map[string]float64)
 	healthCandidates := make([]healthPriorityCandidate, 0)
 	for targetID, item := range inventory {
+		if _, failed := reconcileFailedTargets[targetID]; failed {
+			continue
+		}
 		if !hasMultiplierPriorityPolicy(item.policies) {
 			continue
 		}
@@ -464,6 +512,15 @@ func (s *Service) syncWorkspacePriorities(
 			effectiveMultiplierByTarget[targetID] = multiplier
 			multiplierOnlyTargets[targetID] = multiplier
 			continue
+		}
+		if session.Platform == upstream.PlatformSub2API {
+			activeModels := activeHealthPriorityModels(item)
+			activeStates := activeHealthPriorityStates(statesByTarget[targetID], activeModels)
+			if !healthStatesUsableForTarget(item.target, activeStates, len(activeModels)) {
+				managed[targetID] = item
+				hardExcludedHealthTargets[targetID] = struct{}{}
+				continue
+			}
 		}
 		if isPriorityMultiplierBlocker(item.upstreamMultiplier.status) {
 			missingMultiplier[targetID] = struct{}{}
@@ -488,7 +545,7 @@ func (s *Service) syncWorkspacePriorities(
 		candidate := healthPriorityCandidate{
 			targetID: targetID, item: item, multiplier: multiplier, states: activeStates,
 			expectedModels: len(activeModels), healthBand: priorityHealthBand(activeStates, len(activeModels)),
-			latencyMs: completeTargetSuccessLatency(activeStates, activeModels),
+			latencyMs: targetSuccessLatency(item.target, activeStates, activeModels),
 		}
 		managed[targetID] = item
 		effectiveMultiplierByTarget[targetID] = multiplier
@@ -542,6 +599,21 @@ func (s *Service) syncWorkspacePriorities(
 				UserID: userID, AdminAccountID: adminAccountID, TargetID: targetID,
 				OriginalPriority: item.currentPriority, LastAppliedPriority: item.currentPriority,
 			}
+		}
+		if session.Platform == upstream.PlatformSub2API {
+			if !generationCurrent() {
+				return
+			}
+			_, blocked := hardExcludedHealthTargets[targetID]
+			var multiplierValue *float64
+			if multiplierAvailable {
+				copy := multiplier
+				multiplierValue = &copy
+			}
+			if err := s.syncSafePriorityTarget(ctx, session, userID, adminAccountID, targetID, item, &stored, desired, multiplierValue, statesByTarget[targetID], expectedPendingSignature, false, !blocked); err != nil {
+				failedCount++
+			}
+			continue
 		}
 		if stored.Conflict {
 			continue
@@ -625,6 +697,9 @@ func (s *Service) syncWorkspacePriorities(
 
 	// 不再被任何倍率策略覆盖的目标恢复接管前优先级。若管理员已经人工改过，则保留人工值。
 	for targetID, stored := range storedByTarget {
+		if _, failed := reconcileFailedTargets[targetID]; failed {
+			continue
+		}
 		if _, stillManaged := managed[targetID]; stillManaged {
 			continue
 		}
@@ -632,6 +707,15 @@ func (s *Service) syncWorkspacePriorities(
 			continue
 		}
 		item := inventory[targetID]
+		if session.Platform == upstream.PlatformSub2API {
+			if !generationCurrent() {
+				return
+			}
+			if err := s.syncSafePriorityTarget(ctx, session, userID, adminAccountID, targetID, item, &stored, stored.OriginalPriority, nil, nil, expectedPendingSignature, true, true); err != nil {
+				failedCount++
+			}
+			continue
+		}
 		if session.Platform == upstream.PlatformSub2API && item != nil && !item.priorityPresent {
 			// Preserve an upstream NULL priority and keep any prior checkpoint
 			// for a later, explicit reconciliation once the value is readable.
@@ -1042,4 +1126,18 @@ func desiredManagedPriority(states []ConnectionHealthState, multiplierRank int) 
 		base += maxInt(0, minInt(100, weight)) * 10
 	}
 	return base + priceScore
+}
+
+func targetSuccessLatency(target AdminProbeTarget, states []ConnectionHealthState, activeModels map[string]struct{}) *int {
+	if target.Platform != string(upstream.PlatformSub2API) {
+		return completeTargetSuccessLatency(states, activeModels)
+	}
+	if !healthStatesUsableForTarget(target, states, len(activeModels)) {
+		return nil
+	}
+	current := append([]ConnectionHealthState(nil), states...)
+	for index := range current {
+		current[index].LastSuccessLatencyMs = successLatencyForProtocol(current[index], target.TestConfiguration.Protocol)
+	}
+	return completeTargetSuccessLatency(current, activeModels)
 }

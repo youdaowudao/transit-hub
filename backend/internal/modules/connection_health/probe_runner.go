@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -26,27 +27,54 @@ const maxProbeResponseBytes = 1024 * 1024
 // ProbeRequest 是发起一次真实轻量探活所需的全部参数。UpstreamKey 只用于构造请求凭据，
 // 探活结果（ProbeOutcome）绝不回填明文 key。
 type ProbeRequest struct {
-	BaseURL        string
-	UpstreamKey    string
-	ProviderFamily string
-	ModelName      string
-	MaxTokens      int
-	ProbePrompt    string
+	Protocol            TestProtocol `json:"protocol"`
+	ProbeTimeoutSeconds int          `json:"probeTimeoutSeconds"`
+	LegacyCompatibility bool         `json:"-"`
+	BaseURL             string
+	UpstreamKey         string
+	ProviderFamily      string
+	ModelName           string
+	MaxTokens           int
+	ProbePrompt         string
 }
 
 // RealProbeRunner 按 provider family 构造最小请求，对上游 AI 端点发起一次性轻量调用。
 // 不经过任何现有请求转发路径，独立的 http.Client，超时 10s。
 type RealProbeRunner struct {
 	client *http.Client
+	now    func() time.Time
 }
 
 func NewRealProbeRunner() *RealProbeRunner {
-	return &RealProbeRunner{client: &http.Client{Timeout: ProbeTimeout}}
+	return &RealProbeRunner{client: &http.Client{}, now: time.Now}
 }
 
 // Probe 发起一次真实轻量探活，返回分类后的结果。err 只用于调用方感知调用本身是否被 ctx 取消，
 // 正常的上游错误都归类进 ProbeOutcome.Result，不通过 error 返回。
-func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) ProbeOutcome {
+func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) (outcome ProbeOutcome) {
+	// Empty protocol is reserved for callers compiled before protocol support.
+	legacy := req.LegacyCompatibility || req.Protocol == ""
+	if req.Protocol == "" {
+		req.Protocol = TestProtocolChatCompletions
+	}
+	if req.ProbeTimeoutSeconds == 0 {
+		req.ProbeTimeoutSeconds = 10
+	}
+	defer func() {
+		outcome.Protocol = req.Protocol
+		outcome.ProbeTimeoutSeconds = req.ProbeTimeoutSeconds
+		outcome.LegacyCompatibility = legacy
+	}()
+	if !validGroupTestConfiguration(GroupTestConfiguration{req.Protocol, req.ProbeTimeoutSeconds}) {
+		return ProbeOutcome{Result: ResultInvalidResponse, Detail: "invalid test configuration"}
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(req.ProbeTimeoutSeconds)*time.Second)
+	defer cancel()
+	now := r.now
+	if now == nil {
+		now = time.Now
+	}
+
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = 1
@@ -61,23 +89,26 @@ func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) ProbeOutc
 		return ProbeOutcome{Result: ResultInvalidResponse, Detail: redact(buildErr.Error(), req.UpstreamKey)}
 	}
 
-	started := time.Now()
+	started := now()
 	resp, err := r.client.Do(httpReq)
 	if err != nil {
-		latencyMs := int(time.Since(started).Milliseconds())
-		return ProbeOutcome{Result: classifyTransportError(err), LatencyMs: latencyMs, Detail: redact(err.Error(), req.UpstreamKey)}
+		latencyMs := int(now().Sub(started).Milliseconds())
+		return ProbeOutcome{Result: classifyTransportError(err), LatencyMs: latencyMs, Detail: probeRequestErrorDetail(ctx, err, req, "waiting_headers"), RequestPhase: "waiting_headers"}
 	}
 	defer resp.Body.Close()
 
 	body, oversized, readErr := readProbeResponseBody(resp.Body)
-	latencyMs := int(time.Since(started).Milliseconds())
+	latencyMs := int(now().Sub(started).Milliseconds())
 	if readErr != nil {
-		return ProbeOutcome{Result: classifyTransportError(readErr), LatencyMs: latencyMs, Detail: redact(readErr.Error(), req.UpstreamKey)}
+		return ProbeOutcome{Result: classifyTransportError(readErr), LatencyMs: latencyMs, Detail: probeRequestErrorDetail(ctx, readErr, req, "reading_body"), RequestPhase: "reading_body"}
 	}
 	if oversized && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated) {
 		return ProbeOutcome{Result: ResultInvalidResponse, LatencyMs: latencyMs, Detail: "probe response exceeds 1 MiB limit"}
 	}
-	return classifyHTTPResponse(resp.StatusCode, body, req.UpstreamKey, latencyMs)
+	if legacy {
+		return classifyHTTPResponse(resp.StatusCode, body, req.UpstreamKey, latencyMs)
+	}
+	return classifyTestHTTPResponse(req.Protocol, resp.StatusCode, body, req.UpstreamKey, latencyMs)
 }
 
 func readProbeResponseBody(body io.Reader) ([]byte, bool, error) {
@@ -108,20 +139,22 @@ func readProbeResponseBody(body io.Reader) ([]byte, bool, error) {
 // providerFamily 目前只用于在 ModelName 为空时选择一个合理的默认模型名做探活，
 // 不再影响实际请求的 endpoint/鉴权方式。
 func buildProbeRequest(ctx context.Context, req ProbeRequest, prompt string, maxTokens int) (*http.Request, error) {
-	baseURL := strings.TrimRight(req.BaseURL, "/")
 	model := req.ModelName
 	if model == "" {
 		model = defaultModelForProvider(req.ProviderFamily)
 	}
-
-	endpoint := baseURL + "/v1/chat/completions"
-	payload := map[string]any{
-		"model":      model,
-		"max_tokens": maxTokens,
-		"messages":   []map[string]any{{"role": "user", "content": prompt}},
+	protocol := req.Protocol
+	if protocol == "" {
+		protocol = TestProtocolChatCompletions
 	}
-	headers := map[string]string{"Authorization": "Bearer " + req.UpstreamKey}
-	return newJSONRequest(ctx, http.MethodPost, endpoint, payload, headers)
+	return buildTestRequest(ctx, testRequestInput{Protocol: protocol, BaseURL: req.BaseURL, Key: req.UpstreamKey, Model: model, Prompt: prompt, MaxTokens: maxTokens})
+}
+
+func probeRequestErrorDetail(ctx context.Context, err error, req ProbeRequest, phase string) string {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Sprintf("请求超时（配置 %d 秒，%s）", req.ProbeTimeoutSeconds, phase)
+	}
+	return redact(err.Error(), req.UpstreamKey)
 }
 
 func defaultModelForProvider(providerFamily string) string {
@@ -165,7 +198,7 @@ func classifyTransportError(err error) ResultKey {
 
 // classifyHTTPResponse 按状态码和响应体归类为 7 种错误分类之一，或 ok。
 func classifyHTTPResponse(status int, body []byte, upstreamKey string, latencyMs int) ProbeOutcome {
-	detail := redact(truncate(string(body), 500), upstreamKey)
+	detail := truncate(redact(string(body), upstreamKey), 500)
 
 	switch {
 	case status == http.StatusOK || status == http.StatusCreated:

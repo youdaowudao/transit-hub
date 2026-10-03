@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount, watch, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { LayoutDashboard, Network, Settings, LogOut, Moon, Sun, Percent, Megaphone, ChevronDown, ArrowRightLeft, FolderTree, Link2, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes, Clock3 } from 'lucide-vue-next'
+import { LayoutDashboard, Network, Settings, LogOut, Moon, Sun, Percent, Megaphone, ChevronDown, ArrowRightLeft, Link2, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes, Clock3 } from 'lucide-vue-next'
 import { useDark, useToggle } from '@vueuse/core'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import { clearAccessToken } from '@/modules/auth/api/auth'
@@ -93,7 +93,7 @@ interface MenuChild {
   icon: Component
 }
 // 菜单项分两种形态：叶子（单一路由入口）和分组（固定顺序的二级菜单集合）。
-// “分组管理”下的三个二级菜单顺序固定：分组倍率 -> 分组关联 -> 分组健康，不随业务改动调整。
+// 三个分组功能为一级入口；辅助功能收纳在“二级功能”下。
 type MenuEntry =
   | { type: 'leaf'; name: string; path: string; icon: Component }
   | { type: 'group'; id: string; name: string; icon: Component; children: MenuChild[] }
@@ -101,19 +101,9 @@ type MenuEntry =
 const menuItems = computed<MenuEntry[]>(() => [
   { type: 'leaf', name: t('admin.menu.dashboard'), path: '/admin', icon: LayoutDashboard },
   { type: 'leaf', name: t('admin.menu.upstream'), path: '/admin/upstream', icon: Network },
-  {
-    type: 'group',
-    id: 'group-management',
-    name: t('admin.menu.groupManagement'),
-    icon: FolderTree,
-    children: [
-      { name: t('admin.menu.groupRates'), path: '/admin/group-rates', icon: Percent },
-      { name: t('admin.menu.groupAssociations'), path: '/admin/group-associations', icon: Link2 },
-      { name: t('admin.menu.connectionHealth'), path: '/admin/connection-health', icon: Activity },
-    ],
-  },
-  { type: 'leaf', name: t('admin.menu.massEmail'), path: '/admin/mass-email', icon: Mail },
-  { type: 'leaf', name: t('admin.menu.userLastUsed'), path: '/admin/user-last-used', icon: Clock3 },
+  { type: 'leaf', name: t('admin.menu.groupRates'), path: '/admin/group-rates', icon: Percent },
+  { type: 'leaf', name: t('admin.menu.groupAssociations'), path: '/admin/group-associations', icon: Link2 },
+  { type: 'leaf', name: t('admin.menu.connectionHealth'), path: '/admin/connection-health', icon: Activity },
   {
     type: 'group',
     id: 'embedded-features',
@@ -124,6 +114,8 @@ const menuItems = computed<MenuEntry[]>(() => [
       { name: t('admin.menu.lottery'), path: '/admin/lottery', icon: Gift },
       { name: t('admin.menu.groupRateCampaigns'), path: '/admin/group-rate-campaigns', icon: Megaphone },
       { name: t('admin.menu.tickets'), path: '/admin/tickets', icon: MessageSquare },
+      { name: t('admin.menu.massEmail'), path: '/admin/mass-email', icon: Mail },
+      { name: t('admin.menu.userLastUsed'), path: '/admin/user-last-used', icon: Clock3 },
     ],
   },
   { type: 'leaf', name: t('admin.menu.settings'), path: '/admin/settings', icon: Settings },

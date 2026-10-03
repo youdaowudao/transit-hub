@@ -5,10 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"log"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -340,7 +338,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return r.ensureTestProtocolSchema(ctx)
 }
 
 type policyExecutor interface {
@@ -646,14 +644,40 @@ func scanPolicyRow(row rowScanner) (*Policy, error) {
 
 // UpsertState 按 (connection_id, model_name) 写入或更新一条健康状态。
 func (r *Repository) UpsertState(ctx context.Context, s ConnectionHealthState) error {
-	_, err := r.db.Exec(ctx, `
+	if strings.HasPrefix(s.ConnectionID, "sub2api:") {
+		tx, err := r.beginWorkspaceTransaction(ctx, s.UserID, s.AdminAccountID)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		current, err := getStateTx(ctx, tx, s.ConnectionID, s.ModelName)
+		if err != nil {
+			return err
+		}
+		if current != nil && (current.State != s.State || current.CurrentWeight != s.CurrentWeight || current.ConsecutiveFailures != s.ConsecutiveFailures || current.ConsecutiveSuccesses != s.ConsecutiveSuccesses) {
+			s.HealthEvidenceStatus = HealthEvidenceInvalid
+			s.HealthEvidenceProtocol = nil
+		}
+		if err := upsertStateWithExecutor(ctx, tx, s); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	return upsertStateWithExecutor(ctx, r.db, s)
+}
+
+func upsertStateWithExecutor(ctx context.Context, q policyExecutor, s ConnectionHealthState) error {
+	if s.HealthEvidenceStatus == "" {
+		s.HealthEvidenceStatus = HealthEvidenceInvalid
+	}
+	_, err := q.Exec(ctx, `
 		INSERT INTO connection_health_states (
 			connection_id, model_name, user_id, admin_account_id, own_group_id, own_group_name,
 			upstream_site_id, upstream_group_id, upstream_group_name, state, current_weight,
 				consecutive_failures, consecutive_successes, last_probe_at, last_success_at, last_failure_at,
 				cooldown_until, observing_until, last_latency_ms, last_success_latency_ms, last_probe_decision_key,
-				last_error_key, last_error_detail, last_remote_action, updated_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,now())
+				last_error_key, last_error_detail, last_remote_action, last_probe_protocol, last_probe_timeout_seconds, last_applied_probe_at, last_applied_probe_result, last_applied_probe_protocol, counter_protocol, health_evidence_status, health_evidence_protocol, last_success_protocol, last_credential_failure_at, last_credential_failure_reason, updated_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,now())
 		ON CONFLICT (connection_id, model_name) DO UPDATE SET
 			user_id = EXCLUDED.user_id,
 			admin_account_id = EXCLUDED.admin_account_id,
@@ -677,22 +701,44 @@ func (r *Repository) UpsertState(ctx context.Context, s ConnectionHealthState) e
 			last_error_key = EXCLUDED.last_error_key,
 			last_error_detail = EXCLUDED.last_error_detail,
 			last_remote_action = EXCLUDED.last_remote_action,
+			last_probe_protocol = EXCLUDED.last_probe_protocol,
+			last_probe_timeout_seconds = EXCLUDED.last_probe_timeout_seconds,
+			last_applied_probe_at = EXCLUDED.last_applied_probe_at,
+			last_applied_probe_result = EXCLUDED.last_applied_probe_result,
+			last_applied_probe_protocol = EXCLUDED.last_applied_probe_protocol,
+			counter_protocol = EXCLUDED.counter_protocol,
+			health_evidence_status = EXCLUDED.health_evidence_status,
+			health_evidence_protocol = EXCLUDED.health_evidence_protocol,
+			last_success_protocol = EXCLUDED.last_success_protocol,
+
 			updated_at = now()
 	`, s.ConnectionID, s.ModelName, s.UserID, s.AdminAccountID, s.OwnGroupID, s.OwnGroupName,
 		s.UpstreamSiteID, s.UpstreamGroupID, s.UpstreamGroupName, string(s.State), s.CurrentWeight,
 		s.ConsecutiveFailures, s.ConsecutiveSuccesses, s.LastProbeAt, s.LastSuccessAt, s.LastFailureAt,
 		s.CooldownUntil, s.ObservingUntil, s.LastLatencyMs, s.LastSuccessLatencyMs, s.LastProbeDecisionKey,
-		s.LastErrorKey, s.LastErrorDetail, s.LastRemoteAction)
+		s.LastErrorKey, s.LastErrorDetail, s.LastRemoteAction, s.LastProbeProtocol, s.LastProbeTimeoutSeconds, s.LastAppliedProbeAt, s.LastAppliedProbeResult, s.LastAppliedProbeProtocol, s.CounterProtocol, s.HealthEvidenceStatus, s.HealthEvidenceProtocol, s.LastSuccessProtocol, s.LastCredentialFailureAt, s.LastCredentialFailureReason)
 	return err
 }
 
 func (r *Repository) GetState(ctx context.Context, connectionID string, modelName string) (*ConnectionHealthState, error) {
-	row := r.db.QueryRow(ctx, `
+	return getStateWithQuerier(ctx, r.db, connectionID, modelName)
+}
+
+func getStateTx(ctx context.Context, tx pgx.Tx, connectionID, modelName string) (*ConnectionHealthState, error) {
+	return getStateWithQuerier(ctx, tx, connectionID, modelName)
+}
+
+type stateQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func getStateWithQuerier(ctx context.Context, q stateQuerier, connectionID, modelName string) (*ConnectionHealthState, error) {
+	row := q.QueryRow(ctx, `
 		SELECT connection_id, model_name, user_id, admin_account_id, own_group_id, own_group_name,
 			upstream_site_id, upstream_group_id, upstream_group_name, state, current_weight,
 			consecutive_failures, consecutive_successes, last_probe_at, last_success_at, last_failure_at,
 			cooldown_until, observing_until, last_latency_ms, last_success_latency_ms, last_probe_decision_key,
-			last_error_key, last_error_detail, last_remote_action, updated_at
+			last_error_key, last_error_detail, last_remote_action, last_probe_protocol, last_probe_timeout_seconds, last_applied_probe_at, last_applied_probe_result, last_applied_probe_protocol, counter_protocol, health_evidence_status, health_evidence_protocol, last_success_protocol, last_credential_failure_at, last_credential_failure_reason, updated_at
 		FROM connection_health_states WHERE connection_id = $1 AND model_name = $2
 	`, connectionID, modelName)
 	return scanState(row)
@@ -705,7 +751,7 @@ func (r *Repository) ListStatesByWorkspace(ctx context.Context, userID string, a
 			upstream_site_id, upstream_group_id, upstream_group_name, state, current_weight,
 			consecutive_failures, consecutive_successes, last_probe_at, last_success_at, last_failure_at,
 			cooldown_until, observing_until, last_latency_ms, last_success_latency_ms, last_probe_decision_key,
-			last_error_key, last_error_detail, last_remote_action, updated_at
+			last_error_key, last_error_detail, last_remote_action, last_probe_protocol, last_probe_timeout_seconds, last_applied_probe_at, last_applied_probe_result, last_applied_probe_protocol, counter_protocol, health_evidence_status, health_evidence_protocol, last_success_protocol, last_credential_failure_at, last_credential_failure_reason, updated_at
 		FROM connection_health_states WHERE user_id = $1 AND admin_account_id = $2
 	`, userID, adminAccountID)
 	if err != nil {
@@ -730,7 +776,7 @@ func (r *Repository) ListStatesByConnection(ctx context.Context, connectionID st
 			upstream_site_id, upstream_group_id, upstream_group_name, state, current_weight,
 			consecutive_failures, consecutive_successes, last_probe_at, last_success_at, last_failure_at,
 			cooldown_until, observing_until, last_latency_ms, last_success_latency_ms, last_probe_decision_key,
-			last_error_key, last_error_detail, last_remote_action, updated_at
+			last_error_key, last_error_detail, last_remote_action, last_probe_protocol, last_probe_timeout_seconds, last_applied_probe_at, last_applied_probe_result, last_applied_probe_protocol, counter_protocol, health_evidence_status, health_evidence_protocol, last_success_protocol, last_credential_failure_at, last_credential_failure_reason, updated_at
 		FROM connection_health_states WHERE connection_id = $1
 	`, connectionID)
 	if err != nil {
@@ -755,7 +801,7 @@ func scanState(row pgx.Row) (*ConnectionHealthState, error) {
 		&s.UpstreamSiteID, &s.UpstreamGroupID, &s.UpstreamGroupName, &state, &s.CurrentWeight,
 		&s.ConsecutiveFailures, &s.ConsecutiveSuccesses, &s.LastProbeAt, &s.LastSuccessAt, &s.LastFailureAt,
 		&s.CooldownUntil, &s.ObservingUntil, &s.LastLatencyMs, &s.LastSuccessLatencyMs, &s.LastProbeDecisionKey,
-		&s.LastErrorKey, &s.LastErrorDetail, &s.LastRemoteAction, &s.UpdatedAt); err != nil {
+		&s.LastErrorKey, &s.LastErrorDetail, &s.LastRemoteAction, &s.LastProbeProtocol, &s.LastProbeTimeoutSeconds, &s.LastAppliedProbeAt, &s.LastAppliedProbeResult, &s.LastAppliedProbeProtocol, &s.CounterProtocol, &s.HealthEvidenceStatus, &s.HealthEvidenceProtocol, &s.LastSuccessProtocol, &s.LastCredentialFailureAt, &s.LastCredentialFailureReason, &s.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -772,7 +818,7 @@ func scanStateRow(row rowScanner) (*ConnectionHealthState, error) {
 		&s.UpstreamSiteID, &s.UpstreamGroupID, &s.UpstreamGroupName, &state, &s.CurrentWeight,
 		&s.ConsecutiveFailures, &s.ConsecutiveSuccesses, &s.LastProbeAt, &s.LastSuccessAt, &s.LastFailureAt,
 		&s.CooldownUntil, &s.ObservingUntil, &s.LastLatencyMs, &s.LastSuccessLatencyMs, &s.LastProbeDecisionKey,
-		&s.LastErrorKey, &s.LastErrorDetail, &s.LastRemoteAction, &s.UpdatedAt); err != nil {
+		&s.LastErrorKey, &s.LastErrorDetail, &s.LastRemoteAction, &s.LastProbeProtocol, &s.LastProbeTimeoutSeconds, &s.LastAppliedProbeAt, &s.LastAppliedProbeResult, &s.LastAppliedProbeProtocol, &s.CounterProtocol, &s.HealthEvidenceStatus, &s.HealthEvidenceProtocol, &s.LastSuccessProtocol, &s.LastCredentialFailureAt, &s.LastCredentialFailureReason, &s.UpdatedAt); err != nil {
 		return nil, err
 	}
 	s.State = State(state)
@@ -781,15 +827,19 @@ func scanStateRow(row rowScanner) (*ConnectionHealthState, error) {
 
 // InsertEvent 写入一条探活/远端动作事件，不吞错误。
 func (r *Repository) InsertEvent(ctx context.Context, e ConnectionHealthEvent) error {
-	_, err := r.db.Exec(ctx, `
+	return insertEventWithExecutor(ctx, r.db, e)
+}
+
+func insertEventWithExecutor(ctx context.Context, q policyExecutor, e ConnectionHealthEvent) error {
+	_, err := q.Exec(ctx, `
 		INSERT INTO connection_health_events (
 			id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
-			latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,now())
+			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,COALESCE($23,now()))
 	`, e.ID, e.ConnectionID, e.ModelName, e.UserID, e.AdminAccountID, e.PolicyID, e.AdminGroupID, e.OwnGroupName,
 		e.UpstreamSiteID, e.UpstreamGroupName, e.Result, e.FromState, e.ToState,
-		e.LatencyMs, e.ErrorKey, e.ErrorDetail, e.RemoteAction, e.ActionSource, e.Source)
+		e.LatencyMs, e.ErrorKey, e.ErrorDetail, e.RemoteAction, e.ActionSource, e.Source, e.RequestProtocol, e.RequestTimeoutSeconds, nullableProbeDisposition(e.ProbeDisposition), eventTimestamp(e.CreatedAt))
 	return err
 }
 
@@ -803,7 +853,7 @@ func (r *Repository) ListEventsByConnection(ctx context.Context, connectionID st
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
-			latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
+			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
 		FROM connection_health_events
 		WHERE connection_id = $1 AND user_id = $2 AND admin_account_id = $3
 			AND created_at >= now() - interval '24 hours'
@@ -824,7 +874,7 @@ func (r *Repository) ListRecentEventsByWorkspace(ctx context.Context, userID str
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
-			latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
+			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
 		FROM connection_health_events
 		WHERE user_id = $1 AND admin_account_id = $2
 			AND created_at >= now() - interval '24 hours'
@@ -844,15 +894,15 @@ func (r *Repository) ListLatestProbeFailureEventsByWorkspace(ctx context.Context
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
-			latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
+			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
 		FROM (
-			SELECT DISTINCT ON (connection_id, model_name)
+			SELECT DISTINCT ON (connection_id, model_name, request_protocol)
 				id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 				upstream_site_id, upstream_group_name, result, from_state, to_state,
-				latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
+				latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
 			FROM connection_health_events
-			WHERE user_id = $1 AND admin_account_id = $2 AND created_at >= $3 AND result = ANY($4)
-			ORDER BY connection_id, model_name, created_at DESC, id DESC
+			WHERE user_id = $1 AND admin_account_id = $2 AND created_at >= $3 AND result = ANY($4) AND (probe_disposition IS NULL OR probe_disposition = 'applied')
+			ORDER BY connection_id, model_name, request_protocol, created_at DESC, id DESC
 		) latest
 		ORDER BY created_at DESC, id DESC
 	`, userID, adminAccountID, since, probeFailureResultKeys())
@@ -869,12 +919,12 @@ func (r *Repository) ListLatestSchedulableActionEventsByWorkspace(ctx context.Co
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
-			latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
+			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
 		FROM (
 			SELECT DISTINCT ON (connection_id)
 				id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 				upstream_site_id, upstream_group_name, result, from_state, to_state,
-					latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
+					latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
 			FROM connection_health_events
 				WHERE user_id = $1 AND admin_account_id = $2 AND created_at >= $3
 					AND action_source = $4
@@ -896,12 +946,12 @@ func (r *Repository) ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx 
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
-			latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
+			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
 		FROM (
 			SELECT DISTINCT ON (connection_id)
 				id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 				upstream_site_id, upstream_group_name, result, from_state, to_state,
-					latency_ms, error_key, error_detail, remote_action, action_source, source, created_at
+					latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
 			FROM connection_health_events
 			WHERE user_id = $1 AND admin_account_id = $2 AND created_at >= $3
 				AND action_source = $4 AND result = $5
@@ -923,7 +973,7 @@ func (r *Repository) CountFailureEventsSince(ctx context.Context, userID string,
 		SELECT count(*)
 		FROM connection_health_events
 		WHERE user_id = $1 AND admin_account_id = $2 AND created_at >= $3
-			AND result = ANY($4)
+			AND result = ANY($4) AND (probe_disposition IS NULL OR probe_disposition='applied')
 			AND connection_id = ANY($5::text[])
 	`, userID, adminAccountID, since, probeFailureResultKeys(), includedConnectionIDs)
 	var count int
@@ -1028,85 +1078,11 @@ func (r *Repository) AcquirePrioritySyncLease(ctx context.Context, userID string
 // Scheduler acquisition is non-blocking; target acquisition waits until the current probe
 // releases it. A heartbeat lets crashed processes recover without manual cleanup.
 func (r *Repository) acquireRuntimeLease(ctx context.Context, key string, wait bool) (func(), bool, error) {
-	ownerID, err := newID()
-	if err != nil {
-		return nil, false, err
+	handle, acquired, err := r.AcquireActionLease(ctx, key, wait)
+	if err != nil || !acquired {
+		return nil, acquired, err
 	}
-	const leaseTTL = 2 * time.Minute
-	const leaseQueryTimeout = 5 * time.Second
-	leaseTTLSeconds := int(leaseTTL / time.Second)
-	for {
-		var returnedOwner string
-		err = r.db.QueryRow(ctx, `
-			INSERT INTO connection_health_runtime_leases (lease_key, owner_id, expires_at, updated_at)
-			VALUES ($1, $2, now() + make_interval(secs => $3), now())
-			ON CONFLICT (lease_key) DO UPDATE SET
-				owner_id = EXCLUDED.owner_id,
-				expires_at = EXCLUDED.expires_at,
-				updated_at = now()
-			WHERE connection_health_runtime_leases.expires_at <= now()
-			RETURNING owner_id
-		`, key, ownerID, leaseTTLSeconds).Scan(&returnedOwner)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return nil, false, err
-		}
-		if !wait {
-			return nil, false, nil
-		}
-		timer := time.NewTimer(100 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, false, ctx.Err()
-		case <-timer.C:
-		}
-	}
-
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ticker.C:
-				// A database outage must not leave the heartbeat goroutine blocked forever,
-				// otherwise releasing the lease could also block service shutdown.
-				heartbeatCtx, cancelHeartbeat := context.WithTimeout(context.Background(), leaseQueryTimeout)
-				_, heartbeatErr := r.db.Exec(heartbeatCtx, `
-					UPDATE connection_health_runtime_leases
-					SET expires_at = now() + make_interval(secs => $3), updated_at = now()
-					WHERE lease_key = $1 AND owner_id = $2
-				`, key, ownerID, leaseTTLSeconds)
-				cancelHeartbeat()
-				if heartbeatErr != nil {
-					log.Printf("[connection-health] runtime lease heartbeat failed key=%s err=%v", key, heartbeatErr)
-				}
-			}
-		}
-	}()
-
-	var once sync.Once
-	release := func() {
-		once.Do(func() {
-			close(stop)
-			<-done
-			// Lease expiration remains the final crash-recovery mechanism if this
-			// best-effort delete cannot reach PostgreSQL during shutdown.
-			releaseCtx, cancelRelease := context.WithTimeout(context.Background(), leaseQueryTimeout)
-			defer cancelRelease()
-			_, _ = r.db.Exec(releaseCtx, `
-				DELETE FROM connection_health_runtime_leases WHERE lease_key = $1 AND owner_id = $2
-			`, key, ownerID)
-		})
-	}
-	return release, true, nil
+	return handle.Release, true, nil
 }
 
 func probeResultKeys() []string {
@@ -1124,10 +1100,14 @@ func scanEvents(rows pgx.Rows) ([]ConnectionHealthEvent, error) {
 	events := make([]ConnectionHealthEvent, 0)
 	for rows.Next() {
 		var e ConnectionHealthEvent
+		var disposition *string
 		if err := rows.Scan(&e.ID, &e.ConnectionID, &e.ModelName, &e.UserID, &e.AdminAccountID, &e.PolicyID, &e.AdminGroupID, &e.OwnGroupName,
 			&e.UpstreamSiteID, &e.UpstreamGroupName, &e.Result, &e.FromState, &e.ToState,
-			&e.LatencyMs, &e.ErrorKey, &e.ErrorDetail, &e.RemoteAction, &e.ActionSource, &e.Source, &e.CreatedAt); err != nil {
+			&e.LatencyMs, &e.ErrorKey, &e.ErrorDetail, &e.RemoteAction, &e.ActionSource, &e.Source, &e.RequestProtocol, &e.RequestTimeoutSeconds, &disposition, &e.CreatedAt); err != nil {
 			return nil, err
+		}
+		if disposition != nil {
+			e.ProbeDisposition = *disposition
 		}
 		events = append(events, e)
 	}
@@ -1548,7 +1528,7 @@ func scanGroupTargetExclusions(rows pgx.Rows) ([]GroupTargetExclusion, error) {
 func (r *Repository) ListPrioritySyncStates(ctx context.Context, userID string, adminAccountID string) ([]PrioritySyncState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_priority, last_applied_priority,
-			pending_priority, effective_multiplier, conflict, last_conflict_priority, updated_at
+			pending_priority, effective_multiplier, conflict, last_conflict_priority, pending_dispatch_id, pending_owner_id, pending_dispatch_phase, updated_at
 		FROM connection_health_priority_sync_states
 		WHERE user_id = $1 AND admin_account_id = $2
 	`, userID, adminAccountID)
@@ -1560,7 +1540,7 @@ func (r *Repository) ListPrioritySyncStates(ctx context.Context, userID string, 
 	for rows.Next() {
 		var state PrioritySyncState
 		if err := rows.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalPriority,
-			&state.LastAppliedPriority, &state.PendingPriority, &state.EffectiveMultiplier, &state.Conflict, &state.LastConflictPriority, &state.UpdatedAt); err != nil {
+			&state.LastAppliedPriority, &state.PendingPriority, &state.EffectiveMultiplier, &state.Conflict, &state.LastConflictPriority, &state.PendingDispatchID, &state.PendingOwnerID, &state.PendingDispatchPhase, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		states = append(states, state)
@@ -1571,7 +1551,7 @@ func (r *Repository) ListPrioritySyncStates(ctx context.Context, userID string, 
 func (r *Repository) ListAllPrioritySyncStates(ctx context.Context) ([]PrioritySyncState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_priority, last_applied_priority,
-			pending_priority, effective_multiplier, conflict, last_conflict_priority, updated_at
+			pending_priority, effective_multiplier, conflict, last_conflict_priority, pending_dispatch_id, pending_owner_id, pending_dispatch_phase, updated_at
 		FROM connection_health_priority_sync_states
 	`)
 	if err != nil {
@@ -1582,7 +1562,7 @@ func (r *Repository) ListAllPrioritySyncStates(ctx context.Context) ([]PriorityS
 	for rows.Next() {
 		var state PrioritySyncState
 		if err := rows.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalPriority,
-			&state.LastAppliedPriority, &state.PendingPriority, &state.EffectiveMultiplier, &state.Conflict, &state.LastConflictPriority, &state.UpdatedAt); err != nil {
+			&state.LastAppliedPriority, &state.PendingPriority, &state.EffectiveMultiplier, &state.Conflict, &state.LastConflictPriority, &state.PendingDispatchID, &state.PendingOwnerID, &state.PendingDispatchPhase, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		states = append(states, state)
@@ -1591,30 +1571,11 @@ func (r *Repository) ListAllPrioritySyncStates(ctx context.Context) ([]PriorityS
 }
 
 func (r *Repository) UpsertPrioritySyncState(ctx context.Context, state PrioritySyncState) error {
-	_, err := r.db.Exec(ctx, `
-		INSERT INTO connection_health_priority_sync_states (
-			user_id, admin_account_id, target_id, original_priority, last_applied_priority, pending_priority,
-			effective_multiplier, conflict, last_conflict_priority, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
-		ON CONFLICT (user_id, admin_account_id, target_id) DO UPDATE SET
-			original_priority = EXCLUDED.original_priority,
-			last_applied_priority = EXCLUDED.last_applied_priority,
-			pending_priority = EXCLUDED.pending_priority,
-			effective_multiplier = EXCLUDED.effective_multiplier,
-			conflict = EXCLUDED.conflict,
-			last_conflict_priority = EXCLUDED.last_conflict_priority,
-			updated_at = now()
-	`, state.UserID, state.AdminAccountID, state.TargetID, state.OriginalPriority, state.LastAppliedPriority,
-		state.PendingPriority, state.EffectiveMultiplier, state.Conflict, state.LastConflictPriority)
-	return err
+	return r.storePriorityCheckpoint(ctx, state)
 }
 
 func (r *Repository) DeletePrioritySyncState(ctx context.Context, userID string, adminAccountID string, targetID string) error {
-	_, err := r.db.Exec(ctx, `
-		DELETE FROM connection_health_priority_sync_states
-		WHERE user_id = $1 AND admin_account_id = $2 AND target_id = $3
-	`, userID, adminAccountID, targetID)
-	return err
+	return r.deleteActionCheckpoint(ctx, RemoteActionScope{userID, adminAccountID, targetID}, ActionKindPriority)
 }
 
 func (r *Repository) GetPriorityWorkspaceSyncState(ctx context.Context, userID string, adminAccountID string) (*PriorityWorkspaceSyncState, error) {
@@ -1788,13 +1749,13 @@ func (r *Repository) IsPriorityWorkspaceGenerationCurrent(ctx context.Context, u
 func (r *Repository) GetTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) (*TargetActionState, error) {
 	row := r.db.QueryRow(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, updated_at
+			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, pending_dispatch_id, pending_owner_id, pending_dispatch_phase, updated_at
 		FROM connection_health_target_action_states
 		WHERE user_id = $1 AND admin_account_id = $2 AND target_id = $3
 	`, userID, adminAccountID, targetID)
 	var state TargetActionState
 	if err := row.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalStatus, &state.OriginalWeight,
-		&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.UpdatedAt); err != nil {
+		&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.PendingDispatchID, &state.PendingOwnerID, &state.PendingDispatchPhase, &state.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -1806,7 +1767,7 @@ func (r *Repository) GetTargetActionState(ctx context.Context, userID string, ad
 func (r *Repository) ListTargetActionStates(ctx context.Context, userID string, adminAccountID string) ([]TargetActionState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, updated_at
+			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, pending_dispatch_id, pending_owner_id, pending_dispatch_phase, updated_at
 		FROM connection_health_target_action_states
 		WHERE user_id = $1 AND admin_account_id = $2
 	`, userID, adminAccountID)
@@ -1820,7 +1781,7 @@ func (r *Repository) ListTargetActionStates(ctx context.Context, userID string, 
 func (r *Repository) ListAllTargetActionStates(ctx context.Context) ([]TargetActionState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, updated_at
+			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, pending_dispatch_id, pending_owner_id, pending_dispatch_phase, updated_at
 		FROM connection_health_target_action_states
 	`)
 	if err != nil {
@@ -1835,7 +1796,7 @@ func scanTargetActionStates(rows pgx.Rows) ([]TargetActionState, error) {
 	for rows.Next() {
 		var state TargetActionState
 		if err := rows.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalStatus, &state.OriginalWeight,
-			&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.UpdatedAt); err != nil {
+			&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.PendingDispatchID, &state.PendingOwnerID, &state.PendingDispatchPhase, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		states = append(states, state)
@@ -1844,31 +1805,11 @@ func scanTargetActionStates(rows pgx.Rows) ([]TargetActionState, error) {
 }
 
 func (r *Repository) UpsertTargetActionState(ctx context.Context, state TargetActionState) error {
-	_, err := r.db.Exec(ctx, `
-		INSERT INTO connection_health_target_action_states (
-			user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
-		ON CONFLICT (user_id, admin_account_id, target_id) DO UPDATE SET
-			original_status = EXCLUDED.original_status,
-			original_weight = EXCLUDED.original_weight,
-			last_applied_status = EXCLUDED.last_applied_status,
-			last_applied_weight = EXCLUDED.last_applied_weight,
-			pending_status = EXCLUDED.pending_status,
-			pending_weight = EXCLUDED.pending_weight,
-			conflict = EXCLUDED.conflict,
-			updated_at = now()
-	`, state.UserID, state.AdminAccountID, state.TargetID, state.OriginalStatus, state.OriginalWeight,
-		state.LastAppliedStatus, state.LastAppliedWeight, state.PendingStatus, state.PendingWeight, state.Conflict)
-	return err
+	return r.storeTargetCheckpoint(ctx, state)
 }
 
 func (r *Repository) DeleteTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) error {
-	_, err := r.db.Exec(ctx, `
-		DELETE FROM connection_health_target_action_states
-		WHERE user_id = $1 AND admin_account_id = $2 AND target_id = $3
-	`, userID, adminAccountID, targetID)
-	return err
+	return r.deleteActionCheckpoint(ctx, RemoteActionScope{userID, adminAccountID, targetID}, ActionKindTarget)
 }
 
 func newID() (string, error) {

@@ -18,6 +18,8 @@ const harness = vi.hoisted(() => ({
   loadConfiguration: vi.fn(),
   saveConfiguration: vi.fn(),
   updatePolicy: vi.fn(),
+  loadTestConfiguration: vi.fn(),
+  saveTestConfiguration: vi.fn(),
 }))
 
 vi.mock('@/modules/admin/composables/useConnectionHealth', () => ({
@@ -27,6 +29,8 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', () => ({
     loadAdminGroupPolicyConfiguration: harness.loadConfiguration,
     saveAdminGroupPolicyConfiguration: harness.saveConfiguration,
     updatePolicyForSetup: harness.updatePolicy,
+    loadAdminGroupTestConfiguration: harness.loadTestConfiguration,
+    saveAdminGroupTestConfiguration: harness.saveTestConfiguration,
   }),
 }))
 
@@ -672,5 +676,61 @@ describe('group health setup exclusion outcome behavior', () => {
     expect(wrapper.text()).toContain('从本分组排除后，将停止自动探活')
     expect(findButton(wrapper, '保存分组策略').attributes('disabled')).toBeUndefined()
     expect(wrapper.emitted('saved')).toBeUndefined()
+  })
+})
+
+
+describe('independent group test configuration', () => {
+  it('closes an edited draft without a write and rejects a fractional timeout', async () => {
+    harness.loadTestConfiguration.mockResolvedValue({ configuration: { adminGroupId: 'g1', adminGroupName: 'Group', configuration: null, inventoryComplete: true, affectedAccountCount: 1, conflictAccountCount: 0, accounts: [] } })
+    const group = makeGroup('g1', 'Group', [makeAccount('100', 'Account')])
+    const wrapper = await mountDrawer({ group, allGroups: [group], policies: [] })
+    await wrapper.find('[data-testid="group-test-timeout"]').setValue('30.5')
+    expect(wrapper.find('[data-testid="group-test-save"]').attributes('disabled')).toBeDefined()
+    await wrapper.find('header button').trigger('click')
+    expect(wrapper.emitted('close')).toHaveLength(1)
+    expect(harness.saveTestConfiguration).not.toHaveBeenCalled()
+    expect(harness.saveConfiguration).not.toHaveBeenCalled()
+  })
+
+  const testConfiguration = (value: unknown = null) => ({
+    adminGroupId: 'g1', adminGroupName: 'Group', configuration: value,
+    inventoryComplete: true, affectedAccountCount: 1, conflictAccountCount: 0, accounts: [],
+  })
+  const openTestDrawer = async () => {
+    const group = makeGroup('g1', 'Group', [makeAccount('100', 'Account')])
+    return mountDrawer({ group, allGroups: [group], policies: [] })
+  }
+
+  it('saves Responses independently of policies and preserves an entered timeout on protocol changes', async () => {
+    harness.loadTestConfiguration.mockResolvedValue({ configuration: testConfiguration() })
+    harness.saveTestConfiguration.mockResolvedValue({ configuration: testConfiguration({ protocol: 'responses', probeTimeoutSeconds: 45 }) })
+    const wrapper = await openTestDrawer()
+    await wrapper.find('[data-testid="group-test-protocol"]').setValue('responses')
+    expect((wrapper.find('[data-testid="group-test-timeout"]').element as HTMLInputElement).value).toBe('30')
+    await wrapper.find('[data-testid="group-test-timeout"]').setValue('45')
+    await wrapper.find('[data-testid="group-test-protocol"]').setValue('chat_completions')
+    expect((wrapper.find('[data-testid="group-test-timeout"]').element as HTMLInputElement).value).toBe('45')
+    await wrapper.find('[data-testid="group-test-protocol"]').setValue('responses')
+    await wrapper.find('[data-testid="group-test-save"]').trigger('click')
+    await flushPromises()
+    expect(harness.saveTestConfiguration).toHaveBeenCalledWith('g1', { protocol: 'responses', probeTimeoutSeconds: 45 })
+    expect(harness.saveConfiguration).not.toHaveBeenCalled()
+    expect(harness.createPolicy).not.toHaveBeenCalled()
+  })
+
+  it('keeps a failed save draft, and clears only through the explicit clear action', async () => {
+    harness.loadTestConfiguration.mockResolvedValue({ configuration: testConfiguration({ protocol: 'responses', probeTimeoutSeconds: 30 }) })
+    harness.saveTestConfiguration.mockResolvedValueOnce({ errorKey: 'admin.connectionHealth.errors.request' })
+      .mockResolvedValue({ configuration: testConfiguration() })
+    const wrapper = await openTestDrawer()
+    await wrapper.find('[data-testid="group-test-timeout"]').setValue('40')
+    await wrapper.find('[data-testid="group-test-save"]').trigger('click')
+    await flushPromises()
+    expect((wrapper.find('[data-testid="group-test-timeout"]').element as HTMLInputElement).value).toBe('40')
+    await wrapper.find('[data-testid="group-test-clear"]').trigger('click')
+    await flushPromises()
+    expect(harness.saveTestConfiguration).toHaveBeenLastCalledWith('g1', null)
+    expect(wrapper.find('[data-testid="group-test-configuration"]').text()).toContain('未单独配置')
   })
 })

@@ -31,6 +31,20 @@ type PlatformActioner interface {
 	UpdateSub2APIAdminAccountStatus(session upstream.Session, accountID string, status string) error
 }
 
+type ContextPlatformActioner interface {
+	UpdateSub2APIAdminAccountStatusContext(context.Context, upstream.Session, string, string) error
+}
+
+func (d *remoteActionDispatcher) updateSub2APIStatus(ctx context.Context, session upstream.Session, accountID, status string) error {
+	if platform, ok := d.platform.(ContextPlatformActioner); ok {
+		return platform.UpdateSub2APIAdminAccountStatusContext(ctx, session, accountID, status)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return d.platform.UpdateSub2APIAdminAccountStatus(session, accountID, status)
+}
+
 // SessionProvider 复用 my_sites 已登录并自动刷新的 admin 会话，不重复实现登录逻辑。
 type SessionProvider interface {
 	RequireSession(ctx context.Context, userID string, adminAccountID string) (upstream.Session, error)
@@ -211,7 +225,7 @@ func (d *remoteActionDispatcher) ApplyTargetState(ctx context.Context, session u
 	if status == "inactive" || status == "disabled" || status == "2" {
 		resolvedStatus = "inactive"
 	}
-	if err := d.platform.UpdateSub2APIAdminAccountStatus(session, target.AccountID, resolvedStatus); err != nil {
+	if err := d.updateSub2APIStatus(ctx, session, target.AccountID, resolvedStatus); err != nil {
 		if resolvedStatus == "inactive" {
 			return RemoteActionSub2APIStatusInactiveFailed, err
 		}

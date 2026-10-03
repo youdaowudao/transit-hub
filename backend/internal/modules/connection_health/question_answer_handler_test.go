@@ -42,8 +42,9 @@ func newQuestionAnswerHandlerFixture(t *testing.T) questionAnswerHandlerFixture 
 		t.Fatalf("create handler question: %v", err)
 	}
 	targetID := "sub2api:ws1:handler-account"
+	snapshot := QuestionAnswerConfigurationSnapshot{AdminAccountID: "ws1", InventoryComplete: true, Memberships: []TestConfigurationSource{{AdminGroupID: "handler-group"}}}
 	succeededBatchID := "handler-succeeded"
-	succeeded, err := repository.CreateQuestionAnswerBatch(ctx, "handler-user", targetID, succeededBatchID, []string{"model-a"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1)
+	succeeded, err := repository.CreateQuestionAnswerBatch(ctx, "handler-user", targetID, succeededBatchID, []string{"model-a"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1, snapshot)
 	if err != nil || len(succeeded) != 1 {
 		t.Fatalf("create succeeded handler record: records=%+v err=%v", succeeded, err)
 	}
@@ -55,7 +56,7 @@ func newQuestionAnswerHandlerFixture(t *testing.T) questionAnswerHandlerFixture 
 	}
 
 	failedBatchID := "handler-failed"
-	failed, err := repository.CreateQuestionAnswerBatch(ctx, "handler-user", targetID, failedBatchID, []string{"model-b"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1)
+	failed, err := repository.CreateQuestionAnswerBatch(ctx, "handler-user", targetID, failedBatchID, []string{"model-b"}, []string{question.ID}, QuestionAnswerReasoningEffortMedium, 1, snapshot)
 	if err != nil || len(failed) != 1 {
 		t.Fatalf("create failed handler record: records=%+v err=%v", failed, err)
 	}
@@ -296,6 +297,7 @@ func TestQuestionAnswerKeywordSnapshotAppearsAcrossReadAndJudgmentHandlers(t *te
 	emptyRecords, err := repository.CreateQuestionAnswerBatch(
 		context.Background(), "handler-user", fixture.targetID, emptyBatchID,
 		[]string{"model-empty"}, []string{emptyQuestion.ID}, QuestionAnswerReasoningEffortMedium, 1,
+		QuestionAnswerConfigurationSnapshot{AdminAccountID: "ws1", InventoryComplete: true, Memberships: []TestConfigurationSource{{AdminGroupID: "handler-group"}}},
 	)
 	if err != nil || len(emptyRecords) != 1 {
 		t.Fatalf("create empty snapshot batch=%+v err=%v", emptyRecords, err)

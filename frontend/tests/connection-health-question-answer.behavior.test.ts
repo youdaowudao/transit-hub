@@ -10,6 +10,8 @@ import { shortQuestionAnswerBatchId } from '@/modules/admin/utils/questionAnswer
 
 const harness = vi.hoisted(() => ({
   discoverModels: vi.fn(),
+  runManualProbeOnce: vi.fn(),
+  manualProbeTarget: vi.fn(),
   listTestQuestions: vi.fn(),
   getQuestionAnswerHistory: vi.fn(),
   getLatestQuestionAnswerBatch: vi.fn(),
@@ -25,8 +27,8 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', () => ({
   formatConnectionHealthTime: (value: string) => value,
   useConnectionHealth: () => ({
     discoverModels: harness.discoverModels,
-    runManualProbeOnce: vi.fn(),
-    manualProbeTarget: vi.fn(),
+    runManualProbeOnce: harness.runManualProbeOnce,
+    manualProbeTarget: harness.manualProbeTarget,
     errorKey: { value: '' },
   }),
 }))
@@ -187,6 +189,8 @@ const secondaryTarget: ManualProbeTargetSummary = {
 }
 
 beforeEach(() => {
+  harness.runManualProbeOnce.mockReset()
+  harness.manualProbeTarget.mockReset()
   harness.discoverModels.mockReset().mockResolvedValue({ models: [{ id: 'model-a', name: 'Model A' }] })
   harness.listTestQuestions.mockReset().mockResolvedValue(records.map((record, index) => ({
     id: record.questionId,
@@ -2945,4 +2949,162 @@ describe('question-answer batch behavior', () => {
     expect(wrapper.text()).not.toContain('操作失败，请稍后重试。')
   })
 
+})
+
+
+describe('question-answer retained finalization', () => {
+  it.each(['conflict', 'unavailable'] as const)('opens %s history without discovery and permits judgment and retained finalization while every new-request handler stays blocked', async status => {
+    const record = { ...reviewRecords[0], batchId: 'batch-review' }
+    const terminal = terminalReviewBatch([record])
+    const finalization = { batchId: 'batch-review', state: 'failed', recovery: 'cancel' }
+    const judged = { ...record, answerJudgment: 'correct' as const }
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({ ...terminal, finalization })
+    harness.getQuestionAnswerBatch.mockResolvedValue({ ...terminalReviewBatch([judged]), finalization })
+    harness.getQuestionAnswerHistory.mockResolvedValue(terminalReviewHistory([record]))
+    harness.setQuestionAnswerJudgment.mockResolvedValue(judged)
+    harness.cancelQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch([judged]))
+    const wrapper = await mountQuestionAnswerDialog({ ...primaryTarget,
+      formalModels: [{ id: 'model-a', name: 'model-a' }],
+      testConfiguration: { status, sourceGroups: [], blockedReason: 'admin.connectionHealth.errors.testConfigurationUnavailable' },
+    })
+    expect(harness.discoverModels).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain(record.questionName)
+    const correct = judgmentButtons(rowContaining(wrapper, record.questionName)).find(button => button.text().trim() === '正确')!
+    await correct.trigger('click'); await flushPromises()
+    expect(harness.setQuestionAnswerJudgment).toHaveBeenCalledWith(primaryTarget.targetId, record.id, 'correct', expect.any(AbortSignal))
+    await wrapper.get('[data-testid="question-answer-finalization-retry"]').trigger('click'); await flushPromises()
+    expect(harness.cancelQuestionAnswerBatch).toHaveBeenCalledWith(primaryTarget.targetId, 'batch-review', expect.any(AbortSignal))
+    expect(wrapper.find('[data-testid="question-answer-finalization"]').exists()).toBe(false)
+    for (const [mode, label] of [['问答测试', '开始回答'], ['正式手动探活', '开始正式探活'], ['一次性测试', '开始测试']]) {
+      await wrapper.findAll('button').find(button => button.text().trim() === mode)!.trigger('click')
+      await flushPromises()
+      const start = wrapper.findAll('button').find(button => button.text().trim() === label)!
+      expect(start.attributes('disabled')).toBeDefined()
+      // Dispatch directly to exercise the event-handler guard as well as the disabled UI.
+      start.element.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      await flushPromises()
+    }
+    expect(harness.discoverModels).not.toHaveBeenCalled()
+    expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
+    expect(harness.runManualProbeOnce).not.toHaveBeenCalled()
+    expect(harness.manualProbeTarget).not.toHaveBeenCalled()
+  })
+
+  it.each(['conflict', 'unavailable'] as const)('still cancels the already submitted active batch after reopening a %s target', async status => {
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(activeBatch)
+    harness.cancelQuestionAnswerBatch.mockResolvedValue(batchWithStatuses(records.map(() => 'cancelled'), false))
+    const wrapper = await mountQuestionAnswerDialog({ ...primaryTarget, testConfiguration: { status, sourceGroups: [] } })
+    const stop = wrapper.findAll('button').find(button => button.text().includes('终止本次问答'))!
+    expect(stop.attributes('disabled')).toBeUndefined()
+    await stop.trigger('click'); await flushPromises()
+    expect(harness.cancelQuestionAnswerBatch).toHaveBeenCalledWith(primaryTarget.targetId, activeBatch.batchId, expect.any(AbortSignal))
+    expect(harness.discoverModels).not.toHaveBeenCalled()
+    expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
+  })
+
+  it.each(['both-failed', 'finalize-failed', 'stop-failed'])('checks persisted projection after a failed start: %s', async combo => {
+    const terminal = terminalReviewBatch()
+    const retainedAfterStart = { ...terminal, finalization: { batchId: 'batch-review', state: 'failed', recovery: 'cancel' } }
+    harness.getLatestQuestionAnswerBatch.mockResolvedValueOnce({ ...terminalReviewBatch([]), batchId: '' })
+      .mockResolvedValue(combo === 'stop-failed' ? terminal : retainedAfterStart)
+    harness.startQuestionAnswerBatch.mockRejectedValue(new Error('admin.connectionHealth.errors.request'))
+    const wrapper = await mountQuestionAnswerDialog()
+    const start = wrapper.findAll('button').find(button => button.text().trim() === '开始回答')!
+    expect(start.attributes('disabled')).toBeUndefined()
+    await start.trigger('click')
+    await flushPromises()
+    expect(harness.startQuestionAnswerBatch).toHaveBeenCalledTimes(1)
+    expect(harness.getLatestQuestionAnswerBatch).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('[data-testid="question-answer-finalization-retry"]').exists()).toBe(combo !== 'stop-failed')
+    expect(harness.cancelQuestionAnswerBatch).not.toHaveBeenCalled()
+  })
+
+  it('keeps a cross-day reservation visible while reviewing another historical batch and cancels only the retained id', async () => {
+    const old = historicalBatch('historical-batch', 'Historical answer')
+    const retained = { ...terminalReviewBatch(), finalization: { batchId: 'batch-review', state: 'failed', recovery: 'cancel' } }
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(retained)
+    harness.getQuestionAnswerHistory.mockResolvedValue(terminalReviewHistory(old.records))
+    harness.getQuestionAnswerBatch.mockResolvedValue(old)
+    harness.cancelQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch())
+    const wrapper = await mountQuestionAnswerDialog()
+    const review = wrapper.findAll('button').find(button => button.text().trim() === '复审此批次')!
+    await review.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Historical answer')
+    await wrapper.find('[data-testid="question-answer-finalization-retry"]').trigger('click')
+    await flushPromises()
+    expect(harness.cancelQuestionAnswerBatch).toHaveBeenCalledWith(primaryTarget.targetId, 'batch-review', expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('Historical answer')
+    expect(wrapper.find('[data-testid="question-answer-finalization"]').exists()).toBe(false)
+  })
+
+  it('discards a late finalization read after switching accounts', async () => {
+    let resolveRead!: (value: unknown) => void
+    harness.getLatestQuestionAnswerBatch.mockResolvedValueOnce({ ...terminalReviewBatch([]), batchId: '' })
+      .mockImplementationOnce(() => new Promise(resolve => { resolveRead = resolve }))
+      .mockResolvedValue({ ...terminalReviewBatch([]), batchId: '' })
+    harness.startQuestionAnswerBatch.mockRejectedValue(new Error('admin.connectionHealth.errors.request'))
+    const wrapper = await mountQuestionAnswerDialog()
+    await wrapper.findAll('button').find(button => button.text().trim() === '开始回答')!.trigger('click')
+    await flushPromises()
+    await wrapper.setProps({ target: secondaryTarget })
+    await flushPromises()
+    resolveRead({ ...terminalReviewBatch(), finalization: { batchId: 'old-batch', state: 'failed', recovery: 'cancel' } })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="question-answer-finalization"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('old-batch')
+    expect(harness.cancelQuestionAnswerBatch).not.toHaveBeenCalled()
+  })
+
+  const retained = () => ({
+    ...terminalReviewBatch(),
+    finalization: { batchId: 'batch-review', state: 'failed', recovery: 'cancel' },
+  })
+
+  it('reopens a terminal batch and actually retries its retained reservation', async () => {
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(retained())
+    harness.cancelQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch())
+    const wrapper = await mountQuestionAnswerDialog()
+    const retry = wrapper.find('[data-testid="question-answer-finalization-retry"]')
+    expect(retry.exists()).toBe(true)
+    expect(wrapper.text()).toContain('收口失败')
+    await retry.trigger('click')
+    await flushPromises()
+    expect(harness.cancelQuestionAnswerBatch).toHaveBeenCalledWith(primaryTarget.targetId, 'batch-review', expect.any(AbortSignal))
+    expect(wrapper.find('[data-testid="question-answer-finalization"]').exists()).toBe(false)
+  })
+
+  it.each(['both-failed', 'finalize-failed', 'stop-failed'])('checks persisted projection after cancel error: %s', async combo => {
+    harness.getLatestQuestionAnswerBatch.mockResolvedValueOnce(retained())
+      .mockResolvedValue(combo === 'stop-failed' ? terminalReviewBatch() : retained())
+    harness.cancelQuestionAnswerBatch.mockRejectedValue(new Error('admin.connectionHealth.errors.request'))
+    const wrapper = await mountQuestionAnswerDialog()
+    await wrapper.find('[data-testid="question-answer-finalization-retry"]').trigger('click')
+    await flushPromises()
+    expect(harness.getLatestQuestionAnswerBatch).toHaveBeenCalledTimes(2)
+    expect(harness.cancelQuestionAnswerBatch).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-testid="question-answer-finalization-retry"]').exists()).toBe(combo !== 'stop-failed')
+  })
+
+  it('shows unknown and offers no cancel when the verification read fails', async () => {
+    harness.getLatestQuestionAnswerBatch.mockResolvedValueOnce(retained()).mockRejectedValue(new Error('unavailable'))
+    harness.cancelQuestionAnswerBatch.mockRejectedValue(new Error('admin.connectionHealth.errors.request'))
+    const wrapper = await mountQuestionAnswerDialog()
+    await wrapper.find('[data-testid="question-answer-finalization-retry"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('收口状态暂无法核对')
+    expect(wrapper.find('[data-testid="question-answer-finalization-retry"]').exists()).toBe(false)
+    expect(harness.cancelQuestionAnswerBatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows service shutdown recovery independently of absent records', async () => {
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue({
+      ...terminalReviewBatch([]), batchId: '',
+      finalization: { batchId: 'unknown-commit', state: 'failed', recovery: 'service_shutdown' },
+    })
+    const wrapper = await mountQuestionAnswerDialog()
+    expect(wrapper.text()).toContain('需维护人员关闭服务后收口')
+    expect(wrapper.find('[data-testid="question-answer-finalization-retry"]').exists()).toBe(false)
+    expect(harness.cancelQuestionAnswerBatch).not.toHaveBeenCalled()
+  })
 })

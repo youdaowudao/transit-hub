@@ -74,10 +74,17 @@ func TestFinishTargetProbeBatch_SchedulingSkipPreservesLegacyRemoteAction(t *tes
 	target := AdminProbeTarget{
 		TargetID: targetID, Platform: string(upstream.PlatformSub2API), AccountID: "acc-1",
 		AccountStatus: "active", Schedulable: &schedulable,
+		InventoryComplete: true, TestConfiguration: defaultTestConfiguration(),
+	}
+
+	outcome := ProbeOutcome{Result: ResultOK, Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10}
+	committed, err := repo.CommitTargetProbe(context.Background(), TargetProbeCommit{UserID: "user1", AdminAccountID: "ws1", Target: target, ModelName: spec.modelName, Policy: policy, Outcome: outcome, Now: time.Now(), Event: ConnectionHealthEvent{ID: "scheduling-skip-probe", UserID: "user1", AdminAccountID: "ws1", ConnectionID: targetID, ModelName: spec.modelName, Source: EventSourceScheduled}})
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	svc.finishTargetProbeBatch(context.Background(), "user1", "ws1", upstream.Session{Platform: upstream.PlatformSub2API}, target,
-		[]probeModelSpec{spec}, []targetProbeResult{{state: &state, previousState: StateSuspended, outcome: ProbeOutcome{Result: ResultOK}, spec: spec}}, EventSourceScheduled)
+		[]probeModelSpec{spec}, []targetProbeResult{{state: &committed.State, previousState: committed.PreviousState, outcome: outcome, spec: spec, eventID: committed.EventID, disposition: committed.Disposition, configuration: committed.Configuration}}, EventSourceScheduled)
 
 	stored := repo.states[targetID]["gpt-4o"]
 	if stored.LastRemoteAction != RemoteActionSub2APIStatusInactive {

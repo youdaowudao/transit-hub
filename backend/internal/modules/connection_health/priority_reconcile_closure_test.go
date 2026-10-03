@@ -19,14 +19,12 @@ type eventCancelRepository struct {
 	cancelAfterEvent func()
 }
 
-func (r *eventCancelRepository) InsertEvent(ctx context.Context, event ConnectionHealthEvent) error {
-	if err := r.fakeRepository.InsertEvent(ctx, event); err != nil {
-		return err
-	}
-	if r.cancelAfterEvent != nil {
+func (r *eventCancelRepository) CommitTargetProbe(ctx context.Context, input TargetProbeCommit) (TargetProbeCommitResult, error) {
+	result, err := r.fakeRepository.CommitTargetProbe(ctx, input)
+	if err == nil && r.cancelAfterEvent != nil {
 		r.cancelAfterEvent()
 	}
-	return nil
+	return result, err
 }
 
 type contextAwarePriorityReader struct {
@@ -80,7 +78,16 @@ type eventFailureRepository struct {
 
 type partialUpsertFailureRepository struct {
 	*fakeRepository
-	upsertCalls int
+	upsertCalls  int
+	priorityRead chan struct{}
+}
+
+func (r *partialUpsertFailureRepository) ListPrioritySyncStates(ctx context.Context, userID, workspace string) ([]PrioritySyncState, error) {
+	select {
+	case r.priorityRead <- struct{}{}:
+	default:
+	}
+	return r.fakeRepository.ListPrioritySyncStates(ctx, userID, workspace)
 }
 
 type countingPriorityRepository struct {
@@ -148,16 +155,16 @@ func waitForPriorityAsyncIdle(t *testing.T) {
 	t.Fatalf("priority async dispatcher did not become idle: workers=%d queue=%d", workers, queueLength)
 }
 
-func (r *partialUpsertFailureRepository) UpsertState(ctx context.Context, state ConnectionHealthState) error {
+func (r *partialUpsertFailureRepository) CommitTargetProbe(ctx context.Context, input TargetProbeCommit) (TargetProbeCommitResult, error) {
 	r.upsertCalls++
 	if r.upsertCalls == 2 {
-		return errors.New("second health state write failed")
+		return TargetProbeCommitResult{}, errors.New("second atomic health commit failed")
 	}
-	return r.fakeRepository.UpsertState(ctx, state)
+	return r.fakeRepository.CommitTargetProbe(ctx, input)
 }
 
-func (r *eventFailureRepository) InsertEvent(ctx context.Context, event ConnectionHealthEvent) error {
-	return errors.New("event insert failed after health state commit")
+func (r *eventFailureRepository) CommitTargetProbe(ctx context.Context, input TargetProbeCommit) (TargetProbeCommitResult, error) {
+	return TargetProbeCommitResult{}, errors.New("event insert failed; atomic health transaction rolled back")
 }
 
 func (r contextAwarePriorityReader) FetchAdminAllGroupsContext(ctx context.Context, session upstream.Session) ([]upstream.AdminGroupInfo, error) {
@@ -326,7 +333,7 @@ func TestProbeTarget_PostCommitPrioritySyncDoesNotBlockRequest(t *testing.T) {
 	}
 }
 
-func TestProbeTarget_EventFailureStillQueuesPostCommitPrioritySync(t *testing.T) {
+func TestProbeTarget_EventFailureRollsBackHealthAndDoesNotQueuePrioritySync(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
@@ -342,10 +349,9 @@ func TestProbeTarget_EventFailureStillQueuesPostCommitPrioritySync(t *testing.T)
 	if err == nil {
 		t.Fatal("event persistence failure must still be returned to the caller")
 	}
-	select {
-	case <-priorityActions.called:
-	case <-time.After(time.Second):
-		t.Fatal("health state committed before event failure must still queue Priority reconciliation")
+	waitForPriorityAsyncIdle(t)
+	if len(baseRepo.states) != 0 || len(baseRepo.events) != 0 || len(priorityActions.calls) != 0 {
+		t.Fatalf("atomic event failure must leave no health/event or Priority write: states=%+v events=%+v calls=%+v", baseRepo.states, baseRepo.events, priorityActions.calls)
 	}
 }
 
@@ -368,7 +374,7 @@ func TestProbeTarget_PartialMultiModelCommitStillQueuesPostCommitPrioritySync(t 
 	defer server.Close()
 
 	baseRepo := newFakeRepository()
-	repo := &partialUpsertFailureRepository{fakeRepository: baseRepo}
+	repo := &partialUpsertFailureRepository{fakeRepository: baseRepo, priorityRead: make(chan struct{}, 1)}
 	priorityActions := &fakeTargetPriorityActioner{called: make(chan struct{}, 1)}
 	service := newPostCommitProbeService(baseRepo, repo, priorityActions, server.URL)
 	servicePolicy := baseRepo.policies[0]
@@ -388,9 +394,13 @@ func TestProbeTarget_PartialMultiModelCommitStillQueuesPostCommitPrioritySync(t 
 		t.Fatal("the first successful model must commit health state before the second model fails")
 	}
 	select {
-	case <-priorityActions.called:
+	case <-repo.priorityRead:
 	case <-time.After(time.Second):
 		t.Fatal("partial multi-model health commit must still queue Priority reconciliation")
+	}
+	waitForPriorityAsyncIdle(t)
+	if len(priorityActions.calls) != 0 {
+		t.Fatalf("partial evidence must not reduce expected models and authorize Priority: %+v", priorityActions.calls)
 	}
 }
 
@@ -405,6 +415,7 @@ func TestHealthPrioritySyncSecondTriggerWhileRunningQueuesFollowUp(t *testing.T)
 		firstRelease: make(chan struct{}),
 		secondStart:  make(chan struct{}),
 	}
+	storePriorityFixtureStates(baseRepo, []ConnectionHealthState{{ConnectionID: "sub2api:ws1:acc-1", ModelName: "gpt-4o", State: StateHealthy}})
 	service := newPostCommitProbeService(baseRepo, repo, priorityActions, "http://unused")
 
 	service.triggerHealthPrioritySyncAfterCommit("user1", "ws1")
@@ -548,6 +559,7 @@ func TestHealthPrioritySyncQueueFullFailureCannotOverwriteFollowUpSuccess(t *tes
 		finished:       make(chan struct{}),
 	}
 	priorityActions := &fakeTargetPriorityActioner{called: make(chan struct{}, 1)}
+	storePriorityFixtureStates(baseRepo, []ConnectionHealthState{{ConnectionID: "sub2api:ws1:acc-1", ModelName: "gpt-4o", State: StateHealthy}})
 	service := newPostCommitProbeService(baseRepo, repo, priorityActions, "http://unused")
 	service.mySites = fakeAdminGroupKeyReader{
 		fakeMySitesReader: fakeMySitesReader{
@@ -697,11 +709,11 @@ func TestPrioritySyncIncompleteGroupInventoryDoesNotMarkWorkspaceSuccess(t *test
 	if workspaceState.LastError != "admin.connectionHealth.errors.priorityInventoryIncomplete" {
 		t.Fatalf("incomplete inventory must use its dedicated error key: %+v", workspaceState)
 	}
-	if len(priorityActions.calls) != 1 || priorityActions.calls[0].targetID != "acc-a" || priorityActions.calls[0].priority != 10 {
-		t.Fatalf("readable target must still complete its normal partial write: %+v", priorityActions.calls)
+	if len(priorityActions.calls) != 0 {
+		t.Fatalf("incomplete workspace cannot establish current membership: %+v", priorityActions.calls)
 	}
-	if got := repo.priorityStates["user1|ws1|sub2api:ws1:acc-a"]; got.LastAppliedPriority != 10 || got.PendingPriority != nil || got.EffectiveMultiplier != multiplier {
-		t.Fatalf("readable target checkpoint must close after the partial write: %+v", got)
+	if got, exists := repo.priorityStates["user1|ws1|sub2api:ws1:acc-a"]; exists {
+		t.Fatalf("incomplete inventory must not create a partial-write checkpoint: %+v", got)
 	}
 	if _, ok := repo.priorityStates["user1|ws1|"+omittedTargetID]; !ok {
 		t.Fatalf("omitted target checkpoint must remain retryable")

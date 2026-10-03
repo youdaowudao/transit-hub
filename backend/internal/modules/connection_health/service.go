@@ -16,6 +16,12 @@ import (
 // 定义为接口而不是直接依赖 *Repository 具体类型，使聚合、策略、手动动作等核心流程
 // 可以在不连接真实数据库的情况下用内存假实现单测覆盖（同 group_rate_campaigns 的做法）。
 type healthRepository interface {
+	RecordTargetCredentialFailure(ctx context.Context, initial ConnectionHealthState, reason string, at time.Time) (ConnectionHealthState, error)
+	ListLatestProbeAttemptEventsByWorkspace(ctx context.Context, userID, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error)
+	CommitTargetProbe(ctx context.Context, input TargetProbeCommit) (TargetProbeCommitResult, error)
+	DecorateProbeEventAction(ctx context.Context, userID, workspace, eventID, action, groupID, groupName string) error
+	ListGroupTestConfigurations(ctx context.Context, userID string, adminAccountID string) ([]GroupTestConfig, error)
+	SaveGroupTestConfiguration(ctx context.Context, userID string, adminAccountID string, groupID string, configuration *GroupTestConfiguration) error
 	ListPolicies(ctx context.Context, userID string, adminAccountID string) ([]Policy, error)
 	GetPolicy(ctx context.Context, id string, userID string, adminAccountID string) (*Policy, error)
 	SavePolicyWithTargets(ctx context.Context, p Policy, targets []ModelTarget) error
@@ -82,6 +88,7 @@ type healthRepository interface {
 // Service 组装 connection_health 模块的全部业务逻辑：聚合查询、策略管理、手动动作、
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
+	actionInventoryViews         sync.Map
 	repo                         healthRepository
 	eventRetention               eventRetentionRepository
 	questionAnswers              questionAnswerRepository
@@ -230,29 +237,41 @@ func (s *Service) currentAdminAccountID(ctx context.Context, userID string) (str
 
 // ModelHealth 是单个模型在某条对接链路上的健康状态展示数据，绝不包含 upstream_key。
 type ModelHealth struct {
-	ModelName                string                       `json:"modelName"`
-	ProviderFamily           string                       `json:"providerFamily"`
-	Configured               bool                         `json:"configured"`
-	State                    State                        `json:"state"`
-	CurrentWeight            int                          `json:"currentWeight"`
-	ConsecutiveFailures      int                          `json:"consecutiveFailures"`
-	ConsecutiveSuccesses     int                          `json:"consecutiveSuccesses"`
-	LastProbeAt              *time.Time                   `json:"lastProbeAt"`
-	LastSuccessAt            *time.Time                   `json:"lastSuccessAt"`
-	LastFailureAt            *time.Time                   `json:"lastFailureAt"`
-	LastLatencyMs            *int                         `json:"lastLatencyMs"`
-	LastSuccessLatencyMs     *int                         `json:"lastSuccessLatencyMs"`
-	LastErrorKey             string                       `json:"lastErrorKey"`
-	LastErrorDetail          string                       `json:"lastErrorDetail"`
-	LastRemoteAction         string                       `json:"lastRemoteAction"`
-	ProbeResult              string                       `json:"probeResult,omitempty"`
-	ElapsedSeconds           *int64                       `json:"elapsedSeconds,omitempty"`
-	NextProbeAt              *time.Time                   `json:"nextProbeAt,omitempty"`
-	BlockedReason            string                       `json:"blockedReason,omitempty"`
-	EffectiveIntervalSeconds int                          `json:"effectiveIntervalSeconds,omitempty"`
-	EffectivePolicySources   []EffectiveProbePolicySource `json:"effectivePolicySources,omitempty"`
-	BudgetPolicyID           string                       `json:"budgetPolicyId,omitempty"`
-	UpdatedAt                *time.Time                   `json:"updatedAt"`
+	CredentialUnavailableAt     *time.Time                   `json:"credentialUnavailableAt,omitempty"`
+	CredentialUnavailableReason string                       `json:"credentialUnavailableReason,omitempty"`
+	RequestPhase                string                       `json:"requestPhase,omitempty"`
+	RequestLatencyMs            *int                         `json:"requestLatencyMs,omitempty"`
+	RequestAt                   *time.Time                   `json:"requestAt,omitempty"`
+	RequestErrorKey             string                       `json:"requestErrorKey,omitempty"`
+	RequestErrorDetail          string                       `json:"requestErrorDetail,omitempty"`
+	ProbeDisposition            string                       `json:"probeDisposition,omitempty"`
+	RequestProtocol             *TestProtocol                `json:"requestProtocol,omitempty"`
+	RequestTimeoutSeconds       *int                         `json:"requestTimeoutSeconds,omitempty"`
+	CurrentHealthResult         *CurrentHealthResult         `json:"currentHealthResult,omitempty"`
+	LastAttempt                 *LastTestAttempt             `json:"lastAttempt,omitempty"`
+	ModelName                   string                       `json:"modelName"`
+	ProviderFamily              string                       `json:"providerFamily"`
+	Configured                  bool                         `json:"configured"`
+	State                       State                        `json:"state"`
+	CurrentWeight               int                          `json:"currentWeight"`
+	ConsecutiveFailures         int                          `json:"consecutiveFailures"`
+	ConsecutiveSuccesses        int                          `json:"consecutiveSuccesses"`
+	LastProbeAt                 *time.Time                   `json:"lastProbeAt"`
+	LastSuccessAt               *time.Time                   `json:"lastSuccessAt"`
+	LastFailureAt               *time.Time                   `json:"lastFailureAt"`
+	LastLatencyMs               *int                         `json:"lastLatencyMs"`
+	LastSuccessLatencyMs        *int                         `json:"lastSuccessLatencyMs"`
+	LastErrorKey                string                       `json:"lastErrorKey"`
+	LastErrorDetail             string                       `json:"lastErrorDetail"`
+	LastRemoteAction            string                       `json:"lastRemoteAction"`
+	ProbeResult                 string                       `json:"probeResult,omitempty"`
+	ElapsedSeconds              *int64                       `json:"elapsedSeconds,omitempty"`
+	NextProbeAt                 *time.Time                   `json:"nextProbeAt,omitempty"`
+	BlockedReason               string                       `json:"blockedReason,omitempty"`
+	EffectiveIntervalSeconds    int                          `json:"effectiveIntervalSeconds,omitempty"`
+	EffectivePolicySources      []EffectiveProbePolicySource `json:"effectivePolicySources,omitempty"`
+	BudgetPolicyID              string                       `json:"budgetPolicyId,omitempty"`
+	UpdatedAt                   *time.Time                   `json:"updatedAt"`
 }
 
 // ConnectionHealth 是一条已对接上游分组链路的健康展示数据。UpstreamKeyID 只保留 ID 辅助排障，
@@ -278,22 +297,25 @@ type OwnGroupHealth struct {
 
 // EventView 是事件的对外展示形态，字段命名与前端 camelCase 对齐。
 type EventView struct {
-	ID                string    `json:"id"`
-	ConnectionID      string    `json:"connectionId"`
-	ModelName         string    `json:"modelName"`
-	OwnGroupName      string    `json:"ownGroupName"`
-	UpstreamSiteID    string    `json:"upstreamSiteId"`
-	UpstreamGroupName string    `json:"upstreamGroupName"`
-	Result            string    `json:"result"`
-	FromState         string    `json:"fromState"`
-	ToState           string    `json:"toState"`
-	LatencyMs         *int      `json:"latencyMs"`
-	ErrorKey          string    `json:"errorKey"`
-	ErrorDetail       string    `json:"errorDetail"`
-	RemoteAction      string    `json:"remoteAction"`
-	ActionSource      string    `json:"actionSource"`
-	Source            string    `json:"source"`
-	CreatedAt         time.Time `json:"createdAt"`
+	RequestProtocol       *TestProtocol `json:"requestProtocol"`
+	RequestTimeoutSeconds *int          `json:"requestTimeoutSeconds"`
+	ProbeDisposition      string        `json:"probeDisposition,omitempty"`
+	ID                    string        `json:"id"`
+	ConnectionID          string        `json:"connectionId"`
+	ModelName             string        `json:"modelName"`
+	OwnGroupName          string        `json:"ownGroupName"`
+	UpstreamSiteID        string        `json:"upstreamSiteId"`
+	UpstreamGroupName     string        `json:"upstreamGroupName"`
+	Result                string        `json:"result"`
+	FromState             string        `json:"fromState"`
+	ToState               string        `json:"toState"`
+	LatencyMs             *int          `json:"latencyMs"`
+	ErrorKey              string        `json:"errorKey"`
+	ErrorDetail           string        `json:"errorDetail"`
+	RemoteAction          string        `json:"remoteAction"`
+	ActionSource          string        `json:"actionSource"`
+	Source                string        `json:"source"`
+	CreatedAt             time.Time     `json:"createdAt"`
 }
 
 // OverviewResponse 是大屏顶部汇总卡片的数据。
@@ -500,22 +522,25 @@ func (s *Service) Groups(ctx context.Context, userID string) ([]OwnGroupHealth, 
 
 func toModelHealth(modelName string, st ConnectionHealthState) ModelHealth {
 	updatedAt := st.UpdatedAt.UTC()
+	credentialReason, credentialAt := currentCredentialFailure(st)
 	return ModelHealth{
-		ModelName:            modelName,
-		Configured:           !isCredentialUnavailableReason(st.LastErrorKey),
-		State:                st.State,
-		CurrentWeight:        st.CurrentWeight,
-		ConsecutiveFailures:  st.ConsecutiveFailures,
-		ConsecutiveSuccesses: st.ConsecutiveSuccesses,
-		LastProbeAt:          utcTimePointer(st.LastProbeAt),
-		LastSuccessAt:        utcTimePointer(st.LastSuccessAt),
-		LastFailureAt:        utcTimePointer(st.LastFailureAt),
-		LastLatencyMs:        st.LastLatencyMs,
-		LastSuccessLatencyMs: st.LastSuccessLatencyMs,
-		LastErrorKey:         st.LastErrorKey,
-		LastErrorDetail:      st.LastErrorDetail,
-		LastRemoteAction:     st.LastRemoteAction,
-		UpdatedAt:            &updatedAt,
+		CredentialUnavailableAt:     utcTimePointer(credentialAt),
+		CredentialUnavailableReason: credentialReason,
+		ModelName:                   modelName,
+		Configured:                  credentialReason == "",
+		State:                       st.State,
+		CurrentWeight:               st.CurrentWeight,
+		ConsecutiveFailures:         st.ConsecutiveFailures,
+		ConsecutiveSuccesses:        st.ConsecutiveSuccesses,
+		LastProbeAt:                 utcTimePointer(st.LastProbeAt),
+		LastSuccessAt:               utcTimePointer(st.LastSuccessAt),
+		LastFailureAt:               utcTimePointer(st.LastFailureAt),
+		LastLatencyMs:               st.LastLatencyMs,
+		LastSuccessLatencyMs:        st.LastSuccessLatencyMs,
+		LastErrorKey:                st.LastErrorKey,
+		LastErrorDetail:             st.LastErrorDetail,
+		LastRemoteAction:            st.LastRemoteAction,
+		UpdatedAt:                   &updatedAt,
 	}
 }
 
@@ -551,6 +576,10 @@ func (s *Service) Overview(ctx context.Context, userID string) (OverviewResponse
 					continue
 				}
 				for _, model := range connection.Models {
+					if model.CurrentHealthResult != nil && model.CurrentHealthResult.Status == "unverified" {
+						resp.Unconfigured++
+						continue
+					}
 					accumulateOverviewState(&resp, model.State)
 				}
 			}
@@ -613,7 +642,11 @@ func (s *Service) Overview(ctx context.Context, userID string) (OverviewResponse
 		}
 		resp.Unconfigured += len(target.unprobed)
 		for _, model := range target.models {
-			if isCredentialUnavailableReason(model.LastErrorKey) {
+			if modelCredentialUnavailableReason(model) != "" {
+				resp.Unconfigured++
+				continue
+			}
+			if model.CurrentHealthResult != nil && model.CurrentHealthResult.Status == "unverified" {
 				resp.Unconfigured++
 				continue
 			}
@@ -789,6 +822,7 @@ func toEventViews(events []ConnectionHealthEvent) []EventView {
 	views := make([]EventView, 0, len(events))
 	for _, e := range events {
 		views = append(views, EventView{
+			RequestProtocol: e.RequestProtocol, RequestTimeoutSeconds: e.RequestTimeoutSeconds, ProbeDisposition: e.ProbeDisposition,
 			ID: e.ID, ConnectionID: e.ConnectionID, ModelName: e.ModelName, OwnGroupName: e.OwnGroupName,
 			UpstreamSiteID: e.UpstreamSiteID, UpstreamGroupName: e.UpstreamGroupName, Result: e.Result,
 			FromState: e.FromState, ToState: e.ToState, LatencyMs: e.LatencyMs, ErrorKey: e.ErrorKey,
@@ -1059,6 +1093,7 @@ func (s *Service) ProbeConnection(ctx context.Context, userID string, connection
 	results := make([]ModelHealth, 0, len(targets))
 	for _, mt := range targets {
 		outcome := s.probeRunner.Probe(ctx, ProbeRequest{
+			Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10, LegacyCompatibility: true,
 			BaseURL: site.BaseURL, UpstreamKey: conn.UpstreamKey, ProviderFamily: mt.target.ProviderFamily,
 			ModelName: mt.target.ModelName, MaxTokens: mt.target.MaxProbeTokens, ProbePrompt: mt.target.ProbePrompt,
 		})
@@ -1275,6 +1310,7 @@ func (s *Service) probeOnce(ctx context.Context, conn my_sites.RealConnection, p
 	}
 
 	outcome := s.probeRunner.Probe(ctx, ProbeRequest{
+		Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10, LegacyCompatibility: true,
 		BaseURL: site.BaseURL, UpstreamKey: conn.UpstreamKey, ProviderFamily: target.ProviderFamily,
 		ModelName: target.ModelName, MaxTokens: target.MaxProbeTokens, ProbePrompt: target.ProbePrompt,
 	})

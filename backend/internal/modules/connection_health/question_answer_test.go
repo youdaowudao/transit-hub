@@ -19,6 +19,7 @@ import (
 )
 
 type fakeQuestionAnswerRepository struct {
+	configurations  []GroupTestConfig
 	mu              sync.Mutex
 	questions       map[string]TestQuestion
 	records         []QuestionAnswerRecord
@@ -119,9 +120,17 @@ func (f *fakeQuestionAnswerRepository) DeleteTestQuestion(_ context.Context, _ s
 	return true, nil
 }
 
-func (f *fakeQuestionAnswerRepository) CreateQuestionAnswerBatch(_ context.Context, _ string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort, repeatCount int) ([]QuestionAnswerRecord, error) {
+func (f *fakeQuestionAnswerRepository) CreateQuestionAnswerBatch(_ context.Context, _ string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort, repeatCount int, snapshots ...QuestionAnswerConfigurationSnapshot) ([]QuestionAnswerRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	protocol := TestProtocolChatCompletions
+	if len(snapshots) > 0 {
+		config := ResolveGroupTestConfiguration(snapshots[0].Memberships, snapshots[0].InventoryComplete, f.configurations)
+		if !config.usable() {
+			return nil, requestError(config.BlockedReason)
+		}
+		protocol = config.Protocol
+	}
 	f.createCalls++
 	f.lastRepeatCount = repeatCount
 	for _, record := range f.records {
@@ -147,6 +156,7 @@ func (f *fakeQuestionAnswerRepository) CreateQuestionAnswerBatch(_ context.Conte
 					QuestionID: question.ID, QuestionName: question.Name, QuestionBody: question.Body,
 					QuestionKeywordSnapshot: append([]string{}, question.Keywords...),
 					ReasoningEffort:         questionAnswerReasoningEffortPointer(reasoningEffort),
+					RequestProtocol:         &protocol,
 					Status:                  QuestionAnswerPending, CreatedAt: now, UpdatedAt: now,
 				}
 				created = append(created, record)
@@ -310,7 +320,7 @@ type inconsistentQuestionAnswerRepository struct {
 	*fakeQuestionAnswerRepository
 }
 
-func (f *inconsistentQuestionAnswerRepository) CreateQuestionAnswerBatch(_ context.Context, _ string, targetID string, batchID string, _ []string, _ []string, _ QuestionAnswerReasoningEffort, _ int) ([]QuestionAnswerRecord, error) {
+func (f *inconsistentQuestionAnswerRepository) CreateQuestionAnswerBatch(_ context.Context, _ string, targetID string, batchID string, _ []string, _ []string, _ QuestionAnswerReasoningEffort, _ int, _ ...QuestionAnswerConfigurationSnapshot) ([]QuestionAnswerRecord, error) {
 	medium := QuestionAnswerReasoningEffortMedium
 	high := QuestionAnswerReasoningEffortHigh
 	now := time.Now()
@@ -1347,8 +1357,8 @@ func newPostCreateShutdownQuestionAnswerRepository(base *fakeQuestionAnswerRepos
 	}
 }
 
-func (r *postCreateShutdownQuestionAnswerRepository) CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort, repeatCount int) ([]QuestionAnswerRecord, error) {
-	records, err := r.fakeQuestionAnswerRepository.CreateQuestionAnswerBatch(ctx, userID, targetID, batchID, models, questionIDs, reasoningEffort, repeatCount)
+func (r *postCreateShutdownQuestionAnswerRepository) CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort, repeatCount int, snapshots ...QuestionAnswerConfigurationSnapshot) ([]QuestionAnswerRecord, error) {
+	records, err := r.fakeQuestionAnswerRepository.CreateQuestionAnswerBatch(ctx, userID, targetID, batchID, models, questionIDs, reasoningEffort, repeatCount, snapshots...)
 	if err != nil {
 		return nil, err
 	}

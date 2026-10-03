@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Loader2, X } from 'lucide-vue-next'
 import { t, te } from '@/locales'
-import { connectionHealthMessageKey } from '../../composables/useConnectionHealth'
+import { connectionHealthMessageKey, isTestConfigurationBlocked, testProtocolName } from '../../composables/useConnectionHealth'
 import { discoverTargetModels, listTestQuestions, startQuestionAnswerBatch } from '../../api/connectionHealth'
 import type {
   AdminGroupHealth,
@@ -94,6 +94,7 @@ const candidateSignature = computed(() => JSON.stringify(props.groups.map(group 
     platform: account.platform,
     type: account.type,
     status: account.status,
+    testConfiguration: account.testConfiguration,
   })),
 }))))
 const selectionSignature = computed(() => JSON.stringify({
@@ -221,9 +222,13 @@ const prepare = async () => {
       compatibleModelIds: sourceCompatibility.compatible,
       incompatibleModelIds: sourceCompatibility.incompatible,
       requestCount: sourceCompatibility.compatible.length * resolved.questionIds.length * resolved.repeatCount,
-      discoveryErrorKey: '',
+      discoveryErrorKey: isTestConfigurationBlocked(source.testConfiguration) ? (source.testConfiguration?.blockedReason || 'admin.connectionHealth.errors.testConfigurationUnavailable') : '',
     }]
     for (const target of stableTargets.slice(1)) {
+      if (isTestConfigurationBlocked(target.testConfiguration)) {
+        nextPreviews.push({ target, compatibleModelIds: [], incompatibleModelIds: resolved.modelIds, requestCount: 0, discoveryErrorKey: target.testConfiguration?.blockedReason || 'admin.connectionHealth.errors.testConfigurationUnavailable' })
+        continue
+      }
       try {
         const models = await discoverTargetModels(target.targetId, controller.signal)
         if (sequence !== preparationSequence || !visible.value || signature !== preparationSignature.value) return
@@ -635,7 +640,9 @@ onBeforeUnmount(() => {
                 <p
                   :data-testid="`question-answer-batch-preview-identity-${preview.target.targetId}`"
                   class="break-all font-medium text-foreground"
-                >{{ preview.target.accountName }} · {{ preview.target.targetId }}</p>
+                >{{ preview.target.accountName }} <span v-if="preview.target.testConfiguration" class="text-xs text-muted-foreground">· {{ testProtocolName(preview.target.testConfiguration.protocol) || t('admin.connectionHealth.testConfiguration.' + preview.target.testConfiguration.status) }}<template v-if="preview.target.testConfiguration.probeTimeoutSeconds"> / {{ preview.target.testConfiguration.probeTimeoutSeconds }}s</template></span> · {{ preview.target.targetId }}</p>
+                <p v-if="preview.target.testConfiguration?.sourceGroups.length" class="break-words">{{ preview.target.testConfiguration.sourceGroups.map(source => `${source.adminGroupName || source.adminGroupId}: ${testProtocolName(source.protocol)} / ${source.probeTimeoutSeconds}s`).join('；') }}</p>
+                <p>{{ t('admin.connectionHealth.testConfiguration.questionAnswerTimeout') }}</p>
                 <p>{{ t('admin.connectionHealth.questionAnswerBatch.compatibleModels', { models: preview.compatibleModelIds.join('、') || '-' }) }}</p>
                 <p v-if="preview.incompatibleModelIds.length">{{ t('admin.connectionHealth.questionAnswerBatch.incompatibleModels', { models: preview.incompatibleModelIds.join('、') }) }}</p>
                 <p>{{ t('admin.connectionHealth.questionAnswerBatch.requestCount', { count: preview.requestCount }) }}</p>

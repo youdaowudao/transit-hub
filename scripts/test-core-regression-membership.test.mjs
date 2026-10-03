@@ -21,6 +21,9 @@ test('connection-health core gate keeps every question-answer regression member'
     'connection-health-account-tier.behavior.test.ts',
     'connection-health-priority-candidates.behavior.test.ts',
     'connection-health-quick-probe.behavior.test.ts',
+    'group-health-setup-exclusion-outcome.behavior.test.ts',
+    'connection-health-history-display.test.ts',
+    'connection-health-manual-probe-cancel.test.ts',
     'question-answer-review-fixture.test.mjs',
     'question-answer-batch-review-fixture.test.mjs',
     'question-answer-keyword-highlight-fixture.test.mjs',
@@ -43,4 +46,9 @@ test('full gate runs fixture safety and guards core membership', async () => {
   ]) {
     assert.match(script, new RegExp(member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
+})
+
+test('connection-health core gate includes protocol concurrency contracts', async () => {
+  const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
+  assert.match(script, /go test -race[^\n]+Priority\|Scheduler\|Refresh\|Sync\|Regression\|Protocol\|ActionCheckpoint\|ActionDiagnostics\|ActionDispatch\|RuntimeLease/)
 })

@@ -4,9 +4,12 @@ import { mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import AdminGroupHealthDetail from '@/modules/admin/components/dashboard/AdminGroupHealthDetail.vue'
+import ConnectionHealthEventsDialog from '@/modules/admin/components/dashboard/ConnectionHealthEventsDialog.vue'
 import type {
   AdminGroupAccount,
   AdminGroupHealth,
+  ConnectionHealthEvent,
+  ModelHealth,
 } from '@/modules/admin/types/connectionHealth'
 
 const mountedWrappers: VueWrapper[] = []
@@ -173,5 +176,97 @@ describe('AdminGroupHealthDetail current main-site errors', () => {
     const row = accountRow(wrapper, 'NewAPI account')
     expect(row.text()).not.toContain('主站运行错误')
     expect(row.text()).not.toContain('not a main-site error')
+  })
+})
+
+
+describe('current protocol result and invalid attempt', () => {
+  it.each([
+    ['daily_probe_budget_exhausted', '当日探活预算已耗尽'],
+    ['cooldown', '健康冷却中'],
+  ])('keeps the independent %s explanation visible for an unverified model', async (blockedReason, label) => {
+    const model: ModelHealth = {
+      modelName: 'pending-model', providerFamily: 'openai', configured: true, state: 'healthy',
+      currentWeight: 100, consecutiveFailures: 0, consecutiveSuccesses: 1,
+      lastProbeAt: null, lastSuccessAt: null, lastFailureAt: null, lastLatencyMs: null,
+      lastErrorKey: '', lastErrorDetail: '', lastRemoteAction: '', updatedAt: '2026-10-03T00:00:00Z',
+      currentHealthResult: { status: 'unverified', protocol: 'responses' }, blockedReason,
+    }
+    const wrapper = mountDetail([makeAccount({ hasEnabledProbePolicy: true, modelHealth: [model] })])
+    await accountRow(wrapper, 'Account 100').find('button[aria-label="展开模型结果"]').trigger('click')
+    expect(wrapper.text()).toContain('当前协议待验证')
+    expect(wrapper.text()).toContain(label)
+    expect(wrapper.text()).not.toContain('probeBlockedReasons.admin.')
+    expect(wrapper.text()).not.toContain(`admin.connectionHealth.probeBlockedReasons.${blockedReason}`)
+  })
+
+  it.each(['sub2api:ws1:100', ''])('keeps applied health separate from invalid and stale history in event mode %s', async (selectedConnectionId) => {
+    const model: ModelHealth = {
+      modelName: 'gpt-fixture', providerFamily: 'openai', configured: true, state: 'suspended',
+      currentWeight: 0, consecutiveFailures: 3, consecutiveSuccesses: 0,
+      lastFailureAt: '2026-10-02T10:00:00Z', lastProbeAt: '2026-10-02T10:05:00Z', lastSuccessAt: null,
+      lastLatencyMs: 12, lastErrorKey: 'admin.connectionHealth.errors.probeAuth', lastErrorDetail: 'applied failure t1',
+      lastRemoteAction: '', updatedAt: '2026-10-02T10:05:00Z',
+      currentHealthResult: { status: 'failure', at: '2026-10-02T10:00:00Z', protocol: 'responses', errorKey: 'admin.connectionHealth.errors.probeAuth', errorDetail: 'applied failure t1' },
+      lastAttempt: { at: '2026-10-02T10:05:00Z', protocol: 'responses', probeTimeoutSeconds: 30, disposition: 'invalid', errorDetail: 'invalid attempt t2' },
+    }
+    const group = mountDetail([makeAccount({ modelHealth: [model] })]).props('group')
+    const common: ConnectionHealthEvent = {
+      id: 't1', connectionId: 'sub2api:ws1:100', modelName: 'gpt-fixture', ownGroupName: 'Stable Group',
+      upstreamSiteId: 'sub2api', upstreamGroupName: 'Stable Group', result: 'auth_error',
+      fromState: 'degraded', toState: 'suspended', latencyMs: 12, errorKey: 'admin.connectionHealth.errors.probeAuth',
+      errorDetail: 'applied failure t1', remoteAction: '', createdAt: '2026-10-02T10:00:00Z',
+      requestProtocol: 'responses', requestTimeoutSeconds: 30, probeDisposition: 'applied',
+    }
+    const wrapper = mount(ConnectionHealthEventsDialog, {
+      props: {
+        open: true, selectedConnectionId, groups: [], adminGroups: [group], siteName: (id: string) => id,
+        events: [
+          { ...common, id: 'stale', result: 'slow_response', latencyMs: 33333, probeDisposition: 'stale', createdAt: '2026-10-02T10:06:00Z' },
+          { ...common, id: 't2', result: 'invalid_response', latencyMs: 22222, errorDetail: 'invalid attempt t2', probeDisposition: 'invalid', createdAt: '2026-10-02T10:05:00Z' },
+          common,
+        ],
+      },
+      global: { stubs: { Teleport: true, Transition: false } },
+    })
+    mountedWrappers.push(wrapper)
+
+    expect(wrapper.text()).toContain('当前失败')
+    expect(wrapper.text()).toContain('applied failure t1')
+    expect(wrapper.text()).toContain('invalid attempt t2')
+    expect(wrapper.text()).toContain('Responses / 30s')
+    expect(wrapper.text()).toContain('12ms')
+    expect(wrapper.text()).not.toContain('33333ms')
+    expect(wrapper.text()).not.toContain('22222ms')
+    expect(wrapper.text()).not.toContain('其中 1 次为高延迟成功')
+    expect(wrapper.findAll('[title]').some(node => node.attributes('title')?.includes('过期尝试'))).toBe(true)
+
+    await wrapper.setProps({ adminGroups: [{ ...group, accounts: [makeAccount({ modelHealth: [{
+      ...model, state: 'healthy', lastErrorKey: '', lastErrorDetail: '', lastSuccessAt: '2026-10-02T10:10:00Z',
+      currentHealthResult: { status: 'success', protocol: 'responses', at: '2026-10-02T10:10:00Z' },
+      lastAttempt: { disposition: 'applied', protocol: 'responses', at: '2026-10-02T10:10:00Z' },
+    }] })] }] })
+    expect(wrapper.text()).not.toContain('当前失败')
+    expect(wrapper.text()).not.toContain('invalid attempt t2')
+    expect(wrapper.text()).not.toContain('applied failure t1')
+  })
+
+  it('retains the applied failure after a newer invalid attempt and only clears it for an applied success', async () => {
+    const model = {
+      modelName: 'gpt-fixture', providerFamily: 'openai', configured: true, state: 'suspended' as const,
+      currentWeight: 0, consecutiveFailures: 3, consecutiveSuccesses: 0,
+      lastFailureAt: '2026-10-02T10:00:00Z', lastProbeAt: '2026-10-02T10:05:00Z', lastSuccessAt: null,
+      lastLatencyMs: 12, lastErrorKey: 'admin.connectionHealth.errors.probeAuth', lastErrorDetail: 'applied failure t1',
+      lastRemoteAction: '', updatedAt: '2026-10-02T10:05:00Z',
+      currentHealthResult: { status: 'failure' as const, at: '2026-10-02T10:00:00Z', errorKey: 'admin.connectionHealth.errors.probeAuth', errorDetail: 'applied failure t1' },
+      lastAttempt: { at: '2026-10-02T10:05:00Z', protocol: 'responses' as const, disposition: 'invalid' as const, errorDetail: 'invalid attempt t2' },
+    }
+    const wrapper = mountDetail([makeAccount({ hasEnabledProbePolicy: true, modelHealth: [model] })])
+    await accountRow(wrapper, 'Account 100').find('button[aria-label="展开模型结果"]').trigger('click')
+    expect(wrapper.text()).toContain('applied failure t1')
+    expect(wrapper.text()).toContain('invalid attempt t2')
+    await wrapper.setProps({ group: { ...wrapper.props('group'), accounts: [makeAccount({ hasEnabledProbePolicy: true, modelHealth: [{ ...model, state: 'healthy', currentHealthResult: { status: 'success' }, lastAttempt: { disposition: 'applied', protocol: 'responses' } }] })] } })
+    expect(wrapper.text()).not.toContain('applied failure t1')
+    expect(wrapper.text()).not.toContain('invalid attempt t2')
   })
 })

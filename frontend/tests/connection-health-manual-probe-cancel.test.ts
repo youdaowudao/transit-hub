@@ -4,7 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ManualOneTimeProbeDialog from '@/modules/admin/components/dashboard/ManualOneTimeProbeDialog.vue'
-import type { ModelHealth } from '@/modules/admin/types/connectionHealth'
+import type { EffectiveTestConfiguration, ModelHealth } from '@/modules/admin/types/connectionHealth'
 import { manualProbeOnce, probeTargetWithProgress } from '../src/modules/admin/api/connectionHealth'
 
 const harness = vi.hoisted(() => ({
@@ -54,7 +54,7 @@ const result = (modelName: string): ModelHealth => ({
   updatedAt: '2026-08-30T10:00:00Z',
 })
 
-const mountFormalDialog = async () => {
+const mountFormalDialog = async (testConfiguration?: EffectiveTestConfiguration) => {
   const wrapper = mount(ManualOneTimeProbeDialog, {
     props: {
       open: false,
@@ -65,6 +65,7 @@ const mountFormalDialog = async () => {
         type: 'subscription',
         status: 'active',
         groupName: '正式探活分组',
+        testConfiguration,
         formalModels: [{ id: 'gpt-5.6-sol', name: 'gpt-5.6-sol', providerFamily: 'openai' }],
       },
     },
@@ -101,6 +102,67 @@ afterEach(() => {
 })
 
 describe('manual probe cancellation', () => {
+  it.each([
+    { disposition: 'invalid', result: 'invalid_response', detail: '本次正文不完整', phase: '' },
+    { disposition: 'applied', result: 'network_fluctuation', detail: '本次读取正文超时', phase: 'reading_body' },
+  ])('shows the actual formal $result metadata independently from the old health projection', async ({ disposition, result: probeResult, detail, phase }) => {
+    harness.manualProbeTarget.mockResolvedValue([{
+      ...result('gpt-5.6-sol'),
+      requestProtocol: 'responses',
+      requestTimeoutSeconds: 30,
+      requestLatencyMs: 12500,
+      requestAt: '2026-10-03T01:02:03Z',
+      requestErrorKey: probeResult,
+      requestErrorDetail: detail,
+      requestPhase: phase,
+      probeDisposition: disposition,
+      probeResult,
+      lastLatencyMs: 111,
+      lastErrorDetail: '旧有效失败原因',
+    }])
+    const wrapper = await mountFormalDialog({
+      protocol: 'responses', probeTimeoutSeconds: 30, status: 'inherited',
+      sourceGroups: [{ adminGroupId: 'g-response', adminGroupName: '来源分组', protocol: 'responses', probeTimeoutSeconds: 30 }],
+      blockedReason: '',
+    })
+    await startFormalProbe(wrapper)
+
+    expect(wrapper.text()).toContain('来源分组')
+    expect(wrapper.text()).toContain('Responses / 30s')
+    expect(wrapper.text()).toContain('128')
+    expect(wrapper.text()).toContain('12500ms')
+    expect(wrapper.text()).toContain('2026-10-03T01:02:03Z')
+    expect(wrapper.text()).toContain(detail)
+    if (phase) expect(wrapper.text()).toContain('截止阶段：读取完整响应正文')
+    expect(wrapper.text()).not.toContain('111ms')
+    expect(wrapper.text()).not.toContain('旧有效失败原因')
+    expect(wrapper.find('.lucide-circle-check').exists()).toBe(false)
+  })
+
+  it('shows the temporary response protocol, timeout and elapsed time returned by the API', async () => {
+    harness.runManualProbeOnce.mockResolvedValue({ results: [{
+      modelName: 'discovered-model', protocol: 'responses', probeTimeoutSeconds: 30,
+      result: 'slow_response', healthy: true, latencyMs: 12500,
+      errorKey: '', errorDetail: '', probedAt: '2026-10-03T02:03:04Z', configurationChanged: true,
+    }] })
+    const wrapper = await mountFormalDialog()
+    const once = wrapper.findAll('button').find(button => button.text().trim() === '一次性测试')
+    if (!once) throw new Error('missing temporary mode')
+    await once.trigger('click')
+    await flushPromises()
+    const start = wrapper.findAll('button').find(button => button.text().trim() === '开始测试')
+    if (!start) throw new Error('missing temporary start')
+    await start.trigger('click')
+    await flushPromises()
+
+    expect(harness.runManualProbeOnce).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('Responses / 30s')
+    expect(wrapper.text()).toContain('12500ms')
+    expect(wrapper.text()).toContain('2026-10-03T02:03:04Z')
+    expect(wrapper.text()).toContain('配置已变化')
+    expect(harness.manualProbeTarget).not.toHaveBeenCalled()
+  })
+
   it('passes the caller abort signal to the manual probe request', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response('[]', { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)

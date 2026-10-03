@@ -14,13 +14,17 @@ import (
 
 // ManualProbeResult 是一次性探活单个模型的 transient 结果，绝不包含上游凭据。
 type ManualProbeResult struct {
-	ModelName   string    `json:"modelName"`
-	Result      string    `json:"result"`
-	Healthy     bool      `json:"healthy"`
-	LatencyMs   *int      `json:"latencyMs"`
-	ErrorKey    string    `json:"errorKey"`
-	ErrorDetail string    `json:"errorDetail"`
-	ProbedAt    time.Time `json:"probedAt"`
+	RequestPhase         string       `json:"requestPhase,omitempty"`
+	Protocol             TestProtocol `json:"protocol"`
+	ProbeTimeoutSeconds  int          `json:"probeTimeoutSeconds"`
+	ConfigurationChanged bool         `json:"configurationChanged"`
+	ModelName            string       `json:"modelName"`
+	Result               string       `json:"result"`
+	Healthy              bool         `json:"healthy"`
+	LatencyMs            *int         `json:"latencyMs"`
+	ErrorKey             string       `json:"errorKey"`
+	ErrorDetail          string       `json:"errorDetail"`
+	ProbedAt             time.Time    `json:"probedAt"`
 }
 
 // ManualProbeTarget 对指定 models 逐一发起一次真实轻量探活，直接返回结果，不落任何库。
@@ -51,6 +55,9 @@ func (s *Service) ManualProbeTarget(ctx context.Context, userID string, targetID
 		}
 		return nil, requestError(ErrorProbeTargetNotFound)
 	}
+	if err := s.configureTestTarget(ctx, userID, adminAccountID, &target, memberships, !accountsReadError); err != nil {
+		return nil, err
+	}
 	effectiveSpecs, _, policyOK := s.currentScheduledProbeSpecs(ctx, userID, adminAccountID, target, memberships, nil)
 	if !policyOK {
 		return nil, requestError(ErrorUnknown)
@@ -72,6 +79,8 @@ func (s *Service) ManualProbeTarget(ctx context.Context, userID string, targetID
 		}
 		outcome := s.executeTargetProbe(ctx, target, cred, spec)
 		result := ManualProbeResult{
+			RequestPhase: outcome.RequestPhase,
+			Protocol:     outcome.Protocol, ProbeTimeoutSeconds: outcome.ProbeTimeoutSeconds,
 			ModelName: modelName, Result: string(outcome.Result), Healthy: outcome.Result == ResultOK || outcome.Result == ResultSlowResponse,
 			LatencyMs: intPtr(outcome.LatencyMs), ProbedAt: time.Now(),
 		}
@@ -80,6 +89,15 @@ func (s *Service) ManualProbeTarget(ctx context.Context, userID string, targetID
 			result.ErrorDetail = outcome.Detail
 		}
 		results = append(results, result)
+	}
+	if target.Platform == string(upstream.PlatformSub2API) {
+		configs, readErr := s.repo.ListGroupTestConfigurations(ctx, userID, adminAccountID)
+		current := ResolveGroupTestConfiguration(target.TestMemberships, readErr == nil && target.InventoryComplete, configs)
+		if !sameEffectiveTestConfiguration(target.TestConfiguration, current) {
+			for i := range results {
+				results[i].ConfigurationChanged = true
+			}
+		}
 	}
 	return results, nil
 }

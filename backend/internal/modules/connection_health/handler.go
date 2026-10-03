@@ -918,6 +918,19 @@ func (h *Handler) putAdminGroupPolicyConfiguration(w http.ResponseWriter, r *htt
 }
 
 func writeError(w http.ResponseWriter, err error) {
+	var blocked *RemoteActionBlockedError
+	if errors.As(err, &blocked) {
+		key := blocked.Error()
+		if errors.Is(blocked, ErrRemoteActionPending) {
+			key = "admin.connectionHealth.errors.remoteActionPending"
+		}
+		httpjson.Write(w, http.StatusConflict, map[string]any{"message": key, "groupId": blocked.GroupID, "groupName": blocked.GroupName})
+		return
+	}
+	if errors.Is(err, ErrRemoteActionPending) {
+		httpjson.WriteError(w, http.StatusConflict, "admin.connectionHealth.errors.remoteActionPending")
+		return
+	}
 	var requestErr requestError
 	if errors.As(err, &requestErr) {
 		status := http.StatusBadRequest

@@ -230,6 +230,11 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_target_action_workspace ON connection_health_target_action_states (user_id, admin_account_id)`,
 		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_status text NOT NULL DEFAULT ''`,
 		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_weight integer NULL`,
+		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_action_kind text NOT NULL DEFAULT ''`,
+		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_schedulable boolean NULL`,
+		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_source text NOT NULL DEFAULT ''`,
+		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_group_ids text[] NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_had_automatic_baseline boolean NOT NULL DEFAULT false`,
 
 		`CREATE TABLE IF NOT EXISTS connection_health_probe_budget_usage (
 			user_id text NOT NULL,
@@ -1415,6 +1420,7 @@ func replaceGroupPolicyConfigurationTx(ctx context.Context, tx pgx.Tx, userID st
 		if _, err := tx.Exec(ctx, `
 			DELETE FROM connection_health_priority_sync_states
 			WHERE user_id = $1 AND admin_account_id = $2 AND conflict = true
+				AND pending_dispatch_id = '' AND pending_priority IS NULL
 				AND target_id = ANY($3::text[])
 		`, userID, adminAccountID, groupTargetIDs); err != nil {
 			return err
@@ -1422,6 +1428,8 @@ func replaceGroupPolicyConfigurationTx(ctx context.Context, tx pgx.Tx, userID st
 		if _, err := tx.Exec(ctx, `
 			DELETE FROM connection_health_target_action_states
 			WHERE user_id = $1 AND admin_account_id = $2 AND conflict = true
+				AND pending_dispatch_id = '' AND pending_status = '' AND pending_weight IS NULL
+				AND pending_schedulable IS NULL AND pending_action_kind <> 'delete'
 				AND target_id = ANY($3::text[])
 		`, userID, adminAccountID, groupTargetIDs); err != nil {
 			return err
@@ -1749,13 +1757,13 @@ func (r *Repository) IsPriorityWorkspaceGenerationCurrent(ctx context.Context, u
 func (r *Repository) GetTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) (*TargetActionState, error) {
 	row := r.db.QueryRow(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, pending_dispatch_id, pending_owner_id, pending_dispatch_phase, updated_at
+			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, pending_dispatch_id, pending_owner_id, pending_dispatch_phase, pending_action_kind, pending_schedulable, pending_source, pending_group_ids, pending_had_automatic_baseline, updated_at
 		FROM connection_health_target_action_states
 		WHERE user_id = $1 AND admin_account_id = $2 AND target_id = $3
 	`, userID, adminAccountID, targetID)
 	var state TargetActionState
 	if err := row.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalStatus, &state.OriginalWeight,
-		&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.PendingDispatchID, &state.PendingOwnerID, &state.PendingDispatchPhase, &state.UpdatedAt); err != nil {
+		&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.PendingDispatchID, &state.PendingOwnerID, &state.PendingDispatchPhase, &state.PendingActionKind, &state.PendingSchedulable, &state.PendingSource, &state.PendingGroupIDs, &state.PendingHadAutomaticBaseline, &state.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -1767,7 +1775,7 @@ func (r *Repository) GetTargetActionState(ctx context.Context, userID string, ad
 func (r *Repository) ListTargetActionStates(ctx context.Context, userID string, adminAccountID string) ([]TargetActionState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, pending_dispatch_id, pending_owner_id, pending_dispatch_phase, updated_at
+			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, pending_dispatch_id, pending_owner_id, pending_dispatch_phase, pending_action_kind, pending_schedulable, pending_source, pending_group_ids, pending_had_automatic_baseline, updated_at
 		FROM connection_health_target_action_states
 		WHERE user_id = $1 AND admin_account_id = $2
 	`, userID, adminAccountID)
@@ -1781,7 +1789,7 @@ func (r *Repository) ListTargetActionStates(ctx context.Context, userID string, 
 func (r *Repository) ListAllTargetActionStates(ctx context.Context) ([]TargetActionState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, target_id, original_status, original_weight,
-			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, pending_dispatch_id, pending_owner_id, pending_dispatch_phase, updated_at
+			last_applied_status, last_applied_weight, pending_status, pending_weight, conflict, pending_dispatch_id, pending_owner_id, pending_dispatch_phase, pending_action_kind, pending_schedulable, pending_source, pending_group_ids, pending_had_automatic_baseline, updated_at
 		FROM connection_health_target_action_states
 	`)
 	if err != nil {
@@ -1796,7 +1804,7 @@ func scanTargetActionStates(rows pgx.Rows) ([]TargetActionState, error) {
 	for rows.Next() {
 		var state TargetActionState
 		if err := rows.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalStatus, &state.OriginalWeight,
-			&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.PendingDispatchID, &state.PendingOwnerID, &state.PendingDispatchPhase, &state.UpdatedAt); err != nil {
+			&state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.PendingDispatchID, &state.PendingOwnerID, &state.PendingDispatchPhase, &state.PendingActionKind, &state.PendingSchedulable, &state.PendingSource, &state.PendingGroupIDs, &state.PendingHadAutomaticBaseline, &state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		states = append(states, state)

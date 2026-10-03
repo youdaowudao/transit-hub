@@ -89,14 +89,34 @@ type BotNotifier interface {
 // Service 负责分组映射的查询与保存，以及真实对接的编排。
 // 供仪表盘分组弹窗和分组倍率页面复用。
 type Service struct {
-	repository      StateRepository
-	connRepository  RealConnectionRepository
-	platformService *upstream.PlatformService
-	upstreamLookup  UpstreamSiteLookup
-	botNotifier     BotNotifier
-	accounts        AdminAccountResolver
-	runtimeCleaner  ConnectionRuntimeCleaner
+	repository        StateRepository
+	connRepository    RealConnectionRepository
+	platformService   *upstream.PlatformService
+	upstreamLookup    UpstreamSiteLookup
+	botNotifier       BotNotifier
+	accounts          AdminAccountResolver
+	runtimeCleaner    ConnectionRuntimeCleaner
+	safeAdminDeletion SafeAdminAccountDeletion
 }
+
+type SafeAdminAccountDeletion interface {
+	DeleteManagedSub2APIAccount(context.Context, string, string, upstream.Session, string, string) error
+}
+
+func (s *Service) SetSafeAdminAccountDeletion(deletion SafeAdminAccountDeletion) {
+	s.safeAdminDeletion = deletion
+}
+
+type ManagedResourcePendingError struct {
+	AdminResourceID string
+	UpstreamKeyID   string
+	Cause           error
+}
+
+func (e *ManagedResourcePendingError) Error() string {
+	return "admin.mySites.errors.resourcesPendingVerification"
+}
+func (e *ManagedResourcePendingError) Unwrap() error { return e.Cause }
 
 type AdminAccountResolver interface {
 	RequireCurrentID(ctx context.Context, userID string) (string, error)

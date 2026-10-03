@@ -65,6 +65,7 @@ func TestProtocolContractPausedWorkerCannotSendAfterTakeover(t *testing.T) {
 	target.TestConfiguration = defaultTestConfiguration()
 	target.TestMemberships = []TestConfigurationSource{{AdminGroupID: "g1"}}
 	inventory := sub2APITestInventory(adminInventoryGroup{group: upstream.AdminGroupInfo{ID: "g1"}, accounts: []upstream.AdminGroupAccountInfo{{ID: "acc-1", Status: "active"}, {ID: "acc-2", Status: "active"}}})
+	stageAFloorServiceWithRepository(service, inventory, repo.fakeRepository)
 	call := func() {
 		_, _ = service.reconcileTargetRemoteActionWithFloor(t.Context(), "user1", "ws1", inventory.session, target, []probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory))
 	}
@@ -78,6 +79,7 @@ func TestProtocolContractPausedWorkerCannotSendAfterTakeover(t *testing.T) {
 		t.Fatal("A never reached the prepared barrier")
 	}
 	repo.expireActionLeaseForTest(original.OwnerID, false)
+	repo.expireActionLeaseForTest(original.MutationOwnerID, false)
 	call()
 	if len(platform.sub2APICalls) != 1 {
 		t.Errorf("takeover must be the only sender before A resumes, calls=%d", len(platform.sub2APICalls))

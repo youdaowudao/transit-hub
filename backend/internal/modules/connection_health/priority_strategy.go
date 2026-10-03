@@ -462,11 +462,15 @@ func (s *Service) syncWorkspacePriorities(
 		// eligibility changes. Their receipts still consume this existing refresh.
 		for targetID, stored := range storedByTarget {
 			item := inventory[targetID]
-			if item == nil {
-				continue
+			observation := RemoteActionObservation{RemoteActionScope: RemoteActionScope{userID, adminAccountID, targetID}, InventoryComplete: inventoryComplete}
+			if item != nil {
+				observation.Visible = true
+				observation.SnapshotStartedAt = item.snapshotStartedAt
+				observation.Status = item.target.AccountStatus
+				observation.Weight = item.target.AccountWeight
+				observation.Schedulable = item.target.Schedulable
 			}
-			observation := RemoteActionObservation{RemoteActionScope: RemoteActionScope{userID, adminAccountID, targetID}, InventoryComplete: inventoryComplete, Visible: true, SnapshotStartedAt: item.snapshotStartedAt, Status: item.target.AccountStatus, Weight: item.target.AccountWeight}
-			if item.priorityPresent {
+			if item != nil && item.priorityPresent {
 				value := item.currentPriority
 				observation.Priority = &value
 			}

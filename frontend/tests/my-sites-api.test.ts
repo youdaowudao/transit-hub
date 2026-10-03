@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { checkRealConnections, saveMySiteMapping } from '../src/modules/admin/api/mySites'
+import { checkRealConnections, realDisconnect, saveMySiteMapping } from '../src/modules/admin/api/mySites'
 import type { MySiteMapping } from '../src/modules/admin/types/mySites'
 
 const mappingWithLastRun = (): MySiteMapping => ({
@@ -99,5 +99,22 @@ describe('my sites mapping API', () => {
     expect(requestBody).toEqual({ mappings: [writableMapping, writableOtherMapping] })
     expect(requestBody.mappings).toHaveLength(2)
     expect(requestBody.mappings.every((item: MySiteMapping) => !Object.hasOwn(item, 'lastAutoPricingRun'))).toBe(true)
+  })
+})
+
+
+describe('safe deletion API evidence', () => {
+  it('retains the safe failure key from the existing message envelope', async () => {
+    vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null) })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ message: 'admin.connectionHealth.errors.sub2apiGroupLastUsable' }), { status: 409 })))
+    await expect(realDisconnect({ connectionId: 'isolated', mode: 'full', removePricingMapping: true })).rejects.toThrow('admin.connectionHealth.errors.sub2apiGroupLastUsable')
+  })
+  it('retains resource IDs without retaining other response fields', async () => {
+    vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null) })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'admin.mySites.errors.resourcesPendingVerification', adminResourceId: '101', upstreamKeyId: '207', ignored: 'synthetic-private-data' }), { status: 409 })))
+    let captured: unknown
+    try { await realDisconnect({ connectionId: 'isolated', mode: 'full', removePricingMapping: false }) } catch (error) { captured = error }
+    expect(captured).toMatchObject({ message: 'admin.mySites.errors.resourcesPendingVerification', adminResourceId: '101', upstreamKeyId: '207' })
+    expect(captured).not.toHaveProperty('ignored')
   })
 })

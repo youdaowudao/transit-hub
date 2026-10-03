@@ -22,17 +22,53 @@ func actionGuardForTarget(target AdminProbeTarget, states []ConnectionHealthStat
 
 // A claim returning an uncertain commit is never dispatched. Each successful
 // permission is consumed once; all receipts keep the ID until a later inventory.
+const actionPreparationTimeout = 30 * time.Second
+const actionPermitMinimumBudget = 10 * time.Second
+
+// Registration and closing admission share one mutex, so Shutdown cannot miss
+// a sender that has already passed its permit gate.
+func (s *Service) registerActionDispatch() (func(), error) {
+	s.actionDispatchMu.Lock()
+	defer s.actionDispatchMu.Unlock()
+	if s.actionDispatchClosed {
+		return nil, errors.New("remote action service shutting down")
+	}
+	s.actionDispatchWG.Add(1)
+	return s.actionDispatchWG.Done, nil
+}
+func (s *Service) closeActionAdmission() {
+	s.actionDispatchMu.Lock()
+	s.actionDispatchClosed = true
+	s.actionDispatchMu.Unlock()
+}
+func (s *Service) drainActionDispatches(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() { s.actionDispatchWG.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *Service) dispatchRemoteAction(ctx context.Context, claim RemoteActionClaim, send func(context.Context) (string, error)) (actionResult string, actionErr error) {
 	repository, ok := s.repo.(actionCheckpointRepository)
 	if !ok {
 		return RemoteActionAwaitingConfirmation, ErrRemoteActionPending
 	}
-	handle := actionLeaseFromContext(ctx)
+	complete, err := s.registerActionDispatch()
+	if err != nil {
+		return RemoteActionAwaitingConfirmation, err
+	}
+	defer complete()
+	prepCtx, prepCancel := context.WithTimeout(ctx, actionPreparationTimeout)
+	defer prepCancel()
+	handle := actionLeaseFromContext(prepCtx)
 	if handle == nil {
 		var release func()
 		var acquired bool
-		var err error
-		ctx, release, acquired, err = s.acquireActionTargetLease(ctx, claim.TargetID, true)
+		prepCtx, release, acquired, err = s.acquireActionTargetLease(prepCtx, claim.TargetID, true)
 		if err != nil || !acquired {
 			if err == nil {
 				err = ErrRemoteActionLeaseLost
@@ -40,9 +76,9 @@ func (s *Service) dispatchRemoteAction(ctx context.Context, claim RemoteActionCl
 			return RemoteActionAwaitingConfirmation, err
 		}
 		defer release()
-		handle = actionLeaseFromContext(ctx)
+		handle = actionLeaseFromContext(prepCtx)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := prepCtx.Err(); err != nil {
 		return RemoteActionAwaitingConfirmation, err
 	}
 	id, err := newID()
@@ -50,14 +86,26 @@ func (s *Service) dispatchRemoteAction(ctx context.Context, claim RemoteActionCl
 		return "", err
 	}
 	claim.DispatchID, claim.OwnerID, claim.LeaseKey = id, handle.OwnerID, handle.Key
-	claimed, err := repository.ClaimRemoteAction(ctx, claim)
+	mutation := mutationLeaseFromContext(prepCtx)
+	if mutation != nil {
+		claim.MutationLeaseKey, claim.MutationOwnerID = mutation.Key, mutation.OwnerID
+	}
+	claimed, err := repository.ClaimRemoteAction(prepCtx, claim)
 	if err != nil || !claimed {
 		if err == nil {
 			err = ErrRemoteActionPending
 		}
 		return RemoteActionAwaitingConfirmation, err
 	}
-	permitted, err := repository.PermitRemoteAction(ctx, claim)
+	// Preparation budget is checked after claim and immediately before permit.
+	deadline, bounded := prepCtx.Deadline()
+	if !bounded || time.Until(deadline) < actionPermitMinimumBudget {
+		receiptCtx, cancel := context.WithTimeout(context.Background(), runtimeLeaseQueryTimeout)
+		err := repository.RecordRemoteActionReceipt(receiptCtx, claim, DispatchNotSent)
+		cancel()
+		return RemoteActionAwaitingConfirmation, errors.Join(context.DeadlineExceeded, err)
+	}
+	permitted, err := repository.PermitRemoteAction(prepCtx, claim)
 	if err != nil || !permitted {
 		if err == nil {
 			err = ErrRemoteActionPending
@@ -65,25 +113,34 @@ func (s *Service) dispatchRemoteAction(ctx context.Context, claim RemoteActionCl
 		return RemoteActionAwaitingConfirmation, err
 	}
 	phase := DispatchUncertain
-	// Receipts describe an attempted call even when its lease context has expired.
-	// A bounded independent context cannot authorize another remote write.
+	// After permit use separate HTTP and receipt budgets. Lease loss still cancels
+	// HTTP; a browser or preparation deadline cannot abandon the permitted send.
+	sendCtx, sendCancel := context.WithTimeout(context.WithoutCancel(prepCtx), 5*time.Second)
+	stopTarget := context.AfterFunc(handle.Context, sendCancel)
+	var stopMutation func() bool
+	if mutation != nil {
+		stopMutation = context.AfterFunc(mutation.Context, sendCancel)
+	}
 	defer func() {
+		sendCancel()
+		stopTarget()
+		if stopMutation != nil {
+			stopMutation()
+		}
 		receiptCtx, cancel := context.WithTimeout(context.Background(), runtimeLeaseQueryTimeout)
 		defer cancel()
 		if receiptErr := repository.RecordRemoteActionReceipt(receiptCtx, claim, phase); receiptErr != nil {
 			actionErr = errors.Join(actionErr, receiptErr)
 		}
 	}()
-	if err := ctx.Err(); err != nil {
+	if handle.Context.Err() != nil || (mutation != nil && mutation.Context.Err() != nil) {
 		phase = DispatchNotSent
-		return RemoteActionAwaitingConfirmation, err
+		return RemoteActionAwaitingConfirmation, ErrRemoteActionLeaseLost
 	}
-	action, err := send(ctx)
-	if err == nil {
-		phase = DispatchConfirmedApplied
-		if action == RemoteActionUnsupported {
-			phase = DispatchNotSent
-		}
+	action, err := send(sendCtx)
+	phase = RemoteDispatchPhase(upstream.RemoteMutationOutcome(err))
+	if action == RemoteActionUnsupported && err == nil {
+		phase = DispatchNotSent
 	}
 	return action, err
 }
@@ -108,7 +165,7 @@ func (s *Service) dispatchSafePriorityAction(ctx context.Context, session upstre
 }
 
 func targetObservation(userID, adminAccountID string, target AdminProbeTarget, inventory *adminWorkspaceInventory) RemoteActionObservation {
-	observation := RemoteActionObservation{RemoteActionScope: RemoteActionScope{userID, adminAccountID, target.TargetID}, Status: target.AccountStatus, Weight: target.AccountWeight}
+	observation := RemoteActionObservation{RemoteActionScope: RemoteActionScope{userID, adminAccountID, target.TargetID}, Status: target.AccountStatus, Weight: target.AccountWeight, Schedulable: target.Schedulable}
 	if inventory == nil {
 		return observation
 	}
@@ -119,6 +176,8 @@ func targetObservation(userID, adminAccountID string, target AdminProbeTarget, i
 			if account.ID == target.AccountID {
 				observation.Visible = true
 				observation.Priority = cloneIntPointer(account.Priority)
+				observation.Status = account.Status
+				observation.Schedulable = account.Schedulable
 			}
 		}
 	}

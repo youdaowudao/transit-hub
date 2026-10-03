@@ -669,3 +669,27 @@ func TestSchedulableUserActionMatchesObserved_RejectsStaleDirection(t *testing.T
 		t.Fatal("a value without authoritative upstream update time cannot prove user-action ownership")
 	}
 }
+
+// Context variants model the current Sub2API endpoint returning its updated account.
+func (f *fakeTargetSchedulableActioner) SetSub2APIAdminAccountSchedulableContext(ctx context.Context, session upstream.Session, accountID string, value bool) (upstream.AdminGroupAccountInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return upstream.AdminGroupAccountInfo{}, err
+	}
+	err := f.SetSub2APIAdminAccountSchedulable(session, accountID, value)
+	return upstream.AdminGroupAccountInfo{ID: accountID, Schedulable: boolPointer(value)}, err
+}
+func (a *blockingTargetSchedulableActioner) SetSub2APIAdminAccountSchedulableContext(ctx context.Context, session upstream.Session, accountID string, value bool) (upstream.AdminGroupAccountInfo, error) {
+	a.mu.Lock()
+	a.calls = append(a.calls, accountID)
+	a.mu.Unlock()
+	a.startOnce.Do(func() { close(a.started) })
+	select {
+	case <-a.release:
+	case <-ctx.Done():
+		return upstream.AdminGroupAccountInfo{}, ctx.Err()
+	}
+	if a.afterWrite != nil {
+		a.afterWrite(accountID, value)
+	}
+	return upstream.AdminGroupAccountInfo{ID: accountID, Schedulable: boolPointer(value)}, nil
+}

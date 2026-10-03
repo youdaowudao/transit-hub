@@ -2,8 +2,8 @@ package my_sites
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -175,21 +175,11 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	if err != nil {
 		return RealConnectResponse{}, err
 	}
-	rollbackKey := func() {
-		if rollbackErr := s.deleteUpstreamCredential(connectionCtx.upstreamSession, keyID); rollbackErr != nil {
-			log.Printf("[real-connect] compensate upstream credential failed platform=%s id=%s err=%v", connectionCtx.upstreamSession.Platform, keyID, rollbackErr)
-		}
-	}
-
 	adminResourceID, adminResourceName, err := s.createAdminResource(connectionCtx, req.ChannelType, ownGroupIDs, key)
 	if err != nil {
-		rollbackKey()
-		return RealConnectResponse{}, err
-	}
-	rollbackAdmin := func() {
-		if rollbackErr := s.deleteAdminResource(connectionCtx.state.Session, adminResourceID); rollbackErr != nil {
-			log.Printf("[real-connect] compensate admin resource failed platform=%s id=%s err=%v", connectionCtx.state.Session.Platform, adminResourceID, rollbackErr)
-		}
+		// A failed create may still have reached the remote service. Keep its key
+		// for explicit verification; blindly deleting it could break a live account.
+		return RealConnectResponse{}, &ManagedResourcePendingError{AdminResourceID: adminResourceID, UpstreamKeyID: keyID, Cause: err}
 	}
 
 	conn := RealConnection{
@@ -216,8 +206,13 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 		CreatedAt:               time.Now().Format(time.RFC3339),
 	}
 	if err := s.persistConnection(ctx, conn); err != nil {
-		rollbackAdmin()
-		rollbackKey()
+		deleteErr := s.safeDeleteAdminResource(ctx, userID, connectionCtx.adminAccountID, connectionCtx.state.Session, adminResourceID, "compensate_delete")
+		if deleteErr != nil {
+			return RealConnectResponse{}, &ManagedResourcePendingError{AdminResourceID: adminResourceID, UpstreamKeyID: keyID, Cause: errors.Join(err, deleteErr)}
+		}
+		if keyErr := s.deleteUpstreamCredential(connectionCtx.upstreamSession, keyID); keyErr != nil {
+			return RealConnectResponse{}, &ManagedResourcePendingError{AdminResourceID: adminResourceID, UpstreamKeyID: keyID, Cause: errors.Join(err, keyErr)}
+		}
 		return RealConnectResponse{}, err
 	}
 	return RealConnectResponse{Connection: publicRealConnection(conn)}, nil
@@ -271,6 +266,16 @@ func (s *Service) createAdminResource(connectionCtx connectionContext, requested
 	payload := buildAccountPayload(connectionCtx.groupType, connectionCtx.upstreamSite.BaseURL, key, numericGroupIDs, name)
 	id, err := s.platformService.CreateSub2APIAdminAccount(connectionCtx.state.Session, payload)
 	return id, name, err
+}
+
+func (s *Service) safeDeleteAdminResource(ctx context.Context, userID, workspace string, session upstream.Session, resourceID, source string) error {
+	if session.Platform == upstream.PlatformSub2API {
+		if s.safeAdminDeletion == nil {
+			return requestError("admin.mySites.errors.safeDeletionUnavailable")
+		}
+		return s.safeAdminDeletion.DeleteManagedSub2APIAccount(ctx, userID, workspace, session, resourceID, source)
+	}
+	return s.deleteAdminResource(session, resourceID)
 }
 
 func (s *Service) deleteAdminResource(session upstream.Session, resourceID string) error {
@@ -579,8 +584,8 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 		if conn.UpstreamPlatform != "" && conn.UpstreamPlatform != string(upstreamSession.Platform) {
 			return requestError(ErrorRequest)
 		}
-		if err := s.deleteAdminResource(adminSession, conn.AdminAccountID); err != nil {
-			return err
+		if err := s.safeDeleteAdminResource(ctx, userID, adminAccountID, adminSession, conn.AdminAccountID, "manual_delete"); err != nil {
+			return &ManagedResourcePendingError{AdminResourceID: conn.AdminAccountID, UpstreamKeyID: conn.UpstreamKeyID, Cause: err}
 		}
 		if err := s.deleteUpstreamCredential(upstreamSession, conn.UpstreamKeyID); err != nil {
 			return err

@@ -24,7 +24,11 @@ func (f *fakeRepository) AcquireActionLease(ctx context.Context, key string, wai
 				f.actionMu.Unlock()
 				return nil, false, err
 			}
-			leaseCtx, cancel := context.WithCancel(ctx)
+			leaseParent := ctx
+			if detached, _ := ctx.Value(detachedActionLeaseKey{}).(bool); detached {
+				leaseParent = context.WithoutCancel(ctx)
+			}
+			leaseCtx, cancel := context.WithCancel(leaseParent)
 			lost := make(chan struct{})
 			var once sync.Once
 			lose := func() { once.Do(func() { close(lost); cancel() }) }
@@ -102,6 +106,12 @@ func (f *fakeRepository) writeActionPair(scope RemoteActionScope, before, after 
 	if f.targetActionStates == nil {
 		f.targetActionStates = make(map[string]TargetActionState)
 	}
+	if after.Priority == nil && before.Priority != nil {
+		delete(f.priorityStates, key)
+	}
+	if after.Target == nil && before.Target != nil {
+		delete(f.targetActionStates, key)
+	}
 	if !reflect.DeepEqual(before.Priority, after.Priority) && after.Priority != nil {
 		after.Priority.UpdatedAt = now
 		f.priorityStates[key] = *after.Priority
@@ -127,7 +137,12 @@ func cloneActionPair(pair RemoteActionCheckpoints) RemoteActionCheckpoints {
 
 func (f *fakeRepository) leaseValidForClaim(claim RemoteActionClaim) bool {
 	handle := f.actionLeases[claim.LeaseKey]
-	return handle != nil && handle.OwnerID == claim.OwnerID && handle.Context.Err() == nil
+	valid := handle != nil && handle.OwnerID == claim.OwnerID && handle.Context.Err() == nil
+	if claim.MutationLeaseKey != "" {
+		m := f.actionLeases[claim.MutationLeaseKey]
+		valid = valid && m != nil && m.OwnerID == claim.MutationOwnerID && m.Context.Err() == nil
+	}
+	return valid
 }
 
 func (f *fakeRepository) ClaimRemoteAction(ctx context.Context, claim RemoteActionClaim) (bool, error) {

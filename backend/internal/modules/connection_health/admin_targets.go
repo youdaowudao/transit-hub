@@ -43,22 +43,29 @@ const (
 // AdminProbeTarget 是平台中性的独立探活目标：一个 admin 分组下的账号(sub2api)/渠道(new-api)。
 // 不再要求存在 real_connections。TargetID 稳定且可复算，是新状态/事件的核心键。
 type AdminProbeTarget struct {
-	TestConfiguration      EffectiveTestConfiguration `json:"testConfiguration"`
-	TestMemberships        []TestConfigurationSource  `json:"-"`
-	InventoryComplete      bool                       `json:"-"`
-	TargetID               string                     `json:"targetId"`
-	Platform               string                     `json:"platform"`
-	AdminGroupID           string                     `json:"adminGroupId"`
-	AdminGroupName         string                     `json:"adminGroupName"`
-	AccountID              string                     `json:"accountId"`
-	AccountName            string                     `json:"accountName"`
-	AccountStatus          string                     `json:"accountStatus"`
-	Schedulable            *bool                      `json:"schedulable,omitempty"`
-	AccountWeight          *int                       `json:"accountWeight,omitempty"`
-	ProviderFamily         string                     `json:"providerFamily"`
-	Models                 []string                   `json:"models"`
-	ProbeAvailable         bool                       `json:"probeAvailable"`
-	ProbeUnavailableReason string                     `json:"probeUnavailableReason,omitempty"`
+	TestConfiguration       EffectiveTestConfiguration `json:"testConfiguration"`
+	TestMemberships         []TestConfigurationSource  `json:"-"`
+	InventoryComplete       bool                       `json:"-"`
+	TargetID                string                     `json:"targetId"`
+	Platform                string                     `json:"platform"`
+	AdminGroupID            string                     `json:"adminGroupId"`
+	AdminGroupName          string                     `json:"adminGroupName"`
+	AccountID               string                     `json:"accountId"`
+	AccountName             string                     `json:"accountName"`
+	AccountStatus           string                     `json:"accountStatus"`
+	Schedulable             *bool                      `json:"schedulable,omitempty"`
+	TempUnschedulableUntil  *time.Time                 `json:"tempUnschedulableUntil"`
+	TempUnschedulableKnown  bool                       `json:"tempUnschedulableKnown"`
+	TempUnschedulableReason string                     `json:"tempUnschedulableReason,omitempty"`
+	RateLimitResetAt        *time.Time                 `json:"rateLimitResetAt"`
+	RateLimitKnown          bool                       `json:"rateLimitKnown"`
+	OverloadUntil           *time.Time                 `json:"overloadUntil"`
+	OverloadKnown           bool                       `json:"overloadKnown"`
+	AccountWeight           *int                       `json:"accountWeight,omitempty"`
+	ProviderFamily          string                     `json:"providerFamily"`
+	Models                  []string                   `json:"models"`
+	ProbeAvailable          bool                       `json:"probeAvailable"`
+	ProbeUnavailableReason  string                     `json:"probeUnavailableReason,omitempty"`
 }
 
 // probeModelSpec 是一个「目标 + 具体探活模型」的组合，携带该模型来自哪条策略的探活参数。
@@ -561,17 +568,24 @@ func (s *Service) readbackManualTarget(ctx context.Context, session upstream.Ses
 
 func adminProbeTargetFromAccount(session upstream.Session, adminAccountID string, groupID string, groupName string, account upstream.AdminGroupAccountInfo) AdminProbeTarget {
 	return AdminProbeTarget{
-		TargetID:       buildTargetID(string(session.Platform), adminAccountID, account.ID),
-		Platform:       string(session.Platform),
-		AdminGroupID:   groupID,
-		AdminGroupName: groupName,
-		AccountID:      account.ID,
-		AccountName:    account.Name,
-		AccountStatus:  account.Status,
-		Schedulable:    cloneBoolPointer(account.Schedulable),
-		AccountWeight:  cloneIntPointer(account.Weight),
-		ProviderFamily: account.Platform,
-		Models:         splitModelList(account.Models),
+		TargetID:                buildTargetID(string(session.Platform), adminAccountID, account.ID),
+		Platform:                string(session.Platform),
+		AdminGroupID:            groupID,
+		AdminGroupName:          groupName,
+		AccountID:               account.ID,
+		AccountName:             account.Name,
+		AccountStatus:           account.Status,
+		Schedulable:             cloneBoolPointer(account.Schedulable),
+		TempUnschedulableUntil:  account.TempUnschedulableUntil,
+		TempUnschedulableKnown:  account.TempUnschedulableKnown,
+		TempUnschedulableReason: account.TempUnschedulableReason,
+		RateLimitResetAt:        account.RateLimitResetAt,
+		RateLimitKnown:          account.RateLimitKnown,
+		OverloadUntil:           account.OverloadUntil,
+		OverloadKnown:           account.OverloadKnown,
+		AccountWeight:           cloneIntPointer(account.Weight),
+		ProviderFamily:          account.Platform,
+		Models:                  splitModelList(account.Models),
 	}
 }
 
@@ -616,6 +630,19 @@ func (s *Service) refreshAdminTarget(ctx context.Context, session upstream.Sessi
 				}
 				refresh.account = acc
 				refresh.found = true
+			}
+		}
+	}
+	guardAdminInventoryTimes(&refresh.inventory)
+	if refresh.found {
+	guardedTarget:
+		for _, group := range refresh.inventory.groups {
+			for _, account := range group.accounts {
+				if account.ID == accountID {
+					refresh.account = account
+					refresh.target = adminProbeTargetFromAccount(session, adminAccountID, group.group.ID, group.group.Name, account)
+					break guardedTarget
+				}
 			}
 		}
 	}

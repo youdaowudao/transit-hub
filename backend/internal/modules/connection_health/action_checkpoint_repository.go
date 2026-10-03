@@ -11,7 +11,7 @@ import (
 )
 
 const priorityCheckpointColumns = `user_id,admin_account_id,target_id,original_priority,last_applied_priority,pending_priority,effective_multiplier,conflict,last_conflict_priority,pending_dispatch_id,pending_owner_id,pending_dispatch_phase,updated_at`
-const targetCheckpointColumns = `user_id,admin_account_id,target_id,original_status,original_weight,last_applied_status,last_applied_weight,pending_status,pending_weight,conflict,pending_dispatch_id,pending_owner_id,pending_dispatch_phase,updated_at`
+const targetCheckpointColumns = `user_id,admin_account_id,target_id,original_status,original_weight,last_applied_status,last_applied_weight,pending_status,pending_weight,conflict,pending_dispatch_id,pending_owner_id,pending_dispatch_phase,pending_action_kind,pending_schedulable,pending_source,pending_group_ids,pending_had_automatic_baseline,updated_at`
 
 func scanPriorityCheckpoint(row pgx.Row) (*PrioritySyncState, error) {
 	var state PrioritySyncState
@@ -24,7 +24,7 @@ func scanPriorityCheckpoint(row pgx.Row) (*PrioritySyncState, error) {
 
 func scanTargetCheckpoint(row pgx.Row) (*TargetActionState, error) {
 	var state TargetActionState
-	err := row.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalStatus, &state.OriginalWeight, &state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.PendingDispatchID, &state.PendingOwnerID, &state.PendingDispatchPhase, &state.UpdatedAt)
+	err := row.Scan(&state.UserID, &state.AdminAccountID, &state.TargetID, &state.OriginalStatus, &state.OriginalWeight, &state.LastAppliedStatus, &state.LastAppliedWeight, &state.PendingStatus, &state.PendingWeight, &state.Conflict, &state.PendingDispatchID, &state.PendingOwnerID, &state.PendingDispatchPhase, &state.PendingActionKind, &state.PendingSchedulable, &state.PendingSource, &state.PendingGroupIDs, &state.PendingHadAutomaticBaseline, &state.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -54,13 +54,16 @@ func writePriorityCheckpointTx(ctx context.Context, tx pgx.Tx, state PrioritySyn
 }
 
 func writeTargetCheckpointTx(ctx context.Context, tx pgx.Tx, state TargetActionState) error {
+	if state.PendingGroupIDs == nil {
+		state.PendingGroupIDs = []string{}
+	}
 	_, err := tx.Exec(ctx, `INSERT INTO connection_health_target_action_states (`+targetCheckpointColumns+`)
-	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 	ON CONFLICT(user_id,admin_account_id,target_id) DO UPDATE SET original_status=EXCLUDED.original_status,original_weight=EXCLUDED.original_weight,
 	last_applied_status=EXCLUDED.last_applied_status,last_applied_weight=EXCLUDED.last_applied_weight,
 	pending_status=EXCLUDED.pending_status,pending_weight=EXCLUDED.pending_weight,conflict=EXCLUDED.conflict,
-	pending_dispatch_id=EXCLUDED.pending_dispatch_id,pending_owner_id=EXCLUDED.pending_owner_id,pending_dispatch_phase=EXCLUDED.pending_dispatch_phase,updated_at=EXCLUDED.updated_at`,
-		state.UserID, state.AdminAccountID, state.TargetID, state.OriginalStatus, state.OriginalWeight, state.LastAppliedStatus, state.LastAppliedWeight, state.PendingStatus, state.PendingWeight, state.Conflict, state.PendingDispatchID, state.PendingOwnerID, state.PendingDispatchPhase, state.UpdatedAt)
+	pending_dispatch_id=EXCLUDED.pending_dispatch_id,pending_owner_id=EXCLUDED.pending_owner_id,pending_dispatch_phase=EXCLUDED.pending_dispatch_phase,pending_action_kind=EXCLUDED.pending_action_kind,pending_schedulable=EXCLUDED.pending_schedulable,pending_source=EXCLUDED.pending_source,pending_group_ids=EXCLUDED.pending_group_ids,pending_had_automatic_baseline=EXCLUDED.pending_had_automatic_baseline,updated_at=EXCLUDED.updated_at`,
+		state.UserID, state.AdminAccountID, state.TargetID, state.OriginalStatus, state.OriginalWeight, state.LastAppliedStatus, state.LastAppliedWeight, state.PendingStatus, state.PendingWeight, state.Conflict, state.PendingDispatchID, state.PendingOwnerID, state.PendingDispatchPhase, state.PendingActionKind, state.PendingSchedulable, state.PendingSource, state.PendingGroupIDs, state.PendingHadAutomaticBaseline, state.UpdatedAt)
 	return err
 }
 
@@ -74,6 +77,7 @@ func (r *Repository) actionCheckpointTransaction(ctx context.Context, scope Remo
 	defer tx.Rollback(ctx)
 	var leaseOwner string
 	var leaseExpires time.Time
+	var mutationExpires time.Time
 	if lease != nil && lease.LeaseKey != "" {
 		err = tx.QueryRow(ctx, `SELECT owner_id,expires_at FROM connection_health_runtime_leases WHERE lease_key=$1 FOR UPDATE`, lease.LeaseKey).Scan(&leaseOwner, &leaseExpires)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -84,6 +88,12 @@ func (r *Repository) actionCheckpointTransaction(ctx context.Context, scope Remo
 		}
 	} else if requireLease {
 		return RemoteActionCheckpoints{}, ErrRemoteActionLeaseLost
+	}
+	if requireLease && lease != nil && lease.MutationLeaseKey != "" {
+		var mutationOwner string
+		if err := tx.QueryRow(ctx, `SELECT owner_id,expires_at FROM connection_health_runtime_leases WHERE lease_key=$1 FOR UPDATE`, lease.MutationLeaseKey).Scan(&mutationOwner, &mutationExpires); err != nil || mutationOwner != lease.MutationOwnerID {
+			return RemoteActionCheckpoints{}, ErrRemoteActionLeaseLost
+		}
 	}
 	pair, err := lockActionCheckpoints(ctx, tx, scope)
 	if err != nil {
@@ -104,7 +114,7 @@ func (r *Repository) actionCheckpointTransaction(ctx context.Context, scope Remo
 	}
 	// Evaluate the database clock after all row locks have actually been
 	// acquired; a timestamp computed before a lock wait is not a permit.
-	if requireLease && !leaseExpires.After(now) {
+	if requireLease && (!leaseExpires.After(now) || (lease.MutationLeaseKey != "" && !mutationExpires.After(now))) {
 		return pair, ErrRemoteActionLeaseLost
 	}
 	if err = mutate(tx, &pair, now); err != nil {

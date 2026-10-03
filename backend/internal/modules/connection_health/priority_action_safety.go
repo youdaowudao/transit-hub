@@ -18,6 +18,7 @@ func (s *Service) syncSafePriorityTarget(ctx context.Context, session upstream.S
 		}
 		observation.Status = item.target.AccountStatus
 		observation.Weight = item.target.AccountWeight
+		observation.Schedulable = item.target.Schedulable
 	}
 	pair, err := s.reconcileActionObservation(ctx, observation)
 	if err != nil {

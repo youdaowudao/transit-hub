@@ -197,6 +197,34 @@ const schedulableLabel = (account: AdminGroupAccount): string => {
   return account.schedulable ? t(`${detailPrefix}.schedulableOn`) : t(`${detailPrefix}.schedulableOff`)
 }
 
+// Activity is projected with the TransitHub process clock at the existing
+// refresh. The browser adds no clock source, timer, or inventory request.
+const mainSiteRestrictions = (account: AdminGroupAccount): string[] => {
+  if (!isSub2API(account)) return []
+  return [
+    { kind: 'temporaryPause', known: account.tempUnschedulableKnown, active: account.tempUnschedulableActive, until: account.tempUnschedulableUntil, reason: account.tempUnschedulableReason },
+    { kind: 'rateLimit', known: account.rateLimitKnown, active: account.rateLimitActive, until: account.rateLimitResetAt },
+    { kind: 'overload', known: account.overloadKnown, active: account.overloadActive, until: account.overloadUntil },
+  ].flatMap(restriction => {
+    if (restriction.known !== true) return [t(`${detailPrefix}.mainSiteRestrictions.${restriction.kind}Unknown`)]
+    if (!restriction.active || !restriction.until) return []
+    const message = t(`${detailPrefix}.mainSiteRestrictions.${restriction.kind}Until`, { time: formatConnectionHealthTime(restriction.until) })
+    return [restriction.reason ? `${message} · ${restriction.reason}` : message]
+  })
+}
+
+const remotePendingLabel = (account: AdminGroupAccount): string => {
+  const pending = account.remoteActionPending
+  if (!pending) return ''
+  const safeLabel = (section: string, value: string) => {
+    const key = `${detailPrefix}.remoteActionPending.${section}.${value}`
+    return te(key) ? t(key) : t(`${detailPrefix}.remoteActionPending.${section}.unknown`)
+  }
+  const parts = [t('admin.connectionHealth.testConfiguration.remoteActionPending'), safeLabel('actions', pending.action), pending.dispatchId || '—', safeLabel('phases', pending.phase), safeLabel('reasons', pending.reason)]
+  if (pending.source) parts.push(safeLabel('sources', pending.source))
+  return parts.join(' · ')
+}
+
 const upstreamStatusLabel = (account: AdminGroupAccount): string => {
   const status = account.status?.toLowerCase()
   if (status === 'active' || status === '1') return t(`${detailPrefix}.upstreamAccountActive`)
@@ -825,11 +853,12 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                       <AlertTriangle class="h-3 w-3 shrink-0" />
                       {{ t(`${detailPrefix}.mainSiteError`, { reason: mainSiteErrorReason(account) }) }}
                     </p>
+                    <p v-for="restriction in mainSiteRestrictions(account)" :key="restriction" data-main-site-restriction class="mt-1 whitespace-normal break-words text-xs text-amber-700 dark:text-amber-400">{{ restriction }}</p>
                     <p class="mt-0.5 truncate text-[11px] text-muted-foreground">
                       {{ t(`${detailPrefix}.statusSources`, { upstream: statusSourceLabel(account.upstreamStatusSource), health: statusSourceLabel(account.healthStatusSource), schedulable: statusSourceLabel(account.schedulableSource) }) }}
                     </p>
                     <p v-if="account.remoteActionPending" class="mt-1 whitespace-pre-wrap break-words text-xs text-amber-700 dark:text-amber-400">
-                      {{ t('admin.connectionHealth.testConfiguration.remoteActionPending') }} · {{ account.remoteActionPending.action }} · {{ account.remoteActionPending.dispatchId || '—' }}
+                      {{ remotePendingLabel(account) }}
                     </p>
                     <p v-if="account.testConfiguration" class="mt-1 whitespace-normal break-words text-xs text-muted-foreground">
                       {{ t('admin.connectionHealth.testConfiguration.' + account.testConfiguration.status) }}

@@ -544,16 +544,11 @@ func (f *fakeRepository) TryAcquireTargetLease(ctx context.Context, targetID str
 }
 
 func (f *fakeRepository) AcquireSub2APIMutationLease(ctx context.Context, userID string, adminAccountID string) (func(), error) {
-	key := userID + "|" + adminAccountID
-	f.sub2APIMutationLeaseMu.Lock()
-	lease := f.sub2APIMutationLeases[key]
-	if lease == nil {
-		lease = &sync.Mutex{}
-		f.sub2APIMutationLeases[key] = lease
+	handle, _, err := f.AcquireActionLease(ctx, mutationRuntimeLeaseKey(userID, adminAccountID), true)
+	if err != nil {
+		return nil, err
 	}
-	f.sub2APIMutationLeaseMu.Unlock()
-	lease.Lock()
-	return lease.Unlock, nil
+	return handle.Release, nil
 }
 
 func (f *fakeRepository) AcquirePrioritySyncLease(ctx context.Context, userID string, adminAccountID string) (func(), error) {
@@ -692,10 +687,10 @@ func (f *fakeRepository) ReplaceGroupPolicyConfiguration(ctx context.Context, us
 	}
 	for _, targetID := range groupTargetIDs {
 		key := userID + "|" + adminAccountID + "|" + targetID
-		if state, ok := f.priorityStates[key]; ok && state.Conflict {
+		if state, ok := f.priorityStates[key]; ok && state.Conflict && !priorityActionPending(&state) {
 			delete(f.priorityStates, key)
 		}
-		if state, ok := f.targetActionStates[key]; ok && state.Conflict {
+		if state, ok := f.targetActionStates[key]; ok && state.Conflict && !targetActionPending(&state) {
 			delete(f.targetActionStates, key)
 		}
 	}
@@ -1079,7 +1074,11 @@ func (f fakeMySitesReader) MappingOptions(ctx context.Context, userID string) (m
 }
 
 func (f fakeMySitesReader) RequireSession(ctx context.Context, userID string, adminAccountID string) (upstream.Session, error) {
-	return f.session, nil
+	session := f.session
+	if session.Platform == upstream.PlatformSub2API && session.BaseURL == "" {
+		session.BaseURL = "http://127.0.0.1:8080"
+	}
+	return session, nil
 }
 
 type fakeAdminAccountResolver struct{ id string }

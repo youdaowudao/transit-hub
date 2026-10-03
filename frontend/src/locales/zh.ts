@@ -1217,6 +1217,20 @@ export default {
         schedulableOn: '主站调度开启',
         schedulableOff: '主站调度关闭',
         schedulableUnknown: '主站调度未知',
+        mainSiteRestrictions: {
+          temporaryPauseUntil: '主站临停至 {time}',
+          temporaryPauseUnknown: '主站临停状态未知',
+          rateLimitUntil: '主站限流至 {time}',
+          rateLimitUnknown: '主站限流状态未知',
+          overloadUntil: '主站过载至 {time}',
+          overloadUnknown: '主站过载状态未知',
+        },
+        remoteActionPending: {
+          actions: { priority: 'Priority 写入', target: '账号状态写入', status: '账号状态写入', schedulable: '调度开关写入', delete: '账号删除', priority_and_target: '多个动作未决', unknown: '远端写入' },
+          phases: { prepared: '准备发送', sending: '发送中', receipt: '回执待核对', uncertain: '结果未知', unknown: '阶段待确认' },
+          reasons: { pending: '须核对后收口', legacy: '旧操作缺少完整发送证据', dual_claim: '存在多个未决操作', target_not_visible: '账号不可见，须人工核对', unknown: '须人工核对' },
+          sources: { manual: '人工操作', manual_delete: '人工删除', compensate_delete: '失败补偿删除', automatic: '自动操作', unknown: '来源待确认' },
+        },
         upstreamAccountActive: '主站账号启用',
         upstreamAccountInactive: '主站账号停用',
         strategyDisabled: '策略停用',
@@ -2029,6 +2043,7 @@ export default {
         schedulableReadbackFailed: '主站已返回但调度状态回读失败或不一致，未显示为成功。',
         schedulableAuditFailed: '主站状态已修改，但动作记录保存失败，请刷新后核对。',
         schedulableUnsupported: '当前目标不是可操作的 Sub2API 账号。',
+        remoteActionPending: '同一账号存在待确认的远端动作，须核对后收口，当前操作未发送。',
         sub2apiGroupLastUsable: '该账号是所属分组最后一个可用账号，不能关闭。',
         sub2apiInventoryIncomplete: '主站分组账号资料不完整，无法安全关闭，请刷新后重试。',
         credentialUnavailable: '无法安全获取上游凭据，暂不可探活。',
@@ -2545,7 +2560,11 @@ export default {
       errors: {
         invalidAutoPricingConfig: '自动调价配置无效：主上游不在关联上游中，或最低倍率大于最高倍率。',
         connectionExists: '该上游分组已经存在真实连接。',
-        managedDeleteOnly: '已有资源关联只能取消本地关联，不能删除远端资源。'
+        managedDeleteOnly: '已有资源关联只能取消本地关联，不能删除远端资源。',
+        safeDeletionUnavailable: '安全删除服务暂不可用，账号、Key 和本地记录已保留。',
+        resourcesPendingVerification: '账号删除尚未确认，账号、Key 和本地记录已保留，请核对后再处理。',
+        retainedResources: '待核对资源：主站账号 {adminResourceId}，上游 Key 编号 {upstreamKeyId}。',
+        blockingGroup: '受保护分组：{groupName}（{groupId}）。'
       }
     },
     tickets: {

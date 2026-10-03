@@ -79,6 +79,9 @@ func (s *Service) resolveProbeCredential(ctx context.Context, session upstream.S
 
 func (s *Service) loadAdminInventory(ctx context.Context, userID string, adminAccountID string, cache adminInventoryCache) (*adminWorkspaceInventory, error) {
 	key := userID + "|" + adminAccountID
+	if s.mySites == nil || s.platformGroups == nil {
+		return nil, requestError(ErrorSub2APIInventoryIncomplete)
+	}
 	if cached, ok := cache[key]; ok {
 		return cached.inventory, cached.err
 	}
@@ -104,6 +107,7 @@ func (s *Service) loadAdminInventory(ctx context.Context, userID string, adminAc
 		}
 		inventory.groups = append(inventory.groups, adminInventoryGroup{group: group, accounts: accounts, err: accountsErr})
 	}
+	guardAdminInventoryTimes(inventory)
 	s.rememberActionInventory(userID, adminAccountID, inventory)
 	cache[key] = adminInventoryCacheEntry{inventory: inventory}
 	return inventory, nil

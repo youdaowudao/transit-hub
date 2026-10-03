@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -42,6 +43,8 @@ type workspaceFloorGuard struct {
 	inventory            *adminWorkspaceInventory
 	inventoryFingerprint string
 	snapshotAt           time.Time
+	frozenGroups         map[string]struct{}
+	freezeWorkspace      bool
 }
 
 func newWorkspaceFloorGuard() *workspaceFloorGuard {
@@ -126,6 +129,9 @@ func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, in
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.rememberInventoryLocked(inventory)
+	if g.freezeWorkspace {
+		return targetRemoteActionResult{remoteAction: RemoteActionAwaitingConfirmation}
+	}
 	// A reservation represents a destructive account mutation already admitted against
 	// the cached upstream inventory. A policy/scope change alone cannot prove that the
 	// upstream account has become usable again, so reservations remain until a new
@@ -178,7 +184,7 @@ func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, in
 			if targetStatusEnabled(target.Platform, status) && account.Schedulable == nil {
 				unknownByGroup[groupInventory.group.ID] = true
 			}
-			if targetStatusEnabled(target.Platform, status) && account.Schedulable != nil && *account.Schedulable {
+			if targetStatusEnabled(target.Platform, status) && account.Schedulable != nil && *account.Schedulable && (targetID == target.TargetID || upstream.Sub2APIDeadlineExpired(account.TempUnschedulableUntil, account.TempUnschedulableKnown, time.Now())) {
 				usableTargets[targetID] = struct{}{}
 			}
 		}
@@ -217,6 +223,9 @@ func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, in
 	}
 	sort.Strings(groupIDs)
 	for _, groupID := range groupIDs {
+		if _, frozen := g.frozenGroups[groupID]; frozen || g.freezeWorkspace {
+			return targetRemoteActionResult{remoteAction: RemoteActionAwaitingConfirmation, adminGroupID: groupID, adminGroupName: memberships[groupID]}
+		}
 		remaining := 0
 		candidateUsable := false
 		for targetID := range usableByGroup[groupID] {
@@ -418,6 +427,28 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 	monitoringScope adminMonitoringScope,
 	allowSub2APIInactive bool,
 ) (targetRemoteActionResult, error) {
+	if target.Platform == string(upstream.PlatformSub2API) && actionLeaseFromContext(ctx) == nil {
+		leased, release, acquired, err := s.acquireActionTargetLease(ctx, target.TargetID, true)
+		if err != nil || !acquired {
+			return targetRemoteActionResult{}, err
+		}
+		defer release()
+		ctx = leased
+	}
+	stored, err := s.repo.GetTargetActionState(ctx, userID, adminAccountID, target.TargetID)
+	if err != nil {
+		return targetRemoteActionResult{}, err
+	}
+	if target.Platform == string(upstream.PlatformSub2API) {
+		pair, reconcileErr := s.reconcileActionObservation(ctx, targetObservation(userID, adminAccountID, target, inventory))
+		if reconcileErr != nil {
+			return targetRemoteActionResult{remoteAction: RemoteActionAwaitingConfirmation}, reconcileErr
+		}
+		stored = pair.Target
+		if pair.pendingCount() != 0 {
+			return targetRemoteActionResult{remoteAction: RemoteActionAwaitingConfirmation}, nil
+		}
+	}
 	controlledModels := make(map[string]struct{})
 	for _, spec := range specs {
 		if spec.policy.Enabled && policyRemoteActionEnabled(spec.policy) {
@@ -440,20 +471,6 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 	}
 	statesComplete := len(states) == len(controlledModels)
 
-	stored, err := s.repo.GetTargetActionState(ctx, userID, adminAccountID, target.TargetID)
-	if err != nil {
-		return targetRemoteActionResult{}, err
-	}
-	if target.Platform == string(upstream.PlatformSub2API) {
-		pair, reconcileErr := s.reconcileActionObservation(ctx, targetObservation(userID, adminAccountID, target, inventory))
-		if reconcileErr != nil {
-			return targetRemoteActionResult{remoteAction: RemoteActionAwaitingConfirmation}, reconcileErr
-		}
-		stored = pair.Target
-		if pair.pendingCount() != 0 {
-			return targetRemoteActionResult{remoteAction: RemoteActionAwaitingConfirmation}, nil
-		}
-	}
 	if len(states) == 0 {
 		return targetRemoteActionResult{}, nil
 	}
@@ -542,13 +559,32 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 			}
 			return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APIInventory}, nil
 		}
-		mutationRelease, err := s.repo.AcquireSub2APIMutationLease(ctx, userID, adminAccountID)
+		var mutationRelease func()
+		ctx, mutationRelease, err = s.acquireActionMutationLease(ctx, userID, adminAccountID)
 		if err != nil {
 			return targetRemoteActionResult{}, err
 		}
 		defer mutationRelease()
-		floorGuard.rememberInventory(*inventory)
-		floorResult := floorGuard.reserveSub2APIInactive(target, *inventory, monitoringScope)
+		fresh, refreshErr := s.loadAdminInventory(ctx, userID, adminAccountID, adminInventoryCache{})
+		if refreshErr != nil || fresh == nil || !adminInventoryComplete(*fresh) {
+			return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APIInventory}, refreshErr
+		}
+		freshTarget, visible := findActionInventoryTarget(target.TargetID, *fresh)
+		if !visible {
+			return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APIInventory}, nil
+		}
+		if normalizeTargetStatus(target.Platform, freshTarget.AccountStatus) != currentStatus || !reflect.DeepEqual(freshTarget.Schedulable, target.Schedulable) {
+			return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APIInventory}, nil
+		}
+		monitoringScope, err = s.loadAdminMonitoringScope(ctx, userID, adminAccountID, *fresh)
+		if err != nil {
+			return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APIInventory}, err
+		}
+		if err := s.overlayPersistentPending(ctx, userID, adminAccountID, floorGuard, *fresh); err != nil {
+			return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APIInventory}, err
+		}
+		inventory = fresh
+		floorResult := floorGuard.reserveSub2APIInactive(target, *fresh, monitoringScope)
 		if floorResult.remoteAction != "" {
 			stored.PendingStatus = ""
 			stored.PendingWeight = nil
@@ -561,6 +597,8 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 
 	if target.Platform == string(upstream.PlatformSub2API) {
 		stored.PendingStatus = desiredStatus
+		stored.PendingActionKind = TargetMutationStatus
+		stored.PendingGroupIDs = inventoryTargetGroups(inventory, target.AccountID)
 		stored.PendingWeight = cloneIntPointer(desiredWeight)
 		models := make([]string, 0, len(controlledModels))
 		for model := range controlledModels {
@@ -610,6 +648,13 @@ func (s *Service) restoreUnmanagedTargetActions(
 	groupPolicies := assignedEnabledPoliciesByGroup(policies, groupAssignments)
 	excluded := groupTargetExclusionIndex(exclusions)
 	for _, stored := range states {
+		if isSub2APIActionTarget(stored.TargetID) {
+			pair, err := s.reconcileActionObservation(ctx, RemoteActionObservation{RemoteActionScope: RemoteActionScope{stored.UserID, stored.AdminAccountID, stored.TargetID}})
+			if err != nil || pair.Target == nil {
+				continue
+			}
+			stored = *pair.Target
+		}
 		inventory, err := s.loadAdminInventory(ctx, stored.UserID, stored.AdminAccountID, inventoryCache)
 		if err != nil {
 			log.Printf("[connection-health] restore unmanaged target inventory failed target_id=%s err=%v", stored.TargetID, err)
@@ -617,6 +662,15 @@ func (s *Service) restoreUnmanagedTargetActions(
 		}
 		s.rememberActionInventory(stored.UserID, stored.AdminAccountID, inventory)
 		inventoryComplete := adminInventoryComplete(*inventory)
+		if inventory.session.Platform == upstream.PlatformSub2API {
+			observedTarget, _ := findActionInventoryTarget(stored.TargetID, *inventory)
+			observedTarget.TargetID = stored.TargetID
+			pair, e := s.reconcileActionObservation(ctx, targetObservation(stored.UserID, stored.AdminAccountID, observedTarget, inventory))
+			if e != nil || pair.pendingCount() != 0 || pair.Target == nil {
+				continue
+			}
+			stored = *pair.Target
+		}
 		if !inventoryComplete {
 			// 任一分组成员读取失败时无法证明目标已经失去全部管理关系，保持当前状态更安全。
 			continue
@@ -742,6 +796,13 @@ func (s *Service) restoreEmptySub2APIGroups(ctx context.Context, states []Target
 	workspaces := make(map[string]*workspace)
 	workspaceOrder := make([]string, 0)
 	for _, state := range states {
+		if isSub2APIActionTarget(state.TargetID) {
+			pair, err := s.reconcileActionObservation(ctx, RemoteActionObservation{RemoteActionScope: RemoteActionScope{state.UserID, state.AdminAccountID, state.TargetID}})
+			if err != nil || pair.Target == nil {
+				continue
+			}
+			state = *pair.Target
+		}
 		key := state.UserID + "|" + state.AdminAccountID
 		if workspaces[key] == nil {
 			workspaces[key] = &workspace{userID: state.UserID, adminAccountID: state.AdminAccountID}
@@ -762,12 +823,25 @@ func (s *Service) restoreEmptySub2APIGroups(ctx context.Context, states []Target
 		}
 		s.rememberActionInventory(ws.userID, ws.adminAccountID, inventory)
 		inventoryComplete := adminInventoryComplete(*inventory)
+		for i := range ws.states {
+			state := ws.states[i]
+			target, _ := findActionInventoryTarget(state.TargetID, *inventory)
+			pair, err := s.reconcileActionObservation(ctx, targetObservation(ws.userID, ws.adminAccountID, target, inventory))
+			if err == nil && pair.Target != nil {
+				ws.states[i] = *pair.Target
+			} else if err == nil {
+				ws.states[i] = TargetActionState{}
+			}
+		}
 		if !inventoryComplete {
 			continue
 		}
 
 		stateByTarget := make(map[string]TargetActionState, len(ws.states))
 		for _, state := range ws.states {
+			if state.TargetID == "" {
+				continue
+			}
 			stateByTarget[state.TargetID] = state
 		}
 		activeByGroup := make(map[string]map[string]struct{}, len(inventory.groups))

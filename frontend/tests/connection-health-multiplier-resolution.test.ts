@@ -9,7 +9,7 @@ import {
   resolvePrioritySyncBlockReasonMessage,
 } from '../src/modules/admin/utils/connectionHealthMultiplier'
 
-const localeSource = readFileSync(new URL('../src/locales/zh-CN.ts', import.meta.url), 'utf8')
+const localeSource = readFileSync(new URL('../src/locales/zh.ts', import.meta.url), 'utf8')
 const detailSource = readFileSync(
   new URL('../src/modules/admin/components/dashboard/AdminGroupHealthDetail.vue', import.meta.url),
   'utf8',

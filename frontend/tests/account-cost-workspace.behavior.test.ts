@@ -122,15 +122,46 @@ afterEach(() => {
   for (const wrapper of mountedWrappers.splice(0)) wrapper.unmount()
   document.body.innerHTML = ''
   localStorage.clear()
+  vi.unstubAllEnvs()
 })
 
 describe('AccountCostWorkspace regression behavior', () => {
+  it.each(['Asia/Tokyo', 'America/New_York'])('renders ledger and fee-history timestamps in Singapore from %s without changing amounts', async timezone => {
+    vi.stubEnv('TZ', timezone)
+    harness.listAccountCostLedger.mockResolvedValue({ items: [{
+      id: 'sg-ledger', type: 'fixed', name: 'Singapore time fixture', businessDate: '2026-08-22',
+      amount: 700.25, amountCents: 70025, sourceId: 'sg-source', estimated: false,
+      createdAt: '2026-08-22T00:00:00Z',
+    }], hasMore: false })
+    harness.listRechargeFeeRateHistory.mockResolvedValue({ items: [{
+      id: 'sg-rate', effectiveDate: '2026-08-22', rate: 0.016, createdAt: '2026-08-22T00:00:00Z',
+    }] })
+    const ledger = await mountWorkspace('ledger')
+    expect(ledger.text()).toContain('08:00')
+    expect(ledger.text()).not.toContain('00:00')
+    expect(ledger.text()).toContain('700.25')
+    const rules = await mountWorkspace('rules')
+    expect(rules.text()).toContain('08:00')
+    expect(rules.text()).not.toContain('00:00')
+    expect(rules.text()).toContain('1.60%')
+  })
+
+  it('offers neutral purchase amount inputs while keeping the entered number', async () => {
+    const wrapper = await mountWorkspace('assets')
+    await findButton(wrapper, '录入买号').trigger('click')
+    expect(wrapper.find('input[placeholder="单价（元，二选一）"]').exists()).toBe(false)
+    expect(wrapper.find('input[placeholder="总金额（元，二选一）"]').exists()).toBe(false)
+    await wrapper.get('input[placeholder="单价（二选一）"]').setValue('700.25')
+    expect(wrapper.get('input[placeholder="单价（二选一）"]').element).toHaveProperty('value', '700.25')
+    expect(wrapper.get('input[placeholder="总金额（二选一）"]').exists()).toBe(true)
+  })
+
   it('submits a valid manual cost when the user clicks 保存记录', async () => {
     const { wrapper, form } = await mountWorkspaceWithRealTeleport()
 
     await form.find('select').setValue('fixed')
     await form.find('input[placeholder="名称"]').setValue('本地服务器')
-    await form.find('input[placeholder="金额（元）"]').setValue('12.34')
+    await form.find('input[placeholder="金额"]').setValue('12.34')
     await form.find('input[type="date"]').setValue('2026-08-22')
     await form.find('input[placeholder="分摊天数"]').setValue('1')
     await form.find('input[placeholder="说明（可选）"]').setValue('月度固定费用')
@@ -179,7 +210,7 @@ describe('AccountCostWorkspace regression behavior', () => {
     }))
     expect(wrapper.text()).toContain('固定')
     expect(wrapper.text()).toContain('R06 固定服务器')
-    expect(wrapper.text()).toContain('¥12.34')
+    expect(wrapper.text()).toContain('12.34')
     expect(wrapper.text()).toContain('source-r06-1')
   })
 
@@ -214,7 +245,7 @@ describe('AccountCostWorkspace regression behavior', () => {
 
     expect(harness.getAdditionalCost).toHaveBeenCalledWith('source-edit-1')
     expect(wrapper.find('input[type="date"]').element).toHaveProperty('value', '2026-08-20')
-    expect(wrapper.find('input[placeholder="金额（元）"]').element).toHaveProperty('value', '100')
+    expect(wrapper.find('input[placeholder="金额"]').element).toHaveProperty('value', '100')
 
     await wrapper.find('input[placeholder="分摊天数"]').setValue('2')
     await wrapper.find('form').trigger('submit')
@@ -257,7 +288,7 @@ describe('AccountCostWorkspace regression behavior', () => {
     expect(harness.updateAdditionalCost).toHaveBeenCalledOnce()
     expect(wrapper.text()).toContain('编辑手工成本')
     expect(wrapper.text()).toContain('replacement failed')
-    expect(wrapper.find('input[placeholder="金额（元）"]').element).toHaveProperty('value', '100')
+    expect(wrapper.find('input[placeholder="金额"]').element).toHaveProperty('value', '100')
     expect(wrapper.emitted('updated')).toBeUndefined()
   })
 
@@ -324,7 +355,7 @@ describe('AccountCostWorkspace regression behavior', () => {
     await flushPromises()
     expect(wrapper.text()).not.toContain('工作区 A 旧成本')
     expect(wrapper.text()).toContain('所选范围暂无记录')
-    expect(wrapper.find('input[placeholder="金额（元）"]').exists()).toBe(false)
+    expect(wrapper.find('input[placeholder="金额"]').exists()).toBe(false)
 
     resolveWorkspaceA({ items: [source], hasMore: false })
     await flushPromises()

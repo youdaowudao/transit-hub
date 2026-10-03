@@ -64,22 +64,24 @@ type State struct {
 // GroupMapping 一个自有分组到多个上游分组的映射关系，并可配置该分组的自动调价策略。
 // 自动调价配置绑定在自有分组上，计算时根据 AutoPricingSource 从关联上游中取参考倍率。
 type GroupMapping struct {
-	OwnGroup                  string                `json:"ownGroup"`
-	UpstreamTargets           []UpstreamGroupRef    `json:"upstreamTargets"`
-	EnableAutoPricing         bool                  `json:"enableAutoPricing"`
-	AutoPricingSource         string                `json:"autoPricingSource"`
-	PrimaryUpstreamSiteID     string                `json:"primaryUpstreamSiteId"`
-	PrimaryUpstreamGroupName  string                `json:"primaryUpstreamGroupName"`
-	AutoPricingStrategy       string                `json:"autoPricingStrategy"`
-	FixedIncrease             float64               `json:"fixedIncrease"`
-	PercentageIncrease        float64               `json:"percentageIncrease"`
-	AdjustThresholdPercent    float64               `json:"adjustThresholdPercent"`
-	MinMultiplier             *float64              `json:"minMultiplier"`
-	MaxMultiplier             *float64              `json:"maxMultiplier"`
-	EnableAutoPricingNotify   bool                  `json:"enableAutoPricingNotify"`
-	AutoPricingNotifyBotIDs   []string              `json:"autoPricingNotifyBotIds"`
-	AutoPricingNotifyTemplate string                `json:"autoPricingNotifyTemplate"`
-	LastAutoPricingRun        *AutoPricingRunStatus `json:"lastAutoPricingRun,omitempty"`
+	AutoPricingNotifyRecipientsUnavailable bool                  `json:"autoPricingNotifyRecipientsUnavailable,omitempty"`
+	AutoPricingNotifyRecipientsInvalid     bool                  `json:"autoPricingNotifyRecipientsInvalid,omitempty"`
+	OwnGroup                               string                `json:"ownGroup"`
+	UpstreamTargets                        []UpstreamGroupRef    `json:"upstreamTargets"`
+	EnableAutoPricing                      bool                  `json:"enableAutoPricing"`
+	AutoPricingSource                      string                `json:"autoPricingSource"`
+	PrimaryUpstreamSiteID                  string                `json:"primaryUpstreamSiteId"`
+	PrimaryUpstreamGroupName               string                `json:"primaryUpstreamGroupName"`
+	AutoPricingStrategy                    string                `json:"autoPricingStrategy"`
+	FixedIncrease                          float64               `json:"fixedIncrease"`
+	PercentageIncrease                     float64               `json:"percentageIncrease"`
+	AdjustThresholdPercent                 float64               `json:"adjustThresholdPercent"`
+	MinMultiplier                          *float64              `json:"minMultiplier"`
+	MaxMultiplier                          *float64              `json:"maxMultiplier"`
+	EnableAutoPricingNotify                bool                  `json:"enableAutoPricingNotify"`
+	AutoPricingNotifyBotIDs                []string              `json:"autoPricingNotifyBotIds"`
+	AutoPricingNotifyTemplate              string                `json:"autoPricingNotifyTemplate"`
+	LastAutoPricingRun                     *AutoPricingRunStatus `json:"lastAutoPricingRun,omitempty"`
 }
 
 // AutoPricingRunStatus 是后端写入的最近一次自动调价执行状态。

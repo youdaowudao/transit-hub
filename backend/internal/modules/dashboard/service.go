@@ -45,7 +45,7 @@ type PlatformClient interface {
 	FetchAdminGroupDailyStats(session upstream.Session, groups []upstream.GroupInfo) ([]upstream.GroupDailyStat, error)
 	FetchAdminGroupDailyStatsForDate(session upstream.Session, groups []upstream.GroupInfo, date string) ([]upstream.GroupDailyStat, error)
 	FetchSub2APIAdminGroupDailyStatsByIDForDate(session upstream.Session, date string) ([]upstream.GroupDailyStat, error)
-	// FetchCostForDate 查询上游站点指定上海业务日期的成本（按日精确查询，不使用缓存）。
+	// FetchCostForDate 查询上游站点指定新加坡业务日期的成本（按日精确查询，不使用缓存）。
 	// date 格式 "2006-01-02"，由调用方传入；函数内部禁止调用 time.Now() 推导业务日期。
 	// 返回原始成本（未乘 rechargeRate）、采集元数据和错误。
 	FetchCostForDate(session upstream.Session, date string) (rawCost float64, meta upstream.CostFetchMeta, err error)

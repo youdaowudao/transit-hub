@@ -28,8 +28,8 @@ DECLARE
         NULLIF(current_setting('task2.fixture_now', true), '')::timestamptz,
         now()
     );
-    shanghai_day_start timestamptz := date_trunc('day', fixture_now AT TIME ZONE 'Asia/Shanghai') AT TIME ZONE 'Asia/Shanghai';
-    fixture_span interval := fixture_now - shanghai_day_start;
+    singapore_day_start timestamptz := date_trunc('day', fixture_now AT TIME ZONE 'Asia/Singapore') AT TIME ZONE 'Asia/Singapore';
+    fixture_span interval := fixture_now - singapore_day_start;
 BEGIN
     IF EXISTS (SELECT 1 FROM connection_health_question_answer_records WHERE id = ANY(fixture_ids))
        OR EXISTS (
@@ -58,16 +58,16 @@ BEGIN
             'task2-active-20260830-pending', current_setting('task2.user_id'), current_setting('task2.target_id'),
             'task2-active-20260830', 'task2-active-model', 'task2-active-pending', 'TASK2 最新等待请求',
             'TASK2 最新等待请求正文', 'medium', '', 'pending', '', NULL, false,
-            shanghai_day_start + fixture_span * 0.90, NULL, NULL,
-            shanghai_day_start + fixture_span * 0.90
+            singapore_day_start + fixture_span * 0.90, NULL, NULL,
+            singapore_day_start + fixture_span * 0.90
         ),
         (
             'task2-active-20260830-running', current_setting('task2.user_id'), current_setting('task2.target_id'),
             'task2-active-20260830', 'task2-active-model', 'task2-active-running', 'TASK2 最新运行请求',
             'TASK2 最新运行请求正文', 'medium', '', 'running', '', NULL, false,
-            shanghai_day_start + fixture_span * 0.91,
-            shanghai_day_start + fixture_span * 0.91, NULL,
-            shanghai_day_start + fixture_span * 0.91
+            singapore_day_start + fixture_span * 0.91,
+            singapore_day_start + fixture_span * 0.91, NULL,
+            singapore_day_start + fixture_span * 0.91
         );
     GET DIAGNOSTICS affected = ROW_COUNT;
     inserted := inserted + affected;
@@ -88,10 +88,10 @@ BEGIN
         CASE WHEN item = 24 THEN 'network' ELSE '' END,
         CASE WHEN item <= 5 THEN 'unreviewed' WHEN item <= 14 THEN 'correct' WHEN item <= 23 THEN 'incorrect' ELSE NULL END,
         item BETWEEN 15 AND 23,
-        shanghai_day_start + fixture_span * (0.50 + item::double precision * 0.01),
-        shanghai_day_start + fixture_span * (0.501 + item::double precision * 0.01),
-        shanghai_day_start + fixture_span * (0.502 + item::double precision * 0.01),
-        shanghai_day_start + fixture_span * (0.502 + item::double precision * 0.01)
+        singapore_day_start + fixture_span * (0.50 + item::double precision * 0.01),
+        singapore_day_start + fixture_span * (0.501 + item::double precision * 0.01),
+        singapore_day_start + fixture_span * (0.502 + item::double precision * 0.01),
+        singapore_day_start + fixture_span * (0.502 + item::double precision * 0.01)
     FROM generate_series(1, 25) AS item;
     GET DIAGNOSTICS affected = ROW_COUNT;
     inserted := inserted + affected;
@@ -105,19 +105,19 @@ BEGIN
             'task2-older-20260830-correct', current_setting('task2.user_id'), current_setting('task2.target_id'),
             'task2-older-20260830', 'task2-older-model', 'task2-older-correct', 'TASK2 更早正确',
             'TASK2 更早正确问题', 'medium', 'TASK2 更早正确回答', 'succeeded', '', 'correct', false,
-            shanghai_day_start + fixture_span * 0.18,
-            shanghai_day_start + fixture_span * 0.19,
-            shanghai_day_start + fixture_span * 0.20,
-            shanghai_day_start + fixture_span * 0.20
+            singapore_day_start + fixture_span * 0.18,
+            singapore_day_start + fixture_span * 0.19,
+            singapore_day_start + fixture_span * 0.20,
+            singapore_day_start + fixture_span * 0.20
         ),
         (
             'task2-older-20260830-incorrect', current_setting('task2.user_id'), current_setting('task2.target_id'),
             'task2-older-20260830', 'task2-older-model', 'task2-older-incorrect', 'TASK2 更早错误',
             'TASK2 更早错误问题', 'medium', 'TASK2 更早错误回答', 'succeeded', '', 'incorrect', true,
-            shanghai_day_start + fixture_span * 0.21,
-            shanghai_day_start + fixture_span * 0.22,
-            shanghai_day_start + fixture_span * 0.23,
-            shanghai_day_start + fixture_span * 0.23
+            singapore_day_start + fixture_span * 0.21,
+            singapore_day_start + fixture_span * 0.22,
+            singapore_day_start + fixture_span * 0.23,
+            singapore_day_start + fixture_span * 0.23
         );
     GET DIAGNOSTICS affected = ROW_COUNT;
     inserted := inserted + affected;
@@ -129,8 +129,8 @@ BEGIN
         FROM connection_health_question_answer_records
         WHERE id = ANY(fixture_ids)
           AND (
-              (created_at AT TIME ZONE 'Asia/Shanghai')::date
-                  <> (fixture_now AT TIME ZONE 'Asia/Shanghai')::date
+              (created_at AT TIME ZONE 'Asia/Singapore')::date
+                  <> (fixture_now AT TIME ZONE 'Asia/Singapore')::date
               OR created_at > fixture_now
               OR (started_at IS NOT NULL AND (started_at < created_at OR started_at > fixture_now))
               OR (
@@ -141,7 +141,7 @@ BEGIN
               OR updated_at > fixture_now
           )
     ) THEN
-        RAISE EXCEPTION 'fixture timestamp escaped Shanghai day or lifecycle order';
+        RAISE EXCEPTION 'fixture timestamp escaped Singapore day or lifecycle order';
     END IF;
 END $$;
 COMMIT;

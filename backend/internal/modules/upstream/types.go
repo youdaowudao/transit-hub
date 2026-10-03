@@ -88,7 +88,7 @@ type GroupInfo struct {
 	Platform          *string  `json:"platform"`
 	Multiplier        *float64 `json:"multiplier"`
 	MultiplierDisplay string   `json:"multiplierDisplay"`
-	// TodayCost 是上游分组当天累计成本的人民币展示值。它只在响应组装时从 Redis
+	// TodayCost 是上游分组当天累计成本的核算金额。它只在响应组装时从 Redis
 	// 短期样本合并，不写入上游平台分组配置。
 	TodayCost           *float64   `json:"todayCost,omitempty"`
 	CostMode            string     `json:"costMode,omitempty"`
@@ -131,7 +131,7 @@ type Metrics struct {
 	HistoryRecharge MetricValue `json:"historyRecharge"`
 	Group           GroupInfo   `json:"group"`
 	Groups          []GroupInfo `json:"groups"`
-	// TodayConsumeDate 是 TodayConsume 对应的上海业务日期（"2006-01-02"）。
+	// TodayConsumeDate 是 TodayConsume 对应的新加坡业务日期（"2006-01-02"）。
 	// 同步时由上游同步入口统一写入，用于日期归属校验。空字符串表示尚未记录。
 	TodayConsumeDate string `json:"todayConsumeDate,omitempty"`
 	// TodayConsumeAt 是 TodayConsume 的实际采集时间，用于缓存时效校验。

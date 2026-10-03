@@ -49,7 +49,7 @@ func defaultMarketingEmailTemplate() EmailTemplate {
 }
 
 const builtInMarketingHTML = `<!doctype html>
-<html lang="zh-CN">
+<html lang="zh">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -103,6 +103,9 @@ func (s *Service) ListEmailTemplates(ctx context.Context, userID string) ([]Emai
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrEmailTemplatePersistence, err)
 	}
+	for i := range templates {
+		templates[i] = projectBuiltInEmailTemplate(templates[i])
+	}
 	return templates, nil
 }
 
@@ -121,7 +124,7 @@ func (s *Service) GetEmailTemplate(ctx context.Context, userID string, id string
 	if !ok {
 		return EmailTemplate{}, ErrEmailTemplateNotFound
 	}
-	return template, nil
+	return projectBuiltInEmailTemplate(template), nil
 }
 
 // SnapshotEmailTemplateForWorkspace 按显式 workspace 读取模板，用于异步 worker 在用户切换当前
@@ -137,6 +140,7 @@ func (s *Service) SnapshotEmailTemplateForWorkspace(ctx context.Context, userID 
 	if !ok {
 		return EmailTemplateSnapshot{}, ErrEmailTemplateNotFound
 	}
+	template = projectBuiltInEmailTemplate(template)
 	return EmailTemplateSnapshot{ID: template.ID, Name: template.Name, Subject: template.Subject, HTMLBody: template.HTMLBody}, nil
 }
 
@@ -233,6 +237,7 @@ func (s *Service) TestEmailTemplate(ctx context.Context, userID string, id strin
 	if !ok {
 		return ErrEmailTemplateNotFound
 	}
+	template = projectBuiltInEmailTemplate(template)
 	if err := s.sendSavedSMTPEmail(ctx, userID, adminAccountID, recipientEmail, template.Subject, template.HTMLBody); err != nil {
 		if errors.Is(err, ErrSMTPInvalidEmail) {
 			return ErrEmailTemplateInvalidEmail
@@ -273,4 +278,13 @@ func generateEmailTemplateID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes), nil
+}
+
+// Update only the exact untouched built-in default; user-edited templates retain their body.
+func projectBuiltInEmailTemplate(template EmailTemplate) EmailTemplate {
+	oldBody := strings.Replace(builtInMarketingHTML, `lang="zh"`, `lang="zh-CN"`, 1)
+	if template.ID == builtInMarketingTemplateID && template.IsBuiltIn && template.Name == "营销活动" && template.Subject == "TransitHub 限时活动" && template.HTMLBody == oldBody {
+		template.HTMLBody = builtInMarketingHTML
+	}
+	return template
 }

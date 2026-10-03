@@ -37,7 +37,7 @@ type GroupCostSample struct {
 }
 
 // GroupCostSnapshot 是一个上游站点/分组的短期成本快照。金额已经按站点充值倍率
-// 换算为人民币；nil 表示当前样本或比较基准不足，调用方必须展示未知而不是零。
+// 换算为核算金额；nil 表示当前样本或比较基准不足，调用方必须展示未知而不是零。
 type GroupCostSnapshot struct {
 	SiteID         string     `json:"siteId"`
 	SiteName       string     `json:"siteName"`
@@ -154,7 +154,7 @@ func (s *Service) sampleGroupCosts(site Site, session Session, groups []GroupInf
 		log.Printf("[upstream-cost] save sample state failed site_id=%s err=%v", site.ID, saveErr)
 	}
 	if businesstime.Today() != date {
-		// 请求跨过上海业务日边界时丢弃整批，避免把新日累计值写进旧日样本。
+		// 请求跨过新加坡业务日边界时丢弃整批，避免把新日累计值写进旧日样本。
 		return
 	}
 

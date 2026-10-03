@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"transithub/backend/internal/shared/businesstime"
 
 	"transithub/backend/internal/modules/upstream"
 )
@@ -713,8 +714,8 @@ func (spec probeModelSpec) effectiveBudgetPolicy() Policy {
 }
 
 func probeBudgetDayStart(now time.Time) time.Time {
-	// 产品当前按中国自然日展示“每日预算”，使用固定 UTC+8 避免容器运行在 UTC 时于早上 8 点重置。
-	location := time.FixedZone("UTC+8", 8*60*60)
+	// 每日预算按统一的新加坡业务日重置。
+	location := businesstime.Location()
 	local := now.In(location)
 	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, location)
 }

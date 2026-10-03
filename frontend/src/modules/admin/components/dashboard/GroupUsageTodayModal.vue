@@ -5,7 +5,7 @@ import {
   getGroupUsageToday,
   type GroupUsageTodayItem,
 } from '../../api/dashboardAdmin'
-import { formatCny } from '../../utils/dashboard'
+import { formatAmount } from '../../utils/dashboard'
 
 const props = defineProps<{
   open: boolean
@@ -80,7 +80,7 @@ watch(() => props.open, (isOpen) => {
             <div>
               <h2 class="text-lg font-semibold text-foreground">{{ t('admin.dashboard.groupUsage.title') }}</h2>
               <p class="text-sm text-muted-foreground">
-                {{ t('admin.dashboard.groupUsage.subtitle', { count: displayedGroupCount, total: formatCny(total) }) }}
+                {{ t('admin.dashboard.groupUsage.subtitle', { count: displayedGroupCount, total: formatAmount(total) }) }}
               </p>
             </div>
           </div>
@@ -149,7 +149,7 @@ watch(() => props.open, (isOpen) => {
                   class="border-b border-border/40 last:border-b-0"
                 >
                   <td class="px-4 py-3 align-middle font-medium text-foreground">{{ group.groupName }}</td>
-                  <td class="px-4 py-3 align-middle text-right text-foreground">{{ formatCny(group.todayAmount) }}</td>
+                  <td class="px-4 py-3 align-middle text-right text-foreground">{{ formatAmount(group.todayAmount) }}</td>
                 </tr>
               </tbody>
             </table>

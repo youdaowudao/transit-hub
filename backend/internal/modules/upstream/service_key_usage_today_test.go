@@ -327,7 +327,7 @@ func TestServiceBalanceBreakdown_SortsDescendingWithUnknownBalanceLast(t *testin
 	}
 
 	// Service 层不排序（排序由 dashboard.MetricsService.UpstreamBalanceBreakdown 完成），
-	// 这里只校验数据本身：已知余额已换算为 CNY，未知余额为 nil。
+	// 这里只校验数据本身：已知余额已换算为核算金额，未知余额为 nil。
 	byID := map[string]*BalanceBreakdownItem{}
 	for i := range items {
 		byID[items[i].SiteID] = &items[i]

@@ -128,7 +128,7 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
 
 const liveMetrics = {
   date: '2026-08-22',
-  timezone: 'Asia/Shanghai',
+  timezone: 'Asia/Singapore',
   todayProfit: 120,
   siteBalance: 500,
   todayPurchase: 40,
@@ -223,14 +223,14 @@ describe('Dashboard cost entrypoint behavior', () => {
     if (!section) throw new Error('missing homepage cost composition')
 
     const text = section.text()
-    expect(text).toContain('上游直接 ¥35.00')
-    expect(text).toContain('买号确认 ¥8.00')
-    expect(text).toContain('手续费 ¥2.00')
-    expect(text).toContain('活动 ¥1.00')
-    expect(text).toContain('固定 ¥3.00')
-    expect(text).toContain('调整 ¥1.00')
+    expect(text).toContain('上游直接 35.00')
+    expect(text).toContain('买号确认 8.00')
+    expect(text).toContain('手续费 2.00')
+    expect(text).toContain('活动 1.00')
+    expect(text).toContain('固定 3.00')
+    expect(text).toContain('调整 1.00')
     expect(text).not.toContain('其他')
-    expect(findCard(wrapper, '今日总成本').props('value')).toBe('¥50.00')
+    expect(findCard(wrapper, '今日总成本').props('value')).toBe('50.00')
   })
 
   it('shows a numeric temporary zero and an explicit missing-site warning when no same-day upstream cost exists', async () => {
@@ -255,7 +255,7 @@ describe('Dashboard cost entrypoint behavior', () => {
     const wrapper = await mountDashboard()
     const card = findCard(wrapper, '今日总成本')
 
-    expect(card.props('value')).toBe('¥0.00')
+    expect(card.props('value')).toBe('0.00')
     expect(card.props('statusText')).toBe('1 个站点无同日记录，暂按 0')
     expect(card.text()).not.toContain('成本暂不可用')
   })
@@ -268,9 +268,9 @@ describe('Dashboard cost entrypoint behavior', () => {
 
     const workspace = wrapper.findComponent(AccountCostWorkspace)
     expect(workspace.props('open')).toBe(true)
-    expect(workspace.text()).toContain('今日营收 ¥120.00')
-    expect(workspace.text()).toContain('今日总成本 ¥50.00')
-    expect(workspace.text()).toContain('今日净利润 ¥70.00')
+    expect(workspace.text()).toContain('今日营收 120.00')
+    expect(workspace.text()).toContain('今日总成本 50.00')
+    expect(workspace.text()).toContain('今日净利润 70.00')
     expect(workspace.text()).toContain('净利润 = 营收 - 总成本')
   })
 
@@ -282,8 +282,8 @@ describe('Dashboard cost entrypoint behavior', () => {
 
     const workspace = wrapper.findComponent(AccountCostWorkspace)
     expect(workspace.props('open')).toBe(true)
-    expect(workspace.text()).toContain('今日净利润 ¥70.00')
-    expect(workspace.text()).toContain('今日营收 ¥120.00')
+    expect(workspace.text()).toContain('今日净利润 70.00')
+    expect(workspace.text()).toContain('今日营收 120.00')
     expect(workspace.text()).toContain('利润率 = 净利润 ÷ 营收')
     expect(workspace.text()).toContain('58.3%')
   })

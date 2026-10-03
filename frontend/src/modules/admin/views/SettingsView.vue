@@ -49,6 +49,9 @@ const isSavingChannels = ref(false)
 const showSuccessChannels = ref(false)
 const isLoadingChannels = ref(false)
 const errorChannels = ref('')
+const channelsLoaded = ref(false)
+const balanceRecipientsInvalid = ref(false)
+const multiplierRecipientsInvalid = ref(false)
 
 // === Tab 1: Strategy ===
 const enableRefreshInterval = ref(false)
@@ -71,12 +74,6 @@ const defaultMultiplierTemplate = computed(() => t('admin.settings.sections.temp
   changeDirection: '{changeDirection}',
 }))
 const normalizeBuiltInTemplate = (template?: string) => (template?.trim() ?? '').replace(/>\s+</g, '><')
-const legacyBalanceTemplates = new Set([
-  '【余额预警】{siteName} 站点余额（CNY）已不足 {threshold} 元，当前余额为 {balance} 元。',
-  '[Balance warning] {siteName} balance (CNY) is below {threshold}; current balance is {balance}.',
-  '<div style="border-left:4px solid #f59e0b;background:rgba(245,158,11,0.12);padding:16px;border-radius:6px"><div style="font-size:18px;font-weight:700;color:#f59e0b">🔴 余额预警</div><p style="margin:10px 0 0">上游站点 <strong style="color:#3b82f6">{siteName}</strong> 的可用余额已低于预警阈值。</p><p style="margin:10px 0 0">💰 当前余额: <strong style="color:#ef4444">¥{balance}</strong><br>⚠️ 预警阈值: <strong>¥{threshold}</strong></p><p style="margin:10px 0 0">请及时检查并充值，避免服务中断。</p></div>',
-  '<div style="border-left:4px solid #f59e0b;background:rgba(245,158,11,0.12);padding:16px;border-radius:6px"><div style="font-size:18px;font-weight:700;color:#f59e0b">🔴 Balance warning</div><p style="margin:10px 0 0">The available balance for <strong style="color:#3b82f6">{siteName}</strong> is below the warning threshold.</p><p style="margin:10px 0 0">💰 Current balance: <strong style="color:#ef4444">¥{balance}</strong><br>⚠️ Warning threshold: <strong>¥{threshold}</strong></p><p style="margin:10px 0 0">Please review and recharge the upstream account to avoid service interruption.</p></div>',
-].map(normalizeBuiltInTemplate))
 const legacyMultiplierTemplates = new Set([
   '【倍率变更】{siteName} 的 {groupName} 分组倍率已{changeDirection}：{oldRate}x -> {newRate}x。',
   '[Multiplier change] {siteName} / {groupName} {changeDirection}: {oldRate}x -> {newRate}x.',
@@ -124,52 +121,41 @@ const multiplierPreviewValues = computed(() => ({
   '{changeDirection}': t('admin.settings.templateEditor.samples.changeDirection'),
 }))
 // === Tab 2: Channels ===
-const activeChannelTab = ref<NotificationChannel>('dingtalk')
-
-type WebhookBotForm = {
-  id: string
-  name: string
-  webhook: string
-  secret: string
-}
+const activeChannelTab = ref<NotificationChannel>('telegram')
 
 type TelegramBotForm = {
   id: string
   name: string
+  enabled: boolean
   botToken: string
   chatId: string
   proxyUrl: string
 }
 
-type QQBotForm = {
-  id: string
-  name: string
-  appId: string
-  clientSecret: string
-  userOpenId: string
-  groupOpenId: string
-}
-
-const dingtalkBots = ref<WebhookBotForm[]>([])
-const wecomBots = ref<WebhookBotForm[]>([])
-const qqBots = ref<QQBotForm[]>([])
-const feishuBots = ref<WebhookBotForm[]>([])
 const telegramBots = ref<TelegramBotForm[]>([])
 
 const addBot = (type: NotificationChannel) => {
-  if (type === 'dingtalk') dingtalkBots.value.push({ id: uniqueId(), name: '', webhook: '', secret: '' })
-  if (type === 'wecom') wecomBots.value.push({ id: uniqueId(), name: '', webhook: '', secret: '' })
-  if (type === 'qq') qqBots.value.push({ id: uniqueId(), name: '', appId: '', clientSecret: '', userOpenId: '', groupOpenId: '' })
-  if (type === 'feishu') feishuBots.value.push({ id: uniqueId(), name: '', webhook: '', secret: '' })
-  if (type === 'telegram') telegramBots.value.push({ id: uniqueId(), name: '', botToken: '', chatId: '', proxyUrl: '' })
+  if (type === 'telegram') telegramBots.value.push({ id: uniqueId(), name: '', enabled: true, botToken: '', chatId: '', proxyUrl: '' })
 }
 
 const removeBot = (type: NotificationChannel, index: number) => {
-  if (type === 'dingtalk') dingtalkBots.value.splice(index, 1)
-  if (type === 'wecom') wecomBots.value.splice(index, 1)
-  if (type === 'qq') qqBots.value.splice(index, 1)
-  if (type === 'feishu') feishuBots.value.splice(index, 1)
-  if (type === 'telegram') telegramBots.value.splice(index, 1)
+  if (type === 'telegram') {
+    telegramBots.value.splice(index, 1)
+    reconcileStrategyRecipients()
+  }
+}
+
+const reconcileStrategyRecipients = () => {
+  if (!channelsLoaded.value) return
+  const knownIds = new Set(telegramBots.value.map(bot => bot.id))
+  const balanceIds = balanceSelectedBots.value.filter(id => knownIds.has(id))
+  const multiplierIds = multiplierSelectedBots.value.filter(id => knownIds.has(id))
+  balanceRecipientsInvalid.value ||= balanceIds.length !== balanceSelectedBots.value.length
+  multiplierRecipientsInvalid.value ||= multiplierIds.length !== multiplierSelectedBots.value.length
+  balanceSelectedBots.value = balanceIds
+  multiplierSelectedBots.value = multiplierIds
+  if (balanceRecipientsInvalid.value && balanceIds.length === 0) enableBalanceWarning.value = false
+  if (multiplierRecipientsInvalid.value && multiplierIds.length === 0) enableMultiplierAlert.value = false
 }
 
 const saveStrategy = async () => {
@@ -178,6 +164,7 @@ const saveStrategy = async () => {
   errorStrategy.value = ''
   showSuccessStrategy.value = false
   try {
+    reconcileStrategyRecipients()
     applyStrategySettings(await saveStrategySettings(currentStrategySettings()))
     showSuccessStrategy.value = true
     setTimeout(() => { showSuccessStrategy.value = false }, 3000)
@@ -189,16 +176,23 @@ const saveStrategy = async () => {
 }
 
 const applyStrategySettings = (settings: StrategySettings) => {
+  const knownIds = new Set(telegramBots.value.map(bot => bot.id))
+  const originalBalanceIds = settings.balanceNotifyBotIds ?? []
+  const originalMultiplierIds = settings.multiplierNotifyBotIds ?? []
+  const balanceIds = channelsLoaded.value ? originalBalanceIds.filter(id => knownIds.has(id)) : originalBalanceIds
+  const multiplierIds = channelsLoaded.value ? originalMultiplierIds.filter(id => knownIds.has(id)) : originalMultiplierIds
+  balanceRecipientsInvalid.value = Boolean(settings.balanceNotifyRecipientsInvalid) || balanceIds.length !== originalBalanceIds.length
+  multiplierRecipientsInvalid.value = Boolean(settings.multiplierNotifyRecipientsInvalid) || multiplierIds.length !== originalMultiplierIds.length
   enableRefreshInterval.value = settings.enableRefreshInterval
   refreshInterval.value = String(Math.max(settings.refreshInterval, minimumRefreshInterval))
-  enableBalanceWarning.value = settings.enableBalanceWarning
+  enableBalanceWarning.value = settings.enableBalanceWarning && !(balanceRecipientsInvalid.value && balanceIds.length === 0)
   defaultBalanceThreshold.value = String(settings.defaultBalanceThreshold || 10)
-  balanceSelectedBots.value = settings.balanceNotifyBotIds ?? []
-  const usesDefaultBalanceTemplate = shouldUseDefaultTemplate(settings.balanceTemplate, legacyBalanceTemplates)
+  balanceSelectedBots.value = balanceIds
+  const usesDefaultBalanceTemplate = settings.balanceTemplate == null || settings.balanceTemplate === ''
   balanceTemplate.value = usesDefaultBalanceTemplate ? defaultBalanceTemplate.value : settings.balanceTemplate
   balanceTemplateFormat.value = usesDefaultBalanceTemplate ? 'markdown' : normalizeTemplateFormat(settings.balanceTemplateFormat)
-  enableMultiplierAlert.value = settings.enableMultiplierAlert
-  multiplierSelectedBots.value = settings.multiplierNotifyBotIds ?? []
+  enableMultiplierAlert.value = settings.enableMultiplierAlert && !(multiplierRecipientsInvalid.value && multiplierIds.length === 0)
+  multiplierSelectedBots.value = multiplierIds
   const usesDefaultMultiplierTemplate = shouldUseDefaultTemplate(settings.multiplierTemplate, legacyMultiplierTemplates)
   multiplierTemplate.value = usesDefaultMultiplierTemplate ? defaultMultiplierTemplate.value : settings.multiplierTemplate
   multiplierTemplateFormat.value = usesDefaultMultiplierTemplate ? 'markdown' : normalizeTemplateFormat(settings.multiplierTemplateFormat)
@@ -210,7 +204,7 @@ const currentStrategySettings = (): StrategySettings => ({
   enableBalanceWarning: enableBalanceWarning.value,
   defaultBalanceThreshold: Number.parseFloat(defaultBalanceThreshold.value) || 10,
   balanceNotifyBotIds: balanceSelectedBots.value,
-  balanceTemplate: balanceTemplate.value.trim(),
+  balanceTemplate: balanceTemplate.value,
   balanceTemplateFormat: balanceTemplateFormat.value,
   enableMultiplierAlert: enableMultiplierAlert.value,
   multiplierNotifyBotIds: multiplierSelectedBots.value,
@@ -238,6 +232,8 @@ const saveChannels = async () => {
   showSuccessChannels.value = false
   try {
     applyNotificationChannelSettings(await saveNotificationChannelSettings(currentNotificationChannelSettings()))
+    channelsLoaded.value = true
+    reconcileStrategyRecipients()
     showSuccessChannels.value = true
     setTimeout(() => { showSuccessChannels.value = false }, 3000)
   } catch (error) {
@@ -255,35 +251,10 @@ const errorBotMessage = ref('')
 const uniqueId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
 const applyNotificationChannelSettings = (settings: NotificationChannelSettings) => {
-  dingtalkBots.value = (settings.dingtalk ?? []).map(bot => ({
-    id: bot.id || uniqueId(),
-    name: bot.name,
-    webhook: bot.webhook,
-    secret: bot.secret,
-  }))
-  wecomBots.value = (settings.wecom ?? []).map(bot => ({
-    id: bot.id || uniqueId(),
-    name: bot.name,
-    webhook: bot.webhook,
-    secret: '',
-  }))
-  qqBots.value = (settings.qq ?? []).map(bot => ({
-    id: bot.id || uniqueId(),
-    name: bot.name,
-    appId: bot.appId,
-    clientSecret: bot.clientSecret,
-    userOpenId: bot.userOpenId ?? '',
-    groupOpenId: bot.groupOpenId ?? '',
-  }))
-  feishuBots.value = (settings.feishu ?? []).map(bot => ({
-    id: bot.id || uniqueId(),
-    name: bot.name,
-    webhook: bot.webhook,
-    secret: bot.secret,
-  }))
   telegramBots.value = (settings.telegram ?? []).map(bot => ({
     id: bot.id || uniqueId(),
     name: bot.name,
+    enabled: bot.enabled,
     botToken: bot.botToken,
     chatId: bot.chatId,
     proxyUrl: bot.proxyUrl,
@@ -291,40 +262,10 @@ const applyNotificationChannelSettings = (settings: NotificationChannelSettings)
 }
 
 const currentNotificationChannelSettings = (): NotificationChannelSettings => ({
-  dingtalk: dingtalkBots.value.map(bot => ({
-    id: bot.id,
-    name: bot.name.trim(),
-    enabled: true,
-    webhook: bot.webhook.trim(),
-    secret: bot.secret.trim(),
-  })),
-  wecom: wecomBots.value.map(bot => ({
-    id: bot.id,
-    name: bot.name.trim(),
-    enabled: true,
-    webhook: bot.webhook.trim(),
-    secret: '',
-  })),
-  qq: qqBots.value.map(bot => ({
-    id: bot.id,
-    name: bot.name.trim(),
-    enabled: true,
-    appId: bot.appId.trim(),
-    clientSecret: bot.clientSecret.trim(),
-    userOpenId: bot.userOpenId.trim(),
-    groupOpenId: bot.groupOpenId.trim(),
-  })),
-  feishu: feishuBots.value.map(bot => ({
-    id: bot.id,
-    name: bot.name.trim(),
-    enabled: true,
-    webhook: bot.webhook.trim(),
-    secret: bot.secret.trim(),
-  })),
   telegram: telegramBots.value.map(bot => ({
     id: bot.id,
     name: bot.name.trim(),
-    enabled: true,
+    enabled: bot.enabled,
     botToken: bot.botToken.trim(),
     chatId: bot.chatId.trim(),
     proxyUrl: bot.proxyUrl.trim(),
@@ -337,6 +278,7 @@ const loadChannels = async () => {
   errorChannels.value = ''
   try {
     applyNotificationChannelSettings(await getNotificationChannelSettings())
+    channelsLoaded.value = true
   } catch (error) {
     errorChannels.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
   } finally {
@@ -364,31 +306,12 @@ const testBot = async (channel: NotificationChannel, id: string) => {
 }
 
 const testPayload = (channel: NotificationChannel, id: string): TestNotificationChannelPayload | null => {
-  if (channel === 'qq') {
-    const bot = qqBots.value.find(item => item.id === id)
-    if (!bot) return null
-    return {
-      channel,
-      qqAppId: bot.appId.trim(),
-      qqClientSecret: bot.clientSecret.trim(),
-      qqUserOpenId: bot.userOpenId.trim(),
-    }
-  }
-  if (channel === 'telegram') {
-    const bot = telegramBots.value.find(item => item.id === id)
-    if (!bot) return null
-    return { channel, telegramBotToken: bot.botToken.trim(), telegramChatId: bot.chatId.trim(), telegramProxyUrl: bot.proxyUrl.trim() }
-  }
-  const bot = channel === 'dingtalk'
-    ? dingtalkBots.value.find(item => item.id === id)
-    : channel === 'wecom'
-      ? wecomBots.value.find(item => item.id === id)
-      : feishuBots.value.find(item => item.id === id)
+  const bot = telegramBots.value.find(item => item.id === id)
   if (!bot) return null
-  return { channel, webhook: bot.webhook.trim(), secret: channel === 'wecom' ? '' : bot.secret.trim() }
+  return { channel, telegramBotToken: bot.botToken.trim(), telegramChatId: bot.chatId.trim(), telegramProxyUrl: bot.proxyUrl.trim() }
 }
 
-const allBots = computed(() => [...dingtalkBots.value, ...wecomBots.value, ...qqBots.value, ...feishuBots.value, ...telegramBots.value])
+const allBots = computed(() => telegramBots.value.filter(bot => bot.enabled))
 const hasBots = computed(() => allBots.value.length > 0)
 
 const toggleBalanceBot = (botId: string) => {
@@ -1202,14 +1125,14 @@ onBeforeUnmount(() => {
                 <div class="peer h-6 w-11 rounded-full bg-surface-elevated peer-checked:bg-primary peer-focus-visible:ring-2 peer-focus-visible:ring-primary peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-background after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:border after:border-border after:bg-white after:transition-transform after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white"></div>
               </label>
             </div>
+            <p v-if="balanceRecipientsInvalid" class="px-5 pb-4 text-xs text-warning" role="status">{{ t('admin.settings.recipientsInvalid') }}</p>
             <div v-if="enableBalanceWarning" class="px-5 pb-5 pt-0">
               <div class="space-y-4 animate-in slide-in-from-top-2 fade-in duration-200 sm:pl-12">
                 <!-- Threshold amount -->
                 <div class="grid gap-1.5">
                   <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.balanceWarningAmount') }}</label>
                   <div class="relative max-w-xs">
-                    <span class="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-muted-foreground">¥</span>
-                    <Input type="number" v-model="defaultBalanceThreshold" min="0" step="0.01" class="pl-8" />
+                    <Input type="number" v-model="defaultBalanceThreshold" min="0" step="0.01" />
                   </div>
                 </div>
 
@@ -1260,6 +1183,7 @@ onBeforeUnmount(() => {
                 <div class="peer h-6 w-11 rounded-full bg-surface-elevated peer-checked:bg-primary peer-focus-visible:ring-2 peer-focus-visible:ring-primary peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-background after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:border after:border-border after:bg-white after:transition-transform after:content-[''] peer-checked:after:translate-x-full peer-checked:after:border-white"></div>
               </label>
             </div>
+            <p v-if="multiplierRecipientsInvalid" class="px-5 pb-4 text-xs text-warning" role="status">{{ t('admin.settings.recipientsInvalid') }}</p>
             <div v-if="enableMultiplierAlert" class="px-5 pb-5 pt-0">
               <div class="space-y-4 animate-in slide-in-from-top-2 fade-in duration-200 sm:pl-12">
                 <!-- Bot selector -->
@@ -1326,225 +1250,12 @@ onBeforeUnmount(() => {
             <!-- Channels Sub-tabs -->
             <div class="flex overflow-x-auto border-b border-border/30">
               <button
-                @click="activeChannelTab = 'dingtalk'"
-                class="shrink-0 px-6 py-3 text-sm font-medium transition-colors border-b-2"
-                :class="activeChannelTab === 'dingtalk' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
-              >
-                {{ t('admin.settings.sections.channels.dingtalk') }} ({{ dingtalkBots.length }})
-              </button>
-              <button
-                @click="activeChannelTab = 'wecom'"
-                class="shrink-0 px-6 py-3 text-sm font-medium transition-colors border-b-2"
-                :class="activeChannelTab === 'wecom' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
-              >
-                {{ t('admin.settings.sections.channels.wecom') }} ({{ wecomBots.length }})
-              </button>
-              <button
-                @click="activeChannelTab = 'qq'"
-                class="shrink-0 px-6 py-3 text-sm font-medium transition-colors border-b-2"
-                :class="activeChannelTab === 'qq' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
-              >
-                {{ t('admin.settings.sections.channels.qq') }} ({{ qqBots.length }})
-              </button>
-              <button
-                @click="activeChannelTab = 'feishu'"
-                class="shrink-0 px-6 py-3 text-sm font-medium transition-colors border-b-2"
-                :class="activeChannelTab === 'feishu' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
-              >
-                {{ t('admin.settings.sections.channels.feishu') }} ({{ feishuBots.length }})
-              </button>
-              <button
                 @click="activeChannelTab = 'telegram'"
                 class="shrink-0 px-6 py-3 text-sm font-medium transition-colors border-b-2"
                 :class="activeChannelTab === 'telegram' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
               >
                 {{ t('admin.settings.sections.channels.telegram') }} ({{ telegramBots.length }})
               </button>
-            </div>
-
-            <!-- Dingtalk -->
-            <div v-if="activeChannelTab === 'dingtalk'" class="space-y-4">
-              <div class="flex items-center justify-between">
-                <div>
-                  <h4 class="font-medium text-foreground">{{ t('admin.settings.sections.channels.dingtalk') }}</h4>
-                  <p class="text-xs text-muted-foreground mt-0.5">{{ t('admin.settings.sections.channels.dingtalkHelp') }}</p>
-                </div>
-                <Button variant="secondary" size="sm" class="h-8" @click="addBot('dingtalk')">
-                  <Plus class="h-3 w-3 mr-1.5" /> {{ t('admin.settings.addDingtalkBot') }}
-                </Button>
-              </div>
-              <div class="grid md:grid-cols-2 gap-4">
-                <div v-for="(bot, idx) in dingtalkBots" :key="bot.id" class="p-4 rounded-xl border border-border/50 bg-surface/20 relative group">
-                  <Button variant="ghost" size="sm" class="absolute top-2 right-2 h-8 w-8 p-0 opacity-0 group-hover:opacity-100 transition-opacity text-red-500 hover:bg-red-500/10" @click="removeBot('dingtalk', idx)">
-                    <Trash2 class="h-4 w-4" />
-                  </Button>
-                  <div class="grid gap-4 pr-10">
-                    <div class="grid gap-2">
-                      <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.botNameLabel') }}</label>
-                      <Input v-model="bot.name" :placeholder="t('admin.settings.botNameDingtalkPlaceholder')" class="h-8 text-sm" />
-                    </div>
-                    <div class="grid gap-2">
-                      <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.sections.channels.webhookUrl') }}</label>
-                      <Input type="url" v-model="bot.webhook" placeholder="https://oapi.dingtalk.com/robot/send?access_token=..." class="h-8 text-sm" />
-                    </div>
-                    <div class="grid gap-2">
-                      <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.sections.channels.secret') }}</label>
-                      <Input type="password" v-model="bot.secret" placeholder="SEC..." class="h-8 text-sm" />
-                    </div>
-                    <div>
-                      <Button variant="secondary" size="sm" class="h-8" :disabled="testingBotId === bot.id || !bot.webhook" @click="testBot('dingtalk', bot.id)">
-                        <Loader2 v-if="testingBotId === bot.id" class="h-3 w-3 animate-spin mr-1.5" />
-                        <CheckCircle2 v-else-if="successBotId === bot.id" class="h-3 w-3 mr-1.5 text-green-500" />
-                        <Send v-else class="h-3 w-3 mr-1.5 text-muted-foreground" />
-                        <span :class="{ 'text-green-500': successBotId === bot.id }">{{ successBotId === bot.id ? t('admin.settings.sections.channels.testConnectionSuccess') : t('admin.settings.sections.channels.testConnection') }}</span>
-                      </Button>
-                      <p v-if="errorBotId === bot.id" class="mt-2 text-xs text-destructive">{{ t(errorBotMessage) }}</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div v-if="dingtalkBots.length === 0" class="text-center py-6 text-sm text-muted-foreground border border-dashed border-border/50 rounded-xl">
-                {{ t('admin.settings.emptyDingtalk') }}
-              </div>
-            </div>
-
-            <!-- WeCom -->
-            <div v-if="activeChannelTab === 'wecom'" class="space-y-4">
-              <div class="flex items-center justify-between gap-4">
-                <div>
-                  <h4 class="font-medium text-foreground">{{ t('admin.settings.sections.channels.wecom') }}</h4>
-                  <p class="text-xs text-muted-foreground mt-0.5">{{ t('admin.settings.sections.channels.wecomHelp') }}</p>
-                </div>
-                <Button variant="secondary" size="sm" class="h-8 shrink-0" @click="addBot('wecom')">
-                  <Plus class="h-3 w-3 mr-1.5" /> {{ t('admin.settings.addWecomBot') }}
-                </Button>
-              </div>
-              <div class="grid md:grid-cols-2 gap-4">
-                <div v-for="(bot, idx) in wecomBots" :key="bot.id" class="p-4 rounded-xl border border-border/50 bg-surface/20 relative group">
-                  <Button variant="ghost" size="sm" class="absolute top-2 right-2 h-8 w-8 p-0 opacity-0 group-hover:opacity-100 transition-opacity text-red-500 hover:bg-red-500/10" @click="removeBot('wecom', idx)">
-                    <Trash2 class="h-4 w-4" />
-                  </Button>
-                  <div class="grid gap-4 pr-10">
-                    <div class="grid gap-2">
-                      <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.botNameLabel') }}</label>
-                      <Input v-model="bot.name" :placeholder="t('admin.settings.botNameWecomPlaceholder')" class="h-8 text-sm" />
-                    </div>
-                    <div class="grid gap-2">
-                      <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.sections.channels.webhookUrl') }}</label>
-                      <Input type="url" v-model="bot.webhook" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." class="h-8 text-sm" />
-                    </div>
-                    <div>
-                      <Button variant="secondary" size="sm" class="h-8" :disabled="testingBotId === bot.id || !bot.webhook" @click="testBot('wecom', bot.id)">
-                        <Loader2 v-if="testingBotId === bot.id" class="h-3 w-3 animate-spin mr-1.5" />
-                        <CheckCircle2 v-else-if="successBotId === bot.id" class="h-3 w-3 mr-1.5 text-green-500" />
-                        <Send v-else class="h-3 w-3 mr-1.5 text-muted-foreground" />
-                        <span :class="{ 'text-green-500': successBotId === bot.id }">{{ successBotId === bot.id ? t('admin.settings.sections.channels.testConnectionSuccess') : t('admin.settings.sections.channels.testConnection') }}</span>
-                      </Button>
-                      <p v-if="errorBotId === bot.id" class="mt-2 text-xs text-destructive">{{ t(errorBotMessage) }}</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div v-if="wecomBots.length === 0" class="text-center py-6 text-sm text-muted-foreground border border-dashed border-border/50 rounded-xl">
-                {{ t('admin.settings.emptyWecom') }}
-              </div>
-            </div>
-
-            <!-- QQ -->
-            <div v-if="activeChannelTab === 'qq'" class="space-y-4">
-              <div class="flex items-center justify-between gap-4">
-                <div>
-                  <h4 class="font-medium text-foreground">{{ t('admin.settings.sections.channels.qq') }}</h4>
-                  <p class="text-xs text-muted-foreground mt-0.5">{{ t('admin.settings.sections.channels.qqHelp') }}</p>
-                </div>
-                <Button variant="secondary" size="sm" class="h-8 shrink-0" @click="addBot('qq')">
-                  <Plus class="h-3 w-3 mr-1.5" /> {{ t('admin.settings.addQQBot') }}
-                </Button>
-              </div>
-              <div class="grid md:grid-cols-2 gap-4">
-                <div v-for="(bot, idx) in qqBots" :key="bot.id" class="p-4 rounded-xl border border-border/50 bg-surface/20 relative group">
-                  <Button variant="ghost" size="sm" class="absolute top-2 right-2 h-8 w-8 p-0 opacity-0 group-hover:opacity-100 transition-opacity text-red-500 hover:bg-red-500/10" @click="removeBot('qq', idx)">
-                    <Trash2 class="h-4 w-4" />
-                  </Button>
-                  <div class="grid gap-4 pr-10">
-                    <div class="grid gap-2">
-                      <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.botNameLabel') }}</label>
-                      <Input v-model="bot.name" :placeholder="t('admin.settings.botNameQQPlaceholder')" class="h-8 text-sm" />
-                    </div>
-                    <div class="grid gap-2">
-                      <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.sections.channels.appId') }}</label>
-                      <Input v-model="bot.appId" :placeholder="t('admin.settings.sections.channels.appIdPlaceholder')" class="h-8 text-sm" />
-                    </div>
-                    <div class="grid gap-2">
-                      <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.sections.channels.appSecret') }}</label>
-                      <Input type="password" v-model="bot.clientSecret" :placeholder="t('admin.settings.sections.channels.appSecretPlaceholder')" class="h-8 text-sm" />
-                    </div>
-                    <div class="grid gap-2">
-                      <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.sections.channels.userOpenId') }}</label>
-                      <Input v-model="bot.userOpenId" :placeholder="t('admin.settings.sections.channels.userOpenIdPlaceholder')" class="h-8 text-sm" />
-                      <p class="text-xs text-muted-foreground">{{ t('admin.settings.sections.channels.userOpenIdHelp') }}</p>
-                    </div>
-                    <div>
-                      <Button variant="secondary" size="sm" class="h-8" :disabled="testingBotId === bot.id || !bot.appId || !bot.clientSecret || !bot.userOpenId" @click="testBot('qq', bot.id)">
-                        <Loader2 v-if="testingBotId === bot.id" class="h-3 w-3 animate-spin mr-1.5" />
-                        <CheckCircle2 v-else-if="successBotId === bot.id" class="h-3 w-3 mr-1.5 text-green-500" />
-                        <Send v-else class="h-3 w-3 mr-1.5 text-muted-foreground" />
-                        <span :class="{ 'text-green-500': successBotId === bot.id }">{{ successBotId === bot.id ? t('admin.settings.sections.channels.testConnectionSuccess') : t('admin.settings.sections.channels.testConnection') }}</span>
-                      </Button>
-                      <p v-if="errorBotId === bot.id" class="mt-2 text-xs text-destructive">{{ t(errorBotMessage) }}</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div v-if="qqBots.length === 0" class="text-center py-6 text-sm text-muted-foreground border border-dashed border-border/50 rounded-xl">
-                {{ t('admin.settings.emptyQQ') }}
-              </div>
-            </div>
-
-            <!-- Feishu -->
-            <div v-if="activeChannelTab === 'feishu'" class="space-y-4">
-              <div class="flex items-center justify-between">
-                <div>
-                  <h4 class="font-medium text-foreground">{{ t('admin.settings.sections.channels.feishu') }}</h4>
-                  <p class="text-xs text-muted-foreground mt-0.5">{{ t('admin.settings.sections.channels.feishuHelp') }}</p>
-                </div>
-                <Button variant="secondary" size="sm" class="h-8" @click="addBot('feishu')">
-                  <Plus class="h-3 w-3 mr-1.5" /> {{ t('admin.settings.addFeishuBot') }}
-                </Button>
-              </div>
-              <div class="grid md:grid-cols-2 gap-4">
-                <div v-for="(bot, idx) in feishuBots" :key="bot.id" class="p-4 rounded-xl border border-border/50 bg-surface/20 relative group">
-                  <Button variant="ghost" size="sm" class="absolute top-2 right-2 h-8 w-8 p-0 opacity-0 group-hover:opacity-100 transition-opacity text-red-500 hover:bg-red-500/10" @click="removeBot('feishu', idx)">
-                    <Trash2 class="h-4 w-4" />
-                  </Button>
-                  <div class="grid gap-4 pr-10">
-                    <div class="grid gap-2">
-                      <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.botNameLabel') }}</label>
-                      <Input v-model="bot.name" :placeholder="t('admin.settings.botNameFeishuPlaceholder')" class="h-8 text-sm" />
-                    </div>
-                    <div class="grid gap-2">
-                      <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.sections.channels.webhookUrl') }}</label>
-                      <Input type="url" v-model="bot.webhook" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." class="h-8 text-sm" />
-                    </div>
-                    <div class="grid gap-2">
-                      <label class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.sections.channels.secret') }}</label>
-                      <Input type="password" v-model="bot.secret" placeholder="..." class="h-8 text-sm" />
-                    </div>
-                    <div>
-                      <Button variant="secondary" size="sm" class="h-8" :disabled="testingBotId === bot.id || !bot.webhook" @click="testBot('feishu', bot.id)">
-                        <Loader2 v-if="testingBotId === bot.id" class="h-3 w-3 animate-spin mr-1.5" />
-                        <CheckCircle2 v-else-if="successBotId === bot.id" class="h-3 w-3 mr-1.5 text-green-500" />
-                        <Send v-else class="h-3 w-3 mr-1.5 text-muted-foreground" />
-                        <span :class="{ 'text-green-500': successBotId === bot.id }">{{ successBotId === bot.id ? t('admin.settings.sections.channels.testConnectionSuccess') : t('admin.settings.sections.channels.testConnection') }}</span>
-                      </Button>
-                      <p v-if="errorBotId === bot.id" class="mt-2 text-xs text-destructive">{{ t(errorBotMessage) }}</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div v-if="feishuBots.length === 0" class="text-center py-6 text-sm text-muted-foreground border border-dashed border-border/50 rounded-xl">
-                {{ t('admin.settings.emptyFeishu') }}
-              </div>
             </div>
 
             <!-- Telegram -->

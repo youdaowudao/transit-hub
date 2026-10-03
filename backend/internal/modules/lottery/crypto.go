@@ -122,7 +122,7 @@ func expandedPrizeSlots(prizes []Prize) []Prize {
 	return slots
 }
 
-func parseShanghaiTime(value string) (*time.Time, error) {
+func parseSingaporeTime(value string) (*time.Time, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return nil, nil

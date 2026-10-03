@@ -88,7 +88,7 @@ func TestFetchSub2APIAdminUsersPage_RequestQueryAuthAndParsing(t *testing.T) {
 	service := NewPlatformService(NewHTTPClient(server.Client()))
 	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "admin-token", TokenType: "Bearer"}
 	page, err := service.FetchSub2APIAdminUsersPage(session, Sub2APIAdminUsersQuery{
-		Page: -2, PageSize: 500, Status: "active", Role: "admin", Search: " alice+notes & keys ", SortBy: "not_allowed", SortOrder: "sideways", Timezone: "Asia/Shanghai",
+		Page: -2, PageSize: 500, Status: "active", Role: "admin", Search: " alice+notes & keys ", SortBy: "not_allowed", SortOrder: "sideways", Timezone: "Asia/Singapore",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -108,7 +108,7 @@ func TestFetchSub2APIAdminUsersPage_RequestQueryAuthAndParsing(t *testing.T) {
 	if !strings.Contains(gotRawQuery, "search=alice%2Bnotes+%26+keys") {
 		t.Fatalf("expected encoded search in raw query, got %q", gotRawQuery)
 	}
-	assertQueryValue(t, gotQuery, "timezone", "Asia/Shanghai")
+	assertQueryValue(t, gotQuery, "timezone", "Asia/Singapore")
 	assertQueryValue(t, gotQuery, "sort_by", "created_at")
 	assertQueryValue(t, gotQuery, "sort_order", "desc")
 	if page.Total != 101 || page.Page != 1 || page.PageSize != 100 || page.Pages != 2 {
@@ -145,14 +145,14 @@ func TestFetchSub2APIAdminUsersPage_AllowsLastUsedAtSort(t *testing.T) {
 	service := NewPlatformService(NewHTTPClient(server.Client()))
 	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "admin-token", TokenType: "Bearer"}
 	_, err := service.FetchSub2APIAdminUsersPage(session, Sub2APIAdminUsersQuery{
-		Page: 1, PageSize: 100, SortBy: "last_used_at", SortOrder: "desc", Timezone: "Asia/Shanghai",
+		Page: 1, PageSize: 100, SortBy: "last_used_at", SortOrder: "desc", Timezone: "Asia/Singapore",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	assertQueryValue(t, gotQuery, "sort_by", "last_used_at")
 	assertQueryValue(t, gotQuery, "sort_order", "desc")
-	assertQueryValue(t, gotQuery, "timezone", "Asia/Shanghai")
+	assertQueryValue(t, gotQuery, "timezone", "Asia/Singapore")
 }
 
 func TestFetchSub2APIAdminUserBreakdown_RequestQueryAuthAndParsing(t *testing.T) {
@@ -177,7 +177,7 @@ func TestFetchSub2APIAdminUserBreakdown_RequestQueryAuthAndParsing(t *testing.T)
 
 	service := NewPlatformService(NewHTTPClient(server.Client()))
 	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "admin-token", TokenType: "Bearer"}
-	breakdown, err := service.FetchSub2APIAdminUserBreakdown(session, Sub2APIUserBreakdownQuery{StartDate: "2026-07-12", EndDate: "2026-07-13", SortBy: "email", Limit: 500, Timezone: "Asia/Shanghai"})
+	breakdown, err := service.FetchSub2APIAdminUserBreakdown(session, Sub2APIUserBreakdownQuery{StartDate: "2026-07-12", EndDate: "2026-07-13", SortBy: "email", Limit: 500, Timezone: "Asia/Singapore"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestFetchSub2APIAdminUserBreakdown_RequestQueryAuthAndParsing(t *testing.T)
 	assertQueryValue(t, gotQuery, "end_date", "2026-07-13")
 	assertQueryValue(t, gotQuery, "sort_by", "total_tokens")
 	assertQueryValue(t, gotQuery, "limit", "200")
-	assertQueryValue(t, gotQuery, "timezone", "Asia/Shanghai")
+	assertQueryValue(t, gotQuery, "timezone", "Asia/Singapore")
 	if breakdown.StartDate != "2026-07-12" || breakdown.EndDate != "2026-07-13" || len(breakdown.Users) != 2 {
 		t.Fatalf("unexpected parsed breakdown: %+v", breakdown)
 	}

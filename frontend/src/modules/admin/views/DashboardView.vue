@@ -61,7 +61,7 @@ import {
   computeDelta,
   computeDashboardMetricDelta,
   formatAccountStatsRefreshNotice,
-  formatCny,
+  formatAmount,
   formatDateTime,
 } from '../utils/dashboard'
 
@@ -455,20 +455,20 @@ const cards = computed<DashboardCoreCard[]>(() => {
             ? costMode === 'unavailable' && (cq?.collectedSites ?? 0) === 0 && (cq?.missingSites ?? 0) > 0
               ? t('admin.dashboard.costQuality.temporaryZero', { missing: cq?.missingSites ?? 0 })
               : t('admin.dashboard.costQuality.partial', {
-                  cost: formatCny(current.current),
+                  cost: formatAmount(current.current),
                   collected: cq?.collectedSites ?? 0,
                   expected: cq?.expectedSites ?? 0,
                 })
-            : t('admin.dashboard.costQuality.netProfitCeiling', { value: formatCny(current.current) }))
+            : t('admin.dashboard.costQuality.netProfitCeiling', { value: formatAmount(current.current) }))
       : ''
     return [{
       key,
       label: t(METRIC_META[key].labelKey),
       icon: METRIC_META[key].icon,
       color: METRIC_META[key].color,
-      value: formatCny(current.current),
+      value: formatAmount(current.current),
       deltaDirection: delta.direction,
-      deltaText: deltaUnavailable ? '' : formatCny(Math.abs(delta.amount)),
+      deltaText: deltaUnavailable ? '' : formatAmount(Math.abs(delta.amount)),
       statusText: metricErrorText(current.error)
         || fallbackStatus
         || partialStatus
@@ -601,9 +601,9 @@ const periodProfitLabel = computed(() => selectedSeries('netProfit').some(point 
 
 const compactCurrency = (value: number) => {
   const absolute = Math.abs(value)
-  if (absolute >= 1_000_000) return `¥${numberFormatter.value.format(value / 1_000_000)}M`
-  if (absolute >= 1_000) return `¥${numberFormatter.value.format(value / 1_000)}K`
-  return `¥${numberFormatter.value.format(value)}`
+  if (absolute >= 1_000_000) return `${numberFormatter.value.format(value / 1_000_000)}M`
+  if (absolute >= 1_000) return `${numberFormatter.value.format(value / 1_000)}K`
+  return `${numberFormatter.value.format(value)}`
 }
 
 const performanceChartOption = computed<EChartsCoreOption>(() => {
@@ -633,7 +633,7 @@ const performanceChartOption = computed<EChartsCoreOption>(() => {
     name,
     data: chartData(points),
     itemStyle: { color },
-    tooltip: { valueFormatter: (value: number | null) => formatCny(value) },
+    tooltip: { valueFormatter: (value: number | null) => formatAmount(value) },
   })
   return {
     animationDuration: 350,
@@ -673,8 +673,8 @@ const performanceChartOption = computed<EChartsCoreOption>(() => {
               })})`
             : ''
           const amount = typeof entry.value === 'number' && Number.isFinite(entry.value)
-            ? formatCny(entry.value)
-            : '¥—'
+            ? formatAmount(entry.value)
+            : '—'
           return `${entry.seriesName ? '<span style="display:inline-block;margin-right:4px;border-radius:50%;width:8px;height:8px;background:currentColor"></span>' : ''}${escapeTooltipHtml(label)}${escapeTooltipHtml(coverage)}: ${amount}`
         }).join('<br/>')
         return `${axisValue}<br/>${rows}`
@@ -799,7 +799,7 @@ const groupTooltipContent = (params: unknown, mutedColor: string, foregroundColo
   if (!point) return ''
   const name = escapeTooltipHtml(String(point.name ?? ''))
   const amount = Number(point.value)
-  const value = escapeTooltipHtml(formatCny(Number.isFinite(amount) ? amount : 0))
+  const value = escapeTooltipHtml(formatAmount(Number.isFinite(amount) ? amount : 0))
   const label = escapeTooltipHtml(groupMetricLabel.value)
   const item = topGroups.value.find((group) => groupDisplayName(group) === String(point.name ?? ''))
   if (groupMetricMode.value === 'profit' && item?.contributionKind === 'unallocated_profit') {
@@ -808,8 +808,8 @@ const groupTooltipContent = (params: unknown, mutedColor: string, foregroundColo
       + `<span>${label}</span><strong style="color:${foregroundColor}">${value}</strong></div>`
   }
   if (groupMetricMode.value === 'profit' && item?.directRevenue != null && item.directCost != null) {
-    const directRevenue = escapeTooltipHtml(formatCny(item.directRevenue))
-    const directCost = escapeTooltipHtml(formatCny(item.directCost))
+    const directRevenue = escapeTooltipHtml(formatAmount(item.directRevenue))
+    const directCost = escapeTooltipHtml(formatAmount(item.directCost))
     return `<div style="margin-bottom:6px;color:${foregroundColor};font-weight:600">${name}</div>`
       + `<div style="display:flex;min-width:160px;justify-content:space-between;gap:20px;color:${mutedColor}">`
       + `<span>已归属营收</span><strong style="color:${foregroundColor}">${directRevenue}</strong></div>`
@@ -1105,7 +1105,7 @@ const lastProbeLabel = computed(() => {
 		<section class="flex flex-col gap-3 border-y border-border/60 py-3 sm:flex-row sm:items-center sm:justify-between">
 			<div class="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1 text-sm">
 				<span class="font-medium text-foreground">成本构成</span>
-				<span v-for="line in homepageCostLines" :key="line.label" class="text-muted-foreground">{{ line.label }} {{ formatCny(line.value) }}</span>
+				<span v-for="line in homepageCostLines" :key="line.label" class="text-muted-foreground">{{ line.label }} {{ formatAmount(line.value) }}</span>
 			</div>
 			<div class="flex shrink-0 gap-2">
 				<button type="button" class="h-8 rounded-md border border-border px-3 text-xs font-medium hover:bg-surface-elevated" @click="openAccountCostWorkspace('today')">记一笔成本</button>
@@ -1142,15 +1142,15 @@ const lastProbeLabel = computed(() => {
             <dl class="mt-5 grid grid-cols-3 divide-x divide-border/60 border-y border-border/60 py-3">
               <div class="min-w-0 px-2 first:pl-0 sm:px-4">
                 <dt class="truncate text-xs text-muted-foreground">{{ t('admin.dashboard.performance.periodRevenue') }}</dt>
-                <dd class="mt-1 truncate text-sm font-semibold tabular-nums text-foreground sm:text-base">{{ formatCny(periodTotals.revenue) }}</dd>
+                <dd class="mt-1 truncate text-sm font-semibold tabular-nums text-foreground sm:text-base">{{ formatAmount(periodTotals.revenue) }}</dd>
               </div>
               <div class="min-w-0 px-2 sm:px-4">
                 <dt class="truncate text-xs text-muted-foreground">{{ periodCostLabel }}</dt>
-                <dd class="mt-1 truncate text-sm font-semibold tabular-nums text-foreground sm:text-base">{{ formatCny(periodTotals.cost) }}</dd>
+                <dd class="mt-1 truncate text-sm font-semibold tabular-nums text-foreground sm:text-base">{{ formatAmount(periodTotals.cost) }}</dd>
               </div>
               <div class="min-w-0 px-2 pr-0 sm:px-4 sm:pr-0">
                 <dt class="truncate text-xs text-muted-foreground">{{ periodProfitLabel }}</dt>
-                <dd class="mt-1 truncate text-sm font-semibold tabular-nums text-signal sm:text-base">{{ formatCny(periodTotals.profit) }}</dd>
+                <dd class="mt-1 truncate text-sm font-semibold tabular-nums text-signal sm:text-base">{{ formatAmount(periodTotals.profit) }}</dd>
               </div>
             </dl>
 
@@ -1174,11 +1174,11 @@ const lastProbeLabel = computed(() => {
             <div class="mt-6 divide-y divide-border/60 border-y border-border/60">
               <button type="button" class="flex w-full items-center justify-between gap-4 py-4 text-left" @click="openBalanceFilter">
                 <dt class="text-sm text-muted-foreground">{{ t('admin.dashboard.capital.siteBalance') }}</dt>
-                <dd class="font-semibold tabular-nums text-foreground">{{ formatCny(siteBalance) }}</dd>
+                <dd class="font-semibold tabular-nums text-foreground">{{ formatAmount(siteBalance) }}</dd>
               </button>
               <button type="button" class="flex w-full items-center justify-between gap-4 py-4 text-left" @click="openUpstreamBalanceBreakdown">
                 <dt class="text-sm text-muted-foreground">{{ t('admin.dashboard.capital.upstreamBalance') }}</dt>
-                <dd class="font-semibold tabular-nums text-foreground">{{ formatCny(upstreamBalance) }}</dd>
+                <dd class="font-semibold tabular-nums text-foreground">{{ formatAmount(upstreamBalance) }}</dd>
               </button>
             </div>
 

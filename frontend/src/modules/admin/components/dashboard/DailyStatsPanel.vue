@@ -60,15 +60,15 @@
             >
               <td class="py-2 pr-4 font-mono text-xs">{{ item.date }}</td>
               <td class="text-right py-2 px-2">
-                <span v-if="item.todayProfit != null">{{ formatCny(item.todayProfit) }}</span>
+                <span v-if="item.todayProfit != null">{{ formatAmount(item.todayProfit) }}</span>
                 <span v-else class="text-muted-foreground">—</span>
               </td>
               <td class="text-right py-2 px-2">
-                <span v-if="item.operatingCost != null">{{ formatCny(item.operatingCost) }}</span>
+                <span v-if="item.operatingCost != null">{{ formatAmount(item.operatingCost) }}</span>
                 <span v-else class="text-muted-foreground" title="历史口径不完整">—</span>
               </td>
               <td class="text-right py-2 px-2">
-                <span v-if="item.adjustedNetProfit != null" class="text-xs">{{ formatCny(item.adjustedNetProfit) }}</span>
+                <span v-if="item.adjustedNetProfit != null" class="text-xs">{{ formatAmount(item.adjustedNetProfit) }}</span>
                 <span v-else class="text-muted-foreground">—</span>
               </td>
               <td class="text-right py-2 px-2"><span v-if="adjustedMargin(item) != null">{{ adjustedMargin(item)?.toFixed(1) }}%</span><span v-else class="text-muted-foreground">—</span></td>
@@ -94,16 +94,16 @@
             <tr v-else-if="expandedDates.has(item.date)" class="bg-muted/30">
               <td colspan="7" class="py-2 pl-8 pr-4">
                 <div v-if="item.additionalCosts" class="mb-3 grid gap-1 border-b border-border/60 pb-3 text-xs text-muted-foreground sm:grid-cols-2">
-                  <span>充值手续费{{ item.additionalCosts.feeRate != null ? ` (${(item.additionalCosts.feeRate * 100).toFixed(2)}%)` : '' }}：{{ formatCny(item.additionalCosts.rechargeFee) }}</span>
-                  <span>活动赠送摊销：{{ formatCny(item.additionalCosts.promotion) }}</span>
-                  <span>服务器及固定费用：{{ formatCny(item.additionalCosts.fixed) }}</span>
-                  <span>手工调整：{{ formatCny(item.additionalCosts.adjustment) }}</span>
-                  <span>买号确认：{{ formatCny(item.additionalCosts.accountPurchase) }}</span>
-                  <span>退款冲减：{{ formatCny(item.additionalCosts.accountRefund) }}</span>
-                  <span>替代成本扣减：{{ item.replacementDeduction == null ? '暂无可靠数据' : formatCny(-item.replacementDeduction) }}</span>
+                  <span>充值手续费{{ item.additionalCosts.feeRate != null ? ` (${(item.additionalCosts.feeRate * 100).toFixed(2)}%)` : '' }}：{{ formatAmount(item.additionalCosts.rechargeFee) }}</span>
+                  <span>活动赠送摊销：{{ formatAmount(item.additionalCosts.promotion) }}</span>
+                  <span>服务器及固定费用：{{ formatAmount(item.additionalCosts.fixed) }}</span>
+                  <span>手工调整：{{ formatAmount(item.additionalCosts.adjustment) }}</span>
+                  <span>买号确认：{{ formatAmount(item.additionalCosts.accountPurchase) }}</span>
+                  <span>退款冲减：{{ formatAmount(item.additionalCosts.accountRefund) }}</span>
+                  <span>替代成本扣减：{{ item.replacementDeduction == null ? '暂无可靠数据' : formatAmount(-item.replacementDeduction) }}</span>
                   <span>账号快照：{{ item.accountStatsQuality === 'complete' ? `${item.accountCompletedCount ?? 0}/${item.accountExpectedCount ?? 0} 完整` : '历史口径不完整' }}</span>
-                  <span class="font-medium text-foreground">经营总成本：{{ formatCny(item.operatingCost) }}</span>
-                  <span class="font-medium text-foreground">调整后净利润：{{ formatCny(item.adjustedNetProfit) }}</span>
+                  <span class="font-medium text-foreground">经营总成本：{{ formatAmount(item.operatingCost) }}</span>
+                  <span class="font-medium text-foreground">调整后净利润：{{ formatAmount(item.adjustedNetProfit) }}</span>
                 </div>
                 <div v-if="item.siteCosts && item.siteCosts.length > 0" class="space-y-1">
                   <div
@@ -113,7 +113,7 @@
                   >
                     <span>{{ sc.siteName }} <span class="opacity-60">({{ sc.platform }})</span></span>
                     <span>
-                      <span v-if="sc.adjustedCost != null">{{ formatCny(sc.adjustedCost) }}</span>
+                      <span v-if="sc.adjustedCost != null">{{ formatAmount(sc.adjustedCost) }}</span>
                       <span v-else class="text-destructive">{{ sc.errorReason || sc.status }}</span>
                       <span v-if="sc.lastAttemptError" class="ml-1 text-muted-foreground">({{ sc.lastAttemptError }})</span>
                     </span>
@@ -122,7 +122,7 @@
                 <div v-if="item.additionalCosts?.records?.length" class="mt-3 space-y-1 border-t border-border/60 pt-3 text-xs text-muted-foreground">
                   <div v-for="record in item.additionalCosts.records" :key="record.id" class="flex justify-between gap-4">
                     <span>{{ record.name }}{{ record.estimated ? '（预估）' : '' }}</span>
-                    <span class="tabular-nums">{{ formatCny(record.amount) }}</span>
+                    <span class="tabular-nums">{{ formatAmount(record.amount) }}</span>
                   </div>
                 </div>
                 <p v-else-if="!item.additionalCosts" class="text-xs text-muted-foreground">{{ t('admin.dashboard.dailyStats.noData') }}</p>
@@ -156,20 +156,20 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { getDailyStats, type DailyStatItem } from '../../api/dashboardAdmin'
-import { formatCny } from '../../utils/dashboard'
+import { formatAmount } from '../../utils/dashboard'
 
 import { t } from '@/locales'
-// Shanghai 固定 UTC+8，无 DST。用加偏移量的方式获取上海业务日期。
-function shanghaiDateStr(offsetDays = 0): string {
-  const shanghaiMs = Date.now() + 8 * 60 * 60 * 1000
-  const d = new Date(shanghaiMs + offsetDays * 24 * 60 * 60 * 1000)
+// 当前新加坡业务日为 UTC+8，用固定偏移量获取当日日期。
+function singaporeDateStr(offsetDays = 0): string {
+  const singaporeMs = Date.now() + 8 * 60 * 60 * 1000
+  const d = new Date(singaporeMs + offsetDays * 24 * 60 * 60 * 1000)
   return d.toISOString().slice(0, 10)
 }
 
-const todayStr = shanghaiDateStr(0)
+const todayStr = singaporeDateStr(0)
 
 function daysAgo(n: number) {
-  return shanghaiDateStr(-n)
+  return singaporeDateStr(-n)
 }
 
 interface Shortcut { label: string; from: string; to: string }

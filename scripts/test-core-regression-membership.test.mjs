@@ -52,3 +52,16 @@ test('connection-health core gate includes protocol concurrency contracts', asyn
   const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
   assert.match(script, /go test -race[^\n]+Priority\|Scheduler\|Refresh\|Sync\|Regression\|Protocol\|ActionCheckpoint\|ActionDiagnostics\|ActionDispatch\|RuntimeLease/)
 })
+
+test('core gate retains globalization recipient, language and amount regressions', async () => {
+  const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
+  for (const member of [
+    './cmd/notification-cleanup', './internal/modules/settings', './internal/shared/businesstime',
+    './internal/modules/my_sites', './internal/modules/group_rate_campaigns',
+    'locale-configuration.test.ts', 'globalization-amount.behavior.test.ts', 'globalization-time-input.behavior.test.ts',
+    'notification-recipients.behavior.test.ts', 'user-last-used.test.ts',
+    'run_globalization_gate',
+  ]) {
+    assert.ok(script.includes(member), `missing globalization core regression: ${member}`)
+  }
+})

@@ -386,7 +386,7 @@ func summarizeCachedUpstreamCosts(sites []upstream.Response) (total float64, com
 }
 
 // summarizeCachedUpstreamCostsWithQuality 汇总缓存成本并返回 CostQuality 结构。
-// businessDate：当次请求的上海业务日期（"2006-01-02"）。
+// businessDate：当次请求的新加坡业务日期（"2006-01-02"）。
 // maxStaleness：缓存最大有效时长；0 表示不检查时效。
 func summarizeCachedUpstreamCostsWithQuality(sites []upstream.Response, businessDate string, maxStaleness time.Duration) (total float64, quality *CostQuality) {
 	return summarizeCachedUpstreamCostsWithHistory(sites, businessDate, maxStaleness, nil)
@@ -1263,7 +1263,7 @@ func additionalCostRecords(summary *AdditionalCostSummary) []AdditionalCostRecor
 	return summary.Records
 }
 
-// finalizeBusinessDate 对指定 SessionRef 的指定上海业务日期执行精确日结。
+// finalizeBusinessDate 对指定 SessionRef 的指定新加坡业务日期执行精确日结。
 // date 由调用方传入（"2006-01-02"），函数内部禁止用 time.Now() 推导业务日期。
 // 记录 finalized_at、observed_at 使用 time.Now() 是合法的。
 func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSessionRef, date string, snapshotSource string) error {

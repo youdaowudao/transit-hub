@@ -385,16 +385,16 @@ const openGroupDestination = (group: UpstreamGroupInfo) => {
   })
 }
 
-const cnyMetricDisplay = (site: UpstreamSite, metric: UpstreamMetricValue): string | null => {
+const amountMetricDisplay = (site: UpstreamSite, metric: UpstreamMetricValue): string | null => {
   if (metric.value === null || !Number.isFinite(metric.value) || site.rechargeRate <= 0 || !Number.isFinite(site.rechargeRate)) return null
-  return t('admin.upstream.currency.cnyValue', { amount: (metric.value * site.rechargeRate).toFixed(2) })
+  return t('admin.upstream.currency.amountValue', { amount: (metric.value * site.rechargeRate).toFixed(2) })
 }
 
 const groupTodayCostDisplay = (group: UpstreamGroupInfo): string => {
   if (group.todayCost === null || group.todayCost === undefined || !Number.isFinite(group.todayCost)) {
     return t('admin.upstream.fields.costUnknown')
   }
-  return t('admin.upstream.currency.cnyValue', { amount: group.todayCost.toFixed(2) })
+  return t('admin.upstream.currency.amountValue', { amount: group.todayCost.toFixed(2) })
 }
 
 const groupCostReasonDisplay = (group: UpstreamGroupInfo): string => {
@@ -420,7 +420,7 @@ const lastUpdatedDisplay = (site: UpstreamSite): string => {
   if (!site.lastSyncedAt) return t('admin.upstream.fields.notSynced')
   const value = new Date(site.lastSyncedAt)
   if (Number.isNaN(value.getTime())) return t('admin.upstream.fields.notSynced')
-  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(value)
+  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Singapore' }).format(value)
 }
 
 const siteFailureKey = (site: UpstreamSite): string | null => {
@@ -563,28 +563,28 @@ onBeforeUnmount(() => {
           <div class="grid grid-cols-3 gap-3">
             <div class="flex flex-col items-center justify-center p-3 rounded-xl bg-surface/50 border border-border/40">
               <span class="text-xs text-muted-foreground mb-1">{{ t('admin.upstream.fields.balance') }}</span>
-              <span v-if="cnyMetricDisplay(site, site.metrics.balance)" class="font-bold text-primary text-sm text-center">
-                {{ cnyMetricDisplay(site, site.metrics.balance) }}
+              <span v-if="amountMetricDisplay(site, site.metrics.balance)" class="font-bold text-primary text-sm text-center">
+                {{ amountMetricDisplay(site, site.metrics.balance) }}
               </span>
-              <span :class="[cnyMetricDisplay(site, site.metrics.balance) ? 'text-[10px] font-medium text-primary/70 mt-0.5' : 'font-bold text-primary text-sm', 'text-center']">
+              <span :class="[amountMetricDisplay(site, site.metrics.balance) ? 'text-[10px] font-medium text-primary/70 mt-0.5' : 'font-bold text-primary text-sm', 'text-center']">
                 {{ usdMetricDisplay(site.metrics.balance) }}
               </span>
             </div>
             <div class="flex flex-col items-center justify-center p-3 rounded-xl bg-surface/50 border border-border/40">
               <span class="text-xs text-muted-foreground mb-1">{{ t('admin.upstream.fields.todayConsume') }}</span>
-              <span v-if="cnyMetricDisplay(site, site.metrics.todayConsume)" :class="['font-bold text-sm text-center', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? 'text-orange-500' : 'text-foreground']">
-                {{ cnyMetricDisplay(site, site.metrics.todayConsume) }}
+              <span v-if="amountMetricDisplay(site, site.metrics.todayConsume)" :class="['font-bold text-sm text-center', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? 'text-orange-500' : 'text-foreground']">
+                {{ amountMetricDisplay(site, site.metrics.todayConsume) }}
               </span>
-              <span :class="[cnyMetricDisplay(site, site.metrics.todayConsume) ? 'text-[10px] font-medium mt-0.5' : 'font-bold text-sm', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? (cnyMetricDisplay(site, site.metrics.todayConsume) ? 'text-orange-500/70' : 'text-orange-500') : (cnyMetricDisplay(site, site.metrics.todayConsume) ? 'text-muted-foreground' : 'text-foreground'), 'text-center']">
+              <span :class="[amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-[10px] font-medium mt-0.5' : 'font-bold text-sm', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? (amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-orange-500/70' : 'text-orange-500') : (amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-muted-foreground' : 'text-foreground'), 'text-center']">
                 {{ usdMetricDisplay(site.metrics.todayConsume) }}
               </span>
             </div>
             <div class="flex flex-col items-center justify-center p-3 rounded-xl bg-surface/50 border border-border/40">
               <span class="text-xs text-muted-foreground mb-1">{{ t('admin.upstream.fields.historyRecharge') }}</span>
-              <span v-if="cnyMetricDisplay(site, site.metrics.historyRecharge)" class="font-bold text-foreground text-sm text-center">
-                {{ cnyMetricDisplay(site, site.metrics.historyRecharge) }}
+              <span v-if="amountMetricDisplay(site, site.metrics.historyRecharge)" class="font-bold text-foreground text-sm text-center">
+                {{ amountMetricDisplay(site, site.metrics.historyRecharge) }}
               </span>
-              <span :class="[cnyMetricDisplay(site, site.metrics.historyRecharge) ? 'text-[10px] font-medium text-muted-foreground mt-0.5' : 'font-bold text-foreground text-sm', 'text-center']">
+              <span :class="[amountMetricDisplay(site, site.metrics.historyRecharge) ? 'text-[10px] font-medium text-muted-foreground mt-0.5' : 'font-bold text-foreground text-sm', 'text-center']">
                 {{ usdMetricDisplay(site.metrics.historyRecharge) }}
               </span>
             </div>
@@ -746,30 +746,30 @@ onBeforeUnmount(() => {
               </td>
               <td class="px-6 py-4">
                 <div class="flex flex-col gap-0.5">
-                  <span v-if="cnyMetricDisplay(site, site.metrics.balance)" class="font-medium text-primary">
-                    {{ cnyMetricDisplay(site, site.metrics.balance) }}
+                  <span v-if="amountMetricDisplay(site, site.metrics.balance)" class="font-medium text-primary">
+                    {{ amountMetricDisplay(site, site.metrics.balance) }}
                   </span>
-                  <span :class="[cnyMetricDisplay(site, site.metrics.balance) ? 'text-xs font-medium text-primary/70' : 'font-medium text-primary']">
+                  <span :class="[amountMetricDisplay(site, site.metrics.balance) ? 'text-xs font-medium text-primary/70' : 'font-medium text-primary']">
                     {{ usdMetricDisplay(site.metrics.balance) }}
                   </span>
                 </div>
               </td>
               <td class="px-6 py-4">
                 <div class="flex flex-col gap-0.5">
-                  <span v-if="cnyMetricDisplay(site, site.metrics.todayConsume)" :class="['font-medium', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? 'text-orange-500' : 'text-muted-foreground']">
-                    {{ cnyMetricDisplay(site, site.metrics.todayConsume) }}
+                  <span v-if="amountMetricDisplay(site, site.metrics.todayConsume)" :class="['font-medium', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? 'text-orange-500' : 'text-muted-foreground']">
+                    {{ amountMetricDisplay(site, site.metrics.todayConsume) }}
                   </span>
-                  <span :class="[cnyMetricDisplay(site, site.metrics.todayConsume) ? 'text-xs font-medium' : 'font-medium', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? (cnyMetricDisplay(site, site.metrics.todayConsume) ? 'text-orange-500/70' : 'text-orange-500') : 'text-muted-foreground']">
+                  <span :class="[amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-xs font-medium' : 'font-medium', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? (amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-orange-500/70' : 'text-orange-500') : 'text-muted-foreground']">
                     {{ usdMetricDisplay(site.metrics.todayConsume) }}
                   </span>
                 </div>
               </td>
               <td class="px-6 py-4">
                 <div class="flex flex-col gap-0.5">
-                  <span v-if="cnyMetricDisplay(site, site.metrics.historyRecharge)" class="font-medium text-muted-foreground">
-                    {{ cnyMetricDisplay(site, site.metrics.historyRecharge) }}
+                  <span v-if="amountMetricDisplay(site, site.metrics.historyRecharge)" class="font-medium text-muted-foreground">
+                    {{ amountMetricDisplay(site, site.metrics.historyRecharge) }}
                   </span>
-                  <span :class="[cnyMetricDisplay(site, site.metrics.historyRecharge) ? 'text-xs font-medium text-muted-foreground' : 'text-muted-foreground']">
+                  <span :class="[amountMetricDisplay(site, site.metrics.historyRecharge) ? 'text-xs font-medium text-muted-foreground' : 'text-muted-foreground']">
                     {{ usdMetricDisplay(site.metrics.historyRecharge) }}
                   </span>
                 </div>

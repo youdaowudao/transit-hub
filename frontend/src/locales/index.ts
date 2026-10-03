@@ -4,13 +4,13 @@
  * 提供与 vue-i18n Composition API 同名的符号：
  *   t(key, params?)  — 按 key 查值，支持 {param} 占位符插值
  *   te(key)          — 检查 key 是否存在
- *   locale           — 固定为 'zh-CN'（纯字符串常量，Intl 可直接用）
+ *   locale           — 构建期格式化语言；当前文案回退中文
  *
  * 原来每个组件里的 `const { t } = useI18n()` 替换为
  * `import { t } from '@/locales'`，其余调用方式保持不变。
  */
 
-import messages from './zh-CN'
+import messages from './zh'
 
 type NestedRecord = { [k: string]: string | NestedRecord }
 
@@ -30,8 +30,22 @@ function flatten(obj: NestedRecord, prefix = ''): Record<string, string> {
 
 const flat = flatten(messages as unknown as NestedRecord)
 
-/** 固定语言标识，供 Intl.DateTimeFormat / Intl.NumberFormat 等使用 */
-export const locale = 'zh-CN'
+export type AppLocale = 'zh' | 'en' | `zh-${string}` | `en-${string}`
+
+/** 唯一语言入口；当前仅有中文文案，英文配置用于数字和日期格式。 */
+export function resolveAppLocale(value: unknown): AppLocale {
+  if (typeof value !== 'string' || !value.trim()) return 'zh'
+  try {
+    const [canonical] = Intl.getCanonicalLocales(value.trim())
+    const language = new Intl.Locale(canonical).language
+    return language === 'zh' || language === 'en' ? canonical as AppLocale : 'zh'
+  } catch {
+    return 'zh'
+  }
+}
+
+export const locale = resolveAppLocale(import.meta.env.VITE_APP_LOCALE)
+export const messageLocale = 'zh'
 
 /**
  * 翻译函数

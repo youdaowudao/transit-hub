@@ -1100,7 +1100,7 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	session := *site.Session
 
 	// 刷新会话并拉取指标（无锁操作，可能耗时较长）。
-	syncDate := businesstime.Today() // 同步开始时生成一次上海业务日期，所有指标复用。
+	syncDate := businesstime.Today() // 同步开始时生成一次新加坡业务日期，所有指标复用。
 	refreshedSession, refreshErr := s.platformService.RefreshSession(session)
 	metrics := Metrics{}
 	if refreshErr == nil {

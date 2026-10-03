@@ -590,7 +590,7 @@ func checkBalanceWarning(ctx context.Context, svc *settings.Service, uSvc *upstr
 		return
 	}
 
-	// 获取站点充值倍率，用于将 USD 余额转换为 CNY 后与阈值比较。
+	// 获取站点充值倍率，用于将 USD 余额转换为核算金额 后与阈值比较。
 	site, err := uSvc.GetSite(ctx, siteID)
 	if err != nil {
 		return
@@ -600,15 +600,15 @@ func checkBalanceWarning(ctx context.Context, svc *settings.Service, uSvc *upstr
 		rechargeRate = 1
 	}
 
-	newBalCNY := *newMetrics.Balance.Value * rechargeRate
+	convertedBalance := *newMetrics.Balance.Value * rechargeRate
 
-	// 站点级阈值覆盖：有值则用站点配置，否则使用全局默认（均为 CNY）。
+	// 站点级阈值覆盖：有值则用站点配置，否则使用全局默认（均为核算金额）。
 	threshold := strategy.DefaultBalanceThreshold
 	if site.Settings.BalanceThreshold != nil {
 		threshold = *site.Settings.BalanceThreshold
 	}
 
-	if newBalCNY >= threshold {
+	if convertedBalance >= threshold {
 		// 余额恢复到阈值以上，清除冷却记录，下次跌破可立即触发。
 		balanceAlertTracker.mu.Lock()
 		delete(balanceAlertTracker.lastSent, siteID)
@@ -625,8 +625,8 @@ func checkBalanceWarning(ctx context.Context, svc *settings.Service, uSvc *upstr
 	balanceAlertTracker.lastSent[siteID] = time.Now()
 	balanceAlertTracker.mu.Unlock()
 
-	msg := formatBalanceWarning(siteName, newBalCNY, threshold, strategy.BalanceTemplate)
-	log.Printf("[alert] 余额预警触发 site=%s balanceCNY=%.2f threshold=%.2f rechargeRate=%.2f", siteName, newBalCNY, threshold, rechargeRate)
+	msg := formatBalanceWarning(siteName, convertedBalance, threshold, strategy.BalanceTemplate)
+	log.Printf("[alert] 余额预警触发 site=%s convertedBalance=%.2f threshold=%.2f rechargeRate=%.2f", siteName, convertedBalance, threshold, rechargeRate)
 	svc.SendFormattedToWorkspaceBots(ctx, userID, adminAccountID, strategy.BalanceNotifyBotIDs, msg, strategy.BalanceTemplateFormat)
 }
 
@@ -661,7 +661,7 @@ func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy
 	}
 }
 
-const defaultBalanceTemplate = "🔴 余额预警\n🏷️ 站点：{siteName}\n💰 当前余额：¥{balance}\n⚠️ 预警阈值：¥{threshold}\n请及时检查并充值，避免服务中断。"
+const defaultBalanceTemplate = "🔴 余额预警\n🏷️ 站点：{siteName}\n💰 当前余额：{balance}\n⚠️ 预警阈值：{threshold}\n请及时检查并充值，避免服务中断。"
 const defaultMultiplierTemplate = "🟠 倍率变更预警\n🏷️ 站点：{siteName}\n📦 分组：{groupName}\n📊 变更：{oldRate}x → {newRate}x（{changeDirection}）\n请及时确认定价与路由策略。"
 
 func formatBalanceWarning(siteName string, balance, threshold float64, customTemplate string) string {

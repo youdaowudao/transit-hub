@@ -3,11 +3,11 @@ package businesstime
 import "time"
 
 const (
-	Timezone   = "Asia/Shanghai"
+	Timezone   = "Asia/Singapore"
 	dateLayout = "2006-01-02"
 )
 
-var shanghaiLocation = loadLocation()
+var singaporeLocation = loadLocation()
 
 func loadLocation() *time.Location {
 	location, err := time.LoadLocation(Timezone)
@@ -18,7 +18,7 @@ func loadLocation() *time.Location {
 }
 
 func Location() *time.Location {
-	return shanghaiLocation
+	return singaporeLocation
 }
 
 func Today() string {
@@ -26,15 +26,15 @@ func Today() string {
 }
 
 func DateAt(value time.Time) string {
-	return value.In(shanghaiLocation).Format(dateLayout)
+	return value.In(singaporeLocation).Format(dateLayout)
 }
 
 func Bounds(date string) (time.Time, time.Time, error) {
-	day, err := time.ParseInLocation(dateLayout, date, shanghaiLocation)
+	day, err := time.ParseInLocation(dateLayout, date, singaporeLocation)
 	if err != nil {
 		return time.Time{}, time.Time{}, err
 	}
-	start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, shanghaiLocation)
-	end := time.Date(day.Year(), day.Month(), day.Day(), 23, 59, 59, int(time.Second-time.Nanosecond), shanghaiLocation)
+	start := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, singaporeLocation)
+	end := time.Date(day.Year(), day.Month(), day.Day(), 23, 59, 59, int(time.Second-time.Nanosecond), singaporeLocation)
 	return start, end, nil
 }

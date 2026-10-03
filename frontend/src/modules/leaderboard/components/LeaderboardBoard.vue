@@ -94,7 +94,7 @@ const podiumTableAvatarClass = (rank: number): string => {
 const formatUpdatedAt = (): string => {
   if (!props.updatedAt) return ''
   return new Intl.DateTimeFormat(locale, {
-    timeZone: 'Asia/Shanghai',
+    timeZone: 'Asia/Singapore',
     hour: '2-digit',
     minute: '2-digit',
   }).format(props.updatedAt)

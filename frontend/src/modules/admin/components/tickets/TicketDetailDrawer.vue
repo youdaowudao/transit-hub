@@ -101,6 +101,7 @@ const formatDateTime = (value: string | null): string => {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return t('admin.tickets.common.placeholder')
   return new Intl.DateTimeFormat(locale, {
+    timeZone: 'Asia/Singapore',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

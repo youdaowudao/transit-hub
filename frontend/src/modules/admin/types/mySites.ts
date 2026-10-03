@@ -35,6 +35,8 @@ export interface MySiteMapping {
   maxMultiplier?: number | null
   enableAutoPricingNotify?: boolean
   autoPricingNotifyBotIds?: string[]
+  autoPricingNotifyRecipientsInvalid?: boolean
+  autoPricingNotifyRecipientsUnavailable?: boolean
   autoPricingNotifyTemplate?: string
   lastAutoPricingRun?: AutoPricingRunResult | null
 }

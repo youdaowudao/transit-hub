@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { ArrowDownWideNarrow, ArrowUpWideNarrow, CheckCircle2, Landmark, Loader2, RefreshCw, X } from 'lucide-vue-next'
 import { getUpstreamBalanceBreakdown, type UpstreamBalanceBreakdownItem } from '../../api/dashboardAdmin'
-import { formatCny, formatDateTime } from '../../utils/dashboard'
+import { formatAmount, formatDateTime } from '../../utils/dashboard'
 import type { UpstreamStatus } from '../../types/upstream'
 
 const props = defineProps<{
@@ -91,7 +91,7 @@ watch(() => props.open, (isOpen) => {
             <div>
               <h2 class="text-lg font-semibold text-foreground">{{ t('admin.dashboard.upstreamBalanceBreakdown.title') }}</h2>
               <p class="text-sm text-muted-foreground">
-                {{ t('admin.dashboard.upstreamBalanceBreakdown.subtitle', { count: sites.length, total: formatCny(total) }) }}
+                {{ t('admin.dashboard.upstreamBalanceBreakdown.subtitle', { count: sites.length, total: formatAmount(total) }) }}
               </p>
             </div>
           </div>
@@ -178,7 +178,7 @@ watch(() => props.open, (isOpen) => {
                     {{ formatDateTime(site.lastSyncedAt) ?? t('admin.dashboard.upstreamBalanceBreakdown.neverSynced') }}
                   </td>
                   <td class="px-4 py-3 align-middle text-right text-foreground">
-                    {{ site.balance != null ? formatCny(site.balance) : t('admin.dashboard.upstreamBalanceBreakdown.unknownBalance') }}
+                    {{ site.balance != null ? formatAmount(site.balance) : t('admin.dashboard.upstreamBalanceBreakdown.unknownBalance') }}
                   </td>
                 </tr>
               </tbody>

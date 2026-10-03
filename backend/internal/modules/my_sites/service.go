@@ -248,9 +248,13 @@ func (s *Service) MappingOptions(ctx context.Context, userID string) (MappingOpt
 		}
 		return groups[i].SiteName < groups[j].SiteName
 	})
+	projectedMappings, err := s.projectMappingList(ctx, userID, adminAccountID, viewState.Mappings)
+	if err != nil {
+		return MappingOptionsResponse{}, err
+	}
 	return MappingOptionsResponse{
 		OwnGroups:              groups,
-		Mappings:               viewState.Mappings,
+		Mappings:               projectedMappings,
 		StaleOwnGroups:         staleOwnGroups,
 		StaleTargets:           staleTargets,
 		ConnectionCapabilities: connectionCapabilities(viewState.Session.Platform),
@@ -281,6 +285,10 @@ func (s *Service) SaveMappings(ctx context.Context, userID string, mappings []Ma
 		if !include {
 			continue
 		}
+		groupMapping, err = s.projectMappingNotifications(ctx, userID, adminAccountID, groupMapping)
+		if err != nil {
+			return StatusResponse{}, err
+		}
 		next = append(next, groupMapping)
 	}
 	state, err = s.mutateState(ctx, userID, adminAccountID, func(latest *State) error {
@@ -298,7 +306,11 @@ func (s *Service) SaveMappings(ctx context.Context, userID string, mappings []Ma
 	if state == nil {
 		return StatusResponse{}, requestError(ErrorAuthRequired)
 	}
-	return StatusResponse{Authenticated: true, BaseURL: state.BaseURL, Email: state.Email, Mappings: state.Mappings}, nil
+	projected, err := s.projectMappingList(ctx, userID, adminAccountID, state.Mappings)
+	if err != nil {
+		return StatusResponse{}, err
+	}
+	return StatusResponse{Authenticated: true, BaseURL: state.BaseURL, Email: state.Email, Mappings: projected}, nil
 }
 
 // SaveMapping 原子更新单个自有分组，保留同一 workspace 中其他分组的最新映射。
@@ -319,6 +331,10 @@ func (s *Service) SaveMapping(ctx context.Context, userID string, mapping Mappin
 		return StatusResponse{}, requestError(ErrorRequest)
 	}
 
+	next, err = s.projectMappingNotifications(ctx, userID, adminAccountID, next)
+	if err != nil {
+		return StatusResponse{}, err
+	}
 	state, err := s.mutateState(ctx, userID, adminAccountID, func(latest *State) error {
 		index := findMappingIndexByOwnGroup(latest.Mappings, next.OwnGroup)
 		if index >= 0 {
@@ -337,7 +353,11 @@ func (s *Service) SaveMapping(ctx context.Context, userID string, mapping Mappin
 	if state == nil {
 		return StatusResponse{}, requestError(ErrorAuthRequired)
 	}
-	return StatusResponse{Authenticated: true, BaseURL: state.BaseURL, Email: state.Email, Mappings: state.Mappings}, nil
+	projected, err := s.projectMappingList(ctx, userID, adminAccountID, state.Mappings)
+	if err != nil {
+		return StatusResponse{}, err
+	}
+	return StatusResponse{Authenticated: true, BaseURL: state.BaseURL, Email: state.Email, Mappings: projected}, nil
 }
 
 // RemoveMapping removes one mapping by normalized own-group name while retaining
@@ -368,7 +388,11 @@ func (s *Service) RemoveMapping(ctx context.Context, userID string, ownGroup str
 	if state == nil {
 		return StatusResponse{}, requestError(ErrorAuthRequired)
 	}
-	return StatusResponse{Authenticated: true, BaseURL: state.BaseURL, Email: state.Email, Mappings: state.Mappings}, nil
+	projected, err := s.projectMappingList(ctx, userID, adminAccountID, state.Mappings)
+	if err != nil {
+		return StatusResponse{}, err
+	}
+	return StatusResponse{Authenticated: true, BaseURL: state.BaseURL, Email: state.Email, Mappings: projected}, nil
 }
 
 // normalizeMappingRequest applies the stable defaults and validation shared by
@@ -480,6 +504,7 @@ func (s *Service) RunAutoPricingNow(ctx context.Context, userID string, req Auto
 		if persistErr != nil {
 			return AutoPricingRunResponse{}, persistErr
 		}
+		updatedMapping = s.mappingNotificationForResponse(ctx, userID, adminAccountID, updatedMapping)
 		return AutoPricingRunResponse{Result: *updatedMapping.LastAutoPricingRun, Mapping: updatedMapping}, nil
 	}
 	adminGroups, err := s.platformService.FetchAdminAllGroups(state.Session)
@@ -494,6 +519,7 @@ func (s *Service) RunAutoPricingNow(ctx context.Context, userID string, req Auto
 	if err != nil {
 		return AutoPricingRunResponse{}, err
 	}
+	updatedMapping = s.mappingNotificationForResponse(ctx, userID, adminAccountID, updatedMapping)
 	response := AutoPricingRunResponse{Mapping: updatedMapping}
 	if updatedMapping.LastAutoPricingRun != nil {
 		response.Result = *updatedMapping.LastAutoPricingRun
@@ -1863,7 +1889,7 @@ func (s *Service) processAutoPricing(ctx context.Context, userID string, adminAc
 	// 自动调价成功后发送通知（仅在开启通知且配置了机器人时）
 	if mapping.EnableAutoPricingNotify && len(mapping.AutoPricingNotifyBotIDs) > 0 && s.botNotifier != nil {
 		msg := formatAutoPricingNotify(mapping, siteName, result, oldOwnMultiplier)
-		s.botNotifier.SendToBots(ctx, userID, mapping.AutoPricingNotifyBotIDs, msg)
+		s.sendMappingNotification(ctx, userID, adminAccountID, mapping, msg)
 	}
 
 	return result
@@ -1917,7 +1943,7 @@ func (s *Service) processManualAutoPricing(ctx context.Context, userID string, a
 	}
 	if mapping.EnableAutoPricingNotify && len(mapping.AutoPricingNotifyBotIDs) > 0 && s.botNotifier != nil {
 		msg := formatAutoPricingNotify(mapping, "manual", result, oldOwnMultiplier)
-		s.botNotifier.SendToBots(ctx, userID, mapping.AutoPricingNotifyBotIDs, msg)
+		s.sendMappingNotification(ctx, userID, adminAccountID, mapping, msg)
 	}
 	return result, updated, nil
 }

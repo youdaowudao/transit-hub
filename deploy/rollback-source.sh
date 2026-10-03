@@ -370,13 +370,13 @@ recovery_armed=1
 git switch --detach "$target_commit"
 
 cd "$PROJECT_DIR/frontend"
-npm ci --registry=https://registry.npmmirror.com
+npm ci --registry=https://registry.npmjs.org
 npm run build -- --outDir dist.next --emptyOutDir
 test -f "$PROJECT_DIR/frontend/dist.next/index.html"
 
 cd "$PROJECT_DIR/backend"
 prepare_go_environment
-GOPROXY=https://goproxy.cn,direct CGO_ENABLED=0 go build \
+GOPROXY=https://proxy.golang.org,direct CGO_ENABLED=0 go build \
     -o "$PROJECT_DIR/transithub-api.next" \
     ./cmd/api
 test -x "$PROJECT_DIR/transithub-api.next"

@@ -1,7 +1,6 @@
 package settings
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"time"
@@ -158,26 +157,25 @@ func (r *Repository) GetNotificationChannels(ctx context.Context, userID string,
 }
 
 func unmarshalNotificationChannelSettings(data []byte, settings *NotificationChannelSettings) error {
-	if err := json.Unmarshal(data, settings); err == nil {
-		return nil
+	var raw struct {
+		Telegram json.RawMessage `json:"telegram"`
 	}
-	var legacy struct {
-		Dingtalk DingtalkChannelSettings `json:"dingtalk"`
-		Feishu   WebhookChannelSettings  `json:"feishu"`
-		Telegram TelegramChannelSettings `json:"telegram"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	if err := decoder.Decode(&legacy); err != nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	if legacy.Dingtalk.Enabled || legacy.Dingtalk.Webhook != "" || legacy.Dingtalk.Secret != "" {
-		settings.Dingtalk = []DingtalkChannelSettings{legacy.Dingtalk}
+	*settings = DefaultNotificationChannelSettings()
+	if len(raw.Telegram) == 0 || string(raw.Telegram) == "null" {
+		return nil
 	}
-	if legacy.Feishu.Enabled || legacy.Feishu.Webhook != "" || legacy.Feishu.Secret != "" {
-		settings.Feishu = []WebhookChannelSettings{legacy.Feishu}
+	if err := json.Unmarshal(raw.Telegram, &settings.Telegram); err == nil {
+		return nil
 	}
-	if legacy.Telegram.Enabled || legacy.Telegram.BotToken != "" || legacy.Telegram.ChatID != "" || legacy.Telegram.ProxyURL != "" {
-		settings.Telegram = []TelegramChannelSettings{legacy.Telegram}
+	var legacy TelegramChannelSettings
+	if err := json.Unmarshal(raw.Telegram, &legacy); err != nil {
+		return err
+	}
+	if legacy.ID != "" || legacy.Name != "" || legacy.Enabled || legacy.BotToken != "" || legacy.ChatID != "" || legacy.ProxyURL != "" {
+		settings.Telegram = []TelegramChannelSettings{legacy}
 	}
 	return nil
 }

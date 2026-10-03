@@ -2,9 +2,10 @@ package settings
 
 import (
 	"context"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -84,16 +85,16 @@ func TestGetStrategyForWorkspaceDoesNotUseCurrentWorkspace(t *testing.T) {
 
 func TestSendFormattedToWorkspaceBotsUsesExplicitWorkspace(t *testing.T) {
 	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+	client := &http.Client{Transport: globalizationTransport(func(r *http.Request) (*http.Response, error) {
 		requests++
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(server.Close)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"ok":true}`))}, nil
+	})}
 
 	repository := &capturingNotificationRepository{channels: NotificationChannelSettings{
-		Wecom: []WebhookChannelSettings{{ID: "workspace-b-bot", Enabled: true, Webhook: server.URL}},
+		Telegram: []TelegramChannelSettings{{ID: "workspace-b-bot", Enabled: true, BotToken: "fixture", ChatID: "fixture"}},
 	}}
-	service := NewService(server.Client(), nil)
+	service := NewService(client, nil)
 	service.notificationRepo = repository
 	service.SendFormattedToWorkspaceBots(context.Background(), "user-1", "workspace-b", []string{"workspace-b-bot"}, "alert", NotificationTemplateFormatText)
 
@@ -101,7 +102,7 @@ func TestSendFormattedToWorkspaceBotsUsesExplicitWorkspace(t *testing.T) {
 		t.Fatalf("notification repository workspace = %q, want workspace-b", repository.adminAccountID)
 	}
 	if requests != 1 {
-		t.Fatalf("workspace-b webhook requests = %d, want 1", requests)
+		t.Fatalf("workspace-b Telegram requests = %d, want 1", requests)
 	}
 }
 

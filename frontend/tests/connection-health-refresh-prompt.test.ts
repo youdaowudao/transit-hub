@@ -10,7 +10,7 @@ const viewSource = readFileSync(
   'utf8',
 )
 const localeSource = readFileSync(
-  new URL('../src/locales/zh-CN.ts', import.meta.url),
+  new URL('../src/locales/zh.ts', import.meta.url),
   'utf8',
 )
 

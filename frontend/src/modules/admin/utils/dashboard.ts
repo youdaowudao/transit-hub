@@ -1,6 +1,7 @@
-// 仪表盘共用的展示工具：主题色类名映射、CNY 金额格式化、环比变化计算。
+// 仪表盘共用的展示工具：主题色类名映射、金额格式化、环比变化计算。
 // 颜色类使用「字面量字符串」写法，确保 Tailwind JIT 能扫描到对应工具类。
 
+import { locale } from '@/locales'
 import type { DashboardColorToken, DashboardMetricKey, TrendPoint } from '../types/dashboard'
 
 /** 指标图标底色 + 文字色。 */
@@ -29,22 +30,23 @@ export const DELTA_TEXT_CLASSES: Record<DeltaDirection, string> = {
   flat: 'text-muted-foreground',
 }
 
-// 固定使用 en-US 千分位分组，只影响数字分隔符（无本地化文字），保证两种语言下表现一致。
-const cnyFormatter = new Intl.NumberFormat('en-US', {
+// 数字格式读取统一语言配置，金额精度保持两位小数。
+const amountFormatter = new Intl.NumberFormat(locale, {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 })
 
-/** 格式化为人民币显示，空值返回占位符。 */
-export function formatCny(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) return '¥—'
-  return `¥${cnyFormatter.format(value)}`
+/** 格式化核算金额，空值返回占位符。 */
+export function formatAmount(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—'
+  return amountFormatter.format(value)
 }
 
 /** 把毫秒时间戳格式化为可读时间；空值或非数字返回 null，由调用方回退「未知」文案。 */
-export function formatDateTime(ms: number | null | undefined, locale = 'zh-CN'): string | null {
+export function formatDateTime(ms: number | null | undefined, formatLocale = locale): string | null {
   if (ms == null || !Number.isFinite(ms)) return null
-  return new Intl.DateTimeFormat(locale, {
+  return new Intl.DateTimeFormat(formatLocale, {
+    timeZone: 'Asia/Singapore',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

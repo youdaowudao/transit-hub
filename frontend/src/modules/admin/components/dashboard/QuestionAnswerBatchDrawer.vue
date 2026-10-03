@@ -11,6 +11,7 @@ import type {
   TestQuestion,
 } from '../../types/connectionHealth'
 import type { QuestionAnswerPreferences } from '../../utils/connectionHealthPreferences'
+import { formatLastUsedAt } from '../../utils/userLastUsed'
 import {
   collectQuestionAnswerBatchTargets,
   compatibleQuestionAnswerModelIds,
@@ -122,8 +123,7 @@ const skippedCount = computed(() => outcomes.value.filter(outcome => outcome.kin
 const failedCount = computed(() => outcomes.value.filter(outcome => outcome.kind === 'failed').length)
 const startedAtLabel = computed(() => {
   if (startedAt.value === null) return ''
-  const date = new Date(startedAt.value)
-  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  return formatLastUsedAt(new Date(startedAt.value)).slice(11, 16)
 })
 const hasRunSnapshot = computed(() => startedAt.value !== null)
 const canStart = computed(() => (

@@ -49,6 +49,8 @@ const endAt = ref('')
 
 const notifyEnabled = ref(false)
 const notifyBotIds = ref<string[]>([])
+const notifyRecipientsInvalid = ref(false)
+const notifyRecipientsUnavailable = ref(false)
 const notifyStartTemplate = ref('')
 const notifyEndTemplate = ref('')
 const copiedVar = ref<string | null>(null)
@@ -137,6 +139,9 @@ const resetForm = () => {
   endAt.value = ''
   notifyEnabled.value = props.notifyDefaults?.enabled ?? false
   notifyBotIds.value = [...(props.notifyDefaults?.botIds ?? [])]
+  notifyRecipientsInvalid.value = Boolean(props.notifyDefaults?.recipientsInvalid)
+  notifyRecipientsUnavailable.value = Boolean(props.notifyDefaults?.recipientsUnavailable)
+  if (!notifyRecipientsUnavailable.value && notifyRecipientsInvalid.value && notifyBotIds.value.length === 0) notifyEnabled.value = false
   notifyStartTemplate.value = props.notifyDefaults?.startTemplate ?? ''
   notifyEndTemplate.value = props.notifyDefaults?.endTemplate ?? ''
   copiedVar.value = null
@@ -152,27 +157,22 @@ const loadOptions = async () => {
   try {
     const [mappingOptions, channelSettings] = await Promise.all([
       getMySiteMappingOptions().catch(() => ({ ownGroups: [], mappings: [] })),
-      getNotificationChannelSettings().catch(() => ({ dingtalk: [], wecom: [], qq: [], feishu: [], telegram: [] })),
+      getNotificationChannelSettings().catch(() => null),
     ])
     availableGroups.value = mappingOptions.ownGroups
 
     const bots: BotOption[] = []
-    for (const bot of channelSettings.dingtalk ?? []) {
-      if (bot.enabled) bots.push({ id: bot.id, name: bot.name, channel: 'DingTalk' })
-    }
-    for (const bot of channelSettings.wecom ?? []) {
-      if (bot.enabled) bots.push({ id: bot.id, name: bot.name, channel: 'WeCom' })
-    }
-    for (const bot of channelSettings.qq ?? []) {
-      if (bot.enabled) bots.push({ id: bot.id, name: bot.name, channel: 'QQ' })
-    }
-    for (const bot of channelSettings.feishu ?? []) {
-      if (bot.enabled) bots.push({ id: bot.id, name: bot.name, channel: 'Feishu' })
-    }
-    for (const bot of channelSettings.telegram ?? []) {
+    for (const bot of channelSettings?.telegram ?? []) {
       if (bot.enabled) bots.push({ id: bot.id, name: bot.name, channel: 'Telegram' })
     }
     availableBots.value = bots
+    if (channelSettings && !notifyRecipientsUnavailable.value) {
+      const telegramIds = new Set((channelSettings.telegram ?? []).map(bot => bot.id))
+      const originalIds = notifyBotIds.value
+      notifyBotIds.value = originalIds.filter(id => telegramIds.has(id))
+      notifyRecipientsInvalid.value ||= notifyBotIds.value.length !== originalIds.length
+      if (notifyRecipientsInvalid.value && notifyBotIds.value.length === 0) notifyEnabled.value = false
+    }
   } finally {
     isLoadingOptions.value = false
   }
@@ -204,9 +204,9 @@ const buildRequest = (): CreateGroupRateCampaignRequest => ({
   },
   schedule: {
     startMode: startMode.value,
-    startAt: startMode.value === 'scheduled' && startAt.value ? new Date(startAt.value).toISOString() : null,
+    startAt: startMode.value === 'scheduled' && startAt.value ? new Date(`${startAt.value}+08:00`).toISOString() : null,
     endMode: endMode.value,
-    endAt: endMode.value === 'scheduled' && endAt.value ? new Date(endAt.value).toISOString() : null,
+    endAt: endMode.value === 'scheduled' && endAt.value ? new Date(`${endAt.value}+08:00`).toISOString() : null,
   },
   notify: {
     enabled: notifyEnabled.value,
@@ -453,6 +453,8 @@ const formatMultiplier = (value: number): string => `${Number(value.toFixed(4)).
                   </label>
                 </div>
 
+                <p v-if="notifyRecipientsUnavailable" class="text-xs text-warning" role="status">{{ t('admin.settings.recipientsUnavailable') }}</p>
+                <p v-else-if="notifyRecipientsInvalid" class="text-xs text-warning" role="status">{{ t('admin.settings.recipientsInvalid') }}</p>
                 <template v-if="notifyEnabled">
                   <div class="space-y-1.5">
                     <label class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.notifyBotSelectLabel`) }}</label>

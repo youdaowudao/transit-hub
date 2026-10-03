@@ -65,8 +65,7 @@ func TestNotificationWebhookDoesNotReachLocalTarget(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	err := NewService(nil, nil).TestNotification(context.Background(), TestNotificationRequest{
-		Channel: NotificationChannelWecom,
-		Webhook: server.URL,
+		Channel: NotificationChannel("wecom"),
 	})
 	if err == nil {
 		t.Fatal("TestNotification() accepted a loopback webhook")

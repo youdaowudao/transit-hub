@@ -109,10 +109,12 @@ type Adjustment struct {
 
 // Notify 描述活动的通知配置，整体以 JSONB 存入 group_rate_campaigns.notify。
 type Notify struct {
-	Enabled       bool     `json:"enabled"`
-	BotIDs        []string `json:"botIds"`
-	StartTemplate string   `json:"startTemplate"`
-	EndTemplate   string   `json:"endTemplate"`
+	RecipientsInvalid     bool     `json:"recipientsInvalid,omitempty"`
+	RecipientsUnavailable bool     `json:"recipientsUnavailable,omitempty"`
+	Enabled               bool     `json:"enabled"`
+	BotIDs                []string `json:"botIds"`
+	StartTemplate         string   `json:"startTemplate"`
+	EndTemplate           string   `json:"endTemplate"`
 }
 
 // Schedule 描述活动的开始/结束方式，仅用于请求 DTO，落库时拆分进 campaign 的独立列。
@@ -202,29 +204,33 @@ type Summary struct {
 
 // CampaignListItem 是活动列表接口的单行响应。
 type CampaignListItem struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name"`
-	Status         string     `json:"status"`
-	StartMode      StartMode  `json:"startMode"`
-	StartAt        *time.Time `json:"startAt"`
-	EndMode        EndMode    `json:"endMode"`
-	EndAt          *time.Time `json:"endAt"`
-	StartedAt      *time.Time `json:"startedAt"`
-	EndedAt        *time.Time `json:"endedAt"`
-	Summary        Summary    `json:"summary"`
-	NotifyEnabled  bool       `json:"notifyEnabled"`
-	CreatedBy      string     `json:"createdBy"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
-	LastExecutedAt *time.Time `json:"lastExecutedAt"`
+	NotifyRecipientsInvalid     bool       `json:"notifyRecipientsInvalid,omitempty"`
+	NotifyRecipientsUnavailable bool       `json:"notifyRecipientsUnavailable,omitempty"`
+	ID                          string     `json:"id"`
+	Name                        string     `json:"name"`
+	Status                      string     `json:"status"`
+	StartMode                   StartMode  `json:"startMode"`
+	StartAt                     *time.Time `json:"startAt"`
+	EndMode                     EndMode    `json:"endMode"`
+	EndAt                       *time.Time `json:"endAt"`
+	StartedAt                   *time.Time `json:"startedAt"`
+	EndedAt                     *time.Time `json:"endedAt"`
+	Summary                     Summary    `json:"summary"`
+	NotifyEnabled               bool       `json:"notifyEnabled"`
+	CreatedBy                   string     `json:"createdBy"`
+	CreatedAt                   time.Time  `json:"createdAt"`
+	UpdatedAt                   time.Time  `json:"updatedAt"`
+	LastExecutedAt              *time.Time `json:"lastExecutedAt"`
 }
 
 // NotifyDefaults 是环境变量提供的通知默认值，随列表接口下发，供前端创建活动时预填表单。
 type NotifyDefaults struct {
-	Enabled       bool     `json:"enabled"`
-	BotIDs        []string `json:"botIds"`
-	StartTemplate string   `json:"startTemplate"`
-	EndTemplate   string   `json:"endTemplate"`
+	RecipientsInvalid     bool     `json:"recipientsInvalid,omitempty"`
+	RecipientsUnavailable bool     `json:"recipientsUnavailable,omitempty"`
+	Enabled               bool     `json:"enabled"`
+	BotIDs                []string `json:"botIds"`
+	StartTemplate         string   `json:"startTemplate"`
+	EndTemplate           string   `json:"endTemplate"`
 }
 
 // ListResult 是活动列表接口的分页响应。

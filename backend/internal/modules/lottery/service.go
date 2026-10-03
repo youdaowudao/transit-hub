@@ -699,15 +699,15 @@ func (s *Service) buildDraft(userID, adminAccountID, id string, req CreateCampai
 			return Campaign{}, nil, err
 		}
 	}
-	start, err := parseShanghaiTime(req.RegistrationStart)
+	start, err := parseSingaporeTime(req.RegistrationStart)
 	if err != nil {
 		return Campaign{}, nil, err
 	}
-	end, err := parseShanghaiTime(req.RegistrationEnd)
+	end, err := parseSingaporeTime(req.RegistrationEnd)
 	if err != nil {
 		return Campaign{}, nil, err
 	}
-	drawAt, err := parseShanghaiTime(req.DrawAt)
+	drawAt, err := parseSingaporeTime(req.DrawAt)
 	if err != nil {
 		return Campaign{}, nil, err
 	}

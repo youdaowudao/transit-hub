@@ -159,7 +159,7 @@ type QuestionAnswerStats struct {
 	ByModel  []QuestionAnswerModelStats `json:"byModel"`
 }
 
-// QuestionAnswerTodaySummary 是外部账号列表所需的上海自然日最小统计。
+// QuestionAnswerTodaySummary 是外部账号列表所需的新加坡自然日最小统计。
 // Submitted 包含当天所有已创建记录；Correct 只包含已成功且人工评判为正确的记录。
 type QuestionAnswerTodaySummary struct {
 	Submitted int

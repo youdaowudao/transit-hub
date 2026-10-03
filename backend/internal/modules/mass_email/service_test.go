@@ -246,7 +246,7 @@ func TestListUsersForwardsPaginationFiltersAndTimezone(t *testing.T) {
 	users := &fakeUsers{page: upstream.Sub2APIAdminUsersPage{Items: []upstream.Sub2APIAdminUser{{ID: "1", Email: "a@example.com", LastUsedAt: &lastUsedAt}}, Total: 1, Page: 2, PageSize: 50, Pages: 1}}
 	service := newTestService(newFakeRepo(), users, nil)
 
-	result, err := service.ListUsers(context.Background(), "user-1", "admin-1", UserQuery{Page: 2, PageSize: 50, Status: "active", Role: "user", Search: "  alice+notes  ", SortBy: "last_used_at", SortOrder: "desc", Timezone: "Asia/Shanghai"})
+	result, err := service.ListUsers(context.Background(), "user-1", "admin-1", UserQuery{Page: 2, PageSize: 50, Status: "active", Role: "user", Search: "  alice+notes  ", SortBy: "last_used_at", SortOrder: "desc", Timezone: "Asia/Singapore"})
 	if err != nil {
 		t.Fatalf("ListUsers returned error: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestListUsersForwardsPaginationFiltersAndTimezone(t *testing.T) {
 		t.Fatalf("last_used_at was not forwarded: %#v", result.Items[0])
 	}
 	got := users.lastQuery
-	if got.Page != 2 || got.PageSize != 50 || got.Status != "active" || got.Role != "user" || got.Search != "alice+notes" || got.SortBy != "last_used_at" || got.SortOrder != "desc" || got.Timezone != "Asia/Shanghai" {
+	if got.Page != 2 || got.PageSize != 50 || got.Status != "active" || got.Role != "user" || got.Search != "alice+notes" || got.SortBy != "last_used_at" || got.SortOrder != "desc" || got.Timezone != "Asia/Singapore" {
 		t.Fatalf("query not forwarded correctly: %#v", got)
 	}
 }

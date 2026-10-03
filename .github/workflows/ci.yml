@@ -48,7 +48,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
-        run: npm ci --prefix frontend
+        run: npm ci --prefix frontend --registry=https://registry.npmjs.org
 
       - name: Run full test gate
         run: make test-ci

@@ -250,7 +250,7 @@ describe('question-answer compact layout primitives', () => {
       'question-answer-stats-lifetime',
     ])
     expect(bar.text()).toContain('复审批次')
-    expect(bar.text()).toContain('今日（东八区）')
+    expect(bar.text()).toContain('今日（新加坡）')
     expect(bar.text()).toContain('累计')
     for (const label of ['回答数', '失败数', '正确', '错误', '正确率']) {
       expect(bar.text()).toContain(label)

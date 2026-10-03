@@ -234,12 +234,12 @@ sudo find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.dump' \
 sudo docker exec "$POSTGRES_CONTAINER" rm -f "$CONTAINER_BACKUP"
 
 cd "$PROJECT_DIR/frontend"
-npm ci --registry=https://registry.npmmirror.com
+npm ci --registry=https://registry.npmjs.org
 npm run build
 
 cd "$PROJECT_DIR/backend"
 prepare_go_environment
-GOPROXY=https://goproxy.cn,direct CGO_ENABLED=0 go build \
+GOPROXY=https://proxy.golang.org,direct CGO_ENABLED=0 go build \
     -o "$PROJECT_DIR/transithub-api.next" \
     ./cmd/api
 test -x "$PROJECT_DIR/transithub-api.next"

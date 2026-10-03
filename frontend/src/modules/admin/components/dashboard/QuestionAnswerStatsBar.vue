@@ -22,7 +22,7 @@ const prefix = 'admin.connectionHealth.manualProbeDialog.questionAnswer.stats'
 const showModels = ref(false)
 const periods = computed(() => [
   ...(props.reviewStats ? [{ key: 'review', label: t(`${prefix}.reviewBatch`), stats: props.reviewStats }] : []),
-  { key: 'today', label: t(`${prefix}.todayShanghai`), stats: props.todayStats },
+  { key: 'today', label: t(`${prefix}.todaySingapore`), stats: props.todayStats },
   { key: 'lifetime', label: t(`${prefix}.allTime`), stats: props.lifetimeStats },
 ])
 const hasModelStats = computed(() => periods.value.some(period => period.stats.byModel.length > 0))

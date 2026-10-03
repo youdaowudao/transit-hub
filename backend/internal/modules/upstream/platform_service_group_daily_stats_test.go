@@ -311,8 +311,8 @@ func TestFetchAdminGroupDailyStatsForDate_Sub2APIUsesRequestedBusinessDate(t *te
 			if got := r.URL.Query().Get("end_date"); got != "2026-07-31" {
 				t.Errorf("end_date = %q, want 2026-07-31", got)
 			}
-			if got := r.URL.Query().Get("timezone"); got != "Asia/Shanghai" {
-				t.Errorf("timezone = %q, want Asia/Shanghai", got)
+			if got := r.URL.Query().Get("timezone"); got != "Asia/Singapore" {
+				t.Errorf("timezone = %q, want Asia/Singapore", got)
 			}
 			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 12.5}})
 		default:
@@ -343,7 +343,7 @@ func TestFetchSub2APIAdminGroupDailyStatsByIDForDateUsesStableIDs(t *testing.T) 
 		for key, want := range map[string]string{
 			"start_date": "2026-08-13",
 			"end_date":   "2026-08-13",
-			"timezone":   "Asia/Shanghai",
+			"timezone":   "Asia/Singapore",
 		} {
 			if got := r.URL.Query().Get(key); got != want {
 				t.Fatalf("%s = %q, want %q", key, got, want)
@@ -439,10 +439,10 @@ func TestFetchAdminGroupDailyStatsForDate_NewAPIUsesOneRequestedBusinessDay(t *t
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if got := r.URL.Query().Get("start_timestamp"); got != "1785427200" {
-			t.Errorf("start_timestamp = %q, want Shanghai 2026-07-31 00:00:00", got)
+			t.Errorf("start_timestamp = %q, want Singapore 2026-07-31 00:00:00", got)
 		}
 		if got := r.URL.Query().Get("end_timestamp"); got != "1785513599" {
-			t.Errorf("end_timestamp = %q, want Shanghai 2026-07-31 23:59:59", got)
+			t.Errorf("end_timestamp = %q, want Singapore 2026-07-31 23:59:59", got)
 		}
 		writeJSON(w, map[string]any{"data": map[string]any{"quota": 250000}})
 	}))

@@ -39,6 +39,7 @@ func sub2APITestInventory(groups ...adminInventoryGroup) *adminWorkspaceInventor
 		knownGroups[i].accounts = append([]upstream.AdminGroupAccountInfo(nil), group.accounts...)
 		for accountIndex := range knownGroups[i].accounts {
 			account := &knownGroups[i].accounts[accountIndex]
+			account.TempUnschedulableKnown = true
 			if account.Schedulable == nil && targetStatusEnabled(string(upstream.PlatformSub2API), normalizeTargetStatus(string(upstream.PlatformSub2API), account.Status)) {
 				account.Schedulable = boolPointer(true)
 			}
@@ -189,7 +190,7 @@ func TestReconcileTargetRemoteAction_KeepsLegacyPendingAtLastActiveFloor(t *test
 		},
 	})
 
-	result, err := service.reconcileTargetRemoteActionWithFloor(
+	result, err := stageAFloorService(service, inventory).reconcileTargetRemoteActionWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, target,
 		[]probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
 	)
@@ -222,7 +223,7 @@ func TestReconcileTargetRemoteAction_LastUsableSkipsWhenRemainingActiveIsUnsched
 		},
 	})
 
-	result, err := service.reconcileTargetRemoteActionWithFloor(
+	result, err := stageAFloorService(service, inventory).reconcileTargetRemoteActionWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, target,
 		[]probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
 	)
@@ -254,7 +255,7 @@ func TestReconcileTargetRemoteAction_LastUsableFailsClosedWhenSurvivorSchedulabl
 		}},
 	}
 
-	result, err := service.reconcileTargetRemoteActionWithFloor(
+	result, err := stageAFloorService(service, inventory).reconcileTargetRemoteActionWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, target,
 		[]probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
 	)
@@ -335,7 +336,7 @@ func TestReconcileTargetRemoteAction_WaitsForWorkspaceMutationLease(t *testing.T
 
 	done := make(chan struct{})
 	go func() {
-		_, _ = service.reconcileTargetRemoteActionWithFloor(
+		_, _ = stageAFloorService(service, inventory).reconcileTargetRemoteActionWithFloor(
 			context.Background(), "user1", "ws1", inventory.session, target,
 			[]probeModelSpec{sub2APIActionTestSpec()}, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
 		)
@@ -368,7 +369,7 @@ func TestFinishTargetProbeBatch_LastActiveSkipAuditsBlockingGroup(t *testing.T) 
 		accounts: []upstream.AdminGroupAccountInfo{{ID: "acc-1", Status: "active"}},
 	})
 
-	err := service.finishTargetProbeBatchWithFloor(
+	err := stageAFloorService(service, inventory).finishTargetProbeBatchWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, target,
 		[]probeModelSpec{spec}, []targetProbeResult{commitTargetActionFixture(t, repo, target, spec, EventSourceScheduled)},
 		EventSourceScheduled, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
@@ -404,8 +405,11 @@ func TestFinishTargetProbeBatch_UsesCurrentMonitoringScopeForInactive(t *testing
 		},
 	})
 	scope := floorTestMonitoringScope("only-acc-1", map[string][]string{"g1": {"acc-1"}})
+	stageAFloorService(service, inventory)
+	repo.assignments = []PolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", TargetID: target.TargetID, PolicyID: repo.policies[0].ID}}
+	repo.policies[0].ModelTargets[0].ModelName = "model-a"
 
-	err := service.finishTargetProbeBatchWithFloor(
+	err := stageAFloorService(service, inventory).finishTargetProbeBatchWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, target,
 		[]probeModelSpec{spec}, []targetProbeResult{commitTargetActionFixture(t, repo, target, spec, EventSourceScheduled)},
 		EventSourceScheduled, newWorkspaceFloorGuard(), inventory, scope,
@@ -437,7 +441,7 @@ func TestFinishTargetProbeBatch_LastActiveIsReevaluatedEveryBatch(t *testing.T) 
 	})
 
 	for batch := 0; batch < 3; batch++ {
-		if err := service.finishTargetProbeBatchWithFloor(
+		if err := stageAFloorService(service, inventory).finishTargetProbeBatchWithFloor(
 			context.Background(), "user1", "ws1", inventory.session, target,
 			[]probeModelSpec{spec}, []targetProbeResult{commitTargetActionFixture(t, repo, target, spec, EventSourceScheduled)},
 			EventSourceScheduled, newWorkspaceFloorGuard(), inventory, fullFloorTestMonitoringScope(*inventory),
@@ -469,7 +473,7 @@ func TestReconcileTargetRemoteAction_FailedInactiveKeepsCurrentTickReservation(t
 	})
 	guard := newWorkspaceFloorGuard()
 
-	result, err := service.reconcileTargetRemoteActionWithFloor(
+	result, err := stageAFloorService(service, inventory).reconcileTargetRemoteActionWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, first,
 		[]probeModelSpec{sub2APIActionTestSpec()}, guard, inventory, fullFloorTestMonitoringScope(*inventory),
 	)
@@ -481,11 +485,11 @@ func TestReconcileTargetRemoteAction_FailedInactiveKeepsCurrentTickReservation(t
 		t.Fatalf("failed write must keep its pending checkpoint: %+v", firstState)
 	}
 	platform.sub2APIErr = nil
-	result, err = service.reconcileTargetRemoteActionWithFloor(
+	result, err = stageAFloorService(service, inventory).reconcileTargetRemoteActionWithFloor(
 		context.Background(), "user1", "ws1", inventory.session, second,
 		[]probeModelSpec{sub2APIActionTestSpec()}, guard, inventory, fullFloorTestMonitoringScope(*inventory),
 	)
-	if err != nil || result.remoteAction != RemoteActionSkippedSub2APILastActive {
+	if err != nil || result.remoteAction != RemoteActionAwaitingConfirmation {
 		t.Fatalf("second candidate must be protected in the same tick: result=%+v err=%v", result, err)
 	}
 	if len(platform.sub2APICalls) != 1 {
@@ -1194,4 +1198,35 @@ func commitTargetActionFixture(t *testing.T, repo *fakeRepository, target AdminP
 		t.Fatalf("fixture must commit applied evidence: %+v", committed)
 	}
 	return targetProbeResult{state: &committed.State, previousState: committed.PreviousState, outcome: outcome, spec: spec, eventID: committed.EventID, disposition: committed.Disposition, configuration: committed.Configuration}
+}
+
+// The old floor fixtures now provide the lock-time fresh reader rather than
+// relying on their pre-lock snapshot. The business expectations stay unchanged.
+func stageAFloorService(service *Service, inventory *adminWorkspaceInventory) *Service {
+	return stageAFloorServiceWithRepository(service, inventory, service.repo.(*fakeRepository))
+}
+func stageAFloorServiceWithRepository(service *Service, inventory *adminWorkspaceInventory, repo *fakeRepository) *Service {
+	if service.mySites != nil {
+		return service
+	}
+	groups := []upstream.AdminGroupInfo{}
+	accounts := map[string][]upstream.AdminGroupAccountInfo{}
+	failures := map[string]error{}
+	for _, group := range inventory.groups {
+		groups = append(groups, group.group)
+		accounts[group.group.ID] = group.accounts
+		if group.err != nil {
+			failures[group.group.ID] = group.err
+		}
+	}
+	policy := monitoringScopeTestPolicy("fresh-floor-policy")
+	repo.policies = []Policy{policy}
+	for _, group := range inventory.groups {
+		for _, account := range group.accounts {
+			repo.assignments = append(repo.assignments, PolicyAssignment{UserID: "user1", AdminAccountID: "ws1", TargetID: buildTargetID(string(upstream.PlatformSub2API), "ws1", account.ID), PolicyID: policy.ID})
+		}
+	}
+	service.mySites = fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API, BaseURL: "http://127.0.0.1:8080"}}
+	service.platformGroups = fakePlatformGroupReader{groups: groups, accountsByGrp: accounts, errByGrp: failures}
+	return service
 }

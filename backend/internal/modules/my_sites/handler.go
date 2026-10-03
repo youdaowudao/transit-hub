@@ -3,7 +3,9 @@ package my_sites
 import (
 	"errors"
 	"net/http"
+	"strings"
 
+	"transithub/backend/internal/modules/upstream"
 	"transithub/backend/internal/shared/authctx"
 	"transithub/backend/internal/shared/httpjson"
 )
@@ -266,6 +268,17 @@ func (h *Handler) realDisconnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeError(w http.ResponseWriter, err error) {
+	var pending *ManagedResourcePendingError
+	if errors.As(err, &pending) {
+		payload := map[string]any{"message": pending.Error(), "reason": safeManagedDeleteReason(pending.Cause), "adminResourceId": pending.AdminResourceID, "upstreamKeyId": pending.UpstreamKeyID}
+		var grouped interface{ SafeDeletionGroup() (string, string) }
+		if errors.As(pending.Cause, &grouped) {
+			id, name := grouped.SafeDeletionGroup()
+			payload["groupId"], payload["groupName"] = id, name
+		}
+		httpjson.Write(w, http.StatusConflict, payload)
+		return
+	}
 	var requestErr requestError
 	if errors.As(err, &requestErr) {
 		status := http.StatusBadRequest
@@ -285,4 +298,22 @@ func writeError(w http.ResponseWriter, err error) {
 		return
 	}
 	httpjson.WriteError(w, http.StatusInternalServerError, ErrorUnknown)
+}
+
+func safeManagedDeleteReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	if upstream.RemoteMutationOutcome(err) == upstream.MutationConfirmedApplied {
+		return ""
+	}
+	for _, key := range []string{"admin.connectionHealth.errors.sub2apiGroupLastUsable", "admin.connectionHealth.errors.sub2apiInventoryIncomplete", "admin.mySites.errors.safeDeletionUnavailable"} {
+		if strings.Contains(err.Error(), key) {
+			return key
+		}
+	}
+	if strings.Contains(err.Error(), "remote action requires confirmation") {
+		return "admin.connectionHealth.errors.remoteActionPending"
+	}
+	return ""
 }

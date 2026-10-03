@@ -58,6 +58,8 @@ func main() {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// Close mutation admission and drain permitted writes before the HTTP
+	// shutdown cancels browser requests or the shared database pool is closed.
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("server background shutdown: %v", err)
 	}

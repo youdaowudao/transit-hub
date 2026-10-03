@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -32,7 +33,13 @@ type orderedPlatformGroupReader struct {
 
 func (f orderedPlatformGroupReader) FetchAdminAllGroups(session upstream.Session) ([]upstream.AdminGroupInfo, error) {
 	f.started <- "groups"
-	return f.groups, nil
+	groups := append([]upstream.AdminGroupInfo{}, f.groups...)
+	for i := range groups {
+		if len(groups[i].InventoryResponseTimes) == 0 {
+			groups[i].InventoryResponseTimes = []upstream.InventoryResponseTime{{HTTPDate: time.Now().UTC().Format(http.TimeFormat), ReceivedAt: time.Now()}}
+		}
+	}
+	return groups, nil
 }
 
 func (f orderedPlatformGroupReader) ListAdminGroupAccounts(session upstream.Session, group upstream.AdminGroupInfo) ([]upstream.AdminGroupAccountInfo, error) {
@@ -52,7 +59,14 @@ func (f fakePlatformGroupReader) ListAdminGroupAccounts(session upstream.Session
 	if err, ok := f.errByGrp[group.ID]; ok {
 		return nil, err
 	}
-	return f.accountsByGrp[group.ID], nil
+	accounts := append([]upstream.AdminGroupAccountInfo{}, f.accountsByGrp[group.ID]...)
+	for i := range accounts {
+		if len(accounts[i].InventoryResponseTimes) == 0 {
+			accounts[i].InventoryResponseTimes = []upstream.InventoryResponseTime{{HTTPDate: time.Now().UTC().Format(http.TimeFormat), ReceivedAt: time.Now()}}
+			accounts[i].TempUnschedulableKnown = true
+		}
+	}
+	return accounts, nil
 }
 
 func (f fakePlatformGroupReader) ResolveProbeCredential(session upstream.Session, account upstream.AdminGroupAccountInfo) (upstream.ProbeCredential, error) {

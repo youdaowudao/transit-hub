@@ -40,7 +40,8 @@ type fakePlatformActioner struct {
 		accountID string
 		status    string
 	}
-	sub2APIErr error
+	sub2APIErr        error
+	afterSub2APIWrite func(string, string)
 }
 
 func (f *fakePlatformActioner) UpdateNewAPIChannelWeightStatus(session upstream.Session, channelID string, weight int, status int) error {
@@ -63,6 +64,9 @@ func (f *fakePlatformActioner) UpdateSub2APIAdminAccountStatus(session upstream.
 		accountID string
 		status    string
 	}{accountID, status})
+	if f.sub2APIErr == nil && f.afterSub2APIWrite != nil {
+		f.afterSub2APIWrite(accountID, status)
+	}
 	return f.sub2APIErr
 }
 
@@ -187,7 +191,7 @@ func TestDisableConnection_RejectsLastUsableSub2APIAccount(t *testing.T) {
 		},
 		dispatcher: newRemoteActionDispatcher(site, mySites, platform),
 	}
-	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{groupsComplete: true,
+	stageALegacyInventory(service, adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{{
 			group:    upstream.AdminGroupInfo{ID: "g1", Name: "only"},
@@ -211,7 +215,7 @@ func TestDisableConnection_RejectsLastUsableSub2APIAccount(t *testing.T) {
 	}
 }
 
-func TestDisableConnection_AllowsClosingOneOfTwoUsableSub2APIAccountsFromCachedInventory(t *testing.T) {
+func TestDisableConnection_AllowsClosingOneOfTwoUsableSub2APIAccountsFromFreshLockedInventory(t *testing.T) {
 	repo := newFakeRepository()
 	policy := monitoringScopeTestPolicy("direct-policy")
 	repo.policies = []Policy{policy}
@@ -234,7 +238,7 @@ func TestDisableConnection_AllowsClosingOneOfTwoUsableSub2APIAccountsFromCachedI
 		platformGroups: fakePlatformGroupReader{},
 		dispatcher:     newRemoteActionDispatcher(site, mySites, platform),
 	}
-	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{groupsComplete: true,
+	stageALegacyInventory(service, adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{{
 			group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"},
@@ -253,7 +257,7 @@ func TestDisableConnection_AllowsClosingOneOfTwoUsableSub2APIAccountsFromCachedI
 	}
 }
 
-func TestDisableConnection_ScopeShrinkOnCachedInventoryStillProtectsLastUsableAccount(t *testing.T) {
+func TestDisableConnection_ScopeShrinkOnFreshInventoryStillProtectsLastUsableAccount(t *testing.T) {
 	repo := newFakeRepository()
 	policy := monitoringScopeTestPolicy("direct-policy")
 	repo.policies = []Policy{policy}
@@ -276,7 +280,7 @@ func TestDisableConnection_ScopeShrinkOnCachedInventoryStillProtectsLastUsableAc
 		platformGroups: fakePlatformGroupReader{},
 		dispatcher:     newRemoteActionDispatcher(site, mySites, platform),
 	}
-	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{groupsComplete: true,
+	stageALegacyInventory(service, adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{{
 			group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"},
@@ -314,7 +318,7 @@ func legacyDisableMonitoringScopeService(repo *fakeRepository, platform *fakePla
 		platformGroups: fakePlatformGroupReader{},
 		dispatcher:     newRemoteActionDispatcher(site, mySites, platform),
 	}
-	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{groupsComplete: true,
+	stageALegacyInventory(service, adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{{
 			group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"}, accounts: accounts,
@@ -400,7 +404,7 @@ func TestDisableConnection_AllowsIdempotentInactiveTargetWithIncompleteOtherGrou
 		sites: site, platformGroups: fakePlatformGroupReader{},
 		dispatcher: newRemoteActionDispatcher(site, mySites, platform),
 	}
-	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{groupsComplete: true,
+	stageALegacyInventory(service, adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{
 			{group: upstream.AdminGroupInfo{ID: "g1", Name: "shared"}, accounts: []upstream.AdminGroupAccountInfo{{ID: "1515", Status: "inactive", Schedulable: boolPointer(true)}}},
@@ -434,7 +438,7 @@ func TestDisableConnection_RejectsConflictingSharedAccountState(t *testing.T) {
 		sites: site, platformGroups: fakePlatformGroupReader{},
 		dispatcher: newRemoteActionDispatcher(site, mySites, platform),
 	}
-	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(adminWorkspaceInventory{groupsComplete: true,
+	stageALegacyInventory(service, adminWorkspaceInventory{groupsComplete: true,
 		session: upstream.Session{Platform: upstream.PlatformSub2API},
 		groups: []adminInventoryGroup{
 			{group: upstream.AdminGroupInfo{ID: "g1", Name: "first"}, accounts: []upstream.AdminGroupAccountInfo{{ID: "1515", Status: "active", Schedulable: boolPointer(false)}}},
@@ -454,7 +458,7 @@ func TestDisableConnection_RejectsConflictingSharedAccountState(t *testing.T) {
 	}
 }
 
-func TestDisableConnection_RejectsStaleCachedSub2APIInventory(t *testing.T) {
+func TestDisableConnection_RejectsFreshSub2APIInventoryReadFailure(t *testing.T) {
 	repo := newFakeRepository()
 	platform := &fakePlatformActioner{}
 	mySites := fakeMySitesReader{
@@ -485,6 +489,7 @@ func TestDisableConnection_RejectsStaleCachedSub2APIInventory(t *testing.T) {
 	guard.snapshotAt = time.Now().Add(-2 * schedulerTickInterval)
 	guard.mu.Unlock()
 
+	service.platformGroups = fakePlatformGroupReader{groups: []upstream.AdminGroupInfo{{ID: "g1"}}, errByGrp: map[string]error{"g1": errors.New("fresh inventory unavailable")}}
 	err := service.DisableConnection(context.Background(), "user1", "conn-1")
 	if err == nil || err.Error() != ErrorSub2APIInventoryIncomplete {
 		t.Fatalf("stale cached inventory error = %v", err)
@@ -645,5 +650,34 @@ func TestActions_NewAPIRestoreUsesCurrentWeight(t *testing.T) {
 	}
 	if len(platform.calls) != 1 || platform.calls[0].weight != 25 || platform.calls[0].status != 1 {
 		t.Fatalf("expected weight=25 status=1, got %+v", platform.calls)
+	}
+}
+
+func stageALegacyInventory(service *Service, inventory adminWorkspaceInventory) {
+	service.sub2APIFloorGuardFor("user1", "ws1").rememberInventory(inventory)
+	groups := []upstream.AdminGroupInfo{}
+	accounts := map[string][]upstream.AdminGroupAccountInfo{}
+	failures := map[string]error{}
+	for _, group := range inventory.groups {
+		groups = append(groups, group.group)
+		accounts[group.group.ID] = append([]upstream.AdminGroupAccountInfo{}, group.accounts...)
+		if group.err != nil {
+			failures[group.group.ID] = group.err
+		}
+	}
+	service.platformGroups = fakePlatformGroupReader{groups: groups, accountsByGrp: accounts, errByGrp: failures}
+	if dispatcher, ok := service.dispatcher.(*remoteActionDispatcher); ok {
+		if platform, ok := dispatcher.platform.(*fakePlatformActioner); ok {
+			platform.afterSub2APIWrite = func(id, status string) {
+				for groupID, list := range accounts {
+					for i := range list {
+						if list[i].ID == id {
+							list[i].Status = status
+						}
+					}
+					accounts[groupID] = list
+				}
+			}
+		}
 	}
 }

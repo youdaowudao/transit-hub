@@ -33,6 +33,28 @@ func (h *RuntimeLeaseHandle) Release() {
 }
 
 type actionLeaseContextKey struct{}
+type mutationLeaseContextKey struct{}
+
+func mutationLeaseFromContext(ctx context.Context) *RuntimeLeaseHandle {
+	handle, _ := ctx.Value(mutationLeaseContextKey{}).(*RuntimeLeaseHandle)
+	return handle
+}
+func mutationRuntimeLeaseKey(userID, workspace string) string {
+	return "connection-health:sub2api-mutation:" + strconv.Itoa(len(userID)) + ":" + userID + workspace
+}
+func (s *Service) acquireActionMutationLease(ctx context.Context, userID, workspace string) (context.Context, func(), error) {
+	target := actionLeaseFromContext(ctx)
+	next, release, acquired, err := s.acquireActionLease(ctx, mutationRuntimeLeaseKey(userID, workspace), true)
+	if err != nil || !acquired {
+		if err == nil {
+			err = ErrRemoteActionLeaseLost
+		}
+		return ctx, nil, err
+	}
+	mutation := actionLeaseFromContext(next)
+	next = context.WithValue(next, mutationLeaseContextKey{}, mutation)
+	return actionLeaseContext(next, target), release, nil
+}
 
 func actionLeaseFromContext(ctx context.Context) *RuntimeLeaseHandle {
 	handle, _ := ctx.Value(actionLeaseContextKey{}).(*RuntimeLeaseHandle)
@@ -98,7 +120,11 @@ func (r *Repository) AcquireActionLease(ctx context.Context, key string, wait bo
 		case <-timer.C:
 		}
 	}
-	leaseCtx, cancel := context.WithCancel(ctx)
+	leaseParent := ctx
+	if detached, _ := ctx.Value(detachedActionLeaseKey{}).(bool); detached {
+		leaseParent = context.WithoutCancel(ctx)
+	}
+	leaseCtx, cancel := context.WithCancel(leaseParent)
 	lost := make(chan struct{})
 	stop := make(chan struct{})
 	done := make(chan struct{})

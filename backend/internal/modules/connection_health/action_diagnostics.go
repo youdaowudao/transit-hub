@@ -10,6 +10,7 @@ type RemoteActionPendingView struct {
 	DispatchID string              `json:"dispatchId,omitempty"`
 	Phase      RemoteDispatchPhase `json:"phase"`
 	Reason     string              `json:"reason"`
+	Source     string              `json:"source,omitempty"`
 }
 
 type RemoteActionDiagnostic struct {
@@ -36,7 +37,14 @@ func actionPendingView(priority *PrioritySyncState, target *TargetActionState) *
 		phase = DispatchUncertain
 		reason = "legacy"
 	}
-	return &RemoteActionPendingView{Action: kind, DispatchID: id, Phase: phase, Reason: reason}
+	view := &RemoteActionPendingView{Action: kind, DispatchID: id, Phase: phase, Reason: reason}
+	if kind == ActionKindTarget && target != nil {
+		if target.PendingActionKind != "" {
+			view.Action = target.PendingActionKind
+		}
+		view.Source = target.PendingSource
+	}
+	return view
 }
 
 type actionInventoryView struct {

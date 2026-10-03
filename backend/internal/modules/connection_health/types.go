@@ -189,20 +189,25 @@ type PriorityWorkspaceSyncState struct {
 // TargetActionState 记录分组健康首次接管账号/渠道启停或权重前的上游状态。
 // 健康恢复后只能恢复到这里保存的原值，不能假设账号原本一定启用或权重一定为 100。
 type TargetActionState struct {
-	UserID               string
-	AdminAccountID       string
-	TargetID             string
-	OriginalStatus       string
-	OriginalWeight       *int
-	LastAppliedStatus    string
-	LastAppliedWeight    *int
-	PendingStatus        string
-	PendingWeight        *int
-	PendingDispatchID    string
-	PendingOwnerID       string
-	PendingDispatchPhase RemoteDispatchPhase
-	Conflict             bool
-	UpdatedAt            time.Time
+	UserID                      string
+	AdminAccountID              string
+	TargetID                    string
+	OriginalStatus              string
+	OriginalWeight              *int
+	LastAppliedStatus           string
+	LastAppliedWeight           *int
+	PendingStatus               string
+	PendingWeight               *int
+	PendingDispatchID           string
+	PendingOwnerID              string
+	PendingDispatchPhase        RemoteDispatchPhase
+	PendingActionKind           string
+	PendingSchedulable          *bool
+	PendingSource               string
+	PendingGroupIDs             []string
+	PendingHadAutomaticBaseline bool
+	Conflict                    bool
+	UpdatedAt                   time.Time
 }
 
 // Policy 对应 connection_health_policies 表：一条健康探活/降级策略，

@@ -9,6 +9,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,8 +33,9 @@ type requestOptions struct {
 }
 
 type jsonResponse struct {
-	Payload any
-	Header  http.Header
+	Payload    any
+	Header     http.Header
+	ReceivedAt time.Time
 }
 
 func NewHTTPClient(client *http.Client) *HTTPClient {
@@ -70,7 +74,7 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 
 	req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
 	if err != nil {
-		return jsonResponse{}, newRequestError(ErrorInvalidURL, "")
+		return jsonResponse{}, &RequestError{MessageKey: ErrorInvalidURL, MutationOutcome: MutationNotSent}
 	}
 	req.Header.Set("Accept", "application/json")
 	if options.Body != nil {
@@ -96,29 +100,89 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 		req.Header.Set("New-Api-User", options.UserID)
 	}
 
+	if err := ctx.Err(); err != nil {
+		if method == http.MethodGet || method == http.MethodHead {
+			return jsonResponse{}, err
+		}
+		return jsonResponse{}, &RequestError{MessageKey: ErrorNetwork, MutationOutcome: MutationNotSent, Cause: err}
+	}
+	var traceMu sync.Mutex
+	wroteRequest, dialFailed := false, false
+	trace := &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) { traceMu.Lock(); wroteRequest = true; traceMu.Unlock() },
+		ConnectDone: func(_, _ string, err error) {
+			if err != nil {
+				traceMu.Lock()
+				dialFailed = true
+				traceMu.Unlock()
+			}
+		},
+		DNSDone: func(info httptrace.DNSDoneInfo) {
+			if info.Err != nil {
+				traceMu.Lock()
+				dialFailed = true
+				traceMu.Unlock()
+			}
+		},
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	response, err := c.client.Do(req)
+	receivedAt := time.Now().UTC()
 	if err != nil {
-		if contextErr := ctx.Err(); contextErr != nil {
-			return jsonResponse{}, contextErr
+		traceMu.Lock()
+		outcome := MutationUncertain
+		var opErr *net.OpError
+		var dnsErr *net.DNSError
+		if !wroteRequest && dialFailed && ((errors.As(err, &opErr) && opErr.Op == "dial") || errors.As(err, &dnsErr)) {
+			outcome = MutationNotSent
 		}
+		traceMu.Unlock()
 		var netErr net.Error
-		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
-			return jsonResponse{}, &RequestError{MessageKey: ErrorNetwork, Timeout: true}
+		requestErr := &RequestError{MessageKey: ErrorNetwork, MutationOutcome: outcome}
+		requestErr.Timeout = errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
+		if ctx.Err() != nil {
+			requestErr.Cause = ctx.Err()
 		}
-		log.Printf("[http-client] 请求失败 url=%s err=%v", reqURL, err)
-		return jsonResponse{}, newRequestError(ErrorNetwork, "")
+		log.Printf("[http-client] 请求失败 method=%s category=%s outcome=%s timeout=%t", method, requestErr.MessageKey, outcome, requestErr.Timeout)
+		// Read callers retain the shared client's original cancellation contract;
+		// write callers require the dispatch evidence even after cancellation.
+		if requestErr.Cause != nil && (method == http.MethodGet || method == http.MethodHead) {
+			return jsonResponse{}, requestErr.Cause
+		}
+		return jsonResponse{}, requestErr
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		log.Printf("[http-client] 非 2xx 响应 url=%s status=%d", reqURL, response.StatusCode)
-		// 错误响应不要求是 JSON；先按状态码分类，确保非 JSON 的 401/403
-		// 也能进入认证退避，而不会被误报成响应格式错误。
+		log.Printf("[http-client] 非 2xx 响应 method=%s status=%d", method, response.StatusCode)
+		key := ErrorRequest
 		if response.StatusCode == http.StatusUnauthorized {
-			return jsonResponse{}, newRequestErrorWithStatus(ErrorAuth, "", response.StatusCode)
+			key = ErrorAuth
 		}
-		return jsonResponse{}, newRequestErrorWithStatus(ErrorRequest, "", response.StatusCode)
+		requestErr := newRequestErrorWithStatus(key, "", response.StatusCode)
+		requestErr.MutationOutcome = MutationUncertain
+		// A bounded, structured allowlist prevents response bodies or metadata
+		// containing credentials from reaching callers, audit events, or logs.
+		data, readErr := io.ReadAll(io.LimitReader(response.Body, 4097))
+		if readErr == nil && len(data) <= 4096 {
+			var record map[string]any
+			if json.Unmarshal(data, &record) == nil {
+				if code, ok := record["code"].(float64); ok && code == float64(int(code)) {
+					value := int(code)
+					requestErr.RemoteCode = &value
+				}
+				if reason, ok := record["reason"].(string); ok && safeRemoteReason(reason) {
+					requestErr.RemoteReason = reason
+				}
+				if code, ok := record["code"].(string); ok && safeRemoteReason(code) && requestErr.RemoteReason == "" {
+					requestErr.RemoteReason = code
+				}
+				if message, ok := record["message"].(string); ok {
+					requestErr.RemoteMessage = safeRemoteMutationMessage(message)
+				}
+			}
+		}
+		return jsonResponse{Header: response.Header, ReceivedAt: receivedAt}, requestErr
 	}
-
 	payload, err := parseJSONWithLimit(response.Body, reqURL, maxResponseBytes)
 	if err != nil {
 		return jsonResponse{}, err
@@ -131,7 +195,7 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 			return jsonResponse{}, newRequestError(ErrorRequest, "")
 		}
 	}
-	return jsonResponse{Payload: payload, Header: response.Header}, nil
+	return jsonResponse{Payload: payload, Header: response.Header, ReceivedAt: receivedAt}, nil
 }
 
 func encodeBody(body any) (io.Reader, error) {
@@ -155,11 +219,11 @@ func parseJSONWithLimit(reader io.Reader, reqURL string, maxBytes int64) (any, e
 	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		log.Printf("[http-client] 读取响应体失败 url=%s err=%v", reqURL, err)
+		log.Printf("[http-client] 读取响应体失败 category=%s", ErrorInvalidResponse)
 		return nil, newRequestError(ErrorInvalidResponse, "")
 	}
 	if maxBytes > 0 && int64(len(data)) > maxBytes {
-		log.Printf("[http-client] 响应体超过限制 url=%s limit=%d", reqURL, maxBytes)
+		log.Printf("[http-client] 响应体超过限制 limit=%d", maxBytes)
 		return nil, newRequestError(ErrorInvalidResponse, "")
 	}
 	if len(data) == 0 {
@@ -167,12 +231,28 @@ func parseJSONWithLimit(reader io.Reader, reqURL string, maxBytes int64) (any, e
 	}
 	var payload any
 	if err := json.Unmarshal(data, &payload); err != nil {
-		preview := string(data)
-		if len(preview) > 500 {
-			preview = preview[:500] + "...(truncated)"
-		}
-		log.Printf("[http-client] JSON 解析失败 url=%s len=%d preview=%s", reqURL, len(data), preview)
+		log.Printf("[http-client] JSON 解析失败 len=%d", len(data))
 		return nil, newRequestError(ErrorInvalidResponse, "")
 	}
 	return payload, nil
+}
+
+func safeRemoteReason(value string) bool {
+	switch value {
+	case "UNAUTHORIZED", "INVALID_ADMIN_KEY", "TOKEN_EXPIRED", "INVALID_TOKEN", "USER_NOT_FOUND", "USER_INACTIVE", "TOKEN_REVOKED", "FORBIDDEN", "ACCOUNT_NOT_FOUND", "INTERNAL_ERROR":
+		return true
+	}
+	return false
+}
+
+// Preserve just the handler's safe validation category, never binding details.
+func safeRemoteMutationMessage(value string) string {
+	if strings.HasPrefix(value, "Invalid request: ") {
+		return "Invalid request"
+	}
+	switch value {
+	case "Invalid account ID", "No updates provided", "account_ids or filters is required":
+		return value
+	}
+	return ""
 }

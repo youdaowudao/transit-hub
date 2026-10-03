@@ -823,14 +823,16 @@ func sub2APIGroupRateOverrides(payload any) map[string]float64 {
 // AdminGroupInfo 是 /api/v1/admin/groups 返回的完整分组信息，
 // 包含 status、is_exclusive、subscription_type 等管理端专有字段。
 type AdminGroupInfo struct {
-	ID                string
-	Name              string
-	Platform          string
-	Status            string // active / inactive
-	IsExclusive       bool   // true = 专属分组
-	SubscriptionType  string // standard / subscription
-	Multiplier        *float64
-	MultiplierDisplay string
+	ID                     string
+	Name                   string
+	Platform               string
+	Status                 string // active / inactive
+	IsExclusive            bool   // true = 专属分组
+	SubscriptionType       string // standard / subscription
+	Multiplier             *float64
+	MultiplierDisplay      string
+	InventoryResponseTimes []InventoryResponseTime `json:"-"`
+	InventoryTimeEvidence  *InventoryTimeEvidence  `json:"-"`
 }
 
 // FetchSub2APIAdminAllGroups 通过 /api/v1/admin/groups 获取管理端全量分组列表，
@@ -851,6 +853,7 @@ func (s *PlatformService) fetchSub2APIAdminAllGroupsContext(ctx context.Context,
 	expectedTotal := 0
 	hasExpectedTotal := false
 	complete := false
+	responseTimes := make([]InventoryResponseTime, 0)
 	for page := 1; page <= maxPages; page++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -863,6 +866,7 @@ func (s *PlatformService) fetchSub2APIAdminAllGroupsContext(ctx context.Context,
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		responseTimes = append(responseTimes, InventoryResponseTime{HTTPDate: response.Header.Get("Date"), ReceivedAt: response.ReceivedAt})
 		pageItems, wholeArray, validItems := sub2APIGroupPageItems(response.Payload)
 		meta, validMeta := sub2APIInventoryMetadata(response.Payload, page, pageSize)
 		if !validItems || !validMeta {
@@ -911,6 +915,7 @@ func (s *PlatformService) fetchSub2APIAdminAllGroupsContext(ctx context.Context,
 	if !complete {
 		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
+	evidence := &InventoryTimeEvidence{responses: responseTimes}
 	groups := make([]AdminGroupInfo, 0, len(items))
 	for _, item := range items {
 		id, _ := strictSub2APIInventoryID(item["id"])
@@ -942,14 +947,16 @@ func (s *PlatformService) fetchSub2APIAdminAllGroupsContext(ctx context.Context,
 		}
 		rate := firstNumber(item, []string{"rate_multiplier"})
 		groups = append(groups, AdminGroupInfo{
-			ID:                id,
-			Name:              name,
-			Platform:          platform,
-			Status:            status,
-			IsExclusive:       isExclusive,
-			SubscriptionType:  subscriptionType,
-			Multiplier:        rate,
-			MultiplierDisplay: multiplier(rate),
+			ID:                     id,
+			Name:                   name,
+			Platform:               platform,
+			Status:                 status,
+			IsExclusive:            isExclusive,
+			SubscriptionType:       subscriptionType,
+			Multiplier:             rate,
+			MultiplierDisplay:      multiplier(rate),
+			InventoryResponseTimes: responseTimes,
+			InventoryTimeEvidence:  evidence,
 		})
 	}
 	return groups, nil
@@ -1263,6 +1270,9 @@ func (s *PlatformService) requestKeyUsageJSONWithContext(ctx context.Context, re
 }
 
 func retryableKeyUsageError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	var requestErr *RequestError
 	if !errors.As(err, &requestErr) {
 		return false
@@ -1900,14 +1910,14 @@ func groupID2(record map[string]any) string {
 // 返回新建账号的 ID（字符串）；失败时返回 error。
 func (s *PlatformService) CreateSub2APIAdminAccount(session Session, payload map[string]any) (string, error) {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
-		return "", newRequestError(ErrorAuth, PlatformSub2API)
+		return "", localMutationError(ErrorAuth)
 	}
 	options := adminAuthOptions(session)
 	options.Method = http.MethodPost
 	options.Body = payload
 	response, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/admin/accounts", options)
 	if err != nil {
-		return "", err
+		return "", classifySub2APIMutationError(err, "create")
 	}
 	data := dataRecord(response.Payload)
 	accountID := groupID2(data)
@@ -1929,13 +1939,28 @@ func (s *PlatformService) DeleteSub2APIKey(session Session, keyID string) error 
 
 // DeleteSub2APIAdminAccount 删除 admin 站点的指定转发账号。
 func (s *PlatformService) DeleteSub2APIAdminAccount(session Session, accountID string) error {
+	return s.DeleteSub2APIAdminAccountContext(context.Background(), session, accountID)
+}
+
+func (s *PlatformService) DeleteSub2APIAdminAccountContext(ctx context.Context, session Session, accountID string) error {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
-		return newRequestError(ErrorAuth, PlatformSub2API)
+		return localMutationError(ErrorAuth)
+	}
+	parsedID, err := strconv.ParseInt(strings.TrimSpace(accountID), 10, 64)
+	if err != nil || parsedID <= 0 {
+		return localMutationError(ErrorInvalidResponse)
 	}
 	options := adminAuthOptions(session)
 	options.Method = http.MethodDelete
-	_, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/admin/accounts/"+accountID, options)
-	return err
+	response, err := s.httpClient.requestJSONWithContext(ctx, session.BaseURL+"/api/v1/admin/accounts/"+strconv.FormatInt(parsedID, 10), options)
+	if err != nil {
+		return classifySub2APIMutationError(err, "delete")
+	}
+	data, valid := sub2APIMutationData(response.Payload)
+	if !valid || safeString(data, "message") != "Account deleted successfully" {
+		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	return nil
 }
 
 // FetchAdminUsageStats 平台中性的管理员今日消费查询。
@@ -3136,26 +3161,46 @@ func (s *PlatformService) bulkUpdateSub2APIAdminAccount(session Session, account
 
 func (s *PlatformService) bulkUpdateSub2APIAdminAccountContext(ctx context.Context, session Session, accountID string, payload sub2APIAdminAccountBulkUpdate) error {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
-		return newRequestError(ErrorAuth, PlatformSub2API)
+		return localMutationError(ErrorAuth)
 	}
 	parsedAccountID, err := strconv.ParseInt(strings.TrimSpace(accountID), 10, 64)
 	if err != nil || parsedAccountID <= 0 {
-		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		return localMutationError(ErrorInvalidResponse)
 	}
 	payload.AccountIDs = []int64{parsedAccountID}
 	options := adminAuthOptions(session)
-	options.Method = http.MethodPost
-	options.Body = payload
-	_, err = s.httpClient.requestJSONWithContext(ctx, session.BaseURL+"/api/v1/admin/accounts/bulk-update", options)
-	if requestErr, ok := err.(*RequestError); ok {
-		switch requestErr.StatusCode {
-		case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
-			// 仅这些明确表示 endpoint/HTTP method 不存在的状态才提示升级；401/403/500
-			// 仍按认证或请求失败处理，避免掩盖权限、网络和上游临时故障。
-			return newRequestErrorWithStatus(ErrorSub2APIBulkUpdateUnsupported, PlatformSub2API, requestErr.StatusCode)
+	options.Method, options.Body = http.MethodPost, payload
+	response, err := s.httpClient.requestJSONWithContext(ctx, session.BaseURL+"/api/v1/admin/accounts/bulk-update", options)
+	if err != nil {
+		err = classifySub2APIMutationError(err, "bulk-update")
+		if requestErr, ok := err.(*RequestError); ok {
+			switch requestErr.StatusCode {
+			case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+				// Preserve the evidence while retaining the existing upgrade hint.
+				requestErr.MessageKey = ErrorSub2APIBulkUpdateUnsupported
+			}
 		}
+		return err
 	}
-	return err
+	data, valid := sub2APIMutationData(response.Payload)
+	if !valid {
+		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	results, ok := data["results"].([]any)
+	if !ok || len(results) != 1 {
+		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	result, ok := results[0].(map[string]any)
+	if !ok {
+		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	resultID, validID := strictSub2APIInventoryID(result["account_id"])
+	success, known := result["success"].(bool)
+	if !validID || resultID != strconv.FormatInt(parsedAccountID, 10) || !known || !success || !sub2APIBulkSummaryConsistent(data, resultID) {
+		// A failed entry can follow writes to other fields, so it is uncertain.
+		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	return nil
 }
 
 // UpdateSub2APIAdminAccountStatus 通过字段级批量接口更新 sub2api 转发账号的启用状态
@@ -3173,21 +3218,37 @@ func (s *PlatformService) UpdateSub2APIAdminAccountStatusContext(ctx context.Con
 // SetSub2APIAdminAccountSchedulable 使用 Sub2API 的专用字段接口修改业务流量调度开关。
 // 请求体只包含 schedulable，不能复用账号详情更新或携带 status/priority 等其它字段。
 func (s *PlatformService) SetSub2APIAdminAccountSchedulable(session Session, accountID string, schedulable bool) error {
+	_, err := s.SetSub2APIAdminAccountSchedulableContext(context.Background(), session, accountID, schedulable)
+	return err
+}
+
+func (s *PlatformService) SetSub2APIAdminAccountSchedulableContext(ctx context.Context, session Session, accountID string, schedulable bool) (AdminGroupAccountInfo, error) {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
-		return newRequestError(ErrorAuth, PlatformSub2API)
+		return AdminGroupAccountInfo{}, localMutationError(ErrorAuth)
 	}
 	parsedAccountID, err := strconv.ParseInt(strings.TrimSpace(accountID), 10, 64)
 	if err != nil || parsedAccountID <= 0 {
-		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		return AdminGroupAccountInfo{}, localMutationError(ErrorInvalidResponse)
 	}
 	options := adminAuthOptions(session)
 	options.Method = http.MethodPost
 	options.Body = map[string]bool{"schedulable": schedulable}
-	_, err = s.httpClient.requestJSON(
-		session.BaseURL+"/api/v1/admin/accounts/"+strconv.FormatInt(parsedAccountID, 10)+"/schedulable",
-		options,
-	)
-	return err
+	response, err := s.httpClient.requestJSONWithContext(ctx, session.BaseURL+"/api/v1/admin/accounts/"+strconv.FormatInt(parsedAccountID, 10)+"/schedulable", options)
+	if err != nil {
+		return AdminGroupAccountInfo{}, classifySub2APIMutationError(err, "schedulable")
+	}
+	data, valid := sub2APIMutationData(response.Payload)
+	if !valid {
+		return AdminGroupAccountInfo{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	observed := parseSub2APIAccount(data)
+	id, validID := strictSub2APIInventoryID(data["id"])
+	value, known := data["schedulable"].(bool)
+	if !validID || id != strconv.FormatInt(parsedAccountID, 10) || !known || value != schedulable {
+		return observed, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	observed.ID, observed.Schedulable = id, &value
+	return observed, nil
 }
 
 // sub2APIUserIDKeys/sub2APIUserCreatedAtKeys/sub2APIUserLastUsedAtKeys/sub2APIBalanceHistoryTimeKeys

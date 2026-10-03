@@ -345,9 +345,9 @@ func TestActiveManagedConnectionStillAllowsFullRemoteDelete(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/me":
 			writeConnectionTestJSON(w, map[string]any{"data": map[string]any{"role": "admin"}})
-		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/admin/accounts/admin-account-1":
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/admin/accounts/22":
 			adminDeletes++
-			writeConnectionTestJSON(w, map[string]any{"data": map[string]any{}})
+			writeConnectionTestJSON(w, map[string]any{"data": map[string]any{"message": "Account deleted successfully"}})
 		default:
 			t.Fatalf("unexpected admin request: %s %s", r.Method, r.URL.Path)
 		}
@@ -369,7 +369,7 @@ func TestActiveManagedConnectionStillAllowsFullRemoteDelete(t *testing.T) {
 	stateRepo := &testStateRepo{state: &State{UserID: "user-1", AdminAccountID: "workspace-1", Session: adminSession}}
 	connRepo := &testConnRepo{connection: &RealConnection{
 		ID: "active", UserID: "user-1", WorkspaceAdminAccountID: "workspace-1",
-		UpstreamSiteID: "site-1", UpstreamKeyID: "upstream-key-1", AdminAccountID: "admin-account-1",
+		UpstreamSiteID: "site-1", UpstreamKeyID: "upstream-key-1", AdminAccountID: "22",
 		ProvisioningMode: ProvisioningModeManaged, Status: ConnectionStatusActive,
 		UpstreamPlatform: string(upstream.PlatformSub2API), AdminPlatform: string(upstream.PlatformSub2API),
 	}}
@@ -378,6 +378,12 @@ func TestActiveManagedConnectionStillAllowsFullRemoteDelete(t *testing.T) {
 	}})
 	service.SetAdminAccountResolver(testAdminResolver{currentID: "workspace-1"})
 	service.connRepository = connRepo
+	service.SetSafeAdminAccountDeletion(&stageATestSafeDeletion{apply: func(ctx context.Context, user, workspace string, session upstream.Session, id, source string) error {
+		if source != "manual_delete" || id != "22" {
+			t.Fatal("wrong protected full delete")
+		}
+		return service.platformService.DeleteSub2APIAdminAccountContext(ctx, session, id)
+	}})
 
 	err := service.RealDisconnect(context.Background(), "user-1", RealDisconnectRequest{ConnectionID: "active", Mode: "full"})
 	if err != nil || adminDeletes != 1 || keyDeletes != 1 || connRepo.deleteCalls != 1 || connRepo.connection != nil {

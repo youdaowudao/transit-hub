@@ -112,6 +112,16 @@ type AdminGroupAccount struct {
 	Status                        string                     `json:"status"`
 	MainSiteError                 string                     `json:"mainSiteError,omitempty"`
 	Schedulable                   *bool                      `json:"schedulable,omitempty"`
+	TempUnschedulableUntil        *time.Time                 `json:"tempUnschedulableUntil"`
+	TempUnschedulableActive       bool                       `json:"tempUnschedulableActive"`
+	TempUnschedulableKnown        bool                       `json:"tempUnschedulableKnown"`
+	TempUnschedulableReason       string                     `json:"tempUnschedulableReason,omitempty"`
+	RateLimitResetAt              *time.Time                 `json:"rateLimitResetAt"`
+	RateLimitActive               bool                       `json:"rateLimitActive"`
+	RateLimitKnown                bool                       `json:"rateLimitKnown"`
+	OverloadUntil                 *time.Time                 `json:"overloadUntil"`
+	OverloadActive                bool                       `json:"overloadActive"`
+	OverloadKnown                 bool                       `json:"overloadKnown"`
 	SchedulableSource             string                     `json:"schedulableSource"`
 	SchedulableChangedAt          *time.Time                 `json:"schedulableChangedAt,omitempty"`
 	LastSchedulableAction         string                     `json:"lastSchedulableAction,omitempty"`
@@ -477,6 +487,23 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		members := accountsByGroup[group.ID]
 		snapshot.groups = append(snapshot.groups, adminInventoryGroup{group: group, accounts: members.accounts, err: members.err})
 	}
+	guardAdminInventoryTimes(&snapshot)
+	// Rebuild copied observations from the same guarded inventory; later
+	// pages cannot leave earlier projections looking clock-trustworthy.
+	observationsByTarget = make(map[string][]upstream.AdminGroupAccountInfo)
+	decisionAccountByTarget = make(map[string]upstream.AdminGroupAccountInfo)
+	for _, group := range snapshot.groups {
+		members := accountsByGroup[group.group.ID]
+		members.accounts = group.accounts
+		accountsByGroup[group.group.ID] = members
+		for _, account := range group.accounts {
+			targetID := buildTargetID(platform, adminAccountID, account.ID)
+			observationsByTarget[targetID] = append(observationsByTarget[targetID], account)
+			if _, exists := decisionAccountByTarget[targetID]; !exists {
+				decisionAccountByTarget[targetID] = account
+			}
+		}
+	}
 	s.rememberActionInventory(userID, adminAccountID, &snapshot)
 	accountFetchDuration := time.Since(accountFetchStarted)
 	todayQuestionAnswerTargetIDs := make([]string, 0, len(decisionAccountByTarget))
@@ -493,6 +520,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		}
 	}
 	assemblyStarted := time.Now()
+	restrictionObservedAt := assemblyStarted.UTC()
 	healthFallbacksByTarget := make(map[string][]float64)
 	priorityCandidatePoliciesByTarget := make(map[string][]Policy)
 	for _, group := range groups {
@@ -772,6 +800,16 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				Status:                        acc.Status,
 				MainSiteError:                 mainSiteErrorForAccount(platform, acc),
 				Schedulable:                   decisionAccount.Schedulable,
+				TempUnschedulableActive:       acc.TempUnschedulableKnown && acc.TempUnschedulableUntil != nil && !upstream.Sub2APIDeadlineExpired(acc.TempUnschedulableUntil, acc.TempUnschedulableKnown, restrictionObservedAt),
+				TempUnschedulableUntil:        acc.TempUnschedulableUntil,
+				TempUnschedulableKnown:        acc.TempUnschedulableKnown,
+				TempUnschedulableReason:       acc.TempUnschedulableReason,
+				RateLimitActive:               acc.RateLimitKnown && acc.RateLimitResetAt != nil && !upstream.Sub2APIDeadlineExpired(acc.RateLimitResetAt, acc.RateLimitKnown, restrictionObservedAt),
+				RateLimitResetAt:              acc.RateLimitResetAt,
+				RateLimitKnown:                acc.RateLimitKnown,
+				OverloadActive:                acc.OverloadKnown && acc.OverloadUntil != nil && !upstream.Sub2APIDeadlineExpired(acc.OverloadUntil, acc.OverloadKnown, restrictionObservedAt),
+				OverloadUntil:                 acc.OverloadUntil,
+				OverloadKnown:                 acc.OverloadKnown,
 				SchedulableSource:             schedulableSource,
 				SchedulableChangedAt:          schedulableChangedAt,
 				LastSchedulableAction:         lastSchedulableAction,

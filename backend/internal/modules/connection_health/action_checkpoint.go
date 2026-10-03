@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"time"
 )
 
@@ -21,6 +22,12 @@ const (
 const (
 	ActionKindPriority               = "priority"
 	ActionKindTarget                 = "target"
+	TargetMutationStatus             = "status"
+	TargetMutationSchedulable        = "schedulable"
+	TargetMutationDelete             = "delete"
+	ActionSourceManual               = "manual"
+	ActionSourceManualDelete         = "manual_delete"
+	ActionSourceCompensateDelete     = "compensate_delete"
 	RemoteActionAwaitingConfirmation = "remote_action_awaiting_confirmation"
 	RemoteActionTargetNotVisible     = "remote_action_target_not_visible"
 )
@@ -37,13 +44,15 @@ type RemoteActionScope struct {
 
 type RemoteActionClaim struct {
 	RemoteActionScope
-	Kind       string
-	DispatchID string
-	OwnerID    string
-	LeaseKey   string
-	Priority   *PrioritySyncState
-	Target     *TargetActionState
-	Guard      RemoteActionHealthGuard
+	Kind             string
+	DispatchID       string
+	OwnerID          string
+	LeaseKey         string
+	MutationLeaseKey string
+	MutationOwnerID  string
+	Priority         *PrioritySyncState
+	Target           *TargetActionState
+	Guard            RemoteActionHealthGuard
 }
 
 // Only health-driven decisions need protocol evidence. Exiting management and
@@ -61,6 +70,9 @@ type RemoteActionHealthGuard struct {
 type RemoteActionCheckpoints struct {
 	Priority *PrioritySyncState
 	Target   *TargetActionState
+	// This describes only the current reconciliation transaction, never a
+	// persisted checkpoint. Its caller must also verify the commit succeeded.
+	reconciledWithoutRemoteEffect bool
 }
 
 type RemoteActionObservation struct {
@@ -71,6 +83,7 @@ type RemoteActionObservation struct {
 	Priority          *int
 	Status            string
 	Weight            *int
+	Schedulable       *bool
 }
 
 type actionCheckpointRepository interface {
@@ -92,7 +105,7 @@ func priorityActionPending(state *PrioritySyncState) bool {
 }
 
 func targetActionPending(state *TargetActionState) bool {
-	return state != nil && (state.PendingStatus != "" || state.PendingWeight != nil || state.PendingDispatchID != "")
+	return state != nil && (state.PendingStatus != "" || state.PendingWeight != nil || state.PendingSchedulable != nil || state.PendingActionKind == TargetMutationDelete || state.PendingDispatchID != "")
 }
 
 func (pair RemoteActionCheckpoints) pendingCount() int {
@@ -142,14 +155,14 @@ func claimRemoteAction(pair *RemoteActionCheckpoints, claim RemoteActionClaim) (
 		state.PendingDispatchID, state.PendingOwnerID, state.PendingDispatchPhase = claim.DispatchID, claim.OwnerID, DispatchPrepared
 		pair.Priority = &state
 	case ActionKindTarget:
-		if claim.Target == nil || claim.Target.PendingStatus == "" {
+		if claim.Target == nil || !targetActionPending(claim.Target) {
 			return false, errors.New("missing target intention")
 		}
 		state := *claim.Target
 		if state.UserID != claim.UserID || state.AdminAccountID != claim.AdminAccountID || state.TargetID != claim.TargetID {
 			return false, ErrRemoteActionEvidenceChanged
 		}
-		if pair.Target != nil && (pair.Target.Conflict || pair.Target.LastAppliedStatus != state.LastAppliedStatus || pair.Target.OriginalStatus != state.OriginalStatus) {
+		if pair.Target != nil && !manualTargetAction(&state) && (pair.Target.Conflict || pair.Target.LastAppliedStatus != state.LastAppliedStatus || pair.Target.OriginalStatus != state.OriginalStatus) {
 			return false, ErrRemoteActionEvidenceChanged
 		}
 		state.PendingDispatchID, state.PendingOwnerID, state.PendingDispatchPhase = claim.DispatchID, claim.OwnerID, DispatchPrepared
@@ -178,7 +191,7 @@ func actionClaimIntentionMatches(pair RemoteActionCheckpoints, claim RemoteActio
 		return pair.Priority != nil && claim.Priority != nil && pair.Priority.UserID == claim.UserID && pair.Priority.AdminAccountID == claim.AdminAccountID && pair.Priority.TargetID == claim.TargetID && equalIntPointers(pair.Priority.PendingPriority, claim.Priority.PendingPriority)
 	}
 	if claim.Kind == ActionKindTarget {
-		return pair.Target != nil && claim.Target != nil && pair.Target.UserID == claim.UserID && pair.Target.AdminAccountID == claim.AdminAccountID && pair.Target.TargetID == claim.TargetID && pair.Target.PendingStatus == claim.Target.PendingStatus && equalIntPointers(pair.Target.PendingWeight, claim.Target.PendingWeight)
+		return pair.Target != nil && claim.Target != nil && pair.Target.UserID == claim.UserID && pair.Target.AdminAccountID == claim.AdminAccountID && pair.Target.TargetID == claim.TargetID && pair.Target.PendingStatus == claim.Target.PendingStatus && equalIntPointers(pair.Target.PendingWeight, claim.Target.PendingWeight) && pair.Target.PendingActionKind == claim.Target.PendingActionKind && reflect.DeepEqual(pair.Target.PendingSchedulable, claim.Target.PendingSchedulable) && pair.Target.PendingSource == claim.Target.PendingSource && slices.Equal(pair.Target.PendingGroupIDs, claim.Target.PendingGroupIDs) && pair.Target.PendingHadAutomaticBaseline == claim.Target.PendingHadAutomaticBaseline
 	}
 	return false
 }
@@ -221,6 +234,11 @@ func clearTargetDispatch(state *TargetActionState) {
 	state.PendingDispatchID = ""
 	state.PendingOwnerID = ""
 	state.PendingDispatchPhase = ""
+	state.PendingActionKind = ""
+	state.PendingSchedulable = nil
+	state.PendingSource = ""
+	state.PendingGroupIDs = nil
+	state.PendingHadAutomaticBaseline = false
 }
 
 func validatePriorityCheckpointUpdate(pair RemoteActionCheckpoints, state PrioritySyncState) error {
@@ -248,17 +266,79 @@ func validateTargetCheckpointUpdate(pair RemoteActionCheckpoints, state TargetAc
 	}
 	if targetActionPending(pair.Target) {
 		old := pair.Target
-		if state.PendingDispatchID != old.PendingDispatchID || state.PendingOwnerID != old.PendingOwnerID || state.PendingDispatchPhase != old.PendingDispatchPhase || state.PendingStatus != old.PendingStatus || !equalIntPointers(state.PendingWeight, old.PendingWeight) || state.LastAppliedStatus != old.LastAppliedStatus || !equalIntPointers(state.LastAppliedWeight, old.LastAppliedWeight) || state.OriginalStatus != old.OriginalStatus || !equalIntPointers(state.OriginalWeight, old.OriginalWeight) {
+		if state.PendingDispatchID != old.PendingDispatchID || state.PendingOwnerID != old.PendingOwnerID || state.PendingDispatchPhase != old.PendingDispatchPhase || state.PendingStatus != old.PendingStatus || !equalIntPointers(state.PendingWeight, old.PendingWeight) || state.LastAppliedStatus != old.LastAppliedStatus || !equalIntPointers(state.LastAppliedWeight, old.LastAppliedWeight) || state.OriginalStatus != old.OriginalStatus || !equalIntPointers(state.OriginalWeight, old.OriginalWeight) || state.PendingActionKind != old.PendingActionKind || state.PendingSource != old.PendingSource || !reflect.DeepEqual(state.PendingSchedulable, old.PendingSchedulable) || !slices.Equal(state.PendingGroupIDs, old.PendingGroupIDs) || state.PendingHadAutomaticBaseline != old.PendingHadAutomaticBaseline {
 			return ErrRemoteActionPending
 		}
 	}
 	return nil
 }
 
+func manualTargetAction(state *TargetActionState) bool {
+	return state != nil && (state.PendingSource == ActionSourceManual || state.PendingSource == ActionSourceManualDelete || state.PendingSource == ActionSourceCompensateDelete)
+}
+
+func finishManualTargetAction(pair *RemoteActionCheckpoints, applied bool) {
+	state := pair.Target
+	if !state.PendingHadAutomaticBaseline {
+		pair.Target = nil
+		return
+	}
+	if applied && state.PendingActionKind == TargetMutationStatus && normalizeTargetStatus("sub2api", state.PendingStatus) == "inactive" {
+		state.Conflict = true
+	}
+	clearTargetDispatch(state)
+}
+
 // A confirmed receipt is not reconciliation. Its subsequent complete visible
 // snapshot must match the expected or original value before the claim releases.
 func reconcileRemoteAction(pair *RemoteActionCheckpoints, observation RemoteActionObservation, ownerValid func(string) bool) bool {
-	if !observation.InventoryComplete || !observation.Visible || pair.pendingCount() != 1 {
+	pair.reconciledWithoutRemoteEffect = false
+	if pair.pendingCount() != 1 {
+		return false
+	}
+	// A no-send or pre-write rejection carries direct proof of no side effect.
+	// It must release even when no inventory can be read.
+	if state := pair.Target; targetActionPending(state) {
+		if state.PendingDispatchPhase == DispatchNotSent || state.PendingDispatchPhase == DispatchConfirmedRejected || (state.PendingDispatchPhase == DispatchPrepared && !ownerValid(state.PendingOwnerID)) {
+			pair.reconciledWithoutRemoteEffect = true
+			if manualTargetAction(state) {
+				finishManualTargetAction(pair, false)
+			} else {
+				clearTargetDispatch(state)
+			}
+			return true
+		}
+		if state.PendingActionKind == TargetMutationDelete {
+			if state.PendingDispatchPhase != DispatchConfirmedApplied || !observation.InventoryComplete || observation.Visible || !observation.SnapshotStartedAt.After(state.UpdatedAt) {
+				return false
+			}
+			pair.Target = nil
+			pair.Priority = nil
+			return true
+		}
+		if manualTargetAction(state) {
+			if state.PendingDispatchPhase != DispatchConfirmedApplied || !observation.InventoryComplete || !observation.Visible || !observation.SnapshotStartedAt.After(state.UpdatedAt) {
+				return false
+			}
+			matches := false
+			if state.PendingActionKind == TargetMutationSchedulable {
+				matches = observation.Schedulable != nil && state.PendingSchedulable != nil && *observation.Schedulable == *state.PendingSchedulable
+			} else {
+				matches = observation.Status != "" && normalizeTargetStatus("sub2api", observation.Status) == normalizeTargetStatus("sub2api", state.PendingStatus)
+			}
+			if !matches {
+				return false
+			}
+			finishManualTargetAction(pair, true)
+			return true
+		}
+	}
+	if state := pair.Priority; priorityActionPending(state) && (state.PendingDispatchPhase == DispatchNotSent || state.PendingDispatchPhase == DispatchConfirmedRejected || (state.PendingDispatchPhase == DispatchPrepared && !ownerValid(state.PendingOwnerID))) {
+		pair.reconciledWithoutRemoteEffect = true
+		clearPriorityDispatch(state)
+		return true
+	}
+	if !observation.InventoryComplete || !observation.Visible {
 		return false
 	}
 	if state := pair.Priority; priorityActionPending(state) {

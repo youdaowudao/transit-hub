@@ -117,7 +117,7 @@ func TestRealConnectCompensatesRemoteResourcesWhenPersistenceFails(t *testing.T)
 			writeConnectionTestJSON(w, map[string]any{"data": map[string]any{"id": 22}})
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/admin/accounts/22":
 			deletedAccount = true
-			writeConnectionTestJSON(w, map[string]any{"success": true})
+			writeConnectionTestJSON(w, map[string]any{"data": map[string]any{"message": "Account deleted successfully"}})
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/keys/11":
 			deletedKey = true
 			writeConnectionTestJSON(w, map[string]any{"success": true})
@@ -141,6 +141,12 @@ func TestRealConnectCompensatesRemoteResourcesWhenPersistenceFails(t *testing.T)
 	service := NewService(stateRepo, upstream.NewPlatformService(upstream.NewHTTPClient(server.Client())), lookup)
 	service.SetAdminAccountResolver(testAdminResolver{currentID: "admin-1"})
 	service.connRepository = connRepo
+	service.SetSafeAdminAccountDeletion(&stageATestSafeDeletion{apply: func(ctx context.Context, user, workspace string, session upstream.Session, id, source string) error {
+		if source != "compensate_delete" || id != "22" {
+			t.Fatal("wrong protected compensation")
+		}
+		return service.platformService.DeleteSub2APIAdminAccountContext(ctx, session, id)
+	}})
 	addToPricing := false
 
 	_, err := service.RealConnect(context.Background(), "user-1", RealConnectRequest{

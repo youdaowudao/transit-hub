@@ -39,7 +39,27 @@ type AdminGroupAccountInfo struct {
 	// BaseURL 是 new-api channel 转发到的上游 provider 地址（channel.base_url）。
 	// 独立探活需要用它 + channel key 直接对上游发起 OpenAI 兼容请求。sub2api 账号在列表阶段
 	// 拿不到 base_url，探活前再从单账号导出凭据里解析，故此处可能为空。
-	BaseURL string
+	BaseURL                 string
+	TempUnschedulableUntil  *time.Time
+	TempUnschedulableKnown  bool
+	TempUnschedulableReason string
+	RateLimitResetAt        *time.Time
+	RateLimitKnown          bool
+	OverloadUntil           *time.Time
+	OverloadKnown           bool
+	ExpiresAt               *time.Time
+	ExpiresAtKnown          bool
+	AutoPauseOnExpired      *bool
+	ModelRateLimits         []Sub2APIModelRateLimit
+	ModelRateLimitsKnown    bool
+	QuotaLimit              *float64
+	QuotaUsed               *float64
+	QuotaDailyLimit         *float64
+	QuotaDailyUsed          *float64
+	QuotaWeeklyLimit        *float64
+	QuotaWeeklyUsed         *float64
+	QuotaKnown              bool
+	InventoryResponseTimes  []InventoryResponseTime `json:"-"`
 }
 
 // ListAdminGroupAccounts 平台中性地读取某个 admin 分组下的账号/渠道列表。
@@ -73,6 +93,7 @@ func (s *PlatformService) ListSub2APIAdminAccountsContext(ctx context.Context, s
 	accounts := make([]AdminGroupAccountInfo, 0)
 	seenAccountIDs := make(map[string]struct{})
 	expectedTotal := -1
+	responseTimes := make([]InventoryResponseTime, 0)
 	for page := 1; page <= maxPages; page++ {
 		pageURL := session.BaseURL + "/api/v1/admin/accounts?page=" + strconvInt(int64(page)) +
 			"&page_size=" + strconvInt(pageSize)
@@ -80,6 +101,7 @@ func (s *PlatformService) ListSub2APIAdminAccountsContext(ctx context.Context, s
 		if err != nil {
 			return nil, err
 		}
+		responseTimes = append(responseTimes, InventoryResponseTime{HTTPDate: response.Header.Get("Date"), ReceivedAt: response.ReceivedAt})
 		items, validItems := sub2APIAccountPageItems(response.Payload)
 		if !validItems {
 			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
@@ -116,6 +138,7 @@ func (s *PlatformService) ListSub2APIAdminAccountsContext(ctx context.Context, s
 			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 		}
 		if len(accounts) == expectedTotal {
+			GuardSub2APIAccountTimes(session.BaseURL, accounts, responseTimes)
 			return accounts, nil
 		}
 		if len(items) < pageSize {
@@ -146,6 +169,7 @@ func (s *PlatformService) listSub2APIGroupAccountsContext(ctx context.Context, s
 	seenAccountIDs := make(map[string]struct{})
 	expectedTotal := 0
 	hasExpectedTotal := false
+	responseTimes := make([]InventoryResponseTime, 0)
 	for page := 1; page <= maxPages; page++ {
 		pageURL := session.BaseURL + "/api/v1/admin/accounts?group=" + url.QueryEscape(group.ID) +
 			"&page=" + strconvInt(int64(page)) + "&page_size=" + strconvInt(pageSize)
@@ -153,6 +177,9 @@ func (s *PlatformService) listSub2APIGroupAccountsContext(ctx context.Context, s
 		if err != nil {
 			return nil, err
 		}
+		responseTime := InventoryResponseTime{HTTPDate: response.Header.Get("Date"), ReceivedAt: response.ReceivedAt}
+		responseTimes = append(responseTimes, responseTime)
+		group.InventoryTimeEvidence.add(responseTime)
 		items, validItems := sub2APIAccountPageItems(response.Payload)
 		if !validItems {
 			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
@@ -191,6 +218,7 @@ func (s *PlatformService) listSub2APIGroupAccountsContext(ctx context.Context, s
 			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 		}
 		if finished {
+			GuardSub2APIAccountTimes(session.BaseURL, accounts, responseTimes)
 			return accounts, nil
 		}
 	}
@@ -306,6 +334,7 @@ func parseSub2APIAccount(record map[string]any) AdminGroupAccountInfo {
 		Schedulable:    firstBoolValue(record, []string{"schedulable"}),
 		UpdatedAt:      parseFlexibleTime(firstAny(record, []string{"updated_at", "updatedAt"})),
 	}
+	parseSub2APIRestrictions(record, &account)
 	if p := firstString(record, []string{"platform"}); p != nil {
 		account.Platform = *p
 	}

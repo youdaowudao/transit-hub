@@ -89,6 +89,9 @@ type healthRepository interface {
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
 	actionInventoryViews         sync.Map
+	actionDispatchMu             sync.Mutex
+	actionDispatchClosed         bool
+	actionDispatchWG             sync.WaitGroup
 	repo                         healthRepository
 	eventRetention               eventRetentionRepository
 	questionAnswers              questionAnswerRepository
@@ -1135,90 +1138,26 @@ func (s *Service) DisableConnection(ctx context.Context, userID string, connecti
 		states = []ConnectionHealthState{s.defaultState(*conn, "*")}
 	}
 
-	platform := conn.UpstreamPlatform
-	if platform == "" && s.sites != nil {
-		site, siteErr := s.sites.GetSite(ctx, conn.UpstreamSiteID)
-		if siteErr != nil {
-			return siteErr
-		}
-		if site != nil {
-			platform = string(site.Platform)
-		}
+	session, err := s.mySites.RequireSession(ctx, userID, adminAccountID)
+	if err != nil {
+		return err
 	}
-	var releaseTarget func()
-	var releaseMutation func()
-	if platform == string(upstream.PlatformSub2API) {
-		targetID := buildTargetID(platform, adminAccountID, conn.AdminAccountID)
-		var leaseErr error
-		releaseTarget, leaseErr = s.repo.AcquireTargetLease(ctx, targetID)
-		if leaseErr != nil {
-			return leaseErr
-		}
-		defer releaseTarget()
-		releaseMutation, leaseErr = s.repo.AcquireSub2APIMutationLease(ctx, userID, adminAccountID)
-		if leaseErr != nil {
-			return leaseErr
-		}
-		defer releaseMutation()
-		guard := s.sub2APIFloorGuardFor(userID, adminAccountID)
-		inventory, ok := guard.latestInventory(schedulerTickInterval)
-		if !ok {
-			blockedTarget := AdminProbeTarget{
-				TargetID: targetID, Platform: platform, AccountID: conn.AdminAccountID,
-				AdminGroupID: conn.UpstreamGroupID, AdminGroupName: conn.UpstreamGroupName,
-			}
-			if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, blockedTarget, SchedulableActionFailed, ErrorSub2APIInventoryIncomplete, RemoteActionSkippedSub2APIInventory); auditErr != nil {
-				log.Printf("[connection-health] audit blocked legacy disable failed target_id=%s err=%v", targetID, auditErr)
-			}
-			return requestError(ErrorSub2APIInventoryIncomplete)
-		}
-		var floorResult targetRemoteActionResult
-		if !inventoryTargetAlreadyUnavailable(*inventory, targetID) {
-			monitoringScope, scopeErr := s.loadAdminMonitoringScope(ctx, userID, adminAccountID, *inventory)
-			if scopeErr != nil {
-				blockedTarget := AdminProbeTarget{
-					TargetID: targetID, Platform: platform, AccountID: conn.AdminAccountID,
-					AdminGroupID: conn.UpstreamGroupID, AdminGroupName: conn.UpstreamGroupName,
-				}
-				if groupID, groupName, incomplete := firstIncompleteAdminInventoryGroup(*inventory); incomplete {
-					blockedTarget.AdminGroupID = groupID
-					blockedTarget.AdminGroupName = groupName
-				}
-				if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, blockedTarget, SchedulableActionFailed, ErrorSub2APIInventoryIncomplete, RemoteActionSkippedSub2APIInventory); auditErr != nil {
-					log.Printf("[connection-health] audit incomplete legacy monitoring scope failed target_id=%s err=%v", targetID, auditErr)
-				}
-				return requestError(ErrorSub2APIInventoryIncomplete)
-			}
-			floorResult = guard.reserveSub2APIInactive(AdminProbeTarget{
-				TargetID: targetID, Platform: platform, AccountID: conn.AdminAccountID,
-			}, *inventory, monitoringScope)
-		}
-		if floorResult.remoteAction != "" {
-			blockedTarget := AdminProbeTarget{
-				TargetID: targetID, Platform: platform, AccountID: conn.AdminAccountID,
-				AdminGroupID: floorResult.adminGroupID, AdminGroupName: floorResult.adminGroupName,
-			}
-			if floorResult.remoteAction == RemoteActionSkippedSub2APIInventory {
-				if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, blockedTarget, SchedulableActionFailed, ErrorSub2APIInventoryIncomplete, RemoteActionSkippedSub2APIInventory); auditErr != nil {
-					log.Printf("[connection-health] audit blocked legacy disable failed target_id=%s err=%v", targetID, auditErr)
-				}
-				return requestError(ErrorSub2APIInventoryIncomplete)
-			}
-			if auditErr := s.recordSchedulableActionEvent(ctx, userID, adminAccountID, blockedTarget, SchedulableActionFailed, ErrorSub2APIGroupLastUsable, RemoteActionSkippedSub2APILastUsable); auditErr != nil {
-				log.Printf("[connection-health] audit blocked legacy disable failed target_id=%s err=%v", targetID, auditErr)
-			}
-			return requestError(ErrorSub2APIGroupLastUsable)
+	compatAction := ""
+	if session.Platform == upstream.PlatformSub2API {
+		compatAction, err = s.runCompatibilityStatusAction(ctx, userID, adminAccountID, session, conn.AdminAccountID, "inactive")
+		if err != nil {
+			return err
 		}
 	}
 
-	remoteAction := ""
+	remoteAction := compatAction
 	for i, st := range states {
 		fromState := st.State
 		st.State = StateDisabled
 		st.CurrentWeight = 0
 		st.UserID = userID
 		st.AdminAccountID = adminAccountID
-		if i == 0 {
+		if i == 0 && session.Platform != upstream.PlatformSub2API {
 			action, actionErr := s.dispatcher.Degrade(ctx, *conn, st)
 			remoteAction = action
 			if actionErr != nil {
@@ -1256,7 +1195,17 @@ func (s *Service) RestoreConnection(ctx context.Context, userID string, connecti
 		states = []ConnectionHealthState{s.defaultState(*conn, "*")}
 	}
 
+	session, err := s.mySites.RequireSession(ctx, userID, adminAccountID)
+	if err != nil {
+		return err
+	}
 	remoteAction := ""
+	if session.Platform == upstream.PlatformSub2API {
+		remoteAction, err = s.runCompatibilityStatusAction(ctx, userID, adminAccountID, session, conn.AdminAccountID, "active")
+		if err != nil {
+			return err
+		}
+	}
 	for i, st := range states {
 		fromState := st.State
 		st.State = StateObserving
@@ -1266,7 +1215,7 @@ func (s *Service) RestoreConnection(ctx context.Context, userID string, connecti
 		st.ConsecutiveSuccesses = 0
 		st.UserID = userID
 		st.AdminAccountID = adminAccountID
-		if i == 0 {
+		if i == 0 && session.Platform != upstream.PlatformSub2API {
 			action, actionErr := s.dispatcher.Restore(ctx, *conn, st)
 			remoteAction = action
 			if actionErr != nil {

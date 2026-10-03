@@ -600,7 +600,7 @@ func TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds(t *testi
 			if err := json.NewDecoder(r.Body).Decode(&bulkBody); err != nil {
 				t.Fatalf("failed to decode bulk update body: %v", err)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"results": []map[string]any{{"account_id": 1515, "success": true}}}})
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -627,6 +627,7 @@ func TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds(t *testi
 
 	targetID := "sub2api:ws1:1515"
 	assignPolicyToTarget(repo, repo.policies[0], targetID)
+	assignPolicyToTarget(repo, repo.policies[0], "sub2api:ws1:1516")
 	results, err := svc.ProbeTarget(context.Background(), "user1", targetID, []string{"gpt-4o"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -664,7 +665,7 @@ func TestProbeTargetOnce_Sub2APIRealPlatformServiceComboDegradeSucceeds(t *testi
 
 	st := repo.states[targetID]["gpt-4o"]
 	if st.LastRemoteAction != RemoteActionSub2APIStatusInactive {
-		t.Fatalf("expected state.LastRemoteAction=%s, got %q", RemoteActionSub2APIStatusInactive, st.LastRemoteAction)
+		t.Fatalf("expected state.LastRemoteAction=%s, got %q; disposition=%s evidence=%s state=%s targetComplete=%v", RemoteActionSub2APIStatusInactive, st.LastRemoteAction, committed.Disposition, committed.State.HealthEvidenceStatus, committed.State.State, refresh.target.InventoryComplete)
 	}
 	if len(repo.events) != 2 || repo.events[1].RemoteAction != RemoteActionSub2APIStatusInactive || repo.events[1].Source != EventSourceScheduled {
 		t.Fatalf("expected event.RemoteAction=%s, got %+v", RemoteActionSub2APIStatusInactive, repo.events)

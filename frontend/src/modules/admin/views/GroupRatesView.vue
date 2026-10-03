@@ -12,7 +12,7 @@ import type { AdminResourceOption, ConnectionCapabilities, MySiteMapping, MySite
 import type { UpstreamSiteResponse } from '../types/upstream'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
 
-import { t, locale } from '@/locales'
+import { t, te, locale } from '@/locales'
 const router = useRouter()
 const route = useRoute()
 
@@ -600,6 +600,18 @@ const submitConnector = async () => {
 
 const realConnectError = ref('')
 
+const managedResourceErrorMessage = (error: unknown, fallbackKey: string): string => {
+  const key = error instanceof Error ? error.message : ''
+  let message = te(key) ? t(key) : t(fallbackKey)
+  if (['admin.mySites.errors.resourcesPendingVerification', 'admin.mySites.errors.accountCreationPendingVerification', 'admin.mySites.errors.compensationPendingVerification', 'admin.mySites.errors.upstreamKeyCleanupPendingVerification'].includes(key) && error instanceof Error) {
+    const retained = error as Error & { reason?: string; groupId?: string; groupName?: string; adminResourceId?: string; upstreamKeyId?: string }
+    if (retained.reason && retained.reason !== key && te(retained.reason)) message += ` ${t(retained.reason)}`
+    if (retained.groupId || retained.groupName) message += ` ${t('admin.mySites.errors.blockingGroup', { groupName: retained.groupName || '—', groupId: retained.groupId || '—' })}`
+    message += ` ${t('admin.mySites.errors.retainedResources', { adminResourceId: retained.adminResourceId || '—', upstreamKeyId: retained.upstreamKeyId || '—' })}`
+  }
+  return message
+}
+
 const refreshAfterMutation = async () => {
   try {
     await Promise.all([loadRates(), loadRealConnections(), loadMySiteMappingData(true)])
@@ -654,8 +666,8 @@ const submitRealConnect = async () => {
   try {
     await realConnect(payload)
     closeConnector()
-  } catch {
-    realConnectError.value = t('admin.groupRates.connect.realFailed')
+  } catch (error) {
+    realConnectError.value = managedResourceErrorMessage(error, 'admin.groupRates.connect.realFailed')
     isActionLoading.value = false
     return
   }
@@ -734,8 +746,8 @@ const submitDisconnect = async () => {
       removePricingMapping: disconnectRemovePricing.value,
     })
     closeDisconnect()
-  } catch {
-    disconnectError.value = t('admin.groupRates.disconnect.failed')
+  } catch (error) {
+    disconnectError.value = managedResourceErrorMessage(error, 'admin.groupRates.disconnect.failed')
     isDisconnecting.value = false
     return
   }

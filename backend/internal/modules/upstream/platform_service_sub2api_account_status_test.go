@@ -20,7 +20,7 @@ func TestUpdateSub2APIAdminAccountStatus_UsesFieldOnlyBulkUpdate(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to decode bulk update body: %v", err)
 		}
-		writeJSON(w, map[string]any{"success": true})
+		writeJSON(w, map[string]any{"code": 0, "data": map[string]any{"success": 1, "failed": 0, "success_ids": []int{1515}, "failed_ids": []int{}, "results": []any{map[string]any{"account_id": 1515, "success": true}}}})
 	}))
 	defer server.Close()
 
@@ -49,7 +49,7 @@ func TestUpdateAdminTargetPriority_Sub2APIUsesFieldOnlyBulkUpdate(t *testing.T) 
 		if err != nil {
 			t.Fatalf("failed to decode bulk update body: %v", err)
 		}
-		writeJSON(w, map[string]any{"success": true})
+		writeJSON(w, map[string]any{"code": 0, "data": map[string]any{"success": 1, "failed": 0, "success_ids": []int{1515}, "failed_ids": []int{}, "results": []any{map[string]any{"account_id": 1515, "success": true}}}})
 	}))
 	defer server.Close()
 

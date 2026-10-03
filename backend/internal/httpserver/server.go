@@ -229,6 +229,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	// 分组下账号/渠道，叠加 real_connections 探活状态。platformService 已实现所需方法。
 	connHealthService.SetPlatformGroupReader(platformService)
 	mySitesService.SetConnectionRuntimeCleaner(connHealthService)
+	mySitesService.SetSafeAdminAccountDeletion(connHealthService)
 	connection_health.RegisterRoutes(server.mux, connHealthService)
 	server.connectionHealthService = connHealthService
 

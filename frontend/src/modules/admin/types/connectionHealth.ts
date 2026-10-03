@@ -231,7 +231,7 @@ export interface AccountTierResult {
 }
 
 export interface AdminGroupAccount {
-  remoteActionPending?: { action: string; dispatchId?: string; phase: string; reason: string }
+  remoteActionPending?: { action: string; dispatchId?: string; phase: string; reason: string; source?: string }
   testConfiguration?: EffectiveTestConfiguration
   id: string
   name: string
@@ -241,6 +241,16 @@ export interface AdminGroupAccount {
   accountTier?: AccountTier
   mainSiteError?: string
   schedulable?: boolean
+  tempUnschedulableUntil?: string | null
+  tempUnschedulableKnown?: boolean
+  tempUnschedulableActive?: boolean
+  tempUnschedulableReason?: string
+  rateLimitResetAt?: string | null
+  rateLimitKnown?: boolean
+  rateLimitActive?: boolean
+  overloadUntil?: string | null
+  overloadKnown?: boolean
+  overloadActive?: boolean
   schedulableSource?: string
   schedulableChangedAt?: string | null
   lastSchedulableAction?: string

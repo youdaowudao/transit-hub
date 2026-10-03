@@ -32,6 +32,12 @@ const authHeaders = (): HeadersInit => {
 
 type AdminErrorPayload = {
   message?: string
+  error?: string
+  reason?: string
+  groupId?: string
+  groupName?: string
+  adminResourceId?: string
+  upstreamKeyId?: string
 }
 
 type MySiteMappingRequest = Omit<MySiteMapping, 'lastAutoPricingRun'>
@@ -121,7 +127,17 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       throw new Error(authUnauthorizedErrorKey)
     }
 
-    throw new Error(payload.message ?? 'admin.mySites.errors.request')
+    const error = new Error(payload.message ?? payload.error ?? 'admin.mySites.errors.request')
+    if (['admin.mySites.errors.resourcesPendingVerification', 'admin.mySites.errors.accountCreationPendingVerification', 'admin.mySites.errors.compensationPendingVerification', 'admin.mySites.errors.upstreamKeyCleanupPendingVerification'].includes(error.message)) {
+      Object.assign(error, {
+        reason: typeof payload.reason === 'string' ? payload.reason : undefined,
+        groupId: typeof payload.groupId === 'string' ? payload.groupId : undefined,
+        groupName: typeof payload.groupName === 'string' ? payload.groupName : undefined,
+        adminResourceId: typeof payload.adminResourceId === 'string' ? payload.adminResourceId : undefined,
+        upstreamKeyId: typeof payload.upstreamKeyId === 'string' ? payload.upstreamKeyId : undefined,
+      })
+    }
+    throw error
   }
 
   return payload

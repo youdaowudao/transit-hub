@@ -3,8 +3,10 @@ import App from './App.vue'
 import './styles/globals.css'
 import { router } from './router'
 
-// 固定语言标识，供浏览器和 Intl 使用
-document.documentElement.lang = 'zh-CN'
+import { messageLocale } from './locales'
+
+// HTML 标识实际文案语言，格式化语言通过 locales 统一配置。
+document.documentElement.lang = messageLocale
 
 const app = createApp(App)
 

@@ -70,7 +70,7 @@ const (
 	AlgorithmVersionV1     = "lottery-hmac-sha256-v1"
 	AlgorithmVersionV2     = "lottery-hmac-sha256-public-v2"
 	AlgorithmVersion       = AlgorithmVersionV2
-	DefaultLotteryTimezone = "Asia/Shanghai"
+	DefaultLotteryTimezone = "Asia/Singapore"
 )
 
 type requestError string

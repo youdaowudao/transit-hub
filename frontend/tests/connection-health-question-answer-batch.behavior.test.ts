@@ -257,6 +257,8 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
+  vi.unstubAllEnvs()
   for (const wrapper of mountedWrappers.splice(0)) wrapper.unmount()
   document.body.innerHTML = ''
   window.localStorage.clear()
@@ -796,6 +798,30 @@ describe('batch global configuration gates', () => {
 })
 
 describe('batch sequential submission', () => {
+  it.each(['Asia/Tokyo', 'America/New_York'])('shows the started batch summary in Singapore from %s without changing submitted requests', async timezone => {
+    vi.stubEnv('TZ', timezone)
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-03T00:00:00Z'))
+    const pending = deferred<QuestionAnswerBatch>()
+    harness.startQuestionAnswerBatch.mockReturnValue(pending.promise)
+    const { wrapper, drawer } = await openPreparedBatch(
+      [adminGroup('sg-group', [account('sg-target')])],
+      storedPreferences({ modelIds: ['model-a'], questionIds: ['q1'], repeatCount: 1, batchTargetIds: ['sg-target'] }),
+    )
+    try {
+      await drawer.get('[data-testid="question-answer-batch-start"]').trigger('click')
+      await flushPromises()
+      expect(harness.startQuestionAnswerBatch).toHaveBeenCalledOnce()
+      expect(harness.startQuestionAnswerBatch.mock.calls[0]?.slice(0, 5)).toEqual(['sg-target', ['model-a'], ['q1'], 'high', 1])
+      const summary = wrapper.get('[data-testid="question-answer-batch-entry-summary"]')
+      expect(summary.text()).toContain('08:00')
+      expect(summary.text()).not.toContain(timezone === 'Asia/Tokyo' ? '09:00' : '20:00')
+    } finally {
+      pending.resolve(emptyBatch({ batchId: 'sg-started', submittedCount: 1 }))
+      await flushPromises()
+    }
+  })
+
   it('freezes display order, starts compatible targets serially, and reconciles mixed outcomes and accepted totals', async () => {
     let inFlight = 0
     let maxInFlight = 0

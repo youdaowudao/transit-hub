@@ -781,9 +781,7 @@ const profitMarginFormatter = computed(() => new Intl.NumberFormat(locale, {
   maximumFractionDigits: 2,
 }))
 
-const currencyFormatter = computed(() => new Intl.NumberFormat(locale, {
-  style: 'currency',
-  currency: 'CNY',
+const amountFormatter = computed(() => new Intl.NumberFormat(locale, {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 }))
@@ -810,18 +808,18 @@ const profitMarginClass = (value: number | null | undefined): string => {
   return 'text-emerald-600 dark:text-emerald-400'
 }
 
-const formatCurrency = (value: number | null | undefined): string => {
+const formatAmount = (value: number | null | undefined): string => {
   if (value == null || !Number.isFinite(value)) return t('admin.groupAssociations.common.placeholder')
-  return currencyFormatter.value.format(value)
+  return amountFormatter.value.format(value)
 }
 
 const formatSimulatedProfitRange = (): string => {
   const range = simulatedProfitRange.value
   if (!range) return t('admin.groupAssociations.common.placeholder')
-  if (Math.abs(range.maximum - range.minimum) < 0.005) return formatCurrency(range.minimum)
+  if (Math.abs(range.maximum - range.minimum) < 0.005) return formatAmount(range.minimum)
   return t('admin.groupAssociations.profitCalculator.amountRange', {
-    minimum: formatCurrency(range.minimum),
-    maximum: formatCurrency(range.maximum),
+    minimum: formatAmount(range.minimum),
+    maximum: formatAmount(range.maximum),
   })
 }
 
@@ -842,7 +840,7 @@ const formatRunTime = (value: string | undefined): string => {
   if (!value) return t('admin.groupAssociations.lastRun.never')
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return t('admin.groupAssociations.lastRun.never')
-  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Singapore' }).format(date)
 }
 
 const moveGroup = (groupId: string, offset: -1 | 1) => {
@@ -990,7 +988,7 @@ const loadData = async () => {
       listUpstreamSites()
         .then(items => ({ items, available: true }))
         .catch(() => ({ items: [] as UpstreamSiteResponse[], available: false })),
-      getNotificationChannelSettings().catch(() => ({ dingtalk: [], wecom: [], qq: [], feishu: [], telegram: [] })),
+      getNotificationChannelSettings().catch(() => null),
       listRealConnections()
         .then(items => ({ items, available: true }))
         .catch(() => ({ items: [] as RealConnection[], available: false })),
@@ -1013,12 +1011,21 @@ const loadData = async () => {
     realConnectionsAvailable.value = connectionsResult.available
     groupRatesAvailable.value = ratesResult.available
     healthDataAvailable.value = healthResult.available
+    const telegramIds = new Set((channelSettings?.telegram ?? []).map(bot => bot.id))
+    if (channelSettings) mappings.value = mappings.value.map(mapping => {
+      if (mapping.autoPricingNotifyRecipientsUnavailable) return mapping
+      const originalIds = mapping.autoPricingNotifyBotIds ?? []
+      const botIds = originalIds.filter(id => telegramIds.has(id))
+      const invalid = Boolean(mapping.autoPricingNotifyRecipientsInvalid) || botIds.length !== originalIds.length
+      return {
+        ...mapping,
+        autoPricingNotifyBotIds: botIds,
+        autoPricingNotifyRecipientsInvalid: invalid,
+        enableAutoPricingNotify: mapping.enableAutoPricingNotify && !(invalid && botIds.length === 0),
+      }
+    })
     botOptions.value = [
-      ...(channelSettings.dingtalk ?? []).filter(bot => bot.enabled).map(bot => ({ id: bot.id, name: bot.name, channel: 'DingTalk' })),
-      ...(channelSettings.wecom ?? []).filter(bot => bot.enabled).map(bot => ({ id: bot.id, name: bot.name, channel: 'WeCom' })),
-      ...(channelSettings.qq ?? []).filter(bot => bot.enabled).map(bot => ({ id: bot.id, name: bot.name, channel: 'QQ' })),
-      ...(channelSettings.feishu ?? []).filter(bot => bot.enabled).map(bot => ({ id: bot.id, name: bot.name, channel: 'Feishu' })),
-      ...(channelSettings.telegram ?? []).filter(bot => bot.enabled).map(bot => ({ id: bot.id, name: bot.name, channel: 'Telegram' })),
+      ...(channelSettings?.telegram ?? []).filter(bot => bot.enabled).map(bot => ({ id: bot.id, name: bot.name, channel: 'Telegram' })),
     ]
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : 'admin.groupAssociations.loadError'
@@ -1515,6 +1522,7 @@ onBeforeUnmount(() => {
                       time: formatRunTime(selectedMapping?.lastAutoPricingRun?.ranAt),
                     }) }}
                   </div>
+                  <p v-if="selectedMapping?.autoPricingNotifyRecipientsUnavailable" class="mt-1 text-xs text-warning" role="status">{{ t('admin.settings.recipientsUnavailable') }}</p>
                   <p v-if="selectedMapping?.lastAutoPricingRun?.reason" class="mt-1 text-xs text-muted-foreground">
                     {{ t('admin.groupAssociations.lastRun.reason', { reason: runReasonLabel(selectedMapping.lastAutoPricingRun) }) }}
                   </p>
@@ -1639,7 +1647,6 @@ onBeforeUnmount(() => {
                 {{ t('admin.groupAssociations.profitCalculator.revenueLabel') }}
               </label>
               <div class="relative mt-2 max-w-sm">
-                <span class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">¥</span>
                 <input
                   id="simulated-revenue"
                   v-model="simulatedRevenueInput"
@@ -1689,7 +1696,7 @@ onBeforeUnmount(() => {
                   </div>
                   <div>
                     <div class="text-[11px] text-muted-foreground">{{ t('admin.groupAssociations.profitCalculator.estimatedCost') }}</div>
-                    <div class="mt-1 text-sm font-semibold tabular-nums text-foreground">{{ formatCurrency(target.estimatedCost) }}</div>
+                    <div class="mt-1 text-sm font-semibold tabular-nums text-foreground">{{ formatAmount(target.estimatedCost) }}</div>
                   </div>
                   <div>
                     <div class="text-[11px] text-muted-foreground">{{ t('admin.groupAssociations.metrics.budgetMargin') }}</div>
@@ -1700,7 +1707,7 @@ onBeforeUnmount(() => {
                   <div class="col-span-2 sm:col-span-1 sm:text-right">
                     <div class="text-[11px] text-muted-foreground">{{ t('admin.groupAssociations.profitCalculator.estimatedProfit') }}</div>
                     <div class="mt-1 text-base font-semibold tabular-nums" :class="profitMarginClass(target.estimatedProfit)">
-                      {{ formatCurrency(target.estimatedProfit) }}
+                      {{ formatAmount(target.estimatedProfit) }}
                     </div>
                   </div>
                 </div>
@@ -1716,7 +1723,6 @@ onBeforeUnmount(() => {
                       {{ t('admin.groupAssociations.profitCalculator.revenueLabel') }}
                     </label>
                     <div class="relative mt-2">
-                      <span class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">¥</span>
                       <input
                         id="custom-simulated-revenue"
                         v-model="simulatedRevenueInput"
@@ -1789,7 +1795,7 @@ onBeforeUnmount(() => {
                 <div class="border-b border-border/60 px-5 py-5 sm:border-b-0 sm:border-r">
                   <dt class="text-xs font-medium text-muted-foreground">{{ t('admin.groupAssociations.profitCalculator.estimatedCost') }}</dt>
                   <dd class="mt-1 text-lg font-semibold tabular-nums text-foreground">
-                    {{ formatCurrency(customProfitSimulation?.estimatedCost) }}
+                    {{ formatAmount(customProfitSimulation?.estimatedCost) }}
                   </dd>
                 </div>
                 <div class="border-b border-border/60 px-5 py-5 sm:border-b-0 sm:border-r">
@@ -1801,7 +1807,7 @@ onBeforeUnmount(() => {
                 <div class="px-5 py-5">
                   <dt class="text-xs font-medium text-muted-foreground">{{ t('admin.groupAssociations.profitCalculator.estimatedProfit') }}</dt>
                   <dd class="mt-1 text-lg font-semibold tabular-nums" :class="profitMarginClass(customProfitSimulation?.estimatedProfit)">
-                    {{ formatCurrency(customProfitSimulation?.estimatedProfit) }}
+                    {{ formatAmount(customProfitSimulation?.estimatedProfit) }}
                   </dd>
                 </div>
               </dl>

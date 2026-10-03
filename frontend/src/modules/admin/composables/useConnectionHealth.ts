@@ -1,3 +1,4 @@
+import { locale } from '@/locales'
 import { ref } from 'vue'
 import type {
   AccountTierResult,
@@ -916,8 +917,7 @@ export function formatConnectionHealthTime(iso: string | null): string {
   if (!iso) return '—'
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return '—'
-  const locale = typeof document === 'undefined' ? 'zh-CN' : document.documentElement.lang || 'zh-CN'
-  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Shanghai' }).format(date)
+  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Singapore' }).format(date)
 }
 
 // connectionHealthTimeMs 让显示层统一使用同一套有效时间判定。后端恢复成功后仍会保留

@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { ArrowDownRight, ArrowUpRight, Minus } from 'lucide-vue-next'
 import type { DashboardColorToken } from '../../types/dashboard'
-import { DELTA_TEXT_CLASSES, METRIC_DOT_CLASSES, formatCny, type DeltaDirection } from '../../utils/dashboard'
+import { DELTA_TEXT_CLASSES, METRIC_DOT_CLASSES, formatAmount, type DeltaDirection } from '../../utils/dashboard'
 import TrendChart from './TrendChart.vue'
 
 const props = defineProps<{
@@ -52,7 +52,7 @@ const axisLabels = computed(() => {
     </div>
 
     <div class="mt-4">
-      <TrendChart :values="values" :labels="labels" :color="color" :height="180" :format-value="formatCny" />
+      <TrendChart :values="values" :labels="labels" :color="color" :height="180" :format-value="formatAmount" />
       <div class="mt-2 flex justify-between text-[11px] text-muted-foreground">
         <span v-for="(label, index) in axisLabels" :key="`${label}-${index}`">{{ label }}</span>
       </div>

@@ -42,6 +42,8 @@ export interface CampaignAdjustment {
 export interface CampaignNotify {
   enabled: boolean
   botIds: string[]
+  recipientsInvalid?: boolean
+  recipientsUnavailable?: boolean
   startTemplate: string
   endTemplate: string
 }
@@ -95,6 +97,8 @@ export interface CampaignListItem {
   endedAt: string | null
   summary: CampaignSummary
   notifyEnabled: boolean
+  notifyRecipientsInvalid?: boolean
+  notifyRecipientsUnavailable?: boolean
   createdBy: string
   createdAt: string
   updatedAt: string
@@ -104,6 +108,8 @@ export interface CampaignListItem {
 export interface CampaignNotifyDefaults {
   enabled: boolean
   botIds: string[]
+  recipientsInvalid?: boolean
+  recipientsUnavailable?: boolean
   startTemplate: string
   endTemplate: string
 }

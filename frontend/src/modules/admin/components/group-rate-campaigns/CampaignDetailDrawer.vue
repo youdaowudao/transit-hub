@@ -88,7 +88,7 @@ const formatDateTime = (value: string | null): string => {
   if (!value) return '—'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return '—'
-  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+  return new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Singapore' }).format(date)
 }
 
 const statusBadgeClass = (status: string): string => {
@@ -168,6 +168,8 @@ const statusBadgeClass = (status: string): string => {
             <div v-else-if="detail" class="space-y-5 px-5 py-5">
               <div class="space-y-3">
                 <p class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{{ t(`${prefix}.sectionConfig`) }}</p>
+                <p v-if="detail.notify.recipientsUnavailable" class="text-xs text-warning" role="status">{{ t('admin.settings.recipientsUnavailable') }}</p>
+                <p v-else-if="detail.notify.recipientsInvalid" class="text-xs text-warning" role="status">{{ t('admin.settings.recipientsInvalid') }}</p>
                 <div class="rounded-xl border border-border/40 bg-surface/30 p-4 space-y-3">
                   <div class="flex items-start justify-between gap-3">
                     <div>

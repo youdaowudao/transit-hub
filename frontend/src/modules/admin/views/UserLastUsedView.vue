@@ -4,7 +4,7 @@ import { AlertCircle, Copy, Loader2, Plus, RefreshCw, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tooltip } from '@/components/ui/tooltip'
-import { t } from '@/locales'
+import { t, locale } from '@/locales'
 import { listMassEmailUsers, listSelfRechargeUsers } from '../api/massEmail'
 import type { MassEmailUser, SelfRechargeUser } from '../types/massEmail'
 import {
@@ -195,7 +195,7 @@ const isCopied = (userId: string, email: string): boolean => (
   copiedUserKeys.value.has(copiedUserKey(userId, email))
 )
 
-const amountFormatter = new Intl.NumberFormat('zh-CN', {
+const amountFormatter = new Intl.NumberFormat(locale, {
   minimumFractionDigits: 2,
   maximumFractionDigits: 6,
 })

@@ -434,7 +434,7 @@ func (s *PlatformService) FetchSub2APIGroupUsageSummaryStatsContext(ctx context.
 	return s.fetchSub2APIGroupUsageSummaryStatsContext(ctx, session)
 }
 
-// FetchSub2APIGroupDailyStatsForDate 跳过无日期参数的 usage-summary，按指定上海业务日查询。
+// FetchSub2APIGroupDailyStatsForDate 跳过无日期参数的 usage-summary，按指定新加坡业务日查询。
 func (s *PlatformService) FetchSub2APIGroupDailyStatsForDate(session Session, date string, groups ...[]GroupInfo) ([]GroupDailyStat, error) {
 	stats, err := s.fetchSub2APIKeyGroupDailyStatsForDate(session, date)
 	if err == nil {
@@ -465,7 +465,7 @@ func (s *PlatformService) FetchSub2APIGroupDailyStatsForDate(session Session, da
 	return stats, nil
 }
 
-// FetchSub2APIAdminGroupDailyStatsByIDForDate 读取指定上海业务日的主站分组营收。
+// FetchSub2APIAdminGroupDailyStatsByIDForDate 读取指定新加坡业务日的主站分组营收。
 // 严格归因依赖稳定 group_id，因此该方法不使用逐 Key 或分组名称回退。
 func (s *PlatformService) FetchSub2APIAdminGroupDailyStatsByIDForDate(session Session, date string) ([]GroupDailyStat, error) {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
@@ -1152,7 +1152,7 @@ func (s *PlatformService) FetchNewAPIGroupDailyStats(session Session, groups []G
 	return s.FetchNewAPIGroupDailyStatsForDate(session, groups, businesstime.Today())
 }
 
-// FetchNewAPIGroupDailyStatsForDate 为所有分组复用同一个上海业务日起止时间戳。
+// FetchNewAPIGroupDailyStatsForDate 为所有分组复用同一个新加坡业务日起止时间戳。
 func (s *PlatformService) FetchNewAPIGroupDailyStatsForDate(session Session, groups []GroupInfo, date string) ([]GroupDailyStat, error) {
 	return s.fetchNewAPIGroupDailyStatsForDate(session, groups, date, false)
 }
@@ -1199,7 +1199,7 @@ func (s *PlatformService) fetchNewAPIGroupDailyStatsForDateContext(ctx context.C
 }
 
 // FetchKeyUsageToday 按平台分发获取上游站点今天各 key 的消费统计。
-// 返回值为上游平台原始金额，未乘以站点 rechargeRate；由 upstream.Service 层完成 CNY 换算和跨站点聚合。
+// 返回值为上游平台原始金额，未乘以站点 rechargeRate；由 upstream.Service 层完成核算金额换算和跨站点聚合。
 func (s *PlatformService) FetchKeyUsageToday(session Session, groups []GroupInfo) ([]KeyUsageTodayStat, error) {
 	return s.FetchKeyUsageTodayWithContext(context.Background(), session, groups)
 }
@@ -1349,7 +1349,7 @@ func (s *PlatformService) fetchSub2APIKeyUsageToday(ctx context.Context, session
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			statsURL := session.BaseURL + "/api/v1/usage/stats?start_date=" + date + "&end_date=" + date + "&api_key_id=" + record.id + "&timezone=Asia%2FShanghai"
+			statsURL := session.BaseURL + "/api/v1/usage/stats?start_date=" + date + "&end_date=" + date + "&api_key_id=" + record.id + "&timezone=Asia%2FSingapore"
 			response, err := s.requestKeyUsageJSONWithContext(ctx, statsURL, authOptions)
 			if err != nil {
 				mu.Lock()
@@ -1577,7 +1577,7 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 	if err != nil {
 		return Metrics{}, err
 	}
-	// 使用上海业务日时区边界查询今日成本，修复 todayStart/todayEnd 使用进程本地时区的问题。
+	// 使用新加坡业务日时区边界查询今日成本，修复 todayStart/todayEnd 使用进程本地时区的问题。
 	var stat jsonResponse
 	if startTS, endTS, boundsErr := businessDayUnixBounds(businesstime.Today()); boundsErr == nil {
 		statURL := session.BaseURL + "/api/log/self/stat?type=2&start_timestamp=" + strconvInt(startTS) + "&end_timestamp=" + strconvInt(endTS)
@@ -2139,7 +2139,7 @@ func (s *PlatformService) FetchAdminGroupDailyStats(session Session, groups []Gr
 	}
 }
 
-// FetchAdminGroupDailyStatsForDate 按平台获取指定上海业务日的分组用量。
+// FetchAdminGroupDailyStatsForDate 按平台获取指定新加坡业务日的分组用量。
 func (s *PlatformService) FetchAdminGroupDailyStatsForDate(session Session, groups []GroupInfo, date string) ([]GroupDailyStat, error) {
 	switch session.Platform {
 	case PlatformNewAPI:
@@ -3247,7 +3247,7 @@ func normalizeSub2APIUserBreakdownQuery(query Sub2APIUserBreakdownQuery) Sub2API
 	}
 	query.Timezone = strings.TrimSpace(query.Timezone)
 	if query.Timezone == "" {
-		query.Timezone = "Asia/Shanghai"
+		query.Timezone = "Asia/Singapore"
 	}
 	return query
 }
@@ -3617,7 +3617,7 @@ func parseSub2APIBalanceHistoryItem(value any) Sub2APIBalanceHistoryItem {
 	return item
 }
 
-// FetchCostForDate 查询上游站点指定上海业务日期的原始成本（未乘 rechargeRate）。
+// FetchCostForDate 查询上游站点指定新加坡业务日期的原始成本（未乘 rechargeRate）。
 // date 格式 "2006-01-02"，由调用方传入；内部禁止调用 time.Now() 推导业务日期。
 // sub2api 主路径：账号级汇总接口；回退路径：逐 key 求和（结果标 key_sum_best_effort）。
 // new-api 路径：/api/log/self/stat，使用 businessDayUnixBounds(date)。
@@ -3657,7 +3657,7 @@ func (s *PlatformService) fetchNewAPICostForDate(session Session, date string) (
 func (s *PlatformService) fetchSub2APICostForDate(session Session, date string) (float64, CostFetchMeta, error) {
 	meta := CostFetchMeta{Source: "account_level", ObservedAt: time.Now()}
 	authOpts := adminAuthOptions(session)
-	statsURL := session.BaseURL + "/api/v1/usage/stats?start_date=" + url.QueryEscape(date) + "&end_date=" + url.QueryEscape(date) + "&timezone=Asia%2FShanghai"
+	statsURL := session.BaseURL + "/api/v1/usage/stats?start_date=" + url.QueryEscape(date) + "&end_date=" + url.QueryEscape(date) + "&timezone=Asia%2FSingapore"
 	response, err := s.httpClient.requestJSON(statsURL, authOpts)
 	if err == nil {
 		// 用 *float64：nil 表示字段不存在（字段缺失不等于零成本），触发逐 key 回退。
@@ -3750,7 +3750,7 @@ func (s *PlatformService) fetchSub2APIKeysCostForDate(session Session, date stri
 		go func(record sub2APIKeyRecord) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			statsURL := session.BaseURL + "/api/v1/usage/stats?start_date=" + url.QueryEscape(date) + "&end_date=" + url.QueryEscape(date) + "&api_key_id=" + record.id + "&timezone=Asia%2FShanghai"
+			statsURL := session.BaseURL + "/api/v1/usage/stats?start_date=" + url.QueryEscape(date) + "&end_date=" + url.QueryEscape(date) + "&api_key_id=" + record.id + "&timezone=Asia%2FSingapore"
 			response, err := s.httpClient.requestJSON(statsURL, authOptions)
 			mu.Lock()
 			defer mu.Unlock()

@@ -84,7 +84,7 @@ const hasActiveBatchState = computed(() => (
   activeBatches.value.length > 0 || Boolean(selectedBatch.value && activeBatchStatuses.includes(selectedBatch.value.status))
 ))
 const confirmRecipientCount = computed(() => (confirmMode.value === 'all' ? totalUsers.value : confirmUserIds.value.length))
-const timezone = computed(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
+const timezone = computed(() => 'Asia/Singapore')
 const previewDocument = computed(() => {
   const htmlBody = selectedTemplate.value?.htmlBody ?? ''
   const policy = "default-src 'none'; style-src 'unsafe-inline'; img-src data: cid:; font-src data:; form-action 'none'; frame-src 'none'; connect-src 'none'"
@@ -100,6 +100,7 @@ const formatDateTime = (value?: string | null): string => {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return t('admin.massEmail.common.placeholder')
   return new Intl.DateTimeFormat(locale, {
+    timeZone: 'Asia/Singapore',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

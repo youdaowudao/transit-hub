@@ -84,6 +84,7 @@ const formatDateTime = (value: string | null): string => {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return t('admin.groupRateCampaigns.common.placeholder')
   return new Intl.DateTimeFormat(locale, {
+    timeZone: 'Asia/Singapore',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -195,6 +196,8 @@ onMounted(() => {
                 <span :class="['inline-flex rounded-md border px-2 py-1 text-xs font-semibold', statusBadgeClass(campaign.status)]">
                   {{ t(`admin.groupRateCampaigns.status.${campaign.status}`) }}
                 </span>
+                <p v-if="campaign.notifyRecipientsUnavailable" class="mt-1 text-xs text-warning" role="status">{{ t('admin.settings.recipientsUnavailable') }}</p>
+                <p v-else-if="campaign.notifyRecipientsInvalid" class="mt-1 text-xs text-warning" role="status">{{ t('admin.settings.recipientsInvalid') }}</p>
               </td>
               <td class="px-6 py-2.5 text-muted-foreground">{{ formatDateTime(campaign.startedAt ?? campaign.startAt) }}</td>
               <td class="px-6 py-2.5 text-muted-foreground">{{ formatDateTime(campaign.endedAt ?? campaign.endAt) }}</td>

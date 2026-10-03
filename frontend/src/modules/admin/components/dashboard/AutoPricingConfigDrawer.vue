@@ -39,6 +39,8 @@ const enableAutoPricingNotify = ref(false)
 const autoPricingNotifyBotIds = ref<string[]>([])
 const autoPricingNotifyTemplate = ref('')
 const copiedVar = ref<string | null>(null)
+const notifyRecipientsInvalid = ref(false)
+const notifyRecipientsUnavailable = ref(false)
 const validationError = ref<string | null>(null)
 
 const prefix = 'admin.groupAssociations.autoPricingDrawer'
@@ -165,6 +167,9 @@ const resetForm = () => {
   enableAutoPricingNotify.value = m?.enableAutoPricingNotify ?? false
   autoPricingNotifyBotIds.value = [...(m?.autoPricingNotifyBotIds ?? [])]
   autoPricingNotifyTemplate.value = m?.autoPricingNotifyTemplate ?? ''
+  notifyRecipientsInvalid.value = Boolean(m?.autoPricingNotifyRecipientsInvalid)
+  notifyRecipientsUnavailable.value = Boolean(m?.autoPricingNotifyRecipientsUnavailable)
+  if (!notifyRecipientsUnavailable.value && notifyRecipientsInvalid.value && autoPricingNotifyBotIds.value.length === 0) enableAutoPricingNotify.value = false
   copiedVar.value = null
   validationError.value = null
 }
@@ -517,6 +522,8 @@ const parseNumberInput = (value: string): number | null => {
                       </label>
                     </div>
 
+                    <p v-if="notifyRecipientsUnavailable" class="text-xs text-warning" role="status">{{ t('admin.settings.recipientsUnavailable') }}</p>
+                    <p v-else-if="notifyRecipientsInvalid" class="text-xs text-warning" role="status">{{ t('admin.settings.recipientsInvalid') }}</p>
                     <template v-if="enableAutoPricingNotify">
                       <!-- Bot selector -->
                       <div class="space-y-1.5">

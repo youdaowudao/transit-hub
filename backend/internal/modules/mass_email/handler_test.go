@@ -54,7 +54,7 @@ func TestHandlerListUsersForwardsQuery(t *testing.T) {
 	service := newTestService(newFakeRepo(), users, nil)
 	RegisterRoutes(mux, service, fakeAccounts{"user-1": "admin-1"})
 
-	req := authedRequest(http.MethodGet, "/api/mass-email/users?page=3&page_size=40&status=active&role=admin&search=++Alice%2Bnotes+&sort_by=last_used_at&sort_order=desc&timezone=Asia%2FShanghai", "", "user-1")
+	req := authedRequest(http.MethodGet, "/api/mass-email/users?page=3&page_size=40&status=active&role=admin&search=++Alice%2Bnotes+&sort_by=last_used_at&sort_order=desc&timezone=Asia%2FSingapore", "", "user-1")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -62,7 +62,7 @@ func TestHandlerListUsersForwardsQuery(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	got := users.lastQuery
-	if got.Page != 3 || got.PageSize != 40 || got.Status != "active" || got.Role != "admin" || got.Search != "Alice+notes" || got.SortBy != "last_used_at" || got.SortOrder != "desc" || got.Timezone != "Asia/Shanghai" {
+	if got.Page != 3 || got.PageSize != 40 || got.Status != "active" || got.Role != "admin" || got.Search != "Alice+notes" || got.SortBy != "last_used_at" || got.SortOrder != "desc" || got.Timezone != "Asia/Singapore" {
 		t.Fatalf("query not forwarded: %#v", got)
 	}
 	var response UsersPage

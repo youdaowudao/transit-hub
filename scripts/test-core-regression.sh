@@ -7,7 +7,7 @@ MODE="${1:-core}"
 usage() {
   cat <<'USAGE'
 Usage:
-  bash scripts/test-core-regression.sh [core|connection-health]
+  bash scripts/test-core-regression.sh [core|connection-health|globalization]
 
 Runs the local core regression gate. This script does not start dev services,
 does not run SSH, and does not contact production.
@@ -71,9 +71,21 @@ run_connection_health_gate() {
     bash -c "cd '$ROOT_DIR/frontend' && npm run typecheck"
 }
 
+run_globalization_gate() {
+  run_step "backend globalization behavior and amount regression tests" \
+    bash -c "cd '$ROOT_DIR/backend' && go test ./cmd/notification-cleanup ./internal/modules/settings ./internal/shared/businesstime ./internal/modules/my_sites ./internal/modules/group_rate_campaigns ./internal/modules/leaderboard ./internal/modules/lottery ./internal/modules/dashboard ./internal/modules/upstream ./internal/httpserver -count=1"
+
+  run_step "frontend language, amount and Telegram recipient regression tests" \
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- locale-configuration.test.ts globalization-amount.behavior.test.ts globalization-time-input.behavior.test.ts notification-recipients.behavior.test.ts user-last-used.test.ts"
+}
+
 case "$MODE" in
   core|connection-health)
     run_connection_health_gate
+    run_globalization_gate
+    ;;
+  globalization)
+    run_globalization_gate
     ;;
   -h|--help|help)
     usage

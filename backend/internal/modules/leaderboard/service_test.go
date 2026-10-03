@@ -145,7 +145,7 @@ func newTestService(repo *fakeRepo, sessions *fakeSessions, platform *fakePlatfo
 	return svc
 }
 
-func TestGetData_DefaultShanghaiDateSortMaskAndWorkspace(t *testing.T) {
+func TestGetData_DefaultSingaporeDateSortMaskAndWorkspace(t *testing.T) {
 	repo := newFakeRepo()
 	sessions := &fakeSessions{sessions: map[string]EmbedSession{}}
 	platform := &fakePlatform{}
@@ -154,7 +154,7 @@ func TestGetData_DefaultShanghaiDateSortMaskAndWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if platform.query.StartDate != "2026-07-12" || platform.query.EndDate != "2026-07-13" || platform.query.SortBy != "total_tokens" || platform.query.Limit != 50 || platform.query.Timezone != "Asia/Shanghai" {
+	if platform.query.StartDate != "2026-07-12" || platform.query.EndDate != "2026-07-13" || platform.query.SortBy != "total_tokens" || platform.query.Limit != 50 || platform.query.Timezone != "Asia/Singapore" {
 		t.Fatalf("unexpected query: %+v", platform.query)
 	}
 	if resp.Rows[0].UserID != "u-high-a" || resp.Rows[1].UserID != "u-high-b" {

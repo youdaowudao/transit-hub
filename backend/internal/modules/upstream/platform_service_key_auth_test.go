@@ -122,8 +122,8 @@ func TestFetchSub2APIAdminUsageStatsUsesAdminAPIKey(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "" {
 			t.Fatalf("unexpected Authorization header: %q", got)
 		}
-		if got := r.URL.Query().Get("timezone"); got != "Asia/Shanghai" {
-			t.Fatalf("timezone = %q, want Asia/Shanghai", got)
+		if got := r.URL.Query().Get("timezone"); got != "Asia/Singapore" {
+			t.Fatalf("timezone = %q, want Asia/Singapore", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"total_actual_cost":12.5}}`))
@@ -149,7 +149,7 @@ func TestFetchAdminUsageStatsForScopeUsesAccountAndGroupFilters(t *testing.T) {
 			"group_id":   "group-1",
 			"start_date": "2026-08-07",
 			"end_date":   "2026-08-07",
-			"timezone":   "Asia/Shanghai",
+			"timezone":   "Asia/Singapore",
 		} {
 			if got := r.URL.Query().Get(key); got != want {
 				t.Fatalf("%s = %q, want %q", key, got, want)
@@ -178,16 +178,16 @@ func TestFetchAdminUsageStatsForScopeUsesAccountAndGroupFilters(t *testing.T) {
 	}
 }
 
-func TestFetchNewAPIAdminUsageStatsUsesShanghaiBusinessDayBounds(t *testing.T) {
+func TestFetchNewAPIAdminUsageStatsUsesSingaporeBusinessDayBounds(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/log/self/stat" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		if got := r.URL.Query().Get("start_timestamp"); got != "1785427200" {
-			t.Fatalf("start_timestamp = %q, want Shanghai 2026-07-31 00:00:00", got)
+			t.Fatalf("start_timestamp = %q, want Singapore 2026-07-31 00:00:00", got)
 		}
 		if got := r.URL.Query().Get("end_timestamp"); got != "1785513599" {
-			t.Fatalf("end_timestamp = %q, want Shanghai 2026-07-31 23:59:59", got)
+			t.Fatalf("end_timestamp = %q, want Singapore 2026-07-31 23:59:59", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"quota":250000}}`))

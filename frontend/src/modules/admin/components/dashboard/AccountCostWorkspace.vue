@@ -28,7 +28,8 @@ import {
 } from '../../api/dashboardAdmin'
 import { listRealConnections } from '../../api/mySites'
 import type { RealConnection } from '../../types/mySites'
-import { formatCny } from '../../utils/dashboard'
+import { formatAmount } from '../../utils/dashboard'
+import { formatLastUsedAt } from '../../utils/userLastUsed'
 import { prepareIdempotentSubmission, type IdempotentSubmission } from '../../utils/idempotency'
 
 type WorkspaceTab = 'today' | 'assets' | 'ledger' | 'rules'
@@ -211,8 +212,8 @@ const outcomeText = (asset: AccountAsset) => {
   const terminal = ['dead', 'exhausted', 'closed'].includes(asset.currentStatus)
   const cents = terminal ? performance.finalProfitCents : performance.breakevenDifferenceCents
   if (cents == null) return '暂无可靠数据'
-  if (terminal) return `${cents >= 0 ? '最终赚' : '最终亏'} ${formatCny(Math.abs(cents) / 100)}`
-  return cents >= 0 ? `已超回本 ${formatCny(cents / 100)}` : `距回本 ${formatCny(Math.abs(cents) / 100)}`
+  if (terminal) return `${cents >= 0 ? '最终赚' : '最终亏'} ${formatAmount(Math.abs(cents) / 100)}`
+  return cents >= 0 ? `已超回本 ${formatAmount(cents / 100)}` : `距回本 ${formatAmount(Math.abs(cents) / 100)}`
 }
 
 const ledgerGroups = computed(() => {
@@ -702,13 +703,13 @@ const detailTotals = computed(() => {
 })
 
 const statusText = (status: string) => ({ unactivated: '未激活', active: '使用中', exhausted: '已耗尽', dead: '死号', closed: '已关闭' }[status] ?? status)
-const centsText = (value?: number | null) => value == null ? '暂无可靠数据' : formatCny(value / 100)
+const centsText = (value?: number | null) => value == null ? '暂无可靠数据' : formatAmount(value / 100)
 const ratioText = (value?: number | null) => value == null ? '暂无可靠数据' : `${value.toFixed(2)}x`
 const missingFieldText = (field: string) => ({ dailyStats: '完整单号日快照', revenue: '累计营收', quotaUsed: '累计额度', upstreamCost: '叠加上游成本' }[field] ?? field)
 const eventTypeText = (eventType: string) => ({ status: '状态变化', restore: '恢复使用', refund: '退款', quota_observation: '额度观察', manual_observation: '手工经营数据', link_change: '关联变化', stats_mode_change: '统计方式变化', metadata_correction: '资料更正' }[eventType] ?? eventType)
 const costTypeText = (type: string) => ({ recharge_fee: '手续费', promotion: '活动', fixed: '固定', adjustment: '调整', account_purchase: '买号确认', account_refund: '退款冲减' }[type] ?? type)
 const percentageText = (value?: number | null) => value == null ? '暂无可靠数据' : `${value.toFixed(1)}%`
-const historyCreatedAtText = (value: string) => value.slice(0, 16).replace('T', ' ')
+const historyCreatedAtText = (value: string) => (formatLastUsedAt(value) || value).slice(0, 16).replace('T', ' ')
 const eventSummary = (event: AccountAssetDetail['events'][number]) => {
 	const values: string[] = [eventTypeText(event.eventType)]
 	if (event.status) values.push(statusText(event.status))
@@ -751,23 +752,23 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
           <section v-else-if="activeTab === 'today'" class="space-y-6">
             <div class="flex flex-wrap justify-end gap-2"><Button variant="secondary" @click="emit('open-upstream-details')"><ExternalLink class="mr-2 h-4 w-4" />查看上游成本明细</Button><Button variant="secondary" :disabled="saving" @click="refreshStats"><RefreshCw class="mr-2 h-4 w-4" :class="saving ? 'animate-spin' : ''" />刷新账号统计</Button></div>
             <div class="grid gap-3 sm:grid-cols-3">
-              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日营收</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatCny(todayRevenue ?? null) }}</p></div>
-              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日总成本</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatCny(operatingCost) }}</p></div>
-              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日净利润</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatCny(adjustedNetProfit) }}</p></div>
+              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日营收</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatAmount(todayRevenue ?? null) }}</p></div>
+              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日总成本</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatAmount(operatingCost) }}</p></div>
+              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日净利润</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatAmount(adjustedNetProfit) }}</p></div>
               <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日利润率</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ percentageText(profitMargin) }}</p></div>
               <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">账号统计质量</p><p class="mt-1 text-sm font-semibold">{{ summary?.accountQuality === 'complete' ? '完整' : summary?.accountQuality ? '部分数据' : '暂无可靠数据' }}</p></div>
             </div>
             <div class="space-y-1 text-sm text-muted-foreground"><p>净利润 = 营收 - 总成本</p><p>利润率 = 净利润 ÷ 营收</p></div>
             <div class="grid gap-x-8 sm:grid-cols-2">
-              <div v-for="line in costLines" :key="line.label" class="flex items-center justify-between border-b border-border/50 py-2.5 text-sm"><span class="text-muted-foreground">{{ line.label }}</span><span class="font-medium tabular-nums">{{ formatCny(line.value) }}</span></div>
+              <div v-for="line in costLines" :key="line.label" class="flex items-center justify-between border-b border-border/50 py-2.5 text-sm"><span class="text-muted-foreground">{{ line.label }}</span><span class="font-medium tabular-nums">{{ formatAmount(line.value) }}</span></div>
             </div>
-            <div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">当日成本变动</h3><p v-if="todayLedgerLoadFailed" class="py-5 text-sm text-destructive">当日成本变动加载失败</p><p v-else-if="!todayLedger.length" class="py-5 text-sm text-muted-foreground">当日暂无成本变动</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="record in todayLedger" :key="record.id" class="grid gap-1 py-2.5 text-sm sm:grid-cols-[5rem_1fr_auto]"><span class="text-muted-foreground">{{ costTypeText(record.type) }}</span><span class="min-w-0 break-all">{{ record.name }}<span class="ml-2 text-xs text-muted-foreground">来源 {{ record.sourceId || record.batchId || record.accountAssetId || record.id }}</span></span><span class="font-medium tabular-nums">{{ formatCny(record.amount) }}</span></div></div></div>
+            <div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">当日成本变动</h3><p v-if="todayLedgerLoadFailed" class="py-5 text-sm text-destructive">当日成本变动加载失败</p><p v-else-if="!todayLedger.length" class="py-5 text-sm text-muted-foreground">当日暂无成本变动</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="record in todayLedger" :key="record.id" class="grid gap-1 py-2.5 text-sm sm:grid-cols-[5rem_1fr_auto]"><span class="text-muted-foreground">{{ costTypeText(record.type) }}</span><span class="min-w-0 break-all">{{ record.name }}<span class="ml-2 text-xs text-muted-foreground">来源 {{ record.sourceId || record.batchId || record.accountAssetId || record.id }}</span></span><span class="font-medium tabular-nums">{{ formatAmount(record.amount) }}</span></div></div></div>
             <form class="space-y-3 border-t border-border/60 pt-5" @submit.prevent="submitCost">
               <div class="flex flex-wrap items-center justify-between gap-2"><div><h3 class="text-sm font-semibold">{{ editingCost ? '编辑手工成本' : '记一笔成本' }}</h3><p v-if="editingCost" class="mt-1 text-xs text-muted-foreground">来源 {{ editingCost.sourceId }} · 保存后会重算旧日期和新日期</p></div><div class="flex gap-2"><Button v-if="editingCost" type="button" variant="ghost" @click="cancelCostEdit">取消编辑</Button><Button v-else type="button" variant="secondary" @click="activeTab = 'assets'; showBatchForm = true"><Plus class="mr-2 h-4 w-4" />录入买号</Button></div></div>
               <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <select v-model="costForm.type" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="promotion">活动赠送</option><option value="fixed">固定费用</option><option value="adjustment">手工调整</option></select>
                 <Input v-model="costForm.name" placeholder="名称" required />
-                <Input v-model="costForm.amount" type="number" step="0.01" placeholder="金额（元）" required />
+                <Input v-model="costForm.amount" type="number" step="0.01" placeholder="金额" required />
                 <Input v-model="costForm.businessDate" type="date" required />
                 <Input v-if="costForm.type === 'promotion'" v-model="costForm.usageRate" type="number" min="0" max="100" placeholder="预计使用率 %" />
                 <Input v-if="costForm.type !== 'adjustment'" v-model="costForm.days" type="number" min="1" placeholder="分摊天数" />
@@ -807,9 +808,9 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
                   <label class="flex items-start gap-2 text-sm"><input v-model="linkForm.manualSameDaySplit" type="checkbox" class="mt-0.5" /><span>当天换号并拆分当日数据</span></label>
                   <div v-if="linkForm.manualSameDaySplit" class="grid grid-cols-2 gap-2">
                     <Input v-model="linkForm.previousQuotaUsed" type="number" min="0" step="0.000001" placeholder="旧号额度" required />
-                    <Input v-model="linkForm.previousRevenue" type="number" min="0" step="0.01" placeholder="旧号营收（元）" required />
+                    <Input v-model="linkForm.previousRevenue" type="number" min="0" step="0.01" placeholder="旧号营收" required />
                     <Input v-model="linkForm.replacementQuotaUsed" type="number" min="0" step="0.000001" placeholder="新号额度" required />
-                    <Input v-model="linkForm.replacementRevenue" type="number" min="0" step="0.01" placeholder="新号营收（元）" required />
+                    <Input v-model="linkForm.replacementRevenue" type="number" min="0" step="0.01" placeholder="新号营收" required />
                   </div>
                   <Input v-model="linkForm.note" placeholder="更换原因（可选）" />
                   <Button type="submit" :disabled="saving"><Save class="mr-2 h-4 w-4" />保存关联</Button>
@@ -822,8 +823,8 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
 					<label class="space-y-1 text-xs text-muted-foreground"><span>事件生效日</span><Input v-model="eventForm.effectiveDate" type="date" aria-label="事件生效日" /></label>
                     <select v-if="eventForm.eventType === 'status'" v-model="eventForm.status" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="active">使用中</option><option value="exhausted">已耗尽</option><option value="dead">死号</option><option value="closed">已关闭</option></select>
                     <Input v-if="eventForm.eventType === 'quota_observation' || eventForm.eventType === 'manual_observation'" v-model="eventForm.quotaUsed" type="number" min="0" step="0.000001" placeholder="累计原始额度" />
-                    <Input v-if="eventForm.eventType === 'manual_observation'" v-model="eventForm.revenue" type="number" min="0" step="0.01" placeholder="累计营收（元）" />
-                    <Input v-if="eventForm.eventType === 'manual_observation'" v-model="eventForm.upstreamCost" type="number" min="0" step="0.01" placeholder="累计上游成本（元）" />
+                    <Input v-if="eventForm.eventType === 'manual_observation'" v-model="eventForm.revenue" type="number" min="0" step="0.01" placeholder="累计营收" />
+                    <Input v-if="eventForm.eventType === 'manual_observation'" v-model="eventForm.upstreamCost" type="number" min="0" step="0.01" placeholder="累计上游成本" />
                     <Input v-if="eventForm.eventType === 'refund'" v-model="eventForm.refund" type="number" min="0.01" step="0.01" placeholder="退款金额（正数）" />
                     <label v-if="eventForm.eventType === 'refund'" class="flex items-center gap-2 text-sm"><input v-model="eventForm.refundClose" type="checkbox" />退款并关闭账号</label>
                     <template v-if="eventForm.eventType === 'metadata_correction'">
@@ -852,7 +853,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
               <div>
                 <h4 class="mb-2 text-sm font-semibold">完整事件时间线</h4>
                 <div v-if="!selectedDetail.events.length" class="text-sm text-muted-foreground">暂无事件</div>
-				<div v-for="event in selectedDetail.events" :key="event.id" class="flex items-start justify-between gap-3 border-b border-border/50 py-2 text-sm"><span class="min-w-0 break-all">{{ event.effectiveDate }} · {{ eventSummary(event) }}</span><span class="shrink-0 text-xs text-muted-foreground">{{ event.createdAt.slice(0, 16).replace('T', ' ') }}</span></div>
+				<div v-for="event in selectedDetail.events" :key="event.id" class="flex items-start justify-between gap-3 border-b border-border/50 py-2 text-sm"><span class="min-w-0 break-all">{{ event.effectiveDate }} · {{ eventSummary(event) }}</span><span class="shrink-0 text-xs text-muted-foreground">{{ historyCreatedAtText(event.createdAt) }}</span></div>
               </div>
             </template>
             <template v-else>
@@ -860,7 +861,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
               <form v-if="showBatchForm" class="space-y-4 border-y border-border/60 py-4" @submit.prevent="submitBatch">
                 <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                   <Input v-model="batchForm.batchName" placeholder="批次名称（可选）" /><Input v-model="batchForm.platform" list="account-platforms" placeholder="平台" required /><Input v-model="batchForm.channel" list="account-channels" placeholder="购买渠道" required /><Input v-model="batchForm.accountType" list="account-types" placeholder="账号类型" required />
-				  <label class="space-y-1 text-xs text-muted-foreground"><span>购买日期</span><Input v-model="batchForm.purchaseDate" type="date" aria-label="购买日期" /></label><Input v-model="batchForm.quantity" type="number" min="1" max="500" placeholder="数量" /><Input v-model="batchForm.unitAmount" type="number" min="0" step="0.01" placeholder="单价（元，二选一）" /><Input v-model="batchForm.totalAmount" type="number" min="0" step="0.01" placeholder="总金额（元，二选一）" />
+				  <label class="space-y-1 text-xs text-muted-foreground"><span>购买日期</span><Input v-model="batchForm.purchaseDate" type="date" aria-label="购买日期" /></label><Input v-model="batchForm.quantity" type="number" min="1" max="500" placeholder="数量" /><Input v-model="batchForm.unitAmount" type="number" min="0" step="0.01" placeholder="单价（二选一）" /><Input v-model="batchForm.totalAmount" type="number" min="0" step="0.01" placeholder="总金额（二选一）" />
                   <Input v-model="batchForm.purchaseUrl" type="url" placeholder="购买订单链接" /><Input v-model="batchForm.defaultUpstreamReferenceUrl" type="url" placeholder="默认上游参考链接" />
                   <select v-model="batchForm.accountingMode" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="replace_upstream">替代上游成本</option><option value="additive_upstream">叠加上游成本</option></select>
                   <select v-model="batchForm.recognitionMode" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="immediate">一次确认</option><option value="daily">按天分摊</option><option value="quota">按额度使用确认</option></select>
@@ -899,7 +900,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
             </template>
           </section>
 
-          <section v-else-if="activeTab === 'ledger'" class="space-y-4"><div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><Input v-model="ledgerFilters.from" type="date" /><Input v-model="ledgerFilters.to" type="date" /><select v-model="ledgerFilters.type" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="">全部类型</option><option value="account_purchase">买号确认</option><option value="account_refund">退款冲减</option><option value="recharge_fee">手续费</option><option value="promotion">活动</option><option value="fixed">固定</option><option value="adjustment">调整</option></select><Input v-model="ledgerFilters.platform" placeholder="平台" /><Input v-model="ledgerFilters.channel" placeholder="渠道" /><Input v-model="ledgerFilters.batchId" placeholder="批次 ID" /><Input v-model="ledgerFilters.accountAssetId" placeholder="单号 ID" /><Button variant="secondary" @click="searchLedger"><Search class="mr-2 h-4 w-4" />查询账本</Button></div><div class="divide-y divide-border/50"><details v-for="group in ledgerGroups" :key="group.key" class="group py-3"><summary class="grid cursor-pointer list-none grid-cols-[1fr_auto] items-center gap-3 text-sm sm:grid-cols-[1fr_9rem_8rem]"><div class="min-w-0"><p class="truncate font-medium">{{ group.name }}</p><p class="text-xs text-muted-foreground">{{ group.type }} · {{ group.records.length }} 条确认记录</p></div><span class="hidden text-xs text-muted-foreground sm:block">{{ group.records[0]?.businessDate }}</span><span class="text-right font-semibold tabular-nums" :class="group.amount < 0 ? 'text-emerald-600' : ''">{{ formatCny(group.amount) }}</span></summary><div class="mt-3 overflow-x-auto border-t border-border/40"><table class="w-full min-w-[680px] text-left text-xs"><thead class="text-muted-foreground"><tr><th class="py-2">业务日</th><th>金额</th><th>批次 / 单号</th><th>质量</th><th>录入时间</th></tr></thead><tbody><tr v-for="record in group.records" :key="record.id" class="border-t border-border/30"><td class="py-2">{{ record.businessDate }}</td><td>{{ formatCny(record.amount) }}</td><td>{{ record.batchId || '—' }} / {{ record.accountAssetId || '—' }}</td><td>{{ record.estimated ? '估算' : '已确认' }}</td><td>{{ record.createdAt.slice(0, 16).replace('T', ' ') }}</td></tr></tbody></table></div></details><p v-if="!ledgerGroups.length" class="py-12 text-center text-sm text-muted-foreground">所选范围暂无记录</p></div><div v-if="ledger.length || ledgerPage > 1" class="flex items-center justify-end gap-2"><Button variant="secondary" size="sm" title="上一页" :disabled="ledgerPage === 1" @click="changeLedgerPage(-1)"><ArrowLeft class="h-4 w-4" /></Button><span class="text-xs text-muted-foreground">第 {{ ledgerPage }} 页</span><Button variant="secondary" size="sm" title="下一页" :disabled="!ledgerHasMore" @click="changeLedgerPage(1)"><ArrowRight class="h-4 w-4" /></Button></div></section>
+          <section v-else-if="activeTab === 'ledger'" class="space-y-4"><div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><Input v-model="ledgerFilters.from" type="date" /><Input v-model="ledgerFilters.to" type="date" /><select v-model="ledgerFilters.type" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="">全部类型</option><option value="account_purchase">买号确认</option><option value="account_refund">退款冲减</option><option value="recharge_fee">手续费</option><option value="promotion">活动</option><option value="fixed">固定</option><option value="adjustment">调整</option></select><Input v-model="ledgerFilters.platform" placeholder="平台" /><Input v-model="ledgerFilters.channel" placeholder="渠道" /><Input v-model="ledgerFilters.batchId" placeholder="批次 ID" /><Input v-model="ledgerFilters.accountAssetId" placeholder="单号 ID" /><Button variant="secondary" @click="searchLedger"><Search class="mr-2 h-4 w-4" />查询账本</Button></div><div class="divide-y divide-border/50"><details v-for="group in ledgerGroups" :key="group.key" class="group py-3"><summary class="grid cursor-pointer list-none grid-cols-[1fr_auto] items-center gap-3 text-sm sm:grid-cols-[1fr_9rem_8rem]"><div class="min-w-0"><p class="truncate font-medium">{{ group.name }}</p><p class="text-xs text-muted-foreground">{{ group.type }} · {{ group.records.length }} 条确认记录</p></div><span class="hidden text-xs text-muted-foreground sm:block">{{ group.records[0]?.businessDate }}</span><span class="text-right font-semibold tabular-nums" :class="group.amount < 0 ? 'text-emerald-600' : ''">{{ formatAmount(group.amount) }}</span></summary><div class="mt-3 overflow-x-auto border-t border-border/40"><table class="w-full min-w-[680px] text-left text-xs"><thead class="text-muted-foreground"><tr><th class="py-2">业务日</th><th>金额</th><th>批次 / 单号</th><th>质量</th><th>录入时间</th></tr></thead><tbody><tr v-for="record in group.records" :key="record.id" class="border-t border-border/30"><td class="py-2">{{ record.businessDate }}</td><td>{{ formatAmount(record.amount) }}</td><td>{{ record.batchId || '—' }} / {{ record.accountAssetId || '—' }}</td><td>{{ record.estimated ? '估算' : '已确认' }}</td><td>{{ historyCreatedAtText(record.createdAt) }}</td></tr></tbody></table></div></details><p v-if="!ledgerGroups.length" class="py-12 text-center text-sm text-muted-foreground">所选范围暂无记录</p></div><div v-if="ledger.length || ledgerPage > 1" class="flex items-center justify-end gap-2"><Button variant="secondary" size="sm" title="上一页" :disabled="ledgerPage === 1" @click="changeLedgerPage(-1)"><ArrowLeft class="h-4 w-4" /></Button><span class="text-xs text-muted-foreground">第 {{ ledgerPage }} 页</span><Button variant="secondary" size="sm" title="下一页" :disabled="!ledgerHasMore" @click="changeLedgerPage(1)"><ArrowRight class="h-4 w-4" /></Button></div></section>
 
           <section v-else class="max-w-3xl space-y-6"><div><h3 class="text-sm font-semibold">充值手续费</h3><div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]"><Input v-model="feeForm.rate" type="number" min="0" max="100" step="0.01" placeholder="费率 %" /><Input v-model="feeForm.effectiveDate" type="date" /><Button :disabled="saving" @click="submitFee"><Save class="mr-2 h-4 w-4" />保存费率</Button></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">费率生效历史</h3><p v-if="feeRateHistoryLoadFailed" class="py-5 text-sm text-destructive">费率历史加载失败</p><p v-else-if="!feeRateHistory.length" class="py-5 text-sm text-muted-foreground">暂无费率历史</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in feeRateHistory" :key="rate.id" class="grid gap-1 py-2.5 text-sm sm:grid-cols-[7rem_1fr_auto]"><span>{{ rate.effectiveDate }}</span><span>{{ (rate.rate * 100).toFixed(2) }}% · {{ rate.id }}</span><span class="text-xs text-muted-foreground">{{ historyCreatedAtText(rate.createdAt) }}</span></div></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">核算说明</h3><dl class="mt-3 space-y-3 text-sm"><div><dt class="font-medium">替代上游成本</dt><dd class="mt-1 text-muted-foreground">购买价包含额度时，从上游直接成本扣除该账号已对账 Key 成本，再计入买号确认成本。</dd></div><div><dt class="font-medium">叠加上游成本</dt><dd class="mt-1 text-muted-foreground">购买价是订阅或接入费时，买号确认成本与关联上游按量成本同时计入。</dd></div><div><dt class="font-medium">历史成本更正</dt><dd class="mt-1 text-muted-foreground">手工成本可以直接编辑，保存后会重算受影响历史日；买号购买、退款和状态仍按事件追加记录。</dd></div></dl></div></section>
         </main>

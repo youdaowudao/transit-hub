@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { AlertTriangle, ArrowDownWideNarrow, ArrowUpWideNarrow, Loader2, RefreshCw, ShoppingCart, X } from 'lucide-vue-next'
 import { getUpstreamKeyUsageToday, type UpstreamKeyUsageTodayItem } from '../../api/dashboardAdmin'
-import { formatCny } from '../../utils/dashboard'
+import { formatAmount } from '../../utils/dashboard'
 
 const props = defineProps<{
   open: boolean
@@ -89,7 +89,7 @@ watch(() => props.open, (isOpen) => {
             <div class="min-w-0">
               <h2 class="text-lg font-semibold text-foreground">{{ t('admin.dashboard.upstreamKeyUsage.title') }}</h2>
               <p class="break-words text-sm text-muted-foreground">
-                {{ t('admin.dashboard.upstreamKeyUsage.subtitle', { count: keys.length, total: formatCny(total), successful: successfulSites, failed: failedSites }) }}
+                {{ t('admin.dashboard.upstreamKeyUsage.subtitle', { count: keys.length, total: formatAmount(total), successful: successfulSites, failed: failedSites }) }}
               </p>
             </div>
           </div>
@@ -173,7 +173,7 @@ watch(() => props.open, (isOpen) => {
                   </td>
                   <td class="px-4 py-3 align-middle font-medium text-foreground">{{ item.keyName }}</td>
                   <td class="px-4 py-3 align-middle text-muted-foreground">{{ item.groupName }}</td>
-                  <td class="px-4 py-3 align-middle text-right text-foreground">{{ formatCny(item.todayAmount) }}</td>
+                  <td class="px-4 py-3 align-middle text-right text-foreground">{{ formatAmount(item.todayAmount) }}</td>
                 </tr>
               </tbody>
             </table>

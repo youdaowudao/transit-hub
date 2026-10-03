@@ -12,7 +12,7 @@ const TestIcon = defineComponent({
 
 const baseProps = {
   label: '今日总成本',
-  value: '¥12.34',
+  value: '12.34',
   icon: TestIcon,
   color: 'primary' as const,
   deltaDirection: 'flat' as const,

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"transithub/backend/internal/modules/upstream"
+	"transithub/backend/internal/shared/businesstime"
 )
 
 // AdminGroupOperator 是活动调价对 admin 自有分组的全部远端依赖，由 my_sites.Service 实现。
@@ -129,6 +130,12 @@ func (s *Service) Preview(ctx context.Context, userID string, adminAccountID str
 func (s *Service) Create(ctx context.Context, userID string, adminAccountID string, req CreateCampaignRequest) (CampaignDetail, error) {
 	now := time.Now()
 	req.Notify = normalizeNotify(req.Notify, s.config)
+	req.Notify.RecipientsInvalid = false
+	projectedNotify, err := s.projectNotify(ctx, userID, adminAccountID, req.Notify)
+	if err != nil {
+		return CampaignDetail{}, err
+	}
+	req.Notify = projectedNotify
 	if err := validateCreateRequest(req, now); err != nil {
 		return CampaignDetail{}, err
 	}
@@ -190,7 +197,9 @@ func (s *Service) Get(ctx context.Context, userID string, adminAccountID string,
 	if err != nil {
 		return CampaignDetail{}, err
 	}
-	return toDetail(*campaign, items), nil
+	projected := *campaign
+	projected.Notify = s.notifyForResponse(ctx, userID, adminAccountID, campaign.Notify)
+	return toDetail(projected, items), nil
 }
 
 func (s *Service) List(ctx context.Context, userID string, adminAccountID string, query ListQuery) (ListResult, error) {
@@ -205,15 +214,22 @@ func (s *Service) List(ctx context.Context, userID string, adminAccountID string
 		if err != nil {
 			return ListResult{}, err
 		}
+		c.Notify = s.notifyForResponse(ctx, userID, adminAccountID, c.Notify)
 		listItems = append(listItems, toListItem(c, items))
 	}
+	defaults := s.Defaults()
+	projectedDefaults := s.notifyForResponse(ctx, userID, adminAccountID, Notify{Enabled: defaults.Enabled, BotIDs: defaults.BotIDs, StartTemplate: defaults.StartTemplate, EndTemplate: defaults.EndTemplate})
+	defaults.Enabled = projectedDefaults.Enabled
+	defaults.BotIDs = projectedDefaults.BotIDs
+	defaults.RecipientsInvalid = projectedDefaults.RecipientsInvalid
+	defaults.RecipientsUnavailable = projectedDefaults.RecipientsUnavailable
 	return ListResult{
 		Items:      listItems,
 		Total:      total,
 		Page:       query.Page,
 		PageSize:   query.PageSize,
 		TotalPages: totalPages(total, query.PageSize),
-		Defaults:   s.Defaults(),
+		Defaults:   defaults,
 	}, nil
 }
 
@@ -656,7 +672,7 @@ func (s *Service) notifyStart(ctx context.Context, campaign *Campaign, applied i
 		"executedAt":   formatTime(timePtr(time.Now())),
 	}
 	message := renderTemplate(tpl, vars)
-	s.notifier.SendToBots(ctx, campaign.UserID, campaign.Notify.BotIDs, message)
+	s.sendWorkspaceNotification(ctx, campaign, message)
 }
 
 // notifyEnd 发送活动结束通知：恢复成功、部分失败均发送，失败只记录日志不阻塞流程。
@@ -682,7 +698,7 @@ func (s *Service) notifyEnd(ctx context.Context, campaign *Campaign, restored in
 		"executedAt":         formatTime(timePtr(time.Now())),
 	}
 	message := renderTemplate(tpl, vars)
-	s.notifier.SendToBots(ctx, campaign.UserID, campaign.Notify.BotIDs, message)
+	s.sendWorkspaceNotification(ctx, campaign, message)
 }
 
 // normalizeNotify 用环境变量默认值补全未启用/未填写的通知字段，只在字段为空时兜底，不覆盖显式选择。
@@ -734,21 +750,23 @@ func toListItem(c Campaign, items []CampaignItem) CampaignListItem {
 		lastExecuted = c.EndedAt
 	}
 	return CampaignListItem{
-		ID:             c.ID,
-		Name:           c.Name,
-		Status:         c.Status,
-		StartMode:      c.StartMode,
-		StartAt:        c.StartAt,
-		EndMode:        c.EndMode,
-		EndAt:          c.EndAt,
-		StartedAt:      c.StartedAt,
-		EndedAt:        c.EndedAt,
-		Summary:        summary,
-		NotifyEnabled:  c.Notify.Enabled,
-		CreatedBy:      c.UserID,
-		CreatedAt:      c.CreatedAt,
-		UpdatedAt:      c.UpdatedAt,
-		LastExecutedAt: lastExecuted,
+		ID:                          c.ID,
+		Name:                        c.Name,
+		Status:                      c.Status,
+		StartMode:                   c.StartMode,
+		StartAt:                     c.StartAt,
+		EndMode:                     c.EndMode,
+		EndAt:                       c.EndAt,
+		StartedAt:                   c.StartedAt,
+		EndedAt:                     c.EndedAt,
+		Summary:                     summary,
+		NotifyEnabled:               c.Notify.Enabled,
+		NotifyRecipientsInvalid:     c.Notify.RecipientsInvalid,
+		NotifyRecipientsUnavailable: c.Notify.RecipientsUnavailable,
+		CreatedBy:                   c.UserID,
+		CreatedAt:                   c.CreatedAt,
+		UpdatedAt:                   c.UpdatedAt,
+		LastExecutedAt:              lastExecuted,
 	}
 }
 
@@ -794,7 +812,7 @@ func formatTime(t *time.Time) string {
 	if t == nil {
 		return ""
 	}
-	return t.Format("2006-01-02 15:04:05")
+	return t.In(businesstime.Location()).Format("2006-01-02 15:04:05")
 }
 
 func findGroup(groups []upstream.AdminGroupInfo, name string) *upstream.AdminGroupInfo {

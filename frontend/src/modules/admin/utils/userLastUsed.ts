@@ -1,6 +1,6 @@
 import type { MassEmailUser } from '../types/massEmail'
 
-export const USER_LAST_USED_TIMEZONE = 'Asia/Shanghai'
+export const USER_LAST_USED_TIMEZONE = 'Asia/Singapore'
 export const USER_LAST_USED_COPIED_STORAGE_KEY = 'transithub.user-last-used.copied-users'
 
 const DATE_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/

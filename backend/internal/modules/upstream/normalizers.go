@@ -438,7 +438,7 @@ func invalidBodyError(fields ...string) error {
 }
 
 // WithSyncDate 返回设置了 TodayConsumeDate 和 TodayConsumeAt 的新 Metrics。
-// syncDate 是上海业务日期字符串（"2006-01-02"），由同步入口统一生成。
+// syncDate 是新加坡业务日期字符串（"2006-01-02"），由同步入口统一生成。
 func (m Metrics) WithSyncDate(syncDate string, observedAt time.Time) Metrics {
 	m.TodayConsumeDate = syncDate
 	m.TodayConsumeAt = &observedAt

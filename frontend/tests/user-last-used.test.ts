@@ -43,7 +43,7 @@ afterEach(() => {
 })
 
 describe('user last used dates', () => {
-  it('defaults to today and yesterday in Asia/Shanghai', () => {
+  it('defaults to today and yesterday in Asia/Singapore', () => {
     expect(defaultSelectedDates(new Date('2026-08-12T16:30:00Z'))).toEqual([
       '2026-08-13',
       '2026-08-12',
@@ -57,7 +57,7 @@ describe('user last used dates', () => {
     ])
   })
 
-  it('groups by Shanghai natural day and keeps full second precision', () => {
+  it('groups by Singapore natural day and keeps full second precision', () => {
     const groups = groupUsersByLastUsedDate([
       user('1', ' alice@example.com ', '2026-08-12T16:00:01Z'),
       user('2', 'bob@example.com', '2026-08-12T15:59:59Z'),
@@ -152,7 +152,7 @@ describe('user last used API errors', () => {
       search: '',
       sortBy: 'last_used_at',
       sortOrder: 'desc',
-      timezone: 'Asia/Shanghai',
+      timezone: 'Asia/Singapore',
     }, { preserveUpstreamAuthError: true })).rejects.toThrow('admin.massEmail.errors.upstreamAuth')
     expect(removeItem).not.toHaveBeenCalled()
   })

@@ -119,7 +119,7 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
 
 const liveMetrics = {
   date: '2026-08-22',
-  timezone: 'Asia/Shanghai',
+  timezone: 'Asia/Singapore',
   todayProfit: 120,
   siteBalance: 500,
   todayPurchase: 40,

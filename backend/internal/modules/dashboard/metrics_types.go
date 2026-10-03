@@ -24,11 +24,11 @@ const (
 )
 
 // MetricsResponse 是 GET /api/dashboard/metrics 返回的实时指标数据。
-// 所有金额均以 CNY 计价，上游指标已乘以站点的 rechargeRate。
+// 所有金额均为核算金额，上游指标已乘以站点的 rechargeRate。
 // TodayProfit/TodayPurchase/NetProfit 为 *float64，nil 表示该指标不可用。
 type MetricsResponse struct {
-	Date                  string                 `json:"date"`                       // 指标所属的固定上海业务日
-	Timezone              string                 `json:"timezone"`                   // 业务日时区，固定为 Asia/Shanghai
+	Date                  string                 `json:"date"`                       // 指标所属的固定新加坡业务日
+	Timezone              string                 `json:"timezone"`                   // 业务日时区，固定为 Asia/Singapore
 	TodayProfit           *float64               `json:"todayProfit"`                // 今日盈利额度；nil 表示营收不可用
 	SiteBalance           float64                `json:"siteBalance"`                // 站点用户总余额：所有非 admin 用户余额之和
 	TodayPurchase         *float64               `json:"todayPurchase"`              // 今日进货额度；nil 表示成本不完整
@@ -36,7 +36,7 @@ type MetricsResponse struct {
 	ConfirmedCost         *float64               `json:"confirmedCost,omitempty"`    // 部分成本时的已确认成本下限
 	NetProfitCeiling      *float64               `json:"netProfitCeiling,omitempty"` // 部分成本时的暂估净利润上限
 	SettlementStatus      string                 `json:"settlementStatus,omitempty"` // final/fallback/partial/provisional/unavailable
-	UpstreamBalance       float64                `json:"upstreamBalance"`            // 上游总余额：所有上游站点余额（CNY）之和
+	UpstreamBalance       float64                `json:"upstreamBalance"`            // 上游总余额：所有上游站点余额（核算金额）之和
 	GroupCount            int                    `json:"groupCount"`                 // 管理员站点分组总数，省去前端单独请求
 	MetricErrors          map[string]string      `json:"metricErrors,omitempty"`     // 局部指标拉取失败原因
 	CostQuality           *CostQuality           `json:"costQuality,omitempty"`      // 成本质量信息，成本不完整时必须存在

@@ -857,7 +857,7 @@ func (r *MetricsRepository) upsert(ctx context.Context, db metricsDB, snapshot D
 	return err
 }
 
-// ListRange 查询指定用户指定工作区相对固定上海业务日最近 days 天的快照记录，按日期升序返回。
+// ListRange 查询指定用户指定工作区相对固定新加坡业务日最近 days 天的快照记录，按日期升序返回。
 // 包含结算状态，供前端判断环比是否可信。
 func (r *MetricsRepository) ListRange(ctx context.Context, userID, adminAccountID string, days int, businessDate string) ([]DailySnapshot, error) {
 	rows, err := r.db.Query(ctx, `

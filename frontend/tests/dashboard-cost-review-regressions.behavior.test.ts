@@ -114,7 +114,7 @@ vi.mock('@/modules/admin/api/mySites', () => ({ listRealConnections: harness.lis
 vi.mock('@/modules/admin/api/connectionHealth', () => ({ getConnectionHealthStoredSummary: vi.fn(async () => null) }))
 
 const baseMetrics = {
-  date: '2026-08-22', timezone: 'Asia/Shanghai', todayProfit: 120, siteBalance: 500,
+  date: '2026-08-22', timezone: 'Asia/Singapore', todayProfit: 120, siteBalance: 500,
   todayPurchase: 40, netProfit: 80, upstreamBalance: 200, groupCount: 2,
   operatingCost: 55, adjustedNetProfit: 65, adjustedProfitMargin: 54.16,
   costQuality: { mode: 'exact', complete: true, confirmedCost: 40, expectedSites: 1, collectedSites: 1, failedSites: 0 },
@@ -195,15 +195,15 @@ afterEach(() => {
 describe('reviewed dashboard cost regressions', () => {
   it('R03 treats an omitted replacement deduction as zero only for a complete available account summary', async () => {
     const complete = await mountDashboard(baseMetrics)
-    expect(costCompositionText(complete)).toContain('上游直接 ¥40.00')
+    expect(costCompositionText(complete)).toContain('上游直接 40.00')
 
     const missing = await mountDashboard({
       ...baseMetrics,
       operatingCost: null,
       additionalCosts: { ...baseMetrics.additionalCosts, accountQuality: 'missing' },
     })
-    expect(costCompositionText(missing)).toContain('上游直接 ¥—')
-    expect(costCompositionText(missing)).not.toContain('上游直接 ¥40.00')
+    expect(costCompositionText(missing)).toContain('上游直接 —')
+    expect(costCompositionText(missing)).not.toContain('上游直接 40.00')
   })
 
   it('R06 loads every page of the current-day ledger before rendering it', async () => {

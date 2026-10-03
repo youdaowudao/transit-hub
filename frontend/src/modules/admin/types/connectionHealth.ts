@@ -325,7 +325,7 @@ export interface AdminGroupHealth {
   priorityConflicts?: AdminPriorityConflict[]
   probeModelsConfigured?: boolean
   healthSummary: AdminGroupHealthSummary
-  // 仅在上游来源唯一且短期样本可靠时返回；金额单位为人民币。
+  // 仅在上游来源唯一且短期样本可靠时返回；金额单位为核算金额。
   todayCost?: number | null
   recentHourCost?: number | null
   costObservedAt?: string | null

@@ -13,9 +13,9 @@ const (
 )
 
 var eventRetentionLocation = func() *time.Location {
-	location, err := time.LoadLocation("Asia/Shanghai")
+	location, err := time.LoadLocation("Asia/Singapore")
 	if err != nil {
-		return time.FixedZone("CST", 8*60*60)
+		return time.FixedZone("Asia/Singapore", 8*60*60)
 	}
 	return location
 }()

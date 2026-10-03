@@ -4,25 +4,13 @@ import "time"
 
 type NotificationChannel string
 
-const (
-	NotificationChannelDingtalk NotificationChannel = "dingtalk"
-	NotificationChannelWecom    NotificationChannel = "wecom"
-	NotificationChannelQQ       NotificationChannel = "qq"
-	NotificationChannelFeishu   NotificationChannel = "feishu"
-	NotificationChannelTelegram NotificationChannel = "telegram"
-)
+const NotificationChannelTelegram NotificationChannel = "telegram"
 
 type TestNotificationRequest struct {
 	Channel          NotificationChannel `json:"channel"`
-	Webhook          string              `json:"webhook"`
-	Secret           string              `json:"secret"`
 	TelegramBotToken string              `json:"telegramBotToken"`
 	TelegramChatID   string              `json:"telegramChatId"`
 	TelegramProxyURL string              `json:"telegramProxyUrl"`
-	QQAppID          string              `json:"qqAppId"`
-	QQClientSecret   string              `json:"qqClientSecret"`
-	QQUserOpenID     string              `json:"qqUserOpenId"`
-	QQGroupOpenID    string              `json:"qqGroupOpenId,omitempty"`
 }
 
 type TestNotificationResponse struct {
@@ -31,26 +19,24 @@ type TestNotificationResponse struct {
 }
 
 type NotificationChannelSettings struct {
-	Dingtalk []DingtalkChannelSettings `json:"dingtalk"`
-	Wecom    []WebhookChannelSettings  `json:"wecom"`
-	QQ       []QQChannelSettings       `json:"qq"`
-	Feishu   []WebhookChannelSettings  `json:"feishu"`
 	Telegram []TelegramChannelSettings `json:"telegram"`
 }
 
 type StrategySettings struct {
-	EnableRefreshInterval      bool                       `json:"enableRefreshInterval"`
-	RefreshInterval            int                        `json:"refreshInterval"`
-	EnableBalanceWarning       bool                       `json:"enableBalanceWarning"`
-	DefaultBalanceThreshold    float64                    `json:"defaultBalanceThreshold"`
-	BalanceNotifyBotIDs        []string                   `json:"balanceNotifyBotIds"`
-	BalanceTemplate            string                     `json:"balanceTemplate"`
-	BalanceTemplateFormat      NotificationTemplateFormat `json:"balanceTemplateFormat,omitempty"`
-	EnableMultiplierAlert      bool                       `json:"enableMultiplierAlert"`
-	MultiplierNotifyBotIDs     []string                   `json:"multiplierNotifyBotIds"`
-	MultiplierTemplate         string                     `json:"multiplierTemplate"`
-	MultiplierTemplateFormat   NotificationTemplateFormat `json:"multiplierTemplateFormat,omitempty"`
-	EnableAutoChangeMultiplier bool                       `json:"enableAutoChangeMultiplier"`
+	BalanceNotifyRecipientsInvalid    bool                       `json:"balanceNotifyRecipientsInvalid,omitempty"`
+	MultiplierNotifyRecipientsInvalid bool                       `json:"multiplierNotifyRecipientsInvalid,omitempty"`
+	EnableRefreshInterval             bool                       `json:"enableRefreshInterval"`
+	RefreshInterval                   int                        `json:"refreshInterval"`
+	EnableBalanceWarning              bool                       `json:"enableBalanceWarning"`
+	DefaultBalanceThreshold           float64                    `json:"defaultBalanceThreshold"`
+	BalanceNotifyBotIDs               []string                   `json:"balanceNotifyBotIds"`
+	BalanceTemplate                   string                     `json:"balanceTemplate"`
+	BalanceTemplateFormat             NotificationTemplateFormat `json:"balanceTemplateFormat,omitempty"`
+	EnableMultiplierAlert             bool                       `json:"enableMultiplierAlert"`
+	MultiplierNotifyBotIDs            []string                   `json:"multiplierNotifyBotIds"`
+	MultiplierTemplate                string                     `json:"multiplierTemplate"`
+	MultiplierTemplateFormat          NotificationTemplateFormat `json:"multiplierTemplateFormat,omitempty"`
+	EnableAutoChangeMultiplier        bool                       `json:"enableAutoChangeMultiplier"`
 }
 
 type WorkspaceStrategy struct {
@@ -69,22 +55,6 @@ const (
 	NotificationTemplateFormatHTML     NotificationTemplateFormat = "html"
 )
 
-type DingtalkChannelSettings struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"`
-	Webhook string `json:"webhook"`
-	Secret  string `json:"secret"`
-}
-
-type WebhookChannelSettings struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"`
-	Webhook string `json:"webhook"`
-	Secret  string `json:"secret"`
-}
-
 type TelegramChannelSettings struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
@@ -92,19 +62,6 @@ type TelegramChannelSettings struct {
 	BotToken string `json:"botToken"`
 	ChatID   string `json:"chatId"`
 	ProxyURL string `json:"proxyUrl"`
-}
-
-// QQChannelSettings 保存 QQ 官方机器人的长期凭据和单聊用户 OpenID。
-// GroupOpenID 仅用于兼容尚未发布的群通知配置草稿，不参与单聊发送；Access Token
-// 由后端按需获取并仅缓存在内存中，不写入数据库或返回前端。
-type QQChannelSettings struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Enabled      bool   `json:"enabled"`
-	AppID        string `json:"appId"`
-	ClientSecret string `json:"clientSecret"`
-	UserOpenID   string `json:"userOpenId"`
-	GroupOpenID  string `json:"groupOpenId,omitempty"`
 }
 
 // SmtpTLSMode 只允许 implicit（隐式 TLS，如 465 端口）或 starttls（如 587 端口）。

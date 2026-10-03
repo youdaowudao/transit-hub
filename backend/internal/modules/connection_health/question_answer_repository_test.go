@@ -65,7 +65,7 @@ func TestQuestionAnswerRepositoryListsTodaySummariesForDeduplicatedTargets(t *te
 	}
 }
 
-func TestQuestionAnswerRepositoryHistoryOnlyReturnsShanghaiTodayWithoutDeletingOlderRecords(t *testing.T) {
+func TestQuestionAnswerRepositoryHistoryOnlyReturnsSingaporeTodayWithoutDeletingOlderRecords(t *testing.T) {
 	pool := openQuestionAnswerPostgresPool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), questionAnswerPostgresTimeout)
 	defer cancel()
@@ -91,8 +91,8 @@ func TestQuestionAnswerRepositoryHistoryOnlyReturnsShanghaiTodayWithoutDeletingO
 			'succeeded',
 			CASE WHEN sequence <= 14 THEN 'correct' ELSE 'incorrect' END,
 			'Answer ' || sequence,
-			(((now() AT TIME ZONE 'Asia/Shanghai')::date + time '12:00:00') AT TIME ZONE 'Asia/Shanghai') - (sequence * interval '1 second'),
-			(((now() AT TIME ZONE 'Asia/Shanghai')::date + time '12:00:00') AT TIME ZONE 'Asia/Shanghai') - (sequence * interval '1 second')
+			(((now() AT TIME ZONE 'Asia/Singapore')::date + time '12:00:00') AT TIME ZONE 'Asia/Singapore') - (sequence * interval '1 second'),
+			(((now() AT TIME ZONE 'Asia/Singapore')::date + time '12:00:00') AT TIME ZONE 'Asia/Singapore') - (sequence * interval '1 second')
 		FROM generate_series(1, 21) AS sequence
 	`); err != nil {
 		t.Fatalf("insert today history fixtures: %v", err)
@@ -102,8 +102,8 @@ func TestQuestionAnswerRepositoryHistoryOnlyReturnsShanghaiTodayWithoutDeletingO
 			id, user_id, target_id, batch_id, model_name, question_id, question_name,
 			question_body, status, answer_judgment, answer_body, created_at, completed_at
 		) VALUES
-			('history-yesterday', 'history-user', 'history-target', 'history-yesterday-batch', 'answer-model', 'q-old', 'Old', 'Old body', 'succeeded', 'correct', 'Old answer', (((now() AT TIME ZONE 'Asia/Shanghai')::date - 1 + time '12:00:00') AT TIME ZONE 'Asia/Shanghai'), (((now() AT TIME ZONE 'Asia/Shanghai')::date - 1 + time '12:00:00') AT TIME ZONE 'Asia/Shanghai')),
-			('history-yesterday-active', 'history-user', 'history-target', 'history-yesterday-active-batch', 'answer-model', 'q-active', 'Active', 'Active body', 'pending', NULL, '', (((now() AT TIME ZONE 'Asia/Shanghai')::date - 1 + time '12:00:00') AT TIME ZONE 'Asia/Shanghai'), NULL),
+			('history-yesterday', 'history-user', 'history-target', 'history-yesterday-batch', 'answer-model', 'q-old', 'Old', 'Old body', 'succeeded', 'correct', 'Old answer', (((now() AT TIME ZONE 'Asia/Singapore')::date - 1 + time '12:00:00') AT TIME ZONE 'Asia/Singapore'), (((now() AT TIME ZONE 'Asia/Singapore')::date - 1 + time '12:00:00') AT TIME ZONE 'Asia/Singapore')),
+			('history-yesterday-active', 'history-user', 'history-target', 'history-yesterday-active-batch', 'answer-model', 'q-active', 'Active', 'Active body', 'pending', NULL, '', (((now() AT TIME ZONE 'Asia/Singapore')::date - 1 + time '12:00:00') AT TIME ZONE 'Asia/Singapore'), NULL),
 			('history-foreign-user', 'foreign-history-user', 'history-target', 'foreign-batch', 'answer-model', 'q-foreign', 'Foreign', 'Foreign body', 'succeeded', 'correct', 'Foreign answer', now(), now()),
 			('history-foreign-target', 'history-user', 'foreign-history-target', 'foreign-target-batch', 'answer-model', 'q-foreign-target', 'Foreign target', 'Foreign target body', 'succeeded', 'correct', 'Foreign answer', now(), now())
 	`); err != nil {
@@ -111,8 +111,8 @@ func TestQuestionAnswerRepositoryHistoryOnlyReturnsShanghaiTodayWithoutDeletingO
 	}
 
 	var databaseDate string
-	if err := pool.QueryRow(ctx, `SELECT (now() AT TIME ZONE 'Asia/Shanghai')::date::text`).Scan(&databaseDate); err != nil {
-		t.Fatalf("read Shanghai database date: %v", err)
+	if err := pool.QueryRow(ctx, `SELECT (now() AT TIME ZONE 'Asia/Singapore')::date::text`).Scan(&databaseDate); err != nil {
+		t.Fatalf("read Singapore database date: %v", err)
 	}
 	countAll := func() int {
 		t.Helper()
@@ -140,8 +140,8 @@ func TestQuestionAnswerRepositoryHistoryOnlyReturnsShanghaiTodayWithoutDeletingO
 	}
 	for _, record := range append(append([]QuestionAnswerRecord{}, pageOne.Records...), pageTwo.Records...) {
 		var createdDate string
-		if err := pool.QueryRow(ctx, `SELECT (created_at AT TIME ZONE 'Asia/Shanghai')::date::text FROM connection_health_question_answer_records WHERE id = $1`, record.ID).Scan(&createdDate); err != nil {
-			t.Fatalf("read record %s Shanghai date: %v", record.ID, err)
+		if err := pool.QueryRow(ctx, `SELECT (created_at AT TIME ZONE 'Asia/Singapore')::date::text FROM connection_health_question_answer_records WHERE id = $1`, record.ID).Scan(&createdDate); err != nil {
+			t.Fatalf("read record %s Singapore date: %v", record.ID, err)
 		}
 		if createdDate != databaseDate {
 			t.Fatalf("history record %s date=%s, want today %s", record.ID, createdDate, databaseDate)
@@ -363,12 +363,12 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	if _, err := pool.Exec(ctx, `
 		UPDATE connection_health_question_answer_records
 		SET completed_at = (
-			((now() AT TIME ZONE 'Asia/Shanghai')::date - interval '1 second')
-			AT TIME ZONE 'Asia/Shanghai'
+			((now() AT TIME ZONE 'Asia/Singapore')::date - interval '1 second')
+			AT TIME ZONE 'Asia/Singapore'
 		), updated_at = now()
 		WHERE id = $1
 	`, records[0].ID); err != nil {
-		t.Fatalf("move snapshot record before Shanghai today: %v", err)
+		t.Fatalf("move snapshot record before Singapore today: %v", err)
 	}
 
 	models := make([]string, 25)
@@ -394,13 +394,13 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 			UPDATE connection_health_question_answer_records
 			SET
 				started_at = (
-					date_trunc('day', now() AT TIME ZONE 'Asia/Shanghai')
+					date_trunc('day', now() AT TIME ZONE 'Asia/Singapore')
 					+ interval '12 hours' + ($2 * interval '1 second')
-				) AT TIME ZONE 'Asia/Shanghai',
+				) AT TIME ZONE 'Asia/Singapore',
 				completed_at = (
-					date_trunc('day', now() AT TIME ZONE 'Asia/Shanghai')
+					date_trunc('day', now() AT TIME ZONE 'Asia/Singapore')
 					+ interval '12 hours 500 milliseconds' + ($2 * interval '1 second')
-				) AT TIME ZONE 'Asia/Shanghai',
+				) AT TIME ZONE 'Asia/Singapore',
 				updated_at = now()
 			WHERE id = $1
 		`, record.ID, i); err != nil {
@@ -1213,10 +1213,10 @@ func TestQuestionAnswerRepositoryModelStatsLifetimeTodayAndEmptyArrays(t *testin
 	}
 	if _, err := pool.Exec(ctx, `
 		UPDATE connection_health_question_answer_records
-		SET created_at = (((now() AT TIME ZONE 'Asia/Shanghai')::date - interval '1 second') AT TIME ZONE 'Asia/Shanghai')
+		SET created_at = (((now() AT TIME ZONE 'Asia/Singapore')::date - interval '1 second') AT TIME ZONE 'Asia/Singapore')
 		WHERE id = 'stats-a-correct'
 	`); err != nil {
-		t.Fatalf("move one model-a record before Shanghai today: %v", err)
+		t.Fatalf("move one model-a record before Singapore today: %v", err)
 	}
 
 	history, err := repository.ListQuestionAnswerHistory(ctx, "model-stats-user", "model-stats-target", 1)
@@ -1462,8 +1462,8 @@ func TestQuestionAnswerTask2BrowserFixturePostgresContract(t *testing.T) {
 	}
 	var fixtureNow time.Time
 	if err := connection.QueryRow(ctx, `
-		SELECT (date_trunc('day', now() AT TIME ZONE 'Asia/Shanghai') + interval '1 minute')
-			AT TIME ZONE 'Asia/Shanghai'
+		SELECT (date_trunc('day', now() AT TIME ZONE 'Asia/Singapore') + interval '1 minute')
+			AT TIME ZONE 'Asia/Singapore'
 	`).Scan(&fixtureNow); err != nil {
 		t.Fatalf("build fixture midnight boundary time: %v", err)
 	}
@@ -1538,7 +1538,7 @@ func TestQuestionAnswerTask2BrowserFixturePostgresContract(t *testing.T) {
 	var timestampsValid bool
 	if err := connection.QueryRow(ctx, `
 		SELECT bool_and(
-			(created_at AT TIME ZONE 'Asia/Shanghai')::date = ($4 AT TIME ZONE 'Asia/Shanghai')::date
+			(created_at AT TIME ZONE 'Asia/Singapore')::date = ($4 AT TIME ZONE 'Asia/Singapore')::date
 			AND created_at <= $4
 			AND (started_at IS NULL OR (started_at >= created_at AND started_at <= $4))
 			AND (completed_at IS NULL OR (completed_at >= COALESCE(started_at, created_at) AND completed_at <= $4))
@@ -1551,7 +1551,7 @@ func TestQuestionAnswerTask2BrowserFixturePostgresContract(t *testing.T) {
 		t.Fatalf("validate midnight fixture timestamps: %v", err)
 	}
 	if !timestampsValid {
-		t.Fatalf("fixture timestamps crossed the Shanghai day, entered the future, or reversed lifecycle order at %s", fixtureNow)
+		t.Fatalf("fixture timestamps crossed the Singapore day, entered the future, or reversed lifecycle order at %s", fixtureNow)
 	}
 	if err := runQuestionAnswerTask2FixtureAction(ctx, connection, "prepare"); err == nil || !strings.Contains(err.Error(), "fixture id already exists") {
 		t.Fatalf("duplicate prepare error=%v", err)

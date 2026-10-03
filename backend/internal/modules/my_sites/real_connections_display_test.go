@@ -67,7 +67,7 @@ func TestListRealConnectionsReturnsCompleteSafeDisplayNamesForCurrentWorkspace(t
 	}}
 	accounts := &realConnectionDisplayAccounts{current: "workspace-a"}
 	service := NewService(nil, nil, realConnectionDisplaySites{sites: map[string]*upstream.Site{
-		"site-r10": {ID: "site-r10", UserID: "user-1", AdminAccountID: "workspace-a", Name: "上海供应站"},
+		"site-r10": {ID: "site-r10", UserID: "user-1", AdminAccountID: "workspace-a", Name: "新加坡供应站"},
 	}})
 	service.connRepository = repository
 	service.accounts = accounts
@@ -92,8 +92,8 @@ func TestListRealConnectionsReturnsCompleteSafeDisplayNamesForCurrentWorkspace(t
 		t.Fatalf("decode public connections: %v", err)
 	}
 	item := payload[0]
-	if item["siteName"] != "上海供应站" {
-		t.Fatalf("siteName = %#v, want 上海供应站", item["siteName"])
+	if item["siteName"] != "新加坡供应站" {
+		t.Fatalf("siteName = %#v, want 新加坡供应站", item["siteName"])
 	}
 	if item["connectionName"] != "转发连接 A" {
 		t.Fatalf("connectionName = %#v, want 转发连接 A", item["connectionName"])

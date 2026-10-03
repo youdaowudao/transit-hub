@@ -25,7 +25,7 @@ const (
 )
 
 const (
-	DefaultTimezone = "Asia/Shanghai"
+	DefaultTimezone = "Asia/Singapore"
 	DefaultSortBy   = "total_tokens"
 	DefaultLimit    = 50
 	maxDateRange    = 31 * 24 * time.Hour

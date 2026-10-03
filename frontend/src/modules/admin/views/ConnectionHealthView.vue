@@ -65,7 +65,7 @@ import {
   writeConnectionHealthPreferences,
 } from '../utils/connectionHealthPreferences'
 
-import { t, te } from '@/locales'
+import { t, te, locale } from '@/locales'
 const route = useRoute()
 const router = useRouter()
 const {
@@ -206,7 +206,7 @@ const groupTypeLabel = (type: string): string => t(`admin.connectionHealth.group
 
 const groupCostDisplay = (value: number | null | undefined): string => {
   if (value === null || value === undefined || !Number.isFinite(value)) return t('admin.connectionHealth.costUnknown')
-  return t('admin.upstream.currency.cnyValue', { amount: value.toFixed(2) })
+  return t('admin.upstream.currency.amountValue', { amount: value.toFixed(2) })
 }
 
 const groupCostReasonDisplay = (reason?: string): string => {
@@ -402,7 +402,7 @@ const priorityFailureTime = computed(() => {
 	const parsed = new Date(raw)
 	return Number.isNaN(parsed.getTime())
 		? t('admin.connectionHealth.prioritySync.unknownTime')
-		: parsed.toLocaleString('zh-CN', { hour12: false })
+		: parsed.toLocaleString(locale, { hour12: false, timeZone: 'Asia/Singapore' })
 })
 const prioritySyncBlockers = computed(() => collectPrioritySyncBlockers(adminGroups.value))
 const priorityWorkspaceLabel = computed(() => resolvePriorityWorkspaceLabel(

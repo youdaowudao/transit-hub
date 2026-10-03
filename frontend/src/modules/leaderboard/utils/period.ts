@@ -1,8 +1,8 @@
 import type { LeaderboardDateRange, LeaderboardPeriod } from '../types'
 
-const timezone = 'Asia/Shanghai'
+const timezone = 'Asia/Singapore'
 
-const shanghaiDateParts = (value: Date): [number, number, number] => {
+const singaporeDateParts = (value: Date): [number, number, number] => {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: timezone,
     year: 'numeric',
@@ -22,7 +22,7 @@ const addDays = (value: Date, days: number): Date => {
 const formatDate = (value: Date): string => value.toISOString().slice(0, 10)
 
 export const leaderboardDateRange = (period: LeaderboardPeriod, now = new Date()): LeaderboardDateRange => {
-  const [year, month, day] = shanghaiDateParts(now)
+  const [year, month, day] = singaporeDateParts(now)
   const today = new Date(Date.UTC(year, month - 1, day))
   const days = period === '30d' ? 30 : period === '7d' ? 7 : 1
   return {

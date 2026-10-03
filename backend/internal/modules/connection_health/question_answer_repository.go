@@ -421,7 +421,7 @@ func (r *Repository) ListQuestionAnswerHistory(ctx context.Context, userID strin
 	if err := r.db.QueryRow(ctx, `
 		SELECT count(*) FROM connection_health_question_answer_records
 		WHERE user_id = $1 AND target_id = $2
-			AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
+			AND (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date
 	`, userID, targetID).Scan(&totalItems); err != nil {
 		return QuestionAnswerHistory{}, err
 	}
@@ -431,7 +431,7 @@ func (r *Repository) ListQuestionAnswerHistory(ctx context.Context, userID strin
 	}
 	rows, err := r.db.Query(ctx, questionAnswerRecordSelect+`
 		WHERE user_id = $1 AND target_id = $2
-			AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
+			AND (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date
 		ORDER BY created_at DESC, id DESC
 		LIMIT $3 OFFSET $4
 	`, userID, targetID, QuestionAnswerPageSize, (page-1)*QuestionAnswerPageSize)
@@ -465,7 +465,7 @@ func (r *Repository) ListQuestionAnswerTodaySummaries(ctx context.Context, userI
 		FROM connection_health_question_answer_records
 		WHERE user_id = $1
 			AND target_id = ANY($2::text[])
-			AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date
+			AND (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date
 		GROUP BY target_id
 	`, userID, targetIDs)
 	if err != nil {
@@ -499,14 +499,14 @@ func (r *Repository) questionAnswerStats(ctx context.Context, userID string, tar
 			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'unreviewed'),
 			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'correct'),
 			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'incorrect'),
-			count(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
-			count(*) FILTER (WHERE status IN ('pending', 'running') AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
-			count(*) FILTER (WHERE status = 'succeeded' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
-			count(*) FILTER (WHERE status = 'failed' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
-			count(*) FILTER (WHERE status = 'cancelled' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
-			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'unreviewed' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
-			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'correct' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date),
-			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'incorrect' AND (created_at AT TIME ZONE 'Asia/Shanghai')::date = (now() AT TIME ZONE 'Asia/Shanghai')::date)
+			count(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date),
+			count(*) FILTER (WHERE status IN ('pending', 'running') AND (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date),
+			count(*) FILTER (WHERE status = 'succeeded' AND (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date),
+			count(*) FILTER (WHERE status = 'failed' AND (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date),
+			count(*) FILTER (WHERE status = 'cancelled' AND (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date),
+			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'unreviewed' AND (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date),
+			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'correct' AND (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date),
+			count(*) FILTER (WHERE status = 'succeeded' AND answer_judgment = 'incorrect' AND (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date)
 		FROM connection_health_question_answer_records
 		WHERE user_id = $1 AND target_id = $2
 		GROUP BY model_name

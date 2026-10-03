@@ -31,7 +31,7 @@ export interface UpstreamGroupInfo {
   name: string
   platform: string | null
   multiplier: number | null
-  // 后端按站点充值倍率换算后的人民币今日累计成本；null 表示暂时没有可靠样本。
+  // 后端按站点充值倍率换算后的核算金额今日累计成本；null 表示暂时没有可靠样本。
   todayCost?: number | null
   costMode?: 'exact' | 'retained' | 'unknown' | string
   costSource?: string

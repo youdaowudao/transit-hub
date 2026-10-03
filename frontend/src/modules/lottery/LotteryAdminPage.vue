@@ -24,6 +24,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
+import { formatLastUsedAt } from '@/modules/admin/utils/userLastUsed'
 import {
   cancelLotteryCampaign,
   closeLotteryCampaign,
@@ -155,6 +156,7 @@ const formatDateTime = (value?: string): string => {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return t('admin.lottery.common.empty')
   return new Intl.DateTimeFormat(locale, {
+    timeZone: 'Asia/Singapore',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -170,10 +172,7 @@ const auditEventLabel = (event: string): string => {
 
 const toLocalInput = (value?: string): string => {
   if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-  const offset = date.getTimezoneOffset() * 60000
-  return new Date(date.getTime() - offset).toISOString().slice(0, 16)
+  return formatLastUsedAt(value).replace(' ', 'T').slice(0, 16)
 }
 
 const normalizeDateInput = (value: string): string => value.trim() ? `${value.trim()}:00` : ''

@@ -44,7 +44,7 @@ const mountDetail = (accounts: AdminGroupAccount[]) => {
   const group: AdminGroupHealth = {
     id: 'group-1',
     name: 'Stable Group',
-    platform: 'sub2api',
+    platform: 'openai',
     status: 'enabled',
     type: 'subscription',
     isExclusive: false,
@@ -85,6 +85,20 @@ const accountRow = (wrapper: VueWrapper, accountName: string): VueWrapper => {
 }
 
 describe('AdminGroupHealthDetail current main-site errors', () => {
+  it('shows every member of one group together without paging controls', () => {
+    const accounts = Array.from({ length: 140 }, (_, index) => makeAccount({
+      id: String(index + 1),
+      name: `Member-${String(index + 1).padStart(4, '0')}`,
+      targetId: `sub2api:ws1:${index + 1}`,
+    }))
+    const wrapper = mountDetail(accounts)
+    const rows = wrapper.findAll('tbody > tr')
+    expect(rows).toHaveLength(140)
+    for (const account of accounts) expect(accountRow(wrapper, account.name).exists()).toBe(true)
+    expect(wrapper.findAll('button').some(button => /上一页|下一页/.test(button.text()))).toBe(false)
+    expect(wrapper.text()).toContain('Stable Group')
+  })
+
   it.each([
     {
       label: 'active',
@@ -194,7 +208,9 @@ describe('current protocol result and invalid attempt', () => {
     }
     const wrapper = mountDetail([makeAccount({ hasEnabledProbePolicy: true, modelHealth: [model] })])
     await accountRow(wrapper, 'Account 100').find('button[aria-label="展开模型结果"]').trigger('click')
-    expect(wrapper.text()).toContain('当前协议待验证')
+    expect(wrapper.text()).toContain('当前协议健康依据待验证')
+    expect(wrapper.text()).toContain('超过 5 秒仍属于慢响应')
+    expect(wrapper.text()).toContain('暂停或观察中的账号需要正常成功并满足原恢复条件')
     expect(wrapper.text()).toContain(label)
     expect(wrapper.text()).not.toContain('probeBlockedReasons.admin.')
     expect(wrapper.text()).not.toContain(`admin.connectionHealth.probeBlockedReasons.${blockedReason}`)
@@ -240,6 +256,15 @@ describe('current protocol result and invalid attempt', () => {
     expect(wrapper.text()).not.toContain('22222ms')
     expect(wrapper.text()).not.toContain('其中 1 次为高延迟成功')
     expect(wrapper.findAll('[title]').some(node => node.attributes('title')?.includes('过期尝试'))).toBe(true)
+    expect(wrapper.text()).not.toContain('请求在超时前成功返回，也可能尚未达到健康恢复条件')
+
+    await wrapper.setProps({ adminGroups: [{ ...group, accounts: [makeAccount({ modelHealth: [{
+      ...model, currentHealthResult: { status: 'unverified', protocol: 'responses' },
+      lastAttempt: { disposition: 'applied', result: 'slow_response', protocol: 'responses', probeTimeoutSeconds: 30, at: '2026-10-02T10:10:00Z' },
+    }] })] }] })
+    expect(wrapper.text()).toContain('当前协议健康依据待验证')
+    expect(wrapper.text()).toContain('超过 5 秒仍属于慢响应')
+    expect(wrapper.text()).toContain('暂停或观察中的账号需要正常成功并满足原恢复条件')
 
     await wrapper.setProps({ adminGroups: [{ ...group, accounts: [makeAccount({ modelHealth: [{
       ...model, state: 'healthy', lastErrorKey: '', lastErrorDetail: '', lastSuccessAt: '2026-10-02T10:10:00Z',
@@ -249,6 +274,7 @@ describe('current protocol result and invalid attempt', () => {
     expect(wrapper.text()).not.toContain('当前失败')
     expect(wrapper.text()).not.toContain('invalid attempt t2')
     expect(wrapper.text()).not.toContain('applied failure t1')
+    expect(wrapper.text()).not.toContain('请求在超时前成功返回，也可能尚未达到健康恢复条件')
   })
 
   it('retains the applied failure after a newer invalid attempt and only clears it for an applied success', async () => {

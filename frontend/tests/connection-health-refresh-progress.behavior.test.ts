@@ -157,6 +157,19 @@ afterEach(() => {
 })
 
 describe('connection health refresh progress behavior', () => {
+  it.each(['sub2api', 'newapi', ''])('passes the actual workspace platform %s to the setup drawer independently of group providers', async (platform) => {
+    harness.currentAccount.value = { id: 'ws1', displayName: '测试工作区', platform }
+    const SetupPlatformProbe = defineComponent({
+      name: 'GroupHealthSetupDrawer',
+      props: { workspacePlatform: { type: String, default: 'missing' } },
+      setup(props) {
+        return () => h('div', { 'data-test': 'setup-workspace-platform' }, props.workspacePlatform)
+      },
+    })
+    const wrapper = await mountView({ GroupHealthSetupDrawer: SetupPlatformProbe })
+    expect(wrapper.get('[data-test="setup-workspace-platform"]').text()).toBe(platform)
+  })
+
   it('passes the complete workspace group snapshot to the setup drawer', async () => {
     harness.activeWorkspaceScope = 'ws1'
     harness.refs.adminGroups.value = [

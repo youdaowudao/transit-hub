@@ -1345,7 +1345,7 @@ describe('protocol and unresolved remote action safety display', () => {
 
   it.each([
     ['testConfigurationUnavailable', '成员资料或测试配置无法确认，暂不能发起新测试。'],
-    ['currentProtocolUnverified', '当前协议待验证，历史状态暂不用于新的健康动作。'],
+    ['currentProtocolUnverified', '当前协议尚未满足健康判定条件，历史状态暂不用于新的健康动作。'],
   ])('renders the server %s error in the existing result area', async (key, message) => {
     const account = makeAccount()
     harness.probeTargetWithProgress.mockRejectedValue(new Error(`admin.connectionHealth.errors.${key}`))

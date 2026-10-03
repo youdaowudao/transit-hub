@@ -31,6 +31,7 @@ type ModelSuggestionSource = 'common' | 'discovered' | 'none'
 
 const props = defineProps<{
   open: boolean
+  workspacePlatform: string
   group: AdminGroupHealth | null
   policies: ConnectionHealthPolicy[]
   allGroups: AdminGroupHealth[]
@@ -60,6 +61,7 @@ const testSaving = ref(false)
 const testError = ref('')
 const testSaved = ref(false)
 let testSequence = 0
+const supportsTestConfiguration = computed(() => props.workspacePlatform === 'sub2api')
 const validTestTimeout = computed(() => /^\d+$/.test(testTimeout.value) && Number(testTimeout.value) >= 5 && Number(testTimeout.value) <= 120)
 const setTestProtocol = (event: Event) => {
   testProtocol.value = (event.target as HTMLSelectElement).value as TestProtocol
@@ -75,27 +77,29 @@ const loadTestConfiguration = async () => {
   const group = props.group
   const sequence = ++testSequence
   testConfiguration.value = null
+  testLoading.value = false
+  testSaving.value = false
   testError.value = ''
   testSaved.value = false
   testTimeout.value = ''
   testProtocol.value = 'chat_completions'
-  if (!group || group.platform !== 'sub2api') return
+  if (!group || !supportsTestConfiguration.value) return
   testLoading.value = true
   const outcome = await loadAdminGroupTestConfiguration(group.id)
-  if (sequence !== testSequence || !props.open || props.group?.id !== group.id) return
+  if (sequence !== testSequence || !props.open || !supportsTestConfiguration.value || props.group?.id !== group.id) return
   testLoading.value = false
   if (!outcome || 'errorKey' in outcome) { testError.value = outcome?.errorKey ?? 'admin.connectionHealth.errors.request'; return }
   applyTestConfiguration(outcome.configuration)
 }
 const saveTestConfiguration = async (clear = false) => {
   const group = props.group
-  if (!group || testSaving.value || testLoading.value || !testConfiguration.value?.inventoryComplete || (!clear && !validTestTimeout.value)) return
+  if (!group || !supportsTestConfiguration.value || testSaving.value || testLoading.value || !testConfiguration.value?.inventoryComplete || (!clear && !validTestTimeout.value)) return
   const sequence = ++testSequence
   testSaving.value = true
   testSaved.value = false
   testError.value = ''
   const outcome = await saveAdminGroupTestConfiguration(group.id, clear ? null : { protocol: testProtocol.value, probeTimeoutSeconds: Number(testTimeout.value) })
-  if (sequence !== testSequence || !props.open || props.group?.id !== group.id) return
+  if (sequence !== testSequence || !props.open || !supportsTestConfiguration.value || props.group?.id !== group.id) return
   testSaving.value = false
   if ('errorKey' in outcome) { testError.value = outcome.errorKey; return }
   applyTestConfiguration(outcome.configuration)
@@ -251,7 +255,7 @@ const reset = async () => {
 }
 
 watch(
-  () => [props.open, props.group?.id],
+  () => [props.open, props.group?.id, props.workspacePlatform],
   ([isOpen]) => {
     if (isOpen && props.group) { void reset(); void loadTestConfiguration() }
     else { loadSequence++; testSequence++; testSaving.value = false; testLoading.value = false }
@@ -679,7 +683,7 @@ const close = () => {
           </div>
 
           <div class="flex-1 overflow-y-auto px-6 py-5">
-            <section v-if="group.platform === 'sub2api'" data-testid="group-test-configuration" class="mb-6 space-y-3 rounded-lg border border-border/60 p-4">
+            <section v-if="supportsTestConfiguration" data-testid="group-test-configuration" class="mb-6 space-y-3 rounded-lg border border-border/60 p-4">
               <h3 class="text-sm font-semibold text-foreground">{{ t('admin.connectionHealth.testConfiguration.title') }}</h3>
               <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.help') }}</p>
               <p v-if="testLoading" class="text-xs text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.loading') }}</p>

@@ -148,7 +148,7 @@ func sub2APIInventoryMetadata(value any, page, pageSize int) (inventoryPageMetad
 				meta.hasPagination = true
 			}
 		}
-		for _, key := range []string{"total_pages", "totalPages", "last_page", "lastPage"} {
+		for _, key := range []string{"pages", "total_pages", "totalPages", "last_page", "lastPage"} {
 			if raw, exists := scope[key]; exists {
 				n, ok := strictInventoryNonnegative(raw)
 				if !ok || (n < page && !(n == 0 && page == 1 && meta.hasTotal && meta.total == 0)) || !setMore(n > page) {
@@ -161,7 +161,7 @@ func sub2APIInventoryMetadata(value any, page, pageSize int) (inventoryPageMetad
 	return meta, true
 }
 
-func strictSub2APIGroupItems(value any) ([]map[string]any, bool) {
+func sub2APIGroupPageItems(value any) ([]any, bool, bool) {
 	var items []any
 	arrayContract := false
 	if raw, ok := value.([]any); ok {
@@ -171,11 +171,19 @@ func strictSub2APIGroupItems(value any) ([]map[string]any, bool) {
 		var ok bool
 		items, ok = sub2APIAccountPageItems(value)
 		if !ok {
-			return nil, false
+			return nil, false, false
 		}
 		if root, ok := value.(map[string]any); ok {
 			_, arrayContract = root["data"].([]any)
 		}
+	}
+	return items, arrayContract, true
+}
+
+func strictSub2APIGroupItems(value any) ([]map[string]any, bool) {
+	items, arrayContract, validItems := sub2APIGroupPageItems(value)
+	if !validItems {
+		return nil, false
 	}
 	meta, ok := sub2APIInventoryMetadata(value, 1, 0)
 	if !ok || (meta.hasTotal && meta.total != len(items)) || (meta.hasMore && meta.more) || (meta.pageSize > 0 && len(items) > meta.pageSize) {

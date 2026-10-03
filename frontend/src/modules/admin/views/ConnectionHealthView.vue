@@ -1471,6 +1471,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
 
     <GroupHealthSetupDrawer
       :open="setupDrawerOpen"
+      :workspace-platform="currentAccount?.platform ?? ''"
       :group="setupGroup"
       :policies="policies"
       :all-groups="setupDrawerOpen ? setupGroupsSnapshot : adminGroups"

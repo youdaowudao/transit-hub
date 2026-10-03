@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Zap } from 'lucide-vue-next'
+import { Tooltip } from '@/components/ui/tooltip'
 import {
   connectionHealthMessageKey,
   connectionHealthRecordColorClass,
@@ -112,7 +113,9 @@ const displayedErrorDetail = computed(() => currentFailure.value ? (props.curren
         </div>
       </div>
       <div v-if="!isActionCard" class="flex shrink-0 flex-col items-end gap-1">
-        <span v-if="currentHealthResult?.status === 'unverified'" class="text-xs text-amber-700">{{ t('admin.connectionHealth.testConfiguration.unverified') }}</span>
+        <Tooltip v-if="currentHealthResult?.status === 'unverified'" :text="t('admin.connectionHealth.testConfiguration.unverifiedHelp')" wide>
+          <span class="text-xs text-amber-700">{{ t('admin.connectionHealth.testConfiguration.unverified') }}</span>
+        </Tooltip>
         <span v-else class="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium" :class="connectionHealthStateBadgeClass(state)">
           {{ state ? t(`${prefix}.stateLabels.${state}`) : '—' }}
         </span>
@@ -122,6 +125,7 @@ const displayedErrorDetail = computed(() => currentFailure.value ? (props.curren
       </div>
     </div>
 
+    <p v-if="!isActionCard && currentHealthResult?.status === 'unverified'" class="mt-1 whitespace-normal break-words text-xs text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.unverifiedHelp') }}</p>
     <div v-if="!isActionCard" class="mt-2 grid gap-2" :class="hasFailureTime ? 'grid-cols-2' : 'grid-cols-1'">
       <div class="rounded-lg border border-border/40 bg-background/60 px-2.5 py-1.5">
         <p class="text-[11px] text-muted-foreground">{{ t(`${cardPrefix}.lastProbe`, { value: '' }) }}</p>

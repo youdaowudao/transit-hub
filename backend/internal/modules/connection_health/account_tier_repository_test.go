@@ -59,6 +59,17 @@ func TestAccountTierRepositoryMigrationIsIdempotentAndPreservesLegacyData(t *tes
 		{UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:shared", Conflict: true, OriginalPriority: 7, LastAppliedPriority: 4, LastConflictPriority: intPointer(7)},
 		{UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:multiplier-only", OriginalPriority: 50, LastAppliedPriority: 4, EffectiveMultiplier: 0.5, PendingPriority: intPointer(3)},
 	} {
+		if state.PendingPriority != nil {
+			// Seed a historical pending checkpoint directly; normal writes must not
+			// create an unclaimed Sub2API action under the current safety contract.
+			if _, err := pool.Exec(ctx, `INSERT INTO connection_health_priority_sync_states
+				(user_id, admin_account_id, target_id, original_priority, last_applied_priority, pending_priority, effective_multiplier)
+				VALUES ($1,$2,$3,$4,$5,$6,$7)`, state.UserID, state.AdminAccountID, state.TargetID,
+				state.OriginalPriority, state.LastAppliedPriority, state.PendingPriority, state.EffectiveMultiplier); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
 		if err := repository.UpsertPrioritySyncState(ctx, state); err != nil {
 			t.Fatal(err)
 		}

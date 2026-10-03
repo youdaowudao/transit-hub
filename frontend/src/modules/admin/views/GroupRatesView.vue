@@ -603,9 +603,9 @@ const realConnectError = ref('')
 const managedResourceErrorMessage = (error: unknown, fallbackKey: string): string => {
   const key = error instanceof Error ? error.message : ''
   let message = te(key) ? t(key) : t(fallbackKey)
-  if (key === 'admin.mySites.errors.resourcesPendingVerification' && error instanceof Error) {
+  if (['admin.mySites.errors.resourcesPendingVerification', 'admin.mySites.errors.accountCreationPendingVerification', 'admin.mySites.errors.compensationPendingVerification', 'admin.mySites.errors.upstreamKeyCleanupPendingVerification'].includes(key) && error instanceof Error) {
     const retained = error as Error & { reason?: string; groupId?: string; groupName?: string; adminResourceId?: string; upstreamKeyId?: string }
-    if (retained.reason && te(retained.reason)) message += ` ${t(retained.reason)}`
+    if (retained.reason && retained.reason !== key && te(retained.reason)) message += ` ${t(retained.reason)}`
     if (retained.groupId || retained.groupName) message += ` ${t('admin.mySites.errors.blockingGroup', { groupName: retained.groupName || '—', groupId: retained.groupId || '—' })}`
     message += ` ${t('admin.mySites.errors.retainedResources', { adminResourceId: retained.adminResourceId || '—', upstreamKeyId: retained.upstreamKeyId || '—' })}`
   }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -177,9 +178,16 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	}
 	adminResourceID, adminResourceName, err := s.createAdminResource(connectionCtx, req.ChannelType, ownGroupIDs, key)
 	if err != nil {
-		// A failed create may still have reached the remote service. Keep its key
-		// for explicit verification; blindly deleting it could break a live account.
-		return RealConnectResponse{}, &ManagedResourcePendingError{AdminResourceID: adminResourceID, UpstreamKeyID: keyID, Cause: err}
+		var localErr requestError
+		outcome := upstream.RemoteMutationOutcome(err)
+		if connectionCtx.state.Session.Platform == upstream.PlatformSub2API && !errors.As(err, &localErr) && outcome != upstream.MutationNotSent && outcome != upstream.MutationConfirmedRejected {
+			// Only an uncertain Sub2API create may have left a live account using this key.
+			return RealConnectResponse{}, &ManagedResourcePendingError{MessageKey: "admin.mySites.errors.accountCreationPendingVerification", AdminResourceID: adminResourceID, UpstreamKeyID: keyID, Cause: err}
+		}
+		if rollbackErr := s.deleteUpstreamCredential(connectionCtx.upstreamSession, keyID); rollbackErr != nil {
+			log.Printf("[real-connect] compensate upstream credential failed platform=%s id=%s", connectionCtx.upstreamSession.Platform, keyID)
+		}
+		return RealConnectResponse{}, err
 	}
 
 	conn := RealConnection{
@@ -208,10 +216,10 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	if err := s.persistConnection(ctx, conn); err != nil {
 		deleteErr := s.safeDeleteAdminResource(ctx, userID, connectionCtx.adminAccountID, connectionCtx.state.Session, adminResourceID, "compensate_delete")
 		if deleteErr != nil {
-			return RealConnectResponse{}, &ManagedResourcePendingError{AdminResourceID: adminResourceID, UpstreamKeyID: keyID, Cause: errors.Join(err, deleteErr)}
+			return RealConnectResponse{}, &ManagedResourcePendingError{MessageKey: "admin.mySites.errors.compensationPendingVerification", AdminResourceID: adminResourceID, UpstreamKeyID: keyID, Cause: errors.Join(err, deleteErr)}
 		}
 		if keyErr := s.deleteUpstreamCredential(connectionCtx.upstreamSession, keyID); keyErr != nil {
-			return RealConnectResponse{}, &ManagedResourcePendingError{AdminResourceID: adminResourceID, UpstreamKeyID: keyID, Cause: errors.Join(err, keyErr)}
+			return RealConnectResponse{}, &ManagedResourcePendingError{MessageKey: "admin.mySites.errors.upstreamKeyCleanupPendingVerification", AdminResourceID: adminResourceID, UpstreamKeyID: keyID, Cause: errors.Join(err, keyErr)}
 		}
 		return RealConnectResponse{}, err
 	}

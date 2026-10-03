@@ -2043,7 +2043,7 @@ export default {
         schedulableReadbackFailed: '主站已返回但调度状态回读失败或不一致，未显示为成功。',
         schedulableAuditFailed: '主站状态已修改，但动作记录保存失败，请刷新后核对。',
         schedulableUnsupported: '当前目标不是可操作的 Sub2API 账号。',
-        remoteActionPending: '同一账号存在待确认的远端动作，须核对后收口，当前操作未发送。',
+        remoteActionPending: '当前管理连接存在待确认的远端动作，须核对后收口，当前操作未发送。',
         sub2apiGroupLastUsable: '该账号是所属分组最后一个可用账号，不能关闭。',
         sub2apiInventoryIncomplete: '主站分组账号资料不完整，无法安全关闭，请刷新后重试。',
         credentialUnavailable: '无法安全获取上游凭据，暂不可探活。',
@@ -2561,8 +2561,11 @@ export default {
         invalidAutoPricingConfig: '自动调价配置无效：主上游不在关联上游中，或最低倍率大于最高倍率。',
         connectionExists: '该上游分组已经存在真实连接。',
         managedDeleteOnly: '已有资源关联只能取消本地关联，不能删除远端资源。',
-        safeDeletionUnavailable: '安全删除服务暂不可用，账号、Key 和本地记录已保留。',
-        resourcesPendingVerification: '账号删除尚未确认，账号、Key 和本地记录已保留，请核对后再处理。',
+        safeDeletionUnavailable: '安全删除服务暂不可用。',
+        resourcesPendingVerification: '账号删除尚未确认，Key 和本地记录已保留，请核对后再处理。',
+        accountCreationPendingVerification: '账号创建结果尚未确认，上游 Key 已保留，本地记录未保存，请核对后再处理。',
+        compensationPendingVerification: '本地记录未保存，账号清理尚未确认，上游 Key 已保留，请核对后再处理。',
+        upstreamKeyCleanupPendingVerification: '主站账号已删除，本地记录未保存，上游 Key 清理尚未确认，请核对后再处理。',
         retainedResources: '待核对资源：主站账号 {adminResourceId}，上游 Key 编号 {upstreamKeyId}。',
         blockingGroup: '受保护分组：{groupName}（{groupId}）。'
       }

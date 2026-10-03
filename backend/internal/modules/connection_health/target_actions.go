@@ -38,17 +38,38 @@ type targetInventoryObservation struct {
 }
 
 type workspaceFloorGuard struct {
-	mu                   sync.Mutex
-	reservedUnavailable  map[string]struct{}
-	inventory            *adminWorkspaceInventory
-	inventoryFingerprint string
-	snapshotAt           time.Time
-	frozenGroups         map[string]struct{}
-	freezeWorkspace      bool
+	mu                     sync.Mutex
+	reservedUnavailable    map[string]uint64
+	nextReservationVersion uint64
+	inventory              *adminWorkspaceInventory
+	inventoryFingerprint   string
+	snapshotAt             time.Time
+	frozenGroups           map[string]struct{}
+	freezeWorkspace        bool
 }
 
 func newWorkspaceFloorGuard() *workspaceFloorGuard {
-	return &workspaceFloorGuard{reservedUnavailable: make(map[string]struct{})}
+	return &workspaceFloorGuard{reservedUnavailable: make(map[string]uint64)}
+}
+
+func (g *workspaceFloorGuard) reserveUnavailableLocked(targetID string) {
+	g.nextReservationVersion++
+	g.reservedUnavailable[targetID] = g.nextReservationVersion
+}
+
+func (g *workspaceFloorGuard) reservationVersion(targetID string) (uint64, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	version, present := g.reservedUnavailable[targetID]
+	return version, present
+}
+
+func (g *workspaceFloorGuard) releaseUnchangedReservation(targetID string, version uint64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if current, present := g.reservedUnavailable[targetID]; present && current == version {
+		delete(g.reservedUnavailable, targetID)
+	}
 }
 
 func (g *workspaceFloorGuard) reserveSub2APIInactive(target AdminProbeTarget, inventory adminWorkspaceInventory, scope adminMonitoringScope) targetRemoteActionResult {
@@ -72,7 +93,7 @@ func (g *workspaceFloorGuard) rememberInventoryLocked(inventory adminWorkspaceIn
 	if adminInventoryComplete(inventory) {
 		fingerprint := adminInventoryFingerprint(inventory)
 		if g.inventoryFingerprint != fingerprint {
-			g.reservedUnavailable = make(map[string]struct{})
+			g.reservedUnavailable = make(map[string]uint64)
 			g.inventoryFingerprint = fingerprint
 		}
 	}
@@ -134,8 +155,8 @@ func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, in
 	}
 	// A reservation represents a destructive account mutation already admitted against
 	// the cached upstream inventory. A policy/scope change alone cannot prove that the
-	// upstream account has become usable again, so reservations remain until a new
-	// inventory fingerprint is observed by rememberInventoryLocked.
+	// upstream account has become usable again. Only a changed inventory or a
+	// reliably reconciled no-effect action releases the matching reservation.
 
 	monitoredMemberships := make(map[string]struct{})
 	for groupID, monitoredTargets := range scope.monitoredByGroup {
@@ -260,7 +281,7 @@ func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, in
 			}
 		}
 	}
-	g.reservedUnavailable[target.TargetID] = struct{}{}
+	g.reserveUnavailableLocked(target.TargetID)
 	return targetRemoteActionResult{}
 }
 

@@ -12,6 +12,19 @@ import (
 	"time"
 )
 
+func TestRetryableKeyUsageErrorDoesNotRetryContextTermination(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		for _, err := range []error{cause, &RequestError{MessageKey: ErrorNetwork, Cause: cause}, &RequestError{MessageKey: ErrorInvalidResponse, Cause: cause}} {
+			if retryableKeyUsageError(err) {
+				t.Fatalf("terminated request must not retry: %v", err)
+			}
+		}
+	}
+	if !retryableKeyUsageError(&RequestError{MessageKey: ErrorNetwork, Timeout: true}) {
+		t.Fatal("network timeout without caller context termination must retain its retry policy")
+	}
+}
+
 // TestFetchKeyUsageToday_Sub2API_PaginatesKeysAndFiltersZeroCost 覆盖测试要求 5：
 // sub2api key 列表必须分页拉取完整（不能只取第一页），且只保留今日消费 > 0 的 key。
 func TestFetchKeyUsageToday_Sub2API_PaginatesKeysAndFiltersZeroCost(t *testing.T) {

@@ -1403,6 +1403,40 @@ describe('protocol and unresolved remote action safety display', () => {
     expect(wrapper.text()).not.toContain('暂时无法读取分组健康数据')
   })
 
+  it.each(['same account', 'another account in the protected group'])('shows an accurate rejected scheduling-close message and preserves all account values and pending details: %s', async (pendingOwner) => {
+    const confirm = vi.spyOn(window, 'confirm').mockClear().mockReturnValue(true)
+    try {
+      const pending = { action: 'schedulable', dispatchId: 'dispatch-blocking-close', phase: 'uncertain', reason: 'pending' }
+      const target = makeAccount(pendingOwner === 'same account' ? { remoteActionPending: pending } : {})
+      const other = makeAccount({ id: 'account-2', name: '未决账号二', targetId: 'sub2api:ws1:account-2',
+        ...(pendingOwner !== 'same account' ? { remoteActionPending: pending } : {}),
+      })
+      harness.updateTargetSchedulable.mockImplementationOnce(async () => {
+        harness.refs.errorKey.value = 'admin.connectionHealth.errors.remoteActionPending'
+        return false
+      })
+      const wrapper = await mountView([makeGroup([target, other])])
+      harness.loadAll.mockClear()
+      await buttonByAria(rowFor(wrapper, target.name), '关闭主站调度').trigger('click')
+      await flushPromises()
+      expect(confirm).toHaveBeenCalledTimes(1)
+      expect(harness.updateTargetSchedulable).toHaveBeenCalledWith(target.targetId, false)
+      expect(wrapper.text()).toContain('当前管理连接存在待确认的远端动作，须核对后收口，当前操作未发送。')
+      expect(wrapper.text()).not.toContain('同一账号')
+      expect(wrapper.text()).not.toContain('最后一个可用账号')
+      for (const entry of [target, other]) {
+        expect(rowFor(wrapper, entry.name).text()).toContain('主站调度开启')
+        expect(entry.schedulable).toBe(true)
+        expect(buttonByAria(rowFor(wrapper, entry.name), '关闭主站调度').exists()).toBe(true)
+      }
+      expect(wrapper.text()).toContain(pending.dispatchId)
+      expect(wrapper.text()).toContain('结果未知')
+      expect(harness.loadAll).not.toHaveBeenCalled()
+    } finally {
+      confirm.mockRestore()
+    }
+  })
+
   it('keeps unresolved visible and invisible targets in the existing status area without a clear control', async () => {
     harness.getPrioritySyncStatus.mockResolvedValue({ workspaceId: 'ws1', status: 'success', failedCount: 0, actionDiagnostics: [
       { targetId: 'sub2api:ws1:missing', action: 'priority', dispatchId: 'dispatch-missing', phase: 'uncertain', reason: 'target_not_visible' },

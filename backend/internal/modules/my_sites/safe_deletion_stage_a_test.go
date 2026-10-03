@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"testing"
 
@@ -111,4 +113,92 @@ func stageAResourceService(t *testing.T) (*Service, *testConnRepo, *int) {
 	service.SetAdminAccountResolver(testAdminResolver{currentID: "admin-1"})
 	service.connRepository = repo
 	return service, repo, deletes
+}
+
+func TestStageACreateFailureCleansOnlyProvenAbsentResources(t *testing.T) {
+	for _, sample := range []struct {
+		name         string
+		groupID      string
+		status       int
+		body         string
+		transportErr error
+		wantCleanup  bool
+		noKey        bool
+	}{
+		{name: "local-validation", groupID: "not-numeric", noKey: true},
+		{name: "dial-not-sent", transportErr: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("refused")}, wantCleanup: true},
+		{name: "dns-not-sent", transportErr: &net.DNSError{Err: "not found", Name: "fixture.invalid"}, wantCleanup: true},
+		{name: "middleware-unauthorized", status: 401, body: `{"code":"UNAUTHORIZED"}`, wantCleanup: true},
+		{name: "middleware-forbidden", status: 403, body: `{"code":"FORBIDDEN"}`, wantCleanup: true},
+		{name: "unproven-400", status: 400, body: `{"message":"could have applied"}`},
+		{name: "server-unknown", status: 500, body: `{"code":"INTERNAL_ERROR"}`},
+		{name: "written-disconnect", transportErr: io.EOF},
+		{name: "invalid-receipt", status: 200, body: `not-json`},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			service, repo, _ := stageAResourceService(t)
+			groupID := sample.groupID
+			if groupID == "" {
+				groupID = "7"
+			}
+			keyDeletes, accountWrites, keyCreates := 0, 0, 0
+			service.platformService = upstream.NewPlatformService(upstream.NewHTTPClient(&http.Client{Transport: stageAResourceTransport(func(req *http.Request) (*http.Response, error) {
+				status, payload := 200, `{"data":{"role":"admin"}}`
+				switch {
+				case req.Method == http.MethodGet && req.URL.Path == "/api/v1/auth/me":
+				case req.Method == http.MethodGet && req.URL.Path == "/api/v1/admin/groups":
+					payload = `{"data":[{"id":"` + groupID + `","name":"vip","platform":"openai","status":"active"}]}`
+				case req.Method == http.MethodPost && req.URL.Path == "/api/v1/keys":
+					keyCreates++
+					payload = `{"data":{"id":11,"key":"synthetic-test-key"}}`
+				case req.Method == http.MethodPost && req.URL.Path == "/api/v1/admin/accounts":
+					accountWrites++
+					if sample.transportErr != nil {
+						trace := httptrace.ContextClientTrace(req.Context())
+						var op *net.OpError
+						var dns *net.DNSError
+						if errors.As(sample.transportErr, &op) && trace != nil && trace.ConnectDone != nil {
+							trace.ConnectDone("tcp", "fixture.invalid:443", sample.transportErr)
+						} else if errors.As(sample.transportErr, &dns) && trace != nil && trace.DNSDone != nil {
+							trace.DNSDone(httptrace.DNSDoneInfo{Err: sample.transportErr})
+						} else if trace != nil && trace.WroteRequest != nil {
+							trace.WroteRequest(httptrace.WroteRequestInfo{})
+						}
+						return nil, sample.transportErr
+					}
+					status, payload = sample.status, sample.body
+				case req.Method == http.MethodDelete && req.URL.Path == "/api/v1/keys/11":
+					keyDeletes++
+					payload = `{"data":{}}`
+				default:
+					t.Fatalf("unexpected fixture request %s %s", req.Method, req.URL.Path)
+				}
+				return &http.Response{StatusCode: status, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(payload)), Request: req}, nil
+			})}))
+			_, err := service.RealConnect(t.Context(), "user-1", RealConnectRequest{UpstreamSiteID: "site-1", UpstreamGroupID: "7", UpstreamGroupName: "vip", GroupType: "openai", OwnGroupIDs: []string{groupID}})
+			if err == nil {
+				t.Fatal("create failure reported success")
+			}
+			var pending *ManagedResourcePendingError
+			if sample.noKey {
+				if keyCreates != 0 || keyDeletes != 0 || errors.As(err, &pending) {
+					t.Fatalf("local validation created or retained resources: creates=%d deletes=%d err=%v", keyCreates, keyDeletes, err)
+				}
+			} else if sample.wantCleanup {
+				if keyDeletes != 1 || errors.As(err, &pending) {
+					t.Fatalf("proven absent account retained orphan key: deletes=%d err=%v", keyDeletes, err)
+				}
+			} else {
+				if keyDeletes != 0 || !errors.As(err, &pending) || pending.UpstreamKeyID != "11" {
+					t.Fatalf("unknown account result lost key/verification metadata: deletes=%d err=%v", keyDeletes, err)
+				}
+			}
+			if repo.connection != nil {
+				t.Fatal("failed create persisted local connection")
+			}
+			if sample.groupID != "" && accountWrites != 0 {
+				t.Fatal("local validation sent create")
+			}
+		})
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"transithub/backend/internal/modules/upstream"
 	"transithub/backend/internal/shared/authctx"
 	"transithub/backend/internal/shared/httpjson"
 )
@@ -303,6 +304,9 @@ func safeManagedDeleteReason(err error) string {
 	if err == nil {
 		return ""
 	}
+	if upstream.RemoteMutationOutcome(err) == upstream.MutationConfirmedApplied {
+		return ""
+	}
 	for _, key := range []string{"admin.connectionHealth.errors.sub2apiGroupLastUsable", "admin.connectionHealth.errors.sub2apiInventoryIncomplete", "admin.mySites.errors.safeDeletionUnavailable"} {
 		if strings.Contains(err.Error(), key) {
 			return key
@@ -311,5 +315,5 @@ func safeManagedDeleteReason(err error) string {
 	if strings.Contains(err.Error(), "remote action requires confirmation") {
 		return "admin.connectionHealth.errors.remoteActionPending"
 	}
-	return "admin.mySites.errors.resourcesPendingVerification"
+	return ""
 }

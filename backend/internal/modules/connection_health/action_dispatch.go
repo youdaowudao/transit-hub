@@ -13,7 +13,15 @@ func (s *Service) reconcileActionObservation(ctx context.Context, observation Re
 	if !ok {
 		return RemoteActionCheckpoints{}, ErrRemoteActionPending
 	}
-	return repository.ReconcileRemoteAction(ctx, observation)
+	guard := s.sub2APIFloorGuardFor(observation.UserID, observation.AdminAccountID)
+	version, reserved := guard.reservationVersion(observation.TargetID)
+	pair, err := repository.ReconcileRemoteAction(ctx, observation)
+	if err == nil && reserved && pair.reconciledWithoutRemoteEffect && pair.pendingCount() == 0 {
+		// Do not hold the memory guard across the transaction, and never release
+		// an admission made after this observation started.
+		guard.releaseUnchangedReservation(observation.TargetID, version)
+	}
+	return pair, err
 }
 
 func actionGuardForTarget(target AdminProbeTarget, states []ConnectionHealthState, models []string) RemoteActionHealthGuard {

@@ -70,6 +70,9 @@ type RemoteActionHealthGuard struct {
 type RemoteActionCheckpoints struct {
 	Priority *PrioritySyncState
 	Target   *TargetActionState
+	// This describes only the current reconciliation transaction, never a
+	// persisted checkpoint. Its caller must also verify the commit succeeded.
+	reconciledWithoutRemoteEffect bool
 }
 
 type RemoteActionObservation struct {
@@ -289,6 +292,7 @@ func finishManualTargetAction(pair *RemoteActionCheckpoints, applied bool) {
 // A confirmed receipt is not reconciliation. Its subsequent complete visible
 // snapshot must match the expected or original value before the claim releases.
 func reconcileRemoteAction(pair *RemoteActionCheckpoints, observation RemoteActionObservation, ownerValid func(string) bool) bool {
+	pair.reconciledWithoutRemoteEffect = false
 	if pair.pendingCount() != 1 {
 		return false
 	}
@@ -296,6 +300,7 @@ func reconcileRemoteAction(pair *RemoteActionCheckpoints, observation RemoteActi
 	// It must release even when no inventory can be read.
 	if state := pair.Target; targetActionPending(state) {
 		if state.PendingDispatchPhase == DispatchNotSent || state.PendingDispatchPhase == DispatchConfirmedRejected || (state.PendingDispatchPhase == DispatchPrepared && !ownerValid(state.PendingOwnerID)) {
+			pair.reconciledWithoutRemoteEffect = true
 			if manualTargetAction(state) {
 				finishManualTargetAction(pair, false)
 			} else {
@@ -329,6 +334,7 @@ func reconcileRemoteAction(pair *RemoteActionCheckpoints, observation RemoteActi
 		}
 	}
 	if state := pair.Priority; priorityActionPending(state) && (state.PendingDispatchPhase == DispatchNotSent || state.PendingDispatchPhase == DispatchConfirmedRejected || (state.PendingDispatchPhase == DispatchPrepared && !ownerValid(state.PendingOwnerID))) {
+		pair.reconciledWithoutRemoteEffect = true
 		clearPriorityDispatch(state)
 		return true
 	}

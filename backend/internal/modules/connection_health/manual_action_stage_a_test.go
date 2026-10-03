@@ -40,8 +40,29 @@ func TestStageAPersistentPendingFreezesClaimAndCurrentGroups(t *testing.T) {
 		t.Fatal("persistent pending disappeared")
 	}
 	inventory.groups[1].accounts = inventory.groups[1].accounts[1:]
-	if err := service.overlayPersistentPending(t.Context(), "u", "w", guard, *inventory); err != nil || !guard.freezeWorkspace {
-		t.Fatal("unknown current membership did not freeze workspace")
+	if err := service.overlayPersistentPending(t.Context(), "u", "w", guard, *inventory); err != nil {
+		t.Fatal(err)
+	}
+	if guard.freezeWorkspace {
+		t.Fatal("complete inventory with claimed groups froze unrelated workspace")
+	}
+	if _, ok := guard.frozenGroups["old"]; !ok {
+		t.Fatal("absent account lost claim group protection")
+	}
+	if _, ok := guard.frozenGroups["other"]; ok {
+		t.Fatal("absent account froze unrelated group")
+	}
+	other, _ := findActionInventoryTarget("sub2api:ws1:4", *inventory)
+	if result := guard.reserveSub2APISchedulableFalse(other, *inventory, fullFloorTestMonitoringScope(*inventory)); result.remoteAction != "" {
+		t.Fatalf("unrelated group closure blocked by absent claimed account: %s", result.remoteAction)
+	}
+	claimed, _ := findActionInventoryTarget("sub2api:ws1:2", *inventory)
+	if result := guard.reserveSub2APISchedulableFalse(claimed, *inventory, fullFloorTestMonitoringScope(*inventory)); result.remoteAction != RemoteActionAwaitingConfirmation {
+		t.Fatalf("claim group closure escaped persistent protection: %s", result.remoteAction)
+	}
+	pair, err = service.reconcileActionObservation(t.Context(), RemoteActionObservation{RemoteActionScope: RemoteActionScope{"u", "w", "sub2api:w:1"}, InventoryComplete: true, Visible: false, SnapshotStartedAt: time.Now()})
+	if err != nil || pair.pendingCount() != 1 {
+		t.Fatal("absence without confirmed deletion released uncertainty")
 	}
 }
 
@@ -286,5 +307,36 @@ func TestStageALockWaitUsesFreshPolicyAndMembershipForAllClosures(t *testing.T) 
 				}
 			})
 		}
+	}
+}
+
+func TestStageAAbsentPendingStillFreezesWhenGroupsUnknown(t *testing.T) {
+	for _, sample := range []struct {
+		name       string
+		incomplete bool
+		priority   bool
+		groups     []string
+	}{
+		{name: "legacy-no-claim"},
+		{name: "priority-no-claim", priority: true},
+		{name: "incomplete-with-claim", incomplete: true, groups: []string{"old"}},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			repo := newFakeRepository()
+			service := &Service{repo: repo}
+			inventory := sub2APITestInventory(adminInventoryGroup{group: upstream.AdminGroupInfo{ID: "other"}, accounts: []upstream.AdminGroupAccountInfo{{ID: "4", Status: "active"}, {ID: "5", Status: "active"}}})
+			if sample.incomplete {
+				inventory.groupsComplete = false
+			}
+			if sample.priority {
+				repo.priorityStates["u|w|sub2api:w:1"] = PrioritySyncState{UserID: "u", AdminAccountID: "w", TargetID: "sub2api:w:1", PendingDispatchID: "persistent", PendingOwnerID: "old-process", PendingDispatchPhase: DispatchUncertain}
+			} else {
+				repo.targetActionStates["u|w|sub2api:w:1"] = TargetActionState{UserID: "u", AdminAccountID: "w", TargetID: "sub2api:w:1", PendingActionKind: TargetMutationDelete, PendingSource: ActionSourceManualDelete, PendingGroupIDs: sample.groups, PendingDispatchID: "persistent", PendingOwnerID: "old-process", PendingDispatchPhase: DispatchUncertain}
+			}
+			guard := newWorkspaceFloorGuard()
+			if err := service.overlayPersistentPending(t.Context(), "u", "w", guard, *inventory); err != nil || !guard.freezeWorkspace {
+				t.Fatalf("unknown ownership did not retain workspace protection: %v", err)
+			}
+		})
 	}
 }

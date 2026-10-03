@@ -72,6 +72,13 @@ func TestStageAPostgresManualTemporaryReceiptsPersistAndDelete(t *testing.T) {
 			if err != nil || pair.pendingCount() != 0 || pair.Target != nil {
 				t.Fatal("not_sent temporary row was not deleted without inventory")
 			}
+			if !pair.reconciledWithoutRemoteEffect {
+				t.Fatal("committed no-side-effect settlement did not return capacity-release evidence")
+			}
+			again, err := r.ReconcileRemoteAction(ctx, RemoteActionObservation{RemoteActionScope: claim.RemoteActionScope})
+			if err != nil || again.reconciledWithoutRemoteEffect {
+				t.Fatal("no-side-effect evidence leaked into a later empty transaction")
+			}
 			rows, err := r.ListTargetActionStates(ctx, "u", "w")
 			if err != nil || len(rows) != 0 {
 				t.Fatal("temporary row remains in database")

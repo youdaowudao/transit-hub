@@ -252,6 +252,103 @@ func TestSetTargetSchedulable_RejectsDisablingLastUsableAccount(t *testing.T) {
 	}
 }
 
+func TestStageAClosureBlockAuditUsesActualGroupAndCause(t *testing.T) {
+	for _, entry := range []string{"manual", "compatibility"} {
+		for _, cause := range []string{"last-usable", "pending", "incomplete", "unknown-peer"} {
+			t.Run(entry+"/"+cause, func(t *testing.T) {
+				actioner := &fakeTargetSchedulableActioner{}
+				groups := []upstream.AdminGroupInfo{
+					{ID: "g1", Name: "first-with-survivor", Platform: string(upstream.PlatformSub2API)},
+					{ID: "g2", Name: "actual-blocking-group", Platform: string(upstream.PlatformSub2API)},
+				}
+				target := upstream.AdminGroupAccountInfo{ID: "1515", Status: "active", Schedulable: boolPointer(true)}
+				accounts := map[string][]upstream.AdminGroupAccountInfo{
+					"g1": {target, {ID: "1616", Status: "active", Schedulable: boolPointer(true)}},
+					"g2": {target},
+				}
+				readErrors := map[string]error{}
+				if cause == "incomplete" {
+					readErrors["g2"] = errors.New("group member snapshot unavailable")
+				}
+				if cause == "unknown-peer" {
+					accounts["g2"] = append(accounts["g2"], upstream.AdminGroupAccountInfo{ID: "1717", Status: "active"})
+				}
+				service, repo := schedulableActionServiceWithGroups(groups, accounts, readErrors, actioner)
+				platform := &fakePlatformActioner{}
+				service.dispatcher = newRemoteActionDispatcher(nil, nil, platform)
+				pendingID := "sub2api:ws1:1717"
+				if cause == "pending" {
+					accounts["g2"] = append(accounts["g2"], upstream.AdminGroupAccountInfo{ID: "1717", Status: "active", Schedulable: boolPointer(true)})
+					repo.targetActionStates["user1|ws1|"+pendingID] = TargetActionState{
+						UserID: "user1", AdminAccountID: "ws1", TargetID: pendingID,
+						PendingActionKind: TargetMutationSchedulable, PendingSchedulable: boolPointer(false),
+						PendingSource: ActionSourceManual, PendingGroupIDs: []string{"g2"},
+						PendingDispatchID: "other-account-uncertain", PendingOwnerID: "old-process", PendingDispatchPhase: DispatchUncertain,
+					}
+				}
+				var err error
+				if entry == "manual" {
+					_, err = service.SetTargetSchedulable(t.Context(), "user1", "sub2api:ws1:1515", false)
+				} else {
+					session, sessionErr := service.mySites.RequireSession(t.Context(), "user1", "ws1")
+					if sessionErr != nil {
+						t.Fatal(sessionErr)
+					}
+					_, err = service.runCompatibilityStatusAction(t.Context(), "user1", "ws1", session, "1515", "inactive")
+				}
+				wantKey, wantAction := ErrorSub2APIGroupLastUsable, RemoteActionSkippedSub2APILastActive
+				if entry == "compatibility" {
+					wantAction = RemoteActionSkippedSub2APILastUsable
+				}
+				if cause == "pending" {
+					wantKey, wantAction = "admin.connectionHealth.errors.remoteActionPending", RemoteActionAwaitingConfirmation
+					if !errors.Is(err, ErrRemoteActionPending) {
+						t.Fatalf("expected pending block, got %v", err)
+					}
+				} else {
+					if cause == "incomplete" || cause == "unknown-peer" {
+						wantKey, wantAction = ErrorSub2APIInventoryIncomplete, RemoteActionSkippedSub2APIInventory
+					}
+					if err == nil || err.Error() != wantKey {
+						t.Fatalf("expected %s block, got %v", wantKey, err)
+					}
+				}
+				if actioner.calls != 0 || len(platform.sub2APICalls) != 0 {
+					t.Fatalf("blocked action wrote upstream: schedulable=%d status=%v", actioner.calls, platform.sub2APICalls)
+				}
+				if len(repo.events) != 1 {
+					t.Fatalf("expected one blocked audit event, got %+v", repo.events)
+				}
+				event := repo.events[0]
+				if event.AdminGroupID != "g2" || event.OwnGroupName != groups[1].Name || event.UpstreamGroupName != groups[1].Name || event.ErrorKey != wantKey || event.RemoteAction != wantAction || event.Result != SchedulableActionFailed {
+					t.Fatalf("audit must describe actual blocking group and cause: want group=g2 key=%s action=%s got %+v", wantKey, wantAction, event)
+				}
+				listed, listErr := service.AdminGroups(t.Context(), "user1")
+				if listErr != nil {
+					t.Fatal(listErr)
+				}
+				found := false
+				for _, group := range listed {
+					for _, account := range group.Accounts {
+						if account.TargetID == "sub2api:ws1:1515" {
+							found = true
+							if account.LastSchedulableActionErrorKey != wantKey || account.LastSchedulableAction != wantAction {
+								t.Fatalf("account row contradicts blocked response: %+v", account)
+							}
+						}
+					}
+				}
+				if !found {
+					t.Fatal("blocked account is missing from display")
+				}
+				if cause == "pending" && repo.targetActionStates["user1|ws1|"+pendingID].PendingDispatchID != "other-account-uncertain" {
+					t.Fatal("blocked action consumed another account's unresolved checkpoint")
+				}
+			})
+		}
+	}
+}
+
 func TestSetTargetSchedulable_AllowsDisablingOneOfTwoUsableAccounts(t *testing.T) {
 	actioner := &fakeTargetSchedulableActioner{wantAccount: "1515"}
 	service, repo := schedulableActionServiceWithSurvivor(boolPointer(true), actioner)

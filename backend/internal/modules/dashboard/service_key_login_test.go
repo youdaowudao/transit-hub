@@ -7,6 +7,38 @@ import (
 	"transithub/backend/internal/modules/upstream"
 )
 
+func TestLoginContextTerminationRetainsAuthenticationFailureMessage(t *testing.T) {
+	for _, sample := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"canceled", context.Canceled, ErrorAdminOnly},
+		{"deadline", context.DeadlineExceeded, ErrorAdminOnly},
+		{"wrapped-canceled", &upstream.RequestError{MessageKey: upstream.ErrorNetwork, Cause: context.Canceled}, ErrorAdminOnly},
+		{"wrapped-deadline", &upstream.RequestError{MessageKey: upstream.ErrorNetwork, Cause: context.DeadlineExceeded}, ErrorAdminOnly},
+		{"network", &upstream.RequestError{MessageKey: upstream.ErrorNetwork}, ErrorNetwork},
+		{"network-timeout", &upstream.RequestError{MessageKey: upstream.ErrorNetwork, Timeout: true}, ErrorNetwork},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			store := newFakeSessionStore()
+			platform := &fakePlatformClient{adminKeyErr: sample.err}
+			service := NewService(store, platform)
+			service.SetAdminAccountService(&fakeAdminAccounts{current: map[string]string{"transit-user": "account-1"}})
+			status, err := service.Login(context.Background(), "transit-user", LoginRequest{
+				Platform: PlatformSub2API, SiteURL: "https://synthetic.test", AuthMethod: AuthMethodAdminKey, AdminKey: "synthetic-key",
+			})
+			if err == nil || err.Error() != sample.want || status.Authenticated {
+				t.Fatalf("failed login = %+v, %v; want %s", status, err, sample.want)
+			}
+			saved, _ := store.Get(context.Background(), "transit-user", "account-1")
+			if saved != nil {
+				t.Fatal("terminated login persisted a session")
+			}
+		})
+	}
+}
+
 func TestLoginWithNewAPIAdminKeyPersistsKeySession(t *testing.T) {
 	store := newFakeSessionStore()
 	accounts := &fakeAdminAccounts{current: map[string]string{"transit-user": "account-1"}}

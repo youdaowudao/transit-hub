@@ -128,7 +128,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
     }
 
     const error = new Error(payload.message ?? payload.error ?? 'admin.mySites.errors.request')
-    if (error.message === 'admin.mySites.errors.resourcesPendingVerification') {
+    if (['admin.mySites.errors.resourcesPendingVerification', 'admin.mySites.errors.accountCreationPendingVerification', 'admin.mySites.errors.compensationPendingVerification', 'admin.mySites.errors.upstreamKeyCleanupPendingVerification'].includes(error.message)) {
       Object.assign(error, {
         reason: typeof payload.reason === 'string' ? payload.reason : undefined,
         groupId: typeof payload.groupId === 'string' ? payload.groupId : undefined,

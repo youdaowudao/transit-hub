@@ -74,17 +74,7 @@ func (s *Service) SetTargetSchedulable(ctx context.Context, userID string, targe
 	}
 	if !schedulable {
 		if err := s.checkManualFloor(ctx, userID, workspace, TargetMutationSchedulable, target, &refresh.inventory); err != nil {
-			errorKey, action := ErrorSub2APIGroupLastUsable, RemoteActionSkippedSub2APILastActive
-			if err.Error() == ErrorSub2APIInventoryIncomplete {
-				errorKey, action = ErrorSub2APIInventoryIncomplete, RemoteActionSkippedSub2APIInventory
-			}
-			blocked := target
-			if errorKey == ErrorSub2APIInventoryIncomplete {
-				if id, name, incomplete := firstIncompleteAdminInventoryGroup(refresh.inventory); incomplete {
-					blocked.AdminGroupID, blocked.AdminGroupName = id, name
-				}
-			}
-			_ = s.recordSchedulableActionEvent(ctx, userID, workspace, blocked, SchedulableActionFailed, errorKey, action)
+			_ = s.recordManualFloorBlockedEvent(ctx, userID, workspace, target, refresh.inventory, err, RemoteActionSkippedSub2APILastActive)
 			return TargetSchedulableActionResult{}, err
 		}
 	}
@@ -131,6 +121,25 @@ func schedulableFailedRemoteAction(schedulable bool) string {
 		return RemoteActionSchedulableEnableFailed
 	}
 	return RemoteActionSchedulableDisableFailed
+}
+
+func (s *Service) recordManualFloorBlockedEvent(ctx context.Context, userID, workspace string, target AdminProbeTarget, inventory adminWorkspaceInventory, err error, lastUsableAction string) error {
+	errorKey, action := ErrorSub2APIGroupLastUsable, lastUsableAction
+	switch {
+	case errors.Is(err, ErrRemoteActionPending):
+		errorKey, action = "admin.connectionHealth.errors.remoteActionPending", RemoteActionAwaitingConfirmation
+	case errors.Is(err, requestError(ErrorSub2APIInventoryIncomplete)):
+		errorKey, action = ErrorSub2APIInventoryIncomplete, RemoteActionSkippedSub2APIInventory
+	}
+	var blocked *RemoteActionBlockedError
+	if errors.As(err, &blocked) && blocked.GroupID != "" {
+		target.AdminGroupID, target.AdminGroupName = blocked.GroupID, blocked.GroupName
+	} else if errorKey == ErrorSub2APIInventoryIncomplete {
+		if id, name, incomplete := firstIncompleteAdminInventoryGroup(inventory); incomplete {
+			target.AdminGroupID, target.AdminGroupName = id, name
+		}
+	}
+	return s.recordSchedulableActionEvent(ctx, userID, workspace, target, SchedulableActionFailed, errorKey, action)
 }
 
 func (s *Service) recordSchedulableActionEvent(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, result string, errorKey string, remoteAction string) error {

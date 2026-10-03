@@ -76,8 +76,16 @@ func (s *Service) overlayPersistentPending(ctx context.Context, userID, workspac
 			return
 		}
 		current := inventoryTargetGroups(&inventory, parsed.accountID)
-		// No member row cannot distinguish deletion from lost group visibility.
-		if !adminInventoryComplete(inventory) || len(current) == 0 {
+		hasClaimedGroup := false
+		for _, id := range claimed {
+			if id != "" {
+				hasClaimedGroup = true
+				break
+			}
+		}
+		// Complete absence leaves only the claim groups to protect. Legacy and
+		// Priority claims without group ownership cannot establish that boundary.
+		if !adminInventoryComplete(inventory) || (len(current) == 0 && !hasClaimedGroup) {
 			all = true
 		}
 		for _, id := range append(append([]string{}, claimed...), current...) {
@@ -99,7 +107,9 @@ func (s *Service) overlayPersistentPending(ctx context.Context, userID, workspac
 	defer guard.mu.Unlock()
 	guard.frozenGroups, guard.freezeWorkspace = frozen, all
 	for id := range reserved {
-		guard.reservedUnavailable[id] = struct{}{}
+		if _, present := guard.reservedUnavailable[id]; !present {
+			guard.reserveUnavailableLocked(id)
+		}
 	}
 	return nil
 }
@@ -207,8 +217,11 @@ func (s *Service) DeleteManagedSub2APIAccount(ctx context.Context, userID, works
 	}
 	target, visible := findActionInventoryTarget(targetID, *inventory)
 	pair, err := s.reconcileActionObservation(ctx, targetObservation(userID, workspace, target, inventory))
-	if err != nil || pair.pendingCount() != 0 {
-		return errors.Join(err, ErrRemoteActionPending)
+	if err != nil {
+		return err
+	}
+	if pair.pendingCount() != 0 {
+		return ErrRemoteActionPending
 	}
 	if !visible {
 		return requestError(ErrorProbeTargetNotFound)
@@ -221,25 +234,42 @@ func (s *Service) DeleteManagedSub2APIAccount(ctx context.Context, userID, works
 	}
 	state := manualTargetCheckpoint(pair, userID, workspace, target, TargetMutationDelete, source, "", nil, inventory)
 	claim := RemoteActionClaim{RemoteActionScope: RemoteActionScope{userID, workspace, targetID}, Kind: ActionKindTarget, Target: &state}
+	deleteConfirmed := false
 	_, err = s.dispatchRemoteAction(ctx, claim, func(sendCtx context.Context) (string, error) {
-		return "sub2api_deleted", actioner.DeleteSub2APIAdminAccountContext(sendCtx, session, accountID)
+		deleteErr := actioner.DeleteSub2APIAdminAccountContext(sendCtx, session, accountID)
+		deleteConfirmed = upstream.RemoteMutationOutcome(deleteErr) == upstream.MutationConfirmedApplied
+		return "sub2api_deleted", deleteErr
 	})
 	if err != nil {
 		_, _ = s.reconcileActionObservation(context.WithoutCancel(ctx), RemoteActionObservation{RemoteActionScope: claim.RemoteActionScope})
+		if deleteConfirmed {
+			return confirmedDeletePendingError(err)
+		}
 		return err
 	}
 	// Use the same bounded preparation context for inventory confirmation, while
 	// the receipt itself already had a separate budget.
 	fresh, err := s.loadAdminInventory(ctx, userID, workspace, adminInventoryCache{})
 	if err != nil {
-		return err
+		return confirmedDeletePendingError(err)
 	}
 	observed, _ := findActionInventoryTarget(targetID, *fresh)
 	pair, err = s.reconcileActionObservation(ctx, targetObservation(userID, workspace, observed, fresh))
 	if err != nil || pair.pendingCount() != 0 {
-		return errors.Join(err, ErrRemoteActionPending)
+		return confirmedDeletePendingError(err)
 	}
 	return nil
+}
+
+// The delete reached the upstream successfully, but local confirmation did not
+// finish. Preserve that evidence without the pre-send pending sentinel.
+func confirmedDeletePendingError(cause error) error {
+	return &upstream.RequestError{
+		MessageKey:      ErrRemoteActionPending.Error(),
+		Platform:        upstream.PlatformSub2API,
+		MutationOutcome: upstream.MutationConfirmedApplied,
+		Cause:           cause,
+	}
 }
 
 func (s *Service) runCompatibilityStatusAction(ctx context.Context, userID, workspace string, session upstream.Session, accountID, desired string) (string, error) {
@@ -266,17 +296,7 @@ func (s *Service) runCompatibilityStatusAction(ctx context.Context, userID, work
 	}
 	if desired == "inactive" {
 		if err := s.checkManualFloor(ctx, userID, workspace, TargetMutationStatus, target, inventory); err != nil {
-			errorKey, action := ErrorSub2APIGroupLastUsable, RemoteActionSkippedSub2APILastUsable
-			if err.Error() == ErrorSub2APIInventoryIncomplete {
-				errorKey, action = ErrorSub2APIInventoryIncomplete, RemoteActionSkippedSub2APIInventory
-			}
-			blocked := target
-			if errorKey == ErrorSub2APIInventoryIncomplete {
-				if id, name, incomplete := firstIncompleteAdminInventoryGroup(*inventory); incomplete {
-					blocked.AdminGroupID, blocked.AdminGroupName = id, name
-				}
-			}
-			_ = s.recordSchedulableActionEvent(ctx, userID, workspace, blocked, SchedulableActionFailed, errorKey, action)
+			_ = s.recordManualFloorBlockedEvent(ctx, userID, workspace, target, *inventory, err, RemoteActionSkippedSub2APILastUsable)
 			return "", err
 		}
 	}

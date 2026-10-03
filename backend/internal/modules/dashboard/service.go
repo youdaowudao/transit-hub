@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"time"
@@ -461,6 +462,9 @@ func statusFromRecord(record AdminSession, authenticated bool) StatusResponse {
 
 // mapPlatformError 把 upstream 客户端的错误 key 归并到仪表盘自己的 i18n key。
 func mapPlatformError(err error) requestError {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return requestError(ErrorAdminOnly)
+	}
 	switch err.Error() {
 	case upstream.ErrorInvalidURL:
 		return requestError(ErrorInvalidURL)

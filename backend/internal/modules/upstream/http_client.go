@@ -101,6 +101,9 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 	}
 
 	if err := ctx.Err(); err != nil {
+		if method == http.MethodGet || method == http.MethodHead {
+			return jsonResponse{}, err
+		}
 		return jsonResponse{}, &RequestError{MessageKey: ErrorNetwork, MutationOutcome: MutationNotSent, Cause: err}
 	}
 	var traceMu sync.Mutex
@@ -140,10 +143,17 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 		if ctx.Err() != nil {
 			requestErr.Cause = ctx.Err()
 		}
+		log.Printf("[http-client] 请求失败 method=%s category=%s outcome=%s timeout=%t", method, requestErr.MessageKey, outcome, requestErr.Timeout)
+		// Read callers retain the shared client's original cancellation contract;
+		// write callers require the dispatch evidence even after cancellation.
+		if requestErr.Cause != nil && (method == http.MethodGet || method == http.MethodHead) {
+			return jsonResponse{}, requestErr.Cause
+		}
 		return jsonResponse{}, requestErr
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		log.Printf("[http-client] 非 2xx 响应 method=%s status=%d", method, response.StatusCode)
 		key := ErrorRequest
 		if response.StatusCode == http.StatusUnauthorized {
 			key = ErrorAuth
@@ -209,11 +219,11 @@ func parseJSONWithLimit(reader io.Reader, reqURL string, maxBytes int64) (any, e
 	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		log.Printf("[http-client] 读取响应体失败 url=%s err=%v", reqURL, err)
+		log.Printf("[http-client] 读取响应体失败 category=%s", ErrorInvalidResponse)
 		return nil, newRequestError(ErrorInvalidResponse, "")
 	}
 	if maxBytes > 0 && int64(len(data)) > maxBytes {
-		log.Printf("[http-client] 响应体超过限制 url=%s limit=%d", reqURL, maxBytes)
+		log.Printf("[http-client] 响应体超过限制 limit=%d", maxBytes)
 		return nil, newRequestError(ErrorInvalidResponse, "")
 	}
 	if len(data) == 0 {

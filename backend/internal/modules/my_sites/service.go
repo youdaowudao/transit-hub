@@ -108,12 +108,16 @@ func (s *Service) SetSafeAdminAccountDeletion(deletion SafeAdminAccountDeletion)
 }
 
 type ManagedResourcePendingError struct {
+	MessageKey      string
 	AdminResourceID string
 	UpstreamKeyID   string
 	Cause           error
 }
 
 func (e *ManagedResourcePendingError) Error() string {
+	if e.MessageKey != "" {
+		return e.MessageKey
+	}
 	return "admin.mySites.errors.resourcesPendingVerification"
 }
 func (e *ManagedResourcePendingError) Unwrap() error { return e.Cause }

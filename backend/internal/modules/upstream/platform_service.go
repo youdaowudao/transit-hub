@@ -1270,6 +1270,9 @@ func (s *PlatformService) requestKeyUsageJSONWithContext(ctx context.Context, re
 }
 
 func retryableKeyUsageError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	var requestErr *RequestError
 	if !errors.As(err, &requestErr) {
 		return false
@@ -1907,14 +1910,14 @@ func groupID2(record map[string]any) string {
 // 返回新建账号的 ID（字符串）；失败时返回 error。
 func (s *PlatformService) CreateSub2APIAdminAccount(session Session, payload map[string]any) (string, error) {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
-		return "", newRequestError(ErrorAuth, PlatformSub2API)
+		return "", localMutationError(ErrorAuth)
 	}
 	options := adminAuthOptions(session)
 	options.Method = http.MethodPost
 	options.Body = payload
 	response, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/admin/accounts", options)
 	if err != nil {
-		return "", err
+		return "", classifySub2APIMutationError(err, "create")
 	}
 	data := dataRecord(response.Payload)
 	accountID := groupID2(data)

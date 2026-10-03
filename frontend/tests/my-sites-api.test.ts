@@ -109,12 +109,12 @@ describe('safe deletion API evidence', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ message: 'admin.connectionHealth.errors.sub2apiGroupLastUsable' }), { status: 409 })))
     await expect(realDisconnect({ connectionId: 'isolated', mode: 'full', removePricingMapping: true })).rejects.toThrow('admin.connectionHealth.errors.sub2apiGroupLastUsable')
   })
-  it('retains resource IDs without retaining other response fields', async () => {
+  it.each(['admin.mySites.errors.resourcesPendingVerification', 'admin.mySites.errors.accountCreationPendingVerification', 'admin.mySites.errors.compensationPendingVerification', 'admin.mySites.errors.upstreamKeyCleanupPendingVerification'])('retains resource IDs without retaining other response fields for %s', async (key) => {
     vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null) })
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'admin.mySites.errors.resourcesPendingVerification', adminResourceId: '101', upstreamKeyId: '207', ignored: 'synthetic-private-data' }), { status: 409 })))
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: key, adminResourceId: '101', upstreamKeyId: '207', ignored: 'synthetic-private-data' }), { status: 409 })))
     let captured: unknown
     try { await realDisconnect({ connectionId: 'isolated', mode: 'full', removePricingMapping: false }) } catch (error) { captured = error }
-    expect(captured).toMatchObject({ message: 'admin.mySites.errors.resourcesPendingVerification', adminResourceId: '101', upstreamKeyId: '207' })
+    expect(captured).toMatchObject({ message: key, adminResourceId: '101', upstreamKeyId: '207' })
     expect(captured).not.toHaveProperty('ignored')
   })
 })

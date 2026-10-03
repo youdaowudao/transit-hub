@@ -80,4 +80,31 @@ describe('existing refresh main-site restrictions', () => {
     expect(wrapper.text()).toContain('旧操作缺少完整发送证据')
     expect(wrapper.find('button[aria-label="恢复主站调度"]').exists()).toBe(true)
   })
+
+  it.each(['same account', 'another account in the protected group'])('keeps pending details and the scheduling value while explaining the latest blocked close: %s', async (pendingOwner) => {
+    const pending = { action: 'schedulable', dispatchId: 'dispatch-blocking-101', phase: 'uncertain', reason: 'legacy', source: 'manual' }
+    const entry = account({ schedulable: true, lastSchedulableAction: 'sub2api_schedulable_disable_failed',
+      lastSchedulableActionResult: 'schedulable_user_action_failed', lastSchedulableActionAt: '2026-10-03T12:00:00Z',
+      lastSchedulableActionErrorKey: 'admin.connectionHealth.errors.remoteActionPending',
+      ...(pendingOwner === 'same account' ? { remoteActionPending: pending } : {}),
+    })
+    const wrapper = detail(entry)
+    if (pendingOwner !== 'same account') {
+      const other = account({ id: '102', name: 'Pending account', targetId: 'sub2api:ws:102', remoteActionPending: pending })
+      await wrapper.setProps({ group: { ...group(entry), accountCount: 2, accounts: [entry, other] } })
+    }
+    const targetRow = wrapper.findAll('tbody tr').find(row => row.text().includes(entry.name))!
+    expect(targetRow.text()).toContain('最近动作：用户关闭 Sub2API 主站调度失败')
+    expect(targetRow.text()).toContain('当前管理连接存在待确认的远端动作，须核对后收口，当前操作未发送。')
+    expect(targetRow.text()).not.toContain('同一账号')
+    expect(targetRow.text()).not.toContain('最后一个可用账号')
+    expect(targetRow.text()).toContain('主站调度开启')
+    expect(wrapper.text()).toContain(pending.dispatchId)
+    expect(wrapper.text()).toContain('结果未知')
+    const button = targetRow.get('button[aria-label="关闭主站调度"]')
+    await button.trigger('click')
+    expect(wrapper.emitted('set-schedulable')?.[0]).toEqual([entry])
+    expect(entry.schedulable).toBe(true)
+    expect(wrapper.text()).toContain(pending.dispatchId)
+  })
 })

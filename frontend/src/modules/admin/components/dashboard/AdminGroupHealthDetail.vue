@@ -851,7 +851,9 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     <span v-else-if="account.probeModelsConfigured === false" class="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
                       <Settings2 class="h-3 w-3" />{{ t(`${prefix}.notConfigured`) }}
                     </span>
-                    <span v-else-if="accountProtocolUnverified(account)" class="rounded-md bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-400">{{ t('admin.connectionHealth.testConfiguration.unverified') }}</span>
+                    <Tooltip v-else-if="accountProtocolUnverified(account)" :text="t('admin.connectionHealth.testConfiguration.unverifiedHelp')" wide>
+                      <span class="rounded-md bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-400">{{ t('admin.connectionHealth.testConfiguration.unverified') }}</span>
+                    </Tooltip>
                     <span v-else-if="!aggregateState(account)" class="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
                       <ShieldQuestion class="h-3 w-3" />{{ t(`${prefix}.notProbed`) }}
                     </span>
@@ -1009,9 +1011,12 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     <div v-for="model in filteredModelHealth(account)" :key="model.modelName" class="rounded-lg border border-border/50 bg-background px-2.5 py-2">
                       <div class="flex items-center justify-between gap-3">
                         <span class="truncate text-sm font-medium text-foreground">{{ model.modelName }}</span>
-                        <span v-if="model.currentHealthResult?.status === 'unverified'" class="text-xs text-amber-700">{{ t('admin.connectionHealth.testConfiguration.unverified') }}</span>
+                        <Tooltip v-if="model.currentHealthResult?.status === 'unverified'" :text="t('admin.connectionHealth.testConfiguration.unverifiedHelp')" wide>
+                          <span class="text-xs text-amber-700">{{ t('admin.connectionHealth.testConfiguration.unverified') }}</span>
+                        </Tooltip>
                         <span v-else class="rounded-md px-2 py-0.5 text-xs font-medium" :class="model.configured ? connectionHealthStateBadgeClass(model.state) : 'bg-muted text-muted-foreground'">{{ model.configured ? t(`${prefix}.stateLabels.${model.state}`) : t(`${prefix}.notConfigured`) }}</span>
                       </div>
+                      <p v-if="model.currentHealthResult?.status === 'unverified'" class="mt-1 whitespace-normal break-words text-xs text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.unverifiedHelp') }}</p>
                       <div class="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                         <span :class="model.state === 'suspended' ? 'text-destructive' : ''">{{ t(`${detailPrefix}.models.latency`, { value: !model.configured || model.state === 'suspended' ? '-' : (model.lastLatencyMs ?? '-') }) }}</span>
                         <span>{{ t(`${detailPrefix}.models.lastProbe`, { value: formatConnectionHealthTime(model.lastProbeAt) }) }}</span>

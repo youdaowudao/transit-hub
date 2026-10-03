@@ -844,11 +844,70 @@ func (s *PlatformService) fetchSub2APIAdminAllGroupsContext(ctx context.Context,
 		return nil, newRequestError(ErrorAuth, PlatformSub2API)
 	}
 	authOptions := adminAuthOptions(session)
-	response, err := s.httpClient.requestJSONWithContext(ctx, session.BaseURL+"/api/v1/admin/groups", authOptions)
-	if err != nil {
-		return nil, err
+	const pageSize = 100
+	const maxPages = 100
+	items := make([]map[string]any, 0)
+	seenIDs := make(map[string]struct{})
+	expectedTotal := 0
+	hasExpectedTotal := false
+	complete := false
+	for page := 1; page <= maxPages; page++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		pageURL := session.BaseURL + "/api/v1/admin/groups?page=" + strconv.Itoa(page) + "&page_size=" + strconv.Itoa(pageSize)
+		response, err := s.httpClient.requestJSONWithContext(ctx, pageURL, authOptions)
+		if err != nil {
+			return nil, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		pageItems, wholeArray, validItems := sub2APIGroupPageItems(response.Payload)
+		meta, validMeta := sub2APIInventoryMetadata(response.Payload, page, pageSize)
+		if !validItems || !validMeta {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		if hasExpectedTotal {
+			if !meta.hasTotal || meta.total != expectedTotal {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+		} else if meta.hasTotal {
+			expectedTotal, hasExpectedTotal = meta.total, true
+		}
+		for _, raw := range pageItems {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			id, validID := strictSub2APIInventoryID(item["id"])
+			if !validID {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			if _, duplicate := seenIDs[id]; duplicate {
+				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+			}
+			seenIDs[id] = struct{}{}
+			items = append(items, item)
+		}
+		// Older versions return the entire group inventory as an array, with
+		// optional terminal metadata. Preserve that complete-list contract
+		// only when the original strict validator proves every item is present.
+		if page == 1 && wholeArray {
+			if _, completeArray := strictSub2APIGroupItems(response.Payload); completeArray {
+				complete = true
+				break
+			}
+		}
+		finished, validPage := sub2APIInventoryPageFinished(response.Payload, page, pageSize, len(pageItems), len(items))
+		if !validPage {
+			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		if finished {
+			complete = true
+			break
+		}
 	}
-	items, complete := strictSub2APIGroupItems(response.Payload)
 	if !complete {
 		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}

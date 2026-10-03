@@ -123,7 +123,7 @@ const makeGroup = (
 ): AdminGroupHealth => ({
   id,
   name,
-  platform: 'sub2api',
+  platform: 'openai',
   status: 'active',
   type: 'public',
   isExclusive: false,
@@ -206,6 +206,7 @@ const mountDrawer = async (input: {
   allGroups: AdminGroupHealth[]
   policies: ConnectionHealthPolicy[]
   excludedTargetIds?: string[]
+  workspacePlatform?: string
 }) => {
   const currentPolicies = input.group.assignedPolicyIds
     ?.flatMap(id => input.policies.filter(policy => policy.id === id)) ?? []
@@ -215,6 +216,7 @@ const mountDrawer = async (input: {
   const wrapper = mount(GroupHealthSetupDrawer, {
     props: {
       open: false,
+      workspacePlatform: input.workspacePlatform ?? 'sub2api',
       group: input.group,
       policies: input.policies,
       allGroups: input.allGroups,
@@ -256,6 +258,8 @@ beforeEach(() => {
   harness.loadConfiguration.mockReset()
   harness.saveConfiguration.mockReset()
   harness.updatePolicy.mockReset()
+  harness.loadTestConfiguration.mockReset()
+  harness.saveTestConfiguration.mockReset()
   localStorage.clear()
 })
 
@@ -681,6 +685,36 @@ describe('group health setup exclusion outcome behavior', () => {
 
 
 describe('independent group test configuration', () => {
+  it.each(['openai', 'anthropic'])('shows Responses for a %s group in a Sub2API workspace without changing its provider label', async (platform) => {
+    harness.loadTestConfiguration.mockResolvedValue({ configuration: testConfiguration() })
+    const group = makeGroup('g1', 'Group', [makeAccount('100', 'Account')], { platform })
+    const wrapper = await mountDrawer({ group, allGroups: [group], policies: [] })
+    expect(wrapper.get('header').text()).toContain(`Group · ${platform}`)
+    expect(wrapper.get('[data-testid="group-test-configuration"]').text()).toContain('测试请求')
+    expect(harness.loadTestConfiguration).toHaveBeenCalledExactlyOnceWith('g1')
+    await wrapper.get('[data-testid="group-test-protocol"]').setValue('responses')
+    expect((wrapper.get('[data-testid="group-test-timeout"]').element as HTMLInputElement).value).toBe('30')
+    await wrapper.get('header button').trigger('click')
+    expect(harness.saveTestConfiguration).not.toHaveBeenCalled()
+    expect(harness.saveConfiguration).not.toHaveBeenCalled()
+  })
+
+  it('shows the test configuration for an empty Sub2API group', async () => {
+    harness.loadTestConfiguration.mockResolvedValue({ configuration: { ...testConfiguration(), affectedAccountCount: 0 } })
+    const group = makeGroup('g1', 'Empty Group', [])
+    const wrapper = await mountDrawer({ group, allGroups: [group], policies: [] })
+    expect(wrapper.get('[data-testid="group-test-configuration"]').exists()).toBe(true)
+    expect(harness.loadTestConfiguration).toHaveBeenCalledExactlyOnceWith('g1')
+  })
+
+  it.each(['newapi', ''])('hides and does not load Sub2API test configuration for workspace %s even with a misleading group platform', async (workspacePlatform) => {
+    const group = makeGroup('g1', 'Group', [], { platform: 'sub2api' })
+    const wrapper = await mountDrawer({ group, allGroups: [group], policies: [], workspacePlatform })
+    expect(wrapper.find('[data-testid="group-test-configuration"]').exists()).toBe(false)
+    expect(harness.loadTestConfiguration).not.toHaveBeenCalled()
+    expect(harness.saveTestConfiguration).not.toHaveBeenCalled()
+  })
+
   it('closes an edited draft without a write and rejects a fractional timeout', async () => {
     harness.loadTestConfiguration.mockResolvedValue({ configuration: { adminGroupId: 'g1', adminGroupName: 'Group', configuration: null, inventoryComplete: true, affectedAccountCount: 1, conflictAccountCount: 0, accounts: [] } })
     const group = makeGroup('g1', 'Group', [makeAccount('100', 'Account')])
@@ -701,6 +735,27 @@ describe('independent group test configuration', () => {
     const group = makeGroup('g1', 'Group', [makeAccount('100', 'Account')])
     return mountDrawer({ group, allGroups: [group], policies: [] })
   }
+
+  it('ignores an older Sub2API read after leaving and returning to the workspace platform', async () => {
+    let resolveFirst!: (value: { configuration: ReturnType<typeof testConfiguration> }) => void
+    const first = new Promise<{ configuration: ReturnType<typeof testConfiguration> }>(resolve => { resolveFirst = resolve })
+    harness.loadTestConfiguration.mockReturnValueOnce(first).mockResolvedValue({ configuration: testConfiguration() })
+    const group = makeGroup('g1', 'Group', [])
+    harness.loadConfiguration.mockResolvedValue({ configuration: configuration(group, []) })
+    const wrapper = await mountDrawer({ group, allGroups: [group], policies: [] })
+    expect(harness.loadTestConfiguration).toHaveBeenCalledTimes(1)
+    await wrapper.setProps({ workspacePlatform: 'newapi' })
+    expect(wrapper.find('[data-testid="group-test-configuration"]').exists()).toBe(false)
+    await wrapper.setProps({ workspacePlatform: 'sub2api' })
+    await flushPromises()
+    expect(harness.loadTestConfiguration).toHaveBeenCalledTimes(2)
+    expect((wrapper.get('[data-testid="group-test-protocol"]').element as HTMLSelectElement).value).toBe('chat_completions')
+    resolveFirst({ configuration: testConfiguration({ protocol: 'responses', probeTimeoutSeconds: 75 }) })
+    await flushPromises()
+    expect((wrapper.get('[data-testid="group-test-protocol"]').element as HTMLSelectElement).value).toBe('chat_completions')
+    expect((wrapper.get('[data-testid="group-test-timeout"]').element as HTMLInputElement).value).toBe('')
+    expect(harness.saveTestConfiguration).not.toHaveBeenCalled()
+  })
 
   it('saves Responses independently of policies and preserves an entered timeout on protocol changes', async () => {
     harness.loadTestConfiguration.mockResolvedValue({ configuration: testConfiguration() })

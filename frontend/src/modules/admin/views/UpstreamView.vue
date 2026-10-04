@@ -19,7 +19,7 @@ import { t, locale } from '@/locales'
 const router = useRouter()
 const searchQuery = ref('')
 const isAddModalOpen = ref(false)
-const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, streamRefreshSites, refreshSingleSite } = useUpstreamSites()
+const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, addFailure, clearAddFailure, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, streamRefreshSites, refreshSingleSite } = useUpstreamSites()
 const deletingSiteId = ref<string | null>(null)
 const deleteErrorKey = ref<string | null>(null)
 const editingSiteId = ref<string | null>(null)
@@ -130,6 +130,7 @@ const handleAddSite = async () => {
 }
 
 const handleEditSite = (site: UpstreamSite) => {
+  clearAddFailure()
   editingSiteId.value = site.id
   newSiteForm.value = {
     name: site.name,
@@ -153,7 +154,18 @@ const editingSite = computed(() => {
   return upstreamSites.value.find(site => site.id === editingSiteId.value) ?? null
 })
 
+const openAddSiteModal = () => {
+  clearAddFailure()
+  isAddModalOpen.value = true
+}
+
+const failureFieldLabel = (field: string): string => {
+  const fields: Record<string, string> = { name: 'siteName', siteUrl: 'siteUrl', platform: 'platform', authMode: 'authMode', account: 'account', password: 'password', accessToken: 'accessToken', refreshToken: 'refreshToken', tokenType: 'tokenType', userId: 'userId', rechargeRate: 'rechargeRate', remark: 'remark' }
+  return fields[field] ? t(`admin.upstream.modal.form.${fields[field]}`) : t('admin.upstream.errors.invalidFields')
+}
+
 const closeSiteModal = () => {
+  clearAddFailure()
   isAddModalOpen.value = false
   editingSiteId.value = null
   newSiteForm.value = createEmptyForm()
@@ -495,7 +507,7 @@ onBeforeUnmount(() => {
           <RefreshCw v-else class="w-4 h-4" />
           {{ isRefreshing ? t('admin.upstream.refresh.refreshing') : t('admin.upstream.refresh.action') }}
         </Button>
-        <Button @click="isAddModalOpen = true" class="h-10 flex-1 gap-2 px-4 shadow-sm sm:flex-none">
+        <Button @click="openAddSiteModal" class="h-10 flex-1 gap-2 px-4 shadow-sm sm:flex-none">
           <Plus class="w-4 h-4" />
           {{ t('admin.upstream.addSite') }}
         </Button>
@@ -979,7 +991,21 @@ onBeforeUnmount(() => {
           <form @submit.prevent="handleAddSite" class="p-6">
             <div v-if="addErrorKey" class="mb-5 flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert" aria-live="polite">
               <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
-              <span>{{ t(addErrorKey) }}</span>
+              <div class="min-w-0 space-y-1 break-words">
+                <p>{{ t(addErrorKey) }}</p>
+                <p v-if="addErrorKey === 'admin.upstream.errors.invalidResponse'">{{ t('admin.upstream.failure.invalidResponseHelp') }}</p>
+                <p v-if="addFailure?.stage">{{ t('admin.upstream.failure.stage') }}{{ t(`admin.upstream.failure.stages.${addFailure.stage}`) }}</p>
+                <p v-if="addFailure?.httpStatus !== undefined">{{ t('admin.upstream.failure.httpStatus') }}{{ addFailure.httpStatus || t('admin.upstream.failure.noResponse') }}</p>
+                <p v-if="addFailure?.upstreamMessage">{{ t('admin.upstream.failure.upstreamMessage') }}{{ addFailure.upstreamMessage }}</p>
+                <p v-if="addFailure?.fields?.length">{{ t('admin.upstream.failure.fields') }}{{ addFailure.fields.map(failureFieldLabel).join('、') }}</p>
+                <div v-for="(attempt, index) in addFailure?.attempts ?? []" :key="index" class="space-y-1">
+                  <p>{{ attempt.platform === 'newapi' ? 'NewAPI' : 'Sub2API' }}：{{ t(attempt.errorKey ?? 'admin.upstream.errors.unknown') }}</p>
+                  <p v-if="attempt.errorKey === 'admin.upstream.errors.invalidResponse'">{{ t('admin.upstream.failure.invalidResponseHelp') }}</p>
+                  <p v-if="attempt.stage">{{ t('admin.upstream.failure.stage') }}{{ t(`admin.upstream.failure.stages.${attempt.stage}`) }}</p>
+                  <p v-if="attempt.httpStatus !== undefined">{{ t('admin.upstream.failure.httpStatus') }}{{ attempt.httpStatus || t('admin.upstream.failure.noResponse') }}</p>
+                  <p v-if="attempt.upstreamMessage">{{ t('admin.upstream.failure.upstreamMessage') }}{{ attempt.upstreamMessage }}</p>
+                </div>
+              </div>
             </div>
 
             <div v-if="editingSite" class="mb-5 flex items-center justify-between gap-4 rounded-xl border border-border/50 bg-surface px-4 py-3">

@@ -524,8 +524,7 @@ func (s *Service) BalanceBreakdown(ctx context.Context, userID string) ([]Balanc
 }
 
 // Create 创建一个新的上游站点。
-// 先保存到 Redis 缓存和 PostgreSQL，然后执行平台登录。
-// 登录成功后更新站点状态并启动定时同步。
+// 先执行平台登录，成功后保存站点并启动定时同步。
 func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) (Response, error) {
 	if err := validateCreate(dto); err != nil {
 		return Response{}, err
@@ -564,28 +563,11 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 		Session:           nil,
 	}
 
-	// 先写入缓存和数据库。
-	if err := s.setCachedSite(ctx, site); err != nil {
-		return Response{}, err
-	}
-	if err := s.saveSite(ctx, site); err != nil {
-		_ = s.cache.Delete(ctx, id, userID)
-		return Response{}, err
-	}
-
-	log.Printf("[upstream] 创建站点登录开始 name=%s url=%s platform=%s", dto.Name, dto.SiteURL, dto.Platform)
+	log.Printf("[upstream] 创建站点登录开始 name=%q host=%s platform=%s", safeUpstreamMessage(dto.Name), safeHost(dto.SiteURL), dto.Platform)
 	result, loginErr := s.createLogin(dto)
 	if loginErr != nil {
-		log.Printf("[upstream] 创建站点登录失败 name=%s err=%v", dto.Name, loginErr)
-		site.Status = StatusError
-		key := errorKey(loginErr)
-		site.ErrorKey = &key
-		response := toResponse(site)
-		_ = s.setCachedSite(ctx, site)
-		if saveErr := s.saveSite(ctx, site); saveErr != nil {
-			return response, saveErr
-		}
-		return response, nil
+		logSiteFailure("登录失败", "新建", dto.Name, dto.SiteURL, loginErr)
+		return Response{}, loginErr
 	}
 
 	// 登录成功：更新站点状态。
@@ -598,16 +580,18 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 	site.ErrorKey = nil
 	site.LastSyncedAt = &now
 
-	_ = s.setCachedSite(ctx, site)
-
+	if err := s.setCachedSite(ctx, site); err != nil {
+		return Response{}, err
+	}
+	response := s.toResponse(ctx, site)
+	if err := s.saveSite(ctx, site); err != nil {
+		_ = s.cache.Delete(ctx, id, userID)
+		return response, err
+	}
 	s.mu.Lock()
 	s.scheduleSyncLocked(id, site)
 	s.mu.Unlock()
 
-	response := s.toResponse(ctx, site)
-	if err := s.saveSite(ctx, site); err != nil {
-		return response, err
-	}
 	s.saveSnapshot(ctx, site)
 	return response, nil
 }
@@ -637,6 +621,8 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 
 	// 保存更新前的状态，以便数据库写入失败时回滚。
 	previousSite := *site
+	candidate := previousSite
+	site = &candidate
 	site.Name = strings.TrimSpace(dto.Name)
 	site.BaseURL = strings.TrimSpace(dto.SiteURL)
 	site.RequestedPlatform = dto.Platform
@@ -650,34 +636,23 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 	shouldRelogin := strings.TrimSpace(dto.Password) != "" || strings.TrimSpace(dto.AccessToken) != "" || strings.TrimSpace(dto.RefreshToken) != ""
 
 	if shouldRelogin {
-		// 先保存基本字段更新到缓存。
-		_ = s.setCachedSite(ctx, site)
-
-		log.Printf("[upstream] 更新站点登录开始 id=%s name=%s url=%s", id, dto.Name, dto.SiteURL)
+		log.Printf("[upstream] 更新站点登录开始 id=%s name=%q host=%s", id, safeUpstreamMessage(dto.Name), safeHost(dto.SiteURL))
 		result, loginErr := s.updateLogin(dto)
 		if loginErr != nil {
-			log.Printf("[upstream] 更新站点登录失败 id=%s name=%s err=%v", id, dto.Name, loginErr)
-		} else {
-			log.Printf("[upstream] 更新站点登录成功 id=%s name=%s", id, dto.Name)
+			logSiteFailure("登录失败", id, dto.Name, dto.SiteURL, loginErr)
+			return Response{}, loginErr
 		}
-		// 重新读取缓存，确认站点未被删除。
-		site, err = s.cache.Get(ctx, id)
-		if err != nil || site == nil || site.UserID != userID {
+		// Check existence without replacing the candidate's edited fields.
+		current, readErr := s.cache.Get(ctx, id)
+		if readErr != nil {
+			return Response{}, readErr
+		}
+		if current == nil || current.UserID != userID || current.AdminAccountID != aid {
 			return Response{}, newRequestError(ErrorNotFound, "")
 		}
-
-		if loginErr != nil {
-			site.Status = StatusError
-			key := errorKey(loginErr)
-			site.ErrorKey = &key
-			response := toResponse(site)
-			_ = s.setCachedSite(ctx, site)
-			if saveErr := s.saveSite(ctx, site); saveErr != nil {
-				s.restoreSite(ctx, id, &previousSite)
-				return response, saveErr
-			}
-			return response, nil
-		}
+		// Preserve a concurrent enable/disable operation while login was in flight.
+		site.Enabled = current.Enabled
+		log.Printf("[upstream] 更新站点登录成功 id=%s name=%q", id, safeUpstreamMessage(dto.Name))
 
 		now := time.Now().UnixMilli()
 		site.BaseURL = result.Session.BaseURL
@@ -696,6 +671,7 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 
 		response := toResponse(site)
 		if err := s.saveSite(ctx, site); err != nil {
+			s.restoreSite(ctx, id, &previousSite)
 			return response, err
 		}
 		s.saveSnapshot(ctx, site)
@@ -890,7 +866,7 @@ func syncSiteResult(siteID string, response Response, err error) SyncSiteResult 
 		return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_updating"}
 	}
 	if response.ErrorKey != nil {
-		switch *response.ErrorKey {
+		switch errorCategory(*response.ErrorKey) {
 		case ErrorAuth:
 			return SyncSiteResult{SiteID: siteID, Status: "auth_failed", ErrorKey: "site_sync_auth"}
 		case ErrorNetwork:
@@ -1020,13 +996,17 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 
 			response, syncErr := s.sync(ctx, id)
 			if syncErr != nil || response.Status != StatusConnected {
-				log.Printf("[upstream-stream] 同步失败 id=%s err=%v", id, syncErr)
+				logKey := siteErrorKey(syncErr)
+				if syncErr == nil && response.ErrorKey != nil {
+					logKey = *response.ErrorKey
+				}
+				log.Printf("[upstream-stream] 同步失败 id=%s reason=%s", id, logKey)
 				if cached, cacheErr := s.cache.Get(ctx, id); cacheErr == nil && cached != nil {
 					response = toResponse(cached)
 				}
 				key := ErrorUnknown
 				if syncErr != nil {
-					key = errorKey(syncErr)
+					key = siteErrorKey(syncErr)
 				} else if response.ErrorKey != nil && *response.ErrorKey != "" {
 					key = *response.ErrorKey
 				}
@@ -1127,7 +1107,8 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 
 	if refreshErr != nil {
 		site.Status = StatusError
-		key := errorKey(refreshErr)
+		logSiteFailure("同步失败", id, site.Name, site.BaseURL, refreshErr)
+		key := siteErrorKey(refreshErr)
 		site.ErrorKey = &key
 	} else {
 		now := time.Now().UnixMilli()
@@ -1634,4 +1615,13 @@ func (s *Service) FetchSiteCostsForDate(ctx context.Context, userID, adminAccoun
 	}
 	wg.Wait()
 	return results, nil
+}
+
+func logSiteFailure(event, id, name, baseURL string, err error) {
+	stage, status := "", 0
+	var detail *RequestError
+	if errors.As(err, &detail) {
+		stage, status = detail.Stage, detail.StatusCode
+	}
+	log.Printf("[upstream] %s site=%s name=%q host=%s stage=%s reason=%s status=%d", event, id, safeUpstreamMessage(name), safeHost(baseURL), stage, siteErrorKey(err), status)
 }

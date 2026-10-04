@@ -121,7 +121,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	response, err := h.service.Create(r.Context(), userID, dto)
 	if err != nil {
-		httpjson.WriteError(w, http.StatusBadRequest, err.Error())
+		writeUpstreamFormError(w, err)
 		return
 	}
 	httpjson.Write(w, http.StatusCreated, response)
@@ -161,7 +161,7 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 	}
 	response, err := h.service.Update(r.Context(), userID, id, dto)
 	if err != nil {
-		writeUpstreamError(w, err)
+		writeUpstreamFormError(w, err)
 		return
 	}
 	httpjson.Write(w, http.StatusOK, response)
@@ -282,4 +282,44 @@ func writeUpstreamError(w http.ResponseWriter, err error) {
 		return
 	}
 	httpjson.WriteError(w, http.StatusInternalServerError, errorKey(err))
+}
+
+// Form failures carry transient safe detail; shared HTTP helpers stay unchanged.
+type formFailure struct {
+	ErrorKey        string           `json:"errorKey,omitempty"`
+	Stage           string           `json:"stage,omitempty"`
+	HTTPStatus      int              `json:"httpStatus"`
+	UpstreamMessage string           `json:"upstreamMessage,omitempty"`
+	Attempts        []FailureAttempt `json:"attempts,omitempty"`
+	Fields          []string         `json:"fields,omitempty"`
+}
+
+func writeUpstreamFormError(w http.ResponseWriter, err error) {
+	var fields *FieldValidationError
+	if errors.As(err, &fields) {
+		httpjson.Write(w, http.StatusBadRequest, struct {
+			Message string      `json:"message"`
+			Failure formFailure `json:"failure"`
+		}{ErrorInvalidFields, formFailure{Fields: fields.Fields}})
+		return
+	}
+	var detail *RequestError
+	if errors.As(err, &detail) {
+		if detail.MessageKey == ErrorInvalidURL {
+			httpjson.Write(w, http.StatusBadRequest, struct {
+				Message string      `json:"message"`
+				Failure formFailure `json:"failure"`
+			}{ErrorInvalidFields, formFailure{Fields: []string{"siteUrl"}}})
+			return
+		}
+		if detail.Stage != "" || detail.Reason != "" {
+			key := siteErrorKey(err)
+			httpjson.Write(w, http.StatusUnprocessableEntity, struct {
+				Message string      `json:"message"`
+				Failure formFailure `json:"failure"`
+			}{key, formFailure{ErrorKey: key, Stage: detail.Stage, HTTPStatus: detail.StatusCode, UpstreamMessage: detail.UpstreamMessage, Attempts: detail.Attempts}})
+			return
+		}
+	}
+	writeUpstreamError(w, err)
 }

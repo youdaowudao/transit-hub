@@ -1,5 +1,6 @@
 import type {
   SiteSettings,
+  UpstreamFailure,
   SyncStreamEvent,
   UpstreamSiteForm,
   UpstreamSiteResponse,
@@ -23,7 +24,19 @@ const authHeaders = (): HeadersInit => {
 
 type AdminErrorPayload = {
   message?: string
+  failure?: UpstreamFailure
 }
+
+export class UpstreamApiError extends Error {
+  constructor(readonly key: string, readonly failure?: UpstreamFailure) {
+    super(key)
+    this.name = 'UpstreamApiError'
+  }
+}
+
+const safeErrorKey = (key: unknown): string => typeof key === 'string' && /^admin\.upstream\.errors\.[A-Za-z][A-Za-z0-9]*$/.test(key)
+  ? key : 'admin.upstream.errors.request'
+
 
 const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
   let response: Response
@@ -42,7 +55,13 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
   }
 
   const text = await response.text()
-  const payload = text ? JSON.parse(text) as T & AdminErrorPayload : ({} as T & AdminErrorPayload)
+  let payload = {} as T & AdminErrorPayload
+  try {
+    const parsed = text ? JSON.parse(text) : {}
+    if (parsed !== null && typeof parsed === 'object') payload = parsed as T & AdminErrorPayload
+  } catch {
+    if (response.ok) throw new UpstreamApiError('admin.upstream.errors.invalidResponse')
+  }
 
   if (!response.ok) {
     if (isUnauthorizedApiResponse(response.status, payload)) {
@@ -50,7 +69,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       throw new Error(authUnauthorizedErrorKey)
     }
 
-    throw new Error('admin.upstream.errors.request')
+    throw new UpstreamApiError(safeErrorKey(payload.message), payload.failure)
   }
 
   return payload

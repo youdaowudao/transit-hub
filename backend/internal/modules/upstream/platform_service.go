@@ -103,7 +103,18 @@ func (s *PlatformService) Login(baseURL string, platform Platform, account strin
 		if err == nil {
 			return result, nil
 		}
-		return s.loginSub2API(normalizedURL, account, password)
+		secondResult, secondErr := s.loginSub2API(normalizedURL, account, password)
+		if secondErr == nil {
+			return secondResult, nil
+		}
+		var detail *RequestError
+		if errors.As(secondErr, &detail) {
+			combined := *detail
+			combined.Reason = ErrorAutoDetectFailed
+			combined.Attempts = []FailureAttempt{failureAttempt(PlatformNewAPI, err), failureAttempt(PlatformSub2API, secondErr)}
+			return LoginResult{}, &combined
+		}
+		return LoginResult{}, secondErr
 	}
 }
 
@@ -194,12 +205,12 @@ func (s *PlatformService) refreshSub2APISessionContext(ctx context.Context, sess
 		},
 	})
 	if err != nil {
-		return Session{}, err
+		return Session{}, withFailureStage(err, "refresh", PlatformSub2API)
 	}
 	data := dataRecord(response.Payload)
 	accessToken := firstString(data, []string{"access_token", "accessToken"})
 	if accessToken == nil {
-		return Session{}, newRequestError(ErrorAuth, PlatformSub2API)
+		return Session{}, incompleteLogin(PlatformSub2API, "refresh", response)
 	}
 	refreshToken := session.RefreshToken
 	if value := firstString(data, []string{"refresh_token", "refreshToken"}); value != nil {
@@ -287,18 +298,18 @@ func (s *PlatformService) LoginSub2APIAdmin(baseURL string, email string, passwo
 	if err != nil {
 		return Session{}, err
 	}
-	log.Printf("my-sites sub2api admin login start base_url=%s email=%s", normalizedURL, email)
+	log.Printf("my-sites sub2api admin login start base_url=%s email=%s", safeHost(normalizedURL), email)
 	result, err := s.loginSub2API(normalizedURL, email, password)
 	if err != nil {
-		log.Printf("my-sites sub2api admin login failed base_url=%s email=%s err=%v", normalizedURL, email, err)
+		log.Printf("my-sites sub2api admin login failed base_url=%s email=%s err=%v", safeHost(normalizedURL), email, err)
 		return Session{}, err
 	}
-	log.Printf("my-sites sub2api admin login token received base_url=%s email=%s token_type=%s expires_at_set=%t refresh_token_set=%t", normalizedURL, email, result.Session.TokenType, result.Session.ExpiresAt != nil, result.Session.RefreshToken != "")
+	log.Printf("my-sites sub2api admin login token received base_url=%s email=%s token_type=%s expires_at_set=%t refresh_token_set=%t", safeHost(normalizedURL), email, result.Session.TokenType, result.Session.ExpiresAt != nil, result.Session.RefreshToken != "")
 	if err := s.VerifySub2APIAdmin(result.Session); err != nil {
-		log.Printf("my-sites sub2api admin verify failed base_url=%s email=%s err=%v", normalizedURL, email, err)
+		log.Printf("my-sites sub2api admin verify failed base_url=%s email=%s err=%v", safeHost(normalizedURL), email, err)
 		return Session{}, err
 	}
-	log.Printf("my-sites sub2api admin verify passed base_url=%s email=%s", normalizedURL, email)
+	log.Printf("my-sites sub2api admin verify passed base_url=%s email=%s", safeHost(normalizedURL), email)
 	return result.Session, nil
 }
 
@@ -309,20 +320,20 @@ func (s *PlatformService) LoginNewAPIAdmin(baseURL string, username string, pass
 	if err != nil {
 		return Session{}, err
 	}
-	log.Printf("new-api admin login start base_url=%s username=%s", normalizedURL, username)
+	log.Printf("new-api admin login start base_url=%s username=%s", safeHost(normalizedURL), username)
 	result, err := s.loginNewAPI(normalizedURL, username, password)
 	if err != nil {
-		log.Printf("new-api admin login failed base_url=%s username=%s err=%v", normalizedURL, username, err)
+		log.Printf("new-api admin login failed base_url=%s username=%s err=%v", safeHost(normalizedURL), username, err)
 		return Session{}, err
 	}
 	if err := s.VerifyNewAPIAdmin(result.Session); err != nil {
-		log.Printf("new-api admin verify failed base_url=%s username=%s err=%v", normalizedURL, username, err)
+		log.Printf("new-api admin verify failed base_url=%s username=%s err=%v", safeHost(normalizedURL), username, err)
 		return Session{}, err
 	}
 	// 拉取 quota 换算配置
 	quotaPerUnit := s.fetchNewAPIQuotaPerUnit(result.Session)
 	result.Session.QuotaPerUnit = quotaPerUnit
-	log.Printf("new-api admin login+verify passed base_url=%s username=%s quota_per_unit=%.0f", normalizedURL, username, quotaPerUnit)
+	log.Printf("new-api admin login+verify passed base_url=%s username=%s quota_per_unit=%.0f", safeHost(normalizedURL), username, quotaPerUnit)
 	return result.Session, nil
 }
 
@@ -342,7 +353,7 @@ func (s *PlatformService) VerifyNewAPIAdminContext(ctx context.Context, session 
 	selfData := dataRecord(response.Payload)
 	role := firstNumber(selfData, []string{"role"})
 	if role == nil || *role < 10 {
-		log.Printf("new-api admin verify role rejected base_url=%s role=%v", session.BaseURL, role)
+		log.Printf("new-api admin verify role rejected base_url=%s role=%v", safeHost(session.BaseURL), role)
 		return newRequestError(ErrorAuth, PlatformNewAPI)
 	}
 	return nil
@@ -354,7 +365,7 @@ func (s *PlatformService) fetchNewAPIQuotaPerUnit(session Session) float64 {
 	const defaultQuotaPerUnit = 500000
 	response, err := s.httpClient.requestJSON(session.BaseURL+"/api/status", newAPIAuthOptions(session))
 	if err != nil {
-		log.Printf("new-api /api/status fetch failed base_url=%s err=%v, using default quota_per_unit", session.BaseURL, err)
+		log.Printf("new-api /api/status fetch failed base_url=%s err=%v, using default quota_per_unit", safeHost(session.BaseURL), err)
 		return defaultQuotaPerUnit
 	}
 	data := dataRecord(response.Payload)
@@ -370,29 +381,29 @@ func (s *PlatformService) VerifySub2APIAdmin(session Session) error {
 
 func (s *PlatformService) VerifySub2APIAdminContext(ctx context.Context, session Session) error {
 	if session.Platform != PlatformSub2API {
-		log.Printf("my-sites sub2api admin verify skipped invalid_platform=%s base_url=%s", session.Platform, session.BaseURL)
+		log.Printf("my-sites sub2api admin verify skipped invalid_platform=%s base_url=%s", session.Platform, safeHost(session.BaseURL))
 		return newRequestError(ErrorAuth, PlatformSub2API)
 	}
 	if strings.TrimSpace(session.AdminAPIKey) != "" {
 		requestURL := session.BaseURL + "/api/v1/admin/groups?page=1&page_size=1"
 		_, err := s.httpClient.requestJSONWithContext(ctx, requestURL, adminAuthOptions(session))
 		if err != nil {
-			log.Printf("my-sites sub2api admin key verify failed url=%s err=%v", requestURL, err)
+			log.Printf("my-sites sub2api admin key verify failed url=%s err=%v", safeHost(requestURL), err)
 		}
 		return err
 	}
 	requestURL := session.BaseURL + "/api/v1/auth/me"
-	log.Printf("my-sites sub2api admin verify request url=%s token_type=%s access_token_set=%t", requestURL, session.TokenType, session.AccessToken != "")
+	log.Printf("my-sites sub2api admin verify request url=%s token_type=%s access_token_set=%t", safeHost(requestURL), session.TokenType, session.AccessToken != "")
 	response, err := s.httpClient.requestJSONWithContext(ctx, requestURL, sub2APIUserAuthOptions(session))
 	if err != nil {
-		log.Printf("my-sites sub2api admin verify request failed url=%s err=%v", requestURL, err)
+		log.Printf("my-sites sub2api admin verify request failed url=%s err=%v", safeHost(requestURL), err)
 		return err
 	}
 	record := dataRecord(response.Payload)
 	role := firstString(record, []string{"role"})
-	log.Printf("my-sites sub2api admin verify response url=%s payload_type=%T data_keys=%s parsed_role=%s", requestURL, response.Payload, recordKeys(record), stringValue(role))
+	log.Printf("my-sites sub2api admin verify response url=%s payload_type=%T data_keys=%s parsed_role=%s", safeHost(requestURL), response.Payload, recordKeys(record), stringValue(role))
 	if role == nil || !strings.EqualFold(*role, "admin") {
-		log.Printf("my-sites sub2api admin verify role rejected url=%s parsed_role=%s", requestURL, stringValue(role))
+		log.Printf("my-sites sub2api admin verify role rejected url=%s parsed_role=%s", safeHost(requestURL), stringValue(role))
 		return newRequestError(ErrorAuth, PlatformSub2API)
 	}
 	return nil
@@ -734,7 +745,7 @@ func (s *PlatformService) fetchSub2APIAvailableGroupsWithRates(session Session) 
 	rateOverrides := map[string]float64{}
 	ratesResponse, ratesErr := s.httpClient.requestJSON(session.BaseURL+"/api/v1/groups/rates", authOptions)
 	if ratesErr != nil {
-		log.Printf("[sub2api-groups] /api/v1/groups/rates 拉取失败，回退默认倍率 base_url=%s err=%v", session.BaseURL, ratesErr)
+		log.Printf("[sub2api-groups] /api/v1/groups/rates 拉取失败，回退默认倍率 base_url=%s err=%v", safeHost(session.BaseURL), ratesErr)
 	} else {
 		rateOverrides = sub2APIGroupRateOverrides(ratesResponse.Payload)
 	}
@@ -1522,26 +1533,26 @@ func (s *PlatformService) loginNewAPI(baseURL string, username string, password 
 		Body:   map[string]string{"username": username, "password": password},
 	})
 	if err != nil {
-		return LoginResult{}, err
+		return LoginResult{}, withFailureStage(err, "login", PlatformNewAPI)
 	}
 	if record, ok := response.Payload.(map[string]any); ok {
 		if success, ok := record["success"].(bool); ok && !success {
-			return LoginResult{}, newRequestError(ErrorAuth, PlatformNewAPI)
+			return LoginResult{}, incompleteLogin(PlatformNewAPI, "login", response)
 		}
 	}
 	loginData := dataRecord(response.Payload)
 	userID := newAPIUserID(loginData)
 	session := Session{Platform: PlatformNewAPI, BaseURL: baseURL, Cookie: cookieHeader(response.Header), UserID: userID}
 	if strings.TrimSpace(session.Cookie) == "" {
-		return LoginResult{}, newRequestError(ErrorAuth, PlatformNewAPI)
+		return LoginResult{}, incompleteLogin(PlatformNewAPI, "login", response)
 	}
 	if strings.TrimSpace(session.UserID) == "" {
-		return LoginResult{}, newRequestError(ErrorAuth, PlatformNewAPI)
+		return LoginResult{}, incompleteLogin(PlatformNewAPI, "login", response)
 	}
 	session.QuotaPerUnit = s.fetchNewAPIQuotaPerUnit(session)
 	metrics, err := s.fetchNewAPIMetrics(session, loginData)
 	if err != nil {
-		log.Printf("new-api metrics fetch failed base_url=%s err=%v", baseURL, err)
+		log.Printf("new-api metrics fetch failed base_url=%s err=%v", safeHost(baseURL), err)
 		metrics = defaultMetrics()
 	}
 	return LoginResult{Platform: PlatformNewAPI, Session: session, Metrics: metrics}, nil
@@ -1553,12 +1564,12 @@ func (s *PlatformService) loginSub2API(baseURL string, email string, password st
 		Body:   map[string]string{"email": email, "password": password},
 	})
 	if err != nil {
-		return LoginResult{}, err
+		return LoginResult{}, withFailureStage(err, "login", PlatformSub2API)
 	}
 	data := dataRecord(response.Payload)
 	accessToken := firstString(data, []string{"access_token", "accessToken"})
 	if accessToken == nil {
-		return LoginResult{}, newRequestError(ErrorAuth, PlatformSub2API)
+		return LoginResult{}, incompleteLogin(PlatformSub2API, "login", response)
 	}
 	refreshToken := ""
 	if value := firstString(data, []string{"refresh_token", "refreshToken"}); value != nil {
@@ -1585,7 +1596,7 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 	cookieOptions := newAPIAuthOptions(session)
 	self, err := s.httpClient.requestJSON(session.BaseURL+"/api/user/self", cookieOptions)
 	if err != nil {
-		return Metrics{}, err
+		return Metrics{}, withFailureStage(err, "verify", PlatformNewAPI)
 	}
 	// 使用新加坡业务日时区边界查询今日成本，修复 todayStart/todayEnd 使用进程本地时区的问题。
 	var stat jsonResponse
@@ -1594,24 +1605,24 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 		if r, statErr := s.httpClient.requestJSON(statURL, cookieOptions); statErr == nil {
 			stat = r
 		} else {
-			log.Printf("new-api stat request failed base_url=%s err=%v", session.BaseURL, statErr)
+			log.Printf("new-api stat request failed base_url=%s err=%v", safeHost(session.BaseURL), statErr)
 			stat = jsonResponse{Payload: map[string]any{}}
 		}
 	} else {
-		log.Printf("new-api businessDayUnixBounds failed base_url=%s err=%v", session.BaseURL, boundsErr)
+		log.Printf("new-api businessDayUnixBounds failed base_url=%s err=%v", safeHost(session.BaseURL), boundsErr)
 		stat = jsonResponse{Payload: map[string]any{}}
 	}
 	groupsPayload, err := s.httpClient.requestJSON(session.BaseURL+"/api/user/self/groups", cookieOptions)
 	if err != nil {
 		groupsPayload, err = s.httpClient.requestJSON(session.BaseURL+"/api/user/groups", cookieOptions)
 		if err != nil {
-			log.Printf("new-api groups request failed base_url=%s err=%v", session.BaseURL, err)
+			log.Printf("new-api groups request failed base_url=%s err=%v", safeHost(session.BaseURL), err)
 			groupsPayload = jsonResponse{Payload: map[string]any{}}
 		}
 	}
 	pricingPayload, err := s.httpClient.requestJSON(session.BaseURL+"/api/pricing", cookieOptions)
 	if err != nil {
-		log.Printf("new-api pricing request failed base_url=%s err=%v", session.BaseURL, err)
+		log.Printf("new-api pricing request failed base_url=%s err=%v", safeHost(session.BaseURL), err)
 		pricingPayload = jsonResponse{Payload: map[string]any{}}
 	}
 
@@ -1648,21 +1659,21 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 
 func (s *PlatformService) fetchSub2APIMetrics(session Session) (Metrics, error) {
 	authOptions := requestOptions{AccessToken: session.AccessToken, TokenType: session.TokenType}
-	log.Printf("[sub2api-metrics] 开始拉取指标 base_url=%s", session.BaseURL)
+	log.Printf("[sub2api-metrics] 开始拉取指标 base_url=%s", safeHost(session.BaseURL))
 	me, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/auth/me", authOptions)
 	if err != nil {
-		log.Printf("[sub2api-metrics] /api/v1/auth/me 失败 base_url=%s err=%v", session.BaseURL, err)
-		return Metrics{}, err
+		log.Printf("[sub2api-metrics] /api/v1/auth/me 失败 base_url=%s err=%v", safeHost(session.BaseURL), err)
+		return Metrics{}, withFailureStage(err, "verify", PlatformSub2API)
 	}
 	stats, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/usage/dashboard/stats", authOptions)
 	if err != nil {
-		log.Printf("[sub2api-metrics] /api/v1/usage/dashboard/stats 失败 base_url=%s err=%v", session.BaseURL, err)
-		return Metrics{}, err
+		log.Printf("[sub2api-metrics] /api/v1/usage/dashboard/stats 失败 base_url=%s err=%v", safeHost(session.BaseURL), err)
+		return Metrics{}, withFailureStage(err, "metrics", PlatformSub2API)
 	}
 	groups, err := s.fetchSub2APIAvailableGroupsWithRates(session)
 	if err != nil {
-		log.Printf("[sub2api-metrics] 分组列表拉取失败 base_url=%s err=%v", session.BaseURL, err)
-		return Metrics{}, err
+		log.Printf("[sub2api-metrics] 分组列表拉取失败 base_url=%s err=%v", safeHost(session.BaseURL), err)
+		return Metrics{}, withFailureStage(err, "metrics", PlatformSub2API)
 	}
 
 	meData := dataRecord(me.Payload)
@@ -2147,7 +2158,7 @@ func (s *PlatformService) fetchNewAPIAdminGroups(session Session) ([]GroupInfo, 
 	}
 	pricingPayload, err := s.httpClient.requestJSON(session.BaseURL+"/api/pricing", cookieOptions)
 	if err != nil {
-		log.Printf("new-api pricing request failed base_url=%s err=%v", session.BaseURL, err)
+		log.Printf("new-api pricing request failed base_url=%s err=%v", safeHost(session.BaseURL), err)
 		pricingPayload = jsonResponse{Payload: map[string]any{}}
 	}
 	return newAPIGroups(groupsPayload.Payload, pricingPayload.Payload), nil
@@ -2982,7 +2993,7 @@ func (s *PlatformService) updateNewAPIGroupRatio(session Session, groupName stri
 	ratioMap := map[string]float64{}
 	if ratioStr := firstString(data, []string{"GroupRatio"}); ratioStr != nil && *ratioStr != "" {
 		if jsonErr := jsonUnmarshalString(*ratioStr, &ratioMap); jsonErr != nil {
-			log.Printf("[auto-pricing] new-api GroupRatio parse failed base_url=%s err=%v", session.BaseURL, jsonErr)
+			log.Printf("[auto-pricing] new-api GroupRatio parse failed base_url=%s err=%v", safeHost(session.BaseURL), jsonErr)
 			return jsonErr
 		}
 	}
@@ -3726,9 +3737,9 @@ func (s *PlatformService) fetchSub2APICostForDate(session Session, date string) 
 		if costPtr != nil {
 			return *costPtr, meta, nil
 		}
-		log.Printf("sub2api FetchCostForDate: account-level response missing cost field date=%s base_url=%s, falling back to key sum", date, session.BaseURL)
+		log.Printf("sub2api FetchCostForDate: account-level response missing cost field date=%s base_url=%s, falling back to key sum", date, safeHost(session.BaseURL))
 	} else {
-		log.Printf("sub2api FetchCostForDate: account-level failed date=%s base_url=%s err=%v, falling back to key sum", date, session.BaseURL, err)
+		log.Printf("sub2api FetchCostForDate: account-level failed date=%s base_url=%s err=%v, falling back to key sum", date, safeHost(session.BaseURL), err)
 	}
 	meta.Source = "key_sum_best_effort"
 	cost, keyCount, keyErr := s.fetchSub2APIKeysCostForDate(session, date)

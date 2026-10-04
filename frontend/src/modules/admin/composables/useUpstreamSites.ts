@@ -9,7 +9,7 @@ import {
   updateUpstreamSiteEnabled,
   updateUpstreamSite,
 } from '../api/upstream'
-import type { SiteSyncState, UpstreamMetricValue, UpstreamMetrics, UpstreamSite, UpstreamSiteForm, UpstreamSiteResponse } from '../types/upstream'
+import type { UpstreamFailure, SiteSyncState, UpstreamMetricValue, UpstreamMetrics, UpstreamSite, UpstreamSiteForm, UpstreamSiteResponse } from '../types/upstream'
 
 const logoClasses = [
   'bg-primary/10 text-primary border-primary/20',
@@ -55,6 +55,8 @@ export const useUpstreamSites = () => {
   const isAdding = ref(false)
   const isRefreshing = ref(false)
   const addErrorKey = ref<string | null>(null)
+  const addFailure = ref<UpstreamFailure | null>(null)
+  const clearAddFailure = () => { addErrorKey.value = null; addFailure.value = null }
   const enabledUpdatingIds = ref(new Set<string>())
   const enabledErrorKeys = ref(new Map<string, string>())
 
@@ -68,13 +70,14 @@ export const useUpstreamSites = () => {
 
   const addSite = async (form: UpstreamSiteForm): Promise<boolean> => {
     isAdding.value = true
-    addErrorKey.value = null
+    clearAddFailure()
     try {
       const site = await createUpstreamSite(form)
       sites.value.unshift(normalizeSite(site, logoClasses[sites.value.length % logoClasses.length]))
       return true
     } catch (error) {
-      addErrorKey.value = error instanceof Error ? error.message : 'admin.upstream.errors.unknown'
+      addErrorKey.value = safeUpstreamErrorKey(error)
+      addFailure.value = error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined) ?? null : null
       return false
     } finally {
       isAdding.value = false
@@ -83,7 +86,7 @@ export const useUpstreamSites = () => {
 
   const updateSite = async (id: string, form: UpstreamSiteForm): Promise<boolean> => {
     isAdding.value = true
-    addErrorKey.value = null
+    clearAddFailure()
     try {
       const nextSite = await updateUpstreamSite(id, form)
       const index = sites.value.findIndex((site) => site.id === id)
@@ -92,7 +95,8 @@ export const useUpstreamSites = () => {
       }
       return true
     } catch (error) {
-      addErrorKey.value = error instanceof Error ? error.message : 'admin.upstream.errors.unknown'
+      addErrorKey.value = safeUpstreamErrorKey(error)
+      addFailure.value = error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined) ?? null : null
       return false
     } finally {
       isAdding.value = false
@@ -232,6 +236,8 @@ export const useUpstreamSites = () => {
     isAdding,
     isRefreshing,
     addErrorKey,
+    addFailure,
+    clearAddFailure,
     connectedCount,
     enabledSiteCount,
     enabledUpdatingIds,

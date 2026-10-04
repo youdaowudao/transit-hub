@@ -1,7 +1,6 @@
 package upstream
 
 import (
-	"fmt"
 	"math"
 	"net"
 	"regexp"
@@ -434,7 +433,7 @@ func isFinite(value float64) bool {
 }
 
 func invalidBodyError(fields ...string) error {
-	return fmt.Errorf("missing or invalid fields: %s", strings.Join(fields, ", "))
+	return &FieldValidationError{Fields: fields}
 }
 
 // WithSyncDate 返回设置了 TodayConsumeDate 和 TodayConsumeAt 的新 Metrics。

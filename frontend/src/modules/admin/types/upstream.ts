@@ -122,3 +122,16 @@ export interface SiteSyncState {
   phase: SiteSyncPhase
   errorKey?: string
 }
+
+export interface UpstreamFailureAttempt {
+  platform?: ResolvedUpstreamPlatform
+  errorKey?: string
+  stage?: 'login' | 'refresh' | 'verify' | 'metrics'
+  httpStatus?: number
+  upstreamMessage?: string
+}
+
+export interface UpstreamFailure extends UpstreamFailureAttempt {
+  attempts?: UpstreamFailureAttempt[]
+  fields?: string[]
+}

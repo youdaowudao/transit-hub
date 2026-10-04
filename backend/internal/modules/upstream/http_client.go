@@ -3,6 +3,8 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +39,7 @@ type jsonResponse struct {
 	Payload    any
 	Header     http.Header
 	ReceivedAt time.Time
+	StatusCode int
 }
 
 func NewHTTPClient(client *http.Client) *HTTPClient {
@@ -140,10 +144,19 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 		var netErr net.Error
 		requestErr := &RequestError{MessageKey: ErrorNetwork, MutationOutcome: outcome}
 		requestErr.Timeout = errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout())
+		requestErr.Reason = ErrorNetworkUnreachable
+		var certificateErr *tls.CertificateVerificationError
+		var unknownAuthority x509.UnknownAuthorityError
+		var hostnameErr x509.HostnameError
+		if requestErr.Timeout {
+			requestErr.Reason = ErrorNetworkTimeout
+		} else if errors.As(err, &certificateErr) || errors.As(err, &unknownAuthority) || errors.As(err, &hostnameErr) || strings.Contains(strings.ToLower(err.Error()), "tls:") {
+			requestErr.Reason = ErrorTLSFailed
+		}
 		if ctx.Err() != nil {
 			requestErr.Cause = ctx.Err()
 		}
-		log.Printf("[http-client] 请求失败 method=%s category=%s outcome=%s timeout=%t", method, requestErr.MessageKey, outcome, requestErr.Timeout)
+		log.Printf("[http-client] 请求失败 method=%s %s category=%s reason=%s outcome=%s timeout=%t", method, safeHTTPDiagnostic(reqURL), requestErr.MessageKey, siteErrorKey(requestErr), outcome, requestErr.Timeout)
 		// Read callers retain the shared client's original cancellation contract;
 		// write callers require the dispatch evidence even after cancellation.
 		if requestErr.Cause != nil && (method == http.MethodGet || method == http.MethodHead) {
@@ -153,13 +166,25 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		log.Printf("[http-client] 非 2xx 响应 method=%s status=%d", method, response.StatusCode)
+		log.Printf("[http-client] 非 2xx 响应 method=%s %s status=%d", method, safeHTTPDiagnostic(reqURL), response.StatusCode)
 		key := ErrorRequest
 		if response.StatusCode == http.StatusUnauthorized {
 			key = ErrorAuth
 		}
 		requestErr := newRequestErrorWithStatus(key, "", response.StatusCode)
 		requestErr.MutationOutcome = MutationUncertain
+		switch response.StatusCode {
+		case http.StatusForbidden:
+			requestErr.Reason = ErrorForbidden
+		case http.StatusNotFound:
+			requestErr.Reason = ErrorNotFound
+		case http.StatusTooManyRequests:
+			requestErr.Reason = ErrorRateLimited
+		default:
+			if response.StatusCode >= 500 {
+				requestErr.Reason = ErrorUpstreamServer
+			}
+		}
 		// A bounded, structured allowlist prevents response bodies or metadata
 		// containing credentials from reaching callers, audit events, or logs.
 		data, readErr := io.ReadAll(io.LimitReader(response.Body, 4097))
@@ -178,13 +203,18 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 				}
 				if message, ok := record["message"].(string); ok {
 					requestErr.RemoteMessage = safeRemoteMutationMessage(message)
+					requestErr.UpstreamMessage = safeRequestMessage(message, options)
 				}
 			}
 		}
-		return jsonResponse{Header: response.Header, ReceivedAt: receivedAt}, requestErr
+		return jsonResponse{Header: response.Header, ReceivedAt: receivedAt, StatusCode: response.StatusCode}, requestErr
 	}
 	payload, err := parseJSONWithLimit(response.Body, reqURL, maxResponseBytes)
 	if err != nil {
+		var requestErr *RequestError
+		if errors.As(err, &requestErr) {
+			requestErr.StatusCode = response.StatusCode
+		}
 		return jsonResponse{}, err
 	}
 	// new-api commonly reports authentication/authorization failures as HTTP 200
@@ -192,10 +222,15 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 	// writes cannot be mistaken for successful no-op operations.
 	if record, ok := payload.(map[string]any); ok {
 		if success, exists := record["success"].(bool); exists && !success {
-			return jsonResponse{}, newRequestError(ErrorRequest, "")
+			requestErr := newRequestErrorWithStatus(ErrorRequest, "", response.StatusCode)
+			if message, ok := record["message"].(string); ok {
+				requestErr.UpstreamMessage = safeRequestMessage(message, options)
+			}
+			log.Printf("[http-client] 上游业务拒绝 method=%s %s status=%d category=%s", method, safeHTTPDiagnostic(reqURL), response.StatusCode, requestErr.MessageKey)
+			return jsonResponse{}, requestErr
 		}
 	}
-	return jsonResponse{Payload: payload, Header: response.Header, ReceivedAt: receivedAt}, nil
+	return jsonResponse{Payload: payload, Header: response.Header, ReceivedAt: receivedAt, StatusCode: response.StatusCode}, nil
 }
 
 func encodeBody(body any) (io.Reader, error) {
@@ -219,11 +254,11 @@ func parseJSONWithLimit(reader io.Reader, reqURL string, maxBytes int64) (any, e
 	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		log.Printf("[http-client] 读取响应体失败 category=%s", ErrorInvalidResponse)
+		log.Printf("[http-client] 读取响应体失败 %s category=%s", safeHTTPDiagnostic(reqURL), ErrorInvalidResponse)
 		return nil, newRequestError(ErrorInvalidResponse, "")
 	}
 	if maxBytes > 0 && int64(len(data)) > maxBytes {
-		log.Printf("[http-client] 响应体超过限制 limit=%d", maxBytes)
+		log.Printf("[http-client] 响应体超过限制 %s limit=%d", safeHTTPDiagnostic(reqURL), maxBytes)
 		return nil, newRequestError(ErrorInvalidResponse, "")
 	}
 	if len(data) == 0 {
@@ -231,7 +266,7 @@ func parseJSONWithLimit(reader io.Reader, reqURL string, maxBytes int64) (any, e
 	}
 	var payload any
 	if err := json.Unmarshal(data, &payload); err != nil {
-		log.Printf("[http-client] JSON 解析失败 len=%d", len(data))
+		log.Printf("[http-client] JSON 解析失败 %s category=%s", safeHTTPDiagnostic(reqURL), ErrorInvalidResponse)
 		return nil, newRequestError(ErrorInvalidResponse, "")
 	}
 	return payload, nil
@@ -255,4 +290,37 @@ func safeRemoteMutationMessage(value string) string {
 		return value
 	}
 	return ""
+}
+
+func safeRequestMessage(message string, options requestOptions) string {
+	secrets := []string{options.AccessToken, options.Cookie, options.AdminAPIKey}
+	for _, cookie := range strings.Split(options.Cookie, ";") {
+		if _, value, ok := strings.Cut(strings.TrimSpace(cookie), "="); ok {
+			secrets = append(secrets, value)
+		}
+	}
+	if body, ok := options.Body.(map[string]string); ok {
+		for key, value := range body {
+			if key == "password" || key == "refresh_token" || key == "username" || key == "email" {
+				secrets = append(secrets, value)
+			}
+		}
+	}
+	return safeUpstreamMessage(message, secrets...)
+}
+
+// Only fixed known API paths may identify the origin. Arbitrary paths can carry
+// secrets; a prefix match or a dynamic resource ID must never be logged.
+func safeHTTPDiagnostic(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.RawPath != "" {
+		return "host=- path=-"
+	}
+	switch parsed.Path {
+	case "/api/user/login", "/api/user/self", "/api/status", "/api/log/self/stat", "/api/user/self/groups", "/api/user/groups", "/api/pricing",
+		"/api/v1/auth/login", "/api/v1/auth/refresh", "/api/v1/auth/me", "/api/v1/usage/dashboard/stats", "/api/v1/groups/available", "/api/v1/groups/rates":
+		return "host=" + safeHost(rawURL) + " path=" + parsed.Path
+	default:
+		return "host=- path=-"
+	}
 }

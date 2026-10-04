@@ -19,7 +19,6 @@ import (
 
 const (
 	multiplierSnapshotTTL        = 60 * time.Second
-	multiplierFailureBackoff     = 30 * time.Second
 	multiplierRefreshTimeout     = 90 * time.Second
 	multiplierSnapshotRetention  = 10 * time.Minute
 	multiplierResolutionStale    = "stale"
@@ -145,6 +144,8 @@ type multiplierSnapshotEntry struct {
 	done             chan struct{}
 	supersededDone   []chan struct{}
 	enqueuedAt       time.Time
+
+	consecutiveFailures int
 }
 
 // multiplierSiteMetadata is deliberately narrower than upstream.Site. A snapshot must not
@@ -633,7 +634,6 @@ func (s *Service) finishMultiplierSnapshotLocked(target *multiplierSnapshotEntry
 		keyFailureOutcome := multiplierKeyFailuresOutcome(keyFailures)
 		if len(keyFailures) > 0 && len(keys) == 0 && len(current.keys) > 0 {
 			current.status = multiplierResolutionStale
-			current.nextRetryAt = now.Add(multiplierFailureBackoff)
 			current.lastError = "key metadata unavailable"
 			current.lastOutcome = keyFailureOutcome
 		} else {
@@ -651,9 +651,6 @@ func (s *Service) finishMultiplierSnapshotLocked(target *multiplierSnapshotEntry
 			current.fetchedAt = now
 			current.expiresAt = current.fetchedAt.Add(multiplierSnapshotTTL)
 			current.nextRetryAt = time.Time{}
-			if len(keyFailures) > 0 {
-				current.nextRetryAt = current.fetchedAt.Add(multiplierFailureBackoff)
-			}
 			current.lastError = ""
 			current.lastOutcome = keyFailureOutcome
 			current.capability = captured.capability
@@ -664,12 +661,18 @@ func (s *Service) finishMultiplierSnapshotLocked(target *multiplierSnapshotEntry
 		} else {
 			current.status = multiplierResolutionStale
 		}
-		current.nextRetryAt = time.Now().Add(multiplierFailureBackoff)
 		current.lastError = err.Error()
 		current.lastOutcome = multiplierRefreshOutcome(err)
 		if errors.Is(err, errMultiplierDirectLookupAmbiguous) {
 			current.capability = multiplierDirectUnsupported
 		}
+	}
+	if err != nil || len(keyFailures) > 0 {
+		current.consecutiveFailures++
+		current.nextRetryAt = time.Now().Add(multiplierFailureRetryDelay(current.consecutiveFailures))
+	} else {
+		current.consecutiveFailures = 0
+		current.nextRetryAt = time.Time{}
 	}
 	current.inFlight = false
 	closeMultiplierSnapshotWaiters(current)
@@ -988,4 +991,17 @@ func (s *Service) freshMultiplierLookupForWorkspaceWithOptions(ctx context.Conte
 		return s.multiplierLookupForWorkspaceWithOptions(ctx, userID, adminAccountID, platform, true, true, forceRefresh)
 	}
 	return s.upstreamMultiplierResolutionsByAdminAccountLegacy(ctx, userID, adminAccountID, platform)
+}
+
+// Retry timing follows the existing P2 agreement; only the current in-memory
+// snapshot entry owns the history. Replacement entries begin at the first step.
+func multiplierFailureRetryDelay(failures int) time.Duration {
+	switch {
+	case failures <= 1:
+		return 5 * time.Minute
+	case failures == 2:
+		return 15 * time.Minute
+	default:
+		return 30 * time.Minute
+	}
 }

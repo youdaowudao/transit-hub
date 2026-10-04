@@ -36,6 +36,19 @@ beforeEach(() => {
 afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.unstubAllGlobals(); localStorage.clear(); document.body.innerHTML = '' })
 
 describe('upstream stage D deletion guard', () => {
+ it.each(['card', 'list'] as const)('local missing-site removal in %s mode avoids upstream 404 guidance', async mode => {
+  vi.stubGlobal('fetch', vi.fn(async (url: string, options: RequestInit = {}) => {
+   if (url.endsWith('/sync-stream')) return new Response('', { status: 200 })
+   if (options.method === 'DELETE') return new Response(JSON.stringify({ message: 'admin.upstream.errors.notFound' }), { status: 404 })
+   return new Response(JSON.stringify([site]), { status: 200 })
+  }))
+  const view = await openDelete(mode)
+  const dialog = view.get('[role="alertdialog"]')
+  expect(dialog.text()).toContain('站点不存在')
+  expect(dialog.text()).not.toContain('上游接口不存在')
+  expect(dialog.text()).not.toContain('检查站点地址和平台类型')
+  expect(view.get(mode === 'card' ? 'div.group.bg-card' : 'tbody tr').text()).toContain('验收-删除守卫')
+ })
  it.each(['card', 'list'] as const)('keeps the %s entry and confirmation with both reference counts and unlink instructions', async mode => {
   const view = await openDelete(mode)
   const dialog = view.get('[role="alertdialog"]')

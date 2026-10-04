@@ -69,6 +69,11 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       throw new Error(authUnauthorizedErrorKey)
     }
 
+    // Local missing-site operations use HTTP 404; upstream login failures use
+    // HTTP 422 and retain the upstream notFound reason and failure details.
+    if (response.status === 404 && payload.message === 'admin.upstream.errors.notFound') {
+      throw new UpstreamApiError('admin.upstream.errors.siteNotFound')
+    }
     throw new UpstreamApiError(safeErrorKey(payload.message), payload.failure)
   }
 

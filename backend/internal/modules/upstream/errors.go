@@ -84,6 +84,7 @@ const (
 	ErrorLoginIncomplete      = "admin.upstream.errors.loginIncomplete"
 	ErrorRefreshTokenRejected = "admin.upstream.errors.refreshTokenRejected"
 	ErrorAccessTokenRejected  = "admin.upstream.errors.accessTokenRejected"
+	ErrorBusinessRejected     = "admin.upstream.errors.businessRejected"
 	ErrorForbidden            = "admin.upstream.errors.forbidden"
 	ErrorRateLimited          = "admin.upstream.errors.rateLimited"
 	ErrorUpstreamServer       = "admin.upstream.errors.upstreamServerError"
@@ -136,7 +137,7 @@ func errorCategory(key string) string {
 		return ErrorAuth
 	case ErrorNetworkTimeout, ErrorNetworkUnreachable, ErrorTLSFailed:
 		return ErrorNetwork
-	case ErrorForbidden, ErrorNotFound, ErrorRateLimited, ErrorUpstreamServer, ErrorAutoDetectFailed:
+	case ErrorForbidden, ErrorNotFound, ErrorRateLimited, ErrorUpstreamServer, ErrorAutoDetectFailed, ErrorBusinessRejected:
 		return ErrorRequest
 	default:
 		return key
@@ -153,13 +154,20 @@ func withFailureStage(err error, stage string, platform Platform) error {
 	}
 	detail := *original
 	detail.Stage, detail.Platform = stage, platform
-	if stage == "refresh" && detail.StatusCode >= 300 {
-		detail.Reason = ErrorRefreshTokenRejected
-	} else if detail.StatusCode == 401 || (detail.StatusCode >= 200 && detail.StatusCode < 300 && detail.MessageKey == ErrorRequest) {
-		if stage == "login" {
+	// Preserve HTTP-level reasons and the original coarse category. A rejected
+	// business envelope is a request failure, regardless of the failing step.
+	if detail.Reason != "" {
+		return &detail
+	}
+	if detail.StatusCode >= 200 && detail.StatusCode < 300 && detail.MessageKey == ErrorRequest {
+		detail.Reason = ErrorBusinessRejected
+	} else if detail.MessageKey == ErrorAuth {
+		switch stage {
+		case "refresh":
+			detail.Reason = ErrorRefreshTokenRejected
+		case "login":
 			detail.Reason = ErrorLoginRejected
-		}
-		if stage == "verify" {
+		case "verify":
 			detail.Reason = ErrorAccessTokenRejected
 		}
 	}

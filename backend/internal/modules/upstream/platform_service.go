@@ -1293,7 +1293,9 @@ func retryableKeyUsageError(err error) bool {
 	case ErrorNetwork, ErrorInvalidResponse:
 		return true
 	case ErrorRequest:
-		return requestErr.StatusCode == 0 || requestErr.StatusCode >= http.StatusInternalServerError
+		return requestErr.StatusCode == 0 ||
+			(requestErr.StatusCode >= http.StatusOK && requestErr.StatusCode < http.StatusMultipleChoices) ||
+			requestErr.StatusCode >= http.StatusInternalServerError
 	default:
 		return false
 	}
@@ -1597,7 +1599,14 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 	cookieOptions := newAPIAuthOptions(session)
 	self, err := s.httpClient.requestJSON(session.BaseURL+"/api/user/self", cookieOptions)
 	if err != nil {
-		return Metrics{}, withFailureStage(err, "verify", PlatformNewAPI)
+		failure := withFailureStage(err, "verify", PlatformNewAPI)
+		var requestErr *RequestError
+		// Cookie sessions cannot attribute an authentication failure to a token.
+		// Keep their historical authentication guidance, including legacy sessions.
+		if strings.TrimSpace(session.Cookie) != "" && errors.As(failure, &requestErr) && requestErr.Reason == ErrorAccessTokenRejected {
+			requestErr.Reason = ""
+		}
+		return Metrics{}, failure
 	}
 	// 使用新加坡业务日时区边界查询今日成本，修复 todayStart/todayEnd 使用进程本地时区的问题。
 	var stat jsonResponse

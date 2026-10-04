@@ -20,6 +20,7 @@ import (
 const (
 	multiplierSnapshotTTL        = 60 * time.Second
 	multiplierRefreshTimeout     = 90 * time.Second
+	multiplierLocalRetryDelay    = 30 * time.Second
 	multiplierSnapshotRetention  = 10 * time.Minute
 	multiplierResolutionStale    = "stale"
 	multiplierResolutionUpdating = "updating"
@@ -541,6 +542,9 @@ func (s *Service) refreshMultiplierSnapshot(parent context.Context, reader Upstr
 		return
 	}
 	if err := parent.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = errMultiplierQueueTimeout
+		}
 		s.finishMultiplierSnapshot(target, captured, nil, nil, multiplierSiteMetadata{}, err)
 		return
 	}
@@ -708,7 +712,11 @@ func (s *Service) finishMultiplierSnapshotLocked(target *multiplierSnapshotEntry
 			current.capability = multiplierDirectUnsupported
 		}
 	}
-	if err != nil || len(keyFailures) > 0 {
+	if len(keyFailures) == 0 && (errors.Is(err, errMultiplierQueueFull) || errors.Is(err, errMultiplierQueueTimeout) || errors.Is(err, context.Canceled)) {
+		// Local scheduling failures retry promptly without changing the count
+		// retained from real upstream failures. Partial upstream failures win.
+		current.nextRetryAt = time.Now().Add(multiplierLocalRetryDelay)
+	} else if err != nil || len(keyFailures) > 0 {
 		current.consecutiveFailures++
 		current.nextRetryAt = time.Now().Add(multiplierFailureRetryDelay(current.consecutiveFailures))
 	} else {

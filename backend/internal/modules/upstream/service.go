@@ -631,6 +631,15 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
 
+	// Changing the login method must replace the session, even when an edit
+	// omits credentials. Same-method edits may still retain their old session.
+	if normalizedAuthMode(dto.AuthMode) != siteAuthMode(site) && !hasNewCredentials(dto) {
+		if normalizedAuthMode(dto.AuthMode) == AuthModePassword {
+			return Response{}, invalidBodyError("password")
+		}
+		return Response{}, invalidBodyError("accessToken")
+	}
+
 	// 保存更新前的状态，以便数据库写入失败时回滚。
 	previousSite := *site
 	candidate := previousSite

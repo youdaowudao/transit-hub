@@ -43,6 +43,31 @@ beforeEach(() => {
 })
 afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.unstubAllGlobals(); localStorage.clear(); document.body.innerHTML = '' })
 describe('upstream failure fix stage A', () => {
+ it.each(['card', 'list'] as const)('local missing-site editing in %s mode preserves the form and avoids upstream 404 instructions', async mode => {
+  status = 404; payload = { message: 'admin.upstream.errors.notFound' }
+  const view = await mountView()
+  if (mode === 'list') await view.get('button[aria-label="列表模式"]').trigger('click')
+  const entry = view.get(mode === 'card' ? 'div.group.bg-card' : 'tbody tr')
+  await entry.findAll('button')[2].trigger('click')
+  await view.get('[role="dialog"] form').trigger('submit'); await flushPromises()
+  const alert = view.get('[role="dialog"] [role="alert"]')
+  expect(alert.text()).toContain('站点不存在')
+  expect(alert.text()).not.toContain('上游接口不存在')
+  expect(alert.text()).not.toContain('检查站点地址和平台类型')
+  expect(view.find('[role="dialog"]').exists()).toBe(true)
+  expect(entry.text()).toContain('验收-原站点')
+ })
+ it.each(['admin.upstream.errors.rateLimited', 'admin.upstream.errors.upstreamServerError'])('refresh failures on cards and rows retain temporary %s guidance', async key => {
+  siteError = key
+  const view = await mountView()
+  for (const mode of ['card', 'list']) {
+   if (mode === 'list') await view.get('button[aria-label="列表模式"]').trigger('click')
+   const text = view.get(mode === 'card' ? 'div.group.bg-card' : 'tbody tr').text()
+   expect(text).toContain('请稍后再试')
+   expect(text).not.toContain('刷新令牌已失效')
+   expect(text).not.toContain('重新获取后填写')
+  }
+ })
  it('R5 keeps the failed add dialog open with reason, step, HTTP status and safe upstream hint', async () => {
   const view = await openAdd()
   await view.get('[role="dialog"] form').trigger('submit')

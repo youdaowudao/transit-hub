@@ -61,11 +61,11 @@ func TestFailureFixStageARequestReasonsPreserveCategories(t *testing.T) {
 		cookie                                bool
 	}{
 		{"R1_newapi_missing_identity", "password", "loginIncomplete", "login", ErrorAuth, PlatformNewAPI, 200, `{"success":true,"data":{"require_2fa":true}}`, true},
-		{"R1b_newapi_rejected_envelope", "password", "loginRejected", "login", ErrorRequest, PlatformNewAPI, 200, `{"success":false,"message":"用户名或密码错误"}`, false},
+		{"R1b_newapi_rejected_envelope", "password", "businessRejected", "login", ErrorRequest, PlatformNewAPI, 200, `{"success":false,"message":"用户名或密码错误"}`, false},
 		{"R2_refresh_rejected", "token", "refreshTokenRejected", "refresh", ErrorAuth, PlatformSub2API, 401, `{"message":"刷新失败"}`, false},
 		{"R2b_sub2api_missing_access", "password", "loginIncomplete", "login", ErrorAuth, PlatformSub2API, 200, `{"data":{"require_2fa":true}}`, false},
 		{"R6a_key_rejected", "user_key", "accessTokenRejected", "verify", ErrorAuth, PlatformNewAPI, 401, `{"message":"令牌无效"}`, false},
-		{"R6b_key_rejected_envelope", "user_key", "accessTokenRejected", "verify", ErrorRequest, PlatformNewAPI, 200, `{"success":false,"message":"令牌无效"}`, false},
+		{"R6b_key_rejected_envelope", "user_key", "businessRejected", "verify", ErrorRequest, PlatformNewAPI, 200, `{"success":false,"message":"令牌无效"}`, false},
 		{"forbidden", "password", "forbidden", "login", ErrorRequest, PlatformSub2API, 403, `{"message":"拒绝访问"}`, false},
 		{"not_found", "password", "notFound", "login", ErrorRequest, PlatformSub2API, 404, `{"message":"接口不存在"}`, false},
 		{"rate_limited", "password", "rateLimited", "login", ErrorRequest, PlatformSub2API, 429, `{"message":"请求过快"}`, false},
@@ -208,9 +208,11 @@ func TestFailureFixStageAHandlerFailuresAndAutomaticAttempts(t *testing.T) {
 			var payload struct {
 				Message string `json:"message"`
 				Failure struct {
-					ErrorKey string   `json:"errorKey"`
-					Fields   []string `json:"fields"`
-					Attempts []struct {
+					ErrorKey   string   `json:"errorKey"`
+					Fields     []string `json:"fields"`
+					Stage      string   `json:"stage"`
+					HTTPStatus int      `json:"httpStatus"`
+					Attempts   []struct {
 						Platform   string `json:"platform"`
 						ErrorKey   string `json:"errorKey"`
 						Stage      string `json:"stage"`
@@ -229,11 +231,11 @@ func TestFailureFixStageAHandlerFailuresAndAutomaticAttempts(t *testing.T) {
 			case "R3_auto":
 				if payload.Message != "admin.upstream.errors.autoDetectFailed" || len(payload.Failure.Attempts) != 2 {
 					t.Error("automatic detection lost either attempt")
-				} else if payload.Failure.Attempts[0].Platform != "newapi" || payload.Failure.Attempts[0].ErrorKey != "admin.upstream.errors.loginRejected" || payload.Failure.Attempts[1].Platform != "sub2api" || payload.Failure.Attempts[1].HTTPStatus != 404 {
+				} else if payload.Failure.Attempts[0].Platform != "newapi" || payload.Failure.Attempts[0].ErrorKey != ErrorBusinessRejected || errorCategory(payload.Failure.Attempts[0].ErrorKey) != ErrorRequest || payload.Failure.Attempts[0].HTTPStatus != 200 || payload.Failure.Attempts[0].Stage != "login" || payload.Failure.Attempts[1].Platform != "sub2api" || payload.Failure.Attempts[1].HTTPStatus != 404 {
 					t.Error("automatic detection attempts are inaccurate")
 				}
 			default:
-				if payload.Message != "admin.upstream.errors.loginRejected" || payload.Failure.ErrorKey != payload.Message {
+				if payload.Message != ErrorBusinessRejected || errorCategory(payload.Message) != ErrorRequest || payload.Failure.ErrorKey != payload.Message || payload.Failure.Stage != "login" || payload.Failure.HTTPStatus != 200 {
 					t.Error("structured login failure missing")
 				}
 			}

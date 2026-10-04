@@ -27,6 +27,42 @@ beforeEach(() => {
 afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.unstubAllGlobals(); localStorage.clear(); document.body.innerHTML = '' })
 
 describe('upstream stage B metadata-only edit', () => {
+ it.each([
+  ['password', 'user_key', 'newapi'],
+  ['user_key', 'password', 'newapi'],
+  ['password', 'token', 'sub2api'],
+  ['token', 'password', 'sub2api'],
+ ] as const)('requires new credentials when switching %s to %s', async (original, next, platform) => {
+  authMode = original
+  wrapper = mount(UpstreamView, { global: { stubs: { Teleport: true, Tooltip: { template: '<span><slot /></span>' }, SiteSettingsModal: true } } })
+  await flushPromises()
+  await wrapper.get('div.group.bg-card').findAll('button')[2].trigger('click')
+  await wrapper.get('#upstream-site-platform').setValue(platform)
+  await wrapper.get(`input[type="radio"][value="${next}"]`).setValue(true)
+  if (next === 'user_key') await wrapper.get('#upstream-site-user-id').setValue('42')
+  const form = () => wrapper!.get('[role="dialog"] form').element as HTMLFormElement
+  expect(form().checkValidity()).toBe(false)
+  form().requestSubmit()
+  await flushPromises()
+  expect(savedForm).toBeUndefined()
+  expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
+  expect(wrapper.get('div.group.bg-card').text()).toContain('已连接')
+  const credential = next === 'password' ? '#upstream-site-password' : next === 'user_key' ? '#upstream-site-user-key' : '#upstream-site-access-token'
+  expect((wrapper.get(credential).element as HTMLInputElement).required).toBe(true)
+  if (next === 'token') {
+   await wrapper.get('#upstream-site-refresh-token').setValue('fixture-refresh')
+   expect(form().checkValidity()).toBe(true)
+   await wrapper.get('#upstream-site-refresh-token').setValue('')
+  }
+  await wrapper.get(credential).setValue('fixture-new')
+  expect(form().checkValidity()).toBe(true)
+  await wrapper.get(credential).setValue('')
+  await wrapper.get('#upstream-site-platform').setValue(original === 'token' ? 'sub2api' : 'newapi')
+  await wrapper.get(`input[type="radio"][value="${original}"]`).setValue(true)
+  if (original === 'user_key') await wrapper.get('#upstream-site-user-id').setValue('42')
+  expect(form().checkValidity()).toBe(true)
+  expect(savedForm).toBeUndefined()
+ })
  it.each(['password', 'token', 'user_key'] as const)('allows %s name and remark updates with blank credential fields', async mode => {
   authMode = mode
   wrapper = mount(UpstreamView, { global: { stubs: { Teleport: true, Tooltip: { template: '<span><slot /></span>' }, SiteSettingsModal: true } } })

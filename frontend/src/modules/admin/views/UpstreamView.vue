@@ -108,6 +108,8 @@ const createEmptyForm = (): UpstreamSiteForm => ({
 })
 
 const newSiteForm = ref<UpstreamSiteForm>(createEmptyForm())
+const editingAuthMode = ref<UpstreamSiteForm['authMode']>('password')
+const credentialsRequired = computed(() => !editingSiteId.value || newSiteForm.value.authMode !== editingAuthMode.value)
 
 watch(
   () => newSiteForm.value.platform,
@@ -133,6 +135,7 @@ const handleAddSite = async () => {
 const handleEditSite = (site: UpstreamSite) => {
   clearAddFailure()
   editingSiteId.value = site.id
+  editingAuthMode.value = site.authMode ?? 'password'
   newSiteForm.value = {
     name: site.name,
     siteUrl: site.baseUrl,
@@ -1129,7 +1132,7 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
-              <p v-if="editingSiteId && newSiteForm.authMode !== 'password'" class="text-xs leading-5 text-muted-foreground sm:col-span-2">
+              <p v-if="editingSiteId && !credentialsRequired && newSiteForm.authMode !== 'password'" class="text-xs leading-5 text-muted-foreground sm:col-span-2">
                 {{ t('admin.upstream.modal.form.credentialEditHelp') }}
               </p>
 
@@ -1153,7 +1156,7 @@ onBeforeUnmount(() => {
               <!-- Password -->
               <div v-if="newSiteForm.authMode === 'password'" class="space-y-2">
                 <label for="upstream-site-password" class="text-sm font-medium text-foreground flex items-center gap-1">
-                  <span v-if="!editingSiteId" class="text-red-500">*</span>
+                  <span v-if="credentialsRequired" class="text-red-500">*</span>
                   {{ t('admin.upstream.modal.form.password') }}
                 </label>
                 <Input
@@ -1161,12 +1164,12 @@ onBeforeUnmount(() => {
                   v-model="newSiteForm.password"
                   name="password"
                   type="password"
-                  :placeholder="t(editingSiteId ? 'admin.upstream.modal.form.passwordEditPlaceholder' : 'admin.upstream.modal.form.passwordPlaceholder')"
+                  :placeholder="t(editingSiteId && !credentialsRequired ? 'admin.upstream.modal.form.passwordEditPlaceholder' : 'admin.upstream.modal.form.passwordPlaceholder')"
                   :disabled="isAdding"
-                  :required="!editingSiteId"
+                  :required="credentialsRequired"
                   class="bg-surface border-border/50 focus:border-primary h-10"
                 />
-                <p v-if="editingSiteId" class="text-xs leading-5 text-muted-foreground">
+                <p v-if="editingSiteId && !credentialsRequired" class="text-xs leading-5 text-muted-foreground">
                   {{ t('admin.upstream.modal.form.passwordEditHelp') }}
                 </p>
               </div>
@@ -1182,6 +1185,7 @@ onBeforeUnmount(() => {
                     id="upstream-site-access-token"
                     name="accessToken"
                     :disabled="isAdding"
+                    :required="credentialsRequired && !newSiteForm.refreshToken.trim()"
                     class="bg-surface border-border/50 focus:border-primary h-10"
                   />
                 </div>
@@ -1195,6 +1199,7 @@ onBeforeUnmount(() => {
                     name="refreshToken"
                     :placeholder="t('admin.upstream.modal.form.refreshTokenPlaceholder')"
                     :disabled="isAdding"
+                    :required="credentialsRequired && !newSiteForm.accessToken.trim()"
                     class="bg-surface border-border/50 focus:border-primary h-10"
                   />
                 </div>
@@ -1236,7 +1241,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="space-y-2">
                   <label for="upstream-site-user-key" class="text-sm font-medium text-foreground flex items-center gap-1">
-                    <span v-if="!editingSiteId" class="text-red-500">*</span>
+                    <span v-if="credentialsRequired" class="text-red-500">*</span>
                     {{ t('admin.upstream.modal.form.userKey') }}
                   </label>
                   <Input
@@ -1247,7 +1252,7 @@ onBeforeUnmount(() => {
                     :placeholder="t('admin.upstream.modal.form.userKeyPlaceholder')"
                     :disabled="isAdding"
                     autocomplete="off"
-                    :required="!editingSiteId"
+                    :required="credentialsRequired"
                     class="bg-surface border-border/50 focus:border-primary h-10"
                   />
                   <p class="text-xs leading-5 text-muted-foreground">

@@ -212,6 +212,7 @@ type Response struct {
 	BaseURL           string       `json:"baseUrl"`
 	Platform          Platform     `json:"platform"`
 	RequestedPlatform Platform     `json:"requestedPlatform"`
+	AuthMode          AuthMode     `json:"authMode"`
 	Account           string       `json:"account"`
 	Remark            string       `json:"remark"`
 	RechargeRate      float64      `json:"rechargeRate"`
@@ -237,6 +238,7 @@ func (r Response) IsEnabled() bool {
 }
 
 type Session struct {
+	AuthMode    AuthMode `json:",omitempty"`
 	Platform    Platform
 	BaseURL     string
 	Cookie      string

@@ -92,6 +92,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	if err := mySitesService.EnsureSchema(context.Background()); err != nil {
 		panic(err)
 	}
+	upstreamService.SetSiteReferenceChecker(mySitesService)
 	my_sites.RegisterRoutes(server.mux, mySitesService)
 	mySitesService.SetAdminAccountResolver(adminAccountsService)
 

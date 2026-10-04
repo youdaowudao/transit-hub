@@ -86,6 +86,7 @@ export interface UpstreamSite {
   baseUrl: string
   platform: ResolvedUpstreamPlatform
   requestedPlatform: UpstreamPlatform
+  authMode?: UpstreamAuthMode
   account: string
   rechargeRate: number
   enabled: boolean
@@ -121,4 +122,19 @@ export type SiteSyncPhase = 'idle' | 'syncing' | 'done' | 'error'
 export interface SiteSyncState {
   phase: SiteSyncPhase
   errorKey?: string
+}
+
+export interface UpstreamFailureAttempt {
+  platform?: ResolvedUpstreamPlatform
+  errorKey?: string
+  stage?: 'login' | 'refresh' | 'verify' | 'metrics'
+  httpStatus?: number
+  upstreamMessage?: string
+}
+
+export interface UpstreamFailure extends UpstreamFailureAttempt {
+  connections?: number
+  mappings?: number
+  attempts?: UpstreamFailureAttempt[]
+  fields?: string[]
 }

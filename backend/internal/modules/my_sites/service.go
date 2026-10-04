@@ -2153,3 +2153,42 @@ func formatAutoPricingNotify(mapping GroupMapping, siteName string, result autoP
 type requestError string
 
 func (e requestError) Error() string { return string(e) }
+
+// CountSiteReferences reads the complete local repositories. Runtime connection
+// lists intentionally filter missing states and cannot authorize deletion.
+func (s *Service) CountSiteReferences(ctx context.Context, userID, adminAccountID, siteID string) (connections, mappings int, err error) {
+	if s.repository == nil || s.connRepository == nil || strings.TrimSpace(userID) == "" || strings.TrimSpace(adminAccountID) == "" || strings.TrimSpace(siteID) == "" {
+		return 0, 0, fmt.Errorf("local site reference repositories unavailable")
+	}
+	items, err := s.connRepository.ListRealConnections(ctx, userID, adminAccountID)
+	if err != nil {
+		return 0, 0, err
+	}
+	state, err := s.repository.Get(ctx, userID, adminAccountID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if state != nil && (state.UserID != userID || state.AdminAccountID != adminAccountID) {
+		return 0, 0, fmt.Errorf("local site reference workspace mismatch")
+	}
+	for _, connection := range items {
+		if connection.UserID == userID && connection.WorkspaceAdminAccountID == adminAccountID && connection.UpstreamSiteID == siteID {
+			connections++
+		}
+	}
+	if state != nil {
+		for _, mapping := range state.Mappings {
+			referenced := mapping.PrimaryUpstreamSiteID == siteID
+			for _, target := range mapping.UpstreamTargets {
+				if target.SiteID == siteID {
+					referenced = true
+					break
+				}
+			}
+			if referenced {
+				mappings++
+			}
+		}
+	}
+	return connections, mappings, nil
+}

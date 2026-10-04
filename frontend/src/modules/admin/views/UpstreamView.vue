@@ -10,7 +10,7 @@ import { getConnectionHealthAdminGroups } from '../api/connectionHealth'
 import { listRealConnections } from '../api/mySites'
 import { useUpstreamSites } from '../composables/useUpstreamSites'
 import SiteSettingsModal from '../components/upstream/SiteSettingsModal.vue'
-import type { UpstreamGroupInfo, UpstreamMetricValue, UpstreamSite, UpstreamSiteForm, UpstreamStatus } from '../types/upstream'
+import type { UpstreamFailure, UpstreamGroupInfo, UpstreamMetricValue, UpstreamSite, UpstreamSiteForm, UpstreamStatus } from '../types/upstream'
 import type { AdminGroupHealth } from '../types/connectionHealth'
 import type { RealConnection } from '../types/mySites'
 import { sortUpstreamSites, type UpstreamSortDirection, type UpstreamSortField } from '../utils/upstream'
@@ -19,9 +19,10 @@ import { t, locale } from '@/locales'
 const router = useRouter()
 const searchQuery = ref('')
 const isAddModalOpen = ref(false)
-const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, streamRefreshSites, refreshSingleSite } = useUpstreamSites()
+const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, addFailure, clearAddFailure, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, streamRefreshSites, refreshSingleSite } = useUpstreamSites()
 const deletingSiteId = ref<string | null>(null)
 const deleteErrorKey = ref<string | null>(null)
+const deleteFailure = ref<UpstreamFailure | null>(null)
 const editingSiteId = ref<string | null>(null)
 const refreshIntervalSeconds = ref<number | null>(null)
 const remainingSeconds = ref(0)
@@ -107,6 +108,8 @@ const createEmptyForm = (): UpstreamSiteForm => ({
 })
 
 const newSiteForm = ref<UpstreamSiteForm>(createEmptyForm())
+const editingAuthMode = ref<UpstreamSiteForm['authMode']>('password')
+const credentialsRequired = computed(() => !editingSiteId.value || newSiteForm.value.authMode !== editingAuthMode.value)
 
 watch(
   () => newSiteForm.value.platform,
@@ -130,18 +133,20 @@ const handleAddSite = async () => {
 }
 
 const handleEditSite = (site: UpstreamSite) => {
+  clearAddFailure()
   editingSiteId.value = site.id
+  editingAuthMode.value = site.authMode ?? 'password'
   newSiteForm.value = {
     name: site.name,
     siteUrl: site.baseUrl,
     platform: site.platform,
-    authMode: 'password',
+    authMode: site.authMode ?? 'password',
     account: site.account,
     password: '',
     accessToken: '',
     refreshToken: '',
     tokenType: 'Bearer',
-    userId: '',
+    userId: site.authMode === 'user_key' ? site.account : '',
     rechargeRate: site.rechargeRate > 0 ? site.rechargeRate : 1,
     remark: site.remark,
   }
@@ -153,7 +158,18 @@ const editingSite = computed(() => {
   return upstreamSites.value.find(site => site.id === editingSiteId.value) ?? null
 })
 
+const openAddSiteModal = () => {
+  clearAddFailure()
+  isAddModalOpen.value = true
+}
+
+const failureFieldLabel = (field: string): string => {
+  const fields: Record<string, string> = { name: 'siteName', siteUrl: 'siteUrl', platform: 'platform', authMode: 'authMode', account: 'account', password: 'password', accessToken: 'accessToken', refreshToken: 'refreshToken', tokenType: 'tokenType', userId: 'userId', rechargeRate: 'rechargeRate', remark: 'remark' }
+  return fields[field] ? t(`admin.upstream.modal.form.${fields[field]}`) : t('admin.upstream.errors.invalidFields')
+}
+
 const closeSiteModal = () => {
+  clearAddFailure()
   isAddModalOpen.value = false
   editingSiteId.value = null
   newSiteForm.value = createEmptyForm()
@@ -162,11 +178,13 @@ const closeSiteModal = () => {
 const requestDeleteSite = (id: string) => {
   deletingSiteId.value = id
   deleteErrorKey.value = null
+  deleteFailure.value = null
 }
 
 const cancelDeleteSite = () => {
   deletingSiteId.value = null
   deleteErrorKey.value = null
+  deleteFailure.value = null
 }
 
 const confirmDeleteSite = async () => {
@@ -176,6 +194,7 @@ const confirmDeleteSite = async () => {
     cancelDeleteSite()
   } catch (error) {
     deleteErrorKey.value = error instanceof Error ? error.message : 'admin.upstream.errors.unknown'
+    deleteFailure.value = error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined) ?? null : null
   }
 }
 
@@ -495,7 +514,7 @@ onBeforeUnmount(() => {
           <RefreshCw v-else class="w-4 h-4" />
           {{ isRefreshing ? t('admin.upstream.refresh.refreshing') : t('admin.upstream.refresh.action') }}
         </Button>
-        <Button @click="isAddModalOpen = true" class="h-10 flex-1 gap-2 px-4 shadow-sm sm:flex-none">
+        <Button @click="openAddSiteModal" class="h-10 flex-1 gap-2 px-4 shadow-sm sm:flex-none">
           <Plus class="w-4 h-4" />
           {{ t('admin.upstream.addSite') }}
         </Button>
@@ -858,7 +877,12 @@ onBeforeUnmount(() => {
 
         <div v-if="deleteErrorKey" class="mt-5 flex items-start gap-2 rounded-xl border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
           <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
-          <span>{{ t(deleteErrorKey) }}</span>
+          <div class="min-w-0 space-y-1 break-words">
+            <p>{{ t(deleteErrorKey) }}</p>
+            <p v-if="deleteFailure?.connections !== undefined && deleteFailure?.mappings !== undefined">
+              {{ t('admin.upstream.delete.references', { connections: deleteFailure.connections, mappings: deleteFailure.mappings }) }}
+            </p>
+          </div>
         </div>
 
         <div class="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
@@ -979,7 +1003,21 @@ onBeforeUnmount(() => {
           <form @submit.prevent="handleAddSite" class="p-6">
             <div v-if="addErrorKey" class="mb-5 flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert" aria-live="polite">
               <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
-              <span>{{ t(addErrorKey) }}</span>
+              <div class="min-w-0 space-y-1 break-words">
+                <p>{{ t(addErrorKey) }}</p>
+                <p v-if="addErrorKey === 'admin.upstream.errors.invalidResponse'">{{ t('admin.upstream.failure.invalidResponseHelp') }}</p>
+                <p v-if="addFailure?.stage">{{ t('admin.upstream.failure.stage') }}{{ t(`admin.upstream.failure.stages.${addFailure.stage}`) }}</p>
+                <p v-if="addFailure?.httpStatus !== undefined">{{ t('admin.upstream.failure.httpStatus') }}{{ addFailure.httpStatus || t('admin.upstream.failure.noResponse') }}</p>
+                <p v-if="addFailure?.upstreamMessage">{{ t('admin.upstream.failure.upstreamMessage') }}{{ addFailure.upstreamMessage }}</p>
+                <p v-if="addFailure?.fields?.length">{{ t('admin.upstream.failure.fields') }}{{ addFailure.fields.map(failureFieldLabel).join('、') }}</p>
+                <div v-for="(attempt, index) in addFailure?.attempts ?? []" :key="index" class="space-y-1">
+                  <p>{{ attempt.platform === 'newapi' ? 'NewAPI' : 'Sub2API' }}：{{ t(attempt.errorKey ?? 'admin.upstream.errors.unknown') }}</p>
+                  <p v-if="attempt.errorKey === 'admin.upstream.errors.invalidResponse'">{{ t('admin.upstream.failure.invalidResponseHelp') }}</p>
+                  <p v-if="attempt.stage">{{ t('admin.upstream.failure.stage') }}{{ t(`admin.upstream.failure.stages.${attempt.stage}`) }}</p>
+                  <p v-if="attempt.httpStatus !== undefined">{{ t('admin.upstream.failure.httpStatus') }}{{ attempt.httpStatus || t('admin.upstream.failure.noResponse') }}</p>
+                  <p v-if="attempt.upstreamMessage">{{ t('admin.upstream.failure.upstreamMessage') }}{{ attempt.upstreamMessage }}</p>
+                </div>
+              </div>
             </div>
 
             <div v-if="editingSite" class="mb-5 flex items-center justify-between gap-4 rounded-xl border border-border/50 bg-surface px-4 py-3">
@@ -1094,6 +1132,10 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
+              <p v-if="editingSiteId && !credentialsRequired && newSiteForm.authMode !== 'password'" class="text-xs leading-5 text-muted-foreground sm:col-span-2">
+                {{ t('admin.upstream.modal.form.credentialEditHelp') }}
+              </p>
+
               <!-- Account -->
               <div v-if="newSiteForm.authMode === 'password'" class="space-y-2">
                 <label for="upstream-site-account" class="text-sm font-medium text-foreground flex items-center gap-1">
@@ -1114,7 +1156,7 @@ onBeforeUnmount(() => {
               <!-- Password -->
               <div v-if="newSiteForm.authMode === 'password'" class="space-y-2">
                 <label for="upstream-site-password" class="text-sm font-medium text-foreground flex items-center gap-1">
-                  <span v-if="!editingSiteId" class="text-red-500">*</span>
+                  <span v-if="credentialsRequired" class="text-red-500">*</span>
                   {{ t('admin.upstream.modal.form.password') }}
                 </label>
                 <Input
@@ -1122,12 +1164,12 @@ onBeforeUnmount(() => {
                   v-model="newSiteForm.password"
                   name="password"
                   type="password"
-                  :placeholder="t(editingSiteId ? 'admin.upstream.modal.form.passwordEditPlaceholder' : 'admin.upstream.modal.form.passwordPlaceholder')"
+                  :placeholder="t(editingSiteId && !credentialsRequired ? 'admin.upstream.modal.form.passwordEditPlaceholder' : 'admin.upstream.modal.form.passwordPlaceholder')"
                   :disabled="isAdding"
-                  :required="!editingSiteId"
+                  :required="credentialsRequired"
                   class="bg-surface border-border/50 focus:border-primary h-10"
                 />
-                <p v-if="editingSiteId" class="text-xs leading-5 text-muted-foreground">
+                <p v-if="editingSiteId && !credentialsRequired" class="text-xs leading-5 text-muted-foreground">
                   {{ t('admin.upstream.modal.form.passwordEditHelp') }}
                 </p>
               </div>
@@ -1143,6 +1185,7 @@ onBeforeUnmount(() => {
                     id="upstream-site-access-token"
                     name="accessToken"
                     :disabled="isAdding"
+                    :required="credentialsRequired && !newSiteForm.refreshToken.trim()"
                     class="bg-surface border-border/50 focus:border-primary h-10"
                   />
                 </div>
@@ -1156,6 +1199,7 @@ onBeforeUnmount(() => {
                     name="refreshToken"
                     :placeholder="t('admin.upstream.modal.form.refreshTokenPlaceholder')"
                     :disabled="isAdding"
+                    :required="credentialsRequired && !newSiteForm.accessToken.trim()"
                     class="bg-surface border-border/50 focus:border-primary h-10"
                   />
                 </div>
@@ -1197,7 +1241,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="space-y-2">
                   <label for="upstream-site-user-key" class="text-sm font-medium text-foreground flex items-center gap-1">
-                    <span class="text-red-500">*</span>
+                    <span v-if="credentialsRequired" class="text-red-500">*</span>
                     {{ t('admin.upstream.modal.form.userKey') }}
                   </label>
                   <Input
@@ -1208,7 +1252,7 @@ onBeforeUnmount(() => {
                     :placeholder="t('admin.upstream.modal.form.userKeyPlaceholder')"
                     :disabled="isAdding"
                     autocomplete="off"
-                    required
+                    :required="credentialsRequired"
                     class="bg-surface border-border/50 focus:border-primary h-10"
                   />
                   <p class="text-xs leading-5 text-muted-foreground">

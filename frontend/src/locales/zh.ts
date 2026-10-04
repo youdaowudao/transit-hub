@@ -2200,7 +2200,8 @@ export default {
         title: '确认删除上游站点？',
         description: '你将删除“{name}”，删除后需要重新添加和登录才能恢复。',
         cancel: '取消',
-        confirm: '确认删除'
+        confirm: '确认删除',
+        references: '引用数量：{connections} 条对接、{mappings} 条映射。'
       },
       action: {
         sync: '刷新',
@@ -2251,6 +2252,7 @@ export default {
         tlsFailed: '与上游建立 HTTPS 连接失败。',
         autoDetectFailed: '自动识别平台失败，请查看两次尝试的原因，或手动选择平台。',
         invalidFields: '请检查表单中填写不完整或无效的字段。',
+        siteInUse: '该站点仍被对接或调价映射引用，暂时不能删除。请先在“分组倍率”解除对接，并在“调价映射”移除映射。',
         invalidUrl: '站点 URL 无效，请检查后重试。',
         network: '网络或 CORS 请求失败，请检查站点地址与跨域配置。',
         auth: '登录失败，请检查账号或密码。',

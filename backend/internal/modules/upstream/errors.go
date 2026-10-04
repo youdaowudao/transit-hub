@@ -92,6 +92,7 @@ const (
 	ErrorTLSFailed            = "admin.upstream.errors.tlsFailed"
 	ErrorAutoDetectFailed     = "admin.upstream.errors.autoDetectFailed"
 	ErrorInvalidFields        = "admin.upstream.errors.invalidFields"
+	ErrorSiteInUse            = "admin.upstream.errors.siteInUse"
 )
 
 type FailureAttempt struct {
@@ -104,6 +105,10 @@ type FailureAttempt struct {
 
 type FieldValidationError struct{ Fields []string }
 
+type SiteInUseError struct{ Connections, Mappings int }
+
+func (e *SiteInUseError) Error() string { return ErrorSiteInUse }
+
 func (e *FieldValidationError) Error() string { return ErrorInvalidFields }
 
 func siteErrorKey(err error) string {
@@ -113,6 +118,10 @@ func siteErrorKey(err error) string {
 			return requestErr.Reason
 		}
 		return requestErr.MessageKey
+	}
+	var referencesErr *SiteInUseError
+	if errors.As(err, &referencesErr) {
+		return ErrorSiteInUse
 	}
 	var validationErr *FieldValidationError
 	if errors.As(err, &validationErr) {

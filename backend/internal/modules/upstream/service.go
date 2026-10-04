@@ -47,6 +47,11 @@ type syncFlight struct {
 	err      error
 }
 
+// SiteReferenceChecker reads complete local references without importing my_sites.
+type SiteReferenceChecker interface {
+	CountSiteReferences(ctx context.Context, userID, adminAccountID, siteID string) (connections, mappings int, err error)
+}
+
 // Service 管理上游站点的生命周期（创建、编辑、同步、删除）。
 // 站点运行时状态缓存在 Redis（通过 SiteCache），PostgreSQL 负责持久化。
 // 当系统设置开启了数据刷新频率时，定时器按配置的间隔自动同步各站点。
@@ -56,6 +61,7 @@ type Service struct {
 	repository       SiteRepository
 	cache            SiteCache
 	accounts         AdminAccountResolver
+	references       SiteReferenceChecker
 	refreshConfigs   map[refreshWorkspaceKey]RefreshConfig
 	initialSchedules map[refreshWorkspaceKey]bool
 	// groupCostSlots 限制跨站点成本采样的并发量；nil 仅用于不带 NewService 的单元测试。
@@ -71,6 +77,12 @@ type Service struct {
 
 func (s *Service) SetAdminAccountResolver(accounts AdminAccountResolver) {
 	s.accounts = accounts
+}
+
+func (s *Service) SetSiteReferenceChecker(checker SiteReferenceChecker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.references = checker
 }
 
 // requireCurrentAdminAccountID 解析当前工作区 ID，解析失败时返回错误（fail-closed）。
@@ -1185,6 +1197,21 @@ func (s *Service) Remove(ctx context.Context, userID string, id string) error {
 	}
 	if site.AdminAccountID != aid {
 		return newRequestError(ErrorNotFound, "")
+	}
+
+	// An absent or unreadable checker is not evidence that references are empty.
+	s.mu.Lock()
+	checker := s.references
+	s.mu.Unlock()
+	if checker == nil {
+		return newRequestError(ErrorRequest, "")
+	}
+	connections, mappings, checkErr := checker.CountSiteReferences(ctx, userID, aid, id)
+	if checkErr != nil || connections < 0 || mappings < 0 {
+		return newRequestError(ErrorRequest, "")
+	}
+	if connections > 0 || mappings > 0 {
+		return &SiteInUseError{Connections: connections, Mappings: mappings}
 	}
 
 	s.mu.Lock()

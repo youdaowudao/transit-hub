@@ -133,6 +133,8 @@ export interface UpstreamFailureAttempt {
 }
 
 export interface UpstreamFailure extends UpstreamFailureAttempt {
+  connections?: number
+  mappings?: number
   attempts?: UpstreamFailureAttempt[]
   fields?: string[]
 }

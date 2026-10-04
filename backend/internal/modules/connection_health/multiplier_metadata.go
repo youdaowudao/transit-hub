@@ -193,6 +193,10 @@ func (s *Service) multiplierLookupForWorkspaceWithConnectionsProgress(ctx contex
 	connectionsByAccount := make(map[string][]my_sites.RealConnection)
 	bindingKeys := make(map[string]map[string]struct{})
 	disabledSiteByAccount := make(map[string]string)
+	missingSiteByAccount := make(map[string]string)
+	missingSites := make(map[string]bool)
+	failedSiteByAccount := make(map[string]string)
+	failedSites := make(map[string]bool)
 	siteEnabled := make(map[string]*bool)
 	for _, connection := range connections {
 		accountID := strings.TrimSpace(connection.AdminAccountID)
@@ -206,11 +210,26 @@ func (s *Service) multiplierLookupForWorkspaceWithConnectionsProgress(ctx contex
 		if siteID != "" {
 			enabled, checked := siteEnabled[siteID]
 			if !checked {
-				if site, siteErr := s.sites.GetSite(ctx, siteID); siteErr == nil && site != nil {
-					value := site.IsEnabled()
-					enabled = &value
+				site, siteErr := s.sites.GetSite(ctx, siteID)
+				if siteErr != nil {
+					failedSites[siteID] = true
+				} else {
+					if site == nil {
+						missingSites[siteID] = true
+					} else {
+						value := site.IsEnabled()
+						enabled = &value
+					}
 				}
 				siteEnabled[siteID] = enabled
+			}
+			if failedSites[siteID] {
+				failedSiteByAccount[accountID] = siteID
+				continue
+			}
+			if missingSites[siteID] {
+				missingSiteByAccount[accountID] = siteID
+				continue
 			}
 			if enabled != nil && !*enabled {
 				disabledSiteByAccount[accountID] = siteID
@@ -227,7 +246,7 @@ func (s *Service) multiplierLookupForWorkspaceWithConnectionsProgress(ctx contex
 		bindingKeys[siteID][keyID] = struct{}{}
 	}
 
-	freshReady := s.prepareMultiplierSnapshotsProgress(ctx, metadataReader, userID, adminAccountID, upstream.Platform(platform), bindingKeys, waitForFresh, forceRefresh, started, completed)
+	freshReady := s.prepareMultiplierSnapshotsProgress(ctx, metadataReader, userID, adminAccountID, upstream.Platform(platform), bindingKeys, failedSites, waitForFresh, forceRefresh, started, completed)
 	if waitForFresh && !freshReady {
 		lookup.unavailable = true
 		return lookup
@@ -269,7 +288,16 @@ func (s *Service) multiplierLookupForWorkspaceWithConnectionsProgress(ctx contex
 		}
 		lookup.byAccount[accountID] = upstreamMultiplierResolution{status: status, reason: reason, info: resolved}
 	}
+	for accountID, siteID := range missingSiteByAccount {
+		if _, active := connectionsByAccount[accountID]; active {
+			continue
+		}
+		lookup.byAccount[accountID] = upstreamMultiplierResolution{status: MultiplierResolutionMissing, info: upstreamKeyGroupInfo{siteID: siteID}}
+	}
 	for accountID, siteID := range disabledSiteByAccount {
+		if _, missing := missingSiteByAccount[accountID]; missing {
+			continue
+		}
 		if _, active := connectionsByAccount[accountID]; active {
 			continue
 		}
@@ -278,6 +306,13 @@ func (s *Service) multiplierLookupForWorkspaceWithConnectionsProgress(ctx contex
 			info:   upstreamKeyGroupInfo{siteID: siteID},
 		}
 	}
+	// A later successful cache read must not erase this round's failed read.
+	// Other accounts still retain their independent valid snapshot results.
+	for accountID, siteID := range failedSiteByAccount {
+		lookup.unavailable = true
+		lookup.byAccount[accountID] = upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSiteUnavailable, info: upstreamKeyGroupInfo{siteID: siteID}}
+	}
+
 	for siteID := range bindingKeys {
 		entry := s.multiplierSnapshots[multiplierSnapshotKey(userID, adminAccountID, siteID)]
 		if entry == nil || entry.status == "" || entry.status == "unavailable" || entry.status == multiplierResolutionUpdating {
@@ -288,7 +323,7 @@ func (s *Service) multiplierLookupForWorkspaceWithConnectionsProgress(ctx contex
 }
 
 func (s *Service) prepareMultiplierSnapshots(ctx context.Context, reader UpstreamKeyMetadataReader, userID string, adminAccountID string, platform upstream.Platform, bindingKeys map[string]map[string]struct{}, waitForFresh bool, forceRefresh bool) bool {
-	return s.prepareMultiplierSnapshotsProgress(ctx, reader, userID, adminAccountID, platform, bindingKeys, waitForFresh, forceRefresh, nil, nil)
+	return s.prepareMultiplierSnapshotsProgress(ctx, reader, userID, adminAccountID, platform, bindingKeys, nil, waitForFresh, forceRefresh, nil, nil)
 }
 
 type multiplierSnapshotWaiter struct {
@@ -296,7 +331,7 @@ type multiplierSnapshotWaiter struct {
 	done   <-chan struct{}
 }
 
-func (s *Service) prepareMultiplierSnapshotsProgress(ctx context.Context, reader UpstreamKeyMetadataReader, userID string, adminAccountID string, platform upstream.Platform, bindingKeys map[string]map[string]struct{}, waitForFresh bool, forceRefresh bool, started func([]string), completed func(string)) bool {
+func (s *Service) prepareMultiplierSnapshotsProgress(ctx context.Context, reader UpstreamKeyMetadataReader, userID string, adminAccountID string, platform upstream.Platform, bindingKeys map[string]map[string]struct{}, failedSites map[string]bool, waitForFresh bool, forceRefresh bool, started func([]string), completed func(string)) bool {
 	orderedSites := make([]string, 0, len(bindingKeys))
 	for siteID := range bindingKeys {
 		orderedSites = append(orderedSites, siteID)
@@ -327,6 +362,12 @@ func (s *Service) prepareMultiplierSnapshotsProgress(ctx context.Context, reader
 		}
 		if strings.HasPrefix(key, prefix) {
 			if _, needed := bindingKeys[entry.siteID]; !needed {
+				// A cache read failure does not prove this referenced site was
+				// unlinked. Preserve its existing retry history without refreshing it.
+				if failedSites[entry.siteID] {
+					entry.lastAccessAt = now
+					continue
+				}
 				closeMultiplierSnapshotWaiters(entry)
 				delete(s.multiplierSnapshots, key)
 			}

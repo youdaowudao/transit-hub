@@ -268,6 +268,11 @@ func writeWorkspaceError(w http.ResponseWriter, err error) {
 }
 
 func writeUpstreamError(w http.ResponseWriter, err error) {
+	var referencesErr *SiteInUseError
+	if errors.As(err, &referencesErr) {
+		httpjson.Write(w, http.StatusConflict, map[string]any{"message": ErrorSiteInUse, "failure": map[string]int{"connections": referencesErr.Connections, "mappings": referencesErr.Mappings}})
+		return
+	}
 	if err != nil && strings.Contains(err.Error(), "adminAccounts") {
 		httpjson.WriteError(w, http.StatusConflict, err.Error())
 		return

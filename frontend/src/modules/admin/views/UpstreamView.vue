@@ -10,7 +10,7 @@ import { getConnectionHealthAdminGroups } from '../api/connectionHealth'
 import { listRealConnections } from '../api/mySites'
 import { useUpstreamSites } from '../composables/useUpstreamSites'
 import SiteSettingsModal from '../components/upstream/SiteSettingsModal.vue'
-import type { UpstreamGroupInfo, UpstreamMetricValue, UpstreamSite, UpstreamSiteForm, UpstreamStatus } from '../types/upstream'
+import type { UpstreamFailure, UpstreamGroupInfo, UpstreamMetricValue, UpstreamSite, UpstreamSiteForm, UpstreamStatus } from '../types/upstream'
 import type { AdminGroupHealth } from '../types/connectionHealth'
 import type { RealConnection } from '../types/mySites'
 import { sortUpstreamSites, type UpstreamSortDirection, type UpstreamSortField } from '../utils/upstream'
@@ -22,6 +22,7 @@ const isAddModalOpen = ref(false)
 const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, addFailure, clearAddFailure, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, streamRefreshSites, refreshSingleSite } = useUpstreamSites()
 const deletingSiteId = ref<string | null>(null)
 const deleteErrorKey = ref<string | null>(null)
+const deleteFailure = ref<UpstreamFailure | null>(null)
 const editingSiteId = ref<string | null>(null)
 const refreshIntervalSeconds = ref<number | null>(null)
 const remainingSeconds = ref(0)
@@ -174,11 +175,13 @@ const closeSiteModal = () => {
 const requestDeleteSite = (id: string) => {
   deletingSiteId.value = id
   deleteErrorKey.value = null
+  deleteFailure.value = null
 }
 
 const cancelDeleteSite = () => {
   deletingSiteId.value = null
   deleteErrorKey.value = null
+  deleteFailure.value = null
 }
 
 const confirmDeleteSite = async () => {
@@ -188,6 +191,7 @@ const confirmDeleteSite = async () => {
     cancelDeleteSite()
   } catch (error) {
     deleteErrorKey.value = error instanceof Error ? error.message : 'admin.upstream.errors.unknown'
+    deleteFailure.value = error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined) ?? null : null
   }
 }
 
@@ -870,7 +874,12 @@ onBeforeUnmount(() => {
 
         <div v-if="deleteErrorKey" class="mt-5 flex items-start gap-2 rounded-xl border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
           <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
-          <span>{{ t(deleteErrorKey) }}</span>
+          <div class="min-w-0 space-y-1 break-words">
+            <p>{{ t(deleteErrorKey) }}</p>
+            <p v-if="deleteFailure?.connections !== undefined && deleteFailure?.mappings !== undefined">
+              {{ t('admin.upstream.delete.references', { connections: deleteFailure.connections, mappings: deleteFailure.mappings }) }}
+            </p>
+          </div>
         </div>
 
         <div class="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">

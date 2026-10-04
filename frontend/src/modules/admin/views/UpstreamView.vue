@@ -136,13 +136,13 @@ const handleEditSite = (site: UpstreamSite) => {
     name: site.name,
     siteUrl: site.baseUrl,
     platform: site.platform,
-    authMode: 'password',
+    authMode: site.authMode ?? 'password',
     account: site.account,
     password: '',
     accessToken: '',
     refreshToken: '',
     tokenType: 'Bearer',
-    userId: '',
+    userId: site.authMode === 'user_key' ? site.account : '',
     rechargeRate: site.rechargeRate > 0 ? site.rechargeRate : 1,
     remark: site.remark,
   }
@@ -1120,6 +1120,10 @@ onBeforeUnmount(() => {
                 </div>
               </div>
 
+              <p v-if="editingSiteId && newSiteForm.authMode !== 'password'" class="text-xs leading-5 text-muted-foreground sm:col-span-2">
+                {{ t('admin.upstream.modal.form.credentialEditHelp') }}
+              </p>
+
               <!-- Account -->
               <div v-if="newSiteForm.authMode === 'password'" class="space-y-2">
                 <label for="upstream-site-account" class="text-sm font-medium text-foreground flex items-center gap-1">
@@ -1223,7 +1227,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div class="space-y-2">
                   <label for="upstream-site-user-key" class="text-sm font-medium text-foreground flex items-center gap-1">
-                    <span class="text-red-500">*</span>
+                    <span v-if="!editingSiteId" class="text-red-500">*</span>
                     {{ t('admin.upstream.modal.form.userKey') }}
                   </label>
                   <Input
@@ -1234,7 +1238,7 @@ onBeforeUnmount(() => {
                     :placeholder="t('admin.upstream.modal.form.userKeyPlaceholder')"
                     :disabled="isAdding"
                     autocomplete="off"
-                    required
+                    :required="!editingSiteId"
                     class="bg-surface border-border/50 focus:border-primary h-10"
                   />
                   <p class="text-xs leading-5 text-muted-foreground">

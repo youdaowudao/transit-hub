@@ -2127,6 +2127,7 @@ export default {
           passwordPlaceholder: '输入密码',
           passwordEditPlaceholder: '不修改密码请留空',
           passwordEditHelp: '留空时不会重新登录，也不会修改已保存的登录会话；填写新密码后才会重新登录并更新会话。',
+          credentialEditHelp: '留空时保留已保存的登录会话；填写新凭据后重新登录。',
           accessToken: 'Access Token',
           accessTokenPlaceholder: '粘贴 access_token，可留空并仅提供 refresh_token',
           refreshToken: 'Refresh Token',

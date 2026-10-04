@@ -633,7 +633,7 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 	}
 	site.Remark = strings.TrimSpace(dto.Remark)
 	site.RechargeRate = dto.RechargeRate
-	shouldRelogin := strings.TrimSpace(dto.Password) != "" || strings.TrimSpace(dto.AccessToken) != "" || strings.TrimSpace(dto.RefreshToken) != ""
+	shouldRelogin := hasNewCredentials(dto)
 
 	if shouldRelogin {
 		log.Printf("[upstream] 更新站点登录开始 id=%s name=%q host=%s", id, safeUpstreamMessage(dto.Name), safeHost(dto.SiteURL))
@@ -1356,6 +1356,7 @@ func validateCreate(dto CreateRequest) error {
 
 func validateUpdate(dto UpdateRequest) error {
 	fields := make([]string, 0)
+	hasCredentials := hasNewCredentials(dto)
 	if strings.TrimSpace(dto.Name) == "" {
 		fields = append(fields, "name")
 	}
@@ -1377,14 +1378,17 @@ func validateUpdate(dto UpdateRequest) error {
 	if normalizedAuthMode(dto.AuthMode) == AuthModePassword && strings.TrimSpace(dto.Account) == "" {
 		fields = append(fields, "account")
 	}
-	if normalizedAuthMode(dto.AuthMode) == AuthModeToken && strings.TrimSpace(dto.AccessToken) == "" && strings.TrimSpace(dto.RefreshToken) == "" {
+	if hasCredentials && normalizedAuthMode(dto.AuthMode) == AuthModeToken && strings.TrimSpace(dto.AccessToken) == "" && strings.TrimSpace(dto.RefreshToken) == "" {
 		fields = append(fields, "accessToken")
 	}
-	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey && strings.TrimSpace(dto.AccessToken) == "" {
+	if hasCredentials && normalizedAuthMode(dto.AuthMode) == AuthModeUserKey && strings.TrimSpace(dto.AccessToken) == "" {
 		fields = append(fields, "accessToken")
 	}
 	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey && strings.TrimSpace(dto.UserID) == "" {
 		fields = append(fields, "userId")
+	}
+	if hasCredentials && normalizedAuthMode(dto.AuthMode) == AuthModePassword && strings.TrimSpace(dto.Password) == "" {
+		fields = append(fields, "password")
 	}
 	if dto.RechargeRate <= 0 {
 		fields = append(fields, "rechargeRate")
@@ -1481,6 +1485,7 @@ func toResponse(site *Site) Response {
 		BaseURL:           site.BaseURL,
 		Platform:          site.Platform,
 		RequestedPlatform: site.RequestedPlatform,
+		AuthMode:          siteAuthMode(site),
 		Account:           site.Account,
 		Remark:            site.Remark,
 		RechargeRate:      site.RechargeRate,
@@ -1624,4 +1629,24 @@ func logSiteFailure(event, id, name, baseURL string, err error) {
 		stage, status = detail.Stage, detail.StatusCode
 	}
 	log.Printf("[upstream] %s site=%s name=%q host=%s stage=%s reason=%s status=%d", event, id, safeUpstreamMessage(name), safeHost(baseURL), stage, siteErrorKey(err), status)
+}
+
+// Legacy Sub2API token sessions cannot distinguish password from token login;
+// keep the historical password selection until a new successful login records it.
+func siteAuthMode(site *Site) AuthMode {
+	if site.Session == nil {
+		return AuthModePassword
+	}
+	switch site.Session.AuthMode {
+	case AuthModePassword, AuthModeToken, AuthModeUserKey:
+		return site.Session.AuthMode
+	}
+	if site.Platform == PlatformNewAPI && strings.TrimSpace(site.Session.Cookie) == "" {
+		return AuthModeUserKey
+	}
+	return AuthModePassword
+}
+
+func hasNewCredentials(dto UpdateRequest) bool {
+	return strings.TrimSpace(dto.Password) != "" || strings.TrimSpace(dto.AccessToken) != "" || strings.TrimSpace(dto.RefreshToken) != ""
 }

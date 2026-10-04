@@ -86,6 +86,7 @@ export interface UpstreamSite {
   baseUrl: string
   platform: ResolvedUpstreamPlatform
   requestedPlatform: UpstreamPlatform
+  authMode?: UpstreamAuthMode
   account: string
   rechargeRate: number
   enabled: boolean

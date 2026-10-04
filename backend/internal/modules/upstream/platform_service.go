@@ -132,7 +132,7 @@ func (s *PlatformService) LoginWithToken(baseURL string, platform Platform, acco
 	if tokenType == "" {
 		tokenType = "Bearer"
 	}
-	session := Session{Platform: PlatformSub2API, BaseURL: normalizedURL, AccessToken: accessToken, RefreshToken: refreshToken, TokenType: tokenType}
+	session := Session{AuthMode: AuthModeToken, Platform: PlatformSub2API, BaseURL: normalizedURL, AccessToken: accessToken, RefreshToken: refreshToken, TokenType: tokenType}
 	if session.RefreshToken != "" {
 		refreshedSession, err := s.refreshSub2APISession(session)
 		if err != nil {
@@ -163,6 +163,7 @@ func (s *PlatformService) LoginWithUserKey(baseURL string, userID string, access
 		return LoginResult{}, newRequestError(ErrorAuth, PlatformNewAPI)
 	}
 	session := Session{
+		AuthMode:    AuthModeUserKey,
 		Platform:    PlatformNewAPI,
 		BaseURL:     normalizedURL,
 		UserID:      userID,
@@ -225,7 +226,7 @@ func (s *PlatformService) refreshSub2APISessionContext(ctx context.Context, sess
 		next := time.Now().UnixMilli() + int64(*expiresIn*1000)
 		expiresAt = &next
 	}
-	return Session{Platform: PlatformSub2API, BaseURL: session.BaseURL, AccessToken: *accessToken, RefreshToken: refreshToken, TokenType: tokenType, ExpiresAt: expiresAt}, nil
+	return Session{AuthMode: session.AuthMode, Platform: PlatformSub2API, BaseURL: session.BaseURL, AccessToken: *accessToken, RefreshToken: refreshToken, TokenType: tokenType, ExpiresAt: expiresAt}, nil
 }
 
 func (s *PlatformService) FetchMetrics(session Session) (Metrics, error) {
@@ -1542,7 +1543,7 @@ func (s *PlatformService) loginNewAPI(baseURL string, username string, password 
 	}
 	loginData := dataRecord(response.Payload)
 	userID := newAPIUserID(loginData)
-	session := Session{Platform: PlatformNewAPI, BaseURL: baseURL, Cookie: cookieHeader(response.Header), UserID: userID}
+	session := Session{AuthMode: AuthModePassword, Platform: PlatformNewAPI, BaseURL: baseURL, Cookie: cookieHeader(response.Header), UserID: userID}
 	if strings.TrimSpace(session.Cookie) == "" {
 		return LoginResult{}, incompleteLogin(PlatformNewAPI, "login", response)
 	}
@@ -1584,7 +1585,7 @@ func (s *PlatformService) loginSub2API(baseURL string, email string, password st
 		next := time.Now().UnixMilli() + int64(*expiresIn*1000)
 		expiresAt = &next
 	}
-	session := Session{Platform: PlatformSub2API, BaseURL: baseURL, AccessToken: *accessToken, RefreshToken: refreshToken, TokenType: tokenType, ExpiresAt: expiresAt}
+	session := Session{AuthMode: AuthModePassword, Platform: PlatformSub2API, BaseURL: baseURL, AccessToken: *accessToken, RefreshToken: refreshToken, TokenType: tokenType, ExpiresAt: expiresAt}
 	metrics, err := s.fetchSub2APIMetrics(session)
 	if err != nil {
 		return LoginResult{}, err

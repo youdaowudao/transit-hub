@@ -27,29 +27,30 @@ const (
 // 所有金额均为核算金额，上游指标已乘以站点的 rechargeRate。
 // TodayProfit/TodayPurchase/NetProfit 为 *float64，nil 表示该指标不可用。
 type MetricsResponse struct {
-	Date                  string                 `json:"date"`                       // 指标所属的固定新加坡业务日
-	Timezone              string                 `json:"timezone"`                   // 业务日时区，固定为 Asia/Singapore
-	TodayProfit           *float64               `json:"todayProfit"`                // 今日盈利额度；nil 表示营收不可用
-	SiteBalance           float64                `json:"siteBalance"`                // 站点用户总余额：所有非 admin 用户余额之和
-	TodayPurchase         *float64               `json:"todayPurchase"`              // 今日进货额度；nil 表示成本不完整
-	NetProfit             *float64               `json:"netProfit"`                  // 今日净利润；任一分项为 nil 时为 nil
-	ConfirmedCost         *float64               `json:"confirmedCost,omitempty"`    // 部分成本时的已确认成本下限
-	NetProfitCeiling      *float64               `json:"netProfitCeiling,omitempty"` // 部分成本时的暂估净利润上限
-	SettlementStatus      string                 `json:"settlementStatus,omitempty"` // final/fallback/partial/provisional/unavailable
-	UpstreamBalance       float64                `json:"upstreamBalance"`            // 上游总余额：所有上游站点余额（核算金额）之和
-	GroupCount            int                    `json:"groupCount"`                 // 管理员站点分组总数，省去前端单独请求
-	MetricErrors          map[string]string      `json:"metricErrors,omitempty"`     // 局部指标拉取失败原因
-	CostQuality           *CostQuality           `json:"costQuality,omitempty"`      // 成本质量信息，成本不完整时必须存在
-	AdditionalCosts       *AdditionalCostSummary `json:"additionalCosts,omitempty"`
-	OperatingCost         *float64               `json:"operatingCost,omitempty"`
-	AdjustedNetProfit     *float64               `json:"adjustedNetProfit,omitempty"`
-	AdjustedProfitMargin  *float64               `json:"adjustedProfitMargin,omitempty"`
-	AccountSnapshotRunID  string                 `json:"accountSnapshotRunId,omitempty"`
-	AccountExpectedCount  *int                   `json:"accountExpectedCount,omitempty"`
-	AccountCompletedCount *int                   `json:"accountCompletedCount,omitempty"`
-	AccountStatsQuality   string                 `json:"accountStatsQuality,omitempty"`
-	AccountPurchaseCost   *float64               `json:"accountPurchaseCost,omitempty"`
-	ReplacementDeduction  *float64               `json:"replacementDeduction,omitempty"`
+	Date                        string                 `json:"date"`                       // 指标所属的固定新加坡业务日
+	Timezone                    string                 `json:"timezone"`                   // 业务日时区，固定为 Asia/Singapore
+	TodayProfit                 *float64               `json:"todayProfit"`                // 今日盈利额度；nil 表示营收不可用
+	SiteBalance                 float64                `json:"siteBalance"`                // 站点用户总余额：所有非 admin 用户余额之和
+	TodayPurchase               *float64               `json:"todayPurchase"`              // 今日进货额度；nil 表示成本不完整
+	NetProfit                   *float64               `json:"netProfit"`                  // 今日净利润；任一分项为 nil 时为 nil
+	ConfirmedCost               *float64               `json:"confirmedCost,omitempty"`    // 部分成本时的已确认成本下限
+	NetProfitCeiling            *float64               `json:"netProfitCeiling,omitempty"` // 部分成本时的暂估净利润上限
+	SettlementStatus            string                 `json:"settlementStatus,omitempty"` // final/fallback/partial/provisional/unavailable
+	UpstreamBalance             float64                `json:"upstreamBalance"`            // 上游总余额：所有上游站点余额（核算金额）之和
+	GroupCount                  int                    `json:"groupCount"`                 // 管理员站点分组总数，省去前端单独请求
+	MetricErrors                map[string]string      `json:"metricErrors,omitempty"`     // 局部指标拉取失败原因
+	CostQuality                 *CostQuality           `json:"costQuality,omitempty"`      // 成本质量信息，成本不完整时必须存在
+	AdditionalCosts             *AdditionalCostSummary `json:"additionalCosts,omitempty"`
+	OperatingCost               *float64               `json:"operatingCost,omitempty"`
+	AdjustedNetProfit           *float64               `json:"adjustedNetProfit,omitempty"`
+	AdjustedProfitMargin        *float64               `json:"adjustedProfitMargin,omitempty"`
+	AdjustedProfitMarginQuality string                 `json:"adjustedProfitMarginQuality"` // exact/ceiling/unavailable
+	AccountSnapshotRunID        string                 `json:"accountSnapshotRunId,omitempty"`
+	AccountExpectedCount        *int                   `json:"accountExpectedCount,omitempty"`
+	AccountCompletedCount       *int                   `json:"accountCompletedCount,omitempty"`
+	AccountStatsQuality         string                 `json:"accountStatsQuality,omitempty"`
+	AccountPurchaseCost         *float64               `json:"accountPurchaseCost,omitempty"`
+	ReplacementDeduction        *float64               `json:"replacementDeduction,omitempty"`
 }
 
 // CostQuality 描述本次成本采集的完整性与质量信息，前端根据此字段分级展示。
@@ -246,12 +247,14 @@ type GroupUsageTodayResponse struct {
 // GroupProfitTodayResponse 是独立于分组营收的真实利润响应。
 // 某些分组本轮读取失败时会保留最后成功值并通过 FallbackGroups 提示。
 type GroupProfitTodayResponse struct {
-	Date              string                `json:"date"`
-	TotalProfit       float64               `json:"totalProfit"`
-	Groups            []GroupUsageTodayItem `json:"groups"`
-	FallbackGroups    int                   `json:"fallbackGroups,omitempty"`
-	UnavailableGroups int                   `json:"unavailableGroups,omitempty"`
-	FallbackAt        *time.Time            `json:"fallbackAt,omitempty"`
+	Date               string                `json:"date"`
+	TotalProfit        float64               `json:"totalProfit"`
+	Groups             []GroupUsageTodayItem `json:"groups"`
+	FallbackGroups     int                   `json:"fallbackGroups,omitempty"`
+	UnavailableGroups  int                   `json:"unavailableGroups,omitempty"`
+	FallbackAt         *time.Time            `json:"fallbackAt,omitempty"`
+	CollectedAt        *time.Time            `json:"collectedAt,omitempty"`
+	UnsplittableGroups int                   `json:"unsplittableGroups,omitempty"`
 }
 
 type GroupMetricCacheItem struct {
@@ -280,25 +283,37 @@ type GroupUsageTodayItem struct {
 // UpstreamKeyUsageTodayResponse 是 GET /api/dashboard/upstream-key-usage-today 返回的
 // 「今日成本」下钻明细：当前工作区所有上游站点中，今天有消费的 key 列表。
 type UpstreamKeyUsageTodayResponse struct {
-	Date        string                      `json:"date"`
-	Total       float64                     `json:"total"`
-	Keys        []UpstreamKeyUsageTodayItem `json:"keys"`
-	FailedSites int                         `json:"failedSites,omitempty"` // 按首页缓存成本口径统计的不可用站点数
-	TotalSites  int                         `json:"totalSites,omitempty"`  // 按首页缓存成本口径统计的目标站点数
+	Date               string                      `json:"date"`
+	Total              float64                     `json:"total"`
+	Keys               []UpstreamKeyUsageTodayItem `json:"keys"`
+	FailedSites        int                         `json:"failedSites,omitempty"` // 按首页缓存成本口径统计的不可用站点数
+	TotalSites         int                         `json:"totalSites,omitempty"`  // 按首页缓存成本口径统计的目标站点数
+	Sites              []UpstreamKeyUsageSite      `json:"sites"`
+	AutoRefreshEnabled bool                        `json:"autoRefreshEnabled"`
+}
+
+type UpstreamKeyUsageSite struct {
+	SiteID      string     `json:"siteId"`
+	SiteName    string     `json:"siteName"`
+	Status      string     `json:"status"`
+	CollectedAt *time.Time `json:"collectedAt,omitempty"`
+	ErrorKey    string     `json:"errorKey,omitempty"`
 }
 
 // UpstreamKeyUsageTodayItem 是单个 key 的今日消费明细。
 // TodayAmount 已乘以所属站点的 rechargeRate，口径与仪表盘「今日成本」卡片一致；RawAmount 为上游平台原始金额。
 type UpstreamKeyUsageTodayItem struct {
-	SiteID       string  `json:"siteId"`
-	SiteName     string  `json:"siteName"`
-	Platform     string  `json:"platform"`
-	KeyID        string  `json:"keyId"`
-	KeyName      string  `json:"keyName"`
-	GroupName    string  `json:"groupName"`
-	TodayAmount  float64 `json:"todayAmount"`
-	RawAmount    float64 `json:"rawAmount"`
-	RechargeRate float64 `json:"rechargeRate"`
+	SiteID       string   `json:"siteId"`
+	SiteName     string   `json:"siteName"`
+	Platform     string   `json:"platform"`
+	KeyID        string   `json:"keyId"`
+	KeyIDs       []string `json:"keyIds"`
+	Merged       bool     `json:"merged"`
+	KeyName      string   `json:"keyName"`
+	GroupName    string   `json:"groupName"`
+	TodayAmount  float64  `json:"todayAmount"`
+	RawAmount    float64  `json:"rawAmount"`
+	RechargeRate float64  `json:"rechargeRate"`
 }
 
 // UpstreamBalanceBreakdownResponse 是 GET /api/dashboard/upstream-balance-breakdown 返回的

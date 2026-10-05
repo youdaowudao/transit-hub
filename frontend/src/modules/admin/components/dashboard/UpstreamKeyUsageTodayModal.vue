@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { AlertTriangle, ArrowDownWideNarrow, ArrowUpWideNarrow, Loader2, RefreshCw, ShoppingCart, X } from 'lucide-vue-next'
-import { getUpstreamKeyUsageToday, type UpstreamKeyUsageTodayItem } from '../../api/dashboardAdmin'
-import { formatAmount } from '../../utils/dashboard'
+import { getUpstreamKeyUsageToday, type UpstreamKeyUsageTodayItem, type UpstreamKeyUsageSnapshotSite } from '../../api/dashboardAdmin'
+import { formatAmount, formatDateTime } from '../../utils/dashboard'
 
 const props = defineProps<{
   open: boolean
@@ -19,7 +19,11 @@ const keys = ref<UpstreamKeyUsageTodayItem[]>([])
 const total = ref(0)
 const failedSites = ref(0)
 const totalSites = ref(0)
+const sites = ref<UpstreamKeyUsageSnapshotSite[]>([])
+const autoRefreshEnabled = ref<boolean | undefined>()
+const siteStatus = (status: UpstreamKeyUsageSnapshotSite['status']) => ({ ok: '读取完整', retained: '保留', missing: '不可用' }[status])
 const successfulSites = computed(() => Math.max(totalSites.value - failedSites.value, 0))
+const allMissing = computed(() => totalSites.value > 0 && successfulSites.value === 0)
 // 默认按金额从高到低排序；toggle 后按金额从低到高，金额相同时用 key 名排序，均不触发新的请求。
 const sortAsc = ref(false)
 
@@ -55,6 +59,8 @@ const loadData = async () => {
     total.value = response.total ?? 0
     failedSites.value = response.failedSites ?? 0
     totalSites.value = response.totalSites ?? 0
+    sites.value = response.sites ?? []
+    autoRefreshEnabled.value = response.autoRefreshEnabled
   } catch (err) {
     error.value = loadErrorKey(err)
   } finally {
@@ -89,7 +95,7 @@ watch(() => props.open, (isOpen) => {
             <div class="min-w-0">
               <h2 class="text-lg font-semibold text-foreground">{{ t('admin.dashboard.upstreamKeyUsage.title') }}</h2>
               <p class="break-words text-sm text-muted-foreground">
-                {{ t('admin.dashboard.upstreamKeyUsage.subtitle', { count: keys.length, total: formatAmount(total), successful: successfulSites, failed: failedSites }) }}
+                {{ t('admin.dashboard.upstreamKeyUsage.subtitle', { count: keys.length, total: formatAmount(allMissing ? null : total), successful: successfulSites, failed: failedSites }) }}
               </p>
             </div>
           </div>
@@ -143,12 +149,14 @@ watch(() => props.open, (isOpen) => {
             <span>{{ t('admin.dashboard.upstreamKeyUsage.partialWarning', { failed: failedSites, total: totalSites }) }}</span>
           </div>
 
+          <p v-if="!loading && !error && autoRefreshEnabled === false" class="mb-4 text-sm text-muted-foreground">当前未开启自动刷新，数据来自最近一次手动刷新</p>
+
           <div
             v-if="!loading && !error && sortedKeys.length === 0"
             class="flex flex-col items-center justify-center gap-2 py-12 text-center"
           >
             <ShoppingCart class="h-8 w-8 text-muted-foreground/40" />
-            <p class="text-sm text-muted-foreground">{{ t('admin.dashboard.upstreamKeyUsage.empty') }}</p>
+            <p class="text-sm text-muted-foreground">{{ allMissing ? '暂无可用的今日逐 Key 用量' : t('admin.dashboard.upstreamKeyUsage.empty') }}</p>
           </div>
 
           <div v-else-if="!loading && !error" class="max-h-[60vh] overflow-y-auto rounded-xl border border-border/60">
@@ -171,11 +179,17 @@ watch(() => props.open, (isOpen) => {
                     <div class="font-medium">{{ item.siteName }}</div>
                     <div class="text-xs text-muted-foreground">{{ platformLabel(item.platform) }}</div>
                   </td>
-                  <td class="px-4 py-3 align-middle font-medium text-foreground">{{ item.keyName }}</td>
+                  <td class="px-4 py-3 align-middle font-medium text-foreground">{{ item.keyName }}<p v-if="item.merged" class="text-xs font-normal text-muted-foreground">同名 Token 无法拆分</p></td>
                   <td class="px-4 py-3 align-middle text-muted-foreground">{{ item.groupName }}</td>
                   <td class="px-4 py-3 align-middle text-right text-foreground">{{ formatAmount(item.todayAmount) }}</td>
                 </tr>
               </tbody>
+            </table>
+          </div>
+          <div v-if="!loading && !error && sites.length" class="mt-4 max-h-[25vh] overflow-y-auto rounded-xl border border-border/60">
+            <table class="w-full text-sm">
+              <thead class="bg-surface/90 text-left text-xs text-muted-foreground"><tr><th class="px-4 py-3">上游站点</th><th class="px-4 py-3">读取状态</th><th class="px-4 py-3">采集时间</th></tr></thead>
+              <tbody><tr v-for="site in sites" :key="site.siteId" class="border-t border-border/40"><td class="px-4 py-3">{{ site.siteName }}</td><td class="px-4 py-3">{{ siteStatus(site.status) }}<p v-if="site.errorKey" class="text-xs text-muted-foreground">{{ t(site.errorKey) }}</p></td><td class="px-4 py-3 text-muted-foreground">{{ site.collectedAt ? formatDateTime(Date.parse(site.collectedAt)) : '暂无今日采集记录' }}</td></tr></tbody>
             </table>
           </div>
         </div>

@@ -94,6 +94,10 @@ func (h *Handler) refreshAccountStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if result.Status == "in_progress" {
+		httpjson.Write(w, http.StatusAccepted, result)
+		return
+	}
 	httpjson.Write(w, http.StatusOK, result)
 }
 

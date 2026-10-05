@@ -34,7 +34,7 @@ func TestAccountKeyCostRunsRequireCompleteSitesAndExactCentReconciliation(t *tes
 	observedAt := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
 	siteTotals := []upstream.SiteCostForDateResult{
 		{SiteID: "site-exact", SiteName: "exact", RechargeRate: 2, RawCost: 5, Meta: upstream.CostFetchMeta{ObservedAt: observedAt}},
-		{SiteID: "site-mismatch", SiteName: "mismatch", RechargeRate: 1, RawCost: 10.01, Meta: upstream.CostFetchMeta{ObservedAt: observedAt}},
+		{SiteID: "site-mismatch", SiteName: "mismatch", RechargeRate: 1, RawCost: 10.02, Meta: upstream.CostFetchMeta{ObservedAt: observedAt}},
 		{SiteID: "site-failed", SiteName: "failed", RechargeRate: 1, RawCost: 8, Meta: upstream.CostFetchMeta{ObservedAt: observedAt}},
 	}
 	keys := upstream.KeyUsageForDateResult{
@@ -62,7 +62,7 @@ func TestAccountKeyCostRunsRequireCompleteSitesAndExactCentReconciliation(t *tes
 	if !bySite["site-exact"].Complete || bySite["site-exact"].SiteTotalCents != 1000 || bySite["site-exact"].KeyTotalCents != 1000 || len(bySite["site-exact"].Items) != 2 {
 		t.Fatalf("exact run = %#v", bySite["site-exact"])
 	}
-	if bySite["site-mismatch"].Complete || bySite["site-mismatch"].Quality != KeyCostQualityMismatch || bySite["site-mismatch"].SiteTotalCents != 1001 || bySite["site-mismatch"].KeyTotalCents != 1000 {
+	if bySite["site-mismatch"].Complete || bySite["site-mismatch"].Quality != KeyCostQualityMismatch || bySite["site-mismatch"].SiteTotalCents != 1002 || bySite["site-mismatch"].KeyTotalCents != 1000 {
 		t.Fatalf("mismatch run = %#v", bySite["site-mismatch"])
 	}
 	if bySite["site-failed"].Complete || bySite["site-failed"].Quality != KeyCostQualityMissing {
@@ -308,8 +308,8 @@ func TestPublishAccountStatsRefreshAtomicallyBindsCurrentDashboardSnapshot(t *te
 	if err != nil || updated == nil {
 		t.Fatalf("LatestDashboardSnapshot() = %#v, %v", updated, err)
 	}
-	if updated.AccountSnapshotRunID != run.SnapshotRunID || updated.TodayPurchase == nil || *updated.TodayPurchase != 3 ||
-		updated.NetProfit == nil || *updated.NetProfit != 97 || updated.AccountStatsQuality != KeyCostQualityComplete {
+	if updated.AccountSnapshotRunID != run.SnapshotRunID || updated.TodayPurchase == nil || *updated.TodayPurchase != 1 ||
+		updated.NetProfit == nil || *updated.NetProfit != 99 || updated.AccountStatsQuality != KeyCostQualityComplete {
 		t.Fatalf("refresh was not atomically bound to dashboard snapshot: %#v", updated)
 	}
 	published, found, err := repo.GetPublishedAccountStatsRefresh(ctx, "user-1", "workspace-1", run.SnapshotRunID, "2026-08-22")

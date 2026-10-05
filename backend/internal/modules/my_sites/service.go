@@ -97,6 +97,7 @@ type Service struct {
 	accounts          AdminAccountResolver
 	runtimeCleaner    ConnectionRuntimeCleaner
 	safeAdminDeletion SafeAdminAccountDeletion
+	now               func() time.Time
 }
 
 type SafeAdminAccountDeletion interface {
@@ -127,7 +128,7 @@ type AdminAccountResolver interface {
 }
 
 func NewService(repository StateRepository, platformService *upstream.PlatformService, upstreamLookup UpstreamSiteLookup) *Service {
-	return &Service{repository: repository, platformService: platformService, upstreamLookup: upstreamLookup}
+	return &Service{repository: repository, platformService: platformService, upstreamLookup: upstreamLookup, now: time.Now}
 }
 
 func (s *Service) EnsureSchema(ctx context.Context) error {

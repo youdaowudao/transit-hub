@@ -191,6 +191,7 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 		if readErr == nil && len(data) <= 4096 {
 			var record map[string]any
 			if json.Unmarshal(data, &record) == nil {
+				requestErr.UpstreamCode = ParseUpstreamCode(record)
 				if code, ok := record["code"].(float64); ok && code == float64(int(code)) {
 					value := int(code)
 					requestErr.RemoteCode = &value
@@ -207,6 +208,7 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 				}
 			}
 		}
+		applyKnownUpstreamCodeReason(requestErr)
 		return jsonResponse{Header: response.Header, ReceivedAt: receivedAt, StatusCode: response.StatusCode}, requestErr
 	}
 	payload, err := parseJSONWithLimit(response.Body, reqURL, maxResponseBytes)
@@ -223,6 +225,8 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 	if record, ok := payload.(map[string]any); ok {
 		if success, exists := record["success"].(bool); exists && !success {
 			requestErr := newRequestErrorWithStatus(ErrorRequest, "", response.StatusCode)
+			requestErr.UpstreamCode = ParseUpstreamCode(record)
+			applyKnownUpstreamCodeReason(requestErr)
 			if message, ok := record["message"].(string); ok {
 				requestErr.UpstreamMessage = safeRequestMessage(message, options)
 			}

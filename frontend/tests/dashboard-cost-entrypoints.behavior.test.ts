@@ -12,6 +12,7 @@ const harness = vi.hoisted(() => ({
   getDashboardMetrics: vi.fn(),
   getDashboardTrends: vi.fn(),
   refreshAccountStats: vi.fn(),
+  getGroupProfitToday: vi.fn(),
   listAccountCostLedger: vi.fn(),
   listAccountAssets: vi.fn(),
   listRealConnections: vi.fn(),
@@ -101,7 +102,7 @@ vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
   getDashboardMetrics: harness.getDashboardMetrics,
   getDashboardTrends: harness.getDashboardTrends,
   refreshAccountStats: harness.refreshAccountStats,
-  getGroupProfitToday: vi.fn(async () => ({ groups: [] })),
+  getGroupProfitToday: harness.getGroupProfitToday,
   getGroupUsageToday: vi.fn(async () => ({ groups: [] })),
   getUpstreamBalanceBreakdown: vi.fn(async () => ({ sites: [] })),
   createAccountBatch: vi.fn(),
@@ -184,6 +185,7 @@ const findButton = (wrapper: VueWrapper, label: string) => {
 beforeEach(() => {
   harness.getDashboardMetrics.mockReset().mockResolvedValue(liveMetrics)
   harness.getDashboardTrends.mockReset().mockResolvedValue({ points: [] })
+  harness.getGroupProfitToday.mockReset().mockResolvedValue({ groups: [], collectedAt: '2026-10-05T03:04:00Z' })
   harness.refreshAccountStats.mockReset().mockResolvedValue({
     date: '2026-08-22', snapshotRunId: 'run-1', expectedSites: 1, completedSites: 1,
     quality: 'complete', expectedAccounts: 0, completedAccounts: 0,
@@ -200,6 +202,23 @@ afterEach(() => {
 })
 
 describe('Dashboard cost entrypoint behavior', () => {
+  it('D1/D2 opening the dashboard does not refresh account statistics', async () => {
+    await mountDashboard()
+    expect(harness.refreshAccountStats).not.toHaveBeenCalled()
+  })
+  it('D2 group profit displays the oldest saved collection time', async () => {
+    const wrapper = await mountDashboard()
+    await wrapper.findAll('button').find(button => button.text() === '利润')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('截至 11:04')
+  })
+  it('D2 explains that same-name Token bindings cannot be split by group', async () => {
+    harness.getGroupProfitToday.mockResolvedValue({ groups: [], unsplittableGroups: 1 })
+    const wrapper = await mountDashboard()
+    await wrapper.findAll('button').find(button => button.text() === '利润')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('同名 Token 无法拆分')
+  })
   it('R02 continues from today total cost to the existing upstream Key and group details without stacking drawers', async () => {
     const wrapper = await mountDashboard()
 

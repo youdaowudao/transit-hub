@@ -225,6 +225,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	}
 	connHealthService.SetAdminAccountResolver(adminAccountsService)
 	connHealthService.SetUpstreamSyncCoordinator(upstreamService)
+	upstreamService.SetSiteLoginSuccessCallback(connHealthService.NotifySiteLoginSucceeded)
 	connHealthService.SetGroupCostReader(upstreamService)
 	// 注入平台中性的分组/账号读取能力：admin 分组健康主列表用它拉取 admin 全量分组及
 	// 分组下账号/渠道，叠加 real_connections 探活状态。platformService 已实现所需方法。
@@ -266,18 +267,6 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		log.Printf("[settings] 恢复工作区刷新配置失败: %v", err)
 	}
 
-	// 站点同步成功后检查余额预警和倍率变更，按配置发送通知。
-	upstreamService.AfterSync = func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics) {
-		strategy, err := settingsService.GetStrategyForWorkspace(ctx, userID, adminAccountID)
-		if err != nil {
-			return
-		}
-		checkBalanceWarning(ctx, settingsService, upstreamService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
-		checkMultiplierChanges(ctx, settingsService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
-		// 自动调价：分组级 enableAutoPricing 是唯一开关，Service 内部逐 mapping 判断。
-		mySitesService.ApplyAutoPricingAfterSync(ctx, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
-	}
-
 	settings.RegisterRoutes(server.mux, settingsService)
 
 	// 仪表盘 admin 登录门禁：复用 sub2api 平台客户端（platformService），会话存于 Redis，
@@ -303,6 +292,25 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	metricsService := dashboard.NewMetricsService(dashboardSessionStore, platformService, upstreamService, metricsRepo, adminAccountsService)
 	metricsService.SetMySiteSync(mySitesService)
 	metricsService.SetRealConnectionReader(mySitesService)
+
+	// 站点同步成功后检查余额预警和倍率变更，按配置发送通知。
+	upstreamService.AfterSync = func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics, oldStatus, newStatus upstream.Status) {
+		// 补查独立排队，不等待历史上游请求，也不依赖通知设置读取成功。
+		go func() {
+			if err := metricsService.RecoverSiteCostsAfterSync(ctx, userID, adminAccountID, siteID, oldMetrics, newMetrics, oldStatus, newStatus); err != nil {
+				log.Printf("dashboard recovery failed user_id=%s workspace_id=%s site_id=%s err=%v", userID, adminAccountID, siteID, err)
+			}
+		}()
+		strategy, err := settingsService.GetStrategyForWorkspace(ctx, userID, adminAccountID)
+		if err != nil {
+			return
+		}
+		checkBalanceWarning(ctx, settingsService, upstreamService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
+		checkMultiplierChanges(ctx, settingsService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
+		// 自动调价：分组级 enableAutoPricing 是唯一开关，Service 内部逐 mapping 判断。
+		mySitesService.ApplyAutoPricingAfterSync(ctx, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
+	}
+
 	metricsService.StartScheduler(context.Background())
 	dashboard.RegisterRoutes(server.mux, dashboardService, metricsService)
 

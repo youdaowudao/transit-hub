@@ -34,6 +34,13 @@ const safeUpstreamErrorKey = (error: unknown): string => {
 }
 
 const normalizeMetrics = (metrics: UpstreamSiteResponse['metrics'] | null | undefined): UpstreamMetrics => ({
+  todayConsumeDate: metrics?.todayConsumeDate,
+  todayConsumeAt: metrics?.todayConsumeAt,
+  todayConsumeStatus: metrics?.todayConsumeStatus,
+  todayConsumeErrorKey: metrics?.todayConsumeErrorKey,
+  todayConsumeUpstreamCode: metrics?.todayConsumeUpstreamCode,
+  todayConsumeHTTPStatus: metrics?.todayConsumeHTTPStatus,
+  todayConsumeFailedAt: metrics?.todayConsumeFailedAt,
   balance: metrics?.balance ?? emptyMetric(),
   todayConsume: metrics?.todayConsume ?? emptyMetric(),
   historyRecharge: metrics?.historyRecharge ?? emptyMetric(),

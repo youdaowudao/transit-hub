@@ -8,6 +8,7 @@ import (
 
 	"transithub/backend/internal/modules/my_sites"
 	"transithub/backend/internal/modules/upstream"
+	"transithub/backend/internal/shared/businesstime"
 )
 
 // realGroupUsageToday only reads the main platform's authoritative group
@@ -73,7 +74,7 @@ func (s *MetricsService) cachedGroupRevenue(ctx context.Context, userID, adminAc
 	items := make([]GroupUsageTodayItem, 0, len(cached))
 	var fallbackAt *time.Time
 	for _, item := range cached {
-		if item.TodayRevenue == nil {
+		if item.TodayRevenue == nil || businesstime.DateAt(item.ObservedAt) != date {
 			continue
 		}
 		revenue := *item.TodayRevenue
@@ -100,7 +101,7 @@ func (s *MetricsService) saveGroupRevenueCache(ctx context.Context, userID, admi
 	if s.metricsRepo == nil {
 		return
 	}
-	now := time.Now()
+	now := s.currentTime()
 	items := make([]GroupMetricCacheItem, 0, len(groups))
 	for _, group := range groups {
 		revenue := group.TodayRevenue
@@ -139,20 +140,44 @@ func (s *MetricsService) realGroupProfitToday(ctx context.Context, userID, admin
 		return response, nil
 	}
 	costByKey := make(map[string]float64, len(costResponse.Keys))
+	mergedKeys := make(map[string]bool)
+	collectedBySite := make(map[string]*time.Time)
+	for _, site := range costResponse.Sites {
+		collectedBySite[site.SiteID] = site.CollectedAt
+	}
 	for _, item := range costResponse.Keys {
-		costByKey[directProfitKey(item.SiteID, item.KeyID)] = item.TodayAmount
+		ids := item.KeyIDs
+		if len(ids) == 0 {
+			ids = []string{item.KeyID}
+		}
+		for _, id := range ids {
+			key := directProfitKey(item.SiteID, id)
+			if item.Merged {
+				mergedKeys[key] = true
+				continue
+			}
+			costByKey[key] = item.TodayAmount
+		}
 	}
 
 	sort.Slice(eligible, func(i, j int) bool { return eligible[i].ID < eligible[j].ID })
 	byGroup := make(map[string]*directGroupTotals)
 	groupNames := make(map[string]string)
 	clear(failedGroups)
+	unsplittable := make(map[string]bool)
+	var collectedAt *time.Time
 	for _, connection := range eligible {
 		groupID := connection.OwnGroupIDs[0]
 		if len(connection.OwnGroupNames) > 0 {
 			groupNames[groupID] = strings.TrimSpace(connection.OwnGroupNames[0])
 		}
-		cost, costOK := costByKey[directProfitKey(connection.UpstreamSiteID, connection.UpstreamKeyID)]
+		key := directProfitKey(connection.UpstreamSiteID, connection.UpstreamKeyID)
+		if mergedKeys[key] {
+			unsplittable[groupID] = true
+			failedGroups[groupID] = struct{}{}
+			continue
+		}
+		cost, costOK := costByKey[key]
 		if !costOK {
 			failedGroups[groupID] = struct{}{}
 			continue
@@ -167,12 +192,16 @@ func (s *MetricsService) realGroupProfitToday(ctx context.Context, userID, admin
 			totals = &directGroupTotals{}
 			byGroup[groupID] = totals
 		}
+		if at := collectedBySite[connection.UpstreamSiteID]; at != nil && (collectedAt == nil || at.Before(*collectedAt)) {
+			copied := *at
+			collectedAt = &copied
+		}
 		totals.revenue += stats.TotalActualCost
 		totals.cost += cost
 	}
 	current := make([]GroupUsageTodayItem, 0, len(byGroup))
 	cacheItems := make([]GroupMetricCacheItem, 0, len(byGroup))
-	now := time.Now()
+	now := s.currentTime()
 	for groupID, totals := range byGroup {
 		if _, failed := failedGroups[groupID]; failed {
 			continue
@@ -195,7 +224,10 @@ func (s *MetricsService) realGroupProfitToday(ctx context.Context, userID, admin
 	if s.metricsRepo != nil && len(cacheItems) > 0 {
 		_ = s.metricsRepo.SaveGroupMetricCache(ctx, userID, adminAccountID, cacheItems)
 	}
-	return s.mergeGroupProfitFallback(ctx, userID, adminAccountID, date, current, failedGroups)
+	response, err := s.mergeGroupProfitFallback(ctx, userID, adminAccountID, date, current, failedGroups)
+	response.CollectedAt = collectedAt
+	response.UnsplittableGroups = len(unsplittable)
+	return response, err
 }
 
 func (s *MetricsService) cachedGroupProfit(ctx context.Context, userID, adminAccountID, date string, cause error) (GroupProfitTodayResponse, error) {
@@ -212,7 +244,11 @@ func (s *MetricsService) cachedGroupProfit(ctx context.Context, userID, adminAcc
 		}
 		return GroupProfitTodayResponse{Date: date, Groups: []GroupUsageTodayItem{}}, nil
 	}
-	return groupProfitResponseFromCache(date, cached), nil
+	response := groupProfitResponseFromCache(date, cached)
+	if len(response.Groups) == 0 && cause != nil {
+		return GroupProfitTodayResponse{}, cause
+	}
+	return response, nil
 }
 
 func (s *MetricsService) mergeGroupProfitFallback(ctx context.Context, userID, adminAccountID, date string, current []GroupUsageTodayItem, failedGroups map[string]struct{}) (GroupProfitTodayResponse, error) {
@@ -225,7 +261,7 @@ func (s *MetricsService) mergeGroupProfitFallback(ctx context.Context, userID, a
 	if s.metricsRepo != nil {
 		cached, _ := s.metricsRepo.ListGroupMetricCache(ctx, userID, adminAccountID, "profit")
 		for _, item := range cached {
-			if _, exists := currentIDs[item.GroupID]; exists || item.TodayProfit == nil {
+			if _, exists := currentIDs[item.GroupID]; exists || item.TodayProfit == nil || businesstime.DateAt(item.ObservedAt) != date {
 				continue
 			}
 			if _, failed := failedGroups[item.GroupID]; !failed {
@@ -264,7 +300,7 @@ func groupProfitResponseFromCache(date string, cached []GroupMetricCacheItem) Gr
 	var total float64
 	var fallbackAt *time.Time
 	for _, item := range cached {
-		if item.TodayProfit == nil {
+		if item.TodayProfit == nil || businesstime.DateAt(item.ObservedAt) != date {
 			continue
 		}
 		items = append(items, GroupUsageTodayItem{

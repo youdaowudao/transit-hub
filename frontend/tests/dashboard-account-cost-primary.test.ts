@@ -17,12 +17,10 @@ describe('dashboard operating cost primary cards', () => {
     expect(source).not.toContain('dashboard-operating-cost-details')
   })
 
-  it('shows automatic account refresh failures without clearing the previous result', () => {
-    expect(source).toContain('accountStatsRefreshNotice')
-    expect(source).toContain('formatAccountStatsRefreshNotice(result)')
-    expect(source).toContain('账号自动统计刷新失败')
+  it('keeps the manual account asset entry without automatic account refresh', () => {
+    expect(source).not.toContain('accountStatsRefreshNotice')
+    expect(source).not.toContain('refreshAccountStats(')
     expect(source).toContain("openAccountCostWorkspace('assets')")
-    expect(source).not.toContain(".catch(() => { /* 账号子状态失败不清空首页已确认数据。 */ })")
   })
 
   it('does not report an incomplete refresh when there are no automatic accounts', () => {

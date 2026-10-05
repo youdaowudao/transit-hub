@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // fakeSiteCache 是 SiteCache 的内存实现，仅供测试使用。
@@ -101,16 +102,22 @@ func newTestSite(id, userID, adminAccountID string, rechargeRate float64, sessio
 // TestServiceKeyUsageToday_WorkspaceIsolation 覆盖测试要求 1：只返回当前工作区站点的数据，
 // 其他工作区（即使同一用户名下）的站点不得混入结果。
 func TestServiceKeyUsageToday_WorkspaceIsolation(t *testing.T) {
+	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
 	serverA := sub2APIKeyServer(t, "1", "key-a", "vip", 10)
 	defer serverA.Close()
 	serverB := sub2APIKeyServer(t, "2", "key-b", "vip", 20)
 	defer serverB.Close()
 
-	cache := newFakeSiteCache()
+	cache := newKeySnapshotTestCache()
 	cache.add(newTestSite("site-a", "user-1", "acc-1", 2, &Session{Platform: PlatformSub2API, BaseURL: serverA.URL, AccessToken: "token"}))
 	cache.add(newTestSite("site-b", "user-1", "acc-2", 2, &Session{Platform: PlatformSub2API, BaseURL: serverB.URL, AccessToken: "token"}))
 
+	snapshotsitea := fixtureKeySnapshot(now, 10)
+	_ = cache.SaveKeyUsageSnapshot(context.Background(), "site-a", snapshotsitea)
+	snapshotsiteb := fixtureKeySnapshot(now, 20)
+	_ = cache.SaveKeyUsageSnapshot(context.Background(), "site-b", snapshotsiteb)
 	svc := NewService(NewPlatformService(NewHTTPClient(http.DefaultClient)), nil, nil, cache)
+	svc.now = func() time.Time { return now }
 	svc.SetAdminAccountResolver(&fakeAccountResolver{current: map[string]string{"user-1": "acc-1"}})
 
 	items, err := svc.KeyUsageToday(context.Background(), "user-1")
@@ -149,6 +156,7 @@ func TestServiceKeyUsageToday_SkipsRechargeRateZero(t *testing.T) {
 // TestServiceKeyUsageToday_FiltersZeroCostAndAppliesRechargeRate 覆盖测试要求 2 和字段换算：
 // 0 消费的 key 被过滤；剩余 key 的 todayAmount = 上游原始金额 * rechargeRate。
 func TestServiceKeyUsageToday_FiltersZeroCostAndAppliesRechargeRate(t *testing.T) {
+	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/keys":
@@ -169,10 +177,14 @@ func TestServiceKeyUsageToday_FiltersZeroCostAndAppliesRechargeRate(t *testing.T
 	}))
 	defer server.Close()
 
-	cache := newFakeSiteCache()
+	cache := newKeySnapshotTestCache()
 	cache.add(newTestSite("site-a", "user-1", "acc-1", 2, &Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token"}))
 
+	snapshot := fixtureKeySnapshot(now, 33.3)
+	snapshot.Items = []KeyUsageTodayStat{{KeyID: "1", KeyIDs: []string{"1"}, KeyName: "zero-cost-key", GroupName: "vip", TodayAmount: 0}, {KeyID: "2", KeyIDs: []string{"2"}, KeyName: "prod-key", GroupName: "vip", TodayAmount: 33.3}}
+	_ = cache.SaveKeyUsageSnapshot(context.Background(), "site-a", snapshot)
 	svc := NewService(NewPlatformService(NewHTTPClient(http.DefaultClient)), nil, nil, cache)
+	svc.now = func() time.Time { return now }
 	svc.SetAdminAccountResolver(&fakeAccountResolver{current: map[string]string{"user-1": "acc-1"}})
 
 	items, err := svc.KeyUsageToday(context.Background(), "user-1")
@@ -216,6 +228,7 @@ func TestServiceKeyUsageToday_ExternalErrorFailsClosed(t *testing.T) {
 // TestServiceKeyUsageToday_PartialFailureKeepsSuccessfulItems 验证多站点采集时，
 // 单个站点失败不会丢弃其他站点已经取得的数据，同时返回可识别的失败站点计数。
 func TestServiceKeyUsageToday_PartialFailureKeepsSuccessfulItems(t *testing.T) {
+	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
 	successServer := sub2APIKeyServer(t, "1", "working-key", "vip", 10)
 	defer successServer.Close()
 	failingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -223,11 +236,14 @@ func TestServiceKeyUsageToday_PartialFailureKeepsSuccessfulItems(t *testing.T) {
 	}))
 	defer failingServer.Close()
 
-	cache := newFakeSiteCache()
+	cache := newKeySnapshotTestCache()
 	cache.add(newTestSite("site-success", "user-1", "acc-1", 2, &Session{Platform: PlatformSub2API, BaseURL: successServer.URL, AccessToken: "token"}))
 	cache.add(newTestSite("site-failure", "user-1", "acc-1", 2, &Session{Platform: PlatformSub2API, BaseURL: failingServer.URL, AccessToken: "token"}))
 
+	snapshotsitesuccess := fixtureKeySnapshot(now, 10)
+	_ = cache.SaveKeyUsageSnapshot(context.Background(), "site-success", snapshotsitesuccess)
 	svc := NewService(NewPlatformService(NewHTTPClient(http.DefaultClient)), nil, nil, cache)
+	svc.now = func() time.Time { return now }
 	svc.SetAdminAccountResolver(&fakeAccountResolver{current: map[string]string{"user-1": "acc-1"}})
 
 	items, err := svc.KeyUsageToday(context.Background(), "user-1")

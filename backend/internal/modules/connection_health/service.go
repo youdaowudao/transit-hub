@@ -112,6 +112,7 @@ type Service struct {
 	adminMultiplierCache         map[string]adminMultiplierCacheEntry
 	multiplierSnapshotMu         sync.Mutex
 	multiplierSnapshots          map[string]*multiplierSnapshotEntry
+	multiplierNow                func() time.Time
 	priorityTriggerMu            sync.Mutex
 	priorityTriggerRunning       map[string]bool
 	priorityTriggerPending       map[string]string

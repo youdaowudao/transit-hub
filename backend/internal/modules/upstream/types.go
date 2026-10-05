@@ -136,6 +136,12 @@ type Metrics struct {
 	TodayConsumeDate string `json:"todayConsumeDate,omitempty"`
 	// TodayConsumeAt 是 TodayConsume 的实际采集时间，用于缓存时效校验。
 	TodayConsumeAt *time.Time `json:"todayConsumeAt,omitempty"`
+	// A missing status in legacy data means ok. Failed reads only store safe metadata.
+	TodayConsumeStatus       string     `json:"todayConsumeStatus,omitempty"`
+	TodayConsumeErrorKey     string     `json:"todayConsumeErrorKey,omitempty"`
+	TodayConsumeUpstreamCode string     `json:"todayConsumeUpstreamCode,omitempty"`
+	TodayConsumeHTTPStatus   int        `json:"todayConsumeHTTPStatus,omitempty"`
+	TodayConsumeFailedAt     *time.Time `json:"todayConsumeFailedAt,omitempty"`
 }
 
 // CostFetchMeta 是 FetchCostForDate 的返回元数据，定义在 upstream 包中以避免循环依赖。
@@ -222,7 +228,9 @@ type Response struct {
 	Metrics           Metrics      `json:"metrics"`
 	Settings          SiteSettings `json:"settings"`
 	LastSyncedAt      *int64       `json:"lastSyncedAt"`
-	syncTimedOut      bool
+
+	syncTimedOut        bool
+	keyUsageCostFailure *keyUsageCostFailure
 }
 
 func enabledOrDefault(enabled *bool) bool {
@@ -439,6 +447,8 @@ type Sub2APIUserBalanceHistory struct {
 
 // KeyUsageTodayStat 是平台层返回的单个 key 今日消费统计（上游平台原始金额，未乘以站点 rechargeRate）。
 type KeyUsageTodayStat struct {
+	KeyIDs      []string
+	Merged      bool
 	KeyID       string
 	KeyName     string
 	GroupName   string
@@ -447,6 +457,8 @@ type KeyUsageTodayStat struct {
 
 // KeyUsageTodayItem 是仪表盘「今日成本」下钻明细中单个 key 的聚合结果（已按站点 rechargeRate 换算）。
 type KeyUsageTodayItem struct {
+	KeyIDs       []string
+	Merged       bool
 	SiteID       string
 	SiteName     string
 	Platform     Platform
@@ -459,20 +471,27 @@ type KeyUsageTodayItem struct {
 }
 
 type KeyUsageSiteResult struct {
-	SiteID       string
-	SiteName     string
-	Platform     Platform
-	RechargeRate float64
-	Complete     bool
-	Error        string
-	Items        []KeyUsageTodayItem
+	Status           string
+	StartedAt        time.Time
+	CollectedAt      *time.Time
+	SyncedRawCost    *float64
+	CollectedRawCost *float64
+	ConsumeDate      string
+	SiteID           string
+	SiteName         string
+	Platform         Platform
+	RechargeRate     float64
+	Complete         bool
+	Error            string
+	Items            []KeyUsageTodayItem
 }
 
 type KeyUsageForDateResult struct {
-	BusinessDate   string
-	ExpectedSites  int
-	CompletedSites int
-	Sites          []KeyUsageSiteResult
+	AutoRefreshEnabled bool
+	BusinessDate       string
+	ExpectedSites      int
+	CompletedSites     int
+	Sites              []KeyUsageSiteResult
 }
 
 // KeyUsageCollectionError 表示跨多个上游站点采集 Key 用量时有站点失败。

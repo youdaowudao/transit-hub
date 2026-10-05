@@ -15,6 +15,7 @@ import (
 
 	"transithub/backend/internal/modules/my_sites"
 	"transithub/backend/internal/modules/upstream"
+	"transithub/backend/internal/shared/businesstime"
 )
 
 const (
@@ -146,14 +147,51 @@ type multiplierSnapshotEntry struct {
 	supersededDone   []chan struct{}
 	enqueuedAt       time.Time
 
-	consecutiveFailures int
+	consecutiveFailures  int
+	lastNonSyncingStatus upstream.Status
+	manualReason         string
+	manualBlockedAt      time.Time
+	confirmedDeletedKeys map[string]struct{}
 }
 
 // multiplierSiteMetadata is deliberately narrower than upstream.Site. A snapshot must not
 // retain a Session or any other credential-bearing object after an upstream read finishes.
 type multiplierSiteMetadata struct {
-	rechargeRate float64
-	groups       []upstream.GroupInfo
+	rechargeRate       float64
+	groups             []upstream.GroupInfo
+	syncErrorKey       string
+	nonSub2APIPlatform bool
+}
+
+func (s *Service) multiplierCurrentTime() time.Time {
+	if s.multiplierNow != nil {
+		return s.multiplierNow()
+	}
+	return time.Now()
+}
+
+// NotifySiteLoginSucceeded runs after new credentials were authenticated and saved.
+// It releases only the matching process-local manual marker.
+func (s *Service) NotifySiteLoginSucceeded(userID, adminAccountID, siteID string) {
+	s.multiplierSnapshotMu.Lock()
+	defer s.multiplierSnapshotMu.Unlock()
+	clearMultiplierManualMarker(s.multiplierSnapshots[multiplierSnapshotKey(userID, adminAccountID, siteID)])
+}
+
+func clearMultiplierManualMarker(entry *multiplierSnapshotEntry) {
+	if entry == nil || entry.manualReason == "" {
+		return
+	}
+	entry.manualReason = ""
+	entry.manualBlockedAt = time.Time{}
+	entry.nextRetryAt = time.Time{}
+}
+
+func multiplierSyncReleasedManualMarker(entry *multiplierSnapshotEntry, site *upstream.Site, now time.Time) bool {
+	return entry.manualReason != "" && site != nil && site.LastSyncedAt != nil &&
+		*site.LastSyncedAt > entry.manualBlockedAt.UnixMilli() &&
+		(site.Metrics.TodayConsumeStatus == "" || site.Metrics.TodayConsumeStatus == "ok") &&
+		site.Metrics.TodayConsume.Value != nil && site.Metrics.TodayConsumeDate == businesstime.DateAt(now)
 }
 
 func (s *Service) multiplierLookupForWorkspace(ctx context.Context, userID string, adminAccountID string, platform string, allowStale bool, waitForFresh bool) upstreamMultiplierLookup {
@@ -338,15 +376,15 @@ func (s *Service) prepareMultiplierSnapshotsProgress(ctx context.Context, reader
 		orderedSites = append(orderedSites, siteID)
 	}
 	sort.Strings(orderedSites)
-	now := time.Now()
+	now := s.multiplierCurrentTime()
 	waiters := make([]multiplierSnapshotWaiter, 0, len(orderedSites))
 	immediate := make([]string, 0, len(orderedSites))
 	// This is a local cache read, not an upstream request. It invalidates a fresh snapshot
 	// immediately when a site, its group metadata, or its session identity changes.
-	currentFingerprints := make(map[string]string, len(orderedSites))
+	currentSites := make(map[string]*upstream.Site, len(orderedSites))
 	for _, siteID := range orderedSites {
 		if site, err := s.sites.GetSite(ctx, siteID); err == nil && site != nil {
-			currentFingerprints[siteID] = multiplierSiteFingerprint(site)
+			currentSites[siteID] = site
 		}
 	}
 
@@ -379,10 +417,25 @@ func (s *Service) prepareMultiplierSnapshotsProgress(ctx context.Context, reader
 		signature := strings.Join(keyIDs, "\x00")
 		cacheKey := multiplierSnapshotKey(userID, adminAccountID, siteID)
 		entry := s.multiplierSnapshots[cacheKey]
-		fingerprint := currentFingerprints[siteID]
+		var lastNonSyncingStatus upstream.Status
+		if entry != nil {
+			lastNonSyncingStatus = entry.lastNonSyncingStatus
+		}
+		fingerprint := ""
+		if site := currentSites[siteID]; site != nil {
+			fingerprintSite := *site
+			if site.Status != upstream.StatusSyncing {
+				lastNonSyncingStatus = site.Status
+			} else if lastNonSyncingStatus != "" {
+				// Syncing is temporary; preserve the retry history of the last stable status.
+				fingerprintSite.Status = lastNonSyncingStatus
+			}
+			fingerprint = multiplierSiteFingerprint(&fingerprintSite)
+		}
 		if entry == nil || entry.bindingSignature != signature || entry.platform != platform || (fingerprint != "" && entry.siteFingerprint != "" && entry.siteFingerprint != fingerprint) {
 			generation := uint64(1)
 			var supersededDone []chan struct{}
+			previous := entry
 			if entry != nil {
 				generation = entry.generation + 1
 				supersededDone = transferMultiplierSnapshotWaiters(entry)
@@ -393,12 +446,44 @@ func (s *Service) prepareMultiplierSnapshotsProgress(ctx context.Context, reader
 				capability: multiplierDirectUnknown, keys: make(map[string]upstreamKeyMetadata), siteFingerprint: fingerprint,
 				status: multiplierResolutionUpdating, lastAccessAt: now, supersededDone: supersededDone,
 			}
+			site := currentSites[siteID]
+			deletionScopeUnchanged := site == nil || (site.Platform == upstream.PlatformSub2API &&
+				(site.Session == nil || site.Session.Platform == "" || site.Session.Platform == upstream.PlatformSub2API))
+			if previous != nil && previous.bindingSignature == signature && previous.platform == platform && deletionScopeUnchanged {
+				// Ordinary site metadata invalidates live multipliers, not the
+				// deletion evidence for these unchanged Sub2API bindings.
+				entry.confirmedDeletedKeys = make(map[string]struct{}, len(previous.confirmedDeletedKeys))
+				for keyID := range previous.confirmedDeletedKeys {
+					entry.confirmedDeletedKeys[keyID] = struct{}{}
+				}
+			}
+			if previous != nil && previous.manualReason != "" {
+				// Fingerprint changes are not a manual-marker recovery condition.
+				entry.manualReason, entry.manualBlockedAt = previous.manualReason, previous.manualBlockedAt
+				entry.status, entry.keys, entry.keyFailures, entry.site = previous.status, previous.keys, previous.keyFailures, previous.site
+				entry.lastError, entry.lastOutcome = previous.lastError, previous.lastOutcome
+				entry.fetchedAt, entry.expiresAt, entry.nextRetryAt = previous.fetchedAt, previous.expiresAt, previous.nextRetryAt
+				entry.consecutiveFailures = previous.consecutiveFailures
+			}
 			s.multiplierSnapshots[cacheKey] = entry
 		}
 		if fingerprint != "" {
 			entry.siteFingerprint = fingerprint
 		}
+		entry.lastNonSyncingStatus = lastNonSyncingStatus
 		entry.lastAccessAt = now
+		if forceRefresh || multiplierSyncReleasedManualMarker(entry, currentSites[siteID], now) {
+			clearMultiplierManualMarker(entry)
+		}
+		if forceRefresh {
+			entry.confirmedDeletedKeys = nil
+		}
+		if !forceRefresh && entry.manualReason != "" {
+			if waitForFresh {
+				immediate = append(immediate, siteID)
+			}
+			continue
+		}
 		if entry.inFlight {
 			if waitForFresh {
 				waiters = append(waiters, multiplierSnapshotWaiter{siteID: siteID, done: entry.done})
@@ -427,6 +512,10 @@ func (s *Service) prepareMultiplierSnapshotsProgress(ctx context.Context, reader
 		captured := *entry
 		captured.keyIDs = append([]string(nil), entry.keyIDs...)
 		captured.keys = nil
+		captured.confirmedDeletedKeys = make(map[string]struct{}, len(entry.confirmedDeletedKeys))
+		for keyID := range entry.confirmedDeletedKeys {
+			captured.confirmedDeletedKeys[keyID] = struct{}{}
+		}
 		captured.enqueuedAt = time.Now()
 		var callerContext context.Context
 		if waitForFresh {
@@ -585,12 +674,20 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 		return nil, nil, multiplierSiteMetadata{}, entry.capability, err
 	}
 	siteMetadata := newMultiplierSiteMetadata(site)
+	confirmDeletion := site.Platform == upstream.PlatformSub2API && site.Session.Platform == upstream.PlatformSub2API
+	if siteMetadata.nonSub2APIPlatform {
+		// The source can change after preparation but before this worker reads it.
+		entry.confirmedDeletedKeys = nil
+	}
 	if site.Platform == upstream.PlatformSub2API {
 		if entry.capability != multiplierDirectUnsupported {
 			keys := make(map[string]upstreamKeyMetadata, len(entry.keyIDs))
 			keyFailures := make(map[string]string)
 			fallbackKeyIDs := make([]string, 0)
 			for _, keyID := range entry.keyIDs {
+				if _, deleted := entry.confirmedDeletedKeys[keyID]; deleted && confirmDeletion {
+					continue
+				}
 				*upstreamRequestStarted = true
 				item, getErr := reader.GetUpstreamKeyForWorkspace(ctx, entry.userID, entry.adminAccountID, entry.siteID, keyID)
 				if getErr != nil {
@@ -599,7 +696,7 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 						fallbackKeyIDs = append(fallbackKeyIDs, keyID)
 						continue
 					}
-					keyFailures[keyID] = multiplierRefreshOutcome(getErr)
+					keyFailures[keyID] = multiplierFailureOutcome(getErr, siteMetadata.syncErrorKey)
 					continue
 				}
 				if strings.TrimSpace(item.ID) != keyID {
@@ -615,7 +712,7 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 			items, listErr := listMultiplierKeys(ctx, reader, entry, fallbackKeyIDs)
 			if listErr != nil {
 				for _, keyID := range fallbackKeyIDs {
-					keyFailures[keyID] = multiplierRefreshOutcome(listErr)
+					keyFailures[keyID] = multiplierFailureOutcome(listErr, siteMetadata.syncErrorKey)
 				}
 				return keys, keyFailures, siteMetadata, entry.capability, nil
 			}
@@ -627,6 +724,14 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 				}
 			}
 			capability := entry.capability
+			for _, keyID := range fallbackKeyIDs {
+				if _, found := keys[keyID]; !found && confirmDeletion {
+					if entry.confirmedDeletedKeys == nil {
+						entry.confirmedDeletedKeys = make(map[string]struct{})
+					}
+					entry.confirmedDeletedKeys[keyID] = struct{}{}
+				}
+			}
 			if len(fallbackKeyIDs) == len(entry.keyIDs) && len(keys) == len(fallbackKeyIDs) {
 				capability = multiplierDirectUnsupported
 			}
@@ -674,8 +779,13 @@ func (s *Service) finishMultiplierSnapshotLocked(target *multiplierSnapshotEntry
 	if current != target || current.generation != captured.generation || current.bindingSignature != captured.bindingSignature {
 		return
 	}
+	if site.nonSub2APIPlatform {
+		// A failed read from the new platform must not retain Sub2API deletion evidence.
+		current.confirmedDeletedKeys = nil
+	}
 	if err == nil {
-		now := time.Now()
+		now := s.multiplierCurrentTime()
+		current.confirmedDeletedKeys = captured.confirmedDeletedKeys
 		keyFailureOutcome := multiplierKeyFailuresOutcome(keyFailures)
 		if len(keyFailures) > 0 && len(keys) == 0 && len(current.keys) > 0 {
 			current.status = multiplierResolutionStale
@@ -707,18 +817,33 @@ func (s *Service) finishMultiplierSnapshotLocked(target *multiplierSnapshotEntry
 			current.status = multiplierResolutionStale
 		}
 		current.lastError = err.Error()
-		current.lastOutcome = multiplierRefreshOutcome(err)
+		current.lastOutcome = multiplierFailureOutcome(err, site.syncErrorKey)
 		if errors.Is(err, errMultiplierDirectLookupAmbiguous) {
 			current.capability = multiplierDirectUnsupported
 		}
 	}
+	manualReason := ""
+	if isMultiplierManualReason(current.lastOutcome) {
+		manualReason = current.lastOutcome
+	} else {
+		for _, keyID := range captured.keyIDs {
+			if reason := keyFailures[keyID]; isMultiplierManualReason(reason) {
+				manualReason = reason
+				break
+			}
+		}
+	}
+	if manualReason != "" {
+		current.manualReason = manualReason
+		current.manualBlockedAt = s.multiplierCurrentTime()
+	}
 	if len(keyFailures) == 0 && (errors.Is(err, errMultiplierQueueFull) || errors.Is(err, errMultiplierQueueTimeout) || errors.Is(err, context.Canceled)) {
 		// Local scheduling failures retry promptly without changing the count
 		// retained from real upstream failures. Partial upstream failures win.
-		current.nextRetryAt = time.Now().Add(multiplierLocalRetryDelay)
+		current.nextRetryAt = s.multiplierCurrentTime().Add(multiplierLocalRetryDelay)
 	} else if err != nil || len(keyFailures) > 0 {
 		current.consecutiveFailures++
-		current.nextRetryAt = time.Now().Add(multiplierFailureRetryDelay(current.consecutiveFailures))
+		current.nextRetryAt = s.multiplierCurrentTime().Add(multiplierFailureRetryDelay(current.consecutiveFailures))
 	} else {
 		current.consecutiveFailures = 0
 		current.nextRetryAt = time.Time{}
@@ -776,6 +901,32 @@ func multiplierRefreshOutcome(err error) string {
 		return "auth_failed"
 	}
 	return "unavailable"
+}
+
+func multiplierFailureOutcome(err error, syncErrorKey string) string {
+	var requestErr *upstream.RequestError
+	if errors.As(err, &requestErr) {
+		if reason := upstream.KnownUpstreamCodeErrorKey(requestErr.UpstreamCode); reason != "" {
+			return reason
+		}
+		if requestErr.StatusCode == http.StatusUnauthorized || requestErr.MessageKey == upstream.ErrorAuth {
+			if syncErrorKey == upstream.ErrorRefreshTokenRejected || syncErrorKey == upstream.ErrorAccessTokenRejected {
+				return syncErrorKey
+			}
+		}
+	}
+	return multiplierRefreshOutcome(err)
+}
+
+func isMultiplierManualReason(reason string) bool {
+	switch reason {
+	case upstream.ErrorAnnouncementAckRequired, upstream.ErrorUpstreamInsufficientBalance,
+		upstream.ErrorUpstreamKeyQuotaExhausted, upstream.ErrorUpstreamKeyExpired,
+		upstream.ErrorRefreshTokenRejected, upstream.ErrorAccessTokenRejected:
+		return true
+	default:
+		return false
+	}
 }
 
 func multiplierKeyFailuresOutcome(keyFailures map[string]string) string {
@@ -857,6 +1008,9 @@ func (s *Service) multiplierRefreshSummary(userID string, adminAccountID string)
 }
 
 func multiplierOutcomeErrorKey(outcome string) string {
+	if isMultiplierManualReason(outcome) {
+		return outcome
+	}
 	switch outcome {
 	case "queue_timeout":
 		return "queue_timeout"
@@ -887,17 +1041,32 @@ func (s *Service) resolveMultiplierSnapshotLocked(connection my_sites.RealConnec
 	if entry == nil {
 		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSiteUnavailable, info: info}
 	}
+	if _, deleted := entry.confirmedDeletedKeys[keyID]; deleted {
+		return upstreamMultiplierResolution{status: MultiplierResolutionMissing, reason: MultiplierReasonKeyDeleted, info: info}
+	}
 	if entry.status == multiplierResolutionUpdating {
 		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSnapshotUpdating, info: info}
 	}
-	if _, failed := entry.keyFailures[keyID]; failed {
-		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonKeyUnavailable, info: info}
+	if failure, failed := entry.keyFailures[keyID]; failed {
+		reason := MultiplierReasonKeyUnavailable
+		if isMultiplierManualReason(failure) {
+			reason = failure
+		}
+		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: reason, info: info}
 	}
 	if entry.status == "unavailable" {
-		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSiteUnavailable, info: info}
+		reason := MultiplierReasonSiteUnavailable
+		if entry.manualReason != "" {
+			reason = entry.manualReason
+		}
+		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: reason, info: info}
 	}
 	if entry.status == multiplierResolutionStale && !allowStale {
-		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSnapshotStale, info: info}
+		reason := MultiplierReasonSnapshotStale
+		if entry.manualReason != "" {
+			reason = entry.manualReason
+		}
+		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: reason, info: info}
 	}
 	key, ok := entry.keys[keyID]
 	if !ok {
@@ -930,6 +1099,9 @@ func (s *Service) resolveMultiplierSnapshotLocked(connection my_sites.RealConnec
 	if entry.status == multiplierResolutionStale {
 		status = multiplierResolutionStale
 		reason = MultiplierReasonSnapshotStale
+		if entry.manualReason != "" {
+			reason = entry.manualReason
+		}
 	}
 	return upstreamMultiplierResolution{status: status, reason: reason, info: info}
 }
@@ -960,7 +1132,16 @@ func findSiteGroup(groups []upstream.GroupInfo, key upstreamKeyMetadata) (*upstr
 }
 
 func newMultiplierSiteMetadata(site *upstream.Site) multiplierSiteMetadata {
-	metadata := multiplierSiteMetadata{rechargeRate: site.RechargeRate, groups: make([]upstream.GroupInfo, 0, len(site.Metrics.Groups))}
+	metadata := multiplierSiteMetadata{
+		rechargeRate: site.RechargeRate, groups: make([]upstream.GroupInfo, 0, len(site.Metrics.Groups)),
+		nonSub2APIPlatform: site.Platform != "" && site.Platform != upstream.PlatformSub2API,
+	}
+	if site.Session != nil && site.Session.Platform != "" && site.Session.Platform != upstream.PlatformSub2API {
+		metadata.nonSub2APIPlatform = true
+	}
+	if site.ErrorKey != nil && (*site.ErrorKey == upstream.ErrorRefreshTokenRejected || *site.ErrorKey == upstream.ErrorAccessTokenRejected) {
+		metadata.syncErrorKey = *site.ErrorKey
+	}
 	for _, group := range site.Metrics.Groups {
 		copy := upstream.GroupInfo{ID: group.ID, Name: group.Name}
 		if group.Multiplier != nil {

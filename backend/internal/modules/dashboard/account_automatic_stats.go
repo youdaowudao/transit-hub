@@ -54,7 +54,7 @@ func (s *MetricsService) buildAutomaticAccountStatsForTargets(
 		if err != nil {
 			continue
 		}
-		stat := buildAutomaticAccountDailyStat(target, run, item, date, cents(usage.TotalActualCost), time.Now().UTC())
+		stat := buildAutomaticAccountDailyStat(target, run, item, date, cents(usage.TotalActualCost), s.currentTime().UTC())
 		stat.UserID, stat.AdminAccountID = userID, adminAccountID
 		stats = append(stats, stat)
 	}
@@ -116,7 +116,7 @@ func findAutomaticAccountKey(target AutomaticAccountTarget, runs []UpstreamKeyCo
 			continue
 		}
 		for _, item := range run.Items {
-			if item.KeyID == target.Link.UpstreamKeyID {
+			if item.KeyID == target.Link.UpstreamKeyID && (item.Status == "" || item.Status == "ok") {
 				return run, item, true
 			}
 		}

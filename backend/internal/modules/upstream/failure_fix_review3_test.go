@@ -160,6 +160,10 @@ func TestFailureFixReview3KeyUsageBusinessRejectionRetainsRetry(t *testing.T) {
 				calls := 0
 				platform := failureFixPlatform(func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
+					if r.URL.Path == "/api/v1/usage/dashboard/api-keys-usage" {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
 					if strings.Contains(r.URL.Path, "stats") || strings.Contains(r.URL.Path, "/stat") {
 						calls++
 						if calls == 1 || !recover {

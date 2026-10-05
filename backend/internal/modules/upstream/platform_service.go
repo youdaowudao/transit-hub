@@ -38,7 +38,10 @@ const (
 const sub2APIAdminRedeemCodesResponseLimitBytes int64 = 2 * 1024 * 1024
 
 type PlatformService struct {
-	httpClient *HTTPClient
+	httpClient               *HTTPClient
+	keyUsageMu               sync.Mutex
+	keyUsageBatchUnsupported map[string]bool
+	now                      func() time.Time
 }
 
 func NewPlatformService(httpClient *HTTPClient) *PlatformService {
@@ -184,12 +187,23 @@ func (s *PlatformService) RefreshSession(session Session) (Session, error) {
 
 // RefreshSessionContext keeps scheduler shutdown responsive while a refresh request is in flight.
 func (s *PlatformService) RefreshSessionContext(ctx context.Context, session Session) (Session, error) {
+	return s.refreshSessionContextWithWindow(ctx, session, time.Duration(refreshSkewMS)*time.Millisecond, true)
+}
+
+func (s *PlatformService) refreshSessionContextWithWindow(ctx context.Context, session Session, window time.Duration, inclusive bool) (Session, error) {
 	if session.Platform == PlatformNewAPI {
 		return session, nil
 	}
-	now := time.Now().UnixMilli()
-	if session.RefreshToken == "" || (session.ExpiresAt != nil && *session.ExpiresAt-now > refreshSkewMS) {
+	now := s.keyUsageNow().UnixMilli()
+	if session.RefreshToken == "" {
 		return session, nil
+	}
+	if session.ExpiresAt != nil {
+		remaining := *session.ExpiresAt - now
+		windowMS := window.Milliseconds()
+		if remaining > windowMS || (!inclusive && remaining == windowMS) {
+			return session, nil
+		}
 	}
 	return s.refreshSub2APISessionContext(ctx, session)
 }
@@ -1229,7 +1243,7 @@ func (s *PlatformService) FetchKeyUsageTodayWithContext(ctx context.Context, ses
 	case PlatformSub2API:
 		return s.fetchSub2APIKeyUsageToday(ctx, session, false, date)
 	case PlatformNewAPI:
-		return s.fetchNewAPIKeyUsageToday(session, groups, false, date)
+		return s.fetchNewAPIKeyUsageToday(ctx, session, groups, false, date)
 	default:
 		return nil, newRequestError(ErrorNotFound, "")
 	}
@@ -1246,7 +1260,7 @@ func (s *PlatformService) FetchKeyUsageTodayIncludingZeroWithContext(ctx context
 	case PlatformSub2API:
 		return s.fetchSub2APIKeyUsageToday(ctx, session, true, date)
 	case PlatformNewAPI:
-		return s.fetchNewAPIKeyUsageToday(session, groups, true, date)
+		return s.fetchNewAPIKeyUsageToday(ctx, session, groups, true, date)
 	default:
 		return nil, newRequestError(ErrorNotFound, "")
 	}
@@ -1269,13 +1283,22 @@ func (s *PlatformService) requestKeyUsageJSONWithContext(ctx context.Context, re
 			return response, nil
 		}
 		lastErr = err
-		if !retryableKeyUsageError(err) || attempt+1 == keyUsageRequestAttempts {
+		delay := keyUsageRetryDelay
+		var requestErr *RequestError
+		rateLimited := errors.As(err, &requestErr) && requestErr.StatusCode == http.StatusTooManyRequests
+		if rateLimited {
+			if requestErr.UpstreamCode == "API_KEY_QUOTA_EXHAUSTED" || requestErr.UpstreamCode == "INSUFFICIENT_QUOTA" {
+				break
+			}
+			delay = keyUsageRetryAfter(response.Header.Get("Retry-After"), time.Now())
+		}
+		if (!rateLimited && !retryableKeyUsageError(err)) || attempt+1 == keyUsageRequestAttempts {
 			break
 		}
 		select {
 		case <-ctx.Done():
 			return jsonResponse{}, ctx.Err()
-		case <-time.After(keyUsageRetryDelay):
+		case <-time.After(delay):
 		}
 	}
 	return jsonResponse{}, lastErr
@@ -1311,6 +1334,15 @@ type sub2APIKeyRecord struct {
 // fetchSub2APIKeyUsageToday 分页拉取 sub2api 站点全部 key（不能只取第一页），
 // 再并发查询每个 key 的今日 usage stats（并发上限 maxKeyConcurrency），只保留消费 > 0 的 key。
 func (s *PlatformService) fetchSub2APIKeyUsageToday(ctx context.Context, session Session, includeZero bool, date string) ([]KeyUsageTodayStat, error) {
+	if strings.TrimSpace(date) == "" {
+		date = businesstime.DateAt(s.keyUsageNow())
+	}
+	return s.fetchSub2APIKeyUsage(ctx, session, includeZero, date, date == businesstime.DateAt(s.keyUsageNow()))
+}
+
+// serverToday is fixed by the caller before paging. Historical closing always
+// keeps its explicit date even when it happens to equal the current business day.
+func (s *PlatformService) fetchSub2APIKeyUsage(ctx context.Context, session Session, includeZero bool, date string, serverToday bool) ([]KeyUsageTodayStat, error) {
 	if session.Platform != PlatformSub2API || strings.TrimSpace(session.AccessToken) == "" {
 		return nil, newRequestError(ErrorAuth, PlatformSub2API)
 	}
@@ -1359,6 +1391,14 @@ func (s *PlatformService) fetchSub2APIKeyUsageToday(ctx context.Context, session
 	if strings.TrimSpace(date) == "" {
 		date = businesstime.Today()
 	}
+	if serverToday {
+		if stats, supported, err := s.fetchSub2APIKeyUsageBatch(ctx, session, records, includeZero); err != nil {
+			return nil, err
+		} else if supported {
+			return stats, nil
+		}
+	}
+
 	const maxKeyConcurrency = 4
 	sem := make(chan struct{}, maxKeyConcurrency)
 	var wg sync.WaitGroup
@@ -1367,13 +1407,21 @@ func (s *PlatformService) fetchSub2APIKeyUsageToday(ctx context.Context, session
 	var firstErr error
 
 	for _, record := range records {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return nil, ctx.Err()
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(record sub2APIKeyRecord) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
 			statsURL := session.BaseURL + "/api/v1/usage/stats?start_date=" + date + "&end_date=" + date + "&api_key_id=" + record.id + "&timezone=Asia%2FSingapore"
+			if serverToday {
+				statsURL = session.BaseURL + "/api/v1/usage/stats?period=today&api_key_id=" + url.QueryEscape(record.id)
+			}
 			response, err := s.requestKeyUsageJSONWithContext(ctx, statsURL, authOptions)
 			if err != nil {
 				mu.Lock()
@@ -1391,6 +1439,7 @@ func (s *PlatformService) fetchSub2APIKeyUsageToday(ctx context.Context, session
 			mu.Lock()
 			stats = append(stats, KeyUsageTodayStat{
 				KeyID:       record.id,
+				KeyIDs:      []string{record.id},
 				KeyName:     record.name,
 				GroupName:   groupName,
 				TodayAmount: cost,
@@ -1410,7 +1459,7 @@ func (s *PlatformService) fetchSub2APIKeyUsageToday(ctx context.Context, session
 // token 记录自带分组字段时直接按 token_name+group 查询；否则仅按 token_name 查询自助统计接口
 // （沿用已验证的 self 统计能力，不做 token×全部分组的穷举以控制并发/请求量）。
 // 并发上限 maxKeyConcurrency，只保留今日 quota 换算金额 > 0 的 token。
-func (s *PlatformService) fetchNewAPIKeyUsageToday(session Session, _ []GroupInfo, includeZero bool, date string) ([]KeyUsageTodayStat, error) {
+func (s *PlatformService) fetchNewAPIKeyUsageToday(ctx context.Context, session Session, _ []GroupInfo, includeZero bool, date string) ([]KeyUsageTodayStat, error) {
 	if session.Platform != PlatformNewAPI || !session.IsAuthenticated() {
 		return nil, newRequestError(ErrorAuth, PlatformNewAPI)
 	}
@@ -1423,13 +1472,14 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(session Session, _ []GroupInf
 	const maxPages = 100
 	type tokenRecord struct {
 		id        string
+		ids       []string
 		name      string
 		groupName string
 	}
 	records := make([]tokenRecord, 0)
 	for page := 1; page <= maxPages; page++ {
 		pageURL := session.BaseURL + "/api/token/?p=" + strconvInt(int64(page)) + "&page_size=" + strconvInt(pageSize)
-		response, err := s.requestKeyUsageJSON(pageURL, cookieOptions)
+		response, err := s.requestKeyUsageJSONWithContext(ctx, pageURL, cookieOptions)
 		if err != nil {
 			return nil, err
 		}
@@ -1468,6 +1518,30 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(session Session, _ []GroupInf
 		return nil, nil
 	}
 
+	// Missing group on any token prevents a reliable per-group split for its name.
+	missingGroup := make(map[string]bool)
+	for _, record := range records {
+		if record.groupName == "" {
+			missingGroup[record.name] = true
+		}
+	}
+	merged := make([]tokenRecord, 0, len(records))
+	indexes := make(map[string]int)
+	for _, record := range records {
+		if missingGroup[record.name] {
+			record.groupName = ""
+		}
+		key := record.name + "\x00" + record.groupName
+		if index, ok := indexes[key]; ok {
+			merged[index].ids = append(merged[index].ids, record.id)
+			continue
+		}
+		record.ids = []string{record.id}
+		indexes[key] = len(merged)
+		merged = append(merged, record)
+	}
+	records = merged
+
 	const maxKeyConcurrency = 4
 	sem := make(chan struct{}, maxKeyConcurrency)
 	var wg sync.WaitGroup
@@ -1476,8 +1550,13 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(session Session, _ []GroupInf
 	var firstErr error
 
 	for _, record := range records {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return nil, ctx.Err()
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(record tokenRecord) {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -1495,7 +1574,7 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(session Session, _ []GroupInf
 			if record.groupName != "" {
 				statURL += "&group=" + url.QueryEscape(record.groupName)
 			}
-			response, err := s.requestKeyUsageJSON(statURL, cookieOptions)
+			response, err := s.requestKeyUsageJSONWithContext(ctx, statURL, cookieOptions)
 			if err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -1515,6 +1594,8 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(session Session, _ []GroupInf
 			mu.Lock()
 			stats = append(stats, KeyUsageTodayStat{
 				KeyID:       record.id,
+				KeyIDs:      append([]string(nil), record.ids...),
+				Merged:      len(record.ids) > 1,
 				KeyName:     record.name,
 				GroupName:   groupName,
 				TodayAmount: amount,
@@ -1610,16 +1691,18 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 	}
 	// 使用新加坡业务日时区边界查询今日成本，修复 todayStart/todayEnd 使用进程本地时区的问题。
 	var stat jsonResponse
-	if startTS, endTS, boundsErr := businessDayUnixBounds(businesstime.Today()); boundsErr == nil {
+	var costFailure error
+	var failedAt time.Time
+	if startTS, endTS, boundsErr := businessDayUnixBounds(businesstime.DateAt(s.keyUsageNow())); boundsErr == nil {
 		statURL := session.BaseURL + "/api/log/self/stat?type=2&start_timestamp=" + strconvInt(startTS) + "&end_timestamp=" + strconvInt(endTS)
 		if r, statErr := s.httpClient.requestJSON(statURL, cookieOptions); statErr == nil {
 			stat = r
 		} else {
-			log.Printf("new-api stat request failed base_url=%s err=%v", safeHost(session.BaseURL), statErr)
+			costFailure, failedAt = statErr, s.keyUsageNow()
 			stat = jsonResponse{Payload: map[string]any{}}
 		}
 	} else {
-		log.Printf("new-api businessDayUnixBounds failed base_url=%s err=%v", safeHost(session.BaseURL), boundsErr)
+		costFailure, failedAt = boundsErr, s.keyUsageNow()
 		stat = jsonResponse{Payload: map[string]any{}}
 	}
 	groupsPayload, err := s.httpClient.requestJSON(session.BaseURL+"/api/user/self/groups", cookieOptions)
@@ -1658,13 +1741,17 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 		group = groups[0]
 	}
 	qpu := session.QuotaPerUnit
-	return Metrics{
+	metrics := Metrics{
 		Balance:         metric(quotaToUSDWithUnit(quota, qpu)),
 		TodayConsume:    metric(quotaToUSDWithUnit(firstNumber(dataRecord(stat.Payload), []string{"quota", "used_quota", "usedQuota"}), qpu)),
 		HistoryRecharge: metric(quotaToUSDWithUnit(estimatedGranted, qpu)),
 		Group:           group,
 		Groups:          groups,
-	}, nil
+	}
+	if costFailure != nil {
+		metrics = withCostReadFailure(metrics, costFailure, failedAt)
+	}
+	return metrics, nil
 }
 
 func (s *PlatformService) fetchSub2APIMetrics(session Session) (Metrics, error) {
@@ -1678,7 +1765,10 @@ func (s *PlatformService) fetchSub2APIMetrics(session Session) (Metrics, error) 
 	stats, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/usage/dashboard/stats", authOptions)
 	if err != nil {
 		log.Printf("[sub2api-metrics] /api/v1/usage/dashboard/stats 失败 base_url=%s err=%v", safeHost(session.BaseURL), err)
-		return Metrics{}, withFailureStage(err, "metrics", PlatformSub2API)
+		failure := withFailureStage(err, "metrics", PlatformSub2API)
+		// Return cost-only failure metadata for the snapshot without changing the
+		// existing Sub2API whole-sync failure or its retained site metrics.
+		return withCostReadFailure(Metrics{}, failure, s.keyUsageNow()), failure
 	}
 	groups, err := s.fetchSub2APIAvailableGroupsWithRates(session)
 	if err != nil {

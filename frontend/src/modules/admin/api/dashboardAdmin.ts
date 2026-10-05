@@ -98,6 +98,7 @@ export interface DashboardMetricsResponse {
   operatingCost?: number | null
   adjustedNetProfit?: number | null
   adjustedProfitMargin?: number | null
+  adjustedProfitMarginQuality?: 'exact' | 'ceiling' | 'unavailable'
 }
 
 export interface AdditionalCostRecord {
@@ -271,6 +272,7 @@ export const listAccountCostLedger = async (filters: Record<string, string | num
 }
 
 export const refreshAccountStats = async (date: string): Promise<{
+  status?: 'in_progress'
   date: string
   snapshotRunId: string
   expectedSites: number
@@ -457,6 +459,8 @@ export interface GroupProfitTodayResponse {
   fallbackGroups?: number
   unavailableGroups?: number
   fallbackAt?: string | null
+  collectedAt?: string | null
+  unsplittableGroups?: number
 }
 
 /** 获取主站所有分组的今日营收。首页运营区和弹窗按需调用。 */
@@ -492,6 +496,16 @@ export interface UpstreamKeyUsageTodayItem {
   todayAmount: number
   rawAmount: number
   rechargeRate: number
+  keyIds?: string[]
+  merged?: boolean
+}
+
+export interface UpstreamKeyUsageSnapshotSite {
+  siteId: string
+  siteName: string
+  status: 'ok' | 'retained' | 'missing'
+  collectedAt: string | null
+  errorKey?: string | null
 }
 
 /** 「今日成本」下钻响应：当前工作区所有上游站点中，今天有消费的 key 列表。 */
@@ -501,6 +515,8 @@ export interface UpstreamKeyUsageTodayResponse {
   keys: UpstreamKeyUsageTodayItem[]
   failedSites?: number
   totalSites?: number
+  sites?: UpstreamKeyUsageSnapshotSite[]
+  autoRefreshEnabled?: boolean
 }
 
 /** 获取当前工作区所有上游站点中，今天有消费的 key 明细。仅在弹窗打开时按需调用。 */

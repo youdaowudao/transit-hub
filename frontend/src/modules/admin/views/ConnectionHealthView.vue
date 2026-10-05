@@ -50,6 +50,7 @@ import {
   collectPrioritySyncBlockers,
   type PrioritySyncBlocker,
   resolvePrioritySyncBlockReasonMessage,
+  prioritySyncBlockReasonTranslationKey,
   resolvePrioritySyncFailureMessage,
   resolvePriorityWorkspaceLabel,
 } from '../utils/connectionHealthMultiplier'
@@ -421,7 +422,7 @@ const priorityFailureText = computed(() => {
 })
 const priorityBlockReasonLabel = (blocker: PrioritySyncBlocker): string => {
   const message = resolvePrioritySyncBlockReasonMessage(blocker.reason, blocker.groupName, blocker.groupId)
-  return t(`admin.connectionHealth.prioritySync.blockReasons.${message.key}`, message.params)
+  return t(prioritySyncBlockReasonTranslationKey(message.key), message.params)
 }
 const priorityBlockerSiteLabel = (siteId: string): string =>
   siteId ? siteName(siteId) : t('admin.connectionHealth.prioritySync.siteUnknown')

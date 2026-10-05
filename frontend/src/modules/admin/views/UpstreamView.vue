@@ -448,6 +448,23 @@ const siteFailureKey = (site: UpstreamSite): string | null => {
   return site.errorKey
 }
 
+const manualCostReasons = new Set([
+  'admin.upstream.errors.announcementAckRequired',
+  'admin.upstream.errors.upstreamInsufficientBalance',
+  'admin.upstream.errors.upstreamKeyQuotaExhausted',
+  'admin.upstream.errors.upstreamKeyExpired',
+])
+const costFailureDisplay = (site: UpstreamSite): string | null => {
+  if (site.metrics.todayConsumeStatus !== 'unreadable') return null
+  const key = site.metrics.todayConsumeErrorKey ?? 'admin.upstream.errors.request'
+  const code = site.metrics.todayConsumeUpstreamCode ?? ''
+  const status = site.metrics.todayConsumeHTTPStatus
+  if (!manualCostReasons.has(key) && /^[A-Z0-9_]{1,64}$/.test(code) && Number.isInteger(status) && (status ?? 0) > 0) {
+    return `上游拒绝（代码 ${code}，HTTP ${status}）`
+  }
+  return t(/^admin\.upstream\.errors\.[A-Za-z][A-Za-z0-9]*$/.test(key) ? key : 'admin.upstream.errors.request')
+}
+
 onMounted(() => {
   void Promise.all([loadRefreshSettings(), loadGroupNavigationData()])
   void runRefresh()
@@ -597,6 +614,7 @@ onBeforeUnmount(() => {
               <span :class="[amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-[10px] font-medium mt-0.5' : 'font-bold text-sm', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? (amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-orange-500/70' : 'text-orange-500') : (amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-muted-foreground' : 'text-foreground'), 'text-center']">
                 {{ usdMetricDisplay(site.metrics.todayConsume) }}
               </span>
+              <span v-if="site.metrics.todayConsumeDate" class="mt-1 text-[10px] text-muted-foreground">{{ site.metrics.todayConsumeDate }}</span>
             </div>
             <div class="flex flex-col items-center justify-center p-3 rounded-xl bg-surface/50 border border-border/40">
               <span class="text-xs text-muted-foreground mb-1">{{ t('admin.upstream.fields.historyRecharge') }}</span>
@@ -667,11 +685,11 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-if="site.enabled && siteFailureKey(site)" class="mt-4 flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning" role="alert" aria-live="polite">
+        <div v-if="site.enabled && (siteFailureKey(site) || costFailureDisplay(site))" class="mt-4 flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning" role="alert" aria-live="polite">
           <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>
-            <span class="font-medium">{{ t('admin.upstream.syncStream.error') }}：</span>
-            {{ t(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') }}
+            <span class="font-medium">{{ siteFailureKey(site) ? t('admin.upstream.syncStream.error') : '今日成本不可读' }}：</span>
+            {{ siteFailureKey(site) ? t(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') : costFailureDisplay(site) }}
           </span>
         </div>
 
@@ -755,11 +773,11 @@ onBeforeUnmount(() => {
                   <XCircle v-else class="w-3.5 h-3.5" />
                   {{ site.enabled ? statusLabel(site.status) : t('admin.upstream.status.disabled') }}
                 </div>
-                <div v-if="site.enabled && siteFailureKey(site)" class="mt-2 flex max-w-xs items-start gap-1.5 text-xs leading-5 text-destructive" role="alert" aria-live="polite">
+                <div v-if="site.enabled && (siteFailureKey(site) || costFailureDisplay(site))" class="mt-2 flex max-w-xs items-start gap-1.5 text-xs leading-5 text-destructive" role="alert" aria-live="polite">
                   <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>
-                    <span class="font-medium">{{ t('admin.upstream.syncStream.error') }}：</span>
-                    {{ t(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') }}
+                    <span class="font-medium">{{ siteFailureKey(site) ? t('admin.upstream.syncStream.error') : '今日成本不可读' }}：</span>
+                    {{ siteFailureKey(site) ? t(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') : costFailureDisplay(site) }}
                   </span>
                 </div>
               </td>
@@ -781,6 +799,7 @@ onBeforeUnmount(() => {
                   <span :class="[amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-xs font-medium' : 'font-medium', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? (amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-orange-500/70' : 'text-orange-500') : 'text-muted-foreground']">
                     {{ usdMetricDisplay(site.metrics.todayConsume) }}
                   </span>
+                  <span v-if="site.metrics.todayConsumeDate" class="text-xs text-muted-foreground">{{ site.metrics.todayConsumeDate }}</span>
                 </div>
               </td>
               <td class="px-6 py-4">

@@ -55,6 +55,13 @@ export interface UpstreamGroupInfo {
 export interface UpstreamMetrics {
   balance: UpstreamMetricValue
   todayConsume: UpstreamMetricValue
+  todayConsumeDate?: string
+  todayConsumeAt?: string
+  todayConsumeStatus?: 'ok' | 'unreadable'
+  todayConsumeErrorKey?: string
+  todayConsumeUpstreamCode?: string
+  todayConsumeHTTPStatus?: number
+  todayConsumeFailedAt?: string
   historyRecharge: UpstreamMetricValue
   group: UpstreamGroupInfo
   groups: UpstreamGroupInfo[]

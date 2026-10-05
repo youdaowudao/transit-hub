@@ -564,7 +564,7 @@ export default {
         close: '关闭',
         empty: '暂无今日消费的 key。',
         loadError: '加载今日成本明细失败，请检查上游站点连接后重试。',
-        partialWarning: '{failed}/{total} 个上游站点暂时无法读取，当前合计仅包含成功站点。',
+        partialWarning: '以下站点没有读到今日逐 Key 用量，合计不含这些站点',
         retry: '重试',
         errors: {
           unavailable: '所有上游站点的 Key 用量暂时都无法读取，请检查站点连接或登录凭证。'
@@ -1076,6 +1076,7 @@ export default {
 					site_unavailable: '上游站点资料暂时不可用',
 					key_unavailable: '当前 Key 信息读取失败',
 					key_missing: '上游当前找不到该 Key',
+					key_deleted: '上游 Key 已删除',
 					groups_unavailable: '站点没有可用的分组倍率资料',
 					group_missing: '上游分组{group}已不存在，请到上游核对；不再使用则删除绑定',
 					group_ambiguous: '上游分组{group}匹配到多个同名分组，请到上游核对分组 ID',
@@ -2248,6 +2249,10 @@ export default {
         notFound: '上游接口不存在（404），请检查站点地址和平台类型。',
         siteNotFound: '站点不存在或不属于当前工作区，请刷新站点列表。',
         rateLimited: '上游请求过于频繁（429），请稍后再试。',
+        announcementAckRequired: '上游要求先在网页上确认新公告，确认前无法读取数据。',
+        upstreamInsufficientBalance: '上游账户余额不足，上游不允许读取。',
+        upstreamKeyQuotaExhausted: '该 Key 在上游的额度已用尽。',
+        upstreamKeyExpired: '该 Key 在上游已过期。',
         upstreamServerError: '上游服务异常（5xx），请稍后再试。',
         networkTimeout: '连接上游超时。',
         networkUnreachable: '无法连接上游地址，请检查域名和端口。',

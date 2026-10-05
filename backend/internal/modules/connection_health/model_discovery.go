@@ -44,8 +44,9 @@ type openAIModelListResponse struct {
 }
 
 // ListModels 请求 {baseURL}/v1/models 并解析出去空、去重、按名称排序后的模型列表。
-// 上游不可达/非 2xx -> ErrorModelListUnavailable；返回体不是可识别的 OpenAI 兼容结构 ->
-// ErrorModelListInvalid。两种错误都不携带上游原始报文，避免把上游异常明细泄露给前端。
+// 已知的上游拒绝返回固定原因，其他不可达/非 2xx 返回 ErrorModelListUnavailable；
+// 返回体不是可识别的 OpenAI 兼容结构时返回 ErrorModelListInvalid。
+// 错误不携带上游原始报文，避免把上游异常明细泄露给前端。
 func (r *ModelDiscoveryRunner) ListModels(ctx context.Context, baseURL string, key string) ([]DiscoveredModel, error) {
 	endpoint := strings.TrimRight(baseURL, "/") + "/v1/models"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -63,6 +64,12 @@ func (r *ModelDiscoveryRunner) ListModels(ctx context.Context, baseURL string, k
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var payload map[string]any
+		if json.Unmarshal(body, &payload) == nil {
+			if reason := upstream.KnownUpstreamCodeErrorKey(upstream.ParseUpstreamCode(payload)); reason != "" {
+				return nil, requestError(reason)
+			}
+		}
 		return nil, requestError(ErrorModelListUnavailable)
 	}
 

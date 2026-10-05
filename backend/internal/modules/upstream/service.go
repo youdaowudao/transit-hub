@@ -74,6 +74,8 @@ type Service struct {
 	keyUsageFinished map[string]time.Time
 	now              func() time.Time
 	mu               sync.Mutex
+
+	siteLoginSuccessCallback func(userID, adminAccountID, siteID string)
 	// AfterSync 在站点同步成功后被调用，传入同步前后的指标数据。
 	// 由系统设置模块注入，用于余额预警和倍率变更检测。
 	AfterSync func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics Metrics)
@@ -87,6 +89,22 @@ func (s *Service) SetSiteReferenceChecker(checker SiteReferenceChecker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.references = checker
+}
+
+// SetSiteLoginSuccessCallback installs an in-process notification, without credentials.
+func (s *Service) SetSiteLoginSuccessCallback(callback func(userID, adminAccountID, siteID string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.siteLoginSuccessCallback = callback
+}
+
+func (s *Service) notifySiteLoginSucceeded(site *Site) {
+	s.mu.Lock()
+	callback := s.siteLoginSuccessCallback
+	s.mu.Unlock()
+	if callback != nil {
+		callback(site.UserID, site.AdminAccountID, site.ID)
+	}
 }
 
 // requireCurrentAdminAccountID 解析当前工作区 ID，解析失败时返回错误（fail-closed）。
@@ -609,6 +627,7 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 			return response, err
 		}
 		s.saveSnapshot(ctx, site)
+		s.notifySiteLoginSucceeded(site)
 		return response, nil
 	}
 
@@ -1005,6 +1024,17 @@ func (s *Service) runSyncFlight(id string, flight *syncFlight) {
 	response, err = s.syncOnce(context.Background(), id)
 }
 
+// refreshSessionForSync uses only this site's workspace setting for early refresh.
+func (s *Service) refreshSessionForSync(ctx context.Context, site *Site, session Session) (Session, error) {
+	s.mu.Lock()
+	config := s.refreshConfigs[refreshWorkspaceKey{userID: site.UserID, adminAccountID: site.AdminAccountID}]
+	s.mu.Unlock()
+	if config.Enabled && config.Interval > 0 {
+		return s.platformService.refreshSessionContextWithWindow(ctx, session, config.Interval+5*time.Minute, false)
+	}
+	return s.platformService.RefreshSessionContext(ctx, session)
+}
+
 // syncOnce 执行单个站点的同步流程：刷新会话 → 拉取最新指标 → 更新缓存和数据库。
 func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	site, err := s.cache.Get(ctx, id)
@@ -1027,7 +1057,7 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	// 刷新会话并拉取指标（无锁操作，可能耗时较长）。
 	syncStartedAt := s.keyUsageNow()
 	syncDate := businesstime.DateAt(syncStartedAt) // 同步开始时生成一次新加坡业务日期，所有指标复用。
-	refreshedSession, refreshErr := s.platformService.RefreshSession(session)
+	refreshedSession, refreshErr := s.refreshSessionForSync(ctx, site, session)
 	metrics := Metrics{}
 	if refreshErr == nil {
 		metrics, refreshErr = s.platformService.FetchMetrics(refreshedSession)

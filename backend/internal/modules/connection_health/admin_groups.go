@@ -1182,6 +1182,7 @@ const (
 	MultiplierReasonSiteUnavailable   = "site_unavailable"
 	MultiplierReasonKeyUnavailable    = "key_unavailable"
 	MultiplierReasonKeyMissing        = "key_missing"
+	MultiplierReasonKeyDeleted        = "key_deleted"
 	MultiplierReasonGroupsUnavailable = "groups_unavailable"
 	MultiplierReasonGroupMissing      = "group_missing"
 	MultiplierReasonGroupAmbiguous    = "group_ambiguous"
@@ -1221,11 +1222,15 @@ func isPriorityMultiplierBlocker(status string) bool {
 }
 
 func safeMultiplierBlockReason(resolution upstreamMultiplierResolution) string {
+	if isMultiplierManualReason(resolution.reason) {
+		return resolution.reason
+	}
 	switch resolution.reason {
 	case MultiplierReasonBindingMissing,
 		MultiplierReasonSiteUnavailable,
 		MultiplierReasonKeyUnavailable,
 		MultiplierReasonKeyMissing,
+		MultiplierReasonKeyDeleted,
 		MultiplierReasonGroupsUnavailable,
 		MultiplierReasonGroupMissing,
 		MultiplierReasonGroupAmbiguous,

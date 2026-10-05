@@ -680,11 +680,11 @@ func TestMultiplierSnapshotMixedDirectSupportSurvivesLaterListFailure(t *testing
 		t.Fatalf("later list failure must not discard a key that still supports direct lookup: %+v", second)
 	}
 	missing := second.byAccount["account-missing"]
-	if missing.status != MultiplierResolutionUnavailable || missing.reason != MultiplierReasonKeyUnavailable {
-		t.Fatalf("missing key after list failure = %+v, want unavailable key reason", missing)
+	if missing.status != MultiplierResolutionMissing || missing.reason != MultiplierReasonKeyDeleted {
+		t.Fatalf("confirmed deleted key must remain missing without another list read: %+v", missing)
 	}
-	if direct, lists := reader.callCounts("site-1"); direct != 4 || lists != 2 {
-		t.Fatalf("mixed capability reads = direct:%d list:%d, want direct:4 list:2", direct, lists)
+	if direct, lists := reader.callCounts("site-1"); direct != 3 || lists != 1 {
+		t.Fatalf("mixed capability reads = direct:%d list:%d, want direct:3 list:1", direct, lists)
 	}
 }
 

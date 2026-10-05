@@ -118,11 +118,22 @@ export interface PrioritySyncFailureMessage {
   params: Record<string, string | number>
 }
 
+const UPSTREAM_MANUAL_BLOCK_REASONS = new Set([
+  'admin.upstream.errors.announcementAckRequired',
+  'admin.upstream.errors.upstreamInsufficientBalance',
+  'admin.upstream.errors.upstreamKeyQuotaExhausted',
+  'admin.upstream.errors.upstreamKeyExpired',
+  'admin.upstream.errors.refreshTokenRejected',
+  'admin.upstream.errors.accessTokenRejected',
+])
+
 const PRIORITY_SYNC_BLOCK_REASONS = new Set([
+  ...UPSTREAM_MANUAL_BLOCK_REASONS,
   'binding_missing',
   'site_unavailable',
   'key_unavailable',
   'key_missing',
+  'key_deleted',
   'groups_unavailable',
   'group_missing',
   'group_ambiguous',
@@ -134,6 +145,11 @@ const PRIORITY_SYNC_BLOCK_REASONS = new Set([
 
 export const prioritySyncBlockReasonKey = (reason: string | null | undefined): string =>
   reason && PRIORITY_SYNC_BLOCK_REASONS.has(reason) ? reason : 'unknown'
+
+export const prioritySyncBlockReasonTranslationKey = (reason: string): string =>
+  UPSTREAM_MANUAL_BLOCK_REASONS.has(reason)
+    ? reason
+    : `admin.connectionHealth.prioritySync.blockReasons.${prioritySyncBlockReasonKey(reason)}`
 
 export interface PrioritySyncBlocker {
   targetId: string

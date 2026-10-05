@@ -1076,6 +1076,7 @@ export default {
 					site_unavailable: '上游站点资料暂时不可用',
 					key_unavailable: '当前 Key 信息读取失败',
 					key_missing: '上游当前找不到该 Key',
+					key_deleted: '上游 Key 已删除',
 					groups_unavailable: '站点没有可用的分组倍率资料',
 					group_missing: '上游分组{group}已不存在，请到上游核对；不再使用则删除绑定',
 					group_ambiguous: '上游分组{group}匹配到多个同名分组，请到上游核对分组 ID',

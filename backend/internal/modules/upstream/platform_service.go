@@ -187,12 +187,23 @@ func (s *PlatformService) RefreshSession(session Session) (Session, error) {
 
 // RefreshSessionContext keeps scheduler shutdown responsive while a refresh request is in flight.
 func (s *PlatformService) RefreshSessionContext(ctx context.Context, session Session) (Session, error) {
+	return s.refreshSessionContextWithWindow(ctx, session, time.Duration(refreshSkewMS)*time.Millisecond, true)
+}
+
+func (s *PlatformService) refreshSessionContextWithWindow(ctx context.Context, session Session, window time.Duration, inclusive bool) (Session, error) {
 	if session.Platform == PlatformNewAPI {
 		return session, nil
 	}
-	now := time.Now().UnixMilli()
-	if session.RefreshToken == "" || (session.ExpiresAt != nil && *session.ExpiresAt-now > refreshSkewMS) {
+	now := s.keyUsageNow().UnixMilli()
+	if session.RefreshToken == "" {
 		return session, nil
+	}
+	if session.ExpiresAt != nil {
+		remaining := *session.ExpiresAt - now
+		windowMS := window.Milliseconds()
+		if remaining > windowMS || (!inclusive && remaining == windowMS) {
+			return session, nil
+		}
 	}
 	return s.refreshSub2APISessionContext(ctx, session)
 }

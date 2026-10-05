@@ -43,6 +43,7 @@ import type {
 import {
   resolveConnectionHealthMultiplierDisplay,
   resolvePrioritySyncBlockReasonMessage,
+  prioritySyncBlockReasonTranslationKey,
 } from '../../utils/connectionHealthMultiplier'
 
 const props = withDefaults(defineProps<{
@@ -599,7 +600,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
     account.upstreamKeyGroupName,
     account.upstreamKeyGroupId,
   )
-  return t(`${prefix}.prioritySync.blockReasons.${message.key}`, message.params)
+  return t(prioritySyncBlockReasonTranslationKey(message.key), message.params)
 }
 
 </script>

@@ -217,13 +217,9 @@ const mainSiteRestrictions = (account: AdminGroupAccount): string[] => {
 const remotePendingLabel = (account: AdminGroupAccount): string => {
   const pending = account.remoteActionPending
   if (!pending) return ''
-  const safeLabel = (section: string, value: string) => {
-    const key = `${detailPrefix}.remoteActionPending.${section}.${value}`
-    return te(key) ? t(key) : t(`${detailPrefix}.remoteActionPending.${section}.unknown`)
-  }
-  const parts = [t('admin.connectionHealth.testConfiguration.remoteActionPending'), safeLabel('actions', pending.action), pending.dispatchId || '—', safeLabel('phases', pending.phase), safeLabel('reasons', pending.reason)]
-  if (pending.source) parts.push(safeLabel('sources', pending.source))
-  return parts.join(' · ')
+  const prefix = `${detailPrefix}.remoteActionPending.reasons`
+  const key = `${prefix}.${pending.reason}`
+  return te(key) ? t(key) : t(`${prefix}.unknown`)
 }
 
 const upstreamStatusLabel = (account: AdminGroupAccount): string => {

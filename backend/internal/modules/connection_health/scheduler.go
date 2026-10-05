@@ -205,6 +205,7 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 	inventoryCache := make(adminInventoryCache)
 	s.syncMultiplierPrioritiesWithCache(ctx, policies, assignments, groupAssignments, exclusions, priorityStates, inventoryCache)
 	s.restoreUnmanagedTargetActions(ctx, policies, assignments, groupAssignments, exclusions, targetActionStates, inventoryCache)
+	s.startDeletedAccountSweeps(ctx, inventoryCache)
 	if len(policies) == 0 {
 		return
 	}

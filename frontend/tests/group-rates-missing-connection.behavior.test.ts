@@ -266,7 +266,8 @@ describe('safe complete-disconnect rejection', () => {
     expect(dialog.text()).toContain('主站账号 account-active')
     expect(dialog.text()).toContain('上游 Key 编号 key-active')
     expect(dialog.text()).not.toContain('当前操作未发送')
-    expect(dialog.text()).not.toContain('存在待确认的远端动作')
+    expect(dialog.text()).not.toContain('有远端操作尚未完成核对')
+    expect(dialog.text()).not.toContain('请稍后再试；持续出现时请查看分组健康页顶部提示。')
     expect(dialog.text()).not.toContain('最后一个可用账号')
     expect(dialog.get('input[value="full"]').element).toHaveProperty('checked', true)
     expect(dialog.get('input[type="checkbox"]').element).toHaveProperty('checked', false)
@@ -286,8 +287,9 @@ describe('safe complete-disconnect rejection', () => {
     await dialog.get('input[type="checkbox"]').setValue(false)
     await dialog.findAll('button').find(button => button.text().trim() === '确定')!.trigger('click')
     await flushPromises()
-    expect(dialog.text()).toContain('当前管理连接存在待确认的远端动作，须核对后收口，当前操作未发送。')
+    expect(dialog.text()).toContain('有远端操作尚未完成核对，当前操作未发送。请稍后再试；持续出现时请查看分组健康页顶部提示。')
     expect(dialog.text()).not.toContain('同一账号')
+    expect(dialog.text()).not.toContain('该账号')
     expect(dialog.text()).not.toContain('最后一个可用账号')
     expect(dialog.text()).toContain('受保护分组：正常分组（1）')
     expect(dialog.get('input[value="full"]').element).toHaveProperty('checked', true)
@@ -339,7 +341,8 @@ describe('safe complete-disconnect rejection', () => {
     expect(dialog.text()).toContain('上游 Key 编号 207')
     expect(dialog.text()).not.toContain('本地记录已保留')
     expect(dialog.text()).not.toContain('当前操作未发送')
-    expect(dialog.text()).not.toContain('存在待确认的远端动作')
+    expect(dialog.text()).not.toContain('有远端操作尚未完成核对')
+    expect(dialog.text()).not.toContain('请稍后再试；持续出现时请查看分组健康页顶部提示。')
     expect(dialog.text()).not.toContain('真实对接创建失败')
     expect(selection.element).toHaveProperty('checked', true)
     expect(row.text()).toContain('配置对接')
@@ -417,7 +420,7 @@ describe('safe real-connect compensation rejection', () => {
 
   it.each([
     ['admin.connectionHealth.errors.sub2apiGroupLastUsable', '最后一个可用账号'],
-    ['admin.connectionHealth.errors.remoteActionPending', '当前管理连接存在待确认的远端动作，须核对后收口，当前操作未发送。'],
+    ['admin.connectionHealth.errors.remoteActionPending', '有远端操作尚未完成核对，当前操作未发送。请稍后再试；持续出现时请查看分组健康页顶部提示。'],
   ])('shows retained resources and keeps the connector on compensation failure: %s', async (reason, text) => {
     harness.listRealConnections.mockResolvedValue([])
     harness.getMySiteMappingOptions.mockResolvedValue({
@@ -442,6 +445,7 @@ describe('safe real-connect compensation rejection', () => {
     expect(dialog.text()).toContain(text)
     if (reason === 'admin.connectionHealth.errors.remoteActionPending') {
       expect(dialog.text()).not.toContain('同一账号')
+      expect(dialog.text()).not.toContain('该账号')
       expect(dialog.text()).not.toContain('最后一个可用账号')
     }
     expect(dialog.text()).toContain('受保护分组：隔离分组（10）')

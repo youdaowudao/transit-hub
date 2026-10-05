@@ -12,6 +12,59 @@ import type {
   ModelHealth,
 } from '@/modules/admin/types/connectionHealth'
 
+describe('ActionDiagnostics RED-6 user-facing action reasons', () => {
+  it('renders one account and reason per diagnostic with named and fallback identities', async () => {
+    harness.getPrioritySyncStatus.mockResolvedValue({ workspaceId: 'ws1', status: 'success', failedCount: 0, actionDiagnostics: [
+      { accountId: '101', accountName: '验收账号', targetId: 'sub2api:adminacct_internal:101', action: 'priority', dispatchId: 'red6-secret-dispatch', phase: 'uncertain', reason: 'uncertain' },
+      { accountId: '102', targetId: 'sub2api:adminacct_internal:102', action: 'target', dispatchId: 'red6-other-dispatch', phase: 'uncertain', reason: 'conflict' },
+    ] })
+    const wrapper = await mountView([makeGroup([makeAccount()])])
+    const diagnostics = wrapper.get('[data-testid="remote-action-diagnostics"]')
+    expect(diagnostics.findAll('p')).toHaveLength(2)
+    expect(diagnostics.findAll('p')[0].text()).toBe('验收账号（#101）：远端操作结果未知，请在主站核对')
+    expect(diagnostics.findAll('p')[1].text()).toBe('主站账号 #102：主站当前值与 TransitHub 写入的值不一致，请在主站核对')
+    for (const internal of ['adminacct_', 'sub2api:', 'red6-secret-dispatch', 'red6-other-dispatch']) expect(diagnostics.text()).not.toContain(internal)
+    expect(diagnostics.findAll('button')).toHaveLength(0)
+  })
+
+  it('does not render the diagnostic block when the backend filters ordinary actions', async () => {
+    harness.getPrioritySyncStatus.mockResolvedValue({ workspaceId: 'ws1', status: 'success', failedCount: 0, actionDiagnostics: [] })
+    const wrapper = await mountView([makeGroup([makeAccount()])])
+    expect(wrapper.find('[data-testid="remote-action-diagnostics"]').exists()).toBe(false)
+  })
+
+  it('shows only the reason in account details and hides internal dispatch information', () => {
+    const entry = makeAccount({ remoteActionPending: { action: 'target', dispatchId: 'red6-detail-dispatch', phase: 'uncertain', reason: 'uncertain', source: 'manual' } })
+    const wrapper = mountDetail([entry])
+    const row = rowFor(wrapper, entry.name)
+    expect(row.text()).toContain('远端操作结果未知，请在主站核对')
+    for (const old of ['阶段待确认', 'red6-detail-dispatch', '远端动作待确认', '人工操作']) expect(row.text()).not.toContain(old)
+  })
+
+  it.each(['same account', 'another account'])('explains the original safety interception and preserves scheduling: %s', async (owner) => {
+    const entry = makeAccount({ schedulable: true })
+    const other = makeAccount({ id: '102', name: '其他账号', targetId: 'sub2api:ws1:102', schedulable: true })
+    const blocking = owner === 'same account' ? entry : other
+    blocking.remoteActionPending = { action: 'priority', dispatchId: 'red6-blocker', phase: 'uncertain', reason: 'uncertain' }
+    harness.updateTargetSchedulable.mockImplementation(async () => {
+      harness.refs.errorKey.value = 'admin.connectionHealth.errors.remoteActionPending'
+      return false
+    })
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    try {
+      const wrapper = await mountView([makeGroup([entry, other])])
+      await buttonByAria(rowFor(wrapper, entry.name), '关闭主站调度').trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('有远端操作尚未完成核对，当前操作未发送。请稍后再试；持续出现时请查看分组健康页顶部提示。')
+      expect(wrapper.text()).not.toContain('该账号')
+      expect(wrapper.text()).not.toContain('red6-blocker')
+      expect(harness.updateTargetSchedulable).toHaveBeenCalledWith(entry.targetId, false)
+      expect(entry.schedulable).toBe(true)
+      expect(rowFor(wrapper, entry.name).text()).toContain('主站调度开启')
+    } finally { confirm.mockRestore() }
+  })
+})
+
 type QuickProbePhase = 'starting' | 'queued' | 'running' | ''
 type ActiveQuickProbePhase = Exclude<QuickProbePhase, ''>
 
@@ -1406,7 +1459,7 @@ describe('protocol and unresolved remote action safety display', () => {
   it.each(['same account', 'another account in the protected group'])('shows an accurate rejected scheduling-close message and preserves all account values and pending details: %s', async (pendingOwner) => {
     const confirm = vi.spyOn(window, 'confirm').mockClear().mockReturnValue(true)
     try {
-      const pending = { action: 'schedulable', dispatchId: 'dispatch-blocking-close', phase: 'uncertain', reason: 'pending' }
+      const pending = { action: 'schedulable', dispatchId: 'dispatch-blocking-close', phase: 'uncertain', reason: 'uncertain' }
       const target = makeAccount(pendingOwner === 'same account' ? { remoteActionPending: pending } : {})
       const other = makeAccount({ id: 'account-2', name: '未决账号二', targetId: 'sub2api:ws1:account-2',
         ...(pendingOwner !== 'same account' ? { remoteActionPending: pending } : {}),
@@ -1421,15 +1474,16 @@ describe('protocol and unresolved remote action safety display', () => {
       await flushPromises()
       expect(confirm).toHaveBeenCalledTimes(1)
       expect(harness.updateTargetSchedulable).toHaveBeenCalledWith(target.targetId, false)
-      expect(wrapper.text()).toContain('当前管理连接存在待确认的远端动作，须核对后收口，当前操作未发送。')
+      expect(wrapper.text()).toContain('有远端操作尚未完成核对，当前操作未发送。请稍后再试；持续出现时请查看分组健康页顶部提示。')
       expect(wrapper.text()).not.toContain('同一账号')
+      expect(wrapper.text()).not.toContain('该账号')
       expect(wrapper.text()).not.toContain('最后一个可用账号')
       for (const entry of [target, other]) {
         expect(rowFor(wrapper, entry.name).text()).toContain('主站调度开启')
         expect(entry.schedulable).toBe(true)
         expect(buttonByAria(rowFor(wrapper, entry.name), '关闭主站调度').exists()).toBe(true)
       }
-      expect(wrapper.text()).toContain(pending.dispatchId)
+      expect(wrapper.text()).not.toContain(pending.dispatchId)
       expect(wrapper.text()).toContain('结果未知')
       expect(harness.loadAll).not.toHaveBeenCalled()
     } finally {
@@ -1439,17 +1493,18 @@ describe('protocol and unresolved remote action safety display', () => {
 
   it('keeps unresolved visible and invisible targets in the existing status area without a clear control', async () => {
     harness.getPrioritySyncStatus.mockResolvedValue({ workspaceId: 'ws1', status: 'success', failedCount: 0, actionDiagnostics: [
-      { targetId: 'sub2api:ws1:missing', action: 'priority', dispatchId: 'dispatch-missing', phase: 'uncertain', reason: 'target_not_visible' },
-      { targetId: 'sub2api:ws1:visible', action: 'target', dispatchId: 'dispatch-visible', phase: 'sending', reason: 'pending' },
+      { accountId: 'missing', targetId: 'sub2api:ws1:missing', action: 'priority', dispatchId: 'dispatch-missing', phase: 'uncertain', reason: 'target_not_visible' },
+      { accountId: 'visible', accountName: '需核对账号', targetId: 'sub2api:ws1:visible', action: 'target', dispatchId: 'dispatch-visible', phase: 'uncertain', reason: 'uncertain' },
     ] })
-    const account = makeAccount({ remoteActionPending: { action: 'target', dispatchId: 'dispatch-visible', phase: 'sending', reason: 'pending' } })
+    const account = makeAccount({ remoteActionPending: { action: 'target', dispatchId: 'dispatch-visible', phase: 'uncertain', reason: 'uncertain' } })
     const wrapper = await mountView([makeGroup([account])])
     const diagnostics = wrapper.get('[data-testid="remote-action-diagnostics"]')
-    expect(diagnostics.text()).toContain('账号已离组，当前值无法核对，需人工处理')
-    expect(diagnostics.text()).toContain('dispatch-missing')
-    expect(diagnostics.text()).toContain('远端动作待确认')
+    expect(diagnostics.text()).toContain('主站账号 #missing：已不在任何分组，TransitHub 已无法管理它；不再使用请在主站删除，继续使用请加回分组')
+    expect(diagnostics.text()).not.toContain('dispatch-missing')
+    expect(diagnostics.text()).toContain('需核对账号（#visible）：远端操作结果未知，请在主站核对')
     expect(diagnostics.findAll('button')).toHaveLength(0)
-    expect(rowFor(wrapper, account.name).text()).toContain('dispatch-visible')
+    expect(rowFor(wrapper, account.name).text()).not.toContain('dispatch-visible')
+    expect(rowFor(wrapper, account.name).text()).toContain('远端操作结果未知，请在主站核对')
   })
 
   it('blocks a conflicted quick probe and explains its protocol sources', async () => {

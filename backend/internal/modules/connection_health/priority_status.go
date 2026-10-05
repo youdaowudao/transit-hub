@@ -31,29 +31,9 @@ func (s *Service) PrioritySyncStatus(ctx context.Context, userID string) (Priori
 	if err != nil {
 		return view, err
 	}
-	pairs := make(map[string]RemoteActionCheckpoints)
-	for _, state := range priorityStates {
-		if isSub2APIActionTarget(state.TargetID) {
-			pair := pairs[state.TargetID]
-			copy := state
-			pair.Priority = &copy
-			pairs[state.TargetID] = pair
-		}
-	}
-	for _, state := range targetStates {
-		if isSub2APIActionTarget(state.TargetID) {
-			pair := pairs[state.TargetID]
-			copy := state
-			pair.Target = &copy
-			pairs[state.TargetID] = pair
-		}
-	}
-	for targetID, pair := range pairs {
-		if pending := actionPendingView(pair.Priority, pair.Target); pending != nil {
-			view.ActionDiagnostics = append(view.ActionDiagnostics, RemoteActionDiagnostic{TargetID: targetID, RemoteActionPendingView: *pending})
-		}
-	}
-	view.ActionDiagnostics = append(view.ActionDiagnostics, s.invisibleActionDiagnostics(userID, adminAccountID, pairs)...)
+	checkpoints := s.actionCheckpointsByAccount(userID, adminAccountID, priorityStates, targetStates)
+	inventory := s.completeActionInventory(userID, adminAccountID)
+	view.ActionDiagnostics = s.actionAccountDiagnostics(userID, adminAccountID, checkpoints, inventory, s.actionTime(), false)
 	sort.Slice(view.ActionDiagnostics, func(i, j int) bool {
 		left, right := view.ActionDiagnostics[i], view.ActionDiagnostics[j]
 		if left.TargetID != right.TargetID {

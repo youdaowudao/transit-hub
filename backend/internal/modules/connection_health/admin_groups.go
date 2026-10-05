@@ -415,6 +415,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		}
 		excludedByGroup[exclusion.AdminGroupID][exclusion.TargetID] = struct{}{}
 	}
+	actionCheckpointsByAccount := s.actionCheckpointsByAccount(userID, adminAccountID, priorityStates, targetActionStates)
 	priorityByTarget := make(map[string]PrioritySyncState, len(priorityStates))
 	for _, state := range priorityStates {
 		priorityByTarget[state.TargetID] = state
@@ -790,9 +791,13 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 			}
 			priorityCheckpoint := priorityByTarget[targetID]
 			actionCheckpoint := targetActionsByID[targetID]
+			remoteActionPending := actionPendingView(&priorityCheckpoint, &actionCheckpoint, s.actionTime())
+			if id, valid := scopedActionAccountID(targetID, adminAccountID); valid {
+				remoteActionPending = actionAccountPendingView(actionCheckpointsByAccount[id], s.actionTime())
+			}
 			item := AdminGroupAccount{
 				TestConfiguration:             testConfigurationByTarget[targetID],
-				RemoteActionPending:           actionPendingView(&priorityCheckpoint, &actionCheckpoint),
+				RemoteActionPending:           remoteActionPending,
 				ID:                            acc.ID,
 				Name:                          acc.Name,
 				Platform:                      acc.Platform,

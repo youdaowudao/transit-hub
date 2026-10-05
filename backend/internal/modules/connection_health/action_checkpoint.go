@@ -91,6 +91,7 @@ type actionCheckpointRepository interface {
 	PermitRemoteAction(context.Context, RemoteActionClaim) (bool, error)
 	RecordRemoteActionReceipt(context.Context, RemoteActionClaim, RemoteDispatchPhase) error
 	ReconcileRemoteAction(context.Context, RemoteActionObservation) (RemoteActionCheckpoints, error)
+	ClearDeletedAccountCheckpoint(context.Context, RemoteActionScope, time.Time, time.Time) (bool, error)
 }
 
 func sameRemoteHealthDecisionState(current, expected ConnectionHealthState) bool {

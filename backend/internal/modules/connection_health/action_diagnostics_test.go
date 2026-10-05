@@ -8,7 +8,7 @@ import (
 	"transithub/backend/internal/modules/upstream"
 )
 
-func TestActionDiagnosticsInvisibleIdleAndUncertainRemainVisibleWithoutUpstreamReads(t *testing.T) {
+func TestActionDiagnosticsUnverifiedLegacyVisibleAndIdleHiddenWithoutUpstreamReads(t *testing.T) {
 	repo := newFakeRepository()
 	service := &Service{repo: repo, accounts: fakeAdminAccountResolver{id: "w"}}
 	repo.priorityStates["u|w|sub2api:w:1"] = PrioritySyncState{UserID: "u", AdminAccountID: "w", TargetID: "sub2api:w:1", OriginalPriority: 1, LastAppliedPriority: 2}
@@ -21,15 +21,15 @@ func TestActionDiagnosticsInvisibleIdleAndUncertainRemainVisibleWithoutUpstreamR
 	}
 	invisible := map[string]bool{}
 	for _, diagnostic := range status.ActionDiagnostics {
-		if diagnostic.Reason == "target_not_visible" {
+		if diagnostic.Reason == "target_unverified" {
 			invisible[diagnostic.TargetID] = true
 			if diagnostic.ObservedAt == nil {
 				t.Fatal("missing observation provenance")
 			}
 		}
 	}
-	if !invisible["sub2api:w:1"] || !invisible["sub2api:w:2"] {
-		t.Fatalf("invisible checkpoint diagnostics=%+v", status.ActionDiagnostics)
+	if invisible["sub2api:w:1"] || !invisible["sub2api:w:2"] || len(status.ActionDiagnostics) != 1 {
+		t.Fatalf("unverified legacy diagnostic and hidden idle checkpoint=%+v", status.ActionDiagnostics)
 	}
 	if len(repo.priorityStates) != 1 || repo.targetActionStates["u|w|sub2api:w:2"].PendingStatus != "inactive" {
 		t.Fatal("diagnostic read changed checkpoint")

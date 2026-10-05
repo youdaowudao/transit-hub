@@ -725,6 +725,9 @@ func (s *Service) restoreUnmanagedTargetActions(
 				}
 			}
 		}
+		if found {
+			s.clearInvisibleActionLog(RemoteActionScope{stored.UserID, stored.AdminAccountID, stored.TargetID})
+		}
 		if found && inventory.session.Platform == upstream.PlatformSub2API {
 			pair, reconcileErr := s.reconcileActionObservation(ctx, targetObservation(stored.UserID, stored.AdminAccountID, target, inventory))
 			if reconcileErr != nil || pair.pendingCount() != 0 || pair.Target == nil {
@@ -740,7 +743,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 		if !found && inventory.session.Platform == upstream.PlatformSub2API {
 			// Leaving all groups proves no current value. Keep the checkpoint for
 			// explicit manual verification rather than inventing LastApplied.
-			log.Printf("[connection-health] %s target_id=%s", RemoteActionTargetNotVisible, stored.TargetID)
+			s.logInvisibleAction(RemoteActionScope{stored.UserID, stored.AdminAccountID, stored.TargetID})
 			continue
 		}
 		if !found {

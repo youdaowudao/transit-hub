@@ -1,7 +1,9 @@
 package connection_health
 
 import (
+	"strings"
 	"time"
+
 	"transithub/backend/internal/modules/upstream"
 )
 
@@ -14,94 +16,242 @@ type RemoteActionPendingView struct {
 }
 
 type RemoteActionDiagnostic struct {
-	ObservedAt *time.Time `json:"observedAt,omitempty"`
-	TargetID   string     `json:"targetId"`
+	AccountID   string     `json:"accountId"`
+	AccountName string     `json:"accountName,omitempty"`
+	ObservedAt  *time.Time `json:"observedAt,omitempty"`
+	TargetID    string     `json:"targetId"`
 	RemoteActionPendingView
 }
 
-func actionPendingView(priority *PrioritySyncState, target *TargetActionState) *RemoteActionPendingView {
-	pair := RemoteActionCheckpoints{Priority: priority, Target: target}
-	if pair.pendingCount() == 0 {
-		return nil
+// Every persisted alias participates in the account's display decision.
+// These slices are read-only projections, never dispatch or Priority evidence.
+type actionAccountCheckpoints struct {
+	priorities []*PrioritySyncState
+	targets    []*TargetActionState
+}
+
+func actionPendingView(priority *PrioritySyncState, target *TargetActionState, now time.Time) *RemoteActionPendingView {
+	return actionAccountPendingView(actionAccountCheckpoints{
+		priorities: []*PrioritySyncState{priority}, targets: []*TargetActionState{target},
+	}, now)
+}
+
+func actionAccountPendingView(checkpoints actionAccountCheckpoints, now time.Time) *RemoteActionPendingView {
+	type pendingRecord struct {
+		view      RemoteActionPendingView
+		conflict  bool
+		legacy    bool
+		updatedAt time.Time
 	}
-	if pair.pendingCount() > 1 {
+	pending := make([]pendingRecord, 0, len(checkpoints.priorities)+len(checkpoints.targets))
+	for _, state := range checkpoints.priorities {
+		if !priorityActionPending(state) {
+			continue
+		}
+		pending = append(pending, pendingRecord{
+			view:     RemoteActionPendingView{Action: ActionKindPriority, DispatchID: state.PendingDispatchID, Phase: state.PendingDispatchPhase},
+			conflict: state.Conflict, legacy: state.PendingDispatchID == "" || state.PendingOwnerID == "" || state.PendingDispatchPhase == "", updatedAt: state.UpdatedAt,
+		})
+	}
+	for _, state := range checkpoints.targets {
+		if !targetActionPending(state) {
+			continue
+		}
+		action := state.PendingActionKind
+		if action == "" {
+			action = ActionKindTarget
+		}
+		pending = append(pending, pendingRecord{
+			view:     RemoteActionPendingView{Action: action, DispatchID: state.PendingDispatchID, Phase: state.PendingDispatchPhase, Source: state.PendingSource},
+			conflict: state.Conflict, legacy: state.PendingDispatchID == "" || state.PendingOwnerID == "" || state.PendingDispatchPhase == "", updatedAt: state.UpdatedAt,
+		})
+	}
+	viewFor := func(record pendingRecord, reason string) *RemoteActionPendingView {
+		view := record.view
+		view.Reason = reason
+		return &view
+	}
+	// Apply the specified precedence across all rows, including older aliases.
+	for _, record := range pending {
+		if record.conflict {
+			return viewFor(record, "conflict")
+		}
+	}
+	for _, record := range pending {
+		if record.view.Phase == DispatchUncertain {
+			return viewFor(record, "uncertain")
+		}
+	}
+	for _, record := range pending {
+		if record.legacy {
+			return viewFor(record, "legacy")
+		}
+	}
+	if len(pending) > 1 {
 		return &RemoteActionPendingView{Action: "priority_and_target", Phase: DispatchUncertain, Reason: "dual_claim"}
 	}
-	kind := ActionKindPriority
-	if targetActionPending(target) {
-		kind = ActionKindTarget
-	}
-	id, owner, phase, _ := pair.dispatch(kind)
-	reason := "pending"
-	if id == "" || owner == "" || phase == "" {
-		phase = DispatchUncertain
-		reason = "legacy"
-	}
-	view := &RemoteActionPendingView{Action: kind, DispatchID: id, Phase: phase, Reason: reason}
-	if kind == ActionKindTarget && target != nil {
-		if target.PendingActionKind != "" {
-			view.Action = target.PendingActionKind
+	for _, record := range pending {
+		switch record.view.Phase {
+		case DispatchPrepared, DispatchSending, DispatchConfirmedApplied, DispatchNotSent, DispatchConfirmedRejected:
+			if now.Sub(record.updatedAt) > actionConfirmationWindow {
+				return viewFor(record, "overdue")
+			}
 		}
-		view.Source = target.PendingSource
 	}
-	return view
+	return nil
+}
+
+func (s *Service) actionCheckpointsByAccount(userID, workspace string, priorities []PrioritySyncState, targets []TargetActionState) map[string]actionAccountCheckpoints {
+	accounts := make(map[string]actionAccountCheckpoints)
+	accountID := func(stateUser, stateWorkspace, targetID string) (string, bool) {
+		if stateUser != userID || stateWorkspace != workspace || !isSub2APIActionTarget(targetID) {
+			return "", false
+		}
+		id, valid := scopedActionAccountID(targetID, workspace)
+		if !valid {
+			s.logInvisibleAction(RemoteActionScope{userID, workspace, targetID})
+		}
+		return id, valid
+	}
+	for _, state := range priorities {
+		if id, valid := accountID(state.UserID, state.AdminAccountID, state.TargetID); valid {
+			checkpoints := accounts[id]
+			copy := state
+			checkpoints.priorities = append(checkpoints.priorities, &copy)
+			accounts[id] = checkpoints
+		}
+	}
+	for _, state := range targets {
+		if id, valid := accountID(state.UserID, state.AdminAccountID, state.TargetID); valid {
+			checkpoints := accounts[id]
+			copy := state
+			checkpoints.targets = append(checkpoints.targets, &copy)
+			accounts[id] = checkpoints
+		}
+	}
+	return accounts
 }
 
 type actionInventoryView struct {
 	complete   bool
 	visible    map[string]bool
+	names      map[string]string
 	observedAt time.Time
 }
 
-// This is a read-only projection of the existing refresh, never a source for
-// dispatch or a reason to start another inventory request.
+func (s *Service) completeActionInventory(userID, workspace string) *actionInventoryView {
+	stored, exists := s.actionInventoryViews.Load(priorityRuntimeLeaseKey(userID, workspace))
+	if !exists {
+		return nil
+	}
+	return stored.(*actionInventoryView)
+}
+
+// This immutable projection remembers only successful complete grouped reads.
+// It is never used as dispatch evidence or to request another grouped read.
 func (s *Service) rememberActionInventory(userID, workspace string, inventory *adminWorkspaceInventory) {
-	if inventory == nil || inventory.session.Platform != upstream.PlatformSub2API {
+	if inventory == nil || inventory.session.Platform != upstream.PlatformSub2API || !adminInventoryComplete(*inventory) {
 		return
 	}
-	view := actionInventoryView{complete: adminInventoryComplete(*inventory), visible: make(map[string]bool), observedAt: inventory.snapshotStartedAt}
+	view := actionInventoryView{complete: true, visible: make(map[string]bool), names: make(map[string]string), observedAt: inventory.snapshotStartedAt}
 	for _, group := range inventory.groups {
 		for _, account := range group.accounts {
-			view.visible[buildTargetID(string(upstream.PlatformSub2API), workspace, account.ID)] = true
+			id := strings.TrimSpace(account.ID)
+			view.visible[buildTargetID(string(upstream.PlatformSub2API), workspace, id)] = true
+			view.names[id] = account.Name
 		}
 	}
 	key := priorityRuntimeLeaseKey(userID, workspace)
 	for {
 		previous, loaded := s.actionInventoryViews.LoadOrStore(key, &view)
 		if !loaded {
-			return
+			break
 		}
 		old := previous.(*actionInventoryView)
 		if !view.observedAt.After(old.observedAt) {
 			return
 		}
 		if s.actionInventoryViews.CompareAndSwap(key, old, &view) {
-			return
+			break
 		}
 	}
+	// Reset even when a pending action would make restoration return early.
+	s.actionInvisibleLogs.Range(func(key, _ any) bool {
+		scope := key.(RemoteActionScope)
+		if scope.UserID == userID && scope.AdminAccountID == workspace {
+			if id, valid := scopedActionAccountID(scope.TargetID, workspace); valid {
+				if _, visible := view.names[id]; visible {
+					s.actionInvisibleLogs.Delete(scope)
+				}
+			}
+		}
+		return true
+	})
+	s.removeVisibleActionConclusions(userID, workspace, view.names)
 }
 
 func (s *Service) invisibleActionDiagnostics(userID, workspace string, pairs map[string]RemoteActionCheckpoints) []RemoteActionDiagnostic {
-	stored, exists := s.actionInventoryViews.Load(priorityRuntimeLeaseKey(userID, workspace))
-	if !exists {
-		return nil
-	}
-	view := stored.(*actionInventoryView)
-	if !view.complete {
-		return nil
-	}
-	out := []RemoteActionDiagnostic{}
+	return s.invisibleActionDiagnosticsForInventory(userID, workspace, pairs, s.completeActionInventory(userID, workspace), s.actionTime())
+}
+
+func (s *Service) invisibleActionDiagnosticsForInventory(userID, workspace string, pairs map[string]RemoteActionCheckpoints, view *actionInventoryView, now time.Time) []RemoteActionDiagnostic {
+	accounts := make(map[string]actionAccountCheckpoints)
 	for targetID, pair := range pairs {
-		if view.visible[targetID] {
+		id, valid := scopedActionAccountID(targetID, workspace)
+		if !valid {
+			s.logInvisibleAction(RemoteActionScope{userID, workspace, targetID})
 			continue
 		}
-		for _, kind := range []string{ActionKindPriority, ActionKindTarget} {
-			if (kind == ActionKindPriority && pair.Priority == nil) || (kind == ActionKindTarget && pair.Target == nil) {
+		checkpoints := accounts[id]
+		if pair.Priority != nil {
+			checkpoints.priorities = append(checkpoints.priorities, pair.Priority)
+		}
+		if pair.Target != nil {
+			checkpoints.targets = append(checkpoints.targets, pair.Target)
+		}
+		accounts[id] = checkpoints
+	}
+	return s.actionAccountDiagnostics(userID, workspace, accounts, view, now, true)
+}
+
+func (s *Service) actionAccountDiagnostics(userID, workspace string, accounts map[string]actionAccountCheckpoints, inventory *actionInventoryView, now time.Time, onlyInvisible bool) []RemoteActionDiagnostic {
+	sweep := s.actionSweepViewFor(userID, workspace)
+	out := []RemoteActionDiagnostic{}
+	for id, checkpoints := range accounts {
+		visible, name := true, ""
+		if inventory != nil {
+			name, visible = inventory.names[id]
+		}
+		pending := actionAccountPendingView(checkpoints, now)
+		diagnostic := RemoteActionDiagnostic{TargetID: buildTargetID("sub2api", workspace, id), AccountID: id}
+		if visible {
+			if onlyInvisible || pending == nil {
 				continue
 			}
-			id, _, phase, _ := pair.dispatch(kind)
-			out = append(out, RemoteActionDiagnostic{TargetID: targetID, RemoteActionPendingView: RemoteActionPendingView{Action: kind, DispatchID: id, Phase: phase, Reason: "target_not_visible"}, ObservedAt: &view.observedAt})
+			diagnostic.AccountName, diagnostic.RemoteActionPendingView = name, *pending
+			out = append(out, diagnostic)
+			continue
 		}
+		diagnostic.ObservedAt = &inventory.observedAt
+		if sweep != nil && sweep.departed[id] {
+			if conclusion, confirmed := sweep.conclusions[id]; confirmed {
+				if conclusion.deleted {
+					continue
+				}
+				diagnostic.Reason, diagnostic.AccountName = "target_not_visible", conclusion.accountName
+			}
+		}
+		if diagnostic.Reason == "" {
+			if pending != nil {
+				diagnostic.RemoteActionPendingView = *pending
+				diagnostic.Reason = "target_unverified"
+			} else if sweep != nil && (sweep.failures >= 3 || sweep.unavailable) {
+				diagnostic.Reason = "inventory_unavailable"
+			} else {
+				continue
+			}
+		}
+		out = append(out, diagnostic)
 	}
 	return out
 }

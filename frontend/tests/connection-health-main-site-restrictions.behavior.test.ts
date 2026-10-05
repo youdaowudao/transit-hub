@@ -71,13 +71,13 @@ describe('existing refresh main-site restrictions', () => {
     expect(wrapper.findAll('[data-main-site-restriction]')).toHaveLength(0)
   })
 
-  it('shows the pending action, dispatch, phase, source and reason without changing the existing button', () => {
+  it('shows only the pending reason without changing the existing button', () => {
     const wrapper = detail(account({ remoteActionPending: { action: 'schedulable', dispatchId: 'dispatch-fixture-101', phase: 'uncertain', reason: 'legacy', source: 'manual' } }))
-    expect(wrapper.text()).toContain('调度开关写入')
-    expect(wrapper.text()).toContain('dispatch-fixture-101')
-    expect(wrapper.text()).toContain('结果未知')
-    expect(wrapper.text()).toContain('人工操作')
-    expect(wrapper.text()).toContain('旧操作缺少完整发送证据')
+    expect(wrapper.text()).not.toContain('调度开关写入')
+    expect(wrapper.text()).not.toContain('dispatch-fixture-101')
+    expect(wrapper.text()).not.toContain('远端操作结果未知')
+    expect(wrapper.text()).not.toContain('人工操作')
+    expect(wrapper.text()).toContain('旧操作缺少发送记录，请在主站核对')
     expect(wrapper.find('button[aria-label="恢复主站调度"]').exists()).toBe(true)
   })
 
@@ -95,16 +95,17 @@ describe('existing refresh main-site restrictions', () => {
     }
     const targetRow = wrapper.findAll('tbody tr').find(row => row.text().includes(entry.name))!
     expect(targetRow.text()).toContain('最近动作：用户关闭 Sub2API 主站调度失败')
-    expect(targetRow.text()).toContain('当前管理连接存在待确认的远端动作，须核对后收口，当前操作未发送。')
+    expect(targetRow.text()).toContain('有远端操作尚未完成核对，当前操作未发送。请稍后再试；持续出现时请查看分组健康页顶部提示。')
     expect(targetRow.text()).not.toContain('同一账号')
+    expect(targetRow.text()).not.toContain('该账号')
     expect(targetRow.text()).not.toContain('最后一个可用账号')
     expect(targetRow.text()).toContain('主站调度开启')
-    expect(wrapper.text()).toContain(pending.dispatchId)
-    expect(wrapper.text()).toContain('结果未知')
+    expect(wrapper.text()).not.toContain(pending.dispatchId)
+    expect(wrapper.text()).toContain('旧操作缺少发送记录，请在主站核对')
     const button = targetRow.get('button[aria-label="关闭主站调度"]')
     await button.trigger('click')
     expect(wrapper.emitted('set-schedulable')?.[0]).toEqual([entry])
     expect(entry.schedulable).toBe(true)
-    expect(wrapper.text()).toContain(pending.dispatchId)
+    expect(wrapper.text()).not.toContain(pending.dispatchId)
   })
 })

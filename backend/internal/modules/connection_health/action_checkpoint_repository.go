@@ -284,3 +284,100 @@ func (r *Repository) deleteActionCheckpoint(ctx context.Context, scope RemoteAct
 	})
 	return err
 }
+
+// The workspace W lock already serializes writers. Lock the Sub2API rows in
+// that scope and match IDs in Go so all TrimSpace aliases (including Unicode)
+// use the same identity as grouped and complete upstream inventories.
+func lockDeletedAccountAliases(ctx context.Context, tx pgx.Tx, scope RemoteActionScope) (map[string]RemoteActionCheckpoints, error) {
+	aliases := make(map[string]RemoteActionCheckpoints)
+	id, valid := scopedActionAccountID(scope.TargetID, scope.AdminAccountID)
+	if !valid {
+		return aliases, nil
+	}
+	prefix := "sub2api:" + scope.AdminAccountID + ":"
+	for _, kind := range []string{ActionKindPriority, ActionKindTarget} {
+		columns, table := priorityCheckpointColumns, "connection_health_priority_sync_states"
+		if kind == ActionKindTarget {
+			columns, table = targetCheckpointColumns, "connection_health_target_action_states"
+		}
+		rows, err := tx.Query(ctx, `SELECT `+columns+` FROM `+table+` WHERE user_id=$1 AND admin_account_id=$2 AND left(target_id,length($3))=$3 ORDER BY target_id FOR UPDATE`, scope.UserID, scope.AdminAccountID, prefix)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var targetID string
+			var priority *PrioritySyncState
+			var target *TargetActionState
+			if kind == ActionKindPriority {
+				priority, err = scanPriorityCheckpoint(rows)
+				if err == nil {
+					targetID = priority.TargetID
+				}
+			} else {
+				target, err = scanTargetCheckpoint(rows)
+				if err == nil {
+					targetID = target.TargetID
+				}
+			}
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if aliasID, valid := scopedActionAccountID(targetID, scope.AdminAccountID); valid && aliasID == id {
+				pair := aliases[targetID]
+				if priority != nil {
+					pair.Priority = priority
+				} else {
+					pair.Target = target
+				}
+				aliases[targetID] = pair
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return aliases, nil
+}
+
+// Complete list evidence replaces reconciliation only for accounts proven deleted.
+// One transaction checks and clears every raw alias of the normalized account.
+func (r *Repository) ClearDeletedAccountCheckpoint(ctx context.Context, scope RemoteActionScope, snapshotStartedAt, now time.Time) (bool, error) {
+	cleared := false
+	_, err := r.actionCheckpointTransaction(ctx, scope, nil, false, func(tx pgx.Tx, pair *RemoteActionCheckpoints, _ time.Time) error {
+		aliases, err := lockDeletedAccountAliases(ctx, tx, scope)
+		if err != nil {
+			return err
+		}
+		// The additional alias locks may have waited; use the clock after all locks.
+		var dbNow time.Time
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&dbNow); err != nil {
+			return err
+		}
+		if actionCheckpointBecameVisible(ctx, scope) {
+			return nil
+		}
+		if !clearDeletedAccountCheckpointAliases(aliases, scope, snapshotStartedAt, dbNow) {
+			return nil
+		}
+		otherAliases := make([]string, 0, len(aliases))
+		for targetID := range aliases {
+			if targetID != scope.TargetID {
+				otherAliases = append(otherAliases, targetID)
+			}
+		}
+		if len(otherAliases) > 0 {
+			for _, table := range []string{"connection_health_priority_sync_states", "connection_health_target_action_states"} {
+				if _, err := tx.Exec(ctx, `DELETE FROM `+table+` WHERE user_id=$1 AND admin_account_id=$2 AND target_id=ANY($3)`, scope.UserID, scope.AdminAccountID, otherAliases); err != nil {
+					return err
+				}
+			}
+		}
+		// The existing transaction writer deletes the exact scope's pair.
+		pair.Priority, pair.Target = nil, nil
+		cleared = true
+		return nil
+	})
+	return cleared && err == nil, err
+}

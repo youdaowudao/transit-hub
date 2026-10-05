@@ -9,6 +9,51 @@ import (
 	"time"
 )
 
+func (f *fakeRepository) ClearDeletedAccountCheckpoint(ctx context.Context, scope RemoteActionScope, snapshotStartedAt, now time.Time) (bool, error) {
+	f.actionMu.Lock()
+	defer f.actionMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if actionCheckpointBecameVisible(ctx, scope) {
+		return false, nil
+	}
+	id, valid := scopedActionAccountID(scope.TargetID, scope.AdminAccountID)
+	if !valid {
+		return false, nil
+	}
+	aliases := make(map[string]RemoteActionCheckpoints)
+	for _, state := range f.priorityStates {
+		aliasID, valid := scopedActionAccountID(state.TargetID, scope.AdminAccountID)
+		if state.UserID == scope.UserID && state.AdminAccountID == scope.AdminAccountID && valid && aliasID == id {
+			pair := aliases[state.TargetID]
+			copy := state
+			pair.Priority = &copy
+			aliases[state.TargetID] = pair
+		}
+	}
+	for _, state := range f.targetActionStates {
+		aliasID, valid := scopedActionAccountID(state.TargetID, scope.AdminAccountID)
+		if state.UserID == scope.UserID && state.AdminAccountID == scope.AdminAccountID && valid && aliasID == id {
+			pair := aliases[state.TargetID]
+			copy := state
+			pair.Target = &copy
+			aliases[state.TargetID] = pair
+		}
+	}
+	before := make(map[string]RemoteActionCheckpoints, len(aliases))
+	for targetID, pair := range aliases {
+		before[targetID] = pair
+	}
+	cleared := clearDeletedAccountCheckpointAliases(aliases, scope, snapshotStartedAt, now)
+	if cleared {
+		for targetID, pair := range aliases {
+			f.writeActionPair(RemoteActionScope{scope.UserID, scope.AdminAccountID, targetID}, before[targetID], pair)
+		}
+	}
+	return cleared, nil
+}
+
 func (f *fakeRepository) AcquireActionLease(ctx context.Context, key string, wait bool) (*RuntimeLeaseHandle, bool, error) {
 	if strings.HasPrefix(key, "connection-health:target:") && !wait && f.targetLeaseBlocked {
 		return nil, false, nil

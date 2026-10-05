@@ -111,6 +111,13 @@ const siteNameMap = ref<Map<string, string>>(new Map())
 const preferences = ref<ConnectionHealthPreferences>(createDefaultConnectionHealthPreferences())
 const groupManagerOpen = ref(false)
 const prioritySyncStatus = ref<PrioritySyncStatus | null>(null)
+const actionDiagnosticAccountLabel = (diagnostic: NonNullable<PrioritySyncStatus['actionDiagnostics']>[number]): string =>
+  diagnostic.accountName ? `${diagnostic.accountName}（#${diagnostic.accountId}）` : `主站账号 #${diagnostic.accountId}`
+const actionDiagnosticReasonLabel = (reason: string): string => {
+  const prefix = 'admin.connectionHealth.groupDetail.remoteActionPending.reasons'
+  const key = `${prefix}.${reason}`
+  return te(key) ? t(key) : t(`${prefix}.unknown`)
+}
 const refreshLoading = ref(false)
 const refreshStartedAt = ref<number | null>(null)
 const refreshWaitSeconds = ref(0)
@@ -1237,8 +1244,8 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
     </div>
 
 		<div v-if="prioritySyncStatus?.actionDiagnostics?.length" data-testid="remote-action-diagnostics" class="mb-4 space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-800 dark:text-amber-300" role="status">
-        <p v-for="diagnostic in prioritySyncStatus.actionDiagnostics" :key="`${diagnostic.targetId}:${diagnostic.action}:${diagnostic.dispatchId || ''}:${diagnostic.reason}`" class="whitespace-pre-wrap break-words">
-          {{ t('admin.connectionHealth.testConfiguration.' + (diagnostic.reason === 'target_not_visible' ? 'targetNotVisible' : 'remoteActionPending')) }} · {{ diagnostic.targetId }} · {{ diagnostic.action }}<template v-if="diagnostic.dispatchId"> · {{ diagnostic.dispatchId }}</template>
+        <p v-for="diagnostic in prioritySyncStatus.actionDiagnostics" :key="diagnostic.accountId" class="whitespace-pre-wrap break-words">
+          {{ actionDiagnosticAccountLabel(diagnostic) }}：{{ actionDiagnosticReasonLabel(diagnostic.reason) }}
         </p>
       </div>
       <div

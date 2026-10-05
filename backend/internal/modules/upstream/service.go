@@ -494,11 +494,12 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 	}
 
 	// 登录成功：更新站点状态。
-	now := time.Now().UnixMilli()
+	observedAt := s.keyUsageNow()
+	now := observedAt.UnixMilli()
 	site.BaseURL = result.Session.BaseURL
 	site.Platform = result.Platform
 	site.Session = &result.Session
-	site.Metrics = result.Metrics
+	site.Metrics = result.Metrics.WithSyncDate(businesstime.DateAt(observedAt), observedAt)
 	site.Status = StatusConnected
 	site.ErrorKey = nil
 	site.LastSyncedAt = &now
@@ -586,11 +587,12 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 		site.Enabled = current.Enabled
 		log.Printf("[upstream] 更新站点登录成功 id=%s name=%q", id, safeUpstreamMessage(dto.Name))
 
-		now := time.Now().UnixMilli()
+		observedAt := s.keyUsageNow()
+		now := observedAt.UnixMilli()
 		site.BaseURL = result.Session.BaseURL
 		site.Platform = result.Platform
 		site.Session = &result.Session
-		site.Metrics = result.Metrics
+		site.Metrics = result.Metrics.WithSyncDate(businesstime.DateAt(observedAt), observedAt)
 		site.Status = StatusConnected
 		site.ErrorKey = nil
 		site.LastSyncedAt = &now
@@ -988,6 +990,12 @@ func (s *Service) runSyncFlight(id string, flight *syncFlight) {
 		}
 		close(flight.done)
 		s.mu.Unlock()
+		if response.keyUsageCostFailure != nil {
+			if site, readErr := s.cache.Get(context.Background(), id); readErr == nil && site != nil {
+				s.recordKnownKeyUsageCostFailure(*site, *response.keyUsageCostFailure)
+			}
+			return
+		}
 		if err == nil && response.Status == StatusConnected {
 			if site, readErr := s.cache.Get(context.Background(), id); readErr == nil && site != nil {
 				s.enqueueKeyUsageCollection(*site)
@@ -1051,6 +1059,7 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	} else {
 		now := s.keyUsageNow().UnixMilli()
 		site.Session = &refreshedSession
+		metrics = mergeCostReadStatus(metrics, oldMetrics)
 		site.Metrics = metrics
 		site.Status = StatusConnected
 		site.ErrorKey = nil
@@ -1065,6 +1074,11 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 
 	response := s.toResponse(ctx, site)
 	response.syncTimedOut = requestTimedOut(refreshErr)
+	if metrics.TodayConsumeStatus == "unreadable" && metrics.TodayConsumeFailedAt != nil {
+		if reason := KnownUpstreamCodeErrorKey(metrics.TodayConsumeUpstreamCode); reason != "" {
+			response.keyUsageCostFailure = &keyUsageCostFailure{reason: reason, failedAt: *metrics.TodayConsumeFailedAt}
+		}
+	}
 	if saveErr := s.saveSite(ctx, site); saveErr != nil {
 		return response, saveErr
 	}

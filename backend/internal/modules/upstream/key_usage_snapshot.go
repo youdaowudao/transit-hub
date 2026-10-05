@@ -19,6 +19,44 @@ type keyUsageFlight struct {
 	done    chan struct{}
 }
 
+type keyUsageCostFailure struct {
+	reason   string
+	failedAt time.Time
+}
+
+// A known cost refusal is a terminal attempt; it never makes a Key request.
+// This runs after sync notification, just like an actual collection.
+func (s *Service) recordKnownKeyUsageCostFailure(site Site, failure keyUsageCostFailure) {
+	store := s.keyUsageStore()
+	if store == nil {
+		return
+	}
+	startedAt := s.keyUsageNow()
+	value := KeyUsageSnapshot{BusinessDate: businesstime.DateAt(startedAt), StartedAt: startedAt,
+		AttemptStartedAt: startedAt, CollectedAt: startedAt, ConsumeDate: site.Metrics.TodayConsumeDate,
+		SyncedRawCost: site.Metrics.TodayConsume.Value, FailureReason: failure.reason, FailureAt: &failure.failedAt,
+		Items: []KeyUsageTodayStat{}}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, deleted := s.deletedSites[site.ID]; deleted {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), persistenceTimeout)
+	defer cancel()
+	current, err := s.cache.Get(ctx, site.ID)
+	if err != nil || current == nil || !current.IsEnabled() {
+		return
+	}
+	if err := store.SaveKeyUsageSnapshot(ctx, site.ID, value); err != nil {
+		log.Printf("[upstream] 逐Key快照写入失败 site=%s", site.ID)
+	}
+	if s.keyUsageFinished == nil {
+		s.keyUsageFinished = make(map[string]time.Time)
+	}
+	s.keyUsageFinished[site.ID] = startedAt
+	s.keyUsageNotifyLocked()
+}
+
 func (s *Service) keyUsageStore() KeyUsageSnapshotStore {
 	store, _ := s.cache.(KeyUsageSnapshotStore)
 	return store

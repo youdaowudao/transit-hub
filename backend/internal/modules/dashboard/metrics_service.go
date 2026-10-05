@@ -418,7 +418,10 @@ func summarizeCachedUpstreamCostsWithQuality(sites []upstream.Response, business
 // summarizeCachedUpstreamCostsWithHistory prefers a current cache value and
 // falls back to the site's latest successful persisted cost when necessary.
 func summarizeCachedUpstreamCostsWithHistory(sites []upstream.Response, businessDate string, maxStaleness time.Duration, history map[string]SiteDailyCost) (total float64, quality *CostQuality) {
-	now := time.Now()
+	return summarizeCachedUpstreamCostsWithHistoryAt(sites, businessDate, maxStaleness, history, time.Now())
+}
+
+func summarizeCachedUpstreamCostsWithHistoryAt(sites []upstream.Response, businessDate string, maxStaleness time.Duration, history map[string]SiteDailyCost, now time.Time) (total float64, quality *CostQuality) {
 	quality = &CostQuality{
 		BusinessDate: businessDate,
 		ObservedAt:   &now,
@@ -433,7 +436,8 @@ func summarizeCachedUpstreamCostsWithHistory(sites []upstream.Response, business
 		currentDateOK := site.Metrics.TodayConsumeDate == businessDate
 		stale := metric.Value != nil && maxStaleness > 0 && site.Metrics.TodayConsumeAt != nil &&
 			now.Sub(*site.Metrics.TodayConsumeAt) > maxStaleness
-		needsFallback := metric.Value == nil || !currentDateOK || site.Status == upstream.StatusError || stale
+		retainedCache := site.Status == upstream.StatusError || site.Metrics.TodayConsumeStatus == "unreadable"
+		needsFallback := metric.Value == nil || !currentDateOK || retainedCache || stale
 
 		if !needsFallback {
 			quality.CollectedSites++
@@ -454,9 +458,9 @@ func summarizeCachedUpstreamCostsWithHistory(sites []upstream.Response, business
 			continue
 		}
 
-		// 同日同步失败时，缓存仍保留的是当天最后一次成功值，可以继续用于临时展示。
+		// 同日同步或今日成本读取失败时，缓存保留当天最后一次成功值用于展示。
 		// 无日期或跨日缓存不能进入当天成本，避免把昨天的值带到今天。
-		if site.Status == upstream.StatusError && currentDateOK && metric.Value != nil {
+		if retainedCache && currentDateOK && metric.Value != nil {
 			quality.CollectedSites++
 			quality.RetainedSites++
 			quality.FallbackSites++
@@ -626,7 +630,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 				log.Printf("dashboard metrics: load latest site costs failed user_id=%s err=%v", userID, historyErr)
 			}
 		}
-		total, cq := summarizeCachedUpstreamCostsWithHistory(sites, today, s.maxStaleness(), history)
+		total, cq := summarizeCachedUpstreamCostsWithHistoryAt(sites, today, s.maxStaleness(), history, s.currentTime())
 		costQuality = cq
 		targetSites := 0
 		allTargetsErrored := true

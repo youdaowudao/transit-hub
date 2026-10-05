@@ -208,6 +208,7 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 				}
 			}
 		}
+		applyKnownUpstreamCodeReason(requestErr)
 		return jsonResponse{Header: response.Header, ReceivedAt: receivedAt, StatusCode: response.StatusCode}, requestErr
 	}
 	payload, err := parseJSONWithLimit(response.Body, reqURL, maxResponseBytes)
@@ -225,6 +226,7 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 		if success, exists := record["success"].(bool); exists && !success {
 			requestErr := newRequestErrorWithStatus(ErrorRequest, "", response.StatusCode)
 			requestErr.UpstreamCode = ParseUpstreamCode(record)
+			applyKnownUpstreamCodeReason(requestErr)
 			if message, ok := record["message"].(string); ok {
 				requestErr.UpstreamMessage = safeRequestMessage(message, options)
 			}

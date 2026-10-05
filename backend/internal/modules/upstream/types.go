@@ -136,6 +136,12 @@ type Metrics struct {
 	TodayConsumeDate string `json:"todayConsumeDate,omitempty"`
 	// TodayConsumeAt 是 TodayConsume 的实际采集时间，用于缓存时效校验。
 	TodayConsumeAt *time.Time `json:"todayConsumeAt,omitempty"`
+	// A missing status in legacy data means ok. Failed reads only store safe metadata.
+	TodayConsumeStatus       string     `json:"todayConsumeStatus,omitempty"`
+	TodayConsumeErrorKey     string     `json:"todayConsumeErrorKey,omitempty"`
+	TodayConsumeUpstreamCode string     `json:"todayConsumeUpstreamCode,omitempty"`
+	TodayConsumeHTTPStatus   int        `json:"todayConsumeHTTPStatus,omitempty"`
+	TodayConsumeFailedAt     *time.Time `json:"todayConsumeFailedAt,omitempty"`
 }
 
 // CostFetchMeta 是 FetchCostForDate 的返回元数据，定义在 upstream 包中以避免循环依赖。
@@ -222,7 +228,9 @@ type Response struct {
 	Metrics           Metrics      `json:"metrics"`
 	Settings          SiteSettings `json:"settings"`
 	LastSyncedAt      *int64       `json:"lastSyncedAt"`
-	syncTimedOut      bool
+
+	syncTimedOut        bool
+	keyUsageCostFailure *keyUsageCostFailure
 }
 
 func enabledOrDefault(enabled *bool) bool {

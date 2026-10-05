@@ -2,6 +2,36 @@ package upstream
 
 import "strings"
 
+const (
+	ErrorAnnouncementAckRequired     = "admin.upstream.errors.announcementAckRequired"
+	ErrorUpstreamInsufficientBalance = "admin.upstream.errors.upstreamInsufficientBalance"
+	ErrorUpstreamKeyQuotaExhausted   = "admin.upstream.errors.upstreamKeyQuotaExhausted"
+	ErrorUpstreamKeyExpired          = "admin.upstream.errors.upstreamKeyExpired"
+)
+
+// KnownUpstreamCodeErrorKey maps only the documented refusal identifiers.
+// An unknown identifier keeps the caller's existing fallback.
+func KnownUpstreamCodeErrorKey(code string) string {
+	switch strings.ToUpper(code) {
+	case "ANNOUNCEMENT_ACK_REQUIRED":
+		return ErrorAnnouncementAckRequired
+	case "INSUFFICIENT_BALANCE":
+		return ErrorUpstreamInsufficientBalance
+	case "API_KEY_QUOTA_EXHAUSTED", "INSUFFICIENT_QUOTA":
+		return ErrorUpstreamKeyQuotaExhausted
+	case "API_KEY_EXPIRED":
+		return ErrorUpstreamKeyExpired
+	}
+	return ""
+}
+
+func applyKnownUpstreamCodeReason(detail *RequestError) {
+	if key := KnownUpstreamCodeErrorKey(detail.UpstreamCode); key != "" {
+		detail.Reason = key
+		detail.MessageKey = ErrorRequest
+	}
+}
+
 // ParseUpstreamCode only retains an identifier, never the upstream message/body.
 func ParseUpstreamCode(record map[string]any) string {
 	candidates := []any{record["code"]}

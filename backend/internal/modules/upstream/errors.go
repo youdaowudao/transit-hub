@@ -138,7 +138,8 @@ func errorCategory(key string) string {
 		return ErrorAuth
 	case ErrorNetworkTimeout, ErrorNetworkUnreachable, ErrorTLSFailed:
 		return ErrorNetwork
-	case ErrorForbidden, ErrorNotFound, ErrorRateLimited, ErrorUpstreamServer, ErrorAutoDetectFailed, ErrorBusinessRejected:
+	case ErrorForbidden, ErrorNotFound, ErrorRateLimited, ErrorUpstreamServer, ErrorAutoDetectFailed, ErrorBusinessRejected,
+		ErrorAnnouncementAckRequired, ErrorUpstreamInsufficientBalance, ErrorUpstreamKeyQuotaExhausted, ErrorUpstreamKeyExpired:
 		return ErrorRequest
 	default:
 		return key

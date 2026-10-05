@@ -1680,16 +1680,18 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 	}
 	// 使用新加坡业务日时区边界查询今日成本，修复 todayStart/todayEnd 使用进程本地时区的问题。
 	var stat jsonResponse
-	if startTS, endTS, boundsErr := businessDayUnixBounds(businesstime.Today()); boundsErr == nil {
+	var costFailure error
+	var failedAt time.Time
+	if startTS, endTS, boundsErr := businessDayUnixBounds(businesstime.DateAt(s.keyUsageNow())); boundsErr == nil {
 		statURL := session.BaseURL + "/api/log/self/stat?type=2&start_timestamp=" + strconvInt(startTS) + "&end_timestamp=" + strconvInt(endTS)
 		if r, statErr := s.httpClient.requestJSON(statURL, cookieOptions); statErr == nil {
 			stat = r
 		} else {
-			log.Printf("new-api stat request failed base_url=%s err=%v", safeHost(session.BaseURL), statErr)
+			costFailure, failedAt = statErr, s.keyUsageNow()
 			stat = jsonResponse{Payload: map[string]any{}}
 		}
 	} else {
-		log.Printf("new-api businessDayUnixBounds failed base_url=%s err=%v", safeHost(session.BaseURL), boundsErr)
+		costFailure, failedAt = boundsErr, s.keyUsageNow()
 		stat = jsonResponse{Payload: map[string]any{}}
 	}
 	groupsPayload, err := s.httpClient.requestJSON(session.BaseURL+"/api/user/self/groups", cookieOptions)
@@ -1728,13 +1730,17 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 		group = groups[0]
 	}
 	qpu := session.QuotaPerUnit
-	return Metrics{
+	metrics := Metrics{
 		Balance:         metric(quotaToUSDWithUnit(quota, qpu)),
 		TodayConsume:    metric(quotaToUSDWithUnit(firstNumber(dataRecord(stat.Payload), []string{"quota", "used_quota", "usedQuota"}), qpu)),
 		HistoryRecharge: metric(quotaToUSDWithUnit(estimatedGranted, qpu)),
 		Group:           group,
 		Groups:          groups,
-	}, nil
+	}
+	if costFailure != nil {
+		metrics = withCostReadFailure(metrics, costFailure, failedAt)
+	}
+	return metrics, nil
 }
 
 func (s *PlatformService) fetchSub2APIMetrics(session Session) (Metrics, error) {
@@ -1748,7 +1754,10 @@ func (s *PlatformService) fetchSub2APIMetrics(session Session) (Metrics, error) 
 	stats, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/usage/dashboard/stats", authOptions)
 	if err != nil {
 		log.Printf("[sub2api-metrics] /api/v1/usage/dashboard/stats 失败 base_url=%s err=%v", safeHost(session.BaseURL), err)
-		return Metrics{}, withFailureStage(err, "metrics", PlatformSub2API)
+		failure := withFailureStage(err, "metrics", PlatformSub2API)
+		// Return cost-only failure metadata for the snapshot without changing the
+		// existing Sub2API whole-sync failure or its retained site metrics.
+		return withCostReadFailure(Metrics{}, failure, s.keyUsageNow()), failure
 	}
 	groups, err := s.fetchSub2APIAvailableGroupsWithRates(session)
 	if err != nil {

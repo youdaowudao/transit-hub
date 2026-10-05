@@ -23,6 +23,7 @@ type accountKeyCostRunRepository interface {
 }
 
 type AccountStatsRefreshResponse struct {
+	Status            string `json:"status,omitempty"`
 	Date              string `json:"date"`
 	SnapshotRunID     string `json:"snapshotRunId"`
 	ExpectedSites     int    `json:"expectedSites"`
@@ -32,22 +33,28 @@ type AccountStatsRefreshResponse struct {
 	CompletedAccounts int    `json:"completedAccounts"`
 }
 
+type accountRefreshJob struct {
+	done   chan struct{}
+	result AccountStatsRefreshResponse
+	err    error
+}
+
 func accountRefreshRunID(userID, adminAccountID, date, idempotencyKey string) string {
 	sum := sha256.Sum256([]byte(userID + "\x00" + adminAccountID + "\x00" + date + "\x00" + idempotencyKey))
 	return "account-refresh-" + hex.EncodeToString(sum[:16])
 }
 
 func (s *MetricsService) RefreshAccountStats(ctx context.Context, userID, date, idempotencyKey string) (AccountStatsRefreshResponse, error) {
-	if s == nil || s.upstreams == nil || s.accounts == nil || s.keyUsageForDate == nil || s.keyCostRuns == nil || strings.TrimSpace(idempotencyKey) == "" || len(idempotencyKey) > 256 {
+	if s == nil || s.upstreams == nil || s.accounts == nil || s.keyCostRuns == nil || strings.TrimSpace(idempotencyKey) == "" || len(idempotencyKey) > 256 {
 		return AccountStatsRefreshResponse{}, errInvalidAccountBatch
 	}
 	if strings.TrimSpace(date) == "" {
-		date = businesstime.Today()
+		date = businesstime.DateAt(s.currentTime())
 	}
 	if _, err := time.ParseInLocation("2006-01-02", date, businesstime.Location()); err != nil {
 		return AccountStatsRefreshResponse{}, ErrAdditionalCostInvalidDate
 	}
-	if date != businesstime.Today() {
+	if date != businesstime.DateAt(s.currentTime()) {
 		return AccountStatsRefreshResponse{}, ErrAdditionalCostInvalidDate
 	}
 	adminAccountID, err := s.accounts.RequireCurrentID(ctx, userID)
@@ -60,15 +67,65 @@ func (s *MetricsService) RefreshAccountStats(ctx context.Context, userID, date, 
 	} else if found {
 		return published, nil
 	}
-	siteTotals, err := s.upstreams.FetchSiteCostsForDate(ctx, userID, adminAccountID, date)
+	reader, ok := s.upstreams.(upstreamSyncKeySnapshotReader)
+	if !ok {
+		return AccountStatsRefreshResponse{}, errInvalidAccountBatch
+	}
+	s.accountRefreshMu.Lock()
+	if s.accountRefreshJobs == nil {
+		s.accountRefreshJobs = make(map[string]*accountRefreshJob)
+	}
+	job := s.accountRefreshJobs[runID]
+	if job == nil {
+		job = &accountRefreshJob{done: make(chan struct{})}
+		s.accountRefreshJobs[runID] = job
+		startedAt := s.currentTime()
+		go func() {
+			job.result, job.err = s.performAccountStatsRefresh(context.WithoutCancel(ctx), reader, userID, adminAccountID, date, runID, startedAt)
+			close(job.done)
+			s.accountRefreshMu.Lock()
+			delete(s.accountRefreshJobs, runID)
+			s.accountRefreshMu.Unlock()
+		}()
+	}
+	s.accountRefreshMu.Unlock()
+	wait := s.accountRefreshWait
+	if wait <= 0 {
+		wait = 90 * time.Second
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-job.done:
+		return job.result, job.err
+	case <-timer.C:
+		return AccountStatsRefreshResponse{Status: "in_progress"}, nil
+	case <-ctx.Done():
+		return AccountStatsRefreshResponse{}, ctx.Err()
+	}
+}
+
+func (s *MetricsService) performAccountStatsRefresh(ctx context.Context, reader upstreamSyncKeySnapshotReader, userID, adminAccountID, date, runID string, startedAt time.Time) (AccountStatsRefreshResponse, error) {
+	keys, err := reader.SyncAndCollectKeyUsage(ctx, userID, adminAccountID, date, startedAt)
 	if err != nil {
 		return AccountStatsRefreshResponse{}, err
 	}
-	keys, err := s.keyUsageForDate.KeyUsageForDate(ctx, userID, adminAccountID, date)
-	if err != nil {
-		return AccountStatsRefreshResponse{}, err
+	siteTotals := make([]upstream.SiteCostForDateResult, 0, len(keys.Sites))
+	for index := range keys.Sites {
+		site := &keys.Sites[index]
+		total := upstream.SiteCostForDateResult{SiteID: site.SiteID, SiteName: site.SiteName, Platform: site.Platform, RechargeRate: site.RechargeRate}
+		if site.SyncedRawCost != nil {
+			total.RawCost = *site.SyncedRawCost
+		} else {
+			total.Err = errors.New(upstream.ErrorRequest)
+		}
+		if !site.StartedAt.After(startedAt) {
+			site.Complete = false
+			site.Status = "missing"
+		}
+		siteTotals = append(siteTotals, total)
 	}
-	runs := buildAccountKeyCostRuns(userID, adminAccountID, runID, date, siteTotals, keys, time.Now().UTC())
+	runs := buildAccountKeyCostRuns(userID, adminAccountID, runID, date, siteTotals, keys, s.currentTime().UTC())
 	result := AccountStatsRefreshResponse{Date: date, SnapshotRunID: runID, ExpectedSites: len(runs), Quality: KeyCostQualityComplete}
 	for _, run := range runs {
 		if run.Complete {

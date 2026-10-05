@@ -71,6 +71,13 @@ func (f *fakeAccountSubstateRecoveryRepository) AccountKeyCostRunsForSnapshot(_ 
 	return append([]UpstreamKeyCostRun(nil), f.runs...), nil
 }
 
+func (r *liveMetricsAccountingRepository) AccountCostComponentsFromKeySnapshot(_ context.Context, _, _, _ string, _ upstream.KeyUsageForDateResult) (AccountCostComponents, error) {
+	components := r.components
+	r.requestedSnapshot = components.SnapshotRunID
+	components.LiveKeySnapshot = true
+	return components, r.componentErr
+}
+
 func (r *liveMetricsAccountingRepository) AccountCostComponentsForDate(context.Context, string, string, string) (AccountCostComponents, error) {
 	return r.components, r.componentErr
 }
@@ -933,7 +940,7 @@ func TestLiveMetricsKeepsAtomicallyPublishedAccountRunAndDirectCostTogether(t *t
 	if err != nil {
 		t.Fatalf("LiveMetrics() error: %v", err)
 	}
-	if response.TodayPurchase == nil || *response.TodayPurchase != 100 || response.AccountSnapshotRunID != "published-run" ||
+	if response.TodayPurchase == nil || *response.TodayPurchase != 120 || response.AccountSnapshotRunID != "published-run" ||
 		response.AccountExpectedCount == nil || *response.AccountExpectedCount != 1 ||
 		response.AccountCompletedCount == nil || *response.AccountCompletedCount != 1 {
 		t.Fatalf("published run/cost group was not preserved: %#v", response)
@@ -941,7 +948,7 @@ func TestLiveMetricsKeepsAtomicallyPublishedAccountRunAndDirectCostTogether(t *t
 	if repository.requestedSnapshot != "published-run" {
 		t.Fatalf("account components requested run %q, want published-run", repository.requestedSnapshot)
 	}
-	if len(repository.snapshots) != 1 || repository.snapshots[0].TodayPurchase == nil || *repository.snapshots[0].TodayPurchase != 100 ||
+	if len(repository.snapshots) != 1 || repository.snapshots[0].TodayPurchase == nil || *repository.snapshots[0].TodayPurchase != 120 ||
 		repository.snapshots[0].AccountSnapshotRunID != "published-run" ||
 		repository.snapshots[0].AccountExpectedCount == nil || *repository.snapshots[0].AccountExpectedCount != 1 {
 		t.Fatalf("live upsert broke the published group: %#v", repository.snapshots)

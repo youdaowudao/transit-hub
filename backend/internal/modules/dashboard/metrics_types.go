@@ -246,12 +246,14 @@ type GroupUsageTodayResponse struct {
 // GroupProfitTodayResponse 是独立于分组营收的真实利润响应。
 // 某些分组本轮读取失败时会保留最后成功值并通过 FallbackGroups 提示。
 type GroupProfitTodayResponse struct {
-	Date              string                `json:"date"`
-	TotalProfit       float64               `json:"totalProfit"`
-	Groups            []GroupUsageTodayItem `json:"groups"`
-	FallbackGroups    int                   `json:"fallbackGroups,omitempty"`
-	UnavailableGroups int                   `json:"unavailableGroups,omitempty"`
-	FallbackAt        *time.Time            `json:"fallbackAt,omitempty"`
+	Date               string                `json:"date"`
+	TotalProfit        float64               `json:"totalProfit"`
+	Groups             []GroupUsageTodayItem `json:"groups"`
+	FallbackGroups     int                   `json:"fallbackGroups,omitempty"`
+	UnavailableGroups  int                   `json:"unavailableGroups,omitempty"`
+	FallbackAt         *time.Time            `json:"fallbackAt,omitempty"`
+	CollectedAt        *time.Time            `json:"collectedAt,omitempty"`
+	UnsplittableGroups int                   `json:"unsplittableGroups,omitempty"`
 }
 
 type GroupMetricCacheItem struct {
@@ -280,25 +282,37 @@ type GroupUsageTodayItem struct {
 // UpstreamKeyUsageTodayResponse 是 GET /api/dashboard/upstream-key-usage-today 返回的
 // 「今日成本」下钻明细：当前工作区所有上游站点中，今天有消费的 key 列表。
 type UpstreamKeyUsageTodayResponse struct {
-	Date        string                      `json:"date"`
-	Total       float64                     `json:"total"`
-	Keys        []UpstreamKeyUsageTodayItem `json:"keys"`
-	FailedSites int                         `json:"failedSites,omitempty"` // 按首页缓存成本口径统计的不可用站点数
-	TotalSites  int                         `json:"totalSites,omitempty"`  // 按首页缓存成本口径统计的目标站点数
+	Date               string                      `json:"date"`
+	Total              float64                     `json:"total"`
+	Keys               []UpstreamKeyUsageTodayItem `json:"keys"`
+	FailedSites        int                         `json:"failedSites,omitempty"` // 按首页缓存成本口径统计的不可用站点数
+	TotalSites         int                         `json:"totalSites,omitempty"`  // 按首页缓存成本口径统计的目标站点数
+	Sites              []UpstreamKeyUsageSite      `json:"sites"`
+	AutoRefreshEnabled bool                        `json:"autoRefreshEnabled"`
+}
+
+type UpstreamKeyUsageSite struct {
+	SiteID      string     `json:"siteId"`
+	SiteName    string     `json:"siteName"`
+	Status      string     `json:"status"`
+	CollectedAt *time.Time `json:"collectedAt,omitempty"`
+	ErrorKey    string     `json:"errorKey,omitempty"`
 }
 
 // UpstreamKeyUsageTodayItem 是单个 key 的今日消费明细。
 // TodayAmount 已乘以所属站点的 rechargeRate，口径与仪表盘「今日成本」卡片一致；RawAmount 为上游平台原始金额。
 type UpstreamKeyUsageTodayItem struct {
-	SiteID       string  `json:"siteId"`
-	SiteName     string  `json:"siteName"`
-	Platform     string  `json:"platform"`
-	KeyID        string  `json:"keyId"`
-	KeyName      string  `json:"keyName"`
-	GroupName    string  `json:"groupName"`
-	TodayAmount  float64 `json:"todayAmount"`
-	RawAmount    float64 `json:"rawAmount"`
-	RechargeRate float64 `json:"rechargeRate"`
+	SiteID       string   `json:"siteId"`
+	SiteName     string   `json:"siteName"`
+	Platform     string   `json:"platform"`
+	KeyID        string   `json:"keyId"`
+	KeyIDs       []string `json:"keyIds"`
+	Merged       bool     `json:"merged"`
+	KeyName      string   `json:"keyName"`
+	GroupName    string   `json:"groupName"`
+	TodayAmount  float64  `json:"todayAmount"`
+	RawAmount    float64  `json:"rawAmount"`
+	RechargeRate float64  `json:"rechargeRate"`
 }
 
 // UpstreamBalanceBreakdownResponse 是 GET /api/dashboard/upstream-balance-breakdown 返回的

@@ -66,6 +66,7 @@ const activeTab = ref<WorkspaceTab>('today')
 const loading = ref(false)
 const saving = ref(false)
 const errorText = ref('')
+const statsNotice = ref('')
 const assets = ref<AccountAsset[]>([])
 const ledger = ref<AdditionalCostRecord[]>([])
 const todayLedger = ref<AdditionalCostRecord[]>([])
@@ -303,6 +304,7 @@ watch(() => props.workspaceId, () => {
 	Object.assign(assetFilters, { platform: '', channel: '', accountType: '', status: '', search: '' })
 	resetWorkspaceData()
 	errorText.value = ''
+  statsNotice.value = ''
   try {
     const saved = localStorage.getItem(filterStorageKey.value)
     if (saved) Object.assign(assetFilters, JSON.parse(saved))
@@ -674,9 +676,14 @@ const refreshStats = async () => {
 	const request = currentWorkspaceRequest()
 	saving.value = true
 	errorText.value = ''
+	statsNotice.value = ''
 	try {
-		await refreshAccountStats(today())
+		const result = await refreshAccountStats(today())
 		if (!isCurrentWorkspaceRequest(request)) return
+		if (result.status === 'in_progress') {
+			statsNotice.value = '统计仍在进行，请稍后查看'
+			return
+		}
 		emit('updated')
 	} catch (error) {
 		if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '刷新失败'
@@ -747,6 +754,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
             </template>
           </div>
           <p v-if="errorText" class="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{{ errorText }}</p>
+          <p v-if="statsNotice" role="status" class="mb-4 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-sm text-muted-foreground">{{ statsNotice }}</p>
           <div v-if="loading" class="flex justify-center py-16"><Loader2 class="h-6 w-6 animate-spin text-muted-foreground" /></div>
 
           <section v-else-if="activeTab === 'today'" class="space-y-6">

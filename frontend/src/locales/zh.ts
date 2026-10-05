@@ -564,7 +564,7 @@ export default {
         close: '关闭',
         empty: '暂无今日消费的 key。',
         loadError: '加载今日成本明细失败，请检查上游站点连接后重试。',
-        partialWarning: '{failed}/{total} 个上游站点暂时无法读取，当前合计仅包含成功站点。',
+        partialWarning: '以下站点没有读到今日逐 Key 用量，合计不含这些站点',
         retry: '重试',
         errors: {
           unavailable: '所有上游站点的 Key 用量暂时都无法读取，请检查站点连接或登录凭证。'

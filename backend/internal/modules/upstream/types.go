@@ -439,6 +439,8 @@ type Sub2APIUserBalanceHistory struct {
 
 // KeyUsageTodayStat 是平台层返回的单个 key 今日消费统计（上游平台原始金额，未乘以站点 rechargeRate）。
 type KeyUsageTodayStat struct {
+	KeyIDs      []string
+	Merged      bool
 	KeyID       string
 	KeyName     string
 	GroupName   string
@@ -447,6 +449,8 @@ type KeyUsageTodayStat struct {
 
 // KeyUsageTodayItem 是仪表盘「今日成本」下钻明细中单个 key 的聚合结果（已按站点 rechargeRate 换算）。
 type KeyUsageTodayItem struct {
+	KeyIDs       []string
+	Merged       bool
 	SiteID       string
 	SiteName     string
 	Platform     Platform
@@ -459,20 +463,27 @@ type KeyUsageTodayItem struct {
 }
 
 type KeyUsageSiteResult struct {
-	SiteID       string
-	SiteName     string
-	Platform     Platform
-	RechargeRate float64
-	Complete     bool
-	Error        string
-	Items        []KeyUsageTodayItem
+	Status           string
+	StartedAt        time.Time
+	CollectedAt      *time.Time
+	SyncedRawCost    *float64
+	CollectedRawCost *float64
+	ConsumeDate      string
+	SiteID           string
+	SiteName         string
+	Platform         Platform
+	RechargeRate     float64
+	Complete         bool
+	Error            string
+	Items            []KeyUsageTodayItem
 }
 
 type KeyUsageForDateResult struct {
-	BusinessDate   string
-	ExpectedSites  int
-	CompletedSites int
-	Sites          []KeyUsageSiteResult
+	AutoRefreshEnabled bool
+	BusinessDate       string
+	ExpectedSites      int
+	CompletedSites     int
+	Sites              []KeyUsageSiteResult
 }
 
 // KeyUsageCollectionError 表示跨多个上游站点采集 Key 用量时有站点失败。

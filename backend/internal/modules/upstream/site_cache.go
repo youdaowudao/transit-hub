@@ -150,7 +150,7 @@ func (c *RedisSiteCache) Set(ctx context.Context, site *Site) error {
 // Delete 从 Redis 删除站点及其在用户集合中的引用。
 func (c *RedisSiteCache) Delete(ctx context.Context, id string, userID string) error {
 	pipe := c.client.TxPipeline()
-	pipe.Del(ctx, siteKey(id))
+	pipe.Del(ctx, siteKey(id), keyUsageKeyPrefix+id)
 	if strings.TrimSpace(userID) != "" {
 		pipe.SRem(ctx, userSitesKey(userID), id)
 	}

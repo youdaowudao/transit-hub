@@ -15,6 +15,7 @@ const harness = vi.hoisted(() => ({
   listAccountAssets: vi.fn(),
   listAccountCostLedger: vi.fn(),
   listRealConnections: vi.fn(),
+  refreshAccountStats: vi.fn(),
   routerPush: vi.fn(),
 }))
 
@@ -33,7 +34,7 @@ vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
   listRechargeFeeRateHistory: harness.listRechargeFeeRateHistory,
   listAccountAssets: harness.listAccountAssets,
   listAccountCostLedger: harness.listAccountCostLedger,
-  refreshAccountStats: vi.fn(),
+  refreshAccountStats: harness.refreshAccountStats,
   replaceAccountLink: vi.fn(),
   saveRechargeFeeRate: vi.fn(),
 }))
@@ -126,6 +127,14 @@ afterEach(() => {
 })
 
 describe('AccountCostWorkspace regression behavior', () => {
+  it('E8 shows pending account statistics after a 202 result', async () => {
+    harness.refreshAccountStats.mockResolvedValue({ status: 'in_progress' })
+    const wrapper = await mountWorkspace('today')
+    await findButton(wrapper, '刷新账号统计').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('统计仍在进行，请稍后查看')
+    expect(wrapper.text()).not.toContain('刷新失败')
+  })
   it.each(['Asia/Tokyo', 'America/New_York'])('renders ledger and fee-history timestamps in Singapore from %s without changing amounts', async timezone => {
     vi.stubEnv('TZ', timezone)
     harness.listAccountCostLedger.mockResolvedValue({ items: [{

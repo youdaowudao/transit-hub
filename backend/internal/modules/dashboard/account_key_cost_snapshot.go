@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"transithub/backend/internal/modules/upstream"
+	"transithub/backend/internal/shared/businesstime"
 )
 
 const (
@@ -87,17 +88,35 @@ func buildAccountKeyCostRuns(userID, adminAccountID, runPrefix, date string, sit
 		run.ExpectedKeyCount = len(keySite.Items)
 		run.CollectedKeyCount = len(keySite.Items)
 		run.Items = make([]UpstreamKeyDailyCost, 0, len(keySite.Items))
+		nonzeroKeys := 0
 		for _, item := range keySite.Items {
+			status := "ok"
+			if item.Merged {
+				status = "merged"
+			}
 			adjustedCents := cents(item.TodayAmount)
+			if item.RawAmount != 0 || item.TodayAmount != 0 {
+				nonzeroKeys++
+			}
 			run.KeyTotalCents += adjustedCents
 			run.Items = append(run.Items, UpstreamKeyDailyCost{
 				RunID: run.ID, UserID: userID, AdminAccountID: adminAccountID, BusinessDate: date,
 				SiteID: item.SiteID, KeyID: item.KeyID, KeyName: item.KeyName,
 				RawAmountMicros: int64(item.RawAmount * 1_000_000), AdjustedCostCents: adjustedCents,
-				Status: "ok", ObservedAt: run.ObservedAt,
+				Status: status, ObservedAt: run.ObservedAt,
 			})
 		}
-		if run.KeyTotalCents == run.SiteTotalCents {
+		tolerance := int64((nonzeroKeys + 1) / 2)
+		lower, upper := run.SiteTotalCents-tolerance, run.SiteTotalCents+tolerance
+		dateOK := keySite.ConsumeDate == "" || keySite.ConsumeDate == date
+		if keySite.CollectedAt != nil && businesstime.DateAt(*keySite.CollectedAt) != date {
+			dateOK = false
+		}
+		if keySite.SyncedRawCost != nil && keySite.CollectedRawCost != nil {
+			lower = cents(*keySite.SyncedRawCost*siteTotal.RechargeRate) - tolerance
+			upper = cents(*keySite.CollectedRawCost*siteTotal.RechargeRate) + tolerance
+		}
+		if dateOK && run.KeyTotalCents >= lower && run.KeyTotalCents <= upper {
 			run.Complete = true
 			run.Quality = KeyCostQualityComplete
 		} else {
@@ -113,6 +132,8 @@ type AccountCostComponents struct {
 	ReplacementDeductionCents         *int64
 	RequiresReplacementDeduction      bool
 	ReconciledUpstreamDirectCostCents *int64
+	ReconciledSiteCount               int
+	LiveKeySnapshot                   bool
 	SnapshotRunID                     string
 }
 
@@ -165,56 +186,23 @@ func (r *MetricsRepository) bindAccountStatsRefreshSnapshot(ctx context.Context,
 		return nil
 	}
 	first := runs[0]
-	var directCostCents int64
 	for _, run := range runs {
-		if run.UserID != first.UserID || run.AdminAccountID != first.AdminAccountID || run.BusinessDate != first.BusinessDate ||
-			run.SnapshotRunID != first.SnapshotRunID || !run.Complete {
+		if run.UserID != first.UserID || run.AdminAccountID != first.AdminAccountID || run.BusinessDate != first.BusinessDate || run.SnapshotRunID != first.SnapshotRunID || !run.Complete {
 			return errors.New("account stats refresh contains inconsistent key runs")
 		}
-		directCostCents += run.SiteTotalCents
 	}
-	snapshot, found, err := loadDashboardSnapshotForUpdate(ctx, tx, first.UserID, first.AdminAccountID, first.BusinessDate)
+	var accountPurchaseCents int64
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(amount_cents),0) FROM dashboard_additional_costs WHERE user_id=$1 AND admin_account_id=$2 AND business_date=$3::date AND type=$4`, first.UserID, first.AdminAccountID, first.BusinessDate, AdditionalCostAccountPurchase).Scan(&accountPurchaseCents); err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, `UPDATE dashboard_daily_stats SET account_snapshot_run_id=$4,account_expected_count=$5,account_completed_count=$5,account_stats_quality=$6,account_purchase_cost=$7 WHERE user_id=$1 AND admin_account_id=$2 AND date=$3::date`, first.UserID, first.AdminAccountID, first.BusinessDate, first.SnapshotRunID, len(stats), KeyCostQualityComplete, float64(accountPurchaseCents)/100)
 	if err != nil {
 		return err
 	}
-	if !found {
+	if result.RowsAffected() != 1 {
 		return errors.New("dashboard snapshot is required for account stats refresh")
 	}
-	directCost := float64(directCostCents) / 100
-	snapshot.TodayPurchase = &directCost
-	if snapshot.TodayProfit != nil {
-		netProfit := *snapshot.TodayProfit - directCost
-		snapshot.NetProfit = &netProfit
-	}
-	snapshot.CostExpectedCount = intPtr(len(runs))
-	snapshot.CostCollectedCount = intPtr(len(runs))
-	snapshot.CostFreshCount = intPtr(len(runs))
-	snapshot.CostRetainedCount = intPtr(0)
-	snapshot.CostMissingCount = intPtr(0)
-	snapshot.CostQualityMode = "exact"
-	snapshot.AccountSnapshotRunID = first.SnapshotRunID
-	snapshot.AccountExpectedCount = intPtr(len(stats))
-	snapshot.AccountCompletedCount = intPtr(len(stats))
-	snapshot.AccountStatsQuality = KeyCostQualityComplete
-	snapshot.OperatingCost = nil
-	snapshot.AdjustedNetProfit = nil
-	snapshot.ReplacementDeduction = nil
-	if snapshot.AdditionalCost != nil {
-		components, componentErr := r.accountCostComponentsForDate(
-			ctx, tx, first.UserID, first.AdminAccountID, first.BusinessDate, first.SnapshotRunID, false,
-		)
-		costSummary := summarizeAdditionalCostRecords(snapshot.AdditionalCostRecords)
-		costSummary.Total = snapshot.AdditionalCost
-		costSummary.RechargeFee = snapshot.RechargeFee
-		costSummary.Available = true
-		snapshot.OperatingCost, snapshot.AdjustedNetProfit, _ = projectOperatingCost(
-			snapshot.TodayPurchase, snapshot.TodayProfit, &costSummary, components, componentErr,
-		)
-		snapshot.ReplacementDeduction = costSummary.ReplacementDeduction
-		accountPurchase := float64(components.AccountPurchaseCostCents) / 100
-		snapshot.AccountPurchaseCost = &accountPurchase
-	}
-	return r.upsert(ctx, tx, snapshot)
+	return nil
 }
 
 func (r *MetricsRepository) GetPublishedAccountStatsRefresh(ctx context.Context, userID, adminAccountID, runID, date string) (AccountStatsRefreshResponse, bool, error) {
@@ -381,6 +369,72 @@ func (r *MetricsRepository) AccountCostComponentsForSnapshotRun(ctx context.Cont
 	return r.accountCostComponentsForDate(ctx, r.db, userID, adminAccountID, date, snapshotRunID, false)
 }
 
+func (r *MetricsRepository) AccountCostComponentsFromKeySnapshot(ctx context.Context, userID, adminAccountID, date string, keys upstream.KeyUsageForDateResult) (AccountCostComponents, error) {
+	components := AccountCostComponents{LiveKeySnapshot: true}
+	if err := r.db.QueryRow(ctx, `SELECT COALESCE(sum(amount_cents),0) FROM dashboard_additional_costs WHERE user_id=$1 AND admin_account_id=$2 AND business_date=$3::date AND type=$4`, userID, adminAccountID, date, AdditionalCostAccountPurchase).Scan(&components.AccountPurchaseCostCents); err != nil {
+		return components, err
+	}
+	var replacementLinks int
+	if err := r.db.QueryRow(ctx, `SELECT count(DISTINCT(link.upstream_site_id,link.upstream_key_id)) FROM dashboard_account_links link JOIN dashboard_account_assets asset ON asset.id=link.account_asset_id AND asset.user_id=link.user_id AND asset.admin_account_id=link.admin_account_id WHERE link.user_id=$1 AND link.admin_account_id=$2 AND asset.accounting_mode=$4 AND link.effective_from<=$3::date AND (link.effective_to IS NULL OR link.effective_to>=$3::date)`, userID, adminAccountID, date, AccountingModeReplace).Scan(&replacementLinks); err != nil {
+		return components, err
+	}
+	components.RequiresReplacementDeduction = replacementLinks > 0
+	if !components.RequiresReplacementDeduction || keys.BusinessDate != date {
+		return components, nil
+	}
+	costByKey := make(map[string]int64)
+	for _, site := range keys.Sites {
+		if !site.Complete || site.Status == "missing" {
+			continue
+		}
+		for _, item := range site.Items {
+			if item.Merged {
+				continue
+			}
+			costByKey[directProfitKey(site.SiteID, item.KeyID)] = cents(item.TodayAmount)
+		}
+	}
+	rows, err := r.db.Query(ctx, `
+ SELECT DISTINCT link.upstream_site_id,link.upstream_key_id
+ FROM dashboard_account_links link
+ JOIN dashboard_account_assets asset ON asset.id=link.account_asset_id AND asset.user_id=link.user_id AND asset.admin_account_id=link.admin_account_id
+ JOIN real_connections live ON live.id=link.connection_id AND live.user_id=link.user_id AND live.workspace_admin_account_id=link.admin_account_id
+  AND live.upstream_site_id=link.upstream_site_id AND live.upstream_key_id=link.upstream_key_id AND live.admin_account_id=link.scope_admin_account_id
+  AND live.status='active' AND jsonb_array_length(live.own_group_ids)=1 AND live.own_group_ids->>0=link.own_group_id
+ WHERE link.user_id=$1 AND link.admin_account_id=$2 AND asset.accounting_mode=$4
+  AND link.effective_from<=$3::date AND (link.effective_to IS NULL OR link.effective_to>=$3::date)
+  AND NOT EXISTS(SELECT 1 FROM real_connections other
+   WHERE other.user_id=live.user_id AND other.workspace_admin_account_id=live.workspace_admin_account_id AND other.id<>live.id AND other.status='active' AND jsonb_array_length(other.own_group_ids)=1
+    AND ((other.upstream_site_id=live.upstream_site_id AND other.upstream_key_id=live.upstream_key_id) OR (other.admin_account_id=live.admin_account_id AND other.own_group_ids->>0=live.own_group_ids->>0)))`, userID, adminAccountID, date, AccountingModeReplace)
+	if err != nil {
+		return components, err
+	}
+	defer rows.Close()
+	var deduction int64
+	matched := 0
+	available := true
+	for rows.Next() {
+		var siteID, keyID string
+		if err := rows.Scan(&siteID, &keyID); err != nil {
+			return components, err
+		}
+		matched++
+		amount, ok := costByKey[directProfitKey(siteID, keyID)]
+		if !ok {
+			available = false
+			continue
+		}
+		deduction += amount
+	}
+	if err := rows.Err(); err != nil {
+		return components, err
+	}
+	if matched == replacementLinks && available {
+		components.ReplacementDeductionCents = &deduction
+	}
+	return components, nil
+}
+
 func (r *MetricsRepository) accountCostComponentsForDate(ctx context.Context, db metricsDB, userID, adminAccountID, date, requiredSnapshotRunID string, allowLatest bool) (AccountCostComponents, error) {
 	var components AccountCostComponents
 	if err := db.QueryRow(ctx, `
@@ -405,14 +459,14 @@ func (r *MetricsRepository) accountCostComponentsForDate(ctx context.Context, db
 	}
 	var reconciled int64
 	err := db.QueryRow(ctx, `
-		SELECT snapshot_run_id,COALESCE(sum(site_total_cents),0)
+		SELECT snapshot_run_id,COALESCE(sum(site_total_cents),0),count(*)::int
 		FROM dashboard_upstream_key_cost_runs
 		WHERE user_id=$1 AND admin_account_id=$2 AND business_date=$3::date
 		  AND ($5 OR snapshot_run_id=$4)
 		GROUP BY snapshot_run_id
 		HAVING bool_and(complete)
 		ORDER BY max(observed_at) DESC,max(created_at) DESC,snapshot_run_id DESC LIMIT 1
-	`, userID, adminAccountID, date, requiredSnapshotRunID, allowLatest).Scan(&components.SnapshotRunID, &reconciled)
+	`, userID, adminAccountID, date, requiredSnapshotRunID, allowLatest).Scan(&components.SnapshotRunID, &reconciled, &components.ReconciledSiteCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return components, nil
 	}
@@ -443,6 +497,7 @@ func (r *MetricsRepository) accountCostComponentsForDate(ctx context.Context, db
 			  AND run.business_date=$3::date AND run.site_id=link.upstream_site_id AND run.complete=true
 			  AND run.snapshot_run_id=$5
 			  AND key_cost.key_id=link.upstream_key_id
+			  AND key_cost.status IN ('ok','')
 			ORDER BY run.observed_at DESC,run.created_at DESC,run.id DESC LIMIT 1
 		) latest ON true
 		WHERE link.user_id=$1 AND link.admin_account_id=$2 AND asset.accounting_mode=$4

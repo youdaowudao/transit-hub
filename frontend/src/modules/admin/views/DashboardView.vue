@@ -36,7 +36,6 @@ import {
   getGroupProfitToday,
   getGroupUsageToday,
   getUpstreamBalanceBreakdown,
-  refreshAccountStats,
   type GroupUsageTodayResponse,
   type GroupProfitTodayResponse,
   type UpstreamBalanceBreakdownResponse,
@@ -60,7 +59,6 @@ import {
   calculateProfitMargin,
   computeDelta,
   computeDashboardMetricDelta,
-  formatAccountStatsRefreshNotice,
   formatAmount,
   formatDateTime,
 } from '../utils/dashboard'
@@ -165,8 +163,6 @@ const initialLoading = ref(true)
 const isRefreshingData = ref(false)
 const refreshDataFailed = ref(false)
 const lastUpdatedAt = ref<number | null>(null)
-const accountStatsRefreshKey = ref('')
-const accountStatsRefreshNotice = ref('')
 
 const hydrateSnapshot = (snapshot: DashboardDataSnapshot | null): boolean => {
   if (!snapshot) return false
@@ -285,17 +281,6 @@ const loadAllData = async (options: { skipStatusCheck?: boolean } = {}) => {
     const cachedTrends = previous?.trends ?? { points: [] }
     groupCount.value = live.groupCount ?? null
     applyRawData(live, cachedTrends)
-	const refreshKey = `${workspaceID.value}:${live.date}`
-		if (accountStatsRefreshKey.value !== refreshKey) {
-			accountStatsRefreshKey.value = refreshKey
-			void refreshAccountStats(live.date).then(async (result) => {
-				accountStatsRefreshNotice.value = formatAccountStatsRefreshNotice(result)
-			const refreshed = await getDashboardMetrics()
-			applyRawData(refreshed, cachedTrends)
-		}).catch(() => {
-			accountStatsRefreshNotice.value = '账号自动统计刷新失败，首页保留上一轮同日已确认数据'
-		})
-	}
     const updatedAt = Date.now()
     lastUpdatedAt.value = updatedAt
     const key = workspaceID.value
@@ -1003,15 +988,6 @@ const lastProbeLabel = computed(() => {
     </div>
 
     <div
-      v-if="adminStatus.authenticated && accountStatsRefreshNotice"
-      class="flex flex-wrap items-center justify-between gap-2 border-y border-warning/40 bg-warning/5 px-4 py-2 text-sm"
-      role="status"
-    >
-      <span class="flex items-center gap-2 text-muted-foreground"><AlertTriangle class="h-4 w-4 shrink-0 text-warning" />{{ accountStatsRefreshNotice }}</span>
-      <button type="button" class="rounded-md px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-warning/10" @click="openAccountCostWorkspace('assets')">查看买号资产</button>
-    </div>
-
-    <div
       v-if="!adminStatus.authenticated && !initialLoading && !adminModalOpen"
       class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/30 bg-warning/5 px-4 py-2.5"
     >
@@ -1216,6 +1192,8 @@ const lastProbeLabel = computed(() => {
               <div>
                 <h2 class="text-base font-semibold text-foreground">{{ t('admin.dashboard.groups.title') }}</h2>
                 <p class="mt-1 text-sm text-muted-foreground">{{ groupSubtitle }}</p>
+                <p v-if="groupMetricMode === 'profit' && groupProfit?.collectedAt" class="mt-1 text-xs text-muted-foreground">截至 {{ new Intl.DateTimeFormat(locale, { timeZone: 'Asia/Singapore', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(groupProfit.collectedAt)) }}</p>
+                <p v-if="groupMetricMode === 'profit' && (groupProfit?.unsplittableGroups ?? 0) > 0" class="mt-1 text-xs text-muted-foreground">{{ groupProfit?.unsplittableGroups }} 个分组：同名 Token 无法拆分</p>
               </div>
               <div class="flex flex-wrap items-center justify-end gap-2">
                 <div

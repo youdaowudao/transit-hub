@@ -65,11 +65,15 @@ type Service struct {
 	refreshConfigs   map[refreshWorkspaceKey]RefreshConfig
 	initialSchedules map[refreshWorkspaceKey]bool
 	// groupCostSlots 限制跨站点成本采样的并发量；nil 仅用于不带 NewService 的单元测试。
-	groupCostSlots chan struct{}
-	timers         map[string]*time.Timer
-	deletedSites   map[string]struct{}
-	syncFlights    map[string]*syncFlight
-	mu             sync.Mutex
+	groupCostSlots   chan struct{}
+	timers           map[string]*time.Timer
+	deletedSites     map[string]struct{}
+	syncFlights      map[string]*syncFlight
+	keyUsageFlights  map[string]*keyUsageFlight
+	keyUsageChanged  chan struct{}
+	keyUsageFinished map[string]time.Time
+	now              func() time.Time
+	mu               sync.Mutex
 	// AfterSync 在站点同步成功后被调用，传入同步前后的指标数据。
 	// 由系统设置模块注入，用于余额预警和倍率变更检测。
 	AfterSync func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics Metrics)
@@ -291,13 +295,13 @@ func (s *Service) FetchGroupDailyStats(ctx context.Context, userID string, id st
 // todayPurchase 的统计口径完全一致（rechargeRate <= 0 的站点被整体跳过），确保弹窗总额与卡片数值一致。
 // 站点级并发限制 4；任一站点请求上游平台失败即让整个方法返回错误，不允许把失败站点当 0 处理。
 func (s *Service) KeyUsageToday(ctx context.Context, userID string) ([]KeyUsageTodayItem, error) {
-	return s.keyUsageToday(ctx, userID, false, businesstime.Today())
+	return s.keyUsageToday(ctx, userID, false, s.keyUsageDate())
 }
 
 // KeyUsageTodayIncludingZero 保留真实存在但当日零消费的 key，供稳定绑定利润核算使用。
 // 普通成本下钻仍使用 KeyUsageToday，只展示有消费的 key。
 func (s *Service) KeyUsageTodayIncludingZero(ctx context.Context, userID string) ([]KeyUsageTodayItem, error) {
-	return s.keyUsageToday(ctx, userID, true, businesstime.Today())
+	return s.keyUsageToday(ctx, userID, true, s.keyUsageDate())
 }
 
 func (s *Service) KeyUsageTodayIncludingZeroForDate(ctx context.Context, userID, date string) ([]KeyUsageTodayItem, error) {
@@ -348,7 +352,7 @@ func (s *Service) KeyUsageForDate(ctx context.Context, userID, adminAccountID, d
 				result.Sites[index] = siteResult
 				return
 			}
-			stats, fetchErr := s.platformService.FetchKeyUsageTodayIncludingZeroWithContext(ctx, refreshedSession, groups, date)
+			stats, fetchErr := s.platformService.fetchKeyUsageForDate(ctx, refreshedSession, groups, date)
 			if fetchErr != nil {
 				siteResult.Error = ErrorRequest
 				result.Sites[index] = siteResult
@@ -366,7 +370,7 @@ func (s *Service) KeyUsageForDate(ctx context.Context, userID, adminAccountID, d
 				}
 				siteResult.Items = append(siteResult.Items, KeyUsageTodayItem{
 					SiteID: site.ID, SiteName: site.Name, Platform: site.Platform,
-					KeyID: stat.KeyID, KeyName: stat.KeyName, GroupName: groupName,
+					KeyID: stat.KeyID, KeyIDs: append([]string(nil), stat.KeyIDs...), Merged: stat.Merged, KeyName: stat.KeyName, GroupName: groupName,
 					TodayAmount: stat.TodayAmount * site.RechargeRate,
 					RawAmount:   stat.TodayAmount, RechargeRate: site.RechargeRate,
 				})
@@ -385,122 +389,29 @@ func (s *Service) KeyUsageForDate(ctx context.Context, userID, adminAccountID, d
 }
 
 func (s *Service) keyUsageToday(ctx context.Context, userID string, includeZero bool, date string) ([]KeyUsageTodayItem, error) {
-	if strings.TrimSpace(date) == "" {
-		date = businesstime.Today()
-	}
 	adminAccountID, err := s.requireCurrentAdminAccountID(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
-	sites, err := s.cache.ListByUser(ctx, userID)
+	result, err := s.CachedKeyUsageForDate(ctx, userID, adminAccountID, date)
 	if err != nil {
 		return nil, err
 	}
-
-	targets := make([]*Site, 0, len(sites))
-	for _, site := range sites {
-		if site.AdminAccountID != adminAccountID || !site.IsEnabled() || site.Session == nil || site.RechargeRate <= 0 {
-			continue
-		}
-		targets = append(targets, site)
-	}
-
-	const maxSiteConcurrency = 4
-	sem := make(chan struct{}, maxSiteConcurrency)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
 	items := make([]KeyUsageTodayItem, 0)
-	var firstErr error
-	failedSites := 0
-	recordFailure := func(failure error) {
-		mu.Lock()
-		defer mu.Unlock()
-		failedSites++
-		if firstErr == nil {
-			firstErr = failure
+	for _, site := range result.Sites {
+		for _, item := range site.Items {
+			if includeZero || item.TodayAmount > 0 {
+				items = append(items, item)
+			}
 		}
 	}
-
-siteLoop:
-	for _, site := range targets {
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
-			recordFailure(ctx.Err())
-			break siteLoop
-		}
-		wg.Add(1)
-		go func(site *Site) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			session := *site.Session
-			groups := append([]GroupInfo(nil), site.Metrics.Groups...)
-
-			refreshedSession, refreshErr := s.platformService.RefreshSessionContext(ctx, session)
-			if refreshErr != nil {
-				recordFailure(refreshErr)
-				return
-			}
-
-			var stats []KeyUsageTodayStat
-			var fetchErr error
-			if includeZero {
-				stats, fetchErr = s.platformService.FetchKeyUsageTodayIncludingZeroWithContext(ctx, refreshedSession, groups, date)
-			} else {
-				stats, fetchErr = s.platformService.FetchKeyUsageTodayWithContext(ctx, refreshedSession, groups)
-			}
-			if fetchErr != nil {
-				recordFailure(fetchErr)
-				return
-			}
-
-			// 将刷新后的会话写回缓存和数据库，与 FetchGroupDailyStats 的写回模式一致。
-			if cached, cacheErr := s.cache.Get(ctx, site.ID); cacheErr == nil && cached != nil && cached.UserID == site.UserID && cached.IsEnabled() {
-				cached.Session = &refreshedSession
-				_ = s.setCachedSite(ctx, cached)
-				_ = s.saveSite(ctx, cached)
-			}
-
-			mu.Lock()
-			for _, stat := range stats {
-				if stat.TodayAmount <= 0 && !includeZero {
-					continue
-				}
-				groupName := strings.TrimSpace(stat.GroupName)
-				if groupName == "" {
-					groupName = "Ungrouped"
-				}
-				items = append(items, KeyUsageTodayItem{
-					SiteID:       site.ID,
-					SiteName:     site.Name,
-					Platform:     site.Platform,
-					KeyID:        stat.KeyID,
-					KeyName:      stat.KeyName,
-					GroupName:    groupName,
-					TodayAmount:  stat.TodayAmount * site.RechargeRate,
-					RawAmount:    stat.TodayAmount,
-					RechargeRate: site.RechargeRate,
-				})
-			}
-			mu.Unlock()
-		}(site)
-	}
-	wg.Wait()
-
-	if firstErr != nil {
-		return items, &KeyUsageCollectionError{
-			FailedSites: failedSites,
-			TotalSites:  len(targets),
-			Cause:       firstErr,
-		}
+	sort.Slice(items, func(i, j int) bool { return items[i].TodayAmount > items[j].TodayAmount })
+	if result.CompletedSites < result.ExpectedSites {
+		return items, &KeyUsageCollectionError{FailedSites: result.ExpectedSites - result.CompletedSites, TotalSites: result.ExpectedSites, Cause: newRequestError(ErrorRequest, "")}
 	}
 	return items, nil
 }
 
-// BalanceBreakdown 返回当前工作区所有上游站点的余额明细（仪表盘「上游总余额」下钻数据源）。
-// 纯读缓存，不触发任何外部平台请求。rechargeRate <= 0 或余额尚未同步成功的站点，
-// Balance/RawBalance 返回 nil（前端展示为"未知余额"并排在最后），但站点本身仍会展示。
 func (s *Service) BalanceBreakdown(ctx context.Context, userID string) ([]BalanceBreakdownItem, error) {
 	adminAccountID, err := s.requireCurrentAdminAccountID(ctx, userID)
 	if err != nil {
@@ -1077,6 +988,11 @@ func (s *Service) runSyncFlight(id string, flight *syncFlight) {
 		}
 		close(flight.done)
 		s.mu.Unlock()
+		if err == nil && response.Status == StatusConnected {
+			if site, readErr := s.cache.Get(context.Background(), id); readErr == nil && site != nil {
+				s.enqueueKeyUsageCollection(*site)
+			}
+		}
 	}()
 	response, err = s.syncOnce(context.Background(), id)
 }
@@ -1101,13 +1017,14 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	session := *site.Session
 
 	// 刷新会话并拉取指标（无锁操作，可能耗时较长）。
-	syncDate := businesstime.Today() // 同步开始时生成一次新加坡业务日期，所有指标复用。
+	syncStartedAt := s.keyUsageNow()
+	syncDate := businesstime.DateAt(syncStartedAt) // 同步开始时生成一次新加坡业务日期，所有指标复用。
 	refreshedSession, refreshErr := s.platformService.RefreshSession(session)
 	metrics := Metrics{}
 	if refreshErr == nil {
 		metrics, refreshErr = s.platformService.FetchMetrics(refreshedSession)
 		if refreshErr == nil {
-			metrics = metrics.WithSyncDate(syncDate, time.Now())
+			metrics = metrics.WithSyncDate(syncDate, s.keyUsageNow())
 		}
 	}
 
@@ -1132,7 +1049,7 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 		key := siteErrorKey(refreshErr)
 		site.ErrorKey = &key
 	} else {
-		now := time.Now().UnixMilli()
+		now := s.keyUsageNow().UnixMilli()
 		site.Session = &refreshedSession
 		site.Metrics = metrics
 		site.Status = StatusConnected
@@ -1223,13 +1140,29 @@ func (s *Service) Remove(ctx context.Context, userID string, id string) error {
 		return &SiteInUseError{Connections: connections, Mappings: mappings}
 	}
 
+	var originalSnapshot *KeyUsageSnapshot
+	if store := s.keyUsageStore(); store != nil {
+		originalSnapshot, err = store.GetKeyUsageSnapshot(ctx, id)
+		if err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
+	s.deletedSites[id] = struct{}{}
 	s.clearTimerLocked(id)
 	s.mu.Unlock()
 
 	removedSite := *site
 	if err := s.cache.Delete(ctx, id, userID); err != nil {
+		s.mu.Lock()
+		delete(s.deletedSites, id)
+		s.mu.Unlock()
 		return err
+	}
+	if store := s.keyUsageStore(); store != nil {
+		if err := store.DeleteKeyUsageSnapshot(ctx, id); err != nil {
+			return err
+		}
 	}
 	if store := s.groupCostStore(); store != nil {
 		if err := store.DeleteGroupCostSamples(ctx, id); err != nil {
@@ -1239,7 +1172,13 @@ func (s *Service) Remove(ctx context.Context, userID string, id string) error {
 
 	// 删除数据库记录。失败时把站点还原回缓存。
 	if err := s.deleteSite(ctx, userID, id); err != nil {
+		s.mu.Lock()
+		delete(s.deletedSites, id)
+		s.mu.Unlock()
 		s.restoreSite(ctx, id, &removedSite)
+		if originalSnapshot != nil {
+			_ = s.keyUsageStore().SaveKeyUsageSnapshot(ctx, id, *originalSnapshot)
+		}
 		return err
 	}
 	return nil
@@ -1273,6 +1212,11 @@ func (s *Service) CleanupDeletedWorkspaceSites(ctx context.Context, userID strin
 	for _, id := range ids {
 		if err := s.cache.Delete(ctx, id, userID); err != nil {
 			errs = append(errs, err)
+		}
+		if store := s.keyUsageStore(); store != nil {
+			if err := store.DeleteKeyUsageSnapshot(ctx, id); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		if store := s.groupCostStore(); store != nil {
 			if err := store.DeleteGroupCostSamples(ctx, id); err != nil {

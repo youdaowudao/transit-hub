@@ -21,7 +21,8 @@ type RequestError struct {
 	// StatusCode 是失败步骤返回的 HTTP 状态码，包括 2xx 业务失败；未收到响应时为 0。
 	// 现有调用方只读 MessageKey，新增此字段向后兼容；需要区分 403/401 等细分场景的调用方
 	// （如 new-api channel key 获取的安全验证判定）可读取它。
-	StatusCode int
+	StatusCode   int
+	UpstreamCode string
 	// Only allowlisted response metadata is retained; never keep a raw body.
 	RemoteReason    string
 	RemoteMessage   string

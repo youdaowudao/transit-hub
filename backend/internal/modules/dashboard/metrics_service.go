@@ -19,7 +19,7 @@ import (
 )
 
 // UpstreamLister 抽象上游站点列表读取，由 upstream.Service 实现。
-// 仪表盘只需要读取已同步的站点数据，不需要修改或触发同步。
+// 首页与下钻只读已同步的数据；账号统计刷新通过独立接口显式触发同步。
 // List 用于用户请求路径（自动使用当前工作区），
 // ListForAccount 用于后台调度等需要显式指定工作区的内部流程。
 type UpstreamLister interface {
@@ -67,6 +67,18 @@ type accountCostComponentRepository interface {
 	AccountCostComponentsForSnapshotRun(ctx context.Context, userID, adminAccountID, date, snapshotRunID string) (AccountCostComponents, error)
 }
 
+type accountLiveCostComponentRepository interface {
+	AccountCostComponentsFromKeySnapshot(ctx context.Context, userID, adminAccountID, date string, keys upstream.KeyUsageForDateResult) (AccountCostComponents, error)
+}
+
+type upstreamKeySnapshotReader interface {
+	CachedKeyUsageForDate(ctx context.Context, userID, adminAccountID, date string) (upstream.KeyUsageForDateResult, error)
+}
+
+type upstreamSyncKeySnapshotReader interface {
+	SyncAndCollectKeyUsage(ctx context.Context, userID, adminAccountID, date string, startedAt time.Time) (upstream.KeyUsageForDateResult, error)
+}
+
 type accountSubstateRecoveryRepository interface {
 	LatestCompleteAccountKeyCostRuns(ctx context.Context, userID, adminAccountID, date string) (string, []UpstreamKeyCostRun, error)
 }
@@ -78,20 +90,31 @@ type accountSnapshotRunRepository interface {
 // MetricsService 负责仪表盘指标的实时计算、历史快照存储与午夜调度。
 // 与同包的 Service（admin 会话管理）职责分离，共享 SessionStore 和 PlatformClient。
 type MetricsService struct {
-	store           SessionStore
-	platform        PlatformClient
-	upstreams       UpstreamLister
-	metricsRepo     metricsStore
-	accounts        AdminAccountService
-	realConnections RealConnectionReader
-	sessionSync     MySiteStateSync
-	refreshInterval time.Duration // 用于推导 maxStaleness；0 表示使用默认值 2h
-	additionalCosts AdditionalCostRepository
-	accountCosts    accountCostComponentRepository
-	accountAssets   *AccountAssetService
-	keyUsageForDate upstreamKeyUsageForDateReader
-	keyCostRuns     accountKeyCostRunRepository
-	accountStats    automaticAccountStatsRepository
+	store              SessionStore
+	platform           PlatformClient
+	upstreams          UpstreamLister
+	metricsRepo        metricsStore
+	accounts           AdminAccountService
+	realConnections    RealConnectionReader
+	sessionSync        MySiteStateSync
+	refreshInterval    time.Duration // 用于推导 maxStaleness；0 表示使用默认值 2h
+	additionalCosts    AdditionalCostRepository
+	accountCosts       accountCostComponentRepository
+	accountAssets      *AccountAssetService
+	keyUsageForDate    upstreamKeyUsageForDateReader
+	keyCostRuns        accountKeyCostRunRepository
+	accountStats       automaticAccountStatsRepository
+	now                func() time.Time
+	accountRefreshWait time.Duration
+	accountRefreshMu   sync.Mutex
+	accountRefreshJobs map[string]*accountRefreshJob
+}
+
+func (s *MetricsService) currentTime() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // SetRefreshInterval 注入上游站点同步间隔，用于推导缓存时效阈值。
@@ -523,7 +546,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	// 并行获取四项独立数据：今日盈利、站点余额、分组数量、上游指标。
 	// 营收或成本失败时保留其他指标，用 metricErrors 标注失败项且不写快照。
 	// 余额和分组数量保持原有零值降级行为。
-	today := businesstime.Today()
+	today := businesstime.DateAt(s.currentTime())
 	var (
 		todayProfitVal  float64
 		todayProfitErr  error
@@ -629,19 +652,6 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	if s.metricsRepo != nil {
 		latestSnapshot, _ = s.metricsRepo.LatestDashboardSnapshot(ctx, userID, adminAccountID, today)
 	}
-	if latestSnapshot != nil && latestSnapshot.AccountSnapshotRunID != "" &&
-		latestSnapshot.AccountStatsQuality == KeyCostQualityComplete && latestSnapshot.TodayPurchase != nil &&
-		latestSnapshot.CostExpectedCount != nil && latestSnapshot.CostCollectedCount != nil &&
-		latestSnapshot.CostFreshCount != nil && latestSnapshot.CostRetainedCount != nil &&
-		latestSnapshot.CostMissingCount != nil && latestSnapshot.CostQualityMode == "exact" {
-		costQuality = &CostQuality{
-			BusinessDate: today, Mode: latestSnapshot.CostQualityMode, ConfirmedCost: *latestSnapshot.TodayPurchase,
-			Complete:      *latestSnapshot.CostExpectedCount == *latestSnapshot.CostCollectedCount,
-			ExpectedSites: *latestSnapshot.CostExpectedCount, CollectedSites: *latestSnapshot.CostCollectedCount,
-			FreshSites: *latestSnapshot.CostFreshCount, RetainedSites: *latestSnapshot.CostRetainedCount,
-			MissingSites: *latestSnapshot.CostMissingCount, ObservedAt: latestSnapshot.ObservedAt,
-		}
-	}
 	if todayProfitErr != nil && latestSnapshot != nil && latestSnapshot.TodayProfit != nil {
 		todayProfitVal = *latestSnapshot.TodayProfit
 	}
@@ -722,9 +732,27 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		if latestSnapshot != nil && latestSnapshot.AccountStatsQuality == KeyCostQualityComplete {
 			accountSnapshotRunID = latestSnapshot.AccountSnapshotRunID
 		}
-		components, componentErr = s.accountCosts.AccountCostComponentsForSnapshotRun(ctx, userID, adminAccountID, today, accountSnapshotRunID)
-		if componentErr == nil && components.SnapshotRunID == "" && !components.RequiresReplacementDeduction {
+		if repo, ok := s.metricsRepo.(accountLiveCostComponentRepository); ok {
+			var keys upstream.KeyUsageForDateResult
+			var readErr error
+			if reader, ok := s.upstreams.(upstreamKeySnapshotReader); ok {
+				keys, readErr = reader.CachedKeyUsageForDate(ctx, userID, adminAccountID, today)
+			} else {
+				readErr = requestError(ErrorUpstreamKeyUsageUnavailable)
+			}
+			components, componentErr = repo.AccountCostComponentsFromKeySnapshot(ctx, userID, adminAccountID, today, keys)
+			if componentErr == nil && components.RequiresReplacementDeduction && readErr != nil {
+				componentErr = readErr
+			}
 			components.SnapshotRunID = accountSnapshotRunID
+		} else {
+			components, componentErr = s.accountCosts.AccountCostComponentsForSnapshotRun(ctx, userID, adminAccountID, today, accountSnapshotRunID)
+			if components.RequiresReplacementDeduction {
+				components.ReplacementDeductionCents = nil
+			}
+			if componentErr == nil && components.SnapshotRunID == "" && !components.RequiresReplacementDeduction {
+				components.SnapshotRunID = accountSnapshotRunID
+			}
 		}
 	}
 	operatingCost, adjustedNetProfit, adjustedProfitMargin := projectOperatingCost(todayPurchase, todayProfit, additionalCosts, components, componentErr)
@@ -1075,67 +1103,55 @@ func (s *MetricsService) GroupProfitToday(ctx context.Context, userID string) (G
 
 // UpstreamKeyUsageToday 获取当前工作区所有上游站点中，今天有消费的 key 明细（仪表盘「今日成本」下钻）。
 // 数据在首页运营区和成本明细弹窗按需请求，不参与 LiveMetrics 的批量指标计算。
-// 排序、总额与筛选逻辑全部由 upstream.Service.KeyUsageToday 保证，
-// 这里只负责排序展示和响应封装。
+// 同日逐 Key 快照由上游同步后采集；这里仅整理缓存并按金额降序返回。
 func (s *MetricsService) UpstreamKeyUsageToday(ctx context.Context, userID string) (UpstreamKeyUsageTodayResponse, error) {
-	return s.upstreamKeyUsageTodayForDate(ctx, userID, businesstime.Today(), false)
+	return s.upstreamKeyUsageTodayForDate(ctx, userID, businesstime.DateAt(s.currentTime()), false)
 }
 
 func (s *MetricsService) upstreamKeyUsageTodayForDate(ctx context.Context, userID, date string, includeZero bool) (UpstreamKeyUsageTodayResponse, error) {
-	// 复用日期和时效校验逻辑，与首页成本卡片口径一致。
-	sites := s.upstreams.List(ctx, userID)
-	_, quality := summarizeCachedUpstreamCostsWithQuality(sites, date, s.maxStaleness())
-	totalSites := quality.ExpectedSites
-	failedSites := quality.FailedSites
-	var items []upstream.KeyUsageTodayItem
-	var err error
-	if includeZero {
-		items, err = s.upstreams.KeyUsageTodayIncludingZeroForDate(ctx, userID, date)
-	} else {
-		items, err = s.upstreams.KeyUsageToday(ctx, userID)
+	reader, ok := s.upstreams.(upstreamKeySnapshotReader)
+	if !ok {
+		return UpstreamKeyUsageTodayResponse{}, requestError(ErrorUpstreamKeyUsageUnavailable)
 	}
+	adminAccountID := ""
+	if s.accounts != nil {
+		var err error
+		adminAccountID, err = s.accounts.RequireCurrentID(ctx, userID)
+		if err != nil {
+			return UpstreamKeyUsageTodayResponse{}, err
+		}
+	}
+	result, err := reader.CachedKeyUsageForDate(ctx, userID, adminAccountID, date)
 	if err != nil {
-		var collectionErr *upstream.KeyUsageCollectionError
-		if !errors.As(err, &collectionErr) || collectionErr.TotalSites <= 0 || collectionErr.FailedSites >= collectionErr.TotalSites {
-			return UpstreamKeyUsageTodayResponse{}, requestError(ErrorUpstreamKeyUsageUnavailable)
-		}
-		if collectionErr.FailedSites > failedSites {
-			failedSites = collectionErr.FailedSites
-		}
-		if collectionErr.TotalSites > totalSites {
-			totalSites = collectionErr.TotalSites
-		}
-		log.Printf("dashboard key usage: partial upstream failure user_id=%s failed_sites=%d total_sites=%d", userID, collectionErr.FailedSites, collectionErr.TotalSites)
+		return UpstreamKeyUsageTodayResponse{}, requestError(ErrorUpstreamKeyUsageUnavailable)
 	}
-
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].TodayAmount > items[j].TodayAmount
-	})
-
-	responseItems := make([]UpstreamKeyUsageTodayItem, 0, len(items))
-	var total float64
-	for _, item := range items {
-		responseItems = append(responseItems, UpstreamKeyUsageTodayItem{
-			SiteID:       item.SiteID,
-			SiteName:     item.SiteName,
-			Platform:     string(item.Platform),
-			KeyID:        item.KeyID,
-			KeyName:      item.KeyName,
-			GroupName:    item.GroupName,
-			TodayAmount:  item.TodayAmount,
-			RawAmount:    item.RawAmount,
-			RechargeRate: item.RechargeRate,
-		})
-		total += item.TodayAmount
+	response := UpstreamKeyUsageTodayResponse{Date: date, Keys: []UpstreamKeyUsageTodayItem{}, Sites: []UpstreamKeyUsageSite{}, TotalSites: result.ExpectedSites, AutoRefreshEnabled: result.AutoRefreshEnabled}
+	for _, site := range result.Sites {
+		status := site.Status
+		if !site.Complete {
+			status = "missing"
+		} else if status == "" {
+			status = "ok"
+		}
+		response.Sites = append(response.Sites, UpstreamKeyUsageSite{SiteID: site.SiteID, SiteName: site.SiteName, Status: status, CollectedAt: site.CollectedAt, ErrorKey: site.Error})
+		if status == "missing" {
+			response.FailedSites++
+			continue
+		}
+		for _, item := range site.Items {
+			if !includeZero && item.TodayAmount == 0 {
+				continue
+			}
+			ids := item.KeyIDs
+			if len(ids) == 0 {
+				ids = []string{item.KeyID}
+			}
+			response.Keys = append(response.Keys, UpstreamKeyUsageTodayItem{SiteID: item.SiteID, SiteName: item.SiteName, Platform: string(item.Platform), KeyID: item.KeyID, KeyIDs: ids, Merged: item.Merged, KeyName: item.KeyName, GroupName: item.GroupName, TodayAmount: item.TodayAmount, RawAmount: item.RawAmount, RechargeRate: item.RechargeRate})
+			response.Total += item.TodayAmount
+		}
 	}
-
-	return UpstreamKeyUsageTodayResponse{
-		Date:        date,
-		Total:       total,
-		Keys:        responseItems,
-		FailedSites: failedSites,
-		TotalSites:  totalSites,
-	}, nil
+	sort.SliceStable(response.Keys, func(i, j int) bool { return response.Keys[i].TodayAmount > response.Keys[j].TodayAmount })
+	return response, nil
 }
 
 // UpstreamBalanceBreakdown 获取当前工作区所有上游站点的余额明细（仪表盘「上游总余额」下钻）。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"transithub/backend/internal/modules/upstream"
 )
@@ -26,6 +27,51 @@ func (f *fakeUpstreamLister) List(ctx context.Context, userID string) []upstream
 
 func (f *fakeUpstreamLister) ListForAccount(ctx context.Context, userID, adminAccountID string) []upstream.Response {
 	return f.cachedSites
+}
+
+func (f *fakeUpstreamLister) CachedKeyUsageForDate(_ context.Context, _, _, date string) (upstream.KeyUsageForDateResult, error) {
+	result := upstream.KeyUsageForDateResult{BusinessDate: date, Sites: []upstream.KeyUsageSiteResult{}}
+	byID := make(map[string]*upstream.KeyUsageSiteResult)
+	order := []string{}
+	for _, site := range f.cachedSites {
+		if !site.IsEnabled() || site.RechargeRate <= 0 {
+			continue
+		}
+		byID[site.ID] = &upstream.KeyUsageSiteResult{SiteID: site.ID, SiteName: site.Name, Status: "missing"}
+		order = append(order, site.ID)
+	}
+	for _, key := range f.keyUsageItems {
+		site := byID[key.SiteID]
+		if site == nil {
+			site = &upstream.KeyUsageSiteResult{SiteID: key.SiteID, SiteName: key.SiteName}
+			byID[key.SiteID] = site
+			order = append(order, key.SiteID)
+		}
+		site.Complete = true
+		site.Status = "ok"
+		at := time.Now()
+		site.CollectedAt = &at
+		site.Items = append(site.Items, key)
+	}
+	var partial *upstream.KeyUsageCollectionError
+	if errors.As(f.keyUsageErr, &partial) {
+		for len(order) < partial.TotalSites {
+			id := "missing-" + string(rune('a'+len(order)))
+			order = append(order, id)
+			byID[id] = &upstream.KeyUsageSiteResult{SiteID: id, Status: "missing", Error: upstream.ErrorRequest}
+		}
+	} else if f.keyUsageErr != nil {
+		return result, f.keyUsageErr
+	}
+	for _, id := range order {
+		site := byID[id]
+		result.Sites = append(result.Sites, *site)
+		if site.Complete {
+			result.CompletedSites++
+		}
+	}
+	result.ExpectedSites = len(result.Sites)
+	return result, nil
 }
 
 func (f *fakeUpstreamLister) KeyUsageToday(ctx context.Context, userID string) ([]upstream.KeyUsageTodayItem, error) {

@@ -52,6 +52,8 @@ func TestFetchKeyUsageToday_Sub2API_PaginatesKeysAndFiltersZeroCost(t *testing.T
 				})
 			}
 			writeJSON(w, map[string]any{"data": items, "total": totalKeys})
+		case "/api/v1/usage/dashboard/api-keys-usage":
+			w.WriteHeader(http.StatusNotFound)
 		case "/api/v1/usage/stats":
 			apiKeyID := r.URL.Query().Get("api_key_id")
 			cost := 0.0
@@ -101,6 +103,8 @@ func TestFetchKeyUsageTodayIncludingZero_Sub2APIKeepsExistingZeroCostKey(t *test
 				{"id": 1, "name": "zero", "group": map[string]any{"name": "vip"}},
 				{"id": 2, "name": "used", "group": map[string]any{"name": "vip"}},
 			}, "total": 2})
+		case "/api/v1/usage/dashboard/api-keys-usage":
+			w.WriteHeader(http.StatusNotFound)
 		case "/api/v1/usage/stats":
 			if got := r.URL.Query().Get("start_date"); got != "2026-08-07" || r.URL.Query().Get("end_date") != "2026-08-07" {
 				t.Fatalf("unexpected business date: start=%q end=%q", got, r.URL.Query().Get("end_date"))
@@ -223,6 +227,8 @@ func TestFetchKeyUsageToday_Sub2APIRetriesTransientKeyStatsFailure(t *testing.T)
 			writeJSON(w, map[string]any{"data": []map[string]any{{
 				"id": 1, "name": "retry-key", "group": map[string]any{"name": "vip"},
 			}}, "total": 1})
+		case "/api/v1/usage/dashboard/api-keys-usage":
+			w.WriteHeader(http.StatusNotFound)
 		case "/api/v1/usage/stats":
 			if statsCalls.Add(1) == 1 {
 				http.Error(w, "temporary upstream failure", http.StatusBadGateway)
@@ -289,6 +295,8 @@ func TestFetchKeyUsageToday_DoesNotRetryUnauthorizedKeyStats(t *testing.T) {
 			writeJSON(w, map[string]any{"data": []map[string]any{{
 				"id": 1, "name": "private-key", "group": map[string]any{"name": "vip"},
 			}}, "total": 1})
+		case "/api/v1/usage/dashboard/api-keys-usage":
+			w.WriteHeader(http.StatusNotFound)
 		case "/api/v1/usage/stats":
 			statsCalls.Add(1)
 			w.Header().Set("Content-Type", "application/json")
@@ -318,6 +326,8 @@ func TestFetchKeyUsageToday_StopsAfterRetryBudget(t *testing.T) {
 			writeJSON(w, map[string]any{"data": []map[string]any{{
 				"id": 1, "name": "unavailable-key", "group": map[string]any{"name": "vip"},
 			}}, "total": 1})
+		case "/api/v1/usage/dashboard/api-keys-usage":
+			w.WriteHeader(http.StatusNotFound)
 		case "/api/v1/usage/stats":
 			statsCalls.Add(1)
 			http.Error(w, "temporary upstream failure", http.StatusBadGateway)

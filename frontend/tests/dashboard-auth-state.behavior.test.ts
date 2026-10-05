@@ -177,7 +177,7 @@ afterEach(() => {
 describe('R01 Dashboard login state', () => {
   it.each([
     { authenticated: true, refreshNotice: '', identityVisible: true, loginVisible: false, noticeVisible: false },
-    { authenticated: true, refreshNotice: '账号自动统计未完成（1/2）', identityVisible: true, loginVisible: false, noticeVisible: true },
+    { authenticated: true, refreshNotice: '账号自动统计未完成（1/2）', identityVisible: true, loginVisible: false, noticeVisible: false },
     { authenticated: false, refreshNotice: '', identityVisible: false, loginVisible: true, noticeVisible: false },
     { authenticated: false, refreshNotice: '上一工作区的旧刷新提示', identityVisible: false, loginVisible: true, noticeVisible: false },
   ])('keeps identity, refresh notice and login prompt mutually exclusive: %o', async ({
@@ -192,9 +192,6 @@ describe('R01 Dashboard login state', () => {
       : { authenticated: false }
     const wrapper = mountDashboard()
     await flushPromises()
-
-    ;(wrapper.vm as unknown as { accountStatsRefreshNotice: string }).accountStatsRefreshNotice = refreshNotice
-    await nextTick()
 
     expect(wrapper.text().includes('当前 admin：admin@example.com')).toBe(identityVisible)
     expect(wrapper.text().includes('尚未登录 admin 账户')).toBe(loginVisible)

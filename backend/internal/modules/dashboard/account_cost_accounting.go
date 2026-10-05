@@ -123,11 +123,18 @@ func projectOperatingCost(upstreamDirect, revenue *float64, summary *AdditionalC
 		return nil, nil, nil
 	}
 	if components.RequiresReplacementDeduction {
-		if components.ReplacementDeductionCents == nil || components.ReconciledUpstreamDirectCostCents == nil {
+		if components.ReplacementDeductionCents == nil || !components.LiveKeySnapshot && components.ReconciledUpstreamDirectCostCents == nil {
 			summary.AccountQuality = KeyCostQualityMissing
 			return nil, nil, nil
 		}
-		if cents(*upstreamDirect) != *components.ReconciledUpstreamDirectCostCents {
+		difference := int64(0)
+		if components.ReconciledUpstreamDirectCostCents != nil {
+			difference = cents(*upstreamDirect) - *components.ReconciledUpstreamDirectCostCents
+		}
+		if difference < 0 {
+			difference = -difference
+		}
+		if !components.LiveKeySnapshot && difference > int64((components.ReconciledSiteCount+1)/2) {
 			summary.AccountQuality = KeyCostQualityMissing
 			return nil, nil, nil
 		}

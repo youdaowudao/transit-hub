@@ -21,6 +21,27 @@ func (f *fakeAccountStatsUpstreams) KeyUsageForDate(context.Context, string, str
 	return f.keyResult, f.keyErr
 }
 
+func (f *fakeAccountStatsUpstreams) SyncAndCollectKeyUsage(_ context.Context, _, _, date string, startedAt time.Time) (upstream.KeyUsageForDateResult, error) {
+	f.keyCalls++
+	result := f.keyResult
+	result.BusinessDate = date
+	result.Sites = append([]upstream.KeyUsageSiteResult(nil), result.Sites...)
+	for index := range result.Sites {
+		site := &result.Sites[index]
+		site.StartedAt = startedAt.Add(time.Nanosecond)
+		site.ConsumeDate = date
+		for _, total := range f.siteCostResults {
+			if total.SiteID == site.SiteID {
+				value := total.RawCost
+				site.RechargeRate = total.RechargeRate
+				site.SyncedRawCost = &value
+				site.CollectedRawCost = &value
+			}
+		}
+	}
+	return result, f.keyErr
+}
+
 type fakeAccountKeyRunRepository struct {
 	runs      []UpstreamKeyCostRun
 	published bool
@@ -126,7 +147,7 @@ func TestRefreshAccountStatsKeepsMismatchExplicitlyIncomplete(t *testing.T) {
 	today := businesstime.Today()
 	upstreams := &fakeAccountStatsUpstreams{
 		fakeUpstreamLister: &fakeUpstreamLister{siteCostResults: []upstream.SiteCostForDateResult{
-			{SiteID: "site-1", RechargeRate: 1, RawCost: 10.01},
+			{SiteID: "site-1", RechargeRate: 1, RawCost: 10.02},
 		}},
 		keyResult: upstream.KeyUsageForDateResult{BusinessDate: today, ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{
 			SiteID: "site-1", Complete: true, Items: []upstream.KeyUsageTodayItem{{SiteID: "site-1", KeyID: "key-1", TodayAmount: 10}},

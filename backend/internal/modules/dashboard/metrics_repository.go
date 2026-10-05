@@ -834,10 +834,10 @@ func (r *MetricsRepository) upsert(ctx context.Context, db metricsDB, snapshot D
 			additional_cost_records = EXCLUDED.additional_cost_records,
 			operating_cost     = EXCLUDED.operating_cost,
 			adjusted_net_profit = EXCLUDED.adjusted_net_profit,
-			account_snapshot_run_id = EXCLUDED.account_snapshot_run_id,
-			account_expected_count = EXCLUDED.account_expected_count,
-			account_completed_count = EXCLUDED.account_completed_count,
-			account_stats_quality = EXCLUDED.account_stats_quality,
+			account_snapshot_run_id = CASE WHEN EXCLUDED.snapshot_source='live_cache' THEN dashboard_daily_stats.account_snapshot_run_id ELSE EXCLUDED.account_snapshot_run_id END,
+			account_expected_count = CASE WHEN EXCLUDED.snapshot_source='live_cache' THEN dashboard_daily_stats.account_expected_count ELSE EXCLUDED.account_expected_count END,
+			account_completed_count = CASE WHEN EXCLUDED.snapshot_source='live_cache' THEN dashboard_daily_stats.account_completed_count ELSE EXCLUDED.account_completed_count END,
+			account_stats_quality = CASE WHEN EXCLUDED.snapshot_source='live_cache' THEN dashboard_daily_stats.account_stats_quality ELSE EXCLUDED.account_stats_quality END,
 			account_purchase_cost = EXCLUDED.account_purchase_cost,
 			replacement_deduction = EXCLUDED.replacement_deduction
 		WHERE EXISTS (SELECT 1 FROM admin_accounts WHERE user_id = EXCLUDED.user_id AND id = EXCLUDED.admin_account_id)

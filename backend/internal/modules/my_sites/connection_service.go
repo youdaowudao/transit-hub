@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"transithub/backend/internal/modules/upstream"
+	"transithub/backend/internal/shared/businesstime"
 )
 
 // connectionContext contains the two independently authenticated sides of a
@@ -171,7 +172,12 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	if err != nil {
 		return RealConnectResponse{}, err
 	}
-	resourceName := fmt.Sprintf("%s-%s-%s", randomKeyPrefix(), connectionCtx.upstreamSite.Name, connectionCtx.groupName)
+	creationClock := s.now
+	if creationClock == nil {
+		creationClock = time.Now
+	}
+	creationDate := creationClock().In(businesstime.Location()).Format("0102")
+	resourceName := fmt.Sprintf("%s%s-%s-%s", randomKeyPrefix(), creationDate, connectionCtx.upstreamSite.Name, connectionCtx.groupName)
 	keyID, key, err := s.createUpstreamCredential(connectionCtx.upstreamSession, resourceName, req.UpstreamGroupID)
 	if err != nil {
 		return RealConnectResponse{}, err

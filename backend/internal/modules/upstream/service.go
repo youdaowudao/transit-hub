@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"transithub/backend/internal/shared/businesstime"
@@ -67,6 +68,7 @@ type Service struct {
 	// groupCostSlots 限制跨站点成本采样的并发量；nil 仅用于不带 NewService 的单元测试。
 	groupCostSlots   chan struct{}
 	timers           map[string]*time.Timer
+	afterFunc        func(time.Duration, func()) *time.Timer
 	deletedSites     map[string]struct{}
 	syncFlights      map[string]*syncFlight
 	keyUsageFlights  map[string]*keyUsageFlight
@@ -124,6 +126,7 @@ func NewService(platformService *PlatformService, repository SiteRepository, sna
 		cache:            cache,
 		groupCostSlots:   make(chan struct{}, 2),
 		timers:           make(map[string]*time.Timer),
+		afterFunc:        time.AfterFunc,
 		refreshConfigs:   make(map[refreshWorkspaceKey]RefreshConfig),
 		initialSchedules: make(map[refreshWorkspaceKey]bool),
 		deletedSites:     make(map[string]struct{}),
@@ -366,12 +369,14 @@ func (s *Service) KeyUsageForDate(ctx context.Context, userID, adminAccountID, d
 			groups := append([]GroupInfo(nil), site.Metrics.Groups...)
 			refreshedSession, refreshErr := s.platformService.RefreshSessionContext(ctx, session)
 			if refreshErr != nil {
+				logDatedUsageFailure(site, date, "refresh", refreshErr)
 				siteResult.Error = ErrorRequest
 				result.Sites[index] = siteResult
 				return
 			}
-			stats, fetchErr := s.platformService.fetchKeyUsageForDate(ctx, refreshedSession, groups, date)
+			stats, fetchErr := s.platformService.fetchKeyUsageForDate(withDatedUsageScope(ctx, site.ID), refreshedSession, groups, date)
 			if fetchErr != nil {
+				logDatedUsageFailure(site, date, "usage", fetchErr)
 				siteResult.Error = ErrorRequest
 				result.Sites[index] = siteResult
 				return
@@ -894,6 +899,7 @@ func (s *Service) SyncAll(ctx context.Context, userID string) ([]Response, error
 // 并发上限 5，每个站点独立同步，结果实时推送给前端。
 func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEventCallback) error {
 	const maxConcurrency = 5
+	started := time.Now()
 
 	sites, err := s.cache.ListByUser(ctx, userID)
 	if err != nil {
@@ -932,6 +938,7 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 	// 有会话的站点并发同步，用 channel 信号量限制并发数。
 	sem := make(chan struct{}, maxConcurrency)
 	var wg sync.WaitGroup
+	var succeeded, failed, canceled atomic.Int64
 
 	for _, id := range ids {
 		wg.Add(1)
@@ -941,14 +948,15 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 			defer func() { <-sem }()
 
 			if ctx.Err() != nil {
+				canceled.Add(1)
 				return
 			}
 
-			log.Printf("[upstream-stream] 开始同步站点 id=%s", id)
 			safeEmit(SyncEvent{Event: SyncEventSyncing, SiteID: id})
 
 			response, syncErr := s.sync(ctx, id)
 			if syncErr != nil || response.Status != StatusConnected {
+				failed.Add(1)
 				logKey := siteErrorKey(syncErr)
 				if syncErr == nil && response.ErrorKey != nil {
 					logKey = *response.ErrorKey
@@ -965,13 +973,14 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 				}
 				safeEmit(SyncEvent{Event: SyncEventError, SiteID: id, ErrorKey: key, Site: &response})
 			} else {
-				log.Printf("[upstream-stream] 同步成功 id=%s", id)
+				succeeded.Add(1)
 				safeEmit(SyncEvent{Event: SyncEventDone, SiteID: id, Site: &response})
 			}
 		}(id)
 	}
 
 	wg.Wait()
+	log.Printf("[upstream-stream] 全量同步完成 total=%d ok=%d failed=%d canceled=%d duration=%s", len(ids), succeeded.Load(), failed.Load(), canceled.Load(), time.Since(started))
 	emit(SyncEvent{Event: SyncEventComplete})
 	return nil
 }
@@ -1305,9 +1314,11 @@ func (s *Service) scheduleSyncWithModeLocked(id string, site *Site, initial bool
 	if initial {
 		delay = initialSyncDelay(id, config.Interval)
 	}
-	log.Printf("[upstream-timer] 定时同步已调度 id=%s delay=%s", id, delay)
-	s.timers[id] = time.AfterFunc(delay, func() {
-		log.Printf("[upstream-timer] 定时同步触发 id=%s", id)
+	afterFunc := s.afterFunc
+	if afterFunc == nil {
+		afterFunc = time.AfterFunc
+	}
+	s.timers[id] = afterFunc(delay, func() {
 		s.sync(context.Background(), id)
 	})
 	return true
@@ -1634,7 +1645,7 @@ func (s *Service) FetchSiteCostsForDate(ctx context.Context, userID, adminAccoun
 				results[idx] = r
 				return
 			}
-			rawCost, meta, fetchErr := s.platformService.FetchCostForDate(*site.Session, date)
+			rawCost, meta, fetchErr := s.platformService.fetchCostForDateForSite(site.ID, *site.Session, date)
 			r.RawCost = rawCost
 			r.Meta = meta
 			r.Err = fetchErr
@@ -1643,6 +1654,15 @@ func (s *Service) FetchSiteCostsForDate(ctx context.Context, userID, adminAccoun
 	}
 	wg.Wait()
 	return results, nil
+}
+
+func logDatedUsageFailure(site *Site, date, stage string, err error) {
+	status := 0
+	var detail *RequestError
+	if errors.As(err, &detail) {
+		status = detail.StatusCode
+	}
+	log.Printf("[upstream-usage] 日期用量读取失败 site=%s name=%q date=%s stage=%s reason=%s status=%d", site.ID, safeUpstreamMessage(site.Name), date, stage, siteErrorKey(err), status)
 }
 
 func logSiteFailure(event, id, name, baseURL string, err error) {

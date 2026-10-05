@@ -614,7 +614,6 @@ onBeforeUnmount(() => {
               <span :class="[amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-[10px] font-medium mt-0.5' : 'font-bold text-sm', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? (amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-orange-500/70' : 'text-orange-500') : (amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-muted-foreground' : 'text-foreground'), 'text-center']">
                 {{ usdMetricDisplay(site.metrics.todayConsume) }}
               </span>
-              <span v-if="site.metrics.todayConsumeDate" class="mt-1 text-[10px] text-muted-foreground">{{ site.metrics.todayConsumeDate }}</span>
             </div>
             <div class="flex flex-col items-center justify-center p-3 rounded-xl bg-surface/50 border border-border/40">
               <span class="text-xs text-muted-foreground mb-1">{{ t('admin.upstream.fields.historyRecharge') }}</span>
@@ -799,7 +798,6 @@ onBeforeUnmount(() => {
                   <span :class="[amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-xs font-medium' : 'font-medium', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? (amountMetricDisplay(site, site.metrics.todayConsume) ? 'text-orange-500/70' : 'text-orange-500') : 'text-muted-foreground']">
                     {{ usdMetricDisplay(site.metrics.todayConsume) }}
                   </span>
-                  <span v-if="site.metrics.todayConsumeDate" class="text-xs text-muted-foreground">{{ site.metrics.todayConsumeDate }}</span>
                 </div>
               </td>
               <td class="px-6 py-4">

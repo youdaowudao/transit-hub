@@ -14,6 +14,8 @@ import (
 	"transithub/backend/internal/modules/upstream"
 )
 
+const adminGroupsTimingLogThreshold = 3 * time.Second
+
 // AdminGroupHealth 是「当前 admin workspace 下的一个 admin 分组」在分组健康主列表中的展示单元。
 // 探活体系已改为独立目标：分组下的账号(sub2api)/渠道(new-api)本身就是探活目标，不再依赖
 // real_connections 对接链路。探活字段（probeAvailable / modelHealth 等）来自独立 admin 探活
@@ -311,7 +313,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 			upstreamMultiplierLookup = s.freshMultiplierLookupForWorkspaceWithOptions(ctx, userID, adminAccountID, platform, forceMultiplierRefresh)
 		}
 		multiplierDuration = time.Since(multiplierStarted)
-		log.Printf("[connection-health] fresh multiplier refresh completed workspace=%s duration=%s", adminAccountID, multiplierDuration)
+		logSlowAdminGroupsOperation(multiplierDuration, "[connection-health] fresh multiplier refresh completed workspace=%s duration=%s", adminAccountID, multiplierDuration)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -985,12 +987,13 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 			}
 		}
 	}
-	log.Printf(
+	totalDuration := time.Since(requestStarted)
+	logSlowAdminGroupsOperation(totalDuration,
 		"[connection-health] admin groups timing workspace=%s groups=%d accounts=%d total=%s workspace_lookup=%s session=%s groups_fetch=%s local_reads=%s multiplier_reads=%s cost_reads=%s account_reads=%s assembly=%s",
 		adminAccountID,
 		len(groups),
 		accountCount,
-		time.Since(requestStarted),
+		totalDuration,
 		workspaceDuration,
 		sessionDuration,
 		groupFetchDuration,
@@ -1001,6 +1004,12 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		time.Since(assemblyStarted),
 	)
 	return result, nil
+}
+
+func logSlowAdminGroupsOperation(duration time.Duration, format string, args ...any) {
+	if duration >= adminGroupsTimingLogThreshold {
+		log.Printf(format, args...)
+	}
 }
 
 func mainSiteErrorForAccount(platform string, account upstream.AdminGroupAccountInfo) string {

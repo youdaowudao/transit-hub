@@ -7,6 +7,7 @@ import (
 )
 
 type PrioritySyncStatusView struct {
+	FailedTargets     []PriorityFailedTarget   `json:"failedTargets,omitempty"`
 	ActionDiagnostics []RemoteActionDiagnostic `json:"actionDiagnostics,omitempty"`
 	WorkspaceID       string                   `json:"workspaceId"`
 	Status            string                   `json:"status"`
@@ -15,6 +16,12 @@ type PrioritySyncStatusView struct {
 	LastAttemptAt     *time.Time               `json:"lastAttemptAt,omitempty"`
 	LastFailureAt     *time.Time               `json:"lastFailureAt,omitempty"`
 	FailedCount       int                      `json:"failedCount"`
+}
+
+type PriorityFailedTarget struct {
+	AccountID   string `json:"accountId"`
+	AccountName string `json:"accountName,omitempty"`
+	Reason      string `json:"reason"`
 }
 
 func (s *Service) PrioritySyncStatus(ctx context.Context, userID string) (PrioritySyncStatusView, error) {
@@ -44,7 +51,17 @@ func (s *Service) PrioritySyncStatus(ctx context.Context, userID string) (Priori
 		}
 		return left.Reason < right.Reason
 	})
-	state, err := s.repo.GetPriorityWorkspaceSyncState(ctx, userID, adminAccountID)
+	state, failedTargets, err := func() (*PriorityWorkspaceSyncState, []priorityTargetFailure, error) {
+		lock := s.priorityStatusLock(userID, adminAccountID)
+		lock.Lock()
+		defer lock.Unlock()
+		state, err := s.repo.GetPriorityWorkspaceSyncState(ctx, userID, adminAccountID)
+		var targets []priorityTargetFailure
+		if stored, exists := s.priorityFailureTargets.Load(priorityRuntimeLeaseKey(userID, adminAccountID)); exists {
+			targets = stored.([]priorityTargetFailure)
+		}
+		return state, targets, err
+	}()
 	if err != nil || state == nil {
 		return view, err
 	}
@@ -63,6 +80,7 @@ func (s *Service) PrioritySyncStatus(ctx context.Context, userID string) (Priori
 		case "success":
 			view.Status = "success"
 		}
+		s.fillPriorityFailedTargets(&view, failedTargets, inventory, s.actionSweepViewFor(userID, adminAccountID))
 		return view, nil
 	}
 	switch state.LastDecision {
@@ -77,5 +95,26 @@ func (s *Service) PrioritySyncStatus(ctx context.Context, userID string) (Priori
 	default:
 		view.Status = "pending"
 	}
+	s.fillPriorityFailedTargets(&view, failedTargets, inventory, s.actionSweepViewFor(userID, adminAccountID))
 	return view, nil
+}
+
+func (s *Service) fillPriorityFailedTargets(view *PrioritySyncStatusView, targets []priorityTargetFailure, inventory *actionInventoryView, sweep *actionSweepView) {
+	if view.Status != "failed" || len(targets) == 0 {
+		return
+	}
+	if len(targets) > 10 {
+		targets = targets[:10]
+	}
+	view.FailedTargets = make([]PriorityFailedTarget, 0, len(targets))
+	for _, target := range targets {
+		name := ""
+		if inventory != nil {
+			name = inventory.names[target.accountID]
+		}
+		if name == "" && sweep != nil {
+			name = sweep.conclusions[target.accountID].accountName
+		}
+		view.FailedTargets = append(view.FailedTargets, PriorityFailedTarget{AccountID: target.accountID, AccountName: name, Reason: target.reason})
+	}
 }

@@ -89,6 +89,10 @@ type healthRepository interface {
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
 	actionNow                    func() time.Time
+	priorityWaitingSince         sync.Map
+	priorityFailureTargets       sync.Map
+	priorityStatusLocks          sync.Map
+	priorityRoundLogs            sync.Map
 	actionSweepViews             sync.Map
 	actionSweepFlights           sync.Map
 	actionInventoryViews         sync.Map

@@ -20,6 +20,7 @@ test('connection-health core gate keeps every question-answer regression member'
     'connection-health-intelligence-weight.behavior.test.ts',
     'connection-health-account-tier.behavior.test.ts',
     'connection-health-priority-candidates.behavior.test.ts',
+    'connection-health-priority-failure-reason.behavior.test.ts',
     'connection-health-quick-probe.behavior.test.ts',
     'group-health-setup-exclusion-outcome.behavior.test.ts',
     'connection-health-history-display.test.ts',

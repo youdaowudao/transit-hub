@@ -1860,7 +1860,7 @@ func TestHealthPrioritySyncWithoutPendingSignatureRecordsFailureState(t *testing
 	if err != nil || workspaceState == nil {
 		t.Fatalf("workspace state err=%v state=%+v", err, workspaceState)
 	}
-	if workspaceState.LastDecision != "failed" || workspaceState.InventoryStatus != "failed" || workspaceState.LastError != ErrorUnknown {
+	if workspaceState.LastDecision != "failed" || workspaceState.InventoryStatus != "failed" || workspaceState.LastError != ErrorPriorityTargetFailed {
 		t.Fatalf("missing pending signature must still record a failure state: %+v", workspaceState)
 	}
 	if workspaceState.AppliedSignature != "generation-done" || workspaceState.PendingSignature != "" {

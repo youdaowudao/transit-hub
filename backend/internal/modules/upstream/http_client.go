@@ -322,7 +322,8 @@ func safeHTTPDiagnostic(rawURL string) string {
 	}
 	switch parsed.Path {
 	case "/api/user/login", "/api/user/self", "/api/status", "/api/log/self/stat", "/api/user/self/groups", "/api/user/groups", "/api/pricing",
-		"/api/v1/auth/login", "/api/v1/auth/refresh", "/api/v1/auth/me", "/api/v1/usage/dashboard/stats", "/api/v1/groups/available", "/api/v1/groups/rates":
+		"/api/v1/auth/login", "/api/v1/auth/refresh", "/api/v1/auth/me", "/api/v1/usage/dashboard/stats", "/api/v1/groups/available", "/api/v1/groups/rates",
+		"/api/v1/usage/stats", "/api/v1/keys", "/api/v1/admin/keys", "/api/v1/admin/groups/usage-summary", "/api/v1/usage/dashboard/api-keys-usage":
 		return "host=" + safeHost(rawURL) + " path=" + parsed.Path
 	default:
 		return "host=- path=-"

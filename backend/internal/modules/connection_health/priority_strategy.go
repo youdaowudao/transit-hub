@@ -68,12 +68,12 @@ func (s *Service) syncCurrentWorkspacePriorities(ctx context.Context, userID str
 	pendingSignature, signatureErr := s.pendingPrioritySyncGeneration(ctx, userID, adminAccountID)
 	if signatureErr != nil {
 		log.Printf("[connection-health] priority sync load workspace generation failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, signatureErr)
-		s.markPriorityWorkspaceHealthSyncFailedDirect(userID, adminAccountID, signatureErr, 1)
+		s.markPriorityWorkspaceHealthSyncFailedDirect(userID, adminAccountID, signatureErr, 1, nil)
 		return
 	}
 	if err := s.syncCurrentWorkspacePrioritiesWithResult(ctx, userID, adminAccountID, pendingSignature); err != nil {
 		log.Printf("[connection-health] priority sync failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
-		s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, pendingSignature, err, 1)
+		s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, pendingSignature, err, 1, nil)
 	}
 }
 
@@ -242,7 +242,7 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 				current, err := s.repo.IsPriorityWorkspaceGenerationCurrent(ctx, userID, adminAccountID, expectedPendingSignature)
 				if err != nil {
 					log.Printf("[connection-health] priority sync verify workspace generation failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
-					s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, err, 1)
+					s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, err, 1, nil)
 					return
 				}
 				if !current {
@@ -252,7 +252,7 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 				workspaceState, err := s.repo.GetPriorityWorkspaceSyncState(ctx, userID, adminAccountID)
 				if err != nil {
 					log.Printf("[connection-health] priority sync load workspace generation failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
-					s.markPriorityWorkspaceHealthSyncFailedDirect(userID, adminAccountID, err, 1)
+					s.markPriorityWorkspaceHealthSyncFailedDirect(userID, adminAccountID, err, 1, nil)
 					return
 				}
 				if workspaceState != nil {
@@ -263,7 +263,7 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 				}
 			}
 			failGeneration := func(syncErr error) {
-				s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, syncErr, 1)
+				s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, syncErr, 1, nil)
 			}
 			if expectedPendingSignature != "" {
 				marked, markErr := s.repo.MarkPriorityWorkspaceSyncRunning(ctx, userID, adminAccountID, expectedPendingSignature)
@@ -424,7 +424,7 @@ func (s *Service) syncWorkspacePriorities(
 	generationCurrent := func() bool {
 		current, err := s.priorityWorkspaceGenerationCurrent(ctx, userID, adminAccountID, expectedPendingSignature)
 		if err != nil {
-			s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, err, 1)
+			s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, err, 1, nil)
 			return false
 		}
 		return current
@@ -436,11 +436,37 @@ func (s *Service) syncWorkspacePriorities(
 			item.target.TestConfiguration = ResolveGroupTestConfiguration(item.target.TestMemberships, inventoryComplete && configErr == nil, configs)
 		}
 		if !inventoryComplete {
-			s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, requestError(ErrorPriorityInventoryIncomplete), 1)
+			s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, requestError(ErrorPriorityInventoryIncomplete), 1, nil)
 			return
 		}
 	}
 	failedCount := 0
+	var failedTargets, waitingTargets []priorityTargetFailure
+	waitingSince := make(map[string]time.Time)
+	previousWaitingSince := map[string]time.Time{}
+	if previous, exists := s.priorityWaitingSince.Load(priorityRuntimeLeaseKey(userID, adminAccountID)); exists {
+		previousWaitingSince = previous.(map[string]time.Time)
+	}
+	recordTargetFailure := func(targetID string, err error, visible bool) {
+		reason := classifyPriorityTargetFailure(err, visible)
+		accountID, _ := scopedActionAccountID(targetID, adminAccountID)
+		if reason == "waiting" {
+			now := s.actionTime()
+			since, exists := previousWaitingSince[targetID]
+			if !exists {
+				since = now
+			}
+			waitingSince[targetID] = since
+			if now.Sub(since) >= priorityWaitingTimeout {
+				reason = "waiting_timeout"
+			} else {
+				waitingTargets = append(waitingTargets, priorityTargetFailure{targetID: targetID, accountID: accountID, reason: reason, err: err})
+				return
+			}
+		}
+		failedCount++
+		failedTargets = append(failedTargets, priorityTargetFailure{targetID: targetID, accountID: accountID, reason: reason, err: err})
+	}
 	blockedMultiplierCount := 0
 	processableMultiplierCount := 0
 	incompleteCount := 0
@@ -476,7 +502,7 @@ func (s *Service) syncWorkspacePriorities(
 			}
 			pair, reconcileErr := s.reconcileActionObservation(ctx, observation)
 			if reconcileErr != nil {
-				failedCount++
+				recordTargetFailure(targetID, reconcileErr, inventory[targetID] != nil)
 				reconcileFailedTargets[targetID] = struct{}{}
 				continue
 			}
@@ -615,7 +641,7 @@ func (s *Service) syncWorkspacePriorities(
 				multiplierValue = &copy
 			}
 			if err := s.syncSafePriorityTarget(ctx, session, userID, adminAccountID, targetID, item, &stored, desired, multiplierValue, statesByTarget[targetID], expectedPendingSignature, false, !blocked); err != nil {
-				failedCount++
+				recordTargetFailure(targetID, err, true)
 			}
 			continue
 		}
@@ -716,7 +742,7 @@ func (s *Service) syncWorkspacePriorities(
 				return
 			}
 			if err := s.syncSafePriorityTarget(ctx, session, userID, adminAccountID, targetID, item, &stored, stored.OriginalPriority, nil, nil, expectedPendingSignature, true, true); err != nil {
-				failedCount++
+				recordTargetFailure(targetID, err, inventory[targetID] != nil)
 			}
 			continue
 		}
@@ -810,26 +836,34 @@ func (s *Service) syncWorkspacePriorities(
 			adminAccountID,
 			expectedPendingSignature,
 			requestError(ErrorPriorityInventoryIncomplete),
-			incompleteFailures,
+			incompleteFailures, nil,
 		)
 		return
 	}
+	if session.Platform == upstream.PlatformSub2API {
+		s.priorityWaitingSince.Store(priorityRuntimeLeaseKey(userID, adminAccountID), waitingSince)
+		s.logPrioritySyncRound(userID, adminAccountID, failedTargets, waitingTargets, s.actionTime())
+	}
 	if failedCount > 0 {
-		s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, requestError(ErrorUnknown), failedCount)
+		if session.Platform == upstream.PlatformSub2API {
+			s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, priorityTargetFailureError(failedTargets), failedCount, failedTargets)
+		} else {
+			s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, requestError(ErrorUnknown), failedCount, nil)
+		}
 		return
 	}
 	if blockedMultiplierCount > 0 {
 		if processableMultiplierCount == 0 {
 			s.markPriorityWorkspaceSyncFailed(
 				userID, adminAccountID, expectedPendingSignature,
-				requestError(ErrorPriorityMetadataUnavailable), blockedMultiplierCount,
+				requestError(ErrorPriorityMetadataUnavailable), blockedMultiplierCount, nil,
 			)
 			return
 		}
-		s.markPriorityWorkspaceSyncPartial(userID, adminAccountID, expectedPendingSignature, blockedMultiplierCount)
+		s.markPriorityWorkspaceSyncPartial(userID, adminAccountID, expectedPendingSignature, blockedMultiplierCount, nil)
 		return
 	}
-	s.markPriorityWorkspaceSyncSucceeded(userID, adminAccountID, expectedPendingSignature)
+	s.markPriorityWorkspaceSyncSucceeded(userID, adminAccountID, expectedPendingSignature, nil)
 }
 
 // desiredManagedPriorityForPlatform 按平台真实语义计算优先级：NewAPI 沿用「分数越高越优先」；

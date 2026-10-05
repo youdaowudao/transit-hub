@@ -41,6 +41,8 @@ type PlatformService struct {
 	httpClient               *HTTPClient
 	keyUsageMu               sync.Mutex
 	keyUsageBatchUnsupported map[string]bool
+	costFallbackUnsupported  map[string]bool
+	usageRateLimitedUntil    map[string]time.Time
 	now                      func() time.Time
 }
 
@@ -1275,7 +1277,12 @@ func (s *PlatformService) requestKeyUsageJSON(reqURL string, options requestOpti
 
 func (s *PlatformService) requestKeyUsageJSONWithContext(ctx context.Context, reqURL string, options requestOptions) (jsonResponse, error) {
 	var lastErr error
+	var lastResponse jsonResponse
+	siteID := datedUsageSiteID(ctx)
 	for attempt := 0; attempt < keyUsageRequestAttempts; attempt++ {
+		if s.datedUsagePaused(siteID) {
+			return jsonResponse{}, datedUsagePauseError()
+		}
 		requestCtx, cancel := context.WithTimeout(ctx, keyUsageRequestTimeout)
 		response, err := s.httpClient.requestJSONWithContext(requestCtx, reqURL, options)
 		cancel()
@@ -1283,6 +1290,7 @@ func (s *PlatformService) requestKeyUsageJSONWithContext(ctx context.Context, re
 			return response, nil
 		}
 		lastErr = err
+		lastResponse = response
 		delay := keyUsageRetryDelay
 		var requestErr *RequestError
 		rateLimited := errors.As(err, &requestErr) && requestErr.StatusCode == http.StatusTooManyRequests
@@ -1301,6 +1309,7 @@ func (s *PlatformService) requestKeyUsageJSONWithContext(ctx context.Context, re
 		case <-time.After(delay):
 		}
 	}
+	s.recordDatedUsageRateLimit(siteID, reqURL, lastResponse, lastErr)
 	return jsonResponse{}, lastErr
 }
 
@@ -1756,7 +1765,6 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 
 func (s *PlatformService) fetchSub2APIMetrics(session Session) (Metrics, error) {
 	authOptions := requestOptions{AccessToken: session.AccessToken, TokenType: session.TokenType}
-	log.Printf("[sub2api-metrics] 开始拉取指标 base_url=%s", safeHost(session.BaseURL))
 	me, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/auth/me", authOptions)
 	if err != nil {
 		log.Printf("[sub2api-metrics] /api/v1/auth/me 失败 base_url=%s err=%v", safeHost(session.BaseURL), err)
@@ -3794,20 +3802,7 @@ func parseSub2APIBalanceHistoryItem(value any) Sub2APIBalanceHistoryItem {
 // sub2api 主路径：账号级汇总接口；回退路径：逐 key 求和（结果标 key_sum_best_effort）。
 // new-api 路径：/api/log/self/stat，使用 businessDayUnixBounds(date)。
 func (s *PlatformService) FetchCostForDate(session Session, date string) (rawCost float64, meta CostFetchMeta, err error) {
-	meta.ObservedAt = time.Now()
-	switch session.Platform {
-	case PlatformSub2API:
-		return s.fetchSub2APICostForDate(session, date)
-	case PlatformNewAPI:
-		return s.fetchNewAPICostForDate(session, date)
-	default:
-		// 尝试 new-api，失败再尝试 sub2api。
-		cost, m, err := s.fetchNewAPICostForDate(session, date)
-		if err == nil {
-			return cost, m, nil
-		}
-		return s.fetchSub2APICostForDate(session, date)
-	}
+	return s.fetchCostForDateForSite("", session, date)
 }
 
 func (s *PlatformService) fetchNewAPICostForDate(session Session, date string) (float64, CostFetchMeta, error) {
@@ -3826,25 +3821,36 @@ func (s *PlatformService) fetchNewAPICostForDate(session Session, date string) (
 	return cost, meta, nil
 }
 
-func (s *PlatformService) fetchSub2APICostForDate(session Session, date string) (float64, CostFetchMeta, error) {
+func (s *PlatformService) fetchSub2APICostForDate(siteID string, session Session, date string) (float64, CostFetchMeta, error) {
 	meta := CostFetchMeta{Source: "account_level", ObservedAt: time.Now()}
 	authOpts := adminAuthOptions(session)
 	statsURL := session.BaseURL + "/api/v1/usage/stats?start_date=" + url.QueryEscape(date) + "&end_date=" + url.QueryEscape(date) + "&timezone=Asia%2FSingapore"
-	response, err := s.httpClient.requestJSON(statsURL, authOpts)
+	response, err := s.requestUsageJSONOnce(siteID, statsURL, authOpts)
+	if err != nil {
+		log.Printf("sub2api FetchCostForDate: account-level failed date=%s base_url=%s err=%v", date, safeHost(session.BaseURL), err)
+	}
+	var requestErr *RequestError
+	if errors.As(err, &requestErr) && requestErr.StatusCode == http.StatusTooManyRequests {
+		return 0, meta, err
+	}
 	if err == nil {
 		// 用 *float64：nil 表示字段不存在（字段缺失不等于零成本），触发逐 key 回退。
 		costPtr := sub2APIUsageStatsCostPtr(dataRecord(response.Payload))
 		if costPtr != nil {
 			return *costPtr, meta, nil
 		}
-		log.Printf("sub2api FetchCostForDate: account-level response missing cost field date=%s base_url=%s, falling back to key sum", date, safeHost(session.BaseURL))
-	} else {
-		log.Printf("sub2api FetchCostForDate: account-level failed date=%s base_url=%s err=%v, falling back to key sum", date, safeHost(session.BaseURL), err)
 	}
 	meta.Source = "key_sum_best_effort"
+	if s.isCostFallbackUnsupported(siteID) {
+		return 0, meta, errors.New(ErrorRequest)
+	}
+	if err == nil {
+		log.Printf("sub2api FetchCostForDate: account-level response missing cost field date=%s base_url=%s, falling back to key sum", date, safeHost(session.BaseURL))
+	}
 	cost, keyCount, keyErr := s.fetchSub2APIKeysCostForDate(session, date)
 	if keyErr != nil {
-		return 0, meta, keyErr
+		s.rememberCostFallbackUnsupported(siteID, session.BaseURL, keyErr)
+		return 0, meta, errors.New(ErrorRequest)
 	}
 	meta.KeyCount = keyCount
 	return cost, meta, nil
@@ -3863,14 +3869,14 @@ func (s *PlatformService) fetchSub2APIKeysCostForDate(session Session, date stri
 		groupName string
 	}
 	var records []sub2APIKeyRecord
-	var keyListFailed bool
+	var keyListErr error
 	for {
 		keysURL := session.BaseURL + "/api/v1/admin/keys?page=" + strconv.Itoa(page) + "&page_size=" + strconv.Itoa(pageSize)
 		response, err := s.httpClient.requestJSON(keysURL, authOptions)
 		if err != nil {
 			if len(records) == 0 {
 				// 第一页就失败，无任何记录可用，应向上传播错误而非返回零成本。
-				keyListFailed = true
+				keyListErr = err
 			}
 			break
 		}
@@ -3902,8 +3908,8 @@ func (s *PlatformService) fetchSub2APIKeysCostForDate(session Session, date stri
 		}
 		page++
 	}
-	if keyListFailed {
-		return 0, 0, errors.New(ErrorRequest)
+	if keyListErr != nil {
+		return 0, 0, keyListErr
 	}
 	if len(records) == 0 {
 		return 0, 0, nil

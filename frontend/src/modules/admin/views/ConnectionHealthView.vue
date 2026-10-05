@@ -111,7 +111,7 @@ const siteNameMap = ref<Map<string, string>>(new Map())
 const preferences = ref<ConnectionHealthPreferences>(createDefaultConnectionHealthPreferences())
 const groupManagerOpen = ref(false)
 const prioritySyncStatus = ref<PrioritySyncStatus | null>(null)
-const actionDiagnosticAccountLabel = (diagnostic: NonNullable<PrioritySyncStatus['actionDiagnostics']>[number]): string =>
+const actionDiagnosticAccountLabel = (diagnostic: { accountId: string; accountName?: string }): string =>
   diagnostic.accountName ? `${diagnostic.accountName}（#${diagnostic.accountId}）` : `主站账号 #${diagnostic.accountId}`
 const actionDiagnosticReasonLabel = (reason: string): string => {
   const prefix = 'admin.connectionHealth.groupDetail.remoteActionPending.reasons'
@@ -420,13 +420,28 @@ const priorityWorkspaceLabel = computed(() => resolvePriorityWorkspaceLabel(
 const priorityFailureText = computed(() => {
 	const status = prioritySyncStatus.value
 	if (!status || (status.status !== 'failed' && status.status !== 'partial')) return ''
+	const reasonKey = connectionHealthMessageKey(status.errorKey, te)
+	const reason = t(reasonKey === 'admin.connectionHealth.errors.unknown'
+		? 'admin.connectionHealth.prioritySync.unknownReason'
+		: reasonKey)
 	const message = resolvePrioritySyncFailureMessage(
 		{ ...status, workspaceId: priorityWorkspaceLabel.value },
 		priorityFailureTime.value,
-		readableMessage(status.errorKey ?? ''),
+		reason,
 	)
 	return t(message.key, message.params)
 })
+const priorityFailedTargets = computed(() => prioritySyncStatus.value?.status === 'failed'
+  ? (prioritySyncStatus.value.failedTargets ?? []).slice(0, 10)
+  : [])
+const priorityFailedTargetsMore = computed(() => Math.max(0,
+  (prioritySyncStatus.value?.failedCount ?? 0) - priorityFailedTargets.value.length,
+))
+const priorityFailedTargetReasonLabel = (reason: string): string => {
+  const prefix = 'admin.connectionHealth.prioritySync.failedTargetReasons'
+  const key = `${prefix}.${reason}`
+  return te(key) ? t(key) : t(`${prefix}.other`)
+}
 const priorityBlockReasonLabel = (blocker: PrioritySyncBlocker): string => {
   const message = resolvePrioritySyncBlockReasonMessage(blocker.reason, blocker.groupName, blocker.groupId)
   return t(prioritySyncBlockReasonTranslationKey(message.key), message.params)
@@ -1260,6 +1275,17 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
 			<AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
 			<div class="min-w-0">
 				<p>{{ priorityFailureText }}</p>
+				<ul v-if="priorityFailedTargets.length > 0" class="mt-2 space-y-1 text-xs">
+					<li v-for="target in priorityFailedTargets" :key="target.accountId" class="break-words">
+						{{ t('admin.connectionHealth.prioritySync.failedTarget', {
+							account: actionDiagnosticAccountLabel(target),
+							reason: priorityFailedTargetReasonLabel(target.reason),
+						}) }}
+					</li>
+					<li v-if="priorityFailedTargetsMore > 0" class="break-words">
+						{{ t('admin.connectionHealth.prioritySync.failedTargetsMore', { count: priorityFailedTargetsMore }) }}
+					</li>
+				</ul>
 				<ul v-if="prioritySyncBlockers.length > 0" class="mt-2 space-y-1 text-xs">
 					<li v-for="blocker in prioritySyncBlockers" :key="blocker.targetId" class="break-words">
 						{{ t('admin.connectionHealth.prioritySync.blockedTarget', {

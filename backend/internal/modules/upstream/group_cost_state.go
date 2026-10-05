@@ -103,6 +103,9 @@ func (s *GroupCostSamplingState) recordFailure(class string, now time.Time, auth
 
 func (s *GroupCostSamplingState) RecordSummaryFailure(class string, now time.Time) {
 	s.recordFailure(class, now, &s.SummaryAuthFailures, &s.SummaryNetworkFailures, &s.SummaryNextAllowedAt)
+	if class == "auth_401" || class == "auth_403" {
+		s.SummaryNextAllowedAt = now.Add(24 * time.Hour)
+	}
 }
 
 func (s *GroupCostSamplingState) RecordFallbackFailure(class string, now time.Time) {

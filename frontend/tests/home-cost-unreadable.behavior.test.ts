@@ -28,7 +28,7 @@ describe('B cost readability in every upstream presentation', () => {
    if (list) { await wrapper.get('button[aria-label="列表模式"]').trigger('click'); await flushPromises() }
    const item = list ? wrapper.get('tbody tr') : wrapper.get('div.group.bg-card')
    expect(item.text()).toContain('已连接')
-   expect(item.text()).toContain('2031-02-03')
+   expect(item.text()).not.toContain('2031-02-03')
    expect(item.text()).toContain(reason)
    expect(item.text()).toContain('今日成本不可读')
    expect(item.text()).not.toContain('连接失败')

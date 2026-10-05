@@ -1,8 +1,6 @@
 package upstream
 
 import (
-	"bytes"
-	"log"
 	"testing"
 	"time"
 )
@@ -50,26 +48,16 @@ func TestDisabledConfigDoesNotConsumeInitialScheduleJitter(t *testing.T) {
 	service := NewService(nil, repository, nil, newFakeSiteCache())
 	t.Cleanup(service.Close)
 
-	originalLogWriter := log.Writer()
-	originalLogFlags := log.Flags()
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(originalLogWriter)
-		log.SetFlags(originalLogFlags)
-	})
-
-	var output bytes.Buffer
-	log.SetOutput(&output)
+	observation := observeScheduledDelays(service)
 	service.SetWorkspaceRefreshConfig("user-1", "workspace-1", RefreshConfig{Enabled: false, Interval: interval})
 	if service.timers[site.ID] != nil {
 		t.Fatal("disabled config unexpectedly created a timer")
 	}
 
-	output.Reset()
 	service.SetWorkspaceRefreshConfig("user-1", "workspace-1", RefreshConfig{Enabled: true, Interval: interval})
-	delay := captureScheduledDelays(t, output.String())[site.ID]
+	delay := observation()[site.ID]
 	want := initialSyncDelay(site.ID, interval).String()
 	if delay != want {
-		t.Fatalf("first real schedule after disabled config = %s, want initial jitter %s; log=%s", delay, want, output.String())
+		t.Fatalf("first real schedule after disabled config = %s, want initial jitter %s", delay, want)
 	}
 }

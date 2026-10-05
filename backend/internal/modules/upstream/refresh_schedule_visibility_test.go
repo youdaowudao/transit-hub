@@ -1,29 +1,33 @@
 package upstream
 
 import (
-	"bytes"
 	"context"
-	"log"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
-	"strings"
 	"testing"
 	"time"
 )
 
-var scheduledDelayPattern = regexp.MustCompile(`id=([^ ]+) delay=([^ ]+)`)
-
-func captureScheduledDelays(t *testing.T, output string) map[string]string {
-	t.Helper()
-	delays := make(map[string]string)
-	for _, line := range strings.Split(output, "\n") {
-		match := scheduledDelayPattern.FindStringSubmatch(line)
-		if len(match) == 3 {
-			delays[match[1]] = match[2]
-		}
+// Observe the actual timer duration, then associate the returned timer with its
+// site ID. Production logs are not part of the scheduling contract.
+func observeScheduledDelays(service *Service) func() map[string]string {
+	timerDelays := make(map[*time.Timer]time.Duration)
+	service.afterFunc = func(delay time.Duration, callback func()) *time.Timer {
+		timer := time.AfterFunc(delay, callback)
+		timerDelays[timer] = delay
+		return timer
 	}
-	return delays
+	return func() map[string]string {
+		service.mu.Lock()
+		defer service.mu.Unlock()
+		delays := make(map[string]string)
+		for siteID, timer := range service.timers {
+			if delay, ok := timerDelays[timer]; ok {
+				delays[siteID] = delay.String()
+			}
+		}
+		return delays
+	}
 }
 
 func newInitialScheduleService(siteCount int) (*Service, *enabledTestRepository, []*Site) {
@@ -47,22 +51,13 @@ func newInitialScheduleService(siteCount int) (*Service, *enabledTestRepository,
 
 func TestInitialWorkspaceSchedulesUseStableJitterOnlyOnce(t *testing.T) {
 	const interval = 20 * time.Minute
-	originalLogWriter := log.Writer()
-	originalLogFlags := log.Flags()
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(originalLogWriter)
-		log.SetFlags(originalLogFlags)
-	})
-
-	var firstLog bytes.Buffer
-	log.SetOutput(&firstLog)
 	firstService, _, sites := newInitialScheduleService(26)
 	t.Cleanup(firstService.Close)
+	firstObservation := observeScheduledDelays(firstService)
 	firstService.SetWorkspaceRefreshConfig("user-1", "workspace-1", RefreshConfig{Enabled: true, Interval: interval})
-	firstDelays := captureScheduledDelays(t, firstLog.String())
+	firstDelays := firstObservation()
 	if len(firstDelays) != len(sites) {
-		t.Fatalf("initial scheduled sites = %d, want %d; log=%s", len(firstDelays), len(sites), firstLog.String())
+		t.Fatalf("initial scheduled sites = %d, want %d; delays=%v", len(firstDelays), len(sites), firstDelays)
 	}
 	distinct := make(map[string]struct{})
 	for _, delay := range firstDelays {
@@ -79,22 +74,19 @@ func TestInitialWorkspaceSchedulesUseStableJitterOnlyOnce(t *testing.T) {
 		t.Fatalf("26 initial schedules used no stable jitter: %v", firstDelays)
 	}
 
-	var laterLog bytes.Buffer
-	log.SetOutput(&laterLog)
 	firstService.SetWorkspaceRefreshConfig("user-1", "workspace-1", RefreshConfig{Enabled: true, Interval: interval})
-	laterDelays := captureScheduledDelays(t, laterLog.String())
+	laterDelays := firstObservation()
 	for siteID, delay := range laterDelays {
 		if delay != interval.String() {
 			t.Fatalf("subsequent schedule for %s = %s, want unchanged interval %s", siteID, delay, interval)
 		}
 	}
 
-	var replayLog bytes.Buffer
-	log.SetOutput(&replayLog)
 	replayService, _, _ := newInitialScheduleService(26)
 	t.Cleanup(replayService.Close)
+	replayObservation := observeScheduledDelays(replayService)
 	replayService.SetWorkspaceRefreshConfig("user-1", "workspace-1", RefreshConfig{Enabled: true, Interval: interval})
-	replayedDelays := captureScheduledDelays(t, replayLog.String())
+	replayedDelays := replayObservation()
 	for siteID, delay := range firstDelays {
 		if replayedDelays[siteID] != delay {
 			t.Fatalf("stable initial delay for %s changed from %s to %s", siteID, delay, replayedDelays[siteID])

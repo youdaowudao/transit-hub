@@ -644,6 +644,7 @@ export interface AdminGroupPolicyConfiguration {
 }
 
 export interface PrioritySyncStatus {
+  failedTargets?: Array<{ accountId: string; accountName?: string; reason: string }>
   actionDiagnostics?: Array<{ accountId: string; accountName?: string; targetId: string; action: string; dispatchId?: string; phase: string; reason: string; observedAt?: string }>
 	workspaceId: string
 	status: 'idle' | 'pending' | 'running' | 'partial' | 'success' | 'failed' | string

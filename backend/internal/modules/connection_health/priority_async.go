@@ -107,21 +107,21 @@ func (s *Service) priorityWorkspaceGenerationCurrent(ctx context.Context, userID
 
 // Priority status must survive a cancelled HTTP/scheduler context. The write remains
 // generation-guarded in SQL, so it cannot overwrite a newer save.
-func (s *Service) markPriorityWorkspaceSyncFailed(userID string, adminAccountID string, pendingSignature string, syncErr error, failedCount int) {
+func (s *Service) markPriorityWorkspaceSyncFailed(userID string, adminAccountID string, pendingSignature string, syncErr error, failedCount int, targets []priorityTargetFailure) {
 	if pendingSignature == "" {
-		s.markPriorityWorkspaceHealthSyncFailed(userID, adminAccountID, syncErr, failedCount)
+		s.markPriorityWorkspaceHealthSyncFailed(userID, adminAccountID, syncErr, failedCount, targets)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), priorityStateWriteTimeout)
 	defer cancel()
 	errorDetail := prioritySyncErrorDetail(syncErr)
-	marked, err, panicked := s.tryMarkPriorityWorkspaceSyncFailed(ctx, userID, adminAccountID, pendingSignature, errorDetail, failedCount)
+	marked, err, panicked := s.tryMarkPriorityWorkspaceSyncFailed(ctx, userID, adminAccountID, pendingSignature, errorDetail, failedCount, targets)
 	if panicked {
 		// The row update is generation-guarded and idempotent for the same signature.
 		// Retrying once makes a transient repository panic visible to the page as failed;
 		// a persistent panic still returns safely and leaves reconciliation to the scheduler.
 		log.Printf("[connection-health] priority sync failure state panic recovered user_id=%s admin_account_id=%s", userID, adminAccountID)
-		marked, err, panicked = s.tryMarkPriorityWorkspaceSyncFailed(ctx, userID, adminAccountID, pendingSignature, errorDetail, failedCount)
+		marked, err, panicked = s.tryMarkPriorityWorkspaceSyncFailed(ctx, userID, adminAccountID, pendingSignature, errorDetail, failedCount, targets)
 		if panicked {
 			log.Printf("[connection-health] priority sync failure state retry panic recovered user_id=%s admin_account_id=%s", userID, adminAccountID)
 			return
@@ -136,21 +136,23 @@ func (s *Service) markPriorityWorkspaceSyncFailed(userID string, adminAccountID 
 	}
 }
 
-func (s *Service) markPriorityWorkspaceHealthSyncFailed(userID string, adminAccountID string, syncErr error, failedCount int) {
+func (s *Service) markPriorityWorkspaceHealthSyncFailed(userID string, adminAccountID string, syncErr error, failedCount int, targets []priorityTargetFailure) {
 	ctx, cancel := context.WithTimeout(context.Background(), priorityStateWriteTimeout)
 	defer cancel()
 	allowWrite, err := s.priorityWorkspaceEmptySignatureWritable(ctx, userID, adminAccountID)
 	if err != nil || !allowWrite {
 		return
 	}
-	s.markPriorityWorkspaceHealthSyncFailedDirect(userID, adminAccountID, syncErr, failedCount)
+	s.markPriorityWorkspaceHealthSyncFailedDirect(userID, adminAccountID, syncErr, failedCount, targets)
 }
 
-func (s *Service) markPriorityWorkspaceHealthSyncFailedDirect(userID string, adminAccountID string, syncErr error, failedCount int) {
+func (s *Service) markPriorityWorkspaceHealthSyncFailedDirect(userID string, adminAccountID string, syncErr error, failedCount int, targets []priorityTargetFailure) {
 	ctx, cancel := context.WithTimeout(context.Background(), priorityStateWriteTimeout)
 	defer cancel()
 	errorDetail := prioritySyncErrorDetail(syncErr)
-	marked, err := s.repo.MarkPriorityWorkspaceHealthSyncFailed(ctx, userID, adminAccountID, errorDetail, failedCount)
+	marked, err := s.markPriorityStatus(userID, adminAccountID, targets, func() (bool, error) {
+		return s.repo.MarkPriorityWorkspaceHealthSyncFailed(ctx, userID, adminAccountID, errorDetail, failedCount)
+	})
 	if err != nil {
 		log.Printf("[connection-health] priority sync health failure state failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 		return
@@ -160,16 +162,18 @@ func (s *Service) markPriorityWorkspaceHealthSyncFailedDirect(userID string, adm
 	}
 }
 
-func (s *Service) markPriorityWorkspaceSyncPartial(userID string, adminAccountID string, pendingSignature string, blockedCount int) {
+func (s *Service) markPriorityWorkspaceSyncPartial(userID string, adminAccountID string, pendingSignature string, blockedCount int, targets []priorityTargetFailure) {
 	if pendingSignature == "" {
-		s.markPriorityWorkspaceHealthSyncPartial(userID, adminAccountID, blockedCount)
+		s.markPriorityWorkspaceHealthSyncPartial(userID, adminAccountID, blockedCount, targets)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), priorityStateWriteTimeout)
 	defer cancel()
-	marked, err := s.repo.MarkPriorityWorkspaceSyncPartial(
-		ctx, userID, adminAccountID, pendingSignature, ErrorPriorityMetadataUnavailable, blockedCount,
-	)
+	marked, err := s.markPriorityStatus(userID, adminAccountID, targets, func() (bool, error) {
+		return s.repo.MarkPriorityWorkspaceSyncPartial(
+			ctx, userID, adminAccountID, pendingSignature, ErrorPriorityMetadataUnavailable, blockedCount,
+		)
+	})
 	if err != nil {
 		log.Printf("[connection-health] priority sync mark partial state failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 		return
@@ -179,16 +183,18 @@ func (s *Service) markPriorityWorkspaceSyncPartial(userID string, adminAccountID
 	}
 }
 
-func (s *Service) markPriorityWorkspaceHealthSyncPartial(userID string, adminAccountID string, blockedCount int) {
+func (s *Service) markPriorityWorkspaceHealthSyncPartial(userID string, adminAccountID string, blockedCount int, targets []priorityTargetFailure) {
 	ctx, cancel := context.WithTimeout(context.Background(), priorityStateWriteTimeout)
 	defer cancel()
 	allowWrite, err := s.priorityWorkspaceEmptySignatureWritable(ctx, userID, adminAccountID)
 	if err != nil || !allowWrite {
 		return
 	}
-	marked, err := s.repo.MarkPriorityWorkspaceHealthSyncPartial(
-		ctx, userID, adminAccountID, ErrorPriorityMetadataUnavailable, blockedCount,
-	)
+	marked, err := s.markPriorityStatus(userID, adminAccountID, targets, func() (bool, error) {
+		return s.repo.MarkPriorityWorkspaceHealthSyncPartial(
+			ctx, userID, adminAccountID, ErrorPriorityMetadataUnavailable, blockedCount,
+		)
+	})
 	if err != nil {
 		log.Printf("[connection-health] priority sync health partial state failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 		return
@@ -198,7 +204,7 @@ func (s *Service) markPriorityWorkspaceHealthSyncPartial(userID string, adminAcc
 	}
 }
 
-func (s *Service) tryMarkPriorityWorkspaceSyncFailed(ctx context.Context, userID string, adminAccountID string, pendingSignature string, errorDetail string, failedCount int) (marked bool, err error, panicked bool) {
+func (s *Service) tryMarkPriorityWorkspaceSyncFailed(ctx context.Context, userID string, adminAccountID string, pendingSignature string, errorDetail string, failedCount int, targets []priorityTargetFailure) (marked bool, err error, panicked bool) {
 	defer func() {
 		if recover() != nil {
 			marked = false
@@ -206,18 +212,22 @@ func (s *Service) tryMarkPriorityWorkspaceSyncFailed(ctx context.Context, userID
 			panicked = true
 		}
 	}()
-	marked, err = s.repo.MarkPriorityWorkspaceSyncFailed(ctx, userID, adminAccountID, pendingSignature, errorDetail, failedCount)
+	marked, err = s.markPriorityStatus(userID, adminAccountID, targets, func() (bool, error) {
+		return s.repo.MarkPriorityWorkspaceSyncFailed(ctx, userID, adminAccountID, pendingSignature, errorDetail, failedCount)
+	})
 	return marked, err, false
 }
 
-func (s *Service) markPriorityWorkspaceSyncSucceeded(userID string, adminAccountID string, pendingSignature string) {
+func (s *Service) markPriorityWorkspaceSyncSucceeded(userID string, adminAccountID string, pendingSignature string, targets []priorityTargetFailure) {
 	if pendingSignature == "" {
-		s.markPriorityWorkspaceHealthSyncSucceeded(userID, adminAccountID)
+		s.markPriorityWorkspaceHealthSyncSucceeded(userID, adminAccountID, targets)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), priorityStateWriteTimeout)
 	defer cancel()
-	marked, err := s.repo.MarkPriorityWorkspaceSyncSucceeded(ctx, userID, adminAccountID, pendingSignature)
+	marked, err := s.markPriorityStatus(userID, adminAccountID, targets, func() (bool, error) {
+		return s.repo.MarkPriorityWorkspaceSyncSucceeded(ctx, userID, adminAccountID, pendingSignature)
+	})
 	if err != nil {
 		log.Printf("[connection-health] priority sync mark success state failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 		return
@@ -227,14 +237,16 @@ func (s *Service) markPriorityWorkspaceSyncSucceeded(userID string, adminAccount
 	}
 }
 
-func (s *Service) markPriorityWorkspaceHealthSyncSucceeded(userID string, adminAccountID string) {
+func (s *Service) markPriorityWorkspaceHealthSyncSucceeded(userID string, adminAccountID string, targets []priorityTargetFailure) {
 	ctx, cancel := context.WithTimeout(context.Background(), priorityStateWriteTimeout)
 	defer cancel()
 	allowWrite, err := s.priorityWorkspaceEmptySignatureWritable(ctx, userID, adminAccountID)
 	if err != nil || !allowWrite {
 		return
 	}
-	marked, err := s.repo.MarkPriorityWorkspaceHealthSyncSucceeded(ctx, userID, adminAccountID)
+	marked, err := s.markPriorityStatus(userID, adminAccountID, targets, func() (bool, error) {
+		return s.repo.MarkPriorityWorkspaceHealthSyncSucceeded(ctx, userID, adminAccountID)
+	})
 	if err != nil {
 		log.Printf("[connection-health] priority sync health success state failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 		return
@@ -275,7 +287,7 @@ func (s *Service) triggerPrioritySync(userID string, adminAccountID string, pend
 		return
 	}
 	if s.priorityActions == nil || s.platformGroups == nil {
-		s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, pendingSignature, requestError(ErrorPrioritySyncUnavailable), 1)
+		s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, pendingSignature, requestError(ErrorPrioritySyncUnavailable), 1, nil)
 		return
 	}
 	key := userID + "\x00" + adminAccountID
@@ -301,7 +313,7 @@ func (s *Service) triggerPrioritySync(userID string, adminAccountID string, pend
 	delete(s.priorityTriggerRunning, key)
 	delete(s.priorityTriggerPending, key)
 	s.priorityTriggerMu.Unlock()
-	s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, pendingSignature, requestError(ErrorPrioritySyncUnavailable), 1)
+	s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, pendingSignature, requestError(ErrorPrioritySyncUnavailable), 1, nil)
 }
 
 // triggerHealthPrioritySyncAfterCommit queues a health-driven reconciliation after
@@ -310,7 +322,7 @@ func (s *Service) triggerPrioritySync(userID string, adminAccountID string, pend
 // state is guarded by an empty pending signature.
 func (s *Service) triggerHealthPrioritySyncAfterCommit(userID string, adminAccountID string) {
 	if s.priorityActions == nil || s.platformGroups == nil {
-		s.markPriorityWorkspaceHealthSyncFailed(userID, adminAccountID, requestError(ErrorPrioritySyncUnavailable), 1)
+		s.markPriorityWorkspaceHealthSyncFailed(userID, adminAccountID, requestError(ErrorPrioritySyncUnavailable), 1, nil)
 		return
 	}
 	key := userID + "\x00" + adminAccountID
@@ -359,7 +371,7 @@ func (s *Service) runHealthPriorityFailureFallback(key string, userID string, ad
 		}
 		s.finishHealthPriorityFailureFallback(key, userID, adminAccountID)
 	}()
-	s.markPriorityWorkspaceHealthSyncFailed(userID, adminAccountID, requestError(ErrorPrioritySyncUnavailable), 1)
+	s.markPriorityWorkspaceHealthSyncFailed(userID, adminAccountID, requestError(ErrorPrioritySyncUnavailable), 1, nil)
 }
 
 func (s *Service) finishHealthPriorityFailureFallback(key string, userID string, adminAccountID string) {
@@ -411,7 +423,7 @@ func (s *Service) runQueuedPrioritySyncWithKind(userID string, adminAccountID st
 	}()
 	if runErr != nil {
 		log.Printf("[connection-health] asynchronous priority sync failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, runErr)
-		s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, pendingSignature, runErr, 1)
+		s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, pendingSignature, runErr, 1, nil)
 	}
 
 }
@@ -460,5 +472,5 @@ func (s *Service) finishQueuedPrioritySync(key string, userID string, adminAccou
 	delete(s.priorityTriggerRunning, key)
 	delete(s.priorityTriggerPending, key)
 	s.priorityTriggerMu.Unlock()
-	s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, nextPendingSignature, requestError(ErrorPrioritySyncUnavailable), 1)
+	s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, nextPendingSignature, requestError(ErrorPrioritySyncUnavailable), 1, nil)
 }

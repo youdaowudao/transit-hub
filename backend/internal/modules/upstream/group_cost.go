@@ -20,7 +20,7 @@ const (
 	groupCostMaxSamples       = 16
 	groupCostSampleTimeout    = 45 * time.Second
 	groupCostFallbackInterval = 15 * time.Minute
-	groupCostSamplingStateTTL = 6 * time.Hour
+	groupCostSamplingStateTTL = 25 * time.Hour
 )
 
 // GroupCostSample 是上游平台返回的当天累计原始金额。这里只保存短期比较所需的
@@ -124,19 +124,20 @@ func (s *Service) sampleGroupCosts(site Site, session Session, groups []GroupInf
 	result, err := s.platformService.FetchGroupCostStatsForDate(ctx, session, groups, date, state)
 	state.LastAttemptAt = now
 	if err != nil {
-		if !isGroupCostCooldown(err) {
-			path, summaryFailureClass := groupCostFetchFailure(err)
-			if summaryFailureClass != "" {
-				state.RecordSummaryFailure(summaryFailureClass, now)
-			}
-			if path == "fallback" {
-				state.RecordFallbackFailure(groupCostFailureClass(err), now)
-			} else {
-				state.RecordSummaryFailure(groupCostFailureClass(err), now)
-			}
-			if saveErr := store.SetGroupCostSamplingState(ctx, site.ID, state, groupCostSamplingStateTTL); saveErr != nil {
-				log.Printf("[upstream-cost] save failed sample state failed site_id=%s err=%v", site.ID, saveErr)
-			}
+		if isGroupCostCooldown(err) {
+			return
+		}
+		path, summaryFailureClass := groupCostFetchFailure(err)
+		if summaryFailureClass != "" {
+			state.RecordSummaryFailure(summaryFailureClass, now)
+		}
+		if path == "fallback" {
+			state.RecordFallbackFailure(groupCostFailureClass(err), now)
+		} else {
+			state.RecordSummaryFailure(groupCostFailureClass(err), now)
+		}
+		if saveErr := store.SetGroupCostSamplingState(ctx, site.ID, state, groupCostSamplingStateTTL); saveErr != nil {
+			log.Printf("[upstream-cost] save failed sample state failed site_id=%s err=%v", site.ID, saveErr)
 		}
 		// 成本采样是可选观测，不得把失败写回站点健康状态或同步结果。
 		log.Printf("[upstream-cost] group cost sample failed site_id=%s reason=%s err=%v", site.ID, state.LastReason, err)

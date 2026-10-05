@@ -77,7 +77,11 @@ const (
 	ErrorPriorityInventoryIncomplete = "admin.connectionHealth.errors.priorityInventoryIncomplete"
 	// ErrorPrioritySyncUnavailable means the local configuration was saved, but no
 	// bounded background Priority worker is currently available to process it.
-	ErrorPrioritySyncUnavailable = "admin.connectionHealth.errors.prioritySyncUnavailable"
+	ErrorPrioritySyncUnavailable  = "admin.connectionHealth.errors.prioritySyncUnavailable"
+	ErrorPriorityTargetNotVisible = "admin.connectionHealth.errors.priorityTargetNotVisible"
+	ErrorPriorityWriteFailed      = "admin.connectionHealth.errors.priorityWriteFailed"
+	ErrorPriorityWaitingTimeout   = "admin.connectionHealth.errors.priorityWaitingTimeout"
+	ErrorPriorityTargetFailed     = "admin.connectionHealth.errors.priorityTargetFailed"
 	// ErrorNoMatchingModels: 手动探活请求体显式指定了 models，但没有一个模型命中该连接
 	// 当前匹配到的启用策略/启用模型目标。与"models 为空时探活全部匹配目标但目标本身为空"
 	// 的旧行为（200 + 空数组）区分开，让前端能区分"策略配置问题"和"探活完成但结果为空"。

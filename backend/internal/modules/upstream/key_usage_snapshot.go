@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -139,6 +140,16 @@ func (s *Service) runKeyUsageFlight(site Site, flight *keyUsageFlight) {
 }
 
 func (s *Service) collectKeyUsageSnapshot(site Site) {
+	if site.Session == nil {
+		return
+	}
+	// Keep the original session value stable while a newer login may replace it.
+	originalSession := *site.Session
+	if originalSession.ExpiresAt != nil {
+		expiresAt := *originalSession.ExpiresAt
+		originalSession.ExpiresAt = &expiresAt
+	}
+	site.Session = &originalSession
 	startedAt := s.keyUsageNow()
 	date := businesstime.DateAt(startedAt)
 	value := KeyUsageSnapshot{BusinessDate: date, StartedAt: startedAt, AttemptStartedAt: startedAt, ConsumeDate: site.Metrics.TodayConsumeDate, SyncedRawCost: site.Metrics.TodayConsume.Value, Items: []KeyUsageTodayStat{}}
@@ -147,10 +158,19 @@ func (s *Service) collectKeyUsageSnapshot(site Site) {
 	if s.isSiteDeleted(site.ID) {
 		return
 	}
-	if current, err := s.cache.Get(ctx, site.ID); err != nil || current == nil || !current.IsEnabled() {
+	if current, err := s.cache.Get(ctx, site.ID); err != nil || !keyUsageSiteMatches(current, site) || !reflect.DeepEqual(current.Session, site.Session) {
 		return
 	}
 	session, err := s.platformService.RefreshSessionContext(ctx, *site.Session)
+	sessionPersisted := false
+	if err == nil {
+		proceed, saveErr := s.persistKeyUsageSession(site, session)
+		if !proceed {
+			return
+		}
+		err = saveErr
+		sessionPersisted = saveErr == nil
+	}
 	if err == nil {
 		value.CollectedRawCost, err = s.platformService.fetchKeyCollectionTotal(ctx, session, date)
 	}
@@ -180,7 +200,13 @@ func (s *Service) collectKeyUsageSnapshot(site Site) {
 	saveCtx, saveCancel := context.WithTimeout(context.Background(), persistenceTimeout)
 	defer saveCancel()
 	current, cacheErr := s.cache.Get(saveCtx, site.ID)
-	if cacheErr != nil || current == nil || !current.IsEnabled() {
+	if cacheErr != nil || !keyUsageSiteMatches(current, site) {
+		return
+	}
+	// An in-flight attempt must not publish results for a replaced session.
+	// Failed persistence may leave the original cache value; it can only publish
+	// the failure record, never a complete collection.
+	if !reflect.DeepEqual(current.Session, &session) && (sessionPersisted || !reflect.DeepEqual(current.Session, site.Session)) {
 		return
 	}
 	// Persistence gets an independent bounded context after the 45s attempt finishes.
@@ -188,6 +214,56 @@ func (s *Service) collectKeyUsageSnapshot(site Site) {
 		log.Printf("[upstream] 逐Key快照写入失败 site=%s", site.ID)
 	}
 	s.keyUsageNotifyLocked()
+}
+
+func keyUsageSiteMatches(current *Site, original Site) bool {
+	return current != nil && current.ID == original.ID && current.UserID == original.UserID &&
+		current.AdminAccountID == original.AdminAccountID && current.Platform == original.Platform &&
+		current.IsEnabled() && current.Session != nil
+}
+
+// Persist a successful rotation before any subsequent cost read can fail.
+// The service lock protects deletion and compares the current session with the
+// refresh input; copy current site metadata and replace only the session.
+func (s *Service) persistKeyUsageSession(original Site, refreshed Session) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, deleted := s.deletedSites[original.ID]; deleted {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), persistenceTimeout)
+	defer cancel()
+	current, err := s.cache.Get(ctx, original.ID)
+	if err != nil {
+		return true, keyUsageSessionPersistenceError(original.Platform, err)
+	}
+	if !keyUsageSiteMatches(current, original) || !reflect.DeepEqual(current.Session, original.Session) {
+		return false, nil
+	}
+	if reflect.DeepEqual(current.Session, &refreshed) {
+		return true, nil
+	}
+	current.Session = &refreshed
+	// Both interfaces are called under the lock: the public wrappers acquire the
+	// same lock themselves. Each store is attempted independently so a cache
+	// failure cannot discard a rotated refresh token; neither store is rolled back.
+	cacheErr := s.cache.Set(ctx, current)
+	var durableErr error
+	if s.repository != nil {
+		durableCtx, durableCancel := context.WithTimeout(context.Background(), persistenceTimeout)
+		defer durableCancel()
+		durableErr = s.repository.SaveSite(durableCtx, *current)
+	}
+	if err := errors.Join(cacheErr, durableErr); err != nil {
+		return true, keyUsageSessionPersistenceError(original.Platform, err)
+	}
+	return true, nil
+}
+
+func keyUsageSessionPersistenceError(platform Platform, cause error) error {
+	detail := newRequestError(ErrorRequest, platform)
+	detail.Cause = cause
+	return detail
 }
 
 func (s *Service) CachedKeyUsageForDate(ctx context.Context, userID, adminAccountID, date string) (KeyUsageForDateResult, error) {

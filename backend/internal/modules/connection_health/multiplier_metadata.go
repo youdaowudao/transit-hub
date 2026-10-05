@@ -157,9 +157,10 @@ type multiplierSnapshotEntry struct {
 // multiplierSiteMetadata is deliberately narrower than upstream.Site. A snapshot must not
 // retain a Session or any other credential-bearing object after an upstream read finishes.
 type multiplierSiteMetadata struct {
-	rechargeRate float64
-	groups       []upstream.GroupInfo
-	syncErrorKey string
+	rechargeRate       float64
+	groups             []upstream.GroupInfo
+	syncErrorKey       string
+	nonSub2APIPlatform bool
 }
 
 func (s *Service) multiplierCurrentTime() time.Time {
@@ -445,6 +446,17 @@ func (s *Service) prepareMultiplierSnapshotsProgress(ctx context.Context, reader
 				capability: multiplierDirectUnknown, keys: make(map[string]upstreamKeyMetadata), siteFingerprint: fingerprint,
 				status: multiplierResolutionUpdating, lastAccessAt: now, supersededDone: supersededDone,
 			}
+			site := currentSites[siteID]
+			deletionScopeUnchanged := site == nil || (site.Platform == upstream.PlatformSub2API &&
+				(site.Session == nil || site.Session.Platform == "" || site.Session.Platform == upstream.PlatformSub2API))
+			if previous != nil && previous.bindingSignature == signature && previous.platform == platform && deletionScopeUnchanged {
+				// Ordinary site metadata invalidates live multipliers, not the
+				// deletion evidence for these unchanged Sub2API bindings.
+				entry.confirmedDeletedKeys = make(map[string]struct{}, len(previous.confirmedDeletedKeys))
+				for keyID := range previous.confirmedDeletedKeys {
+					entry.confirmedDeletedKeys[keyID] = struct{}{}
+				}
+			}
 			if previous != nil && previous.manualReason != "" {
 				// Fingerprint changes are not a manual-marker recovery condition.
 				entry.manualReason, entry.manualBlockedAt = previous.manualReason, previous.manualBlockedAt
@@ -662,13 +674,18 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 		return nil, nil, multiplierSiteMetadata{}, entry.capability, err
 	}
 	siteMetadata := newMultiplierSiteMetadata(site)
+	confirmDeletion := site.Platform == upstream.PlatformSub2API && site.Session.Platform == upstream.PlatformSub2API
+	if siteMetadata.nonSub2APIPlatform {
+		// The source can change after preparation but before this worker reads it.
+		entry.confirmedDeletedKeys = nil
+	}
 	if site.Platform == upstream.PlatformSub2API {
 		if entry.capability != multiplierDirectUnsupported {
 			keys := make(map[string]upstreamKeyMetadata, len(entry.keyIDs))
 			keyFailures := make(map[string]string)
 			fallbackKeyIDs := make([]string, 0)
 			for _, keyID := range entry.keyIDs {
-				if _, deleted := entry.confirmedDeletedKeys[keyID]; deleted {
+				if _, deleted := entry.confirmedDeletedKeys[keyID]; deleted && confirmDeletion {
 					continue
 				}
 				*upstreamRequestStarted = true
@@ -708,7 +725,7 @@ func (s *Service) fetchMultiplierSnapshot(ctx context.Context, reader UpstreamKe
 			}
 			capability := entry.capability
 			for _, keyID := range fallbackKeyIDs {
-				if _, found := keys[keyID]; !found {
+				if _, found := keys[keyID]; !found && confirmDeletion {
 					if entry.confirmedDeletedKeys == nil {
 						entry.confirmedDeletedKeys = make(map[string]struct{})
 					}
@@ -761,6 +778,10 @@ func (s *Service) finishMultiplierSnapshotLocked(target *multiplierSnapshotEntry
 	current := s.multiplierSnapshots[target.workspaceKey]
 	if current != target || current.generation != captured.generation || current.bindingSignature != captured.bindingSignature {
 		return
+	}
+	if site.nonSub2APIPlatform {
+		// A failed read from the new platform must not retain Sub2API deletion evidence.
+		current.confirmedDeletedKeys = nil
 	}
 	if err == nil {
 		now := s.multiplierCurrentTime()
@@ -1111,7 +1132,13 @@ func findSiteGroup(groups []upstream.GroupInfo, key upstreamKeyMetadata) (*upstr
 }
 
 func newMultiplierSiteMetadata(site *upstream.Site) multiplierSiteMetadata {
-	metadata := multiplierSiteMetadata{rechargeRate: site.RechargeRate, groups: make([]upstream.GroupInfo, 0, len(site.Metrics.Groups))}
+	metadata := multiplierSiteMetadata{
+		rechargeRate: site.RechargeRate, groups: make([]upstream.GroupInfo, 0, len(site.Metrics.Groups)),
+		nonSub2APIPlatform: site.Platform != "" && site.Platform != upstream.PlatformSub2API,
+	}
+	if site.Session != nil && site.Session.Platform != "" && site.Session.Platform != upstream.PlatformSub2API {
+		metadata.nonSub2APIPlatform = true
+	}
 	if site.ErrorKey != nil && (*site.ErrorKey == upstream.ErrorRefreshTokenRejected || *site.ErrorKey == upstream.ErrorAccessTokenRejected) {
 		metadata.syncErrorKey = *site.ErrorKey
 	}

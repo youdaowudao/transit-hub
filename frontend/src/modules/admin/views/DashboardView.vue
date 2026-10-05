@@ -380,8 +380,10 @@ const numberFormatter = computed(() => new Intl.NumberFormat(locale, { maximumFr
 
 const profitMarginState = computed(() => {
   const cq = liveData.value?.costQuality
+	const adjustedQuality = liveData.value?.adjustedProfitMarginQuality
+	if (adjustedQuality === 'unavailable') return { value: null, mode: 'unavailable' as const }
 	if (liveData.value?.adjustedProfitMargin != null) {
-		return { value: liveData.value.adjustedProfitMargin, mode: 'exact' as const }
+		return { value: liveData.value.adjustedProfitMargin, mode: adjustedQuality === 'ceiling' ? 'ceiling' as const : 'exact' as const }
 	}
   return calculateProfitMargin({
     revenue: metric('todayProfit')?.current,

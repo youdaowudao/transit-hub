@@ -98,6 +98,7 @@ export interface DashboardMetricsResponse {
   operatingCost?: number | null
   adjustedNetProfit?: number | null
   adjustedProfitMargin?: number | null
+  adjustedProfitMarginQuality?: 'exact' | 'ceiling' | 'unavailable'
 }
 
 export interface AdditionalCostRecord {

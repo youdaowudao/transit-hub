@@ -76,7 +76,7 @@ run_globalization_gate() {
     bash -c "cd '$ROOT_DIR/backend' && go test ./cmd/notification-cleanup ./internal/modules/settings ./internal/shared/businesstime ./internal/modules/my_sites ./internal/modules/group_rate_campaigns ./internal/modules/leaderboard ./internal/modules/lottery ./internal/modules/dashboard ./internal/modules/upstream ./internal/httpserver -count=1"
 
   run_step "frontend language, amount and Telegram recipient regression tests" \
-    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- locale-configuration.test.ts globalization-amount.behavior.test.ts globalization-time-input.behavior.test.ts notification-recipients.behavior.test.ts user-last-used.test.ts dashboard-cost-entrypoints.behavior.test.ts account-cost-workspace.behavior.test.ts home-cost-snapshot.behavior.test.ts"
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- locale-configuration.test.ts globalization-amount.behavior.test.ts globalization-time-input.behavior.test.ts notification-recipients.behavior.test.ts user-last-used.test.ts dashboard-cost-entrypoints.behavior.test.ts account-cost-workspace.behavior.test.ts home-cost-snapshot.behavior.test.ts home-cost-margin-quality.behavior.test.ts dashboard-provisional-trend.test.ts dashboard-profit-margin.test.ts"
 }
 
 case "$MODE" in

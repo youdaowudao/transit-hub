@@ -1117,6 +1117,35 @@ func (r *MetricsRepository) upsertDailyCostTarget(ctx context.Context, db metric
 	return err
 }
 
+// ListCostRecoveryDates includes every unconfirmed target in the seven
+// business days before recovery, including dates with no attempted cost row.
+func (r *MetricsRepository) ListCostRecoveryDates(ctx context.Context, userID, adminAccountID, siteID, recoveryBusinessDate string) ([]string, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT target.date::text
+		FROM dashboard_daily_cost_targets target
+		LEFT JOIN upstream_site_daily_costs cost
+		  ON cost.user_id = target.user_id AND cost.admin_account_id = target.admin_account_id
+		 AND cost.date = target.date AND cost.site_id = target.site_id
+		WHERE target.user_id = $1 AND target.admin_account_id = $2 AND target.site_id = $3
+		  AND target.date >= $4::date - 7 AND target.date < $4::date
+		  AND COALESCE(cost.status, '') NOT IN ('ok', 'partial')
+		ORDER BY target.date ASC
+	`, userID, adminAccountID, siteID, recoveryBusinessDate)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	dates := make([]string, 0)
+	for rows.Next() {
+		var date string
+		if err := rows.Scan(&date); err != nil {
+			return nil, err
+		}
+		dates = append(dates, date)
+	}
+	return dates, rows.Err()
+}
+
 // dailyCostTargets 返回业务日稳定的站点目标集合。首建时先纳入该日已有成本明细，
 // 避免部署前已存在但当前已停用的站点被排除；只有当前业务日才允许追加新站点。
 func (r *MetricsRepository) dailyCostTargets(ctx context.Context, db metricsDB, snapshot DailySnapshot, attempts, preAttemptCosts []SiteDailyCost) ([]SiteDailyCost, error) {

@@ -233,12 +233,14 @@ func TestGroupUsageTodayUsesExplicitBusinessDate(t *testing.T) {
 func TestGroupUsageTodayUsesLastSuccessfulRevenueWhenRefreshFails(t *testing.T) {
 	store := newFakeSessionStore()
 	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
-	observedAt := time.Now().Add(-time.Hour)
+	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
+	observedAt := now.Add(-time.Hour)
 	revenue := 17.25
 	repo := &fakeMetricsRepository{groupMetricCache: []GroupMetricCacheItem{{
 		MetricType: "revenue", GroupID: "5", GroupName: "分组五", TodayRevenue: &revenue, ObservedAt: observedAt,
 	}}}
 	service := NewMetricsService(store, &fakePlatformClient{adminGroupsErr: errors.New("main group refresh failed")}, nil, repo, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+	service.now = func() time.Time { return now }
 
 	response, err := service.GroupUsageToday(context.Background(), "user-1")
 	if err != nil {
@@ -330,13 +332,15 @@ func TestGroupProfitTodayUnauthenticated(t *testing.T) {
 func TestGroupProfitTodayKeepsLastSuccessfulValueForFailedGroup(t *testing.T) {
 	store := newFakeSessionStore()
 	store.set("user-1", "account-1", AdminSession{Session: authenticatedSession()})
-	observedAt := time.Now().Add(-time.Hour)
+	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
+	observedAt := now.Add(-time.Hour)
 	oldRevenue, oldCost, oldProfit := 10.0, 4.0, 6.0
 	repo := &fakeMetricsRepository{groupMetricCache: []GroupMetricCacheItem{{
 		MetricType: "profit", GroupID: "5", GroupName: "分组五",
 		DirectRevenue: &oldRevenue, DirectCost: &oldCost, TodayProfit: &oldProfit, ObservedAt: observedAt,
 	}}}
 	service := NewMetricsService(store, &fakePlatformClient{}, &fakeUpstreamLister{keyUsageErr: errors.New("upstream unavailable")}, repo, &fakeAdminAccounts{current: map[string]string{"user-1": "account-1"}})
+	service.now = func() time.Time { return now }
 	service.SetRealConnectionReader(fakeRealConnectionReader{connections: []my_sites.RealConnection{{
 		ID: "connection-93", Status: "active", UpstreamSiteID: "site-1", UpstreamKeyID: "key-93",
 		AdminAccountID: "93", OwnGroupIDs: []string{"5"}, OwnGroupNames: []string{"分组五"},

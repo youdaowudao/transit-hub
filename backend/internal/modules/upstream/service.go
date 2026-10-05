@@ -76,9 +76,9 @@ type Service struct {
 	mu               sync.Mutex
 
 	siteLoginSuccessCallback func(userID, adminAccountID, siteID string)
-	// AfterSync 在站点同步成功后被调用，传入同步前后的指标数据。
+	// AfterSync 在站点同步成功持久化后被调用，传入同步前后的指标及状态。
 	// 由系统设置模块注入，用于余额预警和倍率变更检测。
-	AfterSync func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics Metrics)
+	AfterSync func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics Metrics, oldStatus, newStatus Status)
 }
 
 func (s *Service) SetAdminAccountResolver(accounts AdminAccountResolver) {
@@ -1048,6 +1048,8 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 		return Response{}, newRequestError(ErrorDisabled, "")
 	}
 
+	// Capture recovery inputs before publishing the transient syncing state.
+	oldMetrics, oldStatus := site.Metrics, site.Status
 	// 标记为同步中。
 	site.Status = StatusSyncing
 	site.ErrorKey = nil
@@ -1078,9 +1080,6 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 		return toResponse(site), newRequestError(ErrorDisabled, "")
 	}
 
-	// 在覆盖前保存旧指标，用于同步后的预警检测。
-	oldMetrics := site.Metrics
-
 	if refreshErr != nil {
 		site.Status = StatusError
 		logSiteFailure("同步失败", id, site.Name, site.BaseURL, refreshErr)
@@ -1089,7 +1088,7 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	} else {
 		now := s.keyUsageNow().UnixMilli()
 		site.Session = &refreshedSession
-		metrics = mergeCostReadStatus(metrics, oldMetrics)
+		metrics = mergeCostReadStatus(metrics, site.Metrics)
 		site.Metrics = metrics
 		site.Status = StatusConnected
 		site.ErrorKey = nil
@@ -1116,7 +1115,7 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 		s.saveSnapshot(ctx, site)
 		go s.sampleGroupCosts(*site, refreshedSession, append([]GroupInfo(nil), site.Metrics.Groups...))
 		if s.AfterSync != nil {
-			go s.AfterSync(context.Background(), site.UserID, site.AdminAccountID, site.ID, site.Name, oldMetrics, metrics)
+			go s.AfterSync(context.Background(), site.UserID, site.AdminAccountID, site.ID, site.Name, oldMetrics, metrics, oldStatus, site.Status)
 		}
 	}
 	return response, nil

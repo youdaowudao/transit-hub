@@ -108,6 +108,10 @@ type MetricsService struct {
 	accountRefreshWait time.Duration
 	accountRefreshMu   sync.Mutex
 	accountRefreshJobs map[string]*accountRefreshJob
+	costRecoveryMu     sync.Mutex
+	costRecoveryJobs   map[costRecoveryWorkspace]*costRecoveryJob
+	finalizationMu     sync.Mutex
+	finalizationLocks  map[costFinalizationKey]*costFinalizationLock
 }
 
 func (s *MetricsService) currentTime() time.Time {
@@ -760,6 +764,12 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		}
 	}
 	operatingCost, adjustedNetProfit, adjustedProfitMargin := projectOperatingCost(todayPurchase, todayProfit, additionalCosts, components, componentErr)
+	marginQuality := "exact"
+	if adjustedProfitMargin == nil || costQuality == nil || costQuality.Mode == "unavailable" {
+		marginQuality = "unavailable"
+	} else if costQuality.ExpectedSites > 0 && float64(costQuality.CollectedSites)/float64(costQuality.ExpectedSites) < 0.90 {
+		marginQuality = "ceiling"
+	}
 	var accountPurchaseCost, replacementDeduction *float64
 	accountStatsQuality := ""
 	var accountExpectedCount, accountCompletedCount *int
@@ -778,28 +788,29 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	}
 
 	result := MetricsResponse{
-		Date:                  today,
-		Timezone:              businesstime.Timezone,
-		TodayProfit:           todayProfit,
-		SiteBalance:           siteBalance,
-		TodayPurchase:         todayPurchase,
-		NetProfit:             netProfit,
-		ConfirmedCost:         confirmedCost,
-		NetProfitCeiling:      netProfitCeiling,
-		SettlementStatus:      settlementStatus,
-		UpstreamBalance:       upstreamBalance,
-		GroupCount:            groupCount,
-		CostQuality:           costQuality,
-		AdditionalCosts:       additionalCosts,
-		OperatingCost:         operatingCost,
-		AdjustedNetProfit:     adjustedNetProfit,
-		AdjustedProfitMargin:  adjustedProfitMargin,
-		AccountSnapshotRunID:  components.SnapshotRunID,
-		AccountExpectedCount:  accountExpectedCount,
-		AccountCompletedCount: accountCompletedCount,
-		AccountStatsQuality:   accountStatsQuality,
-		AccountPurchaseCost:   accountPurchaseCost,
-		ReplacementDeduction:  replacementDeduction,
+		Date:                        today,
+		Timezone:                    businesstime.Timezone,
+		TodayProfit:                 todayProfit,
+		SiteBalance:                 siteBalance,
+		TodayPurchase:               todayPurchase,
+		NetProfit:                   netProfit,
+		ConfirmedCost:               confirmedCost,
+		NetProfitCeiling:            netProfitCeiling,
+		SettlementStatus:            settlementStatus,
+		UpstreamBalance:             upstreamBalance,
+		GroupCount:                  groupCount,
+		CostQuality:                 costQuality,
+		AdditionalCosts:             additionalCosts,
+		OperatingCost:               operatingCost,
+		AdjustedNetProfit:           adjustedNetProfit,
+		AdjustedProfitMargin:        adjustedProfitMargin,
+		AdjustedProfitMarginQuality: marginQuality,
+		AccountSnapshotRunID:        components.SnapshotRunID,
+		AccountExpectedCount:        accountExpectedCount,
+		AccountCompletedCount:       accountCompletedCount,
+		AccountStatsQuality:         accountStatsQuality,
+		AccountPurchaseCost:         accountPurchaseCost,
+		ReplacementDeduction:        replacementDeduction,
 	}
 
 	if todayProfitErr != nil {
@@ -827,7 +838,7 @@ func (s *MetricsService) Trends(ctx context.Context, userID string, days int) (T
 	if err != nil {
 		return TrendResponse{}, err
 	}
-	today := businesstime.Today()
+	today := businesstime.DateAt(s.currentTime())
 	snapshots, err := s.metricsRepo.ListRange(ctx, userID, adminAccountID, days, today)
 	if err != nil {
 		return TrendResponse{}, err
@@ -847,6 +858,10 @@ func (s *MetricsService) Trends(ctx context.Context, userID string, days int) (T
 			todayPurchase = nil
 			netProfitCeiling = snap.NetProfit
 			netProfit = nil
+			if status != SettlementStatusPartialHigh {
+				confirmedCost = snap.OperatingCost
+				netProfitCeiling = snap.AdjustedNetProfit
+			}
 		}
 		points = append(points, TrendPoint{
 			Date:               snap.Date.Format("2006-01-02"),
@@ -884,7 +899,7 @@ func (s *MetricsService) StartScheduler(ctx context.Context) {
 		retryMinutes := []int{5, 15, 30}
 
 		for {
-			now := time.Now().In(loc)
+			now := s.currentTime().In(loc)
 			nextDay := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, loc)
 
 			for _, minute := range retryMinutes {
@@ -918,7 +933,7 @@ func (s *MetricsService) snapshotAll(ctx context.Context) {
 	}
 
 	loc := businesstime.Location()
-	yesterday := businesstime.DateAt(time.Now().In(loc).AddDate(0, 0, -1))
+	yesterday := businesstime.DateAt(s.currentTime().In(loc).AddDate(0, 0, -1))
 
 	for _, ref := range refs {
 		if err := s.finalizeBusinessDate(ctx, ref, yesterday, SnapshotSourceDatedQuery); err != nil {
@@ -941,7 +956,7 @@ func (s *MetricsService) upsertSnapshot(ctx context.Context, userID, adminAccoun
 		log.Printf("dashboard metrics: generate id failed: %v", err)
 		return
 	}
-	now := time.Now()
+	now := s.currentTime()
 	snapshotStatus := SettlementStatusProvisional
 	if metrics.SettlementStatus == SettlementStatusFallback {
 		snapshotStatus = SettlementStatusFallback
@@ -1076,7 +1091,7 @@ func (s *MetricsService) GroupUsageToday(ctx context.Context, userID string) (Gr
 		return GroupUsageTodayResponse{}, requestError(ErrorAdminOnly)
 	}
 
-	date := businesstime.Today()
+	date := businesstime.DateAt(s.currentTime())
 	return s.realGroupUsageToday(ctx, userID, adminAccountID, session, date)
 }
 
@@ -1102,7 +1117,7 @@ func (s *MetricsService) GroupProfitToday(ctx context.Context, userID string) (G
 	if err := s.platform.VerifyAdmin(session); err != nil {
 		return GroupProfitTodayResponse{}, requestError(ErrorAdminOnly)
 	}
-	return s.realGroupProfitToday(ctx, userID, adminAccountID, session, businesstime.Today())
+	return s.realGroupProfitToday(ctx, userID, adminAccountID, session, businesstime.DateAt(s.currentTime()))
 }
 
 // UpstreamKeyUsageToday 获取当前工作区所有上游站点中，今天有消费的 key 明细（仪表盘「今日成本」下钻）。
@@ -1287,6 +1302,11 @@ func additionalCostRecords(summary *AdditionalCostSummary) []AdditionalCostRecor
 // date 由调用方传入（"2006-01-02"），函数内部禁止用 time.Now() 推导业务日期。
 // 记录 finalized_at、observed_at 使用 time.Now() 是合法的。
 func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSessionRef, date string, snapshotSource string) error {
+	release, err := s.acquireCostFinalization(ctx, ref, date)
+	if err != nil {
+		return err
+	}
+	defer release()
 	userID := ref.UserID
 	adminAccountID := ref.AdminAccountID
 	record, err := s.store.Get(ctx, userID, adminAccountID)
@@ -1317,7 +1337,7 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 		log.Printf("dashboard finalize: no upstream site cost targets user_id=%s admin_account_id=%s date=%s", userID, adminAccountID, date)
 		return err
 	}
-	now := time.Now().UTC()
+	now := s.currentTime().UTC()
 	attemptRunID, idErr := metricsRandomID()
 	if idErr != nil {
 		return idErr
@@ -1493,7 +1513,7 @@ const startupRecoveryRecentDays = 7
 // 不处理扫描窗口之前的日期。
 func (s *MetricsService) startupRecovery(ctx context.Context) {
 	loc := businesstime.Location()
-	yesterday := businesstime.DateAt(time.Now().In(loc).AddDate(0, 0, -1))
+	yesterday := businesstime.DateAt(s.currentTime().In(loc).AddDate(0, 0, -1))
 
 	baselineStr := os.Getenv("SETTLEMENT_BASELINE_DATE")
 	explicitBaseline := baselineStr != ""

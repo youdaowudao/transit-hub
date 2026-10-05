@@ -8,6 +8,7 @@ import (
 
 	"transithub/backend/internal/modules/my_sites"
 	"transithub/backend/internal/modules/upstream"
+	"transithub/backend/internal/shared/businesstime"
 )
 
 // realGroupUsageToday only reads the main platform's authoritative group
@@ -73,7 +74,7 @@ func (s *MetricsService) cachedGroupRevenue(ctx context.Context, userID, adminAc
 	items := make([]GroupUsageTodayItem, 0, len(cached))
 	var fallbackAt *time.Time
 	for _, item := range cached {
-		if item.TodayRevenue == nil {
+		if item.TodayRevenue == nil || businesstime.DateAt(item.ObservedAt) != date {
 			continue
 		}
 		revenue := *item.TodayRevenue
@@ -243,7 +244,11 @@ func (s *MetricsService) cachedGroupProfit(ctx context.Context, userID, adminAcc
 		}
 		return GroupProfitTodayResponse{Date: date, Groups: []GroupUsageTodayItem{}}, nil
 	}
-	return groupProfitResponseFromCache(date, cached), nil
+	response := groupProfitResponseFromCache(date, cached)
+	if len(response.Groups) == 0 && cause != nil {
+		return GroupProfitTodayResponse{}, cause
+	}
+	return response, nil
 }
 
 func (s *MetricsService) mergeGroupProfitFallback(ctx context.Context, userID, adminAccountID, date string, current []GroupUsageTodayItem, failedGroups map[string]struct{}) (GroupProfitTodayResponse, error) {
@@ -256,7 +261,7 @@ func (s *MetricsService) mergeGroupProfitFallback(ctx context.Context, userID, a
 	if s.metricsRepo != nil {
 		cached, _ := s.metricsRepo.ListGroupMetricCache(ctx, userID, adminAccountID, "profit")
 		for _, item := range cached {
-			if _, exists := currentIDs[item.GroupID]; exists || item.TodayProfit == nil {
+			if _, exists := currentIDs[item.GroupID]; exists || item.TodayProfit == nil || businesstime.DateAt(item.ObservedAt) != date {
 				continue
 			}
 			if _, failed := failedGroups[item.GroupID]; !failed {
@@ -295,7 +300,7 @@ func groupProfitResponseFromCache(date string, cached []GroupMetricCacheItem) Gr
 	var total float64
 	var fallbackAt *time.Time
 	for _, item := range cached {
-		if item.TodayProfit == nil {
+		if item.TodayProfit == nil || businesstime.DateAt(item.ObservedAt) != date {
 			continue
 		}
 		items = append(items, GroupUsageTodayItem{

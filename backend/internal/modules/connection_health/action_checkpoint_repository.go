@@ -163,7 +163,10 @@ func (r *Repository) ClaimRemoteAction(ctx context.Context, claim RemoteActionCl
 
 func (r *Repository) PermitRemoteAction(ctx context.Context, claim RemoteActionClaim) (bool, error) {
 	permitted := false
-	_, err := r.actionCheckpointTransaction(ctx, claim.RemoteActionScope, &claim, true, func(_ pgx.Tx, pair *RemoteActionCheckpoints, _ time.Time) error {
+	_, err := r.actionCheckpointTransaction(ctx, claim.RemoteActionScope, &claim, true, func(tx pgx.Tx, pair *RemoteActionCheckpoints, _ time.Time) error {
+		if err := validateRemoteActionHealthTx(ctx, tx, claim); err != nil {
+			return err
+		}
 		permitted = permitRemoteAction(pair, claim)
 		if !permitted {
 			return ErrRemoteActionPending
@@ -205,6 +208,15 @@ func (r *Repository) ReconcileRemoteAction(ctx context.Context, observation Remo
 
 func validateRemoteActionHealthTx(ctx context.Context, tx pgx.Tx, claim RemoteActionClaim) error {
 	guard := claim.Guard
+	if guard.ConfigGeneration != nil {
+		settings, err := getWorkspaceHealthSettings(ctx, tx, claim.UserID, claim.AdminAccountID)
+		if err != nil {
+			return err
+		}
+		if settings.ConfigGeneration != *guard.ConfigGeneration {
+			return ErrRemoteActionEvidenceChanged
+		}
+	}
 	if guard.ExpectedPriorityGeneration != nil {
 		var current string
 		err := tx.QueryRow(ctx, `SELECT pending_signature FROM connection_health_priority_workspace_sync_states WHERE user_id=$1 AND admin_account_id=$2`, claim.UserID, claim.AdminAccountID).Scan(&current)

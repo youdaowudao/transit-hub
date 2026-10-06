@@ -26,17 +26,21 @@ const harness = vi.hoisted(() => ({
   setQuestionAnswerJudgment: vi.fn(),
 }))
 
-vi.mock('@/modules/admin/composables/useConnectionHealth', () => ({
-  connectionHealthMessageKey: (key: string) => key,
-  connectionHealthRecordColorClass: () => '',
-  formatConnectionHealthTime: (value: string) => value,
-  useConnectionHealth: () => ({
-    discoverModels: harness.discoverModels,
-    runManualProbeOnce: vi.fn(),
-    manualProbeTarget: vi.fn(),
-    errorKey: { value: '' },
-  }),
-}))
+vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/modules/admin/composables/useConnectionHealth')>()
+  return {
+    connectionHealthProbeResultLabelKey: actual.connectionHealthProbeResultLabelKey,
+    connectionHealthMessageKey: (key: string) => key,
+    connectionHealthRecordColorClass: () => '',
+    formatConnectionHealthTime: (value: string) => value,
+    useConnectionHealth: () => ({
+      discoverModels: harness.discoverModels,
+      runManualProbeOnce: vi.fn(),
+      manualProbeTarget: vi.fn(),
+      errorKey: { value: '' },
+    }),
+  }
+})
 
 vi.mock('@/modules/admin/api/connectionHealth', () => ({
   cancelQuestionAnswerBatch: harness.cancelQuestionAnswerBatch,

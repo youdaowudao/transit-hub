@@ -36,7 +36,7 @@ const prefix = 'admin.connectionHealth'
 const cardPrefix = `${prefix}.eventsDialog.card`
 
 // 状态集合只用于从事件兜底推导当前状态；记录条和可用率由共享纯函数统一计算。
-const VALID_STATES = new Set<ConnectionHealthState>(['healthy', 'degraded', 'suspended', 'observing', 'recovering', 'disabled'])
+const VALID_STATES = new Set<ConnectionHealthState>(['healthy', 'suspect', 'degraded', 'suspended', 'observing', 'recovering', 'disabled'])
 
 interface StatusCard {
   currentHealthResult?: CurrentHealthResult
@@ -51,6 +51,8 @@ interface StatusCard {
   isActionCard: boolean
   state: ConnectionHealthState | ''
   latestLatencyMs: number | null
+  firstTokenMs?: number | null
+  firstEventMs?: number | null
   lastProbeAt: string | null
   lastSuccessAt: string | null
   nextProbeAt: string | null
@@ -87,6 +89,8 @@ const connectionMeta = computed(() => {
   const map = new Map<string, { ownGroupId: string; models: Map<string, {
     providerFamily: string
     state: ConnectionHealthState
+    firstTokenMs?: number | null
+    firstEventMs?: number | null
     lastProbeAt: string | null
     lastSuccessAt: string | null
     nextProbeAt: string | null
@@ -104,6 +108,8 @@ const connectionMeta = computed(() => {
       const models = new Map<string, {
         providerFamily: string
         state: ConnectionHealthState
+        firstTokenMs?: number | null
+        firstEventMs?: number | null
         lastProbeAt: string | null
         lastSuccessAt: string | null
         nextProbeAt: string | null
@@ -120,6 +126,8 @@ const connectionMeta = computed(() => {
         models.set(model.modelName, {
           providerFamily: model.providerFamily,
           state: model.state,
+          firstTokenMs: model.firstTokenMs,
+          firstEventMs: model.firstEventMs,
           lastProbeAt: model.lastProbeAt,
           lastSuccessAt: model.lastSuccessAt,
           nextProbeAt: model.nextProbeAt ?? null,
@@ -148,6 +156,8 @@ type AdminTargetModelMeta = {
   lastProbeAt: string | null
   lastSuccessAt: string | null
   lastLatencyMs: number | null
+  firstTokenMs?: number | null
+  firstEventMs?: number | null
   lastRemoteAction: string
   nextProbeAt: string | null
   blockedReason: string
@@ -184,6 +194,8 @@ const adminTargetMeta = computed(() => {
           lastProbeAt: model.lastProbeAt,
           lastSuccessAt: model.lastSuccessAt,
           lastLatencyMs: model.lastLatencyMs,
+          firstTokenMs: model.firstTokenMs,
+          firstEventMs: model.firstEventMs,
           lastRemoteAction: model.lastRemoteAction ?? '',
           nextProbeAt: model.nextProbeAt ?? null,
           blockedReason: model.blockedReason ?? '',
@@ -309,6 +321,8 @@ const buildFocusedCards = (connectionId: string): StatusCard[] => {
         isActionCard: false,
         state: model.state,
         latestLatencyMs: eventsDesc[0]?.latencyMs ?? model.lastLatencyMs,
+        firstTokenMs: model.firstTokenMs,
+        firstEventMs: model.firstEventMs,
         lastProbeAt: model.lastProbeAt,
         lastSuccessAt: model.lastSuccessAt,
         nextProbeAt: model.nextProbeAt ?? null,
@@ -352,6 +366,8 @@ const buildFocusedCards = (connectionId: string): StatusCard[] => {
         lastAttempt: modelMeta.lastAttempt,
         state: modelMeta.state,
         latestLatencyMs: modelMeta.lastLatencyMs,
+        firstTokenMs: modelMeta.firstTokenMs,
+        firstEventMs: modelMeta.firstEventMs,
         lastProbeAt: modelMeta.lastProbeAt,
         lastSuccessAt: modelMeta.lastSuccessAt,
         nextProbeAt: modelMeta.nextProbeAt,
@@ -395,6 +411,8 @@ const buildFocusedCards = (connectionId: string): StatusCard[] => {
       isActionCard: false,
       state,
       latestLatencyMs: latest.latencyMs,
+      firstTokenMs: latest.firstTokenMs,
+      firstEventMs: latest.firstEventMs,
       lastProbeAt: latest.createdAt,
       lastSuccessAt: null,
       nextProbeAt: null,
@@ -474,6 +492,8 @@ const globalGroups = computed<GroupBlock[]>(() => {
         lastAttempt: adminModelMeta?.lastAttempt,
         state,
         latestLatencyMs: adminModelMeta ? adminModelMeta.lastLatencyMs : latest.latencyMs ?? null,
+        firstTokenMs: adminModelMeta ? adminModelMeta.firstTokenMs : legacyModelMeta ? legacyModelMeta.firstTokenMs : latest.firstTokenMs,
+        firstEventMs: adminModelMeta ? adminModelMeta.firstEventMs : legacyModelMeta ? legacyModelMeta.firstEventMs : latest.firstEventMs,
         lastProbeAt: legacyModelMeta?.lastProbeAt ?? adminModelMeta?.lastProbeAt ?? null,
         lastSuccessAt: legacyModelMeta?.lastSuccessAt ?? adminModelMeta?.lastSuccessAt ?? null,
         nextProbeAt: legacyModelMeta?.nextProbeAt ?? adminModelMeta?.nextProbeAt ?? null,
@@ -631,6 +651,8 @@ const nextProbeLabel = (card: StatusCard): string => {
                   :current-health-result="card.currentHealthResult"
                   :last-attempt="card.lastAttempt"
                   :latest-latency-ms="card.latestLatencyMs"
+              :first-token-ms="card.firstTokenMs"
+              :first-event-ms="card.firstEventMs"
                   :last-probe-at="card.lastProbeAt"
                   :last-success-at="card.lastSuccessAt"
                   :last-failure-at="card.lastFailureAt"
@@ -676,6 +698,8 @@ const nextProbeLabel = (card: StatusCard): string => {
                   :current-health-result="card.currentHealthResult"
                   :last-attempt="card.lastAttempt"
                       :latest-latency-ms="card.latestLatencyMs"
+              :first-token-ms="card.firstTokenMs"
+              :first-event-ms="card.firstEventMs"
                       :last-probe-at="card.lastProbeAt"
                       :last-success-at="card.lastSuccessAt"
                       :last-failure-at="card.lastFailureAt"

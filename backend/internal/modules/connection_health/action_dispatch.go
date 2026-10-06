@@ -25,7 +25,12 @@ func (s *Service) reconcileActionObservation(ctx context.Context, observation Re
 }
 
 func actionGuardForTarget(target AdminProbeTarget, states []ConnectionHealthState, models []string) RemoteActionHealthGuard {
-	return RemoteActionHealthGuard{Required: true, Memberships: target.TestMemberships, InventoryComplete: target.InventoryComplete, Configuration: target.TestConfiguration, Models: models, ExpectedStates: states}
+	guard := RemoteActionHealthGuard{Required: true, Memberships: target.TestMemberships, InventoryComplete: target.InventoryComplete, Configuration: target.TestConfiguration, Models: models, ExpectedStates: states}
+	if target.ConfigGenerationKnown {
+		generation := target.ConfigGeneration
+		guard.ConfigGeneration = &generation
+	}
+	return guard
 }
 
 // A claim returning an uncertain commit is never dispatched. Each successful

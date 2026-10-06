@@ -3,6 +3,10 @@ import { computed, ref, watch } from 'vue'
 import { ArrowDownUp, BookOpenText, Radar, X, ShieldCheck, Plus, Trash2 } from 'lucide-vue-next'
 import { HelpTooltip } from '@/components/ui/tooltip'
 import PolicyRunFlowDialog from './PolicyRunFlowDialog.vue'
+import HealthRuleSettings from './HealthRuleSettings.vue'
+import HealthRulePresetFields from './HealthRulePresetFields.vue'
+import type { HealthRulePreset, WorkspaceHealthSettings } from '../../types/connectionHealth'
+import { defaultHealthRulePreset } from '../../utils/healthRulePresets'
 import type { ConnectionHealthPolicy, ConnectionHealthPriorityMode, ConnectionHealthStrategyMode, ModelTargetInput, PolicyInput } from '../../types/connectionHealth'
 import { resolveConnectionHealthStrategyMode } from '../../utils/connectionHealthPolicy'
 
@@ -15,11 +19,14 @@ const props = defineProps<{
   open: boolean
   policy: ConnectionHealthPolicy | null
   ownGroupOptions: OwnGroupOption[]
+  policies?: ConnectionHealthPolicy[]
+  workspaceId?: string
 }>()
 
 const emit = defineEmits<{
   (event: 'close'): void
   (event: 'save', input: PolicyInput): void
+  (event: 'rules-changed'): void
 }>()
 
 import { t } from '@/locales'
@@ -30,11 +37,6 @@ const providerOptions = ['gemini', 'anthropic', 'openai', 'custom']
 // 保守默认值：60s 探活间隔、1 个探活 token、每日预算有限、远端动作默认关闭需要用户显式打开。
 const DEFAULTS = {
   probeIntervalSeconds: 60,
-  failureThreshold: 3,
-  successThreshold: 2,
-  cooldownSeconds: 300,
-  observationSeconds: 300,
-  recoveryStepPercent: 25,
   dailyProbeBudget: 1000,
   unschedulableProbeIntervalMinutes: 60,
   maxProbeTokens: 1,
@@ -44,11 +46,16 @@ const name = ref('')
 const enabled = ref(true)
 const ownGroupId = ref('')
 const probeIntervalSeconds = ref(DEFAULTS.probeIntervalSeconds)
-const failureThreshold = ref(DEFAULTS.failureThreshold)
-const successThreshold = ref(DEFAULTS.successThreshold)
-const cooldownSeconds = ref(DEFAULTS.cooldownSeconds)
-const observationSeconds = ref(DEFAULTS.observationSeconds)
-const recoveryStepPercent = ref(DEFAULTS.recoveryStepPercent)
+const rulePresetId = ref('')
+const rulePresets = ref<HealthRulePreset[]>([])
+const workspaceSettings = ref<WorkspaceHealthSettings | null>(null)
+const selectedPreset = computed(() => rulePresets.value.find(preset => preset.id === rulePresetId.value))
+const firstWorkspacePolicy = computed(() => !props.policy && workspaceSettings.value !== null && rulePresets.value.length === 0)
+const displayedPreset = computed(() => selectedPreset.value ?? (firstWorkspacePolicy.value ? defaultHealthRulePreset() : null))
+const receivePresets = (presets: HealthRulePreset[]) => {
+  rulePresets.value = presets
+  if (!rulePresetId.value && !props.policy) rulePresetId.value = presets.find(preset => preset.kind === 'recommended')?.id ?? ''
+}
 const dailyProbeBudget = ref(DEFAULTS.dailyProbeBudget)
 const continueProbeWhenUnschedulable = ref(true)
 const unschedulableProbeIntervalMinutes = ref(DEFAULTS.unschedulableProbeIntervalMinutes)
@@ -75,11 +82,8 @@ const resetForm = () => {
   enabled.value = p?.enabled ?? true
   ownGroupId.value = p?.ownGroupId ?? ''
   probeIntervalSeconds.value = p?.probeIntervalSeconds ?? DEFAULTS.probeIntervalSeconds
-  failureThreshold.value = p?.failureThreshold ?? DEFAULTS.failureThreshold
-  successThreshold.value = p?.successThreshold ?? DEFAULTS.successThreshold
-  cooldownSeconds.value = p?.cooldownSeconds ?? DEFAULTS.cooldownSeconds
-  observationSeconds.value = p?.observationSeconds ?? DEFAULTS.observationSeconds
-  recoveryStepPercent.value = p?.recoveryStepPercent ?? DEFAULTS.recoveryStepPercent
+  rulePresetId.value = p?.rulePresetId ?? ''
+  if (!p) rulePresetId.value = rulePresets.value.find(preset => preset.kind === 'recommended')?.id ?? ''
   dailyProbeBudget.value = p?.dailyProbeBudget ?? DEFAULTS.dailyProbeBudget
   continueProbeWhenUnschedulable.value = p?.continueProbeWhenUnschedulable ?? true
   unschedulableProbeIntervalMinutes.value = p?.unschedulableProbeIntervalMinutes ?? DEFAULTS.unschedulableProbeIntervalMinutes
@@ -115,6 +119,8 @@ const resetForm = () => {
     : [{ modelName: '', providerFamily: policyProvider.value, enabled: true, probePrompt: '', maxProbeTokens: DEFAULTS.maxProbeTokens }]
   validationError.value = null
 }
+
+watch(() => props.policy?.rulePresetId, value => { if (props.open && value) rulePresetId.value = value })
 
 watch(() => props.open, (isOpen) => { if (isOpen) resetForm() })
 
@@ -162,6 +168,10 @@ const handleSave = () => {
     validationError.value = t(`${prefix}.errors.unschedulableIntervalInvalid`)
     return
   }
+  if (props.workspaceId && !selectedPreset.value && !firstWorkspacePolicy.value) {
+    validationError.value = '请先读取并选择有效的判定预设；原有选择不会自动替换。'
+    return
+  }
 
   const ownGroup = props.ownGroupOptions.find(g => g.id === ownGroupId.value)
   const input: PolicyInput = {
@@ -171,11 +181,7 @@ const handleSave = () => {
     ownGroupId: ownGroupId.value,
     ownGroupName: ownGroup?.name ?? '',
     probeIntervalSeconds: probeIntervalSeconds.value,
-    failureThreshold: failureThreshold.value,
-    successThreshold: successThreshold.value,
-    cooldownSeconds: cooldownSeconds.value,
-    observationSeconds: observationSeconds.value,
-    recoveryStepPercent: recoveryStepPercent.value,
+    ...(rulePresetId.value ? { rulePresetId: rulePresetId.value } : {}),
     dailyProbeBudget: dailyProbeBudget.value,
     continueProbeWhenUnschedulable: continueProbeWhenUnschedulable.value,
     unschedulableProbeIntervalMinutes: unschedulableProbeIntervalMinutes.value,
@@ -247,7 +253,7 @@ const handleSave = () => {
             </div>
 
             <div class="space-y-5 px-5 py-5">
-              <div v-if="validationError" class="rounded-lg border border-red-500/30 bg-red-500/5 p-3 text-sm text-red-600 dark:text-red-400">
+              <div v-if="validationError" role="alert" class="rounded-lg border border-red-500/30 bg-red-500/5 p-3 text-sm text-red-600 dark:text-red-400">
                 {{ validationError }}
               </div>
 
@@ -383,6 +389,7 @@ const handleSave = () => {
                     <input v-model.number="unschedulableProbeIntervalMinutes" type="number" min="1" class="h-8 w-20 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground" :disabled="!continueProbeWhenUnschedulable" />
                   </label>
                 </div>
+                <p class="col-span-2 text-xs leading-5 text-muted-foreground">只对主站调度开关已关闭的账号生效。被调度站关停的账号，按预设里的“关停后仍失败的探活间隔”和“长期失败的探活间隔”。</p>
                 <div class="space-y-1.5">
                   <label class="flex items-center gap-1 text-xs font-medium text-muted-foreground">
                     {{ t(`${prefix}.dailyBudgetLabel`) }}
@@ -390,41 +397,20 @@ const handleSave = () => {
                   </label>
                   <input v-model.number="dailyProbeBudget" type="number" min="1" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
                 </div>
-                <div class="space-y-1.5">
-                  <label class="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-                    {{ t(`${prefix}.failureThresholdLabel`) }}
-                    <HelpTooltip :text="t(`${prefix}.tooltips.failureThreshold`)" />
-                  </label>
-                  <input v-model.number="failureThreshold" type="number" min="1" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
+              </div>
+
+              <div class="space-y-3 border-t border-border/40 pt-4">
+                <label class="block space-y-1.5 text-xs font-medium text-muted-foreground">判定预设
+                  <select v-model="rulePresetId" data-testid="policy-rule-preset" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground">
+                    <option v-if="rulePresetId && !selectedPreset" :value="rulePresetId">当前选择（尚未读取）</option>
+                    <option v-if="!rulePresetId" value="">{{ firstWorkspacePolicy ? '新规则（推荐） · 首次保存时创建' : '请选择判定预设' }}</option>
+                    <option v-for="preset in rulePresets" :key="preset.id" :value="preset.id">{{ preset.name }}</option>
+                  </select>
+                </label>
+                <div v-if="displayedPreset" data-testid="selected-rule-preset-details" class="rounded-lg border border-border/40 bg-surface/30 p-3">
+                  <HealthRulePresetFields :model-value="displayedPreset" :rule-version="workspaceSettings?.ruleVersion ?? 'v2'" readonly />
                 </div>
-                <div class="space-y-1.5">
-                  <label class="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-                    {{ t(`${prefix}.successThresholdLabel`) }}
-                    <HelpTooltip :text="t(`${prefix}.tooltips.successThreshold`)" />
-                  </label>
-                  <input v-model.number="successThreshold" type="number" min="1" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
-                </div>
-                <div class="space-y-1.5">
-                  <label class="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-                    {{ t(`${prefix}.cooldownLabel`) }}
-                    <HelpTooltip :text="t(`${prefix}.tooltips.cooldown`)" />
-                  </label>
-                  <input v-model.number="cooldownSeconds" type="number" min="1" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
-                </div>
-                <div class="space-y-1.5">
-                  <label class="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-                    {{ t(`${prefix}.observationLabel`) }}
-                    <HelpTooltip :text="t(`${prefix}.tooltips.observation`)" />
-                  </label>
-                  <input v-model.number="observationSeconds" type="number" min="1" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
-                </div>
-                <div class="col-span-2 space-y-1.5">
-                  <label class="flex items-center gap-1 text-xs font-medium text-muted-foreground">
-                    {{ t(`${prefix}.recoveryStepLabel`) }}
-                    <HelpTooltip :text="t(`${prefix}.tooltips.recoveryStep`)" />
-                  </label>
-                  <input v-model.number="recoveryStepPercent" type="number" min="1" max="100" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground" />
-                </div>
+                <HealthRuleSettings v-if="workspaceId" :active="open" :workspace-id="workspaceId" :policies="policies ?? (policy ? [policy] : [])" hide-workspace-settings @presets-loaded="receivePresets" @settings-loaded="workspaceSettings = $event" @rules-changed="emit('rules-changed')" />
               </div>
 
               <!-- 自动化开关：默认保守，远端动作必须让用户明确可见并主动打开 -->
@@ -491,7 +477,7 @@ const handleSave = () => {
                 <button type="button" class="rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:bg-surface-line" @click="emit('close')">
                   {{ t(`${prefix}.cancel`) }}
                 </button>
-                <button type="button" class="rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90" @click="handleSave">
+                <button data-testid="save-health-policy" type="button" class="rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90" @click="handleSave">
                   {{ t(`${prefix}.save`) }}
                 </button>
               </div>

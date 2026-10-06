@@ -491,11 +491,6 @@ const createQuickPolicyInput = (): PolicyInput => {
     ownGroupId: '',
     ownGroupName: '',
     probeIntervalSeconds: 60,
-    failureThreshold: 3,
-    successThreshold: 2,
-    cooldownSeconds: 300,
-    observationSeconds: 300,
-    recoveryStepPercent: 25,
     dailyProbeBudget: 1000,
     autoDegradeEnabled: !multiplierOnly,
     autoRemoteActionEnabled: multiplierOnly ? false : autoRemoteActionEnabled.value,
@@ -699,6 +694,7 @@ const close = () => {
                     <input v-model="testTimeout" data-testid="group-test-timeout" type="number" min="5" max="120" step="1" :placeholder="testProtocol === 'responses' ? '30' : '10'" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm" :disabled="testSaving" @input="testSaved = false">
                   </label>
                 </div>
+                <p v-if="Number(testTimeout) > 30" data-testid="group-test-timeout-warning" class="text-xs leading-5 text-amber-700 dark:text-amber-400">一次卡住会拖慢整轮，复测也会变慢。</p>
                 <p v-if="testProtocol === 'responses'" class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.responsesBudget') }}</p>
                 <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.impact', { count: testConfiguration.affectedAccountCount, conflicts: testConfiguration.conflictAccountCount }) }}</p>
                 <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.clearHelp') }}</p>

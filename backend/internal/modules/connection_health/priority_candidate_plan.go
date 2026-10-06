@@ -395,7 +395,7 @@ func classifyPriorityCandidateAvailability(
 	}
 	for _, state := range evidence.states {
 		switch state.State {
-		case StateHealthy, StateRecovering, StateDegraded, StateObserving:
+		case StateHealthy, StateSuspect, StateRecovering, StateDegraded, StateObserving:
 		case StateDisabled, StateSuspended:
 			return "unavailable", "explicitly_unavailable"
 		default:

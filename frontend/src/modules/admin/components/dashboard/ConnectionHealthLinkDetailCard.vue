@@ -4,6 +4,7 @@ import { Zap } from 'lucide-vue-next'
 import { Tooltip } from '@/components/ui/tooltip'
 import {
   connectionHealthMessageKey,
+  connectionHealthProbeResultLabelKey,
   connectionHealthRecordColorClass,
   connectionHealthStateBadgeClass,
   formatConnectionHealthElapsed,
@@ -29,6 +30,8 @@ const props = defineProps<{
   isActionCard: boolean
   state: ConnectionHealthState | ''
   latestLatencyMs: number | null
+  firstTokenMs?: number | null
+  firstEventMs?: number | null
   lastProbeAt: string | null
   lastSuccessAt: string | null
   lastFailureAt: string | null
@@ -67,7 +70,11 @@ const effectivePolicySourcesText = computed(() => props.effectivePolicySources.m
 })).join('；'))
 
 const budgetPolicyLabel = computed(() => props.effectivePolicySources.find((source) => source.policyId === props.budgetPolicyId)?.policyName || props.budgetPolicyId)
-const slowResponseCount = computed(() => props.records.filter(record => record.result === 'slow_response' && record.probeDisposition !== 'stale' && record.probeDisposition !== 'invalid').length)
+const slowResponseCount = computed(() => props.records.filter(record => record.result === 'slow_response' && record.ruleVersion !== 'v2' && record.probeDisposition !== 'stale' && record.probeDisposition !== 'invalid').length)
+
+const delayedCount = computed(() => props.records.filter(record => record.result === 'slow_response' && record.ruleVersion === 'v2' && record.probeDisposition !== 'stale' && record.probeDisposition !== 'invalid').length)
+const eventResultLabel = (record: ConnectionHealthEvent) => record.result === 'slow_response' ? t(connectionHealthProbeResultLabelKey(record.result, record.ruleVersion)) : readableMessage(record.result)
+const eventMeasurements = (record: ConnectionHealthEvent) => `${record.firstTokenMs != null ? ` · 首字：${record.firstTokenMs}ms` : ''}${record.firstEventMs != null ? ` · 首个事件：${record.firstEventMs}ms` : ''}${record.latencyMs != null ? ` · 整段耗时：${record.latencyMs}ms` : ''}`
 
 const eventSourceLabel = (source?: string): string => {
   const key = `${cardPrefix}.eventSources.${source || 'legacy'}`
@@ -139,6 +146,8 @@ const displayedErrorDetail = computed(() => currentFailure.value ? (props.curren
 
     <div v-if="!isActionCard" class="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
       <span>{{ t(`${cardPrefix}.latencyLabel`) }}：{{ latestLatencyMs != null ? `${latestLatencyMs}ms` : t(`${cardPrefix}.noData`) }}</span>
+      <span v-if="firstTokenMs != null">首字：{{ firstTokenMs }}ms</span>
+      <span v-if="firstEventMs != null">首个事件：{{ firstEventMs }}ms</span>
       <span v-if="elapsedText" class="font-medium text-red-600 dark:text-red-400">{{ t(`${cardPrefix}.elapsed`, { value: elapsedText }) }}</span>
     </div>
     <p v-if="showErrorDetail && displayedErrorKey" class="mt-1 text-[11px] text-destructive/80">{{ readableMessage(displayedErrorKey) }}</p>
@@ -156,6 +165,7 @@ const displayedErrorDetail = computed(() => currentFailure.value ? (props.curren
       <p v-if="slowResponseCount > 0" class="mt-1 text-xs text-amber-600 dark:text-amber-400">
         {{ t(`${cardPrefix}.slowResponseCount`, { count: slowResponseCount }) }}
       </p>
+      <p v-if="delayedCount > 0" class="mt-1 text-xs text-amber-600 dark:text-amber-400">其中 {{ delayedCount }} 次为延迟（仍算成功）</p>
     </div>
 
     <p class="mt-3 text-xs font-medium text-foreground">{{ nextProbeText }}</p>
@@ -179,7 +189,7 @@ const displayedErrorDetail = computed(() => currentFailure.value ? (props.curren
             :key="record.id"
             class="min-w-[2px] flex-1 rounded-[1px]"
             :class="connectionHealthRecordColorClass(record.result)"
-            :title="`${formatConnectionHealthTime(record.createdAt)} · ${readableMessage(record.result)} · ${eventSourceLabel(record.source)} · ${testProtocolName(record.requestProtocol) || t('admin.connectionHealth.testConfiguration.legacy')}${record.requestTimeoutSeconds ? ` / ${record.requestTimeoutSeconds}s` : ''}${record.probeDisposition === 'stale' || record.probeDisposition === 'invalid' ? ` · ${t('admin.connectionHealth.testConfiguration.' + record.probeDisposition)}` : ''}`"
+            :title="`${formatConnectionHealthTime(record.createdAt)} · ${eventResultLabel(record)}${eventMeasurements(record)} · ${eventSourceLabel(record.source)} · ${testProtocolName(record.requestProtocol) || t('admin.connectionHealth.testConfiguration.legacy')}${record.requestTimeoutSeconds ? ` / ${record.requestTimeoutSeconds}s` : ''}${record.probeDisposition === 'stale' || record.probeDisposition === 'invalid' ? ` · ${t('admin.connectionHealth.testConfiguration.' + record.probeDisposition)}` : ''}`"
           />
         </div>
         <span class="text-[10px] text-muted-foreground">{{ t(`${cardPrefix}.now`) }}</span>

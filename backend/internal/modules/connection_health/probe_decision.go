@@ -50,6 +50,12 @@ func calculateEffectiveProbeDecisionWithBudgets(policies []Policy, schedulable *
 func calculateEffectiveProbeDecisionWithBudgetAndReuse(policies []Policy, schedulable *bool, state *ConnectionHealthState, now time.Time, budgetUsage map[string]int, reuseProbeInterval bool) EffectiveProbeDecision {
 	decision := EffectiveProbeDecision{SourcePolicies: make([]EffectiveProbePolicySource, 0, len(policies))}
 	candidates := make([]effectiveProbeCandidate, 0, len(policies))
+	var judgment Policy
+	for index, policy := range policies {
+		if index == 0 || preferProbePolicy(policy, judgment) {
+			judgment = policy
+		}
+	}
 	for _, policy := range policies {
 		continueAutoProbe, intervalSeconds := policyProbeCadence(policy, schedulable)
 		decision.SourcePolicies = append(decision.SourcePolicies, EffectiveProbePolicySource{
@@ -58,7 +64,15 @@ func calculateEffectiveProbeDecisionWithBudgetAndReuse(policies []Policy, schedu
 		})
 		if continueAutoProbe {
 			candidate := effectiveProbeCandidate{policy: policy, intervalSec: intervalSeconds, continueProbing: true}
-			candidate.nextProbeAt, candidate.blockedReason = policyNextProbeAtForDecision(state, intervalSeconds, now, reuseProbeInterval)
+			candidate.nextProbeAt, candidate.blockedReason = policyNextProbeAtForRule(state, defaultInt(policy.ProbeIntervalSeconds, 60), judgment, now, reuseProbeInterval)
+			if schedulable != nil && !*schedulable {
+				if last := lastProbeAttemptAt(state); last != nil {
+					floor := last.Add(time.Duration(intervalSeconds) * time.Second)
+					if floor.After(candidate.nextProbeAt) {
+						candidate.nextProbeAt, candidate.blockedReason = floor, ProbeBlockedInterval
+					}
+				}
+			}
 			if budgetUsage != nil && budgetUsage[policy.ID] >= probeBudgetLimit(policy) {
 				budgetReset := probeBudgetDayStart(now).Add(24 * time.Hour).UTC()
 				if budgetReset.After(candidate.nextProbeAt) {
@@ -150,4 +164,75 @@ func policyNextProbeAtForDecision(state *ConnectionHealthState, intervalSeconds 
 		blockedReason = ProbeBlockedCooldown
 	}
 	return next.UTC(), blockedReason
+}
+
+func lastProbeAttemptAt(state *ConnectionHealthState) *time.Time {
+	if state == nil {
+		return nil
+	}
+	last := state.LastProbeAt
+	if _, at := currentCredentialFailure(*state); at != nil && (last == nil || at.After(*last)) {
+		last = at
+	}
+	return last
+}
+
+// Read-side scheduling must not borrow a failure origin from another protocol.
+// Keep durable state intact; the eventual result commit performs the reset.
+func probeDecisionStateForProtocol(state *ConnectionHealthState, protocol TestProtocol) *ConnectionHealthState {
+	if state == nil || !validTestProtocol(protocol) {
+		return state
+	}
+	counterProtocol := TestProtocolChatCompletions
+	if state.CounterProtocol != nil {
+		counterProtocol = *state.CounterProtocol
+	}
+	if counterProtocol == protocol {
+		return state
+	}
+	current := *state
+	current.FailingSince = nil
+	current.ConsecutiveFailures, current.ConsecutiveSuccesses = 0, 0
+	return &current
+}
+
+func policyNextProbeAtForRule(state *ConnectionHealthState, intervalSeconds int, judgment Policy, now time.Time, reuseProbeInterval bool) (time.Time, string) {
+	if judgment.RuleVersion != RuleVersionV2 {
+		next, reason := policyNextProbeAtForDecision(state, intervalSeconds, now, reuseProbeInterval)
+		return applyLongFailureCadence(state, judgment, now, next, reason)
+	}
+	next, reason := now, ""
+	last := lastProbeAttemptAt(state)
+	if state != nil && state.State == StateSuspect && state.RecheckPending {
+		next, reason = now, ""
+	} else if last != nil {
+		interval := time.Duration(intervalSeconds) * time.Second
+		reason = ProbeBlockedInterval
+		if state.State == StateSuspended {
+			if state.CooldownUntil != nil && state.CooldownUntil.After(*last) {
+				next, reason = *state.CooldownUntil, ProbeBlockedCooldown
+				return applyLongFailureCadence(state, judgment, now, next, reason)
+			}
+			if state.ConsecutiveSuccesses == 0 {
+				interval = time.Duration(RulePresetForPolicy(judgment).FailedRetryIntervalSeconds) * time.Second
+				reason = ProbeBlockedFailureBackoff
+			}
+		}
+		if reuseProbeInterval || state.State == StateSuspended {
+			next = last.Add(interval)
+		}
+	}
+	return applyLongFailureCadence(state, judgment, now, next, reason)
+}
+
+func applyLongFailureCadence(state *ConnectionHealthState, judgment Policy, now, next time.Time, reason string) (time.Time, string) {
+	if state != nil && stateHasLongFailure(*state, judgment, now) {
+		if last := lastProbeAttemptAt(state); last != nil {
+			floor := last.Add(time.Duration(RulePresetForPolicy(judgment).LongFailureIntervalSeconds) * time.Second)
+			if floor.After(next) {
+				return floor.UTC(), ProbeBlockedFailureBackoff
+			}
+		}
+	}
+	return next.UTC(), reason
 }

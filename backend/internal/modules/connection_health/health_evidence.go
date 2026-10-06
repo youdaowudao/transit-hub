@@ -104,6 +104,10 @@ func applyCurrentHealthProjection(model *ModelHealth, state ConnectionHealthStat
 		}
 	}
 	model.LastSuccessLatencyMs = successLatencyForProtocol(state, configuration.Protocol)
+	model.FirstTokenMs, model.FirstEventMs = nil, nil
+	if model.LastSuccessLatencyMs != nil {
+		model.FirstTokenMs, model.FirstEventMs = state.LastFirstTokenMs, state.LastFirstEventMs
+	}
 }
 
 func applyLatestAttemptDetails(models []ModelHealth, events []ConnectionHealthEvent, targetID string) {

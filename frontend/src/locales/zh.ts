@@ -987,7 +987,7 @@ export default {
         save: '保存测试请求', clear: '清除本组配置', saved: '已保存，影响范围按上述服务端结果显示。',
         inherited: '使用分组配置', default: '旧默认', conflict: '配置冲突', unavailable: '成员资料或配置无法确认',
         changed: '配置已变化，此结果使用请求开始时的配置。', unverified: '当前协议健康依据待验证', legacy: '旧记录未记录协议', stale: '过期尝试', invalid: '本次测试结果无效',
-        unverifiedHelp: '请求在超时前成功返回，也可能尚未达到健康恢复条件。超过 5 秒仍属于慢响应；暂停或观察中的账号需要正常成功并满足原恢复条件。',
+        unverifiedHelp: '请求成功返回后仍需按当前工作区规则和所选预设判断恢复条件。新规则下首字超过协议延迟线仍算成功；旧规则下慢响应沿用原恢复条件。',
         requestPhases: { waiting_headers: '截止阶段：等待响应头', reading_body: '截止阶段：读取完整响应正文' },
         questionAnswerTimeout: '上述超时用于轻量探活；问答每题仍为 10 分钟。',
       },
@@ -1024,6 +1024,7 @@ export default {
         },
         healthBands: {
           healthy: '健康',
+        suspect: '疑似',
           recovering: '恢复中',
           degraded: '降级/观察',
         },
@@ -1295,7 +1296,7 @@ export default {
         priorityConflict: '检测到 {count} 个上游优先级被人工修改。为避免覆盖人工设置，系统已停止管理这些目标的优先级。重新保存分组策略后可重新接管。',
         priorityConflictShort: '上游优先级已被人工修改，系统已停止自动覆盖',
         priorityConflictTarget: '{target}：当前 {current}，期望 {expected}，发现于 {time}',
-        productionSortHint: '默认按生产调度顺序展示：健康档位优先、有效倍率其次、同倍率再比较最近成功延迟。点击列头只改变当前表格，不会写回主站 priority。',
+        productionSortHint: '默认按生产调度顺序展示：健康档位优先、有效倍率其次。新规则下同档同倍率的 Priority 相同；旧规则保留原有延迟排序。点击列头只改变当前表格，不会写回主站 Priority。',
         temporarySortHint: '当前是临时查看排序，不会改变主站 priority；重新进入分组后恢复生产调度顺序。',
         slowResponse: '高延迟成功',
         empty: '该分组当前没有账号或渠道。',
@@ -1309,6 +1310,7 @@ export default {
           title: '当前分组探活状态',
           hint: '健康状态和待首次探活按模型统计；未配置模型和不可探活按账号/渠道统计，不代表上游原始启停状态。',
           healthy: '健康模型',
+          suspect: '疑似模型',
           degraded: '降级模型',
           suspended: '探活暂停',
           observing: '恢复观察',
@@ -1481,7 +1483,7 @@ export default {
           notConfigured: '未配置',
           enabled: '已启用',
           disabled: '未启用',
-          multiplierRule: '健康探活排序：健康档位第一，账号唯一可靠的上游 Key 倍率第二；确定性缺失或多 Key 冲突时使用目标唯一一致的本地回退倍率；同倍率再比较完整响应延迟。>5000 ms 且在当前配置超时内完成属于高延迟成功；超过当前配置超时按失败处理。主站 schedulable=false 时自动探活默认降为 60 分钟一次。一次性测试不留记录，正式手动探活进入共同状态和调度。',
+          multiplierRule: '健康探活排序：健康档位第一，账号唯一可靠的上游 Key 倍率第二；确定性缺失或多 Key 冲突时使用目标唯一一致的本地回退倍率。新规则下同档同倍率的 Priority 相同，延迟仍算成功；旧规则保留延迟排序。探活须在当前配置超时内完整结束。主站 schedulable=false 时自动探活默认降为 60 分钟一次。一次性测试不留记录，正式手动探活进入共同状态和调度。',
           multiplierOnlyRule: '仅倍率规则：不读取健康状态、不发起模型探活；同一目标属于多个分组时使用最低倍率。停用或解绑策略后会恢复接管前的优先级，人工修改仍受冲突保护。'
         },
         back: '上一步',
@@ -1529,6 +1531,7 @@ export default {
       },
       stateLabels: {
         healthy: '健康',
+        suspect: '疑似',
         degraded: '降级',
         suspended: '探活暂停',
         observing: '观察中',
@@ -1606,7 +1609,8 @@ export default {
       },
       errorKeys: {
         ok: '正常',
-        slow_response: '高延迟成功',
+        slow_response: '慢响应',
+        delayed: '延迟',
         network_fluctuation: '网络波动',
         rate_limited: '触发限流',
         server_error: '上游服务异常',
@@ -1645,7 +1649,7 @@ export default {
         card: {
           latencyLabel: '对话延迟',
           availabilityLabel: '可用率',
-          slowResponseCount: '其中 {count} 次为高延迟成功',
+          slowResponseCount: '其中 {count} 次为慢响应',
           recentRecordsLabel: '近 60 次记录',
           past: 'PAST',
           now: 'NOW',
@@ -1777,7 +1781,7 @@ export default {
         observationLabel: '观察时间（秒）',
         recoveryStepLabel: '恢复步进百分比',
         autoDegradeLabel: '自动降级',
-        autoDegradeHelp: '探活失败达到阈值时自动降低本地权重或暂停链路；完整响应超过 5000 ms 但未超过 10 秒时记为 slow_response，并按高延迟状态处理。',
+        autoDegradeHelp: '按工作区判定规则与所选预设处理探活结果。新规则下延迟仍算成功；关闭自动降级时只记录探活结果。',
         autoRemoteActionLabel: '自动远端动作',
         autoRemoteActionHelp: 'NewAPI 会修改 channel 权重/状态，Sub2API 会切换 admin 账号 active/inactive。关闭后只记录健康结果，不调用上游。',
         priorityModeLabel: '上游流量优先级',
@@ -1785,7 +1789,7 @@ export default {
           none: '保持上游设置',
           multiplier: '按分组倍率排序'
         },
-        priorityModeHelp: '健康探活模式按“健康档位、有效倍率、完整成功延迟、稳定目标 ID”排序；仅倍率模式仍只按主站分组倍率。一次性测试不影响排序，正式手动探活会在既有托管条件成立时刷新排序。',
+        priorityModeHelp: '健康探活模式按健康档位和有效倍率排序；新规则下同档同倍率的 Priority 相同，旧规则保留原有延迟排序；仅倍率模式仍只按主站分组倍率。一次性测试不影响排序，正式手动探活会在既有托管条件成立时刷新排序。',
         multiplierOnlySummaryTitle: '倍率越低，优先级越高',
         multiplierOnlySummary: '系统约每 30 秒读取最新分组倍率并同步上游优先级，不解析探活凭据、不请求模型、不消耗探活预算，也不执行自动降级或远端动作。检测到人工修改时会停止覆盖。',
         providerLabel: '模型 Provider',
@@ -1797,7 +1801,7 @@ export default {
           ownGroup: '用于描述这条策略面向的业务分组范围。当前分组健康的独立探活按显式分配关系启用策略，并使用该策略的启用模型目标组成模型池；如果目标自带模型列表，则取"目标模型 ∩ 策略模型池"，否则使用策略模型池。',
           modelTargets: '这里配置该策略要探活的模型列表，自动调度和手动探活都会按这些模型逐一执行探活请求。',
           provider: '一个探活策略只能选择一个 provider（openai / anthropic / gemini / custom），下方新增的所有模型探活目标都会自动使用这个 provider，避免同一策略内混用不同厂商的模型。',
-          probeInterval: '自动调度会按"上次探活时间 + 该间隔"判断是否到期；连续探活失败时后端还会额外叠加 2/5/10 分钟的递增退避。',
+          probeInterval: '正常探活按上次探活时间加此间隔判断是否到期；疑似立即复测、冷却、关停后和长期失败的节奏由工作区规则和判定预设决定。旧规则保留失败退避。',
           dailyBudget: '限制当前 workspace 每天最多执行多少次真实探活请求；预算耗尽后会跳过真实探活请求，避免消耗过高，不代表系统异常。',
           failureThreshold: '连续软失败达到该次数后会暂停/降级对应链路；某些硬失败（如鉴权失败）可能不经过降级直接暂停。',
           successThreshold: '观察期内连续探活成功达到该次数后，才会判定链路真正恢复并回到健康状态。',
@@ -1806,7 +1810,7 @@ export default {
           recoveryStep: '恢复过程中每次探活成功会按该百分比逐步提高本地权重，不是一次性恢复到 100%。',
           autoDegrade: '开启后，探活结果会推进链路的健康状态机并调整本地转发权重；关闭后只记录探活结果，不会自动改变状态或权重。',
           autoRemoteAction: '开启后，状态机触发降级/恢复时会执行受支持的上游动作：Sub2API 切换 admin 账号 active/inactive，NewAPI 调整 channel 权重/状态。关闭后只记录探活和状态结果。',
-          priorityMode: '健康探活模式先看健康档位，再使用唯一可靠的上游 Key 倍率；确定性缺失或多 Key 冲突时使用分组配置的本地回退倍率，同倍率再按最近成功延迟排序。上游查询暂不可用时保持上次排序。仅倍率模式始终只使用主站分组倍率。'
+          priorityMode: '健康探活模式先看健康档位，再使用唯一可靠的上游 Key 倍率；确定性缺失或多 Key 冲突时使用分组配置的本地回退倍率，新规则下同档同倍率的 Priority 相同，旧规则保留延迟排序。上游查询暂不可用时保持上次排序。仅倍率模式始终只使用主站分组倍率。'
         },
         runFlow: {
           buttonLabel: '运行流程',
@@ -1824,11 +1828,11 @@ export default {
             },
             schedulerCadence: {
               title: '3. 自动调度规则',
-              description: '后端大约每 30 秒扫描一次当前 workspace 的探活任务。生产 priority 先按健康档位，再按账号唯一可靠的上游 Key 倍率；确定性缺失或多 Key 冲突时使用本地回退倍率，同倍率再按最近成功延迟，最后用稳定目标 ID。上游查询暂不可用时保持上次排序。multiplier_only 仍只按主站分组倍率。'
+              description: '后端大约每 30 秒扫描一次当前 workspace 的探活任务。生产 priority 先按健康档位，再按账号唯一可靠的上游 Key 倍率；确定性缺失或多 Key 冲突时使用本地回退倍率，新规则下同档同倍率的 Priority 相同，旧规则保留最近成功延迟排序。上游查询暂不可用时保持上次排序。multiplier_only 仍只按主站分组倍率。'
             },
             dueCheck: {
               title: '4. 到期判断',
-              description: '从未探活过的（目标，模型）组合会被尽快安排一次探活；已经探活过的组合，则按"上次探活时间 + 策略配置的探活间隔"计算下一次到期时间，到期后才会被重新排入探活队列。连续探活失败时，调度器还会引入 2 分钟 / 5 分钟 / 10 分钟的递增退避，避免对持续异常的目标频繁重试。'
+              description: '后端每 30 秒检查到期任务。新规则下第一次失败标为疑似，下一轮优先复测一次；正常、疑似和降档按正常间隔，关停后按预设的冷却与失败间隔。达到长期失败时长的账号按长期失败间隔。主站调度开关关闭的账号还需满足策略的关闭调度间隔。旧规则保留失败退避。'
             },
             budget: {
               title: '5. 预算规则',
@@ -1836,11 +1840,11 @@ export default {
             },
             stateTransition: {
               title: '6. 状态变化',
-              description: '合法响应在 5000 ms 内按正常成功处理。>5000 ms 且在 10 秒超时前完成时记为 slow_response：不增加失败次数、不单独停用；开启自动降级时进入高延迟 degraded，关闭时只记录和提示。10 秒超时仍按原有软失败处理。'
+              description: '判定数字只来自策略选用的预设。新规则下成功与延迟都算成功；第一次计入失败后进入疑似，之后降档，达到预设失败次数后关停。疑似或降档下一次成功立即恢复正常。旧规则沿用原有状态变化，慢线按预设的协议延迟线。'
             },
             cooldownObservation: {
               title: '7. 冷却和观察',
-              description: '目标/模型被暂停后会进入策略配置的冷却时间，冷却结束前调度器不会对其发起自动探活。冷却结束、或管理员手动点击"恢复"之后会进入观察阶段：这段时间内的连续探活结果用于判断目标是否真的恢复稳定，只有连续成功次数达到"恢复成功阈值"才会真正回到健康状态。'
+              description: '关停后先等待预设的冷却时间。新规则下冷却后连续成功达到预设次数就直接恢复正常；延迟也算成功，中间任何失败会清空累计成功。旧规则和兼容人工恢复入口保留观察与逐步恢复。'
             },
             autoDegradeVsRemoteAction: {
               title: '8. 自动降级和自动远端动作的区别',
@@ -1887,7 +1891,7 @@ export default {
           questionAnswer: '问答测试'
         },
         modeDescriptions: {
-          formal: '进入共同记录和健康调度，会更新健康状态与 manual 事件；完整响应超过 5000 ms 且在当前配置超时内完成记为高延迟成功，超过配置超时按失败处理。仅在既有托管条件成立时更新主站 priority，不消耗自动预算，不修改 schedulable；schedulable=false 时自动探活默认降为 60 分钟一次。',
+          formal: '进入共同记录和健康调度，会更新健康状态与 manual 事件；Chat 与 Responses 记录首字和整段耗时，按工作区规则与所选预设判定，新规则下延迟仍算成功。仅在既有托管条件成立时更新主站 priority，不消耗自动预算，不修改 schedulable；schedulable=false 时自动探活默认降为 60 分钟一次。',
           once: '只显示本次结果，不写事件、健康状态、priority、策略预算或远端动作。',
           questionAnswer: '向所选模型分别发送预设问题并保存回答。每个模型和问题组合独立执行，不形成多轮对话，不修改健康状态或调度。'
         },
@@ -2052,6 +2056,10 @@ export default {
       errors: {
         request: '操作失败，请稍后重试。',
         unknown: '暂时无法读取分组健康数据，请稍后重试。',
+        presetReadOnly: '此预设只读，请复制后修改。',
+        presetInUse: '此预设正被策略引用，不能删除。',
+        presetBuiltIn: '内置预设不能删除。',
+        settingsConflict: '同时探活数已被其他操作修改，请重新读取后重试。',
         testConfigurationConflict: '所属分组的测试协议或超时冲突，请在分组设置中统一配置。',
         testConfigurationUnavailable: '成员资料或测试配置无法确认，暂不能发起新测试。',
         currentProtocolUnverified: '当前协议尚未满足健康判定条件，历史状态暂不用于新的健康动作。',

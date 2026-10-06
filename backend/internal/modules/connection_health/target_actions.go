@@ -669,6 +669,10 @@ func (s *Service) restoreUnmanagedTargetActions(
 	groupPolicies := assignedEnabledPoliciesByGroup(policies, groupAssignments)
 	excluded := groupTargetExclusionIndex(exclusions)
 	for _, stored := range states {
+		captured, captureErr := s.capturedWorkspaceRules(ctx, stored.UserID, stored.AdminAccountID, policies)
+		if captureErr != nil {
+			continue
+		}
 		if isSub2APIActionTarget(stored.TargetID) {
 			pair, err := s.reconcileActionObservation(ctx, RemoteActionObservation{RemoteActionScope: RemoteActionScope{stored.UserID, stored.AdminAccountID, stored.TargetID}})
 			if err != nil || pair.Target == nil {
@@ -779,7 +783,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 		stored.PendingStatus = stored.OriginalStatus
 		stored.PendingWeight = cloneIntPointer(stored.OriginalWeight)
 		if inventory.session.Platform == upstream.PlatformSub2API {
-			action, actionErr := s.dispatchSafeTargetAction(ctx, inventory.session, target, stored, RemoteActionHealthGuard{})
+			action, actionErr := s.dispatchSafeTargetAction(ctx, inventory.session, target, stored, RemoteActionHealthGuard{ConfigGeneration: &captured.ConfigGeneration})
 			if actionErr != nil {
 				log.Printf("[connection-health] restore unmanaged target deferred target_id=%s err=%v", stored.TargetID, actionErr)
 				continue
@@ -837,6 +841,10 @@ func (s *Service) restoreEmptySub2APIGroups(ctx context.Context, states []Target
 
 	for _, workspaceKey := range workspaceOrder {
 		ws := workspaces[workspaceKey]
+		captured, captureErr := s.capturedWorkspaceRules(ctx, ws.userID, ws.adminAccountID, nil)
+		if captureErr != nil {
+			continue
+		}
 		inventory, err := s.loadAdminInventory(ctx, ws.userID, ws.adminAccountID, inventoryCache)
 		if err != nil {
 			log.Printf("[connection-health] restore empty group inventory failed user_id=%s admin_account_id=%s err=%v", ws.userID, ws.adminAccountID, err)
@@ -955,7 +963,7 @@ func (s *Service) restoreEmptySub2APIGroups(ctx context.Context, states []Target
 
 			chosen.state.PendingStatus = chosen.state.OriginalStatus
 			chosen.state.PendingWeight = cloneIntPointer(chosen.state.OriginalWeight)
-			action, actionErr := s.dispatchSafeTargetAction(ctx, inventory.session, chosen.target, chosen.state, RemoteActionHealthGuard{})
+			action, actionErr := s.dispatchSafeTargetAction(ctx, inventory.session, chosen.target, chosen.state, RemoteActionHealthGuard{ConfigGeneration: &captured.ConfigGeneration})
 			if actionErr != nil {
 				log.Printf("[connection-health] restore empty group target deferred target_id=%s err=%v", chosen.target.TargetID, actionErr)
 				continue
@@ -1018,13 +1026,13 @@ func aggregateTargetStates(states []ConnectionHealthState) (allHealthy bool, blo
 	allHealthy = true
 	minWeight = 100
 	for _, state := range states {
-		if state.State != StateHealthy {
+		if state.State != StateHealthy && !(state.RuleVersion == RuleVersionV2 && state.State == StateSuspect) {
 			allHealthy = false
 		}
 		if state.CurrentWeight < minWeight {
 			minWeight = state.CurrentWeight
 		}
-		if state.State == StateSuspended || state.State == StateObserving || state.State == StateDisabled || state.CurrentWeight <= 0 {
+		if state.State == StateSuspended || state.State == StateDisabled || (state.RuleVersion != RuleVersionV2 && (state.State == StateObserving || state.CurrentWeight <= 0)) {
 			blocked = true
 		}
 	}

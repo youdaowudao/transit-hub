@@ -43,6 +43,8 @@ const (
 // AdminProbeTarget 是平台中性的独立探活目标：一个 admin 分组下的账号(sub2api)/渠道(new-api)。
 // 不再要求存在 real_connections。TargetID 稳定且可复算，是新状态/事件的核心键。
 type AdminProbeTarget struct {
+	ConfigGeneration        int64                      `json:"-"`
+	ConfigGenerationKnown   bool                       `json:"-"`
 	TestConfiguration       EffectiveTestConfiguration `json:"testConfiguration"`
 	TestMemberships         []TestConfigurationSource  `json:"-"`
 	InventoryComplete       bool                       `json:"-"`
@@ -70,6 +72,7 @@ type AdminProbeTarget struct {
 
 // probeModelSpec 是一个「目标 + 具体探活模型」的组合，携带该模型来自哪条策略的探活参数。
 type probeModelSpec struct {
+	recheckPending bool
 	modelName      string
 	providerFamily string
 	maxProbeTokens int
@@ -206,12 +209,14 @@ func candidateModelSpecsForPlatform(targetModels []string, policies []Policy, pl
 		return specs
 	}
 	for index := range specs {
+		specs[index].policy.RuleVersion = RuleVersionLegacy
 		specs[index].policies = []Policy{specs[index].policy}
 	}
 	return specs
 }
 
 func preferProbePolicy(candidate Policy, current Policy) bool {
+	candidate, current = effectivePolicyFromPreset(candidate), effectivePolicyFromPreset(current)
 	if policyRemoteActionEnabled(candidate) != policyRemoteActionEnabled(current) {
 		return !policyRemoteActionEnabled(candidate)
 	}
@@ -370,6 +375,9 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 	if err != nil {
 		return nil, err
 	}
+	if err := s.loadWorkspaceProbeCap(ctx, userID, adminAccountID); err != nil {
+		return nil, err
+	}
 	workspaceKey := userID + "|" + adminAccountID
 	var notifyQueued func()
 	if onPhase != nil {
@@ -413,6 +421,10 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 	allSpecs, _, policyOK := s.currentScheduledProbeSpecs(ctx, userID, adminAccountID, target, memberships, nil)
 	if !policyOK {
 		return nil, requestError(ErrorUnknown)
+	}
+	if len(allSpecs) > 0 {
+		target.ConfigGeneration = allSpecs[0].policy.ConfigGeneration
+		target.ConfigGenerationKnown = allSpecs[0].policy.RuleVersion != ""
 	}
 	specs := allSpecs
 
@@ -485,6 +497,8 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 	}
 	for _, result := range probeResults {
 		modelHealth := toModelHealth(result.spec.modelName, *result.state)
+		modelHealth.RequestFirstTokenMs = result.outcome.FirstTokenMs
+		modelHealth.RequestFirstEventMs = result.outcome.FirstEventMs
 		if target.Platform == string(upstream.PlatformSub2API) {
 			configuration := result.configuration
 			if configuration.Status == "" {
@@ -689,7 +703,7 @@ func (s *Service) probeTargetOnce(ctx context.Context, userID string, adminAccou
 		}
 	}
 
-	outcome := s.executeTargetProbe(ctx, target, cred, spec)
+	outcome := probeOutcomeWithAuditMetadata(applyOutcomeDelay(s.executeTargetProbe(ctx, target, cred, spec), spec.policy))
 
 	now := time.Now()
 	if target.Platform == string(upstream.PlatformSub2API) {
@@ -702,7 +716,7 @@ func (s *Service) probeTargetOnce(ctx context.Context, userID string, adminAccou
 		if consumeBudget {
 			source = EventSourceScheduled
 		}
-		committed, err := s.repo.CommitTargetProbe(ctx, TargetProbeCommit{UserID: userID, AdminAccountID: adminAccountID, Target: target, ModelName: spec.modelName, Policy: spec.policy, Outcome: outcome, DecisionKey: probeDecisionKey(target, spec), Now: now, Event: ConnectionHealthEvent{ID: id, ConnectionID: target.TargetID, ModelName: spec.modelName, UserID: userID, AdminAccountID: adminAccountID, PolicyID: spec.effectiveBudgetPolicy().ID, AdminGroupID: eventTarget.AdminGroupID, OwnGroupName: eventTarget.AdminGroupName, Source: source}})
+		committed, err := s.repo.CommitTargetProbe(ctx, TargetProbeCommit{ConfigGeneration: spec.policy.ConfigGeneration, UserID: userID, AdminAccountID: adminAccountID, Target: target, ModelName: spec.modelName, Policy: spec.policy, Outcome: outcome, DecisionKey: probeDecisionKey(target, spec), Now: now, Event: ConnectionHealthEvent{ID: id, ConnectionID: target.TargetID, ModelName: spec.modelName, UserID: userID, AdminAccountID: adminAccountID, PolicyID: spec.effectiveBudgetPolicy().ID, AdminGroupID: eventTarget.AdminGroupID, OwnGroupName: eventTarget.AdminGroupName, Source: source}})
 		if err != nil {
 			return nil, err
 		}
@@ -772,6 +786,28 @@ func (s *Service) finishTargetProbeBatchWithFloor(
 		return nil
 	}
 	if target.Platform == string(upstream.PlatformSub2API) {
+		// Reconcile the whole completed batch against its captured configuration in
+		// one short workspace transaction. HTTP admission still rechecks at Claim
+		// and Permit after this transaction has released its lock.
+		if repository, ok := s.repo.(interface {
+			ValidateTargetProbeBatch(context.Context, string, string, string, []string, int64) (bool, error)
+		}); ok {
+			models := make([]string, 0, len(specs))
+			for _, spec := range specs {
+				models = append(models, spec.modelName)
+			}
+			generation := target.ConfigGeneration
+			if !target.ConfigGenerationKnown && len(specs) > 0 {
+				generation = specs[0].policy.ConfigGeneration
+			}
+			valid, err := repository.ValidateTargetProbeBatch(ctx, userID, adminAccountID, target.TargetID, models, generation)
+			if err != nil {
+				return err
+			}
+			if !valid {
+				return nil
+			}
+		}
 		applied := []targetProbeResult{}
 		for _, result := range results {
 			if result.disposition == "applied" {
@@ -908,9 +944,14 @@ func defaultTargetState(userID string, adminAccountID string, target AdminProbeT
 	}
 }
 
+type targetProbeEventMetadata struct {
+	RuleVersion string
+	LongFailure bool
+}
+
 // recordTargetEvent 写入一条独立探活事件（connection_id 列存 targetId）。error_detail 已在
 // probe_runner 里脱敏，绝不含明文 key。
-func (s *Service) recordTargetEvent(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, policyID string, modelName string, result string, fromState string, toState string, latencyMs *int, errorKey string, errorDetail string, remoteAction string, source string) error {
+func (s *Service) recordTargetEvent(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, policyID string, modelName string, result string, fromState string, toState string, latencyMs *int, errorKey string, errorDetail string, remoteAction string, source string, metadata ...targetProbeEventMetadata) error {
 	id, err := newID()
 	if err != nil {
 		return err
@@ -925,6 +966,11 @@ func (s *Service) recordTargetEvent(ctx context.Context, userID string, adminAcc
 		OwnGroupName: target.AdminGroupName, UpstreamSiteID: "", UpstreamGroupName: target.AdminGroupName, Result: result,
 		FromState: fromState, ToState: toState, LatencyMs: latencyMs, ErrorKey: errorKey, ErrorDetail: errorDetail,
 		RemoteAction: remoteAction, ActionSource: actionSource, Source: source,
+	}
+	if len(metadata) > 0 {
+		event.RuleVersion = metadata[0].RuleVersion
+		longFailure := metadata[0].LongFailure
+		event.LongFailure = &longFailure
 	}
 	return s.repo.InsertEvent(ctx, event)
 }

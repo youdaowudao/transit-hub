@@ -25,6 +25,7 @@ const (
 // RegisterRoutes 注册链路健康探活模块的全部路由。响应体一律不含 upstream_key。
 func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	handler := &Handler{service: service}
+	registerRuleRoutes(mux, handler)
 	mux.HandleFunc("GET /api/connection-health/admin-groups/{id}/test-configuration", handler.getAdminGroupTestConfiguration)
 	mux.HandleFunc("PUT /api/connection-health/admin-groups/{id}/test-configuration", handler.putAdminGroupTestConfiguration)
 	mux.HandleFunc("GET /api/connection-health/overview", handler.overview)
@@ -936,6 +937,9 @@ func writeError(w http.ResponseWriter, err error) {
 		status := http.StatusBadRequest
 		if requestErr == requestError(ErrorNotFound) || requestErr == requestError(ErrorTestQuestionNotFound) || requestErr == requestError(ErrorQuestionAnswerBatchNotFound) {
 			status = http.StatusNotFound
+		}
+		if requestErr == requestError(ErrorPresetReadOnly) || requestErr == requestError(ErrorPresetInUse) || requestErr == requestError(ErrorPresetBuiltIn) || requestErr == requestError(ErrorSettingsConflict) {
+			status = http.StatusConflict
 		}
 		if requestErr == requestError(ErrorNoCurrentAccount) || requestErr == requestError(ErrorQuestionAnswerActive) || requestErr == requestError(ErrorQuestionAnswerServiceStopped) {
 			status = http.StatusConflict

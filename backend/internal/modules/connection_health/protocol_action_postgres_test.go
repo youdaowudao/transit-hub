@@ -310,13 +310,12 @@ func TestProtocolPostgresConfigurationAndClaimRespectWorkspaceOrder(t *testing.T
 				t.Fatalf("earlier claim denied: %v %v", ok, err)
 			}
 			save()
-			// An admitted action retains its own snapshot. Saving configuration
-			// does not cancel or duplicate an already claimed dispatch.
-			if ok, err := r.PermitRemoteAction(ctx, claim); err != nil || !ok {
-				t.Fatalf("save discarded admitted action: %v %v", ok, err)
+			// Claim admission precedes the save, but final sending permission must recheck configuration.
+			if ok, err := r.PermitRemoteAction(ctx, claim); ok || !errors.Is(err, ErrRemoteActionEvidenceChanged) {
+				t.Fatalf("configuration change reached final sending permit: %v %v", ok, err)
 			}
 			if ok, _ := r.PermitRemoteAction(ctx, claim); ok {
-				t.Fatal("same admitted action permitted twice")
+				t.Fatal("stale admitted action obtained sending permit")
 			}
 		})
 	}

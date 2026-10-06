@@ -42,6 +42,7 @@ type priorityTargetInventory struct {
 }
 
 type healthPriorityCandidate struct {
+	ruleVersion    string
 	targetID       string
 	item           *priorityTargetInventory
 	multiplier     float64
@@ -112,6 +113,11 @@ func (s *Service) syncCurrentWorkspacePrioritiesWithResult(ctx context.Context, 
 }
 
 func (s *Service) syncCurrentWorkspacePrioritiesLockedWithResult(ctx context.Context, userID string, adminAccountID string, pendingSignature string) error {
+	var err error
+	ctx, err = s.captureWorkspaceRules(ctx, userID, adminAccountID)
+	if err != nil {
+		return err
+	}
 	policies, err := s.repo.ListPolicies(ctx, userID, adminAccountID)
 	if err != nil {
 		return err
@@ -308,6 +314,15 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 				log.Printf("[connection-health] priority sync inventory failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 				failGeneration(err)
 				return
+			}
+			config, err := s.capturedWorkspaceRules(ctx, userID, adminAccountID, policies)
+			if err != nil {
+				failGeneration(err)
+				return
+			}
+			for _, item := range inventory {
+				item.target.ConfigGeneration = config.ConfigGeneration
+				item.target.ConfigGenerationKnown = config.RuleVersion != ""
 			}
 			states, err := s.repo.ListStatesByWorkspace(ctx, userID, adminAccountID)
 			if err != nil {
@@ -573,7 +588,7 @@ func (s *Service) syncWorkspacePriorities(
 		activeModels := activeHealthPriorityModels(item)
 		activeStates := activeHealthPriorityStates(statesByTarget[targetID], activeModels)
 		candidate := healthPriorityCandidate{
-			targetID: targetID, item: item, multiplier: multiplier, states: activeStates,
+			targetID: targetID, item: item, multiplier: multiplier, states: activeStates, ruleVersion: priorityRuleVersionForTarget(item.target.Platform, item.policies, activeStates),
 			expectedModels: len(activeModels), healthBand: priorityHealthBand(activeStates, len(activeModels)),
 			latencyMs: targetSuccessLatency(item.target, activeStates, activeModels),
 		}
@@ -605,13 +620,21 @@ func (s *Service) syncWorkspacePriorities(
 
 	sortHealthPriorityCandidates(healthCandidates)
 	currentBand, bandRank := -1, 0
+	var previousMultiplier float64
+	previousV2 := false
 	for _, candidate := range healthCandidates {
 		if candidate.healthBand != currentBand {
 			currentBand = candidate.healthBand
 			bandRank = 0
+			previousV2 = false
+		} else if candidateUsesV2(candidate) && previousV2 && candidate.multiplier != previousMultiplier {
+			bandRank++
 		}
 		desiredByTarget[candidate.targetID] = desiredHealthPriorityForPlatform(session.Platform, candidate.healthBand, bandRank)
-		bandRank++
+		if !candidateUsesV2(candidate) {
+			bandRank++
+		}
+		previousMultiplier, previousV2 = candidate.multiplier, candidateUsesV2(candidate)
 	}
 
 	for targetID, item := range managed {
@@ -970,6 +993,15 @@ func compareHealthPriorityCandidates(left healthPriorityCandidate, right healthP
 		}
 		return 1
 	}
+	if candidateUsesV2(left) && candidateUsesV2(right) {
+		if left.targetID < right.targetID {
+			return -1
+		}
+		if left.targetID > right.targetID {
+			return 1
+		}
+		return 0
+	}
 	if left.latencyMs == nil || right.latencyMs == nil {
 		if left.latencyMs != nil {
 			return -1
@@ -1178,4 +1210,37 @@ func targetSuccessLatency(target AdminProbeTarget, states []ConnectionHealthStat
 		current[index].LastSuccessLatencyMs = successLatencyForProtocol(current[index], target.TestConfiguration.Protocol)
 	}
 	return completeTargetSuccessLatency(current, activeModels)
+}
+
+func priorityRuleVersion(policies []Policy, states []ConnectionHealthState) string {
+	for _, policy := range policies {
+		if policy.RuleVersion == RuleVersionV2 {
+			return RuleVersionV2
+		}
+	}
+	for _, state := range states {
+		if state.RuleVersion == RuleVersionV2 {
+			return RuleVersionV2
+		}
+	}
+	return RuleVersionLegacy
+}
+func candidateUsesV2(candidate healthPriorityCandidate) bool {
+	if candidate.item != nil && candidate.item.target.Platform == string(upstream.PlatformNewAPI) {
+		return false
+	}
+	if candidate.ruleVersion == RuleVersionV2 {
+		return true
+	}
+	if candidate.item != nil {
+		return priorityRuleVersion(candidate.item.policies, candidate.states) == RuleVersionV2
+	}
+	return priorityRuleVersion(nil, candidate.states) == RuleVersionV2
+}
+
+func priorityRuleVersionForTarget(platform string, policies []Policy, states []ConnectionHealthState) string {
+	if platform == string(upstream.PlatformNewAPI) {
+		return RuleVersionLegacy
+	}
+	return priorityRuleVersion(policies, states)
 }

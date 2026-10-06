@@ -62,6 +62,10 @@ func (s *Service) syncSafePriorityTarget(ctx context.Context, session upstream.S
 		return s.repo.UpsertPrioritySyncState(ctx, *stored)
 	}
 	guard := RemoteActionHealthGuard{ExpectedPriorityGeneration: &generation}
+	if item.target.ConfigGenerationKnown {
+		captured := item.target.ConfigGeneration
+		guard.ConfigGeneration = &captured
+	}
 	if !restore && !hasMultiplierOnlyPolicy(item.policies) {
 		models := activeHealthPriorityModels(item)
 		modelNames := make([]string, 0, len(models))

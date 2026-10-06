@@ -23,6 +23,9 @@ import type {
   TestQuestion,
   TestQuestionInput,
   TargetPolicyAssignments,
+  HealthRulePreset,
+  HealthRulePresetInput,
+  WorkspaceHealthSettings,
 } from '../types/connectionHealth'
 import {
   authUnauthorizedErrorKey,
@@ -82,6 +85,19 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
 
 export const getConnectionHealthOverview = async (): Promise<ConnectionHealthOverview> =>
   requestJson<ConnectionHealthOverview>('/connection-health/overview')
+
+export const listHealthRulePresets = (): Promise<HealthRulePreset[]> => requestJson('/connection-health/rule-presets')
+export const saveHealthRulePreset = (input: HealthRulePresetInput, id?: string): Promise<HealthRulePreset> =>
+  requestJson(`/connection-health/rule-presets${id ? '/' + encodeURIComponent(id) : ''}`, { method: id ? 'PUT' : 'POST', body: JSON.stringify(input) })
+export const deleteHealthRulePreset = (id: string): Promise<void> =>
+  requestJson(`/connection-health/rule-presets/${encodeURIComponent(id)}`, { method: 'DELETE' })
+export const applyHealthRulePresetToAll = (id: string): Promise<WorkspaceHealthSettings> =>
+  requestJson(`/connection-health/rule-presets/${encodeURIComponent(id)}/apply-all`, { method: 'POST' })
+export const switchWorkspaceHealthRule = (operation: 'restore-legacy' | 'switch-v2'): Promise<WorkspaceHealthSettings> =>
+  requestJson(`/connection-health/rule-version/${operation}`, { method: 'POST' })
+export const getWorkspaceHealthSettings = (): Promise<WorkspaceHealthSettings> => requestJson('/connection-health/workspace-settings')
+export const saveWorkspaceProbeConcurrency = (probeConcurrency: number, probeConcurrencyVersion: number): Promise<WorkspaceHealthSettings> =>
+  requestJson('/connection-health/workspace-settings', { method: 'PUT', body: JSON.stringify({ probeConcurrency, probeConcurrencyVersion }) })
 
 export const getConnectionHealthStoredSummary = async (): Promise<ConnectionHealthStoredSummary> =>
   requestJson<ConnectionHealthStoredSummary>('/connection-health/stored-summary')

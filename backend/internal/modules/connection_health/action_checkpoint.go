@@ -58,6 +58,7 @@ type RemoteActionClaim struct {
 // Only health-driven decisions need protocol evidence. Exiting management and
 // the empty-group safeguard retain their independent, existing conditions.
 type RemoteActionHealthGuard struct {
+	ConfigGeneration           *int64
 	Required                   bool
 	Memberships                []TestConfigurationSource
 	InventoryComplete          bool

@@ -1,0 +1,568 @@
+{
+  "sourceSHA256": "a6864b9a4703a87b1293becd65e6473ee2e71eacfb7209c1b402a3aeec8fdd62",
+  "rows": 16474,
+  "modelProbeRows": 16473,
+  "accounts": 29,
+  "policies": [
+    {
+      "name": "GPT自动化策略",
+      "model": "gpt-5.6-sol",
+      "probeIntervalSeconds": 60,
+      "failureThreshold": 3,
+      "successThreshold": 2,
+      "cooldownSeconds": 300,
+      "observationSeconds": 50,
+      "recoveryStepPercent": 25,
+      "autoDegradeEnabled": true,
+      "autoRemoteActionEnabled": true,
+      "dailyProbeBudget": 1000000,
+      "priorityMode": "multiplier"
+    },
+    {
+      "name": "Anthropic 分组自动化策略",
+      "model": "claude-sonnet-5",
+      "probeIntervalSeconds": 120,
+      "failureThreshold": 3,
+      "successThreshold": 2,
+      "cooldownSeconds": 300,
+      "observationSeconds": 300,
+      "recoveryStepPercent": 25,
+      "autoDegradeEnabled": true,
+      "autoRemoteActionEnabled": true,
+      "dailyProbeBudget": 100000,
+      "priorityMode": "multiplier"
+    },
+    {
+      "name": "luna探测",
+      "model": "gpt-5.6-luna",
+      "probeIntervalSeconds": 60,
+      "failureThreshold": 3,
+      "successThreshold": 2,
+      "cooldownSeconds": 300,
+      "observationSeconds": 300,
+      "recoveryStepPercent": 25,
+      "autoDegradeEnabled": false,
+      "autoRemoteActionEnabled": false,
+      "dailyProbeBudget": 100000,
+      "priorityMode": "none"
+    },
+    {
+      "name": "只监控不调度",
+      "model": "gpt-5.6-sol",
+      "probeIntervalSeconds": 600,
+      "failureThreshold": 3,
+      "successThreshold": 2,
+      "cooldownSeconds": 300,
+      "observationSeconds": 300,
+      "recoveryStepPercent": 25,
+      "autoDegradeEnabled": true,
+      "autoRemoteActionEnabled": false,
+      "dailyProbeBudget": 100000,
+      "priorityMode": "none"
+    }
+  ],
+  "initialStates": {
+    "account-26:gpt-5.6-sol": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "responses"
+    },
+    "account-5:gpt-5.6-sol": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "responses"
+    },
+    "account-10:gpt-5.6-sol": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-25:gpt-5.6-sol": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-29:gpt-5.6-sol": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-3:gpt-5.6-sol": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-24:claude-sonnet-5": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-16:gpt-5.6-sol": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-11:gpt-5.6-sol": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-2:gpt-5.6-sol": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-6:gpt-5.6-sol": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-8:claude-sonnet-5": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-23:claude-sonnet-5": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-22:gpt-5.6-sol": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-15:gpt-5.6-sol": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-14:gpt-5.6-sol": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-9:gpt-5.6-sol": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "responses"
+    },
+    "account-4:gpt-5.6-sol": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-21:gpt-5.6-sol": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-19:gpt-5.6-sol": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-12:gpt-5.6-sol": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-27:gpt-5.6-sol": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "responses"
+    },
+    "account-1:gpt-5.6-sol": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-13:gpt-5.6-sol": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-7:gpt-5.6-sol": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-17:claude-sonnet-5": {
+      "legacyState": "suspended",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-20:gpt-5.6-sol": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "responses"
+    },
+    "account-18:claude-sonnet-5": {
+      "legacyState": "healthy",
+      "legacyWeight": 100,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    },
+    "account-28:*": {
+      "legacyState": "",
+      "legacyWeight": 0,
+      "failures": 0,
+      "successes": 0,
+      "cooldown": null,
+      "observingUntil": null,
+      "healthEvidence": "empty",
+      "counterProtocol": "chat_completions"
+    }
+  },
+  "configurationTimeline": {
+    "account-26:gpt-5.6-sol": [
+      {
+        "protocol": "responses",
+        "timeoutSeconds": 30,
+        "atMs": 1791140434128
+      }
+    ],
+    "account-5:gpt-5.6-sol": [
+      {
+        "protocol": "responses",
+        "timeoutSeconds": 30,
+        "atMs": 1791140434927
+      }
+    ],
+    "account-10:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140437149
+      }
+    ],
+    "account-25:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140439513
+      }
+    ],
+    "account-29:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140440581
+      }
+    ],
+    "account-3:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140441120
+      }
+    ],
+    "account-24:claude-sonnet-5": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140442870
+      }
+    ],
+    "account-16:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140444516
+      }
+    ],
+    "account-11:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140460797
+      }
+    ],
+    "account-2:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140462515
+      }
+    ],
+    "account-6:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140465666
+      }
+    ],
+    "account-8:claude-sonnet-5": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140487531
+      }
+    ],
+    "account-23:claude-sonnet-5": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140531281
+      }
+    ],
+    "account-22:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140549991
+      }
+    ],
+    "account-15:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140614072
+      }
+    ],
+    "account-14:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140614480
+      }
+    ],
+    "account-9:gpt-5.6-sol": [
+      {
+        "protocol": "responses",
+        "timeoutSeconds": 30,
+        "atMs": 1791140637776
+      }
+    ],
+    "account-4:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140670217
+      }
+    ],
+    "account-21:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140700100
+      }
+    ],
+    "account-19:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140757482
+      }
+    ],
+    "account-12:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140817627
+      }
+    ],
+    "account-27:gpt-5.6-sol": [
+      {
+        "protocol": "responses",
+        "timeoutSeconds": 30,
+        "atMs": 1791140847684
+      }
+    ],
+    "account-1:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140907501
+      }
+    ],
+    "account-13:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791140997501
+      }
+    ],
+    "account-7:gpt-5.6-sol": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791141447627
+      }
+    ],
+    "account-17:claude-sonnet-5": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791141627500
+      }
+    ],
+    "account-20:gpt-5.6-sol": [
+      {
+        "protocol": "responses",
+        "timeoutSeconds": 30,
+        "atMs": 1791141689479
+      }
+    ],
+    "account-18:claude-sonnet-5": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791141695736
+      }
+    ],
+    "account-28:*": [
+      {
+        "protocol": "chat_completions",
+        "timeoutSeconds": 10,
+        "atMs": 1791213807836
+      }
+    ]
+  },
+  "assumptions": [
+    "Window starts from the first event from_state. Missing counters, deadlines and evidence initialize to zero/empty.",
+    "Policy values are the approved incident C02/C03 snapshot. The export omits policy IDs and membership; GPT uses the 50s policy except isolated group-5 uses the 300s monitoring policy.",
+    "Historical legacy replay retains exported slow_response classification (historical 5s line). Upgraded legacy Responses 10s behavior has separate tests.",
+    "One wildcard event is an upstream scheduling user action, not a model probe; retain but do not apply to the model state machine.",
+    "v2 oracle independently implements SPEC 3.2/3.5, invalid responses do not count, protocol switches reset counters. No random or invented successful rechecks."
+  ]
+}

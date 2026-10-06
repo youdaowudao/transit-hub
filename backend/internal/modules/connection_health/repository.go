@@ -343,7 +343,10 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			return err
 		}
 	}
-	return r.ensureTestProtocolSchema(ctx)
+	if err := r.ensureTestProtocolSchema(ctx); err != nil {
+		return err
+	}
+	return r.ensureHealthRuleSchema(ctx)
 }
 
 type policyExecutor interface {
@@ -352,13 +355,16 @@ type policyExecutor interface {
 
 // upsertPolicyWithExecutor 让单独保存和组合事务复用完全相同的 upsert 语义。
 func upsertPolicyWithExecutor(ctx context.Context, executor policyExecutor, p Policy) error {
+	if err := preparePolicyPreset(ctx, executor, &p); err != nil {
+		return err
+	}
 	_, err := executor.Exec(ctx, `
 		INSERT INTO connection_health_policies (
 			id, user_id, admin_account_id, name, enabled, own_group_id, own_group_name, model_pattern, probe_mode,
 			probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
 			failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
-			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,now(),now())
+			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, rule_preset_id, legacy_preset_id, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,'',now(),now())
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
 			enabled = EXCLUDED.enabled,
@@ -369,28 +375,38 @@ func upsertPolicyWithExecutor(ctx context.Context, executor policyExecutor, p Po
 			probe_interval_seconds = EXCLUDED.probe_interval_seconds,
 			continue_probe_when_unschedulable = EXCLUDED.continue_probe_when_unschedulable,
 			unschedulable_probe_interval_minutes = EXCLUDED.unschedulable_probe_interval_minutes,
-			failure_threshold = EXCLUDED.failure_threshold,
-			success_threshold = EXCLUDED.success_threshold,
-			cooldown_seconds = EXCLUDED.cooldown_seconds,
-			observation_seconds = EXCLUDED.observation_seconds,
-			recovery_step_percent = EXCLUDED.recovery_step_percent,
 			auto_degrade_enabled = EXCLUDED.auto_degrade_enabled,
 			auto_remote_action_enabled = EXCLUDED.auto_remote_action_enabled,
 			priority_mode = EXCLUDED.priority_mode,
 			strategy_mode = EXCLUDED.strategy_mode,
 			daily_probe_budget = EXCLUDED.daily_probe_budget,
+			rule_preset_id = EXCLUDED.rule_preset_id,
 			updated_at = now()
 	`, p.ID, p.UserID, p.AdminAccountID, p.Name, p.Enabled, p.OwnGroupID, p.OwnGroupName, p.ModelPattern, p.ProbeMode,
 		p.ProbeIntervalSeconds, p.ContinueProbeWhenUnschedulable, defaultInt(p.UnschedulableProbeIntervalMinutes, 60),
-		p.FailureThreshold, p.SuccessThreshold, p.CooldownSeconds, p.ObservationSeconds,
-		p.RecoveryStepPercent, p.AutoDegradeEnabled, p.AutoRemoteActionEnabled, normalizePriorityMode(p.PriorityMode),
-		normalizeStrategyMode(p.StrategyMode), p.DailyProbeBudget)
+		3, 2, 300, 300,
+		25, p.AutoDegradeEnabled, p.AutoRemoteActionEnabled, normalizePriorityMode(p.PriorityMode),
+		normalizeStrategyMode(p.StrategyMode), p.DailyProbeBudget, p.RulePresetID)
 	return err
 }
 
 // UpsertPolicy 保留给模块内旧调用兼容；新的 Service 保存链路使用 SavePolicyWithTargets。
 func (r *Repository) UpsertPolicy(ctx context.Context, p Policy) error {
-	return upsertPolicyWithExecutor(ctx, r.db, p)
+	tx, err := r.beginWorkspaceTransaction(ctx, p.UserID, p.AdminAccountID)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := ensureWorkspaceHealthSettings(ctx, tx, p.UserID, p.AdminAccountID); err != nil {
+		return err
+	}
+	if err := upsertPolicyWithExecutor(ctx, tx, p); err != nil {
+		return err
+	}
+	if err := bumpHealthConfigGenerationTx(ctx, tx, p.UserID, p.AdminAccountID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func replaceModelTargetsTx(ctx context.Context, tx pgx.Tx, policyID string, targets []ModelTarget) error {
@@ -411,12 +427,19 @@ func replaceModelTargetsTx(ctx context.Context, tx pgx.Tx, policyID string, targ
 
 // ReplaceModelTargets 用给定的目标列表整体替换一个策略下的模型目标（先删后插，事务保证一致）。
 func (r *Repository) ReplaceModelTargets(ctx context.Context, policyID string, targets []ModelTarget) error {
-	tx, err := r.db.Begin(ctx)
+	var userID, adminAccountID string
+	if err := r.db.QueryRow(ctx, `SELECT user_id,admin_account_id FROM connection_health_policies WHERE id=$1`, policyID).Scan(&userID, &adminAccountID); err != nil {
+		return err
+	}
+	tx, err := r.beginWorkspaceTransaction(ctx, userID, adminAccountID)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	if err := replaceModelTargetsTx(ctx, tx, policyID, targets); err != nil {
+		return err
+	}
+	if err := bumpHealthConfigGenerationTx(ctx, tx, userID, adminAccountID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -425,15 +448,21 @@ func (r *Repository) ReplaceModelTargets(ctx context.Context, policyID string, t
 // SavePolicyWithTargets 在一个事务中保存策略主体并整体替换模型目标。接口只有在两部分都
 // 成功提交后才返回成功，避免调度器读取到“新策略参数 + 旧模型目标”的半完成配置。
 func (r *Repository) SavePolicyWithTargets(ctx context.Context, policy Policy, targets []ModelTarget) error {
-	tx, err := r.db.Begin(ctx)
+	tx, err := r.beginWorkspaceTransaction(ctx, policy.UserID, policy.AdminAccountID)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := ensureWorkspaceHealthSettings(ctx, tx, policy.UserID, policy.AdminAccountID); err != nil {
+		return err
+	}
 	if err := upsertPolicyWithExecutor(ctx, tx, policy); err != nil {
 		return err
 	}
 	if err := replaceModelTargetsTx(ctx, tx, policy.ID, targets); err != nil {
+		return err
+	}
+	if err := bumpHealthConfigGenerationTx(ctx, tx, policy.UserID, policy.AdminAccountID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -443,11 +472,14 @@ func (r *Repository) SavePolicyWithTargets(ctx context.Context, policy Policy, t
 // 再清理没有外键约束的关联表，避免越权删除或留下仍会被调度器读取的孤立分配记录。
 // connection_health_events 属于历史审计数据，故意不随策略删除。
 func (r *Repository) DeletePolicy(ctx context.Context, id string, userID string, adminAccountID string) (bool, error) {
-	tx, err := r.db.Begin(ctx)
+	tx, err := r.beginWorkspaceTransaction(ctx, userID, adminAccountID)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
+	if err := ensureWorkspaceHealthSettings(ctx, tx, userID, adminAccountID); err != nil {
+		return false, err
+	}
 
 	var ownedID string
 	err = tx.QueryRow(ctx, `
@@ -477,6 +509,9 @@ func (r *Repository) DeletePolicy(ctx context.Context, id string, userID string,
 		DELETE FROM connection_health_policies
 		WHERE id = $1 AND user_id = $2 AND admin_account_id = $3
 	`, id, userID, adminAccountID); err != nil {
+		return false, err
+	}
+	if err := bumpHealthConfigGenerationTx(ctx, tx, userID, adminAccountID); err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -518,11 +553,15 @@ func (r *Repository) ListModelTargets(ctx context.Context, policyID string) ([]M
 }
 
 func (r *Repository) GetPolicy(ctx context.Context, id string, userID string, adminAccountID string) (*Policy, error) {
+	settings, err := r.GetWorkspaceHealthSettings(ctx, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
 	row := r.db.QueryRow(ctx, `
 		SELECT id, user_id, admin_account_id, name, enabled, own_group_id, own_group_name, model_pattern, probe_mode,
 			probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
 			failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
-			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, created_at, updated_at
+			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, rule_preset_id, legacy_preset_id, created_at, updated_at
 		FROM connection_health_policies WHERE id = $1 AND user_id = $2 AND admin_account_id = $3
 	`, id, userID, adminAccountID)
 	p, err := scanPolicy(row)
@@ -537,16 +576,24 @@ func (r *Repository) GetPolicy(ctx context.Context, id string, userID string, ad
 		return nil, err
 	}
 	p.ModelTargets = targets
-	return p, nil
+	items := []Policy{*p}
+	if err := r.attachPolicyRules(ctx, items, map[string]WorkspaceHealthSettings{userID + "\x00" + adminAccountID: settings}); err != nil {
+		return nil, err
+	}
+	return &items[0], nil
 }
 
 // ListPolicies 返回指定 workspace 下的全部策略（含各自的 model targets）。
 func (r *Repository) ListPolicies(ctx context.Context, userID string, adminAccountID string) ([]Policy, error) {
+	settings, err := r.GetWorkspaceHealthSettings(ctx, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := r.db.Query(ctx, `
 		SELECT id, user_id, admin_account_id, name, enabled, own_group_id, own_group_name, model_pattern, probe_mode,
 			probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
 			failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
-			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, created_at, updated_at
+			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, rule_preset_id, legacy_preset_id, created_at, updated_at
 		FROM connection_health_policies WHERE user_id = $1 AND admin_account_id = $2 ORDER BY created_at ASC
 	`, userID, adminAccountID)
 	if err != nil {
@@ -573,16 +620,27 @@ func (r *Repository) ListPolicies(ctx context.Context, userID string, adminAccou
 		}
 		policies[i].ModelTargets = targets
 	}
+	if err := r.attachPolicyRules(ctx, policies, map[string]WorkspaceHealthSettings{userID + "\x00" + adminAccountID: settings}); err != nil {
+		return nil, err
+	}
 	return policies, nil
 }
 
 // ListEnabledPolicies 返回全部 workspace 中已启用的策略（含 model targets），供调度器全局扫描使用。
 func (r *Repository) ListEnabledPolicies(ctx context.Context) ([]Policy, error) {
+	settings, err := r.ListWorkspaceHealthSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byWorkspace := map[string]WorkspaceHealthSettings{}
+	for _, item := range settings {
+		byWorkspace[item.UserID+"\x00"+item.AdminAccountID] = item
+	}
 	rows, err := r.db.Query(ctx, `
 		SELECT id, user_id, admin_account_id, name, enabled, own_group_id, own_group_name, model_pattern, probe_mode,
 			probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
 			failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
-			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, created_at, updated_at
+			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, rule_preset_id, legacy_preset_id, created_at, updated_at
 		FROM connection_health_policies WHERE enabled = true ORDER BY created_at ASC
 	`)
 	if err != nil {
@@ -615,6 +673,9 @@ func (r *Repository) ListEnabledPolicies(ctx context.Context) ([]Policy, error) 
 		}
 		policies[i].ModelTargets = enabled
 	}
+	if err := r.attachPolicyRules(ctx, policies, byWorkspace); err != nil {
+		return nil, err
+	}
 	return policies, nil
 }
 
@@ -623,7 +684,7 @@ func scanPolicy(row pgx.Row) (*Policy, error) {
 	if err := row.Scan(&p.ID, &p.UserID, &p.AdminAccountID, &p.Name, &p.Enabled, &p.OwnGroupID, &p.OwnGroupName, &p.ModelPattern, &p.ProbeMode,
 		&p.ProbeIntervalSeconds, &p.ContinueProbeWhenUnschedulable, &p.UnschedulableProbeIntervalMinutes,
 		&p.FailureThreshold, &p.SuccessThreshold, &p.CooldownSeconds, &p.ObservationSeconds,
-		&p.RecoveryStepPercent, &p.AutoDegradeEnabled, &p.AutoRemoteActionEnabled, &p.PriorityMode, &p.StrategyMode, &p.DailyProbeBudget, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		&p.RecoveryStepPercent, &p.AutoDegradeEnabled, &p.AutoRemoteActionEnabled, &p.PriorityMode, &p.StrategyMode, &p.DailyProbeBudget, &p.RulePresetID, &p.LegacyPresetID, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -641,7 +702,7 @@ func scanPolicyRow(row rowScanner) (*Policy, error) {
 	if err := row.Scan(&p.ID, &p.UserID, &p.AdminAccountID, &p.Name, &p.Enabled, &p.OwnGroupID, &p.OwnGroupName, &p.ModelPattern, &p.ProbeMode,
 		&p.ProbeIntervalSeconds, &p.ContinueProbeWhenUnschedulable, &p.UnschedulableProbeIntervalMinutes,
 		&p.FailureThreshold, &p.SuccessThreshold, &p.CooldownSeconds, &p.ObservationSeconds,
-		&p.RecoveryStepPercent, &p.AutoDegradeEnabled, &p.AutoRemoteActionEnabled, &p.PriorityMode, &p.StrategyMode, &p.DailyProbeBudget, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		&p.RecoveryStepPercent, &p.AutoDegradeEnabled, &p.AutoRemoteActionEnabled, &p.PriorityMode, &p.StrategyMode, &p.DailyProbeBudget, &p.RulePresetID, &p.LegacyPresetID, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &p, nil
@@ -681,8 +742,8 @@ func upsertStateWithExecutor(ctx context.Context, q policyExecutor, s Connection
 			upstream_site_id, upstream_group_id, upstream_group_name, state, current_weight,
 				consecutive_failures, consecutive_successes, last_probe_at, last_success_at, last_failure_at,
 				cooldown_until, observing_until, last_latency_ms, last_success_latency_ms, last_probe_decision_key,
-				last_error_key, last_error_detail, last_remote_action, last_probe_protocol, last_probe_timeout_seconds, last_applied_probe_at, last_applied_probe_result, last_applied_probe_protocol, counter_protocol, health_evidence_status, health_evidence_protocol, last_success_protocol, last_credential_failure_at, last_credential_failure_reason, updated_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,now())
+				last_error_key, last_error_detail, last_remote_action, last_probe_protocol, last_probe_timeout_seconds, last_applied_probe_at, last_applied_probe_result, last_applied_probe_protocol, counter_protocol, health_evidence_status, health_evidence_protocol, last_success_protocol, last_credential_failure_at, last_credential_failure_reason, rule_version, failing_since, recheck_pending, last_first_token_ms, last_first_event_ms, updated_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,now())
 		ON CONFLICT (connection_id, model_name) DO UPDATE SET
 			user_id = EXCLUDED.user_id,
 			admin_account_id = EXCLUDED.admin_account_id,
@@ -715,13 +776,14 @@ func upsertStateWithExecutor(ctx context.Context, q policyExecutor, s Connection
 			health_evidence_status = EXCLUDED.health_evidence_status,
 			health_evidence_protocol = EXCLUDED.health_evidence_protocol,
 			last_success_protocol = EXCLUDED.last_success_protocol,
+ rule_version=EXCLUDED.rule_version, failing_since=EXCLUDED.failing_since, recheck_pending=EXCLUDED.recheck_pending, last_first_token_ms=EXCLUDED.last_first_token_ms, last_first_event_ms=EXCLUDED.last_first_event_ms,
 
 			updated_at = now()
 	`, s.ConnectionID, s.ModelName, s.UserID, s.AdminAccountID, s.OwnGroupID, s.OwnGroupName,
 		s.UpstreamSiteID, s.UpstreamGroupID, s.UpstreamGroupName, string(s.State), s.CurrentWeight,
 		s.ConsecutiveFailures, s.ConsecutiveSuccesses, s.LastProbeAt, s.LastSuccessAt, s.LastFailureAt,
 		s.CooldownUntil, s.ObservingUntil, s.LastLatencyMs, s.LastSuccessLatencyMs, s.LastProbeDecisionKey,
-		s.LastErrorKey, s.LastErrorDetail, s.LastRemoteAction, s.LastProbeProtocol, s.LastProbeTimeoutSeconds, s.LastAppliedProbeAt, s.LastAppliedProbeResult, s.LastAppliedProbeProtocol, s.CounterProtocol, s.HealthEvidenceStatus, s.HealthEvidenceProtocol, s.LastSuccessProtocol, s.LastCredentialFailureAt, s.LastCredentialFailureReason)
+		s.LastErrorKey, s.LastErrorDetail, s.LastRemoteAction, s.LastProbeProtocol, s.LastProbeTimeoutSeconds, s.LastAppliedProbeAt, s.LastAppliedProbeResult, s.LastAppliedProbeProtocol, s.CounterProtocol, s.HealthEvidenceStatus, s.HealthEvidenceProtocol, s.LastSuccessProtocol, s.LastCredentialFailureAt, s.LastCredentialFailureReason, s.RuleVersion, s.FailingSince, s.RecheckPending, s.LastFirstTokenMs, s.LastFirstEventMs)
 	return err
 }
 
@@ -743,7 +805,7 @@ func getStateWithQuerier(ctx context.Context, q stateQuerier, connectionID, mode
 			upstream_site_id, upstream_group_id, upstream_group_name, state, current_weight,
 			consecutive_failures, consecutive_successes, last_probe_at, last_success_at, last_failure_at,
 			cooldown_until, observing_until, last_latency_ms, last_success_latency_ms, last_probe_decision_key,
-			last_error_key, last_error_detail, last_remote_action, last_probe_protocol, last_probe_timeout_seconds, last_applied_probe_at, last_applied_probe_result, last_applied_probe_protocol, counter_protocol, health_evidence_status, health_evidence_protocol, last_success_protocol, last_credential_failure_at, last_credential_failure_reason, updated_at
+			last_error_key, last_error_detail, last_remote_action, last_probe_protocol, last_probe_timeout_seconds, last_applied_probe_at, last_applied_probe_result, last_applied_probe_protocol, counter_protocol, health_evidence_status, health_evidence_protocol, last_success_protocol, last_credential_failure_at, last_credential_failure_reason, rule_version, failing_since, recheck_pending, last_first_token_ms, last_first_event_ms, updated_at
 		FROM connection_health_states WHERE connection_id = $1 AND model_name = $2
 	`, connectionID, modelName)
 	return scanState(row)
@@ -756,7 +818,7 @@ func (r *Repository) ListStatesByWorkspace(ctx context.Context, userID string, a
 			upstream_site_id, upstream_group_id, upstream_group_name, state, current_weight,
 			consecutive_failures, consecutive_successes, last_probe_at, last_success_at, last_failure_at,
 			cooldown_until, observing_until, last_latency_ms, last_success_latency_ms, last_probe_decision_key,
-			last_error_key, last_error_detail, last_remote_action, last_probe_protocol, last_probe_timeout_seconds, last_applied_probe_at, last_applied_probe_result, last_applied_probe_protocol, counter_protocol, health_evidence_status, health_evidence_protocol, last_success_protocol, last_credential_failure_at, last_credential_failure_reason, updated_at
+			last_error_key, last_error_detail, last_remote_action, last_probe_protocol, last_probe_timeout_seconds, last_applied_probe_at, last_applied_probe_result, last_applied_probe_protocol, counter_protocol, health_evidence_status, health_evidence_protocol, last_success_protocol, last_credential_failure_at, last_credential_failure_reason, rule_version, failing_since, recheck_pending, last_first_token_ms, last_first_event_ms, updated_at
 		FROM connection_health_states WHERE user_id = $1 AND admin_account_id = $2
 	`, userID, adminAccountID)
 	if err != nil {
@@ -781,7 +843,7 @@ func (r *Repository) ListStatesByConnection(ctx context.Context, connectionID st
 			upstream_site_id, upstream_group_id, upstream_group_name, state, current_weight,
 			consecutive_failures, consecutive_successes, last_probe_at, last_success_at, last_failure_at,
 			cooldown_until, observing_until, last_latency_ms, last_success_latency_ms, last_probe_decision_key,
-			last_error_key, last_error_detail, last_remote_action, last_probe_protocol, last_probe_timeout_seconds, last_applied_probe_at, last_applied_probe_result, last_applied_probe_protocol, counter_protocol, health_evidence_status, health_evidence_protocol, last_success_protocol, last_credential_failure_at, last_credential_failure_reason, updated_at
+			last_error_key, last_error_detail, last_remote_action, last_probe_protocol, last_probe_timeout_seconds, last_applied_probe_at, last_applied_probe_result, last_applied_probe_protocol, counter_protocol, health_evidence_status, health_evidence_protocol, last_success_protocol, last_credential_failure_at, last_credential_failure_reason, rule_version, failing_since, recheck_pending, last_first_token_ms, last_first_event_ms, updated_at
 		FROM connection_health_states WHERE connection_id = $1
 	`, connectionID)
 	if err != nil {
@@ -806,7 +868,7 @@ func scanState(row pgx.Row) (*ConnectionHealthState, error) {
 		&s.UpstreamSiteID, &s.UpstreamGroupID, &s.UpstreamGroupName, &state, &s.CurrentWeight,
 		&s.ConsecutiveFailures, &s.ConsecutiveSuccesses, &s.LastProbeAt, &s.LastSuccessAt, &s.LastFailureAt,
 		&s.CooldownUntil, &s.ObservingUntil, &s.LastLatencyMs, &s.LastSuccessLatencyMs, &s.LastProbeDecisionKey,
-		&s.LastErrorKey, &s.LastErrorDetail, &s.LastRemoteAction, &s.LastProbeProtocol, &s.LastProbeTimeoutSeconds, &s.LastAppliedProbeAt, &s.LastAppliedProbeResult, &s.LastAppliedProbeProtocol, &s.CounterProtocol, &s.HealthEvidenceStatus, &s.HealthEvidenceProtocol, &s.LastSuccessProtocol, &s.LastCredentialFailureAt, &s.LastCredentialFailureReason, &s.UpdatedAt); err != nil {
+		&s.LastErrorKey, &s.LastErrorDetail, &s.LastRemoteAction, &s.LastProbeProtocol, &s.LastProbeTimeoutSeconds, &s.LastAppliedProbeAt, &s.LastAppliedProbeResult, &s.LastAppliedProbeProtocol, &s.CounterProtocol, &s.HealthEvidenceStatus, &s.HealthEvidenceProtocol, &s.LastSuccessProtocol, &s.LastCredentialFailureAt, &s.LastCredentialFailureReason, &s.RuleVersion, &s.FailingSince, &s.RecheckPending, &s.LastFirstTokenMs, &s.LastFirstEventMs, &s.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -823,7 +885,7 @@ func scanStateRow(row rowScanner) (*ConnectionHealthState, error) {
 		&s.UpstreamSiteID, &s.UpstreamGroupID, &s.UpstreamGroupName, &state, &s.CurrentWeight,
 		&s.ConsecutiveFailures, &s.ConsecutiveSuccesses, &s.LastProbeAt, &s.LastSuccessAt, &s.LastFailureAt,
 		&s.CooldownUntil, &s.ObservingUntil, &s.LastLatencyMs, &s.LastSuccessLatencyMs, &s.LastProbeDecisionKey,
-		&s.LastErrorKey, &s.LastErrorDetail, &s.LastRemoteAction, &s.LastProbeProtocol, &s.LastProbeTimeoutSeconds, &s.LastAppliedProbeAt, &s.LastAppliedProbeResult, &s.LastAppliedProbeProtocol, &s.CounterProtocol, &s.HealthEvidenceStatus, &s.HealthEvidenceProtocol, &s.LastSuccessProtocol, &s.LastCredentialFailureAt, &s.LastCredentialFailureReason, &s.UpdatedAt); err != nil {
+		&s.LastErrorKey, &s.LastErrorDetail, &s.LastRemoteAction, &s.LastProbeProtocol, &s.LastProbeTimeoutSeconds, &s.LastAppliedProbeAt, &s.LastAppliedProbeResult, &s.LastAppliedProbeProtocol, &s.CounterProtocol, &s.HealthEvidenceStatus, &s.HealthEvidenceProtocol, &s.LastSuccessProtocol, &s.LastCredentialFailureAt, &s.LastCredentialFailureReason, &s.RuleVersion, &s.FailingSince, &s.RecheckPending, &s.LastFirstTokenMs, &s.LastFirstEventMs, &s.UpdatedAt); err != nil {
 		return nil, err
 	}
 	s.State = State(state)
@@ -840,11 +902,11 @@ func insertEventWithExecutor(ctx context.Context, q policyExecutor, e Connection
 		INSERT INTO connection_health_events (
 			id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
-			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,COALESCE($23,now()))
+			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, rule_version, first_token_ms, first_event_ms, long_failure, created_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,COALESCE($27,now()))
 	`, e.ID, e.ConnectionID, e.ModelName, e.UserID, e.AdminAccountID, e.PolicyID, e.AdminGroupID, e.OwnGroupName,
 		e.UpstreamSiteID, e.UpstreamGroupName, e.Result, e.FromState, e.ToState,
-		e.LatencyMs, e.ErrorKey, e.ErrorDetail, e.RemoteAction, e.ActionSource, e.Source, e.RequestProtocol, e.RequestTimeoutSeconds, nullableProbeDisposition(e.ProbeDisposition), eventTimestamp(e.CreatedAt))
+		e.LatencyMs, e.ErrorKey, e.ErrorDetail, e.RemoteAction, e.ActionSource, e.Source, e.RequestProtocol, e.RequestTimeoutSeconds, nullableProbeDisposition(e.ProbeDisposition), e.RuleVersion, e.FirstTokenMs, e.FirstEventMs, e.LongFailure, eventTimestamp(e.CreatedAt))
 	return err
 }
 
@@ -858,7 +920,7 @@ func (r *Repository) ListEventsByConnection(ctx context.Context, connectionID st
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
-			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
+			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, rule_version, first_token_ms, first_event_ms, long_failure, created_at
 		FROM connection_health_events
 		WHERE connection_id = $1 AND user_id = $2 AND admin_account_id = $3
 			AND created_at >= now() - interval '24 hours'
@@ -879,7 +941,7 @@ func (r *Repository) ListRecentEventsByWorkspace(ctx context.Context, userID str
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
-			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
+			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, rule_version, first_token_ms, first_event_ms, long_failure, created_at
 		FROM connection_health_events
 		WHERE user_id = $1 AND admin_account_id = $2
 			AND created_at >= now() - interval '24 hours'
@@ -899,12 +961,12 @@ func (r *Repository) ListLatestProbeFailureEventsByWorkspace(ctx context.Context
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
-			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
+			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, rule_version, first_token_ms, first_event_ms, long_failure, created_at
 		FROM (
 			SELECT DISTINCT ON (connection_id, model_name, request_protocol)
 				id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 				upstream_site_id, upstream_group_name, result, from_state, to_state,
-				latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
+				latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, rule_version, first_token_ms, first_event_ms, long_failure, created_at
 			FROM connection_health_events
 			WHERE user_id = $1 AND admin_account_id = $2 AND created_at >= $3 AND result = ANY($4) AND (probe_disposition IS NULL OR probe_disposition = 'applied')
 			ORDER BY connection_id, model_name, request_protocol, created_at DESC, id DESC
@@ -924,12 +986,12 @@ func (r *Repository) ListLatestSchedulableActionEventsByWorkspace(ctx context.Co
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
-			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
+			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, rule_version, first_token_ms, first_event_ms, long_failure, created_at
 		FROM (
 			SELECT DISTINCT ON (connection_id)
 				id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 				upstream_site_id, upstream_group_name, result, from_state, to_state,
-					latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
+					latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, rule_version, first_token_ms, first_event_ms, long_failure, created_at
 			FROM connection_health_events
 				WHERE user_id = $1 AND admin_account_id = $2 AND created_at >= $3
 					AND action_source = $4
@@ -951,12 +1013,12 @@ func (r *Repository) ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx 
 	rows, err := r.db.Query(ctx, `
 		SELECT id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 			upstream_site_id, upstream_group_name, result, from_state, to_state,
-			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
+			latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, rule_version, first_token_ms, first_event_ms, long_failure, created_at
 		FROM (
 			SELECT DISTINCT ON (connection_id)
 				id, connection_id, model_name, user_id, admin_account_id, policy_id, admin_group_id, own_group_name,
 				upstream_site_id, upstream_group_name, result, from_state, to_state,
-					latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, created_at
+					latency_ms, error_key, error_detail, remote_action, action_source, source, request_protocol, request_timeout_seconds, probe_disposition, rule_version, first_token_ms, first_event_ms, long_failure, created_at
 			FROM connection_health_events
 			WHERE user_id = $1 AND admin_account_id = $2 AND created_at >= $3
 				AND action_source = $4 AND result = $5
@@ -1108,7 +1170,7 @@ func scanEvents(rows pgx.Rows) ([]ConnectionHealthEvent, error) {
 		var disposition *string
 		if err := rows.Scan(&e.ID, &e.ConnectionID, &e.ModelName, &e.UserID, &e.AdminAccountID, &e.PolicyID, &e.AdminGroupID, &e.OwnGroupName,
 			&e.UpstreamSiteID, &e.UpstreamGroupName, &e.Result, &e.FromState, &e.ToState,
-			&e.LatencyMs, &e.ErrorKey, &e.ErrorDetail, &e.RemoteAction, &e.ActionSource, &e.Source, &e.RequestProtocol, &e.RequestTimeoutSeconds, &disposition, &e.CreatedAt); err != nil {
+			&e.LatencyMs, &e.ErrorKey, &e.ErrorDetail, &e.RemoteAction, &e.ActionSource, &e.Source, &e.RequestProtocol, &e.RequestTimeoutSeconds, &disposition, &e.RuleVersion, &e.FirstTokenMs, &e.FirstEventMs, &e.LongFailure, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		if disposition != nil {
@@ -1122,12 +1184,18 @@ func scanEvents(rows pgx.Rows) ([]ConnectionHealthEvent, error) {
 // ReplacePolicyAssignments 整体替换一个 target 在当前 workspace 下的策略分配（先删后插，事务保证一致）。
 // policyIDs 为空即清空该 target 的全部分配。
 func (r *Repository) ReplacePolicyAssignments(ctx context.Context, userID string, adminAccountID string, targetID string, policyIDs []string) error {
-	tx, err := r.db.Begin(ctx)
+	tx, err := r.beginWorkspaceTransaction(ctx, userID, adminAccountID)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := ensureWorkspaceHealthSettings(ctx, tx, userID, adminAccountID); err != nil {
+		return err
+	}
 	if err := replacePolicyAssignmentsTx(ctx, tx, userID, adminAccountID, targetID, policyIDs); err != nil {
+		return err
+	}
+	if err := bumpHealthConfigGenerationTx(ctx, tx, userID, adminAccountID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1136,15 +1204,21 @@ func (r *Repository) ReplacePolicyAssignments(ctx context.Context, userID string
 // ReplacePolicyAssignmentsAndRequestPrioritySync 在同一事务中替换账号策略分配并登记
 // workspace 级 Priority 重算代号，确保页面保存成功后不会继续使用旧的倍率策略。
 func (r *Repository) ReplacePolicyAssignmentsAndRequestPrioritySync(ctx context.Context, userID string, adminAccountID string, targetID string, policyIDs []string, pendingSignature string) error {
-	tx, err := r.db.Begin(ctx)
+	tx, err := r.beginWorkspaceTransaction(ctx, userID, adminAccountID)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := ensureWorkspaceHealthSettings(ctx, tx, userID, adminAccountID); err != nil {
+		return err
+	}
 	if err := replacePolicyAssignmentsTx(ctx, tx, userID, adminAccountID, targetID, policyIDs); err != nil {
 		return err
 	}
 	if err := requestPrioritySyncTx(ctx, tx, userID, adminAccountID, pendingSignature, "target_policy_save"); err != nil {
+		return err
+	}
+	if err := bumpHealthConfigGenerationTx(ctx, tx, userID, adminAccountID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1228,27 +1302,39 @@ func scanPolicyAssignments(rows pgx.Rows) ([]PolicyAssignment, error) {
 // ReplaceGroupPolicyConfiguration 原子替换一个 admin 分组的策略列表和目标排除列表。分组级
 // 配置独立于旧 target 分配表，清空分组配置不会删除任何旧版逐目标分配。
 func (r *Repository) ReplaceGroupPolicyConfiguration(ctx context.Context, userID string, adminAccountID string, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64) error {
-	tx, err := r.db.Begin(ctx)
+	tx, err := r.beginWorkspaceTransaction(ctx, userID, adminAccountID)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := ensureWorkspaceHealthSettings(ctx, tx, userID, adminAccountID); err != nil {
+		return err
+	}
 	if err := replaceGroupPolicyConfigurationTx(ctx, tx, userID, adminAccountID, adminGroupID, adminGroupName, policyIDs, excludedTargetIDs, groupTargetIDs, fallbackMultiplier); err != nil {
+		return err
+	}
+	if err := bumpHealthConfigGenerationTx(ctx, tx, userID, adminAccountID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
 func (r *Repository) ReplaceGroupPolicyConfigurationAndRequestPrioritySync(ctx context.Context, userID string, adminAccountID string, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64, pendingSignature string) error {
-	tx, err := r.db.Begin(ctx)
+	tx, err := r.beginWorkspaceTransaction(ctx, userID, adminAccountID)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := ensureWorkspaceHealthSettings(ctx, tx, userID, adminAccountID); err != nil {
+		return err
+	}
 	if err := replaceGroupPolicyConfigurationTx(ctx, tx, userID, adminAccountID, adminGroupID, adminGroupName, policyIDs, excludedTargetIDs, groupTargetIDs, fallbackMultiplier); err != nil {
 		return err
 	}
 	if err := requestPrioritySyncTx(ctx, tx, userID, adminAccountID, pendingSignature, "group_policy_save"); err != nil {
+		return err
+	}
+	if err := bumpHealthConfigGenerationTx(ctx, tx, userID, adminAccountID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1257,48 +1343,35 @@ func (r *Repository) ReplaceGroupPolicyConfigurationAndRequestPrioritySync(ctx c
 // CreatePolicyAndReplaceGroupConfiguration 在一个事务里创建向导策略、模型目标和分组绑定。
 // 任意一步失败都会整体回滚，避免线上留下无法从向导继续使用的孤立策略。
 func (r *Repository) CreatePolicyAndReplaceGroupConfiguration(ctx context.Context, policy Policy, targets []ModelTarget, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64) error {
-	tx, err := r.db.Begin(ctx)
+	tx, err := r.beginWorkspaceTransaction(ctx, policy.UserID, policy.AdminAccountID)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO connection_health_policies (
-			id, user_id, admin_account_id, name, enabled, own_group_id, own_group_name, model_pattern, probe_mode,
-				probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
-				failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
-				recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, created_at, updated_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,now(),now())
-		`, policy.ID, policy.UserID, policy.AdminAccountID, policy.Name, policy.Enabled, policy.OwnGroupID, policy.OwnGroupName,
-		policy.ModelPattern, policy.ProbeMode, policy.ProbeIntervalSeconds, policy.ContinueProbeWhenUnschedulable,
-		defaultInt(policy.UnschedulableProbeIntervalMinutes, 60), policy.FailureThreshold, policy.SuccessThreshold,
-		policy.CooldownSeconds, policy.ObservationSeconds, policy.RecoveryStepPercent, policy.AutoDegradeEnabled,
-		policy.AutoRemoteActionEnabled, normalizePriorityMode(policy.PriorityMode), normalizeStrategyMode(policy.StrategyMode),
-		policy.DailyProbeBudget); err != nil {
+	if err := ensureWorkspaceHealthSettings(ctx, tx, policy.UserID, policy.AdminAccountID); err != nil {
 		return err
 	}
-	for _, target := range targets {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO connection_health_model_targets
-				(id, policy_id, user_id, admin_account_id, model_name, provider_family, enabled, probe_prompt, max_probe_tokens, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),now())
-		`, target.ID, target.PolicyID, target.UserID, target.AdminAccountID, target.ModelName, target.ProviderFamily,
-			target.Enabled, target.ProbePrompt, target.MaxProbeTokens); err != nil {
-			return err
-		}
+	if err := insertPolicyWithTargetsTx(ctx, tx, policy, targets); err != nil {
+		return err
 	}
 	if err := replaceGroupPolicyConfigurationTx(ctx, tx, policy.UserID, policy.AdminAccountID, adminGroupID, adminGroupName, policyIDs, excludedTargetIDs, groupTargetIDs, fallbackMultiplier); err != nil {
+		return err
+	}
+	if err := bumpHealthConfigGenerationTx(ctx, tx, policy.UserID, policy.AdminAccountID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
 func (r *Repository) CreatePolicyAndReplaceGroupConfigurationAndRequestPrioritySync(ctx context.Context, policy Policy, targets []ModelTarget, adminGroupID string, adminGroupName string, policyIDs []string, excludedTargetIDs []string, groupTargetIDs []string, fallbackMultiplier *float64, pendingSignature string) error {
-	tx, err := r.db.Begin(ctx)
+	tx, err := r.beginWorkspaceTransaction(ctx, policy.UserID, policy.AdminAccountID)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := ensureWorkspaceHealthSettings(ctx, tx, policy.UserID, policy.AdminAccountID); err != nil {
+		return err
+	}
 	if err := insertPolicyWithTargetsTx(ctx, tx, policy, targets); err != nil {
 		return err
 	}
@@ -1308,23 +1381,32 @@ func (r *Repository) CreatePolicyAndReplaceGroupConfigurationAndRequestPriorityS
 	if err := requestPrioritySyncTx(ctx, tx, policy.UserID, policy.AdminAccountID, pendingSignature, "group_policy_save"); err != nil {
 		return err
 	}
+	if err := bumpHealthConfigGenerationTx(ctx, tx, policy.UserID, policy.AdminAccountID); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
 func insertPolicyWithTargetsTx(ctx context.Context, tx pgx.Tx, policy Policy, targets []ModelTarget) error {
+	if err := ensureWorkspaceHealthSettings(ctx, tx, policy.UserID, policy.AdminAccountID); err != nil {
+		return err
+	}
+	if err := preparePolicyPreset(ctx, tx, &policy); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO connection_health_policies (
 			id, user_id, admin_account_id, name, enabled, own_group_id, own_group_name, model_pattern, probe_mode,
 			probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
 			failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
-			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,now(),now())
+			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, rule_preset_id, legacy_preset_id, created_at, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,'',now(),now())
 	`, policy.ID, policy.UserID, policy.AdminAccountID, policy.Name, policy.Enabled, policy.OwnGroupID, policy.OwnGroupName,
 		policy.ModelPattern, policy.ProbeMode, policy.ProbeIntervalSeconds, policy.ContinueProbeWhenUnschedulable,
-		defaultInt(policy.UnschedulableProbeIntervalMinutes, 60), policy.FailureThreshold, policy.SuccessThreshold,
-		policy.CooldownSeconds, policy.ObservationSeconds, policy.RecoveryStepPercent, policy.AutoDegradeEnabled,
+		defaultInt(policy.UnschedulableProbeIntervalMinutes, 60), 3, 2,
+		300, 300, 25, policy.AutoDegradeEnabled,
 		policy.AutoRemoteActionEnabled, normalizePriorityMode(policy.PriorityMode), normalizeStrategyMode(policy.StrategyMode),
-		policy.DailyProbeBudget); err != nil {
+		policy.DailyProbeBudget, policy.RulePresetID); err != nil {
 		return err
 	}
 	for _, target := range targets {

@@ -61,7 +61,7 @@ const reasonLabel = (reason: string | undefined): string => {
 
 // aggregateState 从账号的逐模型健康状态归纳出一个代表性状态用于行首徽标：
 // 暂停 > 已禁用 > 降级/观察/恢复 > 健康。没有任何模型健康数据时返回空串。
-const STATE_PRIORITY: ConnectionHealthState[] = ['suspended', 'disabled', 'degraded', 'observing', 'recovering', 'healthy']
+const STATE_PRIORITY: ConnectionHealthState[] = ['suspended', 'disabled', 'degraded', 'observing', 'recovering', 'suspect', 'healthy']
 const aggregateState = (account: AdminGroupAccount): ConnectionHealthState | '' => {
   if (!account.modelHealth || account.modelHealth.length === 0) return ''
   const present = new Set(account.modelHealth.map((m) => m.state))
@@ -194,6 +194,13 @@ const assignedPolicyLabel = (account: AdminGroupAccount): string => {
                       {{ stateLabel(aggregateState(account)) }}
                       <span v-if="account.modelHealth.length > 1" class="ml-1 opacity-70">×{{ account.modelHealth.length }}</span>
                     </span>
+                    <template v-for="model in account.modelHealth" :key="model.modelName">
+                      <p v-if="model.firstTokenMs != null || model.firstEventMs != null" class="mt-1 text-[11px] text-muted-foreground">
+                        <span v-if="account.modelHealth.length > 1">{{ model.modelName }} · </span>
+                        <span v-if="model.firstTokenMs != null">首字：{{ model.firstTokenMs }}ms</span>
+                        <span v-if="model.firstEventMs != null"> · 首个事件：{{ model.firstEventMs }}ms</span>
+                      </p>
+                    </template>
                   </td>
                   <td class="py-2 pr-3">
                     <Tooltip v-if="account.hasAssignedPolicy" :text="(account.assignedPolicies ?? []).map((p) => p.policyName).join('、')" wide>

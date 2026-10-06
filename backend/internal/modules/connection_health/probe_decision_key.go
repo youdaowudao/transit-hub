@@ -9,6 +9,8 @@ import (
 )
 
 type probeDecisionPolicyKey struct {
+	RuleVersion                       string
+	RulePreset                        RulePreset
 	ID                                string
 	Enabled                           bool
 	ProbeMode                         string
@@ -67,8 +69,9 @@ func probeDecisionKey(target AdminProbeTarget, spec probeModelSpec) string {
 	}
 	policyKeys := make([]probeDecisionPolicyKey, 0, len(policies))
 	for _, policy := range policies {
+		policy = effectivePolicyFromPreset(policy)
 		policyKeys = append(policyKeys, probeDecisionPolicyKey{
-			ID: policy.ID, Enabled: policy.Enabled, ProbeMode: policy.ProbeMode,
+			ID: policy.ID, Enabled: policy.Enabled, ProbeMode: policy.ProbeMode, RuleVersion: policy.RuleVersion, RulePreset: RulePresetForPolicy(policy),
 			ProbeIntervalSeconds:              policy.ProbeIntervalSeconds,
 			ContinueProbeWhenUnschedulable:    policy.ContinueProbeWhenUnschedulable,
 			UnschedulableProbeIntervalMinutes: policy.UnschedulableProbeIntervalMinutes,

@@ -45,6 +45,7 @@ export interface TestAttempt {
 
 export type ConnectionHealthState =
   | 'healthy'
+  | 'suspect'
   | 'degraded'
   | 'suspended'
   | 'observing'
@@ -52,10 +53,17 @@ export type ConnectionHealthState =
   | 'disabled'
 
 export interface ModelHealth {
+  ruleVersion?: HealthRuleVersion
+  firstTokenMs?: number | null
+  firstEventMs?: number | null
+  recheckPending?: boolean
+  failingSince?: string | null
   credentialUnavailableAt?: string | null
   credentialUnavailableReason?: string
   requestPhase?: 'waiting_headers' | 'reading_body' | string
   requestLatencyMs?: number | null
+  requestFirstTokenMs?: number | null
+  requestFirstEventMs?: number | null
   requestAt?: string | null
   requestErrorKey?: string
   requestErrorDetail?: string
@@ -154,6 +162,8 @@ export interface AdminGroupHealthSummary {
   probeableAccounts: number
   unprobeableAccounts: number
   healthyModels: number
+  // 疑似属于健康档，同时单列用于筛选。
+  suspectModels?: number
   // degradedModels 为兼容旧版，仍包含 degraded + observing + recovering。
   degradedModels: number
   observingModels?: number
@@ -369,6 +379,10 @@ export interface AdminPriorityConflict {
 }
 
 export interface ConnectionHealthEvent {
+  ruleVersion?: HealthRuleVersion
+  firstTokenMs?: number | null
+  firstEventMs?: number | null
+  longFailure?: boolean
   requestPhase?: 'waiting_headers' | 'reading_body' | string
   requestProtocol?: TestProtocol | null
   requestTimeoutSeconds?: number | null
@@ -394,6 +408,7 @@ export interface ConnectionHealthEvent {
 export interface ConnectionHealthOverview {
   totalConnections: number
   healthy: number
+  suspect?: number
   degraded: number
   suspended: number
   observing: number
@@ -433,6 +448,8 @@ export interface ConnectionHealthModelTarget extends Required<Pick<ModelTargetIn
 }
 
 export interface ConnectionHealthPolicy {
+  rulePresetId?: string
+  legacyPresetId?: string
   id: string
   name: string
   enabled: boolean
@@ -482,6 +499,9 @@ export interface ManualProbeModelOption {
 // ManualProbeResult 是手动一次性探活单个模型的 transient 结果：只用于弹窗内展示，
 // 不对应任何落库的状态/事件记录。
 export interface ManualProbeResult {
+  ruleVersion?: HealthRuleVersion
+  firstTokenMs?: number | null
+  firstEventMs?: number | null
   requestPhase?: 'waiting_headers' | 'reading_body' | string
   protocol?: TestProtocol | null
   probeTimeoutSeconds?: number | null
@@ -606,6 +626,7 @@ export interface QuestionAnswerSubmissionSummary {
 }
 
 export interface PolicyInput {
+  rulePresetId?: string
   id?: string
   name: string
   enabled: boolean
@@ -626,6 +647,35 @@ export interface PolicyInput {
   strategyMode?: ConnectionHealthStrategyMode
   dailyProbeBudget?: number
   modelTargets: ModelTargetInput[]
+}
+
+export type HealthRuleVersion = 'legacy' | 'v2'
+export interface HealthRulePresetInput {
+  name: string
+  failureThreshold: number
+  successThreshold: number
+  cooldownSeconds: number
+  failedRetryIntervalSeconds: number
+  longFailureAfterSeconds: number
+  longFailureIntervalSeconds: number
+  delayLineMs: Record<string, number>
+  observationSeconds: number
+  recoveryStepPercent: number
+}
+export interface HealthRulePreset extends HealthRulePresetInput {
+  id: string
+  kind: 'recommended' | 'legacy_snapshot' | 'legacy_default' | 'custom'
+  createdAt: string
+  updatedAt: string
+  policies: Array<{ id: string; name: string }>
+}
+export interface WorkspaceHealthSettings {
+  ruleVersion: HealthRuleVersion
+  configGeneration: number
+  probeConcurrency: number
+  probeConcurrencyVersion: number
+  ruleSwitchedAt: string | null
+  updatedAt: string
 }
 
 export type ConnectionHealthPriorityMode = 'none' | 'multiplier'

@@ -1108,6 +1108,12 @@ const openEditPolicy = (policy: ConnectionHealthPolicy) => {
   policyDrawerOpen.value = true
 }
 
+const onHealthRulesChanged = async () => {
+  await loadPolicies()
+  await loadMainListIfIdle(() => loadAll({ silent: true }))
+  if (editingPolicy.value) editingPolicy.value = policies.value.find(policy => policy.id === editingPolicy.value?.id) ?? null
+}
+
 const handleSavePolicy = async (input: PolicyInput) => {
   if (await savePolicy(input)) {
     policyDrawerOpen.value = false
@@ -1123,11 +1129,7 @@ const togglePolicyEnabled = async (policy: ConnectionHealthPolicy) => {
     ownGroupId: policy.ownGroupId,
     ownGroupName: policy.ownGroupName,
     probeIntervalSeconds: policy.probeIntervalSeconds,
-    failureThreshold: policy.failureThreshold,
-    successThreshold: policy.successThreshold,
-    cooldownSeconds: policy.cooldownSeconds,
-    observationSeconds: policy.observationSeconds,
-    recoveryStepPercent: policy.recoveryStepPercent,
+    ...(policy.rulePresetId ? { rulePresetId: policy.rulePresetId } : {}),
     dailyProbeBudget: policy.dailyProbeBudget,
     continueProbeWhenUnschedulable: policy.continueProbeWhenUnschedulable,
     unschedulableProbeIntervalMinutes: policy.unschedulableProbeIntervalMinutes,
@@ -1537,6 +1539,8 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
     <ProbePolicyListDialog
       :open="policyListDialogOpen"
       :policies="policies"
+      :workspace-id="currentAccount?.id"
+      :workspace-platform="currentAccount?.platform"
       :deleting-policy-id="deletingPolicyId"
       :delete-error="deletePolicyError"
       @close="policyListDialogOpen = false"
@@ -1544,14 +1548,18 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       @delete="handleDeletePolicy"
       @edit="openEditPolicy"
       @toggle="togglePolicyEnabled"
+      @rules-changed="onHealthRulesChanged"
     />
 
     <PolicyConfigDrawer
       :open="policyDrawerOpen"
       :policy="editingPolicy"
       :own-group-options="ownGroupOptions"
+      :policies="policies"
+      :workspace-id="currentAccount?.id"
       @close="policyDrawerOpen = false"
       @save="handleSavePolicy"
+      @rules-changed="onHealthRulesChanged"
     />
 
     <ConnectionHealthEventsDialog

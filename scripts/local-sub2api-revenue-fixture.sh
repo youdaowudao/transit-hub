@@ -129,6 +129,40 @@ COMMIT;
 SQL
 }
 
+current_fixture() {
+  local action="$1" day="${2:-}" script_dir docker_host compose_project
+  if [[ ! "$day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] ||
+    [[ "$(date -d "$day" +%F 2>/dev/null)" != "$day" ]]; then
+    echo '新环境夹具必须指定有效业务日，例如 current-ensure 2026-10-02。' >&2
+    return 2
+  fi
+
+  # 仅限本机测试容器，禁止通过 Docker 远端上下文误写生产库。
+  if [[ -n "${DOCKER_CONTEXT:-}" ]]; then
+    docker_host="$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}')"
+  elif [[ -n "${DOCKER_HOST:-}" ]]; then
+    docker_host="$DOCKER_HOST"
+  else
+    docker_host="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
+  fi
+  if [[ "$docker_host" != unix://* ]]; then
+    echo '夹具只允许使用本机 Unix socket Docker。' >&2
+    return 2
+  fi
+  compose_project="$(docker inspect "$container_name" --format '{{index .Config.Labels "com.docker.compose.project"}}')"
+  if [[ "$compose_project" != 'sub2api-test' ]]; then
+    echo '目标容器不是约定的 sub2api-test，已停止。' >&2
+    return 2
+  fi
+
+  script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  docker exec -i "$container_name" psql -X -v ON_ERROR_STOP=1 \
+    -U "$database_user" -d "$database_name" -P pager=off \
+    -v "fixture_action=$action" -v "fixture_day=$day" \
+    -v "fixture_status=$([[ "$action" == status ]] && echo true || echo false)" \
+    < "$script_dir/../backend/internal/modules/upstream/testdata/local_sub2api_revenue_fixture.sql"
+}
+
 case "${1:-status}" in
   status)
     status_fixture
@@ -139,8 +173,11 @@ case "${1:-status}" in
   rollback)
     rollback_fixture
     ;;
+  current-status|current-ensure|current-rollback)
+    current_fixture "${1#current-}" "${2:-}"
+    ;;
   *)
-    echo "用法: $0 [status|ensure|rollback]" >&2
+    echo "用法: $0 [status|ensure|rollback] 或 [current-status|current-ensure|current-rollback] YYYY-MM-DD" >&2
     exit 2
     ;;
 esac

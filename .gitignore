@@ -24,6 +24,7 @@ backend/node_modules
 backend/dist
 backend/bin
 backend/.cache
+/.cache/
 backend/api
 backend/.prisma
 *.tsbuildinfo

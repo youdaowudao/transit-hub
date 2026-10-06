@@ -32,6 +32,7 @@ func (f *fakeRepository) RecordTargetCredentialFailure(ctx context.Context, init
 	}
 	if current.LastCredentialFailureAt == nil || !current.LastCredentialFailureAt.After(at) {
 		current.LastCredentialFailureAt, current.LastCredentialFailureReason = &at, reason
+		current.RecheckPending = false
 		if current.UpdatedAt.Before(at) {
 			current.UpdatedAt = at
 		}

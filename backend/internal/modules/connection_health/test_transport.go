@@ -14,6 +14,7 @@ type testRequestInput struct {
 	MaxTokens                   int
 	ReasoningEffort             QuestionAnswerReasoningEffort
 	QuestionAnswer              bool
+	Stream                      bool
 }
 
 func buildTestRequest(ctx context.Context, input testRequestInput) (*http.Request, error) {
@@ -25,7 +26,12 @@ func buildTestRequest(ctx context.Context, input testRequestInput) (*http.Reques
 	if input.Protocol == TestProtocolResponses {
 		path = "/v1/responses"
 		payload["input"] = []map[string]any{{"role": "user", "content": input.Prompt}}
-		payload["stream"], payload["store"] = false, false
+		payload["store"] = false
+		if input.QuestionAnswer {
+			payload["stream"] = false
+		} else {
+			payload["stream"] = input.Stream
+		}
 		if input.QuestionAnswer {
 			payload["reasoning"] = map[string]any{"effort": input.ReasoningEffort}
 		} else {
@@ -37,6 +43,9 @@ func buildTestRequest(ctx context.Context, input testRequestInput) (*http.Reques
 			payload["reasoning_effort"] = input.ReasoningEffort
 		} else {
 			payload["max_tokens"] = input.MaxTokens
+			if input.Stream {
+				payload["stream"] = true
+			}
 		}
 	}
 	return newJSONRequest(ctx, http.MethodPost, strings.TrimRight(input.BaseURL, "/")+path, payload, map[string]string{"Authorization": "Bearer " + input.Key})
@@ -99,7 +108,7 @@ func classifyTestHTTPResponse(protocol TestProtocol, status int, body []byte, ke
 			return ProbeOutcome{Result: ResultInvalidResponse, LatencyMs: latency, Detail: detail}
 		}
 		result := ResultOK
-		if latency > int(SlowResponseThreshold.Milliseconds()) {
+		if latency > defaultProtocolDelayLineMs(protocol) {
 			result = ResultSlowResponse
 		}
 		return ProbeOutcome{Result: result, LatencyMs: latency}

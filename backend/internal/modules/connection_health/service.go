@@ -169,7 +169,7 @@ func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platf
 		dispatcher:             newRemoteActionDispatcher(sites, mySites, platform),
 		probeRunner:            NewRealProbeRunner(),
 		modelDiscovery:         NewModelDiscoveryRunner(),
-		probeLimiter:           newProbeConcurrencyLimiter(globalProbeConcurrency, perSiteProbeConcurrency),
+		probeLimiter:           newProbeConcurrencyLimiter(12, 6),
 		adminMultiplierCache:   make(map[string]adminMultiplierCacheEntry),
 		multiplierSnapshots:    make(map[string]*multiplierSnapshotEntry),
 		priorityTriggerRunning: make(map[string]bool),
@@ -249,6 +249,13 @@ func (s *Service) currentAdminAccountID(ctx context.Context, userID string) (str
 
 // ModelHealth 是单个模型在某条对接链路上的健康状态展示数据，绝不包含 upstream_key。
 type ModelHealth struct {
+	RequestFirstTokenMs         *int                         `json:"requestFirstTokenMs"`
+	RequestFirstEventMs         *int                         `json:"requestFirstEventMs"`
+	RecheckPending              bool                         `json:"recheckPending"`
+	FailingSince                *time.Time                   `json:"failingSince"`
+	RuleVersion                 string                       `json:"ruleVersion"`
+	FirstTokenMs                *int                         `json:"firstTokenMs"`
+	FirstEventMs                *int                         `json:"firstEventMs"`
 	CredentialUnavailableAt     *time.Time                   `json:"credentialUnavailableAt,omitempty"`
 	CredentialUnavailableReason string                       `json:"credentialUnavailableReason,omitempty"`
 	RequestPhase                string                       `json:"requestPhase,omitempty"`
@@ -309,6 +316,10 @@ type OwnGroupHealth struct {
 
 // EventView 是事件的对外展示形态，字段命名与前端 camelCase 对齐。
 type EventView struct {
+	RuleVersion           string        `json:"ruleVersion"`
+	FirstTokenMs          *int          `json:"firstTokenMs"`
+	FirstEventMs          *int          `json:"firstEventMs"`
+	LongFailure           *bool         `json:"longFailure"`
 	RequestProtocol       *TestProtocol `json:"requestProtocol"`
 	RequestTimeoutSeconds *int          `json:"requestTimeoutSeconds"`
 	ProbeDisposition      string        `json:"probeDisposition,omitempty"`
@@ -334,6 +345,7 @@ type EventView struct {
 type OverviewResponse struct {
 	TotalConnections int         `json:"totalConnections"`
 	Healthy          int         `json:"healthy"`
+	Suspect          int         `json:"suspect"`
 	Degraded         int         `json:"degraded"`
 	Suspended        int         `json:"suspended"`
 	Observing        int         `json:"observing"`
@@ -536,6 +548,7 @@ func toModelHealth(modelName string, st ConnectionHealthState) ModelHealth {
 	updatedAt := st.UpdatedAt.UTC()
 	credentialReason, credentialAt := currentCredentialFailure(st)
 	return ModelHealth{
+		RecheckPending: st.RecheckPending, FailingSince: utcTimePointer(st.FailingSince), RuleVersion: st.RuleVersion, FirstTokenMs: st.LastFirstTokenMs, FirstEventMs: st.LastFirstEventMs,
 		CredentialUnavailableAt:     utcTimePointer(credentialAt),
 		CredentialUnavailableReason: credentialReason,
 		ModelName:                   modelName,
@@ -686,6 +699,9 @@ func accumulateOverviewState(resp *OverviewResponse, state State) {
 	switch state {
 	case StateHealthy:
 		resp.Healthy++
+	case StateSuspect:
+		resp.Healthy++
+		resp.Suspect++
 	case StateDegraded:
 		resp.Degraded++
 	case StateSuspended:
@@ -834,6 +850,7 @@ func toEventViews(events []ConnectionHealthEvent) []EventView {
 	views := make([]EventView, 0, len(events))
 	for _, e := range events {
 		views = append(views, EventView{
+			RuleVersion: e.RuleVersion, FirstTokenMs: e.FirstTokenMs, FirstEventMs: e.FirstEventMs, LongFailure: e.LongFailure,
 			RequestProtocol: e.RequestProtocol, RequestTimeoutSeconds: e.RequestTimeoutSeconds, ProbeDisposition: e.ProbeDisposition,
 			ID: e.ID, ConnectionID: e.ConnectionID, ModelName: e.ModelName, OwnGroupName: e.OwnGroupName,
 			UpstreamSiteID: e.UpstreamSiteID, UpstreamGroupName: e.UpstreamGroupName, Result: e.Result,
@@ -857,6 +874,7 @@ type ModelTargetInput struct {
 }
 
 type PolicyInput struct {
+	RulePresetID                      *string            `json:"rulePresetId"`
 	ID                                string             `json:"id"`
 	Name                              string             `json:"name"`
 	Enabled                           bool               `json:"enabled"`
@@ -971,9 +989,17 @@ func buildPolicyAndTargets(userID string, adminAccountID string, id string, in P
 		}
 		unschedulableIntervalMinutes = *in.UnschedulableProbeIntervalMinutes
 	}
+	rulePresetID := ""
+	if in.RulePresetID != nil {
+		rulePresetID = strings.TrimSpace(*in.RulePresetID)
+		if rulePresetID == "" {
+			return Policy{}, nil, requestError(ErrorRequest)
+		}
+	}
 	strategyMode := normalizeStrategyMode(in.StrategyMode)
 	policy := Policy{
-		ID: id, UserID: userID, AdminAccountID: adminAccountID, Name: strings.TrimSpace(in.Name), Enabled: in.Enabled,
+		RulePresetID: rulePresetID,
+		ID:           id, UserID: userID, AdminAccountID: adminAccountID, Name: strings.TrimSpace(in.Name), Enabled: in.Enabled,
 		OwnGroupID: in.OwnGroupID, OwnGroupName: in.OwnGroupName, ModelPattern: defaultString(in.ModelPattern, "*"),
 		ProbeMode: "real_model", ProbeIntervalSeconds: defaultInt(in.ProbeIntervalSeconds, 60),
 		ContinueProbeWhenUnschedulable:    continueWhenUnschedulable,
@@ -1102,6 +1128,14 @@ func (s *Service) ProbeConnection(ctx context.Context, userID string, connection
 		return nil, requestError(ErrorNotFound)
 	}
 
+	if err := s.loadWorkspaceProbeCap(ctx, userID, adminAccountID); err != nil {
+		return nil, err
+	}
+	releaseSlot, acquired := s.sharedProbeLimiter().acquireManual(ctx, userID+"|"+adminAccountID, nil)
+	if !acquired {
+		return nil, ctx.Err()
+	}
+	defer releaseSlot()
 	results := make([]ModelHealth, 0, len(targets))
 	for _, mt := range targets {
 		outcome := s.probeRunner.Probe(ctx, ProbeRequest{
@@ -1114,7 +1148,7 @@ func (s *Service) ProbeConnection(ctx context.Context, userID string, connection
 		model := ModelHealth{
 			ModelName: mt.target.ModelName, ProviderFamily: mt.target.ProviderFamily, Configured: true,
 			State: StateHealthy, CurrentWeight: 100, ProbeResult: string(outcome.Result),
-			LastLatencyMs: &latencyMs, UpdatedAt: &probedAt,
+			FirstTokenMs: outcome.FirstTokenMs, FirstEventMs: outcome.FirstEventMs, RuleVersion: RuleVersionLegacy, LastLatencyMs: &latencyMs, UpdatedAt: &probedAt,
 		}
 		if outcome.Result != ResultOK && outcome.Result != ResultSlowResponse {
 			model.LastErrorKey = string(outcome.Result)

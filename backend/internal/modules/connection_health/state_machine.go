@@ -104,71 +104,163 @@ func transitionOnSlowResponse(in TransitionInput) TransitionOutput {
 	return out
 }
 
+// applyOutcomeDelay is the sole place where a successful request is labelled
+// slow. v2 measures visible first text; legacy keeps its whole-response metric.
+func applyOutcomeDelay(outcome ProbeOutcome, policy Policy) ProbeOutcome {
+	if outcome.Result != ResultOK && outcome.Result != ResultSlowResponse {
+		return outcome
+	}
+	if outcome.Result == ResultSlowResponse && outcome.FirstTokenMs == nil {
+		return outcome
+	}
+	metric := outcome.LatencyMs
+	if policy.RuleVersion == RuleVersionV2 && !outcome.LegacyCompatibility && outcome.FirstTokenMs != nil {
+		metric = *outcome.FirstTokenMs
+	}
+	if metric > RulePresetForPolicy(policy).DelayLine(outcome.Protocol) {
+		outcome.Result = ResultSlowResponse
+	} else {
+		outcome.Result = ResultOK
+	}
+	return outcome
+}
+
+func unchangedTransition(current ConnectionHealthState) TransitionOutput {
+	return TransitionOutput{NextState: current.State, Weight: current.CurrentWeight, ConsecutiveFailures: current.ConsecutiveFailures, ConsecutiveSuccesses: current.ConsecutiveSuccesses, CooldownUntil: current.CooldownUntil, ObservingUntil: current.ObservingUntil}
+}
+
+func transitionV2(in TransitionInput) TransitionOutput {
+	out := TransitionOutput{NextState: in.Current, Weight: in.CurrentWeight, ConsecutiveFailures: in.ConsecutiveFailures, ConsecutiveSuccesses: in.ConsecutiveSuccesses, CooldownUntil: in.CooldownUntil, ObservingUntil: in.ObservingUntil}
+	if in.Current == StateDisabled {
+		return out
+	}
+	if in.Result == ResultOK || in.Result == ResultSlowResponse {
+		out.ConsecutiveFailures = 0
+		if in.Current == StateSuspended {
+			out.ConsecutiveSuccesses++
+			if out.ConsecutiveSuccesses < successThreshold(in.Policy) {
+				out.Weight = 0
+				return out
+			}
+			out.TriggerRemoteRestore = true
+		}
+		out.NextState, out.Weight = StateHealthy, 100
+		out.ConsecutiveSuccesses = 0
+		out.CooldownUntil, out.ObservingUntil = nil, nil
+		return out
+	}
+	if !isHardFailure(in.Result) && in.Result != ResultNetworkFluctuation && in.Result != ResultRateLimited {
+		return out
+	}
+	if in.Current == StateHealthy {
+		out.NextState, out.Weight = StateSuspect, 100
+		out.ConsecutiveFailures, out.ConsecutiveSuccesses = 1, 0
+		out.CooldownUntil, out.ObservingUntil = nil, nil
+		return out
+	}
+	out.ConsecutiveFailures++
+	out.ConsecutiveSuccesses = 0
+	out.ObservingUntil = nil
+	if in.Current == StateSuspended {
+		out.Weight = 0
+		return out
+	}
+	if out.ConsecutiveFailures >= failureThreshold(in.Policy) {
+		until := in.Now.Add(cooldownWindow(in.Policy))
+		out.NextState, out.Weight, out.CooldownUntil = StateSuspended, 0, &until
+		out.TriggerRemoteDegrade = true
+	} else {
+		out.NextState, out.Weight = StateDegraded, 75
+	}
+	return out
+}
+
 func applyProbeOutcome(current ConnectionHealthState, outcome ProbeOutcome, policy Policy, now time.Time) (ConnectionHealthState, TransitionOutput) {
 	protocolAware := validTestProtocol(outcome.Protocol) && !outcome.LegacyCompatibility
-	if protocolAware && outcome.Result == ResultInvalidResponse {
-		next := current
-		next.LastProbeAt = &now
+	v2 := protocolAware && policy.RuleVersion == RuleVersionV2
+	policy = effectivePolicyFromPreset(policy)
+	outcome = applyOutcomeDelay(outcome, policy)
+	next := current
+	if protocolAware {
+		next.RuleVersion = RuleVersionLegacy
+		if v2 {
+			next.RuleVersion = RuleVersionV2
+		}
+		next.RecheckPending = false
 		next.LastProbeProtocol = protocolPointer(outcome.Protocol)
 		next.LastProbeTimeoutSeconds = intPtr(outcome.ProbeTimeoutSeconds)
-		next.LastLatencyMs = intPtr(outcome.LatencyMs)
-		return next, TransitionOutput{NextState: current.State, Weight: current.CurrentWeight, ConsecutiveFailures: current.ConsecutiveFailures, ConsecutiveSuccesses: current.ConsecutiveSuccesses, CooldownUntil: current.CooldownUntil, ObservingUntil: current.ObservingUntil}
 	}
-	eligible := protocolAware && policy.AutoDegradeEnabled && current.State != StateDisabled
-	matched := healthEvidenceMatches(current, outcome.Protocol)
-	if eligible {
-		if !matched {
-			current.HealthEvidenceStatus = HealthEvidenceInvalid
-			current.HealthEvidenceProtocol = nil
-		}
+	next.LastProbeAt = &now
+	next.LastLatencyMs = intPtr(outcome.LatencyMs)
+	// Protocol changes invalidate counters and their origin even when the new
+	// response is invalid. Preserve unmarked legacy callers' old invalid contract.
+	if protocolAware && policy.RuleVersion != "" {
 		counterProtocol := TestProtocolChatCompletions
 		if current.CounterProtocol != nil {
 			counterProtocol = *current.CounterProtocol
 		}
 		if counterProtocol != outcome.Protocol {
-			current.ConsecutiveFailures = 0
-			current.ConsecutiveSuccesses = 0
+			next.FailingSince = nil
+			next.ConsecutiveFailures, next.ConsecutiveSuccesses = 0, 0
 		}
-		current.CounterProtocol = protocolPointer(outcome.Protocol)
+		next.CounterProtocol = protocolPointer(outcome.Protocol)
 	}
-	transitionOut := Transition(TransitionInput{
-		Current: current.State, CurrentWeight: current.CurrentWeight,
-		ConsecutiveFailures: current.ConsecutiveFailures, ConsecutiveSuccesses: current.ConsecutiveSuccesses,
-		CooldownUntil: current.CooldownUntil, ObservingUntil: current.ObservingUntil,
-		Now: now, Result: outcome.Result, Policy: policy,
-	})
+	if protocolAware && outcome.Result == ResultInvalidResponse {
+		return next, unchangedTransition(next)
+	}
+	counted := outcome.Result == ResultOK || outcome.Result == ResultSlowResponse || isHardFailure(outcome.Result) || outcome.Result == ResultNetworkFluctuation || outcome.Result == ResultRateLimited
+	if protocolAware && !counted {
+		return next, unchangedTransition(next)
+	}
+	eligible := protocolAware && policy.AutoDegradeEnabled && current.State != StateDisabled
+	matched := healthEvidenceMatches(current, outcome.Protocol)
+	if protocolAware {
+		counterProtocol := TestProtocolChatCompletions
+		if current.CounterProtocol != nil {
+			counterProtocol = *current.CounterProtocol
+		}
+		if counterProtocol != outcome.Protocol {
+			next.FailingSince = nil
+			if eligible || policy.RuleVersion != "" {
+				next.ConsecutiveFailures, next.ConsecutiveSuccesses = 0, 0
+			}
+		}
+		if eligible || policy.RuleVersion != "" {
+			next.CounterProtocol = protocolPointer(outcome.Protocol)
+		}
+		if eligible && !matched {
+			next.HealthEvidenceStatus = HealthEvidenceInvalid
+			next.HealthEvidenceProtocol = nil
+		}
+		if outcome.Result == ResultOK || outcome.Result == ResultSlowResponse {
+			next.FailingSince = nil
+		} else if next.FailingSince == nil {
+			next.FailingSince = &now
+		}
+	}
+	input := TransitionInput{Current: next.State, CurrentWeight: next.CurrentWeight, ConsecutiveFailures: next.ConsecutiveFailures, ConsecutiveSuccesses: next.ConsecutiveSuccesses, CooldownUntil: next.CooldownUntil, ObservingUntil: next.ObservingUntil, Now: now, Result: outcome.Result, Policy: policy}
+	transitionOut := Transition(input)
+	if v2 {
+		transitionOut = transitionV2(input)
+	}
 	if !policy.AutoDegradeEnabled {
-		transitionOut = TransitionOutput{
-			NextState: current.State, Weight: current.CurrentWeight,
-			ConsecutiveFailures: current.ConsecutiveFailures, ConsecutiveSuccesses: current.ConsecutiveSuccesses,
-			CooldownUntil: current.CooldownUntil, ObservingUntil: current.ObservingUntil,
-		}
+		transitionOut = unchangedTransition(next)
 	}
-
-	next := current
-	next.State = transitionOut.NextState
-	next.CurrentWeight = transitionOut.Weight
-	next.ConsecutiveFailures = transitionOut.ConsecutiveFailures
-	next.ConsecutiveSuccesses = transitionOut.ConsecutiveSuccesses
-	next.CooldownUntil = transitionOut.CooldownUntil
-	next.ObservingUntil = transitionOut.ObservingUntil
-	next.LastProbeAt = &now
-	latencyMs := outcome.LatencyMs
-	next.LastLatencyMs = &latencyMs
-
+	next.State, next.CurrentWeight = transitionOut.NextState, transitionOut.Weight
+	next.ConsecutiveFailures, next.ConsecutiveSuccesses = transitionOut.ConsecutiveFailures, transitionOut.ConsecutiveSuccesses
+	next.CooldownUntil, next.ObservingUntil = transitionOut.CooldownUntil, transitionOut.ObservingUntil
+	if v2 && policy.AutoDegradeEnabled && current.State == StateHealthy && next.State == StateSuspect {
+		next.RecheckPending = true
+	}
 	if outcome.Result == ResultOK || outcome.Result == ResultSlowResponse {
-		next.LastSuccessAt = &now
-		next.LastSuccessLatencyMs = &latencyMs
-		next.LastErrorKey = ""
-		next.LastErrorDetail = ""
+		next.LastSuccessAt, next.LastSuccessLatencyMs = &now, intPtr(outcome.LatencyMs)
+		next.LastFirstTokenMs, next.LastFirstEventMs = outcome.FirstTokenMs, outcome.FirstEventMs
+		next.LastErrorKey, next.LastErrorDetail = "", ""
 	} else {
 		next.LastFailureAt = &now
-		next.LastErrorKey = string(outcome.Result)
-		next.LastErrorDetail = outcome.Detail
+		next.LastErrorKey, next.LastErrorDetail = string(outcome.Result), outcome.Detail
 	}
 	if protocolAware {
-		next.LastProbeProtocol = protocolPointer(outcome.Protocol)
-		next.LastProbeTimeoutSeconds = intPtr(outcome.ProbeTimeoutSeconds)
 		next.LastAppliedProbeAt = &now
 		result := string(outcome.Result)
 		next.LastAppliedProbeResult = &result
@@ -181,6 +273,9 @@ func applyProbeOutcome(current ConnectionHealthState, outcome ProbeOutcome, poli
 				(isSoftFailure(outcome.Result) && (next.State == StateDegraded || (next.State == StateSuspended && next.ConsecutiveFailures >= failureThreshold(policy)))) ||
 				(outcome.Result == ResultOK && (next.State == StateHealthy || next.State == StateRecovering)) ||
 				(outcome.Result == ResultSlowResponse && next.State == StateDegraded)
+			if v2 {
+				valid = true
+			}
 			if valid {
 				next.HealthEvidenceStatus = HealthEvidenceValid
 				next.HealthEvidenceProtocol = protocolPointer(outcome.Protocol)
@@ -188,6 +283,10 @@ func applyProbeOutcome(current ConnectionHealthState, outcome ProbeOutcome, poli
 		}
 	}
 	return next, transitionOut
+}
+
+func stateHasLongFailure(state ConnectionHealthState, policy Policy, now time.Time) bool {
+	return state.FailingSince != nil && !now.Before(state.FailingSince.Add(time.Duration(RulePresetForPolicy(policy).LongFailureAfterSeconds)*time.Second))
 }
 
 func stepPercent(p Policy) int {

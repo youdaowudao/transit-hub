@@ -96,6 +96,7 @@ const overviewFromAdminGroups = (groupList: AdminGroupHealth[]): ConnectionHealt
   const result: ConnectionHealthOverview = {
     totalConnections: 0,
     healthy: 0,
+    suspect: 0,
     degraded: 0,
     suspended: 0,
     observing: 0,
@@ -148,7 +149,10 @@ const overviewFromAdminGroups = (groupList: AdminGroupHealth[]): ConnectionHealt
         result.unconfigured++
         continue
       }
-      result[model.state]++
+      if (model.state === 'suspect') {
+        result.suspect = (result.suspect ?? 0) + 1
+        result.healthy++
+      } else result[model.state]++
     }
   }
   return result
@@ -720,15 +724,16 @@ export function useConnectionHealth() {
           if (evidencePending && hasProbePolicy && account.probeAvailable && account.probeModelsConfigured !== false) {
             for (const model of account.modelHealth) {
               if (model.currentHealthResult?.status === 'unverified' || !model.configured) continue
-              const field = `${model.state}Models` as 'healthyModels' | 'degradedModels' | 'suspendedModels' | 'observingModels' | 'recoveringModels' | 'disabledModels'
+              const field = `${model.state}Models` as 'healthyModels' | 'suspectModels' | 'degradedModels' | 'suspendedModels' | 'observingModels' | 'recoveringModels' | 'disabledModels'
               healthSummary[field] = Math.max(0, (healthSummary[field] ?? 0) - 1)
+              if (model.state === 'suspect') healthSummary.healthyModels = Math.max(0, healthSummary.healthyModels - 1)
               // Backend degradedModels also includes observing and recovering.
               if (model.state === 'observing' || model.state === 'recovering') healthSummary.degradedModels = Math.max(0, healthSummary.degradedModels - 1)
               healthSummary.unconfiguredModels = (healthSummary.unconfiguredModels ?? 0) + 1
             }
           }
           return { ...account, testConfiguration: nextConfiguration, ...(evidencePending ? {
-            modelHealth: account.modelHealth.map(model => ({ ...model, currentHealthResult: { status: 'unverified' as const }, lastSuccessLatencyMs: null })),
+            modelHealth: account.modelHealth.map(model => ({ ...model, currentHealthResult: { status: 'unverified' as const }, lastSuccessLatencyMs: null, firstTokenMs: null, firstEventMs: null })),
           } : {}) }
         })
         return { ...group, accounts, healthSummary }
@@ -1047,6 +1052,8 @@ export function connectionHealthStateBadgeClass(state: ConnectionHealthState | s
   switch (state) {
     case 'healthy':
       return 'bg-green-500/10 text-green-600 dark:text-green-400'
+    case 'suspect':
+      return 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
     case 'degraded':
       return 'bg-amber-500/10 text-amber-600 dark:text-amber-400'
     case 'suspended':
@@ -1081,6 +1088,10 @@ const RECORD_COLOR_CLASS: Record<string, string> = {
 
 export function connectionHealthRecordColorClass(result: string): string {
   return RECORD_COLOR_CLASS[result] ?? 'bg-zinc-400'
+}
+
+export function connectionHealthProbeResultLabelKey(result: string, ruleVersion?: string): string {
+  return `admin.connectionHealth.errorKeys.${result === 'slow_response' && ruleVersion === 'v2' ? 'delayed' : result}`
 }
 
 // remoteActionLabelKey 把后端记录的 remoteAction 原始字符串（见 backend connection_health/

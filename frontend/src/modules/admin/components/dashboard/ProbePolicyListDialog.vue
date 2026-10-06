@@ -5,12 +5,15 @@ import { Button } from '@/components/ui/button'
 import { Tooltip } from '@/components/ui/tooltip'
 import type { ConnectionHealthPolicy } from '../../types/connectionHealth'
 import { resolveConnectionHealthStrategyMode } from '../../utils/connectionHealthPolicy'
+import HealthRuleSettings from './HealthRuleSettings.vue'
 
 const props = defineProps<{
   open: boolean
   policies: ConnectionHealthPolicy[]
   deletingPolicyId: string
   deleteError: string
+  workspaceId?: string
+  workspacePlatform?: string
 }>()
 
 const emit = defineEmits<{
@@ -19,6 +22,7 @@ const emit = defineEmits<{
   (event: 'delete', policy: ConnectionHealthPolicy): void
   (event: 'edit', policy: ConnectionHealthPolicy): void
   (event: 'toggle', policy: ConnectionHealthPolicy): void
+  (event: 'rules-changed'): void
 }>()
 
 import { t } from '@/locales'
@@ -98,6 +102,7 @@ watch(() => props.policies.map(policy => policy.id).join('\u0000'), () => {
           </div>
 
           <div class="flex-1 overflow-y-auto px-5 py-4">
+            <HealthRuleSettings v-if="workspaceId && workspacePlatform === 'sub2api'" :active="open" :workspace-id="workspaceId" :policies="policies" @rules-changed="emit('rules-changed')" />
             <div v-if="policies.length === 0" class="flex flex-col items-center justify-center gap-2 py-16 text-center">
               <ShieldCheck class="h-8 w-8 text-muted-foreground/40" />
               <p class="text-sm text-muted-foreground">{{ t(`${prefix}.empty`) }}</p>

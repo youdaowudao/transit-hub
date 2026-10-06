@@ -54,5 +54,8 @@ func (r *Repository) SaveGroupTestConfiguration(ctx context.Context, userID, adm
 	if err != nil {
 		return err
 	}
+	if err := bumpHealthConfigGenerationTx(ctx, tx, userID, adminAccountID); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }

@@ -14,17 +14,21 @@ const harness = vi.hoisted(() => ({
   serviceErrorKey: { value: '' },
 }))
 
-vi.mock('@/modules/admin/composables/useConnectionHealth', () => ({
-  connectionHealthMessageKey: (key: string) => key,
-  connectionHealthRecordColorClass: () => '',
-  formatConnectionHealthTime: (value: string) => value,
-  useConnectionHealth: () => ({
-    discoverModels: harness.discoverModels,
-    manualProbeTarget: harness.manualProbeTarget,
-    runManualProbeOnce: harness.runManualProbeOnce,
-    errorKey: harness.serviceErrorKey,
-  }),
-}))
+vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/modules/admin/composables/useConnectionHealth')>()
+  return {
+    connectionHealthProbeResultLabelKey: actual.connectionHealthProbeResultLabelKey,
+    connectionHealthMessageKey: (key: string) => key,
+    connectionHealthRecordColorClass: () => '',
+    formatConnectionHealthTime: (value: string) => value,
+    useConnectionHealth: () => ({
+      discoverModels: harness.discoverModels,
+      manualProbeTarget: harness.manualProbeTarget,
+      runManualProbeOnce: harness.runManualProbeOnce,
+      errorKey: harness.serviceErrorKey,
+    }),
+  }
+})
 
 const mountedWrappers: VueWrapper[] = []
 

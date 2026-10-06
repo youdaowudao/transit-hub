@@ -51,7 +51,7 @@ func TestProtocolContractRequestAndDeadline(t *testing.T) {
 				}
 				response := `{"choices":[{"message":{"content":"ok"}}]}`
 				if tc.protocol == "responses" {
-					if body["max_output_tokens"] != float64(tc.budget) || body["stream"] != false || body["store"] != false || body["input"] == nil || body["messages"] != nil || body["max_tokens"] != nil || body["reasoning"] != nil {
+					if body["max_output_tokens"] != float64(tc.budget) || body["stream"] != true || body["store"] != false || body["input"] == nil || body["messages"] != nil || body["max_tokens"] != nil || body["reasoning"] != nil {
 						t.Errorf("wrong Responses request: %#v", body)
 					}
 					response = `{"status":"completed","output":[{"type":"reasoning"},{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}]}`
@@ -101,7 +101,8 @@ func TestProtocolContractCompleteResponseTwelveSecondsIsSlow(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"status":"completed","output":[{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"OK"}]}]}`)), Request: r}, nil
 	})
-	outcome := runner.Probe(context.Background(), ProbeRequest{BaseURL: "https://fixture.invalid", Protocol: TestProtocolResponses, ProbeTimeoutSeconds: 30, ModelName: "m"})
+	// Request classification leaves the delay label to the selected rule preset.
+	outcome := applyOutcomeDelay(runner.Probe(context.Background(), ProbeRequest{BaseURL: "https://fixture.invalid", Protocol: TestProtocolResponses, ProbeTimeoutSeconds: 30, ModelName: "m"}), Policy{RuleVersion: RuleVersionLegacy})
 	if outcome.Result != ResultSlowResponse || outcome.LatencyMs != 12000 {
 		t.Errorf("12s complete response must retain slow threshold: %+v", outcome)
 	}

@@ -209,8 +209,8 @@ describe('current protocol result and invalid attempt', () => {
     const wrapper = mountDetail([makeAccount({ hasEnabledProbePolicy: true, modelHealth: [model] })])
     await accountRow(wrapper, 'Account 100').find('button[aria-label="展开模型结果"]').trigger('click')
     expect(wrapper.text()).toContain('当前协议健康依据待验证')
-    expect(wrapper.text()).toContain('超过 5 秒仍属于慢响应')
-    expect(wrapper.text()).toContain('暂停或观察中的账号需要正常成功并满足原恢复条件')
+    expect(wrapper.text()).toContain('新规则下首字超过协议延迟线仍算成功')
+    expect(wrapper.text()).toContain('旧规则下慢响应沿用原恢复条件')
     expect(wrapper.text()).toContain(label)
     expect(wrapper.text()).not.toContain('probeBlockedReasons.admin.')
     expect(wrapper.text()).not.toContain(`admin.connectionHealth.probeBlockedReasons.${blockedReason}`)
@@ -222,6 +222,7 @@ describe('current protocol result and invalid attempt', () => {
       currentWeight: 0, consecutiveFailures: 3, consecutiveSuccesses: 0,
       lastFailureAt: '2026-10-02T10:00:00Z', lastProbeAt: '2026-10-02T10:05:00Z', lastSuccessAt: null,
       lastLatencyMs: 12, lastErrorKey: 'admin.connectionHealth.errors.probeAuth', lastErrorDetail: 'applied failure t1',
+      firstTokenMs: 7, firstEventMs: 3, ruleVersion: 'v2',
       lastRemoteAction: '', updatedAt: '2026-10-02T10:05:00Z',
       currentHealthResult: { status: 'failure', at: '2026-10-02T10:00:00Z', protocol: 'responses', errorKey: 'admin.connectionHealth.errors.probeAuth', errorDetail: 'applied failure t1' },
       lastAttempt: { at: '2026-10-02T10:05:00Z', protocol: 'responses', probeTimeoutSeconds: 30, disposition: 'invalid', errorDetail: 'invalid attempt t2' },
@@ -238,8 +239,8 @@ describe('current protocol result and invalid attempt', () => {
       props: {
         open: true, selectedConnectionId, groups: [], adminGroups: [group], siteName: (id: string) => id,
         events: [
-          { ...common, id: 'stale', result: 'slow_response', latencyMs: 33333, probeDisposition: 'stale', createdAt: '2026-10-02T10:06:00Z' },
-          { ...common, id: 't2', result: 'invalid_response', latencyMs: 22222, errorDetail: 'invalid attempt t2', probeDisposition: 'invalid', createdAt: '2026-10-02T10:05:00Z' },
+          { ...common, id: 'stale', result: 'slow_response', latencyMs: 33333, firstTokenMs: 99999, firstEventMs: 99998, ruleVersion: 'v2', probeDisposition: 'stale', createdAt: '2026-10-02T10:06:00Z' },
+          { ...common, id: 't2', result: 'invalid_response', latencyMs: 22222, firstTokenMs: 88888, firstEventMs: 88887, errorDetail: 'invalid attempt t2', probeDisposition: 'invalid', createdAt: '2026-10-02T10:05:00Z' },
           common,
         ],
       },
@@ -252,19 +253,24 @@ describe('current protocol result and invalid attempt', () => {
     expect(wrapper.text()).toContain('invalid attempt t2')
     expect(wrapper.text()).toContain('Responses / 30s')
     expect(wrapper.text()).toContain('12ms')
+    expect(wrapper.text()).toContain('首字：7ms')
+    expect(wrapper.text()).toContain('首个事件：3ms')
     expect(wrapper.text()).not.toContain('33333ms')
     expect(wrapper.text()).not.toContain('22222ms')
-    expect(wrapper.text()).not.toContain('其中 1 次为高延迟成功')
+    expect(wrapper.text()).not.toContain('99999ms')
+    expect(wrapper.text()).not.toContain('88888ms')
+    expect(wrapper.text()).not.toContain('其中 1 次为慢响应')
+    expect(wrapper.text()).not.toContain('其中 1 次为延迟')
     expect(wrapper.findAll('[title]').some(node => node.attributes('title')?.includes('过期尝试'))).toBe(true)
-    expect(wrapper.text()).not.toContain('请求在超时前成功返回，也可能尚未达到健康恢复条件')
+    expect(wrapper.text()).not.toContain('请求成功返回后仍需按当前工作区规则和所选预设判断恢复条件')
 
     await wrapper.setProps({ adminGroups: [{ ...group, accounts: [makeAccount({ modelHealth: [{
       ...model, currentHealthResult: { status: 'unverified', protocol: 'responses' },
       lastAttempt: { disposition: 'applied', result: 'slow_response', protocol: 'responses', probeTimeoutSeconds: 30, at: '2026-10-02T10:10:00Z' },
     }] })] }] })
     expect(wrapper.text()).toContain('当前协议健康依据待验证')
-    expect(wrapper.text()).toContain('超过 5 秒仍属于慢响应')
-    expect(wrapper.text()).toContain('暂停或观察中的账号需要正常成功并满足原恢复条件')
+    expect(wrapper.text()).toContain('新规则下首字超过协议延迟线仍算成功')
+    expect(wrapper.text()).toContain('旧规则下慢响应沿用原恢复条件')
 
     await wrapper.setProps({ adminGroups: [{ ...group, accounts: [makeAccount({ modelHealth: [{
       ...model, state: 'healthy', lastErrorKey: '', lastErrorDetail: '', lastSuccessAt: '2026-10-02T10:10:00Z',
@@ -274,7 +280,7 @@ describe('current protocol result and invalid attempt', () => {
     expect(wrapper.text()).not.toContain('当前失败')
     expect(wrapper.text()).not.toContain('invalid attempt t2')
     expect(wrapper.text()).not.toContain('applied failure t1')
-    expect(wrapper.text()).not.toContain('请求在超时前成功返回，也可能尚未达到健康恢复条件')
+    expect(wrapper.text()).not.toContain('请求成功返回后仍需按当前工作区规则和所选预设判断恢复条件')
   })
 
   it('retains the applied failure after a newer invalid attempt and only clears it for an applied success', async () => {

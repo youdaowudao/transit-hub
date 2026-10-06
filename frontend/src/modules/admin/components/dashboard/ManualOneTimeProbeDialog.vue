@@ -15,6 +15,7 @@ import {
 import {
   connectionHealthMessageKey,
   connectionHealthRecordColorClass,
+  connectionHealthProbeResultLabelKey,
   formatConnectionHealthTime,
   useConnectionHealth,
 } from '../../composables/useConnectionHealth'
@@ -1479,6 +1480,9 @@ const startTest = async () => {
 
 const formalProbeResult = (model: ModelHealth): ManualProbeResult => ({
   requestPhase: model.requestPhase,
+  ruleVersion: model.ruleVersion,
+  firstTokenMs: model.requestFirstTokenMs,
+  firstEventMs: model.requestFirstEventMs,
   protocol: model.requestProtocol,
   probeTimeoutSeconds: model.requestTimeoutSeconds,
   probeDisposition: model.probeDisposition,
@@ -1491,7 +1495,7 @@ const formalProbeResult = (model: ModelHealth): ManualProbeResult => ({
   probedAt: model.requestAt ?? model.updatedAt ?? new Date().toISOString(),
 })
 
-const resultLabel = (result: string): string => readableMessage(result)
+const resultLabel = (result: ManualProbeResult): string => result.result === 'slow_response' ? t(connectionHealthProbeResultLabelKey(result.result, result.ruleVersion)) : readableMessage(result.result)
 const resultIsSlow = (result: ManualProbeResult): boolean => result.result === 'slow_response'
 const answerSummary = (value: string): string => value.replace(/\s+/g, ' ').trim().slice(0, 160)
 const questionAnswerElapsedLabel = (record: QuestionAnswerRecord): string => {
@@ -1989,13 +1993,15 @@ const close = () => {
                           <span class="truncate text-sm font-medium text-foreground">{{ result.modelName }}</span>
                           <span class="inline-flex shrink-0 items-center gap-1 rounded-full bg-surface-elevated px-2 py-0.5 text-xs text-muted-foreground">
                             <span class="h-1.5 w-1.5 rounded-full" :class="result.probeDisposition === 'stale' ? 'bg-muted-foreground' : connectionHealthRecordColorClass(result.result)" />
-                            {{ result.probeDisposition === 'stale' ? t('admin.connectionHealth.testConfiguration.stale') : resultLabel(result.result) }}
+                            {{ result.probeDisposition === 'stale' ? t('admin.connectionHealth.testConfiguration.stale') : resultLabel(result) }}
                           </span>
                         </div>
                         <div class="flex shrink-0 items-center gap-3 text-xs text-muted-foreground">
                           <span>{{ requestProtocolLabel(result.protocol) }}<template v-if="result.probeTimeoutSeconds"> / {{ result.probeTimeoutSeconds }}s</template></span>
                           <span v-if="result.configurationChanged">{{ t('admin.connectionHealth.testConfiguration.changed') }}</span>
                           <span v-if="result.requestPhase === 'waiting_headers' || result.requestPhase === 'reading_body'">{{ t('admin.connectionHealth.testConfiguration.requestPhases.' + result.requestPhase) }}</span>
+                          <span v-if="result.firstTokenMs != null">首字：{{ result.firstTokenMs }}ms</span>
+                          <span v-if="result.firstEventMs != null">首个事件：{{ result.firstEventMs }}ms</span>
                           <span v-if="result.latencyMs !== null">{{ t(`${prefix}.latency`, { ms: result.latencyMs }) }}</span>
                           <span>{{ formatConnectionHealthTime(result.probedAt) }}</span>
                         </div>

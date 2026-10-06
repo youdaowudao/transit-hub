@@ -8,11 +8,12 @@ import (
 	"transithub/backend/internal/modules/upstream"
 )
 
-// State 是链路健康状态机的六个状态。disabled 只能人工恢复。
+// State 是链路健康状态机的七个状态。disabled 只能人工恢复。
 type State string
 
 const (
 	StateHealthy    State = "healthy"
+	StateSuspect    State = "suspect"
 	StateDegraded   State = "degraded"
 	StateSuspended  State = "suspended"
 	StateObserving  State = "observing"
@@ -217,30 +218,35 @@ type TargetActionState struct {
 // Policy 对应 connection_health_policies 表：一条健康探活/降级策略，
 // 按 own_group_id 匹配对接链路（own_group_id 为空表示匹配该 workspace 下全部已对接分组）。
 type Policy struct {
-	ID                                string    `json:"id"`
-	UserID                            string    `json:"-"`
-	AdminAccountID                    string    `json:"-"`
-	Name                              string    `json:"name"`
-	Enabled                           bool      `json:"enabled"`
-	OwnGroupID                        string    `json:"ownGroupId"`
-	OwnGroupName                      string    `json:"ownGroupName"`
-	ModelPattern                      string    `json:"modelPattern"`
-	ProbeMode                         string    `json:"probeMode"`
-	ProbeIntervalSeconds              int       `json:"probeIntervalSeconds"`
-	ContinueProbeWhenUnschedulable    bool      `json:"continueProbeWhenUnschedulable"`
-	UnschedulableProbeIntervalMinutes int       `json:"unschedulableProbeIntervalMinutes"`
-	FailureThreshold                  int       `json:"failureThreshold"`
-	SuccessThreshold                  int       `json:"successThreshold"`
-	CooldownSeconds                   int       `json:"cooldownSeconds"`
-	ObservationSeconds                int       `json:"observationSeconds"`
-	RecoveryStepPercent               int       `json:"recoveryStepPercent"`
-	AutoDegradeEnabled                bool      `json:"autoDegradeEnabled"`
-	AutoRemoteActionEnabled           bool      `json:"autoRemoteActionEnabled"`
-	PriorityMode                      string    `json:"priorityMode"`
-	StrategyMode                      string    `json:"strategyMode"`
-	DailyProbeBudget                  int       `json:"dailyProbeBudget"`
-	CreatedAt                         time.Time `json:"createdAt"`
-	UpdatedAt                         time.Time `json:"updatedAt"`
+	RuleVersion                       string      `json:"-"`
+	RulePreset                        *RulePreset `json:"-"`
+	ConfigGeneration                  int64       `json:"-"`
+	RulePresetID                      string      `json:"rulePresetId"`
+	LegacyPresetID                    string      `json:"legacyPresetId"`
+	ID                                string      `json:"id"`
+	UserID                            string      `json:"-"`
+	AdminAccountID                    string      `json:"-"`
+	Name                              string      `json:"name"`
+	Enabled                           bool        `json:"enabled"`
+	OwnGroupID                        string      `json:"ownGroupId"`
+	OwnGroupName                      string      `json:"ownGroupName"`
+	ModelPattern                      string      `json:"modelPattern"`
+	ProbeMode                         string      `json:"probeMode"`
+	ProbeIntervalSeconds              int         `json:"probeIntervalSeconds"`
+	ContinueProbeWhenUnschedulable    bool        `json:"continueProbeWhenUnschedulable"`
+	UnschedulableProbeIntervalMinutes int         `json:"unschedulableProbeIntervalMinutes"`
+	FailureThreshold                  int         `json:"failureThreshold"`
+	SuccessThreshold                  int         `json:"successThreshold"`
+	CooldownSeconds                   int         `json:"cooldownSeconds"`
+	ObservationSeconds                int         `json:"observationSeconds"`
+	RecoveryStepPercent               int         `json:"recoveryStepPercent"`
+	AutoDegradeEnabled                bool        `json:"autoDegradeEnabled"`
+	AutoRemoteActionEnabled           bool        `json:"autoRemoteActionEnabled"`
+	PriorityMode                      string      `json:"priorityMode"`
+	StrategyMode                      string      `json:"strategyMode"`
+	DailyProbeBudget                  int         `json:"dailyProbeBudget"`
+	CreatedAt                         time.Time   `json:"createdAt"`
+	UpdatedAt                         time.Time   `json:"updatedAt"`
 	// ModelTargets 不是数据库列，是查询时一并装载的关联目标（connection_health_model_targets）。
 	ModelTargets []ModelTarget `json:"modelTargets"`
 }
@@ -263,6 +269,11 @@ type ModelTarget struct {
 // ConnectionHealthState 对应 connection_health_states 表：一条对接链路在某个模型上的当前健康状态。
 // model_name 为 "*" 表示链路级（非模型级）状态。
 type ConnectionHealthState struct {
+	RuleVersion                 string
+	FailingSince                *time.Time
+	RecheckPending              bool
+	LastFirstTokenMs            *int
+	LastFirstEventMs            *int
 	LastProbeProtocol           *TestProtocol
 	LastProbeTimeoutSeconds     *int
 	LastAppliedProbeAt          *time.Time
@@ -303,6 +314,10 @@ type ConnectionHealthState struct {
 
 // ConnectionHealthEvent 对应 connection_health_events 表：探活或远端动作的一条留痕记录。
 type ConnectionHealthEvent struct {
+	RuleVersion           string
+	FirstTokenMs          *int
+	FirstEventMs          *int
+	LongFailure           *bool
 	RequestProtocol       *TestProtocol `json:"requestProtocol"`
 	RequestTimeoutSeconds *int          `json:"requestTimeoutSeconds"`
 	ProbeDisposition      string        `json:"probeDisposition"`
@@ -330,6 +345,9 @@ type ConnectionHealthEvent struct {
 
 // ProbeOutcome 是一次真实探活的结果，供状态机和事件记录消费。
 type ProbeOutcome struct {
+	FirstTokenMs        *int         `json:"firstTokenMs,omitempty"`
+	FirstEventMs        *int         `json:"firstEventMs,omitempty"`
+	NonStreaming        bool         `json:"nonStreaming,omitempty"`
 	Protocol            TestProtocol `json:"protocol"`
 	ProbeTimeoutSeconds int          `json:"probeTimeoutSeconds"`
 	LegacyCompatibility bool         `json:"-"`

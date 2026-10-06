@@ -2,6 +2,7 @@ package connection_health
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -49,6 +50,9 @@ func (r *Repository) RecordTargetCredentialFailure(ctx context.Context, initial 
 		return ConnectionHealthState{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := ensureWorkspaceHealthSettings(ctx, tx, initial.UserID, initial.AdminAccountID); err != nil {
+		return ConnectionHealthState{}, err
+	}
 	current, err := getStateTx(ctx, tx, initial.ConnectionID, initial.ModelName)
 	if err != nil {
 		return ConnectionHealthState{}, err
@@ -57,6 +61,16 @@ func (r *Repository) RecordTargetCredentialFailure(ctx context.Context, initial 
 		return ConnectionHealthState{}, requestError(ErrorNotFound)
 	}
 	if current == nil {
+		// No model request occurred: new stable-account rows belong to the rule
+		// currently stored inside W, including a switch during credential lookup.
+		initial.RuleVersion = RuleVersionLegacy
+		if strings.HasPrefix(initial.ConnectionID, "sub2api:") {
+			settings, err := getWorkspaceHealthSettings(ctx, tx, initial.UserID, initial.AdminAccountID)
+			if err != nil {
+				return ConnectionHealthState{}, err
+			}
+			initial.RuleVersion = settings.RuleVersion
+		}
 		initial.HealthEvidenceStatus, initial.HealthEvidenceProtocol = HealthEvidenceInvalid, nil
 		initial.LastCredentialFailureAt, initial.LastCredentialFailureReason = nil, ""
 		if err := upsertStateWithExecutor(ctx, tx, initial); err != nil {
@@ -64,7 +78,7 @@ func (r *Repository) RecordTargetCredentialFailure(ctx context.Context, initial 
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE connection_health_states
- SET last_credential_failure_at=$5, last_credential_failure_reason=$6,
+ SET last_credential_failure_at=$5, last_credential_failure_reason=$6,recheck_pending=false,
      updated_at=GREATEST(updated_at,$5)
  WHERE connection_id=$1 AND model_name=$2 AND user_id=$3 AND admin_account_id=$4
    AND (last_credential_failure_at IS NULL OR last_credential_failure_at<=$5)`,

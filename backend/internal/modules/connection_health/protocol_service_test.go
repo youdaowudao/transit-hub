@@ -170,8 +170,8 @@ func TestProtocolServiceInheritedTimeoutAndSSEActualRequest(t *testing.T) {
 					t.Errorf("inheritance path=%s deadline=%v", req.URL.Path, deadline)
 				}
 				var body map[string]any
-				if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body["stream"] != false || body["store"] != false {
-					t.Errorf("model request must remain nonstream: %v err=%v", body, err)
+				if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body["stream"] != true || body["store"] != false {
+					t.Errorf("health probe request must stream: %v err=%v", body, err)
 				}
 				return protocolServiceSuccess(req), nil
 			})

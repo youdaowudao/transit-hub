@@ -14,6 +14,10 @@ import (
 
 // ManualProbeResult 是一次性探活单个模型的 transient 结果，绝不包含上游凭据。
 type ManualProbeResult struct {
+	RuleVersion          string       `json:"ruleVersion"`
+	FirstTokenMs         *int         `json:"firstTokenMs,omitempty"`
+	FirstEventMs         *int         `json:"firstEventMs,omitempty"`
+	NonStreaming         bool         `json:"nonStreaming,omitempty"`
 	RequestPhase         string       `json:"requestPhase,omitempty"`
 	Protocol             TestProtocol `json:"protocol"`
 	ProbeTimeoutSeconds  int          `json:"probeTimeoutSeconds"`
@@ -42,6 +46,21 @@ func (s *Service) ManualProbeTarget(ctx context.Context, userID string, targetID
 	}
 
 	session, target, account, adminAccountID, err := s.resolveManualTarget(ctx, userID, targetID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.loadWorkspaceProbeCap(ctx, userID, adminAccountID); err != nil {
+		return nil, err
+	}
+	releaseSlot, acquired := s.sharedProbeLimiter().acquireManual(ctx, userID+"|"+adminAccountID, nil)
+	if !acquired {
+		return nil, ctx.Err()
+	}
+	defer releaseSlot()
+	settings, err := s.workspaceHealthSettings(ctx, userID, adminAccountID)
+	if target.Platform == string(upstream.PlatformNewAPI) {
+		settings.RuleVersion = RuleVersionLegacy
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -75,10 +94,10 @@ func (s *Service) ManualProbeTarget(ctx context.Context, userID string, targetID
 	for _, modelName := range requested {
 		spec, exists := specByModel[modelName]
 		if !exists {
-			spec = probeModelSpec{modelName: modelName, providerFamily: target.ProviderFamily, maxProbeTokens: 1}
+			spec = probeModelSpec{modelName: modelName, providerFamily: target.ProviderFamily, maxProbeTokens: 1, policy: Policy{RuleVersion: settings.RuleVersion}}
 		}
-		outcome := s.executeTargetProbe(ctx, target, cred, spec)
-		result := ManualProbeResult{
+		outcome := applyOutcomeDelay(s.executeTargetProbe(ctx, target, cred, spec), spec.policy)
+		result := ManualProbeResult{RuleVersion: spec.policy.RuleVersion, FirstTokenMs: outcome.FirstTokenMs, FirstEventMs: outcome.FirstEventMs, NonStreaming: outcome.NonStreaming,
 			RequestPhase: outcome.RequestPhase,
 			Protocol:     outcome.Protocol, ProbeTimeoutSeconds: outcome.ProbeTimeoutSeconds,
 			ModelName: modelName, Result: string(outcome.Result), Healthy: outcome.Result == ResultOK || outcome.Result == ResultSlowResponse,

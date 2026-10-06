@@ -164,6 +164,7 @@ const modelStateFilter = (state: ConnectionHealthState): GroupHealthFilter => ({
 
 const stateBreakdown = computed<StateBreakdownItem[]>(() => [
   { key: 'healthy', count: props.group.healthSummary.healthyModels ?? 0, filter: modelStateFilter('healthy'), tone: 'text-emerald-600 dark:text-emerald-400' },
+  { key: 'suspect', count: props.group.healthSummary.suspectModels ?? 0, filter: modelStateFilter('suspect'), tone: 'text-amber-600 dark:text-amber-400' },
   { key: 'degraded', count: strictDegradedCount.value, filter: modelStateFilter('degraded'), tone: 'text-amber-600 dark:text-amber-400' },
   { key: 'suspended', count: props.group.healthSummary.suspendedModels ?? 0, filter: modelStateFilter('suspended'), tone: 'text-red-600 dark:text-red-400' },
   { key: 'observing', count: props.group.healthSummary.observingModels ?? 0, filter: modelStateFilter('observing'), tone: 'text-blue-600 dark:text-blue-400' },
@@ -176,7 +177,7 @@ const stateBreakdown = computed<StateBreakdownItem[]>(() => [
 
 const readableMessage = (rawKey: string): string => t(connectionHealthMessageKey(rawKey, te))
 
-const STATE_PRIORITY: ConnectionHealthState[] = ['suspended', 'disabled', 'degraded', 'observing', 'recovering', 'healthy']
+const STATE_PRIORITY: ConnectionHealthState[] = ['suspended', 'disabled', 'degraded', 'observing', 'recovering', 'suspect', 'healthy']
 const accountProtocolUnverified = (account: AdminGroupAccount): boolean => account.modelHealth.some(model => model.currentHealthResult?.status === 'unverified')
 const aggregateState = (account: AdminGroupAccount): ConnectionHealthState | '' => {
   const present = new Set((account.modelHealth ?? []).map((model) => model.state))
@@ -311,6 +312,7 @@ const DEFAULT_SORT_DIRECTIONS: Record<AccountSortField, SortDirection> = {
 
 const HEALTH_SORT_RANK: Record<ConnectionHealthState, number> = {
   healthy: 0,
+  suspect: 0,
   observing: 1,
   recovering: 2,
   degraded: 3,
@@ -365,7 +367,7 @@ const matchesFilter = (account: AdminGroupAccount): boolean => {
       return Boolean(account.hasEnabledProbePolicy) && account.probeModelsConfigured === false
         || account.modelHealth.some(model => model.currentHealthResult?.status === 'unverified')
     case 'modelState':
-      return account.modelHealth.some(model => model.currentHealthResult?.status !== 'unverified' && model.state === filter.state)
+      return account.modelHealth.some(model => model.currentHealthResult?.status !== 'unverified' && (model.state === filter.state || filter.state === 'healthy' && model.state === 'suspect'))
     default:
       return true
   }
@@ -381,7 +383,12 @@ const accountLatency = (account: AdminGroupAccount): number | null => {
   return values.length > 0 ? Math.max(...values) : null
 }
 
-const accountHasSlowResponse = (account: AdminGroupAccount): boolean => (accountLatency(account) ?? 0) > 5000
+const accountHasSlowResponse = (account: AdminGroupAccount): boolean => account.modelHealth.some(model => model.probeResult === 'slow_response' && model.probeDisposition !== 'stale' && model.probeDisposition !== 'invalid')
+const accountResponseLabel = (account: AdminGroupAccount): string => account.modelHealth.some(model => model.ruleVersion === 'v2' && model.probeResult === 'slow_response') ? '延迟' : '慢响应'
+const accountMeasurement = (account: AdminGroupAccount, field: 'firstTokenMs' | 'firstEventMs'): number | null => {
+  const values = account.modelHealth.map(model => model[field]).filter((value): value is number => value != null && Number.isFinite(value))
+  return values.length ? Math.max(...values) : null
+}
 
 // 稳定性列按「最差模型」聚合：权重取最小、最近失败取最新、连败取最大，
 // 让一行的读数不会被同账号里状态较好的模型稀释。
@@ -545,7 +552,7 @@ const filteredModelHealth = (account: AdminGroupAccount) => {
   if (filter.kind === 'notProbed') return []
   if (filter.kind === 'unconfigured') return account.modelHealth.filter(model => model.currentHealthResult?.status === 'unverified')
   if (filter.kind !== 'modelState') return account.modelHealth
-  return account.modelHealth.filter(model => model.currentHealthResult?.status !== 'unverified' && model.state === filter.state)
+  return account.modelHealth.filter(model => model.currentHealthResult?.status !== 'unverified' && (model.state === filter.state || filter.state === 'healthy' && model.state === 'suspect'))
 }
 
 const filteredUnprobedModels = (account: AdminGroupAccount) => {
@@ -923,8 +930,10 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                   <span v-else :class="accountHasSlowResponse(account) ? 'text-amber-600 dark:text-amber-400' : 'text-foreground'">
                     {{ accountLatency(account) }} ms
                   </span>
+                  <span v-if="accountMeasurement(account, 'firstTokenMs') != null" class="mt-0.5 block text-[11px] text-muted-foreground">首字：{{ accountMeasurement(account, 'firstTokenMs') }}ms</span>
+                  <span v-if="accountMeasurement(account, 'firstEventMs') != null" class="mt-0.5 block text-[11px] text-muted-foreground">首个事件：{{ accountMeasurement(account, 'firstEventMs') }}ms</span>
                   <span v-if="accountHasSlowResponse(account)" class="mt-0.5 block text-[11px] text-amber-600 dark:text-amber-400">
-                    {{ t(`${detailPrefix}.slowResponse`) }}
+                    {{ accountResponseLabel(account) }}
                   </span>
                 </td>
                 <td class="w-40 px-3 py-3 pl-8 text-right tabular-nums">
@@ -1044,6 +1053,8 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                       </div>
                       <p v-if="model.currentHealthResult?.status === 'unverified'" class="mt-1 whitespace-normal break-words text-xs text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.unverifiedHelp') }}</p>
                       <div class="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                        <span v-if="model.firstTokenMs != null">首字：{{ model.firstTokenMs }}ms</span>
+                        <span v-if="model.firstEventMs != null">首个事件：{{ model.firstEventMs }}ms</span>
                         <span :class="model.state === 'suspended' ? 'text-destructive' : ''">{{ t(`${detailPrefix}.models.latency`, { value: !model.configured || model.state === 'suspended' ? '-' : (model.lastLatencyMs ?? '-') }) }}</span>
                         <span>{{ t(`${detailPrefix}.models.lastProbe`, { value: formatConnectionHealthTime(model.lastProbeAt) }) }}</span>
                         <span>{{ t(`${detailPrefix}.models.weight`, { value: model.currentWeight }) }}</span>

@@ -91,6 +91,7 @@ type AdminGroupHealthSummary struct {
 	ProbeableAccounts   int        `json:"probeableAccounts"`
 	UnprobeableAccounts int        `json:"unprobeableAccounts"`
 	HealthyModels       int        `json:"healthyModels"`
+	SuspectModels       int        `json:"suspectModels"`
 	DegradedModels      int        `json:"degradedModels"`
 	ObservingModels     int        `json:"observingModels"`
 	RecoveringModels    int        `json:"recoveringModels"`
@@ -882,7 +883,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				}
 				if healthStatesUsableForTarget(decisionTarget, activeStates, len(activeModels)) {
 					healthCandidatesByTarget[targetID] = healthPriorityCandidate{
-						targetID: targetID, multiplier: *effectiveMultiplier, states: activeStates,
+						targetID: targetID, multiplier: *effectiveMultiplier, states: activeStates, ruleVersion: priorityRuleVersionForTarget(decisionTarget.Platform, effectivePolicies, activeStates),
 						expectedModels: len(activeModels), healthBand: priorityHealthBand(activeStates, len(activeModels)),
 						latencyMs: targetSuccessLatency(decisionTarget, activeStates, activeModels),
 					}
@@ -1770,7 +1771,8 @@ func modelHealthForSpecs(byModel map[string]ConnectionHealthState, specs []probe
 		model := toModelHealth(spec.modelName, state)
 		model.ProviderFamily = spec.providerFamily
 		reuseProbeInterval := probeDecisionCanReuseInterval(&state, probeDecisionKey(target, spec))
-		decision := calculateEffectiveProbeDecisionWithBudgetAndReuse(spec.policies, target.Schedulable, &state, now, budgetUsage, reuseProbeInterval)
+		decisionState := probeDecisionStateForProtocol(&state, target.TestConfiguration.Protocol)
+		decision := calculateEffectiveProbeDecisionWithBudgetAndReuse(spec.policies, target.Schedulable, decisionState, now, budgetUsage, reuseProbeInterval)
 		if !budgetReady && decision.ContinueAutoProbe {
 			decision.NextProbeAt = nil
 			decision.BlockedReason = ProbeBlockedBudgetUnavailable
@@ -1885,6 +1887,10 @@ func accumulateSummary(summary *AdminGroupHealthSummary, models []ModelHealth) {
 		switch m.State {
 		case StateHealthy:
 			summary.HealthyModels++
+		case StateSuspect:
+			// Preserve the healthy band count and expose its suspect subset.
+			summary.HealthyModels++
+			summary.SuspectModels++
 		case StateDegraded:
 			summary.DegradedModels++
 		case StateObserving:

@@ -220,6 +220,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		upstreamService,
 		platformService,
 	)
+	connHealthService.SetProbeGlobalConcurrency(cfg.ProbeGlobalConcurrency)
 	if err := connHealthService.EnsureSchema(context.Background()); err != nil {
 		panic(err)
 	}

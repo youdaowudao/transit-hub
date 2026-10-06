@@ -3,6 +3,7 @@ package connection_health
 import (
 	"context"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
@@ -10,10 +11,8 @@ import (
 )
 
 const (
-	schedulerTickInterval   = 30 * time.Second
-	maxJobsPerTick          = 100
-	globalProbeConcurrency  = 5
-	perSiteProbeConcurrency = 2
+	schedulerTickInterval = 30 * time.Second
+	maxJobsPerTick        = 100
 )
 
 // adminProbeJob 是调度器一轮扫描出的、针对一个独立探活目标的到期任务集合。
@@ -108,6 +107,7 @@ func (s *Service) loadAdminInventory(ctx context.Context, userID string, adminAc
 		inventory.groups = append(inventory.groups, adminInventoryGroup{group: group, accounts: accounts, err: accountsErr})
 	}
 	guardAdminInventoryTimes(inventory)
+	recordSchedulerInventory(ctx, userID, adminAccountID, *inventory)
 	s.rememberActionInventory(userID, adminAccountID, inventory)
 	cache[key] = adminInventoryCacheEntry{inventory: inventory}
 	return inventory, nil
@@ -118,9 +118,11 @@ func (s *Service) loadAdminInventory(ctx context.Context, userID string, adminAc
 func (s *Service) StartScheduler(ctx context.Context) {
 	s.startEventRetention(ctx)
 	go func() {
-		s.runSchedulerTickSafely(ctx)
 		ticker := time.NewTicker(schedulerTickInterval)
 		defer ticker.Stop()
+		// Keep the 30s clock anchored to scheduler startup. If the immediate
+		// round takes longer, its due tick is consumed after that round finishes.
+		s.runSchedulerTickSafely(ctx)
 		for {
 			select {
 			case <-ctx.Done():
@@ -153,7 +155,15 @@ func (s *Service) runSchedulerTickSafely(ctx context.Context) {
 // runSchedulerTick 扫描全部已启用策略、旧版 target 分配和新版 admin 分组分配，按 workspace
 // 生成独立探活目标。分组新增的账号/渠道会在下一轮扫描时自动继承，无需写入额外 target 行。
 func (s *Service) runSchedulerTick(ctx context.Context) {
+	ctx, round := s.beginSchedulerRound(ctx)
+	defer s.finishSchedulerRound(round)
 	if s.platformGroups == nil {
+		return
+	}
+	var err error
+	ctx, err = s.captureAllWorkspaceRules(ctx)
+	if err != nil {
+		log.Printf("[connection-health] scheduler capture workspace rules failed: %v", err)
 		return
 	}
 	policies, err := s.repo.ListEnabledPolicies(ctx)
@@ -201,6 +211,15 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 		return
 	}
 
+	round.policies, round.targets, round.groups, round.exclusions = policies, assignments, groupAssignments, exclusions
+	capReady := make(map[string]bool)
+	for _, policy := range policies {
+		key := policy.UserID + "|" + policy.AdminAccountID
+		if _, read := capReady[key]; read {
+			continue
+		}
+		capReady[key] = s.loadWorkspaceProbeCap(ctx, policy.UserID, policy.AdminAccountID) == nil
+	}
 	// 优先级同步和探活使用同一份有效策略关系。优先级写入失败只记录日志，不阻断探活。
 	inventoryCache := make(adminInventoryCache)
 	s.syncMultiplierPrioritiesWithCache(ctx, policies, assignments, groupAssignments, exclusions, priorityStates, inventoryCache)
@@ -231,6 +250,9 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 
 	for _, j := range jobs {
 		wsKey := j.userID + "|" + j.adminAccountID
+		if !capReady[wsKey] {
+			continue
+		}
 		releaseSlot, acquired := s.sharedProbeLimiter().acquireAutomatic(ctx, wsKey)
 		if !acquired {
 			break
@@ -296,6 +318,10 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 		return
 	}
 	j.models = currentSpecs
+	if len(currentSpecs) > 0 {
+		j.target.ConfigGeneration = currentSpecs[0].policy.ConfigGeneration
+		j.target.ConfigGenerationKnown = currentSpecs[0].policy.RuleVersion != ""
+	}
 	j.dueSpecs = s.recheckAdminProbeSpecs(ctx, j.userID, j.adminAccountID, j.target, queuedSpecs, time.Now().UTC())
 	if len(j.dueSpecs) == 0 {
 		return
@@ -330,8 +356,6 @@ func (s *Service) recheckAdminProbeSpecs(ctx context.Context, userID string, adm
 	if len(specs) == 0 {
 		return nil
 	}
-	budgetUsage := make(map[string]int)
-	budgetLoaded := make(map[string]bool)
 	due := make([]probeModelSpec, 0, len(specs))
 	for _, spec := range specs {
 		policies := spec.policies
@@ -342,40 +366,17 @@ func (s *Service) recheckAdminProbeSpecs(ctx context.Context, userID string, adm
 		if !stateOK || !decision.ContinueAutoProbe || decision.NextProbeAt == nil || now.Before(*decision.NextProbeAt) {
 			continue
 		}
-		specBudgetUsage := make(map[string]int)
-		budgetReady := true
-		for _, sourcePolicy := range policies {
-			continueAutoProbe, _ := policyProbeCadence(sourcePolicy, target.Schedulable)
-			if !continueAutoProbe {
-				continue
-			}
-			if !budgetLoaded[sourcePolicy.ID] {
-				count, err := s.repo.CountProbesToday(ctx, userID, adminAccountID, sourcePolicy.ID, probeBudgetDayStart(now))
-				if err != nil {
-					budgetReady = false
-					break
-				}
-				budgetUsage[sourcePolicy.ID] = count
-				budgetLoaded[sourcePolicy.ID] = true
-			}
-			specBudgetUsage[sourcePolicy.ID] = budgetUsage[sourcePolicy.ID]
+		if state, err := s.repo.GetState(ctx, target.TargetID, spec.modelName); err == nil && state != nil {
+			spec.recheckPending = state.RecheckPending
 		}
-		if !budgetReady {
-			continue
-		}
-		decision, stateOK = s.effectiveProbeDecisionForSpec(ctx, target, spec, policies, now, specBudgetUsage)
-		if !stateOK || !decision.ContinueAutoProbe || decision.NextProbeAt == nil || now.Before(*decision.NextProbeAt) {
-			continue
-		}
-		budgetPolicy, found := policyWithID(policies, decision.BudgetPolicyID)
-		if !found {
-			continue
-		}
-		spec.budgetPolicy = budgetPolicy
+		spec.policies = policies
 		due = append(due, spec)
-		budgetUsage[budgetPolicy.ID]++
 	}
-	return due
+	jobs := s.selectAdminProbeJobsWithBudget(ctx, []adminProbeJob{{userID: userID, adminAccountID: adminAccountID, target: target, models: specs, dueSpecs: due}}, now, len(specs))
+	if len(jobs) == 0 {
+		return nil
+	}
+	return jobs[0].dueSpecs
 }
 
 func (s *Service) currentScheduledProbeSpecs(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, memberships []adminTargetMembership, queued []probeModelSpec) ([]probeModelSpec, []probeModelSpec, bool) {
@@ -457,26 +458,30 @@ func (s *Service) currentScheduledProbeSpecs(ctx context.Context, userID string,
 			allSpecs[index].eventAdminGroupName = source.adminGroupName
 		}
 	}
-	queuedModels := make(map[string]struct{}, len(queued))
-	for _, spec := range queued {
-		queuedModels[spec.modelName] = struct{}{}
+	currentByModel := make(map[string]probeModelSpec, len(allSpecs))
+	for _, spec := range allSpecs {
+		currentByModel[spec.modelName] = spec
 	}
 	queuedNow := make([]probeModelSpec, 0, len(allSpecs))
-	for _, spec := range allSpecs {
-		if _, exists := queuedModels[spec.modelName]; exists {
+	for _, queuedSpec := range queued {
+		if spec, exists := currentByModel[queuedSpec.modelName]; exists {
 			queuedNow = append(queuedNow, spec)
 		}
 	}
 	return allSpecs, queuedNow, true
 }
 
-// recordTargetCredentialUnavailable 在凭据解析失败时，对每个到期模型回填 last_probe_at（按探活
+// recordTargetCredentialUnavailable 在凭据解析失败时，对每个到期模型记录独立重试时间（按探活
 // 间隔退避，避免每 30s 反复命中受保护的 key/导出接口）并记录一条 unsupported 事件，
 // 事件 error_key 为脱敏 reason。不驱动状态机、不计入探活预算。
 func (s *Service) recordTargetCredentialUnavailable(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, specs []probeModelSpec, reason string) {
 	now := time.Now()
 	for _, spec := range specs {
 		initial := defaultTargetState(userID, adminAccountID, target, spec.modelName)
+		initial.RuleVersion = spec.policy.RuleVersion
+		if target.Platform != string(upstream.PlatformSub2API) || initial.RuleVersion == "" {
+			initial.RuleVersion = RuleVersionLegacy
+		}
 		// Credential preparation is a separate retry diagnostic. The repository
 		// updates only that diagnostic, without replaying a captured health row.
 		next, err := s.repo.RecordTargetCredentialFailure(ctx, initial, reason, now)
@@ -485,7 +490,12 @@ func (s *Service) recordTargetCredentialUnavailable(ctx context.Context, userID 
 			continue
 		}
 		eventTarget := targetForProbeSpec(target, spec)
-		if err := s.recordTargetEvent(ctx, userID, adminAccountID, eventTarget, spec.effectiveBudgetPolicy().ID, spec.modelName, string(ResultUnsupported), string(next.State), string(next.State), nil, reason, "", "", EventSourceScheduled); err != nil {
+		ruleVersion := next.RuleVersion
+		if ruleVersion == "" {
+			ruleVersion = initial.RuleVersion
+		}
+		metadata := targetProbeEventMetadata{RuleVersion: ruleVersion, LongFailure: stateHasLongFailure(next, spec.policy, now)}
+		if err := s.recordTargetEvent(ctx, userID, adminAccountID, eventTarget, spec.effectiveBudgetPolicy().ID, spec.modelName, string(ResultUnsupported), string(next.State), string(next.State), nil, reason, "", "", EventSourceScheduled, metadata); err != nil {
 			log.Printf("[connection-health] insert unavailable target event failed target_id=%s model=%s err=%v", target.TargetID, spec.modelName, err)
 		}
 	}
@@ -534,15 +544,8 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 
 	jobs := make([]adminProbeJob, 0, maxJobsPerTick)
 	now := time.Now()
-	modelBudget := maxJobsPerTick
-	budgetUsage := make(map[string]int)
-	budgetLoaded := make(map[string]bool)
-	dayStart := probeBudgetDayStart(time.Now())
 
 	for _, key := range order {
-		if modelBudget <= 0 {
-			break
-		}
 		ws := byWorkspace[key]
 		// 该 workspace 下没有任何 target 被分配过策略：直接跳过，不建 session、不拉分组/账号，
 		// 避免为完全没有分配关系的 workspace 发起任何上游调用。
@@ -588,9 +591,6 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 		candidates := make(map[string]*targetCandidate)
 		targetOrder := make([]string, 0)
 		for _, groupInventory := range inventory.groups {
-			if modelBudget <= 0 {
-				break
-			}
 			group := groupInventory.group
 			if groupInventory.err != nil {
 				log.Printf("[connection-health] scheduler list accounts failed group_id=%s err=%v", group.ID, groupInventory.err)
@@ -650,9 +650,6 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 		}
 
 		for _, targetID := range targetOrder {
-			if modelBudget <= 0 {
-				break
-			}
 			candidate := candidates[targetID]
 			candidate.target.InventoryComplete = adminInventoryComplete(*inventory)
 			candidate.target.TestMemberships = inventoryTestMemberships(*inventory, candidate.target.AccountID)
@@ -675,49 +672,14 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 			}
 			dueSpecs := make([]probeModelSpec, 0, len(specs))
 			for _, spec := range specs {
-				if modelBudget <= 0 {
-					break
-				}
 				decision, stateOK := s.effectiveProbeDecisionForSpec(ctx, candidate.target, spec, spec.policies, now, nil)
 				if !stateOK || !decision.ContinueAutoProbe || decision.NextProbeAt == nil || now.Before(*decision.NextProbeAt) {
 					continue
 				}
-				specBudgetUsage := make(map[string]int)
-				budgetReady := true
-				for _, sourcePolicy := range spec.policies {
-					continueAutoProbe, _ := policyProbeCadence(sourcePolicy, candidate.target.Schedulable)
-					if !continueAutoProbe {
-						continue
-					}
-					budgetKey := ws.userID + "|" + ws.adminAccountID + "|" + sourcePolicy.ID
-					if !budgetLoaded[budgetKey] {
-						count, countErr := s.repo.CountProbesToday(ctx, ws.userID, ws.adminAccountID, sourcePolicy.ID, dayStart)
-						if countErr != nil {
-							log.Printf("[connection-health] count policy probe budget failed policy_id=%s err=%v", sourcePolicy.ID, countErr)
-							budgetReady = false
-							break
-						}
-						budgetUsage[budgetKey] = count
-						budgetLoaded[budgetKey] = true
-					}
-					specBudgetUsage[sourcePolicy.ID] = budgetUsage[budgetKey]
+				if state, stateErr := s.repo.GetState(ctx, candidate.target.TargetID, spec.modelName); stateErr == nil && state != nil {
+					spec.recheckPending = state.RecheckPending
 				}
-				if !budgetReady {
-					continue
-				}
-				decision, stateOK = s.effectiveProbeDecisionForSpec(ctx, candidate.target, spec, spec.policies, now, specBudgetUsage)
-				if !stateOK || decision.NextProbeAt == nil || now.Before(*decision.NextProbeAt) {
-					continue
-				}
-				budgetPolicy, found := policyWithID(spec.policies, decision.BudgetPolicyID)
-				if !found {
-					continue
-				}
-				spec.budgetPolicy = budgetPolicy
-				budgetKey := ws.userID + "|" + ws.adminAccountID + "|" + budgetPolicy.ID
 				dueSpecs = append(dueSpecs, spec)
-				budgetUsage[budgetKey]++
-				modelBudget--
 			}
 			if len(dueSpecs) > 0 {
 				jobs = append(jobs, adminProbeJob{
@@ -728,7 +690,7 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 			}
 		}
 	}
-	return jobs
+	return s.selectAdminProbeJobsWithBudget(ctx, jobs, now, maxJobsPerTick)
 }
 
 // hasEnabledModelTarget 判断一组策略里是否存在至少一个启用策略下的启用模型目标。
@@ -774,7 +736,8 @@ func (s *Service) effectiveProbeDecisionForSpec(ctx context.Context, target Admi
 		return EffectiveProbeDecision{}, false
 	}
 	reuseProbeInterval := probeDecisionCanReuseInterval(state, probeDecisionKey(target, spec))
-	return calculateEffectiveProbeDecisionWithBudgetAndReuse(policies, target.Schedulable, state, now, budgetUsage, reuseProbeInterval), true
+	decisionState := probeDecisionStateForProtocol(state, target.TestConfiguration.Protocol)
+	return calculateEffectiveProbeDecisionWithBudgetAndReuse(policies, target.Schedulable, decisionState, now, budgetUsage, reuseProbeInterval), true
 }
 
 func policyWithID(policies []Policy, id string) (Policy, bool) {
@@ -784,4 +747,95 @@ func policyWithID(policies []Policy, id string) (Policy, bool) {
 		}
 	}
 	return Policy{}, false
+}
+
+// Limit individual model tasks before grouping by account. This prevents a large
+// account batch from hiding the single immediate recheck at its end.
+type adminProbeModelTask struct {
+	job  int
+	spec probeModelSpec
+}
+
+func orderedAdminProbeTasks(jobs []adminProbeJob) []adminProbeModelTask {
+	tasks := []adminProbeModelTask{}
+	for index, job := range jobs {
+		for _, spec := range job.dueSpecs {
+			tasks = append(tasks, adminProbeModelTask{index, spec})
+		}
+	}
+	sort.SliceStable(tasks, func(i, j int) bool { return tasks[i].spec.recheckPending && !tasks[j].spec.recheckPending })
+	return tasks
+}
+
+func prioritizeAndLimitProbeJobs(jobs []adminProbeJob, limit int) []adminProbeJob {
+	tasks := orderedAdminProbeTasks(jobs)
+	if len(tasks) > limit {
+		tasks = tasks[:limit]
+	}
+	return groupAdminProbeTasks(jobs, tasks)
+}
+
+// Estimate budgets only after pending tasks have won their stable position.
+// These increments remain in memory; probeTargetOnce makes the real claim.
+func (s *Service) selectAdminProbeJobsWithBudget(ctx context.Context, jobs []adminProbeJob, now time.Time, limit int) []adminProbeJob {
+	budgetUsage := map[string]int{}
+	budgetLoaded := map[string]bool{}
+	selected := []adminProbeModelTask{}
+	for _, task := range orderedAdminProbeTasks(jobs) {
+		if len(selected) >= limit {
+			break
+		}
+		job, spec := jobs[task.job], task.spec
+		usage := map[string]int{}
+		ready := true
+		for _, policy := range spec.policies {
+			continueProbe, _ := policyProbeCadence(policy, job.target.Schedulable)
+			if !continueProbe {
+				continue
+			}
+			key := job.userID + "|" + job.adminAccountID + "|" + policy.ID
+			if !budgetLoaded[key] {
+				count, err := s.repo.CountProbesToday(ctx, job.userID, job.adminAccountID, policy.ID, probeBudgetDayStart(now))
+				if err != nil {
+					log.Printf("[connection-health] count policy probe budget failed policy_id=%s err=%v", policy.ID, err)
+					ready = false
+					break
+				}
+				budgetUsage[key], budgetLoaded[key] = count, true
+			}
+			usage[policy.ID] = budgetUsage[key]
+		}
+		if !ready {
+			continue
+		}
+		decision, ok := s.effectiveProbeDecisionForSpec(ctx, job.target, spec, spec.policies, now, usage)
+		if !ok || !decision.ContinueAutoProbe || decision.NextProbeAt == nil || now.Before(*decision.NextProbeAt) {
+			continue
+		}
+		policy, found := policyWithID(spec.policies, decision.BudgetPolicyID)
+		if !found {
+			continue
+		}
+		task.spec.budgetPolicy = policy
+		selected = append(selected, task)
+		budgetUsage[job.userID+"|"+job.adminAccountID+"|"+policy.ID]++
+	}
+	return groupAdminProbeTasks(jobs, selected)
+}
+
+func groupAdminProbeTasks(jobs []adminProbeJob, tasks []adminProbeModelTask) []adminProbeJob {
+	result := []adminProbeJob{}
+	group := map[int]int{}
+	for _, task := range tasks {
+		index, exists := group[task.job]
+		if !exists {
+			index = len(result)
+			group[task.job] = index
+			copy := jobs[task.job]
+			copy.dueSpecs = nil
+			result = append(result, copy)
+		}
+		result[index].dueSpecs = append(result[index].dueSpecs, task.spec)
+	}
+	return result
 }

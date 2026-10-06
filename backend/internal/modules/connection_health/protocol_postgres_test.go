@@ -363,9 +363,19 @@ func TestProtocolPostgresAppliedInvalidStaleAndRetentionProjection(t *testing.T)
 	if err := r.SaveGroupTestConfiguration(ctx, "u", "w", "1", &GroupTestConfiguration{TestProtocolResponses, 30}); err != nil {
 		t.Fatal(err)
 	}
+	// This regression describes legacy verdict/projection behavior. Capture the new workspace generation at request start.
+	if _, err := r.SwitchWorkspaceRule(ctx, "u", "w", RuleVersionLegacy); err != nil {
+		t.Fatal(err)
+	}
+	captured, err := r.GetWorkspaceHealthSettings(ctx, "u", "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	preset := DefaultRulePreset()
+	preset.SuccessThreshold = 1
 	now := time.Date(2026, 10, 2, 1, 0, 0, 0, time.UTC)
 	target := AdminProbeTarget{TargetID: "sub2api:w:1", Platform: "sub2api", AccountID: "1", InventoryComplete: true, TestMemberships: []TestConfigurationSource{{AdminGroupID: "1"}}, TestConfiguration: EffectiveTestConfiguration{Protocol: TestProtocolResponses, ProbeTimeoutSeconds: 30, Status: "inherited"}}
-	input := TargetProbeCommit{UserID: "u", AdminAccountID: "w", Target: target, ModelName: "m", Policy: Policy{AutoDegradeEnabled: true, FailureThreshold: 3, SuccessThreshold: 1}, Outcome: ProbeOutcome{Result: ResultNetworkFluctuation, Protocol: TestProtocolResponses, ProbeTimeoutSeconds: 30, Detail: "accepted failure"}, DecisionKey: "d1", Event: ConnectionHealthEvent{ID: "probe-1", UserID: "u", AdminAccountID: "w", ConnectionID: target.TargetID, ModelName: "m"}, Now: now}
+	input := TargetProbeCommit{ConfigGeneration: captured.ConfigGeneration, UserID: "u", AdminAccountID: "w", Target: target, ModelName: "m", Policy: Policy{RuleVersion: RuleVersionLegacy, RulePreset: &preset, AutoDegradeEnabled: true, FailureThreshold: 3, SuccessThreshold: 1}, Outcome: ProbeOutcome{Result: ResultNetworkFluctuation, Protocol: TestProtocolResponses, ProbeTimeoutSeconds: 30, Detail: "accepted failure"}, DecisionKey: "d1", Event: ConnectionHealthEvent{ID: "probe-1", UserID: "u", AdminAccountID: "w", ConnectionID: target.TargetID, ModelName: "m"}, Now: now}
 	first, err := r.CommitTargetProbe(ctx, input)
 	if err != nil {
 		t.Fatal(err)
@@ -430,6 +440,11 @@ func TestProtocolPostgresAppliedInvalidStaleAndRetentionProjection(t *testing.T)
 	if result := projectCurrentHealth(*state, target.TestConfiguration); result.Status != "failure" || result.ErrorDetail != "accepted failure" {
 		t.Errorf("event retention erased durable last-applied failure: %+v", result)
 	}
+	captured, err = r.GetWorkspaceHealthSettings(ctx, "u", "w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.ConfigGeneration = captured.ConfigGeneration
 	input.Target.TestConfiguration.ProbeTimeoutSeconds = 31
 	input.Outcome.ProbeTimeoutSeconds = 31
 	input.Outcome.Result = ResultOK

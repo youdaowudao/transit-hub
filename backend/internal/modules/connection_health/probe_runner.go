@@ -16,12 +16,9 @@ import (
 // ProbeTimeout 是单次真实探活请求的超时时间，任务书要求默认 10s。
 const ProbeTimeout = 10 * time.Second
 
-const SlowResponseThreshold = 5 * time.Second
-
 const defaultProbePrompt = "hi"
 
-// 探活只需要一个很小的非流式 chat completion。异常上游返回超大响应时，继续读到 EOF
-// 以保持完整延迟口径，但不允许响应体无限占用后端内存。
+// 探活响应的单个事件和累计内容均有上限，避免异常上游无限占用内存。
 const maxProbeResponseBytes = 1024 * 1024
 
 // ProbeRequest 是发起一次真实轻量探活所需的全部参数。UpstreamKey 只用于构造请求凭据，
@@ -97,6 +94,10 @@ func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) (outcome 
 	}
 	defer resp.Body.Close()
 
+	if !legacy && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated) && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+		return readStreamingProbeResponse(resp.Body, req.Protocol, req.UpstreamKey, started, now)
+	}
+
 	body, oversized, readErr := readProbeResponseBody(resp.Body)
 	latencyMs := int(now().Sub(started).Milliseconds())
 	if readErr != nil {
@@ -108,7 +109,13 @@ func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) (outcome 
 	if legacy {
 		return classifyHTTPResponse(resp.StatusCode, body, req.UpstreamKey, latencyMs)
 	}
-	return classifyTestHTTPResponse(req.Protocol, resp.StatusCode, body, req.UpstreamKey, latencyMs)
+	outcome = classifyTestHTTPResponse(req.Protocol, resp.StatusCode, body, req.UpstreamKey, latencyMs)
+	if outcome.Result == ResultSlowResponse {
+		outcome.Result = ResultOK
+	}
+	outcome.FirstTokenMs, outcome.FirstEventMs = intPtr(latencyMs), intPtr(latencyMs)
+	outcome.NonStreaming = true
+	return outcome
 }
 
 func readProbeResponseBody(body io.Reader) ([]byte, bool, error) {
@@ -147,7 +154,7 @@ func buildProbeRequest(ctx context.Context, req ProbeRequest, prompt string, max
 	if protocol == "" {
 		protocol = TestProtocolChatCompletions
 	}
-	return buildTestRequest(ctx, testRequestInput{Protocol: protocol, BaseURL: req.BaseURL, Key: req.UpstreamKey, Model: model, Prompt: prompt, MaxTokens: maxTokens})
+	return buildTestRequest(ctx, testRequestInput{Protocol: protocol, BaseURL: req.BaseURL, Key: req.UpstreamKey, Model: model, Prompt: prompt, MaxTokens: maxTokens, Stream: !req.LegacyCompatibility && req.Protocol != ""})
 }
 
 func probeRequestErrorDetail(ctx context.Context, err error, req ProbeRequest, phase string) string {
@@ -205,7 +212,7 @@ func classifyHTTPResponse(status int, body []byte, upstreamKey string, latencyMs
 		if !validChatCompletionResponse(body) {
 			return ProbeOutcome{Result: ResultInvalidResponse, LatencyMs: latencyMs, Detail: detail}
 		}
-		if latencyMs > int(SlowResponseThreshold.Milliseconds()) {
+		if latencyMs > defaultProtocolDelayLineMs(TestProtocolChatCompletions) {
 			return ProbeOutcome{Result: ResultSlowResponse, LatencyMs: latencyMs, Detail: ""}
 		}
 		return ProbeOutcome{Result: ResultOK, LatencyMs: latencyMs, Detail: ""}

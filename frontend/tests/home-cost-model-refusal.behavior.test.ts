@@ -3,10 +3,14 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import ManualOneTimeProbeDialog from '@/modules/admin/components/dashboard/ManualOneTimeProbeDialog.vue'
 const harness = vi.hoisted(() => ({ discover: vi.fn() }))
-vi.mock('@/modules/admin/composables/useConnectionHealth', () => ({
- connectionHealthMessageKey: (key: string) => key, connectionHealthRecordColorClass: () => '', formatConnectionHealthTime: (v: string) => v,
- useConnectionHealth: () => ({ discoverModels: harness.discover, manualProbeTarget: vi.fn(), runManualProbeOnce: vi.fn(), errorKey: { value: '' } }),
-}))
+vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/modules/admin/composables/useConnectionHealth')>()
+  return {
+    connectionHealthProbeResultLabelKey: actual.connectionHealthProbeResultLabelKey,
+   connectionHealthMessageKey: (key: string) => key, connectionHealthRecordColorClass: () => '', formatConnectionHealthTime: (v: string) => v,
+   useConnectionHealth: () => ({ discoverModels: harness.discover, manualProbeTarget: vi.fn(), runManualProbeOnce: vi.fn(), errorKey: { value: '' } }),
+  }
+})
 describe('B known model-list refusal presentation', () => {
  it.each([
   ['announcementAckRequired', '上游要求先在网页上确认新公告，确认前无法读取数据。'],

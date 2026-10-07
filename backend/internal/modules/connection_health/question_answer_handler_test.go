@@ -51,7 +51,7 @@ func newQuestionAnswerHandlerFixture(t *testing.T) questionAnswerHandlerFixture 
 	if running, err := repository.MarkQuestionAnswerRunning(ctx, "handler-user", succeededBatchID, succeeded[0].ID); err != nil || !running {
 		t.Fatalf("mark succeeded handler record running=%v err=%v", running, err)
 	}
-	if completed, err := repository.CompleteQuestionAnswer(ctx, "handler-user", succeededBatchID, succeeded[0].ID, QuestionAnswerSucceeded, "answer", ""); err != nil || !completed {
+	if completed, err := repository.CompleteQuestionAnswer(ctx, "handler-user", succeededBatchID, succeeded[0].ID, questionAnswerTestCompletion(QuestionAnswerSucceeded, "answer", "")); err != nil || !completed {
 		t.Fatalf("complete succeeded handler record=%v err=%v", completed, err)
 	}
 
@@ -63,7 +63,7 @@ func newQuestionAnswerHandlerFixture(t *testing.T) questionAnswerHandlerFixture 
 	if running, err := repository.MarkQuestionAnswerRunning(ctx, "handler-user", failedBatchID, failed[0].ID); err != nil || !running {
 		t.Fatalf("mark failed handler record running=%v err=%v", running, err)
 	}
-	if completed, err := repository.CompleteQuestionAnswer(ctx, "handler-user", failedBatchID, failed[0].ID, QuestionAnswerFailed, "", QuestionAnswerErrorNetwork); err != nil || !completed {
+	if completed, err := repository.CompleteQuestionAnswer(ctx, "handler-user", failedBatchID, failed[0].ID, questionAnswerTestCompletion(QuestionAnswerFailed, "", QuestionAnswerErrorNetwork)); err != nil || !completed {
 		t.Fatalf("complete failed handler record=%v err=%v", completed, err)
 	}
 
@@ -90,6 +90,19 @@ func (f questionAnswerHandlerFixture) request(t *testing.T, method string, path 
 
 func (f questionAnswerHandlerFixture) requestAs(t *testing.T, userID string, method string, path string, body string, contract string) *httptest.ResponseRecorder {
 	t.Helper()
+	if method == http.MethodPut && strings.HasSuffix(path, "/judgment") {
+		var input map[string]any
+		if json.Unmarshal([]byte(body), &input) == nil {
+			version := questionAnswerTestUpdatedAt(t, NewRepository(f.pool), context.Background(), "handler-user", f.targetID, f.succeededRecordID)
+			input["expectedUpdatedAt"] = version.Format(time.RFC3339Nano)
+			encoded, err := json.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body = string(encoded)
+		}
+	}
+
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request = request.WithContext(authctx.WithUserID(request.Context(), userID))
 	if contract != "" {
@@ -242,7 +255,7 @@ func TestQuestionAnswerKeywordHandlersPreserveOldClientsAndRejectInvalidInput(t 
 
 func TestQuestionAnswerKeywordSnapshotAppearsAcrossReadAndJudgmentHandlers(t *testing.T) {
 	fixture := newQuestionAnswerHandlerFixture(t)
-	contract := "2"
+	contract := "3"
 	assertSnapshot := func(t *testing.T, record map[string]any, want []string, wantNull bool) {
 		t.Helper()
 		value, exists := record["questionKeywordSnapshot"]
@@ -343,10 +356,13 @@ func TestQuestionAnswerKeywordSnapshotAppearsAcrossReadAndJudgmentHandlers(t *te
 	if err := json.Unmarshal(historyResponse.Body.Bytes(), &history); err != nil {
 		t.Fatalf("decode history: %v", err)
 	}
-	for _, item := range history["records"].([]any) {
-		if _, exists := item.(map[string]any)["questionKeywordSnapshot"]; !exists {
-			t.Fatal("history response omits questionKeywordSnapshot")
+	for _, item := range history["batches"].([]any) {
+		if _, exists := item.(map[string]any)["questions"]; !exists {
+			t.Fatal("history batch omits question version summaries")
 		}
+	}
+	if _, exists := history["records"]; exists {
+		t.Fatal("history summary returned long answer records")
 	}
 
 	judgmentPath := "/api/connection-health/targets/" + fixture.targetID + "/question-answers/records/" + fixture.succeededRecordID + "/judgment"
@@ -397,7 +413,7 @@ func TestQuestionAnswerKeywordSnapshotAppearsInStartHandlerResponse(t *testing.T
 		strings.NewReader(`{"models":["model-a"],"questionIds":["question-start-snapshot"],"reasoningEffort":"medium"}`),
 	)
 	request = request.WithContext(authctx.WithUserID(request.Context(), "user1"))
-	request.Header.Set(questionAnswerContractHeader, "2")
+	request.Header.Set(questionAnswerContractHeader, "3")
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
 
@@ -452,11 +468,11 @@ func TestQuestionAnswerHandlerRepeatCountRejectsInvalidBeforeWrite(t *testing.T)
 		{name: "null", body: `{"models":["model-a"],"questionIds":["` + fixture.questionID + `"],"repeatCount":null}`, errorKey: ErrorQuestionAnswerRepeatCount},
 		{name: "negative", body: `{"models":["model-a"],"questionIds":["` + fixture.questionID + `"],"repeatCount":-1}`, errorKey: ErrorQuestionAnswerRepeatCount},
 		{name: "fraction", body: `{"models":["model-a"],"questionIds":["` + fixture.questionID + `"],"repeatCount":1.5}`, errorKey: ErrorQuestionAnswerRepeatCount},
-		{name: "string", body: `{"models":["model-a"],"questionIds":["` + fixture.questionID + `"],"repeatCount":"2"}`, errorKey: ErrorQuestionAnswerRepeatCount},
+		{name: "string", body: `{"models":["model-a"],"questionIds":["` + fixture.questionID + `"],"repeatCount":"3"}`, errorKey: ErrorQuestionAnswerRepeatCount},
 		{name: "total 51", body: string(overLimitBody), errorKey: ErrorQuestionAnswerBatchLimit},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			response := fixture.request(t, http.MethodPost, path, test.body, "2")
+			response := fixture.request(t, http.MethodPost, path, test.body, "3")
 			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), test.errorKey) {
 				t.Fatalf("status=%d body=%s want=400 %s", response.Code, response.Body.String(), test.errorKey)
 			}
@@ -480,7 +496,7 @@ func TestQuestionAnswerHandlerRepeatCountRejectsInvalidBeforeWrite(t *testing.T)
 func TestQuestionAnswerHandlerModelStatsEmptyArrays(t *testing.T) {
 	fixture := newQuestionAnswerHandlerFixture(t)
 	path := "/api/connection-health/targets/sub2api:ws1:empty-model-stats/question-answers/history?page=1"
-	response := fixture.request(t, http.MethodGet, path, "", "2")
+	response := fixture.request(t, http.MethodGet, path, "", "3")
 	if response.Code != http.StatusOK {
 		t.Fatalf("empty history status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -488,7 +504,7 @@ func TestQuestionAnswerHandlerModelStatsEmptyArrays(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &history); err != nil {
 		t.Fatalf("decode empty history: %v", err)
 	}
-	for _, key := range []string{"stats", "todayStats"} {
+	for _, key := range []string{"allTimeStats", "todayStats"} {
 		stats, ok := history[key].(map[string]any)
 		if !ok {
 			t.Fatalf("%s=%#v want object", key, history[key])
@@ -519,7 +535,7 @@ func TestQuestionAnswerHandlersRejectMissingOrWrongContractBeforeBusinessLogic(t
 		{name: "judgment", method: http.MethodPut, path: "/api/connection-health/targets/" + fixture.targetID + "/question-answers/records/" + fixture.succeededRecordID + "/judgment", body: `{"judgment":"correct"}`},
 	}
 	for _, requestCase := range paths {
-		for _, contract := range []string{"", "1"} {
+		for _, contract := range []string{"", "1", "2"} {
 			t.Run(requestCase.name+"/contract="+contract, func(t *testing.T) {
 				response := fixture.request(t, requestCase.method, requestCase.path, requestCase.body, contract)
 				if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "admin.connectionHealth.errors.questionAnswerContractMismatch") {
@@ -533,7 +549,7 @@ func TestQuestionAnswerHandlersRejectMissingOrWrongContractBeforeBusinessLogic(t
 func TestQuestionAnswerOldManualErrorEndpointIsReadOnlyCompatibilityRejection(t *testing.T) {
 	fixture := newQuestionAnswerHandlerFixture(t)
 	path := "/api/connection-health/targets/" + fixture.targetID + "/question-answers/records/" + fixture.succeededRecordID + "/manual-error"
-	response := fixture.request(t, http.MethodPut, path, `{"manualError":true}`, "2")
+	response := fixture.request(t, http.MethodPut, path, `{"manualError":true}`, "3")
 	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "admin.connectionHealth.errors.questionAnswerContractMismatch") {
 		t.Fatalf("status=%d body=%s, want 409 contract mismatch", response.Code, response.Body.String())
 	}
@@ -554,7 +570,7 @@ func TestQuestionAnswerJudgmentHandlerSavesAuthoritativeStateWithoutPriority(t *
 		if attempt > 1 && attempt%2 == 1 {
 			judgment = "incorrect"
 		}
-		response := fixture.request(t, http.MethodPut, path, `{"judgment":"`+judgment+`"}`, "2")
+		response := fixture.request(t, http.MethodPut, path, `{"judgment":"`+judgment+`"}`, "3")
 		if response.Code != http.StatusOK {
 			t.Fatalf("save %s status=%d body=%s", judgment, response.Code, response.Body.String())
 		}
@@ -587,7 +603,7 @@ func TestQuestionAnswerJudgmentHandlerRejectsUnauthenticatedRequest(t *testing.T
 	fixture := newQuestionAnswerHandlerFixture(t)
 	path := "/api/connection-health/targets/" + fixture.targetID + "/question-answers/records/" + fixture.succeededRecordID + "/judgment"
 	request := httptest.NewRequest(http.MethodPut, path, strings.NewReader(`{"judgment":"incorrect"}`))
-	request.Header.Set(questionAnswerContractHeader, "2")
+	request.Header.Set(questionAnswerContractHeader, "3")
 	response := httptest.NewRecorder()
 
 	fixture.mux.ServeHTTP(response, request)
@@ -616,14 +632,14 @@ func TestQuestionAnswerJudgmentHandlerRejectsInvalidAndNonSucceededRecords(t *te
 	fixture := newQuestionAnswerHandlerFixture(t)
 	invalidPath := "/api/connection-health/targets/" + fixture.targetID + "/question-answers/records/" + fixture.succeededRecordID + "/judgment"
 	for _, body := range []string{`{"judgment":"unknown"}`, `{"judgment":`} {
-		invalid := fixture.request(t, http.MethodPut, invalidPath, body, "2")
+		invalid := fixture.request(t, http.MethodPut, invalidPath, body, "3")
 		if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), ErrorRequest) {
 			t.Fatalf("invalid judgment body=%q status=%d response=%s", body, invalid.Code, invalid.Body.String())
 		}
 	}
 
 	failedPath := "/api/connection-health/targets/" + fixture.targetID + "/question-answers/records/" + fixture.failedRecordID + "/judgment"
-	failed := fixture.request(t, http.MethodPut, failedPath, `{"judgment":"incorrect"}`, "2")
+	failed := fixture.request(t, http.MethodPut, failedPath, `{"judgment":"incorrect"}`, "3")
 	if failed.Code != http.StatusConflict || !strings.Contains(failed.Body.String(), "admin.connectionHealth.errors.questionAnswerJudgmentForbidden") {
 		t.Fatalf("failed-record judgment status=%d body=%s", failed.Code, failed.Body.String())
 	}
@@ -653,7 +669,7 @@ func TestQuestionAnswerJudgmentHandlerScopesWritesByUserAndTarget(t *testing.T) 
 		{name: "other target", userID: "handler-user", path: wrongTargetPath},
 	} {
 		t.Run(requestCase.name, func(t *testing.T) {
-			response := fixture.requestAs(t, requestCase.userID, http.MethodPut, requestCase.path, `{"judgment":"incorrect"}`, "2")
+			response := fixture.requestAs(t, requestCase.userID, http.MethodPut, requestCase.path, `{"judgment":"incorrect"}`, "3")
 			if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "admin.connectionHealth.errors.questionAnswerJudgmentForbidden") {
 				t.Fatalf("status=%d body=%s, want scoped write rejection", response.Code, response.Body.String())
 			}

@@ -2,9 +2,12 @@ package connection_health
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -41,6 +44,9 @@ const (
 	ErrorQuestionAnswerBatchNotFound     = "admin.connectionHealth.errors.questionAnswerBatchNotFound"
 	ErrorQuestionAnswerStorage           = "admin.connectionHealth.errors.questionAnswerStorage"
 	ErrorQuestionAnswerContractMismatch  = "admin.connectionHealth.errors.questionAnswerContractMismatch"
+	ErrorQuestionAnswerJudgmentConflict  = "admin.connectionHealth.errors.questionAnswerJudgmentConflict"
+	ErrorQuestionAnswerHistoryScope      = "admin.connectionHealth.errors.questionAnswerHistoryScope"
+	ErrorQuestionAnswerHistoryPage       = "admin.connectionHealth.errors.questionAnswerHistoryPage"
 	ErrorQuestionAnswerJudgmentForbidden = "admin.connectionHealth.errors.questionAnswerJudgmentForbidden"
 	ErrorQuestionAnswerServiceStopped    = "admin.connectionHealth.errors.questionAnswerServiceStopped"
 )
@@ -62,6 +68,13 @@ const (
 type QuestionAnswerStatus string
 
 type QuestionAnswerJudgment string
+
+type QuestionAnswerJudgmentSource string
+
+const (
+	QuestionAnswerJudgmentAutomatic QuestionAnswerJudgmentSource = "automatic"
+	QuestionAnswerJudgmentManual    QuestionAnswerJudgmentSource = "manual"
+)
 
 type QuestionAnswerReasoningEffort string
 
@@ -126,6 +139,8 @@ type QuestionAnswerRecord struct {
 	Status                  QuestionAnswerStatus           `json:"status"`
 	ErrorType               string                         `json:"errorType"`
 	AnswerJudgment          *QuestionAnswerJudgment        `json:"answerJudgment"`
+	JudgmentSource          *QuestionAnswerJudgmentSource  `json:"judgmentSource"`
+	RepeatIndex             *int                           `json:"repeatIndex"`
 	ManualError             bool                           `json:"manualError"`
 	CreatedAt               time.Time                      `json:"createdAt"`
 	StartedAt               *time.Time                     `json:"startedAt"`
@@ -153,27 +168,71 @@ type QuestionAnswerModelStats struct {
 	Reviews   QuestionAnswerReviewStats  `json:"reviews"`
 }
 
-type QuestionAnswerStats struct {
-	Requests QuestionAnswerRequestStats `json:"requests"`
-	Reviews  QuestionAnswerReviewStats  `json:"reviews"`
-	ByModel  []QuestionAnswerModelStats `json:"byModel"`
+type QuestionAnswerQuestionStats struct {
+	QuestionSnapshotKey string                     `json:"questionSnapshotKey"`
+	QuestionID          string                     `json:"questionId"`
+	DisplayQuestionName string                     `json:"displayQuestionName"`
+	QuestionBody        string                     `json:"questionBody"`
+	NormalizedKeywords  []string                   `json:"normalizedKeywords"`
+	Requests            QuestionAnswerRequestStats `json:"requests"`
+	Reviews             QuestionAnswerReviewStats  `json:"reviews"`
+	ByModel             []QuestionAnswerModelStats `json:"byModel"`
 }
 
-// QuestionAnswerTodaySummary 是外部账号列表所需的新加坡自然日最小统计。
-// Submitted 包含当天所有已创建记录；Correct 只包含已成功且人工评判为正确的记录。
+type QuestionAnswerStats struct {
+	Requests   QuestionAnswerRequestStats    `json:"requests"`
+	Reviews    QuestionAnswerReviewStats     `json:"reviews"`
+	ByModel    []QuestionAnswerModelStats    `json:"byModel"`
+	ByQuestion []QuestionAnswerQuestionStats `json:"byQuestion"`
+}
+
+// QuestionAnswerTodaySummary is the local Singapore-day projection for account lists.
 type QuestionAnswerTodaySummary struct {
 	Submitted int
+	Judged    int
 	Correct   int
 }
 
+type QuestionAnswerSummaryStats struct {
+	Requests QuestionAnswerRequestStats `json:"requests"`
+	Reviews  QuestionAnswerReviewStats  `json:"reviews"`
+}
+
+type QuestionAnswerSummary struct {
+	TargetID   string                     `json:"targetId"`
+	TodayStats QuestionAnswerSummaryStats `json:"todayStats"`
+}
+
 type QuestionAnswerHistory struct {
-	Records    []QuestionAnswerRecord `json:"records"`
-	Page       int                    `json:"page"`
-	PageSize   int                    `json:"pageSize"`
-	TotalItems int                    `json:"totalItems"`
-	TotalPages int                    `json:"totalPages"`
-	Stats      QuestionAnswerStats    `json:"stats"`
-	TodayStats QuestionAnswerStats    `json:"todayStats"`
+	Batches      []QuestionAnswerBatchSummary `json:"batches"`
+	Page         int                          `json:"page"`
+	PageSize     int                          `json:"pageSize"`
+	TotalBatches int                          `json:"totalBatches"`
+	TotalPages   int                          `json:"totalPages"`
+	TodayStats   QuestionAnswerStats          `json:"todayStats"`
+	AllTimeStats QuestionAnswerStats          `json:"allTimeStats"`
+}
+
+type QuestionAnswerBatchSummary struct {
+	BatchID         string                         `json:"batchId"`
+	CreatedAt       time.Time                      `json:"createdAt"`
+	StartedAt       *time.Time                     `json:"startedAt"`
+	CompletedAt     *time.Time                     `json:"completedAt"`
+	RequestProtocol *TestProtocol                  `json:"requestProtocol"`
+	ReasoningEffort *QuestionAnswerReasoningEffort `json:"reasoningEffort"`
+	Models          []string                       `json:"models"`
+	Questions       []QuestionAnswerQuestionStats  `json:"questions"`
+	RepeatCount     int                            `json:"repeatCount"`
+	Active          bool                           `json:"active"`
+	Stats           QuestionAnswerStats            `json:"stats"`
+}
+
+type QuestionAnswerCompletion struct {
+	Status         QuestionAnswerStatus
+	AnswerBody     string
+	ErrorType      string
+	AnswerJudgment *QuestionAnswerJudgment
+	JudgmentSource *QuestionAnswerJudgmentSource
 }
 
 type QuestionAnswerBatch struct {
@@ -781,23 +840,47 @@ func (s *Service) StopQuestionAnswerBatch(ctx context.Context, userID string, ta
 	return s.GetQuestionAnswerBatch(ctx, userID, targetID, batchID)
 }
 
-func (s *Service) QuestionAnswerHistory(ctx context.Context, userID string, targetID string, page int) (QuestionAnswerHistory, error) {
+func (s *Service) QuestionAnswerHistory(ctx context.Context, userID string, targetID string, page int, scope string) (QuestionAnswerHistory, error) {
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerHistory{}, err
 	}
-	return s.questionAnswers.ListQuestionAnswerHistory(ctx, userID, targetID, page)
+	if page < 1 {
+		return QuestionAnswerHistory{}, requestError(ErrorQuestionAnswerHistoryPage)
+	}
+	if scope != "today" && scope != "all" {
+		return QuestionAnswerHistory{}, requestError(ErrorQuestionAnswerHistoryScope)
+	}
+	history, err := s.questionAnswers.ListQuestionAnswerHistory(ctx, userID, targetID, page, scope)
+	if err != nil {
+		return QuestionAnswerHistory{}, requestError(ErrorQuestionAnswerStorage)
+	}
+	return history, nil
 }
 
-func (s *Service) SetQuestionAnswerJudgment(ctx context.Context, userID string, targetID string, recordID string, judgment QuestionAnswerJudgment) (QuestionAnswerRecord, error) {
+func (s *Service) GetQuestionAnswerSummary(ctx context.Context, userID, targetID string) (QuestionAnswerSummary, error) {
+	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
+		return QuestionAnswerSummary{}, err
+	}
+	stats, err := s.questionAnswers.GetQuestionAnswerTodayStats(ctx, userID, targetID)
+	if err != nil {
+		return QuestionAnswerSummary{}, requestError(ErrorQuestionAnswerStorage)
+	}
+	return QuestionAnswerSummary{TargetID: targetID, TodayStats: stats}, nil
+}
+
+func (s *Service) SetQuestionAnswerJudgment(ctx context.Context, userID string, targetID string, recordID string, judgment QuestionAnswerJudgment, expectedUpdatedAt time.Time) (QuestionAnswerRecord, error) {
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerRecord{}, err
 	}
-	if !validQuestionAnswerJudgment(judgment) {
+	if !validQuestionAnswerJudgment(judgment) || expectedUpdatedAt.IsZero() {
 		return QuestionAnswerRecord{}, requestError(ErrorRequest)
 	}
-	record, err := s.questionAnswers.SetQuestionAnswerJudgment(ctx, userID, targetID, strings.TrimSpace(recordID), judgment)
+	record, err := s.questionAnswers.SetQuestionAnswerJudgment(ctx, userID, targetID, strings.TrimSpace(recordID), judgment, expectedUpdatedAt)
 	if err != nil {
-		return QuestionAnswerRecord{}, err
+		if errors.Is(err, requestError(ErrorQuestionAnswerJudgmentConflict)) {
+			return QuestionAnswerRecord{}, err
+		}
+		return QuestionAnswerRecord{}, requestError(ErrorQuestionAnswerStorage)
 	}
 	if record == nil {
 		return QuestionAnswerRecord{}, requestError(ErrorQuestionAnswerJudgmentForbidden)
@@ -806,12 +889,7 @@ func (s *Service) SetQuestionAnswerJudgment(ctx context.Context, userID string, 
 }
 
 func validQuestionAnswerJudgment(judgment QuestionAnswerJudgment) bool {
-	switch judgment {
-	case QuestionAnswerUnreviewed, QuestionAnswerCorrect, QuestionAnswerIncorrect:
-		return true
-	default:
-		return false
-	}
+	return judgment == QuestionAnswerCorrect || judgment == QuestionAnswerIncorrect
 }
 
 func (s *Service) validateQuestionAnswerTarget(ctx context.Context, userID string, targetID string) error {
@@ -952,6 +1030,18 @@ func buildQuestionAnswerBatch(records []QuestionAnswerRecord) (QuestionAnswerBat
 		}
 	}
 
+	snapshots := make(map[string]string)
+	for _, record := range records {
+		if len(records) > 0 && (record.BatchID != records[0].BatchID || record.TargetID != records[0].TargetID) {
+			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerStorage)
+		}
+		tuple, _ := questionAnswerSnapshot(record)
+		if old, exists := snapshots[record.QuestionID]; exists && old != tuple {
+			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerStorage)
+		}
+		snapshots[record.QuestionID] = tuple
+	}
+
 	reasoningEffort, err := aggregateQuestionAnswerReasoningEffort(records)
 	if err != nil {
 		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerStorage)
@@ -965,30 +1055,14 @@ func buildQuestionAnswerBatch(records []QuestionAnswerRecord) (QuestionAnswerBat
 		ReasoningEffort: reasoningEffort,
 		RepeatCount:     repeatCount,
 		SubmittedCount:  len(records),
-		Stats:           QuestionAnswerStats{ByModel: []QuestionAnswerModelStats{}},
+		Stats:           aggregateQuestionAnswerStats(records),
 	}
 	if len(records) == 0 {
 		batch.Records = []QuestionAnswerRecord{}
 		return batch, nil
 	}
 	batch.BatchID = records[0].BatchID
-	modelIndexes := make(map[string]int)
 	for _, record := range records {
-		addQuestionAnswerRecordStats(&batch.Stats, record)
-		modelIndex, exists := modelIndexes[record.ModelName]
-		if !exists {
-			modelIndex = len(batch.Stats.ByModel)
-			modelIndexes[record.ModelName] = modelIndex
-			batch.Stats.ByModel = append(batch.Stats.ByModel, QuestionAnswerModelStats{ModelName: record.ModelName})
-		}
-		modelStats := QuestionAnswerStats{
-			Requests: batch.Stats.ByModel[modelIndex].Requests,
-			Reviews:  batch.Stats.ByModel[modelIndex].Reviews,
-		}
-		addQuestionAnswerRecordStats(&modelStats, record)
-		batch.Stats.ByModel[modelIndex].Requests = modelStats.Requests
-		batch.Stats.ByModel[modelIndex].Reviews = modelStats.Reviews
-
 		switch record.Status {
 		case QuestionAnswerPending:
 			batch.Active = true
@@ -1087,12 +1161,19 @@ func aggregateQuestionAnswerRepeatCount(records []QuestionAnswerRecord) (int, er
 	models := make(map[string]struct{})
 	questions := make(map[string]struct{})
 	counts := make(map[combination]int)
+	hasIndexedRecords := false
 	for _, record := range records {
+		if record.RepeatIndex != nil {
+			hasIndexedRecords = true
+		}
 		models[record.ModelName] = struct{}{}
-		questions[record.QuestionID] = struct{}{}
-		counts[combination{modelName: record.ModelName, questionID: record.QuestionID}]++
+		tuple, _ := questionAnswerSnapshot(record)
+		questions[tuple] = struct{}{}
+		counts[combination{modelName: record.ModelName, questionID: tuple}]++
 	}
-	if len(counts) != len(models)*len(questions) {
+	// Legacy records may contain a sparse model/question matrix. Derive their
+	// repeat count from the observed combinations without inventing missing rows.
+	if hasIndexedRecords && len(counts) != len(models)*len(questions) {
 		return 0, errors.New("question answer batch has missing model-question combinations")
 	}
 	repeatCount := 0
@@ -1108,6 +1189,32 @@ func aggregateQuestionAnswerRepeatCount(records []QuestionAnswerRecord) (int, er
 			return 0, errors.New("question answer batch has inconsistent repeat counts")
 		}
 	}
+	sequences := make(map[combination]map[int]bool)
+	sawLegacy, sawIndexed := false, false
+	for _, record := range records {
+		if record.RepeatIndex == nil {
+			sawLegacy = true
+			continue
+		}
+		sawIndexed = true
+		index := *record.RepeatIndex
+		if index < 1 || index > repeatCount {
+			return 0, errors.New("question answer batch has invalid repeat index")
+		}
+		tuple, _ := questionAnswerSnapshot(record)
+		key := combination{record.ModelName, tuple}
+		if sequences[key] == nil {
+			sequences[key] = make(map[int]bool)
+		}
+		if sequences[key][index] {
+			return 0, errors.New("question answer batch has duplicate repeat index")
+		}
+		sequences[key][index] = true
+	}
+	if sawLegacy && sawIndexed {
+		return 0, errors.New("question answer batch has mixed repeat index snapshots")
+	}
+
 	return repeatCount, nil
 }
 
@@ -1163,4 +1270,167 @@ func uniqueNonEmpty(values []string) []string {
 
 func questionAnswerRunKey(userID string, targetID string) string {
 	return fmt.Sprintf("%s|%s", userID, targetID)
+}
+
+// judgeQuestionAnswer shares the literal, ASCII-only folding contract with highlighting.
+func judgeQuestionAnswer(answer string, keywords []string) (QuestionAnswerJudgment, bool) {
+	folded := asciiFoldTestQuestionKeyword(answer)
+	judgeable := false
+	for _, keyword := range keywords {
+		if strings.TrimSpace(keyword) == "" {
+			continue
+		}
+		judgeable = true
+		if strings.Contains(folded, asciiFoldTestQuestionKeyword(keyword)) {
+			return QuestionAnswerCorrect, true
+		}
+	}
+	if judgeable {
+		return QuestionAnswerIncorrect, true
+	}
+	return QuestionAnswerUnreviewed, false
+}
+
+func questionAnswerJudgmentSourcePointer(source QuestionAnswerJudgmentSource) *QuestionAnswerJudgmentSource {
+	return &source
+}
+
+func questionAnswerSnapshot(record QuestionAnswerRecord) (string, QuestionAnswerQuestionStats) {
+	normalized := make([]string, 0, len(record.QuestionKeywordSnapshot))
+	seen := make(map[string]bool)
+	for _, keyword := range record.QuestionKeywordSnapshot {
+		if strings.TrimSpace(keyword) == "" {
+			continue
+		}
+		folded := asciiFoldTestQuestionKeyword(keyword)
+		if !seen[folded] {
+			normalized = append(normalized, folded)
+			seen[folded] = true
+		}
+	}
+	sort.Strings(normalized)
+	tuple := struct {
+		QuestionID         string   `json:"questionId"`
+		QuestionBody       string   `json:"questionBody"`
+		NormalizedKeywords []string `json:"normalizedKeywords"`
+	}{record.QuestionID, record.QuestionBody, normalized}
+	data, _ := json.Marshal(tuple)
+	sum := sha256.Sum256(data)
+	return string(data), QuestionAnswerQuestionStats{QuestionSnapshotKey: hex.EncodeToString(sum[:]), QuestionID: record.QuestionID, DisplayQuestionName: record.QuestionName, QuestionBody: record.QuestionBody, NormalizedKeywords: normalized, ByModel: []QuestionAnswerModelStats{}}
+}
+
+type questionAnswerStatsAccumulator struct {
+	stats          QuestionAnswerStats
+	models         map[string]*QuestionAnswerModelStats
+	questions      map[string]*QuestionAnswerQuestionStats
+	questionModels map[string]map[string]*QuestionAnswerModelStats
+	names          map[string]QuestionAnswerRecord
+}
+
+func newQuestionAnswerStatsAccumulator() *questionAnswerStatsAccumulator {
+	return &questionAnswerStatsAccumulator{stats: QuestionAnswerStats{ByModel: []QuestionAnswerModelStats{}, ByQuestion: []QuestionAnswerQuestionStats{}}, models: make(map[string]*QuestionAnswerModelStats), questions: make(map[string]*QuestionAnswerQuestionStats), questionModels: make(map[string]map[string]*QuestionAnswerModelStats), names: make(map[string]QuestionAnswerRecord)}
+}
+
+func addQuestionAnswerCounts(requests *QuestionAnswerRequestStats, reviews *QuestionAnswerReviewStats, r QuestionAnswerRequestStats, v QuestionAnswerReviewStats) {
+	requests.Submitted += r.Submitted
+	requests.InProgress += r.InProgress
+	requests.Succeeded += r.Succeeded
+	requests.Failed += r.Failed
+	requests.Cancelled += r.Cancelled
+	reviews.Unreviewed += v.Unreviewed
+	reviews.Correct += v.Correct
+	reviews.Incorrect += v.Incorrect
+}
+
+func (a *questionAnswerStatsAccumulator) add(record QuestionAnswerRecord, requests QuestionAnswerRequestStats, reviews QuestionAnswerReviewStats) {
+	addQuestionAnswerCounts(&a.stats.Requests, &a.stats.Reviews, requests, reviews)
+	model := a.models[record.ModelName]
+	if model == nil {
+		model = &QuestionAnswerModelStats{ModelName: record.ModelName}
+		a.models[record.ModelName] = model
+	}
+	addQuestionAnswerCounts(&model.Requests, &model.Reviews, requests, reviews)
+	tuple, question := questionAnswerSnapshot(record)
+	q := a.questions[tuple]
+	if q == nil {
+		q = &question
+		a.questions[tuple] = q
+		a.questionModels[tuple] = make(map[string]*QuestionAnswerModelStats)
+	}
+	old, exists := a.names[tuple]
+	if !exists || record.CreatedAt.After(old.CreatedAt) || (record.CreatedAt.Equal(old.CreatedAt) && record.ID > old.ID) {
+		q.DisplayQuestionName = record.QuestionName
+		a.names[tuple] = record
+	}
+	addQuestionAnswerCounts(&q.Requests, &q.Reviews, requests, reviews)
+	qm := a.questionModels[tuple][record.ModelName]
+	if qm == nil {
+		qm = &QuestionAnswerModelStats{ModelName: record.ModelName}
+		a.questionModels[tuple][record.ModelName] = qm
+	}
+	addQuestionAnswerCounts(&qm.Requests, &qm.Reviews, requests, reviews)
+}
+
+func (a *questionAnswerStatsAccumulator) result() QuestionAnswerStats {
+	for _, model := range a.models {
+		a.stats.ByModel = append(a.stats.ByModel, *model)
+	}
+	sort.Slice(a.stats.ByModel, func(i, j int) bool { return a.stats.ByModel[i].ModelName < a.stats.ByModel[j].ModelName })
+	for tuple, q := range a.questions {
+		for _, model := range a.questionModels[tuple] {
+			q.ByModel = append(q.ByModel, *model)
+		}
+		sort.Slice(q.ByModel, func(i, j int) bool { return q.ByModel[i].ModelName < q.ByModel[j].ModelName })
+		a.stats.ByQuestion = append(a.stats.ByQuestion, *q)
+	}
+	sort.Slice(a.stats.ByQuestion, func(i, j int) bool {
+		left, right := a.stats.ByQuestion[i], a.stats.ByQuestion[j]
+		if left.QuestionID != right.QuestionID {
+			return left.QuestionID < right.QuestionID
+		}
+		return left.QuestionSnapshotKey < right.QuestionSnapshotKey
+	})
+	return a.stats
+}
+
+func aggregateQuestionAnswerStats(records []QuestionAnswerRecord) QuestionAnswerStats {
+	a := newQuestionAnswerStatsAccumulator()
+	for _, record := range records {
+		var stats QuestionAnswerStats
+		addQuestionAnswerRecordStats(&stats, record)
+		a.add(record, stats.Requests, stats.Reviews)
+	}
+	return a.result()
+}
+
+func buildQuestionAnswerBatchSummary(records []QuestionAnswerRecord) (QuestionAnswerBatchSummary, error) {
+	batch, err := buildQuestionAnswerBatch(records)
+	if err != nil {
+		return QuestionAnswerBatchSummary{}, err
+	}
+	summary := QuestionAnswerBatchSummary{BatchID: batch.BatchID, ReasoningEffort: batch.ReasoningEffort, RepeatCount: batch.RepeatCount, Active: batch.Active, Stats: batch.Stats, Models: []string{}, Questions: batch.Stats.ByQuestion}
+	for _, model := range batch.Stats.ByModel {
+		summary.Models = append(summary.Models, model.ModelName)
+	}
+	for i, record := range records {
+		if i == 0 {
+			summary.CreatedAt = record.CreatedAt
+			summary.RequestProtocol = record.RequestProtocol
+		}
+		if record.CreatedAt.Before(summary.CreatedAt) {
+			summary.CreatedAt = record.CreatedAt
+		}
+		if record.StartedAt != nil && (summary.StartedAt == nil || record.StartedAt.Before(*summary.StartedAt)) {
+			value := *record.StartedAt
+			summary.StartedAt = &value
+		}
+		if record.CompletedAt != nil && (summary.CompletedAt == nil || record.CompletedAt.After(*summary.CompletedAt)) {
+			value := *record.CompletedAt
+			summary.CompletedAt = &value
+		}
+	}
+	if summary.Active {
+		summary.CompletedAt = nil
+	}
+	return summary, nil
 }

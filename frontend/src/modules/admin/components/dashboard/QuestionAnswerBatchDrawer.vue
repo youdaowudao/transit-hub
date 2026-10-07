@@ -30,6 +30,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: 'preferences-changed', value: QuestionAnswerPreferences): void
   (event: 'question-answer-started', targetId: string): void
+  (event: 'question-answer-view', value: { targetId: string; batchId?: string }): void
 }>()
 
 interface BatchTargetPreview {
@@ -45,6 +46,7 @@ type BatchTargetOutcomeKind = 'started' | 'skipped' | 'failed'
 interface BatchTargetOutcome {
   targetId: string
   accountName: string
+  batchId?: string
   kind: BatchTargetOutcomeKind
   compatibleModelIds: string[]
   incompatibleModelIds: string[]
@@ -340,6 +342,7 @@ const start = async () => {
           targetId: preview.target.targetId,
           accountName: preview.target.accountName,
           kind: 'started',
+          batchId: batch.batchId,
           compatibleModelIds: [...preview.compatibleModelIds],
           incompatibleModelIds: [...preview.incompatibleModelIds],
           requestCount: preview.requestCount,
@@ -682,6 +685,8 @@ onBeforeUnmount(() => {
                     class="break-words font-medium text-foreground"
                   >{{ outcome.accountName }}</p>
                   <p class="mt-0.5 break-words text-xs text-muted-foreground">{{ outcomeReason(outcome) }}</p>
+                  <button v-if="outcome.kind === 'started' && outcome.batchId" type="button" class="mt-2 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium hover:bg-surface-line" @click="emit('question-answer-view', { targetId: outcome.targetId, batchId: outcome.batchId })">查看该批次</button>
+                  <button v-else-if="outcome.reasonKey === 'activeBatch'" type="button" class="mt-2 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium hover:bg-surface-line" @click="emit('question-answer-view', { targetId: outcome.targetId })">打开该账号最近批次</button>
                   <p v-if="outcome.errorKey" class="mt-0.5 break-words text-xs text-destructive">{{ safeConnectionHealthError(outcome.errorKey) }}</p>
                 </div>
               </div>

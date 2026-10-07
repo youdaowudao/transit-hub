@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { upgradeQuestionAnswerHistoryFixture } from './fixtures/c1QuestionAnswerHistory'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ManualOneTimeProbeDialog, {
@@ -46,7 +47,7 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
   cancelQuestionAnswerBatch: harness.cancelQuestionAnswerBatch,
   getLatestQuestionAnswerBatch: harness.getLatestQuestionAnswerBatch,
   getQuestionAnswerBatch: harness.getQuestionAnswerBatch,
-  getQuestionAnswerHistory: harness.getQuestionAnswerHistory,
+  getQuestionAnswerHistory: async (...args: unknown[]) => upgradeQuestionAnswerHistoryFixture(await harness.getQuestionAnswerHistory(...args)),
   listTestQuestions: harness.listTestQuestions,
   setQuestionAnswerJudgment: harness.setQuestionAnswerJudgment,
   startQuestionAnswerBatch: harness.startQuestionAnswerBatch,
@@ -142,6 +143,7 @@ const deferred = <T>() => {
 }
 
 beforeEach(() => {
+  vi.spyOn(window, 'confirm').mockReturnValue(true)
   harness.discoverModels.mockReset().mockResolvedValue({
     models: [
       { id: 'gpt-5.6-sol', name: 'gpt-5.6-sol' },
@@ -165,6 +167,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   for (const wrapper of mountedWrappers.splice(0)) wrapper.unmount()
   vi.useRealTimers()
   document.body.innerHTML = ''
@@ -200,10 +203,10 @@ describe('question-answer compact layout primitives', () => {
     expect(typeof formatAccuracy).toBe('function')
     if (!accuracy || !formatAccuracy) return
 
-    expect(formatAccuracy(accuracy(stats(4, 3, 1, 3, 0)))).toBe('75%')
-    expect(formatAccuracy(accuracy(stats(3, 2, 1, 2, 0)))).toBe('66.7%')
+    expect(formatAccuracy(accuracy(stats(4, 3, 1, 3, 0)))).toBe('100%')
+    expect(formatAccuracy(accuracy(stats(3, 2, 1, 2, 0)))).toBe('100%')
     expect(formatAccuracy(accuracy(stats(4, 1, 3, 0, 1)))).toBe('0%')
-    expect(formatAccuracy(accuracy(stats(0, 0, 0, 0, 0)))).toBe('-')
+    expect(formatAccuracy(accuracy(stats(0, 0, 0, 0, 0)))).toBe('—')
   })
 
   it('partitions only current-batch reviewable, reviewed and failed answers', () => {
@@ -253,18 +256,18 @@ describe('question-answer compact layout primitives', () => {
       'question-answer-stats-today',
       'question-answer-stats-lifetime',
     ])
-    expect(bar.text()).toContain('复审批次')
+    expect(bar.text()).toContain('当前批次')
     expect(bar.text()).toContain('今日（新加坡）')
     expect(bar.text()).toContain('累计')
-    for (const label of ['回答数', '失败数', '正确', '错误', '正确率']) {
+    for (const label of ['提交', '进行中', '成功', '待人工', '正确', '错误', '失败', '取消', '正确率']) {
       expect(bar.text()).toContain(label)
     }
-    for (const removedLabel of ['提交', '进行中', '已取消', '待复审', '成功回答', '请求失败']) {
+    for (const removedLabel of ['待复审', '回答数', '失败数']) {
       expect(bar.text()).not.toContain(removedLabel)
     }
-    expect(bar.find('[data-testid="question-answer-stats-review"] [data-testid="question-answer-accuracy"]').text()).toBe('66.7%')
-    expect(bar.find('[data-testid="question-answer-stats-today"] [data-testid="question-answer-accuracy"]').text()).toBe('75%')
-    expect(bar.find('[data-testid="question-answer-stats-lifetime"] [data-testid="question-answer-accuracy"]').text()).toBe('40%')
+    expect(bar.find('[data-testid="question-answer-stats-review"] [data-testid="question-answer-accuracy"]').text()).toBe('100%')
+    expect(bar.find('[data-testid="question-answer-stats-today"] [data-testid="question-answer-accuracy"]').text()).toBe('100%')
+    expect(bar.find('[data-testid="question-answer-stats-lifetime"] [data-testid="question-answer-accuracy"]').text()).toBe('66.7%')
     expect(bar.find('[data-testid="question-answer-accuracy"]').classes()).toEqual(expect.arrayContaining(['text-2xl', 'text-primary']))
     expect(bar.find('[data-testid="question-answer-periods"]').classes()).toEqual(expect.arrayContaining([
       'grid-cols-1',
@@ -272,17 +275,16 @@ describe('question-answer compact layout primitives', () => {
     ]))
     expect(bar.find('[data-testid="question-answer-stats-review"] dl').classes()).toEqual(expect.arrayContaining([
       'grid-cols-3',
-      'sm:grid-cols-5',
     ]))
     expect(bar.findAll('[data-testid="question-answer-model-stats"]')).toHaveLength(0)
 
-    const modelToggle = bar.find('button')
-    expect(modelToggle.text()).toContain('按模型查看')
+    const modelToggle = bar.findAll('button').find(button => button.text() === '按模型')!
+    expect(modelToggle.text()).toContain('按模型')
     await modelToggle.trigger('click')
     expect(bar.findAll('[data-testid="question-answer-model-stats"]')).toHaveLength(3)
     expect(bar.text()).toContain('gpt-5.6-sol')
     expect(bar.text()).toContain('gpt-5.6-terra')
-    await modelToggle.trigger('click')
+    await bar.findAll('button').find(button => button.text() === '账号汇总')!.trigger('click')
     expect(bar.findAll('[data-testid="question-answer-model-stats"]')).toHaveLength(0)
   })
 
@@ -312,19 +314,19 @@ describe('question-answer compact layout primitives', () => {
     expect(orderedSections).toEqual(['stats', 'pending', 'processed', 'configuration', 'history'])
 
     const pending = wrapper.find('[data-testid="question-answer-pending"]')
-    expect(pending.text()).toContain('当前待审回答')
+    expect(pending.text()).toContain('待人工判断')
     expect(pending.text()).toContain('Needs review')
     expect(pending.text()).not.toContain('Already correct')
     expect(pending.text()).not.toContain('Request failed detail')
     expect(pending.text()).not.toContain('Running detail')
 
     const processed = wrapper.find('[data-testid="question-answer-processed"]')
-    expect(processed.text()).toContain('本批次已处理 2 条 · 正确 1 · 错误 1')
-    expect(processed.text()).not.toContain('Already correct')
+    expect(processed.text()).toContain('判题结果 2 条 · 正确 1 · 错误 1')
+    expect(processed.text()).toContain('Already correct')
     expect(processed.text()).not.toContain('Request failed detail')
     expect(wrapper.text()).not.toContain('Cancelled detail')
 
-    await processed.find('button').trigger('click')
+    for (const group of processed.findAll('[data-testid="question-answer-result-group"]')) if (group.get('button').attributes('aria-expanded') !== 'true') await group.get('button').trigger('click')
     expect(processed.text()).toContain('Already correct')
     expect(processed.text()).toContain('Already incorrect')
     expect(processed.text()).toContain('失败 1 条')
@@ -362,7 +364,7 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
-    expect(processed.text()).toContain('本批次已处理 0 条 · 正确 0 · 错误 0')
+    expect(processed.text()).toContain('判题结果 0 条 · 正确 0 · 错误 0')
     expect(processed.text()).toContain('共 6 条')
     expect(processed.text()).toContain('未返回 6 条')
     expect(processed.text()).toContain('进行中')
@@ -370,7 +372,7 @@ describe('question-answer compact layout primitives', () => {
     const summary = processed.get('[data-testid="question-answer-processed-summary"]')
     expect(summary.classes()).toEqual(expect.arrayContaining(['text-sm', 'font-semibold', 'tabular-nums']))
     const batchReminder = wrapper.get('[data-testid="question-answer-review-batch"]')
-    expect(batchReminder.classes()).toEqual(expect.arrayContaining(['text-sm', 'font-semibold', 'tabular-nums', 'text-foreground']))
+    expect(batchReminder.classes()).toEqual(expect.arrayContaining(['text-xs', 'text-muted-foreground']))
   })
 
   it('uses inProgress for the visible waiting count when pending and running coexist', async () => {
@@ -400,7 +402,7 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
-    expect(processed.text()).toContain('本批次已处理 2 条 · 正确 1 · 错误 1')
+    expect(processed.text()).toContain('判题结果 2 条 · 正确 1 · 错误 1')
     expect(processed.text()).toContain('共 5 条')
     expect(processed.text()).toContain('未返回 3 条')
     expect(processed.text()).not.toContain('未返回 1 条')
@@ -431,9 +433,9 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
-    expect(processed.text()).toContain('本批次已处理 1 条 · 正确 1 · 错误 0')
+    expect(processed.text()).toContain('判题结果 1 条 · 正确 1 · 错误 0')
     expect(processed.text()).toContain('共 3 条')
-    expect(processed.text()).toContain('待复审 1 条')
+    expect(processed.text()).toContain('待人工判断 1 条')
     expect(processed.text()).toContain('已完成')
     expect(processed.text()).toContain('已用时')
   })
@@ -465,9 +467,9 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
-    expect(processed.text()).toContain('本批次已处理 0 条 · 正确 0 · 错误 0')
+    expect(processed.text()).toContain('判题结果 0 条 · 正确 0 · 错误 0')
     expect(processed.text()).toContain('共 1 条')
-    expect(processed.text()).toContain('待复审 1 条')
+    expect(processed.text()).toContain('待人工判断 1 条')
     expect(processed.text()).toContain('已完成')
   })
 
@@ -765,7 +767,7 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
     const todayHistory = wrapper.find('[data-testid="question-answer-history"]')
     await todayHistory.find('button').trigger('click')
-    const reviewButtons = () => todayHistory.findAll('button').filter(button => button.text().trim() === '复审此批次')
+    const reviewButtons = () => todayHistory.findAll('button').filter(button => button.text().trim() === '查看该批次')
     const reviewButton = reviewButtons()[0]
     if (!reviewButton) throw new Error('missing old batch review button')
     await reviewButton.trigger('click')
@@ -776,7 +778,7 @@ describe('question-answer compact layout primitives', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-testid="question-answer-processed"]').text()).toContain('同步失败')
-    const latestButton = wrapper.get('[data-testid="question-answer-pending"]').findAll('button').find(button => button.text().trim() === '回到最新批次')
+    const latestButton = wrapper.findAll('button').find(button => button.text().trim() === '返回最新')
     if (!latestButton) throw new Error('missing latest batch button')
     await latestButton.trigger('click')
 
@@ -819,7 +821,7 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
     const todayHistory = wrapper.find('[data-testid="question-answer-history"]')
     await todayHistory.find('button').trigger('click')
-    const reviewButton = todayHistory.findAll('button').find(button => button.text().trim() === '复审此批次')
+    const reviewButton = todayHistory.findAll('button').find(button => button.text().trim() === '查看该批次')
     if (!reviewButton) throw new Error('missing other batch review button')
     await reviewButton.trigger('click')
     await flushPromises()
@@ -869,10 +871,10 @@ describe('question-answer compact layout primitives', () => {
     expect(pending.text()).not.toContain('First review')
     expect(pending.text()).toContain('Second review')
     const processed = wrapper.find('[data-testid="question-answer-processed"]')
-    expect(processed.text()).toContain('本批次已处理 2 条 · 正确 2 · 错误 0')
-    expect(processed.text()).not.toContain('First review')
+    expect(processed.text()).toContain('判题结果 2 条 · 正确 2 · 错误 0')
+    expect(processed.text()).toContain('First review')
 
-    await processed.find('button').trigger('click')
+    for (const group of processed.findAll('[data-testid="question-answer-result-group"]')) if (group.get('button').attributes('aria-expanded') !== 'true') await group.get('button').trigger('click')
     const firstProcessedCard = processed.findAll('li').find(item => item.text().includes('First review'))
     if (!firstProcessedCard) throw new Error('missing processed first review card')
     const incorrectButton = firstProcessedCard.findAll('button').find(button => button.text().trim() === '错误')
@@ -880,7 +882,7 @@ describe('question-answer compact layout primitives', () => {
     await incorrectButton.trigger('click')
     await flushPromises()
 
-    expect(processed.text()).toContain('本批次已处理 2 条 · 正确 1 · 错误 1')
+    expect(processed.text()).toContain('判题结果 2 条 · 正确 1 · 错误 1')
     expect(incorrectButton.attributes('aria-pressed')).toBe('true')
   })
 
@@ -986,7 +988,7 @@ describe('question-answer compact layout primitives', () => {
     expect(wrapper.find('[data-testid="question-answer-pending"]').exists()).toBe(true)
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
     expect(processed.text()).toContain('共 1 条')
-    expect(processed.text()).toContain('待复审 1 条')
+    expect(processed.text()).toContain('待人工判断 1 条')
     expect(processed.text()).toContain('已完成')
   })
 
@@ -1025,15 +1027,15 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
     const todayHistory = wrapper.find('[data-testid="question-answer-history"]')
     await todayHistory.find('button').trigger('click')
-    const reviewButton = todayHistory.findAll('button').find(button => button.text().trim() === '复审此批次')
+    const reviewButton = todayHistory.findAll('button').find(button => button.text().trim() === '查看该批次')
     if (!reviewButton) throw new Error('missing old batch review button')
     await reviewButton.trigger('click')
     await flushPromises()
 
     expect(wrapper.find('[data-testid="question-answer-latest-running-hint"]').text()).toContain(
-      '最新批次仍在后台运行，不影响当前复审。',
+      '最新运行批次 #batch-cu',
     )
-    expect(wrapper.find('[data-testid="question-answer-latest-running-hint"]').text()).not.toMatch(/\d/)
+    expect(wrapper.find('[data-testid="question-answer-latest-running-hint"]').text()).toContain('1/3')
     expect(wrapper.find('[data-testid="question-answer-pending"]').text()).not.toContain('正在测试：')
   })
 
@@ -1067,7 +1069,7 @@ describe('question-answer compact layout primitives', () => {
       repeatCount: 1,
     })
     const todayHistory = wrapper.find('[data-testid="question-answer-history"]')
-    expect(todayHistory.text()).toContain('今日历史')
+    expect(todayHistory.text()).toContain('批次历史')
     expect(todayHistory.text()).not.toContain('Today historical entry')
     expect(wrapper.find('[data-testid="question-answer-stats-lifetime"] [data-testid="question-answer-accuracy"]').text()).toBe('100%')
     await todayHistory.find('button').trigger('click')
@@ -1080,6 +1082,9 @@ describe('question-answer compact layout primitives', () => {
     expect(footer.exists()).toBe(true)
     expect(scrollContainer.find('[data-testid="question-answer-footer"]').exists()).toBe(false)
     expect(footer.findAll('button').map(button => button.text().trim())).toEqual(['离开', '开始回答'])
+    expect(footer.get('p').classes()).toEqual(expect.arrayContaining(['min-w-0', 'flex-1']))
+    expect(footer.findAll('button').every(button => button.classes().includes('whitespace-nowrap'))).toBe(true)
+    expect(footer.get('button').element.parentElement?.classList.contains('shrink-0')).toBe(true)
 
     const startButton = footer.findAll('button')[1]
     await Promise.all([startButton.trigger('click'), startButton.trigger('click')])

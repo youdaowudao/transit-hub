@@ -29,6 +29,7 @@ import ConnectionHealthEventsDialog from '../components/dashboard/ConnectionHeal
 import GroupHealthSetupDrawer from '../components/dashboard/GroupHealthSetupDrawer.vue'
 import ManualOneTimeProbeDialog from '../components/dashboard/ManualOneTimeProbeDialog.vue'
 import type { ManualProbeTargetSummary } from '../components/dashboard/ManualOneTimeProbeDialog.vue'
+import { getQuestionAnswerSummary } from '../api/connectionHealth'
 import QuestionAnswerBatchDrawer from '../components/dashboard/QuestionAnswerBatchDrawer.vue'
 import PolicyConfigDrawer from '../components/dashboard/PolicyConfigDrawer.vue'
 import type { OwnGroupOption } from '../components/dashboard/PolicyConfigDrawer.vue'
@@ -87,6 +88,7 @@ const {
   applyAccountTier,
   applyAccountPriority,
   applyAccountConcurrency,
+  applyQuestionAnswerTodaySummary,
   loadAll,
   loadGroups,
   loadAdminGroups,
@@ -243,8 +245,61 @@ const loadPreferences = (scope: string) => {
   loadedPreferenceScope = scope
 }
 
+const questionAnswerSummaryFailures = ref<Set<string>>(new Set())
+const questionAnswerSummaryPending = new Map<string, number>()
+const questionAnswerSummarySettled = new Map<string, number>()
+const questionAnswerSummaryRequests = new Map<string, AbortController>()
+let questionAnswerSummaryLifecycle = 0
+const clearQuestionAnswerSummaryRequests = () => {
+  questionAnswerSummaryLifecycle++
+  for (const controller of questionAnswerSummaryRequests.values()) controller.abort()
+  questionAnswerSummaryRequests.clear()
+  questionAnswerSummaryPending.clear()
+  questionAnswerSummarySettled.clear()
+  questionAnswerSummaryFailures.value = new Set()
+}
+const refreshQuestionAnswerSummary = async (targetId: string) => {
+  if (questionAnswerSummaryRequests.has(targetId)) return
+  const workspace = preferenceScope.value
+  const lifecycle = questionAnswerSummaryLifecycle
+  if (!targetId.startsWith(`sub2api:${workspace}:`)) return
+  const controller = new AbortController()
+  questionAnswerSummaryRequests.set(targetId, controller)
+  const isCurrent = () => lifecycle === questionAnswerSummaryLifecycle && workspace === preferenceScope.value && !controller.signal.aborted
+  try {
+    while (isCurrent() && (questionAnswerSummaryPending.get(targetId) ?? 0) > (questionAnswerSummarySettled.get(targetId) ?? 0)) {
+      const version = questionAnswerSummaryPending.get(targetId)!
+      try {
+        const summary = await getQuestionAnswerSummary(targetId, controller.signal)
+        if (!isCurrent()) return
+        if (summary.targetId !== targetId) throw new Error('admin.connectionHealth.errors.request')
+        if (version !== questionAnswerSummaryPending.get(targetId)) continue
+        applyQuestionAnswerTodaySummary(summary)
+        questionAnswerSummarySettled.set(targetId, version)
+        const failures = new Set(questionAnswerSummaryFailures.value); failures.delete(targetId); questionAnswerSummaryFailures.value = failures
+      } catch (error) {
+        if (!isCurrent()) return
+        if (version !== questionAnswerSummaryPending.get(targetId)) continue
+        questionAnswerSummaryFailures.value = new Set([...questionAnswerSummaryFailures.value, targetId])
+        return
+      }
+    }
+  } finally {
+    if (questionAnswerSummaryRequests.get(targetId) === controller) questionAnswerSummaryRequests.delete(targetId)
+  }
+}
+const onQuestionAnswerStatsDirty = (targetId: string) => {
+  if (!targetId.startsWith(`sub2api:${preferenceScope.value}:`)) return
+  questionAnswerSummaryPending.set(targetId, (questionAnswerSummaryPending.get(targetId) ?? 0) + 1)
+  void refreshQuestionAnswerSummary(targetId)
+}
+const retryPendingQuestionAnswerSummaries = () => {
+  for (const [targetId, version] of questionAnswerSummaryPending) if (version > (questionAnswerSummarySettled.get(targetId) ?? 0)) void refreshQuestionAnswerSummary(targetId)
+}
+
 watch(preferenceScope, (scope) => {
   invalidateQuickProbeSession(true)
+  clearQuestionAnswerSummaryRequests()
   setAdminGroupsWorkspace(scope)
   loadPreferences(scope)
 }, { immediate: true })
@@ -667,7 +722,7 @@ const autoRefresh = async () => {
 // immediate=false 会让 VueUse 的 interval 保持暂停；这里只关闭首次回调，计时器本身必须启动。
 useIntervalFn(() => void autoRefresh(), 30_000, { immediate: true, immediateCallback: false })
 watch(documentVisibility, (visibility) => {
-  if (visibility === 'visible') void autoRefresh()
+  if (visibility === 'visible') { retryPendingQuestionAnswerSummaries(); void autoRefresh() }
 })
 
 const refreshAdminGroupsAutomatically = async (): Promise<boolean> => {
@@ -700,6 +755,7 @@ const refresh = async () => {
 }
 
 onBeforeUnmount(() => {
+  clearQuestionAnswerSummaryRequests()
   invalidateQuickProbeSession(true)
   cancelAdminGroupsRefresh()
   stopRefreshWaitTimer()
@@ -834,6 +890,7 @@ const onTargetPolicySaved = async () => {
 // 手动探活弹窗同时承载正式探活和隔离的一次性测试。
 const probeDialogOpen = ref(false)
 const probeDialogTarget = ref<ManualProbeTargetSummary | null>(null)
+const initialQuestionAnswerBatchId = ref<string | null>(null)
 
 const onAccountTierSaved = (result: AccountTierResult) => {
   const workspaceId = currentAccount.value?.id
@@ -853,8 +910,9 @@ watch(() => {
   }
 })
 
-const onProbeAccount = (account: AdminGroupAccount) => {
-  if (!selectedGroup.value || !canOpenManualProbeHistory(account)) return
+const openQuestionAnswerTarget = (account: AdminGroupAccount, group: AdminGroupHealth, batchId: string | null = null) => {
+  if (!canOpenManualProbeHistory(account)) return
+  initialQuestionAnswerBatchId.value = batchId
   const formalModelMap = new Map<string, { id: string; name: string; providerFamily?: string }>()
   if (account.hasEnabledProbePolicy) {
     for (const model of [...(account.modelHealth ?? []), ...(account.unprobedModels ?? [])]) {
@@ -869,14 +927,23 @@ const onProbeAccount = (account: AdminGroupAccount) => {
     targetId: account.targetId,
     accountTier: account.accountTier,
     accountName: account.name || account.id,
-    platform: selectedGroup.value.platform,
+    platform: group.platform,
     type: account.type,
     status: account.status,
-    groupName: selectedGroup.value.name,
+    groupName: group.name,
     formalModels: Array.from(formalModelMap.values()),
     testConfiguration: account.testConfiguration,
   }
   probeDialogOpen.value = true
+}
+
+const onProbeAccount = (account: AdminGroupAccount) => {
+  if (selectedGroup.value) openQuestionAnswerTarget(account, selectedGroup.value)
+}
+const onQuestionAnswerView = (value: { targetId: string; batchId?: string }) => {
+  const projections = adminGroups.value.flatMap(group => group.accounts.filter(account => account.targetId === value.targetId).map(account => ({ account, group })))
+  const projection = projections.find(item => item.group.id === selectedGroup.value?.id) ?? projections[0]
+  if (projection) openQuestionAnswerTarget(projection.account, projection.group, value.batchId ?? null)
 }
 
 const formalProbeModels = (account: AdminGroupAccount): string[] => {
@@ -1364,6 +1431,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
             :preferences="preferences.questionAnswer"
             @preferences-changed="onQuestionAnswerPreferencesReplaced"
             @question-answer-started="onQuestionAnswerStarted"
+            @question-answer-view="onQuestionAnswerView"
           />
           <div class="space-y-3 border-b border-border/50 p-4">
             <div class="relative">
@@ -1524,11 +1592,15 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       :open="probeDialogOpen"
       :target="probeDialogTarget"
       :question-answer-preferences="preferences.questionAnswer"
+      :initial-question-answer-batch-id="initialQuestionAnswerBatchId"
+      :summary-refresh-failed="Boolean(probeDialogTarget && questionAnswerSummaryFailures.has(probeDialogTarget.targetId))"
       @close="probeDialogOpen = false"
       @completed="onFormalProbeCompleted"
       @tier-saved="onAccountTierSaved"
       @question-answer-started="onQuestionAnswerStarted"
       @question-answer-viewed="onQuestionAnswerViewed"
+      @question-answer-stats-dirty="onQuestionAnswerStatsDirty"
+      @question-answer-stats-retry="refreshQuestionAnswerSummary"
       @question-answer-preferences-changed="onQuestionAnswerPreferencesChanged"
     />
 

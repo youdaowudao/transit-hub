@@ -2,6 +2,7 @@
 
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
+import { upgradeQuestionAnswerHistoryFixture } from './fixtures/c1QuestionAnswerHistory'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ManualOneTimeProbeDialog, {
@@ -117,7 +118,7 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
   cancelQuestionAnswerBatch: harness.cancelQuestionAnswerBatch,
   getLatestQuestionAnswerBatch: harness.getLatestQuestionAnswerBatch,
   getQuestionAnswerBatch: harness.getQuestionAnswerBatch,
-  getQuestionAnswerHistory: harness.getQuestionAnswerHistory,
+  getQuestionAnswerHistory: async (...args: unknown[]) => upgradeQuestionAnswerHistoryFixture(await harness.getQuestionAnswerHistory(...args)),
   listTestQuestions: harness.listTestQuestions,
   discoverTargetModels: harness.discoverTargetModels,
   getPrioritySyncStatus: harness.getPrioritySyncStatus,
@@ -215,6 +216,7 @@ const savedSelection = (overrides: Partial<QuestionAnswerSelectionPreferences> =
 const mountedWrappers: VueWrapper[] = []
 
 beforeEach(() => {
+  vi.spyOn(window, 'confirm').mockReturnValue(true)
   window.localStorage.clear()
   for (const [name, refValue] of Object.entries(harness.refs)) {
     if (['groups', 'adminGroups', 'events', 'policies'].includes(name)) refValue.value = []
@@ -257,6 +259,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   vi.useRealTimers()
   vi.unstubAllEnvs()
   for (const wrapper of mountedWrappers.splice(0)) wrapper.unmount()

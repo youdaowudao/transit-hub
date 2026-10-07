@@ -96,7 +96,7 @@ describe('connection health question keyword settings', () => {
     expect(wrapper.get<HTMLTextAreaElement>('#test-question-keywords').element.value).toBe('')
     expect(wrapper.text()).toContain('错误码')
     expect(wrapper.text().indexOf('错误码')).toBeLessThan(wrapper.text().indexOf('Error'))
-    expect(wrapper.text()).toContain('未配置关键字')
+    expect(wrapper.text()).toContain('仅人工判断')
   })
 
   it('fills edit values, sends explicit empty to clear, and cancel clears local keyword input', async () => {

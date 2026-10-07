@@ -235,7 +235,7 @@ onMounted(load)
             class="w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-primary"
             :placeholder="t('admin.settings.testQuestions.keywordsPlaceholder')"
           />
-          <p class="text-xs text-muted-foreground">{{ t('admin.settings.testQuestions.keywordsHint') }}</p>
+          <p class="text-xs text-muted-foreground">{{ t('admin.settings.testQuestions.keywordsHint') }} 命中任意关键词自动判为正确，均未命中判为错误；ASCII 英文字母忽略大小写，使用字面包含。</p>
         </div>
         <p v-if="showValidationError" class="text-xs text-destructive">
           {{ t('admin.connectionHealth.errors.testQuestionInvalid') }}
@@ -281,7 +281,7 @@ onMounted(load)
             <p class="mt-2 line-clamp-3 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">{{ question.body }}</p>
             <p class="mt-2 text-xs leading-5 text-muted-foreground">
               <span class="font-medium text-foreground">{{ t('admin.settings.testQuestions.keywords') }}：</span>
-              {{ question.keywords.length > 0 ? question.keywords.join('、') : t('admin.settings.testQuestions.noKeywords') }}
+              {{ question.keywords.length > 0 ? question.keywords.join('、') : '仅人工判断' }}
             </p>
           </div>
           <div class="flex shrink-0 items-center gap-1">

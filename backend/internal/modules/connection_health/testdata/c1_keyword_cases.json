@@ -1,0 +1,175 @@
+[
+  {
+    "id": "first",
+    "answer": "answer HIT",
+    "keywords": [
+      "hit"
+    ],
+    "judgment": "correct",
+    "judgeable": true
+  },
+  {
+    "id": "later",
+    "answer": "中文答案水杯",
+    "keywords": [
+      "其它",
+      "水杯"
+    ],
+    "judgment": "correct",
+    "judgeable": true
+  },
+  {
+    "id": "fourth",
+    "answer": "target FOUR",
+    "keywords": [
+      "one",
+      "two",
+      "three",
+      "four"
+    ],
+    "judgment": "correct",
+    "judgeable": true
+  },
+  {
+    "id": "ascii-case",
+    "answer": "eRrOr",
+    "keywords": [
+      "ERROR"
+    ],
+    "judgment": "correct",
+    "judgeable": true
+  },
+  {
+    "id": "chinese-exact",
+    "answer": "茶杯",
+    "keywords": [
+      "茶杯"
+    ],
+    "judgment": "correct",
+    "judgeable": true
+  },
+  {
+    "id": "chinese-different",
+    "answer": "茶杯",
+    "keywords": [
+      "水杯"
+    ],
+    "judgment": "incorrect",
+    "judgeable": true
+  },
+  {
+    "id": "literal-symbol",
+    "answer": "answer [done].*",
+    "keywords": [
+      "[done].*"
+    ],
+    "judgment": "correct",
+    "judgeable": true
+  },
+  {
+    "id": "not-regex",
+    "answer": "xyz",
+    "keywords": [
+      ".*"
+    ],
+    "judgment": "incorrect",
+    "judgeable": true
+  },
+  {
+    "id": "internal-space",
+    "answer": "answer foo  bar",
+    "keywords": [
+      "foo bar"
+    ],
+    "judgment": "incorrect",
+    "judgeable": true
+  },
+  {
+    "id": "space-exact",
+    "answer": "foo bar",
+    "keywords": [
+      "foo bar"
+    ],
+    "judgment": "correct",
+    "judgeable": true
+  },
+  {
+    "id": "overlap",
+    "answer": "abcde",
+    "keywords": [
+      "ab",
+      "bcde"
+    ],
+    "judgment": "correct",
+    "judgeable": true
+  },
+  {
+    "id": "substring",
+    "answer": "concatenate",
+    "keywords": [
+      "cat"
+    ],
+    "judgment": "correct",
+    "judgeable": true
+  },
+  {
+    "id": "non-ascii-case",
+    "answer": "ä",
+    "keywords": [
+      "Ä"
+    ],
+    "judgment": "incorrect",
+    "judgeable": true
+  },
+  {
+    "id": "non-ascii-exact",
+    "answer": "Ä",
+    "keywords": [
+      "Ä"
+    ],
+    "judgment": "correct",
+    "judgeable": true
+  },
+  {
+    "id": "no-punctuation-normalization",
+    "answer": "foo-bar",
+    "keywords": [
+      "foo bar"
+    ],
+    "judgment": "incorrect",
+    "judgeable": true
+  },
+  {
+    "id": "empty-answer",
+    "answer": "",
+    "keywords": [
+      "hit"
+    ],
+    "judgment": "incorrect",
+    "judgeable": true
+  },
+  {
+    "id": "empty-keywords",
+    "answer": "answer",
+    "keywords": [],
+    "judgment": "unreviewed",
+    "judgeable": false
+  },
+  {
+    "id": "nil-keywords",
+    "answer": "answer",
+    "keywords": null,
+    "judgment": "unreviewed",
+    "judgeable": false
+  },
+  {
+    "id": "blank-keywords",
+    "answer": "answer",
+    "keywords": [
+      "",
+      "  \t"
+    ],
+    "judgment": "unreviewed",
+    "judgeable": false
+  }
+]

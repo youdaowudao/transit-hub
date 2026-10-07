@@ -51,6 +51,7 @@ const makeAccount = (
   probeModelsConfigured: true,
   productionSortOrder,
   todayQuestionAnswerSubmitted: submitted,
+  todayQuestionAnswerJudged: submitted,
   todayQuestionAnswerCorrect: correct,
 } as AdminGroupAccount)
 
@@ -132,11 +133,11 @@ describe('AdminGroupHealthDetail today question-answer accuracy', () => {
     ])
 
     expect(rowFor(wrapper, 'Prod Second').findAll('td')[8].text()).toContain('75%')
-    expect(rowFor(wrapper, 'Prod Second').findAll('td')[8].text()).toContain('3/4')
+    expect(rowFor(wrapper, 'Prod Second').findAll('td')[8].text()).toContain('3正确 / 4已判')
     expect(rowFor(wrapper, 'Prod First').findAll('td')[8].text()).toContain('66.7%')
     expect(rowFor(wrapper, 'Zero').findAll('td')[8].text()).toContain('0%')
-    expect(rowFor(wrapper, 'Zero').findAll('td')[8].text()).toContain('0/5')
-    expect(rowFor(wrapper, 'None').findAll('td')[8].text()).toBe('-')
+    expect(rowFor(wrapper, 'Zero').findAll('td')[8].text()).toContain('0正确 / 5已判')
+    expect(rowFor(wrapper, 'None').findAll('td')[8].text()).toBe('—')
 
     const accuracyHeader = wrapper.findAll('thead th').find(header => header.text().includes('今日正确率'))
     if (!accuracyHeader) throw new Error('missing today accuracy header')

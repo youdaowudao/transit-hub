@@ -16,7 +16,8 @@ const account = (): AdminGroupAccount => ({
   hasEnabledPolicy: false, hasEnabledProbePolicy: false, priorityManaged: false,
   priorityConflict: true, prioritySyncBlocked: true, prioritySyncBlockReason: 'manual_priority',
   probeModelsConfigured: false, productionSortOrder: 0,
-  todayQuestionAnswerSubmitted: 10, todayQuestionAnswerCorrect: 7,
+  // The tier fixture has 7 correct and 3 incorrect answers, with no unreviewed samples.
+  todayQuestionAnswerSubmitted: 10, todayQuestionAnswerCorrect: 7, todayQuestionAnswerJudged: 10,
 })
 const groups = (): AdminGroupHealth[] => ['one', 'two'].map(id => ({
   id, name: id, platform: 'openai', status: 'active', type: 'subscription', isExclusive: false,
@@ -98,7 +99,8 @@ describe('account-global tier editing', () => {
     expect(editors(wrapper)).toHaveLength(2)
     for (const editor of editors(wrapper)) { expect(editor.text()).toContain('后备'); expect(editor.text()).not.toContain('主力') }
     expect(wrapper.text()).toContain('今日正确率')
-    expect(wrapper.text()).toContain('7/10')
+    expect(wrapper.text()).toContain('7正确 / 10已判')
+    expect(wrapper.text()).toContain('70%')
     expect(wrapper.findAll('button[aria-label="编辑账号层级"]')).toHaveLength(2)
     expect(saveRequests).toEqual([])
   })

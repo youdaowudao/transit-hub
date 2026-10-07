@@ -482,14 +482,14 @@ const accountHealthRank = (account: AdminGroupAccount): number => {
 }
 
 const accountTodayAccuracy = (account: AdminGroupAccount): number | null => {
-  const submitted = account.todayQuestionAnswerSubmitted ?? 0
-  if (submitted <= 0) return null
-  return (account.todayQuestionAnswerCorrect ?? 0) / submitted
+  const judged = account.todayQuestionAnswerJudged ?? 0
+  if (judged <= 0) return null
+  return (account.todayQuestionAnswerCorrect ?? 0) / judged
 }
 
 const formatTodayAccuracy = (account: AdminGroupAccount): string => {
   const accuracy = accountTodayAccuracy(account)
-  if (accuracy == null) return '-'
+  if (accuracy == null) return '—'
   const roundedPercent = Math.round(accuracy * 1000) / 10
   return `${Number.isInteger(roundedPercent) ? roundedPercent.toFixed(0) : roundedPercent.toFixed(1)}%`
 }
@@ -961,7 +961,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     {{ formatTodayAccuracy(account) }}
                   </span>
                   <span v-if="accountTodayAccuracy(account) != null" class="mt-0.5 block text-[11px] text-muted-foreground">
-                    {{ account.todayQuestionAnswerCorrect ?? 0 }}/{{ account.todayQuestionAnswerSubmitted ?? 0 }}
+                    {{ account.todayQuestionAnswerCorrect ?? 0 }}正确 / {{ account.todayQuestionAnswerJudged ?? 0 }}已判
                   </span>
                 </td>
                 <td class="w-28 px-3 py-3">

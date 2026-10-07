@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"transithub/backend/internal/shared/authctx"
 	"transithub/backend/internal/shared/httpjson"
@@ -19,7 +20,7 @@ type Handler struct {
 
 const (
 	questionAnswerContractHeaderName = "X-TransitHub-Question-Answer-Contract"
-	questionAnswerContractVersion    = "2"
+	questionAnswerContractVersion    = "3"
 )
 
 // RegisterRoutes 注册链路健康探活模块的全部路由。响应体一律不含 upstream_key。
@@ -64,6 +65,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("GET /api/connection-health/targets/{id}/question-answers/batches/{batchId}", handler.getQuestionAnswerBatch)
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/question-answers/batches/{batchId}/cancel", handler.stopQuestionAnswerBatch)
 	mux.HandleFunc("GET /api/connection-health/targets/{id}/question-answers/history", handler.questionAnswerHistory)
+	mux.HandleFunc("GET /api/connection-health/targets/{id}/question-answers/summary", handler.getQuestionAnswerSummary)
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/question-answers/records/{recordId}/manual-error", handler.setQuestionAnswerManualError)
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/question-answers/records/{recordId}/judgment", handler.setQuestionAnswerJudgment)
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/schedulable", handler.setTargetSchedulable)
@@ -788,20 +790,49 @@ func (h *Handler) questionAnswerHistory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	page := 1
-	if raw := r.URL.Query().Get("page"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
+	if values, exists := r.URL.Query()["page"]; exists {
+		if len(values) != 1 {
+			httpjson.WriteError(w, http.StatusBadRequest, ErrorQuestionAnswerHistoryPage)
+			return
+		}
+		parsed, err := strconv.Atoi(values[0])
 		if err != nil || parsed < 1 {
-			httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+			httpjson.WriteError(w, http.StatusBadRequest, ErrorQuestionAnswerHistoryPage)
 			return
 		}
 		page = parsed
 	}
-	history, err := h.service.QuestionAnswerHistory(r.Context(), userID, r.PathValue("id"), page)
+	scope := "today"
+	if values, exists := r.URL.Query()["scope"]; exists {
+		if len(values) != 1 || (values[0] != "today" && values[0] != "all") {
+			httpjson.WriteError(w, http.StatusBadRequest, ErrorQuestionAnswerHistoryScope)
+			return
+		}
+		scope = values[0]
+	}
+	history, err := h.service.QuestionAnswerHistory(r.Context(), userID, r.PathValue("id"), page, scope)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	httpjson.Write(w, http.StatusOK, history)
+}
+
+func (h *Handler) getQuestionAnswerSummary(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if rejectQuestionAnswerContractMismatch(w, r) {
+		return
+	}
+	summary, err := h.service.GetQuestionAnswerSummary(r.Context(), userID, r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, summary)
 }
 
 func (h *Handler) setQuestionAnswerManualError(w http.ResponseWriter, r *http.Request) {
@@ -823,13 +854,14 @@ func (h *Handler) setQuestionAnswerJudgment(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var input struct {
-		Judgment QuestionAnswerJudgment `json:"judgment"`
+		Judgment          QuestionAnswerJudgment `json:"judgment"`
+		ExpectedUpdatedAt time.Time              `json:"expectedUpdatedAt"`
 	}
-	if err := httpjson.Decode(r, &input); err != nil || !validQuestionAnswerJudgment(input.Judgment) {
+	if err := httpjson.Decode(r, &input); err != nil || (!validQuestionAnswerJudgment(input.Judgment) || input.ExpectedUpdatedAt.IsZero()) {
 		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
 		return
 	}
-	record, err := h.service.SetQuestionAnswerJudgment(r.Context(), userID, r.PathValue("id"), r.PathValue("recordId"), input.Judgment)
+	record, err := h.service.SetQuestionAnswerJudgment(r.Context(), userID, r.PathValue("id"), r.PathValue("recordId"), input.Judgment, input.ExpectedUpdatedAt)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -950,7 +982,7 @@ func writeError(w http.ResponseWriter, err error) {
 		if requestErr == requestError(ErrorNoCurrentAccount) || requestErr == requestError(ErrorQuestionAnswerActive) || requestErr == requestError(ErrorQuestionAnswerServiceStopped) {
 			status = http.StatusConflict
 		}
-		if requestErr == requestError(ErrorQuestionAnswerContractMismatch) || requestErr == requestError(ErrorQuestionAnswerJudgmentForbidden) {
+		if requestErr == requestError(ErrorQuestionAnswerContractMismatch) || requestErr == requestError(ErrorQuestionAnswerJudgmentForbidden) || requestErr == requestError(ErrorQuestionAnswerJudgmentConflict) {
 			status = http.StatusConflict
 		}
 		if requestErr == requestError(ErrorPrioritySyncBusy) {

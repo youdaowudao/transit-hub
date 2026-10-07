@@ -9,6 +9,9 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 test('connection-health core gate keeps every question-answer regression member', async () => {
   const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
   for (const member of [
+    'c1-question-answer-red.behavior.test.ts',
+    'c1-question-answer-keywords.test.ts',
+    'c1-question-answer.behavior.test.ts',
     'connection-health-question-answer.test.ts',
     'connection-health-question-answer.behavior.test.ts',
     'connection-health-question-answer-compact-layout.behavior.test.ts',
@@ -25,6 +28,7 @@ test('connection-health core gate keeps every question-answer regression member'
     'group-health-setup-exclusion-outcome.behavior.test.ts',
     'connection-health-history-display.test.ts',
     'connection-health-manual-probe-cancel.test.ts',
+    'c1-question-answer-fixture.test.mjs',
     'question-answer-review-fixture.test.mjs',
     'question-answer-batch-review-fixture.test.mjs',
     'question-answer-keyword-highlight-fixture.test.mjs',
@@ -41,6 +45,7 @@ test('connection-health core gate keeps every question-answer regression member'
 test('full gate runs fixture safety and guards core membership', async () => {
   const script = await readFile(path.join(rootDir, 'scripts/test-full-regression.sh'), 'utf8')
   for (const member of [
+    'c1-question-answer-fixture.test.mjs',
     'question-answer-review-fixture.test.mjs',
     'question-answer-batch-review-fixture.test.mjs',
     'question-answer-keyword-highlight-fixture.test.mjs',

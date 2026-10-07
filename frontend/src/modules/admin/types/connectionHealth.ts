@@ -301,6 +301,7 @@ export interface AdminGroupAccount {
   prioritySyncBlockReason?: PrioritySyncBlockReason | string
   todayQuestionAnswerSubmitted?: number
   todayQuestionAnswerCorrect?: number
+  todayQuestionAnswerJudged?: number
   productionSortOrder?: number
 }
 
@@ -511,6 +512,8 @@ export interface TestQuestionInput {
 export type QuestionAnswerStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 export type QuestionAnswerReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh'
 export type QuestionAnswerJudgment = 'unreviewed' | 'correct' | 'incorrect'
+export type QuestionAnswerJudgmentSource = 'automatic' | 'manual'
+export type QuestionAnswerHistoryScope = 'today' | 'all'
 
 export interface QuestionAnswerRecord {
   requestProtocol?: TestProtocol | null
@@ -527,6 +530,8 @@ export interface QuestionAnswerRecord {
   status: QuestionAnswerStatus
   errorType: string
   answerJudgment: QuestionAnswerJudgment | null
+  judgmentSource: QuestionAnswerJudgmentSource | null
+  repeatIndex: number | null
   manualError: boolean
   createdAt: string
   startedAt: string | null
@@ -554,19 +559,50 @@ export interface QuestionAnswerModelStats {
   reviews: QuestionAnswerReviewStats
 }
 
-export interface QuestionAnswerStats {
+export interface QuestionAnswerQuestionStats {
+  questionSnapshotKey: string
+  questionId: string
+  displayQuestionName: string
+  questionBody: string
+  normalizedKeywords: string[]
   requests: QuestionAnswerRequestStats
   reviews: QuestionAnswerReviewStats
   byModel: QuestionAnswerModelStats[]
 }
 
+export interface QuestionAnswerStats {
+  requests: QuestionAnswerRequestStats
+  reviews: QuestionAnswerReviewStats
+  byModel: QuestionAnswerModelStats[]
+  byQuestion: QuestionAnswerQuestionStats[]
+}
+
+export interface QuestionAnswerBatchSummary {
+  batchId: string
+  createdAt: string
+  startedAt: string | null
+  completedAt: string | null
+  requestProtocol: TestProtocol | null
+  reasoningEffort: QuestionAnswerReasoningEffort | null
+  models: string[]
+  questions: QuestionAnswerQuestionStats[]
+  repeatCount: number
+  active: boolean
+  stats: QuestionAnswerStats
+}
+
+export interface QuestionAnswerTodaySummary {
+  targetId: string
+  todayStats: { requests: QuestionAnswerRequestStats; reviews: QuestionAnswerReviewStats }
+}
+
 export interface QuestionAnswerHistory {
-  records: QuestionAnswerRecord[]
+  batches: QuestionAnswerBatchSummary[]
   page: number
   pageSize: 20
-  totalItems: number
+  totalBatches: number
   totalPages: number
-  stats: QuestionAnswerStats
+  allTimeStats: QuestionAnswerStats
   todayStats: QuestionAnswerStats
 }
 

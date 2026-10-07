@@ -184,6 +184,7 @@ type AdminGroupAccount struct {
 	PrioritySyncBlockReason    string                  `json:"prioritySyncBlockReason,omitempty"`
 
 	TodayQuestionAnswerSubmitted int `json:"todayQuestionAnswerSubmitted"`
+	TodayQuestionAnswerJudged    int `json:"todayQuestionAnswerJudged"`
 	TodayQuestionAnswerCorrect   int `json:"todayQuestionAnswerCorrect"`
 	// ProductionSortOrder 是去重目标在当前 workspace 的全局生产顺序，不是分组内局部序号。
 	ProductionSortOrder int `json:"productionSortOrder"`
@@ -851,6 +852,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				PrioritySyncBlockReason:       prioritySyncBlockReason,
 				TodayQuestionAnswerSubmitted:  todayQuestionAnswer.Submitted,
 				TodayQuestionAnswerCorrect:    todayQuestionAnswer.Correct,
+				TodayQuestionAnswerJudged:     todayQuestionAnswer.Judged,
 			}
 			if session.Platform == upstream.PlatformSub2API {
 				only := hasMultiplierOnlyPolicy(priorityPoliciesByTarget[targetID])

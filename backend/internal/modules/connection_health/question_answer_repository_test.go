@@ -124,31 +124,32 @@ func TestQuestionAnswerRepositoryHistoryOnlyReturnsSingaporeTodayWithoutDeleting
 	}
 	beforeCount := countAll()
 
-	pageOne, err := repository.ListQuestionAnswerHistory(ctx, "history-user", "history-target", 1)
+	pageOne, err := repository.ListQuestionAnswerHistory(ctx, "history-user", "history-target", 1, "today")
 	if err != nil {
 		t.Fatalf("list today history page one: %v", err)
 	}
-	pageTwo, err := repository.ListQuestionAnswerHistory(ctx, "history-user", "history-target", 2)
+	pageTwo, err := repository.ListQuestionAnswerHistory(ctx, "history-user", "history-target", 2, "today")
 	if err != nil {
 		t.Fatalf("list today history page two: %v", err)
 	}
-	if pageOne.TotalItems != 21 || pageOne.TotalPages != 2 || len(pageOne.Records) != 20 {
-		t.Fatalf("page one items=%d pages=%d records=%d, want 21/2/20", pageOne.TotalItems, pageOne.TotalPages, len(pageOne.Records))
+	if pageOne.TotalBatches != 1 || pageOne.TotalPages != 1 || len(pageOne.Batches) != 1 {
+		t.Fatalf("page one batches=%d pages=%d summaries=%d, want 1/1/1", pageOne.TotalBatches, pageOne.TotalPages, len(pageOne.Batches))
 	}
-	if pageTwo.TotalItems != 21 || pageTwo.TotalPages != 2 || len(pageTwo.Records) != 1 {
-		t.Fatalf("page two items=%d pages=%d records=%d, want 21/2/1", pageTwo.TotalItems, pageTwo.TotalPages, len(pageTwo.Records))
+	if pageTwo.TotalBatches != 1 || pageTwo.TotalPages != 1 || len(pageTwo.Batches) != 0 {
+		t.Fatalf("page two batches=%d pages=%d summaries=%d, want 1/1/0", pageTwo.TotalBatches, pageTwo.TotalPages, len(pageTwo.Batches))
 	}
-	for _, record := range append(append([]QuestionAnswerRecord{}, pageOne.Records...), pageTwo.Records...) {
-		var createdDate string
-		if err := pool.QueryRow(ctx, `SELECT (created_at AT TIME ZONE 'Asia/Singapore')::date::text FROM connection_health_question_answer_records WHERE id = $1`, record.ID).Scan(&createdDate); err != nil {
-			t.Fatalf("read record %s Singapore date: %v", record.ID, err)
+	for _, batch := range pageOne.Batches {
+		location, _ := time.LoadLocation("Asia/Singapore")
+		if batch.CreatedAt.In(location).Format("2006-01-02") != databaseDate {
+			t.Fatalf("batch date is not Singapore today")
 		}
-		if createdDate != databaseDate {
-			t.Fatalf("history record %s date=%s, want today %s", record.ID, createdDate, databaseDate)
+		if batch.Stats.Requests.Submitted != 21 {
+			t.Fatalf("batch truncated: %+v", batch.Stats)
 		}
 	}
-	if pageOne.Stats.Requests.Submitted != 23 || pageOne.Stats.Requests.InProgress != 1 || pageOne.Stats.Requests.Succeeded != 22 || pageOne.Stats.Reviews.Correct != 15 || pageOne.Stats.Reviews.Incorrect != 7 {
-		t.Fatalf("lifetime stats=%+v", pageOne.Stats)
+
+	if pageOne.AllTimeStats.Requests.Submitted != 23 || pageOne.AllTimeStats.Requests.InProgress != 1 || pageOne.AllTimeStats.Requests.Succeeded != 22 || pageOne.AllTimeStats.Reviews.Correct != 15 || pageOne.AllTimeStats.Reviews.Incorrect != 7 {
+		t.Fatalf("lifetime stats=%+v", pageOne.AllTimeStats)
 	}
 	if pageOne.TodayStats.Requests.Submitted != 21 || pageOne.TodayStats.Requests.InProgress != 0 || pageOne.TodayStats.Requests.Succeeded != 21 || pageOne.TodayStats.Reviews.Correct != 14 || pageOne.TodayStats.Reviews.Incorrect != 7 {
 		t.Fatalf("today stats=%+v", pageOne.TodayStats)
@@ -332,7 +333,7 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	if running, err := repository.MarkQuestionAnswerRunning(ctx, "user-1", batchID, records[0].ID); err != nil || !running {
 		t.Fatalf("mark running=%v err=%v", running, err)
 	}
-	if completed, err := repository.CompleteQuestionAnswer(ctx, "user-1", batchID, records[0].ID, QuestionAnswerSucceeded, "saved answer", ""); err != nil || !completed {
+	if completed, err := repository.CompleteQuestionAnswer(ctx, "user-1", batchID, records[0].ID, questionAnswerTestCompletion(QuestionAnswerSucceeded, "saved answer", "")); err != nil || !completed {
 		t.Fatalf("complete succeeded=%v err=%v", completed, err)
 	}
 	if _, err := repository.UpdateTestQuestion(ctx, "user-1", q1.ID, "Question 1 changed", "changed body", nil); err != nil {
@@ -356,7 +357,7 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	if err != nil || len(legacyRecords) != 1 || legacyRecords[0].ReasoningEffort != nil {
 		t.Fatalf("legacy null reasoning effort=%+v err=%v", legacyRecords, err)
 	}
-	marked, err := repository.SetQuestionAnswerJudgment(ctx, "user-1", "target-1", records[0].ID, QuestionAnswerIncorrect)
+	marked, err := repository.SetQuestionAnswerJudgment(ctx, "user-1", "target-1", records[0].ID, QuestionAnswerIncorrect, questionAnswerTestUpdatedAt(t, repository, ctx, "user-1", "target-1", records[0].ID))
 	if err != nil || marked == nil || marked.AnswerJudgment == nil || *marked.AnswerJudgment != QuestionAnswerIncorrect || !marked.ManualError {
 		t.Fatalf("incorrect judgment=%+v err=%v", marked, err)
 	}
@@ -387,7 +388,7 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 		if i%2 == 1 {
 			status, answer, errorType = QuestionAnswerFailed, "", QuestionAnswerErrorNetwork
 		}
-		if completed, err := repository.CompleteQuestionAnswer(ctx, "user-1", record.BatchID, record.ID, status, answer, errorType); err != nil || !completed {
+		if completed, err := repository.CompleteQuestionAnswer(ctx, "user-1", record.BatchID, record.ID, questionAnswerTestCompletion(status, answer, errorType)); err != nil || !completed {
 			t.Fatalf("bulk complete %d=%v err=%v", i, completed, err)
 		}
 		if _, err := pool.Exec(ctx, `
@@ -416,7 +417,7 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 			t.Fatalf("ordered bulk record %d id=%s, want %s", i, orderedBulk[i].ID, bulk[i].ID)
 		}
 	}
-	failedMark, err := repository.SetQuestionAnswerJudgment(ctx, "user-1", "target-1", bulk[1].ID, QuestionAnswerCorrect)
+	failedMark, err := repository.SetQuestionAnswerJudgment(ctx, "user-1", "target-1", bulk[1].ID, QuestionAnswerCorrect, questionAnswerTestUpdatedAt(t, repository, ctx, "user-1", "target-1", bulk[1].ID))
 	if err != nil || failedMark != nil {
 		t.Fatalf("failed record judgment=%+v err=%v", failedMark, err)
 	}
@@ -429,19 +430,19 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 		t.Fatalf("cancel batch found=%v err=%v", found, err)
 	}
 
-	page1, err := repository.ListQuestionAnswerHistory(ctx, "user-1", "target-1", 1)
-	if err != nil || len(page1.Records) != 20 || page1.TotalItems != 27 || page1.TotalPages != 2 {
+	page1, err := repository.ListQuestionAnswerHistory(ctx, "user-1", "target-1", 1, "today")
+	if err != nil || len(page1.Batches) != 3 || page1.TotalBatches != 3 || page1.TotalPages != 1 {
 		t.Fatalf("page1=%+v err=%v", page1, err)
 	}
-	page2, err := repository.ListQuestionAnswerHistory(ctx, "user-1", "target-1", 2)
-	if err != nil || len(page2.Records) != 7 {
-		t.Fatalf("page2 records=%d err=%v", len(page2.Records), err)
+	page2, err := repository.ListQuestionAnswerHistory(ctx, "user-1", "target-1", 2, "today")
+	if err != nil || len(page2.Batches) != 0 {
+		t.Fatalf("page2 records=%d err=%v", len(page2.Batches), err)
 	}
-	if page1.Stats.Requests.Submitted != 27 || page1.Stats.Requests.InProgress != 0 || page1.Stats.Requests.Succeeded != 14 || page1.Stats.Requests.Failed != 12 || page1.Stats.Requests.Cancelled != 1 {
-		t.Fatalf("stats=%+v", page1.Stats)
+	if page1.AllTimeStats.Requests.Submitted != 27 || page1.AllTimeStats.Requests.InProgress != 0 || page1.AllTimeStats.Requests.Succeeded != 14 || page1.AllTimeStats.Requests.Failed != 12 || page1.AllTimeStats.Requests.Cancelled != 1 {
+		t.Fatalf("stats=%+v", page1.AllTimeStats)
 	}
-	if page1.Stats.Reviews.Unreviewed != 13 || page1.Stats.Reviews.Correct != 0 || page1.Stats.Reviews.Incorrect != 1 || page1.Stats.Reviews.Unreviewed+page1.Stats.Reviews.Correct+page1.Stats.Reviews.Incorrect != page1.Stats.Requests.Succeeded {
-		t.Fatalf("review stats=%+v", page1.Stats)
+	if page1.AllTimeStats.Reviews.Unreviewed != 13 || page1.AllTimeStats.Reviews.Correct != 0 || page1.AllTimeStats.Reviews.Incorrect != 1 || page1.AllTimeStats.Reviews.Unreviewed+page1.AllTimeStats.Reviews.Correct+page1.AllTimeStats.Reviews.Incorrect != page1.AllTimeStats.Requests.Succeeded {
+		t.Fatalf("review stats=%+v", page1.AllTimeStats)
 	}
 	if page1.TodayStats.Requests.Submitted != 27 || page1.TodayStats.Requests.InProgress != 0 || page1.TodayStats.Requests.Succeeded != 14 || page1.TodayStats.Requests.Failed != 12 || page1.TodayStats.Requests.Cancelled != 1 {
 		t.Fatalf("today stats=%+v", page1.TodayStats)
@@ -449,10 +450,10 @@ func TestQuestionAnswerRepositoryPostgresContract(t *testing.T) {
 	if page1.TodayStats.Reviews.Unreviewed != 13 || page1.TodayStats.Reviews.Correct != 0 || page1.TodayStats.Reviews.Incorrect != 1 || page1.TodayStats.Reviews.Unreviewed+page1.TodayStats.Reviews.Correct+page1.TodayStats.Reviews.Incorrect != page1.TodayStats.Requests.Succeeded {
 		t.Fatalf("today review stats=%+v", page1.TodayStats)
 	}
-	if page1.Records[0].Status != QuestionAnswerCancelled {
-		t.Fatalf("latest record status=%s, want cancelled", page1.Records[0].Status)
+	if page1.Batches[0].Stats.Requests.Cancelled != 1 {
+		t.Fatalf("latest batch cancelled=%d, want one", page1.Batches[0].Stats.Requests.Cancelled)
 	}
-	if foreign, err := repository.ListQuestionAnswerHistory(ctx, "user-2", "target-1", 1); err != nil || foreign.TotalItems != 0 {
+	if foreign, err := repository.ListQuestionAnswerHistory(ctx, "user-2", "target-1", 1, "today"); err != nil || foreign.TotalBatches != 0 {
 		t.Fatalf("history user isolation=%+v err=%v", foreign, err)
 	}
 
@@ -662,7 +663,7 @@ func TestQuestionAnswerRepositoryPostgresConcurrentCompletionAndStopHaveOneTermi
 		go func() {
 			defer wg.Done()
 			<-start
-			completeResult, completeErr = repository.CompleteQuestionAnswer(ctx, "race-user", batchID, records[0].ID, QuestionAnswerSucceeded, "race answer", "")
+			completeResult, completeErr = repository.CompleteQuestionAnswer(ctx, "race-user", batchID, records[0].ID, questionAnswerTestCompletion(QuestionAnswerSucceeded, "race answer", ""))
 		}()
 		go func() {
 			defer wg.Done()
@@ -701,13 +702,13 @@ func TestQuestionAnswerRepositoryPostgresConcurrentCompletionAndStopHaveOneTermi
 			t.Fatalf("mark preserve record running: record=%s running=%v err=%v", record.ID, running, err)
 		}
 	}
-	if completed, err := repository.CompleteQuestionAnswer(ctx, "race-user", "preserve-batch", preserveRecords[0].ID, QuestionAnswerSucceeded, "kept answer", ""); err != nil || !completed {
+	if completed, err := repository.CompleteQuestionAnswer(ctx, "race-user", "preserve-batch", preserveRecords[0].ID, questionAnswerTestCompletion(QuestionAnswerSucceeded, "kept answer", "")); err != nil || !completed {
 		t.Fatalf("complete preserved record: completed=%v err=%v", completed, err)
 	}
 	if found, err := repository.FinalizeQuestionAnswerBatch(ctx, "race-user", "preserve-target", "preserve-batch", QuestionAnswerCancelled, ""); err != nil || !found {
 		t.Fatalf("stop preserve batch: found=%v err=%v", found, err)
 	}
-	if late, err := repository.CompleteQuestionAnswer(ctx, "race-user", "preserve-batch", preserveRecords[1].ID, QuestionAnswerSucceeded, "late answer", ""); err != nil || late {
+	if late, err := repository.CompleteQuestionAnswer(ctx, "race-user", "preserve-batch", preserveRecords[1].ID, questionAnswerTestCompletion(QuestionAnswerSucceeded, "late answer", "")); err != nil || late {
 		t.Fatalf("late completion after stop: completed=%v err=%v", late, err)
 	}
 	stored, err := repository.ListQuestionAnswerBatch(ctx, "race-user", "preserve-target", "preserve-batch")
@@ -759,7 +760,7 @@ func TestQuestionAnswerRepositoryStopFinalizeStateTransitions(t *testing.T) {
 			t.Fatalf("StopPending changed running record: %+v", record)
 		}
 	}
-	if completed, err := repository.CompleteQuestionAnswer(ctx, "stop-finalize-user", "stop-finalize-batch", records[0].ID, QuestionAnswerSucceeded, "kept", ""); err != nil || !completed {
+	if completed, err := repository.CompleteQuestionAnswer(ctx, "stop-finalize-user", "stop-finalize-batch", records[0].ID, questionAnswerTestCompletion(QuestionAnswerSucceeded, "kept", "")); err != nil || !completed {
 		t.Fatalf("complete terminal record before finalizer=%v err=%v", completed, err)
 	}
 	if found, err := repository.FinalizeQuestionAnswerBatch(ctx, "stop-finalize-user", "stop-finalize-target", "stop-finalize-batch", QuestionAnswerCancelled, ""); err != nil || !found {
@@ -919,7 +920,7 @@ func TestQuestionAnswerRepositoryPostgresConcurrentOppositeJudgmentsNeverReturnM
 	if running, err := repository.MarkQuestionAnswerRunning(ctx, "judgment-race-user", records[0].BatchID, records[0].ID); err != nil || !running {
 		t.Fatalf("mark race record running=%v err=%v", running, err)
 	}
-	if completed, err := repository.CompleteQuestionAnswer(ctx, "judgment-race-user", records[0].BatchID, records[0].ID, QuestionAnswerSucceeded, "answer", ""); err != nil || !completed {
+	if completed, err := repository.CompleteQuestionAnswer(ctx, "judgment-race-user", records[0].BatchID, records[0].ID, questionAnswerTestCompletion(QuestionAnswerSucceeded, "answer", "")); err != nil || !completed {
 		t.Fatalf("complete race record=%v err=%v", completed, err)
 	}
 
@@ -953,13 +954,7 @@ func TestQuestionAnswerRepositoryPostgresConcurrentOppositeJudgmentsNeverReturnM
 			go func(desired QuestionAnswerJudgment) {
 				defer wg.Done()
 				<-start
-				record, err := repository.SetQuestionAnswerJudgment(
-					ctx,
-					"judgment-race-user",
-					"judgment-race-target",
-					records[0].ID,
-					desired,
-				)
+				record, err := repository.SetQuestionAnswerJudgment(ctx, "judgment-race-user", "judgment-race-target", records[0].ID, desired, questionAnswerTestUpdatedAt(t, repository, ctx, "judgment-race-user", "judgment-race-target", records[0].ID))
 				results <- judgmentResult{judgment: desired, record: record, err: err}
 			}(judgment)
 		}
@@ -968,6 +963,9 @@ func TestQuestionAnswerRepositoryPostgresConcurrentOppositeJudgmentsNeverReturnM
 		close(results)
 
 		for result := range results {
+			if errors.Is(result.err, requestError(ErrorQuestionAnswerJudgmentConflict)) {
+				continue
+			}
 			if result.err != nil {
 				t.Fatalf("round %d judgment %s returned error: %v", round, result.judgment, result.err)
 			}
@@ -1122,7 +1120,7 @@ func TestQuestionAnswerRepositoryCompletesWithJudgmentAndReconciledStats(t *test
 	if running, err := repository.MarkQuestionAnswerRunning(ctx, "stats-user", "stats-success", success[0].ID); err != nil || !running {
 		t.Fatalf("mark success running=%v err=%v", running, err)
 	}
-	if completed, err := repository.CompleteQuestionAnswer(ctx, "stats-user", "stats-success", success[0].ID, QuestionAnswerSucceeded, "answer", ""); err != nil || !completed {
+	if completed, err := repository.CompleteQuestionAnswer(ctx, "stats-user", "stats-success", success[0].ID, questionAnswerTestCompletion(QuestionAnswerSucceeded, "answer", "")); err != nil || !completed {
 		t.Fatalf("complete success=%v err=%v", completed, err)
 	}
 	var successJudgment *string
@@ -1141,7 +1139,7 @@ func TestQuestionAnswerRepositoryCompletesWithJudgmentAndReconciledStats(t *test
 	if running, err := repository.MarkQuestionAnswerRunning(ctx, "stats-user", "stats-failed", failed[0].ID); err != nil || !running {
 		t.Fatalf("mark failed running=%v err=%v", running, err)
 	}
-	if completed, err := repository.CompleteQuestionAnswer(ctx, "stats-user", "stats-failed", failed[0].ID, QuestionAnswerFailed, "", QuestionAnswerErrorNetwork); err != nil || !completed {
+	if completed, err := repository.CompleteQuestionAnswer(ctx, "stats-user", "stats-failed", failed[0].ID, questionAnswerTestCompletion(QuestionAnswerFailed, "", QuestionAnswerErrorNetwork)); err != nil || !completed {
 		t.Fatalf("complete failed=%v err=%v", completed, err)
 	}
 	var failedJudgment *string
@@ -1152,7 +1150,7 @@ func TestQuestionAnswerRepositoryCompletesWithJudgmentAndReconciledStats(t *test
 		t.Fatalf("failed request received answer judgment %v", failedJudgment)
 	}
 
-	history, err := repository.ListQuestionAnswerHistory(ctx, "stats-user", "stats-target", 1)
+	history, err := repository.ListQuestionAnswerHistory(ctx, "stats-user", "stats-target", 1, "today")
 	if err != nil {
 		t.Fatalf("list reconciled history: %v", err)
 	}
@@ -1174,7 +1172,7 @@ func TestQuestionAnswerRepositoryCompletesWithJudgmentAndReconciledStats(t *test
 				Correct    int `json:"correct"`
 				Incorrect  int `json:"incorrect"`
 			} `json:"reviews"`
-		} `json:"stats"`
+		} `json:"allTimeStats"`
 	}
 	if err := json.Unmarshal(encoded, &payload); err != nil {
 		t.Fatalf("decode reconciled history: %v", err)
@@ -1219,7 +1217,7 @@ func TestQuestionAnswerRepositoryModelStatsLifetimeTodayAndEmptyArrays(t *testin
 		t.Fatalf("move one model-a record before Singapore today: %v", err)
 	}
 
-	history, err := repository.ListQuestionAnswerHistory(ctx, "model-stats-user", "model-stats-target", 1)
+	history, err := repository.ListQuestionAnswerHistory(ctx, "model-stats-user", "model-stats-target", 1, "today")
 	if err != nil {
 		t.Fatalf("list model stats history: %v", err)
 	}
@@ -1241,27 +1239,27 @@ func TestQuestionAnswerRepositoryModelStatsLifetimeTodayAndEmptyArrays(t *testin
 			{ModelName: "model-failed", Requests: QuestionAnswerRequestStats{Submitted: 2, Failed: 2}},
 		},
 	}
-	if !reflect.DeepEqual(history.Stats, wantLifetime) {
-		t.Fatalf("lifetime stats=%+v want=%+v", history.Stats, wantLifetime)
+	if history.AllTimeStats.Requests != wantLifetime.Requests || history.AllTimeStats.Reviews != wantLifetime.Reviews || !reflect.DeepEqual(history.AllTimeStats.ByModel, wantLifetime.ByModel) {
+		t.Fatalf("lifetime stats=%+v want=%+v", history.AllTimeStats, wantLifetime)
 	}
-	if !reflect.DeepEqual(history.TodayStats, wantToday) {
+	if history.TodayStats.Requests != wantToday.Requests || history.TodayStats.Reviews != wantToday.Reviews || !reflect.DeepEqual(history.TodayStats.ByModel, wantToday.ByModel) {
 		t.Fatalf("today stats=%+v want=%+v", history.TodayStats, wantToday)
 	}
-	assertQuestionAnswerStatsReconcile(t, history.Stats)
+	assertQuestionAnswerStatsReconcile(t, history.AllTimeStats)
 	assertQuestionAnswerStatsReconcile(t, history.TodayStats)
-	assertQuestionAnswerModelSumEqualsTotal(t, history.Stats)
+	assertQuestionAnswerModelSumEqualsTotal(t, history.AllTimeStats)
 	assertQuestionAnswerModelSumEqualsTotal(t, history.TodayStats)
 
-	pageTwo, err := repository.ListQuestionAnswerHistory(ctx, "model-stats-user", "model-stats-target", 2)
-	if err != nil || len(pageTwo.Records) != 0 || !reflect.DeepEqual(pageTwo.Stats, history.Stats) || !reflect.DeepEqual(pageTwo.TodayStats, history.TodayStats) {
-		t.Fatalf("page two stats changed with pagination: records=%d history=%+v err=%v", len(pageTwo.Records), pageTwo, err)
+	pageTwo, err := repository.ListQuestionAnswerHistory(ctx, "model-stats-user", "model-stats-target", 2, "today")
+	if err != nil || len(pageTwo.Batches) != 0 || !reflect.DeepEqual(pageTwo.AllTimeStats, history.AllTimeStats) || !reflect.DeepEqual(pageTwo.TodayStats, history.TodayStats) {
+		t.Fatalf("page two stats changed with pagination: records=%d history=%+v err=%v", len(pageTwo.Batches), pageTwo, err)
 	}
-	empty, err := repository.ListQuestionAnswerHistory(ctx, "model-stats-user", "empty-model-stats-target", 1)
+	empty, err := repository.ListQuestionAnswerHistory(ctx, "model-stats-user", "empty-model-stats-target", 1, "today")
 	if err != nil {
 		t.Fatalf("list empty model stats history: %v", err)
 	}
-	if empty.Stats.ByModel == nil || empty.TodayStats.ByModel == nil || len(empty.Stats.ByModel) != 0 || len(empty.TodayStats.ByModel) != 0 {
-		t.Fatalf("empty byModel arrays lifetime=%#v today=%#v", empty.Stats.ByModel, empty.TodayStats.ByModel)
+	if empty.AllTimeStats.ByModel == nil || empty.TodayStats.ByModel == nil || len(empty.AllTimeStats.ByModel) != 0 || len(empty.TodayStats.ByModel) != 0 {
+		t.Fatalf("empty byModel arrays lifetime=%#v today=%#v", empty.AllTimeStats.ByModel, empty.TodayStats.ByModel)
 	}
 	encoded, err := json.Marshal(empty)
 	if err != nil {
@@ -1564,18 +1562,22 @@ func TestQuestionAnswerTask2BrowserFixturePostgresContract(t *testing.T) {
 	if err != nil || len(bulk) != 25 {
 		t.Fatalf("bulk records=%d err=%v", len(bulk), err)
 	}
-	page1, err := repository.ListQuestionAnswerHistory(ctx, userID, targetID, 1)
-	if err != nil || len(page1.Records) != 20 || page1.TotalItems != 29 || page1.TotalPages != 2 ||
-		countBatch(page1.Records, "task2-active-20260830") != 2 ||
-		countBatch(page1.Records, "task2-bulk-20260830") != 18 {
+	page1, err := repository.ListQuestionAnswerHistory(ctx, userID, targetID, 1, "today")
+	if err != nil || len(page1.Batches) != 3 || page1.TotalBatches != 3 || page1.TotalPages != 1 {
 		t.Fatalf("page1=%+v err=%v", page1, err)
 	}
-	page2, err := repository.ListQuestionAnswerHistory(ctx, userID, targetID, 2)
-	if err != nil || len(page2.Records) != 9 ||
-		countBatch(page2.Records, "task2-bulk-20260830") != 7 ||
-		countBatch(page2.Records, "task2-older-20260830") != 2 {
+	counts := map[string]int{}
+	for _, batch := range page1.Batches {
+		counts[batch.BatchID] = batch.Stats.Requests.Submitted
+	}
+	if counts["task2-active-20260830"] != 2 || counts["task2-bulk-20260830"] != 25 || counts["task2-older-20260830"] != 2 {
+		t.Fatalf("complete batch counts=%v", counts)
+	}
+	page2, err := repository.ListQuestionAnswerHistory(ctx, userID, targetID, 2, "today")
+	if err != nil || len(page2.Batches) != 0 {
 		t.Fatalf("page2=%+v err=%v", page2, err)
 	}
+
 	if _, err := connection.Exec(ctx, `
 		INSERT INTO connection_health_question_answer_records (
 			id, user_id, target_id, batch_id, model_name, question_id, question_name, question_body,

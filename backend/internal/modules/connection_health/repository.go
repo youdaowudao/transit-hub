@@ -334,6 +334,26 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 					);
 			END IF;
 		END $$`,
+		`DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = 'connection_health_question_answer_records'::regclass
+          AND attname = 'answer_judgment_source' AND NOT attisdropped
+    ) THEN
+        ALTER TABLE connection_health_question_answer_records
+            ADD COLUMN answer_judgment_source text NULL
+            CONSTRAINT connection_health_question_answer_judgment_source
+                CHECK (answer_judgment_source IS NULL OR answer_judgment_source IN ('automatic', 'manual'));
+        UPDATE connection_health_question_answer_records
+        SET answer_judgment_source = 'manual'
+        WHERE status = 'succeeded' AND answer_judgment IN ('correct', 'incorrect');
+    END IF;
+END $$;`,
+		`ALTER TABLE connection_health_question_answer_records
+    ADD COLUMN IF NOT EXISTS repeat_index integer NULL
+    CONSTRAINT connection_health_question_answer_repeat_index
+        CHECK (repeat_index IS NULL OR repeat_index BETWEEN 1 AND 10)`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_target_history ON connection_health_question_answer_records (user_id, target_id, created_at DESC, id DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_batch ON connection_health_question_answer_records (user_id, target_id, batch_id, created_at, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_active ON connection_health_question_answer_records (user_id, target_id, status) WHERE status IN ('pending', 'running')`,

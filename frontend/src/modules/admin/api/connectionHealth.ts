@@ -21,6 +21,9 @@ import type {
   QuestionAnswerJudgment,
   QuestionAnswerReasoningEffort,
   QuestionAnswerHistory,
+  QuestionAnswerHistoryScope,
+  QuestionAnswerTodaySummary,
+  QuestionAnswerQuestionStats,
   QuestionAnswerRecord,
   TestQuestion,
   TestQuestionInput,
@@ -47,7 +50,7 @@ const authHeaders = (): HeadersInit => {
 }
 
 const questionAnswerContractHeaders: HeadersInit = {
-  'X-TransitHub-Question-Answer-Contract': '2',
+  'X-TransitHub-Question-Answer-Contract': '3',
 }
 
 type ApiErrorPayload = {
@@ -717,17 +720,13 @@ type TestQuestionPayload = Omit<TestQuestion, 'keywords'> & { keywords?: unknown
 type QuestionAnswerRecordPayload = Omit<QuestionAnswerRecord, 'questionKeywordSnapshot'> & {
   questionKeywordSnapshot?: unknown
 }
-type QuestionAnswerStatsPayload = Omit<QuestionAnswerBatch['stats'], 'byModel'> & { byModel?: unknown }
+type QuestionAnswerStatsPayload = Omit<QuestionAnswerBatch['stats'], 'byModel' | 'byQuestion'> & { byModel?: unknown; byQuestion?: unknown }
 type QuestionAnswerBatchPayload = Omit<QuestionAnswerBatch, 'records' | 'repeatCount' | 'stats'> & {
   records: QuestionAnswerRecordPayload[]
   repeatCount?: unknown
   stats: QuestionAnswerStatsPayload
 }
-type QuestionAnswerHistoryPayload = Omit<QuestionAnswerHistory, 'records' | 'stats' | 'todayStats'> & {
-  records: QuestionAnswerRecordPayload[]
-  stats: QuestionAnswerStatsPayload
-  todayStats: QuestionAnswerStatsPayload
-}
+type QuestionAnswerHistoryPayload = QuestionAnswerHistory
 
 const normalizeTestQuestion = (question: TestQuestionPayload): TestQuestion => ({
   ...question,
@@ -736,15 +735,24 @@ const normalizeTestQuestion = (question: TestQuestionPayload): TestQuestion => (
 
 const normalizeQuestionAnswerRecord = (record: QuestionAnswerRecordPayload): QuestionAnswerRecord => ({
   ...record,
+  judgmentSource: record.judgmentSource === 'automatic' || record.judgmentSource === 'manual' ? record.judgmentSource : null,
+  repeatIndex: typeof record.repeatIndex === 'number' ? record.repeatIndex : null,
   questionKeywordSnapshot: Array.isArray(record.questionKeywordSnapshot)
     ? [...record.questionKeywordSnapshot]
     : null,
+})
+
+const normalizeQuestionAnswerQuestionStats = (item: QuestionAnswerQuestionStats): QuestionAnswerQuestionStats => ({
+  ...item, normalizedKeywords: [...(item.normalizedKeywords ?? [])],
+  requests: { ...item.requests }, reviews: { ...item.reviews },
+  byModel: (item.byModel ?? []).map(model => ({ ...model, requests: { ...model.requests }, reviews: { ...model.reviews } })),
 })
 
 const normalizeQuestionAnswerStats = (stats: QuestionAnswerStatsPayload): QuestionAnswerBatch['stats'] => ({
   ...stats,
   requests: { ...stats.requests },
   reviews: { ...stats.reviews },
+  byQuestion: Array.isArray(stats.byQuestion) ? stats.byQuestion.map(normalizeQuestionAnswerQuestionStats) : [],
   byModel: Array.isArray(stats.byModel)
     ? stats.byModel.map(item => ({
       ...item,
@@ -763,8 +771,8 @@ const normalizeQuestionAnswerBatch = (batch: QuestionAnswerBatchPayload): Questi
 
 const normalizeQuestionAnswerHistory = (history: QuestionAnswerHistoryPayload): QuestionAnswerHistory => ({
   ...history,
-  records: history.records.map(normalizeQuestionAnswerRecord),
-  stats: normalizeQuestionAnswerStats(history.stats),
+  batches: history.batches.map(batch => ({ ...batch, models: [...batch.models], questions: batch.questions.map(normalizeQuestionAnswerQuestionStats), stats: normalizeQuestionAnswerStats(batch.stats) })),
+  allTimeStats: normalizeQuestionAnswerStats(history.allTimeStats),
   todayStats: normalizeQuestionAnswerStats(history.todayStats),
 })
 
@@ -846,23 +854,29 @@ export const cancelQuestionAnswerBatch = async (targetId: string, batchId: strin
   return normalizeQuestionAnswerBatch(batch)
 }
 
-export const getQuestionAnswerHistory = async (targetId: string, page: number, signal?: AbortSignal): Promise<QuestionAnswerHistory> => {
+export const getQuestionAnswerHistory = async (targetId: string, page: number, scope: QuestionAnswerHistoryScope = 'today', signal?: AbortSignal): Promise<QuestionAnswerHistory> => {
   const history = await requestJson<QuestionAnswerHistoryPayload>(
-    `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/history?page=${page}`,
+    `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/history?page=${page}&scope=${scope}`,
     { headers: questionAnswerContractHeaders, signal },
   )
   return normalizeQuestionAnswerHistory(history)
 }
 
+export const getQuestionAnswerSummary = async (targetId: string, signal?: AbortSignal): Promise<QuestionAnswerTodaySummary> => {
+  const summary = await requestJson<QuestionAnswerTodaySummary>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/summary`, { headers: questionAnswerContractHeaders, signal })
+  return { targetId: summary.targetId, todayStats: { requests: { ...summary.todayStats.requests }, reviews: { ...summary.todayStats.reviews } } }
+}
+
 export const setQuestionAnswerJudgment = async (
   targetId: string,
   recordId: string,
-  judgment: QuestionAnswerJudgment,
+  judgment: Exclude<QuestionAnswerJudgment, 'unreviewed'>,
+  expectedUpdatedAt: string,
   signal?: AbortSignal,
 ): Promise<QuestionAnswerRecord> => {
   const record = await requestJson<QuestionAnswerRecordPayload>(
     `/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/records/${encodeURIComponent(recordId)}/judgment`,
-    { method: 'PUT', headers: questionAnswerContractHeaders, body: JSON.stringify({ judgment }), signal },
+    { method: 'PUT', headers: questionAnswerContractHeaders, body: JSON.stringify({ judgment, expectedUpdatedAt }), signal },
   )
   return normalizeQuestionAnswerRecord(record)
 }

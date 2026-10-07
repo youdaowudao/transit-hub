@@ -580,8 +580,8 @@ func TestAdminGroups_TargetIDProbeAvailableAndModelHealth(t *testing.T) {
 func TestAdminGroups_ProjectsTodayQuestionAnswerSummaryOnceForSharedTargets(t *testing.T) {
 	repo := newFakeRepository()
 	repo.qaToday = map[string]QuestionAnswerTodaySummary{
-		"sub2api:ws1:shared": {Submitted: 4, Correct: 3},
-		"sub2api:ws1:other":  {Submitted: 3, Correct: 2},
+		"sub2api:ws1:shared": {Submitted: 4, Judged: 3, Correct: 3},
+		"sub2api:ws1:other":  {Submitted: 3, Judged: 3, Correct: 2},
 	}
 	reader := fakePlatformGroupReader{
 		groups: []upstream.AdminGroupInfo{
@@ -623,7 +623,7 @@ func TestAdminGroups_ProjectsTodayQuestionAnswerSummaryOnceForSharedTargets(t *t
 	}
 	sharedTwo := groups[1].Accounts[0]
 	for _, account := range []AdminGroupAccount{sharedOne, sharedTwo} {
-		if account.TodayQuestionAnswerSubmitted != 4 || account.TodayQuestionAnswerCorrect != 3 {
+		if account.TodayQuestionAnswerSubmitted != 4 || account.TodayQuestionAnswerCorrect != 3 || account.TodayQuestionAnswerJudged != 3 {
 			t.Fatalf("shared account summary=%+v want submitted=4 correct=3", account)
 		}
 	}
@@ -633,7 +633,7 @@ func TestAdminGroups_ProjectsTodayQuestionAnswerSummaryOnceForSharedTargets(t *t
 			other = account
 		}
 	}
-	if other.TodayQuestionAnswerSubmitted != 3 || other.TodayQuestionAnswerCorrect != 2 {
+	if other.TodayQuestionAnswerSubmitted != 3 || other.TodayQuestionAnswerCorrect != 2 || other.TodayQuestionAnswerJudged != 3 {
 		t.Fatalf("other summary=%+v want submitted=3 correct=2", other)
 	}
 }

@@ -40,11 +40,15 @@ import type {
   QuestionAnswerJudgment,
   QuestionAnswerReasoningEffort,
   QuestionAnswerHistory,
+  QuestionAnswerHistoryScope,
+  QuestionAnswerStats,
   QuestionAnswerRecord,
   TestQuestion,
 } from '../../types/connectionHealth'
 import {
-  groupQuestionAnswerHistoryByBatch,
+  groupQuestionAnswerResults,
+  questionAnswerRecordMatchesQuestion,
+  questionAnswerRequestProtocolLabel,
   isCurrentQuestionAnswerOperation,
   partitionQuestionAnswerReviewRecords,
   questionAnswerBatchCompletedAt,
@@ -61,7 +65,7 @@ import {
   createDefaultQuestionAnswerPreferences,
   type QuestionAnswerSelectionPreferences,
 } from '../../utils/connectionHealthPreferences'
-import QuestionAnswerHighlightedText from './QuestionAnswerHighlightedText.vue'
+import QuestionAnswerRecordCard from './QuestionAnswerRecordCard.vue'
 import QuestionAnswerStatsBar from './QuestionAnswerStatsBar.vue'
 import AccountTierEditor from './AccountTierEditor.vue'
 import { t, te } from '@/locales'
@@ -82,6 +86,8 @@ const props = withDefaults(defineProps<{
   open: boolean
   target: ManualProbeTargetSummary | null
   questionAnswerPreferences?: QuestionAnswerSelectionPreferences
+  initialQuestionAnswerBatchId?: string | null
+  summaryRefreshFailed?: boolean
 }>(), {
   questionAnswerPreferences: () => createDefaultQuestionAnswerPreferences(),
 })
@@ -92,6 +98,8 @@ const emit = defineEmits<{
   (event: 'completed'): void
   (event: 'question-answer-started', targetId: string): void
   (event: 'question-answer-viewed', targetId: string): void
+  (event: 'question-answer-stats-dirty', targetId: string): void
+  (event: 'question-answer-stats-retry', targetId: string): void
   (event: 'question-answer-preferences-changed', preferences: QuestionAnswerSelectionPreferences): void
 }>()
 
@@ -140,31 +148,32 @@ const qaRuntimeBatch = ref<QuestionAnswerBatch | null>(null)
 const qaReviewBatch = ref<QuestionAnswerBatch | null>(null)
 const qaReviewBatchSyncFailed = ref(false)
 const qaReviewLoadingBatchId = ref<string | null>(null)
-const qaHistory = ref<QuestionAnswerHistory>({
-  records: [],
-  page: 1,
-  pageSize: 20,
-  totalItems: 0,
-  totalPages: 0,
-  stats: {
-    requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
-    reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
-    byModel: [],
-  },
-  todayStats: {
-    requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
-    reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
-    byModel: [],
-  },
-})
+const emptyQuestionAnswerStats = (): QuestionAnswerStats => ({ requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 }, reviews: { unreviewed: 0, correct: 0, incorrect: 0 }, byModel: [], byQuestion: [] })
+const emptyQuestionAnswerHistory = (): QuestionAnswerHistory => ({ batches: [], page: 1, pageSize: 20, totalBatches: 0, totalPages: 0, allTimeStats: emptyQuestionAnswerStats(), todayStats: emptyQuestionAnswerStats() })
+const qaHistory = ref<QuestionAnswerHistory>(emptyQuestionAnswerHistory())
+const qaHistoryScope = ref<QuestionAnswerHistoryScope>('today')
+const qaResultGroupsOpen = ref<Set<string>>(new Set())
+const qaPendingOpen = ref(true)
 const qaMarking = ref<Map<string, QuestionAnswerJudgment>>(new Map())
 const qaExpanded = ref<Set<string>>(new Set())
-const qaProcessedOpen = ref(false)
+const qaProcessedOpen = ref(true)
 const qaFailedOpen = ref(false)
 const qaConfigOpen = ref(true)
 const qaHistoryOpen = ref(false)
 const qaHistoryLoaded = ref(false)
 const qaErrorKey = ref('')
+type QuestionAnswerLocalReadFailure = {
+  intent: number
+  batchId: string | null
+  selectBatch: boolean
+  historyPage: number | null
+  historyScope: QuestionAnswerHistoryScope
+  errorKey: string
+}
+const qaLocalReadFailure = ref<QuestionAnswerLocalReadFailure | null>(null)
+let qaLocalFailureIntent = 0
+const qaLocalRetrying = ref(false)
+let qaLocalRetryController: AbortController | null = null
 const qaCompletedNotice = ref(false)
 const qaClockNow = ref(Date.now())
 
@@ -274,25 +283,17 @@ const resetQuestionAnswerViewState = () => {
   qaReviewBatch.value = null
   qaReviewBatchSyncFailed.value = false
   qaHistoryIntentPage = 1
-  qaHistory.value = {
-    records: [], page: 1, pageSize: 20, totalItems: 0, totalPages: 0,
-    stats: {
-      requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
-      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
-      byModel: [],
-    },
-    todayStats: {
-      requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 },
-      reviews: { unreviewed: 0, correct: 0, incorrect: 0 },
-      byModel: [],
-    },
-  }
-  qaProcessedOpen.value = false
+  qaHistory.value = emptyQuestionAnswerHistory()
+  qaHistoryScope.value = 'today'
+  qaResultGroupsOpen.value = new Set()
+  qaPendingOpen.value = true
+  qaProcessedOpen.value = true
   qaFailedOpen.value = false
   qaExpanded.value = new Set()
   qaConfigOpen.value = true
   qaHistoryOpen.value = false
   qaHistoryLoaded.value = false
+  qaLocalReadFailure.value = null
   qaConfigVisibilityInitialized = false
 }
 
@@ -319,6 +320,9 @@ const cancelQuestionAnswerJudgments = () => {
 }
 
 const cancelQuestionAnswerRequests = () => {
+  qaLocalRetryController?.abort()
+  qaLocalRetryController = null
+  qaLocalRetrying.value = false
   clearQuestionAnswerPolling()
   clearQuestionAnswerClock()
   cancelQuestionAnswerReview()
@@ -437,7 +441,7 @@ const qaReadableError = computed(() => qaErrorKey.value.startsWith('admin.')
   : t(`${prefix}.questionAnswer.errorTypes.${qaErrorKey.value || 'unknown'}`))
 
 watch(
-  () => [props.open, props.target?.targetId],
+  () => [props.open, props.target?.targetId, props.initialQuestionAnswerBatchId],
   async ([isOpen]) => {
     resetQuestionAnswerTargetState()
     if (!isOpen || !props.target) {
@@ -533,7 +537,7 @@ watch(
 const hasModels = computed(() => models.value.length > 0)
 const qaActive = computed(() => Boolean(qaRuntimeBatch.value?.active))
 const qaSelectionLocked = computed(() => qaStarting.value || qaActive.value || Boolean(qaFinalization.value) || qaFinalizationUnknown.value)
-const requestProtocolLabel = (protocol?: string | null) => protocol === 'responses' ? 'Responses' : protocol === 'chat_completions' ? 'Chat Completions' : t('admin.connectionHealth.testConfiguration.legacy')
+const requestProtocolLabel = (protocol?: string | null) => questionAnswerRequestProtocolLabel(protocol, t('admin.connectionHealth.testConfiguration.legacy'))
 const qaSubmission = computed(() => questionAnswerSubmissionSummary(
   selected.value.size,
   qaSelectedQuestions.value.size,
@@ -711,12 +715,13 @@ const qaReviewBatchStatusClass = computed(() => {
   if (qaReviewBatchDisplayStatus.value === 'completed') return 'text-green-600 dark:text-green-400'
   return 'text-primary'
 })
-const qaHistoryBatchGroups = computed(() => {
-  const reviewRecordIDs = new Set(qaReviewBatch.value?.records.map(record => record.id) ?? [])
-  return groupQuestionAnswerHistoryByBatch(
-    qaHistory.value.records.filter(record => !reviewRecordIDs.has(record.id) && record.status !== 'cancelled'),
-  )
-})
+const qaHistoryBatchGroups = computed(() => qaHistory.value.batches)
+const qaResultGroups = computed(() => groupQuestionAnswerResults(qaReviewedRecords.value, qaReviewBatch.value?.stats.byQuestion ?? []))
+const toggleQuestionAnswerResultGroup = (key: string) => {
+  const groups = new Set(qaResultGroupsOpen.value)
+  if (groups.has(key)) groups.delete(key); else groups.add(key)
+  qaResultGroupsOpen.value = groups
+}
 const qaSavedPreferenceValid = computed(() => {
   const modelIDs = new Set(models.value.map(model => model.id))
   const questionIDs = new Set(qaQuestions.value.map(question => question.id))
@@ -836,16 +841,21 @@ const loadQuestionAnswerData = async (
   const controller = new AbortController()
   qaDataController = controller
   qaLoading.value = true
+  const judgmentRevision = qaJudgmentRefreshSequence
+  const cancelSequence = qaCancelSequence
   qaErrorKey.value = ''
   try {
-    const [questions, history, batch] = await Promise.all([
+    const [questions, history, batch, initialBatch] = await Promise.all([
       listTestQuestions(controller.signal),
-      getQuestionAnswerHistory(targetId, historyPage, controller.signal),
+      getQuestionAnswerHistory(targetId, historyPage, qaHistoryScope.value, controller.signal),
       getLatestQuestionAnswerBatch(targetId, controller.signal),
+      props.initialQuestionAnswerBatchId ? getQuestionAnswerBatch(targetId, props.initialQuestionAnswerBatchId, controller.signal) : Promise.resolve(null),
     ])
     if (
       sequence !== loadSequence
       || !questionAnswerHistoryIntentIsCurrent(historySequence)
+      || judgmentRevision !== qaJudgmentRefreshSequence
+      || cancelSequence !== qaCancelSequence
       || mode.value !== 'questionAnswer'
       || props.target?.targetId !== targetId
     ) return
@@ -859,14 +869,16 @@ const loadQuestionAnswerData = async (
       ? preservedQuestions
       : new Set(defaultQuestion ? [defaultQuestion.id] : [])
     qaHistory.value = history
+    qaLocalReadFailure.value = null
     qaHistoryLoaded.value = true
     qaHistoryIntentPage = history.page
+    clearQuestionAnswerLocalReadFailure(undefined, history.page)
     qaFinalization.value = batch.finalization ?? null
     qaFinalizationUnknown.value = false
-    qaRuntimeBatch.value = batch.batchId ? batch : null
-    qaReviewBatch.value = qaRuntimeBatch.value
+    qaRuntimeBatch.value = batch.batchId ? protectQuestionAnswerTerminalBatch(batch) : null
+    qaReviewBatch.value = initialBatch ? protectQuestionAnswerTerminalBatch(initialBatch) : qaRuntimeBatch.value
     qaReviewBatchSyncFailed.value = false
-    qaProcessedOpen.value = false
+    qaProcessedOpen.value = true
     qaFailedOpen.value = false
     qaSelectionDataReady = true
     if (!restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)) restoreSavedQuestionAnswerSelection()
@@ -878,10 +890,12 @@ const loadQuestionAnswerData = async (
     if (
       sequence === loadSequence
       && questionAnswerHistoryIntentIsCurrent(historySequence)
+      && judgmentRevision === qaJudgmentRefreshSequence
+      && cancelSequence === qaCancelSequence
       && mode.value === 'questionAnswer'
       && props.target?.targetId === targetId
-    ) qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
-    if (sequence === loadSequence && mode.value === 'questionAnswer' && props.target?.targetId === targetId) {
+    ) {
+      qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
       qaReviewBatchSyncFailed.value = true
     }
   } finally {
@@ -905,10 +919,114 @@ const questionAnswerPollIsCurrent = (
   scope: QuestionAnswerOperationScope,
 ): boolean => pollSequence === qaPollSequence && questionAnswerScopeIsCurrent(scope)
 
-const applyRuntimeQuestionAnswerBatch = (batch: QuestionAnswerBatch) => {
+type QuestionAnswerBatchReadState = { batchId: string; judgmentRevision: number; cancelSequence: number | null }
+const captureQuestionAnswerBatchRead = (batchId: string): QuestionAnswerBatchReadState => ({
+  batchId,
+  judgmentRevision: qaJudgmentRefreshSequences.get(batchId) ?? 0,
+  cancelSequence: qaRuntimeBatch.value?.batchId === batchId ? qaCancelSequence : null,
+})
+const questionAnswerBatchReadIsCurrent = (read: QuestionAnswerBatchReadState, allowCachedTerminal = false): boolean => (
+  read.judgmentRevision === (qaJudgmentRefreshSequences.get(read.batchId) ?? 0)
+  && (read.cancelSequence === null || read.cancelSequence === qaCancelSequence || (
+    allowCachedTerminal && qaRuntimeBatch.value?.batchId === read.batchId && !qaRuntimeBatch.value.active
+  ))
+)
+const protectQuestionAnswerTerminalBatch = (batch: QuestionAnswerBatch): QuestionAnswerBatch => {
+  const terminal = [qaRuntimeBatch.value, qaReviewBatch.value].find(previous => previous?.batchId === batch.batchId && !previous.active)
+  return batch.active && terminal ? terminal : batch
+}
+const beginQuestionAnswerRuntimeRead = (batchId: string): number | null => (
+  qaRuntimeBatch.value?.batchId === batchId
+    ? ++qaRuntimeSnapshotSequence
+    : null
+)
+const questionAnswerExactReadIsCurrent = (runtimeReadSequence: number | null, reviewReadSequence: number): boolean => (
+  runtimeReadSequence !== null ? runtimeReadSequence === qaRuntimeSnapshotSequence : reviewReadSequence === qaReviewSequence
+)
+const resolveQuestionAnswerRuntimeSnapshot = (
+  received: QuestionAnswerBatch,
+  runtimeReadSequence: number | null,
+  reviewReadSequence: number,
+): QuestionAnswerBatch => {
+  const protectedBatch = protectQuestionAnswerTerminalBatch(received)
+  const runtimeBatch = qaRuntimeBatch.value
+  // Terminal beats active; a superseded read cannot replace a newer active or terminal snapshot.
+  return runtimeReadSequence !== null
+    && !questionAnswerExactReadIsCurrent(runtimeReadSequence, reviewReadSequence)
+    && runtimeBatch?.batchId === protectedBatch.batchId
+    && (protectedBatch.active || !runtimeBatch.active)
+    ? runtimeBatch
+    : protectedBatch
+}
+const applyQuestionAnswerReadBatch = (
+  received: QuestionAnswerBatch,
+  refreshSequence: number | null,
+  selectBatch: boolean,
+  runtimeReadSequence: number | null,
+  reviewReadSequence: number,
+) => {
+  const batch = resolveQuestionAnswerRuntimeSnapshot(received, runtimeReadSequence, reviewReadSequence)
+  const reviewReadIsCurrent = questionAnswerExactReadIsCurrent(null, reviewReadSequence)
+  if ((selectBatch && reviewReadIsCurrent) || (
+    refreshSequence !== null
+    && qaReviewLoadingBatchId.value === batch.batchId
+    && qaReviewJudgmentRefreshSequence < refreshSequence
+  )) {
+    if (!selectBatch) cancelQuestionAnswerReview()
+    qaReviewBatch.value = batch
+    qaReviewBatchSyncFailed.value = false
+  } else if (reviewReadIsCurrent && qaReviewBatch.value?.batchId === batch.batchId) {
+    qaReviewBatch.value = batch
+    qaReviewBatchSyncFailed.value = false
+  }
+  if (qaRuntimeBatch.value?.batchId === batch.batchId) {
+    qaRuntimeBatch.value = batch
+    qaFinalization.value = batch.finalization ?? null
+    qaFinalizationUnknown.value = false
+    if (!batch.active) clearQuestionAnswerClock()
+  }
+}
+const setQuestionAnswerLocalReadFailure = (failure: Omit<QuestionAnswerLocalReadFailure, 'intent'>) => {
+  qaLocalRetryController?.abort()
+  qaLocalRetryController = null
+  qaLocalRetrying.value = false
+  qaLocalReadFailure.value = { ...failure, intent: ++qaLocalFailureIntent }
+  qaErrorKey.value = failure.errorKey
+}
+const clearQuestionAnswerLocalReadFailure = (batchId?: string, historyPage?: number, abandonSelection = false) => {
+  const failure = qaLocalReadFailure.value
+  if (!failure) return
+  const clearBatch = failure.batchId !== null && batchId === failure.batchId
+    && (abandonSelection || !failure.selectBatch || qaReviewBatch.value?.batchId === batchId)
+  const clearHistory = failure.historyPage !== null && historyPage !== undefined
+  if (!clearBatch && !clearHistory) return
+  const remaining = {
+    ...failure,
+    batchId: clearBatch ? null : failure.batchId,
+    historyPage: clearHistory ? null : failure.historyPage,
+  }
+  if (remaining.batchId !== null || remaining.historyPage !== null) qaLocalReadFailure.value = remaining
+  else {
+    qaLocalReadFailure.value = null
+    qaLocalRetryController?.abort()
+    qaLocalRetryController = null
+    qaLocalRetrying.value = false
+    if (qaErrorKey.value === failure.errorKey) qaErrorKey.value = ''
+  }
+}
+const abandonQuestionAnswerLocalSelectionFailure = () => {
+  const failure = qaLocalReadFailure.value
+  if (failure?.selectBatch && failure.batchId) clearQuestionAnswerLocalReadFailure(failure.batchId, undefined, true)
+}
+
+const applyRuntimeQuestionAnswerBatch = (received: QuestionAnswerBatch, runtimeReadSequence: number | null) => {
+  const batch = resolveQuestionAnswerRuntimeSnapshot(received, runtimeReadSequence, qaReviewSequence)
+  const previousStats = qaRuntimeBatch.value?.stats
+  if (props.target && JSON.stringify(previousStats) !== JSON.stringify(batch.stats)) emit('question-answer-stats-dirty', props.target.targetId)
   qaFinalization.value = batch.finalization ?? null
   qaFinalizationUnknown.value = false
   qaRuntimeBatch.value = batch.batchId ? batch : null
+  clearQuestionAnswerLocalReadFailure(batch.batchId)
   if (!qaReviewBatch.value || qaReviewBatch.value.batchId === batch.batchId) {
     qaReviewBatch.value = batch
     qaReviewBatchSyncFailed.value = false
@@ -921,6 +1039,14 @@ const scheduleQuestionAnswerPoll = () => {
   startQuestionAnswerClock()
   qaPollTimer = setTimeout(() => void pollQuestionAnswerBatch(), 2000)
 }
+const resumeQuestionAnswerReadPolling = (batchId: string, runtimeReadSequence: number | null, reviewReadSequence: number) => {
+  if (
+    runtimeReadSequence !== null
+    && questionAnswerExactReadIsCurrent(runtimeReadSequence, reviewReadSequence)
+    && qaRuntimeBatch.value?.batchId === batchId
+    && qaRuntimeBatch.value.active
+  ) scheduleQuestionAnswerPoll()
+}
 
 const pollQuestionAnswerBatch = async () => {
   if (!props.target || !qaRuntimeBatch.value?.batchId || !props.open || mode.value !== 'questionAnswer') return
@@ -930,12 +1056,13 @@ const pollQuestionAnswerBatch = async () => {
   const scope = { sequence, targetId, batchId }
   const pollSequence = qaPollSequence
   const runtimeSnapshotSequence = ++qaRuntimeSnapshotSequence
+  const batchRead = captureQuestionAnswerBatchRead(batchId)
   const controller = new AbortController()
   qaPollController = controller
   let historySequence: number | null = null
   try {
     let batch = await getQuestionAnswerBatch(targetId, batchId, controller.signal)
-    if (!questionAnswerPollIsCurrent(pollSequence, scope)) return
+    if (!questionAnswerPollIsCurrent(pollSequence, scope) || !questionAnswerBatchReadIsCurrent(batchRead)) return
     if (batch.active) {
       if (!qaRuntimeBatch.value?.active) {
         clearQuestionAnswerClock()
@@ -945,39 +1072,40 @@ const pollQuestionAnswerBatch = async () => {
         scheduleQuestionAnswerPoll()
         return
       }
-      applyRuntimeQuestionAnswerBatch(batch)
+      applyRuntimeQuestionAnswerBatch(batch, runtimeSnapshotSequence)
       scheduleQuestionAnswerPoll()
       return
     }
     batch = await getQuestionAnswerBatch(targetId, batchId, controller.signal)
-    if (!questionAnswerPollIsCurrent(pollSequence, scope)) return
+    if (!questionAnswerPollIsCurrent(pollSequence, scope) || !questionAnswerBatchReadIsCurrent(batchRead)) return
     if (batch.active) {
       if (!qaRuntimeBatch.value?.active) {
         clearQuestionAnswerClock()
         return
       }
-      if (runtimeSnapshotSequence === qaRuntimeSnapshotSequence) applyRuntimeQuestionAnswerBatch(batch)
+      if (runtimeSnapshotSequence === qaRuntimeSnapshotSequence) applyRuntimeQuestionAnswerBatch(batch, runtimeSnapshotSequence)
       if (qaRuntimeBatch.value?.active) scheduleQuestionAnswerPoll()
       else clearQuestionAnswerClock()
       return
     }
     const reviewFollowsRuntime = qaReviewLoadingBatchId.value === null
       && qaReviewBatch.value?.batchId === batch.batchId
-    applyRuntimeQuestionAnswerBatch(batch)
+    applyRuntimeQuestionAnswerBatch(batch, runtimeSnapshotSequence)
     if (reviewFollowsRuntime) {
-      qaProcessedOpen.value = false
+      qaProcessedOpen.value = true
       qaFailedOpen.value = false
     }
     const historyPage = reviewFollowsRuntime ? 1 : qaHistoryIntentPage
     historySequence = beginQuestionAnswerHistoryIntent(historyPage)
-    const history = await getQuestionAnswerHistory(targetId, historyPage, controller.signal)
-    if (!questionAnswerPollIsCurrent(pollSequence, scope)) return
+    const history = await getQuestionAnswerHistory(targetId, historyPage, qaHistoryScope.value, controller.signal)
+    if (!questionAnswerPollIsCurrent(pollSequence, scope) || !questionAnswerBatchReadIsCurrent(batchRead)) return
     if (
       questionAnswerHistoryIntentIsCurrent(historySequence)
       && qaHistoryIntentPage === historyPage
     ) {
       qaHistory.value = history
       qaHistoryIntentPage = history.page
+      clearQuestionAnswerLocalReadFailure(undefined, history.page)
     }
     qaCompletedNotice.value = true
     clearQuestionAnswerPolling()
@@ -986,6 +1114,7 @@ const pollQuestionAnswerBatch = async () => {
     if (
       (error instanceof Error && error.name === 'AbortError')
       || !questionAnswerPollIsCurrent(pollSequence, scope)
+      || !questionAnswerBatchReadIsCurrent(batchRead)
     ) return
     if (historySequence !== null && !questionAnswerHistoryIntentIsCurrent(historySequence)) {
       qaCompletedNotice.value = true
@@ -997,7 +1126,11 @@ const pollQuestionAnswerBatch = async () => {
       clearQuestionAnswerClock()
       return
     }
-    qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+    if (historySequence === null && runtimeSnapshotSequence !== qaRuntimeSnapshotSequence) {
+      scheduleQuestionAnswerPoll()
+      return
+    }
+    setQuestionAnswerLocalReadFailure({ batchId: historySequence === null ? batchId : null, selectBatch: false, historyPage: qaHistoryIntentPage, historyScope: qaHistoryScope.value, errorKey: error instanceof Error ? error.message : 'admin.connectionHealth.errors.request' })
     if (!qaReviewBatch.value || qaReviewBatch.value.batchId === batchId) {
       qaReviewBatchSyncFailed.value = true
     }
@@ -1010,19 +1143,23 @@ const pollQuestionAnswerBatch = async () => {
 
 const reconcileQuestionAnswerFinalization = async (scope: QuestionAnswerOperationScope, signal: AbortSignal) => {
   const snapshotSequence = ++qaRuntimeSnapshotSequence
+  const judgmentRevision = qaJudgmentRefreshSequence
+  const cancelSequence = qaCancelSequence
+  const startSequence = qaStartSequence
   try {
     const batch = await getLatestQuestionAnswerBatch(scope.targetId, signal)
-    if (!questionAnswerScopeIsCurrent(scope) || snapshotSequence !== qaRuntimeSnapshotSequence) return
-    applyRuntimeQuestionAnswerBatch(batch)
+    if (!questionAnswerScopeIsCurrent(scope) || snapshotSequence !== qaRuntimeSnapshotSequence || judgmentRevision !== qaJudgmentRefreshSequence || cancelSequence !== qaCancelSequence || startSequence !== qaStartSequence) return
+    applyRuntimeQuestionAnswerBatch(batch, snapshotSequence)
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
-    if (!questionAnswerScopeIsCurrent(scope) || snapshotSequence !== qaRuntimeSnapshotSequence) return
+    if (!questionAnswerScopeIsCurrent(scope) || snapshotSequence !== qaRuntimeSnapshotSequence || judgmentRevision !== qaJudgmentRefreshSequence || cancelSequence !== qaCancelSequence || startSequence !== qaStartSequence) return
     qaFinalizationUnknown.value = true
   }
 }
 
 const startQuestionAnswers = async () => {
   if (!canStartTest.value || !props.target) return
+  abandonQuestionAnswerLocalSelectionFailure()
   cancelQuestionAnswerReview()
   cancelQuestionAnswerJudgments()
   qaStarting.value = true
@@ -1050,14 +1187,15 @@ const startQuestionAnswers = async () => {
     qaReviewBatch.value = batch
     qaReviewBatchSyncFailed.value = false
     qaConfigOpen.value = false
-    qaProcessedOpen.value = false
+    qaProcessedOpen.value = true
     qaFailedOpen.value = false
     emit('question-answer-started', targetId)
+    emit('question-answer-stats-dirty', targetId)
     const historySequence = beginQuestionAnswerHistoryIntent(1)
     qaHistory.value.page = 1
     scheduleQuestionAnswerPoll()
     try {
-      const history = await getQuestionAnswerHistory(targetId, 1, controller.signal)
+      const history = await getQuestionAnswerHistory(targetId, 1, qaHistoryScope.value, controller.signal)
       if (
         startSequence === qaStartSequence
         && questionAnswerHistoryIntentIsCurrent(historySequence)
@@ -1065,6 +1203,7 @@ const startQuestionAnswers = async () => {
       ) {
         qaHistory.value = history
         qaHistoryIntentPage = history.page
+        clearQuestionAnswerLocalReadFailure(undefined, history.page)
       }
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') return
@@ -1073,7 +1212,7 @@ const startQuestionAnswers = async () => {
         && questionAnswerHistoryIntentIsCurrent(historySequence)
         && questionAnswerScopeIsCurrent(scope)
       ) {
-        qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+        setQuestionAnswerLocalReadFailure({ batchId: null, selectBatch: false, historyPage: 1, historyScope: qaHistoryScope.value, errorKey: error instanceof Error ? error.message : 'admin.connectionHealth.errors.request' })
       }
     }
   } catch (error) {
@@ -1093,6 +1232,7 @@ const stopQuestionAnswers = async () => {
   if (!props.target || !batchId || qaCancelling.value || qaFinalizationUnknown.value) return
   if (qaFinalization.value && qaFinalization.value.recovery !== 'cancel') return
   const targetId = props.target.targetId
+  if (!qaFinalization.value && !window.confirm(`终止账号 ${props.target.accountName} 的最新运行批次 ${batchId}？`)) return
   const runtimeAtCancel = qaRuntimeBatch.value
   const sequence = loadSequence
   const cancelSequence = ++qaCancelSequence
@@ -1110,15 +1250,15 @@ const stopQuestionAnswers = async () => {
     if (qaRuntimeBatch.value !== runtimeAtCancel && !qaRuntimeBatch.value?.active && !qaFinalization.value) return
     const reviewFollowsRuntime = qaReviewLoadingBatchId.value === null
       && qaReviewBatch.value?.batchId === batch.batchId
-    applyRuntimeQuestionAnswerBatch(batch)
+    applyRuntimeQuestionAnswerBatch(batch, null)
     if (reviewFollowsRuntime) {
-      qaProcessedOpen.value = false
+      qaProcessedOpen.value = true
       qaFailedOpen.value = false
     }
     clearQuestionAnswerClock()
     const historyPage = reviewFollowsRuntime ? 1 : qaHistoryIntentPage
     historySequence = beginQuestionAnswerHistoryIntent(historyPage)
-    const history = await getQuestionAnswerHistory(targetId, historyPage, controller.signal)
+    const history = await getQuestionAnswerHistory(targetId, historyPage, qaHistoryScope.value, controller.signal)
     if (cancelSequence !== qaCancelSequence || !questionAnswerScopeIsCurrent(scope)) return
     if (
       questionAnswerHistoryIntentIsCurrent(historySequence)
@@ -1126,6 +1266,7 @@ const stopQuestionAnswers = async () => {
     ) {
       qaHistory.value = history
       qaHistoryIntentPage = history.page
+      clearQuestionAnswerLocalReadFailure(undefined, history.page)
     }
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
@@ -1135,7 +1276,8 @@ const stopQuestionAnswers = async () => {
       && questionAnswerScopeIsCurrent(scope)
       && (historySequence === null || questionAnswerHistoryIntentIsCurrent(historySequence))
     ) {
-      qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+      if (historySequence !== null) setQuestionAnswerLocalReadFailure({ batchId: null, selectBatch: false, historyPage: qaHistoryIntentPage, historyScope: qaHistoryScope.value, errorKey: error instanceof Error ? error.message : 'admin.connectionHealth.errors.request' })
+      else qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
       if (historySequence === null) await reconcileQuestionAnswerFinalization(scope, controller.signal)
       if (qaRuntimeBatch.value?.active && !qaFinalization.value && !qaFinalizationUnknown.value) scheduleQuestionAnswerPoll()
     }
@@ -1147,13 +1289,13 @@ const stopQuestionAnswers = async () => {
 
 const reviewQuestionAnswerBatch = async (batchId: string) => {
   if (!props.target || qaReviewLoadingBatchId.value === batchId) return
+  abandonQuestionAnswerLocalSelectionFailure()
   const targetId = props.target.targetId
   const sequence = loadSequence
   const reviewSequence = cancelQuestionAnswerReview()
-  const runtimeSelectionSequence = qaRuntimeBatch.value?.batchId === batchId && qaRuntimeBatch.value.active
-    ? ++qaRuntimeSnapshotSequence
-    : null
+  const runtimeSelectionSequence = beginQuestionAnswerRuntimeRead(batchId)
   qaReviewJudgmentRefreshSequence = qaJudgmentRefreshSequences.get(batchId) ?? 0
+  const batchRead = captureQuestionAnswerBatchRead(batchId)
   const controller = new AbortController()
   qaReviewController = controller
   qaReviewLoadingBatchId.value = batchId
@@ -1163,35 +1305,18 @@ const reviewQuestionAnswerBatch = async (batchId: string) => {
     if (
       sequence !== loadSequence
       || reviewSequence !== qaReviewSequence
+      || !questionAnswerBatchReadIsCurrent(batchRead, true)
       || mode.value !== 'questionAnswer'
       || props.target?.targetId !== targetId
     ) return
-    const runtimeBatch = qaRuntimeBatch.value
-    if (runtimeSelectionSequence !== null && runtimeBatch?.batchId === batch.batchId) {
-      if (
-        runtimeBatch.active
-        && (runtimeSelectionSequence === qaRuntimeSnapshotSequence || !batch.active)
-      ) qaRuntimeBatch.value = batch
-      const currentRuntime = qaRuntimeBatch.value
-      qaReviewBatch.value = currentRuntime?.batchId === batch.batchId
-        ? currentRuntime
-        : batch
-      qaReviewBatchSyncFailed.value = false
-      if (!qaRuntimeBatch.value?.active) clearQuestionAnswerClock()
-    } else {
-      qaReviewBatch.value = batch.active
-        && runtimeBatch?.batchId === batch.batchId
-        && !runtimeBatch.active
-        ? runtimeBatch
-        : batch
-      qaReviewBatchSyncFailed.value = false
-    }
-    qaProcessedOpen.value = false
+    applyQuestionAnswerReadBatch(batch, null, true, runtimeSelectionSequence, reviewSequence)
+    clearQuestionAnswerLocalReadFailure(batchId)
+    qaProcessedOpen.value = true
     qaFailedOpen.value = false
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
-    if (sequence === loadSequence && reviewSequence === qaReviewSequence) {
-      qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+    if (sequence === loadSequence && reviewSequence === qaReviewSequence && questionAnswerBatchReadIsCurrent(batchRead)) {
+      setQuestionAnswerLocalReadFailure({ batchId, selectBatch: true, historyPage: null, historyScope: qaHistoryScope.value, errorKey: error instanceof Error ? error.message : 'admin.connectionHealth.errors.request' })
       if (qaReviewBatch.value?.batchId === batchId) {
         qaReviewBatchSyncFailed.value = true
       }
@@ -1203,34 +1328,34 @@ const reviewQuestionAnswerBatch = async (batchId: string) => {
       qaReviewJudgmentRefreshSequence = 0
     }
     if (
-      runtimeSelectionSequence !== null
-      && runtimeSelectionSequence === qaRuntimeSnapshotSequence
-      && reviewSequence === qaReviewSequence
-      && qaRuntimeBatch.value?.batchId === batchId
-      && qaRuntimeBatch.value.active
-    ) scheduleQuestionAnswerPoll()
+      reviewSequence === qaReviewSequence
+      && sequence === loadSequence
+      && questionAnswerBatchReadIsCurrent(batchRead, true)
+    ) resumeQuestionAnswerReadPolling(batchId, runtimeSelectionSequence, reviewSequence)
   }
 }
 
 const reviewLatestQuestionAnswerBatch = () => {
   if (!qaRuntimeBatch.value) return
+  abandonQuestionAnswerLocalSelectionFailure()
   cancelQuestionAnswerReview()
   qaReviewBatch.value = qaRuntimeBatch.value
   qaReviewBatchSyncFailed.value = false
-  qaProcessedOpen.value = false
+  qaProcessedOpen.value = true
   qaFailedOpen.value = false
 }
 
-const goQuestionAnswerPage = async (page: number) => {
-  if (!props.target || page < 1 || page > qaHistory.value.totalPages || page === qaHistoryIntentPage) return
+const goQuestionAnswerPage = async (page: number, force = false) => {
+  if (!props.target || page < 1 || (!force && (page > qaHistory.value.totalPages || page === qaHistoryIntentPage))) return
   const targetId = props.target.targetId
   const sequence = loadSequence
+  const historyScope = qaHistoryScope.value
   const historySequence = beginQuestionAnswerHistoryIntent(page)
   const controller = new AbortController()
   qaDataController = controller
   qaErrorKey.value = ''
   try {
-    const history = await getQuestionAnswerHistory(targetId, page, controller.signal)
+    const history = await getQuestionAnswerHistory(targetId, page, qaHistoryScope.value, controller.signal)
     if (
       sequence !== loadSequence
       || !questionAnswerHistoryIntentIsCurrent(historySequence)
@@ -1239,6 +1364,7 @@ const goQuestionAnswerPage = async (page: number) => {
     ) return
     qaHistory.value = history
     qaHistoryIntentPage = history.page
+    clearQuestionAnswerLocalReadFailure(undefined, history.page)
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
     if (
@@ -1248,10 +1374,79 @@ const goQuestionAnswerPage = async (page: number) => {
       && props.target?.targetId === targetId
     ) {
       qaHistoryIntentPage = qaHistory.value.page
-      qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+      setQuestionAnswerLocalReadFailure({ batchId: null, selectBatch: false, historyPage: page, historyScope, errorKey: error instanceof Error ? error.message : 'admin.connectionHealth.errors.request' })
     }
   } finally {
     if (qaDataController === controller) qaDataController = null
+  }
+}
+
+const selectQuestionAnswerHistoryScope = (scope: QuestionAnswerHistoryScope) => {
+  if (qaHistoryScope.value === scope) return
+  qaHistoryScope.value = scope
+  void goQuestionAnswerPage(1, true)
+}
+const retryQuestionAnswerData = () => {
+  if (props.target) void loadQuestionAnswerData(props.target.targetId, loadSequence, qaHistoryIntentPage, true)
+}
+const retryQuestionAnswerStats = () => {
+  if (props.target) emit('question-answer-stats-retry', props.target.targetId)
+}
+
+const retryQuestionAnswerLocalData = async () => {
+  if (!props.target || !qaLocalReadFailure.value || qaLocalRetrying.value) return
+  const failure = qaLocalReadFailure.value
+  const scope = { sequence: loadSequence, targetId: props.target.targetId }
+  const read = failure.batchId ? captureQuestionAnswerBatchRead(failure.batchId) : null
+  const reviewSequence = failure.selectBatch ? cancelQuestionAnswerReview() : qaReviewSequence
+  const runtimeReadSequence = failure.batchId ? beginQuestionAnswerRuntimeRead(failure.batchId) : null
+  const historyPage = failure.historyPage
+  const historySequence = historyPage !== null ? beginQuestionAnswerHistoryIntent(historyPage) : null
+  const historyScope = qaHistoryScope.value
+  const controller = new AbortController()
+  qaLocalRetryController = controller
+  qaLocalRetrying.value = true
+  const currentFailure = () => {
+    if (!questionAnswerScopeIsCurrent(scope)) return null
+    const current = qaLocalReadFailure.value
+    return current?.intent === failure.intent ? current : null
+  }
+  try {
+    const [batchResult, historyResult] = await Promise.allSettled([
+      failure.batchId ? getQuestionAnswerBatch(scope.targetId, failure.batchId, controller.signal) : Promise.resolve(null),
+      historyPage !== null ? getQuestionAnswerHistory(scope.targetId, historyPage, historyScope, controller.signal) : Promise.resolve(null),
+    ])
+    let remaining = currentFailure()
+    if (!remaining) return
+    // A sibling read may already have restored this part. Never apply its older retry result.
+    if (read && remaining.batchId === read.batchId
+      && questionAnswerBatchReadIsCurrent(read, failure.selectBatch)
+      && (!failure.selectBatch || reviewSequence === qaReviewSequence)
+      && batchResult.status === 'fulfilled' && batchResult.value) {
+      applyQuestionAnswerReadBatch(batchResult.value, null, failure.selectBatch, runtimeReadSequence, reviewSequence)
+      clearQuestionAnswerLocalReadFailure(read.batchId)
+    }
+    remaining = currentFailure()
+    // History has its own intent; a recovered or obsolete batch does not invalidate it.
+    if (remaining && remaining.historyPage === historyPage && historySequence !== null
+      && questionAnswerHistoryIntentIsCurrent(historySequence)
+      && historyScope === qaHistoryScope.value && historyScope === remaining.historyScope
+      && historyResult.status === 'fulfilled' && historyResult.value) {
+      qaHistory.value = historyResult.value
+      qaHistoryIntentPage = historyResult.value.page
+      clearQuestionAnswerLocalReadFailure(undefined, historyResult.value.page)
+    }
+    // Failed or superseded responses leave only the CURRENT remaining parts; no captured state is restored.
+  } finally {
+    if (read && qaLocalFailureIntent === failure.intent && questionAnswerScopeIsCurrent(scope)
+      && questionAnswerBatchReadIsCurrent(read, failure.selectBatch)
+      && (!failure.selectBatch || reviewSequence === qaReviewSequence)) {
+      resumeQuestionAnswerReadPolling(read.batchId, runtimeReadSequence, reviewSequence)
+    }
+    if (qaLocalRetryController === controller) {
+      qaLocalRetryController = null
+      qaLocalRetrying.value = false
+    }
   }
 }
 
@@ -1274,6 +1469,7 @@ const replaceQuestionAnswerBatchRecord = (
     stats: {
       ...batch.stats,
       reviews: questionAnswerReviewStatsFromRecords(records),
+      byQuestion: (batch.stats.byQuestion ?? []).map(item => ({ ...item, reviews: questionAnswerReviewStatsFromRecords(records.filter(record => questionAnswerRecordMatchesQuestion(record, item))), byModel: item.byModel.map(model => ({ ...model, reviews: questionAnswerReviewStatsFromRecords(records.filter(record => record.modelName === model.modelName && questionAnswerRecordMatchesQuestion(record, item))) })) })),
       byModel: batch.stats.byModel.map(item => ({
         ...item,
         requests: { ...item.requests },
@@ -1288,12 +1484,6 @@ const replaceQuestionAnswerBatchRecord = (
 const applyAuthoritativeQuestionAnswerRecord = (authoritative: QuestionAnswerRecord) => {
   qaRuntimeBatch.value = replaceQuestionAnswerBatchRecord(qaRuntimeBatch.value, authoritative)
   qaReviewBatch.value = replaceQuestionAnswerBatchRecord(qaReviewBatch.value, authoritative)
-  if (qaHistory.value.records.some(record => record.id === authoritative.id)) {
-    qaHistory.value = {
-      ...qaHistory.value,
-      records: replaceQuestionAnswerRecord(qaHistory.value.records, authoritative),
-    }
-  }
 }
 
 const clearQuestionAnswerMarking = (recordId: string) => {
@@ -1302,23 +1492,31 @@ const clearQuestionAnswerMarking = (recordId: string) => {
   qaMarking.value = marking
 }
 
-const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment: QuestionAnswerJudgment) => {
+const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment: Exclude<QuestionAnswerJudgment, 'unreviewed'>) => {
   if (!props.target || record.status !== 'succeeded' || qaMarking.value.has(record.id)) return
   const targetId = props.target.targetId
   const sequence = loadSequence
   const scope = { sequence, targetId }
   const judgmentSessionSequence = qaJudgmentSessionSequence
+  const initialBatchRead = captureQuestionAnswerBatchRead(record.batchId)
+  const initialFailureIntent = qaLocalFailureIntent
   const controller = new AbortController()
   qaJudgmentControllers.set(record.id, controller)
   const nextMarking = new Map(qaMarking.value)
   nextMarking.set(record.id, judgment)
   qaMarking.value = nextMarking
   qaErrorKey.value = ''
-  let judgmentSaved = false
   let pollingPausedForRuntime = false
   let judgmentRefreshSequence: number | null = null
-  let historySequence: number | null = null
-  let judgmentRefreshStage: 'put' | 'batch' | 'history' = 'put'
+  let runtimeReadSequence: number | null = null
+  let reviewReadSequence = qaReviewSequence
+  let batchRead: QuestionAnswerBatchReadState | null = null
+  const pauseRuntimePolling = () => {
+    if (qaRuntimeBatch.value?.batchId === record.batchId) {
+      clearQuestionAnswerPolling()
+      pollingPausedForRuntime = true
+    }
+  }
   const resumeRuntimePolling = () => {
     if (
       pollingPausedForRuntime
@@ -1326,96 +1524,93 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
       && judgmentSessionSequence === qaJudgmentSessionSequence
       && qaJudgmentRefreshSequences.get(record.batchId) === judgmentRefreshSequence
       && questionAnswerScopeIsCurrent(scope)
-      && qaRuntimeBatch.value?.batchId === record.batchId
-      && qaRuntimeBatch.value.active
+      && batchRead !== null && questionAnswerBatchReadIsCurrent(batchRead)
     ) {
       pollingPausedForRuntime = false
-      scheduleQuestionAnswerPoll()
+      resumeQuestionAnswerReadPolling(record.batchId, runtimeReadSequence, reviewReadSequence)
     }
   }
+  const refreshJudgmentData = async (conflictErrorKey?: string) => {
+    pauseRuntimePolling()
+    const historyPage = qaHistoryIntentPage
+    const historyScope = qaHistoryScope.value
+    const historySequence = beginQuestionAnswerHistoryIntent()
+    judgmentRefreshSequence = ++qaJudgmentRefreshSequence
+    qaJudgmentRefreshSequences.set(record.batchId, judgmentRefreshSequence)
+    batchRead = captureQuestionAnswerBatchRead(record.batchId)
+    runtimeReadSequence = beginQuestionAnswerRuntimeRead(record.batchId)
+    const failureIntent = qaLocalFailureIntent
+    reviewReadSequence = qaReviewSequence
+    const refreshIsCurrent = () => (
+      judgmentSessionSequence === qaJudgmentSessionSequence
+      && questionAnswerScopeIsCurrent(scope)
+      && qaJudgmentRefreshSequences.get(record.batchId) === judgmentRefreshSequence
+      && batchRead !== null && questionAnswerBatchReadIsCurrent(batchRead)
+    )
+    const exactReadIsCurrent = () => questionAnswerExactReadIsCurrent(runtimeReadSequence, reviewReadSequence)
+    const historyReadIsCurrent = () => questionAnswerHistoryIntentIsCurrent(historySequence) && historyScope === qaHistoryScope.value
+    const failureIntentIsCurrent = () => failureIntent === qaLocalFailureIntent
+    const batchOutcomePromise = getQuestionAnswerBatch(targetId, record.batchId, controller.signal).then(
+      batch => ({ ok: true as const, batch }),
+      error => ({ ok: false as const, error }),
+    )
+    const historyOutcomePromise = getQuestionAnswerHistory(targetId, historyPage, historyScope, controller.signal).then(
+      history => ({ ok: true as const, history }),
+      error => ({ ok: false as const, error }),
+    )
+    const batchOutcome = await batchOutcomePromise
+    if (!refreshIsCurrent()) return
+    if (batchOutcome.ok) {
+      applyQuestionAnswerReadBatch(batchOutcome.batch, judgmentRefreshSequence, false, runtimeReadSequence, reviewReadSequence)
+      if (failureIntentIsCurrent() && (exactReadIsCurrent() || !batchOutcome.batch.active)) {
+        clearQuestionAnswerLocalReadFailure(record.batchId)
+      }
+      if (conflictErrorKey) emit('question-answer-stats-dirty', targetId)
+    }
+    // A completed exact read must release its own pause without interrupting a newer read/poll.
+    resumeRuntimePolling()
+    const historyOutcome = await historyOutcomePromise
+    if (!refreshIsCurrent() || !failureIntentIsCurrent()) return
+    if (historyReadIsCurrent() && historyOutcome.ok) {
+      qaHistory.value = historyOutcome.history
+      qaHistoryIntentPage = historyOutcome.history.page
+      clearQuestionAnswerLocalReadFailure(undefined, historyOutcome.history.page)
+    }
+    const batchFailed = !batchOutcome.ok && exactReadIsCurrent()
+      && !(batchOutcome.error instanceof Error && batchOutcome.error.name === 'AbortError')
+    const historyFailed = historyReadIsCurrent() && !historyOutcome.ok
+      && !(historyOutcome.error instanceof Error && historyOutcome.error.name === 'AbortError')
+    const errorKey = conflictErrorKey ?? `${prefix}.questionAnswer.judgmentRefreshFailed`
+    if (batchFailed || historyFailed) {
+      setQuestionAnswerLocalReadFailure({
+        batchId: batchFailed ? record.batchId : null,
+        selectBatch: false,
+        historyPage: historyFailed ? historyPage : null,
+        historyScope,
+        errorKey,
+      })
+    } else if (conflictErrorKey) qaErrorKey.value = conflictErrorKey
+  }
   try {
-    const authoritative = await setQuestionAnswerJudgment(targetId, record.id, judgment, controller.signal)
+    const authoritative = await setQuestionAnswerJudgment(targetId, record.id, judgment, record.updatedAt, controller.signal)
     if (
       judgmentSessionSequence !== qaJudgmentSessionSequence
       || !questionAnswerScopeIsCurrent(scope)
     ) return
     applyAuthoritativeQuestionAnswerRecord(authoritative)
-    judgmentSaved = true
+    emit('question-answer-stats-dirty', targetId)
     clearQuestionAnswerMarking(record.id)
-    if (qaRuntimeBatch.value?.batchId === record.batchId) {
-      clearQuestionAnswerPolling()
-      pollingPausedForRuntime = true
-    }
-    const historyPage = qaHistoryIntentPage
-    historySequence = beginQuestionAnswerHistoryIntent()
-    judgmentRefreshSequence = ++qaJudgmentRefreshSequence
-    qaJudgmentRefreshSequences.set(record.batchId, judgmentRefreshSequence)
-    judgmentRefreshStage = 'batch'
-    const batchPromise = getQuestionAnswerBatch(targetId, record.batchId, controller.signal)
-    const historyOutcomePromise = getQuestionAnswerHistory(targetId, historyPage, controller.signal).then(
-      history => ({ ok: true as const, history }),
-      error => ({ ok: false as const, error }),
-    )
-    const batch = await batchPromise
-    if (
-      judgmentSessionSequence !== qaJudgmentSessionSequence
-      || qaJudgmentRefreshSequences.get(record.batchId) !== judgmentRefreshSequence
-      || !questionAnswerScopeIsCurrent(scope)
-    ) return
-    if (
-      qaReviewLoadingBatchId.value === batch.batchId
-      && qaReviewJudgmentRefreshSequence < judgmentRefreshSequence
-    ) {
-      cancelQuestionAnswerReview()
-      const runtimeBatch = qaRuntimeBatch.value
-      qaReviewBatch.value = batch.active
-        && runtimeBatch?.batchId === batch.batchId
-        && !runtimeBatch.active
-        ? runtimeBatch
-        : batch
-    } else if (qaReviewBatch.value?.batchId === batch.batchId && (qaReviewBatch.value.active || !batch.active)) {
-      qaReviewBatch.value = batch
-    }
-    if (qaRuntimeBatch.value?.batchId === batch.batchId && (qaRuntimeBatch.value.active || !batch.active)) {
-      qaRuntimeBatch.value = batch
-      qaFinalization.value = batch.finalization ?? null
-      qaFinalizationUnknown.value = false
-    }
-    resumeRuntimePolling()
-    judgmentRefreshStage = 'history'
-    const historyOutcome = await historyOutcomePromise
-    if (!historyOutcome.ok) throw historyOutcome.error
-    const history = historyOutcome.history
-    if (
-      judgmentSessionSequence !== qaJudgmentSessionSequence
-      || qaJudgmentRefreshSequences.get(record.batchId) !== judgmentRefreshSequence
-      || !questionAnswerScopeIsCurrent(scope)
-    ) return
-    if (
-      questionAnswerHistoryIntentIsCurrent(historySequence)
-      && qaHistoryIntentPage === historyPage
-    ) {
-      qaHistory.value = history
-      qaHistoryIntentPage = history.page
-    }
+    await refreshJudgmentData()
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
     if (
       judgmentSessionSequence === qaJudgmentSessionSequence
       && questionAnswerScopeIsCurrent(scope)
-      && (
-        judgmentRefreshSequence === null
-        || qaJudgmentRefreshSequences.get(record.batchId) === judgmentRefreshSequence
-      )
-      && (
-        judgmentRefreshStage !== 'history'
-        || historySequence === null
-        || questionAnswerHistoryIntentIsCurrent(historySequence)
-      )
+      && questionAnswerBatchReadIsCurrent(initialBatchRead)
+      && initialFailureIntent === qaLocalFailureIntent
     ) {
-      qaErrorKey.value = judgmentSaved
-        ? `${prefix}.questionAnswer.judgmentRefreshFailed`
-        : (error instanceof Error ? error.message : 'admin.connectionHealth.errors.request')
+      if (error instanceof Error && error.message === 'admin.connectionHealth.errors.questionAnswerJudgmentConflict') await refreshJudgmentData(error.message)
+      else qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
     }
   } finally {
     if (qaJudgmentControllers.get(record.id) === controller) {
@@ -1641,101 +1836,46 @@ const close = () => {
                     <Loader2 class="h-4 w-4 animate-spin" />
                     {{ t(prefix + '.questionAnswer.loading') }}
                   </div>
-                  <p v-else data-testid="question-answer-stats-error" class="text-xs text-red-600 dark:text-red-400">{{ qaReadableError }}</p>
+                  <div v-else data-testid="question-answer-stats-error" class="text-xs text-red-600 dark:text-red-400"><p>{{ qaReadableError }}</p><button type="button" class="mt-2 rounded-md border border-border/60 px-3 py-1.5 font-medium" @click="retryQuestionAnswerData">重新加载</button></div>
                 </section>
                 <QuestionAnswerStatsBar
                   v-else-if="mode === 'questionAnswer'"
                   data-question-answer-section="stats"
                   :review-stats="qaReviewBatch?.stats ?? null"
                   :today-stats="qaHistory.todayStats"
-                  :lifetime-stats="qaHistory.stats"
+                  :lifetime-stats="qaHistory.allTimeStats"
                 />
                 <p v-if="mode === 'questionAnswer'" class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.protocolSummary') }}</p>
                 <template v-if="mode === 'questionAnswer'">
+                  <div v-if="(qaErrorKey && qaHistoryLoaded) || qaLocalReadFailure || summaryRefreshFailed" data-testid="question-answer-statistics-error" class="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">
+                    <p v-if="qaLocalReadFailure">{{ readableMessage(qaLocalReadFailure.errorKey) }}</p>
+                    <p v-else-if="qaErrorKey">{{ qaReadableError }}</p>
+                    <p v-if="summaryRefreshFailed">{{ t(prefix + '.questionAnswer.judgmentRefreshFailed') }}</p>
+                    <button v-if="qaLocalReadFailure" type="button" class="mt-2 rounded-md border border-red-500/30 px-2.5 py-1.5 font-medium disabled:opacity-50" :disabled="qaLocalRetrying" @click="retryQuestionAnswerLocalData">重新加载</button>
+                    <button v-if="summaryRefreshFailed" type="button" class="mt-2 rounded-md border border-red-500/30 px-2.5 py-1.5 font-medium" @click="retryQuestionAnswerStats">重试统计</button>
+                  </div>
+                  <section v-if="qaRuntimeBatch?.active && !qaFinalization && !qaFinalizationUnknown" data-testid="question-answer-latest-runtime" class="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 bg-card p-3">
+                    <p data-testid="question-answer-latest-running-hint" class="break-words text-xs text-primary">最新运行批次 #{{ shortQuestionAnswerBatchId(qaRuntimeBatch.batchId) }} · {{ qaRuntimeBatch.completedCount }}/{{ qaRuntimeBatch.submittedCount }}</p>
+                    <div class="flex flex-wrap gap-2">
+                      <button v-if="qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium hover:bg-surface-line" @click="reviewLatestQuestionAnswerBatch">返回最新</button>
+                      <button data-testid="question-answer-stop-latest" type="button" class="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400" :disabled="qaCancelling" @click="stopQuestionAnswers"><Loader2 v-if="qaCancelling" class="h-3.5 w-3.5 animate-spin" /><StopCircle v-else class="h-3.5 w-3.5" />终止 #{{ shortQuestionAnswerBatchId(qaRuntimeBatch.batchId) }}</button>
+                    </div>
+                  </section>
                   <section data-question-answer-section="pending" data-testid="question-answer-pending" class="rounded-lg border border-border/50 bg-card p-3">
                     <div class="flex flex-wrap items-center justify-between gap-3">
                       <div>
-                        <h4 class="text-sm font-semibold text-foreground">{{ t(prefix + '.questionAnswer.pendingReviewTitle') }}</h4>
-                        <p v-if="qaReviewBatch" data-testid="question-answer-review-batch" class="mt-1 text-sm font-semibold tabular-nums text-foreground">
-                          {{ t(prefix + '.questionAnswer.reviewBatchId', { id: shortQuestionAnswerBatchId(qaReviewBatch.batchId) }) }}
-                          <span v-if="qaReviewBatch.active"> · {{ t(prefix + '.questionAnswer.batchStillRunning') }}</span>
-                          <span v-else-if="qaReviewCompletedAt"> · {{ t(prefix + '.questionAnswer.batchCompletedAt', { time: formatConnectionHealthTime(qaReviewCompletedAt) }) }}</span>
-                        </p>
-                        <p
-                          v-if="qaRuntimeBatch?.active && qaReviewBatch && qaReviewBatch.batchId !== qaRuntimeBatch.batchId"
-                          data-testid="question-answer-latest-running-hint"
-                          class="mt-1 text-xs text-primary"
-                        >
-                          {{ t(prefix + '.questionAnswer.latestBatchStillRunning') }}
-                        </p>
+                        <button type="button" class="inline-flex items-center gap-2 text-sm font-semibold text-foreground" :aria-expanded="qaPendingOpen" @click="qaPendingOpen = !qaPendingOpen">待人工判断 {{ qaPendingReviewRecords.length }}<ChevronUp v-if="qaPendingOpen" class="h-4 w-4" /><ChevronDown v-else class="h-4 w-4" /></button>
+                        <p v-if="qaReviewBatch" data-testid="question-answer-review-batch" class="mt-1 break-words text-xs text-muted-foreground">正在查看：批次 #{{ shortQuestionAnswerBatchId(qaReviewBatch.batchId) }} · {{ qaReviewBatchStatusLabel }}<span v-if="qaReviewCompletedAt"> · {{ t(prefix + '.questionAnswer.batchCompletedAt', { time: formatConnectionHealthTime(qaReviewCompletedAt) }) }}</span></p>
                       </div>
-                      <div class="flex items-center gap-2">
-                        <button v-if="qaRuntimeBatch && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line" @click="reviewLatestQuestionAnswerBatch">
-                          {{ t(prefix + '.questionAnswer.reviewLatestBatch') }}
-                        </button>
-                        <button v-if="qaRuntimeBatch?.active && !qaFinalization && !qaFinalizationUnknown" type="button" class="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400" :disabled="qaCancelling" @click="stopQuestionAnswers">
-                          <Loader2 v-if="qaCancelling" class="h-3.5 w-3.5 animate-spin" />
-                          <StopCircle v-else class="h-3.5 w-3.5" />
-                          {{ t(prefix + '.questionAnswer.stop') }}
-                        </button>
-                      </div>
+                      <button v-if="qaRuntimeBatch && !qaRuntimeBatch.active && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium hover:bg-surface-line" @click="reviewLatestQuestionAnswerBatch">返回最新</button>
                     </div>
                     <div v-if="!qaReviewBatch" class="mt-3 rounded-lg border border-dashed border-border/50 px-3 py-4 text-center text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.noBatch') }}</div>
-                    <div v-else-if="qaPendingReviewRecords.length === 0" class="mt-3 rounded-lg border border-dashed border-border/50 px-3 py-4 text-center text-xs text-muted-foreground">
-                      {{ qaReviewBatch.active ? t(prefix + '.questionAnswer.waitingForReviewableAnswer') : t(prefix + '.questionAnswer.noPendingReview') }}
-                    </div>
-                    <ul v-else class="mt-3 space-y-3">
-                      <li v-for="record in qaPendingReviewRecords" :key="record.id" class="grid gap-6 rounded-lg border border-border/60 bg-card p-3 md:grid-cols-[minmax(0,1fr)_10rem] md:grid-rows-2">
-                        <button
-                          type="button"
-                          class="inline-flex min-h-14 items-center justify-center gap-2 rounded-md border border-green-500/40 px-4 py-2 text-sm font-medium text-green-700 hover:bg-green-500/10 disabled:opacity-50 dark:text-green-400 md:col-start-2 md:row-start-1"
-                          :class="qaMarking.get(record.id) === 'correct' ? 'bg-green-500/20' : ''"
-                          :aria-pressed="record.answerJudgment === 'correct'"
-                          :disabled="qaMarking.has(record.id)"
-                          @click="saveQuestionAnswerJudgment(record, 'correct')"
-                        >
-                          <Loader2 v-if="qaMarking.get(record.id) === 'correct'" class="h-4 w-4 animate-spin" />
-                          {{ t(prefix + '.questionAnswer.correct') }}<span v-if="qaMarking.get(record.id) === 'correct'"> · {{ t(prefix + '.questionAnswer.saving') }}</span>
-                        </button>
-                        <div class="min-w-0 md:col-start-1 md:row-span-2 md:row-start-1">
-                          <div class="flex items-start justify-between gap-3">
-                            <div class="min-w-0">
-                              <p class="text-sm font-semibold text-foreground">{{ record.questionName }}</p>
-                              <p class="mt-0.5 text-xs text-muted-foreground">{{ record.modelName }} · {{ requestProtocolLabel(record.requestProtocol) }}</p>
-                            </div>
-                            <span v-if="questionAnswerElapsedLabel(record)" class="shrink-0 text-xs text-muted-foreground">{{ questionAnswerElapsedLabel(record) }}</span>
-                          </div>
-                          <div class="mt-3 space-y-3 border-t border-border/40 pt-3">
-                            <div>
-                              <p class="text-[11px] font-medium text-muted-foreground">{{ t(prefix + '.questionAnswer.questionLabel') }}</p>
-                              <p class="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-foreground">{{ record.questionBody }}</p>
-                            </div>
-                            <div>
-                              <p class="text-[11px] font-medium text-muted-foreground">{{ t(prefix + '.questionAnswer.answerLabel') }}</p>
-                              <QuestionAnswerHighlightedText
-                                v-if="record.questionKeywordSnapshot !== null && record.questionKeywordSnapshot.length > 0"
-                                class="mt-1"
-                                :answer="questionAnswerCurrentAnswer(record)"
-                                :snapshot="record.questionKeywordSnapshot"
-                              />
-                              <p v-else class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{{ questionAnswerCurrentAnswer(record) }}</p>
-                              <p v-if="record.questionKeywordSnapshot === null" class="mt-1 text-[11px] text-muted-foreground">{{ t(prefix + '.questionAnswer.noKeywordSnapshot') }}</p>
-                            </div>
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          class="inline-flex min-h-14 items-center justify-center gap-2 rounded-md border border-red-500/40 px-4 py-2 text-sm font-medium text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400 md:col-start-2 md:row-start-2"
-                          :class="qaMarking.get(record.id) === 'incorrect' ? 'bg-red-500/20' : ''"
-                          :aria-pressed="record.answerJudgment === 'incorrect'"
-                          :disabled="qaMarking.has(record.id)"
-                          @click="saveQuestionAnswerJudgment(record, 'incorrect')"
-                        >
-                          <Loader2 v-if="qaMarking.get(record.id) === 'incorrect'" class="h-4 w-4 animate-spin" />
-                          {{ t(prefix + '.questionAnswer.incorrect') }}<span v-if="qaMarking.get(record.id) === 'incorrect'"> · {{ t(prefix + '.questionAnswer.saving') }}</span>
-                        </button>
-                      </li>
-                    </ul>
+                    <template v-else-if="qaPendingOpen">
+                      <div v-if="qaPendingReviewRecords.length === 0" class="mt-3 rounded-lg border border-dashed border-border/50 px-3 py-4 text-center text-xs text-muted-foreground">{{ qaReviewBatch.active ? t(prefix + '.questionAnswer.waitingForReviewableAnswer') : t(prefix + '.questionAnswer.noPendingReview') }}</div>
+                      <ul v-else class="mt-3 space-y-3">
+                        <li v-for="record in qaPendingReviewRecords" :key="record.id" class="rounded-lg border border-border/60 bg-card p-3"><QuestionAnswerRecordCard :record="record" :expanded="qaExpanded.has(record.id)" :saving="qaMarking.has(record.id)" :saving-judgment="qaMarking.get(record.id)" @expand="toggleQuestionAnswerExpanded(record.id)" @judge="saveQuestionAnswerJudgment(record, $event)" /></li>
+                      </ul>
+                    </template>
                   </section>
 
                   <section v-if="qaProcessedSectionVisible" data-question-answer-section="processed" data-testid="question-answer-processed" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
@@ -1749,43 +1889,16 @@ const close = () => {
                     </button>
                     <div v-if="qaProcessedOpen" data-testid="question-answer-processed-content" class="border-t border-border/40 p-3">
                       <div v-if="qaReviewedRecords.length === 0" class="rounded-md border border-dashed border-border/50 px-3 py-3 text-center text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.noProcessedAnswers') }}</div>
-                      <ul v-else class="space-y-2">
-                        <li v-for="record in qaReviewedRecords" :key="record.id" class="grid gap-3 rounded-md border p-3 md:grid-cols-[minmax(0,1fr)_9rem]" :class="questionAnswerRecordClass(record)">
-                          <div class="min-w-0">
-                            <div class="flex items-center justify-between gap-3">
-                              <div class="min-w-0">
-                                <p class="truncate text-sm font-semibold text-foreground">{{ record.questionName }}</p>
-                                <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ record.modelName }} · {{ requestProtocolLabel(record.requestProtocol) }}</p>
-                              </div>
-                              <span class="shrink-0 text-xs text-muted-foreground">{{ questionAnswerStatusLabel(record) }}</span>
-                            </div>
-                            <p class="mt-2 whitespace-pre-wrap break-words text-xs leading-5 text-foreground">{{ record.questionBody }}</p>
-                            <p class="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{{ questionAnswerCurrentAnswer(record) }}</p>
-                          </div>
-                          <div class="grid grid-cols-2 gap-2 md:grid-cols-1">
-                            <button
-                              type="button"
-                              class="rounded-md border border-green-500/40 px-3 py-2 text-xs font-medium text-green-700 hover:bg-green-500/10 disabled:opacity-50 dark:text-green-400"
-                              :class="record.answerJudgment === 'correct' ? 'bg-green-500/20' : ''"
-                              :aria-pressed="record.answerJudgment === 'correct'"
-                              :disabled="qaMarking.has(record.id)"
-                              @click="saveQuestionAnswerJudgment(record, 'correct')"
-                            >
-                              {{ t(prefix + '.questionAnswer.correct') }}
-                            </button>
-                            <button
-                              type="button"
-                              class="rounded-md border border-red-500/40 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400"
-                              :class="record.answerJudgment === 'incorrect' ? 'bg-red-500/20' : ''"
-                              :aria-pressed="record.answerJudgment === 'incorrect'"
-                              :disabled="qaMarking.has(record.id)"
-                              @click="saveQuestionAnswerJudgment(record, 'incorrect')"
-                            >
-                              {{ t(prefix + '.questionAnswer.incorrect') }}
-                            </button>
-                          </div>
-                        </li>
-                      </ul>
+                      <div v-else class="space-y-2">
+                        <div v-for="group in qaResultGroups" :key="group.key" data-testid="question-answer-result-group" class="rounded-md border border-border/40">
+                          <button type="button" class="flex w-full flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-left text-xs" :aria-expanded="qaResultGroupsOpen.has(group.key)" @click="toggleQuestionAnswerResultGroup(group.key)">
+                            <span class="break-words font-medium text-foreground">{{ group.questionName }}<template v-if="group.questionSnapshotKey"> · #{{ group.questionSnapshotKey.slice(0, 8) }}</template> · {{ group.modelName }} · {{ group.reviews.correct }}正确/{{ group.reviews.correct + group.reviews.incorrect }}已判 · 重复 {{ group.records.length }} 次</span><span class="text-muted-foreground">{{ qaResultGroupsOpen.has(group.key) ? '收起' : `展开 ${group.records.length} 条` }}</span>
+                          </button>
+                          <ul v-if="qaResultGroupsOpen.has(group.key)" class="space-y-2 border-t border-border/40 p-3">
+                            <li v-for="record in group.records" :key="record.id" class="rounded-md border p-3" :class="questionAnswerRecordClass(record)"><QuestionAnswerRecordCard :record="record" :expanded="qaExpanded.has(record.id)" :saving="qaMarking.has(record.id)" :saving-judgment="qaMarking.get(record.id)" @expand="toggleQuestionAnswerExpanded(record.id)" @judge="saveQuestionAnswerJudgment(record, $event)" /></li>
+                          </ul>
+                        </div>
+                      </div>
                       <div v-if="qaFailedRecords.length > 0" class="mt-3 border-t border-border/40 pt-3">
                         <button type="button" class="inline-flex items-center gap-1 text-xs font-medium text-red-600 dark:text-red-400" @click="qaFailedOpen = !qaFailedOpen">
                           {{ t(prefix + '.questionAnswer.failedSummary', { count: qaFailedRecords.length }) }}
@@ -1915,41 +2028,15 @@ const close = () => {
                       <ChevronDown v-else class="h-4 w-4 text-muted-foreground" />
                     </button>
                     <div v-if="qaHistoryOpen" data-testid="question-answer-history-content" class="border-t border-border/40 p-3">
+                      <div class="mb-3 flex gap-2"><button v-for="scope in (['today', 'all'] as const)" :key="scope" type="button" class="rounded-md border border-border/60 px-3 py-1.5 text-xs font-medium" :class="qaHistoryScope === scope ? 'bg-primary/10 text-primary' : 'text-muted-foreground'" :aria-pressed="qaHistoryScope === scope" @click="selectQuestionAnswerHistoryScope(scope)">{{ scope === 'today' ? '今日' : '全部' }}</button></div>
+                      <p class="mb-2 text-[11px] text-muted-foreground">共 {{ qaHistory.totalBatches }} 个完整批次</p>
                       <div v-if="qaHistoryBatchGroups.length === 0" class="rounded-lg border border-dashed border-border/50 px-3 py-4 text-center text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.noHistory') }}</div>
                       <div v-else class="space-y-3">
-                        <div v-for="group in qaHistoryBatchGroups" :key="group.batchId" class="rounded-lg border border-border/50 bg-card p-3">
-                          <div class="flex flex-wrap items-center justify-between gap-3">
-                            <p class="text-xs font-medium text-foreground">{{ t(prefix + '.questionAnswer.reviewBatchId', { id: shortQuestionAnswerBatchId(group.batchId) }) }}</p>
-                            <button type="button" class="inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line disabled:opacity-50" :disabled="qaReviewLoadingBatchId === group.batchId" @click="reviewQuestionAnswerBatch(group.batchId)">
-                              <Loader2 v-if="qaReviewLoadingBatchId === group.batchId" class="h-3.5 w-3.5 animate-spin" />
-                              {{ t(prefix + '.questionAnswer.reviewThisBatch') }}
-                            </button>
-                          </div>
-                          <ul class="mt-2 space-y-1.5 border-t border-border/40 pt-2">
-                            <li v-for="record in group.records" :key="record.id" class="rounded-md border border-border/40 px-3 py-2">
-                              <div class="flex items-center justify-between gap-3">
-                                <button type="button" class="min-w-0 flex-1 text-left" @click="toggleQuestionAnswerExpanded(record.id)">
-                                  <p class="truncate text-xs font-medium text-foreground">{{ record.questionName }}</p>
-                                  <p class="mt-0.5 truncate text-[11px] text-muted-foreground">{{ record.modelName }} · {{ requestProtocolLabel(record.requestProtocol) }} · {{ answerSummary(record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(prefix + '.questionAnswer.noAnswer'))) }}</p>
-                                </button>
-                                <div class="flex shrink-0 items-center gap-2">
-                                  <div v-if="record.status === 'succeeded'" class="grid gap-2">
-                                    <button type="button" class="min-h-12 rounded-md border border-green-500/40 px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-500/10 disabled:opacity-50 dark:text-green-400" :class="record.answerJudgment === 'correct' ? 'bg-green-500/20' : ''" :aria-pressed="record.answerJudgment === 'correct'" :disabled="qaMarking.has(record.id)" @click="saveQuestionAnswerJudgment(record, 'correct')">{{ t(prefix + '.questionAnswer.correct') }}</button>
-                                    <button type="button" class="min-h-12 rounded-md border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400" :class="record.answerJudgment === 'incorrect' ? 'bg-red-500/20' : ''" :aria-pressed="record.answerJudgment === 'incorrect'" :disabled="qaMarking.has(record.id)" @click="saveQuestionAnswerJudgment(record, 'incorrect')">{{ t(prefix + '.questionAnswer.incorrect') }}</button>
-                                  </div>
-                                  <span v-else class="text-[11px] text-muted-foreground">{{ questionAnswerStatusLabel(record) }}</span>
-                                  <button type="button" class="rounded-md p-1 text-muted-foreground hover:bg-surface-elevated" @click="toggleQuestionAnswerExpanded(record.id)">
-                                    <ChevronUp v-if="qaExpanded.has(record.id)" class="h-4 w-4" />
-                                    <ChevronDown v-else class="h-4 w-4" />
-                                  </button>
-                                </div>
-                              </div>
-                              <div v-if="qaExpanded.has(record.id)" class="mt-2 space-y-2 border-t border-border/40 pt-2">
-                                <div><p class="text-[11px] font-medium text-muted-foreground">{{ t(prefix + '.questionAnswer.fullQuestion') }}</p><p class="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-foreground">{{ record.questionBody }}</p></div>
-                                <div><p class="text-[11px] font-medium text-muted-foreground">{{ t(prefix + '.questionAnswer.fullAnswer') }}</p><p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-foreground">{{ record.answerBody || (record.errorType ? questionAnswerErrorLabel(record.errorType) : t(prefix + '.questionAnswer.noAnswer')) }}</p></div>
-                              </div>
-                            </li>
-                          </ul>
+                        <div v-for="group in qaHistoryBatchGroups" :key="group.batchId" data-testid="question-answer-history-batch" class="rounded-lg border border-border/50 bg-card p-3">
+                          <div class="flex flex-wrap items-center justify-between gap-3"><p class="break-words text-xs font-medium text-foreground">批次 #{{ shortQuestionAnswerBatchId(group.batchId) }} · {{ group.active ? '进行中' : '已结束' }}</p><button type="button" class="inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-surface-line disabled:opacity-50" :disabled="qaReviewLoadingBatchId === group.batchId" @click="reviewQuestionAnswerBatch(group.batchId)"><Loader2 v-if="qaReviewLoadingBatchId === group.batchId" class="h-3.5 w-3.5 animate-spin" />查看该批次</button></div>
+                          <p class="mt-2 break-words text-[11px] text-muted-foreground">创建 {{ formatConnectionHealthTime(group.createdAt) }} · 完成 {{ group.completedAt ? formatConnectionHealthTime(group.completedAt) : '—' }} · {{ requestProtocolLabel(group.requestProtocol) }} · 力度 {{ group.reasoningEffort ?? '未指定' }} · 重复 {{ group.repeatCount }} 次</p>
+                          <p class="mt-1 break-words text-[11px] text-muted-foreground">{{ group.models.join('、') }} · {{ group.questions.map(question => `${question.displayQuestionName} · #${question.questionSnapshotKey.slice(0, 8)}`).join('；') }}</p>
+                          <p class="mt-1 break-words text-xs text-foreground">提交 {{ group.stats.requests.submitted }} · 进行中 {{ group.stats.requests.inProgress }} · 成功 {{ group.stats.requests.succeeded }} · 待人工 {{ group.stats.reviews.unreviewed }} · 正确 {{ group.stats.reviews.correct }} · 错误 {{ group.stats.reviews.incorrect }} · 失败 {{ group.stats.requests.failed }} · 取消 {{ group.stats.requests.cancelled }}</p>
                         </div>
                       </div>
                       <div v-if="qaHistory.totalPages > 1" class="mt-4 flex flex-wrap items-center justify-center gap-1.5">
@@ -2015,16 +2102,16 @@ const close = () => {
           </div>
 
           <div data-testid="question-answer-footer" class="flex shrink-0 items-center justify-between gap-3 border-t border-border/60 px-5 py-4">
-            <p v-if="mode === 'questionAnswer' || hasModels" class="flex items-center gap-1 text-xs text-muted-foreground">
+            <p v-if="mode === 'questionAnswer' || hasModels" class="flex min-w-0 flex-1 items-center gap-1 text-xs text-muted-foreground">
               <AlertTriangle v-if="selected.size === 0 || (mode === 'questionAnswer' && qaSelectedQuestions.size === 0)" class="h-3.5 w-3.5" />
               {{ mode === 'questionAnswer'
                 ? (qaStartBlockedReason || t(`${prefix}.questionAnswer.selectedFormula`, { models: qaSubmission.modelCount, questions: qaSubmission.questionCount, repeat: qaSubmission.repeatCount, total: qaSubmission.total }))
                 : t(`${prefix}.selectedCount`, { count: selected.size }) }}
             </p>
             <div v-else />
-            <div class="flex items-center gap-2">
-              <button type="button" class="rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:bg-surface-line" @click="close">{{ mode === 'questionAnswer' ? t(`${prefix}.questionAnswer.leave`) : t(`${prefix}.close`) }}</button>
-              <button type="button" class="inline-flex items-center gap-1.5 rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50" :disabled="!canStartTest" @click="startTest">
+            <div class="flex shrink-0 items-center gap-2">
+              <button type="button" class="whitespace-nowrap rounded-lg px-3 py-1.5 text-sm text-muted-foreground hover:bg-surface-line" @click="close">{{ mode === 'questionAnswer' ? t(`${prefix}.questionAnswer.leave`) : t(`${prefix}.close`) }}</button>
+              <button type="button" class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50" :disabled="!canStartTest" @click="startTest">
                 <Loader2 v-if="phase === 'testing' || qaStarting" class="h-4 w-4 animate-spin" />
                 {{ mode === 'questionAnswer'
                   ? (qaStarting ? t(`${prefix}.questionAnswer.submitting`) : t(`${prefix}.questionAnswer.startAnswer`))

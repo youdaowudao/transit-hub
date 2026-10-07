@@ -8,6 +8,7 @@ import type {
   QuestionAnswerStatus,
   QuestionAnswerReviewStats,
   QuestionAnswerStats,
+  QuestionAnswerQuestionStats,
   QuestionAnswerSubmissionSummary,
   TestQuestion,
 } from '../types/connectionHealth'
@@ -16,6 +17,9 @@ import type { QuestionAnswerSelectionPreferences } from './connectionHealthPrefe
 export const TEST_QUESTION_KEYWORD_COUNT_LIMIT = 20
 export const TEST_QUESTION_KEYWORD_RUNE_LIMIT = 64
 export const TEST_QUESTION_KEYWORD_BYTES_LIMIT = 2048
+
+export const questionAnswerRequestProtocolLabel = (protocol: string | null | undefined, legacyLabel: string): string =>
+  protocol === 'responses' ? 'Responses' : protocol === 'chat_completions' ? 'Chat Completions' : legacyLabel
 
 export interface QuestionAnswerResolvedSelection {
   modelIds: string[]
@@ -260,12 +264,13 @@ export const questionAnswerReviewStatsFromRecords = (
 }
 
 export const questionAnswerAccuracy = (stats: QuestionAnswerStats): number | null => {
-  if (stats.requests.submitted <= 0) return null
-  return Math.round((stats.reviews.correct / stats.requests.submitted) * 1000) / 10
+  const judged = stats.reviews.correct + stats.reviews.incorrect
+  if (judged <= 0) return null
+  return Math.round((stats.reviews.correct / judged) * 1000) / 10
 }
 
 export const formatQuestionAnswerAccuracy = (accuracy: number | null): string => {
-  if (accuracy === null) return '-'
+  if (accuracy === null) return '—'
   return `${Number.isInteger(accuracy) ? accuracy : accuracy.toFixed(1)}%`
 }
 
@@ -401,4 +406,51 @@ export const questionAnswerBatchCompletedAt = (batch: QuestionAnswerBatch): stri
     if (!latest || milliseconds > latest.milliseconds) latest = { value: record.completedAt, milliseconds }
   }
   return latest?.value ?? null
+}
+
+export const normalizeQuestionAnswerKeywords = (keywords: string[] | null): string[] => {
+  const encoder = new TextEncoder()
+  return Array.from(new Set((keywords ?? []).map(keyword => asciiFoldQuestionAnswerText(keyword.trim())).filter(Boolean))).sort((a, b) => {
+    const left = encoder.encode(a), right = encoder.encode(b)
+    for (let i = 0; i < Math.min(left.length, right.length); i++) if (left[i] !== right[i]) return left[i]! - right[i]!
+    return left.length - right.length
+  })
+}
+
+export const questionAnswerRecordMatchesQuestion = (record: QuestionAnswerRecord, question: QuestionAnswerQuestionStats): boolean => (
+  record.questionId === question.questionId && record.questionBody === question.questionBody
+  && JSON.stringify(normalizeQuestionAnswerKeywords(record.questionKeywordSnapshot)) === JSON.stringify(question.normalizedKeywords)
+)
+
+export const questionAnswerSourceLabel = (record: QuestionAnswerRecord): string => (
+  record.judgmentSource === 'automatic' ? '自动判定' : record.judgmentSource === 'manual' ? '人工判定' : '历史判定'
+)
+
+export interface QuestionAnswerResultGroup {
+  key: string
+  questionSnapshotKey: string
+  questionName: string
+  modelName: string
+  records: QuestionAnswerRecord[]
+  reviews: QuestionAnswerReviewStats
+}
+
+export const groupQuestionAnswerResults = (records: QuestionAnswerRecord[], questions: QuestionAnswerQuestionStats[]): QuestionAnswerResultGroup[] => {
+  const groups = new Map<string, QuestionAnswerResultGroup>()
+  for (const record of records) {
+    const question = questions.find(item => questionAnswerRecordMatchesQuestion(record, item))
+    const snapshotKey = question?.questionSnapshotKey ?? JSON.stringify([record.questionId, record.questionBody, normalizeQuestionAnswerKeywords(record.questionKeywordSnapshot)])
+    const key = JSON.stringify([snapshotKey, record.modelName])
+    let group = groups.get(key)
+    if (!group) {
+      group = { key, questionSnapshotKey: question?.questionSnapshotKey ?? '', questionName: question?.displayQuestionName ?? record.questionName, modelName: record.modelName, records: [], reviews: { unreviewed: 0, correct: 0, incorrect: 0 } }
+      groups.set(key, group)
+    }
+    group.records.push(record)
+  }
+  for (const group of groups.values()) {
+    group.records.sort((a, b) => (a.repeatIndex ?? 11) - (b.repeatIndex ?? 11) || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id))
+    group.reviews = questionAnswerReviewStatsFromRecords(group.records)
+  }
+  return Array.from(groups.values())
 }

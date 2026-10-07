@@ -158,6 +158,7 @@ func (f *fakeQuestionAnswerRepository) CreateQuestionAnswerBatch(_ context.Conte
 					ReasoningEffort:         questionAnswerReasoningEffortPointer(reasoningEffort),
 					RequestProtocol:         &protocol,
 					Status:                  QuestionAnswerPending, CreatedAt: now, UpdatedAt: now,
+					RepeatIndex: func() *int { value := sample + 1; return &value }(),
 				}
 				created = append(created, record)
 				f.records = append(f.records, record)
@@ -186,13 +187,15 @@ func (f *fakeQuestionAnswerRepository) MarkQuestionAnswerRunning(_ context.Conte
 	return false, nil
 }
 
-func (f *fakeQuestionAnswerRepository) CompleteQuestionAnswer(_ context.Context, _ string, batchID string, recordID string, status QuestionAnswerStatus, answerBody string, errorType string) (bool, error) {
+func (f *fakeQuestionAnswerRepository) CompleteQuestionAnswer(_ context.Context, _ string, batchID string, recordID string, completion QuestionAnswerCompletion) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i := range f.records {
 		if f.records[i].ID == recordID && f.records[i].BatchID == batchID && f.records[i].Status == QuestionAnswerRunning {
 			now := time.Now()
-			f.records[i].Status, f.records[i].AnswerBody, f.records[i].ErrorType = status, answerBody, errorType
+			f.records[i].Status, f.records[i].AnswerBody, f.records[i].ErrorType = completion.Status, completion.AnswerBody, completion.ErrorType
+			f.records[i].AnswerJudgment, f.records[i].JudgmentSource = completion.AnswerJudgment, completion.JudgmentSource
+			f.records[i].ManualError = completion.AnswerJudgment != nil && *completion.AnswerJudgment == QuestionAnswerIncorrect
 			f.records[i].CompletedAt, f.records[i].UpdatedAt = &now, now
 			return true, nil
 		}
@@ -258,56 +261,87 @@ func (f *fakeQuestionAnswerRepository) LatestQuestionAnswerBatch(ctx context.Con
 	return f.ListQuestionAnswerBatch(ctx, userID, targetID, latestBatch)
 }
 
-func (f *fakeQuestionAnswerRepository) ListQuestionAnswerHistory(_ context.Context, _ string, targetID string, page int) (QuestionAnswerHistory, error) {
+func (f *fakeQuestionAnswerRepository) ListQuestionAnswerHistory(_ context.Context, _ string, targetID string, page int, scope string) (QuestionAnswerHistory, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	all := make([]QuestionAnswerRecord, 0)
-	stats := QuestionAnswerStats{ByModel: []QuestionAnswerModelStats{}}
-	modelIndexes := make(map[string]int)
-	for i := len(f.records) - 1; i >= 0; i-- {
-		record := f.records[i]
+	all, todayRecords := []QuestionAnswerRecord{}, []QuestionAnswerRecord{}
+	byBatch := make(map[string][]QuestionAnswerRecord)
+	location, _ := time.LoadLocation("Asia/Singapore")
+	date := time.Now().In(location).Format("2006-01-02")
+	for _, record := range f.records {
 		if record.TargetID != targetID {
 			continue
 		}
 		all = append(all, record)
-		addQuestionAnswerRecordStats(&stats, record)
-		modelIndex, exists := modelIndexes[record.ModelName]
-		if !exists {
-			modelIndex = len(stats.ByModel)
-			modelIndexes[record.ModelName] = modelIndex
-			stats.ByModel = append(stats.ByModel, QuestionAnswerModelStats{ModelName: record.ModelName})
+		byBatch[record.BatchID] = append(byBatch[record.BatchID], record)
+		if record.CreatedAt.In(location).Format("2006-01-02") == date {
+			todayRecords = append(todayRecords, record)
 		}
-		modelStats := QuestionAnswerStats{Requests: stats.ByModel[modelIndex].Requests, Reviews: stats.ByModel[modelIndex].Reviews}
-		addQuestionAnswerRecordStats(&modelStats, record)
-		stats.ByModel[modelIndex].Requests = modelStats.Requests
-		stats.ByModel[modelIndex].Reviews = modelStats.Reviews
 	}
-	start := (page - 1) * QuestionAnswerPageSize
-	if start > len(all) {
-		start = len(all)
+	summaries := []QuestionAnswerBatchSummary{}
+	for _, records := range byBatch {
+		summary, err := buildQuestionAnswerBatchSummary(records)
+		if err != nil {
+			return QuestionAnswerHistory{}, err
+		}
+		if scope == "all" || summary.CreatedAt.In(location).Format("2006-01-02") == date {
+			summaries = append(summaries, summary)
+		}
 	}
-	end := min(start+QuestionAnswerPageSize, len(all))
-	totalPages := 0
-	if len(all) > 0 {
-		totalPages = (len(all) + QuestionAnswerPageSize - 1) / QuestionAnswerPageSize
+	sort.Slice(summaries, func(i, j int) bool {
+		if !summaries[i].CreatedAt.Equal(summaries[j].CreatedAt) {
+			return summaries[i].CreatedAt.After(summaries[j].CreatedAt)
+		}
+		return summaries[i].BatchID > summaries[j].BatchID
+	})
+	total := len(summaries)
+	pages := 0
+	if total > 0 {
+		pages = 1 + (total-1)/QuestionAnswerPageSize
 	}
-	return QuestionAnswerHistory{
-		Records: cloneQuestionAnswerRecords(all[start:end]), Page: page, PageSize: QuestionAnswerPageSize,
-		TotalItems: len(all), TotalPages: totalPages, Stats: stats,
-		TodayStats: QuestionAnswerStats{ByModel: []QuestionAnswerModelStats{}},
-	}, nil
+	start := total
+	if page <= pages {
+		start = (page - 1) * QuestionAnswerPageSize
+	}
+	end := min(start+QuestionAnswerPageSize, total)
+	return QuestionAnswerHistory{Batches: summaries[start:end], Page: page, PageSize: QuestionAnswerPageSize, TotalBatches: total, TotalPages: pages, AllTimeStats: aggregateQuestionAnswerStats(all), TodayStats: aggregateQuestionAnswerStats(todayRecords)}, nil
 }
 
-func (f *fakeQuestionAnswerRepository) SetQuestionAnswerJudgment(_ context.Context, _ string, targetID string, recordID string, judgment QuestionAnswerJudgment) (*QuestionAnswerRecord, error) {
+func (f *fakeQuestionAnswerRepository) GetQuestionAnswerTodayStats(_ context.Context, _ string, targetID string) (QuestionAnswerSummaryStats, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var stats QuestionAnswerStats
+	location, _ := time.LoadLocation("Asia/Singapore")
+	date := time.Now().In(location).Format("2006-01-02")
+	for _, record := range f.records {
+		if record.TargetID == targetID && record.CreatedAt.In(location).Format("2006-01-02") == date {
+			addQuestionAnswerRecordStats(&stats, record)
+		}
+	}
+	return QuestionAnswerSummaryStats{Requests: stats.Requests, Reviews: stats.Reviews}, nil
+}
+
+func (f *fakeQuestionAnswerRepository) SetQuestionAnswerJudgment(_ context.Context, _ string, targetID, recordID string, judgment QuestionAnswerJudgment, expectedUpdatedAt time.Time) (*QuestionAnswerRecord, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for i := range f.records {
-		if f.records[i].ID == recordID && f.records[i].TargetID == targetID && f.records[i].Status == QuestionAnswerSucceeded {
-			f.records[i].AnswerJudgment = questionAnswerJudgmentPointer(judgment)
-			f.records[i].ManualError = judgment == QuestionAnswerIncorrect
-			result := f.records[i]
+		record := &f.records[i]
+		if record.ID != recordID || record.TargetID != targetID || record.Status != QuestionAnswerSucceeded {
+			continue
+		}
+		if record.AnswerJudgment != nil && *record.AnswerJudgment == judgment && record.JudgmentSource != nil && *record.JudgmentSource == QuestionAnswerJudgmentManual {
+			result := *record
 			return &result, nil
 		}
+		if !record.UpdatedAt.Equal(expectedUpdatedAt) {
+			return nil, requestError(ErrorQuestionAnswerJudgmentConflict)
+		}
+		record.AnswerJudgment = questionAnswerJudgmentPointer(judgment)
+		record.JudgmentSource = questionAnswerJudgmentSourcePointer(QuestionAnswerJudgmentManual)
+		record.ManualError = judgment == QuestionAnswerIncorrect
+		record.UpdatedAt = time.Now()
+		result := *record
+		return &result, nil
 	}
 	return nil, nil
 }
@@ -944,7 +978,7 @@ func newControlledFinalizeQuestionAnswerRepository(base *fakeQuestionAnswerRepos
 	}
 }
 
-func (r *controlledFinalizeQuestionAnswerRepository) CompleteQuestionAnswer(ctx context.Context, userID string, batchID string, recordID string, status QuestionAnswerStatus, answerBody string, errorType string) (bool, error) {
+func (r *controlledFinalizeQuestionAnswerRepository) CompleteQuestionAnswer(ctx context.Context, userID string, batchID string, recordID string, completion QuestionAnswerCompletion) (bool, error) {
 	r.mu.Lock()
 	if r.failOneCompletion && !r.completionFailed {
 		r.completionFailed = true
@@ -952,7 +986,7 @@ func (r *controlledFinalizeQuestionAnswerRepository) CompleteQuestionAnswer(ctx 
 		return false, errors.New("test completion storage failure")
 	}
 	r.mu.Unlock()
-	return r.fakeQuestionAnswerRepository.CompleteQuestionAnswer(ctx, userID, batchID, recordID, status, answerBody, errorType)
+	return r.fakeQuestionAnswerRepository.CompleteQuestionAnswer(ctx, userID, batchID, recordID, completion)
 }
 
 func (r *controlledFinalizeQuestionAnswerRepository) StopPendingQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
@@ -1983,7 +2017,7 @@ func newConcurrentCompletionFailureRepository(base *fakeQuestionAnswerRepository
 	return &concurrentCompletionFailureRepository{fakeQuestionAnswerRepository: base, completes: make(chan struct{})}
 }
 
-func (r *concurrentCompletionFailureRepository) CompleteQuestionAnswer(context.Context, string, string, string, QuestionAnswerStatus, string, string) (bool, error) {
+func (r *concurrentCompletionFailureRepository) CompleteQuestionAnswer(context.Context, string, string, string, QuestionAnswerCompletion) (bool, error) {
 	r.mu.Lock()
 	r.completeCalls++
 	if r.completeCalls == 2 {
@@ -2262,7 +2296,8 @@ func TestQuestionAnswerBatchRepeatSummaryAndModelStats(t *testing.T) {
 			{ModelName: "model-a", Requests: QuestionAnswerRequestStats{Submitted: 4, Succeeded: 2, Failed: 1, Cancelled: 1}, Reviews: QuestionAnswerReviewStats{Unreviewed: 1, Incorrect: 1}},
 		},
 	}
-	if !reflect.DeepEqual(batch.Stats, wantTotal) {
+	sort.Slice(wantTotal.ByModel, func(i, j int) bool { return wantTotal.ByModel[i].ModelName < wantTotal.ByModel[j].ModelName })
+	if batch.Stats.Requests != wantTotal.Requests || batch.Stats.Reviews != wantTotal.Reviews || !reflect.DeepEqual(batch.Stats.ByModel, wantTotal.ByModel) {
 		t.Fatalf("batch stats=%+v want=%+v", batch.Stats, wantTotal)
 	}
 

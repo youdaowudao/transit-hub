@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { upgradeQuestionAnswerHistoryFixture } from './fixtures/c1QuestionAnswerHistory'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ManualOneTimeProbeDialog, {
@@ -45,7 +46,7 @@ vi.mock('@/modules/admin/api/connectionHealth', () => ({
   cancelQuestionAnswerBatch: harness.cancelQuestionAnswerBatch,
   getLatestQuestionAnswerBatch: harness.getLatestQuestionAnswerBatch,
   getQuestionAnswerBatch: harness.getQuestionAnswerBatch,
-  getQuestionAnswerHistory: harness.getQuestionAnswerHistory,
+  getQuestionAnswerHistory: async (...args: unknown[]) => upgradeQuestionAnswerHistoryFixture(await harness.getQuestionAnswerHistory(...args)),
   listTestQuestions: harness.listTestQuestions,
   setQuestionAnswerJudgment: harness.setQuestionAnswerJudgment,
   startQuestionAnswerBatch: harness.startQuestionAnswerBatch,
@@ -151,6 +152,7 @@ const primaryTarget: ManualProbeTargetSummary = {
 const mountedWrappers: VueWrapper[] = []
 
 beforeEach(() => {
+  vi.spyOn(window, 'confirm').mockReturnValue(true)
   harness.discoverModels.mockReset().mockResolvedValue({
     models: [
       { id: 'model-a', name: 'Model A' },
@@ -167,6 +169,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.restoreAllMocks()
   for (const wrapper of mountedWrappers.splice(0)) wrapper.unmount()
   document.body.innerHTML = ''
 })
@@ -320,7 +323,7 @@ describe('question-answer repeat, queue and model statistics', () => {
     expect(wrapper.text()).not.toContain('等待 3 · 运行 2 · 完成 7')
     expect(wrapper.text()).not.toContain('正在排队，会自动开始，请勿重复提交')
     expect(wrapper.text()).not.toMatch(/队列第|预计完成|前面还有/)
-    const modelStatsToggle = wrapper.findAll('button').find(button => button.text().trim() === '按模型查看')
+    const modelStatsToggle = wrapper.findAll('button').find(button => button.text().trim() === '按模型')
     if (!modelStatsToggle) throw new Error('missing collapsed model statistics action')
     await modelStatsToggle.trigger('click')
     const modelBucketTexts = wrapper.findAll('[data-testid="question-answer-model-stats"]')
@@ -331,10 +334,10 @@ describe('question-answer repeat, queue and model statistics', () => {
     expect(modelBucketText).toContain('lifetime-failed')
     expect(modelBucketText).toContain('today-model')
     expect(modelBucketText).not.toContain('discovery-only-model')
-    expect(modelBucketTexts.find(text => text.includes('model-active'))).toContain('失败数5')
-    expect(modelBucketTexts.find(text => text.includes('current-failed'))).toContain('失败数2')
-    expect(modelBucketTexts.find(text => text.includes('lifetime-failed'))).toContain('失败数3')
-    expect(modelBucketTexts.find(text => text.includes('today-model'))).toContain('回答数1')
+    expect(modelBucketTexts.find(text => text.includes('model-active'))).toContain('失败 5')
+    expect(modelBucketTexts.find(text => text.includes('current-failed'))).toContain('失败 2')
+    expect(modelBucketTexts.find(text => text.includes('lifetime-failed'))).toContain('失败 3')
+    expect(modelBucketTexts.find(text => text.includes('today-model'))).toContain('成功 1')
   })
 
   it('never shows queue wording or invented position and ETA for a terminal batch', async () => {
@@ -409,7 +412,7 @@ describe('question-answer repeat, queue and model statistics', () => {
     const currentStats = wrapper.find('[data-testid="question-answer-stats-review"]')
     expect(wrapper.find('[data-testid="question-answer-pending"]').findAll('li')).toHaveLength(0)
     expect(currentStats.text()).toMatch(/正确\s*1/)
-    const modelStatsToggle = wrapper.findAll('button').find(button => button.text().trim() === '按模型查看')
+    const modelStatsToggle = wrapper.findAll('button').find(button => button.text().trim() === '按模型')
     if (!modelStatsToggle) throw new Error('missing model statistics action after judgment')
     await modelStatsToggle.trigger('click')
     const judgeModel = wrapper.findAll('[data-testid="question-answer-model-stats"]')

@@ -213,8 +213,8 @@ describe('connection health question answers', () => {
       },
     }
     const legacyHistory = {
-      records: [legacyRecord], page: 1, pageSize: 20, totalItems: 1, totalPages: 1,
-      stats: legacyBatch.stats, todayStats: legacyBatch.stats,
+      batches: [], page: 1, pageSize: 20, totalBatches: 0, totalPages: 0,
+      allTimeStats: legacyBatch.stats, todayStats: legacyBatch.stats,
     }
     const responses = [
       [legacyQuestion], legacyQuestion, legacyQuestion, legacyQuestion, legacyQuestion,
@@ -237,14 +237,14 @@ describe('connection health question answers', () => {
     const batch = await connectionHealthApi.getQuestionAnswerBatch('target-old', 'batch-old')
     const cancelled = await connectionHealthApi.cancelQuestionAnswerBatch('target-old', 'batch-old')
     const history = await connectionHealthApi.getQuestionAnswerHistory('target-old', 1)
-    const judgment = await connectionHealthApi.setQuestionAnswerJudgment('target-old', 'old', 'correct')
+    const judgment = await connectionHealthApi.setQuestionAnswerJudgment('target-old', 'old', 'correct', currentRecord.updatedAt)
     for (const normalized of [start, latest, batch, cancelled]) {
       expect(normalized.records[0].questionKeywordSnapshot).toBeNull()
       expect(normalized.repeatCount).toBe(1)
       expect(normalized.stats.byModel).toEqual([])
     }
-    expect(history.records[0].questionKeywordSnapshot).toBeNull()
-    expect(history.stats.byModel).toEqual([])
+    expect(history.batches).toEqual([])
+    expect(history.allTimeStats.byModel).toEqual([])
     expect(history.todayStats.byModel).toEqual([])
     expect(judgment.questionKeywordSnapshot).toBeNull()
   })
@@ -267,8 +267,8 @@ describe('connection health question answers', () => {
       currentModel: '', currentQuestion: '', stats,
     }
     const payloadHistory = {
-      records: [], page: 1, pageSize: 20, totalItems: 2, totalPages: 1,
-      stats, todayStats: stats,
+      batches: [], page: 1, pageSize: 20, totalBatches: 0, totalPages: 0,
+      allTimeStats: stats, todayStats: stats,
     }
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(payloadBatch), { status: 200 }))
@@ -279,7 +279,7 @@ describe('connection health question answers', () => {
     const history = await getQuestionAnswerHistory('target-failed', 1)
 
     expect(batch.stats.byModel).toEqual([failedModel])
-    expect(history.stats.byModel).toEqual([failedModel])
+    expect(history.allTimeStats.byModel).toEqual([failedModel])
     expect(history.todayStats.byModel).toEqual([failedModel])
     expect(batch.stats.byModel).not.toBe(payloadBatch.stats.byModel)
     expect(batch.stats.byModel[0]).not.toBe(payloadBatch.stats.byModel[0])
@@ -433,9 +433,9 @@ describe('connection health question answers', () => {
     expect(dialogSource).not.toContain('currentBatchGridClass')
     expect(dialogSource).toContain('data-testid="question-answer-pending"')
     expect(dialogSource).toContain('v-for="record in qaPendingReviewRecords"')
-    expect(dialogSource).toContain('class="grid gap-6 rounded-lg border')
+    expect(dialogSource).toContain('<QuestionAnswerRecordCard')
     expect(dialogSource).toContain('{{ record.questionBody }}')
-    expect(dialogSource).toContain('{{ questionAnswerCurrentAnswer(record) }}')
+    expect(dialogSource).toContain(':expanded="qaExpanded.has(record.id)"')
   })
 
   it('submits model and question selections and exposes explicit cancellation', async () => {
@@ -463,7 +463,7 @@ describe('connection health question answers', () => {
       'high',
       4,
       controller.signal,
-    )).resolves.toEqual(batch)
+    )).resolves.toEqual({ ...batch, stats: { ...batch.stats, byQuestion: [] } })
     await cancelQuestionAnswerBatch('sub2api:ws1:account-1', 'batch-1')
 
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -477,7 +477,7 @@ describe('connection health question answers', () => {
           reasoningEffort: 'high',
           repeatCount: 4,
         }),
-        headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '2' }),
+        headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '3' }),
         signal: controller.signal,
       }),
     )
@@ -486,7 +486,7 @@ describe('connection health question answers', () => {
       '/api/connection-health/targets/sub2api%3Aws1%3Aaccount-1/question-answers/batches/batch-1/cancel',
       expect.objectContaining({
         method: 'POST',
-        headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '2' }),
+        headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '3' }),
       }),
     )
   })
@@ -503,7 +503,7 @@ describe('connection health question answers', () => {
     expect(dialogSource).toContain('reasoningEffort.unspecified')
   })
 
-  it('sends contract 2 on every question-answer read', async () => {
+  it('sends contract 3 on every question-answer read', async () => {
     stubStorage()
     const batch = {
       batchId: 'batch-1', records: [], reasoningEffort: 'medium', submittedCount: 0,
@@ -514,8 +514,8 @@ describe('connection health question answers', () => {
       },
     }
     const history = {
-      records: [], page: 2, pageSize: 20, totalItems: 21, totalPages: 2,
-      stats: {
+      batches: [], page: 2, pageSize: 20, totalBatches: 21, totalPages: 2,
+      allTimeStats: {
         requests: { submitted: 20, inProgress: 0, succeeded: 18, failed: 1, cancelled: 1 },
         reviews: { unreviewed: 2, correct: 15, incorrect: 1 },
       },
@@ -533,12 +533,12 @@ describe('connection health question answers', () => {
     const normalizedBatch = {
       ...batch,
       repeatCount: 1,
-      stats: { ...batch.stats, byModel: [] },
+      stats: { ...batch.stats, byModel: [], byQuestion: [] },
     }
     const normalizedHistory = {
       ...history,
-      stats: { ...history.stats, byModel: [] },
-      todayStats: { ...history.todayStats, byModel: [] },
+      allTimeStats: { ...history.allTimeStats, byModel: [], byQuestion: [] },
+      todayStats: { ...history.todayStats, byModel: [], byQuestion: [] },
     }
     await expect(getLatestQuestionAnswerBatch('sub2api:ws1:account-1')).resolves.toEqual(normalizedBatch)
     await expect(getQuestionAnswerBatch('sub2api:ws1:account-1', 'batch-1')).resolves.toEqual(normalizedBatch)
@@ -546,18 +546,19 @@ describe('connection health question answers', () => {
 
     for (const call of fetchMock.mock.calls) {
       expect(call[1]).toEqual(expect.objectContaining({
-        headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '2' }),
+        headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '3' }),
       }))
     }
   })
 
-  it('uses the record-scoped three-state judgment endpoint without the old writer', async () => {
+  it('uses the record-scoped versioned judgment endpoint without the old writer', async () => {
     stubStorage()
     const api = connectionHealthApi as unknown as {
       setQuestionAnswerJudgment?: (
         targetId: string,
         recordId: string,
-        judgment: 'unreviewed' | 'correct' | 'incorrect',
+        judgment: 'correct' | 'incorrect',
+        expectedUpdatedAt: string,
         signal?: AbortSignal,
       ) => Promise<unknown>
     }
@@ -565,7 +566,7 @@ describe('connection health question answers', () => {
     if (!api.setQuestionAnswerJudgment) return
 
     const record = { id: 'record-9', answerJudgment: 'incorrect', manualError: true }
-    const normalizedRecord = { ...record, questionKeywordSnapshot: null }
+    const normalizedRecord = { ...record, questionKeywordSnapshot: null, judgmentSource: null, repeatIndex: null }
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(record), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
     const controller = new AbortController()
@@ -574,14 +575,15 @@ describe('connection health question answers', () => {
       'sub2api:ws1:account-1',
       'record-9',
       'incorrect',
+      '2026-08-15T00:00:00Z',
       controller.signal,
     )).resolves.toEqual(normalizedRecord)
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/connection-health/targets/sub2api%3Aws1%3Aaccount-1/question-answers/records/record-9/judgment',
       expect.objectContaining({
         method: 'PUT',
-        body: JSON.stringify({ judgment: 'incorrect' }),
-        headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '2' }),
+        body: JSON.stringify({ judgment: 'incorrect', expectedUpdatedAt: '2026-08-15T00:00:00Z' }),
+        headers: expect.objectContaining({ 'X-TransitHub-Question-Answer-Contract': '3' }),
         signal: controller.signal,
       }),
     )
@@ -624,9 +626,9 @@ describe('connection health question answers', () => {
     expect(dialogSource).toContain('const controller = beginModelDiscovery()')
     expect(dialogSource).toContain("mode !== 'questionAnswer'")
     expect(dialogSource).toContain("record.status === 'pending' || record.status === 'running'")
-    expect(dialogSource).toContain('questionAnswerElapsedLabel(record)')
+    expect(readFileSync(new URL('../src/modules/admin/components/dashboard/QuestionAnswerRecordCard.vue', import.meta.url), 'utf8')).toContain('questionAnswerElapsedMilliseconds(record)')
     expect(dialogSource).toContain(':today-stats="qaHistory.todayStats"')
-    expect(startBody.indexOf('scheduleQuestionAnswerPoll()')).toBeLessThan(startBody.indexOf('getQuestionAnswerHistory(targetId, 1, controller.signal)'))
+    expect(startBody.indexOf('scheduleQuestionAnswerPoll()')).toBeLessThan(startBody.indexOf('getQuestionAnswerHistory(targetId, 1, qaHistoryScope.value, controller.signal)'))
     expect(stopBody).toContain('cancelQuestionAnswerBatch(targetId, batchId, controller.signal)')
     expect(stopBody).toContain('questionAnswerScopeIsCurrent(scope)')
     expect(statsIndex).toBeGreaterThan(-1)

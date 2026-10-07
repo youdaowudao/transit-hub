@@ -120,7 +120,15 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 		status = QuestionAnswerFailed
 		answer = ""
 	}
-	completed, err := s.questionAnswers.CompleteQuestionAnswer(run.ctx, run.userID, run.batchID, record.ID, status, answer, errorType)
+	completion := QuestionAnswerCompletion{Status: status, AnswerBody: answer, ErrorType: errorType}
+	if status == QuestionAnswerSucceeded {
+		judgment, judgeable := judgeQuestionAnswer(answer, record.QuestionKeywordSnapshot)
+		completion.AnswerJudgment = &judgment
+		if judgeable {
+			completion.JudgmentSource = questionAnswerJudgmentSourcePointer(QuestionAnswerJudgmentAutomatic)
+		}
+	}
+	completed, err := s.questionAnswers.CompleteQuestionAnswer(run.ctx, run.userID, run.batchID, record.ID, completion)
 	if err == nil && completed {
 		terminalDurable = true
 		return
@@ -159,7 +167,7 @@ func (s *Service) completeStoppedQuestionAnswerRecord(run *activeQuestionAnswerB
 	status, errorType := questionAnswerRunFinalState(run, QuestionAnswerErrorStorage)
 	s.questionAnswerMu.Unlock()
 	completeCtx, cancel := s.questionAnswerStorageContext(context.Background())
-	completed, err := s.questionAnswers.CompleteQuestionAnswer(completeCtx, run.userID, run.batchID, record.ID, status, "", errorType)
+	completed, err := s.questionAnswers.CompleteQuestionAnswer(completeCtx, run.userID, run.batchID, record.ID, QuestionAnswerCompletion{Status: status, ErrorType: errorType})
 	cancel()
 	return err == nil && completed
 }

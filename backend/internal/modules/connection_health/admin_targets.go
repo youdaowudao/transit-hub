@@ -371,9 +371,12 @@ func (s *Service) ProbeTargetWithProgress(ctx context.Context, userID string, ta
 }
 
 func (s *Service) probeTarget(ctx context.Context, userID string, targetID string, models []string, onPhase func(ProbeTargetPhase)) ([]ModelHealth, error) {
-	session, target, _, adminAccountID, err := s.resolveManualTarget(ctx, userID, targetID)
+	session, target, initialAccount, adminAccountID, err := s.resolveManualTarget(ctx, userID, targetID)
 	if err != nil {
 		return nil, err
+	}
+	if accountHardExcludedFromAdminMonitoring(string(session.Platform), initialAccount) {
+		return nil, requestError(ErrorPriorityManualProbeExcluded)
 	}
 	if err := s.loadWorkspaceProbeCap(ctx, userID, adminAccountID); err != nil {
 		return nil, err
@@ -414,6 +417,9 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 			return nil, requestError(ErrorAccountsFetch)
 		}
 		return nil, requestError(ErrorProbeTargetNotFound)
+	}
+	if accountHardExcludedFromAdminMonitoring(string(session.Platform), account) {
+		return nil, requestError(ErrorPriorityManualProbeExcluded)
 	}
 	if err := s.configureTestTarget(ctx, userID, adminAccountID, &target, memberships, !accountsReadError); err != nil {
 		return nil, err

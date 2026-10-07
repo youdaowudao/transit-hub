@@ -25,7 +25,6 @@ import { canOpenManualProbeHistory, connectionHealthMessageKey, testProtocolName
 import { createRefreshCoordinator } from '../utils/connectionHealthRefresh'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import AdminGroupHealthDetail from '../components/dashboard/AdminGroupHealthDetail.vue'
-import PriorityCandidatePreview from '../components/dashboard/PriorityCandidatePreview.vue'
 import ConnectionHealthEventsDialog from '../components/dashboard/ConnectionHealthEventsDialog.vue'
 import GroupHealthSetupDrawer from '../components/dashboard/GroupHealthSetupDrawer.vue'
 import ManualOneTimeProbeDialog from '../components/dashboard/ManualOneTimeProbeDialog.vue'
@@ -73,7 +72,6 @@ const {
   overview,
   groups,
   adminGroups,
-  adminGroupsLoaded,
   events,
   policies,
   isLoading,
@@ -85,8 +83,10 @@ const {
   refreshConnectionState,
   cancelAdminGroupsRefresh,
   setAdminGroupsWorkspace,
-  invalidatePriorityCandidatePlanNow,
+  invalidateAdminGroupsReads,
   applyAccountTier,
+  applyAccountPriority,
+  applyAccountConcurrency,
   loadAll,
   loadGroups,
   loadAdminGroups,
@@ -996,7 +996,7 @@ const onQuickProbeAccount = async (account: AdminGroupAccount) => {
       await reloadQuickProbeAuthoritatively(identity)
       return
     }
-    invalidatePriorityCandidatePlanNow()
+    invalidateAdminGroupsReads()
     mergeQuickProbeResults(account.targetId, results)
     const failed = applyQuickProbeResultError(account.targetId, results)
     if (!failed) {
@@ -1343,12 +1343,6 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
 
     <p v-if="errorKey" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">{{ readableMessage(errorKey) }}</p>
 
-    <PriorityCandidatePreview
-      :groups="adminGroups"
-      :loaded="adminGroupsLoaded"
-      :platform="currentAccount?.platform ?? ''"
-    />
-
     <section class="overflow-hidden rounded-lg border border-border/60 bg-card text-card-foreground shadow-sm">
       <div v-if="isLoading && adminGroups.length === 0" class="grid min-h-[34rem] lg:grid-cols-[19rem_minmax(0,1fr)]">
         <div class="space-y-3 border-r border-border/50 p-4">
@@ -1500,6 +1494,8 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           @set-schedulable="onSetTargetSchedulable"
           @assign-policy="onAssignPolicy"
           @tier-saved="onAccountTierSaved"
+          @priority-saved="applyAccountPriority"
+          @concurrency-saved="applyAccountConcurrency"
           @update:hide-unmonitored-accounts="setHideUnmonitoredAccounts"
         />
       </div>

@@ -11,6 +11,7 @@ import {
   formatConnectionHealthTime,
   hasValidConnectionHealthTime,
   isConnectionHealthCurrentFailure,
+  isConnectionHealthAuditAction,
   remoteActionLabelKey,
   testProtocolName,
 } from '../../composables/useConnectionHealth'
@@ -103,7 +104,15 @@ const elapsedText = computed(() => formatConnectionHealthElapsed(props.elapsedSe
 const failureLabel = computed(() => t(`${cardPrefix}.${props.failureFromLoadedRecords ? 'loadedFailure' : currentFailure.value ? 'currentFailure' : 'historicalFailure'}`))
 const showErrorDetail = computed(() => props.isActionCard || hasFailureTime.value)
 const displayedErrorKey = computed(() => currentFailure.value ? (props.currentHealthResult?.errorKey ?? props.lastErrorKey) : props.lastErrorKey)
-const displayedErrorDetail = computed(() => currentFailure.value ? (props.currentHealthResult?.errorDetail ?? props.lastErrorDetail) : props.lastErrorDetail)
+const displayedErrorDetail = computed(() => {
+  const detail = currentFailure.value ? (props.currentHealthResult?.errorDetail ?? props.lastErrorDetail) : props.lastErrorDetail
+  if (!isConnectionHealthAuditAction(props.remoteAction)) return detail
+  const match = /^(?:(manual|auto):)?(success|not_sent|pending)$/.exec(detail)
+  if (!match) return detail
+  const mode = match[1] === 'manual' ? t(`${prefix}.accountPriority.manualOption`)
+    : match[1] === 'auto' ? t(`${prefix}.accountPriority.auto`) : t(`${prefix}.accountConcurrency.value`)
+  return `${mode} · ${readableMessage(`account_edit_${match[2]}`)}`
+})
 </script>
 
 <template>

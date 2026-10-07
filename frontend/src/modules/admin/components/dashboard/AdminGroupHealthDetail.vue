@@ -22,6 +22,8 @@ import {
 } from 'lucide-vue-next'
 import { Tooltip } from '@/components/ui/tooltip'
 import AccountTierEditor from './AccountTierEditor.vue'
+import AccountPriorityEditor from './AccountPriorityEditor.vue'
+import AccountConcurrencyEditor from './AccountConcurrencyEditor.vue'
 import {
   connectionHealthMessageKey,
   connectionHealthStateBadgeClass,
@@ -36,6 +38,7 @@ import {
 } from '../../composables/useConnectionHealth'
 import type {
   AccountTierResult,
+  AccountManagementResult,
   AdminGroupAccount,
   AdminGroupHealth,
   ConnectionHealthState,
@@ -62,6 +65,8 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   (event: 'tier-saved', result: AccountTierResult): void
+  (event: 'priority-saved', result: AccountManagementResult): void
+  (event: 'concurrency-saved', result: AccountManagementResult): void
   (event: 'setup', group: AdminGroupHealth): void
   (event: 'probe', account: AdminGroupAccount): void
   (event: 'quick-probe', account: AdminGroupAccount): void
@@ -693,7 +698,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
     <div v-if="(group.priorityConflictCount ?? 0) > 0" class="flex items-start gap-2 border-b border-amber-500/25 bg-amber-500/[0.07] px-5 py-3 text-sm text-amber-700 dark:text-amber-400">
       <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
       <div class="min-w-0">
-        <p>{{ t(`${detailPrefix}.priorityConflict`, { count: group.priorityConflictCount ?? 0 }) }}</p>
+        <p>{{ t(`${detailPrefix}.${group.accounts.some(isSub2API) ? 'sub2apiPriorityConflict' : 'priorityConflict'}`, { count: group.priorityConflictCount ?? 0 }) }}</p>
         <ul v-if="group.priorityConflicts?.length" class="mt-1 space-y-0.5 text-xs">
           <li v-for="conflict in group.priorityConflicts" :key="conflict.targetId">
             {{ t(`${detailPrefix}.priorityConflictTarget`, {
@@ -730,7 +735,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
 
     <div class="px-5 py-5">
       <p class="mb-3 text-xs text-muted-foreground">
-        {{ customSortActive ? t(`${detailPrefix}.temporarySortHint`) : t(`${detailPrefix}.productionSortHint`) }}
+        {{ customSortActive ? t(`${detailPrefix}.temporarySortHint`) : t(`${detailPrefix}.${group.accounts.some(isSub2API) ? 'sub2apiProductionSortHint' : 'productionSortHint'}`) }}
       </p>
       <div v-if="activeFilter.kind !== 'all'" class="mb-3 flex items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/[0.06] px-3 py-2 text-xs text-primary">
         <span>{{ t(`${detailPrefix}.filters.active`, { label: filterLabel }) }}</span>
@@ -850,6 +855,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                       :account-tier="account.accountTier"
                       @saved="emit('tier-saved', $event)"
                     />
+                    <AccountConcurrencyEditor v-if="isSub2API(account)" :account="account" @saved="emit('concurrency-saved', $event)" />
                     <p class="mt-0.5 truncate text-xs text-muted-foreground">
                       {{ account.platform || account.type || '-' }} · {{ upstreamStatusLabel(account) }} · {{ schedulableLabel(account) }}
                     </p>
@@ -908,12 +914,14 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                   </Tooltip>
                 </td>
                 <td class="px-3 py-3 tabular-nums text-foreground">
-                  <div class="flex items-center gap-1.5">
+                  <AccountPriorityEditor v-if="isSub2API(account)" :account="account" :tied="account.priority != null && group.accounts.some(other => other.targetId !== account.targetId && other.priority === account.priority)" @saved="emit('priority-saved', $event)" />
+                  <div v-else class="flex items-center gap-1.5">
                     <span>{{ formatNumber(account.priority) }}</span>
                     <span v-if="account.priorityConflict" class="text-[11px] text-amber-600 dark:text-amber-400" :title="t(`${detailPrefix}.priorityConflictShort`)">{{ account.priorityConflictValue ?? account.priority }} → {{ account.priorityExpected ?? '-' }}</span>
                     <ArrowDownUp v-else-if="account.priorityManaged" class="h-3.5 w-3.5 text-primary" />
                   </div>
-                  <p class="mt-0.5 text-[11px] text-muted-foreground">{{ priorityStateLabel(account) }}</p>
+                  <span v-if="isSub2API(account) && account.priorityConflict" class="text-[11px] text-amber-600 dark:text-amber-400" :title="t(`${detailPrefix}.sub2apiPriorityConflictShort`)">{{ account.priorityConflictValue ?? account.priority }} → {{ account.priorityExpected && account.priorityExpected > 0 ? account.priorityExpected : '-' }}</span>
+                  <p v-if="!isSub2API(account)" class="mt-0.5 text-[11px] text-muted-foreground">{{ priorityStateLabel(account) }}</p>
                   <p v-if="account.prioritySyncBlocked" class="mt-1 flex max-w-72 items-start gap-1 text-[11px] leading-4 text-amber-600 dark:text-amber-400">
                     <AlertTriangle class="mt-0.5 h-3 w-3 shrink-0" />
                     <span class="break-words">{{ prioritySyncBlockReasonLabel(account) }}</span>

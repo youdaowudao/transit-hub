@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -44,15 +45,21 @@ type RemoteActionScope struct {
 
 type RemoteActionClaim struct {
 	RemoteActionScope
-	Kind             string
-	DispatchID       string
-	OwnerID          string
-	LeaseKey         string
-	MutationLeaseKey string
-	MutationOwnerID  string
-	Priority         *PrioritySyncState
-	Target           *TargetActionState
-	Guard            RemoteActionHealthGuard
+	Kind                       string
+	DispatchID                 string
+	OwnerID                    string
+	LeaseKey                   string
+	MutationLeaseKey           string
+	MutationOwnerID            string
+	WorkspaceLeaseKey          string
+	WorkspaceOwnerID           string
+	ReleasePriorityOnConfirm   bool
+	ClearPriorityConflict      bool
+	ResetUnwrittenPriority     bool
+	ExpectedPriorityCheckpoint *PrioritySyncState
+	Priority                   *PrioritySyncState
+	Target                     *TargetActionState
+	Guard                      RemoteActionHealthGuard
 }
 
 // Only health-driven decisions need protocol evidence. Exiting management and
@@ -151,8 +158,21 @@ func claimRemoteAction(pair *RemoteActionCheckpoints, claim RemoteActionClaim) (
 		if state.UserID != claim.UserID || state.AdminAccountID != claim.AdminAccountID || state.TargetID != claim.TargetID {
 			return false, ErrRemoteActionEvidenceChanged
 		}
-		if pair.Priority != nil && (pair.Priority.Conflict || pair.Priority.LastAppliedPriority != state.LastAppliedPriority || pair.Priority.OriginalPriority != state.OriginalPriority) {
+		if claim.ExpectedPriorityCheckpoint != nil && !reflect.DeepEqual(pair.Priority, claim.ExpectedPriorityCheckpoint) {
 			return false, ErrRemoteActionEvidenceChanged
+		}
+		if pair.Priority != nil {
+			old := pair.Priority
+			reset := claim.ResetUnwrittenPriority && isUnwrittenHealthPriority(old)
+			if (old.Conflict && !claim.ClearPriorityConflict) || (!reset && (old.LastAppliedPriority != state.LastAppliedPriority || old.OriginalPriority != state.OriginalPriority)) {
+				return false, ErrRemoteActionEvidenceChanged
+			}
+			if reset && (claim.ExpectedPriorityCheckpoint == nil || claim.Guard.ConfigGeneration == nil || !isSub2APIActionTarget(claim.TargetID)) {
+				return false, ErrRemoteActionEvidenceChanged
+			}
+		}
+		if claim.ClearPriorityConflict {
+			state.Conflict, state.LastConflictPriority = false, nil
 		}
 		state.PendingDispatchID, state.PendingOwnerID, state.PendingDispatchPhase = claim.DispatchID, claim.OwnerID, DispatchPrepared
 		pair.Priority = &state
@@ -337,6 +357,10 @@ func reconcileRemoteAction(pair *RemoteActionCheckpoints, observation RemoteActi
 	}
 	if state := pair.Priority; priorityActionPending(state) && (state.PendingDispatchPhase == DispatchNotSent || state.PendingDispatchPhase == DispatchConfirmedRejected || (state.PendingDispatchPhase == DispatchPrepared && !ownerValid(state.PendingOwnerID))) {
 		pair.reconciledWithoutRemoteEffect = true
+		if isUnwrittenHealthPriority(state) {
+			pair.Priority = nil
+			return true
+		}
 		clearPriorityDispatch(state)
 		return true
 	}
@@ -364,6 +388,10 @@ func reconcileRemoteAction(pair *RemoteActionCheckpoints, observation RemoteActi
 			return false
 		}
 		state.LastAppliedPriority = expected
+		if state.PendingDispatchPhase == DispatchConfirmedApplied && strings.HasPrefix(state.PendingDispatchID, "priority-release:") {
+			pair.Priority = nil
+			return true
+		}
 		clearPriorityDispatch(state)
 		return true
 	}
@@ -394,4 +422,8 @@ func reconcileRemoteAction(pair *RemoteActionCheckpoints, observation RemoteActi
 		return true
 	}
 	return false
+}
+
+func isUnwrittenHealthPriority(state *PrioritySyncState) bool {
+	return state != nil && isSub2APIActionTarget(state.TargetID) && state.OriginalPriority > 0 && state.LastAppliedPriority == 0
 }

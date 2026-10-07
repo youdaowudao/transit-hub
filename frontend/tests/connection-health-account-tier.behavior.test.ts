@@ -16,9 +16,6 @@ const account = (): AdminGroupAccount => ({
   hasEnabledPolicy: false, hasEnabledProbePolicy: false, priorityManaged: false,
   priorityConflict: true, prioritySyncBlocked: true, prioritySyncBlockReason: 'manual_priority',
   probeModelsConfigured: false, productionSortOrder: 0,
-  priorityCandidate: {
-    state: 'out_of_scope', reason: 'priority_conflict', priorityEvidence: 'conflict', blocksTakeover: true,
-  },
   todayQuestionAnswerSubmitted: 10, todayQuestionAnswerCorrect: 7,
 })
 const groups = (): AdminGroupHealth[] => ['one', 'two'].map(id => ({
@@ -26,10 +23,6 @@ const groups = (): AdminGroupHealth[] => ['one', 'two'].map(id => ({
   subscriptionType: '', multiplier: null, multiplierDisplay: '-', accountCount: 1, monitoredAccountCount: 0,
   healthSummary: { totalAccounts: 1, probeableAccounts: 1, unprobeableAccounts: 0, healthyModels: 0,
     degradedModels: 0, suspendedModels: 0, disabledModels: 0, unconfiguredModels: 0, lastProbeAt: null },
-  priorityCandidateSummary: {
-    mode: 'safety_lock', candidatePriorityReady: false, safetyReason: 'priority_conflict',
-    candidateCount: 0, outOfScopeCount: 1, blockerCount: 1, capacities: [],
-  },
   accounts: [account()],
 }))
 const wrappers: VueWrapper[] = []
@@ -98,15 +91,12 @@ const save = async (wrapper: VueWrapper, value: 1 | 2, index = 0) => {
 }
 const tiers = () => service.adminGroups.value.map(group => (group.accounts[0] as AdminGroupAccount & { accountTier?: number }).accountTier ?? 2)
 const withoutTiers = () => JSON.parse(JSON.stringify(service.adminGroups.value, (key, value) =>
-  key === 'accountTier' || key === 'priorityCandidate' || key === 'priorityCandidateSummary' ? undefined : value))
-const candidatePlanVisible = () => service.adminGroups.value.length > 0
-  && service.adminGroups.value.every(group => group.priorityCandidateSummary && group.accounts.every(row => row.priorityCandidate))
-
+  key === 'accountTier' ? undefined : value))
 describe('account-global tier editing', () => {
   it('mounts the real list with default second tier and retains existing account controls and statuses', async () => {
     const wrapper = await mountRows()
     expect(editors(wrapper)).toHaveLength(2)
-    for (const editor of editors(wrapper)) { expect(editor.text()).toContain('第二层'); expect(editor.text()).not.toContain('第一层') }
+    for (const editor of editors(wrapper)) { expect(editor.text()).toContain('后备'); expect(editor.text()).not.toContain('主力') }
     expect(wrapper.text()).toContain('今日正确率')
     expect(wrapper.text()).toContain('7/10')
     expect(wrapper.findAll('button[aria-label="编辑账号层级"]')).toHaveLength(2)
@@ -119,14 +109,14 @@ describe('account-global tier editing', () => {
       await save(wrapper, tier)
       expect(tiers()).toEqual([tier, tier]); expect(withoutTiers()).toEqual(before)
       for (const editor of editors(wrapper)) {
-        expect(editor.text()).toContain(tier === 1 ? '第一层' : '第二层')
+        expect(editor.text()).toContain(tier === 1 ? '主力' : '后备')
         expect(editor.find('select').exists()).toBe(false)
       }
       await service.loadAdminGroups(); await flushPromises(); expect(tiers()).toEqual([tier, tier])
     }
     wrapper.unmount(); wrappers.splice(wrappers.indexOf(wrapper), 1)
     wrapper = await mountRows()
-    expect(editors(wrapper).every(editor => editor.text().includes('第一层'))).toBe(true)
+    expect(editors(wrapper).every(editor => editor.text().includes('主力'))).toBe(true)
     expect(saveRequests.map(request => request.body)).toEqual([{ accountTier: 1 }, { accountTier: 2 }, { accountTier: 1 }])
     expect(saveRequests.every(request => request.url.endsWith(`/targets/${targetId}/tier`))).toBe(true)
   })
@@ -149,25 +139,21 @@ describe('account-global tier editing', () => {
     expect(tiers()).toEqual([1, 1]); expect(editor.find('[role="alert"]').exists()).toBe(false)
   })
 
-  it('invalidates the whole candidate plan on save and rejects a pre-save response until a newer read succeeds', async () => {
+  it('rejects a pre-save response and preserves the saved tier until a newer read succeeds', async () => {
     const wrapper = await mountRows()
-    expect(candidatePlanVisible()).toBe(true)
     let release!: (response: Response) => void
     const stale = payload(); deferGroups = () => new Promise(resolve => { release = resolve })
     const read = service.loadAdminGroups({ silent: true })
     await save(wrapper, 1)
     expect(tiers()).toEqual([1, 1])
-    expect.soft(candidatePlanVisible(), 'save must invalidate the previously loaded candidate plan').toBe(false)
     let releaseReload!: (response: Response) => void
     deferGroups = () => new Promise(resolve => { releaseReload = resolve })
-    release(json(stale)); await read; await flushPromises()
+    release(json(stale)); expect(await read).toBe(false); await flushPromises()
     expect(tiers()).toEqual([1, 1])
-    expect(candidatePlanVisible(), 'a response issued before the save must not restore the stale candidate plan').toBe(false)
-    expect(editors(wrapper).every(editor => editor.text().includes('第一层'))).toBe(true)
+    expect(editors(wrapper).every(editor => editor.text().includes('主力'))).toBe(true)
     const reload = service.loadAdminGroups({ silent: true })
     deferGroups = undefined
     releaseReload(json(payload())); await reload; await flushPromises()
-    expect(candidatePlanVisible()).toBe(true)
   })
 
   it('marks admin groups loaded only after an accepted successful read', async () => {
@@ -204,7 +190,7 @@ describe('account-global tier editing', () => {
     await service.loadAdminGroups(); await flushPromises()
     expect(saveRequests.map(request => request.body)).toEqual([{ accountTier: 1 }, { accountTier: 2 }])
     expect(tiers()).toEqual([2, 2]); expect(stored).toBe(2)
-    expect(editors(wrapper).every(editor => editor.text().includes('第二层') && !editor.text().includes('第一层'))).toBe(true)
+    expect(editors(wrapper).every(editor => editor.text().includes('后备') && !editor.text().includes('主力'))).toBe(true)
   })
 
   it('changing workspace and unmounting an in-flight editor never applies the old save to the new workspace', async () => {
@@ -231,7 +217,7 @@ describe('account-global tier editing', () => {
     }) }), { global: { stubs: { Teleport: true, Transition: false } } })
     wrappers.push(wrapper); open.value = true; await flushPromises()
     expect(editors(wrapper)).toHaveLength(1)
-    expect(editors(wrapper)[0]!.text()).toContain('第一层')
+    expect(editors(wrapper)[0]!.text()).toContain('主力')
     for (const tier of [2, 1] as const) { await save(wrapper, tier); expect(tiers()).toEqual([tier, tier]) }
     expect(wrapper.text()).toContain('问答测试')
     expect(wrapper.text()).not.toContain('智商权重')

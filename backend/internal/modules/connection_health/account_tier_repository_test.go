@@ -3,12 +3,11 @@ package connection_health
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 )
 
 func TestAccountTierRepositoryMigrationIsIdempotentAndPreservesLegacyData(t *testing.T) {
-	pool := openQuestionAnswerPostgresPool(t)
+	pool := stageAPostgresPool(t)
 	ctx := context.Background()
 	// Reproduce the deployed pre-tier table, including historical values and timestamps.
 	_, err := pool.Exec(ctx, `CREATE TABLE connection_health_account_configs (
@@ -45,13 +44,7 @@ func TestAccountTierRepositoryMigrationIsIdempotentAndPreservesLegacyData(t *tes
 	}
 	service, _, _ := accountTierFixture()
 	service.repo = repository
-	workspaceMigration, err := os.ReadFile("../../database/migrations/000019_connection_health_priority_sync_b.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(ctx, string(workspaceMigration)); err != nil {
-		t.Fatal(err)
-	}
+	taskBEnsurePriorityWorkspaceTable(t, pool)
 	if _, err := pool.Exec(ctx, `INSERT INTO connection_health_priority_workspace_sync_states (user_id, admin_account_id, pending_signature, last_decision, last_error) VALUES ('user1','ws1','protected-pending','blocked','protected-safety-state')`); err != nil {
 		t.Fatal(err)
 	}
@@ -82,8 +75,7 @@ func TestAccountTierRepositoryMigrationIsIdempotentAndPreservesLegacyData(t *tes
 		var value string
 		if err := pool.QueryRow(ctx, `SELECT jsonb_build_array(
 			(SELECT jsonb_agg(to_jsonb(p) ORDER BY target_id) FROM connection_health_priority_sync_states p),
-			(SELECT jsonb_agg(to_jsonb(a) ORDER BY target_id) FROM connection_health_target_action_states a),
-			(SELECT jsonb_agg(to_jsonb(w)) FROM connection_health_priority_workspace_sync_states w))::text`).Scan(&value); err != nil {
+			(SELECT jsonb_agg(to_jsonb(a) ORDER BY target_id) FROM connection_health_target_action_states a))::text`).Scan(&value); err != nil {
 			t.Fatal(err)
 		}
 		return value
@@ -91,6 +83,12 @@ func TestAccountTierRepositoryMigrationIsIdempotentAndPreservesLegacyData(t *tes
 	protectedBefore := protected()
 	for _, tier := range []int{1, 2, 1} {
 		requireTierResponse(t, tierRequest(service, "PUT", "user1", "sub2api:ws1:shared", fmt.Sprintf(`{"accountTier":%d}`, tier)), "sub2api:ws1:shared", tier)
+		waitForPriorityAsyncIdle(t)
+		settings, err := repository.GetWorkspaceHealthSettings(ctx, "user1", "ws1")
+		sync, syncErr := repository.GetPriorityWorkspaceSyncState(ctx, "user1", "ws1")
+		if err != nil || syncErr != nil || settings.ConfigGeneration < 1 || sync == nil || sync.LastActionSource != "account_tier_save" {
+			t.Fatal("tier request lost durable generation/sort request")
+		}
 		if err := NewRepository(pool).EnsureSchema(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -114,12 +112,13 @@ func TestAccountTierRepositoryMigrationIsIdempotentAndPreservesLegacyData(t *tes
 }
 
 func TestAccountTierRepositoryHTTPPersistenceAndIsolation(t *testing.T) {
-	pool := openQuestionAnswerPostgresPool(t)
+	pool := stageAPostgresPool(t)
 	ctx := context.Background()
 	repo := NewRepository(pool)
 	if err := repo.EnsureSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
+	taskBEnsurePriorityWorkspaceTable(t, pool)
 	svc, _, actions := accountTierFixture()
 	svc.repo = repo
 	for _, tc := range []struct {
@@ -131,6 +130,7 @@ func TestAccountTierRepositoryHTTPPersistenceAndIsolation(t *testing.T) {
 		svc.accounts = fakeAdminAccountResolver{id: tc.ws}
 		requireTierResponse(t, tierRequest(svc, "GET", tc.user, tc.target, ""), tc.target, 2)
 		requireTierResponse(t, tierRequest(svc, "PUT", tc.user, tc.target, fmt.Sprintf(`{"accountTier":%d}`, tc.tier)), tc.target, tc.tier)
+		waitForPriorityAsyncIdle(t)
 	}
 	svc.accounts = fakeAdminAccountResolver{id: "ws1"}
 	for _, body := range []string{`{"accountTier":3}`, `{"accountTier":null}`, `{}`} {

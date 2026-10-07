@@ -166,6 +166,7 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 		log.Printf("[connection-health] scheduler capture workspace rules failed: %v", err)
 		return
 	}
+	ctx = withAccountTierDecisionCache(ctx)
 	policies, err := s.repo.ListEnabledPolicies(ctx)
 	if err != nil {
 		log.Printf("[connection-health] scheduler list policies failed: %v", err)

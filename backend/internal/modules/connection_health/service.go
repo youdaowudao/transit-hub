@@ -113,6 +113,7 @@ type Service struct {
 	modelDiscovery               *ModelDiscoveryRunner
 	platformGroups               PlatformGroupReader
 	priorityActions              TargetPriorityActioner
+	concurrencyActions           TargetConcurrencyContextActioner
 	schedulableActions           TargetSchedulableActioner
 	probeLimiterMu               sync.Mutex
 	probeLimiter                 *probeConcurrencyLimiter
@@ -189,6 +190,9 @@ func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platf
 	}
 	if actions, ok := platform.(TargetSchedulableActioner); ok {
 		service.schedulableActions = actions
+	}
+	if actions, ok := platform.(TargetConcurrencyContextActioner); ok {
+		service.concurrencyActions = actions
 	}
 	return service
 }

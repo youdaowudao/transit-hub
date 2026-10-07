@@ -203,48 +203,19 @@ export interface AdminGroupUnprobedModel {
 
 export type AccountTier = 1 | 2
 
-export type PriorityCandidateMode = 'first_active' | 'second_active' | 'safety_lock'
-export type PriorityCandidateState = 'candidate' | 'unavailable' | 'safety_lock' | 'out_of_scope'
-export type PriorityCandidateRegion = 'normal' | 'hot_standby'
-export type PriorityCandidateHealthBand = 'healthy' | 'recovering' | 'degraded'
-
-export interface PriorityCandidateCapacity {
-  region: PriorityCandidateRegion
-  healthBand: PriorityCandidateHealthBand
-  start: number
-  end: number
-  capacity: number
-  actual: number
-  remaining: number
-  overflow: boolean
-}
-
-export interface PriorityCandidateSummary {
-  mode: PriorityCandidateMode
-  candidatePriorityReady: boolean
-  safetyReason?: string
-  candidateCount: number
-  outOfScopeCount: number
-  blockerCount: number
-  capacities: PriorityCandidateCapacity[]
-}
-
-export interface PriorityCandidateProjection {
-  state: PriorityCandidateState
-  reason?: string
-  rank?: number
-  priority?: number
-  region?: PriorityCandidateRegion
-  healthBand?: PriorityCandidateHealthBand
-  successLatencyMs?: number
-  multiplier?: number
-  priorityEvidence: string
-  blocksTakeover: boolean
-}
-
 export interface AccountTierResult {
   targetId: string
   accountTier: AccountTier
+}
+
+export type AccountPriorityInput = { mode: 'manual'; priority: number } | { mode: 'auto' }
+export interface AccountManagementResult {
+  targetId: string
+  result: 'success' | 'not_sent' | 'pending' | 'noop'
+  priority?: number
+  concurrency?: number
+  loadFactor?: number
+  errorKey?: string
 }
 
 export interface AdminGroupAccount {
@@ -309,6 +280,12 @@ export interface AdminGroupAccount {
   policyAssignmentSource?: 'none' | 'target' | 'group' | 'mixed' | string
   excludedFromGroupPolicy?: boolean
   priorityManaged?: boolean
+  priorityActionPending?: boolean
+  // 缺失表示账号级策略资料不足，不能推断为人工或开放编辑。
+  priorityUsesMultiplierOnly?: boolean
+  // 仅前端暂态；一次结果不明后由后续完整权威读取解除。
+  concurrencyResultUnconfirmed?: boolean
+  concurrencyLoadFactorRequired?: boolean
   priorityConflict?: boolean
   priorityOriginal?: number
   priorityExpected?: number
@@ -325,7 +302,6 @@ export interface AdminGroupAccount {
   todayQuestionAnswerSubmitted?: number
   todayQuestionAnswerCorrect?: number
   productionSortOrder?: number
-  priorityCandidate?: PriorityCandidateProjection
 }
 
 export interface AdminGroupHealth {
@@ -364,7 +340,6 @@ export interface AdminGroupHealth {
   groupAttributedCost?: number | null
   unattributedCost?: number | null
   minProductionRank?: number | null
-  priorityCandidateSummary?: PriorityCandidateSummary
   // accountsError 非空（i18n key）表示该分组账号列表加载失败，其余分组不受影响。
   accountsError?: string
   accounts: AdminGroupAccount[]

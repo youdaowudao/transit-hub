@@ -2,6 +2,7 @@ import { locale } from '@/locales'
 import { ref } from 'vue'
 import type {
   AccountTierResult,
+  AccountManagementResult,
   AdminGroupTestConfiguration,
   GroupTestConfiguration,
   EffectiveTestConfiguration,
@@ -82,11 +83,11 @@ let adminGroupsLoadingRequests = 0
 let adminGroupsActiveRequests = 0
 let adminGroupsWorkspace = ''
 let accountTierRevision = 0
-let priorityCandidateRevision = 0
-let priorityCandidateReloadPending = false
-let priorityCandidateReloadRunning = false
-let priorityCandidateReloadRequest: Promise<boolean> | null = null
-let priorityCandidateReloadWorkspace = ''
+let adminGroupsDataRevision = 0
+let adminGroupsReloadPending = false
+let adminGroupsReloadRunning = false
+let adminGroupsReloadRequest: Promise<boolean> | null = null
+let adminGroupsReloadWorkspace = ''
 const savedAccountTiers = new Map<string, AccountTierResult & { revision: number }>()
 let adminGroupsRefreshController: AbortController | null = null
 const manualRefreshRequests = ref(0)
@@ -158,20 +159,6 @@ const overviewFromAdminGroups = (groupList: AdminGroupHealth[]): ConnectionHealt
   return result
 }
 
-export const invalidatePriorityCandidatePlan = (groupList: AdminGroupHealth[]): AdminGroupHealth[] =>
-  groupList.map(group => {
-    const nextGroup = {
-      ...group,
-      accounts: group.accounts.map(account => {
-        const nextAccount = { ...account }
-        delete nextAccount.priorityCandidate
-        return nextAccount
-      }),
-    }
-    delete nextGroup.priorityCandidateSummary
-    return nextGroup
-  })
-
 export function useConnectionHealth() {
   const cancelAdminGroupsRefresh = () => {
     // 先让所有旧回调失效，再触发 abort；AbortError 只代表浏览器订阅取消。
@@ -180,16 +167,15 @@ export function useConnectionHealth() {
     refreshConnectionState.value = 'connected'
   }
 
-  const invalidatePriorityCandidatePlanNow = () => {
-    priorityCandidateRevision++
-    adminGroups.value = invalidatePriorityCandidatePlan(adminGroups.value)
+  const invalidateAdminGroupsReads = () => {
+    adminGroupsDataRevision++
   }
 
-  const invalidateAndSchedulePriorityCandidateReload = () => {
-    invalidatePriorityCandidatePlanNow()
+  const invalidateAndScheduleAdminGroupsReload = () => {
+    invalidateAdminGroupsReads()
     if (!adminGroupsWorkspace) return
-    priorityCandidateReloadPending = true
-    void flushPriorityCandidateReload()
+    adminGroupsReloadPending = true
+    void flushAdminGroupsReload()
   }
 
   const setAdminGroupsWorkspace = (workspaceId: string) => {
@@ -197,8 +183,8 @@ export function useConnectionHealth() {
     cancelAdminGroupsRefresh()
     adminGroupsWorkspace = workspaceId
     accountTierRevision = 0
-    priorityCandidateRevision = 0
-    priorityCandidateReloadPending = false
+    adminGroupsDataRevision = 0
+    adminGroupsReloadPending = false
     savedAccountTiers.clear()
     adminGroups.value = []
     adminGroupsLoaded.value = false
@@ -222,13 +208,38 @@ export function useConnectionHealth() {
         : account),
     }))
     adminGroups.value = groupsWithSavedTier
-    invalidateAndSchedulePriorityCandidateReload()
+    invalidateAndScheduleAdminGroupsReload()
   }
 
-  // A read started before a successful save may contain the previous tier.
-  // Preserve that field and reject the response's candidate plan because it predates the save.
+  const applyAccountPriority = (result: AccountManagementResult) => {
+    if (!adminGroupsWorkspace || !result.targetId.startsWith(`sub2api:${adminGroupsWorkspace}:`)) return
+    adminGroups.value = adminGroups.value.map(group => ({ ...group, accounts: group.accounts.map(account => {
+      if (account.targetId !== result.targetId || result.result === 'not_sent' || result.result === 'noop') return account
+      if (result.result === 'pending') return { ...account, priorityActionPending: true }
+      if (result.priority === undefined) return account
+      const manual = result.priority >= 1 && result.priority <= 9
+      return { ...account, priority: result.priority, priorityActionPending: false,
+        priorityManaged: !manual, priorityExpected: manual ? undefined : result.priority,
+        priorityOriginal: manual ? undefined : account.priorityOriginal,
+        priorityConflict: false, priorityConflictValue: undefined, priorityConflictAt: null,
+        prioritySyncBlocked: false, prioritySyncBlockReason: undefined }
+    }) }))
+    invalidateAndScheduleAdminGroupsReload()
+  }
+
+  const applyAccountConcurrency = (result: AccountManagementResult) => {
+    if (!adminGroupsWorkspace || !result.targetId.startsWith(`sub2api:${adminGroupsWorkspace}:`)) return
+    adminGroups.value = adminGroups.value.map(group => ({ ...group, accounts: group.accounts.map(account => {
+      if (account.targetId !== result.targetId || result.result === 'not_sent' || result.result === 'noop') return account
+      if (result.result === 'pending') return { ...account, concurrencyResultUnconfirmed: true, concurrencyLoadFactorRequired: Number(account.loadFactor) > 0 }
+      return { ...account, concurrency: result.concurrency ?? account.concurrency,
+        loadFactor: result.loadFactor ?? account.loadFactor, concurrencyResultUnconfirmed: false }
+    }) }))
+    invalidateAndScheduleAdminGroupsReload()
+  }
+
+  // 保存前发起的读取不允许覆盖保存结果；层级仍按账号在所有分组保持一致。
   const preserveSavedAccountTiers = (nextGroups: AdminGroupHealth[], readRevision: number): AdminGroupHealth[] => {
-    const hasNewerSavedTier = [...savedAccountTiers.values()].some(saved => saved.revision > readRevision)
     const groupsWithSavedTiers = nextGroups.map(group => ({
       ...group,
       accounts: group.accounts.map(account => {
@@ -238,7 +249,20 @@ export function useConnectionHealth() {
           : account
       }),
     }))
-    return hasNewerSavedTier ? invalidatePriorityCandidatePlan(groupsWithSavedTiers) : groupsWithSavedTiers
+    return groupsWithSavedTiers
+  }
+
+  const confirmConcurrencyRead = (nextGroups: AdminGroupHealth[]): AdminGroupHealth[] => {
+    const pendingByTarget = new Map(adminGroups.value.flatMap(group => group.accounts)
+      .filter(account => account.concurrencyResultUnconfirmed).map(account => [account.targetId, account]))
+    return nextGroups.map(group => ({ ...group, accounts: group.accounts.map(account => {
+      const previous = pendingByTarget.get(account.targetId)
+      if (!previous) return account
+      const complete = Number.isInteger(account.concurrency) && Number(account.concurrency) >= 1
+        && (!previous?.concurrencyLoadFactorRequired || (typeof account.loadFactor === 'number' && Number.isFinite(account.loadFactor) && account.loadFactor >= 0))
+      return { ...account, concurrencyResultUnconfirmed: Boolean(previous && !complete),
+        ...(previous && !complete ? { concurrencyLoadFactorRequired: previous.concurrencyLoadFactorRequired } : {}) }
+    }) }))
   }
 
   const loadOverview = async () => {
@@ -266,12 +290,12 @@ export function useConnectionHealth() {
   // loadAdminGroups 载入新的主列表数据源（admin 全量分组）。silent 语义同 loadGroups。
   const loadAdminGroups = (opts: { silent?: boolean } = {}): Promise<boolean> => {
     if (terminalRefreshRequests.value > 0) return Promise.resolve(false)
-    if (opts.silent && priorityCandidateReloadRequest && priorityCandidateReloadWorkspace === adminGroupsWorkspace) {
-      return priorityCandidateReloadRequest
+    if (opts.silent && adminGroupsReloadRequest && adminGroupsReloadWorkspace === adminGroupsWorkspace) {
+      return adminGroupsReloadRequest
     }
     const sequence = ++adminGroupsRequestSequence
     const tierRevision = accountTierRevision
-    const candidateRevision = priorityCandidateRevision
+    const dataRevision = adminGroupsDataRevision
     adminGroupsActiveRequests++
     const request = (async () => {
       if (!opts.silent) {
@@ -281,18 +305,14 @@ export function useConnectionHealth() {
       errorKey.value = ''
       try {
         const nextGroups = await getConnectionHealthAdminGroups()
-        if (sequence !== adminGroupsRequestSequence) return false
+        if (sequence !== adminGroupsRequestSequence || dataRevision !== adminGroupsDataRevision) return false
         const acceptedGroups = preserveSavedAccountTiers(nextGroups, tierRevision)
-        const candidatePlanIsCurrent = candidateRevision === priorityCandidateRevision
-        const safeGroups = candidatePlanIsCurrent
-          ? acceptedGroups
-          : invalidatePriorityCandidatePlan(acceptedGroups)
-        adminGroups.value = safeGroups
-        overview.value = overviewFromAdminGroups(safeGroups)
+        adminGroups.value = confirmConcurrencyRead(acceptedGroups)
+        overview.value = overviewFromAdminGroups(adminGroups.value)
         adminGroupsLoaded.value = true
-        return candidatePlanIsCurrent
+        return true
       } catch (err) {
-        if (sequence !== adminGroupsRequestSequence) return false
+        if (sequence !== adminGroupsRequestSequence || dataRevision !== adminGroupsDataRevision) return false
         errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
         return false
       } finally {
@@ -301,7 +321,7 @@ export function useConnectionHealth() {
           adminGroupsLoadingRequests--
           if (adminGroupsLoadingRequests === 0) isLoading.value = false
         }
-        if (adminGroupsActiveRequests === 0) void flushPriorityCandidateReload()
+        if (adminGroupsActiveRequests === 0) void flushAdminGroupsReload()
       }
     })()
     return request
@@ -309,7 +329,7 @@ export function useConnectionHealth() {
 
   type RefreshApplicationState = {
     tierRevision: number
-    candidateRevision: number
+    dataRevision: number
     runId: string
     revision: number
     terminalAccepted: boolean
@@ -363,15 +383,14 @@ export function useConnectionHealth() {
       manualRefreshSites.value = summary.sites
     }
     if (terminal.status === 'success' && terminal.groups) {
-      const acceptedGroups = preserveSavedAccountTiers(terminal.groups, state.tierRevision)
-      const candidatePlanIsCurrent = state.candidateRevision === priorityCandidateRevision
-      const safeGroups = candidatePlanIsCurrent
-        ? acceptedGroups
-        : invalidatePriorityCandidatePlan(acceptedGroups)
-      adminGroups.value = safeGroups
-      overview.value = overviewFromAdminGroups(safeGroups)
-      adminGroupsLoaded.value = true
-      if (!candidatePlanIsCurrent && adminGroupsWorkspace) priorityCandidateReloadPending = true
+      if (state.dataRevision !== adminGroupsDataRevision) {
+        if (adminGroupsWorkspace) adminGroupsReloadPending = true
+      } else {
+        const acceptedGroups = preserveSavedAccountTiers(terminal.groups, state.tierRevision)
+        adminGroups.value = confirmConcurrencyRead(acceptedGroups)
+        overview.value = overviewFromAdminGroups(adminGroups.value)
+        adminGroupsLoaded.value = true
+      }
     }
     return state.terminalSucceeded
   }
@@ -407,7 +426,7 @@ export function useConnectionHealth() {
     refreshConnectionState.value = 'connected'
     const application: RefreshApplicationState = {
       tierRevision: accountTierRevision,
-      candidateRevision: priorityCandidateRevision,
+      dataRevision: adminGroupsDataRevision,
       runId: '',
       revision: -1,
       terminalAccepted: false,
@@ -456,28 +475,28 @@ export function useConnectionHealth() {
       if (sequence === adminGroupsRequestSequence) refreshConnectionState.value = 'connected'
       if (manual) manualRefreshRequests.value--
       terminalRefreshRequests.value--
-      void flushPriorityCandidateReload()
+      void flushAdminGroupsReload()
     }
   }
 
-  async function flushPriorityCandidateReload() {
-    if (!priorityCandidateReloadPending || priorityCandidateReloadRunning
+  async function flushAdminGroupsReload() {
+    if (!adminGroupsReloadPending || adminGroupsReloadRunning
       || terminalRefreshRequests.value > 0 || adminGroupsActiveRequests > 0 || !adminGroupsWorkspace) return
-    priorityCandidateReloadPending = false
-    priorityCandidateReloadRunning = true
-    priorityCandidateReloadWorkspace = adminGroupsWorkspace
+    adminGroupsReloadPending = false
+    adminGroupsReloadRunning = true
+    adminGroupsReloadWorkspace = adminGroupsWorkspace
     let request: Promise<boolean> | null = null
     try {
       request = loadAdminGroups({ silent: true })
-      priorityCandidateReloadRequest = request
+      adminGroupsReloadRequest = request
       await request
     } finally {
-      if (priorityCandidateReloadRequest === request) {
-        priorityCandidateReloadRequest = null
-        priorityCandidateReloadWorkspace = ''
+      if (adminGroupsReloadRequest === request) {
+        adminGroupsReloadRequest = null
+        adminGroupsReloadWorkspace = ''
       }
-      priorityCandidateReloadRunning = false
-      if (priorityCandidateReloadPending) void flushPriorityCandidateReload()
+      adminGroupsReloadRunning = false
+      if (adminGroupsReloadPending) void flushAdminGroupsReload()
     }
   }
 
@@ -538,7 +557,7 @@ export function useConnectionHealth() {
       } else {
         await createConnectionHealthPolicy(input)
       }
-      invalidateAndSchedulePriorityCandidateReload()
+      invalidateAndScheduleAdminGroupsReload()
       await loadPolicies()
       return true
     } catch (err) {
@@ -552,7 +571,7 @@ export function useConnectionHealth() {
     try {
       await deleteConnectionHealthPolicy(policyId)
       policies.value = policies.value.filter(policy => policy.id !== policyId)
-      invalidateAndSchedulePriorityCandidateReload()
+      invalidateAndScheduleAdminGroupsReload()
       return true
     } catch (err) {
       errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
@@ -565,7 +584,7 @@ export function useConnectionHealth() {
   const createPolicyForSetup = async (input: PolicyInput): Promise<{ policy: ConnectionHealthPolicy } | { errorKey: string }> => {
     try {
       const policy = await createConnectionHealthPolicy(input)
-      invalidateAndSchedulePriorityCandidateReload()
+      invalidateAndScheduleAdminGroupsReload()
       await loadPolicies()
       return { policy }
     } catch (err) {
@@ -578,7 +597,7 @@ export function useConnectionHealth() {
   const updatePolicyForSetup = async (policyId: string, input: PolicyInput): Promise<{ policy: ConnectionHealthPolicy } | { errorKey: string }> => {
     try {
       const policy = await updateConnectionHealthPolicy(policyId, { ...input, id: policyId })
-      invalidateAndSchedulePriorityCandidateReload()
+      invalidateAndScheduleAdminGroupsReload()
       await loadPolicies()
       return { policy }
     } catch (err) {
@@ -599,7 +618,7 @@ export function useConnectionHealth() {
     errorKey.value = ''
     try {
       const result = await probeConnection(connectionId, models)
-      invalidateAndSchedulePriorityCandidateReload()
+      invalidateAndScheduleAdminGroupsReload()
       return result
     } catch (err) {
       errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
@@ -623,7 +642,7 @@ export function useConnectionHealth() {
     errorKey.value = ''
     try {
       const result = await probeTargetWithProgress(targetId, models, onPhase ?? (() => {}), signal)
-      invalidateAndSchedulePriorityCandidateReload()
+      invalidateAndScheduleAdminGroupsReload()
       return result
     } catch (err) {
       errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
@@ -673,7 +692,7 @@ export function useConnectionHealth() {
             }
           : account),
       }))
-      invalidateAndSchedulePriorityCandidateReload()
+      invalidateAndScheduleAdminGroupsReload()
       return true
     } catch (err) {
       errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
@@ -694,7 +713,7 @@ export function useConnectionHealth() {
   const saveTargetPolicyAssignments = async (targetId: string, policyIds: string[]): Promise<{ assignments: TargetPolicyAssignments } | { errorKey: string }> => {
     try {
       const assignments = await setTargetPolicyAssignments(targetId, policyIds)
-      invalidateAndSchedulePriorityCandidateReload()
+      invalidateAndScheduleAdminGroupsReload()
       return { assignments }
     } catch (err) {
       return { errorKey: err instanceof Error ? err.message : 'admin.connectionHealth.errors.request' }
@@ -738,11 +757,11 @@ export function useConnectionHealth() {
         })
         return { ...group, accounts, healthSummary }
       })
-      invalidatePriorityCandidatePlanNow()
+      invalidateAdminGroupsReads()
       overview.value = overviewFromAdminGroups(adminGroups.value)
       if (terminalRefreshRequests.value > 0 || adminGroupsActiveRequests > 0) {
-        priorityCandidateReloadPending = true
-        void flushPriorityCandidateReload()
+        adminGroupsReloadPending = true
+        void flushAdminGroupsReload()
       } else await loadAdminGroups({ silent: true })
       return { configuration }
     } catch (err) { return { errorKey: err instanceof Error ? err.message : 'admin.connectionHealth.errors.request' } }
@@ -762,7 +781,7 @@ export function useConnectionHealth() {
   ): Promise<{ configuration: AdminGroupPolicyConfiguration } | { errorKey: string }> => {
     try {
       const configuration = await setAdminGroupPolicyConfiguration(adminGroupId, input)
-      invalidateAndSchedulePriorityCandidateReload()
+      invalidateAndScheduleAdminGroupsReload()
       return { configuration }
     } catch (err) {
       return { errorKey: err instanceof Error ? err.message : 'admin.connectionHealth.errors.request' }
@@ -774,7 +793,7 @@ export function useConnectionHealth() {
     errorKey.value = ''
     try {
       await disableConnection(connectionId)
-      invalidateAndSchedulePriorityCandidateReload()
+      invalidateAndScheduleAdminGroupsReload()
       await loadAll()
       return true
     } catch (err) {
@@ -790,7 +809,7 @@ export function useConnectionHealth() {
     errorKey.value = ''
     try {
       await restoreConnection(connectionId)
-      invalidateAndSchedulePriorityCandidateReload()
+      invalidateAndScheduleAdminGroupsReload()
       await loadAll()
       return true
     } catch (err) {
@@ -819,8 +838,10 @@ export function useConnectionHealth() {
     refreshConnectionState,
     cancelAdminGroupsRefresh,
     setAdminGroupsWorkspace,
-    invalidatePriorityCandidatePlanNow,
+    invalidateAdminGroupsReads,
     applyAccountTier,
+    applyAccountPriority,
+    applyAccountConcurrency,
     loadAll,
     loadOverview,
     loadGroups,
@@ -993,16 +1014,23 @@ const CONNECTION_HEALTH_PROBE_RESULTS = new Set([
   ...PROBE_FAILURE_RESULTS,
 ])
 
+const ACCOUNT_AUDIT_ACTIONS = new Set([
+  'sub2api_priority_manual_set', 'sub2api_priority_manual_set_failed',
+  'sub2api_concurrency_set', 'sub2api_concurrency_set_failed',
+])
+
+export const isConnectionHealthAuditAction = (action?: string): boolean => Boolean(action && ACCOUNT_AUDIT_ACTIONS.has(action))
+
 export function isConnectionHealthProbeFailure(result: string): boolean {
   return PROBE_FAILURE_RESULTS.has(result)
 }
 
-export function buildConnectionHealthRecordSummary<T extends { result: string; probeDisposition?: string | null }>(eventsDesc: readonly T[]): {
+export function buildConnectionHealthRecordSummary<T extends { result: string; remoteAction?: string; probeDisposition?: string | null }>(eventsDesc: readonly T[]): {
   records: T[]
   availabilityPct: number | null
 } {
   const records = eventsDesc.slice(0, 60).slice().reverse()
-  const probeRecords = records.filter((record) => record.probeDisposition !== 'invalid' && record.probeDisposition !== 'stale' && CONNECTION_HEALTH_PROBE_RESULTS.has(record.result))
+  const probeRecords = records.filter((record) => !isConnectionHealthAuditAction(record.remoteAction) && record.probeDisposition !== 'invalid' && record.probeDisposition !== 'stale' && CONNECTION_HEALTH_PROBE_RESULTS.has(record.result))
   const okCount = probeRecords.filter((record) => record.result === 'ok' || record.result === 'slow_response').length
   return {
     records,
@@ -1017,11 +1045,12 @@ export function latestConnectionHealthProbeFailure<T extends {
   result: string
   createdAt: string
   probeDisposition?: string | null
+  remoteAction?: string
 }>(records: readonly T[]): T | null {
   let latest: T | null = null
   let latestAt = Number.NEGATIVE_INFINITY
   for (const record of records) {
-    if (record.probeDisposition === 'stale' || record.probeDisposition === 'invalid') continue
+    if (isConnectionHealthAuditAction(record.remoteAction) || record.probeDisposition === 'stale' || record.probeDisposition === 'invalid') continue
     if (!record.modelName || record.modelName === '*' || !isConnectionHealthProbeFailure(record.result)) continue
     const createdAt = connectionHealthTimeMs(record.createdAt)
     if (createdAt == null || createdAt <= latestAt) continue
@@ -1083,6 +1112,9 @@ const RECORD_COLOR_CLASS: Record<string, string> = {
   model_not_found: 'bg-red-500',
   manual_disable: 'bg-blue-500',
   manual_restore: 'bg-blue-500',
+  account_edit_success: 'bg-blue-500',
+  account_edit_not_sent: 'bg-blue-500',
+  account_edit_pending: 'bg-amber-500',
   unsupported: 'bg-zinc-400',
 }
 
@@ -1129,6 +1161,14 @@ export function remoteActionLabelKey(remoteAction: string): { key: string; param
       return { key: `${prefix}.sub2apiInactiveFailed` }
     case 'sub2api_account_status_active_failed':
       return { key: `${prefix}.sub2apiActiveFailed` }
+    case 'sub2api_priority_manual_set':
+      return { key: `${prefix}.sub2apiPriorityManualSet` }
+    case 'sub2api_priority_manual_set_failed':
+      return { key: `${prefix}.sub2apiPriorityManualSetFailed` }
+    case 'sub2api_concurrency_set':
+      return { key: `${prefix}.sub2apiConcurrencySet` }
+    case 'sub2api_concurrency_set_failed':
+      return { key: `${prefix}.sub2apiConcurrencySetFailed` }
     case 'sub2api_schedulable_enabled':
       return { key: `${prefix}.sub2apiSchedulableEnabled` }
     case 'sub2api_schedulable_disabled':

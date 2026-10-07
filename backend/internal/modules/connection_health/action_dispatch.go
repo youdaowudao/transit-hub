@@ -98,7 +98,14 @@ func (s *Service) dispatchRemoteAction(ctx context.Context, claim RemoteActionCl
 	if err != nil {
 		return "", err
 	}
+	if claim.ReleasePriorityOnConfirm && claim.Kind == ActionKindPriority && isSub2APIActionTarget(claim.TargetID) {
+		id = "priority-release:" + id
+	}
 	claim.DispatchID, claim.OwnerID, claim.LeaseKey = id, handle.OwnerID, handle.Key
+	workspaceLease := workspacePriorityLeaseFromContext(prepCtx)
+	if workspaceLease != nil {
+		claim.WorkspaceLeaseKey, claim.WorkspaceOwnerID = workspaceLease.Key, workspaceLease.OwnerID
+	}
 	mutation := mutationLeaseFromContext(prepCtx)
 	if mutation != nil {
 		claim.MutationLeaseKey, claim.MutationOwnerID = mutation.Key, mutation.OwnerID
@@ -123,6 +130,14 @@ func (s *Service) dispatchRemoteAction(ctx context.Context, claim RemoteActionCl
 		if err == nil {
 			err = ErrRemoteActionPending
 		}
+		if claim.Kind == ActionKindPriority && (errors.Is(err, ErrRemoteActionLeaseLost) || errors.Is(err, ErrRemoteActionEvidenceChanged)) {
+			// These failures precede the permit transaction commit. They prove
+			// that this dispatch never reached HTTP, unlike an unknown commit.
+			receiptCtx, cancel := context.WithTimeout(context.Background(), runtimeLeaseQueryTimeout)
+			receiptErr := repository.RecordRemoteActionReceipt(receiptCtx, claim, DispatchNotSent)
+			cancel()
+			err = errors.Join(err, receiptErr)
+		}
 		return RemoteActionAwaitingConfirmation, err
 	}
 	phase := DispatchUncertain
@@ -134,11 +149,18 @@ func (s *Service) dispatchRemoteAction(ctx context.Context, claim RemoteActionCl
 	if mutation != nil {
 		stopMutation = context.AfterFunc(mutation.Context, sendCancel)
 	}
+	var stopWorkspace func() bool
+	if workspaceLease != nil {
+		stopWorkspace = context.AfterFunc(workspaceLease.Context, sendCancel)
+	}
 	defer func() {
 		sendCancel()
 		stopTarget()
 		if stopMutation != nil {
 			stopMutation()
+		}
+		if stopWorkspace != nil {
+			stopWorkspace()
 		}
 		receiptCtx, cancel := context.WithTimeout(context.Background(), runtimeLeaseQueryTimeout)
 		defer cancel()
@@ -146,7 +168,7 @@ func (s *Service) dispatchRemoteAction(ctx context.Context, claim RemoteActionCl
 			actionErr = errors.Join(actionErr, receiptErr)
 		}
 	}()
-	if handle.Context.Err() != nil || (mutation != nil && mutation.Context.Err() != nil) {
+	if handle.Context.Err() != nil || (mutation != nil && mutation.Context.Err() != nil) || (workspaceLease != nil && workspaceLease.Context.Err() != nil) {
 		phase = DispatchNotSent
 		return RemoteActionAwaitingConfirmation, ErrRemoteActionLeaseLost
 	}

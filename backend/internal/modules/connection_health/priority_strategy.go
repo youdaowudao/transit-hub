@@ -30,6 +30,7 @@ func (s *Service) updateAdminTargetPriority(ctx context.Context, session upstrea
 }
 
 type priorityTargetInventory struct {
+	accountTier         int
 	snapshotStartedAt   time.Time
 	target              AdminProbeTarget
 	account             upstream.AdminGroupAccountInfo
@@ -42,14 +43,16 @@ type priorityTargetInventory struct {
 }
 
 type healthPriorityCandidate struct {
-	ruleVersion    string
-	targetID       string
-	item           *priorityTargetInventory
-	multiplier     float64
-	states         []ConnectionHealthState
-	expectedModels int
-	healthBand     int
-	latencyMs      *int
+	accountTier       int
+	multiplierUnknown bool
+	ruleVersion       string
+	targetID          string
+	item              *priorityTargetInventory
+	multiplier        float64
+	states            []ConnectionHealthState
+	expectedModels    int
+	healthBand        int
+	latencyMs         *int
 }
 
 // syncMultiplierPriorities 在每轮探活前同步上游优先级。普通倍率策略仍然「健康优先、倍率次之」，
@@ -100,6 +103,7 @@ func (s *Service) syncCurrentWorkspacePrioritiesWithResult(ctx context.Context, 
 		return err
 	}
 	defer release()
+	ctx = context.WithValue(ctx, workspacePriorityLeaseContextKey{}, actionLeaseFromContext(ctx))
 	if pendingSignature != "" {
 		current, err := s.repo.IsPriorityWorkspaceGenerationCurrent(ctx, userID, adminAccountID, pendingSignature)
 		if err != nil {
@@ -239,6 +243,7 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 				log.Printf("[connection-health] priority sync acquire workspace lease failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 				continue
 			}
+			workspaceCtx = context.WithValue(workspaceCtx, workspacePriorityLeaseContextKey{}, actionLeaseFromContext(workspaceCtx))
 		}
 		func() {
 			ctx := workspaceCtx
@@ -436,6 +441,24 @@ func (s *Service) syncWorkspacePriorities(
 	if len(expectedPendingSignatures) > 0 {
 		expectedPendingSignature = expectedPendingSignatures[0]
 	}
+	if session.Platform == upstream.PlatformSub2API {
+		// Read the tier only after the rule generation was captured. A failed
+		// tier read cannot silently turn every primary into a standby.
+		var err error
+		ctx, err = s.captureWorkspaceRulesIfMissing(ctx, userID, adminAccountID, inventory)
+		if err != nil {
+			s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, err, 1, nil)
+			return
+		}
+		tiers, err := s.accountTiersForDecision(ctx, userID, adminAccountID)
+		if err != nil {
+			s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, err, 1, nil)
+			return
+		}
+		for id, item := range inventory {
+			item.accountTier = effectiveAccountTier(tiers[id])
+		}
+	}
 	generationCurrent := func() bool {
 		current, err := s.priorityWorkspaceGenerationCurrent(ctx, userID, adminAccountID, expectedPendingSignature)
 		if err != nil {
@@ -524,11 +547,33 @@ func (s *Service) syncWorkspacePriorities(
 			if pair.Priority != nil {
 				stored = *pair.Priority
 				storedByTarget[targetID] = stored
+			} else {
+				delete(storedByTarget, targetID)
 			}
 		}
 	}
 
 	managed := make(map[string]*priorityTargetInventory)
+	if session.Platform == upstream.PlatformSub2API {
+		// Ordinary manual ownership takes precedence over loss of policies,
+		// exclusions and multiplier blockers. Old 1–9 baselines retain their
+		// original multiplier-only comparison and exit restoration semantics.
+		for targetID, stored := range storedByTarget {
+			item := inventory[targetID]
+			if item == nil || !item.priorityPresent || item.currentPriority < 1 || item.currentPriority > 9 || hasMultiplierOnlyPolicy(item.policies) || oldPriorityComparisonBaseline(&stored) {
+				continue
+			}
+			if _, failed := reconcileFailedTargets[targetID]; failed {
+				continue
+			}
+			if err := s.syncSafePriorityTarget(ctx, session, userID, adminAccountID, targetID, item, &stored, 0, nil, nil, expectedPendingSignature, false, false); err != nil {
+				recordTargetFailure(targetID, err, true)
+				reconcileFailedTargets[targetID] = struct{}{}
+			} else {
+				delete(storedByTarget, targetID)
+			}
+		}
+	}
 	hardExcludedHealthTargets := make(map[string]struct{})
 	missingMultiplier := make(map[string]struct{})
 	effectiveMultiplierByTarget := make(map[string]float64)
@@ -582,13 +627,23 @@ func (s *Service) syncWorkspacePriorities(
 			activeStates := activeHealthPriorityStates(statesByTarget[targetID], activeModels)
 			healthBand := priorityHealthBand(activeStates, len(activeModels))
 			managed[targetID] = item
+			if session.Platform == upstream.PlatformSub2API && item.accountTier == 1 {
+				healthCandidates = append(healthCandidates, healthPriorityCandidate{
+					targetID: targetID, item: item, accountTier: 1, multiplierUnknown: true,
+					states: activeStates, expectedModels: len(activeModels), healthBand: healthBand,
+					ruleVersion: priorityRuleVersionForTarget(item.target.Platform, item.policies, activeStates),
+					latencyMs:   targetSuccessLatency(item.target, activeStates, activeModels),
+				})
+				continue
+			}
 			desiredByTarget[targetID] = desiredHealthBandEndForPlatform(session.Platform, healthBand)
 			continue
 		}
 		activeModels := activeHealthPriorityModels(item)
 		activeStates := activeHealthPriorityStates(statesByTarget[targetID], activeModels)
 		candidate := healthPriorityCandidate{
-			targetID: targetID, item: item, multiplier: multiplier, states: activeStates, ruleVersion: priorityRuleVersionForTarget(item.target.Platform, item.policies, activeStates),
+			accountTier: item.accountTier,
+			targetID:    targetID, item: item, multiplier: multiplier, states: activeStates, ruleVersion: priorityRuleVersionForTarget(item.target.Platform, item.policies, activeStates),
 			expectedModels: len(activeModels), healthBand: priorityHealthBand(activeStates, len(activeModels)),
 			latencyMs: targetSuccessLatency(item.target, activeStates, activeModels),
 		}
@@ -618,23 +673,8 @@ func (s *Service) syncWorkspacePriorities(
 		desiredByTarget[targetID] = desired
 	}
 
-	sortHealthPriorityCandidates(healthCandidates)
-	currentBand, bandRank := -1, 0
-	var previousMultiplier float64
-	previousV2 := false
-	for _, candidate := range healthCandidates {
-		if candidate.healthBand != currentBand {
-			currentBand = candidate.healthBand
-			bandRank = 0
-			previousV2 = false
-		} else if candidateUsesV2(candidate) && previousV2 && candidate.multiplier != previousMultiplier {
-			bandRank++
-		}
-		desiredByTarget[candidate.targetID] = desiredHealthPriorityForPlatform(session.Platform, candidate.healthBand, bandRank)
-		if !candidateUsesV2(candidate) {
-			bandRank++
-		}
-		previousMultiplier, previousV2 = candidate.multiplier, candidateUsesV2(candidate)
+	for id, desired := range encodeHealthPriorityCandidates(session.Platform, healthCandidates) {
+		desiredByTarget[id] = desired
 	}
 
 	for targetID, item := range managed {
@@ -981,8 +1021,15 @@ func sortHealthPriorityCandidates(candidates []healthPriorityCandidate) {
 }
 
 func compareHealthPriorityCandidates(left healthPriorityCandidate, right healthPriorityCandidate) int {
-	if left.healthBand != right.healthBand {
-		if left.healthBand < right.healthBand {
+	leftSegment, rightSegment := healthPrioritySegment(left), healthPrioritySegment(right)
+	if leftSegment != rightSegment {
+		if leftSegment < rightSegment {
+			return -1
+		}
+		return 1
+	}
+	if left.multiplierUnknown != right.multiplierUnknown {
+		if !left.multiplierUnknown {
 			return -1
 		}
 		return 1

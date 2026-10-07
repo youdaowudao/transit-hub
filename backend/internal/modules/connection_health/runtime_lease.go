@@ -34,6 +34,12 @@ func (h *RuntimeLeaseHandle) Release() {
 
 type actionLeaseContextKey struct{}
 type mutationLeaseContextKey struct{}
+type workspacePriorityLeaseContextKey struct{}
+
+func workspacePriorityLeaseFromContext(ctx context.Context) *RuntimeLeaseHandle {
+	handle, _ := ctx.Value(workspacePriorityLeaseContextKey{}).(*RuntimeLeaseHandle)
+	return handle
+}
 
 func mutationLeaseFromContext(ctx context.Context) *RuntimeLeaseHandle {
 	handle, _ := ctx.Value(mutationLeaseContextKey{}).(*RuntimeLeaseHandle)

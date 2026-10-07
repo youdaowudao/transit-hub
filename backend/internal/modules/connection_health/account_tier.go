@@ -20,6 +20,10 @@ type accountTierWorkspaceReader interface {
 	Current(context.Context, string) (*admin_accounts.Account, error)
 }
 
+type accountTierSyncRepository interface {
+	SaveAccountTierAndRequestPrioritySync(context.Context, string, string, string, int, string) (bool, error)
+}
+
 func effectiveAccountTier(tier int) int {
 	if tier == 1 {
 		return 1
@@ -71,8 +75,20 @@ func (s *Service) SaveAccountTier(ctx context.Context, userID, targetID string, 
 	if err != nil {
 		return AccountTierResult{}, err
 	}
-	if err := s.repo.SaveAccountTier(ctx, userID, workspaceID, targetID, tier); err != nil {
+	signature, err := newID()
+	if err != nil {
 		return AccountTierResult{}, err
+	}
+	repository, ok := s.repo.(accountTierSyncRepository)
+	if !ok {
+		return AccountTierResult{}, requestError(ErrorPrioritySyncUnavailable)
+	}
+	changed, err := repository.SaveAccountTierAndRequestPrioritySync(ctx, userID, workspaceID, targetID, tier, signature)
+	if err != nil {
+		return AccountTierResult{}, err
+	}
+	if changed {
+		s.triggerPrioritySync(userID, workspaceID, signature)
 	}
 	return AccountTierResult{TargetID: targetID, AccountTier: tier}, nil
 }
@@ -89,14 +105,45 @@ func (r *Repository) GetAccountTier(ctx context.Context, userID, workspaceID, ta
 }
 
 func (r *Repository) SaveAccountTier(ctx context.Context, userID, workspaceID, targetID string, tier int) error {
-	if tier != 1 && tier != 2 {
-		return requestError(ErrorRequest)
+	signature, err := newID()
+	if err != nil {
+		return err
 	}
-	_, err := r.db.Exec(ctx, `INSERT INTO connection_health_account_configs (user_id, admin_account_id, target_id, account_tier)
+	_, err = r.SaveAccountTierAndRequestPrioritySync(ctx, userID, workspaceID, targetID, tier, signature)
+	return err
+}
+
+func (r *Repository) SaveAccountTierAndRequestPrioritySync(ctx context.Context, userID, workspaceID, targetID string, tier int, signature string) (bool, error) {
+	if tier != 1 && tier != 2 {
+		return false, requestError(ErrorRequest)
+	}
+	tx, err := r.beginWorkspaceTransaction(ctx, userID, workspaceID)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	old := 2
+	err = tx.QueryRow(ctx, `SELECT COALESCE(account_tier,2) FROM connection_health_account_configs WHERE user_id=$1 AND admin_account_id=$2 AND target_id=$3`, userID, workspaceID, targetID).Scan(&old)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO connection_health_account_configs (user_id, admin_account_id, target_id, account_tier)
 		VALUES ($1, $2, $3, $4)
 		ON CONFLICT (user_id, admin_account_id, target_id) DO UPDATE
 		SET account_tier = EXCLUDED.account_tier, updated_at = now()`, userID, workspaceID, targetID, tier)
-	return err
+	if err != nil {
+		return false, err
+	}
+	changed := effectiveAccountTier(old) != tier
+	if changed {
+		if err := requestPrioritySyncTx(ctx, tx, userID, workspaceID, signature, "account_tier_save"); err != nil {
+			return false, err
+		}
+		if err := bumpHealthConfigGenerationTx(ctx, tx, userID, workspaceID); err != nil {
+			return false, err
+		}
+	}
+	return changed, tx.Commit(ctx)
 }
 
 func (r *Repository) ListAccountTiers(ctx context.Context, userID, workspaceID string) (map[string]int, error) {

@@ -403,6 +403,8 @@ func targetActionAuditOnly(action string) bool {
 	switch action {
 	case RemoteActionSkippedUpstreamScheduling, RemoteActionSkippedSub2APILastActive, RemoteActionSkippedSub2APILastUsable, RemoteActionSkippedSub2APIInventory:
 		return true
+	case PriorityManualSetAction, PriorityManualSetFailedAction, ConcurrencySetAction, ConcurrencySetFailedAction:
+		return true
 	default:
 		return false
 	}
@@ -468,6 +470,33 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 		stored = pair.Target
 		if pair.pendingCount() != 0 {
 			return targetRemoteActionResult{remoteAction: RemoteActionAwaitingConfirmation}, nil
+		}
+		policies := make([]Policy, 0, len(specs))
+		for _, spec := range specs {
+			policies = mergePoliciesByID(policies, []Policy{spec.policy})
+		}
+		captured, err := s.capturedWorkspaceRules(ctx, userID, adminAccountID, policies)
+		if err != nil {
+			return targetRemoteActionResult{}, err
+		}
+		tiers, err := s.accountTiersForDecision(ctx, userID, adminAccountID)
+		if err != nil {
+			return targetRemoteActionResult{}, err
+		}
+		if oldRulePrimaryUnmanaged(target.Platform, captured.RuleVersion, tiers[target.TargetID]) {
+			return targetRemoteActionResult{}, nil
+		}
+		if inventory != nil {
+			for _, group := range inventory.groups {
+				for _, account := range group.accounts {
+					if account.ID == target.AccountID && accountHardExcludedFromAdminMonitoring(target.Platform, account) {
+						return targetRemoteActionResult{}, nil
+					}
+				}
+			}
+		}
+		if !target.ConfigGenerationKnown {
+			target.ConfigGeneration, target.ConfigGenerationKnown = captured.ConfigGeneration, captured.RuleVersion != ""
 		}
 	}
 	controlledModels := make(map[string]struct{})
@@ -665,6 +694,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 	if len(states) == 0 {
 		return
 	}
+	ctx = withAccountTierDecisionCache(ctx)
 	targetPolicies := assignedEnabledPoliciesByTarget(policies, targetAssignments)
 	groupPolicies := assignedEnabledPoliciesByGroup(policies, groupAssignments)
 	excluded := groupTargetExclusionIndex(exclusions)
@@ -672,6 +702,14 @@ func (s *Service) restoreUnmanagedTargetActions(
 		captured, captureErr := s.capturedWorkspaceRules(ctx, stored.UserID, stored.AdminAccountID, policies)
 		if captureErr != nil {
 			continue
+		}
+		var tiers map[string]int
+		if isSub2APIActionTarget(stored.TargetID) {
+			var tierErr error
+			tiers, tierErr = s.accountTiersForDecision(ctx, stored.UserID, stored.AdminAccountID)
+			if tierErr != nil {
+				continue
+			}
 		}
 		if isSub2APIActionTarget(stored.TargetID) {
 			pair, err := s.reconcileActionObservation(ctx, RemoteActionObservation{RemoteActionScope: RemoteActionScope{stored.UserID, stored.AdminAccountID, stored.TargetID}})
@@ -702,6 +740,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 		}
 		var target AdminProbeTarget
 		found := false
+		hardExcluded := false
 		targetPolicySet := targetPolicies[stored.UserID+"|"+stored.AdminAccountID][stored.TargetID]
 		inheritedPolicies := make([]Policy, 0)
 		for _, groupInventory := range inventory.groups {
@@ -713,6 +752,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 				if targetID != stored.TargetID {
 					continue
 				}
+				hardExcluded = hardExcluded || accountHardExcludedFromAdminMonitoring(string(inventory.session.Platform), account)
 				if !found {
 					target = AdminProbeTarget{
 						TargetID: targetID, Platform: string(inventory.session.Platform),
@@ -740,7 +780,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 			stored = *pair.Target
 		}
 		effectivePolicies := effectivePoliciesForTarget(targetPolicySet, inheritedPolicies)
-		if hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies)) {
+		if hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies)) && !hardExcluded && !oldRulePrimaryUnmanaged(target.Platform, captured.RuleVersion, tiers[stored.TargetID]) {
 			continue
 		}
 		targetVisible := found

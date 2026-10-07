@@ -78,6 +78,13 @@ func (r *Repository) actionCheckpointTransaction(ctx context.Context, scope Remo
 	var leaseOwner string
 	var leaseExpires time.Time
 	var mutationExpires time.Time
+	var workspaceExpires time.Time
+	if requireLease && lease != nil && lease.WorkspaceLeaseKey != "" {
+		var owner string
+		if err := tx.QueryRow(ctx, `SELECT owner_id,expires_at FROM connection_health_runtime_leases WHERE lease_key=$1 FOR UPDATE`, lease.WorkspaceLeaseKey).Scan(&owner, &workspaceExpires); err != nil || owner != lease.WorkspaceOwnerID {
+			return RemoteActionCheckpoints{}, ErrRemoteActionLeaseLost
+		}
+	}
 	if lease != nil && lease.LeaseKey != "" {
 		err = tx.QueryRow(ctx, `SELECT owner_id,expires_at FROM connection_health_runtime_leases WHERE lease_key=$1 FOR UPDATE`, lease.LeaseKey).Scan(&leaseOwner, &leaseExpires)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -114,7 +121,7 @@ func (r *Repository) actionCheckpointTransaction(ctx context.Context, scope Remo
 	}
 	// Evaluate the database clock after all row locks have actually been
 	// acquired; a timestamp computed before a lock wait is not a permit.
-	if requireLease && (!leaseExpires.After(now) || (lease.MutationLeaseKey != "" && !mutationExpires.After(now))) {
+	if requireLease && (!leaseExpires.After(now) || (lease.MutationLeaseKey != "" && !mutationExpires.After(now)) || (lease.WorkspaceLeaseKey != "" && !workspaceExpires.After(now))) {
 		return pair, ErrRemoteActionLeaseLost
 	}
 	if err = mutate(tx, &pair, now); err != nil {

@@ -3266,9 +3266,20 @@ func (s *PlatformService) updateSub2APIAdminAccountPriorityContext(ctx context.C
 // omitempty 保证请求体只包含本次明确要修改的字段，不会把详情接口缺失的 rate_multiplier、
 // credentials、group_ids 等字段用零值覆盖。
 type sub2APIAdminAccountBulkUpdate struct {
-	AccountIDs []int64 `json:"account_ids"`
-	Priority   *int    `json:"priority,omitempty"`
-	Status     *string `json:"status,omitempty"`
+	AccountIDs  []int64 `json:"account_ids"`
+	Priority    *int    `json:"priority,omitempty"`
+	Status      *string `json:"status,omitempty"`
+	Concurrency *int    `json:"concurrency,omitempty"`
+	LoadFactor  *int    `json:"load_factor,omitempty"`
+}
+
+// UpdateSub2APIAdminAccountConcurrencyContext only writes the supplied limits.
+// A nil loadFactor preserves the account's existing effective-load setting.
+func (s *PlatformService) UpdateSub2APIAdminAccountConcurrencyContext(ctx context.Context, session Session, accountID string, concurrency int, loadFactor *int) error {
+	if concurrency < 1 || concurrency > 1000 || (loadFactor != nil && (*loadFactor < 1 || *loadFactor > 1000)) {
+		return localMutationError(ErrorInvalidFields)
+	}
+	return s.bulkUpdateSub2APIAdminAccountContext(ctx, session, accountID, sub2APIAdminAccountBulkUpdate{Concurrency: &concurrency, LoadFactor: loadFactor})
 }
 
 // bulkUpdateSub2APIAdminAccount 只调用 Sub2API 的字段级批量更新接口。旧版或第三方分支若以

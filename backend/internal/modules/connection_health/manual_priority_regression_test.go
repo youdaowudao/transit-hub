@@ -129,7 +129,7 @@ func TestHealthPrioritySync_Sub2APIManualPriorityNeverEntersManagedBand(t *testi
 	}
 }
 
-func TestHealthPrioritySync_Sub2APIExistingManualChangeRecordsConflict(t *testing.T) {
+func TestHealthPrioritySync_Sub2APIExistingManualChangeEndsHealthRun(t *testing.T) {
 	repo := newFakeRepository()
 	actions := &fakeTargetPriorityActioner{}
 	policy := sub2APIProbePolicy(false)
@@ -171,9 +171,8 @@ func TestHealthPrioritySync_Sub2APIExistingManualChangeRecordsConflict(t *testin
 	if len(actions.calls) != 0 {
 		t.Fatalf("existing manual Priority change must not be overwritten: %+v", actions.calls)
 	}
-	got := repo.priorityStates["user1|ws1|"+targetID]
-	if !got.Conflict || got.LastConflictPriority == nil || *got.LastConflictPriority != manualPriority {
-		t.Fatalf("existing manual Priority change must preserve conflict evidence: %+v", got)
+	if got, exists := repo.priorityStates["user1|ws1|"+targetID]; exists {
+		t.Fatalf("ordinary manual Priority must end the idle health run: %+v", got)
 	}
 }
 

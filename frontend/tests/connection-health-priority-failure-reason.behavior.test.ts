@@ -52,7 +52,7 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal
       loadPolicies: async () => true,
       cancelAdminGroupsRefresh: vi.fn(),
       setAdminGroupsWorkspace: vi.fn(),
-      invalidatePriorityCandidatePlanNow: vi.fn(),
+      invalidateAdminGroupsReads: vi.fn(),
       removePolicy: async () => true,
       savePolicy: async () => true,
       updateTargetSchedulable: async () => true,
@@ -69,7 +69,7 @@ const mountView = async (status: Record<string, unknown>) => {
   const wrapper = mount(ConnectionHealthView, {
     global: { stubs: {
       Button: { template: '<button v-bind="$attrs"><slot /></button>' },
-      AdminGroupHealthDetail: true, PriorityCandidatePreview: true,
+      AdminGroupHealthDetail: true,
       ConnectionHealthEventsDialog: true, GroupHealthSetupDrawer: true,
       ManualOneTimeProbeDialog: true, QuestionAnswerBatchDrawer: true,
       PolicyConfigDrawer: true, ProbePolicyListDialog: true, TargetPolicyAssignmentDialog: true,

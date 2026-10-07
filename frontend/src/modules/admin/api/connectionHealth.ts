@@ -2,6 +2,8 @@ import type { AdminGroupTestConfiguration, GroupTestConfiguration } from '../typ
 import type {
   AccountTier,
   AccountTierResult,
+  AccountManagementResult,
+  AccountPriorityInput,
   AdminGroupPolicyConfiguration,
   AdminGroupPolicyConfigurationInput,
   AdminGroupHealth,
@@ -123,6 +125,55 @@ export const saveAccountTier = async (targetId: string, accountTier: AccountTier
     method: 'PUT',
     body: JSON.stringify({ accountTier }),
   }), targetId, accountTier)
+
+const requestAccountManagement = async (
+  targetId: string,
+  field: 'priority-owner' | 'concurrency',
+  input: AccountPriorityInput | { concurrency: number },
+): Promise<AccountManagementResult> => {
+  if (!/^sub2api:[^:]+:.+$/.test(targetId)) throw new Error('admin.connectionHealth.errors.accountManagementSub2apiOnly')
+  const unknown = (): AccountManagementResult => ({ targetId, result: 'pending', errorKey: field === 'concurrency'
+    ? 'admin.connectionHealth.errors.concurrencyUnconfirmed' : 'admin.connectionHealth.errors.priorityWriteUnconfirmed' })
+  let response: Response
+  try {
+    response = await fetch(endpoint(`/connection-health/targets/${encodeURIComponent(targetId)}/${field}`), {
+      method: 'PUT', headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(input),
+    })
+  } catch { return unknown() }
+  let payload: Partial<AccountManagementResult> & ApiErrorPayload
+  try { payload = await response.json() } catch { return unknown() }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return unknown()
+  if (isUnauthorizedApiResponse(response.status, payload)) {
+    handleAuthExpired(); throw new Error(authUnauthorizedErrorKey)
+  }
+  // 发送前校验拒绝可以重试；5xx、断连和非法回执都不能证明主站没有写入。
+  if (!response.ok) {
+    if (response.status >= 400 && response.status < 500) throw new Error(payload.message ?? 'admin.connectionHealth.errors.request')
+    return unknown()
+  }
+  if (!payload || payload.targetId !== targetId || !['success', 'not_sent', 'pending', 'noop'].includes(payload.result ?? '')) return unknown()
+  if (payload.result === 'success' || payload.result === 'noop') {
+    const value = field === 'concurrency' ? payload.concurrency : payload.priority
+    if (!Number.isInteger(value) || Number(value) < 1) return unknown()
+    if ('concurrency' in input && (payload.concurrency !== input.concurrency
+      || (payload.loadFactor !== undefined && (!Number.isFinite(payload.loadFactor) || payload.loadFactor < 0)))) return unknown()
+    if ('mode' in input && input.mode === 'manual' && payload.priority !== input.priority) return unknown()
+    if ('mode' in input && input.mode === 'auto' && Number(payload.priority) <= 9) return unknown()
+  }
+  return { ...payload, targetId, result: payload.result! }
+}
+
+export const saveAccountPriority = (targetId: string, input: AccountPriorityInput): Promise<AccountManagementResult> => {
+  if (input.mode !== 'auto' && (input.mode !== 'manual' || !Number.isInteger(input.priority) || input.priority < 1 || input.priority > 9)) {
+    throw new Error('admin.connectionHealth.errors.priorityManualInvalid')
+  }
+  return requestAccountManagement(targetId, 'priority-owner', input)
+}
+
+export const saveAccountConcurrency = (targetId: string, concurrency: number): Promise<AccountManagementResult> => {
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 1000) throw new Error('admin.connectionHealth.errors.concurrencyInvalid')
+  return requestAccountManagement(targetId, 'concurrency', { concurrency })
+}
 
 const parseAdminGroupHealth = (payload: unknown): AdminGroupHealth[] => {
   if (!Array.isArray(payload)) throw new Error('admin.connectionHealth.errors.request')

@@ -25,6 +25,7 @@ type fakeRepository struct {
 	testConfigurations        []GroupTestConfig
 	testConfigurationErr      error
 	accountTiers              map[string]int
+	healthConfigGenerations   map[string]int64
 	policies                  []Policy
 	states                    map[string]map[string]ConnectionHealthState // connectionID -> modelName -> state
 	events                    []ConnectionHealthEvent

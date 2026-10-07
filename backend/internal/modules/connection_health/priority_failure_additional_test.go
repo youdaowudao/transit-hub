@@ -270,6 +270,9 @@ func TestPrioritySyncRoundTruncatesDisplayButTracksFullLogSignature(t *testing.T
 	log.SetOutput(&output)
 	t.Cleanup(func() { log.SetOutput(previous) })
 	run := func() {
+		for _, state := range states {
+			base.priorityStates["user1|ws1|"+state.TargetID] = state
+		}
 		service.syncWorkspacePriorities(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API}, "user1", "ws1", inventory, true, nil, states)
 	}
 	run()
@@ -318,6 +321,9 @@ func TestPrioritySyncStatusReturnsFailedTargetsWithNames(t *testing.T) {
 	states := make([]PrioritySyncState, 0, 12)
 	for i := 1; i <= 12; i++ {
 		states = append(states, PrioritySyncState{UserID: "user1", AdminAccountID: "ws1", TargetID: fmt.Sprintf("sub2api:ws1:%02d", i), OriginalPriority: 7, LastAppliedPriority: 1})
+	}
+	for _, state := range states {
+		repo.priorityStates["user1|ws1|"+state.TargetID] = state
 	}
 	service.actionInventoryViews.Store(priorityRuntimeLeaseKey("user1", "ws1"), &actionInventoryView{complete: true, names: map[string]string{"01": "库存名字"}})
 	service.updateActionSweepView("user1", "ws1", func(view *actionSweepView) {
@@ -410,6 +416,7 @@ func TestPrioritySyncRoundLogThrottle(t *testing.T) {
 		states := []PrioritySyncState(nil)
 		if id != "" {
 			states = []PrioritySyncState{{UserID: "user1", AdminAccountID: "ws1", TargetID: "sub2api:ws1:" + id, OriginalPriority: 7, LastAppliedPriority: 1}}
+			repo.priorityStates["user1|ws1|"+states[0].TargetID] = states[0]
 		}
 		service.syncWorkspacePriorities(context.Background(), upstream.Session{Platform: upstream.PlatformSub2API}, "user1", "ws1", nil, true, nil, states)
 	}

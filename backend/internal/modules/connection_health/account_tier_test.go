@@ -32,6 +32,8 @@ func (tierLocalOnlySitesReader) RequireSession(context.Context, string, string) 
 }
 
 func (f *fakeRepository) GetAccountTier(_ context.Context, userID, workspaceID, targetID string) (int, error) {
+	f.testConfigurationMu.Lock()
+	defer f.testConfigurationMu.Unlock()
 	if tier := f.accountTiers[userID+"|"+workspaceID+"|"+targetID]; tier != 0 {
 		return tier, nil
 	}
@@ -47,6 +49,8 @@ func (f *fakeRepository) SaveAccountTier(_ context.Context, userID, workspaceID,
 }
 
 func (f *fakeRepository) ListAccountTiers(_ context.Context, userID, workspaceID string) (map[string]int, error) {
+	f.testConfigurationMu.Lock()
+	defer f.testConfigurationMu.Unlock()
 	result := make(map[string]int)
 	prefix := userID + "|" + workspaceID + "|"
 	for key, tier := range f.accountTiers {
@@ -84,7 +88,7 @@ func requireTierResponse(t *testing.T, response *httptest.ResponseRecorder, targ
 }
 
 // Same account is both a protected manual target and visible in two groups.
-// A tier save must not reconcile, clear, or reinterpret any existing state.
+// Tier changes enqueue sorting while preserving existing protected action state.
 func accountTierFixture() (*Service, *fakeRepository, *fakeTargetPriorityActioner) {
 	repo := newFakeRepository()
 	targetID := "sub2api:ws1:shared"
@@ -106,10 +110,9 @@ func accountTierFixture() (*Service, *fakeRepository, *fakeTargetPriorityActione
 
 func TestAccountTierDefaultAndBothDirectionsPreserveProtectedState(t *testing.T) {
 	svc, repo, actions := accountTierFixture()
-	svc.mySites = tierLocalOnlySitesReader{}
 	targetID := "sub2api:ws1:shared"
 	snapshot := func() string {
-		data, err := json.Marshal([]any{repo.states, repo.priorityStates, repo.priorityWorkspaces, repo.targetActionStates, repo.events, repo.assignments, repo.groupAssignments})
+		data, err := json.Marshal([]any{repo.states, repo.priorityStates, repo.targetActionStates, repo.events, repo.assignments, repo.groupAssignments})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -122,6 +125,10 @@ func TestAccountTierDefaultAndBothDirectionsPreserveProtectedState(t *testing.T)
 	}
 	for _, tier := range []int{1, 2, 1} {
 		requireTierResponse(t, tierRequest(svc, "PUT", "user1", targetID, fmt.Sprintf(`{"accountTier":%d}`, tier)), targetID, tier)
+		waitForPriorityAsyncIdle(t)
+		if repo.fakeWorkspaceHealthSettings("user1", "ws1").ConfigGeneration < 1 || repo.priorityWorkspaces["user1|ws1"].LastActionSource != "account_tier_save" {
+			t.Fatal("tier change did not atomically invalidate decisions and request sorting")
+		}
 		requireTierResponse(t, tierRequest(svc, "GET", "user1", targetID, ""), targetID, tier)
 		if got := snapshot(); got != before {
 			t.Fatalf("tier %d changed protected business state\nbefore=%s\nafter=%s", tier, before, got)
@@ -228,6 +235,7 @@ func TestAccountTierUserAndWorkspaceReadWriteIsolation(t *testing.T) {
 		svc.accounts = fakeAdminAccountResolver{id: tc.ws}
 		requireTierResponse(t, tierRequest(svc, "GET", tc.user, tc.target, ""), tc.target, 2)
 		requireTierResponse(t, tierRequest(svc, "PUT", tc.user, tc.target, fmt.Sprintf(`{"accountTier":%d}`, tc.tier)), tc.target, tc.tier)
+		waitForPriorityAsyncIdle(t)
 	}
 	svc.accounts = fakeAdminAccountResolver{id: "ws1"}
 	requireTierResponse(t, tierRequest(svc, "GET", "user1", "sub2api:ws1:shared", ""), "sub2api:ws1:shared", 1)

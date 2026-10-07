@@ -23,6 +23,7 @@ const editing = ref(false)
 const draft = ref<AccountTier>(2)
 const saving = computed(() => savingTargets.has(props.targetId))
 const errorKey = ref('')
+const savedNotice = ref(false)
 let operation = 0
 const errorMessage = computed(() => te(errorKey.value) ? t(errorKey.value) : t('admin.connectionHealth.errors.request'))
 
@@ -30,6 +31,7 @@ const reset = () => {
   operation++
   editing.value = false
   errorKey.value = ''
+  savedNotice.value = false
 }
 watch(() => props.targetId, reset)
 onBeforeUnmount(reset)
@@ -52,6 +54,7 @@ const save = async () => {
     if (operation !== currentOperation || props.targetId !== targetId) return
     emit('saved', result)
     editing.value = false
+    savedNotice.value = true
   } catch (error) {
     if (operation !== currentOperation || props.targetId !== targetId) return
     errorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
@@ -89,5 +92,6 @@ const save = async () => {
       </Tooltip>
       <p v-if="errorKey" role="alert" class="w-full break-words text-xs text-red-600 dark:text-red-400">{{ errorMessage }}</p>
     </form>
+    <p v-if="savedNotice" class="mt-0.5 text-[11px] text-muted-foreground">{{ t(`${prefix}.saved`) }}</p>
   </div>
 </template>

@@ -19,7 +19,7 @@ test('connection-health core gate keeps every question-answer regression member'
     'connection-health-today-accuracy.behavior.test.ts',
     'connection-health-intelligence-weight.behavior.test.ts',
     'connection-health-account-tier.behavior.test.ts',
-    'connection-health-priority-candidates.behavior.test.ts',
+    'connection-health-account-management.behavior.test.ts',
     'connection-health-priority-failure-reason.behavior.test.ts',
     'connection-health-quick-probe.behavior.test.ts',
     'group-health-setup-exclusion-outcome.behavior.test.ts',
@@ -35,6 +35,7 @@ test('connection-health core gate keeps every question-answer regression member'
     assert.match(script, new RegExp(member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   }
   assert.match(script, /go test -race/)
+  assert.doesNotMatch(script, /connection-health-priority-candidates\.behavior\.test\.ts/)
 })
 
 test('full gate runs fixture safety and guards core membership', async () => {
@@ -52,6 +53,8 @@ test('full gate runs fixture safety and guards core membership', async () => {
 test('connection-health core gate includes protocol concurrency contracts', async () => {
   const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
   assert.match(script, /go test -race[^\n]+Priority\|Scheduler\|Refresh\|Sync\|Regression\|Protocol\|ActionCheckpoint\|ActionDiagnostics\|ActionDispatch\|RuntimeLease/)
+  assert.match(script, /go test -race[^\n]+TierSort\|ManualSettings\|TaskB/)
+  assert.match(script, /go test -race \.\/internal\/modules\/upstream -run 'TestTaskBConcurrency'/)
 })
 
 test('core gate retains globalization recipient, language and amount regressions', async () => {

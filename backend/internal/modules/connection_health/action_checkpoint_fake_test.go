@@ -187,7 +187,31 @@ func (f *fakeRepository) leaseValidForClaim(claim RemoteActionClaim) bool {
 		m := f.actionLeases[claim.MutationLeaseKey]
 		valid = valid && m != nil && m.OwnerID == claim.MutationOwnerID && m.Context.Err() == nil
 	}
+	if claim.WorkspaceLeaseKey != "" {
+		w := f.actionLeases[claim.WorkspaceLeaseKey]
+		valid = valid && w != nil && w.OwnerID == claim.WorkspaceOwnerID && w.Context.Err() == nil
+	}
 	return valid
+}
+
+func (f *fakeRepository) MutateIdlePriorityCheckpoint(ctx context.Context, change IdlePriorityCheckpointMutation) (RemoteActionCheckpoints, error) {
+	f.testConfigurationMu.Lock()
+	defer f.testConfigurationMu.Unlock()
+	f.actionMu.Lock()
+	defer f.actionMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return RemoteActionCheckpoints{}, err
+	}
+	if change.ConfigGeneration != nil && f.fakeConfigGenerationKnown(change.UserID, change.AdminAccountID) && f.fakeWorkspaceHealthSettings(change.UserID, change.AdminAccountID).ConfigGeneration != *change.ConfigGeneration {
+		return RemoteActionCheckpoints{}, ErrRemoteActionEvidenceChanged
+	}
+	before := f.actionPair(change.RemoteActionScope)
+	pair := cloneActionPair(before)
+	if err := mutateIdlePriorityCheckpoint(&pair, change); err != nil {
+		return pair, err
+	}
+	f.writeActionPair(change.RemoteActionScope, before, pair)
+	return pair, nil
 }
 
 func (f *fakeRepository) ClaimRemoteAction(ctx context.Context, claim RemoteActionClaim) (bool, error) {
@@ -201,6 +225,9 @@ func (f *fakeRepository) ClaimRemoteAction(ctx context.Context, claim RemoteActi
 	}
 	if !f.leaseValidForClaim(claim) {
 		return false, ErrRemoteActionLeaseLost
+	}
+	if claim.Guard.ConfigGeneration != nil && f.fakeConfigGenerationKnown(claim.UserID, claim.AdminAccountID) && f.fakeWorkspaceHealthSettings(claim.UserID, claim.AdminAccountID).ConfigGeneration != *claim.Guard.ConfigGeneration {
+		return false, ErrRemoteActionEvidenceChanged
 	}
 	if claim.Guard.ExpectedPriorityGeneration != nil {
 		if f.priorityGenerationErr != nil {
@@ -249,6 +276,8 @@ func (f *fakeRepository) ClaimRemoteAction(ctx context.Context, claim RemoteActi
 }
 
 func (f *fakeRepository) PermitRemoteAction(ctx context.Context, claim RemoteActionClaim) (bool, error) {
+	f.testConfigurationMu.Lock()
+	defer f.testConfigurationMu.Unlock()
 	f.actionMu.Lock()
 	defer f.actionMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -257,6 +286,10 @@ func (f *fakeRepository) PermitRemoteAction(ctx context.Context, claim RemoteAct
 	if !f.leaseValidForClaim(claim) {
 		return false, ErrRemoteActionLeaseLost
 	}
+	if claim.Guard.ConfigGeneration != nil && f.fakeConfigGenerationKnown(claim.UserID, claim.AdminAccountID) && f.fakeWorkspaceHealthSettings(claim.UserID, claim.AdminAccountID).ConfigGeneration != *claim.Guard.ConfigGeneration {
+		return false, ErrRemoteActionEvidenceChanged
+	}
+
 	before := f.actionPair(claim.RemoteActionScope)
 	pair := cloneActionPair(before)
 	if !permitRemoteAction(&pair, claim) {

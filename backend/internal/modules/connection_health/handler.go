@@ -43,6 +43,8 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/intelligence-weight", handler.ignoreRetiredIntelligenceWeight)
 	mux.HandleFunc("GET /api/connection-health/targets/{id}/tier", handler.getAccountTier)
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/tier", handler.putAccountTier)
+	mux.HandleFunc("PUT /api/connection-health/targets/{id}/priority-owner", handler.putTargetPriorityOwner)
+	mux.HandleFunc("PUT /api/connection-health/targets/{id}/concurrency", handler.putTargetConcurrency)
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/disable", handler.disable)
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/restore", handler.restore)
 	mux.HandleFunc("GET /api/connection-health/policies", handler.listPolicies)
@@ -932,6 +934,10 @@ func writeError(w http.ResponseWriter, err error) {
 		httpjson.WriteError(w, http.StatusConflict, "admin.connectionHealth.errors.remoteActionPending")
 		return
 	}
+	if errors.Is(err, ErrRemoteActionEvidenceChanged) || errors.Is(err, ErrRemoteActionLeaseLost) {
+		httpjson.WriteError(w, http.StatusConflict, "admin.connectionHealth.errors.remoteActionPending")
+		return
+	}
 	var requestErr requestError
 	if errors.As(err, &requestErr) {
 		status := http.StatusBadRequest
@@ -945,6 +951,9 @@ func writeError(w http.ResponseWriter, err error) {
 			status = http.StatusConflict
 		}
 		if requestErr == requestError(ErrorQuestionAnswerContractMismatch) || requestErr == requestError(ErrorQuestionAnswerJudgmentForbidden) {
+			status = http.StatusConflict
+		}
+		if requestErr == requestError(ErrorPrioritySyncBusy) {
 			status = http.StatusConflict
 		}
 		if requestErr == requestError(ErrorSub2APIGroupLastUsable) || requestErr == requestError(ErrorSub2APIInventoryIncomplete) {

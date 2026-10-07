@@ -74,3 +74,14 @@ test('core gate retains globalization recipient, language and amount regressions
     assert.ok(script.includes(member), `missing globalization core regression: ${member}`)
   }
 })
+
+test('core gate includes C5 import settings and retained group rates behavior', async () => {
+  const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
+  for (const member of [
+    './internal/modules/my_sites',
+    'group-rates-import-settings.behavior.test.ts',
+    'group-rates-missing-connection.behavior.test.ts',
+  ]) {
+    assert.ok(script.includes(member), `missing C5 core regression: ${member}`)
+  }
+})

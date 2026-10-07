@@ -24,6 +24,11 @@ vi.mock('vue-router', () => ({
   useRouter: () => ({ push: harness.routerPush, replace: harness.routerReplace }),
 }))
 
+vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
+  const { ref } = await import('vue')
+  return { useAdminAccounts: () => ({ currentAccount: ref({ id: 'workspace-c5' }) }) }
+})
+
 vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
   getDashboardAdminStatus: vi.fn(async () => ({ platform: 'sub2api' })),
 }))
@@ -438,7 +443,7 @@ describe('safe real-connect compensation rejection', () => {
     await dialog.get('form').trigger('submit')
     await flushPromises()
     expect(harness.realConnect).toHaveBeenCalledTimes(1)
-    expect(harness.realConnect).toHaveBeenCalledWith(expect.objectContaining({ ownGroupIds: ['10'], operationId: expect.any(String) }))
+    expect(harness.realConnect).toHaveBeenCalledWith(expect.objectContaining({ ownGroupIds: ['10'], operationId: expect.any(String) }), expect.any(String))
     expect(dialog.text()).toContain('账号清理尚未确认')
     expect(dialog.text()).toContain('本地记录未保存')
     expect(dialog.text()).not.toContain('本地记录已保留')
@@ -460,7 +465,7 @@ describe('safe real-connect compensation rejection', () => {
     expect(harness.listGroupRates).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps the original generic error for an unrecognized create failure', async () => {
+  it('keeps an unrecognized create result pending and prohibits a new operation retry', async () => {
     harness.listRealConnections.mockResolvedValue([])
     harness.getMySiteMappingOptions.mockResolvedValue({ ownGroups: [{ id: '10', groupName: '隔离分组', platform: 'openai', multiplier: 1 }], mappings: [] })
     harness.realConnect.mockRejectedValueOnce(new Error('unrecognized-create-error'))
@@ -471,7 +476,10 @@ describe('safe real-connect compensation rejection', () => {
     await dialog.findAll('label').find(label => label.text().includes('隔离分组'))!.get('input[type="checkbox"]').setValue(true)
     await dialog.get('form').trigger('submit')
     await flushPromises()
-    expect(dialog.text()).toContain('真实对接创建失败')
+    expect(dialog.text()).toContain('未取得可信的导入结果')
+    expect(dialog.text()).toContain('勿再次导入')
+    expect(dialog.get('button[type="submit"]').element).toHaveProperty('disabled', true)
+    expect(dialog.text()).not.toContain('真实对接创建失败')
     expect(dialog.text()).not.toContain('待核对资源')
     expect(dialog.text()).not.toContain('unrecognized-create-error')
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true)

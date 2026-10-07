@@ -61,37 +61,30 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	health.RegisterRoutes(server.mux)
 	authService := auth.NewService(auth.NewRepository(db))
 	server.authService = authService
-	if err := authService.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, authService.EnsureSchema)
 
 	// 管理员初始化：数据库就绪后、注册路由前执行
-	if err := authService.BootstrapAdmin(context.Background(), cfg.AdminEmail, cfg.AdminPassword); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, func(ctx context.Context) error {
+		return authService.BootstrapAdmin(ctx, cfg.AdminEmail, cfg.AdminPassword)
+	})
 
 	auth.RegisterRoutes(server.mux, authService)
 	users.RegisterRoutes(server.mux, users.NewService(users.NewRepository(db)))
 	adminAccountsService := admin_accounts.NewService(admin_accounts.NewRepository(db))
 	upstreamRepository := upstream.NewRepository(db)
-	if err := upstreamRepository.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, upstreamRepository.EnsureSchema)
 	groupRatesService := group_rates.NewService(group_rates.NewRepository(db))
-	if err := groupRatesService.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, groupRatesService.EnsureSchema)
 	group_rates.RegisterRoutes(server.mux, groupRatesService, adminAccountsService)
 	upstreamHTTPClient := &http.Client{Timeout: upstreamRequestTimeout}
 	platformService := upstream.NewPlatformService(upstream.NewHTTPClient(upstreamHTTPClient))
 	upstreamCache := upstream.NewRedisSiteCache(redisClient)
 	upstreamService := upstream.NewService(platformService, upstreamRepository, groupRateSnapshotWriter{service: groupRatesService}, upstreamCache)
+	upstreamService.SetBackgroundTasksDisabled(cfg.APIOnly)
 	upstreamService.SetAdminAccountResolver(adminAccountsService)
 	upstream.RegisterRoutes(server.mux, upstreamService, adminAccountsService)
 	mySitesService := my_sites.NewService(my_sites.NewRepository(db), platformService, upstreamService)
-	if err := mySitesService.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, mySitesService.EnsureSchema)
 	upstreamService.SetSiteReferenceChecker(mySitesService)
 	my_sites.RegisterRoutes(server.mux, mySitesService)
 	mySitesService.SetAdminAccountResolver(adminAccountsService)
@@ -99,12 +92,14 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	// 工单模块：iframe 嵌入配置 + 工单/回复。公开 iframe 接口鉴权完全依赖 embedToken/Sub2API
 	// token 换取的 embed session，与 TransitHub 登录态无关，因此不加入 protectedPath（见下方）。
 	ticketsRepository := tickets.NewRepository(db)
-	if err := ticketsRepository.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, ticketsRepository.EnsureSchema)
 	ticketsSub2APIClient := tickets.NewSub2APIClient(&http.Client{Timeout: upstreamRequestTimeout})
 	ticketsSessions := tickets.NewEmbedSessionStore(redisClient)
-	ticketsStorage, err := tickets.NewAttachmentStorage(cfg.TicketUploadDir)
+	openAttachments := tickets.NewAttachmentStorage
+	if cfg.APIOnly {
+		openAttachments = tickets.OpenAttachmentStorage
+	}
+	ticketsStorage, err := openAttachments(cfg.TicketUploadDir)
 	if err != nil {
 		panic(err)
 	}
@@ -123,9 +118,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	leaderboardSub2APIClient := leaderboard.NewSub2APIClient(&http.Client{Timeout: upstreamRequestTimeout})
 	leaderboardService := leaderboard.NewService(leaderboardRepository, leaderboardSessions, leaderboardSub2APIClient, platformService, mySitesService)
 	leaderboardService.SetAdminAccountResolver(adminAccountsService)
-	if err := leaderboardService.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, leaderboardService.EnsureSchema)
 	server.leaderboardFrameAncestorOrigin = leaderboardService.FrameAncestorOrigin
 	leaderboard.RegisterRoutes(server.mux, leaderboardService)
 
@@ -140,17 +133,13 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	lotteryService.SetAdminAccountResolver(adminAccountsService)
 	lotteryService.SetSubscriptionGroupProvider(platformService)
 	lotteryService.SetAllowPrivateTargets(cfg.LotteryAllowPrivateSub2APITargets)
-	if err := lotteryService.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, lotteryService.EnsureSchema)
 	server.lotteryFrameAncestorOrigin = lotteryService.FrameAncestorOrigin
 	lottery.RegisterRoutes(server.mux, lotteryService)
 
 	settingsService := settings.NewService(&http.Client{Timeout: upstreamRequestTimeout}, settings.NewRepository(db))
 	settingsService.SetAdminAccountResolver(adminAccountsService)
-	if err := settingsService.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, settingsService.EnsureSchema)
 	// SMTP_ENCRYPTION_KEY 是可选项：空值不影响启动；显式配置了非法值（非 base64 或非 32 字节）
 	// 必须尽早启动失败，避免运行时才发现加密能力不可用。抽成 configureSMTPEncryptionKey
 	// 这个窄 seam，便于在不启动真实 DB/Redis 依赖的情况下单元测试这条组装路径。
@@ -161,15 +150,11 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	// dashboard 指标表必须在 admin_accounts 之前完成 schema，
 	// 因为 admin_accounts.EnsureSchema 的 legacy 迁移会 UPDATE dashboard 表。
 	metricsRepo := dashboard.NewMetricsRepository(db)
-	if err := metricsRepo.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, metricsRepo.EnsureSchema)
 
 	// admin_accounts 最后执行 schema：此时所有业务表和 workspace 字段已存在，
 	// legacy 迁移可以安全地 UPDATE 所有业务表的 admin_account_id。
-	if err := adminAccountsService.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, adminAccountsService.EnsureSchema)
 	admin_accounts.RegisterRoutes(server.mux, adminAccountsService)
 
 	// 注入机器人通知能力，供自动调价成功后发送通知。
@@ -183,9 +168,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		platformService,
 		settingsService,
 	)
-	if err := massEmailService.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, massEmailService.EnsureSchema)
 	mass_email.RegisterRoutes(server.mux, massEmailService, adminAccountsService)
 	massEmailWorker := mass_email.NewWorker(massEmailService)
 
@@ -205,28 +188,27 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 			SchedulerInterval:    cfg.GroupRateCampaignSchedulerInterval,
 		},
 	)
-	if err := campaignsService.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, campaignsService.EnsureSchema)
 	campaignsService.SetAdminAccountResolver(adminAccountsService)
 	group_rate_campaigns.RegisterRoutes(server.mux, campaignsService, adminAccountsService)
 
 	// 分组健康探活模块：数据源为 real_connections（通过 mySitesService 只读接口），
 	// upstreamService 提供站点 base_url/平台类型查询，platformService 提供 new-api 远端降级/恢复能力。
 	// 不新增手动配置的探活目标，也不改变 my_sites/upstream 现有数据语义。
-	connHealthService := connection_health.NewService(
+	connHealthService := connection_health.NewServiceWithBackgroundTasks(
 		connection_health.NewRepository(db),
 		mySitesService,
 		upstreamService,
 		platformService,
+		!cfg.APIOnly,
 	)
 	connHealthService.SetProbeGlobalConcurrency(cfg.ProbeGlobalConcurrency)
-	if err := connHealthService.EnsureSchema(context.Background()); err != nil {
-		panic(err)
-	}
+	runStorageStartup(cfg, connHealthService.EnsureSchema)
 	connHealthService.SetAdminAccountResolver(adminAccountsService)
 	connHealthService.SetUpstreamSyncCoordinator(upstreamService)
-	upstreamService.SetSiteLoginSuccessCallback(connHealthService.NotifySiteLoginSucceeded)
+	if !cfg.APIOnly {
+		upstreamService.SetSiteLoginSuccessCallback(connHealthService.NotifySiteLoginSucceeded)
+	}
 	connHealthService.SetGroupCostReader(upstreamService)
 	// 注入平台中性的分组/账号读取能力：admin 分组健康主列表用它拉取 admin 全量分组及
 	// 分组下账号/渠道，叠加 real_connections 探活状态。platformService 已实现所需方法。
@@ -238,21 +220,18 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 
 	// 所有 workspace 表 schema 完成后再补 legacy 归属；随后才启动 restore、worker 和 scheduler，
 	// 避免后台任务在旧行尚未补齐 workspace 时读取或写回数据。
-	if err := adminAccountsService.AssignLegacyRows(context.Background()); err != nil {
-		panic(err)
+	runStorageStartup(cfg, adminAccountsService.AssignLegacyRows, upstreamService.RestoreSavedSites)
+	if !cfg.APIOnly {
+		massEmailWorker.Start(context.Background())
+		campaignsService.StartScheduler(context.Background())
+		lotteryCtx, lotteryCancel := context.WithCancel(context.Background())
+		lotteryWorker := lottery.NewWorker(lotteryService)
+		lotteryWorker.Start(lotteryCtx)
+		lotteryService.StartScheduler(lotteryCtx)
+		server.lotteryCancel = lotteryCancel
+		server.lotteryWorker = lotteryWorker
+		connHealthService.StartScheduler(context.Background())
 	}
-	if err := upstreamService.RestoreSavedSites(context.Background()); err != nil {
-		panic(err)
-	}
-	massEmailWorker.Start(context.Background())
-	campaignsService.StartScheduler(context.Background())
-	lotteryCtx, lotteryCancel := context.WithCancel(context.Background())
-	lotteryWorker := lottery.NewWorker(lotteryService)
-	lotteryWorker.Start(lotteryCtx)
-	lotteryService.StartScheduler(lotteryCtx)
-	server.lotteryCancel = lotteryCancel
-	server.lotteryWorker = lotteryWorker
-	connHealthService.StartScheduler(context.Background())
 
 	// 策略设置变更时通知上游服务更新定时同步配置。
 	applyRefreshConfig := func(userID, adminAccountID string, s settings.StrategySettings) {
@@ -261,11 +240,15 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 			Interval: time.Duration(s.RefreshInterval) * time.Second,
 		})
 	}
-	settingsService.OnStrategyChanged = applyRefreshConfig
+	if !cfg.APIOnly {
+		settingsService.OnStrategyChanged = applyRefreshConfig
+	}
 
 	// 启动时恢复所有工作区的策略设置，按各自配置决定是否开启定时同步。
-	if err := restoreWorkspaceRefreshConfigs(context.Background(), settingsService, upstreamService); err != nil {
-		log.Printf("[settings] 恢复工作区刷新配置失败: %v", err)
+	if !cfg.APIOnly {
+		if err := restoreWorkspaceRefreshConfigs(context.Background(), settingsService, upstreamService); err != nil {
+			log.Printf("[settings] 恢复工作区刷新配置失败: %v", err)
+		}
 	}
 
 	settings.RegisterRoutes(server.mux, settingsService)
@@ -284,8 +267,10 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		attachments:         ticketsStorage,
 		upstreamSites:       upstreamService,
 	})
-	adminAccountsService.StartCleanupWorker(context.Background(), time.Minute)
-	dashboardService.StartRefresher(context.Background())
+	if !cfg.APIOnly {
+		adminAccountsService.StartCleanupWorker(context.Background(), time.Minute)
+		dashboardService.StartRefresher(context.Background())
+	}
 
 	// 仪表盘指标服务：实时计算五项核心指标 + 历史趋势快照。
 	// 复用 dashboard 的 Redis 会话存储与 sub2api 平台客户端，
@@ -295,24 +280,26 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	metricsService.SetRealConnectionReader(mySitesService)
 
 	// 站点同步成功后检查余额预警和倍率变更，按配置发送通知。
-	upstreamService.AfterSync = func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics, oldStatus, newStatus upstream.Status) {
-		// 补查独立排队，不等待历史上游请求，也不依赖通知设置读取成功。
-		go func() {
-			if err := metricsService.RecoverSiteCostsAfterSync(ctx, userID, adminAccountID, siteID, oldMetrics, newMetrics, oldStatus, newStatus); err != nil {
-				log.Printf("dashboard recovery failed user_id=%s workspace_id=%s site_id=%s err=%v", userID, adminAccountID, siteID, err)
+	if !cfg.APIOnly {
+		upstreamService.AfterSync = func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics, oldStatus, newStatus upstream.Status) {
+			// 补查独立排队，不等待历史上游请求，也不依赖通知设置读取成功。
+			go func() {
+				if err := metricsService.RecoverSiteCostsAfterSync(ctx, userID, adminAccountID, siteID, oldMetrics, newMetrics, oldStatus, newStatus); err != nil {
+					log.Printf("dashboard recovery failed user_id=%s workspace_id=%s site_id=%s err=%v", userID, adminAccountID, siteID, err)
+				}
+			}()
+			strategy, err := settingsService.GetStrategyForWorkspace(ctx, userID, adminAccountID)
+			if err != nil {
+				return
 			}
-		}()
-		strategy, err := settingsService.GetStrategyForWorkspace(ctx, userID, adminAccountID)
-		if err != nil {
-			return
+			checkBalanceWarning(ctx, settingsService, upstreamService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
+			checkMultiplierChanges(ctx, settingsService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
+			// 自动调价：分组级 enableAutoPricing 是唯一开关，Service 内部逐 mapping 判断。
+			mySitesService.ApplyAutoPricingAfterSync(ctx, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
 		}
-		checkBalanceWarning(ctx, settingsService, upstreamService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
-		checkMultiplierChanges(ctx, settingsService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
-		// 自动调价：分组级 enableAutoPricing 是唯一开关，Service 内部逐 mapping 判断。
-		mySitesService.ApplyAutoPricingAfterSync(ctx, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
-	}
 
-	metricsService.StartScheduler(context.Background())
+		metricsService.StartScheduler(context.Background())
+	}
 	dashboard.RegisterRoutes(server.mux, dashboardService, metricsService)
 
 	// 系统信息 API：开源版仅保留版本号展示
@@ -320,6 +307,19 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	system.RegisterRoutes(server.mux, systemService)
 
 	return server
+}
+
+// runStorageStartup preserves the established default initialization order. An
+// API-only instance must bind existing storage without DDL, bootstraps or restore.
+func runStorageStartup(cfg config.Config, tasks ...func(context.Context) error) {
+	if cfg.APIOnly {
+		return
+	}
+	for _, task := range tasks {
+		if err := task(context.Background()); err != nil {
+			panic(err)
+		}
+	}
 }
 
 type workspaceStrategyProvider interface {

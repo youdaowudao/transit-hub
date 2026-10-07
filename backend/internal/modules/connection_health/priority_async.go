@@ -283,6 +283,9 @@ func (s *Service) priorityWorkspaceEmptySignatureWritable(ctx context.Context, u
 // Every queued job carries the transaction's generation, so an older failure cannot
 // mark a newer save as failed or hold it in backoff.
 func (s *Service) triggerPrioritySync(userID string, adminAccountID string, pendingSignature string) {
+	if s.backgroundTasksDisabled {
+		return
+	}
 	if pendingSignature == "" {
 		return
 	}
@@ -321,6 +324,9 @@ func (s *Service) triggerPrioritySync(userID string, adminAccountID string, pend
 // health sync must not overwrite configuration generations, and its durable failure
 // state is guarded by an empty pending signature.
 func (s *Service) triggerHealthPrioritySyncAfterCommit(userID string, adminAccountID string) {
+	if s.backgroundTasksDisabled {
+		return
+	}
 	if s.priorityActions == nil || s.platformGroups == nil {
 		s.markPriorityWorkspaceHealthSyncFailed(userID, adminAccountID, requestError(ErrorPrioritySyncUnavailable), 1, nil)
 		return

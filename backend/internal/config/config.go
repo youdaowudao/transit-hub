@@ -12,7 +12,7 @@ const (
 	defaultPort       = "10621"
 	defaultRedisURL   = "redis://127.0.0.1:6379/0"
 	defaultPublicDir  = "/app/public"
-	defaultAppVersion = "V2.9.5"
+	defaultAppVersion = "V2.9.6"
 )
 
 type Config struct {
@@ -22,6 +22,9 @@ type Config struct {
 	RedisURL    string
 	CORSOrigins []string
 	PublicDir   string // 前端静态文件目录，生产默认 /app/public
+	// APIOnly 仅复用已经初始化的存储，禁止本实例执行启动初始化或后台任务。
+	// 必须显式设置 TRANSITHUB_API_ONLY=1；正常运行默认关闭。
+	APIOnly bool
 
 	// 初始化管理员
 	AdminEmail    string
@@ -66,6 +69,7 @@ func Load() Config {
 		RedisURL:    envOrDefault("REDIS_URL", defaultRedisURL),
 		CORSOrigins: splitOrigins(os.Getenv("CORS_ORIGINS")),
 		PublicDir:   envOrDefault("PUBLIC_DIR", defaultPublicDir),
+		APIOnly:     os.Getenv("TRANSITHUB_API_ONLY") == "1",
 
 		AdminEmail:    os.Getenv("ADMIN_EMAIL"),
 		AdminPassword: os.Getenv("ADMIN_PASSWORD"),

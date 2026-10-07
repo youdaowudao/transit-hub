@@ -24,9 +24,13 @@ func TestStageACompensationWithoutSafeDeletePreservesBothResources(t *testing.T)
 		case req.Method == http.MethodGet && req.URL.Path == "/api/v1/admin/groups":
 			payload = `{"data":[{"id":7,"name":"vip","platform":"openai","status":"active"}]}`
 		case req.Method == http.MethodPost && req.URL.Path == "/api/v1/keys":
-			payload = `{"data":{"id":11,"key":"synthetic-test-key"}}`
+			payload = `{"code":0,"data":{"id":11,"key":"synthetic-test-key"}}`
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "sync-upstream-preview"):
+			payload = `{"code":0,"data":{"models":["live-a"]}}`
 		case req.Method == http.MethodPost && req.URL.Path == "/api/v1/admin/accounts":
-			payload = `{"data":{"id":22}}`
+			payload = `{"code":0,"data":{"id":22}}`
+		case req.Method == http.MethodGet && req.URL.Path == "/api/v1/admin/accounts/22":
+			payload = c5SingleAccountFixture("safe-account")
 		case req.Method == http.MethodDelete:
 			deleteCalls++
 			payload = `{"success":true}`
@@ -37,7 +41,7 @@ func TestStageACompensationWithoutSafeDeletePreservesBothResources(t *testing.T)
 	})
 	session := platformTestSession(upstream.PlatformSub2API, "http://127.0.0.1:8080")
 	stateRepo := &testStateRepo{state: &State{UserID: "user-1", AdminAccountID: "admin-1", Session: session, Mappings: []GroupMapping{}}}
-	connRepo := &testConnRepo{stateRepo: stateRepo, saveErr: errors.New("database unavailable")}
+	connRepo := &testConnRepo{stateRepo: stateRepo, saveErr: &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: errors.New("database unavailable")}}
 	lookup := testUpstreamLookup{sites: map[string]*upstream.Site{"site-1": {ID: "site-1", UserID: "user-1", AdminAccountID: "admin-1", Name: "source", BaseURL: session.BaseURL, Platform: upstream.PlatformSub2API, Session: &session, Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{{ID: "7", Name: "vip", Platform: stringPointer("openai")}}}}}}
 	service := NewService(stateRepo, upstream.NewPlatformService(upstream.NewHTTPClient(&http.Client{Transport: transport})), lookup)
 	service.SetAdminAccountResolver(testAdminResolver{currentID: "admin-1"})

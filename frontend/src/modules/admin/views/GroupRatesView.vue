@@ -7,14 +7,17 @@ import { checkRealConnections, getMySiteMappingOptions, realConnect, realBind, l
 import { getDashboardAdminStatus } from '../api/dashboardAdmin'
 import { listUpstreamSites } from '../api/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
+import { useAdminAccounts } from '../composables/useAdminAccounts'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
-import type { AdminResourceOption, ConnectionCapabilities, MySiteMapping, MySiteMappingOwnGroupOption, RealConnection, UpstreamKeyItem } from '../types/mySites'
+import type { AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, UpstreamKeyItem } from '../types/mySites'
+import type { ImportApiError } from '../api/mySites'
 import type { UpstreamSiteResponse } from '../types/upstream'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
 
 import { t, te, locale } from '@/locales'
 const router = useRouter()
 const route = useRoute()
+const { currentAccount } = useAdminAccounts()
 
 const {
   rates,
@@ -122,6 +125,77 @@ const selectedAdminResourceId = ref('')
 const isLoadingAdminResources = ref(false)
 const addToPricingMapping = ref(true)
 const connectOperationId = ref('')
+const connectOutcome = ref<'editing' | 'submitting' | 'succeeded' | 'failed' | 'pending'>('editing')
+const connectPriorityMode = ref<ImportAccountSettings['priorityMode']>('automatic')
+const connectPriority = ref<string | number>('100')
+const connectAutomaticPriority = ref<string | number>('100')
+const connectConcurrency = ref<string | number>('50')
+const connectPassthrough = ref(false)
+const connectPoolMode = ref(true)
+const connectProbeEnabled = ref(true)
+const connectFailure = ref<ImportFailure | null>(null)
+const connectResult = ref<RealConnectResponse | null>(null)
+const connectRefreshError = ref('')
+const connectGroupSelectionNotice = ref('')
+let connectorGeneration = 0
+let pageIsMounted = true
+const connectSubmitLocked = ref(false)
+const isC5Import = computed(() => connectMode.value === 'real' && adminPlatform.value === 'sub2api')
+const connectPlatform = computed(() => (connectingRate.value?.type || selectedGroupType.value).toLowerCase())
+const supportsConnectPassthrough = computed(() => ['openai', 'anthropic'].includes(connectPlatform.value))
+const connectFormLocked = computed(() => isActionLoading.value || ['submitting', 'succeeded', 'pending'].includes(connectOutcome.value))
+const validIntegerInput = (value: string | number, minimum: number, maximum: number): boolean => (
+  String(value).trim() !== '' && Number.isInteger(Number(value)) && Number(value) >= minimum && Number(value) <= maximum
+)
+const connectPriorityError = computed(() => validIntegerInput(connectPriority.value, connectPriorityMode.value === 'manual' ? 1 : 10, connectPriorityMode.value === 'manual' ? 9 : 2147483647)
+  ? '' : t(connectPriorityMode.value === 'manual' ? 'admin.groupRates.connect.importSettings.manualPriorityError' : 'admin.groupRates.connect.importSettings.automaticPriorityError'))
+const connectConcurrencyError = computed(() => validIntegerInput(connectConcurrency.value, 1, 1000)
+  ? '' : t('admin.groupRates.connect.importSettings.concurrencyError'))
+const resetImportSettings = () => {
+  connectPriorityMode.value = 'automatic'
+  connectPriority.value = '100'
+  connectAutomaticPriority.value = '100'
+  connectConcurrency.value = '50'
+  connectPassthrough.value = false
+  connectPoolMode.value = true
+  connectProbeEnabled.value = true
+}
+const setConnectPriorityMode = (mode: ImportAccountSettings['priorityMode']) => {
+  if (connectFormLocked.value || mode === connectPriorityMode.value) return
+  if (mode === 'manual') {
+    connectAutomaticPriority.value = connectPriority.value
+    connectPriority.value = '1'
+  } else connectPriority.value = connectAutomaticPriority.value
+  connectPriorityMode.value = mode
+}
+const connectConfiguration = computed<ImportConfiguration | null>(() => connectResult.value?.configuration ?? null)
+const connectModelSummary = computed(() => {
+  const config = connectConfiguration.value
+  if (!config) return ''
+  return t(`admin.groupRates.connect.importResult.models.${config.modelState}`, { count: config.models.length })
+})
+watch(connectPlatform, () => {
+  if (!supportsConnectPassthrough.value) connectPassthrough.value = false
+  if (!isC5Import.value) return
+  const kept = connectOwnGroups.value.filter(id => filteredOwnGroups.value.some(group => group.id === id))
+  if (kept.length !== connectOwnGroups.value.length) connectGroupSelectionNotice.value = t('admin.groupRates.connect.importSettings.groupsRemoved')
+  connectOwnGroups.value = kept
+})
+watch(() => currentAccount.value?.id, () => {
+  connectorGeneration++
+  connectSubmitLocked.value = false
+  isActionLoading.value = false
+  connectingRate.value = null
+  connectOwnGroups.value = []
+  ownGroups.value = []
+  mySiteMappings.value = []
+  realConnectionsData.value = []
+  hasLoadedMappingOptions.value = false
+  connectOutcome.value = 'editing'
+  connectResult.value = null
+  connectFailure.value = null
+  realConnectError.value = ''
+}, { flush: 'sync' })
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
 const queryValue = (value: unknown): string => {
@@ -195,7 +269,7 @@ const filteredOwnGroups = computed(() => {
   if (upstreamType) {
     return ownGroups.value.filter(g => g.platform.toLowerCase() === upstreamType)
   }
-  return ownGroups.value
+  return isC5Import.value ? [] : ownGroups.value
 })
 
 const realConnectionsForRate = (rate: GroupRate): RealConnection[] =>
@@ -217,12 +291,14 @@ const isMainAccountMissing = (rate: GroupRate): boolean => realConnectionForRate
 const isPricingMapped = (rate: GroupRate): boolean => rate.pricingMapped ?? mappedOwnGroupsForRate(rate).length > 0
 const disconnectConnection = computed(() => disconnectingRate.value ? realConnectionForRate(disconnectingRate.value) : undefined)
 
-const loadRealConnections = async (clearOnFailure = false): Promise<boolean> => {
+const loadRealConnections = async (clearOnFailure = false, isCurrent: () => boolean = () => true): Promise<boolean> => {
   try {
-    realConnectionsData.value = await listRealConnections()
+    const connections = await listRealConnections()
+    if (!isCurrent()) return false
+    realConnectionsData.value = connections
     return true
   } catch {
-    if (clearOnFailure) realConnectionsData.value = []
+    if (clearOnFailure && isCurrent()) realConnectionsData.value = []
     return false
   }
 }
@@ -331,6 +407,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  pageIsMounted = false
+  connectorGeneration++
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
   document.removeEventListener('keydown', handleDialogKeydown)
   document.body.style.overflow = previousBodyOverflow
@@ -359,11 +437,13 @@ const filteredChannelTypes = computed(() => {
 })
 
 const canSubmitConnect = computed(() => {
-  if (!connectingRate.value) return false
+  if (!connectingRate.value || connectSubmitLocked.value || connectFormLocked.value) return false
   if (connectMode.value === 'bind') {
     return Boolean(selectedKeyId.value && selectedAdminGroupId.value && selectedAdminResourceId.value)
   }
   if (connectOwnGroups.value.length === 0) return false
+  if (isC5Import.value && (!currentAccount.value?.id || !connectPlatform.value || connectPriorityError.value || connectConcurrencyError.value ||
+    connectOwnGroups.value.some(id => !filteredOwnGroups.value.some(group => group.id === id)))) return false
   // sub2api admin：分组类型未知时必须手动选择
   if (needsGroupTypeSelection.value && !selectedGroupType.value) return false
   // new-api admin：必须选择渠道类型
@@ -480,6 +560,15 @@ const closeTypeEditor = () => {
 }
 
 const openConnector = async (rate: GroupRate) => {
+  connectorGeneration++
+  connectOutcome.value = 'editing'
+  connectSubmitLocked.value = false
+  connectResult.value = null
+  connectFailure.value = null
+  realConnectError.value = ''
+  connectRefreshError.value = ''
+  connectGroupSelectionNotice.value = ''
+  resetImportSettings()
   connectingRate.value = rate
   connectOwnGroups.value = []
   connectMode.value = 'real'
@@ -487,7 +576,12 @@ const openConnector = async (rate: GroupRate) => {
   selectedChannelType.value = 0
   addToPricingMapping.value = true
   connectOperationId.value = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
-  await loadMySiteMappingData()
+  const generation = connectorGeneration
+  const workspace = currentAccount.value?.id
+  const isCurrent = () => pageIsMounted && generation === connectorGeneration && workspace === currentAccount.value?.id
+  try { await loadMySiteMappingData(false, isCurrent) } catch {
+    if (isCurrent()) realConnectError.value = t('admin.groupRates.connect.importSettings.loadFailed')
+  }
 }
 
 const isActiveResourceStatus = (status: string): boolean => ['1', 'active', 'enabled'].includes(status.toLowerCase())
@@ -507,6 +601,8 @@ const adminResourceTypeLabel = (resource: AdminResourceOption): string => {
 }
 
 const closeConnector = () => {
+  if (connectSubmitLocked.value || connectOutcome.value === 'submitting') return
+  connectorGeneration++
   connectingRate.value = null
   connectOwnGroups.value = []
   connectMode.value = 'real'
@@ -525,6 +621,8 @@ const closeConnector = () => {
 }
 
 const setConnectMode = async (mode: 'real' | 'bind') => {
+  if (connectFormLocked.value || mode === connectMode.value) return
+  resetImportSettings()
   connectMode.value = mode
   connectOwnGroups.value = []
   selectedGroupType.value = ''
@@ -565,21 +663,23 @@ const submitTypeEditor = async () => {
   closeTypeEditor()
 }
 
-const loadMySiteMappingData = async (force = false) => {
+const loadMySiteMappingData = async (force = false, isCurrent: () => boolean = () => true) => {
   if (hasLoadedMappingOptions.value && !force) return
   isActionLoading.value = true
   try {
     const options = await getMySiteMappingOptions()
+    if (!isCurrent()) return
     ownGroups.value = options.ownGroups
     mySiteMappings.value = options.mappings ?? []
     connectionCapabilities.value = options.connectionCapabilities ?? null
     hasLoadedMappingOptions.value = true
   } finally {
-    isActionLoading.value = false
+    if (isCurrent() && !connectSubmitLocked.value) isActionLoading.value = false
   }
 }
 
 const toggleOwnGroup = (groupId: string) => {
+  if (connectFormLocked.value || !filteredOwnGroups.value.some(group => group.id === groupId)) return
   const index = connectOwnGroups.value.indexOf(groupId)
   if (index === -1) {
     connectOwnGroups.value = [...connectOwnGroups.value, groupId]
@@ -612,11 +712,17 @@ const managedResourceErrorMessage = (error: unknown, fallbackKey: string): strin
   return message
 }
 
-const refreshAfterMutation = async () => {
+const refreshAfterMutation = async (isCurrent: () => boolean = () => true, confirmRefresh = false): Promise<boolean> => {
+  if (!isCurrent()) return false
   try {
-    await Promise.all([loadRates(), loadRealConnections(), loadMySiteMappingData(true)])
+    const [, connectionsLoaded] = await Promise.all([loadRates(isCurrent), loadRealConnections(false, isCurrent), loadMySiteMappingData(true, isCurrent)])
+    if (!isCurrent()) return false
+    if (confirmRefresh && (!connectionsLoaded || errorKey.value)) throw new Error('refresh')
+    return true
   } catch {
+    if (!isCurrent()) return false
     errorKey.value = 'admin.groupRates.errors.refreshFailed'
+    return false
   }
 }
 
@@ -650,30 +756,63 @@ const handleSortChange = async (event: Event) => {
 }
 
 const submitRealConnect = async () => {
-  if (!connectingRate.value || connectOwnGroups.value.length === 0) return
+  if (!connectingRate.value || !canSubmitConnect.value || connectSubmitLocked.value) return
+  const useImportContract = isC5Import.value
+  const generation = connectorGeneration
+  const workspace = currentAccount.value?.id ?? ''
+  const target = connectingRate.value
+  const isCurrent = () => pageIsMounted && generation === connectorGeneration && workspace === (currentAccount.value?.id ?? '') && connectingRate.value === target
+  if (connectOutcome.value === 'failed') connectOperationId.value = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  connectSubmitLocked.value = true
+  connectOutcome.value = 'submitting'
+  connectFailure.value = null
+  connectRefreshError.value = ''
   realConnectError.value = ''
   isActionLoading.value = true
-  const payload = {
+  const payload: RealConnectRequest = {
     upstreamSiteId: connectingRate.value.siteId,
     upstreamGroupId: connectingRate.value.groupId ?? '',
     upstreamGroupName: connectingRate.value.groupName,
-    groupType: selectedGroupType.value,
+    groupType: useImportContract ? connectPlatform.value : selectedGroupType.value,
     channelType: selectedChannelType.value || undefined,
-    ownGroupIds: connectOwnGroups.value,
+    ownGroupIds: [...connectOwnGroups.value],
     addToPricingMapping: addToPricingMapping.value,
     operationId: connectOperationId.value,
+    ...(useImportContract ? { accountSettings: {
+      priorityMode: connectPriorityMode.value, priority: Number(connectPriority.value), concurrency: Number(connectConcurrency.value),
+      passthrough: supportsConnectPassthrough.value && connectPassthrough.value, poolMode: connectPoolMode.value,
+      upstreamBillingProbeEnabled: connectProbeEnabled.value,
+    } } : {}),
   }
   try {
-    await realConnect(payload)
-    closeConnector()
+    const result = useImportContract ? await realConnect(payload, workspace) : await realConnect(payload)
+    if (!isCurrent()) return
+    if (useImportContract) {
+      connectResult.value = result
+      connectOutcome.value = 'succeeded'
+      if (!await refreshAfterMutation(isCurrent, true) && isCurrent()) connectRefreshError.value = t('admin.groupRates.errors.refreshFailed')
+    } else {
+      connectSubmitLocked.value = false
+      connectOutcome.value = 'editing'
+      closeConnector()
+      await refreshAfterMutation()
+    }
   } catch (error) {
+    if (!isCurrent()) return
     realConnectError.value = managedResourceErrorMessage(error, 'admin.groupRates.connect.realFailed')
-    isActionLoading.value = false
-    return
+    if (useImportContract) {
+      const failure = error instanceof Error && error.name === 'ImportApiError' ? error as ImportApiError : null
+      connectFailure.value = failure?.trusted ? failure : null
+      if (failure?.trusted) realConnectError.value = t(failure.message)
+      else if (!(error instanceof Error) || !te(error.message)) realConnectError.value = t('admin.mySites.errors.importResponsePending')
+      connectOutcome.value = failure?.trusted && failure.retryAllowed && ['confirmed', 'not_needed'].includes(failure.cleanup) ? 'failed' : 'pending'
+    } else connectOutcome.value = 'editing'
+  } finally {
+    if (isCurrent() || !useImportContract) {
+      connectSubmitLocked.value = false
+      isActionLoading.value = false
+    }
   }
-
-  await refreshAfterMutation()
-  isActionLoading.value = false
 }
 
 const loadUpstreamKeys = async (rate: GroupRate) => {
@@ -1157,21 +1296,22 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
     <div v-if="connectingRate" class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
       <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-connect-title" tabindex="-1" class="max-h-[calc(100dvh-2rem)] w-full max-w-2xl overflow-y-auto overscroll-contain rounded-lg border border-border/60 bg-card shadow-xl">
         <div class="flex items-start justify-between gap-4 border-b border-border/50 p-6">
-          <div>
-            <h2 id="group-rate-connect-title" class="text-xl font-semibold text-foreground">
+          <div class="min-w-0 flex-1">
+            <h2 id="group-rate-connect-title" class="break-words text-xl font-semibold text-foreground">
               {{ t('admin.groupRates.connect.titleWithGroup', { site: connectingRate.siteName, group: connectingRate.groupName }) }}
             </h2>
             <p class="mt-2 text-sm text-muted-foreground">
               {{ connectMode === 'bind' ? t('admin.groupRates.connect.bindDescription') : t('admin.groupRates.connect.realDescription') }}
             </p>
           </div>
-          <button class="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-surface-line hover:text-foreground" :disabled="isActionLoading" @click="closeConnector">
+          <button class="shrink-0 rounded-lg p-2 text-muted-foreground transition-colors hover:bg-surface-line hover:text-foreground" :disabled="isActionLoading" @click="closeConnector">
             <X class="h-5 w-5" />
             <span class="sr-only">{{ t('admin.groupRates.actions.closeConnect') }}</span>
           </button>
         </div>
 
         <form class="space-y-5 p-6" @submit.prevent="submitConnector">
+          <fieldset class="contents" :disabled="connectFormLocked">
           <div class="grid gap-3 sm:grid-cols-2">
             <button
               type="button"
@@ -1220,11 +1360,11 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           <div class="rounded-xl border border-border/50 bg-surface/50 p-4 space-y-3">
             <div class="flex items-center justify-between">
               <span class="text-xs font-medium text-muted-foreground">{{ t('admin.groupRates.connect.upstreamSiteLabel') }}</span>
-              <span class="text-sm font-medium text-foreground">{{ connectingRate?.siteName }}</span>
+              <span class="min-w-0 break-words text-right text-sm font-medium text-foreground">{{ connectingRate?.siteName }}</span>
             </div>
             <div class="flex items-center justify-between">
               <span class="text-xs font-medium text-muted-foreground">{{ t('admin.groupRates.connect.upstreamGroupNameLabel') }}</span>
-              <span class="text-sm font-medium text-foreground">{{ connectingRate?.groupName }}</span>
+              <span class="min-w-0 break-words text-right text-sm font-medium text-foreground">{{ connectingRate?.groupName }}</span>
             </div>
             <div class="flex items-center justify-between">
               <span class="text-xs font-medium text-muted-foreground">{{ t('admin.groupRates.connect.upstreamMultiplierLabel') }}</span>
@@ -1324,6 +1464,43 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             </div>
           </div>
 
+          <section v-if="isC5Import" class="space-y-4" aria-labelledby="import-account-settings-title">
+            <p v-if="!needsGroupTypeSelection" class="text-sm text-muted-foreground">{{ t('admin.groupRates.connect.groupTypeLabel') }}：{{ typeLabel(connectPlatform) }}</p>
+            <h3 id="import-account-settings-title" class="text-sm font-semibold text-foreground">{{ t('admin.groupRates.connect.importSettings.title') }}</h3>
+            <div class="grid gap-4 sm:grid-cols-2">
+              <div class="space-y-2">
+                <label for="import-priority" class="text-sm font-medium text-foreground">Priority</label>
+                <div class="flex gap-2">
+                  <button type="button" :aria-pressed="connectPriorityMode === 'automatic'" :disabled="connectFormLocked" class="rounded-lg border border-border/60 px-3 py-1.5 text-sm" :class="connectPriorityMode === 'automatic' ? 'border-primary bg-primary/5 text-primary' : 'text-muted-foreground'" @click="setConnectPriorityMode('automatic')">{{ t('admin.groupRates.connect.importSettings.automatic') }}</button>
+                  <button type="button" :aria-pressed="connectPriorityMode === 'manual'" :disabled="connectFormLocked" class="rounded-lg border border-border/60 px-3 py-1.5 text-sm" :class="connectPriorityMode === 'manual' ? 'border-primary bg-primary/5 text-primary' : 'text-muted-foreground'" @click="setConnectPriorityMode('manual')">{{ t('admin.groupRates.connect.importSettings.manual') }}</button>
+                </div>
+                <input id="import-priority" v-model="connectPriority" type="number" step="1" :min="connectPriorityMode === 'manual' ? 1 : 10" :max="connectPriorityMode === 'manual' ? 9 : 2147483647" :disabled="connectFormLocked" :aria-invalid="Boolean(connectPriorityError)" aria-describedby="import-priority-help" class="h-10 w-full rounded-xl border border-border/50 bg-surface px-3 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+                <p id="import-priority-help" class="text-xs leading-5" :class="connectPriorityError ? 'text-warning' : 'text-muted-foreground'">{{ connectPriorityError || t(connectPriorityMode === 'manual' ? 'admin.groupRates.connect.importSettings.manualHint' : 'admin.groupRates.connect.importSettings.automaticHint') }}</p>
+              </div>
+              <div class="space-y-2">
+                <label for="import-concurrency" class="text-sm font-medium text-foreground">{{ t('admin.groupRates.connect.importSettings.concurrency') }}</label>
+                <input id="import-concurrency" v-model="connectConcurrency" type="number" min="1" max="1000" step="1" :disabled="connectFormLocked" :aria-invalid="Boolean(connectConcurrencyError)" aria-describedby="import-concurrency-help" class="h-10 w-full rounded-xl border border-border/50 bg-surface px-3 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
+                <p id="import-concurrency-help" class="text-xs leading-5" :class="connectConcurrencyError ? 'text-warning' : 'text-muted-foreground'">{{ connectConcurrencyError || t('admin.groupRates.connect.importSettings.concurrencyHint') }}</p>
+              </div>
+            </div>
+            <div class="flex items-center justify-between gap-4 rounded-xl border border-border/50 bg-surface px-4 py-3">
+              <div class="min-w-0 space-y-1">
+                <p class="text-sm font-medium text-foreground">{{ t('admin.groupRates.connect.importSettings.passthrough') }}</p>
+                <p v-if="!supportsConnectPassthrough" class="text-xs text-muted-foreground">{{ t('admin.groupRates.connect.importSettings.passthroughUnsupported') }}</p>
+                <p v-if="!connectPassthrough" class="text-xs leading-5 text-muted-foreground">{{ t('admin.groupRates.connect.importSettings.modelSyncHint') }}</p>
+              </div>
+              <button v-if="supportsConnectPassthrough" type="button" role="switch" :aria-label="t('admin.groupRates.connect.importSettings.passthrough')" :aria-checked="connectPassthrough" :disabled="connectFormLocked" class="relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:opacity-50" :class="connectPassthrough ? 'bg-primary' : 'bg-muted'" @click="connectPassthrough = !connectPassthrough"><span class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform" :class="connectPassthrough ? 'translate-x-5' : 'translate-x-0'" /></button>
+            </div>
+            <div class="flex items-center justify-between gap-4 rounded-xl border border-border/50 bg-surface px-4 py-3">
+              <span class="text-sm font-medium text-foreground">Pool Mode</span>
+              <button type="button" role="switch" aria-label="Pool Mode" :aria-checked="connectPoolMode" :disabled="connectFormLocked" class="relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:opacity-50" :class="connectPoolMode ? 'bg-primary' : 'bg-muted'" @click="connectPoolMode = !connectPoolMode"><span class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform" :class="connectPoolMode ? 'translate-x-5' : 'translate-x-0'" /></button>
+            </div>
+            <div class="flex items-center justify-between gap-4 rounded-xl border border-border/50 bg-surface px-4 py-3">
+              <span class="text-sm font-medium text-foreground">{{ t('admin.groupRates.connect.importSettings.probe') }}</span>
+              <button type="button" role="switch" :aria-label="t('admin.groupRates.connect.importSettings.probe')" :aria-checked="connectProbeEnabled" :disabled="connectFormLocked" class="relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:opacity-50" :class="connectProbeEnabled ? 'bg-primary' : 'bg-muted'" @click="connectProbeEnabled = !connectProbeEnabled"><span class="pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow-sm transition-transform" :class="connectProbeEnabled ? 'translate-x-5' : 'translate-x-0'" /></button>
+            </div>
+          </section>
+
           <div v-if="connectMode === 'bind'" class="space-y-2">
             <label for="existing-admin-group" class="flex items-center gap-2 text-sm font-medium text-foreground">
               <ServerCog class="h-4 w-4 text-primary" />
@@ -1385,6 +1562,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
 
           <div v-if="connectMode === 'real'" class="space-y-2">
             <span class="text-sm font-medium text-foreground">{{ t('admin.groupRates.connect.ownGroupLabel') }}</span>
+            <p v-if="connectGroupSelectionNotice" class="text-xs text-warning">{{ connectGroupSelectionNotice }}</p>
             <div class="max-h-48 overflow-auto rounded-xl border border-border/50 bg-surface divide-y divide-border/30">
               <label
                 v-for="group in filteredOwnGroups"
@@ -1398,7 +1576,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                   :disabled="isActionLoading"
                   @change="toggleOwnGroup(group.id)"
                 />
-                <span class="text-sm text-foreground">{{ group.groupName }}</span>
+                <span class="min-w-0 break-words text-sm text-foreground">{{ group.groupName }}</span>
                 <span v-if="group.platform" class="inline-flex rounded-md border border-border/50 bg-surface-elevated px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                   {{ group.platform }}
                 </span>
@@ -1426,16 +1604,50 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             </span>
           </label>
 
-          <div v-if="realConnectError" class="flex items-start gap-3 rounded-xl border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
+          </fieldset>
+          <p v-if="connectOutcome === 'submitting' && isC5Import" role="status" class="text-sm text-muted-foreground">{{ t('admin.groupRates.connect.importResult.submitting') }}</p>
+          <div v-if="realConnectError" role="alert" class="flex items-start gap-3 rounded-xl border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
             <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
-            <span>{{ realConnectError }}</span>
+            <span class="min-w-0 break-words">{{ realConnectError }}</span>
           </div>
 
+          <div v-if="connectFailure" class="space-y-2 break-words text-sm text-warning" data-import-failure>
+            <p>{{ t('admin.groupRates.connect.importResult.stage') }}：{{ t(`admin.groupRates.connect.importResult.stages.${connectFailure.stage}`) }}</p>
+            <p>{{ t(`admin.groupRates.connect.importResult.cleanup.${connectFailure.cleanup}`) }}</p>
+            <p v-if="connectFailure.reason">{{ t(connectFailure.reason) }}</p>
+            <p v-if="connectFailure.groupId || connectFailure.groupName">{{ t('admin.mySites.errors.blockingGroup', { groupName: connectFailure.groupName || '—', groupId: connectFailure.groupId || '—' }) }}</p>
+            <p v-if="connectFailure.adminResourceId || connectFailure.upstreamKeyId || ['retained', 'pending'].includes(connectFailure.cleanup)">{{ t('admin.groupRates.connect.importResult.resourceIds', { adminResourceId: connectFailure.adminResourceId || t('admin.groupRates.connect.importResult.unknownId'), upstreamKeyId: connectFailure.upstreamKeyId || t('admin.groupRates.connect.importResult.unknownId') }) }}</p>
+            <p v-if="connectFailure.upstreamResourceName">{{ t('admin.groupRates.connect.importResult.resourceName') }}：{{ connectFailure.upstreamResourceName }}</p>
+          </div>
+          <div v-if="connectOutcome === 'pending'" role="status" class="space-y-2 break-words text-sm text-warning" data-import-pending>
+            <p>{{ t('admin.groupRates.connect.importResult.pending') }}</p>
+            <p>{{ t('admin.groupRates.connect.importResult.operationId') }}：{{ connectOperationId }}</p>
+          </div>
+          <section v-if="connectOutcome === 'succeeded'" role="status" class="space-y-3 break-words rounded-xl border border-border/50 bg-surface/50 p-4" data-import-success>
+            <h3 class="text-sm font-semibold text-foreground">{{ t(connectResult?.configurationStatus === 'confirmed' ? 'admin.groupRates.connect.importResult.confirmed' : 'admin.groupRates.connect.importResult.unavailable') }}</h3>
+            <template v-if="connectConfiguration">
+              <p class="text-sm">{{ connectConfiguration.name }} · {{ t('admin.groupRates.connect.importResult.accountId') }} {{ connectConfiguration.adminAccountId }}</p>
+              <p class="text-xs text-muted-foreground">{{ t(`admin.groupRates.connect.importResult.observation.${connectConfiguration.observation}`) }}</p>
+              <dl class="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
+                <div><dt class="text-muted-foreground">Priority</dt><dd>{{ connectConfiguration.priority }}</dd></div>
+                <div><dt class="text-muted-foreground">{{ t('admin.groupRates.connect.importSettings.concurrency') }}</dt><dd>{{ connectConfiguration.concurrency }}</dd></div>
+                <div><dt class="text-muted-foreground">{{ t('admin.groupRates.connect.importSettings.passthrough') }}</dt><dd>{{ t(connectConfiguration.passthrough ? 'admin.groupRates.connect.importResult.on' : 'admin.groupRates.connect.importResult.off') }}</dd></div>
+                <div><dt class="text-muted-foreground">Pool Mode</dt><dd>{{ t(connectConfiguration.poolMode ? 'admin.groupRates.connect.importResult.on' : 'admin.groupRates.connect.importResult.off') }}</dd></div>
+                <div><dt class="text-muted-foreground">{{ t('admin.groupRates.connect.importSettings.probe') }}</dt><dd>{{ t(connectConfiguration.upstreamBillingProbeEnabled ? 'admin.groupRates.connect.importResult.on' : 'admin.groupRates.connect.importResult.off') }}</dd></div>
+              </dl>
+              <p class="text-sm">{{ t('admin.groupRates.connect.ownGroupLabel') }}：<span v-for="(group, index) in connectConfiguration.ownGroups" :key="group.id">{{ index ? '、' : '' }}{{ group.name }}（{{ group.id }}）</span></p>
+              <p class="text-sm">{{ connectModelSummary }}</p>
+              <details v-if="connectConfiguration.models.length" class="text-sm"><summary class="cursor-pointer">{{ t('admin.groupRates.connect.importResult.modelList') }}</summary><ul class="mt-2 list-inside list-disc"><li v-for="model in connectConfiguration.models" :key="model">{{ model }}</li></ul></details>
+            </template>
+            <p v-else class="text-sm">{{ t('admin.groupRates.connect.importResult.accountId') }} {{ connectResult?.connection.adminAccountId }}</p>
+          </section>
+          <p v-if="connectRefreshError" role="alert" class="text-sm text-warning" data-import-refresh-error>{{ connectRefreshError }}</p>
+
           <div class="flex justify-end gap-2">
-            <Button type="button" variant="secondary" :disabled="isActionLoading" @click="closeConnector">
-              {{ t('admin.groupRates.actions.cancel') }}
+            <Button type="button" variant="secondary" :disabled="isActionLoading || connectOutcome === 'submitting'" @click="closeConnector">
+              {{ t(connectOutcome === 'succeeded' ? 'admin.groupRates.connect.importResult.done' : 'admin.groupRates.actions.cancel') }}
             </Button>
-            <Button type="submit" class="gap-2" :disabled="isActionLoading || !canSubmitConnect">
+            <Button v-if="connectOutcome !== 'succeeded'" type="submit" class="gap-2" :disabled="isActionLoading || !canSubmitConnect">
               <Loader2 v-if="isActionLoading" class="h-4 w-4 animate-spin" />
               {{ t(connectMode === 'real' ? 'admin.groupRates.connect.submitManaged' : 'admin.groupRates.connect.submitExisting') }}
             </Button>

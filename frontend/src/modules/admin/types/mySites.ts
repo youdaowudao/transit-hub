@@ -101,6 +101,47 @@ export interface RealConnectRequest {
   ownGroupIds: string[]
   addToPricingMapping?: boolean
   operationId?: string
+  accountSettings?: ImportAccountSettings
+}
+
+export interface ImportAccountSettings {
+  priorityMode: 'automatic' | 'manual'
+  priority: number
+  concurrency: number
+  passthrough: boolean
+  poolMode: boolean
+  upstreamBillingProbeEnabled: boolean
+}
+
+export type ImportStage = 'validation' | 'upstream_key' | 'model_sync' | 'account_create' | 'configuration_check' | 'persistence'
+export type ImportCleanup = 'not_needed' | 'confirmed' | 'retained' | 'pending'
+
+export interface ImportFailure {
+  message: string
+  stage: ImportStage
+  cleanup: ImportCleanup
+  retryAllowed: boolean
+  adminResourceId?: string
+  upstreamKeyId?: string
+  upstreamResourceName?: string
+  reason?: string
+  groupId?: string
+  groupName?: string
+}
+
+export interface ImportConfiguration {
+  observation: 'creation' | 'current'
+  adminAccountId: string
+  name: string
+  platform: string
+  priority: number
+  concurrency: number
+  passthrough: boolean
+  poolMode: boolean
+  upstreamBillingProbeEnabled: boolean
+  ownGroups: { id: string; name: string }[]
+  modelState: 'synced' | 'not_required' | 'current_whitelist' | 'current_unrestricted'
+  models: string[]
 }
 
 export interface NewAPIChannelType {
@@ -239,6 +280,10 @@ export interface AdminResourceOption {
 
 export interface RealConnectResponse {
   connection: RealConnection
+  workspaceAdminAccountId?: string
+  configurationStatus?: 'confirmed' | 'unavailable' | 'not_applicable'
+  configuration?: ImportConfiguration
+  message?: string
 }
 
 export interface RealDisconnectRequest {

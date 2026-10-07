@@ -83,7 +83,7 @@ func TestStageAManagedPendingResponseDoesNotRepeatFallbackOrClaimSavedCompensati
 				repo.connection = &RealConnection{ID: "connection", UserID: "user-1", WorkspaceAdminAccountID: "admin-1", UpstreamSiteID: "site-1", AdminAccountID: "22", UpstreamKeyID: "11", Status: ConnectionStatusActive, ProvisioningMode: ProvisioningModeManaged}
 				err = service.RealDisconnect(t.Context(), "user-1", RealDisconnectRequest{ConnectionID: "connection", Mode: "full"})
 			} else {
-				repo.saveErr = errors.New("persist failed")
+				repo.saveErr = &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: errors.New("persist failed")}
 				_, err = service.RealConnect(t.Context(), "user-1", RealConnectRequest{UpstreamSiteID: "site-1", UpstreamGroupID: "7", UpstreamGroupName: "vip", GroupType: "openai", OwnGroupIDs: []string{"7"}})
 				message = "admin.mySites.errors.compensationPendingVerification"
 			}
@@ -119,7 +119,7 @@ func TestStageASentDeletePendingResponseNeverClaimsOperationNotSent(t *testing.T
 					repo.connection = &RealConnection{ID: "connection", UserID: "user-1", WorkspaceAdminAccountID: "admin-1", UpstreamSiteID: "site-1", AdminAccountID: "22", UpstreamKeyID: "11", Status: ConnectionStatusActive, ProvisioningMode: ProvisioningModeManaged}
 					err = service.RealDisconnect(t.Context(), "user-1", RealDisconnectRequest{ConnectionID: "connection", Mode: "full"})
 				} else {
-					repo.saveErr = errors.New("persist failed")
+					repo.saveErr = &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: errors.New("persist failed")}
 					_, err = service.RealConnect(t.Context(), "user-1", RealConnectRequest{UpstreamSiteID: "site-1", UpstreamGroupID: "7", UpstreamGroupName: "vip", GroupType: "openai", OwnGroupIDs: []string{"7"}})
 					message = "admin.mySites.errors.compensationPendingVerification"
 				}
@@ -149,7 +149,7 @@ func TestStageASentDeletePendingResponseNeverClaimsOperationNotSent(t *testing.T
 
 func TestStageAPersistFailureAfterConfirmedAccountDeleteReportsOnlyKeyCleanupUnknown(t *testing.T) {
 	service, repo, _ := stageAResourceService(t)
-	repo.saveErr = errors.New("persist failed")
+	repo.saveErr = &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: errors.New("persist failed")}
 	safe := &stageATestSafeDeletion{}
 	service.SetSafeAdminAccountDeletion(safe)
 	keyDeletes := 0
@@ -160,9 +160,13 @@ func TestStageAPersistFailureAfterConfirmedAccountDeleteReportsOnlyKeyCleanupUnk
 		case "/api/v1/admin/groups":
 			payload = `{"data":[{"id":7,"name":"vip","platform":"openai","status":"active"}]}`
 		case "/api/v1/keys":
-			payload = `{"data":{"id":11,"key":"synthetic-test-key"}}`
+			payload = `{"code":0,"data":{"id":11,"key":"synthetic-test-key"}}`
+		case "/api/v1/admin/accounts/models/sync-upstream-preview":
+			payload = `{"code":0,"data":{"models":["live-a"]}}`
 		case "/api/v1/admin/accounts":
-			payload = `{"data":{"id":22}}`
+			payload = `{"code":0,"data":{"id":22}}`
+		case "/api/v1/admin/accounts/22":
+			payload = c5SingleAccountFixture("safe-account")
 		case "/api/v1/keys/11":
 			if req.Method != http.MethodDelete {
 				t.Fatal("unexpected key read")

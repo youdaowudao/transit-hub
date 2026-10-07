@@ -33,6 +33,9 @@ type requestOptions struct {
 	AccessToken string
 	TokenType   string
 	AdminAPIKey string
+	// C5 retains only a validated ID from a complete failed JSON receipt.
+	// Other request paths preserve their response shape and error contract.
+	PreserveImportMutationID bool
 }
 
 type jsonResponse struct {
@@ -173,6 +176,7 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 		}
 		requestErr := newRequestErrorWithStatus(key, "", response.StatusCode)
 		requestErr.MutationOutcome = MutationUncertain
+		result := jsonResponse{Header: response.Header, ReceivedAt: receivedAt, StatusCode: response.StatusCode}
 		switch response.StatusCode {
 		case http.StatusForbidden:
 			requestErr.Reason = ErrorForbidden
@@ -191,6 +195,9 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 		if readErr == nil && len(data) <= 4096 {
 			var record map[string]any
 			if json.Unmarshal(data, &record) == nil {
+				if options.PreserveImportMutationID {
+					result.Payload = importMutationIDEvidence(record)
+				}
 				requestErr.UpstreamCode = ParseUpstreamCode(record)
 				if code, ok := record["code"].(float64); ok && code == float64(int(code)) {
 					value := int(code)
@@ -204,12 +211,14 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 				}
 				if message, ok := record["message"].(string); ok {
 					requestErr.RemoteMessage = safeRemoteMutationMessage(message)
-					requestErr.UpstreamMessage = safeRequestMessage(message, options)
+					if !options.PreserveImportMutationID {
+						requestErr.UpstreamMessage = safeRequestMessage(message, options)
+					}
 				}
 			}
 		}
 		applyKnownUpstreamCodeReason(requestErr)
-		return jsonResponse{Header: response.Header, ReceivedAt: receivedAt, StatusCode: response.StatusCode}, requestErr
+		return result, requestErr
 	}
 	payload, err := parseJSONWithLimit(response.Body, reqURL, maxResponseBytes)
 	if err != nil {
@@ -227,10 +236,13 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 			requestErr := newRequestErrorWithStatus(ErrorRequest, "", response.StatusCode)
 			requestErr.UpstreamCode = ParseUpstreamCode(record)
 			applyKnownUpstreamCodeReason(requestErr)
-			if message, ok := record["message"].(string); ok {
+			if message, ok := record["message"].(string); ok && !options.PreserveImportMutationID {
 				requestErr.UpstreamMessage = safeRequestMessage(message, options)
 			}
 			log.Printf("[http-client] 上游业务拒绝 method=%s %s status=%d category=%s", method, safeHTTPDiagnostic(reqURL), response.StatusCode, requestErr.MessageKey)
+			if options.PreserveImportMutationID {
+				return jsonResponse{Payload: importMutationIDEvidence(record), StatusCode: response.StatusCode, Header: response.Header, ReceivedAt: receivedAt}, requestErr
+			}
 			return jsonResponse{}, requestErr
 		}
 	}

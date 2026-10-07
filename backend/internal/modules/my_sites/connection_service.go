@@ -46,6 +46,10 @@ func (s *Service) prepareConnectionContext(ctx context.Context, userID, siteID, 
 	if err != nil {
 		return connectionContext{}, err
 	}
+	return s.prepareConnectionContextWithState(ctx, userID, adminAccountID, state, siteID, groupID, groupName, requestedType, requireAdminResourceType)
+}
+
+func (s *Service) prepareConnectionContextWithState(ctx context.Context, userID, adminAccountID string, state *State, siteID, groupID, groupName, requestedType string, requireAdminResourceType bool) (connectionContext, error) {
 	upstreamSite, err := s.upstreamLookup.GetSite(ctx, strings.TrimSpace(siteID))
 	if err != nil || upstreamSite == nil || upstreamSite.Session == nil || upstreamSite.UserID != userID || upstreamSite.AdminAccountID != adminAccountID {
 		return connectionContext{}, requestError(ErrorRequest)
@@ -143,7 +147,7 @@ func (s *Service) resolveAdminGroups(ctx context.Context, state *State, requeste
 	return ids, names, nil
 }
 
-func (s *Service) realConnectManaged(ctx context.Context, userID string, req RealConnectRequest) (RealConnectResponse, error) {
+func (s *Service) realConnectLegacy(ctx context.Context, userID string, req RealConnectRequest, workspace string, state *State) (RealConnectResponse, error) {
 	if strings.TrimSpace(req.UpstreamSiteID) == "" || strings.TrimSpace(req.UpstreamGroupID) == "" || len(req.OwnGroupIDs) == 0 {
 		return RealConnectResponse{}, requestError(ErrorRequest)
 	}
@@ -151,7 +155,7 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	if err != nil {
 		return RealConnectResponse{}, err
 	}
-	connectionCtx, err := s.prepareConnectionContext(ctx, userID, req.UpstreamSiteID, req.UpstreamGroupID, req.UpstreamGroupName, req.GroupType, true)
+	connectionCtx, err := s.prepareConnectionContextWithState(ctx, userID, workspace, state, req.UpstreamSiteID, req.UpstreamGroupID, req.UpstreamGroupName, req.GroupType, true)
 	if err != nil {
 		return RealConnectResponse{}, err
 	}
@@ -277,7 +281,7 @@ func (s *Service) createAdminResource(connectionCtx connectionContext, requested
 		rateLabel = connectionCtx.groupName
 	}
 	name := fmt.Sprintf("%s-【%s】-%s", groupTypePrefix(connectionCtx.groupType), connectionCtx.upstreamSite.Name, rateLabel)
-	payload := buildAccountPayload(connectionCtx.groupType, connectionCtx.upstreamSite.BaseURL, key, numericGroupIDs, name)
+	payload := buildLegacyAccountPayload(connectionCtx.groupType, connectionCtx.upstreamSite.BaseURL, key, numericGroupIDs, name)
 	id, err := s.platformService.CreateSub2APIAdminAccount(connectionCtx.state.Session, payload)
 	return id, name, err
 }

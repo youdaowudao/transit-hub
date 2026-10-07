@@ -298,6 +298,9 @@ type questionAnswerShutdownRun struct {
 }
 
 func (s *Service) initializeQuestionAnswerRuntime() {
+	if s.backgroundTasksDisabled {
+		return
+	}
 	s.questionAnswerMu.Lock()
 	if s.questionAnswerCtx != nil {
 		s.questionAnswerMu.Unlock()
@@ -475,6 +478,9 @@ func normalizeTestQuestionOutput(question TestQuestion) TestQuestion {
 }
 
 func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, targetID string, input QuestionAnswerStartInput) (QuestionAnswerBatch, error) {
+	if s.backgroundTasksDisabled {
+		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
+	}
 	reasoningEffort, err := normalizeQuestionAnswerReasoningEffort(input.ReasoningEffort)
 	if err != nil {
 		return QuestionAnswerBatch{}, err
@@ -908,6 +914,9 @@ func (s *Service) validateQuestionAnswerTarget(ctx context.Context, userID strin
 }
 
 func (s *Service) ShutdownQuestionAnswers(ctx context.Context) error {
+	if s.backgroundTasksDisabled {
+		return nil
+	}
 	s.initializeQuestionAnswerRuntime()
 	s.questionAnswerMu.Lock()
 	s.questionAnswerClosed = true

@@ -81,6 +81,9 @@ run_globalization_gate() {
 
   run_step "frontend language, amount and Telegram recipient regression tests" \
     bash -c "cd '$ROOT_DIR/frontend' && npm run test -- locale-configuration.test.ts globalization-amount.behavior.test.ts globalization-time-input.behavior.test.ts notification-recipients.behavior.test.ts user-last-used.test.ts dashboard-cost-entrypoints.behavior.test.ts account-cost-workspace.behavior.test.ts home-cost-snapshot.behavior.test.ts home-cost-margin-quality.behavior.test.ts dashboard-provisional-trend.test.ts dashboard-profit-margin.test.ts"
+
+  run_step "frontend group rates import and retained behavior regression tests" \
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- group-rates-import-settings.behavior.test.ts group-rates-missing-connection.behavior.test.ts"
 }
 
 case "$MODE" in

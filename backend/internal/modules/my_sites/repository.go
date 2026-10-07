@@ -3,6 +3,7 @@ package my_sites
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -243,12 +244,20 @@ func (r *Repository) SaveRealConnection(ctx context.Context, conn RealConnection
 
 // SaveRealConnectionWithPricingMapping writes the connection and its optional
 // pricing source in one transaction. Remote resources are created before this
-// call; an error therefore lets the service compensate both remote creations.
+// call; only a confirmed not-committed error permits remote compensation.
 func (r *Repository) SaveRealConnectionWithPricingMapping(ctx context.Context, conn RealConnection) error {
-	tx, err := r.db.Begin(ctx)
+	return saveRealConnectionWithPricingMapping(ctx, conn, r.db.Begin)
+}
+
+func saveRealConnectionWithPricingMapping(ctx context.Context, conn RealConnection, begin func(context.Context) (pgx.Tx, error)) error {
+	tx, err := begin(ctx)
 	if err != nil {
-		return err
+		return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: err}
 	}
+	return saveRealConnectionWithPricingMappingTx(ctx, tx, conn)
+}
+
+func saveRealConnectionWithPricingMappingTx(ctx context.Context, tx pgx.Tx, conn RealConnection) error {
 	committed := false
 	defer func() {
 		if !committed {
@@ -259,22 +268,26 @@ func (r *Repository) SaveRealConnectionWithPricingMapping(ctx context.Context, c
 	if conn.PricingMappingEnabled {
 		state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
 		if err != nil {
-			return err
+			return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: err}
 		}
 		if state == nil {
-			return fmt.Errorf("save real connection: workspace state not found")
+			return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: fmt.Errorf("save real connection: workspace state not found")}
 		}
 		addMappingTargetForOwnGroups(state, conn.OwnGroupNames, UpstreamGroupRef{SiteID: conn.UpstreamSiteID, GroupName: conn.UpstreamGroupName})
 		if err := updateStateInTx(ctx, tx, *state); err != nil {
-			return err
+			return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: err}
 		}
 	}
 
 	if err := insertRealConnection(ctx, tx, conn); err != nil {
-		return err
+		return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: err}
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return err
+		outcome := CommitUncertain
+		if errors.Is(err, pgx.ErrTxCommitRollback) {
+			outcome = CommitConfirmedNotCommitted
+		}
+		return &ConnectionCommitError{Outcome: outcome, Cause: err}
 	}
 	committed = true
 	return nil

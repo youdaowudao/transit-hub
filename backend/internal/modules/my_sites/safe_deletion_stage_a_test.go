@@ -33,7 +33,7 @@ func TestStageACompensationRejectedOrUnknownPreservesResources(t *testing.T) {
 	for _, outcome := range []string{"rejected", "unknown"} {
 		t.Run(outcome, func(t *testing.T) {
 			service, repo, deletes := stageAResourceService(t)
-			repo.saveErr = errors.New("persist failed")
+			repo.saveErr = &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: errors.New("persist failed")}
 			safe := &stageATestSafeDeletion{apply: func(context.Context, string, string, upstream.Session, string, string) error {
 				return errors.New(outcome)
 			}}
@@ -94,12 +94,16 @@ func stageAResourceService(t *testing.T) (*Service, *testConnRepo, *int) {
 		case req.Method == http.MethodGet && req.URL.Path == "/api/v1/admin/groups":
 			payload = `{"data":[{"id":7,"name":"vip","platform":"openai","status":"active"}]}`
 		case req.Method == http.MethodPost && req.URL.Path == "/api/v1/keys":
-			payload = `{"data":{"id":11,"key":"synthetic-test-key"}}`
+			payload = `{"code":0,"data":{"id":11,"key":"synthetic-test-key"}}`
+		case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "sync-upstream-preview"):
+			payload = `{"code":0,"data":{"models":["live-a"]}}`
 		case req.Method == http.MethodPost && req.URL.Path == "/api/v1/admin/accounts":
-			payload = `{"data":{"id":22}}`
+			payload = `{"code":0,"data":{"id":22}}`
+		case req.Method == http.MethodGet && req.URL.Path == "/api/v1/admin/accounts/22":
+			payload = c5SingleAccountFixture("safe-account")
 		case req.Method == http.MethodDelete:
 			*deletes++
-			payload = `{"data":{"message":"Account deleted successfully"}}`
+			payload = `{"code":0,"data":{"message":"Account deleted successfully"}}`
 		default:
 			t.Fatalf("unexpected fake request %s %s", req.Method, req.URL.Path)
 		}
@@ -150,7 +154,9 @@ func TestStageACreateFailureCleansOnlyProvenAbsentResources(t *testing.T) {
 					payload = `{"data":[{"id":"` + groupID + `","name":"vip","platform":"openai","status":"active"}]}`
 				case req.Method == http.MethodPost && req.URL.Path == "/api/v1/keys":
 					keyCreates++
-					payload = `{"data":{"id":11,"key":"synthetic-test-key"}}`
+					payload = `{"code":0,"data":{"id":11,"key":"synthetic-test-key"}}`
+				case req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "sync-upstream-preview"):
+					payload = `{"code":0,"data":{"models":["live-a"]}}`
 				case req.Method == http.MethodPost && req.URL.Path == "/api/v1/admin/accounts":
 					accountWrites++
 					if sample.transportErr != nil {
@@ -169,7 +175,7 @@ func TestStageACreateFailureCleansOnlyProvenAbsentResources(t *testing.T) {
 					status, payload = sample.status, sample.body
 				case req.Method == http.MethodDelete && req.URL.Path == "/api/v1/keys/11":
 					keyDeletes++
-					payload = `{"data":{}}`
+					payload = `{"code":0,"data":{"message":"deleted"}}`
 				default:
 					t.Fatalf("unexpected fixture request %s %s", req.Method, req.URL.Path)
 				}

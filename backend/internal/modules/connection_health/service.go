@@ -133,6 +133,7 @@ type Service struct {
 	questionAnswerCtx            context.Context
 	questionAnswerStop           context.CancelFunc
 	questionAnswerClosed         bool
+	backgroundTasksDisabled      bool
 	questionAnswerRuns           map[string]*activeQuestionAnswerBatch
 	questionAnswerOrder          []string
 	questionAnswerLastKey        string
@@ -161,25 +162,33 @@ type Service struct {
 }
 
 func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner) *Service {
+	return NewServiceWithBackgroundTasks(repo, mySites, sites, platform, true)
+}
+
+// NewServiceWithBackgroundTasks keeps normal construction unchanged while allowing
+// a temporary API-only instance to omit all process-local background runtimes.
+func NewServiceWithBackgroundTasks(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner, enabled bool) *Service {
 	service := &Service{
-		repo:                   repo,
-		eventRetention:         repo,
-		questionAnswers:        repo,
-		mySites:                mySites,
-		sites:                  sites,
-		dispatcher:             newRemoteActionDispatcher(sites, mySites, platform),
-		probeRunner:            NewRealProbeRunner(),
-		modelDiscovery:         NewModelDiscoveryRunner(),
-		probeLimiter:           newProbeConcurrencyLimiter(12, 6),
-		adminMultiplierCache:   make(map[string]adminMultiplierCacheEntry),
-		multiplierSnapshots:    make(map[string]*multiplierSnapshotEntry),
-		priorityTriggerRunning: make(map[string]bool),
-		priorityTriggerPending: make(map[string]string),
-		priorityHealthRunning:  make(map[string]bool),
-		priorityHealthPending:  make(map[string]bool),
-		sub2APIFloorGuards:     make(map[string]*workspaceFloorGuard),
-		questionAnswerHTTP:     NewQuestionAnswerRunner(),
-		questionAnswerTTL:      QuestionAnswerRequestTimeout,
+		backgroundTasksDisabled: !enabled,
+		refreshRunClosed:        !enabled,
+		repo:                    repo,
+		eventRetention:          repo,
+		questionAnswers:         repo,
+		mySites:                 mySites,
+		sites:                   sites,
+		dispatcher:              newRemoteActionDispatcher(sites, mySites, platform),
+		probeRunner:             NewRealProbeRunner(),
+		modelDiscovery:          NewModelDiscoveryRunner(),
+		probeLimiter:            newProbeConcurrencyLimiter(12, 6),
+		adminMultiplierCache:    make(map[string]adminMultiplierCacheEntry),
+		multiplierSnapshots:     make(map[string]*multiplierSnapshotEntry),
+		priorityTriggerRunning:  make(map[string]bool),
+		priorityTriggerPending:  make(map[string]string),
+		priorityHealthRunning:   make(map[string]bool),
+		priorityHealthPending:   make(map[string]bool),
+		sub2APIFloorGuards:      make(map[string]*workspaceFloorGuard),
+		questionAnswerHTTP:      NewQuestionAnswerRunner(),
+		questionAnswerTTL:       QuestionAnswerRequestTimeout,
 	}
 	service.initializeQuestionAnswerRuntime()
 	service.initializeAdminGroupsRefreshRuntime()

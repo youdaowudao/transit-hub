@@ -112,15 +112,19 @@ func TestRealConnectCompensatesRemoteResourcesWhenPersistenceFails(t *testing.T)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/groups":
 			writeConnectionTestJSON(w, map[string]any{"data": []map[string]any{{"id": 7, "name": "vip", "platform": "openai", "status": "active"}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/keys":
-			writeConnectionTestJSON(w, map[string]any{"data": map[string]any{"id": 11, "key": "sk-created"}})
+			writeConnectionTestJSON(w, map[string]any{"code": 0, "data": map[string]any{"id": 11, "key": "sk-created"}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "sync-upstream-preview"):
+			writeConnectionTestJSON(w, map[string]any{"code": 0, "data": map[string]any{"models": []string{"live-a"}}})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/admin/accounts":
-			writeConnectionTestJSON(w, map[string]any{"data": map[string]any{"id": 22}})
+			writeConnectionTestJSON(w, map[string]any{"code": 0, "data": map[string]any{"id": 22}})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/accounts/22":
+			_, _ = w.Write([]byte(c5SingleAccountFixture("safe-account")))
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/admin/accounts/22":
 			deletedAccount = true
 			writeConnectionTestJSON(w, map[string]any{"data": map[string]any{"message": "Account deleted successfully"}})
 		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/keys/11":
 			deletedKey = true
-			writeConnectionTestJSON(w, map[string]any{"success": true})
+			writeConnectionTestJSON(w, map[string]any{"code": 0, "data": map[string]any{"message": "deleted"}})
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
 			w.WriteHeader(http.StatusNotFound)
@@ -130,7 +134,8 @@ func TestRealConnectCompensatesRemoteResourcesWhenPersistenceFails(t *testing.T)
 
 	session := platformTestSession(upstream.PlatformSub2API, server.URL)
 	stateRepo := &testStateRepo{state: &State{UserID: "user-1", AdminAccountID: "admin-1", Session: session, Mappings: []GroupMapping{}}}
-	connRepo := &testConnRepo{stateRepo: stateRepo, saveErr: errors.New("database unavailable")}
+	persistenceError := errors.New("database unavailable")
+	connRepo := &testConnRepo{stateRepo: stateRepo, saveErr: &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: persistenceError}}
 	lookup := testUpstreamLookup{sites: map[string]*upstream.Site{
 		"site-1": {
 			ID: "site-1", UserID: "user-1", AdminAccountID: "admin-1", Name: "source",
@@ -153,7 +158,7 @@ func TestRealConnectCompensatesRemoteResourcesWhenPersistenceFails(t *testing.T)
 		UpstreamSiteID: "site-1", UpstreamGroupID: "7", UpstreamGroupName: "vip",
 		GroupType: "openai", OwnGroupIDs: []string{"7"}, AddToPricingMapping: &addToPricing,
 	})
-	if err == nil || !strings.Contains(err.Error(), "database unavailable") {
+	if err == nil || !errors.Is(err, persistenceError) {
 		t.Fatalf("expected persistence error, got %v", err)
 	}
 	if !deletedAccount || !deletedKey {

@@ -115,6 +115,6 @@ describe('retired intelligence weight compatibility', () => {
   it('does not render a retired editor in account rows', () => {
     const wrapper = mountDetail([account('retired')])
     expect(wrapper.find('[data-testid="account-intelligence-weight-editor"]').exists()).toBe(false)
-    expect(wrapper.text()).toContain('今日正确率')
+    expect(wrapper.text()).toContain('最近正确率')
   })
 })

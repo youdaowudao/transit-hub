@@ -9,6 +9,15 @@ import ManualOneTimeProbeDialog, {
 } from '@/modules/admin/components/dashboard/ManualOneTimeProbeDialog.vue'
 import { shortQuestionAnswerBatchId } from '@/modules/admin/utils/questionAnswers'
 
+
+// SPEC C2 §12.5 replaces ratio wording while retaining the original raw judgment counts.
+const expectAccuracyCounts = (period: VueWrapper, correct: number, judged: number) => {
+  expect(period.get('[data-testid="question-answer-accuracy"]').text()).toBe(judged ? `${Number((correct / judged * 100).toFixed(1))}%` : '—')
+  const counts = period.get('dl').findAll('dd')
+  expect(counts[4]!.text()).toBe(String(correct))
+  expect(counts[5]!.text()).toBe(String(judged - correct))
+}
+
 const harness = vi.hoisted(() => ({
   discoverModels: vi.fn(),
   runManualProbeOnce: vi.fn(),
@@ -3227,7 +3236,7 @@ describe('question-answer retained finalization', () => {
     expect(wrapper.find('[data-testid="question-answer-statistics-error"]').exists()).toBe(false)
     release({ ...initial, todayStats: { ...initial.todayStats, reviews: { unreviewed: 0, correct: 41, incorrect: 0 } } }); await flushPromises()
     expect(wrapper.find('[data-testid="question-answer-statistics-error"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="question-answer-stats-today"]').text()).toContain('1正确 / 1已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-today"]'), 1, 1)
     expect(wrapper.get('[data-testid="question-answer-stats-today"]').text()).not.toContain('41正确')
     expect(harness.setQuestionAnswerJudgment).not.toHaveBeenCalled()
   })
@@ -3308,7 +3317,7 @@ describe('question-answer retained finalization', () => {
     await wrapper.get('[data-testid="question-answer-statistics-error"]').findAll('button').find(button => button.text() === '重新加载')!.trigger('click'); await flushPromises()
     expect(wrapper.find('[data-testid="question-answer-statistics-error"]').exists()).toBe(false)
     expect(rowContaining(wrapper, 'Question 1').text()).toContain('人工判定·错误')
-    expect(wrapper.get('[data-testid="question-answer-stats-today"]').text()).toContain('0正确 / 1已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-today"]'), 0, 1)
     expect(harness.setQuestionAnswerJudgment).toHaveBeenCalledTimes(1)
   })
 
@@ -3345,7 +3354,7 @@ describe('question-answer retained finalization', () => {
     resolvePoll(progressed); await flushPromises()
     await openProcessedAnswers(wrapper)
     expect(wrapper.find('[data-testid="question-answer-statistics-error"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('2正确 / 2已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 2, 2)
     expect(rowContaining(wrapper, 'Question 2').text()).toContain('Answer 2')
     expect(rowContaining(wrapper, 'Question 2').text()).toContain('自动判定·正确')
     expect(wrapper.find('[data-testid="question-answer-stop-latest"]').exists()).toBe(true)
@@ -3425,10 +3434,10 @@ describe('question-answer retained finalization', () => {
     resolveRead(progressed); await flushPromises()
     expect(wrapper.find('[data-testid="question-answer-statistics-error"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="question-answer-review-batch"]').text()).toContain(shortQuestionAnswerBatchId(initial.batchId))
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('2正确 / 2已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 2, 2)
     await vi.advanceTimersByTimeAsync(2000); await flushPromises()
     expect(wrapper.find('[data-testid="question-answer-statistics-error"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('2正确 / 2已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 2, 2)
     expect(harness.setQuestionAnswerJudgment).not.toHaveBeenCalled()
     expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
   })
@@ -3469,13 +3478,13 @@ describe('question-answer retained finalization', () => {
     await flushPromises()
     expect(wrapper.get('[data-testid="question-answer-statistics-error"]').text()).toContain('newer-runtime-read-failed')
     expect(wrapper.get('[data-testid="question-answer-statistics-error"]').text()).not.toContain('判定已保存，统计刷新失败')
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('1正确 / 2已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 1, 2)
     await openProcessedAnswers(wrapper)
     expect(rowContaining(wrapper, 'Question 1').text()).toContain('人工判定·错误')
     harness.getQuestionAnswerHistory.mockResolvedValue(terminalReviewHistory(progressed.records))
     await wrapper.get('[data-testid="question-answer-statistics-error"]').findAll('button').find(button => button.text() === '重新加载')!.trigger('click'); await flushPromises()
     expect(wrapper.find('[data-testid="question-answer-statistics-error"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('1正确 / 2已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 1, 2)
     expect(harness.setQuestionAnswerJudgment).toHaveBeenCalledTimes(1)
   })
 
@@ -3498,11 +3507,11 @@ describe('question-answer retained finalization', () => {
       expect(error.text()).toContain('记录已变化')
       expect(error.findAll('button').some(button => button.text() === '重新加载')).toBe(false)
     } else expect(error.exists()).toBe(false)
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('1正确 / 2已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 1, 2)
     const reads = harness.getQuestionAnswerBatch.mock.calls.length
     await vi.advanceTimersByTimeAsync(2000); await flushPromises()
     expect(harness.getQuestionAnswerBatch.mock.calls.length).toBeGreaterThan(reads)
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('1正确 / 2已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 1, 2)
     expect(harness.setQuestionAnswerJudgment).toHaveBeenCalledTimes(1)
   })
 
@@ -3522,7 +3531,7 @@ describe('question-answer retained finalization', () => {
     resolveFollowup(reviewed); await flushPromises()
     expect(wrapper.find('[data-testid="question-answer-stop-latest"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('进行中0')
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('1正确 / 2已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 1, 2)
     const reads = harness.getQuestionAnswerBatch.mock.calls.length
     await vi.advanceTimersByTimeAsync(4000); await flushPromises()
     expect(harness.getQuestionAnswerBatch).toHaveBeenCalledTimes(reads)
@@ -3563,7 +3572,7 @@ describe('question-answer retained finalization', () => {
     await flushPromises()
     expect(rowContaining(wrapper, 'Historical refreshed answer').text()).toContain('人工判定·正确')
     expect(rowContaining(wrapper, 'Historical refreshed answer').text()).not.toContain('人工判定·错误')
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('2正确 / 3已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 2, 3)
     const error = wrapper.find('[data-testid="question-answer-statistics-error"]')
     expect(error.exists() && error.findAll('button').some(button => button.text() === '重新加载')).toBe(false)
     expect(harness.setQuestionAnswerJudgment).toHaveBeenCalledTimes(1)
@@ -3598,7 +3607,7 @@ describe('question-answer retained finalization', () => {
     await openProcessedAnswers(wrapper)
     expect(rowContaining(wrapper, 'Question 1').text()).toContain('人工判定·正确')
     expect(rowContaining(wrapper, 'Question 1').text()).not.toContain('人工判定·错误')
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('2正确 / 2已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 2, 2)
     expect(wrapper.find('[data-testid="question-answer-stop-latest"]').exists()).toBe(false)
     expect(harness.setQuestionAnswerJudgment).toHaveBeenCalledTimes(1)
   })

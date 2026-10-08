@@ -1165,6 +1165,25 @@ export default {
         moveDown: '下移',
         noVisibleGroups: '没有可显示的分组，请在显示管理中恢复。'
       },
+      questionAnswerSchedule: {
+        sources: { manual: '手动测试', scheduled: '定时测试', run_now: '计划立即执行' },
+        statuses: { pending: '等待执行', active: '执行中', completed: '已完成', partial: '部分完成', failed: '失败', skipped: '跳过', cancelled: '已终止' },
+        reasons: {
+          preparation_cancelled: '本次准备已终止', execution_terminated: '本次执行已接受终止', model_discovery_failed: '本次模型发现失败', all_models_unavailable: '本次没有可执行模型', batch_request_limit: '单账号请求矩阵超过50条', target_limit: '目标数量超过运行保护上限', all_accounts_missing: '所有指定账号已删除', account_not_found: '账号已删除', empty_scope: '当前选择范围为空',
+          group_not_found: '选中分组已删除', group_deleted: '选中分组已删除', question_not_found: '题目已删除或禁用', question_unavailable: '题目已删除或禁用',
+          test_configuration_unavailable: '库存或测试配置暂无法读取', test_configuration_conflict: '账号所属分组的测试配置冲突',
+          target_busy: '账号已有活动批次或正在准备测试', previous_execution_active: '上一次执行仍在运行',
+          misfire_no_catchup: '服务错过计划时刻，不补跑', start_window_expired: '启动宽限已过，不补发过期问答',
+          execution_timeout_before_start: '执行超时，尚未创建问答批次', execution_timeout: '整次执行超时', user_cancel: '用户终止本次执行',
+          target_limit_exceeded: '实际目标数量超过运行保护上限', max_targets: '实际目标数量超过运行保护上限',
+          request_limit_exceeded: '单次请求量超过运行保护上限', execution_request_limit: '单次请求量超过运行保护上限',
+          daily_limit: '今日定时请求预算不足', daily_limit_exceeded: '今日定时请求预算不足', queue_full: '等待中的定时请求已达上限',
+          batch_limit_exceeded: '单账号题目、模型和重复次数矩阵超过50条', model_unavailable: '本次没有可执行模型', models_unavailable: '本次没有可执行模型',
+          credential_unavailable: '账号凭据暂不可用', c1_finalization_pending: '准确批次正在收口，继续保留活动名额',
+          c1_finalization_failed: '准确批次收口失败，正在重试收口', preparation_pending: '等待准备调用退出',
+          storage_error: '本地存储失败，等待对账', batch_creation_failed: '创建准确批次失败', service_restarted: '服务重启，沿原批次对账',
+        },
+      },
       groupDetail: {
         multiplierPriority: '按倍率排序',
         subtitle: '已监控 {monitored}/{total} 个账号或渠道',
@@ -1301,6 +1320,7 @@ export default {
           latency: '延迟',
           stability: '最近中断',
           todayAccuracy: '今日正确率',
+          latestAccuracy: '最近正确率',
           actions: '操作'
         },
         stabilityColumn: {
@@ -2093,7 +2113,13 @@ export default {
         questionAnswerHistoryScope: '历史范围无效，请选择今日或全部。',
         questionAnswerHistoryPage: '历史页码无效，请重新选择。',
         questionAnswerJudgmentForbidden: '只有成功回答可以判定正确或错误。',
-        questionAnswerServiceStopped: '问答服务正在关闭，暂时不能开始新批次。'
+        questionAnswerServiceStopped: '问答后台服务不可用，暂时不能执行写入或开始新批次。',
+        questionAnswerScheduleDeleted: '计划已删除，不能接受新的立即执行请求。',
+        questionAnswerScheduleInvalid: '计划配置失效，请处理原因后重新检查。',
+        questionAnswerScheduleActive: '该计划已有活动执行，已打开其权威状态。',
+        questionAnswerScheduleNotFound: '计划不存在或不属于当前工作区。',
+        questionAnswerScheduleVersionConflict: '计划已被其他操作修改，请读取当前权威版本后再保存。',
+        questionAnswerExecutionVersionConflict: '执行状态已变化，已保留当前权威状态，请核对后重试。'
       }
     },
       upstream: {

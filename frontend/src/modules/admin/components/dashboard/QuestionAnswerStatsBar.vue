@@ -5,7 +5,7 @@ import { formatQuestionAnswerAccuracy, questionAnswerAccuracy } from '../../util
 import { t } from '@/locales'
 const props = defineProps<{ reviewStats: QuestionAnswerStats | null; todayStats: QuestionAnswerStats; lifetimeStats: QuestionAnswerStats }>()
 const prefix = 'admin.connectionHealth.manualProbeDialog.questionAnswer.stats'
-const dimension = ref<'account' | 'model' | 'question'>('account')
+const dimension = ref<'account' | 'model' | 'question'>('model')
 const periods = computed(() => [
   ...(props.reviewStats ? [{ key: 'review', label: '当前批次', stats: props.reviewStats }] : []),
   { key: 'today', label: t(`${prefix}.todaySingapore`), stats: props.todayStats },
@@ -31,7 +31,7 @@ const summary = (stats: Pick<QuestionAnswerModelStats, 'requests' | 'reviews'>) 
         <dl class="mt-2 grid grid-cols-3 gap-2">
           <div v-for="([label, count], countIndex) in counts(period.stats)" :key="countIndex"><dt class="text-[11px] text-muted-foreground">{{ label }}</dt><dd class="text-sm font-semibold text-foreground">{{ count }}</dd></div>
         </dl>
-        <div class="mt-2 flex flex-wrap items-end gap-2"><span class="text-[11px] text-muted-foreground">正确率</span><strong data-testid="question-answer-accuracy" class="text-2xl leading-none text-primary">{{ accuracy(period.stats) }}</strong><span class="text-[11px] text-muted-foreground">{{ period.stats.reviews.correct }}正确 / {{ period.stats.reviews.correct + period.stats.reviews.incorrect }}已判</span></div>
+        <div class="mt-2 flex flex-wrap items-end gap-2"><span class="text-[11px] text-muted-foreground">正确率</span><strong data-testid="question-answer-accuracy" class="text-2xl leading-none text-primary">{{ accuracy(period.stats) }}</strong></div>
         <div v-if="dimension === 'model'" class="mt-3 space-y-2">
           <p v-if="period.stats.byModel.length === 0" class="text-xs text-muted-foreground">暂无模型数据</p>
           <div v-for="item in period.stats.byModel" :key="item.modelName" data-testid="question-answer-model-stats" class="rounded-md border border-border/40 p-2"><p class="break-words text-xs font-medium text-foreground">{{ item.modelName }} · {{ accuracy(item) }}</p><p class="mt-1 break-words text-[11px] text-muted-foreground">{{ summary(item) }}</p></div>

@@ -50,7 +50,7 @@ func (s *Service) runQuestionAnswerDispatcher() {
 
 // nextQuestionAnswerDispatchLocked requires questionAnswerMu to be held by the caller.
 func (s *Service) nextQuestionAnswerDispatchLocked() (string, *activeQuestionAnswerBatch, QuestionAnswerRecord, bool) {
-	if s.questionAnswerClosed || s.questionAnswerInFlight >= questionAnswerConcurrency || len(s.questionAnswerOrder) == 0 {
+	if s.questionAnswerClosed || s.questionAnswerInFlight >= s.questionAnswerConcurrency() || len(s.questionAnswerOrder) == 0 {
 		return "", nil, QuestionAnswerRecord{}, false
 	}
 	start := 0
@@ -342,4 +342,28 @@ func (s *Service) removeQuestionAnswerRunLocked(key string, run *activeQuestionA
 	if len(s.questionAnswerOrder) == 0 {
 		s.questionAnswerLastKey = ""
 	}
+}
+
+// SetQuestionAnswerConcurrency applies successful singleton commits in version
+// order. Held slots remain part of inFlight when capacity is reduced.
+func (s *Service) SetQuestionAnswerConcurrency(limit int, version int64) {
+	if s.backgroundTasksDisabled || limit < 1 || limit > 50 || version < 0 {
+		return
+	}
+	s.questionAnswerMu.Lock()
+	if s.questionAnswerConcurrencyLoaded && version <= s.questionAnswerConcurrencyVersion {
+		s.questionAnswerMu.Unlock()
+		return
+	}
+	s.questionAnswerConcurrencyLimit, s.questionAnswerConcurrencyVersion, s.questionAnswerConcurrencyLoaded = limit, version, true
+	s.questionAnswerMu.Unlock()
+	s.wakeQuestionAnswerDispatcher()
+}
+
+// questionAnswerMu is held by the dispatcher caller.
+func (s *Service) questionAnswerConcurrency() int {
+	if s.questionAnswerConcurrencyLimit < 1 {
+		return questionAnswerConcurrency
+	}
+	return s.questionAnswerConcurrencyLimit
 }

@@ -23,6 +23,16 @@ import type {
   QuestionAnswerHistory,
   QuestionAnswerHistoryScope,
   QuestionAnswerTodaySummary,
+  QuestionAnswerRecentSummaryItem,
+  QuestionAnswerRuntimeSettings,
+  QuestionAnswerScheduleLimits,
+  QuestionAnswerScheduleInput,
+  QuestionAnswerSchedulePreviewInput,
+  QuestionAnswerSchedulePreview,
+  QuestionAnswerSchedule,
+  QuestionAnswerSchedulePage,
+  QuestionAnswerScheduleExecution,
+  QuestionAnswerScheduleExecutionDetail,
   QuestionAnswerQuestionStats,
   QuestionAnswerRecord,
   TestQuestion,
@@ -55,6 +65,17 @@ const questionAnswerContractHeaders: HeadersInit = {
 
 type ApiErrorPayload = {
   message?: string
+  error?: string
+  current?: unknown
+  activeExecutionId?: string
+}
+
+// C2 conflicts carry the authoritative object; callers must not treat 409 as a completed mutation.
+export class ConnectionHealthApiError extends Error {
+  constructor(message: string, public readonly status: number, public readonly current?: unknown, public readonly activeExecutionId?: string) {
+    super(message)
+    this.name = 'ConnectionHealthApiError'
+  }
 }
 
 const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
@@ -82,7 +103,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       handleAuthExpired()
       throw new Error(authUnauthorizedErrorKey)
     }
-    throw new Error(payload.message ?? 'admin.connectionHealth.errors.request')
+    throw new ConnectionHealthApiError(payload.message ?? payload.error ?? 'admin.connectionHealth.errors.request', response.status, payload.current, payload.activeExecutionId)
   }
 
   return payload
@@ -866,6 +887,51 @@ export const getQuestionAnswerSummary = async (targetId: string, signal?: AbortS
   const summary = await requestJson<QuestionAnswerTodaySummary>(`/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/summary`, { headers: questionAnswerContractHeaders, signal })
   return { targetId: summary.targetId, todayStats: { requests: { ...summary.todayStats.requests }, reviews: { ...summary.todayStats.reviews } } }
 }
+
+export const getQuestionAnswerRecentSummaries = async (targetIds: string[], signal?: AbortSignal): Promise<QuestionAnswerRecentSummaryItem[]> => {
+  const ids = [...new Set(targetIds)]
+  const query = new URLSearchParams()
+  for (const id of ids) query.append('targetId', id)
+  const response = await requestJson<{ items: QuestionAnswerRecentSummaryItem[] }>(`/connection-health/question-answer-recent-summaries?${query}`, { signal })
+  if (!Array.isArray(response.items) || response.items.length !== ids.length || response.items.some((item, index) =>
+    item.targetId !== ids[index] || typeof item.activeNewerBatch !== 'boolean' || (item.recentQuestionAnswer !== null && (!item.recentQuestionAnswer?.batchId || !item.recentQuestionAnswer.requests || !item.recentQuestionAnswer.reviews)))) {
+    throw new Error('admin.connectionHealth.errors.request')
+  }
+  return response.items.map(item => ({ ...item, recentQuestionAnswer: item.recentQuestionAnswer === null ? null : {
+    ...item.recentQuestionAnswer, requests: { ...item.recentQuestionAnswer.requests }, reviews: { ...item.recentQuestionAnswer.reviews },
+  } }))
+}
+
+const schedulePath = (id: string): string => `/connection-health/question-answer-schedules/${encodeURIComponent(id)}`
+const executionPath = (id: string): string => `/connection-health/question-answer-schedule-executions/${encodeURIComponent(id)}`
+export const getQuestionAnswerRuntimeSettings = (signal?: AbortSignal): Promise<QuestionAnswerRuntimeSettings> =>
+  requestJson('/connection-health/question-answer-runtime-settings', { signal })
+export const saveQuestionAnswerRuntimeSettings = (questionAnswerConcurrency: number, expectedVersion: number, signal?: AbortSignal): Promise<QuestionAnswerRuntimeSettings> =>
+  requestJson('/connection-health/question-answer-runtime-settings', { method: 'PUT', body: JSON.stringify({ questionAnswerConcurrency, expectedVersion }), signal })
+export const getQuestionAnswerScheduleLimits = (signal?: AbortSignal): Promise<QuestionAnswerScheduleLimits> =>
+  requestJson('/connection-health/question-answer-schedule-limits', { signal })
+export const saveQuestionAnswerScheduleLimits = (limits: Omit<QuestionAnswerScheduleLimits, 'todayReservedRequests' | 'version' | 'updatedAt'>, expectedVersion: number, signal?: AbortSignal): Promise<QuestionAnswerScheduleLimits> =>
+  requestJson('/connection-health/question-answer-schedule-limits', { method: 'PUT', body: JSON.stringify({ ...limits, expectedVersion }), signal })
+export const listQuestionAnswerSchedules = (page = 1, status: 'active' | 'deleted' = 'active', signal?: AbortSignal): Promise<QuestionAnswerSchedulePage<QuestionAnswerSchedule>> =>
+  requestJson(`/connection-health/question-answer-schedules?${new URLSearchParams({ page: String(page), pageSize: '20', status })}`, { signal })
+export const getQuestionAnswerSchedule = (id: string, signal?: AbortSignal): Promise<QuestionAnswerSchedule> => requestJson(schedulePath(id), { signal })
+export const previewQuestionAnswerSchedule = (input: QuestionAnswerSchedulePreviewInput, signal?: AbortSignal): Promise<QuestionAnswerSchedulePreview> =>
+  requestJson('/connection-health/question-answer-schedules/preview', { method: 'POST', body: JSON.stringify(input), signal })
+export const createQuestionAnswerSchedule = (input: QuestionAnswerScheduleInput, signal?: AbortSignal): Promise<QuestionAnswerSchedule> =>
+  requestJson('/connection-health/question-answer-schedules', { method: 'POST', body: JSON.stringify(input), signal })
+export const updateQuestionAnswerSchedule = (id: string, input: Omit<QuestionAnswerScheduleInput, 'enabled'>, expectedVersion: number, signal?: AbortSignal): Promise<QuestionAnswerSchedule> =>
+  requestJson(schedulePath(id), { method: 'PUT', body: JSON.stringify({ ...input, expectedVersion }), signal })
+export const setQuestionAnswerScheduleState = (id: string, operation: 'enable' | 'disable' | 'revalidate', expectedVersion: number, signal?: AbortSignal): Promise<QuestionAnswerSchedule> =>
+  requestJson(`${schedulePath(id)}/${operation}`, { method: 'POST', body: JSON.stringify({ expectedVersion }), signal })
+export const deleteQuestionAnswerSchedule = (id: string, expectedVersion: number, signal?: AbortSignal): Promise<QuestionAnswerSchedule> =>
+  requestJson(`${schedulePath(id)}?${new URLSearchParams({ expectedVersion: String(expectedVersion) })}`, { method: 'DELETE', signal })
+export const runQuestionAnswerSchedule = (id: string, requestId: string, signal?: AbortSignal): Promise<QuestionAnswerScheduleExecution> =>
+  requestJson(`${schedulePath(id)}/run`, { method: 'POST', body: JSON.stringify({ requestId }), signal })
+export const listQuestionAnswerScheduleExecutions = (id: string, page = 1, signal?: AbortSignal): Promise<QuestionAnswerSchedulePage<QuestionAnswerScheduleExecution>> =>
+  requestJson(`${schedulePath(id)}/executions?${new URLSearchParams({ page: String(page), pageSize: '20' })}`, { signal })
+export const getQuestionAnswerScheduleExecution = (id: string, signal?: AbortSignal): Promise<QuestionAnswerScheduleExecutionDetail> => requestJson(executionPath(id), { signal })
+export const cancelQuestionAnswerScheduleExecution = (id: string, expectedVersion: number, signal?: AbortSignal): Promise<QuestionAnswerScheduleExecution> =>
+  requestJson(`${executionPath(id)}/cancel`, { method: 'POST', body: JSON.stringify({ expectedVersion }), signal })
 
 export const setQuestionAnswerJudgment = async (
   targetId: string,

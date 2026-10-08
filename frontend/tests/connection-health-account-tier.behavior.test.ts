@@ -18,6 +18,8 @@ const account = (): AdminGroupAccount => ({
   probeModelsConfigured: false, productionSortOrder: 0,
   // The tier fixture has 7 correct and 3 incorrect answers, with no unreviewed samples.
   todayQuestionAnswerSubmitted: 10, todayQuestionAnswerCorrect: 7, todayQuestionAnswerJudged: 10,
+  recentQuestionAnswer: { batchId: 'tier-recent', source: 'manual', scheduleName: null, createdAt: '2026-09-01T00:00:00Z', completedAt: '2026-09-01T00:01:00Z', partial: false, requests: { submitted: 10, succeeded: 10, failed: 0, cancelled: 0, inProgress: 0 }, reviews: { correct: 7, incorrect: 3, unreviewed: 0 } },
+  activeNewerQuestionAnswerBatch: false,
 })
 const groups = (): AdminGroupHealth[] => ['one', 'two'].map(id => ({
   id, name: id, platform: 'openai', status: 'active', type: 'subscription', isExclusive: false,
@@ -98,8 +100,8 @@ describe('account-global tier editing', () => {
     const wrapper = await mountRows()
     expect(editors(wrapper)).toHaveLength(2)
     for (const editor of editors(wrapper)) { expect(editor.text()).toContain('后备'); expect(editor.text()).not.toContain('主力') }
-    expect(wrapper.text()).toContain('今日正确率')
-    expect(wrapper.text()).toContain('7正确 / 10已判')
+    expect(wrapper.text()).toContain('最近正确率')
+    expect(wrapper.text()).not.toContain('7正确 / 10已判')
     expect(wrapper.text()).toContain('70%')
     expect(wrapper.findAll('button[aria-label="编辑账号层级"]')).toHaveLength(2)
     expect(saveRequests).toEqual([])

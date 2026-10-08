@@ -30,6 +30,15 @@ let exactOverride: (() => Promise<Response>) | undefined
 let historyOverride: (() => Promise<Response>) | undefined
 let summaryOverride: (() => Promise<Response>) | undefined
 let summaryCalls: number
+
+// SPEC C2 §12.5 replaces ratio wording while retaining the original raw judgment counts.
+const expectAccuracyCounts = (period: VueWrapper, correct: number, judged: number) => {
+  expect(period.get('[data-testid="question-answer-accuracy"]').text()).toBe(judged ? `${Number((correct / judged * 100).toFixed(1))}%` : '—')
+  const counts = period.get('dl').findAll('dd')
+  expect(counts[4]!.text()).toBe(String(correct))
+  expect(counts[5]!.text()).toBe(String(judged - correct))
+}
+
 const wrappers: VueWrapper[] = []
 const service = useConnectionHealth()
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -127,9 +136,9 @@ describe('C1 frontend complete behavior', () => {
     await wrapper.get('[data-testid="question-answer-record-r1"]').findAll('button')[0]!.trigger('click'); await flushPromises()
     expect(writes[0]!.body).toEqual({ judgment: 'correct', expectedUpdatedAt: now })
     expect(wrapper.text()).toContain('人工判定·正确'); expect(wrapper.text()).toContain('判定已保存，统计刷新失败')
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('1正确 / 1已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 1, 1)
     await wrapper.get('[data-testid="question-answer-record-r1"]').findAll('button')[1]!.trigger('click'); await flushPromises()
-    expect(wrapper.text()).toContain('人工判定·错误'); expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('0正确 / 1已判')
+    expect(wrapper.text()).toContain('人工判定·错误'); expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 0, 1)
     await wrapper.get('[data-testid="question-answer-record-r1"]').findAll('button')[0]!.trigger('click'); await flushPromises()
     expect(wrapper.text()).toContain('人工判定·正确'); expect(wrapper.emitted('question-answer-stats-dirty')).toHaveLength(3)
   })
@@ -221,13 +230,13 @@ describe('C1 frontend complete behavior', () => {
     const section = wrapper.get('[data-testid="question-answer-history"]')
     await section.get('button').trigger('click'); await flushPromises()
     await section.findAll('button').find(button => button.text() === '全部')!.trigger('click'); await flushPromises()
-    expect(wrapper.get('[data-testid="question-answer-stats-today"]').text()).toContain('0正确 / 1已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-today"]'), 0, 1)
     expect(wrapper.get('[data-testid="question-answer-record-r1"]').text()).toContain('自动判定·正确')
     failExact = true; failHistory = true
     await wrapper.get('[data-testid="question-answer-record-r1"]').findAll('button')[1]!.trigger('click'); await flushPromises()
     expect(wrapper.get('[data-testid="question-answer-record-r1"]').text()).toContain('人工判定·错误')
     for (const period of ['review', 'today', 'lifetime']) {
-      expect(wrapper.get(`[data-testid="question-answer-stats-${period}"]`).text()).toContain('0正确 / 1已判')
+      expectAccuracyCounts(wrapper.get(`[data-testid="question-answer-stats-${period}"]`), 0, 1)
       expect(wrapper.get(`[data-testid="question-answer-stats-${period}"]`).text()).not.toContain('-100%')
     }
   })
@@ -293,11 +302,11 @@ describe('C1 frontend complete behavior', () => {
     await wrapper.get('[data-testid="question-answer-statistics-error"]').findAll('button').find(button => button.text() === '重新加载')!.trigger('click'); await flushPromises()
     expect(resolve).toBeTypeOf('function')
     await vi.advanceTimersByTimeAsync(2000); await flushPromises()
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('0正确 / 1已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 0, 1)
     resolve(json(freshHistory)); await flushPromises()
     expect(wrapper.find('[data-testid="question-answer-statistics-error"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="question-answer-stats-today"]').text()).toContain('0正确 / 1已判')
-    expect(wrapper.get('[data-testid="question-answer-stats-lifetime"]').text()).toContain('0正确 / 1已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-today"]'), 0, 1)
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-lifetime"]'), 0, 1)
     expect(writes).toHaveLength(0)
   })
 
@@ -322,7 +331,7 @@ describe('C1 frontend complete behavior', () => {
     expect(wrapper.find('[data-testid="question-answer-statistics-error"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="question-answer-record-r1"]').text()).toContain('人工判定·错误')
     expect(wrapper.get('[data-testid="question-answer-record-r1"]').text()).not.toContain('自动判定·正确')
-    for (const period of ['review', 'today', 'lifetime']) expect(wrapper.get(`[data-testid="question-answer-stats-${period}"]`).text()).toContain('0正确 / 1已判')
+    for (const period of ['review', 'today', 'lifetime']) expectAccuracyCounts(wrapper.get(`[data-testid="question-answer-stats-${period}"]`), 0, 1)
     expect(writes).toHaveLength(0)
   })
 
@@ -365,7 +374,7 @@ describe('C1 frontend complete behavior', () => {
     expect(wrapper.get('[data-testid="question-answer-review-batch"]').text()).toContain('#new-runt')
     expect(wrapper.find('[data-testid="question-answer-statistics-error"]').exists()).toBe(false)
     const expectedCorrect = order.includes('terminal') ? 3 : 2
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain(`${expectedCorrect}正确 / ${expectedCorrect}已判`)
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), expectedCorrect, expectedCorrect)
     expect(wrapper.get('[data-testid="question-answer-record-r2"]').text()).toContain('SECOND HIT')
     expect(wrapper.get('[data-testid="question-answer-record-r2"]').text()).toContain('自动判定·正确')
     expect(wrapper.find('[data-testid="question-answer-stop-latest"]').exists()).toBe(!order.includes('terminal'))
@@ -400,7 +409,7 @@ describe('C1 frontend complete behavior', () => {
     }
     resolveFollowup(json(oldSnapshot)); await flushPromises()
     expect(wrapper.get('[data-testid="question-answer-latest-running-hint"]').text()).toContain('2/3')
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('1正确 / 2已判')
+    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 1, 2)
     if (order.endsWith('poll')) {
       expect(pollSignal!.aborted).toBe(false)
       resolvePoll(json(fresh)); await flushPromises()
@@ -409,7 +418,7 @@ describe('C1 frontend complete behavior', () => {
     expect(wrapper.get('[data-testid="question-answer-record-r2"]').text()).toContain(order.endsWith('poll') ? 'SECOND NEW HIT' : 'SECOND HIT')
     expect(wrapper.get('[data-testid="question-answer-record-r1"]').text()).toContain('人工判定·错误')
     expect(wrapper.find('[data-testid="question-answer-stop-latest"]').exists()).toBe(true)
-    expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).not.toContain('0正确 / 1已判')
+    expect(wrapper.get('[data-testid="question-answer-stats-review"] [data-testid="question-answer-accuracy"]').text()).not.toBe('0%')
     expect(writes).toHaveLength(1)
   })
 

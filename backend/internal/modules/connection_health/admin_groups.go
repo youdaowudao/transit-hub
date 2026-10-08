@@ -183,9 +183,11 @@ type AdminGroupAccount struct {
 	PrioritySyncBlocked        bool                    `json:"prioritySyncBlocked"`
 	PrioritySyncBlockReason    string                  `json:"prioritySyncBlockReason,omitempty"`
 
-	TodayQuestionAnswerSubmitted int `json:"todayQuestionAnswerSubmitted"`
-	TodayQuestionAnswerJudged    int `json:"todayQuestionAnswerJudged"`
-	TodayQuestionAnswerCorrect   int `json:"todayQuestionAnswerCorrect"`
+	TodayQuestionAnswerSubmitted   int                          `json:"todayQuestionAnswerSubmitted"`
+	TodayQuestionAnswerJudged      int                          `json:"todayQuestionAnswerJudged"`
+	TodayQuestionAnswerCorrect     int                          `json:"todayQuestionAnswerCorrect"`
+	RecentQuestionAnswer           *QuestionAnswerRecentSummary `json:"recentQuestionAnswer"`
+	ActiveNewerQuestionAnswerBatch bool                         `json:"activeNewerQuestionAnswerBatch"`
 	// ProductionSortOrder 是去重目标在当前 workspace 的全局生产顺序，不是分组内局部序号。
 	ProductionSortOrder int `json:"productionSortOrder"`
 }
@@ -524,6 +526,14 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 			return nil, summaryErr
 		}
 	}
+	recentQuestionAnswerByTarget := make(map[string]QuestionAnswerRecentSummaryItem)
+	if recentRepo, ok := s.repo.(questionAnswerRecentRepository); ok && len(todayQuestionAnswerTargetIDs) > 0 {
+		var err error
+		recentQuestionAnswerByTarget, err = recentRepo.ListLatestTerminalQuestionAnswerSummaries(ctx, userID, todayQuestionAnswerTargetIDs)
+		if err != nil {
+			return nil, err
+		}
+	}
 	assemblyStarted := time.Now()
 	restrictionObservedAt := assemblyStarted.UTC()
 	healthFallbacksByTarget := make(map[string][]float64)
@@ -620,6 +630,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		for _, acc := range accounts {
 			targetID := buildTargetID(platform, adminAccountID, acc.ID)
 			todayQuestionAnswer := todayQuestionAnswerByTarget[targetID]
+			recentQuestionAnswer := recentQuestionAnswerByTarget[targetID]
 			multiplierResolution := resolutionForAdminAccount(upstreamMultiplierLookup, acc.ID)
 			upstreamKeyGroup := multiplierResolution.info
 			if (multiplierResolution.status == MultiplierResolutionResolved || multiplierResolution.status == MultiplierResolutionStale) && strings.TrimSpace(upstreamKeyGroup.siteID) != "" {
@@ -783,76 +794,78 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				remoteActionPending = actionAccountPendingView(actionCheckpointsByAccount[id], s.actionTime())
 			}
 			item := AdminGroupAccount{
-				TestConfiguration:             testConfigurationByTarget[targetID],
-				RemoteActionPending:           remoteActionPending,
-				ID:                            acc.ID,
-				Name:                          acc.Name,
-				Platform:                      acc.Platform,
-				Type:                          acc.Type,
-				Status:                        acc.Status,
-				MainSiteError:                 mainSiteErrorForAccount(platform, acc),
-				Schedulable:                   decisionAccount.Schedulable,
-				TempUnschedulableActive:       acc.TempUnschedulableKnown && acc.TempUnschedulableUntil != nil && !upstream.Sub2APIDeadlineExpired(acc.TempUnschedulableUntil, acc.TempUnschedulableKnown, restrictionObservedAt),
-				TempUnschedulableUntil:        acc.TempUnschedulableUntil,
-				TempUnschedulableKnown:        acc.TempUnschedulableKnown,
-				TempUnschedulableReason:       acc.TempUnschedulableReason,
-				RateLimitActive:               acc.RateLimitKnown && acc.RateLimitResetAt != nil && !upstream.Sub2APIDeadlineExpired(acc.RateLimitResetAt, acc.RateLimitKnown, restrictionObservedAt),
-				RateLimitResetAt:              acc.RateLimitResetAt,
-				RateLimitKnown:                acc.RateLimitKnown,
-				OverloadActive:                acc.OverloadKnown && acc.OverloadUntil != nil && !upstream.Sub2APIDeadlineExpired(acc.OverloadUntil, acc.OverloadKnown, restrictionObservedAt),
-				OverloadUntil:                 acc.OverloadUntil,
-				OverloadKnown:                 acc.OverloadKnown,
-				SchedulableSource:             schedulableSource,
-				SchedulableChangedAt:          schedulableChangedAt,
-				LastSchedulableAction:         lastSchedulableAction,
-				LastSchedulableActionAt:       lastSchedulableActionAt,
-				LastSchedulableActionResult:   lastSchedulableActionResult,
-				LastSchedulableActionErrorKey: lastSchedulableActionErrorKey,
-				UpstreamStatusSource:          "upstream_observed",
-				HealthStatusSource:            healthStatusSource(modelHealth, unprobedModels),
-				Priority:                      acc.Priority,
-				Concurrency:                   acc.Concurrency,
-				RateMultiplier:                acc.RateMultiplier,
-				LoadFactor:                    acc.LoadFactor,
-				Weight:                        acc.Weight,
-				Models:                        acc.Models,
-				GroupIDs:                      acc.GroupIDs,
-				UpstreamKeyGroupName:          upstreamKeyGroup.name,
-				UpstreamKeyGroupID:            upstreamKeyGroup.groupID,
-				UpstreamKeyGroupMultiplier:    upstreamKeyGroup.multiplier,
-				TargetID:                      targetID,
-				AccountTier:                   effectiveAccountTier(accountTiers[targetID]),
-				ProbeAvailable:                available,
-				ProbeUnavailableReason:        reason,
-				ModelHealth:                   modelHealth,
-				UnprobedModels:                unprobedModels,
-				AssignedPolicyIDs:             assignedIDs,
-				AssignedPolicies:              assignedSummaries,
-				EffectivePolicyIDs:            effectivePolicyIDs,
-				EffectivePolicies:             effectivePolicySummaries,
-				HasAssignedPolicy:             len(assignedIDs) > 0,
-				HasEnabledPolicy:              hasEnabledAssignedPolicy(assignedSummaries),
-				HasEnabledProbePolicy:         hasProbePolicy,
-				PolicyAssignmentSource:        assignmentSource,
-				ExcludedFromGroupPolicy:       excluded,
-				PriorityManaged:               priorityManaged,
-				PriorityActionPending:         priorityManaged && priorityActionPending(&priorityState),
-				PriorityConflict:              priorityManaged && priorityState.Conflict,
-				PriorityOriginal:              priorityOriginal,
-				PriorityExpected:              priorityExpected,
-				PriorityConflictValue:         priorityConflictValue,
-				PriorityConflictAt:            priorityConflictAt,
-				ProbeModelsConfigured:         len(activeSpecs) > 0,
-				EffectiveMultiplier:           effectiveMultiplier,
-				MultiplierResolutionStatus:    multiplierResolution.status,
-				MultiplierSource:              multiplierSource,
-				LocalFallbackMultiplier:       localFallback,
-				UpstreamSiteID:                multiplierResolution.info.siteID,
-				PrioritySyncBlocked:           prioritySyncBlocked,
-				PrioritySyncBlockReason:       prioritySyncBlockReason,
-				TodayQuestionAnswerSubmitted:  todayQuestionAnswer.Submitted,
-				TodayQuestionAnswerCorrect:    todayQuestionAnswer.Correct,
-				TodayQuestionAnswerJudged:     todayQuestionAnswer.Judged,
+				TestConfiguration:              testConfigurationByTarget[targetID],
+				RemoteActionPending:            remoteActionPending,
+				ID:                             acc.ID,
+				Name:                           acc.Name,
+				Platform:                       acc.Platform,
+				Type:                           acc.Type,
+				Status:                         acc.Status,
+				MainSiteError:                  mainSiteErrorForAccount(platform, acc),
+				Schedulable:                    decisionAccount.Schedulable,
+				TempUnschedulableActive:        acc.TempUnschedulableKnown && acc.TempUnschedulableUntil != nil && !upstream.Sub2APIDeadlineExpired(acc.TempUnschedulableUntil, acc.TempUnschedulableKnown, restrictionObservedAt),
+				TempUnschedulableUntil:         acc.TempUnschedulableUntil,
+				TempUnschedulableKnown:         acc.TempUnschedulableKnown,
+				TempUnschedulableReason:        acc.TempUnschedulableReason,
+				RateLimitActive:                acc.RateLimitKnown && acc.RateLimitResetAt != nil && !upstream.Sub2APIDeadlineExpired(acc.RateLimitResetAt, acc.RateLimitKnown, restrictionObservedAt),
+				RateLimitResetAt:               acc.RateLimitResetAt,
+				RateLimitKnown:                 acc.RateLimitKnown,
+				OverloadActive:                 acc.OverloadKnown && acc.OverloadUntil != nil && !upstream.Sub2APIDeadlineExpired(acc.OverloadUntil, acc.OverloadKnown, restrictionObservedAt),
+				OverloadUntil:                  acc.OverloadUntil,
+				OverloadKnown:                  acc.OverloadKnown,
+				SchedulableSource:              schedulableSource,
+				SchedulableChangedAt:           schedulableChangedAt,
+				LastSchedulableAction:          lastSchedulableAction,
+				LastSchedulableActionAt:        lastSchedulableActionAt,
+				LastSchedulableActionResult:    lastSchedulableActionResult,
+				LastSchedulableActionErrorKey:  lastSchedulableActionErrorKey,
+				UpstreamStatusSource:           "upstream_observed",
+				HealthStatusSource:             healthStatusSource(modelHealth, unprobedModels),
+				Priority:                       acc.Priority,
+				Concurrency:                    acc.Concurrency,
+				RateMultiplier:                 acc.RateMultiplier,
+				LoadFactor:                     acc.LoadFactor,
+				Weight:                         acc.Weight,
+				Models:                         acc.Models,
+				GroupIDs:                       acc.GroupIDs,
+				UpstreamKeyGroupName:           upstreamKeyGroup.name,
+				UpstreamKeyGroupID:             upstreamKeyGroup.groupID,
+				UpstreamKeyGroupMultiplier:     upstreamKeyGroup.multiplier,
+				TargetID:                       targetID,
+				AccountTier:                    effectiveAccountTier(accountTiers[targetID]),
+				ProbeAvailable:                 available,
+				ProbeUnavailableReason:         reason,
+				ModelHealth:                    modelHealth,
+				UnprobedModels:                 unprobedModels,
+				AssignedPolicyIDs:              assignedIDs,
+				AssignedPolicies:               assignedSummaries,
+				EffectivePolicyIDs:             effectivePolicyIDs,
+				EffectivePolicies:              effectivePolicySummaries,
+				HasAssignedPolicy:              len(assignedIDs) > 0,
+				HasEnabledPolicy:               hasEnabledAssignedPolicy(assignedSummaries),
+				HasEnabledProbePolicy:          hasProbePolicy,
+				PolicyAssignmentSource:         assignmentSource,
+				ExcludedFromGroupPolicy:        excluded,
+				PriorityManaged:                priorityManaged,
+				PriorityActionPending:          priorityManaged && priorityActionPending(&priorityState),
+				PriorityConflict:               priorityManaged && priorityState.Conflict,
+				PriorityOriginal:               priorityOriginal,
+				PriorityExpected:               priorityExpected,
+				PriorityConflictValue:          priorityConflictValue,
+				PriorityConflictAt:             priorityConflictAt,
+				ProbeModelsConfigured:          len(activeSpecs) > 0,
+				EffectiveMultiplier:            effectiveMultiplier,
+				MultiplierResolutionStatus:     multiplierResolution.status,
+				MultiplierSource:               multiplierSource,
+				LocalFallbackMultiplier:        localFallback,
+				UpstreamSiteID:                 multiplierResolution.info.siteID,
+				PrioritySyncBlocked:            prioritySyncBlocked,
+				PrioritySyncBlockReason:        prioritySyncBlockReason,
+				TodayQuestionAnswerSubmitted:   todayQuestionAnswer.Submitted,
+				TodayQuestionAnswerCorrect:     todayQuestionAnswer.Correct,
+				TodayQuestionAnswerJudged:      todayQuestionAnswer.Judged,
+				RecentQuestionAnswer:           recentQuestionAnswer.RecentQuestionAnswer,
+				ActiveNewerQuestionAnswerBatch: recentQuestionAnswer.ActiveNewerBatch,
 			}
 			if session.Platform == upstream.PlatformSub2API {
 				only := hasMultiplierOnlyPolicy(priorityPoliciesByTarget[targetID])

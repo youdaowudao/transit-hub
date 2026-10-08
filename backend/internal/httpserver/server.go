@@ -230,6 +230,9 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		lotteryService.StartScheduler(lotteryCtx)
 		server.lotteryCancel = lotteryCancel
 		server.lotteryWorker = lotteryWorker
+		if err := connHealthService.StartQuestionAnswerScheduleCoordinator(context.Background()); err != nil {
+			panic(err)
+		}
 		connHealthService.StartScheduler(context.Background())
 	}
 
@@ -260,12 +263,13 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	dashboardService.SetAdminAccountService(adminAccountsService)
 	dashboardService.SetMySiteSync(mySitesService)
 	adminAccountsService.SetWorkspaceCleanup(workspaceCleanup{
-		dashboardSessions:   dashboardSessionStore,
-		ticketSessions:      ticketsSessions,
-		leaderboardSessions: leaderboardSessions,
-		lotterySessions:     lotterySessions,
-		attachments:         ticketsStorage,
-		upstreamSites:       upstreamService,
+		dashboardSessions:       dashboardSessionStore,
+		ticketSessions:          ticketsSessions,
+		leaderboardSessions:     leaderboardSessions,
+		lotterySessions:         lotterySessions,
+		attachments:             ticketsStorage,
+		upstreamSites:           upstreamService,
+		questionAnswerSchedules: connHealthService,
 	})
 	if !cfg.APIOnly {
 		adminAccountsService.StartCleanupWorker(context.Background(), time.Minute)
@@ -372,17 +376,27 @@ type upstreamSiteCleaner interface {
 	CleanupDeletedWorkspaceSites(ctx context.Context, userID string, siteIDs []string) error
 }
 
+type questionAnswerScheduleWorkspaceCleaner interface {
+	CleanupDeletedQuestionAnswerSchedules(context.Context, string, string) error
+}
+
 type workspaceCleanup struct {
-	dashboardSessions   dashboardSessionCleaner
-	ticketSessions      ticketEmbedSessionCleaner
-	leaderboardSessions leaderboardEmbedSessionCleaner
-	lotterySessions     lotteryEmbedSessionCleaner
-	attachments         attachmentCleaner
-	upstreamSites       upstreamSiteCleaner
+	questionAnswerSchedules questionAnswerScheduleWorkspaceCleaner
+	dashboardSessions       dashboardSessionCleaner
+	ticketSessions          ticketEmbedSessionCleaner
+	leaderboardSessions     leaderboardEmbedSessionCleaner
+	lotterySessions         lotteryEmbedSessionCleaner
+	attachments             attachmentCleaner
+	upstreamSites           upstreamSiteCleaner
 }
 
 func (c workspaceCleanup) CleanupDeletedWorkspace(ctx context.Context, payload admin_accounts.WorkspaceCleanupPayload) error {
 	var errs []error
+	if c.questionAnswerSchedules != nil {
+		if err := c.questionAnswerSchedules.CleanupDeletedQuestionAnswerSchedules(ctx, payload.UserID, payload.AdminAccountID); err != nil {
+			errs = append(errs, fmt.Errorf("question answer schedule cleanup: %w", err))
+		}
+	}
 	if c.dashboardSessions != nil {
 		if err := c.dashboardSessions.Delete(ctx, payload.UserID, payload.AdminAccountID); err != nil {
 			errs = append(errs, fmt.Errorf("dashboard session cleanup: %w", err))

@@ -366,7 +366,10 @@ END $$;`,
 	if err := r.ensureTestProtocolSchema(ctx); err != nil {
 		return err
 	}
-	return r.ensureHealthRuleSchema(ctx)
+	if err := r.ensureHealthRuleSchema(ctx); err != nil {
+		return err
+	}
+	return r.ensureQuestionAnswerScheduleSchema(ctx)
 }
 
 type policyExecutor interface {

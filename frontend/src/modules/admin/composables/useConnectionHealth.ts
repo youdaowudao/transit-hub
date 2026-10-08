@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import type {
   AccountTierResult,
   QuestionAnswerTodaySummary,
+  QuestionAnswerRecentSummaryItem,
   AccountManagementResult,
   AdminGroupTestConfiguration,
   GroupTestConfiguration,
@@ -87,6 +88,8 @@ let accountTierRevision = 0
 let adminGroupsDataRevision = 0
 let questionAnswerSummaryRevision = 0
 const savedQuestionAnswerSummaries = new Map<string, QuestionAnswerTodaySummary & { revision: number }>()
+let questionAnswerRecentRevision = 0
+const savedQuestionAnswerRecentSummaries = new Map<string, QuestionAnswerRecentSummaryItem & { revision: number }>()
 let adminGroupsReloadPending = false
 let adminGroupsReloadRunning = false
 let adminGroupsReloadRequest: Promise<boolean> | null = null
@@ -191,6 +194,8 @@ export function useConnectionHealth() {
     savedAccountTiers.clear()
     questionAnswerSummaryRevision = 0
     savedQuestionAnswerSummaries.clear()
+    questionAnswerRecentRevision = 0
+    savedQuestionAnswerRecentSummaries.clear()
     adminGroups.value = []
     adminGroupsLoaded.value = false
     overview.value = null
@@ -219,6 +224,28 @@ export function useConnectionHealth() {
         : account
     }) }))
     for (const [targetId, saved] of savedQuestionAnswerSummaries) if (saved.revision <= readRevision) savedQuestionAnswerSummaries.delete(targetId)
+    return accepted
+  }
+
+  const applyQuestionAnswerRecentSummary = (summary: QuestionAnswerRecentSummaryItem) => {
+    if (!adminGroupsWorkspace || !summary.targetId.startsWith(`sub2api:${adminGroupsWorkspace}:`)) return
+    const saved = { ...summary, recentQuestionAnswer: summary.recentQuestionAnswer === null ? null : {
+      ...summary.recentQuestionAnswer, requests: { ...summary.recentQuestionAnswer.requests }, reviews: { ...summary.recentQuestionAnswer.reviews },
+    }, revision: ++questionAnswerRecentRevision }
+    savedQuestionAnswerRecentSummaries.set(summary.targetId, saved)
+    adminGroups.value = adminGroups.value.map(group => ({ ...group, accounts: group.accounts.map(account => account.targetId === summary.targetId
+      ? { ...account, recentQuestionAnswer: saved.recentQuestionAnswer, activeNewerQuestionAnswerBatch: saved.activeNewerBatch }
+      : account) }))
+  }
+
+  const preserveQuestionAnswerRecentSummaries = (nextGroups: AdminGroupHealth[], readRevision: number): AdminGroupHealth[] => {
+    const accepted = nextGroups.map(group => ({ ...group, accounts: group.accounts.map(account => {
+      const saved = savedQuestionAnswerRecentSummaries.get(account.targetId)
+      return saved && saved.revision > readRevision
+        ? { ...account, recentQuestionAnswer: saved.recentQuestionAnswer, activeNewerQuestionAnswerBatch: saved.activeNewerBatch }
+        : account
+    }) }))
+    for (const [targetId, saved] of savedQuestionAnswerRecentSummaries) if (saved.revision <= readRevision) savedQuestionAnswerRecentSummaries.delete(targetId)
     return accepted
   }
 
@@ -321,6 +348,7 @@ export function useConnectionHealth() {
     const sequence = ++adminGroupsRequestSequence
     const tierRevision = accountTierRevision
     const questionAnswerRevision = questionAnswerSummaryRevision
+    const recentRevision = questionAnswerRecentRevision
     const dataRevision = adminGroupsDataRevision
     adminGroupsActiveRequests++
     const request = (async () => {
@@ -333,7 +361,7 @@ export function useConnectionHealth() {
         const nextGroups = await getConnectionHealthAdminGroups()
         if (sequence !== adminGroupsRequestSequence || dataRevision !== adminGroupsDataRevision) return false
         const acceptedGroups = preserveSavedAccountTiers(nextGroups, tierRevision)
-        adminGroups.value = preserveQuestionAnswerSummaries(confirmConcurrencyRead(acceptedGroups), questionAnswerRevision)
+        adminGroups.value = preserveQuestionAnswerRecentSummaries(preserveQuestionAnswerSummaries(confirmConcurrencyRead(acceptedGroups), questionAnswerRevision), recentRevision)
         overview.value = overviewFromAdminGroups(adminGroups.value)
         adminGroupsLoaded.value = true
         return true
@@ -355,6 +383,7 @@ export function useConnectionHealth() {
 
   type RefreshApplicationState = {
     questionAnswerRevision: number
+    recentRevision: number
     tierRevision: number
     dataRevision: number
     runId: string
@@ -414,7 +443,7 @@ export function useConnectionHealth() {
         if (adminGroupsWorkspace) adminGroupsReloadPending = true
       } else {
         const acceptedGroups = preserveSavedAccountTiers(terminal.groups, state.tierRevision)
-        adminGroups.value = preserveQuestionAnswerSummaries(confirmConcurrencyRead(acceptedGroups), state.questionAnswerRevision)
+        adminGroups.value = preserveQuestionAnswerRecentSummaries(preserveQuestionAnswerSummaries(confirmConcurrencyRead(acceptedGroups), state.questionAnswerRevision), state.recentRevision)
         overview.value = overviewFromAdminGroups(adminGroups.value)
         adminGroupsLoaded.value = true
       }
@@ -454,6 +483,7 @@ export function useConnectionHealth() {
     const application: RefreshApplicationState = {
       tierRevision: accountTierRevision,
       questionAnswerRevision: questionAnswerSummaryRevision,
+      recentRevision: questionAnswerRecentRevision,
       dataRevision: adminGroupsDataRevision,
       runId: '',
       revision: -1,
@@ -869,6 +899,7 @@ export function useConnectionHealth() {
     invalidateAdminGroupsReads,
     applyAccountTier,
     applyQuestionAnswerTodaySummary,
+    applyQuestionAnswerRecentSummary,
     applyAccountPriority,
     applyAccountConcurrency,
     loadAll,

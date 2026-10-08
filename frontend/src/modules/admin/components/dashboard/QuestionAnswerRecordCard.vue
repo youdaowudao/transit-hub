@@ -5,7 +5,7 @@ import { formatConnectionHealthTime } from '../../composables/useConnectionHealt
 import { questionAnswerElapsedMilliseconds, questionAnswerSourceLabel, questionAnswerRequestProtocolLabel } from '../../utils/questionAnswers'
 import { t } from '@/locales'
 import QuestionAnswerHighlightedText from './QuestionAnswerHighlightedText.vue'
-const props = defineProps<{ record: QuestionAnswerRecord; expanded: boolean; saving: boolean; savingJudgment?: 'unreviewed' | 'correct' | 'incorrect' }>()
+const props = defineProps<{ record: QuestionAnswerRecord; expanded: boolean; saving: boolean; savingJudgment?: 'unreviewed' | 'correct' | 'incorrect'; readOnly?: boolean }>()
 const emit = defineEmits<{ (event: 'judge', value: 'correct' | 'incorrect'): void; (event: 'expand'): void }>()
 const answer = () => props.expanded || props.record.answerBody.length <= 220 ? props.record.answerBody : `${props.record.answerBody.slice(0, 220)}…`
 </script>
@@ -26,7 +26,7 @@ const answer = () => props.expanded || props.record.answerBody.length <= 220 ? p
       <p v-else class="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground">没有回答正文。</p>
       <button v-if="record.answerBody.length > 220" type="button" class="mt-2 inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground" @click="emit('expand')">{{ expanded ? '收起详情' : '展开详情' }}<ChevronUp v-if="expanded" class="h-3.5 w-3.5" /><ChevronDown v-else class="h-3.5 w-3.5" /></button>
     </div>
-    <div class="grid grid-cols-2 gap-2 md:grid-cols-1 md:self-start">
+    <div v-if="!readOnly" class="grid grid-cols-2 gap-2 md:grid-cols-1 md:self-start">
       <button type="button" class="min-h-14 rounded-md border border-green-500/40 px-3 py-2 text-xs font-medium text-green-700 hover:bg-green-500/10 disabled:opacity-50 dark:text-green-400" :class="record.answerJudgment === 'correct' || savingJudgment === 'correct' ? 'bg-green-500/20' : ''" :aria-pressed="record.answerJudgment === 'correct'" :disabled="saving" @click="emit('judge', 'correct')"><Loader2 v-if="saving" class="inline h-3.5 w-3.5 animate-spin" />正确<span v-if="savingJudgment === 'correct'"> · 保存中</span></button>
       <button type="button" class="min-h-14 rounded-md border border-red-500/40 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400" :class="record.answerJudgment === 'incorrect' || savingJudgment === 'incorrect' ? 'bg-red-500/20' : ''" :aria-pressed="record.answerJudgment === 'incorrect'" :disabled="saving" @click="emit('judge', 'incorrect')">错误<span v-if="savingJudgment === 'incorrect'"> · 保存中</span></button>
     </div>

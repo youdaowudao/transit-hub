@@ -20,7 +20,7 @@ const (
 	QuestionAnswerRequestTimeout   = 10 * time.Minute
 	QuestionAnswerRepeatCountLimit = 10
 	QuestionAnswerBatchRecordLimit = 50
-	questionAnswerConcurrency      = 5
+	questionAnswerConcurrency      = 15
 	TestQuestionNameLimit          = 100
 	TestQuestionBodyLimit          = 4000
 	TestQuestionKeywordCountLimit  = 20
@@ -119,9 +119,9 @@ type TestQuestionInput struct {
 // QuestionAnswerConfigurationSnapshot carries membership evidence prepared outside W.
 // Configuration values themselves are always re-read inside the create transaction.
 type QuestionAnswerConfigurationSnapshot struct {
-	AdminAccountID    string
-	Memberships       []TestConfigurationSource
-	InventoryComplete bool
+	AdminAccountID    string                    `json:"adminAccountId"`
+	Memberships       []TestConfigurationSource `json:"memberships"`
+	InventoryComplete bool                      `json:"inventoryComplete"`
 }
 
 type QuestionAnswerRecord struct {
@@ -314,6 +314,10 @@ func (s *Service) initializeQuestionAnswerRuntime() {
 	s.questionAnswerWake = make(chan struct{}, 1)
 	s.questionAnswerDispatcherDone = make(chan struct{})
 	s.questionAnswerInFlight = 0
+	if s.questionAnswerConcurrencyLimit == 0 {
+		s.questionAnswerConcurrencyLimit = questionAnswerConcurrency
+	}
+	s.questionAnswerStarts = make(map[string]*questionAnswerTargetStart)
 	s.questionAnswerShutdown = nil
 	if s.questionAnswerStorageTimeout <= 0 {
 		s.questionAnswerStorageTimeout = 5 * time.Second
@@ -477,104 +481,86 @@ func normalizeTestQuestionOutput(question TestQuestion) TestQuestion {
 	return question
 }
 
-func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, targetID string, input QuestionAnswerStartInput) (QuestionAnswerBatch, error) {
-	if s.backgroundTasksDisabled {
-		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
-	}
-	reasoningEffort, err := normalizeQuestionAnswerReasoningEffort(input.ReasoningEffort)
-	if err != nil {
-		return QuestionAnswerBatch{}, err
-	}
-	models := uniqueNonEmpty(input.Models)
-	questionIDs := uniqueNonEmpty(input.QuestionIDs)
-	repeatCount, err := normalizeQuestionAnswerRepeatCount(input.RepeatCount)
-	if err != nil {
-		return QuestionAnswerBatch{}, err
-	}
-	if _, err := questionAnswerSubmissionCount(len(models), len(questionIDs), repeatCount); err != nil {
-		return QuestionAnswerBatch{}, err
-	}
+// A target reservation is acquired before credentials or model discovery. All
+// entry points share this map with active C1 runs under questionAnswerMu.
+type questionAnswerTargetStart struct {
+	userID, targetID, batchID string
+	ctx                       context.Context
+	cancel                    context.CancelFunc
+	released                  bool
+	parentStop                func() bool
+}
+
+func (s *Service) reserveQuestionAnswerTargetStart(parent context.Context, userID, targetID, batchID string) (*questionAnswerTargetStart, error) {
 	s.initializeQuestionAnswerRuntime()
 	s.questionAnswerMu.Lock()
-	startCtx := s.questionAnswerCtx
-	closed := s.questionAnswerClosed
-	s.questionAnswerMu.Unlock()
-	if closed {
-		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
-	}
-
-	session, target, account, adminAccountID, err := s.resolveManualTarget(startCtx, userID, targetID)
-	if err != nil {
-		if startCtx.Err() != nil {
-			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
-		}
-		return QuestionAnswerBatch{}, err
-	}
-	if !target.TestConfiguration.usable() {
-		return QuestionAnswerBatch{}, requestError(target.TestConfiguration.BlockedReason)
-	}
-	cred, err := s.resolveProbeCredential(startCtx, session, account)
-	if err != nil {
-		if startCtx.Err() != nil {
-			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
-		}
-		return QuestionAnswerBatch{}, requestError(reasonToErrorKey(upstream.ProbeCredentialReason(err)))
-	}
-	discovered, err := s.modelDiscovery.ListModels(startCtx, cred.BaseURL, cred.Key)
-	if err != nil {
-		if startCtx.Err() != nil {
-			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
-		}
-		return QuestionAnswerBatch{}, err
-	}
-	allowedModels := make(map[string]struct{}, len(discovered))
-	for _, model := range discovered {
-		allowedModels[model.ID] = struct{}{}
-	}
-	for _, model := range models {
-		if _, ok := allowedModels[model]; !ok {
-			return QuestionAnswerBatch{}, requestError(ErrorModelUnavailable)
-		}
-	}
-
-	batchID, err := newID()
-	if err != nil {
-		return QuestionAnswerBatch{}, err
+	defer s.questionAnswerMu.Unlock()
+	if s.backgroundTasksDisabled || s.questionAnswerClosed || s.questionAnswerCtx == nil || s.questionAnswerCtx.Err() != nil {
+		return nil, requestError(ErrorQuestionAnswerServiceStopped)
 	}
 	key := questionAnswerRunKey(userID, targetID)
+	if s.questionAnswerRuns[key] != nil || s.questionAnswerStarts[key] != nil {
+		return nil, requestError(ErrorQuestionAnswerActive)
+	}
+	ctx, cancel := context.WithCancel(s.questionAnswerCtx)
+	reservation := &questionAnswerTargetStart{userID: userID, targetID: targetID, batchID: batchID, ctx: ctx, cancel: cancel}
+	if parent != nil {
+		reservation.parentStop = context.AfterFunc(parent, cancel)
+	}
+	s.questionAnswerStarts[key] = reservation
+	s.questionAnswerStartWG.Add(1)
+	return reservation, nil
+}
+
+func (s *Service) releaseQuestionAnswerTargetStart(reservation *questionAnswerTargetStart) {
+	if reservation == nil {
+		return
+	}
 	s.questionAnswerMu.Lock()
-	if s.questionAnswerClosed || s.questionAnswerCtx.Err() != nil {
+	if !reservation.released {
+		key := questionAnswerRunKey(reservation.userID, reservation.targetID)
+		if s.questionAnswerStarts[key] == reservation {
+			delete(s.questionAnswerStarts, key)
+		}
+		reservation.released = true
+		s.questionAnswerStartWG.Done()
+	}
+	s.questionAnswerMu.Unlock()
+	if reservation.parentStop != nil {
+		reservation.parentStop()
+	}
+	reservation.cancel()
+}
+
+// The core accepts server-owned credentials and a repository operation. Manual
+// callers retain their original transaction; scheduled callers use the frozen,
+// preallocated target transaction. Neither path has a second dispatcher.
+func (s *Service) startQuestionAnswerBatchCore(reservation *questionAnswerTargetStart, cred upstream.ProbeCredential, create func(context.Context) ([]QuestionAnswerRecord, bool, error)) (QuestionAnswerBatch, error) {
+	key := questionAnswerRunKey(reservation.userID, reservation.targetID)
+	s.questionAnswerMu.Lock()
+	if s.questionAnswerClosed || reservation.ctx.Err() != nil || reservation.released || s.questionAnswerStarts[key] != reservation {
 		s.questionAnswerMu.Unlock()
 		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
 	}
-	if _, exists := s.questionAnswerRuns[key]; exists {
-		s.questionAnswerMu.Unlock()
-		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerActive)
-	}
 	batchCtx, cancel := context.WithCancel(s.questionAnswerCtx)
-	run := &activeQuestionAnswerBatch{
-		userID: userID, targetID: targetID, batchID: batchID, cred: cred,
-		ctx: batchCtx, cancel: cancel, records: []QuestionAnswerRecord{},
-		done: make(chan struct{}), finalizeSettled: make(chan struct{}),
-		finalizeGeneration: 1, finalizeResults: make(map[uint64]error),
-	}
+	run := &activeQuestionAnswerBatch{userID: reservation.userID, targetID: reservation.targetID, batchID: reservation.batchID, cred: cred, ctx: batchCtx, cancel: cancel, records: []QuestionAnswerRecord{}, done: make(chan struct{}), finalizeSettled: make(chan struct{}), finalizeGeneration: 1, finalizeResults: make(map[uint64]error)}
+	delete(s.questionAnswerStarts, key)
+	reservation.released = true
+	s.questionAnswerStartWG.Done()
 	s.questionAnswerRuns[key] = run
 	s.questionAnswerOrder = append(s.questionAnswerOrder, key)
 	s.questionAnswerMu.Unlock()
-
-	records, err := s.questionAnswers.CreateQuestionAnswerBatch(startCtx, userID, targetID, batchID, models, questionIDs, reasoningEffort, repeatCount, QuestionAnswerConfigurationSnapshot{AdminAccountID: adminAccountID, Memberships: target.TestMemberships, InventoryComplete: target.InventoryComplete})
+	records, created, err := create(reservation.ctx)
 	if err != nil {
-		var startErr error
+		startErr := err
 		stopReason := QuestionAnswerErrorStorage
-		if startCtx.Err() != nil {
+		if reservation.ctx.Err() != nil {
 			startErr = requestError(ErrorQuestionAnswerServiceStopped)
 			stopReason = QuestionAnswerErrorServiceShutdown
 		} else if errors.Is(err, errQuestionAnswerActive) {
 			startErr = requestError(ErrorQuestionAnswerActive)
 		} else if errors.Is(err, errQuestionAnswerUnavailable) {
 			startErr = requestError(ErrorTestQuestionDisabled)
-		} else {
-			startErr = err
 		}
 		if !isQuestionAnswerCreateResultUncertain(err) {
 			s.discardQuestionAnswerStartReservation(key, run)
@@ -582,7 +568,21 @@ func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, tar
 		}
 		return QuestionAnswerBatch{}, s.finishFailedQuestionAnswerStart(key, run, nil, stopReason, startErr)
 	}
-
+	if !created {
+		s.discardQuestionAnswerStartReservation(key, run)
+		batch, err := buildQuestionAnswerBatch(records)
+		// Existing records belong to a previously committed start, never a new
+		// permission to resend. On restart C1 startup has normally settled these.
+		if err == nil && batch.Active {
+			storageCtx, stop := s.questionAnswerStorageContext(context.Background())
+			_, err = s.questionAnswers.FinalizeQuestionAnswerBatch(storageCtx, reservation.userID, reservation.targetID, reservation.batchID, QuestionAnswerFailed, QuestionAnswerErrorServiceRestarted)
+			stop()
+			if err == nil {
+				return s.getQuestionAnswerBatchCore(context.Background(), reservation.userID, reservation.targetID, reservation.batchID)
+			}
+		}
+		return batch, err
+	}
 	batch, err := buildQuestionAnswerBatch(records)
 	if err != nil {
 		return QuestionAnswerBatch{}, s.finishFailedQuestionAnswerStart(key, run, records, QuestionAnswerErrorStorage, err)
@@ -592,11 +592,15 @@ func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, tar
 	if current == run {
 		run.records = cloneQuestionAnswerRecords(records)
 	}
-	closed = s.questionAnswerClosed || s.questionAnswerCtx.Err() != nil || current != run
+	closed := s.questionAnswerClosed || s.questionAnswerCtx.Err() != nil || current != run || reservation.ctx.Err() != nil
 	shutdownAttempt := s.questionAnswerShutdown
 	if closed {
 		if current == run && run.stopReason == "" {
-			run.stopReason = QuestionAnswerErrorServiceShutdown
+			if s.questionAnswerClosed {
+				run.stopReason = QuestionAnswerErrorServiceShutdown
+			} else {
+				run.stopReason = string(QuestionAnswerCancelled)
+			}
 		}
 		s.questionAnswerMu.Unlock()
 		run.cancel()
@@ -609,6 +613,77 @@ func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID string, tar
 	s.questionAnswerMu.Unlock()
 	s.wakeQuestionAnswerDispatcher()
 	return batch, nil
+}
+
+func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID, targetID string, input QuestionAnswerStartInput) (QuestionAnswerBatch, error) {
+	if s.backgroundTasksDisabled {
+		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
+	}
+	effort, err := normalizeQuestionAnswerReasoningEffort(input.ReasoningEffort)
+	if err != nil {
+		return QuestionAnswerBatch{}, err
+	}
+	models, questionIDs := uniqueNonEmpty(input.Models), uniqueNonEmpty(input.QuestionIDs)
+	repeat, err := normalizeQuestionAnswerRepeatCount(input.RepeatCount)
+	if err != nil {
+		return QuestionAnswerBatch{}, err
+	}
+	if _, err = questionAnswerSubmissionCount(len(models), len(questionIDs), repeat); err != nil {
+		return QuestionAnswerBatch{}, err
+	}
+	s.initializeQuestionAnswerRuntime()
+	s.questionAnswerMu.Lock()
+	validationCtx := s.questionAnswerCtx
+	s.questionAnswerMu.Unlock()
+	if err := s.validateQuestionAnswerTarget(validationCtx, userID, targetID); err != nil {
+		return QuestionAnswerBatch{}, err
+	}
+	batchID, err := newID()
+	if err != nil {
+		return QuestionAnswerBatch{}, err
+	}
+	reservation, err := s.reserveQuestionAnswerTargetStart(nil, userID, targetID, batchID)
+	if err != nil {
+		return QuestionAnswerBatch{}, err
+	}
+	defer s.releaseQuestionAnswerTargetStart(reservation)
+	session, target, account, workspace, err := s.resolveManualTarget(reservation.ctx, userID, targetID)
+	if err != nil {
+		if reservation.ctx.Err() != nil {
+			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
+		}
+		return QuestionAnswerBatch{}, err
+	}
+	if !target.TestConfiguration.usable() {
+		return QuestionAnswerBatch{}, requestError(target.TestConfiguration.BlockedReason)
+	}
+	cred, err := s.resolveProbeCredential(reservation.ctx, session, account)
+	if err != nil {
+		if reservation.ctx.Err() != nil {
+			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
+		}
+		return QuestionAnswerBatch{}, requestError(reasonToErrorKey(upstream.ProbeCredentialReason(err)))
+	}
+	discovered, err := s.modelDiscovery.ListModels(reservation.ctx, cred.BaseURL, cred.Key)
+	if err != nil {
+		if reservation.ctx.Err() != nil {
+			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
+		}
+		return QuestionAnswerBatch{}, err
+	}
+	allowed := make(map[string]bool, len(discovered))
+	for _, model := range discovered {
+		allowed[model.ID] = true
+	}
+	for _, model := range models {
+		if !allowed[model] {
+			return QuestionAnswerBatch{}, requestError(ErrorModelUnavailable)
+		}
+	}
+	return s.startQuestionAnswerBatchCore(reservation, cred, func(ctx context.Context) ([]QuestionAnswerRecord, bool, error) {
+		records, err := s.questionAnswers.CreateQuestionAnswerBatch(ctx, userID, targetID, batchID, models, questionIDs, effort, repeat, QuestionAnswerConfigurationSnapshot{AdminAccountID: workspace, Memberships: target.TestMemberships, InventoryComplete: target.InventoryComplete})
+		return records, true, err
+	})
 }
 
 func (s *Service) discardQuestionAnswerStartReservation(key string, run *activeQuestionAnswerBatch) {
@@ -759,6 +834,10 @@ func (s *Service) GetQuestionAnswerBatch(ctx context.Context, userID string, tar
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerBatch{}, err
 	}
+	return s.getQuestionAnswerBatchCore(ctx, userID, targetID, batchID)
+}
+
+func (s *Service) getQuestionAnswerBatchCore(ctx context.Context, userID, targetID, batchID string) (QuestionAnswerBatch, error) {
 	records, err := s.questionAnswers.ListQuestionAnswerBatch(ctx, userID, targetID, strings.TrimSpace(batchID))
 	if err != nil {
 		return QuestionAnswerBatch{}, err
@@ -778,6 +857,10 @@ func (s *Service) StopQuestionAnswerBatch(ctx context.Context, userID string, ta
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerBatch{}, err
 	}
+	return s.stopQuestionAnswerBatchCore(ctx, userID, targetID, batchID)
+}
+
+func (s *Service) stopQuestionAnswerBatchCore(ctx context.Context, userID, targetID, batchID string) (QuestionAnswerBatch, error) {
 	batchID = strings.TrimSpace(batchID)
 	key := questionAnswerRunKey(userID, targetID)
 	s.questionAnswerMu.Lock()
@@ -812,7 +895,7 @@ func (s *Service) StopQuestionAnswerBatch(ctx context.Context, userID string, ta
 		if stopErr != nil {
 			return QuestionAnswerBatch{}, stopErr
 		}
-		return s.GetQuestionAnswerBatch(ctx, userID, targetID, batchID)
+		return s.getQuestionAnswerBatchCore(ctx, userID, targetID, batchID)
 	}
 
 	s.questionAnswerMu.Lock()
@@ -843,7 +926,7 @@ func (s *Service) StopQuestionAnswerBatch(ctx context.Context, userID string, ta
 	if err := errors.Join(stopErr, finalErr); err != nil {
 		return QuestionAnswerBatch{}, err
 	}
-	return s.GetQuestionAnswerBatch(ctx, userID, targetID, batchID)
+	return s.getQuestionAnswerBatchCore(ctx, userID, targetID, batchID)
 }
 
 func (s *Service) QuestionAnswerHistory(ctx context.Context, userID string, targetID string, page int, scope string) (QuestionAnswerHistory, error) {
@@ -920,6 +1003,9 @@ func (s *Service) ShutdownQuestionAnswers(ctx context.Context) error {
 	s.initializeQuestionAnswerRuntime()
 	s.questionAnswerMu.Lock()
 	s.questionAnswerClosed = true
+	for _, start := range s.questionAnswerStarts {
+		start.cancel()
+	}
 	runs := make([]questionAnswerShutdownRun, 0, len(s.questionAnswerRuns))
 	for key, run := range s.questionAnswerRuns {
 		if run.stopReason == "" {
@@ -968,6 +1054,7 @@ func (s *Service) ShutdownQuestionAnswers(ctx context.Context) error {
 }
 
 func (s *Service) runQuestionAnswerShutdown(attempt *questionAnswerShutdownAttempt, runs []questionAnswerShutdownRun, dispatcherDone <-chan struct{}) {
+	s.questionAnswerStartWG.Wait()
 	var stopErrors []error
 	for _, item := range runs {
 		s.questionAnswerMu.Lock()

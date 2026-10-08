@@ -35,7 +35,7 @@ export const useGroupRates = () => {
     rates.value = siteFilteredRates.value.slice(offset, offset + pageSize.value)
   }
 
-  const loadSiteFilteredRates = async (requestId: number) => {
+  const loadSiteFilteredRates = async (requestId: number, isCurrent: () => boolean) => {
     const baseQuery = {
       search: search.value,
       type: typeFilter.value,
@@ -47,7 +47,7 @@ export const useGroupRates = () => {
       listAllGroupRates({ ...baseQuery, status: 'deleted' }),
       listGroupRates({ ...baseQuery, page: 1, status: 'all' }),
     ])
-    if (requestId !== ratesRequestId) return
+    if (requestId !== ratesRequestId || !isCurrent()) return
     const filterBySite = (items: GroupRate[]) => items.filter(item => item.siteId === siteFilter.value)
     const activeSiteRows = filterBySite(activeRows)
     const deletedSiteRows = filterBySite(deletedRows)
@@ -72,13 +72,14 @@ export const useGroupRates = () => {
     applySiteFilteredPage()
   }
 
-  const loadRates = async () => {
+  const loadRates = async (isCurrent: () => boolean = () => true) => {
+    if (!isCurrent()) return
     const requestId = ++ratesRequestId
     isLoading.value = true
     errorKey.value = null
     try {
       if (siteFilter.value) {
-        await loadSiteFilteredRates(requestId)
+        await loadSiteFilteredRates(requestId, isCurrent)
         return
       }
 
@@ -91,7 +92,7 @@ export const useGroupRates = () => {
         sort: sortMode.value,
       })
 
-      if (requestId !== ratesRequestId) return
+      if (requestId !== ratesRequestId || !isCurrent()) return
 
       siteFilteredRates.value = []
       rates.value = response.items
@@ -109,7 +110,7 @@ export const useGroupRates = () => {
         deleted: response.items.filter(item => item.deleted).length,
       }
     } catch (error) {
-      if (requestId !== ratesRequestId) return
+      if (requestId !== ratesRequestId || !isCurrent()) return
       errorKey.value = error instanceof Error ? error.message : 'admin.groupRates.errors.unknown'
     } finally {
       if (requestId === ratesRequestId) {

@@ -302,6 +302,8 @@ export interface AdminGroupAccount {
   todayQuestionAnswerSubmitted?: number
   todayQuestionAnswerCorrect?: number
   todayQuestionAnswerJudged?: number
+  recentQuestionAnswer?: QuestionAnswerRecentSummary | null
+  activeNewerQuestionAnswerBatch?: boolean
   productionSortOrder?: number
 }
 
@@ -594,6 +596,160 @@ export interface QuestionAnswerBatchSummary {
 export interface QuestionAnswerTodaySummary {
   targetId: string
   todayStats: { requests: QuestionAnswerRequestStats; reviews: QuestionAnswerReviewStats }
+}
+
+export interface QuestionAnswerRecentSummary {
+  batchId: string
+  source: 'manual' | 'scheduled' | 'run_now'
+  scheduleName: string | null
+  createdAt: string
+  completedAt: string | null
+  partial: boolean
+  requests: QuestionAnswerRequestStats
+  reviews: QuestionAnswerReviewStats
+}
+
+export interface QuestionAnswerRecentSummaryItem {
+  targetId: string
+  recentQuestionAnswer: QuestionAnswerRecentSummary | null
+  activeNewerBatch: boolean
+}
+
+export interface QuestionAnswerRuntimeSettings {
+  questionAnswerConcurrency: number
+  version: number
+  updatedAt: string | null
+}
+
+export interface QuestionAnswerScheduleLimits {
+  maxEnabledQuestionAnswerSchedules: number
+  maxScheduleTargets: number
+  maxScheduleRequestsPerExecution: number
+  dailyScheduledRequestLimit: number
+  maxActiveScheduleExecutions: number
+  maxQueuedScheduledRequests: number
+  scheduleExecutionTimeoutMinutes: number
+  scheduleLateGraceMinutes: number
+  todayReservedRequests: number
+  version: number
+  updatedAt: string | null
+}
+
+export interface QuestionAnswerScheduleInput {
+  name: string
+  targetMode: 'groups' | 'accounts'
+  selectedGroupIds: string[]
+  selectedAccountTargetIds: string[]
+  models: string[]
+  questionIds: string[]
+  reasoningEffort: QuestionAnswerReasoningEffort
+  repeatCount: number
+  peakStart: string
+  peakEnd: string
+  peakIntervalMinutes: number
+  offPeakIntervalMinutes: number
+  enabled: boolean
+}
+
+export interface QuestionAnswerScheduleGroupRef { id: string; name: string }
+
+export interface QuestionAnswerSchedulePreviewTarget {
+  targetId: string
+  accountId: string
+  accountName: string
+  platform: string
+  matchedGroups: QuestionAnswerScheduleGroupRef[]
+  modelNames: string[]
+  missing: boolean
+}
+
+export type QuestionAnswerSchedulePreviewInput = Pick<QuestionAnswerScheduleInput,
+  'targetMode' | 'selectedGroupIds' | 'selectedAccountTargetIds' | 'models' | 'questionIds' | 'reasoningEffort' | 'repeatCount'> & { scheduleId?: string }
+
+export interface QuestionAnswerSchedulePreview {
+  estimatedTargetCount: number
+  estimatedRequestsPerTarget: number
+  estimatedRequestsPerExecution: number
+  targetPreview: QuestionAnswerSchedulePreviewTarget[]
+  targetChanges: { added: QuestionAnswerSchedulePreviewTarget[]; removed: QuestionAnswerSchedulePreviewTarget[] }
+  modelCandidates: string[]
+  warnings: string[]
+  previewedAt: string
+  scheduleVersion: number | null
+}
+
+export interface QuestionAnswerSchedule extends QuestionAnswerScheduleInput {
+  id: string
+  blockedReason: string
+  nextRunAt: string | null
+  version: number
+  estimatedTargetCount: number
+  estimatedRequestsPerTarget: number
+  estimatedRequestsPerExecution: number
+  estimatedRequestsPerDay: number
+  previewedAt: string | null
+  lastActualTargetCount: number | null
+  targetSelectionSnapshot: { targetPreview: QuestionAnswerSchedulePreviewTarget[]; estimatedTargetCount: number; previewedAt: string }
+  lastExecution: QuestionAnswerScheduleExecution | null
+  createdAt: string
+  updatedAt: string
+  deletedAt: string | null
+}
+
+export type QuestionAnswerScheduleExecutionStatus = 'pending' | 'active' | 'completed' | 'partial' | 'failed' | 'skipped' | 'cancelled'
+export interface QuestionAnswerScheduleExecution {
+  id: string
+  scheduleId: string
+  trigger: 'scheduled' | 'run_now'
+  scheduledFor: string
+  status: QuestionAnswerScheduleExecutionStatus
+  statusReason: string
+  plannedTargetCount: number
+  batchCreatedTargetCount: number
+  requestRecordCount: number
+  reservedRequestCount: number
+  missedCount: number
+  missedFrom: string | null
+  missedThrough: string | null
+  terminationCause: '' | 'user_cancel' | 'execution_timeout'
+  cancelRequestedAt: string | null
+  active: boolean
+  version: number
+  stats: QuestionAnswerStats
+  createdAt: string
+  startedAt: string | null
+  completedAt: string | null
+  updatedAt: string
+}
+
+export interface QuestionAnswerScheduleExecutionTarget {
+  targetId: string
+  batchId: string
+  batchAvailable: boolean
+  accountSnapshot: { accountId: string; accountName: string; platform: string }
+  matchedGroupsSnapshot: QuestionAnswerScheduleGroupRef[]
+  testConfigurationSnapshot: { adminAccountId?: string; memberships?: Array<Pick<TestConfigurationSource, 'adminGroupId' | 'adminGroupName'> & Partial<GroupTestConfiguration>>; inventoryComplete?: boolean; protocol?: TestProtocol }
+  status: 'pending' | 'starting' | 'batch_created' | 'failed' | 'skipped' | 'cancelled'
+  statusReason: string
+  requestedModels: string[]
+  availableModels: string[]
+  unavailableModels: Array<{ modelName: string; reason: string }>
+  plannedRequestCount: number
+  stats: QuestionAnswerStats
+}
+
+export interface QuestionAnswerScheduleExecutionDetail extends QuestionAnswerScheduleExecution {
+  configSnapshot: { requested: { schedule: Omit<QuestionAnswerScheduleInput, 'enabled'>; scheduleVersion: number; enabled: boolean; selection?: QuestionAnswerSchedule['targetSelectionSnapshot']; limits: QuestionAnswerScheduleLimits; timezone: string }; resolved: { questions: TestQuestion[]; resolvedAt: string; missingTargetIds: string[] } | null }
+  targets: QuestionAnswerScheduleExecutionTarget[]
+}
+
+export interface QuestionAnswerSchedulePage<T> {
+  items: T[]
+  page: number
+  pageSize: number
+  total: number
+  totalPages: number
+  status?: 'active' | 'deleted'
 }
 
 export interface QuestionAnswerHistory {

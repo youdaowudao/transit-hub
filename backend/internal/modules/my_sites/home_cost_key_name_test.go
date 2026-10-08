@@ -47,15 +47,17 @@ func TestHomeCostManagedKeyNameIncludesCreationMonthDay(t *testing.T) {
 						keyName, _ = body["name"].(string)
 						keyCreates++
 						if platform == upstream.PlatformSub2API {
-							writeConnectionTestJSON(w, map[string]any{"data": map[string]any{"id": 11, "key": "synthetic-test-key"}})
+							writeConnectionTestJSON(w, map[string]any{"code": 0, "data": map[string]any{"id": 11, "key": "synthetic-test-key"}})
 						} else {
 							writeConnectionTestJSON(w, map[string]any{"success": true})
 						}
 					case r.Method == http.MethodGet && r.URL.Path == "/api/token/":
 						tokenLists++
-						writeConnectionTestJSON(w, map[string]any{"data": []map[string]any{{"id": 33, "name": keyName}}})
+						writeConnectionTestJSON(w, map[string]any{"success": true, "data": map[string]any{"page": 1, "page_size": 100, "total": 1, "items": []map[string]any{{"id": 33, "name": keyName}}}})
 					case r.Method == http.MethodPost && r.URL.Path == "/api/token/33/key":
-						writeConnectionTestJSON(w, map[string]any{"data": map[string]any{"key": "synthetic-test-key"}})
+						writeConnectionTestJSON(w, map[string]any{"success": true, "data": map[string]any{"key": "synthetic-test-key"}})
+					case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "sync-upstream-preview"):
+						writeConnectionTestJSON(w, map[string]any{"code": 0, "data": map[string]any{"models": []string{"live-a"}}})
 					case r.Method == http.MethodPost && r.URL.Path == "/api/v1/admin/accounts":
 						var body map[string]any
 						if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -65,7 +67,9 @@ func TestHomeCostManagedKeyNameIncludesCreationMonthDay(t *testing.T) {
 						}
 						accountName, _ = body["name"].(string)
 						accountCreates++
-						writeConnectionTestJSON(w, map[string]any{"data": map[string]any{"id": 22}})
+						writeConnectionTestJSON(w, map[string]any{"code": 0, "data": map[string]any{"id": 22}})
+					case r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/accounts/22":
+						_, _ = w.Write([]byte(c5SingleAccountFixture(accountName)))
 					default:
 						t.Errorf("unexpected fixture request: %s %s", r.Method, r.URL.Path)
 						w.WriteHeader(http.StatusNotFound)

@@ -21,6 +21,12 @@ func NewAttachmentStorage(baseDir string) (*AttachmentStorage, error) {
 	if err := os.MkdirAll(baseDir, 0o755); err != nil {
 		return nil, err
 	}
+	return OpenAttachmentStorage(baseDir)
+}
+
+// OpenAttachmentStorage 仅绑定既有存储路径，不创建目录或改变任何文件。
+// API-only 实例使用它复用主实例已经初始化的附件目录。
+func OpenAttachmentStorage(baseDir string) (*AttachmentStorage, error) {
 	absBase, err := filepath.Abs(baseDir)
 	if err != nil {
 		return nil, err

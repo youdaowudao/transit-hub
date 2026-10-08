@@ -128,7 +128,13 @@ type AdminAccountResolver interface {
 }
 
 func NewService(repository StateRepository, platformService *upstream.PlatformService, upstreamLookup UpstreamSiteLookup) *Service {
-	return &Service{repository: repository, platformService: platformService, upstreamLookup: upstreamLookup, now: time.Now}
+	service := &Service{repository: repository, platformService: platformService, upstreamLookup: upstreamLookup, now: time.Now}
+	// Dependency wiring must not depend on storage initialization: an API-only
+	// instance uses existing tables and deliberately never calls EnsureSchema.
+	if connections, ok := repository.(RealConnectionRepository); ok {
+		service.connRepository = connections
+	}
+	return service
 }
 
 func (s *Service) EnsureSchema(ctx context.Context) error {
@@ -1120,7 +1126,7 @@ func stringsToInts(ss []string) ([]int, error) {
 
 // buildAccountPayload 按分组类型组装 admin 站点创建转发账号的请求体。
 // 不同类型有不同的 platform、extra、credentials 配置，详见计划文档中的类型表。
-func buildAccountPayload(groupType, baseURL, apiKey string, ownGroupIDs []int, accountName string) map[string]any {
+func buildLegacyAccountPayload(groupType, baseURL, apiKey string, ownGroupIDs []int, accountName string) map[string]any {
 	credentials := map[string]any{
 		"base_url": baseURL,
 		"api_key":  apiKey,

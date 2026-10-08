@@ -9,6 +9,10 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 test('connection-health core gate keeps every question-answer regression member', async () => {
   const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
   for (const member of [
+    'c2-question-answer-red.behavior.test.ts',
+    'c2-question-answer-http-origin.behavior.test.ts',
+    'c2-question-answer-schedules.behavior.test.ts',
+    'c2-recent-summaries.behavior.test.ts',
     'c1-question-answer-red.behavior.test.ts',
     'c1-question-answer-keywords.test.ts',
     'c1-question-answer.behavior.test.ts',
@@ -72,5 +76,16 @@ test('core gate retains globalization recipient, language and amount regressions
     'run_globalization_gate',
   ]) {
     assert.ok(script.includes(member), `missing globalization core regression: ${member}`)
+  }
+})
+
+test('core gate includes C5 import settings and retained group rates behavior', async () => {
+  const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
+  for (const member of [
+    './internal/modules/my_sites',
+    'group-rates-import-settings.behavior.test.ts',
+    'group-rates-missing-connection.behavior.test.ts',
+  ]) {
+    assert.ok(script.includes(member), `missing C5 core regression: ${member}`)
   }
 })

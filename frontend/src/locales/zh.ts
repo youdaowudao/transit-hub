@@ -1165,6 +1165,25 @@ export default {
         moveDown: '下移',
         noVisibleGroups: '没有可显示的分组，请在显示管理中恢复。'
       },
+      questionAnswerSchedule: {
+        sources: { manual: '手动测试', scheduled: '定时测试', run_now: '计划立即执行' },
+        statuses: { pending: '等待执行', active: '执行中', completed: '已完成', partial: '部分完成', failed: '失败', skipped: '跳过', cancelled: '已终止' },
+        reasons: {
+          preparation_cancelled: '本次准备已终止', execution_terminated: '本次执行已接受终止', model_discovery_failed: '本次模型发现失败', all_models_unavailable: '本次没有可执行模型', batch_request_limit: '单账号请求矩阵超过50条', target_limit: '目标数量超过运行保护上限', all_accounts_missing: '所有指定账号已删除', account_not_found: '账号已删除', empty_scope: '当前选择范围为空',
+          group_not_found: '选中分组已删除', group_deleted: '选中分组已删除', question_not_found: '题目已删除或禁用', question_unavailable: '题目已删除或禁用',
+          test_configuration_unavailable: '库存或测试配置暂无法读取', test_configuration_conflict: '账号所属分组的测试配置冲突',
+          target_busy: '账号已有活动批次或正在准备测试', previous_execution_active: '上一次执行仍在运行',
+          misfire_no_catchup: '服务错过计划时刻，不补跑', start_window_expired: '启动宽限已过，不补发过期问答',
+          execution_timeout_before_start: '执行超时，尚未创建问答批次', execution_timeout: '整次执行超时', user_cancel: '用户终止本次执行',
+          target_limit_exceeded: '实际目标数量超过运行保护上限', max_targets: '实际目标数量超过运行保护上限',
+          request_limit_exceeded: '单次请求量超过运行保护上限', execution_request_limit: '单次请求量超过运行保护上限',
+          daily_limit: '今日定时请求预算不足', daily_limit_exceeded: '今日定时请求预算不足', queue_full: '等待中的定时请求已达上限',
+          batch_limit_exceeded: '单账号题目、模型和重复次数矩阵超过50条', model_unavailable: '本次没有可执行模型', models_unavailable: '本次没有可执行模型',
+          credential_unavailable: '账号凭据暂不可用', c1_finalization_pending: '准确批次正在收口，继续保留活动名额',
+          c1_finalization_failed: '准确批次收口失败，正在重试收口', preparation_pending: '等待准备调用退出',
+          storage_error: '本地存储失败，等待对账', batch_creation_failed: '创建准确批次失败', service_restarted: '服务重启，沿原批次对账',
+        },
+      },
       groupDetail: {
         multiplierPriority: '按倍率排序',
         subtitle: '已监控 {monitored}/{total} 个账号或渠道',
@@ -1301,6 +1320,7 @@ export default {
           latency: '延迟',
           stability: '最近中断',
           todayAccuracy: '今日正确率',
+          latestAccuracy: '最近正确率',
           actions: '操作'
         },
         stabilityColumn: {
@@ -2093,7 +2113,13 @@ export default {
         questionAnswerHistoryScope: '历史范围无效，请选择今日或全部。',
         questionAnswerHistoryPage: '历史页码无效，请重新选择。',
         questionAnswerJudgmentForbidden: '只有成功回答可以判定正确或错误。',
-        questionAnswerServiceStopped: '问答服务正在关闭，暂时不能开始新批次。'
+        questionAnswerServiceStopped: '问答后台服务不可用，暂时不能执行写入或开始新批次。',
+        questionAnswerScheduleDeleted: '计划已删除，不能接受新的立即执行请求。',
+        questionAnswerScheduleInvalid: '计划配置失效，请处理原因后重新检查。',
+        questionAnswerScheduleActive: '该计划已有活动执行，已打开其权威状态。',
+        questionAnswerScheduleNotFound: '计划不存在或不属于当前工作区。',
+        questionAnswerScheduleVersionConflict: '计划已被其他操作修改，请读取当前权威版本后再保存。',
+        questionAnswerExecutionVersionConflict: '执行状态已变化，已保留当前权威状态，请核对后重试。'
       }
     },
       upstream: {
@@ -2434,7 +2460,45 @@ export default {
         addToPricingMappingHint: '默认开启；取消后只建立流量连接，不加入自动调价映射。',
         submitManaged: '创建并对接',
         submitExisting: '保存已有资源关联',
-        bindFailed: '已有资源关联失败'
+        bindFailed: '已有资源关联失败',
+        importSettings: {
+          title: '主站账号设置',
+          automatic: '自动',
+          manual: '人工',
+          automaticHint: '自动初始值为 100，后续沿用已有健康调度规则。',
+          manualHint: '人工 Priority 为 1–9。',
+          automaticPriorityError: '自动初始 Priority 必须为 10–2147483647 的整数。',
+          manualPriorityError: '人工 Priority 必须为 1–9 的整数。',
+          concurrency: '并发',
+          concurrencyHint: '并发范围为 1–1000，默认 50。',
+          concurrencyError: '并发必须为 1–1000 的整数。',
+          passthrough: '透传',
+          passthroughUnsupported: '此平台不支持透传设置。',
+          modelSyncHint: '导入时由主站同步上游可用模型，并写入模型白名单。',
+          probe: '自动探测上游声明倍率',
+          groupsRemoved: '平台类型已变化，已移除不再匹配的主站分组选择。',
+          loadFailed: '主站分组加载失败，请关闭后重新打开。'
+        },
+        importResult: {
+          submitting: '正在导入并配置主站，请等待。',
+          confirmed: '导入已完成，主站配置已确认',
+          unavailable: '导入已完成，配置暂无法读取',
+          pending: '不确定结果，请先核对主站和上游资源，勿再次导入。',
+          operationId: '本次操作编号',
+          resourceName: '本次上游资源名称',
+          resourceIds: '本次资源：主站账号 {adminResourceId}，上游 Key 编号 {upstreamKeyId}。',
+          unknownId: '尚未取得',
+          accountId: '主站账号编号',
+          modelList: '查看模型列表',
+          done: '完成',
+          on: '开',
+          off: '关',
+          stage: '失败阶段',
+          stages: { validation: '参数与分组校验', upstream_key: '创建上游 Key', model_sync: '主站同步可用模型', account_create: '创建主站账号', configuration_check: '确认主站配置', persistence: '保存本地绑定' },
+          cleanup: { not_needed: '未创建需要清理的资源。', confirmed: '本次资源清理已确认。', retained: '资源已保留，清理未完成，请先核对。', pending: '资源清理结果尚未确认，请先核对。' },
+          observation: { creation: '以下为创建时由主站确认的配置。', current: '以下为主站当前配置，本次未重新创建或同步。' },
+          models: { synced: '已由主站同步并保存 {count} 个模型', not_required: '透传开启，本次不建立白名单', current_whitelist: '当前白名单：{count} 个模型（本次未重新同步）', current_unrestricted: '当前未限制模型（本次未重新同步）' }
+        }
       },
       disconnect: {
         action: '取消对接',
@@ -2602,6 +2666,17 @@ export default {
     mySites: {
       errors: {
         invalidAutoPricingConfig: '自动调价配置无效：主上游不在关联上游中，或最低倍率大于最高倍率。',
+        importSettingsInvalid: '账号设置无效，请检查 Priority、并发和开关。',
+        importGroupTypeMismatch: '主站分组不存在或与账号平台类型不一致。',
+        importSettingsUnsupported: '当前主站不支持此账号设置。',
+        importUpstreamKeyFailed: '上游 Key 创建或读取失败。',
+        importModelSyncFailed: '主站同步上游可用模型失败，未创建主站账号。',
+        importAccountCreateFailed: '主站账号创建失败。',
+        importConfigurationUnavailable: '主站账号已创建，配置尚未确认。',
+        importConfigurationMismatch: '主站保存的账号配置与请求不一致。',
+        importPersistenceFailed: '本地绑定未保存。',
+        importPersistencePending: '本地提交结果尚未确认，主站账号和上游 Key 已保留。',
+        importResponsePending: '未取得可信的导入结果，请先核对本次资源。',
         connectionExists: '该上游分组已经存在真实连接。',
         managedDeleteOnly: '已有资源关联只能取消本地关联，不能删除远端资源。',
         safeDeletionUnavailable: '安全删除服务暂不可用。',

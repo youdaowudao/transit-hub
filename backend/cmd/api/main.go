@@ -27,8 +27,10 @@ func main() {
 	defer db.Close()
 
 	// 数据库迁移：连接 DB 后立即执行，保证表结构就绪后再初始化业务模块
-	if err := migrations.Run(ctx, db); err != nil {
-		log.Fatalf("[migrations] %v", err)
+	if !cfg.APIOnly {
+		if err := migrations.Run(ctx, db); err != nil {
+			log.Fatalf("[migrations] %v", err)
+		}
 	}
 
 	// Redis 用于仪表盘 admin 会话存储与令牌自动刷新调度。
@@ -40,7 +42,7 @@ func main() {
 
 	server := httpserver.New(cfg, db, redisClient)
 	httpServer := &http.Server{
-		Addr:              ":" + cfg.Port,
+		Addr:              listenAddress(cfg),
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -66,4 +68,11 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
+}
+
+func listenAddress(cfg config.Config) string {
+	if cfg.APIOnly {
+		return "127.0.0.1:" + cfg.Port
+	}
+	return ":" + cfg.Port
 }

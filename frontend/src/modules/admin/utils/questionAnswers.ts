@@ -263,10 +263,15 @@ export const questionAnswerReviewStatsFromRecords = (
   return stats
 }
 
-export const questionAnswerAccuracy = (stats: QuestionAnswerStats): number | null => {
+export const questionAnswerAccuracy = (stats: Pick<QuestionAnswerStats, 'reviews'>): number | null => {
   const judged = stats.reviews.correct + stats.reviews.incorrect
   if (judged <= 0) return null
   return Math.round((stats.reviews.correct / judged) * 1000) / 10
+}
+
+export const questionAnswerAccuracyRatio = (stats: Pick<QuestionAnswerStats, 'reviews'> | null | undefined): number | null => {
+  const judged = stats ? stats.reviews.correct + stats.reviews.incorrect : 0
+  return judged > 0 ? stats!.reviews.correct / judged : null
 }
 
 export const formatQuestionAnswerAccuracy = (accuracy: number | null): string => {

@@ -88,69 +88,84 @@ type healthRepository interface {
 // Service 组装 connection_health 模块的全部业务逻辑：聚合查询、策略管理、手动动作、
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
-	actionNow                    func() time.Time
-	priorityWaitingSince         sync.Map
-	priorityFailureTargets       sync.Map
-	priorityStatusLocks          sync.Map
-	priorityRoundLogs            sync.Map
-	actionSweepViews             sync.Map
-	actionSweepFlights           sync.Map
-	actionInventoryViews         sync.Map
-	actionInvisibleLogs          sync.Map
-	actionDispatchMu             sync.Mutex
-	actionDispatchClosed         bool
-	actionDispatchWG             sync.WaitGroup
-	repo                         healthRepository
-	eventRetention               eventRetentionRepository
-	questionAnswers              questionAnswerRepository
-	mySites                      MySitesReader
-	sites                        SiteLookup
-	upstreamSync                 UpstreamSyncCoordinator
-	groupCosts                   GroupCostReader
-	accounts                     AdminAccountResolver
-	dispatcher                   RemoteActionRunner
-	probeRunner                  *RealProbeRunner
-	modelDiscovery               *ModelDiscoveryRunner
-	platformGroups               PlatformGroupReader
-	priorityActions              TargetPriorityActioner
-	concurrencyActions           TargetConcurrencyContextActioner
-	schedulableActions           TargetSchedulableActioner
-	probeLimiterMu               sync.Mutex
-	probeLimiter                 *probeConcurrencyLimiter
-	adminMultiplierMu            sync.Mutex
-	adminMultiplierCache         map[string]adminMultiplierCacheEntry
-	multiplierSnapshotMu         sync.Mutex
-	multiplierSnapshots          map[string]*multiplierSnapshotEntry
-	multiplierNow                func() time.Time
-	priorityTriggerMu            sync.Mutex
-	priorityTriggerRunning       map[string]bool
-	priorityTriggerPending       map[string]string
-	priorityHealthRunning        map[string]bool
-	priorityHealthPending        map[string]bool
-	sub2APIFloorMu               sync.Mutex
-	sub2APIFloorGuards           map[string]*workspaceFloorGuard
-	questionAnswerMu             sync.Mutex
-	questionAnswerCtx            context.Context
-	questionAnswerStop           context.CancelFunc
-	questionAnswerClosed         bool
-	questionAnswerRuns           map[string]*activeQuestionAnswerBatch
-	questionAnswerOrder          []string
-	questionAnswerLastKey        string
-	questionAnswerWake           chan struct{}
-	questionAnswerDispatcherDone chan struct{}
-	questionAnswerInFlight       int
-	questionAnswerStorageTimeout time.Duration
-	questionAnswerWG             sync.WaitGroup
-	questionAnswerShutdown       *questionAnswerShutdownAttempt
-	questionAnswerHTTP           *QuestionAnswerRunner
-	questionAnswerTTL            time.Duration
-	refreshRunMu                 sync.Mutex
-	refreshRootCtx               context.Context
-	refreshRootCancel            context.CancelFunc
-	refreshRunClosed             bool
-	refreshRunWG                 sync.WaitGroup
-	multiplierRefreshWG          sync.WaitGroup
-	multiplierRefreshJobs        int
+	actionNow                            func() time.Time
+	priorityWaitingSince                 sync.Map
+	priorityFailureTargets               sync.Map
+	priorityStatusLocks                  sync.Map
+	priorityRoundLogs                    sync.Map
+	actionSweepViews                     sync.Map
+	actionSweepFlights                   sync.Map
+	actionInventoryViews                 sync.Map
+	actionInvisibleLogs                  sync.Map
+	actionDispatchMu                     sync.Mutex
+	actionDispatchClosed                 bool
+	actionDispatchWG                     sync.WaitGroup
+	repo                                 healthRepository
+	eventRetention                       eventRetentionRepository
+	questionAnswers                      questionAnswerRepository
+	questionAnswerSchedules              questionAnswerScheduleRepository
+	mySites                              MySitesReader
+	sites                                SiteLookup
+	upstreamSync                         UpstreamSyncCoordinator
+	groupCosts                           GroupCostReader
+	accounts                             AdminAccountResolver
+	dispatcher                           RemoteActionRunner
+	probeRunner                          *RealProbeRunner
+	modelDiscovery                       *ModelDiscoveryRunner
+	platformGroups                       PlatformGroupReader
+	priorityActions                      TargetPriorityActioner
+	concurrencyActions                   TargetConcurrencyContextActioner
+	schedulableActions                   TargetSchedulableActioner
+	probeLimiterMu                       sync.Mutex
+	probeLimiter                         *probeConcurrencyLimiter
+	adminMultiplierMu                    sync.Mutex
+	adminMultiplierCache                 map[string]adminMultiplierCacheEntry
+	multiplierSnapshotMu                 sync.Mutex
+	multiplierSnapshots                  map[string]*multiplierSnapshotEntry
+	multiplierNow                        func() time.Time
+	priorityTriggerMu                    sync.Mutex
+	priorityTriggerRunning               map[string]bool
+	priorityTriggerPending               map[string]string
+	priorityHealthRunning                map[string]bool
+	priorityHealthPending                map[string]bool
+	sub2APIFloorMu                       sync.Mutex
+	sub2APIFloorGuards                   map[string]*workspaceFloorGuard
+	questionAnswerMu                     sync.Mutex
+	questionAnswerCtx                    context.Context
+	questionAnswerStop                   context.CancelFunc
+	questionAnswerClosed                 bool
+	backgroundTasksDisabled              bool
+	questionAnswerRuns                   map[string]*activeQuestionAnswerBatch
+	questionAnswerOrder                  []string
+	questionAnswerLastKey                string
+	questionAnswerWake                   chan struct{}
+	questionAnswerDispatcherDone         chan struct{}
+	questionAnswerInFlight               int
+	questionAnswerConcurrencyLimit       int
+	questionAnswerConcurrencyVersion     int64
+	questionAnswerConcurrencyLoaded      bool
+	questionAnswerStarts                 map[string]*questionAnswerTargetStart
+	questionAnswerStartWG                sync.WaitGroup
+	questionAnswerScheduleMu             sync.Mutex
+	questionAnswerScheduleCtx            context.Context
+	questionAnswerScheduleCancel         context.CancelFunc
+	questionAnswerScheduleDone           chan struct{}
+	questionAnswerScheduleWake           chan struct{}
+	questionAnswerScheduleHandles        map[string]*questionAnswerScheduleHandle
+	questionAnswerScheduleWorkspaceLocks sync.Map
+	questionAnswerScheduleNow            func() time.Time
+	questionAnswerStorageTimeout         time.Duration
+	questionAnswerWG                     sync.WaitGroup
+	questionAnswerShutdown               *questionAnswerShutdownAttempt
+	questionAnswerHTTP                   *QuestionAnswerRunner
+	questionAnswerTTL                    time.Duration
+	refreshRunMu                         sync.Mutex
+	refreshRootCtx                       context.Context
+	refreshRootCancel                    context.CancelFunc
+	refreshRunClosed                     bool
+	refreshRunWG                         sync.WaitGroup
+	multiplierRefreshWG                  sync.WaitGroup
+	multiplierRefreshJobs                int
 	// Refresh run ownership is process-local. Multi-process coordination is intentionally out of scope.
 	refreshActive          map[adminGroupsRefreshWorkspaceKey]*adminGroupsRefreshRun
 	refreshRunsByID        map[string]*adminGroupsRefreshRun
@@ -161,25 +176,34 @@ type Service struct {
 }
 
 func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner) *Service {
+	return NewServiceWithBackgroundTasks(repo, mySites, sites, platform, true)
+}
+
+// NewServiceWithBackgroundTasks keeps normal construction unchanged while allowing
+// a temporary API-only instance to omit all process-local background runtimes.
+func NewServiceWithBackgroundTasks(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner, enabled bool) *Service {
 	service := &Service{
-		repo:                   repo,
-		eventRetention:         repo,
-		questionAnswers:        repo,
-		mySites:                mySites,
-		sites:                  sites,
-		dispatcher:             newRemoteActionDispatcher(sites, mySites, platform),
-		probeRunner:            NewRealProbeRunner(),
-		modelDiscovery:         NewModelDiscoveryRunner(),
-		probeLimiter:           newProbeConcurrencyLimiter(12, 6),
-		adminMultiplierCache:   make(map[string]adminMultiplierCacheEntry),
-		multiplierSnapshots:    make(map[string]*multiplierSnapshotEntry),
-		priorityTriggerRunning: make(map[string]bool),
-		priorityTriggerPending: make(map[string]string),
-		priorityHealthRunning:  make(map[string]bool),
-		priorityHealthPending:  make(map[string]bool),
-		sub2APIFloorGuards:     make(map[string]*workspaceFloorGuard),
-		questionAnswerHTTP:     NewQuestionAnswerRunner(),
-		questionAnswerTTL:      QuestionAnswerRequestTimeout,
+		backgroundTasksDisabled: !enabled,
+		refreshRunClosed:        !enabled,
+		repo:                    repo,
+		eventRetention:          repo,
+		questionAnswers:         repo,
+		questionAnswerSchedules: repo,
+		mySites:                 mySites,
+		sites:                   sites,
+		dispatcher:              newRemoteActionDispatcher(sites, mySites, platform),
+		probeRunner:             NewRealProbeRunner(),
+		modelDiscovery:          NewModelDiscoveryRunner(),
+		probeLimiter:            newProbeConcurrencyLimiter(12, 6),
+		adminMultiplierCache:    make(map[string]adminMultiplierCacheEntry),
+		multiplierSnapshots:     make(map[string]*multiplierSnapshotEntry),
+		priorityTriggerRunning:  make(map[string]bool),
+		priorityTriggerPending:  make(map[string]string),
+		priorityHealthRunning:   make(map[string]bool),
+		priorityHealthPending:   make(map[string]bool),
+		sub2APIFloorGuards:      make(map[string]*workspaceFloorGuard),
+		questionAnswerHTTP:      NewQuestionAnswerRunner(),
+		questionAnswerTTL:       QuestionAnswerRequestTimeout,
 	}
 	service.initializeQuestionAnswerRuntime()
 	service.initializeAdminGroupsRefreshRuntime()

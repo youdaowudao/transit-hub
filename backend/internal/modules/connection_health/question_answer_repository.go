@@ -559,6 +559,93 @@ func (r *Repository) ListQuestionAnswerTodaySummaries(ctx context.Context, userI
 	return summaries, nil
 }
 
+// The latest terminal batch identity is chosen before judging its answers.
+// Unjudged or failed newest batches never fall back to an older percentage.
+func (r *Repository) ListLatestTerminalQuestionAnswerSummaries(ctx context.Context, userID string, targetIDs []string) (map[string]QuestionAnswerRecentSummaryItem, error) {
+	result := make(map[string]QuestionAnswerRecentSummaryItem, len(targetIDs))
+	for _, id := range targetIDs {
+		result[id] = QuestionAnswerRecentSummaryItem{TargetID: id}
+	}
+	if len(targetIDs) == 0 {
+		return result, nil
+	}
+	rows, err := r.db.Query(ctx, `WITH batches AS (
+  SELECT target_id,batch_id,MIN(created_at) AS created_at,MAX(completed_at) AS completed_at,
+   count(*) AS submitted,count(*) FILTER(WHERE status IN ('pending','running')) AS in_progress,
+   count(*) FILTER(WHERE status='succeeded') AS succeeded,count(*) FILTER(WHERE status='failed') AS failed,count(*) FILTER(WHERE status='cancelled') AS cancelled,
+   count(*) FILTER(WHERE status='succeeded' AND (answer_judgment IS NULL OR answer_judgment NOT IN ('correct','incorrect'))) AS unreviewed,
+   count(*) FILTER(WHERE status='succeeded' AND answer_judgment='correct') AS correct,count(*) FILTER(WHERE status='succeeded' AND answer_judgment='incorrect') AS incorrect
+  FROM connection_health_question_answer_records WHERE user_id=$1 AND target_id=ANY($2::text[]) GROUP BY target_id,batch_id
+ ),latest AS (
+  SELECT DISTINCT ON(target_id) * FROM batches WHERE in_progress=0 ORDER BY target_id,created_at DESC,batch_id DESC
+ )
+ SELECT requested.target_id,l.batch_id,l.created_at,l.completed_at,
+  COALESCE(e.trigger,'manual'),e.config_snapshot->'requested'->'schedule'->>'name',
+  COALESCE(l.submitted,0),COALESCE(l.in_progress,0),COALESCE(l.succeeded,0),COALESCE(l.failed,0),COALESCE(l.cancelled,0),COALESCE(l.unreviewed,0),COALESCE(l.correct,0),COALESCE(l.incorrect,0),
+  EXISTS(SELECT 1 FROM batches a WHERE a.target_id=requested.target_id AND a.in_progress>0 AND (l.batch_id IS NULL OR (a.created_at,a.batch_id)>(l.created_at,l.batch_id)))
+ FROM unnest($2::text[]) AS requested(target_id) LEFT JOIN latest l ON l.target_id=requested.target_id
+ LEFT JOIN connection_health_question_answer_schedule_execution_targets t ON t.id=l.batch_id AND t.target_id=l.target_id
+ LEFT JOIN connection_health_question_answer_schedule_executions e ON e.id=t.execution_id AND e.user_id=$1`, userID, targetIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var batchID *string
+		var created *time.Time
+		var recent QuestionAnswerRecentSummary
+		var active bool
+		if err = rows.Scan(&id, &batchID, &created, &recent.CompletedAt, &recent.Source, &recent.ScheduleName, &recent.Requests.Submitted, &recent.Requests.InProgress, &recent.Requests.Succeeded, &recent.Requests.Failed, &recent.Requests.Cancelled, &recent.Reviews.Unreviewed, &recent.Reviews.Correct, &recent.Reviews.Incorrect, &active); err != nil {
+			return nil, err
+		}
+		item := QuestionAnswerRecentSummaryItem{TargetID: id, ActiveNewerBatch: active}
+		if batchID != nil {
+			if created == nil {
+				return nil, requestError(ErrorQuestionAnswerStorage)
+			}
+			recent.BatchID = *batchID
+			recent.CreatedAt = *created
+			recent.Partial = recent.Requests.Succeeded > 0 && (recent.Requests.Failed > 0 || recent.Requests.Cancelled > 0)
+			item.RecentQuestionAnswer = &recent
+		}
+		result[id] = item
+	}
+	return result, rows.Err()
+}
+
+func questionAnswerRecordSummarySelect() string {
+	return strings.Replace(questionAnswerRecordSelect, "answer_body,", "'' AS answer_body,", 1)
+}
+
+func (r *Repository) ListQuestionAnswerBatchSummaries(ctx context.Context, userID string, batchIDs []string) (map[string]QuestionAnswerBatchSummary, error) {
+	result := map[string]QuestionAnswerBatchSummary{}
+	if len(batchIDs) == 0 {
+		return result, nil
+	}
+	rows, err := r.db.Query(ctx, questionAnswerRecordSummarySelect()+` WHERE user_id=$1 AND batch_id=ANY($2::text[]) ORDER BY created_at,id`, userID, batchIDs)
+	if err != nil {
+		return nil, err
+	}
+	records, err := scanQuestionAnswerRecords(rows)
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	byBatch := map[string][]QuestionAnswerRecord{}
+	for _, record := range records {
+		byBatch[record.BatchID] = append(byBatch[record.BatchID], record)
+	}
+	for id, batchRecords := range byBatch {
+		summary, err := buildQuestionAnswerBatchSummary(batchRecords)
+		if err != nil {
+			return nil, err
+		}
+		result[id] = summary
+	}
+	return result, nil
+}
+
 type questionAnswerQueryer interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }

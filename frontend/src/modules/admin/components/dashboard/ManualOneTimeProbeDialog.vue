@@ -47,6 +47,8 @@ import type {
 } from '../../types/connectionHealth'
 import {
   groupQuestionAnswerResults,
+  formatQuestionAnswerAccuracy,
+  questionAnswerAccuracy,
   questionAnswerRecordMatchesQuestion,
   questionAnswerRequestProtocolLabel,
   isCurrentQuestionAnswerOperation,
@@ -1892,7 +1894,7 @@ const close = () => {
                       <div v-else class="space-y-2">
                         <div v-for="group in qaResultGroups" :key="group.key" data-testid="question-answer-result-group" class="rounded-md border border-border/40">
                           <button type="button" class="flex w-full flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-left text-xs" :aria-expanded="qaResultGroupsOpen.has(group.key)" @click="toggleQuestionAnswerResultGroup(group.key)">
-                            <span class="break-words font-medium text-foreground">{{ group.questionName }}<template v-if="group.questionSnapshotKey"> · #{{ group.questionSnapshotKey.slice(0, 8) }}</template> · {{ group.modelName }} · {{ group.reviews.correct }}正确/{{ group.reviews.correct + group.reviews.incorrect }}已判 · 重复 {{ group.records.length }} 次</span><span class="text-muted-foreground">{{ qaResultGroupsOpen.has(group.key) ? '收起' : `展开 ${group.records.length} 条` }}</span>
+                            <span class="break-words font-medium text-foreground">{{ group.questionName }}<template v-if="group.questionSnapshotKey"> · #{{ group.questionSnapshotKey.slice(0, 8) }}</template> · {{ group.modelName }} · {{ formatQuestionAnswerAccuracy(questionAnswerAccuracy(group)) }} · 重复 {{ group.records.length }} 次</span><span class="text-muted-foreground">{{ qaResultGroupsOpen.has(group.key) ? '收起' : `展开 ${group.records.length} 条` }}</span>
                           </button>
                           <ul v-if="qaResultGroupsOpen.has(group.key)" class="space-y-2 border-t border-border/40 p-3">
                             <li v-for="record in group.records" :key="record.id" class="rounded-md border p-3" :class="questionAnswerRecordClass(record)"><QuestionAnswerRecordCard :record="record" :expanded="qaExpanded.has(record.id)" :saving="qaMarking.has(record.id)" :saving-judgment="qaMarking.get(record.id)" @expand="toggleQuestionAnswerExpanded(record.id)" @judge="saveQuestionAnswerJudgment(record, $event)" /></li>

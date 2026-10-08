@@ -53,6 +53,8 @@ const makeAccount = (
   todayQuestionAnswerSubmitted: submitted,
   todayQuestionAnswerJudged: submitted,
   todayQuestionAnswerCorrect: correct,
+  recentQuestionAnswer: submitted === 0 ? null : { batchId: `batch-${id}`, source: 'manual', scheduleName: null, createdAt: '2026-08-31T08:00:00Z', completedAt: '2026-08-31T08:01:00Z', partial: false, requests: { submitted, succeeded: submitted, failed: 0, cancelled: 0, inProgress: 0 }, reviews: { correct, incorrect: submitted - correct, unreviewed: 0 } },
+  activeNewerQuestionAnswerBatch: false,
 } as AdminGroupAccount)
 
 const makeGroup = (accounts: AdminGroupAccount[]): AdminGroupHealth => ({
@@ -116,7 +118,7 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
-describe('AdminGroupHealthDetail today question-answer accuracy', () => {
+describe('AdminGroupHealthDetail latest question-answer accuracy', () => {
   it('keeps production order until clicked, formats values, sorts by exact ratio, and always leaves no-data last', async () => {
     const accounts = [
       makeAccount('prod-first', 'Prod First', 0, 3, 2),
@@ -133,24 +135,24 @@ describe('AdminGroupHealthDetail today question-answer accuracy', () => {
     ])
 
     expect(rowFor(wrapper, 'Prod Second').findAll('td')[8].text()).toContain('75%')
-    expect(rowFor(wrapper, 'Prod Second').findAll('td')[8].text()).toContain('3正确 / 4已判')
+    expect(rowFor(wrapper, 'Prod Second').findAll('td')[8].text()).not.toContain('3正确 / 4已判')
     expect(rowFor(wrapper, 'Prod First').findAll('td')[8].text()).toContain('66.7%')
     expect(rowFor(wrapper, 'Zero').findAll('td')[8].text()).toContain('0%')
-    expect(rowFor(wrapper, 'Zero').findAll('td')[8].text()).toContain('0正确 / 5已判')
-    expect(rowFor(wrapper, 'None').findAll('td')[8].text()).toBe('—')
+    expect(rowFor(wrapper, 'Zero').findAll('td')[8].text()).not.toContain('0正确 / 5已判')
+    expect(rowFor(wrapper, 'None').findAll('td')[8].text()).toContain('尚未测试')
 
-    const accuracyHeader = wrapper.findAll('thead th').find(header => header.text().includes('今日正确率'))
-    if (!accuracyHeader) throw new Error('missing today accuracy header')
+    const accuracyHeader = wrapper.findAll('thead th').find(header => header.text().includes('最近正确率'))
+    if (!accuracyHeader) throw new Error('missing latest accuracy header')
     await accuracyHeader.get('button').trigger('click')
     expect(accuracyHeader.attributes('aria-sort')).toBe('descending')
     expect(accountOrder(wrapper, accounts)).toEqual([
-      'Prod Second', 'Prod First', 'Alpha Tie', 'Beta Tie', 'Zero', 'None',
+      'Prod Second', 'Prod First', 'Beta Tie', 'Alpha Tie', 'Zero', 'None',
     ])
 
     await accuracyHeader.get('button').trigger('click')
     expect(accuracyHeader.attributes('aria-sort')).toBe('ascending')
     expect(accountOrder(wrapper, accounts)).toEqual([
-      'Zero', 'Alpha Tie', 'Beta Tie', 'Prod First', 'Prod Second', 'None',
+      'Zero', 'Beta Tie', 'Alpha Tie', 'Prod First', 'Prod Second', 'None',
     ])
   })
 

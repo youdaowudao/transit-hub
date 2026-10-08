@@ -236,7 +236,7 @@ describe('question-answer compact layout primitives', () => {
     expect(result.failed.map(item => item.id)).toEqual(['failed'])
   })
 
-  it('renders review, today and lifetime compact statistics with model details collapsed', async () => {
+  it('renders review, today and lifetime compact statistics with model details expanded by default', async () => {
     const reviewBase = stats(3, 2, 1, 2, 0)
     const todayBase = stats(4, 3, 1, 3, 0)
     const lifetimeBase = stats(5, 3, 2, 2, 1)
@@ -276,6 +276,8 @@ describe('question-answer compact layout primitives', () => {
     expect(bar.find('[data-testid="question-answer-stats-review"] dl').classes()).toEqual(expect.arrayContaining([
       'grid-cols-3',
     ]))
+    expect(bar.findAll('[data-testid="question-answer-model-stats"]')).toHaveLength(3)
+    await bar.findAll('button').find(button => button.text() === '账号汇总')!.trigger('click')
     expect(bar.findAll('[data-testid="question-answer-model-stats"]')).toHaveLength(0)
 
     const modelToggle = bar.findAll('button').find(button => button.text() === '按模型')!

@@ -21,6 +21,7 @@ import {
   Zap,
 } from 'lucide-vue-next'
 import { Tooltip } from '@/components/ui/tooltip'
+import { formatQuestionAnswerAccuracy, questionAnswerAccuracy, questionAnswerAccuracyRatio } from '../../utils/questionAnswers'
 import AccountTierEditor from './AccountTierEditor.vue'
 import AccountPriorityEditor from './AccountPriorityEditor.vue'
 import AccountConcurrencyEditor from './AccountConcurrencyEditor.vue'
@@ -57,10 +58,12 @@ const props = withDefaults(defineProps<{
   quickProbePhases?: Record<string, 'starting' | 'queued' | 'running'>
   quickProbeErrors?: Record<string, string>
   quickProbeSuccesses?: Record<string, { modelName: string; latencyMs: number; protocol?: string | null; timeoutSeconds?: number | null }>
+  recentSummaryFailures?: string[]
 }>(), {
   quickProbePhases: () => ({}),
   quickProbeErrors: () => ({}),
   quickProbeSuccesses: () => ({}),
+  recentSummaryFailures: () => [],
 })
 
 const emit = defineEmits<{
@@ -74,6 +77,9 @@ const emit = defineEmits<{
   (event: 'update:hide-unmonitored-accounts', value: boolean): void
   (event: 'set-schedulable', account: AdminGroupAccount): void
   (event: 'assign-policy', account: AdminGroupAccount): void
+  (event: 'question-answer-view', value: { targetId: string; batchId: string }): void
+  (event: 'question-answer-recent-retry', targetId: string): void
+  (event: 'displayed-targets', targetIds: string[]): void
 }>()
 
 import { t, te } from '@/locales'
@@ -141,7 +147,7 @@ type AccountSortField =
   | 'upstreamMultiplier'
   | 'latency'
   | 'stability'
-  | 'todayAccuracy'
+  | 'latestAccuracy'
 
 type SortDirection = 'asc' | 'desc'
 type StateBreakdownItem = {
@@ -312,7 +318,7 @@ const DEFAULT_SORT_DIRECTIONS: Record<AccountSortField, SortDirection> = {
   upstreamMultiplier: 'asc',
   latency: 'asc',
   stability: 'asc',
-  todayAccuracy: 'desc',
+  latestAccuracy: 'desc',
 }
 
 const HEALTH_SORT_RANK: Record<ConnectionHealthState, number> = {
@@ -481,17 +487,18 @@ const accountHealthRank = (account: AdminGroupAccount): number => {
   return HEALTH_SORT_RANK[state] ?? 6
 }
 
-const accountTodayAccuracy = (account: AdminGroupAccount): number | null => {
-  const judged = account.todayQuestionAnswerJudged ?? 0
-  if (judged <= 0) return null
-  return (account.todayQuestionAnswerCorrect ?? 0) / judged
-}
-
-const formatTodayAccuracy = (account: AdminGroupAccount): string => {
-  const accuracy = accountTodayAccuracy(account)
-  if (accuracy == null) return '—'
-  const roundedPercent = Math.round(accuracy * 1000) / 10
-  return `${Number.isInteger(roundedPercent) ? roundedPercent.toFixed(0) : roundedPercent.toFixed(1)}%`
+const accountLatestAccuracy = (account: AdminGroupAccount): number | null => questionAnswerAccuracyRatio(account.recentQuestionAnswer)
+const formatLatestAccuracy = (account: AdminGroupAccount): string => formatQuestionAnswerAccuracy(account.recentQuestionAnswer ? questionAnswerAccuracy(account.recentQuestionAnswer) : null)
+const recentSource = (account: AdminGroupAccount): string => account.recentQuestionAnswer
+  ? t(`${prefix}.questionAnswerSchedule.sources.${account.recentQuestionAnswer.source}`) : ''
+const recentState = (account: AdminGroupAccount): string => {
+  const recent = account.recentQuestionAnswer
+  if (!recent) return account.activeNewerQuestionAnswerBatch ? '测试中' : '尚未测试'
+  const labels = account.activeNewerQuestionAnswerBatch ? ['测试中'] : []
+  if (recent.requests.succeeded === 0) labels.push(recent.requests.failed === recent.requests.submitted ? '最近测试全部失败' : '最近测试已取消')
+  else if (accountLatestAccuracy(account) === null) labels.push('待人工判断')
+  if (recent.partial) labels.push('部分完成')
+  return labels.join(' · ')
 }
 
 const accountSortValue = (account: AdminGroupAccount, field: AccountSortField): string | number | null => {
@@ -512,8 +519,8 @@ const accountSortValue = (account: AdminGroupAccount, field: AccountSortField): 
       return accountLatency(account)
     case 'stability':
       return accountStabilityRank(account)
-    case 'todayAccuracy':
-      return accountTodayAccuracy(account)
+    case 'latestAccuracy':
+      return accountLatestAccuracy(account)
   }
 }
 
@@ -549,8 +556,12 @@ const sortedAccounts = computed(() => [...filteredAccounts.value].sort((first, s
     accountSortValue(second, sortField.value),
     sortDirection.value,
   )
-  return valueDiff !== 0 ? valueDiff : compareAccountsByName(first, second)
+  if (valueDiff !== 0) return valueDiff
+  if (sortField.value === 'latestAccuracy') return compareSortValues(first.productionSortOrder ?? null, second.productionSortOrder ?? null, 'asc')
+    || first.targetId.localeCompare(second.targetId)
+  return compareAccountsByName(first, second)
 }))
+watch(() => sortedAccounts.value.map(account => account.targetId).join('\n'), () => emit('displayed-targets', sortedAccounts.value.map(account => account.targetId)), { immediate: true })
 
 const filteredModelHealth = (account: AdminGroupAccount) => {
   const filter = activeFilter.value
@@ -816,11 +827,11 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                   <ArrowDownUp v-else class="h-3.5 w-3.5 opacity-50" />
                 </button>
               </th>
-              <th class="w-28 px-3 py-2.5 text-right font-medium" :aria-sort="ariaSort('todayAccuracy')">
-                <button type="button" class="inline-flex items-center justify-end gap-1.5 text-right hover:text-foreground" @click="toggleSort('todayAccuracy')">
-                  {{ t(`${detailPrefix}.columns.todayAccuracy`) }}
-                  <ChevronUp v-if="customSortActive && sortField === 'todayAccuracy' && sortDirection === 'asc'" class="h-3.5 w-3.5" />
-                  <ChevronDown v-else-if="customSortActive && sortField === 'todayAccuracy'" class="h-3.5 w-3.5" />
+              <th class="w-28 px-3 py-2.5 text-right font-medium" :aria-sort="ariaSort('latestAccuracy')">
+                <button type="button" class="inline-flex items-center justify-end gap-1.5 text-right hover:text-foreground" @click="toggleSort('latestAccuracy')">
+                  {{ t(`${detailPrefix}.columns.latestAccuracy`) }}
+                  <ChevronUp v-if="customSortActive && sortField === 'latestAccuracy' && sortDirection === 'asc'" class="h-3.5 w-3.5" />
+                  <ChevronDown v-else-if="customSortActive && sortField === 'latestAccuracy'" class="h-3.5 w-3.5" />
                   <ArrowDownUp v-else class="h-3.5 w-3.5 opacity-50" />
                 </button>
               </th>
@@ -957,12 +968,11 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                   </div>
                 </td>
                 <td class="w-28 px-3 py-3 text-right tabular-nums">
-                  <span :class="accountTodayAccuracy(account) == null ? 'text-muted-foreground' : 'font-medium text-foreground'">
-                    {{ formatTodayAccuracy(account) }}
-                  </span>
-                  <span v-if="accountTodayAccuracy(account) != null" class="mt-0.5 block text-[11px] text-muted-foreground">
-                    {{ account.todayQuestionAnswerCorrect ?? 0 }}正确 / {{ account.todayQuestionAnswerJudged ?? 0 }}已判
-                  </span>
+                  <button v-if="account.recentQuestionAnswer" type="button" class="text-right hover:text-primary" :class="accountLatestAccuracy(account) == null ? 'text-muted-foreground' : 'font-medium text-foreground'" :title="account.recentQuestionAnswer.scheduleName ?? recentSource(account)" @click="emit('question-answer-view', { targetId: account.targetId, batchId: account.recentQuestionAnswer.batchId })">{{ formatLatestAccuracy(account) }}</button>
+                  <span v-else class="text-muted-foreground">—</span>
+                  <span v-if="account.recentQuestionAnswer" class="mt-0.5 block break-words text-[11px] text-muted-foreground">{{ recentSource(account) }} · {{ formatConnectionHealthTime(account.recentQuestionAnswer.createdAt) }}</span>
+                  <span v-if="recentState(account)" class="mt-0.5 block text-[11px] text-muted-foreground">{{ recentState(account) }}</span>
+                  <button v-if="recentSummaryFailures.includes(account.targetId)" type="button" class="mt-1 text-[11px] text-destructive underline" @click="emit('question-answer-recent-retry', account.targetId)">最近结果刷新失败 · 重试</button>
                 </td>
                 <td class="w-28 px-3 py-3">
                   <div class="account-actions flex flex-col items-end gap-1">

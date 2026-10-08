@@ -57,14 +57,15 @@ type SiteReferenceChecker interface {
 // 站点运行时状态缓存在 Redis（通过 SiteCache），PostgreSQL 负责持久化。
 // 当系统设置开启了数据刷新频率时，定时器按配置的间隔自动同步各站点。
 type Service struct {
-	platformService  *PlatformService
-	snapshotWriter   SnapshotWriter
-	repository       SiteRepository
-	cache            SiteCache
-	accounts         AdminAccountResolver
-	references       SiteReferenceChecker
-	refreshConfigs   map[refreshWorkspaceKey]RefreshConfig
-	initialSchedules map[refreshWorkspaceKey]bool
+	platformService         *PlatformService
+	snapshotWriter          SnapshotWriter
+	repository              SiteRepository
+	cache                   SiteCache
+	accounts                AdminAccountResolver
+	references              SiteReferenceChecker
+	refreshConfigs          map[refreshWorkspaceKey]RefreshConfig
+	initialSchedules        map[refreshWorkspaceKey]bool
+	backgroundTasksDisabled bool
 	// groupCostSlots 限制跨站点成本采样的并发量；nil 仅用于不带 NewService 的单元测试。
 	groupCostSlots   chan struct{}
 	timers           map[string]*time.Timer
@@ -134,6 +135,25 @@ func NewService(platformService *PlatformService, repository SiteRepository, sna
 	}
 }
 
+// SetBackgroundTasksDisabled affects only this instance, never persisted strategy
+// settings or shared cache. Configure it before serving requests.
+func (s *Service) SetBackgroundTasksDisabled(disabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.backgroundTasksDisabled = disabled
+	if disabled {
+		for id := range s.timers {
+			s.clearTimerLocked(id)
+		}
+	}
+}
+
+func (s *Service) backgroundTasksEnabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.backgroundTasksDisabled
+}
+
 // SetWorkspaceRefreshConfig 只更新指定工作区的后台定时同步配置。
 func (s *Service) SetWorkspaceRefreshConfig(userID, adminAccountID string, config RefreshConfig) {
 	userID = strings.TrimSpace(userID)
@@ -145,6 +165,9 @@ func (s *Service) SetWorkspaceRefreshConfig(userID, adminAccountID string, confi
 	defer s.mu.Unlock()
 	key := refreshWorkspaceKey{userID: userID, adminAccountID: adminAccountID}
 	s.refreshConfigs[key] = config
+	if s.backgroundTasksDisabled {
+		return
+	}
 	initial := !s.initialSchedules[key]
 
 	if s.repository == nil {
@@ -1122,9 +1145,11 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	}
 	if refreshErr == nil {
 		s.saveSnapshot(ctx, site)
-		go s.sampleGroupCosts(*site, refreshedSession, append([]GroupInfo(nil), site.Metrics.Groups...))
-		if s.AfterSync != nil {
-			go s.AfterSync(context.Background(), site.UserID, site.AdminAccountID, site.ID, site.Name, oldMetrics, metrics, oldStatus, site.Status)
+		if s.backgroundTasksEnabled() {
+			go s.sampleGroupCosts(*site, refreshedSession, append([]GroupInfo(nil), site.Metrics.Groups...))
+			if s.AfterSync != nil {
+				go s.AfterSync(context.Background(), site.UserID, site.AdminAccountID, site.ID, site.Name, oldMetrics, metrics, oldStatus, site.Status)
+			}
 		}
 	}
 	return response, nil
@@ -1300,6 +1325,9 @@ func (s *Service) scheduleInitialSyncLocked(id string, site *Site) bool {
 
 func (s *Service) scheduleSyncWithModeLocked(id string, site *Site, initial bool) bool {
 	s.clearTimerLocked(id)
+	if s.backgroundTasksDisabled {
+		return false
+	}
 	if _, deleted := s.deletedSites[id]; deleted {
 		return false
 	}

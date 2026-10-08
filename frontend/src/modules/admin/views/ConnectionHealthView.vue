@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -31,6 +31,9 @@ import ManualOneTimeProbeDialog from '../components/dashboard/ManualOneTimeProbe
 import type { ManualProbeTargetSummary } from '../components/dashboard/ManualOneTimeProbeDialog.vue'
 import { getQuestionAnswerSummary } from '../api/connectionHealth'
 import QuestionAnswerBatchDrawer from '../components/dashboard/QuestionAnswerBatchDrawer.vue'
+import QuestionAnswerScheduleDrawer from '../components/dashboard/QuestionAnswerScheduleDrawer.vue'
+import QuestionAnswerScheduleBatchDialog from '../components/dashboard/QuestionAnswerScheduleBatchDialog.vue'
+import { useQuestionAnswerRecentSummaries } from '../composables/useQuestionAnswerRecentSummaries'
 import PolicyConfigDrawer from '../components/dashboard/PolicyConfigDrawer.vue'
 import type { OwnGroupOption } from '../components/dashboard/PolicyConfigDrawer.vue'
 import ProbePolicyListDialog from '../components/dashboard/ProbePolicyListDialog.vue'
@@ -89,6 +92,7 @@ const {
   applyAccountPriority,
   applyAccountConcurrency,
   applyQuestionAnswerTodaySummary,
+  applyQuestionAnswerRecentSummary,
   loadAll,
   loadGroups,
   loadAdminGroups,
@@ -126,6 +130,13 @@ const refreshWaitSeconds = ref(0)
 let refreshWaitTimer: ReturnType<typeof setInterval> | null = null
 const refreshCoordinator = createRefreshCoordinator()
 const preferenceScope = computed(() => currentAccount.value?.id ?? 'anonymous')
+const documentVisibility = useDocumentVisibility()
+const mainTableMounted = ref(false)
+const displayedQuestionAnswerTargetIds = ref<string[]>([])
+const scheduleStatsRevision = ref(0)
+const recentSummaries = useQuestionAnswerRecentSummaries({ workspace: () => preferenceScope.value, visible: () => mainTableMounted.value && documentVisibility.value === 'visible', apply: applyQuestionAnswerRecentSummary })
+const recentSummaryFailures = recentSummaries.failures
+const scheduleReadOnlyBatch = ref<{ targetId: string; batchId: string; accountName: string } | null>(null)
 let loadedPreferenceScope = ''
 
 type QuickProbePhase = 'starting' | ProbeTargetProgressPhase
@@ -292,7 +303,12 @@ const onQuestionAnswerStatsDirty = (targetId: string) => {
   if (!targetId.startsWith(`sub2api:${preferenceScope.value}:`)) return
   questionAnswerSummaryPending.set(targetId, (questionAnswerSummaryPending.get(targetId) ?? 0) + 1)
   void refreshQuestionAnswerSummary(targetId)
+  recentSummaries.refreshTargets([targetId])
+  scheduleStatsRevision.value++
 }
+const retryQuestionAnswerSummaries = (targetId: string) => { void refreshQuestionAnswerSummary(targetId); recentSummaries.retry(targetId) }
+const onScheduleSettled = (targetIds: string[]) => { for (const targetId of targetIds) onQuestionAnswerStatsDirty(targetId) }
+const onDisplayedQuestionAnswerTargets = (targetIds: string[]) => { displayedQuestionAnswerTargetIds.value = [...new Set(targetIds)]; recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value) }
 const retryPendingQuestionAnswerSummaries = () => {
   for (const [targetId, version] of questionAnswerSummaryPending) if (version > (questionAnswerSummarySettled.get(targetId) ?? 0)) void refreshQuestionAnswerSummary(targetId)
 }
@@ -300,6 +316,9 @@ const retryPendingQuestionAnswerSummaries = () => {
 watch(preferenceScope, (scope) => {
   invalidateQuickProbeSession(true)
   clearQuestionAnswerSummaryRequests()
+  recentSummaries.reset()
+  displayedQuestionAnswerTargetIds.value = []
+  scheduleReadOnlyBatch.value = null
   setAdminGroupsWorkspace(scope)
   loadPreferences(scope)
 }, { immediate: true })
@@ -371,6 +390,7 @@ watch(
 )
 
 const selectedGroup = computed(() => filteredGroups.value.find(group => group.id === selectedGroupId.value) ?? filteredGroups.value[0] ?? null)
+watch(selectedGroup, group => { if (!group) displayedQuestionAnswerTargetIds.value = [] })
 
 watch(filteredGroups, (nextGroups) => {
   if (nextGroups.some((group) => group.id === selectedGroupId.value)) return
@@ -706,10 +726,9 @@ const refreshOnEntry = () => {
 	void runAuxiliaryRequest('priority', loadPrioritySyncStatus)
 }
 
-onMounted(refreshOnEntry)
-onActivated(refreshOnEntry)
-
-const documentVisibility = useDocumentVisibility()
+onMounted(() => { mainTableMounted.value = true; recentSummaries.resume(); refreshOnEntry() })
+onActivated(() => { mainTableMounted.value = true; recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value); refreshOnEntry() })
+onDeactivated(() => { mainTableMounted.value = false; recentSummaries.suspend() })
 const autoRefresh = async () => {
   if (documentVisibility.value !== 'visible' || probeDialogOpen.value || !refreshCoordinator.shouldRunAutomaticRefresh()) return
   await Promise.all([
@@ -721,8 +740,10 @@ const autoRefresh = async () => {
 }
 // immediate=false 会让 VueUse 的 interval 保持暂停；这里只关闭首次回调，计时器本身必须启动。
 useIntervalFn(() => void autoRefresh(), 30_000, { immediate: true, immediateCallback: false })
+useIntervalFn(() => { if (mainTableMounted.value && documentVisibility.value === 'visible') recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value) }, 30_000, { immediate: true, immediateCallback: false })
 watch(documentVisibility, (visibility) => {
-  if (visibility === 'visible') { retryPendingQuestionAnswerSummaries(); void autoRefresh() }
+  if (visibility === 'visible') { retryPendingQuestionAnswerSummaries(); recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value); recentSummaries.resume(); void autoRefresh() }
+  else recentSummaries.suspend()
 })
 
 const refreshAdminGroupsAutomatically = async (): Promise<boolean> => {
@@ -755,6 +776,8 @@ const refresh = async () => {
 }
 
 onBeforeUnmount(() => {
+  mainTableMounted.value = false
+  recentSummaries.reset()
   clearQuestionAnswerSummaryRequests()
   invalidateQuickProbeSession(true)
   cancelAdminGroupsRefresh()
@@ -943,7 +966,13 @@ const onProbeAccount = (account: AdminGroupAccount) => {
 const onQuestionAnswerView = (value: { targetId: string; batchId?: string }) => {
   const projections = adminGroups.value.flatMap(group => group.accounts.filter(account => account.targetId === value.targetId).map(account => ({ account, group })))
   const projection = projections.find(item => item.group.id === selectedGroup.value?.id) ?? projections[0]
-  if (projection) openQuestionAnswerTarget(projection.account, projection.group, value.batchId ?? null)
+  if (projection && canOpenManualProbeHistory(projection.account)) openQuestionAnswerTarget(projection.account, projection.group, value.batchId ?? null)
+  else if (value.batchId) scheduleReadOnlyBatch.value = { targetId: value.targetId, batchId: value.batchId, accountName: projection?.account.name || projection?.account.id || value.targetId }
+}
+const onScheduleQuestionAnswerView = (value: { targetId: string; batchId: string; accountName: string; platform: string; groupName: string }) => {
+  const exists = adminGroups.value.some(group => group.accounts.some(account => account.targetId === value.targetId))
+  if (exists) onQuestionAnswerView(value)
+  else scheduleReadOnlyBatch.value = { targetId: value.targetId, batchId: value.batchId, accountName: value.accountName }
 }
 
 const formalProbeModels = (account: AdminGroupAccount): string[] => {
@@ -1097,6 +1126,7 @@ const onFormalProbeCompleted = async () => {
 }
 
 const onQuestionAnswerStarted = (targetId: string) => {
+  onQuestionAnswerStatsDirty(targetId)
   updatePreferences(current => markQuestionAnswerUnread(current, targetId))
 }
 
@@ -1425,6 +1455,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
 
       <div v-else class="grid min-h-[34rem] lg:grid-cols-[19rem_minmax(0,1fr)]">
         <aside class="flex min-h-0 flex-col border-b border-border/50 lg:max-h-[34rem] lg:border-b-0 lg:border-r">
+          <div class="grid grid-cols-2">
           <QuestionAnswerBatchDrawer
             :groups="orderedGroups"
             :preference-scope="preferenceScope"
@@ -1433,6 +1464,8 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
             @question-answer-started="onQuestionAnswerStarted"
             @question-answer-view="onQuestionAnswerView"
           />
+          <QuestionAnswerScheduleDrawer :groups="orderedGroups" :workspace="preferenceScope" :platform="currentAccount?.platform ?? ''" :preferences="preferences.questionAnswer" :stats-revision="scheduleStatsRevision" @question-answer-view="onScheduleQuestionAnswerView" @settled="onScheduleSettled" />
+          </div>
           <div class="space-y-3 border-b border-border/50 p-4">
             <div class="relative">
               <Search class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -1555,6 +1588,10 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           :quick-probe-phases="quickProbePhases"
           :quick-probe-errors="quickProbeErrors"
           :quick-probe-successes="quickProbeSuccesses"
+          :recent-summary-failures="recentSummaryFailures"
+          @question-answer-view="onQuestionAnswerView"
+          @question-answer-recent-retry="recentSummaries.retry"
+          @displayed-targets="onDisplayedQuestionAnswerTargets"
           @setup="openSetup"
           @probe="onProbeAccount"
           @quick-probe="onQuickProbeAccount"
@@ -1593,16 +1630,17 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       :target="probeDialogTarget"
       :question-answer-preferences="preferences.questionAnswer"
       :initial-question-answer-batch-id="initialQuestionAnswerBatchId"
-      :summary-refresh-failed="Boolean(probeDialogTarget && questionAnswerSummaryFailures.has(probeDialogTarget.targetId))"
+      :summary-refresh-failed="Boolean(probeDialogTarget && (questionAnswerSummaryFailures.has(probeDialogTarget.targetId) || recentSummaryFailures.includes(probeDialogTarget.targetId)))"
       @close="probeDialogOpen = false"
       @completed="onFormalProbeCompleted"
       @tier-saved="onAccountTierSaved"
       @question-answer-started="onQuestionAnswerStarted"
       @question-answer-viewed="onQuestionAnswerViewed"
       @question-answer-stats-dirty="onQuestionAnswerStatsDirty"
-      @question-answer-stats-retry="refreshQuestionAnswerSummary"
+      @question-answer-stats-retry="retryQuestionAnswerSummaries"
       @question-answer-preferences-changed="onQuestionAnswerPreferencesChanged"
     />
+    <QuestionAnswerScheduleBatchDialog v-if="scheduleReadOnlyBatch" :target-id="scheduleReadOnlyBatch.targetId" :batch-id="scheduleReadOnlyBatch.batchId" :account-name="scheduleReadOnlyBatch.accountName" :workspace="preferenceScope" @close="scheduleReadOnlyBatch = null" />
 
     <ProbePolicyListDialog
       :open="policyListDialogOpen"

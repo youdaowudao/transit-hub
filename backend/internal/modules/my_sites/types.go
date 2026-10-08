@@ -171,8 +171,9 @@ type RealConnectRequest struct {
 	OwnGroupIDs       []string `json:"ownGroupIds"`
 	// AddToPricingMapping is a pointer so rolling deployments preserve the old
 	// behavior: an omitted field still adds the target to automatic pricing.
-	AddToPricingMapping *bool  `json:"addToPricingMapping"`
-	OperationID         string `json:"operationId"`
+	AddToPricingMapping *bool                         `json:"addToPricingMapping"`
+	OperationID         string                        `json:"operationId"`
+	AccountSettings     *ImportAccountSettingsRequest `json:"accountSettings,omitempty"`
 }
 
 // RealDisconnectRequest 取消真实对接请求体。
@@ -235,8 +236,71 @@ type AdminResourceOption struct {
 
 // RealConnectResponse 真实对接成功后返回的绑定记录。
 type RealConnectResponse struct {
-	Connection RealConnection `json:"connection"`
+	Connection              RealConnection                `json:"connection"`
+	WorkspaceAdminAccountID string                        `json:"workspaceAdminAccountId,omitempty"`
+	ConfigurationStatus     string                        `json:"configurationStatus,omitempty"`
+	Configuration           *ImportedAccountConfiguration `json:"configuration,omitempty"`
+	Message                 string                        `json:"message,omitempty"`
 }
+
+type ImportAccountSettingsRequest struct {
+	PriorityMode                *string `json:"priorityMode"`
+	Priority                    *int    `json:"priority"`
+	Concurrency                 *int    `json:"concurrency"`
+	Passthrough                 *bool   `json:"passthrough"`
+	PoolMode                    *bool   `json:"poolMode"`
+	UpstreamBillingProbeEnabled *bool   `json:"upstreamBillingProbeEnabled"`
+	invalidNull                 bool
+}
+
+type ImportAccountSettings struct {
+	PriorityMode                string
+	Priority                    int
+	Concurrency                 int
+	Passthrough                 bool
+	PoolMode                    bool
+	UpstreamBillingProbeEnabled bool
+}
+
+type ImportOwnGroup struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type ImportedAccountConfiguration struct {
+	Observation                 string           `json:"observation"`
+	AdminAccountID              string           `json:"adminAccountId"`
+	Name                        string           `json:"name"`
+	Platform                    string           `json:"platform"`
+	Priority                    int              `json:"priority"`
+	Concurrency                 int              `json:"concurrency"`
+	Passthrough                 bool             `json:"passthrough"`
+	PoolMode                    bool             `json:"poolMode"`
+	UpstreamBillingProbeEnabled bool             `json:"upstreamBillingProbeEnabled"`
+	OwnGroups                   []ImportOwnGroup `json:"ownGroups"`
+	ModelState                  string           `json:"modelState"`
+	Models                      []string         `json:"models"`
+}
+
+// ImportFailure contains only safe, operation-local evidence. Cause and status
+// are never serialized, and Error never exposes upstream response text.
+type ImportFailure struct {
+	Message              string `json:"message"`
+	Stage                string `json:"stage"`
+	Cleanup              string `json:"cleanup"`
+	AdminResourceID      string `json:"adminResourceId,omitempty"`
+	UpstreamKeyID        string `json:"upstreamKeyId,omitempty"`
+	UpstreamResourceName string `json:"upstreamResourceName,omitempty"`
+	RetryAllowed         bool   `json:"retryAllowed"`
+	Reason               string `json:"reason"`
+	GroupID              string `json:"groupId,omitempty"`
+	GroupName            string `json:"groupName,omitempty"`
+	StatusCode           int    `json:"-"`
+	Cause                error  `json:"-"`
+}
+
+func (e *ImportFailure) Error() string { return e.Message }
+func (e *ImportFailure) Unwrap() error { return e.Cause }
 
 // RealConnection 一条真实对接的绑定记录，存储于 real_connections 表。
 // 记录上游 key、admin 账号、关联的自有分组 ID 列表等完整信息。

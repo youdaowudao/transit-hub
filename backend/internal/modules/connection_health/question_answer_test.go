@@ -377,6 +377,8 @@ func newQuestionAnswerService(serverURL string, qaRepo *fakeQuestionAnswerReposi
 	service.questionAnswers = qaRepo
 	service.questionAnswerHTTP = NewQuestionAnswerRunner()
 	service.questionAnswerTTL = QuestionAnswerRequestTimeout
+	// C1 fairness/finalizer fixtures explicitly retain their five-slot capacity.
+	service.questionAnswerConcurrencyLimit = 5
 	service.initializeQuestionAnswerRuntime()
 	return service
 }
@@ -634,6 +636,8 @@ func newMultiTargetQuestionAnswerService(serverURL string, qaRepo questionAnswer
 	service.questionAnswers = qaRepo
 	service.questionAnswerHTTP = NewQuestionAnswerRunner()
 	service.questionAnswerTTL = QuestionAnswerRequestTimeout
+	// C1 fairness/finalizer fixtures explicitly retain their five-slot capacity.
+	service.questionAnswerConcurrencyLimit = 5
 	service.initializeQuestionAnswerRuntime()
 	return service
 }
@@ -753,7 +757,7 @@ func TestQuestionAnswerGlobalPoolCapsFiveAndRotatesBatches(t *testing.T) {
 		t.Fatalf("start batch A: %v", err)
 	}
 	started := make([]string, 0, 12)
-	for i := 0; i < questionAnswerConcurrency; i++ {
+	for i := 0; i < 5; i++ {
 		select {
 		case question := <-transport.started:
 			started = append(started, question)
@@ -783,13 +787,13 @@ func TestQuestionAnswerGlobalPoolCapsFiveAndRotatesBatches(t *testing.T) {
 	if !strings.HasPrefix(started[5], "B-") {
 		t.Fatalf("batch B was starved behind batch A: sixth eligible request=%q sequence=%v", started[5], started)
 	}
-	for i := 0; i < questionAnswerConcurrency; i++ {
+	for i := 0; i < 5; i++ {
 		transport.release <- struct{}{}
 	}
 	waitQuestionAnswerBatchForTarget(t, service, "user1", targetA, batchA.BatchID, false)
 	waitQuestionAnswerBatchForTarget(t, service, "user1", targetB, batchB.BatchID, false)
-	if peak := transport.peak(); peak != questionAnswerConcurrency {
-		t.Fatalf("global peak=%d want=%d", peak, questionAnswerConcurrency)
+	if peak := transport.peak(); peak != 5 {
+		t.Fatalf("global peak=%d want=%d", peak, 5)
 	}
 	seen := make(map[string]int, len(started))
 	for _, question := range started {

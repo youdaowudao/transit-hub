@@ -448,7 +448,8 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		refreshErr = ctx.Err()
 	}
-	return errors.Join(actionErr, refreshErr, s.ShutdownQuestionAnswers(ctx))
+	scheduleErr := s.ShutdownQuestionAnswerSchedules(ctx)
+	return errors.Join(actionErr, refreshErr, scheduleErr, s.ShutdownQuestionAnswers(ctx))
 }
 
 func (run *adminGroupsRefreshRun) publishStage(stage adminGroupsRefreshStage, completed int, total int, waiting []adminGroupsRefreshWaiting, issues []adminGroupsRefreshIssue) bool {

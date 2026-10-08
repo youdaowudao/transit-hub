@@ -268,6 +268,11 @@ func (h *Handler) realDisconnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeError(w http.ResponseWriter, err error) {
+	var importFailure *ImportFailure
+	if errors.As(err, &importFailure) {
+		httpjson.Write(w, importFailure.StatusCode, importFailure)
+		return
+	}
 	var pending *ManagedResourcePendingError
 	if errors.As(err, &pending) {
 		payload := map[string]any{"message": pending.Error(), "reason": safeManagedDeleteReason(pending.Cause), "adminResourceId": pending.AdminResourceID, "upstreamKeyId": pending.UpstreamKeyID}

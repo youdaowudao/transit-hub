@@ -32,6 +32,7 @@ import type { ManualProbeTargetSummary } from '../components/dashboard/ManualOne
 import { getQuestionAnswerSummary } from '../api/connectionHealth'
 import QuestionAnswerBatchDrawer from '../components/dashboard/QuestionAnswerBatchDrawer.vue'
 import QuestionAnswerScheduleDrawer from '../components/dashboard/QuestionAnswerScheduleDrawer.vue'
+import QuestionAnswerModelControlDrawer from '../components/dashboard/QuestionAnswerModelControlDrawer.vue'
 import QuestionAnswerScheduleBatchDialog from '../components/dashboard/QuestionAnswerScheduleBatchDialog.vue'
 import { useQuestionAnswerRecentSummaries } from '../composables/useQuestionAnswerRecentSummaries'
 import PolicyConfigDrawer from '../components/dashboard/PolicyConfigDrawer.vue'
@@ -136,6 +137,7 @@ const displayedQuestionAnswerTargetIds = ref<string[]>([])
 const scheduleStatsRevision = ref(0)
 const recentSummaries = useQuestionAnswerRecentSummaries({ workspace: () => preferenceScope.value, visible: () => mainTableMounted.value && documentVisibility.value === 'visible', apply: applyQuestionAnswerRecentSummary })
 const recentSummaryFailures = recentSummaries.failures
+const modelControlFailures = recentSummaries.modelControlFailures
 const scheduleReadOnlyBatch = ref<{ targetId: string; batchId: string; accountName: string } | null>(null)
 let loadedPreferenceScope = ''
 
@@ -1465,6 +1467,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
             @question-answer-view="onQuestionAnswerView"
           />
           <QuestionAnswerScheduleDrawer :groups="orderedGroups" :workspace="preferenceScope" :platform="currentAccount?.platform ?? ''" :preferences="preferences.questionAnswer" :stats-revision="scheduleStatsRevision" @question-answer-view="onScheduleQuestionAnswerView" @settled="onScheduleSettled" />
+          <QuestionAnswerModelControlDrawer :groups="orderedGroups" :workspace="preferenceScope" :platform="currentAccount?.platform ?? ''" :refresh-key="scheduleStatsRevision" @question-answer-view="onQuestionAnswerView" @batch-view="onScheduleQuestionAnswerView" @settled="recentSummaries.refreshTargets($event)" />
           </div>
           <div class="space-y-3 border-b border-border/50 p-4">
             <div class="relative">
@@ -1589,6 +1592,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           :quick-probe-errors="quickProbeErrors"
           :quick-probe-successes="quickProbeSuccesses"
           :recent-summary-failures="recentSummaryFailures"
+          :model-control-failures="modelControlFailures"
           @question-answer-view="onQuestionAnswerView"
           @question-answer-recent-retry="recentSummaries.retry"
           @displayed-targets="onDisplayedQuestionAnswerTargets"

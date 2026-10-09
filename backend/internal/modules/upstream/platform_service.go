@@ -3266,6 +3266,7 @@ func (s *PlatformService) updateSub2APIAdminAccountPriorityContext(ctx context.C
 // omitempty 保证请求体只包含本次明确要修改的字段，不会把详情接口缺失的 rate_multiplier、
 // credentials、group_ids 等字段用零值覆盖。
 type sub2APIAdminAccountBulkUpdate struct {
+	Credentials map[string]any `json:"credentials,omitempty"`
 	AccountIDs  []int64 `json:"account_ids"`
 	Priority    *int    `json:"priority,omitempty"`
 	Status      *string `json:"status,omitempty"`

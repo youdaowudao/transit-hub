@@ -21,6 +21,9 @@ import (
 // 数值/布尔字段一律用指针，nil 表示上游未提供，由前端决定展示 "-" 还是隐藏，避免把
 // 「上游没给」误当成「值为 0」。
 type AdminGroupAccountInfo struct {
+	ModelMapping map[string]string `json:"-"`
+	ModelMappingKnown bool `json:"-"`
+	OpenAIPassthrough bool `json:"-"`
 	ID             string     // sub2api account id / new-api channel id
 	Name           string     // 账号或渠道名称
 	Platform       string     // 上游平台标识（openai / anthropic / ...），可能为空
@@ -334,6 +337,8 @@ func parseSub2APIAccount(record map[string]any) AdminGroupAccountInfo {
 		Schedulable:    firstBoolValue(record, []string{"schedulable"}),
 		UpdatedAt:      parseFlexibleTime(firstAny(record, []string{"updated_at", "updatedAt"})),
 	}
+	account.ModelMapping, account.ModelMappingKnown = parseSub2APIModelMapping(record)
+	account.OpenAIPassthrough = parseSub2APIOpenAIPassthrough(record)
 	parseSub2APIRestrictions(record, &account)
 	if p := firstString(record, []string{"platform"}); p != nil {
 		account.Platform = *p

@@ -3,13 +3,12 @@ import { computed, ref } from 'vue'
 import type { QuestionAnswerStats, QuestionAnswerModelStats } from '../../types/connectionHealth'
 import { formatQuestionAnswerAccuracy, questionAnswerAccuracy } from '../../utils/questionAnswers'
 import { t } from '@/locales'
-const props = defineProps<{ reviewStats: QuestionAnswerStats | null; todayStats: QuestionAnswerStats; lifetimeStats: QuestionAnswerStats }>()
+const props = defineProps<{ reviewStats: QuestionAnswerStats | null; todayStats: QuestionAnswerStats }>()
 const prefix = 'admin.connectionHealth.manualProbeDialog.questionAnswer.stats'
 const dimension = ref<'account' | 'model' | 'question'>('model')
 const periods = computed(() => [
   ...(props.reviewStats ? [{ key: 'review', label: '当前批次', stats: props.reviewStats }] : []),
   { key: 'today', label: t(`${prefix}.todaySingapore`), stats: props.todayStats },
-  { key: 'lifetime', label: t(`${prefix}.allTime`), stats: props.lifetimeStats },
 ])
 const counts = (stats: Pick<QuestionAnswerStats, 'requests' | 'reviews'>) => [
   ['提交', stats.requests.submitted], ['进行中', stats.requests.inProgress], ['成功', stats.requests.succeeded],
@@ -24,7 +23,7 @@ const summary = (stats: Pick<QuestionAnswerModelStats, 'requests' | 'reviews'>) 
     <div class="flex flex-wrap gap-1 border-b border-border/40 px-3 py-2">
       <button v-for="option in ([['account', '账号汇总'], ['model', '按模型'], ['question', '按题目']] as const)" :key="option[0]" type="button" class="rounded-md px-2.5 py-1.5 text-xs font-medium" :class="dimension === option[0] ? 'bg-background text-foreground' : 'text-muted-foreground hover:text-foreground'" :aria-pressed="dimension === option[0]" @click="dimension = option[0]">{{ option[1] }}</button>
     </div>
-    <div data-testid="question-answer-periods" class="grid grid-cols-1" :class="reviewStats ? 'md:grid-cols-3' : 'md:grid-cols-2'">
+    <div data-testid="question-answer-periods" class="grid grid-cols-1" :class="reviewStats ? 'md:grid-cols-2' : ''">
       <div v-for="(period, index) in periods" :key="period.key" :data-testid="`question-answer-stats-${period.key}`" class="min-w-0 px-3 py-2.5" :class="index > 0 ? 'border-t border-border/50 md:border-l md:border-t-0' : ''">
         <p class="text-xs font-semibold text-foreground">{{ period.label }}</p>
         <p v-if="period.key !== 'review'" class="mt-1 text-[11px] text-muted-foreground">混合配置汇总</p>

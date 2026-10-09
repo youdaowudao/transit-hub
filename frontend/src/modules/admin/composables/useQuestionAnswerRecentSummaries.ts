@@ -5,9 +5,10 @@ import type { QuestionAnswerRecentSummaryItem } from '../types/connectionHealth'
 export const useQuestionAnswerRecentSummaries = (options: {
   workspace: () => string
   visible: () => boolean
-  apply: (item: QuestionAnswerRecentSummaryItem) => void
+  apply: (item: QuestionAnswerRecentSummaryItem, options: { modelControlFailed: boolean }) => void
 }) => {
   const failures = ref<string[]>([])
+  const modelControlFailures = ref<string[]>([])
   const pending = new Map<string, number>()
   const settled = new Map<string, number>()
   const inFlight = new Map<string, AbortController>()
@@ -24,6 +25,7 @@ export const useQuestionAnswerRecentSummaries = (options: {
     pending.clear()
     settled.clear()
     failures.value = []
+    modelControlFailures.value = []
   }
   const flush = async () => {
     if (!options.visible()) return
@@ -38,11 +40,13 @@ export const useQuestionAnswerRecentSummaries = (options: {
       requests.push((async () => {
         let changed = false
         try {
-          const items = await getQuestionAnswerRecentSummaries(chunk, controller.signal)
+          const response = await getQuestionAnswerRecentSummaries(chunk, controller.signal)
           if (!current()) return
-          for (const item of items) {
+          for (const item of response.items) {
             if (pending.get(item.targetId) !== versions.get(item.targetId)) { changed = true; continue }
-            options.apply(item)
+            const modelControlFailed = Boolean(response.modelControlError)
+            options.apply(item, { modelControlFailed })
+            modelControlFailures.value = modelControlFailed ? [...new Set([...modelControlFailures.value, item.targetId])] : modelControlFailures.value.filter(id => id !== item.targetId)
             settled.set(item.targetId, versions.get(item.targetId)!)
             failures.value = failures.value.filter(id => id !== item.targetId)
           }
@@ -67,5 +71,5 @@ export const useQuestionAnswerRecentSummaries = (options: {
     for (const id of new Set(ids)) if (id.startsWith(`sub2api:${options.workspace()}:`)) pending.set(id, (pending.get(id) ?? 0) + 1)
     scheduleFlush()
   }
-  return { failures, refreshTargets, retry: (id: string) => refreshTargets([id]), resume: scheduleFlush, suspend, reset }
+  return { failures, modelControlFailures, refreshTargets, retry: (id: string) => refreshTargets([id]), resume: scheduleFlush, suspend, reset }
 }

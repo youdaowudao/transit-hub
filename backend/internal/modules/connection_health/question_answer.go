@@ -210,7 +210,6 @@ type QuestionAnswerHistory struct {
 	TotalBatches int                          `json:"totalBatches"`
 	TotalPages   int                          `json:"totalPages"`
 	TodayStats   QuestionAnswerStats          `json:"todayStats"`
-	AllTimeStats QuestionAnswerStats          `json:"allTimeStats"`
 }
 
 type QuestionAnswerBatchSummary struct {

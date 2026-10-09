@@ -4,6 +4,7 @@ import type {
   AccountTierResult,
   QuestionAnswerTodaySummary,
   QuestionAnswerRecentSummaryItem,
+  ModelControlAccountSummary,
   AccountManagementResult,
   AdminGroupTestConfiguration,
   GroupTestConfiguration,
@@ -90,6 +91,7 @@ let questionAnswerSummaryRevision = 0
 const savedQuestionAnswerSummaries = new Map<string, QuestionAnswerTodaySummary & { revision: number }>()
 let questionAnswerRecentRevision = 0
 const savedQuestionAnswerRecentSummaries = new Map<string, QuestionAnswerRecentSummaryItem & { revision: number }>()
+const savedModelControlSummaries = new Map<string, { modelControl: ModelControlAccountSummary | null; revision: number }>()
 let adminGroupsReloadPending = false
 let adminGroupsReloadRunning = false
 let adminGroupsReloadRequest: Promise<boolean> | null = null
@@ -196,6 +198,7 @@ export function useConnectionHealth() {
     savedQuestionAnswerSummaries.clear()
     questionAnswerRecentRevision = 0
     savedQuestionAnswerRecentSummaries.clear()
+    savedModelControlSummaries.clear()
     adminGroups.value = []
     adminGroupsLoaded.value = false
     overview.value = null
@@ -227,14 +230,15 @@ export function useConnectionHealth() {
     return accepted
   }
 
-  const applyQuestionAnswerRecentSummary = (summary: QuestionAnswerRecentSummaryItem) => {
+  const applyQuestionAnswerRecentSummary = (summary: QuestionAnswerRecentSummaryItem, options = { modelControlFailed: false }) => {
     if (!adminGroupsWorkspace || !summary.targetId.startsWith(`sub2api:${adminGroupsWorkspace}:`)) return
-    const saved = { ...summary, recentQuestionAnswer: summary.recentQuestionAnswer === null ? null : {
+    const saved = { ...summary, modelControl: summary.modelControl === null ? null : { ...summary.modelControl }, recentQuestionAnswer: summary.recentQuestionAnswer === null ? null : {
       ...summary.recentQuestionAnswer, requests: { ...summary.recentQuestionAnswer.requests }, reviews: { ...summary.recentQuestionAnswer.reviews },
     }, revision: ++questionAnswerRecentRevision }
     savedQuestionAnswerRecentSummaries.set(summary.targetId, saved)
+    if (!options.modelControlFailed) savedModelControlSummaries.set(summary.targetId, { modelControl: summary.modelControl === null ? null : { ...summary.modelControl }, revision: saved.revision })
     adminGroups.value = adminGroups.value.map(group => ({ ...group, accounts: group.accounts.map(account => account.targetId === summary.targetId
-      ? { ...account, recentQuestionAnswer: saved.recentQuestionAnswer, activeNewerQuestionAnswerBatch: saved.activeNewerBatch }
+      ? { ...account, recentQuestionAnswer: saved.recentQuestionAnswer, activeNewerQuestionAnswerBatch: saved.activeNewerBatch, ...(!options.modelControlFailed ? { modelControl: saved.modelControl } : {}) }
       : account) }))
   }
 
@@ -246,6 +250,15 @@ export function useConnectionHealth() {
         : account
     }) }))
     for (const [targetId, saved] of savedQuestionAnswerRecentSummaries) if (saved.revision <= readRevision) savedQuestionAnswerRecentSummaries.delete(targetId)
+    return accepted
+  }
+
+  const preserveModelControlSummaries = (nextGroups: AdminGroupHealth[], readRevision: number): AdminGroupHealth[] => {
+    const accepted = nextGroups.map(group => ({ ...group, accounts: group.accounts.map(account => {
+      const saved = savedModelControlSummaries.get(account.targetId)
+      return saved && saved.revision > readRevision ? { ...account, modelControl: saved.modelControl } : account
+    }) }))
+    for (const [targetId, saved] of savedModelControlSummaries) if (saved.revision <= readRevision) savedModelControlSummaries.delete(targetId)
     return accepted
   }
 
@@ -361,7 +374,7 @@ export function useConnectionHealth() {
         const nextGroups = await getConnectionHealthAdminGroups()
         if (sequence !== adminGroupsRequestSequence || dataRevision !== adminGroupsDataRevision) return false
         const acceptedGroups = preserveSavedAccountTiers(nextGroups, tierRevision)
-        adminGroups.value = preserveQuestionAnswerRecentSummaries(preserveQuestionAnswerSummaries(confirmConcurrencyRead(acceptedGroups), questionAnswerRevision), recentRevision)
+        adminGroups.value = preserveModelControlSummaries(preserveQuestionAnswerRecentSummaries(preserveQuestionAnswerSummaries(confirmConcurrencyRead(acceptedGroups), questionAnswerRevision), recentRevision), recentRevision)
         overview.value = overviewFromAdminGroups(adminGroups.value)
         adminGroupsLoaded.value = true
         return true
@@ -443,7 +456,7 @@ export function useConnectionHealth() {
         if (adminGroupsWorkspace) adminGroupsReloadPending = true
       } else {
         const acceptedGroups = preserveSavedAccountTiers(terminal.groups, state.tierRevision)
-        adminGroups.value = preserveQuestionAnswerRecentSummaries(preserveQuestionAnswerSummaries(confirmConcurrencyRead(acceptedGroups), state.questionAnswerRevision), state.recentRevision)
+        adminGroups.value = preserveModelControlSummaries(preserveQuestionAnswerRecentSummaries(preserveQuestionAnswerSummaries(confirmConcurrencyRead(acceptedGroups), state.questionAnswerRevision), state.recentRevision), state.recentRevision)
         overview.value = overviewFromAdminGroups(adminGroups.value)
         adminGroupsLoaded.value = true
       }

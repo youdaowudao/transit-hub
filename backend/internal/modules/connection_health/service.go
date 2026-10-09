@@ -88,6 +88,8 @@ type healthRepository interface {
 // Service 组装 connection_health 模块的全部业务逻辑：聚合查询、策略管理、手动动作、
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
+	modelControlActions                  ModelControlActioner
+	modelControls                        modelControlRepository
 	actionNow                            func() time.Time
 	priorityWaitingSince                 sync.Map
 	priorityFailureTargets               sync.Map
@@ -189,6 +191,7 @@ func NewServiceWithBackgroundTasks(repo *Repository, mySites MySitesReader, site
 		eventRetention:          repo,
 		questionAnswers:         repo,
 		questionAnswerSchedules: repo,
+		modelControls:           repo,
 		mySites:                 mySites,
 		sites:                   sites,
 		dispatcher:              newRemoteActionDispatcher(sites, mySites, platform),
@@ -211,6 +214,9 @@ func NewServiceWithBackgroundTasks(repo *Repository, mySites MySitesReader, site
 	// 安全跳过远端写入，不影响既有探活/降级流程。
 	if actions, ok := platform.(TargetPriorityActioner); ok {
 		service.priorityActions = actions
+	}
+	if actions, ok := platform.(ModelControlActioner); ok {
+		service.modelControlActions = actions
 	}
 	if actions, ok := platform.(TargetSchedulableActioner); ok {
 		service.schedulableActions = actions

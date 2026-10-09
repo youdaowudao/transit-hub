@@ -45,7 +45,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 const history = (): QuestionAnswerHistory => {
   const records = [...stored.values()].flatMap(item => item.records)
   const stats = questionAnswerFixtureStats(records)
-  return { batches: [...stored.values()].map(item => ({ batchId: item.batchId, createdAt: now, startedAt: now, completedAt: item.active ? null : now, requestProtocol: 'responses', reasoningEffort: 'high', models: ['model-a'], questions: item.stats.byQuestion, repeatCount: item.repeatCount, active: item.active, stats: item.stats })), page: 1, pageSize: 20, totalBatches: stored.size, totalPages: 1, todayStats: stats, allTimeStats: stats }
+  return { batches: [...stored.values()].map(item => ({ batchId: item.batchId, createdAt: now, startedAt: now, completedAt: item.active ? null : now, requestProtocol: 'responses', reasoningEffort: 'high', models: ['model-a'], questions: item.stats.byQuestion, repeatCount: item.repeatCount, active: item.active, stats: item.stats })), page: 1, pageSize: 20, totalBatches: stored.size, totalPages: 1, todayStats: stats }
 }
 beforeEach(() => {
   vi.useFakeTimers({ now: new Date(now) })
@@ -81,7 +81,7 @@ afterEach(async () => {
   wrappers.splice(0).forEach(wrapper => wrapper.unmount()); service.setAdminGroupsWorkspace(''); await flushPromises(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.innerHTML = ''
 })
 const dialog = async (initialId: string | null = null) => {
-  const wrapper = mount(ManualOneTimeProbeDialog, { props: { open: false, initialQuestionAnswerBatchId: initialId, target: { targetId, accountName: 'C1 account', platform: 'openai', type: 'subscription', status: 'active', groupName: 'one', formalModels: [] } }, global: { stubs: { Teleport: true, Transition: false } } })
+  const wrapper = mount(ManualOneTimeProbeDialog, { props: { open: false, initialQuestionAnswerBatchId: initialId, target: { targetId, accountName: 'C1 account', platform: 'openai', type: 'subscription', status: 'active', groupName: 'one', formalModels: [] } }, global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } } })
   wrappers.push(wrapper); await wrapper.setProps({ open: true }); await flushPromises(); return wrapper
 }
 const expandGroups = async (wrapper: VueWrapper) => {
@@ -89,7 +89,7 @@ const expandGroups = async (wrapper: VueWrapper) => {
   await flushPromises()
 }
 const view = async () => {
-  const wrapper = mount(ConnectionHealthView, { global: { stubs: { Teleport: true, Transition: false } } }); wrappers.push(wrapper); await flushPromises(); return wrapper
+  const wrapper = mount(ConnectionHealthView, { global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } } }); wrappers.push(wrapper); await flushPromises(); return wrapper
 }
 
 describe('C1 frontend complete behavior', () => {
@@ -177,9 +177,9 @@ describe('C1 frontend complete behavior', () => {
   })
   it('exposes counts and each model/question dimension while no judged samples stay empty', async () => {
     const stats = questionAnswerFixtureStats([record({ answerJudgment: 'unreviewed', judgmentSource: null })])
-    const wrapper = mount(QuestionAnswerStatsBar, { props: { reviewStats: stats, todayStats: stats, lifetimeStats: stats } }); wrappers.push(wrapper)
+    const wrapper = mount(QuestionAnswerStatsBar, { props: { reviewStats: stats, todayStats: stats } }); wrappers.push(wrapper)
     expect(wrapper.findAll('[data-testid="question-answer-accuracy"]').every(node => node.text() === '—')).toBe(true)
-    await wrapper.findAll('button')[2]!.trigger('click'); expect(wrapper.findAll('[data-testid="question-answer-question-stats"]')).toHaveLength(3); expect(wrapper.text()).toContain(`#${stats.byQuestion[0]!.questionSnapshotKey.slice(0, 8)}`)
+    await wrapper.findAll('button')[2]!.trigger('click'); expect(wrapper.findAll('[data-testid="question-answer-question-stats"]')).toHaveLength(2); expect(wrapper.text()).toContain(`#${stats.byQuestion[0]!.questionSnapshotKey.slice(0, 8)}`)
     expect(wrapper.text()).toContain('混合配置汇总'); expect(wrapper.text()).not.toContain('版本1')
   })
   it('shows initial read failure and retry, and preserves safe long-answer text with narrow-screen action classes', async () => {
@@ -235,7 +235,7 @@ describe('C1 frontend complete behavior', () => {
     failExact = true; failHistory = true
     await wrapper.get('[data-testid="question-answer-record-r1"]').findAll('button')[1]!.trigger('click'); await flushPromises()
     expect(wrapper.get('[data-testid="question-answer-record-r1"]').text()).toContain('人工判定·错误')
-    for (const period of ['review', 'today', 'lifetime']) {
+    for (const period of ['review', 'today']) {
       expectAccuracyCounts(wrapper.get(`[data-testid="question-answer-stats-${period}"]`), 0, 1)
       expect(wrapper.get(`[data-testid="question-answer-stats-${period}"]`).text()).not.toContain('-100%')
     }
@@ -306,7 +306,7 @@ describe('C1 frontend complete behavior', () => {
     resolve(json(freshHistory)); await flushPromises()
     expect(wrapper.find('[data-testid="question-answer-statistics-error"]').exists()).toBe(false)
     expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-today"]'), 0, 1)
-    expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-lifetime"]'), 0, 1)
+    expect(wrapper.find('[data-testid="question-answer-stats-lifetime"]').exists()).toBe(false)
     expect(writes).toHaveLength(0)
   })
 
@@ -331,7 +331,7 @@ describe('C1 frontend complete behavior', () => {
     expect(wrapper.find('[data-testid="question-answer-statistics-error"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="question-answer-record-r1"]').text()).toContain('人工判定·错误')
     expect(wrapper.get('[data-testid="question-answer-record-r1"]').text()).not.toContain('自动判定·正确')
-    for (const period of ['review', 'today', 'lifetime']) expectAccuracyCounts(wrapper.get(`[data-testid="question-answer-stats-${period}"]`), 0, 1)
+    for (const period of ['review', 'today']) expectAccuracyCounts(wrapper.get(`[data-testid="question-answer-stats-${period}"]`), 0, 1)
     expect(writes).toHaveLength(0)
   })
 

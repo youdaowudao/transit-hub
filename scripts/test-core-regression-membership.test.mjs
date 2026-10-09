@@ -9,6 +9,8 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 test('connection-health core gate keeps every question-answer regression member', async () => {
   const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
   for (const member of [
+    'c3-model-control.behavior.test.ts',
+    'c3-question-answer-integration.behavior.test.ts',
     'c2-question-answer-red.behavior.test.ts',
     'c2-question-answer-http-origin.behavior.test.ts',
     'c2-question-answer-schedules.behavior.test.ts',

@@ -219,6 +219,7 @@ export interface AccountManagementResult {
 }
 
 export interface AdminGroupAccount {
+  modelControl?: ModelControlAccountSummary | null
   remoteActionPending?: { action: string; dispatchId?: string; phase: string; reason: string; source?: string }
   testConfiguration?: EffectiveTestConfiguration
   id: string
@@ -308,6 +309,7 @@ export interface AdminGroupAccount {
 }
 
 export interface AdminGroupHealth {
+  modelControlError?: string
   id: string
   name: string
   platform: string
@@ -613,7 +615,55 @@ export interface QuestionAnswerRecentSummaryItem {
   targetId: string
   recentQuestionAnswer: QuestionAnswerRecentSummary | null
   activeNewerBatch: boolean
+  modelControl: ModelControlAccountSummary | null
 }
+
+export interface ModelControlAccountSummary { closed: number; attention: number }
+export type ModelControlDecision = 'no_evidence' | 'testing' | 'awaiting_review' | 'insufficient' | 'close_recommended' | 'usable'
+export type ModelControlOperation = 'close' | 'restore' | 'close_account'
+export interface ModelControlRule {
+  modelName: string; minAccuracyPercent: number; minJudgedAnswers: number
+  includeManual: boolean; includeScheduled: boolean; version: number
+}
+export interface ModelControlBasis { batchId: string; ruleVersion: number; decision: ModelControlDecision }
+export interface ModelControlRound {
+  batchId: string; source: 'manual' | 'scheduled' | 'run_now'; scheduleName: string | null
+  createdAt: string; completedAt: string | null; running: boolean
+  correct: number; incorrect: number; unreviewed: number; failed: number; cancelled: number; accuracyPercent: number | null
+}
+export interface ModelControlEntry { key: string; value: string; state: string }
+export interface ModelControlSource { groupId: string; groupName: string; key: string; count: number | null; ok?: boolean }
+export interface ModelControlItem {
+  targetId: string; accountName: string; modelName: string; version: number; rule: ModelControlRule
+  round: ModelControlRound | null; previousRound: ModelControlRound | null
+  decision: ModelControlDecision; decisionReason: string; basis: ModelControlBasis; verifyErrorKey?: string
+  control: {
+    closedEntries: Record<string, string>; closedAt: string | null; closedAccuracyPercent: number | null
+    pending: null | { operation: ModelControlOperation; phase: string; receipt: string; state: string; startedAt: string; sendStartedAt: string | null }
+    unconfirmedClose: null | { entries: Record<string, string>; sentAt: string; expiresAt: string }
+    accountPending: null | { modelName: string; operation: ModelControlOperation; state: string }
+    conflictReason: string
+    observation: { state: string; reasonKey: string; sources: ModelControlSource[]; accountStatus: string; accountSchedulable: boolean | null; checkedAt: string | null }
+    lastAttempt: null | { operation: ModelControlOperation; outcome: string; reasonKey: string; entries: ModelControlEntry[]; groups: ModelControlSource[]; at: string }
+  }
+  coverage: { schedules: Array<{ id: string; name: string }> }
+  health: { recentlyProbed: boolean; state: string | null }
+}
+export interface ModelControlPreview {
+  item: ModelControlItem; entries: ModelControlEntry[]; groups: ModelControlSource[]; blockReasonKey: string
+  requestHealth: { checked: boolean; allowed: boolean | null; reasonKey: string }
+  accountStatus: string; accountSchedulable: boolean | null; planFingerprint: string | null; noRemoteWrite?: boolean
+}
+export interface ModelControlResult {
+  item: ModelControlItem; outcome?: 'closed' | 'restored' | 'partial' | 'failed' | 'blocked' | 'unknown'
+  reasonKey?: string; entries?: ModelControlEntry[]; groups?: ModelControlSource[]; hintKeys?: string[]
+  schedulableResult?: unknown; errorKey?: string
+}
+export interface ModelControlEvent {
+  id: string; targetId: string; modelName: string; eventType: string; createdAt: string
+  basis: unknown; detail: Record<string, unknown>
+}
+export interface ModelControlPage<T> { items: T[]; page: number; totalPages: number }
 
 export interface QuestionAnswerRuntimeSettings {
   questionAnswerConcurrency: number
@@ -758,7 +808,6 @@ export interface QuestionAnswerHistory {
   pageSize: 20
   totalBatches: number
   totalPages: number
-  allTimeStats: QuestionAnswerStats
   todayStats: QuestionAnswerStats
 }
 

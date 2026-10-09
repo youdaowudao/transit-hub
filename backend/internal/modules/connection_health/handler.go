@@ -28,6 +28,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	handler := &Handler{service: service}
 	registerRuleRoutes(mux, handler)
 	registerQuestionAnswerScheduleRoutes(mux, handler)
+	registerModelControlRoutes(mux, handler)
 	mux.HandleFunc("GET /api/connection-health/admin-groups/{id}/test-configuration", handler.getAdminGroupTestConfiguration)
 	mux.HandleFunc("PUT /api/connection-health/admin-groups/{id}/test-configuration", handler.putAdminGroupTestConfiguration)
 	mux.HandleFunc("GET /api/connection-health/overview", handler.overview)

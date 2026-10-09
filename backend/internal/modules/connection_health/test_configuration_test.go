@@ -18,7 +18,7 @@ func (f *fakeRepository) CommitTargetProbe(ctx context.Context, input TargetProb
 			configs = append(configs, config)
 		}
 	}
-	configuration := ResolveGroupTestConfiguration(input.Target.TestMemberships, input.Target.InventoryComplete, configs)
+	configuration := ResolveGroupTestConfiguration("sub2api", input.Target.TestMemberships, input.Target.InventoryComplete, configs)
 	current, err := f.GetState(ctx, input.Target.TargetID, input.ModelName)
 	if err != nil {
 		return TargetProbeCommitResult{}, err

@@ -815,7 +815,7 @@ func TestReconcileTargetRemoteAction_SuspendedSiblingBlocksRestore(t *testing.T)
 	}
 	policy := Policy{ID: "p1", Enabled: true, AutoDegradeEnabled: true, AutoRemoteActionEnabled: true}
 	specs := []probeModelSpec{{modelName: "model-a", policy: policy}, {modelName: "model-b", policy: policy}}
-	target := AdminProbeTarget{TargetID: targetID, Platform: string(upstream.PlatformSub2API), AccountID: "acc-1", AccountStatus: "inactive", InventoryComplete: true, TestConfiguration: ResolveGroupTestConfiguration(nil, true, nil)}
+	target := AdminProbeTarget{TargetID: targetID, Platform: string(upstream.PlatformSub2API), AccountID: "acc-1", AccountStatus: "inactive", InventoryComplete: true, TestConfiguration: ResolveGroupTestConfiguration("sub2api", nil, true, nil)}
 
 	action, err := service.reconcileTargetRemoteAction(context.Background(), "user1", "ws1", upstream.Session{Platform: upstream.PlatformSub2API}, target, specs)
 	if err != nil {

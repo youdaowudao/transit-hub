@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"time"
+
+	"transithub/backend/internal/modules/upstream"
 )
 
 type TargetProbeCommit struct {
@@ -119,7 +121,7 @@ func (r *Repository) CommitTargetProbe(ctx context.Context, input TargetProbeCom
 	if err != nil {
 		return TargetProbeCommitResult{}, err
 	}
-	configuration := ResolveGroupTestConfiguration(input.Target.TestMemberships, input.Target.InventoryComplete, configs)
+	configuration := ResolveGroupTestConfiguration(string(upstream.PlatformSub2API), input.Target.TestMemberships, input.Target.InventoryComplete, configs)
 	current, err := getStateTx(ctx, tx, input.Target.TargetID, input.ModelName)
 	if err != nil {
 		return TargetProbeCommitResult{}, err

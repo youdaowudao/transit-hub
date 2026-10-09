@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"transithub/backend/internal/modules/upstream"
+
 	"github.com/jackc/pgx/v5"
 )
 
@@ -241,7 +243,7 @@ func validateRemoteActionHealthTx(ctx context.Context, tx pgx.Tx, claim RemoteAc
 	if err != nil {
 		return err
 	}
-	current := ResolveGroupTestConfiguration(guard.Memberships, guard.InventoryComplete, configurations)
+	current := ResolveGroupTestConfiguration(string(upstream.PlatformSub2API), guard.Memberships, guard.InventoryComplete, configurations)
 	if (current.Status != "default" && current.Status != "inherited") || current.Protocol != guard.Configuration.Protocol || current.ProbeTimeoutSeconds != guard.Configuration.ProbeTimeoutSeconds {
 		return ErrRemoteActionEvidenceChanged
 	}

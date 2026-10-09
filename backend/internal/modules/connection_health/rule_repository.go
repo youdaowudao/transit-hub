@@ -27,6 +27,9 @@ func ensureWorkspaceHealthSettings(ctx context.Context, tx pgx.Tx, userID, works
 	}
 	for _, kind := range []string{PresetRecommended, PresetLegacyDefault} {
 		p := DefaultRulePreset()
+		if kind == PresetRecommended {
+			p = recommendedRulePreset()
+		}
 		p.UserID = userID
 		p.AdminAccountID = workspace
 		p.Kind = kind
@@ -107,6 +110,9 @@ func (r *Repository) ListRulePresets(ctx context.Context, userID, workspace stri
 	if len(out) == 0 {
 		for _, kind := range []string{PresetRecommended, PresetLegacyDefault} {
 			p := DefaultRulePreset()
+			if kind == PresetRecommended {
+				p = recommendedRulePreset()
+			}
 			p.ID = builtinPresetID(kind, userID, workspace)
 			p.UserID = userID
 			p.AdminAccountID = workspace
@@ -354,6 +360,9 @@ func (r *Repository) attachPolicyRules(ctx context.Context, policies []Policy, s
 			presets[key] = rows
 		}
 		preset := DefaultRulePreset()
+		if p.RuleVersion == RuleVersionV2 {
+			preset = recommendedRulePreset()
+		}
 		for _, candidate := range presets[key] {
 			if candidate.ID == p.RulePresetID {
 				preset = candidate

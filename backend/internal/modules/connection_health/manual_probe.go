@@ -111,7 +111,7 @@ func (s *Service) ManualProbeTarget(ctx context.Context, userID string, targetID
 	}
 	if target.Platform == string(upstream.PlatformSub2API) {
 		configs, readErr := s.repo.ListGroupTestConfigurations(ctx, userID, adminAccountID)
-		current := ResolveGroupTestConfiguration(target.TestMemberships, readErr == nil && target.InventoryComplete, configs)
+		current := ResolveGroupTestConfiguration(string(upstream.PlatformSub2API), target.TestMemberships, readErr == nil && target.InventoryComplete, configs)
 		if !sameEffectiveTestConfiguration(target.TestConfiguration, current) {
 			for i := range results {
 				results[i].ConfigurationChanged = true

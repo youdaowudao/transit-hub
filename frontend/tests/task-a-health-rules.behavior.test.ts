@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import HealthRulePresetFields from '@/modules/admin/components/dashboard/HealthRulePresetFields.vue'
 import PolicyConfigDrawer from '@/modules/admin/components/dashboard/PolicyConfigDrawer.vue'
 import ProbePolicyListDialog from '@/modules/admin/components/dashboard/ProbePolicyListDialog.vue'
 import ConnectionHealthEventsDialog from '@/modules/admin/components/dashboard/ConnectionHealthEventsDialog.vue'
@@ -125,6 +126,8 @@ describe('task A health rule settings and preset interaction', () => {
     expect(wrapper.get('[data-testid="rule-preset-recommended"] [data-action="delete"]').attributes('disabled')).toBeDefined()
     expect(wrapper.get('[data-testid="rule-preset-referenced"] [data-action="delete"]').attributes('disabled')).toBeDefined()
     await wrapper.get('[data-testid="rule-preset-snapshot"] [data-action="copy"]').trigger('click')
+    expect((wrapper.get('input[aria-label="Responses 延迟线"]').element as HTMLInputElement).value).toBe('10')
+    expect((wrapper.get('input[aria-label="Chat 延迟线"]').element as HTMLInputElement).value).toBe('5')
     expect(wrapper.get('[data-testid="rule-preset-editor"]').text()).toContain('当前规则下不适用')
     await wrapper.get('[data-testid="save-rule-preset"]').trigger('click'); await flushPromises()
     expect(writes.at(-1)).toMatchObject({ method: 'POST', body: { failureThreshold: 3, observationSeconds: 300 } })
@@ -244,6 +247,28 @@ describe('task A health rule settings and preset interaction', () => {
     expect(wrapper.find('[data-testid="rule-preset-unused"]').exists()).toBe(false)
   })
 
+  it('first-text creates six-second defaults while saved legacy values and copies stay explicit', async () => {
+    const wrapper = await list(); await manage(wrapper)
+    await wrapper.findAll('button').find(button => button.text() === '新增预设')!.trigger('click')
+    for (const protocol of ['Responses', 'Chat']) {
+      const input = wrapper.get(`input[aria-label="${protocol} 延迟线"]`)
+      expect((input.element as HTMLInputElement).value).toBe('6')
+      expect(input.attributes('placeholder')).toBe('6')
+    }
+    expect(wrapper.get('[data-testid="rule-preset-editor"]').text()).toContain('探活耗时')
+    expect(wrapper.get('[data-testid="rule-preset-editor"]').text()).not.toContain('整段耗时')
+    await wrapper.get('input[aria-label="预设名称"]').setValue('首字6秒')
+    await wrapper.get('input[aria-label="Responses 延迟线"]').setValue('')
+    await wrapper.get('[data-testid="save-rule-preset"]').trigger('click'); await flushPromises()
+    expect(writes.at(-1)!.body.delayLineMs).toEqual({ chat_completions: 6000 })
+    const old = wrapper.get('[data-testid="rule-preset-snapshot"]')
+    const readonly = mount(HealthRulePresetFields, { props: { modelValue: preset('snapshot', 'legacy_snapshot'), ruleVersion: 'legacy', readonly: true } }); wrappers.push(readonly)
+    expect(readonly.text()).toContain('10 秒'); expect(readonly.text()).toContain('5 秒')
+    expect(readonly.find('input').exists()).toBe(false)
+    expect(old.find('[data-action="edit"]').exists()).toBe(false)
+    // Copy values are asserted in the independent read-only/copy interaction above.
+  })
+
   it('creates a named custom preset, preserves unfilled protocol defaults and validates every parameter', async () => {
     const wrapper = await list(); await manage(wrapper)
     await wrapper.findAll('button').find(button => button.text() === '新增预设')!.trigger('click')
@@ -258,7 +283,7 @@ describe('task A health rule settings and preset interaction', () => {
     await wrapper.get('input[aria-label="Responses 延迟线"]').setValue('')
     expect(wrapper.get('[data-testid="save-rule-preset"]').attributes('disabled')).toBeUndefined()
     await wrapper.get('[data-testid="save-rule-preset"]').trigger('click'); await flushPromises()
-    expect(writes.at(-1)!.body).toMatchObject({ name: '自建规则', longFailureAfterSeconds: 86400, longFailureIntervalSeconds: 3600, delayLineMs: { chat_completions: 5000 } })
+    expect(writes.at(-1)!.body).toMatchObject({ name: '自建规则', longFailureAfterSeconds: 86400, longFailureIntervalSeconds: 3600, delayLineMs: { chat_completions: 6000 } })
     expect((writes.at(-1)!.body.delayLineMs as Record<string, number>).responses).toBeUndefined()
     expect(wrapper.text()).toContain('自建规则')
     expect(wrapper.find('[data-testid="rule-preset-editor"]').exists()).toBe(false)

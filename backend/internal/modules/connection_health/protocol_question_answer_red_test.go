@@ -154,7 +154,7 @@ func protocolContractResolveBaseline(t *testing.T, memberships []string, configs
 	for id, c := range configs {
 		rules = append(rules, GroupTestConfig{AdminGroupID: id, Protocol: TestProtocol(c.Protocol), ProbeTimeoutSeconds: c.Timeout})
 	}
-	result := ResolveGroupTestConfiguration(groups, true, rules)
+	result := ResolveGroupTestConfiguration("sub2api", groups, true, rules)
 	return string(result.Protocol), result.ProbeTimeoutSeconds, result.Status
 }
 
@@ -182,7 +182,7 @@ func TestProtocolContractDynamicGroupInheritance(t *testing.T) {
 	delete(config, "g1")
 	delete(config, "g2")
 	p, timeout, status := protocolContractResolveBaseline(t, []string{"g1", "g2"}, config)
-	if p != "chat_completions" || timeout != 10 || status != "default" {
-		t.Error("clear all explicit configurations must restore legacy default")
+	if p != "chat_completions" || timeout != 20 || status != "default" {
+		t.Error("clear all explicit configurations must restore main-site default")
 	}
 }

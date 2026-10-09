@@ -147,7 +147,7 @@ func TestTaskARuleConversionAtomicAndStaleClearsOnlyRecheckPostgres(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	target := AdminProbeTarget{TargetID: "sub2api:degraded", TestConfiguration: EffectiveTestConfiguration{Status: "default", Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10}, InventoryComplete: true}
+	target := AdminProbeTarget{TargetID: "sub2api:degraded", TestConfiguration: defaultTestConfiguration(), InventoryComplete: true}
 	// Capture settings, change configuration, then commit an old request.
 	if _, err := pool.Exec(ctx, `UPDATE connection_health_states SET recheck_pending=true WHERE connection_id=$1`, target.TargetID); err != nil {
 		t.Fatal(err)

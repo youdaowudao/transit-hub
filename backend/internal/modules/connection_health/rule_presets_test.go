@@ -5,8 +5,8 @@ import "testing"
 func TestRulePresetValidationAndProtocolFallback(t *testing.T) {
 	p := DefaultRulePreset()
 	p.DelayLineMs = map[string]int{}
-	if !validRulePreset(p) || p.DelayLine(TestProtocolResponses) != 10000 || p.DelayLine(TestProtocolChatCompletions) != 5000 {
-		t.Fatal("missing delay keys must keep protocol defaults")
+	if !validRulePreset(p) || p.DelayLine(TestProtocolResponses) != 6000 || p.DelayLine(TestProtocolChatCompletions) != 6000 {
+		t.Fatal("editable missing delay keys must use six seconds")
 	}
 	for _, mutate := range []func(*RulePreset){func(p *RulePreset) { p.FailureThreshold = 1 }, func(p *RulePreset) { p.SuccessThreshold = 11 }, func(p *RulePreset) { p.CooldownSeconds = 59 }, func(p *RulePreset) { p.FailedRetryIntervalSeconds = 3601 }, func(p *RulePreset) { p.LongFailureAfterSeconds = 3599 }, func(p *RulePreset) { p.LongFailureIntervalSeconds = 599 }, func(p *RulePreset) { p.DelayLineMs = map[string]int{"messages": 5000} }, func(p *RulePreset) { p.DelayLineMs = map[string]int{"responses": 999} }} {
 		candidate := DefaultRulePreset()

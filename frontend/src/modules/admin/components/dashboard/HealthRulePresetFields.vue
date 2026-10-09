@@ -6,7 +6,7 @@ const emit = defineEmits<{ (event: 'update:modelValue', value: HealthRulePresetI
 const updateNumber = (key: typeof healthRulePresetFields[number]['key'], scale: number, event: Event) => {
   emit('update:modelValue', { ...props.modelValue, [key]: Number((event.target as HTMLInputElement).value) * scale })
 }
-const protocols = [{ key: 'responses', label: 'Responses', fallback: 10000 }, { key: 'chat_completions', label: 'Chat', fallback: 5000 }]
+const protocols = [{ key: 'responses', label: 'Responses', fallback: 6000 }, { key: 'chat_completions', label: 'Chat', fallback: 6000 }]
 const updateDelay = (key: string, event: Event) => {
   const value = (event.target as HTMLInputElement).value, delayLineMs = { ...props.modelValue.delayLineMs }
   if (!value) delete delayLineMs[key]
@@ -29,7 +29,7 @@ const updateDelay = (key: string, event: Event) => {
     </div>
     <div class="space-y-1">
       <p class="text-xs font-medium text-foreground">延迟线（按协议）</p>
-      <p class="text-xs leading-5 text-muted-foreground">新规则下首字超过此线时标为延迟，仍算成功；旧规则下整段耗时超过此线算慢。留空时使用该协议默认值。</p>
+      <p class="text-xs leading-5 text-muted-foreground">新规则下首字超过此线标为延迟，仍算成功；旧规则下探活耗时（流式为首字时刻）超过此线算慢。留空时按 6 秒。</p>
       <label v-for="protocol in protocols" :key="protocol.key" class="flex items-center justify-between gap-2 text-xs">
         <span>{{ protocol.label }}</span>
         <span v-if="readonly">{{ (modelValue.delayLineMs[protocol.key] ?? protocol.fallback) / 1000 }} 秒 <span v-if="modelValue.delayLineMs[protocol.key] == null">（协议默认值）</span></span>

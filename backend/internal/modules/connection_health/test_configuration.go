@@ -54,6 +54,10 @@ func validGroupTestConfiguration(configuration GroupTestConfiguration) bool {
 }
 
 func defaultTestConfiguration() EffectiveTestConfiguration {
+	return EffectiveTestConfiguration{Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 20, SourceGroups: []TestConfigurationSource{}, Status: "default"}
+}
+
+func legacyTestConfiguration() EffectiveTestConfiguration {
 	return EffectiveTestConfiguration{Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10, SourceGroups: []TestConfigurationSource{}, Status: "default"}
 }
 
@@ -63,7 +67,7 @@ func unavailableTestConfiguration() EffectiveTestConfiguration {
 
 // ResolveGroupTestConfiguration consumes a complete membership snapshot. Names
 // are presentation only; policy exclusions and model families never enter here.
-func ResolveGroupTestConfiguration(memberships []TestConfigurationSource, inventoryComplete bool, configurations []GroupTestConfig) EffectiveTestConfiguration {
+func ResolveGroupTestConfiguration(platform string, memberships []TestConfigurationSource, inventoryComplete bool, configurations []GroupTestConfig) EffectiveTestConfiguration {
 	if !inventoryComplete {
 		return unavailableTestConfiguration()
 	}
@@ -77,7 +81,10 @@ func ResolveGroupTestConfiguration(memberships []TestConfigurationSource, invent
 		}
 		byGroup[config.AdminGroupID] = config
 	}
-	result := defaultTestConfiguration()
+	result := legacyTestConfiguration()
+	if platform == string(upstream.PlatformSub2API) {
+		result = defaultTestConfiguration()
+	}
 	seen := make(map[string]bool)
 	for _, membership := range memberships {
 		if strings.TrimSpace(membership.AdminGroupID) == "" {
@@ -138,7 +145,7 @@ func (s *Service) configureTestTarget(ctx context.Context, userID, adminAccountI
 	target.InventoryComplete = complete
 	target.TestMemberships = testConfigurationMemberships(memberships)
 	if target.Platform != string(upstream.PlatformSub2API) {
-		target.TestConfiguration = defaultTestConfiguration()
+		target.TestConfiguration = legacyTestConfiguration()
 		return nil
 	}
 	configs, err := s.repo.ListGroupTestConfigurations(ctx, userID, adminAccountID)
@@ -146,7 +153,7 @@ func (s *Service) configureTestTarget(ctx context.Context, userID, adminAccountI
 		target.TestConfiguration = unavailableTestConfiguration()
 		return requestError(ErrorTestConfigurationUnavailable)
 	}
-	target.TestConfiguration = ResolveGroupTestConfiguration(target.TestMemberships, complete, configs)
+	target.TestConfiguration = ResolveGroupTestConfiguration(string(upstream.PlatformSub2API), target.TestMemberships, complete, configs)
 	if !target.TestConfiguration.usable() {
 		return requestError(target.TestConfiguration.BlockedReason)
 	}
@@ -207,7 +214,7 @@ func buildAdminGroupTestConfiguration(userID, workspace string, group upstream.A
 			continue
 		}
 		for _, account := range members.accounts {
-			configuration := ResolveGroupTestConfiguration(inventoryTestMemberships(inventory, account.ID), true, configs)
+			configuration := ResolveGroupTestConfiguration(string(upstream.PlatformSub2API), inventoryTestMemberships(inventory, account.ID), true, configs)
 			result.Accounts = append(result.Accounts, AdminGroupTestImpact{buildTargetID(string(inventory.session.Platform), workspace, account.ID), account.Name, configuration})
 			if configuration.Status == "conflict" {
 				result.ConflictAccountCount++

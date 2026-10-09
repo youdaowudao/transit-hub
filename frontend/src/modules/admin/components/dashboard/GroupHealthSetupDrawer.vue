@@ -65,13 +65,13 @@ const supportsTestConfiguration = computed(() => props.workspacePlatform === 'su
 const validTestTimeout = computed(() => /^\d+$/.test(testTimeout.value) && Number(testTimeout.value) >= 5 && Number(testTimeout.value) <= 120)
 const setTestProtocol = (event: Event) => {
   testProtocol.value = (event.target as HTMLSelectElement).value as TestProtocol
-  if (testTimeout.value === '') testTimeout.value = testProtocol.value === 'responses' ? '30' : '10'
+  if (testTimeout.value === '') testTimeout.value = '20'
   testSaved.value = false
 }
 const applyTestConfiguration = (value: AdminGroupTestConfiguration) => {
   testConfiguration.value = value
   testProtocol.value = value.configuration?.protocol ?? 'chat_completions'
-  testTimeout.value = value.configuration ? String(value.configuration.probeTimeoutSeconds) : ''
+  testTimeout.value = value.configuration ? String(value.configuration.probeTimeoutSeconds) : '20'
 }
 const loadTestConfiguration = async () => {
   const group = props.group
@@ -691,7 +691,7 @@ const close = () => {
                     </select>
                   </label>
                   <label class="space-y-1 text-xs">{{ t('admin.connectionHealth.testConfiguration.timeout') }}
-                    <input v-model="testTimeout" data-testid="group-test-timeout" type="number" min="5" max="120" step="1" :placeholder="testProtocol === 'responses' ? '30' : '10'" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm" :disabled="testSaving" @input="testSaved = false">
+                    <input v-model="testTimeout" data-testid="group-test-timeout" type="number" min="5" max="120" step="1" placeholder="20" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm" :disabled="testSaving" @input="testSaved = false">
                   </label>
                 </div>
                 <p v-if="Number(testTimeout) > 30" data-testid="group-test-timeout-warning" class="text-xs leading-5 text-amber-700 dark:text-amber-400">一次卡住会拖慢整轮，复测也会变慢。</p>

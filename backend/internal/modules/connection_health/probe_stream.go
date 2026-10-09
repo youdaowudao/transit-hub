@@ -126,9 +126,6 @@ func streamErrorResult(body []byte) ResultKey {
 func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key string, started time.Time, now func() time.Time) (out ProbeOutcome) {
 	defer func() {
 		out.LatencyMs = int(now().Sub(started).Milliseconds())
-		if out.FirstTokenMs == nil {
-			out.FirstTokenMs = intPtr(out.LatencyMs)
-		}
 	}()
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 4096), maxProbeResponseBytes+1)
@@ -137,7 +134,6 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 	eventName := ""
 	accumulator := chatProbeAccumulator{}
 	complete := false
-	terminalInvalid := false
 	// Events may have multiple data lines. Parse only once their SSE frame ends.
 	consume := func() bool {
 		if len(data) == 0 {
@@ -147,7 +143,7 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 		data = nil
 		if event == "[DONE]" && protocol == TestProtocolChatCompletions {
 			complete = true
-			if accumulator.valid() && !terminalInvalid {
+			if accumulator.valid() {
 				out.Result = ResultOK
 			} else {
 				out.Result = ResultInvalidResponse
@@ -168,8 +164,9 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 			} `json:"choices"`
 		}
 		if json.Unmarshal([]byte(event), &payload) != nil {
-			terminalInvalid = true
-			return false
+			out.Result = ResultInvalidResponse
+			out.Detail = "流式事件不是合法 JSON"
+			return true
 		}
 		eventType := payload.Type
 		if eventType == "" {
@@ -192,8 +189,10 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 		if protocol == TestProtocolResponses {
 			if eventType == "response.output_text.delta" {
 				var delta string
-				if json.Unmarshal(payload.Delta, &delta) == nil && delta != "" && out.FirstTokenMs == nil {
+				if json.Unmarshal(payload.Delta, &delta) == nil && delta != "" {
 					out.FirstTokenMs = intPtr(elapsed)
+					out.Result = ResultOK
+					return true
 				}
 			}
 			if eventType == "response.incomplete" {
@@ -203,8 +202,11 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 			}
 			if eventType == "response.completed" {
 				complete = true
-				if _, valid := decodeTestResponse(protocol, payload.Response, false); valid && !terminalInvalid {
+				if _, valid := decodeTestResponse(protocol, payload.Response, false); valid {
 					out.Result = ResultOK
+					if out.FirstTokenMs == nil {
+						out.FirstTokenMs = intPtr(elapsed)
+					}
 				} else {
 					out.Result = ResultInvalidResponse
 				}
@@ -219,15 +221,17 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 				if accumulator.add(choice.Delta.Reasoning, true) {
 					visible = true
 				}
-				if visible && out.FirstTokenMs == nil {
+				if visible {
 					out.FirstTokenMs = intPtr(elapsed)
+					out.Result = ResultOK
+					return true
 				}
 				if choice.FinishReason != nil && *choice.FinishReason != "" {
 					complete = true
 				}
 			}
 			if complete {
-				if accumulator.valid() && !terminalInvalid {
+				if accumulator.valid() {
 					out.Result = ResultOK
 				} else {
 					out.Result = ResultInvalidResponse
@@ -258,19 +262,22 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 			eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		}
 	}
-	if consume() {
-		return
-	}
-	out.Result = ResultNetworkFluctuation
-	out.RequestPhase = "reading_body"
-	out.Detail = "流式回答中途断开或未结束"
 	if err := scanner.Err(); err != nil {
+		out.Result = ResultNetworkFluctuation
+		out.RequestPhase = "reading_body"
 		if errors.Is(err, bufio.ErrTooLong) {
 			out.Result = ResultInvalidResponse
 			out.Detail = "probe response exceeds 1 MiB limit"
 			return
 		}
 		out.Detail = truncate(redact(err.Error(), key), 500)
+		return
 	}
+	if consume() {
+		return
+	}
+	out.Result = ResultNetworkFluctuation
+	out.RequestPhase = "reading_body"
+	out.Detail = "流式回答中途断开或未结束"
 	return
 }

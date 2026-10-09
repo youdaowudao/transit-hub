@@ -181,7 +181,7 @@ const mountDialog = async (questionAnswerPreferences?: {
 }) => {
   const wrapper = mount(ManualOneTimeProbeDialog, {
     props: { open: false, target, ...(questionAnswerPreferences ? { questionAnswerPreferences } : {}) },
-    global: { stubs: { Teleport: true, Transition: false } },
+    global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } },
   })
   mountedWrappers.push(wrapper)
   await wrapper.setProps({ open: true })
@@ -236,7 +236,7 @@ describe('question-answer compact layout primitives', () => {
     expect(result.failed.map(item => item.id)).toEqual(['failed'])
   })
 
-  it('renders review, today and lifetime compact statistics with model details expanded by default', async () => {
+  it('renders review and today compact statistics with model details expanded by default', async () => {
     const reviewBase = stats(3, 2, 1, 2, 0)
     const todayBase = stats(4, 3, 1, 3, 0)
     const lifetimeBase = stats(5, 3, 2, 2, 1)
@@ -254,11 +254,10 @@ describe('question-answer compact layout primitives', () => {
     expect(bar.findAll('[data-testid^="question-answer-stats-"]').map(item => item.attributes('data-testid'))).toEqual([
       'question-answer-stats-review',
       'question-answer-stats-today',
-      'question-answer-stats-lifetime',
     ])
     expect(bar.text()).toContain('当前批次')
     expect(bar.text()).toContain('今日（新加坡）')
-    expect(bar.text()).toContain('累计')
+    expect(bar.text()).not.toContain('累计')
     for (const label of ['提交', '进行中', '成功', '待人工', '正确', '错误', '失败', '取消', '正确率']) {
       expect(bar.text()).toContain(label)
     }
@@ -267,23 +266,23 @@ describe('question-answer compact layout primitives', () => {
     }
     expect(bar.find('[data-testid="question-answer-stats-review"] [data-testid="question-answer-accuracy"]').text()).toBe('100%')
     expect(bar.find('[data-testid="question-answer-stats-today"] [data-testid="question-answer-accuracy"]').text()).toBe('100%')
-    expect(bar.find('[data-testid="question-answer-stats-lifetime"] [data-testid="question-answer-accuracy"]').text()).toBe('66.7%')
+    expect(bar.find('[data-testid="question-answer-stats-lifetime"]').exists()).toBe(false)
     expect(bar.find('[data-testid="question-answer-accuracy"]').classes()).toEqual(expect.arrayContaining(['text-2xl', 'text-primary']))
     expect(bar.find('[data-testid="question-answer-periods"]').classes()).toEqual(expect.arrayContaining([
       'grid-cols-1',
-      'md:grid-cols-3',
+      'md:grid-cols-2',
     ]))
     expect(bar.find('[data-testid="question-answer-stats-review"] dl').classes()).toEqual(expect.arrayContaining([
       'grid-cols-3',
     ]))
-    expect(bar.findAll('[data-testid="question-answer-model-stats"]')).toHaveLength(3)
+    expect(bar.findAll('[data-testid="question-answer-model-stats"]')).toHaveLength(2)
     await bar.findAll('button').find(button => button.text() === '账号汇总')!.trigger('click')
     expect(bar.findAll('[data-testid="question-answer-model-stats"]')).toHaveLength(0)
 
     const modelToggle = bar.findAll('button').find(button => button.text() === '按模型')!
     expect(modelToggle.text()).toContain('按模型')
     await modelToggle.trigger('click')
-    expect(bar.findAll('[data-testid="question-answer-model-stats"]')).toHaveLength(3)
+    expect(bar.findAll('[data-testid="question-answer-model-stats"]')).toHaveLength(2)
     expect(bar.text()).toContain('gpt-5.6-sol')
     expect(bar.text()).toContain('gpt-5.6-terra')
     await bar.findAll('button').find(button => button.text() === '账号汇总')!.trigger('click')
@@ -942,7 +941,7 @@ describe('question-answer compact layout primitives', () => {
 
       const wrapper = mount(ManualOneTimeProbeDialog, {
         props: { open: false, target, questionAnswerPreferences: preferences },
-        global: { stubs: { Teleport: true, Transition: false } },
+        global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } },
       })
       mountedWrappers.push(wrapper)
       await wrapper.setProps({ open: true })
@@ -1073,7 +1072,7 @@ describe('question-answer compact layout primitives', () => {
     const todayHistory = wrapper.find('[data-testid="question-answer-history"]')
     expect(todayHistory.text()).toContain('批次历史')
     expect(todayHistory.text()).not.toContain('Today historical entry')
-    expect(wrapper.find('[data-testid="question-answer-stats-lifetime"] [data-testid="question-answer-accuracy"]').text()).toBe('100%')
+    expect(wrapper.find('[data-testid="question-answer-stats-lifetime"]').exists()).toBe(false)
     await todayHistory.find('button').trigger('click')
     expect(todayHistory.text()).toContain('Today historical entry')
     expect(todayHistory.findAll('button').some(button => button.text().trim() === '2')).toBe(true)

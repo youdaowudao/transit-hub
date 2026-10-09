@@ -21,6 +21,7 @@ const adminGroupsTimingLogThreshold = 3 * time.Second
 // real_connections 对接链路。探活字段（probeAvailable / modelHealth 等）来自独立 admin 探活
 // 状态（connection_health_states 中以 targetId 为键的行），不再从 real_connections 叠加。
 type AdminGroupHealth struct {
+	ModelControlError           string                  `json:"modelControlError,omitempty"`
 	ID                          string                  `json:"id"`
 	Name                        string                  `json:"name"`
 	Platform                    string                  `json:"platform"`
@@ -105,40 +106,41 @@ type AdminGroupHealthSummary struct {
 // 只要后端能安全解析 base_url + key + model 就可独立探活，不再需要 real_connections。
 // 绝不包含 key / token / cookie / credentials / secret / authorization 明文。
 type AdminGroupAccount struct {
-	TestConfiguration             EffectiveTestConfiguration `json:"testConfiguration"`
-	RemoteActionPending           *RemoteActionPendingView   `json:"remoteActionPending,omitempty"`
-	ID                            string                     `json:"id"`
-	Name                          string                     `json:"name"`
-	Platform                      string                     `json:"platform"`
-	Type                          string                     `json:"type"`
-	Status                        string                     `json:"status"`
-	MainSiteError                 string                     `json:"mainSiteError,omitempty"`
-	Schedulable                   *bool                      `json:"schedulable,omitempty"`
-	TempUnschedulableUntil        *time.Time                 `json:"tempUnschedulableUntil"`
-	TempUnschedulableActive       bool                       `json:"tempUnschedulableActive"`
-	TempUnschedulableKnown        bool                       `json:"tempUnschedulableKnown"`
-	TempUnschedulableReason       string                     `json:"tempUnschedulableReason,omitempty"`
-	RateLimitResetAt              *time.Time                 `json:"rateLimitResetAt"`
-	RateLimitActive               bool                       `json:"rateLimitActive"`
-	RateLimitKnown                bool                       `json:"rateLimitKnown"`
-	OverloadUntil                 *time.Time                 `json:"overloadUntil"`
-	OverloadActive                bool                       `json:"overloadActive"`
-	OverloadKnown                 bool                       `json:"overloadKnown"`
-	SchedulableSource             string                     `json:"schedulableSource"`
-	SchedulableChangedAt          *time.Time                 `json:"schedulableChangedAt,omitempty"`
-	LastSchedulableAction         string                     `json:"lastSchedulableAction,omitempty"`
-	LastSchedulableActionAt       *time.Time                 `json:"lastSchedulableActionAt,omitempty"`
-	LastSchedulableActionResult   string                     `json:"lastSchedulableActionResult,omitempty"`
-	LastSchedulableActionErrorKey string                     `json:"lastSchedulableActionErrorKey,omitempty"`
-	UpstreamStatusSource          string                     `json:"upstreamStatusSource"`
-	HealthStatusSource            string                     `json:"healthStatusSource"`
-	Priority                      *int                       `json:"priority,omitempty"`
-	Concurrency                   *int                       `json:"concurrency,omitempty"`
-	RateMultiplier                *float64                   `json:"rateMultiplier,omitempty"`
-	LoadFactor                    *int                       `json:"loadFactor,omitempty"`
-	Weight                        *int                       `json:"weight,omitempty"`
-	Models                        string                     `json:"models,omitempty"`
-	GroupIDs                      []string                   `json:"groupIds,omitempty"`
+	ModelControl                  *ModelControlAccountSummary `json:"modelControl"`
+	TestConfiguration             EffectiveTestConfiguration  `json:"testConfiguration"`
+	RemoteActionPending           *RemoteActionPendingView    `json:"remoteActionPending,omitempty"`
+	ID                            string                      `json:"id"`
+	Name                          string                      `json:"name"`
+	Platform                      string                      `json:"platform"`
+	Type                          string                      `json:"type"`
+	Status                        string                      `json:"status"`
+	MainSiteError                 string                      `json:"mainSiteError,omitempty"`
+	Schedulable                   *bool                       `json:"schedulable,omitempty"`
+	TempUnschedulableUntil        *time.Time                  `json:"tempUnschedulableUntil"`
+	TempUnschedulableActive       bool                        `json:"tempUnschedulableActive"`
+	TempUnschedulableKnown        bool                        `json:"tempUnschedulableKnown"`
+	TempUnschedulableReason       string                      `json:"tempUnschedulableReason,omitempty"`
+	RateLimitResetAt              *time.Time                  `json:"rateLimitResetAt"`
+	RateLimitActive               bool                        `json:"rateLimitActive"`
+	RateLimitKnown                bool                        `json:"rateLimitKnown"`
+	OverloadUntil                 *time.Time                  `json:"overloadUntil"`
+	OverloadActive                bool                        `json:"overloadActive"`
+	OverloadKnown                 bool                        `json:"overloadKnown"`
+	SchedulableSource             string                      `json:"schedulableSource"`
+	SchedulableChangedAt          *time.Time                  `json:"schedulableChangedAt,omitempty"`
+	LastSchedulableAction         string                      `json:"lastSchedulableAction,omitempty"`
+	LastSchedulableActionAt       *time.Time                  `json:"lastSchedulableActionAt,omitempty"`
+	LastSchedulableActionResult   string                      `json:"lastSchedulableActionResult,omitempty"`
+	LastSchedulableActionErrorKey string                      `json:"lastSchedulableActionErrorKey,omitempty"`
+	UpstreamStatusSource          string                      `json:"upstreamStatusSource"`
+	HealthStatusSource            string                      `json:"healthStatusSource"`
+	Priority                      *int                        `json:"priority,omitempty"`
+	Concurrency                   *int                        `json:"concurrency,omitempty"`
+	RateMultiplier                *float64                    `json:"rateMultiplier,omitempty"`
+	LoadFactor                    *int                        `json:"loadFactor,omitempty"`
+	Weight                        *int                        `json:"weight,omitempty"`
+	Models                        string                      `json:"models,omitempty"`
+	GroupIDs                      []string                    `json:"groupIds,omitempty"`
 	// UpstreamKeyGroup* 来自 real_connections 中该 admin 转发账号实际绑定的上游 API Key
 	// 分组，再以站点缓存的 Groups 解析其当前倍率。无法可靠关联时保持空值，绝不使用
 	// admin 转发账号自身的 rate_multiplier 猜测。
@@ -534,6 +536,11 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 			return nil, err
 		}
 	}
+	modelControlSummaries, modelControlErr := s.ListModelControlAccountSummaries(ctx, userID, adminAccountID, todayQuestionAnswerTargetIDs)
+	modelControlErrorKey := ""
+	if modelControlErr != nil {
+		modelControlErrorKey = modelControlError("Storage")
+	}
 	assemblyStarted := time.Now()
 	restrictionObservedAt := assemblyStarted.UTC()
 	healthFallbacksByTarget := make(map[string][]float64)
@@ -595,6 +602,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 	costSourceUnresolved := make(map[string]bool, len(groups))
 	for _, group := range groups {
 		health := AdminGroupHealth{
+			ModelControlError:           modelControlErrorKey,
 			ID:                          group.ID,
 			Name:                        group.Name,
 			Platform:                    group.Platform,
@@ -866,6 +874,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				TodayQuestionAnswerJudged:      todayQuestionAnswer.Judged,
 				RecentQuestionAnswer:           recentQuestionAnswer.RecentQuestionAnswer,
 				ActiveNewerQuestionAnswerBatch: recentQuestionAnswer.ActiveNewerBatch,
+				ModelControl:                   modelControlSummaries[targetID],
 			}
 			if session.Platform == upstream.PlatformSub2API {
 				only := hasMultiplierOnlyPolicy(priorityPoliciesByTarget[targetID])

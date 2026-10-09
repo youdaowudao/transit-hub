@@ -305,7 +305,7 @@ func (f *fakeQuestionAnswerRepository) ListQuestionAnswerHistory(_ context.Conte
 		start = (page - 1) * QuestionAnswerPageSize
 	}
 	end := min(start+QuestionAnswerPageSize, total)
-	return QuestionAnswerHistory{Batches: summaries[start:end], Page: page, PageSize: QuestionAnswerPageSize, TotalBatches: total, TotalPages: pages, AllTimeStats: aggregateQuestionAnswerStats(all), TodayStats: aggregateQuestionAnswerStats(todayRecords)}, nil
+	return QuestionAnswerHistory{Batches: summaries[start:end], Page: page, PageSize: QuestionAnswerPageSize, TotalBatches: total, TotalPages: pages, TodayStats: aggregateQuestionAnswerStats(todayRecords)}, nil
 }
 
 func (f *fakeQuestionAnswerRepository) GetQuestionAnswerTodayStats(_ context.Context, _ string, targetID string) (QuestionAnswerSummaryStats, error) {

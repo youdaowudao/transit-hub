@@ -98,14 +98,14 @@ func TestQuestionAnswerC1HistoryTwentyBatchPagesAndCrossMidnightStats(t *testing
 		t.Fatal(err)
 	}
 	extreme, err := repo.ListQuestionAnswerHistory(ctx, "page-user", "page-target", int(^uint(0)>>1), "today")
-	if err != nil || len(extreme.Batches) != 0 || extreme.TotalBatches != 21 || extreme.TotalPages != 2 || extreme.TodayStats.Requests != first.TodayStats.Requests || extreme.AllTimeStats.Reviews != first.AllTimeStats.Reviews {
+	if err != nil || len(extreme.Batches) != 0 || extreme.TotalBatches != 21 || extreme.TotalPages != 2 || extreme.TodayStats.Requests != first.TodayStats.Requests {
 		t.Fatalf("MaxInt empty page=%+v err=%v", extreme, err)
 	}
 
 	if first.TotalBatches != 21 || first.TotalPages != 2 || len(first.Batches) != 20 || len(second.Batches) != 1 || first.Batches[0].BatchID != "page-20" || second.Batches[0].BatchID != "page-00" {
 		t.Fatalf("complete stable pages=%+v/%+v", first, second)
 	}
-	if first.TodayStats.Requests.Submitted != 22 || first.TodayStats.Reviews.Correct != 21 || first.TodayStats.Reviews.Incorrect != 0 || first.TodayStats.Requests.InProgress != 1 || first.AllTimeStats.Requests.Submitted != 23 || first.AllTimeStats.Reviews.Incorrect != 1 {
+	if first.TodayStats.Requests.Submitted != 22 || first.TodayStats.Reviews.Correct != 21 || first.TodayStats.Reviews.Incorrect != 0 || first.TodayStats.Requests.InProgress != 1 {
 		t.Fatal("record-day stats changed with batch attribution")
 	}
 	all, err := repo.ListQuestionAnswerHistory(ctx, "page-user", "page-target", 2, "all")
@@ -123,7 +123,7 @@ func TestQuestionAnswerC1HistoryTwentyBatchPagesAndCrossMidnightStats(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if changed.TodayStats.Reviews.Correct != 21 || changed.AllTimeStats.Reviews.Correct != 22 || changed.AllTimeStats.Reviews.Incorrect != 0 {
+	if changed.TodayStats.Reviews.Correct != 21 {
 		t.Fatal("old record judgment migrated into today's numerator")
 	}
 	summary, err := repo.GetQuestionAnswerTodayStats(ctx, "page-user", "page-target")

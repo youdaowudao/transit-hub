@@ -59,11 +59,13 @@ const props = withDefaults(defineProps<{
   quickProbeErrors?: Record<string, string>
   quickProbeSuccesses?: Record<string, { modelName: string; latencyMs: number; protocol?: string | null; timeoutSeconds?: number | null }>
   recentSummaryFailures?: string[]
+  modelControlFailures?: string[]
 }>(), {
   quickProbePhases: () => ({}),
   quickProbeErrors: () => ({}),
   quickProbeSuccesses: () => ({}),
   recentSummaryFailures: () => [],
+  modelControlFailures: () => [],
 })
 
 const emit = defineEmits<{
@@ -77,7 +79,7 @@ const emit = defineEmits<{
   (event: 'update:hide-unmonitored-accounts', value: boolean): void
   (event: 'set-schedulable', account: AdminGroupAccount): void
   (event: 'assign-policy', account: AdminGroupAccount): void
-  (event: 'question-answer-view', value: { targetId: string; batchId: string }): void
+  (event: 'question-answer-view', value: { targetId: string; batchId?: string }): void
   (event: 'question-answer-recent-retry', targetId: string): void
   (event: 'displayed-targets', targetIds: string[]): void
 }>()
@@ -745,6 +747,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
     </section>
 
     <div class="px-5 py-5">
+      <p v-if="group.modelControlError || sortedAccounts.some(account => modelControlFailures.includes(account.targetId))" data-testid="model-control-summary-error" role="alert" class="mb-3 text-xs text-destructive">{{ t('admin.connectionHealth.modelControl.text.summaryError') }}</p>
       <p class="mb-3 text-xs text-muted-foreground">
         {{ customSortActive ? t(`${detailPrefix}.temporarySortHint`) : t(`${detailPrefix}.${group.accounts.some(isSub2API) ? 'sub2apiProductionSortHint' : 'productionSortHint'}`) }}
       </p>
@@ -972,6 +975,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                   <span v-else class="text-muted-foreground">—</span>
                   <span v-if="account.recentQuestionAnswer" class="mt-0.5 block break-words text-[11px] text-muted-foreground">{{ recentSource(account) }} · {{ formatConnectionHealthTime(account.recentQuestionAnswer.createdAt) }}</span>
                   <span v-if="recentState(account)" class="mt-0.5 block text-[11px] text-muted-foreground">{{ recentState(account) }}</span>
+                  <button v-if="account.modelControl" type="button" data-testid="model-control-summary" class="mt-1 block text-right text-[11px] hover:text-primary" :class="account.modelControl.attention > 0 ? 'text-amber-600' : 'text-muted-foreground'" @click="emit('question-answer-view', { targetId: account.targetId })">{{ t('admin.connectionHealth.modelControl.text.summary', { closed: account.modelControl.closed, attention: account.modelControl.attention }) }}</button>
                   <button v-if="recentSummaryFailures.includes(account.targetId)" type="button" class="mt-1 text-[11px] text-destructive underline" @click="emit('question-answer-recent-retry', account.targetId)">最近结果刷新失败 · 重试</button>
                 </td>
                 <td class="w-28 px-3 py-3">

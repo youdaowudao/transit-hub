@@ -42,40 +42,54 @@ type TargetSchedulableActionResult struct {
 
 // SetTargetSchedulable executes an explicit user command, then re-reads the upstream
 // account. A successful write without a matching, parseable readback is still a failure.
+type schedulableActionReadback struct {
+	Account   upstream.AdminGroupAccountInfo
+	StartedAt time.Time
+}
+
 func (s *Service) SetTargetSchedulable(ctx context.Context, userID string, targetID string, schedulable bool) (TargetSchedulableActionResult, error) {
+	result, _, err := s.setTargetSchedulable(ctx, userID, targetID, schedulable, nil)
+	return result, err
+}
+func (s *Service) setTargetSchedulable(ctx context.Context, userID string, targetID string, schedulable bool, extraCheck func(context.Context, adminTargetRefresh) error) (TargetSchedulableActionResult, schedulableActionReadback, error) {
 	session, workspace, accountID, err := s.resolveManualSession(ctx, userID, targetID)
 	if err != nil {
-		return TargetSchedulableActionResult{}, err
+		return TargetSchedulableActionResult{}, schedulableActionReadback{}, err
 	}
 	actioner, ok := s.schedulableActions.(TargetSchedulableContextActioner)
 	if session.Platform != upstream.PlatformSub2API || !ok {
-		return TargetSchedulableActionResult{}, requestError(ErrorSchedulableUnsupported)
+		return TargetSchedulableActionResult{}, schedulableActionReadback{}, requestError(ErrorSchedulableUnsupported)
 	}
 	ctx, release, err := s.prepareManualAction(ctx, userID, workspace, targetID)
 	if err != nil {
-		return TargetSchedulableActionResult{}, err
+		return TargetSchedulableActionResult{}, schedulableActionReadback{}, err
 	}
 	defer release()
 	refresh, err := s.refreshAdminTarget(ctx, session, workspace, accountID)
 	if err != nil {
-		return TargetSchedulableActionResult{}, err
+		return TargetSchedulableActionResult{}, schedulableActionReadback{}, err
 	}
 	target := refresh.target
 	s.sub2APIFloorGuardFor(userID, workspace).rememberInventory(refresh.inventory)
 	if !refresh.found || target.TargetID != targetID {
 		if refresh.accountsReadError {
-			return TargetSchedulableActionResult{}, requestError(ErrorAccountsFetch)
+			return TargetSchedulableActionResult{}, schedulableActionReadback{}, requestError(ErrorAccountsFetch)
 		}
-		return TargetSchedulableActionResult{}, requestError(ErrorProbeTargetNotFound)
+		return TargetSchedulableActionResult{}, schedulableActionReadback{}, requestError(ErrorProbeTargetNotFound)
 	}
 	pair, err := s.reconcileActionObservation(ctx, targetObservation(userID, workspace, target, &refresh.inventory))
 	if err != nil || pair.pendingCount() != 0 {
-		return TargetSchedulableActionResult{}, errors.Join(err, ErrRemoteActionPending)
+		return TargetSchedulableActionResult{}, schedulableActionReadback{}, errors.Join(err, ErrRemoteActionPending)
+	}
+	if extraCheck != nil {
+		if err := extraCheck(ctx, refresh); err != nil {
+			return TargetSchedulableActionResult{}, schedulableActionReadback{}, err
+		}
 	}
 	if !schedulable {
 		if err := s.checkManualFloor(ctx, userID, workspace, TargetMutationSchedulable, target, &refresh.inventory); err != nil {
 			_ = s.recordManualFloorBlockedEvent(ctx, userID, workspace, target, refresh.inventory, err, RemoteActionSkippedSub2APILastActive)
-			return TargetSchedulableActionResult{}, err
+			return TargetSchedulableActionResult{}, schedulableActionReadback{}, err
 		}
 	}
 	state := manualTargetCheckpoint(pair, userID, workspace, target, TargetMutationSchedulable, ActionSourceManual, "", &schedulable, &refresh.inventory)
@@ -90,23 +104,23 @@ func (s *Service) SetTargetSchedulable(ctx context.Context, userID string, targe
 	if err != nil {
 		_, _ = s.reconcileActionObservation(context.WithoutCancel(ctx), RemoteActionObservation{RemoteActionScope: claim.RemoteActionScope})
 		_ = s.recordSchedulableActionEvent(ctx, userID, workspace, target, SchedulableActionFailed, ErrorSchedulableActionFailed, schedulableFailedRemoteAction(schedulable))
-		return TargetSchedulableActionResult{}, requestError(ErrorSchedulableActionFailed)
+		return TargetSchedulableActionResult{}, schedulableActionReadback{}, requestError(ErrorSchedulableActionFailed)
 	}
 	readbackStarted := time.Now()
 	readbackTarget, account, found, _, readbackErr := s.readbackManualTarget(ctx, session, workspace, accountID, refresh.memberships)
 	if readbackErr != nil || !found || readbackTarget.TargetID != targetID || account.Schedulable == nil || *account.Schedulable != schedulable {
 		_ = s.recordSchedulableActionEvent(ctx, userID, workspace, target, SchedulableActionFailed, ErrorSchedulableReadbackFailed, schedulableFailedRemoteAction(schedulable))
-		return TargetSchedulableActionResult{}, requestError(ErrorSchedulableReadbackFailed)
+		return TargetSchedulableActionResult{}, schedulableActionReadback{}, requestError(ErrorSchedulableReadbackFailed)
 	}
 	_, err = s.reconcileActionObservation(ctx, RemoteActionObservation{RemoteActionScope: claim.RemoteActionScope, InventoryComplete: adminInventoryComplete(refresh.inventory), Visible: true, SnapshotStartedAt: readbackStarted, Status: readbackTarget.AccountStatus, Schedulable: account.Schedulable})
 	if err != nil {
-		return TargetSchedulableActionResult{}, err
+		return TargetSchedulableActionResult{}, schedulableActionReadback{}, err
 	}
 	actionAt := time.Now().UTC()
 	if err := s.recordSchedulableActionEvent(ctx, userID, workspace, readbackTarget, SchedulableActionSucceeded, "", schedulableRemoteAction(schedulable)); err != nil {
-		return TargetSchedulableActionResult{}, requestError(ErrorSchedulableAuditFailed)
+		return TargetSchedulableActionResult{}, schedulableActionReadback{}, requestError(ErrorSchedulableAuditFailed)
 	}
-	return TargetSchedulableActionResult{TargetID: targetID, Schedulable: schedulable, ActionSource: ActionSourceUser, ActionAt: actionAt}, nil
+	return TargetSchedulableActionResult{TargetID: targetID, Schedulable: schedulable, ActionSource: ActionSourceUser, ActionAt: actionAt}, schedulableActionReadback{account, readbackStarted}, nil
 }
 
 func schedulableRemoteAction(schedulable bool) string {

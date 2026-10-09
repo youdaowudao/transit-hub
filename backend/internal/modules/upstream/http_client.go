@@ -302,7 +302,7 @@ func safeRemoteMutationMessage(value string) string {
 		return "Invalid request"
 	}
 	switch value {
-	case "Invalid account ID", "No updates provided", "account_ids or filters is required":
+	case "Invalid request", "Invalid account ID", "No updates provided", "account_ids or filters is required":
 		return value
 	}
 	return ""

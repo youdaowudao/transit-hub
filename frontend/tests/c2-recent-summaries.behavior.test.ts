@@ -22,7 +22,7 @@ const service = useConnectionHealth()
 const deferred = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done }); return { promise, resolve } }
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
 const targetId = 'sub2api:ws1:a'
-const recent = (id = targetId, correct = 3, incorrect = 1, batchId = 'latest-frozen'): QuestionAnswerRecentSummaryItem => ({ targetId: id, activeNewerBatch: false, recentQuestionAnswer: { batchId, source: 'scheduled', scheduleName: '冻结计划', createdAt: '2026-10-08T00:00:00Z', completedAt: '2026-10-08T00:01:00Z', partial: false, requests: c2Stats(correct, incorrect).requests, reviews: c2Stats(correct, incorrect).reviews } })
+const recent = (id = targetId, correct = 3, incorrect = 1, batchId = 'latest-frozen'): QuestionAnswerRecentSummaryItem => ({ targetId: id, modelControl: null, activeNewerBatch: false, recentQuestionAnswer: { batchId, source: 'scheduled', scheduleName: '冻结计划', createdAt: '2026-10-08T00:00:00Z', completedAt: '2026-10-08T00:01:00Z', partial: false, requests: c2Stats(correct, incorrect).requests, reviews: c2Stats(correct, incorrect).reviews } })
 const idsOf = (input: string) => new URL(input, 'http://localhost').searchParams.getAll('targetId')
 const makeCoordinator = (apply: (item: QuestionAnswerRecentSummaryItem) => void = vi.fn(), workspace = () => 'ws1', visible = () => true) => { const coordinator = useQuestionAnswerRecentSummaries({ workspace, visible, apply }); coordinators.push(coordinator); return coordinator }
 const mountedRows = () => { const wrapper = mount(defineComponent({ setup: () => () => h('div', service.adminGroups.value.map(group => h(AdminGroupHealthDetail, { key: group.id, group, hideUnmonitoredAccounts: false, questionAnswerUnreadTargetIds: [], actionLoading: false }))) })); wrappers.push(wrapper); return wrapper }
@@ -48,14 +48,14 @@ afterEach(() => {
 
 describe('C2 pure local recent API and dirty coordinator', () => {
   it('preserves null with first-active, source and raw counts, and deduplicates requested IDs in order', async () => {
-    const first = { targetId, recentQuestionAnswer: null, activeNewerBatch: true }, second = recent('sub2api:ws1:b', 1, 2)
+    const first = { targetId, recentQuestionAnswer: null, activeNewerBatch: true, modelControl: null }, second = recent('sub2api:ws1:b', 1, 2)
     const fetchMock = vi.fn().mockResolvedValue(json({ items: [first, second] })); vi.stubGlobal('fetch', fetchMock)
     const result = await getQuestionAnswerRecentSummaries([targetId, targetId, second.targetId])
-    expect(result).toEqual([first, second]); expect(result[0]!.recentQuestionAnswer).toBeNull()
+    expect(result.items).toEqual([first, second]); expect(result.items[0]!.recentQuestionAnswer).toBeNull()
     expect(idsOf(fetchMock.mock.calls[0]![0])).toEqual([targetId, second.targetId])
     expect(fetchMock.mock.calls[0]![0]).toContain('/question-answer-recent-summaries?')
     expect(fetchMock.mock.calls[0]![1].method).toBeUndefined()
-    expect(result[1]!.recentQuestionAnswer?.reviews).toEqual({ correct: 1, incorrect: 2, unreviewed: 0 })
+    expect(result.items[1]!.recentQuestionAnswer?.reviews).toEqual({ correct: 1, incorrect: 2, unreviewed: 0 })
   })
 
   it('fails incomplete or mismatched responses without applying fabricated null', async () => {
@@ -92,7 +92,7 @@ describe('C2 pure local recent API and dirty coordinator', () => {
 
   it('aborts hidden requests, keeps pending work, resumes visible and discards a previous workspace response', async () => {
     const first = deferred<Response>(), oldWorkspace = deferred<Response>(), apply = vi.fn()
-    const fetchMock = vi.fn().mockReturnValueOnce(first.promise).mockImplementationOnce(async () => json({ items: [recent()] })).mockReturnValueOnce(oldWorkspace.promise).mockImplementation(async () => json({ items: [{ targetId: 'sub2api:ws2:a', recentQuestionAnswer: null, activeNewerBatch: true }] })); vi.stubGlobal('fetch', fetchMock)
+    const fetchMock = vi.fn().mockReturnValueOnce(first.promise).mockImplementationOnce(async () => json({ items: [recent()] })).mockReturnValueOnce(oldWorkspace.promise).mockImplementation(async () => json({ items: [{ targetId: 'sub2api:ws2:a', recentQuestionAnswer: null, activeNewerBatch: true, modelControl: null }] })); vi.stubGlobal('fetch', fetchMock)
     let visible = true, workspace = 'ws1'
     const coordinator = makeCoordinator(apply, () => workspace, () => visible)
     coordinator.refreshTargets([targetId]); await flushPromises()
@@ -104,11 +104,11 @@ describe('C2 pure local recent API and dirty coordinator', () => {
     workspace = 'ws2'; coordinator.reset(); coordinator.refreshTargets(['sub2api:ws2:a']); await flushPromises()
     oldWorkspace.resolve(json({ items: [recent(targetId, 4, 0, 'workspace-old')] })); await flushPromises()
     expect(apply).toHaveBeenCalledTimes(2)
-    expect(apply.mock.calls[1]![0]).toEqual({ targetId: 'sub2api:ws2:a', recentQuestionAnswer: null, activeNewerBatch: true })
+    expect(apply.mock.calls[1]![0]).toEqual({ targetId: 'sub2api:ws2:a', recentQuestionAnswer: null, activeNewerBatch: true, modelControl: null })
   })
 
   it('retains prior value on failure, displays local retry, and clears only the failed target after success', async () => {
-    const retained = ref(recent()), fetchMock = vi.fn().mockRejectedValueOnce(new Error('network')).mockImplementation(async () => json({ items: [{ targetId, recentQuestionAnswer: null, activeNewerBatch: true }] })); vi.stubGlobal('fetch', fetchMock)
+    const retained = ref(recent()), fetchMock = vi.fn().mockRejectedValueOnce(new Error('network')).mockImplementation(async () => json({ items: [{ targetId, recentQuestionAnswer: null, activeNewerBatch: true, modelControl: null }] })); vi.stubGlobal('fetch', fetchMock)
     const coordinator = makeCoordinator(item => { retained.value = item })
     const wrapper = track(mount(defineComponent({ setup: () => () => h('section', [h('span', retained.value.recentQuestionAnswer?.batchId ?? '—'), ...(coordinator.failures.value.includes(targetId) ? [h('button', { onClick: () => coordinator.retry(targetId) }, '局部重试')] : [])]) })))
     coordinator.refreshTargets([targetId]); await flushPromises()
@@ -155,7 +155,7 @@ describe('C2 recent and today revisions update all projections independently', (
 
   it('preserves explicit null/active in every projection and refuses a foreign workspace mutation', async () => {
     await service.loadAdminGroups(); const wrapper = mountedRows()
-    service.applyQuestionAnswerRecentSummary({ targetId, recentQuestionAnswer: null, activeNewerBatch: true })
+    service.applyQuestionAnswerRecentSummary({ targetId, recentQuestionAnswer: null, activeNewerBatch: true, modelControl: null })
     service.applyQuestionAnswerRecentSummary(recent('sub2api:ws2:a', 4))
     await nextTick()
     expect(wrapper.findAll('tbody > tr').every(row => row.findAll('td')[8]!.text().includes('—') && row.findAll('td')[8]!.text().includes('测试中'))).toBe(true)

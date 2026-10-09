@@ -15,7 +15,8 @@ import (
 )
 
 type Repository struct {
-	db *pgxpool.Pool
+	db                    *pgxpool.Pool
+	modelControlCommitter func(context.Context, pgx.Tx, string) error
 }
 
 func NewRepository(db *pgxpool.Pool) *Repository {
@@ -369,7 +370,10 @@ END $$;`,
 	if err := r.ensureHealthRuleSchema(ctx); err != nil {
 		return err
 	}
-	return r.ensureQuestionAnswerScheduleSchema(ctx)
+	if err := r.ensureQuestionAnswerScheduleSchema(ctx); err != nil {
+		return err
+	}
+	return r.ensureModelControlSchema(ctx)
 }
 
 type policyExecutor interface {

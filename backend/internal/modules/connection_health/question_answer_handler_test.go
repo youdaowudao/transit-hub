@@ -504,7 +504,10 @@ func TestQuestionAnswerHandlerModelStatsEmptyArrays(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &history); err != nil {
 		t.Fatalf("decode empty history: %v", err)
 	}
-	for _, key := range []string{"allTimeStats", "todayStats"} {
+	if _, exists := history["allTimeStats"]; exists {
+		t.Fatal("allTimeStats must be absent")
+	}
+	for _, key := range []string{"todayStats"} {
 		stats, ok := history[key].(map[string]any)
 		if !ok {
 			t.Fatalf("%s=%#v want object", key, history[key])

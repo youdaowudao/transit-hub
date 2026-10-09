@@ -177,7 +177,7 @@ afterEach(() => {
 const mountDialog = async () => {
   const wrapper = mount(ManualOneTimeProbeDialog, {
     props: { open: false, target: primaryTarget },
-    global: { stubs: { Teleport: true, Transition: false } },
+    global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } },
   })
   mountedWrappers.push(wrapper)
   await wrapper.setProps({ open: true })
@@ -331,12 +331,11 @@ describe('question-answer repeat, queue and model statistics', () => {
     const modelBucketText = modelBucketTexts.join('\n')
     expect(modelBucketText).toContain('model-active')
     expect(modelBucketText).toContain('current-failed')
-    expect(modelBucketText).toContain('lifetime-failed')
+    expect(modelBucketText).not.toContain('lifetime-failed')
     expect(modelBucketText).toContain('today-model')
     expect(modelBucketText).not.toContain('discovery-only-model')
     expect(modelBucketTexts.find(text => text.includes('model-active'))).toContain('失败 5')
     expect(modelBucketTexts.find(text => text.includes('current-failed'))).toContain('失败 2')
-    expect(modelBucketTexts.find(text => text.includes('lifetime-failed'))).toContain('失败 3')
     expect(modelBucketTexts.find(text => text.includes('today-model'))).toContain('成功 1')
   })
 

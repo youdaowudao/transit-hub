@@ -17,12 +17,14 @@ type QuestionAnswerRecentSummary struct {
 	Reviews      QuestionAnswerReviewStats  `json:"reviews"`
 }
 type QuestionAnswerRecentSummaryItem struct {
+	ModelControl         *ModelControlAccountSummary  `json:"modelControl"`
 	TargetID             string                       `json:"targetId"`
 	RecentQuestionAnswer *QuestionAnswerRecentSummary `json:"recentQuestionAnswer"`
 	ActiveNewerBatch     bool                         `json:"activeNewerBatch"`
 }
 type QuestionAnswerRecentSummaries struct {
-	Items []QuestionAnswerRecentSummaryItem `json:"items"`
+	ModelControlError string                            `json:"modelControlError,omitempty"`
+	Items             []QuestionAnswerRecentSummaryItem `json:"items"`
 }
 type questionAnswerRecentRepository interface {
 	ListLatestTerminalQuestionAnswerSummaries(context.Context, string, []string) (map[string]QuestionAnswerRecentSummaryItem, error)
@@ -68,8 +70,15 @@ func (s *Service) ListQuestionAnswerRecentSummaries(ctx context.Context, user st
 	if err != nil {
 		return result, requestError(ErrorQuestionAnswerStorage)
 	}
+	modelSummaries, modelErr := s.ListModelControlAccountSummaries(ctx, user, workspace, ids)
+	if modelErr != nil {
+		result.ModelControlError = modelControlError("Storage")
+	}
 	for _, id := range ids {
 		item := summaries[id]
+		if modelErr == nil {
+			item.ModelControl = modelSummaries[id]
+		}
 		item.TargetID = id
 		result.Items = append(result.Items, item)
 	}

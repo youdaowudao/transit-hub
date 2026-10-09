@@ -238,7 +238,7 @@ const mountQuestionAnswerDialog = async (target = primaryTarget) => {
       open: false,
       target,
     },
-    global: { stubs: { Teleport: true, Transition: false } },
+    global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } },
   })
   mountedWrappers.push(wrapper)
   await wrapper.setProps({ open: true })
@@ -259,7 +259,7 @@ const mountQuestionAnswerDialog = async (target = primaryTarget) => {
 const mountClosedDialog = () => {
   const wrapper = mount(ManualOneTimeProbeDialog, {
     props: { open: false, target: primaryTarget },
-    global: { stubs: { Teleport: true, Transition: false } },
+    global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } },
   })
   mountedWrappers.push(wrapper)
   return wrapper
@@ -1907,11 +1907,10 @@ describe('question-answer batch behavior', () => {
 
     expect(wrapper.get('[data-testid="question-answer-pending"]').findAll('li')).toHaveLength(0)
     expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('正确2')
-    const allTimeTitle = wrapper.findAll('p').find(paragraph => paragraph.text().trim() === '累计')
-    if (!allTimeTitle) throw new Error('missing all-time question-answer stats')
-    const allTimePanelText = allTimeTitle.element.parentElement?.parentElement?.textContent ?? ''
-    expect(allTimePanelText).not.toContain('待人工判断')
-    expect(allTimePanelText).toContain('正确2')
+    expect(wrapper.find('[data-testid="question-answer-stats-lifetime"]').exists()).toBe(false)
+    const todayText = wrapper.get('[data-testid="question-answer-stats-today"]').text()
+    expect(todayText).not.toContain('待人工判断')
+    expect(todayText).toContain('正确2')
   })
 
   it('preserves a pending history page when the active runtime completes', async () => {

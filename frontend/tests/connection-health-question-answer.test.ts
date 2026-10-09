@@ -214,7 +214,7 @@ describe('connection health question answers', () => {
     }
     const legacyHistory = {
       batches: [], page: 1, pageSize: 20, totalBatches: 0, totalPages: 0,
-      allTimeStats: legacyBatch.stats, todayStats: legacyBatch.stats,
+      todayStats: legacyBatch.stats,
     }
     const responses = [
       [legacyQuestion], legacyQuestion, legacyQuestion, legacyQuestion, legacyQuestion,
@@ -244,7 +244,7 @@ describe('connection health question answers', () => {
       expect(normalized.stats.byModel).toEqual([])
     }
     expect(history.batches).toEqual([])
-    expect(history.allTimeStats.byModel).toEqual([])
+    expect(history).not.toHaveProperty('allTimeStats')
     expect(history.todayStats.byModel).toEqual([])
     expect(judgment.questionKeywordSnapshot).toBeNull()
   })
@@ -268,7 +268,7 @@ describe('connection health question answers', () => {
     }
     const payloadHistory = {
       batches: [], page: 1, pageSize: 20, totalBatches: 0, totalPages: 0,
-      allTimeStats: stats, todayStats: stats,
+      todayStats: stats,
     }
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(payloadBatch), { status: 200 }))
@@ -279,7 +279,7 @@ describe('connection health question answers', () => {
     const history = await getQuestionAnswerHistory('target-failed', 1)
 
     expect(batch.stats.byModel).toEqual([failedModel])
-    expect(history.allTimeStats.byModel).toEqual([failedModel])
+    expect(history).not.toHaveProperty('allTimeStats')
     expect(history.todayStats.byModel).toEqual([failedModel])
     expect(batch.stats.byModel).not.toBe(payloadBatch.stats.byModel)
     expect(batch.stats.byModel[0]).not.toBe(payloadBatch.stats.byModel[0])
@@ -515,10 +515,6 @@ describe('connection health question answers', () => {
     }
     const history = {
       batches: [], page: 2, pageSize: 20, totalBatches: 21, totalPages: 2,
-      allTimeStats: {
-        requests: { submitted: 20, inProgress: 0, succeeded: 18, failed: 1, cancelled: 1 },
-        reviews: { unreviewed: 2, correct: 15, incorrect: 1 },
-      },
       todayStats: {
         requests: { submitted: 4, inProgress: 1, succeeded: 2, failed: 1, cancelled: 0 },
         reviews: { unreviewed: 1, correct: 1, incorrect: 0 },
@@ -537,7 +533,6 @@ describe('connection health question answers', () => {
     }
     const normalizedHistory = {
       ...history,
-      allTimeStats: { ...history.allTimeStats, byModel: [], byQuestion: [] },
       todayStats: { ...history.todayStats, byModel: [], byQuestion: [] },
     }
     await expect(getLatestQuestionAnswerBatch('sub2api:ws1:account-1')).resolves.toEqual(normalizedBatch)

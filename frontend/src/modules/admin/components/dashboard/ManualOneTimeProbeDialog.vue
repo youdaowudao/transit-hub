@@ -69,6 +69,7 @@ import {
 } from '../../utils/connectionHealthPreferences'
 import QuestionAnswerRecordCard from './QuestionAnswerRecordCard.vue'
 import QuestionAnswerStatsBar from './QuestionAnswerStatsBar.vue'
+import QuestionAnswerModelControlPanel from './QuestionAnswerModelControlPanel.vue'
 import AccountTierEditor from './AccountTierEditor.vue'
 import { t, te } from '@/locales'
 
@@ -147,11 +148,16 @@ const qaCancelling = ref(false)
 const qaFinalization = ref<QuestionAnswerFinalization | null>(null)
 const qaFinalizationUnknown = ref(false)
 const qaRuntimeBatch = ref<QuestionAnswerBatch | null>(null)
+const qaModelControlRefreshKey = ref(0)
+watch(() => [qaRuntimeBatch.value?.batchId, qaRuntimeBatch.value?.active] as const, ([batchId, active], previous) => {
+  if (batchId && (batchId !== previous?.[0] || active !== previous?.[1])) qaModelControlRefreshKey.value++
+})
+const onModelControlSettled = (targetId: string) => { qaModelControlRefreshKey.value++; emit('question-answer-stats-dirty', targetId) }
 const qaReviewBatch = ref<QuestionAnswerBatch | null>(null)
 const qaReviewBatchSyncFailed = ref(false)
 const qaReviewLoadingBatchId = ref<string | null>(null)
 const emptyQuestionAnswerStats = (): QuestionAnswerStats => ({ requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 }, reviews: { unreviewed: 0, correct: 0, incorrect: 0 }, byModel: [], byQuestion: [] })
-const emptyQuestionAnswerHistory = (): QuestionAnswerHistory => ({ batches: [], page: 1, pageSize: 20, totalBatches: 0, totalPages: 0, allTimeStats: emptyQuestionAnswerStats(), todayStats: emptyQuestionAnswerStats() })
+const emptyQuestionAnswerHistory = (): QuestionAnswerHistory => ({ batches: [], page: 1, pageSize: 20, totalBatches: 0, totalPages: 0, todayStats: emptyQuestionAnswerStats() })
 const qaHistory = ref<QuestionAnswerHistory>(emptyQuestionAnswerHistory())
 const qaHistoryScope = ref<QuestionAnswerHistoryScope>('today')
 const qaResultGroupsOpen = ref<Set<string>>(new Set())
@@ -1600,6 +1606,7 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
       || !questionAnswerScopeIsCurrent(scope)
     ) return
     applyAuthoritativeQuestionAnswerRecord(authoritative)
+    qaModelControlRefreshKey.value++
     emit('question-answer-stats-dirty', targetId)
     clearQuestionAnswerMarking(record.id)
     await refreshJudgmentData()
@@ -1845,8 +1852,8 @@ const close = () => {
                   data-question-answer-section="stats"
                   :review-stats="qaReviewBatch?.stats ?? null"
                   :today-stats="qaHistory.todayStats"
-                  :lifetime-stats="qaHistory.allTimeStats"
                 />
+                <QuestionAnswerModelControlPanel v-if="open && mode === 'questionAnswer' && target?.targetId.startsWith('sub2api:')" :target-id="target.targetId" :refresh-key="qaModelControlRefreshKey" @settled="onModelControlSettled" />
                 <p v-if="mode === 'questionAnswer'" class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.protocolSummary') }}</p>
                 <template v-if="mode === 'questionAnswer'">
                   <div v-if="(qaErrorKey && qaHistoryLoaded) || qaLocalReadFailure || summaryRefreshFailed" data-testid="question-answer-statistics-error" class="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">

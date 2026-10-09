@@ -461,7 +461,7 @@ func (r *Repository) ListQuestionAnswerHistory(ctx context.Context, userID strin
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM (SELECT batch_id `+batchScope+`) batches`, userID, targetID, scope).Scan(&total); err != nil {
 		return QuestionAnswerHistory{}, err
 	}
-	allStats, todayStats, err := queryQuestionAnswerStats(ctx, tx, userID, targetID)
+	todayStats, err := queryQuestionAnswerStats(ctx, tx, userID, targetID)
 	if err != nil {
 		return QuestionAnswerHistory{}, err
 	}
@@ -524,7 +524,7 @@ func (r *Repository) ListQuestionAnswerHistory(ctx context.Context, userID strin
 	if err := tx.Commit(ctx); err != nil {
 		return QuestionAnswerHistory{}, err
 	}
-	return QuestionAnswerHistory{Batches: batches, Page: page, PageSize: QuestionAnswerPageSize, TotalBatches: total, TotalPages: totalPages, TodayStats: todayStats, AllTimeStats: allStats}, nil
+	return QuestionAnswerHistory{Batches: batches, Page: page, PageSize: QuestionAnswerPageSize, TotalBatches: total, TotalPages: totalPages, TodayStats: todayStats}, nil
 }
 
 func (r *Repository) ListQuestionAnswerTodaySummaries(ctx context.Context, userID string, targetIDs []string) (map[string]QuestionAnswerTodaySummary, error) {
@@ -652,45 +652,40 @@ type questionAnswerQueryer interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
-func (r *Repository) questionAnswerStats(ctx context.Context, userID string, targetID string) (QuestionAnswerStats, QuestionAnswerStats, error) {
+func (r *Repository) questionAnswerStats(ctx context.Context, userID string, targetID string) (QuestionAnswerStats, error) {
 	return queryQuestionAnswerStats(ctx, r.db, userID, targetID)
 }
 
-func queryQuestionAnswerStats(ctx context.Context, db questionAnswerQueryer, userID string, targetID string) (QuestionAnswerStats, QuestionAnswerStats, error) {
-	all, today := newQuestionAnswerStatsAccumulator(), newQuestionAnswerStatsAccumulator()
+func queryQuestionAnswerStats(ctx context.Context, db questionAnswerQueryer, userID string, targetID string) (QuestionAnswerStats, error) {
+	today := newQuestionAnswerStatsAccumulator()
 	rows, err := db.Query(ctx, `
   SELECT model_name, question_id, question_body, question_keyword_snapshot,
    (array_agg(question_name ORDER BY created_at DESC,id DESC))[1], MAX(created_at),
    (array_agg(id ORDER BY created_at DESC,id DESC))[1],
-   (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date AS is_today,
    count(*), count(*) FILTER (WHERE status IN ('pending','running')),
    count(*) FILTER (WHERE status='succeeded'), count(*) FILTER (WHERE status='failed'), count(*) FILTER (WHERE status='cancelled'),
    count(*) FILTER (WHERE status='succeeded' AND (answer_judgment IS NULL OR answer_judgment NOT IN ('correct','incorrect'))),
    count(*) FILTER (WHERE status='succeeded' AND answer_judgment='correct'), count(*) FILTER (WHERE status='succeeded' AND answer_judgment='incorrect')
-  FROM connection_health_question_answer_records WHERE user_id=$1 AND target_id=$2
-  GROUP BY model_name, question_id, question_body, question_keyword_snapshot, is_today
+  FROM connection_health_question_answer_records WHERE user_id=$1 AND target_id=$2 AND (created_at AT TIME ZONE 'Asia/Singapore')::date = (now() AT TIME ZONE 'Asia/Singapore')::date
+  GROUP BY model_name, question_id, question_body, question_keyword_snapshot
  `, userID, targetID)
 	if err != nil {
-		return all.result(), today.result(), err
+		return today.result(), err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var record QuestionAnswerRecord
-		var isToday bool
 		var r QuestionAnswerRequestStats
 		var v QuestionAnswerReviewStats
-		if err := rows.Scan(&record.ModelName, &record.QuestionID, &record.QuestionBody, &record.QuestionKeywordSnapshot, &record.QuestionName, &record.CreatedAt, &record.ID, &isToday, &r.Submitted, &r.InProgress, &r.Succeeded, &r.Failed, &r.Cancelled, &v.Unreviewed, &v.Correct, &v.Incorrect); err != nil {
-			return QuestionAnswerStats{}, QuestionAnswerStats{}, err
+		if err := rows.Scan(&record.ModelName, &record.QuestionID, &record.QuestionBody, &record.QuestionKeywordSnapshot, &record.QuestionName, &record.CreatedAt, &record.ID, &r.Submitted, &r.InProgress, &r.Succeeded, &r.Failed, &r.Cancelled, &v.Unreviewed, &v.Correct, &v.Incorrect); err != nil {
+			return QuestionAnswerStats{}, err
 		}
-		all.add(record, r, v)
-		if isToday {
-			today.add(record, r, v)
-		}
+		today.add(record, r, v)
 	}
 	if err := rows.Err(); err != nil {
-		return QuestionAnswerStats{}, QuestionAnswerStats{}, err
+		return QuestionAnswerStats{}, err
 	}
-	return all.result(), today.result(), nil
+	return today.result(), nil
 }
 
 func (r *Repository) GetQuestionAnswerTodayStats(ctx context.Context, userID, targetID string) (QuestionAnswerSummaryStats, error) {

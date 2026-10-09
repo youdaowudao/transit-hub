@@ -284,13 +284,13 @@ describe('C2 running protection and retained account result display', () => {
     expect(api.saveQuestionAnswerRuntimeSettings.mock.calls.at(-1)![1]).toBe(7)
   })
 
-  it('keeps totals and today/lifetime while expanding model percentages by default', async () => {
+  it('keeps totals and today while expanding model percentages by default', async () => {
     const stats = c2Stats(3, 1); stats.byModel = [{ modelName: 'm1', ...c2Stats(3, 1) }]
-    const wrapper = track(mount(QuestionAnswerStatsBar, { props: { reviewStats: stats, todayStats: c2Stats(2, 1), lifetimeStats: c2Stats(5, 1) } }))
+    const wrapper = track(mount(QuestionAnswerStatsBar, { props: { reviewStats: stats, todayStats: c2Stats(2, 1) } }))
     expect(button(wrapper, '按模型').attributes('aria-pressed')).toBe('true')
     expect(wrapper.get('[data-testid="question-answer-stats-review"]').text()).toContain('75%')
     expect(wrapper.get('[data-testid="question-answer-stats-today"]').text()).toContain('66.7%')
-    expect(wrapper.get('[data-testid="question-answer-stats-lifetime"]').text()).toContain('83.3%')
+    expect(wrapper.find('[data-testid="question-answer-stats-lifetime"]').exists()).toBe(false)
     expect(wrapper.text()).toContain('m1 · 75%')
     expect(wrapper.text()).not.toMatch(/正确\s*\/|3\s*\/\s*4/)
     await button(wrapper, '按题目').trigger('click'); await nextTick()

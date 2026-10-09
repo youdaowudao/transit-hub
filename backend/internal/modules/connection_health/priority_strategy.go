@@ -471,7 +471,7 @@ func (s *Service) syncWorkspacePriorities(
 		configs, configErr := s.repo.ListGroupTestConfigurations(ctx, userID, adminAccountID)
 		for _, item := range inventory {
 			item.target.InventoryComplete = inventoryComplete
-			item.target.TestConfiguration = ResolveGroupTestConfiguration(item.target.TestMemberships, inventoryComplete && configErr == nil, configs)
+			item.target.TestConfiguration = ResolveGroupTestConfiguration(string(upstream.PlatformSub2API), item.target.TestMemberships, inventoryComplete && configErr == nil, configs)
 		}
 		if !inventoryComplete {
 			s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, requestError(ErrorPriorityInventoryIncomplete), 1, nil)

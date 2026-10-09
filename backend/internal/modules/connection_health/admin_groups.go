@@ -489,7 +489,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		}
 	}
 	for targetID, memberships := range testMembershipsByTarget {
-		testConfigurationByTarget[targetID] = ResolveGroupTestConfiguration(memberships, inventoryComplete && testConfigErr == nil, testConfigs)
+		testConfigurationByTarget[targetID] = ResolveGroupTestConfiguration(string(session.Platform), memberships, inventoryComplete && testConfigErr == nil, testConfigs)
 	}
 	snapshot := adminWorkspaceInventory{session: session, groupsComplete: true, snapshotStartedAt: groupFetchStarted}
 	for _, group := range groups {

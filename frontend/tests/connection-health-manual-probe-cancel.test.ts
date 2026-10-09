@@ -137,7 +137,7 @@ describe('manual probe cancellation', () => {
     expect(wrapper.text()).toContain('12500ms')
     expect(wrapper.text()).toContain('2026-10-03T01:02:03Z')
     expect(wrapper.text()).toContain(detail)
-    if (phase) expect(wrapper.text()).toContain('截止阶段：读取完整响应正文')
+    if (phase) expect(wrapper.text()).toContain('截止阶段：读取响应正文')
     expect(wrapper.text()).not.toContain('111ms')
     expect(wrapper.text()).not.toContain('旧有效失败原因')
     expect(wrapper.find('.lucide-circle-check').exists()).toBe(false)

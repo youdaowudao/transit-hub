@@ -473,7 +473,7 @@ func TestProtocolPostgresEventFailureRollsBackHealthAtomically(t *testing.T) {
 CREATE TRIGGER protocol_event_failure BEFORE INSERT ON connection_health_events FOR EACH ROW EXECUTE FUNCTION reject_protocol_event()`); err != nil {
 		t.Fatal(err)
 	}
-	target := AdminProbeTarget{TargetID: "sub2api:w:atomic", Platform: "sub2api", AccountID: "atomic", InventoryComplete: true, TestConfiguration: EffectiveTestConfiguration{Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10, Status: "default"}}
+	target := AdminProbeTarget{TargetID: "sub2api:w:atomic", Platform: "sub2api", AccountID: "atomic", InventoryComplete: true, TestConfiguration: defaultTestConfiguration()}
 	input := TargetProbeCommit{UserID: "u", AdminAccountID: "w", Target: target, ModelName: "m", Policy: Policy{AutoDegradeEnabled: true, FailureThreshold: 3}, Outcome: ProbeOutcome{Result: ResultServerError, Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10}, Event: ConnectionHealthEvent{ID: "atomic-event", UserID: "u", AdminAccountID: "w", ConnectionID: target.TargetID, ModelName: "m"}, Now: time.Now()}
 	if _, err := r.CommitTargetProbe(ctx, input); err == nil {
 		t.Fatal("injected event failure was ignored")
@@ -489,7 +489,11 @@ CREATE TRIGGER protocol_event_failure BEFORE INSERT ON connection_health_events 
 	if _, err := pool.Exec(ctx, `DROP TRIGGER protocol_event_failure ON connection_health_events`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.CommitTargetProbe(ctx, input); err != nil {
-		t.Fatalf("rollback leaked W or prevented explicit retry: %v", err)
+	result, err := r.CommitTargetProbe(ctx, input)
+	if err != nil || result.Disposition != "applied" {
+		t.Fatalf("rollback leaked W or prevented explicit applied retry: %+v %v", result, err)
+	}
+	if state, err := r.GetState(ctx, target.TargetID, "m"); err != nil || state == nil {
+		t.Fatalf("retry did not actually write state: %+v %v", state, err)
 	}
 }

@@ -978,17 +978,17 @@ export default {
     },
     connectionHealth: {
       testConfiguration: {
-        remoteActionPending: '远端动作待确认，需核对后收口。', targetNotVisible: '账号已离组，当前值无法核对，需人工处理。', title: '测试请求', protocol: '请求协议', timeout: '轻量探活超时（5–120 秒）',
+        remoteActionPending: '远端动作待确认，需核对后收口。', targetNotVisible: '账号已离组，当前值无法核对，需人工处理。', title: '测试请求', protocol: '请求协议', timeout: '首字最长等待（5–120 秒）',
         help: '独立于自动策略保存，影响本组现有及新加入账号的新测试和新动作。已开始的动作可能继续完成。配置冲突也会阻断新问答；问答每题仍为 10 分钟。',
-        loading: '正在读取测试配置…', configured: '本组已单独配置', notConfigured: '未单独配置；无其他显式来源时沿用 Chat / 10 秒。',
+        loading: '正在读取测试配置…', configured: '本组已单独配置', notConfigured: '未单独配置；无其他显式来源时沿用 Chat / 20 秒。',
         responsesBudget: 'Responses 轻量探活至少请求 128 个输出 token；更高策略预算保留。实际成本还包含输入和推理，上游不一定严格遵守预算。',
         impact: '本次可见成员 {count} 个，当前配置冲突 {conflicts} 个。保存后以服务端实际结果为准。',
-        clearHelp: '清除仅删除本组规则；账号可能改为继承其他组，或回到 Chat / 10 秒。查看和保存不会发起模型测试、Priority 或启停写入。',
+        clearHelp: '清除仅删除本组规则；账号可能改为继承其他组，或回到 Chat / 20 秒。查看和保存不会发起模型测试、Priority 或启停写入。',
         save: '保存测试请求', clear: '清除本组配置', saved: '已保存，影响范围按上述服务端结果显示。',
-        inherited: '使用分组配置', default: '旧默认', conflict: '配置冲突', unavailable: '成员资料或配置无法确认',
+        inherited: '使用分组配置', default: '默认', conflict: '配置冲突', unavailable: '成员资料或配置无法确认',
         changed: '配置已变化，此结果使用请求开始时的配置。', unverified: '当前协议健康依据待验证', legacy: '旧记录未记录协议', stale: '过期尝试', invalid: '本次测试结果无效',
         unverifiedHelp: '请求成功返回后仍需按当前工作区规则和所选预设判断恢复条件。新规则下首字超过协议延迟线仍算成功；旧规则下慢响应沿用原恢复条件。',
-        requestPhases: { waiting_headers: '截止阶段：等待响应头', reading_body: '截止阶段：读取完整响应正文' },
+        requestPhases: { waiting_headers: '截止阶段：等待响应头', reading_body: '截止阶段：读取响应正文' },
         questionAnswerTimeout: '上述超时用于轻量探活；问答每题仍为 10 分钟。',
       },
 
@@ -1874,7 +1874,7 @@ export default {
           questionAnswer: '问答测试'
         },
         modeDescriptions: {
-          formal: '进入共同记录和健康调度，会更新健康状态与 manual 事件；Chat 与 Responses 记录首字和整段耗时，按工作区规则与所选预设判定，新规则下延迟仍算成功。仅在既有托管条件成立时更新主站 priority，不消耗自动预算，不修改 schedulable；schedulable=false 时自动探活默认降为 60 分钟一次。',
+          formal: '进入共同记录和健康调度，会更新健康状态与 manual 事件；Chat 与 Responses 收到首字即结束，记录首字和探活耗时，按工作区规则与所选预设判定，新规则下延迟仍算成功。仅在既有托管条件成立时更新主站 priority，不消耗自动预算，不修改 schedulable；schedulable=false 时自动探活默认降为 60 分钟一次。',
           once: '只显示本次结果，不写事件、健康状态、priority、策略预算或远端动作。',
           questionAnswer: '向所选模型分别发送预设问题并保存回答。每个模型和问题组合独立执行，不形成多轮对话，不修改健康状态或调度。'
         },

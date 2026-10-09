@@ -3,7 +3,7 @@ import type { HealthRulePreset, HealthRulePresetInput, HealthRuleVersion } from 
 export const defaultHealthRulePreset = (): HealthRulePresetInput => ({
   name: '', failureThreshold: 3, successThreshold: 2, cooldownSeconds: 300,
   failedRetryIntervalSeconds: 600, longFailureAfterSeconds: 86400, longFailureIntervalSeconds: 3600,
-  delayLineMs: { responses: 10000, chat_completions: 5000 }, observationSeconds: 300, recoveryStepPercent: 25,
+  delayLineMs: { responses: 6000, chat_completions: 6000 }, observationSeconds: 300, recoveryStepPercent: 25,
 })
 export const copyHealthRulePresetInput = (preset: HealthRulePresetInput): HealthRulePresetInput => ({
   name: preset.name, failureThreshold: preset.failureThreshold, successThreshold: preset.successThreshold,

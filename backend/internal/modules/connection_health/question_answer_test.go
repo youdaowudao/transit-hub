@@ -125,7 +125,8 @@ func (f *fakeQuestionAnswerRepository) CreateQuestionAnswerBatch(_ context.Conte
 	defer f.mu.Unlock()
 	protocol := TestProtocolChatCompletions
 	if len(snapshots) > 0 {
-		config := ResolveGroupTestConfiguration(snapshots[0].Memberships, snapshots[0].InventoryComplete, f.configurations)
+		parsed, _ := parseTargetID(targetID)
+		config := ResolveGroupTestConfiguration(parsed.platform, snapshots[0].Memberships, snapshots[0].InventoryComplete, f.configurations)
 		if !config.usable() {
 			return nil, requestError(config.BlockedReason)
 		}

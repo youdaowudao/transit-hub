@@ -247,7 +247,7 @@ func (f *fakeRepository) ClaimRemoteAction(ctx context.Context, claim RemoteActi
 				configs = append(configs, config)
 			}
 		}
-		current := ResolveGroupTestConfiguration(claim.Guard.Memberships, claim.Guard.InventoryComplete && f.testConfigurationErr == nil, configs)
+		current := ResolveGroupTestConfiguration("sub2api", claim.Guard.Memberships, claim.Guard.InventoryComplete && f.testConfigurationErr == nil, configs)
 		if current.Protocol != claim.Guard.Configuration.Protocol || current.ProbeTimeoutSeconds != claim.Guard.Configuration.ProbeTimeoutSeconds || (current.Status != "default" && current.Status != "inherited") {
 			return false, ErrRemoteActionEvidenceChanged
 		}

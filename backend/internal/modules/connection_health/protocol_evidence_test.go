@@ -257,7 +257,7 @@ func TestProtocolEvidenceLegacyChatCompatibilityAndConfigurationOnlyRoundTrip(t 
 		if err != nil {
 			t.Fatal(err)
 		}
-		configuration := ResolveGroupTestConfiguration(memberships, true, configs)
+		configuration := ResolveGroupTestConfiguration("sub2api", memberships, true, configs)
 		if configuration.Protocol != TestProtocolChatCompletions || healthEvidenceMatches(state, configuration.Protocol) == converted {
 			t.Fatalf("configuration-only vs converted clear conflated: converted=%v state=%+v", converted, state)
 		}

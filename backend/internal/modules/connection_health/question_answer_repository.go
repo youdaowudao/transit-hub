@@ -189,9 +189,11 @@ func scanTestQuestion(row rowScanner) (*TestQuestion, error) {
 
 func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort, repeatCount int, snapshots ...QuestionAnswerConfigurationSnapshot) ([]QuestionAnswerRecord, error) {
 	adminAccountID := ""
+	platform := ""
 	requiresSnapshot := false
 	if parsed, ok := parseTargetID(targetID); ok {
 		adminAccountID = parsed.adminAccountID
+		platform = parsed.platform
 		requiresSnapshot = parsed.platform == string(upstream.PlatformSub2API)
 	}
 	if len(snapshots) > 1 || (requiresSnapshot && len(snapshots) != 1) {
@@ -219,7 +221,7 @@ func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID strin
 		if err != nil {
 			return nil, err
 		}
-		configuration := ResolveGroupTestConfiguration(snapshots[0].Memberships, snapshots[0].InventoryComplete, configurations)
+		configuration := ResolveGroupTestConfiguration(platform, snapshots[0].Memberships, snapshots[0].InventoryComplete, configurations)
 		if !configuration.usable() {
 			return nil, requestError(configuration.BlockedReason)
 		}

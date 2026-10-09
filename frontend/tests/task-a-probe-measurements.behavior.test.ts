@@ -2,6 +2,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ManualOneTimeProbeDialog from '@/modules/admin/components/dashboard/ManualOneTimeProbeDialog.vue'
+import ConnectionHealthLinkDetailCard from '@/modules/admin/components/dashboard/ConnectionHealthLinkDetailCard.vue'
 import AdminGroupAccountsDialog from '@/modules/admin/components/dashboard/AdminGroupAccountsDialog.vue'
 import type { AdminGroupHealth, HealthRuleVersion, ModelHealth } from '@/modules/admin/types/connectionHealth'
 
@@ -129,5 +130,24 @@ describe('task A retained account dialog measurement display', () => {
     expect(wrapper.get('tbody').text()).not.toContain('首字')
     expect(wrapper.get('tbody').text()).not.toContain('首个事件')
     expect(wrapper.get('tbody').findAll('button')).toHaveLength(controls)
+  })
+})
+
+
+describe('first-text probe event card', () => {
+  it('renders probe latency and absent first token accurately without claiming a complete answer', async () => {
+    const record = { id: 'first-text-event', connectionId: 'fixture', result: 'ok', latencyMs: 6000, firstTokenMs: 6000, firstEventMs: 5500, createdAt: '2026-10-09T00:00:00Z', ruleVersion: 'v2', requestProtocol: 'chat_completions', requestTimeoutSeconds: 20 }
+    const wrapper = mount(ConnectionHealthLinkDetailCard, { props: {
+      siteLabel: '站点', upstreamGroupName: '分组', accountName: '账号', modelName: '模型', provider: 'openai', isActionCard: false, state: 'healthy', latestLatencyMs: 6000,
+      lastProbeAt: record.createdAt, lastSuccessAt: record.createdAt, lastFailureAt: null, lastErrorKey: '', lastErrorDetail: '', failureFromLoadedRecords: false, elapsedSeconds: null,
+      effectiveIntervalSeconds: 60, effectivePolicySources: [], budgetPolicyId: '', availabilityPct: 100, records: [record as never], nextProbeText: '', actionSource: '', actionAt: null, remoteAction: '',
+    } }); wrappers.push(wrapper)
+    let tooltip = wrapper.get('span[title]').attributes('title')
+    expect(tooltip).toContain('探活耗时：6000ms'); expect(tooltip).not.toContain('整段耗时')
+    expect(tooltip).toContain('首字：6000ms'); expect(tooltip).toContain('首个事件：5500ms')
+    await wrapper.setProps({ records: [{ ...record, result: 'network_fluctuation', firstTokenMs: null, firstEventMs: 5500 } as never] })
+    tooltip = wrapper.get('span[title]').attributes('title')
+    expect(tooltip).not.toContain('首字：'); expect(tooltip).toContain('首个事件：5500ms')
+    expect(tooltip).toContain('探活耗时：6000ms')
   })
 })

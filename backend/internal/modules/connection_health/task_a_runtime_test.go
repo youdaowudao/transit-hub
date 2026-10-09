@@ -59,16 +59,16 @@ func TestTaskAStreamVisibleFirstTextAndSemanticEvent(t *testing.T) {
 		{2 * time.Second, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"},
 		{10 * time.Second, taskAResponseComplete},
 	})
-	if out.Result != ResultOK || out.FirstTokenMs == nil || *out.FirstTokenMs != 5000 || out.FirstEventMs == nil || *out.FirstEventMs != 2000 || out.LatencyMs != 15000 {
-		t.Fatalf("first visible text/event/full response: %+v", out)
+	if out.Result != ResultOK || out.FirstTokenMs == nil || *out.FirstTokenMs != 5000 || out.FirstEventMs == nil || *out.FirstEventMs != 2000 || out.LatencyMs != 5000 {
+		t.Fatalf("first visible text/event/probe latency: %+v", out)
 	}
 	p := taskAV2Policy()
 	if got := applyOutcomeDelay(out, p); got.Result != ResultOK {
 		t.Fatalf("delay line must only see first visible text: %+v", got)
 	}
 	p.RuleVersion = RuleVersionLegacy
-	if got := applyOutcomeDelay(out, p); got.Result != ResultSlowResponse {
-		t.Fatal("legacy delay must use full response")
+	if got := applyOutcomeDelay(out, p); got.Result != ResultOK {
+		t.Fatal("legacy delay must use probe completion at first text")
 	}
 	out = taskAStream(t, TestProtocolResponses, []taskATimedFrame{{time.Second, "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"input\"}\n\n"}, {2 * time.Second, taskAResponseComplete}})
 	if out.FirstTokenMs == nil || *out.FirstTokenMs != 3000 {
@@ -87,14 +87,14 @@ func TestTaskAStreamingClassificationAndContent(t *testing.T) {
 		{"chat reasoning", TestProtocolChatCompletions, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking\"},\"finish_reason\":\"stop\"}]}\n\n", ResultOK},
 		{"chat array", TestProtocolChatCompletions, "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}]}\n\ndata: [DONE]\n\n", ResultOK},
 		{"chat empty array", TestProtocolChatCompletions, "data: {\"choices\":[{\"delta\":{\"content\":[]}}]}\n\ndata: [DONE]\n\n", ResultInvalidResponse},
-		{"chat no complete", TestProtocolChatCompletions, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", ResultNetworkFluctuation},
+		{"chat no complete", TestProtocolChatCompletions, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n", ResultOK},
 		{"chat rejects malformed before done", TestProtocolChatCompletions, "data: broken\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n", ResultInvalidResponse},
 		{"response incomplete", TestProtocolResponses, "data: {\"type\":\"response.incomplete\"}\n\n", ResultInvalidResponse},
 		{"response refused", TestProtocolResponses, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"refusal\"}]}}\n\n", ResultInvalidResponse},
 		{"response rate limit", TestProtocolResponses, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"rate_limit_exceeded\"}}}\n\n", ResultRateLimited},
 		{"response failure", TestProtocolResponses, "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"internal_error\"}}}\n\n", ResultServerError},
 		{"chat error", TestProtocolChatCompletions, "data: {\"error\":{\"code\":\"rate_limit_exceeded\"}}\n\n", ResultRateLimited},
-		{"response lost completion", TestProtocolResponses, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n", ResultNetworkFluctuation},
+		{"response lost completion", TestProtocolResponses, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n", ResultOK},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

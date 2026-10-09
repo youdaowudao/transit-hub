@@ -657,7 +657,7 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 			candidate := candidates[targetID]
 			candidate.target.InventoryComplete = adminInventoryComplete(*inventory)
 			candidate.target.TestMemberships = inventoryTestMemberships(*inventory, candidate.target.AccountID)
-			candidate.target.TestConfiguration = ResolveGroupTestConfiguration(candidate.target.TestMemberships, candidate.target.InventoryComplete, testConfigs)
+			candidate.target.TestConfiguration = ResolveGroupTestConfiguration(candidate.target.Platform, candidate.target.TestMemberships, candidate.target.InventoryComplete, testConfigs)
 			if !candidate.target.TestConfiguration.usable() {
 				continue
 			}

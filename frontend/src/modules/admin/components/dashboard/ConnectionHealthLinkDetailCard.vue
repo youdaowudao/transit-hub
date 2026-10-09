@@ -75,7 +75,7 @@ const slowResponseCount = computed(() => props.records.filter(record => record.r
 
 const delayedCount = computed(() => props.records.filter(record => record.result === 'slow_response' && record.ruleVersion === 'v2' && record.probeDisposition !== 'stale' && record.probeDisposition !== 'invalid').length)
 const eventResultLabel = (record: ConnectionHealthEvent) => record.result === 'slow_response' ? t(connectionHealthProbeResultLabelKey(record.result, record.ruleVersion)) : readableMessage(record.result)
-const eventMeasurements = (record: ConnectionHealthEvent) => `${record.firstTokenMs != null ? ` · 首字：${record.firstTokenMs}ms` : ''}${record.firstEventMs != null ? ` · 首个事件：${record.firstEventMs}ms` : ''}${record.latencyMs != null ? ` · 整段耗时：${record.latencyMs}ms` : ''}`
+const eventMeasurements = (record: ConnectionHealthEvent) => `${record.firstTokenMs != null ? ` · 首字：${record.firstTokenMs}ms` : ''}${record.firstEventMs != null ? ` · 首个事件：${record.firstEventMs}ms` : ''}${record.latencyMs != null ? ` · 探活耗时：${record.latencyMs}ms` : ''}`
 
 const eventSourceLabel = (source?: string): string => {
   const key = `${cardPrefix}.eventSources.${source || 'legacy'}`

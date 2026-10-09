@@ -3,6 +3,7 @@ package connection_health
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -142,47 +143,58 @@ func TestTaskAReviewPendingWinsLastEstimatedBudget(t *testing.T) {
 }
 func TestTaskAReviewFormalResponseUsesCurrentMeasurements(t *testing.T) {
 	for _, entry := range []string{"http", "sse"} {
-		t.Run(entry, func(t *testing.T) {
-			s, repo := protocolServiceFixture(t)
-			now := time.Now().UTC()
-			first, event := 1000, 900
-			last := now.Add(-time.Minute)
-			repo.states["sub2api:ws1:normal"] = map[string]ConnectionHealthState{"gpt-4o": {ConnectionID: "sub2api:ws1:normal", ModelName: "gpt-4o", State: StateHealthy, CurrentWeight: 100, LastLatencyMs: intPtr(2000), LastFirstTokenMs: &first, LastFirstEventMs: &event, LastSuccessAt: &last, LastSuccessLatencyMs: intPtr(2000), LastSuccessProtocol: protocolPointer(TestProtocolChatCompletions), LastProbeAt: &last, HealthEvidenceStatus: HealthEvidenceValid, HealthEvidenceProtocol: protocolPointer(TestProtocolChatCompletions), CounterProtocol: protocolPointer(TestProtocolChatCompletions)}}
-			s.probeRunner = &RealProbeRunner{now: func() time.Time { return now }, client: &http.Client{Transport: taskATransport(func(*http.Request) (*http.Response, error) {
-				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: &taskATimedReader{now: &now, frames: []taskATimedFrame{{7 * time.Second, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"}, {time.Second, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"}, {time.Second, ""}}}}, nil
-			})}}
-			var result any
-			if entry == "http" {
-				out, err := s.ProbeTarget(context.Background(), "user1", "sub2api:ws1:normal", []string{"gpt-4o"})
-				if err != nil || len(out) != 1 {
-					t.Fatal(out, err)
+		for _, success := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/success=%v", entry, success), func(t *testing.T) {
+				s, repo := protocolServiceFixture(t)
+				now := time.Now().UTC()
+				first, event := 1000, 900
+				last := now.Add(-time.Minute)
+				repo.states["sub2api:ws1:normal"] = map[string]ConnectionHealthState{"gpt-4o": {ConnectionID: "sub2api:ws1:normal", ModelName: "gpt-4o", State: StateHealthy, CurrentWeight: 100, LastLatencyMs: intPtr(2000), LastFirstTokenMs: &first, LastFirstEventMs: &event, LastSuccessAt: &last, LastSuccessLatencyMs: intPtr(2000), LastSuccessProtocol: protocolPointer(TestProtocolChatCompletions), LastProbeAt: &last, HealthEvidenceStatus: HealthEvidenceValid, HealthEvidenceProtocol: protocolPointer(TestProtocolChatCompletions), CounterProtocol: protocolPointer(TestProtocolChatCompletions)}}
+				s.probeRunner = &RealProbeRunner{now: func() time.Time { return now }, client: &http.Client{Transport: taskATransport(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: &taskATimedReader{now: &now, frames: []taskATimedFrame{{7 * time.Second, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"}, {time.Second, "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"}, {time.Second, ""}}}}, nil
+				})}}
+				if !success {
+					s.probeRunner.client.Transport = taskATransport(func(*http.Request) (*http.Response, error) {
+						return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: &taskATimedReader{now: &now, frames: []taskATimedFrame{{7 * time.Second, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"}}}}, nil
+					})
 				}
-				result = out[0]
-			} else {
-				events := protocolServiceSSE(t, s, "sub2api:ws1:normal")
-				for _, e := range events {
-					if len(e.Results) == 1 {
-						result = e.Results[0]
+				var result any
+				if entry == "http" {
+					out, err := s.ProbeTarget(context.Background(), "user1", "sub2api:ws1:normal", []string{"gpt-4o"})
+					if err != nil || len(out) != 1 {
+						t.Fatal(out, err)
+					}
+					result = out[0]
+				} else {
+					events := protocolServiceSSE(t, s, "sub2api:ws1:normal")
+					for _, e := range events {
+						if len(e.Results) == 1 {
+							result = e.Results[0]
+						}
+					}
+					if result == nil {
+						t.Fatalf("no SSE result: %+v", events)
 					}
 				}
-				if result == nil {
-					t.Fatalf("no SSE result: %+v", events)
+				data, err := json.Marshal(result)
+				if err != nil {
+					t.Fatal(err)
 				}
-			}
-			data, err := json.Marshal(result)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var fields map[string]any
-			if err = json.Unmarshal(data, &fields); err != nil {
-				t.Fatal(err)
-			}
-			if fields["requestFirstTokenMs"] != float64(8000) || fields["requestFirstEventMs"] != float64(7000) {
-				t.Fatalf("formal result missing current 8000/7000 measurements: %s", data)
-			}
-			if fields["firstTokenMs"] != float64(1000) || fields["firstEventMs"] != float64(900) {
-				t.Fatalf("current failure overwrote historical success: %s", data)
-			}
-		})
+				var fields map[string]any
+				if err = json.Unmarshal(data, &fields); err != nil {
+					t.Fatal(err)
+				}
+				wantToken, wantHistoryToken, wantHistoryEvent := any(nil), float64(1000), float64(900)
+				if success {
+					wantToken, wantHistoryToken, wantHistoryEvent = float64(8000), float64(8000), float64(7000)
+				}
+				if fields["requestFirstTokenMs"] != wantToken || fields["requestFirstEventMs"] != float64(7000) {
+					t.Fatalf("formal result missing current 8000/7000 measurements: %s", data)
+				}
+				if fields["firstTokenMs"] != wantHistoryToken || fields["firstEventMs"] != wantHistoryEvent {
+					t.Fatalf("current failure overwrote historical success: %s", data)
+				}
+			})
+		}
 	}
 }

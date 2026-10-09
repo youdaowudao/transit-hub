@@ -60,11 +60,19 @@ func defaultWorkspaceHealthSettings(userID, workspace string) WorkspaceHealthSet
 func DefaultRulePreset() RulePreset {
 	return RulePreset{Name: "新规则（推荐）", Kind: PresetRecommended, FailureThreshold: 3, SuccessThreshold: 2, CooldownSeconds: 300, FailedRetryIntervalSeconds: 600, LongFailureAfterSeconds: 86400, LongFailureIntervalSeconds: 3600, DelayLineMs: map[string]int{"responses": 10000, "chat_completions": 5000}, ObservationSeconds: 300, RecoveryStepPercent: 25, Policies: []RulePresetPolicy{}}
 }
+func recommendedRulePreset() RulePreset {
+	preset := DefaultRulePreset()
+	preset.DelayLineMs = map[string]int{"responses": 6000, "chat_completions": 6000}
+	return preset
+}
 func RulePresetForPolicy(policy Policy) RulePreset {
 	if policy.RulePreset != nil {
 		return *policy.RulePreset
 	}
 	preset := DefaultRulePreset()
+	if policy.RuleVersion == RuleVersionV2 {
+		preset = recommendedRulePreset()
+	}
 	// Only old in-memory callers lack a preset; production reads always attach one.
 	if policy.RuleVersion == "" {
 		preset.FailureThreshold = defaultInt(policy.FailureThreshold, 3)
@@ -87,6 +95,9 @@ func effectivePolicyFromPreset(policy Policy) Policy {
 func (preset RulePreset) DelayLine(protocol TestProtocol) int {
 	if line, ok := preset.DelayLineMs[string(protocol)]; ok {
 		return line
+	}
+	if preset.Kind != PresetLegacySnapshot && preset.Kind != PresetLegacyDefault {
+		return 6000
 	}
 	if protocol == TestProtocolResponses {
 		return 10000

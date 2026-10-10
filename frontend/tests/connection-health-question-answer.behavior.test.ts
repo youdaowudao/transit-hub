@@ -47,7 +47,11 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal
   }
 })
 
-vi.mock('@/modules/admin/api/connectionHealth', () => ({
+vi.mock('@/modules/admin/api/connectionHealth', async original => ({
+  ...await original<typeof import('@/modules/admin/api/connectionHealth')>(),
+  getModelControlTarget: async (targetId: string) => ({ targetId, items: [], candidates: [] }),
+  getModelControlSettings: async () => ({ minAccuracyPercent: 50, minJudgedAnswers: 3, version: 0 }),
+  verifyModelControl: async () => ({ items: [], errors: [] }),
   cancelQuestionAnswerBatch: harness.cancelQuestionAnswerBatch,
   getLatestQuestionAnswerBatch: harness.getLatestQuestionAnswerBatch,
   getQuestionAnswerBatch: harness.getQuestionAnswerBatch,
@@ -238,7 +242,7 @@ const mountQuestionAnswerDialog = async (target = primaryTarget) => {
       open: false,
       target,
     },
-    global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } },
+    global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: false } },
   })
   mountedWrappers.push(wrapper)
   await wrapper.setProps({ open: true })
@@ -259,7 +263,7 @@ const mountQuestionAnswerDialog = async (target = primaryTarget) => {
 const mountClosedDialog = () => {
   const wrapper = mount(ManualOneTimeProbeDialog, {
     props: { open: false, target: primaryTarget },
-    global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } },
+    global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: false } },
   })
   mountedWrappers.push(wrapper)
   return wrapper
@@ -314,7 +318,7 @@ const judgmentButtons = (wrapper: ReturnType<typeof rowContaining>) => wrapper.f
 
 const openProcessedAnswers = async (wrapper: VueWrapper) => {
   const section = wrapper.get('[data-testid="question-answer-processed"]')
-  if (!section.find('[data-testid="question-answer-processed-content"]').exists()) {
+  if (!section.find('[data-testid="question-answer-processed-content"]').exists() && section.find('button').exists()) {
     await section.find('button').trigger('click')
   }
   for (const group of section.findAll('[data-testid="question-answer-result-group"]')) {
@@ -683,7 +687,7 @@ describe('question-answer batch behavior', () => {
   it('shows the actual number of concurrent requests instead of one legacy model-question pair', async () => {
     const wrapper = await mountQuestionAnswerDialog()
 
-    expect(wrapper.text()).toContain('问答仍在运行，正在等待可复审回答。')
+    expect(wrapper.text()).toContain('答案返回后会自动判题，显示在这里')
     expect(wrapper.text()).not.toContain('正在处理 5 项')
     expect(wrapper.text()).not.toContain('正在测试：legacy-model × legacy-question')
     expect(wrapper.text()).not.toContain('完成 0/6')
@@ -3095,7 +3099,7 @@ describe('question-answer retained finalization', () => {
     const wrapper = await mountQuestionAnswerDialog()
     const retry = wrapper.find('[data-testid="question-answer-finalization-retry"]')
     expect(retry.exists()).toBe(true)
-    expect(wrapper.text()).toContain('收口失败')
+    expect(wrapper.text()).toContain('上一批问答结束处理失败')
     await retry.trigger('click')
     await flushPromises()
     expect(harness.cancelQuestionAnswerBatch).toHaveBeenCalledWith(primaryTarget.targetId, 'batch-review', expect.any(AbortSignal))
@@ -3120,7 +3124,7 @@ describe('question-answer retained finalization', () => {
     const wrapper = await mountQuestionAnswerDialog()
     await wrapper.find('[data-testid="question-answer-finalization-retry"]').trigger('click')
     await flushPromises()
-    expect(wrapper.text()).toContain('收口状态暂无法核对')
+    expect(wrapper.text()).toContain('暂时查不到上一批问答是否已结束')
     expect(wrapper.find('[data-testid="question-answer-finalization-retry"]').exists()).toBe(false)
     expect(harness.cancelQuestionAnswerBatch).toHaveBeenCalledTimes(1)
   })
@@ -3131,7 +3135,7 @@ describe('question-answer retained finalization', () => {
       finalization: { batchId: 'unknown-commit', state: 'failed', recovery: 'service_shutdown' },
     })
     const wrapper = await mountQuestionAnswerDialog()
-    expect(wrapper.text()).toContain('需维护人员关闭服务后收口')
+    expect(wrapper.text()).toContain('需要维护人员重启服务才能结束这批问答')
     expect(wrapper.find('[data-testid="question-answer-finalization-retry"]').exists()).toBe(false)
     expect(harness.cancelQuestionAnswerBatch).not.toHaveBeenCalled()
   })

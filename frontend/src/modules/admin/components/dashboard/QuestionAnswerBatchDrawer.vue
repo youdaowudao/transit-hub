@@ -2,8 +2,9 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Loader2, X } from 'lucide-vue-next'
 import { t, te } from '@/locales'
+import { Tooltip } from '@/components/ui/tooltip'
 import { connectionHealthMessageKey, isTestConfigurationBlocked, testProtocolName } from '../../composables/useConnectionHealth'
-import { discoverTargetModels, listTestQuestions, startQuestionAnswerBatch } from '../../api/connectionHealth'
+import { discoverTargetModels, getModelControlTarget, listTestQuestions, startQuestionAnswerBatch } from '../../api/connectionHealth'
 import type {
   AdminGroupHealth,
   ManualProbeModelOption,
@@ -39,6 +40,9 @@ interface BatchTargetPreview {
   incompatibleModelIds: string[]
   requestCount: number
   discoveryErrorKey: string
+  discoveredModelIds: string[]
+  managedModelIds: string[]
+  managedErrorKey: string
 }
 
 type BatchTargetOutcomeKind = 'started' | 'skipped' | 'failed'
@@ -59,6 +63,7 @@ interface BatchTargetOutcome {
 interface BatchRunSnapshot {
   preferenceScope: string
   previews: BatchTargetPreview[]
+  preparedModelIds: string[]
   questionIds: string[]
   reasoningEffort: QuestionAnswerReasoningEffort
   repeatCount: number
@@ -218,41 +223,31 @@ const prepare = async () => {
       return question ? [question.name] : []
     })
     preparedModelIds.value = [...resolved.modelIds]
-    const sourceCompatibility = compatibleQuestionAnswerModelIds(resolved.modelIds, sourceModels)
-    const nextPreviews: BatchTargetPreview[] = [{
-      target: source,
-      compatibleModelIds: sourceCompatibility.compatible,
-      incompatibleModelIds: sourceCompatibility.incompatible,
-      requestCount: sourceCompatibility.compatible.length * resolved.questionIds.length * resolved.repeatCount,
-      discoveryErrorKey: isTestConfigurationBlocked(source.testConfiguration) ? (source.testConfiguration?.blockedReason || 'admin.connectionHealth.errors.testConfigurationUnavailable') : '',
-    }]
-    for (const target of stableTargets.slice(1)) {
-      if (isTestConfigurationBlocked(target.testConfiguration)) {
-        nextPreviews.push({ target, compatibleModelIds: [], incompatibleModelIds: resolved.modelIds, requestCount: 0, discoveryErrorKey: target.testConfiguration?.blockedReason || 'admin.connectionHealth.errors.testConfigurationUnavailable' })
-        continue
-      }
+    const nextPreviews: BatchTargetPreview[] = []
+    for (const target of stableTargets) {
+      const preview: BatchTargetPreview = { target, compatibleModelIds: [], incompatibleModelIds: [...resolved.modelIds], requestCount: 0, discoveryErrorKey: '', discoveredModelIds: [], managedModelIds: [], managedErrorKey: '' }
+      if (isTestConfigurationBlocked(target.testConfiguration)) { preview.discoveryErrorKey = target.testConfiguration?.blockedReason || 'admin.connectionHealth.errors.testConfigurationUnavailable'; nextPreviews.push(preview); continue }
       try {
-        const models = await discoverTargetModels(target.targetId, controller.signal)
+        const models = target.targetId === source.targetId ? sourceModels : await discoverTargetModels(target.targetId, controller.signal)
         if (sequence !== preparationSequence || !visible.value || signature !== preparationSignature.value) return
+        preview.discoveredModelIds = models.map(model => model.id)
         const compatibility = compatibleQuestionAnswerModelIds(resolved.modelIds, models)
-        nextPreviews.push({
-          target,
-          compatibleModelIds: compatibility.compatible,
-          incompatibleModelIds: compatibility.incompatible,
-          requestCount: compatibility.compatible.length * resolved.questionIds.length * resolved.repeatCount,
-          discoveryErrorKey: '',
-        })
+        preview.compatibleModelIds = compatibility.compatible; preview.incompatibleModelIds = compatibility.incompatible
+        if (target.targetId.startsWith('sub2api:')) {
+          try { const managed = await getModelControlTarget(target.targetId, controller.signal); preview.managedModelIds = [...new Set(managed.items.map(item => item.modelName))] }
+          catch (error) { if (error instanceof Error && error.name === 'AbortError') return; preview.managedErrorKey = 'managedReadFailed' }
+          if (sequence !== preparationSequence || !visible.value || signature !== preparationSignature.value) return
+          preview.compatibleModelIds = [...new Set([...preview.compatibleModelIds, ...preview.managedModelIds])]
+          if (!preview.managedErrorKey && preview.managedModelIds.some(id => !preview.discoveredModelIds.includes(id))) preview.managedErrorKey = 'managedMissing'
+        }
+        preview.requestCount = preview.compatibleModelIds.length * resolved.questionIds.length * resolved.repeatCount
+        if (!preview.managedErrorKey && preview.requestCount > 50) preview.managedErrorKey = 'managedOverLimit'
       } catch (error) {
         if (error instanceof Error && error.name === 'AbortError') return
         if (sequence !== preparationSequence || !visible.value || signature !== preparationSignature.value) return
-        nextPreviews.push({
-          target,
-          compatibleModelIds: [],
-          incompatibleModelIds: resolved.modelIds,
-          requestCount: 0,
-          discoveryErrorKey: error instanceof Error ? error.message : 'admin.connectionHealth.errors.request',
-        })
+        preview.discoveryErrorKey = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
       }
+      nextPreviews.push(preview)
     }
     if (
       sequence === preparationSequence
@@ -281,7 +276,9 @@ const start = async () => {
       ...preview,
       compatibleModelIds: [...preview.compatibleModelIds],
       incompatibleModelIds: [...preview.incompatibleModelIds],
+      discoveredModelIds: [...preview.discoveredModelIds], managedModelIds: [...preview.managedModelIds],
     })),
+    preparedModelIds: [...preparedModelIds.value],
     questionIds: [...preparedQuestionIds.value],
     reasoningEffort: props.preferences.reasoningEffort,
     repeatCount: props.preferences.repeatCount,
@@ -313,25 +310,29 @@ const start = async () => {
         }]
         continue
       }
-      if (preview.compatibleModelIds.length === 0) {
-        outcomes.value = [...outcomes.value, {
-          targetId: preview.target.targetId,
-          accountName: preview.target.accountName,
-          kind: 'skipped',
-          compatibleModelIds: [],
-          incompatibleModelIds: [...preview.incompatibleModelIds],
-          requestCount: 0,
-          acceptedRequestCount: 0,
-          reasonKey: 'noCompatibleModels',
-          errorKey: '',
-        }]
+      let modelIds = [...preview.compatibleModelIds]
+      let managedReason = '', missingManaged: string[] = []
+      if (preview.target.targetId.startsWith('sub2api:')) {
+        let managedIds: string[] = []
+        try { const current = await getModelControlTarget(preview.target.targetId, controller.signal); managedIds = [...new Set(current.items.map(item => item.modelName))] }
+        catch (error) { if (error instanceof Error && error.name === 'AbortError') return; managedReason = 'managedReadFailed' }
+        if (!runIsCurrent(sequence, snapshot.preferenceScope)) return
+        const discovered = new Set(preview.discoveredModelIds)
+        modelIds = [...new Set([...snapshot.preparedModelIds.filter(id => discovered.has(id)), ...managedIds])]
+        missingManaged = managedIds.filter(id => !discovered.has(id))
+        if (!managedReason && missingManaged.length) managedReason = 'managedMissing'
+        if (!managedReason && modelIds.length * snapshot.questionIds.length * snapshot.repeatCount > 50) managedReason = 'managedOverLimit'
+      }
+      const requestCount = modelIds.length * snapshot.questionIds.length * snapshot.repeatCount
+      if (managedReason || modelIds.length === 0) {
+        outcomes.value = [...outcomes.value, { targetId: preview.target.targetId, accountName: preview.target.accountName, kind: managedReason === 'managedReadFailed' ? 'failed' : 'skipped', compatibleModelIds: modelIds, incompatibleModelIds: managedReason === 'managedMissing' ? missingManaged : [...preview.incompatibleModelIds], requestCount, acceptedRequestCount: 0, reasonKey: managedReason || 'noCompatibleModels', errorKey: '' }]
         continue
       }
 
       try {
         const batch = await startQuestionAnswerBatch(
           preview.target.targetId,
-          [...preview.compatibleModelIds],
+          [...modelIds],
           [...snapshot.questionIds],
           snapshot.reasoningEffort,
           snapshot.repeatCount,
@@ -343,9 +344,9 @@ const start = async () => {
           accountName: preview.target.accountName,
           kind: 'started',
           batchId: batch.batchId,
-          compatibleModelIds: [...preview.compatibleModelIds],
+          compatibleModelIds: [...modelIds],
           incompatibleModelIds: [...preview.incompatibleModelIds],
-          requestCount: preview.requestCount,
+          requestCount,
           acceptedRequestCount: batch.submittedCount,
           reasonKey: 'started',
           errorKey: '',
@@ -360,9 +361,9 @@ const start = async () => {
           targetId: preview.target.targetId,
           accountName: preview.target.accountName,
           kind: active ? 'skipped' : 'failed',
-          compatibleModelIds: [...preview.compatibleModelIds],
+          compatibleModelIds: [...modelIds],
           incompatibleModelIds: [...preview.incompatibleModelIds],
-          requestCount: preview.requestCount,
+          requestCount,
           acceptedRequestCount: 0,
           reasonKey: active ? 'activeBatch' : 'startFailed',
           errorKey: active ? '' : (error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'),
@@ -389,6 +390,9 @@ const cancelRun = () => {
 
 const outcomeReason = (outcome: BatchTargetOutcome): string => {
   switch (outcome.reasonKey) {
+    case 'managedReadFailed': return t('admin.connectionHealth.questionAnswerBatch.outcomes.managedReadFailed')
+    case 'managedMissing': return t('admin.connectionHealth.questionAnswerBatch.outcomes.managedMissing', { models: outcome.incompatibleModelIds.join('、') })
+    case 'managedOverLimit': return t('admin.connectionHealth.questionAnswerBatch.outcomes.managedOverLimit')
     case 'activeBatch': return t('admin.connectionHealth.questionAnswerBatch.outcomes.activeBatch')
     case 'noCompatibleModels': return t('admin.connectionHealth.questionAnswerBatch.outcomes.noCompatibleModels')
     case 'discoveryFailed': return t('admin.connectionHealth.questionAnswerBatch.outcomes.discoveryFailed')
@@ -648,7 +652,7 @@ onBeforeUnmount(() => {
                 <p>{{ t('admin.connectionHealth.testConfiguration.questionAnswerTimeout') }}</p>
                 <p>{{ t('admin.connectionHealth.questionAnswerBatch.compatibleModels', { models: preview.compatibleModelIds.join('、') || '-' }) }}</p>
                 <p v-if="preview.incompatibleModelIds.length">{{ t('admin.connectionHealth.questionAnswerBatch.incompatibleModels', { models: preview.incompatibleModelIds.join('、') }) }}</p>
-                <p>{{ t('admin.connectionHealth.questionAnswerBatch.requestCount', { count: preview.requestCount }) }}</p>
+                <p>{{ t('admin.connectionHealth.questionAnswerBatch.requestCount', { count: preview.requestCount }) }} · <Tooltip :text="preview.managedModelIds.join('、') || '-'" wide><span>{{ t('admin.connectionHealth.questionAnswerBatch.managedCount', { count: preview.managedModelIds.length }) }}</span></Tooltip></p><p v-if="preview.managedErrorKey" class="text-destructive">{{ t('admin.connectionHealth.questionAnswerBatch.outcomes.' + preview.managedErrorKey, { models: preview.managedModelIds.filter(id => !preview.discoveredModelIds.includes(id)).join('、') }) }}</p>
                 <p v-if="preview.discoveryErrorKey" class="break-words text-destructive">
                   {{ t('admin.connectionHealth.questionAnswerBatch.outcomes.discoveryFailed') }}：{{ safeConnectionHealthError(preview.discoveryErrorKey) }}
                 </p>

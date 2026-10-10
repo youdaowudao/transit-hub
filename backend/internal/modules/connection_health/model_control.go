@@ -14,6 +14,11 @@ type ModelControlActioner interface {
 	ReadSub2APIModelControlAccountContext(context.Context, upstream.Session, string) (upstream.Sub2APIModelControlAccount, error)
 	UpdateSub2APIAdminAccountModelMappingContext(context.Context, upstream.Session, string, map[string]string) error
 }
+type ModelControlSettings struct {
+	MinAccuracyPercent int   `json:"minAccuracyPercent"`
+	MinJudgedAnswers   int   `json:"minJudgedAnswers"`
+	Version            int64 `json:"version"`
+}
 type ModelControlRule struct {
 	ID                 string    `json:"-"`
 	UserID             string    `json:"-"`
@@ -42,6 +47,7 @@ type modelControlRound struct {
 	AccuracyPercent *float64   `json:"accuracyPercent"`
 }
 type modelControlBasis struct {
+	BusinessDay            string   `json:"businessDay"`
 	BatchID                string   `json:"batchId"`
 	RuleVersion            int64    `json:"ruleVersion"`
 	Decision               string   `json:"decision"`
@@ -114,9 +120,25 @@ type modelControlTarget struct {
 	Version                                                      int64
 	CreatedAt, UpdatedAt                                         time.Time
 }
-type ModelControlAccountSummary struct {
+type ModelControlSummaryModel struct {
+	ModelName string     `json:"modelName"`
+	Status    string     `json:"status"`
+	Decision  string     `json:"decision"`
+	Attention bool       `json:"attention"`
+	CheckedAt *time.Time `json:"checkedAt"`
+}
+type ModelControlCounts struct {
+	Total     int `json:"total"`
+	Open      int `json:"open"`
 	Closed    int `json:"closed"`
 	Attention int `json:"attention"`
+	Untested  int `json:"untested"`
+}
+type ModelControlAccountSummary struct {
+	Open      int                        `json:"open"`
+	Models    []ModelControlSummaryModel `json:"models"`
+	Closed    int                        `json:"closed"`
+	Attention int                        `json:"attention"`
 }
 type modelControlPendingView struct {
 	Operation     string     `json:"operation"`
@@ -159,6 +181,7 @@ type modelControlHealth struct {
 	State          *string `json:"state"`
 }
 type ModelControlItem struct {
+	Attention      bool                 `json:"attention"`
 	TargetID       string               `json:"targetId"`
 	AccountName    string               `json:"accountName"`
 	ModelName      string               `json:"modelName"`

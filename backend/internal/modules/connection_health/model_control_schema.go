@@ -42,6 +42,18 @@ END $$;
 CREATE INDEX IF NOT EXISTS idx_model_control_events_workspace ON connection_health_model_control_events(user_id,admin_account_id,created_at DESC,id DESC);
 CREATE INDEX IF NOT EXISTS idx_model_control_events_target ON connection_health_model_control_events(user_id,admin_account_id,target_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_question_answer_records_target_model_recent ON connection_health_question_answer_records(user_id,target_id,model_name,created_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS connection_health_model_control_settings (
+ user_id text NOT NULL, admin_account_id text NOT NULL,
+ min_accuracy_percent integer NOT NULL DEFAULT 50 CHECK(min_accuracy_percent BETWEEN 1 AND 100),
+ min_judged_answers integer NOT NULL DEFAULT 3 CHECK(min_judged_answers BETWEEN 1 AND 50),
+ version bigint NOT NULL DEFAULT 1 CHECK(version>=1), updated_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(user_id,admin_account_id)
+);
+DO $$ BEGIN
+ IF to_regclass('admin_accounts') IS NOT NULL AND NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='connection_health_model_control_settings'::regclass AND conname='connection_health_model_control_settings_workspace_fk') THEN
+  ALTER TABLE connection_health_model_control_settings ADD CONSTRAINT connection_health_model_control_settings_workspace_fk FOREIGN KEY(admin_account_id) REFERENCES admin_accounts(id) ON DELETE CASCADE;
+ END IF;
+END $$;
 `
 
 func (r *Repository) ensureModelControlSchema(ctx context.Context) error {

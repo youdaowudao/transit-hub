@@ -338,17 +338,23 @@ func TestC3ModelControlRED02ScheduledSourceWindow(t *testing.T) {
 	}
 	f.round("1", "A", 3, 0, 0)
 	item := f.manage("1", "A")
-	rule := item["rule"].(map[string]any)
-	f.expect("PUT", "model-control/rules", map[string]any{"modelName": "A", "minAccuracyPercent": 50, "minJudgedAnswers": 3, "includeManual": false, "includeScheduled": true, "expectedVersion": rule["version"]}, 200)
-	if f.item("1", "A")["decision"] != "close_recommended" {
-		t.Fatal("manual source not filtered")
+	if item["decision"] != "usable" || !item["rule"].(map[string]any)["includeManual"].(bool) || !item["rule"].(map[string]any)["includeScheduled"].(bool) {
+		t.Fatal("workspace rule must include manual and scheduled sources")
 	}
 	for i := 0; i < 20; i++ {
 		f.round("1", "A", 3, 0, 0)
 	}
-	if f.item("1", "A")["decision"] != "no_evidence" {
-		t.Fatal("searched beyond twenty model rounds")
+	pair := modelControlPair{c3REDTarget("1"), "A"}
+	rounds, err := f.service.modelControls.ListModelControlRounds(t.Context(), c3REDUser, []modelControlPair{pair})
+	if err != nil || len(rounds[pair]) != 20 {
+		t.Fatal("model rounds no longer bounded", rounds, err)
 	}
+	for _, round := range rounds[pair] {
+		if round.BatchID == batch {
+			t.Fatal("searched beyond twenty model rounds")
+		}
+	}
+
 }
 
 func TestC3ModelControlRED03CloseOnlyMappingAliases(t *testing.T) {
@@ -569,7 +575,7 @@ func TestC3ModelControlRED11PendingPreventsRemoveAndRulesHaveForeignKey(t *testi
 	f.bulkCode = 502
 	f.execute("1", "A", "close", p)
 	f.expect("DELETE", "model-control/managed", map[string]any{"targetId": c3REDTarget("1"), "modelName": "A", "expectedVersion": f.item("1", "A")["version"]}, 409)
-	f.expect("DELETE", "model-control/rules", map[string]any{"modelName": "A", "expectedVersion": item["rule"].(map[string]any)["version"]}, 409)
+	f.expect("DELETE", "model-control/rules", map[string]any{"modelName": "A", "expectedVersion": item["rule"].(map[string]any)["version"]}, 404)
 	if f.item("1", "A")["control"].(map[string]any)["pending"] == nil {
 		t.Fatal("rejected removal destroyed pending")
 	}

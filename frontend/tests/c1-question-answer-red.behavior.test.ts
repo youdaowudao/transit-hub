@@ -9,6 +9,7 @@ import type { AdminGroupHealth, QuestionAnswerStats } from '@/modules/admin/type
 const api = vi.hoisted(() => ({ questions: vi.fn(), models: vi.fn(), start: vi.fn(), refresh: vi.fn() }))
 vi.mock('@/modules/admin/api/connectionHealth', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/modules/admin/api/connectionHealth')>(),
+  getModelControlTarget: async (targetId: string) => ({ targetId, items: [], candidates: [] }),
   listTestQuestions: api.questions, discoverTargetModels: api.models, startQuestionAnswerBatch: api.start,
   refreshConnectionHealthAdminGroups: api.refresh, refreshConnectionHealthAdminGroupsAutomatically: api.refresh,
 }))

@@ -10,8 +10,8 @@ func TestC3ModelControlREDWriteProtectionBeforeStorage(t *testing.T) {
 	f := newC3REDFixture(t)
 	f.service.backgroundTasksDisabled = true
 	for _, route := range []struct{ method, path string }{
-		{"PUT", "rules"}, {"DELETE", "rules"}, {"POST", "managed"}, {"DELETE", "managed"},
-		{"POST", "preview"}, {"POST", "close"}, {"POST", "restore"}, {"POST", "close-account"}, {"POST", "verify"},
+		{"PUT", "settings"}, {"POST", "managed"}, {"DELETE", "managed"},
+		{"POST", "preview"}, {"POST", "close"}, {"POST", "restore"}, {"POST", "add"}, {"POST", "close-account"}, {"POST", "verify"},
 	} {
 		code, _ := f.request(route.method, "model-control/"+route.path, map[string]any{})
 		if code != 409 {

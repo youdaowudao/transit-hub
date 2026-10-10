@@ -24,7 +24,7 @@ import type {
   QuestionAnswerHistoryScope,
   QuestionAnswerTodaySummary,
   QuestionAnswerRecentSummaryItem,
-  ModelControlAccountSummary, ModelControlRule, ModelControlItem, ModelControlPreview, ModelControlResult, ModelControlBasis, ModelControlOperation, ModelControlPage, ModelControlEvent,
+  ModelControlAccountSummary, ModelControlSettings, ModelControlCounts, ModelControlItem, ModelControlPreview, ModelControlResult, ModelControlBasis, ModelControlOperation, ModelControlPage, ModelControlEvent,
   QuestionAnswerRuntimeSettings,
   QuestionAnswerScheduleLimits,
   QuestionAnswerScheduleInput,
@@ -1032,13 +1032,21 @@ export const setAdminGroupTestConfiguration = (adminGroupId: string, configurati
   })
 
 
-const validModelControlSummary = (value: unknown): value is ModelControlAccountSummary | null => value === null || Boolean(value && typeof value === 'object' && ['closed', 'attention'].every(key => Number.isInteger((value as Record<string, unknown>)[key]) && Number((value as Record<string, unknown>)[key]) >= 0))
+const validModelControlSummary = (value: unknown): value is ModelControlAccountSummary | null => {
+  if (value === null) return true
+  if (!value || typeof value !== 'object') return false
+  const summary = value as Record<string, unknown>
+  return ['open', 'closed', 'attention'].every(key => Number.isInteger(summary[key]) && Number(summary[key]) >= 0)
+    && Array.isArray(summary.models) && summary.models.every(model => model && typeof model === 'object'
+      && typeof model.modelName === 'string' && ['open', 'closed', 'unknown', 'not_provided', 'account_missing'].includes(model.status)
+      && typeof model.attention === 'boolean' && ['no_evidence', 'testing', 'awaiting_review', 'insufficient', 'close_recommended', 'usable'].includes(model.decision)
+      && (model.checkedAt === null || (typeof model.checkedAt === 'string' && Number.isFinite(Date.parse(model.checkedAt)))))
+}
 const modelControlPath = '/connection-health/model-control'
-export const listModelControlRules = (signal?: AbortSignal): Promise<{ items: ModelControlRule[] }> => requestJson(`${modelControlPath}/rules`, { signal })
-export const saveModelControlRule = (rule: Omit<ModelControlRule, 'version'>, expectedVersion: number, signal?: AbortSignal): Promise<ModelControlRule> => requestJson(`${modelControlPath}/rules`, { method: 'PUT', body: JSON.stringify({ modelName: rule.modelName, minAccuracyPercent: rule.minAccuracyPercent, minJudgedAnswers: rule.minJudgedAnswers, includeManual: rule.includeManual, includeScheduled: rule.includeScheduled, expectedVersion }), signal })
-export const deleteModelControlRule = (modelName: string, expectedVersion: number, signal?: AbortSignal): Promise<void> => requestJson(`${modelControlPath}/rules`, { method: 'DELETE', body: JSON.stringify({ modelName, expectedVersion }), signal })
+export const getModelControlSettings = (signal?: AbortSignal): Promise<ModelControlSettings> => requestJson(`${modelControlPath}/settings`, { signal })
+export const saveModelControlSettings = (settings: Omit<ModelControlSettings, 'version'>, expectedVersion: number, signal?: AbortSignal): Promise<ModelControlSettings> => requestJson(`${modelControlPath}/settings`, { method: 'PUT', body: JSON.stringify({ minAccuracyPercent: settings.minAccuracyPercent, minJudgedAnswers: settings.minJudgedAnswers, expectedVersion }), signal })
 export const getModelControlTarget = (targetId: string, signal?: AbortSignal): Promise<{ targetId: string; items: ModelControlItem[]; candidates: string[] }> => requestJson(`${modelControlPath}/targets/${encodeURIComponent(targetId)}`, { signal })
-export const listModelControlItems = (view: 'attention' | 'all', modelName: string, page: number, signal?: AbortSignal): Promise<ModelControlPage<ModelControlItem>> => requestJson(`${modelControlPath}/items?${new URLSearchParams({ view, modelName, page: String(page) })}`, { signal })
+export const listModelControlItems = (view: 'attention' | 'all', modelName: string, page: number, signal?: AbortSignal): Promise<ModelControlPage<ModelControlItem> & { counts: ModelControlCounts }> => requestJson(`${modelControlPath}/items?${new URLSearchParams({ view, modelName, page: String(page) })}`, { signal })
 export const addModelControlManaged = (targetId: string, modelName: string, signal?: AbortSignal): Promise<ModelControlItem> => requestJson(`${modelControlPath}/managed`, { method: 'POST', body: JSON.stringify({ targetId, modelName }), signal })
 export const removeModelControlManaged = (targetId: string, modelName: string, expectedVersion: number, abandonClosed: boolean, signal?: AbortSignal): Promise<void> => requestJson(`${modelControlPath}/managed`, { method: 'DELETE', body: JSON.stringify({ targetId, modelName, expectedVersion, abandonClosed }), signal })
 export const previewModelControl = (targetId: string, modelName: string, operation: ModelControlOperation, basis: ModelControlBasis, signal?: AbortSignal): Promise<ModelControlPreview> => requestJson(`${modelControlPath}/preview`, { method: 'POST', body: JSON.stringify({ targetId, modelName, operation, basis }), signal })

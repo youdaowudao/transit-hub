@@ -5,12 +5,15 @@ import (
 	"errors"
 	"log"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 	"transithub/backend/internal/modules/upstream"
 )
 
 type modelControlComputedPlan struct {
 	Preview ModelControlPreview
 	Close   modelClosePlan
+	Add     modelAddPlan
 	Restore modelRestorePlan
 	Detail  upstream.Sub2APIModelControlAccount
 	Refresh adminTargetRefresh
@@ -29,13 +32,17 @@ func modelControlAdmission(item ModelControlItem, op string) error {
 		if len(item.Control.ClosedEntries) == 0 || item.Decision == "testing" {
 			return modelControlConflict("NotEligible", item)
 		}
+	} else if op == "add" {
+		if item.Control.Observation.State != "not_provided" || len(item.Control.ClosedEntries) > 0 || item.Decision != "usable" {
+			return modelControlConflict("NotEligible", item)
+		}
 	} else {
 		return requestError(ErrorRequest)
 	}
 	return nil
 }
 func modelControlBasisMatches(a, b modelControlBasis) bool {
-	return a.BatchID == b.BatchID && a.RuleVersion == b.RuleVersion && a.Decision == b.Decision
+	return a.BatchID == b.BatchID && a.RuleVersion == b.RuleVersion && a.Decision == b.Decision && a.BusinessDay == b.BusinessDay
 }
 func (s *Service) modelControlInput(ctx context.Context, user, target, model, op string, basis modelControlBasis) (upstream.Session, string, string, ModelControlItem, modelControlTarget, error) {
 	if err := s.questionAnswerScheduleWriteGuard(); err != nil {
@@ -125,16 +132,25 @@ func (s *Service) computeModelControlPlan(ctx context.Context, user, workspace, 
 		p.Preview.Entries = append(p.Preview.Entries, modelMappingEntries(p.Restore.ManualRestored, "manually_restored")...)
 		p.Preview.Entries = append(p.Preview.Entries, modelMappingEntries(p.Restore.ManualChanged, "manually_changed")...)
 		p.Preview.NoRemoteWrite = p.Restore.NoRemoteWrite
+	case "add":
+		p.Add = planModelAdd(detail, item.ModelName)
+		entries = p.Add.Entries
+		p.Preview.Entries = modelMappingEntries(entries, "to_add")
+		if len(p.Add.Blocking) > 0 {
+			p.Preview.Entries = modelMappingEntries(p.Add.Blocking, "blocking")
+		}
 	case "close_account":
 		entries = detail.ModelMapping
 		p.Preview.Entries = modelMappingEntries(entries, "to_close")
 	}
 	p.Preview.PlanFingerprint = modelControlPlanFingerprint(op, detail.ModelMapping, entries, detail.Schedulable)
-	hp, reserved, err := s.modelControlReservations(ctx, user, workspace)
-	if err != nil {
-		return p, requestError(modelControlError("Storage"))
+	if op != "add" {
+		hp, reserved, err := s.modelControlReservations(ctx, user, workspace)
+		if err != nil {
+			return p, requestError(modelControlError("Storage"))
+		}
+		p.Preview.Groups = countModelSources(refresh.inventory, detail.AdminGroupAccountInfo, entries, hp, reserved, time.Now().UTC())
 	}
-	p.Preview.Groups = countModelSources(refresh.inventory, detail.AdminGroupAccountInfo, entries, hp, reserved, time.Now().UTC())
 	switch {
 	case refresh.accountsReadError || !adminInventoryComplete(refresh.inventory):
 		p.Preview.BlockReasonKey = modelControlError("InventoryIncomplete")
@@ -144,6 +160,8 @@ func (s *Service) computeModelControlPlan(ctx context.Context, user, workspace, 
 		p.Preview.BlockReasonKey = modelControlError("NotEligible")
 	case op == "close_account" && detail.Schedulable != nil && !*detail.Schedulable:
 		p.Preview.BlockReasonKey = modelControlError("AccountAlreadyUnschedulable")
+	case op == "add" && p.Add.ReasonKey != "":
+		p.Preview.BlockReasonKey = p.Add.ReasonKey
 	case op == "restore" && p.Restore.ReasonKey != "":
 		p.Preview.BlockReasonKey = p.Restore.ReasonKey
 	}
@@ -155,7 +173,7 @@ func (s *Service) computeModelControlPlan(ctx context.Context, user, workspace, 
 			}
 		}
 	}
-	if p.Preview.BlockReasonKey == "" && op == "restore" && !p.Restore.NoRemoteWrite {
+	if p.Preview.BlockReasonKey == "" && ((op == "restore" && !p.Restore.NoRemoteWrite) || op == "add") {
 		allowed := true
 		p.Preview.RequestHealth.Checked = true
 		p.Preview.RequestHealth.Allowed = &allowed
@@ -211,6 +229,8 @@ func (s *Service) persistModelControlPlan(ctx context.Context, object modelContr
 			} else {
 				event = "restore_blocked"
 			}
+		} else if op == "add" {
+			event = "add_blocked"
 		} else if op == "close_account" {
 			event = "account_schedulable_blocked"
 		} else {
@@ -392,6 +412,7 @@ func (s *Service) reconcileModelControlLate(ctx context.Context, user, ws, targe
 	return err
 }
 func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, op string, basis modelControlBasis, fingerprint string, confirm bool) (ModelControlResult, error) {
+	submitted := basis
 	session, ws, account, _, _, err := s.modelControlInput(ctx, user, target, model, op, basis)
 	if err != nil {
 		return ModelControlResult{}, err
@@ -437,8 +458,20 @@ func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, 
 	if err != nil {
 		return ModelControlResult{}, err
 	}
-	// Late attribution may have changed closed entries; use the same plan function again.
-	if op == "restore" {
+	if !modelControlBasisMatches(submitted, item.Basis) {
+		return ModelControlResult{}, modelControlConflict("BasisChanged", item)
+	}
+	if err = modelControlAdmission(item, op); err != nil {
+		return ModelControlResult{}, err
+	}
+	if op == "restore" && item.Decision != "usable" && !confirm {
+		return ModelControlResult{}, modelControlConflict("ConfirmationRequired", item)
+	}
+	if op == "add" && item.Decision != "usable" {
+		return ModelControlResult{}, modelControlConflict("NotEligible", item)
+	}
+	// Late attribution or changed upstream mappings require rebuilding the plan.
+	if op == "restore" || op == "add" {
 		plan, err = s.computeModelControlPlan(prep, user, ws, op, item, object, plan.Detail, plan.Refresh, plan.At)
 		if err != nil {
 			return ModelControlResult{}, err
@@ -459,7 +492,7 @@ func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, 
 		return s.modelControlResult(prep, user, ws, target, model, "blocked", plan.Preview.BlockReasonKey, plan.Preview.Entries, plan.Preview.Groups)
 	}
 	basis = item.Basis
-	basis.ConfirmWithoutEvidence = confirm
+	basis.ConfirmWithoutEvidence = op == "restore" && confirm
 	if item.Round != nil {
 		basis.AccuracyPercent = item.Round.AccuracyPercent
 	}
@@ -471,6 +504,9 @@ func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, 
 	if op == "close" {
 		pending.Entries = plan.Close.Entries
 		pending.AfterMapping = plan.Close.AfterMapping
+	} else if op == "add" {
+		pending.Entries = plan.Add.Entries
+		pending.AfterMapping = plan.Add.AfterMapping
 	} else {
 		pending.Entries = plan.Restore.Entries
 		pending.AfterMapping = plan.Restore.AfterMapping
@@ -546,6 +582,16 @@ func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, 
 			return events, nil
 		}
 		return nil, requestError(ErrorProbeTargetNotFound)
+	}, func(guardCtx context.Context, tx pgx.Tx, now time.Time) error {
+		var version int64
+		readErr := tx.QueryRow(guardCtx, `SELECT version FROM connection_health_model_control_settings WHERE user_id=$1 AND admin_account_id=$2`, user, ws).Scan(&version)
+		if readErr != nil && !errors.Is(readErr, pgx.ErrNoRows) {
+			return readErr
+		}
+		if version != submitted.RuleVersion || now.In(questionAnswerScheduleLocation).Format("2006-01-02") != submitted.BusinessDay {
+			return modelControlConflict("BasisChanged", nil)
+		}
+		return nil
 	})
 	if err != nil {
 		var commit *modelControlCommitError
@@ -670,6 +716,8 @@ func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, 
 			if resultOutcome == "succeeded" {
 				if op == "close" {
 					resultOutcome = "closed"
+				} else if op == "add" {
+					resultOutcome = "added"
 				} else {
 					resultOutcome = "restored"
 				}

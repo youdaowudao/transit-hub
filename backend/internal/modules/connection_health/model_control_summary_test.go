@@ -109,6 +109,24 @@ func TestModelControlSummariesAllReadTransportsAndFailures(t *testing.T) {
 					t.Fatalf("groups=%v body=%s", groups, response.Body.String())
 				}
 				group := groups[0].(map[string]any)
+				if failed {
+					if group["modelSupply"] != nil {
+						t.Fatal("failed summary still produced supply")
+					}
+				} else {
+					supply, ok := group["modelSupply"].(map[string]any)
+					if !ok {
+						t.Fatal("supply missing from group transport")
+					}
+					items := supply["items"].([]any)
+					if len(items) != 1 {
+						t.Fatal("supply has unrelated models", items)
+					}
+					item := items[0].(map[string]any)
+					if item["modelName"] != "A" || item["open"] != float64(1) || item["closed"] != float64(1) || item["unknown"] != float64(0) {
+						t.Fatal("wrong supply", item)
+					}
+				}
 				accounts := group["accounts"].([]any)
 				found := false
 				for _, raw := range accounts {

@@ -2012,13 +2012,20 @@ export default {
             failed: '失败',
             cancelled: '已终止'
           },
+          failureEvidence: {
+            listHint: '失败的条目如果保存了上游的返回，下面会显示返回码和原话；没有保存的不显示。',
+            note: '这是上游当时的返回，只用来看这条为什么失败，不会修改主站。偶尔失败可以稍后再答一次；一直失败请把这段话发给上游询问。',
+            status: '上游返回码',
+            excerpt: '上游原话（已隐藏账号密钥，最多 500 字）',
+            emptyExcerpt: '这条记录没有保存上游原话。'
+          },
           errorTypes: {
             network: '网络请求失败。',
             rate_limited: '上游请求被限流。',
             auth: '上游鉴权失败。',
             model_not_found: '上游未找到该模型。',
             server_error: '上游服务返回错误。',
-            invalid_response: '上游响应格式无法识别。',
+            invalid_response: '未能取得可用的答案。',
             response_too_large: '上游响应超过大小限制。',
             timeout: '单次问答超过 10 分钟。',
             storage_error: '记录保存失败。',

@@ -321,3 +321,141 @@ describe('C2 running protection and retained account result display', () => {
     expect(wrapper.findAll('button').some(item => /判断|发题/.test(item.text()))).toBe(false)
   })
 })
+
+
+// 2026-10-10 SPEC §5.11: these are real mounts of the retained exact-batch dialog.
+const scheduleEvidenceCopy = {
+  note: '这是上游当时的返回，只用来看这条为什么失败，不会修改主站。偶尔失败可以稍后再答一次；一直失败请把这段话发给上游询问。',
+  status: '上游返回码',
+  excerpt: '上游原话（已隐藏账号密钥，最多 500 字）',
+  emptyExcerpt: '这条记录没有保存上游原话。',
+}
+const scheduleEvidenceStates = [
+  { name: 'status and excerpt', fields: { upstreamStatus: 400, upstreamExcerpt: '{"error":"定时证据甲"}' }, status: 400, excerpt: '{"error":"定时证据甲"}' },
+  { name: 'status only', fields: { upstreamStatus: 429, upstreamExcerpt: '' }, status: 429, excerpt: '' },
+  { name: 'excerpt only', fields: { upstreamStatus: null, upstreamExcerpt: '定时独立原话证据乙' }, status: null, excerpt: '定时独立原话证据乙' },
+  { name: 'neither field has a value', fields: { upstreamStatus: null, upstreamExcerpt: '' }, status: null, excerpt: '' },
+  { name: 'legacy omitted fields', fields: {}, status: null, excerpt: '' },
+  { name: 'HTML is literal text', fields: { upstreamStatus: 500, upstreamExcerpt: '<img src=x onerror="window.__qaEvidenceXss=true">定时报错' }, status: 500, excerpt: '<img src=x onerror="window.__qaEvidenceXss=true">定时报错' },
+]
+const scheduleEvidenceBatch = (batchId: string, fields: { upstreamStatus?: number | null; upstreamExcerpt?: string }, errorType = 'network', status: 'failed' | 'cancelled' = 'failed') => ({
+  batchId, active: false, reasoningEffort: 'medium' as const, repeatCount: 1,
+  submittedCount: 1, completedCount: 1, runningCount: 0,
+  records: [{
+    id: `${batchId}-record`, batchId, targetId: 'sub2api:ws1:a', modelName: 'm1',
+    questionId: 'q1', questionName: `定时取证题目 ${batchId}`, questionBody: '定时失败题干',
+    questionKeywordSnapshot: null, reasoningEffort: 'medium' as const, requestProtocol: 'responses' as const,
+    status, errorType, answerBody: '', answerJudgment: null, judgmentSource: null,
+    manualError: false, repeatIndex: 1, createdAt: '2026-10-10T10:00:00Z',
+    startedAt: '2026-10-10T10:00:01Z', completedAt: '2026-10-10T10:00:02Z',
+    updatedAt: '2026-10-10T10:00:02Z', ...fields,
+  }],
+  stats: {
+    ...c2Stats(), requests: { submitted: 1, inProgress: 0, succeeded: 0, failed: status === 'failed' ? 1 : 0, cancelled: status === 'cancelled' ? 1 : 0 },
+  },
+})
+const mountScheduleEvidence = async (batchId: string) => {
+  const wrapper = track(mount(QuestionAnswerScheduleBatchDialog, {
+    props: { targetId: 'sub2api:ws1:a', batchId, accountName: '冻结账号名', workspace: 'ws1' },
+    global: { stubs: { Teleport: true } },
+  }))
+  await flushPromises()
+  return wrapper
+}
+const expectScheduleEvidence = (wrapper: VueWrapper, state: typeof scheduleEvidenceStates[number]) => {
+  const row = wrapper.get('article')
+  const visible = state.status !== null || Boolean(state.excerpt)
+  expect(row.text().includes(scheduleEvidenceCopy.note)).toBe(visible)
+  expect(row.text().includes(scheduleEvidenceCopy.status)).toBe(state.status !== null)
+  if (state.excerpt) expect(row.text()).toContain(scheduleEvidenceCopy.excerpt)
+  else if (!visible) expect(row.text()).not.toContain(scheduleEvidenceCopy.excerpt)
+  expect(row.text().includes(scheduleEvidenceCopy.emptyExcerpt)).toBe(state.status !== null && !state.excerpt)
+  if (state.status !== null) {
+    const value = row.findAll('*').find(element => element.text() === String(state.status))
+    expect(value, 'saved status appears as its own readable value').toBeDefined()
+    expect(value!.classes()).toEqual(expect.arrayContaining(['text-sm', 'font-semibold']))
+  }
+  if (state.excerpt) {
+    const excerpt = row.findAll('*').find(element => element.text() === state.excerpt)
+    expect(excerpt, 'saved excerpt is literal wrapping text').toBeDefined()
+    expect(excerpt!.classes()).toEqual(expect.arrayContaining(['whitespace-pre-wrap', 'break-all']))
+  }
+  expect(row.find('img').exists()).toBe(false)
+  expect(row.find('script').exists()).toBe(false)
+  expect(wrapper.text()).not.toContain('格式无法识别')
+  expect(wrapper.text()).not.toContain('上游有返回')
+  expect(wrapper.text()).not.toContain('上游没有返回任何文字')
+}
+
+describe('scheduled exact-batch failure evidence', () => {
+  it.each(scheduleEvidenceStates)('renders $name with the exact explanatory copy and no contradictory evidence', async state => {
+    const batch = scheduleEvidenceBatch('schedule-evidence', state.fields)
+    api.getQuestionAnswerBatch.mockResolvedValue(batch)
+    const wrapper = await mountScheduleEvidence(batch.batchId)
+    const row = wrapper.get('article')
+    expect(row.text()).toContain('定时取证题目 schedule-evidence · m1 · failed')
+    expectScheduleEvidence(wrapper, state)
+    expect(row.text()).toContain('网络请求失败。')
+    expect(row.text()).not.toContain('network')
+    expect(api.getLatestQuestionAnswerBatch).not.toHaveBeenCalled()
+    expect(api.runQuestionAnswerSchedule).not.toHaveBeenCalled()
+    expect(wrapper.findAll('button').some(item => /判断|发题/.test(item.text()))).toBe(false)
+  })
+
+  it.each([
+    ['invalid_response', '未能取得可用的答案。'],
+    ['rate_limited', '上游请求被限流。'],
+    ['not_a_known_error', '问答请求失败。'],
+  ])('translates %s to its shared Chinese failure reason', async (errorType, expected) => {
+    const batch = scheduleEvidenceBatch('schedule-reason', {}, errorType)
+    api.getQuestionAnswerBatch.mockResolvedValue(batch)
+    const wrapper = await mountScheduleEvidence(batch.batchId)
+    expect(wrapper.get('article').text()).toBe(`定时取证题目 schedule-reason · m1 · failed · ${expected}`)
+    expect(wrapper.text()).not.toContain(errorType)
+    expect(wrapper.text()).not.toContain('格式无法识别')
+    expect(wrapper.text()).not.toContain(scheduleEvidenceCopy.note)
+  })
+
+  it('keeps a cancelled empty-reason record without a fallback failure message or evidence', async () => {
+    const batch = scheduleEvidenceBatch('schedule-cancelled', {}, '', 'cancelled')
+    api.getQuestionAnswerBatch.mockResolvedValue(batch)
+    const wrapper = await mountScheduleEvidence(batch.batchId)
+    expect(wrapper.get('article').text()).toBe('定时取证题目 schedule-cancelled · m1 · cancelled')
+    expect(wrapper.text()).not.toContain('问答请求失败。')
+    expectScheduleEvidence(wrapper, scheduleEvidenceStates[4]!)
+  })
+
+  it('refreshes the exact record and removes its previous saved evidence when both fields become empty', async () => {
+    const first = scheduleEvidenceBatch('schedule-refresh', { upstreamStatus: 400, upstreamExcerpt: '定时刷新前唯一原话' })
+    const refreshed = scheduleEvidenceBatch('schedule-refresh', { upstreamStatus: null, upstreamExcerpt: '' })
+    api.getQuestionAnswerBatch.mockResolvedValueOnce(first).mockResolvedValue(refreshed)
+    const wrapper = await mountScheduleEvidence(first.batchId)
+    expect(wrapper.get('article').text()).toContain('定时刷新前唯一原话')
+    await button(wrapper, '刷新准确批次').trigger('click'); await flushPromises()
+    expect(wrapper.get('article').text()).toContain('网络请求失败。')
+    expect(wrapper.text()).not.toContain('定时刷新前唯一原话')
+    expectScheduleEvidence(wrapper, scheduleEvidenceStates[3]!)
+    expect(api.getQuestionAnswerBatch).toHaveBeenCalledTimes(2)
+    expect(api.getLatestQuestionAnswerBatch).not.toHaveBeenCalled()
+  })
+
+  it('uses the selected exact batch evidence and clears the previous block when moving to a legacy batch', async () => {
+    const first = scheduleEvidenceBatch('schedule-switch-a', { upstreamStatus: 400, upstreamExcerpt: '定时批次甲唯一原话' })
+    const second = scheduleEvidenceBatch('schedule-switch-b', { upstreamStatus: null, upstreamExcerpt: '定时批次乙唯一原话' })
+    const legacy = scheduleEvidenceBatch('schedule-switch-legacy', {})
+    api.getQuestionAnswerBatch.mockImplementation(async (_targetId: string, batchId: string) => (
+      [first, second, legacy].find(batch => batch.batchId === batchId)
+    ))
+    const wrapper = await mountScheduleEvidence(first.batchId)
+    expect(wrapper.get('article').text()).toContain('定时批次甲唯一原话')
+    await wrapper.setProps({ batchId: second.batchId }); await flushPromises()
+    expect(wrapper.get('article').text()).toContain('定时批次乙唯一原话')
+    expect(wrapper.text()).not.toContain('定时批次甲唯一原话')
+    expectScheduleEvidence(wrapper, { ...scheduleEvidenceStates[2]!, excerpt: '定时批次乙唯一原话' })
+    await wrapper.setProps({ batchId: legacy.batchId }); await flushPromises()
+    expect(wrapper.text()).not.toContain('定时批次甲唯一原话')
+    expect(wrapper.text()).not.toContain('定时批次乙唯一原话')
+    expectScheduleEvidence(wrapper, scheduleEvidenceStates[4]!)
+    expect(api.getQuestionAnswerBatch).toHaveBeenCalledTimes(3)
+  })
+})

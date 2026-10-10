@@ -114,7 +114,11 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal
   }
 })
 
-vi.mock('@/modules/admin/api/connectionHealth', () => ({
+vi.mock('@/modules/admin/api/connectionHealth', async original => ({
+  ...await original<typeof import('@/modules/admin/api/connectionHealth')>(),
+  getModelControlTarget: async (targetId: string) => ({ targetId, items: [], candidates: [] }),
+  getModelControlSettings: async () => ({ minAccuracyPercent: 50, minJudgedAnswers: 3, version: 0 }),
+  verifyModelControl: async () => ({ items: [], errors: [] }),
   cancelQuestionAnswerBatch: harness.cancelQuestionAnswerBatch,
   getLatestQuestionAnswerBatch: harness.getLatestQuestionAnswerBatch,
   getQuestionAnswerBatch: harness.getQuestionAnswerBatch,

@@ -42,7 +42,11 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal
   }
 })
 
-vi.mock('@/modules/admin/api/connectionHealth', () => ({
+vi.mock('@/modules/admin/api/connectionHealth', async original => ({
+  ...await original<typeof import('@/modules/admin/api/connectionHealth')>(),
+  getModelControlTarget: async (targetId: string) => ({ targetId, items: [], candidates: [] }),
+  getModelControlSettings: async () => ({ minAccuracyPercent: 50, minJudgedAnswers: 3, version: 0 }),
+  verifyModelControl: async () => ({ items: [], errors: [] }),
   cancelQuestionAnswerBatch: harness.cancelQuestionAnswerBatch,
   getLatestQuestionAnswerBatch: harness.getLatestQuestionAnswerBatch,
   getQuestionAnswerBatch: harness.getQuestionAnswerBatch,
@@ -177,7 +181,7 @@ afterEach(() => {
 const mountDialog = async () => {
   const wrapper = mount(ManualOneTimeProbeDialog, {
     props: { open: false, target: primaryTarget },
-    global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } },
+    global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: false } },
   })
   mountedWrappers.push(wrapper)
   await wrapper.setProps({ open: true })
@@ -319,7 +323,7 @@ describe('question-answer repeat, queue and model statistics', () => {
     const wrapper = await mountDialog()
 
     expect(wrapper.get('[data-testid="question-answer-configuration"]').text()).toContain('每组合 4 次')
-    expect(wrapper.text()).toContain('问答仍在运行，正在等待可复审回答。')
+    expect(wrapper.text()).toContain('答案返回后会自动判题，显示在这里')
     expect(wrapper.text()).not.toContain('等待 3 · 运行 2 · 完成 7')
     expect(wrapper.text()).not.toContain('正在排队，会自动开始，请勿重复提交')
     expect(wrapper.text()).not.toMatch(/队列第|预计完成|前面还有/)

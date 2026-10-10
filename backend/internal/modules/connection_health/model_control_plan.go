@@ -201,10 +201,16 @@ func attributeModelControlEntries(mapping, closed map[string]string, pending *mo
 		} else {
 			if !exists {
 				e.State = "still_closed"
+				if pending.Operation == "add" {
+					e.State = "not_added"
+				}
 			} else {
 				delete(a.ClosedEntries, e.Key)
 				if actual == e.Value {
 					e.State = "restored"
+					if pending.Operation == "add" {
+						e.State = "added"
+					}
 					success++
 				} else {
 					e.State = "manually_changed"
@@ -311,4 +317,47 @@ func modelControlMappedModel(mapping map[string]string, key string) string {
 		}
 	}
 	return value
+}
+
+type modelAddPlan struct {
+	ReasonKey                       string
+	Entries, AfterMapping, Blocking map[string]string
+}
+
+func planModelAdd(d upstream.Sub2APIModelControlAccount, model string) modelAddPlan {
+	p := modelAddPlan{Entries: map[string]string{}, AfterMapping: cloneModelMapping(d.ModelMapping)}
+	switch {
+	case d.Type != "apikey" || (d.Platform != "openai" && d.Platform != "anthropic"):
+		p.ReasonKey = modelControlError("AddTypeUnsupported")
+	case d.Platform == "openai" && d.OpenAIPassthrough:
+		p.ReasonKey = modelControlError("AddPassthrough")
+	case !d.ModelMappingKnown:
+		p.ReasonKey = modelControlError("AccountReadFailed")
+	case len(d.ModelMapping) == 0:
+		p.ReasonKey = modelControlError("AddMappingEmpty")
+	}
+	if p.ReasonKey != "" {
+		return p
+	}
+	for _, entry := range modelMappingEntries(d.ModelMapping, "") {
+		if entry.Value == model {
+			p.ReasonKey = modelControlError("AlreadyProvided")
+			return p
+		}
+	}
+	if value, exists := d.ModelMapping[model]; exists {
+		p.ReasonKey = modelControlError("AddKeyConflict")
+		p.Blocking = map[string]string{model: value}
+		return p
+	}
+	for _, entry := range modelMappingEntries(d.ModelMapping, "") {
+		if strings.HasSuffix(entry.Key, "*") && strings.HasPrefix(model, strings.TrimSuffix(entry.Key, "*")) {
+			p.ReasonKey = modelControlError("AddWildcardConflict")
+			p.Blocking = map[string]string{entry.Key: entry.Value}
+			return p
+		}
+	}
+	p.Entries[model] = model
+	p.AfterMapping[model] = model
+	return p
 }

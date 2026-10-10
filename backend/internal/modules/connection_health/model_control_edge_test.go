@@ -97,8 +97,8 @@ func TestModelControlVerifyBusyLeaseAndCompleteDeduplicatedTargets(t *testing.T)
 	defer release()
 	verify := f.verify("1")
 	errors := verify["errors"].([]any)
-	if len(errors) != 1 || !strings.Contains(errors[0].(map[string]any)["reasonKey"].(string), "Processing") {
-		t.Fatal("busy account verification did not report processing")
+	if len(errors) != 1 || !strings.Contains(errors[0].(map[string]any)["reasonKey"].(string), "Busy") {
+		t.Fatal("busy account verification did not report Busy")
 	}
 	if f.writeCount() != 0 {
 		t.Fatal("verification wrote main site")

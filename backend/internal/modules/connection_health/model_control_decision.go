@@ -1,5 +1,7 @@
 package connection_health
 
+import "time"
+
 type modelControlDecision struct {
 	Decision, Reason string
 	AccuracyPercent  *float64
@@ -48,4 +50,13 @@ func evaluateModelControlDecision(latest *modelControlRound, rule ModelControlRu
 		d.Decision, d.Reason = "usable", "accuracy_met"
 	}
 	return d
+}
+
+func modelControlRoundIsToday(round *modelControlRound, now time.Time) bool {
+	if round == nil {
+		return false
+	}
+	ry, rm, rd := round.CreatedAt.In(questionAnswerScheduleLocation).Date()
+	ny, nm, nd := now.In(questionAnswerScheduleLocation).Date()
+	return ry == ny && rm == nm && rd == nd
 }

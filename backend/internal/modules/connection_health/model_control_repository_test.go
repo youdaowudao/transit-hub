@@ -24,26 +24,25 @@ func TestModelControlPostgresRuleVersionForeignKeyAndWorkspaceCascade(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	rules, err := repo.ListModelControlRules(t.Context(), "user", "ws1")
-	if err != nil || len(rules) != 1 || rules[0].MinAccuracyPercent != 50 || rules[0].MinJudgedAnswers != 3 {
-		t.Fatal("default rule not inserted atomically")
+	settings, err := repo.GetModelControlSettings(t.Context(), "user", "ws1")
+	if err != nil || settings != (ModelControlSettings{50, 3, 0}) {
+		t.Fatal("default settings wrong", settings, err)
 	}
-	rule := rules[0]
-	rule.MinAccuracyPercent = 60
-	saved, err := repo.UpsertModelControlRule(t.Context(), rule, rule.Version)
-	if err != nil || saved.Version != 2 {
-		t.Fatalf("save version=%+v err=%v", saved, err)
+	settings.MinAccuracyPercent = 60
+	saved, err := repo.SaveModelControlSettings(t.Context(), "user", "ws1", settings, 0)
+	if err != nil || saved.Version != 1 {
+		t.Fatalf("save=%+v err=%v", saved, err)
 	}
-	if _, err := repo.UpsertModelControlRule(t.Context(), rule, rule.Version); err == nil {
-		t.Fatal("stale version replaced rule")
+	if _, err = repo.SaveModelControlSettings(t.Context(), "user", "ws1", settings, 0); err == nil {
+		t.Fatal("stale save succeeded")
 	}
-	if err := repo.DeleteModelControlRule(t.Context(), "user", "ws1", "A", 2); err == nil {
-		t.Fatal("managed rule was deleted")
+	if _, err = pool.Exec(t.Context(), `DELETE FROM connection_health_model_control_rules WHERE model_name='A'`); err == nil {
+		t.Fatal("managed legacy rule lost its foreign key protection")
 	}
 	if _, err := pool.Exec(t.Context(), `DELETE FROM admin_accounts WHERE id='ws1'`); err != nil {
 		t.Fatalf("workspace cascade failed: %v", err)
 	}
-	for _, table := range []string{"connection_health_model_control_targets", "connection_health_model_control_rules", "connection_health_model_control_events"} {
+	for _, table := range []string{"connection_health_model_control_targets", "connection_health_model_control_rules", "connection_health_model_control_events", "connection_health_model_control_settings"} {
 		var count int
 		if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM `+table).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("workspace leaked %s count=%d err=%v", table, count, err)
@@ -130,8 +129,7 @@ func TestModelControlPostgresConcurrentRuleDeletionCannotCreateOrphan(t *testing
 	if err := repo.EnsureSchema(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	rule := ModelControlRule{UserID: "user", AdminAccountID: "ws1", ModelName: "A", MinAccuracyPercent: 50, MinJudgedAnswers: 3, IncludeManual: true, IncludeScheduled: true}
-	if _, err := repo.UpsertModelControlRule(t.Context(), rule, 0); err != nil {
+	if _, err := pool.Exec(t.Context(), `INSERT INTO connection_health_model_control_rules(id,user_id,admin_account_id,model_name) VALUES('legacy-rule','user','ws1','A')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(t.Context(), `CREATE FUNCTION c3_insert_barrier() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(9314721);RETURN NEW;END $$;CREATE TRIGGER c3_model_control_insert_barrier BEFORE INSERT ON connection_health_model_control_targets FOR EACH ROW EXECUTE FUNCTION c3_insert_barrier()`); err != nil {

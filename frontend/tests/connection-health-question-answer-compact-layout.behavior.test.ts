@@ -43,7 +43,11 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal
   }
 })
 
-vi.mock('@/modules/admin/api/connectionHealth', () => ({
+vi.mock('@/modules/admin/api/connectionHealth', async original => ({
+  ...await original<typeof import('@/modules/admin/api/connectionHealth')>(),
+  getModelControlTarget: async (targetId: string) => ({ targetId, items: [], candidates: [] }),
+  getModelControlSettings: async () => ({ minAccuracyPercent: 50, minJudgedAnswers: 3, version: 0 }),
+  verifyModelControl: async () => ({ items: [], errors: [] }),
   cancelQuestionAnswerBatch: harness.cancelQuestionAnswerBatch,
   getLatestQuestionAnswerBatch: harness.getLatestQuestionAnswerBatch,
   getQuestionAnswerBatch: harness.getQuestionAnswerBatch,
@@ -181,7 +185,7 @@ const mountDialog = async (questionAnswerPreferences?: {
 }) => {
   const wrapper = mount(ManualOneTimeProbeDialog, {
     props: { open: false, target, ...(questionAnswerPreferences ? { questionAnswerPreferences } : {}) },
-    global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } },
+    global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: false } },
   })
   mountedWrappers.push(wrapper)
   await wrapper.setProps({ open: true })
@@ -312,7 +316,7 @@ describe('question-answer compact layout primitives', () => {
 
     const wrapper = await mountDialog()
     const orderedSections = wrapper.findAll('[data-question-answer-section]').map(section => section.attributes('data-question-answer-section'))
-    expect(orderedSections).toEqual(['stats', 'pending', 'processed', 'configuration', 'history'])
+    expect(orderedSections).toEqual(['stats', 'processed', 'pending', 'configuration', 'history'])
 
     const pending = wrapper.find('[data-testid="question-answer-pending"]')
     expect(pending.text()).toContain('待人工判断')
@@ -366,14 +370,14 @@ describe('question-answer compact layout primitives', () => {
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
     expect(processed.text()).toContain('判题结果 0 条 · 正确 0 · 错误 0')
-    expect(processed.text()).toContain('共 6 条')
-    expect(processed.text()).toContain('未返回 6 条')
-    expect(processed.text()).toContain('进行中')
-    expect(processed.text()).toContain('已用时')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('共 6 条')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('未返回 6 条')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('进行中')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('已用时')
     const summary = processed.get('[data-testid="question-answer-processed-summary"]')
     expect(summary.classes()).toEqual(expect.arrayContaining(['text-sm', 'font-semibold', 'tabular-nums']))
     const batchReminder = wrapper.get('[data-testid="question-answer-review-batch"]')
-    expect(batchReminder.classes()).toEqual(expect.arrayContaining(['text-xs', 'text-muted-foreground']))
+    expect(batchReminder.classes()).toContain('text-muted-foreground'); expect(wrapper.get('[data-testid="question-answer-batch-line"]').classes()).toContain('text-xs')
   })
 
   it('uses inProgress for the visible waiting count when pending and running coexist', async () => {
@@ -404,9 +408,9 @@ describe('question-answer compact layout primitives', () => {
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
     expect(processed.text()).toContain('判题结果 2 条 · 正确 1 · 错误 1')
-    expect(processed.text()).toContain('共 5 条')
-    expect(processed.text()).toContain('未返回 3 条')
-    expect(processed.text()).not.toContain('未返回 1 条')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('共 5 条')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('未返回 3 条')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).not.toContain('未返回 1 条')
   })
 
   it('shows terminal completion and remaining review count without replacing processed totals', async () => {
@@ -435,10 +439,10 @@ describe('question-answer compact layout primitives', () => {
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
     expect(processed.text()).toContain('判题结果 1 条 · 正确 1 · 错误 0')
-    expect(processed.text()).toContain('共 3 条')
-    expect(processed.text()).toContain('待人工判断 1 条')
-    expect(processed.text()).toContain('已完成')
-    expect(processed.text()).toContain('已用时')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('共 3 条')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('待人工判断 1 条')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('已完成')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('已用时')
   })
 
   it('shows completed and pending-review status when every successful answer awaits review', async () => {
@@ -469,9 +473,9 @@ describe('question-answer compact layout primitives', () => {
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
     expect(processed.text()).toContain('判题结果 0 条 · 正确 0 · 错误 0')
-    expect(processed.text()).toContain('共 1 条')
-    expect(processed.text()).toContain('待人工判断 1 条')
-    expect(processed.text()).toContain('已完成')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('共 1 条')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('待人工判断 1 条')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('已完成')
   })
 
   it('marks an all-cancelled terminal batch as terminated instead of completed', async () => {
@@ -498,8 +502,8 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
-    expect(processed.text()).toContain('已终止')
-    expect(processed.text()).not.toContain('已完成')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('已终止')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).not.toContain('已完成')
   })
 
   it('marks a terminal batch with inconsistent request statistics as unknown', async () => {
@@ -522,8 +526,8 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
-    expect(processed.text()).toContain('状态未知')
-    expect(processed.text()).not.toContain('已完成')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('状态未知')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).not.toContain('已完成')
   })
 
   it('marks a terminal batch with inconsistent review statistics as unknown', async () => {
@@ -546,8 +550,8 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
-    expect(processed.text()).toContain('状态未知')
-    expect(processed.text()).not.toContain('已完成')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('状态未知')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).not.toContain('已完成')
   })
 
   it('marks a terminal batch as unknown when review statistics disagree with record judgments', async () => {
@@ -570,11 +574,11 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
-    expect(processed.text()).toContain('状态未知')
-    expect(processed.text()).not.toContain('已完成')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('状态未知')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).not.toContain('已完成')
   })
 
-  it('keeps the processed row hidden for a terminal batch with no records', async () => {
+  it('shows plain zero results for a terminal batch with no records', async () => {
     const emptyTerminalStats: QuestionAnswerStats = {
       requests: { submitted: 1, inProgress: 0, succeeded: 1, failed: 0, cancelled: 0 },
       reviews: { unreviewed: 1, correct: 0, incorrect: 0 },
@@ -593,7 +597,7 @@ describe('question-answer compact layout primitives', () => {
 
     const wrapper = await mountDialog()
 
-    expect(wrapper.find('[data-testid="question-answer-processed"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="question-answer-processed"]').text()).toContain('判题结果 0 条'); expect(wrapper.get('[data-testid="question-answer-processed"]').text()).toContain('这一批没有可判的答案'); expect(wrapper.find('[data-testid="question-answer-processed-content"]').exists()).toBe(false)
   })
 
   it('warns in the existing summary after three minutes without auto-terminating', async () => {
@@ -624,8 +628,8 @@ describe('question-answer compact layout primitives', () => {
     const wrapper = await mountDialog()
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
-    expect(processed.text()).toContain('已超过 3 分钟')
-    expect(processed.text()).toContain('未返回 1 条')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('已超过 3 分钟')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('未返回 1 条')
     expect(harness.cancelQuestionAnswerBatch).not.toHaveBeenCalled()
   })
 
@@ -660,8 +664,8 @@ describe('question-answer compact layout primitives', () => {
     await flushPromises()
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
-    expect(processed.text()).toContain('同步失败')
-    expect(processed.text()).not.toContain('已完成')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('同步失败')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).not.toContain('已完成')
   })
 
   it('toggles configuration by title and exposes the current expanded state', async () => {
@@ -778,14 +782,14 @@ describe('question-answer compact layout primitives', () => {
     await retryReviewButton.trigger('click')
     await flushPromises()
 
-    expect(wrapper.get('[data-testid="question-answer-processed"]').text()).toContain('同步失败')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('同步失败')
     const latestButton = wrapper.findAll('button').find(button => button.text().trim() === '返回最新')
     if (!latestButton) throw new Error('missing latest batch button')
     await latestButton.trigger('click')
 
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
-    expect(processed.text()).not.toContain('同步失败')
-    expect(processed.text()).toContain('进行中')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).not.toContain('同步失败')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('进行中')
   })
 
   it('does not mark the currently viewed batch as sync-failed when another batch refresh fails', async () => {
@@ -828,8 +832,8 @@ describe('question-answer compact layout primitives', () => {
     await flushPromises()
 
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
-    expect(processed.text()).not.toContain('同步失败')
-    expect(processed.text()).toContain('进行中')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).not.toContain('同步失败')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('进行中')
   })
 
   it('moves a judged answer into the still-collapsed processed section and supports rejudgment', async () => {
@@ -941,7 +945,7 @@ describe('question-answer compact layout primitives', () => {
 
       const wrapper = mount(ManualOneTimeProbeDialog, {
         props: { open: false, target, questionAnswerPreferences: preferences },
-        global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } },
+        global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: false } },
       })
       mountedWrappers.push(wrapper)
       await wrapper.setProps({ open: true })
@@ -988,9 +992,9 @@ describe('question-answer compact layout primitives', () => {
 
     expect(wrapper.find('[data-testid="question-answer-pending"]').exists()).toBe(true)
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
-    expect(processed.text()).toContain('共 1 条')
-    expect(processed.text()).toContain('待人工判断 1 条')
-    expect(processed.text()).toContain('已完成')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('共 1 条')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('待人工判断 1 条')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('已完成')
   })
 
   it('keeps a brief latest-running hint while reviewing an older batch', async () => {
@@ -1034,9 +1038,9 @@ describe('question-answer compact layout primitives', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="question-answer-latest-running-hint"]').text()).toContain(
-      '最新运行批次 #batch-cu',
+      '最新批次 #batch-cu 运行中',
     )
-    expect(wrapper.find('[data-testid="question-answer-latest-running-hint"]').text()).toContain('1/3')
+    expect(wrapper.get('[data-testid="question-answer-stop-latest"]').text()).toContain('#batch-cu')
     expect(wrapper.find('[data-testid="question-answer-pending"]').text()).not.toContain('正在测试：')
   })
 

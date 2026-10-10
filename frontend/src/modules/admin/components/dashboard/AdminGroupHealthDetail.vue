@@ -23,6 +23,7 @@ import {
 import { Tooltip } from '@/components/ui/tooltip'
 import { formatQuestionAnswerAccuracy, questionAnswerAccuracy, questionAnswerAccuracyRatio } from '../../utils/questionAnswers'
 import AccountTierEditor from './AccountTierEditor.vue'
+import { modelControlText as modelMessage, modelControlSupplyTooltip, modelControlSummaryTooltip } from '../../utils/questionAnswerModelControl'
 import AccountPriorityEditor from './AccountPriorityEditor.vue'
 import AccountConcurrencyEditor from './AccountConcurrencyEditor.vue'
 import {
@@ -68,6 +69,9 @@ const props = withDefaults(defineProps<{
   modelControlFailures: () => [],
 })
 
+const modelSupplyExpanded = ref(false)
+const visibleModelSupply = computed(() => modelSupplyExpanded.value ? props.group.modelSupply?.items ?? [] : (props.group.modelSupply?.items ?? []).slice(0, 8))
+watch(() => props.group.id, () => { modelSupplyExpanded.value = false })
 const emit = defineEmits<{
   (event: 'tier-saved', result: AccountTierResult): void
   (event: 'priority-saved', result: AccountManagementResult): void
@@ -746,6 +750,12 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
       </div>
     </section>
 
+    <section v-if="group.modelSupply?.items.length" data-testid="model-control-supply" class="border-b border-border/50 bg-surface/20 px-5 py-4">
+      <h3 class="text-xs font-semibold">{{ modelMessage('supplyTitle') }}</h3><p class="mt-1 text-xs leading-5 text-muted-foreground">{{ modelMessage('supplyHint') }}<template v-if="group.modelSupply.otherTypeAccounts">。{{ modelMessage('supplyOther', { count: group.modelSupply.otherTypeAccounts }) }}</template></p>
+      <div class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4"><Tooltip v-for="item in visibleModelSupply" :key="item.modelName" :text="modelControlSupplyTooltip(item)" wide><div :data-testid="`model-control-supply-${item.modelName}`" class="w-full min-w-0 rounded-lg border bg-background px-3 py-2.5" :class="item.open === 0 && item.unknown === 0 ? 'border-red-500/40' : item.open <= 1 ? 'border-amber-500/40' : 'border-border/50'"><p class="break-all text-xs font-medium">{{ item.modelName }}</p><p class="mt-1 flex flex-wrap gap-x-3 text-[11px] text-muted-foreground">{{ modelMessage('countOpen') }} <strong class="text-lg font-semibold tabular-nums text-foreground">{{ item.open }}</strong> {{ modelMessage('countClosed') }} <strong class="text-lg font-semibold tabular-nums" :class="item.closed ? 'text-red-600 dark:text-red-400' : 'text-foreground'">{{ item.closed }}</strong></p><p v-if="item.open <= 1" class="mt-1 text-xs" :class="item.open === 0 && item.unknown === 0 ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'">{{ modelMessage(item.open === 1 ? 'supplySingle' : item.unknown ? 'supplyUncertain' : 'supplyNone') }}</p><p v-if="item.unknown" class="mt-1 text-[11px] text-muted-foreground">{{ modelMessage('supplyUnknown', { count: item.unknown }) }}</p></div></Tooltip></div>
+      <button v-if="group.modelSupply.items.length > 8" type="button" class="mt-2 text-xs text-muted-foreground underline" @click="modelSupplyExpanded = !modelSupplyExpanded">{{ modelSupplyExpanded ? modelMessage('supplyCollapse') : modelMessage('supplyExpand', { count: group.modelSupply.items.length }) }}</button>
+    </section>
+
     <div class="px-5 py-5">
       <p v-if="group.modelControlError || sortedAccounts.some(account => modelControlFailures.includes(account.targetId))" data-testid="model-control-summary-error" role="alert" class="mb-3 text-xs text-destructive">{{ t('admin.connectionHealth.modelControl.text.summaryError') }}</p>
       <p class="mb-3 text-xs text-muted-foreground">
@@ -975,7 +985,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                   <span v-else class="text-muted-foreground">—</span>
                   <span v-if="account.recentQuestionAnswer" class="mt-0.5 block break-words text-[11px] text-muted-foreground">{{ recentSource(account) }} · {{ formatConnectionHealthTime(account.recentQuestionAnswer.createdAt) }}</span>
                   <span v-if="recentState(account)" class="mt-0.5 block text-[11px] text-muted-foreground">{{ recentState(account) }}</span>
-                  <button v-if="account.modelControl" type="button" data-testid="model-control-summary" class="mt-1 block text-right text-[11px] hover:text-primary" :class="account.modelControl.attention > 0 ? 'text-amber-600' : 'text-muted-foreground'" @click="emit('question-answer-view', { targetId: account.targetId })">{{ t('admin.connectionHealth.modelControl.text.summary', { closed: account.modelControl.closed, attention: account.modelControl.attention }) }}</button>
+                  <Tooltip v-if="account.modelControl" :text="modelControlSummaryTooltip(account.modelControl)" wide><button data-testid="model-control-summary" type="button" class="mt-1 text-left text-[11px] text-muted-foreground hover:text-primary" @click="emit('question-answer-view', { targetId: account.targetId })"><span>模型 开 {{ account.modelControl.open }} · <span :class="account.modelControl.closed > 0 ? 'text-red-600 dark:text-red-400' : ''">关 {{ account.modelControl.closed }}</span></span><span v-if="account.modelControl.attention > 0" class="block text-amber-600 dark:text-amber-400">{{ modelMessage('summaryAttention', { count: account.modelControl.attention }) }}</span></button></Tooltip>
                   <button v-if="recentSummaryFailures.includes(account.targetId)" type="button" class="mt-1 text-[11px] text-destructive underline" @click="emit('question-answer-recent-retry', account.targetId)">最近结果刷新失败 · 重试</button>
                 </td>
                 <td class="w-28 px-3 py-3">

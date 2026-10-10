@@ -55,6 +55,9 @@ type AdminGroupHealth struct {
 	SiteReportedCost            *float64                `json:"siteReportedCost,omitempty"`
 	GroupAttributedCost         *float64                `json:"groupAttributedCost,omitempty"`
 	UnattributedCost            *float64                `json:"unattributedCost,omitempty"`
+
+	ModelSupply *ModelControlGroupSupply `json:"modelSupply,omitempty"`
+
 	// MinProductionRank 是该分组内目标的 workspace 全局生产 rank 最小值；空分组或
 	// 账号读取失败时为空，供多分组总览把未知分组稳定放在末尾。
 	MinProductionRank *int `json:"minProductionRank,omitempty"`
@@ -634,6 +637,9 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 			continue
 		}
 
+		if platform == string(upstream.PlatformSub2API) && modelControlErr == nil {
+			health.ModelSupply = buildModelControlGroupSupply(accounts, platform, adminAccountID, modelControlSummaries, restrictionObservedAt)
+		}
 		summary := AdminGroupHealthSummary{TotalAccounts: len(accounts)}
 		for _, acc := range accounts {
 			targetID := buildTargetID(platform, adminAccountID, acc.ID)

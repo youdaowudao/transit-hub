@@ -12,7 +12,7 @@ const (
 	defaultPort       = "10621"
 	defaultRedisURL   = "redis://127.0.0.1:6379/0"
 	defaultPublicDir  = "/app/public"
-	defaultAppVersion = "V2.9.10"
+	defaultAppVersion = "V2.9.11"
 )
 
 type Config struct {

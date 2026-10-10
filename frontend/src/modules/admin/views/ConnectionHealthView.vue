@@ -18,6 +18,8 @@ import {
   ShieldCheck,
 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
+import { Tooltip } from '@/components/ui/tooltip'
+import { modelControlRuleRevision, modelControlSupplyWarning } from '../utils/questionAnswerModelControl'
 import { getPrioritySyncStatus, probeTargetWithProgress } from '../api/connectionHealth'
 import type { AdminGroupsRefreshSite, ProbeTargetProgressPhase } from '../api/connectionHealth'
 import { listUpstreamSites } from '../api/upstream'
@@ -743,6 +745,7 @@ const autoRefresh = async () => {
 // immediate=false 会让 VueUse 的 interval 保持暂停；这里只关闭首次回调，计时器本身必须启动。
 useIntervalFn(() => void autoRefresh(), 30_000, { immediate: true, immediateCallback: false })
 useIntervalFn(() => { if (mainTableMounted.value && documentVisibility.value === 'visible') recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value) }, 30_000, { immediate: true, immediateCallback: false })
+watch(modelControlRuleRevision, value => { if (value.workspace === preferenceScope.value) recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value) })
 watch(documentVisibility, (visibility) => {
   if (visibility === 'visible') { retryPendingQuestionAnswerSummaries(); recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value); recentSummaries.resume(); void autoRefresh() }
   else recentSummaries.suspend()
@@ -916,6 +919,7 @@ const onTargetPolicySaved = async () => {
 const probeDialogOpen = ref(false)
 const probeDialogTarget = ref<ManualProbeTargetSummary | null>(null)
 const initialQuestionAnswerBatchId = ref<string | null>(null)
+const initialQuestionAnswerExpandFailed = ref(false)
 
 const onAccountTierSaved = (result: AccountTierResult) => {
   const workspaceId = currentAccount.value?.id
@@ -935,9 +939,10 @@ watch(() => {
   }
 })
 
-const openQuestionAnswerTarget = (account: AdminGroupAccount, group: AdminGroupHealth, batchId: string | null = null) => {
+const openQuestionAnswerTarget = (account: AdminGroupAccount, group: AdminGroupHealth, batchId: string | null = null, expandFailed = false) => {
   if (!canOpenManualProbeHistory(account)) return
   initialQuestionAnswerBatchId.value = batchId
+  initialQuestionAnswerExpandFailed.value = expandFailed
   const formalModelMap = new Map<string, { id: string; name: string; providerFamily?: string }>()
   if (account.hasEnabledProbePolicy) {
     for (const model of [...(account.modelHealth ?? []), ...(account.unprobedModels ?? [])]) {
@@ -965,13 +970,13 @@ const openQuestionAnswerTarget = (account: AdminGroupAccount, group: AdminGroupH
 const onProbeAccount = (account: AdminGroupAccount) => {
   if (selectedGroup.value) openQuestionAnswerTarget(account, selectedGroup.value)
 }
-const onQuestionAnswerView = (value: { targetId: string; batchId?: string }) => {
+const onQuestionAnswerView = (value: { targetId: string; batchId?: string; expandFailed?: boolean }) => {
   const projections = adminGroups.value.flatMap(group => group.accounts.filter(account => account.targetId === value.targetId).map(account => ({ account, group })))
   const projection = projections.find(item => item.group.id === selectedGroup.value?.id) ?? projections[0]
-  if (projection && canOpenManualProbeHistory(projection.account)) openQuestionAnswerTarget(projection.account, projection.group, value.batchId ?? null)
+  if (projection && canOpenManualProbeHistory(projection.account)) openQuestionAnswerTarget(projection.account, projection.group, value.batchId ?? null, value.expandFailed === true)
   else if (value.batchId) scheduleReadOnlyBatch.value = { targetId: value.targetId, batchId: value.batchId, accountName: projection?.account.name || projection?.account.id || value.targetId }
 }
-const onScheduleQuestionAnswerView = (value: { targetId: string; batchId: string; accountName: string; platform: string; groupName: string }) => {
+const onScheduleQuestionAnswerView = (value: { targetId: string; batchId: string; accountName: string; platform: string; groupName: string; expandFailed?: boolean }) => {
   const exists = adminGroups.value.some(group => group.accounts.some(account => account.targetId === value.targetId))
   if (exists) onQuestionAnswerView(value)
   else scheduleReadOnlyBatch.value = { targetId: value.targetId, batchId: value.batchId, accountName: value.accountName }
@@ -1571,6 +1576,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
                     <span class="truncate">{{ t('admin.connectionHealth.groupList.recentHourCost') }} {{ groupCostDisplay(group.recentHourCost) }}</span>
                     <span class="truncate text-right">{{ t('admin.connectionHealth.groupList.todayCost') }} {{ groupCostDisplay(group.todayCost) }}</span>
                   </span>
+                  <Tooltip v-if="modelControlSupplyWarning(group.modelSupply?.items)" :text="modelControlSupplyWarning(group.modelSupply?.items)!.tooltip" wide><span data-testid="model-control-supply-warning" class="mt-1 block break-words text-[11px]" :class="modelControlSupplyWarning(group.modelSupply?.items)!.tone === 'red' ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'">{{ modelControlSupplyWarning(group.modelSupply?.items)!.label }}</span></Tooltip>
                 </span>
               </button>
             </template>
@@ -1634,6 +1640,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       :target="probeDialogTarget"
       :question-answer-preferences="preferences.questionAnswer"
       :initial-question-answer-batch-id="initialQuestionAnswerBatchId"
+      :initial-question-answer-expand-failed="initialQuestionAnswerExpandFailed"
       :summary-refresh-failed="Boolean(probeDialogTarget && (questionAnswerSummaryFailures.has(probeDialogTarget.targetId) || recentSummaryFailures.includes(probeDialogTarget.targetId)))"
       @close="probeDialogOpen = false"
       @completed="onFormalProbeCompleted"

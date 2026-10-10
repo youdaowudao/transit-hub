@@ -74,7 +74,7 @@ func TestModelControlReadIsolationAndInvalidRequests(t *testing.T) {
 		}
 	}
 	f.service.mySites = fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformNewAPI, AccessToken: "fixture-only"}}
-	code, _ := f.request(http.MethodGet, "model-control/rules", nil)
+	code, _ := f.request(http.MethodGet, "model-control/settings", nil)
 	if code == 200 {
 		t.Fatal("NewAPI workspace supported model control")
 	}

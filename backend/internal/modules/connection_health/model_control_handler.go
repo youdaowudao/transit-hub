@@ -8,15 +8,14 @@ import (
 )
 
 func registerModelControlRoutes(mux *http.ServeMux, h *Handler) {
-	mux.HandleFunc("GET /api/connection-health/model-control/rules", h.listModelControlRules)
-	mux.HandleFunc("PUT /api/connection-health/model-control/rules", h.putModelControlRule)
-	mux.HandleFunc("DELETE /api/connection-health/model-control/rules", h.deleteModelControlRule)
+	mux.HandleFunc("GET /api/connection-health/model-control/settings", h.getModelControlSettings)
+	mux.HandleFunc("PUT /api/connection-health/model-control/settings", h.putModelControlSettings)
 	mux.HandleFunc("GET /api/connection-health/model-control/targets/{targetId}", h.getModelControlTarget)
 	mux.HandleFunc("GET /api/connection-health/model-control/items", h.listModelControlItems)
 	mux.HandleFunc("POST /api/connection-health/model-control/managed", h.addManagedModel)
 	mux.HandleFunc("DELETE /api/connection-health/model-control/managed", h.removeManagedModel)
 	mux.HandleFunc("POST /api/connection-health/model-control/preview", h.previewModelControl)
-	for _, op := range []string{"close", "restore", "close-account"} {
+	for _, op := range []string{"close", "restore", "add", "close-account"} {
 		route := op
 		mux.HandleFunc("POST /api/connection-health/model-control/"+route, func(w http.ResponseWriter, r *http.Request) { h.executeModelControl(w, r, route) })
 	}
@@ -40,60 +39,38 @@ func writeModelControlError(w http.ResponseWriter, err error) {
 	}
 	writeQuestionAnswerScheduleError(w, err)
 }
-func (h *Handler) listModelControlRules(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) getModelControlSettings(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.questionAnswerScheduleUser(w, r, false)
 	if !ok {
 		return
 	}
-	items, err := h.service.ListModelControlRules(r.Context(), user)
+	settings, err := h.service.GetModelControlSettings(r.Context(), user)
 	if err != nil {
 		writeModelControlError(w, err)
 		return
 	}
-	httpjson.Write(w, 200, map[string]any{"items": items})
+	httpjson.Write(w, 200, settings)
 }
-func (h *Handler) putModelControlRule(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) putModelControlSettings(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.questionAnswerScheduleUser(w, r, true)
 	if !ok {
 		return
 	}
 	var input struct {
-		ModelName          string `json:"modelName"`
 		MinAccuracyPercent *int   `json:"minAccuracyPercent"`
 		MinJudgedAnswers   *int   `json:"minJudgedAnswers"`
-		IncludeManual      *bool  `json:"includeManual"`
-		IncludeScheduled   *bool  `json:"includeScheduled"`
 		ExpectedVersion    *int64 `json:"expectedVersion"`
 	}
-	if err := httpjson.Decode(r, &input); err != nil || input.MinAccuracyPercent == nil || input.MinJudgedAnswers == nil || input.IncludeManual == nil || input.IncludeScheduled == nil || input.ExpectedVersion == nil {
+	if err := httpjson.Decode(r, &input); err != nil || input.MinAccuracyPercent == nil || input.MinJudgedAnswers == nil || input.ExpectedVersion == nil {
 		httpjson.WriteError(w, 400, ErrorRequest)
 		return
 	}
-	rule, err := h.service.SaveModelControlRule(r.Context(), user, ModelControlRule{ModelName: input.ModelName, MinAccuracyPercent: *input.MinAccuracyPercent, MinJudgedAnswers: *input.MinJudgedAnswers, IncludeManual: *input.IncludeManual, IncludeScheduled: *input.IncludeScheduled}, *input.ExpectedVersion)
+	settings, err := h.service.SaveModelControlSettings(r.Context(), user, ModelControlSettings{MinAccuracyPercent: *input.MinAccuracyPercent, MinJudgedAnswers: *input.MinJudgedAnswers}, *input.ExpectedVersion)
 	if err != nil {
 		writeModelControlError(w, err)
 		return
 	}
-	httpjson.Write(w, 200, rule)
-}
-func (h *Handler) deleteModelControlRule(w http.ResponseWriter, r *http.Request) {
-	user, ok := h.questionAnswerScheduleUser(w, r, true)
-	if !ok {
-		return
-	}
-	var input struct {
-		ModelName       string `json:"modelName"`
-		ExpectedVersion *int64 `json:"expectedVersion"`
-	}
-	if err := httpjson.Decode(r, &input); err != nil || !validModelControlModel(input.ModelName) || input.ExpectedVersion == nil || *input.ExpectedVersion < 1 {
-		httpjson.WriteError(w, 400, ErrorRequest)
-		return
-	}
-	if err := h.service.DeleteModelControlRule(r.Context(), user, input.ModelName, *input.ExpectedVersion); err != nil {
-		writeModelControlError(w, err)
-		return
-	}
-	w.WriteHeader(204)
+	httpjson.Write(w, 200, settings)
 }
 func (h *Handler) getModelControlTarget(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.questionAnswerScheduleUser(w, r, false)
@@ -183,7 +160,7 @@ func (h *Handler) listModelControlItems(w http.ResponseWriter, r *http.Request) 
 	if end > len(items) {
 		end = len(items)
 	}
-	httpjson.Write(w, 200, map[string]any{"items": items[start:end], "page": page, "totalPages": pages})
+	httpjson.Write(w, 200, map[string]any{"items": items[start:end], "page": page, "totalPages": pages, "counts": modelControlCounts(all)})
 }
 func (h *Handler) addManagedModel(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.questionAnswerScheduleUser(w, r, true)
@@ -268,7 +245,7 @@ func (h *Handler) executeModelControl(w http.ResponseWriter, r *http.Request, op
 	if op == "close-account" {
 		result, err = h.service.CloseAccountForModel(r.Context(), user, input.TargetID, input.ModelName, *input.Basis, input.PlanFingerprint)
 	} else {
-		result, err = h.service.ExecuteModelControl(r.Context(), user, input.TargetID, input.ModelName, op, *input.Basis, input.PlanFingerprint, input.ConfirmWithoutEvidence)
+		result, err = h.service.ExecuteModelControl(r.Context(), user, input.TargetID, input.ModelName, op, *input.Basis, input.PlanFingerprint, op == "restore" && input.ConfirmWithoutEvidence)
 	}
 	if err != nil {
 		writeModelControlError(w, err)

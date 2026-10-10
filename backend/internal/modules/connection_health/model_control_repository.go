@@ -11,11 +11,12 @@ import (
 	"time"
 )
 
+type modelControlTxGuard func(context.Context, pgx.Tx, time.Time) error
+
 type modelControlPair struct{ TargetID, ModelName string }
 type modelControlRepository interface {
-	ListModelControlRules(context.Context, string, string) ([]ModelControlRule, error)
-	UpsertModelControlRule(context.Context, ModelControlRule, int64) (ModelControlRule, error)
-	DeleteModelControlRule(context.Context, string, string, string, int64) error
+	GetModelControlSettings(context.Context, string, string) (ModelControlSettings, error)
+	SaveModelControlSettings(context.Context, string, string, ModelControlSettings, int64) (ModelControlSettings, error)
 	ListModelControlTargets(context.Context, string, string) ([]modelControlTarget, error)
 	InsertModelControlTarget(context.Context, string, string, string, string) (modelControlTarget, error)
 	ListModelControlRounds(context.Context, string, []modelControlPair) (map[modelControlPair][]modelControlRound, error)
@@ -23,101 +24,60 @@ type modelControlRepository interface {
 	ListModelControlCoverage(context.Context, string, string, []modelControlPair) (map[modelControlPair][]modelControlScheduleCoverage, error)
 	ListModelControlEvents(context.Context, string, string, string, string, int) ([]ModelControlEvent, int, error)
 	InsertModelControlEvent(context.Context, ModelControlEvent) error
-	mutateModelControlOwnership(context.Context, string, string, string, bool, string, func([]*modelControlTarget, time.Time) ([]ModelControlEvent, error)) error
+	mutateModelControlOwnership(context.Context, string, string, string, bool, string, func([]*modelControlTarget, time.Time) ([]ModelControlEvent, error), ...modelControlTxGuard) error
 	observeModelControlTarget(context.Context, modelControlTarget, time.Time, bool, string) (modelControlTarget, error)
 	recordModelControlReceipt(context.Context, string, string, string, string, string) error
 }
 
-const modelControlRuleColumns = `id,user_id,admin_account_id,model_name,min_accuracy_percent,min_judged_answers,include_manual,include_scheduled,version,created_at,updated_at`
 const modelControlTargetColumns = `id,user_id,admin_account_id,target_id,model_name,account_name,closed_entries,closed_at,closed_by,closed_batch_id,closed_accuracy_percent,conflict_reason,pending,last_pending_id,unconfirmed_close,observed_state,observed_reason,observed_sources,observed_account_status,observed_account_schedulable,observed_at,last_attempt,attempt_at,version,created_at,updated_at`
 
-func scanModelControlRule(row pgx.Row) (ModelControlRule, error) {
-	var r ModelControlRule
-	err := row.Scan(&r.ID, &r.UserID, &r.AdminAccountID, &r.ModelName, &r.MinAccuracyPercent, &r.MinJudgedAnswers, &r.IncludeManual, &r.IncludeScheduled, &r.Version, &r.CreatedAt, &r.UpdatedAt)
-	return r, err
-}
 func scanModelControlTarget(row pgx.Row) (modelControlTarget, error) {
 	var t modelControlTarget
 	err := row.Scan(&t.ID, &t.UserID, &t.AdminAccountID, &t.TargetID, &t.ModelName, &t.AccountName, &t.ClosedEntries, &t.ClosedAt, &t.ClosedBy, &t.ClosedBatchID, &t.ClosedAccuracyPercent, &t.ConflictReason, &t.Pending, &t.LastPendingID, &t.UnconfirmedClose, &t.Observation.State, &t.Observation.ReasonKey, &t.Observation.Sources, &t.Observation.AccountStatus, &t.Observation.AccountSchedulable, &t.Observation.CheckedAt, &t.LastAttempt, &t.AttemptAt, &t.Version, &t.CreatedAt, &t.UpdatedAt)
 	return t, err
 }
-func (r *Repository) ListModelControlRules(ctx context.Context, user, workspace string) ([]ModelControlRule, error) {
-	rows, err := r.db.Query(ctx, `SELECT `+modelControlRuleColumns+` FROM connection_health_model_control_rules WHERE user_id=$1 AND admin_account_id=$2 ORDER BY model_name`, user, workspace)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	result := []ModelControlRule{}
-	for rows.Next() {
-		rule, err := scanModelControlRule(rows)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, rule)
-	}
-	return result, rows.Err()
+func scanModelControlSettings(row pgx.Row) (ModelControlSettings, error) {
+	var settings ModelControlSettings
+	err := row.Scan(&settings.MinAccuracyPercent, &settings.MinJudgedAnswers, &settings.Version)
+	return settings, err
 }
-func (r *Repository) UpsertModelControlRule(ctx context.Context, rule ModelControlRule, expected int64) (ModelControlRule, error) {
-	tx, err := r.beginWorkspaceTransaction(ctx, rule.UserID, rule.AdminAccountID)
+func (r *Repository) GetModelControlSettings(ctx context.Context, user, workspace string) (ModelControlSettings, error) {
+	settings, err := scanModelControlSettings(r.db.QueryRow(ctx, `SELECT min_accuracy_percent,min_judged_answers,version FROM connection_health_model_control_settings WHERE user_id=$1 AND admin_account_id=$2`, user, workspace))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ModelControlSettings{50, 3, 0}, nil
+	}
+	return settings, err
+}
+func (r *Repository) SaveModelControlSettings(ctx context.Context, user, workspace string, input ModelControlSettings, expected int64) (ModelControlSettings, error) {
+	tx, err := r.beginWorkspaceTransaction(ctx, user, workspace)
 	if err != nil {
-		return rule, err
+		return input, err
 	}
 	defer tx.Rollback(ctx)
-	existing, err := scanModelControlRule(tx.QueryRow(ctx, `SELECT `+modelControlRuleColumns+` FROM connection_health_model_control_rules WHERE user_id=$1 AND admin_account_id=$2 AND model_name=$3 FOR UPDATE`, rule.UserID, rule.AdminAccountID, rule.ModelName))
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return rule, err
-	}
-	if (err == nil && existing.Version != expected) || (errors.Is(err, pgx.ErrNoRows) && expected != 0) {
-		return rule, modelControlConflict("VersionConflict", existing)
-	}
-	if err != nil {
-		rule.ID, err = newID()
-		if err != nil {
-			return rule, err
-		}
-		rule.Version = 1
-		rule.CreatedAt = time.Now().UTC()
+	var saved ModelControlSettings
+	if expected == 0 {
+		saved, err = scanModelControlSettings(tx.QueryRow(ctx, `INSERT INTO connection_health_model_control_settings(user_id,admin_account_id,min_accuracy_percent,min_judged_answers) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING min_accuracy_percent,min_judged_answers,version`, user, workspace, input.MinAccuracyPercent, input.MinJudgedAnswers))
 	} else {
-		rule.ID = existing.ID
-		rule.Version = existing.Version + 1
-		rule.CreatedAt = existing.CreatedAt
+		saved, err = scanModelControlSettings(tx.QueryRow(ctx, `UPDATE connection_health_model_control_settings SET min_accuracy_percent=$3,min_judged_answers=$4,version=version+1,updated_at=now() WHERE user_id=$1 AND admin_account_id=$2 AND version=$5 RETURNING min_accuracy_percent,min_judged_answers,version`, user, workspace, input.MinAccuracyPercent, input.MinJudgedAnswers, expected))
 	}
-	rule.UpdatedAt = time.Now().UTC()
-	_, err = tx.Exec(ctx, `INSERT INTO connection_health_model_control_rules(`+modelControlRuleColumns+`) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(user_id,admin_account_id,model_name) DO UPDATE SET min_accuracy_percent=EXCLUDED.min_accuracy_percent,min_judged_answers=EXCLUDED.min_judged_answers,include_manual=EXCLUDED.include_manual,include_scheduled=EXCLUDED.include_scheduled,version=EXCLUDED.version,updated_at=EXCLUDED.updated_at`, rule.ID, rule.UserID, rule.AdminAccountID, rule.ModelName, rule.MinAccuracyPercent, rule.MinJudgedAnswers, rule.IncludeManual, rule.IncludeScheduled, rule.Version, rule.CreatedAt, rule.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		current, readErr := scanModelControlSettings(tx.QueryRow(ctx, `SELECT min_accuracy_percent,min_judged_answers,version FROM connection_health_model_control_settings WHERE user_id=$1 AND admin_account_id=$2`, user, workspace))
+		if errors.Is(readErr, pgx.ErrNoRows) {
+			current, readErr = ModelControlSettings{50, 3, 0}, nil
+		}
+		if readErr != nil {
+			return input, readErr
+		}
+		return input, modelControlConflict("VersionConflict", current)
+	}
 	if err != nil {
-		return rule, err
+		return input, err
 	}
-	err = insertModelControlEventTx(ctx, tx, modelControlNewEvent(rule.UserID, rule.AdminAccountID, "", rule.ModelName, "rule_saved", nil, rule))
+	err = insertModelControlEventTx(ctx, tx, modelControlNewEvent(user, workspace, "", "", "settings_saved", nil, map[string]any{"minAccuracyPercent": saved.MinAccuracyPercent, "minJudgedAnswers": saved.MinJudgedAnswers}))
 	if err == nil {
 		err = tx.Commit(ctx)
 	}
-	return rule, err
-}
-func (r *Repository) DeleteModelControlRule(ctx context.Context, user, workspace, model string, expected int64) error {
-	tx, err := r.beginWorkspaceTransaction(ctx, user, workspace)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	rule, err := scanModelControlRule(tx.QueryRow(ctx, `SELECT `+modelControlRuleColumns+` FROM connection_health_model_control_rules WHERE user_id=$1 AND admin_account_id=$2 AND model_name=$3 FOR UPDATE`, user, workspace, model))
-	if errors.Is(err, pgx.ErrNoRows) || err == nil && rule.Version != expected {
-		return modelControlConflict("VersionConflict", rule)
-	}
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `DELETE FROM connection_health_model_control_rules WHERE id=$1`, rule.ID)
-	var pgerr *pgconn.PgError
-	if errors.As(err, &pgerr) && pgerr.Code == "23503" {
-		return modelControlConflict("RuleHasTargets", rule)
-	}
-	if err != nil {
-		return err
-	}
-	if err = insertModelControlEventTx(ctx, tx, modelControlNewEvent(user, workspace, "", model, "rule_deleted", nil, rule)); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return saved, err
 }
 func (r *Repository) ListModelControlTargets(ctx context.Context, user, workspace string) ([]modelControlTarget, error) {
 	rows, err := r.db.Query(ctx, `SELECT `+modelControlTargetColumns+` FROM connection_health_model_control_targets WHERE user_id=$1 AND admin_account_id=$2 ORDER BY target_id,model_name,id`, user, workspace)
@@ -322,7 +282,7 @@ func modelControlLeasesValid(ctx context.Context, mutation bool) bool {
 
 // Lock order: workspace row, account lease, mutation lease, all account objects,
 // database clock, live handles. Observations are intentionally absent from writes.
-func (r *Repository) mutateModelControlOwnership(ctx context.Context, user, workspace, targetID string, mutation bool, stage string, fn func([]*modelControlTarget, time.Time) ([]ModelControlEvent, error)) error {
+func (r *Repository) mutateModelControlOwnership(ctx context.Context, user, workspace, targetID string, mutation bool, stage string, fn func([]*modelControlTarget, time.Time) ([]ModelControlEvent, error), guards ...modelControlTxGuard) error {
 	if !modelControlLeasesValid(ctx, mutation) {
 		return ErrRemoteActionLeaseLost
 	}
@@ -373,6 +333,11 @@ func (r *Repository) mutateModelControlOwnership(ctx context.Context, user, work
 	}
 	if !modelControlLeasesValid(ctx, mutation) {
 		return ErrRemoteActionLeaseLost
+	}
+	for _, guard := range guards {
+		if err = guard(ctx, tx, now); err != nil {
+			return err
+		}
 	}
 	original := map[string]modelControlTarget{}
 	before := map[string]string{}

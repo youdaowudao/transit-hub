@@ -310,6 +310,7 @@ export interface AdminGroupAccount {
 
 export interface AdminGroupHealth {
   modelControlError?: string
+  modelSupply?: ModelControlGroupSupply
   id: string
   name: string
   platform: string
@@ -620,14 +621,19 @@ export interface QuestionAnswerRecentSummaryItem {
   modelControl: ModelControlAccountSummary | null
 }
 
-export interface ModelControlAccountSummary { closed: number; attention: number }
+export interface ModelControlSummaryModel { modelName: string; status: 'open' | 'closed' | 'unknown' | 'not_provided' | 'account_missing'; attention: boolean; decision: ModelControlDecision; checkedAt: string | null }
+export interface ModelControlAccountSummary { open: number; closed: number; attention: number; models: ModelControlSummaryModel[] }
+export interface ModelControlSettings { minAccuracyPercent: number; minJudgedAnswers: number; version: number }
+export interface ModelControlCounts { total: number; open: number; closed: number; attention: number; untested: number }
+export interface ModelControlSupplyItem { modelName: string; open: number; closed: number; unknown: number; openAccounts: string[]; closedAccounts: string[] }
+export interface ModelControlGroupSupply { items: ModelControlSupplyItem[]; otherTypeAccounts: number }
 export type ModelControlDecision = 'no_evidence' | 'testing' | 'awaiting_review' | 'insufficient' | 'close_recommended' | 'usable'
-export type ModelControlOperation = 'close' | 'restore' | 'close_account'
+export type ModelControlOperation = 'close' | 'restore' | 'add' | 'close_account'
 export interface ModelControlRule {
   modelName: string; minAccuracyPercent: number; minJudgedAnswers: number
   includeManual: boolean; includeScheduled: boolean; version: number
 }
-export interface ModelControlBasis { batchId: string; ruleVersion: number; decision: ModelControlDecision }
+export interface ModelControlBasis { batchId: string; ruleVersion: number; decision: ModelControlDecision; businessDay: string }
 export interface ModelControlRound {
   batchId: string; source: 'manual' | 'scheduled' | 'run_now'; scheduleName: string | null
   createdAt: string; completedAt: string | null; running: boolean
@@ -638,7 +644,7 @@ export interface ModelControlSource { groupId: string; groupName: string; key: s
 export interface ModelControlItem {
   targetId: string; accountName: string; modelName: string; version: number; rule: ModelControlRule
   round: ModelControlRound | null; previousRound: ModelControlRound | null
-  decision: ModelControlDecision; decisionReason: string; basis: ModelControlBasis; verifyErrorKey?: string
+  decision: ModelControlDecision; decisionReason: string; basis: ModelControlBasis; attention: boolean; verifyErrorKey?: string
   control: {
     closedEntries: Record<string, string>; closedAt: string | null; closedAccuracyPercent: number | null
     pending: null | { operation: ModelControlOperation; phase: string; receipt: string; state: string; startedAt: string; sendStartedAt: string | null }
@@ -657,13 +663,13 @@ export interface ModelControlPreview {
   accountStatus: string; accountSchedulable: boolean | null; planFingerprint: string | null; noRemoteWrite?: boolean
 }
 export interface ModelControlResult {
-  item: ModelControlItem; outcome?: 'closed' | 'restored' | 'partial' | 'failed' | 'blocked' | 'unknown'
+  item: ModelControlItem; outcome?: 'closed' | 'restored' | 'added' | 'partial' | 'failed' | 'blocked' | 'unknown'
   reasonKey?: string; entries?: ModelControlEntry[]; groups?: ModelControlSource[]; hintKeys?: string[]
   schedulableResult?: unknown; errorKey?: string
 }
 export interface ModelControlEvent {
   id: string; targetId: string; modelName: string; eventType: string; createdAt: string
-  basis: unknown; detail: Record<string, unknown>
+  basis: unknown; detail: unknown
 }
 export interface ModelControlPage<T> { items: T[]; page: number; totalPages: number }
 

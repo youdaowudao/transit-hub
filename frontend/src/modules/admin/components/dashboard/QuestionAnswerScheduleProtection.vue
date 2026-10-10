@@ -15,7 +15,7 @@ const fields = [
   ['maxEnabledQuestionAnswerSchedules', '最大启用计划数', 1, 100], ['maxScheduleTargets', '单计划最大实际目标数', 1, 200],
   ['maxScheduleRequestsPerExecution', '单次执行最大请求数', 1, 10000], ['dailyScheduledRequestLimit', '新加坡自然日定时请求预算', 1, 1000000],
   ['maxActiveScheduleExecutions', '同时活动的定时执行数', 1, 20], ['maxQueuedScheduledRequests', '等待中的定时请求数', 0, 100000],
-  ['scheduleExecutionTimeoutMinutes', '整次执行超时（分钟）', 30, 1440], ['scheduleLateGraceMinutes', '到期启动宽限（分钟）', 0, 30],
+  ['scheduleExecutionTimeoutMinutes', '整次执行超时（分钟）', 30, 1440], ['scheduleLateGraceMinutes', '到点后最多晚多久仍可开始（分钟）', 0, 30],
 ] as const
 const readable = (key: string) => t(connectionHealthMessageKey(key, te))
 const valid = (value: number | string, min: number, max: number) => typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max

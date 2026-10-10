@@ -97,7 +97,7 @@ describe('C1 frontend complete behavior', () => {
     stored.set('new-runtime', batch('new-runtime', [record({ id: 'running', status: 'running', answerJudgment: null, judgmentSource: null, completedAt: null })])); latestId = 'new-runtime'
     const wrapper = await dialog('old-batch')
     expect(wrapper.get('[data-testid="question-answer-review-batch"]').text()).toContain('#old-batc')
-    expect(wrapper.get('[data-testid="question-answer-latest-runtime"]').text()).toContain('#new-runt')
+    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('#new-runt')
     expect(reads.some(url => url.endsWith('/batches/old-batch'))).toBe(true)
     await wrapper.get('[data-testid="question-answer-stop-latest"]').trigger('click'); await flushPromises()
     expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('new-runtime'))
@@ -395,7 +395,7 @@ describe('C1 frontend complete behavior', () => {
     const section = wrapper.get('[data-testid="question-answer-history"]')
     await section.get('button').trigger('click'); await flushPromises()
     await section.findAll('button').find(button => button.text() === '查看该批次')!.trigger('click'); await flushPromises()
-    expect(wrapper.get('[data-testid="question-answer-latest-running-hint"]').text()).toContain('2/3')
+    expect(wrapper.get('[data-testid="question-answer-stats-review"]').get('dl').findAll('dd').map(count => count.text()).slice(0, 3)).toEqual(['3', '1', '2'])
     let resolvePoll!: (value: Response) => void
     let pollSignal: AbortSignal | undefined
     const fresh = batch('old-batch', stored.get('old-batch')!.records.map(row => row.id === 'r2' ? { ...row, answerBody: 'SECOND NEW HIT' } : row))
@@ -408,7 +408,7 @@ describe('C1 frontend complete behavior', () => {
       expect(pollSignal.aborted).toBe(false)
     }
     resolveFollowup(json(oldSnapshot)); await flushPromises()
-    expect(wrapper.get('[data-testid="question-answer-latest-running-hint"]').text()).toContain('2/3')
+    expect(wrapper.get('[data-testid="question-answer-stats-review"]').get('dl').findAll('dd').map(count => count.text()).slice(0, 3)).toEqual(['3', '1', '2'])
     expectAccuracyCounts(wrapper.get('[data-testid="question-answer-stats-review"]'), 1, 2)
     if (order.endsWith('poll')) {
       expect(pollSignal!.aborted).toBe(false)

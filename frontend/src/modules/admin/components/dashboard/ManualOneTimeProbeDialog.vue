@@ -74,6 +74,8 @@ import QuestionAnswerStatsBar from './QuestionAnswerStatsBar.vue'
 import QuestionAnswerModelControlPanel from './QuestionAnswerModelControlPanel.vue'
 import AccountTierEditor from './AccountTierEditor.vue'
 import { t, te } from '@/locales'
+import { Tooltip } from '@/components/ui/tooltip'
+import { addManagedModel } from '../../utils/questionAnswerModelControl'
 
 export interface ManualProbeTargetSummary {
   targetId: string
@@ -92,6 +94,7 @@ const props = withDefaults(defineProps<{
   target: ManualProbeTargetSummary | null
   questionAnswerPreferences?: QuestionAnswerSelectionPreferences
   initialQuestionAnswerBatchId?: string | null
+  initialQuestionAnswerExpandFailed?: boolean
   summaryRefreshFailed?: boolean
 }>(), {
   questionAnswerPreferences: () => createDefaultQuestionAnswerPreferences(),
@@ -151,6 +154,25 @@ const qaFinalization = ref<QuestionAnswerFinalization | null>(null)
 const qaFinalizationUnknown = ref(false)
 const qaRuntimeBatch = ref<QuestionAnswerBatch | null>(null)
 const qaModelControlRefreshKey = ref(0)
+const qaManaged = ref<{ targetId: string; state: 'loading' | 'ready' | 'error'; models: string[] }>({ targetId: '', state: 'loading', models: [] })
+const qaManagedAddError = ref(''), qaManagedAddsInFlight = ref(0), qaManagedMinRefreshKey = ref(0), qaManagedGeneration = ref(0)
+const qaSubmitting = ref<{ sequence: number; targetId: string; models: string[] } | null>(null)
+const qaHasModelControl = computed(() => Boolean(props.target?.targetId.startsWith('sub2api:')))
+const onManagedChange = (value: { targetId: string; kind: 'loaded' | 'load_failed' | 'updated'; models: string[]; refreshKey: number }) => {
+  if (!props.open || value.targetId !== props.target?.targetId || value.targetId !== qaManaged.value.targetId) return
+  if (value.kind === 'load_failed') { if (value.refreshKey >= qaManagedMinRefreshKey.value) qaManaged.value.state = 'error'; return }
+  qaManaged.value.models = [...value.models]
+  if (value.kind === 'loaded' && qaManagedAddsInFlight.value === 0 && value.refreshKey >= qaManagedMinRefreshKey.value) qaManaged.value.state = 'ready'
+}
+const retryManagedRead = () => { qaManaged.value.state = 'loading'; qaManagedMinRefreshKey.value = ++qaModelControlRefreshKey.value }
+const addQuestionAnswerManaged = async (model: string) => {
+  if (!props.target || qaSelectionLocked.value || !qaHasModelControl.value || qaManaged.value.models.includes(model)) return
+  const generation = qaManagedGeneration.value, targetId = props.target.targetId
+  qaManagedAddsInFlight.value++; qaManaged.value.state = 'loading'; qaManagedAddError.value = ''
+  try { await addManagedModel(targetId, model) }
+  catch (cause) { if (generation === qaManagedGeneration.value && targetId === props.target?.targetId) qaManagedAddError.value = t(`${prefix}.questionAnswer.managedAddFailed`, { reason: cause instanceof Error ? readableMessage(cause.message) : t('admin.connectionHealth.errors.request') }) }
+  finally { if (generation === qaManagedGeneration.value && targetId === props.target?.targetId) { qaManagedAddsInFlight.value--; qaManagedMinRefreshKey.value = ++qaModelControlRefreshKey.value } }
+}
 watch(() => [qaRuntimeBatch.value?.batchId, qaRuntimeBatch.value?.active] as const, ([batchId, active], previous) => {
   if (batchId && (batchId !== previous?.[0] || active !== previous?.[1])) qaModelControlRefreshKey.value++
 })
@@ -308,6 +330,9 @@ const resetQuestionAnswerViewState = () => {
 }
 
 const resetQuestionAnswerTargetState = () => {
+  qaManagedGeneration.value++
+  qaManaged.value = { targetId: props.target?.targetId ?? '', state: props.target?.targetId.startsWith('sub2api:') ? 'loading' : 'ready', models: [] }
+  qaManagedAddsInFlight.value = 0; qaManagedMinRefreshKey.value = 0; qaManagedAddError.value = ''; qaSubmitting.value = null
   resetQuestionAnswerViewState()
   qaPreferenceDraft.value = createQuestionAnswerPreferenceDraft()
   qaQuestions.value = []
@@ -347,6 +372,7 @@ const cancelQuestionAnswerRequests = () => {
 }
 
 const cancelQuestionAnswerStart = () => {
+  qaSubmitting.value = null
   qaStartSequence++
   if (qaStarting.value) cancelActiveRequest()
   qaStarting.value = false
@@ -424,7 +450,7 @@ const emitQuestionAnswerPreferences = (changedField: QuestionAnswerPreferenceFie
     qaPreferenceDraft.value.modelIds = mergeVisibleQuestionAnswerIds(
       qaPreferenceDraft.value.modelIds,
       models.value.map(model => model.id),
-      models.value.filter(model => selected.value.has(model.id)).map(model => model.id),
+      models.value.filter(model => selected.value.has(model.id) && (!qaManaged.value.models.includes(model.id) || qaPreferenceDraft.value.modelIds.includes(model.id))).map(model => model.id),
     )
   } else if (changedField === 'questions') {
     qaPreferenceDraft.value.questionIds = mergeVisibleQuestionAnswerIds(
@@ -507,6 +533,7 @@ watch(
 )
 
 watch(mode, (nextMode) => {
+  if (nextMode === 'questionAnswer' && qaHasModelControl.value) { qaManaged.value.state = 'loading'; qaManagedMinRefreshKey.value = qaModelControlRefreshKey.value }
   if (nextMode === 'questionAnswer' && skipInitializedQuestionAnswerModeLoad) {
     skipInitializedQuestionAnswerModeLoad = false
     return
@@ -547,16 +574,26 @@ watch(
 const hasModels = computed(() => models.value.length > 0)
 const qaActive = computed(() => Boolean(qaRuntimeBatch.value?.active))
 const qaSelectionLocked = computed(() => qaStarting.value || qaActive.value || Boolean(qaFinalization.value) || qaFinalizationUnknown.value)
+const qaEffectiveModelIds = computed(() => {
+  if (mode.value !== 'questionAnswer') return Array.from(selected.value)
+  const submitting = qaSubmitting.value
+  if (submitting && submitting.sequence === qaStartSequence && submitting.targetId === props.target?.targetId) return submitting.models
+  if (qaSelectionLocked.value) return Array.from(selected.value)
+  const available = new Set(models.value.map(model => model.id))
+  return [...new Set([...selected.value, ...qaManaged.value.models.filter(id => available.has(id))])]
+})
+const qaMissingManaged = computed(() => onceLoadState.value === 'ready' ? qaManaged.value.models.filter(id => !onceModels.value.some(model => model.id === id)) : [])
 const requestProtocolLabel = (protocol?: string | null) => questionAnswerRequestProtocolLabel(protocol, t('admin.connectionHealth.testConfiguration.legacy'))
 const qaSubmission = computed(() => questionAnswerSubmissionSummary(
-  selected.value.size,
+  qaEffectiveModelIds.value.length,
   qaSelectedQuestions.value.size,
   qaRepeatCount.value,
 ))
 const canStartTest = computed(() => {
   if (props.target?.testConfiguration?.status === 'conflict' || props.target?.testConfiguration?.status === 'unavailable') return false
-  if (!hasModels.value || selected.value.size === 0 || phase.value === 'testing') return false
+  if (!hasModels.value || (mode.value === 'questionAnswer' ? qaEffectiveModelIds.value.length : selected.value.size) === 0 || phase.value === 'testing') return false
   if (mode.value !== 'questionAnswer') return true
+  if (qaHasModelControl.value && (qaManaged.value.state !== 'ready' || qaManagedAddsInFlight.value > 0 || qaMissingManaged.value.length > 0)) return false
   return qaSelectedQuestions.value.size > 0
     && qaSubmission.value.validRepeatCount
     && qaSubmission.value.withinBatchLimit
@@ -565,8 +602,12 @@ const canStartTest = computed(() => {
 })
 const qaStartBlockedReason = computed(() => {
   if (mode.value !== 'questionAnswer') return ''
+  if (qaManagedAddsInFlight.value > 0) return t(`${prefix}.questionAnswer.managedAdding`)
+  if (qaHasModelControl.value && qaManaged.value.state === 'loading') return t(`${prefix}.questionAnswer.managedLoading`)
+  if (qaHasModelControl.value && qaManaged.value.state === 'error') return t(`${prefix}.questionAnswer.managedReadFailed`)
+  if (qaMissingManaged.value.length) return t(`${prefix}.questionAnswer.managedMissing`, { models: qaMissingManaged.value.join('、') })
   if (qaLoading.value) return t(`${prefix}.questionAnswer.loading`)
-  if (!hasModels.value || selected.value.size === 0 || qaSelectedQuestions.value.size === 0) {
+  if (!hasModels.value || qaEffectiveModelIds.value.length === 0 || qaSelectedQuestions.value.size === 0) {
     return t(`${prefix}.questionAnswer.selectionRequired`)
   }
   if (!qaSubmission.value.validRepeatCount) return t(`${prefix}.questionAnswer.repeatCountInvalid`)
@@ -585,15 +626,6 @@ const qaReviewedRecords = computed(() => qaReviewPartition.value.reviewed)
 const qaFailedRecords = computed(() => qaReviewPartition.value.failed)
 const qaReviewedCorrectCount = computed(() => qaReviewedRecords.value.filter(record => record.answerJudgment === 'correct').length)
 const qaReviewedIncorrectCount = computed(() => qaReviewedRecords.value.filter(record => record.answerJudgment === 'incorrect').length)
-const qaProcessedSectionVisible = computed(() => {
-  const batch = qaReviewBatch.value
-  if (!batch) return false
-  return batch.active
-    || qaReviewBatchSyncFailed.value
-    || qaReviewedRecords.value.length > 0
-    || qaFailedRecords.value.length > 0
-    || (!batch.active && batch.records.length > 0)
-})
 const qaReviewCompletedAt = computed(() => (
   qaReviewBatch.value ? questionAnswerBatchCompletedAt(qaReviewBatch.value) : null
 ))
@@ -735,7 +767,7 @@ const toggleQuestionAnswerResultGroup = (key: string) => {
 const qaSavedPreferenceValid = computed(() => {
   const modelIDs = new Set(models.value.map(model => model.id))
   const questionIDs = new Set(qaQuestions.value.map(question => question.id))
-  const compatibleModels = Array.from(new Set(props.questionAnswerPreferences.modelIds)).filter(id => modelIDs.has(id))
+  const compatibleModels = Array.from(new Set([...props.questionAnswerPreferences.modelIds, ...qaManaged.value.models])).filter(id => modelIDs.has(id))
   const compatibleQuestions = Array.from(new Set(props.questionAnswerPreferences.questionIds)).filter(id => questionIDs.has(id))
   const repeatCount = props.questionAnswerPreferences.repeatCount
   return compatibleModels.length > 0
@@ -758,11 +790,8 @@ const initializeQuestionAnswerConfigurationVisibility = () => {
   qaConfigVisibilityInitialized = true
 }
 const qaSummaryModelNames = computed(() => {
-  if (qaRuntimeBatch.value?.active) {
-    const namesByID = new Map(models.value.map(model => [model.id, model.name]))
-    return Array.from(new Set(qaRuntimeBatch.value.records.map(record => namesByID.get(record.modelName) ?? record.modelName)))
-  }
-  return models.value.filter(model => selected.value.has(model.id)).map(model => model.name)
+  const names = new Map(models.value.map(model => [model.id, model.name]))
+  return qaEffectiveModelIds.value.map(id => `${names.get(id) ?? id}${qaManaged.value.models.includes(id) ? '（受管）' : ''}`)
 })
 const qaSummaryQuestionCount = computed(() => qaRuntimeBatch.value?.active
   ? new Set(qaRuntimeBatch.value.records.map(record => record.questionId)).size
@@ -782,7 +811,7 @@ const qaPageNumbers = computed(() => {
 })
 
 const toggle = (modelId: string) => {
-  if (phase.value === 'testing' || (mode.value === 'questionAnswer' && qaSelectionLocked.value)) return
+  if (phase.value === 'testing' || (mode.value === 'questionAnswer' && (qaSelectionLocked.value || qaManaged.value.models.includes(modelId)))) return
   const next = new Set(selected.value)
   if (next.has(modelId)) next.delete(modelId)
   else next.add(modelId)
@@ -889,7 +918,7 @@ const loadQuestionAnswerData = async (
     qaReviewBatch.value = initialBatch ? protectQuestionAnswerTerminalBatch(initialBatch) : qaRuntimeBatch.value
     qaReviewBatchSyncFailed.value = false
     qaProcessedOpen.value = true
-    qaFailedOpen.value = false
+    qaFailedOpen.value = Boolean(initialBatch && props.initialQuestionAnswerExpandFailed)
     qaSelectionDataReady = true
     if (!restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)) restoreSavedQuestionAnswerSelection()
     initializeQuestionAnswerConfigurationVisibility()
@@ -1172,18 +1201,20 @@ const startQuestionAnswers = async () => {
   abandonQuestionAnswerLocalSelectionFailure()
   cancelQuestionAnswerReview()
   cancelQuestionAnswerJudgments()
+  const submittedModels = [...qaEffectiveModelIds.value]
+  const startSequence = ++qaStartSequence
+  qaSubmitting.value = { sequence: startSequence, targetId: props.target.targetId, models: submittedModels }
   qaStarting.value = true
   qaErrorKey.value = ''
   qaCompletedNotice.value = false
   const sequence = loadSequence
   const targetId = props.target.targetId
-  const startSequence = ++qaStartSequence
   const scope = { sequence, targetId }
   const controller = beginRequest()
   try {
     const batch = await startQuestionAnswerBatch(
       targetId,
-      Array.from(selected.value),
+      submittedModels,
       Array.from(qaSelectedQuestions.value),
       qaReasoningEffort.value,
       qaRepeatCount.value,
@@ -1194,6 +1225,7 @@ const startQuestionAnswers = async () => {
     qaFinalization.value = batch.finalization ?? null
     qaFinalizationUnknown.value = false
     qaRuntimeBatch.value = batch
+    selected.value = new Set(submittedModels)
     qaReviewBatch.value = batch
     qaReviewBatchSyncFailed.value = false
     qaConfigOpen.value = false
@@ -1232,6 +1264,7 @@ const startQuestionAnswers = async () => {
       await reconcileQuestionAnswerFinalization(scope, controller.signal)
     }
   } finally {
+    if (qaSubmitting.value?.sequence === startSequence && qaSubmitting.value.targetId === targetId) qaSubmitting.value = null
     finishRequest(controller)
     if (startSequence === qaStartSequence) qaStarting.value = false
   }
@@ -1297,7 +1330,7 @@ const stopQuestionAnswers = async () => {
   }
 }
 
-const reviewQuestionAnswerBatch = async (batchId: string) => {
+const reviewQuestionAnswerBatch = async (batchId: string, options?: { expandFailed?: boolean }) => {
   if (!props.target || qaReviewLoadingBatchId.value === batchId) return
   abandonQuestionAnswerLocalSelectionFailure()
   const targetId = props.target.targetId
@@ -1322,7 +1355,7 @@ const reviewQuestionAnswerBatch = async (batchId: string) => {
     applyQuestionAnswerReadBatch(batch, null, true, runtimeSelectionSequence, reviewSequence)
     clearQuestionAnswerLocalReadFailure(batchId)
     qaProcessedOpen.value = true
-    qaFailedOpen.value = false
+    qaFailedOpen.value = options?.expandFailed === true
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return
     if (sequence === loadSequence && reviewSequence === qaReviewSequence && questionAnswerBatchReadIsCurrent(batchRead)) {
@@ -1798,8 +1831,8 @@ const close = () => {
               <span v-if="target.testConfiguration.sourceGroups.length"> · {{ target.testConfiguration.sourceGroups.map(source => `${source.adminGroupName || source.adminGroupId}: ${requestProtocolLabel(source.protocol)} / ${source.probeTimeoutSeconds}s`).join('；') }}</span>
             </p>
 
-            <p v-if="mode !== 'questionAnswer'" class="mb-4 text-xs text-muted-foreground">{{ t(`${prefix}.modeDescriptions.${mode}`) }}</p>
-            <p v-if="mode !== 'questionAnswer'" class="mb-4 text-xs text-muted-foreground">{{ t(`${prefix}.contractLimit`) }}</p>
+            <p class="mb-4 text-xs text-muted-foreground">{{ t(`${prefix}.modeDescriptions.${mode}`) }}</p>
+            <p class="mb-4 text-xs text-muted-foreground">{{ t(`${prefix}.contractLimit`) }}</p>
             <p v-if="mode !== 'questionAnswer' && target?.testConfiguration?.protocol === 'responses'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.responsesBudget') }}</p>
             <p v-if="mode === 'questionAnswer'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.questionAnswerTimeout') }}</p>
 
@@ -1852,7 +1885,7 @@ const close = () => {
                   :review-stats="qaReviewBatch?.stats ?? null"
                   :today-stats="qaHistory.todayStats"
                 />
-                <QuestionAnswerModelControlPanel v-if="open && mode === 'questionAnswer' && target?.targetId.startsWith('sub2api:')" :target-id="target.targetId" :refresh-key="qaModelControlRefreshKey" @settled="onModelControlSettled" />
+                <QuestionAnswerModelControlPanel v-if="open && mode === 'questionAnswer' && target?.targetId.startsWith('sub2api:')" :target-id="target.targetId" :refresh-key="qaModelControlRefreshKey" :available-models="onceLoadState === 'ready' ? onceModels.map(model => model.id) : null" @managed-change="onManagedChange" @view-round="reviewQuestionAnswerBatch($event, { expandFailed: true })" @settled="onModelControlSettled" />
                 <p v-if="mode === 'questionAnswer'" class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.protocolSummary') }}</p>
                 <template v-if="mode === 'questionAnswer'">
                   <div v-if="(qaErrorKey && qaHistoryLoaded) || qaLocalReadFailure || summaryRefreshFailed" data-testid="question-answer-statistics-error" class="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">
@@ -1862,42 +1895,23 @@ const close = () => {
                     <button v-if="qaLocalReadFailure" type="button" class="mt-2 rounded-md border border-red-500/30 px-2.5 py-1.5 font-medium disabled:opacity-50" :disabled="qaLocalRetrying" @click="retryQuestionAnswerLocalData">重新加载</button>
                     <button v-if="summaryRefreshFailed" type="button" class="mt-2 rounded-md border border-red-500/30 px-2.5 py-1.5 font-medium" @click="retryQuestionAnswerStats">重试统计</button>
                   </div>
-                  <section v-if="qaRuntimeBatch?.active && !qaFinalization && !qaFinalizationUnknown" data-testid="question-answer-latest-runtime" class="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 bg-card p-3">
-                    <p data-testid="question-answer-latest-running-hint" class="break-words text-xs text-primary">最新运行批次 #{{ shortQuestionAnswerBatchId(qaRuntimeBatch.batchId) }} · {{ qaRuntimeBatch.completedCount }}/{{ qaRuntimeBatch.submittedCount }}</p>
-                    <div class="flex flex-wrap gap-2">
-                      <button v-if="qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium hover:bg-surface-line" @click="reviewLatestQuestionAnswerBatch">返回最新</button>
-                      <button data-testid="question-answer-stop-latest" type="button" class="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400" :disabled="qaCancelling" @click="stopQuestionAnswers"><Loader2 v-if="qaCancelling" class="h-3.5 w-3.5 animate-spin" /><StopCircle v-else class="h-3.5 w-3.5" />终止 #{{ shortQuestionAnswerBatchId(qaRuntimeBatch.batchId) }}</button>
-                    </div>
+                  <section data-testid="question-answer-batch-line" class="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 p-3 text-xs">
+                    <p v-if="qaReviewBatch" data-testid="question-answer-review-batch" class="min-w-0 break-words text-muted-foreground">正在查看：批次 #{{ shortQuestionAnswerBatchId(qaReviewBatch.batchId) }} · {{ qaReviewBatchStatusLabel }}<span v-if="qaReviewCompletedAt"> · {{ t(prefix + '.questionAnswer.batchCompletedAt', { time: formatConnectionHealthTime(qaReviewCompletedAt) }) }}</span></p><p v-else class="text-muted-foreground">{{ t(prefix + '.questionAnswer.noBatch') }}</p>
+                    <div class="flex flex-wrap items-center gap-2"><button v-if="qaRuntimeBatch && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium hover:bg-surface-line" @click="reviewLatestQuestionAnswerBatch">返回最新</button><span v-if="qaRuntimeBatch?.active && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" data-testid="question-answer-latest-running-hint" class="text-primary">最新批次 #{{ shortQuestionAnswerBatchId(qaRuntimeBatch.batchId) }} 运行中</span><button v-if="qaRuntimeBatch?.active && !qaFinalization && !qaFinalizationUnknown" data-testid="question-answer-stop-latest" type="button" class="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 disabled:opacity-50 dark:text-red-400" :disabled="qaCancelling" @click="stopQuestionAnswers"><Loader2 v-if="qaCancelling" class="h-3.5 w-3.5 animate-spin" /><StopCircle v-else class="h-3.5 w-3.5" />终止 #{{ shortQuestionAnswerBatchId(qaRuntimeBatch.batchId) }}</button></div>
                   </section>
-                  <section data-question-answer-section="pending" data-testid="question-answer-pending" class="rounded-lg border border-border/50 bg-card p-3">
-                    <div class="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <button type="button" class="inline-flex items-center gap-2 text-sm font-semibold text-foreground" :aria-expanded="qaPendingOpen" @click="qaPendingOpen = !qaPendingOpen">待人工判断 {{ qaPendingReviewRecords.length }}<ChevronUp v-if="qaPendingOpen" class="h-4 w-4" /><ChevronDown v-else class="h-4 w-4" /></button>
-                        <p v-if="qaReviewBatch" data-testid="question-answer-review-batch" class="mt-1 break-words text-xs text-muted-foreground">正在查看：批次 #{{ shortQuestionAnswerBatchId(qaReviewBatch.batchId) }} · {{ qaReviewBatchStatusLabel }}<span v-if="qaReviewCompletedAt"> · {{ t(prefix + '.questionAnswer.batchCompletedAt', { time: formatConnectionHealthTime(qaReviewCompletedAt) }) }}</span></p>
-                      </div>
-                      <button v-if="qaRuntimeBatch && !qaRuntimeBatch.active && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium hover:bg-surface-line" @click="reviewLatestQuestionAnswerBatch">返回最新</button>
-                    </div>
-                    <div v-if="!qaReviewBatch" class="mt-3 rounded-lg border border-dashed border-border/50 px-3 py-4 text-center text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.noBatch') }}</div>
-                    <template v-else-if="qaPendingOpen">
-                      <div v-if="qaPendingReviewRecords.length === 0" class="mt-3 rounded-lg border border-dashed border-border/50 px-3 py-4 text-center text-xs text-muted-foreground">{{ qaReviewBatch.active ? t(prefix + '.questionAnswer.waitingForReviewableAnswer') : t(prefix + '.questionAnswer.noPendingReview') }}</div>
-                      <ul v-else class="mt-3 space-y-3">
-                        <li v-for="record in qaPendingReviewRecords" :key="record.id" class="rounded-lg border border-border/60 bg-card p-3"><QuestionAnswerRecordCard :record="record" :expanded="qaExpanded.has(record.id)" :saving="qaMarking.has(record.id)" :saving-judgment="qaMarking.get(record.id)" @expand="toggleQuestionAnswerExpanded(record.id)" @judge="saveQuestionAnswerJudgment(record, $event)" /></li>
-                      </ul>
-                    </template>
-                  </section>
-
-                  <section v-if="qaProcessedSectionVisible" data-question-answer-section="processed" data-testid="question-answer-processed" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
-                    <button type="button" class="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left" :aria-expanded="qaProcessedOpen" @click="qaProcessedOpen = !qaProcessedOpen">
+                  <section data-question-answer-section="processed" data-testid="question-answer-processed" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
+                    <button v-if="qaReviewedRecords.length || qaFailedRecords.length" type="button" class="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left" :aria-expanded="qaProcessedOpen" @click="qaProcessedOpen = !qaProcessedOpen">
                       <span data-testid="question-answer-processed-summary" class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold tabular-nums text-foreground">
                         <span>{{ t(prefix + '.questionAnswer.processedSummary', { total: qaReviewedRecords.length, correct: qaReviewedCorrectCount, incorrect: qaReviewedIncorrectCount }) }}</span>
-                        <span :class="qaReviewBatchStatusClass"> · {{ qaReviewBatchStatusLabel }}</span>
+
                       </span>
                       <ChevronUp v-if="qaProcessedOpen" class="h-4 w-4 text-muted-foreground" />
                       <ChevronDown v-else class="h-4 w-4 text-muted-foreground" />
                     </button>
-                    <div v-if="qaProcessedOpen" data-testid="question-answer-processed-content" class="border-t border-border/40 p-3">
-                      <div v-if="qaReviewedRecords.length === 0" class="rounded-md border border-dashed border-border/50 px-3 py-3 text-center text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.noProcessedAnswers') }}</div>
-                      <div v-else class="space-y-2">
+                    <h4 v-else data-testid="question-answer-processed-summary" class="px-3 py-2.5 text-sm font-semibold tabular-nums text-foreground">{{ t(prefix + '.questionAnswer.processedSummary', { total: 0, correct: 0, incorrect: 0 }) }}</h4>
+                    <p v-if="qaReviewedRecords.length === 0" class="px-3 pb-3 text-xs text-muted-foreground">{{ qaReviewBatch?.active ? t(prefix + '.questionAnswer.processedWaiting') : t(prefix + '.questionAnswer.processedEmpty') }}<template v-if="qaFailedRecords.length">，失败的请求见下方</template></p>
+                    <div v-if="qaProcessedOpen && (qaReviewedRecords.length || qaFailedRecords.length)" data-testid="question-answer-processed-content" class="border-t border-border/40 p-3">
+                      <div v-if="qaReviewedRecords.length" class="space-y-2">
                         <div v-for="group in qaResultGroups" :key="group.key" data-testid="question-answer-result-group" class="rounded-md border border-border/40">
                           <button type="button" class="flex w-full flex-wrap items-center justify-between gap-2 px-3 py-2.5 text-left text-xs" :aria-expanded="qaResultGroupsOpen.has(group.key)" @click="toggleQuestionAnswerResultGroup(group.key)">
                             <span class="break-words font-medium text-foreground">{{ group.questionName }}<template v-if="group.questionSnapshotKey"> · #{{ group.questionSnapshotKey.slice(0, 8) }}</template> · {{ group.modelName }} · {{ formatQuestionAnswerAccuracy(questionAnswerAccuracy(group)) }} · 重复 {{ group.records.length }} 次</span><span class="text-muted-foreground">{{ qaResultGroupsOpen.has(group.key) ? '收起' : `展开 ${group.records.length} 条` }}</span>
@@ -1929,6 +1943,23 @@ const close = () => {
                         </ul>
                       </div>
                     </div>
+                  </section>
+
+                  <section data-question-answer-section="pending" data-testid="question-answer-pending" class="rounded-lg border border-border/50 bg-card p-3">
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <button v-if="qaPendingReviewRecords.length" type="button" class="inline-flex items-center gap-2 text-sm font-semibold text-foreground" :aria-expanded="qaPendingOpen" @click="qaPendingOpen = !qaPendingOpen">待人工判断 {{ qaPendingReviewRecords.length }}<ChevronUp v-if="qaPendingOpen" class="h-4 w-4" /><ChevronDown v-else class="h-4 w-4" /></button>
+                        <h4 v-else class="text-sm font-semibold text-foreground">待人工判断 0</h4>
+
+                      </div>
+
+                    </div>
+                    <p class="mt-1 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.manualReviewHint') }}</p>
+                    <template v-if="qaPendingOpen && qaPendingReviewRecords.length > 0">
+                      <ul class="mt-3 space-y-3">
+                        <li v-for="record in qaPendingReviewRecords" :key="record.id" class="rounded-lg border border-border/60 bg-card p-3"><QuestionAnswerRecordCard :record="record" :expanded="qaExpanded.has(record.id)" :saving="qaMarking.has(record.id)" :saving-judgment="qaMarking.get(record.id)" @expand="toggleQuestionAnswerExpanded(record.id)" @judge="saveQuestionAnswerJudgment(record, $event)" /></li>
+                      </ul>
+                    </template>
                   </section>
 
                   <section data-question-answer-section="configuration" data-testid="question-answer-configuration" class="mt-3 rounded-lg border border-border/50 bg-card p-3">
@@ -1978,12 +2009,13 @@ const close = () => {
                     <div v-else id="question-answer-configuration-content" class="mt-3">
                       <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
                         <div data-testid="question-answer-models">
-                          <p class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.selectHint') }}</p>
-                          <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                            <label v-for="model in models" :key="model.id" class="flex cursor-pointer items-start gap-2 rounded-lg border border-border/40 px-3 py-2 transition-colors" :class="selected.has(model.id) ? 'border-primary/50 bg-primary/5' : 'hover:bg-surface-line/40'">
-                              <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-border/60" :disabled="qaSelectionLocked" :checked="selected.has(model.id)" @change="toggle(model.id)" />
+                          <p class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.selectHint') }}</p>
+                          <p v-if="qaSelectionLocked && !qaStarting" class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.managedRunningHint') }}</p><p v-if="qaManagedAddError" class="mb-2 text-xs text-destructive">{{ qaManagedAddError }}</p><div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                            <label v-for="model in models" :key="model.id" class="flex cursor-pointer items-start gap-2 rounded-lg border border-border/40 px-3 py-2 transition-colors" :class="qaEffectiveModelIds.includes(model.id) ? 'border-primary/50 bg-primary/5' : 'hover:bg-surface-line/40'">
+                              <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-border/60" :disabled="qaSelectionLocked || qaManaged.models.includes(model.id)" :checked="qaEffectiveModelIds.includes(model.id)" @change="toggle(model.id)" />
                               <div class="min-w-0 flex-1">
                                 <p class="truncate text-sm font-medium text-foreground">{{ model.name }}</p>
+                                <Tooltip v-if="qaManaged.models.includes(model.id)" :text="t(prefix + '.questionAnswer.managedTooltip')" wide><span class="text-[11px] text-primary">{{ qaSelectionLocked && !qaEffectiveModelIds.includes(model.id) ? t(prefix + '.questionAnswer.managedNotInBatch') : t(prefix + '.questionAnswer.managedLabel') }}</span></Tooltip><Tooltip v-else-if="qaHasModelControl && !qaSelectionLocked" :text="t(prefix + '.questionAnswer.managedAddTooltip')" wide><button type="button" class="text-[11px] text-primary underline" @click.stop.prevent="addQuestionAnswerManaged(model.id)">{{ t(prefix + '.questionAnswer.managedAdd') }}</button></Tooltip>
                                 <p v-if="model.ownedBy" class="truncate text-xs text-muted-foreground">{{ model.ownedBy }}</p>
                               </div>
                             </label>
@@ -2116,7 +2148,7 @@ const close = () => {
               <AlertTriangle v-if="selected.size === 0 || (mode === 'questionAnswer' && qaSelectedQuestions.size === 0)" class="h-3.5 w-3.5" />
               {{ mode === 'questionAnswer'
                 ? (qaStartBlockedReason || t(`${prefix}.questionAnswer.selectedFormula`, { models: qaSubmission.modelCount, questions: qaSubmission.questionCount, repeat: qaSubmission.repeatCount, total: qaSubmission.total }))
-                : t(`${prefix}.selectedCount`, { count: selected.size }) }}
+                : t(`${prefix}.selectedCount`, { count: selected.size }) }}<button v-if="mode === 'questionAnswer' && qaHasModelControl && qaManaged.state === 'error'" type="button" class="ml-1 underline" @click="retryManagedRead">重试</button>
             </p>
             <div v-else />
             <div class="flex shrink-0 items-center gap-2">

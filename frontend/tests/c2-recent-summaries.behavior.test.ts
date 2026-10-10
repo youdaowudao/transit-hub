@@ -231,7 +231,7 @@ describe('C2 mounted main page keeps pure local recent polling separate from tod
     })
     const cell = wrapper.get('tbody > tr').findAll('td')[8]!
     await cell.get('button').trigger('click'); await flushPromises()
-    expect(wrapper.text()).toContain('只读查看该准确批次')
+    expect(wrapper.text()).toContain('按执行时的账号信息显示这批问答，只能查看')
     expect(wrapper.text()).toContain('当前批次总正确率 75%')
     expect(vi.mocked(fetch).mock.calls.at(-1)![0]).toContain('/batches/latest-frozen')
     expect(vi.mocked(fetch).mock.calls.some(call => String(call[0]).endsWith('/models'))).toBe(false)

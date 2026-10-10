@@ -359,7 +359,7 @@ describe('safe complete-disconnect rejection', () => {
   it.each([
     ['admin.connectionHealth.errors.sub2apiGroupLastUsable', '最后一个可用账号'],
     ['admin.connectionHealth.errors.sub2apiInventoryIncomplete', '主站分组账号资料不完整'],
-    ['admin.connectionHealth.testConfiguration.remoteActionPending', '远端动作待确认'],
+    ['admin.connectionHealth.testConfiguration.remoteActionPending', '对主站的上一次修改还没确认结果，需要核对主站后才能继续'],
     ['admin.mySites.errors.safeDeletionUnavailable', '安全删除服务暂不可用'],
   ])('retains the dialog, local connection and both modes for %s', async (key, reason) => {
     harness.realDisconnect.mockRejectedValueOnce(new Error(key))

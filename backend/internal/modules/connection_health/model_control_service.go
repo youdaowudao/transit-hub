@@ -40,13 +40,9 @@ func (s *Service) modelControlItems(ctx context.Context, user, workspace string)
 	if err != nil {
 		return nil, nil, requestError(modelControlError("Storage"))
 	}
-	rules, err := s.modelControls.ListModelControlRules(ctx, user, workspace)
+	settings, err := s.modelControls.GetModelControlSettings(ctx, user, workspace)
 	if err != nil {
 		return nil, nil, requestError(modelControlError("Storage"))
-	}
-	ruleByModel := map[string]ModelControlRule{}
-	for _, r := range rules {
-		ruleByModel[r.ModelName] = r
 	}
 	rounds := map[modelControlPair][]modelControlRound{}
 	coverage := map[modelControlPair][]modelControlScheduleCoverage{}
@@ -83,10 +79,7 @@ func (s *Service) modelControlItems(ctx context.Context, user, workspace string)
 	}
 	items := []ModelControlItem{}
 	for _, t := range targets {
-		rule, ok := ruleByModel[t.ModelName]
-		if !ok {
-			return nil, nil, requestError(modelControlError("Storage"))
-		}
+		rule := modelControlWorkspaceRule(settings, t.ModelName)
 		p := modelControlPair{t.TargetID, t.ModelName}
 		item := buildModelControlItem(t, rule, rounds[p], accountPending[t.TargetID], now)
 		item.Coverage.Schedules = coverage[p]
@@ -109,7 +102,10 @@ func (s *Service) modelControlItems(ctx context.Context, user, workspace string)
 func buildModelControlItem(t modelControlTarget, rule ModelControlRule, rounds []modelControlRound, accountPending *modelControlAccountPending, now time.Time) ModelControlItem {
 	latest, previous, _ := selectModelControlRounds(rounds, rule)
 	decision := evaluateModelControlDecision(latest, rule)
-	basis := modelControlBasis{RuleVersion: rule.Version, Decision: decision.Decision}
+	if latest != nil && !latest.Running && !modelControlRoundIsToday(latest, now) {
+		decision.Decision, decision.Reason = "no_evidence", "not_today"
+	}
+	basis := modelControlBasis{RuleVersion: rule.Version, Decision: decision.Decision, BusinessDay: now.In(questionAnswerScheduleLocation).Format("2006-01-02")}
 	if latest != nil {
 		basis.BatchID = latest.BatchID
 	}
@@ -124,7 +120,9 @@ func buildModelControlItem(t modelControlTarget, rule ModelControlRule, rounds [
 	if u := t.UnconfirmedClose; u != nil && now.Before(u.SentAt.Add(24*time.Hour)) {
 		control.UnconfirmedClose = &modelControlUnconfirmedView{cloneModelMapping(u.Entries), u.SentAt, u.SentAt.Add(24 * time.Hour)}
 	}
-	return ModelControlItem{TargetID: t.TargetID, AccountName: t.AccountName, ModelName: t.ModelName, Version: t.Version, Rule: rule, Round: latest, PreviousRound: previous, Decision: decision.Decision, DecisionReason: decision.Reason, Basis: basis, Control: control, Coverage: modelControlCoverage{Schedules: []modelControlScheduleCoverage{}}}
+	item := ModelControlItem{TargetID: t.TargetID, AccountName: t.AccountName, ModelName: t.ModelName, Version: t.Version, Rule: rule, Round: latest, PreviousRound: previous, Decision: decision.Decision, DecisionReason: decision.Reason, Basis: basis, Control: control, Coverage: modelControlCoverage{Schedules: []modelControlScheduleCoverage{}}}
+	item.Attention = modelControlNeedsAttention(item)
+	return item
 }
 func (s *Service) getModelControlItem(ctx context.Context, user, workspace, target, model string) (ModelControlItem, modelControlTarget, error) {
 	items, targets, err := s.modelControlItems(ctx, user, workspace)
@@ -138,14 +136,17 @@ func (s *Service) getModelControlItem(ctx context.Context, user, workspace, targ
 	}
 	return ModelControlItem{}, modelControlTarget{}, requestError(ErrorProbeTargetNotFound)
 }
-func (s *Service) ListModelControlRules(ctx context.Context, user string) ([]ModelControlRule, error) {
+func modelControlWorkspaceRule(settings ModelControlSettings, model string) ModelControlRule {
+	return ModelControlRule{ModelName: model, MinAccuracyPercent: settings.MinAccuracyPercent, MinJudgedAnswers: settings.MinJudgedAnswers, IncludeManual: true, IncludeScheduled: true, Version: settings.Version}
+}
+func (s *Service) GetModelControlSettings(ctx context.Context, user string) (ModelControlSettings, error) {
 	ws, err := s.modelControlScope(ctx, user, "")
 	if err != nil {
-		return nil, err
+		return ModelControlSettings{}, err
 	}
-	return s.modelControls.ListModelControlRules(ctx, user, ws)
+	return s.modelControls.GetModelControlSettings(ctx, user, ws)
 }
-func (s *Service) SaveModelControlRule(ctx context.Context, user string, input ModelControlRule, expected int64) (ModelControlRule, error) {
+func (s *Service) SaveModelControlSettings(ctx context.Context, user string, input ModelControlSettings, expected int64) (ModelControlSettings, error) {
 	if err := s.questionAnswerScheduleWriteGuard(); err != nil {
 		return input, err
 	}
@@ -153,21 +154,10 @@ func (s *Service) SaveModelControlRule(ctx context.Context, user string, input M
 	if err != nil {
 		return input, err
 	}
-	if !validModelControlModel(input.ModelName) || input.MinAccuracyPercent < 1 || input.MinAccuracyPercent > 100 || input.MinJudgedAnswers < 1 || input.MinJudgedAnswers > 50 || !input.IncludeManual && !input.IncludeScheduled || expected < 0 {
+	if input.MinAccuracyPercent < 1 || input.MinAccuracyPercent > 100 || input.MinJudgedAnswers < 1 || input.MinJudgedAnswers > 50 || expected < 0 {
 		return input, requestError(ErrorRequest)
 	}
-	input.UserID, input.AdminAccountID = user, ws
-	return s.modelControls.UpsertModelControlRule(ctx, input, expected)
-}
-func (s *Service) DeleteModelControlRule(ctx context.Context, user, model string, expected int64) error {
-	if err := s.questionAnswerScheduleWriteGuard(); err != nil {
-		return err
-	}
-	ws, err := s.modelControlScope(ctx, user, "")
-	if err != nil {
-		return err
-	}
-	return s.modelControls.DeleteModelControlRule(ctx, user, ws, model, expected)
+	return s.modelControls.SaveModelControlSettings(ctx, user, ws, input, expected)
 }
 func (s *Service) AddManagedModel(ctx context.Context, user, target, model string) (ModelControlItem, error) {
 	if err := s.questionAnswerScheduleWriteGuard(); err != nil {
@@ -208,7 +198,7 @@ func (s *Service) RemoveManagedModel(ctx context.Context, user, target, model st
 		return err
 	}
 	if !ok {
-		return modelControlConflict("Processing", nil)
+		return modelControlConflict("Busy", nil)
 	}
 	defer release()
 	item, object, err := s.getModelControlItem(leased, user, ws, target, model)
@@ -275,13 +265,9 @@ func listModelControlAccountSummaries(ctx context.Context, repo modelControlRepo
 	if err != nil {
 		return nil, err
 	}
-	rules, err := repo.ListModelControlRules(ctx, user, workspace)
+	settings, err := repo.GetModelControlSettings(ctx, user, workspace)
 	if err != nil {
 		return nil, err
-	}
-	ruleByModel := map[string]ModelControlRule{}
-	for _, r := range rules {
-		ruleByModel[r.ModelName] = r
 	}
 	wanted := map[string]bool{}
 	for _, id := range targetIDs {
@@ -313,14 +299,12 @@ func listModelControlAccountSummaries(ctx context.Context, repo modelControlRepo
 				summary = &ModelControlAccountSummary{}
 				result[t.TargetID] = summary
 			}
-			if len(t.ClosedEntries) > 0 {
-				summary.Closed++
-			}
-			item := buildModelControlItem(t, ruleByModel[t.ModelName], rounds[modelControlPair{t.TargetID, t.ModelName}], nil, now)
-			if modelControlNeedsAttention(item) {
-				summary.Attention++
-			}
+			item := buildModelControlItem(t, modelControlWorkspaceRule(settings, t.ModelName), rounds[modelControlPair{t.TargetID, t.ModelName}], nil, now)
+			appendModelControlSummary(summary, t, item)
 		}
+	}
+	for _, summary := range result {
+		sortModelControlSummary(summary)
 	}
 	return result, nil
 }

@@ -35,7 +35,7 @@ func (s *Service) resolveMissingModelControlAccount(ctx context.Context, user, w
 			return err
 		}
 		if !acquired {
-			return modelControlConflict("Processing", nil)
+			return modelControlConflict("Busy", nil)
 		}
 		defer release()
 		// A missing response read before taking the lease cannot authorize clearing
@@ -141,7 +141,7 @@ func (s *Service) VerifyModelControl(ctx context.Context, user string, targetIDs
 		if err != nil {
 			reason = modelControlError("Storage")
 		} else if !acquired {
-			reason = modelControlError("Processing")
+			reason = modelControlError("Busy")
 		} else {
 			func() {
 				defer release()

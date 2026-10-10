@@ -30,15 +30,16 @@ func TestModelControlDecisionAndRoundSelection(t *testing.T) {
 	if latest.BatchID != "new" || previous.BatchID != "scheduled" {
 		t.Fatal("testing reference did not select latest terminal")
 	}
-	rule.IncludeScheduled = false
-	_, previous, _ = selectModelControlRounds(rounds, rule)
-	if previous.BatchID != "older" {
-		t.Fatal("reference ignored source filter")
+	rule = modelControlWorkspaceRule(ModelControlSettings{60, 4, 2}, "M")
+	if !rule.IncludeManual || !rule.IncludeScheduled || rule.Version != 2 || rule.MinAccuracyPercent != 60 || rule.MinJudgedAnswers != 4 {
+		t.Fatal("workspace rule did not preserve both source types")
 	}
-	rule.IncludeManual = false
-	if latest, _, reason := selectModelControlRounds(rounds, rule); latest != nil || reason == "" {
-		t.Fatal("unselected sources produced evidence")
+	rounds = append([]modelControlRound{{BatchID: "run-now", Source: "run_now", Correct: 3}}, rounds...)
+	latest, _, _ = selectModelControlRounds(rounds, rule)
+	if latest.BatchID != "run-now" {
+		t.Fatal("run-now source excluded")
 	}
+
 }
 func TestModelControlSupportsAndCloseBranches(t *testing.T) {
 	for _, tc := range []struct {

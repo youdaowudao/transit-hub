@@ -51,6 +51,7 @@ import {
   questionAnswerAccuracy,
   questionAnswerRecordMatchesQuestion,
   questionAnswerRequestProtocolLabel,
+  questionAnswerErrorMessageKey,
   isCurrentQuestionAnswerOperation,
   partitionQuestionAnswerReviewRecords,
   questionAnswerBatchCompletedAt,
@@ -68,6 +69,7 @@ import {
   type QuestionAnswerSelectionPreferences,
 } from '../../utils/connectionHealthPreferences'
 import QuestionAnswerRecordCard from './QuestionAnswerRecordCard.vue'
+import QuestionAnswerFailureEvidence from './QuestionAnswerFailureEvidence.vue'
 import QuestionAnswerStatsBar from './QuestionAnswerStatsBar.vue'
 import QuestionAnswerModelControlPanel from './QuestionAnswerModelControlPanel.vue'
 import AccountTierEditor from './AccountTierEditor.vue'
@@ -1723,10 +1725,7 @@ const questionAnswerCurrentAnswer = (record: QuestionAnswerRecord): string => {
     : t(`${prefix}.questionAnswer.noAnswer`))
 }
 const questionAnswerStatusLabel = (record: QuestionAnswerRecord): string => t(`${prefix}.questionAnswer.status.${record.status}`)
-const questionAnswerErrorLabel = (errorType: string): string => {
-  const key = `${prefix}.questionAnswer.errorTypes.${errorType}`
-  return errorType && te(key) ? t(key) : t(`${prefix}.questionAnswer.errorTypes.unknown`)
-}
+const questionAnswerErrorLabel = (errorType: string): string => t(questionAnswerErrorMessageKey(errorType, te))
 const questionAnswerReasoningEffortLabel = (value: QuestionAnswerReasoningEffort | null | undefined): string => {
   if (!value) return t(`${prefix}.questionAnswer.reasoningEffort.unspecified`)
   return t(`${prefix}.questionAnswer.reasoningEffort.options.${value}`)
@@ -1914,6 +1913,7 @@ const close = () => {
                           <ChevronUp v-if="qaFailedOpen" class="h-3.5 w-3.5" />
                           <ChevronDown v-else class="h-3.5 w-3.5" />
                         </button>
+                        <p v-if="qaFailedOpen" class="mt-2 text-xs leading-5 text-muted-foreground">{{ t(prefix + '.questionAnswer.failureEvidence.listHint') }}</p>
                         <ul v-if="qaFailedOpen" data-testid="question-answer-failed-content" class="mt-2 space-y-2">
                           <li v-for="record in qaFailedRecords" :key="record.id" class="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2">
                             <div class="flex items-center justify-between gap-3">
@@ -1924,6 +1924,7 @@ const close = () => {
                               </div>
                               <span class="shrink-0 text-xs text-red-600 dark:text-red-400">{{ questionAnswerErrorLabel(record.errorType) }}</span>
                             </div>
+                            <QuestionAnswerFailureEvidence :record="record" />
                           </li>
                         </ul>
                       </div>

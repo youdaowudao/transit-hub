@@ -103,7 +103,7 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 	if record.RequestProtocol != nil {
 		protocol = *record.RequestProtocol
 	}
-	answer, errorType := s.questionAnswerHTTP.Ask(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort), protocol)
+	result := s.questionAnswerHTTP.AskDetailed(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort), protocol)
 	itemErr := itemCtx.Err()
 	cancel()
 	if s.questionAnswerRunStopReason(run) != "" {
@@ -111,29 +111,36 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 		return
 	}
 
-	status := QuestionAnswerSucceeded
-	if errors.Is(itemErr, context.DeadlineExceeded) {
-		status = QuestionAnswerFailed
-		answer = ""
-		errorType = QuestionAnswerErrorTimeout
-	} else if errorType != "" {
-		status = QuestionAnswerFailed
-		answer = ""
-	}
-	completion := QuestionAnswerCompletion{Status: status, AnswerBody: answer, ErrorType: errorType}
-	if status == QuestionAnswerSucceeded {
-		judgment, judgeable := judgeQuestionAnswer(answer, record.QuestionKeywordSnapshot)
-		completion.AnswerJudgment = &judgment
-		if judgeable {
-			completion.JudgmentSource = questionAnswerJudgmentSourcePointer(QuestionAnswerJudgmentAutomatic)
-		}
-	}
+	completion := questionAnswerCompletionFromAsk(result, errors.Is(itemErr, context.DeadlineExceeded), record)
 	completed, err := s.questionAnswers.CompleteQuestionAnswer(run.ctx, run.userID, run.batchID, record.ID, completion)
 	if err == nil && completed {
 		terminalDurable = true
 		return
 	}
 	s.stopQuestionAnswerRunForStorage(run)
+}
+
+func questionAnswerCompletionFromAsk(result QuestionAnswerAskResult, deadlineExceeded bool, record QuestionAnswerRecord) QuestionAnswerCompletion {
+	completion := QuestionAnswerCompletion{Status: QuestionAnswerSucceeded, AnswerBody: result.Answer, ErrorType: result.ErrorType}
+	if deadlineExceeded || result.ErrorType != "" {
+		completion.Status = QuestionAnswerFailed
+		completion.AnswerBody = ""
+		completion.UpstreamExcerpt = result.UpstreamExcerpt
+		if result.UpstreamStatus >= 100 && result.UpstreamStatus <= 999 {
+			status := result.UpstreamStatus
+			completion.UpstreamStatus = &status
+		}
+		if deadlineExceeded {
+			completion.ErrorType = QuestionAnswerErrorTimeout
+		}
+	} else {
+		judgment, judgeable := judgeQuestionAnswer(result.Answer, record.QuestionKeywordSnapshot)
+		completion.AnswerJudgment = &judgment
+		if judgeable {
+			completion.JudgmentSource = questionAnswerJudgmentSourcePointer(QuestionAnswerJudgmentAutomatic)
+		}
+	}
+	return completion
 }
 
 func (s *Service) questionAnswerRunStopReason(run *activeQuestionAnswerBatch) string {

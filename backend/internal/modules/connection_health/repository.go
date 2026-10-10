@@ -355,6 +355,12 @@ END $$;`,
     ADD COLUMN IF NOT EXISTS repeat_index integer NULL
     CONSTRAINT connection_health_question_answer_repeat_index
         CHECK (repeat_index IS NULL OR repeat_index BETWEEN 1 AND 10)`,
+		`ALTER TABLE connection_health_question_answer_records
+    ADD COLUMN IF NOT EXISTS upstream_status integer NULL
+    CONSTRAINT connection_health_question_answer_upstream_status
+        CHECK (upstream_status IS NULL OR upstream_status BETWEEN 100 AND 999)`,
+		`ALTER TABLE connection_health_question_answer_records
+    ADD COLUMN IF NOT EXISTS upstream_excerpt text NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_target_history ON connection_health_question_answer_records (user_id, target_id, created_at DESC, id DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_batch ON connection_health_question_answer_records (user_id, target_id, batch_id, created_at, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_active ON connection_health_question_answer_records (user_id, target_id, status) WHERE status IN ('pending', 'running')`,

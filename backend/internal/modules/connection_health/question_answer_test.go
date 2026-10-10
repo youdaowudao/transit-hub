@@ -196,6 +196,7 @@ func (f *fakeQuestionAnswerRepository) CompleteQuestionAnswer(_ context.Context,
 			now := time.Now()
 			f.records[i].Status, f.records[i].AnswerBody, f.records[i].ErrorType = completion.Status, completion.AnswerBody, completion.ErrorType
 			f.records[i].AnswerJudgment, f.records[i].JudgmentSource = completion.AnswerJudgment, completion.JudgmentSource
+			f.records[i].UpstreamStatus, f.records[i].UpstreamExcerpt = completion.UpstreamStatus, completion.UpstreamExcerpt
 			f.records[i].ManualError = completion.AnswerJudgment != nil && *completion.AnswerJudgment == QuestionAnswerIncorrect
 			f.records[i].CompletedAt, f.records[i].UpdatedAt = &now, now
 			return true, nil
@@ -2083,6 +2084,9 @@ func TestQuestionAnswerConcurrentStorageFailuresStopBatchOnce(t *testing.T) {
 		t.Fatalf("batch stop calls = %d, want 1 after concurrent storage failures", calls)
 	}
 	for _, record := range completed.Records {
+		if record.UpstreamStatus != nil || record.UpstreamExcerpt != "" {
+			t.Fatal("stopped record has upstream evidence")
+		}
 		if record.Status != QuestionAnswerFailed || record.ErrorType != QuestionAnswerErrorStorage {
 			t.Fatalf("record after storage failure = %+v", record)
 		}
@@ -2488,15 +2492,16 @@ func TestQuestionAnswerBatchReturnsBeforeCompletionAndSurvivesCallerCancellation
 }
 
 func TestQuestionAnswerFailureStoresOnlySafeErrorType(t *testing.T) {
-	const rawMarker = "upstream-raw-marker-93af"
+	const rawMarker = "upstream-body-marker-93af"
+	const headerMarker = "upstream-header-marker-93af"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			_, _ = io.WriteString(w, `{"data":[{"id":"model-a"}]}`)
 			return
 		}
-		w.Header().Set("X-Upstream-Debug", rawMarker)
+		w.Header().Set("X-Upstream-Debug", headerMarker)
 		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = io.WriteString(w, `{"error":{"message":"`+rawMarker+`"},"usage":{"secret":"`+rawMarker+`"}}`)
+		_, _ = io.WriteString(w, `{"error":{"message":"`+rawMarker+`"},"usage":{"secret":"`+rawMarker+` secret-key"}}`)
 	}))
 	defer server.Close()
 
@@ -2513,8 +2518,11 @@ func TestQuestionAnswerFailureStoresOnlySafeErrorType(t *testing.T) {
 		t.Fatalf("failed record = %+v", record)
 	}
 	stored := fmt.Sprintf("%+v", record)
-	if strings.Contains(stored, rawMarker) || strings.Contains(stored, "secret-key") {
+	if strings.Contains(stored, headerMarker) || strings.Contains(stored, "secret-key") {
 		t.Fatalf("record leaked raw upstream data or credentials: %s", stored)
+	}
+	if record.UpstreamStatus == nil || *record.UpstreamStatus != 500 || !strings.Contains(record.UpstreamExcerpt, rawMarker) {
+		t.Fatalf("missing failure evidence: %+v", record)
 	}
 }
 
@@ -2546,6 +2554,9 @@ func TestQuestionAnswerBatchRejectsDuplicateStartAndCancelIsIdempotent(t *testin
 	stopped, err := service.StopQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", batch.BatchID)
 	if err != nil || stopped.Records[0].Status != QuestionAnswerCancelled {
 		t.Fatalf("stop batch: batch=%+v err=%v", stopped, err)
+	}
+	if stopped.Records[0].UpstreamStatus != nil || stopped.Records[0].UpstreamExcerpt != "" {
+		t.Fatal("cancelled record has upstream evidence")
 	}
 	again, err := service.StopQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-1", batch.BatchID)
 	if err != nil || again.Records[0].Status != QuestionAnswerCancelled {
@@ -2670,6 +2681,9 @@ func TestQuestionAnswerShutdownFailsActiveBatchAndReleasesRun(t *testing.T) {
 		t.Fatalf("list batch after shutdown: %v", err)
 	}
 	for _, record := range records {
+		if record.UpstreamStatus != nil || record.UpstreamExcerpt != "" {
+			t.Fatal("stopped record has upstream evidence")
+		}
 		if record.Status != QuestionAnswerFailed || record.ErrorType != QuestionAnswerErrorServiceShutdown || record.AnswerBody != "" {
 			t.Fatalf("record after shutdown = %+v", record)
 		}

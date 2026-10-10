@@ -125,6 +125,8 @@ type QuestionAnswerConfigurationSnapshot struct {
 }
 
 type QuestionAnswerRecord struct {
+	UpstreamStatus          *int                           `json:"upstreamStatus"`
+	UpstreamExcerpt         string                         `json:"upstreamExcerpt"`
 	RequestProtocol         *TestProtocol                  `json:"requestProtocol"`
 	ID                      string                         `json:"id"`
 	TargetID                string                         `json:"targetId"`
@@ -227,11 +229,13 @@ type QuestionAnswerBatchSummary struct {
 }
 
 type QuestionAnswerCompletion struct {
-	Status         QuestionAnswerStatus
-	AnswerBody     string
-	ErrorType      string
-	AnswerJudgment *QuestionAnswerJudgment
-	JudgmentSource *QuestionAnswerJudgmentSource
+	UpstreamStatus  *int
+	UpstreamExcerpt string
+	Status          QuestionAnswerStatus
+	AnswerBody      string
+	ErrorType       string
+	AnswerJudgment  *QuestionAnswerJudgment
+	JudgmentSource  *QuestionAnswerJudgmentSource
 }
 
 type QuestionAnswerBatch struct {

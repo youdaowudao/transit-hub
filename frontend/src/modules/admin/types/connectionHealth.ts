@@ -533,6 +533,8 @@ export interface QuestionAnswerRecord {
   answerBody: string
   status: QuestionAnswerStatus
   errorType: string
+  upstreamStatus?: number | null
+  upstreamExcerpt?: string
   answerJudgment: QuestionAnswerJudgment | null
   judgmentSource: QuestionAnswerJudgmentSource | null
   repeatIndex: number | null

@@ -323,13 +323,17 @@ func (r *Repository) CompleteQuestionAnswer(ctx context.Context, userID string, 
   SET status = $4, answer_body = $5, error_type = $6,
    answer_judgment = $7, answer_judgment_source = $8,
    manual_error = COALESCE($7 = 'incorrect', false),
+   upstream_status = $9, upstream_excerpt = $10,
    completed_at = now(), updated_at = now()
   WHERE id = $1 AND user_id = $2 AND batch_id = $3 AND status = 'running'
- `, recordID, userID, batchID, completion.Status, completion.AnswerBody, completion.ErrorType, completion.AnswerJudgment, completion.JudgmentSource)
+ `, recordID, userID, batchID, completion.Status, completion.AnswerBody, completion.ErrorType, completion.AnswerJudgment, completion.JudgmentSource, completion.UpstreamStatus, completion.UpstreamExcerpt)
 	return result.RowsAffected() > 0, err
 }
 
 func validateQuestionAnswerCompletion(completion QuestionAnswerCompletion) error {
+	if (completion.Status == QuestionAnswerSucceeded || completion.Status == QuestionAnswerCancelled) && (completion.UpstreamStatus != nil || completion.UpstreamExcerpt != "") {
+		return requestError(ErrorQuestionAnswerStorage)
+	}
 	switch completion.Status {
 	case QuestionAnswerSucceeded:
 		if completion.ErrorType != "" || completion.AnswerJudgment == nil {
@@ -726,7 +730,7 @@ func (r *Repository) SetQuestionAnswerJudgment(ctx context.Context, userID strin
 	record, err = scanQuestionAnswerRecord(tx.QueryRow(ctx, `
   UPDATE connection_health_question_answer_records SET answer_judgment=$4,answer_judgment_source='manual',manual_error=($4='incorrect'),updated_at=GREATEST(clock_timestamp(),updated_at+interval '1 microsecond')
   WHERE id=$1 AND user_id=$2 AND target_id=$3 AND status='succeeded'
-  RETURNING id,target_id,batch_id,model_name,question_id,question_name,question_body,question_keyword_snapshot,reasoning_effort,answer_body,status,error_type,answer_judgment,created_at,started_at,completed_at,updated_at,request_protocol,answer_judgment_source,repeat_index
+  RETURNING id,target_id,batch_id,model_name,question_id,question_name,question_body,question_keyword_snapshot,reasoning_effort,answer_body,status,error_type,answer_judgment,created_at,started_at,completed_at,updated_at,request_protocol,answer_judgment_source,repeat_index,upstream_status,upstream_excerpt
  `, recordID, userID, targetID, judgment))
 	if err != nil {
 		return nil, err
@@ -739,7 +743,7 @@ func (r *Repository) SetQuestionAnswerJudgment(ctx context.Context, userID strin
 
 const questionAnswerRecordSelect = `
 	SELECT id, target_id, batch_id, model_name, question_id, question_name, question_body, question_keyword_snapshot,
-		reasoning_effort, answer_body, status, error_type, answer_judgment, created_at, started_at, completed_at, updated_at, request_protocol, answer_judgment_source, repeat_index
+		reasoning_effort, answer_body, status, error_type, answer_judgment, created_at, started_at, completed_at, updated_at, request_protocol, answer_judgment_source, repeat_index, upstream_status, upstream_excerpt
 	FROM connection_health_question_answer_records
 `
 
@@ -763,6 +767,7 @@ func scanQuestionAnswerRecord(row rowScanner) (*QuestionAnswerRecord, error) {
 		&record.QuestionName, &record.QuestionBody, &record.QuestionKeywordSnapshot, &reasoningEffort, &record.AnswerBody, &record.Status,
 		&record.ErrorType, &record.AnswerJudgment, &record.CreatedAt, &record.StartedAt,
 		&record.CompletedAt, &record.UpdatedAt, &record.RequestProtocol, &record.JudgmentSource, &record.RepeatIndex,
+		&record.UpstreamStatus, &record.UpstreamExcerpt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil

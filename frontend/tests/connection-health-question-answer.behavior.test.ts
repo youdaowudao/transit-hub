@@ -3612,3 +3612,157 @@ describe('question-answer retained finalization', () => {
   })
 
 })
+
+
+// 2026-10-10 SPEC §5.11: exercise saved upstream evidence through the real dialog.
+const failureEvidenceCopy = {
+  listHint: '失败的条目如果保存了上游的返回，下面会显示返回码和原话；没有保存的不显示。',
+  note: '这是上游当时的返回，只用来看这条为什么失败，不会修改主站。偶尔失败可以稍后再答一次；一直失败请把这段话发给上游询问。',
+  status: '上游返回码',
+  excerpt: '上游原话（已隐藏账号密钥，最多 500 字）',
+  emptyExcerpt: '这条记录没有保存上游原话。',
+}
+
+const evidenceStates = [
+  { name: 'status and excerpt', fields: { upstreamStatus: 400, upstreamExcerpt: '{"error":"证据甲"}' }, status: 400, excerpt: '{"error":"证据甲"}' },
+  { name: 'status only', fields: { upstreamStatus: 429, upstreamExcerpt: '' }, status: 429, excerpt: '' },
+  { name: 'excerpt only', fields: { upstreamStatus: null, upstreamExcerpt: '独立原话证据乙' }, status: null, excerpt: '独立原话证据乙' },
+  { name: 'neither field has a value', fields: { upstreamStatus: null, upstreamExcerpt: '' }, status: null, excerpt: '' },
+  { name: 'legacy omitted fields', fields: {}, status: null, excerpt: '' },
+  { name: 'HTML is literal text', fields: { upstreamStatus: 500, upstreamExcerpt: '<img src=x onerror="window.__qaEvidenceXss=true">中文报错' }, status: 500, excerpt: '<img src=x onerror="window.__qaEvidenceXss=true">中文报错' },
+]
+
+const evidenceBatch = (batchId: string, fields: { upstreamStatus?: number | null; upstreamExcerpt?: string }, errorType = 'network') => ({
+  ...activeBatch,
+  batchId,
+  records: [{
+    ...records[0], id: `${batchId}-failed`, batchId, questionName: `取证题目 ${batchId}`,
+    questionBody: '失败题干保持可读', requestProtocol: 'responses' as const,
+    status: 'failed' as const, errorType, answerJudgment: null,
+    judgmentSource: null, repeatIndex: 1, completedAt: '2026-10-10T10:00:00Z',
+    ...fields,
+  }],
+  submittedCount: 1, completedCount: 1, runningCount: 0, active: false,
+  currentModel: '', currentQuestion: '',
+  stats: {
+    requests: { submitted: 1, inProgress: 0, succeeded: 0, failed: 1, cancelled: 0 },
+    reviews: { unreviewed: 0, correct: 0, incorrect: 0 }, byModel: [],
+  },
+})
+
+const evidenceHistory = (batches: ReturnType<typeof evidenceBatch>[]) => ({
+  ...emptyHistory, records: batches.flatMap(batch => batch.records),
+  totalItems: batches.length, totalPages: batches.length ? 1 : 0,
+  stats: { ...emptyStats, requests: { ...emptyStats.requests, submitted: batches.length, failed: batches.length } },
+  todayStats: { ...emptyStats, requests: { ...emptyStats.requests, submitted: batches.length, failed: batches.length } },
+})
+
+const expectNoMisleadingFailureCopy = (wrapper: VueWrapper) => {
+  expect(wrapper.text()).not.toContain('格式无法识别')
+  expect(wrapper.text()).not.toContain('上游有返回')
+  expect(wrapper.text()).not.toContain('上游没有返回任何文字')
+}
+
+const expectEvidenceRow = (row: ReturnType<typeof rowContaining>, state: typeof evidenceStates[number]) => {
+  const visible = state.status !== null || Boolean(state.excerpt)
+  expect(row.text().includes(failureEvidenceCopy.note)).toBe(visible)
+  expect(row.text().includes(failureEvidenceCopy.status)).toBe(state.status !== null)
+  if (state.excerpt) expect(row.text()).toContain(failureEvidenceCopy.excerpt)
+  else if (!visible) expect(row.text()).not.toContain(failureEvidenceCopy.excerpt)
+  expect(row.text().includes(failureEvidenceCopy.emptyExcerpt)).toBe(state.status !== null && !state.excerpt)
+  if (state.status !== null) {
+    const status = row.findAll('*').find(element => element.text() === String(state.status))
+    expect(status, 'saved status appears as its own readable value').toBeDefined()
+    expect(status!.classes()).toEqual(expect.arrayContaining(['text-sm', 'font-semibold']))
+  }
+  if (state.excerpt) {
+    const excerpt = row.findAll('*').find(element => element.text() === state.excerpt)
+    expect(excerpt, 'saved excerpt is rendered without trimming or interpreting HTML').toBeDefined()
+    expect(excerpt!.classes()).toEqual(expect.arrayContaining(['whitespace-pre-wrap', 'break-all']))
+  }
+  expect(row.find('img').exists()).toBe(false)
+  expect(row.find('script').exists()).toBe(false)
+  expect(judgmentButtons(row)).toHaveLength(0)
+}
+
+describe('question-answer failure evidence in current and historical batches', () => {
+  for (const historical of [false, true]) {
+    it.each(evidenceStates)(`renders ${historical ? 'historical' : 'current'} $name without contradictory evidence`, async state => {
+      const batch = evidenceBatch(historical ? 'evidence-old' : 'evidence-current', state.fields)
+      harness.getLatestQuestionAnswerBatch.mockResolvedValue(historical ? terminalReviewBatch([]) : batch)
+      harness.getQuestionAnswerHistory.mockResolvedValue(historical ? evidenceHistory([batch]) : emptyHistory)
+      harness.getQuestionAnswerBatch.mockResolvedValue(batch)
+      const wrapper = await mountQuestionAnswerDialog()
+      if (historical) {
+        const action = reviewActionForBatch(wrapper, batch.batchId)
+        if (!action) throw new Error('missing failure-evidence historical batch action')
+        await action.trigger('click'); await flushPromises()
+      }
+      const section = await openFailedAnswers(wrapper)
+      const row = rowContaining(section, batch.records[0]!.questionName)
+      expect(row.text()).toContain('失败题干保持可读')
+      expect(row.text()).toContain('model-a · Responses')
+      expect(row.text()).toContain('网络请求失败。')
+      expectEvidenceRow(row, state)
+      expect(section.findAll('*').filter(element => element.text() === failureEvidenceCopy.listHint)).not.toHaveLength(0)
+      expectNoMisleadingFailureCopy(wrapper)
+      expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
+      expect(harness.setQuestionAnswerJudgment).not.toHaveBeenCalled()
+    })
+  }
+
+  it('uses the exact neutral invalid_response reason and keeps the existing failure row', async () => {
+    const batch = evidenceBatch('evidence-invalid', {}, 'invalid_response')
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(batch)
+    const wrapper = await mountQuestionAnswerDialog()
+    const section = await openFailedAnswers(wrapper)
+    const row = rowContaining(section, batch.records[0]!.questionName)
+    expect(row.text()).toContain('未能取得可用的答案。')
+    expect(row.text()).toContain('失败题干保持可读')
+    expect(row.text()).not.toContain(failureEvidenceCopy.note)
+    expectNoMisleadingFailureCopy(wrapper)
+  })
+
+  it('reloads current records after reopening without retaining evidence from the previous response', async () => {
+    const first = evidenceBatch('evidence-refresh', { upstreamStatus: 400, upstreamExcerpt: '刷新前唯一原话' })
+    const refreshed = evidenceBatch('evidence-refresh', { upstreamStatus: null, upstreamExcerpt: '' })
+    harness.getLatestQuestionAnswerBatch.mockResolvedValueOnce(first).mockResolvedValue(refreshed)
+    const wrapper = await mountQuestionAnswerDialog()
+    let section = await openFailedAnswers(wrapper)
+    expect(rowContaining(section, first.records[0]!.questionName).text()).toContain('刷新前唯一原话')
+    await wrapper.setProps({ open: false }); await flushPromises()
+    await wrapper.setProps({ open: true }); await flushPromises()
+    section = await openFailedAnswers(wrapper)
+    const row = rowContaining(section, refreshed.records[0]!.questionName)
+    expect(row.text()).toContain('网络请求失败。')
+    expectEvidenceRow(row, evidenceStates[3]!)
+    expect(wrapper.text()).not.toContain('刷新前唯一原话')
+    expect(harness.getLatestQuestionAnswerBatch).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps each selected historical batch evidence with its own record and clears it for a legacy batch', async () => {
+    const batchA = evidenceBatch('batch-a-evidence-history', { upstreamStatus: 400, upstreamExcerpt: '批次甲唯一原话' })
+    const batchB = evidenceBatch('batch-b-evidence-history', { upstreamStatus: 500, upstreamExcerpt: '批次乙唯一原话' })
+    const legacy = evidenceBatch('legacy-evidence-history', {})
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch([]))
+    harness.getQuestionAnswerHistory.mockResolvedValue(evidenceHistory([batchA, batchB, legacy]))
+    harness.getQuestionAnswerBatch.mockImplementation(async (_targetId: string, batchId: string) => (
+      [batchA, batchB, legacy].find(batch => batch.batchId === batchId)
+    ))
+    const wrapper = await mountQuestionAnswerDialog()
+    for (const batch of [batchA, batchB, legacy]) {
+      const action = reviewActionForBatch(wrapper, batch.batchId)
+      if (!action) throw new Error(`missing evidence batch action ${batch.batchId}`)
+      await action.trigger('click'); await flushPromises()
+      const section = await openFailedAnswers(wrapper)
+      const row = rowContaining(section, batch.records[0]!.questionName)
+      if (batch === batchA) expect(row.text()).toContain('批次甲唯一原话')
+      else expect(wrapper.text()).not.toContain('批次甲唯一原话')
+      if (batch === batchB) expect(row.text()).toContain('批次乙唯一原话')
+      else expect(wrapper.text()).not.toContain('批次乙唯一原话')
+      if (batch === legacy) expectEvidenceRow(row, evidenceStates[4]!)
+      expectNoMisleadingFailureCopy(wrapper)
+    }
+    expect(harness.getQuestionAnswerBatch).toHaveBeenCalledTimes(3)
+  })
+})

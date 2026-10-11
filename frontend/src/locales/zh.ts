@@ -2549,6 +2549,8 @@ export default {
           manual: '人工',
           automaticHint: '自动初始值为 100，后续沿用已有健康调度规则。',
           manualHint: '人工 Priority 为 1–9。',
+          priorityModeExplain: '这里的“自动 / 人工”与自动答题无关，只决定导入时写入主站的 Priority 范围：自动填 10 及以上，人工填 1–9。',
+          priorityStrategyExplain: '导入后调度站是否探活、是否调整这个数字，以“分组健康”里该分组的策略和页面显示为准。',
           automaticPriorityError: '自动初始 Priority 必须为 10–2147483647 的整数。',
           manualPriorityError: '人工 Priority 必须为 1–9 的整数。',
           concurrency: '并发',

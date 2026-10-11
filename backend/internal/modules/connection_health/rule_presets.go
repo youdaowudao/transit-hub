@@ -96,6 +96,9 @@ func (preset RulePreset) DelayLine(protocol TestProtocol) int {
 	if line, ok := preset.DelayLineMs[string(protocol)]; ok {
 		return line
 	}
+	if protocol == TestProtocolMessages {
+		return 6000
+	}
 	if preset.Kind != PresetLegacySnapshot && preset.Kind != PresetLegacyDefault {
 		return 6000
 	}
@@ -109,7 +112,7 @@ func validRulePreset(p RulePreset) bool {
 		return false
 	}
 	for protocol, line := range p.DelayLineMs {
-		if (protocol != "responses" && protocol != "chat_completions") || line < 1000 || line > 120000 {
+		if !validTestProtocol(TestProtocol(protocol)) || line < 1000 || line > 120000 {
 			return false
 		}
 	}

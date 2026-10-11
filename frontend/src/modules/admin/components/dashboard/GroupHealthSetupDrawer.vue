@@ -62,6 +62,7 @@ const testError = ref('')
 const testSaved = ref(false)
 let testSequence = 0
 const supportsTestConfiguration = computed(() => props.workspacePlatform === 'sub2api')
+const isAnthropicGroup = computed(() => props.group?.platform.trim().toLowerCase() === 'anthropic')
 const validTestTimeout = computed(() => /^\d+$/.test(testTimeout.value) && Number(testTimeout.value) >= 5 && Number(testTimeout.value) <= 120)
 const setTestProtocol = (event: Event) => {
   testProtocol.value = (event.target as HTMLSelectElement).value as TestProtocol
@@ -688,6 +689,7 @@ const close = () => {
                   <label class="space-y-1 text-xs">{{ t('admin.connectionHealth.testConfiguration.protocol') }}
                     <select data-testid="group-test-protocol" :value="testProtocol" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm" :disabled="testSaving" @change="setTestProtocol">
                       <option value="chat_completions">Chat Completions</option><option value="responses">Responses</option>
+                      <option v-if="isAnthropicGroup || testProtocol === 'messages'" value="messages">{{ t('admin.connectionHealth.testConfiguration.messagesOption') }}</option>
                     </select>
                   </label>
                   <label class="space-y-1 text-xs">{{ t('admin.connectionHealth.testConfiguration.timeout') }}
@@ -696,6 +698,13 @@ const close = () => {
                 </div>
                 <p v-if="Number(testTimeout) > 30" data-testid="group-test-timeout-warning" class="text-xs leading-5 text-amber-700 dark:text-amber-400">一次卡住会拖慢整轮，复测也会变慢。</p>
                 <p v-if="testProtocol === 'responses'" class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.responsesBudget') }}</p>
+                <p v-if="isAnthropicGroup" class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesPlatform') }}</p>
+                <template v-if="testProtocol === 'messages'">
+                  <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesHelp') }}</p>
+                  <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesHealthEvidence') }}</p>
+                  <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesConflict') }}</p>
+                  <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesBudget') }}</p>
+                </template>
                 <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.impact', { count: testConfiguration.affectedAccountCount, conflicts: testConfiguration.conflictAccountCount }) }}</p>
                 <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.clearHelp') }}</p>
                 <ul v-if="testConfiguration.conflictAccountCount" class="space-y-1 text-xs text-amber-700 dark:text-amber-400">

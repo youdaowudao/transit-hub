@@ -19,7 +19,7 @@ export const TEST_QUESTION_KEYWORD_RUNE_LIMIT = 64
 export const TEST_QUESTION_KEYWORD_BYTES_LIMIT = 2048
 
 export const questionAnswerRequestProtocolLabel = (protocol: string | null | undefined, legacyLabel: string): string =>
-  protocol === 'responses' ? 'Responses' : protocol === 'chat_completions' ? 'Chat Completions' : legacyLabel
+  protocol === 'messages' ? 'Messages' : protocol === 'responses' ? 'Responses' : protocol === 'chat_completions' ? 'Chat Completions' : legacyLabel
 
 export const questionAnswerErrorMessageKey = (errorType: string, te: (key: string) => boolean): string => {
   const prefix = 'admin.connectionHealth.manualProbeDialog.questionAnswer.errorTypes'

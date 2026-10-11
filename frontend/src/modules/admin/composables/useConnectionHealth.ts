@@ -1048,7 +1048,7 @@ export const hasCurrentHealthFailure = (model: ModelHealth): boolean =>
   model.currentHealthResult ? model.currentHealthResult.status === 'failure' : isConnectionHealthCurrentFailure(model)
 
 export const testProtocolName = (protocol?: string | null): string =>
-  protocol === 'responses' ? 'Responses' : protocol === 'chat_completions' ? 'Chat Completions' : ''
+  protocol === 'messages' ? 'Messages' : protocol === 'responses' ? 'Responses' : protocol === 'chat_completions' ? 'Chat Completions' : ''
 
 export function isConnectionHealthCurrentFailure(input: {
   lastFailureAt: string | null | undefined

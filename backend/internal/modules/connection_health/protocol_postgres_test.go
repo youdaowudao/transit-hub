@@ -72,7 +72,7 @@ func TestProtocolPostgresConfigurationIsolationAndIdempotence(t *testing.T) {
 	for _, value := range []struct {
 		protocol string
 		timeout  int
-	}{{"messages", 30}, {"responses", 4}, {"responses", 121}} {
+	}{{"bogus", 30}, {"responses", 4}, {"responses", 121}} {
 		_, err := pool.Exec(ctx, `INSERT INTO connection_health_group_test_configs(user_id,admin_account_id,admin_group_id,protocol,probe_timeout_seconds) VALUES ('bad','bad','1',$1,$2)`, value.protocol, value.timeout)
 		if err == nil {
 			t.Errorf("database accepted illegal configuration %s/%d", value.protocol, value.timeout)

@@ -3,6 +3,7 @@ package connection_health
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -15,11 +16,33 @@ type testRequestInput struct {
 	ReasoningEffort             QuestionAnswerReasoningEffort
 	QuestionAnswer              bool
 	Stream                      bool
+	AnthropicAuth               string
 }
+
+var errMessagesAccountTypeUnsupported = errors.New("Messages 探活只支持 API Key 类型的账号，这个账号没有发出请求。请把它所在分组的测试请求改回 Chat Completions，或在主站换成 API Key 类型的账号。")
 
 func buildTestRequest(ctx context.Context, input testRequestInput) (*http.Request, error) {
 	if !validTestProtocol(input.Protocol) {
 		return nil, fmt.Errorf("unknown test protocol")
+	}
+	if input.Protocol == TestProtocolMessages {
+		if input.QuestionAnswer {
+			return nil, fmt.Errorf("Messages question answer is not supported")
+		}
+		if input.AnthropicAuth == "" {
+			return nil, errMessagesAccountTypeUnsupported
+		}
+		payload := map[string]any{
+			"model": input.Model, "max_tokens": maxInt(input.MaxTokens, 128),
+			"messages": []map[string]any{{"role": "user", "content": input.Prompt}}, "stream": input.Stream,
+		}
+		headers := map[string]string{"anthropic-version": "2023-06-01"}
+		if input.AnthropicAuth == "authorization_bearer" {
+			headers["Authorization"] = "Bearer " + input.Key
+		} else {
+			headers["x-api-key"] = input.Key
+		}
+		return newJSONRequest(ctx, http.MethodPost, strings.TrimRight(input.BaseURL, "/")+"/v1/messages?beta=true", payload, headers)
 	}
 	path := "/v1/chat/completions"
 	payload := map[string]any{"model": input.Model}
@@ -52,6 +75,26 @@ func buildTestRequest(ctx context.Context, input testRequestInput) (*http.Reques
 }
 
 func decodeTestResponse(protocol TestProtocol, body []byte, questionAnswer bool) (string, bool) {
+	if protocol == TestProtocolMessages {
+		if questionAnswer {
+			return "", false
+		}
+		var response struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(body, &response) != nil {
+			return "", false
+		}
+		for _, part := range response.Content {
+			if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+				return "", true
+			}
+		}
+		return "", false
+	}
 	if protocol == TestProtocolChatCompletions {
 		if questionAnswer {
 			return extractQuestionAnswer(body)
@@ -114,6 +157,18 @@ func classifyTestHTTPResponse(protocol TestProtocol, status int, body []byte, ke
 		return ProbeOutcome{Result: result, LatencyMs: latency}
 	}
 	if status == http.StatusNotFound {
+		if protocol == TestProtocolMessages {
+			var response struct {
+				Type  string `json:"type"`
+				Error struct {
+					Type    string `json:"type"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(body, &response) == nil && response.Type == "error" && response.Error.Type == "not_found_error" && strings.HasPrefix(strings.TrimSpace(response.Error.Message), "model:") {
+				return ProbeOutcome{Result: ResultModelNotFound, LatencyMs: latency, Detail: detail}
+			}
+		}
 		var response struct {
 			Error struct {
 				Code string `json:"code"`
@@ -127,6 +182,9 @@ func classifyTestHTTPResponse(protocol TestProtocol, status int, body []byte, ke
 			return ProbeOutcome{Result: ResultInvalidResponse, LatencyMs: latency, Detail: "所选测试协议与上游接口不兼容"}
 		}
 		return ProbeOutcome{Result: ResultInvalidResponse, LatencyMs: latency, Detail: "接口或模型不可用，原因未确认"}
+	}
+	if protocol == TestProtocolMessages && status == 529 {
+		return ProbeOutcome{Result: ResultRateLimited, LatencyMs: latency, Detail: detail}
 	}
 	return classifyHTTPResponse(status, body, key, latency)
 }

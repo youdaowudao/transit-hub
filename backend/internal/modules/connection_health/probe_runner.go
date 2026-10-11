@@ -27,6 +27,7 @@ type ProbeRequest struct {
 	Protocol            TestProtocol `json:"protocol"`
 	ProbeTimeoutSeconds int          `json:"probeTimeoutSeconds"`
 	LegacyCompatibility bool         `json:"-"`
+	AnthropicAuth       string       `json:"-"`
 	BaseURL             string
 	UpstreamKey         string
 	ProviderFamily      string
@@ -134,17 +135,8 @@ func readProbeResponseBody(body io.Reader) ([]byte, bool, error) {
 	return data, oversized, nil
 }
 
-// buildProbeRequest 统一走 OpenAI 兼容的 /v1/chat/completions 网关端点。
-//
-// 背景（对应整改任务书第 4 项）：real_connections.upstream_key 和
-// upstream_site_id -> upstream_sites.base_url 代表的是已对接的 new-api / sub2api 网关凭据
-// 和网关地址（一个可转发 Gemini/Anthropic/OpenAI 等多种模型的中转站点），不是 provider
-// 官方凭据。new-api 和 sub2api 都以 OpenAI 兼容协议对外暴露 /v1/chat/completions，
-// 内部按 model 名称路由到实际 provider。如果对这些网关直接打 Gemini
-// generateContent / Anthropic messages 原生端点，网关大概率不认识这些路径，会导致
-// Gemini/Anthropic 模型被系统性误判为失败，进而错误触发自动降级。
-// providerFamily 目前只用于在 ModelName 为空时选择一个合理的默认模型名做探活，
-// 不再影响实际请求的 endpoint/鉴权方式。
+// buildProbeRequest follows the saved test protocol. Legacy gateway callers
+// without a protocol retain Chat; provider family only selects the default model.
 func buildProbeRequest(ctx context.Context, req ProbeRequest, prompt string, maxTokens int) (*http.Request, error) {
 	model := req.ModelName
 	if model == "" {
@@ -154,7 +146,7 @@ func buildProbeRequest(ctx context.Context, req ProbeRequest, prompt string, max
 	if protocol == "" {
 		protocol = TestProtocolChatCompletions
 	}
-	return buildTestRequest(ctx, testRequestInput{Protocol: protocol, BaseURL: req.BaseURL, Key: req.UpstreamKey, Model: model, Prompt: prompt, MaxTokens: maxTokens, Stream: !req.LegacyCompatibility && req.Protocol != ""})
+	return buildTestRequest(ctx, testRequestInput{Protocol: protocol, BaseURL: req.BaseURL, Key: req.UpstreamKey, Model: model, Prompt: prompt, MaxTokens: maxTokens, Stream: !req.LegacyCompatibility && req.Protocol != "", AnthropicAuth: req.AnthropicAuth})
 }
 
 func probeRequestErrorDetail(ctx context.Context, err error, req ProbeRequest, phase string) string {

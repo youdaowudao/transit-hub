@@ -25,7 +25,7 @@ func TestProtocolInheritanceCompleteSnapshotAndConflicts(t *testing.T) {
 		{"different_timeouts", members, true, []GroupTestConfig{rule("1", TestProtocolResponses, 30), rule("2", TestProtocolResponses, 20)}, "conflict", "", 0, 2},
 		{"no_membership_proof", members, false, []GroupTestConfig{rule("2", TestProtocolResponses, 30)}, "unavailable", "", 0, 0},
 		{"unknown_empty_inventory", nil, false, nil, "unavailable", "", 0, 0},
-		{"invalid_stored_protocol", members, true, []GroupTestConfig{rule("2", "messages", 30)}, "unavailable", "", 0, 0},
+		{"invalid_stored_protocol", members, true, []GroupTestConfig{rule("2", "bogus", 30)}, "unavailable", "", 0, 0},
 		{"invalid_stored_timeout", members, true, []GroupTestConfig{rule("2", TestProtocolResponses, 121)}, "unavailable", "", 0, 0},
 		{"left_configured_group", members[:1], true, []GroupTestConfig{rule("2", TestProtocolResponses, 30)}, "default", TestProtocolChatCompletions, 20, 0},
 	} {

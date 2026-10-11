@@ -225,7 +225,7 @@ func (r *Repository) CreateQuestionAnswerBatch(ctx context.Context, userID strin
 		if !configuration.usable() {
 			return nil, requestError(configuration.BlockedReason)
 		}
-		protocol = configuration.Protocol
+		protocol = questionAnswerRequestProtocol(configuration.Protocol)
 	}
 	var active bool
 	if err := tx.QueryRow(ctx, `

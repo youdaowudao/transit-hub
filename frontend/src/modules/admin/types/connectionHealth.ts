@@ -1,4 +1,4 @@
-export type TestProtocol = 'chat_completions' | 'responses'
+export type TestProtocol = 'chat_completions' | 'responses' | 'messages'
 export interface GroupTestConfiguration {
   protocol: TestProtocol
   probeTimeoutSeconds: number

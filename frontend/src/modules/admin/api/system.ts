@@ -86,6 +86,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
 
 export interface SystemVersionResponse {
   version: string
+  updateAvailable?: boolean
 }
 
 export const getSystemVersion = async (): Promise<SystemVersionResponse> => (

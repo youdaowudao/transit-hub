@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -31,13 +33,13 @@ type RollbackExecutor interface {
 	Status(ctx context.Context) (RollbackStatusResponse, error)
 }
 
-// Service 提供系统版本信息查询能力。
-// 开源版不再包含商业授权校验和自动更新逻辑。
+// Service 提供系统版本查询和维护操作，只检查 GitHub 上有没有新版本，不会自动更新。
 type Service struct {
 	cfg              config.Config
 	upgradeExecutor  UpgradeExecutor
 	restartExecutor  RestartExecutor
 	rollbackExecutor RollbackExecutor
+	updateChecker    *updateChecker
 	maintenanceMu    sync.Mutex
 
 	lastUpgradeRequestedAt  time.Time
@@ -47,7 +49,9 @@ type Service struct {
 
 // NewService 创建系统服务
 func NewService(cfg config.Config) *Service {
-	return newServiceWithExecutors(cfg, newSystemdUpgradeExecutor(), newSystemdRestartExecutor(), newSystemdRollbackExecutor())
+	service := newServiceWithExecutors(cfg, newSystemdUpgradeExecutor(), newSystemdRestartExecutor(), newSystemdRollbackExecutor())
+	service.updateChecker.fetch = newHTTPUpdateFetch(&http.Client{}, updateCheckURL)
+	return service
 }
 
 func newServiceWithExecutors(
@@ -61,7 +65,33 @@ func newServiceWithExecutors(
 		upgradeExecutor:  upgradeExecutor,
 		restartExecutor:  restartExecutor,
 		rollbackExecutor: rollbackExecutor,
+		updateChecker:    &updateChecker{current: cfg.AppVersion},
 	}
+}
+
+// StartUpdateCheck 启动时检查一次，之后每 24 小时检查一次，结果只保存在内存。
+func (s *Service) StartUpdateCheck(ctx context.Context) {
+	check := func() {
+		defer func() {
+			if value := recover(); value != nil {
+				log.Printf("[system] update check failed: panic=%v", value)
+			}
+		}()
+		s.updateChecker.checkOnce(ctx)
+	}
+	go func() {
+		check()
+		ticker := time.NewTicker(updateCheckInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				check()
+			}
+		}
+	}()
 }
 
 // ensureNoMaintenanceRunning 三个维护动作共享同一把系统级维护锁，
@@ -212,6 +242,7 @@ func (s *Service) RestartStatus(ctx context.Context) (RestartStatusResponse, err
 // Version 返回当前系统版本信息
 func (s *Service) Version() VersionResponse {
 	return VersionResponse{
-		Version: s.cfg.AppVersion,
+		Version:         s.cfg.AppVersion,
+		UpdateAvailable: s.updateChecker.Available(),
 	}
 }

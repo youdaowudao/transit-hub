@@ -306,8 +306,11 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	}
 	dashboard.RegisterRoutes(server.mux, dashboardService, metricsService)
 
-	// 系统信息 API：开源版仅保留版本号展示
+	// 系统信息 API：展示版本号及新版本提示，API-only 不启动后台检查。
 	systemService := system.NewService(cfg)
+	if !cfg.APIOnly {
+		systemService.StartUpdateCheck(context.Background())
+	}
 	system.RegisterRoutes(server.mux, systemService)
 
 	return server

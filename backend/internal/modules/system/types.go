@@ -1,9 +1,10 @@
 package system
 
 // VersionResponse GET /api/system/version 响应。
-// 开源版只展示版本号，不再包含授权状态或更新开关字段。
+// 版本号和 GitHub 上有没有新版本只用于展示。
 type VersionResponse struct {
-	Version string `json:"version"`
+	Version         string `json:"version"`
+	UpdateAvailable bool   `json:"updateAvailable"`
 }
 
 type UpgradeState string

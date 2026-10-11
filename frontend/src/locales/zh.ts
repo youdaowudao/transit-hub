@@ -3416,6 +3416,7 @@ export default {
       version: '版本 {version}',
       openRelease: '查看发布说明',
       openGithubRepository: '在 GitHub 上查看源码',
+      updateAvailable: '有新版本',
       errors: {
         network: '系统信息请求失败，请检查网络连接。',
         request: '系统请求失败，请稍后重试。'

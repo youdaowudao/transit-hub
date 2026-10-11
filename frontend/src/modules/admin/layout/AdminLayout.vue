@@ -20,7 +20,7 @@ const toggleDark = useToggle(isDark)
 import { t } from '@/locales'
 const { currentAccount, noticeKey, loadCurrentAccount } = useAdminAccounts()
 
-// 版本信息：开源版仅用于纯展示，不依赖授权/更新服务
+// 后端告诉页面有没有新版本，页面只显示提示文字。
 const versionInfo = ref<SystemVersionResponse | null>(null)
 const loadVersionInfo = async () => {
   try {
@@ -297,6 +297,13 @@ watch(
             >
               {{ versionLabel }}
             </a>
+            <span
+              v-if="versionInfo?.updateAvailable"
+              class="hidden sm:inline text-xs text-muted-foreground"
+              data-testid="admin-update-available"
+            >
+              {{ t('admin.system.updateAvailable') }}
+            </span>
             <a
               :href="githubRepoUrl"
               target="_blank"

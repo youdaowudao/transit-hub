@@ -748,7 +748,8 @@ func (s *Service) executeTargetProbe(ctx context.Context, target AdminProbeTarge
 	}
 	return s.probeRunner.Probe(ctx, ProbeRequest{
 		BaseURL: cred.BaseURL, UpstreamKey: cred.Key, ProviderFamily: providerFamily,
-		Protocol: target.TestConfiguration.Protocol, ProbeTimeoutSeconds: target.TestConfiguration.ProbeTimeoutSeconds, LegacyCompatibility: target.Platform != string(upstream.PlatformSub2API),
+		AnthropicAuth: cred.AnthropicAuth,
+		Protocol:      target.TestConfiguration.Protocol, ProbeTimeoutSeconds: target.TestConfiguration.ProbeTimeoutSeconds, LegacyCompatibility: target.Platform != string(upstream.PlatformSub2API),
 		ModelName: spec.modelName, MaxTokens: spec.maxProbeTokens, ProbePrompt: spec.probePrompt,
 	})
 }

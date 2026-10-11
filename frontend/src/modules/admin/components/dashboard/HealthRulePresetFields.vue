@@ -6,7 +6,7 @@ const emit = defineEmits<{ (event: 'update:modelValue', value: HealthRulePresetI
 const updateNumber = (key: typeof healthRulePresetFields[number]['key'], scale: number, event: Event) => {
   emit('update:modelValue', { ...props.modelValue, [key]: Number((event.target as HTMLInputElement).value) * scale })
 }
-const protocols = [{ key: 'responses', label: 'Responses', fallback: 6000 }, { key: 'chat_completions', label: 'Chat', fallback: 6000 }]
+const protocols = [{ key: 'responses', label: 'Responses', fallback: 6000 }, { key: 'chat_completions', label: 'Chat', fallback: 6000 }, { key: 'messages', label: 'Messages', fallback: 6000 }]
 const updateDelay = (key: string, event: Event) => {
   const value = (event.target as HTMLInputElement).value, delayLineMs = { ...props.modelValue.delayLineMs }
   if (!value) delete delayLineMs[key]

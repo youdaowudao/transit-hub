@@ -105,7 +105,7 @@ func TestGroupTestConfigurationValidation(t *testing.T) {
 			}
 		}
 	}
-	for _, config := range []GroupTestConfiguration{{TestProtocolResponses, 4}, {TestProtocolResponses, 121}, {"messages", 30}, {"", 10}} {
+	for _, config := range []GroupTestConfiguration{{TestProtocolResponses, 4}, {TestProtocolResponses, 121}, {"bogus", 30}, {"", 10}} {
 		if validGroupTestConfiguration(config) {
 			t.Fatalf("accepted invalid %+v", config)
 		}

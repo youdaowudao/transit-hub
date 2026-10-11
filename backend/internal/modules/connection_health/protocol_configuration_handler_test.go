@@ -41,7 +41,7 @@ func TestProtocolConfigurationHTTPValidationAndZeroActions(t *testing.T) {
 		status int
 	}{
 		{`{}`, 400}, {`{"configuration":{}}`, 400}, {`{"configuration":{"protocol":"responses"}}`, 400},
-		{`{"configuration":{"protocol":"messages","probeTimeoutSeconds":30}}`, 400},
+		{`{"configuration":{"protocol":"bogus","probeTimeoutSeconds":30}}`, 400},
 		{`{"configuration":{"protocol":"responses","probeTimeoutSeconds":4}}`, 400},
 		{`{"configuration":{"protocol":"responses","probeTimeoutSeconds":121}}`, 400},
 		{`{"configuration":{"protocol":"responses","probeTimeoutSeconds":30.5}}`, 400},

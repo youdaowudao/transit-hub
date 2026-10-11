@@ -15,6 +15,14 @@ import (
 	"transithub/backend/internal/modules/upstream"
 )
 
+// C4.1 keeps question answers on the existing Chat request format.
+func questionAnswerRequestProtocol(protocol TestProtocol) TestProtocol {
+	if protocol == TestProtocolMessages {
+		return TestProtocolChatCompletions
+	}
+	return protocol
+}
+
 const (
 	QuestionAnswerPageSize         = 20
 	QuestionAnswerRequestTimeout   = 10 * time.Minute

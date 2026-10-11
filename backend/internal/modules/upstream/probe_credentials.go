@@ -21,6 +21,7 @@ type ProbeCredential struct {
 	Key            string
 	ProviderFamily string
 	Models         []string
+	AnthropicAuth  string `json:"-"`
 }
 
 // 探活不可用原因枚举。这些 reason 会作为 i18n key 前缀透出给前端，绝不携带任何密钥/报文。
@@ -207,10 +208,24 @@ func (s *PlatformService) resolveSub2APIAccountCredentialContext(ctx context.Con
 	}
 
 	return ProbeCredential{
-		BaseURL: baseURL,
-		Key:     key,
-		Models:  splitModels(account.Models),
+		BaseURL:       baseURL,
+		Key:           key,
+		Models:        splitModels(account.Models),
+		AnthropicAuth: sub2APIAnthropicAuth(record),
 	}, nil
+}
+
+func sub2APIAnthropicAuth(record map[string]any) string {
+	kind, _ := record["type"].(string)
+	if strings.TrimSpace(kind) != "apikey" {
+		return ""
+	}
+	extra, _ := record["extra"].(map[string]any)
+	scheme, _ := extra["anthropic_apikey_auth_scheme"].(string)
+	if strings.TrimSpace(scheme) == "authorization_bearer" {
+		return "authorization_bearer"
+	}
+	return "x_api_key"
 }
 
 // sub2APIExportAccounts 从 sub2api 导出接口响应里提取账号数组，兼容两种真实存在的响应结构：

@@ -13,6 +13,8 @@ type TestProtocol string
 const (
 	TestProtocolChatCompletions       TestProtocol = "chat_completions"
 	TestProtocolResponses             TestProtocol = "responses"
+	TestProtocolMessages              TestProtocol = "messages"
+	ErrorTestProtocolNotAllowed                    = "admin.connectionHealth.errors.testProtocolNotAllowed"
 	ErrorTestConfigurationConflict                 = "admin.connectionHealth.errors.testConfigurationConflict"
 	ErrorTestConfigurationUnavailable              = "admin.connectionHealth.errors.testConfigurationUnavailable"
 )
@@ -46,7 +48,11 @@ type EffectiveTestConfiguration struct {
 }
 
 func validTestProtocol(protocol TestProtocol) bool {
-	return protocol == TestProtocolChatCompletions || protocol == TestProtocolResponses
+	return protocol == TestProtocolChatCompletions || protocol == TestProtocolResponses || protocol == TestProtocolMessages
+}
+
+func groupAllowsMessages(group upstream.AdminGroupInfo) bool {
+	return strings.ToLower(strings.TrimSpace(group.Platform)) == "anthropic"
 }
 
 func validGroupTestConfiguration(configuration GroupTestConfiguration) bool {
@@ -247,6 +253,9 @@ func (s *Service) SetAdminGroupTestConfiguration(ctx context.Context, userID, gr
 	}
 	if !adminInventoryComplete(*inventory) {
 		return AdminGroupTestConfiguration{}, requestError(ErrorTestConfigurationUnavailable)
+	}
+	if configuration != nil && configuration.Protocol == TestProtocolMessages && !groupAllowsMessages(group) {
+		return AdminGroupTestConfiguration{}, requestError(ErrorTestProtocolNotAllowed)
 	}
 	if err := s.repo.SaveGroupTestConfiguration(ctx, userID, workspace, groupID, configuration); err != nil {
 		return AdminGroupTestConfiguration{}, err

@@ -322,7 +322,7 @@ func (s *Service) resolveQuestionAnswerScheduleExecution(ctx context.Context, ex
 		}
 		memberships := inventory.memberships[target.TargetID]
 		effective := ResolveGroupTestConfiguration(string(upstream.PlatformSub2API), memberships, true, configs)
-		target.TestConfigurationSnapshot = QuestionAnswerScheduleTargetConfiguration{QuestionAnswerConfigurationSnapshot: QuestionAnswerConfigurationSnapshot{AdminAccountID: execution.AdminAccountID, Memberships: append([]TestConfigurationSource{}, memberships...), InventoryComplete: true}, Protocol: effective.Protocol}
+		target.TestConfigurationSnapshot = QuestionAnswerScheduleTargetConfiguration{QuestionAnswerConfigurationSnapshot: QuestionAnswerConfigurationSnapshot{AdminAccountID: execution.AdminAccountID, Memberships: append([]TestConfigurationSource{}, memberships...), InventoryComplete: true}, Protocol: questionAnswerRequestProtocol(effective.Protocol)}
 		if !effective.usable() {
 			target.Status, target.StatusReason = "failed", "test_configuration_conflict"
 			target.CompletedAt = &now

@@ -141,6 +141,9 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 		}
 		event := strings.Join(data, "\n")
 		data = nil
+		if event == "[DONE]" && protocol == TestProtocolMessages {
+			event = `{"type":"message_stop"}`
+		}
 		if event == "[DONE]" && protocol == TestProtocolChatCompletions {
 			complete = true
 			if accumulator.valid() {
@@ -175,6 +178,9 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 		eventName = ""
 		elapsed := int(now().Sub(started).Milliseconds())
 		metadata := eventType == "response.created" || eventType == "response.in_progress" || eventType == "keepalive"
+		if protocol == TestProtocolMessages {
+			metadata = eventType == "message_start" || eventType == "ping"
+		}
 		if protocol == TestProtocolChatCompletions {
 			metadata = len(payload.Choices) == 0 && len(payload.Error) == 0
 		}
@@ -183,10 +189,35 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 		}
 		if eventType == "error" || eventType == "response.failed" || (len(payload.Error) > 0 && string(payload.Error) != "null") {
 			out.Result = streamErrorResult([]byte(event))
+			if protocol == TestProtocolMessages {
+				var streamError struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(payload.Error, &streamError) == nil && strings.Contains(strings.ToLower(streamError.Type), "overloaded") {
+					out.Result = ResultRateLimited
+				}
+			}
 			out.Detail = truncate(redact(event, key), 500)
 			return true
 		}
-		if protocol == TestProtocolResponses {
+		if protocol == TestProtocolMessages {
+			if eventType == "content_block_delta" {
+				var delta struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				}
+				if json.Unmarshal(payload.Delta, &delta) == nil && delta.Type == "text_delta" && delta.Text != "" {
+					out.FirstTokenMs = intPtr(elapsed)
+					out.Result = ResultOK
+					return true
+				}
+			}
+			if eventType == "message_stop" {
+				out.Result = ResultInvalidResponse
+				out.Detail = "回答结束但没有正文"
+				return true
+			}
+		} else if protocol == TestProtocolResponses {
 			if eventType == "response.output_text.delta" {
 				var delta string
 				if json.Unmarshal(payload.Delta, &delta) == nil && delta != "" {

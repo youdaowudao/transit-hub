@@ -17,6 +17,7 @@ const (
 	RemoteActionSkippedTargetConflict          = "skipped_target_conflict"
 	RemoteActionSkippedTargetInitiallyDisabled = "skipped_target_initially_disabled"
 	RemoteActionSkippedUpstreamScheduling      = "skipped_upstream_scheduling_disabled"
+	RemoteActionSkippedSub2APILastModelSource  = "skipped_sub2api_group_last_model_source"
 	RemoteActionSkippedSub2APILastActive       = "skipped_sub2api_group_last_active"
 	RemoteActionSkippedSub2APILastUsable       = "skipped_sub2api_group_last_usable"
 	RemoteActionSkippedSub2APIInventory        = "skipped_sub2api_group_inventory_incomplete"
@@ -126,6 +127,15 @@ func (g *workspaceFloorGuard) latestInventory(maxAge time.Duration) (*adminWorks
 }
 
 func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, inventory adminWorkspaceInventory, scope adminMonitoringScope) targetRemoteActionResult {
+	return g.reserveSub2APIMutationWithModels(target, inventory, scope, nil)
+}
+func (g *workspaceFloorGuard) reserveSub2APIInactiveWithModels(target AdminProbeTarget, inventory adminWorkspaceInventory, scope adminMonitoringScope, reserved map[string]map[string]bool) targetRemoteActionResult {
+	return g.reserveSub2APIMutationWithModels(target, inventory, scope, reserved)
+}
+func (g *workspaceFloorGuard) reserveSub2APISchedulableFalseWithModels(target AdminProbeTarget, inventory adminWorkspaceInventory, scope adminMonitoringScope, reserved map[string]map[string]bool) targetRemoteActionResult {
+	return g.reserveSub2APIMutationWithModels(target, inventory, scope, reserved)
+}
+func (g *workspaceFloorGuard) reserveSub2APIMutationWithModels(target AdminProbeTarget, inventory adminWorkspaceInventory, scope adminMonitoringScope, reserved map[string]map[string]bool) targetRemoteActionResult {
 	if g == nil {
 		return targetRemoteActionResult{}
 	}
@@ -165,6 +175,16 @@ func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, in
 		}
 	}
 	if len(monitoredMemberships) == 0 {
+		if reserved == nil {
+			return targetRemoteActionResult{}
+		}
+		result, applicable := g.checkModelFloorLocked(target, inventory, reserved)
+		if result.remoteAction != "" {
+			return result
+		}
+		if applicable {
+			g.reserveUnavailableLocked(target.TargetID)
+		}
 		return targetRemoteActionResult{}
 	}
 
@@ -281,8 +301,44 @@ func (g *workspaceFloorGuard) reserveSub2APIMutation(target AdminProbeTarget, in
 			}
 		}
 	}
+	if reserved != nil {
+		result, _ := g.checkModelFloorLocked(target, inventory, reserved)
+		if result.remoteAction != "" {
+			return result
+		}
+	}
 	g.reserveUnavailableLocked(target.TargetID)
 	return targetRemoteActionResult{}
+}
+func (g *workspaceFloorGuard) checkModelFloorLocked(target AdminProbeTarget, inventory adminWorkspaceInventory, reserved map[string]map[string]bool) (targetRemoteActionResult, bool) {
+	groups := append([]adminInventoryGroup(nil), inventory.groups...)
+	sort.Slice(groups, func(i, j int) bool { return groups[i].group.ID < groups[j].group.ID })
+	hp := map[string]bool{}
+	for id := range g.reservedUnavailable {
+		if parsed, ok := parseTargetID(id); ok {
+			hp[parsed.accountID] = true
+		}
+	}
+	applicable := false
+	now := time.Now()
+	for _, group := range groups {
+		for _, account := range group.accounts {
+			if account.ID != target.AccountID {
+				continue
+			}
+			if _, frozen := g.frozenGroups[group.group.ID]; frozen {
+				return targetRemoteActionResult{remoteAction: RemoteActionAwaitingConfirmation, adminGroupID: group.group.ID, adminGroupName: group.group.Name}, applicable
+			}
+			if len(modelFloorCandidateKeys(group.accounts, account, reserved)) > 0 {
+				applicable = true
+			}
+			if len(modelFloorLastKeys(group.accounts, account, hp, reserved, now)) > 0 {
+				return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APILastModelSource, adminGroupID: group.group.ID, adminGroupName: group.group.Name}, applicable
+			}
+			break
+		}
+	}
+	return targetRemoteActionResult{}, applicable
 }
 
 func normalizeFloorTargetStatus(platform string, status string) (string, bool) {
@@ -401,7 +457,7 @@ func conflictingTargetInventory(observations []targetInventoryObservation) bool 
 
 func targetActionAuditOnly(action string) bool {
 	switch action {
-	case RemoteActionSkippedUpstreamScheduling, RemoteActionSkippedSub2APILastActive, RemoteActionSkippedSub2APILastUsable, RemoteActionSkippedSub2APIInventory:
+	case RemoteActionSkippedSub2APILastModelSource, RemoteActionSkippedUpstreamScheduling, RemoteActionSkippedSub2APILastActive, RemoteActionSkippedSub2APILastUsable, RemoteActionSkippedSub2APIInventory:
 		return true
 	case PriorityManualSetAction, PriorityManualSetFailedAction, ConcurrencySetAction, ConcurrencySetFailedAction:
 		return true
@@ -503,6 +559,15 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 	for _, spec := range specs {
 		if spec.policy.Enabled && policyRemoteActionEnabled(spec.policy) {
 			controlledModels[spec.modelName] = struct{}{}
+		}
+	}
+	if target.Platform == string(upstream.PlatformSub2API) {
+		excluded, readErr := s.modelControlExcluded(ctx, userID, adminAccountID)
+		if readErr != nil {
+			return targetRemoteActionResult{}, readErr
+		}
+		for model := range excluded[target.TargetID] {
+			delete(controlledModels, model)
 		}
 	}
 	if len(controlledModels) == 0 {
@@ -634,7 +699,11 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 			return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APIInventory}, err
 		}
 		inventory = fresh
-		floorResult := floorGuard.reserveSub2APIInactive(target, *fresh, monitoringScope)
+		reserved, readErr := s.modelFloorReserved(ctx, userID, adminAccountID)
+		if readErr != nil {
+			return targetRemoteActionResult{remoteAction: RemoteActionSkippedSub2APIInventory}, readErr
+		}
+		floorResult := floorGuard.reserveSub2APIInactiveWithModels(target, *fresh, monitoringScope, reserved)
 		if floorResult.remoteAction != "" {
 			stored.PendingStatus = ""
 			stored.PendingWeight = nil

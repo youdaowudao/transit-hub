@@ -153,6 +153,7 @@ func (s *Service) runSchedulerTickSafely(ctx context.Context) {
 	}
 	defer release()
 	s.runSchedulerTick(ctx)
+	s.startModelControlAutoScans(ctx)
 }
 
 // runSchedulerTick 扫描全部已启用策略、旧版 target 分配和新版 admin 分组分配，按 workspace

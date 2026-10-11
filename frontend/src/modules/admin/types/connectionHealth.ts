@@ -53,6 +53,7 @@ export type ConnectionHealthState =
   | 'disabled'
 
 export interface ModelHealth {
+  modelControlClosed?: boolean
   ruleVersion?: HealthRuleVersion
   firstTokenMs?: number | null
   firstEventMs?: number | null
@@ -192,6 +193,7 @@ export interface TargetPolicyAssignments {
 }
 
 export interface AdminGroupUnprobedModel {
+  modelControlClosed?: boolean
   modelName: string
   providerFamily: string
   nextProbeAt?: string | null
@@ -219,6 +221,8 @@ export interface AccountManagementResult {
 }
 
 export interface AdminGroupAccount {
+  modelControlNoActiveProbe?: boolean
+  modelFloorLastSources?: Array<{ groupId: string; groupName: string; modelKey: string }>
   modelControl?: ModelControlAccountSummary | null
   remoteActionPending?: { action: string; dispatchId?: string; phase: string; reason: string; source?: string }
   testConfiguration?: EffectiveTestConfiguration
@@ -624,6 +628,16 @@ export interface QuestionAnswerRecentSummaryItem {
 export interface ModelControlSummaryModel { modelName: string; status: 'open' | 'closed' | 'unknown' | 'not_provided' | 'account_missing'; attention: boolean; decision: ModelControlDecision; checkedAt: string | null }
 export interface ModelControlAccountSummary { open: number; closed: number; attention: number; models: ModelControlSummaryModel[] }
 export interface ModelControlSettings { minAccuracyPercent: number; minJudgedAnswers: number; version: number }
+export interface ModelControlAutoSettings {
+  autoCloseEnabled: boolean; autoCloseEnabledAt: string | null
+  autoRestoreEnabled: boolean; autoRestoreEnabledAt: string | null
+  healthCoordinationEnabled: boolean; verifyIntervalMinutes: number; retryIntervalMinutes: number; version: number
+  lastScanStartedAt: string | null; lastScanFinishedAt: string | null; lastScanErrorKey: string
+}
+export interface ModelControlAutoView {
+  state: 'off' | 'none' | 'busy' | 'manual' | 'done' | 'waiting' | 'retry' | 'eligible'
+  operation: '' | 'close' | 'restore'; nextAt: string | null; reasonKey: string; changedAt: string
+}
 export interface ModelControlCounts { total: number; open: number; closed: number; attention: number; untested: number }
 export interface ModelControlSupplyItem { modelName: string; open: number; closed: number; unknown: number; openAccounts: string[]; closedAccounts: string[] }
 export interface ModelControlGroupSupply { items: ModelControlSupplyItem[]; otherTypeAccounts: number }
@@ -642,6 +656,7 @@ export interface ModelControlRound {
 export interface ModelControlEntry { key: string; value: string; state: string }
 export interface ModelControlSource { groupId: string; groupName: string; key: string; count: number | null; ok?: boolean }
 export interface ModelControlItem {
+  healthCoordination?: boolean; auto?: ModelControlAutoView
   targetId: string; accountName: string; modelName: string; version: number; rule: ModelControlRule
   round: ModelControlRound | null; previousRound: ModelControlRound | null
   decision: ModelControlDecision; decisionReason: string; basis: ModelControlBasis; attention: boolean; verifyErrorKey?: string
@@ -668,6 +683,7 @@ export interface ModelControlResult {
   schedulableResult?: unknown; errorKey?: string
 }
 export interface ModelControlEvent {
+  actorUserId?: string
   id: string; targetId: string; modelName: string; eventType: string; createdAt: string
   basis: unknown; detail: unknown
 }

@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
+import { c32AutoSettings } from './fixtures/c32ModelControl'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Dialog from '@/modules/admin/components/dashboard/ManualOneTimeProbeDialog.vue'
 import Panel from '@/modules/admin/components/dashboard/QuestionAnswerModelControlPanel.vue'
 import { batch, emptyBatch, managed, now, target, targetId } from './fixtures/v2911ModelControl'
 import { questionAnswerFixtureStats } from './fixtures/c1QuestionAnswerHistory'
-const api = vi.hoisted(() => Object.fromEntries(['discoverTargetModels', 'listTestQuestions', 'getLatestQuestionAnswerBatch', 'getQuestionAnswerHistory', 'getQuestionAnswerBatch', 'startQuestionAnswerBatch', 'getModelControlTarget', 'getModelControlSettings', 'verifyModelControl', 'addModelControlManaged'].map(key => [key, vi.fn()])))
+const api = vi.hoisted(() => Object.fromEntries(['discoverTargetModels', 'listTestQuestions', 'getLatestQuestionAnswerBatch', 'getQuestionAnswerHistory', 'getQuestionAnswerBatch', 'startQuestionAnswerBatch', 'getModelControlTarget', 'getModelControlAutoSettings', 'getModelControlSettings', 'verifyModelControl', 'addModelControlManaged'].map(key => [key, vi.fn()])))
 vi.mock('@/modules/admin/api/connectionHealth', async original => ({ ...await original<typeof import('@/modules/admin/api/connectionHealth')>(), ...api }))
 const wrappers: VueWrapper[] = []
 const defer = <T,>() => { let resolve!: (value: T) => void, reject!: (reason: unknown) => void; const promise = new Promise<T>((a, b) => { resolve = a; reject = b }); return { promise, resolve, reject } }
@@ -13,7 +14,7 @@ const button = (w: VueWrapper, label: string) => { const found = w.findAll('butt
 const read = (models = ['M']) => ({ targetId, items: models.map(managed), candidates: [] })
 const mounted = async () => { const w = mount(Dialog, { props: { open: false, target, questionAnswerPreferences: { modelIds: ['A'], questionIds: ['q'], reasoningEffort: 'medium', repeatCount: 1 } }, global: { stubs: { Teleport: true, Transition: false } } }); wrappers.push(w); await w.setProps({ open: true }); await flushPromises(); if (!w.find('[data-testid="question-answer-models"]').exists()) await w.get('[data-testid="question-answer-configuration-toggle"]').trigger('click'); await flushPromises(); return w }
 beforeEach(() => {
- vi.resetAllMocks(); api.discoverTargetModels.mockResolvedValue(['A', 'B', 'M'].map(id => ({ id, name: id }))); api.listTestQuestions.mockResolvedValue([{ id: 'q', name: '题', body: '答案', keywords: ['答案'], enabled: true, isDefault: true, createdAt: now, updatedAt: now }]); api.getLatestQuestionAnswerBatch.mockResolvedValue(emptyBatch()); api.getQuestionAnswerHistory.mockResolvedValue({ batches: [], page: 1, pageSize: 20, totalBatches: 0, totalPages: 0, todayStats: questionAnswerFixtureStats([]) }); api.getQuestionAnswerBatch.mockResolvedValue(batch()); api.startQuestionAnswerBatch.mockResolvedValue(batch()); api.getModelControlTarget.mockResolvedValue(read()); api.getModelControlSettings.mockResolvedValue({ minAccuracyPercent: 50, minJudgedAnswers: 3, version: 1 }); api.verifyModelControl.mockResolvedValue({ items: [managed()], errors: [] }); api.addModelControlManaged.mockResolvedValue(managed('A'))
+ vi.resetAllMocks(); api.discoverTargetModels.mockResolvedValue(['A', 'B', 'M'].map(id => ({ id, name: id }))); api.listTestQuestions.mockResolvedValue([{ id: 'q', name: '题', body: '答案', keywords: ['答案'], enabled: true, isDefault: true, createdAt: now, updatedAt: now }]); api.getLatestQuestionAnswerBatch.mockResolvedValue(emptyBatch()); api.getQuestionAnswerHistory.mockResolvedValue({ batches: [], page: 1, pageSize: 20, totalBatches: 0, totalPages: 0, todayStats: questionAnswerFixtureStats([]) }); api.getQuestionAnswerBatch.mockResolvedValue(batch()); api.startQuestionAnswerBatch.mockResolvedValue(batch()); api.getModelControlTarget.mockResolvedValue(read()); api.getModelControlAutoSettings.mockResolvedValue(c32AutoSettings()); api.getModelControlSettings.mockResolvedValue({ minAccuracyPercent: 50, minJudgedAnswers: 3, version: 1 }); api.verifyModelControl.mockResolvedValue({ items: [managed()], errors: [] }); api.addModelControlManaged.mockResolvedValue(managed('A'))
 })
 afterEach(async () => { wrappers.splice(0).forEach(w => w.unmount()); await flushPromises(); vi.useRealTimers(); vi.restoreAllMocks() })
 describe('managed model selection waits for a current complete read', () => {

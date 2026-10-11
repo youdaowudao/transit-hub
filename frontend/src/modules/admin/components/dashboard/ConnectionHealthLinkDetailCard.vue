@@ -91,6 +91,11 @@ const latestEventSource = computed(() => {
 const remoteActionText = computed(() => {
   const mapped = remoteActionLabelKey(props.remoteAction)
   if (!mapped) return ''
+  if (props.remoteAction === 'skipped_sub2api_group_last_model_source') {
+    const event = [...props.records].reverse().find(record => record.remoteAction === props.remoteAction)
+    const group = event?.ownGroupName || event?.upstreamGroupName
+    return group ? t('admin.connectionHealth.remoteActions.skippedSub2apiLastModelSource', { group }) : t(mapped.key)
+  }
   return t(mapped.key, mapped.params ?? {})
 })
 

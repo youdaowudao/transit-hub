@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { c32AutoSettings } from './fixtures/c32ModelControl'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -15,7 +16,7 @@ import { modelControlBusyTargets } from '@/modules/admin/utils/questionAnswerMod
 import type { ModelControlItem, ModelControlPreview, ModelControlRule, ModelControlSettings, QuestionAnswerRecentSummaryItem } from '@/modules/admin/types/connectionHealth'
 import { c2Groups, c2Stats } from './fixtures/c2QuestionAnswerSchedules'
 
-const api = vi.hoisted(() => Object.fromEntries(['getModelControlTarget', 'listModelControlItems', 'getModelControlSettings', 'saveModelControlSettings', 'listModelControlEvents', 'getModelControlVerifyTargets', 'verifyModelControl', 'addModelControlManaged', 'removeModelControlManaged', 'previewModelControl', 'executeModelControl', 'getConnectionHealthAdminGroups', 'refreshConnectionHealthAdminGroupsAutomatically'].map(name => [name, vi.fn()])))
+const api = vi.hoisted(() => Object.fromEntries(['getModelControlTarget', 'listModelControlItems', 'getModelControlAutoSettings', 'getModelControlSettings', 'saveModelControlSettings', 'listModelControlEvents', 'getModelControlVerifyTargets', 'verifyModelControl', 'addModelControlManaged', 'removeModelControlManaged', 'previewModelControl', 'executeModelControl', 'getConnectionHealthAdminGroups', 'refreshConnectionHealthAdminGroupsAutomatically'].map(name => [name, vi.fn()])))
 vi.mock('@/modules/admin/api/connectionHealth', async original => ({ ...await original<typeof import('@/modules/admin/api/connectionHealth')>(), ...api }))
 const targetId = 'sub2api:ws1:a', now = '2026-10-09T12:00:00Z'
 const errorKey = (suffix: string) => `admin.connectionHealth.errors.modelControl${suffix}`
@@ -40,7 +41,7 @@ beforeEach(() => {
   vi.resetAllMocks(); modelControlBusyTargets.value = new Set(); service.setAdminGroupsWorkspace(''); service.setAdminGroupsWorkspace('ws1')
   Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
   api.getModelControlTarget.mockResolvedValue({ targetId, items: [item()], candidates: ['B'] })
-  api.listModelControlItems.mockResolvedValue(page([item()])); api.getModelControlSettings.mockResolvedValue(settings()); api.saveModelControlSettings.mockResolvedValue(settings({ version: 2 }))
+  api.listModelControlItems.mockResolvedValue(page([item()])); api.getModelControlAutoSettings.mockResolvedValue(c32AutoSettings()); api.getModelControlSettings.mockResolvedValue(settings()); api.saveModelControlSettings.mockResolvedValue(settings({ version: 2 }))
   api.listModelControlEvents.mockResolvedValue(page([{ id: 'event1', targetId, modelName: 'A', eventType: 'managed_abandoned', createdAt: now, basis: {}, detail: { unconfirmedClose: { entries: { a: 'A' }, sentAt: now, expiresAt: now } } }]))
   api.getModelControlVerifyTargets.mockResolvedValue({ targetIds: [targetId] }); api.verifyModelControl.mockResolvedValue({ items: [item()], errors: [] }); api.previewModelControl.mockResolvedValue(plan()); api.executeModelControl.mockResolvedValue({ item: closed(), outcome: 'closed', entries: [{ key: 'a', value: 'A', state: 'closed' }] }); api.addModelControlManaged.mockResolvedValue(item({ modelName: 'B' })); api.removeModelControlManaged.mockResolvedValue(undefined)
   api.getConnectionHealthAdminGroups.mockResolvedValue(c2Groups())

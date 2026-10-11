@@ -21,8 +21,10 @@ const reread = async (targetId = props.targetId) => {
   if (disposed || generation !== scope || targetId !== props.targetId) return
   result.items.forEach(update); changed('updated'); emit('settled', targetId)
 }
+const headerRefreshKey = ref(0)
 const load = async () => {
   if (disposed) return
+  headerRefreshKey.value++
   const revision = ++sequence, targetId = props.targetId, refreshKey = props.refreshKey, request = new AbortController(); controller?.abort(); controller = request; loading.value = true; error.value = ''
   const current = () => revision === sequence && targetId === props.targetId && !disposed && !request.signal.aborted
   try {
@@ -45,7 +47,7 @@ onBeforeUnmount(() => { disposed = true; scope++; sequence++; controller?.abort(
 <template>
   <section data-testid="model-control-panel" class="mb-3 space-y-3 rounded-lg border border-border/50 p-3">
     <header class="flex items-center justify-between gap-2"><h3 class="text-xs font-semibold">{{ message('title') }}</h3><button type="button" class="text-xs text-muted-foreground underline" :disabled="loading" @click="load">{{ message('refresh') }}</button></header>
-    <QuestionAnswerModelControlHeader scope="account" :workspace="targetId.split(':')[1] ?? ''" :counts="modelControlItemCounts(items)" :counts-stale="stale" />
+    <QuestionAnswerModelControlHeader scope="account" :workspace="targetId.split(':')[1] ?? ''" :counts="modelControlItemCounts(items)" :counts-stale="stale" :refresh-key="headerRefreshKey" />
     <p v-if="error" role="alert" class="text-xs text-destructive">{{ message('listReadFailed') }} · {{ modelControlReason(error) }} · <button type="button" class="underline" @click="load">{{ message('retry') }}</button></p><p v-if="loading && !items.length" class="text-xs text-muted-foreground">{{ message('loading') }}</p><p v-else-if="!items.length && !error" class="text-xs text-muted-foreground">{{ message('emptyCandidates') }}</p>
     <div class="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(min(18rem,100%),1fr))]"><QuestionAnswerModelControlRow v-for="item in items" :key="item.modelName" :item="item" :target-id="targetId" :model-name="item.modelName" :workspace="targetId.split(':')[1] ?? ''" :available-models="availableModels" :issue="issue" :execute-unconfirmed="verifyState.isUnconfirmed(targetId, item.modelName)" :account-unconfirmed="verifyState.accountUnconfirmed(targetId)" @updated="rowUpdated" @refresh="requestLoad" @removed="removed(item.modelName)" @settled="emit('settled', $event)" @verify-now="reread" @execute-unconfirmed="verifyState.markUnconfirmed" @view-round="emit('view-round', $event)" /></div>
   </section>

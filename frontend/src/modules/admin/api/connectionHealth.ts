@@ -24,7 +24,7 @@ import type {
   QuestionAnswerHistoryScope,
   QuestionAnswerTodaySummary,
   QuestionAnswerRecentSummaryItem,
-  ModelControlAccountSummary, ModelControlSettings, ModelControlCounts, ModelControlItem, ModelControlPreview, ModelControlResult, ModelControlBasis, ModelControlOperation, ModelControlPage, ModelControlEvent,
+  ModelControlAccountSummary, ModelControlAutoSettings, ModelControlSettings, ModelControlCounts, ModelControlItem, ModelControlPreview, ModelControlResult, ModelControlBasis, ModelControlOperation, ModelControlPage, ModelControlEvent,
   QuestionAnswerRuntimeSettings,
   QuestionAnswerScheduleLimits,
   QuestionAnswerScheduleInput,
@@ -209,7 +209,12 @@ const parseAdminGroupHealth = (payload: unknown): AdminGroupHealth[] => {
   }
   for (const group of payload as AdminGroupHealth[]) {
     if (group.modelControlError !== undefined && typeof group.modelControlError !== 'string') throw new Error('admin.connectionHealth.errors.request')
-    for (const account of group.accounts) if (account.modelControl !== undefined && !validModelControlSummary(account.modelControl)) throw new Error('admin.connectionHealth.errors.request')
+    for (const account of group.accounts) {
+      if (account.modelControl !== undefined && !validModelControlSummary(account.modelControl)) throw new Error('admin.connectionHealth.errors.request')
+      if ((account.modelControlNoActiveProbe !== undefined && typeof account.modelControlNoActiveProbe !== 'boolean')
+        || (account.modelFloorLastSources !== undefined && (!Array.isArray(account.modelFloorLastSources) || account.modelFloorLastSources.some(source => !source || typeof source.groupId !== 'string' || typeof source.groupName !== 'string' || typeof source.modelKey !== 'string')))
+        || [...(account.modelHealth ?? []), ...(account.unprobedModels ?? [])].some(model => model.modelControlClosed !== undefined && typeof model.modelControlClosed !== 'boolean')) throw new Error('admin.connectionHealth.errors.request')
+    }
   }
   return payload as AdminGroupHealth[]
 }
@@ -1042,15 +1047,45 @@ const validModelControlSummary = (value: unknown): value is ModelControlAccountS
       && typeof model.attention === 'boolean' && ['no_evidence', 'testing', 'awaiting_review', 'insufficient', 'close_recommended', 'usable'].includes(model.decision)
       && (model.checkedAt === null || (typeof model.checkedAt === 'string' && Number.isFinite(Date.parse(model.checkedAt)))))
 }
+const modelControlDate = (value: unknown): boolean => value === null || (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Date.parse(value)))
+export const isModelControlAutoSettings = (value: unknown): value is ModelControlAutoSettings => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const v = value as ModelControlAutoSettings
+  return typeof v.autoCloseEnabled === 'boolean' && typeof v.autoRestoreEnabled === 'boolean' && typeof v.healthCoordinationEnabled === 'boolean'
+    && modelControlDate(v.autoCloseEnabledAt) && modelControlDate(v.autoRestoreEnabledAt)
+    && Number.isInteger(v.verifyIntervalMinutes) && v.verifyIntervalMinutes >= 5 && v.verifyIntervalMinutes <= 60
+    && Number.isInteger(v.retryIntervalMinutes) && v.retryIntervalMinutes >= 1 && v.retryIntervalMinutes <= 60
+    && Number.isInteger(v.version) && v.version >= 0 && modelControlDate(v.lastScanStartedAt) && modelControlDate(v.lastScanFinishedAt) && typeof v.lastScanErrorKey === 'string'
+}
+const parseModelControlAutoSettings = (value: unknown): ModelControlAutoSettings => {
+  if (!isModelControlAutoSettings(value)) throw new Error('admin.connectionHealth.errors.request')
+  return value
+}
+const parseModelControlItem = (item: ModelControlItem): ModelControlItem => {
+  if (item.healthCoordination !== undefined && typeof item.healthCoordination !== 'boolean') throw new Error('admin.connectionHealth.errors.request')
+  if (item.auto !== undefined) {
+    const v = item.auto
+    if (!v || !['off', 'none', 'busy', 'manual', 'done', 'waiting', 'retry', 'eligible'].includes(v.state)
+      || !['', 'close', 'restore'].includes(v.operation) || !modelControlDate(v.nextAt) || typeof v.reasonKey !== 'string' || typeof v.changedAt !== 'string' || !modelControlDate(v.changedAt)) throw new Error('admin.connectionHealth.errors.request')
+  }
+  return item
+}
+const parseModelControlItems = <T extends { items: ModelControlItem[] }>(value: T): T => {
+  if (!Array.isArray(value.items)) throw new Error('admin.connectionHealth.errors.request')
+  value.items.forEach(parseModelControlItem)
+  return value
+}
 const modelControlPath = '/connection-health/model-control'
+export const getModelControlAutoSettings = async (signal?: AbortSignal): Promise<ModelControlAutoSettings> => parseModelControlAutoSettings(await requestJson<unknown>(`${modelControlPath}/auto-settings`, { signal }))
+export const saveModelControlAutoSettings = async (settings: ModelControlAutoSettings, expectedVersion: number, signal?: AbortSignal): Promise<ModelControlAutoSettings> => parseModelControlAutoSettings(await requestJson<unknown>(`${modelControlPath}/auto-settings`, { method: 'PUT', body: JSON.stringify({ autoCloseEnabled: settings.autoCloseEnabled, autoRestoreEnabled: settings.autoRestoreEnabled, healthCoordinationEnabled: settings.healthCoordinationEnabled, verifyIntervalMinutes: settings.verifyIntervalMinutes, retryIntervalMinutes: settings.retryIntervalMinutes, expectedVersion }), signal }))
 export const getModelControlSettings = (signal?: AbortSignal): Promise<ModelControlSettings> => requestJson(`${modelControlPath}/settings`, { signal })
 export const saveModelControlSettings = (settings: Omit<ModelControlSettings, 'version'>, expectedVersion: number, signal?: AbortSignal): Promise<ModelControlSettings> => requestJson(`${modelControlPath}/settings`, { method: 'PUT', body: JSON.stringify({ minAccuracyPercent: settings.minAccuracyPercent, minJudgedAnswers: settings.minJudgedAnswers, expectedVersion }), signal })
-export const getModelControlTarget = (targetId: string, signal?: AbortSignal): Promise<{ targetId: string; items: ModelControlItem[]; candidates: string[] }> => requestJson(`${modelControlPath}/targets/${encodeURIComponent(targetId)}`, { signal })
-export const listModelControlItems = (view: 'attention' | 'all', modelName: string, page: number, signal?: AbortSignal): Promise<ModelControlPage<ModelControlItem> & { counts: ModelControlCounts }> => requestJson(`${modelControlPath}/items?${new URLSearchParams({ view, modelName, page: String(page) })}`, { signal })
-export const addModelControlManaged = (targetId: string, modelName: string, signal?: AbortSignal): Promise<ModelControlItem> => requestJson(`${modelControlPath}/managed`, { method: 'POST', body: JSON.stringify({ targetId, modelName }), signal })
+export const getModelControlTarget = async (targetId: string, signal?: AbortSignal): Promise<{ targetId: string; items: ModelControlItem[]; candidates: string[] }> => parseModelControlItems(await requestJson<{ targetId: string; items: ModelControlItem[]; candidates: string[] }>(`${modelControlPath}/targets/${encodeURIComponent(targetId)}`, { signal }))
+export const listModelControlItems = async (view: 'attention' | 'all', modelName: string, page: number, signal?: AbortSignal): Promise<ModelControlPage<ModelControlItem> & { counts: ModelControlCounts }> => parseModelControlItems(await requestJson<ModelControlPage<ModelControlItem> & { counts: ModelControlCounts }>(`${modelControlPath}/items?${new URLSearchParams({ view, modelName, page: String(page) })}`, { signal }))
+export const addModelControlManaged = async (targetId: string, modelName: string, signal?: AbortSignal): Promise<ModelControlItem> => parseModelControlItem(await requestJson(`${modelControlPath}/managed`, { method: 'POST', body: JSON.stringify({ targetId, modelName }), signal }))
 export const removeModelControlManaged = (targetId: string, modelName: string, expectedVersion: number, abandonClosed: boolean, signal?: AbortSignal): Promise<void> => requestJson(`${modelControlPath}/managed`, { method: 'DELETE', body: JSON.stringify({ targetId, modelName, expectedVersion, abandonClosed }), signal })
-export const previewModelControl = (targetId: string, modelName: string, operation: ModelControlOperation, basis: ModelControlBasis, signal?: AbortSignal): Promise<ModelControlPreview> => requestJson(`${modelControlPath}/preview`, { method: 'POST', body: JSON.stringify({ targetId, modelName, operation, basis }), signal })
-export const executeModelControl = (targetId: string, modelName: string, operation: ModelControlOperation, basis: ModelControlBasis, planFingerprint: string, confirmWithoutEvidence: boolean, signal?: AbortSignal): Promise<ModelControlResult> => requestJson(`${modelControlPath}/${operation === 'close_account' ? 'close-account' : operation}`, { method: 'POST', body: JSON.stringify({ targetId, modelName, basis, planFingerprint, ...(operation === 'restore' ? { confirmWithoutEvidence } : {}) }), signal })
+export const previewModelControl = async (targetId: string, modelName: string, operation: ModelControlOperation, basis: ModelControlBasis, signal?: AbortSignal): Promise<ModelControlPreview> => { const value = await requestJson<ModelControlPreview>(`${modelControlPath}/preview`, { method: 'POST', body: JSON.stringify({ targetId, modelName, operation, basis }), signal }); parseModelControlItem(value.item); return value }
+export const executeModelControl = async (targetId: string, modelName: string, operation: ModelControlOperation, basis: ModelControlBasis, planFingerprint: string, confirmWithoutEvidence: boolean, signal?: AbortSignal): Promise<ModelControlResult> => { const value = await requestJson<ModelControlResult>(`${modelControlPath}/${operation === 'close_account' ? 'close-account' : operation}`, { method: 'POST', body: JSON.stringify({ targetId, modelName, basis, planFingerprint, ...(operation === 'restore' ? { confirmWithoutEvidence } : {}) }), signal }); parseModelControlItem(value.item); return value }
 export const getModelControlVerifyTargets = (signal?: AbortSignal): Promise<{ targetIds: string[] }> => requestJson(`${modelControlPath}/verify-targets`, { signal })
-export const verifyModelControl = (targetIds: string[], signal?: AbortSignal): Promise<{ items: ModelControlItem[]; errors: Array<{ targetId: string; reasonKey: string }> }> => requestJson(`${modelControlPath}/verify`, { method: 'POST', body: JSON.stringify({ targetIds }), signal })
-export const listModelControlEvents = (targetId: string, modelName: string, page: number, signal?: AbortSignal): Promise<ModelControlPage<ModelControlEvent>> => requestJson(`${modelControlPath}/events?${new URLSearchParams({ targetId, modelName, page: String(page) })}`, { signal })
+export const verifyModelControl = async (targetIds: string[], signal?: AbortSignal): Promise<{ items: ModelControlItem[]; errors: Array<{ targetId: string; reasonKey: string }> }> => parseModelControlItems(await requestJson<{ items: ModelControlItem[]; errors: Array<{ targetId: string; reasonKey: string }> }>(`${modelControlPath}/verify`, { method: 'POST', body: JSON.stringify({ targetIds }), signal }))
+export const listModelControlEvents = async (targetId: string, modelName: string, page: number, signal?: AbortSignal): Promise<ModelControlPage<ModelControlEvent>> => { const value = await requestJson<ModelControlPage<ModelControlEvent>>(`${modelControlPath}/events?${new URLSearchParams({ targetId, modelName, page: String(page) })}`, { signal }); if (value.items.some(event => event.actorUserId !== undefined && typeof event.actorUserId !== 'string')) throw new Error('admin.connectionHealth.errors.request'); return value }

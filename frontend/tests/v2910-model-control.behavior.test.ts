@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { c32AutoSettings } from './fixtures/c32ModelControl'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Row from '@/modules/admin/components/dashboard/QuestionAnswerModelControlRow.vue'
@@ -10,7 +11,7 @@ import { modelControlBusyTargets } from '@/modules/admin/utils/questionAnswerMod
 import { questionAnswerFixtureStats } from './fixtures/c1QuestionAnswerHistory'
 import type { ModelControlItem, QuestionAnswerBatch } from '@/modules/admin/types/connectionHealth'
 
-const api = vi.hoisted(() => Object.fromEntries(['getModelControlTarget','verifyModelControl','getModelControlSettings','discoverTargetModels','listTestQuestions','getQuestionAnswerHistory','getLatestQuestionAnswerBatch','getQuestionAnswerBatch','startQuestionAnswerBatch','addModelControlManaged','listModelControlItems','listModelControlEvents','getModelControlVerifyTargets','previewModelControl','executeModelControl'].map(name => [name,vi.fn()])))
+const api = vi.hoisted(() => Object.fromEntries(['getModelControlTarget','verifyModelControl','getModelControlAutoSettings', 'getModelControlSettings','discoverTargetModels','listTestQuestions','getQuestionAnswerHistory','getLatestQuestionAnswerBatch','getQuestionAnswerBatch','startQuestionAnswerBatch','addModelControlManaged','listModelControlItems','listModelControlEvents','getModelControlVerifyTargets','previewModelControl','executeModelControl'].map(name => [name,vi.fn()])))
 vi.mock('@/modules/admin/api/connectionHealth', async original => ({ ...await original<typeof import('@/modules/admin/api/connectionHealth')>(), ...api }))
 import { targetId, now, target, managed, batch, emptyBatch } from './fixtures/v2911ModelControl'
 const wrappers:VueWrapper[]=[]
@@ -21,7 +22,7 @@ const deferred=<T,>()=>{let resolve!:(v:T)=>void;const promise=new Promise<T>(do
 const dialog=async()=>{const w=track(mount(Dialog,{props:{open:false,target,questionAnswerPreferences:{modelIds:['A'],questionIds:['q'],reasoningEffort:'medium',repeatCount:1}},global:{stubs:{Teleport:true,Transition:false}}}));await w.setProps({open:true});await flushPromises();return w}
 beforeEach(()=>{
  vi.resetAllMocks();modelControlBusyTargets.value=new Set();Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'})
- api.getModelControlTarget.mockResolvedValue({targetId,items:[managed()],candidates:[]});api.verifyModelControl.mockResolvedValue({items:[managed()],errors:[]});api.getModelControlSettings.mockResolvedValue({minAccuracyPercent:50,minJudgedAnswers:3,version:1})
+ api.getModelControlTarget.mockResolvedValue({targetId,items:[managed()],candidates:[]});api.verifyModelControl.mockResolvedValue({items:[managed()],errors:[]});api.getModelControlAutoSettings.mockResolvedValue(c32AutoSettings()); api.getModelControlSettings.mockResolvedValue({minAccuracyPercent:50,minJudgedAnswers:3,version:1})
  api.discoverTargetModels.mockResolvedValue([{id:'A',name:'A',isDefault:true},{id:'M',name:'M'}]);api.listTestQuestions.mockResolvedValue([{id:'q',name:'隔离题',body:'答案',keywords:['答案'],enabled:true,isDefault:true,createdAt:now,updatedAt:now}]);api.getLatestQuestionAnswerBatch.mockResolvedValue(emptyBatch())
  api.getQuestionAnswerHistory.mockResolvedValue({batches:[],page:1,pageSize:20,totalBatches:0,totalPages:0,todayStats:questionAnswerFixtureStats([])})
  api.startQuestionAnswerBatch.mockResolvedValue(batch());api.getQuestionAnswerBatch.mockResolvedValue(batch());api.addModelControlManaged.mockResolvedValue(managed('A'))

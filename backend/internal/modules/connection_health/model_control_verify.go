@@ -119,6 +119,30 @@ func (s *Service) VerifyModelControl(ctx context.Context, user string, targetIDs
 		}
 	}
 	sort.Strings(ids)
+	return s.verifyModelControlTargets(ctx, user, ws, ids, modelControlVerifyOptions{})
+}
+
+type modelControlVerifyOptions struct {
+	Session    *upstream.Session
+	Background bool
+}
+
+func (s *Service) verifyModelControlTargets(ctx context.Context, user, ws string, ids []string, opts modelControlVerifyOptions) (ModelControlVerifyResult, error) {
+	var err error
+	result := ModelControlVerifyResult{Items: []ModelControlItem{}, Errors: []ModelControlVerifyError{}}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		seen[id] = true
+	}
+	if opts.Background {
+		settings, err := s.modelControlAuto(ctx, user, ws)
+		if err != nil {
+			return result, requestError(modelControlError("Storage"))
+		}
+		if !settings.enabled() || ctx.Err() != nil {
+			return result, nil
+		}
+	}
 	if s.modelControlActions == nil {
 		return result, requestError(modelControlError("Unsupported"))
 	}
@@ -135,7 +159,11 @@ func (s *Service) VerifyModelControl(ctx context.Context, user string, targetIDs
 		at     time.Time
 	}
 	verified := map[string]verifiedAccount{}
+	stopBackground := false
 	for _, target := range ids {
+		if opts.Background && ctx.Err() != nil {
+			break
+		}
 		reason := ""
 		leased, release, acquired, err := s.acquireActionTargetLease(ctx, target, false)
 		if err != nil {
@@ -145,10 +173,44 @@ func (s *Service) VerifyModelControl(ctx context.Context, user string, targetIDs
 		} else {
 			func() {
 				defer release()
-				session, _, account, err := s.resolveManualSession(leased, user, target)
-				if err != nil {
-					reason = modelControlError("AccountReadFailed")
-					return
+				if opts.Background {
+					settings, readErr := s.modelControlAuto(leased, user, ws)
+					if readErr != nil {
+						reason = modelControlError("Storage")
+						return
+					}
+					if !settings.enabled() {
+						stopBackground = true
+						return
+					}
+					objects, readErr := s.modelControls.ListModelControlTargets(leased, user, ws)
+					if readErr != nil {
+						reason = modelControlError("Storage")
+						return
+					}
+					for _, object := range objects {
+						if object.TargetID == target && object.Pending != nil {
+							return
+						}
+					}
+				}
+				var session upstream.Session
+				var account string
+				if opts.Session != nil {
+					session = *opts.Session
+					parsed, ok := parseTargetID(target)
+					if !ok {
+						reason = modelControlError("AccountReadFailed")
+						return
+					}
+					account = parsed.accountID
+				} else {
+					var resolveErr error
+					session, _, account, resolveErr = s.resolveManualSession(leased, user, target)
+					if resolveErr != nil {
+						reason = modelControlError("AccountReadFailed")
+						return
+					}
 				}
 				at := time.Now().UTC()
 				detail, err := s.modelControlActions.ReadSub2APIModelControlAccountContext(leased, session, account)
@@ -297,6 +359,20 @@ func (s *Service) VerifyModelControl(ctx context.Context, user string, targetIDs
 				}
 				verified[target] = verifiedAccount{detail, at}
 			}()
+		}
+		if opts.Background {
+			if repo, ok := s.modelControls.(modelControlAutoRepository); ok {
+				at := time.Now().UTC()
+				storage, cancel := modelControlStorageContext(ctx)
+				markErr := repo.MarkModelControlAutoVerify(storage, user, ws, target, &at)
+				cancel()
+				if markErr != nil && reason == "" {
+					reason = modelControlError("Storage")
+				}
+			}
+		}
+		if stopBackground {
+			break
 		}
 		if reason != "" {
 			result.Errors = append(result.Errors, ModelControlVerifyError{target, reason})

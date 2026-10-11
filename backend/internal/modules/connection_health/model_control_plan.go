@@ -269,21 +269,7 @@ func countModelSources(inventory adminWorkspaceInventory, target upstream.AdminG
 		for _, entry := range modelMappingEntries(keys, "") {
 			c := modelSourceCount{GroupID: g.group.ID, GroupName: g.group.Name, Key: entry.Key}
 			if adminInventoryComplete(inventory) {
-				n := 0
-				seen := map[string]bool{}
-				for _, a := range g.accounts {
-					if seen[a.ID] || a.ID == target.ID || a.Platform != target.Platform || a.Type != "apikey" {
-						continue
-					}
-					seen[a.ID] = true
-					if healthPending[a.ID] || c3Reserved[a.ID]["*"] || c3Reserved[a.ID][entry.Key] {
-						continue
-					}
-					supported, known := modelControlSupports(a, entry.Key)
-					if supported && known && modelControlSourceSchedulable(a, entry.Key, now) {
-						n++
-					}
-				}
+				n := modelSourceCountInGroup(g.accounts, target, entry.Key, healthPending, c3Reserved, now)
 				c.Count = &n
 				c.OK = n >= 1
 			}
@@ -360,4 +346,57 @@ func planModelAdd(d upstream.Sub2APIModelControlAccount, model string) modelAddP
 	p.Entries[model] = model
 	p.AfterMapping[model] = model
 	return p
+}
+
+func modelSourceCountInGroup(accounts []upstream.AdminGroupAccountInfo, target upstream.AdminGroupAccountInfo, key string, healthPending map[string]bool, reserved map[string]map[string]bool, now time.Time) int {
+	count := 0
+	seen := map[string]bool{}
+	for _, a := range accounts {
+		if seen[a.ID] || a.ID == target.ID || a.Platform != target.Platform || a.Type != "apikey" {
+			continue
+		}
+		seen[a.ID] = true
+		if healthPending[a.ID] || reserved[a.ID]["*"] || reserved[a.ID][key] {
+			continue
+		}
+		supported, known := modelControlSupports(a, key)
+		if supported && known && modelControlSourceSchedulable(a, key, now) {
+			count++
+		}
+	}
+	return count
+}
+func modelFloorCandidateKeys(accounts []upstream.AdminGroupAccountInfo, target upstream.AdminGroupAccountInfo, reserved map[string]map[string]bool) []string {
+	if target.Type != "apikey" || (target.Platform != "openai" && target.Platform != "anthropic") || !modelControlTargetUsable(target) {
+		return nil
+	}
+	keys := map[string]bool{}
+	for _, a := range accounts {
+		if a.ID == target.ID || a.Platform != target.Platform {
+			continue
+		}
+		for key := range reserved[a.ID] {
+			if key != "*" {
+				supported, known := modelControlSupports(target, key)
+				if supported || !known {
+					keys[key] = true
+				}
+			}
+		}
+	}
+	result := []string{}
+	for key := range keys {
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
+}
+func modelFloorLastKeys(accounts []upstream.AdminGroupAccountInfo, target upstream.AdminGroupAccountInfo, healthPending map[string]bool, reserved map[string]map[string]bool, now time.Time) []string {
+	result := []string{}
+	for _, key := range modelFloorCandidateKeys(accounts, target, reserved) {
+		if modelSourceCountInGroup(accounts, target, key, healthPending, reserved, now) == 0 {
+			result = append(result, key)
+		}
+	}
+	return result
 }

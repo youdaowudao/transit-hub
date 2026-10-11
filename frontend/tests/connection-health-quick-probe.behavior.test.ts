@@ -1503,3 +1503,26 @@ describe('protocol and unresolved remote action safety display', () => {
     expect(harness.refs.adminGroups.value[0].accounts[0].modelHealth[0].currentWeight).toBe(45)
   })
 })
+
+
+describe('C3.2 manual probe keeps model-control exclusion markers', () => {
+ it.each(['health', 'unprobed'] as const)('preserves the marker from %s after a real view merge', async source => {
+  const model = makeModel({ modelControlClosed: true })
+  const account = makeAccount({ modelHealth: source === 'health' ? [model] : [], unprobedModels: source === 'unprobed' ? [{ modelName: model.modelName, providerFamily: model.providerFamily, modelControlClosed: true }] : [] })
+  harness.probeTargetWithProgress.mockResolvedValue([{ ...successResult(123), modelControlClosed: false }])
+  const wrapper = await mountView([makeGroup([account])]); await buttonByAria(rowFor(wrapper, account.name), '一键正式探活：gpt-5.6-sol').trigger('click'); await flushPromises()
+  const updated = harness.refs.adminGroups.value[0].accounts[0]
+  expect(updated.modelHealth.find((value: ModelHealth) => value.modelName === model.modelName)?.modelControlClosed).toBe(true)
+  expect(updated.modelHealth).toHaveLength(1); expect(updated.unprobedModels).toHaveLength(0)
+ })
+ it('explains a same-model safety rejection and keeps scheduling enabled', async () => {
+  const account = makeAccount({ schedulable: true })
+  harness.updateTargetSchedulable.mockImplementation(async () => { harness.refs.errorKey.value = 'admin.connectionHealth.errors.sub2apiGroupLastModelSource'; return false })
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+  try {
+   const wrapper = await mountView([makeGroup([account])]); await buttonByAria(rowFor(wrapper, account.name), '关闭主站调度').trigger('click'); await flushPromises()
+   expect(wrapper.text()).toContain('所属分组里有已关闭的模型只剩这个账号还开着，不能关闭或删除。是哪个模型见账号行的“保留账号”提示。')
+   expect(wrapper.text()).not.toContain('admin.connectionHealth.errors.sub2apiGroupLastModelSource'); expect(account.schedulable).toBe(true); expect(rowFor(wrapper, account.name).text()).toContain('主站调度开启')
+  } finally { confirm.mockRestore() }
+ })
+})

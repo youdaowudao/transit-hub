@@ -108,7 +108,14 @@ type AdminGroupHealthSummary struct {
 // AdminGroupAccount 是 admin 分组下的一个账号(sub2api) / 渠道(new-api)，同时是一个独立探活目标。
 // 只要后端能安全解析 base_url + key + model 就可独立探活，不再需要 real_connections。
 // 绝不包含 key / token / cookie / credentials / secret / authorization 明文。
+type ModelFloorLastSource struct {
+	GroupID   string `json:"groupId"`
+	GroupName string `json:"groupName"`
+	ModelKey  string `json:"modelKey"`
+}
 type AdminGroupAccount struct {
+	ModelControlNoActiveProbe     bool                        `json:"modelControlNoActiveProbe,omitempty"`
+	ModelFloorLastSources         []ModelFloorLastSource      `json:"modelFloorLastSources,omitempty"`
 	ModelControl                  *ModelControlAccountSummary `json:"modelControl"`
 	TestConfiguration             EffectiveTestConfiguration  `json:"testConfiguration"`
 	RemoteActionPending           *RemoteActionPendingView    `json:"remoteActionPending,omitempty"`
@@ -206,6 +213,7 @@ type AdminPriorityConflict struct {
 }
 
 type AdminGroupUnprobedModel struct {
+	ModelControlClosed       bool                         `json:"modelControlClosed,omitempty"`
 	ModelName                string                       `json:"modelName"`
 	ProviderFamily           string                       `json:"providerFamily"`
 	NextProbeAt              *time.Time                   `json:"nextProbeAt,omitempty"`
@@ -544,6 +552,28 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 	if modelControlErr != nil {
 		modelControlErrorKey = modelControlError("Storage")
 	}
+	var modelControlClosed map[string]map[string]struct{}
+	var modelFloorHealthPending map[string]bool
+	var modelFloorReservations map[string]map[string]bool
+	if session.Platform == upstream.PlatformSub2API {
+		var readErr error
+		modelControlClosed, readErr = s.modelControlExcluded(ctx, userID, adminAccountID)
+		if readErr != nil {
+			modelControlClosed = nil
+			modelControlErrorKey = modelControlError("Storage")
+		}
+		settings, readErr := s.modelControlAuto(ctx, userID, adminAccountID)
+		if readErr != nil {
+			modelControlClosed = nil
+			modelControlErrorKey = modelControlError("Storage")
+		} else if settings.HealthCoordinationEnabled {
+			modelFloorHealthPending, modelFloorReservations, readErr = s.modelControlReservations(ctx, userID, adminAccountID)
+			if readErr != nil {
+				modelControlErrorKey = modelControlError("Storage")
+				modelFloorReservations = nil
+			}
+		}
+	}
 	assemblyStarted := time.Now()
 	restrictionObservedAt := assemblyStarted.UTC()
 	healthFallbacksByTarget := make(map[string][]float64)
@@ -698,6 +728,12 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				Schedulable: cloneBoolPointer(decisionAccount.Schedulable),
 			}
 			modelHealth, unprobedModels := modelHealthForSpecs(stateIndex[targetID], activeSpecs, decisionTarget, now, budgetUsage, budgetReady)
+			for n := range modelHealth {
+				_, modelHealth[n].ModelControlClosed = modelControlClosed[targetID][modelHealth[n].ModelName]
+			}
+			for n := range unprobedModels {
+				_, unprobedModels[n].ModelControlClosed = modelControlClosed[targetID][unprobedModels[n].ModelName]
+			}
 			if !decisionTarget.TestConfiguration.usable() {
 				available = false
 				reason = decisionTarget.TestConfiguration.BlockedReason
@@ -882,6 +918,24 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				ActiveNewerQuestionAnswerBatch: recentQuestionAnswer.ActiveNewerBatch,
 				ModelControl:                   modelControlSummaries[targetID],
 			}
+			probeCount := len(modelHealth) + len(unprobedModels)
+			closedProbeCount := 0
+			for _, m := range modelHealth {
+				if m.ModelControlClosed {
+					closedProbeCount++
+				}
+			}
+			for _, m := range unprobedModels {
+				if m.ModelControlClosed {
+					closedProbeCount++
+				}
+			}
+			item.ModelControlNoActiveProbe = probeCount > 0 && closedProbeCount == probeCount
+			if modelFloorReservations != nil {
+				for _, key := range modelFloorLastKeys(inventory.accounts, decisionAccount, modelFloorHealthPending, modelFloorReservations, now) {
+					item.ModelFloorLastSources = append(item.ModelFloorLastSources, ModelFloorLastSource{group.ID, group.Name, key})
+				}
+			}
 			if session.Platform == upstream.PlatformSub2API {
 				only := hasMultiplierOnlyPolicy(priorityPoliciesByTarget[targetID])
 				if only || inventoryComplete {
@@ -912,7 +966,8 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 			if _, exists := healthCandidatesByTarget[targetID]; !exists && session.Platform == upstream.PlatformSub2API && priorityManaged && !item.PriorityConflict {
 				candidatePolicies := priorityPoliciesByTarget[targetID]
 				candidateInventory := &priorityTargetInventory{
-					target: decisionTarget, accountTier: effectiveAccountTier(accountTiers[targetID]),
+					modelControlClosed: modelControlClosed[targetID],
+					target:             decisionTarget, accountTier: effectiveAccountTier(accountTiers[targetID]),
 					policies: candidatePolicies, fallbackMultipliers: healthFallbacksByTarget[targetID],
 					upstreamMultiplier: multiplierResolution,
 				}
@@ -956,8 +1011,18 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				if len(activeSpecs) == 0 {
 					summary.UnconfiguredModels++
 				} else {
-					accumulateSummary(&summary, modelHealth)
-					summary.PendingModels += len(unprobedModels)
+					judged := make([]ModelHealth, 0, len(modelHealth))
+					for _, m := range modelHealth {
+						if !m.ModelControlClosed {
+							judged = append(judged, m)
+						}
+					}
+					accumulateSummary(&summary, judged)
+					for _, m := range unprobedModels {
+						if !m.ModelControlClosed {
+							summary.PendingModels++
+						}
+					}
 				}
 			} else if hasProbePolicy {
 				summary.UnprobeableAccounts++

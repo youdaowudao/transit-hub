@@ -1029,6 +1029,7 @@ const mergeQuickProbeResults = (targetId: string, results: ModelHealth[]) => {
         const merged = {
           ...(projected ?? {}),
           ...result,
+          ...(projected?.modelControlClosed !== undefined ? { modelControlClosed: projected.modelControlClosed } : {}),
           providerFamily: result.providerFamily.trim() || projected?.providerFamily || '',
         } as ModelHealth
         if (existingIndex >= 0) modelHealth[existingIndex] = merged

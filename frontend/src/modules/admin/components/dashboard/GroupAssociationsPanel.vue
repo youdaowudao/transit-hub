@@ -20,6 +20,7 @@ import {
   X,
   Zap,
 } from 'lucide-vue-next'
+import { judgedModelHealth } from '../../composables/useConnectionHealth'
 import { getConnectionHealthAdminGroups } from '../../api/connectionHealth'
 import { listAllGroupRates } from '../../api/groupRates'
 import { getMySiteMappingOptions, listRealConnections, removeMySiteMapping, runAutoPricing, saveMySiteMapping } from '../../api/mySites'
@@ -452,7 +453,7 @@ const healthAccountAvailable = (account: AdminGroupHealth['accounts'][number]): 
   const status = account.status.toLowerCase()
   if (['disabled', 'inactive', 'suspended'].includes(status)) return false
   if (!account.probeAvailable) return false
-  return !account.modelHealth.some(model => model.state === 'disabled' || model.state === 'suspended')
+  return !judgedModelHealth(account).some(model => model.state === 'disabled' || model.state === 'suspended')
 }
 
 const healthStatusFor = (connections: RealConnection[], row: AssociationRow): HealthStatus => {

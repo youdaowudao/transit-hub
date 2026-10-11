@@ -88,6 +88,8 @@ type healthRepository interface {
 // Service 组装 connection_health 模块的全部业务逻辑：聚合查询、策略管理、手动动作、
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
+	modelControlScanFlights              sync.Map
+	modelControlScanWG                   sync.WaitGroup
 	modelControlActions                  ModelControlActioner
 	modelControls                        modelControlRepository
 	actionNow                            func() time.Time
@@ -283,6 +285,7 @@ func (s *Service) currentAdminAccountID(ctx context.Context, userID string) (str
 
 // ModelHealth 是单个模型在某条对接链路上的健康状态展示数据，绝不包含 upstream_key。
 type ModelHealth struct {
+	ModelControlClosed          bool                         `json:"modelControlClosed,omitempty"`
 	RequestFirstTokenMs         *int                         `json:"requestFirstTokenMs"`
 	RequestFirstEventMs         *int                         `json:"requestFirstEventMs"`
 	RecheckPending              bool                         `json:"recheckPending"`

@@ -26,6 +26,18 @@ export const modelControlText = (key: string, params?: Record<string, string | n
 export const modelControlState = (item: ModelControlItem): string => item.control.conflictReason ? modelControlText('manualRequired') : item.control.pending ? modelControlPendingState(item.control.pending.state) : t(`admin.connectionHealth.modelControl.states.${item.control.observation.state}`)
 export const modelControlPendingState = (state: string): string => t(`admin.connectionHealth.modelControl.pending.${['in_progress', 'not_completed', 'unknown'].includes(state) ? state : 'in_progress'}`)
 export const modelControlTime = (value?: string | null): string => formatConnectionHealthTime(value ?? null)
+export const modelControlAutoLines = (item: ModelControlItem): string[] => {
+  const value = item.auto
+  if (!value) return []
+  switch (value.state) {
+    case 'eligible': return [modelControlText('autoEligible')]
+    case 'waiting': return [modelControlText('autoWaiting'), modelControlText('autoChangedAt', { time: modelControlTime(value.changedAt) })]
+    case 'busy': return [modelControlText('autoBusy')]
+    case 'retry': return [modelControlText('autoRetry', { reason: value.reasonKey && (te(value.reasonKey) || te(`admin.connectionHealth.modelControl.reasons.${value.reasonKey}`)) ? modelControlReason(value.reasonKey) : modelControlText('autoNotDone'), time: modelControlTime(value.nextAt) })]
+    case 'manual': return [modelControlText('autoManual', { reason: modelControlReason(value.reasonKey) })]
+    default: return []
+  }
+}
 export const modelControlRoundText = (round: ModelControlRound): string => `${round.source === 'manual' ? modelControlText('manualSource') : round.source === 'run_now' ? modelControlText('runNowSource') : modelControlText('scheduledSource')}${round.scheduleName ? ` · ${round.scheduleName}` : ''} · ${modelControlTime(round.createdAt)}`
 export const modelControlEntryState = (state: string): string => te(`admin.connectionHealth.modelControl.entries.${state}`) ? t(`admin.connectionHealth.modelControl.entries.${state}`) : ''
 export const modelControlRuleRevision = ref({ workspace: '', revision: 0 })
@@ -129,6 +141,7 @@ export const modelControlEventLines = (event: ModelControlEvent): { sentence: st
   const known = te(`admin.connectionHealth.modelControl.events.${event.eventType}`)
   let sentence = modelControlEventLabel(event.eventType)
   const detail = event.detail && typeof event.detail === 'object' ? event.detail as Record<string, unknown> : {}
+  if (event.eventType === 'auto_settings_saved') return { sentence: modelControlText('autoSettingsSaved', { close: modelControlText(detail.autoCloseEnabled ? 'autoOn' : 'autoOff'), restore: modelControlText(detail.autoRestoreEnabled ? 'autoOn' : 'autoOff'), health: modelControlText(detail.healthCoordinationEnabled ? 'autoOn' : 'autoOff'), n: Number(detail.verifyIntervalMinutes), m: Number(detail.retryIntervalMinutes) }), entries: [], more: 0 }
   if (event.eventType === 'settings_saved') return { sentence: modelControlText('settingsSaved', { accuracy: Number(detail.minAccuracyPercent), min: Number(detail.minJudgedAnswers) }), entries: [], more: 0 }
   if (!known || ['rule_saved', 'rule_deleted'].includes(event.eventType)) return { sentence, entries: [], more: 0 }
   if ((event.eventType.endsWith('_unknown') || event.eventType.startsWith('account_schedulable_')) && typeof detail.reasonKey === 'string') sentence += ` · ${modelControlReason(detail.reasonKey)}`

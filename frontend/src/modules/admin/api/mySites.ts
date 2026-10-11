@@ -159,6 +159,7 @@ const importMessageKeys = new Set([
 ])
 const importReasonKeys = new Set([
   ...importMessageKeys,
+  'admin.connectionHealth.errors.sub2apiGroupLastModelSource',
   'admin.connectionHealth.errors.sub2apiGroupLastUsable',
   'admin.connectionHealth.errors.sub2apiInventoryIncomplete',
   'admin.connectionHealth.errors.remoteActionPending',

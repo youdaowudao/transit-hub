@@ -175,12 +175,19 @@ func (s *Service) checkManualFloor(ctx context.Context, userID, workspace, mutat
 	if err != nil {
 		return requestError(ErrorSub2APIInventoryIncomplete)
 	}
-	result := guard.reserveSub2APIMutation(target, *inventory, scope)
+	reserved, err := s.modelFloorReserved(ctx, userID, workspace)
+	if err != nil {
+		return &RemoteActionBlockedError{Cause: requestError(ErrorSub2APIInventoryIncomplete)}
+	}
+	result := guard.reserveSub2APIMutationWithModels(target, *inventory, scope, reserved)
 	if result.remoteAction == RemoteActionAwaitingConfirmation {
 		return &RemoteActionBlockedError{Cause: ErrRemoteActionPending, GroupID: result.adminGroupID, GroupName: result.adminGroupName}
 	}
 	if result.remoteAction == RemoteActionSkippedSub2APIInventory {
 		return &RemoteActionBlockedError{Cause: requestError(ErrorSub2APIInventoryIncomplete), GroupID: result.adminGroupID, GroupName: result.adminGroupName}
+	}
+	if result.remoteAction == RemoteActionSkippedSub2APILastModelSource {
+		return &RemoteActionBlockedError{Cause: requestError(ErrorSub2APIGroupLastModelSource), GroupID: result.adminGroupID, GroupName: result.adminGroupName}
 	}
 	if result.remoteAction != "" {
 		return &RemoteActionBlockedError{Cause: requestError(ErrorSub2APIGroupLastUsable), GroupID: result.adminGroupID, GroupName: result.adminGroupName}

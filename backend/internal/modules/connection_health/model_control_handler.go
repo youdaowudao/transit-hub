@@ -8,6 +8,8 @@ import (
 )
 
 func registerModelControlRoutes(mux *http.ServeMux, h *Handler) {
+	mux.HandleFunc("GET /api/connection-health/model-control/auto-settings", h.getModelControlAutoSettings)
+	mux.HandleFunc("PUT /api/connection-health/model-control/auto-settings", h.putModelControlAutoSettings)
 	mux.HandleFunc("GET /api/connection-health/model-control/settings", h.getModelControlSettings)
 	mux.HandleFunc("PUT /api/connection-health/model-control/settings", h.putModelControlSettings)
 	mux.HandleFunc("GET /api/connection-health/model-control/targets/{targetId}", h.getModelControlTarget)
@@ -312,4 +314,41 @@ func (h *Handler) listModelControlEvents(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	httpjson.Write(w, 200, map[string]any{"items": items, "page": page, "totalPages": pages})
+}
+
+func (h *Handler) getModelControlAutoSettings(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.questionAnswerScheduleUser(w, r, false)
+	if !ok {
+		return
+	}
+	settings, err := h.service.GetModelControlAutoSettings(r.Context(), user)
+	if err != nil {
+		writeModelControlError(w, err)
+		return
+	}
+	httpjson.Write(w, 200, settings)
+}
+func (h *Handler) putModelControlAutoSettings(w http.ResponseWriter, r *http.Request) {
+	user, ok := h.questionAnswerScheduleUser(w, r, true)
+	if !ok {
+		return
+	}
+	var input struct {
+		AutoCloseEnabled          *bool  `json:"autoCloseEnabled"`
+		AutoRestoreEnabled        *bool  `json:"autoRestoreEnabled"`
+		HealthCoordinationEnabled *bool  `json:"healthCoordinationEnabled"`
+		VerifyIntervalMinutes     *int   `json:"verifyIntervalMinutes"`
+		RetryIntervalMinutes      *int   `json:"retryIntervalMinutes"`
+		ExpectedVersion           *int64 `json:"expectedVersion"`
+	}
+	if err := httpjson.Decode(r, &input); err != nil || input.AutoCloseEnabled == nil || input.AutoRestoreEnabled == nil || input.HealthCoordinationEnabled == nil || input.VerifyIntervalMinutes == nil || input.RetryIntervalMinutes == nil || input.ExpectedVersion == nil {
+		httpjson.WriteError(w, 400, ErrorRequest)
+		return
+	}
+	settings, err := h.service.SaveModelControlAutoSettings(r.Context(), user, ModelControlAutoSettings{AutoCloseEnabled: *input.AutoCloseEnabled, AutoRestoreEnabled: *input.AutoRestoreEnabled, HealthCoordinationEnabled: *input.HealthCoordinationEnabled, VerifyIntervalMinutes: *input.VerifyIntervalMinutes, RetryIntervalMinutes: *input.RetryIntervalMinutes}, *input.ExpectedVersion)
+	if err != nil {
+		writeModelControlError(w, err)
+		return
+	}
+	httpjson.Write(w, 200, settings)
 }

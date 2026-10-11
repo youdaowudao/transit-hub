@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { c32AutoSettings } from './fixtures/c32ModelControl'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import Header from '@/modules/admin/components/dashboard/QuestionAnswerModelControlHeader.vue'
@@ -7,7 +8,7 @@ import Drawer from '@/modules/admin/components/dashboard/QuestionAnswerModelCont
 import { ConnectionHealthApiError } from '@/modules/admin/api/connectionHealth'
 import { modelControlBusyTargets } from '@/modules/admin/utils/questionAnswerModelControl'
 import { managed, targetId } from './fixtures/v2911ModelControl'
-const api = vi.hoisted(() => Object.fromEntries(['getModelControlSettings', 'saveModelControlSettings', 'previewModelControl', 'executeModelControl', 'removeModelControlManaged', 'getModelControlVerifyTargets', 'listModelControlItems', 'listModelControlEvents', 'verifyModelControl'].map(name => [name, vi.fn()])))
+const api = vi.hoisted(() => Object.fromEntries(['getModelControlAutoSettings', 'getModelControlSettings', 'saveModelControlSettings', 'previewModelControl', 'executeModelControl', 'removeModelControlManaged', 'getModelControlVerifyTargets', 'listModelControlItems', 'listModelControlEvents', 'verifyModelControl'].map(name => [name, vi.fn()])))
 vi.mock('@/modules/admin/api/connectionHealth', async original => ({ ...await original<typeof import('@/modules/admin/api/connectionHealth')>(), ...api }))
 const wrappers: VueWrapper[] = []
 const track = <T extends VueWrapper>(w: T): T => { wrappers.push(w); return w }
@@ -17,7 +18,7 @@ const settings = { minAccuracyPercent: 50, minJudgedAnswers: 3, version: 1 }
 const counts = { total: 47, open: 30, closed: 10, attention: 7, untested: 5 }
 beforeEach(() => {
  vi.resetAllMocks(); modelControlBusyTargets.value = new Set()
- api.getModelControlSettings.mockResolvedValue(settings); api.saveModelControlSettings.mockResolvedValue({ ...settings, version: 2 })
+ api.getModelControlAutoSettings.mockResolvedValue(c32AutoSettings()); api.getModelControlSettings.mockResolvedValue(settings); api.saveModelControlSettings.mockResolvedValue({ ...settings, version: 2 })
  api.previewModelControl.mockResolvedValue({ item: managed(), entries: [{ key: 'M', value: 'M', state: 'to_add' }], groups: [], blockReasonKey: '', requestHealth: { checked: true, allowed: true, reasonKey: '' }, planFingerprint: 'fp' })
  api.executeModelControl.mockResolvedValue({ item: managed(), outcome: 'added', entries: [{ key: 'M', value: 'M', state: 'added' }] }); api.removeModelControlManaged.mockResolvedValue(undefined)
  api.listModelControlItems.mockResolvedValue({ items: [managed()], page: 1, totalPages: 2, counts }); api.listModelControlEvents.mockResolvedValue({ items: [], page: 1, totalPages: 1 }); api.getModelControlVerifyTargets.mockResolvedValue({ targetIds: [targetId] }); api.verifyModelControl.mockResolvedValue({ items: [managed()], errors: [] })

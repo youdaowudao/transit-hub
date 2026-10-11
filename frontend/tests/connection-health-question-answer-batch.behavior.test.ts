@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { c32AutoSettings } from './fixtures/c32ModelControl'
 
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { nextTick } from 'vue'
@@ -117,6 +118,7 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal
 vi.mock('@/modules/admin/api/connectionHealth', async original => ({
   ...await original<typeof import('@/modules/admin/api/connectionHealth')>(),
   getModelControlTarget: async (targetId: string) => ({ targetId, items: [], candidates: [] }),
+  getModelControlAutoSettings: async () => c32AutoSettings(),
   getModelControlSettings: async () => ({ minAccuracyPercent: 50, minJudgedAnswers: 3, version: 0 }),
   verifyModelControl: async () => ({ items: [], errors: [] }),
   cancelQuestionAnswerBatch: harness.cancelQuestionAnswerBatch,

@@ -312,7 +312,7 @@ func safeManagedDeleteReason(err error) string {
 	if upstream.RemoteMutationOutcome(err) == upstream.MutationConfirmedApplied {
 		return ""
 	}
-	for _, key := range []string{"admin.connectionHealth.errors.sub2apiGroupLastUsable", "admin.connectionHealth.errors.sub2apiInventoryIncomplete", "admin.mySites.errors.safeDeletionUnavailable"} {
+	for _, key := range []string{"admin.connectionHealth.errors.sub2apiGroupLastModelSource", "admin.connectionHealth.errors.sub2apiGroupLastUsable", "admin.connectionHealth.errors.sub2apiInventoryIncomplete", "admin.mySites.errors.safeDeletionUnavailable"} {
 		if strings.Contains(err.Error(), key) {
 			return key
 		}

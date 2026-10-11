@@ -990,7 +990,7 @@ func writeError(w http.ResponseWriter, err error) {
 		if requestErr == requestError(ErrorPrioritySyncBusy) {
 			status = http.StatusConflict
 		}
-		if requestErr == requestError(ErrorSub2APIGroupLastUsable) || requestErr == requestError(ErrorSub2APIInventoryIncomplete) {
+		if requestErr == requestError(ErrorSub2APIGroupLastModelSource) || requestErr == requestError(ErrorSub2APIGroupLastUsable) || requestErr == requestError(ErrorSub2APIInventoryIncomplete) {
 			status = http.StatusConflict
 		}
 		if requestErr == requestError(ErrorQuestionAnswerStorage) {

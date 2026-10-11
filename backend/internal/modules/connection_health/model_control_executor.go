@@ -411,18 +411,34 @@ func (s *Service) reconcileModelControlLate(ctx context.Context, user, ws, targe
 	}
 	return err
 }
+
+type modelControlRun struct {
+	user, ws, account, target, model, op, actor string
+	session                                     upstream.Session
+	submitted                                   modelControlBasis
+	fingerprint                                 string
+	confirm                                     bool
+	prepare                                     func(context.Context, string, string, string) (context.Context, func(), error)
+	auto                                        *modelControlAutoCandidate
+	autoVersion                                 int64
+}
+
 func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, op string, basis modelControlBasis, fingerprint string, confirm bool) (ModelControlResult, error) {
-	submitted := basis
 	session, ws, account, _, _, err := s.modelControlInput(ctx, user, target, model, op, basis)
 	if err != nil {
 		return ModelControlResult{}, err
 	}
+	return s.runModelControl(ctx, &modelControlRun{user: user, ws: ws, account: account, target: target, model: model, op: op, actor: user, session: session, submitted: basis, fingerprint: fingerprint, confirm: confirm, prepare: s.prepareManualAction})
+}
+func (s *Service) runModelControl(ctx context.Context, run *modelControlRun) (ModelControlResult, error) {
+	user, ws, account, target, model, op := run.user, run.ws, run.account, run.target, run.model, run.op
+	session, submitted, basis, fingerprint, confirm := run.session, run.submitted, run.submitted, run.fingerprint, run.confirm
 	complete, err := s.registerActionDispatch()
 	if err != nil {
 		return ModelControlResult{}, err
 	}
 	defer complete()
-	prep, release, err := s.prepareManualAction(ctx, user, ws, target)
+	prep, release, err := run.prepare(ctx, user, ws, target)
 	if err != nil {
 		return ModelControlResult{}, err
 	}
@@ -431,14 +447,25 @@ func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, 
 	if err != nil {
 		return ModelControlResult{}, err
 	}
-	if !modelControlBasisMatches(basis, item.Basis) {
-		return ModelControlResult{}, modelControlConflict("BasisChanged", item)
-	}
-	if err = modelControlAdmission(item, op); err != nil {
-		return ModelControlResult{}, err
-	}
-	if op == "restore" && item.Decision != "usable" && !confirm {
-		return ModelControlResult{}, modelControlConflict("ConfirmationRequired", item)
+	if run.auto != nil {
+		eligible, version, checkErr := s.modelControlAutoStillEligible(prep, run, item, object)
+		if checkErr != nil {
+			return ModelControlResult{}, checkErr
+		}
+		if !eligible {
+			return ModelControlResult{Outcome: "skipped"}, nil
+		}
+		run.autoVersion = version
+	} else {
+		if !modelControlBasisMatches(basis, item.Basis) {
+			return ModelControlResult{}, modelControlConflict("BasisChanged", item)
+		}
+		if err = modelControlAdmission(item, op); err != nil {
+			return ModelControlResult{}, err
+		}
+		if op == "restore" && item.Decision != "usable" && !confirm {
+			return ModelControlResult{}, modelControlConflict("ConfirmationRequired", item)
+		}
 	}
 	plan, err := s.loadModelControlPlan(prep, user, ws, account, op, session, item, object)
 	if errors.Is(err, upstream.ErrSub2APIModelControlAccountMissing) {
@@ -458,14 +485,25 @@ func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, 
 	if err != nil {
 		return ModelControlResult{}, err
 	}
-	if !modelControlBasisMatches(submitted, item.Basis) {
-		return ModelControlResult{}, modelControlConflict("BasisChanged", item)
-	}
-	if err = modelControlAdmission(item, op); err != nil {
-		return ModelControlResult{}, err
-	}
-	if op == "restore" && item.Decision != "usable" && !confirm {
-		return ModelControlResult{}, modelControlConflict("ConfirmationRequired", item)
+	if run.auto != nil {
+		eligible, version, checkErr := s.modelControlAutoStillEligible(prep, run, item, object)
+		if checkErr != nil {
+			return ModelControlResult{}, checkErr
+		}
+		if !eligible {
+			return ModelControlResult{Outcome: "skipped"}, nil
+		}
+		run.autoVersion = version
+	} else {
+		if !modelControlBasisMatches(submitted, item.Basis) {
+			return ModelControlResult{}, modelControlConflict("BasisChanged", item)
+		}
+		if err = modelControlAdmission(item, op); err != nil {
+			return ModelControlResult{}, err
+		}
+		if op == "restore" && item.Decision != "usable" && !confirm {
+			return ModelControlResult{}, modelControlConflict("ConfirmationRequired", item)
+		}
 	}
 	if op == "add" && item.Decision != "usable" {
 		return ModelControlResult{}, modelControlConflict("NotEligible", item)
@@ -477,6 +515,9 @@ func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, 
 			return ModelControlResult{}, err
 		}
 	}
+	if run.auto != nil && op == "restore" && !plan.Restore.NoRemoteWrite && len(plan.Restore.ManualRestored)+len(plan.Restore.ManualChanged) > 0 {
+		plan.Preview.BlockReasonKey = modelControlError("AutoManualChange")
+	}
 	_, err = s.persistModelControlPlan(prep, object, op, plan)
 	if err != nil {
 		return ModelControlResult{}, err
@@ -485,7 +526,7 @@ func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, 
 	if err != nil {
 		return ModelControlResult{}, err
 	}
-	if fingerprint == "" || fingerprint != plan.Preview.PlanFingerprint {
+	if run.auto == nil && (fingerprint == "" || fingerprint != plan.Preview.PlanFingerprint) {
 		return ModelControlResult{}, modelControlConflict("PlanChanged", plan.Preview)
 	}
 	if plan.Preview.BlockReasonKey != "" {
@@ -500,7 +541,7 @@ func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, 
 	if err != nil {
 		return ModelControlResult{}, err
 	}
-	pending := &modelControlPending{ID: id, Operation: op, Basis: basis, BeforeMappingHash: modelControlPlanFingerprint(op, plan.Detail.ModelMapping, nil), Phase: "prepared", StartedAt: time.Now().UTC(), ActorUserID: user}
+	pending := &modelControlPending{ID: id, Operation: op, Basis: basis, BeforeMappingHash: modelControlPlanFingerprint(op, plan.Detail.ModelMapping, nil), Phase: "prepared", StartedAt: time.Now().UTC(), ActorUserID: run.actor}
 	if op == "close" {
 		pending.Entries = plan.Close.Entries
 		pending.AfterMapping = plan.Close.AfterMapping
@@ -591,6 +632,17 @@ func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, 
 		if version != submitted.RuleVersion || now.In(questionAnswerScheduleLocation).Format("2006-01-02") != submitted.BusinessDay {
 			return modelControlConflict("BasisChanged", nil)
 		}
+		if run.auto != nil {
+			var autoVersion int64
+			var closeEnabled, restoreEnabled bool
+			readErr = tx.QueryRow(guardCtx, `SELECT version,auto_close_enabled,auto_restore_enabled FROM connection_health_model_control_auto WHERE user_id=$1 AND admin_account_id=$2`, user, ws).Scan(&autoVersion, &closeEnabled, &restoreEnabled)
+			if readErr != nil && !errors.Is(readErr, pgx.ErrNoRows) {
+				return readErr
+			}
+			if autoVersion != run.autoVersion || (op == "close" && !closeEnabled) || (op == "restore" && !restoreEnabled) {
+				return modelControlConflict("AutoDisabled", nil)
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -679,7 +731,7 @@ func (s *Service) ExecuteModelControl(ctx context.Context, user, target, model, 
 					}
 				}
 				if op == "close" && newClosed {
-					modelControlApplyBasis(o, o.Pending.Basis, user, now)
+					modelControlApplyBasis(o, o.Pending.Basis, run.actor, now)
 				}
 				o.ClosedEntries = attr.ClosedEntries
 				o.Pending = nil

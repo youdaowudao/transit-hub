@@ -30,6 +30,7 @@ func (s *Service) updateAdminTargetPriority(ctx context.Context, session upstrea
 }
 
 type priorityTargetInventory struct {
+	modelControlClosed  map[string]struct{}
 	accountTier         int
 	snapshotStartedAt   time.Time
 	target              AdminProbeTarget
@@ -455,8 +456,14 @@ func (s *Service) syncWorkspacePriorities(
 			s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, err, 1, nil)
 			return
 		}
+		excluded, err := s.modelControlExcluded(ctx, userID, adminAccountID)
+		if err != nil {
+			s.markPriorityWorkspaceSyncFailed(userID, adminAccountID, expectedPendingSignature, err, 1, nil)
+			return
+		}
 		for id, item := range inventory {
 			item.accountTier = effectiveAccountTier(tiers[id])
+			item.modelControlClosed = excluded[id]
 		}
 	}
 	generationCurrent := func() bool {
@@ -1126,6 +1133,9 @@ func uniqueFloat(values []float64) (float64, bool) {
 func activeHealthPriorityModels(item *priorityTargetInventory) map[string]struct{} {
 	models := make(map[string]struct{})
 	for _, spec := range candidateModelSpecs(item.target.Models, item.policies) {
+		if _, closed := item.modelControlClosed[spec.modelName]; closed {
+			continue
+		}
 		if spec.policy.AutoDegradeEnabled {
 			models[spec.modelName] = struct{}{}
 		}

@@ -44,6 +44,19 @@ func (s *Service) modelControlItems(ctx context.Context, user, workspace string)
 	if err != nil {
 		return nil, nil, requestError(modelControlError("Storage"))
 	}
+	autoSettings, err := s.modelControlAuto(ctx, user, workspace)
+	if err != nil {
+		return nil, nil, requestError(modelControlError("Storage"))
+	}
+	var ruleSavedAt *time.Time
+	if autoSettings.AutoCloseEnabled || autoSettings.AutoRestoreEnabled {
+		if repo, ok := s.modelControls.(modelControlAutoRepository); ok {
+			ruleSavedAt, err = repo.GetModelControlRuleSavedAt(ctx, user, workspace)
+			if err != nil {
+				return nil, nil, requestError(modelControlError("Storage"))
+			}
+		}
+	}
 	rounds := map[modelControlPair][]modelControlRound{}
 	coverage := map[modelControlPair][]modelControlScheduleCoverage{}
 	for start := 0; start < len(targets); start += 50 {
@@ -94,6 +107,11 @@ func (s *Service) modelControlItems(ctx context.Context, user, workspace string)
 			value := string(state.State)
 			item.Health.State = &value
 			item.Health.RecentlyProbed = state.LastProbeAt != nil && now.Sub(*state.LastProbeAt) <= 24*time.Hour
+		}
+		item.HealthCoordination = autoSettings.HealthCoordinationEnabled
+		auto := modelControlAutoStatus(modelControlAutoStatusInput{Settings: autoSettings, RuleSavedAt: ruleSavedAt, Item: item, Object: t, EvidenceAt: modelControlItemEvidenceAt(item), Now: now})
+		if auto.State != "off" {
+			item.Auto = &auto
 		}
 		items = append(items, item)
 	}

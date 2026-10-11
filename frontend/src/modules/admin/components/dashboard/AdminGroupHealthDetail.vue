@@ -27,6 +27,8 @@ import { modelControlText as modelMessage, modelControlSupplyTooltip, modelContr
 import AccountPriorityEditor from './AccountPriorityEditor.vue'
 import AccountConcurrencyEditor from './AccountConcurrencyEditor.vue'
 import {
+  judgedModelHealth,
+  judgedUnprobedModels,
   connectionHealthMessageKey,
   connectionHealthStateBadgeClass,
   formatConnectionHealthTime,
@@ -195,15 +197,15 @@ const stateBreakdown = computed<StateBreakdownItem[]>(() => [
 const readableMessage = (rawKey: string): string => t(connectionHealthMessageKey(rawKey, te))
 
 const STATE_PRIORITY: ConnectionHealthState[] = ['suspended', 'disabled', 'degraded', 'observing', 'recovering', 'suspect', 'healthy']
-const accountProtocolUnverified = (account: AdminGroupAccount): boolean => account.modelHealth.some(model => model.currentHealthResult?.status === 'unverified')
+const accountProtocolUnverified = (account: AdminGroupAccount): boolean => judgedModelHealth(account).some(model => model.currentHealthResult?.status === 'unverified')
 const aggregateState = (account: AdminGroupAccount): ConnectionHealthState | '' => {
-  const present = new Set((account.modelHealth ?? []).map((model) => model.state))
+  const present = new Set(judgedModelHealth(account).map((model) => model.state))
   return STATE_PRIORITY.find((state) => present.has(state)) ?? ''
 }
 
 const unprobedModels = (account: AdminGroupAccount) => account.unprobedModels ?? []
 const isNotProbed = (account: AdminGroupAccount): boolean =>
-  account.probeAvailable && account.probeModelsConfigured !== false && (unprobedModels(account).length > 0 || account.modelHealth.length === 0)
+  !account.modelControlNoActiveProbe && account.probeAvailable && account.probeModelsConfigured !== false && (judgedUnprobedModels(account).length > 0 || judgedModelHealth(account).length === 0)
 
 const isSub2API = (account: AdminGroupAccount): boolean => account.targetId.toLowerCase().startsWith('sub2api:')
 const hasMainSiteError = (account: AdminGroupAccount): boolean =>
@@ -381,10 +383,10 @@ const matchesFilter = (account: AdminGroupAccount): boolean => {
     case 'notProbed':
       return isNotProbed(account)
     case 'unconfigured':
-      return Boolean(account.hasEnabledProbePolicy) && account.probeModelsConfigured === false
-        || account.modelHealth.some(model => model.currentHealthResult?.status === 'unverified')
+      return !account.modelControlNoActiveProbe && Boolean(account.hasEnabledProbePolicy) && account.probeModelsConfigured === false
+        || judgedModelHealth(account).some(model => model.currentHealthResult?.status === 'unverified')
     case 'modelState':
-      return account.modelHealth.some(model => model.currentHealthResult?.status !== 'unverified' && (model.state === filter.state || filter.state === 'healthy' && model.state === 'suspect'))
+      return judgedModelHealth(account).some(model => model.currentHealthResult?.status !== 'unverified' && (model.state === filter.state || filter.state === 'healthy' && model.state === 'suspect'))
     default:
       return true
   }
@@ -394,16 +396,16 @@ const shouldHideUnmonitored = (account: AdminGroupAccount): boolean =>
   props.hideUnmonitoredAccounts && !monitoringEnabled(account)
 
 const accountLatency = (account: AdminGroupAccount): number | null => {
-  const values = account.modelHealth
+  const values = judgedModelHealth(account)
     .map(model => model.lastSuccessLatencyMs)
     .filter((value): value is number => value != null && Number.isFinite(value))
   return values.length > 0 ? Math.max(...values) : null
 }
 
-const accountHasSlowResponse = (account: AdminGroupAccount): boolean => account.modelHealth.some(model => model.probeResult === 'slow_response' && model.probeDisposition !== 'stale' && model.probeDisposition !== 'invalid')
-const accountResponseLabel = (account: AdminGroupAccount): string => account.modelHealth.some(model => model.ruleVersion === 'v2' && model.probeResult === 'slow_response') ? '延迟' : '慢响应'
+const accountHasSlowResponse = (account: AdminGroupAccount): boolean => judgedModelHealth(account).some(model => model.probeResult === 'slow_response' && model.probeDisposition !== 'stale' && model.probeDisposition !== 'invalid')
+const accountResponseLabel = (account: AdminGroupAccount): string => judgedModelHealth(account).some(model => model.ruleVersion === 'v2' && model.probeResult === 'slow_response') ? '延迟' : '慢响应'
 const accountMeasurement = (account: AdminGroupAccount, field: 'firstTokenMs' | 'firstEventMs'): number | null => {
-  const values = account.modelHealth.map(model => model[field]).filter((value): value is number => value != null && Number.isFinite(value))
+  const values = judgedModelHealth(account).map(model => model[field]).filter((value): value is number => value != null && Number.isFinite(value))
   return values.length ? Math.max(...values) : null
 }
 
@@ -411,10 +413,8 @@ const accountMeasurement = (account: AdminGroupAccount, field: 'firstTokenMs' | 
 // 让一行的读数不会被同账号里状态较好的模型稀释。
 const DAY_SECONDS = 24 * 60 * 60
 
-// 与展开行口径一致：展开行渲染 account.modelHealth 全量，这里不能再按 configured
-// 过滤。后端的 configured 是「最后一次错误是否为凭据不可用」，鉴权失败、权重被打到 0
-// 的模型会被标成 false，一旦过滤掉，列上只剩健康模型算出 100%，与展开行的读数矛盾。
-const aggregatedModelHealth = (account: AdminGroupAccount) => account.modelHealth ?? []
+// 账号级稳定性只排除模型管理已关闭项；仍保留 configured=false 的失败模型。
+const aggregatedModelHealth = (account: AdminGroupAccount) => judgedModelHealth(account)
 
 const accountHealthWeight = (account: AdminGroupAccount): number | null => {
   const values = aggregatedModelHealth(account)
@@ -891,6 +891,8 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     <p class="mt-0.5 truncate text-[11px] text-muted-foreground">
                       {{ t(`${detailPrefix}.statusSources`, { upstream: statusSourceLabel(account.upstreamStatusSource), health: statusSourceLabel(account.healthStatusSource), schedulable: statusSourceLabel(account.schedulableSource) }) }}
                     </p>
+                    <p v-if="account.modelControlNoActiveProbe" data-testid="model-control-no-active-probe-hint" class="mt-1 whitespace-normal break-words text-xs text-muted-foreground">{{ modelMessage('noActiveProbeHint') }}<template v-if="!account.priorityUsesMultiplierOnly">{{ modelMessage('noActiveProbePriority') }}</template></p>
+                    <p v-for="source in account.modelFloorLastSources ?? []" :key="`${source.groupId}:${source.modelKey}`" data-testid="model-control-last-source" class="mt-1 text-xs text-amber-700 dark:text-amber-400"><span class="block truncate" :title="modelMessage('floorLastSource', { group: source.groupName || source.groupId, model: source.modelKey })">{{ modelMessage('floorLastSource', { group: source.groupName || source.groupId, model: source.modelKey }) }}</span></p>
                     <p v-if="account.remoteActionPending" class="mt-1 whitespace-pre-wrap break-words text-xs text-amber-700 dark:text-amber-400">
                       {{ remotePendingLabel(account) }}
                     </p>
@@ -905,7 +907,8 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                 </td>
                 <td class="px-3 py-3">
                   <div class="flex flex-col items-start gap-1">
-                    <span v-if="!account.hasEnabledProbePolicy" class="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
+                    <span v-if="account.modelControlNoActiveProbe" data-testid="model-control-no-active-probe" class="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">{{ modelMessage('noActiveProbe') }}</span>
+                    <span v-else-if="!account.hasEnabledProbePolicy" class="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
                       <ShieldQuestion class="h-3 w-3" />{{ t(`${detailPrefix}.notApplicable`) }}
                     </span>
                     <span v-else-if="!account.probeAvailable" class="inline-flex items-center gap-1 rounded-md bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-600 dark:text-amber-400">
@@ -922,10 +925,10 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     </span>
                     <span v-else class="inline-flex items-center rounded-md px-2 py-1 text-xs font-medium" :class="connectionHealthStateBadgeClass(aggregateState(account))">
                       {{ t(`${prefix}.stateLabels.${aggregateState(account)}`) }}
-                      <span v-if="account.modelHealth.length > 1" class="ml-1 opacity-70">×{{ account.modelHealth.length }}</span>
+                      <span v-if="judgedModelHealth(account).length > 1" class="ml-1 opacity-70">×{{ judgedModelHealth(account).length }}</span>
                     </span>
-                    <span v-if="unprobedModels(account).length > 0 && aggregateState(account)" class="text-[11px] text-muted-foreground">
-                      {{ t(`${prefix}.notProbed`) }} ×{{ unprobedModels(account).length }}
+                    <span v-if="judgedUnprobedModels(account).length > 0 && aggregateState(account)" class="text-[11px] text-muted-foreground">
+                      {{ t(`${prefix}.notProbed`) }} ×{{ judgedUnprobedModels(account).length }}
                     </span>
                   </div>
                 </td>
@@ -976,7 +979,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                       class="mt-0.5 block truncate text-xs text-muted-foreground"
                       :title="hasStabilityReading(account) ? accountStabilitySubLabel(account) : ''"
                     >
-                      {{ hasStabilityReading(account) ? accountStabilitySubLabel(account) : t(`${detailPrefix}.stabilityColumn.notProbed`) }}
+                      {{ hasStabilityReading(account) ? accountStabilitySubLabel(account) : account.modelControlNoActiveProbe ? '—' : t(`${detailPrefix}.stabilityColumn.notProbed`) }}
                     </span>
                   </div>
                 </td>
@@ -1078,6 +1081,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     <div v-for="model in filteredModelHealth(account)" :key="model.modelName" class="rounded-lg border border-border/50 bg-background px-2.5 py-2">
                       <div class="flex items-center justify-between gap-3">
                         <span class="truncate text-sm font-medium text-foreground">{{ model.modelName }}</span>
+                        <Tooltip v-if="model.modelControlClosed" :text="modelMessage('closedProbeModelHint')" wide><span data-testid="model-control-closed-probe" class="text-[11px] text-muted-foreground">{{ modelMessage('closedProbeModel') }}</span></Tooltip>
                         <Tooltip v-if="model.currentHealthResult?.status === 'unverified'" :text="t('admin.connectionHealth.testConfiguration.unverifiedHelp')" wide>
                           <span class="text-xs text-amber-700">{{ t('admin.connectionHealth.testConfiguration.unverified') }}</span>
                         </Tooltip>
@@ -1110,6 +1114,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     <div v-for="model in filteredUnprobedModels(account)" :key="`unprobed:${model.modelName}`" class="rounded-lg border border-border/50 bg-background px-2.5 py-2">
                       <div class="flex items-center justify-between gap-3">
                         <span class="truncate text-sm font-medium text-foreground">{{ model.modelName }}</span>
+                        <Tooltip v-if="model.modelControlClosed" :text="modelMessage('closedProbeModelHint')" wide><span data-testid="model-control-closed-probe" class="text-[11px] text-muted-foreground">{{ modelMessage('closedProbeModel') }}</span></Tooltip>
                         <span class="rounded-md bg-muted px-2 py-0.5 text-xs text-muted-foreground">{{ account.probeModelsConfigured === false ? t(`${prefix}.notConfigured`) : t(`${prefix}.notProbed`) }}</span>
                       </div>
                       <div class="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">

@@ -787,7 +787,14 @@ const submitRealConnect = async () => {
   try {
     const result = useImportContract ? await realConnect(payload, workspace) : await realConnect(payload)
     if (!isCurrent()) return
-    if (useImportContract) {
+    if (useImportContract && result.configurationStatus === 'confirmed' && result.configuration?.observation === 'creation') {
+      // 本次新建且主站已确认：直接关闭弹窗，列表在后台刷新
+      connectSubmitLocked.value = false
+      isActionLoading.value = false
+      connectOutcome.value = 'editing'
+      closeConnector()
+      await refreshAfterMutation(() => pageIsMounted && workspace === (currentAccount.value?.id ?? ''), true)
+    } else if (useImportContract) {
       connectResult.value = result
       connectOutcome.value = 'succeeded'
       if (!await refreshAfterMutation(isCurrent, true) && isCurrent()) connectRefreshError.value = t('admin.groupRates.errors.refreshFailed')
@@ -1482,6 +1489,10 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 <input id="import-concurrency" v-model="connectConcurrency" type="number" min="1" max="1000" step="1" :disabled="connectFormLocked" :aria-invalid="Boolean(connectConcurrencyError)" aria-describedby="import-concurrency-help" class="h-10 w-full rounded-xl border border-border/50 bg-surface px-3 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary" />
                 <p id="import-concurrency-help" class="text-xs leading-5" :class="connectConcurrencyError ? 'text-warning' : 'text-muted-foreground'">{{ connectConcurrencyError || t('admin.groupRates.connect.importSettings.concurrencyHint') }}</p>
               </div>
+            </div>
+            <div class="space-y-1 text-xs leading-5 text-muted-foreground" data-import-priority-explain>
+              <p>{{ t('admin.groupRates.connect.importSettings.priorityModeExplain') }}</p>
+              <p>{{ t('admin.groupRates.connect.importSettings.priorityStrategyExplain') }}</p>
             </div>
             <div class="flex items-center justify-between gap-4 rounded-xl border border-border/50 bg-surface px-4 py-3">
               <div class="min-w-0 space-y-1">

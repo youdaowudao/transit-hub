@@ -33,6 +33,7 @@ type ModelControlRule struct {
 	UpdatedAt          time.Time `json:"updatedAt"`
 }
 type modelControlRound struct {
+	EvidenceAt      *time.Time `json:"-"`
 	BatchID         string     `json:"batchId"`
 	Source          string     `json:"source"`
 	ScheduleName    string     `json:"scheduleName"`
@@ -102,6 +103,8 @@ type modelControlAttempt struct {
 	At        time.Time           `json:"at"`
 }
 type modelControlTarget struct {
+	AutoState                                                    *modelControlAutoAttempt
+	AutoVerifyAt                                                 *time.Time
 	observationAt                                                *time.Time
 	updateAttempt                                                bool
 	deleted                                                      bool
@@ -181,21 +184,23 @@ type modelControlHealth struct {
 	State          *string `json:"state"`
 }
 type ModelControlItem struct {
-	Attention      bool                 `json:"attention"`
-	TargetID       string               `json:"targetId"`
-	AccountName    string               `json:"accountName"`
-	ModelName      string               `json:"modelName"`
-	Version        int64                `json:"version"`
-	Rule           ModelControlRule     `json:"rule"`
-	Round          *modelControlRound   `json:"round"`
-	PreviousRound  *modelControlRound   `json:"previousRound"`
-	Decision       string               `json:"decision"`
-	DecisionReason string               `json:"decisionReason"`
-	Basis          modelControlBasis    `json:"basis"`
-	Control        modelControlControl  `json:"control"`
-	Coverage       modelControlCoverage `json:"coverage"`
-	Health         modelControlHealth   `json:"health"`
-	VerifyErrorKey string               `json:"verifyErrorKey,omitempty"`
+	HealthCoordination bool                  `json:"healthCoordination,omitempty"`
+	Auto               *modelControlAutoView `json:"auto,omitempty"`
+	Attention          bool                  `json:"attention"`
+	TargetID           string                `json:"targetId"`
+	AccountName        string                `json:"accountName"`
+	ModelName          string                `json:"modelName"`
+	Version            int64                 `json:"version"`
+	Rule               ModelControlRule      `json:"rule"`
+	Round              *modelControlRound    `json:"round"`
+	PreviousRound      *modelControlRound    `json:"previousRound"`
+	Decision           string                `json:"decision"`
+	DecisionReason     string                `json:"decisionReason"`
+	Basis              modelControlBasis     `json:"basis"`
+	Control            modelControlControl   `json:"control"`
+	Coverage           modelControlCoverage  `json:"coverage"`
+	Health             modelControlHealth    `json:"health"`
+	VerifyErrorKey     string                `json:"verifyErrorKey,omitempty"`
 }
 type modelControlRequestHealth struct {
 	Checked   bool   `json:"checked"`

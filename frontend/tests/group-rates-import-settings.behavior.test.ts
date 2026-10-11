@@ -130,9 +130,10 @@ describe('C5 actual API to group-rates import component', () => {
     expect(harness.requests).toHaveLength(1)
   })
 
-  it('shows all defaults directly, submits both selected groups once and shows only server-confirmed settings', async () => {
+  it('shows all defaults and the Priority explanation, submits both selected groups once and closes after a confirmed creation', async () => {
     const wrapper = await openView()
     expect(dialog(wrapper).get('#import-priority').element).toHaveProperty('value', '100')
+    expect(dialog(wrapper).get('[data-import-priority-explain]').text()).toBe('这里的“自动 / 人工”与自动答题无关，只决定导入时写入主站的 Priority 范围：自动填 10 及以上，人工填 1–9。导入后调度站是否探活、是否调整这个数字，以“分组健康”里该分组的策略和页面显示为准。')
     expect(dialog(wrapper).get('#import-concurrency').element).toHaveProperty('value', '50')
     expect(dialog(wrapper).get('[role="switch"][aria-label="透传"]').attributes('aria-checked')).toBe('false')
     expect(dialog(wrapper).get('[role="switch"][aria-label="Pool Mode"]').attributes('aria-checked')).toBe('true')
@@ -141,19 +142,11 @@ describe('C5 actual API to group-rates import component', () => {
     await submit(wrapper)
     expect(harness.requests).toHaveLength(1)
     expect(harness.requests[0]).toMatchObject({ ownGroupIds: ['10', '11'], groupType: 'openai', accountSettings: { priorityMode: 'automatic', priority: 100, concurrency: 50, passthrough: false, poolMode: true, upstreamBillingProbeEnabled: true } })
-    const summary = dialog(wrapper).get('[data-import-success]')
-    expect(summary.text()).toContain('主站读回名称')
-    expect(summary.text()).toContain('主站确认甲（10）')
-    expect(summary.text()).toContain('主站确认乙（11）')
-    expect(summary.text()).toContain('已由主站同步并保存 2 个模型')
-    expect(summary.text()).toContain('live-c5-model-a')
-    expect(summary.text()).not.toContain('表单分组甲')
-    expect(summary.text()).not.toContain('本地记录名称')
-    expect(dialog(wrapper).find('button[type="submit"]').exists()).toBe(false)
-    await dialog(wrapper).get('form').trigger('submit')
-    expect(harness.requests).toHaveLength(1)
-    await dialog(wrapper).findAll('button').find(button => button.text() === '完成')!.trigger('click')
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('导入已完成')
+    expect(wrapper.text()).not.toContain('列表刷新失败')
+    expect(wrapper.text()).not.toContain('真实对接创建失败')
+    expect(wrapper.findAll('button').find(button => button.text().trim() === '配置对接')!.element).toHaveProperty('disabled', false)
   })
 
   it.each([
@@ -207,7 +200,7 @@ describe('C5 actual API to group-rates import component', () => {
     await dialog(wrapper).get('[aria-label="自动探测上游声明倍率"]').trigger('click')
     await chooseGroup(wrapper); await submit(wrapper)
     expect(harness.requests[0].accountSettings).toEqual({ priorityMode: 'manual', priority: 7, concurrency: 123, passthrough: false, poolMode: false, upstreamBillingProbeEnabled: false })
-    expect(dialog(wrapper).get('[data-import-success]').text()).toContain('123')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
 
   it.each([['#import-priority', ''], ['#import-priority', '1.5'], ['#import-priority', '9'], ['#import-priority', '2147483648'], ['#import-concurrency', ''], ['#import-concurrency', '1.5'], ['#import-concurrency', '0'], ['#import-concurrency', '1001']])('blocks invalid numeric input %s=%s without sending a request', async (selector, value) => {
@@ -242,6 +235,7 @@ describe('C5 actual API to group-rates import component', () => {
     await dialog(wrapper).get('#import-concurrency').setValue('123')
     await dialog(wrapper).findAll('button').find(button => button.text().includes('使用已有资源'))!.trigger('click'); await flushPromises()
     expect(dialog(wrapper).find('#import-concurrency').exists()).toBe(false)
+    expect(dialog(wrapper).find('[data-import-priority-explain]').exists()).toBe(false)
     await dialog(wrapper).get('input[type="radio"]').setValue(true)
     await dialog(wrapper).get('#existing-admin-group').setValue('10'); await flushPromises()
     await dialog(wrapper).findAll('input[type="radio"]').at(-1)!.setValue(true)
@@ -264,7 +258,8 @@ describe('C5 actual API to group-rates import component', () => {
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
     expect(harness.requests).toHaveLength(1)
     pending.resolve(json(success(harness.requests[0]))); await flushPromises()
-    expect(dialog(wrapper).find('[data-import-success]').exists()).toBe(true)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(harness.requests).toHaveLength(1)
   })
 
   it('C5 RED unlocks an explicitly retryable response after a real pending render without editing inputs', async () => {
@@ -365,23 +360,34 @@ describe('C5 actual API to group-rates import component', () => {
     await dialog(wrapper).get('form').trigger('submit'); expect(harness.requests).toHaveLength(1)
   })
 
-  it.each(['mapping', 'connections', 'rates'])('keeps confirmed import separate from %s refresh failure', async source => {
+  it.each(['mapping', 'connections', 'rates'])('closes after a confirmed creation and reports %s refresh failure on the page without claiming import failure', async source => {
     const wrapper = await openView(); await chooseGroup(wrapper)
     if (source === 'mapping') harness.mappingResponse = async () => json({ message: 'admin.mySites.errors.request' }, 500)
     if (source === 'connections') harness.connectionResponse = async () => json({ message: 'admin.mySites.errors.request' }, 500)
     if (source === 'rates') harness.listGroupRates.mockRejectedValueOnce(new Error('admin.groupRates.errors.request'))
     await submit(wrapper)
-    expect(dialog(wrapper).get('[data-import-success]').text()).toContain('主站配置已确认')
-    expect(dialog(wrapper).get('[data-import-refresh-error]').text()).toContain('列表刷新失败')
-    expect(dialog(wrapper).find('[data-import-pending]').exists()).toBe(false)
-    expect(dialog(wrapper).find('[data-import-failure]').exists()).toBe(false)
-    expect(dialog(wrapper).find('button[type="submit"]').exists()).toBe(false)
-    expect(dialog(wrapper).text()).not.toContain('真实对接创建失败')
-    await dialog(wrapper).get('form').trigger('submit'); expect(harness.requests).toHaveLength(1)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('变更已保存，但列表刷新失败。请重新刷新以更新视图。')
+    expect(wrapper.text()).not.toContain('真实对接创建失败')
+    expect(harness.requests).toHaveLength(1)
   })
 
-  it('keeps all close and submit controls frozen while independent refreshes are still loading', async () => {
+  it('closes right after a confirmed creation while the list refreshes in the background', async () => {
     const pendingRows = deferred<ReturnType<typeof rows>>()
+    const wrapper = await openView(); await chooseGroup(wrapper)
+    harness.listGroupRates.mockImplementationOnce(() => pendingRows.promise)
+    await dialog(wrapper).get('form').trigger('submit'); await flushPromises()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    pendingRows.resolve(rows()); await flushPromises()
+    expect(wrapper.text()).toContain('C5 上游组')
+    expect(wrapper.text()).not.toContain('列表刷新失败')
+    expect(wrapper.findAll('button').find(button => button.text().trim() === '配置对接')!.element).toHaveProperty('disabled', false)
+    expect(harness.requests).toHaveLength(1)
+  })
+
+  it('keeps all close and submit controls frozen while independent refreshes are still loading for a result that stays open', async () => {
+    const pendingRows = deferred<ReturnType<typeof rows>>()
+    harness.importResponse = async (req: RealConnectRequest) => json({ ...success(req), configuration: { priority: 100 } })
     const wrapper = await openView(); await chooseGroup(wrapper)
     harness.listGroupRates.mockImplementationOnce(() => pendingRows.promise)
     await dialog(wrapper).get('form').trigger('submit'); await flushPromises()
@@ -394,13 +400,11 @@ describe('C5 actual API to group-rates import component', () => {
     expect(done.element).toHaveProperty('disabled', false)
   })
 
-  it('submits enabled passthrough and accurately displays skipped whitelist creation', async () => {
+  it('submits enabled passthrough and closes after the confirmed creation', async () => {
     const wrapper = await openView(); await chooseGroup(wrapper)
     await dialog(wrapper).get('[aria-label="透传"]').trigger('click'); await submit(wrapper)
     expect(harness.requests[0].accountSettings?.passthrough).toBe(true)
-    expect(dialog(wrapper).get('[data-import-success]').text()).toContain('透传开启，本次不建立白名单')
-    expect(dialog(wrapper).get('[data-import-success]').find('details').exists()).toBe(false)
-    expect(dialog(wrapper).text()).not.toContain('已由主站同步并保存')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
 
   it('keeps NewAPI main-site requests on the original settings-free API branch', async () => {
@@ -408,6 +412,7 @@ describe('C5 actual API to group-rates import component', () => {
     harness.importResponse = async () => json({ connection: {} })
     const wrapper = await openView(); await chooseGroup(wrapper)
     expect(dialog(wrapper).find('#import-concurrency').exists()).toBe(false)
+    expect(dialog(wrapper).find('[data-import-priority-explain]').exists()).toBe(false)
     const channelSelect = dialog(wrapper).findAll('select').find(select => select.text().includes('请选择渠道类型'))!
     await channelSelect.setValue('1'); await submit(wrapper)
     expect(harness.requests).toHaveLength(1)

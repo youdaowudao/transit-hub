@@ -9,12 +9,13 @@ import (
 )
 
 const (
-	ErrorSchedulableActionFailed    = "admin.connectionHealth.errors.schedulableActionFailed"
-	ErrorSchedulableReadbackFailed  = "admin.connectionHealth.errors.schedulableReadbackFailed"
-	ErrorSchedulableAuditFailed     = "admin.connectionHealth.errors.schedulableAuditFailed"
-	ErrorSchedulableUnsupported     = "admin.connectionHealth.errors.schedulableUnsupported"
-	ErrorSub2APIGroupLastUsable     = "admin.connectionHealth.errors.sub2apiGroupLastUsable"
-	ErrorSub2APIInventoryIncomplete = "admin.connectionHealth.errors.sub2apiInventoryIncomplete"
+	ErrorSchedulableActionFailed     = "admin.connectionHealth.errors.schedulableActionFailed"
+	ErrorSchedulableReadbackFailed   = "admin.connectionHealth.errors.schedulableReadbackFailed"
+	ErrorSchedulableAuditFailed      = "admin.connectionHealth.errors.schedulableAuditFailed"
+	ErrorSchedulableUnsupported      = "admin.connectionHealth.errors.schedulableUnsupported"
+	ErrorSub2APIGroupLastModelSource = "admin.connectionHealth.errors.sub2apiGroupLastModelSource"
+	ErrorSub2APIGroupLastUsable      = "admin.connectionHealth.errors.sub2apiGroupLastUsable"
+	ErrorSub2APIInventoryIncomplete  = "admin.connectionHealth.errors.sub2apiInventoryIncomplete"
 
 	SchedulableActionSucceeded = "schedulable_user_action_succeeded"
 	SchedulableActionFailed    = "schedulable_user_action_failed"
@@ -140,6 +141,8 @@ func schedulableFailedRemoteAction(schedulable bool) string {
 func (s *Service) recordManualFloorBlockedEvent(ctx context.Context, userID, workspace string, target AdminProbeTarget, inventory adminWorkspaceInventory, err error, lastUsableAction string) error {
 	errorKey, action := ErrorSub2APIGroupLastUsable, lastUsableAction
 	switch {
+	case errors.Is(err, requestError(ErrorSub2APIGroupLastModelSource)):
+		errorKey, action = ErrorSub2APIGroupLastModelSource, RemoteActionSkippedSub2APILastModelSource
 	case errors.Is(err, ErrRemoteActionPending):
 		errorKey, action = "admin.connectionHealth.errors.remoteActionPending", RemoteActionAwaitingConfirmation
 	case errors.Is(err, requestError(ErrorSub2APIInventoryIncomplete)):

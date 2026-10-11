@@ -2,7 +2,8 @@
 import { computed } from 'vue'
 import { Activity, Eye, Layers, ShieldAlert, ShieldCheck, ShieldQuestion, X, Zap } from 'lucide-vue-next'
 import { Tooltip } from '@/components/ui/tooltip'
-import { connectionHealthMessageKey, connectionHealthStateBadgeClass } from '../../composables/useConnectionHealth'
+import { judgedModelHealth, connectionHealthMessageKey, connectionHealthStateBadgeClass } from '../../composables/useConnectionHealth'
+import { modelControlText as modelMessage } from '../../utils/questionAnswerModelControl'
 import type {
   AdminGroupAccount,
   AdminGroupHealth,
@@ -63,8 +64,8 @@ const reasonLabel = (reason: string | undefined): string => {
 // 暂停 > 已禁用 > 降级/观察/恢复 > 健康。没有任何模型健康数据时返回空串。
 const STATE_PRIORITY: ConnectionHealthState[] = ['suspended', 'disabled', 'degraded', 'observing', 'recovering', 'suspect', 'healthy']
 const aggregateState = (account: AdminGroupAccount): ConnectionHealthState | '' => {
-  if (!account.modelHealth || account.modelHealth.length === 0) return ''
-  const present = new Set(account.modelHealth.map((m) => m.state))
+  if (judgedModelHealth(account).length === 0) return ''
+  const present = new Set(judgedModelHealth(account).map((m) => m.state))
   for (const s of STATE_PRIORITY) {
     if (present.has(s)) return s
   }
@@ -174,7 +175,8 @@ const assignedPolicyLabel = (account: AdminGroupAccount): string => {
                   </td>
                   <td class="py-2 pr-3">
                     <!-- 不可探活：展示明确原因，不展示会失败的探活按钮。 -->
-                    <Tooltip v-if="!account.probeAvailable" :text="reasonLabel(account.probeUnavailableReason)" wide>
+                    <span v-if="account.modelControlNoActiveProbe" data-testid="model-control-no-active-probe" class="inline-flex items-center rounded-full bg-zinc-500/10 px-2 py-0.5 font-medium text-zinc-500 dark:text-zinc-400">{{ modelMessage('noActiveProbe') }}</span>
+                    <Tooltip v-else-if="!account.probeAvailable" :text="reasonLabel(account.probeUnavailableReason)" wide>
                       <span class="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 font-medium text-amber-600 dark:text-amber-400">
                         <ShieldAlert class="h-3 w-3" />
                         {{ reasonLabel(account.probeUnavailableReason) }}
@@ -192,9 +194,12 @@ const assignedPolicyLabel = (account: AdminGroupAccount): string => {
                       :class="connectionHealthStateBadgeClass(aggregateState(account))"
                     >
                       {{ stateLabel(aggregateState(account)) }}
-                      <span v-if="account.modelHealth.length > 1" class="ml-1 opacity-70">×{{ account.modelHealth.length }}</span>
+                      <span v-if="judgedModelHealth(account).length > 1" class="ml-1 opacity-70">×{{ judgedModelHealth(account).length }}</span>
                     </span>
+                    <p v-if="account.modelControlNoActiveProbe" data-testid="model-control-no-active-probe-hint" class="mt-1 text-[11px] text-muted-foreground">{{ modelMessage('noActiveProbeHint') }}<template v-if="!account.priorityUsesMultiplierOnly">{{ modelMessage('noActiveProbePriority') }}</template></p>
+                    <p v-for="source in account.modelFloorLastSources ?? []" :key="`${source.groupId}:${source.modelKey}`" data-testid="model-control-last-source" class="mt-1 max-w-56 truncate text-[11px] text-amber-600" :title="modelMessage('floorLastSource', { group: source.groupName || source.groupId, model: source.modelKey })">{{ modelMessage('floorLastSource', { group: source.groupName || source.groupId, model: source.modelKey }) }}</p>
                     <template v-for="model in account.modelHealth" :key="model.modelName">
+                      <Tooltip v-if="model.modelControlClosed" :text="modelMessage('closedProbeModelHint')" wide><p data-testid="model-control-closed-probe" class="mt-1 max-w-56 truncate text-[11px] text-muted-foreground" :title="model.modelName">{{ model.modelName }} · {{ modelMessage('closedProbeModel') }}</p></Tooltip>
                       <p v-if="model.firstTokenMs != null || model.firstEventMs != null" class="mt-1 text-[11px] text-muted-foreground">
                         <span v-if="account.modelHealth.length > 1">{{ model.modelName }} · </span>
                         <span v-if="model.firstTokenMs != null">首字：{{ model.firstTokenMs }}ms</span>

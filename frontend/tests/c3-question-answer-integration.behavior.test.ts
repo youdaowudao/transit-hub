@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { c32AutoSettings } from './fixtures/c32ModelControl'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ManualOneTimeProbeDialog from '@/modules/admin/components/dashboard/ManualOneTimeProbeDialog.vue'
@@ -8,7 +9,7 @@ import { modelControlBusyTargets } from '@/modules/admin/utils/questionAnswerMod
 import type { ModelControlDecision, ModelControlItem, QuestionAnswerBatch, QuestionAnswerHistory, QuestionAnswerRecord } from '@/modules/admin/types/connectionHealth'
 import { questionAnswerFixtureStats } from './fixtures/c1QuestionAnswerHistory'
 
-const api = vi.hoisted(() => Object.fromEntries(['discoverTargetModels', 'listTestQuestions', 'getQuestionAnswerHistory', 'getLatestQuestionAnswerBatch', 'getQuestionAnswerBatch', 'startQuestionAnswerBatch', 'getModelControlTarget', 'getModelControlSettings', 'verifyModelControl', 'previewModelControl'].map(name => [name, vi.fn()])))
+const api = vi.hoisted(() => Object.fromEntries(['discoverTargetModels', 'listTestQuestions', 'getQuestionAnswerHistory', 'getLatestQuestionAnswerBatch', 'getQuestionAnswerBatch', 'startQuestionAnswerBatch', 'getModelControlTarget', 'getModelControlAutoSettings', 'getModelControlSettings', 'verifyModelControl', 'previewModelControl'].map(name => [name, vi.fn()])))
 vi.mock('@/modules/admin/api/connectionHealth', async original => ({ ...await original<typeof import('@/modules/admin/api/connectionHealth')>(), ...api }))
 const now = '2026-10-10T01:00:00Z', targetId = 'sub2api:ws1:a', nextTargetId = 'sub2api:ws2:b'
 const wrappers: VueWrapper[] = []
@@ -51,7 +52,7 @@ beforeEach(() => {
   api.getLatestQuestionAnswerBatch.mockImplementation(async (id: string) => structuredClone(id === targetId ? latest : batch('new-workspace-batch', 'B')))
   api.getQuestionAnswerBatch.mockImplementation(async (id: string) => structuredClone(id === targetId ? latest : batch('new-workspace-batch', 'B')))
   api.getQuestionAnswerHistory.mockImplementation(async (id: string) => structuredClone(history(id === targetId ? latest : batch('new-workspace-batch', 'B'))))
-  api.getModelControlSettings.mockResolvedValue({ minAccuracyPercent: 50, minJudgedAnswers: 3, version: 1 })
+  api.getModelControlAutoSettings.mockResolvedValue(c32AutoSettings()); api.getModelControlSettings.mockResolvedValue({ minAccuracyPercent: 50, minJudgedAnswers: 3, version: 1 })
   api.getModelControlTarget.mockImplementation(async (id: string) => ({ targetId: id, items: [structuredClone(id === targetId ? authority : nextAuthority)], candidates: [] }))
   api.verifyModelControl.mockImplementation(async (ids: string[]) => ({ items: ids.map(id => structuredClone(id === targetId ? authority : nextAuthority)), errors: [] }))
 })

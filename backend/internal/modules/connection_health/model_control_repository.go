@@ -29,11 +29,11 @@ type modelControlRepository interface {
 	recordModelControlReceipt(context.Context, string, string, string, string, string) error
 }
 
-const modelControlTargetColumns = `id,user_id,admin_account_id,target_id,model_name,account_name,closed_entries,closed_at,closed_by,closed_batch_id,closed_accuracy_percent,conflict_reason,pending,last_pending_id,unconfirmed_close,observed_state,observed_reason,observed_sources,observed_account_status,observed_account_schedulable,observed_at,last_attempt,attempt_at,version,created_at,updated_at`
+const modelControlTargetColumns = `id,user_id,admin_account_id,target_id,model_name,account_name,closed_entries,closed_at,closed_by,closed_batch_id,closed_accuracy_percent,conflict_reason,pending,last_pending_id,unconfirmed_close,observed_state,observed_reason,observed_sources,observed_account_status,observed_account_schedulable,observed_at,last_attempt,attempt_at,version,created_at,updated_at,auto_state,auto_verify_at`
 
 func scanModelControlTarget(row pgx.Row) (modelControlTarget, error) {
 	var t modelControlTarget
-	err := row.Scan(&t.ID, &t.UserID, &t.AdminAccountID, &t.TargetID, &t.ModelName, &t.AccountName, &t.ClosedEntries, &t.ClosedAt, &t.ClosedBy, &t.ClosedBatchID, &t.ClosedAccuracyPercent, &t.ConflictReason, &t.Pending, &t.LastPendingID, &t.UnconfirmedClose, &t.Observation.State, &t.Observation.ReasonKey, &t.Observation.Sources, &t.Observation.AccountStatus, &t.Observation.AccountSchedulable, &t.Observation.CheckedAt, &t.LastAttempt, &t.AttemptAt, &t.Version, &t.CreatedAt, &t.UpdatedAt)
+	err := row.Scan(&t.ID, &t.UserID, &t.AdminAccountID, &t.TargetID, &t.ModelName, &t.AccountName, &t.ClosedEntries, &t.ClosedAt, &t.ClosedBy, &t.ClosedBatchID, &t.ClosedAccuracyPercent, &t.ConflictReason, &t.Pending, &t.LastPendingID, &t.UnconfirmedClose, &t.Observation.State, &t.Observation.ReasonKey, &t.Observation.Sources, &t.Observation.AccountStatus, &t.Observation.AccountSchedulable, &t.Observation.CheckedAt, &t.LastAttempt, &t.AttemptAt, &t.Version, &t.CreatedAt, &t.UpdatedAt, &t.AutoState, &t.AutoVerifyAt)
 	return t, err
 }
 func scanModelControlSettings(row pgx.Row) (ModelControlSettings, error) {
@@ -144,11 +144,11 @@ func (r *Repository) ListModelControlRounds(ctx context.Context, user string, pa
 	}
 	rows, err := r.db.Query(ctx, `WITH requested AS(SELECT * FROM unnest($2::text[],$3::text[]) AS p(target_id,model_name)),rounds AS(
  SELECT p.target_id,p.model_name,b.* FROM requested p CROSS JOIN LATERAL(
- SELECT batch_id,min(created_at) AS created_at,max(completed_at) AS completed_at,bool_or(status IN ('pending','running')) AS running,
+ SELECT batch_id,min(created_at) AS created_at,max(completed_at) AS completed_at,max(GREATEST(COALESCE(completed_at,updated_at),updated_at)) AS evidence_at,bool_or(status IN ('pending','running')) AS running,
  count(*) FILTER(WHERE status='succeeded' AND answer_judgment='correct') AS correct,count(*) FILTER(WHERE status='succeeded' AND answer_judgment='incorrect') AS incorrect,
  count(*) FILTER(WHERE status='succeeded' AND (answer_judgment IS NULL OR answer_judgment NOT IN ('correct','incorrect'))) AS unreviewed,count(*) FILTER(WHERE status='failed') AS failed,count(*) FILTER(WHERE status='cancelled') AS cancelled
- FROM(SELECT batch_id,created_at,completed_at,status,answer_judgment FROM connection_health_question_answer_records WHERE user_id=$1 AND target_id=p.target_id AND model_name=p.model_name ORDER BY created_at DESC,id DESC LIMIT 1000) bounded GROUP BY batch_id ORDER BY min(created_at) DESC,batch_id DESC LIMIT 20) b)
- SELECT r.target_id,r.model_name,r.batch_id,r.created_at,r.completed_at,r.running,r.correct,r.incorrect,r.unreviewed,r.failed,r.cancelled,COALESCE(e.trigger,'manual'),COALESCE(e.config_snapshot->'requested'->'schedule'->>'name',s.name,'')
+ FROM(SELECT batch_id,created_at,completed_at,updated_at,status,answer_judgment FROM connection_health_question_answer_records WHERE user_id=$1 AND target_id=p.target_id AND model_name=p.model_name ORDER BY created_at DESC,id DESC LIMIT 1000) bounded GROUP BY batch_id ORDER BY min(created_at) DESC,batch_id DESC LIMIT 20) b)
+ SELECT r.target_id,r.model_name,r.batch_id,r.created_at,r.completed_at,r.evidence_at,r.running,r.correct,r.incorrect,r.unreviewed,r.failed,r.cancelled,COALESCE(e.trigger,'manual'),COALESCE(e.config_snapshot->'requested'->'schedule'->>'name',s.name,'')
  FROM rounds r LEFT JOIN connection_health_question_answer_schedule_execution_targets t ON t.id=r.batch_id AND t.target_id=r.target_id
  LEFT JOIN connection_health_question_answer_schedule_executions e ON e.id=t.execution_id AND e.user_id=$1 LEFT JOIN connection_health_question_answer_schedules s ON s.id=e.schedule_id ORDER BY r.target_id,r.model_name,r.created_at DESC,r.batch_id DESC`, user, targets, models)
 	if err != nil {
@@ -158,7 +158,7 @@ func (r *Repository) ListModelControlRounds(ctx context.Context, user string, pa
 	for rows.Next() {
 		var p modelControlPair
 		var round modelControlRound
-		if err := rows.Scan(&p.TargetID, &p.ModelName, &round.BatchID, &round.CreatedAt, &round.CompletedAt, &round.Running, &round.Correct, &round.Incorrect, &round.Unreviewed, &round.Failed, &round.Cancelled, &round.Source, &round.ScheduleName); err != nil {
+		if err := rows.Scan(&p.TargetID, &p.ModelName, &round.BatchID, &round.CreatedAt, &round.CompletedAt, &round.EvidenceAt, &round.Running, &round.Correct, &round.Incorrect, &round.Unreviewed, &round.Failed, &round.Cancelled, &round.Source, &round.ScheduleName); err != nil {
 			return nil, err
 		}
 		if n := round.Correct + round.Incorrect; n > 0 {
@@ -223,6 +223,9 @@ func modelControlNewEvent(user, workspace, target, model, event string, basis, d
 func insertModelControlEventTx(ctx context.Context, tx interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }, e ModelControlEvent) error {
+	if modelControlAutoActor(ctx) {
+		e.ActorUserID = ""
+	}
 	_, err := tx.Exec(ctx, `INSERT INTO connection_health_model_control_events(id,user_id,admin_account_id,target_id,model_name,event_type,actor_user_id,basis,detail,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, e.ID, e.UserID, e.AdminAccountID, e.TargetID, e.ModelName, e.EventType, e.ActorUserID, e.Basis, e.Detail, e.CreatedAt)
 	return err
 }

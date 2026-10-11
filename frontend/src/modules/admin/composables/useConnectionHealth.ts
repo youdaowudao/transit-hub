@@ -101,6 +101,9 @@ let adminGroupsRefreshController: AbortController | null = null
 const manualRefreshRequests = ref(0)
 const terminalRefreshRequests = ref(0)
 
+export const judgedModelHealth = (account: AdminGroupAccount): ModelHealth[] => (account.modelHealth ?? []).filter(model => !model.modelControlClosed)
+export const judgedUnprobedModels = (account: AdminGroupAccount) => (account.unprobedModels ?? []).filter(model => !model.modelControlClosed)
+
 const overviewFromAdminGroups = (groupList: AdminGroupHealth[]): ConnectionHealthOverview => {
   const result: ConnectionHealthOverview = {
     totalConnections: 0,
@@ -116,6 +119,7 @@ const overviewFromAdminGroups = (groupList: AdminGroupHealth[]): ConnectionHealt
   }
   type TargetOverview = {
     probeAvailable: boolean
+    hasClosedProbe: boolean
     models: Map<string, ModelHealth>
     unprobed: Set<string>
   }
@@ -129,21 +133,23 @@ const overviewFromAdminGroups = (groupList: AdminGroupHealth[]): ConnectionHealt
       if (!enabled) continue
       let target = targets.get(account.targetId)
       if (!target) {
-        target = { probeAvailable: true, models: new Map(), unprobed: new Set() }
+        target = { probeAvailable: true, hasClosedProbe: false, models: new Map(), unprobed: new Set() }
         targets.set(account.targetId, target)
       }
       target.probeAvailable = target.probeAvailable && account.probeAvailable
-      for (const model of account.modelHealth) {
+      target.hasClosedProbe ||= [...(account.modelHealth ?? []), ...(account.unprobedModels ?? [])].some(model => model.modelControlClosed)
+      for (const model of judgedModelHealth(account)) {
         target.models.set(model.modelName, model)
         target.unprobed.delete(model.modelName)
       }
-      for (const model of account.unprobedModels ?? []) {
+      for (const model of judgedUnprobedModels(account)) {
         if (!target.models.has(model.modelName)) target.unprobed.add(model.modelName)
       }
     }
   }
   for (const target of targets.values()) {
     result.totalConnections++
+    if (target.models.size === 0 && target.unprobed.size === 0 && target.hasClosedProbe) continue
     if (!target.probeAvailable) {
       result.unconfigured++
       continue
@@ -812,7 +818,7 @@ export function useConnectionHealth() {
           const evidencePending = isTestConfigurationBlocked(nextConfiguration) || nextConfiguration.protocol !== (account.testConfiguration?.protocol ?? 'chat_completions')
           const hasProbePolicy = account.hasEnabledProbePolicy ?? account.hasEnabledPolicy ?? Boolean(account.hasAssignedPolicy)
           if (evidencePending && hasProbePolicy && account.probeAvailable && account.probeModelsConfigured !== false) {
-            for (const model of account.modelHealth) {
+            for (const model of judgedModelHealth(account)) {
               if (model.currentHealthResult?.status === 'unverified' || !model.configured) continue
               const field = `${model.state}Models` as 'healthyModels' | 'suspectModels' | 'degradedModels' | 'suspendedModels' | 'observingModels' | 'recoveringModels' | 'disabledModels'
               healthSummary[field] = Math.max(0, (healthSummary[field] ?? 0) - 1)
@@ -1222,6 +1228,8 @@ export function remoteActionLabelKey(remoteAction: string): { key: string; param
       return { key: `${prefix}.skippedUpstreamScheduling` }
     case 'skipped_sub2api_group_last_active':
       return { key: `${prefix}.skippedSub2apiLastActive` }
+    case 'skipped_sub2api_group_last_model_source':
+      return { key: 'admin.connectionHealth.errors.sub2apiGroupLastModelSource' }
     case 'skipped_sub2api_group_last_usable':
       return { key: `${prefix}.skippedSub2apiLastUsable` }
     case 'skipped_sub2api_group_inventory_incomplete':

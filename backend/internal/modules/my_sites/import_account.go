@@ -51,7 +51,7 @@ func (settings *ImportAccountSettingsRequest) UnmarshalJSON(data []byte) error {
 
 func normalizeImportAccountSettings(req *ImportAccountSettingsRequest, platform string) (ImportAccountSettings, error) {
 	switch platform {
-	case "openai", "anthropic", "gemini", "antigravity":
+	case "openai", "anthropic", "gemini", "antigravity", "kimi", "zhipu", "deepseek", "minimax":
 	default:
 		return ImportAccountSettings{}, requestError(ErrorImportGroupTypeMismatch)
 	}
@@ -266,20 +266,36 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	return RealConnectResponse{Connection: publicRealConnection(conn), WorkspaceAdminAccountID: workspace, ConfigurationStatus: "confirmed", Configuration: &configuration}, nil
 }
 
+// importPlatformsCompatible compares source and target independently of the
+// supported-account whitelist in normalizeImportAccountSettings.
+func importPlatformsCompatible(upstreamPlatform, accountPlatform string) bool {
+	upstreamPlatform = strings.ToLower(strings.TrimSpace(upstreamPlatform))
+	accountPlatform = strings.ToLower(strings.TrimSpace(accountPlatform))
+	if upstreamPlatform == accountPlatform {
+		return true
+	}
+	inOpenAIFamily := func(platform string) bool {
+		switch platform {
+		case "openai", "kimi", "zhipu", "deepseek", "minimax":
+			return true
+		default:
+			return false
+		}
+	}
+	return inOpenAIFamily(upstreamPlatform) && inOpenAIFamily(accountPlatform)
+}
+
 func (s *Service) prepareImportConnectionContext(ctx context.Context, userID, workspace string, state *State, req RealConnectRequest) (connectionContext, error) {
 	site, err := s.upstreamLookup.GetSite(ctx, req.UpstreamSiteID)
 	if err != nil || site == nil || site.Session == nil || site.UserID != userID || site.AdminAccountID != workspace {
 		return connectionContext{}, requestError(ErrorRequest)
 	}
-	platform, multiplier := resolveGroupInfo(site.Metrics.Groups, req.UpstreamGroupID)
-	requested := strings.ToLower(strings.TrimSpace(req.GroupType))
-	if platform != "" && requested != "" && platform != requested {
-		return connectionContext{}, requestError(ErrorImportGroupTypeMismatch)
-	}
+	upstreamPlatform, multiplier := resolveGroupInfo(site.Metrics.Groups, req.UpstreamGroupID)
+	platform := strings.ToLower(strings.TrimSpace(req.GroupType))
 	if platform == "" {
-		platform = requested
+		platform = upstreamPlatform
 	}
-	if platform == "" {
+	if platform == "" || upstreamPlatform != "" && !importPlatformsCompatible(upstreamPlatform, platform) {
 		return connectionContext{}, requestError(ErrorImportGroupTypeMismatch)
 	}
 	name := strings.TrimSpace(req.UpstreamGroupName)

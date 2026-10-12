@@ -13,6 +13,7 @@ import type { AdminResourceOption, ConnectionCapabilities, ImportAccountSettings
 import type { ImportApiError } from '../api/mySites'
 import type { UpstreamSiteResponse } from '../types/upstream'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
+import { importPlatformsCompatible, isOpenAIImportPlatform } from '../utils/importPlatforms'
 
 import { t, te, locale } from '@/locales'
 const router = useRouter()
@@ -141,8 +142,13 @@ let connectorGeneration = 0
 let pageIsMounted = true
 const connectSubmitLocked = ref(false)
 const isC5Import = computed(() => connectMode.value === 'real' && adminPlatform.value === 'sub2api')
-const connectPlatform = computed(() => (connectingRate.value?.type || selectedGroupType.value).toLowerCase())
-const supportsConnectPassthrough = computed(() => ['openai', 'anthropic'].includes(connectPlatform.value))
+const connectUpstreamPlatform = computed(() => (connectingRate.value?.type || '').trim().toLowerCase())
+const connectAccountPlatform = computed(() => {
+  if (!connectUpstreamPlatform.value) return selectedGroupType.value.trim().toLowerCase()
+  const selected = ownGroups.value.find(group => group.id === connectOwnGroups.value[0])
+  return selected?.platform.trim().toLowerCase() ?? ''
+})
+const supportsConnectPassthrough = computed(() => ['openai', 'anthropic'].includes(connectAccountPlatform.value || connectUpstreamPlatform.value))
 const connectFormLocked = computed(() => isActionLoading.value || ['submitting', 'succeeded', 'pending'].includes(connectOutcome.value))
 const validIntegerInput = (value: string | number, minimum: number, maximum: number): boolean => (
   String(value).trim() !== '' && Number.isInteger(Number(value)) && Number(value) >= minimum && Number(value) <= maximum
@@ -174,12 +180,14 @@ const connectModelSummary = computed(() => {
   if (!config) return ''
   return t(`admin.groupRates.connect.importResult.models.${config.modelState}`, { count: config.models.length })
 })
-watch(connectPlatform, () => {
-  if (!supportsConnectPassthrough.value) connectPassthrough.value = false
+watch([connectUpstreamPlatform, selectedGroupType], () => {
   if (!isC5Import.value) return
   const kept = connectOwnGroups.value.filter(id => filteredOwnGroups.value.some(group => group.id === id))
   if (kept.length !== connectOwnGroups.value.length) connectGroupSelectionNotice.value = t('admin.groupRates.connect.importSettings.groupsRemoved')
   connectOwnGroups.value = kept
+})
+watch(supportsConnectPassthrough, (supported) => {
+  if (!supported) connectPassthrough.value = false
 })
 watch(() => currentAccount.value?.id, () => {
   connectorGeneration++
@@ -265,12 +273,20 @@ const firstMappedOwnGroupForRate = (rate: GroupRate): string => mappedOwnGroupsF
 const filteredOwnGroups = computed(() => {
   // new-api admin 不按渠道类型筛选，直接显示全部自有分组
   if (isAdminNewAPI.value) return ownGroups.value
-  const upstreamType = (connectingRate.value?.type || selectedGroupType.value).toLowerCase()
-  if (upstreamType) {
-    return ownGroups.value.filter(g => g.platform.toLowerCase() === upstreamType)
+  if (isC5Import.value) {
+    if (connectUpstreamPlatform.value) {
+      return ownGroups.value.filter(group => importPlatformsCompatible(connectUpstreamPlatform.value, group.platform))
+    }
+    return ownGroups.value.filter(group => selectedGroupType.value && group.platform.trim().toLowerCase() === selectedGroupType.value)
   }
-  return isC5Import.value ? [] : ownGroups.value
+  const upstreamType = (connectingRate.value?.type || selectedGroupType.value).toLowerCase()
+  return upstreamType ? ownGroups.value.filter(group => group.platform.toLowerCase() === upstreamType) : ownGroups.value
 })
+const canSelectOwnGroup = (group: MySiteMappingOwnGroupOption): boolean => (
+  !isC5Import.value || !connectAccountPlatform.value || group.platform.trim().toLowerCase() === connectAccountPlatform.value
+)
+const hasOtherCompatiblePlatforms = computed(() => isC5Import.value && connectOwnGroups.value.length > 0 &&
+  filteredOwnGroups.value.some(group => !canSelectOwnGroup(group)))
 
 const realConnectionsForRate = (rate: GroupRate): RealConnection[] =>
   realConnectionsData.value.filter(c => (
@@ -442,8 +458,8 @@ const canSubmitConnect = computed(() => {
     return Boolean(selectedKeyId.value && selectedAdminGroupId.value && selectedAdminResourceId.value)
   }
   if (connectOwnGroups.value.length === 0) return false
-  if (isC5Import.value && (!currentAccount.value?.id || !connectPlatform.value || connectPriorityError.value || connectConcurrencyError.value ||
-    connectOwnGroups.value.some(id => !filteredOwnGroups.value.some(group => group.id === id)))) return false
+  if (isC5Import.value && (!currentAccount.value?.id || !connectAccountPlatform.value || connectPriorityError.value || connectConcurrencyError.value ||
+    connectOwnGroups.value.some(id => !filteredOwnGroups.value.some(group => group.id === id && canSelectOwnGroup(group))))) return false
   // sub2api admin：分组类型未知时必须手动选择
   if (needsGroupTypeSelection.value && !selectedGroupType.value) return false
   // new-api admin：必须选择渠道类型
@@ -494,6 +510,15 @@ const platformLabel = (platform: string | null): string => {
 const typeLabel = (type: string | null): string => {
   if (!type) return t('admin.groupRates.common.unknown')
   return type
+}
+
+const importPlatformLabel = (platform: string): string => {
+  const labelKeys: Record<string, string> = {
+    openai: 'groupTypeOpenai', kimi: 'groupTypeKimi', zhipu: 'groupTypeZhipu',
+    deepseek: 'groupTypeDeepseek', minimax: 'groupTypeMinimax',
+  }
+  const key = labelKeys[platform]
+  return key ? t(`admin.groupRates.connect.${key}`) : typeLabel(platform)
 }
 
 const platformClasses = (platform: string | null): string => {
@@ -679,7 +704,7 @@ const loadMySiteMappingData = async (force = false, isCurrent: () => boolean = (
 }
 
 const toggleOwnGroup = (groupId: string) => {
-  if (connectFormLocked.value || !filteredOwnGroups.value.some(group => group.id === groupId)) return
+  if (connectFormLocked.value || !filteredOwnGroups.value.some(group => group.id === groupId && canSelectOwnGroup(group))) return
   const index = connectOwnGroups.value.indexOf(groupId)
   if (index === -1) {
     connectOwnGroups.value = [...connectOwnGroups.value, groupId]
@@ -773,7 +798,7 @@ const submitRealConnect = async () => {
     upstreamSiteId: connectingRate.value.siteId,
     upstreamGroupId: connectingRate.value.groupId ?? '',
     upstreamGroupName: connectingRate.value.groupName,
-    groupType: useImportContract ? connectPlatform.value : selectedGroupType.value,
+    groupType: useImportContract ? connectAccountPlatform.value : selectedGroupType.value,
     channelType: selectedChannelType.value || undefined,
     ownGroupIds: [...connectOwnGroups.value],
     addToPricingMapping: addToPricingMapping.value,
@@ -1399,11 +1424,16 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 <option value="anthropic">{{ t('admin.groupRates.connect.groupTypeAnthropic') }}</option>
                 <option value="gemini">{{ t('admin.groupRates.connect.groupTypeGemini') }}</option>
                 <option value="antigravity">{{ t('admin.groupRates.connect.groupTypeAntigravity') }}</option>
+                <option v-if="isC5Import" value="kimi">{{ t('admin.groupRates.connect.groupTypeKimi') }}</option>
+                <option v-if="isC5Import" value="zhipu">{{ t('admin.groupRates.connect.groupTypeZhipu') }}</option>
+                <option v-if="isC5Import" value="deepseek">{{ t('admin.groupRates.connect.groupTypeDeepseek') }}</option>
+                <option v-if="isC5Import" value="minimax">{{ t('admin.groupRates.connect.groupTypeMinimax') }}</option>
               </select>
               <div class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground">
                 <ChevronDown class="h-3.5 w-3.5" />
               </div>
             </div>
+            <p v-if="isC5Import" class="text-xs leading-5 text-muted-foreground" data-import-platform-hint>{{ t('admin.groupRates.connect.accountPlatformHint') }}</p>
           </div>
 
           <!-- new-api admin：渠道类型选择 -->
@@ -1472,7 +1502,10 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           </div>
 
           <section v-if="isC5Import" class="space-y-4" aria-labelledby="import-account-settings-title">
-            <p v-if="!needsGroupTypeSelection" class="text-sm text-muted-foreground">{{ t('admin.groupRates.connect.groupTypeLabel') }}：{{ typeLabel(connectPlatform) }}</p>
+            <div v-if="!needsGroupTypeSelection" class="space-y-1 text-sm text-muted-foreground" data-import-platforms>
+              <p>{{ t('admin.groupRates.connect.upstreamGroupType', { platform: importPlatformLabel(connectUpstreamPlatform) }) }}</p>
+              <p>{{ t('admin.groupRates.connect.accountPlatform', { platform: connectAccountPlatform ? importPlatformLabel(connectAccountPlatform) : t('admin.groupRates.connect.accountPlatformPending') }) }}</p>
+            </div>
             <h3 id="import-account-settings-title" class="text-sm font-semibold text-foreground">{{ t('admin.groupRates.connect.importSettings.title') }}</h3>
             <div class="grid gap-4 sm:grid-cols-2">
               <div class="space-y-2">
@@ -1573,23 +1606,26 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
 
           <div v-if="connectMode === 'real'" class="space-y-2">
             <span class="text-sm font-medium text-foreground">{{ t('admin.groupRates.connect.ownGroupLabel') }}</span>
+            <p v-if="isC5Import && isOpenAIImportPlatform(connectUpstreamPlatform)" class="text-xs leading-5 text-muted-foreground" data-import-compatible-platforms>{{ t('admin.groupRates.connect.compatiblePlatformsHint') }}</p>
+            <p v-if="hasOtherCompatiblePlatforms" class="text-xs leading-5 text-muted-foreground" data-import-platform-lock>{{ t('admin.groupRates.connect.selectedPlatformHint', { platform: importPlatformLabel(connectAccountPlatform) }) }}</p>
             <p v-if="connectGroupSelectionNotice" class="text-xs text-warning">{{ connectGroupSelectionNotice }}</p>
             <div class="max-h-48 overflow-auto rounded-xl border border-border/50 bg-surface divide-y divide-border/30">
               <label
                 v-for="group in filteredOwnGroups"
                 :key="group.id"
-                class="flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors hover:bg-surface-elevated"
+                class="flex items-center gap-3 px-4 py-2.5 transition-colors"
+                :class="canSelectOwnGroup(group) ? 'cursor-pointer hover:bg-surface-elevated' : 'cursor-not-allowed opacity-50'"
               >
                 <input
                   type="checkbox"
                   :checked="connectOwnGroups.includes(group.id)"
                   class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
-                  :disabled="isActionLoading"
+                  :disabled="isActionLoading || !canSelectOwnGroup(group)"
                   @change="toggleOwnGroup(group.id)"
                 />
                 <span class="min-w-0 break-words text-sm text-foreground">{{ group.groupName }}</span>
                 <span v-if="group.platform" class="inline-flex rounded-md border border-border/50 bg-surface-elevated px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  {{ group.platform }}
+                  {{ isC5Import ? importPlatformLabel(group.platform) : group.platform }}
                 </span>
                 <span class="ml-auto text-xs text-muted-foreground">{{ formatMultiplier(group.multiplier) }}</span>
               </label>

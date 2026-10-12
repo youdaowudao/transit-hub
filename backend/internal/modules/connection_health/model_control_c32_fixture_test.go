@@ -23,6 +23,7 @@ import (
 // Explicit TEST_DATABASE_URL opts into isolated PostgreSQL and httptest; the
 // default test run starts neither a listener nor an external process.
 type c32REDFixture struct {
+	groupPlatform    string
 	probeCalls       int
 	probeFailures    int
 	probeFailAccount string
@@ -111,7 +112,11 @@ func (f *c32REDFixture) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": data})
 	}
 	if r.URL.Path == "/api/v1/admin/groups" {
-		write(200, map[string]any{"items": []map[string]any{{"id": 1, "name": "c3-red-group", "platform": "openai", "rate_multiplier": 1}}, "total": 1, "page": 1, "page_size": 100})
+		platform := f.groupPlatform
+		if platform == "" {
+			platform = "openai"
+		}
+		write(200, map[string]any{"items": []map[string]any{{"id": 1, "name": "c3-red-group", "platform": platform, "rate_multiplier": 1}}, "total": 1, "page": 1, "page_size": 100})
 		return
 	}
 	if r.URL.Path == "/api/v1/admin/accounts" {

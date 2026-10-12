@@ -55,6 +55,7 @@ import {
 
 const props = withDefaults(defineProps<{
   group: AdminGroupHealth
+  workspacePlatform?: string
   hideUnmonitoredAccounts: boolean
   questionAnswerUnreadTargetIds: string[]
   actionLoading: boolean
@@ -1081,6 +1082,8 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     <div v-for="model in filteredModelHealth(account)" :key="model.modelName" class="rounded-lg border border-border/50 bg-background px-2.5 py-2">
                       <div class="flex items-center justify-between gap-3">
                         <span class="truncate text-sm font-medium text-foreground">{{ model.modelName }}</span>
+                        <Tooltip v-if="workspacePlatform === 'sub2api' && model.modelSelection === 'fallback'" :text="t(`${detailPrefix}.models.fallbackHelp`, { models: (model.skippedModels ?? []).join('、') })" wide><span data-testid="probe-model-fallback" class="text-[11px] text-muted-foreground">{{ t(`${detailPrefix}.models.fallback`) }}</span></Tooltip>
+                        <Tooltip v-if="workspacePlatform === 'sub2api' && model.modelSelection === 'last_unconfirmed'" :text="t(`${detailPrefix}.models.lastUnconfirmedHelp`)" wide><span data-testid="probe-model-last-unconfirmed" class="text-[11px] text-muted-foreground">{{ t(`${detailPrefix}.models.lastUnconfirmed`) }}</span></Tooltip>
                         <Tooltip v-if="model.modelControlClosed" :text="modelMessage('closedProbeModelHint')" wide><span data-testid="model-control-closed-probe" class="text-[11px] text-muted-foreground">{{ modelMessage('closedProbeModel') }}</span></Tooltip>
                         <Tooltip v-if="model.currentHealthResult?.status === 'unverified'" :text="t('admin.connectionHealth.testConfiguration.unverifiedHelp')" wide>
                           <span class="text-xs text-amber-700">{{ t('admin.connectionHealth.testConfiguration.unverified') }}</span>
@@ -1114,6 +1117,8 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     <div v-for="model in filteredUnprobedModels(account)" :key="`unprobed:${model.modelName}`" class="rounded-lg border border-border/50 bg-background px-2.5 py-2">
                       <div class="flex items-center justify-between gap-3">
                         <span class="truncate text-sm font-medium text-foreground">{{ model.modelName }}</span>
+                        <Tooltip v-if="workspacePlatform === 'sub2api' && model.modelSelection === 'fallback'" :text="t(`${detailPrefix}.models.fallbackHelp`, { models: (model.skippedModels ?? []).join('、') })" wide><span data-testid="probe-model-fallback" class="text-[11px] text-muted-foreground">{{ t(`${detailPrefix}.models.fallback`) }}</span></Tooltip>
+                        <Tooltip v-if="workspacePlatform === 'sub2api' && model.modelSelection === 'last_unconfirmed'" :text="t(`${detailPrefix}.models.lastUnconfirmedHelp`)" wide><span data-testid="probe-model-last-unconfirmed" class="text-[11px] text-muted-foreground">{{ t(`${detailPrefix}.models.lastUnconfirmed`) }}</span></Tooltip>
                         <Tooltip v-if="model.modelControlClosed" :text="modelMessage('closedProbeModelHint')" wide><span data-testid="model-control-closed-probe" class="text-[11px] text-muted-foreground">{{ modelMessage('closedProbeModel') }}</span></Tooltip>
                         <span class="rounded-md bg-muted px-2 py-0.5 text-xs text-muted-foreground">{{ account.probeModelsConfigured === false ? t(`${prefix}.notConfigured`) : t(`${prefix}.notProbed`) }}</span>
                       </div>

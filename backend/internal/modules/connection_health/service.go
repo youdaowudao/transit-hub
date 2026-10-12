@@ -285,6 +285,8 @@ func (s *Service) currentAdminAccountID(ctx context.Context, userID string) (str
 
 // ModelHealth 是单个模型在某条对接链路上的健康状态展示数据，绝不包含 upstream_key。
 type ModelHealth struct {
+	ModelSelection              string                       `json:"modelSelection,omitempty"`
+	SkippedModels               []string                     `json:"skippedModels,omitempty"`
 	ModelControlClosed          bool                         `json:"modelControlClosed,omitempty"`
 	RequestFirstTokenMs         *int                         `json:"requestFirstTokenMs"`
 	RequestFirstEventMs         *int                         `json:"requestFirstEventMs"`
@@ -911,6 +913,7 @@ type ModelTargetInput struct {
 }
 
 type PolicyInput struct {
+	ProbeMode                         string             `json:"probeMode"`
 	RulePresetID                      *string            `json:"rulePresetId"`
 	ID                                string             `json:"id"`
 	Name                              string             `json:"name"`
@@ -979,6 +982,9 @@ func (s *Service) SavePolicy(ctx context.Context, userID string, in PolicyInput)
 		}
 	}
 
+	if err := s.validateProbeModeWorkspace(ctx, userID, adminAccountID, in.ProbeMode); err != nil {
+		return Policy{}, err
+	}
 	policy, targets, err := buildPolicyAndTargets(userID, adminAccountID, id, in)
 	if err != nil {
 		return Policy{}, err
@@ -1033,12 +1039,16 @@ func buildPolicyAndTargets(userID string, adminAccountID string, id string, in P
 			return Policy{}, nil, requestError(ErrorRequest)
 		}
 	}
+	probeMode := strings.TrimSpace(in.ProbeMode)
+	if err := validateProbeMode(probeMode); err != nil {
+		return Policy{}, nil, err
+	}
 	strategyMode := normalizeStrategyMode(in.StrategyMode)
 	policy := Policy{
 		RulePresetID: rulePresetID,
 		ID:           id, UserID: userID, AdminAccountID: adminAccountID, Name: strings.TrimSpace(in.Name), Enabled: in.Enabled,
 		OwnGroupID: in.OwnGroupID, OwnGroupName: in.OwnGroupName, ModelPattern: defaultString(in.ModelPattern, "*"),
-		ProbeMode: "real_model", ProbeIntervalSeconds: defaultInt(in.ProbeIntervalSeconds, 60),
+		ProbeMode: probeMode, ProbeIntervalSeconds: defaultInt(in.ProbeIntervalSeconds, 60),
 		ContinueProbeWhenUnschedulable:    continueWhenUnschedulable,
 		UnschedulableProbeIntervalMinutes: unschedulableIntervalMinutes,
 		FailureThreshold:                  defaultInt(in.FailureThreshold, 3), SuccessThreshold: defaultInt(in.SuccessThreshold, 2),
@@ -1049,6 +1059,7 @@ func buildPolicyAndTargets(userID string, adminAccountID string, id string, in P
 		DailyProbeBudget: defaultInt(in.DailyProbeBudget, 1000),
 	}
 	if strategyMode == StrategyModeMultiplierOnly {
+		policy.ProbeMode = ProbeModeRealModel
 		// 仅倍率策略不拥有任何探活行为。即使错误或旧客户端同时提交了探活字段，也在服务端
 		// 强制关闭并丢弃模型目标，保证不会解析凭据、消耗预算或触发健康状态机。
 		policy.AutoDegradeEnabled = false

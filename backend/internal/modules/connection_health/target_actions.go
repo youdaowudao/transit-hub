@@ -828,7 +828,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 						AdminGroupID: groupInventory.group.ID, AdminGroupName: groupInventory.group.Name,
 						AccountID: account.ID, AccountName: account.Name, AccountStatus: account.Status,
 						AccountWeight: cloneIntPointer(account.Weight), ProviderFamily: account.Platform,
-						Models: splitModelList(account.Models),
+						Models: splitModelList(account.Models), modelSource: probeModelSourceFromAccount(account),
 					}
 					found = true
 				}
@@ -849,7 +849,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 			stored = *pair.Target
 		}
 		effectivePolicies := effectivePoliciesForTarget(targetPolicySet, inheritedPolicies)
-		if hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies)) && !hardExcluded && !oldRulePrimaryUnmanaged(target.Platform, captured.RuleVersion, tiers[stored.TargetID]) {
+		if hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies, target.Platform, target.modelSource, true)) && !hardExcluded && !oldRulePrimaryUnmanaged(target.Platform, captured.RuleVersion, tiers[stored.TargetID]) {
 			continue
 		}
 		targetVisible := found
@@ -1004,7 +1004,7 @@ func (s *Service) restoreEmptySub2APIGroups(ctx context.Context, states []Target
 						AdminGroupID: groupID, AdminGroupName: groupInventory.group.Name,
 						AccountID: account.ID, AccountName: account.Name, AccountStatus: account.Status,
 						Schedulable: cloneBoolPointer(account.Schedulable), AccountWeight: cloneIntPointer(account.Weight),
-						ProviderFamily: account.Platform, Models: splitModelList(account.Models),
+						ProviderFamily: account.Platform, Models: splitModelList(account.Models), modelSource: probeModelSourceFromAccount(account),
 					}
 				}
 				if targetStatusEnabled(string(upstream.PlatformSub2API), normalizeTargetStatus(string(upstream.PlatformSub2API), account.Status)) {

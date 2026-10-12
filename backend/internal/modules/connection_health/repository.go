@@ -397,14 +397,14 @@ func upsertPolicyWithExecutor(ctx context.Context, executor policyExecutor, p Po
 			probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
 			failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
 			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, rule_preset_id, legacy_preset_id, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,'',now(),now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE(NULLIF($9,''),'real_model'),$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,'',now(),now())
 		ON CONFLICT (id) DO UPDATE SET
 			name = EXCLUDED.name,
 			enabled = EXCLUDED.enabled,
 			own_group_id = EXCLUDED.own_group_id,
 			own_group_name = EXCLUDED.own_group_name,
 			model_pattern = EXCLUDED.model_pattern,
-			probe_mode = EXCLUDED.probe_mode,
+			probe_mode = CASE WHEN $9 = '' THEN connection_health_policies.probe_mode ELSE EXCLUDED.probe_mode END,
 			probe_interval_seconds = EXCLUDED.probe_interval_seconds,
 			continue_probe_when_unschedulable = EXCLUDED.continue_probe_when_unschedulable,
 			unschedulable_probe_interval_minutes = EXCLUDED.unschedulable_probe_interval_minutes,
@@ -443,15 +443,23 @@ func (r *Repository) UpsertPolicy(ctx context.Context, p Policy) error {
 }
 
 func replaceModelTargetsTx(ctx context.Context, tx pgx.Tx, policyID string, targets []ModelTarget) error {
+	var probeMode string
+	if err := tx.QueryRow(ctx, `SELECT probe_mode FROM connection_health_policies WHERE id=$1`, policyID).Scan(&probeMode); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM connection_health_model_targets WHERE policy_id = $1`, policyID); err != nil {
 		return err
 	}
-	for _, t := range targets {
+	for index, t := range targets {
+		offset := 0
+		if probeMode == ProbeModeFirstAvailable {
+			offset = index
+		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO connection_health_model_targets
 				(id, policy_id, user_id, admin_account_id, model_name, provider_family, enabled, probe_prompt, max_probe_tokens, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),now())
-		`, t.ID, policyID, t.UserID, t.AdminAccountID, t.ModelName, t.ProviderFamily, t.Enabled, t.ProbePrompt, t.MaxProbeTokens); err != nil {
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now() + $10::int * interval '1 microsecond',now())
+		`, t.ID, policyID, t.UserID, t.AdminAccountID, t.ModelName, t.ProviderFamily, t.Enabled, t.ProbePrompt, t.MaxProbeTokens, offset); err != nil {
 			return err
 		}
 	}
@@ -1433,7 +1441,7 @@ func insertPolicyWithTargetsTx(ctx context.Context, tx pgx.Tx, policy Policy, ta
 			probe_interval_seconds, continue_probe_when_unschedulable, unschedulable_probe_interval_minutes,
 			failure_threshold, success_threshold, cooldown_seconds, observation_seconds,
 			recovery_step_percent, auto_degrade_enabled, auto_remote_action_enabled, priority_mode, strategy_mode, daily_probe_budget, rule_preset_id, legacy_preset_id, created_at, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,'',now(),now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,COALESCE(NULLIF($9,''),'real_model'),$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,'',now(),now())
 	`, policy.ID, policy.UserID, policy.AdminAccountID, policy.Name, policy.Enabled, policy.OwnGroupID, policy.OwnGroupName,
 		policy.ModelPattern, policy.ProbeMode, policy.ProbeIntervalSeconds, policy.ContinueProbeWhenUnschedulable,
 		defaultInt(policy.UnschedulableProbeIntervalMinutes, 60), 3, 2,
@@ -1442,13 +1450,17 @@ func insertPolicyWithTargetsTx(ctx context.Context, tx pgx.Tx, policy Policy, ta
 		policy.DailyProbeBudget, policy.RulePresetID); err != nil {
 		return err
 	}
-	for _, target := range targets {
+	for index, target := range targets {
+		offset := 0
+		if policy.ProbeMode == ProbeModeFirstAvailable {
+			offset = index
+		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO connection_health_model_targets
 				(id, policy_id, user_id, admin_account_id, model_name, provider_family, enabled, probe_prompt, max_probe_tokens, created_at, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),now())
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now() + $10::int * interval '1 microsecond',now())
 		`, target.ID, target.PolicyID, target.UserID, target.AdminAccountID, target.ModelName, target.ProviderFamily,
-			target.Enabled, target.ProbePrompt, target.MaxProbeTokens); err != nil {
+			target.Enabled, target.ProbePrompt, target.MaxProbeTokens, offset); err != nil {
 			return err
 		}
 	}

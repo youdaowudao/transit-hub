@@ -38,16 +38,22 @@ type adminGroupContext struct {
 	targetIDs      map[string]struct{}
 }
 
-func (s *Service) resolveAdminGroupContext(ctx context.Context, userID string, adminGroupID string) (adminGroupContext, error) {
+func (s *Service) resolveAdminGroupContext(ctx context.Context, userID string, adminGroupID string, validatedWorkspace string) (adminGroupContext, error) {
 	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
 	if err != nil {
 		return adminGroupContext{}, err
+	}
+	if validatedWorkspace != "" && adminAccountID != validatedWorkspace {
+		return adminGroupContext{}, requestError(ErrorRequest)
 	}
 	if s.platformGroups == nil {
 		return adminGroupContext{}, requestError(ErrorUnknown)
 	}
 	session, err := s.mySites.RequireSession(ctx, userID, adminAccountID)
 	if err != nil {
+		if validatedWorkspace != "" {
+			return adminGroupContext{}, requestError(ErrorRequest)
+		}
 		return adminGroupContext{}, err
 	}
 	groups, err := s.platformGroups.FetchAdminAllGroups(session)
@@ -101,7 +107,23 @@ func (s *Service) SetAdminGroupPolicyConfiguration(ctx context.Context, userID s
 	if input.ProbeSortFallbackMultiplier != nil && (*input.ProbeSortFallbackMultiplier <= 0 || math.IsNaN(*input.ProbeSortFallbackMultiplier) || math.IsInf(*input.ProbeSortFallbackMultiplier, 0)) {
 		return AdminGroupPolicyConfiguration{}, requestError(ErrorMultiplierRequired)
 	}
-	groupContext, err := s.resolveAdminGroupContext(ctx, userID, adminGroupID)
+	if input.QuickPolicy != nil {
+		if err := validateProbeMode(input.QuickPolicy.ProbeMode); err != nil {
+			return AdminGroupPolicyConfiguration{}, err
+		}
+	}
+	validatedWorkspace := ""
+	if input.QuickPolicy != nil && strings.TrimSpace(input.QuickPolicy.ProbeMode) == ProbeModeFirstAvailable {
+		workspace, err := s.currentAdminAccountID(ctx, userID)
+		if err != nil {
+			return AdminGroupPolicyConfiguration{}, err
+		}
+		if err := s.validateProbeModeWorkspace(ctx, userID, workspace, input.QuickPolicy.ProbeMode); err != nil {
+			return AdminGroupPolicyConfiguration{}, err
+		}
+		validatedWorkspace = workspace
+	}
+	groupContext, err := s.resolveAdminGroupContext(ctx, userID, adminGroupID, validatedWorkspace)
 	if err != nil {
 		return AdminGroupPolicyConfiguration{}, err
 	}
@@ -174,6 +196,7 @@ func (s *Service) SetAdminGroupPolicyConfiguration(ctx context.Context, userID s
 		); err != nil {
 			return AdminGroupPolicyConfiguration{}, err
 		}
+		policy.ProbeMode = defaultString(policy.ProbeMode, ProbeModeRealModel)
 		responsePolicies = append(responsePolicies, policy)
 		s.triggerPrioritySync(userID, groupContext.adminAccountID, pendingSignature)
 		return savedAdminGroupPolicyConfiguration(groupContext.group, policyIDs, excludedTargetIDs, responsePolicies, input.ProbeSortFallbackMultiplier, "pending"), nil

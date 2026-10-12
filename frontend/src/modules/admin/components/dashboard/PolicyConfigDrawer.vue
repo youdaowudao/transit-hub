@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { ArrowDownUp, BookOpenText, Radar, X, ShieldCheck, Plus, Trash2 } from 'lucide-vue-next'
-import { HelpTooltip } from '@/components/ui/tooltip'
+import { ArrowUp, ArrowDown, ArrowDownUp, BookOpenText, Radar, X, ShieldCheck, Plus, Trash2 } from 'lucide-vue-next'
+import { HelpTooltip, Tooltip } from '@/components/ui/tooltip'
 import PolicyRunFlowDialog from './PolicyRunFlowDialog.vue'
 import HealthRuleSettings from './HealthRuleSettings.vue'
 import HealthRulePresetFields from './HealthRulePresetFields.vue'
@@ -21,6 +21,7 @@ const props = defineProps<{
   ownGroupOptions: OwnGroupOption[]
   policies?: ConnectionHealthPolicy[]
   workspaceId?: string
+  workspacePlatform?: string
 }>()
 
 const emit = defineEmits<{
@@ -63,6 +64,9 @@ const autoDegradeEnabled = ref(true)
 const autoRemoteActionEnabled = ref(false)
 const priorityMode = ref<ConnectionHealthPriorityMode>('none')
 const strategyMode = ref<ConnectionHealthStrategyMode>('health_probe')
+const firstAvailable = ref(false)
+const isSub2API = computed(() => props.workspacePlatform === 'sub2api')
+const orderedModels = computed(() => isSub2API.value && !isMultiplierOnly.value && firstAvailable.value)
 const modelTargets = ref<ModelTargetInput[]>([])
 const validationError = ref<string | null>(null)
 const runFlowOpen = ref(false)
@@ -91,6 +95,7 @@ const resetForm = () => {
   autoRemoteActionEnabled.value = autoDegradeEnabled.value && (p?.autoRemoteActionEnabled ?? false)
   priorityMode.value = p?.priorityMode === 'multiplier' ? 'multiplier' : 'none'
   strategyMode.value = p ? resolveConnectionHealthStrategyMode(p) : 'health_probe'
+  firstAvailable.value = p?.probeMode === 'first_available'
 
   // 已有模型目标全部同一个 provider 时直接复用该 provider 初始化——必须从"唯一值"取，
   // 不能从 modelTargets[0] 取，否则历史数据里第一条 provider 恰好为空、后面几条其实
@@ -143,6 +148,13 @@ const removeModelTarget = (index: number) => {
   modelTargets.value.splice(index, 1)
 }
 
+const moveModelTarget = (index: number, step: number) => {
+  const destination = index + step
+  if (destination < 0 || destination >= modelTargets.value.length) return
+  const moved = modelTargets.value.splice(index, 1)[0]!
+  modelTargets.value.splice(destination, 0, moved)
+}
+
 const handleSave = () => {
   validationError.value = null
   if (!name.value.trim()) {
@@ -189,6 +201,7 @@ const handleSave = () => {
     autoRemoteActionEnabled: isMultiplierOnly.value ? false : autoRemoteActionEnabled.value,
     priorityMode: isMultiplierOnly.value ? 'multiplier' : priorityMode.value,
     strategyMode: strategyMode.value,
+    ...(isSub2API.value ? { probeMode: orderedModels.value ? 'first_available' as const : 'real_model' as const } : {}),
     modelTargets: targets,
   }
   emit('save', input)
@@ -317,11 +330,19 @@ const handleSave = () => {
                 <div class="flex items-center justify-between">
                   <label class="flex items-center gap-1 text-xs font-medium text-muted-foreground">
                     {{ t(`${prefix}.modelTargetsLabel`) }}
-                    <HelpTooltip :text="t(`${prefix}.tooltips.modelTargets`)" />
+                    <HelpTooltip v-if="!orderedModels" data-testid="model-targets-help" :text="t(`${prefix}.tooltips.modelTargets`)" />
                   </label>
                   <button type="button" class="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline" @click="addModelTarget">
                     <Plus class="h-3 w-3" />{{ t(`${prefix}.addModelTarget`) }}
                   </button>
+                </div>
+
+                <div v-if="isSub2API" class="space-y-1.5">
+                  <label class="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <input v-model="firstAvailable" data-testid="first-available-probe" type="checkbox" class="h-3.5 w-3.5 rounded border-border/60" />
+                    {{ t(`${prefix}.firstAvailableLabel`) }}
+                  </label>
+                  <p class="text-xs leading-5 text-muted-foreground">{{ t(`${prefix}.firstAvailableHelp`) }}</p>
                 </div>
 
                 <!-- 策略级 provider：一个策略只能选一个 provider，下方所有模型目标都跟随这个选择。 -->
@@ -347,6 +368,16 @@ const handleSave = () => {
                       :placeholder="t(`${prefix}.modelNamePlaceholder`)"
                       class="h-8 flex-1 rounded-md border border-border/60 bg-background px-2 text-xs text-foreground"
                     />
+                    <Tooltip v-if="orderedModels" :text="t(`${prefix}.moveModelUpHelp`)" wide>
+                      <button type="button" :aria-label="t(`${prefix}.moveModelUp`)" data-testid="probe-model-up" :disabled="index === 0" class="rounded-md p-1.5 text-muted-foreground hover:bg-surface-line hover:text-red-500" @click="moveModelTarget(index, -1)">
+                        <ArrowUp class="h-3.5 w-3.5" />
+                      </button>
+                    </Tooltip>
+                    <Tooltip v-if="orderedModels" :text="t(`${prefix}.moveModelDownHelp`)" wide>
+                      <button type="button" :aria-label="t(`${prefix}.moveModelDown`)" data-testid="probe-model-down" :disabled="index === modelTargets.length - 1" class="rounded-md p-1.5 text-muted-foreground hover:bg-surface-line hover:text-red-500" @click="moveModelTarget(index, 1)">
+                        <ArrowDown class="h-3.5 w-3.5" />
+                      </button>
+                    </Tooltip>
                     <button type="button" class="rounded-md p-1.5 text-muted-foreground hover:bg-surface-line hover:text-red-500" @click="removeModelTarget(index)">
                       <Trash2 class="h-3.5 w-3.5" />
                     </button>

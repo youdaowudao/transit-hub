@@ -213,6 +213,8 @@ type AdminPriorityConflict struct {
 }
 
 type AdminGroupUnprobedModel struct {
+	ModelSelection           string                       `json:"modelSelection,omitempty"`
+	SkippedModels            []string                     `json:"skippedModels,omitempty"`
 	ModelControlClosed       bool                         `json:"modelControlClosed,omitempty"`
 	ModelName                string                       `json:"modelName"`
 	ProviderFamily           string                       `json:"providerFamily"`
@@ -716,7 +718,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				effectivePolicyIDs = append(effectivePolicyIDs, policy.ID)
 			}
 			effectivePolicyIDs, effectivePolicySummaries := assignedPolicySummariesFromIDs(effectivePolicyIDs, policyByID)
-			activeSpecs := candidateModelSpecsForPlatform(splitModelList(decisionAccount.Models), monitoringPolicies, platform)
+			activeSpecs := candidateModelSpecsForPlatform(splitModelList(decisionAccount.Models), monitoringPolicies, platform, probeModelSourceFromAccount(decisionAccount), true)
 			hasProbePolicy := hasEnabledProbePolicy(monitoringPolicies)
 			budgetUsage, budgetReady := s.loadProbeBudgetUsage(ctx, userID, adminAccountID, activeSpecs, decisionAccount.Schedulable, budgetCounts, budgetLoaded, budgetDayStart)
 			if !budgetReady {
@@ -972,6 +974,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 					upstreamMultiplier: multiplierResolution,
 				}
 				candidateInventory.target.Models = splitModelList(decisionAccount.Models)
+				candidateInventory.target.modelSource = probeModelSourceFromAccount(decisionAccount)
 				activeModels := activeHealthPriorityModels(candidateInventory)
 				activeStates := make([]ConnectionHealthState, 0, len(activeModels))
 				for _, state := range stateIndex[targetID] {
@@ -1858,12 +1861,14 @@ func modelHealthForSpecs(byModel map[string]ConnectionHealthState, specs []probe
 			}
 			unprobed = append(unprobed, AdminGroupUnprobedModel{
 				ModelName: spec.modelName, ProviderFamily: spec.providerFamily, NextProbeAt: decision.NextProbeAt,
+				ModelSelection: spec.modelSelection, SkippedModels: spec.skippedModels,
 				BlockedReason: decision.BlockedReason, EffectiveIntervalSeconds: decision.EffectiveIntervalSeconds,
 				EffectivePolicySources: decision.SourcePolicies, BudgetPolicyID: decision.BudgetPolicyID,
 			})
 			continue
 		}
 		model := toModelHealth(spec.modelName, state)
+		model.ModelSelection, model.SkippedModels = spec.modelSelection, spec.skippedModels
 		model.ProviderFamily = spec.providerFamily
 		reuseProbeInterval := probeDecisionCanReuseInterval(&state, probeDecisionKey(target, spec))
 		decisionState := probeDecisionStateForProtocol(&state, target.TestConfiguration.Protocol)

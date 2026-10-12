@@ -177,7 +177,7 @@ func (s *Service) computeModelControlPlan(ctx context.Context, user, workspace, 
 		allowed := true
 		p.Preview.RequestHealth.Checked = true
 		p.Preview.RequestHealth.Allowed = &allowed
-		specs, _, ok := s.currentScheduledProbeSpecs(ctx, user, workspace, refresh.target, refresh.memberships, nil)
+		specs, _, ok := s.currentScheduledProbeSpecs(ctx, user, workspace, refresh.target, refresh.memberships, nil, false)
 		if !ok {
 			p.Preview.BlockReasonKey = modelControlError("ProbeSpecsUnavailable")
 		} else {

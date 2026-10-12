@@ -113,7 +113,7 @@ func TestTierSortFullChainEffectiveOwnershipMatrixControlsActualWrites(t *testin
 				if err := s.configureTestTarget(t.Context(), "user1", "ws1", &target, refresh.memberships, true); err != nil {
 					t.Fatal(err)
 				}
-				specs, _, valid := s.currentScheduledProbeSpecs(t.Context(), "user1", "ws1", target, refresh.memberships, nil)
+				specs, _, valid := s.currentScheduledProbeSpecs(t.Context(), "user1", "ws1", target, refresh.memberships, nil, true)
 				if !valid {
 					t.Fatal("complete effective-policy reads unexpectedly failed")
 				}

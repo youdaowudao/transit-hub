@@ -77,7 +77,7 @@ func (s *Service) ManualProbeTarget(ctx context.Context, userID string, targetID
 	if err := s.configureTestTarget(ctx, userID, adminAccountID, &target, memberships, !accountsReadError); err != nil {
 		return nil, err
 	}
-	effectiveSpecs, _, policyOK := s.currentScheduledProbeSpecs(ctx, userID, adminAccountID, target, memberships, nil)
+	effectiveSpecs, _, policyOK := s.currentScheduledProbeSpecs(ctx, userID, adminAccountID, target, memberships, nil, true)
 	if !policyOK {
 		return nil, requestError(ErrorUnknown)
 	}

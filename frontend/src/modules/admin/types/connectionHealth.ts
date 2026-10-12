@@ -53,6 +53,8 @@ export type ConnectionHealthState =
   | 'disabled'
 
 export interface ModelHealth {
+  modelSelection?: 'fallback' | 'last_unconfirmed'
+  skippedModels?: string[]
   modelControlClosed?: boolean
   ruleVersion?: HealthRuleVersion
   firstTokenMs?: number | null
@@ -193,6 +195,8 @@ export interface TargetPolicyAssignments {
 }
 
 export interface AdminGroupUnprobedModel {
+  modelSelection?: 'fallback' | 'last_unconfirmed'
+  skippedModels?: string[]
   modelControlClosed?: boolean
   modelName: string
   providerFamily: string
@@ -866,6 +870,7 @@ export interface QuestionAnswerSubmissionSummary {
 }
 
 export interface PolicyInput {
+  probeMode?: 'real_model' | 'first_available'
   rulePresetId?: string
   id?: string
   name: string

@@ -15,14 +15,6 @@ import (
 	"transithub/backend/internal/modules/upstream"
 )
 
-// C4.1 keeps question answers on the existing Chat request format.
-func questionAnswerRequestProtocol(protocol TestProtocol) TestProtocol {
-	if protocol == TestProtocolMessages {
-		return TestProtocolChatCompletions
-	}
-	return protocol
-}
-
 const (
 	QuestionAnswerPageSize         = 20
 	QuestionAnswerRequestTimeout   = 10 * time.Minute
@@ -60,17 +52,19 @@ const (
 )
 
 const (
-	QuestionAnswerErrorNetwork          = "network"
-	QuestionAnswerErrorRateLimited      = "rate_limited"
-	QuestionAnswerErrorAuth             = "auth"
-	QuestionAnswerErrorModelNotFound    = "model_not_found"
-	QuestionAnswerErrorServer           = "server_error"
-	QuestionAnswerErrorInvalidResponse  = "invalid_response"
-	QuestionAnswerErrorResponseTooLarge = "response_too_large"
-	QuestionAnswerErrorTimeout          = "timeout"
-	QuestionAnswerErrorStorage          = "storage_error"
-	QuestionAnswerErrorServiceRestarted = "service_restarted"
-	QuestionAnswerErrorServiceShutdown  = "service_shutdown"
+	QuestionAnswerErrorNetwork                = "network"
+	QuestionAnswerErrorRateLimited            = "rate_limited"
+	QuestionAnswerErrorAuth                   = "auth"
+	QuestionAnswerErrorModelNotFound          = "model_not_found"
+	QuestionAnswerErrorServer                 = "server_error"
+	QuestionAnswerErrorInvalidResponse        = "invalid_response"
+	QuestionAnswerErrorResponseTooLarge       = "response_too_large"
+	QuestionAnswerErrorResponseIncomplete     = "response_incomplete"
+	QuestionAnswerErrorAccountTypeUnsupported = "account_type_unsupported"
+	QuestionAnswerErrorTimeout                = "timeout"
+	QuestionAnswerErrorStorage                = "storage_error"
+	QuestionAnswerErrorServiceRestarted       = "service_restarted"
+	QuestionAnswerErrorServiceShutdown        = "service_shutdown"
 )
 
 type QuestionAnswerStatus string

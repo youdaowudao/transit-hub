@@ -120,7 +120,7 @@ type ProbeMode = 'once' | 'formal' | 'questionAnswer'
 const phase = ref<Phase>('loading')
 const mode = ref<ProbeMode>('questionAnswer')
 const contractLimitKey = computed(() => props.target?.testConfiguration?.protocol === 'messages'
-  ? mode.value === 'questionAnswer' ? 'contractLimitMessagesQuestionAnswer' : 'contractLimitMessages'
+  ? 'contractLimitMessages'
   : 'contractLimit')
 const currentProbeMode = (): ProbeMode => mode.value
 const models = ref<ManualProbeModelOption[]>([])
@@ -1838,6 +1838,7 @@ const close = () => {
             <p class="mb-4 text-xs text-muted-foreground">{{ t(`${prefix}.${contractLimitKey}`) }}</p>
             <p v-if="mode !== 'questionAnswer' && target?.testConfiguration?.protocol === 'responses'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.responsesBudget') }}</p>
             <p v-if="mode !== 'questionAnswer' && target?.testConfiguration?.protocol === 'messages'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesBudget') }}</p>
+            <p v-if="mode === 'questionAnswer' && target?.testConfiguration?.protocol === 'messages'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesQuestionAnswerBudget') }}</p>
             <p v-if="mode === 'questionAnswer'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.questionAnswerTimeout') }}</p>
 
             <div v-if="mode === 'questionAnswer' && (qaFinalization || qaFinalizationUnknown)" data-testid="question-answer-finalization" class="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm">

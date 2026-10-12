@@ -19,6 +19,7 @@ import (
 type c5RedTransport struct {
 	t                                                                         *testing.T
 	platform                                                                  string
+	mainPlatform                                                              string
 	previewFailure                                                            bool
 	configurationMismatch                                                     bool
 	secondGroupPlatform                                                       string
@@ -94,12 +95,16 @@ func (f *c5RedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/me":
 		value = map[string]any{"code": 0, "data": map[string]any{"role": "admin"}}
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/groups":
-		secondPlatform := f.platform
+		mainPlatform := f.platform
+		if f.mainPlatform != "" {
+			mainPlatform = f.mainPlatform
+		}
+		secondPlatform := mainPlatform
 		if f.secondGroupPlatform != "" {
 			secondPlatform = f.secondGroupPlatform
 		}
 		value = map[string]any{"code": 0, "data": []map[string]any{
-			{"id": 7, "name": "first-live-group", "platform": f.platform, "status": "active"},
+			{"id": 7, "name": "first-live-group", "platform": mainPlatform, "status": "active"},
 			{"id": 8, "name": "second-live-group", "platform": secondPlatform, "status": "active"},
 		}}
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/keys":
@@ -114,7 +119,11 @@ func (f *c5RedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			f.t.Fatal(err)
 		}
-		if body["platform"] != f.platform || body["type"] != "apikey" || body["base_url"] != "https://c5-source.invalid" || body["api_key"] != "synthetic-c5-key" {
+		mainPlatform := f.platform
+		if f.mainPlatform != "" {
+			mainPlatform = f.mainPlatform
+		}
+		if body["platform"] != mainPlatform || body["type"] != "apikey" || body["base_url"] != "https://c5-source.invalid" || body["api_key"] != "synthetic-c5-key" {
 			f.t.Errorf("preview did not use the captured upstream credential and platform")
 		}
 		if _, exists := body["model_mapping"]; exists {

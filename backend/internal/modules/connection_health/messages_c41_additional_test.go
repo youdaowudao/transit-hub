@@ -197,14 +197,10 @@ func TestMessagesC41StreamEndMalformedAndMetadata(t *testing.T) {
 }
 
 func TestMessagesC41QuestionAnswerGuardAndEphemeralAuth(t *testing.T) {
-	req, err := buildTestRequest(context.Background(), testRequestInput{Protocol: TestProtocolMessages, BaseURL: "https://fixture.invalid", Key: "fixture", AnthropicAuth: "x_api_key", QuestionAnswer: true})
-	if err == nil || req != nil {
-		t.Fatal("question-answer Messages request was constructed")
-	}
 	if _, ok := decodeTestResponse(TestProtocolMessages, []byte(`{"content":[{"type":"text","text":"body"}]}`), true); ok {
 		t.Fatal("Messages decoded as a question answer")
 	}
-	req, err = buildTestRequest(context.Background(), testRequestInput{Protocol: TestProtocolMessages, BaseURL: "https://fixture.invalid", Key: "fixture"})
+	req, err := buildTestRequest(context.Background(), testRequestInput{Protocol: TestProtocolMessages, BaseURL: "https://fixture.invalid", Key: "fixture"})
 	if req != nil || !errors.Is(err, errMessagesAccountTypeUnsupported) || err.Error() != c41UnsupportedAccount {
 		t.Fatalf("unsupported typed error=%v", err)
 	}

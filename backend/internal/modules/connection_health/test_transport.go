@@ -21,20 +21,24 @@ type testRequestInput struct {
 
 var errMessagesAccountTypeUnsupported = errors.New("Messages 探活只支持 API Key 类型的账号，这个账号没有发出请求。请把它所在分组的测试请求改回 Chat Completions，或在主站换成 API Key 类型的账号。")
 
+const messagesQuestionAnswerMaxTokens = 16000
+
 func buildTestRequest(ctx context.Context, input testRequestInput) (*http.Request, error) {
 	if !validTestProtocol(input.Protocol) {
 		return nil, fmt.Errorf("unknown test protocol")
 	}
 	if input.Protocol == TestProtocolMessages {
-		if input.QuestionAnswer {
-			return nil, fmt.Errorf("Messages question answer is not supported")
-		}
 		if input.AnthropicAuth == "" {
 			return nil, errMessagesAccountTypeUnsupported
 		}
 		payload := map[string]any{
 			"model": input.Model, "max_tokens": maxInt(input.MaxTokens, 128),
 			"messages": []map[string]any{{"role": "user", "content": input.Prompt}}, "stream": input.Stream,
+		}
+		if input.QuestionAnswer {
+			payload["max_tokens"] = messagesQuestionAnswerMaxTokens
+			payload["stream"] = false
+			payload["output_config"] = map[string]any{"effort": string(input.ReasoningEffort)}
 		}
 		headers := map[string]string{"anthropic-version": "2023-06-01"}
 		if input.AnthropicAuth == "authorization_bearer" {

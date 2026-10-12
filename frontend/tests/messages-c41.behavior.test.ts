@@ -15,13 +15,13 @@ import { questionAnswerFixtureStats } from './fixtures/c1QuestionAnswerHistory'
 const copy = {
   option: 'Messages（Anthropic 原生接口）',
   platform: 'Messages 是 Anthropic 分组的用户实际调用的接口，只有主站平台为 Anthropic 的分组可以选。',
-  behavior: '选 Messages 后，本组账号的健康探活改发 Messages 请求，收到第一段正文就算成功。保存这项配置本身不会修改主站账号；探活出结果后，仍按现有规则自动停用或恢复账号。问答（智商测试）暂时仍用 Chat Completions。',
+  behavior: '选 Messages 后，本组账号的健康探活改发 Messages 请求，收到第一段正文就算成功。保存这项配置本身不会修改主站账号；探活出结果后，仍按现有规则自动停用或恢复账号。问答（智商测试）也用 Messages 发送。',
   health: '保存后，如果账号已有的健康结果不是用 Messages 测的，账号会显示“当前协议健康依据待验证”，这是正常的。请在保存后查看本组账号的探活结果；这个提示长时间不消失时，看账号“最近一次尝试”的说明。',
   conflict: '同一个账号所在的其他分组如果已经单独配置过测试请求，协议和等待秒数要设成一样，否则这个账号会显示“配置冲突”并停止探活；没有单独配置的分组不会造成冲突。',
   budget: 'Messages 轻量探活至少请求 128 个输出 token；更高策略预算保留。',
   error: 'Messages 只能用于主站平台为 Anthropic 的分组。',
   probe: '注意：测试请求只带 Base URL 和 API Key，按分组测试配置里选的 Messages 协议发送。上游如果还需要专用代理、OAuth、TLS 证书或自定义请求头，系统拿不到，测试也不会带上，所以结果可能和真实使用不同',
-  questionAnswer: '注意：这个账号所在分组的测试请求配置为 Messages，但问答（智商测试）暂时仍用 Chat Completions 发送，只带 Base URL 和 API Key。上游如果还需要专用代理、OAuth、TLS 证书或自定义请求头，系统拿不到，测试也不会带上，所以结果可能和真实使用不同',
+  questionAnswer: 'Messages 问答每题最多输出 16000 个 token，思考也算在内；回答因此被截断时，这道题记为“回答不完整”，不判对错。思考强度按所选档位原样发给上游。',
   legacy: '注意：测试请求只带 Base URL 和 API Key，按分组测试配置里选的协议（Chat Completions 或 Responses）发送。上游如果还需要专用代理、OAuth、TLS 证书或自定义请求头，系统拿不到，测试也不会带上，所以结果可能和真实使用不同',
 }
 const targetId = 'sub2api:c41-component:1'
@@ -192,7 +192,7 @@ describe('C4.1 Messages probe and question-answer dialogue', () => {
   it('uses the correct Messages notice in all three modes and names the once result', async () => {
     const wrapper = await dialog('messages' as TestProtocol)
     expect(wrapper.text()).toContain(copy.questionAnswer)
-    expect(wrapper.text()).not.toContain(copy.probe); expect(wrapper.text()).not.toContain(copy.budget); expect(wrapper.text()).not.toContain(copy.legacy)
+    expect(wrapper.text()).toContain(copy.probe); expect(wrapper.text()).not.toContain(copy.budget); expect(wrapper.text()).not.toContain(copy.legacy)
     expect(wrapper.text()).toContain('使用分组配置 · Messages / 20s')
     for (const label of ['正式手动探活', '一次性测试']) {
       await click(wrapper, label)
@@ -218,7 +218,7 @@ describe('C4.1 Messages probe and question-answer dialogue', () => {
     expect(testProtocolName('chat_completions')).toBe('Chat Completions'); expect(testProtocolName('responses')).toBe('Responses')
     expect(testProtocolName('bogus')).toBe('')
     expect(t('admin.connectionHealth.errors.testProtocolNotAllowed')).toBe(copy.error)
-    for (const key of ['messagesOption', 'messagesPlatform', 'messagesHelp', 'messagesHealthEvidence', 'messagesConflict', 'messagesBudget']) expect(t('admin.connectionHealth.testConfiguration.' + key)).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
-    for (const key of ['contractLimitMessages', 'contractLimitMessagesQuestionAnswer']) expect(t('admin.connectionHealth.manualProbeDialog.' + key)).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
+    for (const key of ['messagesOption', 'messagesPlatform', 'messagesHelp', 'messagesHealthEvidence', 'messagesConflict', 'messagesBudget', 'messagesQuestionAnswerBudget']) expect(t('admin.connectionHealth.testConfiguration.' + key)).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
+    for (const key of ['contractLimitMessages']) expect(t('admin.connectionHealth.manualProbeDialog.' + key)).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
   })
 })

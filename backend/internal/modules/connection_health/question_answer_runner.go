@@ -38,8 +38,11 @@ func (r *QuestionAnswerRunner) AskDetailed(ctx context.Context, cred upstream.Pr
 	if len(protocols) > 0 {
 		protocol = protocols[0]
 	}
-	request, err := buildTestRequest(ctx, testRequestInput{Protocol: protocol, BaseURL: cred.BaseURL, Key: cred.Key, Model: model, Prompt: question, ReasoningEffort: reasoningEffort, QuestionAnswer: true})
+	request, err := buildTestRequest(ctx, testRequestInput{Protocol: protocol, BaseURL: cred.BaseURL, Key: cred.Key, Model: model, Prompt: question, ReasoningEffort: reasoningEffort, QuestionAnswer: true, AnthropicAuth: cred.AnthropicAuth})
 	if err != nil {
+		if errors.Is(err, errMessagesAccountTypeUnsupported) {
+			return QuestionAnswerAskResult{ErrorType: QuestionAnswerErrorAccountTypeUnsupported}
+		}
 		return QuestionAnswerAskResult{ErrorType: QuestionAnswerErrorInvalidResponse}
 	}
 	response, err := r.client.Do(request)
@@ -78,13 +81,56 @@ func (r *QuestionAnswerRunner) AskDetailed(ctx context.Context, cred upstream.Pr
 		if outcome.Result == ResultModelNotFound {
 			return failure(QuestionAnswerErrorModelNotFound)
 		}
+		if outcome.Result == ResultRateLimited {
+			return failure(QuestionAnswerErrorRateLimited)
+		}
 		return failure(questionAnswerHTTPError(response.StatusCode))
+	}
+	if protocol == TestProtocolMessages {
+		answer, errorType := extractMessagesQuestionAnswer(body)
+		if errorType != "" {
+			return failure(errorType)
+		}
+		return QuestionAnswerAskResult{Answer: answer}
 	}
 	answer, ok := decodeTestResponse(protocol, body, true)
 	if !ok {
 		return failure(QuestionAnswerErrorInvalidResponse)
 	}
 	return QuestionAnswerAskResult{Answer: answer}
+}
+
+func extractMessagesQuestionAnswer(body []byte) (string, string) {
+	var response struct {
+		Type       string `json:"type"`
+		StopReason string `json:"stop_reason"`
+		Content    []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(body, &response) != nil || response.Type != "message" {
+		return "", QuestionAnswerErrorInvalidResponse
+	}
+	if response.StopReason == "max_tokens" {
+		return "", QuestionAnswerErrorResponseIncomplete
+	}
+	if response.StopReason != "end_turn" && response.StopReason != "stop_sequence" {
+		return "", QuestionAnswerErrorInvalidResponse
+	}
+	texts := []string{}
+	for _, part := range response.Content {
+		if part.Type == "text" {
+			if text := strings.TrimSpace(part.Text); text != "" {
+				texts = append(texts, text)
+			}
+		}
+	}
+	answer := strings.Join(texts, "\n")
+	if answer == "" {
+		return "", QuestionAnswerErrorInvalidResponse
+	}
+	return answer, ""
 }
 
 func questionAnswerUpstreamExcerpt(body []byte, key string) string {

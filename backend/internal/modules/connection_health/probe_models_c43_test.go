@@ -793,3 +793,58 @@ func TestProbeModelC43QuickPolicySessionFailureHTTP(t *testing.T) {
 		})
 	}
 }
+
+// C5.2 business expectations, authored by the primary agent before implementation.
+func TestProbeModelC43CNSelection(t *testing.T) {
+	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax"} {
+		t.Run(platform, func(t *testing.T) {
+			for _, tc := range []struct {
+				name        string
+				mapping     map[string]string
+				known       bool
+				accountType string
+				want, kind  string
+				skipped     []string
+			}{
+				{"first", map[string]string{"A": "A"}, true, "apikey", "A", "", nil},
+				{"absent first", map[string]string{"B": "B"}, true, "apikey", "B", "fallback", []string{"A"}},
+				{"renamed first", map[string]string{"A": "other", "B": "B"}, true, "apikey", "B", "fallback", []string{"A"}},
+				{"absent all", map[string]string{"other": "other"}, true, "apikey", "C", "last_unconfirmed", nil},
+				{"renamed all", map[string]string{"A": "other", "B": "other", "C": "other"}, true, "apikey", "C", "last_unconfirmed", nil},
+				{"empty", nil, true, "apikey", "C", "last_unconfirmed", nil},
+				{"unknown", map[string]string{"A": "A"}, false, "apikey", "C", "last_unconfirmed", nil},
+				{"unsupported type", map[string]string{"A": "A"}, true, "oauth", "C", "last_unconfirmed", nil},
+				{"wildcard identity", map[string]string{"A*": "A"}, true, "apikey", "A", "", nil},
+				{"wildcard renamed", map[string]string{"A*": "other", "B": "B"}, true, "apikey", "B", "fallback", []string{"A"}},
+				{"exact wins", map[string]string{"A*": "other", "A": "A"}, true, "apikey", "A", "", nil},
+				{"exact rename wins", map[string]string{"A*": "A", "A": "other", "B": "B"}, true, "apikey", "B", "fallback", []string{"A"}},
+				{"longest wins", map[string]string{"*": "other", "A*": "A"}, true, "apikey", "A", "", nil},
+				{"longest rename wins", map[string]string{"*": "A", "A*": "other", "B": "B"}, true, "apikey", "B", "fallback", []string{"A"}},
+				{"no new wildcard", map[string]string{"A?": "A", "B": "B"}, true, "apikey", "B", "fallback", []string{"A"}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					source := probeModelSource{accountType: tc.accountType, platform: platform, modelMappingKnown: tc.known, modelMapping: tc.mapping, openAIPassthrough: true}
+					got := selectProbeModel(c43OrderedPolicy("p", "A", "B", "C"), source)
+					if got.modelName != tc.want || got.kind != tc.kind || !reflect.DeepEqual(got.skippedModels, tc.skipped) {
+						t.Fatalf("selection=%+v want=%s/%s/%v", got, tc.want, tc.kind, tc.skipped)
+					}
+					single := selectProbeModel(c43OrderedPolicy("p", "A"), source)
+					if single.modelName != "A" || single.kind != "" || len(single.skippedModels) != 0 {
+						t.Fatal(single)
+					}
+					p := c43OrderedPolicy("p", "disabled", " ")
+					p.ModelTargets[0].Enabled = false
+					if empty := selectProbeModel(p, source); empty.modelName != "" || empty.kind != "" {
+						t.Fatal(empty)
+					}
+				})
+			}
+			// Actual candidate output, rather than a boolean helper assertion.
+			source := probeModelSource{accountType: "apikey", platform: platform, modelMappingKnown: true, modelMapping: map[string]string{"A": "A"}}
+			specs := candidateModelSpecs(nil, []Policy{c43OrderedPolicy("p", "A", "B")}, "sub2api", source, true)
+			if len(specs) != 1 || specs[0].modelName != "A" || specs[0].modelSelection != "" {
+				t.Fatal(specs)
+			}
+		})
+	}
+}

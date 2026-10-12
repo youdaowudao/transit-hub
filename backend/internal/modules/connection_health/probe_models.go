@@ -24,6 +24,25 @@ func probeModelSourceFromAccount(a upstream.AdminGroupAccountInfo) probeModelSou
 	return probeModelSource{a.Type, a.Platform, a.OpenAIPassthrough, a.ModelMapping, a.ModelMappingKnown}
 }
 func probeModelConfirmed(source probeModelSource, model string) bool {
+	switch source.platform {
+	case "kimi", "zhipu", "deepseek", "minimax":
+		if source.accountType != "apikey" || !source.modelMappingKnown || len(source.modelMapping) == 0 {
+			return false
+		}
+		_, matched := source.modelMapping[model]
+		if !matched {
+			for key := range source.modelMapping {
+				if strings.HasSuffix(key, "*") && strings.HasPrefix(model, strings.TrimSuffix(key, "*")) {
+					matched = true
+					break
+				}
+			}
+		}
+		if !matched {
+			return false
+		}
+		return modelControlMappedModel(source.modelMapping, model) == model
+	}
 	account := upstream.AdminGroupAccountInfo{Type: source.accountType, Platform: source.platform, OpenAIPassthrough: source.openAIPassthrough, ModelMapping: source.modelMapping, ModelMappingKnown: source.modelMappingKnown}
 	supported, known := modelControlSupports(account, model)
 	if !supported || !known {

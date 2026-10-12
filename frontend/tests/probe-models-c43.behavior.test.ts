@@ -8,11 +8,11 @@ import type { ConnectionHealthPolicy, PolicyInput, ModelHealth, AdminGroupUnprob
 import { c32Groups, c32Model } from './fixtures/c32ModelControl'
 
 const label = '按顺序只测一个模型'
-const help = '开启后，每个账号只测列表里启用的模型中的一个：从上往下，第一个主站确认这个账号有、并且没有被改名的；一个都确认不了时测最后一个启用的。OpenAI、Anthropic 的 API Key 账号，白名单为空时，或者是开了透传的 OpenAI 账号时，主站认为它什么模型都有，所以测第一个。不开启时，列表里启用的模型每个账号都测。个别账号如果主站单独给出了模型列表，开不开启都仍按原来的规则，只测两份列表里都有的模型。保存策略后生效。保存这一步不会改主站，之后的探活仍按现有规则处理账号。'
+const help = '开启后，每条策略对每个账号只测列表里启用的一个模型：按顺序选白名单里允许使用、且没有改名的第一个；一个都确认不了时测最后一个。Kimi、智谱、DeepSeek、MiniMax 的 API Key 账号也按这个规则选择；它们的白名单为空或读不到时，测最后一个。OpenAI、Anthropic 的 API Key 账号白名单为空时，以及开启透传的 OpenAI 账号，仍测第一个。不开启时，列表里启用的模型都按原规则探活；主站另有账号模型列表时，仍只测两份列表都有的模型。这项探活不要求答题。保存后生效，保存本身不会改主站；后续探活仍按策略决定是否停用或恢复账号。想优先测哪个模型，就把它排在前面。'
 const upHelp = '把这个模型往上排一位，排在上面的优先测。只改这里的顺序，保存策略后生效；点它不会改主站。'
 const downHelp = '把这个模型往下排一位，排在上面的优先测。只改这里的顺序，保存策略后生效；点它不会改主站。'
 const fallbackHelp = '这个账号的主站白名单里没有排在前面的 A、B，或者被改了名，所以改测这个模型。想让它测更新的模型，请到主站确认排在前面的模型已经加进这个账号的白名单，并且没有被改名。'
-const lastHelp = '没法从主站白名单确认这个账号有策略列表里的哪个模型，所以按列表里最后一个启用的模型测。可能是白名单里一个都没有或都被改了名、白名单读取失败，或账号不是 OpenAI、Anthropic 的 API Key 账号。请到主站检查这个账号的模型白名单。'
+const lastHelp = '没能从这个账号的白名单确认它可以使用列表里的任何模型，所以本次测最后一个启用的模型。可能是模型不在白名单里、被改了名、白名单读不到，或账号类型暂不支持；国产账号的白名单为空时也这样处理。请到主站检查账号允许的模型和名称，再调整这里的探活列表。这个提示本身不会改主站，后续探活仍按已保存的策略处理账号。'
 const wrappers: VueWrapper[] = []
 const track = <T extends VueWrapper>(w:T):T => { wrappers.push(w); return w }
 afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); document.body.innerHTML = '' })
@@ -86,12 +86,12 @@ describe('C4.3 ordered probe policy drawer',()=>{
   expect(await save(w)).toMatchObject({probeMode:'real_model',modelTargets:[]})
  })
 })
-const detail=async(kind:ModelHealth['modelSelection'], unprobed:boolean,workspacePlatform='sub2api',accountPlatform='openai')=>{
+const detail=async(kind:ModelHealth['modelSelection'], unprobed:boolean,workspacePlatform='sub2api',accountPlatform='openai',modelName='C',skippedModels=['A','B'])=>{
  const g=c32Groups()[0]!,a=g.accounts[0]!
  g.platform=accountPlatform;a.platform=accountPlatform
- const hint={modelSelection:kind,skippedModels:kind==='fallback'?['A','B']:undefined}
- a.modelHealth=unprobed?[]:[c32Model('C',hint)]
- a.unprobedModels=unprobed?[{modelName:'C',providerFamily:accountPlatform,...hint} as AdminGroupUnprobedModel]:[]
+ const hint={modelSelection:kind,skippedModels:kind==='fallback'?skippedModels:undefined}
+ a.modelHealth=unprobed?[]:[c32Model(modelName,{providerFamily:accountPlatform,...hint})]
+ a.unprobedModels=unprobed?[{modelName,providerFamily:accountPlatform,...hint} as AdminGroupUnprobedModel]:[]
  const w=track(mount(AdminGroupHealthDetail,{props:{group:g,workspacePlatform,hideUnmonitoredAccounts:false,questionAnswerUnreadTargetIds:[],actionLoading:false}}))
  await w.get('tbody tr').findAll('button')[0]!.trigger('click');await flushPromises();return w
 }
@@ -124,5 +124,38 @@ describe('C4.3 selected model explanation on existing health cards',()=>{
   for(const sentence of [label,help,upHelp,downHelp,'顺延',fallbackHelp,'按最后一个测',lastHelp]) {
    expect(sentence).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
   }
+ })
+})
+
+const cnCards=['kimi','zhipu','deepseek','minimax'].flatMap(platform=>[false,true].map(unprobed=>({platform,unprobed})))
+const selectedCard=(w:VueWrapper,modelName:string,unprobed:boolean)=>{
+ const cards=w.findAll('td[colspan="10"] > .grid > div')
+ expect(cards).toHaveLength(1)
+ expect(cards[0]!.get('span.truncate').text()).toBe(modelName)
+ expect(cards[0]!.get('div.flex.items-center > span.rounded-md').text()).toBe(unprobed?'尚未探活':'健康')
+}
+describe('C5.2 Chinese platform selected model cards',()=>{
+ it.each(cnCards)('shows first A without either selection hint for $platform; unprobed=$unprobed',async({platform,unprobed})=>{
+  const w=await detail(undefined,unprobed,'sub2api',platform,'A')
+  selectedCard(w,'A',unprobed)
+  expect(w.find('[data-testid="probe-model-fallback"]').exists()).toBe(false)
+  expect(w.find('[data-testid="probe-model-last-unconfirmed"]').exists()).toBe(false)
+  expect(w.findAllComponents(Tooltip).some(tip=>tip.props('text')===lastHelp)).toBe(false)
+ })
+ it.each(cnCards)('shows selected B with fallback and skipped A only for $platform; unprobed=$unprobed',async({platform,unprobed})=>{
+  const w=await detail('fallback',unprobed,'sub2api',platform,'B',['A'])
+  selectedCard(w,'B',unprobed)
+  expect(w.get('[data-testid="probe-model-fallback"]').text()).toBe('顺延')
+  expect(w.find('[data-testid="probe-model-last-unconfirmed"]').exists()).toBe(false)
+  expect(w.findAllComponents(Tooltip).some(tip=>tip.props('text')===lastHelp)).toBe(false)
+  await hoverText(w,fallbackHelp.replace('A、B','A'))
+ })
+ it.each(cnCards)('shows final C with the approved last-unconfirmed explanation only for $platform; unprobed=$unprobed',async({platform,unprobed})=>{
+  const w=await detail('last_unconfirmed',unprobed,'sub2api',platform,'C')
+  selectedCard(w,'C',unprobed)
+  expect(w.get('[data-testid="probe-model-last-unconfirmed"]').text()).toBe('按最后一个测')
+  expect(w.find('[data-testid="probe-model-fallback"]').exists()).toBe(false)
+  expect(w.findAllComponents(Tooltip).some(tip=>String(tip.props('text')).startsWith('这个账号的主站白名单里没有排在前面的'))).toBe(false)
+  await hoverText(w,lastHelp)
  })
 })

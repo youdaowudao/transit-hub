@@ -41,7 +41,7 @@ func validateManualPriorityOwner(decision ManualPriorityOwnerDecision, policies 
 	if len(activeHealthPriorityModels(item)) != 0 {
 		return nil
 	}
-	if len(candidateModelSpecs(decision.Target.Models, policies)) == 0 {
+	if len(candidateModelSpecs(decision.Target.Models, policies, decision.Target.Platform, decision.Target.modelSource, true)) == 0 {
 		return requestError(ErrorPriorityNoMatchingModels)
 	}
 	return requestError(ErrorPriorityAutoDegradeDisabled)

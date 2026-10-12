@@ -1589,6 +1589,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           <p class="mt-3 text-sm text-muted-foreground">{{ t('admin.connectionHealth.adminEmpty') }}</p>
         </div>
         <AdminGroupHealthDetail
+          :workspace-platform="currentAccount?.platform"
           v-else
           :key="selectedGroup.id"
           :group="selectedGroup"
@@ -1670,6 +1671,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
     />
 
     <PolicyConfigDrawer
+      :workspace-platform="currentAccount?.platform"
       :open="policyDrawerOpen"
       :policy="editingPolicy"
       :own-group-options="ownGroupOptions"

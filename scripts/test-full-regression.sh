@@ -38,7 +38,7 @@ run_step "question answer fixture safety tests" \
       "$ROOT_DIR/scripts/question-answer-keyword-highlight-fixture.test.mjs"
 
 run_step "core regression membership tests" \
-  node --test "$ROOT_DIR/scripts/test-core-regression-membership.test.mjs"
+  node --test "$ROOT_DIR/scripts/test-core-regression-membership.test.mjs" "$ROOT_DIR/scripts/test-c43-core-membership.test.mjs"
 
 run_step "backend full Go test suite" \
   bash -c "cd '$ROOT_DIR/backend' && go test ./... -count=1"

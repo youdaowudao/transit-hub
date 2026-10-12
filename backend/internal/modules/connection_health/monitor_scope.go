@@ -107,7 +107,7 @@ func buildAdminMonitoringScope(
 				inheritedPolicies = nil
 			}
 			effectivePolicies := effectivePoliciesForTarget(directPolicies, inheritedPolicies)
-			if len(candidateModelSpecsForPlatform(splitModelList(account.Models), effectivePolicies, platform)) == 0 {
+			if len(candidateModelSpecsForPlatform(splitModelList(account.Models), effectivePolicies, platform, probeModelSourceFromAccount(account), true)) == 0 {
 				continue
 			}
 			if monitoredByGroup[groupInventory.group.ID] == nil {

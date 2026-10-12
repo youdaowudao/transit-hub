@@ -1141,11 +1141,11 @@ func TestRestoreUnmanagedTargetActions_IgnoresInheritedRemoteActionWhenTargetPol
 	}
 	targetAssignment := PolicyAssignment{UserID: "user1", AdminAccountID: "ws1", TargetID: targetID, PolicyID: direct.ID}
 	groupAssignment := GroupPolicyAssignment{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: group.ID}
-	if !hasRemoteActionModel(candidateModelSpecs([]string{"direct-model", "group-model"}, []Policy{direct, group})) {
+	if !hasRemoteActionModel(candidateModelSpecs([]string{"direct-model", "group-model"}, []Policy{direct, group}, "", probeModelSource{}, true)) {
 		t.Fatal("test setup must include a remote-action group model")
 	}
 	current := mergePoliciesByID([]Policy{direct}, []Policy{group})
-	if !hasRemoteActionModel(candidateModelSpecs([]string{"direct-model", "group-model"}, current)) {
+	if !hasRemoteActionModel(candidateModelSpecs([]string{"direct-model", "group-model"}, current, "", probeModelSource{}, true)) {
 		t.Fatal("merged target and group policies must retain the remote-action model")
 	}
 

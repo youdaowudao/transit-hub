@@ -394,7 +394,7 @@ func (s *Service) priorityInventoryForSnapshot(
 					target: AdminProbeTarget{
 						TargetID: targetID, Platform: platform, AdminGroupID: group.ID, AdminGroupName: group.Name,
 						AccountID: account.ID, AccountName: account.Name, AccountStatus: account.Status, AccountWeight: cloneIntPointer(account.Weight),
-						ProviderFamily: account.Platform, Models: splitModelList(account.Models),
+						ProviderFamily: account.Platform, Models: splitModelList(account.Models), modelSource: probeModelSourceFromAccount(account),
 					},
 					account: account,
 				}
@@ -1132,7 +1132,7 @@ func uniqueFloat(values []float64) (float64, bool) {
 
 func activeHealthPriorityModels(item *priorityTargetInventory) map[string]struct{} {
 	models := make(map[string]struct{})
-	for _, spec := range candidateModelSpecs(item.target.Models, item.policies) {
+	for _, spec := range candidateModelSpecs(item.target.Models, item.policies, item.target.Platform, item.target.modelSource, true) {
 		if _, closed := item.modelControlClosed[spec.modelName]; closed {
 			continue
 		}

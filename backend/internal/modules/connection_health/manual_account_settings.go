@@ -91,6 +91,7 @@ func (s *Service) SetTargetPriorityOwner(ctx context.Context, user, targetID str
 		return TargetAccountEditResult{}, requestError(ErrorPriorityInventoryIncomplete)
 	}
 	target.InventoryComplete, target.Models = true, splitModelList(account.Models)
+	target.modelSource = probeModelSourceFromAccount(account)
 	pair, err := s.reconcileActionObservation(ctx, targetObservation(user, workspace, target, inventory))
 	if err != nil {
 		return TargetAccountEditResult{}, err

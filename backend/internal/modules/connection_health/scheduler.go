@@ -317,7 +317,7 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 		return
 	}
 	j.monitoringScope = monitoringScope
-	currentSpecs, queuedSpecs, policyOK := s.currentScheduledProbeSpecs(ctx, j.userID, j.adminAccountID, j.target, refresh.memberships, j.dueSpecs)
+	currentSpecs, queuedSpecs, policyOK := s.currentScheduledProbeSpecs(ctx, j.userID, j.adminAccountID, j.target, refresh.memberships, j.dueSpecs, true)
 	if !policyOK {
 		log.Printf("[connection-health] refresh scheduled policy decision failed target_id=%s", j.target.TargetID)
 		return
@@ -384,7 +384,7 @@ func (s *Service) recheckAdminProbeSpecs(ctx context.Context, userID string, adm
 	return jobs[0].dueSpecs
 }
 
-func (s *Service) currentScheduledProbeSpecs(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, memberships []adminTargetMembership, queued []probeModelSpec) ([]probeModelSpec, []probeModelSpec, bool) {
+func (s *Service) currentScheduledProbeSpecs(ctx context.Context, userID string, adminAccountID string, target AdminProbeTarget, memberships []adminTargetMembership, queued []probeModelSpec, narrow bool) ([]probeModelSpec, []probeModelSpec, bool) {
 	policies, err := s.repo.ListPolicies(ctx, userID, adminAccountID)
 	if err != nil {
 		return nil, nil, false
@@ -454,7 +454,7 @@ func (s *Service) currentScheduledProbeSpecs(ctx context.Context, userID string,
 		}
 	}
 
-	allSpecs := candidateModelSpecsForPlatform(target.Models, effectivePolicies, target.Platform)
+	allSpecs := candidateModelSpecsForPlatform(target.Models, effectivePolicies, target.Platform, target.modelSource, narrow)
 	for index := range allSpecs {
 		allSpecs[index].policySources = policySources
 		if source, exists := policySources[allSpecs[index].policy.ID]; exists {
@@ -616,7 +616,7 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 					Schedulable:    cloneBoolPointer(acc.Schedulable),
 					AccountWeight:  cloneIntPointer(acc.Weight),
 					ProviderFamily: acc.Platform,
-					Models:         splitModelList(acc.Models),
+					Models:         splitModelList(acc.Models), modelSource: probeModelSourceFromAccount(acc),
 				}
 				inheritedPolicies := assignedGroups[group.ID]
 				if excludedByWorkspace[key][group.ID][target.TargetID] {
@@ -662,7 +662,7 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 			if !candidate.target.TestConfiguration.usable() {
 				continue
 			}
-			specs := candidateModelSpecsForPlatform(candidate.target.Models, candidate.policies, candidate.target.Platform)
+			specs := candidateModelSpecsForPlatform(candidate.target.Models, candidate.policies, candidate.target.Platform, candidate.target.modelSource, true)
 			for index := range specs {
 				specs[index].policySources = candidate.policySources
 				if source, exists := candidate.policySources[specs[index].policy.ID]; exists {

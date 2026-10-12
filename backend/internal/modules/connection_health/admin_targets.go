@@ -43,6 +43,7 @@ const (
 // AdminProbeTarget 是平台中性的独立探活目标：一个 admin 分组下的账号(sub2api)/渠道(new-api)。
 // 不再要求存在 real_connections。TargetID 稳定且可复算，是新状态/事件的核心键。
 type AdminProbeTarget struct {
+	modelSource             probeModelSource
 	ConfigGeneration        int64                      `json:"-"`
 	ConfigGenerationKnown   bool                       `json:"-"`
 	TestConfiguration       EffectiveTestConfiguration `json:"testConfiguration"`
@@ -72,6 +73,8 @@ type AdminProbeTarget struct {
 
 // probeModelSpec 是一个「目标 + 具体探活模型」的组合，携带该模型来自哪条策略的探活参数。
 type probeModelSpec struct {
+	modelSelection string
+	skippedModels  []string
 	recheckPending bool
 	modelName      string
 	providerFamily string
@@ -146,19 +149,24 @@ func parseTargetID(targetID string) (parsedTargetID, bool) {
 //
 // 说明：独立探活维度下，admin 目标不再按 own group 精确匹配策略（own group 是「我的分组」，
 // 与 admin 分组是不同概念），因此这里用 workspace 级策略池，保留现有策略 modelTargets 的配置语义。
-func candidateModelSpecs(targetModels []string, policies []Policy) []probeModelSpec {
+func candidateModelSpecs(targetModels []string, policies []Policy, platform string, source probeModelSource, narrow bool) []probeModelSpec {
 	pool := make([]probeModelSpec, 0)
 	seen := make(map[string]int)
 	for _, p := range policies {
 		if !p.Enabled || !policySupportsProbing(p) {
 			continue
 		}
+		selection := probeModelSelection{}
+		ordered := narrow && platform == string(upstream.PlatformSub2API) && len(targetModels) == 0 && p.ProbeMode == ProbeModeFirstAvailable
+		if ordered {
+			selection = selectProbeModel(p, source)
+		}
 		for _, t := range p.ModelTargets {
 			if !t.Enabled {
 				continue
 			}
 			name := strings.TrimSpace(t.ModelName)
-			if name == "" {
+			if name == "" || (ordered && name != selection.modelName) {
 				continue
 			}
 			if index, dup := seen[name]; dup {
@@ -169,6 +177,7 @@ func candidateModelSpecs(targetModels []string, policies []Policy) []probeModelS
 					pool[index] = probeModelSpec{
 						modelName: name, providerFamily: t.ProviderFamily, maxProbeTokens: t.MaxProbeTokens,
 						probePrompt: t.ProbePrompt, policy: p, policies: sourcePolicies,
+						modelSelection: selection.kind, skippedModels: selection.skippedModels,
 					}
 				} else {
 					pool[index].policies = sourcePolicies
@@ -183,6 +192,7 @@ func candidateModelSpecs(targetModels []string, policies []Policy) []probeModelS
 				probePrompt:    t.ProbePrompt,
 				policy:         p,
 				policies:       []Policy{p},
+				modelSelection: selection.kind, skippedModels: selection.skippedModels,
 			})
 		}
 	}
@@ -203,8 +213,8 @@ func candidateModelSpecs(targetModels []string, policies []Policy) []probeModelS
 	return filtered
 }
 
-func candidateModelSpecsForPlatform(targetModels []string, policies []Policy, platform string) []probeModelSpec {
-	specs := candidateModelSpecs(targetModels, policies)
+func candidateModelSpecsForPlatform(targetModels []string, policies []Policy, platform string, source probeModelSource, narrow bool) []probeModelSpec {
+	specs := candidateModelSpecs(targetModels, policies, platform, source, narrow)
 	if platform == string(upstream.PlatformSub2API) {
 		return specs
 	}
@@ -424,7 +434,7 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 	if err := s.configureTestTarget(ctx, userID, adminAccountID, &target, memberships, !accountsReadError); err != nil {
 		return nil, err
 	}
-	allSpecs, _, policyOK := s.currentScheduledProbeSpecs(ctx, userID, adminAccountID, target, memberships, nil)
+	allSpecs, _, policyOK := s.currentScheduledProbeSpecs(ctx, userID, adminAccountID, target, memberships, nil, true)
 	if !policyOK {
 		return nil, requestError(ErrorUnknown)
 	}
@@ -503,6 +513,7 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 	}
 	for _, result := range probeResults {
 		modelHealth := toModelHealth(result.spec.modelName, *result.state)
+		modelHealth.ModelSelection, modelHealth.SkippedModels = result.spec.modelSelection, result.spec.skippedModels
 		modelHealth.RequestFirstTokenMs = result.outcome.FirstTokenMs
 		modelHealth.RequestFirstEventMs = result.outcome.FirstEventMs
 		if target.Platform == string(upstream.PlatformSub2API) {
@@ -605,7 +616,7 @@ func adminProbeTargetFromAccount(session upstream.Session, adminAccountID string
 		OverloadKnown:           account.OverloadKnown,
 		AccountWeight:           cloneIntPointer(account.Weight),
 		ProviderFamily:          account.Platform,
-		Models:                  splitModelList(account.Models),
+		Models:                  splitModelList(account.Models), modelSource: probeModelSourceFromAccount(account),
 	}
 }
 
@@ -646,7 +657,7 @@ func (s *Service) refreshAdminTarget(ctx context.Context, session upstream.Sessi
 					Schedulable:    cloneBoolPointer(acc.Schedulable),
 					AccountWeight:  cloneIntPointer(acc.Weight),
 					ProviderFamily: acc.Platform,
-					Models:         splitModelList(acc.Models),
+					Models:         splitModelList(acc.Models), modelSource: probeModelSourceFromAccount(acc),
 				}
 				refresh.account = acc
 				refresh.found = true

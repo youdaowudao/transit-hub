@@ -61,7 +61,7 @@ func c32Reconcile(t *testing.T, f *c32REDFixture, id string) (targetRemoteAction
 	if err != nil {
 		t.Fatal(err)
 	}
-	return f.service.reconcileTargetRemoteActionWithFloor(t.Context(), c32REDUser, c32REDWorkspace, f.session, target, candidateModelSpecs(target.Models, policies), f.service.sub2APIFloorGuardFor(c32REDUser, c32REDWorkspace), inventory, scope)
+	return f.service.reconcileTargetRemoteActionWithFloor(t.Context(), c32REDUser, c32REDWorkspace, f.session, target, candidateModelSpecs(target.Models, policies, "", probeModelSource{}, true), f.service.sub2APIFloorGuardFor(c32REDUser, c32REDWorkspace), inventory, scope)
 }
 func TestModelControlAutoFullyClosedFilteringAndFailures(t *testing.T) {
 	f := c32AutoFixture(t, true)

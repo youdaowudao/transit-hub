@@ -397,7 +397,7 @@ func TestRecheckAdminProbeSpecs_ReservesBudgetWithinBatch(t *testing.T) {
 		ID: "slow", Enabled: true, ProbeIntervalSeconds: 60, DailyProbeBudget: 10,
 		ModelTargets: []ModelTarget{{ModelName: "model-a", Enabled: true}, {ModelName: "model-b", Enabled: true}},
 	}
-	specs := candidateModelSpecs([]string{"model-a", "model-b"}, []Policy{fast, slow})
+	specs := candidateModelSpecs([]string{"model-a", "model-b"}, []Policy{fast, slow}, "", probeModelSource{}, true)
 	due := service.recheckAdminProbeSpecs(context.Background(), "user1", "ws1", AdminProbeTarget{
 		TargetID: "newapi:ws1:100", Schedulable: boolPointer(true),
 	}, specs, now)
@@ -423,7 +423,7 @@ func TestCurrentScheduledProbeSpecsDropsStalePolicyAndUsesCurrentAssignments(t *
 		TargetID: "sub2api:ws1:1515", Models: []string{"gpt-4o"},
 	}, []adminTargetMembership{{groupID: "g2", groupName: "second"}}, []probeModelSpec{{
 		modelName: "gpt-4o", policy: queued, policies: []Policy{queued},
-	}})
+	}}, true)
 	if !ok || len(all) != 1 || len(queuedNow) != 1 {
 		t.Fatalf("current specs not rebuilt: ok=%v all=%+v queued=%+v", ok, all, queuedNow)
 	}
@@ -453,7 +453,7 @@ func TestCurrentScheduledProbeSpecs_EnabledTargetPolicyOverridesGroupPolicies(t 
 	all, _, ok := service.currentScheduledProbeSpecs(
 		context.Background(), "user1", "ws1",
 		AdminProbeTarget{TargetID: "newapi:ws1:1515"},
-		[]adminTargetMembership{{groupID: "g1", groupName: "vip"}}, nil,
+		[]adminTargetMembership{{groupID: "g1", groupName: "vip"}}, nil, true,
 	)
 	if !ok {
 		t.Fatal("currentScheduledProbeSpecs returned unavailable")
@@ -482,7 +482,7 @@ func TestCurrentScheduledProbeSpecs_DisabledTargetPolicyFallsBackToGroupPolicies
 	all, _, ok := service.currentScheduledProbeSpecs(
 		context.Background(), "user1", "ws1",
 		AdminProbeTarget{TargetID: "newapi:ws1:1515"},
-		[]adminTargetMembership{{groupID: "g1", groupName: "vip"}}, nil,
+		[]adminTargetMembership{{groupID: "g1", groupName: "vip"}}, nil, true,
 	)
 	if !ok {
 		t.Fatal("currentScheduledProbeSpecs returned unavailable")
@@ -508,7 +508,7 @@ func TestCurrentScheduledProbeSpecs_NoTargetPolicyKeepsMultipleGroupPolicyUnion(
 	all, _, ok := service.currentScheduledProbeSpecs(
 		context.Background(), "user1", "ws1",
 		AdminProbeTarget{TargetID: "newapi:ws1:1515"},
-		[]adminTargetMembership{{groupID: "g1", groupName: "first"}, {groupID: "g2", groupName: "second"}}, nil,
+		[]adminTargetMembership{{groupID: "g1", groupName: "first"}, {groupID: "g2", groupName: "second"}}, nil, true,
 	)
 	if !ok {
 		t.Fatal("currentScheduledProbeSpecs returned unavailable")

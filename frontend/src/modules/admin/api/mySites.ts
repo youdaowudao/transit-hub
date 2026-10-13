@@ -147,6 +147,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
 
 const importMessageKeys = new Set([
   'admin.mySites.errors.request', 'admin.mySites.errors.connectionExists',
+  'admin.mySites.errors.importInProgress', 'admin.mySites.errors.importSourceGroupUnavailable', 'admin.mySites.errors.importGroupsLoadFailed',
   'admin.mySites.errors.importSettingsInvalid', 'admin.mySites.errors.importGroupTypeMismatch',
   'admin.mySites.errors.importSettingsUnsupported', 'admin.mySites.errors.importUpstreamKeyFailed',
   'admin.mySites.errors.importModelSyncFailed', 'admin.mySites.errors.importAccountCreateFailed',

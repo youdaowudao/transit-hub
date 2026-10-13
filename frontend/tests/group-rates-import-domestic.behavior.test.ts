@@ -5,7 +5,6 @@ import { reactive } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import GroupRatesView from '@/modules/admin/views/GroupRatesView.vue'
 import { realConnect } from '@/modules/admin/api/mySites'
-import { importPlatformsCompatible } from '@/modules/admin/utils/importPlatforms'
 import type { RealConnectRequest } from '@/modules/admin/types/mySites'
 
 const harness = vi.hoisted(() => ({
@@ -23,7 +22,7 @@ const harness = vi.hoisted(() => ({
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: {} }), useRouter: () => ({ push: vi.fn(), replace: vi.fn(async () => undefined) }) }))
 vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
   const { ref } = await import('vue')
-  harness.currentAccount = ref({ id: 'workspace-c5', displayName: 'C5 隔离工作区' })
+  harness.currentAccount = ref({ id: 'workspace-c5', displayName: 'C5 隔离工作区', platform: 'sub2api' })
   return { useAdminAccounts: () => ({ currentAccount: harness.currentAccount }) }
 })
 vi.mock('@/modules/auth/api/auth', () => ({ getAccessToken: () => null, handleAuthExpired: vi.fn(), isUnauthorizedApiResponse: (status: number) => status === 401, authUnauthorizedErrorKey: 'auth.errors.unauthorized' }))
@@ -83,7 +82,7 @@ const submit = async (wrapper: VueWrapper) => { await dialog(wrapper).get('form'
 const submitButton = (wrapper: VueWrapper) => dialog(wrapper).get('button[type="submit"]')
 
 beforeEach(() => {
-  harness.currentAccount.value = { id: 'workspace-c5', displayName: 'C5 隔离工作区' }
+  harness.currentAccount.value = { id: 'workspace-c5', displayName: 'C5 隔离工作区', platform: 'sub2api' }
   harness.platform = 'sub2api'
   harness.rate = null
   harness.availableGroups = [...groups]
@@ -110,175 +109,95 @@ beforeEach(() => {
 })
 afterEach(() => { for (const wrapper of wrappers.splice(0)) wrapper.unmount(); vi.unstubAllGlobals(); document.body.innerHTML = '' })
 
-const familyHint = '这个上游分组走 OpenAI 兼容接口，可以导进 OpenAI、Kimi、智谱 GLM、DeepSeek、MiniMax 平台的主站分组。一次只能选同一个平台的分组，账号会创建成所选分组的平台。导入会在上游创建一个 Key、在主站创建一个账号。'
-const selectionHint = '选的是要在主站创建成哪个平台的账号，下面只列出这个平台的主站分组。'
-const modelHint = '导入时由主站同步上游可用模型，并写入模型白名单。'
-const labels: Record<string, string> = { openai: 'OpenAI', kimi: 'Kimi', zhipu: '智谱 GLM', deepseek: 'DeepSeek', minimax: 'MiniMax' }
+const selectionHint = '默认按上游分类选择，你可以手动修改。这里只确定要创建的主站账号平台；点击导入后才会在上游创建 Key、在主站创建账号。'
+const labels: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', antigravity: 'Antigravity', kimi: 'Kimi', zhipu: '智谱 GLM', deepseek: 'DeepSeek', minimax: 'MiniMax' }
+const names: Record<string, string> = { openai: '表单分组甲', anthropic: 'Anthropic 分组', gemini: 'Gemini 分组', antigravity: 'Antigravity 分组', kimi: 'Kimi 分组甲', zhipu: '智谱分组', deepseek: 'DeepSeek 分组', minimax: 'MiniMax 分组' }
 const groupInput = (wrapper: VueWrapper, name: string) => dialog(wrapper).findAll('label').find(label => label.text().includes(name))!.get('input[type="checkbox"]')
-const typeSelect = (wrapper: VueWrapper) => dialog(wrapper).findAll('select').find(select => select.find('option[value="openai"]').exists())!
+const typeSelect = (wrapper: VueWrapper) => dialog(wrapper).get('[data-import-platform-select]')
 const passthrough = (wrapper: VueWrapper) => dialog(wrapper).find('[role="switch"][aria-label="透传"]')
-const familyGroups = (wrapper: VueWrapper) => dialog(wrapper).findAll('label').filter(label => /分组|表单分组/.test(label.text()) && label.find('input[type="checkbox"]').exists())
-const assertUnavailable = (wrapper: VueWrapper) => {
-  expect(passthrough(wrapper).exists()).toBe(false)
-  expect(dialog(wrapper).text()).toContain('此平台不支持透传设置。')
-  expect(dialog(wrapper).text()).toContain(modelHint)
-}
-const assertNoDeveloperWords = (wrapper: VueWrapper) => {
-  expect(dialog(wrapper).text()).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
-}
+const assertNoDeveloperWords = (wrapper: VueWrapper) => expect(dialog(wrapper).text()).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
 
-describe('C5.1 domestic group import component through real API contract', () => {
-  it('uses the same compatibility decisions for every supported pair, case and empty input', () => {
-    const platforms = ['openai', 'kimi', 'zhipu', 'deepseek', 'minimax', 'anthropic', 'gemini', 'antigravity']
-    platforms.forEach((source, i) => platforms.forEach((target, j) => {
-      expect(importPlatformsCompatible(source, target)).toBe(source === target || i < 5 && j < 5)
-    }))
-    expect(importPlatformsCompatible(' OPENAI ', ' KiMi ')).toBe(true)
-    expect(importPlatformsCompatible('Gemini', ' KIMI ')).toBe(false)
-    expect(importPlatformsCompatible('', 'kimi')).toBe(false)
-    expect(importPlatformsCompatible('kimi', '')).toBe(false)
-    expect(importPlatformsCompatible('grok', 'openai')).toBe(false)
-  })
-
-  it.each(['openai', 'kimi', 'zhipu', 'deepseek', 'minimax'])('lists all five compatible platforms for %s, locks other platforms and restores on deselection', async source => {
-    const wrapper = await openView(source)
-    expect(familyGroups(wrapper)).toHaveLength(7)
-    expect(dialog(wrapper).text()).not.toContain('Anthropic 分组')
-    expect(dialog(wrapper).text()).not.toContain('Gemini 分组')
-    expect(dialog(wrapper).text()).not.toContain('Antigravity 分组')
-    expect(dialog(wrapper).get('[data-import-platforms]').text()).toContain(`上游分组类型：${labels[source]}`)
-    expect(dialog(wrapper).get('[data-import-platforms]').text()).toContain('将创建的主站账号平台：选了主站分组后确定')
-    expect(dialog(wrapper).get('[data-import-compatible-platforms]').text()).toBe(familyHint)
-    expect(dialog(wrapper).find('[data-import-platform-lock]').exists()).toBe(false)
-    expect(dialog(wrapper).find('[data-import-platform-hint]').exists()).toBe(false)
-    expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
-    await submit(wrapper)
-    expect(harness.requests).toHaveLength(0)
-    await chooseGroup(wrapper, 'Kimi 分组甲')
-    expect(dialog(wrapper).get('[data-import-platforms]').text()).toContain('将创建的主站账号平台：Kimi')
-    expect(dialog(wrapper).get('[data-import-platform-lock]').text()).toBe('已选 Kimi 平台的分组，其他平台的分组暂时不能选；取消已选的分组后可以改选。')
-    expect(groupInput(wrapper, 'Kimi 分组乙').element).toHaveProperty('disabled', false)
-    for (const name of ['表单分组甲', '智谱分组', 'DeepSeek 分组', 'MiniMax 分组']) {
-      const input = groupInput(wrapper, name)
-      expect(input.element).toHaveProperty('disabled', true)
-      await input.trigger('change')
-      expect(input.element).toHaveProperty('checked', false)
-    }
-    await chooseGroup(wrapper, 'Kimi 分组乙')
-    await groupInput(wrapper, 'Kimi 分组甲').setValue(false)
-    expect(groupInput(wrapper, '表单分组甲').element).toHaveProperty('disabled', true)
-    await groupInput(wrapper, 'Kimi 分组乙').setValue(false)
-    expect(groupInput(wrapper, '表单分组甲').element).toHaveProperty('disabled', false)
-    expect(dialog(wrapper).find('[data-import-platform-lock]').exists()).toBe(false)
-    expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
-    assertNoDeveloperWords(wrapper)
-  })
-
-  it.each([
-    ['kimi', 'Kimi 分组甲'], ['zhipu', '智谱分组'], ['deepseek', 'DeepSeek 分组'], ['minimax', 'MiniMax 分组'],
-  ])('imports an OpenAI source into %s and directly closes after main-site confirmation', async (target, name) => {
-    const wrapper = await openView()
-    expect(passthrough(wrapper).attributes('aria-checked')).toBe('false')
-    await chooseGroup(wrapper, name)
-    assertUnavailable(wrapper)
-    expect(dialog(wrapper).get('[data-import-platforms]').text()).toContain(`将创建的主站账号平台：${labels[target]}`)
-    assertNoDeveloperWords(wrapper)
-    await submit(wrapper)
-    expect(harness.requests).toHaveLength(1)
-    expect(harness.requests[0]).toMatchObject({ groupType: target, accountSettings: { passthrough: false, priorityMode: 'automatic', priority: 100, concurrency: 50, poolMode: true, upstreamBillingProbeEnabled: true } })
-    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('导入已完成')
-    expect(wrapper.text()).not.toContain('真实对接创建失败')
-  })
-
-  it.each(['anthropic', 'gemini', 'antigravity'])('preserves the %s same-platform group list and hides family text', async source => {
-    const wrapper = await openView(source)
-    const expected = source === 'anthropic' ? 'Anthropic 分组' : source === 'gemini' ? 'Gemini 分组' : 'Antigravity 分组'
-    expect(familyGroups(wrapper)).toHaveLength(1)
-    expect(familyGroups(wrapper)[0].text()).toContain(expected)
-    expect(dialog(wrapper).get('[data-import-platforms]').text()).toContain(`上游分组类型：${source}`)
+describe('explicit platform selection through the import API contract', () => {
+  it.each(Object.keys(labels))('defaults to classified %s and always permits all eight choices', async source => {
+    const wrapper = await openView(source), select = typeSelect(wrapper)
+    expect(select.element).toHaveProperty('value', source)
+    expect(select.findAll('option').filter(o => o.attributes('value')).map(o => o.attributes('value'))).toEqual(['openai','anthropic','gemini','antigravity','kimi','zhipu','deepseek','minimax'])
+    expect(dialog(wrapper).get('[data-import-platform-hint]').text()).toBe(selectionHint)
+    expect(dialog(wrapper).get('[data-import-platforms]').text()).toContain(`上游标注：${labels[source]}`)
+    expect(dialog(wrapper).get('[data-import-platforms]').text()).toContain(`将创建的主站账号平台：${labels[source]}`)
     expect(dialog(wrapper).find('[data-import-compatible-platforms]').exists()).toBe(false)
     expect(dialog(wrapper).find('[data-import-platform-lock]').exists()).toBe(false)
-    await chooseGroup(wrapper, expected)
-    expect(dialog(wrapper).get('[data-import-platforms]').text()).toContain(`将创建的主站账号平台：${source}`)
-    if (source === 'anthropic') expect(passthrough(wrapper).attributes('aria-checked')).toBe('false')
-    else assertUnavailable(wrapper)
-    await submit(wrapper)
+    expect(submitButton(wrapper).element).toHaveProperty('disabled',true)
+    await chooseGroup(wrapper,names[source]); await submit(wrapper)
     expect(harness.requests[0].groupType).toBe(source)
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
-
-  it('shows eight platform options for an untyped source, filters by the chosen platform and retains settings/removal text', async () => {
-    const wrapper = await openView('')
-    const select = typeSelect(wrapper)
-    expect(select.findAll('option').filter(option => option.attributes('value') !== '').map(option => option.attributes('value'))).toEqual(['openai', 'anthropic', 'gemini', 'antigravity', 'kimi', 'zhipu', 'deepseek', 'minimax'])
-    for (const [value, label] of Object.entries(labels)) expect(select.get(`option[value="${value}"]`).text()).toBe(label)
-    expect(dialog(wrapper).get('[data-import-platform-hint]').text()).toBe(selectionHint)
-    expect(dialog(wrapper).find('[data-import-platforms]').exists()).toBe(false)
-    expect(dialog(wrapper).find('[data-import-compatible-platforms]').exists()).toBe(false)
-    expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
+  it.each(Object.keys(labels))('imports a differently classified source as explicitly selected %s', async target => {
+    const wrapper = await openView(target === 'openai' ? 'grok' : 'openai')
+    await typeSelect(wrapper).setValue(target)
+    for (const [platform,name] of Object.entries(names)) expect(dialog(wrapper).text().includes(name)).toBe(platform === target)
+    await chooseGroup(wrapper,names[target]); assertNoDeveloperWords(wrapper); await submit(wrapper)
+    expect(harness.requests[0]).toMatchObject({ groupType:target, accountSettings:{passthrough:false,priority:100,concurrency:50,poolMode:true,upstreamBillingProbeEnabled:true} })
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('真实对接创建失败')
+  })
+  it.each(['','grok','unknown'])('requires a manual selection for unknown/unsupported source %s', async source => {
+    const wrapper = await openView(source)
+    expect(typeSelect(wrapper).element).toHaveProperty('value','')
+    expect(dialog(wrapper).text()).toContain('请先选择主站账号平台。')
     await submit(wrapper); expect(harness.requests).toHaveLength(0)
-    await select.setValue('openai'); await chooseGroup(wrapper)
-    await select.setValue('deepseek')
-    expect(familyGroups(wrapper)).toHaveLength(1)
-    expect(familyGroups(wrapper)[0].text()).toContain('DeepSeek 分组')
-    expect(dialog(wrapper).text()).toContain('平台类型已变化，已移除不再匹配的主站分组选择。')
-    expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
-    assertUnavailable(wrapper)
-    expect(dialog(wrapper).find('[data-import-platform-lock]').exists()).toBe(false)
-    await chooseGroup(wrapper, 'DeepSeek 分组')
-    assertNoDeveloperWords(wrapper)
-    await submit(wrapper)
-    expect(harness.requests[0]).toMatchObject({ groupType: 'deepseek', ownGroupIds: ['16'], accountSettings: { passthrough: false } })
-    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    await typeSelect(wrapper).setValue('minimax'); await chooseGroup(wrapper,names.minimax); await submit(wrapper)
+    expect(harness.requests[0].groupType).toBe('minimax')
   })
-
-  it.each(['target-selection', 'untyped-dropdown', 'upstream-type-change'])('keeps passthrough off after becoming unavailable through %s and submits off', async route => {
-    const wrapper = await openView(route === 'untyped-dropdown' ? '' : 'openai')
-    if (route === 'untyped-dropdown') await typeSelect(wrapper).setValue('openai')
-    expect(passthrough(wrapper).attributes('aria-checked')).toBe('false')
-    await passthrough(wrapper).trigger('click')
+  it('clears mismatched targets, retains settings and platform on deselection, and resets on reopening', async () => {
+    const wrapper = await openView('openai')
+    await chooseGroup(wrapper,names.openai)
+    await dialog(wrapper).get('#import-concurrency').setValue('123')
+    await typeSelect(wrapper).setValue('kimi')
+    expect(dialog(wrapper).text()).toContain('平台已修改，不符合新平台的已选分组已移除，请重新选择。')
+    expect(submitButton(wrapper).element).toHaveProperty('disabled',true)
+    expect(dialog(wrapper).get('#import-concurrency').element).toHaveProperty('value','123')
+    await chooseGroup(wrapper,names.kimi); await chooseGroup(wrapper,'Kimi 分组乙')
+    await groupInput(wrapper,names.kimi).setValue(false); await groupInput(wrapper,'Kimi 分组乙').setValue(false)
+    expect(typeSelect(wrapper).element).toHaveProperty('value','kimi')
+    await dialog(wrapper).findAll('button').find(b=>b.text().trim()==='取消')!.trigger('click')
+    await wrapper.findAll('button').find(b=>b.text().trim()==='配置对接')!.trigger('click'); await flushPromises()
+    expect(typeSelect(wrapper).element).toHaveProperty('value','openai')
+    expect(dialog(wrapper).get('#import-concurrency').element).toHaveProperty('value','50')
+  })
+  it.each(['typed','untyped'])('never restores passthrough after platform becomes unsupported (%s)', async kind => {
+    const wrapper = await openView(kind === 'typed' ? 'openai' : '')
+    await typeSelect(wrapper).setValue('openai'); await passthrough(wrapper).trigger('click')
     expect(passthrough(wrapper).attributes('aria-checked')).toBe('true')
-    expect(dialog(wrapper).text()).not.toContain(modelHint)
-    if (route === 'target-selection') await chooseGroup(wrapper, 'Kimi 分组甲')
-    else if (route === 'untyped-dropdown') await typeSelect(wrapper).setValue('gemini')
-    else { harness.rate.type = 'gemini'; await flushPromises() }
-    assertUnavailable(wrapper)
-    if (route === 'target-selection') await groupInput(wrapper, 'Kimi 分组甲').setValue(false)
-    else if (route === 'untyped-dropdown') await typeSelect(wrapper).setValue('openai')
-    else { harness.rate.type = 'openai'; await flushPromises() }
-    expect(passthrough(wrapper).attributes('aria-checked')).toBe('false')
-    expect(dialog(wrapper).text()).toContain(modelHint)
-    await chooseGroup(wrapper)
-    await submit(wrapper)
-    expect(harness.requests[0]).toMatchObject({ groupType: 'openai', accountSettings: { passthrough: false } })
-    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    await typeSelect(wrapper).setValue('gemini'); expect(passthrough(wrapper).exists()).toBe(false)
+    await typeSelect(wrapper).setValue('openai'); expect(passthrough(wrapper).attributes('aria-checked')).toBe('false')
+    await chooseGroup(wrapper); await submit(wrapper)
+    expect(harness.requests[0].accountSettings?.passthrough).toBe(false)
   })
-
-  it('only shows platform-lock text when another compatible platform is actually present', async () => {
-    harness.availableGroups = groups.filter(group => group.platform === 'kimi')
-    const wrapper = await openView('kimi')
-    await chooseGroup(wrapper, 'Kimi 分组甲')
-    expect(dialog(wrapper).get('[data-import-compatible-platforms]').text()).toBe(familyHint)
-    expect(dialog(wrapper).find('[data-import-platform-lock]').exists()).toBe(false)
-    await submit(wrapper)
-    expect(harness.requests[0].groupType).toBe('kimi')
-    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  it('does not overwrite explicit platform or groups when the source classification refreshes', async () => {
+    const wrapper = await openView('openai'); await typeSelect(wrapper).setValue('kimi'); await chooseGroup(wrapper,names.kimi)
+    harness.rate.type = 'gemini'; await flushPromises()
+    expect(typeSelect(wrapper).element).toHaveProperty('value','kimi')
+    expect(groupInput(wrapper,names.kimi).element).toHaveProperty('checked',true)
+    await submit(wrapper); expect(harness.requests[0].groupType).toBe('kimi')
   })
-
-  it('keeps NewAPI main-site channel selection outside expanded domestic import behavior', async () => {
-    harness.platform = 'newapi'
-    harness.importResponse = async () => json({ connection: {} })
-    const wrapper = await openView('kimi')
-    expect(dialog(wrapper).find('[data-import-platforms]').exists()).toBe(false)
-    expect(dialog(wrapper).find('[data-import-compatible-platforms]').exists()).toBe(false)
-    expect(dialog(wrapper).find('[data-import-platform-hint]').exists()).toBe(false)
-    expect(dialog(wrapper).find('[data-import-platform-lock]').exists()).toBe(false)
-    expect(familyGroups(wrapper)).toHaveLength(groups.length)
-    await chooseGroup(wrapper, 'Kimi 分组甲')
-    const channel = dialog(wrapper).findAll('select').find(select => select.text().includes('请选择渠道类型'))!
-    await channel.setValue('1'); await submit(wrapper)
-    expect(harness.requests[0]).not.toHaveProperty('accountSettings')
-    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  it('describes how to reload missing targets and discovers them after full page remount', async () => {
+    harness.availableGroups = groups.filter(g=>g.platform!=='gemini')
+    const first = await openView('gemini')
+    expect(dialog(first).text()).toContain('主站暂无这个平台的分组，请先在主站创建分组，再刷新本页面并重新打开导入。')
+    expect(submitButton(first).element).toHaveProperty('disabled',true)
+    first.unmount(); wrappers.splice(wrappers.indexOf(first),1)
+    harness.availableGroups=[...groups]
+    const second=await openView('gemini'); await chooseGroup(second,names.gemini); await submit(second)
+    expect(harness.requests[0].groupType).toBe('gemini')
+  })
+  it('preserves NewAPI main channel selection without accountSettings', async () => {
+    harness.platform='newapi'; harness.currentAccount.value={id:'workspace-c5',platform:'newapi'}
+    harness.importResponse=async()=>json({connection:{}})
+    const wrapper=await openView('kimi')
+    expect(dialog(wrapper).find('[data-import-platform-select]').exists()).toBe(false)
+    await chooseGroup(wrapper,names.kimi)
+    await dialog(wrapper).findAll('select').find(s=>s.text().includes('请选择渠道类型'))!.setValue('1'); await submit(wrapper)
+    expect(harness.requests[0]).not.toHaveProperty('accountSettings'); expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
 })

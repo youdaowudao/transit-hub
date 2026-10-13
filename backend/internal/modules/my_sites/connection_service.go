@@ -497,6 +497,15 @@ func (s *Service) realBindExisting(ctx context.Context, userID string, req RealB
 	if err != nil {
 		return RealConnectResponse{}, err
 	}
+	if connectionCtx.state.Session.Platform == upstream.PlatformSub2API {
+		req.UpstreamSiteID = strings.TrimSpace(req.UpstreamSiteID)
+		req.UpstreamGroupID = strings.TrimSpace(req.UpstreamGroupID)
+		release, err := s.tryBeginConnectionCreation(userID, connectionCtx.adminAccountID, req.UpstreamSiteID, req.UpstreamGroupID, operationID)
+		if err != nil {
+			return RealConnectResponse{}, err
+		}
+		defer release()
+	}
 	if existing, err := s.idempotentConnection(ctx, userID, connectionCtx.adminAccountID, operationID); err != nil {
 		return RealConnectResponse{}, err
 	} else if existing != nil {

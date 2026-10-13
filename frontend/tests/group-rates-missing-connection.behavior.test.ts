@@ -26,7 +26,7 @@ vi.mock('vue-router', () => ({
 
 vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
   const { ref } = await import('vue')
-  return { useAdminAccounts: () => ({ currentAccount: ref({ id: 'workspace-c5' }) }) }
+  return { useAdminAccounts: () => ({ currentAccount: ref({ id: 'workspace-c5', platform: 'sub2api' }) }) }
 })
 
 vi.mock('@/modules/admin/api/dashboardAdmin', () => ({

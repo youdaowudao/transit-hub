@@ -4,7 +4,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { AlertCircle, ArrowUpDown, Check, ChevronDown, History, KeyRound, Link2, Loader2, Megaphone, RefreshCw, Search, ServerCog, Sparkles, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { checkRealConnections, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, listRealConnections, realDisconnect } from '../api/mySites'
-import { getDashboardAdminStatus } from '../api/dashboardAdmin'
 import { listUpstreamSites } from '../api/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
@@ -13,7 +12,7 @@ import type { AdminResourceOption, ConnectionCapabilities, ImportAccountSettings
 import type { ImportApiError } from '../api/mySites'
 import type { UpstreamSiteResponse } from '../types/upstream'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
-import { importPlatformsCompatible, isOpenAIImportPlatform } from '../utils/importPlatforms'
+import { isImportAccountPlatform } from '../utils/importPlatforms'
 
 import { t, te, locale } from '@/locales'
 const router = useRouter()
@@ -116,7 +115,8 @@ const handleDialogKeydown = (event: KeyboardEvent) => {
 }
 const selectedGroupType = ref('')
 const selectedChannelType = ref(0)
-const adminPlatform = ref('')
+const adminPlatform = computed(() => (currentAccount.value?.platform || '').trim().toLowerCase())
+const isAdminReady = computed(() => Boolean(currentAccount.value?.id && ['sub2api', 'newapi'].includes(adminPlatform.value)))
 const upstreamKeys = ref<UpstreamKeyItem[]>([])
 const selectedKeyId = ref('')
 const isLoadingKeys = ref(false)
@@ -143,12 +143,8 @@ let pageIsMounted = true
 const connectSubmitLocked = ref(false)
 const isC5Import = computed(() => connectMode.value === 'real' && adminPlatform.value === 'sub2api')
 const connectUpstreamPlatform = computed(() => (connectingRate.value?.type || '').trim().toLowerCase())
-const connectAccountPlatform = computed(() => {
-  if (!connectUpstreamPlatform.value) return selectedGroupType.value.trim().toLowerCase()
-  const selected = ownGroups.value.find(group => group.id === connectOwnGroups.value[0])
-  return selected?.platform.trim().toLowerCase() ?? ''
-})
-const supportsConnectPassthrough = computed(() => ['openai', 'anthropic'].includes(connectAccountPlatform.value || connectUpstreamPlatform.value))
+const connectAccountPlatform = computed(() => selectedGroupType.value.trim().toLowerCase())
+const supportsConnectPassthrough = computed(() => ['openai', 'anthropic'].includes(connectAccountPlatform.value))
 const connectFormLocked = computed(() => isActionLoading.value || ['submitting', 'succeeded', 'pending'].includes(connectOutcome.value))
 const validIntegerInput = (value: string | number, minimum: number, maximum: number): boolean => (
   String(value).trim() !== '' && Number.isInteger(Number(value)) && Number(value) >= minimum && Number(value) <= maximum
@@ -180,7 +176,7 @@ const connectModelSummary = computed(() => {
   if (!config) return ''
   return t(`admin.groupRates.connect.importResult.models.${config.modelState}`, { count: config.models.length })
 })
-watch([connectUpstreamPlatform, selectedGroupType], () => {
+watch(selectedGroupType, () => {
   if (!isC5Import.value) return
   const kept = connectOwnGroups.value.filter(id => filteredOwnGroups.value.some(group => group.id === id))
   if (kept.length !== connectOwnGroups.value.length) connectGroupSelectionNotice.value = t('admin.groupRates.connect.importSettings.groupsRemoved')
@@ -189,7 +185,7 @@ watch([connectUpstreamPlatform, selectedGroupType], () => {
 watch(supportsConnectPassthrough, (supported) => {
   if (!supported) connectPassthrough.value = false
 })
-watch(() => currentAccount.value?.id, () => {
+watch([() => currentAccount.value?.id, adminPlatform], () => {
   connectorGeneration++
   connectSubmitLocked.value = false
   isActionLoading.value = false
@@ -197,6 +193,13 @@ watch(() => currentAccount.value?.id, () => {
   connectOwnGroups.value = []
   ownGroups.value = []
   mySiteMappings.value = []
+  upstreamKeys.value = []
+  adminResources.value = []
+  selectedKeyId.value = ''
+  selectedAdminGroupId.value = ''
+  selectedAdminResourceId.value = ''
+  isLoadingKeys.value = false
+  isLoadingAdminResources.value = false
   realConnectionsData.value = []
   hasLoadedMappingOptions.value = false
   connectOutcome.value = 'editing'
@@ -274,10 +277,7 @@ const filteredOwnGroups = computed(() => {
   // new-api admin 不按渠道类型筛选，直接显示全部自有分组
   if (isAdminNewAPI.value) return ownGroups.value
   if (isC5Import.value) {
-    if (connectUpstreamPlatform.value) {
-      return ownGroups.value.filter(group => importPlatformsCompatible(connectUpstreamPlatform.value, group.platform))
-    }
-    return ownGroups.value.filter(group => selectedGroupType.value && group.platform.trim().toLowerCase() === selectedGroupType.value)
+    return ownGroups.value.filter(group => isImportAccountPlatform(connectAccountPlatform.value) && group.platform.trim().toLowerCase() === connectAccountPlatform.value)
   }
   const upstreamType = (connectingRate.value?.type || selectedGroupType.value).toLowerCase()
   return upstreamType ? ownGroups.value.filter(group => group.platform.toLowerCase() === upstreamType) : ownGroups.value
@@ -285,8 +285,6 @@ const filteredOwnGroups = computed(() => {
 const canSelectOwnGroup = (group: MySiteMappingOwnGroupOption): boolean => (
   !isC5Import.value || !connectAccountPlatform.value || group.platform.trim().toLowerCase() === connectAccountPlatform.value
 )
-const hasOtherCompatiblePlatforms = computed(() => isC5Import.value && connectOwnGroups.value.length > 0 &&
-  filteredOwnGroups.value.some(group => !canSelectOwnGroup(group)))
 
 const realConnectionsForRate = (rate: GroupRate): RealConnection[] =>
   realConnectionsData.value.filter(c => (
@@ -340,14 +338,6 @@ const checkThenLoadRates = async () => {
   }
 }
 
-const loadAdminPlatform = async () => {
-  try {
-    const status = await getDashboardAdminStatus()
-    adminPlatform.value = status.platform ?? ''
-  } catch {
-    adminPlatform.value = ''
-  }
-}
 
 const filteredRates = computed(() => {
   if (serverSupportsStatusFilters.value) return rates.value
@@ -418,7 +408,7 @@ watch(isAnyDialogOpen, async (open) => {
 onMounted(async () => {
   document.addEventListener('keydown', handleDialogKeydown)
   await checkThenLoadRates()
-  await Promise.all([loadAdminPlatform(), loadUpstreamSiteOptions()])
+  await loadUpstreamSiteOptions()
   await consumeRouteFocus()
 })
 
@@ -431,7 +421,7 @@ onBeforeUnmount(() => {
 })
 
 const isAdminNewAPI = computed(() => adminPlatform.value === 'newapi')
-const needsGroupTypeSelection = computed(() => (
+const needsGroupTypeSelection = computed(() => isC5Import.value || (
   connectMode.value === 'real' &&
   (connectionCapabilities.value?.requiresGroupType ?? (!connectingRate.value?.type && !isAdminNewAPI.value))
 ) && !connectingRate.value?.type)
@@ -453,12 +443,12 @@ const filteredChannelTypes = computed(() => {
 })
 
 const canSubmitConnect = computed(() => {
-  if (!connectingRate.value || connectSubmitLocked.value || connectFormLocked.value) return false
+  if (!isAdminReady.value || !connectingRate.value || connectSubmitLocked.value || connectFormLocked.value) return false
   if (connectMode.value === 'bind') {
     return Boolean(selectedKeyId.value && selectedAdminGroupId.value && selectedAdminResourceId.value)
   }
   if (connectOwnGroups.value.length === 0) return false
-  if (isC5Import.value && (!currentAccount.value?.id || !connectAccountPlatform.value || connectPriorityError.value || connectConcurrencyError.value ||
+  if (isC5Import.value && (!currentAccount.value?.id || !isImportAccountPlatform(connectAccountPlatform.value) || connectPriorityError.value || connectConcurrencyError.value ||
     connectOwnGroups.value.some(id => !filteredOwnGroups.value.some(group => group.id === id && canSelectOwnGroup(group))))) return false
   // sub2api admin：分组类型未知时必须手动选择
   if (needsGroupTypeSelection.value && !selectedGroupType.value) return false
@@ -514,7 +504,7 @@ const typeLabel = (type: string | null): string => {
 
 const importPlatformLabel = (platform: string): string => {
   const labelKeys: Record<string, string> = {
-    openai: 'groupTypeOpenai', kimi: 'groupTypeKimi', zhipu: 'groupTypeZhipu',
+    openai: 'groupTypeOpenai', anthropic: 'groupTypeAnthropic', gemini: 'groupTypeGemini', antigravity: 'groupTypeAntigravity', kimi: 'groupTypeKimi', zhipu: 'groupTypeZhipu',
     deepseek: 'groupTypeDeepseek', minimax: 'groupTypeMinimax',
   }
   const key = labelKeys[platform]
@@ -597,7 +587,7 @@ const openConnector = async (rate: GroupRate) => {
   connectingRate.value = rate
   connectOwnGroups.value = []
   connectMode.value = 'real'
-  selectedGroupType.value = ''
+  selectedGroupType.value = isC5Import.value && isImportAccountPlatform(connectUpstreamPlatform.value) ? connectUpstreamPlatform.value : ''
   selectedChannelType.value = 0
   addToPricingMapping.value = true
   connectOperationId.value = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -647,10 +637,13 @@ const closeConnector = () => {
 
 const setConnectMode = async (mode: 'real' | 'bind') => {
   if (connectFormLocked.value || mode === connectMode.value) return
+  connectorGeneration++
+  isLoadingKeys.value = false
+  isLoadingAdminResources.value = false
   resetImportSettings()
   connectMode.value = mode
   connectOwnGroups.value = []
-  selectedGroupType.value = ''
+  selectedGroupType.value = isC5Import.value && isImportAccountPlatform(connectUpstreamPlatform.value) ? connectUpstreamPlatform.value : ''
   selectedChannelType.value = 0
   selectedKeyId.value = ''
   selectedAdminGroupId.value = ''
@@ -663,18 +656,25 @@ const setConnectMode = async (mode: 'real' | 'bind') => {
 }
 
 const loadAdminResourcesForGroup = async (groupId: string) => {
+  if (connectFormLocked.value) return
   selectedAdminGroupId.value = groupId
   selectedAdminResourceId.value = ''
   adminResources.value = []
   if (!groupId) return
+  const generation = connectorGeneration
+  const workspace = currentAccount.value?.id
+  const isCurrent = () => pageIsMounted && generation === connectorGeneration && workspace === currentAccount.value?.id && selectedAdminGroupId.value === groupId
   isLoadingAdminResources.value = true
   try {
-    adminResources.value = await listAdminResources(groupId)
+    const resources = await listAdminResources(groupId)
+    if (isCurrent()) adminResources.value = resources
   } catch {
-    adminResources.value = []
-    realConnectError.value = t('admin.groupRates.connect.adminResourcesFailed')
+    if (isCurrent()) {
+      adminResources.value = []
+      realConnectError.value = t('admin.groupRates.connect.adminResourcesFailed')
+    }
   } finally {
-    isLoadingAdminResources.value = false
+    if (isCurrent()) isLoadingAdminResources.value = false
   }
 }
 
@@ -785,8 +785,9 @@ const submitRealConnect = async () => {
   const useImportContract = isC5Import.value
   const generation = connectorGeneration
   const workspace = currentAccount.value?.id ?? ''
+  const platform = adminPlatform.value
   const target = connectingRate.value
-  const isCurrent = () => pageIsMounted && generation === connectorGeneration && workspace === (currentAccount.value?.id ?? '') && connectingRate.value === target
+  const isCurrent = () => pageIsMounted && generation === connectorGeneration && workspace === (currentAccount.value?.id ?? '') && platform === adminPlatform.value && connectingRate.value === target
   if (connectOutcome.value === 'failed') connectOperationId.value = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
   connectSubmitLocked.value = true
   connectOutcome.value = 'submitting'
@@ -818,7 +819,7 @@ const submitRealConnect = async () => {
       isActionLoading.value = false
       connectOutcome.value = 'editing'
       closeConnector()
-      await refreshAfterMutation(() => pageIsMounted && workspace === (currentAccount.value?.id ?? ''), true)
+      await refreshAfterMutation(() => pageIsMounted && workspace === (currentAccount.value?.id ?? '') && platform === adminPlatform.value, true)
     } else if (useImportContract) {
       connectResult.value = result
       connectOutcome.value = 'succeeded'
@@ -835,7 +836,7 @@ const submitRealConnect = async () => {
     if (useImportContract) {
       const failure = error instanceof Error && error.name === 'ImportApiError' ? error as ImportApiError : null
       connectFailure.value = failure?.trusted ? failure : null
-      if (failure?.trusted) realConnectError.value = t(failure.message)
+      if (failure?.trusted) realConnectError.value = te(failure.message) ? t(failure.message) : t('admin.groupRates.connect.realFailed')
       else if (!(error instanceof Error) || !te(error.message)) realConnectError.value = t('admin.mySites.errors.importResponsePending')
       connectOutcome.value = failure?.trusted && failure.retryAllowed && ['confirmed', 'not_needed'].includes(failure.cleanup) ? 'failed' : 'pending'
     } else connectOutcome.value = 'editing'
@@ -848,27 +849,38 @@ const submitRealConnect = async () => {
 }
 
 const loadUpstreamKeys = async (rate: GroupRate) => {
+  const generation = connectorGeneration
+  const workspace = currentAccount.value?.id
+  const isCurrent = () => pageIsMounted && generation === connectorGeneration && workspace === currentAccount.value?.id && connectingRate.value === rate && connectMode.value === 'bind'
   isLoadingKeys.value = true
   try {
-    upstreamKeys.value = await listUpstreamKeys(rate.siteId, rate.groupId ?? '', rate.groupName)
+    const keys = await listUpstreamKeys(rate.siteId, rate.groupId ?? '', rate.groupName)
+    if (isCurrent()) upstreamKeys.value = keys
   } catch {
-    upstreamKeys.value = []
+    if (isCurrent()) upstreamKeys.value = []
   } finally {
-    isLoadingKeys.value = false
+    if (isCurrent()) isLoadingKeys.value = false
   }
 }
 
 const submitBind = async () => {
-  if (!connectingRate.value || !selectedKeyId.value || !selectedAdminGroupId.value || !selectedAdminResourceId.value) return
+  if (!connectingRate.value || !canSubmitConnect.value) return
   const selectedKey = upstreamKeys.value.find(k => k.id === selectedKeyId.value)
   if (!selectedKey) return
+  const generation = connectorGeneration
+  const workspace = currentAccount.value?.id ?? ''
+  const platform = adminPlatform.value
+  const target = connectingRate.value
+  const isCurrent = () => pageIsMounted && generation === connectorGeneration && workspace === (currentAccount.value?.id ?? '') && platform === adminPlatform.value && connectingRate.value === target
+  connectSubmitLocked.value = true
+  connectOutcome.value = 'submitting'
   realConnectError.value = ''
   isActionLoading.value = true
   try {
     await realBind({
-      upstreamSiteId: connectingRate.value.siteId,
-      upstreamGroupId: connectingRate.value.groupId ?? '',
-      upstreamGroupName: connectingRate.value.groupName,
+      upstreamSiteId: target.siteId,
+      upstreamGroupId: target.groupId ?? '',
+      upstreamGroupName: target.groupName,
       upstreamKeyId: selectedKey.id,
       upstreamKey: selectedKey.key,
       ownGroupIds: [selectedAdminGroupId.value],
@@ -878,15 +890,28 @@ const submitBind = async () => {
       addToPricingMapping: addToPricingMapping.value,
       operationId: connectOperationId.value,
     })
-    closeConnector()
-  } catch {
-    realConnectError.value = t('admin.groupRates.connect.bindFailed')
+    if (!isCurrent()) return
+    connectSubmitLocked.value = false
     isActionLoading.value = false
-    return
+    connectOutcome.value = 'editing'
+    closeConnector()
+    await refreshAfterMutation(() => pageIsMounted && workspace === (currentAccount.value?.id ?? '') && platform === adminPlatform.value)
+  } catch (error) {
+    if (!isCurrent()) return
+    const key = error instanceof Error ? error.message : ''
+    if (platform === 'sub2api' && key === 'admin.mySites.errors.importInProgress') {
+      realConnectError.value = t(key)
+      connectOutcome.value = 'pending'
+    } else {
+      realConnectError.value = t(key === 'admin.mySites.errors.connectionExists' ? key : 'admin.groupRates.connect.bindFailed')
+      connectOutcome.value = 'editing'
+    }
+  } finally {
+    if (isCurrent()) {
+      connectSubmitLocked.value = false
+      isActionLoading.value = false
+    }
   }
-
-  await refreshAfterMutation()
-  isActionLoading.value = false
 }
 
 const openDisconnect = (rate: GroupRate) => {
@@ -1353,6 +1378,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                   ? 'border-primary bg-primary/5 text-foreground'
                   : 'border-border/60 bg-surface text-muted-foreground hover:border-primary/40 hover:text-foreground'
               ]"
+              :disabled="connectFormLocked"
               @click="setConnectMode('real')"
             >
               <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
@@ -1374,6 +1400,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                   ? 'border-primary bg-primary/5 text-foreground'
                   : 'border-border/60 bg-surface text-muted-foreground hover:border-primary/40 hover:text-foreground'
               ]"
+              :disabled="connectFormLocked"
               @click="setConnectMode('bind')"
             >
               <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
@@ -1410,14 +1437,17 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             </div>
           </div>
 
-          <!-- sub2api admin：分组类型选择（仅在无法自动检测时显示） -->
+          <p v-if="!isAdminReady" class="text-sm text-warning" data-import-admin-unavailable>{{ t('admin.groupRates.connect.adminUnavailable') }}</p>
+
+          <!-- Sub2API 自动创建使用显式账号平台，源分类只初始化默认。 -->
           <div v-if="needsGroupTypeSelection" class="space-y-2">
-            <span class="text-sm font-medium text-foreground">{{ t('admin.groupRates.connect.groupTypeLabel') }}</span>
+            <span class="text-sm font-medium text-foreground">{{ t(isC5Import ? 'admin.groupRates.connect.accountPlatformLabel' : 'admin.groupRates.connect.groupTypeLabel') }}</span>
             <div class="relative">
               <select
                 v-model="selectedGroupType"
+                data-import-platform-select
                 class="h-10 w-full rounded-xl border border-border/50 bg-surface px-3 pr-8 text-sm text-foreground outline-none appearance-none transition-all focus:border-primary focus:ring-1 focus:ring-primary"
-                :disabled="isActionLoading"
+                :disabled="connectFormLocked"
               >
                 <option value="">{{ t('admin.groupRates.connect.groupTypePlaceholder') }}</option>
                 <option value="openai">{{ t('admin.groupRates.connect.groupTypeOpenai') }}</option>
@@ -1443,7 +1473,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <select
                 v-model.number="selectedChannelType"
                 class="h-10 w-full rounded-xl border border-border/50 bg-surface px-3 pr-8 text-sm text-foreground outline-none appearance-none transition-all focus:border-primary focus:ring-1 focus:ring-primary"
-                :disabled="isActionLoading"
+                :disabled="connectFormLocked"
               >
                 <option :value="0">{{ t('admin.groupRates.connect.channelTypePlaceholder') }}</option>
                 <option v-for="ct in filteredChannelTypes" :key="ct.id" :value="ct.id">{{ ct.name }}</option>
@@ -1477,7 +1507,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                   :value="keyItem.id"
                   :checked="selectedKeyId === keyItem.id"
                   class="h-4 w-4 border-border text-primary focus:ring-primary"
-                  :disabled="isActionLoading"
+                  :disabled="connectFormLocked"
                   @change="selectedKeyId = keyItem.id"
                 />
                 <div class="flex-1 min-w-0">
@@ -1502,8 +1532,8 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           </div>
 
           <section v-if="isC5Import" class="space-y-4" aria-labelledby="import-account-settings-title">
-            <div v-if="!needsGroupTypeSelection" class="space-y-1 text-sm text-muted-foreground" data-import-platforms>
-              <p>{{ t('admin.groupRates.connect.upstreamGroupType', { platform: importPlatformLabel(connectUpstreamPlatform) }) }}</p>
+            <div class="space-y-1 text-sm text-muted-foreground" data-import-platforms>
+              <p>{{ t('admin.groupRates.connect.upstreamGroupType', { platform: connectUpstreamPlatform ? importPlatformLabel(connectUpstreamPlatform) : t('admin.groupRates.connect.unclassified') }) }}</p>
               <p>{{ t('admin.groupRates.connect.accountPlatform', { platform: connectAccountPlatform ? importPlatformLabel(connectAccountPlatform) : t('admin.groupRates.connect.accountPlatformPending') }) }}</p>
             </div>
             <h3 id="import-account-settings-title" class="text-sm font-semibold text-foreground">{{ t('admin.groupRates.connect.importSettings.title') }}</h3>
@@ -1591,7 +1621,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                   type="radio"
                   :value="resource.id"
                   class="h-4 w-4 border-border text-primary focus:ring-primary"
-                  :disabled="isActionLoading"
+                  :disabled="connectFormLocked"
                 />
                 <div class="min-w-0 flex-1">
                   <div class="truncate text-sm font-medium text-foreground">{{ resource.name }}</div>
@@ -1606,8 +1636,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
 
           <div v-if="connectMode === 'real'" class="space-y-2">
             <span class="text-sm font-medium text-foreground">{{ t('admin.groupRates.connect.ownGroupLabel') }}</span>
-            <p v-if="isC5Import && isOpenAIImportPlatform(connectUpstreamPlatform)" class="text-xs leading-5 text-muted-foreground" data-import-compatible-platforms>{{ t('admin.groupRates.connect.compatiblePlatformsHint') }}</p>
-            <p v-if="hasOtherCompatiblePlatforms" class="text-xs leading-5 text-muted-foreground" data-import-platform-lock>{{ t('admin.groupRates.connect.selectedPlatformHint', { platform: importPlatformLabel(connectAccountPlatform) }) }}</p>
+            <p v-if="isC5Import" class="text-xs leading-5 text-muted-foreground">{{ t('admin.groupRates.connect.targetGroupsHint') }}</p>
             <p v-if="connectGroupSelectionNotice" class="text-xs text-warning">{{ connectGroupSelectionNotice }}</p>
             <div class="max-h-48 overflow-auto rounded-xl border border-border/50 bg-surface divide-y divide-border/30">
               <label
@@ -1620,7 +1649,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                   type="checkbox"
                   :checked="connectOwnGroups.includes(group.id)"
                   class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
-                  :disabled="isActionLoading || !canSelectOwnGroup(group)"
+                  :disabled="connectFormLocked || !canSelectOwnGroup(group)"
                   @change="toggleOwnGroup(group.id)"
                 />
                 <span class="min-w-0 break-words text-sm text-foreground">{{ group.groupName }}</span>
@@ -1630,7 +1659,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 <span class="ml-auto text-xs text-muted-foreground">{{ formatMultiplier(group.multiplier) }}</span>
               </label>
               <div v-if="filteredOwnGroups.length === 0" class="px-4 py-3 text-sm text-muted-foreground">
-                {{ t('admin.groupRates.connect.ownGroupPlaceholder') }}
+                {{ t(isC5Import ? (connectAccountPlatform ? 'admin.groupRates.connect.noPlatformGroups' : 'admin.groupRates.connect.selectPlatformFirst') : 'admin.groupRates.connect.ownGroupPlaceholder') }}
               </div>
             </div>
           </div>
@@ -1640,7 +1669,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               v-model="addToPricingMapping"
               type="checkbox"
               class="mt-0.5 h-4 w-4 rounded border-border text-primary focus:ring-primary"
-              :disabled="isActionLoading"
+              :disabled="connectFormLocked"
             />
             <span>
               <span class="flex items-center gap-2 text-sm font-medium text-foreground">
@@ -1661,7 +1690,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           <div v-if="connectFailure" class="space-y-2 break-words text-sm text-warning" data-import-failure>
             <p>{{ t('admin.groupRates.connect.importResult.stage') }}：{{ t(`admin.groupRates.connect.importResult.stages.${connectFailure.stage}`) }}</p>
             <p>{{ t(`admin.groupRates.connect.importResult.cleanup.${connectFailure.cleanup}`) }}</p>
-            <p v-if="connectFailure.reason">{{ t(connectFailure.reason) }}</p>
+            <p v-if="connectFailure.reason && te(connectFailure.reason)">{{ t(connectFailure.reason) }}</p>
             <p v-if="connectFailure.groupId || connectFailure.groupName">{{ t('admin.mySites.errors.blockingGroup', { groupName: connectFailure.groupName || '—', groupId: connectFailure.groupId || '—' }) }}</p>
             <p v-if="connectFailure.adminResourceId || connectFailure.upstreamKeyId || ['retained', 'pending'].includes(connectFailure.cleanup)">{{ t('admin.groupRates.connect.importResult.resourceIds', { adminResourceId: connectFailure.adminResourceId || t('admin.groupRates.connect.importResult.unknownId'), upstreamKeyId: connectFailure.upstreamKeyId || t('admin.groupRates.connect.importResult.unknownId') }) }}</p>
             <p v-if="connectFailure.upstreamResourceName">{{ t('admin.groupRates.connect.importResult.resourceName') }}：{{ connectFailure.upstreamResourceName }}</p>

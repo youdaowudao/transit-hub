@@ -9,32 +9,6 @@ import (
 	"testing"
 )
 
-func TestC51PlatformCompatibility(t *testing.T) {
-	platforms := []string{"openai", "kimi", "zhipu", "deepseek", "minimax", "anthropic", "gemini", "antigravity"}
-	for i, source := range platforms {
-		for j, target := range platforms {
-			t.Run(source+"/"+target, func(t *testing.T) {
-				want := source == target || i < 5 && j < 5
-				if got := importPlatformsCompatible(source, target); got != want {
-					t.Fatalf("compatibility = %t, want %t", got, want)
-				}
-			})
-		}
-	}
-	for _, test := range []struct {
-		source, target string
-		want           bool
-	}{
-		{" OPENAI ", " KiMi ", true}, {" ANTHROPIC ", "anthropic", true},
-		{"KIMI", "Gemini", false}, {"", "kimi", false}, {"kimi", "", false},
-		{"", "", true}, {"grok", "grok", true}, {"grok", "openai", false},
-	} {
-		if got := importPlatformsCompatible(test.source, test.target); got != test.want {
-			t.Errorf("%q -> %q = %t, want %t", test.source, test.target, got, test.want)
-		}
-	}
-}
-
 func TestC51AllOpenAIFamilyImports(t *testing.T) {
 	family := []string{"openai", "kimi", "zhipu", "deepseek", "minimax"}
 	for _, source := range family {
@@ -50,15 +24,17 @@ func TestC51AllOpenAIFamilyImports(t *testing.T) {
 	}
 }
 
-func TestC51CompatibilityTableRejectsEveryOutsideFamilyPairBeforeResources(t *testing.T) {
+func TestImportSelectionAllSourceAndTargetPlatforms(t *testing.T) {
 	platforms := []string{"openai", "kimi", "zhipu", "deepseek", "minimax", "anthropic", "gemini", "antigravity", "grok"}
-	for i, source := range platforms {
-		for j, target := range platforms {
-			if source == target && source != "grok" || i < 5 && j < 5 {
-				continue
-			}
+	prefixes := map[string]string{"openai": "A", "anthropic": "B", "gemini": "C", "antigravity": "D", "kimi": "X", "zhipu": "X", "deepseek": "X", "minimax": "X"}
+	for _, source := range platforms {
+		for _, target := range platforms {
 			t.Run(source+"/"+target, func(t *testing.T) {
-				c51AssertRejectedBeforeResources(t, &c5RedTransport{platform: source, mainPlatform: target}, target)
+				if target == "grok" {
+					c51AssertRejectedBeforeResources(t, &c5RedTransport{platform: source, mainPlatform: target}, target)
+				} else {
+					c51AssertImportedPlatform(t, source, target, target, prefixes[target])
+				}
 			})
 		}
 	}

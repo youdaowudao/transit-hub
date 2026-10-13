@@ -37,8 +37,11 @@ func (tx *c5Transaction) Exec(ctx context.Context, query string, args ...any) (p
 	}
 	return pgconn.NewCommandTag("INSERT 0 1"), nil
 }
-func (tx *c5Transaction) QueryRow(context.Context, string, ...any) pgx.Row {
+func (tx *c5Transaction) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
 	tx.queries++
+	if strings.Contains(query, "SELECT EXISTS") {
+		return importSelectionBoolRow(false)
+	}
 	return c5TransactionRow{tx}
 }
 func (tx *c5Transaction) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error) {

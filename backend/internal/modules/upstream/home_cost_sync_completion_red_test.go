@@ -18,9 +18,9 @@ func TestHomeCostSyncKeepsActualCompletionTimeForRecovery(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/auth/me":
 			writeJSON(w, map[string]any{"data": map[string]any{"balance": 10}})
-		case "/api/v1/usage/dashboard/stats":
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
 			elapsed.Store(20)
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3}})
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3, "total_actual_cost": 3}})
 		case "/api/v1/groups/available", "/api/v1/groups/rates":
 			writeJSON(w, map[string]any{"data": []any{}})
 		default:

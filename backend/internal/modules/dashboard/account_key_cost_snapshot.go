@@ -34,6 +34,7 @@ type UpstreamKeyDailyCost struct {
 }
 
 type UpstreamKeyCostRun struct {
+	UsageTimezone     string
 	ID                string
 	SnapshotRunID     string
 	UserID            string
@@ -63,7 +64,7 @@ func completeAccountKeySnapshotRunID(runs []UpstreamKeyCostRun) string {
 	return runID
 }
 
-func buildAccountKeyCostRuns(userID, adminAccountID, runPrefix, date string, siteTotals []upstream.SiteCostForDateResult, keys upstream.KeyUsageForDateResult, observedAt time.Time) []UpstreamKeyCostRun {
+func buildAccountKeyCostRuns(userID, adminAccountID, runPrefix, date string, siteTotals []upstream.SiteCostForDateResult, keys upstream.KeyUsageForDateResult, observedAt time.Time, currentDates ...string) []UpstreamKeyCostRun {
 	keySites := make(map[string]upstream.KeyUsageSiteResult, len(keys.Sites))
 	for _, site := range keys.Sites {
 		keySites[site.SiteID] = site
@@ -81,10 +82,11 @@ func buildAccountKeyCostRuns(userID, adminAccountID, runPrefix, date string, sit
 			run.SiteTotalCents = cents(siteTotal.RawCost * siteTotal.RechargeRate)
 		}
 		keySite, exists := keySites[siteTotal.SiteID]
-		if siteTotal.Err != nil || !exists || !keySite.Complete {
+		if siteTotal.Err != nil || !exists || !keySite.Complete || keySite.Timezone != businesstime.Timezone || keys.BusinessDate != date {
 			runs = append(runs, run)
 			continue
 		}
+		run.UsageTimezone = keySite.Timezone
 		run.ExpectedKeyCount = len(keySite.Items)
 		run.CollectedKeyCount = len(keySite.Items)
 		run.Items = make([]UpstreamKeyDailyCost, 0, len(keySite.Items))
@@ -108,14 +110,11 @@ func buildAccountKeyCostRuns(userID, adminAccountID, runPrefix, date string, sit
 		}
 		tolerance := int64((nonzeroKeys + 1) / 2)
 		lower, upper := run.SiteTotalCents-tolerance, run.SiteTotalCents+tolerance
-		dateOK := keySite.ConsumeDate == "" || keySite.ConsumeDate == date
-		if keySite.CollectedAt != nil && businesstime.DateAt(*keySite.CollectedAt) != date {
+		dateOK := keySite.ConsumeDate == date
+		if (len(currentDates) == 0 || date == currentDates[0]) && keySite.CollectedAt != nil && businesstime.DateAt(*keySite.CollectedAt) != date {
 			dateOK = false
 		}
-		if keySite.SyncedRawCost != nil && keySite.CollectedRawCost != nil {
-			lower = cents(*keySite.SyncedRawCost*siteTotal.RechargeRate) - tolerance
-			upper = cents(*keySite.CollectedRawCost*siteTotal.RechargeRate) + tolerance
-		}
+
 		if dateOK && run.KeyTotalCents >= lower && run.KeyTotalCents <= upper {
 			run.Complete = true
 			run.Quality = KeyCostQualityComplete
@@ -169,6 +168,14 @@ func (r *MetricsRepository) PublishAccountStatsRefresh(ctx context.Context, runs
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	currentDate := accountCurrentDateFromContext(ctx)
+	if currentDate != "" && len(runs) > 0 && runs[0].BusinessDate == currentDate && !usableAccountRunForDate(runs, runs[0].UserID, runs[0].AdminAccountID, currentDate, currentDate) {
+		return errors.New(maskedAutomaticAccountGuidance())
+	}
+	before, err := r.historicalAccountBusinessState(ctx, tx, stats, currentDate)
+	if err != nil {
+		return err
+	}
 	if err := r.saveUpstreamKeyCostRuns(ctx, tx, runs); err != nil {
 		return err
 	}
@@ -176,6 +183,9 @@ func (r *MetricsRepository) PublishAccountStatsRefresh(ctx context.Context, runs
 		return err
 	}
 	if err := r.bindAccountStatsRefreshSnapshot(ctx, tx, runs, stats); err != nil {
+		return err
+	}
+	if err := r.verifyHistoricalAccountBusinessState(ctx, tx, stats, currentDate, before); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -205,7 +215,8 @@ func (r *MetricsRepository) bindAccountStatsRefreshSnapshot(ctx context.Context,
 	return nil
 }
 
-func (r *MetricsRepository) GetPublishedAccountStatsRefresh(ctx context.Context, userID, adminAccountID, runID, date string) (AccountStatsRefreshResponse, bool, error) {
+func (r *MetricsRepository) GetPublishedAccountStatsRefresh(ctx context.Context, userID, adminAccountID, runID, date string, currentDates ...string) (AccountStatsRefreshResponse, bool, error) {
+	currentDate := accountQueryCurrentDate(currentDates)
 	response := AccountStatsRefreshResponse{Date: date, SnapshotRunID: runID}
 	var expectedAccounts, completedAccounts sql.NullInt64
 	var accountQuality string
@@ -226,13 +237,16 @@ func (r *MetricsRepository) GetPublishedAccountStatsRefresh(ctx context.Context,
 	response.CompletedAccounts = int(completedAccounts.Int64)
 	var allComplete bool
 	if err := r.db.QueryRow(ctx, `
-		SELECT count(*)::int,count(*) FILTER (WHERE complete)::int,COALESCE(bool_and(complete),false)
+		SELECT count(*)::int,count(*) FILTER (WHERE complete AND (NULLIF($5::text,'')::date IS DISTINCT FROM $4::date OR usage_timezone=$6))::int,COALESCE(bool_and(complete AND (NULLIF($5::text,'')::date IS DISTINCT FROM $4::date OR usage_timezone=$6)),false)
 		FROM dashboard_upstream_key_cost_runs
 		WHERE user_id=$1 AND admin_account_id=$2 AND snapshot_run_id=$3 AND business_date=$4::date
-	`, userID, adminAccountID, runID, date).Scan(&response.ExpectedSites, &response.CompletedSites, &allComplete); err != nil {
+	`, userID, adminAccountID, runID, date, currentDate, businesstime.Timezone).Scan(&response.ExpectedSites, &response.CompletedSites, &allComplete); err != nil {
 		return AccountStatsRefreshResponse{}, false, err
 	}
 	if response.ExpectedSites == 0 || !allComplete || response.CompletedSites != response.ExpectedSites {
+		if currentDate == date && response.ExpectedSites > 0 {
+			return AccountStatsRefreshResponse{}, false, errors.New("这份账号费用尚未按新加坡日期重新核对，请再次点击“刷新账号统计”创建新请求；旧记录保留，不会修改主站。")
+		}
 		return AccountStatsRefreshResponse{}, false, nil
 	}
 	var storedCompletedAccounts int
@@ -249,31 +263,33 @@ func (r *MetricsRepository) GetPublishedAccountStatsRefresh(ctx context.Context,
 	return response, true, nil
 }
 
-func (r *MetricsRepository) LatestCompleteAccountKeyCostRuns(ctx context.Context, userID, adminAccountID, date string) (string, []UpstreamKeyCostRun, error) {
+func (r *MetricsRepository) LatestCompleteAccountKeyCostRuns(ctx context.Context, userID, adminAccountID, date string, currentDates ...string) (string, []UpstreamKeyCostRun, error) {
+	currentDate := accountQueryCurrentDate(currentDates)
 	var snapshotRunID string
 	err := r.db.QueryRow(ctx, `
 		SELECT snapshot_run_id FROM dashboard_upstream_key_cost_runs
 		WHERE user_id=$1 AND admin_account_id=$2 AND business_date=$3::date
-		GROUP BY snapshot_run_id HAVING bool_and(complete)
+		GROUP BY snapshot_run_id HAVING bool_and(complete AND (NULLIF($4::text,'')::date IS DISTINCT FROM $3::date OR usage_timezone=$5))
 		ORDER BY max(observed_at) DESC,max(created_at) DESC,snapshot_run_id DESC LIMIT 1
-	`, userID, adminAccountID, date).Scan(&snapshotRunID)
+	`, userID, adminAccountID, date, currentDate, businesstime.Timezone).Scan(&snapshotRunID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil, nil
 	}
 	if err != nil {
 		return "", nil, err
 	}
-	runs, err := r.AccountKeyCostRunsForSnapshot(ctx, userID, adminAccountID, date, snapshotRunID)
+	runs, err := r.AccountKeyCostRunsForSnapshot(ctx, userID, adminAccountID, date, snapshotRunID, currentDate)
 	return snapshotRunID, runs, err
 }
 
-func (r *MetricsRepository) AccountKeyCostRunsForSnapshot(ctx context.Context, userID, adminAccountID, date, snapshotRunID string) ([]UpstreamKeyCostRun, error) {
+func (r *MetricsRepository) AccountKeyCostRunsForSnapshot(ctx context.Context, userID, adminAccountID, date, snapshotRunID string, currentDates ...string) ([]UpstreamKeyCostRun, error) {
+	currentDate := accountQueryCurrentDate(currentDates)
 	if snapshotRunID == "" {
 		return nil, nil
 	}
 	rows, err := r.db.Query(ctx, `
 		SELECT id,snapshot_run_id,user_id,admin_account_id,business_date::text,site_id,
-		       expected_key_count,collected_key_count,site_total_cents,key_total_cents,complete,quality,observed_at
+		       expected_key_count,collected_key_count,site_total_cents,key_total_cents,complete,quality,observed_at,usage_timezone
 		FROM dashboard_upstream_key_cost_runs
 		WHERE user_id=$1 AND admin_account_id=$2 AND business_date=$3::date AND snapshot_run_id=$4
 		ORDER BY site_id,id
@@ -287,7 +303,7 @@ func (r *MetricsRepository) AccountKeyCostRunsForSnapshot(ctx context.Context, u
 		var run UpstreamKeyCostRun
 		if err := rows.Scan(&run.ID, &run.SnapshotRunID, &run.UserID, &run.AdminAccountID, &run.BusinessDate,
 			&run.SiteID, &run.ExpectedKeyCount, &run.CollectedKeyCount, &run.SiteTotalCents, &run.KeyTotalCents,
-			&run.Complete, &run.Quality, &run.ObservedAt); err != nil {
+			&run.Complete, &run.Quality, &run.ObservedAt, &run.UsageTimezone); err != nil {
 			return nil, err
 		}
 		itemRows, err := r.db.Query(ctx, `
@@ -322,7 +338,7 @@ func (r *MetricsRepository) AccountKeyCostRunsForSnapshot(ctx context.Context, u
 		return nil, nil
 	}
 	for _, run := range runs {
-		if !run.Complete || run.Quality != KeyCostQualityComplete {
+		if !run.Complete || run.Quality != KeyCostQualityComplete || run.BusinessDate != date || currentDate == date && run.UsageTimezone != businesstime.Timezone {
 			return nil, nil
 		}
 	}
@@ -334,14 +350,23 @@ func (r *MetricsRepository) saveUpstreamKeyCostRuns(ctx context.Context, db metr
 		if _, err := db.Exec(ctx, `
 			INSERT INTO dashboard_upstream_key_cost_runs (
 				id,snapshot_run_id,user_id,admin_account_id,business_date,site_id,expected_key_count,
-				collected_key_count,site_total_cents,key_total_cents,complete,quality,observed_at
-			) VALUES ($1,$2,$3,$4,$5::date,$6,$7,$8,$9,$10,$11,$12,$13)
+				collected_key_count,site_total_cents,key_total_cents,complete,quality,observed_at,usage_timezone
+			) VALUES ($1,$2,$3,$4,$5::date,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 			ON CONFLICT (id) DO NOTHING
 		`, run.ID, run.SnapshotRunID, run.UserID, run.AdminAccountID, run.BusinessDate, run.SiteID,
 			run.ExpectedKeyCount, run.CollectedKeyCount, run.SiteTotalCents, run.KeyTotalCents,
-			run.Complete, run.Quality, run.ObservedAt); err != nil {
+			run.Complete, run.Quality, run.ObservedAt, run.UsageTimezone); err != nil {
 			return err
 		}
+		var storedTimezone, storedDate string
+		var storedComplete bool
+		if err := db.QueryRow(ctx, `SELECT usage_timezone,business_date::text,complete FROM dashboard_upstream_key_cost_runs WHERE id=$1 AND user_id=$2 AND admin_account_id=$3`, run.ID, run.UserID, run.AdminAccountID).Scan(&storedTimezone, &storedDate, &storedComplete); err != nil {
+			return err
+		}
+		if storedTimezone != run.UsageTimezone || storedDate != run.BusinessDate || storedComplete != run.Complete {
+			return errors.New("这个刷新请求已保存了旧费用记录，不能覆盖或视为新加坡已核对费用；请再次点击“刷新账号统计”创建新请求，不会修改主站。")
+		}
+
 		for _, item := range run.Items {
 			if item.UserID != run.UserID || item.AdminAccountID != run.AdminAccountID || item.RunID != run.ID || item.SiteID != run.SiteID {
 				return errors.New("key cost item workspace mismatch")
@@ -361,12 +386,14 @@ func (r *MetricsRepository) saveUpstreamKeyCostRuns(ctx context.Context, db metr
 	return nil
 }
 
-func (r *MetricsRepository) AccountCostComponentsForDate(ctx context.Context, userID, adminAccountID, date string) (AccountCostComponents, error) {
-	return r.accountCostComponentsForDate(ctx, r.db, userID, adminAccountID, date, "", true)
+func (r *MetricsRepository) AccountCostComponentsForDate(ctx context.Context, userID, adminAccountID, date string, currentDates ...string) (AccountCostComponents, error) {
+	currentDate := accountQueryCurrentDate(currentDates)
+	return r.accountCostComponentsForDate(ctx, r.db, userID, adminAccountID, date, "", true, currentDate)
 }
 
-func (r *MetricsRepository) AccountCostComponentsForSnapshotRun(ctx context.Context, userID, adminAccountID, date, snapshotRunID string) (AccountCostComponents, error) {
-	return r.accountCostComponentsForDate(ctx, r.db, userID, adminAccountID, date, snapshotRunID, false)
+func (r *MetricsRepository) AccountCostComponentsForSnapshotRun(ctx context.Context, userID, adminAccountID, date, snapshotRunID string, currentDates ...string) (AccountCostComponents, error) {
+	currentDate := accountQueryCurrentDate(currentDates)
+	return r.accountCostComponentsForDate(ctx, r.db, userID, adminAccountID, date, snapshotRunID, false, currentDate)
 }
 
 func (r *MetricsRepository) AccountCostComponentsFromKeySnapshot(ctx context.Context, userID, adminAccountID, date string, keys upstream.KeyUsageForDateResult) (AccountCostComponents, error) {
@@ -384,7 +411,7 @@ func (r *MetricsRepository) AccountCostComponentsFromKeySnapshot(ctx context.Con
 	}
 	costByKey := make(map[string]int64)
 	for _, site := range keys.Sites {
-		if !site.Complete || site.Status == "missing" {
+		if !site.Complete || site.Status == "missing" || site.Timezone != businesstime.Timezone || site.ConsumeDate != date {
 			continue
 		}
 		for _, item := range site.Items {
@@ -435,7 +462,7 @@ func (r *MetricsRepository) AccountCostComponentsFromKeySnapshot(ctx context.Con
 	return components, nil
 }
 
-func (r *MetricsRepository) accountCostComponentsForDate(ctx context.Context, db metricsDB, userID, adminAccountID, date, requiredSnapshotRunID string, allowLatest bool) (AccountCostComponents, error) {
+func (r *MetricsRepository) accountCostComponentsForDate(ctx context.Context, db metricsDB, userID, adminAccountID, date, requiredSnapshotRunID string, allowLatest bool, currentDate string) (AccountCostComponents, error) {
 	var components AccountCostComponents
 	if err := db.QueryRow(ctx, `
 		SELECT COALESCE(sum(amount_cents),0) FROM dashboard_additional_costs
@@ -464,9 +491,9 @@ func (r *MetricsRepository) accountCostComponentsForDate(ctx context.Context, db
 		WHERE user_id=$1 AND admin_account_id=$2 AND business_date=$3::date
 		  AND ($5 OR snapshot_run_id=$4)
 		GROUP BY snapshot_run_id
-		HAVING bool_and(complete)
+		HAVING bool_and(complete AND (NULLIF($6::text,'')::date IS DISTINCT FROM $3::date OR usage_timezone=$7))
 		ORDER BY max(observed_at) DESC,max(created_at) DESC,snapshot_run_id DESC LIMIT 1
-	`, userID, adminAccountID, date, requiredSnapshotRunID, allowLatest).Scan(&components.SnapshotRunID, &reconciled, &components.ReconciledSiteCount)
+	`, userID, adminAccountID, date, requiredSnapshotRunID, allowLatest, currentDate, businesstime.Timezone).Scan(&components.SnapshotRunID, &reconciled, &components.ReconciledSiteCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return components, nil
 	}
@@ -495,7 +522,7 @@ func (r *MetricsRepository) accountCostComponentsForDate(ctx context.Context, db
 			  ON key_cost.run_id=run.id AND key_cost.user_id=run.user_id AND key_cost.admin_account_id=run.admin_account_id
 			WHERE run.user_id=link.user_id AND run.admin_account_id=link.admin_account_id
 			  AND run.business_date=$3::date AND run.site_id=link.upstream_site_id AND run.complete=true
-			  AND run.snapshot_run_id=$5
+			  AND run.snapshot_run_id=$5 AND (NULLIF($6::text,'')::date IS DISTINCT FROM $3::date OR run.usage_timezone=$7)
 			  AND key_cost.key_id=link.upstream_key_id
 			  AND key_cost.status IN ('ok','')
 			ORDER BY run.observed_at DESC,run.created_at DESC,run.id DESC LIMIT 1
@@ -511,7 +538,7 @@ func (r *MetricsRepository) accountCostComponentsForDate(ctx context.Context, db
 		  )
 		ORDER BY link.upstream_site_id,link.upstream_key_id,link.id
 		) matched
-	`, userID, adminAccountID, date, AccountingModeReplace, components.SnapshotRunID)
+	`, userID, adminAccountID, date, AccountingModeReplace, components.SnapshotRunID, currentDate, businesstime.Timezone)
 	if err != nil {
 		return AccountCostComponents{}, err
 	}
@@ -541,4 +568,38 @@ func (r *MetricsRepository) accountCostComponentsForDate(ctx context.Context, db
 		components.ReplacementDeductionCents = &deduction
 	}
 	return components, nil
+}
+
+func accountQueryCurrentDate(dates []string) string {
+	if len(dates) > 0 {
+		return dates[0]
+	}
+	return ""
+}
+func usableAccountRunForDate(runs []UpstreamKeyCostRun, userID, workspace, date, currentDate string) bool {
+	if len(runs) == 0 {
+		return false
+	}
+	runID := runs[0].SnapshotRunID
+	if runID == "" {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, run := range runs {
+		if run.UserID != userID || run.AdminAccountID != workspace || run.BusinessDate != date || run.SnapshotRunID != runID || run.SiteID == "" || seen[run.SiteID] || !run.Complete || currentDate == date && run.UsageTimezone != businesstime.Timezone {
+			return false
+		}
+		seen[run.SiteID] = true
+	}
+	return true
+}
+
+type accountCurrentDateContextKey struct{}
+
+func withAccountCurrentDate(ctx context.Context, date string) context.Context {
+	return context.WithValue(ctx, accountCurrentDateContextKey{}, date)
+}
+func accountCurrentDateFromContext(ctx context.Context) string {
+	date, _ := ctx.Value(accountCurrentDateContextKey{}).(string)
+	return date
 }

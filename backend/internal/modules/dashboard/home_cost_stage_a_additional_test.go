@@ -44,6 +44,17 @@ func stageASnapshotResult(t *testing.T, value map[string]any) upstream.KeyUsageF
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatal(err)
 	}
+	for index := range result.Sites {
+		site := &result.Sites[index]
+		if site.Complete {
+			if site.Timezone == "" {
+				site.Timezone = "Asia/Singapore"
+			}
+			if site.ConsumeDate == "" {
+				site.ConsumeDate = result.BusinessDate
+			}
+		}
+	}
 	return result
 }
 
@@ -53,9 +64,9 @@ func TestHomeCostStageADrilldownUsesSnapshotStatesAndNoLiveRequests(t *testing.T
 	upstreams := &stageASnapshotUpstreams{fakeUpstreamLister: &fakeUpstreamLister{}, result: stageASnapshotResult(t, map[string]any{
 		"BusinessDate": date, "ExpectedSites": 3, "CompletedSites": 2, "AutoRefreshEnabled": false,
 		"Sites": []map[string]any{
-			{"SiteID": "ok", "SiteName": "ok", "Complete": true, "Status": "ok", "CollectedAt": now, "Items": []upstream.KeyUsageTodayItem{{SiteID: "ok", KeyID: "a", TodayAmount: 3}}},
-			{"SiteID": "retained", "SiteName": "retained", "Complete": true, "Status": "retained", "CollectedAt": now.Add(-time.Hour), "Error": upstream.ErrorRequest, "Items": []upstream.KeyUsageTodayItem{{SiteID: "retained", KeyID: "b", TodayAmount: 4}}},
-			{"SiteID": "missing", "Status": "missing", "Error": upstream.ErrorRequest},
+			{"Timezone": "Asia/Singapore", "SiteID": "ok", "SiteName": "ok", "Complete": true, "Status": "ok", "CollectedAt": now, "Items": []upstream.KeyUsageTodayItem{{SiteID: "ok", KeyID: "a", TodayAmount: 3}}},
+			{"Timezone": "Asia/Singapore", "SiteID": "retained", "SiteName": "retained", "Complete": true, "Status": "retained", "CollectedAt": now.Add(-time.Hour), "Error": upstream.ErrorRequest, "Items": []upstream.KeyUsageTodayItem{{SiteID: "retained", KeyID: "b", TodayAmount: 4}}},
+			{"Timezone": "Asia/Singapore", "SiteID": "missing", "Status": "missing", "Error": upstream.ErrorRequest},
 		},
 	})}
 	service := NewMetricsService(nil, nil, upstreams, nil, nil)
@@ -84,7 +95,7 @@ func TestHomeCostStageADrilldownUsesSnapshotStatesAndNoLiveRequests(t *testing.T
 func TestHomeCostStageALiveCostIgnoresPublishedAccountSnapshot(t *testing.T) {
 	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
 	repository := &fakeMetricsRepository{latestSnapshot: &DailySnapshot{TodayPurchase: ptrF64(9), AccountSnapshotRunID: "published", AccountStatsQuality: KeyCostQualityComplete, CostExpectedCount: intPtr(1), CostCollectedCount: intPtr(1), CostFreshCount: intPtr(1), CostRetainedCount: intPtr(0), CostMissingCount: intPtr(0), CostQualityMode: "exact"}}
-	metrics := upstream.Metrics{TodayConsume: upstream.MetricValue{Value: ptrF64(3)}, TodayConsumeDate: businesstime.DateAt(now), TodayConsumeAt: &now}
+	metrics := upstream.Metrics{TodayConsumeTimezone: "Asia/Singapore", TodayConsume: upstream.MetricValue{Value: ptrF64(3)}, TodayConsumeDate: businesstime.DateAt(now), TodayConsumeAt: &now}
 	service := newLiveMetricsTestService(&fakePlatformClient{usageStats: 20}, &fakeUpstreamLister{cachedSites: []upstream.Response{{ID: "site", Status: upstream.StatusConnected, RechargeRate: 1, Metrics: metrics}}}, repository)
 	service.now = func() time.Time { return now }
 	result, err := service.LiveMetrics(context.Background(), "user-1")
@@ -100,7 +111,7 @@ func TestHomeCostStageARefreshUsesSyncSnapshotInsteadOfLiveQueries(t *testing.T)
 	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
 	date := businesstime.DateAt(now)
 	upstreams := &stageASnapshotUpstreams{fakeUpstreamLister: &fakeUpstreamLister{siteCostResults: []upstream.SiteCostForDateResult{{SiteID: "site", RechargeRate: 1, RawCost: 1}}}, result: stageASnapshotResult(t, map[string]any{
-		"BusinessDate": date, "ExpectedSites": 1, "CompletedSites": 1, "Sites": []map[string]any{{"SiteID": "site", "RechargeRate": 1, "Complete": true, "Status": "ok", "StartedAt": now.Add(time.Minute), "CollectedAt": now.Add(time.Minute), "SyncedRawCost": 1, "CollectedRawCost": 1, "ConsumeDate": date, "Items": []upstream.KeyUsageTodayItem{{SiteID: "site", KeyID: "key", RawAmount: 1, TodayAmount: 1, RechargeRate: 1}}}},
+		"BusinessDate": date, "ExpectedSites": 1, "CompletedSites": 1, "Sites": []map[string]any{{"Timezone": "Asia/Singapore", "SiteID": "site", "RechargeRate": 1, "Complete": true, "Status": "ok", "StartedAt": now.Add(time.Minute), "CollectedAt": now.Add(time.Minute), "SyncedRawCost": 1, "CollectedRawCost": 1, "ConsumeDate": date, "Items": []upstream.KeyUsageTodayItem{{SiteID: "site", KeyID: "key", RawAmount: 1, TodayAmount: 1, RechargeRate: 1}}}},
 	})}
 	repository := &fakeAccountKeyRunRepository{}
 	service := NewMetricsService(nil, nil, upstreams, nil, &fakeAdminAccounts{current: map[string]string{"user": "workspace"}})
@@ -128,7 +139,7 @@ func (f *stageABlockedSnapshotUpstreams) SyncAndCollectKeyUsage(context.Context,
 func TestHomeCostStageARefreshTimeoutKeepsBackgroundJobRunning(t *testing.T) {
 	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
 	date := businesstime.DateAt(now)
-	base := &stageASnapshotUpstreams{fakeUpstreamLister: &fakeUpstreamLister{}, result: stageASnapshotResult(t, map[string]any{"BusinessDate": date, "ExpectedSites": 1, "CompletedSites": 1, "Sites": []map[string]any{{"SiteID": "site", "RechargeRate": 1, "Complete": true, "Status": "ok", "StartedAt": now.Add(time.Second), "ConsumeDate": date, "SyncedRawCost": 1, "CollectedRawCost": 1, "Items": []upstream.KeyUsageTodayItem{{SiteID: "site", KeyID: "key", RawAmount: 1, TodayAmount: 1}}}}})}
+	base := &stageASnapshotUpstreams{fakeUpstreamLister: &fakeUpstreamLister{}, result: stageASnapshotResult(t, map[string]any{"BusinessDate": date, "ExpectedSites": 1, "CompletedSites": 1, "Sites": []map[string]any{{"Timezone": "Asia/Singapore", "SiteID": "site", "RechargeRate": 1, "Complete": true, "Status": "ok", "StartedAt": now.Add(time.Second), "ConsumeDate": date, "SyncedRawCost": 1, "CollectedRawCost": 1, "Items": []upstream.KeyUsageTodayItem{{SiteID: "site", KeyID: "key", RawAmount: 1, TodayAmount: 1}}}}})}
 	upstreams := &stageABlockedSnapshotUpstreams{stageASnapshotUpstreams: base, release: make(chan struct{})}
 	released := false
 	defer func() {
@@ -177,9 +188,9 @@ func TestHomeCostStageARefreshExcludesOldAndSyncFailedSnapshots(t *testing.T) {
 	date := businesstime.DateAt(now)
 	one := 1.0
 	upstreams := &stageASnapshotUpstreams{fakeUpstreamLister: &fakeUpstreamLister{}, result: upstream.KeyUsageForDateResult{BusinessDate: date, ExpectedSites: 3, CompletedSites: 2, Sites: []upstream.KeyUsageSiteResult{
-		{SiteID: "current", RechargeRate: 1, Complete: true, Status: "ok", StartedAt: now.Add(time.Second), SyncedRawCost: &one, CollectedRawCost: &one, ConsumeDate: date, Items: []upstream.KeyUsageTodayItem{{SiteID: "current", KeyID: "one", TodayAmount: 1}}},
-		{SiteID: "old", RechargeRate: 1, Complete: true, Status: "retained", StartedAt: now.Add(-time.Second), SyncedRawCost: &one, CollectedRawCost: &one, ConsumeDate: date, Items: []upstream.KeyUsageTodayItem{{SiteID: "old", KeyID: "two", TodayAmount: 1}}},
-		{SiteID: "sync-failed", RechargeRate: 1, Status: "missing", Error: upstream.ErrorRequest},
+		{Timezone: "Asia/Singapore", SiteID: "current", RechargeRate: 1, Complete: true, Status: "ok", StartedAt: now.Add(time.Second), SyncedRawCost: &one, CollectedRawCost: &one, ConsumeDate: date, Items: []upstream.KeyUsageTodayItem{{SiteID: "current", KeyID: "one", TodayAmount: 1}}},
+		{Timezone: "Asia/Singapore", SiteID: "old", RechargeRate: 1, Complete: true, Status: "retained", StartedAt: now.Add(-time.Second), SyncedRawCost: &one, CollectedRawCost: &one, ConsumeDate: date, Items: []upstream.KeyUsageTodayItem{{SiteID: "old", KeyID: "two", TodayAmount: 1}}},
+		{Timezone: "Asia/Singapore", ConsumeDate: date, SiteID: "sync-failed", RechargeRate: 1, Status: "missing", Error: upstream.ErrorRequest},
 	}}}
 	repository := &fakeAccountKeyRunRepository{}
 	service := NewMetricsService(nil, nil, upstreams, nil, &fakeAdminAccounts{current: map[string]string{"user": "workspace"}})
@@ -196,8 +207,8 @@ func TestHomeCostStageAGroupProfitReadsSnapshotsAndCannotSplitMergedKeys(t *test
 	date := businesstime.DateAt(now)
 	fast, early := now.Add(-time.Minute), now.Add(-time.Hour)
 	upstreams := &stageASnapshotUpstreams{fakeUpstreamLister: &fakeUpstreamLister{}, result: upstream.KeyUsageForDateResult{BusinessDate: date, ExpectedSites: 2, CompletedSites: 2, Sites: []upstream.KeyUsageSiteResult{
-		{SiteID: "fast", Complete: true, Status: "ok", CollectedAt: &fast, Items: []upstream.KeyUsageTodayItem{{SiteID: "fast", KeyID: "one", TodayAmount: 4}, {SiteID: "fast", KeyID: "merged", KeyIDs: []string{"merged", "merged-two"}, Merged: true, TodayAmount: 8}}},
-		{SiteID: "early", Complete: true, Status: "retained", CollectedAt: &early, Items: []upstream.KeyUsageTodayItem{{SiteID: "early", KeyID: "two", TodayAmount: 3}}},
+		{Timezone: "Asia/Singapore", ConsumeDate: date, SiteID: "fast", Complete: true, Status: "ok", CollectedAt: &fast, Items: []upstream.KeyUsageTodayItem{{SiteID: "fast", KeyID: "one", TodayAmount: 4}, {SiteID: "fast", KeyID: "merged", KeyIDs: []string{"merged", "merged-two"}, Merged: true, TodayAmount: 8}}},
+		{Timezone: "Asia/Singapore", ConsumeDate: date, SiteID: "early", Complete: true, Status: "retained", CollectedAt: &early, Items: []upstream.KeyUsageTodayItem{{SiteID: "early", KeyID: "two", TodayAmount: 3}}},
 	}}}
 	service := NewMetricsService(nil, &fakePlatformClient{scopeUsage: map[string]upstream.AdminUsageStats{"admin-one|g1": {TotalActualCost: 10}, "admin-two|g2": {TotalActualCost: 10}, "admin-three|g3": {TotalActualCost: 10}}}, upstreams, &fakeMetricsRepository{}, &fakeAdminAccounts{current: map[string]string{"user": "workspace"}})
 	service.now = func() time.Time { return now }
@@ -250,19 +261,19 @@ func TestHomeCostStageAReconciliationRejectsCrossBusinessDay(t *testing.T) {
 	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
 	date := businesstime.DateAt(now)
 	value := 1.0
-	keys := upstream.KeyUsageForDateResult{BusinessDate: date, Sites: []upstream.KeyUsageSiteResult{{SiteID: "site", Complete: true, ConsumeDate: businesstime.DateAt(now.AddDate(0, 0, -1)), SyncedRawCost: &value, CollectedRawCost: &value, Items: []upstream.KeyUsageTodayItem{{SiteID: "site", KeyID: "key", TodayAmount: 1, RawAmount: 1}}}}}
+	keys := upstream.KeyUsageForDateResult{BusinessDate: date, Sites: []upstream.KeyUsageSiteResult{{Timezone: "Asia/Singapore", SiteID: "site", Complete: true, ConsumeDate: businesstime.DateAt(now.AddDate(0, 0, -1)), SyncedRawCost: &value, CollectedRawCost: &value, Items: []upstream.KeyUsageTodayItem{{SiteID: "site", KeyID: "key", TodayAmount: 1, RawAmount: 1}}}}}
 	runs := buildAccountKeyCostRuns("user", "workspace", "run", date, []upstream.SiteCostForDateResult{{SiteID: "site", RawCost: 1, RechargeRate: 1}}, keys, now)
 	if len(runs) != 1 || runs[0].Complete || runs[0].Quality != KeyCostQualityMismatch {
 		t.Fatalf("cross-day costs were reconciled: %#v", runs)
 	}
 }
 
-func TestHomeCostStageAReconciliationAllowsCollectionInterval(t *testing.T) {
+func TestHomeCostStageAReconciliationRejectsCollectionIntervalAsTotalProof(t *testing.T) {
 	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
 	date := businesstime.DateAt(now)
-	keys := stageASnapshotResult(t, map[string]any{"BusinessDate": date, "Sites": []map[string]any{{"SiteID": "site", "Complete": true, "ConsumeDate": date, "SyncedRawCost": 1, "CollectedRawCost": 2, "Items": []upstream.KeyUsageTodayItem{{SiteID: "site", KeyID: "key", RawAmount: 1.5, TodayAmount: 1.5, RechargeRate: 1}}}}})
+	keys := stageASnapshotResult(t, map[string]any{"BusinessDate": date, "Sites": []map[string]any{{"Timezone": "Asia/Singapore", "SiteID": "site", "Complete": true, "ConsumeDate": date, "SyncedRawCost": 1, "CollectedRawCost": 2, "Items": []upstream.KeyUsageTodayItem{{SiteID: "site", KeyID: "key", RawAmount: 1.5, TodayAmount: 1.5, RechargeRate: 1}}}}})
 	runs := buildAccountKeyCostRuns("user", "workspace", "run", date, []upstream.SiteCostForDateResult{{SiteID: "site", RawCost: 1, RechargeRate: 1}}, keys, now)
-	if len(runs) != 1 || !runs[0].Complete {
-		t.Fatalf("same-batch collection interval incorrectly mismatched: %#v", runs)
+	if len(runs) != 1 || runs[0].Complete || runs[0].Quality != KeyCostQualityMismatch {
+		t.Fatalf("collection interval cannot replace independent total: %#v", runs)
 	}
 }

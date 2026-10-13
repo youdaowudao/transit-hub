@@ -28,7 +28,7 @@ func TestHomeCostStageAReconciliationRoundingBoundaries(t *testing.T) {
 			for i, amount := range tc.amounts {
 				items[i] = upstream.KeyUsageTodayItem{SiteID: "site", TodayAmount: amount, RawAmount: amount}
 			}
-			runs := buildAccountKeyCostRuns("user", "workspace", "run", date, []upstream.SiteCostForDateResult{{SiteID: "site", RawCost: tc.total, RechargeRate: 1}}, upstream.KeyUsageForDateResult{BusinessDate: date, ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{SiteID: "site", Complete: true, Items: items}}}, now)
+			runs := buildAccountKeyCostRuns("user", "workspace", "run", date, []upstream.SiteCostForDateResult{{SiteID: "site", RawCost: tc.total, RechargeRate: 1}}, upstream.KeyUsageForDateResult{BusinessDate: date, ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{Timezone: "Asia/Singapore", ConsumeDate: date, SiteID: "site", Complete: true, Items: items}}}, now)
 			if len(runs) != 1 || runs[0].Complete != tc.complete {
 				t.Fatalf("reconciliation = %#v; want complete=%v", runs, tc.complete)
 			}

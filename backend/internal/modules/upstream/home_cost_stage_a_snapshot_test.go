@@ -61,12 +61,12 @@ func (c *keySnapshotTestCache) DeleteKeyUsageSnapshot(_ context.Context, id stri
 	return nil
 }
 func fixtureKeySnapshot(now time.Time, amount float64) KeyUsageSnapshot {
-	return KeyUsageSnapshot{BusinessDate: businesstime.DateAt(now), StartedAt: now, AttemptStartedAt: now, CollectedAt: now.Add(time.Second), ConsumeDate: businesstime.DateAt(now), SyncedRawCost: &amount, CollectedRawCost: &amount, Complete: true, Items: []KeyUsageTodayStat{{KeyID: "1", KeyIDs: []string{"1"}, KeyName: "one", TodayAmount: amount}}}
+	return KeyUsageSnapshot{Timezone: businesstime.Timezone, BusinessDate: businesstime.DateAt(now), StartedAt: now, AttemptStartedAt: now, CollectedAt: now.Add(time.Second), ConsumeDate: businesstime.DateAt(now), SyncedRawCost: &amount, CollectedRawCost: &amount, Complete: true, Items: []KeyUsageTodayStat{{KeyID: "1", KeyIDs: []string{"1"}, KeyName: "one", TodayAmount: amount}}}
 }
 
 func TestHomeCostStageAReadsSameDateSnapshotsWithCurrentRateAndRetention(t *testing.T) {
 	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
-	primary := newTestSite("one", "user", "workspace", 2, nil)
+	primary := newTestSite("one", "user", "workspace", 2, &Session{Platform: PlatformSub2API, AccessToken: "fixture-only"})
 	foreign := newTestSite("foreign", "user", "other", 2, nil)
 	disabled := newTestSite("disabled", "user", "workspace", 2, nil)
 	disabled.Enabled = boolPointer(false)
@@ -114,8 +114,8 @@ func TestHomeCostStageANotifiesSyncBeforeCollectingAndQueuesOnlyOnce(t *testing.
 		switch r.URL.Path {
 		case "/api/v1/auth/me":
 			writeJSON(w, map[string]any{"data": map[string]any{"balance": 10}})
-		case "/api/v1/usage/dashboard/stats":
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3}})
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3, "total_actual_cost": 3}})
 		case "/api/v1/groups/available", "/api/v1/groups/rates":
 			writeJSON(w, map[string]any{"data": []any{}})
 		case "/api/v1/keys":
@@ -128,7 +128,7 @@ func TestHomeCostStageANotifiesSyncBeforeCollectingAndQueuesOnlyOnce(t *testing.
 			}
 			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "one"}}, "total": 1})
 		case "/api/v1/usage/dashboard/api-keys-usage":
-			writeJSON(w, map[string]any{"data": map[string]any{"stats": map[string]any{"1": map[string]any{"today_actual_cost": 3}}}})
+			writeJSON(w, map[string]any{"data": map[string]any{"stats": map[string]any{"1": map[string]any{"today_actual_cost": 3, "total_actual_cost": 3}}}})
 		default:
 			http.NotFound(w, r)
 		}

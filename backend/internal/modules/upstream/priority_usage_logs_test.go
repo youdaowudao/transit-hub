@@ -60,8 +60,8 @@ func TestUpstreamTimerAndMetricsDoNotLogRoutineLines(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/auth/me":
 			writeJSON(w, map[string]any{"data": map[string]any{"balance": 10}})
-		case "/api/v1/usage/dashboard/stats":
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1}})
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1, "total_actual_cost": 1}})
 		case "/api/v1/groups/available":
 			writeJSON(w, map[string]any{"data": []map[string]any{{"id": "1", "name": "fixture", "rate_multiplier": 1}}})
 		case "/api/v1/groups/rates":
@@ -134,6 +134,8 @@ func TestGroupCostCooldownIsSilentAndRealFailureStillLogs(t *testing.T) {
 	cache := &priorityUsageLogCostCache{failureFixDeleteCache: &failureFixDeleteCache{fakeSiteCache: newFakeSiteCache()}, state: GroupCostSamplingState{
 		SummaryNextAllowedAt: time.Now().Add(time.Hour), FallbackNextAllowedAt: time.Now().Add(time.Hour), LastReason: "auth_403",
 	}}
+	site.Metrics.Groups = []GroupInfo{{ID: "1", Name: "fixture"}}
+	cache.add(site)
 	service := NewService(platform, nil, nil, cache)
 	t.Cleanup(service.Close)
 	service.sampleGroupCosts(*site, session, []GroupInfo{{ID: "1", Name: "fixture"}})

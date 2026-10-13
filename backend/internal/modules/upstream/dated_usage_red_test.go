@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -242,7 +243,7 @@ func TestDatedUsageRateLimitPausesSiteThroughKeyUsageForDate(t *testing.T) {
 			cache.add(site)
 			for i := 0; i < 2; i++ {
 				result, err := s.KeyUsageForDate(context.Background(), site.UserID, site.AdminAccountID, "2031-02-02")
-				if err != nil || result.CompletedSites != 0 || len(result.Sites) != 1 || result.Sites[0].Error != ErrorRequest {
+				if err != nil || result.CompletedSites != 0 || len(result.Sites) != 1 || !strings.Contains(result.Sites[0].Error, "失败") {
 					t.Fatalf("failed historical result must stay unreadable: %+v err=%v", result, err)
 				}
 			}

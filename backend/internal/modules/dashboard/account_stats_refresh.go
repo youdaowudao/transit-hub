@@ -19,7 +19,7 @@ type upstreamKeyUsageForDateReader interface {
 type accountKeyCostRunRepository interface {
 	SaveUpstreamKeyCostRuns(ctx context.Context, runs []UpstreamKeyCostRun) error
 	PublishAccountStatsRefresh(ctx context.Context, runs []UpstreamKeyCostRun, stats []AccountDailyStat) error
-	GetPublishedAccountStatsRefresh(ctx context.Context, userID, adminAccountID, runID, date string) (AccountStatsRefreshResponse, bool, error)
+	GetPublishedAccountStatsRefresh(ctx context.Context, userID, adminAccountID, runID, date string, currentDates ...string) (AccountStatsRefreshResponse, bool, error)
 }
 
 type AccountStatsRefreshResponse struct {
@@ -45,6 +45,8 @@ func accountRefreshRunID(userID, adminAccountID, date, idempotencyKey string) st
 }
 
 func (s *MetricsService) RefreshAccountStats(ctx context.Context, userID, date, idempotencyKey string) (AccountStatsRefreshResponse, error) {
+	currentDate := businesstime.DateAt(s.currentTime())
+	ctx = withAccountCurrentDate(ctx, currentDate)
 	if s == nil || s.upstreams == nil || s.accounts == nil || s.keyCostRuns == nil || strings.TrimSpace(idempotencyKey) == "" || len(idempotencyKey) > 256 {
 		return AccountStatsRefreshResponse{}, errInvalidAccountBatch
 	}
@@ -62,7 +64,7 @@ func (s *MetricsService) RefreshAccountStats(ctx context.Context, userID, date, 
 		return AccountStatsRefreshResponse{}, err
 	}
 	runID := accountRefreshRunID(userID, adminAccountID, date, strings.TrimSpace(idempotencyKey))
-	if published, found, err := s.keyCostRuns.GetPublishedAccountStatsRefresh(ctx, userID, adminAccountID, runID, date); err != nil {
+	if published, found, err := s.keyCostRuns.GetPublishedAccountStatsRefresh(ctx, userID, adminAccountID, runID, date, businesstime.DateAt(s.currentTime())); err != nil {
 		return AccountStatsRefreshResponse{}, err
 	} else if found {
 		return published, nil
@@ -114,8 +116,11 @@ func (s *MetricsService) performAccountStatsRefresh(ctx context.Context, reader 
 	for index := range keys.Sites {
 		site := &keys.Sites[index]
 		total := upstream.SiteCostForDateResult{SiteID: site.SiteID, SiteName: site.SiteName, Platform: site.Platform, RechargeRate: site.RechargeRate}
-		if site.SyncedRawCost != nil {
-			total.RawCost = *site.SyncedRawCost
+		if site.CollectedRawCost != nil && site.Timezone == businesstime.Timezone && site.Complete && site.ConsumeDate == date {
+			total.RawCost = *site.CollectedRawCost
+			if site.CollectedAt != nil {
+				total.Meta.ObservedAt = *site.CollectedAt
+			}
 		} else {
 			total.Err = errors.New(upstream.ErrorRequest)
 		}
@@ -125,7 +130,7 @@ func (s *MetricsService) performAccountStatsRefresh(ctx context.Context, reader 
 		}
 		siteTotals = append(siteTotals, total)
 	}
-	runs := buildAccountKeyCostRuns(userID, adminAccountID, runID, date, siteTotals, keys, s.currentTime().UTC())
+	runs := buildAccountKeyCostRuns(userID, adminAccountID, runID, date, siteTotals, keys, s.currentTime().UTC(), businesstime.DateAt(s.currentTime()))
 	result := AccountStatsRefreshResponse{Date: date, SnapshotRunID: runID, ExpectedSites: len(runs), Quality: KeyCostQualityComplete}
 	for _, run := range runs {
 		if run.Complete {

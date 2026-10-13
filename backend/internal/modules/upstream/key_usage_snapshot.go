@@ -26,14 +26,18 @@ type keyUsageCostFailure struct {
 }
 
 // A known cost refusal is a terminal attempt; it never makes a Key request.
-// This runs after sync notification, just like an actual collection.
+// Use the published site and original failure time, never a later cache identity.
 func (s *Service) recordKnownKeyUsageCostFailure(site Site, failure keyUsageCostFailure) {
 	store := s.keyUsageStore()
 	if store == nil {
 		return
 	}
-	startedAt := s.keyUsageNow()
-	value := KeyUsageSnapshot{BusinessDate: businesstime.DateAt(startedAt), StartedAt: startedAt,
+	startedAt := failure.failedAt
+	date := site.Metrics.TodayConsumeDate
+	if startedAt.IsZero() || date == "" || s.keyUsageDate() != date {
+		return
+	}
+	value := KeyUsageSnapshot{BusinessDate: date, StartedAt: startedAt,
 		AttemptStartedAt: startedAt, CollectedAt: startedAt, ConsumeDate: site.Metrics.TodayConsumeDate,
 		SyncedRawCost: site.Metrics.TodayConsume.Value, FailureReason: failure.reason, FailureAt: &failure.failedAt,
 		Items: []KeyUsageTodayStat{}}
@@ -45,16 +49,22 @@ func (s *Service) recordKnownKeyUsageCostFailure(site Site, failure keyUsageCost
 	ctx, cancel := context.WithTimeout(context.Background(), persistenceTimeout)
 	defer cancel()
 	current, err := s.cache.Get(ctx, site.ID)
-	if err != nil || current == nil || !current.IsEnabled() {
+	if err != nil || !keyUsageSiteMatches(current, site) || !reflect.DeepEqual(current.Session, site.Session) ||
+		current.Metrics.TodayConsumeDate != date || current.Metrics.TodayConsumeStatus != "unreadable" ||
+		current.Metrics.TodayConsumeFailedAt == nil || !current.Metrics.TodayConsumeFailedAt.Equal(failure.failedAt) ||
+		current.Metrics.TodayConsumeErrorDetail != failure.reason || s.keyUsageDate() != date {
 		return
 	}
 	if err := store.SaveKeyUsageSnapshot(ctx, site.ID, value); err != nil {
 		log.Printf("[upstream] 逐Key快照写入失败 site=%s", site.ID)
+		return
 	}
 	if s.keyUsageFinished == nil {
 		s.keyUsageFinished = make(map[string]time.Time)
 	}
-	s.keyUsageFinished[site.ID] = startedAt
+	if s.keyUsageFinished[site.ID].Before(startedAt) {
+		s.keyUsageFinished[site.ID] = startedAt
+	}
 	s.keyUsageNotifyLocked()
 }
 
@@ -152,7 +162,7 @@ func (s *Service) collectKeyUsageSnapshot(site Site) {
 	site.Session = &originalSession
 	startedAt := s.keyUsageNow()
 	date := businesstime.DateAt(startedAt)
-	value := KeyUsageSnapshot{BusinessDate: date, StartedAt: startedAt, AttemptStartedAt: startedAt, ConsumeDate: site.Metrics.TodayConsumeDate, SyncedRawCost: site.Metrics.TodayConsume.Value, Items: []KeyUsageTodayStat{}}
+	value := KeyUsageSnapshot{BusinessDate: date, StartedAt: startedAt, AttemptStartedAt: startedAt, ConsumeDate: site.Metrics.TodayConsumeDate, Items: []KeyUsageTodayStat{}}
 	ctx, cancel := context.WithTimeout(context.Background(), keyUsageCollectionTimeout)
 	defer cancel()
 	if s.isSiteDeleted(site.ID) {
@@ -165,24 +175,35 @@ func (s *Service) collectKeyUsageSnapshot(site Site) {
 	sessionPersisted := false
 	if err == nil {
 		proceed, saveErr := s.persistKeyUsageSession(site, session)
-		if !proceed {
+		if !proceed && saveErr == nil {
 			return
 		}
 		err = saveErr
 		sessionPersisted = saveErr == nil
 	}
-	if err == nil {
-		value.CollectedRawCost, err = s.platformService.fetchKeyCollectionTotal(ctx, session, date)
+	if UsableSingaporeTodayCost(site.Metrics, date) {
+		value.SyncedRawCost = site.Metrics.TodayConsume.Value
 	}
 	if err == nil {
-		value.Items, err = s.platformService.collectKeyUsageToday(ctx, session, site.Metrics.Groups, date)
+		var total float64
+		var collectedAt time.Time
+		value.Items, total, collectedAt, err = s.platformService.fetchDatedKeyCollection(ctx, session, site.Metrics.Groups, date)
+		if err == nil {
+			value.CollectedRawCost = &total
+			value.CollectedAt = collectedAt
+			value.Timezone = businesstime.Timezone
+			value.ConsumeDate = date
+		}
 	}
 	value.CollectedAt = s.keyUsageNow()
 	if err == nil {
 		value.Complete = true
 	} else {
 		reason := siteErrorKey(err)
-		value.FailureReason = reason
+		value.FailureReason = taskErrorDetail(err)
+		if value.FailureReason == "" {
+			value.FailureReason = formatCostFailure("站点“"+safeCostReason(site.Name)+"”逐Key指定日费用读取", err)
+		}
 		value.FailureAt = &value.CollectedAt
 		var requestErr *RequestError
 		status := 0
@@ -190,6 +211,9 @@ func (s *Service) collectKeyUsageSnapshot(site Site) {
 			status = requestErr.StatusCode
 		}
 		log.Printf("[upstream] 逐Key读取失败 site=%s name=%s host=%s reason=%s status=%d", site.ID, safeUpstreamMessage(site.Name), safeHost(site.BaseURL), reason, status)
+	}
+	if s.keyUsageDate() != date {
+		return
 	}
 	// Removal holds the same lock across deletion, preventing a late writer's resurrection.
 	s.mu.Lock()
@@ -240,22 +264,12 @@ func (s *Service) persistKeyUsageSession(original Site, refreshed Session) (bool
 	if !keyUsageSiteMatches(current, original) || !reflect.DeepEqual(current.Session, original.Session) {
 		return false, nil
 	}
-	if reflect.DeepEqual(current.Session, &refreshed) {
-		return true, nil
-	}
-	current.Session = &refreshed
-	// Both interfaces are called under the lock: the public wrappers acquire the
-	// same lock themselves. Each store is attempted independently so a cache
-	// failure cannot discard a rotated refresh token; neither store is rolled back.
-	cacheErr := s.cache.Set(ctx, current)
-	var durableErr error
-	if s.repository != nil {
-		durableCtx, durableCancel := context.WithTimeout(context.Background(), persistenceTimeout)
-		defer durableCancel()
-		durableErr = s.repository.SaveSite(durableCtx, *current)
-	}
-	if err := errors.Join(cacheErr, durableErr); err != nil {
-		return true, keyUsageSessionPersistenceError(original.Platform, err)
+	expected := cloneSite(current)
+	candidate := cloneSite(current)
+	candidate.Session = &refreshed
+	err = s.publishExistingSiteLocked(expected, candidate, true, nil)
+	if err != nil {
+		return false, err
 	}
 	return true, nil
 }
@@ -296,6 +310,13 @@ func (s *Service) CachedKeyUsageForDate(ctx context.Context, userID, adminAccoun
 			}
 		}
 		if snapshot != nil && snapshot.BusinessDate == date {
+			item.Error = snapshot.FailureReason
+			if snapshot.Complete && snapshot.Timezone != businesstime.Timezone {
+				item.Error = oldSingaporeCostMessage
+			}
+		}
+		if site.Status != StatusConnecting && site.Session != nil && snapshot != nil && snapshot.BusinessDate == date && snapshot.Timezone == businesstime.Timezone {
+			item.Timezone = snapshot.Timezone
 			item.Error = snapshot.FailureReason
 			item.StartedAt = snapshot.StartedAt
 			item.SyncedRawCost = snapshot.SyncedRawCost
@@ -341,8 +362,10 @@ func (s *Service) SyncAndCollectKeyUsage(ctx context.Context, userID, adminAccou
 	}
 	syncResults := s.SyncSites(ctx, userID, adminAccountID, ids, true)
 	success := make(map[string]bool)
+	syncFailures := make(map[string]string)
 	for _, result := range syncResults {
 		success[result.SiteID] = result.Status == "success"
+		syncFailures[result.SiteID] = result.ErrorDetail
 	}
 	waitIDs := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -410,6 +433,9 @@ func (s *Service) SyncAndCollectKeyUsage(ctx context.Context, userID, adminAccou
 			site.Complete = false
 			site.Status = "missing"
 			site.Items = []KeyUsageTodayItem{}
+			if syncFailures[site.SiteID] != "" {
+				site.Error = syncFailures[site.SiteID]
+			}
 		} else if site.Complete {
 			result.CompletedSites++
 		}

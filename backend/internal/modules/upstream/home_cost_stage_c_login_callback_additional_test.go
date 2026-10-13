@@ -81,8 +81,8 @@ func TestHomeCostStageCCredentialNotificationWaitsForPersistence(t *testing.T) {
 		t.Error("failed persistence cleared manual block")
 	}
 	rolledBack, err := cache.Get(t.Context(), site.ID)
-	if err != nil || rolledBack == nil || rolledBack.Session.AccessToken != "fixture-old" {
-		t.Fatal("failed update lost prior credentials")
+	if err != nil || rolledBack == nil || rolledBack.Session.AccessToken != "fixture-new" {
+		t.Fatal("PG failure must preserve validated replacement credentials in cache only")
 	}
 	repo.saveErr = nil
 	if _, err := svc.Update(t.Context(), "user", site.ID, dto); err != nil {
@@ -91,4 +91,9 @@ func TestHomeCostStageCCredentialNotificationWaitsForPersistence(t *testing.T) {
 	if notices != 1 {
 		t.Errorf("successfully persisted credential notifications=%d want=1", notices)
 	}
+}
+
+func (r *homeCostCredentialRepository) SaveExistingSiteIfUnchanged(ctx context.Context, expected, candidate Site) (bool, error) {
+	err := r.SaveSite(ctx, candidate)
+	return err == nil, err
 }

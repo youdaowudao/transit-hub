@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"time"
 
+	"transithub/backend/internal/shared/businesstime"
+
 	"github.com/redis/go-redis/v9"
 )
 
@@ -13,6 +15,7 @@ const keyUsageSnapshotTTL = 48 * time.Hour
 
 // KeyUsageSnapshot stores raw amounts. Rates are applied by each read using current settings.
 type KeyUsageSnapshot struct {
+	Timezone         string
 	BusinessDate     string
 	StartedAt        time.Time
 	CollectedAt      time.Time
@@ -61,7 +64,7 @@ func newerKeyUsageSnapshot(previous *KeyUsageSnapshot, value KeyUsageSnapshot) (
 		if !value.AttemptStartedAt.After(previousStarted) {
 			return KeyUsageSnapshot{}, false
 		}
-		if !value.Complete && previous.Complete && previous.BusinessDate == value.BusinessDate {
+		if !value.Complete && previous.Complete && previous.BusinessDate == value.BusinessDate && previous.Timezone == businesstime.Timezone {
 			retained := *previous
 			retained.FailureReason = value.FailureReason
 			retained.FailureAt = value.FailureAt

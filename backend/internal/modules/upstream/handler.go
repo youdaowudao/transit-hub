@@ -268,6 +268,11 @@ func writeWorkspaceError(w http.ResponseWriter, err error) {
 }
 
 func writeUpstreamError(w http.ResponseWriter, err error) {
+	var saveErr *RequestError
+	if errors.As(err, &saveErr) && saveErr.Stage == "save" {
+		writeUpstreamFormError(w, err)
+		return
+	}
 	var referencesErr *SiteInUseError
 	if errors.As(err, &referencesErr) {
 		httpjson.Write(w, http.StatusConflict, map[string]any{"message": ErrorSiteInUse, "failure": map[string]int{"connections": referencesErr.Connections, "mappings": referencesErr.Mappings}})
@@ -292,6 +297,7 @@ func writeUpstreamError(w http.ResponseWriter, err error) {
 // Form failures carry transient safe detail; shared HTTP helpers stay unchanged.
 type formFailure struct {
 	ErrorKey        string           `json:"errorKey,omitempty"`
+	ErrorDetail     string           `json:"errorDetail,omitempty"`
 	Stage           string           `json:"stage,omitempty"`
 	HTTPStatus      int              `json:"httpStatus"`
 	UpstreamMessage string           `json:"upstreamMessage,omitempty"`
@@ -319,10 +325,17 @@ func writeUpstreamFormError(w http.ResponseWriter, err error) {
 		}
 		if detail.Stage != "" || detail.Reason != "" {
 			key := siteErrorKey(err)
-			httpjson.Write(w, http.StatusUnprocessableEntity, struct {
+			status := http.StatusUnprocessableEntity
+			if detail.Stage == "save" {
+				status = detail.StatusCode
+				if status != 409 && status != 503 {
+					status = 503
+				}
+			}
+			httpjson.Write(w, status, struct {
 				Message string      `json:"message"`
 				Failure formFailure `json:"failure"`
-			}{key, formFailure{ErrorKey: key, Stage: detail.Stage, HTTPStatus: detail.StatusCode, UpstreamMessage: detail.UpstreamMessage, Attempts: detail.Attempts}})
+			}{key, formFailure{ErrorKey: key, ErrorDetail: taskErrorDetail(err), Stage: detail.Stage, HTTPStatus: detail.StatusCode, UpstreamMessage: detail.UpstreamMessage, Attempts: detail.Attempts}})
 			return
 		}
 	}

@@ -103,3 +103,10 @@ test('core gate includes C5 import settings and retained group rates behavior', 
     assert.ok(script.includes(member), `missing C5 core regression: ${member}`)
   }
 })
+
+test('core gate includes dated cost business and storage regressions', async () => {
+  const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
+  for (const member of ['singapore-cost-critical.behavior.test.ts', 'singapore-cost-dashboard-hydration.behavior.test.ts', 'singapore-cost-sites.behavior.test.ts', 'singapore-cost-daily-stats.behavior.test.ts']) assert.ok(script.includes(member), `missing dated cost core regression: ${member}`)
+  assert.match(script, /go test -race \.\/internal\/modules\/upstream \.\/internal\/modules\/dashboard -run 'TestSingaporeCost'/)
+  assert.ok(script.includes('./internal/modules/dashboard'))
+})

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestFetchGroupCostStatsForDateFallsBackToBoundedCompleteKeySet(t *testing.T) {
+func TestFetchGroupCostStatsForDateUsesNativeSparseGroupsAndIndependentTotal(t *testing.T) {
 	var usageRequests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -22,13 +22,15 @@ func TestFetchGroupCostStatsForDateFallsBackToBoundedCompleteKeySet(t *testing.T
 				{"id": 11, "group_id": 1},
 				{"id": 12, "group_id": 2},
 			}, "total": 2})
+		case "/api/v1/usage/dashboard/snapshot-v2":
+			writeJSON(w, map[string]any{"data": map[string]any{"start_date": "2026-08-16", "end_date": "2026-08-16", "groups": []any{map[string]any{"group_id": 1, "actual_cost": 3.5}}}})
 		case "/api/v1/usage/stats":
 			usageRequests++
 			if r.URL.Query().Get("api_key_id") == "11" {
 				writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 3.5}})
 				return
 			}
-			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 0.0}})
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 3.5}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -45,7 +47,7 @@ func TestFetchGroupCostStatsForDateFallsBackToBoundedCompleteKeySet(t *testing.T
 	if err != nil {
 		t.Fatalf("FetchGroupCostStatsForDate() error: %v", err)
 	}
-	if result.Source != GroupCostSourceKeyFallback || !result.Complete || len(result.Stats) != 2 || usageRequests != 2 {
+	if result.Source != GroupCostSourceSummary || !result.Complete || len(result.Stats) != 2 || usageRequests != 2 {
 		t.Fatalf("unexpected fallback result: %+v usageRequests=%d", result, usageRequests)
 	}
 	if result.SiteReportedRawCost == nil || *result.SiteReportedRawCost != 3.5 || result.UnattributedRawCost == nil || *result.UnattributedRawCost != 0 {
@@ -135,13 +137,17 @@ func TestFetchGroupCostStatsForDateDoesNotFanOutOnSummaryNetworkFailure(t *testi
 	}
 }
 
-func TestFetchGroupCostStatsForDateTreatsCompleteEmptyKeySetAsZero(t *testing.T) {
+func TestFetchGroupCostStatsForDateTreatsNativeEmptyArrayWithIndependentZeroAsZero(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/groups/available":
 			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "vip"}}})
 		case "/api/v1/admin/groups/usage-summary":
 			http.Error(w, "forbidden", http.StatusForbidden)
+		case "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 0}})
+		case "/api/v1/usage/dashboard/snapshot-v2":
+			writeJSON(w, map[string]any{"data": map[string]any{"start_date": "2026-08-16", "end_date": "2026-08-16", "groups": []any{}}})
 		case "/api/v1/keys":
 			writeJSON(w, map[string]any{"data": []map[string]any{}, "total": 0})
 		default:
@@ -162,7 +168,7 @@ func TestFetchGroupCostStatsForDateTreatsCompleteEmptyKeySetAsZero(t *testing.T)
 	}
 }
 
-func TestFetchGroupCostStatsForDateRejectsUnknownKeyGroup(t *testing.T) {
+func TestFetchGroupCostStatsForDateUnknownCurrentKeyGroupDoesNotAffectNativeAttribution(t *testing.T) {
 	var usageRequests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -172,9 +178,11 @@ func TestFetchGroupCostStatsForDateRejectsUnknownKeyGroup(t *testing.T) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 		case "/api/v1/keys":
 			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 11, "group_id": 99}}, "total": 1})
+		case "/api/v1/usage/dashboard/snapshot-v2":
+			writeJSON(w, map[string]any{"data": map[string]any{"start_date": "2026-08-16", "end_date": "2026-08-16", "groups": []any{}}})
 		case "/api/v1/usage/stats":
 			usageRequests++
-			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 1.0}})
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 0.0}})
 		}
 	}))
 	defer server.Close()
@@ -186,7 +194,7 @@ func TestFetchGroupCostStatsForDateRejectsUnknownKeyGroup(t *testing.T) {
 		"2026-08-16",
 		GroupCostSamplingState{},
 	)
-	if err == nil || usageRequests != 0 {
+	if err != nil || usageRequests != 2 {
 		t.Fatalf("unknown group mapping must reject whole batch before usage fan-out: err=%v usageRequests=%d", err, usageRequests)
 	}
 }
@@ -466,7 +474,7 @@ func TestFetchAdminGroupDailyStatsForDate_NewAPIUsesOneRequestedBusinessDay(t *t
 // today_actual_cost / total_actual_cost / actual_cost 语义。
 func TestSub2APICostParsers(t *testing.T) {
 	t.Run("group usage summary prefers today_actual_cost", func(t *testing.T) {
-		got := sub2APIUsageSummaryCost(map[string]any{"today_actual_cost": 9.5})
+		got := sub2APIUsageSummaryCost(map[string]any{"today_actual_cost": 9.5, "total_actual_cost": 9.5})
 		if got != 9.5 {
 			t.Errorf("got %.2f, want 9.50", got)
 		}
@@ -487,7 +495,7 @@ func TestSub2APICostParsers(t *testing.T) {
 	})
 
 	t.Run("admin dashboard groups fallback parses today_actual_cost", func(t *testing.T) {
-		got := sub2APIGroupDailyCost(map[string]any{"today_actual_cost": 6.6})
+		got := sub2APIGroupDailyCost(map[string]any{"today_actual_cost": 6.6, "total_actual_cost": 6.6})
 		if got != 6.6 {
 			t.Errorf("got %.2f, want 6.60", got)
 		}

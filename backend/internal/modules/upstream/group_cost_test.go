@@ -9,9 +9,9 @@ import (
 func TestCalculateGroupCostSnapshotUsesApproximateHourlyBaseline(t *testing.T) {
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	samples := []GroupCostSample{
-		{Date: "2026-08-16", RawAmount: 2.0, ObservedAt: now.Add(-75 * time.Minute)},
-		{Date: "2026-08-16", RawAmount: 2.4, ObservedAt: now.Add(-65 * time.Minute)},
-		{Date: "2026-08-16", RawAmount: 3.0, ObservedAt: now.Add(-5 * time.Minute)},
+		{Date: "2026-08-16", Source: GroupCostSourceSummary, Complete: true, RawAmount: 2.0, ObservedAt: now.Add(-75 * time.Minute)},
+		{Date: "2026-08-16", Source: GroupCostSourceSummary, Complete: true, RawAmount: 2.4, ObservedAt: now.Add(-65 * time.Minute)},
+		{Date: "2026-08-16", Source: GroupCostSourceSummary, Complete: true, RawAmount: 3.0, ObservedAt: now.Add(-5 * time.Minute)},
 	}
 
 	today, recentHour, observedAt, sample := calculateGroupCostSnapshot(samples, "2026-08-16", now, 7)
@@ -38,13 +38,13 @@ func TestCalculateGroupCostSnapshotReturnsUnknownForStaleOrMissingBaseline(t *te
 		{
 			name: "retained latest sample",
 			samples: []GroupCostSample{
-				{Date: "2026-08-16", RawAmount: 3, ObservedAt: now.Add(-16 * time.Minute)},
+				{Date: "2026-08-16", Source: GroupCostSourceSummary, Complete: true, RawAmount: 3, ObservedAt: now.Add(-16 * time.Minute)},
 			},
 		},
 		{
 			name: "no hourly baseline",
 			samples: []GroupCostSample{
-				{Date: "2026-08-16", RawAmount: 2, ObservedAt: now.Add(-10 * time.Minute)},
+				{Date: "2026-08-16", Source: GroupCostSourceSummary, Complete: true, RawAmount: 2, ObservedAt: now.Add(-10 * time.Minute)},
 			},
 		},
 	}
@@ -72,8 +72,8 @@ func TestCalculateGroupCostSnapshotReturnsUnknownForStaleOrMissingBaseline(t *te
 func TestCalculateGroupCostSnapshotIgnoresPreviousBusinessDate(t *testing.T) {
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	samples := []GroupCostSample{
-		{Date: "2026-08-15", RawAmount: 100, ObservedAt: now.Add(-70 * time.Minute)},
-		{Date: "2026-08-16", RawAmount: 3, ObservedAt: now.Add(-5 * time.Minute)},
+		{Date: "2026-08-15", Source: GroupCostSourceSummary, Complete: true, RawAmount: 100, ObservedAt: now.Add(-70 * time.Minute)},
+		{Date: "2026-08-16", Source: GroupCostSourceSummary, Complete: true, RawAmount: 3, ObservedAt: now.Add(-5 * time.Minute)},
 	}
 
 	today, recentHour, _, _ := calculateGroupCostSnapshot(samples, "2026-08-16", now, 7)
@@ -88,21 +88,29 @@ func TestCalculateGroupCostSnapshotIgnoresPreviousBusinessDate(t *testing.T) {
 func TestCalculateGroupCostSnapshotRejectsNegativeAndCounterRollback(t *testing.T) {
 	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
 	cases := map[string][]GroupCostSample{
-		"negative cumulative": {{Date: "2026-08-16", RawAmount: -1, ObservedAt: now.Add(-5 * time.Minute)}},
+		"negative cumulative": {{Date: "2026-08-16", Source: GroupCostSourceSummary, Complete: true, RawAmount: -1, ObservedAt: now.Add(-5 * time.Minute)}},
 		"negative hourly baseline": {
-			{Date: "2026-08-16", RawAmount: -1, ObservedAt: now.Add(-65 * time.Minute)},
-			{Date: "2026-08-16", RawAmount: 3, ObservedAt: now.Add(-5 * time.Minute)},
+			{Date: "2026-08-16", Source: GroupCostSourceSummary, Complete: true, RawAmount: -1, ObservedAt: now.Add(-65 * time.Minute)},
+			{Date: "2026-08-16", Source: GroupCostSourceSummary, Complete: true, RawAmount: 3, ObservedAt: now.Add(-5 * time.Minute)},
 		},
 		"counter rollback": {
-			{Date: "2026-08-16", RawAmount: 5, ObservedAt: now.Add(-65 * time.Minute)},
-			{Date: "2026-08-16", RawAmount: 3, ObservedAt: now.Add(-5 * time.Minute)},
+			{Date: "2026-08-16", Source: GroupCostSourceSummary, Complete: true, RawAmount: 5, ObservedAt: now.Add(-65 * time.Minute)},
+			{Date: "2026-08-16", Source: GroupCostSourceSummary, Complete: true, RawAmount: 3, ObservedAt: now.Add(-5 * time.Minute)},
 		},
 	}
 	for name, samples := range cases {
 		t.Run(name, func(t *testing.T) {
 			today, recentHour, observedAt, sample := calculateGroupCostSnapshot(samples, "2026-08-16", now, 7)
-			if today != nil || recentHour != nil || observedAt != nil || sample != nil {
-				t.Fatalf("abnormal cumulative value must be unknown, got today=%v recentHour=%v observedAt=%v sample=%v", today, recentHour, observedAt, sample)
+			if name == "counter rollback" {
+				if today == nil || *today != 35 || recentHour != nil || observedAt == nil || sample == nil {
+					t.Fatalf("rollback must retain the still-valid complete amount, got %v %v", today, recentHour)
+				}
+			} else if name == "negative hourly baseline" {
+				if today == nil || *today != 21 || recentHour != nil {
+					t.Fatal("invalid baseline must not hide readable today's amount")
+				}
+			} else if today != nil || recentHour != nil || observedAt != nil || sample != nil {
+				t.Fatal("negative latest amount must remain unknown")
 			}
 		})
 	}

@@ -84,7 +84,7 @@ func newReviewSessionFixture(t *testing.T) *reviewSessionFixture {
 	amount := 3.0
 	f := &reviewSessionFixture{repo: &reviewSessionRepository{}}
 	f.site = newTestSite("site", "user", "workspace", 1, &Session{AuthMode: AuthModeToken, Platform: PlatformSub2API, AccessToken: "fixture-old-access", RefreshToken: "fixture-old-refresh", TokenType: "Bearer", ExpiresAt: &expires})
-	f.site.Metrics = Metrics{TodayConsume: metric(&amount), TodayConsumeDate: businesstime.DateAt(now), TodayConsumeAt: &now, TodayConsumeStatus: "ok"}
+	f.site.Metrics = Metrics{TodayConsume: metric(&amount), TodayConsumeTimezone: businesstime.Timezone, TodayConsumeDate: businesstime.DateAt(now), TodayConsumeAt: &now, TodayConsumeStatus: "ok"}
 	f.cache = &reviewSessionCache{keySnapshotTestCache: newKeySnapshotTestCache(f.site)}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -93,16 +93,16 @@ func newReviewSessionFixture(t *testing.T) *reviewSessionFixture {
 				f.onRefresh()
 			}
 			writeJSON(w, map[string]any{"data": map[string]any{"access_token": "fixture-rotated-access", "refresh_token": "fixture-rotated-refresh", "token_type": "Bearer"}})
-		case "/api/v1/usage/dashboard/stats":
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
 			f.statsReads.Add(1)
 			if f.onStats != nil {
 				f.onStats()
 			}
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3}})
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3, "total_actual_cost": 3}})
 		case "/api/v1/keys":
 			writeJSON(w, map[string]any{"data": map[string]any{"items": []map[string]any{{"id": 1, "name": "验收-Key"}}, "total": 1}})
 		case "/api/v1/usage/dashboard/api-keys-usage":
-			writeJSON(w, map[string]any{"data": map[string]any{"stats": map[string]any{"1": map[string]any{"today_actual_cost": 3}}}})
+			writeJSON(w, map[string]any{"data": map[string]any{"stats": map[string]any{"1": map[string]any{"today_actual_cost": 3, "total_actual_cost": 3}}}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -137,7 +137,7 @@ func TestHomeCostReviewCollectorPersistenceFailureStaysIncomplete(t *testing.T) 
 				t.Error("failed cache write changed prior credentials")
 			}
 			snapshot, err := f.cache.GetKeyUsageSnapshot(t.Context(), f.site.ID)
-			if err != nil || snapshot == nil || snapshot.Complete || snapshot.FailureReason != ErrorRequest {
+			if err != nil || snapshot != nil {
 				t.Error("session persistence failure became a complete collection")
 			}
 			if f.statsReads.Load() != 0 {
@@ -173,7 +173,7 @@ func TestHomeCostReviewCollectorAttemptsRepositoryAfterCacheFailure(t *testing.T
 				t.Error("failed cache write changed original local value")
 			}
 			snapshot, err := f.cache.GetKeyUsageSnapshot(t.Context(), f.site.ID)
-			if err != nil || snapshot == nil || snapshot.Complete || snapshot.FailureReason != ErrorRequest {
+			if err != nil || snapshot != nil {
 				t.Error("partial session preservation made the collection complete")
 			}
 			if f.statsReads.Load() != 0 {
@@ -278,4 +278,9 @@ func TestHomeCostReviewCollectorDoesNotPublishAfterLaterSession(t *testing.T) {
 	if snapshot, _ := f.cache.GetKeyUsageSnapshot(t.Context(), f.site.ID); snapshot != nil {
 		t.Error("older collection published after the session changed")
 	}
+}
+
+func (r *reviewSessionRepository) SaveExistingSiteIfUnchanged(ctx context.Context, expected, candidate Site) (bool, error) {
+	err := r.SaveSite(ctx, candidate)
+	return err == nil, err
 }

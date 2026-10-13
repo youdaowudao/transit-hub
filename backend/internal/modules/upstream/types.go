@@ -49,12 +49,13 @@ const (
 // SyncEvent 是 SSE 同步流中每个 data: 行的 JSON 载荷。
 // 前端通过 event 字段判断当前阶段并更新对应站点卡片的进度。
 type SyncEvent struct {
-	Event    string    `json:"event"`
-	SiteID   string    `json:"siteId"`
-	Attempt  int       `json:"attempt,omitempty"`
-	MaxRetry int       `json:"maxRetry,omitempty"`
-	Site     *Response `json:"site,omitempty"`
-	ErrorKey string    `json:"errorKey,omitempty"`
+	Event       string    `json:"event"`
+	SiteID      string    `json:"siteId"`
+	Attempt     int       `json:"attempt,omitempty"`
+	MaxRetry    int       `json:"maxRetry,omitempty"`
+	Site        *Response `json:"site,omitempty"`
+	ErrorKey    string    `json:"errorKey,omitempty"`
+	ErrorDetail string    `json:"errorDetail,omitempty"`
 }
 
 // SyncEventCallback 是 SSE 事件的推送回调，由 handler 注入，
@@ -64,9 +65,10 @@ type SyncEventCallback func(SyncEvent)
 // SyncSiteResult 是站点同步的安全终态，仅用于进程内刷新编排和页面结果。
 // 它不包含上游响应体、URL 参数或任何凭据。
 type SyncSiteResult struct {
-	SiteID   string `json:"siteId"`
-	Status   string `json:"status"`
-	ErrorKey string `json:"errorKey,omitempty"`
+	SiteID      string `json:"siteId"`
+	Status      string `json:"status"`
+	ErrorKey    string `json:"errorKey,omitempty"`
+	ErrorDetail string `json:"errorDetail,omitempty"`
 }
 
 type AuthMode string
@@ -133,7 +135,9 @@ type Metrics struct {
 	Groups          []GroupInfo `json:"groups"`
 	// TodayConsumeDate 是 TodayConsume 对应的新加坡业务日期（"2006-01-02"）。
 	// 同步时由上游同步入口统一写入，用于日期归属校验。空字符串表示尚未记录。
-	TodayConsumeDate string `json:"todayConsumeDate,omitempty"`
+	TodayConsumeDate        string `json:"todayConsumeDate,omitempty"`
+	TodayConsumeTimezone    string `json:"todayConsumeTimezone,omitempty"`
+	TodayConsumeErrorDetail string `json:"todayConsumeErrorDetail,omitempty"`
 	// TodayConsumeAt 是 TodayConsume 的实际采集时间，用于缓存时效校验。
 	TodayConsumeAt *time.Time `json:"todayConsumeAt,omitempty"`
 	// A missing status in legacy data means ok. Failed reads only store safe metadata.
@@ -229,8 +233,7 @@ type Response struct {
 	Settings          SiteSettings `json:"settings"`
 	LastSyncedAt      *int64       `json:"lastSyncedAt"`
 
-	syncTimedOut        bool
-	keyUsageCostFailure *keyUsageCostFailure
+	syncTimedOut bool
 }
 
 func enabledOrDefault(enabled *bool) bool {
@@ -471,6 +474,7 @@ type KeyUsageTodayItem struct {
 }
 
 type KeyUsageSiteResult struct {
+	Timezone         string `json:"timezone,omitempty"`
 	Status           string
 	StartedAt        time.Time
 	CollectedAt      *time.Time

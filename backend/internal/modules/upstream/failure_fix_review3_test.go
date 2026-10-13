@@ -86,7 +86,7 @@ func TestFailureFixReview3SyncKeepsBaselineCategory(t *testing.T) {
 	}
 }
 
-func TestFailureFixReview3ModeSwitchRequiresCredentialsWithoutWrites(t *testing.T) {
+func TestFailureFixReview3ModeSwitchRejectedWithoutWrites(t *testing.T) {
 	failureFixCaptureLogs(t)
 	for _, tc := range []struct {
 		platform         Platform
@@ -126,8 +126,8 @@ func TestFailureFixReview3ModeSwitchRequiresCredentialsWithoutWrites(t *testing.
 			request = request.WithContext(authctx.WithUserID(request.Context(), "fixture-user"))
 			response := httptest.NewRecorder()
 			(&Handler{service: service, accounts: service.accounts}).update(response, request)
-			if response.Code != http.StatusBadRequest {
-				t.Errorf("mode switch status=%d, want 400", response.Code)
+			if response.Code != http.StatusUnprocessableEntity {
+				t.Errorf("mode switch status=%d, want 422", response.Code)
 			}
 			var result struct {
 				Message string `json:"message"`
@@ -136,12 +136,8 @@ func TestFailureFixReview3ModeSwitchRequiresCredentialsWithoutWrites(t *testing.
 				} `json:"failure"`
 			}
 			_ = json.Unmarshal(response.Body.Bytes(), &result)
-			field := "accessToken"
-			if tc.newMode == AuthModePassword {
-				field = "password"
-			}
-			if result.Message != ErrorInvalidFields || !reflect.DeepEqual(result.Failure.Fields, []string{field}) {
-				t.Errorf("missing credential validation: %+v", result)
+			if result.Message != ErrorRequest {
+				t.Errorf("identity mode replacement must be rejected: %+v", result)
 			}
 			after, _ := cache.Get(context.Background(), original.ID)
 			afterJSON, _ := json.Marshal(after)
@@ -197,7 +193,7 @@ func TestFailureFixReview3KeyUsageBusinessRejectionRetainsRetry(t *testing.T) {
 	}
 }
 
-func TestFailureFixReview3ModeSwitchSuccessReplacesSession(t *testing.T) {
+func TestFailureFixReview3ModeSwitchWithCredentialsStillPreservesOriginalIdentity(t *testing.T) {
 	failureFixCaptureLogs(t)
 	for _, tc := range []struct {
 		platform         Platform
@@ -242,24 +238,12 @@ func TestFailureFixReview3ModeSwitchSuccessReplacesSession(t *testing.T) {
 					dto.AccessToken = "fixture-new-access"
 				}
 			}
-			response, err := service.Update(context.Background(), original.UserID, original.ID, dto)
-			if err != nil {
-				t.Fatalf("valid mode switch failed: %v", err)
-			}
+			_, err := service.Update(context.Background(), original.UserID, original.ID, dto)
 			after, _ := cache.Get(context.Background(), original.ID)
-			if response.AuthMode != tc.newMode || after.Session.AuthMode != tc.newMode || after.Status != StatusConnected || len(repository.saved) != 1 {
-				t.Error("successful mode switch did not replace and persist the session with selected mode")
+			if err == nil || !reflect.DeepEqual(after, original) || len(repository.saved) != 0 {
+				t.Fatal("switching the original site's login identity must preserve its session and records")
 			}
-			if after.Session.AccessToken == "fixture-old-access" || after.Session.Cookie == "fixture-old-cookie" {
-				t.Error("mode switch retained original authentication credentials")
-			}
-			account := dto.Account
-			if tc.newMode == AuthModeUserKey {
-				account = dto.UserID
-			}
-			if after.Account != account || response.Account != account {
-				t.Error("display account differs from selected login identity")
-			}
+
 		})
 	}
 }

@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { AlertTriangle, ArrowDownWideNarrow, ArrowUpWideNarrow, Loader2, RefreshCw, ShoppingCart, X } from 'lucide-vue-next'
 import { getUpstreamKeyUsageToday, type UpstreamKeyUsageTodayItem, type UpstreamKeyUsageSnapshotSite } from '../../api/dashboardAdmin'
+import { costFailureText } from '../../utils/upstream'
 import { formatAmount, formatDateTime } from '../../utils/dashboard'
 
 const props = defineProps<{
@@ -93,7 +94,8 @@ watch(() => props.open, (isOpen) => {
               <ShoppingCart class="h-5 w-5" />
             </div>
             <div class="min-w-0">
-              <h2 class="text-lg font-semibold text-foreground">{{ t('admin.dashboard.upstreamKeyUsage.title') }}</h2>
+              <p class="text-xs text-muted-foreground">费用按新加坡日期统计，使用最近一次同步结果；暂缺的费用不会计作零。</p>
+ <h2 class="text-lg font-semibold text-foreground">{{ t('admin.dashboard.upstreamKeyUsage.title') }}</h2>
               <p class="break-words text-sm text-muted-foreground">
                 {{ t('admin.dashboard.upstreamKeyUsage.subtitle', { count: keys.length, total: formatAmount(allMissing ? null : total), successful: successfulSites, failed: failedSites }) }}
               </p>
@@ -189,7 +191,7 @@ watch(() => props.open, (isOpen) => {
           <div v-if="!loading && !error && sites.length" class="mt-4 max-h-[25vh] overflow-y-auto rounded-xl border border-border/60">
             <table class="w-full text-sm">
               <thead class="bg-surface/90 text-left text-xs text-muted-foreground"><tr><th class="px-4 py-3">上游站点</th><th class="px-4 py-3">读取状态</th><th class="px-4 py-3">采集时间</th></tr></thead>
-              <tbody><tr v-for="site in sites" :key="site.siteId" class="border-t border-border/40"><td class="px-4 py-3">{{ site.siteName }}</td><td class="px-4 py-3">{{ siteStatus(site.status) }}<p v-if="site.errorKey" class="text-xs text-muted-foreground">{{ t(site.errorKey) }}</p></td><td class="px-4 py-3 text-muted-foreground">{{ site.collectedAt ? formatDateTime(Date.parse(site.collectedAt)) : '暂无今日采集记录' }}</td></tr></tbody>
+              <tbody><tr v-for="site in sites" :key="site.siteId" class="border-t border-border/40"><td class="px-4 py-3">{{ site.siteName }}</td><td class="px-4 py-3">{{ siteStatus(site.status) }}<p v-if="site.errorKey" class="text-xs text-muted-foreground">{{ costFailureText(site.errorKey) }}</p></td><td class="px-4 py-3 text-muted-foreground">{{ site.collectedAt ? formatDateTime(Date.parse(site.collectedAt)) : '暂无今日采集记录' }}</td></tr></tbody>
             </table>
           </div>
         </div>

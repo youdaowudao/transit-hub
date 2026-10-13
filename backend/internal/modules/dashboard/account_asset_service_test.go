@@ -200,7 +200,7 @@ func (f *fakeAccountAssetRepository) ReplaceAccountLink(_ context.Context, event
 	return nil
 }
 
-func (f *fakeAccountAssetRepository) GetAccountAssetDetail(context.Context, string, string, string) (AccountAssetDetail, error) {
+func (f *fakeAccountAssetRepository) GetAccountAssetDetail(context.Context, string, string, string, ...string) (AccountAssetDetail, error) {
 	return f.detail, nil
 }
 

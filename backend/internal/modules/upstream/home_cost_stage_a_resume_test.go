@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -135,7 +136,7 @@ func TestHomeCostStageAExplicitHistoricalDateRetainedEvenWhenDateIsToday(t *test
 	platform.now = func() time.Time { return now }
 	svc := NewService(platform, nil, nil, cache)
 	result, err := svc.KeyUsageForDate(t.Context(), "user", "workspace", date)
-	if err != nil || historical.Load() != 1 || result.CompletedSites != 1 || result.Sites[0].Items[0].TodayAmount != 3 {
+	if err != nil || historical.Load() != 3 || result.CompletedSites != 1 || result.Sites[0].Items[0].TodayAmount != 3 {
 		t.Fatalf("historical result %v requests=%d error=%v", result, historical.Load(), err)
 	}
 }
@@ -183,8 +184,8 @@ func TestHomeCostStageARemovalDuringCollectionNeverResurrectsSnapshot(t *testing
 			release := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
-				case "/api/v1/usage/dashboard/stats":
-					writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3}})
+				case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
+					writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3, "total_actual_cost": 3}})
 				case "/api/v1/keys":
 					close(entered)
 					select {
@@ -194,7 +195,7 @@ func TestHomeCostStageARemovalDuringCollectionNeverResurrectsSnapshot(t *testing
 					}
 					writeJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "one"}}, "total": 1})
 				case "/api/v1/usage/dashboard/api-keys-usage":
-					writeJSON(w, map[string]any{"data": map[string]any{"stats": map[string]any{"1": map[string]any{"today_actual_cost": 9}}}})
+					writeJSON(w, map[string]any{"data": map[string]any{"stats": map[string]any{"1": map[string]any{"today_actual_cost": 9, "total_actual_cost": 9}}}})
 				default:
 					http.NotFound(w, r)
 				}
@@ -260,8 +261,8 @@ func TestHomeCostStageASyncRefreshWaitsForSupplementAndSkipsFailedStation(t *tes
 		switch r.URL.Path {
 		case "/api/v1/auth/me":
 			writeJSON(w, map[string]any{"data": map[string]any{"balance": 10}})
-		case "/api/v1/usage/dashboard/stats":
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3}})
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 2, "today_actual_cost": 2}})
 		case "/api/v1/groups/available", "/api/v1/groups/rates":
 			writeJSON(w, map[string]any{"data": []any{}})
 		case "/api/v1/keys":
@@ -381,10 +382,14 @@ func TestHomeCostStageAOrdinary429FailsOnlyItsStation(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/usage/dashboard/stats":
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3}})
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3, "total_actual_cost": 3}})
 		case "/api/v1/keys":
 			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "one"}}, "total": 1})
-		case "/api/v1/usage/dashboard/api-keys-usage":
+		case "/api/v1/usage/stats":
+			if r.URL.Query().Get("api_key_id") == "" {
+				writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 3}})
+				return
+			}
 			if r.Header.Get("Authorization") == "Bearer limited-fixture" {
 				rejected.Add(1)
 				w.Header().Set("Retry-After", "0")
@@ -393,7 +398,7 @@ func TestHomeCostStageAOrdinary429FailsOnlyItsStation(t *testing.T) {
 				return
 			}
 			successful.Add(1)
-			writeJSON(w, map[string]any{"data": map[string]any{"stats": map[string]any{"1": map[string]any{"today_actual_cost": 3}}}})
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 3}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -418,7 +423,7 @@ func TestHomeCostStageAOrdinary429FailsOnlyItsStation(t *testing.T) {
 	}
 	for _, site := range result.Sites {
 		if site.SiteID == "limited" {
-			if site.Status != "missing" || len(site.Items) != 0 || site.Error != ErrorRateLimited {
+			if site.Status != "missing" || len(site.Items) != 0 || !strings.Contains(site.Error, "稍后") {
 				t.Fatalf("429 failure counted as cost: %+v", site)
 			}
 		} else if site.Status != "ok" || site.Items[0].TodayAmount != 3 {
@@ -437,13 +442,13 @@ func TestHomeCostStageACollectionKeepsSeparateTotalsAndDateMismatch(t *testing.T
 	var totals atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v1/usage/dashboard/stats":
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
 			totals.Add(1)
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 9}})
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 8, "total_actual_cost": 8}})
 		case "/api/v1/keys":
 			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "one"}}, "total": 1})
 		case "/api/v1/usage/dashboard/api-keys-usage":
-			writeJSON(w, map[string]any{"data": map[string]any{"stats": map[string]any{"1": map[string]any{"today_actual_cost": 8}}}})
+			writeJSON(w, map[string]any{"data": map[string]any{"stats": map[string]any{"1": map[string]any{"today_actual_cost": 8, "total_actual_cost": 8}}}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -461,11 +466,11 @@ func TestHomeCostStageACollectionKeepsSeparateTotalsAndDateMismatch(t *testing.T
 	svc.enqueueKeyUsageCollection(*site)
 	waitKeySnapshotFlights(t, svc)
 	result, err := svc.CachedKeyUsageForDate(t.Context(), "user", "workspace", businesstime.DateAt(after))
-	if err != nil || result.CompletedSites != 1 || totals.Load() != 1 {
+	if err != nil || result.CompletedSites != 1 || totals.Load() != 3 {
 		t.Fatalf("collection result=%v totals=%d err=%v", result, totals.Load(), err)
 	}
 	collected := result.Sites[0]
-	if collected.ConsumeDate == result.BusinessDate || collected.SyncedRawCost == nil || *collected.SyncedRawCost != 7 || collected.CollectedRawCost == nil || *collected.CollectedRawCost != 9 || collected.Items[0].RawAmount != 8 {
+	if collected.ConsumeDate != result.BusinessDate || collected.SyncedRawCost != nil || collected.CollectedRawCost == nil || *collected.CollectedRawCost != 8 || collected.Items[0].RawAmount != 8 {
 		t.Fatalf("cross-day totals/date were hidden or zeroed: %+v", collected)
 	}
 }

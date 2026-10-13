@@ -607,7 +607,7 @@ func (r *MetricsRepository) reprojectDailySnapshotForDate(ctx context.Context, d
 	snapshot.AdditionalCostRecords = items
 	accountPurchase := summary.AccountPurchase
 	snapshot.AccountPurchaseCost = &accountPurchase
-	components, componentErr := r.accountCostComponentsForDate(ctx, db, userID, adminAccountID, date, snapshot.AccountSnapshotRunID, false)
+	components, componentErr := r.accountCostComponentsForDate(ctx, db, userID, adminAccountID, date, snapshot.AccountSnapshotRunID, false, accountCurrentDateFromContext(ctx))
 	snapshot.OperatingCost, snapshot.AdjustedNetProfit, _ = projectOperatingCost(
 		snapshot.TodayPurchase, snapshot.TodayProfit, &summary, components, componentErr,
 	)
@@ -1390,7 +1390,7 @@ func (r *MetricsRepository) finalizeDailySnapshot(ctx context.Context, snapshot 
 		}
 	}
 	if snapshot.AdditionalCost != nil && snapshot.SettlementStatus == SettlementStatusFinal {
-		components, componentErr := r.accountCostComponentsForDate(ctx, tx, snapshot.UserID, snapshot.AdminAccountID, date, requiredSnapshotRunID, false)
+		components, componentErr := r.accountCostComponentsForDate(ctx, tx, snapshot.UserID, snapshot.AdminAccountID, date, requiredSnapshotRunID, false, accountCurrentDateFromContext(ctx))
 		costSummary := summarizeAdditionalCostRecords(snapshot.AdditionalCostRecords)
 		costSummary.Total = snapshot.AdditionalCost
 		costSummary.RechargeFee = snapshot.RechargeFee

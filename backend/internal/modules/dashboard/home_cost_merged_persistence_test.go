@@ -68,11 +68,11 @@ func TestHomeCostMergedPersistencePreservesUnsplitStatusAndReadbackRejectsBothID
 		}
 	}
 	for _, target := range targets[:2] {
-		if _, _, ok := findAutomaticAccountKey(target, stored); ok {
+		if _, _, ok := findAutomaticAccountKey(target, stored, "user-1", "workspace-1", keys.BusinessDate, keys.BusinessDate); ok {
 			t.Errorf("readback confirmed aggregate for %s", target.Asset.ID)
 		}
 	}
-	if _, item, ok := findAutomaticAccountKey(targets[2], stored); !ok || item.AdjustedCostCents != 200 {
+	if _, item, ok := findAutomaticAccountKey(targets[2], stored, "user-1", "workspace-1", keys.BusinessDate, keys.BusinessDate); !ok || item.AdjustedCostCents != 200 {
 		t.Fatal("readback lost the independent key amount")
 	}
 }
@@ -137,14 +137,14 @@ func TestHomeCostMergedDayEndDeductionRejectsPrimaryOnlyBinding(t *testing.T) {
 func TestHomeCostMergedUnknownStatusCannotProduceConfirmedAccountAmount(t *testing.T) {
 	target := AutomaticAccountTarget{Link: AccountLink{UpstreamSiteID: "site", UpstreamKeyID: "key"}}
 	for _, status := range []string{"merged", "missing", "unknown"} {
-		runs := []UpstreamKeyCostRun{{SiteID: "site", Complete: true, Items: []UpstreamKeyDailyCost{{KeyID: "key", Status: status, AdjustedCostCents: 100}}}}
-		if _, _, ok := findAutomaticAccountKey(target, runs); ok {
+		runs := []UpstreamKeyCostRun{{UserID: "user", AdminAccountID: "workspace", BusinessDate: "2031-02-03", SnapshotRunID: "run", SiteID: "site", Complete: true, Items: []UpstreamKeyDailyCost{{KeyID: "key", Status: status, AdjustedCostCents: 100}}}}
+		if _, _, ok := findAutomaticAccountKey(target, runs, "user", "workspace", "2031-02-03", "2031-02-04"); ok {
 			t.Errorf("status %q produced a confirmed amount", status)
 		}
 	}
 	for _, status := range []string{"", "ok"} {
-		runs := []UpstreamKeyCostRun{{SiteID: "site", Complete: true, Items: []UpstreamKeyDailyCost{{KeyID: "key", Status: status, AdjustedCostCents: 100}}}}
-		if _, _, ok := findAutomaticAccountKey(target, runs); !ok {
+		runs := []UpstreamKeyCostRun{{UserID: "user", AdminAccountID: "workspace", BusinessDate: "2031-02-03", SnapshotRunID: "run", SiteID: "site", Complete: true, Items: []UpstreamKeyDailyCost{{KeyID: "key", Status: status, AdjustedCostCents: 100}}}}
+		if _, _, ok := findAutomaticAccountKey(target, runs, "user", "workspace", "2031-02-03", "2031-02-04"); !ok {
 			t.Errorf("compatible status %q lost a confirmed amount", status)
 		}
 	}

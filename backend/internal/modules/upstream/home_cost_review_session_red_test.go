@@ -31,17 +31,17 @@ func TestHomeCostReviewCollectorPersistsRotatedSession(t *testing.T) {
 					return
 				}
 				switch r.URL.Path {
-				case "/api/v1/usage/dashboard/stats":
+				case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
 					if readFails {
 						w.WriteHeader(http.StatusForbidden)
 						writeJSON(w, map[string]any{"code": "INSUFFICIENT_BALANCE"})
 					} else {
-						writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3}})
+						writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3, "total_actual_cost": 3}})
 					}
 				case "/api/v1/keys":
 					writeJSON(w, map[string]any{"data": map[string]any{"items": []any{map[string]any{"id": 1, "name": "验收-Key"}}, "total": 1}})
 				case "/api/v1/usage/dashboard/api-keys-usage":
-					writeJSON(w, map[string]any{"data": map[string]any{"stats": map[string]any{"1": map[string]any{"today_actual_cost": 3}}}})
+					writeJSON(w, map[string]any{"data": map[string]any{"stats": map[string]any{"1": map[string]any{"today_actual_cost": 3, "total_actual_cost": 3}}}})
 				default:
 					http.NotFound(w, r)
 				}

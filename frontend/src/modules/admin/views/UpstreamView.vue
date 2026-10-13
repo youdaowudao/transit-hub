@@ -13,7 +13,7 @@ import SiteSettingsModal from '../components/upstream/SiteSettingsModal.vue'
 import type { UpstreamFailure, UpstreamGroupInfo, UpstreamMetricValue, UpstreamSite, UpstreamSiteForm, UpstreamStatus } from '../types/upstream'
 import type { AdminGroupHealth } from '../types/connectionHealth'
 import type { RealConnection } from '../types/mySites'
-import { sortUpstreamSites, type UpstreamSortDirection, type UpstreamSortField } from '../utils/upstream'
+import { costFailureText, sortUpstreamSites, type UpstreamSortDirection, type UpstreamSortField } from '../utils/upstream'
 
 import { t, locale } from '@/locales'
 const router = useRouter()
@@ -417,18 +417,17 @@ const groupTodayCostDisplay = (group: UpstreamGroupInfo): string => {
 }
 
 const groupCostReasonDisplay = (group: UpstreamGroupInfo): string => {
-  switch (group.costReason) {
-    case 'shared_source': return '成本来源被多个分组共享，暂不归属'
-    case 'unresolved_source': return '上游来源无法唯一确认'
-    case 'sample_decode_failed': return '成本样本损坏，等待重新采样'
-    case 'retained_sample': return '沿用最近一次已确认样本'
-    case 'auth_401': return '上游认证失败，等待退避后重试'
-    case 'auth_403': return '上游拒绝访问，等待退避后重试'
-    case 'network': return '上游网络不可达，等待退避后重试'
-    case 'sample_unavailable': return '当前没有可靠成本样本'
-    default: return group.costReason ? '成本暂不可确认' : ''
-  }
+ const reason = costFailureText(group.costReason)
+ if (group.costMode === 'retained' && !reason.includes('沿用截至')) {
+  const observed = group.costObservedAt ? new Date(group.costObservedAt) : null
+  const time = observed && Number.isFinite(observed.getTime()) ? new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'medium', timeZone: 'Asia/Singapore' }).format(observed) : '上次已确认时间'
+  return `沿用截至 ${time} 的费用；${reason || '暂未取得更新记录'}，可在允许重试后同步这个站点；不会修改主站。`
+ }
+ return reason || (group.todayCost == null ? '暂无当日费用记录，可同步这个站点重试；不会修改主站。' : '')
 }
+const hasUnattributedCost = (group: UpstreamGroupInfo): boolean => group.todayCost != null && Number.isFinite(group.todayCost) && group.costComplete === false && group.unattributedCost != null && Number.isFinite(group.unattributedCost) && group.unattributedCost > 0
+const unmatchedCostDisplay = (amount?: number | null): string => amount != null && amount > 0 && amount < 0.01 ? '少于0.01' : (amount ?? 0).toFixed(2)
+const selectedUnattributedGroup = computed(() => selectedSiteForGroups.value?.metrics.groups.find(hasUnattributedCost))
 
 const usdMetricDisplay = (metric: UpstreamMetricValue): string => {
   if (metric.display.toUpperCase().includes('USD')) return metric.display
@@ -444,7 +443,8 @@ const lastUpdatedDisplay = (site: UpstreamSite): string => {
 
 const siteFailureKey = (site: UpstreamSite): string | null => {
   const syncState = siteSyncStates.value.get(site.id)
-  if (syncState?.phase === 'error' && syncState.errorKey) return syncState.errorKey
+  if (syncState?.phase === 'error' && syncState.errorDetail) return syncState.errorDetail
+ if (syncState?.phase === 'error' && syncState.errorKey) return syncState.errorKey
   return site.errorKey
 }
 
@@ -455,7 +455,8 @@ const manualCostReasons = new Set([
   'admin.upstream.errors.upstreamKeyExpired',
 ])
 const costFailureDisplay = (site: UpstreamSite): string | null => {
-  if (site.metrics.todayConsumeStatus !== 'unreadable') return null
+  if (site.metrics.todayConsumeErrorDetail) return site.metrics.todayConsumeErrorDetail
+ if (site.metrics.todayConsumeStatus !== 'unreadable') return null
   const key = site.metrics.todayConsumeErrorKey ?? 'admin.upstream.errors.request'
   const code = site.metrics.todayConsumeUpstreamCode ?? ''
   const status = site.metrics.todayConsumeHTTPStatus
@@ -688,7 +689,7 @@ onBeforeUnmount(() => {
           <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>
             <span class="font-medium">{{ siteFailureKey(site) ? t('admin.upstream.syncStream.error') : '今日成本不可读' }}：</span>
-            {{ siteFailureKey(site) ? t(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') : costFailureDisplay(site) }}
+            {{ siteFailureKey(site) ? costFailureText(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') : costFailureDisplay(site) }}
           </span>
         </div>
 
@@ -776,7 +777,7 @@ onBeforeUnmount(() => {
                   <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>
                     <span class="font-medium">{{ siteFailureKey(site) ? t('admin.upstream.syncStream.error') : '今日成本不可读' }}：</span>
-                    {{ siteFailureKey(site) ? t(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') : costFailureDisplay(site) }}
+                    {{ siteFailureKey(site) ? costFailureText(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') : costFailureDisplay(site) }}
                   </span>
                 </div>
               </td>
@@ -936,6 +937,8 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="min-h-0 flex-1 space-y-6 overflow-y-auto p-6 overscroll-contain">
+ <p class="text-sm text-muted-foreground">费用按新加坡当天统计，按使用时的上游分组计算；这里只显示费用，不会修改主站。数据暂缺时可同步这个站点。</p>
+ <p v-if="selectedUnattributedGroup" class="text-sm text-warning" :title="String(selectedUnattributedGroup.unattributedCost)">本站费用 {{ (selectedUnattributedGroup.siteReportedCost ?? 0).toFixed(2) }}，可对应当前分组 {{ (selectedUnattributedGroup.groupAttributedCost ?? 0).toFixed(2) }}，另有 {{ unmatchedCostDisplay(selectedUnattributedGroup.unattributedCost) }} 无法对应当前可用分组；请到上游查看当天消费记录。这里不会分配这部分费用或修改主站。</p>
             <div v-for="(groups, platform) in groupedGroups" :key="platform" class="space-y-3">
               <h4 class="text-sm font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
                 <div class="w-1.5 h-1.5 rounded-full bg-primary"></div>
@@ -980,9 +983,9 @@ onBeforeUnmount(() => {
                     </span>
                   </template>
                   <span class="mt-2 text-[16px] leading-tight text-muted-foreground" :title="groupCostReasonDisplay(group)">
-                    {{ t('admin.upstream.fields.todayCost') }} {{ groupTodayCostDisplay(group) }}
+                    {{ group.todayCost == null || !Number.isFinite(group.todayCost) ? '今日费用暂无法读取' : '今日费用 ' + group.todayCost.toFixed(2) }}
                     <span v-if="group.costMode === 'retained'" class="ml-1 text-[11px]">(沿用)</span>
-                    <span v-if="group.costComplete === false" class="ml-1 text-[11px] text-warning">(未完全归属)</span>
+                    <span v-if="hasUnattributedCost(group)" class="ml-1 text-[11px] text-warning">(未完全归属)</span>
                   </span>
                 </button>
               </div>
@@ -1018,14 +1021,15 @@ onBeforeUnmount(() => {
           </div>
 
           <form @submit.prevent="handleAddSite" class="p-6">
+ <p v-if="editingSiteId" class="mb-4 text-sm text-muted-foreground">更换站点地址、登录方式或账号请新增站点，原费用会保留在原站点；更新同一账号的凭据需要验证原账号，不会修改主站。</p>
             <div v-if="addErrorKey" class="mb-5 flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert" aria-live="polite">
               <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
               <div class="min-w-0 space-y-1 break-words">
                 <p>{{ t(addErrorKey) }}</p>
                 <p v-if="addErrorKey === 'admin.upstream.errors.invalidResponse'">{{ t('admin.upstream.failure.invalidResponseHelp') }}</p>
                 <p v-if="addFailure?.stage">{{ t('admin.upstream.failure.stage') }}{{ t(`admin.upstream.failure.stages.${addFailure.stage}`) }}</p>
-                <p v-if="addFailure?.httpStatus !== undefined">{{ t('admin.upstream.failure.httpStatus') }}{{ addFailure.httpStatus || t('admin.upstream.failure.noResponse') }}</p>
-                <p v-if="addFailure?.upstreamMessage">{{ t('admin.upstream.failure.upstreamMessage') }}{{ addFailure.upstreamMessage }}</p>
+                <p v-if="addFailure?.httpStatus !== undefined && addFailure.stage !== 'save'">{{ t('admin.upstream.failure.httpStatus') }}{{ addFailure.httpStatus || t('admin.upstream.failure.noResponse') }}</p>
+                <p v-if="addFailure?.upstreamMessage">{{ addFailure.stage === 'save' ? '实际结果：' : t('admin.upstream.failure.upstreamMessage') }}{{ addFailure.upstreamMessage }}</p>
                 <p v-if="addFailure?.fields?.length">{{ t('admin.upstream.failure.fields') }}{{ addFailure.fields.map(failureFieldLabel).join('、') }}</p>
                 <div v-for="(attempt, index) in addFailure?.attempts ?? []" :key="index" class="space-y-1">
                   <p>{{ attempt.platform === 'newapi' ? 'NewAPI' : 'Sub2API' }}：{{ t(attempt.errorKey ?? 'admin.upstream.errors.unknown') }}</p>

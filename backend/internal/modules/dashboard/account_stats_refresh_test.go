@@ -30,6 +30,7 @@ func (f *fakeAccountStatsUpstreams) SyncAndCollectKeyUsage(_ context.Context, _,
 		site := &result.Sites[index]
 		site.StartedAt = startedAt.Add(time.Nanosecond)
 		site.ConsumeDate = date
+		site.Timezone = "Asia/Singapore"
 		for _, total := range f.siteCostResults {
 			if total.SiteID == site.SiteID {
 				value := total.RawCost
@@ -58,7 +59,7 @@ func (f *fakeAccountKeyRunRepository) PublishAccountStatsRefresh(_ context.Conte
 	return nil
 }
 
-func (f *fakeAccountKeyRunRepository) GetPublishedAccountStatsRefresh(_ context.Context, _, _, _, date string) (AccountStatsRefreshResponse, bool, error) {
+func (f *fakeAccountKeyRunRepository) GetPublishedAccountStatsRefresh(_ context.Context, _, _, _, date string, currentDates ...string) (AccountStatsRefreshResponse, bool, error) {
 	if !f.published {
 		return AccountStatsRefreshResponse{}, false, nil
 	}
@@ -79,7 +80,7 @@ func TestRefreshAccountStatsPublishesOnlyACompleteCentReconciledRun(t *testing.T
 		fakeUpstreamLister: &fakeUpstreamLister{siteCostResults: []upstream.SiteCostForDateResult{{
 			SiteID: "site-1", RechargeRate: 2, RawCost: 5, Meta: upstream.CostFetchMeta{ObservedAt: observed},
 		}}},
-		keyResult: upstream.KeyUsageForDateResult{BusinessDate: today, ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{
+		keyResult: upstream.KeyUsageForDateResult{BusinessDate: today, ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{Timezone: "Asia/Singapore", ConsumeDate: today,
 			SiteID: "site-1", Complete: true, Items: []upstream.KeyUsageTodayItem{{SiteID: "site-1", KeyID: "key-1", RawAmount: 5, TodayAmount: 10}},
 		}}},
 	}
@@ -149,7 +150,7 @@ func TestRefreshAccountStatsKeepsMismatchExplicitlyIncomplete(t *testing.T) {
 		fakeUpstreamLister: &fakeUpstreamLister{siteCostResults: []upstream.SiteCostForDateResult{
 			{SiteID: "site-1", RechargeRate: 1, RawCost: 10.02},
 		}},
-		keyResult: upstream.KeyUsageForDateResult{BusinessDate: today, ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{
+		keyResult: upstream.KeyUsageForDateResult{BusinessDate: today, ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{Timezone: "Asia/Singapore", ConsumeDate: today,
 			SiteID: "site-1", Complete: true, Items: []upstream.KeyUsageTodayItem{{SiteID: "site-1", KeyID: "key-1", TodayAmount: 10}},
 		}}},
 	}

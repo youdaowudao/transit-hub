@@ -81,6 +81,12 @@ export const refreshDashboardAdminSession = async (): Promise<DashboardAdminStat
 /** 五项核心指标的实时数据。
  * todayProfit/todayPurchase/netProfit 为 null 表示该指标不可用（非零）。 */
 export interface DashboardMetricsResponse {
+ accountSnapshotRunId?: string
+ accountStatsQuality?: string
+ accountExpectedCount?: number
+ accountCompletedCount?: number
+ accountPurchaseCost?: number | null
+ replacementDeduction?: number | null
   date: string
   timezone: string
   todayProfit: number | null
@@ -314,7 +320,8 @@ export interface CostQuality {
 /** 单个站点成本采集失败记录。 */
 export interface SiteCostFault {
   siteName: string
-  reason: 'date_mismatch' | 'stale' | 'fetch_error'
+  reason: 'date_mismatch' | 'stale' | 'fetch_error' | string
+ errorDetail?: string
 }
 
 /** 历史趋势单日数据点。nullable 字段为 null 表示该天数据未采集，前端显示断点。 */

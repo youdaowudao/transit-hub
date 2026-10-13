@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"math"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -91,7 +92,19 @@ func (s *Service) groupCostStore() GroupCostStore {
 
 func (s *Service) sampleGroupCosts(site Site, session Session, groups []GroupInfo) {
 	store := s.groupCostStore()
-	if store == nil || !site.IsEnabled() || session.Platform == "" || len(groups) == 0 {
+	if store == nil || !site.IsEnabled() || site.Session == nil || session.Platform == "" {
+		return
+	}
+	original := cloneSite(&site)
+	if !session.IsAuthenticated() || session.Platform == PlatformSub2API && strings.TrimSpace(session.AccessToken) == "" {
+		return
+	}
+	s.mu.Lock()
+	currentAtStart, readErr := s.readCurrentSite(context.Background(), site.ID)
+	_, deletedAtStart := s.deletedSites[site.ID]
+	validStart := !deletedAtStart && readErr == nil && keyUsageSiteMatches(currentAtStart, original) && reflect.DeepEqual(currentAtStart.Session, original.Session) && sameCostGroupIdentifiers(session.Platform, currentAtStart.Metrics.Groups, groups)
+	s.mu.Unlock()
+	if !validStart {
 		return
 	}
 	if s.groupCostSlots != nil {
@@ -99,147 +112,128 @@ func (s *Service) sampleGroupCosts(site Site, session Session, groups []GroupInf
 		case s.groupCostSlots <- struct{}{}:
 			defer func() { <-s.groupCostSlots }()
 		default:
-			// 成本只是观测值，跨站点并发达到上限时直接跳过，不积压后台任务。
 			return
 		}
 	}
-
+	startedAt := s.keyUsageNow()
+	date := businesstime.DateAt(startedAt)
 	ctx, cancel := context.WithTimeout(context.Background(), groupCostSampleTimeout)
 	defer cancel()
 	acquired, err := store.TryStartGroupCostSampling(ctx, site.ID, groupCostSampleInterval)
 	if err != nil || !acquired {
-		if err != nil {
-			log.Printf("[upstream-cost] sample lock failed site_id=%s err=%v", site.ID, err)
-		}
 		return
 	}
-
-	date := businesstime.Today()
-	now := time.Now().UTC()
 	state, err := store.GetGroupCostSamplingState(ctx, site.ID)
 	if err != nil {
-		log.Printf("[upstream-cost] load sample state failed site_id=%s err=%v", site.ID, err)
 		return
 	}
-	result, err := s.platformService.FetchGroupCostStatsForDate(ctx, session, groups, date, state)
-	state.LastAttemptAt = now
-	if err != nil {
-		if isGroupCostCooldown(err) {
-			return
-		}
-		path, summaryFailureClass := groupCostFetchFailure(err)
-		if summaryFailureClass != "" {
-			state.RecordSummaryFailure(summaryFailureClass, now)
-		}
-		if path == "fallback" {
-			state.RecordFallbackFailure(groupCostFailureClass(err), now)
-		} else {
-			state.RecordSummaryFailure(groupCostFailureClass(err), now)
-		}
-		if saveErr := store.SetGroupCostSamplingState(ctx, site.ID, state, groupCostSamplingStateTTL); saveErr != nil {
-			log.Printf("[upstream-cost] save failed sample state failed site_id=%s err=%v", site.ID, saveErr)
-		}
-		// 成本采样是可选观测，不得把失败写回站点健康状态或同步结果。
-		log.Printf("[upstream-cost] group cost sample failed site_id=%s reason=%s err=%v", site.ID, state.LastReason, err)
+	if state.LastAttemptAt.After(startedAt) {
 		return
 	}
-	if result.SummaryFailureClass != "" {
-		state.RecordSummaryFailure(result.SummaryFailureClass, now)
-	}
-	if result.Source == GroupCostSourceKeyFallback {
-		state.RecordFallbackSuccess(now)
-	} else {
-		state.RecordSummarySuccess(now)
-	}
-	if saveErr := store.SetGroupCostSamplingState(ctx, site.ID, state, groupCostSamplingStateTTL); saveErr != nil {
-		log.Printf("[upstream-cost] save sample state failed site_id=%s err=%v", site.ID, saveErr)
-	}
-	if businesstime.Today() != date {
-		// 请求跨过新加坡业务日边界时丢弃整批，避免把新日累计值写进旧日样本。
+	result, fetchErr := s.platformService.FetchGroupCostStatsForDate(ctx, session, groups, date, state)
+	if isGroupCostCooldown(fetchErr) {
 		return
 	}
-
-	groupsByKey := make(map[string]GroupInfo, len(groups)*2)
-	seenGroupIDs := make(map[string]struct{}, len(groups))
-	seenGroupNames := make(map[string]struct{}, len(groups))
-	for _, group := range groups {
-		id := strings.TrimSpace(group.ID)
-		name := strings.TrimSpace(group.Name)
-		if id == "" && name == "" {
-			log.Printf("[upstream-cost] group mapping incomplete site_id=%s", site.ID)
-			return
-		}
-		if id != "" {
-			if _, exists := seenGroupIDs[id]; exists {
-				log.Printf("[upstream-cost] duplicate group id site_id=%s group_id=%s", site.ID, id)
-				return
-			}
-			seenGroupIDs[id] = struct{}{}
-			groupsByKey[id] = group
-		}
-		if name != "" {
-			if _, exists := seenGroupNames[name]; exists {
-				log.Printf("[upstream-cost] duplicate group name cannot be attributed site_id=%s group=%s", site.ID, name)
-				return
-			}
-			seenGroupNames[name] = struct{}{}
-			groupsByKey[name] = group
-		}
+	completedAt := s.keyUsageNow()
+	if businesstime.DateAt(completedAt) != date {
+		return
 	}
-
-	samplesByGroup := make(map[string][]GroupCostSample)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, deleted := s.deletedSites[site.ID]; deleted {
+		return
+	}
+	saveCtx, saveCancel := context.WithTimeout(context.Background(), persistenceTimeout)
+	defer saveCancel()
+	current, err := s.cache.Get(saveCtx, site.ID)
+	if err != nil || !keyUsageSiteMatches(current, original) || !reflect.DeepEqual(current.Session, original.Session) || !sameCostGroupIdentifiers(session.Platform, current.Metrics.Groups, groups) {
+		return
+	}
+	latestState, err := store.GetGroupCostSamplingState(saveCtx, site.ID)
+	if err != nil || latestState.LastAttemptAt.After(startedAt) {
+		return
+	}
+	state = latestState
+	state.LastAttemptAt = startedAt
+	if fetchErr != nil {
+		class := groupCostFailureClass(fetchErr)
+		state.RecordSummaryFailure(class, startedAt)
+		state.LastReason = formatCostFailure("站点“"+safeCostReason(site.Name)+"”分组指定日费用读取", fetchErr)
+		if err := store.SetGroupCostSamplingState(saveCtx, site.ID, state, groupCostSamplingStateTTL); err != nil {
+			log.Printf("[upstream-cost] save failed sample state failed site_id=%s", site.ID)
+		}
+		log.Printf("[upstream-cost] group cost sample failed site_id=%s reason=%s", site.ID, class)
+		return
+	}
+	state.RecordSummarySuccess(completedAt)
+	state.LastAttemptAt = startedAt
 	for _, stat := range result.Stats {
-		if math.IsNaN(stat.TodayActualCost) || math.IsInf(stat.TodayActualCost, 0) {
-			continue
-		}
 		key := strings.TrimSpace(stat.GroupID)
-		if key == "" {
+		if session.Platform == PlatformNewAPI {
 			key = strings.TrimSpace(stat.GroupName)
 		}
-		group, ok := groupsByKey[key]
-		if !ok {
-			continue
-		}
-		groupKey := strings.TrimSpace(group.ID)
-		if groupKey == "" {
-			groupKey = strings.TrimSpace(group.Name)
-		}
-		if groupKey == "" {
-			continue
-		}
-		samplesByGroup[groupKey] = []GroupCostSample{{
-			Date:                   date,
-			RawAmount:              stat.TodayActualCost,
-			ObservedAt:             now,
-			Source:                 result.Source,
-			Complete:               result.Complete,
-			SiteReportedRawCost:    cloneRawPointer(result.SiteReportedRawCost),
-			GroupAttributedRawCost: cloneRawPointer(result.GroupAttributedRawCost),
-			UnattributedRawCost:    cloneRawPointer(result.UnattributedRawCost),
-		}}
-	}
-
-	for groupKey, samples := range samplesByGroup {
-		if err := store.AppendGroupCostSamples(ctx, site.ID, groupKey, date, samples, groupCostMaxSamples, groupCostSampleTTL); err != nil {
-			log.Printf("[upstream-cost] save group cost sample failed site_id=%s group=%s err=%v", site.ID, groupKey, err)
+		sample := GroupCostSample{Date: date, RawAmount: stat.TodayActualCost, ObservedAt: completedAt, Source: result.Source, Complete: result.Complete, SiteReportedRawCost: cloneRawPointer(result.SiteReportedRawCost), GroupAttributedRawCost: cloneRawPointer(result.GroupAttributedRawCost), UnattributedRawCost: cloneRawPointer(result.UnattributedRawCost)}
+		if err := store.AppendGroupCostSamples(saveCtx, site.ID, key, date, []GroupCostSample{sample}, groupCostMaxSamples, groupCostSampleTTL); err != nil {
+			log.Printf("[upstream-cost] save group cost sample failed site_id=%s group=%s", site.ID, key)
+			return
 		}
 	}
+	if err := store.SetGroupCostSamplingState(saveCtx, site.ID, state, groupCostSamplingStateTTL); err != nil {
+		log.Printf("[upstream-cost] save sample state failed site_id=%s", site.ID)
+	}
+}
+func sameCostGroupIdentifiers(platform Platform, a, b []GroupInfo) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	ids := map[string]bool{}
+	for _, group := range a {
+		key := strings.TrimSpace(group.ID)
+		if platform == PlatformNewAPI {
+			key = strings.TrimSpace(group.Name)
+		}
+		if key == "" || ids[key] {
+			return false
+		}
+		ids[key] = true
+	}
+	for _, group := range b {
+		key := strings.TrimSpace(group.ID)
+		if platform == PlatformNewAPI {
+			key = strings.TrimSpace(group.Name)
+		}
+		if !ids[key] {
+			return false
+		}
+		delete(ids, key)
+	}
+	return len(ids) == 0
 }
 
 func (s *Service) groupCostSnapshotsForSite(ctx context.Context, site *Site) ([]GroupCostSnapshot, error) {
 	if site == nil || !site.IsEnabled() {
 		return nil, nil
 	}
+	if site.Status == StatusConnecting || site.Session == nil || site.Platform == PlatformSub2API && strings.TrimSpace(site.Session.AccessToken) == "" || site.Platform == PlatformNewAPI && !site.Session.IsAuthenticated() {
+		result := make([]GroupCostSnapshot, 0, len(site.Metrics.Groups))
+		for _, group := range site.Metrics.Groups {
+			result = append(result, unavailableGroupCostSnapshot(site, group, "本站登录资料不支持用户分组费用读取，今日费用暂无法读取；请核查上游登录资料后同步这个站点重试，不会修改主站。"))
+		}
+		return result, nil
+	}
 	store := s.groupCostStore()
 	if store == nil {
 		return nil, nil
 	}
-	date := businesstime.Today()
+	date := s.keyUsageDate()
 	state, stateErr := store.GetGroupCostSamplingState(ctx, site.ID)
 	result := make([]GroupCostSnapshot, 0, len(site.Metrics.Groups))
 	for _, group := range site.Metrics.Groups {
 		groupKey := strings.TrimSpace(group.ID)
-		if groupKey == "" {
+		if site.Platform == PlatformNewAPI {
+			groupKey = strings.TrimSpace(group.Name)
+		}
+		if groupKey == "" && site.Platform == PlatformNewAPI {
 			groupKey = strings.TrimSpace(group.Name)
 		}
 		if groupKey == "" {
@@ -251,7 +245,7 @@ func (s *Service) groupCostSnapshotsForSite(ctx context.Context, site *Site) ([]
 			result = append(result, unavailableGroupCostSnapshot(site, group, "sample_decode_failed"))
 			continue
 		}
-		todayCost, recentHourCost, observedAt, sample := calculateGroupCostSnapshot(samples, date, time.Now().UTC(), site.RechargeRate)
+		todayCost, recentHourCost, observedAt, sample := calculateGroupCostSnapshot(samples, date, s.keyUsageNow(), site.RechargeRate)
 		if sample == nil {
 			reason := "sample_unavailable"
 			if stateErr == nil && strings.TrimSpace(state.LastReason) != "" {
@@ -269,7 +263,7 @@ func (s *Service) groupCostSnapshotsForSite(ctx context.Context, site *Site) ([]
 			TodayCost:           todayCost,
 			RecentHourCost:      recentHourCost,
 			ObservedAt:          observedAt,
-			Mode:                groupCostSnapshotMode(sample.ObservedAt, time.Now().UTC()),
+			Mode:                groupCostSnapshotMode(sample.ObservedAt, s.keyUsageNow()),
 			Source:              sample.Source,
 			Complete:            sample.Complete,
 			SiteReportedCost:    convertedGroupCost(sample.SiteReportedRawCost, site.RechargeRate),
@@ -277,7 +271,19 @@ func (s *Service) groupCostSnapshotsForSite(ctx context.Context, site *Site) ([]
 			UnattributedCost:    convertedGroupCost(sample.UnattributedRawCost, site.RechargeRate),
 		}
 		if snapshot.Mode == GroupCostModeRetained {
-			snapshot.Reason = "retained_sample"
+			snapshot.Reason = "沿用截至 " + sample.ObservedAt.In(businesstime.Location()).Format("2006-01-02 15:04:05") + " 的费用；暂未取得更新记录，可在允许重试后同步这个站点；不会修改主站。"
+		}
+		if stateErr == nil && state.LastAttemptStatus == "failed" && state.LastAttemptAt.After(sample.ObservedAt) {
+			snapshot.Mode = GroupCostModeRetained
+			snapshot.Reason = "沿用截至 " + sample.ObservedAt.In(businesstime.Location()).Format("2006-01-02 15:04:05") + " 的费用；本轮" + state.LastReason
+		}
+		for _, newer := range samples {
+			if newer.Date == date && newer.Source == sample.Source && newer.ObservedAt.After(sample.ObservedAt) && finiteNonnegative(newer.RawAmount) && newer.RawAmount < sample.RawAmount {
+				snapshot.Mode = GroupCostModeRetained
+				snapshot.Reason = "本轮累计费用下降，沿用截至 " + sample.ObservedAt.In(businesstime.Location()).Format("2006-01-02 15:04:05") + " 的已确认费用；请到上游核查当天消费记录后同步这个站点重试；不会修改主站。"
+				snapshot.RecentHourCost = nil
+				break
+			}
 		}
 		result = append(result, snapshot)
 	}
@@ -285,54 +291,63 @@ func (s *Service) groupCostSnapshotsForSite(ctx context.Context, site *Site) ([]
 }
 
 func calculateGroupCostSnapshot(samples []GroupCostSample, date string, now time.Time, rechargeRate float64) (*float64, *float64, *time.Time, *GroupCostSample) {
-	if len(samples) == 0 || rechargeRate <= 0 || math.IsNaN(rechargeRate) || math.IsInf(rechargeRate, 0) {
+	if len(samples) == 0 || rechargeRate <= 0 || !finiteNonnegative(rechargeRate) {
 		return nil, nil, nil, nil
 	}
 	ordered := append([]GroupCostSample(nil), samples...)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		return ordered[i].ObservedAt.Before(ordered[j].ObservedAt)
-	})
-	latest := ordered[len(ordered)-1]
-	if strings.TrimSpace(latest.Date) != date || now.Sub(latest.ObservedAt) < 0 || now.Sub(latest.ObservedAt) > groupCostSampleTTL {
-		return nil, nil, nil, nil
-	}
-	if math.IsNaN(latest.RawAmount) || math.IsInf(latest.RawAmount, 0) || latest.RawAmount < 0 {
-		return nil, nil, nil, nil
-	}
-
-	todayCost := latest.RawAmount * rechargeRate
-	if math.IsNaN(todayCost) || math.IsInf(todayCost, 0) {
-		return nil, nil, nil, nil
-	}
-	observedAt := latest.ObservedAt
-	var baseline *GroupCostSample
-	for i := range ordered[:len(ordered)-1] {
-		candidate := ordered[i]
-		age := latest.ObservedAt.Sub(candidate.ObservedAt)
-		if candidate.Date != latest.Date || age < time.Hour || age > groupCostSampleWindow {
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].ObservedAt.Before(ordered[j].ObservedAt) })
+	var latest *GroupCostSample
+	for index := len(ordered) - 1; index >= 0; index-- {
+		candidate := ordered[index]
+		if candidate.Date != date || now.Sub(candidate.ObservedAt) < 0 || now.Sub(candidate.ObservedAt) > groupCostSampleTTL || !finiteNonnegative(candidate.RawAmount) {
 			continue
 		}
-		if baseline == nil || candidate.ObservedAt.After(baseline.ObservedAt) {
-			candidateCopy := candidate
-			baseline = &candidateCopy
+		rollback := false
+		{
+			for _, earlier := range ordered[:index] {
+				age := candidate.ObservedAt.Sub(earlier.ObservedAt)
+				if earlier.Date == date && earlier.Source == candidate.Source && earlier.Complete && age >= time.Hour && age <= groupCostSampleWindow && finiteNonnegative(earlier.RawAmount) && candidate.RawAmount < earlier.RawAmount {
+					rollback = true
+					break
+				}
+			}
+		}
+		if rollback {
+			continue
+		}
+		copy := candidate
+		latest = &copy
+		break
+	}
+	if latest == nil {
+		return nil, nil, nil, nil
+	}
+	today := latest.RawAmount * rechargeRate
+	if !finiteNonnegative(today) {
+		return nil, nil, nil, nil
+	}
+	var baseline *GroupCostSample
+	if latest.Complete {
+		for _, candidate := range ordered {
+			age := latest.ObservedAt.Sub(candidate.ObservedAt)
+			if candidate.Date != date || candidate.Source != latest.Source || !candidate.Complete || age < time.Hour || age > groupCostSampleWindow || !finiteNonnegative(candidate.RawAmount) {
+				continue
+			}
+			if baseline == nil || candidate.ObservedAt.After(baseline.ObservedAt) {
+				copy := candidate
+				baseline = &copy
+			}
 		}
 	}
-	var recentHourCost *float64
-	if baseline != nil && (math.IsNaN(baseline.RawAmount) || math.IsInf(baseline.RawAmount, 0) || baseline.RawAmount < 0) {
-		// 旧缓存也可能来自此前异常响应，不能参与小时差额计算。
-		return nil, nil, nil, nil
-	}
-	if baseline != nil && latest.RawAmount < baseline.RawAmount {
-		// 累计值回退代表上游计数重置或异常，当前日成本无法可靠确认。
-		return nil, nil, nil, nil
-	}
-	if now.Sub(latest.ObservedAt) <= groupCostMaxAge && baseline != nil && !math.IsNaN(baseline.RawAmount) && !math.IsInf(baseline.RawAmount, 0) {
+	var hour *float64
+	if now.Sub(latest.ObservedAt) <= groupCostMaxAge && baseline != nil && latest.RawAmount >= baseline.RawAmount {
 		value := (latest.RawAmount - baseline.RawAmount) * rechargeRate
-		if !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 {
-			recentHourCost = &value
+		if finiteNonnegative(value) {
+			hour = &value
 		}
 	}
-	return &todayCost, recentHourCost, &observedAt, &latest
+	observed := latest.ObservedAt
+	return &today, hour, &observed, latest
 }
 
 func (s *Service) GroupCostSnapshots(ctx context.Context, userID, adminAccountID string) ([]GroupCostSnapshot, error) {
@@ -361,7 +376,7 @@ func mergeGroupCostSnapshots(site *Site, response *Response, snapshots []GroupCo
 	byKey := make(map[string]GroupCostSnapshot, len(snapshots)*2)
 	for _, snapshot := range snapshots {
 		byKey[GroupCostSourceKey(snapshot.SiteID, snapshot.GroupID, snapshot.GroupName)] = snapshot
-		if name := strings.TrimSpace(snapshot.GroupName); name != "" {
+		if name := strings.TrimSpace(snapshot.GroupName); name != "" && site.Platform == PlatformNewAPI {
 			byKey[GroupCostSourceKey(snapshot.SiteID, "", name)] = snapshot
 		}
 	}

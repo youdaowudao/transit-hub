@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { costFailureText } from '../../utils/upstream'
 import { ref, watch } from 'vue'
 import { Settings2, X, Save, Loader2, CheckCircle2 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
@@ -50,7 +51,7 @@ const save = async () => {
     showSuccess.value = true
     setTimeout(() => { showSuccess.value = false }, 2000)
   } catch (err) {
-    errorMsg.value = err instanceof Error ? err.message : 'admin.upstream.errors.unknown'
+    errorMsg.value = err instanceof Error && 'failure' in err ? (err.failure as {errorDetail?:string}|undefined)?.errorDetail ?? err.message : err instanceof Error ? err.message : 'admin.upstream.errors.unknown'
   } finally {
     isSaving.value = false
   }
@@ -112,7 +113,7 @@ const save = async () => {
           </div>
 
           <p v-if="errorMsg" class="text-sm text-destructive rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2">
-            {{ t(errorMsg) }}
+            {{ costFailureText(errorMsg) }}
           </p>
         </div>
 

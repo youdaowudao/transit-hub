@@ -86,7 +86,7 @@ func TestHomeCostStageALiveReplacementReadsKeysAndPreservesMatchingRules(t *test
 	if _, err := repo.CreateAccountBatch(ctx, batch, []AccountAsset{asset}, []AccountLink{link}, nil); err != nil {
 		t.Fatal(err)
 	}
-	keys := upstream.KeyUsageForDateResult{BusinessDate: date, Sites: []upstream.KeyUsageSiteResult{{SiteID: "site", Complete: true, Status: "retained", Items: []upstream.KeyUsageTodayItem{{SiteID: "site", KeyID: "key", RawAmount: 3.5, RechargeRate: 2, TodayAmount: 7}}}}}
+	keys := upstream.KeyUsageForDateResult{BusinessDate: date, Sites: []upstream.KeyUsageSiteResult{{Timezone: "Asia/Singapore", ConsumeDate: date, SiteID: "site", Complete: true, Status: "retained", Items: []upstream.KeyUsageTodayItem{{SiteID: "site", KeyID: "key", RawAmount: 3.5, RechargeRate: 2, TodayAmount: 7}}}}}
 	assertDeduction := func(want *int64) {
 		t.Helper()
 		components, err := repo.AccountCostComponentsFromKeySnapshot(ctx, "user-1", "workspace-1", date, keys)

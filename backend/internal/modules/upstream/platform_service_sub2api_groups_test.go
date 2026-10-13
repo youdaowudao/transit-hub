@@ -197,8 +197,8 @@ func TestFetchSub2APIMetrics_UsesOverriddenMultiplier(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/auth/me":
 			writeJSON(w, map[string]any{"data": map[string]any{"balance": 10.0, "total_recharged": 20.0}})
-		case "/api/v1/usage/dashboard/stats":
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0}})
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0, "total_actual_cost": 1.0}})
 		case "/api/v1/groups/available":
 			availableGroupsFixture(w)
 		case "/api/v1/groups/rates":

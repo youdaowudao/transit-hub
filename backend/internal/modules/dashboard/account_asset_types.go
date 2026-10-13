@@ -214,6 +214,7 @@ type AccountAssetDetail struct {
 }
 
 type AccountAssetFilter struct {
+	CurrentDate string `json:"-"`
 	Platform    string
 	Channel     string
 	AccountType string
@@ -224,6 +225,7 @@ type AccountAssetFilter struct {
 }
 
 type AccountCostLedgerFilter struct {
+	CurrentDate    string // Internal service date; never supplied by the client.
 	From           string
 	To             string
 	Type           string

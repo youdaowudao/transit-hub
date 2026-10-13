@@ -56,6 +56,8 @@ export interface UpstreamMetrics {
   balance: UpstreamMetricValue
   todayConsume: UpstreamMetricValue
   todayConsumeDate?: string
+ todayConsumeTimezone?: string
+ todayConsumeErrorDetail?: string
   todayConsumeAt?: string
   todayConsumeStatus?: 'ok' | 'unreadable'
   todayConsumeErrorKey?: string
@@ -122,6 +124,7 @@ export interface SyncStreamEvent {
   siteId: string
   site?: UpstreamSiteResponse
   errorKey?: string
+ errorDetail?: string
 }
 
 export type SiteSyncPhase = 'idle' | 'syncing' | 'done' | 'error'
@@ -129,12 +132,14 @@ export type SiteSyncPhase = 'idle' | 'syncing' | 'done' | 'error'
 export interface SiteSyncState {
   phase: SiteSyncPhase
   errorKey?: string
+ errorDetail?: string
 }
 
 export interface UpstreamFailureAttempt {
   platform?: ResolvedUpstreamPlatform
   errorKey?: string
-  stage?: 'login' | 'refresh' | 'verify' | 'metrics'
+ errorDetail?: string
+  stage?: 'login' | 'refresh' | 'verify' | 'metrics' | 'save'
   httpStatus?: number
   upstreamMessage?: string
 }

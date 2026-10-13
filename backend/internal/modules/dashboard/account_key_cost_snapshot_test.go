@@ -40,14 +40,14 @@ func TestAccountKeyCostRunsRequireCompleteSitesAndExactCentReconciliation(t *tes
 	keys := upstream.KeyUsageForDateResult{
 		BusinessDate: "2026-08-22", ExpectedSites: 3, CompletedSites: 2,
 		Sites: []upstream.KeyUsageSiteResult{
-			{SiteID: "site-exact", Complete: true, Items: []upstream.KeyUsageTodayItem{
+			{Timezone: "Asia/Singapore", ConsumeDate: "2026-08-22", SiteID: "site-exact", Complete: true, Items: []upstream.KeyUsageTodayItem{
 				{SiteID: "site-exact", KeyID: "key-a", KeyName: "A", RawAmount: 2, TodayAmount: 4},
 				{SiteID: "site-exact", KeyID: "key-b", KeyName: "B", RawAmount: 3, TodayAmount: 6},
 			}},
-			{SiteID: "site-mismatch", Complete: true, Items: []upstream.KeyUsageTodayItem{
+			{Timezone: "Asia/Singapore", ConsumeDate: "2026-08-22", SiteID: "site-mismatch", Complete: true, Items: []upstream.KeyUsageTodayItem{
 				{SiteID: "site-mismatch", KeyID: "key-c", KeyName: "C", RawAmount: 10, TodayAmount: 10},
 			}},
-			{SiteID: "site-failed", Complete: false, Error: upstream.ErrorRequest},
+			{Timezone: "Asia/Singapore", ConsumeDate: "2026-08-22", SiteID: "site-failed", Complete: false, Error: upstream.ErrorRequest},
 		},
 	}
 

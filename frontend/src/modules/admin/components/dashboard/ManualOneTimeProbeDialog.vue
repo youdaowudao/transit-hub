@@ -59,6 +59,7 @@ import {
   questionAnswerReviewStatsFromRecords,
   questionAnswerStatsReconcile,
   resolveQuestionAnswerSelection,
+  questionAnswerDuplicateQuestionNames,
   questionAnswerSubmissionSummary,
   replaceQuestionAnswerRecord,
   shortQuestionAnswerBatchId,
@@ -157,6 +158,7 @@ const qaFinalization = ref<QuestionAnswerFinalization | null>(null)
 const qaFinalizationUnknown = ref(false)
 const qaRuntimeBatch = ref<QuestionAnswerBatch | null>(null)
 const qaModelControlRefreshKey = ref(0)
+const qaDefaultSelectionRestored = ref(false)
 const qaManaged = ref<{ targetId: string; state: 'loading' | 'ready' | 'error'; models: string[] }>({ targetId: '', state: 'loading', models: [] })
 const qaManagedAddError = ref(''), qaManagedAddsInFlight = ref(0), qaManagedMinRefreshKey = ref(0), qaManagedGeneration = ref(0)
 const qaSubmitting = ref<{ sequence: number; targetId: string; models: string[] } | null>(null)
@@ -333,6 +335,7 @@ const resetQuestionAnswerViewState = () => {
 }
 
 const resetQuestionAnswerTargetState = () => {
+  qaDefaultSelectionRestored.value = false
   qaManagedGeneration.value++
   qaManaged.value = { targetId: props.target?.targetId ?? '', state: props.target?.targetId.startsWith('sub2api:') ? 'loading' : 'ready', models: [] }
   qaManagedAddsInFlight.value = 0; qaManagedMinRefreshKey.value = 0; qaManagedAddError.value = ''; qaSubmitting.value = null
@@ -415,6 +418,7 @@ const restoreSavedQuestionAnswerSelection = (): boolean => {
     onceModels.value,
     qaQuestions.value,
   )
+  qaDefaultSelectionRestored.value = !props.questionAnswerPreferences.modelIds.some(id => onceModels.value.some(model => model.id === id)) || !props.questionAnswerPreferences.questionIds.some(id => qaQuestions.value.some(question => question.id === id && question.enabled))
   selected.value = new Set(restored.modelIds)
   qaSelectedQuestions.value = new Set(restored.questionIds)
   qaReasoningEffort.value = restored.reasoningEffort
@@ -453,7 +457,7 @@ const emitQuestionAnswerPreferences = (changedField: QuestionAnswerPreferenceFie
     qaPreferenceDraft.value.modelIds = mergeVisibleQuestionAnswerIds(
       qaPreferenceDraft.value.modelIds,
       models.value.map(model => model.id),
-      models.value.filter(model => selected.value.has(model.id) && (!qaManaged.value.models.includes(model.id) || qaPreferenceDraft.value.modelIds.includes(model.id))).map(model => model.id),
+      models.value.filter(model => selected.value.has(model.id)).map(model => model.id),
     )
   } else if (changedField === 'questions') {
     qaPreferenceDraft.value.questionIds = mergeVisibleQuestionAnswerIds(
@@ -582,10 +586,9 @@ const qaEffectiveModelIds = computed(() => {
   const submitting = qaSubmitting.value
   if (submitting && submitting.sequence === qaStartSequence && submitting.targetId === props.target?.targetId) return submitting.models
   if (qaSelectionLocked.value) return Array.from(selected.value)
-  const available = new Set(models.value.map(model => model.id))
-  return [...new Set([...selected.value, ...qaManaged.value.models.filter(id => available.has(id))])]
+  return Array.from(selected.value)
 })
-const qaMissingManaged = computed(() => onceLoadState.value === 'ready' ? qaManaged.value.models.filter(id => !onceModels.value.some(model => model.id === id)) : [])
+
 const requestProtocolLabel = (protocol?: string | null) => questionAnswerRequestProtocolLabel(protocol, t('admin.connectionHealth.testConfiguration.legacy'))
 const qaSubmission = computed(() => questionAnswerSubmissionSummary(
   qaEffectiveModelIds.value.length,
@@ -596,7 +599,6 @@ const canStartTest = computed(() => {
   if (props.target?.testConfiguration?.status === 'conflict' || props.target?.testConfiguration?.status === 'unavailable') return false
   if (!hasModels.value || (mode.value === 'questionAnswer' ? qaEffectiveModelIds.value.length : selected.value.size) === 0 || phase.value === 'testing') return false
   if (mode.value !== 'questionAnswer') return true
-  if (qaHasModelControl.value && (qaManaged.value.state !== 'ready' || qaManagedAddsInFlight.value > 0 || qaMissingManaged.value.length > 0)) return false
   return qaSelectedQuestions.value.size > 0
     && qaSubmission.value.validRepeatCount
     && qaSubmission.value.withinBatchLimit
@@ -605,10 +607,6 @@ const canStartTest = computed(() => {
 })
 const qaStartBlockedReason = computed(() => {
   if (mode.value !== 'questionAnswer') return ''
-  if (qaManagedAddsInFlight.value > 0) return t(`${prefix}.questionAnswer.managedAdding`)
-  if (qaHasModelControl.value && qaManaged.value.state === 'loading') return t(`${prefix}.questionAnswer.managedLoading`)
-  if (qaHasModelControl.value && qaManaged.value.state === 'error') return t(`${prefix}.questionAnswer.managedReadFailed`)
-  if (qaMissingManaged.value.length) return t(`${prefix}.questionAnswer.managedMissing`, { models: qaMissingManaged.value.join('、') })
   if (qaLoading.value) return t(`${prefix}.questionAnswer.loading`)
   if (!hasModels.value || qaEffectiveModelIds.value.length === 0 || qaSelectedQuestions.value.size === 0) {
     return t(`${prefix}.questionAnswer.selectionRequired`)
@@ -770,7 +768,7 @@ const toggleQuestionAnswerResultGroup = (key: string) => {
 const qaSavedPreferenceValid = computed(() => {
   const modelIDs = new Set(models.value.map(model => model.id))
   const questionIDs = new Set(qaQuestions.value.map(question => question.id))
-  const compatibleModels = Array.from(new Set([...props.questionAnswerPreferences.modelIds, ...qaManaged.value.models])).filter(id => modelIDs.has(id))
+  const compatibleModels = Array.from(new Set(props.questionAnswerPreferences.modelIds)).filter(id => modelIDs.has(id))
   const compatibleQuestions = Array.from(new Set(props.questionAnswerPreferences.questionIds)).filter(id => questionIDs.has(id))
   const repeatCount = props.questionAnswerPreferences.repeatCount
   return compatibleModels.length > 0
@@ -814,20 +812,22 @@ const qaPageNumbers = computed(() => {
 })
 
 const toggle = (modelId: string) => {
-  if (phase.value === 'testing' || (mode.value === 'questionAnswer' && (qaSelectionLocked.value || qaManaged.value.models.includes(modelId)))) return
+  if (phase.value === 'testing' || (mode.value === 'questionAnswer' && qaSelectionLocked.value)) return
   const next = new Set(selected.value)
   if (next.has(modelId)) next.delete(modelId)
   else next.add(modelId)
   selected.value = next
-  if (mode.value === 'questionAnswer') emitQuestionAnswerPreferences('models')
+  if (mode.value === 'questionAnswer') { qaDefaultSelectionRestored.value = false; emitQuestionAnswerPreferences('models') }
 }
 
+const qaDuplicateQuestionNames = computed(() => questionAnswerDuplicateQuestionNames(qaQuestions.value.filter(question => qaSelectedQuestions.value.has(question.id))))
 const toggleQuestion = (questionId: string) => {
   if (qaSelectionLocked.value) return
   const next = new Set(qaSelectedQuestions.value)
   if (next.has(questionId)) next.delete(questionId)
   else next.add(questionId)
   qaSelectedQuestions.value = next
+  qaDefaultSelectionRestored.value = false
   emitQuestionAnswerPreferences('questions')
 }
 
@@ -1204,6 +1204,7 @@ const startQuestionAnswers = async () => {
   abandonQuestionAnswerLocalSelectionFailure()
   cancelQuestionAnswerReview()
   cancelQuestionAnswerJudgments()
+  qaDefaultSelectionRestored.value = false
   const submittedModels = [...qaEffectiveModelIds.value]
   const startSequence = ++qaStartSequence
   qaSubmitting.value = { sequence: startSequence, targetId: props.target.targetId, models: submittedModels }
@@ -1890,7 +1891,7 @@ const close = () => {
                   :review-stats="qaReviewBatch?.stats ?? null"
                   :today-stats="qaHistory.todayStats"
                 />
-                <QuestionAnswerModelControlPanel v-if="open && mode === 'questionAnswer' && target?.targetId.startsWith('sub2api:')" :target-id="target.targetId" :refresh-key="qaModelControlRefreshKey" :available-models="onceLoadState === 'ready' ? onceModels.map(model => model.id) : null" @managed-change="onManagedChange" @view-round="reviewQuestionAnswerBatch($event, { expandFailed: true })" @settled="onModelControlSettled" />
+                <QuestionAnswerModelControlPanel v-if="open && mode === 'questionAnswer' && target?.targetId.startsWith('sub2api:')" :target-id="target.targetId" :refresh-key="qaModelControlRefreshKey" :repeat-count="qaSummaryRepeatCount" :available-models="onceLoadState === 'ready' ? onceModels.map(model => model.id) : null" @managed-change="onManagedChange" @view-round="reviewQuestionAnswerBatch($event, { expandFailed: true })" @settled="onModelControlSettled" />
                 <p v-if="mode === 'questionAnswer'" class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.protocolSummary') }}</p>
                 <template v-if="mode === 'questionAnswer'">
                   <div v-if="(qaErrorKey && qaHistoryLoaded) || qaLocalReadFailure || summaryRefreshFailed" data-testid="question-answer-statistics-error" class="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">
@@ -1998,6 +1999,7 @@ const close = () => {
                         {{ qaConfigOpen ? t(prefix + '.questionAnswer.collapseConfiguration') : t(prefix + '.questionAnswer.modifyConfiguration') }}
                       </button>
                     </div>
+                    <p v-if="qaDefaultSelectionRestored && !qaSelectionLocked" data-testid="question-answer-default-restored" class="mt-2 text-xs text-muted-foreground">没有可用的记住选择，已选默认模型/题目。请确认本次配置，再点开始；此时还没有发请求。</p>
                     <div v-if="!qaConfigOpen" id="question-answer-configuration-content" class="mt-3 rounded-lg bg-surface-line/30 px-3 py-2.5">
                       <p class="break-words text-sm font-medium text-foreground">{{ qaSummaryModelNames.join('、') || '-' }}</p>
                       <p class="mt-1 text-xs text-muted-foreground">
@@ -2015,9 +2017,9 @@ const close = () => {
                       <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
                         <div data-testid="question-answer-models">
                           <p class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.selectHint') }}</p>
-                          <p v-if="qaSelectionLocked && !qaStarting" class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.managedRunningHint') }}</p><p v-if="qaManagedAddError" class="mb-2 text-xs text-destructive">{{ qaManagedAddError }}</p><div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                          <p v-if="qaSelectionLocked && !qaStarting" class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.managedRunningHint') }}</p><p v-if="qaManagedAddsInFlight > 0" class="mb-2 text-xs text-muted-foreground">正在纳入管理，当前测试选择保持；仍可按已选模型开始回答。</p><p v-if="qaManagedAddError" class="mb-2 text-xs text-destructive">{{ qaManagedAddError }}</p><div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                             <label v-for="model in models" :key="model.id" class="flex cursor-pointer items-start gap-2 rounded-lg border border-border/40 px-3 py-2 transition-colors" :class="qaEffectiveModelIds.includes(model.id) ? 'border-primary/50 bg-primary/5' : 'hover:bg-surface-line/40'">
-                              <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-border/60" :disabled="qaSelectionLocked || qaManaged.models.includes(model.id)" :checked="qaEffectiveModelIds.includes(model.id)" @change="toggle(model.id)" />
+                              <input type="checkbox" class="mt-0.5 h-4 w-4 shrink-0 rounded border-border/60" :disabled="qaSelectionLocked" :checked="qaEffectiveModelIds.includes(model.id)" @change="toggle(model.id)" />
                               <div class="min-w-0 flex-1">
                                 <p class="truncate text-sm font-medium text-foreground">{{ model.name }}</p>
                                 <Tooltip v-if="qaManaged.models.includes(model.id)" :text="t(prefix + '.questionAnswer.managedTooltip')" wide><span class="text-[11px] text-primary">{{ qaSelectionLocked && !qaEffectiveModelIds.includes(model.id) ? t(prefix + '.questionAnswer.managedNotInBatch') : t(prefix + '.questionAnswer.managedLabel') }}</span></Tooltip><Tooltip v-else-if="qaHasModelControl && !qaSelectionLocked" :text="t(prefix + '.questionAnswer.managedAddTooltip')" wide><button type="button" class="text-[11px] text-primary underline" @click.stop.prevent="addQuestionAnswerManaged(model.id)">{{ t(prefix + '.questionAnswer.managedAdd') }}</button></Tooltip>
@@ -2040,6 +2042,7 @@ const close = () => {
                           </select>
                         </fieldset>
                       </div>
+                      <p v-if="qaDuplicateQuestionNames.length" data-testid="question-answer-duplicate-questions" class="mt-2 text-xs text-amber-600">{{ qaDuplicateQuestionNames.join('、') }}的题干相同，但按独立题目分别计分。重复内容不会增加测试范围，建议换成不同内容。</p>
                       <div data-testid="question-answer-questions" class="mt-4 border-t border-border/40 pt-3">
                         <div class="mb-2 flex items-center justify-between gap-3">
                           <h4 class="text-xs font-semibold text-foreground">{{ t(prefix + '.questionAnswer.questionsTitle') }}</h4>

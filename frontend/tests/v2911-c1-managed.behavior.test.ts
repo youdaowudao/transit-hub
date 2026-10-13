@@ -16,13 +16,13 @@ const start=async(w:VueWrapper)=>{await w.get('[data-testid="question-answer-bat
 beforeEach(()=>{vi.resetAllMocks();api.discoverTargetModels.mockResolvedValue([{id:'A',name:'A'},{id:'M',name:'M'}]);api.listTestQuestions.mockResolvedValue([{id:'q',name:'隔离题',body:'答案',keywords:['答案'],enabled:true,isDefault:true,createdAt:now,updatedAt:now}]);api.getModelControlTarget.mockImplementation(async(id:string)=>({targetId:id,items:[{...managed(),targetId:id}],candidates:[]}));api.startQuestionAnswerBatch.mockResolvedValue(batch())})
 afterEach(()=>{for(const w of wrappers.splice(0))w.unmount();vi.restoreAllMocks()})
 
-describe('V2.9.11 C1 uses frozen base models plus current managed models',()=>{
- it('includes an unselected managed model in each account request and preview',async()=>{
-  const w=await open();expect(w.text()).toContain('含受管 1 个');await start(w)
-  expect(api.startQuestionAnswerBatch.mock.calls.map(c=>c.slice(0,2))).toEqual([[targetId,['A','M']],[second,['A','M']]])
+describe('C1 uses frozen prepared user models independently of management',()=>{
+ it('keeps an unselected managed model out of each account request and preview',async()=>{
+  const w=await open();expect(w.text()).not.toContain('含受管 1 个');await start(w)
+  expect(api.startQuestionAnswerBatch.mock.calls.map(c=>c.slice(0,2))).toEqual([[targetId,['A']],[second,['A']]])
   const saved=w.emitted('preferences-changed')??[];expect(saved.every(e=>!(e[0] as {modelIds:string[]}).modelIds.includes('M'))).toBe(true)
  })
- it.each(['read_failed','missing','over_limit'] as const)('isolates a %s managed account and still submits its peer',async problem=>{
+ it.each(['read_failed','missing','over_limit'] as const)('ignores a %s management issue and submits both selected accounts',async problem=>{
   if(problem==='over_limit'){api.discoverTargetModels.mockResolvedValue(Array.from({length:11},(_,i)=>({id:i===0?'A':`M${i}`,name:`模型${i}`})))}
   api.getModelControlTarget.mockImplementation(async(id:string)=>{
    if(id===second)return{targetId:id,items:[],candidates:[]}
@@ -30,15 +30,15 @@ describe('V2.9.11 C1 uses frozen base models plus current managed models',()=>{
    return{targetId:id,items:problem==='missing'?[managed('missing')]:Array.from({length:10},(_,i)=>managed(`M${i+1}`)),candidates:[]}
   })
   const w=await open(['A'],problem==='over_limit'?5:1);await start(w)
-  expect(api.startQuestionAnswerBatch.mock.calls.map(c=>c[0])).toEqual([second])
+  expect(api.startQuestionAnswerBatch.mock.calls.map(c=>c[0])).toEqual([targetId,second])
   const outcome=w.get(`[data-testid="question-answer-batch-outcome-${targetId}"]`).text()
-  expect(outcome).toContain(problem==='read_failed'?'受管模型读取失败':problem==='missing'?'missing':'单批 50 条')
+  expect(outcome).not.toContain('受管模型读取失败');expect(api.getModelControlTarget).not.toHaveBeenCalled()
  })
- it('recomputes preview problems and permits newly added compatible managed models at submission',async()=>{
+ it('keeps an incompatible selected model skipped even if it becomes managed',async()=>{
   api.discoverTargetModels.mockImplementation(async(id:string)=>id===targetId?[{id:'A',name:'A'}]:[{id:'M',name:'M'}])
   let submitting=false;api.getModelControlTarget.mockImplementation(async(id:string)=>({targetId:id,items:id===second&&submitting?[{...managed(),targetId:id}]:[],candidates:[]}))
   const w=await open();submitting=true;await start(w)
-  expect(api.startQuestionAnswerBatch.mock.calls.map(c=>c.slice(0,2))).toEqual([[targetId,['A']],[second,['M']]])
+  expect(api.startQuestionAnswerBatch.mock.calls.map(c=>c.slice(0,2))).toEqual([[targetId,['A']]])
  })
  it('uses resolved default models frozen in the run snapshot when preferences change during submission',async()=>{
   const first=deferred<ReturnType<typeof batch>>();api.startQuestionAnswerBatch.mockReturnValueOnce(first.promise)

@@ -5,7 +5,7 @@ import type { ModelControlItem } from '../../types/connectionHealth'
 import { createModelControlVerifyState, modelControlItemCounts, modelControlText as message, modelControlReason, modelControlRuleRevision } from '../../utils/questionAnswerModelControl'
 import QuestionAnswerModelControlHeader from './QuestionAnswerModelControlHeader.vue'
 import QuestionAnswerModelControlRow from './QuestionAnswerModelControlRow.vue'
-const props = defineProps<{ targetId: string; refreshKey: number; availableModels?: string[] | null }>()
+const props = defineProps<{ targetId: string; refreshKey: number; availableModels?: string[] | null; repeatCount?: number }>()
 const emit = defineEmits<{ (event: 'settled', targetId: string): void; (event: 'managed-change', value: { targetId: string; kind: 'loaded' | 'load_failed' | 'updated'; models: string[]; refreshKey: number }): void; (event: 'view-round', batchId: string): void }>()
 const items = ref<ModelControlItem[]>([]), loading = ref(false), error = ref('')
 let disposed = false, sequence = 0, scope = 0, automaticVerifyDone = false, controller: AbortController | null = null
@@ -47,7 +47,7 @@ onBeforeUnmount(() => { disposed = true; scope++; sequence++; controller?.abort(
 <template>
   <section data-testid="model-control-panel" class="mb-3 space-y-3 rounded-lg border border-border/50 p-3">
     <header class="flex items-center justify-between gap-2"><h3 class="text-xs font-semibold">{{ message('title') }}</h3><button type="button" class="text-xs text-muted-foreground underline" :disabled="loading" @click="load">{{ message('refresh') }}</button></header>
-    <QuestionAnswerModelControlHeader scope="account" :workspace="targetId.split(':')[1] ?? ''" :counts="modelControlItemCounts(items)" :counts-stale="stale" :refresh-key="headerRefreshKey" />
+    <QuestionAnswerModelControlHeader scope="account" :workspace="targetId.split(':')[1] ?? ''" :counts="modelControlItemCounts(items)" :counts-stale="stale" :refresh-key="headerRefreshKey" :repeat-count="repeatCount" />
     <p v-if="error" role="alert" class="text-xs text-destructive">{{ message('listReadFailed') }} · {{ modelControlReason(error) }} · <button type="button" class="underline" @click="load">{{ message('retry') }}</button></p><p v-if="loading && !items.length" class="text-xs text-muted-foreground">{{ message('loading') }}</p><p v-else-if="!items.length && !error" class="text-xs text-muted-foreground">{{ message('emptyCandidates') }}</p>
     <div class="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(min(18rem,100%),1fr))]"><QuestionAnswerModelControlRow v-for="item in items" :key="item.modelName" :item="item" :target-id="targetId" :model-name="item.modelName" :workspace="targetId.split(':')[1] ?? ''" :available-models="availableModels" :issue="issue" :execute-unconfirmed="verifyState.isUnconfirmed(targetId, item.modelName)" :account-unconfirmed="verifyState.accountUnconfirmed(targetId)" @updated="rowUpdated" @refresh="requestLoad" @removed="removed(item.modelName)" @settled="emit('settled', $event)" @verify-now="reread" @execute-unconfirmed="verifyState.markUnconfirmed" @view-round="emit('view-round', $event)" /></div>
   </section>

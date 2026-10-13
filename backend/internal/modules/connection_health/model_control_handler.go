@@ -247,7 +247,7 @@ func (h *Handler) executeModelControl(w http.ResponseWriter, r *http.Request, op
 	if op == "close-account" {
 		result, err = h.service.CloseAccountForModel(r.Context(), user, input.TargetID, input.ModelName, *input.Basis, input.PlanFingerprint)
 	} else {
-		result, err = h.service.ExecuteModelControl(r.Context(), user, input.TargetID, input.ModelName, op, *input.Basis, input.PlanFingerprint, op == "restore" && input.ConfirmWithoutEvidence)
+		result, err = h.service.ExecuteModelControl(r.Context(), user, input.TargetID, input.ModelName, op, *input.Basis, input.PlanFingerprint, input.ConfirmWithoutEvidence)
 	}
 	if err != nil {
 		writeModelControlError(w, err)

@@ -1061,31 +1061,97 @@ const parseModelControlAutoSettings = (value: unknown): ModelControlAutoSettings
   if (!isModelControlAutoSettings(value)) throw new Error('admin.connectionHealth.errors.request')
   return value
 }
-const parseModelControlItem = (item: ModelControlItem): ModelControlItem => {
-  if (item.healthCoordination !== undefined && typeof item.healthCoordination !== 'boolean') throw new Error('admin.connectionHealth.errors.request')
+const modelControlObject = (value: unknown): value is Record<string, any> => Boolean(value && typeof value === 'object' && !Array.isArray(value))
+const modelControlCount = (value: unknown): boolean => Number.isSafeInteger(value) && Number(value) >= 0
+const modelControlScore = (value: unknown): boolean => value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100)
+const modelControlInvalid = (reason: string): never => { throw new Error(reason) }
+const parseModelControlRound = (value: unknown): void => {
+  if (value === null) return
+  if (!modelControlObject(value) || !Array.isArray(value.questions) || value.questions.length === 0 || !Array.isArray(value.duplicateQuestionIds)) modelControlInvalid('缺少逐题统计')
+  const round = value as Record<string, any>, ids = new Set<string>()
+  for (const question of round.questions) {
+    if (!modelControlObject(question) || typeof question.questionId !== 'string' || !question.questionId || typeof question.questionName !== 'string') modelControlInvalid('缺少逐题统计')
+    if (ids.has(question.questionId)) modelControlInvalid('重复题目编号')
+    ids.add(question.questionId)
+    if (!['correct', 'incorrect', 'unreviewed', 'failed', 'cancelled'].every(key => modelControlCount(question[key]))) modelControlInvalid('非法回答数量')
+    if (!modelControlScore(question.accuracyPercent)) modelControlInvalid('非法正确率')
+  }
+  if (!['correct', 'incorrect', 'unreviewed', 'failed', 'cancelled'].every(key => modelControlCount(round[key]))) modelControlInvalid('非法回答数量')
+  if (!modelControlScore(round.accuracyPercent)) modelControlInvalid('非法正确率')
+  if (!round.duplicateQuestionIds.every((id: unknown) => typeof id === 'string' && ids.has(id)) || new Set(round.duplicateQuestionIds).size !== round.duplicateQuestionIds.length) modelControlInvalid('重复题目编号')
+  if (typeof round.batchId !== 'string' || !round.batchId || !['manual', 'scheduled', 'run_now'].includes(round.source) || (round.scheduleName !== null && typeof round.scheduleName !== 'string') || !modelControlDate(round.createdAt) || round.createdAt === null || !modelControlDate(round.completedAt) || typeof round.running !== 'boolean') modelControlInvalid('缺少逐题统计')
+}
+const modelControlEntries = (value: unknown): boolean => Array.isArray(value) && value.every(entry => modelControlObject(entry) && typeof entry.key === 'string' && typeof entry.value === 'string' && typeof entry.state === 'string')
+const modelControlSources = (value: unknown): boolean => Array.isArray(value) && value.every(source => modelControlObject(source) && typeof source.groupId === 'string' && typeof source.groupName === 'string' && typeof source.key === 'string' && (source.count === null || modelControlCount(source.count)) && (source.ok === undefined || typeof source.ok === 'boolean'))
+const modelControlMapping = (value: unknown): boolean => modelControlObject(value) && Object.values(value).every(entry => typeof entry === 'string')
+export const parseModelControlItem = (value: unknown, targetId?: string, modelName?: string): ModelControlItem => {
+  if (!modelControlObject(value) || typeof value.targetId !== 'string' || typeof value.modelName !== 'string' || !value.targetId || !value.modelName || !modelControlCount(value.version)) modelControlInvalid('对象不匹配')
+  const item = value as ModelControlItem
+  if ((targetId !== undefined && item.targetId !== targetId) || (modelName !== undefined && item.modelName !== modelName)) modelControlInvalid('对象不匹配')
+  parseModelControlRound(item.round); parseModelControlRound(item.previousRound)
+  if (!['no_evidence', 'testing', 'awaiting_review', 'insufficient', 'close_recommended', 'usable'].includes(item.decision) || typeof item.decisionReason !== 'string' || typeof item.attention !== 'boolean' || typeof item.accountName !== 'string') modelControlInvalid('对象不匹配')
+  const { rule, basis, control, coverage, health } = item
+  if (!modelControlObject(rule) || !modelControlCount(rule.version) || rule.modelName !== item.modelName || !Number.isInteger(rule.minAccuracyPercent) || rule.minAccuracyPercent < 1 || rule.minAccuracyPercent > 100 || !Number.isInteger(rule.minJudgedAnswers) || rule.minJudgedAnswers < 1 || rule.minJudgedAnswers > 50 || typeof rule.includeManual !== 'boolean' || typeof rule.includeScheduled !== 'boolean') modelControlInvalid('对象不匹配')
+  if (!modelControlObject(basis) || typeof basis.batchId !== 'string' || typeof basis.businessDay !== 'string' || !modelControlCount(basis.ruleVersion) || basis.ruleVersion !== rule.version || basis.decision !== item.decision) modelControlInvalid('对象不匹配')
+  if (!modelControlObject(control) || !modelControlMapping(control.closedEntries) || !modelControlDate(control.closedAt) || !modelControlScore(control.closedAccuracyPercent) || typeof control.conflictReason !== 'string' || !modelControlObject(control.observation)) modelControlInvalid('对象不匹配')
+  const observation = control.observation
+  if (!['unverified', 'serving', 'partially_closed', 'closed', 'not_provided', 'not_isolatable', 'last_model', 'account_missing'].includes(observation.state) || typeof observation.reasonKey !== 'string' || !modelControlSources(observation.sources) || typeof observation.accountStatus !== 'string' || (observation.accountSchedulable !== null && typeof observation.accountSchedulable !== 'boolean') || !modelControlDate(observation.checkedAt)) modelControlInvalid('对象不匹配')
+  if (control.pending !== null && (!modelControlObject(control.pending) || !['close', 'restore', 'add', 'close_account'].includes(control.pending.operation) || !['phase', 'receipt', 'state'].every(key => typeof (control.pending as any)[key] === 'string') || !modelControlDate(control.pending.startedAt) || !modelControlDate(control.pending.sendStartedAt))) modelControlInvalid('对象不匹配')
+  if (control.accountPending !== null && (!modelControlObject(control.accountPending) || typeof control.accountPending.modelName !== 'string' || typeof control.accountPending.operation !== 'string' || typeof control.accountPending.state !== 'string')) modelControlInvalid('对象不匹配')
+  if (control.unconfirmedClose !== null && (!modelControlObject(control.unconfirmedClose) || !modelControlMapping(control.unconfirmedClose.entries) || !modelControlDate(control.unconfirmedClose.sentAt) || !modelControlDate(control.unconfirmedClose.expiresAt))) modelControlInvalid('对象不匹配')
+  if (control.lastAttempt !== null && (!modelControlObject(control.lastAttempt) || !modelControlEntries(control.lastAttempt.entries) || !modelControlSources(control.lastAttempt.groups) || !modelControlDate(control.lastAttempt.at) || !['operation', 'outcome', 'reasonKey'].every(key => typeof (control.lastAttempt as any)[key] === 'string'))) modelControlInvalid('对象不匹配')
+  if (!modelControlObject(coverage) || !Array.isArray(coverage.schedules) || !coverage.schedules.every(schedule => modelControlObject(schedule) && typeof schedule.id === 'string' && typeof schedule.name === 'string') || !modelControlObject(health) || typeof health.recentlyProbed !== 'boolean' || (health.state !== null && typeof health.state !== 'string')) modelControlInvalid('对象不匹配')
+  if (item.healthCoordination !== undefined && typeof item.healthCoordination !== 'boolean') modelControlInvalid('对象不匹配')
   if (item.auto !== undefined) {
     const v = item.auto
-    if (!v || !['off', 'none', 'busy', 'manual', 'done', 'waiting', 'retry', 'eligible'].includes(v.state)
-      || !['', 'close', 'restore'].includes(v.operation) || !modelControlDate(v.nextAt) || typeof v.reasonKey !== 'string' || typeof v.changedAt !== 'string' || !modelControlDate(v.changedAt)) throw new Error('admin.connectionHealth.errors.request')
+    if (!v || !['off', 'none', 'busy', 'manual', 'done', 'waiting', 'retry', 'eligible'].includes(v.state) || !['', 'close', 'restore'].includes(v.operation) || !modelControlDate(v.nextAt) || typeof v.reasonKey !== 'string' || typeof v.changedAt !== 'string' || !modelControlDate(v.changedAt)) modelControlInvalid('对象不匹配')
   }
   return item
 }
-const parseModelControlItems = <T extends { items: ModelControlItem[] }>(value: T): T => {
-  if (!Array.isArray(value.items)) throw new Error('admin.connectionHealth.errors.request')
-  value.items.forEach(parseModelControlItem)
+const parseModelControlItems = <T extends { items: ModelControlItem[] }>(value: T, targetId?: string): T => {
+  if (!modelControlObject(value) || !Array.isArray(value.items)) modelControlInvalid('缺少逐题统计')
+  value.items.forEach(item => parseModelControlItem(item, targetId))
   return value
+}
+const parseModelControlPreview = (value: unknown, targetId?: string, modelName?: string): ModelControlPreview => {
+  if (!modelControlObject(value)) modelControlInvalid('无效预览结构')
+  const preview = value as ModelControlPreview
+  parseModelControlItem(preview.item, targetId, modelName)
+  if (!modelControlEntries(preview.entries) || !modelControlSources(preview.groups) || typeof preview.blockReasonKey !== 'string' || typeof preview.accountStatus !== 'string' || (preview.accountSchedulable !== null && typeof preview.accountSchedulable !== 'boolean') || (preview.planFingerprint !== null && typeof preview.planFingerprint !== 'string') || (preview.noRemoteWrite !== undefined && typeof preview.noRemoteWrite !== 'boolean') || !modelControlObject(preview.requestHealth) || typeof preview.requestHealth.checked !== 'boolean' || (preview.requestHealth.allowed !== null && typeof preview.requestHealth.allowed !== 'boolean') || typeof preview.requestHealth.reasonKey !== 'string') modelControlInvalid('无效预览结构')
+  return preview
+}
+export const parseModelControlConflictCurrent = (value: unknown, targetId?: string, modelName?: string): ModelControlItem | ModelControlPreview => {
+  if (modelControlObject(value) && 'item' in value) return parseModelControlPreview(value, targetId, modelName)
+  return parseModelControlItem(value, targetId, modelName)
+}
+type ModelControlRequestContext = { stage: 'read' | 'manage' | 'preview' | 'execute'; targetId?: string; modelName?: string; targetIds?: string[] }
+const modelControlItemRequest = async <T>(path: string, options: RequestInit, parse: (value: T) => T, context: ModelControlRequestContext): Promise<T> => {
+  try { return parse(await requestJson<T>(path, options)) }
+  catch (cause) {
+    if (cause instanceof Error && cause.name === 'AbortError') throw cause
+    if (cause instanceof ConnectionHealthApiError) {
+      if (cause.status !== 409 || cause.current === undefined || cause.current === null) throw cause
+      try { const current = parseModelControlConflictCurrent(cause.current, context.targetId, context.modelName); if (context.targetIds && !context.targetIds.includes('item' in current ? current.item.targetId : current.targetId)) modelControlInvalid('对象不匹配'); throw new ConnectionHealthApiError(cause.message, cause.status, current, cause.activeExecutionId) }
+      catch (invalid) { if (invalid instanceof ConnectionHealthApiError) throw invalid; cause = invalid }
+    }
+    const reason = cause instanceof SyntaxError ? '返回内容不是可读取的数据' : cause instanceof TypeError ? '返回结构不完整' : cause instanceof Error && !cause.message.startsWith('admin.') ? cause.message : '连接中断或返回内容无法读取'
+    const model = context.modelName ?? '模型管理'
+    if (context.stage === 'execute') throw new Error(`${model}的操作请求已发送，但返回内容无法读取：${reason}。暂时无法确认主站是否修改，请点“重新读取主站结果”，不要直接重试。`)
+    if (context.stage === 'manage') throw new Error(`读取${model}的管理名单时发现${reason}，请重新读取本地管理名单后再处理。`)
+    throw new Error(`读取${model}测试结果时发现${reason}，本次尚未发送模型开关。请刷新后重新预览；仍出现时检查前后端是否为同一版本。`)
+  }
 }
 const modelControlPath = '/connection-health/model-control'
 export const getModelControlAutoSettings = async (signal?: AbortSignal): Promise<ModelControlAutoSettings> => parseModelControlAutoSettings(await requestJson<unknown>(`${modelControlPath}/auto-settings`, { signal }))
 export const saveModelControlAutoSettings = async (settings: ModelControlAutoSettings, expectedVersion: number, signal?: AbortSignal): Promise<ModelControlAutoSettings> => parseModelControlAutoSettings(await requestJson<unknown>(`${modelControlPath}/auto-settings`, { method: 'PUT', body: JSON.stringify({ autoCloseEnabled: settings.autoCloseEnabled, autoRestoreEnabled: settings.autoRestoreEnabled, healthCoordinationEnabled: settings.healthCoordinationEnabled, verifyIntervalMinutes: settings.verifyIntervalMinutes, retryIntervalMinutes: settings.retryIntervalMinutes, expectedVersion }), signal }))
 export const getModelControlSettings = (signal?: AbortSignal): Promise<ModelControlSettings> => requestJson(`${modelControlPath}/settings`, { signal })
 export const saveModelControlSettings = (settings: Omit<ModelControlSettings, 'version'>, expectedVersion: number, signal?: AbortSignal): Promise<ModelControlSettings> => requestJson(`${modelControlPath}/settings`, { method: 'PUT', body: JSON.stringify({ minAccuracyPercent: settings.minAccuracyPercent, minJudgedAnswers: settings.minJudgedAnswers, expectedVersion }), signal })
-export const getModelControlTarget = async (targetId: string, signal?: AbortSignal): Promise<{ targetId: string; items: ModelControlItem[]; candidates: string[] }> => parseModelControlItems(await requestJson<{ targetId: string; items: ModelControlItem[]; candidates: string[] }>(`${modelControlPath}/targets/${encodeURIComponent(targetId)}`, { signal }))
-export const listModelControlItems = async (view: 'attention' | 'all', modelName: string, page: number, signal?: AbortSignal): Promise<ModelControlPage<ModelControlItem> & { counts: ModelControlCounts }> => parseModelControlItems(await requestJson<ModelControlPage<ModelControlItem> & { counts: ModelControlCounts }>(`${modelControlPath}/items?${new URLSearchParams({ view, modelName, page: String(page) })}`, { signal }))
-export const addModelControlManaged = async (targetId: string, modelName: string, signal?: AbortSignal): Promise<ModelControlItem> => parseModelControlItem(await requestJson(`${modelControlPath}/managed`, { method: 'POST', body: JSON.stringify({ targetId, modelName }), signal }))
-export const removeModelControlManaged = (targetId: string, modelName: string, expectedVersion: number, abandonClosed: boolean, signal?: AbortSignal): Promise<void> => requestJson(`${modelControlPath}/managed`, { method: 'DELETE', body: JSON.stringify({ targetId, modelName, expectedVersion, abandonClosed }), signal })
-export const previewModelControl = async (targetId: string, modelName: string, operation: ModelControlOperation, basis: ModelControlBasis, signal?: AbortSignal): Promise<ModelControlPreview> => { const value = await requestJson<ModelControlPreview>(`${modelControlPath}/preview`, { method: 'POST', body: JSON.stringify({ targetId, modelName, operation, basis }), signal }); parseModelControlItem(value.item); return value }
-export const executeModelControl = async (targetId: string, modelName: string, operation: ModelControlOperation, basis: ModelControlBasis, planFingerprint: string, confirmWithoutEvidence: boolean, signal?: AbortSignal): Promise<ModelControlResult> => { const value = await requestJson<ModelControlResult>(`${modelControlPath}/${operation === 'close_account' ? 'close-account' : operation}`, { method: 'POST', body: JSON.stringify({ targetId, modelName, basis, planFingerprint, ...(operation === 'restore' ? { confirmWithoutEvidence } : {}) }), signal }); parseModelControlItem(value.item); return value }
+export const getModelControlTarget = (targetId: string, signal?: AbortSignal): Promise<{ targetId: string; items: ModelControlItem[]; candidates: string[] }> => modelControlItemRequest(`${modelControlPath}/targets/${encodeURIComponent(targetId)}`, { signal }, value => parseModelControlItems(value, targetId), { stage: 'read', targetId })
+export const listModelControlItems = (view: 'attention' | 'all', modelName: string, page: number, signal?: AbortSignal): Promise<ModelControlPage<ModelControlItem> & { counts: ModelControlCounts }> => modelControlItemRequest(`${modelControlPath}/items?${new URLSearchParams({ view, modelName, page: String(page) })}`, { signal }, parseModelControlItems, { stage: 'read' })
+export const addModelControlManaged = (targetId: string, modelName: string, signal?: AbortSignal): Promise<ModelControlItem> => modelControlItemRequest(`${modelControlPath}/managed`, { method: 'POST', body: JSON.stringify({ targetId, modelName }), signal }, value => parseModelControlItem(value, targetId, modelName), { stage: 'manage', targetId, modelName })
+export const removeModelControlManaged = (targetId: string, modelName: string, expectedVersion: number, abandonClosed: boolean, signal?: AbortSignal): Promise<void> => modelControlItemRequest(`${modelControlPath}/managed`, { method: 'DELETE', body: JSON.stringify({ targetId, modelName, expectedVersion, abandonClosed }), signal }, value => value, { stage: 'manage', targetId, modelName })
+export const previewModelControl = (targetId: string, modelName: string, operation: ModelControlOperation, basis: ModelControlBasis, signal?: AbortSignal): Promise<ModelControlPreview> => modelControlItemRequest(`${modelControlPath}/preview`, { method: 'POST', body: JSON.stringify({ targetId, modelName, operation, basis }), signal }, value => parseModelControlPreview(value, targetId, modelName), { stage: 'preview', targetId, modelName })
+export const executeModelControl = (targetId: string, modelName: string, operation: ModelControlOperation, basis: ModelControlBasis, planFingerprint: string, confirmWithoutEvidence: boolean, signal?: AbortSignal): Promise<ModelControlResult> => modelControlItemRequest(`${modelControlPath}/${operation === 'close_account' ? 'close-account' : operation}`, { method: 'POST', body: JSON.stringify({ targetId, modelName, basis, planFingerprint, ...(operation !== 'close_account' ? { confirmWithoutEvidence } : {}) }), signal }, value => { if (!modelControlObject(value)) modelControlInvalid('对象不匹配'); parseModelControlItem(value.item, targetId, modelName); if (!['closed', 'restored', 'added', 'partial', 'failed', 'blocked', 'unknown'].includes(value.outcome ?? '') || typeof value.reasonKey !== 'string' || !modelControlEntries(value.entries) || !modelControlSources(value.groups) || !Array.isArray(value.hintKeys) || !value.hintKeys.every(hint => typeof hint === 'string') || (value.errorKey !== undefined && typeof value.errorKey !== 'string')) modelControlInvalid('无效执行结果'); return value }, { stage: 'execute', targetId, modelName })
 export const getModelControlVerifyTargets = (signal?: AbortSignal): Promise<{ targetIds: string[] }> => requestJson(`${modelControlPath}/verify-targets`, { signal })
-export const verifyModelControl = async (targetIds: string[], signal?: AbortSignal): Promise<{ items: ModelControlItem[]; errors: Array<{ targetId: string; reasonKey: string }> }> => parseModelControlItems(await requestJson<{ items: ModelControlItem[]; errors: Array<{ targetId: string; reasonKey: string }> }>(`${modelControlPath}/verify`, { method: 'POST', body: JSON.stringify({ targetIds }), signal }))
+export const verifyModelControl = (targetIds: string[], signal?: AbortSignal): Promise<{ items: ModelControlItem[]; errors: Array<{ targetId: string; reasonKey: string }> }> => modelControlItemRequest(`${modelControlPath}/verify`, { method: 'POST', body: JSON.stringify({ targetIds }), signal }, value => { parseModelControlItems(value); if (value.items.some(item => !targetIds.includes(item.targetId)) || !Array.isArray(value.errors) || !value.errors.every(error => modelControlObject(error) && targetIds.includes(error.targetId) && typeof error.reasonKey === 'string')) modelControlInvalid('对象不匹配'); return value }, { stage: 'read', targetIds })
 export const listModelControlEvents = async (targetId: string, modelName: string, page: number, signal?: AbortSignal): Promise<ModelControlPage<ModelControlEvent>> => { const value = await requestJson<ModelControlPage<ModelControlEvent>>(`${modelControlPath}/events?${new URLSearchParams({ targetId, modelName, page: String(page) })}`, { signal }); if (value.items.some(event => event.actorUserId !== undefined && typeof event.actorUserId !== 'string')) throw new Error('admin.connectionHealth.errors.request'); return value }

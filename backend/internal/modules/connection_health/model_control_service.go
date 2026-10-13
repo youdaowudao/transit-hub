@@ -164,6 +164,18 @@ func (s *Service) GetModelControlSettings(ctx context.Context, user string) (Mod
 	}
 	return s.modelControls.GetModelControlSettings(ctx, user, ws)
 }
+func validateModelControlSettings(input ModelControlSettings, expected int64) error {
+	if input.MinAccuracyPercent < 1 || input.MinAccuracyPercent > 100 {
+		return requestError(modelControlError("AccuracyInvalid"))
+	}
+	if input.MinJudgedAnswers < 3 || input.MinJudgedAnswers > 10 {
+		return requestError(modelControlError("QuestionMinimumInvalid"))
+	}
+	if expected < 0 {
+		return requestError(modelControlError("SettingsVersionInvalid"))
+	}
+	return nil
+}
 func (s *Service) SaveModelControlSettings(ctx context.Context, user string, input ModelControlSettings, expected int64) (ModelControlSettings, error) {
 	if err := s.questionAnswerScheduleWriteGuard(); err != nil {
 		return input, err
@@ -172,8 +184,8 @@ func (s *Service) SaveModelControlSettings(ctx context.Context, user string, inp
 	if err != nil {
 		return input, err
 	}
-	if input.MinAccuracyPercent < 1 || input.MinAccuracyPercent > 100 || input.MinJudgedAnswers < 1 || input.MinJudgedAnswers > 50 || expected < 0 {
-		return input, requestError(ErrorRequest)
+	if err := validateModelControlSettings(input, expected); err != nil {
+		return input, err
 	}
 	return s.modelControls.SaveModelControlSettings(ctx, user, ws, input, expected)
 }

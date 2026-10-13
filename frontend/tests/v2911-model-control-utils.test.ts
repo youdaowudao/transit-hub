@@ -48,10 +48,10 @@ describe('manual model verification preserves sequencing and account freezes',()
 describe('model cards and operation events follow the confirmed page contract',()=>{
  it.each([['unverified',''],['not_isolatable','AccountTypeUnsupported'],['not_isolatable','AccountReadFailed']] as const)('keeps %s/%s uncertain even with historical closed entries', (state,reason)=>{
   const item=managed();item.decision='usable';item.control.closedEntries={alias:'M'};item.control.observation.state=state;item.control.observation.reasonKey=reason ? `admin.connectionHealth.errors.modelControl${reason}` : ''
-  const view=control.modelControlCardView(item,{availableModels:['M']});expect(view.label).toBe('主站状态无法确认');expect(view.tone).toBe('neutral');expect(view.stateSentence).not.toContain('开放中');expect(view.primaryAction).toBe('restore')
+  const view=control.modelControlCardView(item,{availableModels:['M']});expect(view.label).toBe('主站状态无法确认');expect(view.tone).toBe('neutral');expect(view.stateSentence).not.toContain('开放中');expect(view.primaryAction).toBeNull()
  })
  it.each([
-  ['serving','close_recommended','',false,'close'],['serving','usable','',false,null],['partially_closed','close_recommended','',true,'close'],['closed','usable','',true,'restore'],['not_provided','usable','',false,'add'],['not_provided','no_evidence','',false,null],['closed','testing','',true,null],['account_missing','usable','',true,null],['closed','usable','conflict',true,null],['unverified','usable','',false,null],
+  ['serving','close_recommended','',false,'close'],['serving','usable','',false,'close'],['partially_closed','close_recommended','',true,'close'],['closed','usable','',true,'restore'],['not_provided','usable','',false,'add'],['not_provided','no_evidence','',false,'add'],['closed','testing','',true,null],['account_missing','usable','',true,null],['closed','usable','conflict',true,null],['unverified','usable','',false,null],
  ] as const)('%s/%s shows at most its intended primary action', (state,decision,conflict,closed,action)=>{
   const item=managed();item.decision=decision;item.control.observation.state=state;item.control.conflictReason=conflict;if(closed)item.control.closedEntries={alias:'M'}
   const view=control.modelControlCardView(item,{availableModels:['M']});expect(view.primaryAction).toBe(action)

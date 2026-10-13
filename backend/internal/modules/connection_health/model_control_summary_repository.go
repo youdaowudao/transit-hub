@@ -20,11 +20,8 @@ func (r *Repository) queryModelControlAccountSummaries(ctx context.Context, user
 	}
 	rows, err := r.db.Query(ctx, `SELECT to_jsonb(t),COALESCE(rounds.items,'[]'::jsonb)
  FROM connection_health_model_control_targets t
- LEFT JOIN LATERAL(SELECT jsonb_agg(jsonb_build_object('batchId',b.batch_id,'source',COALESCE(e.trigger,'manual'),'scheduleName','','createdAt',b.created_at,'completedAt',b.completed_at,'running',b.running,'correct',b.correct,'incorrect',b.incorrect,'unreviewed',b.unreviewed,'failed',b.failed,'cancelled',b.cancelled) ORDER BY b.created_at DESC,b.batch_id DESC) AS items FROM(
- SELECT batch_id,min(created_at) created_at,max(completed_at) completed_at,bool_or(status IN('pending','running')) running,
- count(*) FILTER(WHERE status='succeeded' AND answer_judgment='correct') correct,count(*) FILTER(WHERE status='succeeded' AND answer_judgment='incorrect') incorrect,
- count(*) FILTER(WHERE status='succeeded' AND (answer_judgment IS NULL OR answer_judgment NOT IN('correct','incorrect'))) unreviewed,count(*) FILTER(WHERE status='failed') failed,count(*) FILTER(WHERE status='cancelled') cancelled
- FROM(SELECT batch_id,created_at,completed_at,status,answer_judgment FROM connection_health_question_answer_records WHERE user_id=$1 AND target_id=t.target_id AND model_name=t.model_name ORDER BY created_at DESC,id DESC LIMIT 1000) bounded GROUP BY batch_id ORDER BY min(created_at) DESC,batch_id DESC LIMIT 20) b
+ LEFT JOIN LATERAL(SELECT jsonb_agg(jsonb_build_object('batchId',b.batch_id,'source',COALESCE(e.trigger,'manual'),'scheduleName','','createdAt',b.created_at,'completedAt',b.completed_at,'running',b.running,'correct',b.correct,'incorrect',b.incorrect,'unreviewed',b.unreviewed,'failed',b.failed,'cancelled',b.cancelled,'questions',b.questions) ORDER BY b.created_at DESC,b.batch_id DESC) AS items FROM(`+
+		modelControlRoundAggregateQuery(`SELECT id,batch_id,question_id,question_name,question_body,created_at,completed_at,updated_at,status,answer_judgment FROM connection_health_question_answer_records WHERE user_id=$1 AND target_id=t.target_id AND model_name=t.model_name ORDER BY created_at DESC,id DESC LIMIT 1000`)+`) b
  LEFT JOIN connection_health_question_answer_schedule_execution_targets et ON et.id=b.batch_id AND et.target_id=t.target_id LEFT JOIN connection_health_question_answer_schedule_executions e ON e.id=et.execution_id AND e.user_id=$1) rounds ON true
  WHERE t.user_id=$1 AND t.admin_account_id=$2 AND t.target_id=ANY($3::text[])`, user, workspace, targetIDs)
 	if err != nil {
@@ -55,6 +52,9 @@ func (r *Repository) queryModelControlAccountSummaries(ctx context.Context, user
 		}
 		if err := json.Unmarshal(roundJSON, &rounds); err != nil {
 			return nil, err
+		}
+		for i := range rounds {
+			prepareModelControlRoundQuality(&rounds[i])
 		}
 		rule := modelControlWorkspaceRule(settings, stored.ModelName)
 		target := modelControlTarget{TargetID: stored.TargetID, ModelName: stored.ModelName, ClosedEntries: stored.ClosedEntries, Pending: stored.Pending, ConflictReason: stored.ConflictReason, LastAttempt: stored.LastAttempt, Observation: modelControlObservation{State: stored.State, ReasonKey: stored.Reason, CheckedAt: stored.ObservedAt, AccountSchedulable: stored.Schedulable}}

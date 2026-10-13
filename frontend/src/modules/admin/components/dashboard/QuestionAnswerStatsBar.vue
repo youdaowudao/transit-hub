@@ -20,6 +20,7 @@ const summary = (stats: Pick<QuestionAnswerModelStats, 'requests' | 'reviews'>) 
 </script>
 <template>
   <section data-testid="question-answer-stats-bar" class="mb-3 overflow-hidden rounded-lg border border-border/50 bg-surface-line/20">
+    <p class="px-3 pt-2 text-xs text-muted-foreground">失败次数单独显示，答对比例不代表请求稳定。</p>
     <div class="flex flex-wrap gap-1 border-b border-border/40 px-3 py-2">
       <button v-for="option in ([['account', '账号汇总'], ['model', '按模型'], ['question', '按题目']] as const)" :key="option[0]" type="button" class="rounded-md px-2.5 py-1.5 text-xs font-medium" :class="dimension === option[0] ? 'bg-background text-foreground' : 'text-muted-foreground hover:text-foreground'" :aria-pressed="dimension === option[0]" @click="dimension = option[0]">{{ option[1] }}</button>
     </div>
@@ -30,7 +31,7 @@ const summary = (stats: Pick<QuestionAnswerModelStats, 'requests' | 'reviews'>) 
         <dl class="mt-2 grid grid-cols-3 gap-2">
           <div v-for="([label, count], countIndex) in counts(period.stats)" :key="countIndex"><dt class="text-[11px] text-muted-foreground">{{ label }}</dt><dd class="text-sm font-semibold text-foreground">{{ count }}</dd></div>
         </dl>
-        <div class="mt-2 flex flex-wrap items-end gap-2"><span class="text-[11px] text-muted-foreground">正确率</span><strong data-testid="question-answer-accuracy" class="text-2xl leading-none text-primary">{{ accuracy(period.stats) }}</strong></div>
+        <div class="mt-2 flex flex-wrap items-end gap-2"><span class="text-[11px] text-muted-foreground">答案正确比例（统计用）</span><strong data-testid="question-answer-accuracy" class="text-2xl leading-none text-primary">{{ accuracy(period.stats) }}</strong></div>
         <div v-if="dimension === 'model'" class="mt-3 space-y-2">
           <p v-if="period.stats.byModel.length === 0" class="text-xs text-muted-foreground">暂无模型数据</p>
           <div v-for="item in period.stats.byModel" :key="item.modelName" data-testid="question-answer-model-stats" class="rounded-md border border-border/40 p-2"><p class="break-words text-xs font-medium text-foreground">{{ item.modelName }} · {{ accuracy(item) }}</p><p class="mt-1 break-words text-[11px] text-muted-foreground">{{ summary(item) }}</p></div>

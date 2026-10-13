@@ -264,7 +264,9 @@ describe('question-answer compact layout primitives', () => {
     expect(bar.text()).toContain('当前批次')
     expect(bar.text()).toContain('今日（新加坡）')
     expect(bar.text()).not.toContain('累计')
-    for (const label of ['提交', '进行中', '成功', '待人工', '正确', '错误', '失败', '取消', '正确率']) {
+    expect(bar.text()).not.toContain('本轮题目平均正确率（用于模型建议）')
+    expect(bar.text()).toContain('失败次数单独显示，答对比例不代表请求稳定。')
+    for (const label of ['提交', '进行中', '成功', '待人工', '正确', '错误', '失败', '取消', '答案正确比例（统计用）']) {
       expect(bar.text()).toContain(label)
     }
     for (const removedLabel of ['待复审', '回答数', '失败数']) {
@@ -907,7 +909,9 @@ describe('question-answer compact layout primitives', () => {
     const configuration = wrapper.find('[data-testid="question-answer-configuration"]')
     expect(configuration.text()).toContain('gpt-5.6-sol、gpt-5.6-terra')
     expect(configuration.text()).toContain('问题 1 个 · 推理力度 高 · 每组合 3 次')
-    expect(configuration.text()).toContain('已记住（本浏览器，当前管理员的 OpenAI 分组共用）')
+    expect(configuration.text()).toContain('记住的选择会用于后续账号问答和批量问答。')
+    expect(configuration.text()).not.toContain('当前管理员的 OpenAI 分组共用')
+    expect(configuration.text()).not.toContain('此时还没有发请求')
     expect(configuration.find('[data-testid="question-answer-models"]').exists()).toBe(false)
     expect(configuration.find('[data-testid="question-answer-questions"]').exists()).toBe(false)
     expect(configuration.findAll('button').some(button => button.text().includes('保存'))).toBe(false)

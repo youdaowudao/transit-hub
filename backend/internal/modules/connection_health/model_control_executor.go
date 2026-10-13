@@ -41,6 +41,52 @@ func modelControlAdmission(item ModelControlItem, op string) error {
 	}
 	return nil
 }
+
+// Human model actions use the same write safeguards without treating quality
+// advice as permission. Account-wide and automatic actions keep strict admission.
+func modelControlManualAdmission(item ModelControlItem, op string) error {
+	if item.Control.AccountPending != nil || item.Control.Pending != nil {
+		return modelControlConflict("Pending", item)
+	}
+	if item.Control.Observation.State == "account_missing" {
+		return modelControlConflict("AccountMissing", item)
+	}
+	if item.Decision == "testing" {
+		return modelControlConflict("Testing", item)
+	}
+	switch op {
+	case "close":
+	case "restore":
+		if len(item.Control.ClosedEntries) == 0 {
+			return modelControlConflict("NothingClosed", item)
+		}
+		if item.Control.ConflictReason != "" {
+			return &ModelControlConflictError{Key: item.Control.ConflictReason, Current: item}
+		}
+	case "add":
+		if item.Control.ConflictReason != "" {
+			return &ModelControlConflictError{Key: item.Control.ConflictReason, Current: item}
+		}
+		if len(item.Control.ClosedEntries) > 0 {
+			return modelControlConflict("RestoreRequired", item)
+		}
+		if item.Control.Observation.State != "not_provided" {
+			return modelControlConflict("AddStateUnverified", item)
+		}
+	default:
+		return requestError(modelControlError("OperationInvalid"))
+	}
+	return nil
+}
+func modelControlManualNeedsConfirmation(item ModelControlItem, op string) bool {
+	return op == "close" && item.Decision != "close_recommended" || (op == "add" || op == "restore") && item.Decision != "usable"
+}
+func modelControlHumanAdmission(item ModelControlItem, op string) error {
+	if op == "close_account" {
+		return modelControlAdmission(item, op)
+	}
+	return modelControlManualAdmission(item, op)
+}
 func modelControlBasisMatches(a, b modelControlBasis) bool {
 	return a.BatchID == b.BatchID && a.RuleVersion == b.RuleVersion && a.Decision == b.Decision && a.BusinessDay == b.BusinessDay
 }
@@ -69,7 +115,7 @@ func (s *Service) modelControlInput(ctx context.Context, user, target, model, op
 	if !modelControlBasisMatches(basis, item.Basis) {
 		return session, workspace, account, item, object, modelControlConflict("BasisChanged", item)
 	}
-	return session, workspace, account, item, object, modelControlAdmission(item, op)
+	return session, workspace, account, item, object, modelControlHumanAdmission(item, op)
 }
 func (s *Service) modelControlReservations(ctx context.Context, user, workspace string) (map[string]bool, map[string]map[string]bool, error) {
 	health, err := s.repo.ListTargetActionStates(ctx, user, workspace)
@@ -277,7 +323,7 @@ func (s *Service) PreviewModelControl(ctx context.Context, user, target, model, 
 		return ModelControlPreview{Item: latest, Entries: []ModelControlEntry{}, Groups: []modelSourceCount{}, BlockReasonKey: modelControlError("AccountMissing")}, nil
 	}
 	if err != nil {
-		return ModelControlPreview{}, requestError(modelControlError("AccountReadFailed"))
+		return ModelControlPreview{}, requestError(modelControlPreparationFailureDetail(model, err, session))
 	}
 	_, err = s.persistModelControlPlan(ctx, object, op, plan)
 	if err != nil {
@@ -336,7 +382,10 @@ func modelControlClearClosedBasis(t *modelControlTarget) {
 func modelControlApplyBasis(t *modelControlTarget, basis modelControlBasis, actor string, now time.Time) {
 	t.ClosedAt = &now
 	t.ClosedBy = &actor
-	t.ClosedBatchID = &basis.BatchID
+	t.ClosedBatchID = nil
+	if basis.BatchID != "" {
+		t.ClosedBatchID = &basis.BatchID
+	}
 	t.ClosedAccuracyPercent = basis.AccuracyPercent
 }
 
@@ -460,10 +509,10 @@ func (s *Service) runModelControl(ctx context.Context, run *modelControlRun) (Mo
 		if !modelControlBasisMatches(basis, item.Basis) {
 			return ModelControlResult{}, modelControlConflict("BasisChanged", item)
 		}
-		if err = modelControlAdmission(item, op); err != nil {
+		if err = modelControlHumanAdmission(item, op); err != nil {
 			return ModelControlResult{}, err
 		}
-		if op == "restore" && item.Decision != "usable" && !confirm {
+		if modelControlManualNeedsConfirmation(item, op) && !confirm {
 			return ModelControlResult{}, modelControlConflict("ConfirmationRequired", item)
 		}
 	}
@@ -476,7 +525,10 @@ func (s *Service) runModelControl(ctx context.Context, run *modelControlRun) (Mo
 		return s.modelControlResult(ctx, user, ws, target, model, "blocked", modelControlError("AccountMissing"), nil, nil)
 	}
 	if err != nil {
-		return ModelControlResult{}, requestError(modelControlError("AccountReadFailed"))
+		if run.auto != nil {
+			return ModelControlResult{}, requestError(modelControlError("AccountReadFailed"))
+		}
+		return ModelControlResult{}, requestError(modelControlPreparationFailureDetail(model, err, session))
 	}
 	if err = s.reconcileModelControlLate(prep, user, ws, target, plan.Detail, true); err != nil {
 		return ModelControlResult{}, err
@@ -498,15 +550,12 @@ func (s *Service) runModelControl(ctx context.Context, run *modelControlRun) (Mo
 		if !modelControlBasisMatches(submitted, item.Basis) {
 			return ModelControlResult{}, modelControlConflict("BasisChanged", item)
 		}
-		if err = modelControlAdmission(item, op); err != nil {
+		if err = modelControlHumanAdmission(item, op); err != nil {
 			return ModelControlResult{}, err
 		}
-		if op == "restore" && item.Decision != "usable" && !confirm {
+		if modelControlManualNeedsConfirmation(item, op) && !confirm {
 			return ModelControlResult{}, modelControlConflict("ConfirmationRequired", item)
 		}
-	}
-	if op == "add" && item.Decision != "usable" {
-		return ModelControlResult{}, modelControlConflict("NotEligible", item)
 	}
 	// Late attribution or changed upstream mappings require rebuilding the plan.
 	if op == "restore" || op == "add" {
@@ -533,8 +582,9 @@ func (s *Service) runModelControl(ctx context.Context, run *modelControlRun) (Mo
 		return s.modelControlResult(prep, user, ws, target, model, "blocked", plan.Preview.BlockReasonKey, plan.Preview.Entries, plan.Preview.Groups)
 	}
 	basis = item.Basis
-	basis.ConfirmWithoutEvidence = op == "restore" && confirm
-	if item.Round != nil {
+	basis.ConfirmWithoutEvidence = run.auto == nil && op != "close_account" && confirm
+	basis.AccuracyPercent = nil
+	if item.Round != nil && (item.Decision == "usable" || item.Decision == "close_recommended") {
 		basis.AccuracyPercent = item.Round.AccuracyPercent
 	}
 	id, err := newID()
@@ -778,11 +828,29 @@ func (s *Service) runModelControl(ctx context.Context, run *modelControlRun) (Mo
 			if attr.Outcome != "succeeded" {
 				reason = modelControlError("AccountReadFailed")
 			}
-			return s.modelControlResult(ctx, user, ws, target, model, resultOutcome, reason, attr.Entries, plan.Preview.Groups)
+			result, resultErr := s.modelControlResult(ctx, user, ws, target, model, resultOutcome, reason, attr.Entries, plan.Preview.Groups)
+			if resultErr == nil && (resultOutcome == "failed" || resultOutcome == "partial") {
+				if sendErr != nil {
+					result.ErrorKey = modelControlFailureDetail(model, "写入主站白名单", sendErr, resultOutcome, session)
+				} else {
+					result.ErrorKey = modelControlFailureDetail(model, "读回核对条目", nil, resultOutcome, session)
+				}
+			}
+			return result, resultErr
 		}
 	}
 	_ = s.recordModelControlEvent(ctx, modelControlNewEvent(user, ws, target, model, op+"_unknown", basis, map[string]any{"reasonKey": modelControlError("Storage"), "entries": plan.Preview.Entries}))
-	return s.modelControlResult(ctx, user, ws, target, model, "unknown", modelControlError("Storage"), nil, plan.Preview.Groups)
+	result, resultErr := s.modelControlResult(ctx, user, ws, target, model, "unknown", modelControlError("Storage"), nil, plan.Preview.Groups)
+	if resultErr == nil {
+		if readErr != nil {
+			result.ErrorKey = modelControlFailureDetail(model, "读回主站结果", readErr, "unknown", session)
+		} else if err != nil {
+			result.ErrorKey = modelControlFailureDetail(model, "保存本次结果", err, "unknown", session)
+		} else {
+			result.ErrorKey = modelControlFailureDetail(model, "写入主站白名单", sendErr, "unknown", session)
+		}
+	}
+	return result, resultErr
 }
 func (s *Service) observeModelControlOutcome(ctx context.Context, object modelControlTarget, detail upstream.Sub2APIModelControlAccount, at time.Time, groups []modelSourceCount, reason string, entries []ModelControlEntry) error {
 	short, cancel := modelControlStorageContext(ctx)

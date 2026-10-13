@@ -652,7 +652,12 @@ export interface ModelControlRule {
   includeManual: boolean; includeScheduled: boolean; version: number
 }
 export interface ModelControlBasis { batchId: string; ruleVersion: number; decision: ModelControlDecision; businessDay: string }
+export interface ModelControlQuestionResult {
+  questionId: string; questionName: string
+  correct: number; incorrect: number; unreviewed: number; failed: number; cancelled: number; accuracyPercent: number | null
+}
 export interface ModelControlRound {
+  questions: ModelControlQuestionResult[]; duplicateQuestionIds: string[]
   batchId: string; source: 'manual' | 'scheduled' | 'run_now'; scheduleName: string | null
   createdAt: string; completedAt: string | null; running: boolean
   correct: number; incorrect: number; unreviewed: number; failed: number; cancelled: number; accuracyPercent: number | null

@@ -19,6 +19,9 @@ func TestModelControlDecisionAndRoundSelection(t *testing.T) {
 		round *modelControlRound
 		want  string
 	}{{"none", nil, "no_evidence"}, {"running", &modelControlRound{Running: true, Unreviewed: 1}, "testing"}, {"review", &modelControlRound{Correct: 10, Unreviewed: 1}, "awaiting_review"}, {"insufficient", &modelControlRound{Correct: 2}, "insufficient"}, {"all_failed", &modelControlRound{Failed: 3}, "insufficient"}, {"below", &modelControlRound{Correct: 1, Incorrect: 2}, "close_recommended"}, {"boundary", &modelControlRound{Correct: 2, Incorrect: 2}, "usable"}, {"above", &modelControlRound{Correct: 2, Incorrect: 1}, "usable"}} {
+		if tc.round != nil {
+			tc.round.Questions = []ModelControlQuestionResult{{QuestionID: "q", QuestionName: "题", Correct: tc.round.Correct, Incorrect: tc.round.Incorrect, Unreviewed: tc.round.Unreviewed, Failed: tc.round.Failed, Cancelled: tc.round.Cancelled}}
+		}
 		t.Run(tc.name, func(t *testing.T) {
 			if got := evaluateModelControlDecision(tc.round, rule); got.Decision != tc.want {
 				t.Fatalf("decision=%+v", got)

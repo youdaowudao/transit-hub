@@ -4,7 +4,7 @@ import { Loader2, X } from 'lucide-vue-next'
 import { t, te } from '@/locales'
 import { Tooltip } from '@/components/ui/tooltip'
 import { connectionHealthMessageKey, isTestConfigurationBlocked, testProtocolName } from '../../composables/useConnectionHealth'
-import { discoverTargetModels, getModelControlTarget, listTestQuestions, startQuestionAnswerBatch } from '../../api/connectionHealth'
+import { discoverTargetModels, listTestQuestions, startQuestionAnswerBatch } from '../../api/connectionHealth'
 import type {
   AdminGroupHealth,
   ManualProbeModelOption,
@@ -18,6 +18,7 @@ import {
   compatibleQuestionAnswerModelIds,
   reconcileQuestionAnswerBatchTargetIds,
   resolveQuestionAnswerSelection,
+  questionAnswerDuplicateQuestionNames,
   selectQuestionAnswerBatchTargets,
   type QuestionAnswerBatchTarget,
 } from '../../utils/questionAnswers'
@@ -40,9 +41,6 @@ interface BatchTargetPreview {
   incompatibleModelIds: string[]
   requestCount: number
   discoveryErrorKey: string
-  discoveredModelIds: string[]
-  managedModelIds: string[]
-  managedErrorKey: string
 }
 
 type BatchTargetOutcomeKind = 'started' | 'skipped' | 'failed'
@@ -75,6 +73,8 @@ const preparing = ref(false)
 const selectedTargetIds = ref<string[]>([])
 const previews = ref<BatchTargetPreview[]>([])
 const preparationError = ref('')
+const defaultSelectionRestored = ref(false)
+const preparedDuplicateQuestionNames = ref<string[]>([])
 const preparationReady = ref(false)
 const preparedQuestionIds = ref<string[]>([])
 const preparedQuestionNames = ref<string[]>([])
@@ -162,6 +162,8 @@ const prepare = async () => {
   cancelPreparation()
   previews.value = []
   preparationError.value = ''
+  defaultSelectionRestored.value = false
+  preparedDuplicateQuestionNames.value = []
   preparedQuestionIds.value = []
   preparedQuestionNames.value = []
   preparedModelIds.value = []
@@ -203,6 +205,7 @@ const prepare = async () => {
     }
     if (sequence !== preparationSequence || !visible.value || signature !== preparationSignature.value) return
     const resolved = resolveQuestionAnswerSelection(props.preferences, sourceModels, questions)
+    defaultSelectionRestored.value = !props.preferences.modelIds.some(id => sourceModels.some(model => model.id === id)) || !props.preferences.questionIds.some(id => questions.some(question => question.id === id && question.enabled))
     if (resolved.modelIds.length === 0) {
       preparationError.value = 'noSourceModel'
       return
@@ -217,6 +220,7 @@ const prepare = async () => {
       return
     }
 
+    preparedDuplicateQuestionNames.value = questionAnswerDuplicateQuestionNames(questions.filter(question => resolved.questionIds.includes(question.id)))
     preparedQuestionIds.value = [...resolved.questionIds]
     preparedQuestionNames.value = resolved.questionIds.flatMap((questionId) => {
       const question = questions.find(item => item.id === questionId)
@@ -225,23 +229,14 @@ const prepare = async () => {
     preparedModelIds.value = [...resolved.modelIds]
     const nextPreviews: BatchTargetPreview[] = []
     for (const target of stableTargets) {
-      const preview: BatchTargetPreview = { target, compatibleModelIds: [], incompatibleModelIds: [...resolved.modelIds], requestCount: 0, discoveryErrorKey: '', discoveredModelIds: [], managedModelIds: [], managedErrorKey: '' }
+      const preview: BatchTargetPreview = { target, compatibleModelIds: [], incompatibleModelIds: [...resolved.modelIds], requestCount: 0, discoveryErrorKey: '' }
       if (isTestConfigurationBlocked(target.testConfiguration)) { preview.discoveryErrorKey = target.testConfiguration?.blockedReason || 'admin.connectionHealth.errors.testConfigurationUnavailable'; nextPreviews.push(preview); continue }
       try {
         const models = target.targetId === source.targetId ? sourceModels : await discoverTargetModels(target.targetId, controller.signal)
         if (sequence !== preparationSequence || !visible.value || signature !== preparationSignature.value) return
-        preview.discoveredModelIds = models.map(model => model.id)
         const compatibility = compatibleQuestionAnswerModelIds(resolved.modelIds, models)
         preview.compatibleModelIds = compatibility.compatible; preview.incompatibleModelIds = compatibility.incompatible
-        if (target.targetId.startsWith('sub2api:')) {
-          try { const managed = await getModelControlTarget(target.targetId, controller.signal); preview.managedModelIds = [...new Set(managed.items.map(item => item.modelName))] }
-          catch (error) { if (error instanceof Error && error.name === 'AbortError') return; preview.managedErrorKey = 'managedReadFailed' }
-          if (sequence !== preparationSequence || !visible.value || signature !== preparationSignature.value) return
-          preview.compatibleModelIds = [...new Set([...preview.compatibleModelIds, ...preview.managedModelIds])]
-          if (!preview.managedErrorKey && preview.managedModelIds.some(id => !preview.discoveredModelIds.includes(id))) preview.managedErrorKey = 'managedMissing'
-        }
         preview.requestCount = preview.compatibleModelIds.length * resolved.questionIds.length * resolved.repeatCount
-        if (!preview.managedErrorKey && preview.requestCount > 50) preview.managedErrorKey = 'managedOverLimit'
       } catch (error) {
         if (error instanceof Error && error.name === 'AbortError') return
         if (sequence !== preparationSequence || !visible.value || signature !== preparationSignature.value) return
@@ -270,13 +265,13 @@ const runIsCurrent = (sequence: number, scope: string): boolean => (
 
 const start = async () => {
   if (!canStart.value) return
+  defaultSelectionRestored.value = false
   const snapshot: BatchRunSnapshot = {
     preferenceScope: props.preferenceScope,
     previews: previews.value.map(preview => ({
       ...preview,
       compatibleModelIds: [...preview.compatibleModelIds],
       incompatibleModelIds: [...preview.incompatibleModelIds],
-      discoveredModelIds: [...preview.discoveredModelIds], managedModelIds: [...preview.managedModelIds],
     })),
     preparedModelIds: [...preparedModelIds.value],
     questionIds: [...preparedQuestionIds.value],
@@ -310,22 +305,10 @@ const start = async () => {
         }]
         continue
       }
-      let modelIds = [...preview.compatibleModelIds]
-      let managedReason = '', missingManaged: string[] = []
-      if (preview.target.targetId.startsWith('sub2api:')) {
-        let managedIds: string[] = []
-        try { const current = await getModelControlTarget(preview.target.targetId, controller.signal); managedIds = [...new Set(current.items.map(item => item.modelName))] }
-        catch (error) { if (error instanceof Error && error.name === 'AbortError') return; managedReason = 'managedReadFailed' }
-        if (!runIsCurrent(sequence, snapshot.preferenceScope)) return
-        const discovered = new Set(preview.discoveredModelIds)
-        modelIds = [...new Set([...snapshot.preparedModelIds.filter(id => discovered.has(id)), ...managedIds])]
-        missingManaged = managedIds.filter(id => !discovered.has(id))
-        if (!managedReason && missingManaged.length) managedReason = 'managedMissing'
-        if (!managedReason && modelIds.length * snapshot.questionIds.length * snapshot.repeatCount > 50) managedReason = 'managedOverLimit'
-      }
+      const modelIds = [...preview.compatibleModelIds]
       const requestCount = modelIds.length * snapshot.questionIds.length * snapshot.repeatCount
-      if (managedReason || modelIds.length === 0) {
-        outcomes.value = [...outcomes.value, { targetId: preview.target.targetId, accountName: preview.target.accountName, kind: managedReason === 'managedReadFailed' ? 'failed' : 'skipped', compatibleModelIds: modelIds, incompatibleModelIds: managedReason === 'managedMissing' ? missingManaged : [...preview.incompatibleModelIds], requestCount, acceptedRequestCount: 0, reasonKey: managedReason || 'noCompatibleModels', errorKey: '' }]
+      if (modelIds.length === 0) {
+        outcomes.value = [...outcomes.value, { targetId: preview.target.targetId, accountName: preview.target.accountName, kind: 'skipped', compatibleModelIds: modelIds, incompatibleModelIds: [...preview.incompatibleModelIds], requestCount, acceptedRequestCount: 0, reasonKey: 'noCompatibleModels', errorKey: '' }]
         continue
       }
 
@@ -390,9 +373,6 @@ const cancelRun = () => {
 
 const outcomeReason = (outcome: BatchTargetOutcome): string => {
   switch (outcome.reasonKey) {
-    case 'managedReadFailed': return t('admin.connectionHealth.questionAnswerBatch.outcomes.managedReadFailed')
-    case 'managedMissing': return t('admin.connectionHealth.questionAnswerBatch.outcomes.managedMissing', { models: outcome.incompatibleModelIds.join('、') })
-    case 'managedOverLimit': return t('admin.connectionHealth.questionAnswerBatch.outcomes.managedOverLimit')
     case 'activeBatch': return t('admin.connectionHealth.questionAnswerBatch.outcomes.activeBatch')
     case 'noCompatibleModels': return t('admin.connectionHealth.questionAnswerBatch.outcomes.noCompatibleModels')
     case 'discoveryFailed': return t('admin.connectionHealth.questionAnswerBatch.outcomes.discoveryFailed')
@@ -578,6 +558,9 @@ onBeforeUnmount(() => {
           </div>
 
           <template v-else>
+            <p class="text-xs text-muted-foreground">记住的选择会用于后续账号问答和批量问答。这里只提交准备名单，管理名单不会自动加入；点开始才发请求。</p>
+            <p v-if="preparedDuplicateQuestionNames.length" data-testid="question-answer-batch-duplicate-questions" class="text-xs text-amber-600">{{ preparedDuplicateQuestionNames.join('、') }}的题干相同，但按独立题目分别计分。重复内容不会增加测试范围，建议换成不同内容。</p>
+            <p v-if="defaultSelectionRestored" data-testid="question-answer-default-restored" class="text-xs text-muted-foreground">没有可用的记住选择，已选默认模型/题目。请确认本次配置，再点开始；此时还没有发请求。</p>
             <div class="space-y-2 rounded-lg border border-border/50 p-3">
               <div v-for="group in groups" :key="`batch-group:${group.id}`" class="flex items-center justify-between gap-3">
                 <span class="min-w-0 truncate text-xs font-medium text-foreground">{{ group.name }}</span>
@@ -652,7 +635,7 @@ onBeforeUnmount(() => {
                 <p>{{ t('admin.connectionHealth.testConfiguration.questionAnswerTimeout') }}</p>
                 <p>{{ t('admin.connectionHealth.questionAnswerBatch.compatibleModels', { models: preview.compatibleModelIds.join('、') || '-' }) }}</p>
                 <p v-if="preview.incompatibleModelIds.length">{{ t('admin.connectionHealth.questionAnswerBatch.incompatibleModels', { models: preview.incompatibleModelIds.join('、') }) }}</p>
-                <p>{{ t('admin.connectionHealth.questionAnswerBatch.requestCount', { count: preview.requestCount }) }} · <Tooltip :text="preview.managedModelIds.join('、') || '-'" wide><span>{{ t('admin.connectionHealth.questionAnswerBatch.managedCount', { count: preview.managedModelIds.length }) }}</span></Tooltip></p><p v-if="preview.managedErrorKey" class="text-destructive">{{ t('admin.connectionHealth.questionAnswerBatch.outcomes.' + preview.managedErrorKey, { models: preview.managedModelIds.filter(id => !preview.discoveredModelIds.includes(id)).join('、') }) }}</p>
+                <p>{{ t('admin.connectionHealth.questionAnswerBatch.requestCount', { count: preview.requestCount }) }}</p>
                 <p v-if="preview.discoveryErrorKey" class="break-words text-destructive">
                   {{ t('admin.connectionHealth.questionAnswerBatch.outcomes.discoveryFailed') }}：{{ safeConnectionHealthError(preview.discoveryErrorKey) }}
                 </p>

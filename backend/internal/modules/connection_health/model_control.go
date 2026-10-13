@@ -2,6 +2,7 @@ package connection_health
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 	"transithub/backend/internal/modules/upstream"
 )
@@ -32,20 +33,51 @@ type ModelControlRule struct {
 	CreatedAt          time.Time `json:"createdAt"`
 	UpdatedAt          time.Time `json:"updatedAt"`
 }
+
+// ModelControlQuestionResult is computed from this model's records in one batch.
+// The body is kept only for duplicate snapshot detection and is never returned.
+type ModelControlQuestionResult struct {
+	QuestionID      string   `json:"questionId"`
+	QuestionName    string   `json:"questionName"`
+	QuestionBody    string   `json:"-"`
+	Correct         int      `json:"correct"`
+	Incorrect       int      `json:"incorrect"`
+	Unreviewed      int      `json:"unreviewed"`
+	Failed          int      `json:"failed"`
+	Cancelled       int      `json:"cancelled"`
+	AccuracyPercent *float64 `json:"accuracyPercent"`
+}
+
+func (q *ModelControlQuestionResult) UnmarshalJSON(data []byte) error {
+	type result ModelControlQuestionResult
+	var value struct {
+		result
+		QuestionBody string `json:"questionBody"`
+	}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*q = ModelControlQuestionResult(value.result)
+	q.QuestionBody = value.QuestionBody
+	return nil
+}
+
 type modelControlRound struct {
-	EvidenceAt      *time.Time `json:"-"`
-	BatchID         string     `json:"batchId"`
-	Source          string     `json:"source"`
-	ScheduleName    string     `json:"scheduleName"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	CompletedAt     *time.Time `json:"completedAt"`
-	Running         bool       `json:"running"`
-	Correct         int        `json:"correct"`
-	Incorrect       int        `json:"incorrect"`
-	Unreviewed      int        `json:"unreviewed"`
-	Failed          int        `json:"failed"`
-	Cancelled       int        `json:"cancelled"`
-	AccuracyPercent *float64   `json:"accuracyPercent"`
+	EvidenceAt           *time.Time                   `json:"-"`
+	Questions            []ModelControlQuestionResult `json:"questions"`
+	DuplicateQuestionIDs []string                     `json:"duplicateQuestionIds"`
+	BatchID              string                       `json:"batchId"`
+	Source               string                       `json:"source"`
+	ScheduleName         string                       `json:"scheduleName"`
+	CreatedAt            time.Time                    `json:"createdAt"`
+	CompletedAt          *time.Time                   `json:"completedAt"`
+	Running              bool                         `json:"running"`
+	Correct              int                          `json:"correct"`
+	Incorrect            int                          `json:"incorrect"`
+	Unreviewed           int                          `json:"unreviewed"`
+	Failed               int                          `json:"failed"`
+	Cancelled            int                          `json:"cancelled"`
+	AccuracyPercent      *float64                     `json:"accuracyPercent"`
 }
 type modelControlBasis struct {
 	BusinessDay            string   `json:"businessDay"`

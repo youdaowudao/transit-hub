@@ -244,6 +244,7 @@ type RealConnectResponse struct {
 	ConfigurationStatus     string                        `json:"configurationStatus,omitempty"`
 	Configuration           *ImportedAccountConfiguration `json:"configuration,omitempty"`
 	Message                 string                        `json:"message,omitempty"`
+	Diagnostics             []ImportDiagnostic            `json:"diagnostics,omitempty"`
 }
 
 type ImportAccountSettingsRequest struct {
@@ -285,21 +286,32 @@ type ImportedAccountConfiguration struct {
 	Models                      []string         `json:"models"`
 }
 
+// ImportDiagnostic contains only safe, short-lived display information.
+type ImportDiagnostic struct {
+	Stage      string `json:"stage"`
+	Target     string `json:"target"`
+	Message    string `json:"message"`
+	Reason     string `json:"reason,omitempty"`
+	HTTPStatus int    `json:"httpStatus,omitempty"`
+	Detail     string `json:"detail,omitempty"`
+}
+
 // ImportFailure contains only safe, operation-local evidence. Cause and status
 // are never serialized, and Error never exposes upstream response text.
 type ImportFailure struct {
-	Message              string `json:"message"`
-	Stage                string `json:"stage"`
-	Cleanup              string `json:"cleanup"`
-	AdminResourceID      string `json:"adminResourceId,omitempty"`
-	UpstreamKeyID        string `json:"upstreamKeyId,omitempty"`
-	UpstreamResourceName string `json:"upstreamResourceName,omitempty"`
-	RetryAllowed         bool   `json:"retryAllowed"`
-	Reason               string `json:"reason"`
-	GroupID              string `json:"groupId,omitempty"`
-	GroupName            string `json:"groupName,omitempty"`
-	StatusCode           int    `json:"-"`
-	Cause                error  `json:"-"`
+	Message              string             `json:"message"`
+	Stage                string             `json:"stage"`
+	Cleanup              string             `json:"cleanup"`
+	AdminResourceID      string             `json:"adminResourceId,omitempty"`
+	UpstreamKeyID        string             `json:"upstreamKeyId,omitempty"`
+	UpstreamResourceName string             `json:"upstreamResourceName,omitempty"`
+	RetryAllowed         bool               `json:"retryAllowed"`
+	Reason               string             `json:"reason"`
+	GroupID              string             `json:"groupId,omitempty"`
+	GroupName            string             `json:"groupName,omitempty"`
+	StatusCode           int                `json:"-"`
+	Cause                error              `json:"-"`
+	Diagnostics          []ImportDiagnostic `json:"diagnostics,omitempty"`
 }
 
 func (e *ImportFailure) Error() string { return e.Message }

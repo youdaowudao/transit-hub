@@ -231,7 +231,7 @@ describe('C5 actual API to group-rates import component', () => {
     await selector.setValue('gemini')
     expect(dialog(wrapper).find('[aria-label="透传"]').exists()).toBe(false)
     expect(dialog(wrapper).text()).toContain('不符合新平台的已选分组已移除')
-    expect(dialog(wrapper).text()).toContain('导入时由主站同步')
+    expect(dialog(wrapper).text()).toContain('同步失败仍可导入')
     await selector.setValue('openai')
     expect(dialog(wrapper).get('[aria-label="透传"]').attributes('aria-checked')).toBe('false')
     expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
@@ -363,7 +363,7 @@ describe('C5 actual API to group-rates import component', () => {
     harness.connectionResponse = async () => json({ message: 'admin.mySites.errors.request' }, 500)
     await submit(wrapper)
     expect(dialog(wrapper).get('[data-import-success]').text()).toContain('导入已完成，配置暂无法读取')
-    expect(dialog(wrapper).get('[data-import-refresh-error]').text()).toContain('变更已保存，但列表刷新失败')
+    expect(dialog(wrapper).get('[data-import-refresh-error]').text()).toContain('导入结果已返回，但列表刷新失败')
     expect(dialog(wrapper).text()).not.toContain('真实对接创建失败')
     expect(dialog(wrapper).find('button[type="submit"]').exists()).toBe(false)
     await dialog(wrapper).get('form').trigger('submit'); expect(harness.requests).toHaveLength(1)
@@ -376,7 +376,8 @@ describe('C5 actual API to group-rates import component', () => {
     if (source === 'rates') harness.listGroupRates.mockRejectedValueOnce(new Error('admin.groupRates.errors.request'))
     await submit(wrapper)
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
-    expect(wrapper.text()).toContain('变更已保存，但列表刷新失败。请重新刷新以更新视图。')
+    expect(wrapper.text()).toContain('导入结果已返回，但列表刷新失败；请刷新列表查看。不要因此再次导入。')
+    expect(wrapper.text()).toContain('不要因此再次导入')
     expect(wrapper.text()).not.toContain('真实对接创建失败')
     expect(harness.requests).toHaveLength(1)
   })
@@ -642,4 +643,325 @@ it('falls back to readable failure text when a trusted translation is unavailabl
   expect(dialog(wrapper).text()).toContain('真实对接创建失败')
   expect(dialog(wrapper).text()).not.toContain('admin.mySites.errors.importGroupsLoadFailed')
   expect(submitButton(wrapper).element).toHaveProperty('disabled',false)
+})
+
+
+describe('import diagnostics preserve existing safety decisions', () => {
+  it.each(['not-array', 'too-many', 'bad-stage', 'bad-target', 'array-target', 'bad-message', 'bad-reason', 'bad-status', 'bad-detail'])('drops illegal diagnostic %s while retaining trusted retry result', async mode => {
+    let diagnostics: any = [{ stage: 'upstream_key', target: 'upstream', message: 'admin.mySites.errors.importUpstreamKeyFailed', detail: '上游明确拒绝创建' }]
+    if (mode === 'not-array') diagnostics = 'unsafe-raw-details'
+    if (mode === 'too-many') diagnostics = Array(4).fill(diagnostics[0])
+    if (mode === 'bad-stage') diagnostics[0].stage = 'injected'
+    if (mode === 'bad-target') diagnostics[0].target = 'injected'
+    if (mode === 'array-target') diagnostics[0].target = ['upstream']
+    if (mode === 'bad-message') diagnostics[0].message = 'injected.raw.secret'
+    if (mode === 'bad-reason') diagnostics[0].reason = 'injected.raw.secret'
+    if (mode === 'bad-status') diagnostics[0].httpStatus = 403.5
+    if (mode === 'bad-detail') diagnostics[0].detail = 'unsafe-raw-details\u0000'
+    harness.importResponse = async () => json(failure({ message: 'admin.mySites.errors.importUpstreamKeyFailed', stage: 'upstream_key', cleanup: 'not_needed', retryAllowed: true, upstreamKeyId: undefined, upstreamResourceName: undefined, diagnostics }), 502)
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    expect(dialog(wrapper).text()).toContain('详细原因无法读取')
+    expect(dialog(wrapper).text()).toContain('本次未留下待处理资源')
+    expect(dialog(wrapper).text()).not.toContain('unsafe-raw-details')
+    expect(dialog(wrapper).text()).not.toContain('injected.raw.secret')
+    expect(dialog(wrapper).find('[data-import-pending]').exists()).toBe(false)
+    expect(submitButton(wrapper).element).toHaveProperty('disabled', false)
+  })
+
+  it('keeps trusted 401 preflight failure and original auth expiry handling', async () => {
+    const { handleAuthExpired } = await import('@/modules/auth/api/auth')
+    vi.mocked(handleAuthExpired).mockClear()
+    harness.importResponse = async () => json({ message: 'auth.errors.unauthorized', stage: 'validation', cleanup: 'not_needed', retryAllowed: true, diagnostics: [{ stage: 'validation', target: 'local', message: 'auth.errors.unauthorized', detail: '登录已失效，本次未创建账号或 Key' }] }, 401)
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    expect(handleAuthExpired).toHaveBeenCalledTimes(1)
+    expect(dialog(wrapper).text()).toContain('本次未创建账号或 Key')
+    expect(dialog(wrapper).find('[data-import-pending]').exists()).toBe(false)
+    expect(submitButton(wrapper).element).toHaveProperty('disabled', false)
+  })
+
+  it('rejects a raw 401 as unknown outcome while still expiring auth', async () => {
+    harness.importResponse = async () => json({ message: 'auth.errors.unauthorized' }, 401)
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    expect(dialog(wrapper).find('[data-import-pending]').exists()).toBe(true)
+    expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
+    expect(dialog(wrapper).text()).not.toContain('本次未创建账号或 Key')
+  })
+
+  it.each(['upstreamInsufficientBalance', 'upstreamKeyQuotaExhausted', 'upstreamKeyExpired', 'announcementAckRequired'])('shows a concrete next action for structured reason %s', async reason => {
+    harness.importResponse = async () => json(failure({ diagnostics: [{ stage: 'upstream_key', target: 'upstream', message: 'admin.mySites.errors.importUpstreamKeyFailed', reason: 'admin.upstream.errors.' + reason, httpStatus: 200, detail: '上游给出了明确拒绝原因' }] }), 502)
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    const text = dialog(wrapper).text()
+    expect(text).toContain('对端 HTTP 状态：200')
+    expect(text).toContain('下一步')
+    expect(text).toContain('上游')
+    expect(text).not.toContain('admin.upstream.errors.' + reason)
+  })
+})
+
+it('clears a completed warning when reopening and ignores an old warning after workspace switch', async () => {
+  harness.importResponse = async (req: RealConnectRequest) => json(warningSuccess(req))
+  const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+  expect(dialog(wrapper).text()).toContain('导入成功，模型未同步')
+  await dialog(wrapper).findAll('button').find(button => button.text().trim() === '完成')!.trigger('click')
+  await wrapper.findAll('button').find(button => button.text().trim() === '配置对接')!.trigger('click')
+  await flushPromises()
+  expect(dialog(wrapper).find('[data-import-success]').exists()).toBe(false)
+  expect(dialog(wrapper).find('[data-import-diagnostics]').exists()).toBe(false)
+  const pending = deferred<Response>()
+  harness.importResponse = async () => pending.promise
+  await chooseGroup(wrapper)
+  await dialog(wrapper).get('form').trigger('submit')
+  await flushPromises()
+  const oldRequest = harness.requests[harness.requests.length - 1]!
+  harness.currentAccount.value = { id: 'new-workspace', platform: 'sub2api' }
+  await flushPromises()
+  pending.resolve(json(warningSuccess(oldRequest)))
+  await flushPromises()
+  expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  expect(wrapper.find('[data-import-diagnostics]').exists()).toBe(false)
+})
+
+describe('R1 concentrated import display regressions', () => {
+  it.each(['main', 'upstream'] as const)('keeps the actual %s request target and safe proxy detail without shared reason guesses', async target => {
+    harness.importResponse = async (req: RealConnectRequest) => {
+      const result = warningSuccess(req)
+      if (target === 'main') result.diagnostics[0] = { ...modelWarningDiagnostic, reason: 'admin.upstream.errors.upstreamServerError', httpStatus: 502, detail: '主站返回：上游返回 HTTP 403，请查看该步骤记录' }
+      else return json(failure({ message: 'admin.mySites.errors.importUpstreamKeyFailed', stage: 'upstream_key', cleanup: 'not_needed', retryAllowed: true, upstreamKeyId: undefined, diagnostics: [{ stage: 'upstream_key', target, message: 'admin.mySites.errors.importUpstreamKeyFailed', reason: 'admin.upstream.errors.forbidden', httpStatus: 403, detail: '上游不允许创建 Key' }] }), 502)
+      return json(result)
+    }
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    const text = dialog(wrapper).text()
+    expect(text).not.toMatch(/防护拦截|限制了来源 IP|上游服务异常|连接上游超时/)
+    if (target === 'main') {
+      expect(text).toContain('主站返回了服务错误')
+      expect(text).toContain('对端 HTTP 状态：502')
+      expect(text).toContain('上游返回 HTTP 403')
+    } else {
+      expect(text).toContain('上游站点拒绝了请求')
+      expect(text).toContain('上游不允许创建 Key')
+    }
+  })
+
+  it('does not let a secondary model warning become the title of a blocking model-stage failure', async () => {
+    harness.importResponse = async () => json(failure({ diagnostics: [
+      { stage: 'model_sync', target: 'main', message: 'admin.mySites.errors.importModelSyncFailed', detail: 'invalid\u0000initial' },
+      { ...modelWarningDiagnostic },
+    ] }), 502)
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    expect(dialog(wrapper).get('[role="alert"]').text()).toContain('未创建主站账号')
+    expect(dialog(wrapper).text()).toContain(modelWarningDiagnostic.detail)
+    expect(dialog(wrapper).text()).toContain('详细原因无法读取')
+    expect(submitButton(wrapper).element).toHaveProperty('disabled', false)
+  })
+
+  it('keeps passthrough clean-success automatic close and the explicit import refresh warning', async () => {
+    const wrapper = await openView(); await chooseGroup(wrapper)
+    await dialog(wrapper).get('[aria-label="透传"]').trigger('click')
+    harness.connectionResponse = async () => { throw new Error('synthetic refresh failure') }
+    await submit(wrapper)
+    expect(harness.requests[0]?.accountSettings?.passthrough).toBe(true)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('导入结果已返回，但列表刷新失败')
+    expect(wrapper.text()).toContain('不要因此再次导入')
+    expect(harness.requests).toHaveLength(1)
+  })
+
+  it('does not publish an old clean-success refresh warning after a workspace change', async () => {
+    const wrapper = await openView(); await chooseGroup(wrapper)
+    const pendingRefresh = deferred<Response>()
+    harness.connectionResponse = async () => pendingRefresh.promise
+    await dialog(wrapper).get('form').trigger('submit'); await flushPromises()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    harness.currentAccount.value = { id: 'new-workspace', platform: 'sub2api' }
+    await flushPromises()
+    pendingRefresh.resolve(json({ message: 'admin.mySites.errors.request' }, 500))
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('导入结果已返回，但列表刷新失败')
+    expect(harness.requests).toHaveLength(1)
+  })
+})
+
+it('keeps a missing import-only reason translation readable without using the shared speculative wording', async () => {
+  const original = localeFns.te
+  vi.spyOn(localeFns, 'te').mockImplementation(key => key === 'admin.groupRates.connect.importResult.reasons.forbidden' ? false : original(key))
+  harness.importResponse = async (req: RealConnectRequest) => json(warningSuccess(req))
+  const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+  expect(dialog(wrapper).text()).toContain('未取得可安全显示的具体原因')
+  expect(dialog(wrapper).text()).toContain(modelWarningDiagnostic.detail)
+  expect(dialog(wrapper).text()).not.toContain('admin.groupRates.connect.importResult.reasons.forbidden')
+  expect(dialog(wrapper).text()).not.toMatch(/防护拦截|限制了来源 IP/)
+})
+
+// Primary-agent key regression contract for the model-warning change.
+// Implementers must preserve these business expectations.
+const modelWarningDiagnostic = {
+  stage: 'model_sync', target: 'main', message: 'admin.mySites.errors.importModelSyncWarning',
+  reason: 'admin.upstream.errors.forbidden', httpStatus: 403,
+  detail: '主站返回：请求被拒绝，请检查接口权限',
+}
+const warningSuccess = (req: RealConnectRequest) => {
+  const result: any = success(req)
+  result.configuration.modelState = 'not_synced'
+  result.configuration.models = []
+  result.diagnostics = [{ ...modelWarningDiagnostic }]
+  return result
+}
+
+describe('model warning primary-agent RED business contract', () => {
+  it('R1 RED keeps an old failure reason neutral when optional diagnostics are absent', async () => {
+    harness.importResponse = async () => json(failure({ reason: 'admin.upstream.errors.forbidden' }), 502)
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    expect(dialog(wrapper).text()).not.toMatch(/防护拦截|限制了来源 IP/)
+    expect(dialog(wrapper).find('[data-import-success]').exists()).toBe(false)
+    expect(dialog(wrapper).text()).toContain('未创建主站账号')
+    expect(dialog(wrapper).text()).toContain('可重新导入')
+  })
+  it.each([
+    ['admin.upstream.errors.forbidden', 403],
+    ['admin.upstream.errors.upstreamServerError', 502],
+    ['admin.upstream.errors.networkTimeout', undefined],
+  ])('R1 RED shows a neutral main-site cause without inferring protection or upstream failure: %s', async (reason, httpStatus) => {
+    harness.importResponse = async (req: RealConnectRequest) => {
+      const result = warningSuccess(req)
+      result.diagnostics[0] = { ...modelWarningDiagnostic, reason, httpStatus, detail: '主站模型同步没有返回可用结果' }
+      return json(result)
+    }
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    const text = dialog(wrapper).text()
+    expect(text).toContain('主站')
+    expect(text).not.toMatch(/防护拦截|限制了来源 IP|上游服务异常|连接上游超时/)
+    expect(text).not.toContain('余额不足，请充值')
+    expect(dialog(wrapper).find('button[type="submit"]').exists()).toBe(false)
+    expect(harness.requests).toHaveLength(1)
+  })
+
+  it('R1 RED preserves the initial failure title when its optional diagnostic is invalid', async () => {
+    harness.importResponse = async () => json(failure({
+      message: 'admin.mySites.errors.importConfigurationMismatch', stage: 'configuration_check', cleanup: 'retained', retryAllowed: false,
+      adminResourceId: '101', diagnostics: [
+        { stage: 'configuration_check', target: 'main', message: 'admin.mySites.errors.importConfigurationMismatch', detail: 'invalid\u0000initial' },
+        { ...modelWarningDiagnostic },
+        { stage: 'account_cleanup', target: 'main', message: 'admin.mySites.errors.compensationPendingVerification', detail: '主站不允许删除当前账号' },
+      ],
+    }), 409)
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    const primary = dialog(wrapper).get('[role="alert"]').text()
+    expect(primary).toContain('主站保存的账号配置与请求不一致')
+    expect(primary).not.toContain('模型同步失败')
+    expect(dialog(wrapper).text()).toContain(modelWarningDiagnostic.detail)
+    expect(dialog(wrapper).text()).toContain('后续清理失败')
+    expect(dialog(wrapper).text()).toContain('详细原因无法读取')
+    expect(dialog(wrapper).text()).not.toContain('invalid')
+    expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
+  })
+
+  it('R1 RED closes clean success but says not to import again when list refresh fails', async () => {
+    const wrapper = await openView(); await chooseGroup(wrapper)
+    harness.connectionResponse = async () => { throw new Error('synthetic refresh failure') }
+    await submit(wrapper)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('导入结果已返回，但列表刷新失败')
+    expect(wrapper.text()).toContain('不要因此再次导入')
+    expect(harness.requests).toHaveLength(1)
+  })
+
+  it('shows warning success with confirmed config, locks creation and completion only closes', async () => {
+    harness.importResponse = async (req: RealConnectRequest) => json(warningSuccess(req))
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    const text = dialog(wrapper).text()
+    expect(text).toContain('导入成功，模型未同步')
+    expect(text).toContain('主站账号和本地关联已保存')
+    expect(text).toContain('尚未建立模型白名单')
+    expect(text).toContain('导入成功不代表模型可用')
+    expect(text).toContain('请到主站账号设置重新同步并保存模型白名单，无需再次导入')
+    expect(text).toContain(modelWarningDiagnostic.detail)
+    expect(text).toContain('仅凭 403 无法确认是否余额不足')
+    expect(text).toContain('完成只关闭当前结果，不会再次创建账号或修改主站')
+    expect(text).not.toContain('未创建主站账号')
+    expect(text).not.toContain('模型已同步')
+    expect(dialog(wrapper).find('[data-import-pending]').exists()).toBe(false)
+    expect(dialog(wrapper).find('button[type="submit"]').exists()).toBe(false)
+    await dialog(wrapper).get('form').trigger('submit'); await flushPromises()
+    expect(harness.requests).toHaveLength(1)
+    await dialog(wrapper).findAll('button').find(button => button.text().trim() === '完成')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(harness.requests).toHaveLength(1)
+  })
+
+  it('keeps a trusted preflight 409 failed, says no resources created and forbids another submit', async () => {
+    harness.importResponse = async () => json(failure({
+      message: 'admin.adminAccounts.errors.noCurrentAccount', stage: 'validation', cleanup: 'not_needed', retryAllowed: false,
+      upstreamKeyId: undefined, upstreamResourceName: undefined,
+      diagnostics: [{ stage: 'validation', target: 'local', message: 'admin.adminAccounts.errors.noCurrentAccount', detail: '没有选择当前工作区，请先选择工作区' }],
+    }), 409)
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    expect(dialog(wrapper).text()).toContain('本次未创建账号或 Key')
+    expect(dialog(wrapper).text()).toContain('重新打开导入窗口')
+    expect(dialog(wrapper).find('[data-import-pending]').exists()).toBe(false)
+    expect(dialog(wrapper).find('[data-import-success]').exists()).toBe(false)
+    expect(dialog(wrapper).text()).not.toContain('账号可能')
+    expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
+    await dialog(wrapper).get('form').trigger('submit'); await flushPromises()
+    expect(harness.requests).toHaveLength(1)
+  })
+
+  it('displays original failure, model warning and cleanup issue together without retry', async () => {
+    harness.importResponse = async () => json(failure({
+      message: 'admin.mySites.errors.compensationPendingVerification', stage: 'configuration_check', cleanup: 'retained', retryAllowed: false,
+      adminResourceId: '101', diagnostics: [
+        { stage: 'configuration_check', target: 'main', message: 'admin.mySites.errors.importConfigurationMismatch', detail: 'Priority 要求 100，实际 999' },
+        { ...modelWarningDiagnostic },
+        { stage: 'account_cleanup', target: 'main', message: 'admin.mySites.errors.compensationPendingVerification', reason: 'admin.upstream.errors.forbidden', httpStatus: 403, detail: '主站不允许删除当前账号' },
+      ],
+    }), 409)
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    const text = dialog(wrapper).text()
+    expect(text).toContain('Priority 要求 100，实际 999')
+    expect(text).toContain(modelWarningDiagnostic.detail)
+    expect(text).toContain('主站不允许删除当前账号')
+    expect(text).toContain('后续清理失败')
+    expect(text).toContain('101'); expect(text).toContain('207')
+    expect(text).not.toContain('导入成功')
+    expect(text).not.toContain('可重新导入')
+    expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
+  })
+
+  it.each(['missing-warning', 'wrong-target', 'nonempty-models', 'passthrough', 'control-detail', 'oversize-detail'])('keeps confirmed association without accepting invalid warning configuration: %s', async mode => {
+    harness.importResponse = async (req: RealConnectRequest) => {
+      const result = warningSuccess(req)
+      if (mode === 'missing-warning') delete result.diagnostics
+      if (mode === 'wrong-target') result.diagnostics[0].target = 'upstream'
+      if (mode === 'nonempty-models') result.configuration.models = ['invented']
+      if (mode === 'passthrough') result.configuration.passthrough = true
+      if (mode === 'control-detail') result.diagnostics[0].detail = 'unsafe\u0000text'
+      if (mode === 'oversize-detail') result.diagnostics[0].detail = 'x'.repeat(513)
+      return json(result)
+    }
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    expect(dialog(wrapper).get('[data-import-success]').text()).toContain('配置暂无法读取')
+    expect(dialog(wrapper).text()).not.toContain('导入成功，模型未同步')
+    expect(dialog(wrapper).text()).not.toContain('模型已同步')
+    expect(dialog(wrapper).find('button[type="submit"]').exists()).toBe(false)
+    await dialog(wrapper).get('form').trigger('submit'); await flushPromises()
+    expect(harness.requests).toHaveLength(1)
+  })
+
+  it('preserves warning success when refreshing lists fails and renders details as plain text', async () => {
+    harness.importResponse = async (req: RealConnectRequest) => {
+      const result = warningSuccess(req)
+      result.diagnostics[0].detail = '<img src=x onerror=alert(1)> 主站提示'
+      return json(result)
+    }
+    const wrapper = await openView(); await chooseGroup(wrapper)
+    harness.connectionResponse = async () => { throw new Error('synthetic refresh failure') }
+    await submit(wrapper)
+    expect(dialog(wrapper).text()).toContain('导入成功，模型未同步')
+    expect(dialog(wrapper).text()).toContain('列表刷新失败')
+    expect(dialog(wrapper).text()).toContain('不要因此再次导入')
+    expect(dialog(wrapper).text()).toContain('<img src=x onerror=alert(1)> 主站提示')
+    expect(dialog(wrapper).find('img').exists()).toBe(false)
+    await dialog(wrapper).get('form').trigger('submit'); await flushPromises()
+    expect(harness.requests).toHaveLength(1)
+  })
 })

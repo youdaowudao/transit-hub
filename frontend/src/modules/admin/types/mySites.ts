@@ -116,6 +116,15 @@ export interface ImportAccountSettings {
 export type ImportStage = 'validation' | 'upstream_key' | 'model_sync' | 'account_create' | 'configuration_check' | 'persistence'
 export type ImportCleanup = 'not_needed' | 'confirmed' | 'retained' | 'pending'
 
+export interface ImportDiagnostic {
+  stage: ImportStage | 'account_cleanup' | 'key_cleanup'
+  target: 'main' | 'upstream' | 'local'
+  message: string
+  reason?: string
+  httpStatus?: number
+  detail?: string
+}
+
 export interface ImportFailure {
   message: string
   stage: ImportStage
@@ -127,6 +136,8 @@ export interface ImportFailure {
   reason?: string
   groupId?: string
   groupName?: string
+  diagnostics?: ImportDiagnostic[]
+  diagnosticsUnavailable?: boolean
 }
 
 export interface ImportConfiguration {
@@ -140,7 +151,7 @@ export interface ImportConfiguration {
   poolMode: boolean
   upstreamBillingProbeEnabled: boolean
   ownGroups: { id: string; name: string }[]
-  modelState: 'synced' | 'not_required' | 'current_whitelist' | 'current_unrestricted'
+  modelState: 'synced' | 'not_synced' | 'not_required' | 'current_whitelist' | 'current_unrestricted'
   models: string[]
 }
 
@@ -284,6 +295,8 @@ export interface RealConnectResponse {
   configurationStatus?: 'confirmed' | 'unavailable' | 'not_applicable'
   configuration?: ImportConfiguration
   message?: string
+  diagnostics?: ImportDiagnostic[]
+  diagnosticsUnavailable?: boolean
 }
 
 export interface RealDisconnectRequest {

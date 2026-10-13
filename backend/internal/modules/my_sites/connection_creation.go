@@ -16,7 +16,7 @@ func (s *Service) tryBeginConnectionCreation(user, workspace, site, group, opera
 	s.creationMutex.Lock()
 	if s.creationTargets[target] || operation != "" && s.creationOperations[op] {
 		s.creationMutex.Unlock()
-		return nil, importFailure(ErrorImportInProgress, "validation", "pending", http.StatusConflict, nil)
+		return nil, importFailure(ErrorImportInProgress, "validation", "local", "pending", http.StatusConflict, nil)
 	}
 	if s.creationTargets == nil {
 		s.creationTargets = make(map[connectionCreationTarget]bool)

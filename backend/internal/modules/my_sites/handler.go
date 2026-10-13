@@ -129,12 +129,12 @@ func (h *Handler) runAutoPricing(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) realConnect(w http.ResponseWriter, r *http.Request) {
 	userID, ok := authctx.UserID(r.Context())
 	if !ok {
-		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		writeError(w, importFailure("auth.errors.unauthorized", "validation", "local", "not_needed", http.StatusUnauthorized, nil))
 		return
 	}
 	var req RealConnectRequest
 	if err := httpjson.Decode(r, &req); err != nil {
-		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		writeError(w, importFailure(ErrorRequest, "validation", "local", "not_needed", http.StatusBadRequest, importInvalid(ErrorRequest, "导入请求格式或设置字段无效，本次未创建账号或 Key；请检查导入设置后重新提交")))
 		return
 	}
 	response, err := h.service.RealConnect(r.Context(), userID, req)

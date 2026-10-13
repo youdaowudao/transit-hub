@@ -281,26 +281,15 @@ func TestC5REDExplicitFalseAndEditableValuesReachMainSite(t *testing.T) {
 	}
 }
 
-func TestC5REDModelFailureCreatesZeroAccountsAndReportsActualCleanup(t *testing.T) {
+func TestC5ModelFailureCreatesAccountAndPersistsWarning(t *testing.T) {
 	remote := &c5RedTransport{platform: "openai", previewFailure: true}
 	service, repo := c5RedService(t, remote)
-	_, err := service.RealConnect(context.Background(), "user-1", c5RedRequest(t, ""))
-	if err == nil {
-		t.Error("model sync failure must fail import")
+	response, err := service.RealConnect(context.Background(), "user-1", c5RedRequest(t, ""))
+	if err != nil || response.Configuration == nil || response.Configuration.ModelState != "not_synced" || len(response.Diagnostics) != 1 {
+		t.Fatal("model failure must become a warning after complete import")
 	}
-	if remote.accountCreates != 0 || repo.saveCalls != 0 {
-		t.Error("model failure must create zero main accounts and no successful local binding")
-	}
-	if remote.keyCreates != 1 || remote.keyDeletes != 1 {
-		t.Error("failed preview must clean only the Key created by this operation")
-	}
-	if err != nil {
-		encoded, _ := json.Marshal(err)
-		var failure map[string]any
-		_ = json.Unmarshal(encoded, &failure)
-		if failure["stage"] != "model_sync" || failure["cleanup"] != "confirmed" || failure["retryAllowed"] != true {
-			t.Errorf("failure must report trusted model stage and confirmed cleanup: %s", encoded)
-		}
+	if remote.accountCreates != 1 || repo.saveCalls != 1 || remote.keyCreates != 1 || remote.keyDeletes != 0 {
+		t.Fatal("warning import lost creation, persistence or entered cleanup")
 	}
 }
 

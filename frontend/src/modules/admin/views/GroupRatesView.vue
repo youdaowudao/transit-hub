@@ -8,7 +8,7 @@ import { listUpstreamSites } from '../api/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
-import type { AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, UpstreamKeyItem } from '../types/mySites'
+import type { AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportDiagnostic, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, UpstreamKeyItem } from '../types/mySites'
 import type { ImportApiError } from '../api/mySites'
 import type { UpstreamSiteResponse } from '../types/upstream'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
@@ -171,6 +171,49 @@ const setConnectPriorityMode = (mode: ImportAccountSettings['priorityMode']) => 
   connectPriorityMode.value = mode
 }
 const connectConfiguration = computed<ImportConfiguration | null>(() => connectResult.value?.configuration ?? null)
+const connectHasModelWarning = computed(() => connectConfiguration.value?.modelState === 'not_synced')
+const connectDiagnostics = computed(() => connectFailure.value?.diagnostics ?? connectResult.value?.diagnostics ?? [])
+const connectDiagnosticsUnavailable = computed(() => connectFailure.value?.diagnosticsUnavailable || connectResult.value?.diagnosticsUnavailable)
+const importReasonLabel = (reason: string | undefined, target?: ImportDiagnostic['target']): string => {
+  if (!reason) return ''
+  const labels: Record<string, string> = {
+    auth: 'auth', forbidden: 'forbidden', notFound: 'notFound', rateLimited: 'rateLimited',
+    upstreamServerError: 'server', networkTimeout: 'timeout', networkUnreachable: 'network', tlsFailed: 'tls',
+    invalidResponse: 'invalidResponse', businessRejected: 'businessRejected', refreshTokenRejected: 'refresh',
+    accessTokenRejected: 'auth', loginIncomplete: 'loginIncomplete', announcementAckRequired: 'announcement',
+    upstreamInsufficientBalance: 'balance', upstreamKeyQuotaExhausted: 'quota', upstreamKeyExpired: 'expired',
+  }
+  const key = reason.startsWith('admin.upstream.errors.') ? labels[reason.slice('admin.upstream.errors.'.length)] : undefined
+  if (key) {
+    const object = t(`admin.groupRates.connect.importResult.targets.${target ?? 'peer'}`)
+    const label = `admin.groupRates.connect.importResult.reasons.${key}`
+    return te(label) ? t(label, { object }) : t('admin.groupRates.connect.importResult.unknownDetail', { object })
+  }
+  return te(reason) ? t(reason) : ''
+}
+const diagnosticGuide = (diagnostic: ImportDiagnostic): string => {
+  const object = t(`admin.groupRates.connect.importResult.targets.${diagnostic.target}`)
+  const prefix = 'admin.groupRates.connect.importResult.guides.'
+  const reason = diagnostic.reason ?? ''
+  if (['admin.upstream.errors.auth', 'admin.upstream.errors.refreshTokenRejected', 'admin.upstream.errors.accessTokenRejected', 'admin.upstream.errors.loginIncomplete'].includes(reason) || diagnostic.httpStatus === 401) return t(prefix + (diagnostic.target === 'upstream' ? 'upstreamAuth' : 'mainAuth'))
+  if (reason === 'admin.upstream.errors.upstreamInsufficientBalance') return t(prefix + 'balance')
+  if (reason === 'admin.upstream.errors.upstreamKeyQuotaExhausted') return t(prefix + 'quota')
+  if (reason === 'admin.upstream.errors.upstreamKeyExpired') return t(prefix + 'expired')
+  if (reason === 'admin.upstream.errors.announcementAckRequired') return t(prefix + 'announcement')
+  if (reason === 'admin.upstream.errors.forbidden' || diagnostic.httpStatus === 403) return t(prefix + 'forbidden', { object })
+  if (reason === 'admin.upstream.errors.rateLimited' || diagnostic.httpStatus === 429) return t(prefix + 'rateLimited')
+  if (['admin.upstream.errors.networkTimeout', 'admin.upstream.errors.networkUnreachable', 'admin.upstream.errors.tlsFailed'].includes(reason)) return t(prefix + 'network', { object })
+  if (diagnostic.stage === 'model_sync') return t(prefix + 'model')
+  if (diagnostic.stage === 'configuration_check') return t(prefix + 'configuration')
+  if (diagnostic.stage === 'account_cleanup' || diagnostic.stage === 'key_cleanup') return t(prefix + 'cleanup', { object })
+  if (diagnostic.target === 'local') return t(prefix + 'local')
+  return t(prefix + 'records', { object })
+}
+const connectPreflightGuide = computed(() => {
+  if (connectFailure.value?.message === 'admin.adminAccounts.errors.noCurrentAccount') return t('admin.groupRates.connect.importResult.preflightWorkspace')
+  if (connectFailure.value?.message === 'admin.mySites.errors.connectionExists') return t('admin.groupRates.connect.importResult.preflightExisting')
+  return t('admin.groupRates.connect.importResult.preflightReconnect')
+})
 const connectModelSummary = computed(() => {
   const config = connectConfiguration.value
   if (!config) return ''
@@ -206,6 +249,7 @@ watch([() => currentAccount.value?.id, adminPlatform], () => {
   connectResult.value = null
   connectFailure.value = null
   realConnectError.value = ''
+  connectRefreshError.value = ''
 }, { flush: 'sync' })
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -444,6 +488,7 @@ const filteredChannelTypes = computed(() => {
 
 const canSubmitConnect = computed(() => {
   if (!isAdminReady.value || !connectingRate.value || connectSubmitLocked.value || connectFormLocked.value) return false
+  if (connectOutcome.value === 'failed' && connectFailure.value?.retryAllowed === false) return false
   if (connectMode.value === 'bind') {
     return Boolean(selectedKeyId.value && selectedAdminGroupId.value && selectedAdminResourceId.value)
   }
@@ -633,6 +678,10 @@ const closeConnector = () => {
   isLoadingAdminResources.value = false
   addToPricingMapping.value = true
   connectOperationId.value = ''
+  connectResult.value = null
+  connectFailure.value = null
+  connectRefreshError.value = ''
+  connectOutcome.value = 'editing'
 }
 
 const setConnectMode = async (mode: 'real' | 'bind') => {
@@ -641,6 +690,10 @@ const setConnectMode = async (mode: 'real' | 'bind') => {
   isLoadingKeys.value = false
   isLoadingAdminResources.value = false
   resetImportSettings()
+  connectResult.value = null
+  connectFailure.value = null
+  connectRefreshError.value = ''
+  connectOutcome.value = 'editing'
   connectMode.value = mode
   connectOwnGroups.value = []
   selectedGroupType.value = isC5Import.value && isImportAccountPlatform(connectUpstreamPlatform.value) ? connectUpstreamPlatform.value : ''
@@ -813,17 +866,19 @@ const submitRealConnect = async () => {
   try {
     const result = useImportContract ? await realConnect(payload, workspace) : await realConnect(payload)
     if (!isCurrent()) return
-    if (useImportContract && result.configurationStatus === 'confirmed' && result.configuration?.observation === 'creation') {
+    if (useImportContract && result.configurationStatus === 'confirmed' && result.configuration?.observation === 'creation' &&
+      ['synced', 'not_required'].includes(result.configuration.modelState) && !result.diagnostics?.length && !result.diagnosticsUnavailable) {
       // 本次新建且主站已确认：直接关闭弹窗，列表在后台刷新
       connectSubmitLocked.value = false
       isActionLoading.value = false
       connectOutcome.value = 'editing'
       closeConnector()
-      await refreshAfterMutation(() => pageIsMounted && workspace === (currentAccount.value?.id ?? '') && platform === adminPlatform.value, true)
+      const isCurrentPage = () => pageIsMounted && workspace === (currentAccount.value?.id ?? '') && platform === adminPlatform.value
+      if (!await refreshAfterMutation(isCurrentPage, true) && isCurrentPage()) errorKey.value = 'admin.groupRates.connect.importResult.refreshFailed'
     } else if (useImportContract) {
       connectResult.value = result
       connectOutcome.value = 'succeeded'
-      if (!await refreshAfterMutation(isCurrent, true) && isCurrent()) connectRefreshError.value = t('admin.groupRates.errors.refreshFailed')
+      if (!await refreshAfterMutation(isCurrent, true) && isCurrent()) connectRefreshError.value = t('admin.groupRates.connect.importResult.refreshFailed')
     } else {
       connectSubmitLocked.value = false
       connectOutcome.value = 'editing'
@@ -836,9 +891,16 @@ const submitRealConnect = async () => {
     if (useImportContract) {
       const failure = error instanceof Error && error.name === 'ImportApiError' ? error as ImportApiError : null
       connectFailure.value = failure?.trusted ? failure : null
-      if (failure?.trusted) realConnectError.value = te(failure.message) ? t(failure.message) : t('admin.groupRates.connect.realFailed')
+      if (failure?.trusted) {
+        const initialDiagnostics = failure.diagnostics?.filter(diagnostic => diagnostic.stage === failure.stage &&
+          diagnostic.message !== 'admin.mySites.errors.importModelSyncWarning' &&
+          !['account_cleanup', 'key_cleanup'].includes(diagnostic.stage)) ?? []
+        const initialDiagnostic = initialDiagnostics.find(diagnostic => diagnostic.message === failure.message) ?? initialDiagnostics[0]
+        const message = initialDiagnostic?.message ?? failure.message
+        realConnectError.value = te(message) ? t(message) : t('admin.groupRates.connect.realFailed')
+      }
       else if (!(error instanceof Error) || !te(error.message)) realConnectError.value = t('admin.mySites.errors.importResponsePending')
-      connectOutcome.value = failure?.trusted && failure.retryAllowed && ['confirmed', 'not_needed'].includes(failure.cleanup) ? 'failed' : 'pending'
+      connectOutcome.value = failure?.trusted && ((failure.stage === 'validation' && failure.cleanup === 'not_needed') || (failure.retryAllowed && ['confirmed', 'not_needed'].includes(failure.cleanup))) ? 'failed' : 'pending'
     } else connectOutcome.value = 'editing'
   } finally {
     if (isCurrent() || !useImportContract) {
@@ -1690,7 +1752,9 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           <div v-if="connectFailure" class="space-y-2 break-words text-sm text-warning" data-import-failure>
             <p>{{ t('admin.groupRates.connect.importResult.stage') }}：{{ t(`admin.groupRates.connect.importResult.stages.${connectFailure.stage}`) }}</p>
             <p>{{ t(`admin.groupRates.connect.importResult.cleanup.${connectFailure.cleanup}`) }}</p>
-            <p v-if="connectFailure.reason && te(connectFailure.reason)">{{ t(connectFailure.reason) }}</p>
+            <p v-if="!connectFailure.diagnostics?.length && connectFailure.reason">{{ importReasonLabel(connectFailure.reason) }}</p>
+            <p v-if="connectFailure.retryAllowed">{{ t('admin.groupRates.connect.importResult.retry') }}</p>
+            <p v-else-if="connectFailure.stage === 'validation' && connectFailure.cleanup === 'not_needed'">{{ connectPreflightGuide }}</p>
             <p v-if="connectFailure.groupId || connectFailure.groupName">{{ t('admin.mySites.errors.blockingGroup', { groupName: connectFailure.groupName || '—', groupId: connectFailure.groupId || '—' }) }}</p>
             <p v-if="connectFailure.adminResourceId || connectFailure.upstreamKeyId || ['retained', 'pending'].includes(connectFailure.cleanup)">{{ t('admin.groupRates.connect.importResult.resourceIds', { adminResourceId: connectFailure.adminResourceId || t('admin.groupRates.connect.importResult.unknownId'), upstreamKeyId: connectFailure.upstreamKeyId || t('admin.groupRates.connect.importResult.unknownId') }) }}</p>
             <p v-if="connectFailure.upstreamResourceName">{{ t('admin.groupRates.connect.importResult.resourceName') }}：{{ connectFailure.upstreamResourceName }}</p>
@@ -1700,7 +1764,11 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             <p>{{ t('admin.groupRates.connect.importResult.operationId') }}：{{ connectOperationId }}</p>
           </div>
           <section v-if="connectOutcome === 'succeeded'" role="status" class="space-y-3 break-words rounded-xl border border-border/50 bg-surface/50 p-4" data-import-success>
-            <h3 class="text-sm font-semibold text-foreground">{{ t(connectResult?.configurationStatus === 'confirmed' ? 'admin.groupRates.connect.importResult.confirmed' : 'admin.groupRates.connect.importResult.unavailable') }}</h3>
+            <h3 class="text-sm font-semibold text-foreground">{{ t(connectHasModelWarning ? 'admin.groupRates.connect.importResult.warningSuccess' : connectResult?.configurationStatus === 'confirmed' ? 'admin.groupRates.connect.importResult.confirmed' : 'admin.groupRates.connect.importResult.unavailable') }}</h3>
+            <template v-if="connectHasModelWarning">
+              <p class="text-sm">{{ t('admin.groupRates.connect.importResult.warningExplanation') }}</p>
+              <p class="text-sm">{{ t('admin.groupRates.connect.importResult.warningNext') }}</p>
+            </template>
             <template v-if="connectConfiguration">
               <p class="text-sm">{{ connectConfiguration.name }} · {{ t('admin.groupRates.connect.importResult.accountId') }} {{ connectConfiguration.adminAccountId }}</p>
               <p class="text-xs text-muted-foreground">{{ t(`admin.groupRates.connect.importResult.observation.${connectConfiguration.observation}`) }}</p>
@@ -1717,6 +1785,18 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             </template>
             <p v-else class="text-sm">{{ t('admin.groupRates.connect.importResult.accountId') }} {{ connectResult?.connection.adminAccountId }}</p>
           </section>
+          <div v-if="connectDiagnostics.length" class="space-y-3 break-words text-sm text-warning" data-import-diagnostics>
+            <div v-for="(diagnostic, index) in connectDiagnostics" :key="index" class="space-y-1">
+              <p class="font-medium">{{ t(diagnostic.stage === 'model_sync' ? 'admin.groupRates.connect.importResult.modelHint' : ['account_cleanup', 'key_cleanup'].includes(diagnostic.stage) ? 'admin.groupRates.connect.importResult.cleanupHint' : 'admin.groupRates.connect.importResult.stage') }}：{{ t(`admin.groupRates.connect.importResult.stages.${diagnostic.stage}`) }}</p>
+              <p>{{ t('admin.groupRates.connect.importResult.target') }}：{{ t(`admin.groupRates.connect.importResult.targets.${diagnostic.target}`) }}<span v-if="diagnostic.stage === 'model_sync'">；{{ t('admin.groupRates.connect.importResult.modelReturnedByMain') }}</span></p>
+              <p v-if="diagnostic.httpStatus">{{ t('admin.groupRates.connect.importResult.httpStatus') }}：{{ diagnostic.httpStatus }}</p>
+              <p v-if="diagnostic.reason">{{ importReasonLabel(diagnostic.reason, diagnostic.target) }}</p>
+              <p>{{ t('admin.groupRates.connect.importResult.detail') }}：{{ diagnostic.detail || t('admin.groupRates.connect.importResult.unknownDetail', { object: t(`admin.groupRates.connect.importResult.targets.${diagnostic.target}`) }) }}</p>
+              <p>{{ t('admin.groupRates.connect.importResult.next') }}：{{ diagnosticGuide(diagnostic) }}</p>
+            </div>
+          </div>
+          <p v-if="connectDiagnosticsUnavailable" class="text-sm text-warning" data-import-diagnostics-unavailable>{{ t('admin.groupRates.connect.importResult.diagnosticsUnavailable') }}</p>
+          <p v-if="connectOutcome === 'succeeded'" class="text-xs text-muted-foreground">{{ t('admin.groupRates.connect.importResult.doneHint') }}</p>
           <p v-if="connectRefreshError" role="alert" class="text-sm text-warning" data-import-refresh-error>{{ connectRefreshError }}</p>
 
           <div class="flex justify-end gap-2">

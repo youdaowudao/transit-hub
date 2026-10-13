@@ -158,12 +158,12 @@ func TestC5ImportSettingsValidationBeforeResources(t *testing.T) {
 	if err != nil || settings.Priority != 100 || settings.Concurrency != 50 || settings.Passthrough || !settings.PoolMode || !settings.UpstreamBillingProbeEnabled {
 		t.Fatal("default normalization changed")
 	}
-	if _, err := buildAccountPayload("openai", "x", "x", []int{7}, "n", settings, nil); err == nil {
+	if _, err := buildAccountPayload("openai", "x", "x", []int{7}, "n", settings, importModelResult{}); err == nil {
 		t.Fatal("empty non-passthrough mapping was accepted")
 	}
 }
 
-func TestC5ImportModelTimeoutStopsAccountAndReportsCleanup(t *testing.T) {
+func TestC5ImportModelTimeoutContinuesAccountWithoutCleanup(t *testing.T) {
 	for _, cleanup := range []string{"confirmed", "ambiguous"} {
 		t.Run(cleanup, func(t *testing.T) {
 			remote := &c5RedTransport{platform: "openai"}
@@ -186,20 +186,12 @@ func TestC5ImportModelTimeoutStopsAccountAndReportsCleanup(t *testing.T) {
 				}
 				return nil, nil, false
 			})
-			_, err := s.RealConnect(t.Context(), "user-1", c5RedRequest(t, ""))
-			var failure *ImportFailure
-			if !errors.As(err, &failure) || failure.Stage != "model_sync" || failure.Reason != upstream.ErrorNetworkTimeout || failure.UpstreamKeyID != "11" {
-				t.Fatal("import timeout lost its model stage, safe cause or known Key ID")
+			response, err := s.RealConnect(t.Context(), "user-1", c5RedRequest(t, ""))
+			if err != nil || response.Configuration == nil || response.Configuration.ModelState != "not_synced" || len(response.Diagnostics) != 1 || response.Diagnostics[0].Reason != upstream.ErrorNetworkTimeout {
+				t.Fatal("model child timeout lost warning or prevented a complete import")
 			}
-			if remote.keyCreates != 1 || previewCalls != 1 || cleanupCalls != 1 || remote.accountCreates != 0 || repo.saveCalls != 0 || remote.reads != 0 || remote.protectedDeletes != 0 {
-				t.Fatal("model timeout created/persisted an account or repeated resource operations")
-			}
-			if cleanup == "confirmed" {
-				if failure.Cleanup != "confirmed" || !failure.RetryAllowed || failure.StatusCode != http.StatusBadGateway {
-					t.Fatal("trusted Key cleanup did not produce a retryable model timeout")
-				}
-			} else if failure.Cleanup != "pending" || failure.RetryAllowed || failure.StatusCode != http.StatusConflict {
-				t.Fatal("ambiguous Key cleanup authorized a new operation after timeout")
+			if remote.keyCreates != 1 || previewCalls != 1 || cleanupCalls != 0 || remote.accountCreates != 1 || repo.saveCalls != 1 || remote.reads != 1 || remote.protectedDeletes != 0 {
+				t.Fatal("model child timeout entered cleanup or repeated resource operations")
 			}
 		})
 	}
@@ -242,7 +234,13 @@ func TestC5ImportKeyAndModelFailuresReportActualCleanup(t *testing.T) {
 				}
 				return nil, nil, false
 			})
-			_, err := s.RealConnect(ctx, "user-1", c5RedRequest(t, ""))
+			response, err := s.RealConnect(ctx, "user-1", c5RedRequest(t, ""))
+			if strings.HasPrefix(mode, "model-") {
+				if err != nil || response.Configuration == nil || response.Configuration.ModelState != "not_synced" || len(response.Diagnostics) != 1 || remote.accountCreates != 1 || repo.saveCalls != 1 || cleanupCalls != 0 {
+					t.Fatal("model warning must complete import without invoking Key cleanup")
+				}
+				return
+			}
 			var failure *ImportFailure
 			if !errors.As(err, &failure) || remote.accountCreates != 0 || repo.saveCalls != 0 {
 				t.Fatal("failed prerequisite created or persisted account")
@@ -538,8 +536,24 @@ func TestC5ImportHandlerPropagatesSafeContractAndRejectsNull(t *testing.T) {
 				}
 				return
 			}
+			if mode == "model-failure" {
+				configuration, _ := payload["configuration"].(map[string]any)
+				if w.Code != 200 || configuration["modelState"] != "not_synced" || remote.accountCreates != 1 || remote.keyDeletes != 0 || base.saveCalls != 1 {
+					t.Fatal("handler did not preserve successful model-warning import")
+				}
+				warningDiagnostics(t, payload, 1)
+				return
+			}
 			wantStatus, wantStage, wantCleanup, wantRetry := 502, "model_sync", "confirmed", true
 			if mode == "persistence-pending" {
+				if mode == "model-failure" {
+					configuration, _ := payload["configuration"].(map[string]any)
+					if w.Code != 200 || configuration["modelState"] != "not_synced" || remote.accountCreates != 1 || remote.keyDeletes != 0 || base.saveCalls != 1 {
+						t.Fatal("handler did not preserve successful model-warning import")
+					}
+					warningDiagnostics(t, payload, 1)
+					return
+				}
 				wantStatus, wantStage, wantCleanup, wantRetry = 409, "persistence", "retained", false
 			}
 			if w.Code != wantStatus || payload["stage"] != wantStage || payload["cleanup"] != wantCleanup || payload["retryAllowed"] != wantRetry || payload["upstreamKeyId"] != "11" {

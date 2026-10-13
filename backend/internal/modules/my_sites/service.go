@@ -1182,14 +1182,26 @@ func randomConnID() (string, error) {
 
 // authenticatedState 获取并校验用户的 admin 会话（平台感知），必要时刷新令牌。
 func (s *Service) authenticatedState(ctx context.Context, userID string, adminAccountID string) (*State, error) {
+	return s.authenticatedStateObserved(ctx, userID, adminAccountID, nil)
+}
+
+type importSessionFailureObserver func(stage, target string, cause error)
+
+func (s *Service) authenticatedStateObserved(ctx context.Context, userID string, adminAccountID string, onFailure importSessionFailureObserver) (*State, error) {
 	state, err := s.repository.Get(ctx, userID, adminAccountID)
 	if err != nil {
+		if onFailure != nil {
+			onFailure("load_session", "local", err)
+		}
 		return nil, err
 	}
 	if state == nil || !state.Session.IsAuthenticated() {
 		return nil, requestError(ErrorAuthRequired)
 	}
-	return s.validatedState(ctx, state)
+	if state.Session.Platform != upstream.PlatformSub2API {
+		onFailure = nil
+	}
+	return s.validatedStateObserved(ctx, state, onFailure)
 }
 
 // RequireSession 获取并校验用户的 admin 会话（必要时刷新令牌），供活动调价模块
@@ -1232,21 +1244,37 @@ func (s *Service) UpdateAdminGroupMultiplier(session upstream.Session, group ups
 
 // validatedState 刷新临期令牌并校验 admin 角色（平台中性）。
 func (s *Service) validatedState(ctx context.Context, state *State) (*State, error) {
+	return s.validatedStateObserved(ctx, state, nil)
+}
+
+func (s *Service) validatedStateObserved(ctx context.Context, state *State, onFailure importSessionFailureObserver) (*State, error) {
+	if state.Session.Platform != upstream.PlatformSub2API {
+		onFailure = nil
+	}
 	if !state.Session.IsAuthenticated() {
 		return nil, requestError(ErrorAuthRequired)
 	}
 	refreshedSession, err := s.platformService.RefreshSession(state.Session)
 	if err != nil {
+		if onFailure != nil {
+			onFailure("refresh_session", "main", err)
+		}
 		return nil, requestError(ErrorAdminOnly)
 	}
 	if refreshedSession.AccessToken != state.Session.AccessToken || refreshedSession.RefreshToken != state.Session.RefreshToken ||
 		refreshedSession.Cookie != state.Session.Cookie {
 		state.Session = refreshedSession
 		if err := s.repository.Save(ctx, *state); err != nil {
+			if onFailure != nil {
+				onFailure("save_session", "local", err)
+			}
 			return nil, err
 		}
 	}
 	if err := s.platformService.VerifyAdmin(state.Session); err != nil {
+		if onFailure != nil {
+			onFailure("verify_admin", "main", err)
+		}
 		return nil, requestError(ErrorAdminOnly)
 	}
 	return state, nil

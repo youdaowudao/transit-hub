@@ -21,6 +21,13 @@ const (
 	ErrorImportGroupTypeMismatch        = "admin.mySites.errors.importGroupTypeMismatch"
 	ErrorImportSettingsUnsupported      = "admin.mySites.errors.importSettingsUnsupported"
 	ErrorImportUpstreamKeyFailed        = "admin.mySites.errors.importUpstreamKeyFailed"
+	ErrorImportModelSyncWarning         = "admin.mySites.errors.importModelSyncWarning"
+	ErrorImportCancelled                = "admin.mySites.errors.importCancelled"
+	ErrorImportModelListEmpty           = "admin.mySites.errors.importModelListEmpty"
+	ErrorImportModelListInvalid         = "admin.mySites.errors.importModelListInvalid"
+	ErrorImportSessionRefreshFailed     = "admin.mySites.errors.importSessionRefreshFailed"
+	ErrorImportAdminVerificationFailed  = "admin.mySites.errors.importAdminVerificationFailed"
+	ErrorImportSessionSaveFailed        = "admin.mySites.errors.importSessionSaveFailed"
 	ErrorImportModelSyncFailed          = "admin.mySites.errors.importModelSyncFailed"
 	ErrorImportAccountCreateFailed      = "admin.mySites.errors.importAccountCreateFailed"
 	ErrorImportConfigurationUnavailable = "admin.mySites.errors.importConfigurationUnavailable"
@@ -54,12 +61,12 @@ func normalizeImportAccountSettings(req *ImportAccountSettingsRequest, platform 
 	switch platform {
 	case "openai", "anthropic", "gemini", "antigravity", "kimi", "zhipu", "deepseek", "minimax":
 	default:
-		return ImportAccountSettings{}, requestError(ErrorImportGroupTypeMismatch)
+		return ImportAccountSettings{}, importInvalid(ErrorImportGroupTypeMismatch, "所选平台不支持导入，请重新选择已有支持平台")
 	}
 	settings := ImportAccountSettings{PriorityMode: "automatic", Priority: 100, Concurrency: 50, PoolMode: true, UpstreamBillingProbeEnabled: true}
 	if req != nil {
 		if req.invalidNull {
-			return ImportAccountSettings{}, requestError(ErrorImportSettingsInvalid)
+			return ImportAccountSettings{}, importInvalid(ErrorImportSettingsInvalid, "账号设置字段不能为 null，请提供有效值或省略该字段")
 		}
 		if req.PriorityMode != nil {
 			settings.PriorityMode = *req.PriorityMode
@@ -82,28 +89,37 @@ func normalizeImportAccountSettings(req *ImportAccountSettingsRequest, platform 
 			settings.UpstreamBillingProbeEnabled = *req.UpstreamBillingProbeEnabled
 		}
 	}
-	if settings.PriorityMode != "automatic" && settings.PriorityMode != "manual" || settings.PriorityMode == "automatic" && (settings.Priority < 10 || settings.Priority > 2147483647) || settings.PriorityMode == "manual" && (settings.Priority < 1 || settings.Priority > 9) || settings.Concurrency < 1 || settings.Concurrency > 1000 || settings.Passthrough && platform != "openai" && platform != "anthropic" || strings.TrimSpace(platform) == "" {
-		return ImportAccountSettings{}, requestError(ErrorImportSettingsInvalid)
+	problems := []string{}
+	if settings.PriorityMode != "automatic" && settings.PriorityMode != "manual" {
+		problems = append(problems, "Priority 模式必须为自动或人工")
+	}
+	if settings.PriorityMode == "automatic" && (settings.Priority < 10 || settings.Priority > 2147483647) {
+		problems = append(problems, "自动 Priority 必须为 10–2147483647 的整数")
+	}
+	if settings.PriorityMode == "manual" && (settings.Priority < 1 || settings.Priority > 9) {
+		problems = append(problems, "人工 Priority 必须为 1–9 的整数")
+	}
+	if settings.Concurrency < 1 || settings.Concurrency > 1000 {
+		problems = append(problems, "并发 concurrency 必须为 1–1000 的整数")
+	}
+	if settings.Passthrough && platform != "openai" && platform != "anthropic" {
+		problems = append(problems, "透传 passthrough 仅支持 OpenAI 或 Anthropic 平台，请关闭透传或更改平台")
+	}
+	if len(problems) > 0 {
+		return ImportAccountSettings{}, importInvalid(ErrorImportSettingsInvalid, strings.Join(problems, "；"))
 	}
 	return settings, nil
 }
 
-func importFailure(message, stage, cleanup string, status int, cause error) *ImportFailure {
+func importFailure(message, stage, target, cleanup string, status int, cause error) *ImportFailure {
 	if cleanup == "retained" || cleanup == "pending" {
 		status = http.StatusConflict
 	}
 	result := &ImportFailure{Message: message, Stage: stage, Cleanup: cleanup, RetryAllowed: cleanup == "not_needed" || cleanup == "confirmed", StatusCode: status, Cause: cause}
-	result.Reason = safeManagedDeleteReason(cause)
-	if result.Reason == "" {
-		var remote *upstream.RequestError
-		if errors.As(cause, &remote) {
-			for _, key := range []string{upstream.ErrorAuth, upstream.ErrorForbidden, upstream.ErrorNotFound, upstream.ErrorRateLimited, upstream.ErrorUpstreamServer, upstream.ErrorNetworkTimeout, upstream.ErrorNetworkUnreachable, upstream.ErrorTLSFailed, upstream.ErrorInvalidResponse, upstream.ErrorBusinessRejected} {
-				if remote.Reason == key || remote.Reason == "" && remote.MessageKey == key {
-					result.Reason = key
-					break
-				}
-			}
-		}
+	result.Diagnostics = []ImportDiagnostic{newImportDiagnostic(stage, target, message, cause, "")}
+	result.Reason = result.Diagnostics[0].Reason
+	if status == http.StatusConflict && cleanup == "not_needed" {
+		result.RetryAllowed = false
 	}
 	var grouped interface{ SafeDeletionGroup() (string, string) }
 	if errors.As(cause, &grouped) {
@@ -122,19 +138,44 @@ func importValidationFailure(err error) error {
 	if errors.As(err, &local) {
 		message = local.Error()
 	}
-	return importFailure(message, "validation", "not_needed", http.StatusBadRequest, err)
+	return importFailure(message, "validation", "local", "not_needed", http.StatusBadRequest, err)
 }
 
 // The request resolves its workspace exactly once. Successful replays precede
 // all mutable cached group and form validation.
-func (s *Service) realConnectManaged(ctx context.Context, userID string, req RealConnectRequest) (RealConnectResponse, error) {
+func (s *Service) realConnectManaged(ctx context.Context, userID string, req RealConnectRequest) (response RealConnectResponse, resultErr error) {
 	workspace, err := s.currentAdminAccountID(ctx, userID)
 	if err != nil {
-		return RealConnectResponse{}, err
+		return RealConnectResponse{}, importPreflightFailure(err)
 	}
-	state, err := s.authenticatedState(ctx, userID, workspace)
+	if strings.TrimSpace(workspace) == "" {
+		return RealConnectResponse{}, importPreflightFailure(requestError("admin.adminAccounts.errors.noCurrentAccount"))
+	}
+	var sessionDiagnostic *ImportDiagnostic
+	state, err := s.authenticatedStateObserved(ctx, userID, workspace, func(step, target string, cause error) {
+		message, detail := ErrorUnknown, "Hub 读取登录资料失败，具体原因无法安全确认；请查看 Hub 后端记录"
+		switch step {
+		case "refresh_session":
+			message, detail = ErrorImportSessionRefreshFailed, ""
+		case "verify_admin":
+			message, detail = ErrorImportAdminVerificationFailed, ""
+		case "save_session":
+			message, detail = ErrorImportSessionSaveFailed, "Hub 保存刷新后的登录资料失败，具体数据库原因无法安全确认；请查看 Hub 后端记录"
+		}
+		d := newImportDiagnostic("validation", target, message, cause, detail)
+		sessionDiagnostic = &d
+	})
 	if err != nil {
-		return RealConnectResponse{}, err
+		// Identified legacy callers keep their original authentication output.
+		// The Sub2API import form supplies settings; its observer preserves causes.
+		if req.AccountSettings == nil && sessionDiagnostic == nil {
+			return RealConnectResponse{}, err
+		}
+		failure := importPreflightFailure(err)
+		if sessionDiagnostic != nil {
+			failure.Diagnostics = []ImportDiagnostic{*sessionDiagnostic}
+		}
+		return RealConnectResponse{}, failure
 	}
 	if state.Session.Platform != upstream.PlatformSub2API {
 		if req.AccountSettings != nil {
@@ -148,12 +189,15 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	}
 	req.UpstreamSiteID = strings.TrimSpace(req.UpstreamSiteID)
 	req.UpstreamGroupID = strings.TrimSpace(req.UpstreamGroupID)
-	if req.UpstreamSiteID == "" || req.UpstreamGroupID == "" {
-		return RealConnectResponse{}, importValidationFailure(requestError(ErrorRequest))
+	if req.UpstreamSiteID == "" {
+		return RealConnectResponse{}, importValidationFailure(importInvalid(ErrorRequest, "尚未选择上游站点，请重新选择要导入的上游分组"))
+	}
+	if req.UpstreamGroupID == "" {
+		return RealConnectResponse{}, importValidationFailure(importInvalid(ErrorRequest, "所选上游分组缺少编号，请刷新上游分组并重新选择"))
 	}
 	operationID, err := normalizeOperationID(req.OperationID)
 	if err != nil {
-		return RealConnectResponse{}, importValidationFailure(err)
+		return RealConnectResponse{}, importValidationFailure(importInvalid(ErrorRequest, "本次操作编号长度超过 128 字节，请关闭并重新打开导入窗口"))
 	}
 	release, err := s.tryBeginConnectionCreation(userID, workspace, req.UpstreamSiteID, req.UpstreamGroupID, operationID)
 	if err != nil {
@@ -162,11 +206,11 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	defer release()
 	existing, err := s.idempotentConnection(ctx, userID, workspace, operationID)
 	if err != nil {
-		return RealConnectResponse{}, importFailure(ErrorImportPersistencePending, "persistence", "pending", http.StatusConflict, err)
+		return RealConnectResponse{}, importFailure(ErrorImportPersistencePending, "persistence", "local", "pending", http.StatusConflict, err)
 	}
 	if existing != nil {
 		if existing.UserID != userID || existing.WorkspaceAdminAccountID != workspace || existing.UpstreamSiteID != req.UpstreamSiteID || existing.UpstreamGroupID != req.UpstreamGroupID {
-			failure := importFailure(ErrorRequest, "validation", "retained", http.StatusConflict, nil)
+			failure := importFailure(ErrorRequest, "validation", "local", "retained", http.StatusConflict, nil)
 			return RealConnectResponse{}, failure
 		}
 		return s.replayImportedConnection(ctx, state, *existing), nil
@@ -193,7 +237,7 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	}
 	connID, err := randomConnID()
 	if err != nil {
-		return RealConnectResponse{}, importValidationFailure(requestError(ErrorUnknown))
+		return RealConnectResponse{}, importValidationFailure(importInvalid(ErrorUnknown, "Hub 生成本次关联编号失败，本次未创建账号或 Key；请查看 Hub 后端记录并重试"))
 	}
 	clock := s.now
 	if clock == nil {
@@ -203,7 +247,7 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	resourceName = buildImportCredentialName(connectionCtx.upstreamSession.Platform, resourceName, connID)
 	credential, err := s.platformService.CreateImportUpstreamCredentialContext(ctx, connectionCtx.upstreamSession, resourceName, req.UpstreamGroupID)
 	if err != nil {
-		failure := importFailure(ErrorImportUpstreamKeyFailed, "upstream_key", "pending", http.StatusBadGateway, err)
+		failure := importFailure(ErrorImportUpstreamKeyFailed, "upstream_key", "upstream", "pending", http.StatusBadGateway, err)
 		failure.UpstreamKeyID, failure.UpstreamResourceName = credential.ID, resourceName
 		switch credential.Outcome {
 		case upstream.ImportCredentialNotSent, upstream.ImportCredentialRejected:
@@ -217,14 +261,30 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 		}
 		return RealConnectResponse{}, failure
 	}
-	models := []string{}
+	modelResult := importModelResult{}
+	defer func() {
+		var failure *ImportFailure
+		if errors.As(resultErr, &failure) {
+			appendImportWarning(failure, modelResult.Warning)
+		}
+	}()
+	stopBeforeCreate := func(cause error) *ImportFailure {
+		failure := importFailure(ErrorImportModelSyncFailed, "model_sync", "main", "pending", http.StatusBadGateway, cause)
+		failure.UpstreamKeyID, failure.UpstreamResourceName = credential.ID, resourceName
+		s.cleanupImportKey(ctx, connectionCtx, credential.ID, failure)
+		return failure
+	}
+	if err = ctx.Err(); err != nil {
+		return RealConnectResponse{}, stopBeforeCreate(err)
+	}
 	if !settings.Passthrough {
-		models, err = s.platformService.PreviewSub2APIImportModelsContext(ctx, state.Session, connectionCtx.groupType, connectionCtx.upstreamSite.BaseURL, credential.Key)
+		modelResult.Models, err = s.platformService.PreviewSub2APIImportModelsContext(ctx, state.Session, connectionCtx.groupType, connectionCtx.upstreamSite.BaseURL, credential.Key)
+		if parentErr := ctx.Err(); parentErr != nil {
+			return RealConnectResponse{}, stopBeforeCreate(parentErr)
+		}
 		if err != nil {
-			failure := importFailure(ErrorImportModelSyncFailed, "model_sync", "pending", http.StatusBadGateway, err)
-			failure.UpstreamKeyID, failure.UpstreamResourceName = credential.ID, resourceName
-			s.cleanupImportKey(ctx, connectionCtx, credential.ID, failure)
-			return RealConnectResponse{}, failure
+			d := newImportDiagnostic("model_sync", "main", ErrorImportModelSyncWarning, err, "")
+			modelResult = importModelResult{Warning: &d}
 		}
 	}
 	rateLabel := connectionCtx.multiplierLabel
@@ -232,16 +292,19 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 		rateLabel = connectionCtx.groupName
 	}
 	accountName := fmt.Sprintf("%s-【%s】-%s", groupTypePrefix(connectionCtx.groupType), connectionCtx.upstreamSite.Name, rateLabel)
-	payload, err := buildAccountPayload(connectionCtx.groupType, connectionCtx.upstreamSite.BaseURL, credential.Key, numericIDs, accountName, settings, models)
+	payload, err := buildAccountPayload(connectionCtx.groupType, connectionCtx.upstreamSite.BaseURL, credential.Key, numericIDs, accountName, settings, modelResult)
 	if err != nil {
-		failure := importFailure(ErrorImportModelSyncFailed, "model_sync", "pending", http.StatusBadGateway, err)
+		failure := importFailure(ErrorImportModelSyncFailed, "model_sync", "main", "pending", http.StatusBadGateway, err)
 		failure.UpstreamKeyID, failure.UpstreamResourceName = credential.ID, resourceName
 		s.cleanupImportKey(ctx, connectionCtx, credential.ID, failure)
 		return RealConnectResponse{}, failure
 	}
+	if err = ctx.Err(); err != nil {
+		return RealConnectResponse{}, stopBeforeCreate(err)
+	}
 	accountID, err := s.platformService.CreateSub2APIImportAccountContext(ctx, state.Session, payload)
 	if err != nil {
-		failure := importFailure(ErrorImportAccountCreateFailed, "account_create", "pending", http.StatusBadGateway, err)
+		failure := importFailure(ErrorImportAccountCreateFailed, "account_create", "main", "pending", http.StatusBadGateway, err)
 		failure.AdminResourceID, failure.UpstreamKeyID, failure.UpstreamResourceName = accountID, credential.ID, resourceName
 		outcome := upstream.RemoteMutationOutcome(err)
 		if accountID == "" && (outcome == upstream.MutationNotSent || outcome == upstream.MutationConfirmedRejected) {
@@ -254,48 +317,79 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	}
 	observed, readErr := s.platformService.ReadSub2APIImportConfigurationContext(ctx, state.Session, accountID)
 	if readErr != nil {
-		failure := importFailure(ErrorImportConfigurationUnavailable, "configuration_check", "retained", http.StatusBadGateway, readErr)
+		failure := importFailure(ErrorImportConfigurationUnavailable, "configuration_check", "main", "retained", http.StatusBadGateway, readErr)
 		failure.AdminResourceID, failure.UpstreamKeyID, failure.UpstreamResourceName = accountID, credential.ID, resourceName
 		return RealConnectResponse{}, failure
 	}
-	configuration, err := verifyImportedAccountConfiguration(observed, connectionCtx.groupType, settings, ids, models)
+	if err = ctx.Err(); err != nil {
+		failure := importFailure(ErrorImportConfigurationUnavailable, "configuration_check", "main", "retained", http.StatusConflict, err)
+		failure.AdminResourceID, failure.UpstreamKeyID, failure.UpstreamResourceName = accountID, credential.ID, resourceName
+		return RealConnectResponse{}, failure
+	}
+	configuration, err := verifyImportedAccountConfiguration(observed, connectionCtx.groupType, settings, ids, modelResult)
 	if err != nil {
-		failure := importFailure(ErrorImportConfigurationMismatch, "configuration_check", "retained", http.StatusBadGateway, err)
+		failure := importFailure(ErrorImportConfigurationMismatch, "configuration_check", "main", "retained", http.StatusBadGateway, err)
 		failure.AdminResourceID, failure.UpstreamKeyID, failure.UpstreamResourceName = accountID, credential.ID, resourceName
 		s.compensateImport(ctx, userID, connectionCtx, accountID, credential.ID, failure)
 		return RealConnectResponse{}, failure
 	}
 	conn := RealConnection{ID: connID, UserID: userID, WorkspaceAdminAccountID: workspace, UpstreamSiteID: req.UpstreamSiteID, UpstreamGroupID: req.UpstreamGroupID, UpstreamGroupName: connectionCtx.groupName, UpstreamKeyID: credential.ID, UpstreamKey: credential.Key, AdminAccountID: accountID, AdminAccountName: observed.Name, OwnGroupIDs: ids, OwnGroupNames: names, GroupType: connectionCtx.groupType, ProvisioningMode: ProvisioningModeManaged, Status: ConnectionStatusActive, UpstreamPlatform: string(connectionCtx.upstreamSession.Platform), AdminPlatform: string(state.Session.Platform), PricingMappingEnabled: addToPricingMapping(req.AddToPricingMapping), OperationID: operationID, CanDeleteRemote: true, CreatedAt: time.Now().Format(time.RFC3339)}
 	currentSite, sourceErr := s.upstreamLookup.GetSite(ctx, req.UpstreamSiteID)
+	sourceDetail := ""
+	if sourceErr != nil {
+		sourceDetail = "Hub 无法读取当前上游站点资料，具体原因无法确认；账号和 Key 保留，关联未保存，请查看 Hub 后端记录"
+	}
 	if sourceErr == nil && (currentSite == nil || currentSite.Session == nil || currentSite.UserID != userID || currentSite.AdminAccountID != workspace || currentSite.BaseURL != sourceBaseURL || currentSite.Platform != sourcePlatform || currentSite.Session.Platform != connectionCtx.upstreamSession.Platform || currentSite.Session.BaseURL != connectionCtx.upstreamSession.BaseURL) {
-		sourceErr = requestError(ErrorRequest)
+		sourceErr = importInvalid(ErrorRequest, "上游站点、登录来源或所属工作区已变化，账号和 Key 保留，关联未保存；请刷新上游站点并核对已有资源")
 	}
 	var currentGroup upstream.GroupInfo
 	if sourceErr == nil {
 		currentGroup, sourceErr = resolveImportSourceGroup(currentSite, req.UpstreamGroupID)
 	}
 	if sourceErr != nil {
-		failure := importFailure(ErrorImportSourceGroupUnavailable, "persistence", "retained", http.StatusConflict, sourceErr)
+		failure := importFailure(ErrorImportSourceGroupUnavailable, "persistence", "local", "retained", http.StatusConflict, sourceErr)
+		if sourceDetail != "" {
+			failure.Diagnostics[0] = newImportDiagnostic("persistence", "local", ErrorImportSourceGroupUnavailable, sourceErr, sourceDetail)
+		}
 		failure.AdminResourceID, failure.UpstreamKeyID, failure.UpstreamResourceName = accountID, credential.ID, resourceName
 		return RealConnectResponse{}, failure
 	}
 	conn.UpstreamGroupName = currentGroup.Name
+	if err = ctx.Err(); err != nil {
+		failure := importFailure(ErrorImportPersistencePending, "persistence", "local", "retained", http.StatusConflict, err)
+		failure.AdminResourceID, failure.UpstreamKeyID, failure.UpstreamResourceName = accountID, credential.ID, resourceName
+		return RealConnectResponse{}, failure
+	}
 	if err = s.persistImportedConnection(ctx, conn); err != nil {
-		failure := importFailure(ErrorImportPersistencePending, "persistence", "retained", http.StatusInternalServerError, err)
+		failure := importFailure(ErrorImportPersistencePending, "persistence", "local", "retained", http.StatusInternalServerError, err)
 		failure.AdminResourceID, failure.UpstreamKeyID, failure.UpstreamResourceName = accountID, credential.ID, resourceName
 		if connectionCommitOutcome(err) == CommitConfirmedNotCommitted {
 			failure.Message = ErrorImportPersistenceFailed
+			failure.Diagnostics[0] = newImportDiagnostic("persistence", "local", ErrorImportPersistenceFailed, err, "Hub 已确认本次关联未保存；请按下方清理结果处理账号和 Key，并查看 Hub 后端保存记录")
 			s.compensateImport(ctx, userID, connectionCtx, accountID, credential.ID, failure)
 		}
 		return RealConnectResponse{}, failure
 	}
-	return RealConnectResponse{Connection: publicRealConnection(conn), WorkspaceAdminAccountID: workspace, ConfigurationStatus: "confirmed", Configuration: &configuration}, nil
+	response = RealConnectResponse{Connection: publicRealConnection(conn), WorkspaceAdminAccountID: workspace, ConfigurationStatus: "confirmed", Configuration: &configuration}
+	if modelResult.Warning != nil {
+		response.Diagnostics = []ImportDiagnostic{*modelResult.Warning}
+	}
+	return response, nil
 }
 
 func (s *Service) prepareImportConnectionContext(ctx context.Context, userID, workspace string, state *State, req RealConnectRequest) (connectionContext, error) {
 	site, err := s.upstreamLookup.GetSite(ctx, req.UpstreamSiteID)
-	if err != nil || site == nil || site.Session == nil || site.UserID != userID || site.AdminAccountID != workspace {
-		return connectionContext{}, requestError(ErrorRequest)
+	if err != nil {
+		return connectionContext{}, importInvalid(ErrorRequest, "Hub 读取上游站点资料失败，具体原因无法确认；本次未创建资源，请查看 Hub 后端记录")
+	}
+	if site == nil {
+		return connectionContext{}, importInvalid(ErrorRequest, "所选上游站点不存在，请刷新站点列表并重新选择")
+	}
+	if site.Session == nil {
+		return connectionContext{}, importInvalid(ErrorRequest, "所选上游站点缺少登录资料，请重新连接上游站点")
+	}
+	if site.UserID != userID || site.AdminAccountID != workspace {
+		return connectionContext{}, importInvalid(ErrorRequest, "所选上游站点不属于当前用户或工作区，请切换到对应工作区并重新选择")
 	}
 	group, err := resolveImportSourceGroup(site, req.UpstreamGroupID)
 	if err != nil {
@@ -307,7 +401,7 @@ func (s *Service) prepareImportConnectionContext(ctx context.Context, userID, wo
 		platform = upstreamPlatform
 	}
 	if platform == "" {
-		return connectionContext{}, requestError(ErrorImportGroupTypeMismatch)
+		return connectionContext{}, importInvalid(ErrorImportGroupTypeMismatch, "上游分组尚未分类，请手动选择要创建的主站账号平台")
 	}
 	return connectionContext{adminAccountID: workspace, state: state, upstreamSite: site, upstreamSession: *site.Session, groupType: platform, groupName: group.Name, multiplierLabel: multiplier}, nil
 }
@@ -321,8 +415,14 @@ func resolveImportSourceGroup(site *upstream.Site, id string) (upstream.GroupInf
 			matches++
 		}
 	}
-	if matches != 1 || strings.TrimSpace(selected.Name) == "" {
-		return upstream.GroupInfo{}, requestError(ErrorRequest)
+	if matches == 0 {
+		return upstream.GroupInfo{}, importInvalid(ErrorRequest, "所选上游分组编号已不存在，请刷新上游分组并重新选择")
+	}
+	if matches != 1 {
+		return upstream.GroupInfo{}, importInvalid(ErrorRequest, "所选上游分组编号对应多条记录，无法确定唯一来源，请刷新上游分组并核对记录")
+	}
+	if strings.TrimSpace(selected.Name) == "" {
+		return upstream.GroupInfo{}, importInvalid(ErrorRequest, "所选上游分组名称为空，请刷新上游分组并重新选择")
 	}
 	return selected, nil
 }
@@ -343,13 +443,13 @@ func buildImportCredentialName(platform upstream.Platform, readableName, connID 
 
 func (s *Service) resolveImportAdminGroups(ctx context.Context, state *State, requestedIDs []string, platform string) ([]string, []string, error) {
 	if len(requestedIDs) == 0 {
-		return nil, nil, requestError(ErrorRequest)
+		return nil, nil, importInvalid(ErrorRequest, "尚未选择主站目标分组，请选择至少一个同平台分组")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	groups, err := s.platformService.FetchAdminAllGroupsContext(ctx, state.Session)
 	if err != nil {
-		return nil, nil, importFailure(ErrorImportGroupsLoadFailed, "validation", "not_needed", http.StatusBadGateway, err)
+		return nil, nil, importFailure(ErrorImportGroupsLoadFailed, "validation", "main", "not_needed", http.StatusBadGateway, err)
 	}
 	byID := map[string]upstream.AdminGroupInfo{}
 	for _, group := range groups {
@@ -361,14 +461,14 @@ func (s *Service) resolveImportAdminGroups(ctx context.Context, state *State, re
 		requestedID = strings.TrimSpace(requestedID)
 		id, err := strconv.ParseInt(requestedID, 10, 64)
 		if err != nil || id <= 0 || strconv.FormatInt(id, 10) != requestedID {
-			return nil, nil, requestError(ErrorRequest)
+			return nil, nil, importInvalid(ErrorRequest, "所选主站分组编号格式无效，请刷新主站分组并重新选择")
 		}
 		group, ok := byID[requestedID]
 		if !ok {
-			return nil, nil, requestError(ErrorRequest)
+			return nil, nil, importInvalid(ErrorRequest, "主站目标分组编号 "+requestedID+" 已不存在，请刷新主站分组并重新选择")
 		}
 		if strings.ToLower(strings.TrimSpace(group.Platform)) != platform {
-			return nil, nil, requestError(ErrorImportGroupTypeMismatch)
+			return nil, nil, importInvalid(ErrorImportGroupTypeMismatch, "主站目标分组编号 "+requestedID+" 的平台与所选平台不符，请重新选择同平台分组")
 		}
 		if !seen[requestedID] {
 			seen[requestedID] = true
@@ -379,15 +479,16 @@ func (s *Service) resolveImportAdminGroups(ctx context.Context, state *State, re
 	return ids, names, nil
 }
 
-func buildAccountPayload(platform, baseURL, key string, groups []int, name string, settings ImportAccountSettings, models []string) (map[string]any, error) {
+func buildAccountPayload(platform, baseURL, key string, groups []int, name string, settings ImportAccountSettings, result importModelResult) (map[string]any, error) {
+	if !result.valid(settings.Passthrough) {
+		return nil, importInvalid(ErrorImportModelSyncFailed, "本次模型同步结果不一致，未创建主站账号")
+	}
+	models := result.Models
 	credentials := map[string]any{"base_url": baseURL, "api_key": key, "pool_mode": settings.PoolMode}
 	if platform == "gemini" {
 		credentials["tier_id"] = "aistudio_free"
 	}
 	if !settings.Passthrough {
-		if len(models) == 0 {
-			return nil, requestError(ErrorImportModelSyncFailed)
-		}
 		mapping := map[string]string{}
 		for _, model := range models {
 			if model == "" || model != strings.TrimSpace(model) || strings.Contains(model, "*") {
@@ -417,7 +518,11 @@ func configurationSummary(observed upstream.Sub2APIImportConfiguration, observat
 		}
 		sort.Strings(configuration.Models)
 		if observation == "creation" {
-			configuration.ModelState = "synced"
+			if len(configuration.Models) > 0 {
+				configuration.ModelState = "synced"
+			} else {
+				configuration.ModelState = "not_synced"
+			}
 		} else if len(configuration.Models) > 0 {
 			configuration.ModelState = "current_whitelist"
 		} else {
@@ -427,23 +532,59 @@ func configurationSummary(observed upstream.Sub2APIImportConfiguration, observat
 	return configuration
 }
 
-func verifyImportedAccountConfiguration(observed upstream.Sub2APIImportConfiguration, platform string, settings ImportAccountSettings, groups, models []string) (ImportedAccountConfiguration, error) {
+func verifyImportedAccountConfiguration(observed upstream.Sub2APIImportConfiguration, platform string, settings ImportAccountSettings, groups []string, result importModelResult) (ImportedAccountConfiguration, error) {
+	if !result.valid(settings.Passthrough) {
+		return ImportedAccountConfiguration{}, importInvalid(ErrorImportConfigurationMismatch, "本次模型同步结果不一致，未保存关联")
+	}
+	models := result.Models
 	actualGroups := make([]string, 0, len(observed.Groups))
 	for _, group := range observed.Groups {
 		actualGroups = append(actualGroups, group.ID)
 	}
-	if observed.Platform != platform || observed.Type != "apikey" || observed.Priority != settings.Priority || observed.Concurrency != settings.Concurrency || observed.Passthrough != settings.Passthrough || observed.PoolMode != settings.PoolMode || observed.UpstreamBillingProbeEnabled != settings.UpstreamBillingProbeEnabled || observed.UpstreamBillingRateSyncEnabled || !equalImportIDSets(actualGroups, groups) {
-		return ImportedAccountConfiguration{}, requestError(ErrorImportConfigurationMismatch)
+	differences := []string{}
+	if observed.Platform != platform {
+		differences = append(differences, "platform 平台要求 "+platform+"，实际 "+safeImportPlatform(observed.Platform))
+	}
+	if observed.Type != "apikey" {
+		actualType := "无效或不支持的类型"
+		if observed.Type == "oauth" || observed.Type == "setup-token" {
+			actualType = observed.Type
+		}
+		differences = append(differences, "type 账号类型要求 apikey，实际 "+actualType)
+	}
+	for _, field := range []struct {
+		name             string
+		expected, actual any
+	}{
+		{"Priority", settings.Priority, observed.Priority}, {"concurrency", settings.Concurrency, observed.Concurrency},
+		{"passthrough", settings.Passthrough, observed.Passthrough}, {"poolMode", settings.PoolMode, observed.PoolMode},
+		{"upstreamBillingProbeEnabled", settings.UpstreamBillingProbeEnabled, observed.UpstreamBillingProbeEnabled},
+		{"upstreamBillingRateSyncEnabled", false, observed.UpstreamBillingRateSyncEnabled},
+	} {
+		if field.expected != field.actual {
+			differences = append(differences, fmt.Sprintf("%s 要求 %v，实际 %v", field.name, field.expected, field.actual))
+		}
+	}
+	if !equalImportIDSets(actualGroups, groups) {
+		differences = append(differences, fmt.Sprintf("目标分组要求编号 %s，实际编号 %s", strings.Join(groups, ","), strings.Join(actualGroups, ",")))
 	}
 	if !settings.Passthrough {
-		if len(models) == 0 || len(observed.ModelMapping) != len(models) {
-			return ImportedAccountConfiguration{}, requestError(ErrorImportConfigurationMismatch)
-		}
+		matches := len(observed.ModelMapping) == len(models)
 		for _, model := range models {
 			if observed.ModelMapping[model] != model {
-				return ImportedAccountConfiguration{}, requestError(ErrorImportConfigurationMismatch)
+				matches = false
 			}
 		}
+		if !matches {
+			if result.Warning != nil {
+				differences = append(differences, "模型映射要求为空，实际并非空映射")
+			} else {
+				differences = append(differences, "模型映射与同步后的逐项同名白名单不符，存在遗漏、增加或改名")
+			}
+		}
+	}
+	if len(differences) > 0 {
+		return ImportedAccountConfiguration{}, importInvalid(ErrorImportConfigurationMismatch, strings.Join(differences, "；")+"；请到主站检查账号设置和保留资源")
 	}
 	return configurationSummary(observed, "creation"), nil
 }
@@ -471,6 +612,7 @@ func (s *Service) replayImportedConnection(ctx context.Context, state *State, co
 	response := RealConnectResponse{Connection: publicRealConnection(conn), WorkspaceAdminAccountID: conn.WorkspaceAdminAccountID, ConfigurationStatus: "unavailable", Message: ErrorImportConfigurationUnavailable}
 	observed, err := s.platformService.ReadSub2APIImportConfigurationContext(ctx, state.Session, conn.AdminAccountID)
 	if err != nil {
+		response.Diagnostics = []ImportDiagnostic{newImportDiagnostic("configuration_check", "main", ErrorImportConfigurationUnavailable, err, "")}
 		return response
 	}
 	configuration := configurationSummary(observed, "current")
@@ -495,6 +637,7 @@ func (s *Service) cleanupImportKey(ctx context.Context, connectionCtx connection
 		}
 	}
 	if err != nil {
+		failure.Diagnostics = append(failure.Diagnostics, newImportDiagnostic("key_cleanup", "upstream", "admin.mySites.errors.upstreamKeyCleanupPendingVerification", err, ""))
 		failure.Cause = errors.Join(failure.Cause, err)
 	}
 }
@@ -504,6 +647,7 @@ func (s *Service) compensateImport(ctx context.Context, userID string, connectio
 	defer cancel()
 	err := s.safeDeleteAdminResource(cleanupCtx, userID, connectionCtx.adminAccountID, connectionCtx.state.Session, accountID, "compensate_delete")
 	if err != nil {
+		failure.Diagnostics = append(failure.Diagnostics, newImportDiagnostic("account_cleanup", "main", "admin.mySites.errors.compensationPendingVerification", err, ""))
 		failure.Message = "admin.mySites.errors.compensationPendingVerification"
 		failure.Cleanup, failure.RetryAllowed, failure.StatusCode = "retained", false, http.StatusConflict
 		if upstream.RemoteMutationOutcome(err) == upstream.MutationUncertain {
@@ -538,4 +682,58 @@ func (s *Service) persistImportedConnection(ctx context.Context, conn RealConnec
 		return nil
 	}
 	return err
+}
+
+type importModelResult struct {
+	Models  []string
+	Warning *ImportDiagnostic
+}
+
+func (r importModelResult) valid(passthrough bool) bool {
+	if passthrough {
+		return len(r.Models) == 0 && r.Warning == nil
+	}
+	if r.Warning != nil {
+		return len(r.Models) == 0 && r.Warning.Stage == "model_sync" && r.Warning.Target == "main" && r.Warning.Message == ErrorImportModelSyncWarning
+	}
+	if len(r.Models) == 0 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, model := range r.Models {
+		if model == "" || model != strings.TrimSpace(model) || strings.Contains(model, "*") || seen[model] {
+			return false
+		}
+		seen[model] = true
+	}
+	return true
+}
+
+func importPreflightFailure(err error) *ImportFailure {
+	var failure *ImportFailure
+	if errors.As(err, &failure) {
+		return failure
+	}
+	message, status := ErrorUnknown, http.StatusInternalServerError
+	var local requestError
+	if errors.As(err, &local) {
+		message, status = local.Error(), http.StatusBadRequest
+		switch message {
+		case ErrorAuthRequired:
+			status = http.StatusUnauthorized
+		case ErrorAdminOnly:
+			status = http.StatusForbidden
+		case "admin.adminAccounts.errors.noCurrentAccount", ErrorConnectionExists, ErrorManagedDeleteOnly:
+			status = http.StatusConflict
+		}
+	}
+	return importFailure(message, "validation", "local", "not_needed", status, err)
+}
+
+func safeImportPlatform(platform string) string {
+	switch platform {
+	case "openai", "anthropic", "gemini", "antigravity", "kimi", "zhipu", "deepseek", "minimax":
+		return platform
+	}
+	return "无效或不支持的平台"
 }

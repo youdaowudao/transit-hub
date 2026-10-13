@@ -14,6 +14,7 @@ import type {
   AdminResourceOption,
   ImportFailure,
   ImportConfiguration,
+  ImportDiagnostic,
 } from '../types/mySites'
 import {
   authUnauthorizedErrorKey,
@@ -147,6 +148,9 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
 
 const importMessageKeys = new Set([
   'admin.mySites.errors.request', 'admin.mySites.errors.connectionExists',
+  'admin.mySites.errors.authRequired', 'admin.mySites.errors.adminOnly', 'admin.mySites.errors.unknown', 'auth.errors.unauthorized',
+  'admin.mySites.errors.importModelSyncWarning', 'admin.mySites.errors.importSessionRefreshFailed',
+  'admin.mySites.errors.importAdminVerificationFailed', 'admin.mySites.errors.importSessionSaveFailed',
   'admin.mySites.errors.importInProgress', 'admin.mySites.errors.importSourceGroupUnavailable', 'admin.mySites.errors.importGroupsLoadFailed',
   'admin.mySites.errors.importSettingsInvalid', 'admin.mySites.errors.importGroupTypeMismatch',
   'admin.mySites.errors.importSettingsUnsupported', 'admin.mySites.errors.importUpstreamKeyFailed',
@@ -160,12 +164,13 @@ const importMessageKeys = new Set([
 ])
 const importReasonKeys = new Set([
   ...importMessageKeys,
+  'admin.mySites.errors.importCancelled', 'admin.mySites.errors.importModelListEmpty', 'admin.mySites.errors.importModelListInvalid',
   'admin.connectionHealth.errors.sub2apiGroupLastModelSource',
   'admin.connectionHealth.errors.sub2apiGroupLastUsable',
   'admin.connectionHealth.errors.sub2apiInventoryIncomplete',
   'admin.connectionHealth.errors.remoteActionPending',
   'admin.connectionHealth.testConfiguration.remoteActionPending',
-  ...['auth', 'forbidden', 'notFound', 'rateLimited', 'upstreamServerError', 'networkTimeout', 'networkUnreachable', 'tlsFailed', 'invalidResponse', 'businessRejected'].map(key => `admin.upstream.errors.${key}`),
+  ...['auth', 'forbidden', 'notFound', 'rateLimited', 'upstreamServerError', 'networkTimeout', 'networkUnreachable', 'tlsFailed', 'invalidResponse', 'businessRejected', 'refreshTokenRejected', 'accessTokenRejected', 'loginIncomplete', 'announcementAckRequired', 'upstreamInsufficientBalance', 'upstreamKeyQuotaExhausted', 'upstreamKeyExpired'].map(key => `admin.upstream.errors.${key}`),
 ])
 const importStages = new Set(['validation', 'upstream_key', 'model_sync', 'account_create', 'configuration_check', 'persistence'])
 const importCleanups = new Set(['not_needed', 'confirmed', 'retained', 'pending'])
@@ -173,6 +178,30 @@ const isObject = (value: unknown): value is Record<string, unknown> => value != 
 const safeText = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/.test(value)
 const positiveResourceId = (value: unknown): value is string => typeof value === 'string' && /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value))
 const integerInRange = (value: unknown, minimum: number, maximum: number): value is number => typeof value === 'number' && Number.isInteger(value) && value >= minimum && value <= maximum
+
+const diagnosticStages = new Set([...importStages, 'account_cleanup', 'key_cleanup'])
+const parseImportDiagnostics = (value: unknown): { diagnostics?: ImportDiagnostic[]; diagnosticsUnavailable?: boolean } => {
+  if (value === undefined) return {}
+  if (!Array.isArray(value) || value.length > 3) return { diagnosticsUnavailable: true }
+  const diagnostics: ImportDiagnostic[] = []
+  let unavailable = false
+  for (const item of value) {
+    if (!isObject(item) || typeof item.stage !== 'string' || !diagnosticStages.has(item.stage) ||
+      typeof item.target !== 'string' || !['main', 'upstream', 'local'].includes(item.target) || typeof item.message !== 'string' || !importMessageKeys.has(item.message) ||
+      (item.reason !== undefined && (typeof item.reason !== 'string' || !importReasonKeys.has(item.reason))) ||
+      (item.httpStatus !== undefined && !integerInRange(item.httpStatus, 100, 599)) ||
+      (item.detail !== undefined && !safeText(item.detail))) {
+      unavailable = true
+      continue
+    }
+    diagnostics.push({ stage: item.stage as ImportDiagnostic['stage'], target: item.target as ImportDiagnostic['target'], message: item.message,
+      ...(typeof item.reason === 'string' ? { reason: item.reason } : {}),
+      ...(typeof item.httpStatus === 'number' ? { httpStatus: item.httpStatus } : {}),
+      ...(typeof item.detail === 'string' ? { detail: item.detail } : {}),
+    })
+  }
+  return { diagnostics, ...(unavailable ? { diagnosticsUnavailable: true } : {}) }
+}
 
 export class ImportApiError extends Error implements ImportFailure {
   readonly stage: ImportFailure['stage']
@@ -185,6 +214,8 @@ export class ImportApiError extends Error implements ImportFailure {
   readonly reason?: string
   readonly groupId?: string
   readonly groupName?: string
+  readonly diagnostics?: ImportDiagnostic[]
+  readonly diagnosticsUnavailable?: boolean
 
   constructor(failure: ImportFailure, trusted: boolean) {
     super(failure.message)
@@ -199,6 +230,8 @@ export class ImportApiError extends Error implements ImportFailure {
     this.reason = failure.reason
     this.groupId = failure.groupId
     this.groupName = failure.groupName
+    this.diagnostics = failure.diagnostics
+    this.diagnosticsUnavailable = failure.diagnosticsUnavailable
   }
 }
 
@@ -228,13 +261,14 @@ const parseImportFailure = (payload: unknown, status: number): ImportApiError | 
     reason: typeof payload.reason === 'string' && importReasonKeys.has(payload.reason) ? payload.reason : undefined,
     groupId: positiveResourceId(payload.groupId) ? payload.groupId : undefined,
     groupName: safeText(payload.groupName) ? payload.groupName : undefined,
+    ...parseImportDiagnostics(payload.diagnostics),
   }, true)
 }
 
 const parseImportConfiguration = (value: unknown, connection: RealConnection): ImportConfiguration | null => {
   if (!isObject(value) || typeof value.observation !== 'string' || !['creation', 'current'].includes(value.observation) ||
     value.adminAccountId !== connection.adminAccountId || typeof value.platform !== 'string' || value.platform !== connection.groupType || !safeText(value.name) ||
-    typeof value.modelState !== 'string' || !['synced', 'not_required', 'current_whitelist', 'current_unrestricted'].includes(value.modelState) ||
+    typeof value.modelState !== 'string' || !['synced', 'not_synced', 'not_required', 'current_whitelist', 'current_unrestricted'].includes(value.modelState) ||
     !integerInRange(value.priority, value.observation === 'creation' ? 1 : 0, 2147483647) || !integerInRange(value.concurrency, 1, value.observation === 'creation' ? 1000 : 2147483647) ||
     typeof value.passthrough !== 'boolean' || typeof value.poolMode !== 'boolean' || typeof value.upstreamBillingProbeEnabled !== 'boolean' ||
     (value.passthrough && !['openai', 'anthropic'].includes(value.platform)) ||
@@ -254,7 +288,7 @@ const parseImportConfiguration = (value: unknown, connection: RealConnection): I
   if (value.passthrough) {
     if (value.modelState !== 'not_required' || models.length !== 0) return null
   } else if (creation) {
-    if (value.modelState !== 'synced' || models.length === 0 || models.some(model => model.includes('*')) || ownGroups.length === 0) return null
+    if (!(value.modelState === 'synced' && models.length > 0 && !models.some(model => model.includes('*'))) && !(value.modelState === 'not_synced' && models.length === 0)) return null
   } else if (!(value.modelState === 'current_whitelist' && models.length > 0) && !(value.modelState === 'current_unrestricted' && models.length === 0)) return null
   if (creation && (ownGroups.length !== connection.ownGroupIds.length || ownGroups.some(group => !connection.ownGroupIds.includes(group.id)))) return null
   return {
@@ -290,9 +324,16 @@ const parseImportSuccess = (payload: unknown, request: RealConnectRequest, works
     ...(safeText(source.provisioningMode) ? { provisioningMode: source.provisioningMode } : {}),
     ...(safeText(source.upstreamPlatform) ? { upstreamPlatform: source.upstreamPlatform } : {}),
   }
-  const configuration = payload.configurationStatus === 'confirmed' ? parseImportConfiguration(payload.configuration, connection) : null
+  const diagnosticInfo = parseImportDiagnostics(payload.diagnostics)
+  let configuration = payload.configurationStatus === 'confirmed' ? parseImportConfiguration(payload.configuration, connection) : null
+  const warnings = diagnosticInfo.diagnostics?.filter(item => item.stage === 'model_sync' || item.message === 'admin.mySites.errors.importModelSyncWarning') ?? []
+  if (configuration?.modelState === 'not_synced') {
+    if (diagnosticInfo.diagnosticsUnavailable || diagnosticInfo.diagnostics?.length !== 1 || warnings.length !== 1 || warnings[0]?.stage !== 'model_sync' || warnings[0]?.target !== 'main' || warnings[0]?.message !== 'admin.mySites.errors.importModelSyncWarning') configuration = null
+  } else if (warnings.length > 0) configuration = null
+  if (configuration?.observation === 'creation' && diagnosticInfo.diagnosticsUnavailable) configuration = null
   return {
     connection, workspaceAdminAccountId,
+    ...diagnosticInfo,
     configurationStatus: configuration ? 'confirmed' : 'unavailable',
     ...(configuration ? { configuration } : { message: 'admin.mySites.errors.importConfigurationUnavailable' }),
   }
@@ -315,6 +356,8 @@ const requestImportJson = async (req: RealConnectRequest, workspaceAdminAccountI
   if (!response.ok) {
     if (isUnauthorizedApiResponse(response.status, isObject(payload) ? payload : {})) {
       handleAuthExpired()
+      const failure = parseImportFailure(payload, response.status)
+      if (failure?.stage === 'validation' && failure.cleanup === 'not_needed') throw failure
       throw pendingImportError(authUnauthorizedErrorKey)
     }
     throw parseImportFailure(payload, response.status) ?? pendingImportError()

@@ -100,6 +100,12 @@ func TestC51DomesticFailuresPreserveCleanupAndPendingResults(t *testing.T) {
 				req := c5RedRequest(t, "")
 				req.GroupType = platform
 				response, err := service.RealConnect(t.Context(), "user-1", req)
+				if mode == "preview" {
+					if err != nil || response.Configuration == nil || response.Configuration.ModelState != "not_synced" || len(response.Diagnostics) != 1 || response.Configuration.Platform != platform || base.connection == nil || base.saveCalls != 1 || remote.accountCreates != 1 || remote.reads != 1 || remote.keyDeletes != 0 || remote.protectedDeletes != 0 {
+						t.Fatal("domestic model warning lost full import or original platform")
+					}
+					return
+				}
 				var failure *ImportFailure
 				if !errors.As(err, &failure) || response.Configuration != nil || response.Connection.ID != "" {
 					t.Fatal("failed domestic import claimed success")

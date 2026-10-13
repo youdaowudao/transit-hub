@@ -36,13 +36,16 @@ type requestOptions struct {
 	// C5 retains only a validated ID from a complete failed JSON receipt.
 	// Other request paths preserve their response shape and error contract.
 	PreserveImportMutationID bool
+	// ImportDiagnostics opts only this import request into ephemeral safe hints.
+	ImportDiagnostics bool
 }
 
 type jsonResponse struct {
-	Payload    any
-	Header     http.Header
-	ReceivedAt time.Time
-	StatusCode int
+	Payload           any
+	Header            http.Header
+	ReceivedAt        time.Time
+	StatusCode        int
+	SafeImportMessage string
 }
 
 func NewHTTPClient(client *http.Client) *HTTPClient {
@@ -192,9 +195,17 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 		// A bounded, structured allowlist prevents response bodies or metadata
 		// containing credentials from reaching callers, audit events, or logs.
 		data, readErr := io.ReadAll(io.LimitReader(response.Body, 4097))
+		if options.ImportDiagnostics && len(data) > 4096 {
+			result.SafeImportMessage = importDiagnosticOverBudget
+			requestErr.UpstreamMessage = result.SafeImportMessage
+		}
 		if readErr == nil && len(data) <= 4096 {
 			var record map[string]any
 			if json.Unmarshal(data, &record) == nil {
+				if options.ImportDiagnostics {
+					result.SafeImportMessage = safeImportResponseMessage(record, options)
+					requestErr.UpstreamMessage = result.SafeImportMessage
+				}
 				if options.PreserveImportMutationID {
 					result.Payload = importMutationIDEvidence(record)
 				}
@@ -211,7 +222,7 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 				}
 				if message, ok := record["message"].(string); ok {
 					requestErr.RemoteMessage = safeRemoteMutationMessage(message)
-					if !options.PreserveImportMutationID {
+					if !options.PreserveImportMutationID && !options.ImportDiagnostics {
 						requestErr.UpstreamMessage = safeRequestMessage(message, options)
 					}
 				}
@@ -220,13 +231,30 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 		applyKnownUpstreamCodeReason(requestErr)
 		return result, requestErr
 	}
-	payload, err := parseJSONWithLimit(response.Body, reqURL, maxResponseBytes)
+	reader := io.Reader(response.Body)
+	var counted *importDiagnosticReader
+	if options.ImportDiagnostics {
+		counted = &importDiagnosticReader{Reader: reader}
+		reader = counted
+	}
+	payload, err := parseJSONWithLimit(reader, reqURL, maxResponseBytes)
 	if err != nil {
 		var requestErr *RequestError
 		if errors.As(err, &requestErr) {
 			requestErr.StatusCode = response.StatusCode
+			if counted != nil && counted.bytes > 4096 {
+				requestErr.UpstreamMessage = importDiagnosticOverBudget
+			}
 		}
 		return jsonResponse{}, err
+	}
+	safeImportMessage := ""
+	if counted != nil {
+		if counted.bytes > 4096 {
+			safeImportMessage = importDiagnosticOverBudget
+		} else if record, ok := payload.(map[string]any); ok {
+			safeImportMessage = safeImportResponseMessage(record, options)
+		}
 	}
 	// new-api commonly reports authentication/authorization failures as HTTP 200
 	// with {"success": false}. Treat that envelope as an error so Root/Admin
@@ -236,17 +264,19 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 			requestErr := newRequestErrorWithStatus(ErrorRequest, "", response.StatusCode)
 			requestErr.UpstreamCode = ParseUpstreamCode(record)
 			applyKnownUpstreamCodeReason(requestErr)
-			if message, ok := record["message"].(string); ok && !options.PreserveImportMutationID {
+			if options.ImportDiagnostics {
+				requestErr.UpstreamMessage = safeImportMessage
+			} else if message, ok := record["message"].(string); ok && !options.PreserveImportMutationID {
 				requestErr.UpstreamMessage = safeRequestMessage(message, options)
 			}
 			log.Printf("[http-client] 上游业务拒绝 method=%s %s status=%d category=%s", method, safeHTTPDiagnostic(reqURL), response.StatusCode, requestErr.MessageKey)
 			if options.PreserveImportMutationID {
-				return jsonResponse{Payload: importMutationIDEvidence(record), StatusCode: response.StatusCode, Header: response.Header, ReceivedAt: receivedAt}, requestErr
+				return jsonResponse{Payload: importMutationIDEvidence(record), StatusCode: response.StatusCode, Header: response.Header, ReceivedAt: receivedAt, SafeImportMessage: safeImportMessage}, requestErr
 			}
 			return jsonResponse{}, requestErr
 		}
 	}
-	return jsonResponse{Payload: payload, Header: response.Header, ReceivedAt: receivedAt, StatusCode: response.StatusCode}, nil
+	return jsonResponse{Payload: payload, Header: response.Header, ReceivedAt: receivedAt, StatusCode: response.StatusCode, SafeImportMessage: safeImportMessage}, nil
 }
 
 func encodeBody(body any) (io.Reader, error) {
@@ -322,7 +352,75 @@ func safeRequestMessage(message string, options requestOptions) string {
 			}
 		}
 	}
+	if body, ok := options.Body.(map[string]any); ok {
+		secrets = append(secrets, importCredentialValues(body)...)
+		if credentials, ok := body["credentials"].(map[string]any); ok {
+			secrets = append(secrets, importCredentialValues(credentials)...)
+		}
+	}
 	return safeUpstreamMessage(message, secrets...)
+}
+
+const importDiagnosticOverBudget = "响应过大，未提取具体提示，请检查该步骤记录"
+
+// Count the original stream without bounding or retaining the business body.
+type importDiagnosticReader struct {
+	io.Reader
+	bytes int64
+}
+
+func (r *importDiagnosticReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.bytes += int64(n)
+	return n, err
+}
+
+func importCredentialValues(record map[string]any) []string {
+	values := []string{}
+	for _, key := range []string{"api_key", "key", "password", "access_token", "refresh_token", "cookie", "authorization"} {
+		if value, ok := record[key].(string); ok && value != "" {
+			values = append(values, value)
+			if key == "authorization" {
+				if scheme, secret, ok := strings.Cut(value, " "); ok && (strings.EqualFold(scheme, "Bearer") || strings.EqualFold(scheme, "Basic")) {
+					values = append(values, strings.TrimSpace(secret))
+				}
+			}
+			if key == "cookie" {
+				for _, cookie := range strings.Split(value, ";") {
+					if _, part, ok := strings.Cut(strings.TrimSpace(cookie), "="); ok {
+						values = append(values, part)
+					}
+				}
+			}
+		}
+	}
+	return values
+}
+
+func safeImportResponseMessage(record map[string]any, options requestOptions) string {
+	message, ok := record["message"].(string)
+	if !ok {
+		if nested, valid := record["error"].(map[string]any); valid {
+			message, _ = nested["message"].(string)
+		}
+	}
+	message = ImportDiagnosticHint(message)
+	secrets := importCredentialValues(record)
+	for _, key := range []string{"data", "error"} {
+		if nested, ok := record[key].(map[string]any); ok {
+			secrets = append(secrets, importCredentialValues(nested)...)
+			if key == "data" {
+				if credentials, ok := nested["credentials"].(map[string]any); ok {
+					secrets = append(secrets, importCredentialValues(credentials)...)
+				}
+			}
+		}
+	}
+	// Known response values must be hidden before any truncation occurs.
+	for _, value := range secrets {
+		message = strings.ReplaceAll(message, value, "[已遮盖]")
+	}
+	return safeRequestMessage(message, options)
 }
 
 // Only fixed known API paths may identify the origin. Arbitrary paths can carry

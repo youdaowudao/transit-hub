@@ -233,3 +233,24 @@ func safeHost(value string) string {
 	}
 	return parsed.Scheme + "://" + parsed.Host
 }
+
+var importDatabaseObjectDetail = regexp.MustCompile(`(?i)\b(?:(?:relation|column|schema|sequence|database|table|index|view|type|function|procedure|extension|role|tablespace|constraint|trigger|policy)\s+(?:"[^"\r\n]*"|[^\s()]+)(?:\.(?:"[^"\r\n]*"|[^\s()]+))*(?:\([^\r\n]*\))?(?:\s+(?:of|for|on|in)\s+(?:relation|table|schema|database|sequence|view|type)\s+(?:"[^"\r\n]*"|[^\s()]+)(?:\.(?:"[^"\r\n]*"|[^\s()]+))*(?:\([^\r\n]*\))?)?\s+does not exist|permission denied for (?:relation|column|schema|sequence|database|table|index|view|type|function|procedure|extension|role|tablespace|constraint|trigger|policy))\b`)
+
+// ImportDiagnosticHint rejects identifiable database and stack details. Callers
+// still apply credential masking at the request boundary before display.
+func ImportDiagnosticHint(value string) string {
+	if importDatabaseObjectDetail.MatchString(value) {
+		return ""
+	}
+	lowered := strings.ToLower(value)
+	for _, marker := range []string{
+		"sqlstate", "pq:", "postgres://", "postgresql://", "mysql://", "sql: ", "goroutine ", "panic:",
+		"duplicate key value violates unique constraint", "syntax error at or near", "password authentication failed for user",
+		"violates foreign key constraint", "violates not-null constraint", "violates check constraint",
+	} {
+		if strings.Contains(lowered, marker) {
+			return ""
+		}
+	}
+	return value
+}

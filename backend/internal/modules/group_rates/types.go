@@ -37,13 +37,17 @@ type RateRow struct {
 // intentionally fixed by the handler to 30 for now, but keeping it explicit here
 // makes repository pagination deterministic and easy to test.
 type ListQuery struct {
-	Page     int
-	PageSize int
-	Search   string
-	Type     string
-	Platform string
-	Status   string
-	Sort     string
+	WorkspaceAdminAccountID string
+	SiteID                  string
+	FocusGroupID            string
+	FocusGroup              string
+	Page                    int
+	PageSize                int
+	Search                  string
+	Type                    string
+	Platform                string
+	Status                  string
+	Sort                    string
 }
 
 // StatusCounts provides tab totals after search/type/platform filters but before
@@ -56,14 +60,16 @@ type StatusCounts struct {
 }
 
 type ListResult struct {
-	Items        []RateRow    `json:"items"`
-	Total        int          `json:"total"`
-	Page         int          `json:"page"`
-	PageSize     int          `json:"pageSize"`
-	TotalPages   int          `json:"totalPages"`
-	Types        []string     `json:"types"`
-	Platforms    []string     `json:"platforms"`
-	StatusCounts StatusCounts `json:"statusCounts"`
+	WorkspaceAdminAccountID string       `json:"workspaceAdminAccountId"`
+	FocusFound              *bool        `json:"focusFound,omitempty"`
+	Items                   []RateRow    `json:"items"`
+	Total                   int          `json:"total"`
+	Page                    int          `json:"page"`
+	PageSize                int          `json:"pageSize"`
+	TotalPages              int          `json:"totalPages"`
+	Types                   []string     `json:"types"`
+	Platforms               []string     `json:"platforms"`
+	StatusCounts            StatusCounts `json:"statusCounts"`
 }
 
 type UpdateTypeRequest struct {
@@ -126,6 +132,8 @@ type latestGroupKey struct {
 }
 
 type listRecords struct {
+	Page         int
+	FocusFound   *bool
 	Items        []snapshotRecord
 	Total        int
 	Types        []string

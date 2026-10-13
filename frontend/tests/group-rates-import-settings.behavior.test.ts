@@ -29,7 +29,7 @@ vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
 })
 vi.mock('@/modules/auth/api/auth', () => ({ getAccessToken: () => null, handleAuthExpired: vi.fn(), isUnauthorizedApiResponse: (status: number) => status === 401, authUnauthorizedErrorKey: 'auth.errors.unauthorized' }))
 vi.mock('@/modules/admin/api/dashboardAdmin', () => ({ getDashboardAdminStatus: vi.fn(async () => { if (harness.dashboardFailure) throw new Error('dashboard failed'); return { platform: harness.platform } }) }))
-vi.mock('@/modules/admin/api/upstream', () => ({ listUpstreamSites: vi.fn(async () => []) }))
+vi.mock('@/modules/admin/api/upstream', () => ({ listUpstreamSiteOptions: vi.fn(async () => ({ workspaceAdminAccountId: (harness.currentAccount.value?.id ?? ''), items: [] })) }))
 vi.mock('@/modules/admin/api/groupRates', () => ({ listGroupRates: harness.listGroupRates, listAllGroupRates: vi.fn(async () => []), listGroupRateHistory: vi.fn(async () => []), updateGroupRateType: vi.fn() }))
 
 const rate = { siteId: 'site-c5', siteName: 'C5 上游', groupId: '21', groupName: 'C5 上游组', type: 'openai', platform: 'sub2api', mapped: false, currentMultiplier: 1, delta: 0, deltaPercent: 0, deleted: false, updatedAt: '2026-10-07T00:00:00Z' }
@@ -38,7 +38,7 @@ const groups = [
   { id: '11', groupName: '表单分组乙', platform: 'openai', multiplier: 1 },
   { id: '12', groupName: 'Gemini 分组', platform: 'gemini', multiplier: 1 },
 ]
-const rows = (type = 'openai') => ({ items: [{ ...rate, type }], total: 1, page: 1, pageSize: 10, totalPages: 1, types: ['openai', 'gemini'], platforms: ['sub2api'] })
+const rows = (type = 'openai') => ({ workspaceAdminAccountId: (harness.currentAccount.value?.id ?? ''), items: [{ ...rate, type }], total: 1, page: 1, pageSize: 10, totalPages: 1, types: ['openai', 'gemini'], platforms: ['sub2api'] })
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
 const success = (req: RealConnectRequest) => ({
   workspaceAdminAccountId: 'workspace-c5', configurationStatus: 'confirmed',
@@ -62,7 +62,7 @@ const failure = (changes: Record<string, unknown> = {}) => ({ message: 'admin.my
 const deferred = <T>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(next => { resolve = next }); return { resolve, promise } }
 const wrappers: VueWrapper[] = []
 const openView = async (type = 'openai') => {
-  harness.listGroupRates.mockResolvedValue(rows(type))
+  harness.listGroupRates.mockImplementation(async () => rows(type))
   const wrapper = mount(GroupRatesView, { attachTo: document.body })
   wrappers.push(wrapper)
   await flushPromises()
@@ -86,7 +86,7 @@ beforeEach(() => {
   harness.resourceResponse = async () => json([{ id: '101', name: '既有主站账号', platform: 'openai', type: 'apikey', status: 'active', groupIds: ['10'] }])
   harness.requests.splice(0)
   harness.bindings.splice(0)
-  harness.listGroupRates.mockReset().mockResolvedValue(rows())
+  harness.listGroupRates.mockReset().mockImplementation(async () => rows())
   harness.importResponse = async (req: RealConnectRequest) => json(success(req))
   harness.mappingResponse = async () => json({ ownGroups: groups, mappings: [] })
   harness.connectionResponse = async () => json([])
@@ -97,8 +97,8 @@ beforeEach(() => {
       return harness.importResponse(request)
     }
     if (url === '/api/my-sites/real-bind') { harness.bindings.push(JSON.parse(String(options.body))); return harness.bindingResponse() }
-    if (url === '/api/my-sites/real-connections/check') return json({ checked: 0, active: 0, missing: 0 })
-    if (url === '/api/my-sites/real-connections') return harness.connectionResponse()
+    if (url === '/api/my-sites/real-connections/check-scoped') return json({ workspaceAdminAccountId: (harness.currentAccount.value?.id ?? ''), total: 0, confirmedConnectionIds: [], unconfirmedConnectionIds: [], skippedConnectionIds: [], changedConnectionIds: [], confirmedStatuses: {}, issues: [], storageUncertain: false })
+    if (url === '/api/my-sites/real-connections/list-scoped') { const response = await harness.connectionResponse(); if (!response.ok) return response; return json({ workspaceAdminAccountId: (harness.currentAccount.value?.id ?? ''), items: await response.json() }) }
     if (url === '/api/my-sites/mapping-options') return harness.mappingResponse()
     if (url.startsWith('/api/my-sites/upstream-keys?')) return harness.keyResponse()
     if (url.startsWith('/api/my-sites/admin-resources?')) return harness.resourceResponse()
@@ -482,9 +482,9 @@ describe('C5 actual API to group-rates import component', () => {
     const pending = deferred<Response>(); harness.importResponse = () => pending.promise
     const wrapper = await openView(); await chooseGroup(wrapper)
     await dialog(wrapper).get('form').trigger('submit'); await flushPromises()
-    const calls = harness.listGroupRates.mock.calls.length
     harness.currentAccount.value = { id: 'workspace-new', displayName: '新工作区', platform: 'sub2api' }
     await flushPromises()
+    const calls = harness.listGroupRates.mock.calls.length
     pending.resolve(outcome === 'success' ? json(success(harness.requests[0])) : json(failure(), 502)); await flushPromises()
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('主站读回名称')
@@ -562,6 +562,17 @@ describe('approved import selection regression', () => {
   })
   it.each([null, { id: 'workspace-c5', platform: '' }, { id: 'workspace-c5', platform: 'grok' }])('RED unknown main information forbids all creation: %j', async account => {
     harness.currentAccount.value = account
+    if (account === null) {
+      const wrapper = mount(GroupRatesView, { attachTo: document.body }); wrappers.push(wrapper)
+      await flushPromises()
+      expect(harness.requests).toHaveLength(0)
+      expect(harness.bindings).toHaveLength(0)
+      expect(wrapper.findAll('button').some(button => button.text().trim() === '配置对接')).toBe(false)
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+      expect(harness.listGroupRates).not.toHaveBeenCalled()
+      expect(wrapper.text()).toContain('工作区')
+      return
+    }
     const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
     expect(harness.requests).toHaveLength(0)
     expect(dialog(wrapper).text()).toContain('当前主站信息未就绪')

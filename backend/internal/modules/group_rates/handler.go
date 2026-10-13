@@ -39,18 +39,34 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		writeWorkspaceError(w, err)
 		return
 	}
+	workspace := strings.TrimSpace(query.Get("workspaceAdminAccountId"))
+	siteID := strings.TrimSpace(query.Get("siteId"))
+	focusID := strings.TrimSpace(query.Get("focusGroupId"))
+	focusName := strings.TrimSpace(query.Get("focusGroup"))
+	if len(workspace) > 128 || len(siteID) > 128 || len(focusID) > 128 || len(focusName) > 512 || (siteID == "" && (focusID != "" || focusName != "")) {
+		httpjson.Write(w, http.StatusBadRequest, map[string]string{"message": "无法读取分组倍率：网站或分组定位参数不正确", "detail": "网站和分组ID最多128字节，分组名称最多512字节；定位分组必须指定网站", "next": "请从上游管理重新打开对应分组"})
+		return
+	}
+	if workspace != "" && workspace != adminAccountID {
+		httpjson.Write(w, http.StatusConflict, map[string]string{"message": "工作区已变化，本次分组倍率未读取", "detail": "请求中的工作区与当前工作区不同", "next": "请刷新页面后重试"})
+		return
+	}
 	rows, err := h.service.List(r.Context(), userID, adminAccountID, ListQuery{
-		Page:     intQuery(query.Get("page"), 1),
-		PageSize: 30,
-		Search:   query.Get("search"),
-		Type:     query.Get("type"),
-		Platform: query.Get("platform"),
-		Status:   query.Get("status"),
-		Sort:     query.Get("sort"),
+		WorkspaceAdminAccountID: adminAccountID,
+		SiteID:                  siteID,
+		FocusGroupID:            focusID,
+		FocusGroup:              focusName,
+		Page:                    intQuery(query.Get("page"), 1),
+		PageSize:                30,
+		Search:                  query.Get("search"),
+		Type:                    query.Get("type"),
+		Platform:                query.Get("platform"),
+		Status:                  query.Get("status"),
+		Sort:                    query.Get("sort"),
 	})
 	if err != nil {
 		log.Printf("list group rates: %v", err)
-		httpjson.WriteError(w, http.StatusInternalServerError, "Failed to list group rates")
+		httpjson.Write(w, http.StatusInternalServerError, map[string]string{"message": "分组倍率暂时无法读取", "detail": "Hub读取已保存的倍率资料失败，具体数据库原因无法安全确认；本次未更新倍率或账号", "next": "请刷新重试；仍失败时请检查Hub后端读取记录"})
 		return
 	}
 	httpjson.Write(w, http.StatusOK, rows)

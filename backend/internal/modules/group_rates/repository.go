@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -230,30 +231,10 @@ func (r *Repository) InsertSnapshots(ctx context.Context, records []snapshotReco
 }
 
 func (r *Repository) List(ctx context.Context, userID string, adminAccountID string, query ListQuery) (listRecords, error) {
-	search := strings.ToLower(strings.TrimSpace(query.Search))
-	filterType := strings.TrimSpace(query.Type)
-	filterPlatform := strings.TrimSpace(query.Platform)
-	filterStatus := strings.TrimSpace(query.Status)
-	if filterStatus == "" {
-		filterStatus = "legacy"
-	}
-	sortMode := strings.TrimSpace(query.Sort)
-	if sortMode == "" {
-		sortMode = "default"
-	}
-	if query.Page < 1 {
-		query.Page = 1
-	}
-	if query.PageSize < 1 {
-		query.PageSize = 10
-	}
-	offset := (query.Page - 1) * query.PageSize
-
-	// latest keeps one current row per site URL/group ID tuple, then the
-	// filtered CTE applies admin list controls before LIMIT/OFFSET. Facets are
-	// intentionally calculated from latest without active filters so the UI can
-	// keep showing all available filter choices while one filter is selected.
-	rows, err := r.db.Query(ctx, `
+	query = normalizeListQuery(query)
+	var result listRecords
+	var raw []byte
+	err := r.db.QueryRow(ctx, `
 		WITH enriched AS (
 			SELECT
 				snapshots.id,
@@ -314,7 +295,7 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 						AND (connections.status = '' OR connections.status = 'active')
 						AND connections.upstream_site_id = latest.site_id
 						AND (
-							connections.upstream_group_id = latest.group_id
+							(connections.upstream_group_id <> '' AND latest.group_id <> '' AND connections.upstream_group_id = latest.group_id)
 							OR ((connections.upstream_group_id = '' OR latest.group_id = '')
 								AND connections.upstream_group_name = latest.group_name)
 						)
@@ -342,6 +323,7 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 			WHERE ($3 = '' OR lower(site_name) LIKE '%' || $3 || '%' OR lower(group_name) LIKE '%' || $3 || '%' OR lower(platform) LIKE '%' || $3 || '%' OR lower(type) LIKE '%' || $3 || '%')
 				AND ($4 = '' OR type = $4)
 				AND ($5 = '' OR platform = $5)
+				AND ($8 = '' OR site_id = $8)
 		), filtered AS (
 			SELECT *
 			FROM base_filtered
@@ -355,44 +337,52 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 				COALESCE(array_agg(DISTINCT type ORDER BY type) FILTER (WHERE type <> ''), ARRAY[]::text[]) AS types,
 				COALESCE(array_agg(DISTINCT platform ORDER BY platform) FILTER (WHERE platform <> ''), ARRAY[]::text[]) AS platforms
 			FROM latest
-		), counted AS (
-			SELECT count(*)::int AS total FROM filtered
+		), counted AS (SELECT count(*)::int AS total FROM filtered),
+		counts AS (
+			SELECT count(*) FILTER (WHERE NOT deleted)::int AS all_count,
+			count(*) FILTER (WHERE mapped AND NOT deleted)::int AS mapped_count,
+			count(*) FILTER (WHERE NOT mapped AND NOT deleted)::int AS unmapped_count,
+			count(*) FILTER (WHERE deleted)::int AS deleted_count FROM base_filtered
+		), ordered AS (
+			SELECT filtered.*, row_number() OVER (ORDER BY CASE WHEN $7 = 'multiplierAsc' THEN multiplier * recharge_rate END ASC NULLS LAST,
+				CASE WHEN $7 = 'multiplierDesc' THEN multiplier * recharge_rate END DESC NULLS LAST,
+				CASE WHEN $7 = 'siteNameAsc' THEN lower(site_name) END ASC,
+				CASE WHEN $7 = 'groupNameAsc' THEN lower(group_name) END ASC,
+				CASE WHEN $7 = 'default' THEN CASE WHEN mapped THEN 1 ELSE 0 END END DESC,
+				CASE WHEN $7 = 'default' THEN multiplier * recharge_rate END ASC NULLS LAST,
+				site_name ASC, group_name ASC, platform ASC, type ASC, site_id ASC, group_id ASC, id ASC) AS position FROM filtered
+		), focused AS (
+			SELECT count(*)::int AS matches, min(position) AS position FROM ordered
+			WHERE ($11 <> '' AND group_id = $11) OR ($11 = '' AND $12 <> '' AND group_name = $12)
+		), target AS (
+			SELECT CASE WHEN $11 <> '' OR $12 <> '' THEN
+				CASE WHEN focused.matches = 1 THEN ((focused.position - 1) / $9 + 1)::int ELSE 1 END
+				ELSE least(greatest($10,1), greatest((counted.total + $9 - 1) / $9,1)) END AS page,
+				CASE WHEN $11 <> '' OR $12 <> '' THEN focused.matches = 1 ELSE NULL END AS focus_found
+			FROM focused CROSS JOIN counted
+		), page_rows AS (
+			SELECT ordered.* FROM ordered CROSS JOIN target
+			WHERE position > (target.page::bigint - 1) * $9 AND position <= target.page::bigint * $9
 		)
-		SELECT filtered.id, filtered.user_id, filtered.site_id, filtered.site_name, filtered.group_id, filtered.group_name, filtered.platform, filtered.type, filtered.mapped, filtered.pricing_mapped, filtered.deleted,
-			filtered.multiplier, filtered.recharge_rate, filtered.created_at, filtered.last_seen_at, filtered.previous_multiplier, counted.total, facets.types, facets.platforms
-		FROM filtered
-		CROSS JOIN counted
-		CROSS JOIN facets
-		ORDER BY
-			CASE WHEN $7 = 'multiplierAsc' THEN filtered.multiplier * filtered.recharge_rate END ASC NULLS LAST,
-			CASE WHEN $7 = 'multiplierDesc' THEN filtered.multiplier * filtered.recharge_rate END DESC NULLS LAST,
-			CASE WHEN $7 = 'siteNameAsc' THEN lower(filtered.site_name) END ASC,
-			CASE WHEN $7 = 'groupNameAsc' THEN lower(filtered.group_name) END ASC,
-			CASE WHEN $7 = 'default' THEN CASE WHEN filtered.mapped THEN 1 ELSE 0 END END DESC,
-			CASE WHEN $7 = 'default' THEN filtered.multiplier * filtered.recharge_rate END ASC NULLS LAST,
-			filtered.site_name ASC, filtered.group_name ASC, filtered.platform ASC, filtered.type ASC
-		LIMIT $8 OFFSET $9
-	`, userID, adminAccountID, search, filterType, filterPlatform, filterStatus, sortMode, query.PageSize, offset)
+		SELECT counted.total, facets.types, facets.platforms, counts.all_count, counts.mapped_count,
+			counts.unmapped_count, counts.deleted_count, target.page, target.focus_found,
+			COALESCE((SELECT jsonb_agg(jsonb_build_object(
+				'ID', id, 'UserID', user_id, 'SiteID', site_id, 'SiteName', site_name, 'GroupID', group_id,
+				'GroupName', group_name, 'Platform', platform, 'Type', type, 'Mapped', mapped,
+				'PricingMapped', pricing_mapped, 'Deleted', deleted, 'Multiplier', multiplier,
+				'RechargeRate', recharge_rate, 'CreatedAt', created_at, 'LastSeenAt', last_seen_at,
+				'PreviousMultiplier', previous_multiplier) ORDER BY position) FROM page_rows), '[]'::jsonb)
+		FROM counted CROSS JOIN facets CROSS JOIN counts CROSS JOIN target
+	`, userID, adminAccountID, strings.ToLower(query.Search), query.Type, query.Platform,
+		query.Status, query.Sort, query.SiteID, query.PageSize, query.Page, query.FocusGroupID, query.FocusGroup).Scan(
+		&result.Total, &result.Types, &result.Platforms, &result.StatusCounts.All, &result.StatusCounts.Mapped,
+		&result.StatusCounts.Unmapped, &result.StatusCounts.Deleted, &result.Page, &result.FocusFound, &raw)
 	if err != nil {
 		return listRecords{}, err
 	}
-	result, err := scanListSnapshots(rows)
-	if err != nil {
+	if err := json.Unmarshal(raw, &result.Items); err != nil {
 		return listRecords{}, err
 	}
-	if result.Total == 0 {
-		facets, err := r.facets(ctx, userID, adminAccountID)
-		if err != nil {
-			return listRecords{}, err
-		}
-		result.Types = facets.Types
-		result.Platforms = facets.Platforms
-	}
-	counts, err := r.statusCounts(ctx, userID, adminAccountID, search, filterType, filterPlatform)
-	if err != nil {
-		return listRecords{}, err
-	}
-	result.StatusCounts = counts
 	return result, nil
 }
 
@@ -608,8 +598,12 @@ func (r *Repository) facets(ctx context.Context, userID string, adminAccountID s
 // statusCounts calculates status-tab totals using the same current-row and
 // mapped semantics as List. Search/type/platform remain active so tab counts
 // always describe the result set the operator is currently inspecting.
-func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccountID string, search string, filterType string, filterPlatform string) (StatusCounts, error) {
+func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccountID string, search string, filterType string, filterPlatform string, siteIDs ...string) (StatusCounts, error) {
 	var counts StatusCounts
+	siteID := ""
+	if len(siteIDs) > 0 {
+		siteID = strings.TrimSpace(siteIDs[0])
+	}
 	err := r.db.QueryRow(ctx, `
 		WITH enriched AS (
 			SELECT
@@ -648,7 +642,7 @@ func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccou
 						AND (connections.status = '' OR connections.status = 'active')
 						AND connections.upstream_site_id = latest.site_id
 						AND (
-							connections.upstream_group_id = latest.group_id
+							(connections.upstream_group_id <> '' AND latest.group_id <> '' AND connections.upstream_group_id = latest.group_id)
 							OR ((connections.upstream_group_id = '' OR latest.group_id = '')
 								AND connections.upstream_group_name = latest.group_name)
 						)
@@ -660,6 +654,7 @@ func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccou
 			WHERE ($3 = '' OR lower(site_name) LIKE '%' || $3 || '%' OR lower(group_name) LIKE '%' || $3 || '%' OR lower(platform) LIKE '%' || $3 || '%' OR lower(type) LIKE '%' || $3 || '%')
 				AND ($4 = '' OR type = $4)
 				AND ($5 = '' OR platform = $5)
+				AND ($6 = '' OR site_id = $6)
 		)
 		SELECT
 			count(*) FILTER (WHERE NOT deleted)::int,
@@ -667,7 +662,7 @@ func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccou
 			count(*) FILTER (WHERE NOT mapped AND NOT deleted)::int,
 			count(*) FILTER (WHERE deleted)::int
 		FROM base_filtered
-	`, userID, adminAccountID, search, filterType, filterPlatform).Scan(
+	`, userID, adminAccountID, search, filterType, filterPlatform, siteID).Scan(
 		&counts.All,
 		&counts.Mapped,
 		&counts.Unmapped,

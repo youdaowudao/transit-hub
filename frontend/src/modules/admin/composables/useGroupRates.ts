@@ -1,6 +1,6 @@
 import { ref } from 'vue'
-import { listAllGroupRates, listGroupRateHistory, listGroupRates, updateGroupRateType } from '../api/groupRates'
-import type { GroupRate, GroupRateHistoryQuery, GroupRateHistoryRow, GroupRateSort, GroupRateStatusCounts, GroupRateStatusFilter } from '../types/groupRates'
+import { listGroupRateHistory, listGroupRates, updateGroupRateType } from '../api/groupRates'
+import type { GroupRate, GroupRateHistoryQuery, GroupRateHistoryRow, GroupRateSort, GroupRateStatusCounts, GroupRateStatusFilter, GroupRatesQuery, PaginatedGroupRatesResponse } from '../types/groupRates'
 
 export const useGroupRates = () => {
   const rates = ref<GroupRate[]>([])
@@ -24,99 +24,41 @@ export const useGroupRates = () => {
   const isActionLoading = ref(false)
   const errorKey = ref<string | null>(null)
   const historyErrorKey = ref<string | null>(null)
-  const siteFilteredRates = ref<GroupRate[]>([])
   let ratesRequestId = 0
 
-  const applySiteFilteredPage = () => {
-    total.value = siteFilteredRates.value.length
-    totalPages.value = total.value > 0 ? Math.ceil(total.value / pageSize.value) : 0
-    page.value = Math.min(Math.max(page.value, 1), Math.max(totalPages.value, 1))
-    const offset = (page.value - 1) * pageSize.value
-    rates.value = siteFilteredRates.value.slice(offset, offset + pageSize.value)
-  }
-
-  const loadSiteFilteredRates = async (requestId: number, isCurrent: () => boolean) => {
-    const baseQuery = {
-      search: search.value,
-      type: typeFilter.value,
-      platform: platformFilter.value,
-      sort: sortMode.value,
+  const applyRates = (response: PaginatedGroupRatesResponse) => {
+    rates.value = response.items
+    total.value = response.total
+    page.value = response.page
+    pageSize.value = response.pageSize
+    totalPages.value = response.totalPages
+    types.value = response.types
+    platforms.value = response.platforms
+    serverSupportsStatusFilters.value = response.statusCounts != null
+    statusCounts.value = response.statusCounts ?? {
+      all: response.items.filter(item => !item.deleted).length,
+      mapped: response.items.filter(item => item.mapped && !item.deleted).length,
+      unmapped: response.items.filter(item => !item.mapped && !item.deleted).length,
+      deleted: response.items.filter(item => item.deleted).length,
     }
-    const [activeRows, deletedRows, metadata] = await Promise.all([
-      listAllGroupRates({ ...baseQuery, status: 'all' }),
-      listAllGroupRates({ ...baseQuery, status: 'deleted' }),
-      listGroupRates({ ...baseQuery, page: 1, status: 'all' }),
-    ])
-    if (requestId !== ratesRequestId || !isCurrent()) return
-    const filterBySite = (items: GroupRate[]) => items.filter(item => item.siteId === siteFilter.value)
-    const activeSiteRows = filterBySite(activeRows)
-    const deletedSiteRows = filterBySite(deletedRows)
-
-    statusCounts.value = {
-      all: activeSiteRows.length,
-      mapped: activeSiteRows.filter(item => item.mapped).length,
-      unmapped: activeSiteRows.filter(item => !item.mapped).length,
-      deleted: deletedSiteRows.length,
-    }
-    types.value = metadata.types
-    platforms.value = metadata.platforms
-    siteFilteredRates.value = statusFilter.value === 'deleted'
-      ? deletedSiteRows
-      : statusFilter.value === 'mapped'
-        ? activeSiteRows.filter(item => item.mapped)
-        : statusFilter.value === 'unmapped'
-          ? activeSiteRows.filter(item => !item.mapped)
-          : activeSiteRows
-    serverSupportsStatusFilters.value = true
-    pageSize.value = metadata.pageSize || 30
-    applySiteFilteredPage()
   }
-
-  const loadRates = async (isCurrent: () => boolean = () => true) => {
-    if (!isCurrent()) return
+  const loadRates = async (isCurrent: () => boolean = () => true, options: Partial<GroupRatesQuery> & { signal?: AbortSignal } = {}, commit = true): Promise<PaginatedGroupRatesResponse | null> => {
+    if (!isCurrent()) return null
     const requestId = ++ratesRequestId
     isLoading.value = true
     errorKey.value = null
     try {
-      if (siteFilter.value) {
-        await loadSiteFilteredRates(requestId, isCurrent)
-        return
-      }
-
-      const response = await listGroupRates({
-        page: page.value,
-        search: search.value,
-        type: typeFilter.value,
-        platform: platformFilter.value,
-        status: statusFilter.value,
-        sort: sortMode.value,
-      })
-
-      if (requestId !== ratesRequestId || !isCurrent()) return
-
-      siteFilteredRates.value = []
-      rates.value = response.items
-      total.value = response.total
-      page.value = response.page
-      pageSize.value = response.pageSize
-      totalPages.value = response.totalPages
-      types.value = response.types
-      platforms.value = response.platforms
-      serverSupportsStatusFilters.value = response.statusCounts != null
-      statusCounts.value = response.statusCounts ?? {
-        all: response.items.filter(item => !item.deleted).length,
-        mapped: response.items.filter(item => item.mapped && !item.deleted).length,
-        unmapped: response.items.filter(item => !item.mapped && !item.deleted).length,
-        deleted: response.items.filter(item => item.deleted).length,
-      }
+      const response = await listGroupRates({ page: page.value, search: search.value, type: typeFilter.value, platform: platformFilter.value,
+        status: statusFilter.value, sort: sortMode.value, siteId: siteFilter.value, ...options }, options.signal)
+      if (requestId !== ratesRequestId || !isCurrent()) return null
+      if (commit) applyRates(response)
+      return response
     } catch (error) {
-      if (requestId !== ratesRequestId || !isCurrent()) return
+      if (requestId !== ratesRequestId || !isCurrent()) return null
+      if (error instanceof Error && error.name === 'AbortError') throw error
       errorKey.value = error instanceof Error ? error.message : 'admin.groupRates.errors.unknown'
-    } finally {
-      if (requestId === ratesRequestId) {
-        isLoading.value = false
-      }
-    }
+      return null
+    } finally { if (requestId === ratesRequestId) isLoading.value = false }
   }
 
   const resetPageAndLoadRates = async () => {
@@ -159,20 +101,7 @@ export const useGroupRates = () => {
     if (nextPage === page.value) return
 
     page.value = nextPage
-    if (siteFilter.value) {
-      applySiteFilteredPage()
-      return
-    }
     await loadRates()
-  }
-
-  const focusGroup = (groupName: string): boolean => {
-    if (!siteFilter.value || !groupName.trim()) return false
-    const index = siteFilteredRates.value.findIndex(item => item.groupName === groupName)
-    if (index < 0) return false
-    page.value = Math.floor(index / pageSize.value) + 1
-    applySiteFilteredPage()
-    return true
   }
 
   const loadHistory = async (query: GroupRateHistoryQuery) => {
@@ -187,12 +116,12 @@ export const useGroupRates = () => {
     }
   }
 
-  const saveType = async (rate: GroupRate, groupType: string) => {
+  const saveType = async (rate: GroupRate, groupType: string, reload: () => Promise<unknown> = () => loadRates()) => {
     isActionLoading.value = true
     errorKey.value = null
     try {
       await updateGroupRateType({ siteId: rate.siteId, groupName: rate.groupName, type: groupType })
-      await loadRates()
+      await reload()
     } catch (error) {
       errorKey.value = error instanceof Error ? error.message : 'admin.groupRates.errors.unknown'
       throw error
@@ -224,6 +153,7 @@ export const useGroupRates = () => {
     errorKey,
     historyErrorKey,
     loadRates,
+    applyRates,
     loadHistory,
     saveType,
     setSearch,
@@ -233,6 +163,5 @@ export const useGroupRates = () => {
     setStatusFilter,
     setSortMode,
     goToPage,
-    focusGroup,
   }
 }

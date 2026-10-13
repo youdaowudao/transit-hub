@@ -1,3 +1,4 @@
+import { scopedReadFailureText } from '../utils/scopedErrorText'
 import type { GroupRateHistoryQuery, GroupRateHistoryRow, GroupRatesQuery, PaginatedGroupRatesResponse, UpdateGroupRateTypeRequest } from '../types/groupRates'
 import {
   authUnauthorizedErrorKey,
@@ -33,25 +34,32 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       },
     })
   } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error
     throw new Error('admin.groupRates.errors.network')
   }
 
-  const text = await response.text()
-  const payload = text ? JSON.parse(text) as T & AdminErrorPayload : ({} as T & AdminErrorPayload)
+  let payload: T & AdminErrorPayload
+  try { const text = await response.text(); payload = text ? JSON.parse(text) as T & AdminErrorPayload : ({} as T & AdminErrorPayload) }
+  catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error
+    if (response.status === 401) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+    throw new Error('倍率资料返回内容无法读取，本次未修改倍率或主站账号；请刷新重试，并查看Hub后端倍率读取记录。')
+  }
 
   if (!response.ok) {
-    if (isUnauthorizedApiResponse(response.status, payload)) {
+    const errorPayload = payload != null && typeof payload === 'object' ? payload : {}
+    if (isUnauthorizedApiResponse(response.status, errorPayload)) {
       handleAuthExpired()
       throw new Error(authUnauthorizedErrorKey)
     }
 
-    throw new Error('admin.groupRates.errors.request')
+    throw new Error(scopedReadFailureText(payload, '倍率资料暂时无法读取，本次未修改主站账号；请刷新并查看Hub后端倍率读取记录。'))
   }
 
   return payload
 }
 
-export const listGroupRates = async (query: GroupRatesQuery): Promise<PaginatedGroupRatesResponse> => {
+export const listGroupRates = async (query: GroupRatesQuery, signal?: AbortSignal): Promise<PaginatedGroupRatesResponse> => {
   const params = new URLSearchParams({
     page: query.page.toString(),
     search: query.search.trim(),
@@ -61,7 +69,8 @@ export const listGroupRates = async (query: GroupRatesQuery): Promise<PaginatedG
     sort: query.sort,
   })
 
-  return requestJson<PaginatedGroupRatesResponse>(`/group-rates?${params.toString()}`)
+  for (const key of ['workspaceAdminAccountId', 'siteId', 'focusGroupId', 'focusGroup'] as const) { if (query[key]) params.set(key, query[key]) }
+  return requestJson<PaginatedGroupRatesResponse>(`/group-rates?${params.toString()}`, { signal })
 }
 
 export const listAllGroupRates = async (query: Omit<GroupRatesQuery, 'page'>): Promise<PaginatedGroupRatesResponse['items']> => {

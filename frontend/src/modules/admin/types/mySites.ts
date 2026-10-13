@@ -304,3 +304,31 @@ export interface RealDisconnectRequest {
   mode: 'unlink' | 'full'
   removePricingMapping?: boolean
 }
+
+export interface ScopedGroupRef { siteId: string; groupId: string; groupName: string }
+export interface ScopedCheckRequest {
+  workspaceAdminAccountId: string
+  mode: 'automatic' | 'manual'
+  siteId?: string
+  groupRefs?: ScopedGroupRef[]
+}
+export interface ScopedCheckIssue {
+  connectionId?: string
+  accountId?: string
+  step: string
+  detail: string
+  next: string
+  retryAllowed: boolean
+  httpStatus?: number
+}
+export interface ScopedCheckResult {
+  workspaceAdminAccountId: string
+  total: number
+  confirmedConnectionIds: string[]
+  unconfirmedConnectionIds: string[]
+  skippedConnectionIds: string[]
+  changedConnectionIds: string[]
+  confirmedStatuses: Record<string, 'active' | 'missing'>
+  issues: ScopedCheckIssue[]
+  storageUncertain: boolean
+}

@@ -387,7 +387,7 @@ const openGroupDestination = (group: UpstreamGroupInfo) => {
   if (connections.length === 0) {
     void router.push({
       name: 'AdminGroupRates',
-      query: { siteId: site.id, focusGroup: group.name },
+      query: { siteId: site.id, focusGroup: group.name, focusGroupId: group.id || undefined },
     })
     return
   }

@@ -18,6 +18,10 @@ export interface GroupRate {
 }
 
 export interface GroupRatesQuery {
+  workspaceAdminAccountId?: string
+  siteId?: string
+  focusGroupId?: string
+  focusGroup?: string
   page: number
   search: string
   type: string
@@ -37,6 +41,8 @@ export interface GroupRateStatusCounts {
 }
 
 export interface PaginatedGroupRatesResponse {
+  workspaceAdminAccountId?: string
+  focusFound?: boolean
   items: GroupRate[]
   total: number
   page: number

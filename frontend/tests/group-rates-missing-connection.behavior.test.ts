@@ -35,6 +35,7 @@ vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
 
 vi.mock('@/modules/admin/api/upstream', () => ({
   listUpstreamSites: vi.fn(async () => []),
+  listUpstreamSiteOptions: vi.fn(async () => ({ workspaceAdminAccountId: 'workspace-c5', items: [] })),
 }))
 
 vi.mock('@/modules/admin/api/groupRates', () => ({
@@ -46,7 +47,10 @@ vi.mock('@/modules/admin/api/groupRates', () => ({
 
 vi.mock('@/modules/admin/api/mySites', () => ({
   checkRealConnections: harness.checkRealConnections,
+  checkScopedRealConnections: harness.checkRealConnections,
+  ScopedCheckApiError: class extends Error {},
   listRealConnections: harness.listRealConnections,
+  listScopedRealConnections: async (...args: unknown[]) => ({ workspaceAdminAccountId: 'workspace-c5', items: await harness.listRealConnections(...args) }),
   realDisconnect: harness.realDisconnect,
   getMySiteMappingOptions: harness.getMySiteMappingOptions,
   realConnect: harness.realConnect,
@@ -108,7 +112,8 @@ beforeEach(() => {
   harness.calls.splice(0)
   harness.checkRealConnections.mockReset().mockImplementation(async () => {
     harness.calls.push('check')
-    return { checked: 2, active: 1, missing: 1 }
+    const items = harness.listRealConnections.mock.results.at(-1)?.value ? await harness.listRealConnections.mock.results.at(-1)!.value : connections;
+    return { workspaceAdminAccountId: 'workspace-c5', total: items.length, confirmedConnectionIds: items.map((item: RealConnection) => item.id), confirmedStatuses: Object.fromEntries(items.map((item: RealConnection) => [item.id, item.status || 'active'])), unconfirmedConnectionIds: [], changedConnectionIds: [], skippedConnectionIds: [], issues: [], storageUncertain: false }
   })
   harness.listRealConnections.mockReset().mockImplementation(async () => {
     harness.calls.push('connections')
@@ -120,7 +125,7 @@ beforeEach(() => {
   harness.listGroupRates.mockReset().mockImplementation(async () => {
     harness.calls.push('rates')
     return {
-      items: rates, total: rates.length, page: 1, pageSize: 10, totalPages: 1,
+      workspaceAdminAccountId: 'workspace-c5', items: rates, total: rates.length, page: 1, pageSize: 10, totalPages: 1,
       types: ['openai'], platforms: ['sub2api'], statusCounts: { all: 2, mapped: 1, unmapped: 1, deleted: 0 },
     }
   })
@@ -132,12 +137,12 @@ afterEach(() => {
 })
 
 describe('group rates missing main account behavior', () => {
-  it('checks before loading, renders missing separately, and only offers local cleanup', async () => {
+  it('loads locally before checking, renders confirmed missing separately, and only offers local cleanup', async () => {
     const wrapper = await mountView()
 
-    expect(harness.calls[0]).toBe('check')
-    expect(harness.calls.indexOf('check')).toBeLessThan(harness.calls.indexOf('rates'))
-    expect(harness.calls.indexOf('check')).toBeLessThan(harness.calls.indexOf('connections'))
+    expect(harness.calls[0]).toBe('rates')
+    expect(harness.calls.indexOf('rates')).toBeLessThan(harness.calls.indexOf('check'))
+    expect(harness.calls.indexOf('connections')).toBeLessThan(harness.calls.indexOf('check'))
 
     const activeRow = rowByGroup(wrapper, '正常分组')
     expect(activeRow.text()).toContain('已对接')
@@ -168,8 +173,8 @@ describe('group rates missing main account behavior', () => {
       mode: 'unlink',
       removePricingMapping: false,
     })
-    expect(harness.listGroupRates).toHaveBeenCalledTimes(2)
-    expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
+    expect(harness.listGroupRates).toHaveBeenCalledTimes(3)
+    expect(harness.listRealConnections).toHaveBeenCalledTimes(3)
   })
 
   it('prefers an active connection over a missing duplicate for the same target', async () => {
@@ -189,7 +194,7 @@ describe('group rates missing main account behavior', () => {
     expect(duplicateRow.text()).not.toContain('主站账号已删除')
   })
 
-  it('checks first on manual refresh and retains visible rows with a retry warning when checking fails', async () => {
+  it('reads locally before manual checking and retains rows with disabled cleanup after a lost result', async () => {
     const wrapper = await mountView()
     harness.calls.splice(0)
     harness.checkRealConnections.mockImplementationOnce(async () => {
@@ -202,9 +207,10 @@ describe('group rates missing main account behavior', () => {
     await refresh.trigger('click')
     await flushPromises()
 
-    expect(harness.calls[0]).toBe('check')
+    expect(harness.calls[0]).toBe('rates')
     expect(harness.checkRealConnections).toHaveBeenCalledTimes(2)
-    expect(wrapper.text()).toContain('主站账号核对失败，当前仍显示上次数据。请重试刷新。')
+    expect(wrapper.text()).toContain('刷新')
+    expect(rowByGroup(wrapper, '失效分组').findAll('button').at(-1)!.element).toHaveProperty('disabled', true)
     expect(rowByGroup(wrapper, '失效分组').text()).toContain('主站账号已删除')
   })
 
@@ -221,17 +227,17 @@ describe('group rates missing main account behavior', () => {
     await refresh.trigger('click')
     await flushPromises()
 
-    expect(harness.checkRealConnections).toHaveBeenCalledTimes(2)
+    expect(harness.checkRealConnections).toHaveBeenCalledTimes(1)
     expect((refresh.element as HTMLButtonElement).disabled).toBe(true)
     await refresh.trigger('click')
-    expect(harness.checkRealConnections).toHaveBeenCalledTimes(2)
+    expect(harness.checkRealConnections).toHaveBeenCalledTimes(1)
 
     pendingConnections.resolve(connections)
     await flushPromises()
     expect((refresh.element as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('clears stale connection status when checking succeeds but the refreshed connection list fails', async () => {
+  it('hides operation buttons and shows unknown status when a local reread fails', async () => {
     const wrapper = await mountView()
     harness.calls.splice(0)
     harness.listRealConnections.mockImplementationOnce(async () => {
@@ -244,11 +250,11 @@ describe('group rates missing main account behavior', () => {
     await refresh.trigger('click')
     await flushPromises()
 
-    expect(harness.calls[0]).toBe('check')
-    expect(wrapper.text()).toContain('主站账号核对已完成，但对接状态加载失败。为避免误显示，已隐藏旧对接状态，请重试刷新。')
+    expect(harness.calls[0]).toBe('rates')
+    expect(wrapper.text()).toContain('本页对接资料暂时无法读取')
     const activeRow = rowByGroup(wrapper, '正常分组')
     expect(activeRow.text()).not.toContain('已对接')
-    expect(activeRow.text()).toContain('配置对接')
+    expect(activeRow.text()).not.toContain('配置对接')
   })
 })
 
@@ -278,7 +284,7 @@ describe('safe complete-disconnect rejection', () => {
     expect(dialog.get('input[type="checkbox"]').element).toHaveProperty('checked', false)
     expect(row.text()).toContain('已对接')
     expect(harness.realDisconnect).toHaveBeenCalledTimes(1)
-    expect(harness.listRealConnections).toHaveBeenCalledTimes(1)
+    expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
   })
 
   it('describes pending protection without misidentifying the account', async () => {
@@ -302,8 +308,8 @@ describe('safe complete-disconnect rejection', () => {
     expect(dialog.find('input[value="unlink"]').exists()).toBe(true)
     expect(rowByGroup(wrapper, '正常分组').text()).toContain('已对接')
     expect(harness.realDisconnect).toHaveBeenCalledWith({ connectionId: 'connection-active', mode: 'full', removePricingMapping: false })
-    expect(harness.listRealConnections).toHaveBeenCalledTimes(1)
-    expect(harness.listGroupRates).toHaveBeenCalledTimes(1)
+    expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
+    expect(harness.listGroupRates).toHaveBeenCalledTimes(2)
   })
 
   it('shows a fallback reason only once and preserves the local record', async () => {
@@ -322,7 +328,7 @@ describe('safe complete-disconnect rejection', () => {
     expect(dialog.text()).toContain('主站账号 101')
     expect(dialog.text()).toContain('上游 Key 编号 207')
     expect(rowByGroup(wrapper, '正常分组').text()).toContain('已对接')
-    expect(harness.listRealConnections).toHaveBeenCalledTimes(1)
+    expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
   })
 
   it('keeps sent-but-unconfirmed compensation accurate and retains the creation selection', async () => {
@@ -353,7 +359,7 @@ describe('safe complete-disconnect rejection', () => {
     expect(row.text()).toContain('配置对接')
     expect(row.text()).not.toContain('已对接')
     expect(harness.realConnect).toHaveBeenCalledTimes(1)
-    expect(harness.listRealConnections).toHaveBeenCalledTimes(1)
+    expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
   })
 
   it.each([
@@ -375,8 +381,8 @@ describe('safe complete-disconnect rejection', () => {
     expect(dialog.find('input[value="unlink"]').exists()).toBe(true)
     expect(dialog.find('input[value="full"]').exists()).toBe(true)
     expect(rowByGroup(wrapper, '正常分组').text()).toContain('已对接')
-    expect(harness.listRealConnections).toHaveBeenCalledTimes(1)
-    expect(harness.listGroupRates).toHaveBeenCalledTimes(1)
+    expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
+    expect(harness.listGroupRates).toHaveBeenCalledTimes(2)
   })
 
   it('shows retained resource numbers when deletion outcome is unknown', async () => {
@@ -393,7 +399,7 @@ describe('safe complete-disconnect rejection', () => {
     expect(dialog.text()).toContain('主站账号 101')
     expect(dialog.text()).toContain('上游 Key 编号 207')
     expect(rowByGroup(wrapper, '正常分组').text()).toContain('已对接')
-    expect(harness.listGroupRates).toHaveBeenCalledTimes(1)
+    expect(harness.listGroupRates).toHaveBeenCalledTimes(2)
   })
 })
 
@@ -420,7 +426,7 @@ describe('safe real-connect compensation rejection', () => {
     expect(dialog.text()).not.toContain('账号删除尚未确认')
     expect(dialog.text()).not.toContain('真实对接创建失败')
     expect(harness.realDisconnect).not.toHaveBeenCalled()
-    expect(harness.listRealConnections).toHaveBeenCalledTimes(1)
+    expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
   })
 
   it.each([
@@ -461,8 +467,8 @@ describe('safe real-connect compensation rejection', () => {
     expect(row.text()).not.toContain('已对接')
     expect(dialog.get('input[type="checkbox"]').element).toHaveProperty('checked', true)
     expect(harness.realDisconnect).not.toHaveBeenCalled()
-    expect(harness.listRealConnections).toHaveBeenCalledTimes(1)
-    expect(harness.listGroupRates).toHaveBeenCalledTimes(1)
+    expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
+    expect(harness.listGroupRates).toHaveBeenCalledTimes(2)
   })
 
   it('keeps an unrecognized create result pending and prohibits a new operation retry', async () => {

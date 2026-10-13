@@ -3,14 +3,13 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { AlertCircle, ArrowUpDown, Check, ChevronDown, History, KeyRound, Link2, Loader2, Megaphone, RefreshCw, Search, ServerCog, Sparkles, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
-import { checkRealConnections, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, listRealConnections, realDisconnect } from '../api/mySites'
-import { listUpstreamSites } from '../api/upstream'
+import { checkScopedRealConnections, listScopedRealConnections, ScopedCheckApiError, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, realDisconnect } from '../api/mySites'
+import { listUpstreamSiteOptions } from '../api/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
-import type { AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportDiagnostic, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, UpstreamKeyItem } from '../types/mySites'
+import type { AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportDiagnostic, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, ScopedCheckRequest, ScopedCheckResult, ScopedGroupRef, UpstreamKeyItem } from '../types/mySites'
 import type { ImportApiError } from '../api/mySites'
-import type { UpstreamSiteResponse } from '../types/upstream'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
 import { isImportAccountPlatform } from '../utils/importPlatforms'
 
@@ -41,16 +40,10 @@ const {
   errorKey,
   historyErrorKey,
   loadRates,
+  applyRates,
+  search,
   loadHistory,
   saveType,
-  setSearch,
-  setTypeFilter,
-  setPlatformFilter,
-  setSiteFilter,
-  setStatusFilter,
-  setSortMode,
-  goToPage,
-  focusGroup: focusRateGroup,
 } = useGroupRates()
 
 const selectedRate = ref<GroupRate | null>(null)
@@ -65,11 +58,32 @@ const mySiteMappings = ref<MySiteMapping[]>([])
 const hasLoadedMappingOptions = ref(false)
 const connectionCapabilities = ref<ConnectionCapabilities | null>(null)
 const searchQuery = ref('')
-const upstreamSiteOptions = ref<UpstreamSiteResponse[]>([])
+const upstreamSiteOptions = ref<{ id: string; name: string }[]>([])
 const focusedRateKey = ref('')
 const pendingFocusGroup = ref('')
+const pendingFocusGroupId = ref('')
+const focusError = ref('')
+const siteOptionsError = ref('')
+const connectionDataError = ref('')
+const connectionDataKnown = ref(false)
+const checkSummary = ref('')
+let pageGeneration = 0
+let pageController: AbortController | null = null
+let checkController: AbortController | null = null
+let optionsController: AbortController | null = null
+let consumedFocusRoute = ''
+let deferredRouteChange = false
+let lastCheckScope: Omit<ScopedCheckRequest, 'mode'> | null = null
+// Retain the existing batch's public identity copies for every local reread.
+let checkIdentities = new Map<string, RealConnection>()
+const confirmedIds = ref(new Set<string>())
+const unconfirmedIds = ref(new Set<string>())
+const changedIds = ref(new Set<string>())
+const skippedIds = ref(new Set<string>())
 const realConnectionsData = ref<RealConnection[]>([])
 const disconnectingRate = ref<GroupRate | null>(null)
+const disconnectConnection = ref<RealConnection | null>(null)
+let disconnectWorkspace = ''
 const disconnectMode = ref<'unlink' | 'full'>('unlink')
 const disconnectRemovePricing = ref(true)
 const isDisconnecting = ref(false)
@@ -243,7 +257,10 @@ watch([() => currentAccount.value?.id, adminPlatform], () => {
   selectedAdminResourceId.value = ''
   isLoadingKeys.value = false
   isLoadingAdminResources.value = false
+  invalidatePage(true)
+  connectionDataKnown.value = false
   realConnectionsData.value = []
+  if (pageIsMounted) void enterPage()
   hasLoadedMappingOptions.value = false
   connectOutcome.value = 'editing'
   connectResult.value = null
@@ -252,6 +269,7 @@ watch([() => currentAccount.value?.id, adminPlatform], () => {
   connectRefreshError.value = ''
 }, { flush: 'sync' })
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let pendingSearchValue: string | null = null
 
 const queryValue = (value: unknown): string => {
   if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0] : ''
@@ -260,6 +278,7 @@ const queryValue = (value: unknown): string => {
 
 siteFilter.value = queryValue(route.query.siteId)
 pendingFocusGroup.value = queryValue(route.query.focusGroup)
+pendingFocusGroupId.value = queryValue(route.query.focusGroupId)
 
 const siteOptions = computed(() => {
   const options = new Map(upstreamSiteOptions.value.map(site => [site.id, site.name]))
@@ -270,37 +289,49 @@ const siteOptions = computed(() => {
     .sort((first, second) => first.name.localeCompare(second.name))
 })
 
-const rateFocusKey = (rate: GroupRate): string => `${rate.siteId}\u0000${rate.groupName}`
+const rateFocusKey = (rate: GroupRate): string => `${rate.siteId}\u0000${rate.groupId ? 'id:' + rate.groupId : 'name:' + rate.groupName}`
 
-const clearRateHighlight = () => {
-  focusedRateKey.value = ''
-  if (!route.query.focusGroup) return
+const routeScopeKey = () => [queryValue(route.query.siteId), queryValue(route.query.focusGroupId), queryValue(route.query.focusGroup)].join('\u0000')
+const clearRateHighlight = () => { focusedRateKey.value = '' }
+const consumeRouteFocus = async (found?: boolean) => {
+  const name = pendingFocusGroup.value.trim()
+  const id = pendingFocusGroupId.value.trim()
+  if (!name && !id) return
+  const target = rates.value.find(rate => rate.siteId === siteFilter.value && (id ? rate.groupId === id : rate.groupName === name))
+  if (found === true && target) focusedRateKey.value = rateFocusKey(target)
+  else focusError.value = `没有找到要查看的分组${name || id}，或存在多个同名分组；当前筛选保持不变。请检查网站与分组是否仍存在，或调整筛选后查找。`
+  pendingFocusGroup.value = ''
+  pendingFocusGroupId.value = ''
   const query = { ...route.query }
   delete query.focusGroup
-  void router.replace({ query })
+  delete query.focusGroupId
+  consumedFocusRoute = [queryValue(query.siteId), '', ''].join('\u0000')
+  await router.replace({ query })
 }
-
-const consumeRouteFocus = async () => {
-  const groupName = pendingFocusGroup.value.trim()
-  if (!groupName || !siteFilter.value) return
-  const located = focusRateGroup(groupName)
-  if (located) {
-    const target = rates.value.find(rate => rate.siteId === siteFilter.value && rate.groupName === groupName)
-    if (target) focusedRateKey.value = rateFocusKey(target)
-  }
-  pendingFocusGroup.value = ''
-  if (route.query.focusGroup) {
-    const query = { ...route.query }
-    delete query.focusGroup
-    await router.replace({ query })
-  }
+const displayCause = (error: unknown) => error instanceof Error ? (te(error.message) ? t(error.message) : error.message) : '原因无法确认，请查看Hub后端读取记录'
+const showMissingWorkspace = () => {
+  isLoading.value = false
+  connectionDataKnown.value = false
+  realConnectionsData.value = []
+  upstreamSiteOptions.value = []
+  applyRates({ items: [], total: 0, page: 1, pageSize: 30, totalPages: 0, types: [], platforms: [], statusCounts: { all: 0, mapped: 0, unmapped: 0, deleted: 0 } })
+  errorKey.value = '尚未选定当前工作区，本次未读取倍率或账号资料；请先选择工作区，再刷新页面。'
 }
-
 const loadUpstreamSiteOptions = async () => {
+  const workspace = currentAccount.value?.id ?? ''
+  if (!workspace) return
+  optionsController?.abort()
+  const controller = new AbortController()
+  optionsController = controller
   try {
-    upstreamSiteOptions.value = await listUpstreamSites()
-  } catch {
-    upstreamSiteOptions.value = []
+    const response = await listUpstreamSiteOptions(controller.signal)
+    if (!pageIsMounted || controller.signal.aborted || workspace !== (currentAccount.value?.id ?? '')) return
+    if (response.workspaceAdminAccountId !== workspace) throw new Error('工作区已变化，请刷新重试')
+    upstreamSiteOptions.value = response.items
+    siteOptionsError.value = ''
+  } catch (error) {
+    if (!pageIsMounted || controller.signal.aborted || workspace !== (currentAccount.value?.id ?? '')) return
+    siteOptionsError.value = `网站选项暂时无法加载：${displayCause(error)}。当前列表保持显示，请点击刷新重试加载选项。`
   }
 }
 
@@ -333,7 +364,7 @@ const canSelectOwnGroup = (group: MySiteMappingOwnGroupOption): boolean => (
 const realConnectionsForRate = (rate: GroupRate): RealConnection[] =>
   realConnectionsData.value.filter(c => (
     c.upstreamSiteId === rate.siteId &&
-    (c.upstreamGroupId === rate.groupId || ((!c.upstreamGroupId || !rate.groupId) && c.upstreamGroupName === rate.groupName))
+    (Boolean(c.upstreamGroupId && rate.groupId) && c.upstreamGroupId === rate.groupId || ((!c.upstreamGroupId || !rate.groupId) && c.upstreamGroupName === rate.groupName))
   ))
 
 const realConnectionForRate = (rate: GroupRate): RealConnection | undefined => {
@@ -347,41 +378,192 @@ const isRealConnected = (rate: GroupRate): boolean => {
 }
 const isMainAccountMissing = (rate: GroupRate): boolean => realConnectionForRate(rate)?.status === 'missing'
 const isPricingMapped = (rate: GroupRate): boolean => rate.pricingMapped ?? mappedOwnGroupsForRate(rate).length > 0
-const disconnectConnection = computed(() => disconnectingRate.value ? realConnectionForRate(disconnectingRate.value) : undefined)
 
-const loadRealConnections = async (clearOnFailure = false, isCurrent: () => boolean = () => true): Promise<boolean> => {
+const groupRefsForPage = (): ScopedGroupRef[] => Array.from(new Map(rates.value.map(rate => {
+  const ref = { siteId: rate.siteId, groupId: rate.groupId || '', groupName: rate.groupName }
+  return [JSON.stringify(ref), ref]
+})).values())
+const frozenScope = (): Omit<ScopedCheckRequest, 'mode'> => ({ workspaceAdminAccountId: currentAccount.value?.id ?? '', ...(siteFilter.value ? { siteId: siteFilter.value } : { groupRefs: groupRefsForPage() }) })
+const connectionMatchesScope = (connection: RealConnection, scope = lastCheckScope): boolean => Boolean(scope && (scope.siteId ? connection.upstreamSiteId === scope.siteId : scope.groupRefs?.some(ref => connection.upstreamSiteId === ref.siteId && ((Boolean(connection.upstreamGroupId && ref.groupId) && connection.upstreamGroupId === ref.groupId) || ((!connection.upstreamGroupId || !ref.groupId) && connection.upstreamGroupName === ref.groupName)))))
+const applicableConnection = (connection: RealConnection) => Boolean(connection.adminAccountId?.trim() && (!connection.adminPlatform || connection.adminPlatform === 'sub2api'))
+const connectionOperationBlocked = (rate: GroupRate): boolean => {
+  if (!connectionDataKnown.value) return true
+  const connection = realConnectionForRate(rate)
+  if (!connection || !connectionMatchesScope(connection)) return false
+  if (unconfirmedIds.value.has(connection.id) || changedIds.value.has(connection.id)) return true
+  const frozen = checkIdentities.get(connection.id)
+  const unchanged = frozen && sameConnectionIdentity(frozen, connection) && frozen.status === connection.status
+  if (skippedIds.value.has(connection.id)) return !unchanged
+  if (!applicableConnection(connection)) return false
+  return isCheckingConnections.value || !confirmedIds.value.has(connection.id) || !unchanged
+}
+const operationBlockedReason = '这个账号正在检查或本次未能确认，暂时不能导入或解绑；请等待检查结束，或点击刷新完成核对。'
+const clearCheckState = () => {
+  lastCheckScope = null
+  checkIdentities.clear()
+  confirmedIds.value = new Set()
+  unconfirmedIds.value = new Set()
+  changedIds.value = new Set()
+  skippedIds.value = new Set()
+  checkSummary.value = ''
+  connectionCheckError.value = ''
+}
+const invalidatePage = (clear = false) => {
+  pageGeneration++
+  pageController?.abort()
+  checkController?.abort()
+  if (isCheckingConnections.value) {
+    unconfirmedIds.value = new Set([...unconfirmedIds.value, ...realConnectionsData.value.filter(connection => applicableConnection(connection) && connectionMatchesScope(connection)).map(connection => connection.id)])
+  }
+  isCheckingConnections.value = false
+  if (clear) clearCheckState()
+  return pageGeneration
+}
+const loadLocalPage = async (options: { generation?: number; focus?: boolean; isCurrent?: () => boolean } = {}): Promise<boolean> => {
+  const generation = options.generation ?? invalidatePage()
+  const workspace = currentAccount.value?.id ?? ''
+  if (!workspace) { showMissingWorkspace(); return false }
+  const controller = new AbortController()
+  pageController?.abort()
+  pageController = controller
+  const isCurrent = () => pageIsMounted && !controller.signal.aborted && generation === pageGeneration && workspace === (currentAccount.value?.id ?? '') && (options.isCurrent?.() ?? true)
   try {
-    const connections = await listRealConnections()
-    if (!isCurrent()) return false
-    realConnectionsData.value = connections
-    return true
-  } catch {
-    if (clearOnFailure && isCurrent()) realConnectionsData.value = []
+    const response = await loadRates(isCurrent, { workspaceAdminAccountId: workspace, siteId: siteFilter.value, signal: controller.signal,
+      ...(options.focus ? { focusGroupId: pendingFocusGroupId.value, focusGroup: pendingFocusGroup.value } : {}) }, false)
+    if (!response || !isCurrent()) return false
+    if (response.workspaceAdminAccountId !== workspace) throw new Error('倍率返回的工作区已变化，请刷新页面')
+    isLoading.value = true
+    try {
+      const connections = await listScopedRealConnections({ workspaceAdminAccountId: workspace, groupRefs: response.items.map(rate => ({ siteId: rate.siteId, groupId: rate.groupId || '', groupName: rate.groupName })) }, controller.signal)
+      if (!isCurrent()) return false
+      revokeChangedPermissions(connections.items)
+      applyRates(response)
+      realConnectionsData.value = connections.items
+      connectionDataKnown.value = true
+      connectionDataError.value = ''
+    } catch (error) {
+      if (!isCurrent()) return false
+      applyRates(response)
+      connectionDataKnown.value = false
+      connectionDataError.value = `倍率已加载，但本页对接资料暂时无法读取：${displayCause(error)}。当前不会显示导入或解绑按钮，请点击刷新重试；本次没有执行账号操作。`
+      return false
+    }
+    if (options.focus) await consumeRouteFocus(response.focusFound)
+    return isCurrent()
+  } catch (error) {
+    if (isCurrent()) errorKey.value = displayCause(error)
     return false
+  } finally { if (isCurrent()) isLoading.value = false }
+}
+const sameConnectionIdentity = (before: RealConnection, after: RealConnection) => before.id === after.id && before.adminAccountId === after.adminAccountId && before.upstreamSiteId === after.upstreamSiteId && before.upstreamGroupId === after.upstreamGroupId && before.upstreamGroupName === after.upstreamGroupName && (before.adminPlatform || '') === (after.adminPlatform || '')
+const revokeChangedPermissions = (connections: RealConnection[]) => {
+  const current = new Map(connections.map(connection => [connection.id, connection]))
+  const changed = new Set(changedIds.value)
+  for (const id of new Set([...confirmedIds.value, ...skippedIds.value])) {
+    const latest = current.get(id)
+    if (!latest) continue
+    const frozen = checkIdentities.get(id)
+    if (frozen && sameConnectionIdentity(frozen, latest) && frozen.status === latest.status) continue
+    confirmedIds.value.delete(id)
+    skippedIds.value.delete(id)
+    changed.add(id)
+  }
+  if (changed.size !== changedIds.value.size) {
+    changedIds.value = changed
+    connectionCheckError.value = `${connectionCheckError.value ? connectionCheckError.value + ' ' : ''}账号的关联资料在检查后发生变化，旧结果没有确认最新资料；请点击刷新重新核对。`
   }
 }
-
-const checkThenLoadRates = async () => {
-  if (isCheckingConnections.value) return
+const runScopedCheck = async (mode: 'automatic' | 'manual', scope: Omit<ScopedCheckRequest, 'mode'>, before: RealConnection[], generation = pageGeneration) => {
+  if (generation !== pageGeneration || !pageIsMounted || isAnyDialogOpen.value) return
+  const workspace = scope.workspaceAdminAccountId
+  if (!workspace || workspace !== (currentAccount.value?.id ?? '')) return
+  const controller = new AbortController()
+  checkController?.abort()
+  checkController = controller
+  const isCurrent = () => pageIsMounted && generation === pageGeneration && workspace === (currentAccount.value?.id ?? '') && !controller.signal.aborted
+  lastCheckScope = scope
+  checkIdentities = new Map(before.map(connection => [connection.id, { ...connection }]))
+  confirmedIds.value = new Set()
+  skippedIds.value = new Set()
+  changedIds.value = new Set()
+  unconfirmedIds.value = new Set(before.filter(connection => applicableConnection(connection) && connectionMatchesScope(connection, scope)).map(connection => connection.id))
   isCheckingConnections.value = true
   connectionCheckError.value = ''
-  try {
-    let checkSucceeded = false
-    try {
-      await checkRealConnections()
-      checkSucceeded = true
-    } catch {
-      connectionCheckError.value = t('admin.groupRates.errors.connectionCheckFailed')
+  checkSummary.value = ''
+  let result: ScopedCheckResult | undefined
+  let failure = ''
+  try { result = await checkScopedRealConnections({ ...scope, mode }, controller.signal) }
+  catch (error) {
+    if (!isCurrent()) return
+    if (error instanceof ScopedCheckApiError) { result = error.result; failure = [displayCause(error), error.detail, error.next].filter(Boolean).join('；') }
+    else failure = `账号检查结果暂时无法取得：${displayCause(error)}；仍保留上次状态，请点击刷新重试，并检查Hub后端检查记录。`
+  }
+  if (!isCurrent()) return
+  if (result) {
+    unconfirmedIds.value = new Set(result.unconfirmedConnectionIds)
+    changedIds.value = new Set(result.changedConnectionIds)
+    skippedIds.value = new Set(result.skippedConnectionIds)
+  }
+  const reread = await loadLocalPage({ generation })
+  if (!isCurrent()) return
+  if (reread && result) {
+    const previous = new Map(before.map(connection => [connection.id, connection]))
+    const current = new Map(realConnectionsData.value.map(connection => [connection.id, connection]))
+    const confirmed = new Set<string>()
+    let confirmedCount = result.confirmedConnectionIds.length
+    const changed = new Set([...result.changedConnectionIds, ...changedIds.value])
+    for (const id of result.confirmedConnectionIds) {
+      const original = previous.get(id), latest = current.get(id)
+      // Off-page backend confirmations count for this batch, but cannot
+      // authorize a row that has no matching public before/after identity.
+      if (!latest) continue
+      if (original && sameConnectionIdentity(original, latest) && latest.status === result.confirmedStatuses[id]) { confirmed.add(id); checkIdentities.set(id, { ...original, status: latest.status }) }
+      else { changed.add(id); confirmedCount-- }
     }
-    const [, connectionsLoaded] = await Promise.all([loadRates(), loadRealConnections(checkSucceeded)])
-    if (checkSucceeded && !connectionsLoaded) {
-      connectionCheckError.value = t('admin.groupRates.errors.connectionStatusLoadFailed')
-    }
-  } finally {
-    isCheckingConnections.value = false
+    const known = new Set([...result.confirmedConnectionIds, ...result.unconfirmedConnectionIds, ...result.changedConnectionIds, ...result.skippedConnectionIds])
+    const fresh = realConnectionsData.value.filter(connection => applicableConnection(connection) && connectionMatchesScope(connection, scope) && !known.has(connection.id))
+    unconfirmedIds.value = new Set([...result.unconfirmedConnectionIds, ...fresh.map(connection => connection.id)])
+    confirmedIds.value = confirmed
+    changedIds.value = changed
+    checkSummary.value = `本次确认${confirmedCount}条账号对接记录，${unconfirmedIds.value.size + changed.size}条仍显示上次状态。标签数量按本地保存结果统计，不代表所有账号刚刚检查过；未确认的账号可点击刷新重试。` + (skippedIds.value.size ? ` ${skippedIds.value.size}条记录不适用本次检查，保持原来的操作方式。` : '') + (fresh.length ? ` 本页有${fresh.length}条新出现的对接记录尚未检查，请点击刷新核对。` : '') + (changed.size ? ` ${changed.size}条关联资料在检查期间发生变化，本次结果没有覆盖它；请刷新查看最新记录。` : '')
+  } else if (!reread) {
+    if (result) unconfirmedIds.value = new Set([...unconfirmedIds.value, ...result.confirmedConnectionIds])
+    failure = `${failure ? failure + '；' : ''}账号检查已完成，但最新对接状态暂时无法读取：${connectionDataError.value || (errorKey.value ? displayCause(new Error(errorKey.value)) : '原因无法确认，请查看Hub后端读取记录')}；请刷新，本次未执行导入或解绑。`
+  } else checkSummary.value = `本次确认0条账号对接记录，${unconfirmedIds.value.size}条仍显示上次状态。标签数量按本地保存结果统计，不代表所有账号刚刚检查过；未确认的账号可点击刷新重试。`
+  connectionCheckError.value = [failure, ...(result?.issues.map(issue => `${issue.detail}。${issue.next}`) ?? [])].filter(Boolean).join(' ')
+  isCheckingConnections.value = false
+}
+const enterPage = async () => {
+  const generation = invalidatePage(true)
+  // A new scope cannot inherit old rows or their connection-read permission.
+  connectionDataKnown.value = false
+  connectionDataError.value = ''
+  realConnectionsData.value = []
+  rates.value = []
+  page.value = 1
+  if (!currentAccount.value?.id) { showMissingWorkspace(); return }
+  void loadUpstreamSiteOptions()
+  if (await loadLocalPage({ generation, focus: Boolean(pendingFocusGroup.value || pendingFocusGroupId.value) })) {
+    const scope = frozenScope()
+    const before = realConnectionsData.value.map(connection => ({ ...connection }))
+    void runScopedCheck('automatic', scope, before, generation)
   }
 }
-
+const checkThenLoadRates = async () => {
+  if (isCheckingConnections.value || isAnyDialogOpen.value) return
+  if (!currentAccount.value?.id) { showMissingWorkspace(); return }
+  const scope = frozenScope()
+  const before = realConnectionsData.value.map(connection => ({ ...connection }))
+  const generation = invalidatePage(true)
+  // Freeze before rereading: reordered/shrunk pages must not replace this batch.
+  lastCheckScope = scope
+  isCheckingConnections.value = true
+  void loadUpstreamSiteOptions()
+  const loaded = await loadLocalPage({ generation })
+  if (generation !== pageGeneration || !pageIsMounted) return
+  isCheckingConnections.value = false
+  if (loaded) await runScopedCheck('manual', scope, before, generation)
+}
 
 const filteredRates = computed(() => {
   if (serverSupportsStatusFilters.value) return rates.value
@@ -420,10 +602,20 @@ const filteredRates = computed(() => {
 const canGoPrevious = computed(() => page.value > 1 && !isLoading.value)
 const canGoNext = computed(() => page.value < totalPages.value && !isLoading.value)
 
+const applyPendingSearch = () => {
+  if (pendingSearchValue === null || isAnyDialogOpen.value) return
+  search.value = pendingSearchValue
+  pendingSearchValue = null
+  page.value = 1
+  void loadLocalPage()
+}
 watch(searchQuery, (value) => {
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
+  pendingSearchValue = value
+  if (isAnyDialogOpen.value) return
   searchDebounceTimer = setTimeout(() => {
-    void setSearch(value)
+    searchDebounceTimer = null
+    applyPendingSearch()
   }, 300)
 })
 const hasAnyRateData = computed(() => Object.values(statusCounts.value).some(count => count > 0))
@@ -437,6 +629,7 @@ const hasActiveRateFilters = computed(() => Boolean(
 
 watch(isAnyDialogOpen, async (open) => {
   if (open) {
+    if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = null }
     previouslyFocusedElement = document.activeElement as HTMLElement | null
     previousBodyOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
@@ -447,17 +640,25 @@ watch(isAnyDialogOpen, async (open) => {
   document.body.style.overflow = previousBodyOverflow
   previouslyFocusedElement?.focus()
   previouslyFocusedElement = null
+  if (deferredRouteChange) {
+    deferredRouteChange = false
+    if (pendingSearchValue !== null) { search.value = pendingSearchValue; pendingSearchValue = null }
+    siteFilter.value = queryValue(route.query.siteId)
+    pendingFocusGroup.value = queryValue(route.query.focusGroup)
+    pendingFocusGroupId.value = queryValue(route.query.focusGroupId)
+    void enterPage()
+  } else applyPendingSearch()
 })
 
 onMounted(async () => {
   document.addEventListener('keydown', handleDialogKeydown)
-  await checkThenLoadRates()
-  await loadUpstreamSiteOptions()
-  await consumeRouteFocus()
+  await enterPage()
 })
 
 onBeforeUnmount(() => {
   pageIsMounted = false
+  invalidatePage(true)
+  optionsController?.abort()
   connectorGeneration++
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
   document.removeEventListener('keydown', handleDialogKeydown)
@@ -505,7 +706,9 @@ const canSubmitConnect = computed(() => {
 const handleTypeChange = async (event: Event) => {
   const target = event.target as HTMLSelectElement
   clearRateHighlight()
-  await setTypeFilter(target.value)
+  typeFilter.value = target.value
+  page.value = 1
+  await loadLocalPage()
 }
 
 const formatMultiplier = (value: number | null): string => {
@@ -610,6 +813,7 @@ const closeHistory = () => {
 }
 
 const openTypeEditor = (rate: GroupRate) => {
+  invalidatePage()
   editingRate.value = rate
   editTypeValue.value = rate.type ?? ''
 }
@@ -620,6 +824,8 @@ const closeTypeEditor = () => {
 }
 
 const openConnector = async (rate: GroupRate) => {
+  if (connectionOperationBlocked(rate)) return
+  invalidatePage()
   connectorGeneration++
   connectOutcome.value = 'editing'
   connectSubmitLocked.value = false
@@ -737,7 +943,7 @@ const handleAdminGroupChange = (event: Event) => {
 
 const submitTypeEditor = async () => {
   if (!editingRate.value) return
-  await saveType(editingRate.value, editTypeValue.value.trim())
+  await saveType(editingRate.value, editTypeValue.value.trim(), async () => { clearCheckState(); await loadLocalPage() })
   closeTypeEditor()
 }
 
@@ -792,13 +998,19 @@ const managedResourceErrorMessage = (error: unknown, fallbackKey: string): strin
 
 const refreshAfterMutation = async (isCurrent: () => boolean = () => true, confirmRefresh = false): Promise<boolean> => {
   if (!isCurrent()) return false
+  const generation = invalidatePage()
   try {
-    const [, connectionsLoaded] = await Promise.all([loadRates(isCurrent), loadRealConnections(false, isCurrent), loadMySiteMappingData(true, isCurrent)])
+    clearCheckState()
+    const [connectionsLoaded] = await Promise.all([loadLocalPage({ generation, isCurrent }), loadMySiteMappingData(true, isCurrent)])
     if (!isCurrent()) return false
+    // Closing a dialog can resume a search or a new website. That active read
+    // owns the page; the deliberately replaced old read has no failure to report.
+    if (generation !== pageGeneration) return true
     if (confirmRefresh && (!connectionsLoaded || errorKey.value)) throw new Error('refresh')
     return true
   } catch {
     if (!isCurrent()) return false
+    if (generation !== pageGeneration) return true
     errorKey.value = 'admin.groupRates.errors.refreshFailed'
     return false
   }
@@ -807,30 +1019,56 @@ const refreshAfterMutation = async (isCurrent: () => boolean = () => true, confi
 const handlePlatformChange = async (event: Event) => {
   const target = event.target as HTMLSelectElement
   clearRateHighlight()
-  await setPlatformFilter(target.value)
+  platformFilter.value = target.value
+  page.value = 1
+  await loadLocalPage()
 }
 
 const handleSiteChange = async (event: Event) => {
+  if (isAnyDialogOpen.value) return
   const target = event.target as HTMLSelectElement
+  const previousSite = queryValue(route.query.siteId)
+  if (target.value === previousSite) return
   clearRateHighlight()
-  await setSiteFilter(target.value)
   const query = { ...route.query }
   if (target.value) query.siteId = target.value
   else delete query.siteId
   delete query.focusGroup
+  delete query.focusGroupId
   await router.replace({ query })
+}
+watch(() => routeScopeKey(), (key) => {
+  if (key === consumedFocusRoute) { consumedFocusRoute = ''; return }
+  if (isAnyDialogOpen.value) { deferredRouteChange = true; return }
+  siteFilter.value = queryValue(route.query.siteId)
+  pendingFocusGroup.value = queryValue(route.query.focusGroup)
+  pendingFocusGroupId.value = queryValue(route.query.focusGroupId)
+  focusedRateKey.value = ''
+  focusError.value = ''
+  if (pageIsMounted) void enterPage()
+})
+const goToPage = async (target: number) => {
+  const next = Math.min(Math.max(target, 1), totalPages.value || 1)
+  if (next === page.value || isAnyDialogOpen.value) return
+  page.value = next
+  clearRateHighlight()
+  await loadLocalPage()
 }
 
 const handleStatusChange = async (status: 'all' | 'mapped' | 'unmapped' | 'deleted') => {
   if (status === statusFilter.value || isLoading.value) return
   clearRateHighlight()
-  await setStatusFilter(status)
+  statusFilter.value = status
+  page.value = 1
+  await loadLocalPage()
 }
 
 const handleSortChange = async (event: Event) => {
   const target = event.target as HTMLSelectElement
   clearRateHighlight()
-  await setSortMode(target.value as 'multiplierAsc' | 'multiplierDesc' | 'siteNameAsc' | 'groupNameAsc')
+  sortMode.value = target.value as 'multiplierAsc' | 'multiplierDesc' | 'siteNameAsc' | 'groupNameAsc'
+  page.value = 1
+  await loadLocalPage()
 }
 
 const submitRealConnect = async () => {
@@ -977,14 +1215,22 @@ const submitBind = async () => {
 }
 
 const openDisconnect = (rate: GroupRate) => {
-  disconnectingRate.value = rate
+  if (connectionOperationBlocked(rate)) return
+  invalidatePage()
+  const selected = realConnectionForRate(rate)
+  if (!selected) return
+  disconnectConnection.value = { ...selected }
+  disconnectWorkspace = currentAccount.value?.id ?? ''
+  disconnectingRate.value = { ...rate }
   disconnectMode.value = 'unlink'
-  disconnectRemovePricing.value = realConnectionForRate(rate)?.pricingMappingEnabled ?? Boolean(rate.pricingMapped)
+  disconnectRemovePricing.value = selected.pricingMappingEnabled ?? Boolean(rate.pricingMapped)
   disconnectError.value = ''
 }
 
 const closeDisconnect = () => {
   disconnectingRate.value = null
+  disconnectConnection.value = null
+  disconnectWorkspace = ''
   disconnectMode.value = 'unlink'
   disconnectRemovePricing.value = true
   disconnectError.value = ''
@@ -992,8 +1238,9 @@ const closeDisconnect = () => {
 
 const submitDisconnect = async () => {
   if (!disconnectingRate.value) return
-  const conn = realConnectionForRate(disconnectingRate.value)
+  const conn = disconnectConnection.value
   if (!conn) return
+  if (disconnectWorkspace !== (currentAccount.value?.id ?? '')) { disconnectError.value = '工作区已变化，本次没有执行解绑；请关闭窗口后在当前工作区重新打开对应记录。'; return }
 
   isDisconnecting.value = true
   disconnectError.value = ''
@@ -1083,6 +1330,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         <div class="relative w-full sm:w-56 sm:shrink-0">
           <select
             v-model="siteFilter"
+            :disabled="isAnyDialogOpen"
             :aria-label="t('admin.groupRates.filters.siteLabel')"
             class="h-10 w-full appearance-none rounded-lg border border-border/50 bg-surface px-3 pr-8 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
             @change="handleSiteChange"
@@ -1138,7 +1386,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           <Megaphone class="h-4 w-4" />
           {{ t('admin.groupRates.actions.createCampaign') }}
         </Button>
-        <Button class="h-10 gap-2 shadow-sm" :disabled="isLoading || isCheckingConnections" @click="checkThenLoadRates">
+        <Button class="h-10 gap-2 shadow-sm" :disabled="isLoading || isCheckingConnections || isAnyDialogOpen" @click="checkThenLoadRates">
           <Loader2 v-if="isLoading || isCheckingConnections" class="h-4 w-4 animate-spin" />
           <RefreshCw v-else class="h-4 w-4" />
           {{ t('admin.groupRates.actions.refresh') }}
@@ -1146,9 +1394,20 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       </div>
     </div>
 
+    <div class="shrink-0 space-y-1 text-sm text-muted-foreground">
+      <p>这里显示已保存的上游倍率，更新时间见每一行。刷新会检查对应的主站账号，不会创建、删除或修改主站账号；要取得新的上游倍率，请到上游管理同步对应网站。</p>
+      <p v-if="siteFilter">当前查看{{ siteOptions.find(site => site.id === siteFilter)?.name || siteFilter }}。进入或切换网站时只检查这个网站的关联账号；搜索和翻页不会检查其他网站。</p>
+      <p v-else>进入时只检查首批30个分组关联的账号；翻页和筛选显示已保存资料，点击刷新可检查当前页。</p>
+      <p v-if="isCheckingConnections">正在检查{{ siteFilter ? (siteOptions.find(site => site.id === siteFilter)?.name || siteFilter) : '当前页' }}的关联账号，倍率可以先查看；账号检查中的操作暂时不可用。</p>
+      <p v-else-if="checkSummary">{{ checkSummary }}</p>
+    </div>
+    <div v-for="notice in [connectionDataError, siteOptionsError, focusError].filter(Boolean)" :key="notice" role="alert" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
+      <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" /><span>{{ notice }}</span>
+    </div>
+
     <div v-if="errorKey" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
       <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
-      <span>{{ t(errorKey) }}</span>
+      <span>{{ te(errorKey) ? t(errorKey) : errorKey }}</span>
     </div>
 
     <div v-if="connectionCheckError" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
@@ -1187,7 +1446,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           <tbody class="divide-y divide-border/50">
             <tr
               v-for="rate in filteredRates"
-              :key="`${rate.siteId}-${rate.groupName}-${rate.platform ?? 'all'}`"
+              :key="`${rateFocusKey(rate)}\u0000${rate.platform ?? 'all'}`"
               class="transition-colors hover:bg-surface/30"
               :class="focusedRateKey === rateFocusKey(rate) ? 'bg-primary/[0.10] outline outline-1 -outline-offset-1 outline-primary/50' : ''"
               @click="clearRateHighlight"
@@ -1199,15 +1458,18 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 <div class="flex items-center gap-1.5">
                   <span class="font-medium text-foreground">{{ rate.groupName }}</span>
                   <span v-if="rate.deleted" class="inline-flex rounded-md border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-500">{{ t('admin.groupRates.status.deleted') }}</span>
+                  <span v-else-if="!connectionDataKnown" class="text-xs text-muted-foreground">对接状态暂时未知，请刷新读取资料</span>
                   <span v-else-if="isMainAccountMissing(rate)" class="inline-flex rounded-md border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-600 dark:text-red-300">{{ t('admin.groupRates.status.mainAccountMissing') }}</span>
                   <span v-else-if="isRealConnected(rate)" class="inline-flex rounded-md border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-300">{{ t('admin.groupRates.status.mapped') }}</span>
                   <span v-if="!rate.deleted && isPricingMapped(rate)" class="inline-flex rounded-md border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300">{{ t('admin.groupRates.status.pricingMapped') }}</span>
                 </div>
               </td>
               <td class="px-4 py-2.5">
-                <span :class="['inline-flex rounded-md border px-2 py-1 text-xs font-semibold uppercase tracking-wider', typeClasses(rate.type)]">
+                <button type="button" :class="['inline-flex rounded-md border px-2 py-1 text-xs font-semibold uppercase tracking-wider', typeClasses(rate.type)]"
+                  :aria-label="`修改${rate.groupName}的分类，仅保存Hub资料，不修改主站`"
+                  title="点击修改分组分类，仅保存Hub资料，不修改主站" @click="openTypeEditor(rate)">
                   {{ typeLabel(rate.type) }}
-                </span>
+                </button>
               </td>
               <td class="px-4 py-2.5">
                 <span :class="['inline-flex rounded-md border px-2 py-1 text-xs font-semibold uppercase tracking-wider', platformClasses(rate.platform)]">
@@ -1239,13 +1501,15 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               </td>
               <td class="px-4 py-2.5 text-muted-foreground tabular-nums">{{ formatDateTime(rate.updatedAt) }}</td>
               <td class="px-4 py-2.5 text-right">
-                <div v-if="!rate.deleted" class="flex justify-end gap-2">
+                <div v-if="!rate.deleted && connectionDataKnown" class="flex justify-end gap-2">
+                  <span v-if="connectionOperationBlocked(rate)" class="max-w-56 text-xs text-muted-foreground">{{ operationBlockedReason }}</span>
                   <Button
                     v-if="isMainAccountMissing(rate)"
                     variant="destructive"
                     size="sm"
                     class="gap-1.5"
-                    :disabled="isActionLoading || isDisconnecting"
+                    :disabled="isActionLoading || isDisconnecting || connectionOperationBlocked(rate)"
+                    :title="connectionOperationBlocked(rate) ? operationBlockedReason : undefined"
                     @click="openDisconnect(rate)"
                   >
                     <X class="h-3.5 w-3.5" />
@@ -1256,7 +1520,8 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                     variant="destructive"
                     size="sm"
                     class="gap-1.5"
-                    :disabled="isActionLoading || isDisconnecting"
+                    :disabled="isActionLoading || isDisconnecting || connectionOperationBlocked(rate)"
+                    :title="connectionOperationBlocked(rate) ? operationBlockedReason : undefined"
                     @click="openDisconnect(rate)"
                   >
                     <X class="h-3.5 w-3.5" />
@@ -1267,7 +1532,8 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                     variant="secondary"
                     size="sm"
                     class="gap-1.5 text-primary hover:text-primary"
-                    :disabled="isActionLoading"
+                    :disabled="isActionLoading || connectionOperationBlocked(rate)"
+                    :title="connectionOperationBlocked(rate) ? operationBlockedReason : undefined"
                     @click="openConnector(rate)"
                   >
                     <Link2 class="h-3.5 w-3.5" />

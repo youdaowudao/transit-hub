@@ -163,14 +163,16 @@ func (s *Service) List(ctx context.Context, userID string, adminAccountID string
 		})
 	}
 	return ListResult{
-		Items:        rows,
-		Total:        records.Total,
-		Page:         query.Page,
-		PageSize:     query.PageSize,
-		TotalPages:   totalPages(records.Total, query.PageSize),
-		Types:        records.Types,
-		Platforms:    records.Platforms,
-		StatusCounts: records.StatusCounts,
+		Items:                   rows,
+		Total:                   records.Total,
+		Page:                    records.Page,
+		WorkspaceAdminAccountID: strings.TrimSpace(adminAccountID),
+		FocusFound:              records.FocusFound,
+		PageSize:                query.PageSize,
+		TotalPages:              totalPages(records.Total, query.PageSize),
+		Types:                   records.Types,
+		Platforms:               records.Platforms,
+		StatusCounts:            records.StatusCounts,
 	}, nil
 }
 
@@ -219,6 +221,9 @@ func (s *Service) History(ctx context.Context, userID string, adminAccountID str
 }
 
 func normalizeListQuery(query ListQuery) ListQuery {
+	query.SiteID = strings.TrimSpace(query.SiteID)
+	query.FocusGroupID = strings.TrimSpace(query.FocusGroupID)
+	query.FocusGroup = strings.TrimSpace(query.FocusGroup)
 	query.Search = strings.TrimSpace(query.Search)
 	query.Type = strings.TrimSpace(query.Type)
 	query.Platform = strings.TrimSpace(query.Platform)

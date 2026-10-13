@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -137,8 +138,20 @@ func TestHomeCostReviewCollectorPersistenceFailureStaysIncomplete(t *testing.T) 
 				t.Error("failed cache write changed prior credentials")
 			}
 			snapshot, err := f.cache.GetKeyUsageSnapshot(t.Context(), f.site.ID)
-			if err != nil || snapshot != nil {
-				t.Error("session persistence failure became a complete collection")
+			if err != nil || snapshot == nil {
+				t.Fatal("session persistence failure lost its failure-only record")
+			}
+			if snapshot.Complete || snapshot.Timezone != "" || len(snapshot.Items) != 0 || snapshot.CollectedRawCost != nil {
+				t.Error("session persistence failure published costs or a complete collection")
+			}
+			parts := []string{"本站资料已保存", "当前运行数据未更新", "fixture cache persistence failure", "本轮新费用未发布"}
+			if mode == "repository" {
+				parts = []string{"保存本站资料失败", "本站资料未保存", "fixture durable persistence failure", "本轮未发布新费用"}
+			}
+			for _, part := range parts {
+				if !strings.Contains(snapshot.FailureReason, part) {
+					t.Errorf("failure-only record lost the actual persistence result %q: %s", part, snapshot.FailureReason)
+				}
 			}
 			if f.statsReads.Load() != 0 {
 				t.Error("collection continued after session persistence failure")
@@ -173,8 +186,20 @@ func TestHomeCostReviewCollectorAttemptsRepositoryAfterCacheFailure(t *testing.T
 				t.Error("failed cache write changed original local value")
 			}
 			snapshot, err := f.cache.GetKeyUsageSnapshot(t.Context(), f.site.ID)
-			if err != nil || snapshot != nil {
-				t.Error("partial session preservation made the collection complete")
+			if err != nil || snapshot == nil {
+				t.Fatal("partial session preservation lost its failure-only record")
+			}
+			if snapshot.Complete || snapshot.Timezone != "" || len(snapshot.Items) != 0 || snapshot.CollectedRawCost != nil {
+				t.Error("partial session preservation published costs or a complete collection")
+			}
+			cause := "fixture cache persistence failure"
+			if timeout {
+				cause = "context deadline exceeded"
+			}
+			for _, part := range []string{"本站资料已保存", "当前运行数据未更新", cause, "本轮新费用未发布"} {
+				if !strings.Contains(snapshot.FailureReason, part) {
+					t.Errorf("failure-only record lost the actual persistence result %q: %s", part, snapshot.FailureReason)
+				}
 			}
 			if f.statsReads.Load() != 0 {
 				t.Error("collection continued after cache persistence failed")

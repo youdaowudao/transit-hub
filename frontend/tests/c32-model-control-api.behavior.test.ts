@@ -19,12 +19,12 @@ describe('C3.2 new settings and optional fields have strict response parsing', (
  it('accepts absent flags from old items, while validating every item-returning endpoint', async () => {
   const old = managed(), bad = { ...managed(), auto: { state: 'waiting', operation: 'close', nextAt: null, reasonKey: '', changedAt: 1 } }
   response = { targetId, candidates: [], items: [old] }; await expect(getModelControlTarget(targetId)).resolves.toHaveProperty('items')
-  for (const load of [() => getModelControlTarget(targetId), () => listModelControlItems('all', '', 1), () => verifyModelControl([targetId])]) { response = { items: [bad], candidates: [], targetId, errors: [], page: 1, totalPages: 1, counts: {} }; await expect(load()).rejects.toThrow('admin.connectionHealth.errors.request') }
-  response = bad; await expect(addModelControlManaged(targetId, 'M')).rejects.toThrow('admin.connectionHealth.errors.request')
-  response = { item: bad }; await expect(previewModelControl(targetId, 'M', 'close', old.basis)).rejects.toThrow('admin.connectionHealth.errors.request'); await expect(executeModelControl(targetId, 'M', 'close', old.basis, 'fp', false)).rejects.toThrow('admin.connectionHealth.errors.request')
+  for (const load of [() => getModelControlTarget(targetId), () => listModelControlItems('all', '', 1), () => verifyModelControl([targetId])]) { response = { items: [bad], candidates: [], targetId, errors: [], page: 1, totalPages: 1, counts: {} }; await expect(load()).rejects.toThrow('对象不匹配') }
+  response = bad; await expect(addModelControlManaged(targetId, 'M')).rejects.toThrow('对象不匹配')
+  response = { item: bad }; await expect(previewModelControl(targetId, 'M', 'close', old.basis)).rejects.toThrow('对象不匹配'); await expect(executeModelControl(targetId, 'M', 'close', old.basis, 'fp', false)).rejects.toThrow('对象不匹配')
  })
  it.each([{ state: 'unknown' }, { operation: 'add' }, { nextAt: 1 }, { reasonKey: false }, { changedAt: null }])('rejects malformed auto projection %j', async patch => {
-  response = { items: [{ ...managed(), auto: { state: 'retry', operation: 'restore', nextAt: now, reasonKey: '', changedAt: now, ...patch } }], targetId, candidates: [] }; await expect(getModelControlTarget(targetId)).rejects.toThrow('admin.connectionHealth.errors.request')
+  response = { items: [{ ...managed(), auto: { state: 'retry', operation: 'restore', nextAt: now, reasonKey: '', changedAt: now, ...patch } }], targetId, candidates: [] }; await expect(getModelControlTarget(targetId)).rejects.toThrow('对象不匹配')
  })
  it('accepts valid optional admin markers and rejects malformed booleans or source rows', async () => {
   response = c32Groups(); await expect(getConnectionHealthAdminGroups()).resolves.toHaveLength(1)

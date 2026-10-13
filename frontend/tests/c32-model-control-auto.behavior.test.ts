@@ -48,7 +48,7 @@ describe('C3.2 header and auto settings', () => {
   expect(form.findAll('input[type="checkbox"]')).toHaveLength(3); expect(form.text()).not.toContain('保存后，系统会在没有人确认的情况下改主站白名单。')
   await form.get('[aria-label="健康配合"]').setValue(true); expect(form.text()).toContain('已打开的功能会在后台运行，不需要你点确认。'); expect(form.text()).not.toContain('保存后，系统会在没有人确认')
   await form.get('[aria-label="自动关闭"]').setValue(true); expect(form.text()).toContain('保存后，系统会在没有人确认的情况下改主站白名单。'); expect(form.text()).not.toContain('每测一轮可能开关一次')
-  await form.get('[aria-label="自动恢复"]').setValue(true); expect(form.text()).toContain('正确率在可用线附近的模型，每测一轮可能开关一次。可以提高‘每轮最少已判答案’来减少。'); expect(api.saveModelControlAutoSettings).not.toHaveBeenCalled()
+  await form.get('[aria-label="自动恢复"]').setValue(true); expect(form.text()).toContain('正确率在可用线附近的模型，每测一轮可能开关一次。可以提高‘每题最少已判回答（3—10）’来减少。'); expect(form.text()).not.toContain('每轮最少已判答案'); expect(api.saveModelControlAutoSettings).not.toHaveBeenCalled()
   await form.trigger('submit'); await flushPromises(); expect(api.saveModelControlAutoSettings.mock.calls[0]!.slice(0, 2)).toEqual([defaults({ autoCloseEnabled: true, autoRestoreEnabled: true, healthCoordinationEnabled: true }), 0]); expect(w.find('form').exists()).toBe(false)
  })
  it.each([

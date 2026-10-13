@@ -20,7 +20,7 @@ export const releaseModelControlBusy = (targetId: string, owner: symbol) => {
   next.delete(targetId)
   modelControlBusyTargets.value = next
 }
-export const modelControlReason = (key?: string): string => key ? (te(key) ? t(key) : te(`admin.connectionHealth.modelControl.reasons.${key}`) ? t(`admin.connectionHealth.modelControl.reasons.${key}`) : t('admin.connectionHealth.errors.request')) : ''
+export const modelControlReason = (key?: string): string => key ? (te(key) ? t(key) : te(`admin.connectionHealth.modelControl.reasons.${key}`) ? t(`admin.connectionHealth.modelControl.reasons.${key}`) : key.startsWith('admin.') || /^[A-Za-z0-9_.]+$/.test(key) ? modelControlText('reasonUnknown') : key) : ''
 export const modelControlDecision = (decision: ModelControlDecision): string => t(`admin.connectionHealth.modelControl.decisions.${decision}`)
 export const modelControlText = (key: string, params?: Record<string, string | number>): string => t(`admin.connectionHealth.modelControl.text.${key}`, params)
 export const modelControlState = (item: ModelControlItem): string => item.control.conflictReason ? modelControlText('manualRequired') : item.control.pending ? modelControlPendingState(item.control.pending.state) : t(`admin.connectionHealth.modelControl.states.${item.control.observation.state}`)
@@ -122,10 +122,13 @@ export const modelControlCardView = (item: ModelControlItem, opts: { issue?: Mod
     else if (state === 'not_provided') { label = modelControlText(decision === 'usable' ? 'missingUsableLabel' : 'missingBadLabel'); if (decision !== 'usable') tone = 'neutral' }
   } else if (state === 'not_provided') label = modelControlText('missingNoActionLabel')
   let primaryAction: 'close' | 'restore' | 'add' | null = null
-  if (state !== 'account_missing' && decision !== 'testing') {
-    if (decision === 'close_recommended' && ['serving', 'partially_closed'].includes(state)) primaryAction = 'close'
-    else if (!item.control.conflictReason && closed) primaryAction = 'restore'
-    else if (!item.control.conflictReason && state === 'not_provided' && decision === 'usable') primaryAction = 'add'
+  let secondaryAction: 'restore' | null = null
+  if (state !== 'account_missing' && decision !== 'testing' && !observationUnknown && !uncertain) {
+    if (['serving', 'partially_closed'].includes(state)) primaryAction = 'close'
+    if (!item.control.conflictReason && closed && (['closed', 'partially_closed'].includes(state) || isolationIsOpen)) {
+      if (state === 'partially_closed') secondaryAction = 'restore'
+      else primaryAction = 'restore'
+    } else if (!item.control.conflictReason && state === 'not_provided' && !closed) primaryAction = 'add'
   }
   const missingBad = state === 'not_provided' && decision === 'close_recommended' && !closed && !item.control.conflictReason
   let sentence = modelControlText(state === 'serving' || state === 'last_model' ? 'siteOpen' : state === 'closed' ? 'siteClosed' : state === 'partially_closed' ? 'sitePartial' : state === 'not_provided' ? missingBad ? 'siteNotProvidedBad' : 'siteNotProvided' : state === 'account_missing' ? 'siteAccountMissing' : state === 'unverified' ? 'siteUnverified' : isolationIsOpen ? 'siteNotIsolatable' : 'siteUnknown', { reason: modelControlReason(item.control.observation.reasonKey) })
@@ -135,7 +138,7 @@ export const modelControlCardView = (item: ModelControlItem, opts: { issue?: Mod
   }
   if (uncertain) sentence = modelControlText('unknownResult')
   else if (!opts.issue && item.control.accountPending) sentence = modelControlText('accountPending')
-  return { label, tone, stateSentence: sentence, primaryAction, showReread: Boolean(opts.issue || state === 'unverified' || item.control.accountPending || item.control.pending || uncertain) }
+  return { label, tone, stateSentence: sentence, primaryAction, secondaryAction, showReread: Boolean(opts.issue || state === 'unverified' || item.control.accountPending || item.control.pending || uncertain) }
 }
 
 export const modelControlEventLines = (event: ModelControlEvent): { sentence: string; entries: string[]; more: number } => {

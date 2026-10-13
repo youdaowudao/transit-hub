@@ -27,6 +27,17 @@ export const questionAnswerErrorMessageKey = (errorType: string, te: (key: strin
   return errorType && te(key) ? key : `${prefix}.unknown`
 }
 
+// Match Go strings.TrimSpace: normalize CRLF only, then remove Unicode
+// White_Space at the two ends. Inner whitespace and punctuation remain exact.
+export const questionAnswerDuplicateQuestionNames = (questions: Pick<TestQuestion, 'id' | 'name' | 'body'>[]): string[] => {
+  const bodies = new Map<string, string[]>()
+  for (const question of questions) {
+    const body = question.body.replace(/\r\n/g, '\n').replace(/^[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g, '')
+    bodies.set(body, [...(bodies.get(body) ?? []), question.name])
+  }
+  return [...bodies.values()].filter(names => names.length > 1).flat()
+}
+
 export interface QuestionAnswerResolvedSelection {
   modelIds: string[]
   questionIds: string[]

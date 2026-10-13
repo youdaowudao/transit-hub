@@ -21,7 +21,7 @@ vi.mock('@/modules/admin/api/connectionHealth', async original => ({ ...await or
 const targetId = 'sub2api:ws1:a', now = '2026-10-09T12:00:00Z'
 const errorKey = (suffix: string) => `admin.connectionHealth.errors.modelControl${suffix}`
 const rule = (patch: Partial<ModelControlRule> = {}): ModelControlRule => ({ modelName: 'A', minAccuracyPercent: 50, minJudgedAnswers: 3, includeManual: true, includeScheduled: true, version: 1, ...patch })
-const item = (patch: Partial<ModelControlItem> = {}): ModelControlItem => ({ targetId, accountName: '隔离账号', modelName: 'A', version: 1, attention: true, rule: rule(), round: { batchId: 'batch-a', source: 'manual', scheduleName: null, createdAt: now, completedAt: now, running: false, correct: 1, incorrect: 2, unreviewed: 0, failed: 0, cancelled: 0, accuracyPercent: 100 / 3 }, previousRound: null, decision: 'close_recommended', decisionReason: '', basis: { batchId: 'batch-a', ruleVersion: 1, decision: 'close_recommended', businessDay: '2026-10-09' }, control: { closedEntries: {}, closedAt: null, closedAccuracyPercent: null, pending: null, unconfirmedClose: null, accountPending: null, conflictReason: '', observation: { state: 'serving', reasonKey: '', sources: [], accountStatus: 'active', accountSchedulable: true, checkedAt: now }, lastAttempt: null }, coverage: { schedules: [] }, health: { recentlyProbed: false, state: null }, ...patch })
+const item = (patch: Partial<ModelControlItem> = {}): ModelControlItem => ({ targetId, accountName: '隔离账号', modelName: 'A', version: 1, attention: true, rule: rule(), round: { questions: [{ questionId: 'q', questionName: '题', correct: 1, incorrect: 2, unreviewed: 0, failed: 0, cancelled: 0, accuracyPercent: 100 / 3 }], duplicateQuestionIds: [], batchId: 'batch-a', source: 'manual', scheduleName: null, createdAt: now, completedAt: now, running: false, correct: 1, incorrect: 2, unreviewed: 0, failed: 0, cancelled: 0, accuracyPercent: 100 / 3 }, previousRound: null, decision: 'close_recommended', decisionReason: '', basis: { batchId: 'batch-a', ruleVersion: 1, decision: 'close_recommended', businessDay: '2026-10-09' }, control: { closedEntries: {}, closedAt: null, closedAccuracyPercent: null, pending: null, unconfirmedClose: null, accountPending: null, conflictReason: '', observation: { state: 'serving', reasonKey: '', sources: [], accountStatus: 'active', accountSchedulable: true, checkedAt: now }, lastAttempt: null }, coverage: { schedules: [] }, health: { recentlyProbed: false, state: null }, ...patch })
 const closed = (): ModelControlItem => { const value = item(); value.control.closedEntries = { a: 'A', alias: 'A' }; value.control.closedAt = now; value.control.observation.state = 'closed'; return value }
 const plan = (value = item(), patch: Partial<ModelControlPreview> = {}): ModelControlPreview => ({ item: value, entries: [{ key: 'a', value: 'A', state: 'to_close' }, { key: 'alias', value: 'A', state: 'to_close' }], groups: [{ groupId: 'g1', groupName: '隔离分组', key: 'a', count: 1, ok: true }], blockReasonKey: '', requestHealth: { checked: false, allowed: null, reasonKey: '' }, accountStatus: 'active', accountSchedulable: true, planFingerprint: 'fingerprint-1', ...patch })
 const summary = (closedCount: number, patch: Partial<QuestionAnswerRecentSummaryItem> = {}): QuestionAnswerRecentSummaryItem => ({ targetId, recentQuestionAnswer: null, activeNewerBatch: false, modelControl: { open: 0, closed: closedCount, attention: 1, models: [] }, ...patch })
@@ -55,12 +55,12 @@ describe('C3 shared row displays decisions and preserves protected actions', () 
     if (decision === 'testing') { value.control.closedEntries = { alias: 'A' }; value.control.observation.state = 'partially_closed'; value.previousRound = { ...value.round!, batchId: 'previous' } }
     const wrapper = row(value); expect(wrapper.text()).toContain(label)
     if (decision === 'testing') { expect(hasButton(wrapper, '关闭此模型')).toBe(false); expect(hasButton(wrapper, '开放此模型')).toBe(false); expect(wrapper.text()).not.toContain('上一轮参考') }
-    else expect(hasButton(wrapper, '关闭此模型')).toBe(decision === 'close_recommended')
+    else expect(hasButton(wrapper, '关闭此模型')).toBe(true)
     expect(api.previewModelControl).not.toHaveBeenCalled()
   })
-  it('shows one model action and redirects last-model scheduling to the account row', async () => {
+  it('shows both partial model actions and redirects last-model scheduling to the account row', async () => {
     const shut = row(closed()); expect(hasButton(shut, '关闭此模型')).toBe(false); expect(hasButton(shut, '开放此模型')).toBe(true)
-    const partial = closed(); partial.control.observation.state = 'partially_closed'; const half = row(partial); expect(hasButton(half, '关闭此模型')).toBe(true); expect(hasButton(half, '开放此模型')).toBe(false)
+    const partial = closed(); partial.control.observation.state = 'partially_closed'; const half = row(partial); expect(hasButton(half, '关闭剩余条目')).toBe(true); expect(hasButton(half, '加回已关闭条目')).toBe(true)
     const last = item(); last.control.observation.state = 'last_model'; const only = row(last); expect(hasButton(only, '关闭整个账号的调度')).toBe(false); expect(hasButton(only, '关闭此模型')).toBe(false); expect(hasButton(only, '开放此模型')).toBe(false); expect(only.text()).toContain('请在账号行点“关闭主站调度”')
     last.control.observation.accountSchedulable = false; last.decision = 'usable'; const stopped = row(last); expect(stopped.text()).toContain('可以在账号行点“恢复主站调度”'); expect(hasButton(stopped, '关闭整个账号的调度')).toBe(false)
     last.control.observation.accountSchedulable = null; const unknown = row(last); expect(hasButton(unknown, '关闭整个账号的调度')).toBe(false); expect(api.executeModelControl).not.toHaveBeenCalled()
@@ -105,7 +105,7 @@ describe('C3 shared row displays decisions and preserves protected actions', () 
     const wrapper = row(value); await button(wrapper, '开放此模型').trigger('click'); await flushPromises(); expect(button(wrapper, '确认').attributes('disabled')).toBeDefined(); await wrapper.get('[data-testid="model-control-preview"] input[type="checkbox"]').setValue(true); await button(wrapper, '确认').trigger('click'); await flushPromises()
     expect(api.executeModelControl.mock.calls[0]![5]).toBe(true); expect(wrapper.text()).toContain('模型要等调度打开后才会提供服务')
   })
-  it.each(['close', 'restore'] as const)('disables an existing %s preview confirmation when authoritative evidence becomes testing, while retaining cancellation', async operation => {
+  it.each(['close', 'restore'] as const)('clears an existing %s preview when authoritative evidence becomes testing', async operation => {
     const original = operation === 'restore' ? closed() : item()
     if (operation === 'restore') { original.decision = 'usable'; original.basis.decision = 'usable' }
     api.previewModelControl.mockResolvedValue(plan(original, { entries: [{ key: 'alias', value: 'A', state: operation === 'restore' ? 'to_restore' : 'to_close' }] }))
@@ -115,12 +115,7 @@ describe('C3 shared row displays decisions and preserves protected actions', () 
     const testing = structuredClone(original); testing.previousRound = testing.round; testing.round = { ...testing.round!, batchId: 'new-running', completedAt: null, running: true, correct: 0, incorrect: 0, unreviewed: 0, accuracyPercent: null }; testing.decision = 'testing'; testing.basis = { ...testing.basis, batchId: 'new-running', decision: 'testing' }
     expect(testing.control.accountPending).toBeNull(); expect(testing.control.pending).toBeNull()
     await wrapper.setProps({ item: testing }); await flushPromises()
-    expect(wrapper.get('[data-testid="model-control-preview"]').text()).toContain('alias（转给 A）')
-    const confirmation = button(wrapper, '确认'); expect.soft(confirmation.attributes('disabled')).toBeDefined()
-    expect(button(wrapper, '取消预览').attributes('disabled')).toBeUndefined()
-    await confirmation.trigger('click'); confirmation.element.dispatchEvent(new MouseEvent('click', { bubbles: true })); await flushPromises()
-    expect(api.executeModelControl).not.toHaveBeenCalled()
-    await button(wrapper, '取消预览').trigger('click'); expect(wrapper.find('[data-testid="model-control-preview"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="model-control-preview"]').exists()).toBe(false)
     expect(api.executeModelControl).not.toHaveBeenCalled()
   })
   it('displays only verify for an unknown own operation, and disables conflicting restore', async () => {

@@ -14,7 +14,7 @@ func TestModelControlV2911CompletedEvidenceOnlyUsesBusinessToday(t *testing.T) {
 	now := time.Date(2026, 10, 11, 0, 1, 0, 0, questionAnswerScheduleLocation)
 	rule := ModelControlRule{MinAccuracyPercent: 50, MinJudgedAnswers: 3, IncludeManual: true, IncludeScheduled: true}
 	target := modelControlTarget{Observation: modelControlObservation{State: "serving"}}
-	round := modelControlRound{BatchID: "yesterday", Source: "manual", CreatedAt: now.Add(-2 * time.Minute), Incorrect: 3}
+	round := modelControlRound{BatchID: "yesterday", Source: "manual", CreatedAt: now.Add(-2 * time.Minute), Incorrect: 3, Questions: []ModelControlQuestionResult{{QuestionID: "q", Incorrect: 3}}}
 	item := buildModelControlItem(target, rule, []modelControlRound{round}, nil, now)
 	if item.Decision != "no_evidence" || item.DecisionReason != "not_today" || modelControlNeedsAttention(item) {
 		t.Fatalf("old evidence suggested a closure: decision=%s reason=%s attention=%v", item.Decision, item.DecisionReason, modelControlNeedsAttention(item))

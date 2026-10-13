@@ -92,10 +92,10 @@ describe('V2.9.11 confirmed model-control business RED',()=>{
   await w.setProps({refreshKey:1});await flushPromises();expect(api.verifyModelControl).toHaveBeenCalledTimes(1)
   await w.setProps({refreshKey:2});await flushPromises();expect(api.verifyModelControl).toHaveBeenCalledTimes(1)
  })
- it('gives a partially closed model a single primary action',()=>{
+ it('gives a partially closed model two actions sharing a single preview',()=>{
   const value=managed();value.control.closedEntries={alias:'M'};value.control.observation.state='partially_closed'
   const w=track(mount(Row,{props:{item:value,targetId,modelName:'M',workspace:'ws1'}}))
-  expect(hasButton(w,'关闭此模型')).toBe(true);expect(hasButton(w,'恢复此模型')).toBe(false);expect(hasButton(w,'开放此模型')).toBe(false)
+  expect(hasButton(w,'关闭剩余条目')).toBe(true);expect(hasButton(w,'加回已关闭条目')).toBe(true)
  })
  it.each([['restore','account_missing'],['restore','conflict'],['add','account_missing'],['add','conflict']] as const)('blocks an already open %s preview after %s arrives',async(operation,problem)=>{
   const value=managed();value.decision='usable';value.basis.decision='usable';value.control.closedEntries=operation==='restore'?{alias:'M'}:{};value.control.observation.state=operation==='restore'?'closed':'not_provided'
@@ -110,18 +110,18 @@ describe('V2.9.11 confirmed model-control business RED',()=>{
   expect(api.executeModelControl).not.toHaveBeenCalled()
   if(confirm)expect(confirm.attributes('disabled')).toBeDefined()
  })
- it('includes an unselected managed model in the actual submitted request',async()=>{
+ it('excludes an unselected managed model from the actual submitted request',async()=>{
   const w=await dialog();await button(w,'开始回答').trigger('click');await flushPromises()
-  expect(api.startQuestionAnswerBatch).toHaveBeenCalledTimes(1);expect(api.startQuestionAnswerBatch.mock.calls[0]![1]).toEqual(['A','M'])
+  expect(api.startQuestionAnswerBatch).toHaveBeenCalledTimes(1);expect(api.startQuestionAnswerBatch.mock.calls[0]![1]).toEqual(['A'])
  })
- it('blocks starts until a complete managed read succeeds',async()=>{
+ it('keeps selected testing available while managed reads are loading',async()=>{
   const pending=deferred<{targetId:string;items:ModelControlItem[];candidates:string[]}>();api.getModelControlTarget.mockReturnValueOnce(pending.promise)
-  const w=await dialog();expect(button(w,'开始回答').attributes('disabled')).toBeDefined();await button(w,'开始回答').trigger('click');expect(api.startQuestionAnswerBatch).not.toHaveBeenCalled()
+  const w=await dialog();expect(button(w,'开始回答').attributes('disabled')).toBeUndefined();await button(w,'开始回答').trigger('click');expect(api.startQuestionAnswerBatch.mock.calls[0]![1]).toEqual(['A'])
   pending.resolve({targetId,items:[managed()],candidates:[]});await flushPromises();expect(button(w,'开始回答').attributes('disabled')).toBeUndefined()
  })
- it('blocks starts when managed reading fails',async()=>{
+ it('keeps selected testing available when management reading fails',async()=>{
   api.getModelControlTarget.mockRejectedValue(new Error('fixture failure'));const w=await dialog()
-  expect(button(w,'开始回答').attributes('disabled')).toBeDefined();expect(w.text()).toContain('受管模型读取失败');await button(w,'开始回答').trigger('click');expect(api.startQuestionAnswerBatch).not.toHaveBeenCalled()
+  expect(button(w,'开始回答').attributes('disabled')).toBeUndefined();expect(w.text()).toContain('模型管理读取失败');await button(w,'开始回答').trigger('click');expect(api.startQuestionAnswerBatch.mock.calls[0]![1]).toEqual(['A'])
  })
  it('renders judged results before manual review without an empty box',async()=>{
   api.getLatestQuestionAnswerBatch.mockResolvedValue(batch());const w=await dialog();const text=w.text()
@@ -130,15 +130,16 @@ describe('V2.9.11 confirmed model-control business RED',()=>{
  it('keeps the zero-result explanation visible when its heading is clicked',async()=>{
   const w=await dialog();const processed=w.get('[data-testid="question-answer-processed"]');expect(processed.text()).toContain('这一批没有可判的答案');await processed.get('[data-testid="question-answer-processed-summary"]').trigger('click');expect(processed.text()).toContain('这一批没有可判的答案');expect(processed.findAll('.border-dashed')).toHaveLength(0)
  })
- it('does not save a managed model introduced by a completed running batch',async()=>{
+ it('does not save a completed batch automatically but saves all current models when the user explicitly edits',async()=>{
   vi.useFakeTimers();const completed=batch();const m=batch('M').records[0]!;completed.records.push({...m,id:'record-M'});completed.submittedCount=2;completed.completedCount=2;completed.stats=questionAnswerFixtureStats(completed.records)
   const running={...completed,active:true,runningCount:2,completedCount:0,currentModel:'A',records:completed.records.map(r=>({...r,status:'running' as const,answerJudgment:null,completedAt:null}))}
   api.getLatestQuestionAnswerBatch.mockResolvedValue(running);api.getQuestionAnswerBatch.mockResolvedValue(completed)
   const w=await dialog();await vi.advanceTimersByTimeAsync(2000);await flushPromises()
   await w.get('[data-testid="question-answer-configuration-toggle"]').trigger('click');await flushPromises()
+  expect(w.emitted('question-answer-preferences-changed')).toBeUndefined()
   const a=w.get('[data-testid="question-answer-models"] label input[type="checkbox"]')
   expect(a.attributes('disabled')).toBeUndefined();await a.setValue(false);await flushPromises()
   const saved=w.emitted('question-answer-preferences-changed')!.at(-1)![0] as {modelIds:string[]}
-  expect(saved.modelIds).not.toContain('M')
+  expect(saved.modelIds).toEqual(['M'])
  })
 })

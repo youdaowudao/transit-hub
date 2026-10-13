@@ -17,42 +17,42 @@ beforeEach(() => {
  vi.resetAllMocks(); api.discoverTargetModels.mockResolvedValue(['A', 'B', 'M'].map(id => ({ id, name: id }))); api.listTestQuestions.mockResolvedValue([{ id: 'q', name: '题', body: '答案', keywords: ['答案'], enabled: true, isDefault: true, createdAt: now, updatedAt: now }]); api.getLatestQuestionAnswerBatch.mockResolvedValue(emptyBatch()); api.getQuestionAnswerHistory.mockResolvedValue({ batches: [], page: 1, pageSize: 20, totalBatches: 0, totalPages: 0, todayStats: questionAnswerFixtureStats([]) }); api.getQuestionAnswerBatch.mockResolvedValue(batch()); api.startQuestionAnswerBatch.mockResolvedValue(batch()); api.getModelControlTarget.mockResolvedValue(read()); api.getModelControlAutoSettings.mockResolvedValue(c32AutoSettings()); api.getModelControlSettings.mockResolvedValue({ minAccuracyPercent: 50, minJudgedAnswers: 3, version: 1 }); api.verifyModelControl.mockResolvedValue({ items: [managed()], errors: [] }); api.addModelControlManaged.mockResolvedValue(managed('A'))
 })
 afterEach(async () => { wrappers.splice(0).forEach(w => w.unmount()); await flushPromises(); vi.useRealTimers(); vi.restoreAllMocks() })
-describe('managed model selection waits for a current complete read', () => {
- it.each(['success', 'failure'] as const)('blocks during add and until its complete read after %s', async outcome => {
+describe('managed model reads stay independent of user selection', () => {
+ it.each(['success', 'failure'] as const)('keeps testing available during add and its complete read after %s', async outcome => {
   const add = defer<ReturnType<typeof managed>>(), reload = defer<ReturnType<typeof read>>()
   const w = await mounted(); const initialReads = api.getModelControlTarget.mock.calls.length; api.addModelControlManaged.mockReturnValueOnce(add.promise); api.getModelControlTarget.mockReturnValueOnce(reload.promise)
-  await button(w, '纳入管理').trigger('click'); expect(button(w, '开始回答').attributes('disabled')).toBeDefined(); expect(w.text()).toContain('正在纳入管理')
+  await button(w, '纳入管理').trigger('click'); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined(); expect(w.text()).toContain('正在纳入管理')
   if (outcome === 'success') add.resolve(managed('A')); else add.reject(new Error('admin.connectionHealth.errors.request'))
-  await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeDefined(); w.getComponent(Panel).vm.$emit('managed-change', { targetId, kind: 'updated', models: ['A', 'M'], refreshKey: 99 }); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeDefined()
+  await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined(); w.getComponent(Panel).vm.$emit('managed-change', { targetId, kind: 'updated', models: ['A', 'M'], refreshKey: 99 }); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined()
   reload.resolve(read(['A', 'M'])); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined(); expect(api.getModelControlTarget).toHaveBeenCalledTimes(initialReads + 1); expect(api.verifyModelControl).toHaveBeenCalledTimes(1); if (outcome === 'failure') expect(w.text()).toContain('纳入管理失败')
  })
- it('does not let old loaded or updated events bypass multiple additions', async () => {
+ it('old loaded or updated events never expand selection during multiple additions', async () => {
   const first = defer<ReturnType<typeof managed>>(), second = defer<ReturnType<typeof managed>>()
   const w = await mounted(); api.addModelControlManaged.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
   const links = w.get('[data-testid="question-answer-models"]').findAll('button').filter(b => b.text() === '纳入管理'); await links[0]!.trigger('click'); await links[1]!.trigger('click')
-  first.resolve(managed('A')); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeDefined()
-  w.getComponent(Panel).vm.$emit('managed-change', { targetId, kind: 'loaded', models: ['A', 'M'], refreshKey: 0 }); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeDefined()
+  first.resolve(managed('A')); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined()
+  w.getComponent(Panel).vm.$emit('managed-change', { targetId, kind: 'loaded', models: ['A', 'M'], refreshKey: 0 }); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined()
   api.getModelControlTarget.mockResolvedValue(read(['A', 'B', 'M'])); second.resolve(managed('B')); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined(); expect(api.verifyModelControl).toHaveBeenCalledTimes(1)
  })
- it('keeps error readiness after a card update and permits only a complete retry', async () => {
+ it('keeps management errors visible without blocking testing, then permits retry', async () => {
   api.getModelControlTarget.mockRejectedValueOnce(new Error('fixture'))
-  const w = await mounted(); expect(button(w, '开始回答').attributes('disabled')).toBeDefined(); w.getComponent(Panel).vm.$emit('managed-change', { targetId, kind: 'updated', models: ['M'], refreshKey: 0 }); await flushPromises(); expect(w.text()).toContain('受管模型读取失败')
+  const w = await mounted(); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined(); w.getComponent(Panel).vm.$emit('managed-change', { targetId, kind: 'updated', models: ['M'], refreshKey: 0 }); await flushPromises(); expect(w.text()).toContain('模型管理读取失败')
   await w.getComponent(Panel).findAll('button').find(b => b.text() === '重试')!.trigger('click'); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined()
  })
- it('lists missing managed names and never submits the remaining models', async () => {
-  api.discoverTargetModels.mockResolvedValue([{ id: 'A', name: 'A' }]); const w = await mounted(); expect(w.text()).toContain('受管模型 M 不在这个账号现在的模型列表里'); expect(button(w, '开始回答').attributes('disabled')).toBeDefined(); await button(w, '开始回答').trigger('click'); expect(api.startQuestionAnswerBatch).not.toHaveBeenCalled()
+ it('an unselected missing managed model does not block selected models', async () => {
+  api.discoverTargetModels.mockResolvedValue([{ id: 'A', name: 'A' }]); const w = await mounted(); expect(w.text()).toContain('这个账号现在的模型列表里没有它'); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined(); await button(w, '开始回答').trigger('click'); expect(api.startQuestionAnswerBatch.mock.calls[0]![1]).toEqual(['A'])
  })
  it('ignores a late addition after closing and reopening the same account', async () => {
   const late = defer<ReturnType<typeof managed>>(); const w = await mounted(); api.addModelControlManaged.mockReturnValueOnce(late.promise); await button(w, '纳入管理').trigger('click'); await w.setProps({ open: false }); await w.setProps({ open: true }); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined()
   const reads = api.getModelControlTarget.mock.calls.length; late.reject(new Error('fixture old failure')); await flushPromises(); expect(api.getModelControlTarget).toHaveBeenCalledTimes(reads); expect(w.text()).not.toContain('纳入管理失败'); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined()
  })
- it('blocks on reentering question mode until its remounted management panel is ready', async () => {
-  const w = await mounted(); await button(w, '一次性测试').trigger('click'); await flushPromises(); const reload = defer<ReturnType<typeof read>>(); api.getModelControlTarget.mockReturnValueOnce(reload.promise); await button(w, '问答测试').trigger('click'); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeDefined(); reload.resolve(read()); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined()
+ it('reentering question mode does not wait for its management panel', async () => {
+  const w = await mounted(); await button(w, '一次性测试').trigger('click'); await flushPromises(); const reload = defer<ReturnType<typeof read>>(); api.getModelControlTarget.mockReturnValueOnce(reload.promise); await button(w, '问答测试').trigger('click'); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined(); reload.resolve(read()); await flushPromises(); expect(button(w, '开始回答').attributes('disabled')).toBeUndefined()
  })
- it('shows an active C2 batch actual selection and includes its missing managed model only afterwards', async () => {
+ it('shows active C2 selection and never adds managed models after completion', async () => {
   vi.useFakeTimers(); const running = { ...batch('A'), active: true, completedCount: 0, runningCount: 1, records: batch('A').records.map(r => ({ ...r, status: 'running', answerJudgment: null, completedAt: null })) }; api.getLatestQuestionAnswerBatch.mockResolvedValue(running); api.getQuestionAnswerBatch.mockResolvedValue(batch('A'))
   const w = await mounted(); const m = w.get('[data-testid="question-answer-models"]').findAll('label').find(label => label.text().startsWith('M'))!
-  expect((m.get('input').element as HTMLInputElement).checked).toBe(false); expect(m.text()).toContain('本批未包含'); expect(w.get('[data-testid="question-answer-models"]').findAll('button').filter(b => b.text() === '纳入管理')).toHaveLength(0)
-  await vi.advanceTimersByTimeAsync(2000); await flushPromises(); expect((m.get('input').element as HTMLInputElement).checked).toBe(true); expect(m.get('input').attributes('disabled')).toBeDefined(); expect(m.text()).not.toContain('本批未包含')
+  expect((m.get('input').element as HTMLInputElement).checked).toBe(false); expect(m.text()).toContain('本批未选'); expect(w.get('[data-testid="question-answer-models"]').findAll('button').filter(b => b.text() === '纳入管理')).toHaveLength(0)
+  await vi.advanceTimersByTimeAsync(2000); await flushPromises(); expect((m.get('input').element as HTMLInputElement).checked).toBe(false); expect(m.get('input').attributes('disabled')).toBeUndefined(); expect(m.text()).not.toContain('本批未选')
  })
 })

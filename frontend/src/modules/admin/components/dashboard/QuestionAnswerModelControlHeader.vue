@@ -6,7 +6,7 @@ import type { ModelControlCounts, ModelControlAutoSettings, ModelControlSettings
 import { modelControlText as message, modelControlRuleRevision, modelControlTime, modelControlReason } from '../../utils/questionAnswerModelControl'
 import QuestionAnswerModelControlRuleForm from './QuestionAnswerModelControlRuleForm.vue'
 import QuestionAnswerModelControlAutoForm from './QuestionAnswerModelControlAutoForm.vue'
-const props = defineProps<{ scope: 'account' | 'workspace'; counts: ModelControlCounts | null; workspace: string; countsStale?: boolean; refreshKey?: number }>()
+const props = defineProps<{ scope: 'account' | 'workspace'; counts: ModelControlCounts | null; workspace: string; countsStale?: boolean; refreshKey?: number; repeatCount?: number }>()
 const emit = defineEmits<{ (event: 'auto-enabled', enabled: boolean): void }>()
 const settings = ref<ModelControlSettings | null>(null), editing = ref(false), failed = ref(false)
 let sequence = 0, controller: AbortController | null = null
@@ -41,6 +41,9 @@ onBeforeUnmount(() => { sequence++; controller?.abort(); autoSequence++; autoCon
 <template>
   <div data-testid="model-control-header" class="space-y-2">
     <div class="flex flex-wrap items-center gap-x-3 gap-y-2 text-xs"><span>{{ message('handling') }}</span><Tooltip v-if="!autoSettings?.autoCloseEnabled && !autoSettings?.autoRestoreEnabled" :text="message('handlingHint')" wide><button type="button" aria-pressed="true" class="rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 text-primary">{{ message('manualHandling') }}</button></Tooltip><template v-for="option in (['autoClose', 'autoRestore', 'healthCoordination'] as const)" :key="option"><Tooltip v-if="autoSettings?.[`${option}Enabled`]" :text="message(`${option}Hint`)" wide><span class="rounded-md border border-primary/30 bg-primary/10 px-2.5 py-1 text-primary">{{ message(option) }}</span></Tooltip></template><Tooltip v-if="autoSettings && !autoFailed" :text="message('autoSettingsHint')" wide><button type="button" data-testid="model-control-auto-open" class="underline" @click="toggleAutoEditing">{{ message('autoSettings') }}</button></Tooltip><p v-if="failed" role="alert">{{ message('ruleReadFailed') }} · <button type="button" class="underline" @click="load">{{ message('retry') }}</button></p><template v-else-if="settings"><p class="min-w-0 break-words text-muted-foreground">{{ message('rule') }}{{ message('ruleSummary', { accuracy: settings.minAccuracyPercent, min: settings.minJudgedAnswers }) }}</p><button type="button" class="underline" @click="editing = !editing">{{ message('edit') }}</button></template></div>
+    <p class="break-words text-xs text-muted-foreground">每题质量样本至少 3 条；以前不足 3 的设置已提高到 3。主站保持原样。</p>
+    <p v-if="settings && settings.minJudgedAnswers > 10" class="break-words text-xs text-amber-600">以前设为每题 {{ settings.minJudgedAnswers }} 条，但每次最多回答 10 次，暂时不能形成质量结论。请在这里改成 3—10，再重新测试；仍可手动开关。</p>
+    <p v-if="settings && repeatCount !== undefined && repeatCount < settings.minJudgedAnswers" data-testid="model-control-quick-test-hint" class="break-words text-xs text-muted-foreground">这批每题回答 {{ repeatCount }} 次；系统需要每题至少 {{ settings.minJudgedAnswers }} 条已判回答才给质量建议。仍可测试和手动开关。</p>
     <p v-if="autoFailed" role="alert" class="text-xs text-destructive">{{ message('autoReadFailed') }} · <button type="button" class="underline" @click="loadAuto">{{ message('retry') }}</button></p>
     <p v-else-if="autoEnabled" data-testid="model-control-auto-last-scan" class="break-words text-xs text-muted-foreground">{{ scanText }}</p>
     <QuestionAnswerModelControlAutoForm v-if="autoEditing && autoSettings" :settings="autoSettings" :workspace="workspace" @saved="autoSettings = $event; autoEditing = false" @cancel="autoEditing = false" />

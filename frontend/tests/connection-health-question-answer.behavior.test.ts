@@ -354,7 +354,9 @@ describe('question-answer low-operation review', () => {
     const wrapper = await mountQuestionAnswerDialog()
 
     expect(wrapper.find('[data-testid="account-intelligence-weight-editor"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="question-answer-stats-bar"]').text()).toContain('正确率')
+    expect(wrapper.get('[data-testid="question-answer-stats-bar"]').text()).toContain('答案正确比例（统计用）')
+    expect(wrapper.get('[data-testid="question-answer-stats-review"] [data-testid="question-answer-accuracy"]').text()).toBe('50%')
+    expect(wrapper.get('[data-testid="question-answer-stats-bar"]').text()).not.toContain('本轮题目平均正确率（用于模型建议）')
     expect(judgmentButtons(wrapper.get('[data-testid="question-answer-pending"]'))).not.toHaveLength(0)
   })
 

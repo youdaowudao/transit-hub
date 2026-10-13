@@ -95,6 +95,46 @@ const save = async (wrapper: VueWrapper, field: 'Priority' | '并发') => {
 }
 
 describe('Task B account management', () => {
+  it.each([
+    { name: 'unassigned', effectivePolicies: [], priority: 50 },
+    { name: 'disabled', effectivePolicies: [{ policyId: 'disabled', policyName: 'Disabled', enabled: false, priorityMode: 'multiplier' as const, strategyMode: 'health_probe' as const }], priority: 50 },
+    { name: 'health only', effectivePolicies: [{ policyId: 'health', policyName: 'Health', enabled: true, priorityMode: 'none' as const, strategyMode: 'health_probe' as const }], priority: 50 },
+    { name: 'excluded', effectivePolicies: [], excludedFromGroupPolicy: true, priority: 50 },
+    { name: 'manual', effectivePolicies: [], priority: 5 },
+    { name: 'unschedulable', effectivePolicies: [], schedulable: false, priority: 50 },
+  ])('displays the upstream effective multiplier without changing account management: $name', scenario => {
+    const wrapper = detail(account({ ...scenario, effectiveMultiplier: 0.08, upstreamKeyGroupMultiplier: 0.8,
+      rateMultiplier: 9, multiplierResolutionStatus: 'resolved', multiplierSource: 'none', priorityManaged: false }))
+    const column = wrapper.findAll('thead th').findIndex(header => header.text() === '实际有效倍率')
+    expect(column).toBeGreaterThanOrEqual(0)
+    const cell = wrapper.find('tbody tr').findAll('td')[column]!
+    expect(cell.find('span').text()).toBe('0.08x')
+    expect(cell.text()).not.toContain('0.8x')
+    expect(cell.text()).not.toContain('9x')
+    expect(wrapper.find('button[aria-label="编辑Priority"]').exists()).toBe(true)
+    expect(writes).toEqual([])
+  })
+
+  it('sorts displayed upstream multipliers in both directions and keeps missing values last without writes', async () => {
+    const rows = [
+      account({ id: 'high', name: 'higher', targetId: 'sub2api:task-b-workspace:high', effectivePolicies: [], effectiveMultiplier: 0.2, multiplierSource: 'none', productionSortOrder: 0 }),
+      account({ id: 'missing', name: 'missing', targetId: 'sub2api:task-b-workspace:missing', effectivePolicies: [], rateMultiplier: 9, multiplierSource: 'none', productionSortOrder: 1 }),
+      account({ id: 'low', name: 'lower', targetId: 'sub2api:task-b-workspace:low', effectivePolicies: [], effectiveMultiplier: 0.08, multiplierSource: 'none', productionSortOrder: 2 }),
+    ]
+    const wrapper = detail(rows[0]!)
+    await wrapper.setProps({ group: { ...group(rows[0]!), accounts: rows, accountCount: 3 } })
+    const names = () => wrapper.findAll('tbody tr').map(row => row.text())
+    expect(names()[0]).toContain('higher')
+    const sort = wrapper.findAll('thead button').find(button => button.text() === '实际有效倍率')!
+    await sort.trigger('click')
+    expect(names().map(name => rows.find(row => name.includes(row.name))?.id)).toEqual(['low', 'high', 'missing'])
+    await sort.trigger('click')
+    expect(names().map(name => rows.find(row => name.includes(row.name))?.id)).toEqual(['high', 'low', 'missing'])
+    const column = wrapper.findAll('thead th').findIndex(header => header.text() === '实际有效倍率')
+    expect(wrapper.findAll('tbody tr')[2]!.findAll('td')[column]!.find('span').text()).toBe('-')
+    expect(writes).toEqual([])
+  })
+
   it('marks ordinary 1–9 as manual and offers existing-style Priority and concurrency editors', () => {
     const wrapper = detail(account())
     expect(wrapper.text()).toContain('人工 Priority，调度站不管理')

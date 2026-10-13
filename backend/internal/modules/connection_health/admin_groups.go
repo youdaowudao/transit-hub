@@ -824,6 +824,9 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 						multiplierSource = MultiplierSourceLocalFallback
 					}
 				}
+			} else if !hasMultiplierOnlyPolicy(monitoringPolicies) && (multiplierResolution.status == MultiplierResolutionResolved || multiplierResolution.status == MultiplierResolutionStale) {
+				// 未使用倍率排序时也展示已解析的上游倍率，调度来源仍保持 none。
+				effectiveMultiplier = cloneFloat64Pointer(upstreamKeyGroup.effectiveMultiplier)
 			}
 			if priorityManaged && !usesHealthPriority && effectiveMultiplier == nil {
 				value := priorityState.EffectiveMultiplier

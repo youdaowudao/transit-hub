@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"transithub/backend/internal/modules/upstream"
 	"transithub/backend/internal/shared/businesstime"
@@ -112,6 +113,10 @@ func importFailure(message, stage, cleanup string, status int, cause error) *Imp
 }
 
 func importValidationFailure(err error) error {
+	var failure *ImportFailure
+	if errors.As(err, &failure) {
+		return failure
+	}
 	var local requestError
 	message := ErrorRequest
 	if errors.As(err, &local) {
@@ -150,6 +155,11 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	if err != nil {
 		return RealConnectResponse{}, importValidationFailure(err)
 	}
+	release, err := s.tryBeginConnectionCreation(userID, workspace, req.UpstreamSiteID, req.UpstreamGroupID, operationID)
+	if err != nil {
+		return RealConnectResponse{}, err
+	}
+	defer release()
 	existing, err := s.idempotentConnection(ctx, userID, workspace, operationID)
 	if err != nil {
 		return RealConnectResponse{}, importFailure(ErrorImportPersistencePending, "persistence", "pending", http.StatusConflict, err)
@@ -169,6 +179,7 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	if err != nil {
 		return RealConnectResponse{}, importValidationFailure(err)
 	}
+	sourceBaseURL, sourcePlatform := connectionCtx.upstreamSite.BaseURL, connectionCtx.upstreamSite.Platform
 	ids, names, err := s.resolveImportAdminGroups(ctx, state, req.OwnGroupIDs, connectionCtx.groupType)
 	if err != nil {
 		return RealConnectResponse{}, importValidationFailure(err)
@@ -189,6 +200,7 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 		clock = time.Now
 	}
 	resourceName := fmt.Sprintf("%s%s-%s-%s", randomKeyPrefix(), clock().In(businesstime.Location()).Format("0102"), connectionCtx.upstreamSite.Name, connectionCtx.groupName)
+	resourceName = buildImportCredentialName(connectionCtx.upstreamSession.Platform, resourceName, connID)
 	credential, err := s.platformService.CreateImportUpstreamCredentialContext(ctx, connectionCtx.upstreamSession, resourceName, req.UpstreamGroupID)
 	if err != nil {
 		failure := importFailure(ErrorImportUpstreamKeyFailed, "upstream_key", "pending", http.StatusBadGateway, err)
@@ -254,6 +266,20 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 		return RealConnectResponse{}, failure
 	}
 	conn := RealConnection{ID: connID, UserID: userID, WorkspaceAdminAccountID: workspace, UpstreamSiteID: req.UpstreamSiteID, UpstreamGroupID: req.UpstreamGroupID, UpstreamGroupName: connectionCtx.groupName, UpstreamKeyID: credential.ID, UpstreamKey: credential.Key, AdminAccountID: accountID, AdminAccountName: observed.Name, OwnGroupIDs: ids, OwnGroupNames: names, GroupType: connectionCtx.groupType, ProvisioningMode: ProvisioningModeManaged, Status: ConnectionStatusActive, UpstreamPlatform: string(connectionCtx.upstreamSession.Platform), AdminPlatform: string(state.Session.Platform), PricingMappingEnabled: addToPricingMapping(req.AddToPricingMapping), OperationID: operationID, CanDeleteRemote: true, CreatedAt: time.Now().Format(time.RFC3339)}
+	currentSite, sourceErr := s.upstreamLookup.GetSite(ctx, req.UpstreamSiteID)
+	if sourceErr == nil && (currentSite == nil || currentSite.Session == nil || currentSite.UserID != userID || currentSite.AdminAccountID != workspace || currentSite.BaseURL != sourceBaseURL || currentSite.Platform != sourcePlatform || currentSite.Session.Platform != connectionCtx.upstreamSession.Platform || currentSite.Session.BaseURL != connectionCtx.upstreamSession.BaseURL) {
+		sourceErr = requestError(ErrorRequest)
+	}
+	var currentGroup upstream.GroupInfo
+	if sourceErr == nil {
+		currentGroup, sourceErr = resolveImportSourceGroup(currentSite, req.UpstreamGroupID)
+	}
+	if sourceErr != nil {
+		failure := importFailure(ErrorImportSourceGroupUnavailable, "persistence", "retained", http.StatusConflict, sourceErr)
+		failure.AdminResourceID, failure.UpstreamKeyID, failure.UpstreamResourceName = accountID, credential.ID, resourceName
+		return RealConnectResponse{}, failure
+	}
+	conn.UpstreamGroupName = currentGroup.Name
 	if err = s.persistImportedConnection(ctx, conn); err != nil {
 		failure := importFailure(ErrorImportPersistencePending, "persistence", "retained", http.StatusInternalServerError, err)
 		failure.AdminResourceID, failure.UpstreamKeyID, failure.UpstreamResourceName = accountID, credential.ID, resourceName
@@ -266,52 +292,64 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	return RealConnectResponse{Connection: publicRealConnection(conn), WorkspaceAdminAccountID: workspace, ConfigurationStatus: "confirmed", Configuration: &configuration}, nil
 }
 
-// importPlatformsCompatible compares source and target independently of the
-// supported-account whitelist in normalizeImportAccountSettings.
-func importPlatformsCompatible(upstreamPlatform, accountPlatform string) bool {
-	upstreamPlatform = strings.ToLower(strings.TrimSpace(upstreamPlatform))
-	accountPlatform = strings.ToLower(strings.TrimSpace(accountPlatform))
-	if upstreamPlatform == accountPlatform {
-		return true
-	}
-	inOpenAIFamily := func(platform string) bool {
-		switch platform {
-		case "openai", "kimi", "zhipu", "deepseek", "minimax":
-			return true
-		default:
-			return false
-		}
-	}
-	return inOpenAIFamily(upstreamPlatform) && inOpenAIFamily(accountPlatform)
-}
-
 func (s *Service) prepareImportConnectionContext(ctx context.Context, userID, workspace string, state *State, req RealConnectRequest) (connectionContext, error) {
 	site, err := s.upstreamLookup.GetSite(ctx, req.UpstreamSiteID)
 	if err != nil || site == nil || site.Session == nil || site.UserID != userID || site.AdminAccountID != workspace {
 		return connectionContext{}, requestError(ErrorRequest)
 	}
-	upstreamPlatform, multiplier := resolveGroupInfo(site.Metrics.Groups, req.UpstreamGroupID)
+	group, err := resolveImportSourceGroup(site, req.UpstreamGroupID)
+	if err != nil {
+		return connectionContext{}, err
+	}
+	upstreamPlatform, multiplier := resolveGroupInfo([]upstream.GroupInfo{group}, req.UpstreamGroupID)
 	platform := strings.ToLower(strings.TrimSpace(req.GroupType))
 	if platform == "" {
 		platform = upstreamPlatform
 	}
-	if platform == "" || upstreamPlatform != "" && !importPlatformsCompatible(upstreamPlatform, platform) {
+	if platform == "" {
 		return connectionContext{}, requestError(ErrorImportGroupTypeMismatch)
 	}
-	name := strings.TrimSpace(req.UpstreamGroupName)
-	if name == "" {
-		name = req.UpstreamGroupID
+	return connectionContext{adminAccountID: workspace, state: state, upstreamSite: site, upstreamSession: *site.Session, groupType: platform, groupName: group.Name, multiplierLabel: multiplier}, nil
+}
+
+func resolveImportSourceGroup(site *upstream.Site, id string) (upstream.GroupInfo, error) {
+	var selected upstream.GroupInfo
+	matches := 0
+	for _, group := range site.Metrics.Groups {
+		if group.ID == id {
+			selected = group
+			matches++
+		}
 	}
-	return connectionContext{adminAccountID: workspace, state: state, upstreamSite: site, upstreamSession: *site.Session, groupType: platform, groupName: name, multiplierLabel: multiplier}, nil
+	if matches != 1 || strings.TrimSpace(selected.Name) == "" {
+		return upstream.GroupInfo{}, requestError(ErrorRequest)
+	}
+	return selected, nil
+}
+
+func buildImportCredentialName(platform upstream.Platform, readableName, connID string) string {
+	if platform != upstream.PlatformNewAPI {
+		return readableName
+	}
+	if len(readableName) > 17 {
+		end := 17
+		for end > 0 && !utf8.RuneStart(readableName[end]) {
+			end--
+		}
+		readableName = readableName[:end]
+	}
+	return readableName + "-" + connID
 }
 
 func (s *Service) resolveImportAdminGroups(ctx context.Context, state *State, requestedIDs []string, platform string) ([]string, []string, error) {
 	if len(requestedIDs) == 0 {
 		return nil, nil, requestError(ErrorRequest)
 	}
-	groups, err := s.platformService.FetchAdminAllGroups(state.Session)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	groups, err := s.platformService.FetchAdminAllGroupsContext(ctx, state.Session)
 	if err != nil {
-		return nil, nil, requestError(ErrorRequest)
+		return nil, nil, importFailure(ErrorImportGroupsLoadFailed, "validation", "not_needed", http.StatusBadGateway, err)
 	}
 	byID := map[string]upstream.AdminGroupInfo{}
 	for _, group := range groups {
@@ -329,7 +367,7 @@ func (s *Service) resolveImportAdminGroups(ctx context.Context, state *State, re
 		if !ok {
 			return nil, nil, requestError(ErrorRequest)
 		}
-		if group.Platform != platform {
+		if strings.ToLower(strings.TrimSpace(group.Platform)) != platform {
 			return nil, nil, requestError(ErrorImportGroupTypeMismatch)
 		}
 		if !seen[requestedID] {

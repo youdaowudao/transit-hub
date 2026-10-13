@@ -3,6 +3,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import GroupRatesView from '@/modules/admin/views/GroupRatesView.vue'
+import * as localeFns from '@/locales'
 import { realConnect } from '@/modules/admin/api/mySites'
 import type { RealConnectRequest } from '@/modules/admin/types/mySites'
 
@@ -15,15 +16,19 @@ const harness = vi.hoisted(() => ({
   connectionResponse: null as any,
   listGroupRates: vi.fn(),
   platform: 'sub2api',
+  dashboardFailure: false,
+  bindingResponse: null as any,
+  keyResponse: null as any,
+  resourceResponse: null as any,
 }))
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: {} }), useRouter: () => ({ push: vi.fn(), replace: vi.fn(async () => undefined) }) }))
 vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
   const { ref } = await import('vue')
-  harness.currentAccount = ref({ id: 'workspace-c5', displayName: 'C5 隔离工作区' })
+  harness.currentAccount = ref({ id: 'workspace-c5', displayName: 'C5 隔离工作区', platform: 'sub2api' })
   return { useAdminAccounts: () => ({ currentAccount: harness.currentAccount }) }
 })
 vi.mock('@/modules/auth/api/auth', () => ({ getAccessToken: () => null, handleAuthExpired: vi.fn(), isUnauthorizedApiResponse: (status: number) => status === 401, authUnauthorizedErrorKey: 'auth.errors.unauthorized' }))
-vi.mock('@/modules/admin/api/dashboardAdmin', () => ({ getDashboardAdminStatus: vi.fn(async () => ({ platform: harness.platform })) }))
+vi.mock('@/modules/admin/api/dashboardAdmin', () => ({ getDashboardAdminStatus: vi.fn(async () => { if (harness.dashboardFailure) throw new Error('dashboard failed'); return { platform: harness.platform } }) }))
 vi.mock('@/modules/admin/api/upstream', () => ({ listUpstreamSites: vi.fn(async () => []) }))
 vi.mock('@/modules/admin/api/groupRates', () => ({ listGroupRates: harness.listGroupRates, listAllGroupRates: vi.fn(async () => []), listGroupRateHistory: vi.fn(async () => []), updateGroupRateType: vi.fn() }))
 
@@ -73,8 +78,12 @@ const submit = async (wrapper: VueWrapper) => { await dialog(wrapper).get('form'
 const submitButton = (wrapper: VueWrapper) => dialog(wrapper).get('button[type="submit"]')
 
 beforeEach(() => {
-  harness.currentAccount.value = { id: 'workspace-c5', displayName: 'C5 隔离工作区' }
+  harness.currentAccount.value = { id: 'workspace-c5', displayName: 'C5 隔离工作区', platform: 'sub2api' }
   harness.platform = 'sub2api'
+  harness.dashboardFailure = false
+  harness.bindingResponse = async () => json({ connection: {} })
+  harness.keyResponse = async () => json([{ id: '207', name: '既有 Key', status: 'active', groupId: '21', groupName: 'C5 上游组' }])
+  harness.resourceResponse = async () => json([{ id: '101', name: '既有主站账号', platform: 'openai', type: 'apikey', status: 'active', groupIds: ['10'] }])
   harness.requests.splice(0)
   harness.bindings.splice(0)
   harness.listGroupRates.mockReset().mockResolvedValue(rows())
@@ -87,16 +96,16 @@ beforeEach(() => {
       harness.requests.push(request)
       return harness.importResponse(request)
     }
-    if (url === '/api/my-sites/real-bind') { harness.bindings.push(JSON.parse(String(options.body))); return json({ connection: {} }) }
+    if (url === '/api/my-sites/real-bind') { harness.bindings.push(JSON.parse(String(options.body))); return harness.bindingResponse() }
     if (url === '/api/my-sites/real-connections/check') return json({ checked: 0, active: 0, missing: 0 })
     if (url === '/api/my-sites/real-connections') return harness.connectionResponse()
     if (url === '/api/my-sites/mapping-options') return harness.mappingResponse()
-    if (url.startsWith('/api/my-sites/upstream-keys?')) return json([{ id: '207', name: '既有 Key', status: 'active', groupId: '21', groupName: 'C5 上游组' }])
-    if (url.startsWith('/api/my-sites/admin-resources?')) return json([{ id: '101', name: '既有主站账号', platform: 'openai', type: 'apikey', status: 'active', groupIds: ['10'] }])
+    if (url.startsWith('/api/my-sites/upstream-keys?')) return harness.keyResponse()
+    if (url.startsWith('/api/my-sites/admin-resources?')) return harness.resourceResponse()
     throw new Error('unexpected test endpoint')
   }))
 })
-afterEach(() => { for (const wrapper of wrappers.splice(0)) wrapper.unmount(); vi.unstubAllGlobals(); document.body.innerHTML = '' })
+afterEach(() => { for (const wrapper of wrappers.splice(0)) wrapper.unmount(); vi.unstubAllGlobals(); vi.restoreAllMocks(); document.body.innerHTML = '' })
 
 describe('C5 actual API to group-rates import component', () => {
   it.each(['configuration-status-array', 'connection-status-array'])('C5 RED rejects coerced top-level success enums as pending: %s', async variant => {
@@ -221,7 +230,7 @@ describe('C5 actual API to group-rates import component', () => {
     expect(dialog(wrapper).get('[aria-label="透传"]').attributes('aria-checked')).toBe('true')
     await selector.setValue('gemini')
     expect(dialog(wrapper).find('[aria-label="透传"]').exists()).toBe(false)
-    expect(dialog(wrapper).text()).toContain('已移除不再匹配')
+    expect(dialog(wrapper).text()).toContain('不符合新平台的已选分组已移除')
     expect(dialog(wrapper).text()).toContain('导入时由主站同步')
     await selector.setValue('openai')
     expect(dialog(wrapper).get('[aria-label="透传"]').attributes('aria-checked')).toBe('false')
@@ -409,6 +418,7 @@ describe('C5 actual API to group-rates import component', () => {
 
   it('keeps NewAPI main-site requests on the original settings-free API branch', async () => {
     harness.platform = 'newapi'
+    harness.currentAccount.value = { id: 'workspace-c5', platform: 'newapi' }
     harness.importResponse = async () => json({ connection: {} })
     const wrapper = await openView(); await chooseGroup(wrapper)
     expect(dialog(wrapper).find('#import-concurrency').exists()).toBe(false)
@@ -472,7 +482,7 @@ describe('C5 actual API to group-rates import component', () => {
     const wrapper = await openView(); await chooseGroup(wrapper)
     await dialog(wrapper).get('form').trigger('submit'); await flushPromises()
     const calls = harness.listGroupRates.mock.calls.length
-    harness.currentAccount.value = { id: 'workspace-new', displayName: '新工作区' }
+    harness.currentAccount.value = { id: 'workspace-new', displayName: '新工作区', platform: 'sub2api' }
     await flushPromises()
     pending.resolve(outcome === 'success' ? json(success(harness.requests[0])) : json(failure(), 502)); await flushPromises()
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
@@ -491,12 +501,14 @@ describe('C5 actual API to group-rates import component', () => {
     expect(harness.listGroupRates).toHaveBeenCalledTimes(calls)
   })
 
-  it('keeps an in-flight post-success refresh from replacing the new workspace rows', async () => {
+  it.each(['workspace', 'same-id-platform'])('keeps an in-flight post-success refresh from replacing rows after %s changes', async change => {
     const pendingRows = deferred<ReturnType<typeof rows>>()
     const wrapper = await openView(); await chooseGroup(wrapper)
     harness.listGroupRates.mockImplementationOnce(() => pendingRows.promise)
     await dialog(wrapper).get('form').trigger('submit'); await flushPromises()
-    harness.currentAccount.value = { id: 'workspace-new', displayName: '新工作区' }
+    harness.currentAccount.value = change === 'workspace'
+      ? { id: 'workspace-new', displayName: '新工作区', platform: 'sub2api' }
+      : { id: 'workspace-c5', displayName: 'C5 隔离工作区', platform: 'newapi' }
     pendingRows.resolve({ ...rows(), items: [{ ...rate, groupName: '不得出现的迟到旧工作区分组' }] }); await flushPromises()
     expect(wrapper.text()).not.toContain('不得出现的迟到旧工作区分组')
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
@@ -520,4 +532,114 @@ describe('C5 actual API to group-rates import component', () => {
     expect(result).not.toHaveProperty('privateMarker')
     expect(result.configurationStatus).toBe('confirmed')
   })
+})
+
+
+describe('approved import selection regression', () => {
+  it('RED keeps the platform selector available for classified sources', async () => {
+    const wrapper = await openView()
+    const select = dialog(wrapper).find('select')
+    expect(select.exists()).toBe(true)
+    expect(select.element).toHaveProperty('value', 'openai')
+    expect(select.findAll('option').filter(o => o.attributes('value'))).toHaveLength(8)
+    await chooseGroup(wrapper)
+    await select.setValue('gemini')
+    expect(dialog(wrapper).text()).not.toContain('表单分组甲')
+    await chooseGroup(wrapper, 'Gemini 分组')
+    await submit(wrapper)
+    expect(harness.requests[0]).toMatchObject({ groupType: 'gemini', ownGroupIds: ['12'], accountSettings: { passthrough: false } })
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  })
+  it('RED dashboard failure cannot remove the Sub2API safety contract', async () => {
+    harness.dashboardFailure = true
+    harness.importResponse = async () => json(failure({ cleanup: 'retained', retryAllowed: false }), 409)
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    expect(harness.requests[0]).toHaveProperty('accountSettings')
+    expect(dialog(wrapper).find('[data-import-pending]').exists()).toBe(true)
+    expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
+    await submit(wrapper); expect(harness.requests).toHaveLength(1)
+  })
+  it.each([null, { id: 'workspace-c5', platform: '' }, { id: 'workspace-c5', platform: 'grok' }])('RED unknown main information forbids all creation: %j', async account => {
+    harness.currentAccount.value = account
+    const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    expect(harness.requests).toHaveLength(0)
+    expect(dialog(wrapper).text()).toContain('当前主站信息未就绪')
+    expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
+  })
+  it('RED busy received by binding locks saving and mode changes', async () => {
+    harness.bindingResponse = async () => json({ message: 'admin.mySites.errors.importInProgress' }, 409)
+    const wrapper = await openView()
+    await dialog(wrapper).findAll('button').find(b => b.text().includes('使用已有资源'))!.trigger('click'); await flushPromises()
+    await dialog(wrapper).get('input[type="radio"][value="207"]').setValue(true)
+    await dialog(wrapper).get('select').setValue('10'); await flushPromises()
+    await dialog(wrapper).get('input[type="radio"][value="101"]').setValue(true)
+    await submit(wrapper)
+    expect(dialog(wrapper).text()).toContain('这个上游分组正在导入或绑定')
+    expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
+    const automatic = dialog(wrapper).findAll('button').find(b => b.text().includes('自动创建资源'))!
+    expect(automatic.element).toHaveProperty('disabled', true)
+    await automatic.trigger('click'); await submit(wrapper)
+    expect(harness.bindings).toHaveLength(1); expect(harness.requests).toHaveLength(0)
+  })
+})
+
+
+describe('binding response isolation and failure display', () => {
+  const setupBinding = async (wrapper: VueWrapper) => {
+    await dialog(wrapper).findAll('button').find(b=>b.text().includes('使用已有资源'))!.trigger('click'); await flushPromises()
+    await dialog(wrapper).get('input[type="radio"][value="207"]').setValue(true)
+    await dialog(wrapper).get('#existing-admin-group').setValue('10'); await flushPromises()
+    await dialog(wrapper).get('input[type="radio"][value="101"]').setValue(true)
+  }
+  it.each(['busy','success'])('ignores stale binding %s after workspace changes', async result => {
+    const response=deferred<Response>(); harness.bindingResponse=()=>response.promise
+    const wrapper=await openView(); await setupBinding(wrapper); await submit(wrapper)
+    expect(harness.bindings).toHaveLength(1)
+    harness.currentAccount.value={id:'other-workspace',platform:'sub2api'}; await flushPromises()
+    await wrapper.findAll('button').find(b=>b.text().trim()==='配置对接')!.trigger('click'); await flushPromises()
+    response.resolve(result==='busy'?json({message:'admin.mySites.errors.importInProgress'},409):json({connection:{}})); await flushPromises()
+    expect(dialog(wrapper).text()).not.toContain('这个上游分组正在导入或绑定')
+    expect(dialog(wrapper).find('[data-import-pending]').exists()).toBe(false)
+    expect(dialog(wrapper).get('#import-priority').element).toHaveProperty('disabled',false)
+  })
+  it('invalidates the dialog when the same workspace changes platform', async () => {
+    const wrapper=await openView()
+    harness.currentAccount.value={id:'workspace-c5',platform:'newapi'}; await flushPromises()
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(harness.requests).toHaveLength(0)
+  })
+  it('ignores stale Key loading after returning to automatic creation', async () => {
+    const response=deferred<Response>(); harness.keyResponse=()=>response.promise
+    const wrapper=await openView()
+    await dialog(wrapper).findAll('button').find(b=>b.text().includes('使用已有资源'))!.trigger('click')
+    await dialog(wrapper).findAll('button').find(b=>b.text().includes('自动创建资源'))!.trigger('click'); await flushPromises()
+    response.resolve(json([{id:'old-key',name:'过期Key',status:'active'}])); await flushPromises()
+    expect(dialog(wrapper).text()).not.toContain('过期Key')
+    expect(dialog(wrapper).get('[data-import-platform-select]').element).toHaveProperty('value','openai')
+  })
+  it('shows connectionExists distinctly and keeps other binding failures readable', async () => {
+    harness.bindingResponse=async()=>json({message:'admin.mySites.errors.connectionExists'},409)
+    const wrapper=await openView(); await setupBinding(wrapper); await submit(wrapper)
+    expect(dialog(wrapper).text()).toContain('已经存在')
+    expect(dialog(wrapper).find('[data-import-pending]').exists()).toBe(false)
+    expect(submitButton(wrapper).element).toHaveProperty('disabled',false)
+  })
+  it.each(['importInProgress','importSourceGroupUnavailable','importGroupsLoadFailed','request'])('shows the new trusted failure %s in Chinese with safe retry semantics', async message => {
+    const blocked=['importInProgress','importSourceGroupUnavailable'].includes(message)
+    harness.importResponse=async()=>json(failure({message:'admin.mySites.errors.'+message,stage:message==='importSourceGroupUnavailable'?'persistence':'validation',cleanup:blocked?'retained':'not_needed',retryAllowed:!blocked,upstreamKeyId:blocked?'207':undefined}),blocked?409:502)
+    const wrapper=await openView(); await chooseGroup(wrapper); await submit(wrapper)
+    expect(dialog(wrapper).text()).not.toContain('admin.mySites.errors.'+message)
+    expect(submitButton(wrapper).element).toHaveProperty('disabled',blocked)
+  })
+})
+
+
+it('falls back to readable failure text when a trusted translation is unavailable', async () => {
+  const original = localeFns.te
+  vi.spyOn(localeFns,'te').mockImplementation(key => key==='admin.mySites.errors.importGroupsLoadFailed'?false:original(key))
+  harness.importResponse=async()=>json({message:'admin.mySites.errors.importGroupsLoadFailed',stage:'validation',cleanup:'not_needed',retryAllowed:true},502)
+  const wrapper=await openView();await chooseGroup(wrapper);await submit(wrapper)
+  expect(dialog(wrapper).text()).toContain('真实对接创建失败')
+  expect(dialog(wrapper).text()).not.toContain('admin.mySites.errors.importGroupsLoadFailed')
+  expect(submitButton(wrapper).element).toHaveProperty('disabled',false)
 })

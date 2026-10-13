@@ -90,8 +90,8 @@ func c51AssertRejectedBeforeResources(t *testing.T, remote *c5RedTransport, requ
 	}
 }
 
-func TestC51REDE2IncompatiblePlatforms(t *testing.T) {
-	c51AssertRejectedBeforeResources(t, &c5RedTransport{platform: "openai", mainPlatform: "anthropic"}, "anthropic")
+func TestC51REDE2ExplicitCrossPlatformChoice(t *testing.T) {
+	c51AssertImportedPlatform(t, "openai", "anthropic", "anthropic", "B")
 }
 
 func TestC51REDE3MixedTargetPlatforms(t *testing.T) {

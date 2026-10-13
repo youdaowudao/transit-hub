@@ -265,7 +265,7 @@ func saveRealConnectionWithPricingMappingTx(ctx context.Context, tx pgx.Tx, conn
 		}
 	}()
 
-	if conn.PricingMappingEnabled {
+	if conn.PricingMappingEnabled || conn.AdminPlatform == string(upstream.PlatformSub2API) {
 		state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
 		if err != nil {
 			return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: err}
@@ -273,9 +273,21 @@ func saveRealConnectionWithPricingMappingTx(ctx context.Context, tx pgx.Tx, conn
 		if state == nil {
 			return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: fmt.Errorf("save real connection: workspace state not found")}
 		}
-		addMappingTargetForOwnGroups(state, conn.OwnGroupNames, UpstreamGroupRef{SiteID: conn.UpstreamSiteID, GroupName: conn.UpstreamGroupName})
-		if err := updateStateInTx(ctx, tx, *state); err != nil {
-			return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: err}
+		if conn.AdminPlatform == string(upstream.PlatformSub2API) && conn.UpstreamGroupID != "" {
+			var exists bool
+			err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM real_connections WHERE user_id = $1 AND workspace_admin_account_id = $2 AND upstream_site_id = $3 AND upstream_group_id = $4 AND status IN ('active', ''))`, conn.UserID, conn.WorkspaceAdminAccountID, conn.UpstreamSiteID, conn.UpstreamGroupID).Scan(&exists)
+			if err != nil {
+				return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: err}
+			}
+			if exists {
+				return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: requestError(ErrorConnectionExists)}
+			}
+		}
+		if conn.PricingMappingEnabled {
+			addMappingTargetForOwnGroups(state, conn.OwnGroupNames, UpstreamGroupRef{SiteID: conn.UpstreamSiteID, GroupName: conn.UpstreamGroupName})
+			if err := updateStateInTx(ctx, tx, *state); err != nil {
+				return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: err}
+			}
 		}
 	}
 

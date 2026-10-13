@@ -7,13 +7,16 @@ import (
 )
 
 const (
-	ErrorAuthRequired           = "admin.mySites.errors.authRequired"
-	ErrorAdminOnly              = "admin.mySites.errors.adminOnly"
-	ErrorRequest                = "admin.mySites.errors.request"
-	ErrorUnknown                = "admin.mySites.errors.unknown"
-	ErrorInvalidAutoPricingConf = "admin.mySites.errors.invalidAutoPricingConfig"
-	ErrorConnectionExists       = "admin.mySites.errors.connectionExists"
-	ErrorManagedDeleteOnly      = "admin.mySites.errors.managedDeleteOnly"
+	ErrorAuthRequired                 = "admin.mySites.errors.authRequired"
+	ErrorAdminOnly                    = "admin.mySites.errors.adminOnly"
+	ErrorRequest                      = "admin.mySites.errors.request"
+	ErrorUnknown                      = "admin.mySites.errors.unknown"
+	ErrorInvalidAutoPricingConf       = "admin.mySites.errors.invalidAutoPricingConfig"
+	ErrorConnectionExists             = "admin.mySites.errors.connectionExists"
+	ErrorImportInProgress             = "admin.mySites.errors.importInProgress"
+	ErrorImportSourceGroupUnavailable = "admin.mySites.errors.importSourceGroupUnavailable"
+	ErrorImportGroupsLoadFailed       = "admin.mySites.errors.importGroupsLoadFailed"
+	ErrorManagedDeleteOnly            = "admin.mySites.errors.managedDeleteOnly"
 )
 
 const (
@@ -161,7 +164,7 @@ type GroupOption struct {
 
 // RealConnectRequest 真实对接请求体。
 // 前端传入上游站点 ID、上游分组 ID/名称和自有分组 ID 列表。
-// GroupType 可选：为空时后端从上游站点缓存的分组列表中自动识别平台类型。
+// GroupType 显式选择优先；为空使用缓存分类作默认，仍校验支持平台和真实目标。
 type RealConnectRequest struct {
 	UpstreamSiteID    string   `json:"upstreamSiteId"`
 	UpstreamGroupID   string   `json:"upstreamGroupId"`

@@ -94,12 +94,21 @@ func TestHomeCostManagedKeyNameIncludesCreationMonthDay(t *testing.T) {
 				}
 				mu.Lock()
 				defer mu.Unlock()
-				if !strings.HasSuffix(keyName, "-验收-source-vip") {
-					t.Fatalf("site or group part changed: %q", keyName)
-				}
 				prefix := strings.TrimSuffix(keyName, "-验收-source-vip")
+				if platform == upstream.PlatformNewAPI {
+					if len(keyName) > 50 || !strings.HasSuffix(keyName, "-"+result.Connection.ID) || len(result.Connection.ID) != 32 {
+						t.Fatal("NewAPI name lost byte limit or complete connection suffix")
+					}
+					dateIndex := strings.Index(keyName, clock.date+"-")
+					if dateIndex < 0 {
+						t.Fatal("NewAPI readable prefix lost original month/day")
+					}
+					prefix = keyName[:dateIndex+len(clock.date)]
+				} else if !strings.HasSuffix(keyName, "-验收-source-vip") {
+					t.Fatal("Sub2API source/group name changed")
+				}
 				if !strings.HasSuffix(prefix, clock.date) {
-					t.Fatalf("creation name %q lacks month/day %s immediately after the English word", keyName, clock.date)
+					t.Fatal("creation prefix lost month/day")
 				}
 				word := strings.TrimSuffix(prefix, clock.date)
 				foundWord := false
@@ -107,7 +116,7 @@ func TestHomeCostManagedKeyNameIncludesCreationMonthDay(t *testing.T) {
 					foundWord = foundWord || word == existingWord
 				}
 				if !foundWord {
-					t.Fatalf("creation name changed the original English prefix: %q", word)
+					t.Fatal("creation prefix lost existing English word")
 				}
 				wantTokenLists := 0
 				if platform == upstream.PlatformNewAPI {

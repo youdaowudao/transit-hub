@@ -88,7 +88,7 @@ func TestC5ImportThreeGroupsCompleteMainSitePipeline(t *testing.T) {
 	if response.ConfigurationStatus != "confirmed" || response.Configuration == nil || !reflect.DeepEqual(response.Configuration.OwnGroups, []ImportOwnGroup{{ID: "7", Name: "readback-first"}, {ID: "8", Name: "readback-second"}, {ID: "9", Name: "readback-third"}}) {
 		t.Fatal("success summary did not use all three main-site readback group names")
 	}
-	if tx.commits != 1 || tx.queries != 1 || tx.rollbacks != 0 || len(tx.statements) != 2 || tx.insertArgs[10] != `["7","8","9"]` || tx.insertArgs[17] != true {
+	if tx.commits != 1 || tx.queries != 2 || tx.rollbacks != 0 || len(tx.statements) != 2 || tx.insertArgs[10] != `["7","8","9"]` || tx.insertArgs[17] != true {
 		t.Fatal("three-group binding and enabled pricing were not written in one transaction")
 	}
 	var mappings []GroupMapping

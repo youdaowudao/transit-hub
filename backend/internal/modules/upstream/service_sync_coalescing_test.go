@@ -77,8 +77,8 @@ func TestSyncCoalescesConcurrentCallsForSameSite(t *testing.T) {
 			metricsStarted <- struct{}{}
 			<-releaseMetrics
 			writeJSON(w, map[string]any{"data": map[string]any{"balance": 10.0, "total_recharged": 20.0}})
-		case "/api/v1/usage/dashboard/stats":
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0}})
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0, "total_actual_cost": 1.0}})
 		case "/api/v1/groups/available":
 			writeJSON(w, map[string]any{"data": []map[string]any{{"id": "group-1", "name": "default", "rate_multiplier": 1.0}}})
 		case "/api/v1/groups/rates":
@@ -136,8 +136,8 @@ func TestSyncDifferentSitesRunConcurrently(t *testing.T) {
 			metricsStarted <- token
 			<-releaseMetrics
 			writeJSON(w, map[string]any{"data": map[string]any{"balance": 10.0, "total_recharged": 20.0}})
-		case "/api/v1/usage/dashboard/stats":
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0}})
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0, "total_actual_cost": 1.0}})
 		case "/api/v1/groups/available":
 			writeJSON(w, map[string]any{"data": []map[string]any{{"id": "group-1", "name": "default", "rate_multiplier": 1.0}}})
 		case "/api/v1/groups/rates":
@@ -319,8 +319,8 @@ func TestSyncCancellationDoesNotCancelSharedSameSiteFlight(t *testing.T) {
 			metricsStarted <- struct{}{}
 			<-releaseMetrics
 			writeJSON(w, map[string]any{"data": map[string]any{"balance": 10.0, "total_recharged": 20.0}})
-		case "/api/v1/usage/dashboard/stats":
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0}})
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0, "total_actual_cost": 1.0}})
 		case "/api/v1/groups/available":
 			writeJSON(w, map[string]any{"data": []map[string]any{{"id": "group-1", "name": "default", "rate_multiplier": 1.0}}})
 		case "/api/v1/groups/rates":
@@ -381,8 +381,8 @@ func TestSyncReleasesFlightAfterFailure(t *testing.T) {
 				return
 			}
 			writeJSON(w, map[string]any{"data": map[string]any{"balance": 10.0, "total_recharged": 20.0}})
-		case "/api/v1/usage/dashboard/stats":
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0}})
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0, "total_actual_cost": 1.0}})
 		case "/api/v1/groups/available":
 			writeJSON(w, map[string]any{"data": []map[string]any{{"id": "group-1", "name": "default", "rate_multiplier": 1.0}}})
 		case "/api/v1/groups/rates":
@@ -434,8 +434,8 @@ func TestSyncReleasesFlightAfterPanic(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/auth/me":
 			writeJSON(w, map[string]any{"data": map[string]any{"balance": 10.0, "total_recharged": 20.0}})
-		case "/api/v1/usage/dashboard/stats":
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0}})
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0, "total_actual_cost": 1.0}})
 		case "/api/v1/groups/available":
 			writeJSON(w, map[string]any{"data": []map[string]any{{"id": "group-1", "name": "default", "rate_multiplier": 1.0}}})
 		case "/api/v1/groups/rates":

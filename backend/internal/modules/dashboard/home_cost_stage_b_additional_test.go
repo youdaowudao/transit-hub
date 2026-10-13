@@ -12,8 +12,8 @@ import (
 func stageBCostMetrics(t *testing.T, date string, observedAt time.Time, status string, value *float64) upstream.Metrics {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
-		"todayConsume":     map[string]any{"value": value},
-		"todayConsumeDate": date, "todayConsumeAt": observedAt, "todayConsumeStatus": status,
+		"todayConsume":         map[string]any{"value": value},
+		"todayConsumeTimezone": "Asia/Singapore", "todayConsumeDate": date, "todayConsumeAt": observedAt, "todayConsumeStatus": status,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -100,7 +100,7 @@ func TestHomeCostStageBLiveCostClockAndUnreadableBoundaries(t *testing.T) {
 	}
 }
 
-func TestHomeCostStageBUnreadableStillUsesExistingHistoryFallback(t *testing.T) {
+func TestHomeCostStageBUnreadableRetainsCertifiedCacheAndDoesNotUseHistory(t *testing.T) {
 	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
 	previousAt := now.Add(-time.Hour)
 	repo := &fakeMetricsRepository{latestSiteCosts: []SiteDailyCost{{
@@ -117,7 +117,7 @@ func TestHomeCostStageBUnreadableStillUsesExistingHistoryFallback(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.TodayPurchase == nil || *response.TodayPurchase != 9 || response.CostQuality == nil || response.CostQuality.Mode != "retained" || response.CostQuality.FallbackAt == nil || !response.CostQuality.FallbackAt.Equal(previousAt) {
+	if response.TodayPurchase == nil || *response.TodayPurchase != 6 || response.CostQuality == nil || response.CostQuality.Mode != "retained" || response.CostQuality.FallbackAt == nil || !response.CostQuality.FallbackAt.Equal(now) {
 		t.Fatalf("existing history fallback changed: purchase=%v quality=%+v", response.TodayPurchase, response.CostQuality)
 	}
 }

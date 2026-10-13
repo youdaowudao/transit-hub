@@ -12,9 +12,9 @@ import (
 func mergedAccountFixture(now time.Time) (upstream.KeyUsageForDateResult, []upstream.SiteCostForDateResult, []AutomaticAccountTarget) {
 	amount := 3.0
 	date := businesstime.DateAt(now)
-	keys := upstream.KeyUsageForDateResult{BusinessDate: date, ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{
+	keys := upstream.KeyUsageForDateResult{BusinessDate: date, ExpectedSites: 1, CompletedSites: 1, Sites: []upstream.KeyUsageSiteResult{{Timezone: "Asia/Singapore",
 		SiteID: "site", RechargeRate: 1, Complete: true, Status: "ok", StartedAt: now.Add(time.Second), ConsumeDate: date,
-		SyncedRawCost: &amount, CollectedRawCost: &amount,
+		SyncedRawCost: &amount, CollectedRawCost: &amount, CollectedAt: &now,
 		Items: []upstream.KeyUsageTodayItem{
 			{SiteID: "site", KeyID: "merged-main", KeyIDs: []string{"merged-main", "merged-other"}, KeyName: "same", Merged: true, RawAmount: 1, TodayAmount: 1},
 			{SiteID: "site", KeyID: "single", KeyIDs: []string{"single"}, KeyName: "single", RawAmount: 2, TodayAmount: 2},
@@ -36,11 +36,11 @@ func TestHomeCostMergedAccountNeverConfirmsEitherMergedID(t *testing.T) {
 		t.Fatalf("merged consumption must reconcile once at site level: %#v", runs)
 	}
 	for _, target := range targets[:2] {
-		if _, _, ok := findAutomaticAccountKey(target, runs); ok {
+		if _, _, ok := findAutomaticAccountKey(target, runs, "user", "workspace", keys.BusinessDate, keys.BusinessDate); ok {
 			t.Errorf("aggregate consumption was accepted as one account's amount for %s", target.Asset.ID)
 		}
 	}
-	if _, item, ok := findAutomaticAccountKey(targets[2], runs); !ok || item.AdjustedCostCents != 200 {
+	if _, item, ok := findAutomaticAccountKey(targets[2], runs, "user", "workspace", keys.BusinessDate, keys.BusinessDate); !ok || item.AdjustedCostCents != 200 {
 		t.Fatal("independent Key lost its confirmable account amount")
 	}
 }

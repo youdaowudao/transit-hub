@@ -186,6 +186,7 @@ func (r *MetricsRepository) ensureAccountAssetSchema(ctx context.Context) error 
 		CREATE INDEX IF NOT EXISTS idx_dashboard_key_cost_runs_workspace_date
 			ON dashboard_upstream_key_cost_runs (user_id, admin_account_id, business_date, site_id, created_at DESC);
 		ALTER TABLE dashboard_upstream_key_cost_runs ADD COLUMN IF NOT EXISTS snapshot_run_id text NOT NULL DEFAULT '';
+ ALTER TABLE dashboard_upstream_key_cost_runs ADD COLUMN IF NOT EXISTS usage_timezone text NOT NULL DEFAULT '';
 
 		CREATE TABLE IF NOT EXISTS dashboard_upstream_key_daily_costs (
 			run_id text NOT NULL REFERENCES dashboard_upstream_key_cost_runs(id) ON DELETE CASCADE,
@@ -392,6 +393,9 @@ func accountAssetQueryError(kind string, err error) error {
 }
 
 func (r *MetricsRepository) ListAccountAssets(ctx context.Context, userID, adminAccountID string, filter AccountAssetFilter) (AccountAssetPage, error) {
+	if filter.CurrentDate == "" {
+		return AccountAssetPage{}, errors.New("账号列表缺少内部新加坡当前日期，无法核查费用；请联系维护人员检查读取入口。")
+	}
 	filter.Platform = strings.TrimSpace(filter.Platform)
 	filter.Channel = strings.TrimSpace(filter.Channel)
 	filter.AccountType = strings.TrimSpace(filter.AccountType)
@@ -415,10 +419,10 @@ func (r *MetricsRepository) ListAccountAssets(ctx context.Context, userID, admin
 		         AND link.effective_from <= $12::date AND (link.effective_to IS NULL OR link.effective_to >= $12::date))
 		FROM dashboard_account_assets asset
 		LEFT JOIN LATERAL (
-			SELECT sum(raw_quota_used_micros)::bigint AS raw_quota_used_micros,
-			       sum(revenue_cents)::bigint AS revenue_cents,sum(upstream_cost_cents)::bigint AS upstream_cost_cents,
+			SELECT sum(raw_quota_used_micros) FILTER (WHERE `+usableAutomaticStatSQL("stat", "$12")+`)::bigint AS raw_quota_used_micros,
+			       sum(revenue_cents) FILTER (WHERE `+usableAutomaticStatSQL("stat", "$12")+`)::bigint AS revenue_cents,sum(upstream_cost_cents) FILTER (WHERE `+usableAutomaticStatSQL("stat", "$12")+`)::bigint AS upstream_cost_cents,
 			       CASE WHEN count(*)=0 THEN 'missing'
-			            WHEN bool_and(quality=$10) THEN $10 ELSE 'partial' END AS quality
+			            WHEN bool_and(quality=$10 AND `+usableAutomaticStatSQL("stat", "$12")+`) THEN $10 ELSE 'partial' END AS quality
 			FROM dashboard_account_daily_stats stat
 			WHERE stat.user_id=asset.user_id AND stat.admin_account_id=asset.admin_account_id AND stat.account_asset_id=asset.id
 		) stats ON true
@@ -466,7 +470,7 @@ func (r *MetricsRepository) ListAccountAssets(ctx context.Context, userID, admin
 		ORDER BY asset.updated_at DESC,asset.id ASC LIMIT $8 OFFSET $9
 	`, userID, adminAccountID, filter.Platform, filter.Channel, filter.AccountType, filter.Status, filter.Search,
 		filter.PageSize+1, (filter.Page-1)*filter.PageSize, KeyCostQualityComplete, AccountEventRefund,
-		businesstime.Today(), AccountEventStatus, AccountEventRestore, AccountStatusUnactivated, AccountEventMetadataCorrection)
+		filter.CurrentDate, AccountEventStatus, AccountEventRestore, AccountStatusUnactivated, AccountEventMetadataCorrection)
 	if err != nil {
 		return AccountAssetPage{}, err
 	}
@@ -484,13 +488,13 @@ func (r *MetricsRepository) ListAccountAssets(ctx context.Context, userID, admin
 			&item.HasActiveLink); err != nil {
 			return AccountAssetPage{}, err
 		}
-		projected, err := projectAccountMetadataAtDate(ctx, r.db, item, businesstime.Today())
+		projected, err := projectAccountMetadataAtDate(ctx, r.db, item, filter.CurrentDate)
 		if err != nil {
 			return AccountAssetPage{}, err
 		}
 		item.Identifier, item.Platform, item.Channel = projected.Identifier, projected.Platform, projected.Channel
 		item.AccountType, item.UpstreamReferenceURL = projected.AccountType, projected.UpstreamReferenceURL
-		projectedStatus, projectedStatsMode, err := accountAssetStateAtDate(ctx, r.db, item, businesstime.Today())
+		projectedStatus, projectedStatsMode, err := accountAssetStateAtDate(ctx, r.db, item, filter.CurrentDate)
 		if err != nil {
 			return AccountAssetPage{}, err
 		}
@@ -598,6 +602,18 @@ func (r *MetricsRepository) ListAccountCostLedger(ctx context.Context, userID, a
 	}
 	if err := rows.Err(); err != nil {
 		return AccountCostLedgerPage{}, err
+	}
+	rows.Close()
+	if filter.CurrentDate != "" {
+		invalid, err := r.UnconfirmedQuotaRecognitionAssets(ctx, userID, adminAccountID, filter.CurrentDate, filter.CurrentDate)
+		if err != nil {
+			return AccountCostLedgerPage{}, err
+		}
+		for i := range items {
+			if items[i].BusinessDate == filter.CurrentDate && items[i].Type == AdditionalCostAccountPurchase && invalid[items[i].AccountAssetID] {
+				items[i].Note += " 这笔金额保留为原记录，尚未按新加坡日期重新确认；请点击‘刷新账号统计’，不会修改主站。"
+			}
+		}
 	}
 	return AccountCostLedgerPage{Items: items, HasMore: filter.Page*filter.PageSize < totalGroups}, nil
 }
@@ -710,7 +726,15 @@ func (r *MetricsRepository) SaveAutomaticAccountDailyStats(ctx context.Context, 
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	currentDate := accountCurrentDateFromContext(ctx)
+	before, err := r.historicalAccountBusinessState(ctx, tx, stats, currentDate)
+	if err != nil {
+		return err
+	}
 	if err := r.saveAutomaticAccountDailyStats(ctx, tx, stats); err != nil {
+		return err
+	}
+	if err := r.verifyHistoricalAccountBusinessState(ctx, tx, stats, currentDate, before); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -1756,7 +1780,11 @@ func loadAccountEventByIdempotency(ctx context.Context, db metricsDB, userID, ad
 	return event, err == nil, err
 }
 
-func (r *MetricsRepository) GetAccountAssetDetail(ctx context.Context, userID, adminAccountID, assetID string) (AccountAssetDetail, error) {
+func (r *MetricsRepository) GetAccountAssetDetail(ctx context.Context, userID, adminAccountID, assetID string, currentDates ...string) (AccountAssetDetail, error) {
+	currentDate := accountQueryCurrentDate(currentDates)
+	if currentDate == "" {
+		return AccountAssetDetail{}, errors.New("账号详情缺少内部新加坡当前日期，无法核查费用；请联系维护人员检查读取入口。")
+	}
 	asset, err := r.GetAccountAsset(ctx, userID, adminAccountID, assetID)
 	if err != nil {
 		return AccountAssetDetail{}, err
@@ -1770,7 +1798,7 @@ func (r *MetricsRepository) GetAccountAssetDetail(ctx context.Context, userID, a
 	if err != nil {
 		return AccountAssetDetail{}, err
 	}
-	today := businesstime.Today()
+	today := currentDate
 	batch.PurchaseURL, err = projectAccountPurchaseURLAtDate(ctx, r.db, asset, batch.PurchaseURL, today)
 	if err != nil {
 		return AccountAssetDetail{}, err
@@ -1789,7 +1817,7 @@ func (r *MetricsRepository) GetAccountAssetDetail(ctx context.Context, userID, a
 	if err != nil {
 		return AccountAssetDetail{}, err
 	}
-	stats, err := r.listAccountDailyStats(ctx, userID, adminAccountID, assetID)
+	stats, err := r.listAccountDailyStats(ctx, userID, adminAccountID, assetID, currentDate)
 	if err != nil {
 		return AccountAssetDetail{}, err
 	}
@@ -1799,6 +1827,9 @@ func (r *MetricsRepository) GetAccountAssetDetail(ctx context.Context, userID, a
 	for _, stat := range stats {
 		if stat.Quality != KeyCostQualityComplete {
 			hasIncompleteDailyStats = true
+		}
+		if stat.BusinessDate == currentDate && stat.Source == StatsModeAutomatic && stat.Quality == KeyCostQualityMissing {
+			continue
 		}
 		if stat.RevenueCents != nil {
 			revenueCents += *stat.RevenueCents
@@ -1893,13 +1924,13 @@ func (r *MetricsRepository) listAccountEvents(ctx context.Context, userID, admin
 	return items, rows.Err()
 }
 
-func (r *MetricsRepository) listAccountDailyStats(ctx context.Context, userID, adminAccountID, assetID string) ([]AccountDailyStat, error) {
+func (r *MetricsRepository) listAccountDailyStats(ctx context.Context, userID, adminAccountID, assetID, currentDate string) ([]AccountDailyStat, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id,business_date::text,source,quality,key_cost_run_id,raw_quota_used_micros,revenue_cents,
-		       upstream_cost_cents,recognized_cost_cents,replacement_deduction_cents,observed_at,created_at,updated_at
-		FROM dashboard_account_daily_stats WHERE user_id=$1 AND admin_account_id=$2 AND account_asset_id=$3
+		       upstream_cost_cents,recognized_cost_cents,replacement_deduction_cents,observed_at,created_at,updated_at,`+usableAutomaticStatSQL("stat", "$4")+`
+		FROM dashboard_account_daily_stats stat WHERE user_id=$1 AND admin_account_id=$2 AND account_asset_id=$3
 		ORDER BY business_date,created_at,id
-	`, userID, adminAccountID, assetID)
+	`, userID, adminAccountID, assetID, currentDate)
 	if err != nil {
 		return nil, err
 	}
@@ -1907,12 +1938,28 @@ func (r *MetricsRepository) listAccountDailyStats(ctx context.Context, userID, a
 	items := make([]AccountDailyStat, 0)
 	for rows.Next() {
 		var item AccountDailyStat
+		var usable bool
 		if err := rows.Scan(&item.ID, &item.BusinessDate, &item.Source, &item.Quality, &item.KeyCostRunID,
 			&item.RawQuotaUsedMicros, &item.RevenueCents, &item.UpstreamCostCents, &item.RecognizedCostCents,
-			&item.ReplacementDeductionCents, &item.ObservedAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			&item.ReplacementDeductionCents, &item.ObservedAt, &item.CreatedAt, &item.UpdatedAt, &usable); err != nil {
 			return nil, err
+		}
+		if !usable {
+			item.RawQuotaUsedMicros = nil
+			item.UpstreamCostCents = nil
+			item.ReplacementDeductionCents = nil
+			item.Quality = KeyCostQualityMissing
 		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// Manual and historical rows preserve their original values. A current automatic
+// row needs one unambiguous linked site and a wholly certified parent batch.
+func usableAutomaticStatSQL(alias, currentDate string) string {
+	return `(` + alias + `.source<>'automatic' OR ` + alias + `.business_date<>` + currentDate + `::date OR (` + alias + `.quality='complete' AND
+ (SELECT count(*) FROM dashboard_account_links link WHERE link.user_id=` + alias + `.user_id AND link.admin_account_id=` + alias + `.admin_account_id AND link.account_asset_id=` + alias + `.account_asset_id AND link.effective_from<=` + alias + `.business_date AND (link.effective_to IS NULL OR link.effective_to>=` + alias + `.business_date))=1 AND
+ EXISTS (SELECT 1 FROM dashboard_upstream_key_cost_runs run JOIN dashboard_account_links link ON link.user_id=run.user_id AND link.admin_account_id=run.admin_account_id AND link.upstream_site_id=run.site_id WHERE run.user_id=` + alias + `.user_id AND run.admin_account_id=` + alias + `.admin_account_id AND run.snapshot_run_id=` + alias + `.key_cost_run_id AND run.business_date=` + alias + `.business_date AND run.complete=true AND run.usage_timezone='Asia/Singapore' AND link.account_asset_id=` + alias + `.account_asset_id AND link.effective_from<=` + alias + `.business_date AND (link.effective_to IS NULL OR link.effective_to>=` + alias + `.business_date)) AND
+ NOT EXISTS (SELECT 1 FROM dashboard_upstream_key_cost_runs bad WHERE bad.user_id=` + alias + `.user_id AND bad.admin_account_id=` + alias + `.admin_account_id AND bad.snapshot_run_id=` + alias + `.key_cost_run_id AND (bad.business_date<>` + alias + `.business_date OR bad.complete=false OR bad.usage_timezone<>'Asia/Singapore'))))`
 }

@@ -88,7 +88,7 @@ func TestHomeCostStageDRecoveryMergesDifferentSiteDateSets(t *testing.T) {
 	}
 	amount := 1.0
 	old := upstream.Metrics{TodayConsumeStatus: "unreadable"}
-	next := upstream.Metrics{TodayConsumeStatus: "ok", TodayConsumeDate: businesstime.DateAt(now), TodayConsume: upstream.MetricValue{Value: &amount}}
+	next := upstream.Metrics{TodayConsumeTimezone: "Asia/Singapore", TodayConsumeStatus: "ok", TodayConsumeDate: businesstime.DateAt(now), TodayConsume: upstream.MetricValue{Value: &amount}}
 	done := make(chan error, 2)
 	go func() {
 		done <- handler.RecoverSiteCostsAfterSync(t.Context(), "user", "ws", "one", old, next, upstream.StatusConnected, upstream.StatusConnected)
@@ -180,7 +180,7 @@ func TestHomeCostStageDRecoveryWaitsForConcurrentDateRegistration(t *testing.T) 
 	}
 	old := upstream.Metrics{TodayConsumeStatus: "unreadable"}
 	amount := 1.0
-	next := upstream.Metrics{TodayConsumeStatus: "ok", TodayConsumeDate: businesstime.DateAt(now), TodayConsume: upstream.MetricValue{Value: &amount}}
+	next := upstream.Metrics{TodayConsumeTimezone: "Asia/Singapore", TodayConsumeStatus: "ok", TodayConsumeDate: businesstime.DateAt(now), TodayConsume: upstream.MetricValue{Value: &amount}}
 	done := make(chan error, 2)
 	for _, siteID := range []string{"one", "two"} {
 		go func() {

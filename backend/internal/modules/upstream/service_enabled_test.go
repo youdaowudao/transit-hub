@@ -99,3 +99,8 @@ func TestDisabledSiteIsExcludedFromCostQueries(t *testing.T) {
 		t.Fatalf("BalanceBreakdown disabled result = %#v, err=%v", balances, err)
 	}
 }
+
+func (r *enabledTestRepository) SaveExistingSiteIfUnchanged(ctx context.Context, expected, candidate Site) (bool, error) {
+	err := r.SaveSite(ctx, candidate)
+	return err == nil, err
+}

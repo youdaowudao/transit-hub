@@ -74,8 +74,9 @@ type CostQuality struct {
 
 // SiteCostFault 记录单个站点的成本采集失败原因。
 type SiteCostFault struct {
-	SiteName string `json:"siteName"`
-	Reason   string `json:"reason"` // "date_mismatch" / "stale" / "fetch_error"
+	ErrorDetail string `json:"errorDetail,omitempty"`
+	SiteName    string `json:"siteName"`
+	Reason      string `json:"reason"` // "date_mismatch" / "stale" / "fetch_error"
 }
 
 // TrendResponse 是 GET /api/dashboard/trends 返回的历史趋势数据。

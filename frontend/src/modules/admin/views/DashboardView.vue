@@ -50,6 +50,7 @@ import {
   type DashboardDataSnapshot,
 } from '../composables/useDashboardDataCache'
 import { useDashboardMetrics } from '../composables/useDashboardMetrics'
+import { costFailureText } from '../utils/upstream'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import type { ConnectionHealthStoredSummary } from '../types/connectionHealth'
 import type { DashboardColorToken, DashboardMetricData, DashboardMetricKey, DashboardPeriod } from '../types/dashboard'
@@ -169,10 +170,14 @@ const hydrateSnapshot = (snapshot: DashboardDataSnapshot | null): boolean => {
   adminStatus.value = snapshot.adminStatus
   groupCount.value = snapshot.live.groupCount ?? null
   groupUsage.value = snapshot.groupUsage ?? null
-  groupProfit.value = snapshot.groupProfit ?? null
+  groupProfit.value = null
   balanceBreakdown.value = snapshot.balanceBreakdown ?? null
   healthSummary.value = snapshot.healthSummary ?? null
-  applyRawData(snapshot.live, snapshot.trends)
+  applyRawData({ ...snapshot.live, todayPurchase: null, netProfit: null, operatingCost: null, adjustedNetProfit: null, adjustedProfitMargin: null,
+    confirmedCost: null, netProfitCeiling: null, accountSnapshotRunId: '', accountStatsQuality: 'missing', accountExpectedCount: undefined, accountCompletedCount: undefined, replacementDeduction: null,
+    additionalCosts: snapshot.live.additionalCosts ? { ...snapshot.live.additionalCosts, available: false, total: null, accountQuality: 'missing', replacementDeduction: null, unavailableReason: '当前费用等待最近一次同步结果，暂缺的费用不会计作零；可刷新账号统计，不会修改主站。' } : undefined,
+ costQuality: { ...snapshot.live.costQuality, businessDate: snapshot.live.date, mode: 'unavailable', confirmedCost: 0, complete: false, expectedSites: snapshot.live.costQuality?.expectedSites ?? 0, collectedSites: 0, freshSites: 0, retainedSites: 0, missingSites: snapshot.live.costQuality?.expectedSites ?? 0, failedSites: snapshot.live.costQuality?.expectedSites ?? 0 },
+  }, snapshot.trends)
   lastUpdatedAt.value = snapshot.updatedAt
   initialLoading.value = false
   return true
@@ -935,6 +940,8 @@ const lastProbeLabel = computed(() => {
 
 <template>
   <div class="space-y-6">
+ <p class="text-xs text-muted-foreground">费用按新加坡日期统计，使用最近一次同步结果；暂缺的费用不会计作零。</p>
+ <p v-for="failure in liveData?.costQuality?.failures ?? []" :key="failure.siteName" class="text-xs text-warning">{{ failure.siteName }}：{{ failure.errorDetail || costFailureText(failure.reason) }}</p>
     <div
       v-if="adminStatus.authenticated"
       class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-card px-4 py-2.5 shadow-sm"

@@ -47,6 +47,8 @@ func (f *fakeUpstreamLister) CachedKeyUsageForDate(_ context.Context, _, _, date
 			byID[key.SiteID] = site
 			order = append(order, key.SiteID)
 		}
+		site.Timezone = "Asia/Singapore"
+		site.ConsumeDate = date
 		site.Complete = true
 		site.Status = "ok"
 		at := time.Now()

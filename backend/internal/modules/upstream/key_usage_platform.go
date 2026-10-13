@@ -90,36 +90,17 @@ func (s *PlatformService) fetchSub2APIKeyUsageBatch(ctx context.Context, session
 }
 
 func (s *PlatformService) fetchKeyCollectionTotal(ctx context.Context, session Session, date string) (*float64, error) {
-	if session.Platform == PlatformSub2API {
-		response, err := s.requestKeyUsageJSONWithContext(ctx, session.BaseURL+"/api/v1/usage/dashboard/stats", sub2APIUserAuthOptions(session))
-		if err != nil {
-			return nil, err
-		}
-		amount := firstNumber(dataRecord(response.Payload), []string{"today_actual_cost"})
-		if amount == nil {
-			return nil, newRequestError(ErrorInvalidResponse, session.Platform)
-		}
-		return amount, nil
-	}
-	start, end, err := businessDayUnixBounds(date)
+	amount, _, err := s.fetchAccountCostForDateContext(ctx, session, date)
 	if err != nil {
 		return nil, err
 	}
-	response, err := s.requestKeyUsageJSONWithContext(ctx, session.BaseURL+"/api/log/self/stat?type=2&start_timestamp="+strconvInt(start)+"&end_timestamp="+strconvInt(end), newAPIAuthOptions(session))
-	if err != nil {
-		return nil, err
-	}
-	amount := quotaToUSDWithUnit(firstNumber(dataRecord(response.Payload), []string{"quota", "used_quota", "usedQuota"}), session.QuotaPerUnit)
-	if amount == nil {
-		return nil, newRequestError(ErrorInvalidResponse, session.Platform)
-	}
-	return amount, nil
+	return &amount, nil
 }
 
 // Historical daily closing preserves its explicit date; collectors always use today.
 func (s *PlatformService) collectKeyUsageToday(ctx context.Context, session Session, groups []GroupInfo, date string) ([]KeyUsageTodayStat, error) {
 	if session.Platform == PlatformSub2API {
-		return s.fetchSub2APIKeyUsage(ctx, session, true, date, true)
+		return s.fetchSub2APIKeyUsage(ctx, session, true, date, false)
 	}
 	if session.Platform == PlatformNewAPI {
 		return s.fetchNewAPIKeyUsageToday(ctx, session, groups, true, date)

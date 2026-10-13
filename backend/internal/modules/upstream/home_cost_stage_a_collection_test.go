@@ -2,7 +2,6 @@ package upstream
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +11,7 @@ import (
 	"transithub/backend/internal/shared/businesstime"
 )
 
-func TestHomeCostStageASub2APIBatches100(t *testing.T) {
+func TestHomeCostStageASub2APIUsesBoundedDatedIndividualReads(t *testing.T) {
 	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
 	var batches atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -28,20 +27,12 @@ func TestHomeCostStageASub2APIBatches100(t *testing.T) {
 				rows = append(rows, map[string]any{"id": 101, "name": "101"})
 			}
 			writeJSON(w, map[string]any{"data": rows, "total": 101})
-		case "/api/v1/usage/dashboard/api-keys-usage":
+		case "/api/v1/usage/stats":
 			batches.Add(1)
-			var body struct {
-				IDs []int64 `json:"api_key_ids"`
+			if r.URL.Query().Get("period") != "" || r.URL.Query().Get("timezone") != "Asia/Singapore" || r.URL.Query().Get("start_date") != businesstime.DateAt(now) {
+				t.Error("dated query omitted Singapore range")
 			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			if len(body.IDs) > 100 || len(body.IDs) == 0 {
-				t.Errorf("invalid batch size %d", len(body.IDs))
-			}
-			stats := map[string]any{}
-			for _, id := range body.IDs {
-				stats[fmt.Sprint(id)] = map[string]any{"today_actual_cost": 1, "total_actual_cost": 99}
-			}
-			writeJSON(w, map[string]any{"data": map[string]any{"stats": stats}})
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 1}})
 		default:
 			http.NotFound(w, r)
 		}
@@ -50,7 +41,7 @@ func TestHomeCostStageASub2APIBatches100(t *testing.T) {
 	platform := NewPlatformService(NewHTTPClient(server.Client()))
 	platform.now = func() time.Time { return now }
 	items, err := platform.FetchKeyUsageTodayIncludingZeroWithContext(context.Background(), Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "fixture"}, nil, businesstime.DateAt(now))
-	if err != nil || len(items) != 101 || batches.Load() != 2 {
+	if err != nil || len(items) != 101 || batches.Load() != 101 {
 		t.Fatalf("batch result entries=%d batches=%d err=%v", len(items), batches.Load(), err)
 	}
 	for _, item := range items {
@@ -60,7 +51,7 @@ func TestHomeCostStageASub2APIBatches100(t *testing.T) {
 	}
 }
 
-func TestHomeCostStageASub2APIBatchFallbackUsesServerToday(t *testing.T) {
+func TestHomeCostStageASub2APIDatedReadsNeverUseUnsupportedBatch(t *testing.T) {
 	now := time.Date(2031, 2, 3, 4, 5, 6, 0, time.UTC)
 	for _, status := range []int{404, 405} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
@@ -76,7 +67,7 @@ func TestHomeCostStageASub2APIBatchFallbackUsesServerToday(t *testing.T) {
 				case "/api/v1/usage/stats":
 					fallback.Add(1)
 					q := r.URL.Query()
-					if q.Get("period") != "today" || q.Get("timezone") != "" || q.Get("start_date") != "" || q.Get("end_date") != "" {
+					if q.Get("period") != "" || q.Get("timezone") != "Asia/Singapore" || q.Get("start_date") != businesstime.DateAt(now) || q.Get("end_date") != businesstime.DateAt(now) {
 						t.Errorf("fallback query is not upstream server today: %v", q)
 					}
 					writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 2}})
@@ -93,7 +84,7 @@ func TestHomeCostStageASub2APIBatchFallbackUsesServerToday(t *testing.T) {
 					t.Fatalf("fallback result %v %v", items, err)
 				}
 			}
-			if batches.Load() != 1 || fallback.Load() != 2 {
+			if batches.Load() != 0 || fallback.Load() != 2 {
 				t.Fatalf("capability not cached: batch=%d fallback=%d", batches.Load(), fallback.Load())
 			}
 		})

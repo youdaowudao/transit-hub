@@ -436,13 +436,11 @@ func invalidBodyError(fields ...string) error {
 	return &FieldValidationError{Fields: fields}
 }
 
-// WithSyncDate 返回设置了 TodayConsumeDate 和 TodayConsumeAt 的新 Metrics。
-// syncDate 是新加坡业务日期字符串（"2006-01-02"），由同步入口统一生成。
+// WithSyncDate 仅补缺少的兼容日期，不改实际查询日期或费用时区证明。
 func (m Metrics) WithSyncDate(syncDate string, observedAt time.Time) Metrics {
-	m.TodayConsumeDate = syncDate
-	if m.TodayConsumeStatus != "unreadable" {
-		m.TodayConsumeStatus = "ok"
-		m.TodayConsumeAt = &observedAt
+	// This compatibility wrapper cannot certify the range of a cost request.
+	if m.TodayConsumeDate == "" {
+		m.TodayConsumeDate = syncDate
 	}
 	return m
 }

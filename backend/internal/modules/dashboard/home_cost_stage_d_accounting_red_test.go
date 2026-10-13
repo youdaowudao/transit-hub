@@ -70,7 +70,7 @@ func TestHomeCostStageDAdjustedProfitMarginQuality(t *testing.T) {
 				}
 				if i < tc.count {
 					amount := 1.0
-					sites[i].Metrics = upstream.Metrics{TodayConsume: upstream.MetricValue{Value: &amount}, TodayConsumeDate: businesstime.DateAt(now), TodayConsumeAt: &now, TodayConsumeStatus: "ok"}
+					sites[i].Metrics = upstream.Metrics{TodayConsumeTimezone: "Asia/Singapore", TodayConsume: upstream.MetricValue{Value: &amount}, TodayConsumeDate: businesstime.DateAt(now), TodayConsumeAt: &now, TodayConsumeStatus: "ok"}
 				}
 			}
 			repo := &liveMetricsAccountingRepository{fakeMetricsRepository: &fakeMetricsRepository{}, fakeAdditionalCostRepository: &fakeAdditionalCostRepository{rate: RechargeFeeRate{Rate: 0}, items: []AdditionalCostRecord{{Type: AdditionalCostFixed, Amount: 5}}}}
@@ -84,8 +84,12 @@ func TestHomeCostStageDAdjustedProfitMarginQuality(t *testing.T) {
 			if payload["adjustedProfitMarginQuality"] != tc.want {
 				t.Errorf("margin quality=%v want=%s", payload["adjustedProfitMarginQuality"], tc.want)
 			}
-			if response.AdjustedProfitMargin == nil {
-				t.Fatal("fixture should provide adjusted margin")
+			if tc.count == 0 {
+				if response.AdjustedProfitMargin != nil {
+					t.Fatal("all missing costs cannot produce a margin")
+				}
+			} else if response.AdjustedProfitMargin == nil {
+				t.Fatal("confirmed partial costs should retain their existing margin projection")
 			}
 		})
 	}

@@ -87,7 +87,7 @@ func sub2APIKeyServer(t *testing.T, keyID string, keyName string, groupName stri
 }
 
 func newTestSite(id, userID, adminAccountID string, rechargeRate float64, session *Session) *Site {
-	return &Site{
+	site := &Site{
 		ID:             id,
 		UserID:         userID,
 		AdminAccountID: adminAccountID,
@@ -97,6 +97,13 @@ func newTestSite(id, userID, adminAccountID string, rechargeRate float64, sessio
 		Status:         StatusConnected,
 		Session:        session,
 	}
+	if session != nil {
+		site.BaseURL = session.BaseURL
+		if session.AuthMode == AuthModeUserKey {
+			site.Account = session.UserID
+		}
+	}
+	return site
 }
 
 // TestServiceKeyUsageToday_WorkspaceIsolation 覆盖测试要求 1：只返回当前工作区站点的数据，
@@ -272,7 +279,7 @@ func TestServiceKeyUsageForDateReportsCompleteAndFailedSitesWithoutDroppingZeroK
 				t.Fatalf("unexpected business date: %s", r.URL.RawQuery)
 			}
 			amount := 0.0
-			if r.URL.Query().Get("api_key_id") == "2" {
+			if r.URL.Query().Get("api_key_id") == "2" || r.URL.Query().Get("api_key_id") == "" {
 				amount = 5
 			}
 			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": amount}})

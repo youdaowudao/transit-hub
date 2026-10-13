@@ -7,6 +7,7 @@ import (
 	"errors"
 	"hash/fnv"
 	"log"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ type SiteRepository interface {
 	ListSites(ctx context.Context) ([]Site, error)
 	ListSitesForUser(ctx context.Context, userID string) ([]Site, error)
 	SaveSite(ctx context.Context, site Site) error
+	SaveExistingSiteIfUnchanged(ctx context.Context, expected, candidate Site) (bool, error)
 	DeleteSite(ctx context.Context, userID string, id string) error
 }
 
@@ -324,12 +326,12 @@ func (s *Service) FetchGroupDailyStats(ctx context.Context, userID string, id st
 		return nil, err
 	}
 
-	// 将刷新后的会话写回缓存和数据库。
-	site, err = s.cache.Get(ctx, id)
-	if err == nil && site != nil && site.UserID == userID && site.IsEnabled() {
-		site.Session = &refreshedSession
-		_ = s.setCachedSite(ctx, site)
-		_ = s.saveSite(ctx, site)
+	proceed, saveErr := s.persistKeyUsageSession(*site, refreshedSession)
+	if !proceed || saveErr != nil {
+		if saveErr == nil {
+			saveErr = staleSiteRequestError()
+		}
+		return nil, saveErr
 	}
 	return stats, nil
 }
@@ -354,7 +356,7 @@ func (s *Service) KeyUsageTodayIncludingZeroForDate(ctx context.Context, userID,
 
 func (s *Service) KeyUsageForDate(ctx context.Context, userID, adminAccountID, date string) (KeyUsageForDateResult, error) {
 	if strings.TrimSpace(date) == "" {
-		date = businesstime.Today()
+		date = s.keyUsageDate()
 	}
 	if strings.TrimSpace(adminAccountID) == "" {
 		return KeyUsageForDateResult{}, errors.New("admin account id is required")
@@ -393,22 +395,31 @@ func (s *Service) KeyUsageForDate(ctx context.Context, userID, adminAccountID, d
 			refreshedSession, refreshErr := s.platformService.RefreshSessionContext(ctx, session)
 			if refreshErr != nil {
 				logDatedUsageFailure(site, date, "refresh", refreshErr)
-				siteResult.Error = ErrorRequest
+				siteResult.Error = formatCostFailure("逐Key登录资料刷新", refreshErr)
 				result.Sites[index] = siteResult
 				return
 			}
-			stats, fetchErr := s.platformService.fetchKeyUsageForDate(withDatedUsageScope(ctx, site.ID), refreshedSession, groups, date)
+			stats, total, collectedAt, fetchErr := s.platformService.fetchDatedKeyCollection(withDatedUsageScope(ctx, site.ID), refreshedSession, groups, date)
 			if fetchErr != nil {
 				logDatedUsageFailure(site, date, "usage", fetchErr)
-				siteResult.Error = ErrorRequest
+				siteResult.Error = formatCostFailure("站点“"+safeCostReason(site.Name)+"”逐Key指定日费用读取", fetchErr)
 				result.Sites[index] = siteResult
 				return
 			}
-			if cached, cacheErr := s.cache.Get(ctx, site.ID); cacheErr == nil && cached != nil && cached.UserID == site.UserID && cached.IsEnabled() {
-				cached.Session = &refreshedSession
-				_ = s.setCachedSite(ctx, cached)
-				_ = s.saveSite(ctx, cached)
+			proceed, saveErr := s.persistKeyUsageSession(*site, refreshedSession)
+			if !proceed || saveErr != nil {
+				if saveErr == nil {
+					saveErr = staleSiteRequestError()
+				}
+				siteResult.Error = taskErrorDetail(saveErr)
+				result.Sites[index] = siteResult
+				return
 			}
+			siteResult.Timezone = businesstime.Timezone
+			siteResult.ConsumeDate = date
+			siteResult.CollectedRawCost = &total
+			siteResult.CollectedAt = &collectedAt
+
 			for _, stat := range stats {
 				groupName := strings.TrimSpace(stat.GroupName)
 				if groupName == "" {
@@ -568,19 +579,17 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 
 // Update 更新指定站点的配置。
 // 如果提供了新的凭证，会重新执行平台登录。
-func (s *Service) Update(ctx context.Context, userID string, id string, dto UpdateRequest) (Response, error) {
+func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateRequest) (Response, error) {
 	if err := validateUpdate(dto); err != nil {
 		return Response{}, err
 	}
-
-	site, err := s.cache.Get(ctx, id)
+	site, err := s.readCurrentSite(ctx, id)
 	if err != nil {
 		return Response{}, err
 	}
 	if site == nil || site.UserID != userID {
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
-	// 工作区隔离：站点必须属于当前工作区，否则拒绝操作。
 	aid, err := s.requireCurrentAdminAccountID(ctx, userID)
 	if err != nil {
 		return Response{}, err
@@ -588,90 +597,111 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 	if site.AdminAccountID != aid {
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
-
-	// Changing the login method must replace the session, even when an edit
-	// omits credentials. Same-method edits may still retain their old session.
-	if normalizedAuthMode(dto.AuthMode) != siteAuthMode(site) && !hasNewCredentials(dto) {
-		if normalizedAuthMode(dto.AuthMode) == AuthModePassword {
-			return Response{}, invalidBodyError("password")
-		}
-		return Response{}, invalidBodyError("accessToken")
+	original := cloneSite(site)
+	normalizedURL, err := s.platformServiceURL(dto.SiteURL)
+	if err != nil {
+		return Response{}, err
 	}
-
-	// 保存更新前的状态，以便数据库写入失败时回滚。
-	previousSite := *site
-	candidate := previousSite
-	site = &candidate
-	site.Name = strings.TrimSpace(dto.Name)
-	site.BaseURL = strings.TrimSpace(dto.SiteURL)
-	site.RequestedPlatform = dto.Platform
-	site.Platform = resolvedPlatform(dto.Platform)
-	site.Account = strings.TrimSpace(dto.Account)
+	originalURL, err := s.platformServiceURL(site.BaseURL)
+	if err != nil {
+		return Response{}, err
+	}
+	account := strings.TrimSpace(dto.Account)
 	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey {
-		site.Account = strings.TrimSpace(dto.UserID)
+		account = strings.TrimSpace(dto.UserID)
 	}
-	site.Remark = strings.TrimSpace(dto.Remark)
-	site.RechargeRate = dto.RechargeRate
-	shouldRelogin := hasNewCredentials(dto)
-
-	if shouldRelogin {
-		log.Printf("[upstream] 更新站点登录开始 id=%s name=%q host=%s", id, safeUpstreamMessage(dto.Name), safeHost(dto.SiteURL))
-		result, loginErr := s.updateLogin(dto)
-		if loginErr != nil {
-			logSiteFailure("登录失败", id, dto.Name, dto.SiteURL, loginErr)
-			return Response{}, loginErr
+	if normalizedURL != originalURL || dto.Platform != PlatformAuto && dto.Platform != site.Platform || normalizedAuthMode(dto.AuthMode) != siteAuthMode(site) || account != strings.TrimSpace(site.Account) {
+		return Response{}, identityUpdateError(nil, "这个修改会换成另一个站点或账号，请新增站点，避免混入原账号的费用；原资料未保存，不会修改主站。")
+	}
+	relogin := hasNewCredentials(dto)
+	var result LoginResult
+	if relogin {
+		if original.Session == nil {
+			return Response{}, identityUpdateError(nil, "原站点没有可核验的登录资料")
 		}
-		// Check existence without replacing the candidate's edited fields.
-		current, readErr := s.cache.Get(ctx, id)
+		oldID, readErr := s.platformService.readLoginPrincipal(ctx, *original.Session)
 		if readErr != nil {
-			return Response{}, readErr
+			return Response{}, identityUpdateError(readErr, "读取原账号身份失败")
 		}
-		if current == nil || current.UserID != userID || current.AdminAccountID != aid {
-			return Response{}, newRequestError(ErrorNotFound, "")
+		result, err = s.updateLogin(dto)
+		if err != nil {
+			return Response{}, identityUpdateError(err, "重新登录失败")
 		}
-		// Preserve a concurrent enable/disable operation while login was in flight.
-		site.Enabled = current.Enabled
-		log.Printf("[upstream] 更新站点登录成功 id=%s name=%q", id, safeUpstreamMessage(dto.Name))
-
-		observedAt := s.keyUsageNow()
-		now := observedAt.UnixMilli()
-		site.BaseURL = result.Session.BaseURL
-		site.Platform = result.Platform
-		site.Session = &result.Session
-		site.Metrics = result.Metrics.WithSyncDate(businesstime.DateAt(observedAt), observedAt)
-		site.Status = StatusConnected
-		site.ErrorKey = nil
-		site.LastSyncedAt = &now
-
-		_ = s.setCachedSite(ctx, site)
-
-		s.mu.Lock()
-		s.scheduleSyncLocked(id, site)
+		if result.Platform != original.Platform || result.Session.BaseURL != originalURL {
+			return Response{}, identityUpdateError(nil, "重新登录后的站点地址或平台与原资料不同")
+		}
+		newID, readErr := s.platformService.readLoginPrincipal(ctx, result.Session)
+		if readErr != nil {
+			return Response{}, identityUpdateError(readErr, "读取新登录身份失败")
+		}
+		if oldID != newID {
+			return Response{}, identityUpdateError(nil, "新登录身份与原账号不同")
+		}
+	}
+	s.mu.Lock()
+	current, readErr := s.readCurrentSite(ctx, id)
+	_, deleted := s.deletedSites[id]
+	if readErr != nil || deleted || current == nil || current.UserID != userID || current.AdminAccountID != aid {
 		s.mu.Unlock()
-
-		response := toResponse(site)
-		if err := s.saveSite(ctx, site); err != nil {
-			s.restoreSite(ctx, id, &previousSite)
-			return response, err
-		}
-		s.saveSnapshot(ctx, site)
-		s.notifySiteLoginSucceeded(site)
-		return response, nil
-	}
-
-	// 无需重新登录：仅更新基本字段。
-	_ = s.setCachedSite(ctx, site)
-	if err := s.saveSite(ctx, site); err != nil {
-		s.restoreSite(ctx, id, &previousSite)
-		return toResponse(site), err
-	}
-
-	// 重新读取确保返回最新状态。
-	site, err = s.cache.Get(ctx, id)
-	if err != nil || site == nil || site.UserID != userID {
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
-	return toResponse(site), nil
+	if !reflect.DeepEqual(current.Session, original.Session) {
+		s.mu.Unlock()
+		return Response{}, staleSiteRequestError()
+	}
+	expected := cloneSite(current)
+	candidate := cloneSite(current)
+	candidate.Name = strings.TrimSpace(dto.Name)
+	candidate.Remark = strings.TrimSpace(dto.Remark)
+	candidate.RechargeRate = dto.RechargeRate
+	candidate.RequestedPlatform = dto.Platform
+	if relogin {
+		candidate.BaseURL = result.Session.BaseURL
+		candidate.Platform = result.Platform
+		candidate.Session = &result.Session
+		candidate.Metrics = mergeCostReadStatus(result.Metrics, current.Metrics)
+		candidate.Status = StatusConnected
+		candidate.ErrorKey = nil
+		observed := s.keyUsageNow().UnixMilli()
+		candidate.LastSyncedAt = &observed
+	}
+	err = s.publishExistingSiteLocked(expected, candidate, relogin, nil)
+	if err == nil {
+		s.scheduleSyncLocked(id, &candidate)
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return s.toResponse(ctx, current), err
+	}
+	if relogin {
+		s.saveSnapshot(ctx, &candidate)
+		s.notifySiteLoginSucceeded(&candidate)
+	}
+	return s.toResponse(ctx, &candidate), nil
+}
+func (s *Service) platformServiceURL(value string) (string, error) {
+	if s.platformService != nil {
+		return s.platformService.NormalizeURL(value)
+	}
+	return (&PlatformService{}).NormalizeURL(value)
+}
+func identityUpdateError(cause error, step string) error {
+	reason := step
+	if cause != nil {
+		reason += "：" + costFailureCause(cause)
+	}
+	reason += "；原资料和费用未保存，无法确认是原账号，请新增站点；不会修改主站。"
+	var original *RequestError
+	if errors.As(cause, &original) {
+		detail := *original
+		detail.UpstreamMessage = reason
+		detail.Cause = cause
+		return &detail
+	}
+	return &RequestError{MessageKey: ErrorRequest, Stage: "verify", UpstreamMessage: reason, Cause: cause}
+}
+func staleSiteRequestError() error {
+	return saveFailureError("站点登录资料已更新，本次旧请求未保存，请重新同步；不会修改主站。", nil, 409)
 }
 
 func resolvedPlatform(platform Platform) Platform {
@@ -815,7 +845,7 @@ func (s *Service) syncSiteForWorkspace(ctx context.Context, userID string, admin
 		flight := s.syncFlights[siteID]
 		s.mu.Unlock()
 		if flight == nil {
-			return syncSiteResult(siteID, toResponse(site), nil)
+			return syncSiteResult(siteID, toResponseForDate(site, s.keyUsageDate()), nil)
 		}
 		response, err := waitForSyncFlight(ctx, flight)
 		return syncSiteResult(siteID, response, err)
@@ -838,7 +868,7 @@ func syncSiteResult(siteID string, response Response, err error) SyncSiteResult 
 		return SyncSiteResult{SiteID: siteID, Status: "timeout", ErrorKey: "site_sync_timeout"}
 	}
 	if err != nil {
-		return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_failed"}
+		return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_failed", ErrorDetail: taskErrorDetail(err)}
 	}
 	if response.Status == StatusConnected {
 		return SyncSiteResult{SiteID: siteID, Status: "success"}
@@ -881,11 +911,11 @@ func (s *Service) SyncAll(ctx context.Context, userID string) ([]Response, error
 			continue
 		}
 		if !site.IsEnabled() {
-			responses = append(responses, toResponse(site))
+			responses = append(responses, toResponseForDate(site, s.keyUsageDate()))
 			continue
 		}
 		if site.Session == nil {
-			responses = append(responses, toResponse(site))
+			responses = append(responses, toResponseForDate(site, s.keyUsageDate()))
 			continue
 		}
 		ids = append(ids, site.ID)
@@ -901,7 +931,7 @@ func (s *Service) SyncAll(ctx context.Context, userID string) ([]Response, error
 			if err != nil {
 				// 同步失败时返回缓存中的当前状态。
 				if cached, cacheErr := s.cache.Get(ctx, id); cacheErr == nil && cached != nil {
-					response = toResponse(cached)
+					response = toResponseForDate(cached, s.keyUsageDate())
 				}
 				results[index] = response
 				return
@@ -951,7 +981,7 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 			continue
 		}
 		if site.Session == nil {
-			resp := toResponse(site)
+			resp := toResponseForDate(site, s.keyUsageDate())
 			safeEmit(SyncEvent{Event: SyncEventDone, SiteID: site.ID, Site: &resp})
 			continue
 		}
@@ -986,7 +1016,7 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 				}
 				log.Printf("[upstream-stream] 同步失败 id=%s reason=%s", id, logKey)
 				if cached, cacheErr := s.cache.Get(ctx, id); cacheErr == nil && cached != nil {
-					response = toResponse(cached)
+					response = toResponseForDate(cached, s.keyUsageDate())
 				}
 				key := ErrorUnknown
 				if syncErr != nil {
@@ -994,7 +1024,7 @@ func (s *Service) SyncAllStream(ctx context.Context, userID string, emit SyncEve
 				} else if response.ErrorKey != nil && *response.ErrorKey != "" {
 					key = *response.ErrorKey
 				}
-				safeEmit(SyncEvent{Event: SyncEventError, SiteID: id, ErrorKey: key, Site: &response})
+				safeEmit(SyncEvent{Event: SyncEventError, SiteID: id, ErrorKey: key, ErrorDetail: taskErrorDetail(syncErr), Site: &response})
 			} else {
 				succeeded.Add(1)
 				safeEmit(SyncEvent{Event: SyncEventDone, SiteID: id, Site: &response})
@@ -1041,13 +1071,8 @@ func (s *Service) runSyncFlight(id string, flight *syncFlight) {
 		}
 		close(flight.done)
 		s.mu.Unlock()
-		if response.keyUsageCostFailure != nil {
-			if site, readErr := s.cache.Get(context.Background(), id); readErr == nil && site != nil {
-				s.recordKnownKeyUsageCostFailure(*site, *response.keyUsageCostFailure)
-			}
-			return
-		}
-		if err == nil && response.Status == StatusConnected {
+		if err == nil && response.Status == StatusConnected &&
+			(response.Metrics.TodayConsumeStatus != "unreadable" || KnownUpstreamCodeErrorKey(response.Metrics.TodayConsumeUpstreamCode) == "") {
 			if site, readErr := s.cache.Get(context.Background(), id); readErr == nil && site != nil {
 				s.enqueueKeyUsageCollection(*site)
 			}
@@ -1069,90 +1094,127 @@ func (s *Service) refreshSessionForSync(ctx context.Context, site *Site, session
 
 // syncOnce 执行单个站点的同步流程：刷新会话 → 拉取最新指标 → 更新缓存和数据库。
 func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
-	site, err := s.cache.Get(ctx, id)
+	s.mu.Lock()
+	site, err := s.readCurrentSite(ctx, id)
 	if err != nil {
+		s.mu.Unlock()
 		return Response{}, err
 	}
-	if site == nil || site.Session == nil {
-		return Response{}, newRequestError(ErrorNotFound, "")
-	}
-	if !site.IsEnabled() {
-		return Response{}, newRequestError(ErrorDisabled, "")
-	}
-
-	// Capture recovery inputs before publishing the transient syncing state.
-	oldMetrics, oldStatus := site.Metrics, site.Status
-	// 标记为同步中。
-	site.Status = StatusSyncing
-	site.ErrorKey = nil
-	_ = s.setCachedSite(ctx, site)
-	session := *site.Session
-
-	// 刷新会话并拉取指标（无锁操作，可能耗时较长）。
-	syncStartedAt := s.keyUsageNow()
-	syncDate := businesstime.DateAt(syncStartedAt) // 同步开始时生成一次新加坡业务日期，所有指标复用。
-	refreshedSession, refreshErr := s.refreshSessionForSync(ctx, site, session)
-	metrics := Metrics{}
-	if refreshErr == nil {
-		metrics, refreshErr = s.platformService.FetchMetrics(refreshedSession)
-		if refreshErr == nil {
-			metrics = metrics.WithSyncDate(syncDate, s.keyUsageNow())
-		}
-	}
-
-	// 重新读取站点确认仍存在（可能在同步期间被删除）。
-	site, err = s.cache.Get(ctx, id)
-	if err != nil || site == nil {
-		return Response{}, newRequestError(ErrorNotFound, "")
-	}
-	if !site.IsEnabled() {
-		s.mu.Lock()
-		s.clearTimerLocked(id)
+	if _, deleted := s.deletedSites[id]; deleted || site == nil || site.Session == nil {
 		s.mu.Unlock()
-		return toResponse(site), newRequestError(ErrorDisabled, "")
+		return Response{}, newRequestError(ErrorNotFound, "")
 	}
-
-	if refreshErr != nil {
-		site.Status = StatusError
-		logSiteFailure("同步失败", id, site.Name, site.BaseURL, refreshErr)
-		key := siteErrorKey(refreshErr)
-		site.ErrorKey = &key
-	} else {
-		now := s.keyUsageNow().UnixMilli()
-		site.Session = &refreshedSession
-		metrics = mergeCostReadStatus(metrics, site.Metrics)
-		site.Metrics = metrics
-		site.Status = StatusConnected
-		site.ErrorKey = nil
-		site.LastSyncedAt = &now
+	if !site.IsEnabled() {
+		s.mu.Unlock()
+		return s.toResponse(ctx, site), newRequestError(ErrorDisabled, "")
 	}
-
-	_ = s.setCachedSite(ctx, site)
-
-	s.mu.Lock()
-	s.scheduleSyncLocked(id, site)
+	original := cloneSite(site)
+	oldMetrics, oldStatus := original.Metrics, original.Status
+	transient := cloneSite(site)
+	transient.Status = StatusSyncing
+	transient.ErrorKey = nil
+	if err = s.cache.Set(ctx, &transient); err != nil {
+		s.mu.Unlock()
+		return Response{}, saveFailureError("标记本站同步状态失败："+safePersistenceCause(err)+"；未开始读取或更新费用，请维护人员检查存储连接后重试；不会修改主站。", err, 503)
+	}
 	s.mu.Unlock()
-
-	response := s.toResponse(ctx, site)
-	response.syncTimedOut = requestTimedOut(refreshErr)
+	syncDate := businesstime.DateAt(s.keyUsageNow())
+	session := *original.Session
+	refreshed, fetchErr := s.refreshSessionForSync(ctx, &original, session)
+	refreshedOK := fetchErr == nil
+	metrics := Metrics{}
+	if fetchErr == nil {
+		metrics, fetchErr = s.platformService.FetchMetricsForDate(refreshed, syncDate)
+	}
+	s.mu.Lock()
+	current, readErr := s.readCurrentSite(ctx, id)
+	_, deleted := s.deletedSites[id]
+	if readErr != nil || deleted || current == nil || current.UserID != original.UserID || current.AdminAccountID != original.AdminAccountID {
+		s.mu.Unlock()
+		return Response{}, newRequestError(ErrorNotFound, "")
+	}
+	if !current.IsEnabled() {
+		s.clearTimerLocked(id)
+		s.revokeSyncingLocked(current, original)
+		s.mu.Unlock()
+		return s.toResponse(ctx, current), newRequestError(ErrorDisabled, "")
+	}
+	if !reflect.DeepEqual(current.Session, original.Session) {
+		s.mu.Unlock()
+		return s.toResponse(ctx, current), staleSiteRequestError()
+	}
+	expected := cloneSite(current)
+	candidate := cloneSite(current)
+	if refreshedOK {
+		candidate.Session = &refreshed
+	}
+	if fetchErr != nil {
+		candidate.Status = StatusError
+		key := siteErrorKey(fetchErr)
+		candidate.ErrorKey = &key
+		if metrics.TodayConsumeStatus == "unreadable" && metrics.TodayConsumeFailedAt != nil {
+			failedMetrics := current.Metrics
+			failedMetrics.TodayConsumeDate = syncDate
+			failedMetrics = withCostReadFailure(failedMetrics, fetchErr, *metrics.TodayConsumeFailedAt)
+			candidate.Metrics = mergeCostReadStatus(failedMetrics, current.Metrics)
+		}
+		logSiteFailure("同步失败", id, candidate.Name, candidate.BaseURL, fetchErr)
+	} else {
+		candidate.Session = &refreshed
+		candidate.Metrics = mergeCostReadStatus(metrics, current.Metrics)
+		candidate.Status = StatusConnected
+		candidate.ErrorKey = nil
+		now := s.keyUsageNow().UnixMilli()
+		candidate.LastSyncedAt = &now
+	}
+	saveErr := s.publishExistingSiteLocked(expected, candidate, refreshedOK, &original.Status)
+	if saveErr != nil {
+		s.revokeSyncingLocked(current, original)
+		s.mu.Unlock()
+		return s.toResponse(ctx, current), saveErr
+	}
+	s.scheduleSyncLocked(id, &candidate)
+	enabledBackground := !s.backgroundTasksDisabled
+	callback := s.AfterSync
+	s.mu.Unlock()
 	if metrics.TodayConsumeStatus == "unreadable" && metrics.TodayConsumeFailedAt != nil {
 		if reason := KnownUpstreamCodeErrorKey(metrics.TodayConsumeUpstreamCode); reason != "" {
-			response.keyUsageCostFailure = &keyUsageCostFailure{reason: reason, failedAt: *metrics.TodayConsumeFailedAt}
+			s.recordKnownKeyUsageCostFailure(candidate, keyUsageCostFailure{reason: metrics.TodayConsumeErrorDetail, failedAt: *metrics.TodayConsumeFailedAt})
 		}
 	}
-	if saveErr := s.saveSite(ctx, site); saveErr != nil {
-		return response, saveErr
-	}
-	if refreshErr == nil {
-		s.saveSnapshot(ctx, site)
-		if s.backgroundTasksEnabled() {
-			go s.sampleGroupCosts(*site, refreshedSession, append([]GroupInfo(nil), site.Metrics.Groups...))
-			if s.AfterSync != nil {
-				go s.AfterSync(context.Background(), site.UserID, site.AdminAccountID, site.ID, site.Name, oldMetrics, metrics, oldStatus, site.Status)
+	response := s.toResponse(ctx, &candidate)
+	response.syncTimedOut = requestTimedOut(fetchErr)
+	if fetchErr == nil {
+		s.saveSnapshot(ctx, &candidate)
+		if enabledBackground {
+			go s.sampleGroupCosts(candidate, refreshed, append([]GroupInfo(nil), candidate.Metrics.Groups...))
+			if callback != nil {
+				go callback(context.Background(), candidate.UserID, candidate.AdminAccountID, candidate.ID, candidate.Name, oldMetrics, candidate.Metrics, oldStatus, candidate.Status)
 			}
 		}
 	}
 	return response, nil
+}
+func (s *Service) revokeSyncingLocked(current *Site, original Site) {
+	if current == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), persistenceTimeout)
+	defer cancel()
+	latest, err := s.cache.Get(ctx, current.ID)
+	if err != nil || latest == nil || latest.Status != StatusSyncing || !reflect.DeepEqual(latest.Session, original.Session) {
+		return
+	}
+	next := cloneSite(latest)
+	next.Status = original.Status
+	_ = s.cache.Set(ctx, &next)
+}
+func taskErrorDetail(err error) string {
+	var detail *RequestError
+	if errors.As(err, &detail) && detail.Stage == "save" {
+		return detail.UpstreamMessage
+	}
+	return ""
 }
 
 func (s *Service) saveSnapshot(ctx context.Context, site *Site) {
@@ -1462,68 +1524,39 @@ func validateUpdate(dto UpdateRequest) error {
 }
 
 // UpdateSettings 更新站点级预警覆盖配置，不触发重新登录或同步。
-func (s *Service) UpdateSettings(ctx context.Context, userID string, siteID string, dto SiteSettings) (Response, error) {
-	site, err := s.cache.Get(ctx, siteID)
-	if err != nil {
-		return Response{}, err
-	}
-	if site == nil || site.UserID != userID {
-		return Response{}, newRequestError(ErrorNotFound, "")
-	}
-	// 工作区隔离：站点必须属于当前工作区，否则拒绝操作。
-	aid, err := s.requireCurrentAdminAccountID(ctx, userID)
-	if err != nil {
-		return Response{}, err
-	}
-	if site.AdminAccountID != aid {
-		return Response{}, newRequestError(ErrorNotFound, "")
-	}
-	site.Settings = dto
-	_ = s.setCachedSite(ctx, site)
-	if saveErr := s.saveSite(ctx, site); saveErr != nil {
-		return Response{}, saveErr
-	}
-	return s.toResponse(ctx, site), nil
+func (s *Service) UpdateSettings(ctx context.Context, userID, siteID string, dto SiteSettings) (Response, error) {
+	return s.updateLocalSiteFields(ctx, userID, siteID, func(site *Site) { site.Settings = dto })
 }
-
-// UpdateEnabled 只切换本地站点生命周期。停用后停止定时刷新并退出各统计入口；
-// 恢复后只安排下一次定时刷新，不立即请求上游。
-func (s *Service) UpdateEnabled(ctx context.Context, userID string, siteID string, enabled bool) (Response, error) {
-	site, err := s.cache.Get(ctx, siteID)
-	if err != nil {
-		return Response{}, err
-	}
-	if site == nil || site.UserID != userID {
-		return Response{}, newRequestError(ErrorNotFound, "")
-	}
+func (s *Service) UpdateEnabled(ctx context.Context, userID, siteID string, enabled bool) (Response, error) {
+	return s.updateLocalSiteFields(ctx, userID, siteID, func(site *Site) { site.Enabled = boolPointer(enabled) })
+}
+func (s *Service) updateLocalSiteFields(ctx context.Context, userID, siteID string, change func(*Site)) (Response, error) {
 	aid, err := s.requireCurrentAdminAccountID(ctx, userID)
 	if err != nil {
 		return Response{}, err
 	}
-	if site.AdminAccountID != aid {
+	s.mu.Lock()
+	current, err := s.readCurrentSite(ctx, siteID)
+	if err != nil {
+		s.mu.Unlock()
+		return Response{}, err
+	}
+	if _, deleted := s.deletedSites[siteID]; deleted || current == nil || current.UserID != userID || current.AdminAccountID != aid {
+		s.mu.Unlock()
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
-
-	previousSite := *site
-	site.Enabled = boolPointer(enabled)
-	if !enabled {
-		s.mu.Lock()
-		s.clearTimerLocked(siteID)
-		s.mu.Unlock()
+	expected := cloneSite(current)
+	candidate := cloneSite(current)
+	change(&candidate)
+	err = s.publishExistingSiteLocked(expected, candidate, false, nil)
+	if err == nil {
+		s.scheduleSyncLocked(siteID, &candidate)
 	}
-	if err := s.setCachedSite(ctx, site); err != nil {
+	s.mu.Unlock()
+	if err != nil {
 		return Response{}, err
 	}
-	if err := s.saveSite(ctx, site); err != nil {
-		s.restoreSite(ctx, siteID, &previousSite)
-		return Response{}, err
-	}
-	if enabled {
-		s.mu.Lock()
-		s.scheduleSyncLocked(siteID, site)
-		s.mu.Unlock()
-	}
-	return s.toResponse(ctx, site), nil
+	return s.toResponse(ctx, &candidate), nil
 }
 
 // GetSite 根据 ID 获取站点（供 alert 逻辑读取站点级配置）。
@@ -1532,14 +1565,15 @@ func (s *Service) GetSite(ctx context.Context, siteID string) (*Site, error) {
 }
 
 func (s *Service) toResponse(ctx context.Context, site *Site) Response {
-	response := toResponse(site)
+	response := toResponseForDate(site, s.keyUsageDate())
 	if snapshots, err := s.groupCostSnapshotsForSite(ctx, site); err == nil {
 		mergeGroupCostSnapshots(site, &response, snapshots)
 	}
 	return response
 }
 
-func toResponse(site *Site) Response {
+func toResponse(site *Site) Response { return toResponseForDate(site, businesstime.Today()) }
+func toResponseForDate(site *Site, date string) Response {
 	return Response{
 		ID:                site.ID,
 		UserID:            site.UserID,
@@ -1554,7 +1588,7 @@ func toResponse(site *Site) Response {
 		Enabled:           boolPointer(site.IsEnabled()),
 		Status:            site.Status,
 		ErrorKey:          site.ErrorKey,
-		Metrics:           site.Metrics,
+		Metrics:           maskUnverifiedTodayCost(site.Metrics, date),
 		Settings:          site.Settings,
 		LastSyncedAt:      site.LastSyncedAt,
 	}
@@ -1720,4 +1754,11 @@ func siteAuthMode(site *Site) AuthMode {
 
 func hasNewCredentials(dto UpdateRequest) bool {
 	return strings.TrimSpace(dto.Password) != "" || strings.TrimSpace(dto.AccessToken) != "" || strings.TrimSpace(dto.RefreshToken) != ""
+}
+
+// This narrow read never acquires s.mu; callers may use it within publication.
+func (s *Service) readCurrentSite(ctx context.Context, id string) (*Site, error) {
+	bounded, cancel := context.WithTimeout(ctx, persistenceTimeout)
+	defer cancel()
+	return s.cache.Get(bounded, id)
 }

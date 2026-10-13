@@ -43,13 +43,38 @@ func TestBuildAutomaticAccountDailyStatUsesMatchedKeyAndScopedRevenue(t *testing
 func TestFindAutomaticAccountKeyRejectsIncompleteOrWrongRun(t *testing.T) {
 	target := AutomaticAccountTarget{Link: AccountLink{UpstreamSiteID: "site-1", UpstreamKeyID: "key-1"}}
 	runs := []UpstreamKeyCostRun{{ID: "run-1", SiteID: "site-1", Complete: false, Items: []UpstreamKeyDailyCost{{KeyID: "key-1"}}}}
-	if _, _, ok := findAutomaticAccountKey(target, runs); ok {
+	if _, _, ok := findAutomaticAccountKey(target, runs, "user-1", "workspace-1", "2026-08-22", "2026-08-23"); ok {
 		t.Fatal("incomplete key run was accepted")
 	}
 	runs[0].Complete = true
 	runs[0].Items[0].KeyID = "other"
-	if _, _, ok := findAutomaticAccountKey(target, runs); ok {
+	if _, _, ok := findAutomaticAccountKey(target, runs, "user-1", "workspace-1", "2026-08-22", "2026-08-23"); ok {
 		t.Fatal("wrong key was accepted")
+	}
+}
+
+func TestSingaporeCostAutomaticAccountKeyRequiresExplicitRunScope(t *testing.T) {
+	now := time.Date(2031, 2, 3, 4, 0, 0, 0, time.UTC)
+	run := singaporeAccountRun(now, "2031-02-03", "Asia/Singapore", "scoped")
+	target := AutomaticAccountTarget{Link: AccountLink{UpstreamSiteID: "site", UpstreamKeyID: "key"}}
+	for _, tc := range []struct {
+		name, userID, workspace, date, currentDate, timezone string
+		want                                                 bool
+	}{
+		{"current SG", "user-1", "workspace-1", "2031-02-03", "2031-02-03", "Asia/Singapore", true},
+		{"current legacy", "user-1", "workspace-1", "2031-02-03", "2031-02-03", "", false},
+		{"historical legacy", "user-1", "workspace-1", "2031-02-03", "2031-02-04", "", true},
+		{"wrong user", "other", "workspace-1", "2031-02-03", "2031-02-03", "Asia/Singapore", false},
+		{"wrong workspace", "user-1", "other", "2031-02-03", "2031-02-03", "Asia/Singapore", false},
+		{"wrong date", "user-1", "workspace-1", "2031-02-04", "2031-02-04", "Asia/Singapore", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run.UsageTimezone = tc.timezone
+			_, _, ok := findAutomaticAccountKey(target, []UpstreamKeyCostRun{run}, tc.userID, tc.workspace, tc.date, tc.currentDate)
+			if ok != tc.want {
+				t.Fatal("account helper accepted a broken run scope or discarded valid historical data")
+			}
+		})
 	}
 }
 
@@ -62,7 +87,7 @@ func TestSaveAutomaticAccountStatsForRunPersistsCompleteMatchedAccounts(t *testi
 		"scope-1|group-1": {TotalActualCost: 20},
 	}}}
 	runs := []UpstreamKeyCostRun{{
-		ID: "run-1", SnapshotRunID: "snapshot-1", SiteID: "site-1", Complete: true,
+		ID: "run-1", SnapshotRunID: "snapshot-1", SiteID: "site-1", Complete: true, UserID: "user-1", AdminAccountID: "workspace-1", BusinessDate: "2026-08-22", UsageTimezone: "Asia/Singapore",
 		Items: []UpstreamKeyDailyCost{{KeyID: "key-1", RawAmountMicros: 50_000_000, AdjustedCostCents: 300}},
 	}}
 

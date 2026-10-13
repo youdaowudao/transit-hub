@@ -64,7 +64,7 @@ type dailySnapshotAccountFinalizer interface {
 }
 
 type accountCostComponentRepository interface {
-	AccountCostComponentsForSnapshotRun(ctx context.Context, userID, adminAccountID, date, snapshotRunID string) (AccountCostComponents, error)
+	AccountCostComponentsForSnapshotRun(ctx context.Context, userID, adminAccountID, date, snapshotRunID string, currentDates ...string) (AccountCostComponents, error)
 }
 
 type accountLiveCostComponentRepository interface {
@@ -80,11 +80,11 @@ type upstreamSyncKeySnapshotReader interface {
 }
 
 type accountSubstateRecoveryRepository interface {
-	LatestCompleteAccountKeyCostRuns(ctx context.Context, userID, adminAccountID, date string) (string, []UpstreamKeyCostRun, error)
+	LatestCompleteAccountKeyCostRuns(ctx context.Context, userID, adminAccountID, date string, currentDates ...string) (string, []UpstreamKeyCostRun, error)
 }
 
 type accountSnapshotRunRepository interface {
-	AccountKeyCostRunsForSnapshot(ctx context.Context, userID, adminAccountID, date, snapshotRunID string) ([]UpstreamKeyCostRun, error)
+	AccountKeyCostRunsForSnapshot(ctx context.Context, userID, adminAccountID, date, snapshotRunID string, currentDates ...string) ([]UpstreamKeyCostRun, error)
 }
 
 // MetricsService 负责仪表盘指标的实时计算、历史快照存储与午夜调度。
@@ -368,6 +368,29 @@ func (s *MetricsService) additionalCostSummary(ctx context.Context, userID, admi
 			summary.FeeRate = &rate.Rate
 		}
 	}
+	if date == businesstime.DateAt(s.currentTime()) {
+		if repo, ok := s.metricsRepo.(interface {
+			UnconfirmedQuotaRecognitionAssets(context.Context, string, string, string, string) (map[string]bool, error)
+		}); ok {
+			invalid, readErr := repo.UnconfirmedQuotaRecognitionAssets(ctx, userID, adminAccountID, date, date)
+			if readErr != nil {
+				summary.Available = false
+				summary.Total = nil
+				summary.AccountQuality = KeyCostQualityMissing
+				summary.UnavailableReason = "无法核查当前账号费用是否按新加坡日期确认，请检查存储连接后刷新账号统计；不会修改主站。"
+			} else if len(invalid) > 0 {
+				summary.Available = false
+				summary.Total = nil
+				summary.AccountQuality = KeyCostQualityMissing
+				summary.UnavailableReason = maskedAutomaticAccountGuidance()
+				for i := range summary.Records {
+					if invalid[summary.Records[i].AccountAssetID] {
+						summary.Records[i].Note += " 这笔金额保留为原记录，尚未按新加坡日期重新确认。"
+					}
+				}
+			}
+		}
+	}
 	if summary.Available {
 		total := summary.Promotion + summary.Fixed + summary.Adjustment + summary.AccountPurchase + summary.AccountRefund
 		if summary.RechargeFee != nil {
@@ -437,7 +460,7 @@ func summarizeCachedUpstreamCostsWithHistoryAt(sites []upstream.Response, busine
 		}
 		quality.ExpectedSites++
 		metric := site.Metrics.TodayConsume
-		currentDateOK := site.Metrics.TodayConsumeDate == businessDate
+		currentDateOK := upstream.UsableSingaporeTodayCost(site.Metrics, businessDate)
 		stale := metric.Value != nil && maxStaleness > 0 && site.Metrics.TodayConsumeAt != nil &&
 			now.Sub(*site.Metrics.TodayConsumeAt) > maxStaleness
 		retainedCache := site.Status == upstream.StatusError || site.Metrics.TodayConsumeStatus == "unreadable"
@@ -450,7 +473,7 @@ func summarizeCachedUpstreamCostsWithHistoryAt(sites []upstream.Response, busine
 			continue
 		}
 
-		if previous, ok := history[site.ID]; ok && previous.AdjustedCost != nil {
+		if previous, ok := history[site.ID]; ok && previous.AdjustedCost != nil && businessDate != businesstime.DateAt(now) {
 			quality.CollectedSites++
 			quality.RetainedSites++
 			quality.FallbackSites++
@@ -464,7 +487,7 @@ func summarizeCachedUpstreamCostsWithHistoryAt(sites []upstream.Response, busine
 
 		// 同日同步或今日成本读取失败时，缓存保留当天最后一次成功值用于展示。
 		// 无日期或跨日缓存不能进入当天成本，避免把昨天的值带到今天。
-		if retainedCache && currentDateOK && metric.Value != nil {
+		if currentDateOK && metric.Value != nil && retainedCache {
 			quality.CollectedSites++
 			quality.RetainedSites++
 			quality.FallbackSites++
@@ -481,10 +504,13 @@ func summarizeCachedUpstreamCostsWithHistoryAt(sites []upstream.Response, busine
 		reason := "fetch_error"
 		if !currentDateOK {
 			reason = "date_mismatch"
+			if site.Metrics.TodayConsumeTimezone != businesstime.Timezone {
+				reason = "旧费用尚未按新加坡日期重新读取，请同步这个站点；此操作不会修改主站。"
+			}
 		} else if stale {
 			reason = "stale"
 		}
-		quality.Failures = append(quality.Failures, SiteCostFault{SiteName: site.Name, Reason: reason})
+		quality.Failures = append(quality.Failures, SiteCostFault{SiteName: site.Name, Reason: reason, ErrorDetail: site.Metrics.TodayConsumeErrorDetail})
 	}
 
 	if quality.ExpectedSites == 0 {
@@ -527,6 +553,7 @@ func cachedUpstreamCostSiteCounts(sites []upstream.Response) (totalSites, failed
 //   - upstreamBalance: 所有上游站点余额 × 站点倍率之和（复用已同步的内存数据）
 //   - netProfit:       todayProfit - todayPurchase；只有完全没有成本值时才为 nil
 func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (MetricsResponse, error) {
+	ctx = withAccountCurrentDate(ctx, businesstime.DateAt(s.currentTime()))
 	// 获取并校验 admin 会话（平台感知：sub2api 检查 AccessToken，new-api 检查 Cookie+UserID）。
 	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
 	if err != nil {
@@ -565,7 +592,6 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		upstreamBalance float64
 		knownBalances   int
 		costQuality     *CostQuality
-		temporaryZeroOK bool
 		wg              sync.WaitGroup
 	)
 
@@ -622,19 +648,8 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	go func() {
 		defer wg.Done()
 		sites := s.upstreams.List(ctx, userID)
-		history := make(map[string]SiteDailyCost)
-		historyLoaded := false
-		if s.metricsRepo != nil {
-			if previous, historyErr := s.metricsRepo.ListLatestSiteCosts(ctx, userID, adminAccountID, today); historyErr == nil {
-				historyLoaded = true
-				for _, cost := range previous {
-					history[cost.SiteID] = cost
-				}
-			} else {
-				log.Printf("dashboard metrics: load latest site costs failed user_id=%s err=%v", userID, historyErr)
-			}
-		}
-		total, cq := summarizeCachedUpstreamCostsWithHistoryAt(sites, today, s.maxStaleness(), history, s.currentTime())
+
+		total, cq := summarizeCachedUpstreamCostsWithHistoryAt(sites, today, s.maxStaleness(), nil, s.currentTime())
 		costQuality = cq
 		targetSites := 0
 		allTargetsErrored := true
@@ -651,7 +666,8 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 				knownBalances++
 			}
 		}
-		temporaryZeroOK = historyLoaded && targetSites > 0 && allTargetsErrored
+		_ = targetSites
+		_ = allTargetsErrored
 		_ = total // total 在 costQuality.ConfirmedCost 中
 	}()
 
@@ -697,10 +713,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	var todayPurchase *float64
 	if costQuality != nil && (costQuality.CollectedSites > 0 || costQuality.ExpectedSites == 0) {
 		todayPurchase = ptrF64(costQuality.ConfirmedCost)
-	} else if costQuality != nil && costQuality.ExpectedSites > 0 && costQuality.MissingSites > 0 && temporaryZeroOK {
-		// 当天完全没有可沿用成本时，仅在实时响应中暂按 0 继续计算。
-		// CostQuality 仍保持 unavailable，写快照时不会把该值保存成已确认成本。
-		todayPurchase = ptrF64(0)
+
 	}
 	var netProfit *float64
 	if todayProfit != nil && todayPurchase != nil {
@@ -738,7 +751,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	accountSnapshotRunID := ""
 	if s.accountCosts != nil {
 		if latestSnapshot != nil && latestSnapshot.AccountStatsQuality == KeyCostQualityComplete {
-			accountSnapshotRunID = latestSnapshot.AccountSnapshotRunID
+			accountSnapshotRunID = s.certifiedAccountSnapshotRunID(ctx, userID, adminAccountID, today, latestSnapshot.AccountSnapshotRunID)
 		}
 		if repo, ok := s.metricsRepo.(accountLiveCostComponentRepository); ok {
 			var keys upstream.KeyUsageForDateResult
@@ -754,7 +767,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 			}
 			components.SnapshotRunID = accountSnapshotRunID
 		} else {
-			components, componentErr = s.accountCosts.AccountCostComponentsForSnapshotRun(ctx, userID, adminAccountID, today, accountSnapshotRunID)
+			components, componentErr = s.accountCosts.AccountCostComponentsForSnapshotRun(ctx, userID, adminAccountID, today, accountSnapshotRunID, today)
 			if components.RequiresReplacementDeduction {
 				components.ReplacementDeductionCents = nil
 			}
@@ -773,7 +786,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 	var accountPurchaseCost, replacementDeduction *float64
 	accountStatsQuality := ""
 	var accountExpectedCount, accountCompletedCount *int
-	if latestSnapshot != nil && latestSnapshot.AccountSnapshotRunID == components.SnapshotRunID {
+	if latestSnapshot != nil && components.SnapshotRunID != "" && latestSnapshot.AccountSnapshotRunID == components.SnapshotRunID {
 		accountStatsQuality = latestSnapshot.AccountStatsQuality
 		accountExpectedCount = latestSnapshot.AccountExpectedCount
 		accountCompletedCount = latestSnapshot.AccountCompletedCount
@@ -1147,7 +1160,7 @@ func (s *MetricsService) upstreamKeyUsageTodayForDate(ctx context.Context, userI
 	response := UpstreamKeyUsageTodayResponse{Date: date, Keys: []UpstreamKeyUsageTodayItem{}, Sites: []UpstreamKeyUsageSite{}, TotalSites: result.ExpectedSites, AutoRefreshEnabled: result.AutoRefreshEnabled}
 	for _, site := range result.Sites {
 		status := site.Status
-		if !site.Complete {
+		if !site.Complete || site.Timezone != businesstime.Timezone || site.ConsumeDate != date || result.BusinessDate != date {
 			status = "missing"
 		} else if status == "" {
 			status = "ok"
@@ -1302,6 +1315,7 @@ func additionalCostRecords(summary *AdditionalCostSummary) []AdditionalCostRecor
 // date 由调用方传入（"2006-01-02"），函数内部禁止用 time.Now() 推导业务日期。
 // 记录 finalized_at、observed_at 使用 time.Now() 是合法的。
 func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSessionRef, date string, snapshotSource string) error {
+	ctx = withAccountCurrentDate(ctx, businesstime.DateAt(s.currentTime()))
 	release, err := s.acquireCostFinalization(ctx, ref, date)
 	if err != nil {
 		return err
@@ -1348,7 +1362,7 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 		if keyErr != nil {
 			log.Printf("dashboard finalize: account key snapshot unavailable user_id=%s date=%s err=%v", userID, date, keyErr)
 		} else {
-			keyRuns = buildAccountKeyCostRuns(userID, adminAccountID, attemptRunID, date, siteCostResults, keyResult, now)
+			keyRuns = buildAccountKeyCostRuns(userID, adminAccountID, attemptRunID, date, siteCostResults, keyResult, now, businesstime.DateAt(s.currentTime()))
 		}
 	}
 	attempts := make([]SiteDailyCost, 0, len(siteCostResults))
@@ -1586,6 +1600,7 @@ func (s *MetricsService) startupRecovery(ctx context.Context) {
 }
 
 func (s *MetricsService) retryAutomaticAccountSubstate(ctx context.Context, ref ActiveSessionRef, snapshot DailySnapshot) error {
+	ctx = withAccountCurrentDate(ctx, businesstime.DateAt(s.currentTime()))
 	repository, ok := s.metricsRepo.(accountSnapshotRunRepository)
 	if !ok || s.accountStats == nil {
 		return errors.New("account substate recovery is unavailable")
@@ -1595,12 +1610,12 @@ func (s *MetricsService) retryAutomaticAccountSubstate(ctx context.Context, ref 
 	if runID == "" {
 		return errors.New("frozen account key snapshot is unavailable")
 	}
-	runs, err := repository.AccountKeyCostRunsForSnapshot(ctx, ref.UserID, ref.AdminAccountID, date, runID)
+	runs, err := repository.AccountKeyCostRunsForSnapshot(ctx, ref.UserID, ref.AdminAccountID, date, runID, businesstime.DateAt(s.currentTime()))
 	if err != nil {
 		return err
 	}
-	if len(runs) == 0 {
-		return errors.New("complete account key snapshot is unavailable")
+	if !usableAccountRunForDate(runs, ref.UserID, ref.AdminAccountID, date, businesstime.DateAt(s.currentTime())) {
+		return errors.New("这份账号费用尚未按新加坡日期重新核对，请点击“刷新账号统计”；旧历史记录保留，不会修改主站。")
 	}
 	record, err := s.store.Get(ctx, ref.UserID, ref.AdminAccountID)
 	if err != nil || record == nil || !record.Session.IsAuthenticated() {
@@ -1616,6 +1631,7 @@ func (s *MetricsService) retryAutomaticAccountSubstate(ctx context.Context, ref 
 // DailyStats 查询指定日期范围内每天的结算状态，缺失日期返回 missing 占位。
 // page 从 1 开始，pageSize 默认 31，最大 90。
 func (s *MetricsService) DailyStats(ctx context.Context, userID string, from, to string, page, pageSize int, expand bool) ([]DailyStatItem, error) {
+	ctx = withAccountCurrentDate(ctx, businesstime.DateAt(s.currentTime()))
 	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -1654,6 +1670,9 @@ func (s *MetricsService) DailyStats(ctx context.Context, userID string, from, to
 		snapMap[snap.Date.Format("2006-01-02")] = snap
 	}
 
+	now := s.currentTime()
+	currentDate := businesstime.DateAt(now)
+	var currentSites []upstream.Response
 	// 生成完整日期序列。
 	items := make([]DailyStatItem, 0, totalDays)
 	for d := fromTime; !d.After(toTime); d = d.AddDate(0, 0, 1) {
@@ -1708,11 +1727,98 @@ func (s *MetricsService) DailyStats(ctx context.Context, userID string, from, to
 				summary.Records = snap.AdditionalCostRecords
 				item.AdditionalCosts = &summary
 			}
+			if dateStr == currentDate {
+				currentSites = s.upstreams.List(ctx, userID)
+				_, quality := summarizeCachedUpstreamCostsWithHistoryAt(currentSites, dateStr, s.maxStaleness(), nil, now)
+				item.ConfirmedCost = nil
+				item.NetProfitCeiling = nil
+				item.MarginCeiling = nil
+				item.OperatingCost = nil
+				item.AdjustedNetProfit = nil
+				if quality.CollectedSites > 0 || quality.ExpectedSites == 0 {
+					item.ConfirmedCost = ptrF64(quality.ConfirmedCost)
+					if item.TodayProfit != nil {
+						value := *item.TodayProfit - quality.ConfirmedCost
+						item.NetProfitCeiling = &value
+						if *item.TodayProfit > 0 {
+							margin := value / *item.TodayProfit * 100
+							item.MarginCeiling = &margin
+						}
+					}
+				}
+				item.CostQualityMode = quality.Mode
+				item.CostExpectedCount = intPtr(quality.ExpectedSites)
+				item.CostCollectedCount = intPtr(quality.CollectedSites)
+				item.CostFreshCount = intPtr(quality.FreshSites)
+				item.CostRetainedCount = intPtr(quality.RetainedSites)
+				item.CostMissingCount = intPtr(quality.MissingSites)
+				id := s.certifiedAccountSnapshotRunID(ctx, userID, adminAccountID, dateStr, snap.AccountSnapshotRunID)
+				if id == "" {
+					item.AccountSnapshotRunID = ""
+					item.AccountStatsQuality = KeyCostQualityMissing
+					item.AccountExpectedCount = nil
+					item.AccountCompletedCount = nil
+					item.ReplacementDeduction = nil
+				}
+				item.AdditionalCosts = s.additionalCostSummary(ctx, userID, adminAccountID, dateStr, item.TodayProfit)
+				if s.accountCosts != nil {
+					components, err := s.accountCosts.AccountCostComponentsForSnapshotRun(ctx, userID, adminAccountID, dateStr, id, currentDate)
+					item.OperatingCost, item.AdjustedNetProfit, _ = projectOperatingCost(item.ConfirmedCost, item.TodayProfit, item.AdditionalCosts, components, err)
+				}
+			}
+
 			if snap.FinalizedAt != nil {
 				ts := snap.FinalizedAt.Format(time.RFC3339)
 				item.FinalizedAt = &ts
 			}
-			if expand {
+			if expand && dateStr == currentDate {
+				item.SiteCosts = []SiteCostDetail{}
+				for _, site := range currentSites {
+					if !site.IsEnabled() || site.RechargeRate <= 0 {
+						continue
+					}
+					detail := SiteCostDetail{SiteID: site.ID, SiteName: site.Name, Platform: string(site.Platform), RechargeRate: site.RechargeRate, Status: "missing", Source: SnapshotSourceLiveCache}
+					_, siteQuality := summarizeCachedUpstreamCostsWithHistoryAt([]upstream.Response{site}, currentDate, s.maxStaleness(), nil, now)
+					if siteQuality.CollectedSites > 0 {
+						detail.RawCost = site.Metrics.TodayConsume.Value
+						value := *detail.RawCost * site.RechargeRate
+						detail.AdjustedCost = &value
+						detail.Status = "ok"
+						if site.Metrics.TodayConsumeAt != nil {
+							detail.ObservedAt = site.Metrics.TodayConsumeAt.Format(time.RFC3339)
+						}
+						if siteQuality.RetainedSites > 0 {
+							detail.LastAttemptStatus = "failed"
+							detail.LastAttemptError = site.Metrics.TodayConsumeErrorDetail
+							if detail.LastAttemptError == "" {
+								detail.LastAttemptError = "本站同步或费用读取失败，具体原因尚未确认；可同步这个站点重试，不会修改主站。"
+							}
+							if site.Metrics.TodayConsumeFailedAt != nil {
+								detail.LastAttemptAt = site.Metrics.TodayConsumeFailedAt.Format(time.RFC3339)
+							}
+						}
+					} else {
+						detail.ErrorReason = site.Metrics.TodayConsumeErrorDetail
+						if len(siteQuality.Failures) > 0 {
+							switch siteQuality.Failures[0].Reason {
+							case "stale":
+								detail.ErrorReason = "最近的费用记录已经过期，请同步这个站点重新读取；不会修改主站。"
+							case "date_mismatch":
+								detail.ErrorReason = "这份费用不属于新加坡今天，请同步这个站点重新读取；不会修改主站。"
+							case "fetch_error":
+								if detail.ErrorReason == "" {
+									detail.ErrorReason = "今日费用暂无法读取，具体原因尚未确认，请同步这个站点重试；不会修改主站。"
+								}
+							default:
+								detail.ErrorReason = siteQuality.Failures[0].Reason
+							}
+						}
+					}
+					item.SiteCosts = append(item.SiteCosts, detail)
+				}
+			}
+
+			if expand && dateStr != currentDate {
 				siteCosts, scErr := s.metricsRepo.ListSiteCosts(ctx, userID, adminAccountID, dateStr)
 				if scErr != nil {
 					log.Printf("dashboard daily-stats: list site costs failed date=%s err=%v", dateStr, scErr)

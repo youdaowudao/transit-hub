@@ -127,6 +127,34 @@ afterEach(() => {
 })
 
 describe('AccountCostWorkspace regression behavior', () => {
+  it('shows saved quota amounts with the current confirmation warning in today and ledger views', async () => {
+    const note = '这笔金额保留为原记录，尚未按新加坡日期重新确认；请点击‘刷新账号统计’，不会修改主站。'
+    harness.listAccountCostLedger.mockResolvedValue({ items: [{
+      id: 'quota-current', type: 'account_purchase', name: '原额度确认记录', businessDate: '2026-08-22',
+      amount: 7.25, amountCents: 725, sourceId: 'quota-source', estimated: false, note,
+      createdAt: '2026-08-22T00:00:00Z',
+    }], hasMore: false })
+    const today = await mountWorkspace('today')
+    expect(today.text()).toContain('7.25')
+    expect(today.text()).toContain(note)
+    const ledger = await mountWorkspace('ledger')
+    expect(ledger.text()).toContain('7.25')
+    expect(ledger.text()).toContain(note)
+    expect(ledger.text()).toContain('待重新确认')
+    expect(ledger.text()).not.toContain('已确认')
+
+    harness.listAccountCostLedger.mockResolvedValue({ items: [{
+      id: 'quota-current', type: 'account_purchase', name: '原额度确认记录', businessDate: '2026-08-22',
+      amount: 7.25, amountCents: 725, sourceId: 'quota-source', estimated: false, note: '原保存说明',
+      createdAt: '2026-08-22T00:00:00Z',
+    }], hasMore: false })
+    await findButton(ledger, '查询账本').trigger('click')
+    await flushPromises()
+    expect(ledger.text()).toContain('7.25')
+    expect(ledger.text()).toContain('原保存说明')
+    expect(ledger.text()).toContain('已确认')
+    expect(ledger.text()).not.toContain('尚未按新加坡日期重新确认')
+  })
   it('E8 shows pending account statistics after a 202 result', async () => {
     harness.refreshAccountStats.mockResolvedValue({ status: 'in_progress' })
     const wrapper = await mountWorkspace('today')

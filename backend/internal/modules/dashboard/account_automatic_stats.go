@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"transithub/backend/internal/modules/upstream"
+	"transithub/backend/internal/shared/businesstime"
 )
 
 type AutomaticAccountTarget struct {
@@ -39,12 +40,12 @@ func (s *MetricsService) buildAutomaticAccountStatsForTargets(
 	session upstream.Session,
 	targets []AutomaticAccountTarget,
 ) ([]AccountDailyStat, string) {
-	if s == nil || s.platform == nil {
+	if s == nil || s.platform == nil || !usableAccountRunForDate(runs, userID, adminAccountID, date, businesstime.DateAt(s.currentTime())) {
 		return nil, KeyCostQualityMissing
 	}
 	stats := make([]AccountDailyStat, 0, len(targets))
 	for _, target := range targets {
-		run, item, ok := findAutomaticAccountKey(target, runs)
+		run, item, ok := findAutomaticAccountKey(target, runs, userID, adminAccountID, date, businesstime.DateAt(s.currentTime()))
 		if !ok {
 			continue
 		}
@@ -92,7 +93,7 @@ func (s *MetricsService) finalizeAutomaticAccountSubstate(
 		accountPurchase := additionalCosts.AccountPurchase
 		snapshot.AccountPurchaseCost = &accountPurchase
 		if s.accountCosts != nil {
-			components, componentErr := s.accountCosts.AccountCostComponentsForSnapshotRun(ctx, snapshot.UserID, snapshot.AdminAccountID, date, runID)
+			components, componentErr := s.accountCosts.AccountCostComponentsForSnapshotRun(ctx, snapshot.UserID, snapshot.AdminAccountID, date, runID, businesstime.DateAt(s.currentTime()))
 			snapshot.OperatingCost, snapshot.AdjustedNetProfit, _ = projectOperatingCost(
 				snapshot.TodayPurchase, snapshot.TodayProfit, additionalCosts, components, componentErr,
 			)
@@ -110,7 +111,10 @@ type automaticAccountStatsRepository interface {
 	SaveAutomaticAccountDailyStats(ctx context.Context, stats []AccountDailyStat) error
 }
 
-func findAutomaticAccountKey(target AutomaticAccountTarget, runs []UpstreamKeyCostRun) (UpstreamKeyCostRun, UpstreamKeyDailyCost, bool) {
+func findAutomaticAccountKey(target AutomaticAccountTarget, runs []UpstreamKeyCostRun, userID, workspace, date, currentDate string) (UpstreamKeyCostRun, UpstreamKeyDailyCost, bool) {
+	if !usableAccountRunForDate(runs, userID, workspace, date, currentDate) {
+		return UpstreamKeyCostRun{}, UpstreamKeyDailyCost{}, false
+	}
 	for _, run := range runs {
 		if !run.Complete || run.SiteID != target.Link.UpstreamSiteID {
 			continue

@@ -94,21 +94,22 @@ func (s *PlatformService) NormalizeURL(value string) (string, error) {
 }
 
 func (s *PlatformService) Login(baseURL string, platform Platform, account string, password string) (LoginResult, error) {
+	date := businesstime.DateAt(s.keyUsageNow())
 	normalizedURL, err := s.NormalizeURL(baseURL)
 	if err != nil {
 		return LoginResult{}, err
 	}
 	switch platform {
 	case PlatformNewAPI:
-		return s.loginNewAPI(normalizedURL, account, password)
+		return s.loginNewAPI(normalizedURL, account, password, date)
 	case PlatformSub2API:
-		return s.loginSub2API(normalizedURL, account, password)
+		return s.loginSub2API(normalizedURL, account, password, date)
 	default:
-		result, err := s.loginNewAPI(normalizedURL, account, password)
+		result, err := s.loginNewAPI(normalizedURL, account, password, date)
 		if err == nil {
 			return result, nil
 		}
-		secondResult, secondErr := s.loginSub2API(normalizedURL, account, password)
+		secondResult, secondErr := s.loginSub2API(normalizedURL, account, password, date)
 		if secondErr == nil {
 			return secondResult, nil
 		}
@@ -124,6 +125,7 @@ func (s *PlatformService) Login(baseURL string, platform Platform, account strin
 }
 
 func (s *PlatformService) LoginWithToken(baseURL string, platform Platform, account string, accessToken string, refreshToken string, tokenType string) (LoginResult, error) {
+	date := businesstime.DateAt(s.keyUsageNow())
 	if platform == PlatformNewAPI {
 		return LoginResult{}, newRequestError(ErrorAuth, PlatformSub2API)
 	}
@@ -148,7 +150,7 @@ func (s *PlatformService) LoginWithToken(baseURL string, platform Platform, acco
 	if strings.TrimSpace(session.AccessToken) == "" {
 		return LoginResult{}, newRequestError(ErrorAuth, PlatformSub2API)
 	}
-	metrics, err := s.fetchSub2APIMetrics(session)
+	metrics, err := s.fetchSub2APIMetrics(session, date)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -158,6 +160,7 @@ func (s *PlatformService) LoginWithToken(baseURL string, platform Platform, acco
 // LoginWithUserKey signs in to new-api with the system access token generated in
 // Personal Settings -> Security Settings. new-api also requires the matching user ID.
 func (s *PlatformService) LoginWithUserKey(baseURL string, userID string, accessToken string) (LoginResult, error) {
+	date := businesstime.DateAt(s.keyUsageNow())
 	normalizedURL, err := s.NormalizeURL(baseURL)
 	if err != nil {
 		return LoginResult{}, err
@@ -176,7 +179,7 @@ func (s *PlatformService) LoginWithUserKey(baseURL string, userID string, access
 		TokenType:   "Bearer",
 	}
 	session.QuotaPerUnit = s.fetchNewAPIQuotaPerUnit(session)
-	metrics, err := s.fetchNewAPIMetrics(session, nil)
+	metrics, err := s.fetchNewAPIMetrics(session, nil, date)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -246,10 +249,7 @@ func (s *PlatformService) refreshSub2APISessionContext(ctx context.Context, sess
 }
 
 func (s *PlatformService) FetchMetrics(session Session) (Metrics, error) {
-	if session.Platform == PlatformNewAPI {
-		return s.fetchNewAPIMetrics(session, nil)
-	}
-	return s.fetchSub2APIMetrics(session)
+	return s.FetchMetricsForDate(session, businesstime.DateAt(s.keyUsageNow()))
 }
 
 // LoginAdmin 平台中性的 admin 登录：按平台分发到 sub2api 或 new-api 的 admin 登录流程。
@@ -1225,8 +1225,8 @@ func (s *PlatformService) fetchNewAPIGroupDailyStatsForDateContext(ctx context.C
 			return nil, err
 		}
 		quota := firstNumber(dataRecord(payload.Payload), []string{"quota"})
-		if rejectMissingCost && quota == nil {
-			continue
+		if rejectMissingCost && (quota == nil || !finiteNonnegative(*quota)) {
+			return nil, datedCostError(session.Platform, "metrics", "分组“"+safeCostReason(name)+"”缺少quota实际费用字段或金额无效")
 		}
 		stats = append(stats, GroupDailyStat{GroupName: name, TodayActualCost: quotaToUSDValueWithUnit(quota, session.QuotaPerUnit)})
 	}
@@ -1346,7 +1346,7 @@ func (s *PlatformService) fetchSub2APIKeyUsageToday(ctx context.Context, session
 	if strings.TrimSpace(date) == "" {
 		date = businesstime.DateAt(s.keyUsageNow())
 	}
-	return s.fetchSub2APIKeyUsage(ctx, session, includeZero, date, date == businesstime.DateAt(s.keyUsageNow()))
+	return s.fetchSub2APIKeyUsage(ctx, session, includeZero, date, false)
 }
 
 // serverToday is fixed by the caller before paging. Historical closing always
@@ -1355,43 +1355,70 @@ func (s *PlatformService) fetchSub2APIKeyUsage(ctx context.Context, session Sess
 	if session.Platform != PlatformSub2API || strings.TrimSpace(session.AccessToken) == "" {
 		return nil, newRequestError(ErrorAuth, PlatformSub2API)
 	}
+	if _, _, err := businessDayUnixBounds(date); err != nil {
+		return nil, datedCostError(session.Platform, "metrics", "Key查询日期不正确")
+	}
 	authOptions := requestOptions{AccessToken: session.AccessToken, TokenType: session.TokenType}
 
 	const pageSize = 100
 	const maxPages = 100 // 安全上限，防止上游分页字段异常导致死循环
 	records := make([]sub2APIKeyRecord, 0)
+	seen := map[string]bool{}
+	ended := false
+	declaredTotal := -1
 	for page := 1; page <= maxPages; page++ {
 		pageURL := session.BaseURL + "/api/v1/keys?page=" + strconvInt(int64(page)) + "&page_size=" + strconvInt(pageSize) + "&sort_by=created_at&sort_order=desc"
 		response, err := s.requestKeyUsageJSONWithContext(ctx, pageURL, authOptions)
 		if err != nil {
 			return nil, err
 		}
-		items := dataArray(response.Payload)
-		if len(items) == 0 {
-			break
+		items, validArray := strictKeyArray(response.Payload)
+		if !validArray || len(items) > pageSize {
+			return nil, datedCostError(session.Platform, "metrics", "Key列表缺少数组或单页超过100条，未取得完整列表")
+		}
+		total, hasTotal, totalErr := strictKeyTotal(response.Payload)
+		if totalErr != nil {
+			return nil, totalErr
+		}
+		if hasTotal {
+			if declaredTotal >= 0 && declaredTotal != total {
+				return nil, datedCostError(session.Platform, "metrics", "读取期间Key总数变化，未取得完整列表")
+			}
+			declaredTotal = total
 		}
 		for _, item := range items {
 			record, ok := item.(map[string]any)
 			if !ok {
-				continue
+				return nil, datedCostError(session.Platform, "metrics", "Key列表包含格式不正确的记录")
 			}
-			id := groupID2(record)
-			if id == "" {
-				continue
+			id, validID := strictNumericID(record["id"], false)
+			if !validID || seen[id] {
+				return nil, datedCostError(session.Platform, "metrics", "Key编号缺失、无效或重复，不能确认完整费用")
 			}
+			seen[id] = true
 			records = append(records, sub2APIKeyRecord{
 				id:        id,
 				name:      safeString(record, "name"),
 				groupName: sub2APIKeyGroupName(record),
 			})
 		}
-		total, hasTotal := paginationTotal(response.Payload)
-		if hasTotal && page*pageSize >= total {
+		if len(records) > 10000 || declaredTotal >= 0 && len(records) > declaredTotal {
+			return nil, datedCostError(session.Platform, "metrics", "Key数量超过总数或10000条上限")
+		}
+		if declaredTotal >= 0 && len(records) == declaredTotal {
+			ended = true
 			break
 		}
-		if !hasTotal && len(items) < pageSize {
+		if len(items) < pageSize {
+			if declaredTotal >= 0 && len(records) != declaredTotal {
+				return nil, datedCostError(session.Platform, "metrics", "Key列表提前结束，数量少于上游声明的总数")
+			}
+			ended = true
 			break
 		}
+	}
+	if !ended {
+		return nil, datedCostError(session.Platform, "metrics", "Key列表达到分页上限仍未结束，不能确认完整费用")
 	}
 	if len(records) == 0 {
 		return nil, nil
@@ -1399,13 +1426,6 @@ func (s *PlatformService) fetchSub2APIKeyUsage(ctx context.Context, session Sess
 
 	if strings.TrimSpace(date) == "" {
 		date = businesstime.Today()
-	}
-	if serverToday {
-		if stats, supported, err := s.fetchSub2APIKeyUsageBatch(ctx, session, records, includeZero); err != nil {
-			return nil, err
-		} else if supported {
-			return stats, nil
-		}
 	}
 
 	const maxKeyConcurrency = 4
@@ -1428,9 +1448,6 @@ func (s *PlatformService) fetchSub2APIKeyUsage(ctx context.Context, session Sess
 			defer func() { <-sem }()
 
 			statsURL := session.BaseURL + "/api/v1/usage/stats?start_date=" + date + "&end_date=" + date + "&api_key_id=" + record.id + "&timezone=Asia%2FSingapore"
-			if serverToday {
-				statsURL = session.BaseURL + "/api/v1/usage/stats?period=today&api_key_id=" + url.QueryEscape(record.id)
-			}
 			response, err := s.requestKeyUsageJSONWithContext(ctx, statsURL, authOptions)
 			if err != nil {
 				mu.Lock()
@@ -1440,7 +1457,16 @@ func (s *PlatformService) fetchSub2APIKeyUsage(ctx context.Context, session Sess
 				mu.Unlock()
 				return
 			}
-			cost := sub2APIUsageStatsCost(dataRecord(response.Payload))
+			costPtr := firstNumber(dataRecord(response.Payload), []string{"total_actual_cost"})
+			if costPtr == nil || !finiteNonnegative(*costPtr) {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = datedCostError(session.Platform, "metrics", "Key编号 "+record.id+" 缺少实际费用字段或金额无效")
+				}
+				mu.Unlock()
+				return
+			}
+			cost := *costPtr
 			if cost <= 0 && !includeZero {
 				return
 			}
@@ -1486,25 +1512,39 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(ctx context.Context, session 
 		groupName string
 	}
 	records := make([]tokenRecord, 0)
+	seen := map[string]bool{}
+	declaredTotal := -1
+	ended := false
 	for page := 1; page <= maxPages; page++ {
 		pageURL := session.BaseURL + "/api/token/?p=" + strconvInt(int64(page)) + "&page_size=" + strconvInt(pageSize)
 		response, err := s.requestKeyUsageJSONWithContext(ctx, pageURL, cookieOptions)
 		if err != nil {
 			return nil, err
 		}
-		items := dataArray(response.Payload)
-		if len(items) == 0 {
-			break
+		items, valid := strictKeyArray(response.Payload)
+		if !valid || len(items) > pageSize {
+			return nil, datedCostError(session.Platform, "metrics", "Token列表缺少数组或单页超过100条，未取得完整列表")
+		}
+		total, hasTotal, totalErr := strictKeyTotal(response.Payload, session.Platform)
+		if totalErr != nil {
+			return nil, totalErr
+		}
+		if hasTotal {
+			if declaredTotal >= 0 && declaredTotal != total {
+				return nil, datedCostError(session.Platform, "metrics", "读取期间Token总数变化，未取得完整列表")
+			}
+			declaredTotal = total
 		}
 		for _, item := range items {
 			record, ok := item.(map[string]any)
 			if !ok {
-				continue
+				return nil, datedCostError(session.Platform, "metrics", "Token列表包含格式不正确的记录")
 			}
-			id := groupID2(record)
-			if id == "" || safeString(record, "name") == "" {
-				continue
+			id, validID := strictNumericID(record["id"], false)
+			if !validID || seen[id] || strings.TrimSpace(safeString(record, "name")) == "" {
+				return nil, datedCostError(session.Platform, "metrics", "Token编号缺失、无效、重复或名称为空，不能确认完整费用")
 			}
+			seen[id] = true
 			groupName := ""
 			if g := firstString(record, []string{"group"}); g != nil {
 				groupName = strings.TrimSpace(*g)
@@ -1515,13 +1555,23 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(ctx context.Context, session 
 				groupName: groupName,
 			})
 		}
-		total, hasTotal := paginationTotal(response.Payload)
-		if hasTotal && page*pageSize >= total {
+		if len(records) > 10000 || declaredTotal >= 0 && len(records) > declaredTotal {
+			return nil, datedCostError(session.Platform, "metrics", "Token数量超过声明总数或10000条上限")
+		}
+		if declaredTotal >= 0 && len(records) == declaredTotal {
+			ended = true
 			break
 		}
-		if !hasTotal && len(items) < pageSize {
+		if len(items) < pageSize {
+			if declaredTotal >= 0 && len(records) != declaredTotal {
+				return nil, datedCostError(session.Platform, "metrics", "Token列表提前结束，数量少于上游声明的总数")
+			}
+			ended = true
 			break
 		}
+	}
+	if !ended {
+		return nil, datedCostError(session.Platform, "metrics", "Token列表达到分页上限仍未结束，不能确认完整费用")
 	}
 	if len(records) == 0 {
 		return nil, nil
@@ -1592,7 +1642,17 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(ctx context.Context, session 
 				mu.Unlock()
 				return
 			}
-			amount := quotaToUSDValueWithUnit(firstNumber(dataRecord(response.Payload), []string{"quota"}), session.QuotaPerUnit)
+			quota := firstNumber(dataRecord(response.Payload), []string{"quota"})
+			amountPtr := quotaToUSDWithUnit(quota, session.QuotaPerUnit)
+			if amountPtr == nil || !finiteNonnegative(*amountPtr) {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = datedCostError(session.Platform, "metrics", "Token编号 "+record.id+" 缺少quota实际费用字段或金额无效")
+				}
+				mu.Unlock()
+				return
+			}
+			amount := *amountPtr
 			if amount <= 0 && !includeZero {
 				return
 			}
@@ -1620,7 +1680,8 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(ctx context.Context, session 
 	return stats, nil
 }
 
-func (s *PlatformService) loginNewAPI(baseURL string, username string, password string) (LoginResult, error) {
+func (s *PlatformService) loginNewAPI(baseURL string, username string, password string, dates ...string) (LoginResult, error) {
+	date := s.metricsDate(dates)
 	response, err := s.httpClient.requestJSON(baseURL+"/api/user/login", requestOptions{
 		Method: http.MethodPost,
 		Body:   map[string]string{"username": username, "password": password},
@@ -1643,7 +1704,7 @@ func (s *PlatformService) loginNewAPI(baseURL string, username string, password 
 		return LoginResult{}, incompleteLogin(PlatformNewAPI, "login", response)
 	}
 	session.QuotaPerUnit = s.fetchNewAPIQuotaPerUnit(session)
-	metrics, err := s.fetchNewAPIMetrics(session, loginData)
+	metrics, err := s.fetchNewAPIMetrics(session, loginData, date)
 	if err != nil {
 		log.Printf("new-api metrics fetch failed base_url=%s err=%v", safeHost(baseURL), err)
 		metrics = defaultMetrics()
@@ -1651,7 +1712,8 @@ func (s *PlatformService) loginNewAPI(baseURL string, username string, password 
 	return LoginResult{Platform: PlatformNewAPI, Session: session, Metrics: metrics}, nil
 }
 
-func (s *PlatformService) loginSub2API(baseURL string, email string, password string) (LoginResult, error) {
+func (s *PlatformService) loginSub2API(baseURL string, email string, password string, dates ...string) (LoginResult, error) {
+	date := s.metricsDate(dates)
 	response, err := s.httpClient.requestJSON(baseURL+"/api/v1/auth/login", requestOptions{
 		Method: http.MethodPost,
 		Body:   map[string]string{"email": email, "password": password},
@@ -1678,14 +1740,15 @@ func (s *PlatformService) loginSub2API(baseURL string, email string, password st
 		expiresAt = &next
 	}
 	session := Session{AuthMode: AuthModePassword, Platform: PlatformSub2API, BaseURL: baseURL, AccessToken: *accessToken, RefreshToken: refreshToken, TokenType: tokenType, ExpiresAt: expiresAt}
-	metrics, err := s.fetchSub2APIMetrics(session)
+	metrics, err := s.fetchSub2APIMetrics(session, date)
 	if err != nil {
 		return LoginResult{}, err
 	}
 	return LoginResult{Platform: PlatformSub2API, Session: session, Metrics: metrics}, nil
 }
 
-func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[string]any) (Metrics, error) {
+func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[string]any, dates ...string) (Metrics, error) {
+	date := s.metricsDate(dates)
 	cookieOptions := newAPIAuthOptions(session)
 	self, err := s.httpClient.requestJSON(session.BaseURL+"/api/user/self", cookieOptions)
 	if err != nil {
@@ -1698,21 +1761,10 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 		}
 		return Metrics{}, failure
 	}
-	// 使用新加坡业务日时区边界查询今日成本，修复 todayStart/todayEnd 使用进程本地时区的问题。
-	var stat jsonResponse
-	var costFailure error
-	var failedAt time.Time
-	if startTS, endTS, boundsErr := businessDayUnixBounds(businesstime.DateAt(s.keyUsageNow())); boundsErr == nil {
-		statURL := session.BaseURL + "/api/log/self/stat?type=2&start_timestamp=" + strconvInt(startTS) + "&end_timestamp=" + strconvInt(endTS)
-		if r, statErr := s.httpClient.requestJSON(statURL, cookieOptions); statErr == nil {
-			stat = r
-		} else {
-			costFailure, failedAt = statErr, s.keyUsageNow()
-			stat = jsonResponse{Payload: map[string]any{}}
-		}
-	} else {
-		costFailure, failedAt = boundsErr, s.keyUsageNow()
-		stat = jsonResponse{Payload: map[string]any{}}
+	amount, observedAt, costFailure := s.fetchAccountCostForDateContext(context.Background(), session, date)
+	var todayCost *float64
+	if costFailure == nil {
+		todayCost = &amount
 	}
 	groupsPayload, err := s.httpClient.requestJSON(session.BaseURL+"/api/user/self/groups", cookieOptions)
 	if err != nil {
@@ -1751,61 +1803,65 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 	}
 	qpu := session.QuotaPerUnit
 	metrics := Metrics{
-		Balance:         metric(quotaToUSDWithUnit(quota, qpu)),
-		TodayConsume:    metric(quotaToUSDWithUnit(firstNumber(dataRecord(stat.Payload), []string{"quota", "used_quota", "usedQuota"}), qpu)),
-		HistoryRecharge: metric(quotaToUSDWithUnit(estimatedGranted, qpu)),
-		Group:           group,
-		Groups:          groups,
+		Balance:          metric(quotaToUSDWithUnit(quota, qpu)),
+		TodayConsume:     metric(todayCost),
+		TodayConsumeDate: date,
+		HistoryRecharge:  metric(quotaToUSDWithUnit(estimatedGranted, qpu)),
+		Group:            group,
+		Groups:           groups,
 	}
 	if costFailure != nil {
-		metrics = withCostReadFailure(metrics, costFailure, failedAt)
+		metrics = withCostReadFailure(metrics, costFailure, s.keyUsageNow())
+	}
+	if costFailure == nil {
+		metrics.TodayConsumeTimezone = businesstime.Timezone
+		metrics.TodayConsumeStatus = "ok"
+		metrics.TodayConsumeAt = &observedAt
 	}
 	return metrics, nil
 }
 
-func (s *PlatformService) fetchSub2APIMetrics(session Session) (Metrics, error) {
-	authOptions := requestOptions{AccessToken: session.AccessToken, TokenType: session.TokenType}
-	me, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/auth/me", authOptions)
+func (s *PlatformService) fetchSub2APIMetrics(session Session, dates ...string) (Metrics, error) {
+	date := s.metricsDate(dates)
+	options := sub2APIUserAuthOptions(session)
+	me, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/auth/me", options)
 	if err != nil {
-		log.Printf("[sub2api-metrics] /api/v1/auth/me 失败 base_url=%s err=%v", safeHost(session.BaseURL), err)
+		log.Printf("[sub2api-metrics] /api/v1/auth/me 失败 base_url=%s category=%s", safeHost(session.BaseURL), siteErrorKey(err))
 		return Metrics{}, withFailureStage(err, "verify", PlatformSub2API)
 	}
-	stats, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/usage/dashboard/stats", authOptions)
+	stats, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/usage/dashboard/stats", options)
 	if err != nil {
-		log.Printf("[sub2api-metrics] /api/v1/usage/dashboard/stats 失败 base_url=%s err=%v", safeHost(session.BaseURL), err)
 		failure := withFailureStage(err, "metrics", PlatformSub2API)
-		// Return cost-only failure metadata for the snapshot without changing the
-		// existing Sub2API whole-sync failure or its retained site metrics.
 		return withCostReadFailure(Metrics{}, failure, s.keyUsageNow()), failure
 	}
 	groups, err := s.fetchSub2APIAvailableGroupsWithRates(session)
 	if err != nil {
-		log.Printf("[sub2api-metrics] 分组列表拉取失败 base_url=%s err=%v", safeHost(session.BaseURL), err)
 		return Metrics{}, withFailureStage(err, "metrics", PlatformSub2API)
 	}
-
-	meData := dataRecord(me.Payload)
-	statsData := dataRecord(stats.Payload)
+	meData, statsData := dataRecord(me.Payload), dataRecord(stats.Payload)
 	balance := firstNumber(meData, []string{"balance"})
-	totalRecharged := firstNumber(meData, []string{"total_recharged"})
-	if totalRecharged == nil || *totalRecharged == 0 {
-		if totalActualCost := firstNumber(statsData, []string{"total_actual_cost"}); totalActualCost != nil && balance != nil {
-			fallbackTotal := *totalActualCost + *balance
-			totalRecharged = &fallbackTotal
+	recharged := firstNumber(meData, []string{"total_recharged"})
+	if recharged == nil || *recharged == 0 {
+		if total := firstNumber(statsData, []string{"total_actual_cost"}); total != nil && balance != nil {
+			value := *total + *balance
+			recharged = &value
 		}
 	}
-
-	firstGroup := defaultMetrics().Group
+	group := defaultMetrics().Group
 	if len(groups) > 0 {
-		firstGroup = groups[0]
+		group = groups[0]
 	}
-	return Metrics{
-		Balance:         metric(balance),
-		TodayConsume:    metric(firstNumber(statsData, []string{"today_actual_cost"})),
-		HistoryRecharge: metric(totalRecharged),
-		Group:           firstGroup,
-		Groups:          groups,
-	}, nil
+	amount, observedAt, costErr := s.fetchAccountCostForDateContext(context.Background(), session, date)
+	metrics := Metrics{Balance: metric(balance), TodayConsume: metric(nil), TodayConsumeDate: date, HistoryRecharge: metric(recharged), Group: group, Groups: groups}
+	if costErr != nil {
+		metrics = withCostReadFailure(metrics, costErr, s.keyUsageNow())
+	} else {
+		metrics.TodayConsume = metric(&amount)
+		metrics.TodayConsumeTimezone = businesstime.Timezone
+		metrics.TodayConsumeStatus = "ok"
+		metrics.TodayConsumeAt = &observedAt
+	}
+	return metrics, nil
 }
 
 func cookieHeader(headers http.Header) string {
@@ -2304,65 +2360,37 @@ type GroupCostFetchResult struct {
 	SummaryFailureClass string
 }
 
-// FetchGroupCostStatsForDate 是后台短期成本采样专用入口。Sub2API 首先读取轻量分组
-// 汇总；汇总失败时，仅在拥有用户 AccessToken 且站点处于回退窗口外时，读取完整且有硬上限
-// 的 Key 列表。Admin API Key 不会被猜测为普通用户凭证。
+// FetchGroupCostStatsForDate 是后台短期成本采样专用入口。指定日独立总额 A、
+// 原生分组费用和独立总额 B 全部核对成功后才返回费用；失败不回退到逐 Key 归组。
 func (s *PlatformService) FetchGroupCostStatsForDate(ctx context.Context, session Session, groups []GroupInfo, date string, state GroupCostSamplingState) (GroupCostFetchResult, error) {
-	switch session.Platform {
-	case PlatformNewAPI:
-		stats, err := s.fetchNewAPIGroupCostStatsForDateContext(ctx, session, groups, date)
-		if err != nil {
-			return GroupCostFetchResult{}, &groupCostFetchError{err: err, path: "summary"}
-		}
-		return completeGroupCostResult(stats, groups, GroupCostSourceSummary)
-	case PlatformSub2API:
-		now := time.Now().UTC()
-		var summaryErr error
-		if state.summaryAllowed(now) {
-			stats, err := s.FetchSub2APIGroupUsageSummaryStatsContext(ctx, session)
-			if err == nil {
-				if result, validateErr := completeGroupCostResult(stats, groups, GroupCostSourceSummary); validateErr == nil {
-					return result, nil
-				} else {
-					err = validateErr
-				}
-			}
-			summaryErr = err
-			if !shouldUseGroupCostKeyFallback(summaryErr) {
-				return GroupCostFetchResult{}, &groupCostFetchError{err: summaryErr, path: "summary"}
-			}
-		}
-		if strings.TrimSpace(session.AccessToken) == "" {
-			if summaryErr != nil {
-				return GroupCostFetchResult{}, &groupCostFetchError{err: summaryErr, path: "summary"}
-			}
-			return GroupCostFetchResult{}, groupCostCooldownError{}
-		}
-		if !state.fallbackAllowed(now) {
-			if summaryErr != nil {
-				return GroupCostFetchResult{}, &groupCostFetchError{err: summaryErr, path: "summary"}
-			}
-			return GroupCostFetchResult{}, groupCostCooldownError{}
-		}
-		result, err := s.fetchSub2APIGroupCostByKeys(ctx, session, groups, date)
-		if err != nil {
-			summaryFailureClass := ""
-			if summaryErr != nil {
-				summaryFailureClass = groupCostFailureClass(summaryErr)
-			}
-			return GroupCostFetchResult{}, &groupCostFetchError{
-				err:                 err,
-				path:                "fallback",
-				summaryFailureClass: summaryFailureClass,
-			}
-		}
-		if summaryErr != nil {
-			result.SummaryFailureClass = groupCostFailureClass(summaryErr)
-		}
-		return result, nil
-	default:
-		return GroupCostFetchResult{}, newRequestError(ErrorUnsupported, session.Platform)
+	if !state.summaryAllowed(s.keyUsageNow().UTC()) {
+		return GroupCostFetchResult{}, groupCostCooldownError{}
 	}
+	a, _, err := s.fetchAccountCostForDateContext(ctx, session, date)
+	if err != nil {
+		return GroupCostFetchResult{}, &groupCostFetchError{err: err, path: "summary"}
+	}
+	var stats []GroupDailyStat
+	switch session.Platform {
+	case PlatformSub2API:
+		stats, err = s.fetchSub2APIUserGroupCostsForDateContext(ctx, session, date)
+	case PlatformNewAPI:
+		stats, err = s.fetchNewAPIGroupCostStatsForDateContext(ctx, session, groups, date)
+	default:
+		err = newRequestError(ErrorUnsupported, session.Platform)
+	}
+	if err != nil {
+		return GroupCostFetchResult{}, &groupCostFetchError{err: err, path: "summary"}
+	}
+	b, _, err := s.fetchAccountCostForDateContext(ctx, session, date)
+	if err != nil {
+		return GroupCostFetchResult{}, &groupCostFetchError{err: err, path: "summary"}
+	}
+	result, err := reconcileGroupCosts(session.Platform, groups, stats, a, b)
+	if err != nil {
+		return GroupCostFetchResult{}, &groupCostFetchError{err: err, path: "summary"}
+	}
+	return result, nil
 }
 
 // shouldUseGroupCostKeyFallback 只接受认证、路由或汇总格式/覆盖范围问题。网络、5xx
@@ -3267,11 +3295,11 @@ func (s *PlatformService) updateSub2APIAdminAccountPriorityContext(ctx context.C
 // credentials、group_ids 等字段用零值覆盖。
 type sub2APIAdminAccountBulkUpdate struct {
 	Credentials map[string]any `json:"credentials,omitempty"`
-	AccountIDs  []int64 `json:"account_ids"`
-	Priority    *int    `json:"priority,omitempty"`
-	Status      *string `json:"status,omitempty"`
-	Concurrency *int    `json:"concurrency,omitempty"`
-	LoadFactor  *int    `json:"load_factor,omitempty"`
+	AccountIDs  []int64        `json:"account_ids"`
+	Priority    *int           `json:"priority,omitempty"`
+	Status      *string        `json:"status,omitempty"`
+	Concurrency *int           `json:"concurrency,omitempty"`
+	LoadFactor  *int           `json:"load_factor,omitempty"`
 }
 
 // UpdateSub2APIAdminAccountConcurrencyContext only writes the supplied limits.

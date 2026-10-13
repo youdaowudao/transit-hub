@@ -18,7 +18,8 @@ func TestFailureFixStageAHandlerUpdateRejectedAndInvalidFields(t *testing.T) {
 	failureFixCaptureLogs(t)
 	for _, invalid := range []bool{false, true} {
 		service, cache, repository := failureFixService(t, failureFixRejectedPlatform())
-		original := newTestSite("fixture-edit", "fixture-user", "fixture-workspace", 2, &Session{Platform: PlatformNewAPI, BaseURL: "http://original.invalid", UserID: "7", AccessToken: "fixture-old"})
+		original := newTestSite("fixture-edit", "fixture-user", "fixture-workspace", 2, &Session{Platform: PlatformNewAPI, AuthMode: AuthModeUserKey, BaseURL: "http://fixture.invalid", UserID: "42", AccessToken: "fixture-old"})
+		original.Platform = PlatformNewAPI
 		cache.add(original)
 		dto := UpdateRequest{Name: "验收-新名称", SiteURL: "http://fixture.invalid", Platform: PlatformNewAPI, AuthMode: AuthModeUserKey, UserID: "42", AccessToken: "fixture-new", RechargeRate: 3}
 		want := http.StatusUnprocessableEntity
@@ -69,7 +70,7 @@ func TestFailureFixStageAHandlerSuccessfulCreateAndUpdateRetainStatus(t *testing
 			_, _ = io.WriteString(w, `{"success":true,"data":{"id":7}}`)
 			return
 		}
-		_, _ = io.WriteString(w, `{"success":true,"data":{}}`)
+		_, _ = io.WriteString(w, `{"success":true,"data":{"id":7}}`)
 	})
 	service, _, _ := failureFixService(t, platform)
 	handler := &Handler{service: service, accounts: service.accounts}

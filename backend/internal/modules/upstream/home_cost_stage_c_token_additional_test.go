@@ -36,8 +36,8 @@ func TestHomeCostStageCSyncTokenRefreshWorkspaceAndThresholdBoundaries(t *testin
 					writeJSON(w, map[string]any{"data": map[string]any{"access_token": "fixture-new", "refresh_token": "fixture-refresh", "expires_in": 3600}})
 				case "/api/v1/auth/me":
 					writeJSON(w, map[string]any{"data": map[string]any{"balance": 10}})
-				case "/api/v1/usage/dashboard/stats":
-					writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3}})
+				case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
+					writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 3, "total_actual_cost": 3}})
 				default:
 					writeJSON(w, map[string]any{"data": []any{}})
 				}

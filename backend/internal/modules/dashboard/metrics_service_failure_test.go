@@ -15,7 +15,7 @@ import (
 // todayCachedMetrics 返回一个带有今日日期标记的有效 Metrics，用于测试成本路径。
 func todayCachedMetrics(cost float64) upstream.Metrics {
 	now := time.Now()
-	return upstream.Metrics{
+	return upstream.Metrics{TodayConsumeTimezone: "Asia/Singapore",
 		TodayConsume:     upstream.MetricValue{Value: ptrFloat64(cost)},
 		TodayConsumeDate: businesstime.Today(),
 		TodayConsumeAt:   &now,
@@ -59,11 +59,11 @@ type fakeAccountSubstateRecoveryRepository struct {
 	requestedRunID string
 }
 
-func (f *fakeAccountSubstateRecoveryRepository) LatestCompleteAccountKeyCostRuns(context.Context, string, string, string) (string, []UpstreamKeyCostRun, error) {
+func (f *fakeAccountSubstateRecoveryRepository) LatestCompleteAccountKeyCostRuns(context.Context, string, string, string, ...string) (string, []UpstreamKeyCostRun, error) {
 	return f.runID, append([]UpstreamKeyCostRun(nil), f.runs...), nil
 }
 
-func (f *fakeAccountSubstateRecoveryRepository) AccountKeyCostRunsForSnapshot(_ context.Context, _, _, _, snapshotRunID string) ([]UpstreamKeyCostRun, error) {
+func (f *fakeAccountSubstateRecoveryRepository) AccountKeyCostRunsForSnapshot(_ context.Context, _, _, _, snapshotRunID string, currentDates ...string) ([]UpstreamKeyCostRun, error) {
 	f.requestedRunID = snapshotRunID
 	if snapshotRunID != f.runID {
 		return nil, nil
@@ -78,16 +78,16 @@ func (r *liveMetricsAccountingRepository) AccountCostComponentsFromKeySnapshot(_
 	return components, r.componentErr
 }
 
-func (r *liveMetricsAccountingRepository) AccountCostComponentsForDate(context.Context, string, string, string) (AccountCostComponents, error) {
+func (r *liveMetricsAccountingRepository) AccountCostComponentsForDate(context.Context, string, string, string, ...string) (AccountCostComponents, error) {
 	return r.components, r.componentErr
 }
 
-func (r *liveMetricsAccountingRepository) AccountCostComponentsForSnapshotRun(_ context.Context, _, _, _, snapshotRunID string) (AccountCostComponents, error) {
+func (r *liveMetricsAccountingRepository) AccountCostComponentsForSnapshotRun(_ context.Context, _, _, _, snapshotRunID string, currentDates ...string) (AccountCostComponents, error) {
 	r.requestedSnapshot = snapshotRunID
 	return r.components, r.componentErr
 }
 
-func (r *liveMetricsAccountingRepository) LatestCompleteAccountKeyCostRuns(context.Context, string, string, string) (string, []UpstreamKeyCostRun, error) {
+func (r *liveMetricsAccountingRepository) LatestCompleteAccountKeyCostRuns(context.Context, string, string, string, ...string) (string, []UpstreamKeyCostRun, error) {
 	if r.components.SnapshotRunID == "" {
 		return "", nil, nil
 	}
@@ -213,8 +213,8 @@ func TestLiveMetricsCostFailureStillPersistsRevenue(t *testing.T) {
 		t.Fatalf("todayProfit = %#v, want 30", decoded["todayProfit"])
 	}
 	// 上游失败且没有同日确认值时，不使用无日期缓存，但实时响应暂按 0 继续计算。
-	if decoded["todayPurchase"] != 0.0 || decoded["netProfit"] != 30.0 {
-		t.Fatalf("cost failure should use temporary zero: todayPurchase=%#v netProfit=%#v", decoded["todayPurchase"], decoded["netProfit"])
+	if decoded["todayPurchase"] != nil || decoded["netProfit"] != nil {
+		t.Fatalf("cost failure must keep cost and profit unknown: todayPurchase=%#v netProfit=%#v", decoded["todayPurchase"], decoded["netProfit"])
 	}
 	// 新实现：成本质量通过 costQuality 字段暴露，不再写入 metricErrors
 	if cq, hasCq := decoded["costQuality"].(map[string]any); !hasCq || cq["complete"] != false {
@@ -269,7 +269,7 @@ func TestStartupRecoveryRetriesOnlyMissingAccountSubstateForFinalSnapshot(t *tes
 	repository := &fakeAccountSubstateRecoveryRepository{
 		fakeMetricsRepository: base, fakeAutomaticAccountStatsRepository: automatic, runID: "account-run-1",
 		runs: []UpstreamKeyCostRun{{
-			ID: "site-run-1", SnapshotRunID: "account-run-1", SiteID: "site-1", Complete: true,
+			ID: "site-run-1", SnapshotRunID: "account-run-1", SiteID: "site-1", Complete: true, UserID: "user-1", AdminAccountID: "account-1", BusinessDate: date.Format("2006-01-02"),
 			Items: []UpstreamKeyDailyCost{{KeyID: "key-1", RawAmountMicros: 10_000_000, AdjustedCostCents: 200}},
 		}},
 	}
@@ -314,7 +314,7 @@ func TestBackfillRetriesOnlyMissingAccountSubstateForProtectedFinalSnapshot(t *t
 	repository := &fakeAccountSubstateRecoveryRepository{
 		fakeMetricsRepository: base, fakeAutomaticAccountStatsRepository: automatic, runID: "account-run-1",
 		runs: []UpstreamKeyCostRun{{
-			ID: "site-run-1", SnapshotRunID: "account-run-1", SiteID: "site-1", Complete: true,
+			ID: "site-run-1", SnapshotRunID: "account-run-1", SiteID: "site-1", Complete: true, UserID: "user-1", AdminAccountID: "account-1", BusinessDate: date.Format("2006-01-02"),
 			Items: []UpstreamKeyDailyCost{{KeyID: "key-1", RawAmountMicros: 10_000_000, AdjustedCostCents: 200}},
 		}},
 	}
@@ -460,7 +460,7 @@ func TestLiveMetricsUsesCachedCostsAndKeepsPartialSuccess(t *testing.T) {
 	upstreams := &fakeUpstreamLister{cachedSites: []upstream.Response{
 		{
 			ID: "site-success", Status: upstream.StatusConnected, RechargeRate: 2,
-			Metrics: upstream.Metrics{TodayConsume: upstream.MetricValue{Value: &successCost}, TodayConsumeDate: businesstime.Today()},
+			Metrics: upstream.Metrics{TodayConsumeTimezone: "Asia/Singapore", TodayConsume: upstream.MetricValue{Value: &successCost}, TodayConsumeDate: businesstime.Today()},
 		},
 		{
 			ID: "site-failure", Status: upstream.StatusError, ErrorKey: &failedKey, RechargeRate: 2,
@@ -494,7 +494,7 @@ func TestLiveMetricsUsesCachedCostsAndKeepsPartialSuccess(t *testing.T) {
 	}
 }
 
-func TestLiveMetricsUsesLatestPersistedSiteCostWhenCurrentValueMissing(t *testing.T) {
+func TestLiveMetricsRetainsCertifiedCacheWithoutPersistedHistoryFallback(t *testing.T) {
 	failedKey := upstream.ErrorNetwork
 	historicalCost := 8.0
 	observedAt := time.Now().Add(-4 * time.Hour)
@@ -514,15 +514,15 @@ func TestLiveMetricsUsesLatestPersistedSiteCostWhenCurrentValueMissing(t *testin
 	if err != nil {
 		t.Fatalf("LiveMetrics() error: %v", err)
 	}
-	if response.TodayPurchase == nil || *response.TodayPurchase != 8 || response.NetProfit == nil || *response.NetProfit != 22 {
+	if response.TodayPurchase == nil || *response.TodayPurchase != 20 || response.NetProfit == nil || *response.NetProfit != 10 {
 		t.Fatalf("historical fallback amounts: cost=%v net=%v", response.TodayPurchase, response.NetProfit)
 	}
-	if response.CostQuality == nil || response.CostQuality.Mode != "retained" || response.CostQuality.RetainedSites != 1 || response.CostQuality.FallbackAt == nil || !response.CostQuality.FallbackAt.Equal(observedAt) || !response.CostQuality.Complete {
+	if response.CostQuality == nil || response.CostQuality.Mode != "retained" || response.CostQuality.RetainedSites != 1 || response.CostQuality.FallbackAt == nil || response.CostQuality.FallbackAt.Equal(observedAt) || !response.CostQuality.Complete {
 		t.Fatalf("historical fallback quality = %+v", response.CostQuality)
 	}
 }
 
-func TestLiveMetricsUsesTemporaryZeroWhenAllSameDayCostsAreMissing(t *testing.T) {
+func TestLiveMetricsKeepsUnknownWhenAllSameDayCostsAreMissing(t *testing.T) {
 	errorKey := upstream.ErrorNetwork
 	upstreams := &fakeUpstreamLister{cachedSites: []upstream.Response{
 		{
@@ -551,14 +551,8 @@ func TestLiveMetricsUsesTemporaryZeroWhenAllSameDayCostsAreMissing(t *testing.T)
 	if err != nil {
 		t.Fatalf("LiveMetrics() error = %v, want partial response", err)
 	}
-	if response.TodayPurchase == nil || *response.TodayPurchase != 0 {
-		t.Fatalf("temporary direct cost = %#v, want 0", response.TodayPurchase)
-	}
-	if response.NetProfit == nil || *response.NetProfit != 30 {
-		t.Fatalf("temporary net profit = %#v, want 30", response.NetProfit)
-	}
-	if response.OperatingCost == nil || *response.OperatingCost != 5 || response.AdjustedNetProfit == nil || *response.AdjustedNetProfit != 25 {
-		t.Fatalf("temporary operating projection: operating=%#v adjustedNet=%#v, want 5 and 25", response.OperatingCost, response.AdjustedNetProfit)
+	if response.TodayPurchase != nil || response.NetProfit != nil || response.OperatingCost != nil || response.AdjustedNetProfit != nil {
+		t.Fatal("missing cost cannot become confirmed zero or derived profit")
 	}
 	if response.CostQuality == nil || response.CostQuality.Mode != "unavailable" || response.CostQuality.ExpectedSites != 1 || response.CostQuality.CollectedSites != 0 || response.CostQuality.MissingSites != 1 || response.CostQuality.FailedSites != 1 || response.CostQuality.Complete {
 		t.Fatalf("temporary zero quality = %+v", response.CostQuality)
@@ -577,7 +571,7 @@ func TestLiveMetricsUsesErroredSameDayCacheAsRetainedCost(t *testing.T) {
 	errorKey := upstream.ErrorNetwork
 	observedAt := time.Now().Add(-30 * time.Minute)
 	cost := 10.0
-	metrics := upstream.Metrics{
+	metrics := upstream.Metrics{TodayConsumeTimezone: "Asia/Singapore",
 		TodayConsume:     upstream.MetricValue{Value: &cost},
 		TodayConsumeDate: businesstime.Today(),
 		TodayConsumeAt:   &observedAt,
@@ -609,7 +603,7 @@ func TestLiveMetricsUsesErroredSameDayCacheAsRetainedCost(t *testing.T) {
 	}
 }
 
-func TestLiveMetricsUsesTemporaryZeroInsteadOfPreviousBusinessDayCache(t *testing.T) {
+func TestLiveMetricsKeepsUnknownInsteadOfPreviousBusinessDayCache(t *testing.T) {
 	errorKey := upstream.ErrorNetwork
 	observedAt := time.Now().Add(-30 * time.Minute)
 	cost := 10.0
@@ -618,7 +612,7 @@ func TestLiveMetricsUsesTemporaryZeroInsteadOfPreviousBusinessDayCache(t *testin
 		&fakePlatformClient{usageStats: 30},
 		&fakeUpstreamLister{cachedSites: []upstream.Response{{
 			ID: "site-previous-day", Name: "上游旧值", Status: upstream.StatusError, ErrorKey: &errorKey, RechargeRate: 2,
-			Metrics: upstream.Metrics{
+			Metrics: upstream.Metrics{TodayConsumeTimezone: "Asia/Singapore",
 				TodayConsume:     upstream.MetricValue{Value: &cost},
 				TodayConsumeDate: "2000-01-01",
 				TodayConsumeAt:   &observedAt,
@@ -631,7 +625,7 @@ func TestLiveMetricsUsesTemporaryZeroInsteadOfPreviousBusinessDayCache(t *testin
 	if err != nil {
 		t.Fatalf("LiveMetrics() error: %v", err)
 	}
-	if response.TodayPurchase == nil || *response.TodayPurchase != 0 || response.NetProfit == nil || *response.NetProfit != 30 {
+	if response.TodayPurchase != nil || response.NetProfit != nil {
 		t.Fatalf("previous-day fallback amounts: cost=%v net=%v, want 0 and 30", response.TodayPurchase, response.NetProfit)
 	}
 	if response.CostQuality == nil || response.CostQuality.Mode != "unavailable" || response.CostQuality.ExpectedSites != 1 || response.CostQuality.CollectedSites != 0 || response.CostQuality.RetainedSites != 0 || response.CostQuality.MissingSites != 1 || response.CostQuality.Complete {
@@ -647,7 +641,7 @@ func TestCachedCostRejectsStaleSameDayValueWithoutConfirmation(t *testing.T) {
 	cost := 10.0
 	_, quality := summarizeCachedUpstreamCostsWithQuality([]upstream.Response{{
 		Name: "stale-site", Status: upstream.StatusConnected, RechargeRate: 1,
-		Metrics: upstream.Metrics{
+		Metrics: upstream.Metrics{TodayConsumeTimezone: "Asia/Singapore",
 			TodayConsume:     upstream.MetricValue{Value: &cost},
 			TodayConsumeDate: businesstime.Today(),
 			TodayConsumeAt:   &observedAt,
@@ -667,7 +661,7 @@ func TestLiveMetricsKeepsConnectedStaleCostUnavailable(t *testing.T) {
 		&fakePlatformClient{usageStats: 30},
 		&fakeUpstreamLister{cachedSites: []upstream.Response{{
 			Name: "stale-site", Status: upstream.StatusConnected, RechargeRate: 1,
-			Metrics: upstream.Metrics{
+			Metrics: upstream.Metrics{TodayConsumeTimezone: "Asia/Singapore",
 				TodayConsume:     upstream.MetricValue{Value: &cost},
 				TodayConsumeDate: businesstime.Today(),
 				TodayConsumeAt:   &observedAt,
@@ -723,7 +717,7 @@ func TestCachedCostRejectsPreviousBusinessDay(t *testing.T) {
 	cost := 10.0
 	total, quality := summarizeCachedUpstreamCostsWithQuality([]upstream.Response{{
 		Name: "old-site", Status: upstream.StatusError, ErrorKey: &errorKey, RechargeRate: 1,
-		Metrics: upstream.Metrics{
+		Metrics: upstream.Metrics{TodayConsumeTimezone: "Asia/Singapore",
 			TodayConsume:     upstream.MetricValue{Value: &cost},
 			TodayConsumeDate: "2026-08-07",
 			TodayConsumeAt:   &observedAt,
@@ -1013,4 +1007,11 @@ func TestTrendsPreservesFallbackAmountsAndStatus(t *testing.T) {
 		response.Points[0].NetProfit == nil || *response.Points[0].NetProfit != profit {
 		t.Fatalf("fallback trend point = %+v", response.Points)
 	}
+}
+
+func (r *liveMetricsAccountingRepository) AccountKeyCostRunsForSnapshot(_ context.Context, userID, workspace, date, id string, currentDates ...string) ([]UpstreamKeyCostRun, error) {
+	if id != r.components.SnapshotRunID || id == "" {
+		return nil, nil
+	}
+	return []UpstreamKeyCostRun{{SnapshotRunID: id, UserID: userID, AdminAccountID: workspace, BusinessDate: date, SiteID: "site", Complete: true, UsageTimezone: "Asia/Singapore"}}, nil
 }

@@ -11,7 +11,7 @@ import (
 	"transithub/backend/internal/shared/businesstime"
 )
 
-func TestHomeCostCollectorCrossMidnightNeverChangesToHistoricalUsageRoute(t *testing.T) {
+func TestHomeCostCollectorCrossMidnightKeepsFrozenSingaporeDate(t *testing.T) {
 	before := time.Date(2031, 2, 3, 15, 59, 59, 0, time.UTC)
 	var crossed atomic.Bool
 	var todayRequests atomic.Int32
@@ -24,8 +24,8 @@ func TestHomeCostCollectorCrossMidnightNeverChangesToHistoricalUsageRoute(t *tes
 			w.WriteHeader(http.StatusNotFound)
 		case "/api/v1/usage/stats":
 			q := r.URL.Query()
-			if q.Get("period") != "today" || q.Has("timezone") || q.Has("start_date") || q.Has("end_date") {
-				t.Error("collector crossing midnight changed its server-today route to a historical query")
+			if q.Get("period") != "" || q.Get("timezone") != "Asia/Singapore" || q.Get("start_date") != businesstime.DateAt(before) || q.Get("end_date") != businesstime.DateAt(before) {
+				t.Error("collector crossing midnight changed its frozen Singapore query date")
 			} else {
 				todayRequests.Add(1)
 			}

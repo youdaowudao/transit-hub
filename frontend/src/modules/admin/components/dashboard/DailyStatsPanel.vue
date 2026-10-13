@@ -113,9 +113,9 @@
                   >
                     <span>{{ sc.siteName }} <span class="opacity-60">({{ sc.platform }})</span></span>
                     <span>
-                      <span v-if="sc.adjustedCost != null">{{ formatAmount(sc.adjustedCost) }}</span>
-                      <span v-else class="text-destructive">{{ sc.errorReason || sc.status }}</span>
-                      <span v-if="sc.lastAttemptError" class="ml-1 text-muted-foreground">({{ sc.lastAttemptError }})</span>
+                      <span v-if="sc.adjustedCost != null" :title="siteCostObservation(sc, item.date)">{{ formatAmount(sc.adjustedCost) }}<span v-if="siteCostObservation(sc, item.date)" class="ml-1">{{ siteCostObservation(sc, item.date) }}</span></span>
+                      <span v-else class="text-destructive">{{ item.date === singaporeDateStr() ? costFailureText(sc.errorReason) || '今日费用暂无法读取，请同步这个站点重试；不会修改主站。' : sc.errorReason || sc.status }}</span>
+                      <span v-if="sc.lastAttemptError" class="ml-1 text-muted-foreground">({{ item.date === singaporeDateStr() ? costFailureText(sc.lastAttemptError) : sc.lastAttemptError }})</span>
                     </span>
                   </div>
                 </div>
@@ -155,8 +155,9 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { getDailyStats, type DailyStatItem } from '../../api/dashboardAdmin'
+import { getDailyStats, type DailyStatItem, type SiteCostDetail } from '../../api/dashboardAdmin'
 import { formatAmount } from '../../utils/dashboard'
+import { costFailureText } from '../../utils/upstream'
 
 import { t } from '@/locales'
 // 当前新加坡业务日为 UTC+8，用固定偏移量获取当日日期。
@@ -196,6 +197,14 @@ const adjustedMargin = (item: DailyStatItem): number | null => (
     ? item.adjustedNetProfit / item.todayProfit * 100
     : null
 )
+
+const siteCostObservation = (site: SiteCostDetail, date: string): string => {
+  if (date !== singaporeDateStr() || !site.observedAt) return ''
+  const timestamp = new Date(site.observedAt)
+  if (!Number.isFinite(timestamp.getTime())) return ''
+  const observedAt = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Singapore', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(timestamp)
+  return `${site.lastAttemptStatus === 'failed' ? '沿用截至' : '截至'} ${observedAt}（新加坡时间）的费用`
+}
 
 function applyShortcut(sc: Shortcut) {
   fromInput.value = sc.from

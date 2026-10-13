@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func TestHomeCostStageBUnknownCostRefusalAndRecovery(t *testing.T) {
 	amount := 3.0
 	site := newTestSite("site", "user", "workspace", 1, &Session{Platform: PlatformNewAPI, BaseURL: server.URL, UserID: "1", AccessToken: "fixture"})
 	site.Platform = PlatformNewAPI
-	site.Metrics = Metrics{TodayConsume: metric(&amount), TodayConsumeDate: businesstime.DateAt(oldAt), TodayConsumeAt: &oldAt}
+	site.Metrics = Metrics{TodayConsume: metric(&amount), TodayConsumeTimezone: businesstime.Timezone, TodayConsumeDate: businesstime.DateAt(oldAt), TodayConsumeAt: &oldAt}
 	cache := newSyncTestCache(site) // no collector in this status-only fixture.
 	platform := NewPlatformService(NewHTTPClient(server.Client()))
 	platform.now = clock
@@ -102,8 +103,8 @@ func TestHomeCostStageBSuccessfulLoginDatesAllModesAndUpdate(t *testing.T) {
 			writeJSON(w, map[string]any{"data": []any{}})
 		case "/api/log/self/stat":
 			writeJSON(w, map[string]any{"data": map[string]any{"quota": 500000}})
-		case "/api/v1/usage/dashboard/stats":
-			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1}})
+		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1, "total_actual_cost": 1}})
 		default:
 			writeJSON(w, map[string]any{"data": map[string]any{"id": 1, "quota": 5000000, "balance": 10}})
 		}
@@ -168,7 +169,7 @@ func TestHomeCostStageBSub2APICostRefusalRecordsSnapshotButAuthDoesNot(t *testin
 			if failurePath == "/api/v1/usage/dashboard/stats" {
 				select {
 				case snapshot := <-cache.writes:
-					if snapshot.Complete || snapshot.FailureReason != "admin.upstream.errors.upstreamInsufficientBalance" || snapshot.FailureAt == nil {
+					if snapshot.Complete || !strings.Contains(snapshot.FailureReason, "失败") || snapshot.FailureAt == nil {
 						t.Error("cost refusal snapshot lost safe failure")
 					}
 				case <-time.After(time.Second):

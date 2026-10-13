@@ -1,0 +1,496 @@
+[
+  {
+    "name": "340",
+    "date": "2026-10-13",
+    "availableGroups": [
+      {
+        "id": 8,
+        "name": "GPT满血不降智，不限速 ，站长自用"
+      },
+      {
+        "id": 15,
+        "name": "plus  team  pro混池"
+      },
+      {
+        "id": 19,
+        "name": "生图专用"
+      }
+    ],
+    "oldKeys": [
+      {
+        "id": 210,
+        "group_id": 11
+      }
+    ],
+    "accountBefore": {
+      "data": {
+        "total_actual_cost": 0.41558589
+      }
+    },
+    "accountAfter": {
+      "data": {
+        "total_actual_cost": 0.41558589
+      }
+    },
+    "native": {
+      "data": {
+        "start_date": "2026-10-13",
+        "end_date": "2026-10-13",
+        "groups": [
+          {
+            "group_id": 8,
+            "actual_cost": 0.41558589
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "synoralink 0.1不降智",
+    "date": "2026-10-13",
+    "availableGroups": [
+      {
+        "id": 81,
+        "name": "CCMax（0注入）"
+      },
+      {
+        "id": 105,
+        "name": "CCMax（一）"
+      },
+      {
+        "id": 122,
+        "name": "CCMax（二）"
+      },
+      {
+        "id": 124,
+        "name": "Codex-特惠"
+      },
+      {
+        "id": 113,
+        "name": "Codex-Pro"
+      },
+      {
+        "id": 123,
+        "name": "Codex-稳定分组"
+      },
+      {
+        "id": 118,
+        "name": "Codex-伪官Key"
+      },
+      {
+        "id": 119,
+        "name": "OAI官Key生图"
+      },
+      {
+        "id": 115,
+        "name": "全参生图专线"
+      },
+      {
+        "id": 99,
+        "name": "adobe中质量生图"
+      },
+      {
+        "id": 116,
+        "name": "香蕉2专线"
+      },
+      {
+        "id": 117,
+        "name": "香蕉pro专线"
+      },
+      {
+        "id": 100,
+        "name": "香蕉官转"
+      },
+      {
+        "id": 60,
+        "name": "Grok"
+      }
+    ],
+    "oldKeys": [
+      {
+        "id": 1496,
+        "group_id": 104
+      }
+    ],
+    "accountBefore": {
+      "data": {
+        "total_actual_cost": 0.0
+      }
+    },
+    "accountAfter": {
+      "data": {
+        "total_actual_cost": 0.0
+      }
+    },
+    "native": {
+      "data": {
+        "start_date": "2026-10-13",
+        "end_date": "2026-10-13",
+        "groups": []
+      }
+    }
+  },
+  {
+    "name": "可达鸭",
+    "date": "2026-10-13",
+    "availableGroups": [
+      {
+        "id": 43,
+        "name": "GPT 不降智"
+      },
+      {
+        "id": 48,
+        "name": "GPT 不降智2"
+      },
+      {
+        "id": 57,
+        "name": "GPT 不降智3"
+      },
+      {
+        "id": 9,
+        "name": "GPT 稳定分组"
+      },
+      {
+        "id": 40,
+        "name": "GPT蒸馏专属分组"
+      },
+      {
+        "id": 70,
+        "name": "CCMAX「防封蒸馏」"
+      },
+      {
+        "id": 53,
+        "name": "CCMAX「特价蒸馏」"
+      },
+      {
+        "id": 49,
+        "name": "CCMAX「禁止外接、蒸馏」"
+      },
+      {
+        "id": 25,
+        "name": "甩GPT无数条街的Grok 吊打GPT"
+      },
+      {
+        "id": 10,
+        "name": "kiro"
+      },
+      {
+        "id": 36,
+        "name": "DeepSeek"
+      },
+      {
+        "id": 38,
+        "name": "Zhipu"
+      },
+      {
+        "id": 37,
+        "name": "Kimi"
+      },
+      {
+        "id": 66,
+        "name": "gemini"
+      },
+      {
+        "id": 19,
+        "name": "生图 0.04一张2k"
+      }
+    ],
+    "oldKeys": [
+      {
+        "id": 14605,
+        "group_id": 13
+      }
+    ],
+    "accountBefore": {
+      "data": {
+        "total_actual_cost": 0.07410396
+      }
+    },
+    "accountAfter": {
+      "data": {
+        "total_actual_cost": 0.07410396
+      }
+    },
+    "native": {
+      "data": {
+        "start_date": "2026-10-13",
+        "end_date": "2026-10-13",
+        "groups": [
+          {
+            "group_id": 43,
+            "actual_cost": 0.06579829000000001
+          },
+          {
+            "group_id": 10,
+            "actual_cost": 0.008305670000000001
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "智元AI",
+    "date": "2026-10-13",
+    "availableGroups": [
+      {
+        "id": 4,
+        "name": "GPT pro"
+      },
+      {
+        "id": 20,
+        "name": "kiro正价-企业级稳定-cctest100分"
+      },
+      {
+        "id": 35,
+        "name": "GPT pro 企业级稳定 不降智"
+      },
+      {
+        "id": 38,
+        "name": "CCMax全透传微注入可蒸馏支持高并发可破甲 特惠"
+      },
+      {
+        "id": 48,
+        "name": "gpt不降智分组"
+      },
+      {
+        "id": 54,
+        "name": "ccmax满血0注入 全透传可蒸馏"
+      },
+      {
+        "id": 55,
+        "name": "awsb官key"
+      },
+      {
+        "id": 59,
+        "name": "awsb带F5"
+      },
+      {
+        "id": 62,
+        "name": "gemini"
+      }
+    ],
+    "oldKeys": [
+      {
+        "id": 5200,
+        "group_id": 34
+      }
+    ],
+    "accountBefore": {
+      "data": {
+        "total_actual_cost": 2.72469103
+      }
+    },
+    "accountAfter": {
+      "data": {
+        "total_actual_cost": 2.72469103
+      }
+    },
+    "native": {
+      "data": {
+        "start_date": "2026-10-13",
+        "end_date": "2026-10-13",
+        "groups": [
+          {
+            "group_id": 20,
+            "actual_cost": 2.60918407
+          },
+          {
+            "group_id": 4,
+            "actual_cost": 0.11550696
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "林",
+    "date": "2026-10-13",
+    "availableGroups": [
+      {
+        "id": 19,
+        "name": "Kiro-99缓"
+      },
+      {
+        "id": 47,
+        "name": "Claude-满分低智商"
+      },
+      {
+        "id": 52,
+        "name": "Claude-满分"
+      },
+      {
+        "id": 43,
+        "name": "Claude-满分0注入-兜底"
+      },
+      {
+        "id": 13,
+        "name": "Claude-满分0注入"
+      },
+      {
+        "id": 14,
+        "name": "GPT-Plus"
+      },
+      {
+        "id": 30,
+        "name": "GPT-Pro"
+      },
+      {
+        "id": 53,
+        "name": "GPT-不降智-特惠"
+      },
+      {
+        "id": 15,
+        "name": "GPT-不降智-Pro高速"
+      },
+      {
+        "id": 51,
+        "name": "GPT-不降智-企业"
+      },
+      {
+        "id": 23,
+        "name": "Kiro-无缓"
+      },
+      {
+        "id": 21,
+        "name": "Kiro-高智商无缓"
+      },
+      {
+        "id": 5,
+        "name": "Kiro-90缓-外接"
+      },
+      {
+        "id": 28,
+        "name": "Image-2「超分」"
+      },
+      {
+        "id": 16,
+        "name": "image-2 生图"
+      },
+      {
+        "id": 22,
+        "name": "测试组"
+      }
+    ],
+    "oldKeys": [
+      {
+        "id": 313,
+        "group_id": 2
+      }
+    ],
+    "accountBefore": {
+      "data": {
+        "total_actual_cost": 0.15651599
+      }
+    },
+    "accountAfter": {
+      "data": {
+        "total_actual_cost": 0.15651599
+      }
+    },
+    "native": {
+      "data": {
+        "start_date": "2026-10-13",
+        "end_date": "2026-10-13",
+        "groups": [
+          {
+            "group_id": 14,
+            "actual_cost": 0.1564878
+          },
+          {
+            "group_id": 19,
+            "actual_cost": 2.819e-05
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "透明人",
+    "date": "2026-10-13",
+    "availableGroups": [
+      {
+        "id": 101,
+        "name": "阿里-DS-今日爽蹬"
+      },
+      {
+        "id": 102,
+        "name": "阿里-Kimi-今日爽蹬"
+      },
+      {
+        "id": 103,
+        "name": "阿里-GLM-今日爽蹬"
+      },
+      {
+        "id": 106,
+        "name": "阿里-QW-今日爽蹬"
+      },
+      {
+        "id": 57,
+        "name": "今日爽蹬-009"
+      },
+      {
+        "id": 78,
+        "name": "Pro 特惠-130-概率能用"
+      },
+      {
+        "id": 77,
+        "name": "Pro 稳定-180-上线6sol"
+      },
+      {
+        "id": 92,
+        "name": "Claude-100-好用"
+      },
+      {
+        "id": 2,
+        "name": "Kiro稳定-260-好用"
+      },
+      {
+        "id": 113,
+        "name": "生图-Nano"
+      },
+      {
+        "id": 84,
+        "name": "生图-003/张"
+      },
+      {
+        "id": 86,
+        "name": "生图-AD-012一张"
+      },
+      {
+        "id": 112,
+        "name": "生图-官转-016一张"
+      },
+      {
+        "id": 97,
+        "name": "智能调度-16236ffcf3295d7e"
+      }
+    ],
+    "oldKeys": [
+      {
+        "id": 410,
+        "group_id": 105
+      },
+      {
+        "id": 67,
+        "group_id": 29
+      }
+    ],
+    "accountBefore": {
+      "data": {
+        "total_actual_cost": 0.0
+      }
+    },
+    "accountAfter": {
+      "data": {
+        "total_actual_cost": 0.0
+      }
+    },
+    "native": {
+      "data": {
+        "start_date": "2026-10-13",
+        "end_date": "2026-10-13",
+        "groups": []
+      }
+    }
+  }
+]

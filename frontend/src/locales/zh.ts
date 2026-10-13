@@ -2405,7 +2405,7 @@ export default {
         upstreamMessage: '上游提示：',
         fields: '请检查字段：',
         invalidResponseHelp: '上游返回的不是有效 JSON，地址可能不是 API 地址。',
-        stages: { login: '登录', refresh: '刷新令牌', verify: '读取身份', metrics: '读取指标' },
+        stages: { login: '登录', refresh: '刷新令牌', verify: '读取身份', metrics: '读取指标', save: '保存站点资料' },
       },
       errors: {
         loginRejected: '上游拒绝登录：账号或密码不正确，或账号被停用。',

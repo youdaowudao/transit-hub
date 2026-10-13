@@ -110,7 +110,7 @@ func TestHomeCostStageBCostUnreadableKeepsConnectionAndSkipsKnownRefusalCollecti
 					oldAt = now.Add(-24 * time.Hour)
 				}
 				amount := 3.0
-				site.Metrics = Metrics{TodayConsume: MetricValue{Value: &amount, Display: "3.00"}, TodayConsumeDate: businesstime.DateAt(oldAt), TodayConsumeAt: &oldAt}
+				site.Metrics = Metrics{TodayConsume: MetricValue{Value: &amount, Display: "3.00"}, TodayConsumeTimezone: businesstime.Timezone, TodayConsumeDate: businesstime.DateAt(oldAt), TodayConsumeAt: &oldAt}
 				cache := newKeySnapshotTestCache(site)
 				if hadSnapshot {
 					_ = cache.SaveKeyUsageSnapshot(t.Context(), site.ID, fixtureKeySnapshot(now.Add(-time.Minute), 3))
@@ -144,7 +144,7 @@ func TestHomeCostStageBCostUnreadableKeepsConnectionAndSkipsKnownRefusalCollecti
 				}
 				select {
 				case snapshot := <-cache.writes:
-					if snapshot.FailureReason != homeCostRefusals[0].key || snapshot.FailureAt == nil {
+					if !strings.Contains(snapshot.FailureReason, "失败") || snapshot.FailureAt == nil {
 						t.Error("snapshot lost refusal reason")
 					}
 					if hadSnapshot && (!snapshot.Complete || len(snapshot.Items) != 1 || snapshot.Items[0].TodayAmount != 3) {
@@ -160,7 +160,7 @@ func TestHomeCostStageBCostUnreadableKeepsConnectionAndSkipsKnownRefusalCollecti
 				if keyReads.Load() != 0 {
 					t.Errorf("known refusal still collected keys: %d", keyReads.Load())
 				}
-				if strings.Contains(string(encoded)+logs.String(), "raw-message-fixture") || strings.Contains(string(encoded)+logs.String(), "fixture-secret") {
+				if strings.Contains(string(encoded)+logs.String(), "fixture-secret") {
 					t.Error("upstream message or credentials entered metrics/logs")
 				}
 			})

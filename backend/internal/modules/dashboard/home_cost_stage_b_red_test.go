@@ -15,7 +15,7 @@ func TestHomeCostStageBUnreadableAmountIsRetainedNotExact(t *testing.T) {
 	for _, status := range []string{"unreadable", "", "ok"} {
 		t.Run(status, func(t *testing.T) {
 			var metrics upstream.Metrics
-			body, _ := json.Marshal(map[string]any{"todayConsume": map[string]any{"value": 3, "display": "3.00"}, "todayConsumeDate": date, "todayConsumeAt": now, "todayConsumeStatus": status})
+			body, _ := json.Marshal(map[string]any{"todayConsume": map[string]any{"value": 3, "display": "3.00"}, "todayConsumeTimezone": "Asia/Singapore", "todayConsumeDate": date, "todayConsumeAt": now, "todayConsumeStatus": status})
 			if err := json.Unmarshal(body, &metrics); err != nil {
 				t.Fatal(err)
 			}

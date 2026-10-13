@@ -24,7 +24,7 @@ type AccountAssetRepository interface {
 	GetAccountAsset(ctx context.Context, userID, adminAccountID, assetID string) (AccountAsset, error)
 	AppendAccountEvent(ctx context.Context, event AccountEvent) (AccountEventResult, error)
 	ReplaceAccountLink(ctx context.Context, event AccountEvent, link *AccountLink, upstreamReferenceURL string) error
-	GetAccountAssetDetail(ctx context.Context, userID, adminAccountID, assetID string) (AccountAssetDetail, error)
+	GetAccountAssetDetail(ctx context.Context, userID, adminAccountID, assetID string, currentDates ...string) (AccountAssetDetail, error)
 	ListAccountCostLedger(ctx context.Context, userID, adminAccountID string, filter AccountCostLedgerFilter) (AccountCostLedgerPage, error)
 }
 
@@ -36,6 +36,7 @@ func (s *AccountAssetService) ListCostLedger(ctx context.Context, userID string,
 	if err != nil {
 		return AccountCostLedgerPage{}, err
 	}
+	filter.CurrentDate = businesstime.DateAt(s.now())
 	return s.repository.ListAccountCostLedger(ctx, userID, adminAccountID, filter)
 }
 
@@ -47,10 +48,11 @@ func (s *AccountAssetService) ListAssets(ctx context.Context, userID string, fil
 	if err != nil {
 		return AccountAssetPage{}, err
 	}
+	filter.CurrentDate = businesstime.DateAt(s.now())
 	return s.repository.ListAccountAssets(ctx, userID, adminAccountID, filter)
 }
 
-func (s *AccountAssetService) GetAssetDetail(ctx context.Context, userID, assetID string) (AccountAssetDetail, error) {
+func (s *AccountAssetService) GetAssetDetail(ctx context.Context, userID, assetID string, currentDates ...string) (AccountAssetDetail, error) {
 	if s == nil || s.repository == nil || s.accounts == nil || strings.TrimSpace(assetID) == "" {
 		return AccountAssetDetail{}, errInvalidAccountBatch
 	}
@@ -58,7 +60,7 @@ func (s *AccountAssetService) GetAssetDetail(ctx context.Context, userID, assetI
 	if err != nil {
 		return AccountAssetDetail{}, err
 	}
-	return s.repository.GetAccountAssetDetail(ctx, userID, adminAccountID, assetID)
+	return s.repository.GetAccountAssetDetail(ctx, userID, adminAccountID, assetID, businesstime.DateAt(s.now()))
 }
 
 func (s *AccountAssetService) AppendEvent(ctx context.Context, userID, assetID, idempotencyKey string, event AccountEvent) (AccountEventResult, error) {
@@ -173,7 +175,7 @@ func (s *AccountAssetService) ReplaceLink(ctx context.Context, userID, assetID, 
 	if err := s.repository.ReplaceAccountLink(ctx, event, link, input.UpstreamReferenceURL); err != nil {
 		return AccountAssetDetail{}, err
 	}
-	return s.repository.GetAccountAssetDetail(ctx, userID, adminAccountID, event.AccountAssetID)
+	return s.repository.GetAccountAssetDetail(ctx, userID, adminAccountID, event.AccountAssetID, businesstime.DateAt(s.now()))
 }
 
 type AccountAssetService struct {

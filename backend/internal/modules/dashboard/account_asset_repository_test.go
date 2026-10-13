@@ -155,7 +155,7 @@ func TestAccountAssetRepositoryListAndGetStayInsideWorkspace(t *testing.T) {
 		}
 	}
 
-	items, err := repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{Platform: "Claude", Search: "same"})
+	items, err := repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{CurrentDate: businesstime.DateAt(now), Platform: "Claude", Search: "same"})
 	if err != nil {
 		t.Fatalf("ListAccountAssets() error: %v", err)
 	}
@@ -434,11 +434,11 @@ func TestAccountAssetRepositoryDoesNotExposeFutureLinkAsActive(t *testing.T) {
 	if _, err := repo.CreateAccountBatch(ctx, batch, []AccountAsset{asset}, []AccountLink{link}, nil); err != nil {
 		t.Fatalf("CreateAccountBatch() error: %v", err)
 	}
-	items, err := repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{PageSize: 20})
+	items, err := repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{CurrentDate: businesstime.Today(), PageSize: 20})
 	if err != nil {
 		t.Fatalf("ListAccountAssets() error: %v", err)
 	}
-	detail, err := repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID)
+	detail, err := repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID, businesstime.Today())
 	if err != nil {
 		t.Fatalf("GetAccountAssetDetail() error: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestAccountAssetRepositoryReplacesLinkWithEffectiveHistoryAndIdempotency(t 
 	}); err != nil {
 		t.Fatalf("automatic stats mode event: %v", err)
 	}
-	detail, err := repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID)
+	detail, err := repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID, businesstime.Today())
 	if err != nil {
 		t.Fatalf("GetAccountAssetDetail() error: %v", err)
 	}
@@ -686,7 +686,7 @@ func TestAccountAssetRepositoryManualDailyStatsBuildLifecyclePerformanceFromTota
 		}
 	}
 
-	detail, err := repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID)
+	detail, err := repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID, businesstime.DateAt(now.AddDate(0, 0, 1)))
 	if err != nil {
 		t.Fatalf("GetAccountAssetDetail() error: %v", err)
 	}
@@ -698,7 +698,7 @@ func TestAccountAssetRepositoryManualDailyStatsBuildLifecyclePerformanceFromTota
 	if detail.Performance.BreakevenDifferenceCents == nil || *detail.Performance.BreakevenDifferenceCents != -2_000 || detail.Performance.FinalProfitCents != nil {
 		t.Fatalf("active performance = %#v", detail.Performance)
 	}
-	items, err := repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{PageSize: 20})
+	items, err := repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{CurrentDate: businesstime.DateAt(now.AddDate(0, 0, 1)), PageSize: 20})
 	if err != nil {
 		t.Fatalf("ListAccountAssets() error: %v", err)
 	}
@@ -713,7 +713,7 @@ func TestAccountAssetRepositoryManualDailyStatsBuildLifecyclePerformanceFromTota
 	`, asset.ID); err != nil {
 		t.Fatalf("mark one daily stat incomplete: %v", err)
 	}
-	detail, err = repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID)
+	detail, err = repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID, businesstime.DateAt(now.AddDate(0, 0, 1)))
 	if err != nil {
 		t.Fatalf("GetAccountAssetDetail(incomplete) error: %v", err)
 	}
@@ -721,7 +721,7 @@ func TestAccountAssetRepositoryManualDailyStatsBuildLifecyclePerformanceFromTota
 		detail.Performance.BreakevenDifferenceCents != nil || !slices.Contains(detail.Performance.MissingFields, "dailyStats") {
 		t.Fatalf("incomplete detail still exposed derived performance: %#v", detail.Performance)
 	}
-	items, err = repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{PageSize: 20})
+	items, err = repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{CurrentDate: businesstime.DateAt(now.AddDate(0, 0, 1)), PageSize: 20})
 	if err != nil {
 		t.Fatalf("ListAccountAssets(incomplete) error: %v", err)
 	}
@@ -1013,7 +1013,7 @@ func TestAccountMetadataCorrectionsAreAppendOnlyAndProjectedByEffectiveDate(t *t
 	}); err != nil {
 		t.Fatalf("current metadata correction: %v", err)
 	}
-	detail, err := repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID)
+	detail, err := repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID, businesstime.Today())
 	if err != nil {
 		t.Fatalf("GetAccountAssetDetail() error: %v", err)
 	}
@@ -1034,7 +1034,7 @@ func TestAccountMetadataCorrectionsAreAppendOnlyAndProjectedByEffectiveDate(t *t
 	}); err != nil {
 		t.Fatalf("metadata correction without links: %v", err)
 	}
-	linkPreserved, err := repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID)
+	linkPreserved, err := repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID, businesstime.Today())
 	if err != nil || linkPreserved.Asset.UpstreamReferenceURL != "https://supplier.example/correct" {
 		t.Fatalf("metadata correction without link cleared existing value: asset=%#v err=%v", linkPreserved.Asset, err)
 	}
@@ -1060,7 +1060,7 @@ func TestAccountMetadataCorrectionsAreAppendOnlyAndProjectedByEffectiveDate(t *t
 	`, asset.ID); err != nil {
 		t.Fatalf("simulate stale materialized metadata: %v", err)
 	}
-	filteredAssets, err := repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{
+	filteredAssets, err := repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{CurrentDate: businesstime.Today(),
 		Platform: "FilteredPlatform", Channel: "FilteredChannel", AccountType: "FilteredType", Search: "filtered-name",
 	})
 	if err != nil || len(filteredAssets.Items) != 1 {
@@ -1087,7 +1087,7 @@ func TestAccountMetadataCorrectionsAreAppendOnlyAndProjectedByEffectiveDate(t *t
 	}); err != nil {
 		t.Fatalf("clear upstream reference link: %v", err)
 	}
-	cleared, err := repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID)
+	cleared, err := repo.GetAccountAssetDetail(ctx, "user-1", "workspace-1", asset.ID, businesstime.Today())
 	if err != nil || cleared.Asset.UpstreamReferenceURL != "" || cleared.Batch.PurchaseURL != "" {
 		t.Fatalf("cleared reference links = upstream %q purchase %q, err=%v", cleared.Asset.UpstreamReferenceURL, cleared.Batch.PurchaseURL, err)
 	}
@@ -1124,11 +1124,11 @@ func TestListAccountAssetsReturnsExplicitHasMore(t *testing.T) {
 	if _, err := repo.CreateAccountBatch(ctx, batch, assets, nil, nil); err != nil {
 		t.Fatalf("CreateAccountBatch() error: %v", err)
 	}
-	first, err := repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{Page: 1, PageSize: 50})
+	first, err := repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{CurrentDate: businesstime.Today(), Page: 1, PageSize: 50})
 	if err != nil || len(first.Items) != 50 || !first.HasMore {
 		t.Fatalf("first account asset page = %#v, err=%v", first, err)
 	}
-	second, err := repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{Page: 2, PageSize: 50})
+	second, err := repo.ListAccountAssets(ctx, "user-1", "workspace-1", AccountAssetFilter{CurrentDate: businesstime.Today(), Page: 2, PageSize: 50})
 	if err != nil || len(second.Items) != 1 || second.HasMore {
 		t.Fatalf("second account asset page = %#v, err=%v", second, err)
 	}

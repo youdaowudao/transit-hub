@@ -1,3 +1,4 @@
+import { costFailureText } from '../utils/upstream'
 import { computed, onBeforeUnmount, ref } from 'vue'
 import {
   createUpstreamSite,
@@ -33,20 +34,27 @@ const safeUpstreamErrorKey = (error: unknown): string => {
   return 'admin.upstream.errors.unknown'
 }
 
-const normalizeMetrics = (metrics: UpstreamSiteResponse['metrics'] | null | undefined): UpstreamMetrics => ({
-  todayConsumeDate: metrics?.todayConsumeDate,
-  todayConsumeAt: metrics?.todayConsumeAt,
-  todayConsumeStatus: metrics?.todayConsumeStatus,
-  todayConsumeErrorKey: metrics?.todayConsumeErrorKey,
-  todayConsumeUpstreamCode: metrics?.todayConsumeUpstreamCode,
-  todayConsumeHTTPStatus: metrics?.todayConsumeHTTPStatus,
-  todayConsumeFailedAt: metrics?.todayConsumeFailedAt,
-  balance: metrics?.balance ?? emptyMetric(),
-  todayConsume: metrics?.todayConsume ?? emptyMetric(),
-  historyRecharge: metrics?.historyRecharge ?? emptyMetric(),
-  group: metrics?.group ?? { id: '', name: '-', platform: null, multiplier: null, multiplierDisplay: '-' },
-  groups: Array.isArray(metrics?.groups) ? metrics.groups : [],
-})
+const normalizeMetrics = (metrics: UpstreamSiteResponse['metrics'] | null | undefined): UpstreamMetrics => {
+  const singaporeDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Singapore', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+  const usable = metrics?.todayConsumeTimezone === 'Asia/Singapore' && metrics.todayConsumeDate === singaporeDate && metrics.todayConsume?.value != null && Number.isFinite(metrics.todayConsume.value) && metrics.todayConsume.value >= 0
+  const legacy = metrics?.todayConsumeTimezone !== 'Asia/Singapore'
+  return {
+    todayConsumeDate: metrics?.todayConsumeDate,
+    todayConsumeTimezone: metrics?.todayConsumeTimezone,
+    todayConsumeErrorDetail: legacy ? "旧费用尚未按新加坡日期重新读取，请同步这个站点；此操作不会修改主站。" + (metrics?.todayConsumeErrorDetail ? " " + metrics.todayConsumeErrorDetail : metrics?.todayConsumeErrorKey ? " " + costFailureText(metrics.todayConsumeErrorKey) : "") : metrics?.todayConsumeErrorDetail,
+    todayConsumeAt: metrics?.todayConsumeAt,
+    todayConsumeStatus: metrics?.todayConsumeStatus,
+    todayConsumeErrorKey: metrics?.todayConsumeErrorKey,
+    todayConsumeUpstreamCode: metrics?.todayConsumeUpstreamCode,
+    todayConsumeHTTPStatus: metrics?.todayConsumeHTTPStatus,
+    todayConsumeFailedAt: metrics?.todayConsumeFailedAt,
+    balance: metrics?.balance ?? emptyMetric(),
+    todayConsume: usable ? metrics!.todayConsume : emptyMetric(),
+    historyRecharge: metrics?.historyRecharge ?? emptyMetric(),
+    group: metrics?.group ?? { id: '', name: '-', platform: null, multiplier: null, multiplierDisplay: '-' },
+    groups: Array.isArray(metrics?.groups) ? metrics.groups : [],
+  }
+}
 
 const normalizeSite = (site: UpstreamSiteResponse, logoBg: string): UpstreamSite => ({
   ...site,
@@ -146,6 +154,7 @@ export const useUpstreamSites = () => {
       siteSyncStates.value.set(id, {
         phase: 'error',
         errorKey: safeUpstreamErrorKey(error),
+        errorDetail: error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined)?.errorDetail : undefined,
       })
     } finally {
       const next = new Set(syncingSiteIds.value)
@@ -189,7 +198,7 @@ export const useUpstreamSites = () => {
                 sites.value[index] = normalizeSite(event.site, sites.value[index].logoBg)
               }
             }
-            siteSyncStates.value.set(id, { phase: 'error', errorKey: event.errorKey })
+            siteSyncStates.value.set(id, { phase: 'error', errorKey: event.errorKey, errorDetail: event.errorDetail })
             break
           case 'complete':
             isRefreshing.value = false
@@ -224,7 +233,7 @@ export const useUpstreamSites = () => {
         siteSyncStates.value.delete(id)
       }
     } catch (error) {
-      enabledErrorKeys.value.set(id, error instanceof Error ? error.message : 'admin.upstream.errors.unknown')
+      enabledErrorKeys.value.set(id, error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined)?.errorDetail ?? safeUpstreamErrorKey(error) : safeUpstreamErrorKey(error))
     } finally {
       const next = new Set(enabledUpdatingIds.value)
       next.delete(id)

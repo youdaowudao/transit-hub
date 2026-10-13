@@ -153,7 +153,7 @@ func TestHomeCostStageDRecoveryTriggersAndDeduplicatesSameRoundDates(t *testing.
 			handler, ok := any(s).(homeCostRecoveryHandler)
 			amount := 1.0
 			old := upstream.Metrics{TodayConsumeStatus: tc.oldCost}
-			next := upstream.Metrics{TodayConsumeStatus: tc.newCost, TodayConsume: upstream.MetricValue{Value: &amount}, TodayConsumeDate: businesstime.DateAt(now), TodayConsumeAt: &now}
+			next := upstream.Metrics{TodayConsumeTimezone: "Asia/Singapore", TodayConsumeStatus: tc.newCost, TodayConsume: upstream.MetricValue{Value: &amount}, TodayConsumeDate: businesstime.DateAt(now), TodayConsumeAt: &now}
 			if ok && tc.want > 0 {
 				done := make(chan error, 2)
 				go func() {

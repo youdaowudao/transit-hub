@@ -525,6 +525,9 @@ func (s *Service) runModelControl(ctx context.Context, run *modelControlRun) (Mo
 		return s.modelControlResult(ctx, user, ws, target, model, "blocked", modelControlError("AccountMissing"), nil, nil)
 	}
 	if err != nil {
+		if run.auto != nil {
+			return ModelControlResult{}, requestError(modelControlError("AccountReadFailed"))
+		}
 		return ModelControlResult{}, requestError(modelControlPreparationFailureDetail(model, err, session))
 	}
 	if err = s.reconcileModelControlLate(prep, user, ws, target, plan.Detail, true); err != nil {

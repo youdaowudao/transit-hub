@@ -119,7 +119,7 @@ export const modelControlCardView = (item: ModelControlItem, opts: { issue?: Mod
   else if (decision === 'close_recommended' || decision === 'usable') {
     tone = decision === 'close_recommended' ? 'red' : 'green'
     if (closed) label = modelControlText(decision === 'usable' ? 'closedUsableLabel' : 'closedBadLabel')
-    else if (state === 'not_provided') { label = modelControlText(decision === 'usable' ? 'missingUsableLabel' : 'missingNoActionLabel'); if (decision !== 'usable') tone = 'neutral' }
+    else if (state === 'not_provided') { label = modelControlText(decision === 'usable' ? 'missingUsableLabel' : 'missingBadLabel'); if (decision !== 'usable') tone = 'neutral' }
   } else if (state === 'not_provided') label = modelControlText('missingNoActionLabel')
   let primaryAction: 'close' | 'restore' | 'add' | null = null
   if (state !== 'account_missing' && decision !== 'testing') {
@@ -127,7 +127,8 @@ export const modelControlCardView = (item: ModelControlItem, opts: { issue?: Mod
     else if (!item.control.conflictReason && closed) primaryAction = 'restore'
     else if (!item.control.conflictReason && state === 'not_provided' && decision === 'usable') primaryAction = 'add'
   }
-  let sentence = modelControlText(state === 'serving' || state === 'last_model' ? 'siteOpen' : state === 'closed' ? 'siteClosed' : state === 'partially_closed' ? 'sitePartial' : state === 'not_provided' ? 'siteNotProvided' : state === 'account_missing' ? 'siteAccountMissing' : state === 'unverified' ? 'siteUnverified' : isolationIsOpen ? 'siteNotIsolatable' : 'siteUnknown', { reason: modelControlReason(item.control.observation.reasonKey) })
+  const missingBad = state === 'not_provided' && decision === 'close_recommended' && !closed && !item.control.conflictReason
+  let sentence = modelControlText(state === 'serving' || state === 'last_model' ? 'siteOpen' : state === 'closed' ? 'siteClosed' : state === 'partially_closed' ? 'sitePartial' : state === 'not_provided' ? missingBad ? 'siteNotProvidedBad' : 'siteNotProvided' : state === 'account_missing' ? 'siteAccountMissing' : state === 'unverified' ? 'siteUnverified' : isolationIsOpen ? 'siteNotIsolatable' : 'siteUnknown', { reason: modelControlReason(item.control.observation.reasonKey) })
   if (opts.issue) {
     const reason = opts.issue.reasonKey
     sentence = reason.endsWith('Busy') ? modelControlText('verifyBusy') : reason.endsWith('Processing') ? modelControlText('verifyProcessing') : modelControlText('verifyFailed', { reason: modelControlReason(reason), time: item.control.observation.checkedAt ? modelControlTime(item.control.observation.checkedAt) : modelControlText('neverChecked'), state: modelControlState(item) })

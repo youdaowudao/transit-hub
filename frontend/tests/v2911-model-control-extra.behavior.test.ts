@@ -24,6 +24,80 @@ beforeEach(() => {
  api.listModelControlItems.mockResolvedValue({ items: [managed()], page: 1, totalPages: 2, counts }); api.listModelControlEvents.mockResolvedValue({ items: [], page: 1, totalPages: 1 }); api.getModelControlVerifyTargets.mockResolvedValue({ targetIds: [targetId] }); api.verifyModelControl.mockResolvedValue({ items: [managed()], errors: [] })
 })
 afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); vi.useRealTimers(); vi.restoreAllMocks(); modelControlBusyTargets.value = new Set() })
+const missingGeneral = '主站：这个账号目前未开放这个模型。未在白名单不影响问答测试；今天测试合格后，可点“开放此模型”加入白名单，确认后会改主站。'
+const missingBad = '主站：这个账号目前未开放这个模型。本轮测试不合格，继续保持未开放；以后仍可重新测试，合格后再开放。'
+const missingItem = () => {
+ const value = managed(); value.control.observation.state = 'not_provided'; value.attention = false
+ value.round!.correct = 0; value.round!.incorrect = 3; value.round!.accuracyPercent = 0
+ return value
+}
+const expectNoSiteAction = (w: VueWrapper) => {
+ expect(w.findAll('button').some(b => ['开放此模型', '关闭此模型'].includes(b.text()))).toBe(false)
+ expect(api.previewModelControl).not.toHaveBeenCalled(); expect(api.executeModelControl).not.toHaveBeenCalled()
+}
+describe('missing whitelist model copy', () => {
+ it('T1 identifies a judged bad round while preserving counts and no site action', () => {
+  const w = row(missingItem())
+  expect(w.get('header').text()).toContain('本轮不合格 · 主站未开放')
+  expect(w.get('[data-testid="model-control-state"]').text()).toBe(missingBad)
+  expect(w.text()).toContain('0%'); expect(w.text()).toContain('已判 3/3')
+  expect(w.text()).not.toContain('无需处理'); expect(w.text()).not.toContain(missingGeneral)
+  expect(button(w, '不再管理').exists()).toBe(true); expect(w.classes()).toContain('border-border/50')
+  expectNoSiteAction(w)
+ })
+ it.each(['no_evidence', 'testing', 'awaiting_review', 'insufficient'] as const)('T2 preserves %s progress without calling it a bad round', async decision => {
+  const value = missingItem(); value.decision = decision; value.basis.decision = decision
+  if (decision === 'no_evidence') { value.round = null; value.decisionReason = 'no_participating_round' }
+  if (decision === 'testing') { value.round!.running = true; value.round!.completedAt = null; value.round!.incorrect = 0; value.round!.accuracyPercent = null }
+  if (decision === 'awaiting_review') { value.round!.unreviewed = 1; value.round!.incorrect = 2 }
+  if (decision === 'insufficient') { value.round!.incorrect = 2; value.round!.failed = 1; value.round!.cancelled = 1 }
+  const w = row(value)
+  expect(w.get('header').text()).toContain('主站未开放')
+  expect(w.get('[data-testid="model-control-state"]').text()).toBe(missingGeneral)
+  expect(w.text()).not.toContain('本轮不合格'); expect(w.text()).not.toContain('无需处理')
+  const progress = { no_evidence: '今日未测', testing: '这一轮还没跑完', awaiting_review: '还有 1 条答案没判对错', insufficient: '已判 2 条，至少要 3 条才下结论' }
+  expect(w.text()).toContain(progress[decision]); expectNoSiteAction(w)
+  if (decision === 'no_evidence') expect(w.text()).toContain('最近 20 批里没有这个模型的测试')
+  if (decision === 'insufficient') {
+   expect(w.text()).toContain('已判 2/3'); expect(w.text()).toContain('失败 1'); expect(w.text()).toContain('取消 1')
+   await button(w, '看原因').trigger('click'); expect(w.emitted('view-round')![0]).toEqual([value.round!.batchId]); expectNoSiteAction(w)
+  }
+ })
+ it.each(['AccountReadFailed', 'Busy', 'Processing', 'executeUnconfirmed', 'accountUnconfirmed', 'accountPending', 'pending'] as const)('T4 preserves the %s override and reread behavior', async kind => {
+  const value = missingItem()
+  if (kind === 'accountPending') value.control.accountPending = { modelName: 'M', operation: 'close', state: 'unknown' }
+  if (kind === 'pending') value.control.pending = { operation: 'close', phase: 'sending', receipt: '', state: 'unknown', startedAt: value.round!.createdAt, sendStartedAt: value.round!.createdAt }
+  const extra = ['AccountReadFailed', 'Busy', 'Processing'].includes(kind) ? { issue: { reasonKey: `admin.connectionHealth.errors.modelControl${kind}`, at: 1 } } : kind === 'executeUnconfirmed' || kind === 'accountUnconfirmed' ? { [kind]: true } : {}
+  const w = row(value, extra)
+  const expected = { AccountReadFailed: '这次没读到', Busy: '这个账号正在做健康探活或其他操作', Processing: '正在写入主站', executeUnconfirmed: '主站没有明确答复', accountUnconfirmed: '主站没有明确答复', accountPending: '这个账号上一次操作还没确认结果', pending: missingBad }
+  expect(w.get('[data-testid="model-control-state"]').text()).toContain(expected[kind])
+  if (kind !== 'pending') expect(w.get('[data-testid="model-control-state"]').text()).not.toContain(missingBad)
+  if (['accountPending', 'accountUnconfirmed', 'pending'].includes(kind)) expect(button(w, '不再管理').attributes('disabled')).toBeDefined()
+  await button(w, '重新读取主站结果').trigger('click'); expect(w.emitted('verify-now')![0]).toEqual([targetId]); expectNoSiteAction(w)
+ })
+ it.each(['closedEntries', 'conflictReason'] as const)('T5 excludes the bad missing sentence when only %s is present', kind => {
+  const value = missingItem()
+  if (kind === 'closedEntries') value.control.closedEntries = { alias: 'M' }
+  else value.control.conflictReason = 'admin.connectionHealth.errors.modelControlAddKeyConflict'
+  const w = row(value)
+  expect(w.get('header').text()).toContain(kind === 'closedEntries' ? '已关闭 · 复测仍不合格' : '需要你处理')
+  expect(w.get('[data-testid="model-control-state"]').text()).toBe(missingGeneral)
+  expect(w.get('[data-testid="model-control-state"]').text()).not.toContain(missingBad)
+  if (kind === 'closedEntries') expect(button(w, '开放此模型').exists()).toBe(true)
+  else expectNoSiteAction(w)
+ })
+ it.each(['closed', 'partially_closed', 'account_missing', 'unverified'] as const)('T5 retains %s observation copy and the upstream model warning', state => {
+  const value = missingItem(); value.control.observation.state = state
+  if (state === 'closed' || state === 'partially_closed') value.control.closedEntries = { alias: 'M' }
+  const w = row(value, { availableModels: [] })
+  const expected = { closed: '主站：已关闭', partially_closed: '主站：部分关闭', account_missing: '主站：这个账号已在主站删除', unverified: '主站：还没读取' }
+  expect(w.get('[data-testid="model-control-state"]').text()).toContain(expected[state])
+  expect(w.text()).not.toContain(missingBad); expect(w.text()).toContain('这个账号现在的模型列表里没有它，问答测不到；可以不再管理')
+  if (state === 'closed') expect(button(w, '开放此模型').exists()).toBe(true)
+  if (state === 'partially_closed') expect(button(w, '关闭此模型').exists()).toBe(true)
+  if (state === 'account_missing' || state === 'unverified') expectNoSiteAction(w)
+ })
+})
 describe('workspace header settings and complete counts', () => {
  it('saves two settings without model/source fields and handles optimistic conflicts', async () => {
   const w = track(mount(Header, { props: { scope: 'account', workspace: 'ws1', counts } })); await flushPromises(); await button(w, '修改').trigger('click')
@@ -45,9 +119,12 @@ describe('workspace header settings and complete counts', () => {
 })
 describe('model action copy and protected removals', () => {
  it.each(['added', 'restored'] as const)('shows the open success copy for %s', async outcome => {
-  const value = managed(); value.decision = 'usable'; value.control.observation.state = outcome === 'added' ? 'not_provided' : 'closed'; if (outcome === 'restored') value.control.closedEntries = { alias: 'M' }
+  const value = managed(); value.decision = 'usable'; value.basis.decision = 'usable'; value.round!.correct = 3; value.round!.incorrect = 0; value.round!.accuracyPercent = 100; value.control.observation.state = outcome === 'added' ? 'not_provided' : 'closed'; if (outcome === 'restored') value.control.closedEntries = { alias: 'M' }
   api.previewModelControl.mockResolvedValue({ item: value, entries: [{ key: 'M', value: 'M', state: outcome === 'added' ? 'to_add' : 'to_restore' }], groups: [], blockReasonKey: '', requestHealth: { checked: true, allowed: true, reasonKey: '' }, planFingerprint: 'fp' }); api.executeModelControl.mockResolvedValue({ item: managed(), outcome, entries: [] })
-  const w = row(value); await button(w, '开放此模型').trigger('click'); await flushPromises(); expect(w.text()).toContain(outcome === 'added' ? '将在白名单新增：M（转给 M）' : '将加回 TransitHub 之前删掉的：M（转给 M）'); expect(api.executeModelControl).not.toHaveBeenCalled(); await button(w, '确认').trigger('click'); await flushPromises(); expect(w.text()).toContain('已开放。白名单已允许这个模型')
+  const w = row(value)
+  expect(w.classes()).toContain('border-green-500/35'); expect(w.text()).toContain('100%'); expect(w.text()).toContain('已判 3/3')
+  if (outcome === 'added') { expect(w.get('header').text()).toContain('白名单没有 · 今天合格，可开放'); expect(w.get('[data-testid="model-control-state"]').text()).toBe(missingGeneral); expect(w.text()).not.toContain(missingBad) }
+  await button(w, '开放此模型').trigger('click'); await flushPromises(); expect(api.previewModelControl.mock.calls[0]!.slice(0, 4)).toEqual([targetId, 'M', outcome === 'added' ? 'add' : 'restore', value.basis]); expect(w.text()).toContain(outcome === 'added' ? '将在白名单新增：M（转给 M）' : '将加回 TransitHub 之前删掉的：M（转给 M）'); expect(api.executeModelControl).not.toHaveBeenCalled(); await button(w, '确认').trigger('click'); await flushPromises(); expect(api.executeModelControl.mock.calls[0]!.slice(0, 6)).toEqual([targetId, 'M', outcome === 'added' ? 'add' : 'restore', value.basis, 'fp', false]); expect(w.text()).toContain('已开放。白名单已允许这个模型')
  })
  it('lists the existing conflicting entry without a confirmation write', async () => {
   const value = managed(); value.decision = 'usable'; value.control.observation.state = 'not_provided'

@@ -110,3 +110,13 @@ test('core gate includes dated cost business and storage regressions', async () 
   assert.match(script, /go test -race \.\/internal\/modules\/upstream \.\/internal\/modules\/dashboard -run 'TestSingaporeCost'/)
   assert.ok(script.includes('./internal/modules/dashboard'))
 })
+
+
+test('core gate keeps the scoped group rates business regressions', async () => {
+  const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
+  assert.match(script, /group-rates-scoped-critical\.behavior\.test\.ts/)
+  assert.match(script, /group-rates-scoped-additional\.behavior\.test\.ts/)
+  assert.match(script, /group-rates-scoped-api\.additional\.test\.ts/)
+  assert.match(script, /group-rates-import-settings\.behavior\.test\.ts/)
+  assert.match(script, /group-rates-missing-connection\.behavior\.test\.ts/)
+})

@@ -1,3 +1,4 @@
+import { safeScopedErrorText } from '../utils/scopedErrorText'
 import type {
   RunAutoPricingRequest,
   RunAutoPricingResponse,
@@ -456,4 +457,69 @@ export const removeMySiteMapping = async (ownGroup: string, currentMappings: MyS
     if (!(error instanceof Error) || error.message !== 'admin.mySites.errors.request') throw error
     return saveMySiteMappings(currentMappings.filter(item => item.ownGroup !== ownGroup))
   }
+}
+
+export class ScopedCheckApiError extends Error {
+  constructor(message: string, readonly detail = '', readonly next = '', readonly result?: import('../types/mySites').ScopedCheckResult) {
+    super(message)
+    this.name = 'ScopedCheckApiError'
+  }
+}
+const scopedSafeText = safeScopedErrorText
+const scopedIdentityText = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value)
+const scopedAbortError = (error: unknown): boolean => error instanceof Error && error.name === 'AbortError'
+const parseScopedCheckResult = (value: unknown, workspace: string): import('../types/mySites').ScopedCheckResult | undefined => {
+  if (!isObject(value) || value.workspaceAdminAccountId !== workspace || !Number.isSafeInteger(value.total) || Number(value.total) < 0 || typeof value.storageUncertain !== 'boolean' || !isObject(value.confirmedStatuses) || !Array.isArray(value.issues)) return undefined
+  const keys = ['confirmedConnectionIds', 'unconfirmedConnectionIds', 'skippedConnectionIds', 'changedConnectionIds'] as const
+  const seen = new Set<string>()
+  for (const key of keys) {
+    if (!Array.isArray(value[key])) return undefined
+    for (const id of value[key]) { if (!scopedIdentityText(id) || seen.has(id)) return undefined; seen.add(id) }
+  }
+  if (seen.size !== value.total) return undefined
+  const confirmed = value.confirmedConnectionIds as string[]
+  if (Object.keys(value.confirmedStatuses).length !== confirmed.length || !confirmed.every(id => value.confirmedStatuses && isObject(value.confirmedStatuses) && ['active', 'missing'].includes(String(value.confirmedStatuses[id]))) || (value.storageUncertain && confirmed.length !== 0)) return undefined
+  const issues: import('../types/mySites').ScopedCheckIssue[] = []
+  for (const issue of value.issues) {
+    if (!isObject(issue) || !scopedIdentityText(issue.step) || typeof issue.detail !== 'string' || typeof issue.next !== 'string' || typeof issue.retryAllowed !== 'boolean' || (issue.connectionId !== undefined && (!scopedIdentityText(issue.connectionId) || !seen.has(issue.connectionId))) || (issue.accountId !== undefined && !scopedIdentityText(issue.accountId)) || (issue.httpStatus !== undefined && !integerInRange(issue.httpStatus, 100, 599))) return undefined
+    issues.push({ step: issue.step, detail: scopedSafeText(issue.detail), next: scopedSafeText(issue.next), retryAllowed: issue.retryAllowed,
+      ...(typeof issue.connectionId === 'string' ? { connectionId: issue.connectionId } : {}), ...(typeof issue.accountId === 'string' ? { accountId: issue.accountId } : {}), ...(typeof issue.httpStatus === 'number' ? { httpStatus: issue.httpStatus } : {}) })
+  }
+  return { workspaceAdminAccountId: workspace, total: Number(value.total), confirmedConnectionIds: [...confirmed], unconfirmedConnectionIds: [...value.unconfirmedConnectionIds as string[]], skippedConnectionIds: [...value.skippedConnectionIds as string[]], changedConnectionIds: [...value.changedConnectionIds as string[]], confirmedStatuses: Object.fromEntries(confirmed.map(id => [id, (value.confirmedStatuses as Record<string, 'active' | 'missing'>)[id]])), issues, storageUncertain: value.storageUncertain }
+}
+export const checkScopedRealConnections = async (request: import('../types/mySites').ScopedCheckRequest, signal?: AbortSignal): Promise<import('../types/mySites').ScopedCheckResult> => {
+  let response: Response
+  try { response = await fetch(endpoint('/my-sites/real-connections/check-scoped'), { method: 'POST', signal, headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(request) }) }
+  catch (error) { if (scopedAbortError(error)) throw error; throw new ScopedCheckApiError('账号检查结果暂时无法取得', 'Hub与服务器的连接已中断，无法确认本批保存结果；仍显示上次状态', '请点击刷新重试，并检查Hub后端检查记录') }
+  let payload: unknown
+  try { payload = JSON.parse(await response.text()) } catch (error) {
+    if (scopedAbortError(error)) throw error
+    if (response.status === 401) { handleAuthExpired(); throw new ScopedCheckApiError(authUnauthorizedErrorKey, 'Hub登录已失效，本次结果无法确认', '请重新登录Hub后刷新') }
+    throw new ScopedCheckApiError('账号检查结果无法读取', '服务器没有返回可确认的完整检查结果，仍显示上次状态', '请点击刷新重试，并查看Hub后端检查记录')
+  }
+  if (isUnauthorizedApiResponse(response.status, isObject(payload) ? payload : {})) { handleAuthExpired(); throw new ScopedCheckApiError(authUnauthorizedErrorKey, 'Hub登录已失效，本次结果无法确认', '请重新登录Hub后刷新') }
+  const result = parseScopedCheckResult(payload, request.workspaceAdminAccountId)
+  if (!response.ok) throw new ScopedCheckApiError(isObject(payload) ? scopedSafeText(payload.message) || '本批账号状态未能检查完成' : '本批账号状态未能检查完成', isObject(payload) ? scopedSafeText(payload.detail) : '', isObject(payload) ? scopedSafeText(payload.next) : '请刷新重试并查看Hub后端记录', result)
+  if (!result) throw new ScopedCheckApiError('账号检查结果无法确认', '返回的工作区、账号数量或状态结果不完整，仍显示上次状态', '请刷新重试，并查看Hub后端检查记录')
+  return result
+}
+export const listScopedRealConnections = async (request: { workspaceAdminAccountId: string; groupRefs: import('../types/mySites').ScopedGroupRef[] }, signal?: AbortSignal): Promise<{ workspaceAdminAccountId: string; items: RealConnection[] }> => {
+  let response: Response
+  try { response = await fetch(endpoint('/my-sites/real-connections/list-scoped'), { method: 'POST', signal, headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(request) }) }
+  catch (error) { if (scopedAbortError(error)) throw error; throw new Error('Hub与服务器的连接中断，本页对接资料未读取；请刷新并检查Hub后端连接') }
+  let payload: unknown
+  try { payload = JSON.parse(await response.text()) } catch (error) {
+    if (scopedAbortError(error)) throw error
+    if (response.status === 401) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+    throw new Error('Hub返回的本页对接资料无法读取；请刷新并查看Hub后端记录')
+  }
+  if (isUnauthorizedApiResponse(response.status, isObject(payload) ? payload : {})) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+  if (!response.ok) throw new Error(isObject(payload) ? [payload.message, payload.detail, payload.next].map(scopedSafeText).filter(Boolean).join('；') || '本页对接资料未读取，请刷新并查看Hub后端记录' : '本页对接资料未读取，请刷新并查看Hub后端记录')
+  if (!isObject(payload) || payload.workspaceAdminAccountId !== request.workspaceAdminAccountId || !Array.isArray(payload.items)) throw new Error('本页对接资料的工作区或内容无法确认，请刷新重试')
+  const ids = new Set<string>()
+  for (const item of payload.items) {
+    if (!isObject(item) || !scopedIdentityText(item.id) || ids.has(item.id) || !scopedIdentityText(item.upstreamSiteId) || typeof item.upstreamGroupId !== 'string' || typeof item.upstreamGroupName !== 'string' || typeof item.adminAccountId !== 'string' || typeof item.status !== 'string' || !['active', 'missing', ''].includes(item.status) || (item.upstreamKey !== undefined && item.upstreamKey !== '')) throw new Error('本页对接资料不完整或状态无法确认，请刷新并查看Hub后端记录')
+    ids.add(item.id)
+  }
+  return { workspaceAdminAccountId: request.workspaceAdminAccountId, items: payload.items as RealConnection[] }
 }

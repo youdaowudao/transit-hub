@@ -27,7 +27,7 @@ vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
 })
 vi.mock('@/modules/auth/api/auth', () => ({ getAccessToken: () => null, handleAuthExpired: vi.fn(), isUnauthorizedApiResponse: (status: number) => status === 401, authUnauthorizedErrorKey: 'auth.errors.unauthorized' }))
 vi.mock('@/modules/admin/api/dashboardAdmin', () => ({ getDashboardAdminStatus: vi.fn(async () => ({ platform: harness.platform })) }))
-vi.mock('@/modules/admin/api/upstream', () => ({ listUpstreamSites: vi.fn(async () => []) }))
+vi.mock('@/modules/admin/api/upstream', () => ({ listUpstreamSiteOptions: vi.fn(async () => ({ workspaceAdminAccountId: harness.currentAccount.value.id, items: [] })) }))
 vi.mock('@/modules/admin/api/groupRates', () => ({ listGroupRates: harness.listGroupRates, listAllGroupRates: vi.fn(async () => []), listGroupRateHistory: vi.fn(async () => []), updateGroupRateType: vi.fn() }))
 
 const rate = { siteId: 'site-c5', siteName: 'C5 上游', groupId: '21', groupName: 'C5 上游组', type: 'openai', platform: 'sub2api', mapped: false, currentMultiplier: 1, delta: 0, deltaPercent: 0, deleted: false, updatedAt: '2026-10-07T00:00:00Z' }
@@ -43,7 +43,7 @@ const groups = [
   { id: '18', groupName: 'Anthropic 分组', platform: 'anthropic', multiplier: 1 },
   { id: '19', groupName: 'Antigravity 分组', platform: 'antigravity', multiplier: 1 },
 ]
-const rows = (type = 'openai') => ({ items: [harness.rate ?? { ...rate, type }], total: 1, page: 1, pageSize: 10, totalPages: 1, types: ['openai', 'gemini'], platforms: ['sub2api'] })
+const rows = (type = 'openai') => ({ workspaceAdminAccountId: harness.currentAccount.value.id, items: [harness.rate ?? { ...rate, type }], total: 1, page: 1, pageSize: 10, totalPages: 1, types: ['openai', 'gemini'], platforms: ['sub2api'] })
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
 const success = (req: RealConnectRequest) => ({
   workspaceAdminAccountId: 'workspace-c5', configurationStatus: 'confirmed',
@@ -99,8 +99,8 @@ beforeEach(() => {
       return harness.importResponse(request)
     }
     if (url === '/api/my-sites/real-bind') { harness.bindings.push(JSON.parse(String(options.body))); return json({ connection: {} }) }
-    if (url === '/api/my-sites/real-connections/check') return json({ checked: 0, active: 0, missing: 0 })
-    if (url === '/api/my-sites/real-connections') return harness.connectionResponse()
+    if (url === '/api/my-sites/real-connections/check-scoped') return json({ workspaceAdminAccountId: harness.currentAccount.value.id, total: 0, confirmedConnectionIds: [], unconfirmedConnectionIds: [], skippedConnectionIds: [], changedConnectionIds: [], confirmedStatuses: {}, issues: [], storageUncertain: false })
+    if (url === '/api/my-sites/real-connections/list-scoped') { const response = await harness.connectionResponse(); if (!response.ok) return response; return json({ workspaceAdminAccountId: harness.currentAccount.value.id, items: await response.json() }) }
     if (url === '/api/my-sites/mapping-options') return harness.mappingResponse()
     if (url.startsWith('/api/my-sites/upstream-keys?')) return json([{ id: '207', name: '既有 Key', status: 'active', groupId: '21', groupName: 'C5 上游组' }])
     if (url.startsWith('/api/my-sites/admin-resources?')) return json([{ id: '101', name: '既有主站账号', platform: 'openai', type: 'apikey', status: 'active', groupIds: ['10'] }])

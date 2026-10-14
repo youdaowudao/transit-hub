@@ -87,8 +87,8 @@ run_connection_health_gate() {
   run_step "frontend typecheck" \
     bash -c "cd '$ROOT_DIR/frontend' && npm run typecheck"
 
-  run_step "frontend notification scoped API contracts" \
-    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- notifications-api-critical.test.ts"
+  run_step "frontend notification scoped API and workspace UI contracts" \
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- notifications-api-critical.test.ts notifications-controller-critical.behavior.test.ts notifications-layout-critical.behavior.test.ts admin-layout-update-notice.behavior.test.ts admin-menu-hierarchy.behavior.test.ts"
 }
 
 run_globalization_gate() {

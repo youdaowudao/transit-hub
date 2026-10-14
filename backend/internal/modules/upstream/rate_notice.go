@@ -254,6 +254,8 @@ type rateNoticeClassification struct {
 	unknownReasons []string
 }
 
+const rateNoticeUnknownScopeDescription = "这个网站已有登记的主站接入，但当前无法确认受影响范围，请进入分组健康核查。"
+
 func classifyRateNotice(group GroupInfo, bindings []RateNoticeBinding, assignments map[string]RateNoticeKeyAssignment) rateNoticeClassification {
 	result := rateNoticeClassification{level: notifications.LevelNormal, description: "未发现这个分组的已登记主站接入"}
 	accounts := make(map[string][]RateNoticeBinding)
@@ -320,7 +322,7 @@ func classifyRateNotice(group GroupInfo, bindings []RateNoticeBinding, assignmen
 		result.description = "最近确认的Key分组归属与变化分组一致，可能影响已登记主站账号"
 	} else if unknown {
 		result.level = notifications.LevelUrgent
-		result.description = "已登记主站接入，受影响范围暂未确认"
+		result.description = rateNoticeUnknownScopeDescription
 	} else if unclassifiable {
 		result.level = notifications.LevelImportant
 		result.description = "接入情况暂未确认，请核查本站已登记资料"
@@ -379,5 +381,17 @@ func rateChangeNotice(site Site, group GroupInfo, old float64, observedAt time.T
 	} else {
 		action.FocusGroup = group.Name
 	}
-	return notifications.NoticeInput{UserID: site.UserID, AdminAccountID: site.AdminAccountID, Kind: "upstream.group_rate_changed", EventKey: eventKey, SubjectType: "upstream_site", SubjectID: site.ID, Level: classification.level, DiscoveredAt: observedAt, Content: notifications.Content{Title: siteName + "的上游倍率发生变化", Summary: groupName + "：" + oldText + "×变为" + newText + "×。" + classification.description + "；请查看倍率和原关联，不会自动修改主站。", Details: details, Action: action}}, nil
+	title := siteName + "的上游倍率发生变化"
+	summary := groupName + "：" + oldText + "×变为" + newText + "×。" + classification.description + "；请查看倍率和原关联，不会自动修改主站。"
+	rateFact := siteName + "·" + groupName + "：上游倍率" + oldText + "×→" + newText + "×。"
+	if classification.level == notifications.LevelUrgent {
+		title = "已登记主站接入的上游倍率发生变化"
+		summary = rateFact + "请检查成本、定价和调度安排；查看或确认不会修改主站。"
+		if classification.description == rateNoticeUnknownScopeDescription {
+			summary += rateNoticeUnknownScopeDescription
+		}
+	} else if classification.level == notifications.LevelNormal {
+		summary = rateFact + "上游倍率发生变化；未发现这个分组的已登记主站接入。"
+	}
+	return notifications.NoticeInput{UserID: site.UserID, AdminAccountID: site.AdminAccountID, Kind: "upstream.group_rate_changed", EventKey: eventKey, SubjectType: "upstream_site", SubjectID: site.ID, Level: classification.level, DiscoveredAt: observedAt, Content: notifications.Content{Title: title, Summary: summary, Details: details, Action: action}}, nil
 }

@@ -1,0 +1,167 @@
+[
+  {
+    "id": "copy-registered-known",
+    "adminAccountId": "workspace-copy",
+    "kind": "upstream.group_rate_changed",
+    "subjectType": "upstream_site",
+    "subjectId": "site-copy",
+    "level": 4,
+    "discoveredAt": "2030-01-01T00:00:00Z",
+    "createdAt": "2030-01-01T00:00:00Z",
+    "content": {
+      "title": "已登记主站接入的上游倍率发生变化",
+      "summary": "验收网站·验收分组：上游倍率1×→2×。请检查成本、定价和调度安排；查看或确认不会修改主站。",
+      "details": [
+        {
+          "label": "网站",
+          "value": "验收网站"
+        },
+        {
+          "label": "分组",
+          "value": "验收分组"
+        },
+        {
+          "label": "上游倍率",
+          "value": "1×变为2×"
+        },
+        {
+          "label": "接入判断",
+          "value": "最近确认的Key分组归属与变化分组一致，可能影响已登记主站账号"
+        },
+        {
+          "label": "发现时间",
+          "value": "2030-01-01T00:00:00Z"
+        },
+        {
+          "label": "变化比例",
+          "value": "100%"
+        },
+        {
+          "label": "已登记主站账号数量",
+          "value": "1"
+        },
+        {
+          "label": "已登记主站账号摘要",
+          "value": "登记账号"
+        }
+      ],
+      "action": {
+        "kind": "group_rates",
+        "siteId": "site-copy",
+        "focusGroupId": "group-copy"
+      }
+    },
+    "readAt": null,
+    "reminderCompletedAt": null
+  },
+  {
+    "id": "copy-registered-unknown",
+    "adminAccountId": "workspace-copy",
+    "kind": "upstream.group_rate_changed",
+    "subjectType": "upstream_site",
+    "subjectId": "site-copy",
+    "level": 4,
+    "discoveredAt": "2030-01-01T00:00:00Z",
+    "createdAt": "2030-01-01T00:00:00Z",
+    "content": {
+      "title": "已登记主站接入的上游倍率发生变化",
+      "summary": "验收网站·验收分组：上游倍率1×→2×。请检查成本、定价和调度安排；查看或确认不会修改主站。这个网站已有登记的主站接入，但当前无法确认受影响范围，请进入分组健康核查。",
+      "details": [
+        {
+          "label": "网站",
+          "value": "验收网站"
+        },
+        {
+          "label": "分组",
+          "value": "验收分组"
+        },
+        {
+          "label": "上游倍率",
+          "value": "1×变为2×"
+        },
+        {
+          "label": "接入判断",
+          "value": "这个网站已有登记的主站接入，但当前无法确认受影响范围，请进入分组健康核查。"
+        },
+        {
+          "label": "发现时间",
+          "value": "2030-01-01T00:00:00Z"
+        },
+        {
+          "label": "变化比例",
+          "value": "100%"
+        },
+        {
+          "label": "已登记主站账号数量",
+          "value": "1"
+        },
+        {
+          "label": "已登记主站账号摘要",
+          "value": "登记账号"
+        },
+        {
+          "label": "需要核查的原因",
+          "value": "关联Key的最近分组归属尚未确认，请核查原关联"
+        }
+      ],
+      "action": {
+        "kind": "group_rates",
+        "siteId": "site-copy",
+        "focusGroupId": "group-copy"
+      }
+    },
+    "readAt": null,
+    "reminderCompletedAt": null
+  },
+  {
+    "id": "copy-unmatched",
+    "adminAccountId": "workspace-copy",
+    "kind": "upstream.group_rate_changed",
+    "subjectType": "upstream_site",
+    "subjectId": "site-copy",
+    "level": 1,
+    "discoveredAt": "2030-01-01T00:00:00Z",
+    "createdAt": "2030-01-01T00:00:00Z",
+    "content": {
+      "title": "验收网站的上游倍率发生变化",
+      "summary": "验收网站·验收分组：上游倍率1×→2×。上游倍率发生变化；未发现这个分组的已登记主站接入。",
+      "details": [
+        {
+          "label": "网站",
+          "value": "验收网站"
+        },
+        {
+          "label": "分组",
+          "value": "验收分组"
+        },
+        {
+          "label": "上游倍率",
+          "value": "1×变为2×"
+        },
+        {
+          "label": "接入判断",
+          "value": "未发现这个分组的已登记主站接入"
+        },
+        {
+          "label": "发现时间",
+          "value": "2030-01-01T00:00:00Z"
+        },
+        {
+          "label": "变化比例",
+          "value": "100%"
+        },
+        {
+          "label": "已登记主站账号数量",
+          "value": "0"
+        }
+      ],
+      "action": {
+        "kind": "group_rates",
+        "siteId": "site-copy",
+        "focusGroupId": "group-copy"
+      }
+    },
+    "readAt": null,
+    "reminderCompletedAt": null
+  }
+]

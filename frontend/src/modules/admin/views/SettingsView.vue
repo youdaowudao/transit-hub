@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Plus, Save, Loader2, CheckCircle2, ListChecks, MessageSquare, Send, Trash2, Timer, AlertTriangle, TrendingUp, Info, Mail, RefreshCw, RotateCcw, ServerCog, Power, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import EmailTemplatesPanel from '../components/settings/EmailTemplatesPanel.vue'
 import NotificationTemplateEditor from '../components/settings/NotificationTemplateEditor.vue'
 import TestQuestionsPanel from '../components/settings/TestQuestionsPanel.vue'
+import { NotificationControllerKey } from '../composables/useNotifications'
 import {
   getSystemRestartStatus,
   getSystemRollbackStatus,
@@ -38,6 +39,21 @@ import type { NotificationChannel, NotificationChannelSettings, NotificationTemp
 import { t } from '@/locales'
 // Tab Settings
 const activeTab = ref<'strategy' | 'questions' | 'channels' | 'email' | 'system'>('strategy')
+const notifications = inject(NotificationControllerKey, null)
+const notificationInterval = ref(String((notifications?.intervalSeconds.value ?? 300) / 60))
+const notificationIntervalValid = computed(() => /^\d+$/.test(notificationInterval.value) && Number(notificationInterval.value) >= 1 && Number(notificationInterval.value) <= 60)
+if (notifications) {
+  watch(notifications.intervalSeconds, seconds => { notificationInterval.value = String(seconds / 60) })
+  watch(notifications.workspaceId, () => {
+    notificationInterval.value = String(notifications.intervalSeconds.value / 60)
+    void notifications.loadPreferences()
+  })
+}
+const saveNotificationInterval = async () => {
+  if (!notifications) return
+  const success = await notifications.savePreferences(Number(notificationInterval.value))
+  if (!success) notificationInterval.value = String(notifications.intervalSeconds.value / 60)
+}
 
 // Save loading states
 const isSavingStrategy = ref(false)
@@ -941,6 +957,7 @@ const loadCurrentVersion = async () => {
 }
 
 onMounted(async () => {
+  if (notifications) void nextTick().then(() => notifications.loadPreferences())
   await loadChannels()
   void loadStrategy()
   void loadSmtp()
@@ -1059,6 +1076,18 @@ onBeforeUnmount(() => {
         <!-- Strategy Tab                                 -->
         <!-- ============================================ -->
         <div v-if="activeTab === 'strategy'" id="settings-panel-strategy" class="space-y-5" role="tabpanel" aria-labelledby="settings-tab-strategy">
+          <section v-if="notifications" class="overflow-hidden rounded-2xl border border-border/50 bg-card shadow-sm" aria-label="站内通知设置">
+            <div class="space-y-4 p-5">
+              <div><h3 class="text-lg font-semibold text-foreground">站内通知</h3><p class="mt-1 text-sm text-muted-foreground">默认每5分钟读取已保存的通知。只影响网页检查，不改变上游同步和主站。</p></div>
+              <div class="flex flex-wrap items-end gap-3"><div class="space-y-2"><label for="notification-check-interval" class="block text-sm font-medium">通知检查间隔（分钟）</label><Input id="notification-check-interval" v-model="notificationInterval" type="number" min="1" max="60" step="1" inputmode="numeric" class="w-32" :disabled="notifications.preferenceLoading.value || notifications.preferenceSaving.value" aria-describedby="notification-interval-help" /></div><Button :disabled="!notificationIntervalValid || notifications.preferenceLoading.value || notifications.preferenceSaving.value" @click="saveNotificationInterval">{{ notifications.preferenceSaving.value ? '正在保存通知检查间隔' : '保存通知检查间隔' }}</Button><Button variant="secondary" :disabled="notifications.preferenceLoading.value || notifications.preferenceSaving.value" @click="notifications.loadPreferences()">重试读取通知设置</Button></div>
+              <p id="notification-interval-help" class="text-xs text-muted-foreground">请输入1—60之间的整数分钟。保存后用于当前工作区，其他工作区保持原设置。</p>
+              <p v-if="notifications.preferenceLoading.value" role="status" class="text-sm text-muted-foreground">正在读取当前工作区的通知设置；原间隔保留。</p>
+              <p v-if="!notifications.preferenceConfirmed.value && !notifications.preferenceLoading.value" class="text-sm text-warning">当前工作区的通知检查间隔尚未确认，暂按5分钟检查；请重试读取通知设置。</p>
+              <p v-if="!notificationIntervalValid" class="text-sm text-destructive">请输入1—60之间的整数分钟后保存。</p>
+              <p v-if="notifications.displayedPreferenceError.value" role="alert" class="break-words text-sm text-destructive">{{ notifications.displayedPreferenceError.value }}</p>
+              <p v-if="notifications.preferenceSaved.value" role="status" aria-live="polite" class="text-sm text-green-500">通知检查间隔已确认保存为{{ notifications.intervalSeconds.value / 60 }}分钟；当前工作区使用新间隔，不会修改主站。</p>
+            </div>
+          </section>
           <!-- Strategy Header + Save button -->
           <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>

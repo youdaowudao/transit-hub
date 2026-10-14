@@ -1,9 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onBeforeUnmount, watch, type Component } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount, provide, watch, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { LayoutDashboard, Network, Settings, LogOut, Moon, Sun, Percent, Megaphone, ChevronDown, ArrowRightLeft, Link2, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes, Clock3 } from 'lucide-vue-next'
 import { useDark, useToggle } from '@vueuse/core'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
+import { NotificationControllerKey, useNotifications } from '../composables/useNotifications'
+import NotificationBell from '../components/notifications/NotificationBell.vue'
+import NotificationDrawer from '../components/notifications/NotificationDrawer.vue'
+import NotificationSummary from '../components/notifications/NotificationSummary.vue'
+import NotificationCriticalDialog from '../components/notifications/NotificationCriticalDialog.vue'
 import { clearAccessToken } from '@/modules/auth/api/auth'
 import { getSystemVersion } from '../api/system'
 import type { SystemVersionResponse } from '../api/system'
@@ -18,7 +23,14 @@ const isDark = useDark({
 })
 const toggleDark = useToggle(isDark)
 import { t } from '@/locales'
-const { currentAccount, noticeKey, loadCurrentAccount } = useAdminAccounts()
+const { currentAccount, isSwitching, noticeKey, loadCurrentAccount } = useAdminAccounts()
+const notifications = useNotifications({
+  workspaceId: computed(() => currentAccount.value?.id ?? ''),
+  isSwitching,
+  enabled: computed(() => route.name !== 'AdminAccounts'),
+  navigate: location => router.push(location),
+})
+provide(NotificationControllerKey, notifications)
 
 // 后端告诉页面有没有新版本，页面只显示提示文字。
 const versionInfo = ref<SystemVersionResponse | null>(null)
@@ -152,6 +164,7 @@ const pageTitle = computed(() => (route.path === '/admin' ? t('admin.menu.dashbo
 const handleLogout = () => {
   showUserMenu.value = false
   closeMobileSidebar()
+  notifications.stop()
   clearAccessToken()
   router.push('/login')
 }
@@ -285,6 +298,7 @@ watch(
 
         <div class="flex min-w-0 shrink-0 items-center gap-1 sm:gap-4">
           <div class="flex items-center gap-1 sm:gap-2">
+            <NotificationBell v-if="!isWorkspaceSelectionPage && currentAccount" :controller="notifications" />
             <!-- 版本号展示：点击只打开当前 GitHub 仓库，不根据版本号拼 release/tag。 -->
             <a
               v-if="versionInfo"
@@ -363,6 +377,10 @@ watch(
         <div v-if="!isWorkspaceSelectionPage && noticeKey" class="mb-4 rounded-lg border border-warning/40 bg-warning/10 p-4 text-sm text-warning">
           {{ t(noticeKey) }}
         </div>
+        <div v-if="!isWorkspaceSelectionPage && notifications.summaryError.value" role="alert" class="mb-4 space-y-2 rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
+          <p class="break-words">{{ notifications.summaryError.value }}</p>
+          <button type="button" class="underline" :disabled="notifications.summaryLoading.value" @click="notifications.refreshSummary()">重试读取</button>
+        </div>
         <router-view v-slot="{ Component }">
           <transition name="fade" mode="out-in">
             <component :is="Component" />
@@ -371,6 +389,9 @@ watch(
       </main>
     </div>
   </div>
+  <NotificationSummary :controller="notifications" />
+  <NotificationDrawer :controller="notifications" />
+  <NotificationCriticalDialog :controller="notifications" />
 </template>
 <style scoped>
 .fade-enter-active,

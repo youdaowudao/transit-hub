@@ -20,6 +20,7 @@ var (
 	ErrEventConflict = errors.New("同一通知事件已保存不同内容，本次没有覆盖原提醒，请发布方核查事件编号")
 	ErrWorkspace     = errors.New("通知所属工作区不存在或不属于这个用户，本次没有保存，请核查工作区后重试")
 	unsafeText       = regexp.MustCompile(`(?i)(?:<\s*/?\s*[a-z!][^>]*>|(?:password|passwd|token|key|secret|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|cookie|session|real[_ -]?connection|密码|密钥|令牌)["']?\s*[:=]|\bbearer\s+\S+|(?:postgres(?:ql)?|redis)://)`)
+	httpURLUserinfo  = regexp.MustCompile(`(?i)https?://[^\s/?#，。；]*@`)
 	stableActionKind = regexp.MustCompile(`^[a-z][a-z0-9_.-]{0,127}$`)
 )
 
@@ -67,6 +68,11 @@ func checkText(field, value string, limit int, required, identifier bool) error 
 			return invalidInput(field, "包含网页标签，请去掉标签并提供纯文字")
 		}
 		return invalidInput(field, "包含登录凭据或存储连接资料，请去掉敏感资料并提供纯文字")
+	}
+	if httpURLUserinfo.MatchString(value) {
+		// Check every HTTP origin, including nested URLs, before any path/query.
+		// Never mask a complete navigation identifier into another ID.
+		return invalidInput(field, "包含带登录身份的网页地址，请去掉网址中的用户名和密码；完整业务编号不会被截断或遮盖成其他编号")
 	}
 	for _, r := range value {
 		if unicode.IsControl(r) && (identifier || r != '\n' && r != '\t') {

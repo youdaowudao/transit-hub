@@ -66,6 +66,9 @@ run_connection_health_gate() {
   run_step "backend notification persistence and read-only assignment race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/notifications ./internal/modules/upstream ./internal/modules/connection_health -run 'Test.*(Notification|Notice|PeekKeyAssignment)' -count=1"
 
+  run_step "backend notification authenticated API race tests (real PG only when explicitly configured)" \
+    bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/httpserver -run 'TestNotificationAPI' -count=1"
+
   run_step "backend Singapore cost persistence race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/upstream ./internal/modules/dashboard -run 'TestSingaporeCost' -count=1"
 
@@ -83,6 +86,9 @@ run_connection_health_gate() {
 
   run_step "frontend typecheck" \
     bash -c "cd '$ROOT_DIR/frontend' && npm run typecheck"
+
+  run_step "frontend notification scoped API contracts" \
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- notifications-api-critical.test.ts"
 }
 
 run_globalization_gate() {

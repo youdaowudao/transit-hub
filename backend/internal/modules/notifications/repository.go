@@ -19,6 +19,15 @@ func SafeStorageCause(err error) string {
 }
 
 func safeStorageCause(err error) string {
+	if errors.Is(err, errStoredContentFormat) {
+		return "已保存的通知内容不是可读取的完整格式，请维护人员核查这条通知的保存内容"
+	}
+	if errors.Is(err, errStoredContentUnsafe) {
+		return "已保存的通知内容未通过安全显示检查，请维护人员核查必要字段、长度和敏感资料；本次没有展示这条内容"
+	}
+	if errors.Is(err, errStoredPreference) {
+		return "已保存的通知检查间隔不在1到60整数分钟范围内，请维护人员核查这个工作区的通知设置"
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "数据库操作等待超时"
 	}

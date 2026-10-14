@@ -192,7 +192,7 @@ func failureAttempt(platform Platform, err error) FailureAttempt {
 }
 
 var longMessageToken = regexp.MustCompile(`[A-Za-z0-9]{24,}`)
-var messageURL = regexp.MustCompile(`(?i)https?://[^\s<>"'，。；]+`)
+var messageURL = regexp.MustCompile(`(?i)https?://[^\s<>，。；]+`)
 var messageQuery = regexp.MustCompile(`\?[^\s<>"'，。；]+`)
 var labelledSecret = regexp.MustCompile(`(?i)(?:password|passwd|token|key|secret|api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|cookie|密码|密钥|令牌)\s*[:=]\s*[^\s,;，。；]+`)
 

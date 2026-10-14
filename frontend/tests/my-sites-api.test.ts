@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { checkRealConnections, realDisconnect, saveMySiteMapping } from '../src/modules/admin/api/mySites'
-import type { MySiteMapping } from '../src/modules/admin/types/mySites'
+import { checkRealConnections, realConnect, realDisconnect, saveMySiteMapping } from '../src/modules/admin/api/mySites'
+import type { MySiteMapping, RealConnectRequest } from '../src/modules/admin/types/mySites'
 
 const mappingWithLastRun = (): MySiteMapping => ({
   ownGroup: 'Gemini premium',
@@ -116,5 +116,69 @@ describe('safe deletion API evidence', () => {
     try { await realDisconnect({ connectionId: 'isolated', mode: 'full', removePricingMapping: false }) } catch (error) { captured = error }
     expect(captured).toMatchObject({ message: key, adminResourceId: '101', upstreamKeyId: '207' })
     expect(captured).not.toHaveProperty('ignored')
+  })
+})
+
+
+const grokImportRequest = (): RealConnectRequest => ({
+  upstreamSiteId: 'grok-source', upstreamGroupId: '70', upstreamGroupName: 'source-group', groupType: 'grok', ownGroupIds: ['7', '8'],
+  accountSettings: { priorityMode: 'manual', priority: 7, concurrency: 73, passthrough: false, poolMode: false, upstreamBillingProbeEnabled: false },
+})
+const grokImportResponse = () => ({
+  workspaceAdminAccountId: 'grok-workspace', configurationStatus: 'confirmed',
+  connection: { id: 'a'.repeat(32), upstreamSiteId: 'grok-source', upstreamGroupId: '70', upstreamGroupName: 'source-group', adminAccountId: '22', adminAccountName: 'X-source', upstreamKeyId: '11', ownGroupIds: ['7', '8'], groupType: 'grok', adminPlatform: 'sub2api', status: 'active', createdAt: '2026-10-14T00:00:00Z' },
+  configuration: { observation: 'creation', adminAccountId: '22', name: 'X-source', platform: 'grok', priority: 7, concurrency: 73, passthrough: false, poolMode: false, upstreamBillingProbeEnabled: false, ownGroups: [{ id: '7', name: 'Grok A' }, { id: '8', name: 'Grok B' }], modelState: 'synced', models: ['grok-live', 'provider/custom'] },
+})
+const grokWarning = { stage: 'model_sync', target: 'main', message: 'admin.mySites.errors.importModelSyncWarning', reason: 'admin.upstream.errors.forbidden', httpStatus: 403, detail: '主站返回：请检查模型接口权限' }
+const mockImportFetch = (payload: unknown, status = 200) => {
+  vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null) })
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status }))
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
+describe('Grok import API contract', () => {
+  it('preserves selected Grok, both target groups and explicit false settings through confirmed readback', async () => {
+    const request = grokImportRequest(), payload = grokImportResponse(), fetchMock = mockImportFetch(payload)
+    const result = await realConnect(request, 'grok-workspace')
+    expect(result.configurationStatus).toBe('confirmed')
+    expect(result.configuration).toEqual(payload.configuration)
+    expect(result.connection.groupType).toBe('grok')
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual(request)
+  })
+  it('accepts a complete Grok warning without inventing model sync success', async () => {
+    const payload: any = grokImportResponse()
+    payload.configuration.modelState = 'not_synced'; payload.configuration.models = []; payload.diagnostics = [grokWarning]
+    mockImportFetch(payload)
+    const result = await realConnect(grokImportRequest(), 'grok-workspace')
+    expect(result).toMatchObject({ configurationStatus: 'confirmed', configuration: { platform: 'grok', modelState: 'not_synced', models: [], passthrough: false }, diagnostics: [grokWarning] })
+  })
+  it.each(['current_whitelist', 'current_unrestricted'])('accepts replay %s as current configuration', async modelState => {
+    const payload = grokImportResponse()
+    payload.configuration = { ...payload.configuration, observation: 'current', priority: 0, concurrency: 2000, modelState, models: modelState === 'current_whitelist' ? ['current-alias-*'] : [], ownGroups: [{ id: '9', name: 'Current Grok' }] }
+    mockImportFetch(payload)
+    const result = await realConnect(grokImportRequest(), 'grok-workspace')
+    expect(result.configuration).toEqual(payload.configuration)
+    expect(result.configuration?.observation).toBe('current')
+  })
+  it.each(['wrong-platform', 'forbidden-passthrough', 'missing-warning', 'partial-warning-models'])('keeps completed association but refuses invalid Grok configuration: %s', async mode => {
+    const payload: any = grokImportResponse()
+    if (mode === 'wrong-platform') payload.configuration.platform = 'openai'
+    if (mode === 'forbidden-passthrough') { payload.configuration.passthrough = true; payload.configuration.modelState = 'not_required'; payload.configuration.models = [] }
+    if (mode.includes('warning')) { payload.configuration.modelState = 'not_synced'; payload.configuration.models = mode === 'partial-warning-models' ? ['invented'] : []; if (mode !== 'missing-warning') payload.diagnostics = [grokWarning] }
+    mockImportFetch(payload)
+    const result = await realConnect(grokImportRequest(), 'grok-workspace')
+    expect(result.connection.groupType).toBe('grok')
+    expect(result.configurationStatus).toBe('unavailable')
+    expect(result).not.toHaveProperty('configuration')
+  })
+  it.each(['wrong-connection-platform', 'wrong-main', 'wrong-workspace', 'malformed-http-success'])('keeps %s pending without trustworthy creation confirmation', async mode => {
+    const payload: any = grokImportResponse()
+    if (mode === 'wrong-connection-platform') payload.connection.groupType = 'openai'
+    if (mode === 'wrong-main') payload.connection.adminPlatform = 'grok'
+    if (mode === 'wrong-workspace') payload.workspaceAdminAccountId = 'other'
+    if (mode === 'malformed-http-success') delete payload.connection
+    mockImportFetch(payload)
+    await expect(realConnect(grokImportRequest(), 'grok-workspace')).rejects.toMatchObject({ cleanup: 'pending', retryAllowed: false })
   })
 })

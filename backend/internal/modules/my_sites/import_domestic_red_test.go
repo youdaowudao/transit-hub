@@ -98,6 +98,6 @@ func TestC51REDE3MixedTargetPlatforms(t *testing.T) {
 	c51AssertRejectedBeforeResources(t, &c5RedTransport{platform: "openai", secondGroupPlatform: "anthropic"}, "openai")
 }
 
-func TestC51REDE4UnsupportedSourcePlatform(t *testing.T) {
-	c51AssertRejectedBeforeResources(t, &c5RedTransport{platform: "grok"}, "grok")
+func TestC51REDE4GrokSourceAndTargetPlatform(t *testing.T) {
+	c51AssertImportedPlatform(t, "grok", "grok", "grok", "X")
 }

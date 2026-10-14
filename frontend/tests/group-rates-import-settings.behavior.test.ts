@@ -37,6 +37,8 @@ const groups = [
   { id: '10', groupName: '表单分组甲', platform: 'openai', multiplier: 1 },
   { id: '11', groupName: '表单分组乙', platform: 'openai', multiplier: 1 },
   { id: '12', groupName: 'Gemini 分组', platform: 'gemini', multiplier: 1 },
+  { id: '20', groupName: 'Grok 分组甲', platform: 'grok', multiplier: 1 },
+  { id: '21', groupName: 'Grok 分组乙', platform: 'grok', multiplier: 1 },
 ]
 const rows = (type = 'openai') => ({ workspaceAdminAccountId: (harness.currentAccount.value?.id ?? ''), items: [{ ...rate, type }], total: 1, page: 1, pageSize: 10, totalPages: 1, types: ['openai', 'gemini'], platforms: ['sub2api'] })
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
@@ -542,7 +544,7 @@ describe('approved import selection regression', () => {
     const select = dialog(wrapper).find('select')
     expect(select.exists()).toBe(true)
     expect(select.element).toHaveProperty('value', 'openai')
-    expect(select.findAll('option').filter(o => o.attributes('value'))).toHaveLength(8)
+    expect(select.findAll('option').filter(o => o.attributes('value'))).toHaveLength(9)
     await chooseGroup(wrapper)
     await select.setValue('gemini')
     expect(dialog(wrapper).text()).not.toContain('表单分组甲')
@@ -974,5 +976,82 @@ describe('model warning primary-agent RED business contract', () => {
     expect(dialog(wrapper).find('img').exists()).toBe(false)
     await dialog(wrapper).get('form').trigger('submit'); await flushPromises()
     expect(harness.requests).toHaveLength(1)
+  })
+})
+
+
+describe('Grok complete import result and existing binding interaction', () => {
+  const hint = '选择 Grok 后会创建 Grok 平台的主站账号；请在下面选择 Grok 分组，再点击“创建并对接”。这里不设置探活或答题。'
+  it('sends manual Priority, both Grok groups and all explicit false switches', async () => {
+    const wrapper = await openView('grok')
+    await dialog(wrapper).findAll('button').find(button => button.text() === '人工')!.trigger('click')
+    await dialog(wrapper).get('#import-priority').setValue('7')
+    await dialog(wrapper).get('#import-concurrency').setValue('73')
+    await dialog(wrapper).get('[role="switch"][aria-label="Pool Mode"]').trigger('click')
+    await dialog(wrapper).get('[role="switch"][aria-label="自动探测上游声明倍率"]').trigger('click')
+    await chooseGroup(wrapper, 'Grok 分组甲'); await chooseGroup(wrapper, 'Grok 分组乙'); await submit(wrapper)
+    expect(harness.requests[0]).toMatchObject({ groupType: 'grok', ownGroupIds: ['20', '21'], accountSettings: { priorityMode: 'manual', priority: 7, concurrency: 73, passthrough: false, poolMode: false, upstreamBillingProbeEnabled: false } })
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  })
+  it('shows the complete Grok warning and only allows completion to close it', async () => {
+    harness.importResponse = async (req: RealConnectRequest) => json(warningSuccess(req))
+    const wrapper = await openView('grok'); await chooseGroup(wrapper, 'Grok 分组甲'); await submit(wrapper)
+    const text = dialog(wrapper).text()
+    expect(text).toContain('导入成功，模型未同步。')
+    expect(text).toContain('主站账号和本地关联已保存。尚未建立模型白名单，主站按该平台现有规则处理模型；导入成功不代表模型可用。')
+    expect(text).toContain('请到主站账号设置重新同步并保存模型白名单，无需再次导入。')
+    expect(text).toContain(modelWarningDiagnostic.detail)
+    expect(text).toContain('Grok')
+    expect(text).not.toContain('模型已同步')
+    expect(text).not.toContain('已由主站同步')
+    expect(text).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
+    expect(dialog(wrapper).find('button[type="submit"]').exists()).toBe(false)
+    expect(dialog(wrapper).find('[data-import-pending]').exists()).toBe(false)
+    await submit(wrapper); expect(harness.requests).toHaveLength(1)
+    await dialog(wrapper).findAll('button').find(button => button.text().trim() === '完成')!.trigger('click')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(harness.requests).toHaveLength(1)
+  })
+  it.each(['current_whitelist', 'current_unrestricted', 'unavailable'])('shows Grok replay %s without calling it fresh model synchronization', async state => {
+    harness.importResponse = async (req: RealConnectRequest) => {
+      const result: any = success(req)
+      if (state === 'unavailable') { result.configurationStatus = 'unavailable'; delete result.configuration }
+      else result.configuration = { ...result.configuration, observation: 'current', priority: 0, concurrency: 2000, modelState: state, models: state === 'current_whitelist' ? ['existing-alias-*'] : [], ownGroups: [{ id: '20', name: '当前 Grok 分组' }] }
+      return json(result)
+    }
+    const wrapper = await openView('grok'); await chooseGroup(wrapper, 'Grok 分组甲'); await submit(wrapper)
+    const summary = dialog(wrapper).get('[data-import-success]').text()
+    expect(summary).toContain(state === 'unavailable' ? '配置暂无法读取' : '当前')
+    expect(summary).not.toContain('已由主站同步')
+    expect(summary).not.toContain('导入成功，模型未同步')
+    expect(dialog(wrapper).find('button[type="submit"]').exists()).toBe(false)
+    await submit(wrapper); expect(harness.requests).toHaveLength(1)
+  })
+  it.each(['retained', 'pending'])('retains Grok IDs and prevents another create after cleanup=%s', async cleanup => {
+    harness.importResponse = async () => json(failure({ message: 'admin.mySites.errors.accountCreationPendingVerification', stage: 'account_create', cleanup, retryAllowed: false, adminResourceId: '101' }), 409)
+    const wrapper = await openView('grok'); await chooseGroup(wrapper, 'Grok 分组甲'); await submit(wrapper)
+    expect(dialog(wrapper).text()).toContain('101'); expect(dialog(wrapper).text()).toContain('207')
+    expect(dialog(wrapper).text()).not.toContain('导入成功')
+    expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
+    await submit(wrapper); expect(harness.requests).toHaveLength(1)
+  })
+  it('binds an existing Grok resource without account creation controls or the Grok creation hint', async () => {
+    harness.resourceResponse = async () => json([{ id: '101', name: '既有 Grok 账号', platform: 'grok', type: 'apikey', status: 'active', groupIds: ['20', '21'] }])
+    const wrapper = await openView('grok')
+    expect(dialog(wrapper).text()).toContain(hint)
+    await dialog(wrapper).findAll('button').find(button => button.text().includes('使用已有资源'))!.trigger('click'); await flushPromises()
+    expect(dialog(wrapper).text()).not.toContain(hint)
+    expect(dialog(wrapper).text()).toContain('关联已有上游 Key/Token 和管理端账号/渠道，不创建或接管远端资源。')
+    expect(dialog(wrapper).find('[data-import-platform-select]').exists()).toBe(false)
+    expect(dialog(wrapper).find('#import-concurrency').exists()).toBe(false)
+    await dialog(wrapper).get('input[type="radio"][value="207"]').setValue(true)
+    await dialog(wrapper).get('#existing-admin-group').setValue('20'); await flushPromises()
+    expect(dialog(wrapper).text()).toContain('既有 Grok 账号')
+    await dialog(wrapper).get('input[type="radio"][value="101"]').setValue(true); await submit(wrapper)
+    expect(harness.bindings).toHaveLength(1)
+    expect(harness.bindings[0]).toMatchObject({ adminGroupId: '20', adminResourceId: '101', upstreamKeyId: '207' })
+    expect(harness.bindings[0]).not.toHaveProperty('accountSettings')
+    expect(harness.requests).toHaveLength(0)
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
 })

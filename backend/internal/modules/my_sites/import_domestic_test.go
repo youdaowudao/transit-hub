@@ -26,19 +26,15 @@ func TestC51AllOpenAIFamilyImports(t *testing.T) {
 
 func TestImportSelectionAllSourceAndTargetPlatforms(t *testing.T) {
 	platforms := []string{"openai", "kimi", "zhipu", "deepseek", "minimax", "anthropic", "gemini", "antigravity", "grok"}
-	prefixes := map[string]string{"openai": "A", "anthropic": "B", "gemini": "C", "antigravity": "D", "kimi": "X", "zhipu": "X", "deepseek": "X", "minimax": "X"}
+	prefixes := map[string]string{"openai": "A", "anthropic": "B", "gemini": "C", "antigravity": "D", "grok": "X", "kimi": "X", "zhipu": "X", "deepseek": "X", "minimax": "X"}
 	for _, source := range platforms {
 		for _, target := range platforms {
 			t.Run(source+"/"+target, func(t *testing.T) {
-				if target == "grok" {
-					c51AssertRejectedBeforeResources(t, &c5RedTransport{platform: source, mainPlatform: target}, target)
-				} else {
-					c51AssertImportedPlatform(t, source, target, target, prefixes[target])
-				}
+				c51AssertImportedPlatform(t, source, target, target, prefixes[target])
 			})
 		}
 	}
-	for _, target := range []string{"", "unknown", "grok"} {
+	for _, target := range []string{"", "unknown", "opencode-go"} {
 		t.Run("untyped/"+target, func(t *testing.T) {
 			c51AssertRejectedBeforeResources(t, &c5RedTransport{platform: "", mainPlatform: target}, target)
 		})
@@ -46,7 +42,7 @@ func TestImportSelectionAllSourceAndTargetPlatforms(t *testing.T) {
 }
 
 func TestC51DomesticPassthroughRejectedBeforeResources(t *testing.T) {
-	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax"} {
+	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax", "grok"} {
 		t.Run(platform, func(t *testing.T) {
 			remote := &c5RedTransport{platform: "openai", mainPlatform: platform}
 			service, repo := c5RedService(t, remote)
@@ -65,13 +61,13 @@ func TestC51DomesticPassthroughRejectedBeforeResources(t *testing.T) {
 }
 
 func TestC51DomesticRequestPlatformFallback(t *testing.T) {
-	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax"} {
+	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax", "grok"} {
 		t.Run(platform, func(t *testing.T) { c51AssertImportedPlatform(t, platform, "   ", platform, "X") })
 	}
 }
 
 func TestC51DomesticFailuresPreserveCleanupAndPendingResults(t *testing.T) {
-	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax"} {
+	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax", "grok"} {
 		for _, mode := range []string{"preview", "account-rejected", "account-uncertain", "read-unavailable", "read-mismatch", "commit-uncertain", "commit-not-committed"} {
 			t.Run(platform+"/"+mode, func(t *testing.T) {
 				remote := &c5RedTransport{platform: "openai", mainPlatform: platform, previewFailure: mode == "preview", configurationMismatch: mode == "read-mismatch"}
@@ -141,7 +137,7 @@ func TestC51DomesticFailuresPreserveCleanupAndPendingResults(t *testing.T) {
 }
 
 func TestC51DomesticReplayReadsCurrentConfigurationWithoutCreating(t *testing.T) {
-	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax"} {
+	for _, platform := range []string{"kimi", "zhipu", "deepseek", "minimax", "grok"} {
 		for _, unavailable := range []bool{false, true} {
 			t.Run(platform+map[bool]string{false: "/current", true: "/unavailable"}[unavailable], func(t *testing.T) {
 				remote := &c5RedTransport{platform: "openai", mainPlatform: platform}

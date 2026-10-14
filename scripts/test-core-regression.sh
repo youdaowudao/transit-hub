@@ -51,8 +51,8 @@ run_connection_health_gate() {
       "$ROOT_DIR/scripts/test-core-regression-membership.test.mjs" \
       "$ROOT_DIR/scripts/test-c43-core-membership.test.mjs"
 
-  run_step "backend connection_health and upstream tests" \
-    bash -c "cd '$ROOT_DIR/backend' && go test ./internal/modules/connection_health ./internal/modules/upstream ./internal/modules/group_rates -count=1"
+  run_step "backend connection_health, upstream and notifications tests" \
+    bash -c "cd '$ROOT_DIR/backend' && go test ./internal/modules/connection_health ./internal/modules/upstream ./internal/modules/group_rates ./internal/modules/notifications ./internal/modules/admin_accounts -count=1"
 
   run_step "backend model control quality migration tests (real PG only when explicitly configured)" \
     bash -c "cd '$ROOT_DIR/backend' && go test ./internal/database/migrations -run 'TestModelControlV300' -count=1"
@@ -62,6 +62,9 @@ run_connection_health_gate() {
 
   run_step "backend upstream task B concurrency race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/upstream -run 'TestTaskBConcurrency' -count=1"
+
+  run_step "backend notification persistence and read-only assignment race tests" \
+    bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/notifications ./internal/modules/upstream ./internal/modules/connection_health -run 'Test.*(Notification|Notice|PeekKeyAssignment)' -count=1"
 
   run_step "backend Singapore cost persistence race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/upstream ./internal/modules/dashboard -run 'TestSingaporeCost' -count=1"

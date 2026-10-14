@@ -8,14 +8,17 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"transithub/backend/internal/modules/notifications"
 )
 
 type Repository struct {
-	db *pgxpool.Pool
+	db                       *pgxpool.Pool
+	rateNoticeWriter         rateNoticeWriter
+	rateNoticeKeyAssignments RateNoticeKeyAssignmentReader
 }
 
 func NewRepository(db *pgxpool.Pool) *Repository {
-	return &Repository{db: db}
+	return &Repository{db: db, rateNoticeWriter: notifications.NewRepository(db)}
 }
 
 func (r *Repository) EnsureSchema(ctx context.Context) error {
@@ -172,7 +175,9 @@ func (r *Repository) SaveSite(ctx context.Context, site Site) error {
 	return nil
 }
 
-func (r *Repository) SaveSiteWithSnapshotVersion(ctx context.Context, site Site) (sourceVersion string, resultErr error) {
+func (r *Repository) SaveSiteWithSnapshotVersion(ctx context.Context, site Site, noticeInputs ...*RateNoticeInput) (sourceVersion string, resultErr error) {
+	input := rateNoticeInput(noticeInputs)
+	setRateNoticeObservation(&site, input)
 	metricsJSON, err := json.Marshal(site.Metrics)
 	if err != nil {
 		return "", err
@@ -238,6 +243,9 @@ func (r *Repository) SaveSiteWithSnapshotVersion(ctx context.Context, site Site)
 		return "", newRequestError(ErrorNotFound, "")
 	}
 	if err != nil {
+		return "", err
+	}
+	if err = r.recordRateNoticesTx(ctx, tx, site, input); err != nil {
 		return "", err
 	}
 	if err = tx.Commit(ctx); err != nil {

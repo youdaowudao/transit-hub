@@ -51,6 +51,7 @@ func unchangedGroupBaseline(current, baseline Site) bool {
 func keepCurrentGroupResult(next *Site, current Site) {
 	next.Metrics.Groups = current.Metrics.Groups
 	next.Metrics.Group = current.Metrics.Group
+	next.Metrics.RateNoticeObservation = current.Metrics.RateNoticeObservation
 	next.LastSyncedAt = current.LastSyncedAt
 	next.Status = current.Status
 	next.ErrorKey = current.ErrorKey
@@ -63,13 +64,13 @@ type groupPublication struct {
 	GroupsAccepted bool
 }
 type groupGuardRepository interface {
-	SaveExistingSiteWithGroupGuard(context.Context, Site, Site, Site) (Site, string, bool, bool, error)
+	SaveExistingSiteWithGroupGuard(context.Context, Site, Site, Site, ...*RateNoticeInput) (Site, string, bool, bool, error)
 }
 type snapshotVersionRepository interface {
-	SaveSiteWithSnapshotVersion(context.Context, Site) (string, error)
+	SaveSiteWithSnapshotVersion(context.Context, Site, ...*RateNoticeInput) (string, error)
 }
 
-func (r *Repository) SaveExistingSiteWithGroupGuard(ctx context.Context, expected, candidate, baseline Site) (actualSite Site, sourceVersion string, saved bool, groupsAccepted bool, resultErr error) {
+func (r *Repository) SaveExistingSiteWithGroupGuard(ctx context.Context, expected, candidate, baseline Site, noticeInputs ...*RateNoticeInput) (actualSite Site, sourceVersion string, saved bool, groupsAccepted bool, resultErr error) {
 	if candidate.ID != expected.ID || candidate.UserID != expected.UserID || candidate.AdminAccountID != expected.AdminAccountID {
 		return Site{}, "", false, false, nil
 	}
@@ -116,6 +117,12 @@ func (r *Repository) SaveExistingSiteWithGroupGuard(ctx context.Context, expecte
 	}
 	accepted := unchangedGroupBaseline(current, baseline)
 	next := mergeExistingSiteChanges(current, expected, candidate)
+	input := rateNoticeInput(noticeInputs)
+	if input == nil || !accepted {
+		next.Metrics.RateNoticeObservation = current.Metrics.RateNoticeObservation
+	} else {
+		setRateNoticeObservation(&next, input)
+	}
 	if !accepted {
 		keepCurrentGroupResult(&next, current)
 	}
@@ -142,6 +149,11 @@ func (r *Repository) SaveExistingSiteWithGroupGuard(ctx context.Context, expecte
 	if err != nil {
 		return Site{}, "", false, false, err
 	}
+	if accepted {
+		if err = r.recordRateNoticesTx(ctx, tx, next, input); err != nil {
+			return Site{}, "", false, false, err
+		}
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return Site{}, "", false, false, &siteCommitError{err: err}
 	}
@@ -151,7 +163,7 @@ func (r *Repository) SaveExistingSiteWithGroupGuard(ctx context.Context, expecte
 func staleGroupsWarning() *GroupRatesWarning {
 	return &GroupRatesWarning{Message: "分组资料已由另一次同步更新", Detail: "本次旧分组结果未写入或清理，已保留先保存的分组资料；独立费用结果见本站费用说明", Next: "请查看本站当前分组，仍需更新时重新同步网站"}
 }
-func (s *Service) saveSiteWithSnapshotVersion(ctx context.Context, site *Site) (string, error) {
+func (s *Service) saveSiteWithSnapshotVersion(ctx context.Context, site *Site, input *RateNoticeInput) (string, error) {
 	if site == nil {
 		return "", nil
 	}
@@ -164,7 +176,7 @@ func (s *Service) saveSiteWithSnapshotVersion(ctx context.Context, site *Site) (
 	ctx, cancel := context.WithTimeout(ctx, persistenceTimeout)
 	defer cancel()
 	if repository, ok := s.repository.(snapshotVersionRepository); ok {
-		return repository.SaveSiteWithSnapshotVersion(ctx, *site)
+		return repository.SaveSiteWithSnapshotVersion(ctx, *site, input)
 	}
 	return "", s.repository.SaveSite(ctx, *site)
 }

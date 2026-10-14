@@ -103,6 +103,7 @@ func (r *Repository) SaveExistingSiteIfUnchanged(ctx context.Context, expected, 
 		return false, nil
 	}
 	next := mergeExistingSiteChanges(current, expected, candidate)
+	next.Metrics.RateNoticeObservation = current.Metrics.RateNoticeObservation
 	metricsJSON, err = json.Marshal(next.Metrics)
 	if err != nil {
 		return false, err
@@ -184,7 +185,7 @@ func safePersistenceCause(cause error) string {
 }
 
 // Caller holds s.mu; each store uses its own bounded persistence context.
-func (s *Service) publishExistingSiteLocked(expected, candidate Site, preserveRotatedSession bool, syncStatusBefore *Status, publications ...*groupPublication) error {
+func (s *Service) publishExistingSiteLocked(expected, candidate Site, preserveRotatedSession bool, syncStatusBefore *Status, rateInput *RateNoticeInput, publications ...*groupPublication) error {
 	ctx, cancel := context.WithTimeout(context.Background(), persistenceTimeout)
 	defer cancel()
 	saved := true
@@ -197,7 +198,7 @@ func (s *Service) publishExistingSiteLocked(expected, candidate Site, preserveRo
 		publication.Actual = candidate
 		publication.GroupsAccepted = unchangedGroupBaseline(expected, publication.Baseline)
 		if repository, ok := s.repository.(groupGuardRepository); ok {
-			publication.Actual, publication.RowVersion, saved, publication.GroupsAccepted, durableErr = repository.SaveExistingSiteWithGroupGuard(ctx, expected, candidate, publication.Baseline)
+			publication.Actual, publication.RowVersion, saved, publication.GroupsAccepted, durableErr = repository.SaveExistingSiteWithGroupGuard(ctx, expected, candidate, publication.Baseline, rateInput)
 		} else {
 			if !publication.GroupsAccepted {
 				keepCurrentGroupResult(&publication.Actual, expected)

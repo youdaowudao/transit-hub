@@ -749,19 +749,19 @@ func (s *PlatformService) FetchSub2APIAdminGroups(session Session) ([]GroupInfo,
 // 默认倍率并记录日志，因为 available 已经提供了完整的基础分组列表；调用方（登录、同步）
 // 因此不会因为这一个可选接口失败而整体失败。
 func (s *PlatformService) fetchSub2APIAvailableGroupsWithRates(session Session) ([]GroupInfo, error) {
-	groups, _, err := s.fetchSub2APIAvailableGroupsWithRatesAudited(session)
+	groups, _, _, err := s.fetchSub2APIAvailableGroupsWithRatesAudited(session)
 	return groups, err
 }
 
-func (s *PlatformService) fetchSub2APIAvailableGroupsWithRatesAudited(session Session) ([]GroupInfo, *GroupSnapshotAudit, error) {
+func (s *PlatformService) fetchSub2APIAvailableGroupsWithRatesAudited(session Session) ([]GroupInfo, *GroupSnapshotAudit, *RateNoticeObservation, error) {
 	if session.Platform != PlatformSub2API || strings.TrimSpace(session.AccessToken) == "" {
-		return nil, nil, newRequestError(ErrorAuth, PlatformSub2API)
+		return nil, nil, nil, newRequestError(ErrorAuth, PlatformSub2API)
 	}
 	authOptions := sub2APIUserAuthOptions(session)
 
 	response, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/groups/available", authOptions)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	rateOverrides := map[string]float64{}
@@ -806,7 +806,13 @@ func (s *PlatformService) fetchSub2APIAvailableGroupsWithRatesAudited(session Se
 
 		groups = append(groups, group)
 	}
-	return groups, auditSub2APIGroups(response.Payload, ratesResponse.Payload, ratesErr, groups, authOptions), nil
+	audit := auditSub2APIGroups(response.Payload, ratesResponse.Payload, ratesErr, groups, authOptions)
+	observation := observationFromGroupAudit(audit, s.keyUsageNow())
+	if ratesErr != nil {
+		observation.Confirmed = false
+		observation.Reason = safeCostReason("读取专属倍率失败：" + costFailureCause(ratesErr) + "；本次仅沿用默认倍率显示，请重新同步并核查上游倍率接口")
+	}
+	return groups, audit, observation, nil
 }
 
 // sub2APIGroupRateOverrides 将 /api/v1/groups/rates 的响应解析为 "分组 ID -> 专属倍率" 映射。
@@ -1713,6 +1719,7 @@ func (s *PlatformService) loginNewAPI(baseURL string, username string, password 
 	if err != nil {
 		log.Printf("new-api metrics fetch failed base_url=%s err=%v", safeHost(baseURL), err)
 		metrics = defaultMetrics()
+		metrics.RateNoticeObservation = &RateNoticeObservation{ObservedAt: s.keyUsageNow(), Reason: safeCostReason("登录已成功，但读取网站资料失败：" + costFailureCause(err) + "；本次倍率尚未确认，请重新同步并核查上游网站资料")}
 	}
 	return LoginResult{Platform: PlatformNewAPI, Session: session, Metrics: metrics}, nil
 }
@@ -1818,6 +1825,7 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 		Groups:             groups,
 		GroupSnapshotAudit: auditNewAPIGroups(groupsPayload.Payload, pricingPayload.Payload, groupsErr, pricingErr, groups, cookieOptions),
 	}
+	metrics.RateNoticeObservation = observationFromGroupAudit(metrics.GroupSnapshotAudit, s.keyUsageNow())
 	if costFailure != nil {
 		metrics = withCostReadFailure(metrics, costFailure, s.keyUsageNow())
 	}
@@ -1842,7 +1850,7 @@ func (s *PlatformService) fetchSub2APIMetrics(session Session, dates ...string) 
 		failure := withFailureStage(err, "metrics", PlatformSub2API)
 		return withCostReadFailure(Metrics{}, failure, s.keyUsageNow()), failure
 	}
-	groups, audit, err := s.fetchSub2APIAvailableGroupsWithRatesAudited(session)
+	groups, audit, rateObservation, err := s.fetchSub2APIAvailableGroupsWithRatesAudited(session)
 	if err != nil {
 		return Metrics{}, withFailureStage(err, "metrics", PlatformSub2API)
 	}
@@ -1860,7 +1868,7 @@ func (s *PlatformService) fetchSub2APIMetrics(session Session, dates ...string) 
 		group = groups[0]
 	}
 	amount, observedAt, costErr := s.fetchAccountCostForDateContext(context.Background(), session, date)
-	metrics := Metrics{Balance: metric(balance), TodayConsume: metric(nil), TodayConsumeDate: date, HistoryRecharge: metric(recharged), Group: group, Groups: groups, GroupSnapshotAudit: audit}
+	metrics := Metrics{Balance: metric(balance), TodayConsume: metric(nil), TodayConsumeDate: date, HistoryRecharge: metric(recharged), Group: group, Groups: groups, GroupSnapshotAudit: audit, RateNoticeObservation: rateObservation}
 	if costErr != nil {
 		metrics = withCostReadFailure(metrics, costErr, s.keyUsageNow())
 	} else {

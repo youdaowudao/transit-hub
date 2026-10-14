@@ -434,7 +434,7 @@ func (w *panicOnceSnapshotWriter) SaveSiteSnapshot(context.Context, string, stri
 // returned a durable PostgreSQL version.
 type panicSnapshotRepository struct{ enabledTestRepository }
 
-func (r *panicSnapshotRepository) SaveExistingSiteWithGroupGuard(_ context.Context, expected, candidate, baseline Site) (Site, string, bool, bool, error) {
+func (r *panicSnapshotRepository) SaveExistingSiteWithGroupGuard(_ context.Context, expected, candidate, baseline Site, _ ...*RateNoticeInput) (Site, string, bool, bool, error) {
 	return cloneSite(&candidate), "fixture-saved-version", true, true, nil
 }
 

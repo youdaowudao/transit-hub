@@ -267,7 +267,7 @@ func (s *Service) persistKeyUsageSession(original Site, refreshed Session) (bool
 	expected := cloneSite(current)
 	candidate := cloneSite(current)
 	candidate.Session = &refreshed
-	err = s.publishExistingSiteLocked(expected, candidate, true, nil)
+	err = s.publishExistingSiteLocked(expected, candidate, true, nil, nil)
 	if err != nil {
 		return false, err
 	}

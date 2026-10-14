@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"transithub/backend/internal/modules/notifications"
 	"transithub/backend/internal/shared/businesstime"
 )
 
@@ -562,14 +563,38 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 	site.LastSyncedAt = &now
 
 	audit := site.Metrics.GroupSnapshotAudit
+	rateInput := currentRateNoticeInput(site.Metrics, nil, observedAt)
 	if err := s.setCachedSite(ctx, site); err != nil {
 		return Response{}, err
 	}
 	response := s.toResponse(ctx, site)
-	sourceRowVersion, saveErr := s.saveSiteWithSnapshotVersion(ctx, site)
+	sourceRowVersion, saveErr := s.saveSiteWithSnapshotVersion(ctx, site, rateInput)
 	if saveErr != nil {
-		_ = s.cache.Delete(ctx, id, userID)
-		return response, saveErr
+		cleanupErr := s.cache.Delete(ctx, id, userID)
+		outcome := "新网站资料未保存，原有网站资料保留"
+		var commitErr *siteCommitError
+		commitUnknown := errors.As(saveErr, &commitErr)
+		var requestErr *RequestError
+		if !commitUnknown && errors.As(saveErr, &requestErr) && requestErr.MessageKey == ErrorNotFound {
+			return response, saveErr
+		}
+		var cause string
+		if commitUnknown {
+			outcome = "新网站数据库保存结果尚未确认，请维护人员核查实际提交结果"
+			cause = "数据库提交结果尚未确认"
+		} else {
+			var state interface{ SQLState() string }
+			if errors.As(saveErr, &state) {
+				cause = notifications.SafeStorageCause(saveErr)
+			} else {
+				cause = safePersistenceCause(saveErr)
+			}
+		}
+		detail := "保存新网站资料失败：" + cause + "；" + outcome + "；处理原因并核查实际保存结果后可重新登录重试；不会修改主站。"
+		if cleanupErr != nil {
+			detail += "本次新网站运行资料的回收也未成功：" + safePersistenceCause(cleanupErr) + "；请维护人员核查当前运行资料后重试。"
+		}
+		return response, saveFailureError(detail, saveErr, 503)
 	}
 	s.mu.Lock()
 	s.scheduleSyncLocked(id, site)
@@ -618,6 +643,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	relogin := hasNewCredentials(dto)
 	var result LoginResult
 	var audit *GroupSnapshotAudit
+	var rateInput *RateNoticeInput
 	if relogin {
 		if original.Session == nil {
 			return Response{}, identityUpdateError(nil, "原站点没有可核验的登录资料")
@@ -628,6 +654,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		}
 		result, err = s.updateLogin(dto)
 		audit = result.Metrics.GroupSnapshotAudit
+		rateInput = currentRateNoticeInput(result.Metrics, err, s.keyUsageNow())
 		if err != nil {
 			return Response{}, identityUpdateError(err, "重新登录失败")
 		}
@@ -673,7 +700,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	if relogin {
 		publication = &groupPublication{Baseline: original}
 	}
-	err = s.publishExistingSiteLocked(expected, candidate, relogin, nil, publication)
+	err = s.publishExistingSiteLocked(expected, candidate, relogin, nil, rateInput, publication)
 	if err == nil && publication != nil {
 		candidate = publication.Actual
 	}
@@ -1144,6 +1171,7 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 		metrics, fetchErr = s.platformService.FetchMetricsForDate(refreshed, syncDate)
 	}
 	audit := metrics.GroupSnapshotAudit
+	rateInput := currentRateNoticeInput(metrics, fetchErr, s.keyUsageNow())
 	s.mu.Lock()
 	current, readErr := s.readCurrentSite(ctx, id)
 	_, deleted := s.deletedSites[id]
@@ -1186,7 +1214,7 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 		candidate.LastSyncedAt = &now
 	}
 	publication := &groupPublication{Baseline: original}
-	saveErr := s.publishExistingSiteLocked(expected, candidate, refreshedOK, &original.Status, publication)
+	saveErr := s.publishExistingSiteLocked(expected, candidate, refreshedOK, &original.Status, rateInput, publication)
 	if saveErr == nil {
 		candidate = publication.Actual
 	}
@@ -1588,7 +1616,7 @@ func (s *Service) updateLocalSiteFields(ctx context.Context, userID, siteID stri
 	expected := cloneSite(current)
 	candidate := cloneSite(current)
 	change(&candidate)
-	err = s.publishExistingSiteLocked(expected, candidate, false, nil)
+	err = s.publishExistingSiteLocked(expected, candidate, false, nil, nil)
 	if err == nil {
 		s.scheduleSyncLocked(siteID, &candidate)
 	}

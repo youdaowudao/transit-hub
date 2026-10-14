@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"transithub/backend/internal/modules/notifications"
 	"transithub/backend/internal/shared/businesstime"
 )
 
@@ -52,6 +53,20 @@ func singaporeCostPGPool(t *testing.T) *pgxpool.Pool {
 	}
 	if err = NewRepository(pool).EnsureSchema(ctx); err != nil {
 		t.Fatal(err)
+	}
+	// Site creation and sync now join the real notification transaction. Keep the
+	// old business expectations while providing their newly required local tables.
+	if _, err := pool.Exec(ctx, `
+ALTER TABLE admin_accounts ADD COLUMN IF NOT EXISTS platform text NOT NULL DEFAULT 'sub2api';
+CREATE TABLE IF NOT EXISTS real_connections (
+ id text PRIMARY KEY, user_id text NOT NULL, workspace_admin_account_id text NOT NULL,
+ upstream_site_id text NOT NULL, admin_account_id text NOT NULL, admin_account_name text NOT NULL,
+ upstream_key_id text NOT NULL, status text NOT NULL DEFAULT 'active', admin_platform text NOT NULL DEFAULT 'sub2api'
+);`); err != nil {
+		t.Fatal("isolated site notification dependencies failed")
+	}
+	if err := notifications.NewRepository(pool).EnsureSchema(ctx); err != nil {
+		t.Fatal("isolated site notification schema failed")
 	}
 	return pool
 }

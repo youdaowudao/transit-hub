@@ -25,6 +25,7 @@ import (
 	"transithub/backend/internal/modules/lottery"
 	"transithub/backend/internal/modules/mass_email"
 	"transithub/backend/internal/modules/my_sites"
+	"transithub/backend/internal/modules/notifications"
 	"transithub/backend/internal/modules/settings"
 	"transithub/backend/internal/modules/system"
 	"transithub/backend/internal/modules/tickets"
@@ -155,6 +156,9 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	// admin_accounts 最后执行 schema：此时所有业务表和 workspace 字段已存在，
 	// legacy 迁移可以安全地 UPDATE 所有业务表的 admin_account_id。
 	runStorageStartup(cfg, adminAccountsService.EnsureSchema)
+	notificationsRepository := notifications.NewRepository(db)
+	runStorageStartup(cfg, notificationsRepository.EnsureSchema)
+	upstreamRepository.SetRateNoticeWriter(notificationsRepository)
 	admin_accounts.RegisterRoutes(server.mux, adminAccountsService)
 
 	// 注入机器人通知能力，供自动调价成功后发送通知。
@@ -205,6 +209,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	connHealthService.SetProbeGlobalConcurrency(cfg.ProbeGlobalConcurrency)
 	runStorageStartup(cfg, connHealthService.EnsureSchema)
 	connHealthService.SetAdminAccountResolver(adminAccountsService)
+	upstreamRepository.SetRateNoticeKeyAssignmentReader(connHealthService)
 	connHealthService.SetUpstreamSyncCoordinator(upstreamService)
 	if !cfg.APIOnly {
 		upstreamService.SetSiteLoginSuccessCallback(connHealthService.NotifySiteLoginSucceeded)

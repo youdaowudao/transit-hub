@@ -143,12 +143,13 @@ type SnapshotWriter interface {
 }
 
 type Metrics struct {
-	GroupSnapshotAudit *GroupSnapshotAudit `json:"-"`
-	Balance            MetricValue         `json:"balance"`
-	TodayConsume       MetricValue         `json:"todayConsume"`
-	HistoryRecharge    MetricValue         `json:"historyRecharge"`
-	Group              GroupInfo           `json:"group"`
-	Groups             []GroupInfo         `json:"groups"`
+	GroupSnapshotAudit    *GroupSnapshotAudit    `json:"-"`
+	RateNoticeObservation *RateNoticeObservation `json:"rateNoticeObservation,omitempty"`
+	Balance               MetricValue            `json:"balance"`
+	TodayConsume          MetricValue            `json:"todayConsume"`
+	HistoryRecharge       MetricValue            `json:"historyRecharge"`
+	Group                 GroupInfo              `json:"group"`
+	Groups                []GroupInfo            `json:"groups"`
 	// TodayConsumeDate 是 TodayConsume 对应的新加坡业务日期（"2006-01-02"）。
 	// 同步时由上游同步入口统一写入，用于日期归属校验。空字符串表示尚未记录。
 	TodayConsumeDate        string `json:"todayConsumeDate,omitempty"`

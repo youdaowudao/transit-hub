@@ -256,6 +256,7 @@ export type AdminGroupsRefreshIssue = {
   phase: string
   status: string
   errorKey: string
+  groupRatesWarning?: import('../types/upstream').GroupRatesWarning
 }
 
 export type AdminGroupsRefreshSnapshot = {

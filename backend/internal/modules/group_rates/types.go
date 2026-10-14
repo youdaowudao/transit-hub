@@ -6,10 +6,11 @@ import "time"
 // The HTTP server maps upstream's narrow callback DTO into this module-local type so
 // group_rates does not import upstream internals or repository details from other modules.
 type SnapshotGroup struct {
-	ID         string
-	Name       string
-	Platform   *string
-	Multiplier *float64
+	MultiplierMode string
+	ID             string
+	Name           string
+	Platform       *string
+	Multiplier     *float64
 }
 
 // RateRow is the list API shape consumed by the admin UI. Delta values compare the latest
@@ -51,7 +52,7 @@ type ListQuery struct {
 }
 
 // StatusCounts provides tab totals after search/type/platform filters but before
-// the active status filter. Deleted rows are kept separate from active totals.
+// the active status filter. Deleted is retained only for compatibility and is zero.
 type StatusCounts struct {
 	All      int `json:"all"`
 	Mapped   int `json:"mapped"`

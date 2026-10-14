@@ -438,17 +438,18 @@ func (c workspaceCleanup) CleanupDeletedWorkspace(ctx context.Context, payload a
 	return errors.Join(errs...)
 }
 
-func (w groupRateSnapshotWriter) SaveSiteSnapshot(ctx context.Context, userID string, adminAccountID string, siteID string, siteName string, sitePlatform upstream.Platform, groups []upstream.SnapshotGroup) error {
+func (w groupRateSnapshotWriter) SaveSiteSnapshot(ctx context.Context, userID string, adminAccountID string, siteID string, siteName string, sitePlatform upstream.Platform, groups []upstream.SnapshotGroup, lastSyncedAt int64, sourceRowVersion string, allowCleanup bool) error {
 	snapshots := make([]group_rates.SnapshotGroup, 0, len(groups))
 	for _, group := range groups {
 		snapshots = append(snapshots, group_rates.SnapshotGroup{
-			ID:         group.ID,
-			Name:       group.Name,
-			Platform:   group.Platform,
-			Multiplier: group.Multiplier,
+			ID:             group.ID,
+			Name:           group.Name,
+			Platform:       group.Platform,
+			Multiplier:     group.Multiplier,
+			MultiplierMode: group.MultiplierMode,
 		})
 	}
-	return w.service.SaveSiteSnapshot(ctx, userID, adminAccountID, siteID, siteName, string(sitePlatform), snapshots)
+	return w.service.SaveSiteSnapshot(ctx, userID, adminAccountID, siteID, siteName, string(sitePlatform), snapshots, lastSyncedAt, sourceRowVersion, allowCleanup)
 }
 
 func (s *Server) Handler() http.Handler {

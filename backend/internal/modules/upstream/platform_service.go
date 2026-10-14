@@ -749,14 +749,19 @@ func (s *PlatformService) FetchSub2APIAdminGroups(session Session) ([]GroupInfo,
 // 默认倍率并记录日志，因为 available 已经提供了完整的基础分组列表；调用方（登录、同步）
 // 因此不会因为这一个可选接口失败而整体失败。
 func (s *PlatformService) fetchSub2APIAvailableGroupsWithRates(session Session) ([]GroupInfo, error) {
+	groups, _, err := s.fetchSub2APIAvailableGroupsWithRatesAudited(session)
+	return groups, err
+}
+
+func (s *PlatformService) fetchSub2APIAvailableGroupsWithRatesAudited(session Session) ([]GroupInfo, *GroupSnapshotAudit, error) {
 	if session.Platform != PlatformSub2API || strings.TrimSpace(session.AccessToken) == "" {
-		return nil, newRequestError(ErrorAuth, PlatformSub2API)
+		return nil, nil, newRequestError(ErrorAuth, PlatformSub2API)
 	}
 	authOptions := sub2APIUserAuthOptions(session)
 
 	response, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/groups/available", authOptions)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	rateOverrides := map[string]float64{}
@@ -801,7 +806,7 @@ func (s *PlatformService) fetchSub2APIAvailableGroupsWithRates(session Session) 
 
 		groups = append(groups, group)
 	}
-	return groups, nil
+	return groups, auditSub2APIGroups(response.Payload, ratesResponse.Payload, ratesErr, groups, authOptions), nil
 }
 
 // sub2APIGroupRateOverrides 将 /api/v1/groups/rates 的响应解析为 "分组 ID -> 专属倍率" 映射。
@@ -1774,12 +1779,14 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 			groupsPayload = jsonResponse{Payload: map[string]any{}}
 		}
 	}
+	groupsErr := err
 	pricingPayload, err := s.httpClient.requestJSON(session.BaseURL+"/api/pricing", cookieOptions)
 	if err != nil {
 		log.Printf("new-api pricing request failed base_url=%s err=%v", safeHost(session.BaseURL), err)
 		pricingPayload = jsonResponse{Payload: map[string]any{}}
 	}
 
+	pricingErr := err
 	defaults := defaultMetrics()
 	selfData := dataRecord(self.Payload)
 	groupName := defaults.Group.Name
@@ -1803,12 +1810,13 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 	}
 	qpu := session.QuotaPerUnit
 	metrics := Metrics{
-		Balance:          metric(quotaToUSDWithUnit(quota, qpu)),
-		TodayConsume:     metric(todayCost),
-		TodayConsumeDate: date,
-		HistoryRecharge:  metric(quotaToUSDWithUnit(estimatedGranted, qpu)),
-		Group:            group,
-		Groups:           groups,
+		Balance:            metric(quotaToUSDWithUnit(quota, qpu)),
+		TodayConsume:       metric(todayCost),
+		TodayConsumeDate:   date,
+		HistoryRecharge:    metric(quotaToUSDWithUnit(estimatedGranted, qpu)),
+		Group:              group,
+		Groups:             groups,
+		GroupSnapshotAudit: auditNewAPIGroups(groupsPayload.Payload, pricingPayload.Payload, groupsErr, pricingErr, groups, cookieOptions),
 	}
 	if costFailure != nil {
 		metrics = withCostReadFailure(metrics, costFailure, s.keyUsageNow())
@@ -1834,7 +1842,7 @@ func (s *PlatformService) fetchSub2APIMetrics(session Session, dates ...string) 
 		failure := withFailureStage(err, "metrics", PlatformSub2API)
 		return withCostReadFailure(Metrics{}, failure, s.keyUsageNow()), failure
 	}
-	groups, err := s.fetchSub2APIAvailableGroupsWithRates(session)
+	groups, audit, err := s.fetchSub2APIAvailableGroupsWithRatesAudited(session)
 	if err != nil {
 		return Metrics{}, withFailureStage(err, "metrics", PlatformSub2API)
 	}
@@ -1852,7 +1860,7 @@ func (s *PlatformService) fetchSub2APIMetrics(session Session, dates ...string) 
 		group = groups[0]
 	}
 	amount, observedAt, costErr := s.fetchAccountCostForDateContext(context.Background(), session, date)
-	metrics := Metrics{Balance: metric(balance), TodayConsume: metric(nil), TodayConsumeDate: date, HistoryRecharge: metric(recharged), Group: group, Groups: groups}
+	metrics := Metrics{Balance: metric(balance), TodayConsume: metric(nil), TodayConsumeDate: date, HistoryRecharge: metric(recharged), Group: group, Groups: groups, GroupSnapshotAudit: audit}
 	if costErr != nil {
 		metrics = withCostReadFailure(metrics, costErr, s.keyUsageNow())
 	} else {

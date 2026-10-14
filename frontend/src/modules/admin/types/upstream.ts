@@ -89,6 +89,12 @@ export interface SiteSettings {
   balanceThreshold: number | null
 }
 
+export interface GroupRatesWarning {
+  message: string
+  detail: string
+  next: string
+}
+
 export interface UpstreamSite {
   id: string
   name: string
@@ -108,6 +114,7 @@ export interface UpstreamSite {
   settings: SiteSettings
   session?: UpstreamSession | null
   lastSyncedAt: number | null
+  groupRatesWarning?: GroupRatesWarning
 }
 
 export type UpstreamSiteResponse = Omit<UpstreamSite, 'session' | 'logo' | 'logoBg' | 'enabled'> & { enabled?: boolean }

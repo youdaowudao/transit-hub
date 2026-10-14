@@ -572,6 +572,9 @@ func (s *Service) realBindExisting(ctx context.Context, userID string, req RealB
 }
 
 func (s *Service) realDisconnectConnection(ctx context.Context, userID string, req RealDisconnectRequest) error {
+	if req.ExpectedConnection != nil {
+		return s.disconnectExpectedConnection(ctx, userID, req)
+	}
 	if strings.TrimSpace(req.ConnectionID) == "" || (req.Mode != "unlink" && req.Mode != "full") || s.connRepository == nil {
 		return requestError(ErrorRequest)
 	}

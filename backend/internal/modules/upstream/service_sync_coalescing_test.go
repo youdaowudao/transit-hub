@@ -422,11 +422,20 @@ type panicOnceSnapshotWriter struct {
 	calls atomic.Int32
 }
 
-func (w *panicOnceSnapshotWriter) SaveSiteSnapshot(context.Context, string, string, string, string, Platform, []SnapshotGroup) error {
+func (w *panicOnceSnapshotWriter) SaveSiteSnapshot(context.Context, string, string, string, string, Platform, []SnapshotGroup, int64, string, bool) error {
 	if w.calls.Add(1) == 1 {
 		panic("snapshot writer panic")
 	}
 	return nil
+}
+
+// The panic business assertion requires an explicitly eligible, saved source.
+// This narrow fixture supplies that source without pretending nil repositories
+// returned a durable PostgreSQL version.
+type panicSnapshotRepository struct{ enabledTestRepository }
+
+func (r *panicSnapshotRepository) SaveExistingSiteWithGroupGuard(_ context.Context, expected, candidate, baseline Site) (Site, string, bool, bool, error) {
+	return cloneSite(&candidate), "fixture-saved-version", true, true, nil
 }
 
 func TestSyncReleasesFlightAfterPanic(t *testing.T) {
@@ -437,9 +446,9 @@ func TestSyncReleasesFlightAfterPanic(t *testing.T) {
 		case "/api/v1/usage/dashboard/stats", "/api/v1/usage/stats":
 			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0, "total_actual_cost": 1.0}})
 		case "/api/v1/groups/available":
-			writeJSON(w, map[string]any{"data": []map[string]any{{"id": "group-1", "name": "default", "rate_multiplier": 1.0}}})
+			writeJSON(w, map[string]any{"data": []map[string]any{{"id": 1, "name": "default", "rate_multiplier": 1.0}}})
 		case "/api/v1/groups/rates":
-			writeJSON(w, map[string]any{"data": map[string]any{"group-1": 1.0}})
+			writeJSON(w, map[string]any{"data": map[string]any{"1": 1.0}})
 		default:
 			t.Fatalf("unexpected upstream request: %s", r.URL.Path)
 		}
@@ -449,7 +458,7 @@ func TestSyncReleasesFlightAfterPanic(t *testing.T) {
 	cache := newSyncTestCache(newTestSite("site-1", "user-1", "workspace-1", 1, &Session{
 		Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token",
 	}))
-	service := NewService(NewPlatformService(NewHTTPClient(server.Client())), nil, &panicOnceSnapshotWriter{}, cache)
+	service := NewService(NewPlatformService(NewHTTPClient(server.Client())), &panicSnapshotRepository{}, &panicOnceSnapshotWriter{}, cache)
 	service.SetAdminAccountResolver(&fakeAccountResolver{current: map[string]string{"user-1": "workspace-1"}})
 
 	if _, err := service.Sync(context.Background(), "user-1", "site-1"); err == nil {

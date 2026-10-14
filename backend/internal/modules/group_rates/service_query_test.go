@@ -2,9 +2,9 @@ package group_rates
 
 import "testing"
 
-func TestNormalizeListQueryPreservesLegacyAndAcceptsExplicitControls(t *testing.T) {
+func TestNormalizeListQueryDefaultsToActiveAndAcceptsExplicitControls(t *testing.T) {
 	legacy := normalizeListQuery(ListQuery{})
-	if legacy.Status != "legacy" || legacy.Sort != "default" {
+	if legacy.Status != "all" || legacy.Sort != "default" {
 		t.Fatalf("legacy controls changed: status=%q sort=%q", legacy.Status, legacy.Sort)
 	}
 
@@ -14,7 +14,7 @@ func TestNormalizeListQueryPreservesLegacyAndAcceptsExplicitControls(t *testing.
 	}
 
 	invalid := normalizeListQuery(ListQuery{Status: "unexpected", Sort: "unsafe"})
-	if invalid.Status != "legacy" || invalid.Sort != "default" {
+	if invalid.Status != "all" || invalid.Sort != "default" {
 		t.Fatalf("invalid controls should use compatibility defaults: %#v", invalid)
 	}
 }

@@ -561,19 +561,21 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 	site.ErrorKey = nil
 	site.LastSyncedAt = &now
 
+	audit := site.Metrics.GroupSnapshotAudit
 	if err := s.setCachedSite(ctx, site); err != nil {
 		return Response{}, err
 	}
 	response := s.toResponse(ctx, site)
-	if err := s.saveSite(ctx, site); err != nil {
+	sourceRowVersion, saveErr := s.saveSiteWithSnapshotVersion(ctx, site)
+	if saveErr != nil {
 		_ = s.cache.Delete(ctx, id, userID)
-		return response, err
+		return response, saveErr
 	}
 	s.mu.Lock()
 	s.scheduleSyncLocked(id, site)
 	s.mu.Unlock()
 
-	s.saveSnapshot(ctx, site)
+	response.GroupRatesWarning = s.saveSnapshot(ctx, site, audit, sourceRowVersion)
 	return response, nil
 }
 
@@ -615,6 +617,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	}
 	relogin := hasNewCredentials(dto)
 	var result LoginResult
+	var audit *GroupSnapshotAudit
 	if relogin {
 		if original.Session == nil {
 			return Response{}, identityUpdateError(nil, "原站点没有可核验的登录资料")
@@ -624,6 +627,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 			return Response{}, identityUpdateError(readErr, "读取原账号身份失败")
 		}
 		result, err = s.updateLogin(dto)
+		audit = result.Metrics.GroupSnapshotAudit
 		if err != nil {
 			return Response{}, identityUpdateError(err, "重新登录失败")
 		}
@@ -665,7 +669,14 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		observed := s.keyUsageNow().UnixMilli()
 		candidate.LastSyncedAt = &observed
 	}
-	err = s.publishExistingSiteLocked(expected, candidate, relogin, nil)
+	var publication *groupPublication
+	if relogin {
+		publication = &groupPublication{Baseline: original}
+	}
+	err = s.publishExistingSiteLocked(expected, candidate, relogin, nil, publication)
+	if err == nil && publication != nil {
+		candidate = publication.Actual
+	}
 	if err == nil {
 		s.scheduleSyncLocked(id, &candidate)
 	}
@@ -673,11 +684,16 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	if err != nil {
 		return s.toResponse(ctx, current), err
 	}
+	response := s.toResponse(ctx, &candidate)
 	if relogin {
-		s.saveSnapshot(ctx, &candidate)
-		s.notifySiteLoginSucceeded(&candidate)
+		if publication.GroupsAccepted {
+			response.GroupRatesWarning = s.saveSnapshot(ctx, &candidate, audit, publication.RowVersion)
+			s.notifySiteLoginSucceeded(&candidate)
+		} else {
+			response.GroupRatesWarning = staleGroupsWarning()
+		}
 	}
-	return s.toResponse(ctx, &candidate), nil
+	return response, nil
 }
 func (s *Service) platformServiceURL(value string) (string, error) {
 	if s.platformService != nil {
@@ -863,7 +879,8 @@ func waitForSyncFlight(ctx context.Context, flight *syncFlight) (Response, error
 	}
 }
 
-func syncSiteResult(siteID string, response Response, err error) SyncSiteResult {
+func syncSiteResult(siteID string, response Response, err error) (result SyncSiteResult) {
+	defer func() { result.GroupRatesWarning = response.GroupRatesWarning }()
 	if errors.Is(err, context.DeadlineExceeded) || response.syncTimedOut {
 		return SyncSiteResult{SiteID: siteID, Status: "timeout", ErrorKey: "site_sync_timeout"}
 	}
@@ -1126,6 +1143,7 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	if fetchErr == nil {
 		metrics, fetchErr = s.platformService.FetchMetricsForDate(refreshed, syncDate)
 	}
+	audit := metrics.GroupSnapshotAudit
 	s.mu.Lock()
 	current, readErr := s.readCurrentSite(ctx, id)
 	_, deleted := s.deletedSites[id]
@@ -1167,7 +1185,11 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 		now := s.keyUsageNow().UnixMilli()
 		candidate.LastSyncedAt = &now
 	}
-	saveErr := s.publishExistingSiteLocked(expected, candidate, refreshedOK, &original.Status)
+	publication := &groupPublication{Baseline: original}
+	saveErr := s.publishExistingSiteLocked(expected, candidate, refreshedOK, &original.Status, publication)
+	if saveErr == nil {
+		candidate = publication.Actual
+	}
 	if saveErr != nil {
 		s.revokeSyncingLocked(current, original)
 		s.mu.Unlock()
@@ -1184,8 +1206,11 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	}
 	response := s.toResponse(ctx, &candidate)
 	response.syncTimedOut = requestTimedOut(fetchErr)
-	if fetchErr == nil {
-		s.saveSnapshot(ctx, &candidate)
+	if !publication.GroupsAccepted {
+		response.GroupRatesWarning = staleGroupsWarning()
+	}
+	if fetchErr == nil && publication.GroupsAccepted {
+		response.GroupRatesWarning = s.saveSnapshot(ctx, &candidate, audit, publication.RowVersion)
 		if enabledBackground {
 			go s.sampleGroupCosts(candidate, refreshed, append([]GroupInfo(nil), candidate.Metrics.Groups...))
 			if callback != nil {
@@ -1217,28 +1242,43 @@ func taskErrorDetail(err error) string {
 	return ""
 }
 
-func (s *Service) saveSnapshot(ctx context.Context, site *Site) {
-	if s.snapshotWriter == nil {
-		return
+func (s *Service) saveSnapshot(ctx context.Context, site *Site, audit *GroupSnapshotAudit, sourceRowVersion string) *GroupRatesWarning {
+	if site == nil {
+		return nil
 	}
-	if site == nil || strings.TrimSpace(site.UserID) == "" {
-		return
+	warning := auditWarning(site.Name, audit)
+	if audit == nil || !audit.AllowUpdate {
+		return warning
+	}
+	if s.snapshotWriter == nil {
+		return warning
+	}
+	if site.LastSyncedAt == nil || sourceRowVersion == "" {
+		return &GroupRatesWarning{Message: site.Name + "的分组倍率未更新", Detail: "本站保存返回的数据库版本或同步时间缺失，旧倍率和历史仍保留，本轮未清理", Next: "请维护人员核查站点保存记录后重新同步"}
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := s.snapshotWriter.SaveSiteSnapshot(ctx, site.UserID, site.AdminAccountID, site.ID, site.Name, site.Platform, snapshotGroups(site.Metrics.Groups)); err != nil {
-		log.Printf("group rate snapshot failed site_id=%s err=%v", site.ID, err)
+	if err := s.snapshotWriter.SaveSiteSnapshot(ctx, site.UserID, site.AdminAccountID, site.ID, site.Name, site.Platform, snapshotGroups(site.Metrics.Groups), *site.LastSyncedAt, sourceRowVersion, audit.AllowCleanup); err != nil {
+		cause := safeSnapshotCause(err)
+		log.Printf("group rate snapshot failed site_id=%s reason=%s", site.ID, cause)
+		var outcome interface{ UncertainSnapshotResult() bool }
+		if errors.As(err, &outcome) && outcome.UncertainSnapshotResult() {
+			return &GroupRatesWarning{Message: site.Name + "的本地倍率保存结果尚未确认", Detail: cause + "；当前不能确认哪些记录已更新或清理，本次未修改主站账号", Next: "请维护人员核查数据库提交结果后再同步"}
+		}
+		return &GroupRatesWarning{Message: site.Name + "的上游资料已读取，但本地倍率保存失败", Detail: cause + "；倍率新增与清理未完成，旧倍率记录保留", Next: "请恢复数据库连接并核查倍率保存记录后重新同步"}
 	}
+	return warning
 }
 
 func snapshotGroups(groups []GroupInfo) []SnapshotGroup {
 	snapshots := make([]SnapshotGroup, 0, len(groups))
 	for _, group := range groups {
 		snapshots = append(snapshots, SnapshotGroup{
-			ID:         group.ID,
-			Name:       group.Name,
-			Platform:   group.Platform,
-			Multiplier: group.Multiplier,
+			ID:             group.ID,
+			Name:           group.Name,
+			Platform:       group.Platform,
+			Multiplier:     group.Multiplier,
+			MultiplierMode: group.MultiplierMode,
 		})
 	}
 	return snapshots

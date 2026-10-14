@@ -58,11 +58,12 @@ type adminGroupsRefreshWaiting struct {
 }
 
 type adminGroupsRefreshIssue struct {
-	SiteID   string `json:"siteId,omitempty"`
-	SiteName string `json:"siteName,omitempty"`
-	Phase    string `json:"phase"`
-	Status   string `json:"status"`
-	ErrorKey string `json:"errorKey"`
+	GroupRatesWarning *upstream.GroupRatesWarning `json:"groupRatesWarning,omitempty"`
+	SiteID            string                      `json:"siteId,omitempty"`
+	SiteName          string                      `json:"siteName,omitempty"`
+	Phase             string                      `json:"phase"`
+	Status            string                      `json:"status"`
+	ErrorKey          string                      `json:"errorKey"`
 }
 
 type adminGroupsRefreshTerminal struct {
@@ -632,6 +633,9 @@ func adminGroupsRefreshProgressForSyncSites(sites []upstream.SyncSiteResult, con
 	names := adminGroupsRefreshSiteNames(connections)
 	issues := make([]adminGroupsRefreshIssue, 0)
 	for _, site := range sites {
+		if site.GroupRatesWarning != nil {
+			issues = append(issues, adminGroupsRefreshIssue{SiteID: site.SiteID, SiteName: names[site.SiteID], Phase: "group_rates", Status: site.Status, GroupRatesWarning: site.GroupRatesWarning})
+		}
 		if site.Status == "success" || site.Status == "disabled" {
 			continue
 		}

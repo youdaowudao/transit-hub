@@ -303,6 +303,40 @@ export interface RealDisconnectRequest {
   connectionId: string
   mode: 'unlink' | 'full'
   removePricingMapping?: boolean
+  expectedConnection?: ExpectedRealConnection
+}
+
+export interface ExpectedRealConnection {
+  workspaceAdminAccountId: string
+  id: string
+  upstreamSiteId: string
+  upstreamGroupId: string
+  upstreamGroupName: string
+  upstreamKeyId: string
+  adminAccountId: string
+  adminPlatform: string
+  upstreamPlatform: string
+  provisioningMode: string
+  status: string
+  ownGroupIds: string[]
+  ownGroupNames: string[]
+  pricingMappingEnabled: boolean
+}
+
+export interface ConnectionNeedingAttention {
+  connection: RealConnection
+  reason: 'group_not_found' | 'source_unconfirmed'
+  detail: string
+  lastSyncedAt: number | null
+}
+
+export interface ConnectionsNeedingAttentionResponse {
+  workspaceAdminAccountId: string
+  total: number
+  page: number
+  pageSize: number
+  totalPages: number
+  items: ConnectionNeedingAttention[]
 }
 
 export interface ScopedGroupRef { siteId: string; groupId: string; groupName: string }

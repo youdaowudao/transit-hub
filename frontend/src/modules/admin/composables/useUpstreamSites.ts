@@ -1,4 +1,5 @@
 import { costFailureText } from '../utils/upstream'
+import { safeScopedErrorText } from '../utils/scopedErrorText'
 import { computed, onBeforeUnmount, ref } from 'vue'
 import {
   createUpstreamSite,
@@ -58,6 +59,11 @@ const normalizeMetrics = (metrics: UpstreamSiteResponse['metrics'] | null | unde
 
 const normalizeSite = (site: UpstreamSiteResponse, logoBg: string): UpstreamSite => ({
   ...site,
+  groupRatesWarning: site.groupRatesWarning ? {
+    message: safeScopedErrorText(site.groupRatesWarning.message),
+    detail: safeScopedErrorText(site.groupRatesWarning.detail),
+    next: safeScopedErrorText(site.groupRatesWarning.next),
+  } : undefined,
   enabled: site.enabled ?? true,
   metrics: normalizeMetrics(site.metrics),
   settings: site.settings ?? { balanceThreshold: null },

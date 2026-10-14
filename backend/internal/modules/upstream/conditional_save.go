@@ -184,12 +184,32 @@ func safePersistenceCause(cause error) string {
 }
 
 // Caller holds s.mu; each store uses its own bounded persistence context.
-func (s *Service) publishExistingSiteLocked(expected, candidate Site, preserveRotatedSession bool, syncStatusBefore *Status) error {
+func (s *Service) publishExistingSiteLocked(expected, candidate Site, preserveRotatedSession bool, syncStatusBefore *Status, publications ...*groupPublication) error {
 	ctx, cancel := context.WithTimeout(context.Background(), persistenceTimeout)
 	defer cancel()
 	saved := true
 	var durableErr error
-	if s.repository != nil {
+	var publication *groupPublication
+	if len(publications) > 0 {
+		publication = publications[0]
+	}
+	if publication != nil {
+		publication.Actual = candidate
+		publication.GroupsAccepted = unchangedGroupBaseline(expected, publication.Baseline)
+		if repository, ok := s.repository.(groupGuardRepository); ok {
+			publication.Actual, publication.RowVersion, saved, publication.GroupsAccepted, durableErr = repository.SaveExistingSiteWithGroupGuard(ctx, expected, candidate, publication.Baseline)
+		} else {
+			if !publication.GroupsAccepted {
+				keepCurrentGroupResult(&publication.Actual, expected)
+			}
+			if s.repository != nil {
+				saved, durableErr = s.repository.SaveExistingSiteIfUnchanged(ctx, expected, publication.Actual)
+			}
+		}
+		if durableErr == nil && saved {
+			candidate = publication.Actual
+		}
+	} else if s.repository != nil {
 		saved, durableErr = s.repository.SaveExistingSiteIfUnchanged(ctx, expected, candidate)
 	}
 	if durableErr != nil {

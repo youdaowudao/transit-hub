@@ -52,7 +52,7 @@ run_connection_health_gate() {
       "$ROOT_DIR/scripts/test-c43-core-membership.test.mjs"
 
   run_step "backend connection_health and upstream tests" \
-    bash -c "cd '$ROOT_DIR/backend' && go test ./internal/modules/connection_health ./internal/modules/upstream -count=1"
+    bash -c "cd '$ROOT_DIR/backend' && go test ./internal/modules/connection_health ./internal/modules/upstream ./internal/modules/group_rates -count=1"
 
   run_step "backend model control quality migration tests (real PG only when explicitly configured)" \
     bash -c "cd '$ROOT_DIR/backend' && go test ./internal/database/migrations -run 'TestModelControlV300' -count=1"
@@ -90,7 +90,7 @@ run_globalization_gate() {
     bash -c "cd '$ROOT_DIR/frontend' && npm run test -- locale-configuration.test.ts globalization-amount.behavior.test.ts globalization-time-input.behavior.test.ts notification-recipients.behavior.test.ts user-last-used.test.ts dashboard-cost-entrypoints.behavior.test.ts account-cost-workspace.behavior.test.ts home-cost-snapshot.behavior.test.ts home-cost-margin-quality.behavior.test.ts dashboard-provisional-trend.test.ts dashboard-profit-margin.test.ts"
 
   run_step "frontend group rates import and retained behavior regression tests" \
-    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- group-rates-import-domestic.behavior.test.ts group-rates-import-settings.behavior.test.ts group-rates-missing-connection.behavior.test.ts group-rates-scoped-critical.behavior.test.ts group-rates-scoped-additional.behavior.test.ts group-rates-scoped-api.additional.test.ts"
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- group-rates-import-domestic.behavior.test.ts group-rates-import-settings.behavior.test.ts group-rates-missing-connection.behavior.test.ts group-rates-scoped-critical.behavior.test.ts group-rates-scoped-additional.behavior.test.ts group-rates-scoped-api.additional.test.ts group-rates-cleanup-critical.behavior.test.ts group-associations-cleanup-critical.behavior.test.ts group-rates-maintenance.additional.behavior.test.ts group-rates-maintenance-api.additional.test.ts group-rates-maintenance-dialog-critical.behavior.test.ts group-associations-cleanup.additional.behavior.test.ts upstream-group-rates-warning.behavior.test.ts connection-health-group-rates-warning.behavior.test.ts"
 }
 
 case "$MODE" in

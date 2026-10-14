@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+var ErrNoEditableSnapshot = errors.New("该分组已没有可编辑倍率记录，请同步或重新选择")
+
 type Repository struct {
 	db *pgxpool.Pool
 }
@@ -83,26 +85,8 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 	`); err != nil {
 		return err
 	}
-	if _, err := r.db.Exec(ctx, `
-		WITH inferred AS (
-			SELECT empty.id, filled.type
-			FROM group_rate_snapshots AS empty
-			JOIN group_rate_snapshots AS filled
-				ON empty.user_id = filled.user_id
-				AND empty.site_id = filled.site_id
-				AND empty.group_name = filled.group_name
-				AND filled.type <> ''
-				AND filled.type NOT IN ('newapi', 'sub2api')
-			WHERE empty.type = ''
-			ORDER BY filled.created_at DESC
-		)
-		UPDATE group_rate_snapshots AS snapshots
-		SET type = inferred.type
-		FROM inferred
-		WHERE snapshots.id = inferred.id
-	`); err != nil {
-		return err
-	}
+	// An empty category may be a user-saved choice. Historical nonempty values
+	// cannot distinguish that choice from legacy absence, so never infer it here.
 	if _, err := r.db.Exec(ctx, `
 		CREATE INDEX IF NOT EXISTS idx_group_rate_snapshots_group_latest
 		ON group_rate_snapshots (user_id, site_id, group_id, group_name, created_at DESC)
@@ -284,7 +268,7 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 		), latest AS (
 			SELECT id, user_id, site_id, site_name, group_id, group_name, platform, type, multiplier, deleted, recharge_rate, created_at, last_seen_at, previous_multiplier
 			FROM ranked
-			WHERE row_number = 1
+			WHERE row_number = 1 AND NOT deleted
 		), mapped AS (
 			SELECT latest.*, (
 				EXISTS (
@@ -439,21 +423,37 @@ func (r *Repository) ListDistinctGroupNames(ctx context.Context, userID string, 
 
 func (r *Repository) UpdateType(ctx context.Context, userID string, adminAccountID string, ref GroupRef, groupType string) error {
 	if userID == "" || adminAccountID == "" || ref.SiteID == "" || ref.GroupName == "" {
-		return nil
+		return ErrNoEditableSnapshot
 	}
-	_, err := r.db.Exec(ctx, `
-		UPDATE group_rate_snapshots
-		SET type = $5
-		WHERE user_id = $1
-			AND admin_account_id = $2
-			AND site_id = $3
-			AND (group_id = $4 OR group_name = $4)
+	result, err := r.db.Exec(ctx, `
+		WITH ranked AS (
+		 SELECT *,row_number() OVER(PARTITION BY CASE WHEN group_id<>'' THEN 'id:'||group_id ELSE 'name:'||group_name END ORDER BY created_at DESC,id DESC) AS rank
+		 FROM group_rate_snapshots WHERE user_id=$1 AND admin_account_id=$2 AND site_id=$3
+		), current AS (
+		 SELECT * FROM ranked WHERE rank=1 AND NOT deleted AND (group_id=$4 OR group_name=$4)
+		), chosen AS (SELECT * FROM current WHERE (SELECT count(*) FROM current)=1)
+		UPDATE group_rate_snapshots AS snapshots SET type=$5 FROM chosen
+		WHERE snapshots.user_id=$1 AND snapshots.admin_account_id=$2 AND snapshots.site_id=$3
+		 AND ((snapshots.group_id<>'' AND chosen.group_id<>'' AND snapshots.group_id=chosen.group_id)
+		 OR ((snapshots.group_id='' OR chosen.group_id='') AND snapshots.group_name=chosen.group_name))
 	`, userID, adminAccountID, ref.SiteID, ref.GroupName, groupType)
-	return err
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return ErrNoEditableSnapshot
+	}
+	return nil
 }
 
 func (r *Repository) History(ctx context.Context, userID string, adminAccountID string, siteID string, groupName string, platform string) ([]snapshotRecord, error) {
 	rows, err := r.db.Query(ctx, `
+		WITH ranked AS (
+		 SELECT *,row_number() OVER(PARTITION BY CASE WHEN group_id<>'' THEN 'id:'||group_id ELSE 'name:'||group_name END ORDER BY created_at DESC,id DESC) AS rank
+		 FROM group_rate_snapshots WHERE user_id=$1 AND admin_account_id=$2 AND site_id=$3
+		), current AS (
+		 SELECT * FROM ranked WHERE rank=1 AND NOT deleted AND (group_id=$4 OR (group_id='' AND group_name=$4))
+		), chosen AS (SELECT * FROM current WHERE (SELECT count(*) FROM current)=1)
 		SELECT
 			group_rate_snapshots.id,
 			group_rate_snapshots.user_id,
@@ -473,7 +473,10 @@ func (r *Repository) History(ctx context.Context, userID string, adminAccountID 
 		LEFT JOIN upstream_sites
 			ON upstream_sites.user_id = group_rate_snapshots.user_id
 			AND upstream_sites.id = group_rate_snapshots.site_id
-		WHERE group_rate_snapshots.user_id = $1 AND group_rate_snapshots.admin_account_id = $2 AND group_rate_snapshots.site_id = $3 AND (group_rate_snapshots.group_id = $4 OR (group_rate_snapshots.group_id = '' AND group_rate_snapshots.group_name = $4)) AND ($5 = '' OR group_rate_snapshots.platform = $5 OR group_rate_snapshots.type = $5)
+		WHERE group_rate_snapshots.user_id = $1 AND group_rate_snapshots.admin_account_id = $2 AND group_rate_snapshots.site_id = $3
+		 AND EXISTS(SELECT 1 FROM chosen WHERE
+		  (group_rate_snapshots.group_id<>'' AND chosen.group_id<>'' AND group_rate_snapshots.group_id=chosen.group_id)
+		  OR ((group_rate_snapshots.group_id='' OR chosen.group_id='') AND group_rate_snapshots.group_name=chosen.group_name)) AND ($5 = '' OR group_rate_snapshots.platform = $5 OR group_rate_snapshots.type = $5)
 		ORDER BY group_rate_snapshots.created_at DESC, group_rate_snapshots.id DESC
 	`, userID, adminAccountID, siteID, groupName, platform)
 	if err != nil {
@@ -572,6 +575,7 @@ func (r *Repository) facets(ctx context.Context, userID string, adminAccountID s
 				COALESCE(NULLIF(snapshots.group_id, ''), snapshots.group_name) AS group_key,
 				snapshots.platform,
 				snapshots.type,
+				snapshots.deleted,
 				snapshots.created_at,
 				snapshots.id,
 				COALESCE(sites.base_url, snapshots.site_id) AS site_key
@@ -581,11 +585,11 @@ func (r *Repository) facets(ctx context.Context, userID string, adminAccountID s
 				AND sites.id = snapshots.site_id
 			WHERE snapshots.user_id = $1 AND snapshots.admin_account_id = $2
 		), ranked AS (
-			SELECT platform, type,
+			SELECT platform, type, deleted,
 				ROW_NUMBER() OVER (PARTITION BY user_id, site_key, group_key ORDER BY created_at DESC, id DESC) AS row_number
 			FROM enriched
 		), latest AS (
-			SELECT platform, type FROM ranked WHERE row_number = 1
+			SELECT platform, type FROM ranked WHERE row_number = 1 AND NOT deleted
 		)
 		SELECT
 			COALESCE(array_agg(DISTINCT type ORDER BY type) FILTER (WHERE type <> ''), ARRAY[]::text[]) AS types,
@@ -631,7 +635,7 @@ func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccou
 			) AS row_number
 			FROM enriched
 		), latest AS (
-			SELECT * FROM ranked WHERE row_number = 1
+			SELECT * FROM ranked WHERE row_number = 1 AND NOT deleted
 		), mapped AS (
 			SELECT latest.*, (
 				EXISTS (

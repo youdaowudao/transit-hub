@@ -685,6 +685,11 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
+        <div v-if="site.groupRatesWarning" class="mt-4 flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning" role="alert" aria-live="polite" data-group-rates-warning>
+          <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <div class="min-w-0 space-y-1 break-words"><p>{{ site.groupRatesWarning.message }}</p><p>{{ site.groupRatesWarning.detail }}</p><p>{{ site.groupRatesWarning.next }}</p></div>
+        </div>
+
         <div v-if="site.enabled && (siteFailureKey(site) || costFailureDisplay(site))" class="mt-4 flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning" role="alert" aria-live="polite">
           <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>
@@ -772,6 +777,10 @@ onBeforeUnmount(() => {
                   <CheckCircle2 v-else-if="site.enabled && site.status === 'connected'" class="w-3.5 h-3.5" />
                   <XCircle v-else class="w-3.5 h-3.5" />
                   {{ site.enabled ? statusLabel(site.status) : t('admin.upstream.status.disabled') }}
+                </div>
+                <div v-if="site.groupRatesWarning" class="mt-2 flex max-w-xs items-start gap-1.5 text-xs leading-5 text-warning" role="alert" aria-live="polite" data-group-rates-warning>
+                  <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <div class="min-w-0 space-y-1 break-words"><p>{{ site.groupRatesWarning.message }}</p><p>{{ site.groupRatesWarning.detail }}</p><p>{{ site.groupRatesWarning.next }}</p></div>
                 </div>
                 <div v-if="site.enabled && (siteFailureKey(site) || costFailureDisplay(site))" class="mt-2 flex max-w-xs items-start gap-1.5 text-xs leading-5 text-destructive" role="alert" aria-live="polite">
                   <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />

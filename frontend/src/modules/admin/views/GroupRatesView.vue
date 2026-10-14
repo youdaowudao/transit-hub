@@ -3,12 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { AlertCircle, ArrowUpDown, Check, ChevronDown, History, KeyRound, Link2, Loader2, Megaphone, RefreshCw, Search, ServerCog, Sparkles, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
-import { checkScopedRealConnections, listScopedRealConnections, ScopedCheckApiError, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, realDisconnect } from '../api/mySites'
+import { checkScopedRealConnections, listScopedRealConnections, listConnectionsNeedingAttention, ScopedCheckApiError, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, realDisconnect } from '../api/mySites'
 import { listUpstreamSiteOptions } from '../api/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
-import type { AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportDiagnostic, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, ScopedCheckRequest, ScopedCheckResult, ScopedGroupRef, UpstreamKeyItem } from '../types/mySites'
+import type { AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportDiagnostic, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, ConnectionNeedingAttention, ExpectedRealConnection, ScopedCheckRequest, ScopedCheckResult, ScopedGroupRef, UpstreamKeyItem } from '../types/mySites'
 import type { ImportApiError } from '../api/mySites'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
 import { isImportAccountPlatform } from '../utils/importPlatforms'
@@ -81,7 +81,22 @@ const unconfirmedIds = ref(new Set<string>())
 const changedIds = ref(new Set<string>())
 const skippedIds = ref(new Set<string>())
 const realConnectionsData = ref<RealConnection[]>([])
-const disconnectingRate = ref<GroupRate | null>(null)
+const disconnectingRate = ref<{ siteId: string; siteName: string; groupName: string; pricingMapped?: boolean } | null>(null)
+const disconnectIsMaintenance = ref(false)
+let disconnectGeneration = 0
+const attentionItems = ref<ConnectionNeedingAttention[]>([])
+const attentionTotal = ref(0)
+const attentionPage = ref(1)
+const attentionTotalPages = ref(0)
+const attentionSiteFilter = ref('')
+const attentionExpanded = ref(false)
+const attentionLoading = ref(false)
+const attentionError = ref('')
+const attentionKnown = ref(false)
+const attentionCheckSummary = ref('')
+const attentionCheckingSite = ref('')
+let attentionGeneration = 0
+let attentionController: AbortController | null = null
 const disconnectConnection = ref<RealConnection | null>(null)
 let disconnectWorkspace = ''
 const disconnectMode = ref<'unlink' | 'full'>('unlink')
@@ -244,6 +259,13 @@ watch(supportsConnectPassthrough, (supported) => {
 })
 watch([() => currentAccount.value?.id, adminPlatform], () => {
   connectorGeneration++
+  disconnectGeneration++
+  closeDisconnect()
+  isDisconnecting.value = false
+  invalidateAttention(true)
+  attentionSiteFilter.value = ''
+  attentionExpanded.value = false
+  attentionPage.value = 1
   connectSubmitLocked.value = false
   isActionLoading.value = false
   connectingRate.value = null
@@ -416,6 +438,7 @@ const invalidatePage = (clear = false) => {
     unconfirmedIds.value = new Set([...unconfirmedIds.value, ...realConnectionsData.value.filter(connection => applicableConnection(connection) && connectionMatchesScope(connection)).map(connection => connection.id)])
   }
   isCheckingConnections.value = false
+  attentionCheckingSite.value = ''
   if (clear) clearCheckState()
   return pageGeneration
 }
@@ -543,6 +566,7 @@ const enterPage = async () => {
   page.value = 1
   if (!currentAccount.value?.id) { showMissingWorkspace(); return }
   void loadUpstreamSiteOptions()
+  void loadAttention()
   if (await loadLocalPage({ generation, focus: Boolean(pendingFocusGroup.value || pendingFocusGroupId.value) })) {
     const scope = frozenScope()
     const before = realConnectionsData.value.map(connection => ({ ...connection }))
@@ -566,16 +590,14 @@ const checkThenLoadRates = async () => {
 }
 
 const filteredRates = computed(() => {
-  if (serverSupportsStatusFilters.value) return rates.value
+  if (serverSupportsStatusFilters.value) return rates.value.filter(rate => !rate.deleted)
 
   const filtered = rates.value.filter(rate => {
     const typeMatch = !typeFilter.value || rate.type === typeFilter.value
     const platformMatch = !platformFilter.value || rate.platform === platformFilter.value
     const siteMatch = !siteFilter.value || rate.siteId === siteFilter.value
 
-    if (statusFilter.value === 'deleted') {
-      return typeMatch && platformMatch && siteMatch && rate.deleted
-    }
+    if (statusFilter.value === 'deleted') return false
 
     if (rate.deleted) return false
 
@@ -618,7 +640,7 @@ watch(searchQuery, (value) => {
     applyPendingSearch()
   }, 300)
 })
-const hasAnyRateData = computed(() => Object.values(statusCounts.value).some(count => count > 0))
+const hasAnyRateData = computed(() => ['all', 'mapped', 'unmapped'].some(key => statusCounts.value[key as 'all' | 'mapped' | 'unmapped'] > 0))
 const hasActiveRateFilters = computed(() => Boolean(
   searchQuery.value.trim() ||
   typeFilter.value ||
@@ -647,7 +669,10 @@ watch(isAnyDialogOpen, async (open) => {
     pendingFocusGroup.value = queryValue(route.query.focusGroup)
     pendingFocusGroupId.value = queryValue(route.query.focusGroupId)
     void enterPage()
-  } else applyPendingSearch()
+  } else {
+    applyPendingSearch()
+    if (pageIsMounted && attentionController?.signal.aborted && !attentionLoading.value) void loadAttention()
+  }
 })
 
 onMounted(async () => {
@@ -659,6 +684,8 @@ onBeforeUnmount(() => {
   pageIsMounted = false
   invalidatePage(true)
   optionsController?.abort()
+  invalidateAttention(true)
+  disconnectGeneration++
   connectorGeneration++
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
   document.removeEventListener('keydown', handleDialogKeydown)
@@ -724,7 +751,7 @@ const formatDelta = (delta: number | null): string => {
   return t('admin.groupRates.format.deltaMultiplier', { value: deltaValue })
 }
 
-const formatDateTime = (value: string | null): string => {
+const formatDateTime = (value: string | number | null): string => {
   if (!value) return t('admin.groupRates.common.placeholder')
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return t('admin.groupRates.common.placeholder')
@@ -797,6 +824,8 @@ const historyActionLabel = (rate: GroupRate): string => (
 )
 
 const openHistory = async (rate: GroupRate) => {
+  invalidatePage()
+  invalidateAttention()
   selectedRate.value = rate
   isHistoryOpen.value = true
   await loadHistory({
@@ -814,6 +843,7 @@ const closeHistory = () => {
 
 const openTypeEditor = (rate: GroupRate) => {
   invalidatePage()
+  invalidateAttention()
   editingRate.value = rate
   editTypeValue.value = rate.type ?? ''
 }
@@ -826,6 +856,7 @@ const closeTypeEditor = () => {
 const openConnector = async (rate: GroupRate) => {
   if (connectionOperationBlocked(rate)) return
   invalidatePage()
+  invalidateAttention()
   connectorGeneration++
   connectOutcome.value = 'editing'
   connectSubmitLocked.value = false
@@ -996,12 +1027,13 @@ const managedResourceErrorMessage = (error: unknown, fallbackKey: string): strin
   return message
 }
 
-const refreshAfterMutation = async (isCurrent: () => boolean = () => true, confirmRefresh = false): Promise<boolean> => {
+const refreshAfterMutation = async (isCurrent: () => boolean = () => true, confirmRefresh = false, localOnly = false): Promise<boolean> => {
   if (!isCurrent()) return false
   const generation = invalidatePage()
+  invalidateAttention()
   try {
     clearCheckState()
-    const [connectionsLoaded] = await Promise.all([loadLocalPage({ generation, isCurrent }), loadMySiteMappingData(true, isCurrent)])
+    const [connectionsLoaded] = await Promise.all([loadLocalPage({ generation, isCurrent }), localOnly ? Promise.resolve() : loadMySiteMappingData(true, isCurrent), loadAttention(isCurrent)])
     if (!isCurrent()) return false
     // Closing a dialog can resume a search or a new website. That active read
     // owns the page; the deliberately replaced old read has no failure to report.
@@ -1055,7 +1087,7 @@ const goToPage = async (target: number) => {
   await loadLocalPage()
 }
 
-const handleStatusChange = async (status: 'all' | 'mapped' | 'unmapped' | 'deleted') => {
+const handleStatusChange = async (status: 'all' | 'mapped' | 'unmapped') => {
   if (status === statusFilter.value || isLoading.value) return
   clearRateHighlight()
   statusFilter.value = status
@@ -1214,51 +1246,185 @@ const submitBind = async () => {
   }
 }
 
-const openDisconnect = (rate: GroupRate) => {
-  if (connectionOperationBlocked(rate)) return
+const freezeExpectedConnection = (connection: RealConnection, workspace: string): ExpectedRealConnection => ({
+  workspaceAdminAccountId: workspace, id: connection.id, upstreamSiteId: connection.upstreamSiteId,
+  upstreamGroupId: connection.upstreamGroupId || '', upstreamGroupName: connection.upstreamGroupName,
+  upstreamKeyId: connection.upstreamKeyId || '', adminAccountId: connection.adminAccountId || '',
+  adminPlatform: connection.adminPlatform || '', upstreamPlatform: connection.upstreamPlatform || '',
+  provisioningMode: connection.provisioningMode || '', status: connection.status || '',
+  ownGroupIds: [...new Set(connection.ownGroupIds ?? [])].sort(), ownGroupNames: [...new Set(connection.ownGroupNames ?? [])].sort(),
+  pricingMappingEnabled: connection.pricingMappingEnabled ?? false,
+})
+const attentionSiteName = (connection: RealConnection) => connection.siteName || siteOptions.value.find(site => site.id === connection.upstreamSiteId)?.name || connection.upstreamSiteId
+const attentionSiteOptions = computed(() => {
+  const options = new Map(siteOptions.value.map(site => [site.id, site.name]))
+  for (const item of attentionItems.value) if (!options.has(item.connection.upstreamSiteId)) options.set(item.connection.upstreamSiteId, attentionSiteName(item.connection))
+  return Array.from(options, ([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name))
+})
+const invalidateAttention = (clear = false) => {
+  attentionGeneration++
+  attentionController?.abort()
+  attentionLoading.value = false
+  if (clear) {
+    attentionItems.value = []
+    attentionTotal.value = 0
+    attentionTotalPages.value = 0
+    attentionKnown.value = false
+    attentionError.value = ''
+    attentionCheckSummary.value = ''
+  }
+}
+const loadAttention = async (additionalCurrent: () => boolean = () => true): Promise<boolean> => {
+  const workspace = currentAccount.value?.id ?? ''
+  if (!workspace) { invalidateAttention(true); return false }
+  const generation = ++attentionGeneration
+  const controller = new AbortController()
+  attentionController?.abort()
+  attentionController = controller
+  const siteId = attentionSiteFilter.value
+  const requestedPage = attentionPage.value
+  const isCurrent = () => pageIsMounted && !controller.signal.aborted && generation === attentionGeneration && workspace === (currentAccount.value?.id ?? '') && additionalCurrent()
+  attentionLoading.value = true
+  try {
+    const response = await listConnectionsNeedingAttention({ workspaceAdminAccountId: workspace, siteId, page: requestedPage }, controller.signal)
+    if (!isCurrent()) return false
+    attentionItems.value = response.items
+    attentionTotal.value = response.total
+    attentionTotalPages.value = response.totalPages
+    attentionKnown.value = true
+    attentionError.value = ''
+    if (response.total === 0 && !siteId) attentionExpanded.value = false
+    return true
+  } catch (error) {
+    if (!isCurrent()) return false
+    attentionKnown.value = false
+    attentionError.value = `已有对接暂时无法读取：${displayCause(error)}。当前不能确认是否有记录需要处理；倍率仍可查看，请重试读取，并检查Hub后端对接读取记录。`
+    return false
+  } finally {
+    if (attentionController === controller && !controller.signal.aborted) attentionController = null
+    if (isCurrent()) attentionLoading.value = false
+  }
+}
+const changeAttentionSite = async () => {
+  if (isCheckingConnections.value || isAnyDialogOpen.value) return
+  attentionPage.value = 1
+  attentionItems.value = []
+  attentionKnown.value = false
+  attentionCheckSummary.value = ''
+  await loadAttention()
+}
+const goToAttentionPage = async (target: number) => {
+  if (attentionLoading.value || isCheckingConnections.value || isAnyDialogOpen.value || target < 1 || target > attentionTotalPages.value) return
+  attentionPage.value = target
+  attentionItems.value = []
+  attentionKnown.value = false
+  await loadAttention()
+}
+const checkAttentionSite = async (connection: RealConnection) => {
+  if (isCheckingConnections.value || isAnyDialogOpen.value || !attentionKnown.value || !upstreamSiteOptions.value.some(site => site.id === connection.upstreamSiteId)) return
+  const workspace = currentAccount.value?.id ?? ''
+  const scope = { workspaceAdminAccountId: workspace, siteId: connection.upstreamSiteId }
+  const before = Array.from(new Map([...realConnectionsData.value, ...attentionItems.value.map(item => item.connection)].filter(item => item.upstreamSiteId === scope.siteId).map(item => [item.id, { ...item, ownGroupIds: [...item.ownGroupIds], ownGroupNames: [...(item.ownGroupNames ?? [])] }])).values())
+  const generation = invalidatePage(true)
+  invalidateAttention()
+  const controller = new AbortController()
+  checkController = controller
+  const isCurrent = () => pageIsMounted && generation === pageGeneration && workspace === (currentAccount.value?.id ?? '') && !controller.signal.aborted && !isAnyDialogOpen.value
+  lastCheckScope = scope
+  checkIdentities = new Map(before.map(connection => [connection.id, connection]))
+  unconfirmedIds.value = new Set(before.filter(applicableConnection).map(connection => connection.id))
+  isCheckingConnections.value = true
+  attentionCheckingSite.value = scope.siteId
+  attentionCheckSummary.value = ''
+  let result: ScopedCheckResult | undefined
+  let failure = ''
+  try { result = await checkScopedRealConnections({ ...scope, mode: 'manual' }, controller.signal) }
+  catch (error) {
+    if (!isCurrent()) return
+    if (error instanceof ScopedCheckApiError) { result = error.result; failure = [displayCause(error), error.detail, error.next].filter(Boolean).join('；') }
+    else failure = `本站账号核对未完成：${displayCause(error)}；请重新读取已有对接，并查看Hub后端账号检查记录后重试。`
+  }
+  if (!isCurrent()) return
+  const [reread, ratesRead] = await Promise.all([loadAttention(isCurrent), loadLocalPage({ generation, isCurrent })])
+  if (!isCurrent()) return
+  // Only a before/after public identity and the exact confirmed status can
+  // describe a row as checked. This never authorizes remote deletion here.
+  const originals = new Map(before.map(item => [item.id, freezeExpectedConnection(item, workspace)]))
+  const confirmed = new Set<string>()
+  const changed = new Set(result?.changedConnectionIds ?? [])
+  if (reread && result) {
+    for (const connection of [...attentionItems.value.map(item => item.connection), ...(ratesRead ? realConnectionsData.value : [])]) {
+      if (!result.confirmedConnectionIds.includes(connection.id)) continue
+      const original = originals.get(connection.id)
+      const current = freezeExpectedConnection(connection, workspace)
+      if (original && current.status === result.confirmedStatuses[current.id] && JSON.stringify({ ...original, status: current.status }) === JSON.stringify(current)) { confirmed.add(current.id); checkIdentities.set(current.id, { ...connection }) }
+      else changed.add(current.id)
+    }
+  }
+  confirmedIds.value = confirmed
+  changedIds.value = changed
+  skippedIds.value = new Set(result?.skippedConnectionIds ?? [])
+  unconfirmedIds.value = new Set([...before.filter(applicableConnection).map(connection => connection.id), ...(result?.unconfirmedConnectionIds ?? [])].filter(id => !confirmed.has(id) && !skippedIds.value.has(id)))
+  const attentionConfirmed = attentionItems.value.filter(item => confirmed.has(item.connection.id)).length
+  attentionCheckSummary.value = reread
+    ? `本站账号核对已结束，本页有${attentionConfirmed}条对接的账号状态已确认；其他记录仍显示上次状态，可重新核对。核对覆盖这个网站全部已有对接，本次没有创建、删除或修改主站账号。`
+    : '本站账号核对已结束，但最新已有对接暂时无法读取，当前不能确认本页状态；请重试读取，并查看Hub后端账号检查记录。本次没有创建、删除或修改主站账号。'
+  connectionCheckError.value = [failure, ...(result?.issues.map(issue => `${issue.detail}。${issue.next}`) ?? [])].filter(Boolean).join(' ')
+  isCheckingConnections.value = false
+  attentionCheckingSite.value = ''
+}
+const selectDisconnect = (connection: RealConnection, labels: { siteId: string; siteName: string; groupName: string; pricingMapped?: boolean }, maintenance: boolean) => {
   invalidatePage()
-  const selected = realConnectionForRate(rate)
-  if (!selected) return
-  disconnectConnection.value = { ...selected }
+  invalidateAttention()
+  disconnectGeneration++
+  disconnectConnection.value = { ...connection, ownGroupIds: [...connection.ownGroupIds], ownGroupNames: [...(connection.ownGroupNames ?? [])] }
   disconnectWorkspace = currentAccount.value?.id ?? ''
-  disconnectingRate.value = { ...rate }
+  disconnectingRate.value = labels
+  disconnectIsMaintenance.value = maintenance
   disconnectMode.value = 'unlink'
-  disconnectRemovePricing.value = selected.pricingMappingEnabled ?? Boolean(rate.pricingMapped)
+  disconnectRemovePricing.value = maintenance ? false : connection.pricingMappingEnabled ?? Boolean(labels.pricingMapped)
   disconnectError.value = ''
 }
-
+const openDisconnect = (rate: GroupRate) => {
+  if (connectionOperationBlocked(rate)) return
+  const selected = realConnectionForRate(rate)
+  if (selected) selectDisconnect(selected, { siteId: rate.siteId, siteName: rate.siteName, groupName: rate.groupName, pricingMapped: rate.pricingMapped }, false)
+}
+const openAttentionDisconnect = (connection: RealConnection) => {
+  if (isCheckingConnections.value || !attentionKnown.value || isAnyDialogOpen.value) return
+  selectDisconnect(connection, { siteId: connection.upstreamSiteId, siteName: attentionSiteName(connection), groupName: connection.upstreamGroupName }, true)
+}
 const closeDisconnect = () => {
+  disconnectGeneration++
   disconnectingRate.value = null
   disconnectConnection.value = null
   disconnectWorkspace = ''
+  disconnectIsMaintenance.value = false
   disconnectMode.value = 'unlink'
   disconnectRemovePricing.value = true
   disconnectError.value = ''
 }
-
 const submitDisconnect = async () => {
-  if (!disconnectingRate.value) return
   const conn = disconnectConnection.value
-  if (!conn) return
-  if (disconnectWorkspace !== (currentAccount.value?.id ?? '')) { disconnectError.value = '工作区已变化，本次没有执行解绑；请关闭窗口后在当前工作区重新打开对应记录。'; return }
-
+  if (!disconnectingRate.value || !conn || isDisconnecting.value) return
+  const workspace = disconnectWorkspace
+  if (workspace !== (currentAccount.value?.id ?? '')) { disconnectError.value = '工作区已变化，本次没有执行解绑；请关闭窗口后在当前工作区重新打开对应记录。'; return }
+  const generation = disconnectGeneration
+  const maintenance = disconnectIsMaintenance.value
+  const isCurrent = () => pageIsMounted && generation === disconnectGeneration && workspace === (currentAccount.value?.id ?? '')
   isDisconnecting.value = true
   disconnectError.value = ''
   try {
-    await realDisconnect({
-      connectionId: conn.id,
-      mode: disconnectMode.value,
-      removePricingMapping: disconnectRemovePricing.value,
+    await realDisconnect({ connectionId: conn.id, mode: maintenance ? 'unlink' : disconnectMode.value, removePricingMapping: disconnectRemovePricing.value,
+      ...(maintenance ? { expectedConnection: freezeExpectedConnection(conn, workspace) } : {}),
     })
+    if (!isCurrent()) return
     closeDisconnect()
+    await refreshAfterMutation(() => pageIsMounted && workspace === (currentAccount.value?.id ?? ''), false, maintenance)
   } catch (error) {
-    disconnectError.value = managedResourceErrorMessage(error, 'admin.groupRates.disconnect.failed')
-    isDisconnecting.value = false
-    return
-  }
-
-  await refreshAfterMutation()
-  isDisconnecting.value = false
+    if (!isCurrent()) return
+    disconnectError.value = maintenance ? `对接${conn.adminAccountName || conn.id}的本地解除未完成：${displayCause(error)}` : managedResourceErrorMessage(error, 'admin.groupRates.disconnect.failed')
+  } finally { if (pageIsMounted && workspace === (currentAccount.value?.id ?? '') && (generation === disconnectGeneration || generation + 1 === disconnectGeneration && !disconnectConnection.value)) isDisconnecting.value = false }
 }
 
 const historyTitle = computed(() => {
@@ -1287,10 +1453,11 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
   <div class="flex min-h-[calc(100dvh-8rem)] flex-col space-y-6 lg:h-[calc(100dvh-8rem)]" @click.capture="clearRateHighlight">
     <div class="flex max-w-full w-fit shrink-0 items-center gap-1 overflow-x-auto rounded-lg border border-border/50 bg-surface p-1" role="tablist" :aria-label="t('admin.menu.groupRates')">
       <button
-        v-for="tab in (['all', 'mapped', 'unmapped', 'deleted'] as const)"
+        v-for="tab in (['all', 'mapped', 'unmapped'] as const)"
         :key="tab"
         type="button"
         role="tab"
+        :disabled="isCheckingConnections || isAnyDialogOpen"
         :aria-selected="statusFilter === tab"
         aria-controls="group-rates-panel"
         :class="[
@@ -1311,6 +1478,58 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       </button>
     </div>
 
+    <div v-if="attentionError" role="alert" class="shrink-0 rounded-xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning">
+      <p class="break-words">{{ attentionError }}</p>
+      <Button variant="secondary" size="sm" class="mt-3" :disabled="attentionLoading || isCheckingConnections || isAnyDialogOpen" @click="loadAttention()">重试读取已有对接</Button>
+    </div>
+    <section v-if="attentionKnown && attentionTotal > 0 || attentionExpanded" class="shrink-0 overflow-hidden rounded-xl border border-border/50 bg-card" aria-label="已有对接维护">
+      <div class="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+        <p v-if="attentionKnown && attentionTotal > 0" class="min-w-0 break-words text-sm text-muted-foreground">有{{ attentionTotal }}条已有对接需要查看。上游分组资料目前无法对应这些记录，主站账号和对接仍保留；查看后可核对或解除对接。</p>
+        <p v-else class="min-w-0 text-sm text-muted-foreground">{{ attentionKnown ? '当前筛选没有需要查看的已有对接，可调整网站筛选。' : '已有对接资料尚未确认，请重试读取。' }}</p>
+        <Button variant="secondary" size="sm" class="shrink-0" :disabled="attentionLoading || isCheckingConnections || isAnyDialogOpen" :aria-expanded="attentionExpanded" aria-controls="group-rates-attention" @click="attentionExpanded = !attentionExpanded">{{ attentionExpanded ? '收起已有对接' : '查看已有对接' }}</Button>
+      </div>
+      <p class="px-4 pb-4 text-xs text-muted-foreground">只读取Hub保存的资料，不修改主站。</p>
+      <div v-if="attentionExpanded" id="group-rates-attention" class="border-t border-border/50">
+        <div class="space-y-3 p-4">
+          <label class="block text-sm text-muted-foreground">维护网站
+            <select v-model="attentionSiteFilter" aria-label="维护网站" class="mt-2 h-10 w-full rounded-lg border border-border/50 bg-surface px-3 text-sm text-foreground sm:max-w-xs" :disabled="attentionLoading || isCheckingConnections || isAnyDialogOpen" @change="changeAttentionSite">
+              <option value="">当前工作区全部网站</option>
+              <option v-for="site in attentionSiteOptions" :key="site.id" :value="site.id">{{ site.name }}</option>
+            </select>
+          </label>
+          <p class="text-xs text-muted-foreground">网站筛选只改变这里的已有对接；倍率搜索、分类和翻页不会改变此列表。</p>
+          <p class="text-xs text-muted-foreground">核对本站账号会检查这个网站全部已有对接的主站账号，不创建、删除或修改主站账号。处理对接会打开解除本地对接选项，不会删除主站账号或上游Key。</p>
+          <p v-if="attentionCheckSummary" class="break-words text-sm text-muted-foreground">{{ attentionCheckSummary }}</p>
+        </div>
+        <div v-if="attentionLoading" class="flex items-center justify-center p-6 text-sm text-muted-foreground"><Loader2 class="mr-2 h-4 w-4 animate-spin" />正在读取已有对接</div>
+        <p v-else-if="!attentionKnown" class="p-4 text-sm text-warning">当前无法确认已有对接资料，请重试读取。</p>
+        <p v-else-if="attentionItems.length === 0" class="p-4 text-sm text-muted-foreground">当前网站或这一页没有需要查看的已有对接；可调整网站筛选或返回上一页。</p>
+        <div v-else class="max-h-96 overflow-auto">
+          <table class="w-full min-w-[850px] text-left text-sm">
+            <thead class="sticky top-0 border-b border-border/50 bg-surface-elevated"><tr><th class="px-4 py-3">网站 / 上游分组</th><th class="px-4 py-3">主站账号 / 已有对接状态</th><th class="px-4 py-3">站点最后同步</th><th class="px-4 py-3">说明与处理</th></tr></thead>
+            <tbody class="divide-y divide-border/50">
+              <tr v-for="item in attentionItems" :key="item.connection.id" :data-attention-connection-id="item.connection.id" class="align-top">
+                <td class="px-4 py-3"><div class="max-w-56 break-words font-medium">{{ attentionSiteName(item.connection) }}</div><div class="mt-1 max-w-56 break-words text-muted-foreground">{{ item.connection.upstreamGroupName || item.connection.upstreamGroupId || '分组名称暂缺' }}</div></td>
+                <td class="px-4 py-3"><div class="max-w-56 break-words font-medium">{{ item.connection.adminAccountName || item.connection.adminAccountId || '账号名称暂缺' }}</div><div class="mt-1 text-xs text-muted-foreground">{{ item.connection.status === 'missing' ? '上次核对时主站账号未找到' : item.connection.status === 'active' ? '已保存对接' : '旧对接状态尚未确认' }}</div><div class="mt-1 text-xs text-muted-foreground">对接编号 {{ item.connection.id }}</div></td>
+                <td class="px-4 py-3 text-muted-foreground">{{ formatDateTime(item.lastSyncedAt) }}</td>
+                <td class="px-4 py-3"><p class="max-w-md break-words text-xs leading-5 text-muted-foreground">{{ item.reason === 'group_not_found' ? 'Hub保存的上游分组资料里未找到这个分组，不能据此确认上游删除。已有对接仍保留，你可以核对主站账号或解除本地对接。' : `这个对接对应的上游分组资料暂时无法确认：${item.detail}。对接和主站账号未改变，请到上游管理核查网站资料。` }}</p>
+                  <div class="mt-3 flex flex-wrap gap-2">
+                    <Button variant="secondary" size="sm" :disabled="isCheckingConnections || isAnyDialogOpen || !upstreamSiteOptions.some(site => site.id === item.connection.upstreamSiteId)" title="检查这个网站全部已有对接的主站账号，不创建、删除或修改主站账号" @click="checkAttentionSite(item.connection)">核对本站账号</Button>
+                    <Button variant="secondary" size="sm" :disabled="isCheckingConnections || isDisconnecting || isAnyDialogOpen" title="打开解除本地对接选项，不会删除主站账号或上游Key" @click="openAttentionDisconnect(item.connection)">处理对接</Button>
+                  </div>
+                  <p v-if="!upstreamSiteOptions.some(site => site.id === item.connection.upstreamSiteId)" class="mt-2 text-xs text-muted-foreground">网站资料不存在或网站选项未读取，当前不能核对本站账号；仍可解除本地对接。</p>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="flex flex-wrap items-center justify-between gap-3 border-t border-border/50 p-4 text-sm text-muted-foreground">
+          <span>共{{ attentionTotal }}条，每页30条，第{{ attentionPage }} / {{ attentionTotalPages }}页</span>
+          <div class="flex gap-2"><Button variant="secondary" size="sm" :disabled="attentionPage <= 1 || attentionLoading || isCheckingConnections || isAnyDialogOpen" @click="goToAttentionPage(attentionPage - 1)">上一页已有对接</Button><Button variant="secondary" size="sm" :disabled="attentionPage >= attentionTotalPages || attentionLoading || isCheckingConnections || isAnyDialogOpen" @click="goToAttentionPage(attentionPage + 1)">下一页已有对接</Button></div>
+        </div>
+      </div>
+    </section>
+
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
       <div class="flex w-full flex-1 flex-col gap-3 sm:flex-row sm:flex-wrap lg:flex-nowrap">
         <div class="relative w-full sm:w-80 max-w-sm">
@@ -1318,6 +1537,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           <input
             v-model="searchQuery"
             name="groupRateSearch"
+            :disabled="isCheckingConnections || isAnyDialogOpen"
             type="text"
             :placeholder="t('admin.groupRates.filters.searchPlaceholder')"
             :aria-label="t('admin.groupRates.filters.searchPlaceholder')"
@@ -1330,7 +1550,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         <div class="relative w-full sm:w-56 sm:shrink-0">
           <select
             v-model="siteFilter"
-            :disabled="isAnyDialogOpen"
+            :disabled="isAnyDialogOpen || isCheckingConnections"
             :aria-label="t('admin.groupRates.filters.siteLabel')"
             class="h-10 w-full appearance-none rounded-lg border border-border/50 bg-surface px-3 pr-8 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
             @change="handleSiteChange"
@@ -1344,6 +1564,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         <div class="relative w-full sm:w-48 sm:shrink-0">
           <select
             v-model="typeFilter"
+            :disabled="isCheckingConnections || isAnyDialogOpen"
             class="h-10 w-full appearance-none rounded-lg border border-border/50 bg-surface px-3 pr-8 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
             @change="handleTypeChange"
           >
@@ -1356,6 +1577,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         <div class="relative w-full sm:w-44 sm:shrink-0">
           <select
             v-model="platformFilter"
+            :disabled="isCheckingConnections || isAnyDialogOpen"
             class="h-10 w-full appearance-none rounded-lg border border-border/50 bg-surface px-3 pr-8 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
             @change="handlePlatformChange"
           >
@@ -1369,6 +1591,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           <ArrowUpDown class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
           <select
             v-model="sortMode"
+            :disabled="isCheckingConnections || isAnyDialogOpen"
             class="h-10 w-full appearance-none rounded-lg border border-border/50 bg-surface pl-9 pr-8 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
             @change="handleSortChange"
           >
@@ -1395,10 +1618,10 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
     </div>
 
     <div class="shrink-0 space-y-1 text-sm text-muted-foreground">
-      <p>这里显示已保存的上游倍率，更新时间见每一行。刷新会检查对应的主站账号，不会创建、删除或修改主站账号；要取得新的上游倍率，请到上游管理同步对应网站。</p>
+      <p>这里显示上次成功读取的可用分组倍率，并保留它们的倍率变化。要取得新倍率，请到上游管理同步对应网站。刷新会检查对应的主站账号，不会创建、删除或修改主站账号。</p>
       <p v-if="siteFilter">当前查看{{ siteOptions.find(site => site.id === siteFilter)?.name || siteFilter }}。进入或切换网站时只检查这个网站的关联账号；搜索和翻页不会检查其他网站。</p>
       <p v-else>进入时只检查首批30个分组关联的账号；翻页和筛选显示已保存资料，点击刷新可检查当前页。</p>
-      <p v-if="isCheckingConnections">正在检查{{ siteFilter ? (siteOptions.find(site => site.id === siteFilter)?.name || siteFilter) : '当前页' }}的关联账号，倍率可以先查看；账号检查中的操作暂时不可用。</p>
+      <p v-if="isCheckingConnections">正在检查{{ attentionCheckingSite ? (attentionSiteOptions.find(site => site.id === attentionCheckingSite)?.name || attentionCheckingSite) : siteFilter ? (siteOptions.find(site => site.id === siteFilter)?.name || siteFilter) : '当前页' }}的关联账号，倍率可以先查看；账号检查中的操作暂时不可用。</p>
       <p v-else-if="checkSummary">{{ checkSummary }}</p>
     </div>
     <div v-for="notice in [connectionDataError, siteOptionsError, focusError].filter(Boolean)" :key="notice" role="alert" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
@@ -1415,7 +1638,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       <span>{{ connectionCheckError }}</span>
     </div>
 
-    <div id="group-rates-panel" class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm" role="tabpanel">
+    <div id="group-rates-panel" class="flex min-h-64 flex-1 flex-col overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm" role="tabpanel">
       <div v-if="isLoading" class="flex flex-1 items-center justify-center text-muted-foreground">
         <Loader2 class="mr-2 h-5 w-5 animate-spin" />
         {{ t('admin.groupRates.status.loading') }}
@@ -1457,8 +1680,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <td class="px-4 py-2.5">
                 <div class="flex items-center gap-1.5">
                   <span class="font-medium text-foreground">{{ rate.groupName }}</span>
-                  <span v-if="rate.deleted" class="inline-flex rounded-md border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-500">{{ t('admin.groupRates.status.deleted') }}</span>
-                  <span v-else-if="!connectionDataKnown" class="text-xs text-muted-foreground">对接状态暂时未知，请刷新读取资料</span>
+                  <span v-if="!connectionDataKnown" class="text-xs text-muted-foreground">对接状态暂时未知，请刷新读取资料</span>
                   <span v-else-if="isMainAccountMissing(rate)" class="inline-flex rounded-md border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-600 dark:text-red-300">{{ t('admin.groupRates.status.mainAccountMissing') }}</span>
                   <span v-else-if="isRealConnected(rate)" class="inline-flex rounded-md border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-300">{{ t('admin.groupRates.status.mapped') }}</span>
                   <span v-if="!rate.deleted && isPricingMapped(rate)" class="inline-flex rounded-md border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300">{{ t('admin.groupRates.status.pricingMapped') }}</span>
@@ -1554,10 +1776,10 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         </div>
 
         <div class="flex items-center gap-2">
-          <Button variant="secondary" size="sm" :disabled="!canGoPrevious" @click="goToPage(page - 1)">
+          <Button variant="secondary" size="sm" :disabled="!canGoPrevious || isCheckingConnections || isAnyDialogOpen" @click="goToPage(page - 1)">
             {{ t('admin.groupRates.pagination.previous') }}
           </Button>
-          <Button variant="secondary" size="sm" :disabled="!canGoNext" @click="goToPage(page + 1)">
+          <Button variant="secondary" size="sm" :disabled="!canGoNext || isCheckingConnections || isAnyDialogOpen" @click="goToPage(page + 1)">
             {{ t('admin.groupRates.pagination.next') }}
           </Button>
         </div>
@@ -1614,7 +1836,6 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 <td class="px-6 py-4 text-foreground">
                   <div class="flex items-center gap-1.5">
                     <span>{{ row.groupName }}</span>
-                    <span v-if="row.deleted" class="inline-flex rounded-md border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-500">{{ t('admin.groupRates.status.deleted') }}</span>
                   </div>
                 </td>
                 <td class="px-6 py-4 text-muted-foreground">{{ typeLabel(row.type) }}</td>
@@ -2102,7 +2323,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         <div class="space-y-4 p-6">
           <div class="space-y-3">
             <label
-              v-if="disconnectConnection?.status === 'missing' || disconnectConnection?.canDeleteRemote !== false"
+              v-if="disconnectIsMaintenance || disconnectConnection?.status === 'missing' || disconnectConnection?.canDeleteRemote !== false"
               class="flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition-colors"
               :class="disconnectMode === 'unlink'
                 ? 'border-primary bg-primary/5'
@@ -2116,13 +2337,13 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 :disabled="isDisconnecting"
               />
               <div>
-                <span class="text-sm font-medium text-foreground">{{ t(disconnectConnection?.status === 'missing' ? 'admin.groupRates.disconnect.cleanupLocalOnly' : 'admin.groupRates.disconnect.unlinkOnly') }}</span>
-                <p class="mt-1 text-xs text-muted-foreground">{{ t(disconnectConnection?.status === 'missing' ? 'admin.groupRates.disconnect.cleanupLocalOnlyHint' : 'admin.groupRates.disconnect.unlinkOnlyHint') }}</p>
+                <span class="text-sm font-medium text-foreground">{{ disconnectIsMaintenance ? '仅解除本地对接' : t(disconnectConnection?.status === 'missing' ? 'admin.groupRates.disconnect.cleanupLocalOnly' : 'admin.groupRates.disconnect.unlinkOnly') }}</span>
+                <p class="mt-1 text-xs text-muted-foreground">{{ disconnectIsMaintenance ? '不会删除主站账号或上游Key，调价映射按你在窗口中的选择处理。' : t(disconnectConnection?.status === 'missing' ? 'admin.groupRates.disconnect.cleanupLocalOnlyHint' : 'admin.groupRates.disconnect.unlinkOnlyHint') }}</p>
               </div>
             </label>
 
             <label
-              v-if="disconnectConnection?.status !== 'missing'"
+              v-if="!disconnectIsMaintenance && disconnectConnection?.status !== 'missing'"
               class="flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition-colors"
               :class="disconnectMode === 'full'
                 ? 'border-red-500/50 bg-red-500/5'

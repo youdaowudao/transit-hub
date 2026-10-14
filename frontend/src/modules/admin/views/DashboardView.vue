@@ -1396,7 +1396,7 @@ const lastProbeLabel = computed(() => {
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
       @click.self="closeDailyStatsPanel"
     >
-      <div class="bg-background rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] overflow-hidden flex flex-col mx-4">
+      <div role="dialog" aria-modal="true" :aria-label="t('admin.dashboard.dailyStats.title')" class="bg-background rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] overflow-hidden flex flex-col mx-4">
         <div class="flex items-center justify-between px-5 py-4 border-b border-border">
           <h2 class="text-base font-semibold">{{ t('admin.dashboard.dailyStats.title') }}</h2>
           <button class="text-muted-foreground hover:text-foreground" aria-label="关闭" @click="closeDailyStatsPanel">✕</button>

@@ -865,8 +865,8 @@ const refreshWaitingLabel = (siteName: string, phase: string, elapsedSeconds: nu
     phase: refreshStageLabel(phase),
     seconds: elapsedSeconds,
   })
-const refreshIssueLabel = (issue: { errorKey: string; status: string }): string =>
-  refreshFailureLabel(issue.errorKey, issue.status)
+const refreshIssueLabel = (issue: { errorKey: string; status: string; groupRatesWarning?: import('../types/upstream').GroupRatesWarning }): string =>
+  issue.groupRatesWarning ? [issue.groupRatesWarning.message, issue.groupRatesWarning.detail, issue.groupRatesWarning.next].filter(Boolean).join('；') : refreshFailureLabel(issue.errorKey, issue.status)
 
 // 分组启用/管理抽屉。
 const setupDrawerOpen = ref(false)
@@ -1327,6 +1327,10 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           {{ issue.siteName || siteName(issue.siteId || '') }}: {{ refreshIssueLabel(issue) }}
         </p>
       </div>
+    </div>
+
+    <div v-if="!refreshLoading && refreshRunSnapshot?.issues?.some(issue => issue.groupRatesWarning)" class="space-y-2 text-xs text-warning" role="status" aria-live="polite" data-group-rates-warning>
+      <p v-for="issue in refreshRunSnapshot.issues.filter(issue => issue.groupRatesWarning)" :key="`${issue.siteId}:${issue.phase}`" class="break-words">{{ issue.siteName || siteName(issue.siteId || '') }}: {{ refreshIssueLabel(issue) }}</p>
     </div>
 
     <div v-if="!refreshLoading" class="space-y-1 text-xs text-muted-foreground" aria-live="polite">

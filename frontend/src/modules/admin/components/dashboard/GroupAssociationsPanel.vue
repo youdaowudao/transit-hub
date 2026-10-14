@@ -83,6 +83,8 @@ interface AssociationTargetRow {
   sourceStatus: SourceStatus
   mainSiteStatus: MainSiteStatus
   healthStatus: HealthStatus
+  priceNotice: string
+  multiplierMode?: string
 }
 
 import { t, locale } from '@/locales'
@@ -322,53 +324,35 @@ const calculateProfitMargin = (
   return (saleMultiplier - costMultiplier) / saleMultiplier
 }
 
-const selectedTargetDetails = computed(() => selectedTargets.value.map(target => {
-  const option = targetOptions.value.find(item => item.siteId === target.siteId && item.groupName === target.groupName)
-  const detail = option ?? {
-    ...target,
-    siteName: target.siteId,
-    platform: '',
-    multiplier: null,
-    multiplierMode: undefined,
-    stale: true,
-  }
-  const rechargeRate = siteById.value.get(target.siteId)?.rechargeRate
-  const effectiveCostMultiplier = detail.stale
-    ? null
-    : calculateEffectiveCostMultiplier(detail.multiplier, rechargeRate)
-  return {
-    ...detail,
-    effectiveCostMultiplier,
-    profitMargin: calculateProfitMargin(selectedRow.value?.ownGroupInfo?.multiplier, effectiveCostMultiplier),
-  }
-}))
-
-const upstreamGroupInfoFor = (siteId: string, groupId: string, groupName: string): UpstreamGroupInfo | null => {
-  const site = siteById.value.get(siteId)
-  if (!site) return null
-  return site.metrics?.groups.find(group => (
-    (groupId && group.id === groupId) || group.name === groupName
-  )) ?? null
+// Keep all candidates until identity has been checked; a name map would
+// otherwise replace old A with same-name B before the comparison can run.
+const matchingIdentity = <T extends { id: string; name: string }>(candidates: T[], groupId: string, groupName: string): T | null => {
+  const exact = groupId ? candidates.filter(item => item.id && item.id === groupId) : []
+  if (exact.length) return exact.length === 1 ? exact[0]! : null
+  const compatible = candidates.filter(item => (!groupId || !item.id) && item.name === groupName)
+  return compatible.length === 1 ? compatible[0]! : null
 }
-
-const groupRateKey = (siteId: string, groupName: string, platform: string | null | undefined): string => (
-  `${targetKey(siteId, groupName)}\u0000${platform ?? ''}`
-)
-
-const groupRateMap = computed(() => {
-  const result = new Map<string, GroupRate>()
-  for (const rate of groupRates.value) {
-    result.set(groupRateKey(rate.siteId, rate.groupName, rate.platform), rate)
+const upstreamGroupInfoFor = (siteId: string, groupId: string, groupName: string): UpstreamGroupInfo | null => {
+  const groups = siteById.value.get(siteId)?.metrics?.groups
+  return Array.isArray(groups) ? matchingIdentity(groups, groupId, groupName) : null
+}
+const groupRateFor = (siteId: string, groupId: string, groupName: string, platform: string): GroupRate | null => {
+  const candidates = groupRates.value.filter(rate => rate.siteId === siteId && !rate.deleted)
+  for (const candidatePlatform of [...new Set([platform, ''])]) {
+    const platformCandidates = candidates.filter(rate => (rate.platform ?? '') === candidatePlatform)
+    const exact = groupId ? platformCandidates.filter(rate => rate.groupId && rate.groupId === groupId) : []
+    const compatible = exact.length ? exact : platformCandidates.filter(rate => (!groupId || !rate.groupId) && rate.groupName === groupName)
+    if (compatible.length) return compatible.length === 1 ? compatible[0]! : null
   }
-  return result
-})
-
-const sourceStatusFor = (siteId: string, groupId: string, groupName: string): SourceStatus => {
+  return null
+}
+const sourceStatusFor = (siteId: string, groupInfo: UpstreamGroupInfo | null, ambiguous: boolean): SourceStatus => {
+  if (ambiguous) return 'unknown'
   const site = siteById.value.get(siteId)
   if (!site) return 'unknown'
   if (site.status === 'error') return 'syncError'
   if (site.status !== 'connected') return 'unknown'
-  return upstreamGroupInfoFor(siteId, groupId, groupName) ? 'available' : 'notFound'
+  return groupInfo ? 'available' : 'notFound'
 }
 
 const healthGroupFor = (row: AssociationRow): AdminGroupHealth | null => {
@@ -508,42 +492,72 @@ const associationRows = computed<AssociationTargetRow[]>(() => {
       included: mappingTargetSet.has(key),
       connections: [],
     }
-    if (!current.groupId) current.groupId = connection.upstreamGroupId
     if (!current.connections.some(item => item.id === connection.id)) current.connections.push(connection)
     entries.set(key, current)
   }
 
   return Array.from(entries.entries()).map(([key, entry]) => {
     const site = siteById.value.get(entry.siteId)
-    const platform = site?.platform ?? entry.connections[0]?.upstreamPlatform ?? ''
-    const groupInfo = upstreamGroupInfoFor(entry.siteId, entry.groupId, entry.groupName)
-    const rate = groupRateMap.value.get(groupRateKey(entry.siteId, entry.groupName, platform))
-      ?? groupRateMap.value.get(groupRateKey(entry.siteId, entry.groupName, ''))
-      ?? null
-    const upstreamMultiplier = rate?.upstreamMultiplier ?? groupInfo?.multiplier ?? null
-    const effectiveCostMultiplier = rate?.currentMultiplier
-      ?? calculateEffectiveCostMultiplier(upstreamMultiplier, site?.rechargeRate)
+    const connectionPlatforms = [...new Set(entry.connections.map(connection => connection.upstreamPlatform || '').filter(Boolean))]
+    const platform = site?.platform ?? (connectionPlatforms.length === 1 ? connectionPlatforms[0]! : '')
+    const ids = [...new Set(entry.connections.map(connection => connection.upstreamGroupId || '').filter(Boolean))]
+    const groupId = ids.length === 1 ? ids[0]! : ''
+    let ambiguous = ids.length > 1 || (!site && connectionPlatforms.length > 1)
+    let groupInfo = ambiguous ? null : upstreamGroupInfoFor(entry.siteId, groupId, entry.groupName)
+    if (!ambiguous && groupId && entry.connections.some(connection => !connection.upstreamGroupId)) {
+      // A legacy blank-ID connection may join a known identity only when its
+      // name uniquely identifies that same current group.
+      ambiguous = entry.connections.filter(connection => !connection.upstreamGroupId).some(connection => {
+        const legacyGroup = upstreamGroupInfoFor(entry.siteId, '', connection.upstreamGroupName)
+        return !legacyGroup || !groupInfo || legacyGroup !== groupInfo
+      })
+      if (ambiguous) groupInfo = null
+    }
+    const fixed = groupInfo && groupInfo.multiplierMode !== 'auto' && groupInfo.multiplier != null && Number.isFinite(groupInfo.multiplier) && groupInfo.multiplier >= 0
+    const candidateRate = !ambiguous && fixed ? groupRateFor(entry.siteId, groupId || groupInfo!.id, entry.groupName, platform) : null
+    const updatedAt = candidateRate?.updatedAt ? Date.parse(candidateRate.updatedAt) : NaN
+    const snapshotBehind = Boolean(candidateRate && site?.lastSyncedAt != null && (!Number.isFinite(updatedAt) || updatedAt < site.lastSyncedAt))
+    const rate = snapshotBehind ? null : candidateRate
+    const upstreamMultiplier = fixed ? rate?.upstreamMultiplier ?? groupInfo!.multiplier : null
+    const effectiveCostMultiplier = fixed ? rate?.currentMultiplier ?? calculateEffectiveCostMultiplier(upstreamMultiplier, site?.rechargeRate) : null
     return {
       key,
       siteId: entry.siteId,
-      groupId: entry.groupId,
+      groupId,
       groupName: entry.groupName,
-      siteName: rate?.siteName ?? site?.name ?? entry.siteId,
-      platform: rate?.platform ?? platform,
+      siteName: site?.name ?? [...new Set(entry.connections.map(connection => connection.siteName).filter((name): name is string => Boolean(name)))].sort()[0] ?? entry.siteId,
+      platform,
       included: entry.included,
-      stale: staleTargetSet.value.has(key) || (entry.included && entry.connections.length === 0) || Boolean(rate?.deleted),
+      stale: staleTargetSet.value.has(key) || (entry.included && entry.connections.length === 0),
       connections: entry.connections,
       rate,
       upstreamMultiplier,
       delta: rate?.delta ?? null,
       effectiveCostMultiplier,
       profitMargin: calculateProfitMargin(row.ownGroupInfo?.multiplier, effectiveCostMultiplier),
-      sourceStatus: sourceStatusFor(entry.siteId, entry.groupId, entry.groupName),
+      sourceStatus: sourceStatusFor(entry.siteId, groupInfo, ambiguous),
       mainSiteStatus: mainSiteStatusFor(entry.connections, row),
       healthStatus: healthStatusFor(entry.connections, row),
+      priceNotice: ambiguous ? '这个目标包含不同分组的对接，暂时无法确认统一价格；对接和映射仍保留，请逐条核查。'
+        : snapshotBehind ? '倍率快照未跟上网站同步；当前成本按该分组已保存的上游倍率计算，涨跌暂时无法确认，请重新同步网站。' : '',
+      multiplierMode: groupInfo?.multiplierMode,
     }
   })
 })
+
+const selectedTargetDetails = computed(() => selectedTargets.value.map(target => {
+  const row = associationRows.value.find(item => item.key === targetKey(target.siteId, target.groupName))
+  return {
+    ...target,
+    siteName: row?.siteName ?? siteById.value.get(target.siteId)?.name ?? target.siteId,
+    platform: row?.platform ?? '',
+    multiplier: row?.upstreamMultiplier ?? null,
+    multiplierMode: row?.multiplierMode,
+    stale: row?.stale ?? true,
+    effectiveCostMultiplier: row?.effectiveCostMultiplier ?? null,
+    profitMargin: row?.profitMargin ?? null,
+  }
+}))
 
 const compareNullableNumbers = (first: number | null, second: number | null): number => {
   const firstMissing = first == null || !Number.isFinite(first)
@@ -1435,7 +1449,7 @@ onBeforeUnmount(() => {
                           </div>
                         </td>
                         <td class="px-4 py-3">
-                          <span class="inline-flex rounded-md px-2 py-1 text-xs font-medium" :class="sourceStatusClass(target.sourceStatus)">{{ sourceStatusLabel(target.sourceStatus) }}</span>
+                          <span class="inline-flex rounded-md px-2 py-1 text-xs font-medium" :class="sourceStatusClass(target.sourceStatus)">{{ sourceStatusLabel(target.sourceStatus) }}</span><p v-if="target.priceNotice" class="mt-2 max-w-sm break-words text-xs leading-5 text-warning">{{ target.priceNotice }}</p>
                         </td>
                         <td class="px-4 py-3">
                           <span class="inline-flex rounded-md px-2 py-1 text-xs font-medium" :class="mainSiteStatusClass(target.mainSiteStatus)">{{ mainSiteStatusLabel(target.mainSiteStatus) }}</span>
@@ -1477,7 +1491,7 @@ onBeforeUnmount(() => {
                     <div class="mt-4 grid grid-cols-2 gap-3 border-t border-border/50 pt-3">
                       <div>
                         <div class="text-[11px] text-muted-foreground">{{ t('admin.groupAssociations.associationTable.columns.sourceStatus') }}</div>
-                        <div class="mt-1"><span class="inline-flex rounded-md px-2 py-1 text-xs font-medium" :class="sourceStatusClass(target.sourceStatus)">{{ sourceStatusLabel(target.sourceStatus) }}</span></div>
+                        <div class="mt-1"><span class="inline-flex rounded-md px-2 py-1 text-xs font-medium" :class="sourceStatusClass(target.sourceStatus)">{{ sourceStatusLabel(target.sourceStatus) }}</span><p v-if="target.priceNotice" class="mt-2 max-w-sm break-words text-xs leading-5 text-warning">{{ target.priceNotice }}</p></div>
                       </div>
                       <div>
                         <div class="text-[11px] text-muted-foreground">{{ t('admin.groupAssociations.associationTable.columns.mainSiteStatus') }}</div>

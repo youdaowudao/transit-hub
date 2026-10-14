@@ -182,9 +182,10 @@ type RealConnectRequest struct {
 // RealDisconnectRequest 取消真实对接请求体。
 // Mode: "unlink" 仅删除本地绑定记录，"full" 同时删除上游 Key 和 admin 转发账号。
 type RealDisconnectRequest struct {
-	ConnectionID         string `json:"connectionId"`
-	Mode                 string `json:"mode"`
-	RemovePricingMapping *bool  `json:"removePricingMapping"`
+	ConnectionID         string              `json:"connectionId"`
+	Mode                 string              `json:"mode"`
+	RemovePricingMapping *bool               `json:"removePricingMapping"`
+	ExpectedConnection   *ExpectedConnection `json:"expectedConnection,omitempty"`
 }
 
 // RealConnectionCheckResponse summarizes one authoritative main-site account

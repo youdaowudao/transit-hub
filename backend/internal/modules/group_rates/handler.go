@@ -2,6 +2,7 @@ package group_rates
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -89,8 +90,12 @@ func (h *Handler) updateType(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.service.UpdateType(r.Context(), userID, adminAccountID, GroupRef{SiteID: dto.SiteID, GroupName: dto.GroupName}, dto.Type); err != nil {
+		if errors.Is(err, ErrNoEditableSnapshot) {
+			httpjson.Write(w, http.StatusConflict, map[string]string{"message": err.Error(), "detail": "当前网站中找不到可唯一编辑的有效分组倍率，分类未保存", "next": "请到上游管理同步网站后重新选择分组"})
+			return
+		}
 		log.Printf("update group rate type: %v", err)
-		httpjson.WriteError(w, http.StatusInternalServerError, "Failed to update group rate type")
+		httpjson.Write(w, http.StatusInternalServerError, map[string]string{"message": "保存分组分类失败", "detail": "数据库未完成分类保存，具体原因无法安全确认", "next": "请维护人员检查Hub分类保存记录和数据库连接，确认恢复后重试"})
 		return
 	}
 	httpjson.Write(w, http.StatusOK, map[string]bool{"success": true})

@@ -7,6 +7,9 @@ import (
 
 func TestWorkspaceDeleteStatementsCoverAllWorkspaceTables(t *testing.T) {
 	want := []string{
+		"site_notifications",
+		"site_notification_preferences",
+		"upstream_rate_notice_baselines",
 		"lottery_reward_jobs",
 		"lottery_winners",
 		"lottery_draws",
@@ -89,6 +92,10 @@ func TestLegacyWorkspaceDescriptorsCoverDeleteTables(t *testing.T) {
 		descriptors[table.Name] = table.WorkspaceColumn
 	}
 	for _, stmt := range workspaceDeleteStatements {
+		// Notifications start with explicit workspace ownership and never contain legacy rows.
+		if stmt.Name == "site_notifications" || stmt.Name == "site_notification_preferences" || stmt.Name == "upstream_rate_notice_baselines" {
+			continue
+		}
 		column, ok := descriptors[stmt.Name]
 		if !ok {
 			t.Fatalf("legacy workspace descriptor missing for delete table %s", stmt.Name)

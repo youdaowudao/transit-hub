@@ -51,8 +51,8 @@ run_connection_health_gate() {
       "$ROOT_DIR/scripts/test-core-regression-membership.test.mjs" \
       "$ROOT_DIR/scripts/test-c43-core-membership.test.mjs"
 
-  run_step "backend connection_health and upstream tests" \
-    bash -c "cd '$ROOT_DIR/backend' && go test ./internal/modules/connection_health ./internal/modules/upstream -count=1"
+  run_step "backend connection_health, upstream and notifications tests" \
+    bash -c "cd '$ROOT_DIR/backend' && go test ./internal/modules/connection_health ./internal/modules/upstream ./internal/modules/group_rates ./internal/modules/notifications ./internal/modules/admin_accounts -count=1"
 
   run_step "backend model control quality migration tests (real PG only when explicitly configured)" \
     bash -c "cd '$ROOT_DIR/backend' && go test ./internal/database/migrations -run 'TestModelControlV300' -count=1"
@@ -62,6 +62,12 @@ run_connection_health_gate() {
 
   run_step "backend upstream task B concurrency race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/upstream -run 'TestTaskBConcurrency' -count=1"
+
+  run_step "backend notification persistence and read-only assignment race tests" \
+    bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/notifications ./internal/modules/upstream ./internal/modules/connection_health -run 'Test.*(Notification|Notice|PeekKeyAssignment)' -count=1"
+
+  run_step "backend notification authenticated API race tests (real PG only when explicitly configured)" \
+    bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/httpserver -run 'TestNotificationAPI' -count=1"
 
   run_step "backend Singapore cost persistence race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/upstream ./internal/modules/dashboard -run 'TestSingaporeCost' -count=1"
@@ -80,6 +86,9 @@ run_connection_health_gate() {
 
   run_step "frontend typecheck" \
     bash -c "cd '$ROOT_DIR/frontend' && npm run typecheck"
+
+  run_step "frontend notification scoped API and workspace UI contracts" \
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- notifications-api-critical.test.ts notifications-controller-critical.behavior.test.ts notifications-layout-critical.behavior.test.ts admin-layout-update-notice.behavior.test.ts admin-menu-hierarchy.behavior.test.ts"
 }
 
 run_globalization_gate() {
@@ -90,7 +99,7 @@ run_globalization_gate() {
     bash -c "cd '$ROOT_DIR/frontend' && npm run test -- locale-configuration.test.ts globalization-amount.behavior.test.ts globalization-time-input.behavior.test.ts notification-recipients.behavior.test.ts user-last-used.test.ts dashboard-cost-entrypoints.behavior.test.ts account-cost-workspace.behavior.test.ts home-cost-snapshot.behavior.test.ts home-cost-margin-quality.behavior.test.ts dashboard-provisional-trend.test.ts dashboard-profit-margin.test.ts"
 
   run_step "frontend group rates import and retained behavior regression tests" \
-    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- group-rates-import-domestic.behavior.test.ts group-rates-import-settings.behavior.test.ts group-rates-missing-connection.behavior.test.ts group-rates-scoped-critical.behavior.test.ts group-rates-scoped-additional.behavior.test.ts group-rates-scoped-api.additional.test.ts"
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- group-rates-import-domestic.behavior.test.ts group-rates-import-settings.behavior.test.ts group-rates-missing-connection.behavior.test.ts group-rates-scoped-critical.behavior.test.ts group-rates-scoped-additional.behavior.test.ts group-rates-scoped-api.additional.test.ts group-rates-cleanup-critical.behavior.test.ts group-associations-cleanup-critical.behavior.test.ts group-rates-maintenance.additional.behavior.test.ts group-rates-maintenance-api.additional.test.ts group-rates-maintenance-dialog-critical.behavior.test.ts group-associations-cleanup.additional.behavior.test.ts upstream-group-rates-warning.behavior.test.ts connection-health-group-rates-warning.behavior.test.ts"
 }
 
 case "$MODE" in

@@ -16,6 +16,7 @@ import type {
   ImportFailure,
   ImportConfiguration,
   ImportDiagnostic,
+  ConnectionsNeedingAttentionResponse,
 } from '../types/mySites'
 import {
   authUnauthorizedErrorKey,
@@ -36,6 +37,8 @@ const authHeaders = (): HeadersInit => {
 
 type AdminErrorPayload = {
   message?: string
+  detail?: string
+  next?: string
   error?: string
   reason?: string
   groupId?: string
@@ -416,10 +419,55 @@ export const realBind = async (req: RealBindRequest): Promise<RealConnectRespons
 )
 
 export const realDisconnect = async (req: RealDisconnectRequest): Promise<void> => {
+  if (req.expectedConnection) {
+    // The maintenance path is local only. Keep the backend's actual outcome
+    // details when a checked delete fails or its commit cannot be confirmed.
+    let response: Response
+    try { response = await fetch(endpoint('/my-sites/real-disconnect'), { method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(req) }) }
+    catch { throw new Error('解除本地对接的结果暂时无法确认：Hub与服务器的连接中断。请先重新读取已有对接，并查看Hub后端解除记录，确认结果后再重试；本次不会删除主站账号或上游Key。') }
+    let payload: unknown
+    try { payload = JSON.parse(await response.text()) } catch {
+      if (response.status === 401) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+      throw new Error('解除本地对接的结果暂时无法确认：服务器未返回完整结果。请先重新读取已有对接，并查看Hub后端解除记录，确认结果后再重试；本次不会删除主站账号或上游Key。')
+    }
+    if (isUnauthorizedApiResponse(response.status, isObject(payload) ? payload : {})) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+    if (!response.ok) throw new Error(isObject(payload) ? [payload.message, payload.detail, payload.next].map(safeScopedErrorText).filter(Boolean).join('；') || '解除本地对接未完成，具体原因无法确认；请重新读取记录并核查Hub后端解除记录后再重试。' : '解除本地对接未完成，具体原因无法确认；请重新读取记录并核查Hub后端解除记录后再重试。')
+    if (!isObject(payload) || (payload.ok !== true && payload.success !== true)) throw new Error('解除本地对接的结果暂时无法确认；请重新读取已有对接，并核查Hub后端解除记录后再重试。')
+    return
+  }
   await requestJson<{ ok: boolean }>('/my-sites/real-disconnect', {
     method: 'POST',
     body: JSON.stringify(req),
   })
+}
+
+export const listConnectionsNeedingAttention = async (request: { workspaceAdminAccountId: string; siteId?: string; page: number }, signal?: AbortSignal): Promise<ConnectionsNeedingAttentionResponse> => {
+  const params = new URLSearchParams({ workspaceAdminAccountId: request.workspaceAdminAccountId, page: String(request.page) })
+  if (request.siteId) params.set('siteId', request.siteId)
+  let response: Response
+  try { response = await fetch(endpoint(`/my-sites/real-connections/needs-attention?${params}`), { signal, headers: { Accept: 'application/json', ...authHeaders() } }) }
+  catch (error) { if (scopedAbortError(error)) throw error; throw new Error('Hub与服务器的连接中断，对接资料未读取；请重试读取，并检查Hub后端对接读取记录') }
+  let payload: unknown
+  try { payload = JSON.parse(await response.text()) } catch (error) {
+    if (scopedAbortError(error)) throw error
+    if (response.status === 401) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+    throw new Error('服务器未返回可读取的完整对接资料；请重试读取，并查看Hub后端对接读取记录')
+  }
+  if (isUnauthorizedApiResponse(response.status, isObject(payload) ? payload : {})) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+  if (!response.ok) throw new Error(isObject(payload) ? [payload.message, payload.detail, payload.next].map(scopedSafeText).filter(Boolean).join('；') || '具体原因无法确认，请查看Hub后端对接读取记录' : '具体原因无法确认，请查看Hub后端对接读取记录')
+  const fail = () => new Error('服务器返回的工作区、分页或对接资料不完整；请重试读取，并查看Hub后端对接读取记录')
+  if (!isObject(payload) || payload.workspaceAdminAccountId !== request.workspaceAdminAccountId || !Number.isSafeInteger(payload.total) || Number(payload.total) < 0 || payload.page !== request.page || payload.pageSize !== 30 || !Number.isSafeInteger(payload.totalPages) || payload.totalPages !== Math.ceil(Number(payload.total) / 30) || !Array.isArray(payload.items) || payload.items.length > 30) throw fail()
+  const expectedCount = Math.min(30, Math.max(0, Number(payload.total) - (request.page - 1) * 30))
+  if (payload.items.length !== expectedCount) throw fail()
+  const ids = new Set<string>()
+  for (const item of payload.items) {
+    if (!isObject(item) || !isObject(item.connection) || !['group_not_found', 'source_unconfirmed'].includes(String(item.reason)) || typeof item.detail !== 'string' || (item.lastSyncedAt !== null && (!Number.isSafeInteger(item.lastSyncedAt) || Number(item.lastSyncedAt) < 0))) throw fail()
+    const connection = item.connection
+    if (!scopedIdentityText(connection.id) || ids.has(connection.id) || !scopedIdentityText(connection.upstreamSiteId) || typeof connection.upstreamGroupId !== 'string' || typeof connection.upstreamGroupName !== 'string' || typeof connection.upstreamKeyId !== 'string' || typeof connection.adminAccountId !== 'string' || !['active', 'missing', ''].includes(String(connection.status ?? '')) || !Array.isArray(connection.ownGroupIds) || !connection.ownGroupIds.every(value => typeof value === 'string') || (connection.ownGroupNames !== undefined && (!Array.isArray(connection.ownGroupNames) || !connection.ownGroupNames.every(value => typeof value === 'string'))) || (connection.upstreamKey !== undefined && connection.upstreamKey !== '') || (connection.operationId !== undefined && connection.operationId !== '')) throw fail()
+    ids.add(connection.id)
+    item.detail = scopedSafeText(item.detail)
+  }
+  return payload as unknown as ConnectionsNeedingAttentionResponse
 }
 
 export const runAutoPricing = async (req: RunAutoPricingRequest): Promise<RunAutoPricingResponse> => {

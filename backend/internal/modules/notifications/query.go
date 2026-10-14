@@ -1,0 +1,231 @@
+package notifications
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+)
+
+const noticeColumns = `id,user_id,admin_account_id,kind,subject_type,subject_id,level,discovered_at,created_at,content,read_at,reminder_completed_at`
+
+var (
+	errStoredContentFormat = errors.New("已保存的通知内容格式无法读取")
+	errStoredContentUnsafe = errors.New("已保存的通知内容未通过安全显示检查")
+	errStoredPreference    = errors.New("已保存的通知检查间隔不符合整数分钟范围")
+)
+
+type noticeScanner interface{ Scan(...any) error }
+
+func scanNotice(row noticeScanner) (Notice, error) {
+	var item Notice
+	var content []byte
+	if err := row.Scan(&item.ID, &item.UserID, &item.AdminAccountID, &item.Kind, &item.SubjectType, &item.SubjectID, &item.Level, &item.DiscoveredAt, &item.CreatedAt, &content, &item.ReadAt, &item.ReminderCompletedAt); err != nil {
+		return item, err
+	}
+	if err := json.Unmarshal(content, &item.Content); err != nil {
+		return Notice{}, errStoredContentFormat
+	}
+	// Recheck known display fields; never forward raw JSON or unknown stored fields.
+	if _, err := validate(NoticeInput{UserID: item.UserID, AdminAccountID: item.AdminAccountID, Kind: item.Kind, EventKey: "stored-notice", SubjectType: item.SubjectType, SubjectID: item.SubjectID, Level: item.Level, DiscoveredAt: item.DiscoveredAt, Content: item.Content}); err != nil {
+		return Notice{}, errStoredContentUnsafe
+	}
+	if item.Content.Details == nil {
+		item.Content.Details = []Detail{}
+	}
+	return item, nil
+}
+
+func collectNotices(rows pgx.Rows) ([]Notice, error) {
+	defer rows.Close()
+	items := []Notice{}
+	for rows.Next() {
+		item, err := scanNotice(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *Repository) beginRead(ctx context.Context, user, workspace string) (pgx.Tx, error) {
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, storageFailure(workspace, "开始读取已保存的通知", err)
+	}
+	if err := verifyWorkspace(ctx, tx, user, workspace, false); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, err
+	}
+	return tx, nil
+}
+
+func (s *Service) Summary(ctx context.Context, user, workspace string, query SummaryQuery) (SummaryResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	result := SummaryResponse{WorkspaceAdminAccountID: workspace}
+	cursors := make([]*noticeCursor, 3)
+	for i, raw := range []string{query.AttentionCursor, query.ImportantCursor, query.CriticalCursor} {
+		cursor, err := decodeCursor(raw, user, workspace, Level(i+2), "")
+		if err != nil {
+			return result, err
+		}
+		cursors[i] = cursor
+	}
+	tx, err := s.repository.beginRead(ctx, user, workspace)
+	if err != nil {
+		return result, err
+	}
+	defer tx.Rollback(ctx)
+	var attentionCount, importantCount int64
+	err = tx.QueryRow(ctx, `SELECT clock_timestamp(),count(*) FILTER(WHERE read_at IS NULL),count(*) FILTER(WHERE level=4 AND reminder_completed_at IS NULL),count(*) FILTER(WHERE level=2 AND reminder_completed_at IS NULL),count(*) FILTER(WHERE level=3 AND reminder_completed_at IS NULL) FROM site_notifications WHERE user_id=$1 AND admin_account_id=$2`, user, workspace).Scan(&result.ServerTime, &result.UnreadCount, &result.PendingCriticalCount, &attentionCount, &importantCount)
+	if err != nil {
+		return result, storageFailure(workspace, "读取通知数量", err)
+	}
+	buckets := []*ActiveBucket{&result.Active.Attention, &result.Active.Important, &result.Active.Critical}
+	counts := []int64{attentionCount, importantCount, result.PendingCriticalCount}
+	for i, bucket := range buckets {
+		level := Level(i + 2)
+		sql := `SELECT ` + noticeColumns + ` FROM site_notifications WHERE user_id=$1 AND admin_account_id=$2 AND level=$3 AND reminder_completed_at IS NULL`
+		args := []any{user, workspace, level}
+		if cursor := cursors[i]; cursor != nil {
+			sql += ` AND (created_at,id)>($4,$5)`
+			args = append(args, cursor.CreatedAt, cursor.ID)
+		}
+		rows, err := tx.Query(ctx, sql+` ORDER BY created_at,id LIMIT 21`, args...)
+		if err != nil {
+			return result, storageFailure(workspace, "读取待提醒的通知摘要", err)
+		}
+		items, err := collectNotices(rows)
+		if err != nil {
+			return result, storageFailure(workspace, "读取待提醒通知的安全内容", err)
+		}
+		bucket.TotalCount = counts[i]
+		if len(items) > 20 {
+			items = items[:20]
+			bucket.NextCursor = encodeCursor(items[19], user, workspace, level, "")
+		}
+		bucket.Items = items
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return result, storageFailure(workspace, "完成通知摘要读取", err)
+	}
+	// The message transaction is closed before these serial, independent queries.
+	preference, err := s.repository.loadPreference(ctx, user, workspace)
+	if err != nil {
+		result.PreferenceWarning = &Warning{Message: "消息已读取，但检查间隔暂时无法确认", Detail: SafeStorageCause(err) + "；已取得的消息和数量仍然有效", Next: "请沿用这个工作区最近确认的间隔；没有已确认值时临时每5分钟检查一次，稍后重试读取设置"}
+	} else {
+		result.IntervalSeconds = &preference.IntervalSeconds
+	}
+	result.SamplingState = s.repository.loadSamplingState(ctx, user, workspace)
+	return result, nil
+}
+
+func (s *Service) History(ctx context.Context, user, workspace string, query HistoryQuery) (HistoryResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	result := HistoryResponse{WorkspaceAdminAccountID: workspace, Items: []Notice{}}
+	if query.Limit == 0 {
+		query.Limit = 20
+	}
+	if query.Limit < 1 {
+		return result, invalidRequest(workspace, "每页消息数量必须是正整数，默认20条，最多50条")
+	}
+	if query.Limit > 50 {
+		return result, invalidRequest(workspace, "每页消息数量超过50条上限；请使用1到50的整数")
+	}
+	if query.Filter == "" {
+		query.Filter = "all"
+	}
+	if query.Filter != "all" && query.Filter != "unread" && query.Filter != "pending" {
+		return result, invalidRequest(workspace, "消息筛选只允许全部、未读或紧急待确认（all、unread、pending）")
+	}
+	cursor, err := decodeCursor(query.Cursor, user, workspace, 0, query.Filter)
+	if err != nil {
+		return result, err
+	}
+	tx, err := s.repository.beginRead(ctx, user, workspace)
+	if err != nil {
+		return result, err
+	}
+	defer tx.Rollback(ctx)
+	sql := `SELECT ` + noticeColumns + ` FROM site_notifications WHERE user_id=$1 AND admin_account_id=$2`
+	if query.Filter == "unread" {
+		sql += ` AND read_at IS NULL`
+	} else if query.Filter == "pending" {
+		sql += ` AND level=4 AND reminder_completed_at IS NULL`
+	}
+	args := []any{user, workspace, query.Limit + 1}
+	if cursor != nil {
+		sql += ` AND (created_at,id)<($4,$5)`
+		args = append(args, cursor.CreatedAt, cursor.ID)
+	}
+	rows, err := tx.Query(ctx, sql+` ORDER BY created_at DESC,id DESC LIMIT $3`, args...)
+	if err != nil {
+		return result, storageFailure(workspace, "读取通知历史", err)
+	}
+	items, err := collectNotices(rows)
+	if err != nil {
+		return result, storageFailure(workspace, "读取通知历史的安全内容", err)
+	}
+	if len(items) > query.Limit {
+		items = items[:query.Limit]
+		result.NextCursor = encodeCursor(items[len(items)-1], user, workspace, 0, query.Filter)
+	}
+	result.Items = items
+	if err := tx.Commit(ctx); err != nil {
+		return result, storageFailure(workspace, "完成通知历史读取", err)
+	}
+	return result, nil
+}
+
+func (s *Service) Detail(ctx context.Context, user, workspace, id string) (DetailResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	result := DetailResponse{WorkspaceAdminAccountID: workspace}
+	if err := checkText("消息编号", id, 512, true, true); err != nil {
+		return result, invalidRequest(workspace, "消息编号为空、不符合纯文字格式或超过512个字符")
+	}
+	tx, err := s.repository.beginRead(ctx, user, workspace)
+	if err != nil {
+		return result, err
+	}
+	defer tx.Rollback(ctx)
+	item, err := scanNotice(tx.QueryRow(ctx, `SELECT `+noticeColumns+` FROM site_notifications WHERE user_id=$1 AND admin_account_id=$2 AND id=$3`, user, workspace, id))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return result, unavailableNotice(workspace)
+	}
+	if err != nil {
+		return result, storageFailure(workspace, "读取这条通知详情", err)
+	}
+	result.Item = item
+	if action := item.Content.Action; action != nil {
+		switch action.Kind {
+		case "group_rates":
+			var exists bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM upstream_sites WHERE user_id=$1 AND admin_account_id=$2 AND id=$3)`, user, workspace, action.SiteID).Scan(&exists); err != nil {
+				return result, storageFailure(workspace, "核查这条通知的网站检查入口", err)
+			}
+			result.CheckAction = &CheckAction{Available: exists, Message: "查看相关网站当前保存的上游倍率，不会修改主站账号"}
+			if !exists {
+				result.CheckAction.Message = "相关网站已删除，这条提醒保留当时信息"
+			}
+		case "connection_health":
+			result.CheckAction = &CheckAction{Available: true, Message: "打开分组健康页面核查当前状态"}
+		default:
+			result.CheckAction = &CheckAction{Message: "当前版本暂时不能打开这个检查入口，请从菜单进入对应功能"}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return result, storageFailure(workspace, "完成这条通知详情读取", err)
+	}
+	return result, nil
+}
+
+func unavailableNotice(workspace string) *RequestError {
+	return requestFailure(http.StatusNotFound, workspace, "这次请求的消息无法访问，本次没有改变任何消息", "一个或多个消息编号已不存在或不属于当前登录用户和工作区", "请重新读取当前工作区的消息，再对仍可查看的具体消息重试", false)
+}

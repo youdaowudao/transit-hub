@@ -64,11 +64,25 @@ type SyncEventCallback func(SyncEvent)
 
 // SyncSiteResult 是站点同步的安全终态，仅用于进程内刷新编排和页面结果。
 // 它不包含上游响应体、URL 参数或任何凭据。
+type GroupRatesWarning struct {
+	Message string `json:"message"`
+	Detail  string `json:"detail"`
+	Next    string `json:"next"`
+}
+
+// GroupSnapshotAudit is limited to the current fetch and never enters either store.
+type GroupSnapshotAudit struct {
+	AllowUpdate  bool
+	AllowCleanup bool
+	Issue        string
+}
+
 type SyncSiteResult struct {
-	SiteID      string `json:"siteId"`
-	Status      string `json:"status"`
-	ErrorKey    string `json:"errorKey,omitempty"`
-	ErrorDetail string `json:"errorDetail,omitempty"`
+	GroupRatesWarning *GroupRatesWarning `json:"groupRatesWarning,omitempty"`
+	SiteID            string             `json:"siteId"`
+	Status            string             `json:"status"`
+	ErrorKey          string             `json:"errorKey,omitempty"`
+	ErrorDetail       string             `json:"errorDetail,omitempty"`
 }
 
 type AuthMode string
@@ -117,22 +131,25 @@ type GroupInfo struct {
 // module while still allowing successful metric refreshes to publish multiplier
 // history. Any implementation can be injected by the HTTP server assembly layer.
 type SnapshotGroup struct {
-	ID         string
-	Name       string
-	Platform   *string
-	Multiplier *float64
+	MultiplierMode string
+	ID             string
+	Name           string
+	Platform       *string
+	Multiplier     *float64
 }
 
 type SnapshotWriter interface {
-	SaveSiteSnapshot(ctx context.Context, userID string, adminAccountID string, siteID string, siteName string, sitePlatform Platform, groups []SnapshotGroup) error
+	SaveSiteSnapshot(ctx context.Context, userID string, adminAccountID string, siteID string, siteName string, sitePlatform Platform, groups []SnapshotGroup, lastSyncedAt int64, sourceRowVersion string, allowCleanup bool) error
 }
 
 type Metrics struct {
-	Balance         MetricValue `json:"balance"`
-	TodayConsume    MetricValue `json:"todayConsume"`
-	HistoryRecharge MetricValue `json:"historyRecharge"`
-	Group           GroupInfo   `json:"group"`
-	Groups          []GroupInfo `json:"groups"`
+	GroupSnapshotAudit    *GroupSnapshotAudit    `json:"-"`
+	RateNoticeObservation *RateNoticeObservation `json:"rateNoticeObservation,omitempty"`
+	Balance               MetricValue            `json:"balance"`
+	TodayConsume          MetricValue            `json:"todayConsume"`
+	HistoryRecharge       MetricValue            `json:"historyRecharge"`
+	Group                 GroupInfo              `json:"group"`
+	Groups                []GroupInfo            `json:"groups"`
 	// TodayConsumeDate 是 TodayConsume 对应的新加坡业务日期（"2006-01-02"）。
 	// 同步时由上游同步入口统一写入，用于日期归属校验。空字符串表示尚未记录。
 	TodayConsumeDate        string `json:"todayConsumeDate,omitempty"`
@@ -215,23 +232,24 @@ type Site struct {
 }
 
 type Response struct {
-	ID                string       `json:"id"`
-	UserID            string       `json:"-"`
-	AdminAccountID    string       `json:"-"`
-	Name              string       `json:"name"`
-	BaseURL           string       `json:"baseUrl"`
-	Platform          Platform     `json:"platform"`
-	RequestedPlatform Platform     `json:"requestedPlatform"`
-	AuthMode          AuthMode     `json:"authMode"`
-	Account           string       `json:"account"`
-	Remark            string       `json:"remark"`
-	RechargeRate      float64      `json:"rechargeRate"`
-	Enabled           *bool        `json:"enabled"`
-	Status            Status       `json:"status"`
-	ErrorKey          *string      `json:"errorKey"`
-	Metrics           Metrics      `json:"metrics"`
-	Settings          SiteSettings `json:"settings"`
-	LastSyncedAt      *int64       `json:"lastSyncedAt"`
+	GroupRatesWarning *GroupRatesWarning `json:"groupRatesWarning,omitempty"`
+	ID                string             `json:"id"`
+	UserID            string             `json:"-"`
+	AdminAccountID    string             `json:"-"`
+	Name              string             `json:"name"`
+	BaseURL           string             `json:"baseUrl"`
+	Platform          Platform           `json:"platform"`
+	RequestedPlatform Platform           `json:"requestedPlatform"`
+	AuthMode          AuthMode           `json:"authMode"`
+	Account           string             `json:"account"`
+	Remark            string             `json:"remark"`
+	RechargeRate      float64            `json:"rechargeRate"`
+	Enabled           *bool              `json:"enabled"`
+	Status            Status             `json:"status"`
+	ErrorKey          *string            `json:"errorKey"`
+	Metrics           Metrics            `json:"metrics"`
+	Settings          SiteSettings       `json:"settings"`
+	LastSyncedAt      *int64             `json:"lastSyncedAt"`
 
 	syncTimedOut bool
 }

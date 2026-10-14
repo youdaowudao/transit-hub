@@ -12,6 +12,7 @@ vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
   return {
     useAdminAccounts: () => ({
       currentAccount: ref(null),
+      isSwitching: ref(false),
       noticeKey: ref(''),
       loadCurrentAccount: vi.fn(async () => true),
     }),

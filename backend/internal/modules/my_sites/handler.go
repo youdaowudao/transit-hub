@@ -28,6 +28,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("GET /api/my-sites/upstream-keys", handler.listUpstreamKeys)
 	mux.HandleFunc("GET /api/my-sites/admin-resources", handler.listAdminResources)
 	mux.HandleFunc("GET /api/my-sites/real-connections", handler.listRealConnections)
+	mux.HandleFunc("GET /api/my-sites/real-connections/needs-attention", handler.listConnectionsNeedingAttention)
 	mux.HandleFunc("POST /api/my-sites/real-connections/list-scoped", handler.listScopedRealConnections)
 	mux.HandleFunc("POST /api/my-sites/real-connections/check-scoped", handler.checkScopedRealConnections)
 	mux.HandleFunc("POST /api/my-sites/real-connections/check", handler.checkRealConnections)
@@ -270,6 +271,11 @@ func (h *Handler) realDisconnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeError(w http.ResponseWriter, err error) {
+	var local *scopedRequestError
+	if errors.As(err, &local) {
+		writeScopedError(w, err)
+		return
+	}
 	var importFailure *ImportFailure
 	if errors.As(err, &importFailure) {
 		httpjson.Write(w, importFailure.StatusCode, importFailure)

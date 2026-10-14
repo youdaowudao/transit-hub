@@ -25,6 +25,7 @@ import (
 	"transithub/backend/internal/modules/lottery"
 	"transithub/backend/internal/modules/mass_email"
 	"transithub/backend/internal/modules/my_sites"
+	"transithub/backend/internal/modules/notifications"
 	"transithub/backend/internal/modules/settings"
 	"transithub/backend/internal/modules/system"
 	"transithub/backend/internal/modules/tickets"
@@ -155,6 +156,10 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	// admin_accounts 最后执行 schema：此时所有业务表和 workspace 字段已存在，
 	// legacy 迁移可以安全地 UPDATE 所有业务表的 admin_account_id。
 	runStorageStartup(cfg, adminAccountsService.EnsureSchema)
+	notificationsRepository := notifications.NewRepository(db)
+	runStorageStartup(cfg, notificationsRepository.EnsureSchema)
+	upstreamRepository.SetRateNoticeWriter(notificationsRepository)
+	notifications.RegisterRoutes(server.mux, notifications.NewService(notificationsRepository))
 	admin_accounts.RegisterRoutes(server.mux, adminAccountsService)
 
 	// 注入机器人通知能力，供自动调价成功后发送通知。
@@ -205,6 +210,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	connHealthService.SetProbeGlobalConcurrency(cfg.ProbeGlobalConcurrency)
 	runStorageStartup(cfg, connHealthService.EnsureSchema)
 	connHealthService.SetAdminAccountResolver(adminAccountsService)
+	upstreamRepository.SetRateNoticeKeyAssignmentReader(connHealthService)
 	connHealthService.SetUpstreamSyncCoordinator(upstreamService)
 	if !cfg.APIOnly {
 		upstreamService.SetSiteLoginSuccessCallback(connHealthService.NotifySiteLoginSucceeded)
@@ -438,17 +444,18 @@ func (c workspaceCleanup) CleanupDeletedWorkspace(ctx context.Context, payload a
 	return errors.Join(errs...)
 }
 
-func (w groupRateSnapshotWriter) SaveSiteSnapshot(ctx context.Context, userID string, adminAccountID string, siteID string, siteName string, sitePlatform upstream.Platform, groups []upstream.SnapshotGroup) error {
+func (w groupRateSnapshotWriter) SaveSiteSnapshot(ctx context.Context, userID string, adminAccountID string, siteID string, siteName string, sitePlatform upstream.Platform, groups []upstream.SnapshotGroup, lastSyncedAt int64, sourceRowVersion string, allowCleanup bool) error {
 	snapshots := make([]group_rates.SnapshotGroup, 0, len(groups))
 	for _, group := range groups {
 		snapshots = append(snapshots, group_rates.SnapshotGroup{
-			ID:         group.ID,
-			Name:       group.Name,
-			Platform:   group.Platform,
-			Multiplier: group.Multiplier,
+			ID:             group.ID,
+			Name:           group.Name,
+			Platform:       group.Platform,
+			Multiplier:     group.Multiplier,
+			MultiplierMode: group.MultiplierMode,
 		})
 	}
-	return w.service.SaveSiteSnapshot(ctx, userID, adminAccountID, siteID, siteName, string(sitePlatform), snapshots)
+	return w.service.SaveSiteSnapshot(ctx, userID, adminAccountID, siteID, siteName, string(sitePlatform), snapshots, lastSyncedAt, sourceRowVersion, allowCleanup)
 }
 
 func (s *Server) Handler() http.Handler {
@@ -501,7 +508,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) protectedPath(path string) bool {
-	return strings.HasPrefix(path, "/api/users") || strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email")
+	return strings.HasPrefix(path, "/api/notifications") || strings.HasPrefix(path, "/api/users") || strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email")
 }
 
 func (s *Server) setSecurityHeaders(w http.ResponseWriter, r *http.Request) {

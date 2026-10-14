@@ -2,9 +2,9 @@ package group_rates
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strings"
-	"time"
 )
 
 type Service struct {
@@ -19,118 +19,15 @@ func (s *Service) EnsureSchema(ctx context.Context) error {
 	return s.repository.EnsureSchema(ctx)
 }
 
-func (s *Service) SaveSiteSnapshot(ctx context.Context, userID string, adminAccountID string, siteID string, siteName string, sitePlatform string, groups []SnapshotGroup) error {
-	now := time.Now()
-	ownerID := strings.TrimSpace(userID)
-	workspaceID := strings.TrimSpace(adminAccountID)
-	if ownerID == "" || workspaceID == "" {
-		return nil
+func (s *Service) SaveSiteSnapshot(ctx context.Context, userID string, adminAccountID string, siteID string, siteName string, sitePlatform string, groups []SnapshotGroup, lastSyncedAt int64, sourceRowVersion string, allowCleanup bool) error {
+	ownerID, workspaceID := strings.TrimSpace(userID), strings.TrimSpace(adminAccountID)
+	if ownerID == "" || workspaceID == "" || strings.TrimSpace(siteID) == "" || strings.TrimSpace(sitePlatform) == "" || lastSyncedAt <= 0 || strings.TrimSpace(sourceRowVersion) == "" {
+		return errors.New("倍率保存来源无法确认：网站、工作区、同步时间或数据库版本缺失，请重新同步网站")
 	}
-	trimmedSiteID := strings.TrimSpace(siteID)
-	trimmedSiteName := strings.TrimSpace(siteName)
-
-	// 构建经过验证和清洗的分组列表。
-	type validatedGroup struct {
-		groupID    string
-		groupName  string
-		platform   string
-		groupType  string
-		multiplier float64
-	}
-	var validated []validatedGroup
-	for _, group := range groups {
-		name := strings.TrimSpace(group.Name)
-		if name == "" || group.Multiplier == nil {
-			continue
-		}
-		platform := strings.TrimSpace(sitePlatform)
-		groupType := ""
-		if group.Platform != nil {
-			if gp := strings.TrimSpace(*group.Platform); gp != "" {
-				groupType = gp
-			}
-		}
-		if platform == "" {
-			continue
-		}
-		validated = append(validated, validatedGroup{
-			groupID:    strings.TrimSpace(group.ID),
-			groupName:  name,
-			platform:   platform,
-			groupType:  groupType,
-			multiplier: *group.Multiplier,
-		})
-	}
-
-	// 获取该站点每个分组的最新快照，用于判断倍率是否变化以及检测已消失分组。
-	existing, err := s.repository.LatestGroupKeysForSite(ctx, ownerID, workspaceID, trimmedSiteID)
-	if err != nil {
+	if err := validateSnapshotGroups(groups); err != nil {
 		return err
 	}
-	existingMap := make(map[string]latestGroupKey, len(existing))
-	for _, e := range existing {
-		key := e.GroupID
-		if key == "" {
-			key = e.GroupName
-		}
-		existingMap[key] = e
-	}
-
-	// 拆分为"倍率未变 → 刷新时间戳"和"倍率变化或新分组 → 插入新行"两组。
-	// 只有倍率真正变化时才写入新快照，使得 LEAD 窗口函数始终对比的是上一次不同的倍率，
-	// 涨跌幅会持续展示直到发生下一次倍率变动，而非仅展示一个同步周期。
-	var toInsert []snapshotRecord
-	var toTouch []string
-	incomingKeys := make(map[string]struct{}, len(validated))
-	for _, g := range validated {
-		key := g.groupID
-		if key == "" {
-			key = g.groupName
-		}
-		incomingKeys[key] = struct{}{}
-
-		if prev, ok := existingMap[key]; ok && prev.Multiplier == g.multiplier && !prev.Deleted {
-			toTouch = append(toTouch, prev.ID)
-		} else {
-			id, err := newSnapshotID()
-			if err != nil {
-				return err
-			}
-			toInsert = append(toInsert, snapshotRecord{
-				ID:             id,
-				UserID:         ownerID,
-				AdminAccountID: workspaceID,
-				SiteID:         trimmedSiteID,
-				SiteName:       trimmedSiteName,
-				GroupID:        g.groupID,
-				GroupName:      g.groupName,
-				Platform:       g.platform,
-				Type:           g.groupType,
-				Multiplier:     g.multiplier,
-				CreatedAt:      now,
-			})
-		}
-	}
-
-	// 检测已消失的分组并标记为已删除。
-	var toDelete []string
-	for _, e := range existing {
-		key := e.GroupID
-		if key == "" {
-			key = e.GroupName
-		}
-		if _, found := incomingKeys[key]; !found && !e.Deleted {
-			toDelete = append(toDelete, e.ID)
-		}
-	}
-
-	if err := s.repository.MarkDeleted(ctx, toDelete); err != nil {
-		return err
-	}
-	if err := s.repository.TouchSnapshots(ctx, toTouch, trimmedSiteName, now); err != nil {
-		return err
-	}
-	return s.repository.InsertSnapshots(ctx, toInsert)
+	return s.repository.ApplySiteSnapshot(ctx, ownerID, workspaceID, strings.TrimSpace(siteID), strings.TrimSpace(siteName), strings.TrimSpace(sitePlatform), groups, lastSyncedAt, sourceRowVersion, allowCleanup)
 }
 
 func (s *Service) List(ctx context.Context, userID string, adminAccountID string, query ListQuery) (ListResult, error) {
@@ -231,13 +128,11 @@ func normalizeListQuery(query ListQuery) ListQuery {
 	query.Sort = strings.TrimSpace(query.Sort)
 	switch query.Status {
 	case "":
-		// Empty is the legacy contract: return active and deleted rows together.
-		// New clients always send an explicit status and receive accurate totals.
-		query.Status = "legacy"
+		query.Status = "all"
 	case "mapped", "unmapped", "deleted":
 	case "all":
 	default:
-		query.Status = "legacy"
+		query.Status = "all"
 	}
 	switch query.Sort {
 	case "multiplierAsc", "multiplierDesc", "siteNameAsc", "groupNameAsc":

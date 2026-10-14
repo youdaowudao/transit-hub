@@ -42,6 +42,8 @@ const groups = [
   { id: '17', groupName: 'MiniMax 分组', platform: 'minimax', multiplier: 1 },
   { id: '18', groupName: 'Anthropic 分组', platform: 'anthropic', multiplier: 1 },
   { id: '19', groupName: 'Antigravity 分组', platform: 'antigravity', multiplier: 1 },
+  { id: '20', groupName: 'Grok 分组甲', platform: 'grok', multiplier: 1 },
+  { id: '21', groupName: 'Grok 分组乙', platform: 'grok', multiplier: 1 },
 ]
 const rows = (type = 'openai') => ({ workspaceAdminAccountId: harness.currentAccount.value.id, items: [harness.rate ?? { ...rate, type }], total: 1, page: 1, pageSize: 10, totalPages: 1, types: ['openai', 'gemini'], platforms: ['sub2api'] })
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
@@ -110,18 +112,18 @@ beforeEach(() => {
 afterEach(() => { for (const wrapper of wrappers.splice(0)) wrapper.unmount(); vi.unstubAllGlobals(); document.body.innerHTML = '' })
 
 const selectionHint = '默认按上游分类选择，你可以手动修改。这里只确定要创建的主站账号平台；点击导入后才会在上游创建 Key、在主站创建账号。'
-const labels: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', antigravity: 'Antigravity', kimi: 'Kimi', zhipu: '智谱 GLM', deepseek: 'DeepSeek', minimax: 'MiniMax' }
-const names: Record<string, string> = { openai: '表单分组甲', anthropic: 'Anthropic 分组', gemini: 'Gemini 分组', antigravity: 'Antigravity 分组', kimi: 'Kimi 分组甲', zhipu: '智谱分组', deepseek: 'DeepSeek 分组', minimax: 'MiniMax 分组' }
+const labels: Record<string, string> = { openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', antigravity: 'Antigravity', grok: 'Grok', kimi: 'Kimi', zhipu: '智谱 GLM', deepseek: 'DeepSeek', minimax: 'MiniMax' }
+const names: Record<string, string> = { openai: '表单分组甲', anthropic: 'Anthropic 分组', gemini: 'Gemini 分组', antigravity: 'Antigravity 分组', grok: 'Grok 分组甲', kimi: 'Kimi 分组甲', zhipu: '智谱分组', deepseek: 'DeepSeek 分组', minimax: 'MiniMax 分组' }
 const groupInput = (wrapper: VueWrapper, name: string) => dialog(wrapper).findAll('label').find(label => label.text().includes(name))!.get('input[type="checkbox"]')
 const typeSelect = (wrapper: VueWrapper) => dialog(wrapper).get('[data-import-platform-select]')
 const passthrough = (wrapper: VueWrapper) => dialog(wrapper).find('[role="switch"][aria-label="透传"]')
 const assertNoDeveloperWords = (wrapper: VueWrapper) => expect(dialog(wrapper).text()).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
 
 describe('explicit platform selection through the import API contract', () => {
-  it.each(Object.keys(labels))('defaults to classified %s and always permits all eight choices', async source => {
+  it.each(Object.keys(labels))('defaults to classified %s and always permits all nine choices', async source => {
     const wrapper = await openView(source), select = typeSelect(wrapper)
     expect(select.element).toHaveProperty('value', source)
-    expect(select.findAll('option').filter(o => o.attributes('value')).map(o => o.attributes('value'))).toEqual(['openai','anthropic','gemini','antigravity','kimi','zhipu','deepseek','minimax'])
+    expect(select.findAll('option').filter(o => o.attributes('value')).map(o => o.attributes('value'))).toEqual(['openai','anthropic','gemini','antigravity','grok','kimi','zhipu','deepseek','minimax'])
     expect(dialog(wrapper).get('[data-import-platform-hint]').text()).toBe(selectionHint)
     expect(dialog(wrapper).get('[data-import-platforms]').text()).toContain(`上游标注：${labels[source]}`)
     expect(dialog(wrapper).get('[data-import-platforms]').text()).toContain(`将创建的主站账号平台：${labels[source]}`)
@@ -141,7 +143,7 @@ describe('explicit platform selection through the import API contract', () => {
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('真实对接创建失败')
   })
-  it.each(['','grok','unknown'])('requires a manual selection for unknown/unsupported source %s', async source => {
+  it.each(['','opencode-go','unknown'])('requires a manual selection for unknown/unsupported source %s', async source => {
     const wrapper = await openView(source)
     expect(typeSelect(wrapper).element).toHaveProperty('value','')
     expect(dialog(wrapper).text()).toContain('请先选择主站账号平台。')
@@ -199,5 +201,45 @@ describe('explicit platform selection through the import API contract', () => {
     await chooseGroup(wrapper,names.kimi)
     await dialog(wrapper).findAll('select').find(s=>s.text().includes('请选择渠道类型'))!.setValue('1'); await submit(wrapper)
     expect(harness.requests[0]).not.toHaveProperty('accountSettings'); expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  })
+})
+
+// Primary-agent Grok expectations fixed before changing production code.
+describe('Grok critical RED import behavior', () => {
+  const grokHint = '选择 Grok 后会创建 Grok 平台的主站账号；请在下面选择 Grok 分组，再点击“创建并对接”。这里不设置探活或答题。'
+  it.each(['grok', ' GrOk '])('defaults classified %s and submits both Grok targets with default settings', async source => {
+    const wrapper = await openView(source)
+    expect(typeSelect(wrapper).element).toHaveProperty('value','grok')
+    expect(typeSelect(wrapper).findAll('option').filter(o=>o.attributes('value')).map(o=>o.attributes('value'))).toEqual(['openai','anthropic','gemini','antigravity','grok','kimi','zhipu','deepseek','minimax'])
+    expect(dialog(wrapper).text()).toContain('将创建的主站账号平台：Grok')
+    expect(dialog(wrapper).text()).toContain(grokHint)
+    expect(dialog(wrapper).text()).not.toContain('Kimi 分组甲')
+    expect(passthrough(wrapper).exists()).toBe(false)
+    await chooseGroup(wrapper,'Grok 分组甲'); await chooseGroup(wrapper,'Grok 分组乙')
+    await submit(wrapper)
+    expect(harness.requests[0]).toMatchObject({groupType:'grok',ownGroupIds:['20','21'],accountSettings:{priorityMode:'automatic',priority:100,concurrency:50,passthrough:false,poolMode:true,upstreamBillingProbeEnabled:true}})
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+  })
+  it.each(['', 'unknown', 'anthropic'])('allows source %s to select Grok and clears incompatible targets while preserving settings', async source => {
+    const wrapper=await openView(source)
+    if(source==='anthropic') await chooseGroup(wrapper,'Anthropic 分组')
+    await dialog(wrapper).get('#import-concurrency').setValue('73')
+    await typeSelect(wrapper).setValue('grok')
+    expect(dialog(wrapper).text()).toContain(grokHint)
+    expect(submitButton(wrapper).element).toHaveProperty('disabled',true)
+    expect(dialog(wrapper).get('#import-concurrency').element).toHaveProperty('value','73')
+    await chooseGroup(wrapper,'Grok 分组甲'); await submit(wrapper)
+    expect(harness.requests[0]).toMatchObject({groupType:'grok',ownGroupIds:['20'],accountSettings:{concurrency:73,passthrough:false}})
+  })
+  it('turns passthrough off entering Grok and keeps it off on return; only Grok shows its hint', async () => {
+    const wrapper=await openView('openai')
+    expect(dialog(wrapper).text()).not.toContain(grokHint)
+    await passthrough(wrapper).trigger('click')
+    await typeSelect(wrapper).setValue('grok')
+    expect(passthrough(wrapper).exists()).toBe(false)
+    expect(dialog(wrapper).text()).toContain(grokHint)
+    await typeSelect(wrapper).setValue('openai')
+    expect(passthrough(wrapper).attributes('aria-checked')).toBe('false')
+    expect(dialog(wrapper).text()).not.toContain(grokHint)
   })
 })

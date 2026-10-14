@@ -59,7 +59,7 @@ func (settings *ImportAccountSettingsRequest) UnmarshalJSON(data []byte) error {
 
 func normalizeImportAccountSettings(req *ImportAccountSettingsRequest, platform string) (ImportAccountSettings, error) {
 	switch platform {
-	case "openai", "anthropic", "gemini", "antigravity", "kimi", "zhipu", "deepseek", "minimax":
+	case "openai", "anthropic", "gemini", "antigravity", "grok", "kimi", "zhipu", "deepseek", "minimax":
 	default:
 		return ImportAccountSettings{}, importInvalid(ErrorImportGroupTypeMismatch, "所选平台不支持导入，请重新选择已有支持平台")
 	}
@@ -732,7 +732,7 @@ func importPreflightFailure(err error) *ImportFailure {
 
 func safeImportPlatform(platform string) string {
 	switch platform {
-	case "openai", "anthropic", "gemini", "antigravity", "kimi", "zhipu", "deepseek", "minimax":
+	case "openai", "anthropic", "gemini", "antigravity", "grok", "kimi", "zhipu", "deepseek", "minimax":
 		return platform
 	}
 	return "无效或不支持的平台"

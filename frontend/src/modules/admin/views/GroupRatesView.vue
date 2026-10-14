@@ -752,7 +752,7 @@ const typeLabel = (type: string | null): string => {
 
 const importPlatformLabel = (platform: string): string => {
   const labelKeys: Record<string, string> = {
-    openai: 'groupTypeOpenai', anthropic: 'groupTypeAnthropic', gemini: 'groupTypeGemini', antigravity: 'groupTypeAntigravity', kimi: 'groupTypeKimi', zhipu: 'groupTypeZhipu',
+    openai: 'groupTypeOpenai', anthropic: 'groupTypeAnthropic', gemini: 'groupTypeGemini', antigravity: 'groupTypeAntigravity', grok: 'groupTypeGrok', kimi: 'groupTypeKimi', zhipu: 'groupTypeZhipu',
     deepseek: 'groupTypeDeepseek', minimax: 'groupTypeMinimax',
   }
   const key = labelKeys[platform]
@@ -1782,6 +1782,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 <option value="anthropic">{{ t('admin.groupRates.connect.groupTypeAnthropic') }}</option>
                 <option value="gemini">{{ t('admin.groupRates.connect.groupTypeGemini') }}</option>
                 <option value="antigravity">{{ t('admin.groupRates.connect.groupTypeAntigravity') }}</option>
+                <option v-if="isC5Import" value="grok">{{ t('admin.groupRates.connect.groupTypeGrok') }}</option>
                 <option v-if="isC5Import" value="kimi">{{ t('admin.groupRates.connect.groupTypeKimi') }}</option>
                 <option v-if="isC5Import" value="zhipu">{{ t('admin.groupRates.connect.groupTypeZhipu') }}</option>
                 <option v-if="isC5Import" value="deepseek">{{ t('admin.groupRates.connect.groupTypeDeepseek') }}</option>
@@ -1792,6 +1793,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               </div>
             </div>
             <p v-if="isC5Import" class="text-xs leading-5 text-muted-foreground" data-import-platform-hint>{{ t('admin.groupRates.connect.accountPlatformHint') }}</p>
+            <p v-if="isC5Import && connectAccountPlatform === 'grok'" class="text-xs leading-5 text-muted-foreground">{{ t('admin.groupRates.connect.grokImportHint') }}</p>
           </div>
 
           <!-- new-api admin：渠道类型选择 -->

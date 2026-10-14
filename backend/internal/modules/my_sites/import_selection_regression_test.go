@@ -141,9 +141,13 @@ func TestImportSelectionCurrentNameIsAtomicMappingSource(t *testing.T) {
 // These expectations are fixed by the primary agent against the approved SPEC.
 // All network responses are in-memory; no listener or external process starts.
 func TestImportSelectionExplicitPlatformEntirePipeline(t *testing.T) {
-	for i, target := range []string{"openai", "anthropic", "gemini", "antigravity", "kimi", "zhipu", "deepseek", "minimax"} {
+	for i, target := range []string{"openai", "anthropic", "gemini", "antigravity", "grok", "kimi", "zhipu", "deepseek", "minimax"} {
 		t.Run(target, func(t *testing.T) {
-			c51AssertImportedPlatform(t, "grok", " "+strings.ToUpper(target)+" ", target, []string{"A", "B", "C", "D", "X", "X", "X", "X"}[i])
+			source := "grok"
+			if target == "grok" {
+				source = "openai"
+			}
+			c51AssertImportedPlatform(t, source, " "+strings.ToUpper(target)+" ", target, []string{"A", "B", "C", "D", "X", "X", "X", "X", "X"}[i])
 		})
 	}
 }

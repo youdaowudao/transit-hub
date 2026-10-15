@@ -690,6 +690,7 @@ export default {
     groupAssociations: {
       title: '调价映射',
       detailsLabel: '调价映射详情',
+      listDisplayHint: '这里列出当前筛选出的全部分组；向下滚动页面可继续查看，点击分组查看详情。查看详情不会修改主站。',
       subtitle: '共 {count} 组 · {associated} 组已配置数据源 · {unassociated} 组未配置',
       common: {
         placeholder: '—',
@@ -2452,6 +2453,7 @@ export default {
     groupRates: {
       badge: '倍率同步记录',
       title: '分组倍率',
+      listDisplayHint: '列表按当前页条数展开，表头和翻页按钮随列表一起滚动；左右滑动可查看其余列。查看列表不会修改主站。',
       subtitle: '查看各上游站点分组倍率及最近变动，并追踪历史倍率记录。',
       common: {
         placeholder: '—',

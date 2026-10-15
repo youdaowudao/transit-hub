@@ -1450,7 +1450,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
 </script>
 
 <template>
-  <div class="flex min-h-[calc(100dvh-8rem)] flex-col space-y-6 lg:h-[calc(100dvh-8rem)]" @click.capture="clearRateHighlight">
+  <div class="flex flex-col space-y-6" @click.capture="clearRateHighlight">
     <div class="flex max-w-full w-fit shrink-0 items-center gap-1 overflow-x-auto rounded-lg border border-border/50 bg-surface p-1" role="tablist" :aria-label="t('admin.menu.groupRates')">
       <button
         v-for="tab in (['all', 'mapped', 'unmapped'] as const)"
@@ -1623,6 +1623,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       <p v-else>进入时只检查首批30个分组关联的账号；翻页和筛选显示已保存资料，点击刷新可检查当前页。</p>
       <p v-if="isCheckingConnections">正在检查{{ attentionCheckingSite ? (attentionSiteOptions.find(site => site.id === attentionCheckingSite)?.name || attentionCheckingSite) : siteFilter ? (siteOptions.find(site => site.id === siteFilter)?.name || siteFilter) : '当前页' }}的关联账号，倍率可以先查看；账号检查中的操作暂时不可用。</p>
       <p v-else-if="checkSummary">{{ checkSummary }}</p>
+      <p>{{ t('admin.groupRates.listDisplayHint') }}</p>
     </div>
     <div v-for="notice in [connectionDataError, siteOptionsError, focusError].filter(Boolean)" :key="notice" role="alert" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
       <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" /><span>{{ notice }}</span>
@@ -1638,13 +1639,13 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       <span>{{ connectionCheckError }}</span>
     </div>
 
-    <div id="group-rates-panel" class="flex min-h-64 flex-1 flex-col overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm" role="tabpanel">
-      <div v-if="isLoading" class="flex flex-1 items-center justify-center text-muted-foreground">
+    <div id="group-rates-panel" class="flex flex-col overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm" role="tabpanel">
+      <div v-if="isLoading" class="flex min-h-48 items-center justify-center text-muted-foreground">
         <Loader2 class="mr-2 h-5 w-5 animate-spin" />
         {{ t('admin.groupRates.status.loading') }}
       </div>
 
-      <div v-else-if="filteredRates.length === 0" class="flex flex-1 flex-col items-center justify-center px-6 text-center">
+      <div v-else-if="filteredRates.length === 0" class="flex min-h-48 flex-col items-center justify-center px-6 text-center">
         <div class="flex h-12 w-12 items-center justify-center rounded-2xl border border-border/50 bg-surface-elevated text-muted-foreground">
           <History class="h-5 w-5" />
         </div>
@@ -1652,9 +1653,9 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         <p class="mt-2 max-w-sm text-sm text-muted-foreground">{{ t(hasActiveRateFilters || hasAnyRateData ? 'admin.groupRates.empty.filteredDescription' : 'admin.groupRates.empty.description') }}</p>
       </div>
 
-      <div v-else class="flex-1 overflow-auto">
+      <div v-else class="overflow-x-auto">
         <table class="w-full min-w-[980px] text-left text-sm relative">
-          <thead class="sticky top-0 z-10 border-b border-border/50 bg-surface-elevated/90 backdrop-blur-sm">
+          <thead class="border-b border-border/50 bg-surface-elevated/90 backdrop-blur-sm">
             <tr>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.siteName') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.groupName') }}</th>

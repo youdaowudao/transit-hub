@@ -3,6 +3,8 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"math"
 	"reflect"
@@ -90,67 +92,141 @@ func (s *Service) groupCostStore() GroupCostStore {
 	return store
 }
 
+type groupCostAttemptOutcome struct {
+	kind, reason     string
+	wait, read, save time.Duration
+	groups           int
+	nextAllowed      time.Time
+	lastSuccessAge   time.Duration
+}
+
+// Compatibility for existing synchronous callers; production work is queued.
 func (s *Service) sampleGroupCosts(site Site, session Session, groups []GroupInfo) {
+	site = cloneSite(&site)
+	site.Session = &session
+	site.Metrics.Groups = append([]GroupInfo(nil), groups...)
+	s.sampleGroupCostsContext(context.Background(), site, s.keyUsageDate())
+}
+
+func (s *Service) sampleGroupCostsContext(parent context.Context, original Site, date string) (outcome groupCostAttemptOutcome) {
+	outcome.kind, outcome.reason = "no_request", "unsupported_login"
+	outcome.lastSuccessAge = -1
 	store := s.groupCostStore()
-	if store == nil || !site.IsEnabled() || site.Session == nil || session.Platform == "" {
+	if store == nil || !original.IsEnabled() || original.Session == nil || s.platformService == nil {
 		return
 	}
-	original := cloneSite(&site)
+	session := *original.Session
+	groups := original.Metrics.Groups
+	outcome.groups = len(groups)
 	if !session.IsAuthenticated() || session.Platform == PlatformSub2API && strings.TrimSpace(session.AccessToken) == "" {
 		return
 	}
-	s.mu.Lock()
-	currentAtStart, readErr := s.readCurrentSite(context.Background(), site.ID)
-	_, deletedAtStart := s.deletedSites[site.ID]
-	validStart := !deletedAtStart && readErr == nil && keyUsageSiteMatches(currentAtStart, original) && reflect.DeepEqual(currentAtStart.Session, original.Session) && sameCostGroupIdentifiers(session.Platform, currentAtStart.Metrics.Groups, groups)
-	s.mu.Unlock()
-	if !validStart {
+	if parent.Err() != nil {
+		outcome.kind, outcome.reason = "cancelled", "cancelled"
 		return
 	}
-	if s.groupCostSlots != nil {
-		select {
-		case s.groupCostSlots <- struct{}{}:
-			defer func() { <-s.groupCostSlots }()
-		default:
-			return
-		}
+	prepareCtx, prepareCancel := context.WithTimeout(parent, persistenceTimeout)
+	defer prepareCancel()
+	currentAtStart, readErr := s.readGroupCostCandidate(prepareCtx, costWorkKey(&original))
+	validStart := readErr == nil && prepareCtx.Err() == nil && keyUsageSiteMatches(currentAtStart, original) && reflect.DeepEqual(currentAtStart.Session, original.Session) && sameCostGroupIdentifiers(session.Platform, currentAtStart.Metrics.Groups, groups)
+	if !validStart {
+		outcome.kind, outcome.reason = "discarded", "site_changed"
+		return
+	}
+	state, err := store.GetGroupCostSamplingState(prepareCtx, original.ID)
+	if err != nil || prepareCtx.Err() != nil {
+		outcome.reason = "state_read_failed"
+		return
+	}
+	outcome.nextAllowed = state.SummaryNextAllowedAt
+	if !state.LastSuccessAt.IsZero() {
+		outcome.lastSuccessAge = s.keyUsageNow().Sub(state.LastSuccessAt)
+	}
+	if !state.summaryAllowed(s.keyUsageNow()) {
+		outcome.reason = "not_due"
+		return
+	}
+	acquired, err := store.TryStartGroupCostSampling(prepareCtx, original.ID, groupCostSampleInterval)
+	if err != nil {
+		outcome.reason = "lock_failed"
+		return
+	}
+	if !acquired {
+		outcome.reason = "lock_not_acquired"
+		return
+	}
+	state, err = store.GetGroupCostSamplingState(prepareCtx, original.ID)
+	if err != nil || prepareCtx.Err() != nil {
+		outcome.reason = "state_read_failed"
+		return
 	}
 	startedAt := s.keyUsageNow()
-	date := businesstime.DateAt(startedAt)
-	ctx, cancel := context.WithTimeout(context.Background(), groupCostSampleTimeout)
+	if date != businesstime.DateAt(startedAt) {
+		outcome.kind, outcome.reason = "discarded", "date_changed"
+		return
+	}
+	if !state.summaryAllowed(startedAt) || state.LastAttemptAt.After(startedAt) {
+		outcome.reason = "not_due"
+		return
+	}
+	if parent.Err() != nil {
+		outcome.kind, outcome.reason = "cancelled", "cancelled"
+		return
+	}
+	readStart := time.Now()
+	ctx, cancel := context.WithTimeout(parent, groupCostSampleTimeout)
 	defer cancel()
-	acquired, err := store.TryStartGroupCostSampling(ctx, site.ID, groupCostSampleInterval)
-	if err != nil || !acquired {
-		return
-	}
-	state, err := store.GetGroupCostSamplingState(ctx, site.ID)
-	if err != nil {
-		return
-	}
-	if state.LastAttemptAt.After(startedAt) {
-		return
-	}
+	log.Printf("[upstream-cost] outcome=started site_id=%s workspace_id=%s date=%s groups=%d", original.ID, original.AdminAccountID, date, len(groups))
 	result, fetchErr := s.platformService.FetchGroupCostStatsForDate(ctx, session, groups, date, state)
+	cancel()
+	outcome.read = time.Since(readStart)
+	if parent.Err() != nil {
+		outcome.kind, outcome.reason = "cancelled", "cancelled"
+		return
+	}
 	if isGroupCostCooldown(fetchErr) {
+		outcome.reason = "not_due"
 		return
 	}
 	completedAt := s.keyUsageNow()
 	if businesstime.DateAt(completedAt) != date {
+		outcome.kind, outcome.reason = "discarded", "date_changed"
 		return
 	}
+	saveStart := time.Now()
+	defer func() { outcome.save = time.Since(saveStart) }()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, deleted := s.deletedSites[site.ID]; deleted {
+	if _, deleted := s.deletedSites[original.ID]; deleted {
+		outcome.kind, outcome.reason = "discarded", "deleted"
 		return
 	}
-	saveCtx, saveCancel := context.WithTimeout(context.Background(), persistenceTimeout)
+	saveCtx, saveCancel := context.WithTimeout(parent, persistenceTimeout)
 	defer saveCancel()
-	current, err := s.cache.Get(saveCtx, site.ID)
-	if err != nil || !keyUsageSiteMatches(current, original) || !reflect.DeepEqual(current.Session, original.Session) || !sameCostGroupIdentifiers(session.Platform, current.Metrics.Groups, groups) {
+	if saveCtx.Err() != nil {
+		outcome.kind, outcome.reason = "cancelled", "cancelled"
 		return
 	}
-	latestState, err := store.GetGroupCostSamplingState(saveCtx, site.ID)
-	if err != nil || latestState.LastAttemptAt.After(startedAt) {
+	current, err := s.cache.Get(saveCtx, original.ID)
+	if err != nil || saveCtx.Err() != nil {
+		outcome.kind, outcome.reason = "save_failed", "site_read_failed"
+		return
+	}
+	if !keyUsageSiteMatches(current, original) || !reflect.DeepEqual(current.Session, original.Session) || !sameCostGroupIdentifiers(session.Platform, current.Metrics.Groups, groups) {
+		outcome.kind, outcome.reason = "discarded", "site_changed"
+		return
+	}
+	latestState, err := store.GetGroupCostSamplingState(saveCtx, original.ID)
+	if err != nil || saveCtx.Err() != nil {
+		outcome.kind, outcome.reason = "save_failed", "state_read_failed"
+		return
+	}
+	if latestState.LastAttemptAt.After(startedAt) {
+		outcome.kind, outcome.reason = "discarded", "newer_attempt"
+		return
+	}
+	if businesstime.DateAt(s.keyUsageNow()) != date {
+		outcome.kind, outcome.reason = "discarded", "date_changed"
 		return
 	}
 	state = latestState
@@ -158,30 +234,56 @@ func (s *Service) sampleGroupCosts(site Site, session Session, groups []GroupInf
 	if fetchErr != nil {
 		class := groupCostFailureClass(fetchErr)
 		state.RecordSummaryFailure(class, startedAt)
-		state.LastReason = formatCostFailure("站点“"+safeCostReason(site.Name)+"”分组指定日费用读取", fetchErr)
-		if err := store.SetGroupCostSamplingState(saveCtx, site.ID, state, groupCostSamplingStateTTL); err != nil {
-			log.Printf("[upstream-cost] save failed sample state failed site_id=%s", site.ID)
+		outcome.nextAllowed = state.SummaryNextAllowedAt
+		state.LastReason = formatCostFailure("站点“"+safeCostReason(original.Name)+"”分组指定日费用读取", fetchErr)
+		if class == "cost_changed" {
+			var changed *costChangedError
+			if errors.As(fetchErr, &changed) {
+				state.LastReason = fmt.Sprintf("读取期间费用从 %.12g 变为 %.12g，本轮未更新。", changed.Before, changed.After)
+			}
 		}
-		log.Printf("[upstream-cost] group cost sample failed site_id=%s reason=%s", site.ID, class)
+		outcome.kind, outcome.reason = "failed", class
+		if saveCtx.Err() != nil {
+			outcome.kind, outcome.reason = "cancelled", "cancelled"
+			return
+		}
+		if err := store.SetGroupCostSamplingState(saveCtx, original.ID, state, groupCostSamplingStateTTL); err != nil || saveCtx.Err() != nil {
+			outcome.kind, outcome.reason = "save_failed", "state_write_failed"
+		}
+		logGroupCostComparison(original, date, fetchErr, state.SummaryNextAllowedAt)
+		log.Printf("[upstream-cost] group cost sample failed site_id=%s reason=%s outcome=%s next_allowed_at=%s", original.ID, class, outcome.kind, state.SummaryNextAllowedAt.UTC().Format(time.RFC3339))
 		return
 	}
 	state.RecordSummarySuccess(completedAt)
+	outcome.nextAllowed = state.SummaryNextAllowedAt
 	state.LastAttemptAt = startedAt
 	for _, stat := range result.Stats {
+		if saveCtx.Err() != nil {
+			outcome.kind, outcome.reason = "save_failed", "save_cancelled_partial_possible"
+			return
+		}
 		key := strings.TrimSpace(stat.GroupID)
 		if session.Platform == PlatformNewAPI {
 			key = strings.TrimSpace(stat.GroupName)
 		}
 		sample := GroupCostSample{Date: date, RawAmount: stat.TodayActualCost, ObservedAt: completedAt, Source: result.Source, Complete: result.Complete, SiteReportedRawCost: cloneRawPointer(result.SiteReportedRawCost), GroupAttributedRawCost: cloneRawPointer(result.GroupAttributedRawCost), UnattributedRawCost: cloneRawPointer(result.UnattributedRawCost)}
-		if err := store.AppendGroupCostSamples(saveCtx, site.ID, key, date, []GroupCostSample{sample}, groupCostMaxSamples, groupCostSampleTTL); err != nil {
-			log.Printf("[upstream-cost] save group cost sample failed site_id=%s group=%s", site.ID, key)
+		if err := store.AppendGroupCostSamples(saveCtx, original.ID, key, date, []GroupCostSample{sample}, groupCostMaxSamples, groupCostSampleTTL); err != nil {
+			outcome.kind, outcome.reason = "save_failed", "sample_write_failed_partial_possible"
 			return
 		}
 	}
-	if err := store.SetGroupCostSamplingState(saveCtx, site.ID, state, groupCostSamplingStateTTL); err != nil {
-		log.Printf("[upstream-cost] save sample state failed site_id=%s", site.ID)
+	if saveCtx.Err() != nil {
+		outcome.kind, outcome.reason = "save_failed", "save_cancelled_partial_possible"
+		return
 	}
+	if err := store.SetGroupCostSamplingState(saveCtx, original.ID, state, groupCostSamplingStateTTL); err != nil || saveCtx.Err() != nil {
+		outcome.kind, outcome.reason = "save_failed", "state_write_failed_partial_possible"
+		return
+	}
+	outcome.kind, outcome.reason = "saved", "complete"
+	return
 }
+
 func sameCostGroupIdentifiers(platform Platform, a, b []GroupInfo) bool {
 	if len(a) != len(b) {
 		return false
@@ -227,6 +329,7 @@ func (s *Service) groupCostSnapshotsForSite(ctx context.Context, site *Site) ([]
 	}
 	date := s.keyUsageDate()
 	state, stateErr := store.GetGroupCostSamplingState(ctx, site.ID)
+	progress := s.groupCostWorkSnapshot(costWorkKey(site))
 	result := make([]GroupCostSnapshot, 0, len(site.Metrics.Groups))
 	for _, group := range site.Metrics.Groups {
 		groupKey := strings.TrimSpace(group.ID)
@@ -242,14 +345,14 @@ func (s *Service) groupCostSnapshotsForSite(ctx context.Context, site *Site) ([]
 		samples, err := store.ListGroupCostSamples(ctx, site.ID, groupKey, date)
 		if err != nil {
 			// 单个缓存键损坏不能让其它上游站点或分组丢失已有样本。
-			result = append(result, unavailableGroupCostSnapshot(site, group, "sample_decode_failed"))
+			result = append(result, unavailableGroupCostSnapshot(site, group, groupCostCacheReason("分组费用记录", err, false)))
 			continue
 		}
 		todayCost, recentHourCost, observedAt, sample := calculateGroupCostSnapshot(samples, date, s.keyUsageNow(), site.RechargeRate)
 		if sample == nil {
-			reason := "sample_unavailable"
-			if stateErr == nil && strings.TrimSpace(state.LastReason) != "" {
-				reason = state.LastReason
+			reason := s.groupCostStateReason(site, state, progress, nil)
+			if stateErr != nil {
+				reason = groupCostCacheReason("最近读取结果", stateErr, false)
 			}
 			result = append(result, unavailableGroupCostSnapshot(site, group, reason))
 			continue
@@ -273,19 +376,35 @@ func (s *Service) groupCostSnapshotsForSite(ctx context.Context, site *Site) ([]
 		if snapshot.Mode == GroupCostModeRetained {
 			snapshot.Reason = "沿用截至 " + sample.ObservedAt.In(businesstime.Location()).Format("2006-01-02 15:04:05") + " 的费用；暂未取得更新记录，可在允许重试后同步这个站点；不会修改主站。"
 		}
-		if stateErr == nil && state.LastAttemptStatus == "failed" && state.LastAttemptAt.After(sample.ObservedAt) {
+		if stateErr != nil {
 			snapshot.Mode = GroupCostModeRetained
-			snapshot.Reason = "沿用截至 " + sample.ObservedAt.In(businesstime.Location()).Format("2006-01-02 15:04:05") + " 的费用；本轮" + state.LastReason
+			snapshot.Reason = groupCostCacheReason("最近读取结果", stateErr, true)
+		} else {
+			displayState := state
+			if !state.LastAttemptAt.After(sample.ObservedAt) {
+				displayState.LastAttemptStatus = ""
+			}
+			if reason := s.groupCostStateReason(site, displayState, progress, observedAt); reason != "" {
+				snapshot.Reason = reason
+			}
+			if state.LastAttemptStatus == "failed" && state.LastAttemptAt.After(sample.ObservedAt) {
+				snapshot.Mode = GroupCostModeRetained
+			}
 		}
 		for _, newer := range samples {
 			if newer.Date == date && newer.Source == sample.Source && newer.ObservedAt.After(sample.ObservedAt) && finiteNonnegative(newer.RawAmount) && newer.RawAmount < sample.RawAmount {
 				snapshot.Mode = GroupCostModeRetained
-				snapshot.Reason = "本轮累计费用下降，沿用截至 " + sample.ObservedAt.In(businesstime.Location()).Format("2006-01-02 15:04:05") + " 的已确认费用；请到上游核查当天消费记录后同步这个站点重试；不会修改主站。"
+				if stateErr == nil {
+					snapshot.Reason = "本轮累计费用下降，沿用截至 " + sample.ObservedAt.In(businesstime.Location()).Format("2006-01-02 15:04:05") + " 的已确认费用；请到上游核查当天消费记录后同步这个站点重试；不会修改主站。"
+				}
 				snapshot.RecentHourCost = nil
 				break
 			}
 		}
 		result = append(result, snapshot)
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 	return result, nil
 }

@@ -50,6 +50,7 @@ type Server struct {
 	lotteryCancel                  context.CancelFunc
 	lotteryWorker                  *lottery.Worker
 	connectionHealthService        *connection_health.Service
+	upstreamService                interface{ ShutdownGroupCostSampling(context.Context) error }
 }
 
 func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server {
@@ -81,6 +82,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	platformService := upstream.NewPlatformService(upstream.NewHTTPClient(upstreamHTTPClient))
 	upstreamCache := upstream.NewRedisSiteCache(redisClient)
 	upstreamService := upstream.NewService(platformService, upstreamRepository, groupRateSnapshotWriter{service: groupRatesService}, upstreamCache)
+	server.upstreamService = upstreamService
 	upstreamService.SetBackgroundTasksDisabled(cfg.APIOnly)
 	upstreamService.SetAdminAccountResolver(adminAccountsService)
 	upstream.RegisterRoutes(server.mux, upstreamService, adminAccountsService)
@@ -482,6 +484,11 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	var shutdownErrors []error
+	if s.upstreamService != nil {
+		if err := s.upstreamService.ShutdownGroupCostSampling(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
 	if s.connectionHealthService != nil {
 		if err := s.connectionHealthService.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)

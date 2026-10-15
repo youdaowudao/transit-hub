@@ -287,10 +287,10 @@ func reconcileGroupCosts(platform Platform, groups []GroupInfo, stats []GroupDai
 		return GroupCostFetchResult{}, datedCostError(platform, "metrics", "独立总额或分组合计无效")
 	}
 	if math.Abs(a-b) > 1e-9 {
-		return GroupCostFetchResult{}, datedCostError(platform, "metrics", fmt.Sprintf("读取期间费用变化，读取前 %.12g、读取后 %.12g，暂未更新", a, b))
+		return GroupCostFetchResult{}, &RequestError{MessageKey: ErrorInvalidResponse, Platform: platform, Stage: "metrics", UpstreamMessage: fmt.Sprintf("读取期间费用变化，读取前 %.12g、读取后 %.12g，暂未更新", a, b), Cause: &costChangedError{Before: a, After: b}}
 	}
 	if math.Abs(total-b) > 1e-9 {
-		return GroupCostFetchResult{}, datedCostError(platform, "metrics", fmt.Sprintf("独立总额 %.12g、分组合计 %.12g、差额 %.12g，缺失原因尚未确认，本轮未更新", b, total, b-total))
+		return GroupCostFetchResult{}, &RequestError{MessageKey: ErrorInvalidResponse, Platform: platform, Stage: "metrics", UpstreamMessage: fmt.Sprintf("独立总额 %.12g、分组合计 %.12g、差额 %.12g，缺失原因尚未确认，本轮未更新", b, total, b-total), Cause: &groupCostComparisonError{Before: a, After: b, Total: total}}
 	}
 	result := GroupCostFetchResult{Source: GroupCostSourceSummary, Complete: unattributed == 0, SiteReportedRawCost: float64Pointer(b), GroupAttributedRawCost: float64Pointer(attributed), UnattributedRawCost: float64Pointer(unattributed), Stats: make([]GroupDailyStat, 0, len(groups))}
 	for _, id := range order {

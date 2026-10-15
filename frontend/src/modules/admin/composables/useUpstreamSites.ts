@@ -1,6 +1,7 @@
 import { costFailureText } from '../utils/upstream'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { useAdminAccounts } from './useAdminAccounts'
 import {
   createUpstreamSite,
   listUpstreamSites,
@@ -10,8 +11,9 @@ import {
   syncUpstreamSite,
   updateUpstreamSiteEnabled,
   updateUpstreamSite,
+  updateSiteSettings,
 } from '../api/upstream'
-import type { UpstreamFailure, SiteSyncState, UpstreamMetricValue, UpstreamMetrics, UpstreamSite, UpstreamSiteForm, UpstreamSiteResponse } from '../types/upstream'
+import type { SiteSettings, UpstreamFailure, SiteSyncState, UpstreamMetricValue, UpstreamMetrics, UpstreamSite, UpstreamSiteForm, UpstreamSiteResponse } from '../types/upstream'
 
 const logoClasses = [
   'bg-primary/10 text-primary border-primary/20',
@@ -72,6 +74,8 @@ const normalizeSite = (site: UpstreamSiteResponse, logoBg: string): UpstreamSite
 })
 
 export const useUpstreamSites = () => {
+  const { currentAccount } = useAdminAccounts()
+  const workspaceId = computed(() => currentAccount.value?.id ?? '')
   const sites = ref<UpstreamSite[]>([])
   const isAdding = ref(false)
   const isRefreshing = ref(false)
@@ -80,200 +84,344 @@ export const useUpstreamSites = () => {
   const clearAddFailure = () => { addErrorKey.value = null; addFailure.value = null }
   const enabledUpdatingIds = ref(new Set<string>())
   const enabledErrorKeys = ref(new Map<string, string>())
-
+  const siteSyncStates = ref(new Map<string, SiteSyncState>())
+  const syncingSiteIds = ref(new Set<string>())
+  const siteOperationVersions = ref(new Map<string, number>())
+  const pendingSiteOperations = ref(new Set<string>())
   const enabledSiteCount = computed(() => sites.value.filter((site) => site.enabled).length)
   const connectedCount = computed(() => sites.value.filter((site) => site.enabled && (site.status === 'connected' || site.status === 'syncing')).length)
 
+  // Reading and mutations have separate generations: an older finally must not
+  // invalidate the result of a newer mutation. Each workspace owns its maps.
+  let epoch = 0
+  let disposed = false
+  let operationVersions = new Map<string, number>()
+  let pending = new Map<string, number>()
+  let removedIds = new Set<string>()
+  let streamController: AbortController | undefined
+  const doneTimers = new Set<ReturnType<typeof setTimeout>>()
+  const invalidateRead = (id: string) => {
+    const next = new Map(siteOperationVersions.value)
+    next.set(id, (next.get(id) ?? 0) + 1)
+    siteOperationVersions.value = next
+  }
+  const beginOperation = (id: string, ownsSite = true) => {
+    invalidateRead(id)
+    // Only editing replaces the site fields. Independent fields and syncs use
+    // the existing read generation; they never supersede an in-flight edit.
+    const operations = ownsSite ? operationVersions : siteOperationVersions.value
+    const version = ownsSite ? (operations.get(id) ?? 0) + 1 : operations.get(id)!
+    if (ownsSite) operations.set(id, version)
+    else if (!operationVersions.has(id)) operationVersions.set(id, 0)
+    pending.set(id, (pending.get(id) ?? 0) + 1)
+    pendingSiteOperations.value = new Set(pending.keys())
+    return { id, version, epoch, workspace: workspaceId.value, operations, pending }
+  }
+  type Operation = ReturnType<typeof beginOperation>
+  const sameWorkspace = (token: { epoch: number; workspace: string }) => !disposed && token.epoch === epoch && token.workspace === workspaceId.value
+  const isCurrent = (token: Operation) => sameWorkspace(token) && (token.operations === operationVersions ? operationVersions : siteOperationVersions.value).get(token.id) === token.version
+  const finishOperation = (token: Operation) => {
+    const count = (token.pending.get(token.id) ?? 1) - 1
+    if (count > 0) token.pending.set(token.id, count)
+    else token.pending.delete(token.id)
+    if (sameWorkspace(token)) {
+      invalidateRead(token.id)
+      pendingSiteOperations.value = new Set(pending.keys())
+    }
+  }
+  const applySite = (remote: UpstreamSiteResponse, preserveWarning = false) => {
+    const index = sites.value.findIndex(site => site.id === remote.id)
+    if (index < 0 || removedIds.has(remote.id)) return
+    const current = sites.value[index]!
+    const next = normalizeSite(remote, current.logoBg)
+    if (preserveWarning && remote.groupRatesWarning === undefined) next.groupRatesWarning = current.groupRatesWarning
+    sites.value[index] = next
+  }
+
   const loadSites = async () => {
-    const remoteSites = await listUpstreamSites()
-    sites.value = remoteSites.map((site, index) => normalizeSite(site, logoClasses[index % logoClasses.length]))
+    const token = { epoch, workspace: workspaceId.value }
+    const versions = new Map(siteOperationVersions.value)
+    try {
+      const remoteSites = await listUpstreamSites()
+      if (!sameWorkspace(token)) return
+      // Keep objects changed since this initial/cache load began, including
+      // deletions (their version remains even after the object is removed).
+      const result = remoteSites.flatMap((remote, index) => {
+        if (removedIds.has(remote.id)) return []
+        const current = sites.value.find(site => site.id === remote.id)
+        if ((versions.get(remote.id) ?? 0) !== (siteOperationVersions.value.get(remote.id) ?? 0)) {
+          if (current) return [current]
+          if (removedIds.has(remote.id)) return []
+          // A stream may start before the initial objects have loaded.
+        }
+        return [normalizeSite(remote, current?.logoBg ?? logoClasses[index % logoClasses.length]!)]
+      })
+      const ids = new Set(result.map(site => site.id))
+      for (const current of sites.value) if (!ids.has(current.id) && (versions.get(current.id) ?? 0) !== (siteOperationVersions.value.get(current.id) ?? 0)) result.push(current)
+      sites.value = result
+    } catch {
+      // Initial cache failure must not erase a newer operation's site objects.
+    }
+  }
+
+  const readSiteSnapshot = async (id: string, signal?: AbortSignal, expectedWorkspace = workspaceId.value): Promise<boolean> => {
+    if (disposed || signal?.aborted || expectedWorkspace !== workspaceId.value || pending.has(id)) return false
+    const token = { epoch, workspace: workspaceId.value }
+    const version = siteOperationVersions.value.get(id) ?? 0
+    const remote = await listUpstreamSites(id, signal)
+    if (!sameWorkspace(token) || signal?.aborted || pending.has(id) || version !== (siteOperationVersions.value.get(id) ?? 0)) return false
+    // The API validates this too; retain the guard for adapters/test doubles.
+    if (!Array.isArray(remote) || remote.length !== 1 || remote[0]?.id !== id || !remote[0]?.metrics || !Array.isArray(remote[0].metrics.groups)) throw new Error('本站缓存返回内容不完整，请检查 Hub 服务读取日志后重试；不会修改主站。')
+    if (!sites.value.some(site => site.id === id)) return false
+    applySite(remote[0], true)
+    invalidateRead(id)
+    return true
   }
 
   const addSite = async (form: UpstreamSiteForm): Promise<boolean> => {
+    const token = { epoch, workspace: workspaceId.value }
     isAdding.value = true
     clearAddFailure()
     try {
       const site = await createUpstreamSite(form)
-      sites.value.unshift(normalizeSite(site, logoClasses[sites.value.length % logoClasses.length]))
+      if (!sameWorkspace(token)) return false
+      removedIds.delete(site.id)
+      invalidateRead(site.id)
+      sites.value.unshift(normalizeSite(site, logoClasses[sites.value.length % logoClasses.length]!))
       return true
     } catch (error) {
-      addErrorKey.value = safeUpstreamErrorKey(error)
-      addFailure.value = error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined) ?? null : null
+      if (sameWorkspace(token)) {
+        addErrorKey.value = safeUpstreamErrorKey(error)
+        addFailure.value = error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined) ?? null : null
+      }
       return false
     } finally {
-      isAdding.value = false
+      if (sameWorkspace(token)) isAdding.value = false
     }
   }
 
   const updateSite = async (id: string, form: UpstreamSiteForm): Promise<boolean> => {
+    const token = beginOperation(id)
     isAdding.value = true
     clearAddFailure()
     try {
       const nextSite = await updateUpstreamSite(id, form)
-      const index = sites.value.findIndex((site) => site.id === id)
-      if (index >= 0) {
-        sites.value[index] = normalizeSite(nextSite, sites.value[index].logoBg)
-      }
+      if (!isCurrent(token)) return false
+      const current = sites.value.find(site => site.id === id)
+      if (!current || removedIds.has(id)) return false
+      applySite({ ...nextSite, settings: current.settings, enabled: current.enabled })
       return true
     } catch (error) {
-      addErrorKey.value = safeUpstreamErrorKey(error)
-      addFailure.value = error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined) ?? null : null
+      if (isCurrent(token)) {
+        addErrorKey.value = safeUpstreamErrorKey(error)
+        addFailure.value = error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined) ?? null : null
+      }
       return false
     } finally {
-      isAdding.value = false
+      finishOperation(token)
+      if (sameWorkspace(token)) isAdding.value = false
+    }
+  }
+
+  const saveSiteSettings = async (id: string, settings: SiteSettings): Promise<void> => {
+    const token = beginOperation(id, false)
+    const submitted = { ...settings }
+    try {
+      await updateSiteSettings(id, submitted)
+      if (!sameWorkspace(token)) return
+      const site = sites.value.find(site => site.id === id)
+      if (site) site.settings = submitted
+    } finally {
+      finishOperation(token)
     }
   }
 
   const syncSite = async (id: string) => {
-    const site = sites.value.find((item) => item.id === id)
-    if (!site?.enabled) return
-    const nextSite = await syncUpstreamSite(id)
-    Object.assign(site, normalizeSite(nextSite, site.logoBg))
+    if (!sites.value.find(site => site.id === id)?.enabled || pending.has(id) || removedIds.has(id)) return
+    const token = beginOperation(id, false)
+    try {
+      const nextSite = await syncUpstreamSite(id)
+      if (isCurrent(token)) applySite(nextSite)
+    } finally {
+      finishOperation(token)
+    }
+  }
+
+  const refreshSingleSite = async (id: string) => {
+    if (!sites.value.find(site => site.id === id)?.enabled || syncingSiteIds.value.has(id) || pending.has(id) || removedIds.has(id)) return
+    const token = beginOperation(id, false)
+    siteSyncStates.value.delete(id)
+    syncingSiteIds.value = new Set([...syncingSiteIds.value, id])
+    try {
+      const nextSite = await syncUpstreamSite(id)
+      if (isCurrent(token)) applySite(nextSite)
+    } catch (error) {
+      if (isCurrent(token)) siteSyncStates.value.set(id, {
+        phase: 'error', errorKey: safeUpstreamErrorKey(error),
+        errorDetail: error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined)?.errorDetail : undefined,
+      })
+    } finally {
+      finishOperation(token)
+      if (sameWorkspace(token)) {
+        const next = new Set(syncingSiteIds.value); next.delete(id); syncingSiteIds.value = next
+      }
+    }
   }
 
   const refreshSites = async () => {
     if (isRefreshing.value) return
+    const owner = { epoch, workspace: workspaceId.value }
+    const tokens = new Map(sites.value.filter(site => !pending.has(site.id) && !removedIds.has(site.id)).map(site => [site.id, beginOperation(site.id, false)]))
     isRefreshing.value = true
     try {
       const remoteSites = await syncAllUpstreamSites()
-      sites.value = remoteSites.map((site, index) => {
-        const current = sites.value.find((item) => item.id === site.id)
-        return normalizeSite(site, current?.logoBg ?? logoClasses[index % logoClasses.length])
-      })
+      if (!sameWorkspace(owner)) return
+      const result: UpstreamSite[] = []
+      for (const [index, remote] of remoteSites.entries()) {
+        if (removedIds.has(remote.id)) continue
+        const token = tokens.get(remote.id)
+        const current = sites.value.find(site => site.id === remote.id)
+        if ((token && isCurrent(token)) || (!token && !siteOperationVersions.value.has(remote.id))) {
+          invalidateRead(remote.id)
+          result.push(normalizeSite(remote, current?.logoBg ?? logoClasses[index % logoClasses.length]!))
+        } else if (current) result.push(current)
+      }
+      const ids = new Set(result.map(site => site.id))
+      for (const current of sites.value) {
+        const token = tokens.get(current.id)
+        if (!ids.has(current.id) && (!token || !isCurrent(token))) result.push(current)
+      }
+      sites.value = result
     } finally {
-      isRefreshing.value = false
-    }
-  }
-
-  // 逐站流式同步状态：每个站点 ID 映射到当前同步阶段。
-  const siteSyncStates = ref(new Map<string, SiteSyncState>())
-  const syncingSiteIds = ref(new Set<string>())
-
-  const refreshSingleSite = async (id: string) => {
-    const site = sites.value.find((item) => item.id === id)
-    if (!site?.enabled || syncingSiteIds.value.has(id)) return
-    siteSyncStates.value.delete(id)
-    syncingSiteIds.value = new Set([...syncingSiteIds.value, id])
-    try {
-      await syncSite(id)
-    } catch (error) {
-      siteSyncStates.value.set(id, {
-        phase: 'error',
-        errorKey: safeUpstreamErrorKey(error),
-        errorDetail: error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined)?.errorDetail : undefined,
-      })
-    } finally {
-      const next = new Set(syncingSiteIds.value)
-      next.delete(id)
-      syncingSiteIds.value = next
+      for (const token of tokens.values()) finishOperation(token)
+      if (sameWorkspace(owner)) isRefreshing.value = false
     }
   }
 
   const streamRefreshSites = async () => {
     if (isRefreshing.value) return
+    const owner = { epoch, workspace: workspaceId.value }
+    const tokens = new Map(sites.value.filter(site => !pending.has(site.id) && !removedIds.has(site.id)).map(site => [site.id, beginOperation(site.id, false)]))
+    const terminal = new Set<string>()
+    const controller = new AbortController()
+    streamController = controller
     isRefreshing.value = true
-    siteSyncStates.value = new Map()
-
+    siteSyncStates.value = new Map([...siteSyncStates.value].filter(([id]) => !tokens.has(id)))
     try {
-      await streamSyncAllUpstreamSites((event) => {
+      await streamSyncAllUpstreamSites(event => {
+        if (!sameWorkspace(owner) || controller.signal.aborted) return
         const id = event.siteId
-        const currentSite = sites.value.find((site) => site.id === id)
-        if (event.event !== 'complete' && currentSite?.enabled === false) return
-        switch (event.event) {
-          case 'syncing':
-            siteSyncStates.value.set(id, { phase: 'syncing' })
-            break
-          case 'done':
-            if (event.site) {
-              const index = sites.value.findIndex((s) => s.id === id)
-              if (index >= 0) {
-                sites.value[index] = normalizeSite(event.site, sites.value[index].logoBg)
-              }
-            }
-            siteSyncStates.value.set(id, { phase: 'done' })
-            setTimeout(() => {
-              if (siteSyncStates.value.get(id)?.phase === 'done') {
-                siteSyncStates.value.delete(id)
-              }
-            }, 2000)
-            break
-          case 'error':
-            if (event.site) {
-              const index = sites.value.findIndex((s) => s.id === id)
-              if (index >= 0) {
-                sites.value[index] = normalizeSite(event.site, sites.value[index].logoBg)
-              }
-            }
-            siteSyncStates.value.set(id, { phase: 'error', errorKey: event.errorKey, errorDetail: event.errorDetail })
-            break
-          case 'complete':
-            isRefreshing.value = false
-            break
+        if (event.event === 'complete') {
+          for (const [siteId, token] of tokens) if (!terminal.has(siteId)) { terminal.add(siteId); finishOperation(token) }
+          if (streamController === controller) isRefreshing.value = false
+          return
         }
-      })
+        let token = tokens.get(id)
+        // Initial load may complete after stream start. Enrol its site only if
+        // no newer mutation has claimed it since the stream began.
+        if (!token && !removedIds.has(id) && !pending.has(id) && !operationVersions.has(id)) {
+          token = beginOperation(id, false); tokens.set(id, token)
+        }
+        // Determine applicability before releasing this token: finish invalidates
+        // reads, and an obsolete result still has to release its own pending work.
+        const canApply = token && isCurrent(token) && !removedIds.has(id) && sites.value.find(site => site.id === id)?.enabled !== false
+        try {
+          if (!canApply) return
+          if (event.event === 'syncing') siteSyncStates.value.set(id, { phase: 'syncing' })
+          if (event.event === 'done' || event.event === 'error') {
+            invalidateRead(id)
+            if (event.site) {
+              if (!sites.value.some(site => site.id === id) && !removedIds.has(id)) sites.value.push(normalizeSite(event.site, logoClasses[sites.value.length % logoClasses.length]!))
+              else applySite(event.site)
+            }
+            if (event.event === 'done') {
+              siteSyncStates.value.set(id, { phase: 'done' })
+              const doneState = siteSyncStates.value.get(id)
+              const timer = setTimeout(() => {
+                doneTimers.delete(timer)
+                if (sameWorkspace(owner) && siteSyncStates.value.get(id) === doneState) siteSyncStates.value.delete(id)
+              }, 2000)
+              doneTimers.add(timer)
+            } else siteSyncStates.value.set(id, { phase: 'error', errorKey: event.errorKey, errorDetail: event.errorDetail })
+          }
+        } finally {
+          if ((event.event === 'done' || event.event === 'error') && token && !terminal.has(id)) {
+            terminal.add(id)
+            if (!canApply && streamController === controller && siteSyncStates.value.get(id)?.phase === 'syncing') siteSyncStates.value.delete(id)
+            finishOperation(token)
+          }
+        }
+      }, controller.signal)
     } catch {
-      // 连接中断时清理状态。
+      // Preserve the last confirmed objects when the stream is interrupted.
     } finally {
-      isRefreshing.value = false
+      for (const [id, token] of tokens) if (!terminal.has(id)) finishOperation(token)
+      if (streamController === controller) {
+        streamController = undefined
+        if (sameWorkspace(owner)) isRefreshing.value = false
+      }
     }
   }
 
   const deleteSite = async (id: string) => {
-    await removeUpstreamSite(id)
-    sites.value = sites.value.filter((site) => site.id !== id)
+    const token = beginOperation(id, false)
+    try {
+      await removeUpstreamSite(id)
+      if (sameWorkspace(token)) { removedIds.add(id); sites.value = sites.value.filter(site => site.id !== id) }
+    } finally { finishOperation(token) }
   }
 
   const setSiteEnabled = async (id: string, enabled: boolean) => {
     if (enabledUpdatingIds.value.has(id)) return
-    const site = sites.value.find((item) => item.id === id)
+    const site = sites.value.find(item => item.id === id)
     if (!site || site.enabled === enabled) return
+    const token = beginOperation(id, false)
     enabledUpdatingIds.value = new Set([...enabledUpdatingIds.value, id])
     enabledErrorKeys.value.delete(id)
     try {
       const nextSite = await updateUpstreamSiteEnabled(id, enabled)
-      Object.assign(site, normalizeSite(nextSite, site.logoBg))
+      if (!sameWorkspace(token)) return
+      const current = sites.value.find(site => site.id === id)
+      if (!current || removedIds.has(id)) return
+      current.enabled = nextSite.enabled ?? true
       if (!enabled) {
-        const nextSyncing = new Set(syncingSiteIds.value)
-        nextSyncing.delete(id)
-        syncingSiteIds.value = nextSyncing
+        const next = new Set(syncingSiteIds.value); next.delete(id); syncingSiteIds.value = next
         siteSyncStates.value.delete(id)
       }
     } catch (error) {
-      enabledErrorKeys.value.set(id, error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined)?.errorDetail ?? safeUpstreamErrorKey(error) : safeUpstreamErrorKey(error))
+      if (sameWorkspace(token) && sites.value.some(site => site.id === id)) enabledErrorKeys.value.set(id, error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined)?.errorDetail ?? safeUpstreamErrorKey(error) : safeUpstreamErrorKey(error))
     } finally {
-      const next = new Set(enabledUpdatingIds.value)
-      next.delete(id)
-      enabledUpdatingIds.value = next
+      finishOperation(token)
+      if (sameWorkspace(token)) { const next = new Set(enabledUpdatingIds.value); next.delete(id); enabledUpdatingIds.value = next }
     }
   }
 
+  watch(workspaceId, () => {
+    epoch++
+    streamController?.abort()
+    for (const timer of doneTimers) clearTimeout(timer)
+    doneTimers.clear()
+    sites.value = []
+    operationVersions = new Map(); pending = new Map(); removedIds = new Set()
+    siteOperationVersions.value = new Map(); pendingSiteOperations.value = new Set()
+    siteSyncStates.value = new Map(); syncingSiteIds.value = new Set()
+    enabledUpdatingIds.value = new Set(); enabledErrorKeys.value = new Map()
+    isAdding.value = false; isRefreshing.value = false; clearAddFailure()
+    void loadSites()
+  }, { flush: 'sync' })
+
   void loadSites()
-
   onBeforeUnmount(() => {
-    // no-op; backend now owns refresh scheduling
+    disposed = true; epoch++
+    streamController?.abort()
+    for (const timer of doneTimers) clearTimeout(timer)
+    doneTimers.clear()
   })
-
   return {
-    sites,
-    isAdding,
-    isRefreshing,
-    addErrorKey,
-    addFailure,
-    clearAddFailure,
-    connectedCount,
-    enabledSiteCount,
-    enabledUpdatingIds,
-    enabledErrorKeys,
-    siteSyncStates,
-    syncingSiteIds,
-    addSite,
-    updateSite,
-    syncSite,
-    refreshSingleSite,
-    refreshSites,
-    streamRefreshSites,
-    deleteSite,
-    setSiteEnabled,
-    loadSites,
+    sites, workspaceId, isAdding, isRefreshing, addErrorKey, addFailure, clearAddFailure,
+    connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, siteSyncStates,
+    syncingSiteIds, siteOperationVersions, pendingSiteOperations, readSiteSnapshot,
+    addSite, updateSite, saveSiteSettings, syncSite, refreshSingleSite, refreshSites,
+    streamRefreshSites, deleteSite, setSiteEnabled, loadSites,
   }
 }

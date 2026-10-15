@@ -69,17 +69,20 @@ type Service struct {
 	refreshConfigs          map[refreshWorkspaceKey]RefreshConfig
 	initialSchedules        map[refreshWorkspaceKey]bool
 	backgroundTasksDisabled bool
-	// groupCostSlots 限制跨站点成本采样的并发量；nil 仅用于不带 NewService 的单元测试。
-	groupCostSlots   chan struct{}
-	timers           map[string]*time.Timer
-	afterFunc        func(time.Duration, func()) *time.Timer
-	deletedSites     map[string]struct{}
-	syncFlights      map[string]*syncFlight
-	keyUsageFlights  map[string]*keyUsageFlight
-	keyUsageChanged  chan struct{}
-	keyUsageFinished map[string]time.Time
-	now              func() time.Time
-	mu               sync.Mutex
+	// groupCostQueueMu never nests service/cache operations. Workers own at most two reads.
+	groupCostQueueMu  sync.Mutex
+	groupCostQueue    *groupCostQueue
+	groupCostClosed   bool
+	groupCostDisabled bool
+	timers            map[string]*time.Timer
+	afterFunc         func(time.Duration, func()) *time.Timer
+	deletedSites      map[string]struct{}
+	syncFlights       map[string]*syncFlight
+	keyUsageFlights   map[string]*keyUsageFlight
+	keyUsageChanged   chan struct{}
+	keyUsageFinished  map[string]time.Time
+	now               func() time.Time
+	mu                sync.Mutex
 
 	siteLoginSuccessCallback func(userID, adminAccountID, siteID string)
 	// AfterSync 在站点同步成功持久化后被调用，传入同步前后的指标及状态。
@@ -128,7 +131,6 @@ func NewService(platformService *PlatformService, repository SiteRepository, sna
 		snapshotWriter:   snapshotWriter,
 		repository:       repository,
 		cache:            cache,
-		groupCostSlots:   make(chan struct{}, 2),
 		timers:           make(map[string]*time.Timer),
 		afterFunc:        time.AfterFunc,
 		refreshConfigs:   make(map[refreshWorkspaceKey]RefreshConfig),
@@ -142,13 +144,19 @@ func NewService(platformService *PlatformService, repository SiteRepository, sna
 // settings or shared cache. Configure it before serving requests.
 func (s *Service) SetBackgroundTasksDisabled(disabled bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.backgroundTasksDisabled = disabled
 	if disabled {
 		for id := range s.timers {
 			s.clearTimerLocked(id)
 		}
 	}
+	s.groupCostQueueMu.Lock()
+	s.groupCostDisabled = disabled
+	if disabled {
+		s.stopGroupCostQueueLocked()
+	}
+	s.groupCostQueueMu.Unlock()
+	s.mu.Unlock()
 }
 
 func (s *Service) backgroundTasksEnabled() bool {
@@ -1240,7 +1248,7 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	if fetchErr == nil && publication.GroupsAccepted {
 		response.GroupRatesWarning = s.saveSnapshot(ctx, &candidate, audit, publication.RowVersion)
 		if enabledBackground {
-			go s.sampleGroupCosts(candidate, refreshed, append([]GroupInfo(nil), candidate.Metrics.Groups...))
+			s.enqueueGroupCostSampling(costWorkKey(&candidate), syncDate)
 			if callback != nil {
 				go callback(context.Background(), candidate.UserID, candidate.AdminAccountID, candidate.ID, candidate.Name, oldMetrics, candidate.Metrics, oldStatus, candidate.Status)
 			}
@@ -1357,6 +1365,7 @@ func (s *Service) Remove(ctx context.Context, userID string, id string) error {
 	s.mu.Lock()
 	s.deletedSites[id] = struct{}{}
 	s.clearTimerLocked(id)
+	s.cancelGroupCostWork(costWorkKey(site))
 	s.mu.Unlock()
 
 	removedSite := *site
@@ -1413,6 +1422,27 @@ func (s *Service) CleanupDeletedWorkspaceSites(ctx context.Context, userID strin
 		s.deletedSites[id] = struct{}{}
 		s.clearTimerLocked(id)
 	}
+	// Cleanup may run after the workspace row is gone, so match queued local keys.
+	s.groupCostQueueMu.Lock()
+	if q := s.groupCostQueue; q != nil {
+		for key, work := range q.entries {
+			if key.userID == userID {
+				if _, deleted := seen[key.siteID]; deleted {
+					work.cancel()
+					work.followupDate = ""
+					delete(q.entries, key)
+				}
+			}
+		}
+		kept := q.pending[:0]
+		for _, work := range q.pending {
+			if q.entries[work.key] == work {
+				kept = append(kept, work)
+			}
+		}
+		q.pending = kept
+	}
+	s.groupCostQueueMu.Unlock()
 	s.mu.Unlock()
 
 	var errs []error
@@ -1436,10 +1466,13 @@ func (s *Service) CleanupDeletedWorkspaceSites(ctx context.Context, userID strin
 
 func (s *Service) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for id := range s.timers {
 		s.clearTimerLocked(id)
 	}
+	s.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), persistenceTimeout)
+	defer cancel()
+	_ = s.ShutdownGroupCostSampling(ctx)
 }
 
 // scheduleSyncLocked 根据刷新配置为站点调度下一次定时同步。
@@ -1619,6 +1652,9 @@ func (s *Service) updateLocalSiteFields(ctx context.Context, userID, siteID stri
 	err = s.publishExistingSiteLocked(expected, candidate, false, nil, nil)
 	if err == nil {
 		s.scheduleSyncLocked(siteID, &candidate)
+		if !candidate.IsEnabled() {
+			s.cancelGroupCostWork(costWorkKey(&candidate))
+		}
 	}
 	s.mu.Unlock()
 	if err != nil {

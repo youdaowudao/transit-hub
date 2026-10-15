@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import { costFailureText } from '../../utils/upstream'
-import { ref, watch } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import { Settings2, X, Save, Loader2, CheckCircle2 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { updateSiteSettings } from '../../api/upstream'
-import type { UpstreamSite } from '../../types/upstream'
+import type { SiteSettings, UpstreamSite } from '../../types/upstream'
 
 const props = defineProps<{
   open: boolean
   site: UpstreamSite | null
+  saveSettings: (siteId: string, settings: SiteSettings) => Promise<void>
 }>()
 
 const emit = defineEmits<{
@@ -24,38 +24,40 @@ const isSaving = ref(false)
 const showSuccess = ref(false)
 const errorMsg = ref<string | null>(null)
 
-watch(() => props.open, (isOpen) => {
+let displayGeneration = 0
+let successTimer: ReturnType<typeof setTimeout> | undefined
+watch([() => props.open, () => props.site?.id], ([isOpen]) => {
+  displayGeneration++
+  if (successTimer) clearTimeout(successTimer)
   if (!isOpen || !props.site) return
   const s = props.site.settings
-  if (s.balanceThreshold != null) {
-    useCustomThreshold.value = true
-    balanceThreshold.value = String(s.balanceThreshold)
-  } else {
-    useCustomThreshold.value = false
-    balanceThreshold.value = ''
-  }
+  useCustomThreshold.value = s.balanceThreshold != null
+  balanceThreshold.value = s.balanceThreshold != null ? String(s.balanceThreshold) : ''
   errorMsg.value = null
   showSuccess.value = false
-})
+}, { immediate: true })
 
 const save = async () => {
   if (isSaving.value || !props.site) return
+  const siteId = props.site.id
+  const generation = displayGeneration
+  const settings = { balanceThreshold: useCustomThreshold.value ? (Number.parseFloat(balanceThreshold.value) || null) : null }
   isSaving.value = true
   errorMsg.value = null
   try {
-    const settings = {
-      balanceThreshold: useCustomThreshold.value ? (Number.parseFloat(balanceThreshold.value) || null) : null,
+    await props.saveSettings(siteId, settings)
+    emit('saved', siteId, settings)
+    if (props.open && props.site?.id === siteId && generation === displayGeneration) {
+      showSuccess.value = true
+      successTimer = setTimeout(() => { showSuccess.value = false; successTimer = undefined }, 2000)
     }
-    await updateSiteSettings(props.site.id, settings)
-    emit('saved', props.site.id, settings)
-    showSuccess.value = true
-    setTimeout(() => { showSuccess.value = false }, 2000)
   } catch (err) {
-    errorMsg.value = err instanceof Error && 'failure' in err ? (err.failure as {errorDetail?:string}|undefined)?.errorDetail ?? err.message : err instanceof Error ? err.message : 'admin.upstream.errors.unknown'
+    if (props.open && props.site?.id === siteId && generation === displayGeneration) errorMsg.value = err instanceof Error && 'failure' in err ? (err.failure as {errorDetail?:string}|undefined)?.errorDetail ?? err.message : err instanceof Error ? err.message : 'admin.upstream.errors.unknown'
   } finally {
     isSaving.value = false
   }
 }
+onBeforeUnmount(() => { displayGeneration++; if (successTimer) clearTimeout(successTimer) })
 </script>
 
 <template>
@@ -103,7 +105,8 @@ const save = async () => {
             <div v-if="useCustomThreshold" class="animate-in slide-in-from-top-2 fade-in duration-200">
               <Input
                 type="number"
-                v-model="balanceThreshold"
+                :model-value="balanceThreshold"
+                @update:model-value="balanceThreshold = String($event)"
                 min="0"
                 step="0.01"
                 :placeholder="t('admin.upstream.siteSettings.balanceThresholdPlaceholder')"

@@ -12,7 +12,7 @@ vi.mock('@/modules/admin/api/upstream', () => ({ listUpstreamSites: harness.list
 
 let wrapper: VueWrapper | undefined
 const metric = { value: 3, display: '3.00' }
-const groupFixture = (cost: number | null, complete: boolean, unassigned: number | null) => ({ id: '1', name: '原消费分组', platform: 'openai', multiplier: 1, multiplierDisplay: '1', todayCost: cost, costMode: cost === null ? 'unknown' : 'live', costSource: 'group_summary', costReason: cost === null ? '读取分组费用时未收到完整数据；暂无可用费用，可同步这个站点重试' : '', costComplete: complete, siteReportedCost: cost === null ? null : 3, groupAttributedCost: cost, unattributedCost: unassigned })
+const groupFixture = (cost: number | null, complete: boolean, unassigned: number | null) => ({ id: '1', name: '原消费分组', platform: 'openai', multiplier: 1, multiplierDisplay: '1', todayCost: cost, costMode: cost === null ? 'unknown' : 'live', costSource: 'group_summary', costObservedAt: cost === null ? null : '2031-02-03T04:00:00Z', costReason: cost === null ? '读取分组费用时未收到完整数据；暂无可用费用，可同步这个站点重试' : '', costComplete: complete, siteReportedCost: cost === null ? null : 3, groupAttributedCost: cost, unattributedCost: unassigned })
 const siteFixture = (group = groupFixture(null, false, null), detail = '') => ({ id: 'site', name: '验收-新加坡费用', baseUrl: 'http://fixture.invalid', platform: 'sub2api', requestedPlatform: 'sub2api', account: '原账号', rechargeRate: 1, enabled: true, remark: '', status: 'connected', errorKey: null, settings: { balanceThreshold: null }, lastSyncedAt: Date.parse('2031-02-03T04:00:00Z'), metrics: { balance: metric, todayConsume: metric, historyRecharge: metric, group, groups: [group], todayConsumeDate: '2031-02-03', todayConsumeAt: '2031-02-03T03:00:00Z', todayConsumeTimezone: 'Asia/Singapore', todayConsumeStatus: detail ? 'unreadable' : 'ok', todayConsumeErrorKey: detail ? 'admin.upstream.errors.invalidResponse' : '', todayConsumeErrorDetail: detail } })
 
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2031-02-03T04:05:06Z')); localStorage.clear() })
@@ -35,7 +35,7 @@ describe('新加坡费用关键页面回归', () => {
     harness.list.mockResolvedValue([siteFixture()])
     const dialog = await openGroups(await mountView())
     expect(dialog.text()).not.toContain('未完全归属')
-    expect(dialog.text()).toContain('费用按新加坡当天统计，按使用时的上游分组计算；这里只显示费用，不会修改主站。数据暂缺时可同步这个站点。')
+    expect(dialog.text()).toContain('费用按新加坡当天统计，按使用时的上游分组计算；这里只显示费用，不会修改主站。数据暂缺时可关闭弹窗后同步这个站点。')
   })
   it('真零可读，不同时显示未知或未完全归属', async () => {
     harness.list.mockResolvedValue([siteFixture(groupFixture(0, true, 0))])

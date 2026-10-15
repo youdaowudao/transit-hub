@@ -1,5 +1,5 @@
 import { t } from '@/locales'
-import type { UpstreamSite } from '../types/upstream'
+import type { UpstreamGroupInfo, UpstreamSite } from '../types/upstream'
 
 export type UpstreamSortField = 'balance' | 'todayConsume' | 'historyRecharge'
 export type UpstreamSortDirection = 'asc' | 'desc'
@@ -57,4 +57,51 @@ export const costFailureText = (reason?: string): string => {
     fetch_error: '今日费用暂无法读取，具体原因尚未确认，请到上游核查当天消费记录后同步这个站点重试；不会修改主站。',
   }
   return known[reason] ?? reason
+}
+
+const singaporeDay = (time: number): string => new Intl.DateTimeFormat('sv-SE', {
+  timeZone: 'Asia/Singapore', year: 'numeric', month: '2-digit', day: '2-digit',
+}).format(time)
+
+export const groupCostObservedTime = (value?: string | null): string => {
+  const time = value ? Date.parse(value) : NaN
+  return Number.isFinite(time) ? new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Singapore', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).format(time) : '时间无法确认'
+}
+
+// Display-only guard for an open modal. Never change shared list/cache data.
+export const groupCostForDisplay = (group: UpstreamGroupInfo, now = Date.now()): UpstreamGroupInfo => {
+  const observed = group.costObservedAt ? Date.parse(group.costObservedAt) : NaN
+  let unavailable = ''
+  if (!Number.isFinite(observed)) unavailable = '上次读取时间无法确认'
+  else if (observed > now) unavailable = `上次读取时间 ${groupCostObservedTime(group.costObservedAt)} 晚于当前时间，时间无法确认`
+  else if (singaporeDay(observed) !== singaporeDay(now)) unavailable = `上次读取于 ${groupCostObservedTime(group.costObservedAt)}，不属于新加坡今天`
+  else if (now - observed > 90 * 60_000) unavailable = `上次读取于 ${groupCostObservedTime(group.costObservedAt)}，记录已超过九十分钟`
+  else if (group.todayCost == null || !Number.isFinite(group.todayCost) || group.todayCost < 0 || group.costMode === 'unknown') unavailable = '今天尚未取得可用的分组费用'
+  if (unavailable) {
+    const reason = costFailureText(group.costReason)
+    const expired = Number.isFinite(observed) && observed <= now && (singaporeDay(observed) !== singaporeDay(now) || now - observed > 90 * 60_000)
+    return {
+      ...group, todayCost: null, costMode: 'unknown', unattributedCost: null,
+      costReason: `当前没有可用的今日费用；${unavailable}。${reason ? `${expired ? '历史说明：' : ''}${reason}。` : ''}请关闭弹窗后同步这个站点；不会修改主站。`,
+    }
+  }
+  return { ...group, costMode: group.costMode === 'retained' || now - observed > 15 * 60_000 ? 'retained' : group.costMode }
+}
+
+export const nextGroupCostDisplayBoundary = (groups: UpstreamGroupInfo[], now = Date.now()): number => {
+  const day = singaporeDay(now)
+  let next = Date.parse(`${day}T00:00:00+08:00`) + 24 * 60 * 60_000
+  for (const group of groups) {
+    const observed = group.costObservedAt ? Date.parse(group.costObservedAt) : NaN
+    if (!Number.isFinite(observed) || observed > now) continue
+    for (const minutes of [15, 90]) {
+      // The backend uses <=: recompute one millisecond beyond the boundary.
+      const boundary = observed + minutes * 60_000 + 1
+      if (boundary > now) next = Math.min(next, boundary)
+    }
+  }
+  return next
 }

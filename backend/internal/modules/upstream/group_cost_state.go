@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 )
@@ -29,6 +30,26 @@ type GroupCostSamplingState struct {
 	SummaryNetworkFailures  int       `json:"summaryNetworkFailures,omitempty"`
 	FallbackAuthFailures    int       `json:"fallbackAuthFailures,omitempty"`
 	FallbackNetworkFailures int       `json:"fallbackNetworkFailures,omitempty"`
+}
+
+type costChangedError struct{ Before, After float64 }
+
+func (e *costChangedError) Error() string { return "group cost changed during read" }
+
+type groupCostComparisonError struct{ Before, After, Total float64 }
+
+func (e *groupCostComparisonError) Error() string { return "group cost totals differ" }
+
+func logGroupCostComparison(site Site, date string, err error, next time.Time) {
+	var changed *costChangedError
+	if errors.As(err, &changed) {
+		log.Printf("[upstream-cost] outcome=failed site_id=%s workspace_id=%s date=%s comparison=cost_changed a=%.12g b=%.12g next_allowed_at=%s", site.ID, site.AdminAccountID, date, changed.Before, changed.After, next.UTC().Format(time.RFC3339))
+		return
+	}
+	var mismatch *groupCostComparisonError
+	if errors.As(err, &mismatch) {
+		log.Printf("[upstream-cost] outcome=failed site_id=%s workspace_id=%s date=%s comparison=group_total_mismatch a=%.12g b=%.12g g=%.12g next_allowed_at=%s", site.ID, site.AdminAccountID, date, mismatch.Before, mismatch.After, mismatch.Total, next.UTC().Format(time.RFC3339))
+	}
 }
 
 type groupCostCooldownError struct{}
@@ -102,6 +123,12 @@ func (s *GroupCostSamplingState) recordFailure(class string, now time.Time, auth
 }
 
 func (s *GroupCostSamplingState) RecordSummaryFailure(class string, now time.Time) {
+	if class == "cost_changed" {
+		s.LastAttemptStatus, s.LastReason = "failed", class
+		s.SummaryNextAllowedAt = now.Add(groupCostSampleInterval)
+		s.SummaryAuthFailures, s.SummaryNetworkFailures = 0, 0
+		return
+	}
 	s.recordFailure(class, now, &s.SummaryAuthFailures, &s.SummaryNetworkFailures, &s.SummaryNextAllowedAt)
 	if class == "auth_401" || class == "auth_403" {
 		s.SummaryNextAllowedAt = now.Add(24 * time.Hour)
@@ -139,6 +166,10 @@ func groupCostPersistentFailure(class string) bool {
 }
 
 func groupCostFailureClass(err error) string {
+	var changed *costChangedError
+	if errors.As(err, &changed) {
+		return "cost_changed"
+	}
 	var requestErr *RequestError
 	if errors.As(err, &requestErr) {
 		switch requestErr.StatusCode {

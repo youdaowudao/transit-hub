@@ -52,6 +52,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       },
     })
   } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error
     throw new Error('admin.upstream.errors.network')
   }
 
@@ -73,7 +74,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
     // Local missing-site operations use HTTP 404; upstream login failures use
     // HTTP 422 and retain the upstream notFound reason and failure details.
     if (response.status === 404 && payload.message === 'admin.upstream.errors.notFound') {
-      throw new UpstreamApiError('admin.upstream.errors.siteNotFound')
+      throw new UpstreamApiError('admin.upstream.errors.siteNotFound', payload.failure)
     }
     throw new UpstreamApiError(safeErrorKey(payload.message), payload.failure)
   }
@@ -81,7 +82,13 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
   return payload
 }
 
-export const listUpstreamSites = async (): Promise<UpstreamSiteResponse[]> => requestJson<UpstreamSiteResponse[]>('/upstream-sites')
+export const listUpstreamSites = async (siteId?: string, signal?: AbortSignal): Promise<UpstreamSiteResponse[]> => {
+  const sites = await requestJson<UpstreamSiteResponse[]>(siteId === undefined ? '/upstream-sites' : `/upstream-sites?siteId=${encodeURIComponent(siteId)}`, { signal, ...(siteId === undefined ? {} : { cache: 'no-store' as RequestCache }) })
+  if (siteId !== undefined && (!Array.isArray(sites) || sites.length !== 1 || sites[0]?.id !== siteId || !sites[0]?.metrics || !Array.isArray(sites[0].metrics.groups))) {
+    throw new UpstreamApiError('admin.upstream.errors.invalidResponse', { stage: 'metrics', errorDetail: '本站缓存返回的站点或分组资料不完整，本次没有取得新结果；请检查 Hub 服务读取日志后重试，不会修改主站。' })
+  }
+  return sites
+}
 
 export const createUpstreamSite = async (form: UpstreamSiteForm): Promise<UpstreamSiteResponse> => (
   requestJson<UpstreamSiteResponse>('/upstream-sites', {

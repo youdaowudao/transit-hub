@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search, Plus, CheckCircle2, XCircle, X, Loader2, AlertCircle, Trash2, Edit2, LayoutGrid, List, RefreshCw, Settings2, ArrowUpDown, ChevronDown, ChevronUp } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
@@ -13,13 +13,14 @@ import SiteSettingsModal from '../components/upstream/SiteSettingsModal.vue'
 import type { UpstreamFailure, UpstreamGroupInfo, UpstreamMetricValue, UpstreamSite, UpstreamSiteForm, UpstreamStatus } from '../types/upstream'
 import type { AdminGroupHealth } from '../types/connectionHealth'
 import type { RealConnection } from '../types/mySites'
-import { costFailureText, sortUpstreamSites, type UpstreamSortDirection, type UpstreamSortField } from '../utils/upstream'
+import { safeScopedErrorText } from '../utils/scopedErrorText'
+import { groupCostForDisplay, groupCostObservedTime, nextGroupCostDisplayBoundary, costFailureText, sortUpstreamSites, type UpstreamSortDirection, type UpstreamSortField } from '../utils/upstream'
 
 import { t, locale } from '@/locales'
 const router = useRouter()
 const searchQuery = ref('')
 const isAddModalOpen = ref(false)
-const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, addFailure, clearAddFailure, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, streamRefreshSites, refreshSingleSite } = useUpstreamSites()
+const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, addFailure, clearAddFailure, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, streamRefreshSites, refreshSingleSite, workspaceId, readSiteSnapshot, pendingSiteOperations, saveSiteSettings } = useUpstreamSites()
 const deletingSiteId = ref<string | null>(null)
 const deleteErrorKey = ref<string | null>(null)
 const deleteFailure = ref<UpstreamFailure | null>(null)
@@ -239,7 +240,19 @@ const deletingSite = computed(() => upstreamSites.value.find((site) => site.id =
 
 // Groups Modal Logic
 const isGroupsModalOpen = ref(false)
-const selectedSiteForGroups = ref<UpstreamSite | null>(null)
+const selectedGroupSiteId = ref<string | null>(null)
+const selectedSiteForGroups = computed(() => upstreamSites.value.find(site => site.id === selectedGroupSiteId.value) ?? null)
+const groupSiteDeletedMessage = ref('')
+const groupSnapshotError = ref('')
+const groupDisplayNow = ref(Date.now())
+const groupsPageActive = ref(true)
+const groupsPageVisible = ref(document.visibilityState !== 'hidden')
+const displayedGroups = computed(() => (selectedSiteForGroups.value?.metrics.groups ?? []).map(group => groupCostForDisplay(group, groupDisplayNow.value)))
+let groupReadGeneration = 0
+let groupReadController: AbortController | undefined
+let groupReadTimer: ReturnType<typeof setTimeout> | undefined
+let groupBoundaryTimer: ReturnType<typeof setTimeout> | undefined
+let groupReadFailures = 0
 const realConnections = ref<RealConnection[]>([])
 const adminGroupHealth = ref<AdminGroupHealth[]>([])
 
@@ -309,23 +322,27 @@ const groupStatusLabel = (state: GroupCardState): string => {
 }
 
 const loadGroupNavigationData = async () => {
+  const expectedWorkspace = workspaceId.value
   const [connectionsResult, healthResult] = await Promise.allSettled([
     listRealConnections(),
     getConnectionHealthAdminGroups(),
   ])
+  if (expectedWorkspace !== workspaceId.value) return
   realConnections.value = connectionsResult.status === 'fulfilled' ? connectionsResult.value : []
   adminGroupHealth.value = healthResult.status === 'fulfilled' ? healthResult.value : []
 }
 
 const openGroupsModal = (site: UpstreamSite) => {
-  selectedSiteForGroups.value = site
+  groupSiteDeletedMessage.value = ''
+  selectedGroupSiteId.value = site.id
   isGroupsModalOpen.value = true
   void loadGroupNavigationData()
 }
 
 const closeGroupsModal = () => {
   isGroupsModalOpen.value = false
-  selectedSiteForGroups.value = null
+  selectedGroupSiteId.value = null
+  groupSnapshotError.value = ''
 }
 
 const isSiteSettingsOpen = ref(false)
@@ -341,16 +358,9 @@ const closeSiteSettings = () => {
   selectedSiteForSettings.value = null
 }
 
-const onSiteSettingsSaved = (siteId: string, settings: { balanceThreshold: number | null }) => {
-  const site = upstreamSites.value.find(s => s.id === siteId)
-  if (site) {
-    site.settings = settings
-  }
-}
-
 const groupedGroups = computed<Record<string, UpstreamGroupInfo[]>>(() => {
   if (!selectedSiteForGroups.value) return {}
-  const groups = selectedSiteForGroups.value.metrics.groups
+  const groups = displayedGroups.value
   return groups.reduce<Record<string, UpstreamGroupInfo[]>>((acc, group) => {
     const platform = group.platform ?? t('admin.upstream.fields.unknownPlatform')
     if (!acc[platform]) acc[platform] = []
@@ -358,8 +368,6 @@ const groupedGroups = computed<Record<string, UpstreamGroupInfo[]>>(() => {
     return acc
   }, {})
 })
-
-const selectedGroupSiteId = computed(() => selectedSiteForGroups.value?.id ?? '')
 
 const formatMultiplier = (value: number): string => (
   t('admin.groupRates.format.multiplier', { value: Number(value.toFixed(4)).toString() })
@@ -417,17 +425,99 @@ const groupTodayCostDisplay = (group: UpstreamGroupInfo): string => {
 }
 
 const groupCostReasonDisplay = (group: UpstreamGroupInfo): string => {
- const reason = costFailureText(group.costReason)
+ const reason = safeScopedErrorText(costFailureText(group.costReason))
  if (group.costMode === 'retained' && !reason.includes('沿用截至')) {
   const observed = group.costObservedAt ? new Date(group.costObservedAt) : null
-  const time = observed && Number.isFinite(observed.getTime()) ? new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'medium', timeZone: 'Asia/Singapore' }).format(observed) : '上次已确认时间'
+  const time = observed && Number.isFinite(observed.getTime()) ? groupCostObservedTime(group.costObservedAt) : '上次已确认时间'
   return `沿用截至 ${time} 的费用；${reason || '暂未取得更新记录'}，可在允许重试后同步这个站点；不会修改主站。`
  }
  return reason || (group.todayCost == null ? '暂无当日费用记录，可同步这个站点重试；不会修改主站。' : '')
 }
 const hasUnattributedCost = (group: UpstreamGroupInfo): boolean => group.todayCost != null && Number.isFinite(group.todayCost) && group.costComplete === false && group.unattributedCost != null && Number.isFinite(group.unattributedCost) && group.unattributedCost > 0
 const unmatchedCostDisplay = (amount?: number | null): string => amount != null && amount > 0 && amount < 0.01 ? '少于0.01' : (amount ?? 0).toFixed(2)
-const selectedUnattributedGroup = computed(() => selectedSiteForGroups.value?.metrics.groups.find(hasUnattributedCost))
+const selectedUnattributedGroup = computed(() => displayedGroups.value.find(hasUnattributedCost))
+const sharedGroupCostReasons = computed(() => {
+  const counts = new Map<string, number>()
+  for (const group of displayedGroups.value) {
+    const reason = groupCostReasonDisplay(group)
+    if (reason) counts.set(reason, (counts.get(reason) ?? 0) + 1)
+  }
+  return [...counts].filter(([, count]) => count > 1).map(([reason]) => reason)
+})
+const groupSnapshotErrorDisplay = computed(() => {
+  if (!groupSnapshotError.value) return ''
+  const usable = displayedGroups.value.find(group => group.todayCost != null)
+  const retained = usable ? `暂时显示截至 ${groupCostObservedTime(usable.costObservedAt)} 的费用` : '当前没有可用的今日费用，仅保留仍在今天且未过期的金额'
+  return `读取 Hub 保存的本站费用失败：${groupSnapshotError.value}；${retained}，页面将稍后重试，请检查 Hub 服务连接；也可关闭弹窗后同步这个站点，不会修改主站。`
+})
+
+const canReadGroupSnapshot = () => isGroupsModalOpen.value && !!selectedGroupSiteId.value && groupsPageActive.value && groupsPageVisible.value
+const stopGroupSnapshotRead = () => {
+  groupReadGeneration++
+  groupReadController?.abort()
+  groupReadController = undefined
+  if (groupReadTimer) clearTimeout(groupReadTimer)
+  if (groupBoundaryTimer) clearTimeout(groupBoundaryTimer)
+  groupReadTimer = undefined; groupBoundaryTimer = undefined
+}
+const scheduleGroupDisplayBoundary = () => {
+  if (groupBoundaryTimer) clearTimeout(groupBoundaryTimer)
+  groupBoundaryTimer = undefined
+  groupDisplayNow.value = Date.now()
+  if (!canReadGroupSnapshot()) return
+  const boundary = nextGroupCostDisplayBoundary(selectedSiteForGroups.value?.metrics.groups ?? [], groupDisplayNow.value)
+  groupBoundaryTimer = setTimeout(scheduleGroupDisplayBoundary, Math.max(1, boundary - Date.now()))
+}
+const readGroupSnapshot = async () => {
+  const id = selectedGroupSiteId.value
+  if (!canReadGroupSnapshot() || !id || pendingSiteOperations.value.has(id) || groupReadController) return
+  const generation = groupReadGeneration
+  const expectedWorkspace = workspaceId.value
+  const controller = new AbortController()
+  groupReadController = controller
+  try {
+    const applied = await readSiteSnapshot(id, controller.signal, expectedWorkspace)
+    if (generation !== groupReadGeneration || controller.signal.aborted) return
+    if (applied) { groupReadFailures = 0; groupSnapshotError.value = '' }
+  } catch (error) {
+    if (generation !== groupReadGeneration || controller.signal.aborted || (error instanceof Error && error.name === 'AbortError')) return
+    groupReadFailures++
+    const detail = error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined)?.errorDetail : undefined
+    groupSnapshotError.value = safeScopedErrorText(detail) || '本站缓存读取失败，具体原因未返回，请检查 Hub 服务读取日志后重试；页面仅保留仍在今天且未过期的金额，不会修改主站。'
+  } finally {
+    if (generation === groupReadGeneration && groupReadController === controller) {
+      groupReadController = undefined
+      scheduleGroupDisplayBoundary()
+      if (canReadGroupSnapshot() && !pendingSiteOperations.value.has(id)) groupReadTimer = setTimeout(() => { groupReadTimer = undefined; void readGroupSnapshot() }, groupReadFailures ? Math.min(groupReadFailures * 10_000, 30_000) : 5_000)
+    }
+  }
+}
+const restartGroupSnapshotRead = () => {
+  stopGroupSnapshotRead()
+  scheduleGroupDisplayBoundary()
+  if (canReadGroupSnapshot()) void readGroupSnapshot()
+}
+watch([isGroupsModalOpen, selectedGroupSiteId, groupsPageActive, groupsPageVisible, () => pendingSiteOperations.value.has(selectedGroupSiteId.value ?? '')], () => {
+  if (!isGroupsModalOpen.value) { groupReadFailures = 0; groupSnapshotError.value = '' }
+  restartGroupSnapshotRead()
+}, { flush: 'sync' })
+watch(() => selectedSiteForGroups.value?.metrics.groups, scheduleGroupDisplayBoundary)
+watch(selectedSiteForGroups, (site) => {
+  if (isGroupsModalOpen.value && !site) {
+    groupSiteDeletedMessage.value = '这个站点已删除，可返回站点列表查看其他站点；不会修改主站。'
+    closeGroupsModal()
+  }
+})
+watch(workspaceId, () => {
+  closeGroupsModal()
+  groupSnapshotError.value = ''; groupSiteDeletedMessage.value = ''
+  closeSiteSettings()
+  realConnections.value = []; adminGroupHealth.value = []
+  void loadGroupNavigationData()
+}, { flush: 'sync' })
+const onGroupsVisibilityChanged = () => { groupsPageVisible.value = document.visibilityState !== 'hidden' }
+onActivated(() => { groupsPageActive.value = true })
+onDeactivated(() => { groupsPageActive.value = false })
 
 const usdMetricDisplay = (metric: UpstreamMetricValue): string => {
   if (metric.display.toUpperCase().includes('USD')) return metric.display
@@ -467,17 +557,21 @@ const costFailureDisplay = (site: UpstreamSite): string | null => {
 }
 
 onMounted(() => {
+  document.addEventListener('visibilitychange', onGroupsVisibilityChanged)
   void Promise.all([loadRefreshSettings(), loadGroupNavigationData()])
   void runRefresh()
 })
 
 onBeforeUnmount(() => {
+  stopGroupSnapshotRead()
+  document.removeEventListener('visibilitychange', onGroupsVisibilityChanged)
   stopCountdown()
 })
 </script>
 
 <template>
   <div class="mx-auto w-full max-w-[1600px] space-y-6">
+    <p v-if="groupSiteDeletedMessage" role="status" class="text-sm text-muted-foreground">{{ groupSiteDeletedMessage }}</p>
     <!-- Top Action Bar -->
     <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
       <div class="flex flex-col gap-3 w-full sm:w-auto">
@@ -946,7 +1040,9 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="min-h-0 flex-1 space-y-6 overflow-y-auto p-6 overscroll-contain">
- <p class="text-sm text-muted-foreground">费用按新加坡当天统计，按使用时的上游分组计算；这里只显示费用，不会修改主站。数据暂缺时可同步这个站点。</p>
+ <p class="text-sm text-muted-foreground">费用按新加坡当天统计，按使用时的上游分组计算；这里只显示费用，不会修改主站。数据暂缺时可关闭弹窗后同步这个站点。</p>
+ <p v-if="groupSnapshotErrorDisplay" role="alert" class="text-sm text-warning">{{ groupSnapshotErrorDisplay }}</p>
+ <p v-for="reason in sharedGroupCostReasons" :key="reason" class="text-sm text-muted-foreground">{{ reason }}</p>
  <p v-if="selectedUnattributedGroup" class="text-sm text-warning" :title="String(selectedUnattributedGroup.unattributedCost)">本站费用 {{ (selectedUnattributedGroup.siteReportedCost ?? 0).toFixed(2) }}，可对应当前分组 {{ (selectedUnattributedGroup.groupAttributedCost ?? 0).toFixed(2) }}，另有 {{ unmatchedCostDisplay(selectedUnattributedGroup.unattributedCost) }} 无法对应当前可用分组；请到上游查看当天消费记录。这里不会分配这部分费用或修改主站。</p>
             <div v-for="(groups, platform) in groupedGroups" :key="platform" class="space-y-3">
               <h4 class="text-sm font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
@@ -959,23 +1055,23 @@ onBeforeUnmount(() => {
                   :key="group.id || group.name"
                   :style="GROUP_CARD_SIZE_STYLE"
                   class="group flex flex-col items-center justify-center rounded-xl border text-center transition-colors"
-                  :class="groupCardClasses(selectedGroupSiteId, group)"
+                  :class="groupCardClasses(selectedGroupSiteId ?? '', group)"
                   @click="openGroupDestination(group)"
                 >
                   <span class="flex w-full flex-wrap items-center justify-center gap-1.5">
                     <span class="min-w-0 max-w-full whitespace-normal break-words text-center text-[22px] font-medium leading-tight text-foreground transition-colors group-hover:text-primary">{{ group.name }}</span>
                     <span
-                      v-if="groupCardState(selectedGroupSiteId, group) !== 'unconnected'"
+                      v-if="groupCardState(selectedGroupSiteId ?? '', group) !== 'unconnected'"
                       class="shrink-0 rounded-md border px-1.5 py-0.5 text-[17px] font-semibold leading-tight"
-                      :class="groupStatusClasses(groupCardState(selectedGroupSiteId, group))"
+                      :class="groupStatusClasses(groupCardState(selectedGroupSiteId ?? '', group))"
                     >
-                      {{ groupStatusLabel(groupCardState(selectedGroupSiteId, group)) }}
+                      {{ groupStatusLabel(groupCardState(selectedGroupSiteId ?? '', group)) }}
                     </span>
                   </span>
                   <span
                     v-if="group.multiplier !== null && selectedSiteForGroups && selectedSiteForGroups.rechargeRate > 0"
                     class="mt-3 rounded-md border px-3 py-2 text-center"
-                    :class="groupMultiplierClasses(groupCardState(selectedGroupSiteId, group))"
+                    :class="groupMultiplierClasses(groupCardState(selectedGroupSiteId ?? '', group))"
                   >
                     <Tooltip :text="multiplierFormula(selectedSiteForGroups, group)" wide>
                       <span class="block text-[22px] font-semibold leading-tight">{{ convertedMultiplierDisplay(selectedSiteForGroups, group) }}</span>
@@ -996,6 +1092,7 @@ onBeforeUnmount(() => {
                     <span v-if="group.costMode === 'retained'" class="ml-1 text-[11px]">(沿用)</span>
                     <span v-if="hasUnattributedCost(group)" class="ml-1 text-[11px] text-warning">(未完全归属)</span>
                   </span>
+                  <span v-if="groupCostReasonDisplay(group) && !sharedGroupCostReasons.includes(groupCostReasonDisplay(group))" class="mt-2 text-xs leading-relaxed text-muted-foreground">{{ groupCostReasonDisplay(group) }}</span>
                 </button>
               </div>
             </div>
@@ -1349,7 +1446,7 @@ onBeforeUnmount(() => {
       :open="isSiteSettingsOpen"
       :site="selectedSiteForSettings"
       @close="closeSiteSettings"
-      @saved="onSiteSettingsSaved"
+      :save-settings="saveSiteSettings"
     />
   </div>
 </template>

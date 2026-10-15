@@ -72,6 +72,12 @@ run_connection_health_gate() {
   run_step "backend Singapore cost persistence race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/upstream ./internal/modules/dashboard -run 'TestSingaporeCost' -count=1"
 
+  run_step "backend group cost queue, read-only snapshot and shutdown race tests" \
+    bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/upstream ./internal/httpserver -run 'TestGroupCost(Queue|Retry|Snapshot|Shutdown)' -count=1"
+
+  run_step "frontend group cost cache refresh and retained behavior" \
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- upstream-group-cost-refresh.behavior.test.ts upstream-group-cost-additional.behavior.test.ts upstream-group-cost-api.test.ts upstream-group-rates-warning.behavior.test.ts"
+
   run_step "backend question answer race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/connection_health -run 'Test.*QuestionAnswer' -count=1"
 

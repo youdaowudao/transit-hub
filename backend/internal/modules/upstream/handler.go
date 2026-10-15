@@ -93,6 +93,10 @@ func (h *Handler) syncStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
+	values, filtered := r.URL.Query()["siteId"]
+	if filtered {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	userID, ok := authctx.UserID(r.Context())
 	if !ok {
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
@@ -102,7 +106,32 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		writeWorkspaceError(w, err)
 		return
 	}
-	httpjson.Write(w, http.StatusOK, h.service.List(r.Context(), userID))
+	if !filtered {
+		httpjson.Write(w, http.StatusOK, h.service.List(r.Context(), userID))
+		return
+	}
+	if len(values) != 1 || strings.TrimSpace(values[0]) == "" {
+		writeSiteSnapshotError(w, &RequestError{MessageKey: ErrorInvalidFields, StatusCode: http.StatusBadRequest, Stage: "metrics", UpstreamMessage: "读取本站费用需要一个非空站点编号，本次没有读取或修改资料；请返回站点列表重新打开分组，不会修改主站"})
+		return
+	}
+	response, err := h.service.ReadSiteSnapshot(r.Context(), userID, strings.TrimSpace(values[0]))
+	if err != nil {
+		writeSiteSnapshotError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, []Response{response})
+}
+
+func writeSiteSnapshotError(w http.ResponseWriter, err error) {
+	var detail *RequestError
+	if !errors.As(err, &detail) || detail.Stage != "metrics" {
+		writeWorkspaceError(w, err)
+		return
+	}
+	httpjson.Write(w, detail.StatusCode, struct {
+		Message string      `json:"message"`
+		Failure formFailure `json:"failure"`
+	}{detail.MessageKey, formFailure{ErrorKey: detail.MessageKey, Stage: "metrics", HTTPStatus: detail.StatusCode, ErrorDetail: detail.UpstreamMessage}})
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {

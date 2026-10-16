@@ -69,7 +69,7 @@ func newServiceWithExecutors(
 	}
 }
 
-// StartUpdateCheck 启动时检查一次，之后每 24 小时检查一次，结果只保存在内存。
+// StartUpdateCheck 启动时检查一次，之后每 8 小时检查一次，结果只保存在内存。
 func (s *Service) StartUpdateCheck(ctx context.Context) {
 	check := func() {
 		defer func() {

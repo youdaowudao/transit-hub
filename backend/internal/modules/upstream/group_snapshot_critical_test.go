@@ -41,6 +41,10 @@ func TestGroupSnapshotCriticalSub2APIRawEligibility(t *testing.T) {
 		{"successful damaged override", `{"data":[{"id":1,"name":"a","rate_multiplier":1}]}`, `{"data":{"1":"broken"}}`, 200, false, false},
 		{"HTTP200 rejected override", `{"data":[{"id":1,"name":"a","rate_multiplier":1}]}`, `{"success":false,"message":"倍率覆盖读取被拒绝"}`, 200, false, false},
 		{"HTTP200 nonzero override code", `{"data":[{"id":1,"name":"a","rate_multiplier":1}]}`, `{"code":5,"message":"倍率覆盖资料暂不可读"}`, 200, false, false},
+		// 20261016/4：有编号时名字首尾空白只是显示差异，按编号对应；无编号或空名仍拒绝。
+		{"trailing space with id", `{"data":[{"id":9,"name":"Claude-Max ","rate_multiplier":1}]}`, `{"data":{}}`, 200, true, true},
+		{"edge space without id", `{"data":[{"name":" a","rate_multiplier":1}]}`, `{"data":{}}`, 200, false, false},
+		{"blank name with id", `{"data":[{"id":1,"name":"   ","rate_multiplier":1}]}`, `{"data":{}}`, 200, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := map[string]int{}
@@ -149,6 +153,15 @@ func TestGroupSnapshotCriticalNewAPIRawEligibility(t *testing.T) {
 		{"unknown pagination types", `{"data":{"a":{"ratio":2}},"pagination":"unknown"}`, `{"group_ratio":{"a":3},"usable_group":{"a":"a"},"total":"models"}`, true, false},
 		{"conflicting nested directory", `{"data":{"a":{"ratio":2}}}`, `{"group_ratio":{"a":3},"usable_group":{"a":"a"},"data":{"group_ratio":{"a":4},"usable_group":{"a":"a"}}}`, false, false},
 		{"matching nested directory", `{"data":{"a":{"ratio":2}}}`, `{"group_ratio":{"a":3},"usable_group":{"a":"a"},"data":{"group_ratio":{"a":3},"usable_group":{"a":"a"}}}`, true, true},
+		// 20261016/4：NewAPI 组目录对 auto 分组固定返回字符串倍率（新版 "auto"、旧版 "自动"），
+		// 价格接口登录后会把没有倍率的用户分组放进可用列表；这些都是正常返回。
+		{"auto literal", `{"data":{"auto":{"ratio":"auto","desc":"x"}}}`, `{"group_ratio":{},"usable_group":{"auto":"x"}}`, true, true},
+		{"legacy auto literal", `{"data":{"auto":{"ratio":"自动","desc":"x"}}}`, `{"group_ratio":{},"usable_group":{"auto":"x"}}`, true, true},
+		{"auto literal with priced auto", `{"data":{"a":{"ratio":2},"auto":{"ratio":"auto"}}}`, `{"group_ratio":{"a":2,"auto":1},"usable_group":{"a":"a","auto":"x"}}`, true, true},
+		{"auto literal on fixed group", `{"data":{"a":{"ratio":"auto"}}}`, `{"group_ratio":{},"usable_group":{"a":"a"}}`, false, false},
+		{"auto literal with rate alias", `{"data":{"auto":{"ratio":"auto","rate":2}}}`, `{"group_ratio":{},"usable_group":{"auto":"x"}}`, false, false},
+		{"usable group without ratio", `{"data":{"a":{"ratio":2}}}`, `{"group_ratio":{"a":2},"usable_group":{"a":"a","vip":"User group"}}`, true, true},
+		{"usable group without ratio on partial page", `{"data":{"a":{"ratio":2}},"has_more":false}`, `{"group_ratio":{"a":2},"usable_group":{"a":"a","vip":"User group"}}`, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var groupPayload, pricePayload any

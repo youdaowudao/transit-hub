@@ -37,7 +37,7 @@ func snapshotMode(group SnapshotGroup) string {
 func validateSnapshotGroups(groups []SnapshotGroup) error {
 	ids, names := map[string]bool{}, map[string]int{}
 	for _, g := range groups {
-		if g.Name == "" || strings.TrimSpace(g.Name) != g.Name || strings.TrimSpace(g.ID) != g.ID {
+		if strings.TrimSpace(g.Name) == "" || strings.TrimSpace(g.ID) != g.ID || (g.ID == "" && strings.TrimSpace(g.Name) != g.Name) {
 			return errors.New("分组名称或身份缺失、含首尾空格，本轮倍率未更新或清理，请核查上游分组列表")
 		}
 		mode := snapshotMode(g)

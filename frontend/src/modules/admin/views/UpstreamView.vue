@@ -722,7 +722,7 @@ onBeforeUnmount(() => {
           </div>
 
           <Button
-            v-if="site.metrics.groups.length > 0"
+            v-if="site.metrics.groups.length > 0 || site.groupRatesWarning"
             variant="secondary"
             class="w-full h-9 text-xs font-medium bg-surface hover:bg-surface-elevated border-border/50 border"
             @click="openGroupsModal(site)"
@@ -781,7 +781,7 @@ onBeforeUnmount(() => {
 
         <div v-if="site.groupRatesWarning" class="mt-4 flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning" role="alert" aria-live="polite" data-group-rates-warning>
           <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <div class="min-w-0 space-y-1 break-words"><p>{{ site.groupRatesWarning.message }}</p><p>{{ site.groupRatesWarning.detail }}</p><p>{{ site.groupRatesWarning.next }}</p></div>
+          <div class="min-w-0 space-y-1 break-words"><p>{{ site.groupRatesWarning.message }}。点“可用分组”查看原因和处理办法；不会修改主站。</p></div>
         </div>
 
         <div v-if="site.enabled && (siteFailureKey(site) || costFailureDisplay(site))" class="mt-4 flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning" role="alert" aria-live="polite">
@@ -874,7 +874,7 @@ onBeforeUnmount(() => {
                 </div>
                 <div v-if="site.groupRatesWarning" class="mt-2 flex max-w-xs items-start gap-1.5 text-xs leading-5 text-warning" role="alert" aria-live="polite" data-group-rates-warning>
                   <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  <div class="min-w-0 space-y-1 break-words"><p>{{ site.groupRatesWarning.message }}</p><p>{{ site.groupRatesWarning.detail }}</p><p>{{ site.groupRatesWarning.next }}</p></div>
+                  <div class="min-w-0 space-y-1 break-words"><p>{{ site.groupRatesWarning.message }}。点“可用分组”查看原因和处理办法；不会修改主站。</p></div>
                 </div>
                 <div v-if="site.enabled && (siteFailureKey(site) || costFailureDisplay(site))" class="mt-2 flex max-w-xs items-start gap-1.5 text-xs leading-5 text-destructive" role="alert" aria-live="polite">
                   <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -917,7 +917,7 @@ onBeforeUnmount(() => {
               <td class="px-6 py-4 text-right">
                 <div class="flex items-center justify-end gap-2">
                   <Button
-                    v-if="site.metrics.groups.length > 0"
+                    v-if="site.metrics.groups.length > 0 || site.groupRatesWarning"
                     variant="ghost"
                     class="h-8 px-2 text-xs text-primary hover:text-primary hover:bg-primary/10"
                     @click="openGroupsModal(site)"
@@ -1040,10 +1040,20 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="min-h-0 flex-1 space-y-6 overflow-y-auto p-6 overscroll-contain">
+            <div v-if="selectedSiteForGroups?.groupRatesWarning" class="flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-sm text-warning" role="alert" data-groups-modal-warning>
+              <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <div class="min-w-0 space-y-1 break-words">
+                <p class="font-semibold">{{ selectedSiteForGroups.groupRatesWarning.message }}</p>
+                <p>{{ selectedSiteForGroups.groupRatesWarning.detail }}</p>
+                <p>{{ selectedSiteForGroups.groupRatesWarning.next }}</p>
+                <p>下面显示本站当前保存的上游分组；分组资料和倍率记录的处理情况见上面的说明，查看不会修改主站。</p>
+              </div>
+            </div>
  <p class="text-sm text-muted-foreground">费用按新加坡当天统计，按使用时的上游分组计算；这里只显示费用，不会修改主站。数据暂缺时可关闭弹窗后同步这个站点。</p>
  <p v-if="groupSnapshotErrorDisplay" role="alert" class="text-sm text-warning">{{ groupSnapshotErrorDisplay }}</p>
  <p v-for="reason in sharedGroupCostReasons" :key="reason" class="text-sm text-muted-foreground">{{ reason }}</p>
  <p v-if="selectedUnattributedGroup" class="text-sm text-warning" :title="String(selectedUnattributedGroup.unattributedCost)">本站费用 {{ (selectedUnattributedGroup.siteReportedCost ?? 0).toFixed(2) }}，可对应当前分组 {{ (selectedUnattributedGroup.groupAttributedCost ?? 0).toFixed(2) }}，另有 {{ unmatchedCostDisplay(selectedUnattributedGroup.unattributedCost) }} 无法对应当前可用分组；请到上游查看当天消费记录。这里不会分配这部分费用或修改主站。</p>
+            <p v-if="selectedSiteForGroups?.metrics.groups.length === 0" class="text-sm text-muted-foreground">这个站点目前没有可显示的分组。</p>
             <div v-for="(groups, platform) in groupedGroups" :key="platform" class="space-y-3">
               <h4 class="text-sm font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
                 <div class="w-1.5 h-1.5 rounded-full bg-primary"></div>

@@ -1164,7 +1164,6 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	oldMetrics, oldStatus := original.Metrics, original.Status
 	transient := cloneSite(site)
 	transient.Status = StatusSyncing
-	transient.ErrorKey = nil
 	if err = s.cache.Set(ctx, &transient); err != nil {
 		s.mu.Unlock()
 		return Response{}, saveFailureError("标记本站同步状态失败："+safePersistenceCause(err)+"；未开始读取或更新费用，请维护人员检查存储连接后重试；不会修改主站。", err, 503)

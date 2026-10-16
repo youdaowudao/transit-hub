@@ -14,7 +14,7 @@ import (
 
 const (
 	updateCheckURL      = "https://raw.githubusercontent.com/youdaowudao/transit-hub/main/backend/internal/config/config.go"
-	updateCheckInterval = 24 * time.Hour
+	updateCheckInterval = 8 * time.Hour
 	updateCheckTimeout  = 15 * time.Second
 	updateCheckMaxBytes = 256 * 1024
 )

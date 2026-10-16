@@ -14,7 +14,7 @@ const (
 	defaultPublicDir = "/app/public"
 	// 升级、回滚脚本的 read_app_version 和新版本检查都按行首读这一行；
 	// 不要改这一行的格式，否则已部署的旧版本收不到新版本提示。
-	defaultAppVersion = "V3.0.8"
+	defaultAppVersion = "V3.0.9"
 )
 
 type Config struct {
@@ -36,7 +36,7 @@ type Config struct {
 	// 仅在受控的本地开发环境中临时开启。
 	LotteryAllowPrivateSub2APITargets bool
 
-	// 版本展示：后端每天读一次 GitHub 上的版本号，只用于新版本提示。
+	// 版本展示：后端每 8 小时读一次 GitHub 上的版本号，只用于新版本提示。
 	// 发布版本号由代码内置，不能由部署环境变量覆盖，避免部署用户随意修改后台展示版本。
 	AppVersion string
 

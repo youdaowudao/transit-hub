@@ -1062,6 +1062,17 @@ export default {
       summaryLabel: '分组健康汇总',
       groupListLabel: '上游分组列表',
       refresh: '刷新',
+      boundSiteRateStatus: {
+        title: '已对接的上游站点中，以下站点最近一次同步没能确认分组倍率',
+        description: '这些站点在分组倍率页的记录和调价提醒可能没有按最新倍率更新；查看不会修改主站。请按原因到上游核查，处理后到上游站点页同步该站；本区在进入本页或点“刷新”完成后更新。',
+        missingReason: '没有记录具体原因，请到上游站点页同步该站后再查看',
+        unknownTime: '时间未知',
+        failure: '暂时无法判断哪些已对接站点的分组倍率没确认：{items}（{reasons}）。本次没有修改主站；请重新进入本页或点“刷新”重试，仍失败时请查看 Hub 后端日志里对应的读取记录。',
+        failedSites: '读取上游站点资料失败',
+        failedConnections: '读取对接资料失败',
+        reasonNetwork: '连不上 Hub 后端（网络中断或后端没有运行）',
+        reasonUnknown: '原因未能确认',
+      },
       refreshStatus: {
         running: '正在刷新，已等待 {seconds} 秒',
         progress: '{stage} · {completed} / {total}',

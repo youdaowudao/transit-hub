@@ -5,6 +5,8 @@ import { defineComponent, h, nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ConnectionHealthView from '@/modules/admin/views/ConnectionHealthView.vue'
+// 20261016/4：分组健康页新增已对接站点读取；本用例与它无关，隔离为空列表，不改原断言。
+vi.mock('@/modules/admin/api/mySites', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/modules/admin/api/mySites')>()), listRealConnections: vi.fn(async () => []) }))
 
 const harness = vi.hoisted(() => ({
   refs: {} as Record<string, { value: any }>,

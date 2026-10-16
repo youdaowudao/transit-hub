@@ -41,7 +41,7 @@ run_step "core regression membership tests" \
   node --test "$ROOT_DIR/scripts/test-core-regression-membership.test.mjs" "$ROOT_DIR/scripts/test-c43-core-membership.test.mjs"
 
 run_step "backend full Go test suite" \
-  bash -c "cd '$ROOT_DIR/backend' && go test ./... -count=1"
+  bash -c "cd '$ROOT_DIR/backend' && go test ./... -count=1 -v"
 
 run_step "frontend full test suite" \
   bash -c "cd '$ROOT_DIR/frontend' && npm run test"

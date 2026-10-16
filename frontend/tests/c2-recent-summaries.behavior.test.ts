@@ -10,6 +10,8 @@ import { getQuestionAnswerRecentSummaries } from '@/modules/admin/api/connection
 import { useQuestionAnswerRecentSummaries } from '@/modules/admin/composables/useQuestionAnswerRecentSummaries'
 import { useConnectionHealth } from '@/modules/admin/composables/useConnectionHealth'
 import type { AdminGroupHealth, QuestionAnswerRecentSummaryItem } from '@/modules/admin/types/connectionHealth'
+// 20261016/4：分组健康页新增已对接站点读取；本用例与它无关，隔离为空列表，不改原断言。
+vi.mock('@/modules/admin/api/mySites', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/modules/admin/api/mySites')>()), listRealConnections: vi.fn(async () => []) }))
 
 const api = vi.hoisted(() => ({ getConnectionHealthAdminGroups: vi.fn(), refreshConnectionHealthAdminGroupsAutomatically: vi.fn(), getConnectionHealthGroups: vi.fn(), getConnectionHealthEvents: vi.fn(), listConnectionHealthPolicies: vi.fn(), getPrioritySyncStatus: vi.fn(), listUpstreamSites: vi.fn(), workspace: null as any }))
 vi.mock('@/modules/admin/api/connectionHealth', async (importOriginal) => ({ ...await importOriginal<typeof import('@/modules/admin/api/connectionHealth')>(), getConnectionHealthAdminGroups: api.getConnectionHealthAdminGroups, refreshConnectionHealthAdminGroupsAutomatically: api.refreshConnectionHealthAdminGroupsAutomatically, getConnectionHealthGroups: api.getConnectionHealthGroups, getConnectionHealthEvents: api.getConnectionHealthEvents, listConnectionHealthPolicies: api.listConnectionHealthPolicies, getPrioritySyncStatus: api.getPrioritySyncStatus }))

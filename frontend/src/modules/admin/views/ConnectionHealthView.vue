@@ -24,6 +24,9 @@ import { modelControlRuleRevision, modelControlSupplyWarning } from '../utils/qu
 import { getPrioritySyncStatus, probeTargetWithProgress } from '../api/connectionHealth'
 import type { AdminGroupsRefreshSite, ProbeTargetProgressPhase } from '../api/connectionHealth'
 import { listUpstreamSites } from '../api/upstream'
+import { listRealConnections } from '../api/mySites'
+import type { UpstreamSiteResponse } from '../types/upstream'
+import { safeScopedErrorText } from '../utils/scopedErrorText'
 import { canOpenManualProbeHistory, connectionHealthMessageKey, testProtocolName, useConnectionHealth } from '../composables/useConnectionHealth'
 import { createRefreshCoordinator } from '../utils/connectionHealthRefresh'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
@@ -118,6 +121,13 @@ const selectedConnectionId = ref('')
 const eventsDialogOpen = ref(false)
 let eventsOpenRequestSequence = 0
 const siteNameMap = ref<Map<string, string>>(new Map())
+// 常驻提示区：已对接站点最近一次分组倍率读取未确认。独立于站点名称读取和"辅助读取失败"。
+type BoundSiteRateState =
+  | { kind: 'idle' }
+  | { kind: 'ready'; sites: UpstreamSiteResponse[]; boundIds: Set<string> }
+  | { kind: 'failed'; failedSites: boolean; failedConnections: boolean; reasons: string[] }
+const boundSiteRateState = ref<BoundSiteRateState>({ kind: 'idle' })
+let boundSiteRateSeq = 0
 const preferences = ref<ConnectionHealthPreferences>(createDefaultConnectionHealthPreferences())
 const groupManagerOpen = ref(false)
 const prioritySyncStatus = ref<PrioritySyncStatus | null>(null)
@@ -306,7 +316,11 @@ const retryPendingQuestionAnswerSummaries = () => {
   for (const [targetId, version] of questionAnswerSummaryPending) if (version > (questionAnswerSummarySettled.get(targetId) ?? 0)) void refreshQuestionAnswerSummary(targetId)
 }
 
-watch(preferenceScope, (scope) => {
+watch(preferenceScope, (scope, previous) => {
+  boundSiteRateState.value = { kind: 'idle' }
+  boundSiteRateSeq++
+  // 整页打开时工作区在挂载后才读到，进入页面那次读取会被上面丢弃，需按新工作区重读；首次触发由进入页面负责读取。
+  if (previous !== undefined) void loadBoundSiteRateStatus()
   invalidateQuickProbeSession(true)
   clearQuestionAnswerSummaryRequests()
   recentSummaries.reset()
@@ -564,6 +578,79 @@ const loadSiteNames = async (): Promise<boolean> => {
   }
 }
 
+// 只认三种原因，不透传返回文字：返回文字可能是未翻译的文字键或内部说明。
+const boundSiteRateFailureReason = (error: unknown): string => {
+  const message = error instanceof Error ? error.message : ''
+  if (message === 'admin.mySites.errors.network' || message === 'admin.upstream.errors.network') return t('admin.connectionHealth.boundSiteRateStatus.reasonNetwork')
+  if (message === 'auth.errors.unauthorized') return t('auth.errors.unauthorized')
+  return t('admin.connectionHealth.boundSiteRateStatus.reasonUnknown')
+}
+
+// async 包装让同步抛出的错误也成为失败结果；本函数自己不抛错。
+const settleBoundSiteRead = async <T,>(read: () => Promise<T>): Promise<T> => read()
+
+const loadBoundSiteRateStatus = async (): Promise<void> => {
+  const seq = ++boundSiteRateSeq
+  const [sitesResult, connectionsResult] = await Promise.allSettled([
+    settleBoundSiteRead(() => listUpstreamSites()),
+    settleBoundSiteRead(() => listRealConnections()),
+  ])
+  // 较早发出的读取（含切换工作区前发出的）成功、失败都丢弃。
+  if (seq !== boundSiteRateSeq) return
+  const sites = sitesResult.status === 'fulfilled' && Array.isArray(sitesResult.value) ? sitesResult.value : null
+  const connections = connectionsResult.status === 'fulfilled' && Array.isArray(connectionsResult.value) ? connectionsResult.value : null
+  if (sites && connections) {
+    const boundIds = new Set<string>()
+    for (const connection of connections) {
+      const status = typeof connection?.status === 'string' ? connection.status.trim() : ''
+      if (status !== '' && status !== 'active') continue
+      const siteId = typeof connection?.upstreamSiteId === 'string' ? connection.upstreamSiteId.trim() : ''
+      if (siteId) boundIds.add(siteId)
+    }
+    boundSiteRateState.value = { kind: 'ready', sites, boundIds }
+    return
+  }
+  const unknown = t('admin.connectionHealth.boundSiteRateStatus.reasonUnknown')
+  const reasons: string[] = []
+  if (!sites) reasons.push(sitesResult.status === 'rejected' ? boundSiteRateFailureReason(sitesResult.reason) : unknown)
+  if (!connections) reasons.push(connectionsResult.status === 'rejected' ? boundSiteRateFailureReason(connectionsResult.reason) : unknown)
+  boundSiteRateState.value = { kind: 'failed', failedSites: !sites, failedConnections: !connections, reasons }
+}
+
+const boundSiteRateTime = (value: unknown): string => {
+  const parsed = typeof value === 'string' && value ? new Date(value) : null
+  return parsed && !Number.isNaN(parsed.getTime())
+    ? parsed.toLocaleString(locale, { hour12: false, timeZone: 'Asia/Singapore' })
+    : t('admin.connectionHealth.boundSiteRateStatus.unknownTime')
+}
+
+const boundSiteRateRows = computed(() => {
+  const state = boundSiteRateState.value
+  if (state.kind !== 'ready') return []
+  return state.sites
+    .filter(site => site.enabled !== false
+      && site.status === 'connected'
+      && site.metrics?.rateNoticeObservation?.confirmed === false
+      && state.boundIds.has(site.id))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map(site => ({
+      id: site.id,
+      name: site.name,
+      time: boundSiteRateTime(site.metrics.rateNoticeObservation?.observedAt),
+      reason: safeScopedErrorText(site.metrics.rateNoticeObservation?.reason) || t('admin.connectionHealth.boundSiteRateStatus.missingReason'),
+    }))
+})
+
+const boundSiteRateFailureText = computed(() => {
+  const state = boundSiteRateState.value
+  if (state.kind !== 'failed') return ''
+  const items = [
+    ...(state.failedSites ? [t('admin.connectionHealth.boundSiteRateStatus.failedSites')] : []),
+    ...(state.failedConnections ? [t('admin.connectionHealth.boundSiteRateStatus.failedConnections')] : []),
+  ]
+  return t('admin.connectionHealth.boundSiteRateStatus.failure', { items: items.join('、'), reasons: state.reasons.join('；') })
+})
+
 const moveGroup = (groupId: string, offset: -1 | 1) => {
   const ids = orderedGroups.value.map(group => group.id)
   const index = ids.indexOf(groupId)
@@ -717,6 +804,7 @@ const refreshOnEntry = () => {
   void runAuxiliaryRequest('policies', () => loadPolicies({ recordError: false }))
   void runAuxiliaryRequest('siteNames', loadSiteNames)
 	void runAuxiliaryRequest('priority', loadPrioritySyncStatus)
+  void loadBoundSiteRateStatus()
 }
 
 onMounted(() => { mainTableMounted.value = true; recentSummaries.resume(); refreshOnEntry() })
@@ -766,6 +854,7 @@ const refresh = async () => {
     await refreshAdminGroups()
   } finally {
     completeRefresh(generation)
+    void loadBoundSiteRateStatus()
   }
 }
 
@@ -1331,6 +1420,15 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
 
     <div v-if="!refreshLoading && refreshRunSnapshot?.issues?.some(issue => issue.groupRatesWarning)" class="space-y-2 text-xs text-warning" role="status" aria-live="polite" data-group-rates-warning>
       <p v-for="issue in refreshRunSnapshot.issues.filter(issue => issue.groupRatesWarning)" :key="`${issue.siteId}:${issue.phase}`" class="break-words">{{ issue.siteName || siteName(issue.siteId || '') }}: {{ refreshIssueLabel(issue) }}</p>
+    </div>
+
+    <div v-if="boundSiteRateFailureText || boundSiteRateRows.length > 0" class="space-y-1 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning" role="status" data-bound-site-rate-status>
+      <p v-if="boundSiteRateFailureText" class="break-words">{{ boundSiteRateFailureText }}</p>
+      <template v-else>
+        <p class="font-semibold">{{ t('admin.connectionHealth.boundSiteRateStatus.title') }}</p>
+        <p class="break-words">{{ t('admin.connectionHealth.boundSiteRateStatus.description') }}</p>
+        <p v-for="row in boundSiteRateRows" :key="row.id" class="break-words"><span class="font-semibold">{{ row.name }}</span>（{{ row.time }}）：{{ row.reason }}</p>
+      </template>
     </div>
 
     <div v-if="!refreshLoading" class="space-y-1 text-xs text-muted-foreground" aria-live="polite">

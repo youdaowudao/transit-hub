@@ -420,6 +420,12 @@ const connectionOperationBlocked = (rate: GroupRate): boolean => {
   return isCheckingConnections.value || !confirmedIds.value.has(connection.id) || !unchanged
 }
 const operationBlockedReason = '这个账号正在检查或本次未能确认，暂时不能导入或解绑；请等待检查结束，或点击刷新完成核对。'
+// The backend trims the group name with Go strings.TrimSpace before matching by
+// name, so such a row could update another group. Same character set as
+// utils/questionAnswers.ts; JavaScript trim() misses U+0085.
+const goTrimSpaceEdge = /^[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]|[\t-\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]$/
+const typeEditBlocked = (rate: GroupRate): boolean => goTrimSpaceEdge.test(rate.groupName)
+const typeEditBlockedReason = '这个分组的名字首尾带空白字符，暂时不能修改分类，请先保留现有分类；这项限制不影响倍率同步，也不会修改主站。'
 const clearCheckState = () => {
   lastCheckScope = null
   checkIdentities.clear()
@@ -842,6 +848,7 @@ const closeHistory = () => {
 }
 
 const openTypeEditor = (rate: GroupRate) => {
+  if (typeEditBlocked(rate)) return
   invalidatePage()
   invalidateAttention()
   editingRate.value = rate
@@ -1688,11 +1695,15 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 </div>
               </td>
               <td class="px-4 py-2.5">
-                <button type="button" :class="['inline-flex rounded-md border px-2 py-1 text-xs font-semibold uppercase tracking-wider', typeClasses(rate.type)]"
-                  :aria-label="`修改${rate.groupName}的分类，仅保存Hub资料，不修改主站`"
-                  title="点击修改分组分类，仅保存Hub资料，不修改主站" @click="openTypeEditor(rate)">
-                  {{ typeLabel(rate.type) }}
-                </button>
+                <div class="flex items-center gap-2">
+                  <button type="button" :class="['inline-flex rounded-md border px-2 py-1 text-xs font-semibold uppercase tracking-wider', typeClasses(rate.type)]"
+                    :disabled="typeEditBlocked(rate)"
+                    :aria-label="typeEditBlocked(rate) ? typeEditBlockedReason : `修改${rate.groupName}的分类，仅保存Hub资料，不修改主站`"
+                    :title="typeEditBlocked(rate) ? typeEditBlockedReason : '点击修改分组分类，仅保存Hub资料，不修改主站'" @click="openTypeEditor(rate)">
+                    {{ typeLabel(rate.type) }}
+                  </button>
+                  <span v-if="typeEditBlocked(rate)" class="max-w-56 text-xs text-muted-foreground">{{ typeEditBlockedReason }}</span>
+                </div>
               </td>
               <td class="px-4 py-2.5">
                 <span :class="['inline-flex rounded-md border px-2 py-1 text-xs font-semibold uppercase tracking-wider', platformClasses(rate.platform)]">

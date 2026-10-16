@@ -11,6 +11,8 @@ import type {
   AdminGroupHealth,
   ModelHealth,
 } from '@/modules/admin/types/connectionHealth'
+// 20261016/4：分组健康页新增已对接站点读取；本用例与它无关，隔离为空列表，不改原断言。
+vi.mock('@/modules/admin/api/mySites', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/modules/admin/api/mySites')>()), listRealConnections: vi.fn(async () => []) }))
 
 describe('ActionDiagnostics RED-6 user-facing action reasons', () => {
   it('renders one account and reason per diagnostic with named and fallback identities', async () => {

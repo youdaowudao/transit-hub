@@ -236,18 +236,26 @@ func auditSub2APIGroups(available, rates any, ratesErr error, normalized []Group
 	}
 	expected := make([]GroupInfo, 0, len(items))
 	ids, names := map[string]bool{}, map[string]int{}
-	for _, item := range items {
+	for index, item := range items {
 		record, ok := item.(map[string]any)
 		if !ok {
 			return rejectedGroupAudit("读取可用分组失败：列表条目不是对象")
 		}
-		name, ok := record["name"].(string)
-		if !ok || auditGroupName(name) != nil {
-			return rejectedGroupAudit("读取可用分组失败：分组名称缺失或不规范")
-		}
 		id, idErr := auditGroupID(record)
 		if idErr != nil {
 			return rejectedGroupAudit("读取可用分组失败：" + idErr.Error())
+		}
+		// Groups with an id are matched by id, so edge whitespace in the name is
+		// only a display difference; without an id the name is the identity.
+		name, ok := record["name"].(string)
+		if !ok || strings.TrimSpace(name) == "" {
+			if id != "" {
+				return rejectedGroupAudit(fmt.Sprintf("读取可用分组失败：编号 %s 的分组没有名称", id))
+			}
+			return rejectedGroupAudit(fmt.Sprintf("读取可用分组失败：列表第 %d 个分组没有名称和编号", index+1))
+		}
+		if id == "" && strings.TrimSpace(name) != name {
+			return rejectedGroupAudit("读取可用分组失败：没有编号的分组“" + limitRateNoticeText(name, 100) + "”首尾带空白字符，无法按名称核对")
 		}
 		if id != "" && ids[id] {
 			return rejectedGroupAudit("读取可用分组失败：分组编号重复")
@@ -358,12 +366,18 @@ func parseNewAPIGroupDirectory(payload any) (map[string]*float64, bool, error) {
 		var rate *float64
 		var err error
 		if object, ok := item.(map[string]any); ok {
-			rate, err = auditAliases(object, []string{"ratio", "rate", "multiplier"})
+			if strings.EqualFold(name, "auto") && newAPIAutoRatioLiteral(object) {
+				// NewAPI writes the auto group's ratio as a literal string; it is an
+				// automatic ratio, handled by the auto check below.
+				rate = nil
+			} else {
+				rate, err = auditAliases(object, []string{"ratio", "rate", "multiplier"})
+			}
 		} else {
 			rate, err = auditFixedNumber(item)
 		}
 		if err != nil {
-			return nil, false, fmt.Errorf("组目录包含无效倍率：%w", err)
+			return nil, false, fmt.Errorf("分组“%s”的倍率无效：%w", limitRateNoticeText(name, 100), err)
 		}
 		if rate == nil && !strings.EqualFold(name, "auto") {
 			return nil, false, errors.New("组目录固定倍率字段缺失")
@@ -374,6 +388,22 @@ func parseNewAPIGroupDirectory(payload any) (map[string]*float64, bool, error) {
 		return nil, false, errors.New("旧版组返回没有明确目录，不能作为有效空目录")
 	}
 	return result, complete, nil
+}
+
+// newAPIAutoRatioLiteral reports whether a group directory entry carries the
+// literal ratio NewAPI writes for the auto group ("auto", or "自动" in older
+// releases) and no other ratio alias.
+func newAPIAutoRatioLiteral(object map[string]any) bool {
+	ratio, ok := object["ratio"].(string)
+	if !ok || (ratio != "auto" && ratio != "自动") {
+		return false
+	}
+	for _, key := range []string{"rate", "multiplier"} {
+		if _, exists := object[key]; exists {
+			return false
+		}
+	}
+	return true
 }
 
 type newAPIPricingDirectory struct {
@@ -500,7 +530,9 @@ func auditNewAPIGroups(groupsPayload, pricingPayload any, groupsErr, pricingErr 
 	for name := range pricing.usable {
 		if _, exists := base[name]; !exists {
 			if !strings.EqualFold(name, "auto") {
-				return rejectedGroupAudit("核查价格目录失败：可用固定分组缺少倍率")
+				// NewAPI lists the user's own group as usable even without a
+				// configured ratio; the displayed groups skip it as well.
+				continue
 			}
 			base[name] = nil
 		}

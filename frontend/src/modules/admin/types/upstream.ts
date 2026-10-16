@@ -67,6 +67,7 @@ export interface UpstreamMetrics {
   historyRecharge: UpstreamMetricValue
   group: UpstreamGroupInfo
   groups: UpstreamGroupInfo[]
+  rateNoticeObservation?: { confirmed: boolean; observedAt: string; reason?: string }
 }
 
 export interface NewApiSession {

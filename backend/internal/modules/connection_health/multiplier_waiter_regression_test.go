@@ -219,8 +219,7 @@ func TestMultiplierSiteDeletionWithoutSuccessorReleasesCurrentWaiters(t *testing
 		started:           make(chan string, 1), release: release,
 	}
 	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}}
-	var closeOnce sync.Once
-	t.Cleanup(func() { closeOnce.Do(func() { close(release) }) })
+	unblock := registerSnapshotReaderCleanup(t, service, release)
 
 	waiterDone := make(chan struct{})
 	go func() {
@@ -237,7 +236,7 @@ func TestMultiplierSiteDeletionWithoutSuccessorReleasesCurrentWaiters(t *testing
 	select {
 	case <-waiterDone:
 	case <-time.After(100 * time.Millisecond):
-		closeOnce.Do(func() { close(release) })
+		unblock()
 		t.Fatal("site deletion without a successor left the current waiter blocked")
 	}
 }

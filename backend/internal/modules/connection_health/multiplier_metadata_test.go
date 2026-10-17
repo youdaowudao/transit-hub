@@ -38,9 +38,6 @@ func (f *snapshotMetadataReader) GetUpstreamKeyForWorkspace(ctx context.Context,
 	}
 	item := f.directItems[siteID+"|"+keyID]
 	f.mu.Unlock()
-	if f.started != nil {
-		f.started <- siteID
-	}
 	if f.release != nil {
 		f.mu.Lock()
 		f.active++
@@ -53,6 +50,15 @@ func (f *snapshotMetadataReader) GetUpstreamKeyForWorkspace(ctx context.Context,
 			f.active--
 			f.mu.Unlock()
 		}()
+	}
+	if f.started != nil {
+		select {
+		case f.started <- siteID:
+		case <-ctx.Done():
+			return upstream.Sub2APIKeyItem{}, ctx.Err()
+		}
+	}
+	if f.release != nil {
 		select {
 		case <-ctx.Done():
 			return upstream.Sub2APIKeyItem{}, ctx.Err()
@@ -60,6 +66,21 @@ func (f *snapshotMetadataReader) GetUpstreamKeyForWorkspace(ctx context.Context,
 		}
 	}
 	return item, err
+}
+
+func registerSnapshotReaderCleanup(t *testing.T, service *Service, release chan struct{}) func() {
+	t.Helper()
+	unblock := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(func() {
+		unblock()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := service.Shutdown(ctx); err != nil {
+			t.Errorf("shutdown service during snapshot reader cleanup: %v", err)
+		}
+		waitForMultiplierRefreshDispatcherIdle(t)
+	})
+	return unblock
 }
 
 func waitForMultiplierRefreshDispatcherIdle(t *testing.T) {
@@ -246,6 +267,7 @@ func TestMultiplierSnapshotPageReturnsWhileBackgroundRefreshIsBlocked(t *testing
 		started:           make(chan string, 2), release: release,
 	}
 	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}}
+	unblock := registerSnapshotReaderCleanup(t, service, release)
 
 	startedAt := time.Now()
 	lookup := service.cachedAdminGroupMultiplierLookup(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
@@ -264,7 +286,7 @@ func TestMultiplierSnapshotPageReturnsWhileBackgroundRefreshIsBlocked(t *testing
 	if direct, _ := reader.callCounts("site-1"); direct != 1 {
 		t.Fatalf("same-site concurrent page refreshes=%d, want 1", direct)
 	}
-	close(release)
+	unblock()
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -288,6 +310,7 @@ func TestMultiplierBackgroundRefreshStopsWithServiceShutdown(t *testing.T) {
 		mySites: reader,
 		sites:   snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}},
 	}
+	registerSnapshotReaderCleanup(t, service, reader.release)
 
 	service.cachedAdminGroupMultiplierLookup(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
 	select {
@@ -792,6 +815,7 @@ func TestMultiplierSnapshotBoundsProcessWideRefreshWorkers(t *testing.T) {
 		release:           release,
 	}
 	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: sites}}
+	unblock := registerSnapshotReaderCleanup(t, service, release)
 
 	service.cachedAdminGroupMultiplierLookup(context.Background(), "user1", "ws1", string(upstream.PlatformSub2API))
 	for index := 0; index < upstreamMetadataFetchConcurrency; index++ {
@@ -809,7 +833,7 @@ func TestMultiplierSnapshotBoundsProcessWideRefreshWorkers(t *testing.T) {
 		t.Fatal("refresh queue started more than the configured global worker limit")
 	case <-time.After(50 * time.Millisecond):
 	}
-	close(release)
+	unblock()
 	select {
 	case <-reader.started:
 	case <-time.After(time.Second):
@@ -841,6 +865,7 @@ func TestFreshMultiplierLookupWaitsForReplacementGeneration(t *testing.T) {
 		release: release,
 	}
 	service := &Service{mySites: reader, sites: snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}}
+	unblock := registerSnapshotReaderCleanup(t, service, release)
 
 	firstDone := make(chan struct{})
 	go func() {
@@ -871,7 +896,7 @@ func TestFreshMultiplierLookupWaitsForReplacementGeneration(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	close(release)
+	unblock()
 	for _, done := range []<-chan struct{}{firstDone, secondDone} {
 		select {
 		case <-done:

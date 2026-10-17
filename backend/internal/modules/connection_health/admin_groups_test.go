@@ -107,6 +107,7 @@ func TestAdminGroupsFreshWaitsForExternalMultiplierBeforeReadingMainGroups(t *te
 		newFakeRepository(),
 	)
 	service.sites = snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}
+	unblock := registerSnapshotReaderCleanup(t, service, release)
 
 	freshService, ok := any(service).(interface {
 		AdminGroupsFresh(context.Context, string) ([]AdminGroupHealth, error)
@@ -132,7 +133,7 @@ func TestAdminGroupsFreshWaitsForExternalMultiplierBeforeReadingMainGroups(t *te
 		t.Fatalf("main-site read started before multiplier terminal state: %q", event)
 	case <-time.After(30 * time.Millisecond):
 	}
-	close(release)
+	unblock()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -185,6 +186,7 @@ func TestAdminGroupsFreshCancellationDoesNotReadMainGroups(t *testing.T) {
 		newFakeRepository(),
 	)
 	service.sites = snapshotSiteLookup{sites: map[string]*upstream.Site{"site-1": snapshotSite("site-1")}}
+	registerSnapshotReaderCleanup(t, service, release)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

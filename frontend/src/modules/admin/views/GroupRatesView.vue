@@ -462,7 +462,20 @@ const isRealConnected = (rate: GroupRate): boolean => {
   return Boolean(connection && (!connection.status || connection.status === 'active'))
 }
 const isMainAccountMissing = (rate: GroupRate): boolean => realConnectionForRate(rate)?.status === 'missing'
-type OwnGroupCellLine = { key: string; id: string; name: string; title: string; value: string; valueTone: 'number' | 'muted'; suffix: string }
+const calculateProfitMargin = (saleMultiplier: number | null | undefined, costMultiplier: number | null): number | null => {
+  if (saleMultiplier == null || costMultiplier == null || !Number.isFinite(saleMultiplier) || saleMultiplier <= 0) return null
+  return (saleMultiplier - costMultiplier) / saleMultiplier
+}
+const profitMarginFormatter = new Intl.NumberFormat(locale, { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 })
+const formatProfitMargin = (value: number | null): string => value == null || !Number.isFinite(value)
+  ? t('admin.groupRates.common.placeholder') : profitMarginFormatter.format(value)
+const profitMarginClass = (value: number | null): string => {
+  if (value == null || !Number.isFinite(value)) return 'text-muted-foreground'
+  if (value < 0) return 'text-destructive'
+  if (value === 0) return 'text-warning'
+  return 'text-emerald-600 dark:text-emerald-400'
+}
+type OwnGroupCellLine = { key: string; id: string; name: string; title: string; value: string; valueTone: 'number' | 'muted'; suffix: string; profitMargin: number | null }
 type OwnGroupCells = { kind: 'unknown' | 'blank'; lines: OwnGroupCellLine[] } | { kind: 'lines'; lines: OwnGroupCellLine[] }
 const ownGroupCells = (rate: GroupRate): OwnGroupCells => {
   if (!connectionDataKnown.value) return { kind: 'unknown', lines: [] }
@@ -479,7 +492,7 @@ const ownGroupCells = (rate: GroupRate): OwnGroupCells => {
       if (!groups.has(key)) groups.set(key, { id, name })
     }
   }
-  if (!groups.size) return { kind: 'lines', lines: [{ key: 'missing', id: '', name: '对接记录里没有主站分组', title: '对接记录里没有主站分组', value: '', valueTone: 'muted', suffix: '' }] }
+  if (!groups.size) return { kind: 'lines', lines: [{ key: 'missing', id: '', name: '对接记录里没有主站分组', title: '对接记录里没有主站分组', value: '', valueTone: 'muted', suffix: '', profitMargin: null }] }
   const lines = Array.from(groups, ([key, group]): OwnGroupCellLine => {
     const live = ownGroupRatesState.value === 'ready' && group.id ? ownGroupRatesById.value.get(group.id) : undefined
     const name = live ? live.name : group.name || `分组编号 ${group.id}`
@@ -494,7 +507,8 @@ const ownGroupCells = (rate: GroupRate): OwnGroupCells => {
       const status = live.status.trim().toLowerCase()
       if (status && status !== 'active') suffix = '（已停用）'
     }
-    return { key, id: group.id, name, title: name, value, valueTone, suffix }
+    const profitMargin = live ? calculateProfitMargin(live.multiplier, rate.currentMultiplier) : null
+    return { key, id: group.id, name, title: name, value, valueTone, suffix, profitMargin }
   })
   lines.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
   return { kind: 'lines', lines }
@@ -1834,8 +1848,9 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
 
     <div class="shrink-0 space-y-1 text-sm text-muted-foreground">
       <p>这里显示上次成功读取的可用分组倍率，并保留它们的倍率变化。要取得新倍率，请到上游管理同步对应网站。刷新会检查对应的主站账号，不会创建、删除或修改主站账号。</p>
-      <p>“对接的主站分组”按 Hub 保存的对接记录，显示这个上游分组导入或关联的主站账号所在的分组；在主站后台直接改了账号分组，这里不会跟着变。没有对接的分组这两列留空，只标“已用于调价”的也留空。</p>
+      <p>“对接的主站分组”按 Hub 保存的对接记录，显示这个上游分组导入或关联的主站账号所在的分组；在主站后台直接改了账号分组，这里不会跟着变。没有对接的分组这三列留空，只标“已用于调价”的也留空。</p>
       <p>“销售倍率”是这些分组在主站上的默认倍率，可与左边的换算后成本倍率对比；不含单独给用户设置的专属倍率，上游和主站的模型标准价不同时只能粗略对比。进入本页或点“刷新数据”时从主站读取，翻页和筛选不重新读取；自动调价或调价活动改价后，请点“刷新数据”查看。读取只查看，不会修改主站。</p>
+      <p>利润率按（销售倍率－换算后成本倍率）÷销售倍率估算，与调价映射的口径相同。销售倍率为0、为负数或资料不全时显示“—”，可结合旁边的销售倍率和页面提示查看原因。只查看不会修改主站；上游改价后请先同步对应网站，主站改价后请点“刷新数据”。</p>
       <p v-if="siteFilter">当前查看{{ siteOptions.find(site => site.id === siteFilter)?.name || siteFilter }}。进入或切换网站时只检查这个网站的关联账号；搜索和翻页不会检查其他网站。</p>
       <p v-else>进入时只检查首批30个分组关联的账号；翻页和筛选显示已保存资料，点击刷新可检查当前页。</p>
       <p v-if="isCheckingConnections">正在检查{{ attentionCheckingSite ? (attentionSiteOptions.find(site => site.id === attentionCheckingSite)?.name || attentionCheckingSite) : siteFilter ? (siteOptions.find(site => site.id === siteFilter)?.name || siteFilter) : '当前页' }}的关联账号，倍率可以先查看；账号检查中的操作暂时不可用。</p>
@@ -1881,6 +1896,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.effectiveMultiplier') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.ownGroups') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.salesMultiplier') }}</th>
+              <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.profitMargin') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.delta') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.updatedAt') }}</th>
               <th class="px-6 py-3 text-right font-medium text-muted-foreground">{{ t('admin.groupRates.fields.actions') }}</th>
@@ -1938,6 +1954,10 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <td class="px-4 py-2.5">
                 <span v-if="ownGroupCells(rate).kind === 'unknown'" class="text-xs text-muted-foreground">暂时未知</span>
                 <div v-for="line in ownGroupCells(rate).lines" :key="line.key" data-sales-line class="h-5 leading-5 whitespace-nowrap tabular-nums" :class="line.valueTone === 'number' ? 'font-semibold text-foreground' : 'text-xs text-muted-foreground'">{{ line.value }}{{ line.suffix }}</div>
+              </td>
+              <td class="px-4 py-2.5">
+                <span v-if="ownGroupCells(rate).kind === 'unknown'" class="text-xs text-muted-foreground">{{ t('admin.groupRates.common.placeholder') }}</span>
+                <div v-for="line in ownGroupCells(rate).lines" :key="line.key" data-profit-margin-line class="h-5 leading-5 whitespace-nowrap tabular-nums font-semibold" :class="profitMarginClass(line.profitMargin)">{{ formatProfitMargin(line.profitMargin) }}{{ line.suffix }}</div>
               </td>
               <td class="px-4 py-2.5">
                 <button

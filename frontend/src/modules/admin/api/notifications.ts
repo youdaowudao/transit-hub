@@ -7,7 +7,7 @@ import {
 import { safeScopedErrorText } from '../utils/scopedErrorText'
 import type {
   NotificationAction, NotificationActiveBucket, NotificationContent,
-  NotificationDetailResponse, NotificationHistoryQuery, NotificationHistoryResponse,
+  NotificationDisplayedState, NotificationSubjectState, NotificationDetailResponse, NotificationHistoryQuery, NotificationHistoryResponse,
   NotificationLevel, NotificationPreferencesRequest, NotificationPreferencesResponse,
   NotificationProgress, NotificationProgressRequest, NotificationProgressResponse,
   NotificationSamplingState, NotificationSummaryQuery, NotificationSummaryResponse,
@@ -38,7 +38,7 @@ export class NotificationRequestError extends Error {
 }
 
 const malformed = (workspace: string): never => {
-  throw new NotificationRequestError('通知返回的内容无法确认', '返回结构、消息归属或必要字段不完整；这次读取不会被当作空消息或保存成功', '请重新读取当前工作区的消息或检查间隔；仍失败时请维护人员核查Hub后端通知接口', true, workspace)
+  throw new NotificationRequestError('通知返回的内容无法确认', '返回结构、消息归属或必要字段不完整；请确认前后端已一起更新；这次读取不会被当作空消息或保存成功', '请重新读取当前工作区的消息或检查间隔；仍失败时请维护人员核查Hub后端通知接口', true, workspace)
 }
 
 const record = (value: unknown, workspace: string): Record<string, unknown> => {
@@ -82,6 +82,13 @@ const progress = (value: unknown, workspace: string): NotificationProgress => {
   const result = record(value, workspace)
   return { id: text(result.id, workspace), readAt: nullableDate(result.readAt, workspace), reminderCompletedAt: nullableDate(result.reminderCompletedAt, workspace) }
 }
+const subjectState = (value: unknown, workspace: string): NotificationSubjectState => {
+  const result = record(value, workspace)
+  if (typeof result.subjectActive !== 'boolean') return malformed(workspace)
+  const message = text(result.subjectInactiveMessage, workspace, 2000, true)
+  if (result.subjectActive ? message !== '' : !message.trim()) return malformed(workspace)
+  return { subjectActive: result.subjectActive, subjectInactiveMessage: message }
+}
 const content = (value: unknown, workspace: string): NotificationContent => {
   const result = record(value, workspace)
   const output: NotificationContent = {
@@ -110,7 +117,7 @@ const notice = (value: unknown, workspace: string): SiteNotification => {
   const level = count(result.level, workspace)
   if (level < 1 || level > 4) return malformed(workspace)
   return {
-    ...progress(result, workspace), adminAccountId: workspace, kind: text(result.kind, workspace),
+    ...progress(result, workspace), ...subjectState(result, workspace), adminAccountId: workspace, kind: text(result.kind, workspace),
     subjectType: text(result.subjectType, workspace), subjectId: text(result.subjectId, workspace),
     level: level as NotificationLevel, discoveredAt: date(result.discoveredAt, workspace),
     createdAt: date(result.createdAt, workspace), content: content(result.content, workspace),
@@ -124,7 +131,7 @@ const bucket = (value: unknown, workspace: string, level: NotificationLevel): No
   const result = record(value, workspace)
   const items = unique(list(result.items, workspace, 20).map(item => notice(item, workspace)), workspace)
   const totalCount = count(result.totalCount, workspace)
-  if (items.some(item => item.level !== level || item.reminderCompletedAt !== null) || totalCount < items.length) return malformed(workspace)
+  if (items.some(item => item.level !== level || !item.subjectActive || item.reminderCompletedAt !== null) || totalCount < items.length) return malformed(workspace)
   return { items, totalCount, nextCursor: cursor(result.nextCursor, workspace) }
 }
 const sampling = (value: unknown, workspace: string): NotificationSamplingState => {
@@ -148,9 +155,9 @@ const aborted = (signal?: AbortSignal): void => {
 const isAbort = (error: unknown): boolean => error !== null && typeof error === 'object' && 'name' in error && error.name === 'AbortError'
 const errorText = (value: unknown, fallback: string): string => typeof value === 'string' && value.trim() ? value : fallback
 
-const requestJson = async (path: string, workspace: string, options: RequestInit = {}): Promise<unknown> => {
+const requestJson = async (path: string, workspace: string, options: RequestInit = {}, intent: 'read' | 'write' = 'read'): Promise<unknown> => {
   const signal = options.signal ?? undefined
-  const saving = options.method === 'POST' || options.method === 'PUT'
+  const saving = intent === 'write'
   aborted(signal)
   const token = getAccessToken()
   let response: Response
@@ -213,19 +220,31 @@ export const getNotificationSummary = async (query: NotificationSummaryQuery, si
   const workspace = query.workspaceAdminAccountId
   const params = parameters(workspace)
   for (const key of ['attentionCursor', 'importantCursor', 'criticalCursor'] as const) if (query[key]) params.set(key, query[key])
-  const result = scope(await requestJson(`/summary?${params}`, workspace, { signal }), workspace)
+  const displayedIds = query.displayedIds ?? []
+  unique(displayedIds.map(id => ({ id: text(id, workspace) })), workspace)
+  if (displayedIds.length > 60) return malformed(workspace)
+  const result = scope(await (displayedIds.length
+    ? requestJson('/summary', workspace, { method: 'POST', body: JSON.stringify(query), signal }, 'read')
+    : requestJson(`/summary?${params}`, workspace, { signal }, 'read')), workspace)
+  const displayedStates: NotificationDisplayedState[] = unique(list(result.displayedStates, workspace, 60).map(value => ({ ...progress(value, workspace), ...subjectState(value, workspace) })), workspace)
+  if (displayedStates.length !== displayedIds.length || displayedStates.some((item, index) => item.id !== displayedIds[index])) return malformed(workspace)
   const active = record(result.active, workspace)
   const output: NotificationSummaryResponse = {
     workspaceAdminAccountId: workspace, serverTime: date(result.serverTime, workspace),
     intervalSeconds: result.intervalSeconds === null ? null : interval(result.intervalSeconds, workspace),
     unreadCount: count(result.unreadCount, workspace), pendingCriticalCount: count(result.pendingCriticalCount, workspace),
     active: { attention: bucket(active.attention, workspace, 2), important: bucket(active.important, workspace, 3), critical: bucket(active.critical, workspace, 4) },
-    samplingState: sampling(result.samplingState, workspace),
+    samplingState: sampling(result.samplingState, workspace), displayedStates,
   }
   if (result.preferenceWarning !== undefined) output.preferenceWarning = warning(result.preferenceWarning, workspace)
   if (output.intervalSeconds === null && !output.preferenceWarning) return malformed(workspace)
   if (output.pendingCriticalCount !== output.active.critical.totalCount) return malformed(workspace)
-  unique([...output.active.attention.items, ...output.active.important.items, ...output.active.critical.items], workspace)
+  const activeItems = unique([...output.active.attention.items, ...output.active.important.items, ...output.active.critical.items], workspace)
+  const statesById = new Map(displayedStates.map(item => [item.id, item]))
+  if (activeItems.some(item => {
+    const state = statesById.get(item.id)
+    return state && (state.subjectActive !== item.subjectActive || state.subjectInactiveMessage !== item.subjectInactiveMessage || state.readAt !== item.readAt || state.reminderCompletedAt !== item.reminderCompletedAt)
+  })) return malformed(workspace)
   return output
 }
 
@@ -238,7 +257,7 @@ export const listNotifications = async (query: NotificationHistoryQuery, signal?
   const result = scope(await requestJson(`/?${params}`, workspace, { signal }), workspace)
   const max = query.limit === undefined ? 20 : Math.min(query.limit, 50)
   const items = unique(list(result.items, workspace, max).map(item => notice(item, workspace)), workspace)
-  if (query.filter === 'unread' && items.some(item => item.readAt !== null) || query.filter === 'pending' && items.some(item => item.level !== 4 || item.reminderCompletedAt !== null)) return malformed(workspace)
+  if (query.filter === 'unread' && items.some(item => !item.subjectActive || item.readAt !== null) || query.filter === 'pending' && items.some(item => !item.subjectActive || item.level !== 4 || item.reminderCompletedAt !== null)) return malformed(workspace)
   return { workspaceAdminAccountId: workspace, items, nextCursor: cursor(result.nextCursor, workspace) }
 }
 
@@ -258,7 +277,7 @@ export const getNotificationDetail = async (workspace: string, id: string, signa
 export const saveNotificationProgress = async (request: NotificationProgressRequest, signal?: AbortSignal): Promise<NotificationProgressResponse> => {
   const workspace = request.workspaceAdminAccountId
   parameters(workspace)
-  const result = scope(await requestJson('/progress', workspace, { method: 'POST', body: JSON.stringify(request), signal }), workspace)
+  const result = scope(await requestJson('/progress', workspace, { method: 'POST', body: JSON.stringify(request), signal }, 'write'), workspace)
   const items = unique(list(result.items, workspace, 50).map(item => progress(item, workspace)), workspace)
   const ids = new Set(request.ids)
   if (items.length !== request.ids.length || items.some(item => !ids.has(item.id))) return malformed(workspace)
@@ -276,7 +295,7 @@ export const getNotificationPreferences = async (workspace: string, signal?: Abo
 export const saveNotificationPreferences = async (request: NotificationPreferencesRequest, signal?: AbortSignal): Promise<NotificationPreferencesResponse> => {
   const workspace = request.workspaceAdminAccountId
   parameters(workspace)
-  const result = preferenceResponse(await requestJson('/preferences', workspace, { method: 'PUT', body: JSON.stringify(request), signal }), workspace)
+  const result = preferenceResponse(await requestJson('/preferences', workspace, { method: 'PUT', body: JSON.stringify(request), signal }, 'write'), workspace)
   if (result.intervalSeconds !== request.intervalMinutes * 60 || result.updatedAt === null) return malformed(workspace)
   return result
 }

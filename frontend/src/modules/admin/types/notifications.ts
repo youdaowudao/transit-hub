@@ -20,7 +20,12 @@ export interface NotificationProgress {
   readAt: string | null
   reminderCompletedAt: string | null
 }
-export interface SiteNotification extends NotificationProgress {
+export interface NotificationSubjectState {
+  subjectActive: boolean
+  subjectInactiveMessage: string
+}
+export interface NotificationDisplayedState extends NotificationProgress, NotificationSubjectState {}
+export interface SiteNotification extends NotificationProgress, NotificationSubjectState {
   adminAccountId: string
   kind: string
   subjectType: string
@@ -56,6 +61,7 @@ export interface NotificationSummaryResponse {
     critical: NotificationActiveBucket
   }
   samplingState: NotificationSamplingState
+  displayedStates: NotificationDisplayedState[]
 }
 export interface NotificationHistoryResponse {
   workspaceAdminAccountId: string
@@ -81,6 +87,7 @@ export interface NotificationSummaryQuery {
   attentionCursor?: string
   importantCursor?: string
   criticalCursor?: string
+  displayedIds?: string[]
 }
 export interface NotificationHistoryQuery {
   workspaceAdminAccountId: string

@@ -4,7 +4,7 @@ import { X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import type { NotificationController } from '../../composables/useNotifications'
 const props = defineProps<{ controller: NotificationController }>()
-const { criticalOpen, criticalBatch, criticalNextCursor, criticalTotalCount, busyIds, progressError, summaryLoading } = props.controller
+const { criticalOpen, criticalBatch, criticalNextCursor, criticalTotalCount, managementRefreshPending, busyIds, progressError, summaryLoading } = props.controller
 const dialogRef = ref<HTMLElement | null>(null)
 let previousFocus: HTMLElement | null = null
 let previousOverflow = ''
@@ -41,10 +41,11 @@ onBeforeUnmount(() => { if (criticalOpen.value || previousFocus) restore() })
   <Teleport to="body">
     <div v-if="criticalOpen" class="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-3 sm:p-4" @keydown="keydown">
       <section ref="dialogRef" role="alertdialog" aria-modal="true" aria-labelledby="notification-critical-title" aria-describedby="notification-critical-description" tabindex="-1" class="flex max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-destructive/40 bg-card shadow-2xl" @click.capture="focusBeforeButtonAction">
-        <div class="flex shrink-0 items-start justify-between gap-3 border-b border-border/50 p-4 sm:p-5"><div><h2 id="notification-critical-title" class="text-lg font-semibold text-destructive">紧急：优先确认</h2><p class="mt-1 text-sm text-muted-foreground">本次读取待确认{{ criticalTotalCount }}条，本摘要{{ criticalBatch.length }}条。</p></div><button type="button" class="shrink-0 text-muted-foreground hover:text-foreground" aria-label="收起紧急通知，待确认消息仍会保留" @click="controller.laterCritical()"><X class="h-5 w-5" /></button></div>
+        <div class="flex shrink-0 items-start justify-between gap-3 border-b border-border/50 p-4 sm:p-5"><div><h2 id="notification-critical-title" class="text-lg font-semibold text-destructive">紧急：优先确认</h2><p class="mt-1 text-sm text-muted-foreground"><template v-if="!managementRefreshPending">本次读取待确认{{ criticalTotalCount }}条，</template>本摘要{{ criticalBatch.length }}条。</p></div><button type="button" class="shrink-0 text-muted-foreground hover:text-foreground" aria-label="收起紧急通知，待确认消息仍会保留" @click="controller.laterCritical()"><X class="h-5 w-5" /></button></div>
         <div class="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-4 sm:p-5">
           <p id="notification-critical-description" class="text-sm text-muted-foreground">查看或确认不会修改主站。只确认当前摘要中列出的消息，后到和未显示的消息仍需单独确认。</p>
           <article v-for="item in criticalBatch" :key="item.id" class="min-w-0 break-words border-b border-border/50 pb-4"><h3 class="font-semibold">{{ item.content.title }}</h3><p class="mt-1 whitespace-pre-wrap text-sm">{{ item.content.summary }}</p><button type="button" class="mt-2 text-sm text-primary underline" @click="controller.openDetail(item.id)">查看详情</button><p class="mt-1 text-xs text-muted-foreground">查看详情只标记看过，仍需点击“我已知悉”。</p></article>
+          <p v-if="managementRefreshPending" role="status" class="break-words text-sm text-muted-foreground">{{ controller.summaryError.value || '站点设置已变化，正在重新确认通知数量；这里不会修改主站。' }}</p>
           <p v-if="progressError" role="alert" class="break-words text-sm text-destructive">{{ progressError }}</p>
           <Button v-if="criticalNextCursor" variant="secondary" size="sm" :disabled="summaryLoading || criticalBatch.some(item => busyIds.includes(item.id))" @click="controller.nextSummaryPage(4)">查看下一页紧急提醒</Button>
           <p class="text-xs text-muted-foreground">下一页只读取下一批消息，不会确认本批或其他消息。</p>

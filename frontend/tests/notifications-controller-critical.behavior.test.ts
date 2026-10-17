@@ -9,10 +9,10 @@ import type { NotificationSummaryResponse, SiteNotification } from '@/modules/ad
 const api = vi.hoisted(() => ({ summary: vi.fn(), history: vi.fn(), detail: vi.fn(), progress: vi.fn(), getPreferences: vi.fn(), savePreferences: vi.fn() }))
 vi.mock('@/modules/admin/api/notifications', async original => ({ ...await original<typeof import('@/modules/admin/api/notifications')>(), getNotificationSummary: api.summary, listNotifications: api.history, getNotificationDetail: api.detail, saveNotificationProgress: api.progress, getNotificationPreferences: api.getPreferences, saveNotificationPreferences: api.savePreferences }))
 const date = '2030-01-01T00:00:00Z'
-const item = (id: string, level: 1 | 2 | 3 | 4, workspace = 'a'): SiteNotification => ({ id, adminAccountId: workspace, kind: 'fixture.fact', subjectType: 'site', subjectId: 'site-a', level, discoveredAt: date, createdAt: date, content: { title: id, summary: '保存的事实', details: [] }, readAt: null, reminderCompletedAt: null })
+const item = (id: string, level: 1 | 2 | 3 | 4, workspace = 'a'): SiteNotification => ({ id, adminAccountId: workspace, kind: 'fixture.fact', subjectType: 'site', subjectId: 'site-a', subjectActive: true, subjectInactiveMessage: '', level, discoveredAt: date, createdAt: date, content: { title: id, summary: '保存的事实', details: [] }, readAt: null, reminderCompletedAt: null })
 const snapshot = (items: SiteNotification[] = [], workspace = 'a', seconds: number | null = 300): NotificationSummaryResponse => {
   const bucket = (level: number) => ({ items: items.filter(n => n.level === level && !n.reminderCompletedAt), totalCount: items.filter(n => n.level === level && !n.reminderCompletedAt).length, nextCursor: null })
-  return { workspaceAdminAccountId: workspace, serverTime: date, intervalSeconds: seconds, ...(seconds === null ? { preferenceWarning: { message: '设置暂不可读', detail: '数据库连接中断', next: '重试读取通知设置', retryable: true } } : {}), unreadCount: items.filter(n => !n.readAt).length, pendingCriticalCount: bucket(4).totalCount, active: { attention: bucket(2), important: bucket(3), critical: bucket(4) }, samplingState: { autoSyncEnabled: false, unconfirmedSiteCount: 0, sites: [] } }
+  return { workspaceAdminAccountId: workspace, serverTime: date, intervalSeconds: seconds, ...(seconds === null ? { preferenceWarning: { message: '设置暂不可读', detail: '数据库连接中断', next: '重试读取通知设置', retryable: true } } : {}), unreadCount: items.filter(n => !n.readAt).length, pendingCriticalCount: bucket(4).totalCount, active: { attention: bucket(2), important: bucket(3), critical: bucket(4) }, displayedStates: [], samplingState: { autoSyncEnabled: false, unconfirmedSiteCount: 0, sites: [] } }
 }
 const deferred = <T,>() => { let resolve!: (value: T) => void; let reject!: (error: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 const wrappers: VueWrapper[] = []
@@ -111,6 +111,7 @@ describe('workspace notification controller complete request paths', () => {
     api.summary.mockResolvedValueOnce(firstSummary)
     const { controller } = start(); await flushPromises()
     const next = snapshot([item('new-arrival', 4)]); next.pendingCriticalCount = 25; next.active.critical.totalCount = 25
+    next.displayedStates = first.map(n => ({ id: n.id, subjectActive: true, subjectInactiveMessage: '', readAt: null, reminderCompletedAt: null }))
     api.summary.mockResolvedValueOnce(next); await controller.refreshSummary()
     expect(controller.criticalBatch.value.map(n => n.id)).toEqual(first.map(n => n.id)); expect(controller.criticalTotalCount.value).toBe(24); expect(controller.pendingCriticalCount.value).toBe(25)
     expect(await controller.acknowledgeCritical()).toBe(true)
@@ -153,7 +154,7 @@ describe('workspace notification controller complete request paths', () => {
     const first = snapshot([item('first', 4)]); first.active.critical.nextCursor = 'critical-cursor'; first.active.critical.totalCount = 21; first.pendingCriticalCount = 21
     api.summary.mockResolvedValueOnce(first).mockResolvedValueOnce(snapshot([item('second-page', 4)]))
     const { controller } = start(); await flushPromises(); await controller.nextSummaryPage(4)
-    expect(api.summary).toHaveBeenLastCalledWith({ workspaceAdminAccountId: 'a', criticalCursor: 'critical-cursor' }, expect.anything())
+    expect(api.summary).toHaveBeenLastCalledWith({ workspaceAdminAccountId: 'a', criticalCursor: 'critical-cursor', displayedIds: ['first'] }, expect.anything())
     expect(controller.criticalBatch.value.map(n => n.id)).toEqual(['second-page']); expect(api.progress).not.toHaveBeenCalled()
   })
   it('blocks automatic urgent windows behind visible inline roles and retries only on a normal read', async () => {
@@ -260,5 +261,236 @@ describe('workspace notification controller complete request paths', () => {
     expect(getNotificationCheckRoute(known)).toEqual({ path: '/admin/group-rates', query: { siteId: 'site-a', focusGroupId: 'group-a' } })
     expect(getNotificationCheckRoute({ ...known, checkAction: { available: false, message: '相关网站已删除，这条提醒保留当时信息' } })).toBeNull()
     expect(getNotificationCheckRoute({ ...known, item: { ...fact, content: { ...fact.content, action: { kind: 'unknown-link' } } } })).toBeNull()
+  })
+})
+
+// 主代理冻结：已打开批次按明确编号失效，不与摘要第一页求交集。
+describe('unmanaged upstream notification lifecycle critical regression', () => {
+  it('removes only inactive displayed IDs from an open mixed urgent batch', async () => {
+    const a = {...item('managed-a', 4), subjectType:'upstream_site', subjectId:'a', subjectActive:true, subjectInactiveMessage:''}
+    const b = {...item('managed-b', 4), subjectType:'upstream_site', subjectId:'b', subjectActive:true, subjectInactiveMessage:''}
+    api.summary.mockResolvedValueOnce({...snapshot([a,b]),displayedStates:[]})
+    const {controller}=start(); await flushPromises()
+    expect(controller.criticalBatch.value.map(n=>n.id)).toEqual(['managed-a','managed-b'])
+    const states=[{id:a.id,subjectActive:false,subjectInactiveMessage:'这个站点已停止管理',readAt:null,reminderCompletedAt:null},{id:b.id,subjectActive:true,subjectInactiveMessage:'',readAt:null,reminderCompletedAt:null}]
+    api.summary.mockResolvedValueOnce({...snapshot([b]),displayedStates:states})
+    await controller.refreshSummary()
+    expect(controller.criticalOpen.value).toBe(true)
+    expect(controller.criticalBatch.value.map(n=>n.id)).toEqual(['managed-b'])
+    await controller.acknowledgeCritical()
+    expect(api.progress.mock.calls.at(-1)?.[0].ids).toEqual(['managed-b'])
+  })
+  it('keeps a displayed second-page urgent ID that is eligible but absent from first-page items', async () => {
+    const later={...item('later-page',4),subjectActive:true,subjectInactiveMessage:''}
+    const first={...item('first-page',4),subjectActive:true,subjectInactiveMessage:''}
+    api.summary.mockResolvedValueOnce({...snapshot([later]),displayedStates:[]})
+    const {controller}=start();await flushPromises()
+    api.summary.mockResolvedValueOnce({...snapshot([first,later]),active:{...snapshot([first]).active,critical:{items:[first],totalCount:2,nextCursor:'next'}},displayedStates:[{id:later.id,subjectActive:true,subjectInactiveMessage:'',readAt:null,reminderCompletedAt:null}]})
+    await controller.refreshSummary()
+    expect(controller.criticalBatch.value.map(n=>n.id)).toEqual(['later-page'])
+  })
+})
+
+describe('management changes and notification lifecycle failure paths', () => {
+  const siteItem = (id: string, level: 1 | 2 | 3 | 4, site = 'a'): SiteNotification => ({ ...item(id, level), subjectType: 'upstream_site', subjectId: site })
+  const displayed = (notice: SiteNotification, active = true) => ({ id: notice.id, subjectActive: active, subjectInactiveMessage: active ? '' : '这个站点已停止管理，这条消息保留为历史，不再主动提醒。', readAt: notice.readAt, reminderCompletedAt: notice.reminderCompletedAt })
+  it('clears an invalidated entire urgent batch without filling it during the same check', async () => {
+    const old = siteItem('old-batch', 4), fresh = siteItem('new-batch', 4, 'b')
+    api.summary.mockResolvedValueOnce(snapshot([old]))
+    const { controller } = start(); await flushPromises()
+    api.summary.mockResolvedValueOnce({ ...snapshot([fresh]), displayedStates: [displayed(old, false)] })
+    await controller.refreshSummary()
+    expect(api.summary.mock.calls.at(-1)?.[0].displayedIds).toEqual([old.id])
+    expect(controller.criticalOpen.value).toBe(false); expect(controller.criticalBatch.value).toEqual([])
+    api.summary.mockResolvedValueOnce(snapshot([fresh])); await controller.refreshSummary()
+    expect(controller.criticalBatch.value.map(n => n.id)).toEqual([fresh.id]); expect(controller.criticalOpen.value).toBe(true)
+    expect(api.progress).not.toHaveBeenCalled()
+  })
+  it('updates attention and important summaries on normal reads and explicit next pages', async () => {
+    const attention = siteItem('first-attention', 2), important = siteItem('first-important', 3)
+    const original = snapshot([attention, important]); original.active.attention.nextCursor = 'attention-next'; original.active.important.nextCursor = 'important-next'
+    api.summary.mockResolvedValueOnce(original)
+    const { controller } = start(); await flushPromises()
+    const freshAttention = siteItem('new-attention', 2), freshImportant = siteItem('new-important', 3)
+    const next = snapshot([attention, important, freshAttention, freshImportant]); next.displayedStates = [displayed(attention), displayed(important)]
+    next.active.attention.nextCursor = 'attention-next'; next.active.important.nextCursor = 'important-next'
+    api.summary.mockResolvedValueOnce(next); await controller.refreshSummary()
+    expect(controller.attentionItems.value.map(n => n.id)).toEqual([attention.id, freshAttention.id])
+    expect(controller.importantItems.value.map(n => n.id)).toEqual([important.id, freshImportant.id])
+    const secondAttention = siteItem('second-attention', 2), secondImportant = siteItem('second-important', 3)
+    const second = snapshot([secondAttention, secondImportant])
+    second.active.important.nextCursor = 'important-next'
+    api.summary.mockResolvedValueOnce(second); await controller.nextSummaryPage(2)
+    expect(controller.attentionItems.value.map(n => n.id)).toEqual([secondAttention.id])
+    api.summary.mockResolvedValueOnce(snapshot([secondAttention, secondImportant])); await controller.nextSummaryPage(3)
+    expect(controller.importantItems.value.map(n => n.id)).toEqual([secondImportant.id])
+    expect(api.progress).not.toHaveBeenCalled()
+  })
+  it('immediately drops confirmed stopped items, hides old counts through failures and recovers only from a latest summary', async () => {
+    const a = siteItem('a-urgent', 4), b = siteItem('b-urgent', 4, 'b')
+    api.summary.mockResolvedValueOnce(snapshot([a, b]))
+    const { controller } = start(); await flushPromises()
+    const old = deferred<NotificationSummaryResponse>(), current = deferred<NotificationSummaryResponse>()
+    api.summary.mockReturnValueOnce(old.promise); void controller.refreshSummary()
+    const oldSignal = api.summary.mock.calls.at(-1)![1] as AbortSignal
+    api.summary.mockReturnValueOnce(current.promise)
+    controller.siteManagementChanged('a', 'a', false)
+    expect(oldSignal.aborted).toBe(true)
+    expect(controller.managementRefreshPending.value).toBe(true)
+    expect(controller.criticalBatch.value.map(n => n.id)).toEqual([b.id])
+    old.resolve(snapshot([a, b])); await flushPromises()
+    expect(controller.managementRefreshPending.value).toBe(true)
+    expect(controller.criticalBatch.value.map(n => n.id)).toEqual([b.id])
+    current.reject(new Error('数据库连接中断 password=fixture-secret')); await flushPromises()
+    expect(controller.managementRefreshPending.value).toBe(true)
+    expect(controller.summaryError.value).toContain('通知数量暂时无法确认')
+    expect(controller.summaryError.value).toContain('数据库连接中断')
+    expect(controller.summaryError.value).not.toContain('fixture-secret')
+    expect(controller.unreadCount.value).toBe(2)
+    api.summary.mockResolvedValueOnce({ ...snapshot([b]), displayedStates: [displayed(b)] }); await controller.refreshSummary()
+    expect(controller.managementRefreshPending.value).toBe(false); expect(controller.unreadCount.value).toBe(1)
+    expect(api.progress).not.toHaveBeenCalled()
+  })
+  it('does not refill a locally cleared urgent batch when its management confirmation reread returns', async () => {
+    const old = siteItem('locally-cleared', 4), fresh = siteItem('other-still-pending', 4, 'b')
+    api.summary.mockResolvedValueOnce(snapshot([old]))
+    const { controller } = start(); await flushPromises()
+    api.summary.mockResolvedValueOnce(snapshot([fresh])); controller.siteManagementChanged('a', 'a', false); await flushPromises()
+    expect(controller.criticalOpen.value).toBe(false); expect(controller.criticalBatch.value).toEqual([])
+    api.summary.mockResolvedValueOnce(snapshot([fresh])); await controller.refreshSummary()
+    expect(controller.criticalBatch.value.map(n => n.id)).toEqual([fresh.id])
+  })
+  it('cancels old history and detail reads and updates the loaded history without changing reading progress', async () => {
+    const a = siteItem('old-history', 4)
+    api.summary.mockResolvedValueOnce(snapshot([a]))
+    api.history.mockResolvedValue({ workspaceAdminAccountId: 'a', items: [a], nextCursor: null })
+    api.detail.mockResolvedValue({ workspaceAdminAccountId: 'a', item: a, checkAction: { available: true, message: '只查看保存的信息' } })
+    const { controller } = start(); await flushPromises(); await controller.openDrawer(); await controller.openDetail(a.id)
+    const history = deferred<{ workspaceAdminAccountId: string; items: SiteNotification[]; nextCursor: null }>(), detail = deferred<{ workspaceAdminAccountId: string; item: SiteNotification }>()
+    api.history.mockReturnValueOnce(history.promise); void controller.loadHistory()
+    api.detail.mockReturnValueOnce(detail.promise); void controller.openDetail(a.id, true)
+    const historySignal = api.history.mock.calls.at(-1)![1] as AbortSignal, detailSignal = api.detail.mock.calls.at(-1)![2] as AbortSignal
+    const inactive = { ...a, ...displayed(a, false) }
+    api.summary.mockResolvedValueOnce(snapshot())
+    api.history.mockResolvedValue({ workspaceAdminAccountId: 'a', items: [inactive], nextCursor: null })
+    api.detail.mockResolvedValue({ workspaceAdminAccountId: 'a', item: inactive, checkAction: { available: true, message: '这个站点已停止管理' } })
+    controller.siteManagementChanged('a', 'a', false); await flushPromises()
+    expect(historySignal.aborted).toBe(true); expect(detailSignal.aborted).toBe(true)
+    history.resolve({ workspaceAdminAccountId: 'a', items: [a], nextCursor: null }); detail.resolve({ workspaceAdminAccountId: 'a', item: a }); await flushPromises()
+    expect(controller.historyItems.value[0]?.subjectActive).toBe(false); expect(controller.detail.value?.item.subjectActive).toBe(false)
+    expect(controller.detail.value?.item.readAt).toBeNull(); expect(controller.detail.value?.item.reminderCompletedAt).toBeNull()
+    expect(api.progress).not.toHaveBeenCalled()
+  })
+  it('does not let stale active history restore automatic eligibility and allows a later active summary to restore it', async () => {
+    const a = siteItem('restorable-important', 3)
+    api.summary.mockResolvedValueOnce(snapshot([a])); const { controller } = start(); await flushPromises()
+    api.summary.mockRejectedValueOnce(new Error('重新核查中断')); controller.siteManagementChanged('a', 'a', false); await flushPromises()
+    api.history.mockResolvedValueOnce({ workspaceAdminAccountId: 'a', items: [a], nextCursor: null }); await controller.loadHistory()
+    api.progress.mockResolvedValueOnce({ workspaceAdminAccountId: 'a', items: [{ id: a.id, readAt: date, reminderCompletedAt: date }] })
+    await controller.progress('read', [a.id]); await flushPromises()
+    expect(controller.importantItems.value).toEqual([])
+    api.summary.mockResolvedValueOnce(snapshot([a])); controller.siteManagementChanged('a', 'a', true); await flushPromises()
+    // The explicit read above still completes the important reminder; restoration cannot undo progress.
+    expect(controller.importantItems.value).toEqual([])
+    const untouched = siteItem('restored-urgent', 4)
+    api.summary.mockResolvedValueOnce(snapshot([untouched])); await controller.refreshSummary()
+    expect(controller.criticalBatch.value[0]?.id).toBe(untouched.id)
+  })
+  it('does not subtract active unread or pending counts when manually reading and acknowledging stopped history', async () => {
+    const active = siteItem('active-other', 4, 'b'), inactive = { ...siteItem('inactive-history', 4), subjectActive: false, subjectInactiveMessage: '已停止管理' }
+    api.summary.mockResolvedValue(snapshot([active])); api.history.mockResolvedValue({ workspaceAdminAccountId: 'a', items: [inactive], nextCursor: null })
+    api.detail.mockResolvedValue({ workspaceAdminAccountId: 'a', item: inactive })
+    const { controller } = start(); await flushPromises(); await controller.openDrawer(); await controller.openDetail(inactive.id)
+    const check = deferred<NotificationSummaryResponse>(); api.summary.mockReturnValueOnce(check.promise)
+    expect(await controller.markDetailRead(inactive.id)).toBe(true)
+    expect(controller.unreadCount.value).toBe(1); expect(controller.pendingCriticalCount.value).toBe(1)
+    expect(await controller.acknowledgeCritical([inactive.id])).toBe(true)
+    expect(controller.unreadCount.value).toBe(1); expect(controller.pendingCriticalCount.value).toBe(1)
+    expect(controller.detail.value?.item.reminderCompletedAt).toBe(date)
+    check.resolve(snapshot([active])); await flushPromises()
+  })
+  it('treats failed management as unknown until authoritative reading and discards old workspace results', async () => {
+    const a = siteItem('unknown-setting', 4)
+    api.summary.mockResolvedValueOnce(snapshot([a])); const { controller, workspaceId } = start(); await flushPromises()
+    const check = deferred<NotificationSummaryResponse>(); api.summary.mockReturnValueOnce(check.promise)
+    controller.siteManagementChanged('a', 'a')
+    expect(controller.criticalBatch.value.map(n => n.id)).toEqual([a.id]); expect(controller.managementRefreshPending.value).toBe(true)
+    api.summary.mockResolvedValueOnce(snapshot([], 'b')); workspaceId.value = 'b'; await flushPromises()
+    expect(controller.managementRefreshPending.value).toBe(false); expect(controller.unreadCount.value).toBe(0)
+    check.resolve(snapshot([a])); await flushPromises()
+    expect(controller.summary.value?.workspaceAdminAccountId).toBe('b'); expect(controller.criticalBatch.value).toEqual([])
+    controller.siteManagementChanged('a', 'a', false)
+    expect(controller.managementRefreshPending.value).toBe(false)
+  })
+})
+
+
+describe('restoring the same upstream notification subject', () => {
+  it('restores untouched old urgent facts from a new summary while preserving their original discovery time', async () => {
+    const a = { ...item('restore-same-id', 4), subjectType: 'upstream_site', subjectId: 'a' }
+    api.summary.mockResolvedValueOnce(snapshot([a])); const { controller } = start(); await flushPromises()
+    api.summary.mockResolvedValueOnce(snapshot()); controller.siteManagementChanged('a', 'a', false); await flushPromises()
+    expect(controller.criticalBatch.value).toEqual([])
+    api.summary.mockResolvedValueOnce(snapshot([a])); controller.siteManagementChanged('a', 'a', true); await flushPromises()
+    expect(controller.criticalBatch.value[0]).toMatchObject({ id: a.id, subjectActive: true, discoveredAt: date, readAt: null, reminderCompletedAt: null })
+    expect(api.progress).not.toHaveBeenCalled()
+  })
+})
+
+// 主代理冻结：Review C1三类交错必须先在C1失败，旧批次/后到消息期望不改。
+describe('review lifecycle crossings critical regression', () => {
+  const upstreamItem = (id: string, level: 1 | 4, site: string): SiteNotification => ({ ...item(id, level), subjectType: 'upstream_site', subjectId: site })
+  const state = (notice: SiteNotification, active = true) => ({ id: notice.id, subjectActive: active, subjectInactiveMessage: active ? '' : '这个站点已停止管理', readAt: null, reminderCompletedAt: null })
+  it.each([{ view: 'history', level: 1 }, { view: 'history', level: 4 }, { view: 'detail', level: 1 }, { view: 'detail', level: 4 }] as const)('does not debit B for late active $view A at level $level after a newer summary excludes A', async scenario => {
+    const a = upstreamItem('late-eligible-a', scenario.level, 'a'), b = upstreamItem('still-counted-b', 4, 'b')
+    api.summary.mockReset().mockResolvedValue(snapshot([b]))
+    const { controller } = start(); await flushPromises()
+    if (scenario.view === 'history') {
+      const old = deferred<{ workspaceAdminAccountId: string; items: SiteNotification[]; nextCursor: null }>()
+      api.history.mockReturnValueOnce(old.promise)
+      const opening = controller.openDrawer(); await flushPromises()
+      expect(controller.unreadCount.value).toBe(1)
+      old.resolve({ workspaceAdminAccountId: 'a', items: [a], nextCursor: null }); await opening
+    } else {
+      const old = deferred<{ workspaceAdminAccountId: string; item: SiteNotification }>()
+      api.detail.mockReturnValueOnce(old.promise)
+      const opening = controller.openDetail(a.id); await flushPromises(); await controller.refreshSummary()
+      old.resolve({ workspaceAdminAccountId: 'a', item: a }); await opening
+    }
+    const beforeReads = api.summary.mock.calls.length, correction = deferred<NotificationSummaryResponse>()
+    api.summary.mockReturnValueOnce(correction.promise)
+    expect(await (scenario.level === 4 ? controller.acknowledgeCritical([a.id]) : scenario.view === 'history' ? controller.markPageRead() : controller.markDetailRead(a.id))).toBe(true)
+    expect(api.progress.mock.calls.at(-1)?.[0].ids).toEqual([a.id])
+    expect(controller.unreadCount.value).toBe(1); expect(controller.pendingCriticalCount.value).toBe(1)
+    expect(api.summary.mock.calls.length).toBe(beforeReads + 1)
+    correction.resolve(snapshot([b])); await flushPromises()
+    expect(controller.unreadCount.value).toBe(1); expect(controller.pendingCriticalCount.value).toBe(1)
+  })
+  it('shows an explicitly requested valid next page when the prior urgent batch becomes entirely inactive', async () => {
+    const a = upstreamItem('page-old-a', 4, 'a'), b = upstreamItem('page-next-b', 4, 'b'), first = snapshot([a])
+    first.pendingCriticalCount = first.active.critical.totalCount = 2; first.active.critical.nextCursor = 'original-next'
+    api.summary.mockReset().mockResolvedValueOnce(first); const { controller } = start(); await flushPromises()
+    api.summary.mockResolvedValueOnce({ ...snapshot([b]), displayedStates: [state(a, false)] })
+    expect(await controller.nextSummaryPage(4)).toBe(true)
+    expect(controller.criticalOpen.value).toBe(true); expect(controller.criticalBatch.value.map(n => n.id)).toEqual([b.id])
+    expect(controller.criticalTotalCount.value).toBe(1)
+    await controller.acknowledgeCritical(); expect(api.progress.mock.calls.at(-1)?.[0].ids).toEqual([b.id])
+  })
+  it('keeps the urgent dialog closed when the user closes it while the explicit page request is pending', async () => {
+    const a = upstreamItem('closing-page-a', 4, 'a'), b = upstreamItem('closing-page-b', 4, 'b'), first = snapshot([a])
+    first.active.critical.nextCursor = 'original-next'; api.summary.mockReset().mockResolvedValueOnce(first)
+    const { controller } = start(); await flushPromises(); const page = deferred<NotificationSummaryResponse>()
+    api.summary.mockReturnValueOnce(page.promise); const next = controller.nextSummaryPage(4); controller.laterCritical()
+    page.resolve({ ...snapshot([b]), displayedStates: [state(a, false)] }); await next
+    expect(controller.criticalOpen.value).toBe(false); expect(api.progress).not.toHaveBeenCalled()
+  })
+  it('lowers an open urgent total after only an undisplayed site becomes inactive without replacing the batch or cursor', async () => {
+    const a = Array.from({ length: 20 }, (_, i) => upstreamItem('visible-a-' + i, 4, 'a')), first = snapshot(a)
+    first.unreadCount = first.pendingCriticalCount = first.active.critical.totalCount = 21; first.active.critical.nextCursor = 'original-next'
+    api.summary.mockReset().mockResolvedValueOnce(first); const { controller } = start(); await flushPromises()
+    api.summary.mockResolvedValueOnce({ ...snapshot(a), displayedStates: a.map(n => state(n)) }); await controller.refreshSummary()
+    expect(controller.criticalBatch.value.map(n => n.id)).toEqual(a.map(n => n.id))
+    expect(controller.pendingCriticalCount.value).toBe(20); expect(controller.criticalTotalCount.value).toBe(20)
+    expect(controller.criticalNextCursor.value).toBe('original-next'); expect(api.progress).not.toHaveBeenCalled()
   })
 })

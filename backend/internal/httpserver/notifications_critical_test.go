@@ -622,7 +622,7 @@ func TestNotificationAPISamplingIsLocalBoundedAndHonestPostgres(t *testing.T) {
 	if _, err := f.pool.Exec(t.Context(), `UPDATE strategy_settings SET settings='{"enableRefreshInterval":true}'::jsonb WHERE user_id='user' AND admin_account_id='workspace-a'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.pool.Exec(t.Context(), `ALTER TABLE upstream_sites RENAME TO unavailable_upstream_sites`); err != nil {
+	if _, err := f.pool.Exec(t.Context(), `ALTER TABLE upstream_sites RENAME COLUMN metrics TO unavailable_metrics`); err != nil {
 		t.Fatal(err)
 	}
 	body = notificationResponse(t, f.request(t, http.MethodGet, notificationScopePath("/api/notifications/summary"), nil, true), http.StatusOK)

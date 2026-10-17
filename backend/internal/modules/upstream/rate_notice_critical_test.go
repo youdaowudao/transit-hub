@@ -756,3 +756,33 @@ func TestRateNoticeCriticalCreateMissingParentKeepsExistingNotFoundResponsePostg
 		t.Fatal("父工作区消失仍应沿用新建失败缓存清理")
 	}
 }
+
+// 主代理冻结：停用可信观测不产生消息、不推进比较记录；恢复仍比较原值。
+func TestRateNoticeLifecycleDisabledObservationKeepsBaselinePostgres(t *testing.T) {
+	pool := rateNoticeCriticalPool(t)
+	sample := &rateNoticeCriticalSample{rate: 1, status: 200, name: "a"}
+	svc, cache := rateNoticeCriticalService(t, pool, sample)
+	rateNoticeCriticalSync(t, svc)
+	original, err := cache.Get(t.Context(), "site")
+	if err != nil || original == nil {
+		t.Fatal("cannot read isolated site")
+	}
+	disabled := cloneSite(original)
+	disabled.Enabled = boolPointer(false)
+	disabled.Metrics.Groups[0].Multiplier = float64Pointer(2)
+	input := &RateNoticeInput{Observation: RateNoticeObservation{Confirmed: true, ObservedAt: time.Date(2031, 1, 2, 0, 0, 0, 0, time.UTC)}}
+	repo := NewRepository(pool)
+	if _, err := repo.SaveSiteWithSnapshotVersion(t.Context(), disabled, input); err != nil {
+		t.Fatal(err)
+	}
+	rateNoticeCriticalCount(t, pool, 0)
+	var baseline float64
+	if err := pool.QueryRow(t.Context(), `SELECT multiplier FROM upstream_rate_notice_baselines WHERE site_id='site'`).Scan(&baseline); err != nil || baseline != 1 {
+		t.Fatal("disabled observation must keep original comparison value")
+	}
+	disabled.Enabled = boolPointer(true)
+	if _, err := repo.SaveSiteWithSnapshotVersion(t.Context(), disabled, input); err != nil {
+		t.Fatal(err)
+	}
+	rateNoticeCriticalCount(t, pool, 1)
+}

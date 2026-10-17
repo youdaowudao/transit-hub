@@ -17,6 +17,7 @@ type Handler struct{ service *Service }
 func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	h := &Handler{service: service}
 	mux.HandleFunc("GET /api/notifications/summary", h.summary)
+	mux.HandleFunc("POST /api/notifications/summary", h.summaryRead)
 	mux.HandleFunc("GET /api/notifications/{$}", h.history)
 	mux.HandleFunc("GET /api/notifications", h.history)
 	mux.HandleFunc("GET /api/notifications/preferences", h.preferences)
@@ -48,6 +49,10 @@ func requestScope(w http.ResponseWriter, r *http.Request, workspace string) (str
 }
 
 func decodeRequest(w http.ResponseWriter, r *http.Request, target any, workspace func() string) bool {
+	return decodeRequestIntent(w, r, target, workspace, false)
+}
+
+func decodeRequestIntent(w http.ResponseWriter, r *http.Request, target any, workspace func() string, readOnly bool) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -58,8 +63,10 @@ func decodeRequest(w http.ResponseWriter, r *http.Request, target any, workspace
 		if err == io.EOF {
 			return true
 		}
-		writeRequestError(w, workspace(), invalidRequest(workspace(), "请求正文在第一份JSON后还有其他内容，只能发送一份完整JSON；本次没有保存"))
-		return false
+		if err == nil {
+			writeRequestError(w, workspace(), invalidRequest(workspace(), "请求正文在第一份JSON后还有其他内容，只能发送一份完整JSON；本次没有改变任何消息或设置"))
+			return false
+		}
 	}
 	reason := "请求正文包含不允许的字段或不是通知接口要求的结构；本次没有保存"
 	var typeError *json.UnmarshalTypeError
@@ -68,6 +75,8 @@ func decodeRequest(w http.ResponseWriter, r *http.Request, target any, workspace
 	switch {
 	case errors.As(err, &typeError):
 		switch typeError.Field {
+		case "displayedIds":
+			reason = "已显示的消息编号必须是一组纯文字编号；本次没有改变任何消息"
 		case "intervalMinutes":
 			reason = "检查间隔必须使用1到60的整数分钟，小数、文字和其他类型无法保存；原有间隔没有改变"
 		case "ids":
@@ -86,6 +95,12 @@ func decodeRequest(w http.ResponseWriter, r *http.Request, target any, workspace
 	case errors.Is(err, io.EOF):
 		reason = "请求正文为空，没有提供要保存的消息操作或检查间隔；本次没有保存"
 	}
+	if readOnly {
+		reason = strings.ReplaceAll(reason, "本次没有保存", "本次未读取通知，也没有改变任何消息或设置")
+		if errors.Is(err, io.EOF) {
+			reason = "请求正文为空，请提供当前工作区和需要核查的消息编号后重试读取；本次没有改变任何消息或设置"
+		}
+	}
 	writeRequestError(w, workspace(), invalidRequest(workspace(), reason))
 	return false
 }
@@ -97,6 +112,29 @@ func (h *Handler) summary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := h.service.Summary(r.Context(), user, workspace, SummaryQuery{AttentionCursor: query.Get("attentionCursor"), ImportantCursor: query.Get("importantCursor"), CriticalCursor: query.Get("criticalCursor")})
+	if err != nil {
+		writeRequestError(w, workspace, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) summaryRead(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		WorkspaceAdminAccountID string   `json:"workspaceAdminAccountId"`
+		AttentionCursor         string   `json:"attentionCursor"`
+		ImportantCursor         string   `json:"importantCursor"`
+		CriticalCursor          string   `json:"criticalCursor"`
+		DisplayedIDs            []string `json:"displayedIds"`
+	}
+	if !decodeRequestIntent(w, r, &body, func() string { return body.WorkspaceAdminAccountID }, true) {
+		return
+	}
+	user, workspace, ok := requestScope(w, r, body.WorkspaceAdminAccountID)
+	if !ok {
+		return
+	}
+	result, err := h.service.Summary(r.Context(), user, workspace, SummaryQuery{AttentionCursor: body.AttentionCursor, ImportantCursor: body.ImportantCursor, CriticalCursor: body.CriticalCursor, DisplayedIDs: body.DisplayedIDs})
 	if err != nil {
 		writeRequestError(w, workspace, err)
 		return

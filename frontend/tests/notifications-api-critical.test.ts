@@ -14,7 +14,7 @@ vi.mock('@/modules/auth/api/auth', () => ({
 const workspaceAdminAccountId = 'workspace-a'
 const when = '2030-01-01T00:00:00Z'
 const notice = (id = 'notice-a', level = 4) => ({
-  id, adminAccountId: workspaceAdminAccountId, kind: 'fixture.fact', subjectType: 'site', subjectId: 'site-a', level,
+  id, adminAccountId: workspaceAdminAccountId, kind: 'fixture.fact', subjectType: 'site', subjectId: 'site-a', subjectActive: true, subjectInactiveMessage: '', level,
   discoveredAt: when, createdAt: when, content: { title: '网站倍率发生变化', summary: '请查看详细信息', details: [{ label: '原倍率', value: '1' }], action: { kind: 'group_rates', siteId: 'site-a', focusGroupId: '7' } },
   readAt: null as string | null, reminderCompletedAt: null as string | null,
 })
@@ -22,7 +22,7 @@ const bucket = (items: ReturnType<typeof notice>[] = []) => ({ items, totalCount
 const summary = () => ({
   workspaceAdminAccountId, serverTime: when, intervalSeconds: 300, unreadCount: 1, pendingCriticalCount: 1,
   active: { attention: bucket(), important: bucket(), critical: bucket([notice()]) },
-  samplingState: { autoSyncEnabled: false, unconfirmedSiteCount: 0, sites: [] },
+  displayedStates: [], samplingState: { autoSyncEnabled: false, unconfirmedSiteCount: 0, sites: [] },
 })
 const respond = (payload: unknown, status = 200) => {
   const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify(payload), { status }))
@@ -49,7 +49,7 @@ describe('notification API scoped complete decoding', () => {
   })
 
   it('preserves acquired messages when interval and sampling are unknown', async () => {
-    respond({ ...summary(), intervalSeconds: null, preferenceWarning: { message: '间隔读取失败', detail: '数据库存储表缺少必要结构', next: '请维护人员检查启动迁移' }, samplingState: { autoSyncEnabled: null, unconfirmedSiteCount: null, sites: [], warning: { message: '状态读取失败', detail: '数据库存储表缺少必要结构', next: '请维护人员检查' } } })
+    respond({ ...summary(), intervalSeconds: null, preferenceWarning: { message: '间隔读取失败', detail: '数据库存储表缺少必要结构', next: '请维护人员检查启动迁移' }, displayedStates: [], samplingState: { autoSyncEnabled: null, unconfirmedSiteCount: null, sites: [], warning: { message: '状态读取失败', detail: '数据库存储表缺少必要结构', next: '请维护人员检查' } } })
     const result = await getNotificationSummary({ workspaceAdminAccountId })
     expect(result.intervalSeconds).toBeNull()
     expect(result.active.critical.items).toHaveLength(1)
@@ -69,7 +69,7 @@ describe('notification API scoped complete decoding', () => {
     () => ({ ...summary(), active: { ...summary().active, critical: bucket(Array.from({ length: 21 }, (_, i) => notice(`notice-${i}`))) } }),
     () => ({ ...summary(), active: { ...summary().active, critical: { ...bucket([notice()]), totalCount: 0 } } }),
     () => ({ ...summary(), active: { ...summary().active, critical: bucket([{ ...notice(), content: { ...notice().content, details: null } } as unknown as ReturnType<typeof notice>]) } }),
-    () => ({ ...summary(), samplingState: { autoSyncEnabled: 'false', unconfirmedSiteCount: 0, sites: [] } }),
+    () => ({ ...summary(), displayedStates: [], samplingState: { autoSyncEnabled: 'false', unconfirmedSiteCount: 0, sites: [] } }),
   ])('rejects incomplete, contradictory or foreign summary evidence', async makeBody => {
     respond(makeBody())
     await expect(getNotificationSummary({ workspaceAdminAccountId })).rejects.toBeInstanceOf(Error)
@@ -159,5 +159,86 @@ describe('all notification API errors and cancellation', () => {
     expect(error.message).not.toContain('fixture-secret')
     expect(error.message).toMatch(/读取|保存|检查|返回/)
     expect(auth.expired).not.toHaveBeenCalled()
+  })
+})
+
+describe('site lifecycle displayed summary is a read operation', () => {
+  it('posts explicit displayed IDs and decodes their eligibility without marking progress', async () => {
+    const body=summary()
+    const fetchMock=respond({...body,active:{...body.active,critical:bucket([{...notice(),subjectActive:true,subjectInactiveMessage:''}])},displayedStates:[{id:'notice-a',subjectActive:true,subjectInactiveMessage:'',readAt:null,reminderCompletedAt:null}]})
+    const query={workspaceAdminAccountId,displayedIds:['notice-a']}
+    const result=await getNotificationSummary(query)
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({method:'POST'})
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject(query)
+    expect((result as unknown as {displayedStates:unknown[]}).displayedStates).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+  it('describes a displayed-summary network failure as reading, never an unknown save', async()=>{
+    vi.stubGlobal('fetch',vi.fn().mockRejectedValue(new TypeError('network unavailable')))
+    await expect(getNotificationSummary({workspaceAdminAccountId,displayedIds:['notice-a']})).rejects.toMatchObject({detail:expect.stringContaining('读取')})
+  })
+})
+
+describe('notification lifecycle projection validation', () => {
+  const state = (id: string) => ({ id, subjectActive: true, subjectInactiveMessage: '', readAt: null, reminderCompletedAt: null })
+  it.each([
+    [], [state('extra')], [state('a'), state('a')], [state('a'), state('b')],
+    [{ ...state('a'), subjectActive: 'true' }], [{ ...state('a'), subjectActive: false }],
+    [{ ...state('a'), subjectInactiveMessage: 'contradictory reason' }], [{ ...state('a'), readAt: 'bad date' }],
+  ].map(states => ({ states })))('rejects missing, extra, duplicate and contradictory displayed evidence %#', async ({ states }) => {
+    respond({ ...summary(), displayedStates: states })
+    await expect(getNotificationSummary({ workspaceAdminAccountId, displayedIds: ['a'] })).rejects.toBeInstanceOf(Error)
+  })
+  it('requires the displayed result to match each requested ID in order', async () => {
+    respond({ ...summary(), displayedStates: [state('b'), state('a')] })
+    await expect(getNotificationSummary({ workspaceAdminAccountId, displayedIds: ['a', 'b'] })).rejects.toBeInstanceOf(Error)
+  })
+  it('accepts 60 IDs but rejects oversized, duplicate or invalid request IDs without sending', async () => {
+    const ids = Array.from({ length: 60 }, (_, i) => `displayed-${i}`)
+    const fetchMock = respond({ ...summary(), displayedStates: ids.map(state) })
+    expect((await getNotificationSummary({ workspaceAdminAccountId, displayedIds: ids })).displayedStates).toHaveLength(60)
+    for (const invalid of [[...ids, 'sixty-one'], ['same', 'same'], [''], ['x'.repeat(513)]]) {
+      await expect(getNotificationSummary({ workspaceAdminAccountId, displayedIds: invalid })).rejects.toBeInstanceOf(Error)
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+  it.each([
+    { subjectActive: false, subjectInactiveMessage: '这个站点已停止管理' },
+    { subjectActive: true, subjectInactiveMessage: 'contradictory reason' },
+    { subjectActive: undefined, subjectInactiveMessage: '' },
+  ])('rejects inactive or incomplete messages in automatic buckets %#', async projection => {
+    respond({ ...summary(), active: { ...summary().active, critical: bucket([{ ...notice(), ...projection }]) } })
+    await expect(getNotificationSummary({ workspaceAdminAccountId })).rejects.toBeInstanceOf(Error)
+  })
+  it('retains inactive history and detail while rejecting it in unread and pending filters', async () => {
+    const inactive = { ...notice(), subjectActive: false, subjectInactiveMessage: '这个站点已停止管理，这条消息保留为历史，不再主动提醒。' }
+    respond({ workspaceAdminAccountId, items: [inactive], nextCursor: null })
+    expect((await listNotifications({ workspaceAdminAccountId, filter: 'all' })).items[0]?.subjectActive).toBe(false)
+    for (const filter of ['unread', 'pending'] as const) await expect(listNotifications({ workspaceAdminAccountId, filter })).rejects.toBeInstanceOf(Error)
+    respond({ workspaceAdminAccountId, item: inactive })
+    expect((await getNotificationDetail(workspaceAdminAccountId, inactive.id)).item.subjectInactiveMessage).toContain('不再主动提醒')
+  })
+  it('keeps read-only wording for malformed and HTTP-failed POST summaries', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('not JSON', { status: 503 })))
+    const malformed = await getNotificationSummary({ workspaceAdminAccountId, displayedIds: ['a'] }).catch(error => error)
+    expect(malformed.detail).toContain('没有修改消息进度')
+    expect(malformed.detail).not.toContain('是否已经保存')
+    respond({}, 503)
+    const failed = await getNotificationSummary({ workspaceAdminAccountId, displayedIds: ['a'] }).catch(error => error)
+    expect(failed.detail).toContain('读取没有完成')
+    expect(failed.detail).not.toContain('保存成功')
+  })
+})
+
+
+describe('summary evidence from the same read', () => {
+  it('rejects contradictory eligibility or progress between a displayed ID and its summary item', async () => {
+    for (const projected of [
+      { id: 'notice-a', subjectActive: false, subjectInactiveMessage: '已停止管理', readAt: null, reminderCompletedAt: null },
+      { id: 'notice-a', subjectActive: true, subjectInactiveMessage: '', readAt: when, reminderCompletedAt: null },
+    ]) {
+      respond({ ...summary(), displayedStates: [projected] })
+      await expect(getNotificationSummary({ workspaceAdminAccountId, displayedIds: ['notice-a'] })).rejects.toBeInstanceOf(Error)
+    }
   })
 })

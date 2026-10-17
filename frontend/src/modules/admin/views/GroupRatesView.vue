@@ -1914,8 +1914,8 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 <div class="font-medium text-foreground">{{ rate.siteName }}</div>
               </td>
               <td class="px-4 py-2.5">
-                <div class="flex items-center gap-1.5">
-                  <span class="font-medium text-foreground">{{ rate.groupName }}</span>
+                <div class="flex flex-col items-start gap-1">
+                  <span class="break-words font-medium text-foreground">{{ rate.groupName }}</span>
                   <span v-if="!connectionDataKnown" class="text-xs text-muted-foreground">对接状态暂时未知，请刷新读取资料</span>
                   <span v-else-if="isMainAccountMissing(rate)" class="inline-flex rounded-md border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-600 dark:text-red-300">{{ t('admin.groupRates.status.mainAccountMissing') }}</span>
                   <span v-else-if="isRealConnected(rate)" class="inline-flex rounded-md border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-300">{{ t('admin.groupRates.status.mapped') }}</span>
@@ -1975,12 +1975,14 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               </td>
               <td class="px-4 py-2.5 text-muted-foreground tabular-nums">{{ formatDateTime(rate.updatedAt) }}</td>
               <td class="px-4 py-2.5 text-right">
-                <div v-if="!rate.deleted && connectionDataKnown" class="flex justify-end gap-2">
+                <div v-if="!rate.deleted && connectionDataKnown" class="flex flex-col items-end gap-1">
                   <span v-if="connectionOperationBlocked(rate)" class="max-w-56 text-xs text-muted-foreground">{{ operationBlockedReason }}</span>
+                  <div class="flex flex-nowrap justify-end gap-1.5">
                   <Button
                     v-if="canEditMainSiteGroups(rate)"
                     variant="secondary"
                     size="sm"
+                    class="!h-7 gap-1 whitespace-nowrap !px-2.5 !text-xs"
                     :disabled="isActionLoading || isDisconnecting || connectionOperationBlocked(rate)"
                     :title="connectionOperationBlocked(rate) ? operationBlockedReason : t('admin.groupRates.groupEditor.actionHint')"
                     @click="openGroupEditor(rate)"
@@ -1989,38 +1991,39 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                     v-if="isMainAccountMissing(rate)"
                     variant="destructive"
                     size="sm"
-                    class="gap-1.5"
+                    class="!h-7 gap-1 whitespace-nowrap !px-2.5 !text-xs"
                     :disabled="isActionLoading || isDisconnecting || connectionOperationBlocked(rate)"
                     :title="connectionOperationBlocked(rate) ? operationBlockedReason : undefined"
                     @click="openDisconnect(rate)"
                   >
-                    <X class="h-3.5 w-3.5" />
+                    <X class="h-3 w-3" />
                     {{ t('admin.groupRates.disconnect.cleanupMissing') }}
                   </Button>
                   <Button
                     v-else-if="isRealConnected(rate)"
                     variant="destructive"
                     size="sm"
-                    class="gap-1.5"
+                    class="!h-7 gap-1 whitespace-nowrap !px-2.5 !text-xs"
                     :disabled="isActionLoading || isDisconnecting || connectionOperationBlocked(rate)"
                     :title="connectionOperationBlocked(rate) ? operationBlockedReason : undefined"
                     @click="openDisconnect(rate)"
                   >
-                    <X class="h-3.5 w-3.5" />
+                    <X class="h-3 w-3" />
                     {{ t('admin.groupRates.disconnect.action') }}
                   </Button>
                   <Button
                     v-else
                     variant="secondary"
                     size="sm"
-                    class="gap-1.5 text-primary hover:text-primary"
+                    class="!h-7 gap-1 whitespace-nowrap !px-2.5 !text-xs text-primary hover:text-primary"
                     :disabled="isActionLoading || connectionOperationBlocked(rate)"
                     :title="connectionOperationBlocked(rate) ? operationBlockedReason : undefined"
                     @click="openConnector(rate)"
                   >
-                    <Link2 class="h-3.5 w-3.5" />
+                    <Link2 class="h-3 w-3" />
                     {{ t('admin.groupRates.actions.connect') }}
                   </Button>
+                  </div>
                 </div>
               </td>
             </tr>

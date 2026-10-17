@@ -152,7 +152,7 @@ func (r *Repository) ReadRateNoticeBindingsTx(ctx context.Context, tx pgx.Tx, us
 }
 
 func (r *Repository) recordRateNoticesTx(ctx context.Context, tx pgx.Tx, site Site, input *RateNoticeInput) error {
-	if input == nil || !input.Observation.Confirmed {
+	if !site.IsEnabled() || input == nil || !input.Observation.Confirmed {
 		return nil
 	}
 	if input.Observation.ObservedAt.IsZero() {

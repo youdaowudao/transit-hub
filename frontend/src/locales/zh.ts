@@ -2491,6 +2491,8 @@ export default {
         type: '分组类型',
         platform: '站点平台',
         currentMultiplier: '当前倍率',
+        ownGroups: '对接的主站分组',
+        salesMultiplier: '销售倍率',
         effectiveMultiplier: '换算后成本倍率',
         multiplierFormula: '上游 {upstream} × 充值系数 {recharge}',
         delta: '涨跌幅',

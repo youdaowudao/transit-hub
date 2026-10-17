@@ -1,5 +1,7 @@
+import { t, te } from '@/locales'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
 import type {
+  OwnGroupRatesResponse,
   RunAutoPricingRequest,
   RunAutoPricingResponse,
   MySiteMapping,
@@ -570,4 +572,34 @@ export const listScopedRealConnections = async (request: { workspaceAdminAccount
     ids.add(item.id)
   }
   return { workspaceAdminAccountId: request.workspaceAdminAccountId, items: payload.items as RealConnection[] }
+}
+
+export const readOwnGroupRates = async (workspace: string, signal?: AbortSignal): Promise<OwnGroupRatesResponse> => {
+  const invalid = () => new ScopedCheckApiError('读取主站分组失败', 'Hub 返回的主站分组资料不完整，无法确认', '请点“刷新数据”重试')
+  let response: Response
+  try { response = await fetch(endpoint('/my-sites/own-group-rates?workspaceAdminAccountId=' + encodeURIComponent(workspace)), { method: 'GET', signal, headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHeaders() } }) }
+  catch (error) { if (scopedAbortError(error)) throw error; throw new ScopedCheckApiError('读取主站分组失败', 'Hub 后端没有响应', '请确认 Hub 服务正在运行，再点“刷新数据”') }
+  let payload: unknown
+  try { payload = JSON.parse(await response.text()) } catch (error) {
+    if (scopedAbortError(error)) throw error
+    if (response.status === 401) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+    throw invalid()
+  }
+  if (isUnauthorizedApiResponse(response.status, isObject(payload) ? payload : {})) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+  if (!response.ok) {
+    const record = isObject(payload) ? payload : {}
+    let message = safeScopedErrorText(record.message)
+    if (/^(?:admin|auth)\.[A-Za-z0-9_.]+$/.test(message)) message = te(message) ? t(message) : ''
+    message ||= '主站分组读取没有完成'
+    throw new ScopedCheckApiError(message, safeScopedErrorText(record.detail) || message, safeScopedErrorText(record.next) || '请点“刷新数据”重试')
+  }
+  if (!isObject(payload) || typeof payload.workspaceAdminAccountId !== 'string') throw invalid()
+  if (payload.workspaceAdminAccountId !== workspace) throw new ScopedCheckApiError('读取主站分组失败', '返回的资料属于另一个工作区，已忽略', '请重新进入本页')
+  if (!Array.isArray(payload.groups)) throw invalid()
+  const ids = new Set<string>()
+  for (const group of payload.groups) {
+    if (!isObject(group) || !scopedIdentityText(group.id) || ids.has(group.id) || typeof group.name !== 'string' || typeof group.status !== 'string' || !(group.multiplier === null || typeof group.multiplier === 'number' && Number.isFinite(group.multiplier))) throw invalid()
+    ids.add(group.id)
+  }
+  return payload as unknown as OwnGroupRatesResponse
 }

@@ -3,12 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { AlertCircle, ArrowUpDown, Check, ChevronDown, History, KeyRound, Link2, Loader2, Megaphone, RefreshCw, Search, ServerCog, Sparkles, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
-import { checkScopedRealConnections, listScopedRealConnections, listConnectionsNeedingAttention, ScopedCheckApiError, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, realDisconnect } from '../api/mySites'
+import { readOwnGroupRates, checkScopedRealConnections, listScopedRealConnections, listConnectionsNeedingAttention, ScopedCheckApiError, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, realDisconnect } from '../api/mySites'
 import { listUpstreamSiteOptions } from '../api/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
-import type { AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportDiagnostic, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, ConnectionNeedingAttention, ExpectedRealConnection, ScopedCheckRequest, ScopedCheckResult, ScopedGroupRef, UpstreamKeyItem } from '../types/mySites'
+import type { OwnGroupRate, AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportDiagnostic, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, ConnectionNeedingAttention, ExpectedRealConnection, ScopedCheckRequest, ScopedCheckResult, ScopedGroupRef, UpstreamKeyItem } from '../types/mySites'
 import type { ImportApiError } from '../api/mySites'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
 import { isImportAccountPlatform } from '../utils/importPlatforms'
@@ -81,6 +81,48 @@ const unconfirmedIds = ref(new Set<string>())
 const changedIds = ref(new Set<string>())
 const skippedIds = ref(new Set<string>())
 const realConnectionsData = ref<RealConnection[]>([])
+const ownGroupRatesState = ref<'idle' | 'loading' | 'ready' | 'failed'>('idle')
+const ownGroupRatesById = ref(new Map<string, OwnGroupRate>())
+const ownGroupRatesError = ref('')
+let ownGroupRatesWorkspace = ''
+let ownGroupRatesGeneration = 0
+let ownGroupRatesController: AbortController | null = null
+const resetOwnGroupRates = () => {
+  ownGroupRatesController?.abort()
+  ownGroupRatesController = null
+  ownGroupRatesGeneration++
+  ownGroupRatesState.value = 'idle'
+  ownGroupRatesById.value = new Map()
+  ownGroupRatesError.value = ''
+  ownGroupRatesWorkspace = ''
+}
+const loadOwnGroupRates = async () => {
+  const workspace = currentAccount.value?.id ?? ''
+  if (!workspace) return
+  ownGroupRatesController?.abort()
+  const controller = new AbortController()
+  ownGroupRatesController = controller
+  const generation = ++ownGroupRatesGeneration
+  ownGroupRatesWorkspace = workspace
+  ownGroupRatesState.value = 'loading'
+  ownGroupRatesById.value = new Map()
+  ownGroupRatesError.value = ''
+  const isCurrent = () => pageIsMounted && generation === ownGroupRatesGeneration && workspace === (currentAccount.value?.id ?? '')
+  try {
+    const response = await readOwnGroupRates(workspace, controller.signal)
+    if (!isCurrent()) return
+    ownGroupRatesById.value = new Map(response.groups.map(group => [group.id, group]))
+    ownGroupRatesState.value = 'ready'
+  } catch (error) {
+    if (!isCurrent() || error instanceof Error && error.name === 'AbortError') return
+    ownGroupRatesState.value = 'failed'
+    const cause = error instanceof ScopedCheckApiError ? error.detail || error.message : displayCause(error)
+    const next = error instanceof ScopedCheckApiError ? error.next : '请点“刷新数据”重试'
+    ownGroupRatesError.value = `销售倍率暂时读不到：${cause}。销售倍率先不显示，本次没有修改主站。${next}`
+  } finally {
+    if (isCurrent()) ownGroupRatesController = null
+  }
+}
 const disconnectingRate = ref<{ siteId: string; siteName: string; groupName: string; pricingMapped?: boolean } | null>(null)
 const disconnectIsMaintenance = ref(false)
 let disconnectGeneration = 0
@@ -282,6 +324,7 @@ watch([() => currentAccount.value?.id, adminPlatform], () => {
   invalidatePage(true)
   connectionDataKnown.value = false
   realConnectionsData.value = []
+  resetOwnGroupRates()
   if (pageIsMounted) void enterPage()
   hasLoadedMappingOptions.value = false
   connectOutcome.value = 'editing'
@@ -399,6 +442,44 @@ const isRealConnected = (rate: GroupRate): boolean => {
   return Boolean(connection && (!connection.status || connection.status === 'active'))
 }
 const isMainAccountMissing = (rate: GroupRate): boolean => realConnectionForRate(rate)?.status === 'missing'
+type OwnGroupCellLine = { key: string; id: string; name: string; title: string; value: string; valueTone: 'number' | 'muted'; suffix: string }
+type OwnGroupCells = { kind: 'unknown' | 'blank'; lines: OwnGroupCellLine[] } | { kind: 'lines'; lines: OwnGroupCellLine[] }
+const ownGroupCells = (rate: GroupRate): OwnGroupCells => {
+  if (!connectionDataKnown.value) return { kind: 'unknown', lines: [] }
+  const connections = realConnectionsForRate(rate).filter(c => !c.status || c.status === 'active')
+  if (!connections.length) return { kind: 'blank', lines: [] }
+  const groups = new Map<string, { id: string; name: string }>()
+  for (const connection of connections) {
+    const ids = Array.isArray(connection.ownGroupIds) ? connection.ownGroupIds : []
+    const names = Array.isArray(connection.ownGroupNames) ? connection.ownGroupNames : []
+    for (let i = 0; i < Math.max(ids.length, names.length); i++) {
+      const id = (ids[i] ?? '').trim(), name = (names[i] ?? '').trim()
+      if (!id && !name) continue
+      const key = id ? `id:${id}` : `name:${name}`
+      if (!groups.has(key)) groups.set(key, { id, name })
+    }
+  }
+  if (!groups.size) return { kind: 'lines', lines: [{ key: 'missing', id: '', name: '对接记录里没有主站分组', title: '对接记录里没有主站分组', value: '', valueTone: 'muted', suffix: '' }] }
+  const lines = Array.from(groups, ([key, group]): OwnGroupCellLine => {
+    const live = ownGroupRatesState.value === 'ready' && group.id ? ownGroupRatesById.value.get(group.id) : undefined
+    const name = live ? live.name : group.name || `分组编号 ${group.id}`
+    let value: string, valueTone: 'number' | 'muted' = 'muted', suffix = ''
+    if (ownGroupRatesState.value === 'loading') value = '读取中'
+    else if (ownGroupRatesState.value !== 'ready') value = '暂时读不到'
+    else if (!group.id) value = '对接记录没有分组编号'
+    else if (!live) value = '读取时主站没有这个分组'
+    else {
+      value = live.multiplier === null ? '主站未返回倍率' : formatMultiplier(live.multiplier)
+      if (live.multiplier !== null) valueTone = 'number'
+      const status = live.status.trim().toLowerCase()
+      if (status && status !== 'active') suffix = '（已停用）'
+    }
+    return { key, id: group.id, name, title: name, value, valueTone, suffix }
+  })
+  lines.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+  return { kind: 'lines', lines }
+}
+
 const isPricingMapped = (rate: GroupRate): boolean => rate.pricingMapped ?? mappedOwnGroupsForRate(rate).length > 0
 
 const groupRefsForPage = (): ScopedGroupRef[] => Array.from(new Map(rates.value.map(rate => {
@@ -571,6 +652,7 @@ const enterPage = async () => {
   rates.value = []
   page.value = 1
   if (!currentAccount.value?.id) { showMissingWorkspace(); return }
+  if (ownGroupRatesWorkspace !== (currentAccount.value?.id ?? '')) void loadOwnGroupRates()
   void loadUpstreamSiteOptions()
   void loadAttention()
   if (await loadLocalPage({ generation, focus: Boolean(pendingFocusGroup.value || pendingFocusGroupId.value) })) {
@@ -582,6 +664,7 @@ const enterPage = async () => {
 const checkThenLoadRates = async () => {
   if (isCheckingConnections.value || isAnyDialogOpen.value) return
   if (!currentAccount.value?.id) { showMissingWorkspace(); return }
+  void loadOwnGroupRates()
   const scope = frozenScope()
   const before = realConnectionsData.value.map(connection => ({ ...connection }))
   const generation = invalidatePage(true)
@@ -688,6 +771,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   pageIsMounted = false
+  resetOwnGroupRates()
   invalidatePage(true)
   optionsController?.abort()
   invalidateAttention(true)
@@ -1036,6 +1120,7 @@ const managedResourceErrorMessage = (error: unknown, fallbackKey: string): strin
 
 const refreshAfterMutation = async (isCurrent: () => boolean = () => true, confirmRefresh = false, localOnly = false): Promise<boolean> => {
   if (!isCurrent()) return false
+  if (!localOnly) void loadOwnGroupRates()
   const generation = invalidatePage()
   invalidateAttention()
   try {
@@ -1626,13 +1711,15 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
 
     <div class="shrink-0 space-y-1 text-sm text-muted-foreground">
       <p>这里显示上次成功读取的可用分组倍率，并保留它们的倍率变化。要取得新倍率，请到上游管理同步对应网站。刷新会检查对应的主站账号，不会创建、删除或修改主站账号。</p>
+      <p>“对接的主站分组”按 Hub 保存的对接记录，显示这个上游分组导入或关联的主站账号所在的分组；在主站后台直接改了账号分组，这里不会跟着变。没有对接的分组这两列留空，只标“已用于调价”的也留空。</p>
+      <p>“销售倍率”是这些分组在主站上的默认倍率，可与左边的换算后成本倍率对比；不含单独给用户设置的专属倍率，上游和主站的模型标准价不同时只能粗略对比。进入本页或点“刷新数据”时从主站读取，翻页和筛选不重新读取；自动调价或调价活动改价后，请点“刷新数据”查看。读取只查看，不会修改主站。</p>
       <p v-if="siteFilter">当前查看{{ siteOptions.find(site => site.id === siteFilter)?.name || siteFilter }}。进入或切换网站时只检查这个网站的关联账号；搜索和翻页不会检查其他网站。</p>
       <p v-else>进入时只检查首批30个分组关联的账号；翻页和筛选显示已保存资料，点击刷新可检查当前页。</p>
       <p v-if="isCheckingConnections">正在检查{{ attentionCheckingSite ? (attentionSiteOptions.find(site => site.id === attentionCheckingSite)?.name || attentionCheckingSite) : siteFilter ? (siteOptions.find(site => site.id === siteFilter)?.name || siteFilter) : '当前页' }}的关联账号，倍率可以先查看；账号检查中的操作暂时不可用。</p>
       <p v-else-if="checkSummary">{{ checkSummary }}</p>
       <p>{{ t('admin.groupRates.listDisplayHint') }}</p>
     </div>
-    <div v-for="notice in [connectionDataError, siteOptionsError, focusError].filter(Boolean)" :key="notice" role="alert" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
+    <div v-for="notice in [connectionDataError, siteOptionsError, focusError, ownGroupRatesError].filter(Boolean)" :key="notice" role="alert" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
       <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" /><span>{{ notice }}</span>
     </div>
 
@@ -1669,6 +1756,8 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.type') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.platform') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.effectiveMultiplier') }}</th>
+              <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.ownGroups') }}</th>
+              <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.salesMultiplier') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.delta') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.updatedAt') }}</th>
               <th class="px-6 py-3 text-right font-medium text-muted-foreground">{{ t('admin.groupRates.fields.actions') }}</th>
@@ -1718,6 +1807,14 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                     recharge: Number((rate.rechargeRate ?? 1).toFixed(4)).toString(),
                   }) }}
                 </div>
+              </td>
+              <td class="px-4 py-2.5">
+                <span v-if="ownGroupCells(rate).kind === 'unknown'" class="text-xs text-muted-foreground">暂时未知</span>
+                <div v-for="line in ownGroupCells(rate).lines" :key="line.key" data-own-group-line class="h-5 leading-5 max-w-48 truncate" :title="line.title">{{ line.name }}</div>
+              </td>
+              <td class="px-4 py-2.5">
+                <span v-if="ownGroupCells(rate).kind === 'unknown'" class="text-xs text-muted-foreground">暂时未知</span>
+                <div v-for="line in ownGroupCells(rate).lines" :key="line.key" data-sales-line class="h-5 leading-5 whitespace-nowrap tabular-nums" :class="line.valueTone === 'number' ? 'font-semibold text-foreground' : 'text-xs text-muted-foreground'">{{ line.value }}{{ line.suffix }}</div>
               </td>
               <td class="px-4 py-2.5">
                 <button

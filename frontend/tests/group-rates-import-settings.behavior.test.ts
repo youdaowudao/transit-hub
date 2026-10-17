@@ -93,6 +93,7 @@ beforeEach(() => {
   harness.mappingResponse = async () => json({ ownGroups: groups, mappings: [] })
   harness.connectionResponse = async () => json([])
   vi.stubGlobal('fetch', vi.fn(async (url: string, options: RequestInit = {}) => {
+    if (String(url).includes('/my-sites/own-group-rates')) return json({ workspaceAdminAccountId: new URL(String(url), 'http://local').searchParams.get('workspaceAdminAccountId'), groups: [] })
     if (url === '/api/my-sites/real-connect') {
       const request = JSON.parse(String(options.body))
       harness.requests.push(request)

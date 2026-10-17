@@ -40,6 +40,7 @@ const closeWindow = async (w: VueWrapper, kind: string) => {
 beforeEach(() => {
   h.workspace = ref({ id: 'ws-dialog', platform: 'sub2api' }); h.route = reactive({ query: {} }); h.requests = []; h.connected = false; h.read = attention
   vi.stubGlobal('fetch', vi.fn(async (input: string, options: RequestInit = {}) => {
+    if (String(input).includes('/my-sites/own-group-rates')) return response({ workspaceAdminAccountId: new URL(String(input), 'http://local').searchParams.get('workspaceAdminAccountId'), groups: [] })
     const path = String(input); h.requests.push(path)
     if (path.includes('/needs-attention')) return h.read(new URL(path, 'http://local').searchParams)
     if (path.includes('/upstream-sites/options')) return response({ workspaceAdminAccountId: h.workspace.value.id, items: [{ id: 'site-a', name: 'fixture site' }] })

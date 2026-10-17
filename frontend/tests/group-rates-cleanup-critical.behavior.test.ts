@@ -17,6 +17,7 @@ beforeEach(() => {
   h.route = reactive({ query: {} }); h.calls = []; h.failed = false
   h.attention = ['101', '102'].map((id, i) => ({ connection: connection(id, i ? 'missing' : 'active'), reason: 'group_not_found', detail: 'Hub保存的上游分组资料里未找到这个分组，不能据此确认上游删除。已有对接仍保留，你可以核对账号或解除本地对接。', lastSyncedAt: 1924992000000 }))
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
+    if (String(url).includes('/my-sites/own-group-rates')) return json({ workspaceAdminAccountId: new URL(String(url), 'http://local').searchParams.get('workspaceAdminAccountId'), groups: [] })
     const path = String(url); const body = init.body ? JSON.parse(String(init.body)) : null; h.calls.push({ path, body })
     if (path.includes('/needs-attention')) return h.failed ? json({ message: '已有对接暂时无法读取', detail: '测试读取连接被中断', next: '请重试读取' }, 503) : json({ workspaceAdminAccountId: 'ws-cleanup', total: h.attention.length, page: 1, pageSize: 30, totalPages: h.attention.length ? 1 : 0, items: h.attention })
     if (path.includes('/check-scoped')) return json({ workspaceAdminAccountId: 'ws-cleanup', total: h.attention.length, confirmedConnectionIds: h.attention.map(x => x.connection.id), unconfirmedConnectionIds: [], skippedConnectionIds: [], changedConnectionIds: [], confirmedStatuses: Object.fromEntries(h.attention.map(x => [x.connection.id, x.connection.status])), issues: [], storageUncertain: false })

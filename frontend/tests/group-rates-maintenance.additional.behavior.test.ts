@@ -26,6 +26,7 @@ beforeEach(() => {
   h.check = async (body: any) => json({ workspaceAdminAccountId: body.workspaceAdminAccountId, total: 0, confirmedConnectionIds: [], unconfirmedConnectionIds: [], skippedConnectionIds: [], changedConnectionIds: [], confirmedStatuses: {}, issues: [], storageUncertain: false })
   h.unlink = async (body: any) => { h.records = h.records.filter(item => item.connection.id !== body.connectionId); return json({ ok: true }) }
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
+    if (String(url).includes('/my-sites/own-group-rates')) return json({ workspaceAdminAccountId: new URL(String(url), 'http://local').searchParams.get('workspaceAdminAccountId'), groups: [] })
     const path = String(url), body = init.body ? JSON.parse(String(init.body)) : null; h.calls.push({ path, body })
     if (path.includes('/needs-attention')) return h.attention(new URL(path, 'http://local').searchParams)
     if (path.includes('/check-scoped')) return h.check(body)

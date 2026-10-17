@@ -22,6 +22,7 @@ beforeEach(() => {
   h.route = reactive({ query: {} }); h.calls = []; h.rates = [rate('1', '分组甲')]; h.connections = [conn('101', '1', '分组甲')]; h.optionsFail = false
   h.check = async () => json(result()); h.local = async () => json({ workspaceAdminAccountId: 'ws-scoped', items: h.connections })
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
+    if (String(url).includes('/my-sites/own-group-rates')) return json({ workspaceAdminAccountId: new URL(String(url), 'http://local').searchParams.get('workspaceAdminAccountId'), groups: [] })
     const path = String(url); const body = init.body ? JSON.parse(String(init.body)) : null; h.calls.push({ path, body })
     if (path.includes('/real-connections/check')) return h.check(body)
     if (path.includes('/real-connections/list-scoped')) return h.local(body)

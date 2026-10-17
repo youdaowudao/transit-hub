@@ -366,3 +366,14 @@ export interface ScopedCheckResult {
   issues: ScopedCheckIssue[]
   storageUncertain: boolean
 }
+
+export interface OwnGroupRate {
+  id: string
+  name: string
+  multiplier: number | null
+  status: string
+}
+export interface OwnGroupRatesResponse {
+  workspaceAdminAccountId: string
+  groups: OwnGroupRate[]
+}

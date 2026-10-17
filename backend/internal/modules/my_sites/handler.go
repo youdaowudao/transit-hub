@@ -18,6 +18,7 @@ type Handler struct {
 // 包含映射选项查询、映射关系保存、真实对接创建和记录查询。
 func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	handler := &Handler{service: service}
+	mux.HandleFunc("GET /api/my-sites/own-group-rates", handler.readOwnGroupRates)
 	mux.HandleFunc("GET /api/my-sites/mapping-options", handler.mappingOptions)
 	mux.HandleFunc("PUT /api/my-sites/mappings", handler.saveMappings)
 	mux.HandleFunc("PATCH /api/my-sites/mappings", handler.saveMapping)

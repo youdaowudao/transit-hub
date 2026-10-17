@@ -71,6 +71,7 @@ beforeEach(() => {
   h.listGate = null
   h.checkGate = null
   vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit = {}) => {
+    if (String(input).includes('/my-sites/own-group-rates')) return json({ workspaceAdminAccountId: new URL(String(input), 'http://local').searchParams.get('workspaceAdminAccountId'), groups: [] })
     const url = new URL(String(input), 'http://height.test')
     const path = url.pathname
     const method = init.method ?? 'GET'

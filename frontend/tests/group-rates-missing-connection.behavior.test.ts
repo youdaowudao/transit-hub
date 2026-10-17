@@ -46,6 +46,7 @@ vi.mock('@/modules/admin/api/groupRates', () => ({
 }))
 
 vi.mock('@/modules/admin/api/mySites', () => ({
+  readOwnGroupRates: vi.fn(async (workspace: string) => ({ workspaceAdminAccountId: workspace, groups: [] })),
   checkRealConnections: harness.checkRealConnections,
   checkScopedRealConnections: harness.checkRealConnections,
   ScopedCheckApiError: class extends Error {},

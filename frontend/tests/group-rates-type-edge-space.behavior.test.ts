@@ -30,6 +30,7 @@ const typeButton = (w: VueWrapper, text: string) => {
 beforeEach(() => {
   h.route = reactive({ query: {} }); h.calls = []
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
+    if (String(url).includes('/my-sites/own-group-rates')) return json({ workspaceAdminAccountId: new URL(String(url), 'http://local').searchParams.get('workspaceAdminAccountId'), groups: [] })
     const path = String(url); const body = init.body ? JSON.parse(String(init.body)) : null; h.calls.push({ path, method: init.method ?? 'GET', body })
     if (path.includes('/group-rates/type')) return json({ success: true })
     if (path.includes('/group-rates?')) return json({ workspaceAdminAccountId: 'ws-type', items, total: items.length, page: 1, pageSize: 30, totalPages: 1, types: ['openai'], platforms: ['openai'], statusCounts: { all: items.length, mapped: 0, unmapped: items.length, deleted: 0 } })

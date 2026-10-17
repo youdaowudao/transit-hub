@@ -223,6 +223,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	connHealthService.SetPlatformGroupReader(platformService)
 	mySitesService.SetConnectionRuntimeCleaner(connHealthService)
 	mySitesService.SetSafeAdminAccountDeletion(connHealthService)
+	mySitesService.SetManagedAccountGroupChanger(connHealthService)
 	connection_health.RegisterRoutes(server.mux, connHealthService)
 	server.connectionHealthService = connHealthService
 

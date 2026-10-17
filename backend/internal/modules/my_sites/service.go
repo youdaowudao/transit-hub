@@ -90,18 +90,19 @@ type BotNotifier interface {
 // Service 负责分组映射的查询与保存，以及真实对接的编排。
 // 供仪表盘分组弹窗和分组倍率页面复用。
 type Service struct {
-	repository         StateRepository
-	connRepository     RealConnectionRepository
-	platformService    *upstream.PlatformService
-	upstreamLookup     UpstreamSiteLookup
-	botNotifier        BotNotifier
-	accounts           AdminAccountResolver
-	runtimeCleaner     ConnectionRuntimeCleaner
-	safeAdminDeletion  SafeAdminAccountDeletion
-	now                func() time.Time
-	creationMutex      sync.Mutex
-	creationTargets    map[connectionCreationTarget]bool
-	creationOperations map[connectionCreationOperation]bool
+	repository          StateRepository
+	connRepository      RealConnectionRepository
+	platformService     *upstream.PlatformService
+	upstreamLookup      UpstreamSiteLookup
+	botNotifier         BotNotifier
+	accounts            AdminAccountResolver
+	runtimeCleaner      ConnectionRuntimeCleaner
+	safeAdminDeletion   SafeAdminAccountDeletion
+	managedGroupChanger ManagedAccountGroupChanger
+	now                 func() time.Time
+	creationMutex       sync.Mutex
+	creationTargets     map[connectionCreationTarget]bool
+	creationOperations  map[connectionCreationOperation]bool
 }
 
 type SafeAdminAccountDeletion interface {

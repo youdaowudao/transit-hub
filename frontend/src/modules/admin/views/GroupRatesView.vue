@@ -3,12 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { AlertCircle, ArrowUpDown, Check, ChevronDown, History, KeyRound, Link2, Loader2, Megaphone, RefreshCw, Search, ServerCog, Sparkles, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
-import { readOwnGroupRates, checkScopedRealConnections, listScopedRealConnections, listConnectionsNeedingAttention, ScopedCheckApiError, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, realDisconnect } from '../api/mySites'
+import { readOwnGroupRates, readConnectionMainSiteGroups, changeConnectionMainSiteGroups, syncConnectionHubGroups, MainSiteGroupsApiError, checkScopedRealConnections, listScopedRealConnections, listConnectionsNeedingAttention, ScopedCheckApiError, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, realDisconnect } from '../api/mySites'
 import { listUpstreamSiteOptions } from '../api/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
-import type { OwnGroupRate, AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportDiagnostic, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, ConnectionNeedingAttention, ExpectedRealConnection, ScopedCheckRequest, ScopedCheckResult, ScopedGroupRef, UpstreamKeyItem } from '../types/mySites'
+import type { ConnectionMainSiteGroups, MainSiteGroupMutationResult, OwnGroupRate, AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportDiagnostic, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, ConnectionNeedingAttention, ExpectedRealConnection, ScopedCheckRequest, ScopedCheckResult, ScopedGroupRef, UpstreamKeyItem } from '../types/mySites'
 import type { ImportApiError } from '../api/mySites'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
 import { isImportAccountPlatform } from '../utils/importPlatforms'
@@ -118,7 +118,7 @@ const loadOwnGroupRates = async () => {
     ownGroupRatesState.value = 'failed'
     const cause = error instanceof ScopedCheckApiError ? error.detail || error.message : displayCause(error)
     const next = error instanceof ScopedCheckApiError ? error.next : '请点“刷新数据”重试'
-    ownGroupRatesError.value = `销售倍率暂时读不到：${cause}。销售倍率先不显示，本次没有修改主站。${next}`
+    ownGroupRatesError.value = `销售倍率暂时读不到：${cause}。销售倍率先不显示；这次销售倍率读取本身不会修改主站。${next}`
   } finally {
     if (isCurrent()) ownGroupRatesController = null
   }
@@ -147,7 +147,25 @@ const isDisconnecting = ref(false)
 const disconnectError = ref('')
 const isCheckingConnections = ref(false)
 const connectionCheckError = ref('')
-const isAnyDialogOpen = computed(() => Boolean(isHistoryOpen.value || editingRate.value || connectingRate.value || disconnectingRate.value))
+const groupEditingRate = ref<GroupRate | null>(null)
+const groupEditorState = ref<'loading' | 'readFailed' | 'ready' | 'submitting' | 'syncing'>('loading')
+const groupEditorData = ref<ConnectionMainSiteGroups | null>(null)
+const groupEditorSelected = ref<string[]>([])
+const groupEditorRemovePricing = ref(true)
+const groupEditorReadError = ref('')
+const groupEditorResultNotice = ref('')
+const groupEditorBusy = computed(() => groupEditorState.value === 'submitting' || groupEditorState.value === 'syncing')
+const groupEditorUnchanged = computed(() => {
+  const current = groupEditorData.value?.currentGroups.map(group => group.id) ?? []
+  return current.length === groupEditorSelected.value.length && current.every(id => groupEditorSelected.value.includes(id))
+})
+let groupEditorGeneration = 0
+let groupEditorWorkspace = ''
+let groupEditorConnectionId = ''
+let groupEditorExpected: ExpectedRealConnection | null = null
+let groupEditorRequestSent = false
+let groupEditorController: AbortController | null = null
+const isAnyDialogOpen = computed(() => Boolean(isHistoryOpen.value || editingRate.value || connectingRate.value || disconnectingRate.value || groupEditingRate.value))
 let previouslyFocusedElement: HTMLElement | null = null
 let previousBodyOverflow = ''
 
@@ -165,7 +183,8 @@ const handleDialogKeydown = (event: KeyboardEvent) => {
   if (!dialog) return
   if (event.key === 'Escape') {
     event.preventDefault()
-    if (disconnectingRate.value && !isDisconnecting.value) closeDisconnect()
+    if (groupEditingRate.value) { if (!groupEditorBusy.value) closeGroupEditor() }
+    else if (disconnectingRate.value && !isDisconnecting.value) closeDisconnect()
     else if (connectingRate.value && !isActionLoading.value) closeConnector()
     else if (editingRate.value && !isActionLoading.value) closeTypeEditor()
     else if (isHistoryOpen.value) closeHistory()
@@ -300,6 +319,7 @@ watch(supportsConnectPassthrough, (supported) => {
   if (!supported) connectPassthrough.value = false
 })
 watch([() => currentAccount.value?.id, adminPlatform], () => {
+  resetGroupEditor()
   connectorGeneration++
   disconnectGeneration++
   closeDisconnect()
@@ -500,7 +520,7 @@ const connectionOperationBlocked = (rate: GroupRate): boolean => {
   if (!applicableConnection(connection)) return false
   return isCheckingConnections.value || !confirmedIds.value.has(connection.id) || !unchanged
 }
-const operationBlockedReason = '这个账号正在检查或本次未能确认，暂时不能导入或解绑；请等待检查结束，或点击刷新完成核对。'
+const operationBlockedReason = '这个账号正在检查或本次未能确认，暂时不能导入、解绑或修改主站分组；请等待检查结束，或点击刷新完成核对。'
 // The backend trims the group name with Go strings.TrimSpace before matching by
 // name, so such a row could update another group. Same character set as
 // utils/questionAnswers.ts; JavaScript trim() misses U+0085.
@@ -771,6 +791,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   pageIsMounted = false
+  resetGroupEditor()
   resetOwnGroupRates()
   invalidatePage(true)
   optionsController?.abort()
@@ -1347,6 +1368,108 @@ const freezeExpectedConnection = (connection: RealConnection, workspace: string)
   ownGroupIds: [...new Set(connection.ownGroupIds ?? [])].sort(), ownGroupNames: [...new Set(connection.ownGroupNames ?? [])].sort(),
   pricingMappingEnabled: connection.pricingMappingEnabled ?? false,
 })
+const canEditMainSiteGroups = (rate: GroupRate): boolean => {
+  const connection = realConnectionForRate(rate)
+  return !rate.deleted && connectionDataKnown.value && Boolean(connection && (!connection.status || connection.status === 'active') && connection.provisioningMode === 'managed' && connection.adminPlatform === 'sub2api' && connection.adminAccountId?.trim())
+}
+const resetGroupEditor = () => {
+  groupEditorGeneration++
+  groupEditorController?.abort()
+  groupEditorController = null
+  groupEditingRate.value = null
+  groupEditorData.value = null
+  groupEditorSelected.value = []
+  groupEditorRemovePricing.value = true
+  groupEditorReadError.value = ''
+  groupEditorResultNotice.value = ''
+  groupEditorExpected = null
+  groupEditorWorkspace = ''
+  groupEditorConnectionId = ''
+  groupEditorRequestSent = false
+  groupEditorState.value = 'loading'
+}
+const closeGroupEditor = () => {
+  if (groupEditorBusy.value) return
+  const workspace = groupEditorWorkspace
+  const sent = groupEditorRequestSent
+  resetGroupEditor()
+  if (sent) void refreshAfterMutation(() => pageIsMounted && workspace === (currentAccount.value?.id ?? ''), false, false)
+}
+const readGroupEditor = async () => {
+  if (!groupEditingRate.value || groupEditorBusy.value) return
+  const generation = ++groupEditorGeneration
+  const workspace = groupEditorWorkspace
+  groupEditorController?.abort()
+  const controller = new AbortController()
+  groupEditorController = controller
+  groupEditorState.value = 'loading'
+  groupEditorData.value = null
+  groupEditorExpected = null
+  groupEditorReadError.value = ''
+  const isCurrent = () => pageIsMounted && Boolean(groupEditingRate.value) && generation === groupEditorGeneration && workspace === (currentAccount.value?.id ?? '')
+  try {
+    const data = await readConnectionMainSiteGroups(groupEditorConnectionId, workspace, controller.signal)
+    if (!isCurrent()) return
+    groupEditorData.value = data
+    groupEditorExpected = freezeExpectedConnection(data.connection, workspace)
+    groupEditorSelected.value = data.currentGroups.map(group => group.id)
+    groupEditorRemovePricing.value = true
+    groupEditorState.value = 'ready'
+  } catch (error) {
+    if (!isCurrent() || error instanceof Error && error.name === 'AbortError') return
+    groupEditorReadError.value = t('admin.groupRates.groupEditor.readFailed', { reason: displayCause(error) })
+    groupEditorState.value = 'readFailed'
+  } finally { if (isCurrent()) groupEditorController = null }
+}
+const openGroupEditor = (rate: GroupRate) => {
+  if (!canEditMainSiteGroups(rate) || connectionOperationBlocked(rate) || isAnyDialogOpen.value) return
+  const connection = realConnectionForRate(rate)!
+  invalidatePage()
+  invalidateAttention()
+  resetGroupEditor()
+  groupEditingRate.value = rate
+  groupEditorWorkspace = currentAccount.value?.id ?? ''
+  groupEditorConnectionId = connection.id
+  void readGroupEditor()
+}
+const groupEditorResultText = (result: MainSiteGroupMutationResult): string => {
+  const fallback: Record<string, string> = {
+    unchanged: t('admin.groupRates.groupEditor.unchangedResult'),
+    main_changed_hub_not_saved: t('admin.groupRates.groupEditor.mainChangedResult'),
+    main_unknown: t('admin.groupRates.groupEditor.mainUnknownResult'),
+    hub_unknown: t('admin.groupRates.groupEditor.hubUnknownResult'),
+  }
+  return [result.message || fallback[result.outcome], result.detail, result.next].filter(Boolean).join('；')
+}
+const submitGroupEditor = async (sync = false) => {
+  const data = groupEditorData.value
+  if (!data || !groupEditorExpected || groupEditorState.value !== 'ready' || !sync && (!groupEditorSelected.value.length || groupEditorUnchanged.value) || sync && data.consistent) return
+  const workspace = groupEditorWorkspace
+  const generation = groupEditorGeneration
+  const isCurrent = () => pageIsMounted && Boolean(groupEditingRate.value) && generation === groupEditorGeneration && workspace === (currentAccount.value?.id ?? '')
+  const request = { workspaceAdminAccountId: workspace, expectedConnection: groupEditorExpected, expectedMainSiteGroupIds: data.currentGroups.map(group => group.id), removeOldPricingMapping: groupEditorRemovePricing.value }
+  groupEditorState.value = sync ? 'syncing' : 'submitting'
+  groupEditorResultNotice.value = ''
+  groupEditorRequestSent = true
+  try {
+    const result = sync ? await syncConnectionHubGroups(groupEditorConnectionId, request) : await changeConnectionMainSiteGroups(groupEditorConnectionId, { ...request, targetGroupIds: [...groupEditorSelected.value] })
+    if (!isCurrent()) return
+    if (result.outcome === 'completed') {
+      resetGroupEditor()
+      await refreshAfterMutation(() => pageIsMounted && workspace === (currentAccount.value?.id ?? ''), true, false)
+      return
+    }
+    groupEditorResultNotice.value = groupEditorResultText(result)
+  } catch (error) {
+    if (!isCurrent()) return
+    groupEditorResultNotice.value = error instanceof MainSiteGroupsApiError
+      ? t('admin.groupRates.groupEditor.' + (error.kind === 'network' ? 'noResponse' : 'invalidResponse'))
+      : displayCause(error)
+  }
+  if (!isCurrent()) return
+  groupEditorState.value = 'ready'
+  await readGroupEditor()
+}
 const attentionSiteName = (connection: RealConnection) => connection.siteName || siteOptions.value.find(site => site.id === connection.upstreamSiteId)?.name || connection.upstreamSiteId
 const attentionSiteOptions = computed(() => {
   const options = new Map(siteOptions.value.map(site => [site.id, site.name]))
@@ -1834,6 +1957,14 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <td class="px-4 py-2.5 text-right">
                 <div v-if="!rate.deleted && connectionDataKnown" class="flex justify-end gap-2">
                   <span v-if="connectionOperationBlocked(rate)" class="max-w-56 text-xs text-muted-foreground">{{ operationBlockedReason }}</span>
+                  <Button
+                    v-if="canEditMainSiteGroups(rate)"
+                    variant="secondary"
+                    size="sm"
+                    :disabled="isActionLoading || isDisconnecting || connectionOperationBlocked(rate)"
+                    :title="connectionOperationBlocked(rate) ? operationBlockedReason : t('admin.groupRates.groupEditor.actionHint')"
+                    @click="openGroupEditor(rate)"
+                  >{{ t('admin.groupRates.groupEditor.action') }}</Button>
                   <Button
                     v-if="isMainAccountMissing(rate)"
                     variant="destructive"
@@ -2407,6 +2538,62 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             </Button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <div v-if="groupEditingRate" class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
+      <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-editor-title" tabindex="-1" class="max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto overscroll-contain rounded-xl border border-border/50 bg-card shadow-xl">
+        <div class="flex items-start justify-between gap-4 border-b border-border/50 p-6">
+          <div>
+            <h2 id="group-rate-editor-title" class="text-xl font-semibold text-foreground">{{ t('admin.groupRates.groupEditor.action') }}</h2>
+            <p class="mt-2 text-sm text-muted-foreground">{{ t('admin.groupRates.groupEditor.description', { site: groupEditingRate.siteName, group: groupEditingRate.groupName }) }}</p>
+          </div>
+          <button aria-label="关闭修改主站分组" class="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-surface-line hover:text-foreground" :disabled="groupEditorBusy" @click="closeGroupEditor"><X class="h-5 w-5" /></button>
+        </div>
+        <div class="space-y-5 p-6">
+          <div v-if="groupEditorResultNotice" role="status" class="flex items-start gap-3 rounded-xl border border-warning/20 bg-warning/10 p-3 text-sm text-warning"><AlertCircle class="mt-0.5 h-4 w-4 shrink-0" /><span class="min-w-0 break-words">{{ groupEditorResultNotice }}</span></div>
+          <p v-if="groupEditorState === 'loading'" role="status" class="text-sm text-muted-foreground">{{ t('admin.groupRates.groupEditor.loading') }}</p>
+          <div v-if="groupEditorState === 'readFailed'" role="alert" class="rounded-xl border border-warning/20 bg-warning/10 p-3 text-sm text-warning">{{ groupEditorReadError }}</div>
+          <template v-if="groupEditorData">
+            <div class="space-y-2 break-words text-sm">
+              <p>{{ t('admin.groupRates.groupEditor.upstream', { site: groupEditingRate.siteName, group: groupEditingRate.groupName }) }}</p>
+              <p>{{ t('admin.groupRates.groupEditor.account', { name: groupEditorData.account.name, id: groupEditorData.account.id }) }}</p>
+              <p>{{ t('admin.groupRates.groupEditor.platform', { platform: groupEditorData.account.platform }) }}</p>
+              <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.groupRates.groupEditor.reconfigure') }}</p>
+            </div>
+            <div v-if="!groupEditorData.consistent" class="space-y-3 rounded-xl border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
+              <p>{{ t('admin.groupRates.groupEditor.inconsistent', { main: groupEditorData.currentGroups.map(group => group.name || group.id).join('、'), hub: groupEditorData.hubGroups.map(group => group.name || group.id).join('、') || '没有分组' }) }}</p>
+              <Button variant="secondary" size="sm" :disabled="groupEditorBusy" @click="submitGroupEditor(true)">{{ t('admin.groupRates.groupEditor.sync') }}</Button>
+              <p class="text-xs">{{ t('admin.groupRates.groupEditor.syncHint') }}</p>
+            </div>
+            <fieldset class="space-y-3" :disabled="groupEditorBusy">
+              <legend class="mb-3 text-sm font-medium text-foreground">{{ t('admin.groupRates.groupEditor.groups', { platform: groupEditorData.account.platform }) }}</legend>
+              <p v-if="!groupEditorData.groups.length" class="text-sm text-muted-foreground">{{ t('admin.groupRates.groupEditor.noGroups') }}</p>
+              <label v-for="group in groupEditorData.groups" :key="group.id" class="flex items-center gap-3 rounded-lg border border-border/50 p-3 text-sm">
+                <input v-model="groupEditorSelected" type="checkbox" :value="group.id" :disabled="groupEditorBusy" class="h-4 w-4 accent-primary" />
+                <span>{{ group.name || group.id }}</span>
+                <span v-if="groupEditorData.currentGroups.some(current => current.id === group.id)" class="text-xs text-muted-foreground">{{ t('admin.groupRates.groupEditor.current') }}</span>
+                <span v-if="group.status.trim().toLowerCase() !== 'active'" class="text-xs text-muted-foreground">{{ t('admin.groupRates.groupEditor.inactive') }}</span>
+              </label>
+              <label v-if="groupEditorData.connection.pricingMappingEnabled" class="flex items-start gap-3 rounded-xl border border-border/50 bg-surface/50 p-4">
+                <input v-model="groupEditorRemovePricing" type="checkbox" :disabled="groupEditorBusy" class="mt-0.5 h-4 w-4 accent-primary" />
+                <span><span class="text-sm font-medium text-foreground">{{ t('admin.groupRates.groupEditor.removePricing') }}</span><span class="mt-1 block text-xs leading-5 text-muted-foreground">{{ t('admin.groupRates.groupEditor.pricingHint') }}</span></span>
+              </label>
+            </fieldset>
+            <div v-if="groupEditorSelected.length" class="space-y-2 text-xs leading-5 text-muted-foreground">
+              <p>{{ t('admin.groupRates.groupEditor.' + (groupEditorSelected.length === 1 ? 'singleImpact' : 'multipleImpact')) }}</p>
+              <p>{{ t('admin.groupRates.groupEditor.' + (groupEditorSelected.length === 1 ? 'singlePurchase' : 'multiplePurchase')) }}</p>
+            </div>
+            <p v-if="!groupEditorSelected.length" class="text-sm text-warning">{{ t('admin.groupRates.groupEditor.required') }}</p>
+            <p v-else-if="groupEditorUnchanged" class="text-sm text-muted-foreground">{{ t('admin.groupRates.groupEditor.unchanged') }}</p>
+          </template>
+          <p v-if="groupEditorBusy" role="status" class="text-sm text-muted-foreground">{{ t('admin.groupRates.groupEditor.' + (groupEditorState === 'syncing' ? 'syncing' : 'submitting')) }}</p>
+          <div class="flex flex-wrap justify-end gap-2">
+            <Button variant="secondary" :disabled="groupEditorBusy" @click="closeGroupEditor">{{ t('admin.groupRates.actions.cancel') }}</Button>
+            <Button v-if="groupEditorState !== 'loading'" variant="secondary" :disabled="groupEditorBusy" @click="readGroupEditor">{{ t('admin.groupRates.groupEditor.reread') }}</Button>
+            <Button v-if="groupEditorData" :disabled="groupEditorBusy || !groupEditorSelected.length || groupEditorUnchanged" @click="submitGroupEditor(false)">{{ t('admin.groupRates.groupEditor.save') }}</Button>
+          </div>
+        </div>
       </div>
     </div>
 

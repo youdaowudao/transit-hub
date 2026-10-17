@@ -19,6 +19,10 @@ import type {
   ImportConfiguration,
   ImportDiagnostic,
   ConnectionsNeedingAttentionResponse,
+  ConnectionMainSiteGroups,
+  ChangeConnectionMainSiteGroupsRequest,
+  SyncConnectionHubGroupsRequest,
+  MainSiteGroupMutationResult,
 } from '../types/mySites'
 import {
   authUnauthorizedErrorKey,
@@ -603,3 +607,66 @@ export const readOwnGroupRates = async (workspace: string, signal?: AbortSignal)
   }
   return payload as unknown as OwnGroupRatesResponse
 }
+
+export class MainSiteGroupsApiError extends Error {
+  constructor(readonly kind: 'network' | 'invalid') {
+    super(kind === 'network' ? 'Hub 后端没有回复，请确认 Hub 服务正在运行后点“重新读取”' : 'Hub 返回的资料不完整或不属于当前工作区，请点“重新读取”')
+    this.name = 'MainSiteGroupsApiError'
+  }
+}
+const validMainSiteGroups = (value: unknown, withStatus = false): boolean => {
+  if (!Array.isArray(value)) return false
+  const ids = new Set<string>()
+  for (const group of value) {
+    if (!isObject(group) || !scopedIdentityText(group.id) || ids.has(group.id) || typeof group.name !== 'string' || withStatus && typeof group.status !== 'string') return false
+    ids.add(group.id)
+  }
+  return true
+}
+const validMainSiteGroupConnection = (value: unknown, id: string): value is RealConnection => {
+  if (!isObject(value) || value.id !== id || value.upstreamKey !== undefined && value.upstreamKey !== '') return false
+  for (const key of ['upstreamSiteId', 'upstreamGroupId', 'upstreamGroupName', 'upstreamKeyId', 'adminAccountId', 'adminAccountName', 'groupType', 'createdAt']) if (typeof value[key] !== 'string') return false
+  if (!Array.isArray(value.ownGroupIds) || !value.ownGroupIds.every(scopedIdentityText)) return false
+  if (value.ownGroupNames !== undefined && (!Array.isArray(value.ownGroupNames) || !value.ownGroupNames.every(name => typeof name === 'string'))) return false
+  for (const key of ['adminPlatform', 'upstreamPlatform', 'provisioningMode', 'status']) if (value[key] !== undefined && typeof value[key] !== 'string') return false
+  return value.pricingMappingEnabled === undefined || typeof value.pricingMappingEnabled === 'boolean'
+}
+const mainSiteGroupsRequest = async (id: string, workspace: string, request?: SyncConnectionHubGroupsRequest | ChangeConnectionMainSiteGroupsRequest, sync = false, signal?: AbortSignal): Promise<unknown> => {
+  const path = '/my-sites/real-connections/' + encodeURIComponent(id) + '/main-site-groups' + (sync ? '/hub-record' : '')
+  let response: Response
+  try {
+    response = await fetch(endpoint(path + (request ? '' : '?workspaceAdminAccountId=' + encodeURIComponent(workspace))), {
+      method: request ? 'POST' : 'GET', signal,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHeaders() },
+      ...(request ? { body: JSON.stringify(request) } : {}),
+    })
+  } catch (error) { if (scopedAbortError(error)) throw error; throw new MainSiteGroupsApiError('network') }
+  let payload: unknown
+  try { payload = JSON.parse(await response.text()) } catch (error) {
+    if (scopedAbortError(error)) throw error
+    if (response.status === 401) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+    throw new MainSiteGroupsApiError('invalid')
+  }
+  if (isUnauthorizedApiResponse(response.status, isObject(payload) ? payload : {})) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+  if (!response.ok) throw new Error(isObject(payload) ? [payload.message, payload.detail, payload.next].map(scopedSafeText).filter(Boolean).join('；') || 'Hub 未能处理主站分组，请重新读取并查看 Hub 后端记录' : 'Hub 未能处理主站分组，请重新读取并查看 Hub 后端记录')
+  if (!isObject(payload) || payload.workspaceAdminAccountId !== workspace) throw new MainSiteGroupsApiError('invalid')
+  return payload
+}
+export const readConnectionMainSiteGroups = async (id: string, workspace: string, signal?: AbortSignal): Promise<ConnectionMainSiteGroups> => {
+  const payload = await mainSiteGroupsRequest(id, workspace, undefined, false, signal)
+  if (!isObject(payload) || !validMainSiteGroupConnection(payload.connection, id) || !isObject(payload.account) || !scopedIdentityText(payload.account.id) || typeof payload.account.name !== 'string' || typeof payload.account.platform !== 'string' || !validMainSiteGroups(payload.currentGroups) || !validMainSiteGroups(payload.hubGroups) || !validMainSiteGroups(payload.groups, true) || typeof payload.consistent !== 'boolean') throw new MainSiteGroupsApiError('invalid')
+  return payload as unknown as ConnectionMainSiteGroups
+}
+const mutateConnectionMainSiteGroups = async (id: string, request: SyncConnectionHubGroupsRequest | ChangeConnectionMainSiteGroupsRequest, sync: boolean): Promise<MainSiteGroupMutationResult> => {
+  const payload = await mainSiteGroupsRequest(id, request.workspaceAdminAccountId, request, sync)
+  if (!isObject(payload) || !['completed', 'unchanged', 'main_changed_hub_not_saved', 'main_unknown', 'hub_unknown'].includes(String(payload.outcome))) throw new MainSiteGroupsApiError('invalid')
+  // The outcome and workspace are the confirmation boundary. Display text is
+  // bounded and sanitized without retaining the original response envelope.
+  return { workspaceAdminAccountId: request.workspaceAdminAccountId, outcome: payload.outcome as MainSiteGroupMutationResult['outcome'],
+    message: scopedSafeText(payload.message), detail: scopedSafeText(payload.detail), next: scopedSafeText(payload.next),
+    mainSiteGroups: validMainSiteGroups(payload.mainSiteGroups) ? payload.mainSiteGroups as MainSiteGroupMutationResult['mainSiteGroups'] : [],
+    ...(validMainSiteGroupConnection(payload.connection, id) ? { connection: payload.connection } : {}),
+  }
+}
+export const changeConnectionMainSiteGroups = (id: string, request: ChangeConnectionMainSiteGroupsRequest): Promise<MainSiteGroupMutationResult> => mutateConnectionMainSiteGroups(id, request, false)
+export const syncConnectionHubGroups = (id: string, request: SyncConnectionHubGroupsRequest): Promise<MainSiteGroupMutationResult> => mutateConnectionMainSiteGroups(id, request, true)

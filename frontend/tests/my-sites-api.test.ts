@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { checkRealConnections, realConnect, realDisconnect, saveMySiteMapping } from '../src/modules/admin/api/mySites'
+import { checkRealConnections, realConnect, realDisconnect, saveMySiteMapping, readConnectionMainSiteGroups, changeConnectionMainSiteGroups, syncConnectionHubGroups } from '../src/modules/admin/api/mySites'
 import type { MySiteMapping, RealConnectRequest } from '../src/modules/admin/types/mySites'
 
 const mappingWithLastRun = (): MySiteMapping => ({
@@ -180,5 +180,74 @@ describe('Grok import API contract', () => {
     if (mode === 'malformed-http-success') delete payload.connection
     mockImportFetch(payload)
     await expect(realConnect(grokImportRequest(), 'grok-workspace')).rejects.toMatchObject({ cleanup: 'pending', retryAllowed: false })
+  })
+})
+
+const groupConnection = () => ({ id: 'connection-1', upstreamSiteId: 'site-1', upstreamGroupId: '1', upstreamGroupName: '上游组', upstreamKeyId: 'key-1', adminAccountId: '101', adminAccountName: '主站账号', ownGroupIds: ['10'], ownGroupNames: ['原组'], groupType: 'openai', provisioningMode: 'managed', status: 'active', adminPlatform: 'sub2api', pricingMappingEnabled: true, createdAt: '2026-10-17T00:00:00Z' })
+const groupsRead = () => ({ workspaceAdminAccountId: 'ws', connection: groupConnection(), account: { id: '101', name: '主站账号', platform: 'openai' }, currentGroups: [{ id: '10', name: '原组' }], hubGroups: [{ id: '10', name: '原组' }], groups: [{ id: '10', name: '原组', status: 'active' }], consistent: true })
+const groupRequest = () => ({ workspaceAdminAccountId: 'ws', expectedConnection: { ...groupConnection(), workspaceAdminAccountId: 'ws', upstreamPlatform: '', ownGroupNames: ['原组'] }, expectedMainSiteGroupIds: ['10'], targetGroupIds: ['11'], removeOldPricingMapping: true })
+const groupResult = (outcome = 'completed') => ({ workspaceAdminAccountId: 'ws', outcome, message: '修改结果', detail: '具体原因', next: '请核对', mainSiteGroups: [{ id: '11', name: '新组' }], connection: { ...groupConnection(), ownGroupIds: ['11'], ownGroupNames: ['新组'] } })
+describe('main site group API contract', () => {
+  it('reads current account groups using the selected connection and workspace', async () => {
+    const payload = groupsRead(); payload.connection.id = 'connection/1'
+    const fetchMock = mockImportFetch(payload)
+    await expect(readConnectionMainSiteGroups('connection/1', 'ws')).resolves.toEqual(payload)
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/my-sites/real-connections/connection%2F1/main-site-groups?workspaceAdminAccountId=ws')
+    expect(fetchMock.mock.calls[0][1]).toMatchObject({ method: 'GET' })
+  })
+  it.each(['change', 'sync'])('sends the complete latest expectations through %s', async mode => {
+    const fetchMock = mockImportFetch(groupResult())
+    const request = groupRequest()
+    if (mode === 'change') await changeConnectionMainSiteGroups('connection-1', request)
+    else { const { targetGroupIds: _target, ...sync } = request; await syncConnectionHubGroups('connection-1', sync) }
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/my-sites/real-connections/connection-1/main-site-groups' + (mode === 'sync' ? '/hub-record' : ''))
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body)
+    expect(body.expectedMainSiteGroupIds).toEqual(['10'])
+    expect(body.expectedConnection.ownGroupIds).toEqual(['10'])
+    expect(body.removeOldPricingMapping).toBe(true)
+    if (mode === 'sync') expect(body).not.toHaveProperty('targetGroupIds')
+    else expect(body.targetGroupIds).toEqual(['11'])
+  })
+  it.each(['read', 'change', 'sync'])('distinguishes a missing response in %s', async mode => {
+    vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null) })
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('offline')))
+    const pending = mode === 'read' ? readConnectionMainSiteGroups('connection-1', 'ws') : mode === 'change' ? changeConnectionMainSiteGroups('connection-1', groupRequest()) : syncConnectionHubGroups('connection-1', groupRequest())
+    await expect(pending).rejects.toMatchObject({ kind: 'network' })
+  })
+  it('retains all three safe server explanations', async () => {
+    mockImportFetch({ message: '分组不能移出', detail: '原组没有其他可用账号', next: '请保留原组' }, 409)
+    await expect(changeConnectionMainSiteGroups('connection-1', groupRequest())).rejects.toThrow('分组不能移出；原组没有其他可用账号；请保留原组')
+  })
+  it.each(['workspace', 'account', 'connection', 'current', 'hub', 'groups', 'consistent', 'secret'])('rejects malformed read fields: %s', async mode => {
+    const payload: any = groupsRead()
+    if (mode === 'workspace') payload.workspaceAdminAccountId = 'other'
+    if (mode === 'account') delete payload.account.platform
+    if (mode === 'connection') delete payload.connection.ownGroupIds
+    if (mode === 'current') payload.currentGroups = [{ id: '10' }]
+    if (mode === 'hub') payload.hubGroups = '10'
+    if (mode === 'groups') delete payload.groups[0].status
+    if (mode === 'consistent') delete payload.consistent
+    if (mode === 'secret') payload.connection.upstreamKey = 'private-response'
+    mockImportFetch(payload)
+    await expect(readConnectionMainSiteGroups('connection-1', 'ws')).rejects.toMatchObject({ kind: 'invalid' })
+  })
+  it.each(['completed', 'unchanged', 'main_changed_hub_not_saved', 'main_unknown', 'hub_unknown'])('preserves outcome %s', async outcome => {
+    mockImportFetch(groupResult(outcome))
+    await expect(changeConnectionMainSiteGroups('connection-1', groupRequest())).resolves.toMatchObject({ outcome, workspaceAdminAccountId: 'ws' })
+  })
+  it.each(['workspace', 'outcome', 'json'])('refuses unconfirmed mutation results: %s', async mode => {
+    const payload: any = groupResult()
+    if (mode === 'workspace') payload.workspaceAdminAccountId = 'other'
+    if (mode === 'outcome') payload.outcome = 'success'
+    mockImportFetch(payload)
+    if (mode === 'json') vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('not json', { status: 200 })))
+    await expect(changeConnectionMainSiteGroups('connection-1', groupRequest())).rejects.toMatchObject({ kind: 'invalid' })
+  })
+  it('expires the Hub session on 401 even without JSON', async () => {
+    const removeItem = vi.fn()
+    vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null), removeItem })
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('expired', { status: 401 })))
+    await expect(readConnectionMainSiteGroups('connection-1', 'ws')).rejects.toThrow('auth.errors.unauthorized')
+    expect(removeItem).toHaveBeenCalled()
   })
 })

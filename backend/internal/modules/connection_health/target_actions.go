@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"transithub/backend/internal/modules/my_sites"
 	"transithub/backend/internal/modules/upstream"
 )
 
@@ -51,6 +52,23 @@ type workspaceFloorGuard struct {
 
 func newWorkspaceFloorGuard() *workspaceFloorGuard {
 	return &workspaceFloorGuard{reservedUnavailable: make(map[string]uint64)}
+}
+
+// checkGroupRemoval observes reservations while holding their existing mutex.
+// It deliberately does not reserve the account as unavailable.
+func (g *workspaceFloorGuard) checkGroupRemoval(target AdminProbeTarget, removed []string, inventory adminWorkspaceInventory, scope adminMonitoringScope, reserved map[string]map[string]bool, now time.Time) error {
+	if g == nil {
+		return &my_sites.GroupChangeBlockedError{Status: 409, Message: "主站分组资料没有读全", Detail: "无法确认移出后是否还有可用账号；本次未修改任何内容", Next: "请稍后重试"}
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	pending := make(map[string]bool, len(g.reservedUnavailable))
+	for id := range g.reservedUnavailable {
+		if parsed, ok := parseTargetID(id); ok {
+			pending[parsed.accountID] = true
+		}
+	}
+	return checkGroupRemovalFloor(target, removed, inventory, scope, g.freezeWorkspace, g.frozenGroups, pending, reserved, now)
 }
 
 func (g *workspaceFloorGuard) reserveUnavailableLocked(targetID string) {

@@ -377,3 +377,33 @@ export interface OwnGroupRatesResponse {
   workspaceAdminAccountId: string
   groups: OwnGroupRate[]
 }
+
+export interface MainSiteGroup { id: string; name: string }
+export interface ConnectionMainSiteGroups {
+  workspaceAdminAccountId: string
+  connection: RealConnection
+  account: { id: string; name: string; platform: string }
+  currentGroups: MainSiteGroup[]
+  hubGroups: MainSiteGroup[]
+  groups: (MainSiteGroup & { status: string })[]
+  consistent: boolean
+}
+export interface SyncConnectionHubGroupsRequest {
+  workspaceAdminAccountId: string
+  expectedConnection: ExpectedRealConnection
+  expectedMainSiteGroupIds: string[]
+  removeOldPricingMapping: boolean
+}
+export interface ChangeConnectionMainSiteGroupsRequest extends SyncConnectionHubGroupsRequest {
+  targetGroupIds: string[]
+}
+export type MainSiteGroupOutcome = 'completed' | 'unchanged' | 'main_changed_hub_not_saved' | 'main_unknown' | 'hub_unknown'
+export interface MainSiteGroupMutationResult {
+  workspaceAdminAccountId: string
+  outcome: MainSiteGroupOutcome
+  message: string
+  detail: string
+  next: string
+  mainSiteGroups: MainSiteGroup[]
+  connection?: RealConnection
+}

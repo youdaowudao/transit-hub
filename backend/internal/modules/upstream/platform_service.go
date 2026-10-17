@@ -3316,6 +3316,7 @@ type sub2APIAdminAccountBulkUpdate struct {
 	Status      *string        `json:"status,omitempty"`
 	Concurrency *int           `json:"concurrency,omitempty"`
 	LoadFactor  *int           `json:"load_factor,omitempty"`
+	GroupIDs    *[]int64       `json:"group_ids,omitempty"`
 }
 
 // UpdateSub2APIAdminAccountConcurrencyContext only writes the supplied limits.
@@ -3335,6 +3336,26 @@ func (s *PlatformService) bulkUpdateSub2APIAdminAccount(session Session, account
 }
 
 func (s *PlatformService) bulkUpdateSub2APIAdminAccountContext(ctx context.Context, session Session, accountID string, payload sub2APIAdminAccountBulkUpdate) error {
+	return s.bulkUpdateSub2APIAdminAccountFieldsContext(ctx, session, accountID, payload, false)
+}
+
+// UpdateSub2APIAdminAccountGroupsContext replaces only the account's memberships.
+func (s *PlatformService) UpdateSub2APIAdminAccountGroupsContext(ctx context.Context, session Session, accountID string, groupIDs []string) error {
+	if len(groupIDs) == 0 {
+		return localMutationError(ErrorInvalidFields)
+	}
+	ids := make([]int64, len(groupIDs))
+	for i, id := range groupIDs {
+		value, err := strconv.ParseInt(id, 10, 64)
+		if err != nil || value <= 0 || strconv.FormatInt(value, 10) != id {
+			return localMutationError(ErrorInvalidFields)
+		}
+		ids[i] = value
+	}
+	return s.bulkUpdateSub2APIAdminAccountFieldsContext(ctx, session, accountID, sub2APIAdminAccountBulkUpdate{GroupIDs: &ids}, true)
+}
+
+func (s *PlatformService) bulkUpdateSub2APIAdminAccountFieldsContext(ctx context.Context, session Session, accountID string, payload sub2APIAdminAccountBulkUpdate, includeGroupFailure bool) error {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
 		return localMutationError(ErrorAuth)
 	}
@@ -3373,7 +3394,23 @@ func (s *PlatformService) bulkUpdateSub2APIAdminAccountContext(ctx context.Conte
 	success, known := result["success"].(bool)
 	if !validID || resultID != strconv.FormatInt(parsedAccountID, 10) || !known || !success || !sub2APIBulkSummaryConsistent(data, resultID) {
 		// A failed entry can follow writes to other fields, so it is uncertain.
-		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		failure := newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		if includeGroupFailure && validID && resultID == strconv.FormatInt(parsedAccountID, 10) && known && !success {
+			if message, ok := result["error"].(string); ok {
+				message = ImportDiagnosticHint(message)
+				for _, secret := range []string{session.AccessToken, session.RefreshToken, session.Cookie, session.AdminAPIKey} {
+					if secret != "" {
+						message = strings.ReplaceAll(message, secret, "[已遮盖]")
+					}
+				}
+				runes := []rune(message)
+				if len(runes) > 300 {
+					runes = runes[:300]
+				}
+				failure.UpstreamMessage = string(runes)
+			}
+		}
+		return failure
 	}
 	return nil
 }

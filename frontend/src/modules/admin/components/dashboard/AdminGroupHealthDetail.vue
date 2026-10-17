@@ -941,7 +941,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     </div>
                   </Tooltip>
                 </td>
-                <td class="px-3 py-3 tabular-nums text-foreground">
+                <td class="px-3 py-3 text-[13px] tabular-nums text-foreground">
                   <AccountPriorityEditor v-if="isSub2API(account)" :account="account" :tied="account.priority != null && group.accounts.some(other => other.targetId !== account.targetId && other.priority === account.priority)" @saved="emit('priority-saved', $event)" />
                   <div v-else class="flex items-center gap-1.5">
                     <span>{{ formatNumber(account.priority) }}</span>
@@ -955,13 +955,13 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     <span class="break-words">{{ prioritySyncBlockReasonLabel(account) }}</span>
                   </p>
                 </td>
-                <td class="px-3 py-3 tabular-nums text-foreground">
+                <td class="px-3 py-3 text-[13px] tabular-nums text-foreground">
                   <span>{{ formatMultiplier(effectiveMultiplier(account)) }}</span>
                   <span class="mt-0.5 block max-w-40 text-[11px] leading-4 text-muted-foreground">
                     {{ multiplierSourceLabel(account) }}
                   </span>
                 </td>
-                <td class="px-3 py-3 tabular-nums">
+                <td class="px-3 py-3 text-[13px] tabular-nums">
                   <span v-if="accountLatency(account) == null" class="text-muted-foreground">-</span>
                   <span v-else :class="accountHasSlowResponse(account) ? 'text-amber-600 dark:text-amber-400' : 'text-foreground'">
                     {{ accountLatency(account) }} ms
@@ -972,7 +972,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     {{ accountResponseLabel(account) }}
                   </span>
                 </td>
-                <td class="w-40 px-3 py-3 pl-8 text-right tabular-nums">
+                <td class="w-40 px-3 py-3 pl-8 text-right text-[13px] tabular-nums">
                   <div class="ml-auto max-w-32">
                     <span v-if="!hasStabilityReading(account)" class="text-muted-foreground">-</span>
                     <span v-else class="text-foreground">{{ accountHealthWeight(account) ?? '-' }}%</span>
@@ -984,7 +984,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                     </span>
                   </div>
                 </td>
-                <td class="w-28 px-3 py-3 text-right tabular-nums">
+                <td class="w-28 px-3 py-3 text-right text-[13px] tabular-nums">
                   <button v-if="account.recentQuestionAnswer" type="button" class="text-right hover:text-primary" :class="accountLatestAccuracy(account) == null ? 'text-muted-foreground' : 'font-medium text-foreground'" :title="account.recentQuestionAnswer.scheduleName ?? recentSource(account)" @click="emit('question-answer-view', { targetId: account.targetId, batchId: account.recentQuestionAnswer.batchId })">{{ formatLatestAccuracy(account) }}</button>
                   <span v-else class="text-muted-foreground">—</span>
                   <span v-if="account.recentQuestionAnswer" class="mt-0.5 block break-words text-[11px] text-muted-foreground">{{ recentSource(account) }} · {{ formatConnectionHealthTime(account.recentQuestionAnswer.createdAt) }}</span>

@@ -1887,7 +1887,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
 
       <div v-else class="overflow-x-auto">
         <table class="w-full min-w-[980px] text-left text-sm relative">
-          <thead class="border-b border-border/50 bg-surface-elevated/90 backdrop-blur-sm">
+          <thead class="border-b border-border/50 bg-surface-elevated/90 text-xs leading-5 backdrop-blur-sm">
             <tr>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.siteName') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.groupName') }}</th>
@@ -1939,7 +1939,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 </span>
               </td>
               <td class="px-4 py-2.5 tabular-nums">
-                <div class="font-semibold text-foreground">{{ formatMultiplier(rate.currentMultiplier) }}</div>
+                <div class="text-[13px] font-semibold text-foreground">{{ formatMultiplier(rate.currentMultiplier) }}</div>
                 <div v-if="rate.upstreamMultiplier != null" class="mt-0.5 text-[11px] text-muted-foreground">
                   {{ t('admin.groupRates.fields.multiplierFormula', {
                     upstream: formatMultiplier(rate.upstreamMultiplier),
@@ -1953,11 +1953,11 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               </td>
               <td class="px-4 py-2.5">
                 <span v-if="ownGroupCells(rate).kind === 'unknown'" class="text-xs text-muted-foreground">暂时未知</span>
-                <div v-for="line in ownGroupCells(rate).lines" :key="line.key" data-sales-line class="h-5 leading-5 whitespace-nowrap tabular-nums" :class="line.valueTone === 'number' ? 'font-semibold text-foreground' : 'text-xs text-muted-foreground'">{{ line.value }}{{ line.suffix }}</div>
+                <div v-for="line in ownGroupCells(rate).lines" :key="line.key" data-sales-line class="h-5 leading-5 whitespace-nowrap tabular-nums" :class="line.valueTone === 'number' ? 'text-[13px] font-semibold text-foreground' : 'text-xs text-muted-foreground'">{{ line.value }}{{ line.suffix }}</div>
               </td>
               <td class="px-4 py-2.5">
                 <span v-if="ownGroupCells(rate).kind === 'unknown'" class="text-xs text-muted-foreground">{{ t('admin.groupRates.common.placeholder') }}</span>
-                <div v-for="line in ownGroupCells(rate).lines" :key="line.key" data-profit-margin-line class="h-5 leading-5 whitespace-nowrap tabular-nums font-semibold" :class="profitMarginClass(line.profitMargin)">{{ formatProfitMargin(line.profitMargin) }}{{ line.suffix }}</div>
+                <div v-for="line in ownGroupCells(rate).lines" :key="line.key" data-profit-margin-line class="h-5 leading-5 whitespace-nowrap text-[13px] tabular-nums font-semibold" :class="profitMarginClass(line.profitMargin)">{{ formatProfitMargin(line.profitMargin) }}{{ line.suffix }}</div>
               </td>
               <td class="px-4 py-2.5">
                 <button

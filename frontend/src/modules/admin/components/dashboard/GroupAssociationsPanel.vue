@@ -1458,12 +1458,12 @@ onBeforeUnmount(() => {
                         <td class="px-4 py-3">
                           <span class="inline-flex rounded-md px-2 py-1 text-xs font-medium" :class="healthStatusClass(target.healthStatus)">{{ healthStatusLabel(target.healthStatus) }}</span>
                         </td>
-                        <td class="px-4 py-3 text-sm tabular-nums text-foreground">
+                        <td class="px-4 py-3 text-[13px] leading-5 tabular-nums text-foreground">
                           <div class="font-semibold">{{ formatMultiplier(target.upstreamMultiplier) }}</div>
                           <div class="mt-1 text-xs text-muted-foreground">{{ t('admin.groupAssociations.associationTable.recentChange') }} {{ formatRecentDelta(target.delta) }}</div>
                         </td>
-                        <td class="px-4 py-3 text-sm font-semibold tabular-nums text-foreground">{{ formatMultiplier(target.effectiveCostMultiplier) }}</td>
-                        <td class="px-4 py-3 text-sm font-semibold tabular-nums" :class="profitMarginClass(target.profitMargin)">{{ formatProfitMargin(target.profitMargin) }}</td>
+                        <td class="px-4 py-3 text-[13px] leading-5 font-semibold tabular-nums text-foreground">{{ formatMultiplier(target.effectiveCostMultiplier) }}</td>
+                        <td class="px-4 py-3 text-[13px] leading-5 font-semibold tabular-nums" :class="profitMarginClass(target.profitMargin)">{{ formatProfitMargin(target.profitMargin) }}</td>
                       </tr>
                     </tbody>
                   </table>
@@ -1504,16 +1504,16 @@ onBeforeUnmount(() => {
                       </div>
                       <div>
                         <div class="text-[11px] text-muted-foreground">{{ t('admin.groupAssociations.associationTable.columns.upstreamMultiplier') }}</div>
-                        <div class="mt-1 text-sm font-semibold tabular-nums text-foreground">{{ formatMultiplier(target.upstreamMultiplier) }}</div>
+                        <div class="mt-1 text-[13px] leading-5 font-semibold tabular-nums text-foreground">{{ formatMultiplier(target.upstreamMultiplier) }}</div>
                         <div class="mt-0.5 text-xs text-muted-foreground">{{ formatRecentDelta(target.delta) }}</div>
                       </div>
                       <div>
                         <div class="text-[11px] text-muted-foreground">{{ t('admin.groupAssociations.associationTable.columns.effectiveCost') }}</div>
-                        <div class="mt-1 text-sm font-semibold tabular-nums text-foreground">{{ formatMultiplier(target.effectiveCostMultiplier) }}</div>
+                        <div class="mt-1 text-[13px] leading-5 font-semibold tabular-nums text-foreground">{{ formatMultiplier(target.effectiveCostMultiplier) }}</div>
                       </div>
                       <div class="col-span-2">
                         <div class="text-[11px] text-muted-foreground">{{ t('admin.groupAssociations.associationTable.columns.profitMargin') }}</div>
-                        <div class="mt-1 text-sm font-semibold tabular-nums" :class="profitMarginClass(target.profitMargin)">{{ formatProfitMargin(target.profitMargin) }}</div>
+                        <div class="mt-1 text-[13px] leading-5 font-semibold tabular-nums" :class="profitMarginClass(target.profitMargin)">{{ formatProfitMargin(target.profitMargin) }}</div>
                       </div>
                     </div>
                   </div>

@@ -301,14 +301,8 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 					log.Printf("dashboard recovery failed user_id=%s workspace_id=%s site_id=%s err=%v", userID, adminAccountID, siteID, err)
 				}
 			}()
-			strategy, err := settingsService.GetStrategyForWorkspace(ctx, userID, adminAccountID)
-			if err != nil {
-				return
-			}
-			checkBalanceWarning(ctx, settingsService, upstreamService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
-			checkMultiplierChanges(ctx, settingsService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
-			// 自动调价：分组级 enableAutoPricing 是唯一开关，Service 内部逐 mapping 判断。
-			mySitesService.ApplyAutoPricingAfterSync(ctx, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
+			runSiteSyncWorkspaceActions(ctx, settingsService, settingsService, upstreamService, upstreamRepository,
+				mySitesService.ApplyAutoPricingAfterSync, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
 		}
 
 		metricsService.StartScheduler(context.Background())
@@ -622,10 +616,70 @@ var balanceAlertTracker = struct {
 // balanceAlertCooldown 余额预警冷却时间，同一站点在此时间段内不会重复发送通知。
 const balanceAlertCooldown = 1 * time.Hour
 
+type siteNotificationEligibilityReader interface {
+	IsSiteNotificationEnabled(context.Context, string, string, string) (bool, error)
+}
+
+type siteNotificationSender interface {
+	SendFormattedToWorkspaceBots(context.Context, string, string, []string, string, settings.NotificationTemplateFormat)
+}
+
+type notificationSiteReader interface {
+	GetSite(context.Context, string) (*upstream.Site, error)
+}
+
+type workspaceStrategyReader interface {
+	GetStrategyForWorkspace(context.Context, string, string) (settings.StrategySettings, error)
+}
+
+type syncAutoPricing func(context.Context, string, string, string, string, upstream.Metrics, upstream.Metrics)
+
+// Keep the existing serial order. A skipped notification returns only from its
+// check, so persisted site lifecycle cannot short-circuit automatic pricing.
+func runSiteSyncWorkspaceActions(ctx context.Context, strategies workspaceStrategyReader, sender siteNotificationSender, sites notificationSiteReader, eligibility siteNotificationEligibilityReader, autoPricing syncAutoPricing, userID, workspaceID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics) {
+	strategy, err := strategies.GetStrategyForWorkspace(ctx, userID, workspaceID)
+	if err != nil {
+		return
+	}
+	checkBalanceWarning(ctx, sender, sites, eligibility, strategy, userID, workspaceID, siteID, siteName, oldMetrics, newMetrics)
+	checkMultiplierChanges(ctx, sender, eligibility, strategy, userID, workspaceID, siteID, siteName, oldMetrics, newMetrics)
+	autoPricing(ctx, userID, workspaceID, siteID, siteName, oldMetrics, newMetrics)
+}
+
+func maySendSiteNotification(ctx context.Context, reader siteNotificationEligibilityReader, userID, workspaceID, siteID string, multiplier bool) bool {
+	var enabled bool
+	var err error
+	var reason string
+	if reader == nil {
+		reason = "服务未装配站点管理状态读取，请维护人员检查启动配置"
+	} else {
+		enabled, err = reader.IsSiteNotificationEnabled(ctx, userID, workspaceID, siteID)
+		if err != nil {
+			reason = notifications.SafeStorageCause(err)
+		}
+	}
+	if reason != "" {
+		if multiplier {
+			log.Printf("倍率提醒资格未能确认 user_id=%s workspace_id=%s site_id=%s：%s；本轮剩余倍率通知未发送且不会自动补发，已保存的站内消息保持", userID, workspaceID, siteID, reason)
+		} else {
+			log.Printf("余额提醒资格未能确认 user_id=%s workspace_id=%s site_id=%s：%s；本次未发起通知，后续有效同步仍低于阈值时按原冷却重新判断", userID, workspaceID, siteID, reason)
+		}
+		return false
+	}
+	if !enabled {
+		kind := "余额"
+		if multiplier {
+			kind = "倍率"
+		}
+		log.Printf("%s提醒已跳过 user_id=%s workspace_id=%s site_id=%s：站点已停止管理、已删除或不属于当前工作区；本次未发起通知", kind, userID, workspaceID, siteID)
+	}
+	return enabled
+}
+
 // checkBalanceWarning 检测余额是否低于阈值并发送通知。
 // 采用冷却机制：首次低于阈值立即通知，之后在冷却期内不再重复；冷却期过后若仍低于阈值再次通知。
 // 优先使用站点级 BalanceThreshold 覆盖全局 DefaultBalanceThreshold；站点设置为 nil 时降级到全局。
-func checkBalanceWarning(ctx context.Context, svc *settings.Service, uSvc *upstream.Service, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, _ /* oldMetrics */, newMetrics upstream.Metrics) {
+func checkBalanceWarning(ctx context.Context, svc siteNotificationSender, uSvc notificationSiteReader, eligibility siteNotificationEligibilityReader, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, _ /* oldMetrics */, newMetrics upstream.Metrics) {
 	if !strategy.EnableBalanceWarning || len(strategy.BalanceNotifyBotIDs) == 0 {
 		return
 	}
@@ -636,6 +690,11 @@ func checkBalanceWarning(ctx context.Context, svc *settings.Service, uSvc *upstr
 	// 获取站点充值倍率，用于将 USD 余额转换为核算金额 后与阈值比较。
 	site, err := uSvc.GetSite(ctx, siteID)
 	if err != nil {
+		log.Printf("余额提醒所需站点资料未能读取 user_id=%s workspace_id=%s site_id=%s：%s；本次未发起通知，后续有效同步仍低于阈值时按原冷却重新判断", userID, adminAccountID, siteID, notifications.SafeStorageCause(err))
+		return
+	}
+	if site == nil || site.ID != siteID || site.UserID != userID || site.AdminAccountID != adminAccountID {
+		log.Printf("余额提醒已跳过 user_id=%s workspace_id=%s site_id=%s：未找到当前工作区的站点资料；本次未发起通知", userID, adminAccountID, siteID)
 		return
 	}
 	rechargeRate := site.RechargeRate
@@ -659,6 +718,11 @@ func checkBalanceWarning(ctx context.Context, svc *settings.Service, uSvc *upstr
 		return
 	}
 
+	// Persisted lifecycle is checked before touching the existing cooldown.
+	if !maySendSiteNotification(ctx, eligibility, userID, adminAccountID, siteID, false) {
+		return
+	}
+
 	// 冷却期检查：同一站点在冷却期内不重复通知。
 	balanceAlertTracker.mu.Lock()
 	if last, ok := balanceAlertTracker.lastSent[siteID]; ok && time.Since(last) < balanceAlertCooldown {
@@ -675,8 +739,7 @@ func checkBalanceWarning(ctx context.Context, svc *settings.Service, uSvc *upstr
 
 // checkMultiplierChanges 对比同步前后的分组倍率，任何变化都发送通知。
 // 只受系统设置全局开关 strategy.EnableMultiplierAlert 控制。
-func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics) {
-	_ = siteID
+func checkMultiplierChanges(ctx context.Context, svc siteNotificationSender, eligibility siteNotificationEligibilityReader, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics) {
 	if !strategy.EnableMultiplierAlert || len(strategy.MultiplierNotifyBotIDs) == 0 {
 		return
 	}
@@ -697,6 +760,9 @@ func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy
 		oldVal, existed := oldMap[key]
 		if !existed || oldVal == *g.Multiplier {
 			continue
+		}
+		if !maySendSiteNotification(ctx, eligibility, userID, adminAccountID, siteID, true) {
+			return
 		}
 		msg := formatMultiplierChange(siteName, g.Name, oldVal, *g.Multiplier, strategy.MultiplierTemplate)
 		log.Printf("[alert] 倍率变更触发 site=%s group=%s old=%.4f new=%.4f", siteName, g.Name, oldVal, *g.Multiplier)

@@ -45,16 +45,18 @@ type NoticeInput struct {
 }
 
 type Notice struct {
-	ID                  string     `json:"id"`
-	UserID              string     `json:"-"`
-	AdminAccountID      string     `json:"adminAccountId"`
-	Kind                string     `json:"kind"`
-	SubjectType         string     `json:"subjectType"`
-	SubjectID           string     `json:"subjectId"`
-	Level               Level      `json:"level"`
-	DiscoveredAt        time.Time  `json:"discoveredAt"`
-	CreatedAt           time.Time  `json:"createdAt"`
-	Content             Content    `json:"content"`
-	ReadAt              *time.Time `json:"readAt"`
-	ReminderCompletedAt *time.Time `json:"reminderCompletedAt"`
+	SubjectActive          bool       `json:"subjectActive"`
+	SubjectInactiveMessage string     `json:"subjectInactiveMessage"`
+	ID                     string     `json:"id"`
+	UserID                 string     `json:"-"`
+	AdminAccountID         string     `json:"adminAccountId"`
+	Kind                   string     `json:"kind"`
+	SubjectType            string     `json:"subjectType"`
+	SubjectID              string     `json:"subjectId"`
+	Level                  Level      `json:"level"`
+	DiscoveredAt           time.Time  `json:"discoveredAt"`
+	CreatedAt              time.Time  `json:"createdAt"`
+	Content                Content    `json:"content"`
+	ReadAt                 *time.Time `json:"readAt"`
+	ReminderCompletedAt    *time.Time `json:"reminderCompletedAt"`
 }

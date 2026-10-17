@@ -9,6 +9,7 @@ type Warning struct {
 }
 
 type SummaryQuery struct {
+	DisplayedIDs    []string
 	AttentionCursor string
 	ImportantCursor string
 	CriticalCursor  string
@@ -39,7 +40,16 @@ type SamplingState struct {
 	Warning              *Warning       `json:"warning,omitempty"`
 }
 
+type DisplayedState struct {
+	ID                     string     `json:"id"`
+	SubjectActive          bool       `json:"subjectActive"`
+	SubjectInactiveMessage string     `json:"subjectInactiveMessage"`
+	ReadAt                 *time.Time `json:"readAt"`
+	ReminderCompletedAt    *time.Time `json:"reminderCompletedAt"`
+}
+
 type SummaryResponse struct {
+	DisplayedStates         []DisplayedState    `json:"displayedStates"`
 	ServerTime              time.Time           `json:"serverTime"`
 	WorkspaceAdminAccountID string              `json:"workspaceAdminAccountId"`
 	IntervalSeconds         *int                `json:"intervalSeconds"`

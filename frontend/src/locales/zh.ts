@@ -2378,8 +2378,8 @@ export default {
       },
       lifecycle: {
         label: '启用站点',
-        enabledHelp: '参与刷新与经营统计',
-        disabledHelp: '不刷新，也不计入经营统计'
+        enabledHelp: '参与刷新、经营统计和相关提醒。关闭不会停用主站账号，请先确认这个上游不再承载业务。',
+        disabledHelp: '已停止刷新、经营统计和相关提醒，主站账号保持现状。历史消息仍可查看；重新启用后，未确认的历史提醒可能再次出现。'
       },
       empty: {
         title: '未找到上游站点',

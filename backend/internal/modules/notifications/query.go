@@ -10,7 +10,18 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const noticeColumns = `id,user_id,admin_account_id,kind,subject_type,subject_id,level,discovered_at,created_at,content,read_at,reminder_completed_at`
+// All notification queries use the same current subject eligibility. This is a
+// read projection: lifecycle changes never rewrite the stored fact or progress.
+const subjectActiveExpression = `(n.subject_type <> 'upstream_site' OR EXISTS (
+SELECT 1 FROM upstream_sites s WHERE s.id=n.subject_id AND s.user_id=n.user_id
+AND s.admin_account_id=n.admin_account_id AND s.enabled=true))`
+
+const subjectInactiveMessageExpression = `CASE WHEN ` + subjectActiveExpression + ` THEN ''
+WHEN EXISTS (SELECT 1 FROM upstream_sites s WHERE s.id=n.subject_id AND s.user_id=n.user_id AND s.admin_account_id=n.admin_account_id)
+THEN '这个站点已停止管理，这条消息保留为历史，不再主动提醒。'
+ELSE '相关网站已删除，这条消息保留为历史，不再主动提醒。' END`
+
+const noticeColumns = `n.id,n.user_id,n.admin_account_id,n.kind,n.subject_type,n.subject_id,n.level,n.discovered_at,n.created_at,n.content,n.read_at,n.reminder_completed_at,` + subjectActiveExpression + `,` + subjectInactiveMessageExpression
 
 var (
 	errStoredContentFormat = errors.New("已保存的通知内容格式无法读取")
@@ -23,7 +34,7 @@ type noticeScanner interface{ Scan(...any) error }
 func scanNotice(row noticeScanner) (Notice, error) {
 	var item Notice
 	var content []byte
-	if err := row.Scan(&item.ID, &item.UserID, &item.AdminAccountID, &item.Kind, &item.SubjectType, &item.SubjectID, &item.Level, &item.DiscoveredAt, &item.CreatedAt, &content, &item.ReadAt, &item.ReminderCompletedAt); err != nil {
+	if err := row.Scan(&item.ID, &item.UserID, &item.AdminAccountID, &item.Kind, &item.SubjectType, &item.SubjectID, &item.Level, &item.DiscoveredAt, &item.CreatedAt, &content, &item.ReadAt, &item.ReminderCompletedAt, &item.SubjectActive, &item.SubjectInactiveMessage); err != nil {
 		return item, err
 	}
 	if err := json.Unmarshal(content, &item.Content); err != nil {
@@ -67,7 +78,17 @@ func (r *Repository) beginRead(ctx context.Context, user, workspace string) (pgx
 func (s *Service) Summary(ctx context.Context, user, workspace string, query SummaryQuery) (SummaryResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	result := SummaryResponse{WorkspaceAdminAccountID: workspace}
+	result := SummaryResponse{WorkspaceAdminAccountID: workspace, DisplayedStates: []DisplayedState{}}
+	if len(query.DisplayedIDs) > 60 {
+		return result, invalidRequest(workspace, "每次读取最多核查60个已显示的消息编号，请减少编号后重试；本次没有改变任何消息")
+	}
+	seen := make(map[string]bool, len(query.DisplayedIDs))
+	for _, id := range query.DisplayedIDs {
+		if seen[id] || checkText("消息编号", id, 512, true, true) != nil {
+			return result, invalidRequest(workspace, "已显示的消息编号不能重复、为空、包含非纯文字内容或超过512个字符；请重新读取当前消息后重试，本次没有改变任何消息")
+		}
+		seen[id] = true
+	}
 	cursors := make([]*noticeCursor, 3)
 	for i, raw := range []string{query.AttentionCursor, query.ImportantCursor, query.CriticalCursor} {
 		cursor, err := decodeCursor(raw, user, workspace, Level(i+2), "")
@@ -82,7 +103,7 @@ func (s *Service) Summary(ctx context.Context, user, workspace string, query Sum
 	}
 	defer tx.Rollback(ctx)
 	var attentionCount, importantCount int64
-	err = tx.QueryRow(ctx, `SELECT clock_timestamp(),count(*) FILTER(WHERE read_at IS NULL),count(*) FILTER(WHERE level=4 AND reminder_completed_at IS NULL),count(*) FILTER(WHERE level=2 AND reminder_completed_at IS NULL),count(*) FILTER(WHERE level=3 AND reminder_completed_at IS NULL) FROM site_notifications WHERE user_id=$1 AND admin_account_id=$2`, user, workspace).Scan(&result.ServerTime, &result.UnreadCount, &result.PendingCriticalCount, &attentionCount, &importantCount)
+	err = tx.QueryRow(ctx, `SELECT clock_timestamp(),count(*) FILTER(WHERE read_at IS NULL),count(*) FILTER(WHERE level=4 AND reminder_completed_at IS NULL),count(*) FILTER(WHERE level=2 AND reminder_completed_at IS NULL),count(*) FILTER(WHERE level=3 AND reminder_completed_at IS NULL) FROM site_notifications n WHERE n.user_id=$1 AND n.admin_account_id=$2 AND `+subjectActiveExpression, user, workspace).Scan(&result.ServerTime, &result.UnreadCount, &result.PendingCriticalCount, &attentionCount, &importantCount)
 	if err != nil {
 		return result, storageFailure(workspace, "读取通知数量", err)
 	}
@@ -90,7 +111,7 @@ func (s *Service) Summary(ctx context.Context, user, workspace string, query Sum
 	counts := []int64{attentionCount, importantCount, result.PendingCriticalCount}
 	for i, bucket := range buckets {
 		level := Level(i + 2)
-		sql := `SELECT ` + noticeColumns + ` FROM site_notifications WHERE user_id=$1 AND admin_account_id=$2 AND level=$3 AND reminder_completed_at IS NULL`
+		sql := `SELECT ` + noticeColumns + ` FROM site_notifications n WHERE n.user_id=$1 AND n.admin_account_id=$2 AND level=$3 AND reminder_completed_at IS NULL AND ` + subjectActiveExpression
 		args := []any{user, workspace, level}
 		if cursor := cursors[i]; cursor != nil {
 			sql += ` AND (created_at,id)>($4,$5)`
@@ -110,6 +131,10 @@ func (s *Service) Summary(ctx context.Context, user, workspace string, query Sum
 			bucket.NextCursor = encodeCursor(items[19], user, workspace, level, "")
 		}
 		bucket.Items = items
+	}
+	result.DisplayedStates, err = loadDisplayedStates(ctx, tx, user, workspace, query.DisplayedIDs)
+	if err != nil {
+		return result, storageFailure(workspace, "核查当前已显示通知的状态", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return result, storageFailure(workspace, "完成通知摘要读取", err)
@@ -153,11 +178,11 @@ func (s *Service) History(ctx context.Context, user, workspace string, query His
 		return result, err
 	}
 	defer tx.Rollback(ctx)
-	sql := `SELECT ` + noticeColumns + ` FROM site_notifications WHERE user_id=$1 AND admin_account_id=$2`
+	sql := `SELECT ` + noticeColumns + ` FROM site_notifications n WHERE n.user_id=$1 AND n.admin_account_id=$2`
 	if query.Filter == "unread" {
-		sql += ` AND read_at IS NULL`
+		sql += ` AND read_at IS NULL AND ` + subjectActiveExpression
 	} else if query.Filter == "pending" {
-		sql += ` AND level=4 AND reminder_completed_at IS NULL`
+		sql += ` AND level=4 AND reminder_completed_at IS NULL AND ` + subjectActiveExpression
 	}
 	args := []any{user, workspace, query.Limit + 1}
 	if cursor != nil {
@@ -195,7 +220,7 @@ func (s *Service) Detail(ctx context.Context, user, workspace, id string) (Detai
 		return result, err
 	}
 	defer tx.Rollback(ctx)
-	item, err := scanNotice(tx.QueryRow(ctx, `SELECT `+noticeColumns+` FROM site_notifications WHERE user_id=$1 AND admin_account_id=$2 AND id=$3`, user, workspace, id))
+	item, err := scanNotice(tx.QueryRow(ctx, `SELECT `+noticeColumns+` FROM site_notifications n WHERE n.user_id=$1 AND n.admin_account_id=$2 AND n.id=$3`, user, workspace, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return result, unavailableNotice(workspace)
 	}
@@ -211,6 +236,9 @@ func (s *Service) Detail(ctx context.Context, user, workspace, id string) (Detai
 				return result, storageFailure(workspace, "核查这条通知的网站检查入口", err)
 			}
 			result.CheckAction = &CheckAction{Available: exists, Message: "查看相关网站当前保存的上游倍率，不会修改主站账号"}
+			if exists && !item.SubjectActive {
+				result.CheckAction.Message = "这个站点已停止管理，不会自动刷新；这里只查看已保存的上游倍率，不会修改主站账号"
+			}
 			if !exists {
 				result.CheckAction.Message = "相关网站已删除，这条提醒保留当时信息"
 			}
@@ -228,4 +256,36 @@ func (s *Service) Detail(ctx context.Context, user, workspace, id string) (Detai
 
 func unavailableNotice(workspace string) *RequestError {
 	return requestFailure(http.StatusNotFound, workspace, "这次请求的消息无法访问，本次没有改变任何消息", "一个或多个消息编号已不存在或不属于当前登录用户和工作区", "请重新读取当前工作区的消息，再对仍可查看的具体消息重试", false)
+}
+
+// One scoped batch read, in the same snapshot as counts and bucket pages.
+func loadDisplayedStates(ctx context.Context, tx pgx.Tx, user, workspace string, ids []string) ([]DisplayedState, error) {
+	result := make([]DisplayedState, 0, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT n.id,`+subjectActiveExpression+`,`+subjectInactiveMessageExpression+`,n.read_at,n.reminder_completed_at FROM site_notifications n WHERE n.user_id=$1 AND n.admin_account_id=$2 AND n.id=ANY($3::text[])`, user, workspace, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	found := make(map[string]DisplayedState, len(ids))
+	for rows.Next() {
+		var state DisplayedState
+		if err := rows.Scan(&state.ID, &state.SubjectActive, &state.SubjectInactiveMessage, &state.ReadAt, &state.ReminderCompletedAt); err != nil {
+			return nil, err
+		}
+		found[state.ID] = state
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		state, ok := found[id]
+		if !ok {
+			state = DisplayedState{ID: id, SubjectInactiveMessage: "这条消息已无法访问，请重新读取当前工作区的消息列表"}
+		}
+		result = append(result, state)
+	}
+	return result, nil
 }

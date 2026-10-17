@@ -93,7 +93,7 @@ func TestCleanupNotificationActualRiseFallAndNoDisappearedEventPostgres(t *testi
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			transport.messages = nil
-			checkMultiplierChanges(ctx, service, strategy, "fixture-user", "fixture-workspace", "fixture-site", "fixture", old, upstream.Metrics{Groups: scenario.groups})
+			checkMultiplierChanges(ctx, service, notificationEligibilityFunc(func(context.Context, string, string, string) (bool, error) { return true, nil }), strategy, "fixture-user", "fixture-workspace", "fixture-site", "fixture", old, upstream.Metrics{Groups: scenario.groups})
 			if len(transport.messages) != scenario.want {
 				t.Fatalf("actual notification requests=%d want=%d", len(transport.messages), scenario.want)
 			}

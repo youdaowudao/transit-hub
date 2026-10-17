@@ -42,13 +42,13 @@ vi.mock('@/modules/admin/api/system', () => ({
 
 const when = '2030-01-01T00:00:00Z'
 const notice = (id: string, level: 1 | 2 | 3 | 4, read = false): SiteNotification => ({
-  id, adminAccountId: 'workspace-a', kind: 'fixture.fact', subjectType: 'site', subjectId: 'site-a', level,
+  id, adminAccountId: 'workspace-a', kind: 'fixture.fact', subjectType: 'site', subjectId: 'site-a', subjectActive: true, subjectInactiveMessage: '', level,
   discoveredAt: when, createdAt: when, content: { title: `隔离提醒 ${id}`, summary: '查看事实不会修改主站', details: [] },
   readAt: read ? when : null, reminderCompletedAt: null,
 })
 const summary = (items: SiteNotification[] = []): NotificationSummaryResponse => {
   const bucket = (level: number) => ({ items: items.filter(item => item.level === level && item.reminderCompletedAt === null), totalCount: items.filter(item => item.level === level && item.reminderCompletedAt === null).length, nextCursor: null })
-  return { workspaceAdminAccountId: 'workspace-a', serverTime: when, intervalSeconds: 300, unreadCount: items.filter(item => item.readAt === null).length, pendingCriticalCount: bucket(4).totalCount, active: { attention: bucket(2), important: bucket(3), critical: bucket(4) }, samplingState: { autoSyncEnabled: false, unconfirmedSiteCount: 0, sites: [] } }
+  return { workspaceAdminAccountId: 'workspace-a', serverTime: when, intervalSeconds: 300, unreadCount: items.filter(item => item.readAt === null).length, pendingCriticalCount: bucket(4).totalCount, active: { attention: bucket(2), important: bucket(3), critical: bucket(4) }, displayedStates: [], samplingState: { autoSyncEnabled: false, unconfirmedSiteCount: 0, sites: [] } }
 }
 const EmptyPage = defineComponent({ template: '<div>原业务页面</div>' })
 const wrappers: VueWrapper[] = []
@@ -231,7 +231,7 @@ describe('notifications existing layout and settings critical entry points', () 
   })
 
   it('renders the actual rate producer fixed copy including unknown scope and ordinary history', async () => {
-    const items=rateCopyFixture.map(row=>({...row,adminAccountId:'workspace-a'})) as SiteNotification[]
+    const items=rateCopyFixture.map(row=>({...row,adminAccountId:'workspace-a',subjectActive:true,subjectInactiveMessage:''})) as SiteNotification[]
     harness.summary.mockResolvedValue(summary(items));harness.history.mockResolvedValue({workspaceAdminAccountId:'workspace-a',items,nextCursor:null})
     const {wrapper}=await mountLayout();expect(wrapper.findAll('h3').filter(h=>h.text()==='已登记主站接入的上游倍率发生变化')).toHaveLength(2)
     expect(wrapper.text()).toContain('验收网站·验收分组：上游倍率1×→2×。请检查成本、定价和调度安排；查看或确认不会修改主站。')
@@ -326,5 +326,47 @@ describe('notifications existing layout and settings critical entry points', () 
     ack.focus(); await clickElement(ack); expect(ack.disabled).toBe(true); expect(document.activeElement).toBe(dialog)
     reject(new Error('这次知悉没有保存，请重新读取')); await flushPromises(); expect(dialog.isConnected).toBe(true)
     document.activeElement!.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true})); await flushPromises();expect(document.querySelector('[role="alertdialog"]')).toBeNull();expect(wrapper.text().replace(/\s/g,'')).toContain('待确认1条')
+  })
+})
+
+describe('inactive notification history and management result presentation', () => {
+  it('shows stopped-history reasons and historical progress without subtracting another active message', async () => {
+    const active = { ...notice('still-managed', 4), subjectType: 'upstream_site', subjectId: 'b' }
+    const inactive = { ...notice('stopped-history', 4), subjectType: 'upstream_site', subjectId: 'a', subjectActive: false, subjectInactiveMessage: '这个站点已停止管理，这条消息保留为历史，不再主动提醒。' }
+    harness.summary.mockResolvedValue(summary([active]))
+    harness.history.mockResolvedValue({ workspaceAdminAccountId: 'workspace-a', items: [inactive], nextCursor: null })
+    harness.detail.mockResolvedValue({ workspaceAdminAccountId: 'workspace-a', item: inactive, checkAction: { available: true, message: '这个站点已停止管理；这里只查看已保存的倍率。' } })
+    const { wrapper } = await mountLayout(); await bell(wrapper).trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain(inactive.subjectInactiveMessage)
+    expect(wrapper.text()).toContain('未读（历史消息）'); expect(wrapper.text()).toContain('尚未知悉（已停止主动提醒）')
+    expect(wrapper.text()).toContain('“全部消息”保留历史；“未读消息”和“待确认消息”只显示仍在管理的站点及其他有效消息。查看或确认不会修改主站。')
+    expect(wrapper.text()).toContain('发现时间是本系统读到变化的时间，可能晚于上游实际调整；停止管理期间不会补采全部变化。')
+    const row = wrapper.findAll('button').find(b => b.text().includes('隔离提醒 stopped-history'))!
+    await row.trigger('click'); await flushPromises()
+    expect(wrapper.find('[aria-label="通知详情"]').text()).toContain(inactive.subjectInactiveMessage)
+    expect(harness.progress).toHaveBeenCalledWith({ workspaceAdminAccountId: 'workspace-a', ids: [inactive.id], action: 'read' }, expect.anything())
+    expect(wrapper.text().replace(/\s/g, '')).toContain('待确认1条')
+    await button(wrapper, '我已知悉这1条').trigger('click'); await flushPromises()
+    expect(wrapper.text().replace(/\s/g, '')).toContain('待确认1条')
+    expect(harness.progress.mock.calls.at(-1)?.[0].ids).toEqual([inactive.id])
+  })
+  it('hides stale bell numbers during failed management verification and restores them only after a successful read', async () => {
+    const active = { ...notice('pending-management', 4), subjectType: 'upstream_site', subjectId: 'a' }
+    harness.summary.mockResolvedValueOnce(summary([active]))
+    const { wrapper } = await mountLayout()
+    const controller = wrapper.findComponent(NotificationBell).props('controller')
+    harness.summary.mockRejectedValue(new Error('读取站点状态时数据库连接中断'))
+    controller.siteManagementChanged('workspace-a', 'a', false); await flushPromises()
+    expect(controller.managementRefreshPending.value).toBe(true)
+    expect(wrapper.find('[role="alertdialog"]').exists()).toBe(false)
+    expect(wrapper.findComponent(NotificationBell).text()).toContain('通知数量暂时无法确认')
+    expect(wrapper.findComponent(NotificationBell).text()).not.toContain('待确认1条')
+    expect(wrapper.findComponent(NotificationBell).find('[aria-live="polite"]').exists()).toBe(false)
+    await bell(wrapper).trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('通知数量暂时无法确认：读取站点状态时数据库连接中断')
+    expect(wrapper.text()).toContain('旧数量暂不显示，新的自动提醒暂停；请点击“重试读取”。不会修改主站。')
+    harness.summary.mockResolvedValueOnce(summary([active])); await button(wrapper, '重试读取').trigger('click'); await flushPromises()
+    expect(controller.managementRefreshPending.value).toBe(false)
+    expect(wrapper.findComponent(NotificationBell).text().replace(/\s/g, '')).toContain('待确认1条')
   })
 })

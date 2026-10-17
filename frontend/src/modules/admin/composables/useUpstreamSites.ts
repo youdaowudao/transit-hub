@@ -1,7 +1,8 @@
 import { costFailureText } from '../utils/upstream'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, onBeforeUnmount, ref, watch } from 'vue'
 import { useAdminAccounts } from './useAdminAccounts'
+import { NotificationControllerKey } from './useNotifications'
 import {
   createUpstreamSite,
   listUpstreamSites,
@@ -74,6 +75,7 @@ const normalizeSite = (site: UpstreamSiteResponse, logoBg: string): UpstreamSite
 })
 
 export const useUpstreamSites = () => {
+  const notifications = inject(NotificationControllerKey, null)
   const { currentAccount } = useAdminAccounts()
   const workspaceId = computed(() => currentAccount.value?.id ?? '')
   const sites = ref<UpstreamSite[]>([])
@@ -367,7 +369,7 @@ export const useUpstreamSites = () => {
     const token = beginOperation(id, false)
     try {
       await removeUpstreamSite(id)
-      if (sameWorkspace(token)) { removedIds.add(id); sites.value = sites.value.filter(site => site.id !== id) }
+      if (sameWorkspace(token)) { removedIds.add(id); sites.value = sites.value.filter(site => site.id !== id); notifications?.siteManagementChanged(workspaceId.value, id, false, true) }
     } finally { finishOperation(token) }
   }
 
@@ -384,11 +386,13 @@ export const useUpstreamSites = () => {
       const current = sites.value.find(site => site.id === id)
       if (!current || removedIds.has(id)) return
       current.enabled = nextSite.enabled ?? true
+      notifications?.siteManagementChanged(workspaceId.value, id, current.enabled)
       if (!enabled) {
         const next = new Set(syncingSiteIds.value); next.delete(id); syncingSiteIds.value = next
         siteSyncStates.value.delete(id)
       }
     } catch (error) {
+      if (sameWorkspace(token)) notifications?.siteManagementChanged(workspaceId.value, id)
       if (sameWorkspace(token) && sites.value.some(site => site.id === id)) enabledErrorKeys.value.set(id, error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined)?.errorDetail ?? safeUpstreamErrorKey(error) : safeUpstreamErrorKey(error))
     } finally {
       finishOperation(token)

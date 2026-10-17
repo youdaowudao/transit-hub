@@ -86,7 +86,7 @@ func (r *Repository) loadSamplingState(ctx context.Context, user, workspace stri
 	rows, err := r.db.Query(ctx, `WITH unconfirmed AS (
 SELECT id,name,metrics#>>'{rateNoticeObservation,observedAt}' AS observed_at,
 metrics#>>'{rateNoticeObservation,reason}' AS reason
-FROM upstream_sites WHERE user_id=$1 AND admin_account_id=$2 AND (
+FROM upstream_sites WHERE user_id=$1 AND admin_account_id=$2 AND enabled=true AND (
 jsonb_typeof(metrics->'rateNoticeObservation') IS DISTINCT FROM 'object'
 OR jsonb_typeof(metrics#>'{rateNoticeObservation,confirmed}') IS DISTINCT FROM 'boolean'
 OR metrics#>>'{rateNoticeObservation,confirmed}' IS DISTINCT FROM 'true'

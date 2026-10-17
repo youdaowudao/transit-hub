@@ -360,3 +360,21 @@ func nullableJSONString(value []byte) any {
 	}
 	return string(value)
 }
+
+// IsSiteNotificationEnabled reads only the persisted ownership and lifecycle.
+// It intentionally does not use the runtime cache or load credentials/metrics.
+func (r *Repository) IsSiteNotificationEnabled(ctx context.Context, userID, workspaceID, siteID string) (bool, error) {
+	return readSiteNotificationEnabled(ctx, r.db, userID, workspaceID, siteID)
+}
+
+type siteNotificationRowReader interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func readSiteNotificationEnabled(ctx context.Context, db siteNotificationRowReader, userID, workspaceID, siteID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, persistenceTimeout)
+	defer cancel()
+	var enabled bool
+	err := db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM upstream_sites WHERE user_id=$1 AND admin_account_id=$2 AND id=$3 AND enabled=true)`, userID, workspaceID, siteID).Scan(&enabled)
+	return enabled, err
+}

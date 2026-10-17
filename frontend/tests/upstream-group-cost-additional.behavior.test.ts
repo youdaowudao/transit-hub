@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import UpstreamView from '@/modules/admin/views/UpstreamView.vue'
 import SiteSettingsModal from '@/modules/admin/components/upstream/SiteSettingsModal.vue'
 import { useUpstreamSites } from '@/modules/admin/composables/useUpstreamSites'
+import { NotificationControllerKey } from '@/modules/admin/composables/useNotifications'
 import { groupCostForDisplay, nextGroupCostDisplayBoundary } from '@/modules/admin/utils/upstream'
 import type { UpstreamGroupInfo, UpstreamSite, UpstreamSiteResponse, SyncStreamEvent } from '@/modules/admin/types/upstream'
 const api = vi.hoisted(() => ({ list: vi.fn(), stream: vi.fn(), sync: vi.fn(), syncAll: vi.fn(), edit: vi.fn(), settings: vi.fn(), enabled: vi.fn(), remove: vi.fn(), create: vi.fn(), account: undefined as unknown as Ref<{ id: string } | null> }))
@@ -24,7 +25,7 @@ const view = async () => { const w = mount(UpstreamView, { global: { stubs } });
 const open = async (w: VueWrapper, index = 0) => { await w.findAll('button').filter(b => b.text().includes('可用分组'))[index]!.trigger('click'); await flushPromises() }
 const dialog = (w: VueWrapper) => w.get('[role="dialog"]')
 const close = async (w: VueWrapper) => { await dialog(w).findAll('button').find(b => b.text() === '关闭')!.trigger('click'); await flushPromises() }
-const service = async () => { let s!: ReturnType<typeof useUpstreamSites>; const w = mount(defineComponent({ setup() { s = useUpstreamSites(); return () => element('div') } })); wrappers.push(w); await flushPromises(); return s }
+const service = async (notificationChanged?: ReturnType<typeof vi.fn>) => { let s!: ReturnType<typeof useUpstreamSites>; const w = mount(defineComponent({ setup() { s = useUpstreamSites(); return () => element('div') } }), { global: { provide: notificationChanged ? { [NotificationControllerKey as symbol]: { siteManagementChanged: notificationChanged } } : {} } }); wrappers.push(w); await flushPromises(); return s }
 const form = { name: '编辑后', siteUrl: 'https://fixture.invalid', platform: 'sub2api' as const, authMode: 'password' as const, account: 'fixture', password: '', accessToken: '', refreshToken: '', tokenType: 'Bearer', userId: '', rechargeRate: 1, remark: '' }
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2031-02-03T04:05:00Z')); vi.resetAllMocks(); api.account = ref({ id: 'workspace-a' }); api.list.mockResolvedValue([site()]); api.stream.mockResolvedValue(undefined); api.settings.mockResolvedValue(site()); localStorage.clear(); Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }) })
 afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); vi.clearAllTimers(); vi.useRealTimers(); localStorage.clear(); document.body.innerHTML = ''; Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }) })
@@ -420,5 +421,38 @@ describe('新加坡当天费用显示门禁', () => {
   it.each([null, 'invalid', '2031-02-03T04:00:01Z', '2031-02-02T04:00:00Z'])('缺少、无效、未来或跨日时间 %s 不显示金额', time => {
     const result = groupCostForDisplay({ ...group(), costObservedAt: time }, Date.parse(observed))
     expect(result.todayCost).toBeNull(); expect(result.costReason).toContain('不会修改主站')
+  })
+})
+
+
+describe('site management notification bridge', () => {
+  it('announces confirmed disable, enable and deletion only after their API results', async () => {
+    const changed = vi.fn(); const s = await service(changed)
+    const pending = deferred<UpstreamSiteResponse>(); api.enabled.mockReturnValueOnce(pending.promise)
+    const disable = s.setSiteEnabled('a', false)
+    expect(changed).not.toHaveBeenCalled()
+    pending.resolve({ ...site(), enabled: false }); await disable
+    expect(changed).toHaveBeenLastCalledWith('workspace-a', 'a', false)
+    api.enabled.mockResolvedValueOnce({ ...site(), enabled: true }); await s.setSiteEnabled('a', true)
+    expect(changed).toHaveBeenLastCalledWith('workspace-a', 'a', true)
+    api.remove.mockResolvedValueOnce(undefined); await s.deleteSite('a')
+    expect(changed).toHaveBeenLastCalledWith('workspace-a', 'a', false, true)
+    expect(api.sync).not.toHaveBeenCalled(); expect(api.syncAll).not.toHaveBeenCalled()
+  })
+  it('announces unknown management result after failed save without assuming the site stayed enabled', async () => {
+    const changed = vi.fn(); const s = await service(changed)
+    api.enabled.mockRejectedValueOnce(new Error('admin.upstream.errors.unknown'))
+    await s.setSiteEnabled('a', false)
+    expect(changed).toHaveBeenCalledExactlyOnceWith('workspace-a', 'a')
+    expect(s.sites.value[0]?.enabled).toBe(true)
+    expect(s.enabledErrorKeys.value.has('a')).toBe(true)
+  })
+  it('does not notify a new workspace when an old management request completes', async () => {
+    const changed = vi.fn(); const s = await service(changed)
+    const pending = deferred<UpstreamSiteResponse>(); api.enabled.mockReturnValueOnce(pending.promise)
+    const disable = s.setSiteEnabled('a', false)
+    api.account.value = { id: 'workspace-b' }; await flushPromises()
+    pending.resolve({ ...site(), enabled: false }); await disable
+    expect(changed).not.toHaveBeenCalled()
   })
 })

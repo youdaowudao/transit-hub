@@ -3,13 +3,23 @@ import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { getNotificationCheckRoute, type NotificationController } from '../../composables/useNotifications'
-import type { NotificationHistoryFilter } from '../../types/notifications'
+import type { NotificationHistoryFilter, SiteNotification } from '../../types/notifications'
 const props = defineProps<{ controller: NotificationController }>()
-const { drawerOpen, historyFilter, historyItems, historyNextCursor, historyLoading, historyError, detail, detailLoading, detailError, busyIds, progressError, summaryError, managementRefreshPending, lastCheckedAt, summary, displayedPreferenceError: preferenceError } = props.controller
+const { drawerOpen, historyFilter, historyItems, historyNextCursor, historyLoading, historyError, detail, detailLoading, detailError, busyIds, progressError, summaryError, managementRefreshPending, lastCheckedAt, summary, displayedPreferenceError: preferenceError, acknowledgeCritical } = props.controller
 const filters: { value: NotificationHistoryFilter; label: string }[] = [{ value: 'all', label: '全部消息' }, { value: 'unread', label: '未读消息' }, { value: 'pending', label: '待确认消息' }]
 const levels = ['', '普通', '关注', '重要', '紧急']
 const dialogRef = ref<HTMLElement | null>(null)
 const detailRef = ref<HTMLElement | null>(null)
+const siteReasonsOpen = ref(false)
+const notesOpen = ref(false)
+const noticeTone = (item: SiteNotification): 'pending' | 'important' | 'unread' | 'read' => {
+  if (item.level === 4 && item.subjectActive && !item.reminderCompletedAt) return 'pending'
+  if (item.level === 3 && item.subjectActive && !item.readAt) return 'important'
+  if (item.level <= 2 && item.subjectActive && !item.readAt) return 'unread'
+  return 'read'
+}
+const toneClasses = { pending: 'border-destructive/30 bg-destructive/10', important: 'border-warning/30 bg-warning/10', unread: 'border-primary/20 bg-primary/5', read: 'border-border/50 text-muted-foreground' }
+const labelClasses = { pending: 'text-destructive', important: 'text-warning', unread: 'text-primary', read: 'text-muted-foreground' }
 let previousFocus: HTMLElement | null = null
 let previousOverflow = ''
 const restore = () => {
@@ -22,6 +32,7 @@ const restore = () => {
 }
 watch(drawerOpen, async open => {
   if (!open) { restore(); return }
+  siteReasonsOpen.value = notesOpen.value = false
   previousFocus = document.activeElement as HTMLElement | null
   previousOverflow = document.body.style.overflow
   document.body.style.overflow = 'hidden'
@@ -76,14 +87,21 @@ onBeforeUnmount(() => { document.removeEventListener('visibilitychange', readVis
   <Teleport to="body">
     <div v-if="drawerOpen" class="fixed inset-0 z-[100] flex justify-end bg-black/50" @click.self="controller.closeDrawer()" @keydown="keydown">
       <section ref="dialogRef" role="dialog" aria-modal="true" aria-labelledby="notification-drawer-title" tabindex="-1" class="flex h-full w-full max-w-xl flex-col overflow-hidden border-l border-border/50 bg-card shadow-2xl" @click.capture="focusBeforeButtonAction">
-        <div class="flex shrink-0 items-start justify-between gap-3 border-b border-border/50 p-4 sm:p-5"><div><h2 id="notification-drawer-title" class="text-lg font-semibold">站内通知</h2><p class="mt-1 break-words text-sm text-muted-foreground">这里保留当前工作区的消息。已读表示看过；紧急消息还需要点击‘我已知悉’。</p><p class="mt-2 text-xs text-muted-foreground">普通：知道即可；关注：建议查看；重要：尽快检查；紧急：优先确认。</p></div><button type="button" class="shrink-0 text-muted-foreground hover:text-foreground" aria-label="关闭消息抽屉" @click="controller.closeDrawer()"><X class="h-5 w-5" /></button></div>
+        <div class="flex shrink-0 items-start justify-between gap-3 border-b border-border/50 p-4 sm:p-5"><div><h2 id="notification-drawer-title" class="text-lg font-semibold">站内通知</h2><p class="mt-1 break-words text-sm text-muted-foreground">这里保留当前工作区的消息。已读表示看过；紧急消息还需要点击‘我已知悉’。</p><p class="mt-2 text-xs text-muted-foreground">紧急（红底）：优先确认，点‘我已知悉’后才变灰；重要（黄底）：尽快检查；关注、普通（蓝底）：建议查看或知道即可；其他消息看过后变灰，不再有底色；网站停止管理后保留的历史消息也是灰色。</p><p class="mt-2 text-xs text-muted-foreground">铃铛上：红色数字是待确认的紧急消息，黄色数字是还没收起或查看的重要提醒，小圆点表示还有没看过的消息。</p></div><button type="button" class="shrink-0 text-muted-foreground hover:text-foreground" aria-label="关闭消息抽屉" @click="controller.closeDrawer()"><X class="h-5 w-5" /></button></div>
         <div class="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain p-4 sm:p-5">
-          <p v-if="managementRefreshPending && !summaryError" role="status" class="text-sm text-muted-foreground">站点设置已变化，正在重新确认通知数量；这里不会修改主站。</p>
-          <p class="text-xs text-muted-foreground">上次成功检查：{{ lastCheckedAt ? new Date(lastCheckedAt).toLocaleString() : '尚无' }}。这里只读取本地消息，不会同步上游或修改主站。</p>
-          <p v-if="!managementRefreshPending && summary?.samplingState.autoSyncEnabled === false" class="break-words text-sm text-warning">当前未开启自动同步，网页只读取已保存的提醒；新的倍率变化需开启自动同步或手动同步后才能发现。</p>
-          <p v-if="!managementRefreshPending && summary?.samplingState.warning" role="alert" class="break-words text-sm text-warning">{{ summary.samplingState.warning.message }}；{{ summary.samplingState.warning.detail }}；{{ summary.samplingState.warning.next }}</p>
-          <div v-if="!managementRefreshPending && summary?.samplingState.unconfirmedSiteCount" class="space-y-1 text-sm text-warning"><p>有{{ summary.samplingState.unconfirmedSiteCount }}个网站的倍率尚未确认，不能据此判断没有变化；请检查下面原因，再到上游管理重试同步。</p><p v-for="site in summary.samplingState.sites" :key="site.siteName" class="break-words">{{ site.siteName }}：{{ site.reason }}；最近读取时间：{{ site.observedAt ? new Date(site.observedAt).toLocaleString() : '尚无' }}</p></div>
-          <p class="text-xs text-muted-foreground">新功能首次取得可信倍率时开始比较，不补发无法确认的旧变化。</p><p class="text-xs text-muted-foreground">发现时间是本系统读到变化的时间，可能晚于上游实际调整；停止管理期间不会补采全部变化。</p><p class="text-xs text-muted-foreground">手工接入且未在本系统关联的账号，可能无法按主站接入分类。</p>
+          <div class="space-y-2 rounded-lg border border-border/50 bg-surface-elevated p-3">
+            <h3 class="text-sm font-semibold">同步状态</h3>
+            <p v-if="managementRefreshPending && !summaryError" role="status" class="text-sm text-muted-foreground">站点设置已变化，正在重新确认通知数量；这里不会修改主站。</p>
+            <p v-if="!managementRefreshPending && summary?.samplingState.autoSyncEnabled === false" class="break-words text-sm text-warning">当前未开启自动同步，网页只读取已保存的提醒；新的倍率变化需开启自动同步或手动同步后才能发现。</p>
+            <p v-if="!managementRefreshPending && summary?.samplingState.warning" role="alert" class="break-words text-sm text-warning">{{ summary.samplingState.warning.message }}；{{ summary.samplingState.warning.detail }}；{{ summary.samplingState.warning.next }}</p>
+            <div v-if="!managementRefreshPending && summary?.samplingState.unconfirmedSiteCount" class="space-y-1 text-sm text-warning">
+              <p>有{{ summary.samplingState.unconfirmedSiteCount }}个网站的倍率尚未确认，不能据此判断没有变化；请点‘查看原因’，再到上游管理重试同步。</p>
+              <Button variant="ghost" size="sm" :aria-expanded="siteReasonsOpen" @click="siteReasonsOpen = !siteReasonsOpen">{{ siteReasonsOpen ? '收起原因' : `查看原因（${summary.samplingState.sites.length}个网站）` }}</Button>
+              <div v-show="siteReasonsOpen"><p v-for="site in summary.samplingState.sites" :key="site.siteName" class="break-words">{{ site.siteName }}：{{ site.reason }}；最近读取时间：{{ site.observedAt ? new Date(site.observedAt).toLocaleString() : '尚无' }}</p></div>
+            </div>
+            <p v-if="!managementRefreshPending && summary && summary.samplingState.autoSyncEnabled === true && summary.samplingState.unconfirmedSiteCount === 0 && !summary.samplingState.warning" class="text-sm text-muted-foreground">自动同步已开启，已启用网站最近一次倍率读取都已确认。</p>
+            <p class="text-xs text-muted-foreground">上次成功检查：{{ lastCheckedAt ? new Date(lastCheckedAt).toLocaleString() : '尚无' }}。这里只读取本地消息，不会同步上游或修改主站。</p>
+          </div>
           <p v-for="error in [summaryError, preferenceError, historyError, detailError, progressError].filter(Boolean)" :key="error" role="alert" class="break-words text-sm text-destructive">{{ error }}</p>
           <div class="flex flex-wrap gap-2"><Button variant="secondary" size="sm" :disabled="controller.summaryLoading.value" @click="controller.refreshSummary()">重试读取</Button><Button v-if="preferenceError" variant="secondary" size="sm" :disabled="controller.preferenceLoading.value" @click="controller.loadPreferences()">重试读取通知设置</Button><Button v-if="historyError" variant="secondary" size="sm" :disabled="historyLoading" @click="controller.loadHistory()">重试读取消息页</Button></div>
           <div v-if="detailLoading" role="status" aria-live="polite" class="text-sm text-muted-foreground">正在读取这条消息的详情；读取并显示后才标为已读。</div>
@@ -98,13 +116,32 @@ onBeforeUnmount(() => { document.removeEventListener('visibilitychange', readVis
             <div v-if="detail.item.level === 4 && !detail.item.reminderCompletedAt" class="space-y-2"><Button :disabled="busyIds.includes(detail.item.id)" @click="controller.acknowledgeCritical([detail.item.id])">我已知悉这1条</Button><p class="text-xs text-muted-foreground">只停止这1条提醒，不表示定价或主站已调整。</p></div>
           </article>
           <template v-else-if="!detailLoading">
+            <div v-if="!managementRefreshPending && summary && summary.active.critical.items.length" class="space-y-2">
+              <h3 class="text-sm font-semibold">待确认</h3>
+              <p class="text-xs text-muted-foreground">这些紧急消息需要逐条点‘我已知悉’；只停止提醒，不表示定价或主站已调整。</p>
+              <div v-for="item in summary.active.critical.items" :key="item.id" class="space-y-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3">
+                <p class="break-words font-semibold">{{ item.content.title }}</p><p class="whitespace-pre-wrap break-words text-sm line-clamp-2">{{ item.content.summary }}</p><p class="text-xs text-muted-foreground">发现时间：{{ new Date(item.discoveredAt).toLocaleString() }}</p>
+                <div class="flex flex-wrap gap-2"><Button variant="secondary" size="sm" @click="controller.openDetail(item.id)">查看详情</Button><Button size="sm" :disabled="busyIds.includes(item.id)" @click="acknowledgeCritical([item.id])">我已知悉这1条</Button></div>
+              </div>
+              <p v-if="summary.active.critical.nextCursor" class="text-xs text-muted-foreground">还有更多待确认的紧急消息，请点‘待确认消息’查看。</p>
+            </div>
             <div class="flex flex-wrap gap-2" aria-label="消息筛选"><Button v-for="filter in filters" :key="filter.value" :variant="historyFilter === filter.value ? 'default' : 'secondary'" size="sm" :disabled="historyLoading" :aria-pressed="historyFilter === filter.value" @click="controller.loadHistory(filter.value)">{{ filter.label }}</Button></div>
             <p class="text-xs text-muted-foreground">“全部消息”保留历史；“未读消息”和“待确认消息”只显示仍在管理的站点及其他有效消息。查看或确认不会修改主站。</p>
             <p v-if="historyLoading" role="status" aria-live="polite" class="text-sm text-muted-foreground">正在读取当前工作区的消息页，原消息保留。</p>
             <p v-if="!historyLoading && !historyError && !historyItems.length" class="text-sm text-muted-foreground">{{ historyNextCursor ? '本页没有符合当前筛选的消息。请点击“下一页消息”继续查看。' : historyFilter === 'all' ? '当前没有已保存的消息。倍率是否已检查，请看上游同步状态。' : historyFilter === 'unread' ? '当前筛选没有未读消息；已读消息可从“全部消息”查看。' : '当前没有待确认的紧急消息；其他消息可从“全部消息”查看。' }}</p>
-            <button v-for="item in historyItems" :key="item.id" type="button" class="block w-full min-w-0 space-y-1 break-words border-b border-border/50 py-3 text-left hover:bg-surface-line/30" @click="controller.openDetail(item.id)"><span class="block text-xs text-muted-foreground">{{ levels[item.level] }} · {{ item.readAt ? '已读' : item.subjectActive ? '未读' : '未读（历史消息）' }}<span v-if="item.level === 4"> · {{ item.reminderCompletedAt ? '已知悉' : item.subjectActive ? '待确认' : '尚未知悉（已停止主动提醒）' }}</span></span><span v-if="!item.subjectActive" class="block text-xs text-muted-foreground">{{ item.subjectInactiveMessage }}</span><span class="block font-medium">{{ item.content.title }}</span><span class="block whitespace-pre-wrap text-sm text-muted-foreground">{{ item.content.summary }}</span><span class="block text-xs text-primary">打开详情；显示后仅标记这一条已读。</span></button>
+            <p class="text-xs text-muted-foreground">点开一条消息可查看详情；显示详情后只把这一条标为已读。</p>
+            <div class="space-y-2">
+              <button v-for="item in historyItems" :key="item.id" type="button" class="block w-full min-w-0 space-y-1 break-words rounded-lg border p-3 text-left hover:bg-surface-line/30" :class="toneClasses[noticeTone(item)]" @click="controller.openDetail(item.id)">
+                <span class="flex flex-wrap items-center justify-between gap-2"><span class="inline-flex items-center gap-1 rounded px-1 text-xs" :class="labelClasses[noticeTone(item)]"><span v-if="noticeTone(item) === 'unread'" class="h-2 w-2 shrink-0 rounded-full bg-primary" />{{ levels[item.level] }} · {{ item.readAt ? '已读' : item.subjectActive ? '未读' : '未读（历史消息）' }}<span v-if="item.level === 4"> · {{ item.reminderCompletedAt ? '已知悉' : item.subjectActive ? '待确认' : '尚未知悉（已停止主动提醒）' }}</span></span><span class="text-xs text-muted-foreground">发现时间：{{ new Date(item.discoveredAt).toLocaleString() }}</span></span>
+                <span v-if="!item.subjectActive" class="block text-xs text-muted-foreground">{{ item.subjectInactiveMessage }}</span><span class="block" :class="noticeTone(item) === 'read' ? 'font-normal' : 'font-semibold'">{{ item.content.title }}</span><span class="block whitespace-pre-wrap text-sm text-muted-foreground line-clamp-2">{{ item.content.summary }}</span>
+              </button>
+            </div>
             <div class="flex flex-wrap gap-2"><Button v-if="historyNextCursor" variant="secondary" :disabled="historyLoading" @click="controller.loadHistory(historyFilter, historyNextCursor)">下一页消息</Button><Button v-if="historyItems.length" variant="secondary" :disabled="historyLoading || historyItems.some(item => busyIds.includes(item.id))" @click="controller.markPageRead()">本页标为已读</Button></div><p class="text-xs text-muted-foreground">只标记本页消息，并停止本页重要提醒；紧急消息仍需单独知悉。</p><p v-if="historyNextCursor" class="text-xs text-muted-foreground">下一页只读取下一批消息，不会把未显示的消息标为已读。</p>
           </template>
+          <div class="space-y-2">
+            <Button variant="ghost" size="sm" :aria-expanded="notesOpen" @click="notesOpen = !notesOpen">{{ notesOpen ? '收起说明' : '关于这些提醒' }}</Button>
+            <div v-show="notesOpen" class="space-y-2"><p class="text-xs text-muted-foreground">新功能首次取得可信倍率时开始比较，不补发无法确认的旧变化。</p><p class="text-xs text-muted-foreground">发现时间是本系统读到变化的时间，可能晚于上游实际调整；停止管理期间不会补采全部变化。</p><p class="text-xs text-muted-foreground">手工接入且未在本系统关联的账号，可能无法按主站接入分类。</p></div>
+          </div>
         </div>
       </section>
     </div>

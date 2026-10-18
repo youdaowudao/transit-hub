@@ -363,7 +363,7 @@ export function useNotifications(options: NotificationControllerOptions) {
     detailError.value = ''
     detail.value = null
     void refreshSummary()
-    await loadHistory('all')
+    await loadHistory(!managementRefreshPending.value && unreadCount.value > 0 ? 'unread' : 'all')
   }
   const closeDrawer = () => { drawerOpen.value = false; detailRequest?.abort(); detailLoading.value = false }
   const openDetail = async (id: string, preserveDetail = false): Promise<boolean> => {

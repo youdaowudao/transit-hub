@@ -232,7 +232,7 @@ describe('workspace notification controller complete request paths', () => {
   it('marks only the loaded page and does not complete urgent reminders on read', async () => {
     const page = [item('normal', 1), item('urgent', 4)]; api.summary.mockResolvedValue(snapshot([page[1]!]))
     api.history.mockResolvedValue({ workspaceAdminAccountId: 'a', items: page, nextCursor: 'next-history' })
-    const { controller } = start(); await flushPromises(); await controller.openDrawer(); expect(api.progress).not.toHaveBeenCalled()
+    const { controller } = start(); await flushPromises(); await controller.openDrawer(); await controller.loadHistory('all'); expect(api.progress).not.toHaveBeenCalled()
     await controller.markPageRead(); expect(api.progress).toHaveBeenCalledWith({ workspaceAdminAccountId: 'a', action: 'read', ids: ['normal', 'urgent'] }, expect.anything())
     expect(controller.pendingCriticalCount.value).toBe(1); expect(controller.historyItems.value[1]?.reminderCompletedAt).toBeNull()
   })
@@ -365,7 +365,7 @@ describe('management changes and notification lifecycle failure paths', () => {
     api.summary.mockResolvedValueOnce(snapshot([a]))
     api.history.mockResolvedValue({ workspaceAdminAccountId: 'a', items: [a], nextCursor: null })
     api.detail.mockResolvedValue({ workspaceAdminAccountId: 'a', item: a, checkAction: { available: true, message: '只查看保存的信息' } })
-    const { controller } = start(); await flushPromises(); await controller.openDrawer(); await controller.openDetail(a.id)
+    const { controller } = start(); await flushPromises(); await controller.openDrawer(); await controller.loadHistory('all'); await controller.openDetail(a.id)
     const history = deferred<{ workspaceAdminAccountId: string; items: SiteNotification[]; nextCursor: null }>(), detail = deferred<{ workspaceAdminAccountId: string; item: SiteNotification }>()
     api.history.mockReturnValueOnce(history.promise); void controller.loadHistory()
     api.detail.mockReturnValueOnce(detail.promise); void controller.openDetail(a.id, true)

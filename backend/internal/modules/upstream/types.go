@@ -147,6 +147,7 @@ type Metrics struct {
 	RateNoticeObservation *RateNoticeObservation `json:"rateNoticeObservation,omitempty"`
 	Balance               MetricValue            `json:"balance"`
 	TodayConsume          MetricValue            `json:"todayConsume"`
+	TotalConsume          MetricValue            `json:"totalConsume"`
 	HistoryRecharge       MetricValue            `json:"historyRecharge"`
 	Group                 GroupInfo              `json:"group"`
 	Groups                []GroupInfo            `json:"groups"`

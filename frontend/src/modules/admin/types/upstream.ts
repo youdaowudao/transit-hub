@@ -55,6 +55,7 @@ export interface UpstreamGroupInfo {
 export interface UpstreamMetrics {
   balance: UpstreamMetricValue
   todayConsume: UpstreamMetricValue
+  totalConsume?: UpstreamMetricValue
   todayConsumeDate?: string
  todayConsumeTimezone?: string
  todayConsumeErrorDetail?: string
@@ -68,6 +69,23 @@ export interface UpstreamMetrics {
   group: UpstreamGroupInfo
   groups: UpstreamGroupInfo[]
   rateNoticeObservation?: { confirmed: boolean; observedAt: string; reason?: string }
+}
+
+export interface UpstreamSiteConsumption {
+  todayConsume: UpstreamMetricValue
+  totalConsume?: UpstreamMetricValue
+  rechargeRate: number
+  todayConsumeDate?: string
+  todayConsumeTimezone?: string
+  todayConsumeStatus?: 'ok' | 'unreadable'
+  todayConsumeErrorKey?: string
+  todayConsumeErrorDetail?: string
+}
+
+export interface UpstreamSiteOption {
+  id: string
+  name: string
+  consumption?: UpstreamSiteConsumption
 }
 
 export interface NewApiSession {

@@ -54,6 +54,7 @@ const normalizeMetrics = (metrics: UpstreamSiteResponse['metrics'] | null | unde
     todayConsumeFailedAt: metrics?.todayConsumeFailedAt,
     balance: metrics?.balance ?? emptyMetric(),
     todayConsume: usable ? metrics!.todayConsume : emptyMetric(),
+    totalConsume: metrics?.totalConsume ?? emptyMetric(),
     historyRecharge: metrics?.historyRecharge ?? emptyMetric(),
     group: metrics?.group ?? { id: '', name: '-', platform: null, multiplier: null, multiplierDisplay: '-' },
     groups: Array.isArray(metrics?.groups) ? metrics.groups : [],

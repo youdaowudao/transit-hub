@@ -5,6 +5,9 @@ import { AlertCircle, ArrowUpDown, Check, ChevronDown, History, KeyRound, Link2,
 import { Button } from '@/components/ui/button'
 import { readOwnGroupRates, readConnectionMainSiteGroups, changeConnectionMainSiteGroups, syncConnectionHubGroups, MainSiteGroupsApiError, checkScopedRealConnections, listScopedRealConnections, listConnectionsNeedingAttention, ScopedCheckApiError, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, realDisconnect } from '../api/mySites'
 import { listUpstreamSiteOptions } from '../api/upstream'
+import type { UpstreamSiteOption } from '../types/upstream'
+import { safeScopedErrorText } from '../utils/scopedErrorText'
+import { costFailureText } from '../utils/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
@@ -58,7 +61,7 @@ const mySiteMappings = ref<MySiteMapping[]>([])
 const hasLoadedMappingOptions = ref(false)
 const connectionCapabilities = ref<ConnectionCapabilities | null>(null)
 const searchQuery = ref('')
-const upstreamSiteOptions = ref<{ id: string; name: string }[]>([])
+const upstreamSiteOptions = ref<UpstreamSiteOption[]>([])
 const focusedRateKey = ref('')
 const pendingFocusGroup = ref('')
 const pendingFocusGroupId = ref('')
@@ -345,6 +348,8 @@ watch([() => currentAccount.value?.id, adminPlatform], () => {
   connectionDataKnown.value = false
   realConnectionsData.value = []
   resetOwnGroupRates()
+  upstreamSiteOptions.value = []
+  siteOptionsError.value = ''
   if (pageIsMounted) void enterPage()
   hasLoadedMappingOptions.value = false
   connectOutcome.value = 'editing'
@@ -373,6 +378,43 @@ const siteOptions = computed(() => {
   return Array.from(options, ([id, name]) => ({ id, name }))
     .sort((first, second) => first.name.localeCompare(second.name))
 })
+
+const consumptionBySiteId = computed(() => new Map(upstreamSiteOptions.value.map(site => [site.id, site.consumption])))
+const accountConsumptionNext = '请先在上游管理同步该账号，再点本页“刷新数据”；不会修改主站。'
+const accountConsumptionAmount = (rate: GroupRate, field: 'todayConsume' | 'totalConsume'): number | null => {
+  const summary = consumptionBySiteId.value.get(rate.siteId)
+  if (!summary) return null
+  if (field === 'todayConsume') {
+    const date = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Singapore', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+    if (summary.todayConsumeTimezone !== 'Asia/Singapore' || summary.todayConsumeDate !== date) return null
+  }
+  const raw = summary[field]?.value
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0 || typeof summary.rechargeRate !== 'number' || !Number.isFinite(summary.rechargeRate) || summary.rechargeRate <= 0) return null
+  const value = raw * summary.rechargeRate
+  return Number.isFinite(value) ? value : null
+}
+const accountConsumptionDisplay = (rate: GroupRate, field: 'todayConsume' | 'totalConsume'): string => {
+  const amount = accountConsumptionAmount(rate, field)
+  if (amount === null) return '—'
+  const retained = field === 'todayConsume' && consumptionBySiteId.value.get(rate.siteId)?.todayConsumeStatus === 'unreadable'
+  return amount.toFixed(2) + (retained ? '（上次读取）' : '')
+}
+const accountConsumptionHint = (rate: GroupRate, field: 'todayConsume' | 'totalConsume'): string => {
+  const summary = consumptionBySiteId.value.get(rate.siteId)
+  const retained = siteOptionsError.value && summary ? '本次读取已保存数据失败，显示上次读取结果。' : ''
+  if (field === 'todayConsume' && summary?.todayConsumeStatus === 'unreadable') {
+    const reason = safeScopedErrorText(summary.todayConsumeErrorDetail || costFailureText(summary.todayConsumeErrorKey)) || '今日消费暂时无法读取，具体原因未保存，请检查上游管理的同步结果。'
+    return retained + reason + '；' + accountConsumptionNext
+  }
+  if (accountConsumptionAmount(rate, field) === null) {
+    const label = field === 'todayConsume' ? '有效的今日消费' : '累计消费'
+    const reason = summary && (typeof summary.rechargeRate !== 'number' || !Number.isFinite(summary.rechargeRate) || summary.rechargeRate <= 0)
+      ? '账号充值系数无效，暂时无法换算消费金额，请到上游管理检查充值系数。'
+      : `上游管理尚未保存该账号${label}。`
+    return retained + reason + accountConsumptionNext
+  }
+  return retained || '金额与上游管理使用相同的充值系数换算。'
+}
 
 const rateFocusKey = (rate: GroupRate): string => `${rate.siteId}\u0000${rate.groupId ? 'id:' + rate.groupId : 'name:' + rate.groupName}`
 
@@ -416,7 +458,7 @@ const loadUpstreamSiteOptions = async () => {
     siteOptionsError.value = ''
   } catch (error) {
     if (!pageIsMounted || controller.signal.aborted || workspace !== (currentAccount.value?.id ?? '')) return
-    siteOptionsError.value = `网站选项暂时无法加载：${displayCause(error)}。当前列表保持显示，请点击刷新重试加载选项。`
+    siteOptionsError.value = `网站选项暂时无法加载：${displayCause(error)}。本次没有取得新的名称和消费数据，已显示的资料为上次读取结果；请点击“刷新数据”重试。`
   }
 }
 
@@ -1912,6 +1954,8 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             >
               <td class="px-4 py-2.5">
                 <div class="font-medium text-foreground">{{ rate.siteName }}</div>
+                <div data-account-today-consume class="mt-1 whitespace-nowrap text-xs leading-5 text-muted-foreground tabular-nums" :title="accountConsumptionHint(rate, 'todayConsume')">今日消费：{{ accountConsumptionDisplay(rate, 'todayConsume') }}</div>
+                <div data-account-total-consume class="whitespace-nowrap text-xs leading-5 text-muted-foreground tabular-nums" :title="accountConsumptionHint(rate, 'totalConsume')">累计消费：{{ accountConsumptionDisplay(rate, 'totalConsume') }}</div>
               </td>
               <td class="px-4 py-2.5">
                 <div class="flex flex-col items-start gap-1">
@@ -1977,7 +2021,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <td class="px-4 py-2.5 text-right">
                 <div v-if="!rate.deleted && connectionDataKnown" class="flex flex-col items-end gap-1">
                   <span v-if="connectionOperationBlocked(rate)" class="max-w-56 text-xs text-muted-foreground">{{ operationBlockedReason }}</span>
-                  <div class="flex flex-nowrap justify-end gap-1.5">
+                  <div class="flex flex-col items-stretch gap-1.5">
                   <Button
                     v-if="canEditMainSiteGroups(rate)"
                     variant="secondary"
@@ -2048,6 +2092,8 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         </div>
       </div>
     </div>
+
+    <p data-account-consumption-hint class="shrink-0 text-xs leading-5 text-muted-foreground">显示上游管理中该账号已保存的消费金额，不会重新查询上游或修改主站；需要更新时，请先在上游管理同步该账号，再点本页“刷新数据”。</p>
 
     <div v-if="isHistoryOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
       <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-history-title" tabindex="-1" class="max-h-[calc(100dvh-2rem)] w-full max-w-4xl overflow-hidden overscroll-contain rounded-xl border border-border/50 bg-card shadow-xl">

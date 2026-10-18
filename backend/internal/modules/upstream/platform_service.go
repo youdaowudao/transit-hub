@@ -1819,6 +1819,7 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 	metrics := Metrics{
 		Balance:            metric(quotaToUSDWithUnit(quota, qpu)),
 		TodayConsume:       metric(todayCost),
+		TotalConsume:       metric(quotaToUSDWithUnit(usedQuota, qpu)),
 		TodayConsumeDate:   date,
 		HistoryRecharge:    metric(quotaToUSDWithUnit(estimatedGranted, qpu)),
 		Group:              group,
@@ -1868,7 +1869,7 @@ func (s *PlatformService) fetchSub2APIMetrics(session Session, dates ...string) 
 		group = groups[0]
 	}
 	amount, observedAt, costErr := s.fetchAccountCostForDateContext(context.Background(), session, date)
-	metrics := Metrics{Balance: metric(balance), TodayConsume: metric(nil), TodayConsumeDate: date, HistoryRecharge: metric(recharged), Group: group, Groups: groups, GroupSnapshotAudit: audit, RateNoticeObservation: rateObservation}
+	metrics := Metrics{Balance: metric(balance), TodayConsume: metric(nil), TotalConsume: metric(firstNumber(statsData, []string{"total_actual_cost"})), TodayConsumeDate: date, HistoryRecharge: metric(recharged), Group: group, Groups: groups, GroupSnapshotAudit: audit, RateNoticeObservation: rateObservation}
 	if costErr != nil {
 		metrics = withCostReadFailure(metrics, costErr, s.keyUsageNow())
 	} else {

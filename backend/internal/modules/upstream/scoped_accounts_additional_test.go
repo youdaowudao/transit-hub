@@ -63,8 +63,19 @@ func TestScopedSiteOptionsCountsReadsAndPropagatesCacheFailure(t *testing.T) {
 	}
 	for _, raw := range payload["items"].([]any) {
 		item := raw.(map[string]any)
-		if len(item) != 2 || item["id"] == nil || item["name"] == nil {
-			t.Fatal("options added full website fields")
+		// The approved account-consumption summary is the only additional field.
+		if len(item) != 3 || item["id"] == nil || item["name"] == nil {
+			t.Fatal("options added fields outside the approved account summary")
+		}
+		summary, ok := item["consumption"].(map[string]any)
+		if !ok || summary["todayConsume"] == nil || summary["totalConsume"] == nil || summary["rechargeRate"] == nil {
+			t.Fatal("options missing the saved account summary")
+		}
+		allowed := map[string]bool{"todayConsume": true, "totalConsume": true, "rechargeRate": true, "todayConsumeDate": true, "todayConsumeTimezone": true, "todayConsumeStatus": true, "todayConsumeErrorKey": true, "todayConsumeErrorDetail": true}
+		for field := range summary {
+			if !allowed[field] {
+				t.Fatalf("options leaked an unrelated account field: %s", field)
+			}
 		}
 	}
 	sentinel := errors.New("fixture cache unavailable")

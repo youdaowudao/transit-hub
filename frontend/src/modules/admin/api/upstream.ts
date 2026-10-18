@@ -1,6 +1,7 @@
 import { scopedReadFailureText } from '../utils/scopedErrorText'
 import type {
   SiteSettings,
+  UpstreamSiteOption,
   UpstreamFailure,
   SyncStreamEvent,
   UpstreamSiteForm,
@@ -176,7 +177,7 @@ export const streamSyncAllUpstreamSites = async (
   }
 }
 
-export const listUpstreamSiteOptions = async (signal?: AbortSignal): Promise<{ workspaceAdminAccountId: string; items: { id: string; name: string }[] }> => {
+export const listUpstreamSiteOptions = async (signal?: AbortSignal): Promise<{ workspaceAdminAccountId: string; items: UpstreamSiteOption[] }> => {
   let response: Response
   try { response = await fetch(endpoint('/upstream-sites/options'), { signal, headers: { Accept: 'application/json', ...authHeaders() } }) }
   catch (error) { if (error instanceof Error && error.name === 'AbortError') throw error; throw new Error('Hub暂时无法连接服务器，请刷新并检查后端连接') }
@@ -190,5 +191,5 @@ export const listUpstreamSiteOptions = async (signal?: AbortSignal): Promise<{ w
   if (isUnauthorizedApiResponse(response.status, record)) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
   if (!response.ok) throw new Error(scopedReadFailureText(record, '网站名称缓存无法读取，本次未修改网站或主站账号；请刷新并检查Hub后端缓存连接。'))
   if (typeof record.workspaceAdminAccountId !== 'string' || !Array.isArray(record.items) || !record.items.every(item => item && typeof item.id === 'string' && typeof item.name === 'string')) throw new Error('网站名称返回内容不完整，请刷新并查看Hub后端记录')
-  return record as { workspaceAdminAccountId: string; items: { id: string; name: string }[] }
+  return record as { workspaceAdminAccountId: string; items: UpstreamSiteOption[] }
 }

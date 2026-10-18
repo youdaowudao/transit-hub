@@ -34,6 +34,7 @@ func defaultMetrics() Metrics {
 	return Metrics{
 		Balance:         metric(nil),
 		TodayConsume:    metric(nil),
+		TotalConsume:    metric(nil),
 		HistoryRecharge: metric(nil),
 		Group: GroupInfo{
 			Name:              defaultDisplay,

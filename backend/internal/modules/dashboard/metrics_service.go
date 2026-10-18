@@ -75,6 +75,10 @@ type upstreamKeySnapshotReader interface {
 	CachedKeyUsageForDate(ctx context.Context, userID, adminAccountID, date string) (upstream.KeyUsageForDateResult, error)
 }
 
+type upstreamKeyRecordedTotalsReader interface {
+	UpstreamKeyRecordedTotals(ctx context.Context, userID, adminAccountID string) ([]UpstreamKeyRecordedTotalItem, error)
+}
+
 type upstreamSyncKeySnapshotReader interface {
 	SyncAndCollectKeyUsage(ctx context.Context, userID, adminAccountID, date string, startedAt time.Time) (upstream.KeyUsageForDateResult, error)
 }
@@ -1140,6 +1144,35 @@ func (s *MetricsService) UpstreamKeyUsageToday(ctx context.Context, userID strin
 	return s.upstreamKeyUsageTodayForDate(ctx, userID, businesstime.DateAt(s.currentTime()), false)
 }
 
+// UpstreamKeyUsageTodayIncludingZero also keeps collected zero amounts so callers
+// can distinguish a zero-cost Key from a Key that has not been collected.
+func (s *MetricsService) UpstreamKeyUsageTodayIncludingZero(ctx context.Context, userID string) (UpstreamKeyUsageTodayResponse, error) {
+	return s.upstreamKeyUsageTodayForDate(ctx, userID, businesstime.DateAt(s.currentTime()), true)
+}
+
+func (s *MetricsService) UpstreamKeyRecordedTotals(ctx context.Context, userID string) (UpstreamKeyRecordedTotalsResponse, error) {
+	adminAccountID := ""
+	if s.accounts != nil {
+		var err error
+		adminAccountID, err = s.accounts.RequireCurrentID(ctx, userID)
+		if err != nil {
+			return UpstreamKeyRecordedTotalsResponse{}, err
+		}
+	}
+	reader, ok := s.metricsRepo.(upstreamKeyRecordedTotalsReader)
+	if !ok {
+		return UpstreamKeyRecordedTotalsResponse{}, requestError(ErrorUpstreamKeyRecordedTotalsUnavailable)
+	}
+	items, err := reader.UpstreamKeyRecordedTotals(ctx, userID, adminAccountID)
+	if err != nil {
+		return UpstreamKeyRecordedTotalsResponse{}, requestError(ErrorUpstreamKeyRecordedTotalsUnavailable)
+	}
+	if items == nil {
+		items = []UpstreamKeyRecordedTotalItem{}
+	}
+	return UpstreamKeyRecordedTotalsResponse{WorkspaceAdminAccountID: adminAccountID, Items: items}, nil
+}
+
 func (s *MetricsService) upstreamKeyUsageTodayForDate(ctx context.Context, userID, date string, includeZero bool) (UpstreamKeyUsageTodayResponse, error) {
 	reader, ok := s.upstreams.(upstreamKeySnapshotReader)
 	if !ok {
@@ -1157,7 +1190,7 @@ func (s *MetricsService) upstreamKeyUsageTodayForDate(ctx context.Context, userI
 	if err != nil {
 		return UpstreamKeyUsageTodayResponse{}, requestError(ErrorUpstreamKeyUsageUnavailable)
 	}
-	response := UpstreamKeyUsageTodayResponse{Date: date, Keys: []UpstreamKeyUsageTodayItem{}, Sites: []UpstreamKeyUsageSite{}, TotalSites: result.ExpectedSites, AutoRefreshEnabled: result.AutoRefreshEnabled}
+	response := UpstreamKeyUsageTodayResponse{WorkspaceAdminAccountID: adminAccountID, Date: date, Keys: []UpstreamKeyUsageTodayItem{}, Sites: []UpstreamKeyUsageSite{}, TotalSites: result.ExpectedSites, AutoRefreshEnabled: result.AutoRefreshEnabled}
 	for _, site := range result.Sites {
 		status := site.Status
 		if !site.Complete || site.Timezone != businesstime.Timezone || site.ConsumeDate != date || result.BusinessDate != date {

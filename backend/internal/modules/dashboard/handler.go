@@ -30,6 +30,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, metricsService *Metric
 	mux.HandleFunc("GET /api/dashboard/group-usage-today", handler.groupUsageToday)
 	mux.HandleFunc("GET /api/dashboard/group-profit-today", handler.groupProfitToday)
 	mux.HandleFunc("GET /api/dashboard/upstream-key-usage-today", handler.upstreamKeyUsageToday)
+	mux.HandleFunc("GET /api/dashboard/upstream-key-recorded-totals", handler.upstreamKeyRecordedTotals)
 	mux.HandleFunc("GET /api/dashboard/upstream-balance-breakdown", handler.upstreamBalanceBreakdown)
 	mux.HandleFunc("GET /api/dashboard/balance-filter", handler.getBalanceFilter)
 	mux.HandleFunc("PUT /api/dashboard/balance-filter", handler.saveBalanceFilter)
@@ -486,7 +487,25 @@ func (h *Handler) upstreamKeyUsageToday(w http.ResponseWriter, r *http.Request) 
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
 		return
 	}
-	response, err := h.metricsService.UpstreamKeyUsageToday(r.Context(), userID)
+	read := h.metricsService.UpstreamKeyUsageToday
+	if r.URL.Query().Get("includeZero") == "1" {
+		read = h.metricsService.UpstreamKeyUsageTodayIncludingZero
+	}
+	response, err := read(r.Context(), userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, response)
+}
+
+func (h *Handler) upstreamKeyRecordedTotals(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	response, err := h.metricsService.UpstreamKeyRecordedTotals(r.Context(), userID)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -577,7 +596,7 @@ func writeError(w http.ResponseWriter, err error) {
 			status = http.StatusForbidden
 		case requestError(ErrorPlatformUnsupported):
 			status = http.StatusNotImplemented
-		case requestError(ErrorUpstreamKeyUsageUnavailable):
+		case requestError(ErrorUpstreamKeyUsageUnavailable), requestError(ErrorUpstreamKeyRecordedTotalsUnavailable):
 			status = http.StatusBadGateway
 		}
 		httpjson.WriteError(w, status, requestErr.Error())

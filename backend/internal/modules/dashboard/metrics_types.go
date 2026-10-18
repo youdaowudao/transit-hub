@@ -284,13 +284,31 @@ type GroupUsageTodayItem struct {
 // UpstreamKeyUsageTodayResponse 是 GET /api/dashboard/upstream-key-usage-today 返回的
 // 「今日成本」下钻明细：当前工作区所有上游站点中，今天有消费的 key 列表。
 type UpstreamKeyUsageTodayResponse struct {
-	Date               string                      `json:"date"`
-	Total              float64                     `json:"total"`
-	Keys               []UpstreamKeyUsageTodayItem `json:"keys"`
-	FailedSites        int                         `json:"failedSites,omitempty"` // 按首页缓存成本口径统计的不可用站点数
-	TotalSites         int                         `json:"totalSites,omitempty"`  // 按首页缓存成本口径统计的目标站点数
-	Sites              []UpstreamKeyUsageSite      `json:"sites"`
-	AutoRefreshEnabled bool                        `json:"autoRefreshEnabled"`
+	WorkspaceAdminAccountID string                      `json:"workspaceAdminAccountId,omitempty"`
+	Date                    string                      `json:"date"`
+	Total                   float64                     `json:"total"`
+	Keys                    []UpstreamKeyUsageTodayItem `json:"keys"`
+	FailedSites             int                         `json:"failedSites,omitempty"` // 按首页缓存成本口径统计的不可用站点数
+	TotalSites              int                         `json:"totalSites,omitempty"`  // 按首页缓存成本口径统计的目标站点数
+	Sites                   []UpstreamKeyUsageSite      `json:"sites"`
+	AutoRefreshEnabled      bool                        `json:"autoRefreshEnabled"`
+}
+
+type UpstreamKeyRecordedTotalsResponse struct {
+	WorkspaceAdminAccountID string                         `json:"workspaceAdminAccountId"`
+	Items                   []UpstreamKeyRecordedTotalItem `json:"items"`
+}
+
+// UpstreamKeyRecordedTotalItem sums only locally saved Singapore daily costs.
+// A merged row makes every account on that site unsuitable for individual totals.
+type UpstreamKeyRecordedTotalItem struct {
+	SiteID         string  `json:"siteId"`
+	KeyID          string  `json:"keyId"`
+	TotalAmount    float64 `json:"totalAmount"`
+	Days           int     `json:"days"`
+	FirstDate      string  `json:"firstDate"`
+	LastDate       string  `json:"lastDate"`
+	SiteMergedDays int     `json:"siteMergedDays"`
 }
 
 type UpstreamKeyUsageSite struct {

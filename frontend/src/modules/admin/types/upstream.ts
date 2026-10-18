@@ -72,14 +72,8 @@ export interface UpstreamMetrics {
 }
 
 export interface UpstreamSiteConsumption {
-  todayConsume: UpstreamMetricValue
-  totalConsume?: UpstreamMetricValue
+  balance: UpstreamMetricValue
   rechargeRate: number
-  todayConsumeDate?: string
-  todayConsumeTimezone?: string
-  todayConsumeStatus?: 'ok' | 'unreadable'
-  todayConsumeErrorKey?: string
-  todayConsumeErrorDetail?: string
 }
 
 export interface UpstreamSiteOption {

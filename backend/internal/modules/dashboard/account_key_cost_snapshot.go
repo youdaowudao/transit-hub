@@ -51,6 +51,51 @@ type UpstreamKeyCostRun struct {
 	Items             []UpstreamKeyDailyCost
 }
 
+// UpstreamKeyRecordedTotals is read-only. Each site's latest complete Singapore
+// run supplies each day once, independently of today's site configuration.
+func (r *MetricsRepository) UpstreamKeyRecordedTotals(ctx context.Context, userID, adminAccountID string) ([]UpstreamKeyRecordedTotalItem, error) {
+	rows, err := r.db.Query(ctx, `
+		WITH latest_runs AS (
+			SELECT DISTINCT ON (business_date,site_id) id,business_date,site_id
+			FROM dashboard_upstream_key_cost_runs
+			WHERE user_id=$1 AND admin_account_id=$2 AND complete=true AND usage_timezone=$3
+			ORDER BY business_date,site_id,observed_at DESC,created_at DESC
+		), selected_costs AS (
+			SELECT costs.site_id,costs.key_id,costs.business_date,costs.adjusted_cost_cents,costs.status
+			FROM latest_runs runs
+			JOIN dashboard_upstream_key_daily_costs costs ON costs.run_id=runs.id
+				AND costs.business_date=runs.business_date AND costs.site_id=runs.site_id
+			WHERE costs.user_id=$1 AND costs.admin_account_id=$2
+		), site_merged AS (
+			SELECT site_id,count(*) FILTER (WHERE status='merged') AS merged_days
+			FROM selected_costs GROUP BY site_id
+		)
+		SELECT costs.site_id,costs.key_id,sum(costs.adjusted_cost_cents),count(*),
+		       min(costs.business_date)::text,max(costs.business_date)::text,merged.merged_days
+		FROM selected_costs costs JOIN site_merged merged ON merged.site_id=costs.site_id
+		GROUP BY costs.site_id,costs.key_id,merged.merged_days
+		ORDER BY costs.site_id,costs.key_id
+	`, userID, adminAccountID, businesstime.Timezone)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]UpstreamKeyRecordedTotalItem, 0)
+	for rows.Next() {
+		var item UpstreamKeyRecordedTotalItem
+		var totalCents int64
+		if err := rows.Scan(&item.SiteID, &item.KeyID, &totalCents, &item.Days, &item.FirstDate, &item.LastDate, &item.SiteMergedDays); err != nil {
+			return nil, err
+		}
+		item.TotalAmount = float64(totalCents) / 100
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 func completeAccountKeySnapshotRunID(runs []UpstreamKeyCostRun) string {
 	if len(runs) == 0 || runs[0].SnapshotRunID == "" {
 		return ""

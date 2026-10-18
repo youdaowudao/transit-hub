@@ -5,6 +5,7 @@ import { AlertCircle, ArrowUpDown, Check, ChevronDown, History, KeyRound, Link2,
 import { Button } from '@/components/ui/button'
 import { readOwnGroupRates, readConnectionMainSiteGroups, changeConnectionMainSiteGroups, syncConnectionHubGroups, MainSiteGroupsApiError, checkScopedRealConnections, listScopedRealConnections, listConnectionsNeedingAttention, ScopedCheckApiError, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, realDisconnect } from '../api/mySites'
 import { listUpstreamSiteOptions } from '../api/upstream'
+import { getUpstreamKeyUsageToday, getUpstreamKeyRecordedTotals, type UpstreamKeyUsageTodayResponse, type UpstreamKeyRecordedTotalsResponse } from '../api/dashboardAdmin'
 import type { UpstreamSiteOption } from '../types/upstream'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
 import { costFailureText } from '../utils/upstream'
@@ -74,6 +75,7 @@ let pageGeneration = 0
 let pageController: AbortController | null = null
 let checkController: AbortController | null = null
 let optionsController: AbortController | null = null
+let optionsGeneration = 0
 let consumedFocusRoute = ''
 let deferredRouteChange = false
 let lastCheckScope: Omit<ScopedCheckRequest, 'mode'> | null = null
@@ -350,6 +352,10 @@ watch([() => currentAccount.value?.id, adminPlatform], () => {
   resetOwnGroupRates()
   upstreamSiteOptions.value = []
   siteOptionsError.value = ''
+  todayConsumption.reset()
+  totalConsumption.reset()
+  optionsController?.abort()
+  optionsGeneration++
   if (pageIsMounted) void enterPage()
   hasLoadedMappingOptions.value = false
   connectOutcome.value = 'editing'
@@ -380,41 +386,119 @@ const siteOptions = computed(() => {
 })
 
 const consumptionBySiteId = computed(() => new Map(upstreamSiteOptions.value.map(site => [site.id, site.consumption])))
-const accountConsumptionNext = '请先在上游管理同步该账号，再点本页“刷新数据”；不会修改主站。'
-const accountConsumptionAmount = (rate: GroupRate, field: 'todayConsume' | 'totalConsume'): number | null => {
-  const summary = consumptionBySiteId.value.get(rate.siteId)
-  if (!summary) return null
-  if (field === 'todayConsume') {
-    const date = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Singapore', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
-    if (summary.todayConsumeTimezone !== 'Asia/Singapore' || summary.todayConsumeDate !== date) return null
-  }
-  const raw = summary[field]?.value
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0 || typeof summary.rechargeRate !== 'number' || !Number.isFinite(summary.rechargeRate) || summary.rechargeRate <= 0) return null
-  const value = raw * summary.rechargeRate
-  return Number.isFinite(value) ? value : null
+const singaporeDate = () => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Singapore', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+const singaporeToday = ref(singaporeDate())
+let singaporeMidnightTimer: ReturnType<typeof setTimeout> | null = null
+const updateSingaporeToday = () => {
+  singaporeToday.value = singaporeDate()
+  if (singaporeMidnightTimer) clearTimeout(singaporeMidnightTimer)
+  const midnight = Date.parse(`${singaporeToday.value}T00:00:00+08:00`) + 24 * 60 * 60_000
+  singaporeMidnightTimer = setTimeout(updateSingaporeToday, Math.max(1, midnight - Date.now()))
 }
-const accountConsumptionDisplay = (rate: GroupRate, field: 'todayConsume' | 'totalConsume'): string => {
-  const amount = accountConsumptionAmount(rate, field)
-  if (amount === null) return '—'
-  const retained = field === 'todayConsume' && consumptionBySiteId.value.get(rate.siteId)?.todayConsumeStatus === 'unreadable'
-  return amount.toFixed(2) + (retained ? '（上次读取）' : '')
+const onConsumptionVisibilityChange = () => {
+  if (document.visibilityState === 'visible') updateSingaporeToday()
 }
-const accountConsumptionHint = (rate: GroupRate, field: 'todayConsume' | 'totalConsume'): string => {
-  const summary = consumptionBySiteId.value.get(rate.siteId)
-  const retained = siteOptionsError.value && summary ? '本次读取已保存数据失败，显示上次读取结果。' : ''
-  if (field === 'todayConsume' && summary?.todayConsumeStatus === 'unreadable') {
-    const reason = safeScopedErrorText(summary.todayConsumeErrorDetail || costFailureText(summary.todayConsumeErrorKey)) || '今日消费暂时无法读取，具体原因未保存，请检查上游管理的同步结果。'
-    return retained + reason + '；' + accountConsumptionNext
+// Each independent read owns its generation and cancellation, including across workspaces.
+const consumptionReader = <T extends { workspaceAdminAccountId?: string }>(read: (signal: AbortSignal) => Promise<T>, label: string, cause: string, canRetain: (value: T) => boolean = () => true) => {
+  const data = ref<T | null>(null)
+  const failureReason = ref('')
+  const error = computed(() => failureReason.value
+    ? `${label}暂时无法读取：${failureReason.value}；本次没有修改主站。${data.value && canRetain(data.value as T) ? '已显示的是上次读取结果，' : ''}请点‘刷新数据’重试，仍失败请查看 Hub 后端日志。`
+    : '')
+  let generation = 0
+  let controller: AbortController | null = null
+  const reset = () => { generation++; controller?.abort(); controller = null; data.value = null; failureReason.value = '' }
+  const load = async () => {
+    const workspace = currentAccount.value?.id ?? ''
+    if (!workspace) { reset(); return }
+    controller?.abort()
+    controller = new AbortController()
+    const activeController = controller
+    const currentGeneration = ++generation
+    const current = () => pageIsMounted && !activeController.signal.aborted && currentGeneration === generation && workspace === (currentAccount.value?.id ?? '')
+    try {
+      const response = await read(activeController.signal)
+      if (!current()) return
+      if (response.workspaceAdminAccountId !== workspace) throw new Error('工作区已变化，请刷新重试')
+      data.value = response
+      failureReason.value = ''
+    } catch (failure) {
+      if (!current()) return
+      const knownReasons = ['工作区已变化，请刷新重试', '消费记录返回内容不完整', '每日消费记录返回内容不完整']
+      failureReason.value = failure instanceof Error && knownReasons.includes(failure.message) ? failure.message : cause
+    }
   }
-  if (accountConsumptionAmount(rate, field) === null) {
-    const label = field === 'todayConsume' ? '有效的今日消费' : '累计消费'
-    const reason = summary && (typeof summary.rechargeRate !== 'number' || !Number.isFinite(summary.rechargeRate) || summary.rechargeRate <= 0)
-      ? '账号充值系数无效，暂时无法换算消费金额，请到上游管理检查充值系数。'
-      : `上游管理尚未保存该账号${label}。`
-    return retained + reason + accountConsumptionNext
-  }
-  return retained || '金额与上游管理使用相同的充值系数换算。'
+  return { data, error, load, reset }
 }
+const todayConsumption = consumptionReader<UpstreamKeyUsageTodayResponse>(async signal => {
+  const response = await getUpstreamKeyUsageToday({ includeZero: true, signal })
+  if (!Array.isArray(response.keys) || !Array.isArray(response.sites)) throw new Error('消费记录返回内容不完整')
+  return response
+}, '今日消费', 'Hub 读取已保存的消费缓存失败，具体原因无法安全确认', response => response.date === singaporeToday.value)
+const totalConsumption = consumptionReader<UpstreamKeyRecordedTotalsResponse>(async signal => {
+  const response = await getUpstreamKeyRecordedTotals({ signal })
+  if (!Array.isArray(response.items)) throw new Error('每日消费记录返回内容不完整')
+  return response
+}, '已记录合计', 'Hub 读取已保存的每日消费记录失败，具体原因无法安全确认')
+const loadAccountConsumption = () => { updateSingaporeToday(); void todayConsumption.load(); void totalConsumption.load() }
+type ConsumptionField = 'todayConsume' | 'totalConsume' | 'balance'
+type ConsumptionCell = { amount: number | null; hint: string; retained?: boolean }
+const missingKeyToday = '这个 Key 今天还没有采集记录，请先到上游管理同步该站点，再点‘刷新数据’'
+const missingRecordedTotal = 'Hub 还没有这个账号的每日消费记录。每日记录由首页成本区的‘刷新账号统计’或每日结算生成，请到首页点‘刷新账号统计’；普通同步上游不会生成它，也不会修改主站'
+const accountConsumptionCell = (rate: GroupRate, field: ConsumptionField): ConsumptionCell => {
+  if (field === 'balance') {
+    const summary = consumptionBySiteId.value.get(rate.siteId)
+    const balance = summary?.balance?.value
+    const factor = summary?.rechargeRate
+    if (typeof balance !== 'number' || !Number.isFinite(balance) || typeof factor !== 'number' || !Number.isFinite(factor) || factor <= 0 || !Number.isFinite(balance * factor)) {
+      return { amount: null, hint: '上游管理没有可用的余额或充值系数，请到上游管理检查充值系数并同步' }
+    }
+    return { amount: balance * factor, hint: '整站余额来自上游管理上次同步，按充值系数换算；不会修改主站。' + (siteOptionsError.value || ''), retained: Boolean(siteOptionsError.value) }
+  }
+  if (!connectionDataKnown.value) return { amount: null, hint: '对接资料还没读到，请点‘刷新数据’' }
+  const connections = realConnectionsForRate(rate).filter(c => !c.status || c.status === 'active')
+  if (!connections.length) return { amount: null, hint: '该分组还没有对接账号' }
+  const seen = new Set<string>()
+  let amount = 0, retained = false
+  const hints = new Set<string>()
+  for (const connection of connections) {
+    const siteId = connection.upstreamSiteId, keyId = connection.upstreamKeyId
+    const identity = JSON.stringify([siteId, keyId])
+    if (seen.has(identity)) continue
+    seen.add(identity)
+    if (field === 'todayConsume') {
+      const response = todayConsumption.data.value
+      if (!response || response.date !== singaporeToday.value) return { amount: null, hint: todayConsumption.error.value || missingKeyToday }
+      const site = response.sites?.find(site => site.siteId === siteId)
+      if (!site) return { amount: null, hint: '该站点已停用或充值系数无效，不参与消费采集，请到上游管理检查' }
+      const detail = site.errorKey ? safeScopedErrorText(costFailureText(site.errorKey)) : ''
+      const reason = detail ? `${detail}；请到上游管理查看该站点的同步结果，再点‘刷新数据’` : ''
+      if (site.status === 'missing') return { amount: null, hint: reason || '无法确认原因，请到上游管理查看该站点的同步结果' }
+      const item = response.keys.find(item => item.siteId === siteId && item.keyIds?.includes(keyId))
+      if (item?.merged) return { amount: null, hint: '该 Key 与其他 Key 合并统计，无法拆分到单个账号' }
+      if (!item || typeof item.todayAmount !== 'number' || !Number.isFinite(item.todayAmount) || item.todayAmount < 0) return { amount: null, hint: missingKeyToday }
+      amount += item.todayAmount
+      if (site.status === 'retained') { retained = true; hints.add(reason || '无法确认原因，请到上游管理查看该站点的同步结果') }
+    } else {
+      const response = totalConsumption.data.value
+      if (!response) return { amount: null, hint: totalConsumption.error.value || missingRecordedTotal }
+      if (response.items.some(item => item.siteId === siteId && item.siteMergedDays > 0)) return { amount: null, hint: '这个站点有合并统计的 Key，累计无法拆分到单个账号' }
+      const item = response.items.find(item => item.siteId === siteId && item.keyId === keyId)
+      if (!item || !(item.days > 0) || typeof item.totalAmount !== 'number' || !Number.isFinite(item.totalAmount) || item.totalAmount < 0) return { amount: null, hint: missingRecordedTotal }
+      amount += item.totalAmount
+      hints.add(`只统计按新加坡日期保存的记录：${item.firstDate} 至 ${item.lastDate}，共 ${item.days} 天；每日按分取整，可能与上游账单有分级误差。`)
+    }
+  }
+  const error = field === 'todayConsume' ? todayConsumption.error.value : totalConsumption.error.value
+  if (error) { retained = true; hints.add(error) }
+  if (!Number.isFinite(amount)) return { amount: null, hint: '金额超出可显示范围，请查看 Hub 后端记录并重试；本次没有修改主站。' }
+  return { amount, retained, hint: (field === 'todayConsume' ? '该主站账号对应上游 Key 今天已保存的消费金额，已按充值系数换算。' : '') + [...hints].join('；') }
+}
+const accountConsumptionDisplay = (rate: GroupRate, field: ConsumptionField): string => {
+  const cell = accountConsumptionCell(rate, field)
+  return cell.amount === null ? '—' : cell.amount.toFixed(2) + (cell.retained ? '（上次读取）' : '')
+}
+const accountConsumptionHint = (rate: GroupRate, field: ConsumptionField) => accountConsumptionCell(rate, field).hint
 
 const rateFocusKey = (rate: GroupRate): string => `${rate.siteId}\u0000${rate.groupId ? 'id:' + rate.groupId : 'name:' + rate.groupName}`
 
@@ -450,15 +534,16 @@ const loadUpstreamSiteOptions = async () => {
   optionsController?.abort()
   const controller = new AbortController()
   optionsController = controller
+  const generation = ++optionsGeneration
   try {
     const response = await listUpstreamSiteOptions(controller.signal)
-    if (!pageIsMounted || controller.signal.aborted || workspace !== (currentAccount.value?.id ?? '')) return
+    if (!pageIsMounted || controller.signal.aborted || generation !== optionsGeneration || workspace !== (currentAccount.value?.id ?? '')) return
     if (response.workspaceAdminAccountId !== workspace) throw new Error('工作区已变化，请刷新重试')
     upstreamSiteOptions.value = response.items
     siteOptionsError.value = ''
   } catch (error) {
-    if (!pageIsMounted || controller.signal.aborted || workspace !== (currentAccount.value?.id ?? '')) return
-    siteOptionsError.value = `网站选项暂时无法加载：${displayCause(error)}。本次没有取得新的名称和消费数据，已显示的资料为上次读取结果；请点击“刷新数据”重试。`
+    if (!pageIsMounted || controller.signal.aborted || generation !== optionsGeneration || workspace !== (currentAccount.value?.id ?? '')) return
+    siteOptionsError.value = `网站选项暂时无法加载：${displayCause(error)}。本次没有取得新的名称和整站余额；${upstreamSiteOptions.value.length ? '已显示的名称和整站余额为上次读取结果；' : ''}请点击“刷新数据”重试。`
   }
 }
 
@@ -516,6 +601,18 @@ const profitMarginClass = (value: number | null): string => {
   if (value < 0) return 'text-destructive'
   if (value === 0) return 'text-warning'
   return 'text-emerald-600 dark:text-emerald-400'
+}
+const groupEditorProfit = (id: string) => {
+  const group = ownGroupRatesState.value === 'ready' ? ownGroupRatesById.value.get(id) : undefined
+  const multiplier = group?.multiplier
+  const cost = groupEditingRate.value?.currentMultiplier ?? null
+  let reason = ''
+  if (ownGroupRatesState.value === 'loading') reason = '分组倍率读取中，请稍候'
+  else if (ownGroupRatesState.value !== 'ready') reason = ownGroupRatesError.value || '分组倍率暂时无法读取，请点‘刷新数据’重试'
+  else if (!group || multiplier == null || !Number.isFinite(multiplier)) reason = '主站没有返回这个分组的倍率，请检查主站分组后点‘刷新数据’'
+  else if (multiplier <= 0) reason = '分组倍率需要大于零才能估算利润率，请检查主站分组倍率'
+  else if (cost == null || !Number.isFinite(cost)) reason = '当前成本倍率缺失，请到上游管理同步后点‘刷新数据’'
+  return { multiplier: multiplier != null && Number.isFinite(multiplier) ? multiplier.toFixed(2) : '—', margin: reason ? null : calculateProfitMargin(multiplier, cost), reason }
 }
 type OwnGroupCellLine = { key: string; id: string; name: string; title: string; value: string; valueTone: 'number' | 'muted'; suffix: string; profitMargin: number | null }
 type OwnGroupCells = { kind: 'unknown' | 'blank'; lines: OwnGroupCellLine[] } | { kind: 'lines'; lines: OwnGroupCellLine[] }
@@ -730,6 +827,7 @@ const enterPage = async () => {
   if (!currentAccount.value?.id) { showMissingWorkspace(); return }
   if (ownGroupRatesWorkspace !== (currentAccount.value?.id ?? '')) void loadOwnGroupRates()
   void loadUpstreamSiteOptions()
+  loadAccountConsumption()
   void loadAttention()
   if (await loadLocalPage({ generation, focus: Boolean(pendingFocusGroup.value || pendingFocusGroupId.value) })) {
     const scope = frozenScope()
@@ -748,6 +846,7 @@ const checkThenLoadRates = async () => {
   lastCheckScope = scope
   isCheckingConnections.value = true
   void loadUpstreamSiteOptions()
+  loadAccountConsumption()
   const loaded = await loadLocalPage({ generation })
   if (generation !== pageGeneration || !pageIsMounted) return
   isCheckingConnections.value = false
@@ -842,6 +941,8 @@ watch(isAnyDialogOpen, async (open) => {
 
 onMounted(async () => {
   document.addEventListener('keydown', handleDialogKeydown)
+  document.addEventListener('visibilitychange', onConsumptionVisibilityChange)
+  updateSingaporeToday()
   await enterPage()
 })
 
@@ -851,6 +952,11 @@ onBeforeUnmount(() => {
   resetOwnGroupRates()
   invalidatePage(true)
   optionsController?.abort()
+  optionsGeneration++
+  todayConsumption.reset()
+  totalConsumption.reset()
+  if (singaporeMidnightTimer) clearTimeout(singaporeMidnightTimer)
+  document.removeEventListener('visibilitychange', onConsumptionVisibilityChange)
   invalidateAttention(true)
   disconnectGeneration++
   connectorGeneration++
@@ -1899,7 +2005,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       <p v-else-if="checkSummary">{{ checkSummary }}</p>
       <p>{{ t('admin.groupRates.listDisplayHint') }}</p>
     </div>
-    <div v-for="notice in [connectionDataError, siteOptionsError, focusError, ownGroupRatesError].filter(Boolean)" :key="notice" role="alert" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
+    <div v-for="notice in [connectionDataError, siteOptionsError, todayConsumption.error.value, totalConsumption.error.value, focusError, ownGroupRatesError].filter(Boolean)" :key="notice" role="alert" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
       <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" /><span>{{ notice }}</span>
     </div>
 
@@ -1955,7 +2061,8 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <td class="px-4 py-2.5">
                 <div class="font-medium text-foreground">{{ rate.siteName }}</div>
                 <div data-account-today-consume class="mt-1 whitespace-nowrap text-xs leading-5 text-muted-foreground tabular-nums" :title="accountConsumptionHint(rate, 'todayConsume')">今日消费：{{ accountConsumptionDisplay(rate, 'todayConsume') }}</div>
-                <div data-account-total-consume class="whitespace-nowrap text-xs leading-5 text-muted-foreground tabular-nums" :title="accountConsumptionHint(rate, 'totalConsume')">累计消费：{{ accountConsumptionDisplay(rate, 'totalConsume') }}</div>
+                <div data-account-total-consume class="whitespace-nowrap text-xs leading-5 text-muted-foreground tabular-nums" :title="accountConsumptionHint(rate, 'totalConsume')">累计消费：{{ accountConsumptionDisplay(rate, 'totalConsume') }}（已记录合计）</div>
+                <div data-account-site-balance class="whitespace-nowrap text-xs leading-5 text-muted-foreground tabular-nums" :title="accountConsumptionHint(rate, 'balance')">整站余额：{{ accountConsumptionDisplay(rate, 'balance') }}</div>
               </td>
               <td class="px-4 py-2.5">
                 <div class="flex flex-col items-start gap-1">
@@ -2093,7 +2200,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       </div>
     </div>
 
-    <p data-account-consumption-hint class="shrink-0 text-xs leading-5 text-muted-foreground">显示上游管理中该账号已保存的消费金额，不会重新查询上游或修改主站；需要更新时，请先在上游管理同步该账号，再点本页“刷新数据”。</p>
+    <p data-account-consumption-hint class="shrink-0 text-xs leading-5 text-muted-foreground">今日消费和累计消费是该主站账号对应上游 Key 的金额；累计只统计 Hub 按新加坡日期已保存的天数，不是上游账单全部历史；整站余额来自上游管理上次同步。页面不会重新查询上游或修改主站。今日消费、整站余额需要更新时，请先在上游管理同步，再点‘刷新数据’；累计消费需要更新时，请到首页成本区点‘刷新账号统计’，再点‘刷新数据’。</p>
 
     <div v-if="isHistoryOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
       <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-history-title" tabindex="-1" class="max-h-[calc(100dvh-2rem)] w-full max-w-4xl overflow-hidden overscroll-contain rounded-xl border border-border/50 bg-card shadow-xl">
@@ -2638,9 +2745,15 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             <fieldset class="space-y-3" :disabled="groupEditorBusy">
               <legend class="mb-3 text-sm font-medium text-foreground">{{ t('admin.groupRates.groupEditor.groups', { platform: groupEditorData.account.platform }) }}</legend>
               <p v-if="!groupEditorData.groups.length" class="text-sm text-muted-foreground">{{ t('admin.groupRates.groupEditor.noGroups') }}</p>
+              <p class="text-xs leading-5 text-muted-foreground">利润率按（该分组倍率－当前成本倍率）÷该分组倍率估算，只用于参考，不会修改主站；选好后仍要点保存才会生效。</p>
               <label v-for="group in groupEditorData.groups" :key="group.id" class="flex items-center gap-3 rounded-lg border border-border/50 p-3 text-sm">
                 <input v-model="groupEditorSelected" type="checkbox" :value="group.id" :disabled="groupEditorBusy" class="h-4 w-4 accent-primary" />
                 <span>{{ group.name || group.id }}</span>
+                <span data-editor-group-profit class="ml-auto text-right text-xs tabular-nums">
+                  <span class="block">倍率 {{ groupEditorProfit(group.id).multiplier }}</span>
+                  <span class="block" :class="profitMarginClass(groupEditorProfit(group.id).margin)">若移入此分组：利润率 {{ formatProfitMargin(groupEditorProfit(group.id).margin) }}</span>
+                  <span v-if="groupEditorProfit(group.id).reason" class="block text-muted-foreground">{{ groupEditorProfit(group.id).reason }}</span>
+                </span>
                 <span v-if="groupEditorData.currentGroups.some(current => current.id === group.id)" class="text-xs text-muted-foreground">{{ t('admin.groupRates.groupEditor.current') }}</span>
                 <span v-if="group.status.trim().toLowerCase() !== 'active'" class="text-xs text-muted-foreground">{{ t('admin.groupRates.groupEditor.inactive') }}</span>
               </label>

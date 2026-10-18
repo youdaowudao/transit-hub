@@ -68,10 +68,10 @@ func TestScopedSiteOptionsCountsReadsAndPropagatesCacheFailure(t *testing.T) {
 			t.Fatal("options added fields outside the approved account summary")
 		}
 		summary, ok := item["consumption"].(map[string]any)
-		if !ok || summary["todayConsume"] == nil || summary["totalConsume"] == nil || summary["rechargeRate"] == nil {
+		if !ok || summary["balance"] == nil || summary["rechargeRate"] == nil {
 			t.Fatal("options missing the saved account summary")
 		}
-		allowed := map[string]bool{"todayConsume": true, "totalConsume": true, "rechargeRate": true, "todayConsumeDate": true, "todayConsumeTimezone": true, "todayConsumeStatus": true, "todayConsumeErrorKey": true, "todayConsumeErrorDetail": true}
+		allowed := map[string]bool{"balance": true, "rechargeRate": true}
 		for field := range summary {
 			if !allowed[field] {
 				t.Fatalf("options leaked an unrelated account field: %s", field)

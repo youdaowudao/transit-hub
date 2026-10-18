@@ -89,7 +89,7 @@ func stringMustJSON(t *testing.T, value any) string {
 
 func TestAccountConsumptionOptionsReadSavedWorkspaceOnly(t *testing.T) {
 	var metrics Metrics
-	if err := json.Unmarshal([]byte(`{"todayConsume":{"value":7,"display":"7"},"totalConsume":{"value":123.75,"display":"123.75"},"todayConsumeDate":"2031-01-01","todayConsumeTimezone":"Asia/Singapore","todayConsumeStatus":"unreadable","todayConsumeErrorDetail":"上游今日消费暂不可读，请稍后同步账号"}`), &metrics); err != nil {
+	if err := json.Unmarshal([]byte(`{"balance":{"value":11,"display":"11"},"todayConsume":{"value":7,"display":"7"},"totalConsume":{"value":123.75,"display":"123.75"},"todayConsumeDate":"2031-01-01","todayConsumeTimezone":"Asia/Singapore","todayConsumeStatus":"unreadable","todayConsumeErrorDetail":"上游今日消费暂不可读，请稍后同步账号"}`), &metrics); err != nil {
 		t.Fatal(err)
 	}
 	for _, date := range []string{"2031-01-01", "2031-01-02"} {
@@ -110,10 +110,8 @@ func TestAccountConsumptionOptionsReadSavedWorkspaceOnly(t *testing.T) {
 				Items []struct {
 					ID          string `json:"id"`
 					Consumption struct {
-						TodayConsume            MetricValue `json:"todayConsume"`
-						TotalConsume            MetricValue `json:"totalConsume"`
-						RechargeRate            float64     `json:"rechargeRate"`
-						TodayConsumeErrorDetail string      `json:"todayConsumeErrorDetail"`
+                        Balance MetricValue `json:"balance"`
+                        RechargeRate float64 `json:"rechargeRate"`
 					} `json:"consumption"`
 				} `json:"items"`
 			}
@@ -124,15 +122,13 @@ func TestAccountConsumptionOptionsReadSavedWorkspaceOnly(t *testing.T) {
 				t.Fatalf("foreign account leaked: %s", raw)
 			}
 			c := body.Items[0].Consumption
-			if c.TotalConsume.Value == nil || *c.TotalConsume.Value != 123.75 || c.RechargeRate != 2 || c.TodayConsumeErrorDetail == "" {
-				t.Fatalf("saved summary missing: %s", raw)
-			}
-			if date == "2031-01-01" && (c.TodayConsume.Value == nil || *c.TodayConsume.Value != 7) {
-				t.Fatal("same-day retained amount lost")
-			}
-			if date != "2031-01-01" && c.TodayConsume.Value != nil {
-				t.Fatal("yesterday shown as today")
-			}
+            if c.Balance.Value == nil || *c.Balance.Value != 11 || c.RechargeRate != 2 {
+                t.Fatalf("saved balance summary missing: %s", raw)
+            }
+            var fields map[string]any
+            encoded, _ := json.Marshal(result.Items[0].Consumption)
+            if err := json.Unmarshal(encoded, &fields); err != nil {t.Fatal(err)}
+            if len(fields)!=2 || fields["balance"]==nil || fields["rechargeRate"]==nil {t.Fatalf("unexpected summary fields: %s",encoded)}
 		})
 	}
 }

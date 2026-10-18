@@ -71,6 +71,10 @@ beforeEach(() => {
             return json([]);
         if (path.includes('mapping-options'))
             return json({ ownGroups: [{ id: '10', groupName: '弹窗分组', platform: 'openai', multiplier: 1 }], mappings: [] });
+        if (path.includes('/upstream-key-usage-today'))
+            return json({ workspaceAdminAccountId: h.currentAccount.value.id, date: '2031-01-01', keys: [], sites: [] });
+        if (path.includes('/upstream-key-recorded-totals'))
+            return json({ workspaceAdminAccountId: h.currentAccount.value.id, items: [] });
         if (path.includes('/dashboard'))
             return json({ platform: 'sub2api' });
         return json({});

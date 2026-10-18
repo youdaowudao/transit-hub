@@ -517,6 +517,7 @@ export interface UpstreamKeyUsageSnapshotSite {
 
 /** 「今日成本」下钻响应：当前工作区所有上游站点中，今天有消费的 key 列表。 */
 export interface UpstreamKeyUsageTodayResponse {
+  workspaceAdminAccountId?: string
   date: string
   total: number
   keys: UpstreamKeyUsageTodayItem[]
@@ -527,8 +528,26 @@ export interface UpstreamKeyUsageTodayResponse {
 }
 
 /** 获取当前工作区所有上游站点中，今天有消费的 key 明细。仅在弹窗打开时按需调用。 */
-export const getUpstreamKeyUsageToday = async (): Promise<UpstreamKeyUsageTodayResponse> =>
-  requestJson<UpstreamKeyUsageTodayResponse>('/dashboard/upstream-key-usage-today')
+export const getUpstreamKeyUsageToday = async (options: { includeZero?: boolean; signal?: AbortSignal } = {}): Promise<UpstreamKeyUsageTodayResponse> =>
+  requestJson<UpstreamKeyUsageTodayResponse>(`/dashboard/upstream-key-usage-today${options.includeZero ? '?includeZero=1' : ''}`, { signal: options.signal })
+
+export interface UpstreamKeyRecordedTotal {
+  siteId: string
+  keyId: string
+  totalAmount: number
+  days: number
+  firstDate: string
+  lastDate: string
+  siteMergedDays: number
+}
+export interface UpstreamKeyRecordedTotalsResponse {
+  workspaceAdminAccountId: string
+  items: UpstreamKeyRecordedTotal[]
+}
+
+/** Only reads the saved daily Key costs for the current workspace. */
+export const getUpstreamKeyRecordedTotals = async (options: { signal?: AbortSignal } = {}): Promise<UpstreamKeyRecordedTotalsResponse> =>
+  requestJson<UpstreamKeyRecordedTotalsResponse>('/dashboard/upstream-key-recorded-totals', { signal: options.signal })
 
 /** 单个上游站点的余额明细（「上游总余额」下钻）。balance/rawBalance 为 null 表示该站点余额未知。 */
 export interface UpstreamBalanceBreakdownItem {

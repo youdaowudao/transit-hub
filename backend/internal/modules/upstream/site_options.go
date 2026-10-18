@@ -10,14 +10,8 @@ import (
 
 // SiteConsumption exposes only amounts already saved by the ordinary site sync.
 type SiteConsumption struct {
-	TodayConsume            MetricValue `json:"todayConsume"`
-	TotalConsume            MetricValue `json:"totalConsume"`
-	RechargeRate            float64     `json:"rechargeRate"`
-	TodayConsumeDate        string      `json:"todayConsumeDate,omitempty"`
-	TodayConsumeTimezone    string      `json:"todayConsumeTimezone,omitempty"`
-	TodayConsumeStatus      string      `json:"todayConsumeStatus,omitempty"`
-	TodayConsumeErrorKey    string      `json:"todayConsumeErrorKey,omitempty"`
-	TodayConsumeErrorDetail string      `json:"todayConsumeErrorDetail,omitempty"`
+	Balance      MetricValue `json:"balance"`
+	RechargeRate float64     `json:"rechargeRate"`
 }
 
 type SiteOption struct {
@@ -38,14 +32,10 @@ func (s *Service) ListOptions(ctx context.Context, userID, workspaceID string) (
 		return SiteOptionsResponse{}, err
 	}
 	result := SiteOptionsResponse{WorkspaceAdminAccountID: workspaceID, Items: make([]SiteOption, 0)}
-	date := s.keyUsageDate()
 	for _, site := range sites {
 		if site != nil && site.UserID == userID && site.AdminAccountID == workspaceID {
-			metrics := maskUnverifiedTodayCost(site.Metrics, date)
 			result.Items = append(result.Items, SiteOption{ID: site.ID, Name: site.Name, Consumption: SiteConsumption{
-				TodayConsume: metric(metrics.TodayConsume.Value), TotalConsume: metric(metrics.TotalConsume.Value), RechargeRate: site.RechargeRate,
-				TodayConsumeDate: metrics.TodayConsumeDate, TodayConsumeTimezone: metrics.TodayConsumeTimezone,
-				TodayConsumeStatus: metrics.TodayConsumeStatus, TodayConsumeErrorKey: metrics.TodayConsumeErrorKey, TodayConsumeErrorDetail: metrics.TodayConsumeErrorDetail,
+				Balance: metric(site.Metrics.Balance.Value), RechargeRate: site.RechargeRate,
 			}})
 		}
 	}
@@ -64,7 +54,7 @@ func (h *Handler) listOptions(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.service.ListOptions(r.Context(), userID, workspace)
 	if err != nil {
-		httpjson.Write(w, http.StatusInternalServerError, map[string]string{"message": "网站选项暂时无法加载", "detail": "Hub读取已保存的网站名称和账号消费失败，缓存连接的具体原因无法安全确认；本次未取得新数据，也未修改网站或主站", "next": "请刷新重试；仍失败时请检查Hub后端缓存读取记录"})
+		httpjson.Write(w, http.StatusInternalServerError, map[string]string{"message": "网站选项暂时无法加载", "detail": "Hub读取已保存的网站名称和整站余额失败，缓存连接的具体原因无法安全确认；本次未取得新数据，也未修改网站或主站", "next": "请刷新重试；仍失败时请检查Hub后端缓存读取记录"})
 		return
 	}
 	httpjson.Write(w, http.StatusOK, result)

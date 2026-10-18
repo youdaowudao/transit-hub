@@ -106,6 +106,8 @@ beforeEach(() => {
     if (path.endsWith('/upstream-sites/options') && method === 'GET') {
       return json({ workspaceAdminAccountId: 'ws-height', items: [{ id: 'site-height', name: '高度测试站点' }] })
     }
+    if (path.endsWith('/upstream-key-usage-today') && method === 'GET') return json({ workspaceAdminAccountId: 'ws-height', date: '2031-01-01', keys: [], sites: [] })
+    if (path.endsWith('/upstream-key-recorded-totals') && method === 'GET') return json({ workspaceAdminAccountId: 'ws-height', items: [] })
     if (path.endsWith('/group-rates/history') && method === 'GET') return json([])
     h.unexpected.push(`${method} ${path}`)
     throw new Error(`Unexpected test request: ${method} ${path}`)

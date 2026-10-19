@@ -250,7 +250,10 @@ func TestLoginMethodSwitchSub2API(t *testing.T) { // PLAN 1,2,3,3a,3b,4,5,11,12,
 		{"3邮箱不同", AuthModePassword, AuthModeToken, 401, false, false, 7, "other@example.com", "Owner@Example.com", "新登录的邮箱与原站点保存的登录邮箱不同", false, false},
 		{"3没有邮箱", AuthModePassword, AuthModeToken, 401, false, false, 7, "", "Owner@Example.com", "上游没有返回新登录的邮箱", false, false},
 		{"3a编号优先", AuthModePassword, AuthModeToken, 401, false, true, 8, "owner@example.com", "Owner@Example.com", "原站点保存的已核实编号", false, false},
-		{"3b未知旧方式", AuthMode(""), AuthModeToken, 401, false, false, 7, "owner@example.com", "Owner@Example.com", "本次没有用新凭据登录", true, false},
+		{"3b旧资料邮箱兜底", AuthMode(""), AuthModeToken, 401, false, false, 7, "owner@example.com", " Owner@Example.com ", "", false, false},
+		{"3c旧资料同方式密码", AuthMode(""), AuthModePassword, 401, false, false, 7, "owner@example.com", " Owner@Example.com ", "", false, false},
+		{"3d旧资料邮箱不同", AuthMode(""), AuthModeToken, 401, false, false, 7, "other@example.com", "Owner@Example.com", "新登录的邮箱与原站点保存的登录邮箱不同", false, false},
+		{"3e旧资料没有账号", AuthMode(""), AuthModeToken, 401, false, false, 7, "owner@example.com", "", "本次没有用新凭据登录", true, false},
 		{"4缺旧编号邮箱兜底", AuthModePassword, AuthModeToken, 200, true, false, 7, "owner@example.com", "Owner@Example.com", "", false, false},
 		{"4缺旧编号Token拒绝", AuthModeToken, AuthModeToken, 200, true, false, 7, "owner@example.com", "Owner@Example.com", "上游回复成功，但没有返回合法的用户编号", true, false},
 		{"5已核实同编号", AuthModeToken, AuthModeToken, 401, false, true, 7, "owner@example.com", "Owner@Example.com", "", false, false},
@@ -332,6 +335,9 @@ func TestLoginMethodSwitchNewAPI(t *testing.T) { // PLAN 6–10
 		{"8密码兜底不同", AuthModePassword, AuthModeUserKey, 401, false, "42", "owner", "", 43, "上游用户编号", false},
 		{"8密码兜底相同", AuthModePassword, AuthModeUserKey, 401, false, "42", "owner", "", 42, "", false},
 		{"8旧Key不可信", AuthModeUserKey, AuthModeUserKey, 401, false, "42", "42", "", 42, "本次没有用新凭据登录", true},
+		{"8旧密码资料相同", AuthMode(""), AuthModeUserKey, 401, false, "42", "owner", "", 42, "", false},
+		{"8旧密码资料不同", AuthMode(""), AuthModeUserKey, 401, false, "42", "owner", "", 43, "上游用户编号", false},
+		{"8旧Key资料", AuthMode(""), AuthModeUserKey, 401, false, "42", "42", "", 42, "本次没有用新凭据登录", true},
 		{"8核实Key相同", AuthModeUserKey, AuthModeUserKey, 401, true, "42", "42", "", 42, "", false},
 		{"8核实Key不同", AuthModeUserKey, AuthModeUserKey, 401, true, "42", "42", "", 43, "上游用户编号", false},
 		{"9账号补头", AuthModeUserKey, AuthModeUserKey, 200, false, "", "42", "", 42, "", false},
@@ -344,6 +350,10 @@ func TestLoginMethodSwitchNewAPI(t *testing.T) { // PLAN 6–10
 			f.oldStatus = tc.oldStatus
 			f.requireHeader = strings.HasPrefix(tc.name, "6") || strings.HasPrefix(tc.name, "9")
 			svc, c, r, site := switchSetup(t, f, PlatformNewAPI, tc.oldMode, tc.confirmed)
+			if strings.HasPrefix(tc.name, "8旧密码资料") {
+				site.Session.Cookie = "fixture-session=old"
+				site.Session.AccessToken = ""
+			}
 			site.Session.UserID = tc.sessionID
 			site.Account = tc.account
 			c.add(site)

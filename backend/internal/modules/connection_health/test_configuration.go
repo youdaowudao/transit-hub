@@ -33,6 +33,7 @@ type GroupTestConfig struct {
 }
 
 type TestConfigurationSource struct {
+	MessagesByDefault   bool         `json:"messagesByDefault,omitempty"`
 	AdminGroupID        string       `json:"adminGroupId"`
 	AdminGroupName      string       `json:"adminGroupName"`
 	Protocol            TestProtocol `json:"protocol,omitempty"`
@@ -53,6 +54,10 @@ func validTestProtocol(protocol TestProtocol) bool {
 
 func groupAllowsMessages(group upstream.AdminGroupInfo) bool {
 	return strings.ToLower(strings.TrimSpace(group.Platform)) == "anthropic"
+}
+
+func testConfigurationMembership(group upstream.AdminGroupInfo, account upstream.AdminGroupAccountInfo) TestConfigurationSource {
+	return TestConfigurationSource{AdminGroupID: group.ID, AdminGroupName: group.Name, MessagesByDefault: groupAllowsMessages(group) && strings.ToLower(strings.TrimSpace(account.Platform)) == "anthropic" && strings.TrimSpace(account.Type) == "apikey"}
 }
 
 func validGroupTestConfiguration(configuration GroupTestConfiguration) bool {
@@ -88,13 +93,18 @@ func ResolveGroupTestConfiguration(platform string, memberships []TestConfigurat
 		byGroup[config.AdminGroupID] = config
 	}
 	result := legacyTestConfiguration()
+	messagesDefault := false
 	if platform == string(upstream.PlatformSub2API) {
 		result = defaultTestConfiguration()
+		messagesDefault = len(memberships) > 0
 	}
 	seen := make(map[string]bool)
 	for _, membership := range memberships {
 		if strings.TrimSpace(membership.AdminGroupID) == "" {
 			return unavailableTestConfiguration()
+		}
+		if !membership.MessagesByDefault {
+			messagesDefault = false
 		}
 		if seen[membership.AdminGroupID] {
 			continue
@@ -104,12 +114,15 @@ func ResolveGroupTestConfiguration(platform string, memberships []TestConfigurat
 		if !exists {
 			continue
 		}
-		result.SourceGroups = append(result.SourceGroups, TestConfigurationSource{membership.AdminGroupID, membership.AdminGroupName, config.Protocol, config.ProbeTimeoutSeconds})
+		result.SourceGroups = append(result.SourceGroups, TestConfigurationSource{AdminGroupID: membership.AdminGroupID, AdminGroupName: membership.AdminGroupName, Protocol: config.Protocol, ProbeTimeoutSeconds: config.ProbeTimeoutSeconds})
 		if result.Status == "default" {
 			result.Protocol, result.ProbeTimeoutSeconds, result.Status = config.Protocol, config.ProbeTimeoutSeconds, "inherited"
 		} else if result.Protocol != config.Protocol || result.ProbeTimeoutSeconds != config.ProbeTimeoutSeconds {
 			result.Status, result.BlockedReason = "conflict", ErrorTestConfigurationConflict
 		}
+	}
+	if result.Status == "default" && messagesDefault {
+		result.Protocol = TestProtocolMessages
 	}
 	sort.Slice(result.SourceGroups, func(i, j int) bool { return result.SourceGroups[i].AdminGroupID < result.SourceGroups[j].AdminGroupID })
 	if result.Status == "conflict" {
@@ -129,7 +142,7 @@ func sameEffectiveTestConfiguration(a, b EffectiveTestConfiguration) bool {
 func testConfigurationMemberships(memberships []adminTargetMembership) []TestConfigurationSource {
 	result := make([]TestConfigurationSource, 0, len(memberships))
 	for _, membership := range memberships {
-		result = append(result, TestConfigurationSource{AdminGroupID: membership.groupID, AdminGroupName: membership.groupName})
+		result = append(result, TestConfigurationSource{AdminGroupID: membership.groupID, AdminGroupName: membership.groupName, MessagesByDefault: membership.messagesByDefault})
 	}
 	return result
 }
@@ -139,7 +152,7 @@ func inventoryTestMemberships(inventory adminWorkspaceInventory, accountID strin
 	for _, group := range inventory.groups {
 		for _, account := range group.accounts {
 			if account.ID == accountID {
-				result = append(result, TestConfigurationSource{AdminGroupID: group.group.ID, AdminGroupName: group.group.Name})
+				result = append(result, testConfigurationMembership(group.group, account))
 				break
 			}
 		}

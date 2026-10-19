@@ -404,7 +404,7 @@ func (s *Service) priorityInventoryForSnapshot(
 				}
 				inventory[targetID] = item
 			}
-			item.target.TestMemberships = append(item.target.TestMemberships, TestConfigurationSource{AdminGroupID: group.ID, AdminGroupName: group.Name})
+			item.target.TestMemberships = append(item.target.TestMemberships, testConfigurationMembership(group, account))
 			item.target.InventoryComplete = inventoryComplete
 			item.upstreamMultiplier = resolutionForAdminAccount(multiplierLookup, account.ID)
 			inherited := groupPolicies[group.ID]

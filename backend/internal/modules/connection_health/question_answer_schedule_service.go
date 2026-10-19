@@ -171,7 +171,7 @@ func (s *Service) resolveQuestionAnswerScheduleTargets(ctx context.Context, user
 			}
 			seen[id] = true
 			result.accounts[id] = account
-			result.memberships[id] = append(result.memberships[id], TestConfigurationSource{AdminGroupID: group.ID, AdminGroupName: group.Name})
+			result.memberships[id] = append(result.memberships[id], testConfigurationMembership(group, account))
 			if selected[group.ID] {
 				selectedAccounts[id] = true
 				matched[id] = append(matched[id], QuestionAnswerScheduleGroupRef{ID: group.ID, Name: group.Name})

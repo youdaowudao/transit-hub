@@ -116,7 +116,7 @@ const record = (errorType = ''): QuestionAnswerRecord => {
 describe('C4.2 Messages question-answer page behavior', () => {
   it('states the new question-answer protocol after selecting Messages without the old temporary notice', async () => {
     const wrapper = await drawer(), section = wrapper.get('[data-testid="group-test-configuration"]')
-    expect(section.text()).not.toContain('问答（智商测试）也用 Messages 发送。')
+    expect(section.text()).toContain('问答（智商测试）也用 Messages 发送。')
     await section.get('[data-testid="group-test-protocol"]').setValue('messages')
     expect(section.text()).toContain(copy.behavior)
     expect(section.text()).not.toContain('暂时仍用 Chat Completions')

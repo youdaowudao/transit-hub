@@ -321,7 +321,7 @@ func (s *Service) runCompatibilityStatusAction(ctx context.Context, userID, work
 	for _, group := range inventory.groups {
 		for _, account := range group.accounts {
 			if account.ID == accountID {
-				memberships = append(memberships, adminTargetMembership{groupID: group.group.ID, groupName: group.group.Name})
+				memberships = append(memberships, adminTargetMembershipFor(group.group, account))
 				break
 			}
 		}

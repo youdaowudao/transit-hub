@@ -24,6 +24,7 @@ const copy = {
   questionAnswer: 'Messages 问答边生成边接收回答，每题最多输出 64000 个 token（思考也算在内），最长等 20 分钟。回答被这个上限截断时，这道题记为“回答不完整”，不判对错。思考强度按所选档位原样发给上游；档位越高，等待越久、花费越多。',
   legacy: '注意：测试请求只带 Base URL 和 API Key，按分组测试配置里选的协议（Chat Completions 或 Responses）发送。上游如果还需要专用代理、OAuth、TLS 证书或自定义请求头，系统拿不到，测试也不会带上，所以结果可能和真实使用不同',
 }
+const notConfiguredAnthropic = '未单独配置。账号先按所在其他分组的单独配置；所在分组都没有单独配置时用默认：只在 Anthropic 分组里、主站平台为 Anthropic、类型为 API Key 的账号用 Messages / 20 秒，其他账号用 Chat / 20 秒。点“保存测试请求”会给本组单独指定下拉框里的协议和等待秒数，本组账号不再按上面的默认区分；单独指定 Messages 时，类型不是 API Key 的账号无法探活。要让本组改用 Chat，选 Chat Completions 后保存。'
 const targetId = 'sub2api:c41-component:1'
 const model = { id: 'claude-c41-fixture', name: 'claude-c41-fixture', providerFamily: 'anthropic' }
 const group = (platform = 'anthropic'): AdminGroupHealth => ({
@@ -101,12 +102,12 @@ const dialog = async (protocol: TestProtocol) => {
 }
 
 describe('C4.1 Messages group setup', () => {
-  it.each(['anthropic', ' Anthropic '])('offers Messages for normalized %s, saves, reads back and clears without changing legacy defaults', async (platform) => {
+  it.each(['anthropic', ' Anthropic '])('offers Messages for normalized %s, saves, reads back and returns to the Anthropic default', async (platform) => {
     const wrapper = await drawer(platform), section = wrapper.get('[data-testid="group-test-configuration"]')
     expect(section.get('option[value="messages"]').text()).toBe(copy.option)
     expect(section.text()).toContain(copy.platform)
-    expect(section.text()).not.toContain(copy.behavior)
-    expect(section.text()).toContain('未单独配置；无其他显式来源时沿用 Chat / 20 秒。')
+    expect(section.text()).toContain(copy.behavior)
+    expect(section.text()).toContain(notConfiguredAnthropic)
     await section.get('[data-testid="group-test-protocol"]').setValue('messages')
     for (const key of ['behavior', 'health', 'conflict', 'budget'] as const) expect(section.text()).toContain(copy[key])
     await section.get('[data-testid="group-test-timeout"]').setValue('30')
@@ -118,9 +119,9 @@ describe('C4.1 Messages group setup', () => {
     expect((wrapper.get('[data-testid="group-test-timeout"]').element as HTMLInputElement).value).toBe('30')
     await wrapper.get('[data-testid="group-test-clear"]').trigger('click'); await flushPromises()
     expect(writes.at(-1)!.body).toEqual({ configuration: null })
-    expect((wrapper.get('[data-testid="group-test-protocol"]').element as HTMLSelectElement).value).toBe('chat_completions')
+    expect((wrapper.get('[data-testid="group-test-protocol"]').element as HTMLSelectElement).value).toBe('messages')
     expect((wrapper.get('[data-testid="group-test-timeout"]').element as HTMLInputElement).value).toBe('20')
-    expect(wrapper.text()).not.toContain(copy.behavior)
+    expect(wrapper.text()).toContain(copy.behavior)
   })
   it('hides all Messages options and explanation on other platforms', async () => {
     const wrapper = await drawer('openai'), section = wrapper.get('[data-testid="group-test-configuration"]')
@@ -220,5 +221,65 @@ describe('C4.1 Messages probe and question-answer dialogue', () => {
     expect(t('admin.connectionHealth.errors.testProtocolNotAllowed')).toBe(copy.error)
     for (const key of ['messagesOption', 'messagesPlatform', 'messagesHelp', 'messagesHealthEvidence', 'messagesConflict', 'messagesBudget', 'messagesQuestionAnswerBudget']) expect(t('admin.connectionHealth.testConfiguration.' + key)).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
     for (const key of ['contractLimitMessages']) expect(t('admin.connectionHealth.manualProbeDialog.' + key)).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
+  })
+})
+
+const clearHelpAnthropic = '清除仅删除本组规则；账号可能改为继承其他组，或回到默认（所在分组都是 Anthropic 分组、主站平台为 Anthropic、类型为 API Key 的账号用 Messages / 20 秒，其他账号用 Chat / 20 秒）。查看和保存不会发起模型测试、Priority 或启停写入。'
+
+describe('C4.5 Anthropic default group configuration', () => {
+  it.each(['anthropic', ' Anthropic '])('preselects Messages for %s and saves directly through the existing API', async platform => {
+    const wrapper = await drawer(platform), section = wrapper.get('[data-testid="group-test-configuration"]')
+    expect((section.get('[data-testid="group-test-protocol"]').element as HTMLSelectElement).value).toBe('messages')
+    expect(section.text()).toContain(notConfiguredAnthropic)
+    expect(section.text()).toContain(clearHelpAnthropic)
+    expect(section.text()).toContain(copy.behavior)
+    expect(section.text()).not.toContain('未单独配置；无其他显式来源时沿用 Chat / 20 秒。')
+    expect(section.text()).not.toContain('现在用的是默认')
+    expect(section.text()).not.toContain('本组所有账号都改用它')
+    expect(writes).toEqual([])
+    await section.get('[data-testid="group-test-save"]').trigger('click'); await flushPromises()
+    expect(writes).toEqual([{ url: '/api/connection-health/admin-groups/c41-group/test-configuration', method: 'PUT', body: { configuration: { protocol: 'messages', probeTimeoutSeconds: 20 } } }])
+    expect(section.text()).toContain('本组已单独配置')
+    expect(section.text()).not.toContain(notConfiguredAnthropic)
+  })
+  it('saves an explicit Chat choice, reads it back and returns to Messages after clearing', async () => {
+    const wrapper = await drawer(), section = wrapper.get('[data-testid="group-test-configuration"]')
+    await section.get('[data-testid="group-test-protocol"]').setValue('chat_completions')
+    await section.get('[data-testid="group-test-save"]').trigger('click'); await flushPromises()
+    expect(writes).toEqual([{ url: '/api/connection-health/admin-groups/c41-group/test-configuration', method: 'PUT', body: { configuration: { protocol: 'chat_completions', probeTimeoutSeconds: 20 } } }])
+    expect(section.text()).toContain('本组已单独配置')
+    expect(section.text()).not.toContain(copy.behavior)
+    await wrapper.setProps({ open: false }); await wrapper.setProps({ open: true }); await flushPromises()
+    expect((wrapper.get('[data-testid="group-test-protocol"]').element as HTMLSelectElement).value).toBe('chat_completions')
+    await wrapper.get('[data-testid="group-test-clear"]').trigger('click'); await flushPromises()
+    expect(writes.at(-1)!.body).toEqual({ configuration: null })
+    expect((wrapper.get('[data-testid="group-test-protocol"]').element as HTMLSelectElement).value).toBe('messages')
+    expect(wrapper.text()).toContain(notConfiguredAnthropic)
+    expect(wrapper.text()).toContain(copy.behavior)
+  })
+  it('saves a timeout-only edit while retaining the Messages preselection', async () => {
+    const wrapper = await drawer(), section = wrapper.get('[data-testid="group-test-configuration"]')
+    await section.get('[data-testid="group-test-timeout"]').setValue('30')
+    expect((section.get('[data-testid="group-test-protocol"]').element as HTMLSelectElement).value).toBe('messages')
+    await section.get('[data-testid="group-test-save"]').trigger('click'); await flushPromises()
+    expect(writes).toEqual([{ url: '/api/connection-health/admin-groups/c41-group/test-configuration', method: 'PUT', body: { configuration: { protocol: 'messages', probeTimeoutSeconds: 30 } } }])
+    expect(section.text()).toContain('本组已单独配置')
+    expect((section.get('[data-testid="group-test-timeout"]').element as HTMLInputElement).value).toBe('30')
+  })
+  it('retains the original default and clear explanation for other group platforms', async () => {
+    const wrapper = await drawer('openai'), section = wrapper.get('[data-testid="group-test-configuration"]')
+    expect((section.get('[data-testid="group-test-protocol"]').element as HTMLSelectElement).value).toBe('chat_completions')
+    expect(section.text()).toContain('未单独配置；无其他显式来源时沿用 Chat / 20 秒。')
+    expect(section.text()).toContain('清除仅删除本组规则；账号可能改为继承其他组，或回到 Chat / 20 秒。查看和保存不会发起模型测试、Priority 或启停写入。')
+    expect(section.find('option[value="messages"]').exists()).toBe(false)
+    expect(section.text()).not.toContain(notConfiguredAnthropic)
+    expect(section.text()).not.toContain(clearHelpAnthropic)
+  })
+  it('keeps both exact new explanations accurate for multi-group accounts and free of developer jargon', () => {
+    expect(notConfiguredAnthropic).toContain('账号先按所在其他分组的单独配置')
+    expect(clearHelpAnthropic).toContain('所在分组都是 Anthropic 分组')
+    expect(t('admin.connectionHealth.testConfiguration.notConfiguredAnthropic')).toBe(notConfiguredAnthropic)
+    expect(t('admin.connectionHealth.testConfiguration.clearHelpAnthropic')).toBe(clearHelpAnthropic)
+    for (const text of [notConfiguredAnthropic, clearHelpAnthropic]) expect(text).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
   })
 })

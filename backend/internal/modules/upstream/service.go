@@ -711,9 +711,9 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 			switch {
 			case storedID != "" && original.Session.UserIDConfirmed:
 				oldID, usedStoredID = storedID, true
-			case original.Platform == PlatformNewAPI && original.Session.AuthMode == AuthModePassword && storedID != "":
+			case original.Platform == PlatformNewAPI && originalMode == AuthModePassword && storedID != "":
 				oldID, usedStoredID = storedID, true
-			case original.Platform == PlatformSub2API && original.Session.AuthMode == AuthModePassword && strings.TrimSpace(original.Account) != "":
+			case original.Platform == PlatformSub2API && originalMode == AuthModePassword && strings.TrimSpace(original.Account) != "":
 				fallbackEmail = strings.TrimSpace(original.Account)
 			default:
 				cause := "上游回复成功，但没有返回合法的用户编号"

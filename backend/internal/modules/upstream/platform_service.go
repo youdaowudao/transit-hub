@@ -51,7 +51,7 @@ func NewPlatformService(httpClient *HTTPClient) *PlatformService {
 }
 
 // newAPIAuthOptions supports both legacy cookie sessions and system access tokens.
-// New-Api-User is required by new-api for either authentication mechanism.
+// Legacy new-api requires New-Api-User; newer versions identify token users directly.
 func newAPIAuthOptions(session Session) requestOptions {
 	return requestOptions{
 		Cookie:      session.Cookie,
@@ -158,7 +158,7 @@ func (s *PlatformService) LoginWithToken(baseURL string, platform Platform, acco
 }
 
 // LoginWithUserKey signs in to new-api with the system access token generated in
-// Personal Settings -> Security Settings. new-api also requires the matching user ID.
+// Personal Settings -> Security Settings. The matching ID is optional on newer versions.
 func (s *PlatformService) LoginWithUserKey(baseURL string, userID string, accessToken string) (LoginResult, error) {
 	date := businesstime.DateAt(s.keyUsageNow())
 	normalizedURL, err := s.NormalizeURL(baseURL)
@@ -167,7 +167,7 @@ func (s *PlatformService) LoginWithUserKey(baseURL string, userID string, access
 	}
 	userID = strings.TrimSpace(userID)
 	accessToken = strings.TrimSpace(accessToken)
-	if userID == "" || accessToken == "" {
+	if accessToken == "" {
 		return LoginResult{}, newRequestError(ErrorAuth, PlatformNewAPI)
 	}
 	session := Session{
@@ -178,6 +178,20 @@ func (s *PlatformService) LoginWithUserKey(baseURL string, userID string, access
 		AccessToken: accessToken,
 		TokenType:   "Bearer",
 	}
+	actualID, _, err := s.readLoginPrincipal(context.Background(), session)
+	if err != nil {
+		var detail *RequestError
+		if userID == "" && errors.As(err, &detail) && (detail.StatusCode == http.StatusUnauthorized || detail.StatusCode >= 200 && detail.StatusCode < 300 && detail.Reason == ErrorBusinessRejected) {
+			converted := *detail
+			converted.Reason, converted.Stage = ErrorUserKeyDetectFailed, "verify"
+			return LoginResult{}, &converted
+		}
+		return LoginResult{}, err
+	}
+	if actualID == "" {
+		return LoginResult{}, identityCheckError(PlatformNewAPI, "读取 Key 所属用户时，上游回复成功但没有合法的用户编号，无法确定 Key 属于哪个账号。请在上游确认 Key 是否有效，或填写用户 ID 后重试；没有保存，不会修改主站。")
+	}
+	session.UserID, session.UserIDConfirmed = actualID, true
 	session.QuotaPerUnit = s.fetchNewAPIQuotaPerUnit(session)
 	metrics, err := s.fetchNewAPIMetrics(session, nil, date)
 	if err != nil {
@@ -245,7 +259,7 @@ func (s *PlatformService) refreshSub2APISessionContext(ctx context.Context, sess
 		next := time.Now().UnixMilli() + int64(*expiresIn*1000)
 		expiresAt = &next
 	}
-	return Session{AuthMode: session.AuthMode, Platform: PlatformSub2API, BaseURL: session.BaseURL, AccessToken: *accessToken, RefreshToken: refreshToken, TokenType: tokenType, ExpiresAt: expiresAt}, nil
+	return Session{AuthMode: session.AuthMode, Platform: PlatformSub2API, BaseURL: session.BaseURL, UserID: session.UserID, UserIDConfirmed: session.UserIDConfirmed, AccessToken: *accessToken, RefreshToken: refreshToken, TokenType: tokenType, ExpiresAt: expiresAt}, nil
 }
 
 func (s *PlatformService) FetchMetrics(session Session) (Metrics, error) {
@@ -1707,7 +1721,7 @@ func (s *PlatformService) loginNewAPI(baseURL string, username string, password 
 	}
 	loginData := dataRecord(response.Payload)
 	userID := newAPIUserID(loginData)
-	session := Session{AuthMode: AuthModePassword, Platform: PlatformNewAPI, BaseURL: baseURL, Cookie: cookieHeader(response.Header), UserID: userID}
+	session := Session{AuthMode: AuthModePassword, Platform: PlatformNewAPI, BaseURL: baseURL, Cookie: cookieHeader(response.Header), UserID: userID, UserIDConfirmed: true}
 	if strings.TrimSpace(session.Cookie) == "" {
 		return LoginResult{}, incompleteLogin(PlatformNewAPI, "login", response)
 	}

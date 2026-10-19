@@ -159,7 +159,7 @@ export interface UpstreamFailureAttempt {
   platform?: ResolvedUpstreamPlatform
   errorKey?: string
  errorDetail?: string
-  stage?: 'login' | 'refresh' | 'verify' | 'metrics' | 'save'
+  stage?: 'login' | 'refresh' | 'verify' | 'metrics' | 'save' | 'check'
   httpStatus?: number
   upstreamMessage?: string
 }

@@ -268,12 +268,14 @@ func (r Response) IsEnabled() bool {
 }
 
 type Session struct {
-	AuthMode    AuthMode `json:",omitempty"`
-	Platform    Platform
-	BaseURL     string
-	Cookie      string
-	UserID      string
-	AccessToken string
+	AuthMode AuthMode `json:",omitempty"`
+	Platform Platform
+	BaseURL  string
+	Cookie   string
+	UserID   string
+	// UserIDConfirmed 表示用户编号来自已核实的上游响应，而非用户手填。
+	UserIDConfirmed bool `json:",omitempty"`
+	AccessToken     string
 	// AdminAPIKey 是 Sub2API 管理路由使用的 Admin API Key，通过 x-api-key 发送。
 	// 它与用户 JWT/AccessToken 分开保存，避免被误发到普通用户路由。
 	AdminAPIKey  string `json:",omitempty"`

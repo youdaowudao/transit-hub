@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -126,8 +127,8 @@ func TestFailureFixReview3ModeSwitchRejectedWithoutWrites(t *testing.T) {
 			request = request.WithContext(authctx.WithUserID(request.Context(), "fixture-user"))
 			response := httptest.NewRecorder()
 			(&Handler{service: service, accounts: service.accounts}).update(response, request)
-			if response.Code != http.StatusUnprocessableEntity {
-				t.Errorf("mode switch status=%d, want 422", response.Code)
+			if response.Code != http.StatusBadRequest {
+				t.Errorf("mode switch status=%d, want 400", response.Code)
 			}
 			var result struct {
 				Message string `json:"message"`
@@ -136,8 +137,14 @@ func TestFailureFixReview3ModeSwitchRejectedWithoutWrites(t *testing.T) {
 				} `json:"failure"`
 			}
 			_ = json.Unmarshal(response.Body.Bytes(), &result)
-			if result.Message != ErrorRequest {
-				t.Errorf("identity mode replacement must be rejected: %+v", result)
+			field := "password"
+			if tc.newMode == AuthModeToken {
+				field = "refreshToken"
+			} else if tc.newMode == AuthModeUserKey {
+				field = "accessToken"
+			}
+			if result.Message != ErrorInvalidFields || !reflect.DeepEqual(result.Failure.Fields, []string{field}) {
+				t.Errorf("mode switch must identify the missing credential: %+v", result)
 			}
 			after, _ := cache.Get(context.Background(), original.ID)
 			afterJSON, _ := json.Marshal(after)
@@ -206,44 +213,59 @@ func TestFailureFixReview3ModeSwitchWithCredentialsStillPreservesOriginalIdentit
 		{PlatformSub2API, AuthModePassword, AuthModeToken, true},
 		{PlatformSub2API, AuthModeToken, AuthModePassword, false},
 	} {
-		t.Run(string(tc.platform)+"_"+string(tc.newMode)+map[bool]string{true: "_refresh_only"}[tc.refreshOnly], func(t *testing.T) {
-			platform := failureFixPlatform(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				switch r.URL.Path {
-				case "/api/user/login":
-					w.Header().Set("Set-Cookie", "fixture-new-session=fixture; Path=/")
-					_, _ = io.WriteString(w, `{"success":true,"data":{"id":42}}`)
-				case "/api/v1/auth/login", "/api/v1/auth/refresh":
-					_, _ = io.WriteString(w, `{"data":{"access_token":"fixture-new-access","refresh_token":"fixture-new-refresh","expires_in":3600}}`)
-				case "/api/user/self/groups", "/api/v1/groups/available":
-					_, _ = io.WriteString(w, `{"success":true,"data":[]}`)
-				default:
-					_, _ = io.WriteString(w, `{"success":true,"data":{}}`)
+		for _, different := range []bool{false, true} {
+			t.Run(string(tc.platform)+"_"+string(tc.newMode)+map[bool]string{true: "_refresh_only"}[tc.refreshOnly]+map[bool]string{true: "_different", false: "_same"}[different], func(t *testing.T) {
+				platform := failureFixPlatform(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					switch r.URL.Path {
+					case "/api/user/self", "/api/v1/auth/me":
+						id := 42
+						old := r.Header.Get("Authorization") == "Bearer fixture-old-access" || r.Header.Get("Cookie") == "fixture-old-cookie"
+						if different && !old {
+							id = 43
+						}
+						_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{"id": id}})
+					case "/api/user/login":
+						w.Header().Set("Set-Cookie", "fixture-new-session=fixture; Path=/")
+						_, _ = io.WriteString(w, `{"success":true,"data":{"id":42}}`)
+					case "/api/v1/auth/login", "/api/v1/auth/refresh":
+						_, _ = io.WriteString(w, `{"data":{"access_token":"fixture-new-access","refresh_token":"fixture-new-refresh","expires_in":3600}}`)
+					case "/api/user/self/groups", "/api/v1/groups/available":
+						_, _ = io.WriteString(w, `{"success":true,"data":[]}`)
+					default:
+						_, _ = io.WriteString(w, `{"success":true,"data":{}}`)
+					}
+				})
+				service, cache, repository := failureFixService(t, platform)
+				service.SetBackgroundTasksDisabled(true)
+				original := newTestSite("fixture-success", "fixture-user", "fixture-workspace", 1, &Session{Platform: tc.platform, AuthMode: tc.oldMode, BaseURL: "http://fixture.invalid", UserID: "42", AccessToken: "fixture-old-access", Cookie: "fixture-old-cookie"})
+				original.Platform, original.Account = tc.platform, "fixture-account"
+				cache.add(original)
+				dto := UpdateRequest{Name: "验收-切换成功", SiteURL: "http://fixture.invalid", Platform: tc.platform, AuthMode: tc.newMode, Account: "fixture-account", RechargeRate: 1}
+				switch tc.newMode {
+				case AuthModePassword:
+					dto.Password = "fixture-new-password"
+				case AuthModeUserKey:
+					dto.AccessToken = "fixture-new-key"
+				case AuthModeToken:
+					if tc.refreshOnly {
+						dto.RefreshToken = "fixture-refresh"
+					} else {
+						dto.AccessToken = "fixture-new-access"
+					}
 				}
-			})
-			service, cache, repository := failureFixService(t, platform)
-			original := newTestSite("fixture-success", "fixture-user", "fixture-workspace", 1, &Session{Platform: tc.platform, AuthMode: tc.oldMode, AccessToken: "fixture-old-access", Cookie: "fixture-old-cookie"})
-			original.Platform, original.Account = tc.platform, "fixture-account"
-			cache.add(original)
-			dto := UpdateRequest{Name: "验收-切换成功", SiteURL: "http://fixture.invalid", Platform: tc.platform, AuthMode: tc.newMode, Account: "fixture-account", UserID: "42", RechargeRate: 1}
-			switch tc.newMode {
-			case AuthModePassword:
-				dto.Password = "fixture-new-password"
-			case AuthModeUserKey:
-				dto.AccessToken = "fixture-new-key"
-			case AuthModeToken:
-				if tc.refreshOnly {
-					dto.RefreshToken = "fixture-refresh"
-				} else {
-					dto.AccessToken = "fixture-new-access"
+				_, err := service.Update(context.Background(), original.UserID, original.ID, dto)
+				after, _ := cache.Get(context.Background(), original.ID)
+				if different {
+					var detail *RequestError
+					if !errors.As(err, &detail) || detail.MessageKey != ErrorIdentityCheckFailed || !strings.Contains(detail.UpstreamMessage, "上游用户编号与原账号不同") || !reflect.DeepEqual(after, original) || len(repository.saved) != 0 {
+						t.Fatal("different principal must preserve original site and records")
+					}
+				} else if err != nil || after.Session.AuthMode != tc.newMode || after.Session.UserID != "42" || !after.Session.UserIDConfirmed || len(repository.saved) != 1 {
+					t.Fatalf("same principal must allow switching login method: %v", err)
 				}
-			}
-			_, err := service.Update(context.Background(), original.UserID, original.ID, dto)
-			after, _ := cache.Get(context.Background(), original.ID)
-			if err == nil || !reflect.DeepEqual(after, original) || len(repository.saved) != 0 {
-				t.Fatal("switching the original site's login identity must preserve its session and records")
-			}
 
-		})
+			})
+		}
 	}
 }

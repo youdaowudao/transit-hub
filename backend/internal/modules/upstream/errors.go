@@ -95,6 +95,8 @@ const (
 	ErrorAutoDetectFailed     = "admin.upstream.errors.autoDetectFailed"
 	ErrorInvalidFields        = "admin.upstream.errors.invalidFields"
 	ErrorSiteInUse            = "admin.upstream.errors.siteInUse"
+	ErrorIdentityCheckFailed  = "admin.upstream.errors.identityCheckFailed"
+	ErrorUserKeyDetectFailed  = "admin.upstream.errors.userKeyDetectFailed"
 )
 
 type FailureAttempt struct {

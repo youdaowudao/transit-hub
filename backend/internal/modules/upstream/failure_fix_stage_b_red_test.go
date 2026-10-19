@@ -32,6 +32,8 @@ func TestFailureFixStageBLoginModesPersistWithoutExposingCredentials(t *testing.
 			io.WriteString(w, `{"success":true,"data":{"id":42}}`)
 		case "/api/v1/auth/login", "/api/v1/auth/refresh":
 			io.WriteString(w, `{"data":{"access_token":"fixture-access","refresh_token":"fixture-refresh","expires_in":3600}}`)
+		case "/api/user/self":
+			io.WriteString(w, `{"success":true,"data":{"id":42}}`)
 		case "/api/status":
 			io.WriteString(w, `{"data":{"quota_per_unit":500000}}`)
 		case "/api/v1/groups/available":

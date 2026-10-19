@@ -21,7 +21,7 @@ const copy = {
   budget: 'Messages 轻量探活至少请求 128 个输出 token；更高策略预算保留。',
   error: 'Messages 只能用于主站平台为 Anthropic 的分组。',
   probe: '注意：测试请求只带 Base URL 和 API Key，按分组测试配置里选的 Messages 协议发送。上游如果还需要专用代理、OAuth、TLS 证书或自定义请求头，系统拿不到，测试也不会带上，所以结果可能和真实使用不同',
-  questionAnswer: 'Messages 问答每题最多输出 16000 个 token，思考也算在内；回答因此被截断时，这道题记为“回答不完整”，不判对错。思考强度按所选档位原样发给上游。',
+  questionAnswer: 'Messages 问答边生成边接收回答，每题最多输出 64000 个 token（思考也算在内），最长等 20 分钟。回答被这个上限截断时，这道题记为“回答不完整”，不判对错。思考强度按所选档位原样发给上游；档位越高，等待越久、花费越多。',
   legacy: '注意：测试请求只带 Base URL 和 API Key，按分组测试配置里选的协议（Chat Completions 或 Responses）发送。上游如果还需要专用代理、OAuth、TLS 证书或自定义请求头，系统拿不到，测试也不会带上，所以结果可能和真实使用不同',
 }
 const targetId = 'sub2api:c41-component:1'

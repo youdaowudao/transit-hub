@@ -1942,8 +1942,8 @@ const close = () => {
                                 <p class="mt-0.5 truncate text-xs text-muted-foreground">{{ record.modelName }} · {{ requestProtocolLabel(record.requestProtocol) }}</p>
                                 <p class="mt-1 text-xs text-foreground">{{ record.questionBody }}</p>
                               </div>
-                              <span class="shrink-0 text-xs text-red-600 dark:text-red-400">{{ questionAnswerErrorLabel(record.errorType) }}</span>
                             </div>
+                            <p class="break-words text-xs text-red-600 dark:text-red-400">{{ questionAnswerErrorLabel(record.errorType) }}</p>
                             <QuestionAnswerFailureEvidence :record="record" />
                           </li>
                         </ul>

@@ -21,7 +21,7 @@ type testRequestInput struct {
 
 var errMessagesAccountTypeUnsupported = errors.New("Messages 探活只支持 API Key 类型的账号，这个账号没有发出请求。请把它所在分组的测试请求改回 Chat Completions，或在主站换成 API Key 类型的账号。")
 
-const messagesQuestionAnswerMaxTokens = 16000
+const messagesQuestionAnswerMaxTokens = 64000
 
 func buildTestRequest(ctx context.Context, input testRequestInput) (*http.Request, error) {
 	if !validTestProtocol(input.Protocol) {
@@ -37,7 +37,7 @@ func buildTestRequest(ctx context.Context, input testRequestInput) (*http.Reques
 		}
 		if input.QuestionAnswer {
 			payload["max_tokens"] = messagesQuestionAnswerMaxTokens
-			payload["stream"] = false
+			payload["stream"] = true
 			payload["output_config"] = map[string]any{"effort": string(input.ReasoningEffort)}
 		}
 		headers := map[string]string{"anthropic-version": "2023-06-01"}

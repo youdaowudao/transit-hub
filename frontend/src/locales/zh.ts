@@ -980,7 +980,7 @@ export default {
     connectionHealth: {
       testConfiguration: {
         remoteActionPending: '对主站的上一次修改还没确认结果，需要核对主站后才能继续', targetNotVisible: '账号已离组，当前值无法核对，需人工处理。', title: '测试请求', protocol: '请求协议', timeout: '首字最长等待（5–120 秒）',
-        help: '独立于自动策略保存，影响本组现有及新加入账号的新测试和新动作。已开始的动作可能继续完成。配置冲突也会阻断新问答；问答每题仍为 10 分钟。',
+        help: '独立于自动策略保存，影响本组现有及新加入账号的新测试和新动作。已开始的动作可能继续完成。配置冲突也会阻断新问答。问答每题最长等待：Messages 20 分钟，Chat 和 Responses 10 分钟。',
         loading: '正在读取测试配置…', configured: '本组已单独配置', notConfigured: '未单独配置；无其他显式来源时沿用 Chat / 20 秒。',
         responsesBudget: 'Responses 轻量探活至少请求 128 个输出 token；更高策略预算保留。实际成本还包含输入和推理，上游不一定严格遵守预算。',
         messagesOption: 'Messages（Anthropic 原生接口）',
@@ -989,7 +989,7 @@ export default {
         messagesHealthEvidence: '保存后，如果账号已有的健康结果不是用 Messages 测的，账号会显示“当前协议健康依据待验证”，这是正常的。请在保存后查看本组账号的探活结果；这个提示长时间不消失时，看账号“最近一次尝试”的说明。',
         messagesConflict: '同一个账号所在的其他分组如果已经单独配置过测试请求，协议和等待秒数要设成一样，否则这个账号会显示“配置冲突”并停止探活；没有单独配置的分组不会造成冲突。',
         messagesBudget: 'Messages 轻量探活至少请求 128 个输出 token；更高策略预算保留。',
-        messagesQuestionAnswerBudget: 'Messages 问答每题最多输出 16000 个 token，思考也算在内；回答因此被截断时，这道题记为“回答不完整”，不判对错。思考强度按所选档位原样发给上游。',
+        messagesQuestionAnswerBudget: 'Messages 问答边生成边接收回答，每题最多输出 64000 个 token（思考也算在内），最长等 20 分钟。回答被这个上限截断时，这道题记为“回答不完整”，不判对错。思考强度按所选档位原样发给上游；档位越高，等待越久、花费越多。',
         impact: '本次可见成员 {count} 个，当前配置冲突 {conflicts} 个。保存后以服务端实际结果为准。',
         clearHelp: '清除仅删除本组规则；账号可能改为继承其他组，或回到 Chat / 20 秒。查看和保存不会发起模型测试、Priority 或启停写入。',
         save: '保存测试请求', clear: '清除本组配置', saved: '已保存，影响范围按上述服务端结果显示。',
@@ -997,7 +997,7 @@ export default {
         changed: '配置已变化，此结果使用请求开始时的配置。', unverified: '当前协议健康依据待验证', legacy: '旧记录未记录协议', stale: '过期尝试', invalid: '本次测试结果无效',
         unverifiedHelp: '请求成功返回后仍需按当前工作区规则和所选预设判断恢复条件。新规则下首字超过协议延迟线仍算成功；旧规则下慢响应沿用原恢复条件。',
         requestPhases: { waiting_headers: '截止阶段：等待响应头', reading_body: '截止阶段：读取响应正文' },
-        questionAnswerTimeout: '上述超时用于轻量探活；问答每题仍为 10 分钟。',
+        questionAnswerTimeout: '上述超时只用于轻量探活。问答每题最长等待：Messages 20 分钟，Chat 和 Responses 10 分钟。',
       },
 
       accountTier: {
@@ -2052,22 +2052,23 @@ export default {
           },
           failureEvidence: {
             listHint: '失败的条目如果保存了上游的返回，下面会显示返回码和原话；没有保存的不显示。',
-            note: '这是上游当时的返回，只用来看这条为什么失败，不会修改主站。偶尔失败可以稍后再答一次；一直失败请把这段话发给上游询问。',
+            note: '这是上游当时的返回，只用来看这条为什么失败，不会修改主站。偶尔失败可以稍后再答一次。一直失败时：有原话就把下面的原话发给上游询问；没有原话时具体原因无法确认，请记下时间、模型和返回码，请上游核查这一次的请求。',
+            noteIncomplete: '上游报告这道题的思考和回答用满了输出上限，通常是题目难或思考强度高，先把思考强度调低后重测；一直如此再联系上游。下面如有上游原话，只用来核对，不会修改主站。',
             status: '上游返回码',
             excerpt: '上游原话（已隐藏账号密钥，最多 500 字）',
             emptyExcerpt: '这条记录没有保存上游原话。'
           },
           errorTypes: {
-            network: '网络请求失败。',
+            network: '网络请求失败：连接没有建立，或者回答到一半断开了。可以稍后重测；一直失败时检查上游地址和网络。',
             rate_limited: '上游请求被限流。',
             auth: '上游鉴权失败。',
             model_not_found: '上游未找到该模型。',
             server_error: '上游服务返回错误。',
-            invalid_response: '未能取得可用的答案。',
-            response_incomplete: '回答不完整：达到每题 16000 个 token 的输出上限（思考也算在内），这道题不判对错。可以把思考强度调低后重测。',
+            invalid_response: '未能取得可用的答案：没有拿到可以判题的正文。常见原因：请求被上游拒绝、只收到思考没有正文、模型拒答或没有正常结束、回答内容无法解析。偶尔出现可以稍后重测。一直出现时：有上游原话就把原话发给上游询问；没有原话就记下时间、模型和返回码，请上游核查这一次的回答。',
+            response_incomplete: '回答不完整：思考和回答用满了这道题的输出上限（现在 Messages 每题 64000 个 token，思考也算在内），这道题不判对错。可以把思考强度调低后重测。',
             account_type_unsupported: 'Messages 问答只支持 API Key 类型的账号，这道题没有发出请求。请把账号所在分组的测试请求改回 Chat Completions，或在主站换成 API Key 类型的账号。',
-            response_too_large: '上游响应超过大小限制。',
-            timeout: '单次问答超过 10 分钟。',
+            response_too_large: '上游响应超过大小限制（现在 Messages 边生成边接收的回答最多 16 MiB、单行最多 1 MiB，其他回答最多 1 MiB），这道题不判对错。可以把思考强度调低后重测。',
+            timeout: '这道题没有在每题最长等待时间内完成（现在 Messages 20 分钟，Chat 和 Responses 10 分钟），不判对错。可以稍后重测，或把思考强度调低。',
             storage_error: '记录保存失败。',
             service_restarted: '服务重启中断了未完成请求。',
             service_shutdown: '服务关闭中断了未完成请求。',

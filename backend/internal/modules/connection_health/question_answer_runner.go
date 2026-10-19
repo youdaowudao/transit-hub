@@ -1,10 +1,13 @@
 package connection_health
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf16"
@@ -57,6 +60,9 @@ func (r *QuestionAnswerRunner) AskDetailed(ctx context.Context, cred upstream.Pr
 	if response.StatusCode >= 100 && response.StatusCode <= 999 {
 		result.UpstreamStatus = response.StatusCode
 	}
+	if protocol == TestProtocolMessages && response.StatusCode >= 200 && response.StatusCode < 300 && strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
+		return readMessagesQuestionAnswerStream(ctx, response.Body, cred.Key, result)
+	}
 	body, oversized, err := readProbeResponseBody(response.Body)
 	if err != nil {
 		result.ErrorType = QuestionAnswerErrorNetwork
@@ -98,6 +104,159 @@ func (r *QuestionAnswerRunner) AskDetailed(ctx context.Context, cred upstream.Pr
 		return failure(QuestionAnswerErrorInvalidResponse)
 	}
 	return QuestionAnswerAskResult{Answer: answer}
+}
+
+const messagesQuestionAnswerStreamLimit = 16 << 20
+
+func readMessagesQuestionAnswerStream(ctx context.Context, body io.Reader, key string, result QuestionAnswerAskResult) QuestionAnswerAskResult {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 4096), maxProbeResponseBytes+2)
+	total := 0
+	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		advance, token, err := bufio.ScanLines(data, atEOF)
+		total += advance
+		return advance, token, err
+	})
+	texts := map[int]*strings.Builder{}
+	data := []string{}
+	eventName, stopReason := "", ""
+	fail := func(errorType, excerpt string) QuestionAnswerAskResult {
+		result.Answer = ""
+		result.ErrorType = errorType
+		result.UpstreamExcerpt = excerpt
+		return result
+	}
+	finish := func() QuestionAnswerAskResult {
+		if stopReason == "max_tokens" {
+			return fail(QuestionAnswerErrorResponseIncomplete, questionAnswerUpstreamExcerpt([]byte(stopReason), key))
+		}
+		if stopReason == "end_turn" || stopReason == "stop_sequence" {
+			indices := make([]int, 0, len(texts))
+			for index := range texts {
+				indices = append(indices, index)
+			}
+			sort.Ints(indices)
+			parts := []string{}
+			for _, index := range indices {
+				if text := strings.TrimSpace(texts[index].String()); text != "" {
+					parts = append(parts, text)
+				}
+			}
+			if answer := strings.Join(parts, "\n"); answer != "" {
+				result.Answer = answer
+				return result
+			}
+		}
+		return fail(QuestionAnswerErrorInvalidResponse, questionAnswerUpstreamExcerpt([]byte(stopReason), key))
+	}
+	consume := func() (QuestionAnswerAskResult, bool) {
+		name := eventName
+		eventName = ""
+		if len(data) == 0 {
+			return result, false
+		}
+		event := strings.Join(data, "\n")
+		data = nil
+		if event == "[DONE]" {
+			return finish(), true
+		}
+		var payload struct {
+			Type         string `json:"type"`
+			Index        int    `json:"index"`
+			ContentBlock struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content_block"`
+			Delta struct {
+				Type       string `json:"type"`
+				Text       string `json:"text"`
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+			Error json.RawMessage `json:"error"`
+		}
+		var object map[string]any
+		if json.Unmarshal([]byte(event), &payload) != nil || json.Unmarshal([]byte(event), &object) != nil {
+			return fail(QuestionAnswerErrorInvalidResponse, ""), true
+		}
+		eventType := payload.Type
+		if eventType == "" {
+			eventType = name
+		}
+		if eventType == "error" || eventType == "response.failed" || (len(payload.Error) > 0 && string(payload.Error) != "null") {
+			errorType := QuestionAnswerErrorServer
+			var streamError struct {
+				Type string `json:"type"`
+			}
+			if streamErrorResult([]byte(event)) == ResultRateLimited || (json.Unmarshal(payload.Error, &streamError) == nil && strings.Contains(strings.ToLower(streamError.Type), "overloaded")) {
+				errorType = QuestionAnswerErrorRateLimited
+			}
+			return fail(errorType, messagesStreamErrorExcerpt(object, key)), true
+		}
+		appendText := func(text string) {
+			if texts[payload.Index] == nil {
+				texts[payload.Index] = &strings.Builder{}
+			}
+			texts[payload.Index].WriteString(text)
+		}
+		switch eventType {
+		case "content_block_start":
+			if payload.ContentBlock.Type == "text" {
+				appendText(payload.ContentBlock.Text)
+			}
+		case "content_block_delta":
+			if payload.Delta.Type == "text_delta" {
+				appendText(payload.Delta.Text)
+			}
+		case "message_delta":
+			if payload.Delta.StopReason != "" {
+				stopReason = payload.Delta.StopReason
+			}
+		case "message_stop":
+			return finish(), true
+		}
+		return result, false
+	}
+	for scanner.Scan() {
+		line := scanner.Text()
+		if total > messagesQuestionAnswerStreamLimit || len(line) > maxProbeResponseBytes {
+			return fail(QuestionAnswerErrorResponseTooLarge, "")
+		}
+		if line == "" {
+			if out, done := consume(); done {
+				return out
+			}
+		} else if strings.HasPrefix(line, "data:") {
+			data = append(data, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		} else if strings.HasPrefix(line, "event:") {
+			eventName = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		}
+	}
+	if errors.Is(scanner.Err(), bufio.ErrTooLong) {
+		return fail(QuestionAnswerErrorResponseTooLarge, "")
+	}
+	if scanner.Err() == nil {
+		if out, done := consume(); done {
+			return out
+		}
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fail(QuestionAnswerErrorTimeout, "")
+	}
+	return fail(QuestionAnswerErrorNetwork, "")
+}
+
+func messagesStreamErrorExcerpt(event map[string]any, key string) string {
+	errorObject, _ := event["error"].(map[string]any)
+	response, _ := event["response"].(map[string]any)
+	responseError, _ := response["error"].(map[string]any)
+	for _, candidate := range []any{errorObject["message"], responseError["message"], event["message"], event["error"], response["error"]} {
+		if text, ok := candidate.(string); ok {
+			if excerpt := questionAnswerUpstreamExcerpt([]byte(text), key); excerpt != "" {
+				return excerpt
+			}
+		}
+	}
+	return ""
 }
 
 func extractMessagesQuestionAnswer(body []byte) (string, string) {

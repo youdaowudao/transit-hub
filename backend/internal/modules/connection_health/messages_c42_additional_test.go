@@ -74,7 +74,7 @@ func TestMessagesC42QuestionAnswerEffortAndBearerAuth(t *testing.T) {
 					t.Fatal(err)
 				}
 				output, ok := payload["output_config"].(map[string]any)
-				if len(payload) != 5 || payload["max_tokens"] != float64(16000) || payload["stream"] != false || !ok || len(output) != 1 || output["effort"] != string(effort) {
+				if len(payload) != 5 || payload["max_tokens"] != float64(64000) || payload["stream"] != true || !ok || len(output) != 1 || output["effort"] != string(effort) {
 					t.Errorf("question body=%v", payload)
 				}
 				return protocolServiceResponse(req, 200, `{"type":"message","stop_reason":"end_turn","content":[{"type":"text","text":"answer"}]}`), nil

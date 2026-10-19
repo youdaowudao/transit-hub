@@ -98,11 +98,15 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 		return
 	}
 
-	itemCtx, cancel := context.WithTimeout(run.ctx, s.questionAnswerTTL)
 	protocol := TestProtocolChatCompletions
 	if record.RequestProtocol != nil {
 		protocol = *record.RequestProtocol
 	}
+	ttl := s.questionAnswerTTL
+	if protocol == TestProtocolMessages {
+		ttl = s.questionAnswerMessagesTTL
+	}
+	itemCtx, cancel := context.WithTimeout(run.ctx, ttl)
 	result := s.questionAnswerHTTP.AskDetailed(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort), protocol)
 	itemErr := itemCtx.Err()
 	cancel()

@@ -27,8 +27,8 @@ func c42AssertRequest(t *testing.T, req *http.Request, model, prompt, effort str
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body) != 5 || body["model"] != model || body["max_tokens"] != float64(16000) || body["stream"] != false {
-		t.Errorf("five-field nonstream request=%v", body)
+	if len(body) != 5 || body["model"] != model || body["max_tokens"] != float64(64000) || body["stream"] != true {
+		t.Errorf("five-field streaming request=%v", body)
 	}
 	config, ok := body["output_config"].(map[string]any)
 	if !ok || len(config) != 1 || config["effort"] != effort {

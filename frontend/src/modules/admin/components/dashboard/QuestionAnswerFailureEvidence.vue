@@ -11,7 +11,7 @@ const excerpt = computed(() => props.record.upstreamExcerpt ?? '')
 
 <template>
   <div v-if="record.status === 'failed' && (status !== null || excerpt)" data-testid="question-answer-failure-evidence" class="mt-2 space-y-2 border-t border-border/40 pt-2">
-    <p class="text-xs leading-5 text-muted-foreground">{{ t(prefix + '.note') }}</p>
+    <p class="text-xs leading-5 text-muted-foreground">{{ t(prefix + (record.errorType === 'response_incomplete' ? '.noteIncomplete' : '.note')) }}</p>
     <p v-if="status !== null" class="flex items-baseline gap-2">
       <span class="text-xs text-muted-foreground">{{ t(prefix + '.status') }}</span>
       <span class="text-sm font-semibold text-foreground">{{ status }}</span>

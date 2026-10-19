@@ -16,16 +16,17 @@ import (
 )
 
 const (
-	QuestionAnswerPageSize         = 20
-	QuestionAnswerRequestTimeout   = 10 * time.Minute
-	QuestionAnswerRepeatCountLimit = 10
-	QuestionAnswerBatchRecordLimit = 50
-	questionAnswerConcurrency      = 15
-	TestQuestionNameLimit          = 100
-	TestQuestionBodyLimit          = 4000
-	TestQuestionKeywordCountLimit  = 20
-	TestQuestionKeywordRuneLimit   = 64
-	TestQuestionKeywordBytesLimit  = 2048
+	QuestionAnswerPageSize               = 20
+	QuestionAnswerRequestTimeout         = 10 * time.Minute
+	QuestionAnswerMessagesRequestTimeout = 20 * time.Minute
+	QuestionAnswerRepeatCountLimit       = 10
+	QuestionAnswerBatchRecordLimit       = 50
+	questionAnswerConcurrency            = 15
+	TestQuestionNameLimit                = 100
+	TestQuestionBodyLimit                = 4000
+	TestQuestionKeywordCountLimit        = 20
+	TestQuestionKeywordRuneLimit         = 64
+	TestQuestionKeywordBytesLimit        = 2048
 )
 
 const (
@@ -329,6 +330,9 @@ func (s *Service) initializeQuestionAnswerRuntime() {
 	}
 	if s.questionAnswerHTTP == nil {
 		s.questionAnswerHTTP = NewQuestionAnswerRunner()
+	}
+	if s.questionAnswerMessagesTTL <= 0 {
+		s.questionAnswerMessagesTTL = QuestionAnswerMessagesRequestTimeout
 	}
 	if s.questionAnswerTTL <= 0 {
 		s.questionAnswerTTL = QuestionAnswerRequestTimeout

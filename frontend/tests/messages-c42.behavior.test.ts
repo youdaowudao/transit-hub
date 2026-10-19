@@ -6,6 +6,8 @@ import ManualOneTimeProbeDialog from '@/modules/admin/components/dashboard/Manua
 import { useConnectionHealth } from '@/modules/admin/composables/useConnectionHealth'
 import { defaultHealthRulePreset } from '@/modules/admin/utils/healthRulePresets'
 import { t, te } from '@/locales'
+import QuestionAnswerBatchDrawer from '@/modules/admin/components/dashboard/QuestionAnswerBatchDrawer.vue'
+import { createDefaultQuestionAnswerPreferences } from '@/modules/admin/utils/connectionHealthPreferences'
 import QuestionAnswerRecordCard from '@/modules/admin/components/dashboard/QuestionAnswerRecordCard.vue'
 import QuestionAnswerScheduleBatchDialog from '@/modules/admin/components/dashboard/QuestionAnswerScheduleBatchDialog.vue'
 import type { AdminGroupHealth, AdminGroupTestConfiguration, GroupTestConfiguration, TestProtocol, QuestionAnswerRecord } from '@/modules/admin/types/connectionHealth'
@@ -20,7 +22,7 @@ const copy = {
   budget: 'Messages 轻量探活至少请求 128 个输出 token；更高策略预算保留。',
   error: 'Messages 只能用于主站平台为 Anthropic 的分组。',
   probe: '注意：测试请求只带 Base URL 和 API Key，按分组测试配置里选的 Messages 协议发送。上游如果还需要专用代理、OAuth、TLS 证书或自定义请求头，系统拿不到，测试也不会带上，所以结果可能和真实使用不同',
-  questionAnswer: 'Messages 问答每题最多输出 16000 个 token，思考也算在内；回答因此被截断时，这道题记为“回答不完整”，不判对错。思考强度按所选档位原样发给上游。',
+  questionAnswer: 'Messages 问答边生成边接收回答，每题最多输出 64000 个 token（思考也算在内），最长等 20 分钟。回答被这个上限截断时，这道题记为“回答不完整”，不判对错。思考强度按所选档位原样发给上游；档位越高，等待越久、花费越多。',
   legacy: '注意：测试请求只带 Base URL 和 API Key，按分组测试配置里选的协议（Chat Completions 或 Responses）发送。上游如果还需要专用代理、OAuth、TLS 证书或自定义请求头，系统拿不到，测试也不会带上，所以结果可能和真实使用不同',
 }
 const targetId = 'sub2api:c42-component:1'
@@ -40,6 +42,7 @@ let savedPreset: ReturnType<typeof preset>
 const preset = () => ({ ...defaultHealthRulePreset(), id: 'custom-c42', name: 'C4.2 延迟线', kind: 'custom', createdAt: '', updatedAt: '', policies: [] })
 const testConfiguration = (): AdminGroupTestConfiguration => ({ adminGroupId: 'c42-group', adminGroupName: 'C4.2 组件分组', configuration: saved, inventoryComplete, affectedAccountCount: 1, conflictAccountCount: 0, accounts: [{ targetId, accountName: 'C4.2 组件账号', testConfiguration: { status: saved ? 'inherited' : 'default', protocol: saved?.protocol ?? 'chat_completions', probeTimeoutSeconds: saved?.probeTimeoutSeconds ?? 20, sourceGroups: [] } }] })
 let records: QuestionAnswerRecord[]
+let previewQuestions = false
 const currentStats = () => questionAnswerFixtureStats(records)
 const currentBatch = () => ({ targetId, batchId: records.length ? 'c42-batch' : '', records, active: false, reasoningEffort: 'medium', repeatCount: 1, submittedCount: records.length, completedCount: records.length, runningCount: 0, currentModel: '', currentQuestion: '', stats: currentStats() })
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -48,7 +51,7 @@ const service = useConnectionHealth()
 const setup = { global: { stubs: { Teleport: true, Transition: false } } }
 beforeEach(() => {
   vi.useFakeTimers()
-  records = []; saved = null; rejectSave = false; inventoryComplete = true; writes = []; unexpected = []; savedPreset = preset()
+  previewQuestions = false; records = []; saved = null; rejectSave = false; inventoryComplete = true; writes = []; unexpected = []; savedPreset = preset()
   service.setAdminGroupsWorkspace(''); service.setAdminGroupsWorkspace('c42-component')
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = decodeURIComponent(String(input)), method = init?.method ?? 'GET'
@@ -69,7 +72,7 @@ beforeEach(() => {
       if (url.endsWith('/workspace-settings')) return json({ ruleVersion: 'v2', configGeneration: 1, probeConcurrency: 6, probeConcurrencyVersion: 1, ruleSwitchedAt: null, updatedAt: '' })
       if (url.endsWith('/policies')) return json([])
       if (url.endsWith('/models')) return json([model])
-      if (url.endsWith('/test-questions')) return json([])
+      if (url.endsWith('/test-questions')) return json(previewQuestions ? [{ id: 'c44-question', name: 'C4.4 preview', body: 'answer', keywords: ['answer'], enabled: true, createdAt: '', updatedAt: '' }] : [])
       if (url.includes('/question-answers/history?')) return json({ batches: [], page: 1, pageSize: 20, totalBatches: 0, totalPages: 1, todayStats: currentStats() })
       if (url.endsWith('/question-answers/batches/latest')) return json(currentBatch())
       if (url.endsWith('/question-answers/batches/c42-batch')) return json(currentBatch())
@@ -103,7 +106,7 @@ const dialog = async (protocol: TestProtocol) => {
 }
 
 
-const incomplete = '回答不完整：达到每题 16000 个 token 的输出上限（思考也算在内），这道题不判对错。可以把思考强度调低后重测。'
+const incomplete = '回答不完整：思考和回答用满了这道题的输出上限（现在 Messages 每题 64000 个 token，思考也算在内），这道题不判对错。可以把思考强度调低后重测。'
 const unsupported = 'Messages 问答只支持 API Key 类型的账号，这道题没有发出请求。请把账号所在分组的测试请求改回 Chat Completions，或在主站换成 API Key 类型的账号。'
 const record = (errorType = ''): QuestionAnswerRecord => {
   const now = new Date().toISOString()
@@ -120,7 +123,7 @@ describe('C4.2 Messages question-answer page behavior', () => {
     await section.get('[data-testid="group-test-protocol"]').setValue('responses')
     expect(section.text()).not.toContain(copy.behavior)
   })
-  it('shows a single Messages notice in all modes and the 16000-token guidance only for questions', async () => {
+  it('shows a single Messages notice in all modes and the 64000-token guidance only for questions', async () => {
     const wrapper = await dialog('messages')
     expect(wrapper.text()).toContain(copy.probe)
     expect(wrapper.text()).toContain(copy.questionAnswer)
@@ -132,7 +135,7 @@ describe('C4.2 Messages question-answer page behavior', () => {
       expect(wrapper.text()).toContain(copy.probe)
       expect(wrapper.text()).toContain(copy.budget)
       expect(wrapper.text()).not.toContain(copy.questionAnswer)
-      expect(wrapper.text()).not.toContain('16000')
+      expect(wrapper.text()).not.toContain('64000')
       expect(wrapper.text()).not.toContain(copy.legacy)
     }
     await click(wrapper, '问答测试')
@@ -146,7 +149,7 @@ describe('C4.2 Messages question-answer page behavior', () => {
       expect(wrapper.text()).toContain(copy.legacy)
       expect(wrapper.text()).not.toContain(copy.probe)
       expect(wrapper.text()).not.toContain(copy.questionAnswer)
-      expect(wrapper.text()).not.toContain('16000')
+      expect(wrapper.text()).not.toContain('64000')
       expect(wrapper.text()).not.toContain(copy.budget)
     }
   })
@@ -187,5 +190,121 @@ describe('C4.2 Messages question-answer page behavior', () => {
       expect(sentence).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
       expect(sentence).not.toContain('暂时仍用 Chat Completions')
     }
+  })
+})
+
+const c44Copy = {
+  help: '独立于自动策略保存，影响本组现有及新加入账号的新测试和新动作。已开始的动作可能继续完成。配置冲突也会阻断新问答。问答每题最长等待：Messages 20 分钟，Chat 和 Responses 10 分钟。',
+  timeout: '上述超时只用于轻量探活。问答每题最长等待：Messages 20 分钟，Chat 和 Responses 10 分钟。',
+  note: '这是上游当时的返回，只用来看这条为什么失败，不会修改主站。偶尔失败可以稍后再答一次。一直失败时：有原话就把下面的原话发给上游询问；没有原话时具体原因无法确认，请记下时间、模型和返回码，请上游核查这一次的请求。',
+  noteIncomplete: '上游报告这道题的思考和回答用满了输出上限，通常是题目难或思考强度高，先把思考强度调低后重测；一直如此再联系上游。下面如有上游原话，只用来核对，不会修改主站。',
+  errors: {
+    response_incomplete: '回答不完整：思考和回答用满了这道题的输出上限（现在 Messages 每题 64000 个 token，思考也算在内），这道题不判对错。可以把思考强度调低后重测。',
+    timeout: '这道题没有在每题最长等待时间内完成（现在 Messages 20 分钟，Chat 和 Responses 10 分钟），不判对错。可以稍后重测，或把思考强度调低。',
+    network: '网络请求失败：连接没有建立，或者回答到一半断开了。可以稍后重测；一直失败时检查上游地址和网络。',
+    invalid_response: '未能取得可用的答案：没有拿到可以判题的正文。常见原因：请求被上游拒绝、只收到思考没有正文、模型拒答或没有正常结束、回答内容无法解析。偶尔出现可以稍后重测。一直出现时：有上游原话就把原话发给上游询问；没有原话就记下时间、模型和返回码，请上游核查这一次的回答。',
+    response_too_large: '上游响应超过大小限制（现在 Messages 边生成边接收的回答最多 16 MiB、单行最多 1 MiB，其他回答最多 1 MiB），这道题不判对错。可以把思考强度调低后重测。',
+  },
+}
+
+describe('C4.4 streaming question-answer retained component paths', () => {
+  it('states protocol-specific deadlines in group configuration and all manual question modes', async () => {
+    const config = await drawer()
+    expect(config.get('[data-testid="group-test-configuration"]').text()).toContain(c44Copy.help)
+    expect(config.text()).not.toContain('问答每题仍为 10 分钟')
+    for (const protocol of ['messages', 'chat_completions', 'responses'] as const) {
+      const wrapper = await dialog(protocol)
+      expect(wrapper.text()).toContain(c44Copy.timeout)
+      expect(wrapper.text()).not.toContain('问答每题仍为 10 分钟')
+      if (protocol === 'messages') {
+        expect(wrapper.text()).toContain(copy.questionAnswer)
+        expect(wrapper.text()).not.toContain('16000')
+      } else {
+        expect(wrapper.text()).not.toContain(copy.questionAnswer)
+        expect(wrapper.text()).not.toContain('64000')
+      }
+    }
+  })
+  it('states the new deadline in the actual cross-account preview without submitting requests', async () => {
+    previewQuestions = true
+    const current = group()
+    current.accounts[0]!.testConfiguration = { status: 'inherited', protocol: 'messages', probeTimeoutSeconds: 20, sourceGroups: [] }
+    const preferences = { ...createDefaultQuestionAnswerPreferences(), modelIds: [model.id], questionIds: ['c44-question'], batchTargetIds: [targetId] }
+    const wrapper = mount(QuestionAnswerBatchDrawer, { ...setup, props: { groups: [current], preferenceScope: 'c44-preview', preferences } })
+    wrappers.push(wrapper)
+    await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click')
+    await flushPromises()
+    const preview = wrapper.get(`[data-testid="question-answer-batch-preview-${targetId}"]`)
+    expect(preview.text()).toContain(c44Copy.timeout)
+    expect(preview.text()).not.toContain('问答每题仍为 10 分钟')
+    expect(writes).toEqual([])
+  })
+  it.each(['messages', 'chat_completions', 'responses'] as const)('shows all five new failure explanations for %s in both retained entry points', async protocol => {
+    records = Object.keys(c44Copy.errors).map(error => ({ ...record(error), requestProtocol: protocol, upstreamStatus: 200, upstreamExcerpt: error === 'response_incomplete' ? 'max_tokens' : '上游具体说明' }))
+    const manual = await dialog(protocol)
+    await click(manual, '失败 5 条')
+    const rows = manual.get('[data-testid="question-answer-failed-content"]').findAll('li')
+    expect(rows).toHaveLength(5)
+    rows.forEach((row, index) => {
+      const errorType = records[index]!.errorType as keyof typeof c44Copy.errors
+      expect(row.text()).toContain(c44Copy.errors[errorType])
+      const evidence = row.get('[data-testid="question-answer-failure-evidence"]')
+      expect(evidence.text()).toContain(errorType === 'response_incomplete' ? c44Copy.noteIncomplete : c44Copy.note)
+      expect(evidence.text()).not.toContain(errorType === 'response_incomplete' ? c44Copy.note : c44Copy.noteIncomplete)
+      expect(row.text()).not.toContain('没有拿到完整回答')
+      expect(row.text()).not.toContain('一直失败请把这段话发给上游询问')
+    })
+    const scheduled = mount(QuestionAnswerScheduleBatchDialog, { ...setup, props: { targetId, batchId: 'c42-batch', accountName: 'C4.4 组件账号', workspace: 'c42-component' } })
+    wrappers.push(scheduled); await flushPromises()
+    const scheduledRows = scheduled.findAll('article')
+    expect(scheduledRows).toHaveLength(5)
+    scheduledRows.forEach((row, index) => {
+      const errorType = records[index]!.errorType as keyof typeof c44Copy.errors
+      expect(row.text()).toContain(c44Copy.errors[errorType])
+      const evidence = row.get('[data-testid="question-answer-failure-evidence"]')
+      expect(evidence.text()).toContain(errorType === 'response_incomplete' ? c44Copy.noteIncomplete : c44Copy.note)
+      expect(evidence.text()).not.toContain(errorType === 'response_incomplete' ? c44Copy.note : c44Copy.noteIncomplete)
+      expect(row.text()).not.toContain('没有拿到完整回答')
+      expect(row.text()).not.toContain('一直失败请把这段话发给上游询问')
+    })
+  })
+  it.each(['response_incomplete', 'invalid_response', 'server_error'])('keeps useful guidance for an old %s record with only the upstream status in both entry points', async errorType => {
+    records = [{ ...record(errorType), createdAt: '2026-10-01T00:00:00Z', upstreamStatus: 200, upstreamExcerpt: '' }]
+    const manual = await dialog('messages')
+    await click(manual, '失败 1 条')
+    const scheduled = mount(QuestionAnswerScheduleBatchDialog, { ...setup, props: { targetId, batchId: 'c42-batch', accountName: 'C4.4 组件账号', workspace: 'c42-component' } })
+    wrappers.push(scheduled); await flushPromises()
+    for (const wrapper of [manual, scheduled]) {
+      const evidence = wrapper.get('[data-testid="question-answer-failure-evidence"]')
+      expect(evidence.text()).toContain('这条记录没有保存上游原话。')
+      expect(evidence.text()).toContain(errorType === 'response_incomplete' ? c44Copy.noteIncomplete : c44Copy.note)
+      expect(evidence.text()).not.toContain(errorType === 'response_incomplete' ? c44Copy.note : c44Copy.noteIncomplete)
+      expect(evidence.text()).not.toContain('请把这段话发给上游询问')
+      if (errorType === 'server_error') {
+        expect(evidence.text()).toContain('没有原话时具体原因无法确认')
+        expect(evidence.text()).toContain('记下时间、模型和返回码')
+      } else {
+        expect(wrapper.text()).toContain(c44Copy.errors[errorType as keyof typeof c44Copy.errors])
+      }
+    }
+  })
+  it('places long failure guidance below the retained identity row and allows wrapping', async () => {
+    records = [{ ...record('invalid_response'), upstreamStatus: 200, upstreamExcerpt: '' }]
+    const wrapper = await dialog('messages')
+    await click(wrapper, '失败 1 条')
+    const row = wrapper.get('[data-testid="question-answer-failed-content"] li')
+    const guidance = row.findAll('p').find(item => item.text() === c44Copy.errors.invalid_response)!
+    expect(guidance).toBeDefined()
+    expect(guidance.classes()).toContain('break-words')
+    expect(guidance.element.parentElement).toBe(row.element)
+    const identity = guidance.element.previousElementSibling!
+    expect(identity.textContent).toContain(records[0]!.questionName)
+    expect(identity.textContent).toContain(`${model.id} · Messages`)
+    expect(identity.textContent).not.toContain(c44Copy.errors.invalid_response)
+  })
+  it('keeps every added and changed page sentence free of developer jargon', () => {
+    const sentences = [c44Copy.help, c44Copy.timeout, c44Copy.note, c44Copy.noteIncomplete, copy.questionAnswer, ...Object.values(c44Copy.errors)]
+    for (const sentence of sentences) expect(sentence).not.toMatch(/租约|回执|收口|对账|权威|矩阵|source=|schedulable=/)
+    expect(t('admin.connectionHealth.manualProbeDialog.questionAnswer.failureEvidence.noteIncomplete')).toBe(c44Copy.noteIncomplete)
   })
 })

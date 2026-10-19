@@ -382,6 +382,18 @@ func TestSingaporeCostCriticalIdentityEditRejected(t *testing.T) {
 			_, err := svc.Update(t.Context(), "user", site.ID, dto)
 			afterSite, _ := cache.Get(t.Context(), site.ID)
 			after, _ := json.Marshal(afterSite)
+			if field == "account" {
+				if err != nil || afterSite.Account != site.Account || string(before) != string(after) {
+					t.Fatalf("Token 方式账号文字不用于核对，只存其他资料：err=%v", err)
+				}
+				return
+			}
+			if field == "mode" {
+				var detail *FieldValidationError
+				if !errors.As(err, &detail) || !reflect.DeepEqual(detail.Fields, []string{"password"}) {
+					t.Fatalf("换方式未标出缺少密码：%v", err)
+				}
+			}
 			if err == nil || string(before) != string(after) {
 				t.Fatalf("原编号换身份未拒绝或原值被改：err=%v unchanged=%v", err, string(before) == string(after))
 			}
@@ -391,7 +403,7 @@ func TestSingaporeCostCriticalIdentityEditRejected(t *testing.T) {
 
 func TestSingaporeCostCriticalCredentialPrincipal(t *testing.T) {
 	now := time.Date(2031, 2, 3, 4, 0, 0, 0, time.UTC)
-	for _, scenario := range []string{"same", "different", "old-missing-id", "old-expired"} {
+	for _, scenario := range []string{"same", "different", "old-missing-id", "old-expired", "old-expired-confirmed-same", "old-expired-confirmed-different"} {
 		t.Run(scenario, func(t *testing.T) {
 			oldReads, newReads := 0, 0
 			p := singaporeCostPlatform(t, now, func(r *http.Request) (int, any) {
@@ -400,7 +412,7 @@ func TestSingaporeCostCriticalCredentialPrincipal(t *testing.T) {
 					id := 1
 					if r.Header.Get("Authorization") == "Bearer fixture-old" {
 						oldReads++
-						if scenario == "old-expired" {
+						if strings.HasPrefix(scenario, "old-expired") {
 							return 401, map[string]any{"message": "原登录已失效"}
 						}
 						if scenario == "old-missing-id" {
@@ -408,7 +420,7 @@ func TestSingaporeCostCriticalCredentialPrincipal(t *testing.T) {
 						}
 					} else {
 						newReads++
-						if scenario == "different" {
+						if scenario == "different" || scenario == "old-expired-confirmed-different" {
 							id = 2
 						}
 					}
@@ -422,6 +434,9 @@ func TestSingaporeCostCriticalCredentialPrincipal(t *testing.T) {
 				}
 			})
 			site := newTestSite("site", "user", "workspace", 1, &Session{Platform: PlatformSub2API, AuthMode: AuthModeToken, BaseURL: "http://fixture.invalid", AccessToken: "fixture-old"})
+			if strings.HasPrefix(scenario, "old-expired-confirmed") {
+				site.Session.UserID, site.Session.UserIDConfirmed = "1", true
+			}
 			site.BaseURL = site.Session.BaseURL
 			site.Account = "原账号"
 			site.RequestedPlatform = PlatformSub2API
@@ -436,7 +451,7 @@ func TestSingaporeCostCriticalCredentialPrincipal(t *testing.T) {
 			_, err := svc.Update(t.Context(), "user", site.ID, UpdateRequest{Name: site.Name, SiteURL: site.BaseURL, Platform: PlatformSub2API, AuthMode: AuthModeToken, Account: site.Account, AccessToken: "fixture-new", RechargeRate: 1})
 			current, _ := cache.Get(t.Context(), site.ID)
 			after, _ := json.Marshal(current)
-			if scenario == "same" {
+			if scenario == "same" || scenario == "old-expired-confirmed-same" {
 				if err != nil || current.Session.AccessToken != "fixture-new" || oldReads != 1 || newReads != 2 {
 					t.Fatalf("同账号凭据更新需旧身份一次、新登录/身份各一次：err=%v old=%d new=%d", err, oldReads, newReads)
 				}
@@ -445,8 +460,14 @@ func TestSingaporeCostCriticalCredentialPrincipal(t *testing.T) {
 			if err == nil || string(before) != string(after) {
 				t.Fatalf("无法确认原身份须整次拒绝原值不改：scenario=%s err=%v unchanged=%v", scenario, err, string(before) == string(after))
 			}
-			if oldReads != 1 || (scenario != "different" && newReads != 0) {
-				t.Error("原身份失败后仍执行新登录")
+			if scenario == "old-expired" || scenario == "old-missing-id" {
+				var detail *RequestError
+				if !errors.As(err, &detail) || detail.MessageKey != ErrorIdentityCheckFailed || detail.Stage != "check" || !strings.Contains(detail.UpstreamMessage, "本次没有用新凭据登录") {
+					t.Fatalf("缺少可信编号时必须返回 R3：%v", err)
+				}
+			}
+			if oldReads != 1 || ((scenario == "old-expired" || scenario == "old-missing-id") && newReads != 0) || (scenario == "old-expired-confirmed-different" && newReads != 2) {
+				t.Error("原身份读取失败后的登录次数不符合核实标记")
 			}
 		})
 	}

@@ -17,7 +17,16 @@ import (
 func TestFailureFixStageAHandlerUpdateRejectedAndInvalidFields(t *testing.T) {
 	failureFixCaptureLogs(t)
 	for _, invalid := range []bool{false, true} {
-		service, cache, repository := failureFixService(t, failureFixRejectedPlatform())
+		newLoginRequests := 0
+		platform := failureFixPlatform(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") == "Bearer fixture-new" {
+				newLoginRequests++
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"message":"令牌无效"}`)
+		})
+		service, cache, repository := failureFixService(t, platform)
 		original := newTestSite("fixture-edit", "fixture-user", "fixture-workspace", 2, &Session{Platform: PlatformNewAPI, AuthMode: AuthModeUserKey, BaseURL: "http://fixture.invalid", UserID: "42", AccessToken: "fixture-old"})
 		original.Platform = PlatformNewAPI
 		cache.add(original)
@@ -51,8 +60,11 @@ func TestFailureFixStageAHandlerUpdateRejectedAndInvalidFields(t *testing.T) {
 			if result.Message != "admin.upstream.errors.invalidFields" || !reflect.DeepEqual(result.Failure.Fields, []string{"name"}) {
 				t.Error("update field validation missing")
 			}
-		} else if result.Message != "admin.upstream.errors.accessTokenRejected" || result.Failure.ErrorKey != result.Message || result.Failure.HTTPStatus != 401 || result.Failure.Stage != "verify" {
+		} else if result.Message != ErrorIdentityCheckFailed || result.Failure.ErrorKey != result.Message || result.Failure.HTTPStatus != 0 || result.Failure.Stage != "check" {
 			t.Error("update structured failure missing")
+		}
+		if newLoginRequests != 0 {
+			t.Error("unconfirmed original key must not use new credentials")
 		}
 		after, _ := cache.Get(context.Background(), original.ID)
 		if !reflect.DeepEqual(original, after) || len(repository.saved) != 0 {

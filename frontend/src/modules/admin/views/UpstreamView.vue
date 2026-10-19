@@ -97,7 +97,7 @@ const createEmptyForm = (): UpstreamSiteForm => ({
   name: '',
   siteUrl: '',
   platform: 'auto',
-  authMode: 'password',
+  authMode: 'token',
   account: '',
   password: '',
   accessToken: '',
@@ -112,13 +112,16 @@ const newSiteForm = ref<UpstreamSiteForm>(createEmptyForm())
 const editingAuthMode = ref<UpstreamSiteForm['authMode']>('password')
 const credentialsRequired = computed(() => !editingSiteId.value || newSiteForm.value.authMode !== editingAuthMode.value)
 
+const showEditFailureHelp = computed(() => Boolean(editingSiteId.value) && ['login', 'refresh', 'verify', 'metrics'].includes(addFailure.value?.stage ?? ''))
+const showRefreshTokenWarning = computed(() => newSiteForm.value.platform !== 'newapi' && newSiteForm.value.authMode === 'token' && newSiteForm.value.refreshToken.trim() !== '' && ['refresh', 'verify', 'metrics', 'save'].includes(addFailure.value?.stage ?? ''))
+
 watch(
   () => newSiteForm.value.platform,
   (platform) => {
     if (platform === 'newapi' && newSiteForm.value.authMode === 'token') {
-      newSiteForm.value.authMode = 'password'
+      newSiteForm.value.authMode = 'user_key'
     } else if (platform !== 'newapi' && newSiteForm.value.authMode === 'user_key') {
-      newSiteForm.value.authMode = 'password'
+      newSiteForm.value.authMode = 'token'
     }
   },
 )
@@ -165,6 +168,7 @@ const openAddSiteModal = () => {
 }
 
 const failureFieldLabel = (field: string): string => {
+  if (field === 'accessToken' && newSiteForm.value.authMode === 'user_key') return t('admin.upstream.modal.form.userKey')
   const fields: Record<string, string> = { name: 'siteName', siteUrl: 'siteUrl', platform: 'platform', authMode: 'authMode', account: 'account', password: 'password', accessToken: 'accessToken', refreshToken: 'refreshToken', tokenType: 'tokenType', userId: 'userId', rechargeRate: 'rechargeRate', remark: 'remark' }
   return fields[field] ? t(`admin.upstream.modal.form.${fields[field]}`) : t('admin.upstream.errors.invalidFields')
 }
@@ -1119,15 +1123,17 @@ onBeforeUnmount(() => {
           </div>
 
           <form @submit.prevent="handleAddSite" class="p-6">
- <p v-if="editingSiteId" class="mb-4 text-sm text-muted-foreground">更换站点地址、登录方式或账号请新增站点，原费用会保留在原站点；更新同一账号的凭据需要验证原账号，不会修改主站。</p>
+            <p v-if="editingSiteId" class="mb-4 text-sm text-muted-foreground">{{ t('admin.upstream.modal.identityEditHelp') }}</p>
             <div v-if="addErrorKey" class="mb-5 flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert" aria-live="polite">
               <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
               <div class="min-w-0 space-y-1 break-words">
-                <p>{{ t(addErrorKey) }}</p>
+                <p>{{ t(addFailure?.stage === 'save' ? 'admin.upstream.failure.saveProblem' : addErrorKey) }}</p>
                 <p v-if="addErrorKey === 'admin.upstream.errors.invalidResponse'">{{ t('admin.upstream.failure.invalidResponseHelp') }}</p>
                 <p v-if="addFailure?.stage">{{ t('admin.upstream.failure.stage') }}{{ t(`admin.upstream.failure.stages.${addFailure.stage}`) }}</p>
-                <p v-if="addFailure?.httpStatus !== undefined && addFailure.stage !== 'save'">{{ t('admin.upstream.failure.httpStatus') }}{{ addFailure.httpStatus || t('admin.upstream.failure.noResponse') }}</p>
-                <p v-if="addFailure?.upstreamMessage">{{ addFailure.stage === 'save' ? '实际结果：' : t('admin.upstream.failure.upstreamMessage') }}{{ addFailure.upstreamMessage }}</p>
+                <p v-if="addFailure?.httpStatus !== undefined && addFailure.stage !== 'save' && addFailure.stage !== 'check'">{{ t('admin.upstream.failure.httpStatus') }}{{ addFailure.httpStatus || t('admin.upstream.failure.noResponse') }}</p>
+                <p v-if="addFailure?.upstreamMessage">{{ addFailure.stage === 'save' ? '实际结果：' : t(addFailure.stage === 'check' ? 'admin.upstream.failure.checkReason' : 'admin.upstream.failure.upstreamMessage') }}{{ addFailure.upstreamMessage }}</p>
+                <p v-if="showEditFailureHelp">{{ t('admin.upstream.failure.editNotSaved') }}</p>
+                <p v-if="showRefreshTokenWarning">{{ t('admin.upstream.failure.refreshTokenUsed') }}</p>
                 <p v-if="addFailure?.fields?.length">{{ t('admin.upstream.failure.fields') }}{{ addFailure.fields.map(failureFieldLabel).join('、') }}</p>
                 <div v-for="(attempt, index) in addFailure?.attempts ?? []" :key="index" class="space-y-1">
                   <p>{{ attempt.platform === 'newapi' ? 'NewAPI' : 'Sub2API' }}：{{ t(attempt.errorKey ?? 'admin.upstream.errors.unknown') }}</p>
@@ -1235,17 +1241,17 @@ onBeforeUnmount(() => {
                 </span>
                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3" role="radiogroup" :aria-label="t('admin.upstream.modal.form.authMode')">
                   <label class="flex cursor-pointer items-start gap-3 rounded-xl border border-border/50 bg-surface p-3 text-sm transition-colors hover:border-primary/50">
-                    <input v-model="newSiteForm.authMode" type="radio" value="password" :disabled="isAdding" class="mt-1" />
-                    <span class="space-y-1">
-                      <span class="block font-medium text-foreground">{{ t('admin.upstream.modal.form.authModes.password') }}</span>
-                      <span class="block text-xs leading-5 text-muted-foreground">{{ t('admin.upstream.modal.form.authModes.passwordHelp') }}</span>
-                    </span>
-                  </label>
-                  <label class="flex cursor-pointer items-start gap-3 rounded-xl border border-border/50 bg-surface p-3 text-sm transition-colors hover:border-primary/50">
                     <input v-model="newSiteForm.authMode" type="radio" :value="newSiteForm.platform === 'newapi' ? 'user_key' : 'token'" :disabled="isAdding" class="mt-1" />
                     <span class="space-y-1">
                       <span class="block font-medium text-foreground">{{ t(`admin.upstream.modal.form.authModes.${newSiteForm.platform === 'newapi' ? 'userKey' : 'token'}`) }}</span>
                       <span class="block text-xs leading-5 text-muted-foreground">{{ t(`admin.upstream.modal.form.authModes.${newSiteForm.platform === 'newapi' ? 'userKeyHelp' : 'tokenHelp'}`) }}</span>
+                    </span>
+                  </label>
+                  <label class="flex cursor-pointer items-start gap-3 rounded-xl border border-border/50 bg-surface p-3 text-sm transition-colors hover:border-primary/50">
+                    <input v-model="newSiteForm.authMode" type="radio" value="password" :disabled="isAdding" class="mt-1" />
+                    <span class="space-y-1">
+                      <span class="block font-medium text-foreground">{{ t('admin.upstream.modal.form.authModes.password') }}</span>
+                      <span class="block text-xs leading-5 text-muted-foreground">{{ t('admin.upstream.modal.form.authModes.passwordHelp') }}</span>
                     </span>
                   </label>
                 </div>
@@ -1295,20 +1301,6 @@ onBeforeUnmount(() => {
 
               <template v-else-if="newSiteForm.authMode === 'token'">
                 <div class="space-y-2 sm:col-span-2">
-                  <label for="upstream-site-access-token" class="text-sm font-medium text-foreground flex items-center gap-1">
-                    {{ t('admin.upstream.modal.form.accessToken') }}
-                  </label>
-                  <Input
-                    v-model="newSiteForm.accessToken"
-                    :placeholder="t('admin.upstream.modal.form.accessTokenPlaceholder')"
-                    id="upstream-site-access-token"
-                    name="accessToken"
-                    :disabled="isAdding"
-                    :required="credentialsRequired && !newSiteForm.refreshToken.trim()"
-                    class="bg-surface border-border/50 focus:border-primary h-10"
-                  />
-                </div>
-                <div class="space-y-2">
                   <label for="upstream-site-refresh-token" class="text-sm font-medium text-foreground flex items-center gap-1">
                     {{ t('admin.upstream.modal.form.refreshToken') }}
                   </label>
@@ -1319,6 +1311,20 @@ onBeforeUnmount(() => {
                     :placeholder="t('admin.upstream.modal.form.refreshTokenPlaceholder')"
                     :disabled="isAdding"
                     :required="credentialsRequired && !newSiteForm.accessToken.trim()"
+                    class="bg-surface border-border/50 focus:border-primary h-10"
+                  />
+                </div>
+                <div class="space-y-2">
+                  <label for="upstream-site-access-token" class="text-sm font-medium text-foreground flex items-center gap-1">
+                    {{ t('admin.upstream.modal.form.accessToken') }}
+                  </label>
+                  <Input
+                    v-model="newSiteForm.accessToken"
+                    :placeholder="t('admin.upstream.modal.form.accessTokenPlaceholder')"
+                    id="upstream-site-access-token"
+                    name="accessToken"
+                    :disabled="isAdding"
+                    :required="credentialsRequired && !newSiteForm.refreshToken.trim()"
                     class="bg-surface border-border/50 focus:border-primary h-10"
                   />
                 </div>
@@ -1343,7 +1349,6 @@ onBeforeUnmount(() => {
               <template v-else>
                 <div class="space-y-2">
                   <label for="upstream-site-user-id" class="text-sm font-medium text-foreground flex items-center gap-1">
-                    <span class="text-red-500">*</span>
                     {{ t('admin.upstream.modal.form.userId') }}
                   </label>
                   <Input
@@ -1354,9 +1359,11 @@ onBeforeUnmount(() => {
                     :disabled="isAdding"
                     inputmode="numeric"
                     autocomplete="off"
-                    required
                     class="bg-surface border-border/50 focus:border-primary h-10"
                   />
+                  <p class="text-xs leading-5 text-muted-foreground">
+                    {{ t('admin.upstream.modal.form.userIdHelp') }}
+                  </p>
                 </div>
                 <div class="space-y-2">
                   <label for="upstream-site-user-key" class="text-sm font-medium text-foreground flex items-center gap-1">

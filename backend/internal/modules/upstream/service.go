@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"log"
+	"net/http"
 	"reflect"
 	"sort"
 	"strings"
@@ -558,6 +560,21 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 		logSiteFailure("登录失败", "新建", dto.Name, dto.SiteURL, loginErr)
 		return Response{}, loginErr
 	}
+	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey {
+		providedUserID := strings.TrimSpace(dto.UserID)
+		if providedUserID != "" && providedUserID != result.Session.UserID {
+			return Response{}, identityCheckError(result.Platform, "Key 实际属于用户编号 "+result.Session.UserID+"，与填写的用户 ID "+providedUserID+" 不同。请改正用户 ID，或留空让系统自动读取；没有保存，不会修改主站。")
+		}
+		site.Account = result.Session.UserID
+	}
+	if result.Platform == PlatformSub2API {
+		principalID, _, principalErr := s.platformService.readLoginPrincipal(ctx, result.Session)
+		if principalErr == nil && principalID != "" {
+			result.Session.UserID, result.Session.UserIDConfirmed = principalID, true
+		} else {
+			log.Printf("[upstream] 新建站点登录成功但未核实用户编号 host=%s category=%s", safeHost(dto.SiteURL), siteErrorKey(principalErr))
+		}
+	}
 
 	// 登录成功：更新站点状态。
 	observedAt := s.keyUsageNow()
@@ -633,6 +650,27 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
 	original := cloneSite(site)
+	mode := normalizedAuthMode(dto.AuthMode)
+	originalMode := siteAuthMode(&original)
+	providedUserID := strings.TrimSpace(dto.UserID)
+	if mode == AuthModeUserKey && providedUserID == "" && original.Platform == PlatformNewAPI {
+		if original.Session != nil {
+			dto.UserID = strings.TrimSpace(original.Session.UserID)
+		}
+		if dto.UserID == "" && originalMode == AuthModeUserKey {
+			dto.UserID = strings.TrimSpace(original.Account)
+		}
+	}
+	relogin := hasNewCredentials(dto)
+	if mode != originalMode && !relogin {
+		field := "password"
+		if mode == AuthModeToken {
+			field = "refreshToken"
+		} else if mode == AuthModeUserKey {
+			field = "accessToken"
+		}
+		return Response{}, invalidBodyError(field)
+	}
 	normalizedURL, err := s.platformServiceURL(dto.SiteURL)
 	if err != nil {
 		return Response{}, err
@@ -641,40 +679,90 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	if err != nil {
 		return Response{}, err
 	}
-	account := strings.TrimSpace(dto.Account)
-	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey {
-		account = strings.TrimSpace(dto.UserID)
+	differences := make([]string, 0, 3)
+	if normalizedURL != originalURL {
+		differences = append(differences, "站点地址")
 	}
-	if normalizedURL != originalURL || dto.Platform != PlatformAuto && dto.Platform != site.Platform || normalizedAuthMode(dto.AuthMode) != siteAuthMode(site) || account != strings.TrimSpace(site.Account) {
-		return Response{}, identityUpdateError(nil, "这个修改会换成另一个站点或账号，请新增站点，避免混入原账号的费用；原资料未保存，不会修改主站。")
+	if dto.Platform != PlatformAuto && dto.Platform != site.Platform {
+		differences = append(differences, "平台")
 	}
-	relogin := hasNewCredentials(dto)
+	if mode == AuthModePassword && originalMode == AuthModePassword && strings.TrimSpace(dto.Account) != strings.TrimSpace(site.Account) {
+		differences = append(differences, "登录账号")
+	}
+	if len(differences) > 0 {
+		difference := strings.Join(differences, "、")
+		return Response{}, identityCheckError(site.Platform, difference+"与原站点不同。原站点只能更新同一个账号的登录信息；换"+difference+"请新增站点，原费用会保留在原站点。本次没有请求上游，重试也不会通过；原资料未保存，不会修改主站。")
+	}
 	var result LoginResult
 	var audit *GroupSnapshotAudit
 	var rateInput *RateNoticeInput
 	if relogin {
 		if original.Session == nil {
-			return Response{}, identityUpdateError(nil, "原站点没有可核验的登录资料")
+			return Response{}, identityCheckError(site.Platform, "原站点没有保存过登录资料，无法核对新登录信息是不是原账号。请新增站点；原资料未保存，不会修改主站。")
 		}
-		oldID, readErr := s.platformService.readLoginPrincipal(ctx, *original.Session)
-		if readErr != nil {
-			return Response{}, identityUpdateError(readErr, "读取原账号身份失败")
+		oldID, _, readErr := s.platformService.readLoginPrincipal(ctx, *original.Session)
+		if ctx.Err() != nil {
+			return Response{}, ctx.Err()
+		}
+		fallbackEmail := ""
+		usedStoredID := false
+		if readErr != nil || oldID == "" {
+			storedID := strings.TrimSpace(original.Session.UserID)
+			switch {
+			case storedID != "" && original.Session.UserIDConfirmed:
+				oldID, usedStoredID = storedID, true
+			case original.Platform == PlatformNewAPI && original.Session.AuthMode == AuthModePassword && storedID != "":
+				oldID, usedStoredID = storedID, true
+			case original.Platform == PlatformSub2API && original.Session.AuthMode == AuthModePassword && strings.TrimSpace(original.Account) != "":
+				fallbackEmail = strings.TrimSpace(original.Account)
+			default:
+				cause := "上游回复成功，但没有返回合法的用户编号"
+				if readErr != nil {
+					cause = identityReadCause(readErr)
+				}
+				return Response{}, identityCheckError(site.Platform, "原登录没能读到账号编号（"+cause+"），原站点也没有保存可以核对的已核实编号或登录邮箱，无法确认新登录信息属于原账号。本次没有用新凭据登录，填写的凭据没有被使用。如果上面的原因是网络或上游临时故障，可稍后重试；否则请新增站点。原资料未保存，不会修改主站。")
+			}
 		}
 		result, err = s.updateLogin(dto)
 		audit = result.Metrics.GroupSnapshotAudit
 		rateInput = currentRateNoticeInput(result.Metrics, err, s.keyUsageNow())
 		if err != nil {
-			return Response{}, identityUpdateError(err, "重新登录失败")
+			return Response{}, err
+		}
+		if mode == AuthModeUserKey && providedUserID != "" && providedUserID != result.Session.UserID {
+			return Response{}, identityCheckError(result.Platform, "Key 实际属于用户编号 "+result.Session.UserID+"，与填写的用户 ID "+providedUserID+" 不同。请改正用户 ID，或留空让系统自动读取；没有保存，不会修改主站。")
+		}
+		refreshWarning := ""
+		if mode == AuthModeToken && strings.TrimSpace(dto.RefreshToken) != "" {
+			refreshWarning = "填写的 Refresh Token 可能已被使用，重试前请到上游重新获取。"
 		}
 		if result.Platform != original.Platform || result.Session.BaseURL != originalURL {
-			return Response{}, identityUpdateError(nil, "重新登录后的站点地址或平台与原资料不同")
+			return Response{}, identityCheckError(site.Platform, "用新凭据登录后，上游返回的站点地址或平台与原站点不同，无法确认是同一个站点。请新增站点。"+refreshWarning+"原资料未保存，不会修改主站。")
 		}
-		newID, readErr := s.platformService.readLoginPrincipal(ctx, result.Session)
+		newID, newEmail, readErr := s.platformService.readLoginPrincipal(ctx, result.Session)
 		if readErr != nil {
-			return Response{}, identityUpdateError(readErr, "读取新登录身份失败")
+			return Response{}, readErr
 		}
-		if oldID != newID {
-			return Response{}, identityUpdateError(nil, "新登录身份与原账号不同")
+		if newID == "" {
+			return Response{}, identityCheckError(site.Platform, "用新凭据登录后，上游没有返回合法的用户编号，无法确认是原账号。请在上游网站确认账号状态后重试，或新增站点。"+refreshWarning+"原资料未保存，不会修改主站。")
+		}
+		if fallbackEmail != "" {
+			if !strings.EqualFold(fallbackEmail, strings.TrimSpace(newEmail)) {
+				cause := "新登录的邮箱与原站点保存的登录邮箱不同"
+				if newEmail == "" {
+					cause = "上游没有返回新登录的邮箱"
+				}
+				return Response{}, identityCheckError(site.Platform, "原登录已不能读取，改用登录邮箱核对："+cause+"，无法确认是原账号。请用原账号的凭据重试，或新增站点。"+refreshWarning+"原资料未保存，不会修改主站。")
+			}
+		} else if oldID != newID {
+			comparison := "原账号"
+			if usedStoredID {
+				comparison = "原站点保存的已核实编号"
+			}
+			return Response{}, identityCheckError(site.Platform, "新登录信息属于另一个账号：上游用户编号与"+comparison+"不同。请用原账号的凭据重试，或新增站点。"+refreshWarning+"原资料未保存，不会修改主站。")
+		}
+		if result.Platform == PlatformSub2API {
+			result.Session.UserID, result.Session.UserIDConfirmed = newID, true
 		}
 	}
 	s.mu.Lock()
@@ -697,6 +785,12 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	if relogin {
 		candidate.BaseURL = result.Session.BaseURL
 		candidate.Platform = result.Platform
+		switch mode {
+		case AuthModePassword:
+			candidate.Account = strings.TrimSpace(dto.Account)
+		case AuthModeUserKey:
+			candidate.Account = result.Session.UserID
+		}
 		candidate.Session = &result.Session
 		candidate.Metrics = mergeCostReadStatus(result.Metrics, current.Metrics)
 		candidate.Status = StatusConnected
@@ -708,7 +802,8 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	if relogin {
 		publication = &groupPublication{Baseline: original}
 	}
-	err = s.publishExistingSiteLocked(expected, candidate, relogin, nil, rateInput, publication)
+	retainLogin := relogin && mode == originalMode && candidate.Account == current.Account
+	err = s.publishExistingSiteLocked(expected, candidate, retainLogin, nil, rateInput, publication)
 	if err == nil && publication != nil {
 		candidate = publication.Actual
 	}
@@ -736,20 +831,42 @@ func (s *Service) platformServiceURL(value string) (string, error) {
 	}
 	return (&PlatformService{}).NormalizeURL(value)
 }
-func identityUpdateError(cause error, step string) error {
-	reason := step
-	if cause != nil {
-		reason += "：" + costFailureCause(cause)
+func identityCheckError(platform Platform, reason string) error {
+	return &RequestError{MessageKey: ErrorIdentityCheckFailed, Platform: platform, Stage: "check", UpstreamMessage: reason}
+}
+func identityReadCause(err error) string {
+	cause := "上游没有正常返回，原因尚未确认"
+	var detail *RequestError
+	if errors.As(err, &detail) {
+		if hint := safeUpstreamMessage(detail.UpstreamMessage); hint != "" {
+			cause = hint
+		} else {
+			switch {
+			case detail.Timeout || siteErrorKey(err) == ErrorNetworkTimeout:
+				cause = "上游读取超时"
+			case siteErrorKey(err) == ErrorNetworkUnreachable:
+				cause = "无法连接上游"
+			case siteErrorKey(err) == ErrorTLSFailed:
+				cause = "上游安全连接验证失败"
+			case detail.StatusCode == http.StatusUnauthorized:
+				cause = "上游未接受原登录资料"
+			case detail.StatusCode == http.StatusForbidden:
+				cause = "上游拒绝访问，具体原因未说明"
+			case detail.StatusCode == http.StatusNotFound:
+				cause = "上游没有提供读取账号的接口"
+			case detail.StatusCode == http.StatusTooManyRequests:
+				cause = "上游要求稍后再读取"
+			case detail.StatusCode >= 500:
+				cause = "上游服务异常"
+			}
+		}
+		if detail.StatusCode > 0 {
+			cause += fmt.Sprintf("（HTTP %d）", detail.StatusCode)
+		}
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		cause = "上游读取超时"
 	}
-	reason += "；原资料和费用未保存，无法确认是原账号，请新增站点；不会修改主站。"
-	var original *RequestError
-	if errors.As(cause, &original) {
-		detail := *original
-		detail.UpstreamMessage = reason
-		detail.Cause = cause
-		return &detail
-	}
-	return &RequestError{MessageKey: ErrorRequest, Stage: "verify", UpstreamMessage: reason, Cause: cause}
+	return cause
 }
 func staleSiteRequestError() error {
 	return saveFailureError("站点登录资料已更新，本次旧请求未保存，请重新同步；不会修改主站。", nil, 409)
@@ -1566,9 +1683,6 @@ func validateCreate(dto CreateRequest) error {
 	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey && strings.TrimSpace(dto.AccessToken) == "" {
 		fields = append(fields, "accessToken")
 	}
-	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey && strings.TrimSpace(dto.UserID) == "" {
-		fields = append(fields, "userId")
-	}
 	if dto.RechargeRate <= 0 {
 		fields = append(fields, "rechargeRate")
 	}
@@ -1607,9 +1721,6 @@ func validateUpdate(dto UpdateRequest) error {
 	}
 	if hasCredentials && normalizedAuthMode(dto.AuthMode) == AuthModeUserKey && strings.TrimSpace(dto.AccessToken) == "" {
 		fields = append(fields, "accessToken")
-	}
-	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey && strings.TrimSpace(dto.UserID) == "" {
-		fields = append(fields, "userId")
 	}
 	if hasCredentials && normalizedAuthMode(dto.AuthMode) == AuthModePassword && strings.TrimSpace(dto.Password) == "" {
 		fields = append(fields, "password")

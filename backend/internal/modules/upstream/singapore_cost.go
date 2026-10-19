@@ -120,7 +120,7 @@ func (s *PlatformService) FetchMetricsForDate(session Session, date string) (Met
 		return Metrics{}, newRequestError(ErrorUnsupported, session.Platform)
 	}
 }
-func (s *PlatformService) readLoginPrincipal(ctx context.Context, session Session) (string, error) {
+func (s *PlatformService) readLoginPrincipal(ctx context.Context, session Session) (string, string, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, keyUsageRequestTimeout)
 	defer cancel()
 	path := "/api/v1/auth/me"
@@ -131,15 +131,33 @@ func (s *PlatformService) readLoginPrincipal(ctx context.Context, session Sessio
 	}
 	response, err := s.httpClient.requestJSONWithContext(reqCtx, session.BaseURL+path, options)
 	if err != nil {
-		return "", withFailureStage(err, "verify", session.Platform)
+		statusCode := 0
+		var requestErr *RequestError
+		if errors.As(err, &requestErr) {
+			statusCode = requestErr.StatusCode
+		}
+		if contextErr := reqCtx.Err(); contextErr != nil {
+			err = contextErr
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", "", &RequestError{MessageKey: ErrorNetwork, Reason: ErrorNetworkTimeout, Timeout: true, Platform: session.Platform, Stage: "verify", StatusCode: statusCode, Cause: err}
+		}
+		if errors.Is(err, context.Canceled) {
+			return "", "", &RequestError{MessageKey: ErrorNetwork, Platform: session.Platform, Stage: "verify", StatusCode: statusCode, UpstreamMessage: "读取已取消，本次没有保存", Cause: err}
+		}
+		return "", "", withFailureStage(err, "verify", session.Platform)
 	}
 	record := dataRecord(response.Payload)
+	email := ""
+	if value, ok := record["email"].(string); ok {
+		email = strings.TrimSpace(value)
+	}
 	for _, key := range []string{"id", "user_id", "userId"} {
 		if id, ok := strictNumericID(record[key], false); ok {
-			return id, nil
+			return id, email, nil
 		}
 	}
-	return "", datedCostError(session.Platform, "verify", "上游身份响应没有合法的用户编号，无法确认是原账号")
+	return "", email, nil
 }
 func strictNumericID(value any, allowZero bool) (string, bool) {
 	var number float64

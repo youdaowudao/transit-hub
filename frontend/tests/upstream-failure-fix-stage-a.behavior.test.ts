@@ -27,6 +27,7 @@ const openAdd = async () => {
  await button.trigger('click')
  await view.get('#upstream-site-name').setValue('验收-添加')
  await view.get('#upstream-site-url').setValue('http://fixture.invalid')
+ await view.get('input[type="radio"][value="password"]').setValue(true)
  await view.get('#upstream-site-account').setValue('fixture-account')
  await view.get('#upstream-site-password').setValue('fixture-password')
  return view

@@ -1056,3 +1056,87 @@ describe('Grok complete import result and existing binding interaction', () => {
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
   })
 })
+
+describe('connect dialog shows each main-site group multiplier with its estimated profit margin', () => {
+  const profitGroups = [
+    { id: '10', groupName: '利润分组甲', platform: 'openai', multiplier: 1.5 },
+    { id: '11', groupName: '利润分组乙', platform: 'openai', multiplier: 1 },
+    { id: '12', groupName: '利润分组平', platform: 'openai', multiplier: 1.2 },
+    { id: '13', groupName: '利润分组零', platform: 'openai', multiplier: 0 },
+    { id: '14', groupName: '利润分组负', platform: 'openai', multiplier: -1 },
+  ]
+  const importHelp = '每个分组右侧的利润率，是假设账号放进该分组时的估算：（该分组倍率－上方“上游倍率”）÷该分组倍率，只用于参考，不会修改主站；显示“—”时，下方写明原因。'
+  const bindHelp = '下拉选项里的利润率，是假设账号放进该分组时的估算：（该分组倍率－上方“上游倍率”）÷该分组倍率，只用于参考，不会修改主站。显示“—”表示该分组倍率不大于零（主站没有返回倍率时也按 0 显示），或上方“上游倍率”缺失；前者请到主站检查分组倍率，后者请到上游管理同步后点‘刷新数据’。'
+  const zeroReason = '这个分组的倍率不大于零（主站没有返回倍率时也按 0 显示），无法估算利润率，请到主站检查该分组倍率'
+  const costReason = '上方“上游倍率”缺失，无法估算利润率，请到上游管理同步后点‘刷新数据’'
+  const openWithCost = async (cost: number | null) => {
+    harness.mappingResponse = async () => json({ ownGroups: profitGroups, mappings: [] })
+    harness.listGroupRates.mockImplementation(async () => ({ ...rows(), items: [{ ...rate, currentMultiplier: cost }] }))
+    const wrapper = mount(GroupRatesView, { attachTo: document.body })
+    wrappers.push(wrapper)
+    await flushPromises()
+    await wrapper.findAll('button').find(button => button.text().trim() === '配置对接')!.trigger('click')
+    await flushPromises()
+    return wrapper
+  }
+  const profitCell = (wrapper: VueWrapper, name: string) => dialog(wrapper).findAll('label').find(label => label.text().includes(name))!.get('[data-connect-group-profit]')
+  const marginLine = (wrapper: VueWrapper, name: string) => profitCell(wrapper, name).findAll('span').find(span => span.text().startsWith('利润率'))!
+  const chooseBind = async (wrapper: VueWrapper) => { await dialog(wrapper).findAll('button').find(button => button.text().includes('使用已有资源'))!.trigger('click'); await flushPromises() }
+  const bindOptions = (wrapper: VueWrapper) => dialog(wrapper).get('#existing-admin-group').findAll('option').filter(option => option.attributes('value'))
+
+  it('automatic creation rows show multiplier, margin with the list color rule, and a reason for a zero multiplier', async () => {
+    const wrapper = await openWithCost(1.2)
+    expect(dialog(wrapper).get('[data-connect-profit-help]').text()).toBe(importHelp)
+    expect(dialog(wrapper).find('[data-bind-profit-help]').exists()).toBe(false)
+    expect(profitCell(wrapper, '利润分组甲').text()).toContain('1.5x')
+    expect(marginLine(wrapper, '利润分组甲').text()).toBe('利润率 20.00%')
+    expect(marginLine(wrapper, '利润分组甲').classes()).toContain('text-emerald-600')
+    expect(marginLine(wrapper, '利润分组乙').text()).toBe('利润率 -20.00%')
+    expect(marginLine(wrapper, '利润分组乙').classes()).toContain('text-destructive')
+    expect(marginLine(wrapper, '利润分组平').text()).toBe('利润率 0.00%')
+    expect(marginLine(wrapper, '利润分组平').classes()).toContain('text-warning')
+    expect(marginLine(wrapper, '利润分组零').text()).toBe('利润率 —')
+    expect(profitCell(wrapper, '利润分组零').text()).toContain(zeroReason)
+    expect(profitCell(wrapper, '利润分组负').text()).toContain('-1x')
+    expect(marginLine(wrapper, '利润分组负').text()).toBe('利润率 —')
+    expect(profitCell(wrapper, '利润分组负').text()).toContain(zeroReason)
+    expect(profitCell(wrapper, '利润分组甲').text()).not.toContain(zeroReason)
+    expect(profitCell(wrapper, '利润分组甲').text()).not.toContain(costReason)
+    await chooseGroup(wrapper, '利润分组甲'); await submit(wrapper)
+    expect(harness.requests).toHaveLength(1)
+    expect(harness.requests[0]!.ownGroupIds).toEqual(['10'])
+  })
+
+  it('automatic creation rows explain a missing upstream multiplier instead of guessing a margin', async () => {
+    const wrapper = await openWithCost(null)
+    for (const name of ['利润分组甲', '利润分组乙', '利润分组平']) {
+      expect(marginLine(wrapper, name).text()).toBe('利润率 —')
+      expect(profitCell(wrapper, name).text()).toContain(costReason)
+    }
+    expect(profitCell(wrapper, '利润分组零').text()).toContain(zeroReason)
+    expect(profitCell(wrapper, '利润分组负').text()).toContain(zeroReason)
+    expect(profitCell(wrapper, '利润分组负').text()).not.toContain(costReason)
+    expect(dialog(wrapper).text()).not.toContain('%')
+  })
+
+  it('binding options append the same margin to each group and keep the group id values', async () => {
+    const wrapper = await openWithCost(1.2)
+    await chooseBind(wrapper)
+    expect(dialog(wrapper).find('[data-connect-profit-help]').exists()).toBe(false)
+    expect(dialog(wrapper).get('[data-bind-profit-help]').text()).toBe(bindHelp)
+    expect(bindOptions(wrapper).map(option => option.text())).toEqual(['利润分组甲 · 1.5x · 利润率 20.00%', '利润分组乙 · 1x · 利润率 -20.00%', '利润分组平 · 1.2x · 利润率 0.00%', '利润分组零 · 0x · 利润率 —', '利润分组负 · -1x · 利润率 —'])
+    expect(bindOptions(wrapper).map(option => option.attributes('value'))).toEqual(['10', '11', '12', '13', '14'])
+    await dialog(wrapper).get('input[type="radio"][value="207"]').setValue(true)
+    await dialog(wrapper).get('#existing-admin-group').setValue('10'); await flushPromises()
+    await dialog(wrapper).get('input[type="radio"][value="101"]').setValue(true); await submit(wrapper)
+    expect(harness.bindings).toHaveLength(1)
+    expect(harness.bindings[0]).toMatchObject({ adminGroupId: '10', adminResourceId: '101', upstreamKeyId: '207' })
+  })
+
+  it('binding options show a dash for every group when the upstream multiplier is missing', async () => {
+    const wrapper = await openWithCost(null)
+    await chooseBind(wrapper)
+    expect(bindOptions(wrapper).map(option => option.text())).toEqual(['利润分组甲 · 1.5x · 利润率 —', '利润分组乙 · 1x · 利润率 —', '利润分组平 · 1.2x · 利润率 —', '利润分组零 · 0x · 利润率 —', '利润分组负 · -1x · 利润率 —'])
+    expect(dialog(wrapper).get('[data-bind-profit-help]').text()).toBe(bindHelp)
+  })
+})

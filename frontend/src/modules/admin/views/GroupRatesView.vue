@@ -614,6 +614,14 @@ const groupEditorProfit = (id: string) => {
   else if (cost == null || !Number.isFinite(cost)) reason = '当前成本倍率缺失，请到上游管理同步后点‘刷新数据’'
   return { multiplier: multiplier != null && Number.isFinite(multiplier) ? multiplier.toFixed(2) : '—', margin: reason ? null : calculateProfitMargin(multiplier, cost), reason }
 }
+// 配置对接弹窗：直接用分组选项里已显示的倍率和本上游分组的成本倍率，公式与列表相同。
+const connectGroupProfit = (multiplier: number) => {
+  const cost = connectingRate.value?.currentMultiplier ?? null
+  let reason = ''
+  if (!Number.isFinite(multiplier) || multiplier <= 0) reason = '这个分组的倍率不大于零（主站没有返回倍率时也按 0 显示），无法估算利润率，请到主站检查该分组倍率'
+  else if (cost == null || !Number.isFinite(cost)) reason = '上方“上游倍率”缺失，无法估算利润率，请到上游管理同步后点‘刷新数据’'
+  return { margin: reason ? null : calculateProfitMargin(multiplier, cost), reason }
+}
 type OwnGroupCellLine = { key: string; id: string; name: string; title: string; value: string; valueTone: 'number' | 'muted'; suffix: string; profitMargin: number | null }
 type OwnGroupCells = { kind: 'unknown' | 'blank'; lines: OwnGroupCellLine[] } | { kind: 'lines'; lines: OwnGroupCellLine[] }
 const ownGroupCells = (rate: GroupRate): OwnGroupCells => {
@@ -2557,11 +2565,12 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               >
                 <option value="">{{ t('admin.groupRates.connect.bindAdminGroupPlaceholder') }}</option>
                 <option v-for="group in ownGroups" :key="group.id" :value="group.id">
-                  {{ group.groupName }} · {{ formatMultiplier(group.multiplier) }}
+                  {{ group.groupName }} · {{ formatMultiplier(group.multiplier) }} · 利润率 {{ formatProfitMargin(connectGroupProfit(group.multiplier).margin) }}
                 </option>
               </select>
               <ChevronDown class="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             </div>
+            <p data-bind-profit-help class="text-xs leading-5 text-muted-foreground">下拉选项里的利润率，是假设账号放进该分组时的估算：（该分组倍率－上方“上游倍率”）÷该分组倍率，只用于参考，不会修改主站。显示“—”表示该分组倍率不大于零（主站没有返回倍率时也按 0 显示），或上方“上游倍率”缺失；前者请到主站检查分组倍率，后者请到上游管理同步后点‘刷新数据’。</p>
           </div>
 
           <div v-if="connectMode === 'bind' && selectedAdminGroupId" class="space-y-2">
@@ -2605,6 +2614,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             <span class="text-sm font-medium text-foreground">{{ t('admin.groupRates.connect.ownGroupLabel') }}</span>
             <p v-if="isC5Import" class="text-xs leading-5 text-muted-foreground">{{ t('admin.groupRates.connect.targetGroupsHint') }}</p>
             <p v-if="connectGroupSelectionNotice" class="text-xs text-warning">{{ connectGroupSelectionNotice }}</p>
+            <p data-connect-profit-help class="text-xs leading-5 text-muted-foreground">每个分组右侧的利润率，是假设账号放进该分组时的估算：（该分组倍率－上方“上游倍率”）÷该分组倍率，只用于参考，不会修改主站；显示“—”时，下方写明原因。</p>
             <div class="max-h-48 overflow-auto rounded-xl border border-border/50 bg-surface divide-y divide-border/30">
               <label
                 v-for="group in filteredOwnGroups"
@@ -2623,7 +2633,11 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                 <span v-if="group.platform" class="inline-flex rounded-md border border-border/50 bg-surface-elevated px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                   {{ isC5Import ? importPlatformLabel(group.platform) : group.platform }}
                 </span>
-                <span class="ml-auto text-xs text-muted-foreground">{{ formatMultiplier(group.multiplier) }}</span>
+                <span data-connect-group-profit class="ml-auto text-right text-xs tabular-nums">
+                  <span class="block text-muted-foreground">{{ formatMultiplier(group.multiplier) }}</span>
+                  <span class="block" :class="profitMarginClass(connectGroupProfit(group.multiplier).margin)">利润率 {{ formatProfitMargin(connectGroupProfit(group.multiplier).margin) }}</span>
+                  <span v-if="connectGroupProfit(group.multiplier).reason" class="block text-muted-foreground">{{ connectGroupProfit(group.multiplier).reason }}</span>
+                </span>
               </label>
               <div v-if="filteredOwnGroups.length === 0" class="px-4 py-3 text-sm text-muted-foreground">
                 {{ t(isC5Import ? (connectAccountPlatform ? 'admin.groupRates.connect.noPlatformGroups' : 'admin.groupRates.connect.selectPlatformFirst') : 'admin.groupRates.connect.ownGroupPlaceholder') }}

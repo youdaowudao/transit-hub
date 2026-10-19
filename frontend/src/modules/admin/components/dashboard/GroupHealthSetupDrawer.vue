@@ -71,7 +71,7 @@ const setTestProtocol = (event: Event) => {
 }
 const applyTestConfiguration = (value: AdminGroupTestConfiguration) => {
   testConfiguration.value = value
-  testProtocol.value = value.configuration?.protocol ?? 'chat_completions'
+  testProtocol.value = value.configuration?.protocol ?? (isAnthropicGroup.value ? 'messages' : 'chat_completions')
   testTimeout.value = value.configuration ? String(value.configuration.probeTimeoutSeconds) : '20'
 }
 const loadTestConfiguration = async () => {
@@ -684,7 +684,7 @@ const close = () => {
               <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.help') }}</p>
               <p v-if="testLoading" class="text-xs text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.loading') }}</p>
               <template v-else-if="testConfiguration">
-                <p class="text-xs">{{ t('admin.connectionHealth.testConfiguration.' + (testConfiguration.configuration ? 'configured' : 'notConfigured')) }}</p>
+                <p class="text-xs">{{ t('admin.connectionHealth.testConfiguration.' + (testConfiguration.configuration ? 'configured' : isAnthropicGroup ? 'notConfiguredAnthropic' : 'notConfigured')) }}</p>
                 <div class="grid gap-3 sm:grid-cols-2">
                   <label class="space-y-1 text-xs">{{ t('admin.connectionHealth.testConfiguration.protocol') }}
                     <select data-testid="group-test-protocol" :value="testProtocol" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm" :disabled="testSaving" @change="setTestProtocol">
@@ -706,7 +706,7 @@ const close = () => {
                   <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesBudget') }}</p>
                 </template>
                 <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.impact', { count: testConfiguration.affectedAccountCount, conflicts: testConfiguration.conflictAccountCount }) }}</p>
-                <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.clearHelp') }}</p>
+                <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.' + (isAnthropicGroup ? 'clearHelpAnthropic' : 'clearHelp')) }}</p>
                 <ul v-if="testConfiguration.conflictAccountCount" class="space-y-1 text-xs text-amber-700 dark:text-amber-400">
                   <li v-for="account in testConfiguration.accounts.filter(item => item.testConfiguration.status === 'conflict')" :key="account.targetId">
                     {{ account.accountName }} · {{ account.testConfiguration.sourceGroups.map(source => `${source.adminGroupName || source.adminGroupId}: ${source.protocol} / ${source.probeTimeoutSeconds}s`).join('；') }}

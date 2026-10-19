@@ -92,8 +92,14 @@ type probeModelSpec struct {
 }
 
 type adminTargetMembership struct {
-	groupID   string
-	groupName string
+	messagesByDefault bool
+	groupID           string
+	groupName         string
+}
+
+func adminTargetMembershipFor(group upstream.AdminGroupInfo, account upstream.AdminGroupAccountInfo) adminTargetMembership {
+	membership := testConfigurationMembership(group, account)
+	return adminTargetMembership{groupID: membership.AdminGroupID, groupName: membership.AdminGroupName, messagesByDefault: membership.MessagesByDefault}
 }
 
 type adminTargetRefresh struct {
@@ -644,7 +650,7 @@ func (s *Service) refreshAdminTarget(ctx context.Context, session upstream.Sessi
 			if acc.ID != accountID {
 				continue
 			}
-			refresh.memberships = append(refresh.memberships, adminTargetMembership{groupID: group.ID, groupName: group.Name})
+			refresh.memberships = append(refresh.memberships, adminTargetMembershipFor(group, acc))
 			if !refresh.found {
 				refresh.target = AdminProbeTarget{
 					TargetID:       buildTargetID(platform, adminAccountID, acc.ID),

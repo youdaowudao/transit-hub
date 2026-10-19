@@ -492,7 +492,7 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		accountCount += len(accounts)
 		for _, acc := range accounts {
 			targetID := buildTargetID(platform, adminAccountID, acc.ID)
-			testMembershipsByTarget[targetID] = append(testMembershipsByTarget[targetID], TestConfigurationSource{AdminGroupID: group.ID, AdminGroupName: group.Name})
+			testMembershipsByTarget[targetID] = append(testMembershipsByTarget[targetID], testConfigurationMembership(group, acc))
 			if _, exists := decisionAccountByTarget[targetID]; !exists {
 				decisionAccountByTarget[targetID] = acc
 			}

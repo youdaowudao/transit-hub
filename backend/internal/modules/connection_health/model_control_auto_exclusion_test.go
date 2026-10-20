@@ -100,6 +100,7 @@ func TestModelControlAutoFullyClosedFilteringAndFailures(t *testing.T) {
 	}
 	f.monitor([]string{"1", "2"}, "A", "B")
 	f.service.runSchedulerTickSafely(t.Context())
+	waitSchedulerPathsIdle(t, f.service)
 	// The tick starts automatic scans asynchronously; settle them before the next fixture phase.
 	f.service.modelControlScanWG.Wait()
 	for _, failure := range []string{"settings", "set"} {
@@ -165,6 +166,7 @@ func TestModelControlAutoAllClosedPriorityAndRestoration(t *testing.T) {
 		f.switches(false, false, true)
 		f.monitor([]string{"1"}, "A", "B")
 		f.service.runSchedulerTickSafely(t.Context())
+		waitSchedulerPathsIdle(t, f.service)
 		f.service.modelControlScanWG.Wait()
 		if f.inactiveCount() > 0 {
 			t.Fatal("all excluded still stopped")
@@ -220,6 +222,7 @@ func TestModelControlAutoAllClosedPriorityAndRestoration(t *testing.T) {
 		f.close("1", "A")
 		f.monitor([]string{"1", "2"}, "A", "B")
 		f.service.runSchedulerTickSafely(t.Context())
+		waitSchedulerPathsIdle(t, f.service)
 		f.service.modelControlScanWG.Wait()
 		if f.inactiveCount() != 1 {
 			t.Fatal("baseline initial stop missing")

@@ -98,6 +98,10 @@ func TestProbeModelC43K1ScheduledChoosesOne(t *testing.T) {
 	f := c43CriticalFixture(t)
 	c43CriticalPolicy(t, f, true, "A", "B", "C")
 	f.service.runSchedulerTickSafely(t.Context())
+	waitSchedulerPathsIdle(t, f.service)
+	// Seven accounts exceed the workspace cap of six; admit the remainder on the next tick.
+	f.service.runSchedulerTickSafely(t.Context())
+	waitSchedulerPathsIdle(t, f.service)
 	got := c43CriticalEvents(t, f)
 	for id := range f.accounts {
 		want := []string{c43CriticalSelected(id)}
@@ -243,6 +247,7 @@ func TestProbeModelC43K4OldSuspendedModelDoesNotStopAccount(t *testing.T) {
 		}
 	}
 	f.service.runSchedulerTickSafely(t.Context())
+	waitSchedulerPathsIdle(t, f.service)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.accounts["1"]["status"] != "active" {
@@ -333,6 +338,10 @@ func TestProbeModelC43E1DefaultStillProbesAllAndNoHints(t *testing.T) {
 	f := c43CriticalFixture(t)
 	c43CriticalPolicy(t, f, false, "A", "B", "C")
 	f.service.runSchedulerTickSafely(t.Context())
+	waitSchedulerPathsIdle(t, f.service)
+	// Seven accounts exceed the workspace cap of six; admit the remainder on the next tick.
+	f.service.runSchedulerTickSafely(t.Context())
+	waitSchedulerPathsIdle(t, f.service)
 	events := c43CriticalEvents(t, f)
 	page := c43CriticalPage(t, f)
 	for id := range f.accounts {

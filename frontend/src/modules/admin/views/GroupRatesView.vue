@@ -21,6 +21,54 @@ import { t, te, locale } from '@/locales'
 const router = useRouter()
 const route = useRoute()
 const { currentAccount } = useAdminAccounts()
+const siteMenuRate = ref<GroupRate | null>(null)
+const siteMenuPosition = ref({ left: 8, top: 8, maxHeight: 0 })
+const siteMenuRef = ref<HTMLElement | null>(null)
+let siteMenuTrigger: HTMLElement | null = null
+const siteNameMenuHelp = '点击选择：去分组健康查看对接的主站分组，或在新标签页打开上游网站；只跳转，不会修改主站'
+const closeSiteMenu = (restoreFocus = false) => {
+  siteMenuRate.value = null
+  if (restoreFocus) siteMenuTrigger?.focus()
+  siteMenuTrigger = null
+}
+const openSiteMenu = async (rate: GroupRate, event: MouseEvent) => {
+  const trigger = event.currentTarget as HTMLElement
+  if (siteMenuRate.value && siteMenuTrigger === trigger) { closeSiteMenu(); return }
+  siteMenuTrigger = trigger
+  siteMenuRate.value = rate
+  siteMenuPosition.value = { left: 8, top: 8, maxHeight: 0 }
+  await nextTick()
+  const menu = siteMenuRef.value
+  if (!menu || !siteMenuRate.value || siteMenuTrigger !== trigger) return
+  const rect = trigger.getBoundingClientRect()
+  const menuRect = menu.getBoundingClientRect()
+  const height = Math.max(menu.scrollHeight, menuRect.height)
+  const below = Math.max(0, window.innerHeight - rect.bottom - 12)
+  const above = Math.max(0, rect.top - 12)
+  const placeBelow = height <= below || (height > above && below >= above)
+  const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
+  const maxHeight = Math.min(placeBelow ? below : above, 24 * rem)
+  const width = Math.min(menuRect.width, window.innerWidth - 16)
+  siteMenuPosition.value = {
+    left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+    top: placeBelow ? rect.bottom + 8 : rect.top - Math.min(height, maxHeight) - 8,
+    maxHeight,
+  }
+}
+const handleSiteMenuClick = (event: MouseEvent) => {
+  const target = event.target
+  if (target instanceof Node && siteMenuRef.value?.contains(target)) return
+  if (target instanceof Element && target.closest('[data-site-name-trigger]')) return
+  closeSiteMenu()
+}
+const handleSiteMenuKeydown = (event: KeyboardEvent) => {
+  if (event.key === 'Escape' && siteMenuRate.value) closeSiteMenu(true)
+}
+const handleSiteMenuScroll = (event: Event) => {
+  if (event.target instanceof Node && siteMenuRef.value?.contains(event.target)) return
+  closeSiteMenu()
+}
+const handleSiteMenuResize = () => closeSiteMenu()
 
 const {
   rates,
@@ -324,6 +372,7 @@ watch(supportsConnectPassthrough, (supported) => {
   if (!supported) connectPassthrough.value = false
 })
 watch([() => currentAccount.value?.id, adminPlatform], () => {
+  closeSiteMenu()
   resetGroupEditor()
   connectorGeneration++
   disconnectGeneration++
@@ -622,13 +671,13 @@ const connectGroupProfit = (multiplier: number) => {
   else if (cost == null || !Number.isFinite(cost)) reason = '上方“上游倍率”缺失，无法估算利润率，请到上游管理同步后点‘刷新数据’'
   return { margin: reason ? null : calculateProfitMargin(multiplier, cost), reason }
 }
-type OwnGroupCellLine = { key: string; id: string; name: string; title: string; value: string; valueTone: 'number' | 'muted'; suffix: string; profitMargin: number | null }
+type OwnGroupCellLine = { accountIds: string[]; key: string; id: string; name: string; title: string; value: string; valueTone: 'number' | 'muted'; suffix: string; profitMargin: number | null }
 type OwnGroupCells = { kind: 'unknown' | 'blank'; lines: OwnGroupCellLine[] } | { kind: 'lines'; lines: OwnGroupCellLine[] }
 const ownGroupCells = (rate: GroupRate): OwnGroupCells => {
   if (!connectionDataKnown.value) return { kind: 'unknown', lines: [] }
   const connections = realConnectionsForRate(rate).filter(c => !c.status || c.status === 'active')
   if (!connections.length) return { kind: 'blank', lines: [] }
-  const groups = new Map<string, { id: string; name: string }>()
+  const groups = new Map<string, { id: string; name: string; accountIds: Set<string> }>()
   for (const connection of connections) {
     const ids = Array.isArray(connection.ownGroupIds) ? connection.ownGroupIds : []
     const names = Array.isArray(connection.ownGroupNames) ? connection.ownGroupNames : []
@@ -636,10 +685,12 @@ const ownGroupCells = (rate: GroupRate): OwnGroupCells => {
       const id = (ids[i] ?? '').trim(), name = (names[i] ?? '').trim()
       if (!id && !name) continue
       const key = id ? `id:${id}` : `name:${name}`
-      if (!groups.has(key)) groups.set(key, { id, name })
+      if (!groups.has(key)) groups.set(key, { id, name, accountIds: new Set() })
+      const accountId = connection.adminAccountId?.trim()
+      if (accountId) groups.get(key)!.accountIds.add(accountId)
     }
   }
-  if (!groups.size) return { kind: 'lines', lines: [{ key: 'missing', id: '', name: '对接记录里没有主站分组', title: '对接记录里没有主站分组', value: '', valueTone: 'muted', suffix: '', profitMargin: null }] }
+  if (!groups.size) return { kind: 'lines', lines: [{ accountIds: [], key: 'missing', id: '', name: '对接记录里没有主站分组', title: '对接记录里没有主站分组', value: '', valueTone: 'muted', suffix: '', profitMargin: null }] }
   const lines = Array.from(groups, ([key, group]): OwnGroupCellLine => {
     const live = ownGroupRatesState.value === 'ready' && group.id ? ownGroupRatesById.value.get(group.id) : undefined
     const name = live ? live.name : group.name || `分组编号 ${group.id}`
@@ -655,7 +706,7 @@ const ownGroupCells = (rate: GroupRate): OwnGroupCells => {
       if (status && status !== 'active') suffix = '（已停用）'
     }
     const profitMargin = live ? calculateProfitMargin(live.multiplier, rate.currentMultiplier) : null
-    return { key, id: group.id, name, title: name, value, valueTone, suffix, profitMargin }
+    return { accountIds: [...group.accountIds].sort(), key, id: group.id, name, title: name, value, valueTone, suffix, profitMargin }
   })
   lines.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
   return { kind: 'lines', lines }
@@ -670,6 +721,49 @@ const groupRefsForPage = (): ScopedGroupRef[] => Array.from(new Map(rates.value.
 const frozenScope = (): Omit<ScopedCheckRequest, 'mode'> => ({ workspaceAdminAccountId: currentAccount.value?.id ?? '', ...(siteFilter.value ? { siteId: siteFilter.value } : { groupRefs: groupRefsForPage() }) })
 const connectionMatchesScope = (connection: RealConnection, scope = lastCheckScope): boolean => Boolean(scope && (scope.siteId ? connection.upstreamSiteId === scope.siteId : scope.groupRefs?.some(ref => connection.upstreamSiteId === ref.siteId && ((Boolean(connection.upstreamGroupId && ref.groupId) && connection.upstreamGroupId === ref.groupId) || ((!connection.upstreamGroupId || !ref.groupId) && connection.upstreamGroupName === ref.groupName)))))
 const applicableConnection = (connection: RealConnection) => Boolean(connection.adminAccountId?.trim() && (!connection.adminPlatform || connection.adminPlatform === 'sub2api'))
+type SiteMenuHealthItem = { key: string; label: string; groupId: string; groupName: string; accountIds: string[]; disabledReason: string }
+const siteMenuHealthItems = computed<SiteMenuHealthItem[]>(() => {
+  const rate = siteMenuRate.value
+  if (!rate) return []
+  const cells = ownGroupCells(rate)
+  let disabledReason = ''
+  if (cells.kind === 'unknown') disabledReason = '对接资料还没读到，请点‘刷新数据’后再试。'
+  else if (isMainAccountMissing(rate)) disabledReason = rate.deleted
+    ? '对接的主站账号已不存在，这个上游分组也已删除，分组健康里没有可查看的内容。'
+    : '对接的主站账号已不存在，分组健康里看不到它；可点右侧‘清理本地失效对接’。'
+  else if (cells.kind === 'blank') disabledReason = rate.deleted
+    ? '这个上游分组已删除，也没有对接主站账号，分组健康里没有可查看的内容。'
+    : '这个上游分组还没对接主站账号，分组健康里没有它；需要时点右侧‘配置对接’。'
+  else if (cells.lines.length === 1 && cells.lines[0]?.key === 'missing') disabledReason = canEditMainSiteGroups(rate)
+    ? '对接记录里没有主站分组，无法定位；可点右侧‘修改主站分组’补上。'
+    : '对接记录里没有主站分组，无法直接定位；请到分组健康，在左侧搜索框输入这个主站账号的名称查找。'
+  if (disabledReason) return [{ key: 'disabled', label: '去分组健康', groupId: '', groupName: '', accountIds: [], disabledReason }]
+  return cells.lines.map(line => ({ key: line.key, label: `去分组健康：${line.name}`, groupId: line.id, groupName: line.name, accountIds: line.accountIds, disabledReason: '' }))
+})
+const siteMenuWebsite = computed(() => {
+  const site = upstreamSiteOptions.value.find(site => site.id === siteMenuRate.value?.siteId)
+  const unavailable = (disabledReason: string) => ({ href: '', host: '', disabledReason })
+  if (!site) return unavailable(siteOptionsError.value || '网站资料里没有这个网站，可能还在读取，或已在上游管理删除。请稍后点‘刷新数据’；仍没有时到上游管理检查。')
+  try {
+    const parsed = new URL(site.baseUrl ?? '')
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error('invalid website URL')
+    return { href: site.baseUrl!, host: parsed.host, disabledReason: '' }
+  } catch {
+    return unavailable('上游管理里这个网站的网址为空或格式不对（只支持 http/https 开头的网址），无法打开；请到上游管理修改网址。')
+  }
+})
+const goToHealthGroup = (item: SiteMenuHealthItem) => {
+  if (item.disabledReason) return
+  closeSiteMenu()
+  void router.push({ name: 'AdminConnectionHealth', query: {
+    focusGroupId: item.groupId || undefined,
+    focusGroupName: item.groupName || undefined,
+    focusAccountIds: item.accountIds.join(',') || undefined,
+    focusWorkspace: currentAccount.value?.id || undefined,
+  } })
+}
+watch(rates, () => closeSiteMenu())
+
 const connectionOperationBlocked = (rate: GroupRate): boolean => {
   if (!connectionDataKnown.value) return true
   const connection = realConnectionForRate(rate)
@@ -948,6 +1042,10 @@ watch(isAnyDialogOpen, async (open) => {
 })
 
 onMounted(async () => {
+  document.addEventListener('click', handleSiteMenuClick)
+  document.addEventListener('keydown', handleSiteMenuKeydown)
+  document.addEventListener('scroll', handleSiteMenuScroll, true)
+  window.addEventListener('resize', handleSiteMenuResize)
   document.addEventListener('keydown', handleDialogKeydown)
   document.addEventListener('visibilitychange', onConsumptionVisibilityChange)
   updateSingaporeToday()
@@ -955,6 +1053,11 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  closeSiteMenu()
+  document.removeEventListener('click', handleSiteMenuClick)
+  document.removeEventListener('keydown', handleSiteMenuKeydown)
+  document.removeEventListener('scroll', handleSiteMenuScroll, true)
+  window.removeEventListener('resize', handleSiteMenuResize)
   pageIsMounted = false
   resetGroupEditor()
   resetOwnGroupRates()
@@ -1835,7 +1938,27 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
 </script>
 
 <template>
+
   <div class="flex flex-col space-y-6" @click.capture="clearRateHighlight">
+  <Teleport to="body">
+    <div v-if="siteMenuRate" ref="siteMenuRef" role="menu" class="fixed w-72 rounded-xl border border-border/60 bg-surface-elevated shadow-lg py-1 overflow-y-auto z-[60]" :style="{ left: `${siteMenuPosition.left}px`, top: `${siteMenuPosition.top}px`, maxHeight: `${siteMenuPosition.maxHeight}px`, maxWidth: 'calc(100vw - 16px)' }">
+      <div class="px-3 py-2.5 border-b border-border/40">
+        <p class="text-sm font-medium text-foreground break-words">{{ siteMenuRate.siteName }} · {{ siteMenuRate.groupName }}</p>
+        <p class="mt-1 text-xs text-muted-foreground">只跳转，不会修改主站。</p>
+      </div>
+      <button v-for="item in siteMenuHealthItems" :key="item.key" type="button" role="menuitem" :disabled="Boolean(item.disabledReason)" :aria-disabled="item.disabledReason ? 'true' : undefined" class="block w-full px-3 py-2.5 text-left text-sm text-muted-foreground" :class="item.disabledReason ? 'cursor-not-allowed opacity-60' : 'hover:bg-surface-line hover:text-foreground'" @click="goToHealthGroup(item)">
+        <span class="block">{{ item.label }}</span>
+        <span class="mt-1 block text-xs leading-5">{{ item.disabledReason || '在分组健康选中这个主站分组，并标出对应账号' }}</span>
+      </button>
+      <div v-if="siteMenuWebsite.disabledReason" role="menuitem" aria-disabled="true" class="px-3 py-2.5 text-sm text-muted-foreground cursor-not-allowed opacity-60">
+        <span class="block">打开上游网站</span><span class="mt-1 block text-xs leading-5">{{ siteMenuWebsite.disabledReason }}</span>
+      </div>
+      <a v-else role="menuitem" :href="siteMenuWebsite.href" target="_blank" rel="noopener noreferrer" class="block px-3 py-2.5 text-sm text-muted-foreground hover:bg-surface-line hover:text-foreground" @click="closeSiteMenu()">
+        <span class="block">打开上游网站</span><span class="mt-1 block text-xs leading-5">在新标签页打开 {{ siteMenuWebsite.host }}</span>
+      </a>
+    </div>
+  </Teleport>
+
     <div class="flex max-w-full w-fit shrink-0 items-center gap-1 overflow-x-auto rounded-lg border border-border/50 bg-surface p-1" role="tablist" :aria-label="t('admin.menu.groupRates')">
       <button
         v-for="tab in (['all', 'mapped', 'unmapped'] as const)"
@@ -2067,7 +2190,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               @click="clearRateHighlight"
             >
               <td class="px-4 py-2.5">
-                <div class="font-medium text-foreground">{{ rate.siteName }}</div>
+                <button type="button" data-site-name-trigger class="font-medium text-foreground hover:text-primary cursor-pointer" aria-haspopup="menu" :aria-expanded="siteMenuRate === rate" :title="siteNameMenuHelp" :aria-label="siteNameMenuHelp" @click="openSiteMenu(rate, $event)">{{ rate.siteName }}</button>
                 <div data-account-today-consume class="mt-1 whitespace-nowrap text-xs leading-5 text-muted-foreground tabular-nums" :title="accountConsumptionHint(rate, 'todayConsume')">今日消费：{{ accountConsumptionDisplay(rate, 'todayConsume') }}</div>
                 <div data-account-total-consume class="whitespace-nowrap text-xs leading-5 text-muted-foreground tabular-nums" :title="accountConsumptionHint(rate, 'totalConsume')">累计消费：{{ accountConsumptionDisplay(rate, 'totalConsume') }}（已记录合计）</div>
                 <div data-account-site-balance class="whitespace-nowrap text-xs leading-5 text-muted-foreground tabular-nums" :title="accountConsumptionHint(rate, 'balance')">整站余额：{{ accountConsumptionDisplay(rate, 'balance') }}</div>
@@ -2209,6 +2332,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
     </div>
 
     <p data-account-consumption-hint class="shrink-0 text-xs leading-5 text-muted-foreground">今日消费和累计消费是该主站账号对应上游 Key 的金额；累计只统计 Hub 按新加坡日期已保存的天数，不是上游账单全部历史；整站余额来自上游管理上次同步。页面不会重新查询上游或修改主站。今日消费、整站余额需要更新时，请先在上游管理同步，再点‘刷新数据’；累计消费需要更新时，请到首页成本区点‘刷新账号统计’，再点‘刷新数据’。</p>
+      <p data-site-name-menu-hint class="shrink-0 text-xs leading-5 text-muted-foreground">点站点名称可以跳到分组健康查看对接的主站分组，或在新标签页打开上游网站；只跳转，不会修改主站。</p>
 
     <div v-if="isHistoryOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
       <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-history-title" tabindex="-1" class="max-h-[calc(100dvh-2rem)] w-full max-w-4xl overflow-hidden overscroll-contain rounded-xl border border-border/50 bg-card shadow-xl">

@@ -3,6 +3,8 @@ package upstream
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"transithub/backend/internal/shared/authctx"
 	"transithub/backend/internal/shared/httpjson"
@@ -17,11 +19,21 @@ type SiteConsumption struct {
 type SiteOption struct {
 	ID          string          `json:"id"`
 	Name        string          `json:"name"`
+	BaseURL     string          `json:"baseUrl"`
 	Consumption SiteConsumption `json:"consumption"`
 }
 type SiteOptionsResponse struct {
 	WorkspaceAdminAccountID string       `json:"workspaceAdminAccountId"`
 	Items                   []SiteOption `json:"items"`
+}
+
+func optionBaseURL(value string) string {
+	parsed, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		return ""
+	}
+	parsed.User = nil
+	return parsed.String()
 }
 
 // ListOptions reads only the existing site cache. It deliberately bypasses
@@ -34,7 +46,7 @@ func (s *Service) ListOptions(ctx context.Context, userID, workspaceID string) (
 	result := SiteOptionsResponse{WorkspaceAdminAccountID: workspaceID, Items: make([]SiteOption, 0)}
 	for _, site := range sites {
 		if site != nil && site.UserID == userID && site.AdminAccountID == workspaceID {
-			result.Items = append(result.Items, SiteOption{ID: site.ID, Name: site.Name, Consumption: SiteConsumption{
+			result.Items = append(result.Items, SiteOption{ID: site.ID, Name: site.Name, BaseURL: optionBaseURL(site.BaseURL), Consumption: SiteConsumption{
 				Balance: metric(site.Metrics.Balance.Value), RechargeRate: site.RechargeRate,
 			}})
 		}

@@ -79,6 +79,7 @@ export interface UpstreamSiteConsumption {
 export interface UpstreamSiteOption {
   id: string
   name: string
+  baseUrl?: string
   consumption?: UpstreamSiteConsumption
 }
 

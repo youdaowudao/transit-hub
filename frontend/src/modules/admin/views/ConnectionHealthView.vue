@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { costFailureText } from '../utils/upstream'
-import { computed, onActivated, onDeactivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -83,6 +83,7 @@ const {
   overview,
   groups,
   adminGroups,
+  adminGroupsLoaded,
   events,
   policies,
   isLoading,
@@ -117,6 +118,8 @@ const searchText = ref('')
 const selectedType = ref('')
 const selectedGroupId = ref('')
 const focusedGroupId = ref('')
+const focusNotice = ref('')
+const focusAccountTarget = ref<{ groupId: string; accountIds: string[] } | null>(null)
 const selectedConnectionId = ref('')
 const eventsDialogOpen = ref(false)
 let eventsOpenRequestSequence = 0
@@ -317,6 +320,8 @@ const retryPendingQuestionAnswerSummaries = () => {
 }
 
 watch(preferenceScope, (scope, previous) => {
+  focusNotice.value = ''
+  focusAccountTarget.value = null
   boundSiteRateState.value = { kind: 'idle' }
   boundSiteRateSeq++
   // 整页打开时工作区在挂载后才读到，进入页面那次读取会被上面丢弃，需按新工作区重读；首次触发由进入页面负责读取。
@@ -413,6 +418,8 @@ const clearGroupFocusQuery = async () => {
   const query = { ...route.query }
   delete query.focusGroupId
   delete query.focusGroupName
+  delete query.focusAccountIds
+  delete query.focusWorkspace
   await router.replace({ query })
 }
 
@@ -420,7 +427,16 @@ const consumeRouteGroupFocus = async () => {
   const focusId = routeQueryValue(route.query.focusGroupId).trim()
   const focusName = routeQueryValue(route.query.focusGroupName).trim()
   if (!focusId && !focusName) return
-  if (adminGroups.value.length === 0) return
+  if (!adminGroupsLoaded.value) return
+  const focusWorkspace = routeQueryValue(route.query.focusWorkspace).trim()
+  if (focusWorkspace && preferenceScope.value === 'anonymous') return
+  focusNotice.value = ''
+  focusAccountTarget.value = null
+  if (focusWorkspace && focusWorkspace !== preferenceScope.value) {
+    focusNotice.value = '这次要查看的分组属于另一个工作区，当前工作区已经不同，所以没有定位。需要时请回到分组倍率重新点站点名称。'
+    await clearGroupFocusQuery()
+    return
+  }
 
   const target = filteredGroups.value.find(group => (
     (focusId && group.id === focusId) || (!focusId && focusName && group.name === focusName)
@@ -429,16 +445,29 @@ const consumeRouteGroupFocus = async () => {
     selectedGroupId.value = target.id
     focusedGroupId.value = target.id
   }
+  const knownGroup = target ?? adminGroups.value.find(group => (
+    (focusId && group.id === focusId) || (!focusId && focusName && group.name === focusName)
+  ))
+  const accountIds = [...new Set(routeQueryValue(route.query.focusAccountIds).split(',').map(id => id.trim()).filter(Boolean))]
+  if (knownGroup && accountIds.length) focusAccountTarget.value = { groupId: knownGroup.id, accountIds }
+  if (!target) {
+    const name = knownGroup?.name || focusName || `分组编号 ${focusId}`
+    if (knownGroup && preferences.value.hiddenGroupIds.includes(knownGroup.id)) {
+      focusNotice.value = `要查看的分组「${name}」在本页被设为不显示。请点左侧‘管理分组显示’勾选它，再在列表里点它；这只改本机显示，不会修改主站。`
+    } else if (knownGroup) {
+      focusNotice.value = `要查看的分组「${name}」被当前搜索或类型筛选挡住了。请清空搜索、把类型选为‘全部类型’，再在列表里点它。`
+    } else {
+      focusNotice.value = `主站分组列表里没有找到「${name}」，可能已在主站删除或改名。请点右上角‘刷新’重新读取；仍没有时，到分组倍率检查这条对接。`
+    }
+  }
   await clearGroupFocusQuery()
 }
 
-watch(
-  [() => route.query.focusGroupId, () => route.query.focusGroupName, filteredGroups],
-  () => { void consumeRouteGroupFocus() },
-  { immediate: true },
-)
+watchEffect(() => { void consumeRouteGroupFocus() })
 
 const selectGroup = (groupId: string) => {
+  focusNotice.value = ''
+  if (focusAccountTarget.value?.groupId !== groupId) focusAccountTarget.value = null
   selectedGroupId.value = groupId
   focusedGroupId.value = ''
 }
@@ -1538,6 +1567,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
     </section>
 
     <p v-if="errorKey" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">{{ readableMessage(errorKey) }}</p>
+    <p v-if="focusNotice" role="status" data-group-focus-notice class="rounded-lg bg-warning/10 px-4 py-3 text-sm text-warning">{{ focusNotice }}</p>
 
     <section class="overflow-hidden rounded-lg border border-border/60 bg-card text-card-foreground shadow-sm">
       <div v-if="isLoading && adminGroups.length === 0" class="grid min-h-[34rem] lg:grid-cols-[19rem_minmax(0,1fr)]">
@@ -1684,6 +1714,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           v-else
           :key="selectedGroup.id"
           :group="selectedGroup"
+          :focused-account-ids="focusAccountTarget?.groupId === selectedGroup.id ? focusAccountTarget.accountIds : []"
           :hide-unmonitored-accounts="preferences.hideUnmonitoredAccounts"
           :question-answer-unread-target-ids="preferences.questionAnswerUnreadTargetIds"
           :action-loading="isActionLoading"

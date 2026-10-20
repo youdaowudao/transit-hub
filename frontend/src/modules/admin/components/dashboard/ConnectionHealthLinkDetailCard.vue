@@ -87,6 +87,11 @@ const latestEventSource = computed(() => {
   return latest ? eventSourceLabel(latest.source) : ''
 })
 
+const abandonedActionText = computed(() => {
+  const latest = props.records[props.records.length - 1]
+  return props.isActionCard && latest?.result === 'policy_unmanaged_abandoned' ? readableMessage(latest.result) : ''
+})
+
 // remoteActionText 为空字符串时模板不渲染这一行；失败/unsupported 也照常展示，不隐藏。
 const remoteActionText = computed(() => {
   const mapped = remoteActionLabelKey(props.remoteAction)
@@ -189,6 +194,7 @@ const displayedErrorDetail = computed(() => {
     <p v-if="budgetPolicyId" class="mt-1 text-xs text-muted-foreground">{{ t(`${cardPrefix}.budgetPolicy`, { policy: budgetPolicyLabel }) }}</p>
     <p v-if="actionSource" class="mt-1 text-xs text-muted-foreground">{{ t(`${cardPrefix}.actionSource`, { source: actionSourceLabel, time: formatConnectionHealthTime(actionAt) }) }}</p>
     <p v-if="latestEventSource" class="mt-1 text-xs text-muted-foreground">{{ t(`${cardPrefix}.eventSource`, { source: latestEventSource }) }}</p>
+    <p v-if="abandonedActionText" class="mt-1 text-xs text-muted-foreground">{{ abandonedActionText }}</p>
     <p v-if="remoteActionText" class="mt-1 text-xs text-muted-foreground">{{ t(`${cardPrefix}.remoteActionLine`, { label: remoteActionText }) }}</p>
 
     <div v-if="!isActionCard" class="mt-3">

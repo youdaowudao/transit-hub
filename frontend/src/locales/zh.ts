@@ -1720,7 +1720,7 @@ export default {
         sub2apiSchedulableDisabled: '用户已关闭 Sub2API 主站调度',
         sub2apiSchedulableEnableFailed: '用户恢复 Sub2API 主站调度失败',
         sub2apiSchedulableDisableFailed: '用户关闭 Sub2API 主站调度失败',
-        skippedUpstreamScheduling: '主站调度关闭，未执行自动远端动作',
+        skippedUpstreamScheduling: '主站调度关闭，未执行自动关停',
         newapiDisabled: 'NewAPI channel 已禁用',
         newapiUpdateFailed: 'NewAPI channel 权重或状态更新失败',
         newapiWeight: 'NewAPI channel 权重已调整为 {weight}',

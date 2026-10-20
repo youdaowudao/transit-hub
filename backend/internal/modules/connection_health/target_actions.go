@@ -622,7 +622,10 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 		return targetRemoteActionResult{}, nil
 	}
 	if target.Schedulable != nil && !*target.Schedulable {
-		return targetRemoteActionResult{remoteAction: RemoteActionSkippedUpstreamScheduling}, nil
+		canRestore := target.Platform == string(upstream.PlatformSub2API) && stored != nil && !stored.Conflict && allHealthy
+		if !canRestore {
+			return targetRemoteActionResult{remoteAction: RemoteActionSkippedUpstreamScheduling}, nil
+		}
 	}
 
 	currentStatus := normalizeTargetStatus(target.Platform, target.AccountStatus)

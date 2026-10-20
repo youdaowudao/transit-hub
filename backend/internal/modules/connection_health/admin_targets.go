@@ -424,10 +424,11 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 	defer release()
 
 	// Re-read the target and its memberships under the same lease used by the scheduler.
-	target, account, memberships, found, accountsReadError, err := s.findAdminTargetWithMemberships(ctx, session, adminAccountID, target.AccountID)
+	refresh, err := s.refreshAdminTarget(ctx, session, adminAccountID, target.AccountID)
 	if err != nil {
 		return nil, err
 	}
+	target, account, memberships, found, accountsReadError := refresh.target, refresh.account, refresh.memberships, refresh.found, refresh.accountsReadError
 	if !found || target.TargetID != targetID {
 		if accountsReadError {
 			return nil, requestError(ErrorAccountsFetch)
@@ -514,7 +515,7 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 			probeResults = append(probeResults, *result)
 		}
 	}
-	if err := s.finishTargetProbeBatch(ctx, userID, adminAccountID, session, target, allSpecs, probeResults, EventSourceManual); err != nil {
+	if err := s.finishTargetProbeBatchWithFloor(ctx, userID, adminAccountID, session, target, allSpecs, probeResults, EventSourceManual, nil, &refresh.inventory, adminMonitoringScope{}); err != nil {
 		return nil, err
 	}
 	for _, result := range probeResults {

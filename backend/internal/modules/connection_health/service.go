@@ -27,6 +27,8 @@ type healthRepository interface {
 	SavePolicyWithTargets(ctx context.Context, p Policy, targets []ModelTarget) error
 	DeletePolicy(ctx context.Context, id string, userID string, adminAccountID string) (bool, error)
 	ListStatesByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]ConnectionHealthState, error)
+	ListSub2APIHealthWorkspaces(ctx context.Context) ([]healthStateWorkspace, error)
+	DeleteUnmonitoredStates(ctx context.Context, userID, adminAccountID, targetID string, expectedGeneration int64) (int64, error)
 	ListStatesByConnection(ctx context.Context, connectionID string) ([]ConnectionHealthState, error)
 	GetState(ctx context.Context, connectionID string, modelName string) (*ConnectionHealthState, error)
 	UpsertState(ctx context.Context, s ConnectionHealthState) error
@@ -82,6 +84,7 @@ type healthRepository interface {
 	ListAllTargetActionStates(ctx context.Context) ([]TargetActionState, error)
 	UpsertTargetActionState(ctx context.Context, state TargetActionState) error
 	DeleteTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) error
+	AbandonConflictedTargetAction(ctx context.Context, scope RemoteActionScope, expectedGeneration int64, event ConnectionHealthEvent) (bool, error)
 	EnsureSchema(ctx context.Context) error
 }
 
@@ -791,7 +794,7 @@ func (s *Service) filterToAssignedTargetEvents(ctx context.Context, userID strin
 	out := make([]ConnectionHealthEvent, 0, len(events))
 	for _, e := range events {
 		if _, ok := parseTargetID(e.ConnectionID); ok {
-			if e.Result == "policy_unmanaged_restore" || e.ActionSource == ActionSourceUser {
+			if e.Result == "policy_unmanaged_restore" || e.Result == "policy_unmanaged_abandoned" || e.ActionSource == ActionSourceUser {
 				// This event is emitted after the final assignment is removed. Filtering it by
 				// current assignments would make the automatic upstream restore or an explicit
 				// user scheduling action impossible to audit.

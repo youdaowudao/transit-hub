@@ -1626,6 +1626,7 @@ export default {
         manual_disable: '人工禁用',
         manual_restore: '人工恢复',
         policy_unmanaged_restore: '策略已解绑，恢复上游原始状态',
+        policy_unmanaged_abandoned: '不再管理：主站已被人工改动，保持现状，没有修改主站',
         schedulable_user_action_succeeded: '用户调度动作成功',
         schedulable_user_action_failed: '用户调度动作失败',
         account_edit_success: '账号修改已确认成功',

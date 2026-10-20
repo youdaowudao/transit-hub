@@ -789,6 +789,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 	groupPolicies := assignedEnabledPoliciesByGroup(policies, groupAssignments)
 	excluded := groupTargetExclusionIndex(exclusions)
 	for _, stored := range states {
+		storedConflict := stored.Conflict
 		captured, captureErr := s.capturedWorkspaceRules(ctx, stored.UserID, stored.AdminAccountID, policies)
 		if captureErr != nil {
 			continue
@@ -871,6 +872,19 @@ func (s *Service) restoreUnmanagedTargetActions(
 		}
 		effectivePolicies := effectivePoliciesForTarget(targetPolicySet, inheritedPolicies)
 		if hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies, target.Platform, target.modelSource, true)) && !hardExcluded && !oldRulePrimaryUnmanaged(target.Platform, captured.RuleVersion, tiers[stored.TargetID]) {
+			continue
+		}
+		if inventory.session.Platform == upstream.PlatformSub2API && storedConflict {
+			id, idErr := newID()
+			if idErr != nil {
+				log.Printf("[connection-health] create unmanaged abandonment event failed target_id=%s err=%v", stored.TargetID, idErr)
+				continue
+			}
+			event := ConnectionHealthEvent{ID: id, UserID: stored.UserID, AdminAccountID: stored.AdminAccountID, ConnectionID: stored.TargetID, ModelName: "*", AdminGroupID: target.AdminGroupID, OwnGroupName: target.AdminGroupName, UpstreamGroupName: target.AdminGroupName, Result: "policy_unmanaged_abandoned", Source: EventSourceScheduled}
+			_, abandonErr := s.repo.AbandonConflictedTargetAction(ctx, RemoteActionScope{stored.UserID, stored.AdminAccountID, stored.TargetID}, captured.ConfigGeneration, event)
+			if abandonErr != nil {
+				log.Printf("[connection-health] abandon unmanaged target conflict failed target_id=%s err=%v", stored.TargetID, abandonErr)
+			}
 			continue
 		}
 		targetVisible := found

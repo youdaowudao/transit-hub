@@ -298,6 +298,10 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 		log.Printf("[connection-health] scheduler list target action states failed: %v", err)
 		return
 	}
+	inventoryCache := make(adminInventoryCache)
+	rules, _ := ctx.Value(workspaceRuleSnapshotKey{}).(workspaceRuleSnapshot)
+	scan := &schedulerScan{policies: policies, assignments: assignments, groupAssignments: groupAssignments, exclusions: exclusions, inventoryCache: inventoryCache, priorityStates: priorityStates, targetActionStates: targetActionStates, rules: rules}
+	defer s.finishSchedulerScan(ctx, scan)
 	if len(assignments) == 0 && len(groupAssignments) == 0 && len(priorityStates) == 0 && len(targetActionStates) == 0 {
 		// 没有任何显式或分组分配：不解析凭据、不探活、不修改优先级。
 		return
@@ -313,7 +317,6 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 		capReady[key] = s.loadWorkspaceProbeCap(ctx, policy.UserID, policy.AdminAccountID) == nil
 	}
 	// 优先级同步和探活使用同一份有效策略关系。优先级写入失败只记录日志，不阻断探活。
-	inventoryCache := make(adminInventoryCache)
 	skipWorkspaces := s.scheduledProbeWorkspaces()
 	for _, state := range workspaceSyncStates {
 		if state.PendingSignature != "" {

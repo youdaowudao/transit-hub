@@ -386,7 +386,8 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 	}
 	ctx = leasedCtx
 	defer release()
-	refresh, refreshErr := s.refreshAdminTarget(ctx, j.session, j.adminAccountID, j.target.AccountID)
+	inventory, refreshErr := s.sharedWorkspaceInventory(ctx, j.userID, j.adminAccountID, j.session)
+	refresh := adminTargetRefreshFromInventory(j.session, j.adminAccountID, j.target.AccountID, inventory)
 	if refreshErr != nil || refresh.accountsReadError || !refresh.found || refresh.target.TargetID != j.target.TargetID {
 		log.Printf("[connection-health] refresh scheduled target failed target_id=%s found=%t partial=%t err=%v", j.target.TargetID, refresh.found, refresh.accountsReadError, refreshErr)
 		return

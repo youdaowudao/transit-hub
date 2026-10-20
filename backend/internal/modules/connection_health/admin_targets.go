@@ -629,24 +629,45 @@ func adminProbeTargetFromAccount(session upstream.Session, adminAccountID string
 // refreshAdminTarget keeps the existing execution-time refresh as one complete snapshot.
 // Scheduler floor decisions consume this same result and must not re-read groups or accounts.
 func (s *Service) refreshAdminTarget(ctx context.Context, session upstream.Session, adminAccountID string, accountID string) (adminTargetRefresh, error) {
-	snapshotStartedAt := time.Now()
-	groups, err := s.fetchAdminAllGroups(ctx, session)
+	inventory, err := s.readAdminWorkspaceInventory(ctx, session)
 	if err != nil {
 		return adminTargetRefresh{}, err
 	}
-	refresh := adminTargetRefresh{
-		inventory: adminWorkspaceInventory{snapshotStartedAt: snapshotStartedAt, groupsComplete: true, session: session, groups: make([]adminInventoryGroup, 0, len(groups))},
+	return adminTargetRefreshFromInventory(session, adminAccountID, accountID, inventory), nil
+}
+
+func (s *Service) readAdminWorkspaceInventory(ctx context.Context, session upstream.Session) (adminWorkspaceInventory, error) {
+	snapshotStartedAt := time.Now()
+	groups, err := s.fetchAdminAllGroups(ctx, session)
+	if err != nil {
+		return adminWorkspaceInventory{}, err
 	}
-	platform := string(session.Platform)
+	inventory := adminWorkspaceInventory{snapshotStartedAt: snapshotStartedAt, groupsComplete: true, session: session, groups: make([]adminInventoryGroup, 0, len(groups))}
 	for _, group := range groups {
+		if err := ctx.Err(); err != nil {
+			return adminWorkspaceInventory{}, err
+		}
 		accounts, accErr := s.listAdminGroupAccounts(ctx, session, group)
-		refresh.inventory.groups = append(refresh.inventory.groups, adminInventoryGroup{group: group, accounts: accounts, err: accErr})
-		if accErr != nil {
+		if err := ctx.Err(); err != nil {
+			return adminWorkspaceInventory{}, err
+		}
+		inventory.groups = append(inventory.groups, adminInventoryGroup{group: group, accounts: accounts, err: accErr})
+	}
+	guardAdminInventoryTimes(&inventory)
+	return inventory, nil
+}
+
+func adminTargetRefreshFromInventory(session upstream.Session, adminAccountID, accountID string, inventory adminWorkspaceInventory) adminTargetRefresh {
+	refresh := adminTargetRefresh{inventory: inventory}
+	platform := string(session.Platform)
+	for _, inventoryGroup := range inventory.groups {
+		group := inventoryGroup.group
+		if inventoryGroup.err != nil {
 			// 单分组失败不影响在其它分组里继续找，但记录下发生过读取错误。
 			refresh.accountsReadError = true
 			continue
 		}
-		for _, acc := range accounts {
+		for _, acc := range inventoryGroup.accounts {
 			if acc.ID != accountID {
 				continue
 			}
@@ -670,7 +691,6 @@ func (s *Service) refreshAdminTarget(ctx context.Context, session upstream.Sessi
 			}
 		}
 	}
-	guardAdminInventoryTimes(&refresh.inventory)
 	if refresh.found {
 	guardedTarget:
 		for _, group := range refresh.inventory.groups {
@@ -685,7 +705,7 @@ func (s *Service) refreshAdminTarget(ctx context.Context, session upstream.Sessi
 	}
 	refresh.target.InventoryComplete = !refresh.accountsReadError
 	refresh.target.TestMemberships = testConfigurationMemberships(refresh.memberships)
-	return refresh, nil
+	return refresh
 }
 
 // probeTargetOnce 对一个 (target, model) 组合执行一次独立探活并落库状态。事件和账号级上游

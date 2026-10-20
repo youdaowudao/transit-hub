@@ -128,6 +128,7 @@ type Service struct {
 	schedulerClosed                      bool
 	schedulerJobs                        sync.WaitGroup
 	probeInFlight                        map[string]string
+	schedulerInventoryReads              map[string][]*adminInventoryRead
 	adminMultiplierMu                    sync.Mutex
 	adminMultiplierCache                 map[string]adminMultiplierCacheEntry
 	multiplierSnapshotMu                 sync.Mutex

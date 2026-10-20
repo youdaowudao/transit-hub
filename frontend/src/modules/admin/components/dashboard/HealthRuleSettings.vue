@@ -51,7 +51,7 @@ watch(() => [props.active, props.workspaceId] as const, ([active]) => {
 
 const edit = (preset?: HealthRulePreset, copy = false) => {
   if (busy.value || (preset && !copy && isReadOnlyHealthRulePreset(preset))) return
-  editor.value = preset ? copyHealthRulePresetInput(preset) : defaultHealthRulePreset()
+  editor.value = preset ? copyHealthRulePresetInput(preset) : { ...defaultHealthRulePreset(), longFailureIntervalSeconds: 3600 }
   editingId.value = preset && !copy ? preset.id : ''
   if (copy && preset) editor.value.name = `${preset.name}（副本）`
   error.value = ''

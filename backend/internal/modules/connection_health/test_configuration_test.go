@@ -39,6 +39,8 @@ func (f *fakeRepository) CommitTargetProbe(ctx context.Context, input TargetProb
 }
 
 func (f *fakeRepository) DecorateProbeEventAction(_ context.Context, userID, workspace, eventID, action, groupID, groupName string) error {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	for i := range f.events {
 		event := &f.events[i]
 		if event.ID == eventID && event.UserID == userID && event.AdminAccountID == workspace && event.ProbeDisposition == "applied" {
@@ -139,6 +141,8 @@ func TestGroupTestConfigurationIsolationAndClear(t *testing.T) {
 }
 
 func (f *fakeRepository) ListLatestProbeAttemptEventsByWorkspace(_ context.Context, userID, workspace string, since time.Time) ([]ConnectionHealthEvent, error) {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	result := []ConnectionHealthEvent{}
 	for _, event := range f.events {
 		if event.UserID == userID && event.AdminAccountID == workspace && !event.CreatedAt.Before(since) && (event.ProbeDisposition == "applied" || event.ProbeDisposition == "invalid") {

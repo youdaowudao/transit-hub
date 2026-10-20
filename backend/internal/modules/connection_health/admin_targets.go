@@ -727,6 +727,9 @@ func (s *Service) probeTargetOnce(ctx context.Context, userID string, adminAccou
 	}
 
 	outcome := probeOutcomeWithAuditMetadata(applyOutcomeDelay(s.executeTargetProbe(ctx, target, cred, spec), spec.policy))
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	now := time.Now()
 	if target.Platform == string(upstream.PlatformSub2API) {

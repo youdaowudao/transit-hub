@@ -175,7 +175,7 @@ func (s *Service) syncMultiplierPrioritiesWithCache(
 	allSyncStates []PrioritySyncState,
 	inventoryCache adminInventoryCache,
 ) {
-	s.syncMultiplierPrioritiesWithCacheMode(ctx, policies, targetAssignments, groupAssignments, exclusions, allSyncStates, inventoryCache, true, nil)
+	s.syncMultiplierPrioritiesWithCacheMode(ctx, policies, targetAssignments, groupAssignments, exclusions, allSyncStates, inventoryCache, true, nil, nil)
 }
 
 func (s *Service) syncMultiplierPrioritiesWithCacheLocked(
@@ -188,7 +188,7 @@ func (s *Service) syncMultiplierPrioritiesWithCacheLocked(
 	inventoryCache adminInventoryCache,
 	expectedGenerations map[string]string,
 ) {
-	s.syncMultiplierPrioritiesWithCacheMode(ctx, policies, targetAssignments, groupAssignments, exclusions, allSyncStates, inventoryCache, false, expectedGenerations)
+	s.syncMultiplierPrioritiesWithCacheMode(ctx, policies, targetAssignments, groupAssignments, exclusions, allSyncStates, inventoryCache, false, expectedGenerations, nil)
 }
 
 func (s *Service) syncMultiplierPrioritiesWithCacheMode(
@@ -201,6 +201,7 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 	inventoryCache adminInventoryCache,
 	acquireWorkspaceLease bool,
 	expectedGenerations map[string]string,
+	skipWorkspaces map[string]bool,
 ) {
 	if s.priorityActions == nil || s.platformGroups == nil {
 		return
@@ -233,6 +234,10 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 	}
 	sort.Strings(workspaceKeys)
 	for _, workspaceKey := range workspaceKeys {
+		if skipWorkspaces[workspaceKey] {
+			s.recordSchedulerSkip("priority_workspace")
+			continue
+		}
 		identity := workspaceIdentity[workspaceKey]
 		userID, adminAccountID := identity[0], identity[1]
 		release := func() {}

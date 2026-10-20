@@ -79,6 +79,22 @@ func (l *probeConcurrencyLimiter) acquireAutomatic(ctx context.Context, workspac
 	}
 }
 
+func (l *probeConcurrencyLimiter) tryAcquireAutomatic(workspaceKey string) (func(), bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	usage := l.usageLocked(workspaceKey)
+	workspaceManualPriority := usage.manualWaiters > 0 && usage.active >= usage.cap-1
+	globalReserved := min(l.globalManualWaiters, l.globalCap)
+	globalManualPriority := globalReserved > 0 && l.globalActive >= l.globalCap-globalReserved
+	if usage.active >= usage.cap || l.globalActive >= l.globalCap || workspaceManualPriority || globalManualPriority {
+		return nil, false
+	}
+	usage.active++
+	l.globalActive++
+	l.signalLocked()
+	return l.releaseFunc(workspaceKey), true
+}
+
 func (l *probeConcurrencyLimiter) acquireManual(ctx context.Context, workspaceKey string, onQueued func()) (func(), bool) {
 	queuedReported := false
 	l.mu.Lock()

@@ -119,6 +119,10 @@ func (s *Service) StartScheduler(ctx context.Context) {
 	if s.backgroundTasksDisabled {
 		return
 	}
+	ctx, admitted := s.schedulerContext(ctx)
+	if !admitted {
+		return
+	}
 	s.startEventRetention(ctx)
 	go func() {
 		ticker := time.NewTicker(schedulerTickInterval)
@@ -135,6 +139,85 @@ func (s *Service) StartScheduler(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+func (s *Service) schedulerContext(parent context.Context) (context.Context, bool) {
+	s.schedulerMu.Lock()
+	defer s.schedulerMu.Unlock()
+	if s.schedulerClosed || parent.Err() != nil {
+		return parent, false
+	}
+	if s.schedulerCtx == nil {
+		s.schedulerCtx, s.schedulerCancel = context.WithCancel(parent)
+	}
+	return s.schedulerCtx, s.schedulerCtx.Err() == nil
+}
+
+func (s *Service) scheduledProbeInFlight(userID, targetID string) bool {
+	s.schedulerMu.Lock()
+	defer s.schedulerMu.Unlock()
+	_, exists := s.probeInFlight[userID+"|"+targetID]
+	return exists
+}
+
+func (s *Service) scheduledProbeWorkspaces() map[string]bool {
+	s.schedulerMu.Lock()
+	defer s.schedulerMu.Unlock()
+	workspaces := make(map[string]bool)
+	for _, workspace := range s.probeInFlight {
+		workspaces[workspace] = true
+	}
+	return workspaces
+}
+
+func (s *Service) registerScheduledProbe(ctx context.Context, job adminProbeJob) bool {
+	s.schedulerMu.Lock()
+	defer s.schedulerMu.Unlock()
+	if s.schedulerClosed || ctx.Err() != nil {
+		return false
+	}
+	if s.probeInFlight == nil {
+		s.probeInFlight = make(map[string]string)
+	}
+	key := job.userID + "|" + job.target.TargetID
+	if _, exists := s.probeInFlight[key]; exists {
+		return false
+	}
+	s.probeInFlight[key] = job.userID + "|" + job.adminAccountID
+	s.schedulerJobs.Add(1)
+	return true
+}
+
+func (s *Service) finishScheduledProbe(userID, targetID string) {
+	s.schedulerMu.Lock()
+	delete(s.probeInFlight, userID+"|"+targetID)
+	s.schedulerMu.Unlock()
+}
+
+func (s *Service) closeSchedulerAdmission() {
+	s.schedulerMu.Lock()
+	s.schedulerClosed = true
+	s.schedulerMu.Unlock()
+}
+
+func (s *Service) cancelScheduledProbes() {
+	s.schedulerMu.Lock()
+	cancel := s.schedulerCancel
+	s.schedulerMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (s *Service) waitScheduledProbes(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() { s.schedulerJobs.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Service) runSchedulerTickSafely(ctx context.Context) {
@@ -159,6 +242,10 @@ func (s *Service) runSchedulerTickSafely(ctx context.Context) {
 // runSchedulerTick 扫描全部已启用策略、旧版 target 分配和新版 admin 分组分配，按 workspace
 // 生成独立探活目标。分组新增的账号/渠道会在下一轮扫描时自动继承，无需写入额外 target 行。
 func (s *Service) runSchedulerTick(ctx context.Context) {
+	ctx, admitted := s.schedulerContext(ctx)
+	if !admitted {
+		return
+	}
 	ctx, round := s.beginSchedulerRound(ctx)
 	defer s.finishSchedulerRound(round)
 	if s.platformGroups == nil {
@@ -227,7 +314,13 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 	}
 	// 优先级同步和探活使用同一份有效策略关系。优先级写入失败只记录日志，不阻断探活。
 	inventoryCache := make(adminInventoryCache)
-	s.syncMultiplierPrioritiesWithCache(ctx, policies, assignments, groupAssignments, exclusions, priorityStates, inventoryCache)
+	skipWorkspaces := s.scheduledProbeWorkspaces()
+	for _, state := range workspaceSyncStates {
+		if state.PendingSignature != "" {
+			delete(skipWorkspaces, state.UserID+"|"+state.AdminAccountID)
+		}
+	}
+	s.syncMultiplierPrioritiesWithCacheMode(ctx, policies, assignments, groupAssignments, exclusions, priorityStates, inventoryCache, true, nil, skipWorkspaces)
 	s.restoreUnmanagedTargetActions(ctx, policies, assignments, groupAssignments, exclusions, targetActionStates, inventoryCache)
 	s.startDeletedAccountSweeps(ctx, inventoryCache)
 	if len(policies) == 0 {
@@ -244,42 +337,24 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 		return
 	}
 
-	var wg sync.WaitGroup
-	type probedWorkspace struct {
-		userID         string
-		adminAccountID string
-	}
-	probedWorkspaces := make([]probedWorkspace, 0)
-	seenWorkspaces := make(map[string]struct{})
-	floorGuards := make(map[string]*workspaceFloorGuard)
-
+	noSlotWorkspaces := make(map[string]bool)
 	for _, j := range jobs {
 		wsKey := j.userID + "|" + j.adminAccountID
-		if !capReady[wsKey] {
+		if !capReady[wsKey] || noSlotWorkspaces[wsKey] {
 			continue
 		}
-		releaseSlot, acquired := s.sharedProbeLimiter().acquireAutomatic(ctx, wsKey)
+		releaseSlot, acquired := s.sharedProbeLimiter().tryAcquireAutomatic(wsKey)
 		if !acquired {
-			break
+			noSlotWorkspaces[wsKey] = true
+			s.recordSchedulerSkip("no_slot")
+			continue
 		}
-		if _, seen := seenWorkspaces[wsKey]; !seen {
-			seenWorkspaces[wsKey] = struct{}{}
-			probedWorkspaces = append(probedWorkspaces, probedWorkspace{userID: j.userID, adminAccountID: j.adminAccountID})
+		j.floorGuard = s.sub2APIFloorGuardFor(j.userID, j.adminAccountID)
+		if !s.registerScheduledProbe(ctx, j) {
+			releaseSlot()
+			continue
 		}
-		if floorGuards[wsKey] == nil {
-			floorGuards[wsKey] = newWorkspaceFloorGuard()
-			s.setSub2APIFloorGuard(j.userID, j.adminAccountID, floorGuards[wsKey])
-		}
-		j.floorGuard = floorGuards[wsKey]
-
-		wg.Add(1)
-		go s.runAdminProbeJob(ctx, j, releaseSlot, &wg)
-	}
-	wg.Wait()
-	// 探活会在本轮改变健康档位和延迟排序。所有已启动任务完成后复用正式手动探活的
-	// workspace 同步入口，让生产 priority 在同一轮反映最新状态，而不是等待下一次 tick。
-	for _, workspace := range probedWorkspaces {
-		s.syncCurrentWorkspacePriorities(ctx, workspace.userID, workspace.adminAccountID)
+		go s.runAdminProbeJob(ctx, j, releaseSlot, &s.schedulerJobs)
 	}
 }
 
@@ -287,18 +362,29 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 // 一次「不可探活」事件并回填 last_probe_at 退避（不驱动状态机、不计入探活预算），
 // 凭据可用时逐个模型执行独立探活。
 func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, releaseSlot func(), wg *sync.WaitGroup) {
+	started := s.beginSchedulerJob()
+	committed := false
 	defer wg.Done()
-	defer releaseSlot()
 	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("[connection-health] admin probe goroutine panic recovered target_id=%s: %v", j.target.TargetID, r)
+		if recover() != nil {
+			log.Printf("[connection-health] admin probe goroutine panic recovered target_id=%s", j.target.TargetID)
 		}
 	}()
-	ctx, release, acquired, err := s.acquireActionTargetLease(ctx, j.target.TargetID, true)
+	defer func() {
+		if committed {
+			s.triggerHealthPrioritySyncAfterCommit(j.userID, j.adminAccountID)
+		}
+	}()
+	defer s.finishSchedulerJob(started)
+	defer releaseSlot()
+	defer s.finishScheduledProbe(j.userID, j.target.TargetID)
+	leasedCtx, release, acquired, err := s.acquireActionTargetLease(ctx, j.target.TargetID, false)
 	if err != nil || !acquired {
+		s.recordSchedulerSkip("lease_busy")
 		log.Printf("[connection-health] acquire target lease failed target_id=%s err=%v", j.target.TargetID, err)
 		return
 	}
+	ctx = leasedCtx
 	defer release()
 	refresh, refreshErr := s.refreshAdminTarget(ctx, j.session, j.adminAccountID, j.target.AccountID)
 	if refreshErr != nil || refresh.accountsReadError || !refresh.found || refresh.target.TargetID != j.target.TargetID {
@@ -310,6 +396,7 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 	}
 	j.target = refresh.target
 	j.account = refresh.account
+	j.floorGuard = s.sub2APIFloorGuardFor(j.userID, j.adminAccountID)
 	j.floorGuard.rememberInventory(refresh.inventory)
 	monitoringScope, scopeErr := s.loadAdminMonitoringScope(ctx, j.userID, j.adminAccountID, refresh.inventory)
 	if scopeErr != nil || !adminMonitoringScopeContainsTarget(monitoringScope, j.target.TargetID) {
@@ -332,7 +419,7 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 		return
 	}
 
-	cred, err := s.platformGroups.ResolveProbeCredential(j.session, j.account)
+	cred, err := s.resolveProbeCredential(ctx, j.session, j.account)
 	if err != nil {
 		reason := upstream.ProbeCredentialReason(err)
 		s.recordTargetCredentialUnavailable(ctx, j.userID, j.adminAccountID, j.target, j.dueSpecs, reason)
@@ -340,12 +427,16 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 	}
 	results := make([]targetProbeResult, 0, len(j.dueSpecs))
 	for _, spec := range j.dueSpecs {
+		if ctx.Err() != nil {
+			break
+		}
 		result, err := s.probeTargetOnce(ctx, j.userID, j.adminAccountID, j.target, cred, spec, true)
 		if err != nil {
 			log.Printf("[connection-health] scheduled target probe failed target_id=%s model=%s err=%v", j.target.TargetID, spec.modelName, err)
 			continue
 		}
 		if result != nil {
+			committed = true
 			results = append(results, *result)
 		}
 	}
@@ -655,6 +746,10 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 		}
 
 		for _, targetID := range targetOrder {
+			if s.scheduledProbeInFlight(ws.userID, targetID) {
+				s.recordSchedulerSkip("in_flight")
+				continue
+			}
 			candidate := candidates[targetID]
 			candidate.target.InventoryComplete = adminInventoryComplete(*inventory)
 			candidate.target.TestMemberships = inventoryTestMemberships(*inventory, candidate.target.AccountID)

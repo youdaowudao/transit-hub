@@ -109,6 +109,9 @@ func (g *workspaceFloorGuard) rememberInventory(inventory adminWorkspaceInventor
 }
 
 func (g *workspaceFloorGuard) rememberInventoryLocked(inventory adminWorkspaceInventory) {
+	if inventory.snapshotStartedAt.Before(g.snapshotAt) {
+		return
+	}
 	if adminInventoryComplete(inventory) {
 		fingerprint := adminInventoryFingerprint(inventory)
 		if g.inventoryFingerprint != fingerprint {
@@ -117,7 +120,7 @@ func (g *workspaceFloorGuard) rememberInventoryLocked(inventory adminWorkspaceIn
 		}
 	}
 	g.inventory = &inventory
-	g.snapshotAt = time.Now().UTC()
+	g.snapshotAt = inventory.snapshotStartedAt
 }
 
 func adminInventoryComplete(inventory adminWorkspaceInventory) bool {
@@ -910,7 +913,15 @@ func (s *Service) restoreUnmanagedTargetActions(
 		stored.PendingStatus = stored.OriginalStatus
 		stored.PendingWeight = cloneIntPointer(stored.OriginalWeight)
 		if inventory.session.Platform == upstream.PlatformSub2API {
-			action, actionErr := s.dispatchSafeTargetAction(ctx, inventory.session, target, stored, RemoteActionHealthGuard{ConfigGeneration: &captured.ConfigGeneration})
+			restoreCtx, release, acquired, leaseErr := s.acquireActionTargetLease(ctx, target.TargetID, false)
+			if leaseErr != nil || !acquired {
+				s.recordSchedulerSkip("restore_busy")
+				continue
+			}
+			action, actionErr := func() (string, error) {
+				defer release()
+				return s.dispatchSafeTargetAction(restoreCtx, inventory.session, target, stored, RemoteActionHealthGuard{ConfigGeneration: &captured.ConfigGeneration})
+			}()
 			if actionErr != nil {
 				log.Printf("[connection-health] restore unmanaged target deferred target_id=%s err=%v", stored.TargetID, actionErr)
 				continue
@@ -1090,7 +1101,15 @@ func (s *Service) restoreEmptySub2APIGroups(ctx context.Context, states []Target
 
 			chosen.state.PendingStatus = chosen.state.OriginalStatus
 			chosen.state.PendingWeight = cloneIntPointer(chosen.state.OriginalWeight)
-			action, actionErr := s.dispatchSafeTargetAction(ctx, inventory.session, chosen.target, chosen.state, RemoteActionHealthGuard{ConfigGeneration: &captured.ConfigGeneration})
+			restoreCtx, release, acquired, leaseErr := s.acquireActionTargetLease(ctx, chosen.target.TargetID, false)
+			if leaseErr != nil || !acquired {
+				s.recordSchedulerSkip("restore_busy")
+				continue
+			}
+			action, actionErr := func() (string, error) {
+				defer release()
+				return s.dispatchSafeTargetAction(restoreCtx, inventory.session, chosen.target, chosen.state, RemoteActionHealthGuard{ConfigGeneration: &captured.ConfigGeneration})
+			}()
 			if actionErr != nil {
 				log.Printf("[connection-health] restore empty group target deferred target_id=%s err=%v", chosen.target.TargetID, actionErr)
 				continue

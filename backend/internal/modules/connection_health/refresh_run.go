@@ -436,8 +436,11 @@ func (s *Service) expireAdminGroupsRefreshRun(run *adminGroupsRefreshRun) {
 }
 
 func (s *Service) Shutdown(ctx context.Context) error {
+	s.closeSchedulerAdmission()
 	s.closeActionAdmission()
 	actionErr := s.drainActionDispatches(ctx)
+	s.cancelScheduledProbes()
+	schedulerErr := s.waitScheduledProbes(ctx)
 	s.refreshRunMu.Lock()
 	s.initializeAdminGroupsRefreshRuntimeLocked()
 	s.refreshRunClosed = true
@@ -467,7 +470,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		refreshErr = ctx.Err()
 	}
 	scheduleErr := s.ShutdownQuestionAnswerSchedules(ctx)
-	return errors.Join(actionErr, refreshErr, scheduleErr, s.ShutdownQuestionAnswers(ctx))
+	return errors.Join(actionErr, schedulerErr, refreshErr, scheduleErr, s.ShutdownQuestionAnswers(ctx))
 }
 
 func (run *adminGroupsRefreshRun) publishStage(stage adminGroupsRefreshStage, completed int, total int, waiting []adminGroupsRefreshWaiting, issues []adminGroupsRefreshIssue) bool {

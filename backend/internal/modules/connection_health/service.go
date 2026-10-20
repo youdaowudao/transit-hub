@@ -122,6 +122,12 @@ type Service struct {
 	schedulableActions                   TargetSchedulableActioner
 	probeLimiterMu                       sync.Mutex
 	probeLimiter                         *probeConcurrencyLimiter
+	schedulerMu                          sync.Mutex
+	schedulerCtx                         context.Context
+	schedulerCancel                      context.CancelFunc
+	schedulerClosed                      bool
+	schedulerJobs                        sync.WaitGroup
+	probeInFlight                        map[string]string
 	adminMultiplierMu                    sync.Mutex
 	adminMultiplierCache                 map[string]adminMultiplierCacheEntry
 	multiplierSnapshotMu                 sync.Mutex
@@ -244,19 +250,6 @@ func (s *Service) sub2APIFloorGuardFor(userID string, adminAccountID string) *wo
 		s.sub2APIFloorGuards[key] = guard
 	}
 	return guard
-}
-
-func (s *Service) setSub2APIFloorGuard(userID string, adminAccountID string, guard *workspaceFloorGuard) {
-	if guard == nil {
-		return
-	}
-	key := userID + "|" + adminAccountID
-	s.sub2APIFloorMu.Lock()
-	defer s.sub2APIFloorMu.Unlock()
-	if s.sub2APIFloorGuards == nil {
-		s.sub2APIFloorGuards = make(map[string]*workspaceFloorGuard)
-	}
-	s.sub2APIFloorGuards[key] = guard
 }
 
 func (s *Service) EnsureSchema(ctx context.Context) error {

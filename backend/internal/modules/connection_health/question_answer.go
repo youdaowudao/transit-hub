@@ -51,6 +51,7 @@ const (
 	ErrorQuestionAnswerHistoryPage       = "admin.connectionHealth.errors.questionAnswerHistoryPage"
 	ErrorQuestionAnswerJudgmentForbidden = "admin.connectionHealth.errors.questionAnswerJudgmentForbidden"
 	ErrorQuestionAnswerServiceStopped    = "admin.connectionHealth.errors.questionAnswerServiceStopped"
+	ErrorQuestionAnswerInternal          = "admin.connectionHealth.manualProbeDialog.questionAnswer.errorTypes.internal_error"
 )
 
 const (
@@ -758,7 +759,16 @@ func (s *Service) finishFailedQuestionAnswerStart(key string, run *activeQuestio
 	if closed && shutdownAttempt != nil {
 		return errors.Join(cause, s.waitQuestionAnswerShutdownAttempt(shutdownAttempt))
 	}
-	return errors.Join(cause, s.finalizeFailedQuestionAnswerStart(key, run))
+	cleanupErr := s.finalizeFailedQuestionAnswerStart(key, run)
+	if cleanupErr == nil && reason == QuestionAnswerErrorInternal && errors.Is(cause, errQuestionAnswerInternal) {
+		s.questionAnswerMu.Lock()
+		stoppedInternally := run.stopReason == QuestionAnswerErrorInternal && !s.questionAnswerClosed && s.questionAnswerCtx.Err() == nil
+		s.questionAnswerMu.Unlock()
+		if stoppedInternally {
+			return errors.Join(requestError(ErrorQuestionAnswerInternal), cause)
+		}
+	}
+	return errors.Join(cause, cleanupErr)
 }
 
 func (s *Service) finalizeFailedQuestionAnswerStart(key string, run *activeQuestionAnswerBatch) error {

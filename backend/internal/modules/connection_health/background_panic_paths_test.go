@@ -224,7 +224,7 @@ func TestScheduleCoordinatorSurvivesPanic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	repo := &panicPathsCoordinatorRepository{retried: make(chan struct{}), cancel: cancel}
-	s := &Service{questionAnswerSchedules: repo, questionAnswerScheduleCtx: ctx, questionAnswerScheduleDone: make(chan struct{}), questionAnswerScheduleWake: make(chan struct{}, 1), questionAnswerScheduleHandles: map[string]*questionAnswerScheduleHandle{}, questionAnswerScheduleNow: time.Now}
+	s := &Service{questionAnswerSchedules: repo, questionAnswerScheduleCtx: ctx, questionAnswerScheduleDone: make(chan struct{}), questionAnswerScheduleWake: make(chan struct{}, 1), questionAnswerScheduleHandles: map[string]*questionAnswerScheduleHandle{}, questionAnswerScheduleNow: time.Now, schedulableActions: forbiddenAutomaticSchedulingWriter{t}}
 	s.questionAnswerScheduleWake <- struct{}{}
 	go s.runQuestionAnswerScheduleCoordinator()
 	select {
@@ -261,7 +261,7 @@ func TestScheduleCoordinatorPanicReleasesWorkspaceLock(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	repo := &panicPathsLockedCoordinatorRepository{c2ScheduleLifecycleRepository: &c2ScheduleLifecycleRepository{}, stop: cancel}
-	s := &Service{questionAnswerSchedules: repo, questionAnswerScheduleCtx: ctx, questionAnswerScheduleDone: make(chan struct{}), questionAnswerScheduleWake: make(chan struct{}, 1), questionAnswerScheduleHandles: map[string]*questionAnswerScheduleHandle{}}
+	s := &Service{questionAnswerSchedules: repo, questionAnswerScheduleCtx: ctx, questionAnswerScheduleDone: make(chan struct{}), questionAnswerScheduleWake: make(chan struct{}, 1), questionAnswerScheduleHandles: map[string]*questionAnswerScheduleHandle{}, schedulableActions: forbiddenAutomaticSchedulingWriter{t}}
 	s.questionAnswerScheduleWake <- struct{}{}
 	go s.runQuestionAnswerScheduleCoordinator()
 	select {
@@ -333,6 +333,7 @@ func (panicPathsRefreshReader) FetchAdminAllGroups(upstream.Session) ([]upstream
 
 func TestAdminGroupsRefreshPipelinePanicTerminal(t *testing.T) {
 	s := newAdminGroupsService(panicPathsRefreshReader{}, fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}}, newFakeRepository())
+	s.schedulableActions = forbiddenAutomaticSchedulingWriter{t}
 	run := newUnitRefreshRun(t)
 	t.Cleanup(run.cancel)
 	subscription, _ := run.subscribe()

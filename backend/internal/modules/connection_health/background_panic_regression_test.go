@@ -18,7 +18,7 @@ func panicRegressionService(t *testing.T, repo questionAnswerRepository) *Servic
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return &Service{questionAnswers: repo, questionAnswerCtx: ctx, questionAnswerStop: cancel,
+	return &Service{questionAnswers: repo, questionAnswerCtx: ctx, questionAnswerStop: cancel, schedulableActions: forbiddenAutomaticSchedulingWriter{t},
 		questionAnswerRuns: map[string]*activeQuestionAnswerBatch{}, questionAnswerStarts: map[string]*questionAnswerTargetStart{},
 		questionAnswerWake: make(chan struct{}, 1), questionAnswerTTL: time.Second, questionAnswerStorageTimeout: time.Second,
 		questionAnswerHTTP: &QuestionAnswerRunner{client: &http.Client{Transport: c1RoundTripFunc(func(*http.Request) (*http.Response, error) {

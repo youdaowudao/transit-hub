@@ -12,7 +12,6 @@ import (
 
 func TestActionCheckpointCleanupConcurrentEmptyGroupRestoration(t *testing.T) {
 	s, repo, lister, now, _ := actionCleanupHarness()
-	s.repo = actionCleanupConcurrentRepo{repo}
 	platform := &fakePlatformActioner{}
 	s.dispatcher = newRemoteActionDispatcher(nil, nil, platform)
 	visible := actionCleanupPair("1", *now).Target
@@ -55,10 +54,20 @@ func TestActionCheckpointCleanupConcurrentEmptyGroupRestoration(t *testing.T) {
 type actionCleanupLockWaitRepo struct {
 	*fakeRepository
 	entered chan struct{}
+	release <-chan struct{}
 }
 
 func (r actionCleanupLockWaitRepo) ClearDeletedAccountCheckpoint(ctx context.Context, scope RemoteActionScope, startedAt, now time.Time) (bool, error) {
-	r.entered <- struct{}{}
+	select {
+	case r.entered <- struct{}{}:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 	return r.fakeRepository.ClearDeletedAccountCheckpoint(ctx, scope, startedAt, now)
 }
 
@@ -68,24 +77,31 @@ func TestActionCheckpointCleanupReentryWhileWaitingForRowLock(t *testing.T) {
 	actionCleanupStore(repo, pair)
 	before := cloneActionPair(pair)
 	entered := make(chan struct{}, 1)
-	s.repo = actionCleanupLockWaitRepo{fakeRepository: repo, entered: entered}
-	// Model the existing workspace/row lock waiting after successful list evidence.
-	repo.actionMu.Lock()
-	locked := true
+	release := make(chan struct{})
+	s.repo = actionCleanupLockWaitRepo{fakeRepository: repo, entered: entered, release: release}
+	// Wait at the clear entry after list evidence; concurrent list reads remain available.
+	ctx, cancel := context.WithCancel(context.Background())
+	released := false
+	done := make(chan struct{})
 	defer func() {
-		if locked {
-			repo.actionMu.Unlock()
+		cancel()
+		if !released {
+			close(release)
+		}
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("cleanup fixture did not stop")
 		}
 	}()
-	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.sweepDeletedAccountCheckpoints(context.Background(), "u", "w", inventory)
+		s.sweepDeletedAccountCheckpoints(ctx, "u", "w", inventory)
 	}()
 	actionCleanupWait(t, entered)
 	actionCleanupRemember(s, now.Add(time.Second), true, upstream.AdminGroupAccountInfo{ID: "2", Name: "锁等待期间回组"})
-	repo.actionMu.Unlock()
-	locked = false
+	close(release)
+	released = true
 	select {
 	case <-done:
 	case <-time.After(time.Second):

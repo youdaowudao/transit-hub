@@ -91,6 +91,10 @@ func TestTaskAReviewOldProtocolOriginDoesNotDelayNewProtocol(t *testing.T) {
 	p := taskAV2Policy()
 	p.ProbeIntervalSeconds = 60
 	p.Enabled = true
+	// Keep the saved hourly preset while checking protocol-origin isolation.
+	preset := recommendedRulePreset()
+	preset.Kind, preset.LongFailureIntervalSeconds = PresetCustom, 3600
+	p.RulePreset = &preset
 	target := AdminProbeTarget{TargetID: "sub2api:ws1:a", Platform: "sub2api", Schedulable: boolPointer(true), TestConfiguration: defaultTestConfiguration()}
 	target.TestConfiguration.Protocol = TestProtocolResponses
 	spec := probeModelSpec{modelName: "m", policy: p, policies: []Policy{p}, maxProbeTokens: 1}

@@ -642,24 +642,8 @@ func TestActionCheckpointCleanupRED4CacheCompleteness(t *testing.T) {
 	}
 }
 
-// Status reads and the scheduler may overlap. Lock only the fake repository's
-// read methods here; production already reads through independent transactions.
-type actionCleanupConcurrentRepo struct{ *fakeRepository }
-
-func (r actionCleanupConcurrentRepo) ListPrioritySyncStates(ctx context.Context, u, w string) ([]PrioritySyncState, error) {
-	r.actionMu.Lock()
-	defer r.actionMu.Unlock()
-	return r.fakeRepository.ListPrioritySyncStates(ctx, u, w)
-}
-func (r actionCleanupConcurrentRepo) ListTargetActionStates(ctx context.Context, u, w string) ([]TargetActionState, error) {
-	r.actionMu.Lock()
-	defer r.actionMu.Unlock()
-	return r.fakeRepository.ListTargetActionStates(ctx, u, w)
-}
-
 func TestActionCheckpointCleanupRED4ConcurrentInventoryCopy(t *testing.T) {
 	s, repo, r, now, _ := actionCleanupHarness()
-	s.repo = actionCleanupConcurrentRepo{repo}
 	actionCleanupStore(repo, actionCleanupPair("2", *now))
 	r.entered = make(chan struct{}, 1)
 	r.release = make(chan struct{})

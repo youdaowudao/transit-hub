@@ -71,7 +71,7 @@ func TestPriorityTaskBUnmanagedStatusRestoresWithoutProbe(t *testing.T) {
 	}
 }
 
-func TestPriorityTaskBUnmanagedStatusKeepsConflictPendingAndIncomplete(t *testing.T) {
+func TestPriorityTaskBUnmanagedStatusAbandonsConflictButKeepsPendingAndIncomplete(t *testing.T) {
 	for _, reason := range []string{"conflict", "priority-pending", "target-pending", "incomplete"} {
 		t.Run(reason, func(t *testing.T) {
 			s, repo, actions, reader, p, st := taskBStatusRestoreFixture(RuleVersionLegacy, 1, 5)
@@ -92,8 +92,19 @@ func TestPriorityTaskBUnmanagedStatusKeepsConflictPendingAndIncomplete(t *testin
 			if len(actions.sub2APICalls) != 0 {
 				t.Fatalf("%s admitted restoration: %+v", reason, actions.sub2APICalls)
 			}
-			if _, ok := repo.targetActionStates["user1|ws1|"+st.TargetID]; !ok {
+			_, exists := repo.targetActionStates["user1|ws1|"+st.TargetID]
+			if reason == "conflict" {
+				// D1 replaces indefinite retention with atomic abandonment, without restoration.
+				if exists || len(repo.events) != 1 || repo.events[0].Result != "policy_unmanaged_abandoned" {
+					t.Fatalf("stored unmanaged conflict was not abandoned once: exists=%v events=%+v", exists, repo.events)
+				}
+				return
+			}
+			if !exists {
 				t.Fatal("unconfirmed checkpoint deleted")
+			}
+			if len(repo.events) != 0 {
+				t.Fatalf("%s fabricated an abandonment event: %+v", reason, repo.events)
 			}
 		})
 	}

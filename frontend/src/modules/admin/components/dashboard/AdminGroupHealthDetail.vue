@@ -54,6 +54,7 @@ import {
 } from '../../utils/connectionHealthMultiplier'
 
 const props = withDefaults(defineProps<{
+  focusedAccountIds?: string[]
   group: AdminGroupHealth
   workspacePlatform?: string
   hideUnmonitoredAccounts: boolean
@@ -65,6 +66,7 @@ const props = withDefaults(defineProps<{
   recentSummaryFailures?: string[]
   modelControlFailures?: string[]
 }>(), {
+  focusedAccountIds: () => [],
   quickProbePhases: () => ({}),
   quickProbeErrors: () => ({}),
   quickProbeSuccesses: () => ({}),
@@ -568,6 +570,39 @@ const sortedAccounts = computed(() => [...filteredAccounts.value].sort((first, s
     || first.targetId.localeCompare(second.targetId)
   return compareAccountsByName(first, second)
 }))
+const accountTableRef = ref<HTMLElement | null>(null)
+const focusedAccountSet = computed(() => new Set(props.focusedAccountIds))
+const isFocusedAccount = (account: AdminGroupAccount) => focusedAccountSet.value.has(account.id)
+const focusedAccountNotices = computed(() => {
+  if (props.group.accountsError || !props.focusedAccountIds.length) return []
+  const notices: string[] = []
+  const hidden = props.group.accounts.filter(account => isFocusedAccount(account) && shouldHideUnmonitored(account))
+  if (hidden.length) {
+    const names = hidden.map(account => account.name || account.id).join('、')
+    notices.push(`要找的账号「${names}」没有开启监控，被‘隐藏未监控’藏起来了。取消勾选分组标题右侧的‘隐藏未监控’就能看到；这只改本机显示，不会修改主站。`)
+  }
+  const missing = props.focusedAccountIds.filter(id => !props.group.accounts.some(account => account.id === id))
+  if (missing.length) {
+    const ids = missing.map(id => `账号编号 ${id}`).join('、')
+    notices.push(`这个分组里没有找到要找的账号（${ids}），可能已从这个主站分组移除，或资料还没更新。请点右上角‘刷新’；仍没有时，到分组倍率检查这条对接。`)
+  }
+  return notices
+})
+let hasAutoScrolled = false
+watch([() => props.group.id, () => JSON.stringify([...props.focusedAccountIds].sort())], () => {
+  hasAutoScrolled = false
+}, { flush: 'pre' })
+watch(
+  [() => props.group.id, () => JSON.stringify([...props.focusedAccountIds].sort()), () => sortedAccounts.value.find(isFocusedAccount)?.targetId, accountTableRef],
+  () => {
+    if (hasAutoScrolled) return
+    const row = accountTableRef.value?.querySelector<HTMLElement>('[data-focused-account]')
+    if (!row) return
+    row.scrollIntoView({ block: 'center' })
+    hasAutoScrolled = true
+  },
+  { flush: 'post' },
+)
 watch(() => sortedAccounts.value.map(account => account.targetId).join('\n'), () => emit('displayed-targets', sortedAccounts.value.map(account => account.targetId)), { immediate: true })
 
 const filteredModelHealth = (account: AdminGroupAccount) => {
@@ -773,6 +808,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
           {{ t(`${detailPrefix}.filters.clear`) }}
         </button>
       </div>
+      <p v-for="notice in focusedAccountNotices" :key="notice" role="status" data-account-focus-notice class="mb-3 rounded-lg bg-warning/10 px-4 py-3 text-sm text-warning">{{ notice }}</p>
       <div v-if="group.accountsError" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
         {{ readableMessage(group.accountsError) }}
       </div>
@@ -781,7 +817,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
         <p class="mt-3 text-sm text-muted-foreground">{{ t(`${detailPrefix}.empty`) }}</p>
       </div>
       <div v-else class="overflow-x-auto rounded-lg border border-border/60">
-        <table class="w-full min-w-[72rem] text-sm">
+        <table ref="accountTableRef" class="w-full min-w-[72rem] text-sm">
           <thead class="bg-surface/60 text-left text-xs text-muted-foreground">
             <tr>
               <th class="relative w-10 px-3 py-2.5 font-medium"><span class="sr-only">{{ t(`${detailPrefix}.columns.expand`) }}</span></th>
@@ -859,7 +895,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
               </td>
             </tr>
             <template v-else v-for="account in sortedAccounts" :key="account.targetId">
-              <tr class="border-t border-border/40 transition-colors hover:bg-surface/35">
+              <tr class="border-t border-border/40 transition-colors hover:bg-surface/35" :data-focused-account="isFocusedAccount(account) ? account.id : undefined" :class="isFocusedAccount(account) ? 'bg-primary/[0.10] outline outline-2 -outline-offset-2 outline-primary/70' : ''">
                 <td class="px-3 py-3">
                   <button
                     type="button"
@@ -873,7 +909,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                 </td>
                 <td class="px-3 py-3">
                   <div class="max-w-56">
-                    <p class="truncate font-medium text-foreground">{{ account.name || account.id }}</p>
+                    <p class="flex items-center gap-1 font-medium text-foreground"><span class="truncate">{{ account.name || account.id }}</span> <span v-if="isFocusedAccount(account)" class="inline-flex shrink-0 rounded-md border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary" title="从分组倍率跳转过来要找的账号；换到其他分组后标记消失。只是标记，不会修改主站。">要找的账号</span></p>
                     <AccountTierEditor
                       v-if="isSub2API(account)"
                       :target-id="account.targetId"

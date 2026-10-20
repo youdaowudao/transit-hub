@@ -63,9 +63,12 @@ func TestScopedSiteOptionsCountsReadsAndPropagatesCacheFailure(t *testing.T) {
 	}
 	for _, raw := range payload["items"].([]any) {
 		item := raw.(map[string]any)
-		// The approved account-consumption summary is the only additional field.
-		if len(item) != 3 || item["id"] == nil || item["name"] == nil {
-			t.Fatal("options added fields outside the approved account summary")
+		// Only the saved account summary and sanitized navigation URL extend identity.
+		if len(item) != 4 || item["id"] == nil || item["name"] == nil {
+			t.Fatal("options added fields outside the approved summary and navigation URL")
+		}
+		if baseURL, ok := item["baseUrl"].(string); !ok || baseURL != "" {
+			t.Fatal("options must include an empty navigation URL for sites without a saved URL")
 		}
 		summary, ok := item["consumption"].(map[string]any)
 		if !ok || summary["balance"] == nil || summary["rechargeRate"] == nil {

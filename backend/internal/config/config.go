@@ -14,7 +14,7 @@ const (
 	defaultPublicDir = "/app/public"
 	// 升级、回滚脚本的 read_app_version 和新版本检查都按行首读这一行；
 	// 不要改这一行的格式，否则已部署的旧版本收不到新版本提示。
-	defaultAppVersion = "V3.0.28"
+	defaultAppVersion = "V3.0.29"
 )
 
 type Config struct {

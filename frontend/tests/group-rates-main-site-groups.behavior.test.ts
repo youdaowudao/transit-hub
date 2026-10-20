@@ -288,7 +288,7 @@ describe('main-site groups result and lifecycle behavior', () => {
         const w = await open(); await click(w, '修改主站分组'); await click(w, '取消');
         await click(w, '取消对接'); expect(editor(w).text()).toContain('仅取消关联'); expect(editor(w).text()).toContain('删除账号和 Key');
         expect(editor(w).text()).not.toContain('保存主站分组'); await click(w, '取消');
-        const typeAction = row(w).findAll('button').find(b => b.attributes('aria-label')?.includes('修改'));
+        const typeAction = row(w).findAll('button').find(b => b.attributes('aria-label')?.includes('的分类'));
         expect(typeAction).toBeDefined(); await typeAction!.trigger('click'); await flushPromises();
         expect(editor(w).find('select').exists()).toBe(true); expect(editor(w).text()).not.toContain('保存主站分组'); expect(groupWrites()).toHaveLength(0);
     });

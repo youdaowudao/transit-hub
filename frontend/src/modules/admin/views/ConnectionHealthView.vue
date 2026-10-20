@@ -901,10 +901,11 @@ const siteName = (siteId: string): string => siteNameMap.value.get(siteId) ?? si
 
 type RefreshFailureMessage = {
   phase: 'siteSync' | 'multiplier' | 'mainGroups' | 'refresh'
-  reason: 'auth' | 'network' | 'invalidResponse' | 'request' | 'timeout' | 'queueTimeout' | 'requestTimeout' | 'connections' | 'unavailable' | 'disabled' | 'session' | 'updating' | 'cancelled' | 'stale'
+  reason: 'auth' | 'network' | 'invalidResponse' | 'request' | 'timeout' | 'queueTimeout' | 'requestTimeout' | 'connections' | 'unavailable' | 'disabled' | 'session' | 'updating' | 'cancelled' | 'stale' | 'internal'
 }
 
 const refreshFailureMessages: Record<string, RefreshFailureMessage> = {
+  refresh_internal_error: { phase: 'refresh', reason: 'internal' },
   site_sync_connections: { phase: 'siteSync', reason: 'connections' },
   site_sync_auth: { phase: 'siteSync', reason: 'auth' },
   site_sync_network: { phase: 'siteSync', reason: 'network' },

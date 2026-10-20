@@ -204,7 +204,8 @@ func TestMessagesC42M1ScheduledPreparationPersistsMessagesAndPassesExistingCheck
 	prepRepo := &c2SchedulePreparationRepository{questions: questions, configs: configs}
 	s, _ := c2SchedulePreparationFixture(t, reader, prepRepo)
 	s.accounts = fakeAdminAccountResolver{id: "w"}
-	prep := s.resolveQuestionAnswerScheduleExecution(ctx, *execution)
+	var prep questionAnswerSchedulePreparation
+	s.resolveQuestionAnswerScheduleExecution(ctx, *execution, &prep)
 	defer func() {
 		for _, reservation := range prep.reservations {
 			s.releaseQuestionAnswerTargetStart(reservation)

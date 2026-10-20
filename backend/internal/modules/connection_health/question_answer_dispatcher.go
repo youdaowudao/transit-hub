@@ -3,6 +3,7 @@ package connection_health
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 )
 
@@ -29,9 +30,7 @@ func (s *Service) questionAnswerStorageContext(parent context.Context) (context.
 func (s *Service) runQuestionAnswerDispatcher() {
 	defer close(s.questionAnswerDispatcherDone)
 	for {
-		s.questionAnswerMu.Lock()
-		key, run, record, ok := s.nextQuestionAnswerDispatchLocked()
-		s.questionAnswerMu.Unlock()
+		key, run, record, ok := s.nextQuestionAnswerDispatch()
 		if ok {
 			s.questionAnswerWG.Add(1)
 			go func() {
@@ -46,6 +45,18 @@ func (s *Service) runQuestionAnswerDispatcher() {
 		case <-s.questionAnswerWake:
 		}
 	}
+}
+
+func (s *Service) nextQuestionAnswerDispatch() (key string, run *activeQuestionAnswerBatch, record QuestionAnswerRecord, ok bool) {
+	defer func() {
+		if recover() != nil {
+			key, run, record, ok = "", nil, QuestionAnswerRecord{}, false
+			log.Printf("[connection-health] question selection panic recovered")
+		}
+	}()
+	s.questionAnswerMu.Lock()
+	defer s.questionAnswerMu.Unlock()
+	return s.nextQuestionAnswerDispatchLocked()
 }
 
 // nextQuestionAnswerDispatchLocked requires questionAnswerMu to be held by the caller.
@@ -81,6 +92,13 @@ func (s *Service) nextQuestionAnswerDispatchLocked() (string, *activeQuestionAns
 func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionAnswerBatch, record QuestionAnswerRecord) {
 	terminalDurable := false
 	defer func() { s.finishQuestionAnswerDispatch(key, run, terminalDurable) }()
+	defer func() {
+		if recover() != nil {
+			s.stopQuestionAnswerRunForInternalError(run)
+			terminalDurable = s.completeStoppedQuestionAnswerRecord(run, record)
+			log.Printf("[connection-health] question dispatch panic recovered")
+		}
+	}()
 
 	running, err := s.questionAnswers.MarkQuestionAnswerRunning(run.ctx, run.userID, run.batchID, record.ID)
 	if err != nil {
@@ -107,6 +125,7 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 		ttl = s.questionAnswerMessagesTTL
 	}
 	itemCtx, cancel := context.WithTimeout(run.ctx, ttl)
+	defer cancel()
 	result := s.questionAnswerHTTP.AskDetailed(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort), protocol)
 	itemErr := itemCtx.Err()
 	cancel()
@@ -167,17 +186,47 @@ func (s *Service) stopQuestionAnswerRunForStorage(run *activeQuestionAnswerBatch
 	run.cancel()
 	s.wakeQuestionAnswerDispatcher()
 	stopCtx, cancel := s.questionAnswerStorageContext(context.Background())
+	defer cancel()
 	_, _ = s.questionAnswers.StopPendingQuestionAnswerBatch(
 		stopCtx, run.userID, run.targetID, run.batchID, QuestionAnswerFailed, QuestionAnswerErrorStorage,
 	)
 	cancel()
 }
 
-func (s *Service) completeStoppedQuestionAnswerRecord(run *activeQuestionAnswerBatch, record QuestionAnswerRecord) bool {
+func (s *Service) stopQuestionAnswerRunForInternalError(run *activeQuestionAnswerBatch) {
+	s.questionAnswerMu.Lock()
+	firstStop := run.stopReason == ""
+	if firstStop {
+		run.stopReason = QuestionAnswerErrorInternal
+	}
+	s.questionAnswerMu.Unlock()
+	if !firstStop {
+		return
+	}
+	run.cancel()
+	s.wakeQuestionAnswerDispatcher()
+	stopCtx, cancel := s.questionAnswerStorageContext(context.Background())
+	defer cancel()
+	defer func() {
+		if recover() != nil {
+			// Finalization still owns the batch and retries the durable terminal.
+			log.Printf("[connection-health] internal-error batch stop could not be saved")
+		}
+	}()
+	_, _ = s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, run.userID, run.targetID, run.batchID, QuestionAnswerFailed, QuestionAnswerErrorInternal)
+}
+
+func (s *Service) completeStoppedQuestionAnswerRecord(run *activeQuestionAnswerBatch, record QuestionAnswerRecord) (durable bool) {
+	defer func() {
+		if recover() != nil {
+			log.Printf("[connection-health] stopped question completion panic recovered")
+		}
+	}()
 	s.questionAnswerMu.Lock()
 	status, errorType := questionAnswerRunFinalState(run, QuestionAnswerErrorStorage)
 	s.questionAnswerMu.Unlock()
 	completeCtx, cancel := s.questionAnswerStorageContext(context.Background())
+	defer cancel()
 	completed, err := s.questionAnswers.CompleteQuestionAnswer(completeCtx, run.userID, run.batchID, record.ID, QuestionAnswerCompletion{Status: status, ErrorType: errorType})
 	cancel()
 	return err == nil && completed
@@ -268,25 +317,54 @@ func questionAnswerChannelClosed(channel <-chan struct{}) bool {
 	}
 }
 
-func (s *Service) finalizeQuestionAnswerRun(key string, run *activeQuestionAnswerBatch) error {
+func (s *Service) finalizeQuestionAnswerRun(key string, run *activeQuestionAnswerBatch) (finalErr error) {
+	locked := false
+	var generation uint64
+	var settled chan struct{}
+	defer func() {
+		if recover() == nil {
+			return
+		}
+		if !locked {
+			s.questionAnswerMu.Lock()
+		}
+		s.ensureQuestionAnswerFinalizationLocked(run)
+		if generation == 0 {
+			generation = run.finalizeGeneration
+			settled = run.finalizeSettled
+		}
+		run.finalErr = errQuestionAnswerInternal
+		run.finalizeResults[generation] = errQuestionAnswerInternal
+		run.finalizing = false
+		if !questionAnswerChannelClosed(settled) {
+			close(settled)
+		}
+		s.questionAnswerMu.Unlock()
+		finalErr = errQuestionAnswerInternal
+		log.Printf("[connection-health] question finalization panic recovered")
+	}()
 	s.questionAnswerMu.Lock()
+	locked = true
 	s.ensureQuestionAnswerFinalizationLocked(run)
-	generation := run.finalizeGeneration
+	generation, settled = run.finalizeGeneration, run.finalizeSettled
 	status, errorType := questionAnswerRunFinalState(run, QuestionAnswerErrorStorage)
 	s.questionAnswerMu.Unlock()
+	locked = false
 
 	finalizeCtx, cancel := s.questionAnswerStorageContext(context.Background())
+	defer cancel()
 	_, err := s.questionAnswers.FinalizeQuestionAnswerBatch(finalizeCtx, run.userID, run.targetID, run.batchID, status, errorType)
 	cancel()
 
 	s.questionAnswerMu.Lock()
-	settled := run.finalizeSettled
+	locked = true
 	if err != nil {
 		run.finalErr = err
 		run.finalizeResults[generation] = err
 		run.finalizing = false
 		close(settled)
 		s.questionAnswerMu.Unlock()
+		locked = false
 		return err
 	}
 	run.finalErr = nil
@@ -298,6 +376,7 @@ func (s *Service) finalizeQuestionAnswerRun(key string, run *activeQuestionAnswe
 	close(run.done)
 	close(settled)
 	s.questionAnswerMu.Unlock()
+	locked = false
 	run.cancel()
 	s.wakeQuestionAnswerDispatcher()
 	return nil
@@ -314,6 +393,8 @@ func questionAnswerRunFinalState(run *activeQuestionAnswerBatch, fallback string
 		return QuestionAnswerCancelled, ""
 	case QuestionAnswerErrorServiceShutdown:
 		return QuestionAnswerFailed, QuestionAnswerErrorServiceShutdown
+	case QuestionAnswerErrorInternal:
+		return QuestionAnswerFailed, QuestionAnswerErrorInternal
 	default:
 		return QuestionAnswerFailed, QuestionAnswerErrorStorage
 	}

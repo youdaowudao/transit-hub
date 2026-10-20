@@ -1114,6 +1114,7 @@ export default {
           unknown: '刷新阶段未知',
         },
         failureReason: {
+          internal: '程序内部出错，本轮已结束并保留原列表，没有修改主站；请再点“刷新”，仍失败请查看服务日志',
           auth: '鉴权失败',
           network: '网络不可达',
           invalidResponse: '响应无效',
@@ -1190,6 +1191,7 @@ export default {
         sources: { manual: '手动测试', scheduled: '定时测试', run_now: '计划立即执行' },
         statuses: { pending: '等待执行', active: '执行中', completed: '已完成', partial: '部分完成', failed: '失败', skipped: '跳过', cancelled: '已终止' },
         reasons: {
+          internal_error: '测试程序内部出错，这个账号本次没有测试，没有修改主站；可以点“立即执行”重试。',
           preparation_cancelled: '本次准备已终止', execution_terminated: '本次执行已接受终止', model_discovery_failed: '本次模型发现失败', all_models_unavailable: '本次没有可执行模型', batch_request_limit: '单个账号的请求数（模型 × 题目 × 次数）超过 50 条', target_limit: '目标数量超过运行保护上限', all_accounts_missing: '所有指定账号已删除', account_not_found: '账号已删除', empty_scope: '当前选择范围为空',
           group_not_found: '选中分组已删除', group_deleted: '选中分组已删除', question_not_found: '题目已删除或禁用', question_unavailable: '题目已删除或禁用',
           test_configuration_unavailable: '库存或测试配置暂无法读取', test_configuration_conflict: '账号所属分组的测试配置冲突',
@@ -2061,6 +2063,7 @@ export default {
             emptyExcerpt: '这条记录没有保存上游原话。'
           },
           errorTypes: {
+            internal_error: '测试程序内部出错，本批次已停止，没有修改主站；可以重新发起测试。',
             network: '网络请求失败：连接没有建立，或者回答到一半断开了。可以稍后重测；一直失败时检查上游地址和网络。',
             rate_limited: '上游请求被限流。',
             auth: '上游鉴权失败。',

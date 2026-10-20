@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,6 +20,8 @@ const (
 	adminGroupsRefreshHeartbeatInterval = 30 * time.Second
 	adminGroupsRefreshTerminalRetention = 10 * time.Minute
 )
+
+var errAdminGroupsRefreshInternal = errors.New("admin groups refresh internal error")
 
 type adminGroupsRefreshMode string
 
@@ -238,8 +241,18 @@ func (s *Service) executeAdminGroupsRefreshRun(run *adminGroupsRefreshRun, userI
 	}
 	resultCh := make(chan pipelineResult, 1)
 	go func() {
-		result, err := s.adminGroupsRefreshResultWithRun(run.ctx, userID, run)
-		resultCh <- pipelineResult{result: result, err: err}
+		var result pipelineResult
+		defer func() {
+			panicked := recover() != nil
+			if panicked {
+				result.err = errAdminGroupsRefreshInternal
+			}
+			resultCh <- result
+			if panicked {
+				log.Printf("[connection-health] admin-groups refresh panic recovered")
+			}
+		}()
+		result.result, result.err = s.adminGroupsRefreshResultWithRun(run.ctx, userID, run)
 	}()
 
 	ticker := time.NewTicker(s.adminGroupsRefreshHeartbeatDuration())
@@ -252,6 +265,10 @@ func (s *Service) executeAdminGroupsRefreshRun(run *adminGroupsRefreshRun, userI
 				return
 			}
 			if result.err != nil {
+				if errors.Is(result.err, errAdminGroupsRefreshInternal) {
+					s.finishAdminGroupsRefreshRun(run, run.failureTerminal("refresh_internal_error"))
+					return
+				}
 				s.finishAdminGroupsRefreshRun(run, run.pipelineFailureTerminal())
 				return
 			}

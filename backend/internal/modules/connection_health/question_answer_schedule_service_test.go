@@ -104,7 +104,8 @@ func TestC2QuestionAnswerSchedulePreparationInventoryDeletionAndCompleteness(t *
 			execution := c2ScheduleExecutionFixture("accounts")
 			execution.ConfigSnapshot.Requested.Schedule.SelectedGroupIDs = nil
 			execution.ConfigSnapshot.Requested.Schedule.SelectedAccountTargetIDs = []string{"sub2api:ws1:a", "sub2api:ws1:b"}
-			prep := service.resolveQuestionAnswerScheduleExecution(context.Background(), execution)
+			var prep questionAnswerSchedulePreparation
+			service.resolveQuestionAnswerScheduleExecution(context.Background(), execution, &prep)
 			for _, reservation := range prep.reservations {
 				service.releaseQuestionAnswerTargetStart(reservation)
 			}
@@ -141,7 +142,8 @@ func TestC2QuestionAnswerSchedulePreparationUsesCompleteMembershipsWithoutMonito
 	reader := &c2ScheduleInventoryReader{fakePlatformGroupReader: fakePlatformGroupReader{groups: []upstream.AdminGroupInfo{{ID: "selected", Name: "selected"}, {ID: "outside", Name: "outside"}}, accountsByGrp: map[string][]upstream.AdminGroupAccountInfo{"selected": {{ID: "a", Priority: intPointer(1), Schedulable: boolPointer(false)}, {ID: "b"}}, "outside": {{ID: "a"}, {ID: "c"}}}, credByAccount: map[string]upstream.ProbeCredential{"a": {BaseURL: "https://fixture.invalid", Key: "fixture"}, "b": {BaseURL: "https://fixture.invalid", Key: "fixture"}}}}
 	repo := &c2SchedulePreparationRepository{questions: []TestQuestion{{ID: "question", Body: "Q", Enabled: true}}, configs: []GroupTestConfig{{AdminGroupID: "selected", Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10}, {AdminGroupID: "outside", Protocol: TestProtocolResponses, ProbeTimeoutSeconds: 10}}}
 	service, calls := c2SchedulePreparationFixture(t, reader, repo)
-	prep := service.resolveQuestionAnswerScheduleExecution(context.Background(), c2ScheduleExecutionFixture("groups"))
+	var prep questionAnswerSchedulePreparation
+	service.resolveQuestionAnswerScheduleExecution(context.Background(), c2ScheduleExecutionFixture("groups"), &prep)
 	for _, reservation := range prep.reservations {
 		service.releaseQuestionAnswerTargetStart(reservation)
 	}
@@ -169,7 +171,8 @@ func TestC2QuestionAnswerSchedulePreparationFreezesAllQuestionsAndProtocolsBefor
 		repo.configs[0].Protocol = TestProtocolChatCompletions
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"available"}]}`)), Request: request}, nil
 	})
-	prep := service.resolveQuestionAnswerScheduleExecution(context.Background(), c2ScheduleExecutionFixture("groups"))
+	var prep questionAnswerSchedulePreparation
+	service.resolveQuestionAnswerScheduleExecution(context.Background(), c2ScheduleExecutionFixture("groups"), &prep)
 	for _, reservation := range prep.reservations {
 		service.releaseQuestionAnswerTargetStart(reservation)
 	}

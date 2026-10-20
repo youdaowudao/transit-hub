@@ -113,7 +113,8 @@ func TestMessagesC45K1DefaultAgreesAcrossSixConfigurationEntries(t *testing.T) {
 				execution := c2ScheduleExecutionFixture("groups")
 				execution.ConfigSnapshot.Requested.Schedule.SelectedGroupIDs = []string{"g1"}
 				execution.ConfigSnapshot.Requested.Schedule.Models = []string{"available"}
-				prep := service.resolveQuestionAnswerScheduleExecution(context.Background(), execution)
+				var prep questionAnswerSchedulePreparation
+				service.resolveQuestionAnswerScheduleExecution(context.Background(), execution, &prep)
 				defer func() {
 					for _, reservation := range prep.reservations {
 						service.releaseQuestionAnswerTargetStart(reservation)

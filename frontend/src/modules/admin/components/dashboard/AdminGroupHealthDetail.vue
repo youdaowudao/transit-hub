@@ -95,6 +95,17 @@ const emit = defineEmits<{
 
 import { t, te } from '@/locales'
 const prefix = 'admin.connectionHealth'
+const longFailureDuration = (seconds: number): string =>
+  t(`${prefix}.longFailure.${seconds % 3600 === 0 ? 'hours' : 'minutes'}`, { value: seconds % 3600 === 0 ? seconds / 3600 : seconds / 60 })
+
+const longFailureExplanation = (model: AdminGroupAccount['modelHealth'][number]): string => {
+  if (!model.longFailure || !model.failingSince || !model.longFailureAfterSeconds || !model.longFailureIntervalSeconds || !model.longFailureRetry) return ''
+  return t(`${prefix}.longFailure.explanation`, {
+    since: formatConnectionHealthTime(model.failingSince),
+    after: longFailureDuration(model.longFailureAfterSeconds),
+    retry: t(`${prefix}.longFailure.${model.longFailureRetry}`, { interval: longFailureDuration(model.longFailureIntervalSeconds) }),
+  })
+}
 const detailPrefix = `${prefix}.groupDetail`
 const expandedTargetId = ref('')
 const hasUnreadQuestionAnswer = (account: AdminGroupAccount): boolean =>
@@ -1140,6 +1151,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                         <span class="font-medium text-destructive">{{ t(`${detailPrefix}.models.lastFailure`, { value: formatConnectionHealthTime(model.lastFailureAt) }) }}</span>
                         <span v-if="formatConnectionHealthElapsed(model.elapsedSeconds, model.lastFailureAt)" class="font-medium text-destructive">{{ t(`${detailPrefix}.models.elapsed`, { value: formatConnectionHealthElapsed(model.elapsedSeconds, model.lastFailureAt) }) }}</span>
                       </div>
+                      <p v-if="longFailureExplanation(model)" class="mt-1.5 whitespace-pre-wrap break-words text-xs text-muted-foreground">{{ longFailureExplanation(model) }}</p>
                       <div v-if="hasCurrentHealthFailure(model)" class="mt-1 whitespace-pre-wrap break-words text-xs text-destructive/80">
                         <p>{{ readableMessage(model.currentHealthResult?.errorKey || model.lastErrorKey) }}</p>
                         <p>{{ model.currentHealthResult?.errorDetail || model.lastErrorDetail }}</p>

@@ -62,6 +62,7 @@ func DefaultRulePreset() RulePreset {
 }
 func recommendedRulePreset() RulePreset {
 	preset := DefaultRulePreset()
+	preset.LongFailureIntervalSeconds = 86400
 	preset.DelayLineMs = map[string]int{"responses": 6000, "chat_completions": 6000}
 	return preset
 }

@@ -161,7 +161,8 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	notificationsRepository := notifications.NewRepository(db)
 	runStorageStartup(cfg, notificationsRepository.EnsureSchema)
 	upstreamRepository.SetRateNoticeWriter(notificationsRepository)
-	notifications.RegisterRoutes(server.mux, notifications.NewService(notificationsRepository))
+	notificationService := notifications.NewService(notificationsRepository)
+	notifications.RegisterRoutes(server.mux, notificationService)
 	admin_accounts.RegisterRoutes(server.mux, adminAccountsService)
 
 	// 注入机器人通知能力，供自动调价成功后发送通知。
@@ -210,6 +211,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		!cfg.APIOnly,
 	)
 	connHealthService.SetProbeGlobalConcurrency(cfg.ProbeGlobalConcurrency)
+	connHealthService.SetNoticePublisher(notificationService)
 	runStorageStartup(cfg, connHealthService.EnsureSchema)
 	connHealthService.SetAdminAccountResolver(adminAccountsService)
 	upstreamRepository.SetRateNoticeKeyAssignmentReader(connHealthService)

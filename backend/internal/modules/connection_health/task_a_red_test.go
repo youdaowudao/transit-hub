@@ -164,6 +164,10 @@ func TestTaskACadenceTable(t *testing.T) {
 			p.ProbeIntervalSeconds = 60
 			p.ContinueProbeWhenUnschedulable = true
 			p.UnschedulableProbeIntervalMinutes = 60
+			// Preserve the saved hourly preset covered by this cadence table.
+			preset := recommendedRulePreset()
+			preset.Kind, preset.LongFailureIntervalSeconds = PresetCustom, 3600
+			p.RulePreset = &preset
 			s := ConnectionHealthState{State: c.state, ConsecutiveFailures: 2, ConsecutiveSuccesses: c.successes, LastProbeAt: &last, CooldownUntil: c.cooldown}
 			taskASet(&s, "RuleVersion", "v2")
 			taskASet(&s, "RecheckPending", c.pending)

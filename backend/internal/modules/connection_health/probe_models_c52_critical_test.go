@@ -189,7 +189,7 @@ func TestProbeModelC43CNExecutionRechecksSelection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			jobs := f.service.collectAdminProbeJobsWithGroupsAndCache(t.Context(), policies, assignments, nil, nil, adminInventoryCache{})
+			jobs := f.service.collectAdminProbeJobsWithGroupsAndCache(t.Context(), policies, assignments, nil, nil, adminInventoryCache{}, nil)
 			if len(jobs) != 1 || len(jobs[0].dueSpecs) != 1 || jobs[0].dueSpecs[0].modelName != "B" {
 				t.Fatal("queued B", jobs)
 			}

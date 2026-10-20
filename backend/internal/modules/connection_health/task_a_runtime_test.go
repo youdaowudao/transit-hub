@@ -358,6 +358,10 @@ func TestTaskASchedulerSimulationSeventeenAndLongFailures(t *testing.T) {
 	p.Enabled = true
 	p.ProbeIntervalSeconds = 60
 	p.ContinueProbeWhenUnschedulable = true
+	// This simulation protects an explicitly saved hourly retry interval.
+	preset := recommendedRulePreset()
+	preset.Kind, preset.LongFailureIntervalSeconds = PresetCustom, 3600
+	p.RulePreset = &preset
 	states := make([]ConnectionHealthState, 28)
 	starts := make([][]time.Time, 28)
 	old := start.Add(-25 * time.Hour)

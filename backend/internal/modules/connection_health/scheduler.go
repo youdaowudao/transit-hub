@@ -335,7 +335,7 @@ func (s *Service) runSchedulerTick(ctx context.Context) {
 		return
 	}
 	s.restoreEmptySub2APIGroups(ctx, remainingTargetActionStates, inventoryCache)
-	jobs := s.collectAdminProbeJobsWithGroupsAndCache(ctx, policies, assignments, groupAssignments, exclusions, inventoryCache)
+	jobs := s.collectAdminProbeJobsWithGroupsAndCache(ctx, policies, assignments, groupAssignments, exclusions, inventoryCache, scan)
 	if len(jobs) == 0 {
 		return
 	}
@@ -612,10 +612,10 @@ func (s *Service) collectAdminProbeJobs(ctx context.Context, policies []Policy, 
 }
 
 func (s *Service) collectAdminProbeJobsWithGroups(ctx context.Context, policies []Policy, assignments []PolicyAssignment, groupAssignments []GroupPolicyAssignment, exclusions []GroupTargetExclusion) []adminProbeJob {
-	return s.collectAdminProbeJobsWithGroupsAndCache(ctx, policies, assignments, groupAssignments, exclusions, make(adminInventoryCache))
+	return s.collectAdminProbeJobsWithGroupsAndCache(ctx, policies, assignments, groupAssignments, exclusions, make(adminInventoryCache), nil)
 }
 
-func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, policies []Policy, assignments []PolicyAssignment, groupAssignments []GroupPolicyAssignment, exclusions []GroupTargetExclusion, inventoryCache adminInventoryCache) []adminProbeJob {
+func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, policies []Policy, assignments []PolicyAssignment, groupAssignments []GroupPolicyAssignment, exclusions []GroupTargetExclusion, inventoryCache adminInventoryCache, scan *schedulerScan) []adminProbeJob {
 	// 按 workspace 归拢策略。
 	type workspace struct {
 		userID         string
@@ -758,9 +758,6 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 			candidate.target.InventoryComplete = adminInventoryComplete(*inventory)
 			candidate.target.TestMemberships = inventoryTestMemberships(*inventory, candidate.target.AccountID)
 			candidate.target.TestConfiguration = ResolveGroupTestConfiguration(candidate.target.Platform, candidate.target.TestMemberships, candidate.target.InventoryComplete, testConfigs)
-			if !candidate.target.TestConfiguration.usable() {
-				continue
-			}
 			specs := candidateModelSpecsForPlatform(candidate.target.Models, candidate.policies, candidate.target.Platform, candidate.target.modelSource, true)
 			for index := range specs {
 				specs[index].policySources = candidate.policySources
@@ -771,16 +768,35 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 				}
 			}
 			available, _ := targetProbeAvailability(platform, candidate.account.BaseURL, len(specs))
+			if (scan == nil || platform != string(upstream.PlatformSub2API)) && (!candidate.target.TestConfiguration.usable() || !available) {
+				continue
+			}
+			states := make([]*ConnectionHealthState, len(specs))
+			decisions := make([]EffectiveProbeDecision, len(specs))
+			ready := make([]bool, len(specs))
+			for index, spec := range specs {
+				state, stateErr := s.repo.GetState(ctx, candidate.target.TargetID, spec.modelName)
+				if stateErr != nil {
+					log.Printf("[connection-health] get state failed target_id=%s model=%s err=%v", candidate.target.TargetID, spec.modelName, stateErr)
+					continue
+				}
+				states[index], ready[index] = state, true
+				decisions[index] = effectiveProbeDecisionForState(candidate.target, spec, spec.policies, state, now, nil)
+			}
+			s.collectLongFailureNotices(scan, ws.userID, ws.adminAccountID, candidate.target, specs, states, decisions, ready, now)
+			if !candidate.target.TestConfiguration.usable() {
+				continue
+			}
 			if !available {
 				continue
 			}
 			dueSpecs := make([]probeModelSpec, 0, len(specs))
-			for _, spec := range specs {
-				decision, stateOK := s.effectiveProbeDecisionForSpec(ctx, candidate.target, spec, spec.policies, now, nil)
-				if !stateOK || !decision.ContinueAutoProbe || decision.NextProbeAt == nil || now.Before(*decision.NextProbeAt) {
+			for index, spec := range specs {
+				decision := decisions[index]
+				if !ready[index] || !decision.ContinueAutoProbe || decision.NextProbeAt == nil || now.Before(*decision.NextProbeAt) {
 					continue
 				}
-				if state, stateErr := s.repo.GetState(ctx, candidate.target.TargetID, spec.modelName); stateErr == nil && state != nil {
+				if state := states[index]; state != nil {
 					spec.recheckPending = state.RecheckPending
 				}
 				dueSpecs = append(dueSpecs, spec)
@@ -839,9 +855,13 @@ func (s *Service) effectiveProbeDecisionForSpec(ctx context.Context, target Admi
 		log.Printf("[connection-health] get state failed target_id=%s model=%s err=%v", target.TargetID, spec.modelName, err)
 		return EffectiveProbeDecision{}, false
 	}
+	return effectiveProbeDecisionForState(target, spec, policies, state, now, budgetUsage), true
+}
+
+func effectiveProbeDecisionForState(target AdminProbeTarget, spec probeModelSpec, policies []Policy, state *ConnectionHealthState, now time.Time, budgetUsage map[string]int) EffectiveProbeDecision {
 	reuseProbeInterval := probeDecisionCanReuseInterval(state, probeDecisionKey(target, spec))
 	decisionState := probeDecisionStateForProtocol(state, target.TestConfiguration.Protocol)
-	return calculateEffectiveProbeDecisionWithBudgetAndReuse(policies, target.Schedulable, decisionState, now, budgetUsage, reuseProbeInterval), true
+	return calculateEffectiveProbeDecisionWithBudgetAndReuse(policies, target.Schedulable, decisionState, now, budgetUsage, reuseProbeInterval)
 }
 
 func policyWithID(policies []Policy, id string) (Policy, bool) {

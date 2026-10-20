@@ -1888,6 +1888,13 @@ func modelHealthForSpecs(byModel map[string]ConnectionHealthState, specs []probe
 		model.ElapsedSeconds = elapsedSince(model.LastFailureAt, model.LastProbeAt, now)
 		if target.Platform == string(upstream.PlatformSub2API) {
 			applyCurrentHealthProjection(&model, state, target.TestConfiguration)
+			if modelInLongFailure(&state, target.TestConfiguration.Protocol, target.TestConfiguration.usable(), spec.policy, now) {
+				preset := RulePresetForPolicy(spec.policy)
+				model.LongFailure = true
+				model.LongFailureRetry = autoProbeRetryKind(target.TestConfiguration.usable(), decision)
+				model.LongFailureAfterSeconds = preset.LongFailureAfterSeconds
+				model.LongFailureIntervalSeconds = preset.LongFailureIntervalSeconds
+			}
 		}
 		models = append(models, model)
 	}

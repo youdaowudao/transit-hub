@@ -17,6 +17,7 @@ type schedulerScan struct {
 	priorityStates     []PrioritySyncState
 	targetActionStates []TargetActionState
 	rules              workspaceRuleSnapshot
+	notices            []longFailureNoticeCandidate
 }
 
 func (s *Service) finishSchedulerScan(ctx context.Context, scan *schedulerScan) {
@@ -25,6 +26,7 @@ func (s *Service) finishSchedulerScan(ctx context.Context, scan *schedulerScan) 
 	}
 	ctx = context.WithValue(ctx, workspaceRuleSnapshotKey{}, scan.rules)
 	s.cleanupUnmonitoredHealthStates(ctx, scan)
+	s.publishLongFailureNotices(ctx, scan)
 }
 
 func (s *Service) cleanupUnmonitoredHealthStates(ctx context.Context, scan *schedulerScan) {

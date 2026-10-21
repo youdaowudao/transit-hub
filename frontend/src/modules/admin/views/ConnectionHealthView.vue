@@ -46,6 +46,7 @@ import type { OwnGroupOption } from '../components/dashboard/PolicyConfigDrawer.
 import ProbePolicyListDialog from '../components/dashboard/ProbePolicyListDialog.vue'
 import TargetPolicyAssignmentDialog from '../components/dashboard/TargetPolicyAssignmentDialog.vue'
 import type {
+  AccountFocusLabel,
   AccountTierResult,
   AdminGroupAccount,
   AdminGroupHealth,
@@ -127,10 +128,17 @@ const siteNameMap = ref<Map<string, string>>(new Map())
 // 常驻提示区：已对接站点最近一次分组倍率读取未确认。独立于站点名称读取和"辅助读取失败"。
 type BoundSiteRateState =
   | { kind: 'idle' }
-  | { kind: 'ready'; sites: UpstreamSiteResponse[]; boundIds: Set<string> }
-  | { kind: 'failed'; failedSites: boolean; failedConnections: boolean; reasons: string[] }
+  | { kind: 'ready'; sites: UpstreamSiteResponse[]; boundIds: Set<string>; accountLabels: Record<string, AccountFocusLabel> }
+  | { kind: 'failed'; failedSites: boolean; failedConnections: boolean; reasons: string[]; accountLabels: Record<string, AccountFocusLabel> }
 const boundSiteRateState = ref<BoundSiteRateState>({ kind: 'idle' })
 let boundSiteRateSeq = 0
+const focusedAccountLabels = computed<Record<string, AccountFocusLabel>>(() => {
+  const savedLabels = boundSiteRateState.value.kind === 'idle' ? {} : boundSiteRateState.value.accountLabels
+  return Object.fromEntries((focusAccountTarget.value?.accountIds ?? []).map(id => {
+    const current = adminGroups.value.flatMap(group => group.accounts).find(account => account.id === id)
+    return [id, { name: current?.name?.trim() || savedLabels[id]?.name || '', siteNames: savedLabels[id]?.siteNames ?? [] }]
+  }))
+})
 const preferences = ref<ConnectionHealthPreferences>(createDefaultConnectionHealthPreferences())
 const groupManagerOpen = ref(false)
 const prioritySyncStatus = ref<PrioritySyncStatus | null>(null)
@@ -628,6 +636,19 @@ const loadBoundSiteRateStatus = async (): Promise<void> => {
   if (seq !== boundSiteRateSeq) return
   const sites = sitesResult.status === 'fulfilled' && Array.isArray(sitesResult.value) ? sitesResult.value : null
   const connections = connectionsResult.status === 'fulfilled' && Array.isArray(connectionsResult.value) ? connectionsResult.value : null
+  const accountLabels: Record<string, AccountFocusLabel> = Object.create(null)
+  for (const connection of connections ?? []) {
+    if (connection?.adminPlatform && connection.adminPlatform !== 'sub2api') continue
+    const id = typeof connection?.adminAccountId === 'string' ? connection.adminAccountId.trim() : ''
+    if (!id) continue
+    const name = typeof connection.adminAccountName === 'string' ? connection.adminAccountName.trim() : ''
+    const site = sites?.find(site => site?.id === connection.upstreamSiteId)
+    const siteName = (typeof site?.name === 'string' ? site.name.trim() : '')
+      || (typeof connection.siteName === 'string' ? connection.siteName.trim() : '')
+    const label = accountLabels[id] ??= { name: '', siteNames: [] }
+    if (!label.name) label.name = name
+    if (siteName && !label.siteNames.includes(siteName)) label.siteNames.push(siteName)
+  }
   if (sites && connections) {
     const boundIds = new Set<string>()
     for (const connection of connections) {
@@ -636,14 +657,14 @@ const loadBoundSiteRateStatus = async (): Promise<void> => {
       const siteId = typeof connection?.upstreamSiteId === 'string' ? connection.upstreamSiteId.trim() : ''
       if (siteId) boundIds.add(siteId)
     }
-    boundSiteRateState.value = { kind: 'ready', sites, boundIds }
+    boundSiteRateState.value = { kind: 'ready', sites, boundIds, accountLabels }
     return
   }
   const unknown = t('admin.connectionHealth.boundSiteRateStatus.reasonUnknown')
   const reasons: string[] = []
   if (!sites) reasons.push(sitesResult.status === 'rejected' ? boundSiteRateFailureReason(sitesResult.reason) : unknown)
   if (!connections) reasons.push(connectionsResult.status === 'rejected' ? boundSiteRateFailureReason(connectionsResult.reason) : unknown)
-  boundSiteRateState.value = { kind: 'failed', failedSites: !sites, failedConnections: !connections, reasons }
+  boundSiteRateState.value = { kind: 'failed', failedSites: !sites, failedConnections: !connections, reasons, accountLabels }
 }
 
 const boundSiteRateTime = (value: unknown): string => {
@@ -1716,6 +1737,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           :key="selectedGroup.id"
           :group="selectedGroup"
           :focused-account-ids="focusAccountTarget?.groupId === selectedGroup.id ? focusAccountTarget.accountIds : []"
+          :focused-account-labels="focusAccountTarget?.groupId === selectedGroup.id ? focusedAccountLabels : {}"
           :hide-unmonitored-accounts="preferences.hideUnmonitoredAccounts"
           :question-answer-unread-target-ids="preferences.questionAnswerUnreadTargetIds"
           :action-loading="isActionLoading"

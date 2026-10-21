@@ -228,6 +228,11 @@ export interface AccountManagementResult {
   errorKey?: string
 }
 
+export interface AccountFocusLabel {
+  name: string
+  siteNames: string[]
+}
+
 export interface AdminGroupAccount {
   modelControlNoActiveProbe?: boolean
   modelFloorLastSources?: Array<{ groupId: string; groupName: string; modelKey: string }>

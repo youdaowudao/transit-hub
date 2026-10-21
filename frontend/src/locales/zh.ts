@@ -1114,6 +1114,7 @@ export default {
           unknown: '刷新阶段未知',
         },
         failureReason: {
+          internal: '程序内部出错，本轮已结束并保留原列表，没有修改主站；请再点“刷新”，仍失败请查看服务日志',
           auth: '鉴权失败',
           network: '网络不可达',
           invalidResponse: '响应无效',
@@ -1190,6 +1191,7 @@ export default {
         sources: { manual: '手动测试', scheduled: '定时测试', run_now: '计划立即执行' },
         statuses: { pending: '等待执行', active: '执行中', completed: '已完成', partial: '部分完成', failed: '失败', skipped: '跳过', cancelled: '已终止' },
         reasons: {
+          internal_error: '测试程序内部出错，这个账号本次没有测试，没有修改主站；可以点“立即执行”重试。',
           preparation_cancelled: '本次准备已终止', execution_terminated: '本次执行已接受终止', model_discovery_failed: '本次模型发现失败', all_models_unavailable: '本次没有可执行模型', batch_request_limit: '单个账号的请求数（模型 × 题目 × 次数）超过 50 条', target_limit: '目标数量超过运行保护上限', all_accounts_missing: '所有指定账号已删除', account_not_found: '账号已删除', empty_scope: '当前选择范围为空',
           group_not_found: '选中分组已删除', group_deleted: '选中分组已删除', question_not_found: '题目已删除或禁用', question_unavailable: '题目已删除或禁用',
           test_configuration_unavailable: '库存或测试配置暂无法读取', test_configuration_conflict: '账号所属分组的测试配置冲突',
@@ -1624,6 +1626,7 @@ export default {
         manual_disable: '人工禁用',
         manual_restore: '人工恢复',
         policy_unmanaged_restore: '策略已解绑，恢复上游原始状态',
+        policy_unmanaged_abandoned: '不再管理：主站已被人工改动，保持现状，没有修改主站',
         schedulable_user_action_succeeded: '用户调度动作成功',
         schedulable_user_action_failed: '用户调度动作失败',
         account_edit_success: '账号修改已确认成功',
@@ -1717,16 +1720,25 @@ export default {
         sub2apiSchedulableDisabled: '用户已关闭 Sub2API 主站调度',
         sub2apiSchedulableEnableFailed: '用户恢复 Sub2API 主站调度失败',
         sub2apiSchedulableDisableFailed: '用户关闭 Sub2API 主站调度失败',
-        skippedUpstreamScheduling: '主站调度关闭，未执行自动远端动作',
+        skippedUpstreamScheduling: '主站调度关闭，未执行自动关停',
         newapiDisabled: 'NewAPI channel 已禁用',
         newapiUpdateFailed: 'NewAPI channel 权重或状态更新失败',
         newapiWeight: 'NewAPI channel 权重已调整为 {weight}',
         other: '{action}'
       },
+      longFailure: {
+        explanation: '从 {since} 起连续失败超过 {after}。{retry}',
+        hours: '{value} 小时',
+        minutes: '{value} 分钟',
+        continuing: '系统已改为每 {interval} 自动试一次，成功后自动恢复正常探活。请检查上游 Key 或账号，修好后可在分组健康点“一键正式探活”立即验证。',
+        config_blocked: '因为分组测试配置冲突或无法确认，系统目前无法探活，也不会自动恢复。请到分组设置把这个账号所在各分组的测试协议和超时统一，未被禁止探活的模型才会继续自动探活。若模型显示“健康已禁用”，请联系管理员核查该模型的禁用记录；正式探活不能解除禁用。',
+        scheduling_blocked: '因为主站调度已关闭、且策略设为调度关闭时不继续探活，系统目前不会自动探活。请在分组健康检查模型状态：若有模型显示“健康已禁用”，请先联系管理员核查禁用记录，正式探活不能解除禁用；否则可点“一键正式探活”验证。仍处于关停状态的模型要按各自预设要求连续成功，全部受控模型恢复健康后，账号才会改回原状态；调度开关仍关闭，要接收请求请在主站手动打开。',
+      },
       probeBlockedReasons: {
         probe_interval: '探活间隔未到',
         cooldown: '健康冷却中',
         failure_backoff: '连续失败退避中',
+        long_failure: '长期失败，按长期间隔自动重试',
         health_disabled: '健康已禁用',
         upstream_scheduling_disabled: '主站调度关闭且策略停止自动探活',
         daily_probe_budget_exhausted: '当日探活预算已耗尽',
@@ -1849,7 +1861,7 @@ export default {
             },
             dueCheck: {
               title: '4. 到期判断',
-              description: '后端每 30 秒检查到期任务。新规则下第一次失败标为疑似，下一轮优先复测一次；正常、疑似和降档按正常间隔，关停后按预设的冷却与失败间隔。达到长期失败时长的账号按长期失败间隔。主站调度开关关闭的账号还需满足策略的关闭调度间隔。旧规则保留失败退避。'
+              description: '后端每 30 秒检查到期任务。新规则下第一次失败标为疑似，下一轮优先复测一次；正常、疑似和降档按正常间隔，关停后按预设的冷却与失败间隔。达到长期失败时长的账号按长期失败间隔（推荐 24 小时）自动重试，并发出站内提醒；修好后可点“一键正式探活”立即验证。主站调度关闭时，系统仍会把自己关停、已恢复健康的账号改回原状态，但从不改动调度开关，也不会在调度关闭期间关停账号。主站调度开关关闭的账号还需满足策略的关闭调度间隔。旧规则保留失败退避。'
             },
             budget: {
               title: '5. 预算规则',
@@ -2061,6 +2073,7 @@ export default {
             emptyExcerpt: '这条记录没有保存上游原话。'
           },
           errorTypes: {
+            internal_error: '测试程序内部出错，本批次已停止，没有修改主站；可以重新发起测试。',
             network: '网络请求失败：连接没有建立，或者回答到一半断开了。可以稍后重测；一直失败时检查上游地址和网络。',
             rate_limited: '上游请求被限流。',
             auth: '上游鉴权失败。',

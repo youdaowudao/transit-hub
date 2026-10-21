@@ -993,7 +993,7 @@ func writeError(w http.ResponseWriter, err error) {
 		if requestErr == requestError(ErrorSub2APIGroupLastModelSource) || requestErr == requestError(ErrorSub2APIGroupLastUsable) || requestErr == requestError(ErrorSub2APIInventoryIncomplete) {
 			status = http.StatusConflict
 		}
-		if requestErr == requestError(ErrorQuestionAnswerStorage) {
+		if requestErr == requestError(ErrorQuestionAnswerStorage) || requestErr == requestError(ErrorQuestionAnswerInternal) {
 			status = http.StatusInternalServerError
 		}
 		httpjson.WriteError(w, status, requestErr.Error())

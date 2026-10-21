@@ -255,12 +255,12 @@ func (f *fakeRepository) ClaimRemoteAction(ctx context.Context, claim RemoteActi
 			return false, ErrRemoteActionEvidenceChanged
 		}
 		for _, model := range claim.Guard.Models {
-			state, exists := f.states[claim.TargetID][model]
-			if !exists || !healthEvidenceMatches(state, current.Protocol) {
+			state, _ := f.GetState(ctx, claim.TargetID, model)
+			if state == nil || !healthEvidenceMatches(*state, current.Protocol) {
 				return false, ErrRemoteActionEvidenceChanged
 			}
 			for _, expected := range claim.Guard.ExpectedStates {
-				if expected.ModelName == model && !sameRemoteHealthDecisionState(state, expected) {
+				if expected.ModelName == model && !sameRemoteHealthDecisionState(*state, expected) {
 					return false, ErrRemoteActionEvidenceChanged
 				}
 			}

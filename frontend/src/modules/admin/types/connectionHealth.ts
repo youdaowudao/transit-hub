@@ -61,6 +61,10 @@ export interface ModelHealth {
   firstEventMs?: number | null
   recheckPending?: boolean
   failingSince?: string | null
+  longFailure?: boolean
+  longFailureRetry?: 'continuing' | 'config_blocked' | 'scheduling_blocked'
+  longFailureAfterSeconds?: number
+  longFailureIntervalSeconds?: number
   credentialUnavailableAt?: string | null
   credentialUnavailableReason?: string
   requestPhase?: 'waiting_headers' | 'reading_body' | string

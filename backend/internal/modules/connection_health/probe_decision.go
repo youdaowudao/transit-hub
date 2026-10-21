@@ -9,6 +9,7 @@ const (
 	ProbeBlockedInterval                   = "probe_interval"
 	ProbeBlockedCooldown                   = "cooldown"
 	ProbeBlockedFailureBackoff             = "failure_backoff"
+	ProbeBlockedLongFailure                = "long_failure"
 	ProbeBlockedHealthDisabled             = "health_disabled"
 	ProbeBlockedUpstreamSchedulingDisabled = "upstream_scheduling_disabled"
 	ProbeBlockedDailyBudget                = "daily_probe_budget_exhausted"
@@ -230,7 +231,7 @@ func applyLongFailureCadence(state *ConnectionHealthState, judgment Policy, now,
 		if last := lastProbeAttemptAt(state); last != nil {
 			floor := last.Add(time.Duration(RulePresetForPolicy(judgment).LongFailureIntervalSeconds) * time.Second)
 			if floor.After(next) {
-				return floor.UTC(), ProbeBlockedFailureBackoff
+				return floor.UTC(), ProbeBlockedLongFailure
 			}
 		}
 	}

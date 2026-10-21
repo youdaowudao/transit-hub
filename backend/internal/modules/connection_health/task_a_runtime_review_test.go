@@ -127,6 +127,12 @@ func TestTaskARuntimeReviewModelProjectionIgnoresOnlyForeignFailureOrigin(t *tes
 		for _, sameProtocol := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/same=%v", version, sameProtocol), func(t *testing.T) {
 				p := Policy{ID: "p", RuleVersion: version, ProbeIntervalSeconds: 60, Enabled: true}
+				if version == RuleVersionV2 {
+					// The existing projection contract also applies to saved hourly presets.
+					preset := recommendedRulePreset()
+					preset.Kind, preset.LongFailureIntervalSeconds = PresetCustom, 3600
+					p.RulePreset = &preset
+				}
 				target := AdminProbeTarget{TargetID: "sub2api:ws1:a", Platform: "sub2api", TestConfiguration: defaultTestConfiguration(), Schedulable: boolPointer(true)}
 				target.TestConfiguration.Protocol = TestProtocolResponses
 				spec := probeModelSpec{modelName: "m", policy: p, policies: []Policy{p}}

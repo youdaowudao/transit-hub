@@ -90,7 +90,7 @@ func (s *Service) runQuestionAnswerScheduleCoordinator() {
 	defer ticker.Stop()
 	defer close(s.questionAnswerScheduleDone)
 	for {
-		if err := s.reconcileQuestionAnswerScheduleExecutions(s.questionAnswerScheduleCtx); err != nil && s.questionAnswerScheduleCtx.Err() == nil {
+		if err := s.reconcileQuestionAnswerScheduleExecutionsSafely(s.questionAnswerScheduleCtx); err != nil && s.questionAnswerScheduleCtx.Err() == nil {
 			log.Printf("[question-answer-schedules] reconciliation failed: %v", err)
 		}
 		select {
@@ -110,6 +110,15 @@ func (s *Service) runQuestionAnswerScheduleCoordinator() {
 		case <-s.questionAnswerScheduleWake:
 		}
 	}
+}
+
+func (s *Service) reconcileQuestionAnswerScheduleExecutionsSafely(ctx context.Context) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errQuestionAnswerInternal
+		}
+	}()
+	return s.reconcileQuestionAnswerScheduleExecutions(ctx)
 }
 
 func (s *Service) questionAnswerScheduleHandleSnapshot() []*questionAnswerScheduleHandle {
@@ -220,9 +229,11 @@ func (s *Service) reconcileQuestionAnswerScheduleExecutions(ctx context.Context)
 	for _, workspace := range workspaces {
 		for {
 			lock := s.questionAnswerScheduleWorkspaceLock(workspace.UserID, workspace.AdminAccountID)
-			lock.Lock()
-			execution, err := s.questionAnswerSchedules.ClaimNextQuestionAnswerScheduleExecution(ctx, workspace.UserID, workspace.AdminAccountID, s.scheduleNow)
-			lock.Unlock()
+			execution, err := func() (*QuestionAnswerScheduleExecution, error) {
+				lock.Lock()
+				defer lock.Unlock()
+				return s.questionAnswerSchedules.ClaimNextQuestionAnswerScheduleExecution(ctx, workspace.UserID, workspace.AdminAccountID, s.scheduleNow)
+			}()
 			if err != nil {
 				errs = append(errs, err)
 				break
@@ -242,34 +253,49 @@ func (s *Service) reconcileQuestionAnswerScheduleExecutions(ctx context.Context)
 func (s *Service) launchQuestionAnswerSchedulePreparation(handle *questionAnswerScheduleHandle) {
 	handle.prepareDone = make(chan struct{})
 	go func() {
-		result := s.resolveQuestionAnswerScheduleExecution(handle.ctx, handle.execution)
-		handle.preparation = result
-		close(handle.prepareDone)
-		s.wakeQuestionAnswerScheduleCoordinator()
+		var result questionAnswerSchedulePreparation
+		defer func() {
+			panicked := recover() != nil
+			if panicked {
+				for _, reservation := range result.reservations {
+					s.releaseQuestionAnswerTargetStart(reservation)
+				}
+				result.outcome = QuestionAnswerSchedulePreparationOutcome{Status: "failed", Reason: QuestionAnswerErrorInternal}
+			}
+			handle.preparation = result
+			close(handle.prepareDone)
+			s.wakeQuestionAnswerScheduleCoordinator()
+			if panicked {
+				log.Printf("[question-answer-schedules] preparation panic recovered")
+			}
+		}()
+		s.resolveQuestionAnswerScheduleExecution(handle.ctx, handle.execution, &result)
 	}()
 }
 
-func (s *Service) resolveQuestionAnswerScheduleExecution(ctx context.Context, execution QuestionAnswerScheduleExecution) questionAnswerSchedulePreparation {
-	result := questionAnswerSchedulePreparation{reservations: map[string]*questionAnswerTargetStart{}, credentials: map[string]upstream.ProbeCredential{}}
-	fail := func(reason, block string) questionAnswerSchedulePreparation {
+func (s *Service) resolveQuestionAnswerScheduleExecution(ctx context.Context, execution QuestionAnswerScheduleExecution, result *questionAnswerSchedulePreparation) {
+	*result = questionAnswerSchedulePreparation{reservations: map[string]*questionAnswerTargetStart{}, credentials: map[string]upstream.ProbeCredential{}}
+	fail := func(reason, block string) {
 		result.outcome = QuestionAnswerSchedulePreparationOutcome{Status: "failed", Reason: reason, BlockedReason: block}
-		return result
 	}
 	requested := execution.ConfigSnapshot.Requested
 	config := requested.Schedule
 	inventory, err := s.resolveQuestionAnswerScheduleTargets(ctx, execution.UserID, execution.AdminAccountID, config)
 	if err != nil {
-		return fail("test_configuration_unavailable", "")
+		fail("test_configuration_unavailable", "")
+		return
 	}
 	if inventory.blockedReason != "" {
-		return fail(inventory.blockedReason, inventory.blockedReason)
+		fail(inventory.blockedReason, inventory.blockedReason)
+		return
 	}
 	targets := make([]QuestionAnswerScheduleExecutionTarget, 0, len(inventory.preview))
 	now := s.scheduleNow()
 	for _, entry := range inventory.preview {
 		id, err := newID()
 		if err != nil {
-			return fail("storage_error", "")
+			fail("storage_error", "")
+			return
 		}
 		name := entry.AccountName
 		if entry.Missing {
@@ -293,21 +319,24 @@ func (s *Service) resolveQuestionAnswerScheduleExecution(ctx context.Context, ex
 			missing = append(missing, target.TargetID)
 		}
 		result.outcome = QuestionAnswerSchedulePreparationOutcome{Status: "skipped", Reason: "all_accounts_missing", BlockedReason: "all_accounts_missing", Resolved: &QuestionAnswerScheduleResolved{Questions: []TestQuestion{}, ResolvedAt: now, MissingTargetIDs: missing}, Targets: targets}
-		return result
+		return
 	}
 	if len(targets) == 0 {
 		result.outcome = QuestionAnswerSchedulePreparationOutcome{Status: "skipped", Reason: "empty_scope"}
-		return result
+		return
 	}
 	questions, configs, err := s.questionAnswerSchedules.ReadQuestionAnswerSchedulePreparationConfiguration(ctx, execution.UserID, execution.AdminAccountID, config.QuestionIDs)
 	if err != nil {
 		if errors.Is(err, errQuestionAnswerUnavailable) {
-			return fail("question_unavailable", "question_unavailable")
+			fail("question_unavailable", "question_unavailable")
+			return
 		}
-		return fail("test_configuration_unavailable", "")
+		fail("test_configuration_unavailable", "")
+		return
 	}
 	if len(questions) != len(config.QuestionIDs) {
-		return fail("question_unavailable", "question_unavailable")
+		fail("question_unavailable", "question_unavailable")
+		return
 	}
 	questions = append([]TestQuestion{}, questions...)
 	for i := range questions {
@@ -334,7 +363,8 @@ func (s *Service) resolveQuestionAnswerScheduleExecution(ctx context.Context, ex
 			continue
 		}
 		if ctx.Err() != nil {
-			return fail("preparation_cancelled", "")
+			fail("preparation_cancelled", "")
+			return
 		}
 		reservation, err := s.reserveQuestionAnswerTargetStart(ctx, execution.UserID, target.TargetID, target.ID)
 		if err != nil {
@@ -381,7 +411,6 @@ func (s *Service) resolveQuestionAnswerScheduleExecution(ctx context.Context, ex
 		}
 	}
 	result.outcome = QuestionAnswerSchedulePreparationOutcome{Resolved: &QuestionAnswerScheduleResolved{Questions: questions, ResolvedAt: s.scheduleNow(), MissingTargetIDs: missingTargetIDs}, Targets: targets}
-	return result
 }
 
 func (s *Service) releaseQuestionAnswerScheduleReservations(handle *questionAnswerScheduleHandle) {
@@ -411,37 +440,61 @@ func (s *Service) launchQuestionAnswerScheduleBuild(handle *questionAnswerSchedu
 			if handle.ctx.Err() != nil {
 				return
 			}
-			reservation := handle.preparation.reservations[target.TargetID]
-			cred, ready := handle.preparation.credentials[target.TargetID]
-			var err error
-			if reservation == nil {
-				reservation, err = s.reserveQuestionAnswerTargetStart(handle.ctx, execution.UserID, target.TargetID, target.ID)
-				if err != nil {
-					s.failQuestionAnswerScheduleBuildTarget(handle, execution, target, nil, "target_busy")
-					continue
-				}
-			}
-			if !ready {
-				// Recovery obtains credentials only. Frozen memberships/protocol/questions
-				// and discovered models are never replaced by present-day configuration.
-				cred, err = s.resolveQuestionAnswerScheduleRecoveryCredential(reservation.ctx, execution, target)
-				if err != nil {
-					s.failQuestionAnswerScheduleBuildTarget(handle, execution, target, reservation, "credential_unavailable")
-					continue
-				}
-			}
-			_, err = s.startQuestionAnswerBatchCore(reservation, cred, func(ctx context.Context) ([]QuestionAnswerRecord, bool, error) {
-				return s.questionAnswerSchedules.CreateScheduledQuestionAnswerBatch(ctx, execution.UserID, execution.AdminAccountID, execution.ID, target.TargetID, target.ID)
-			})
-			s.releaseQuestionAnswerTargetStart(reservation)
-			if err != nil {
-				s.failQuestionAnswerScheduleBuildTarget(handle, execution, target, nil, "batch_creation_failed")
-			}
+			s.buildQuestionAnswerScheduleTarget(handle, execution, target)
 		}
 	}()
 }
+
+func (s *Service) buildQuestionAnswerScheduleTarget(handle *questionAnswerScheduleHandle, execution QuestionAnswerScheduleExecution, target QuestionAnswerScheduleExecutionTarget) {
+	reservation := handle.preparation.reservations[target.TargetID]
+	enteredCore := false
+	defer func() {
+		if recover() != nil {
+			if !enteredCore {
+				s.failQuestionAnswerScheduleBuildTarget(handle, execution, target, reservation, QuestionAnswerErrorInternal)
+			}
+			log.Printf("[question-answer-schedules] target creation panic recovered")
+		}
+	}()
+	cred, ready := handle.preparation.credentials[target.TargetID]
+	var err error
+	if reservation == nil {
+		reservation, err = s.reserveQuestionAnswerTargetStart(handle.ctx, execution.UserID, target.TargetID, target.ID)
+		if err != nil {
+			s.failQuestionAnswerScheduleBuildTarget(handle, execution, target, nil, "target_busy")
+			return
+		}
+	}
+	defer s.releaseQuestionAnswerTargetStart(reservation)
+	if !ready {
+		// Recovery obtains credentials only. Frozen memberships/protocol/questions
+		// and discovered models are never replaced by present-day configuration.
+		cred, err = s.resolveQuestionAnswerScheduleRecoveryCredential(reservation.ctx, execution, target)
+		if err != nil {
+			s.failQuestionAnswerScheduleBuildTarget(handle, execution, target, reservation, "credential_unavailable")
+			return
+		}
+	}
+	enteredCore = true
+	_, err = s.startQuestionAnswerBatchCore(reservation, cred, func(ctx context.Context) ([]QuestionAnswerRecord, bool, error) {
+		return s.questionAnswerSchedules.CreateScheduledQuestionAnswerBatch(ctx, execution.UserID, execution.AdminAccountID, execution.ID, target.TargetID, target.ID)
+	})
+	if err != nil {
+		reason := "batch_creation_failed"
+		if errors.Is(err, errQuestionAnswerInternal) {
+			reason = QuestionAnswerErrorInternal
+		}
+		s.failQuestionAnswerScheduleBuildTarget(handle, execution, target, nil, reason)
+	}
+}
 func (s *Service) failQuestionAnswerScheduleBuildTarget(handle *questionAnswerScheduleHandle, execution QuestionAnswerScheduleExecution, target QuestionAnswerScheduleExecutionTarget, reservation *questionAnswerTargetStart, reason string) {
 	s.releaseQuestionAnswerTargetStart(reservation)
+	defer func() {
+		if recover() != nil {
+			handle.targetFailures[target.TargetID] = questionAnswerScheduleTargetFailure{target: target, reason: reason}
+			log.Printf("[question-answer-schedules] target failure save panic recovered")
+		}
+	}()
 	ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stop()
 	lock := s.questionAnswerScheduleWorkspaceLock(execution.UserID, execution.AdminAccountID)
@@ -492,9 +545,11 @@ func (s *Service) reconcileQuestionAnswerScheduleHandle(ctx context.Context, han
 	// turn finalizer-only waiting into a newly accepted timeout.
 	if execution.TerminationCause == "" && !now.Before(execution.deadline()) {
 		lock := s.questionAnswerScheduleWorkspaceLock(execution.UserID, execution.AdminAccountID)
-		lock.Lock()
-		result, err := s.questionAnswerSchedules.DecideQuestionAnswerScheduleTermination(ctx, execution.UserID, execution.AdminAccountID, execution.ID, "execution_timeout", nil, s.scheduleNow)
-		lock.Unlock()
+		result, err := func() (QuestionAnswerScheduleTerminationResult, error) {
+			lock.Lock()
+			defer lock.Unlock()
+			return s.questionAnswerSchedules.DecideQuestionAnswerScheduleTermination(ctx, execution.UserID, execution.AdminAccountID, execution.ID, "execution_timeout", nil, s.scheduleNow)
+		}()
 		if err != nil {
 			return err
 		}
@@ -515,9 +570,11 @@ func (s *Service) reconcileQuestionAnswerScheduleHandle(ctx context.Context, han
 		if handle.prepareDone == nil {
 			if now.After(execution.startWindowEnd()) {
 				lock := s.questionAnswerScheduleWorkspaceLock(execution.UserID, execution.AdminAccountID)
-				lock.Lock()
-				finished, err := s.questionAnswerSchedules.FinishQuestionAnswerSchedulePreparation(ctx, execution.UserID, execution.AdminAccountID, execution.ID, QuestionAnswerSchedulePreparationOutcome{Status: "skipped", Reason: "start_window_expired"}, s.scheduleNow)
-				lock.Unlock()
+				finished, err := func() (*QuestionAnswerScheduleExecution, error) {
+					lock.Lock()
+					defer lock.Unlock()
+					return s.questionAnswerSchedules.FinishQuestionAnswerSchedulePreparation(ctx, execution.UserID, execution.AdminAccountID, execution.ID, QuestionAnswerSchedulePreparationOutcome{Status: "skipped", Reason: "start_window_expired"}, s.scheduleNow)
+				}()
 				if err == nil && finished != nil && !questionAnswerScheduleExecutionActive(finished.Status) {
 					s.removeQuestionAnswerScheduleHandle(handle)
 				}
@@ -533,26 +590,32 @@ func (s *Service) reconcileQuestionAnswerScheduleHandle(ctx context.Context, han
 		if outcome.Status != "" {
 			s.releaseQuestionAnswerScheduleReservations(handle)
 			lock := s.questionAnswerScheduleWorkspaceLock(execution.UserID, execution.AdminAccountID)
-			lock.Lock()
-			finished, err := s.questionAnswerSchedules.FinishQuestionAnswerSchedulePreparation(ctx, execution.UserID, execution.AdminAccountID, execution.ID, outcome, s.scheduleNow)
-			lock.Unlock()
+			finished, err := func() (*QuestionAnswerScheduleExecution, error) {
+				lock.Lock()
+				defer lock.Unlock()
+				return s.questionAnswerSchedules.FinishQuestionAnswerSchedulePreparation(ctx, execution.UserID, execution.AdminAccountID, execution.ID, outcome, s.scheduleNow)
+			}()
 			if err == nil && finished != nil && !questionAnswerScheduleExecutionActive(finished.Status) {
 				s.removeQuestionAnswerScheduleHandle(handle)
 			}
 			return err
 		}
 		lock := s.questionAnswerScheduleWorkspaceLock(execution.UserID, execution.AdminAccountID)
-		lock.Lock()
-		reason, err := s.questionAnswerSchedules.FreezeQuestionAnswerScheduleExecution(ctx, execution.UserID, execution.AdminAccountID, execution.ID, *outcome.Resolved, outcome.Targets, s.scheduleNow)
-		lock.Unlock()
+		reason, err := func() (string, error) {
+			lock.Lock()
+			defer lock.Unlock()
+			return s.questionAnswerSchedules.FreezeQuestionAnswerScheduleExecution(ctx, execution.UserID, execution.AdminAccountID, execution.ID, *outcome.Resolved, outcome.Targets, s.scheduleNow)
+		}()
 		if err != nil {
 			return err
 		}
 		if reason != "" {
 			s.releaseQuestionAnswerScheduleReservations(handle)
-			lock.Lock()
-			finished, err := s.questionAnswerSchedules.FinishQuestionAnswerSchedulePreparation(ctx, execution.UserID, execution.AdminAccountID, execution.ID, QuestionAnswerSchedulePreparationOutcome{Status: "skipped", Reason: reason}, s.scheduleNow)
-			lock.Unlock()
+			finished, err := func() (*QuestionAnswerScheduleExecution, error) {
+				lock.Lock()
+				defer lock.Unlock()
+				return s.questionAnswerSchedules.FinishQuestionAnswerSchedulePreparation(ctx, execution.UserID, execution.AdminAccountID, execution.ID, QuestionAnswerSchedulePreparationOutcome{Status: "skipped", Reason: reason}, s.scheduleNow)
+			}()
 			if err == nil && finished != nil && !questionAnswerScheduleExecutionActive(finished.Status) {
 				s.removeQuestionAnswerScheduleHandle(handle)
 			}
@@ -574,9 +637,11 @@ func (s *Service) reconcileQuestionAnswerScheduleHandle(ctx context.Context, han
 	s.releaseQuestionAnswerScheduleReservations(handle)
 	for targetID, failure := range handle.targetFailures {
 		lock := s.questionAnswerScheduleWorkspaceLock(execution.UserID, execution.AdminAccountID)
-		lock.Lock()
-		err := s.questionAnswerSchedules.FailQuestionAnswerScheduleTarget(ctx, execution.UserID, execution.AdminAccountID, execution.ID, targetID, failure.target.ID, failure.reason, s.scheduleNow)
-		lock.Unlock()
+		err := func() error {
+			lock.Lock()
+			defer lock.Unlock()
+			return s.questionAnswerSchedules.FailQuestionAnswerScheduleTarget(ctx, execution.UserID, execution.AdminAccountID, execution.ID, targetID, failure.target.ID, failure.reason, s.scheduleNow)
+		}()
 		if err != nil {
 			return err
 		}
@@ -624,9 +689,11 @@ func (s *Service) reconcileQuestionAnswerScheduleCancellationConflict(ctx contex
 			}
 		}
 		lock := s.questionAnswerScheduleWorkspaceLock(execution.UserID, execution.AdminAccountID)
-		lock.Lock()
-		finished, err := s.questionAnswerSchedules.FinishQuestionAnswerScheduleExecution(ctx, execution.UserID, execution.AdminAccountID, execution.ID, settleErr == nil, reason, s.scheduleNow)
-		lock.Unlock()
+		finished, err := func() (*QuestionAnswerScheduleExecution, error) {
+			lock.Lock()
+			defer lock.Unlock()
+			return s.questionAnswerSchedules.FinishQuestionAnswerScheduleExecution(ctx, execution.UserID, execution.AdminAccountID, execution.ID, settleErr == nil, reason, s.scheduleNow)
+		}()
 		if err != nil {
 			return nil, err
 		}
@@ -665,9 +732,11 @@ func (s *Service) settleQuestionAnswerScheduleBatches(ctx context.Context, handl
 }
 func (s *Service) persistQuestionAnswerScheduleSettling(ctx context.Context, execution QuestionAnswerScheduleExecution, settled bool, reason string, cause error) error {
 	lock := s.questionAnswerScheduleWorkspaceLock(execution.UserID, execution.AdminAccountID)
-	lock.Lock()
-	finished, err := s.questionAnswerSchedules.FinishQuestionAnswerScheduleExecution(ctx, execution.UserID, execution.AdminAccountID, execution.ID, settled, reason, s.scheduleNow)
-	lock.Unlock()
+	finished, err := func() (*QuestionAnswerScheduleExecution, error) {
+		lock.Lock()
+		defer lock.Unlock()
+		return s.questionAnswerSchedules.FinishQuestionAnswerScheduleExecution(ctx, execution.UserID, execution.AdminAccountID, execution.ID, settled, reason, s.scheduleNow)
+	}()
 	if err == nil && finished != nil && !questionAnswerScheduleExecutionActive(finished.Status) {
 		s.questionAnswerScheduleMu.Lock()
 		handle := s.questionAnswerScheduleHandles[execution.ID]

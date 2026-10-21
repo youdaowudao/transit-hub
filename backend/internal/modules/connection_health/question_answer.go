@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -50,6 +51,7 @@ const (
 	ErrorQuestionAnswerHistoryPage       = "admin.connectionHealth.errors.questionAnswerHistoryPage"
 	ErrorQuestionAnswerJudgmentForbidden = "admin.connectionHealth.errors.questionAnswerJudgmentForbidden"
 	ErrorQuestionAnswerServiceStopped    = "admin.connectionHealth.errors.questionAnswerServiceStopped"
+	ErrorQuestionAnswerInternal          = "admin.connectionHealth.manualProbeDialog.questionAnswer.errorTypes.internal_error"
 )
 
 const (
@@ -64,9 +66,12 @@ const (
 	QuestionAnswerErrorAccountTypeUnsupported = "account_type_unsupported"
 	QuestionAnswerErrorTimeout                = "timeout"
 	QuestionAnswerErrorStorage                = "storage_error"
+	QuestionAnswerErrorInternal               = "internal_error"
 	QuestionAnswerErrorServiceRestarted       = "service_restarted"
 	QuestionAnswerErrorServiceShutdown        = "service_shutdown"
 )
+
+var errQuestionAnswerInternal = errors.New("question answer internal error")
 
 type QuestionAnswerStatus string
 
@@ -544,7 +549,7 @@ func (s *Service) releaseQuestionAnswerTargetStart(reservation *questionAnswerTa
 // The core accepts server-owned credentials and a repository operation. Manual
 // callers retain their original transaction; scheduled callers use the frozen,
 // preallocated target transaction. Neither path has a second dispatcher.
-func (s *Service) startQuestionAnswerBatchCore(reservation *questionAnswerTargetStart, cred upstream.ProbeCredential, create func(context.Context) ([]QuestionAnswerRecord, bool, error)) (QuestionAnswerBatch, error) {
+func (s *Service) startQuestionAnswerBatchCore(reservation *questionAnswerTargetStart, cred upstream.ProbeCredential, create func(context.Context) ([]QuestionAnswerRecord, bool, error)) (result QuestionAnswerBatch, resultErr error) {
 	key := questionAnswerRunKey(reservation.userID, reservation.targetID)
 	s.questionAnswerMu.Lock()
 	if s.questionAnswerClosed || reservation.ctx.Err() != nil || reservation.released || s.questionAnswerStarts[key] != reservation {
@@ -559,6 +564,17 @@ func (s *Service) startQuestionAnswerBatchCore(reservation *questionAnswerTarget
 	s.questionAnswerRuns[key] = run
 	s.questionAnswerOrder = append(s.questionAnswerOrder, key)
 	s.questionAnswerMu.Unlock()
+	locked := false
+	defer func() {
+		if recover() != nil {
+			if locked {
+				s.questionAnswerMu.Unlock()
+			}
+			result = QuestionAnswerBatch{}
+			resultErr = s.finishFailedQuestionAnswerStart(key, run, nil, QuestionAnswerErrorInternal, errQuestionAnswerInternal)
+			log.Printf("[connection-health] question batch creation panic recovered")
+		}
+	}()
 	records, created, err := create(reservation.ctx)
 	if err != nil {
 		startErr := err
@@ -584,6 +600,7 @@ func (s *Service) startQuestionAnswerBatchCore(reservation *questionAnswerTarget
 		// permission to resend. On restart C1 startup has normally settled these.
 		if err == nil && batch.Active {
 			storageCtx, stop := s.questionAnswerStorageContext(context.Background())
+			defer stop()
 			_, err = s.questionAnswers.FinalizeQuestionAnswerBatch(storageCtx, reservation.userID, reservation.targetID, reservation.batchID, QuestionAnswerFailed, QuestionAnswerErrorServiceRestarted)
 			stop()
 			if err == nil {
@@ -597,6 +614,7 @@ func (s *Service) startQuestionAnswerBatchCore(reservation *questionAnswerTarget
 		return QuestionAnswerBatch{}, s.finishFailedQuestionAnswerStart(key, run, records, QuestionAnswerErrorStorage, err)
 	}
 	s.questionAnswerMu.Lock()
+	locked = true
 	current := s.questionAnswerRuns[key]
 	if current == run {
 		run.records = cloneQuestionAnswerRecords(records)
@@ -612,6 +630,7 @@ func (s *Service) startQuestionAnswerBatchCore(reservation *questionAnswerTarget
 			}
 		}
 		s.questionAnswerMu.Unlock()
+		locked = false
 		run.cancel()
 		cleanupErr := s.waitQuestionAnswerShutdownAttempt(shutdownAttempt)
 		if cleanupErr == nil && current == run && shutdownAttempt == nil {
@@ -620,6 +639,7 @@ func (s *Service) startQuestionAnswerBatchCore(reservation *questionAnswerTarget
 		return QuestionAnswerBatch{}, errors.Join(requestError(ErrorQuestionAnswerServiceStopped), cleanupErr)
 	}
 	s.questionAnswerMu.Unlock()
+	locked = false
 	s.wakeQuestionAnswerDispatcher()
 	return batch, nil
 }
@@ -739,7 +759,16 @@ func (s *Service) finishFailedQuestionAnswerStart(key string, run *activeQuestio
 	if closed && shutdownAttempt != nil {
 		return errors.Join(cause, s.waitQuestionAnswerShutdownAttempt(shutdownAttempt))
 	}
-	return errors.Join(cause, s.finalizeFailedQuestionAnswerStart(key, run))
+	cleanupErr := s.finalizeFailedQuestionAnswerStart(key, run)
+	if cleanupErr == nil && reason == QuestionAnswerErrorInternal && errors.Is(cause, errQuestionAnswerInternal) {
+		s.questionAnswerMu.Lock()
+		stoppedInternally := run.stopReason == QuestionAnswerErrorInternal && !s.questionAnswerClosed && s.questionAnswerCtx.Err() == nil
+		s.questionAnswerMu.Unlock()
+		if stoppedInternally {
+			return errors.Join(requestError(ErrorQuestionAnswerInternal), cause)
+		}
+	}
+	return errors.Join(cause, cleanupErr)
 }
 
 func (s *Service) finalizeFailedQuestionAnswerStart(key string, run *activeQuestionAnswerBatch) error {
@@ -747,7 +776,15 @@ func (s *Service) finalizeFailedQuestionAnswerStart(key string, run *activeQuest
 	status, errorType := questionAnswerRunFinalState(run, QuestionAnswerErrorStorage)
 	s.questionAnswerMu.Unlock()
 	stopCtx, cancel := s.questionAnswerStorageContext(context.Background())
-	_, stopErr := s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, run.userID, run.targetID, run.batchID, status, errorType)
+	defer cancel()
+	_, stopErr := func() (stopped bool, err error) {
+		defer func() {
+			if recover() != nil {
+				err = errQuestionAnswerInternal
+			}
+		}()
+		return s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, run.userID, run.targetID, run.batchID, status, errorType)
+	}()
 	cancel()
 	s.questionAnswerMu.Lock()
 	shouldFinalize := s.beginQuestionAnswerRunFinalizationLocked(key, run)
@@ -761,6 +798,9 @@ func (s *Service) finalizeFailedQuestionAnswerStart(key string, run *activeQuest
 	s.questionAnswerMu.Lock()
 	finalErr := run.finalizeResults[generation]
 	s.questionAnswerMu.Unlock()
+	if errors.Is(stopErr, errQuestionAnswerInternal) {
+		log.Printf("[connection-health] failed question start stop panic recovered")
+	}
 	return errors.Join(stopErr, finalErr)
 }
 
@@ -1063,15 +1103,38 @@ func (s *Service) ShutdownQuestionAnswers(ctx context.Context) error {
 }
 
 func (s *Service) runQuestionAnswerShutdown(attempt *questionAnswerShutdownAttempt, runs []questionAnswerShutdownRun, dispatcherDone <-chan struct{}) {
-	s.questionAnswerStartWG.Wait()
 	var stopErrors []error
+	locked := false
+	defer func() {
+		panicked := recover() != nil
+		if locked {
+			s.questionAnswerMu.Unlock()
+		}
+		if panicked {
+			stopErrors = append(stopErrors, errQuestionAnswerInternal)
+		}
+		s.questionAnswerMu.Lock()
+		attempt.err = errors.Join(stopErrors...)
+		if !questionAnswerChannelClosed(attempt.done) {
+			close(attempt.done)
+		}
+		s.questionAnswerMu.Unlock()
+		if panicked {
+			log.Printf("[connection-health] question shutdown panic recovered")
+		}
+	}()
+	s.questionAnswerStartWG.Wait()
 	for _, item := range runs {
 		s.questionAnswerMu.Lock()
+		locked = true
 		status, errorType := questionAnswerRunFinalState(item.run, QuestionAnswerErrorServiceShutdown)
 		s.questionAnswerMu.Unlock()
+		locked = false
 		stopCtx, cancel := s.questionAnswerStorageContext(context.Background())
-		_, err := s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, item.run.userID, item.run.targetID, item.run.batchID, status, errorType)
-		cancel()
+		_, err := func() (bool, error) {
+			defer cancel()
+			return s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, item.run.userID, item.run.targetID, item.run.batchID, status, errorType)
+		}()
 		if err != nil {
 			stopErrors = append(stopErrors, err)
 		}
@@ -1090,6 +1153,7 @@ func (s *Service) runQuestionAnswerShutdown(attempt *questionAnswerShutdownAttem
 	}
 	waits := make([]finalizationWait, 0, len(runs))
 	s.questionAnswerMu.Lock()
+	locked = true
 	for _, item := range runs {
 		if current := s.questionAnswerRuns[item.key]; current != item.run {
 			continue
@@ -1104,6 +1168,7 @@ func (s *Service) runQuestionAnswerShutdown(attempt *questionAnswerShutdownAttem
 		})
 	}
 	s.questionAnswerMu.Unlock()
+	locked = false
 	for _, item := range waits {
 		if item.start {
 			go func(key string, run *activeQuestionAnswerBatch) { _ = s.finalizeQuestionAnswerRun(key, run) }(item.key, item.run)
@@ -1112,17 +1177,15 @@ func (s *Service) runQuestionAnswerShutdown(attempt *questionAnswerShutdownAttem
 	for _, item := range waits {
 		<-item.settled
 		s.questionAnswerMu.Lock()
+		locked = true
 		finalErr := item.run.finalizeResults[item.generation]
 		s.questionAnswerMu.Unlock()
+		locked = false
 		if finalErr != nil {
 			stopErrors = append(stopErrors, finalErr)
 		}
 	}
 
-	s.questionAnswerMu.Lock()
-	attempt.err = errors.Join(stopErrors...)
-	close(attempt.done)
-	s.questionAnswerMu.Unlock()
 }
 
 func buildQuestionAnswerBatch(records []QuestionAnswerRecord) (QuestionAnswerBatch, error) {

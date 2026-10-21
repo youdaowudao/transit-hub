@@ -89,16 +89,11 @@ func newC32REDFixture(t *testing.T) *c32REDFixture {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		f.service.closeActionAdmission()
-		if err := f.service.drainActionDispatches(ctx); err != nil {
+		if err := f.service.Shutdown(ctx); err != nil {
 			t.Error(err)
 		}
-		if err := f.service.ShutdownQuestionAnswers(ctx); err != nil {
-			t.Error(err)
-		}
-		if err := f.service.ShutdownQuestionAnswerSchedules(ctx); err != nil {
-			t.Error(err)
-		}
+		f.service.modelControlScanWG.Wait()
+		waitSchedulerPathsIdle(t, f.service)
 	})
 	return f
 }

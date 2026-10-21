@@ -932,6 +932,7 @@ func TestRunSchedulerTick_SyncsPriorityAfterProbeStateChanges(t *testing.T) {
 	}
 
 	service.runSchedulerTick(context.Background())
+	waitSchedulerPathsIdle(t, service)
 
 	stored := repo.states["newapi:ws1:100"]["gpt-4o"]
 	if stored.State != StateSuspended {

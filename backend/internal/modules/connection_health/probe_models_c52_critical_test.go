@@ -118,6 +118,10 @@ func TestProbeModelC43CNCompletePath(t *testing.T) {
 				c52Models(t, groups, id, want, kinds[id])
 			}
 			f.service.runSchedulerTickSafely(t.Context())
+			waitSchedulerPathsIdle(t, f.service)
+			// Seven accounts exceed the workspace cap of six; admit the remainder on the next tick.
+			f.service.runSchedulerTickSafely(t.Context())
+			waitSchedulerPathsIdle(t, f.service)
 			events := c43CriticalEvents(t, f)
 			mu.Lock()
 			for id, want := range selected {
@@ -189,7 +193,7 @@ func TestProbeModelC43CNExecutionRechecksSelection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			jobs := f.service.collectAdminProbeJobsWithGroupsAndCache(t.Context(), policies, assignments, nil, nil, adminInventoryCache{})
+			jobs := f.service.collectAdminProbeJobsWithGroupsAndCache(t.Context(), policies, assignments, nil, nil, adminInventoryCache{}, nil)
 			if len(jobs) != 1 || len(jobs[0].dueSpecs) != 1 || jobs[0].dueSpecs[0].modelName != "B" {
 				t.Fatal("queued B", jobs)
 			}
@@ -203,6 +207,7 @@ func TestProbeModelC43CNExecutionRechecksSelection(t *testing.T) {
 				t.Fatal("stale job wrote health", states, err)
 			}
 			f.service.runSchedulerTickSafely(t.Context())
+			waitSchedulerPathsIdle(t, f.service)
 			if events := c43CriticalEvents(t, f); !reflect.DeepEqual(events[c32REDTarget("1")], []string{"A"}) {
 				t.Fatal("fresh scheduler failed to select A", events)
 			}

@@ -30,11 +30,60 @@ type schedulerRoundStats struct {
 	over30       int
 	over60       int
 	longest      time.Duration
+	jobs         int
+	jobOver30    int
+	jobOver60    int
+	jobLongest   time.Duration
+	inFlight     int
+	maxInFlight  int
+	skipped      map[string]int
 	zero         map[string]int
 	unknown      map[string]int
 }
 
 var schedulerStatsByService sync.Map
+
+func (s *Service) schedulerStatistics() *schedulerRoundStats {
+	value, _ := schedulerStatsByService.LoadOrStore(s, &schedulerRoundStats{zero: map[string]int{}, unknown: map[string]int{}, skipped: map[string]int{}})
+	return value.(*schedulerRoundStats)
+}
+
+func (s *Service) recordSchedulerSkip(reason string) {
+	stats := s.schedulerStatistics()
+	stats.mu.Lock()
+	stats.skipped[reason]++
+	stats.mu.Unlock()
+}
+
+func (s *Service) beginSchedulerJob() time.Time {
+	started := time.Now()
+	stats := s.schedulerStatistics()
+	stats.mu.Lock()
+	stats.inFlight++
+	if stats.inFlight > stats.maxInFlight {
+		stats.maxInFlight = stats.inFlight
+	}
+	stats.mu.Unlock()
+	return started
+}
+
+func (s *Service) finishSchedulerJob(started time.Time) {
+	duration := time.Since(started)
+	stats := s.schedulerStatistics()
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+	stats.jobs++
+	stats.inFlight--
+	if duration > 30*time.Second {
+		stats.jobOver30++
+	}
+	if duration > 60*time.Second {
+		stats.jobOver60++
+	}
+	if duration > stats.jobLongest {
+		stats.jobLongest = duration
+	}
+}
 
 func (s *Service) beginSchedulerRound(ctx context.Context) (context.Context, *schedulerRoundEvidence) {
 	round := &schedulerRoundEvidence{started: time.Now(), seen: map[string]bool{}, zero: map[string]int{}, unknown: map[string]int{}}
@@ -95,8 +144,7 @@ func recordSchedulerInventory(ctx context.Context, userID, workspace string, inv
 
 func (s *Service) finishSchedulerRound(round *schedulerRoundEvidence) {
 	ended := time.Now()
-	value, _ := schedulerStatsByService.LoadOrStore(s, &schedulerRoundStats{zero: map[string]int{}, unknown: map[string]int{}})
-	stats := value.(*schedulerRoundStats)
+	stats := s.schedulerStatistics()
 	stats.mu.Lock()
 	defer stats.mu.Unlock()
 	if stats.firstStarted.IsZero() {
@@ -125,8 +173,11 @@ func (s *Service) finishSchedulerRound(round *schedulerRoundEvidence) {
 	if ended.Sub(stats.firstStarted) < 10*time.Minute {
 		return
 	}
-	log.Printf("[connection-health] round stats first_started=%s last_ended=%s rounds=%d over_30s=%d over_60s=%d longest_ms=%d zero_available=%v unknown=%v", stats.firstStarted.UTC().Format(time.RFC3339Nano), stats.lastEnded.UTC().Format(time.RFC3339Nano), stats.total, stats.over30, stats.over60, stats.longest.Milliseconds(), stats.zero, stats.unknown)
+	log.Printf("[connection-health] round stats first_started=%s last_ended=%s scans=%d scan_over_30s=%d scan_longest_ms=%d jobs=%d job_over_30s=%d job_over_60s=%d job_longest_ms=%d max_in_flight=%d skipped_in_flight=%d skipped_no_slot=%d skipped_lease_busy=%d skipped_priority_workspace=%d skipped_restore_busy=%d zero_available=%v unknown=%v", stats.firstStarted.UTC().Format(time.RFC3339Nano), stats.lastEnded.UTC().Format(time.RFC3339Nano), stats.total, stats.over30, stats.longest.Milliseconds(), stats.jobs, stats.jobOver30, stats.jobOver60, stats.jobLongest.Milliseconds(), stats.maxInFlight, stats.skipped["in_flight"], stats.skipped["no_slot"], stats.skipped["lease_busy"], stats.skipped["priority_workspace"], stats.skipped["restore_busy"], stats.zero, stats.unknown)
 	stats.firstStarted = time.Time{}
 	stats.total, stats.over30, stats.over60, stats.longest = 0, 0, 0, 0
+	stats.jobs, stats.jobOver30, stats.jobOver60, stats.jobLongest = 0, 0, 0, 0
+	stats.maxInFlight = stats.inFlight
+	stats.skipped = map[string]int{}
 	stats.zero, stats.unknown = map[string]int{}, map[string]int{}
 }

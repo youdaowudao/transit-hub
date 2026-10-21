@@ -436,6 +436,7 @@ func TestProbeModelC43TopLevelModelsPreserved(t *testing.T) {
 		t.Fatal(page)
 	}
 	f.service.runSchedulerTickSafely(t.Context())
+	waitSchedulerPathsIdle(t, f.service)
 	events := c43CriticalEvents(t, f)
 	if !reflect.DeepEqual(events[c32REDTarget("1")], []string{"A"}) {
 		t.Fatal(events)

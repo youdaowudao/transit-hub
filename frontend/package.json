@@ -1,6 +1,6 @@
 {
   "name": "@transithub/frontend",
-  "version": "3.0.29",
+  "version": "3.0.42",
   "private": true,
   "type": "module",
   "scripts": {

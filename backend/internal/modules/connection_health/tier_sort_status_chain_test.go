@@ -50,6 +50,7 @@ func TestTierSortFullChainLegacyPrimaryRestoresDuringSkippedAndCredentialFailedT
 				}
 			}
 			s.runSchedulerTick(t.Context())
+			waitSchedulerPathsIdle(t, s)
 			if len(actions.sub2APICalls) != 1 || actions.sub2APICalls[0].status != "active" || reader.accountsByGrp["g1"][0].Status != "active" {
 				t.Fatalf("tick with %s failed to restore the original status: %+v", reason, actions.sub2APICalls)
 			}
@@ -68,6 +69,7 @@ func TestTierSortFullChainLegacyPrimaryRestoresDuringSkippedAndCredentialFailedT
 				t.Fatal("credential failure was not actually recorded")
 			}
 			s.runSchedulerTick(t.Context())
+			waitSchedulerPathsIdle(t, s)
 			if len(actions.sub2APICalls) != 1 || reader.accountsByGrp["g1"][0].Status != "active" {
 				t.Fatal("confirmation tick replayed the original-state restoration")
 			}

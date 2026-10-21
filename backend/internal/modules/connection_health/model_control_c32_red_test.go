@@ -47,6 +47,7 @@ func (f *c32REDFixture) scan() {
 	f.t.Helper()
 	started := time.Now().UTC()
 	f.service.runSchedulerTickSafely(f.t.Context())
+	waitSchedulerPathsIdle(f.t, f.service)
 	f.t.Logf("probe calls=%d hard failures=%d", f.probeCalls, f.probeFailures)
 	deadline := time.Now().Add(15 * time.Second)
 	for {
@@ -325,7 +326,9 @@ func TestModelControlC32Equivalent6DefaultBackgroundDoesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.service.runSchedulerTickSafely(t.Context())
+	waitSchedulerPathsIdle(t, f.service)
 	f.service.runSchedulerTickSafely(t.Context())
+	waitSchedulerPathsIdle(t, f.service)
 	if err := f.pool.QueryRow(t.Context(), `SELECT count(*) FROM connection_health_model_control_events`).Scan(&eventsAfter); err != nil {
 		t.Fatal(err)
 	}
@@ -354,6 +357,7 @@ func TestModelControlC32Equivalent7DefaultHealthAndManualPreserved(t *testing.T)
 		f.closedSources()
 		f.monitor([]string{"1", "2", "3"}, "A")
 		f.service.runSchedulerTickSafely(t.Context())
+		waitSchedulerPathsIdle(t, f.service)
 		t.Logf("probe calls=%d hard failures=%d", f.probeCalls, f.probeFailures)
 		rows, err := f.pool.Query(t.Context(), `SELECT model_name, result, COALESCE(probe_disposition,''), COALESCE(remote_action,'') FROM connection_health_events ORDER BY created_at`)
 		if err != nil {
@@ -394,6 +398,7 @@ func TestModelControlC32Equivalent7DefaultHealthAndManualPreserved(t *testing.T)
 		f.close("1", "A")
 		f.monitor([]string{"1", "2"}, "A", "B")
 		f.service.runSchedulerTickSafely(t.Context())
+		waitSchedulerPathsIdle(t, f.service)
 		f.knownMultiplierPriority()
 		hasSuspendedPriority := false
 		for _, value := range f.priorityWrites {

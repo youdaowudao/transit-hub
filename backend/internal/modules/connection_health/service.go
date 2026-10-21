@@ -27,6 +27,8 @@ type healthRepository interface {
 	SavePolicyWithTargets(ctx context.Context, p Policy, targets []ModelTarget) error
 	DeletePolicy(ctx context.Context, id string, userID string, adminAccountID string) (bool, error)
 	ListStatesByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]ConnectionHealthState, error)
+	ListSub2APIHealthWorkspaces(ctx context.Context) ([]healthStateWorkspace, error)
+	DeleteUnmonitoredStates(ctx context.Context, userID, adminAccountID, targetID string, expectedGeneration int64) (int64, error)
 	ListStatesByConnection(ctx context.Context, connectionID string) ([]ConnectionHealthState, error)
 	GetState(ctx context.Context, connectionID string, modelName string) (*ConnectionHealthState, error)
 	UpsertState(ctx context.Context, s ConnectionHealthState) error
@@ -82,12 +84,16 @@ type healthRepository interface {
 	ListAllTargetActionStates(ctx context.Context) ([]TargetActionState, error)
 	UpsertTargetActionState(ctx context.Context, state TargetActionState) error
 	DeleteTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) error
+	AbandonConflictedTargetAction(ctx context.Context, scope RemoteActionScope, expectedGeneration int64, event ConnectionHealthEvent) (bool, error)
 	EnsureSchema(ctx context.Context) error
 }
 
 // Service 组装 connection_health 模块的全部业务逻辑：聚合查询、策略管理、手动动作、
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
+	noticeMu                             sync.Mutex
+	noticePublisher                      NoticePublisher
+	sentLongFailureNotices               map[string]bool
 	modelControlScanFlights              sync.Map
 	modelControlScanWG                   sync.WaitGroup
 	modelControlActions                  ModelControlActioner
@@ -122,6 +128,13 @@ type Service struct {
 	schedulableActions                   TargetSchedulableActioner
 	probeLimiterMu                       sync.Mutex
 	probeLimiter                         *probeConcurrencyLimiter
+	schedulerMu                          sync.Mutex
+	schedulerCtx                         context.Context
+	schedulerCancel                      context.CancelFunc
+	schedulerClosed                      bool
+	schedulerJobs                        sync.WaitGroup
+	probeInFlight                        map[string]string
+	schedulerInventoryReads              map[string][]*adminInventoryRead
 	adminMultiplierMu                    sync.Mutex
 	adminMultiplierCache                 map[string]adminMultiplierCacheEntry
 	multiplierSnapshotMu                 sync.Mutex
@@ -246,19 +259,6 @@ func (s *Service) sub2APIFloorGuardFor(userID string, adminAccountID string) *wo
 	return guard
 }
 
-func (s *Service) setSub2APIFloorGuard(userID string, adminAccountID string, guard *workspaceFloorGuard) {
-	if guard == nil {
-		return
-	}
-	key := userID + "|" + adminAccountID
-	s.sub2APIFloorMu.Lock()
-	defer s.sub2APIFloorMu.Unlock()
-	if s.sub2APIFloorGuards == nil {
-		s.sub2APIFloorGuards = make(map[string]*workspaceFloorGuard)
-	}
-	s.sub2APIFloorGuards[key] = guard
-}
-
 func (s *Service) EnsureSchema(ctx context.Context) error {
 	if err := s.repo.EnsureSchema(ctx); err != nil {
 		return err
@@ -294,6 +294,10 @@ type ModelHealth struct {
 	RequestFirstEventMs         *int                         `json:"requestFirstEventMs"`
 	RecheckPending              bool                         `json:"recheckPending"`
 	FailingSince                *time.Time                   `json:"failingSince"`
+	LongFailure                 bool                         `json:"longFailure"`
+	LongFailureRetry            string                       `json:"longFailureRetry,omitempty"`
+	LongFailureAfterSeconds     int                          `json:"longFailureAfterSeconds,omitempty"`
+	LongFailureIntervalSeconds  int                          `json:"longFailureIntervalSeconds,omitempty"`
 	RuleVersion                 string                       `json:"ruleVersion"`
 	FirstTokenMs                *int                         `json:"firstTokenMs"`
 	FirstEventMs                *int                         `json:"firstEventMs"`
@@ -797,7 +801,7 @@ func (s *Service) filterToAssignedTargetEvents(ctx context.Context, userID strin
 	out := make([]ConnectionHealthEvent, 0, len(events))
 	for _, e := range events {
 		if _, ok := parseTargetID(e.ConnectionID); ok {
-			if e.Result == "policy_unmanaged_restore" || e.ActionSource == ActionSourceUser {
+			if e.Result == "policy_unmanaged_restore" || e.Result == "policy_unmanaged_abandoned" || e.ActionSource == ActionSourceUser {
 				// This event is emitted after the final assignment is removed. Filtering it by
 				// current assignments would make the automatic upstream restore or an explicit
 				// user scheduling action impossible to audit.

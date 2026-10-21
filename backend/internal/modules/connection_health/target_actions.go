@@ -109,6 +109,9 @@ func (g *workspaceFloorGuard) rememberInventory(inventory adminWorkspaceInventor
 }
 
 func (g *workspaceFloorGuard) rememberInventoryLocked(inventory adminWorkspaceInventory) {
+	if inventory.snapshotStartedAt.Before(g.snapshotAt) {
+		return
+	}
 	if adminInventoryComplete(inventory) {
 		fingerprint := adminInventoryFingerprint(inventory)
 		if g.inventoryFingerprint != fingerprint {
@@ -117,7 +120,7 @@ func (g *workspaceFloorGuard) rememberInventoryLocked(inventory adminWorkspaceIn
 		}
 	}
 	g.inventory = &inventory
-	g.snapshotAt = time.Now().UTC()
+	g.snapshotAt = inventory.snapshotStartedAt
 }
 
 func adminInventoryComplete(inventory adminWorkspaceInventory) bool {
@@ -619,7 +622,10 @@ func (s *Service) reconcileTargetRemoteActionWithFloorMode(
 		return targetRemoteActionResult{}, nil
 	}
 	if target.Schedulable != nil && !*target.Schedulable {
-		return targetRemoteActionResult{remoteAction: RemoteActionSkippedUpstreamScheduling}, nil
+		canRestore := target.Platform == string(upstream.PlatformSub2API) && stored != nil && !stored.Conflict && allHealthy
+		if !canRestore {
+			return targetRemoteActionResult{remoteAction: RemoteActionSkippedUpstreamScheduling}, nil
+		}
 	}
 
 	currentStatus := normalizeTargetStatus(target.Platform, target.AccountStatus)
@@ -786,6 +792,7 @@ func (s *Service) restoreUnmanagedTargetActions(
 	groupPolicies := assignedEnabledPoliciesByGroup(policies, groupAssignments)
 	excluded := groupTargetExclusionIndex(exclusions)
 	for _, stored := range states {
+		storedConflict := stored.Conflict
 		captured, captureErr := s.capturedWorkspaceRules(ctx, stored.UserID, stored.AdminAccountID, policies)
 		if captureErr != nil {
 			continue
@@ -870,6 +877,19 @@ func (s *Service) restoreUnmanagedTargetActions(
 		if hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies, target.Platform, target.modelSource, true)) && !hardExcluded && !oldRulePrimaryUnmanaged(target.Platform, captured.RuleVersion, tiers[stored.TargetID]) {
 			continue
 		}
+		if inventory.session.Platform == upstream.PlatformSub2API && storedConflict {
+			id, idErr := newID()
+			if idErr != nil {
+				log.Printf("[connection-health] create unmanaged abandonment event failed target_id=%s err=%v", stored.TargetID, idErr)
+				continue
+			}
+			event := ConnectionHealthEvent{ID: id, UserID: stored.UserID, AdminAccountID: stored.AdminAccountID, ConnectionID: stored.TargetID, ModelName: "*", AdminGroupID: target.AdminGroupID, OwnGroupName: target.AdminGroupName, UpstreamGroupName: target.AdminGroupName, Result: "policy_unmanaged_abandoned", Source: EventSourceScheduled}
+			_, abandonErr := s.repo.AbandonConflictedTargetAction(ctx, RemoteActionScope{stored.UserID, stored.AdminAccountID, stored.TargetID}, captured.ConfigGeneration, event)
+			if abandonErr != nil {
+				log.Printf("[connection-health] abandon unmanaged target conflict failed target_id=%s err=%v", stored.TargetID, abandonErr)
+			}
+			continue
+		}
 		targetVisible := found
 		if !found && inventory.session.Platform == upstream.PlatformSub2API {
 			// Leaving all groups proves no current value. Keep the checkpoint for
@@ -910,7 +930,15 @@ func (s *Service) restoreUnmanagedTargetActions(
 		stored.PendingStatus = stored.OriginalStatus
 		stored.PendingWeight = cloneIntPointer(stored.OriginalWeight)
 		if inventory.session.Platform == upstream.PlatformSub2API {
-			action, actionErr := s.dispatchSafeTargetAction(ctx, inventory.session, target, stored, RemoteActionHealthGuard{ConfigGeneration: &captured.ConfigGeneration})
+			restoreCtx, release, acquired, leaseErr := s.acquireActionTargetLease(ctx, target.TargetID, false)
+			if leaseErr != nil || !acquired {
+				s.recordSchedulerSkip("restore_busy")
+				continue
+			}
+			action, actionErr := func() (string, error) {
+				defer release()
+				return s.dispatchSafeTargetAction(restoreCtx, inventory.session, target, stored, RemoteActionHealthGuard{ConfigGeneration: &captured.ConfigGeneration})
+			}()
 			if actionErr != nil {
 				log.Printf("[connection-health] restore unmanaged target deferred target_id=%s err=%v", stored.TargetID, actionErr)
 				continue
@@ -1090,7 +1118,15 @@ func (s *Service) restoreEmptySub2APIGroups(ctx context.Context, states []Target
 
 			chosen.state.PendingStatus = chosen.state.OriginalStatus
 			chosen.state.PendingWeight = cloneIntPointer(chosen.state.OriginalWeight)
-			action, actionErr := s.dispatchSafeTargetAction(ctx, inventory.session, chosen.target, chosen.state, RemoteActionHealthGuard{ConfigGeneration: &captured.ConfigGeneration})
+			restoreCtx, release, acquired, leaseErr := s.acquireActionTargetLease(ctx, chosen.target.TargetID, false)
+			if leaseErr != nil || !acquired {
+				s.recordSchedulerSkip("restore_busy")
+				continue
+			}
+			action, actionErr := func() (string, error) {
+				defer release()
+				return s.dispatchSafeTargetAction(restoreCtx, inventory.session, chosen.target, chosen.state, RemoteActionHealthGuard{ConfigGeneration: &captured.ConfigGeneration})
+			}()
 			if actionErr != nil {
 				log.Printf("[connection-health] restore empty group target deferred target_id=%s err=%v", chosen.target.TargetID, actionErr)
 				continue

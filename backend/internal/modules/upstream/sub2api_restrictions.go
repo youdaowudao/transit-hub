@@ -44,6 +44,14 @@ func (e *InventoryTimeEvidence) Responses() []InventoryResponseTime {
 	return append([]InventoryResponseTime(nil), e.responses...)
 }
 
+// Clone copies completed inventory evidence without sharing its mutex or storage.
+func (e *InventoryTimeEvidence) Clone() *InventoryTimeEvidence {
+	if e == nil {
+		return nil
+	}
+	return &InventoryTimeEvidence{responses: e.Responses()}
+}
+
 type Sub2APIModelRateLimit struct {
 	Model   string
 	ResetAt *time.Time

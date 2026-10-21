@@ -19,6 +19,7 @@ import (
 
 // fakeRepository 是 healthRepository 的内存实现，供 service 单测使用，不连接真实数据库。
 type fakeRepository struct {
+	dataMu                    sync.Mutex
 	actionMu                  sync.Mutex
 	actionLeases              map[string]*RuntimeLeaseHandle
 	testConfigurationMu       sync.Mutex
@@ -348,6 +349,8 @@ func TestBuildPolicyAndTargets_RejectsNonPositiveUnschedulableProbeInterval(t *t
 }
 
 func (f *fakeRepository) ListStatesByWorkspace(ctx context.Context, userID string, adminAccountID string) ([]ConnectionHealthState, error) {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	out := make([]ConnectionHealthState, 0)
 	for _, byModel := range f.states {
 		for _, st := range byModel {
@@ -360,6 +363,8 @@ func (f *fakeRepository) ListStatesByWorkspace(ctx context.Context, userID strin
 }
 
 func (f *fakeRepository) ListStatesByConnection(ctx context.Context, connectionID string) ([]ConnectionHealthState, error) {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	out := make([]ConnectionHealthState, 0)
 	for _, st := range f.states[connectionID] {
 		out = append(out, st)
@@ -368,6 +373,8 @@ func (f *fakeRepository) ListStatesByConnection(ctx context.Context, connectionI
 }
 
 func (f *fakeRepository) GetState(ctx context.Context, connectionID string, modelName string) (*ConnectionHealthState, error) {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	if byModel, ok := f.states[connectionID]; ok {
 		if st, ok := byModel[modelName]; ok {
 			cp := st
@@ -378,6 +385,8 @@ func (f *fakeRepository) GetState(ctx context.Context, connectionID string, mode
 }
 
 func (f *fakeRepository) UpsertState(ctx context.Context, s ConnectionHealthState) error {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	if f.upsertStateErr != nil {
 		return f.upsertStateErr
 	}
@@ -389,6 +398,8 @@ func (f *fakeRepository) UpsertState(ctx context.Context, s ConnectionHealthStat
 }
 
 func (f *fakeRepository) InsertEvent(ctx context.Context, e ConnectionHealthEvent) error {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	if f.insertEventErr != nil {
 		return f.insertEventErr
 	}
@@ -397,6 +408,8 @@ func (f *fakeRepository) InsertEvent(ctx context.Context, e ConnectionHealthEven
 }
 
 func (f *fakeRepository) ListEventsByConnection(ctx context.Context, connectionID string, userID string, adminAccountID string, limit int) ([]ConnectionHealthEvent, error) {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	out := make([]ConnectionHealthEvent, 0)
 	for _, e := range f.events {
 		if e.ConnectionID == connectionID && e.UserID == userID && e.AdminAccountID == adminAccountID {
@@ -407,6 +420,8 @@ func (f *fakeRepository) ListEventsByConnection(ctx context.Context, connectionI
 }
 
 func (f *fakeRepository) ListRecentEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, limit int) ([]ConnectionHealthEvent, error) {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	out := make([]ConnectionHealthEvent, 0)
 	for _, e := range f.events {
 		if e.UserID == userID && e.AdminAccountID == adminAccountID {
@@ -417,6 +432,8 @@ func (f *fakeRepository) ListRecentEventsByWorkspace(ctx context.Context, userID
 }
 
 func (f *fakeRepository) ListLatestProbeFailureEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error) {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	type eventKey struct {
 		connectionID string
 		modelName    string
@@ -445,6 +462,8 @@ func (f *fakeRepository) ListLatestProbeFailureEventsByWorkspace(ctx context.Con
 }
 
 func (f *fakeRepository) ListLatestSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error) {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	latest := make(map[string]ConnectionHealthEvent)
 	for _, event := range f.events {
 		if event.UserID != userID || event.AdminAccountID != adminAccountID || event.CreatedAt.Before(since) || event.ActionSource != ActionSourceUser {
@@ -463,6 +482,8 @@ func (f *fakeRepository) ListLatestSchedulableActionEventsByWorkspace(ctx contex
 }
 
 func (f *fakeRepository) ListLatestSuccessfulSchedulableActionEventsByWorkspace(ctx context.Context, userID string, adminAccountID string, since time.Time) ([]ConnectionHealthEvent, error) {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	latest := make(map[string]ConnectionHealthEvent)
 	for _, event := range f.events {
 		if event.UserID != userID || event.AdminAccountID != adminAccountID || event.CreatedAt.Before(since) || event.ActionSource != ActionSourceUser || event.Result != SchedulableActionSucceeded {
@@ -481,6 +502,8 @@ func (f *fakeRepository) ListLatestSuccessfulSchedulableActionEventsByWorkspace(
 }
 
 func (f *fakeRepository) CountFailureEventsSince(ctx context.Context, userID string, adminAccountID string, since time.Time, includedConnectionIDs []string) (int, error) {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	included := make(map[string]struct{}, len(includedConnectionIDs))
 	for _, connectionID := range includedConnectionIDs {
 		included[connectionID] = struct{}{}
@@ -498,6 +521,8 @@ func (f *fakeRepository) CountFailureEventsSince(ctx context.Context, userID str
 }
 
 func (f *fakeRepository) CountProbesToday(ctx context.Context, userID string, adminAccountID string, policyID string, dayStart time.Time) (int, error) {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	count := 0
 	for _, e := range f.events {
 		if e.UserID == userID && e.AdminAccountID == adminAccountID && e.PolicyID == policyID && e.Source != EventSourceManual && isProbeResultString(e.Result) {
@@ -512,6 +537,8 @@ func (f *fakeRepository) CountProbesToday(ctx context.Context, userID string, ad
 }
 
 func (f *fakeRepository) TryConsumeProbeBudget(ctx context.Context, userID string, adminAccountID string, policyID string, dayStart time.Time, limit int) (bool, error) {
+	f.dataMu.Lock()
+	defer f.dataMu.Unlock()
 	key := userID + "|" + adminAccountID + "|" + policyID + "|" + dayStart.Format(time.RFC3339)
 	if _, initialized := f.budgetClaims[key]; !initialized {
 		count := 0
@@ -775,6 +802,8 @@ func (f *fakeRepository) ListAllGroupTargetExclusions(ctx context.Context) ([]Gr
 }
 
 func (f *fakeRepository) ListPrioritySyncStates(ctx context.Context, userID string, adminAccountID string) ([]PrioritySyncState, error) {
+	f.actionMu.Lock()
+	defer f.actionMu.Unlock()
 	out := make([]PrioritySyncState, 0)
 	for _, state := range f.priorityStates {
 		if state.UserID == userID && state.AdminAccountID == adminAccountID {
@@ -785,6 +814,8 @@ func (f *fakeRepository) ListPrioritySyncStates(ctx context.Context, userID stri
 }
 
 func (f *fakeRepository) ListAllPrioritySyncStates(ctx context.Context) ([]PrioritySyncState, error) {
+	f.actionMu.Lock()
+	defer f.actionMu.Unlock()
 	out := make([]PrioritySyncState, 0, len(f.priorityStates))
 	for _, state := range f.priorityStates {
 		out = append(out, state)
@@ -986,6 +1017,8 @@ func (f *fakeRepository) IsPriorityWorkspaceGenerationCurrent(ctx context.Contex
 }
 
 func (f *fakeRepository) GetTargetActionState(ctx context.Context, userID string, adminAccountID string, targetID string) (*TargetActionState, error) {
+	f.actionMu.Lock()
+	defer f.actionMu.Unlock()
 	state, ok := f.targetActionStates[userID+"|"+adminAccountID+"|"+targetID]
 	if !ok {
 		return nil, nil
@@ -995,6 +1028,8 @@ func (f *fakeRepository) GetTargetActionState(ctx context.Context, userID string
 }
 
 func (f *fakeRepository) ListAllTargetActionStates(ctx context.Context) ([]TargetActionState, error) {
+	f.actionMu.Lock()
+	defer f.actionMu.Unlock()
 	states := make([]TargetActionState, 0, len(f.targetActionStates))
 	for _, state := range f.targetActionStates {
 		states = append(states, state)
@@ -1003,6 +1038,8 @@ func (f *fakeRepository) ListAllTargetActionStates(ctx context.Context) ([]Targe
 }
 
 func (f *fakeRepository) ListTargetActionStates(ctx context.Context, userID string, adminAccountID string) ([]TargetActionState, error) {
+	f.actionMu.Lock()
+	defer f.actionMu.Unlock()
 	states := make([]TargetActionState, 0)
 	for _, state := range f.targetActionStates {
 		if state.UserID == userID && state.AdminAccountID == adminAccountID {

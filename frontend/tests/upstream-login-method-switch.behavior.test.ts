@@ -11,7 +11,7 @@ vi.mock('@/modules/admin/api/mySites', () => ({ listRealConnections: async () =>
 
 const refreshWarning = '填写的 Refresh Token 可能已被使用，重试前请到上游重新获取。'
 const editUnchanged = '本次修改没有保存，原站点资料和费用保持不变，不会修改主站；处理上面的原因后可以重试。'
-const identityHelp = '更换站点地址、平台或账号请新增站点，原费用会保留在原站点。可以改用其他登录方式或更新凭据：保存前系统会核对新登录信息属于原账号，核对不通过不会保存；不会修改主站。'
+const identityHelp = '原站点更换域名时可以在这里修改，核实原账号后会保留原有费用和对接记录。也可以更新凭据或切换登录方式；核对不通过不会保存，不会修改主站。'
 const saveProblem = '保存站点资料时出现问题，请按下面的“实际结果”处理。'
 const forbiddenHelp = '上游拒绝访问（403）。具体原因请看下面的上游提示；没有提示时，请在上游网站确认账号状态和访问限制。'
 const metric = { value: 1, display: '1.00' }
@@ -163,7 +163,7 @@ describe('same-site login method switching and Key-first entry', () => {
   })
 
   it('shows local R1 with check wording and no HTTP or upstream-failure wording', async () => {
-    const reason = '站点地址与原站点不同。原站点只能更新同一个账号的登录信息；换站点地址请新增站点，原费用会保留在原站点。本次没有请求上游，重试也不会通过；原资料未保存，不会修改主站。'
+    const reason = '更换站点地址前，请勾选确认这是原站点的新地址。本次没有请求上游，资料和费用未保存，不会修改主站。'
     failure('check', reason, 'identityCheckFailed')
     const view = await open(true)
     await selectToken(view)

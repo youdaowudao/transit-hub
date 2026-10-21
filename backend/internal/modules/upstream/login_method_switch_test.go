@@ -431,7 +431,7 @@ func TestLoginMethodSwitchBeforeLogin(t *testing.T) { // PLAN 13–15,25
 		dto.Account = "another"
 		status, body := switchHandler(svc, site, dto)
 		failure, _ := body["failure"].(map[string]any)
-		if status != 422 || failure["errorKey"] != switchIdentityKey || failure["stage"] != "check" || failure["httpStatus"] != float64(0) || !strings.Contains(failure["upstreamMessage"].(string), "站点地址、平台、登录账号与原站点不同") {
+		if status != 422 || failure["errorKey"] != switchIdentityKey || failure["stage"] != "check" || failure["httpStatus"] != float64(0) || !strings.Contains(failure["upstreamMessage"].(string), "平台、登录账号与原站点不同") {
 			t.Fatalf("R1结构错误：%d %+v", status, body)
 		}
 		if len(f.paths) != 0 {
@@ -457,7 +457,7 @@ func TestLoginMethodSwitchBeforeLogin(t *testing.T) { // PLAN 13–15,25
 			dto := CreateRequest{Name: "fixture", SiteURL: "http://fixture.invalid", Platform: PlatformNewAPI, AuthMode: AuthModeUserKey, AccessToken: "fixture-new", RechargeRate: 1}
 			var err error
 			if update {
-				err = validateUpdate(UpdateRequest(dto))
+				err = validateUpdate(UpdateRequest{Name: dto.Name, SiteURL: dto.SiteURL, Platform: dto.Platform, AuthMode: dto.AuthMode, AccessToken: dto.AccessToken, RechargeRate: dto.RechargeRate})
 			} else {
 				err = validateCreate(dto)
 			}

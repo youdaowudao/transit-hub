@@ -1735,7 +1735,7 @@ func (s *PlatformService) loginNewAPI(baseURL string, username string, password 
 		metrics = defaultMetrics()
 		metrics.RateNoticeObservation = &RateNoticeObservation{ObservedAt: s.keyUsageNow(), Reason: safeCostReason("登录已成功，但读取网站资料失败：" + costFailureCause(err) + "；本次倍率尚未确认，请重新同步并核查上游网站资料")}
 	}
-	return LoginResult{Platform: PlatformNewAPI, Session: session, Metrics: metrics}, nil
+	return LoginResult{Platform: PlatformNewAPI, Session: session, Metrics: metrics, MetricsError: err}, nil
 }
 
 func (s *PlatformService) loginSub2API(baseURL string, email string, password string, dates ...string) (LoginResult, error) {

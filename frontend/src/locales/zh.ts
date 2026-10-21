@@ -2306,7 +2306,11 @@ export default {
         cancel: '取消',
         submit: '确认新增',
         updateSubmit: '保存修改',
-        identityEditHelp: '更换站点地址、平台或账号请新增站点，原费用会保留在原站点。可以改用其他登录方式或更新凭据：保存前系统会核对新登录信息属于原账号，核对不通过不会保存；不会修改主站。',
+        identityEditHelp: '原站点更换域名时可以在这里修改，核实原账号后会保留原有费用和对接记录。也可以更新凭据或切换登录方式；核对不通过不会保存，不会修改主站。',
+        domainMigrationHelp: '请先确认新地址属于原站点。保存时会在新地址核实原账号，成功后本站从新地址读取数据，原费用和对接记录保留。',
+        domainMigrationConfirm: '我确认这是原站点的新地址，继续保留原有费用和对接记录。',
+        domainMigrationMainSiteHelp: '不会自动修改主站已导入账号的地址；主站仍使用旧地址时，请在主站单独更新。',
+        domainMigrationRequired: '更换站点地址前，请勾选确认这是原站点的新地址。本次没有请求上游，资料和费用未保存，不会修改主站。',
         submitting: '连接中...',
         form: {
           siteName: '站点名称',

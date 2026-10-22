@@ -12,7 +12,7 @@ afterEach(() => {
 })
 
 describe('question answer public internal-error response', () => {
-  it('shows the stopped-batch cause and retry guidance in the actual submission drawer', async () => {
+  it('shows the legacy internal-error classification and asks to read before another submission', async () => {
     const targetId = 'sub2api:ws1:a'
     const wireMessage = 'admin.connectionHealth.manualProbeDialog.questionAnswer.errorTypes.internal_error'
     const posts: Array<{ path: string; body: unknown }> = []
@@ -41,7 +41,11 @@ describe('question answer public internal-error response', () => {
     const outcome = wrapper.get(`[data-testid="question-answer-batch-outcome-${targetId}"]`)
     expect(posts).toHaveLength(1)
     expect(posts[0].body).toMatchObject({ models: ['available'], questionIds: ['question'], repeatCount: 1 })
-    expect(outcome.text()).toContain('测试程序内部出错，本批次已停止，没有修改主站；可以重新发起测试。')
+    expect(outcome.text()).toContain('接口返回了答题程序内部错误分类')
+    expect(outcome.text()).toContain('目前无法确认这批题是否已提交')
+    expect(outcome.text()).toContain('最近批次或历史核对')
+    expect(outcome.text()).toContain('本次不会自动重发')
+    expect(outcome.text()).not.toContain('本批次已停止')
     expect(outcome.text()).not.toContain('暂时无法读取分组健康数据')
     expect(outcome.text()).not.toContain(wireMessage)
     expect(wrapper.emitted('question-answer-started')).toBeUndefined()

@@ -197,6 +197,7 @@ func (f *fakeQuestionAnswerRepository) CompleteQuestionAnswer(_ context.Context,
 			f.records[i].Status, f.records[i].AnswerBody, f.records[i].ErrorType = completion.Status, completion.AnswerBody, completion.ErrorType
 			f.records[i].AnswerJudgment, f.records[i].JudgmentSource = completion.AnswerJudgment, completion.JudgmentSource
 			f.records[i].UpstreamStatus, f.records[i].UpstreamExcerpt = completion.UpstreamStatus, completion.UpstreamExcerpt
+			f.records[i].Diagnostics = cloneQuestionAnswerDiagnostics(completion.Diagnostics)
 			f.records[i].ManualError = completion.AnswerJudgment != nil && *completion.AnswerJudgment == QuestionAnswerIncorrect
 			f.records[i].CompletedAt, f.records[i].UpdatedAt = &now, now
 			return true, nil
@@ -207,6 +208,41 @@ func (f *fakeQuestionAnswerRepository) CompleteQuestionAnswer(_ context.Context,
 
 func (f *fakeQuestionAnswerRepository) StopPendingQuestionAnswerBatch(_ context.Context, _ string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
 	return f.stopQuestionAnswerRecords(targetID, batchID, status, errorType, false)
+}
+
+func (f *fakeQuestionAnswerRepository) ConfirmOrSaveQuestionAnswerCompletion(ctx context.Context, userID, targetID, batchID, recordID string, completion QuestionAnswerCompletion, allowPending bool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := validateQuestionAnswerCompletion(completion); err != nil {
+		return false, err
+	}
+	if allowPending && !questionAnswerPendingCompletionEvidence(completion) {
+		return false, errors.New("pending completion lacks evidence")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.records {
+		row := &f.records[i]
+		if row.ID != recordID || row.TargetID != targetID || row.BatchID != batchID {
+			continue
+		}
+		if row.Status == QuestionAnswerSucceeded || row.Status == QuestionAnswerFailed || row.Status == QuestionAnswerCancelled {
+			return true, nil
+		}
+		if row.Status != QuestionAnswerRunning && !(allowPending && row.Status == QuestionAnswerPending) {
+			return false, errors.New("record is not terminal and pending update is not allowed")
+		}
+		now := time.Now()
+		row.Status, row.AnswerBody, row.ErrorType = completion.Status, completion.AnswerBody, completion.ErrorType
+		row.AnswerJudgment, row.JudgmentSource = completion.AnswerJudgment, completion.JudgmentSource
+		row.UpstreamStatus, row.UpstreamExcerpt = completion.UpstreamStatus, completion.UpstreamExcerpt
+		row.Diagnostics = cloneQuestionAnswerDiagnostics(completion.Diagnostics)
+		row.ManualError = completion.AnswerJudgment != nil && *completion.AnswerJudgment == QuestionAnswerIncorrect
+		row.CompletedAt, row.UpdatedAt = &now, now
+		return true, nil
+	}
+	return false, errors.New("record not found")
 }
 
 func (f *fakeQuestionAnswerRepository) FinalizeQuestionAnswerBatch(_ context.Context, _ string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
@@ -965,12 +1001,9 @@ type controlledFinalizeQuestionAnswerRepository struct {
 	failOneCompletion      bool
 	completionFailed       bool
 	finalizeCalls          int
-	stopPendingCalls       int
-	stopPendingObserved    chan struct{}
 	firstFinalizeStarted   chan struct{}
 	firstFinalizeRelease   chan struct{}
 	firstFinalizeReleaseMu sync.Once
-	stopPendingRelease     chan struct{}
 	alwaysWaitForDeadline  bool
 }
 
@@ -978,7 +1011,6 @@ func newControlledFinalizeQuestionAnswerRepository(base *fakeQuestionAnswerRepos
 	return &controlledFinalizeQuestionAnswerRepository{
 		fakeQuestionAnswerRepository: base,
 		failOneCompletion:            failOneCompletion,
-		stopPendingObserved:          make(chan struct{}, 16),
 		firstFinalizeStarted:         make(chan struct{}),
 		firstFinalizeRelease:         make(chan struct{}),
 	}
@@ -993,22 +1025,6 @@ func (r *controlledFinalizeQuestionAnswerRepository) CompleteQuestionAnswer(ctx 
 	}
 	r.mu.Unlock()
 	return r.fakeQuestionAnswerRepository.CompleteQuestionAnswer(ctx, userID, batchID, recordID, completion)
-}
-
-func (r *controlledFinalizeQuestionAnswerRepository) StopPendingQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
-	r.mu.Lock()
-	r.stopPendingCalls++
-	release := r.stopPendingRelease
-	r.mu.Unlock()
-	r.stopPendingObserved <- struct{}{}
-	if release != nil {
-		select {
-		case <-release:
-		case <-ctx.Done():
-			return true, ctx.Err()
-		}
-	}
-	return r.fakeQuestionAnswerRepository.StopPendingQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType)
 }
 
 func (r *controlledFinalizeQuestionAnswerRepository) FinalizeQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
@@ -1052,17 +1068,11 @@ func TestQuestionAnswerStopDoesNotRetryFailureCreatedDuringSameCall(t *testing.T
 	defer server.Close()
 	base := newFakeQuestionAnswerRepository(TestQuestion{ID: "same-attempt-q", Name: "same-attempt", Body: "same-attempt", Enabled: true})
 	repository := newControlledFinalizeQuestionAnswerRepository(base, false)
-	repository.stopPendingRelease = make(chan struct{})
 	repository.releaseFirstFinalize()
 	service := newMultiTargetQuestionAnswerService(server.URL, repository, newFakeRepository())
 	transport := newCancellationHoldingRoundTripper(1)
 	service.questionAnswerHTTP = &QuestionAnswerRunner{client: &http.Client{Transport: transport}}
 	defer func() {
-		select {
-		case <-repository.stopPendingRelease:
-		default:
-			close(repository.stopPendingRelease)
-		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_ = service.ShutdownQuestionAnswers(ctx)
@@ -1084,11 +1094,6 @@ func TestQuestionAnswerStopDoesNotRetryFailureCreatedDuringSameCall(t *testing.T
 		stopResult <- stopErr
 	}()
 	select {
-	case <-repository.stopPendingObserved:
-	case <-time.After(time.Second):
-		t.Fatal("same-attempt stop did not block in StopPending")
-	}
-	select {
 	case <-transport.cancellationObserved:
 	case <-time.After(time.Second):
 		t.Fatal("same-attempt request did not observe cancellation")
@@ -1106,7 +1111,6 @@ func TestQuestionAnswerStopDoesNotRetryFailureCreatedDuringSameCall(t *testing.T
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	close(repository.stopPendingRelease)
 	select {
 	case stopErr := <-stopResult:
 		if !errors.Is(stopErr, errQuestionAnswerTestFinalize) {
@@ -1154,17 +1158,11 @@ func TestQuestionAnswerStopCallerDeadlineKeepsBackgroundFinalizerAndHeldSlots(t 
 	}
 	base := newFakeQuestionAnswerRepository(questions...)
 	repository := newControlledFinalizeQuestionAnswerRepository(base, true)
-	repository.stopPendingRelease = make(chan struct{})
 	service := newMultiTargetQuestionAnswerService(server.URL, repository, newFakeRepository())
 	service.questionAnswerStorageTimeout = time.Second
 	transport := newCancellationHoldingRoundTripper(10)
 	service.questionAnswerHTTP = &QuestionAnswerRunner{client: &http.Client{Transport: transport}}
 	defer func() {
-		select {
-		case <-repository.stopPendingRelease:
-		default:
-			close(repository.stopPendingRelease)
-		}
 		repository.releaseFirstFinalize()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
@@ -1196,11 +1194,6 @@ func TestQuestionAnswerStopCallerDeadlineKeepsBackgroundFinalizerAndHeldSlots(t 
 		_, stopErr := service.StopQuestionAnswerBatch(callerCtx, "user1", targetA, batchA.BatchID)
 		stopResult <- stopErr
 	}()
-	select {
-	case <-repository.stopPendingObserved:
-	case <-time.After(time.Second):
-		t.Fatal("caller-deadline stop did not reach blocked StopPending")
-	}
 	for i := 0; i < 5; i++ {
 		select {
 		case <-transport.cancellationObserved:
@@ -1212,7 +1205,7 @@ func TestQuestionAnswerStopCallerDeadlineKeepsBackgroundFinalizerAndHeldSlots(t 
 	select {
 	case <-repository.firstFinalizeStarted:
 	case <-time.After(time.Second):
-		t.Fatal("background finalizer did not start while StopPending was blocked")
+		t.Fatal("background finalizer did not start after cancelled requests settled")
 	}
 	select {
 	case stopErr := <-stopResult:
@@ -1262,7 +1255,6 @@ func TestQuestionAnswerStopCallerDeadlineKeepsBackgroundFinalizerAndHeldSlots(t 
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	close(repository.stopPendingRelease)
 	if _, err := service.StopQuestionAnswerBatch(context.Background(), "user1", targetA, batchA.BatchID); err != nil {
 		t.Fatalf("retry caller-deadline finalizer: %v", err)
 	}
@@ -1321,28 +1313,28 @@ func TestQuestionAnswerShutdownContinuesAfterCallerReturns(t *testing.T) {
 	}
 }
 
-var errQuestionAnswerStopPendingOnce = errors.New("test one-time stop-pending failure")
+var errQuestionAnswerFinalizeOnce = errors.New("test one-time finalization failure")
 
-type stopPendingOnceQuestionAnswerRepository struct {
+type finalizeOnceQuestionAnswerRepository struct {
 	*fakeQuestionAnswerRepository
 	mu    sync.Mutex
 	calls int
 }
 
-func (r *stopPendingOnceQuestionAnswerRepository) StopPendingQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
+func (r *finalizeOnceQuestionAnswerRepository) FinalizeQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
 	r.mu.Lock()
 	r.calls++
 	call := r.calls
 	r.mu.Unlock()
 	if call == 1 {
-		return true, errQuestionAnswerStopPendingOnce
+		return true, errQuestionAnswerFinalizeOnce
 	}
-	return r.fakeQuestionAnswerRepository.StopPendingQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType)
+	return r.fakeQuestionAnswerRepository.FinalizeQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType)
 }
 
-func TestQuestionAnswerShutdownNextCallClearsSettledStopPendingFailure(t *testing.T) {
+func TestQuestionAnswerShutdownNextCallClearsSettledFinalizeFailure(t *testing.T) {
 	base := newFakeQuestionAnswerRepository(TestQuestion{ID: "shutdown-retry-q", Name: "shutdown-retry", Body: "shutdown-retry", Enabled: true})
-	repository := &stopPendingOnceQuestionAnswerRepository{fakeQuestionAnswerRepository: base}
+	repository := &finalizeOnceQuestionAnswerRepository{fakeQuestionAnswerRepository: base}
 	records, err := repository.CreateQuestionAnswerBatch(context.Background(), "user1", "sub2api:ws1:acc-a", "shutdown-retry-batch", []string{"model-a"}, []string{"shutdown-retry-q"}, QuestionAnswerReasoningEffortMedium, 1)
 	if err != nil {
 		t.Fatalf("prepare shutdown retry batch: %v", err)
@@ -1364,8 +1356,8 @@ func TestQuestionAnswerShutdownNextCallClearsSettledStopPendingFailure(t *testin
 		questionAnswerOrder: []string{key}, questionAnswerWake: make(chan struct{}, 1),
 		questionAnswerDispatcherDone: dispatcherDone, questionAnswerStorageTimeout: time.Second,
 	}
-	if shutdownErr := service.ShutdownQuestionAnswers(context.Background()); !errors.Is(shutdownErr, errQuestionAnswerStopPendingOnce) {
-		t.Fatalf("first shutdown error=%v want one-time StopPending failure", shutdownErr)
+	if shutdownErr := service.ShutdownQuestionAnswers(context.Background()); !errors.Is(shutdownErr, errQuestionAnswerFinalizeOnce) {
+		t.Fatalf("first shutdown error=%v want one-time finalization failure", shutdownErr)
 	}
 	if shutdownErr := service.ShutdownQuestionAnswers(context.Background()); shutdownErr != nil {
 		t.Fatalf("second explicit shutdown retained stale error: %v", shutdownErr)
@@ -1373,9 +1365,9 @@ func TestQuestionAnswerShutdownNextCallClearsSettledStopPendingFailure(t *testin
 }
 
 var (
-	errQuestionAnswerPostCreateCommit   = errors.New("test post-create commit result unknown")
-	errQuestionAnswerPostCreateStop     = errors.New("test post-create stop failure")
-	errQuestionAnswerPostCreateFinalize = errors.New("test post-create finalize failure")
+	errQuestionAnswerPostCreateCommit    = errors.New("test post-create commit result unknown")
+	errQuestionAnswerPostCreateRemaining = errors.New("test post-create remaining-record finalization failure")
+	errQuestionAnswerPostCreateFinalize  = errors.New("test post-create finalize failure")
 )
 
 type postCreateShutdownQuestionAnswerRepository struct {
@@ -1385,7 +1377,6 @@ type postCreateShutdownQuestionAnswerRepository struct {
 
 	mu            sync.Mutex
 	createErr     error
-	stopCalls     int
 	finalizeCalls int
 }
 
@@ -1408,17 +1399,6 @@ func (r *postCreateShutdownQuestionAnswerRepository) CreateQuestionAnswerBatch(c
 		return nil, r.createErr
 	}
 	return records, nil
-}
-
-func (r *postCreateShutdownQuestionAnswerRepository) StopPendingQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
-	r.mu.Lock()
-	r.stopCalls++
-	call := r.stopCalls
-	r.mu.Unlock()
-	if call == 1 {
-		return true, errQuestionAnswerPostCreateStop
-	}
-	return r.fakeQuestionAnswerRepository.StopPendingQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType)
 }
 
 func (r *postCreateShutdownQuestionAnswerRepository) FinalizeQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
@@ -1458,8 +1438,8 @@ func TestQuestionAnswerPostCreateShutdownFailureRetainsRetryOwnership(t *testing
 	shutdownErr := service.ShutdownQuestionAnswers(context.Background())
 	close(repository.release)
 	startErr := <-startResult
-	if !errors.Is(shutdownErr, errQuestionAnswerPostCreateStop) || !errors.Is(shutdownErr, errQuestionAnswerPostCreateFinalize) {
-		t.Fatalf("post-create shutdown error=%v want stop and finalize failures", shutdownErr)
+	if !errors.Is(shutdownErr, errQuestionAnswerPostCreateFinalize) {
+		t.Fatalf("post-create shutdown error=%v want batch-finalization failure", shutdownErr)
 	}
 	if !errors.Is(startErr, errQuestionAnswerPostCreateFinalize) || startErr.Error() == ErrorQuestionAnswerServiceStopped {
 		t.Fatalf("post-create start error=%v want visible cleanup failure", startErr)
@@ -1496,8 +1476,8 @@ func TestQuestionAnswerCreateErrorAfterPersistCleanupFailureRetainsOwnerForShutd
 	_, startErr := service.StartQuestionAnswerBatch(context.Background(), "user1", target, QuestionAnswerStartInput{
 		Models: []string{"model-a"}, QuestionIDs: []string{"post-create-error-q"},
 	})
-	if !errors.Is(startErr, errQuestionAnswerPostCreateCommit) || !errors.Is(startErr, errQuestionAnswerPostCreateStop) || !errors.Is(startErr, errQuestionAnswerPostCreateFinalize) {
-		t.Fatalf("post-create error=%v want create, stop, and finalize failures", startErr)
+	if !errors.Is(startErr, errQuestionAnswerPostCreateCommit) || !errors.Is(startErr, errQuestionAnswerPostCreateFinalize) {
+		t.Fatalf("post-create error=%v want create and batch-finalization failures", startErr)
 	}
 	key := questionAnswerRunKey("user1", target)
 	service.questionAnswerMu.Lock()
@@ -1672,23 +1652,16 @@ func TestQuestionAnswerConcurrentStorageStopsShareSettledFailureThenRetry(t *tes
 	case <-time.After(time.Second):
 		t.Fatal("settled request did not start")
 	}
-	stop := func(result chan<- error) {
-		_, stopErr := service.StopQuestionAnswerBatch(context.Background(), "user1", targetA, batch.BatchID)
+	stop := func(ctx context.Context, result chan<- error) {
+		_, stopErr := service.StopQuestionAnswerBatch(ctx, "user1", targetA, batch.BatchID)
 		result <- stopErr
 	}
 	results := make(chan error, 2)
-	go stop(results)
-	select {
-	case <-repository.stopPendingObserved:
-	case <-time.After(time.Second):
-		t.Fatal("first stop did not reach pending stop")
-	}
-	go stop(results)
-	select {
-	case <-repository.stopPendingObserved:
-	case <-time.After(time.Second):
-		t.Fatal("second stop did not share the active attempt")
-	}
+	firstWait, secondWait := inventoryPathsWaitingContext(), inventoryPathsWaitingContext()
+	go stop(firstWait, results)
+	inventoryPathsWaitEntered(t, firstWait)
+	go stop(secondWait, results)
+	inventoryPathsWaitEntered(t, secondWait)
 	select {
 	case <-transport.cancellationObserved:
 	case <-time.After(time.Second):
@@ -1931,14 +1904,14 @@ func (r *cancellingMarkQuestionAnswerRepository) MarkQuestionAnswerRunning(ctx c
 	return false, ctx.Err()
 }
 
-func (r *cancellingMarkQuestionAnswerRepository) StopPendingQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
+func (r *cancellingMarkQuestionAnswerRepository) ConfirmOrSaveQuestionAnswerCompletion(ctx context.Context, userID, targetID, batchID, recordID string, completion QuestionAnswerCompletion, allowPending bool) (bool, error) {
 	r.mu.Lock()
 	r.stopCalls = append(r.stopCalls, struct {
 		status    QuestionAnswerStatus
 		errorType string
-	}{status: status, errorType: errorType})
+	}{status: completion.Status, errorType: completion.ErrorType})
 	r.mu.Unlock()
-	return r.fakeQuestionAnswerRepository.StopPendingQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType)
+	return r.fakeQuestionAnswerRepository.ConfirmOrSaveQuestionAnswerCompletion(ctx, userID, targetID, batchID, recordID, completion, allowPending)
 }
 
 func (r *cancellingMarkQuestionAnswerRepository) FinalizeQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
@@ -2001,7 +1974,7 @@ func TestQuestionAnswerCancelDuringMarkRunningIsNotReportedAsStorageFailure(t *t
 	}
 	stopCalls := repository.stops()
 	if len(stopCalls) != 2 {
-		t.Fatalf("stop calls = %+v, want pending stop and finalizer", stopCalls)
+		t.Fatalf("stop calls = %+v, want selected-record confirmation and finalizer", stopCalls)
 	}
 	for _, call := range stopCalls {
 		if call.status != QuestionAnswerCancelled || call.errorType != "" {
@@ -2015,7 +1988,7 @@ type concurrentCompletionFailureRepository struct {
 
 	mu            sync.Mutex
 	completeCalls int
-	stopCalls     int
+	finalizeCalls int
 	completes     chan struct{}
 }
 
@@ -2034,21 +2007,17 @@ func (r *concurrentCompletionFailureRepository) CompleteQuestionAnswer(context.C
 	return false, errors.New("complete storage failure")
 }
 
-func (r *concurrentCompletionFailureRepository) StopPendingQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
-	r.mu.Lock()
-	r.stopCalls++
-	r.mu.Unlock()
-	return r.fakeQuestionAnswerRepository.StopPendingQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType)
-}
-
 func (r *concurrentCompletionFailureRepository) FinalizeQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
+	r.mu.Lock()
+	r.finalizeCalls++
+	r.mu.Unlock()
 	return r.fakeQuestionAnswerRepository.FinalizeQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType)
 }
 
-func (r *concurrentCompletionFailureRepository) stopCount() int {
+func (r *concurrentCompletionFailureRepository) finalizeCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.stopCalls
+	return r.finalizeCalls
 }
 
 func TestQuestionAnswerConcurrentStorageFailuresStopBatchOnce(t *testing.T) {
@@ -2080,15 +2049,15 @@ func TestQuestionAnswerConcurrentStorageFailuresStopBatchOnce(t *testing.T) {
 		t.Fatalf("start batch: %v", err)
 	}
 	completed := waitQuestionAnswerBatch(t, service, batch.BatchID, false)
-	if calls := repository.stopCount(); calls != 1 {
-		t.Fatalf("batch stop calls = %d, want 1 after concurrent storage failures", calls)
+	if calls := repository.finalizeCount(); calls != 1 {
+		t.Fatalf("batch finalizer calls = %d, want 1 after concurrent storage failures", calls)
 	}
 	for _, record := range completed.Records {
 		if record.UpstreamStatus != nil || record.UpstreamExcerpt != "" {
 			t.Fatal("stopped record has upstream evidence")
 		}
-		if record.Status != QuestionAnswerFailed || record.ErrorType != QuestionAnswerErrorStorage {
-			t.Fatalf("record after storage failure = %+v", record)
+		if record.Status != QuestionAnswerSucceeded || record.ErrorType != "" || record.AnswerBody != "answer" {
+			t.Fatalf("sealed answer after storage recovery = %+v", record)
 		}
 	}
 }

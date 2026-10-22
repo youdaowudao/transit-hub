@@ -10,6 +10,8 @@ import ManualOneTimeProbeDialog, {
   type ManualProbeTargetSummary,
 } from '@/modules/admin/components/dashboard/ManualOneTimeProbeDialog.vue'
 import ConnectionHealthView from '@/modules/admin/views/ConnectionHealthView.vue'
+import QuestionAnswerScheduleBatchDialog from '@/modules/admin/components/dashboard/QuestionAnswerScheduleBatchDialog.vue'
+import * as queuePolling from '@/modules/admin/composables/useQuestionAnswerQueue'
 import type {
   AdminGroupAccount,
   AdminGroupHealth,
@@ -426,6 +428,33 @@ const mountView = async (
 }
 
 describe('model error parent entry preservation', () => {
+  it('refreshes the shared queue on original current-workspace task notifications and manual refresh only', async () => {
+    const refreshQueue = vi.spyOn(queuePolling, 'refreshQuestionAnswerQueue')
+    const current = 'sub2api:ws1:queue-notification'
+    const wrapper = await mountView([adminGroup('notification-parent', [account(current)])], storedPreferences())
+    refreshQueue.mockClear()
+    wrapper.getComponent(ManualOneTimeProbeDialog).vm.$emit('question-answer-started', current); await flushPromises()
+    expect(refreshQueue).toHaveBeenCalledWith('ws1')
+    refreshQueue.mockClear()
+    wrapper.getComponent(ManualOneTimeProbeDialog).vm.$emit('question-answer-stats-dirty', 'sub2api:other:foreign'); await flushPromises()
+    expect(refreshQueue).not.toHaveBeenCalled()
+    const refreshButton = wrapper.findAll('button').find(button => button.text() === '刷新')!
+    await refreshButton.trigger('click'); await flushPromises()
+    expect(refreshQueue).toHaveBeenCalledWith('ws1')
+  })
+  it('opens an absent queue target read-only then removes that overlay when a current target opens manually', async () => {
+    const current = 'sub2api:ws1:current-queue-target'
+    const wrapper = await mountView([adminGroup('queue-parent', [account(current)])], storedPreferences())
+    wrapper.getComponent(ManualOneTimeProbeDialog).vm.$emit('question-answer-view', { targetId: 'sub2api:ws1:missing', batchId: 'missing-batch' })
+    await flushPromises()
+    const fallback = wrapper.getComponent(QuestionAnswerScheduleBatchDialog)
+    expect(fallback.props('batchId')).toBe('missing-batch')
+    fallback.vm.$emit('question-answer-view', { targetId: current, batchId: 'current-batch' }); await flushPromises()
+    expect(wrapper.findComponent(QuestionAnswerScheduleBatchDialog).exists()).toBe(false)
+    expect(wrapper.getComponent(ManualOneTimeProbeDialog).props('target').targetId).toBe(current)
+    expect(wrapper.getComponent(ManualOneTimeProbeDialog).props('initialQuestionAnswerBatchId')).toBe('current-batch')
+    expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
+  })
   it.each(['account', 'recent', 'management'] as const)('T9 opens the real %s entry with original target and exact batch', async entry => {
     const id = 'sub2api:ws1:model-error-entry'
     const batchId = 'model-error-exact-entry'
@@ -917,13 +946,16 @@ describe('batch sequential submission', () => {
     expect(drawer.text()).toContain('已处理 6/6')
     expect(drawer.text()).toContain('已启动 2')
     expect(drawer.text()).toContain('已跳过 2')
-    expect(drawer.text()).toContain('失败 2')
+    expect(drawer.text()).toContain('失败 1')
     expect(drawer.text()).toContain('预览总量 32')
-    expect(drawer.text()).toContain('实际接受总量 15')
+    expect(drawer.text()).toContain('实际接受总量尚未确认')
+    expect(drawer.text()).toContain('已确认受理 15 条')
+    expect(drawer.text()).not.toContain('实际接受总量 15')
     expect(drawer.get('[data-testid="question-answer-batch-outcome-t2"]').text()).toContain('已有活动批次')
     expect(drawer.get('[data-testid="question-answer-batch-outcome-t3"]').text()).toContain('无兼容模型')
     expect(drawer.get('[data-testid="question-answer-batch-outcome-t4"]').text()).toContain('模型发现失败')
-    expect(drawer.get('[data-testid="question-answer-batch-outcome-t5"]').text()).toContain('启动失败')
+    expect(drawer.get('[data-testid="question-answer-batch-outcome-t5"]').text()).toContain('提交未确认')
+    expect(drawer.get('[data-testid="question-answer-batch-outcome-t5"]').text()).toContain('不会自动重发')
     expect(readConnectionHealthPreferences('ws1').questionAnswerUnreadTargetIds).toEqual(['t1', 't6'])
   })
 

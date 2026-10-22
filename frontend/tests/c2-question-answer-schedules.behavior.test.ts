@@ -327,7 +327,7 @@ describe('C2 running protection and retained account result display', () => {
 const scheduleEvidenceCopy = {
   note: '这里显示已保存的处理结果，只供查看，不会修改主站。请按这条记录上方已知的失败原因处理；没有取得可判题完整答案的条目不判对错。',
   status: '上游返回码',
-  excerpt: '失败详情（已隐藏账号密钥，最多500字；旧记录可能只保留开头）',
+  excerpt: '失败详情：接口返回和已有说明（已隐藏账号密钥，最多500字；旧记录可能只保留开头）',
   emptyExcerpt: '这条记录没有保存额外详情，已知原因请看上方的失败说明。',
 }
 const scheduleEvidenceStates = [
@@ -395,7 +395,7 @@ describe('scheduled exact-batch failure evidence', () => {
     const row = wrapper.get('article')
     expect(row.text()).toContain('定时取证题目 schedule-evidence · m1 · failed')
     expectScheduleEvidence(wrapper, state)
-    expect(row.text()).toContain('网络请求失败：连接没有建立，或者回答到一半断开了。可以稍后重测；一直失败时检查上游地址和网络。')
+    expect(row.text()).toContain('请求被记录为连接或读取错误。具体步骤和直接原因见下方详情；记录不足时无法确认中断位置，请先核查同一时刻的后台日志。')
     expect(row.text()).not.toContain('network')
     expect(api.getLatestQuestionAnswerBatch).not.toHaveBeenCalled()
     expect(api.runQuestionAnswerSchedule).not.toHaveBeenCalled()
@@ -403,7 +403,7 @@ describe('scheduled exact-batch failure evidence', () => {
   })
 
   it.each([
-    ['invalid_response', '未能取得可用的答案：没有拿到可以判题的正文。常见原因：请求被上游拒绝、只收到思考没有正文、模型拒答或没有正常结束、回答内容无法解析。偶尔出现可以稍后重测。一直出现时：有上游原话就把原话发给上游询问；没有原话就记下时间、模型和返回码，请上游核查这一次的回答。'],
+    ['invalid_response', '没有取得可判题的完整回答，本题不判对错。具体格式或结束原因见下方详情；当时未记录的过程无法补回，请先核查批次和同一时刻的后台日志。'],
     ['rate_limited', '上游请求被限流。'],
     ['not_a_known_error', '问答请求失败。'],
   ])('translates %s to its shared Chinese failure reason', async (errorType, expected) => {
@@ -420,7 +420,8 @@ describe('scheduled exact-batch failure evidence', () => {
     const batch = scheduleEvidenceBatch('schedule-cancelled', {}, '', 'cancelled')
     api.getQuestionAnswerBatch.mockResolvedValue(batch)
     const wrapper = await mountScheduleEvidence(batch.batchId)
-    expect(wrapper.get('article').text()).toBe('定时取证题目 schedule-cancelled · m1 · cancelled')
+    expect(wrapper.get('article > p').text()).toBe('定时取证题目 schedule-cancelled · m1 · cancelled')
+    expect(wrapper.get('[data-testid="question-answer-execution-details"]').text()).toContain('当时未记录网络过程')
     expect(wrapper.text()).not.toContain('问答请求失败。')
     expectScheduleEvidence(wrapper, scheduleEvidenceStates[4]!, false)
   })
@@ -432,7 +433,7 @@ describe('scheduled exact-batch failure evidence', () => {
     const wrapper = await mountScheduleEvidence(first.batchId)
     expect(wrapper.get('article').text()).toContain('定时刷新前唯一原话')
     await button(wrapper, '刷新').trigger('click'); await flushPromises()
-    expect(wrapper.get('article').text()).toContain('网络请求失败：连接没有建立，或者回答到一半断开了。可以稍后重测；一直失败时检查上游地址和网络。')
+    expect(wrapper.get('article').text()).toContain('请求被记录为连接或读取错误。具体步骤和直接原因见下方详情；记录不足时无法确认中断位置，请先核查同一时刻的后台日志。')
     expect(wrapper.text()).not.toContain('定时刷新前唯一原话')
     expectScheduleEvidence(wrapper, scheduleEvidenceStates[3]!)
     expect(api.getQuestionAnswerBatch).toHaveBeenCalledTimes(2)

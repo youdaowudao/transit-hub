@@ -5,6 +5,7 @@ import { formatConnectionHealthTime } from '../../composables/useConnectionHealt
 import { questionAnswerElapsedMilliseconds, questionAnswerSourceLabel, questionAnswerRequestProtocolLabel } from '../../utils/questionAnswers'
 import { t } from '@/locales'
 import QuestionAnswerHighlightedText from './QuestionAnswerHighlightedText.vue'
+import QuestionAnswerExecutionDetails from './QuestionAnswerExecutionDetails.vue'
 const props = defineProps<{ record: QuestionAnswerRecord; expanded: boolean; saving: boolean; savingJudgment?: 'unreviewed' | 'correct' | 'incorrect'; readOnly?: boolean }>()
 const emit = defineEmits<{ (event: 'judge', value: 'correct' | 'incorrect'): void; (event: 'expand'): void }>()
 const answer = () => props.expanded || props.record.answerBody.length <= 220 ? props.record.answerBody : `${props.record.answerBody.slice(0, 220)}…`
@@ -24,6 +25,7 @@ const answer = () => props.expanded || props.record.answerBody.length <= 220 ? p
       <p class="mt-1 break-words text-[11px] text-muted-foreground">关键词快照：{{ record.questionKeywordSnapshot === null ? '无关键字快照' : record.questionKeywordSnapshot.length ? record.questionKeywordSnapshot.join('、') : '仅人工判断' }}</p>
       <QuestionAnswerHighlightedText v-if="record.answerBody" class="mt-2" :answer="answer()" :snapshot="record.questionKeywordSnapshot" />
       <p v-else class="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground">没有回答正文。</p>
+      <QuestionAnswerExecutionDetails :record="record" />
       <button v-if="record.answerBody.length > 220" type="button" class="mt-2 inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground" @click="emit('expand')">{{ expanded ? '收起详情' : '展开详情' }}<ChevronUp v-if="expanded" class="h-3.5 w-3.5" /><ChevronDown v-else class="h-3.5 w-3.5" /></button>
     </div>
     <div v-if="!readOnly" class="grid grid-cols-2 gap-2 md:grid-cols-1 md:self-start">

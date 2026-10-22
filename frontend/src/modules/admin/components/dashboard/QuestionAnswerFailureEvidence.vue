@@ -4,6 +4,7 @@ import { t } from '@/locales'
 import type { QuestionAnswerRecord } from '../../types/connectionHealth'
 import { formatConnectionHealthTime } from '../../composables/useConnectionHealth'
 import { questionAnswerElapsedMilliseconds } from '../../utils/questionAnswers'
+import QuestionAnswerExecutionDetails from './QuestionAnswerExecutionDetails.vue'
 
 const props = defineProps<{ record: QuestionAnswerRecord }>()
 const prefix = 'admin.connectionHealth.manualProbeDialog.questionAnswer.failureEvidence'
@@ -34,5 +35,6 @@ const elapsedLabel = computed(() => {
       <p class="mt-1 whitespace-pre-wrap break-all text-xs leading-5 text-foreground">{{ excerpt }}</p>
     </div>
     <p v-else class="text-xs text-muted-foreground">{{ t(prefix + '.emptyExcerpt') }}</p>
+    <QuestionAnswerExecutionDetails :record="record" />
   </div>
 </template>

@@ -61,7 +61,14 @@ func TestModelControlV300MigrationPreservesHistoryAndTargetsBackfill(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	queries := []string{`SELECT to_jsonb(t)::text FROM connection_health_model_control_targets t WHERE id='old-target'`, `SELECT to_jsonb(t)::text FROM connection_health_model_control_events t WHERE id='old-event'`, `SELECT to_jsonb(t)::text FROM connection_health_question_answer_records t WHERE id='old-answer'`, `SELECT to_jsonb(t)::text FROM connection_health_model_control_auto t WHERE user_id='v300-history'`}
+	queries := []string{
+		`SELECT to_jsonb(t)::text FROM connection_health_model_control_targets t WHERE id='old-target'`,
+		`SELECT to_jsonb(t)::text FROM connection_health_model_control_events t WHERE id='old-event'`,
+		// Compare every historical column; the new nullable diagnostics column is
+		// checked separately after the full migration chain.
+		`SELECT (to_jsonb(t) - 'request_diagnostics')::text FROM connection_health_question_answer_records t WHERE id='old-answer'`,
+		`SELECT to_jsonb(t)::text FROM connection_health_model_control_auto t WHERE user_id='v300-history'`,
+	}
 	before := make([]string, len(queries))
 	for i, q := range queries {
 		if err = pool.QueryRow(ctx, q).Scan(&before[i]); err != nil {
@@ -79,6 +86,13 @@ func TestModelControlV300MigrationPreservesHistoryAndTargetsBackfill(t *testing.
 		if after != before[i] {
 			t.Errorf("migration rewrote historical row %d before=%s after=%s", i, before[i], after)
 		}
+	}
+	var diagnosticsNull bool
+	if err = pool.QueryRow(ctx, `SELECT request_diagnostics IS NULL FROM connection_health_question_answer_records WHERE id='old-answer'`).Scan(&diagnosticsNull); err != nil {
+		t.Fatal(err)
+	}
+	if !diagnosticsNull {
+		t.Fatal("new diagnostics column must remain NULL for the historical answer")
 	}
 	var accuracy, min int
 	var version int64

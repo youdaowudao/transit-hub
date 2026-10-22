@@ -2,9 +2,12 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Loader2, X } from 'lucide-vue-next'
 import { t, te } from '@/locales'
+import { getAccessToken } from '@/modules/auth/api/auth'
 import { Tooltip } from '@/components/ui/tooltip'
 import { connectionHealthMessageKey, isTestConfigurationBlocked, testProtocolName } from '../../composables/useConnectionHealth'
-import { discoverTargetModels, listTestQuestions, startQuestionAnswerBatch } from '../../api/connectionHealth'
+import { ConnectionHealthApiError, discoverTargetModels, listTestQuestions, startQuestionAnswerBatch } from '../../api/connectionHealth'
+import QuestionAnswerQueuePanel from './QuestionAnswerQueuePanel.vue'
+import { refreshQuestionAnswerQueue } from '../../composables/useQuestionAnswerQueue'
 import type {
   AdminGroupHealth,
   ManualProbeModelOption,
@@ -20,6 +23,8 @@ import {
   resolveQuestionAnswerSelection,
   questionAnswerDuplicateQuestionNames,
   selectQuestionAnswerBatchTargets,
+  questionAnswerReadableError,
+  questionAnswerOperationKey,
   type QuestionAnswerBatchTarget,
 } from '../../utils/questionAnswers'
 
@@ -43,7 +48,7 @@ interface BatchTargetPreview {
   discoveryErrorKey: string
 }
 
-type BatchTargetOutcomeKind = 'started' | 'skipped' | 'failed'
+type BatchTargetOutcomeKind = 'started' | 'skipped' | 'failed' | 'unknown'
 
 interface BatchTargetOutcome {
   targetId: string
@@ -53,7 +58,7 @@ interface BatchTargetOutcome {
   compatibleModelIds: string[]
   incompatibleModelIds: string[]
   requestCount: number
-  acceptedRequestCount: number
+  acceptedRequestCount: number | null
   reasonKey: string
   errorKey: string
 }
@@ -81,6 +86,10 @@ const preparedQuestionNames = ref<string[]>([])
 const preparedModelIds = ref<string[]>([])
 const running = ref(false)
 const outcomes = ref<BatchTargetOutcome[]>([])
+const runPlan = ref<BatchTargetPreview[]>([])
+const submittingTarget = ref('')
+const waitingTargets = computed(() => runPlan.value.filter(preview => preview.target.targetId !== submittingTarget.value && !outcomes.value.some(outcome => outcome.targetId === preview.target.targetId)))
+const submittingAccount = computed(() => runPlan.value.find(preview => preview.target.targetId === submittingTarget.value)?.target.accountName)
 const runPreviewTotal = ref(0)
 const runTargetTotal = ref(0)
 const startedAt = ref<number | null>(null)
@@ -89,6 +98,7 @@ let preparationSequence = 0
 let preparationController: AbortController | null = null
 let runSequence = 0
 let runController: AbortController | null = null
+let runSessionIdentity: string | null = null
 
 const candidates = computed(() => collectQuestionAnswerBatchTargets(props.groups))
 const incompleteGroups = computed(() => props.groups.filter(group => Boolean(group.accountsError)))
@@ -121,10 +131,13 @@ const preparationSignature = computed(() => JSON.stringify({
 const sourceTarget = computed(() => selectedTargets.value[0] ?? null)
 const previewTotal = computed(() => previews.value.reduce((total, preview) => total + preview.requestCount, 0))
 const displayedPreviewTotal = computed(() => running.value ? runPreviewTotal.value : previewTotal.value)
-const acceptedRequestTotal = computed(() => outcomes.value.reduce(
-  (total, outcome) => total + outcome.acceptedRequestCount,
+const confirmedRequestTotal = computed(() => outcomes.value.reduce(
+  (total, outcome) => total + (outcome.acceptedRequestCount ?? 0),
   0,
 ))
+const unknownCount = computed(() => outcomes.value.filter(outcome => outcome.kind === 'unknown').length)
+const acceptedRequestTotal = computed(() => unknownCount.value || running.value ? '尚未确认' : confirmedRequestTotal.value)
+const queueAccounts = computed(() => Object.fromEntries(candidates.value.map(target => [target.targetId, target.accountName])))
 const startedCount = computed(() => outcomes.value.filter(outcome => outcome.kind === 'started').length)
 const skippedCount = computed(() => outcomes.value.filter(outcome => outcome.kind === 'skipped').length)
 const failedCount = computed(() => outcomes.value.filter(outcome => outcome.kind === 'failed').length)
@@ -259,9 +272,14 @@ const prepare = async () => {
   }
 }
 
-const runIsCurrent = (sequence: number, scope: string): boolean => (
-  sequence === runSequence && scope === props.preferenceScope
-)
+const runIsCurrent = (sequence: number, scope: string): boolean => {
+  if (sequence !== runSequence || scope !== props.preferenceScope) return false
+  if (runSessionIdentity !== getAccessToken()) {
+    cancelRun(); outcomes.value = []; startedAt.value = null
+    return false
+  }
+  return true
+}
 
 const start = async () => {
   if (!canStart.value) return
@@ -280,10 +298,13 @@ const start = async () => {
     previewTotal: previewTotal.value,
   }
   const sequence = ++runSequence
+  runSessionIdentity = getAccessToken()
   const controller = new AbortController()
   runController = controller
   running.value = true
   outcomes.value = []
+  runPlan.value = snapshot.previews
+  submittingTarget.value = ''
   runPreviewTotal.value = snapshot.previewTotal
   runTargetTotal.value = snapshot.previews.length
   startedAt.value = Date.now()
@@ -313,6 +334,7 @@ const start = async () => {
       }
 
       try {
+        submittingTarget.value = preview.target.targetId
         const batch = await startQuestionAnswerBatch(
           preview.target.targetId,
           [...modelIds],
@@ -336,21 +358,24 @@ const start = async () => {
         }]
         emit('question-answer-started', preview.target.targetId)
       } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') return
+        if (error instanceof Error && error.name === 'AbortError') { runIsCurrent(sequence, snapshot.preferenceScope); return }
         if (!runIsCurrent(sequence, snapshot.preferenceScope)) return
-        const active = error instanceof Error
-          && error.message === 'admin.connectionHealth.errors.questionAnswerActive'
+        const active = questionAnswerOperationKey(error) === 'admin.connectionHealth.errors.questionAnswerActive'
+        const unknown = !active && (!(error instanceof ConnectionHealthApiError) || error.operationResult !== 'not_started')
         outcomes.value = [...outcomes.value, {
           targetId: preview.target.targetId,
           accountName: preview.target.accountName,
-          kind: active ? 'skipped' : 'failed',
+          kind: active ? 'skipped' : unknown ? 'unknown' : 'failed',
           compatibleModelIds: [...modelIds],
           incompatibleModelIds: [...preview.incompatibleModelIds],
           requestCount,
-          acceptedRequestCount: 0,
-          reasonKey: active ? 'activeBatch' : 'startFailed',
+          acceptedRequestCount: unknown ? null : 0,
+          reasonKey: active ? 'activeBatch' : unknown ? 'submissionUnknown' : 'startFailed',
           errorKey: active ? '' : (error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'),
         }]
+        refreshQuestionAnswerQueue(snapshot.preferenceScope)
+      } finally {
+        if (runIsCurrent(sequence, snapshot.preferenceScope)) submittingTarget.value = ''
       }
     }
   } finally {
@@ -368,7 +393,10 @@ const cancelRun = () => {
   runSequence++
   runController?.abort()
   runController = null
+  runSessionIdentity = null
   running.value = false
+  submittingTarget.value = ''
+  runPlan.value = []
 }
 
 const outcomeReason = (outcome: BatchTargetOutcome): string => {
@@ -377,12 +405,13 @@ const outcomeReason = (outcome: BatchTargetOutcome): string => {
     case 'noCompatibleModels': return t('admin.connectionHealth.questionAnswerBatch.outcomes.noCompatibleModels')
     case 'discoveryFailed': return t('admin.connectionHealth.questionAnswerBatch.outcomes.discoveryFailed')
     case 'startFailed': return t('admin.connectionHealth.questionAnswerBatch.outcomes.startFailed')
+    case 'submissionUnknown': return '提交未确认：创建请求的返回未确认，这不代表后台没有接收；请查看账号最近批次和时间核对，本次不会自动重发。'
     default: return t('admin.connectionHealth.questionAnswerBatch.outcomes.started')
   }
 }
 
 const safeConnectionHealthError = (rawKey: string): string => (
-  t(connectionHealthMessageKey(rawKey, te))
+  questionAnswerReadableError(rawKey, t, te)
 )
 
 const shortenedTargetId = (targetId: string): string => {
@@ -550,6 +579,8 @@ onBeforeUnmount(() => {
         </header>
 
         <div data-testid="question-answer-batch-body" class="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
+          <p class="text-xs text-muted-foreground">关闭抽屉后本轮提交和已接收任务继续。刷新页面会丢失尚未提交的计划；已接收任务仍可查看。</p>
+          <QuestionAnswerQueuePanel :workspace="preferenceScope" :visible="visible" :active="running" :accounts="queueAccounts" @view="emit('question-answer-view', $event)" />
           <div v-if="incompleteGroups.length" class="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-700 dark:text-amber-300">
             <p class="font-medium">{{ t('admin.connectionHealth.questionAnswerBatch.incomplete') }}</p>
             <ul class="mt-2 list-disc space-y-1 pl-5">
@@ -659,7 +690,11 @@ onBeforeUnmount(() => {
                 <span>{{ t('admin.connectionHealth.questionAnswerBatch.skipped', { count: skippedCount }) }}</span>
                 <span>{{ t('admin.connectionHealth.questionAnswerBatch.failed', { count: failedCount }) }}</span>
               </div>
-              <p class="font-medium text-foreground">{{ t('admin.connectionHealth.questionAnswerBatch.acceptedTotal', { total: acceptedRequestTotal }) }}</p>
+              <p v-if="unknownCount" class="font-medium text-foreground">实际接受总量尚未确认；已确认受理 {{ confirmedRequestTotal }} 条，另有 {{ unknownCount }} 个账号提交未确认。</p>
+              <p v-else-if="running" class="font-medium text-foreground">已确认受理 {{ confirmedRequestTotal }} 条；实际总量等待确认。</p>
+              <p v-else class="font-medium text-foreground">{{ t('admin.connectionHealth.questionAnswerBatch.acceptedTotal', { total: acceptedRequestTotal }) }}</p>
+              <p v-if="submittingTarget" data-testid="question-answer-batch-submitting">{{ submittingAccount }} · 正在提交：正在准备账号和题目，后台尚未确认接收。</p>
+              <p v-for="preview in waitingTargets" :key="`waiting:${preview.target.targetId}`" data-testid="question-answer-batch-waiting">{{ preview.target.accountName }} · 等待提交：尚未向后台创建这批题。</p>
               <div class="space-y-2">
                 <div
                   v-for="outcome in outcomes"
@@ -674,6 +709,7 @@ onBeforeUnmount(() => {
                   <p class="mt-0.5 break-words text-xs text-muted-foreground">{{ outcomeReason(outcome) }}</p>
                   <button v-if="outcome.kind === 'started' && outcome.batchId" type="button" class="mt-2 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium hover:bg-surface-line" @click="emit('question-answer-view', { targetId: outcome.targetId, batchId: outcome.batchId })">查看该批次</button>
                   <button v-else-if="outcome.reasonKey === 'activeBatch'" type="button" class="mt-2 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium hover:bg-surface-line" @click="emit('question-answer-view', { targetId: outcome.targetId })">打开该账号最近批次</button>
+                  <button v-else-if="outcome.kind === 'unknown'" type="button" class="mt-2 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium hover:bg-surface-line" @click="emit('question-answer-view', { targetId: outcome.targetId })">查看最近批次</button>
                   <p v-if="outcome.errorKey" class="mt-0.5 break-words text-xs text-destructive">{{ safeConnectionHealthError(outcome.errorKey) }}</p>
                 </div>
               </div>

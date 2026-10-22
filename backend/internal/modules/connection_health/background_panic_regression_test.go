@@ -198,7 +198,7 @@ func TestQuestionAnswerStartCorePanicReleasesAccount(t *testing.T) {
 
 type panicShutdownRepository struct{ *fakeQuestionAnswerRepository }
 
-func (r *panicShutdownRepository) StopPendingQuestionAnswerBatch(context.Context, string, string, string, QuestionAnswerStatus, string) (bool, error) {
+func (r *panicShutdownRepository) FinalizeQuestionAnswerBatch(context.Context, string, string, string, QuestionAnswerStatus, string) (bool, error) {
 	panic("injected shutdown storage panic")
 }
 func TestQuestionAnswerShutdownPanicCompletes(t *testing.T) {
@@ -206,6 +206,10 @@ func TestQuestionAnswerShutdownPanicCompletes(t *testing.T) {
 	s := panicRegressionService(t, base)
 	run := panicRegressionStart(t, s, base, "shutdown-panic")
 	s.questionAnswers = &panicShutdownRepository{base}
+	s.questionAnswerMu.Lock()
+	run.stopReason = QuestionAnswerErrorServiceShutdown
+	s.questionAnswerMu.Unlock()
+	run.cancel()
 	attempt := &questionAnswerShutdownAttempt{done: make(chan struct{})}
 	panicRegressionCall(t, func() {
 		s.runQuestionAnswerShutdown(attempt, []questionAnswerShutdownRun{{key: questionAnswerRunKey("user1", run.targetID), run: run}}, nil)

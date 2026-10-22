@@ -56,6 +56,9 @@ import {
   partitionQuestionAnswerReviewRecords,
   questionAnswerBatchCompletedAt,
   questionAnswerElapsedMilliseconds,
+  questionAnswerReadableError,
+  questionAnswerOperationKey,
+  questionAnswerSnapshotTime,
   questionAnswerReviewStatsFromRecords,
   questionAnswerStatsReconcile,
   resolveQuestionAnswerSelection,
@@ -71,6 +74,8 @@ import {
 } from '../../utils/connectionHealthPreferences'
 import QuestionAnswerRecordCard from './QuestionAnswerRecordCard.vue'
 import QuestionAnswerFailureEvidence from './QuestionAnswerFailureEvidence.vue'
+import QuestionAnswerExecutionDetails from './QuestionAnswerExecutionDetails.vue'
+import QuestionAnswerQueuePanel from './QuestionAnswerQueuePanel.vue'
 import QuestionAnswerStatsBar from './QuestionAnswerStatsBar.vue'
 import QuestionAnswerModelControlPanel from './QuestionAnswerModelControlPanel.vue'
 import AccountTierEditor from './AccountTierEditor.vue'
@@ -107,6 +112,7 @@ const emit = defineEmits<{
   (event: 'completed'): void
   (event: 'question-answer-started', targetId: string): void
   (event: 'question-answer-viewed', targetId: string): void
+  (event: 'question-answer-view', value: { targetId: string; batchId: string }): void
   (event: 'question-answer-stats-dirty', targetId: string): void
   (event: 'question-answer-stats-retry', targetId: string): void
   (event: 'question-answer-preferences-changed', preferences: QuestionAnswerSelectionPreferences): void
@@ -478,10 +484,8 @@ const emitQuestionAnswerPreferences = (changedField: QuestionAnswerPreferenceFie
   })
 }
 
-const readableMessage = (rawKey: string): string => t(connectionHealthMessageKey(rawKey, te))
-const qaReadableError = computed(() => qaErrorKey.value.startsWith('admin.')
-  ? t(qaErrorKey.value)
-  : t(`${prefix}.questionAnswer.errorTypes.${qaErrorKey.value || 'unknown'}`))
+const readableMessage = (rawKey: string): string => mode.value === 'questionAnswer' ? questionAnswerReadableError(rawKey, t, te) : t(connectionHealthMessageKey(rawKey, te))
+const qaReadableError = computed(() => questionAnswerReadableError(qaErrorKey.value, t, te))
 const qaModelReadGuidance = computed(() => {
   const errorKey = connectionHealthMessageKey(loadErrorKey.value, te)
   const guidanceKeys: Record<string, string> = {
@@ -654,6 +658,9 @@ const qaReviewedIncorrectCount = computed(() => qaReviewedRecords.value.filter(r
 const qaReviewCompletedAt = computed(() => (
   qaReviewBatch.value ? questionAnswerBatchCompletedAt(qaReviewBatch.value) : null
 ))
+const qaReviewSnapshotReceivedAt = ref(Date.now())
+watch(() => qaReviewBatch.value?.runtime?.snapshotAt, () => { qaReviewSnapshotReceivedAt.value = Date.now() })
+const qaReviewServerNow = computed(() => questionAnswerSnapshotTime(qaReviewBatch.value?.runtime?.snapshotAt, qaReviewSnapshotReceivedAt.value, qaClockNow.value, qaReviewBatchSyncFailed.value))
 const qaReviewBatchStartedAtMilliseconds = computed(() => {
   const batch = qaReviewBatch.value
   if (!batch || batch.records.length === 0) return null
@@ -668,7 +675,7 @@ const qaReviewBatchElapsedMilliseconds = computed(() => {
   const startedAt = qaReviewBatchStartedAtMilliseconds.value
   if (!batch || startedAt === null) return null
   const completedAt = batch.active
-    ? qaClockNow.value
+    ? qaReviewServerNow.value
     : qaReviewCompletedAt.value
       ? Date.parse(qaReviewCompletedAt.value)
       : Number.NaN
@@ -723,8 +730,10 @@ const qaReviewBatchDisplayStatus = computed<QuestionAnswerBatchDisplayStatus>(()
   if (qaReviewBatchSyncFailed.value) return 'syncFailed'
   const hasUnfinishedRecord = batch.records.some(record => record.status === 'pending' || record.status === 'running')
   if (batch.active) {
-    return qaReviewBatchElapsedMilliseconds.value !== null
-      && qaReviewBatchElapsedMilliseconds.value > 3 * 60 * 1000
+    return batch.runtime?.items.some(item => {
+      const started = item.diagnostics?.requestStartedAt
+      return started && !item.diagnostics?.requestFinishedAt && qaReviewServerNow.value - Date.parse(started) >= 3 * 60 * 1000
+    })
       ? 'slow'
       : 'active'
   }
@@ -1360,6 +1369,10 @@ const stopQuestionAnswers = async () => {
   }
 }
 
+const viewQueueBatch = (item: { targetId: string; batchId: string }) => {
+  if (item.targetId === props.target?.targetId) void reviewQuestionAnswerBatch(item.batchId)
+  else emit('question-answer-view', item)
+}
 const reviewQuestionAnswerBatch = async (batchId: string, options?: { expandFailed?: boolean }) => {
   if (!props.target || qaReviewLoadingBatchId.value === batchId) return
   abandonQuestionAnswerLocalSelectionFailure()
@@ -1683,8 +1696,8 @@ const saveQuestionAnswerJudgment = async (record: QuestionAnswerRecord, judgment
       && questionAnswerBatchReadIsCurrent(initialBatchRead)
       && initialFailureIntent === qaLocalFailureIntent
     ) {
-      if (error instanceof Error && error.message === 'admin.connectionHealth.errors.questionAnswerJudgmentConflict') await refreshJudgmentData(error.message)
-      else qaErrorKey.value = error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+      if (questionAnswerOperationKey(error) === 'admin.connectionHealth.errors.questionAnswerJudgmentConflict') await refreshJudgmentData(error instanceof Error ? error.message : questionAnswerOperationKey(error))
+      else await refreshJudgmentData(error instanceof Error ? error.message : 'admin.connectionHealth.errors.request')
     }
   } finally {
     if (qaJudgmentControllers.get(record.id) === controller) {
@@ -1867,16 +1880,20 @@ const close = () => {
             <p v-if="mode !== 'questionAnswer' && target?.testConfiguration?.protocol === 'messages'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesBudget') }}</p>
             <p v-if="mode === 'questionAnswer' && target?.testConfiguration?.protocol === 'messages'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesQuestionAnswerBudget') }}</p>
             <p v-if="mode === 'questionAnswer'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.questionAnswerTimeout') }}</p>
+            <QuestionAnswerQueuePanel v-if="mode === 'questionAnswer' && target?.targetId.startsWith('sub2api:')" :workspace="target.targetId.split(':')[1] || ''" :visible="open" :active="qaActive || qaStarting" :accounts="{ [target.targetId]: target.accountName }" @view="viewQueueBatch" />
 
             <div v-if="mode === 'questionAnswer' && (qaFinalization || qaFinalizationUnknown)" data-testid="question-answer-finalization" class="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
               <p v-if="qaFinalizationUnknown">{{ t(prefix + '.questionAnswer.finalizationUnknown') }}</p>
               <template v-else-if="qaFinalization">
                 <p>{{ t(prefix + '.questionAnswer.' + (qaFinalization.state === 'failed' ? 'finalizationFailed' : 'finalizationPending')) }}</p>
                 <p class="mt-1 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.finalizationBatch', { id: shortQuestionAnswerBatchId(qaFinalization.batchId) }) }}</p>
+                <p v-if="qaFinalization.message" class="mt-1 break-words text-xs">结束尚未确认：{{ qaFinalization.message }}</p>
+                <p v-if="qaFinalization.heldCount != null" class="mt-1 text-xs">批次尚未结束，{{ qaFinalization.heldCount }}个位置暂时保留；这不是未保存的题数，请查看每题实际结果。</p>
                 <p v-if="qaFinalization.recovery === 'service_shutdown'" class="mt-1 text-xs">{{ t(prefix + '.questionAnswer.finalizationShutdown') }}</p>
                 <button v-if="qaFinalization.recovery === 'cancel'" data-testid="question-answer-finalization-retry" type="button" class="mt-2 rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium disabled:opacity-50" :disabled="qaCancelling" @click="stopQuestionAnswers">
-                  {{ t(prefix + '.questionAnswer.finalizationRetry') }}
+                  {{ qaFinalization.reason === 'storage_error' || qaFinalization.state === 'failed' ? '重试保存并结束' : t(prefix + '.questionAnswer.finalizationRetry') }}
                 </button>
+                <p v-if="qaFinalization.recovery === 'cancel'" class="mt-1 text-xs text-muted-foreground">只保存已经取得的结果并结束剩余题，不会再次发送题目或修改主站。</p>
               </template>
             </div>
 
@@ -1931,6 +1948,13 @@ const close = () => {
                     <p v-if="qaReviewBatch" data-testid="question-answer-review-batch" class="min-w-0 break-words text-muted-foreground">正在查看：批次 #{{ shortQuestionAnswerBatchId(qaReviewBatch.batchId) }} · {{ qaReviewBatchStatusLabel }}<span v-if="qaReviewCompletedAt"> · {{ t(prefix + '.questionAnswer.batchCompletedAt', { time: formatConnectionHealthTime(qaReviewCompletedAt) }) }}</span></p><p v-else class="text-muted-foreground">{{ t(prefix + '.questionAnswer.noBatch') }}</p>
                     <div class="flex flex-wrap items-center gap-2"><button v-if="qaRuntimeBatch && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium hover:bg-surface-line" @click="reviewLatestQuestionAnswerBatch">返回最新</button><span v-if="qaRuntimeBatch?.active && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" data-testid="question-answer-latest-running-hint" class="text-primary">最新批次 #{{ shortQuestionAnswerBatchId(qaRuntimeBatch.batchId) }} 运行中</span><button v-if="qaRuntimeBatch?.active && !qaFinalization && !qaFinalizationUnknown" data-testid="question-answer-stop-latest" type="button" class="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 disabled:opacity-50 dark:text-red-400" :disabled="qaCancelling" @click="stopQuestionAnswers"><Loader2 v-if="qaCancelling" class="h-3.5 w-3.5 animate-spin" /><StopCircle v-else class="h-3.5 w-3.5" />终止 #{{ shortQuestionAnswerBatchId(qaRuntimeBatch.batchId) }}</button></div>
                   </section>
+                  <p v-if="qaReviewBatch?.active && !qaReviewBatch.runtime" class="mb-2 text-xs text-muted-foreground">后台过程信息不可用，无法确认当前进度。</p>
+                  <div v-if="qaReviewBatch?.runtime?.items.length" data-testid="question-answer-active-processes" class="mb-3 space-y-2 rounded-lg border border-border/50 p-3">
+                    <div v-for="record in qaReviewBatch.records.filter(record => (record.status === 'pending' || record.status === 'running') && qaReviewBatch?.runtime?.items.some(item => item.recordId === record.id))" :key="record.id">
+                      <p class="break-words text-xs font-medium">{{ record.questionName }} · {{ record.modelName }}</p>
+                      <QuestionAnswerExecutionDetails :record="record" :runtime="qaReviewBatch.runtime?.items.find(item => item.recordId === record.id)" :snapshot-at="qaReviewBatch.runtime?.snapshotAt" :stale="qaReviewBatchSyncFailed" />
+                    </div>
+                  </div>
                   <section v-if="qaHistoryLoaded" data-question-answer-section="processed" data-testid="question-answer-processed" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
                     <button v-if="qaReviewedRecords.length || qaFailedRecords.length" type="button" class="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left" :aria-expanded="qaProcessedOpen" @click="qaProcessedOpen = !qaProcessedOpen">
                       <span data-testid="question-answer-processed-summary" class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold tabular-nums text-foreground">

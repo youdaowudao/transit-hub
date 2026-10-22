@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { t, te } from '@/locales'
 import { useQuestionAnswerQueue } from '../../composables/useQuestionAnswerQueue'
 import { formatConnectionHealthTime } from '../../composables/useConnectionHealth'
-import { questionAnswerReadableError, questionAnswerSnapshotTime } from '../../utils/questionAnswers'
+import { questionAnswerReadableError, questionAnswerSavingMessage, questionAnswerSnapshotTime } from '../../utils/questionAnswers'
 import type { QuestionAnswerQueueItem, QuestionAnswerQueueTarget } from '../../types/connectionHealth'
 
 const props = withDefaults(defineProps<{ workspace: string; visible?: boolean; active?: boolean; accounts?: Record<string, string> }>(), { visible: true, active: false })
@@ -27,7 +27,7 @@ const duration = (milliseconds: number) => `${Math.max(0, milliseconds / 1000).t
 const progress = (item: QuestionAnswerQueueItem) => {
   const runtime = item.runtime, d = runtime?.diagnostics
   if (!runtime) return '后台过程信息不可用，无法确认当前进度。'
-  if (runtime.step === 'saving' || runtime.step === 'confirming') return `${runtime.pendingResultStatus === 'succeeded' ? '已取得完整回答' : '请求已结束'}，${runtime.storageError ? `保存尚未确认：${runtime.storageError}。暂时保留执行位置，请查看该批次的实际结果。` : '正在保存结果。'}`
+  if (runtime.step === 'saving' || runtime.step === 'confirming') return questionAnswerSavingMessage(runtime)
   if (d?.responseHeadersAt) return `已收到响应，最近在${time(d.lastReceivedAt)}收到内容；内容可能是心跳，不代表答案已生成。`
   if (d?.requestWrittenAt) return '客户端已写出请求，正在等响应；这不能证明对端已经收到。'
   return '已开始处理，正在记录开始/准备连接；尚无请求写出完成的记录。'

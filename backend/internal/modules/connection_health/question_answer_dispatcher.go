@@ -105,16 +105,24 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 		}
 	}()
 
-	running, err := s.questionAnswers.MarkQuestionAnswerRunning(run.ctx, run.userID, run.batchID, record.ID)
+	running, err := func() (bool, error) {
+		markCtx, cancel := s.questionAnswerStorageContext(run.ctx)
+		defer cancel()
+		return s.questionAnswers.MarkQuestionAnswerRunning(markCtx, run.userID, run.batchID, record.ID)
+	}()
 	if err != nil {
-		progress.failure("starting", err, run.cred.Key)
-		if s.questionAnswerRunStopReason(run) == "" {
-			s.stopQuestionAnswerRunForStorage(run)
-		}
+		s.recordQuestionAnswerStorageFailure(run, record, err, true)
 		return
 	}
 	if !running {
-		terminalDurable = true
+		terminalDurable, err = func() (bool, error) {
+			readCtx, cancel := s.questionAnswerStorageContext(run.ctx)
+			defer cancel()
+			return s.confirmQuestionAnswerRecordTerminal(readCtx, run, record)
+		}()
+		if !terminalDurable {
+			s.recordQuestionAnswerStorageFailure(run, record, err, true)
+		}
 		return
 	}
 	if s.questionAnswerRunStopReason(run) != "" {
@@ -136,24 +144,27 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 	result := s.questionAnswerHTTP.AskDetailedWithProgress(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort), progress, protocol)
 	itemErr := itemCtx.Err()
 	cancel()
-	if s.questionAnswerRunStopReason(run) != "" {
-		terminalDurable = s.completeStoppedQuestionAnswerRecord(run, record)
+	candidate := questionAnswerCompletionFromAsk(result, errors.Is(itemErr, context.DeadlineExceeded), record, run.cred.Key)
+	s.questionAnswerMu.Lock()
+	completion, sealed := s.freezeQuestionAnswerCompletionLocked(run, record, candidate)
+	s.questionAnswerMu.Unlock()
+	if !sealed {
 		return
 	}
-
-	completion := questionAnswerCompletionFromAsk(result, errors.Is(itemErr, context.DeadlineExceeded), record, run.cred.Key)
-	if progress != nil {
-		progress.mu.Lock()
-		status := completion.Status
-		progress.pendingResultStatus = &status
-		progress.mu.Unlock()
-	}
-	completed, err := s.questionAnswers.CompleteQuestionAnswer(run.ctx, run.userID, run.batchID, record.ID, completion)
+	completed, err := func() (bool, error) {
+		completeCtx, cancel := s.questionAnswerStorageContext(run.ctx)
+		defer cancel()
+		return s.questionAnswers.CompleteQuestionAnswer(completeCtx, run.userID, run.batchID, record.ID, completion)
+	}()
 	if err == nil && completed {
+		s.questionAnswerMu.Lock()
+		s.clearQuestionAnswerCompletionLocked(run, record.ID)
+		s.questionAnswerMu.Unlock()
 		terminalDurable = true
 		return
 	}
-	s.stopQuestionAnswerRunForStorage(run)
+	s.recordQuestionAnswerStorageFailure(run, record, err, false)
+
 }
 
 func questionAnswerCompletionFromAsk(result QuestionAnswerAskResult, deadlineExceeded bool, record QuestionAnswerRecord, keys ...string) QuestionAnswerCompletion {
@@ -192,27 +203,6 @@ func (s *Service) questionAnswerRunStopReason(run *activeQuestionAnswerBatch) st
 	return run.stopReason
 }
 
-func (s *Service) stopQuestionAnswerRunForStorage(run *activeQuestionAnswerBatch) {
-	s.questionAnswerMu.Lock()
-	firstStop := false
-	if run.stopReason == "" {
-		run.stopReason = QuestionAnswerErrorStorage
-		firstStop = true
-	}
-	s.questionAnswerMu.Unlock()
-	if !firstStop {
-		return
-	}
-	run.cancel()
-	s.wakeQuestionAnswerDispatcher()
-	stopCtx, cancel := s.questionAnswerStorageContext(context.Background())
-	defer cancel()
-	_, _ = s.questionAnswers.StopPendingQuestionAnswerBatch(
-		stopCtx, run.userID, run.targetID, run.batchID, QuestionAnswerFailed, QuestionAnswerErrorStorage,
-	)
-	cancel()
-}
-
 func (s *Service) stopQuestionAnswerRunForInternalError(run *activeQuestionAnswerBatch) {
 	s.questionAnswerMu.Lock()
 	firstStop := run.stopReason == ""
@@ -225,15 +215,7 @@ func (s *Service) stopQuestionAnswerRunForInternalError(run *activeQuestionAnswe
 	}
 	run.cancel()
 	s.wakeQuestionAnswerDispatcher()
-	stopCtx, cancel := s.questionAnswerStorageContext(context.Background())
-	defer cancel()
-	defer func() {
-		if recover() != nil {
-			// Finalization still owns the batch and retries the durable terminal.
-			log.Printf("[connection-health] internal-error batch stop could not be saved")
-		}
-	}()
-	_, _ = s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, run.userID, run.targetID, run.batchID, QuestionAnswerFailed, QuestionAnswerErrorInternal)
+
 }
 
 func (s *Service) completeStoppedQuestionAnswerRecord(run *activeQuestionAnswerBatch, record QuestionAnswerRecord) (durable bool) {
@@ -244,20 +226,23 @@ func (s *Service) completeStoppedQuestionAnswerRecord(run *activeQuestionAnswerB
 	}()
 	s.questionAnswerMu.Lock()
 	status, errorType := questionAnswerRunFinalState(run, QuestionAnswerErrorStorage)
-	progress := run.progress[record.ID]
+	completion, sealed := s.freezeQuestionAnswerCompletionLocked(run, record, QuestionAnswerCompletion{Status: status, ErrorType: errorType})
 	s.questionAnswerMu.Unlock()
+	if !sealed {
+		return false
+	}
 	completeCtx, cancel := s.questionAnswerStorageContext(context.Background())
 	defer cancel()
-	var diagnostics *QuestionAnswerDiagnostics
-	if progress != nil {
-		diagnostics = progress.snapshot(record.ID).Diagnostics
-		if diagnostics.RequestStartedAt == nil {
-			diagnostics.FailureStep = "starting"
-		}
+	completed, err := s.questionAnswers.CompleteQuestionAnswer(completeCtx, run.userID, run.batchID, record.ID, completion)
+	if err != nil || !completed {
+		s.recordQuestionAnswerStorageFailure(run, record, err, false)
+	} else {
+		s.questionAnswerMu.Lock()
+		s.clearQuestionAnswerCompletionLocked(run, record.ID)
+		s.questionAnswerMu.Unlock()
 	}
-	completed, err := s.questionAnswers.CompleteQuestionAnswer(completeCtx, run.userID, run.batchID, record.ID, QuestionAnswerCompletion{Status: status, ErrorType: errorType, Diagnostics: diagnostics})
-	cancel()
 	return err == nil && completed
+
 }
 
 func (s *Service) finishQuestionAnswerDispatch(key string, run *activeQuestionAnswerBatch, terminalDurable bool) {
@@ -376,12 +361,49 @@ func (s *Service) finalizeQuestionAnswerRun(key string, run *activeQuestionAnswe
 	s.ensureQuestionAnswerFinalizationLocked(run)
 	generation, settled = run.finalizeGeneration, run.finalizeSettled
 	status, errorType := questionAnswerRunFinalState(run, QuestionAnswerErrorStorage)
+	type pendingSave struct {
+		record     QuestionAnswerRecord
+		completion QuestionAnswerCompletion
+	}
+	pending := make([]pendingSave, 0, len(run.pendingCompletions))
+	for _, record := range run.records {
+		if completion, ok := run.pendingCompletions[record.ID]; ok {
+			pending = append(pending, pendingSave{record, cloneQuestionAnswerCompletion(completion)})
+		}
+	}
+	completeSelection := len(pending) == len(run.pendingCompletions)
 	s.questionAnswerMu.Unlock()
 	locked = false
 
 	finalizeCtx, cancel := s.questionAnswerStorageContext(context.Background())
 	defer cancel()
-	_, err := s.questionAnswers.FinalizeQuestionAnswerBatch(finalizeCtx, run.userID, run.targetID, run.batchID, status, errorType)
+	var err error
+	if !completeSelection {
+		err = errors.New("待保存结果没有对应的已选中记录，尚未确认结束；请按批次和记录编号核查后台日志")
+	}
+	for _, item := range pending {
+		if err != nil {
+			break
+		}
+		var confirmed bool
+		confirmed, err = s.confirmFrozenQuestionAnswerCompletion(finalizeCtx, run, item.record, item.completion)
+		if err == nil && !confirmed {
+			err = errors.New("这条题目的保存结果尚未确认，批次暂时保留执行位置；请重试保存并结束")
+		}
+		if err != nil {
+			text := questionAnswerSafeCause(err, run.cred.Key)
+			s.questionAnswerMu.Lock()
+			if progress := run.progress[item.record.ID]; progress != nil {
+				progress.mu.Lock()
+				progress.step, progress.storageError = "confirming", text
+				progress.mu.Unlock()
+			}
+			s.questionAnswerMu.Unlock()
+		}
+	}
+	if err == nil {
+		_, err = s.questionAnswers.FinalizeQuestionAnswerBatch(finalizeCtx, run.userID, run.targetID, run.batchID, status, errorType)
+	}
 	cancel()
 
 	s.questionAnswerMu.Lock()

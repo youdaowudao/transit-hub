@@ -5,6 +5,7 @@ import type {
   QuestionAnswerBatch,
   QuestionAnswerReasoningEffort,
   QuestionAnswerRecord,
+  QuestionAnswerRuntimeItem,
   QuestionAnswerStatus,
   QuestionAnswerReviewStats,
   QuestionAnswerStats,
@@ -30,6 +31,17 @@ export const questionAnswerOperationKey = (error: unknown): string => (
 export const questionAnswerSnapshotTime = (snapshotAt: string | undefined, receivedAt: number, now: number, stale = false): number => {
   const snapshot = snapshotAt ? Date.parse(snapshotAt) : NaN
   return Number.isFinite(snapshot) ? snapshot + (stale ? 0 : Math.max(0, now - receivedAt)) : now
+}
+
+export const questionAnswerSavingMessage = (runtime: QuestionAnswerRuntimeItem): string => {
+  const diagnostics = runtime.diagnostics
+  if (diagnostics?.failureStep === 'starting' && !diagnostics.requestStartedAt) {
+    const cause = diagnostics.localError
+    if (cause) return `记录这题开始时失败：${cause}；这条题目没有调用答题接口，后续发送已停止。${runtime.storageError && runtime.storageError !== cause ? `保存尚未确认：${runtime.storageError}。` : ''}暂时保留执行位置，请重试保存并结束；不会重新发题。`
+    return `调用答题接口前已停止，这条题目没有调用答题接口；${runtime.storageError ? `保存停止结果尚未确认：${runtime.storageError}。请重试保存并结束；不会重新发题。` : '正在保存停止结果，批次结束尚未确认。'}`
+  }
+  const result = runtime.pendingResultStatus === 'succeeded' ? '已取得完整回答' : '请求已结束'
+  return `${result}，${runtime.storageError ? `保存尚未确认：${runtime.storageError}。暂时保留执行位置，请重试保存并结束；不会重新发题。` : '正在保存结果。'}`
 }
 
 export const TEST_QUESTION_KEYWORD_COUNT_LIMIT = 20

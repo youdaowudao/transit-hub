@@ -37,6 +37,8 @@ test('connection-health core gate keeps every question-answer regression member'
     'c1-question-answer-red.behavior.test.ts',
     'c1-question-answer-keywords.test.ts',
     'c1-question-answer.behavior.test.ts',
+    'question-answer-storage-red.behavior.test.ts',
+    'question-answer-storage.behavior.test.ts',
     'question-answer-queue-red.behavior.test.ts',
     'question-answer-queue.behavior.test.ts',
     'question-answer-queue-entry.behavior.test.ts',

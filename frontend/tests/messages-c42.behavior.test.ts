@@ -45,6 +45,7 @@ let records: QuestionAnswerRecord[]
 let previewQuestions = false
 const currentStats = () => questionAnswerFixtureStats(records)
 const currentBatch = () => ({ targetId, batchId: records.length ? 'c42-batch' : '', records, active: false, reasoningEffort: 'medium', repeatCount: 1, submittedCount: records.length, completedCount: records.length, runningCount: 0, currentModel: '', currentQuestion: '', stats: currentStats() })
+const emptyQueue = () => ({ snapshotAt: new Date().toISOString(), capacity: 15, availableSlots: 15, workspaceOccupied: 0, heldCount: 0, queued: [], processing: [], stopping: [], preparingTargets: [], finalizingBatches: [], counts: { queued: 0, processing: 0, stopping: 0, preparingTargets: 0, finalizingBatches: 0 } })
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 const wrappers: VueWrapper[] = []
 const service = useConnectionHealth()
@@ -65,6 +66,7 @@ beforeEach(() => {
       if (url.endsWith('/manual-probe')) return json([{ modelName: model.id, result: 'ok', healthy: true, latencyMs: 42, firstTokenMs: 42, ruleVersion: 'v2', protocol: 'messages', probeTimeoutSeconds: 20, errorKey: '', errorDetail: '', probedAt: '2026-10-12T00:00:00Z' }])
       if (url.endsWith('/rule-presets/custom-c42')) { savedPreset = { ...savedPreset, ...body }; return json(savedPreset) }
     } else {
+      if (url === '/api/connection-health/question-answer-queue?workspace=c42-component' || url === '/api/connection-health/question-answer-queue?workspace=c44-preview') return json(emptyQueue())
       if (url.endsWith('/test-configuration')) return json(testConfiguration())
       if (url.endsWith('/policy-configuration')) return json({ adminGroupId: 'c42-group', policyIds: [], excludedTargetIds: [] })
       if (url.endsWith('/admin-groups')) return json([group()])

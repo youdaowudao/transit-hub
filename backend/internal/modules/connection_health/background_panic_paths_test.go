@@ -320,8 +320,21 @@ func TestQuestionAnswerStartPanicCleanupDoesNotEscape(t *testing.T) {
 	remaining := s.questionAnswerRuns[questionAnswerRunKey("user1", target)]
 	s.questionAnswerMu.Unlock()
 	records, _ := base.ListQuestionAnswerBatch(context.Background(), "user1", target, "cleanup-panic")
+	if remaining == nil || len(records) != 1 || records[0].Status != QuestionAnswerPending || remaining.finalErr == nil {
+		t.Fatalf("failed finalizer lost retry ownership or prematurely ended record: remaining=%v records=%+v", remaining != nil, records)
+	}
+	// The final storage panic is now the real finalizer failure. An explicit
+	// recovery after storage returns must still end the same row without Ask.
+	s.questionAnswers = base
+	if _, err := s.stopQuestionAnswerBatchCore(context.Background(), "user1", target, "cleanup-panic"); err != nil {
+		t.Fatalf("explicit cleanup retry: %v", err)
+	}
+	records, _ = base.ListQuestionAnswerBatch(context.Background(), "user1", target, "cleanup-panic")
+	s.questionAnswerMu.Lock()
+	remaining = s.questionAnswerRuns[questionAnswerRunKey("user1", target)]
+	s.questionAnswerMu.Unlock()
 	if remaining != nil || len(records) != 1 || records[0].Status != QuestionAnswerFailed || records[0].ErrorType != "internal_error" {
-		t.Fatalf("start cleanup did not settle: remaining=%v records=%+v", remaining != nil, records)
+		t.Fatalf("explicit cleanup did not settle original record: remaining=%v records=%+v", remaining != nil, records)
 	}
 }
 

@@ -13,7 +13,6 @@ import (
 
 type protocolFinalizationRepository struct {
 	*fakeQuestionAnswerRepository
-	stopFails     atomic.Bool
 	finalizeFails atomic.Bool
 }
 
@@ -24,12 +23,6 @@ func (r *protocolFinalizationRepository) CreateQuestionAnswerBatch(ctx context.C
 	}
 	return nil, &uncertainQuestionAnswerCreateError{cause: errors.New("fixture commit response lost")}
 }
-func (r *protocolFinalizationRepository) StopPendingQuestionAnswerBatch(ctx context.Context, userID, targetID, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
-	if r.stopFails.Load() {
-		return true, errors.New("fixture StopPending failure")
-	}
-	return r.fakeQuestionAnswerRepository.StopPendingQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType)
-}
 func (r *protocolFinalizationRepository) FinalizeQuestionAnswerBatch(ctx context.Context, userID, targetID, batchID string, status QuestionAnswerStatus, errorType string) (bool, error) {
 	if r.finalizeFails.Load() {
 		return true, errors.New("fixture Finalize failure")
@@ -37,25 +30,22 @@ func (r *protocolFinalizationRepository) FinalizeQuestionAnswerBatch(ctx context
 	return r.fakeQuestionAnswerRepository.FinalizeQuestionAnswerBatch(ctx, userID, targetID, batchID, status, errorType)
 }
 
-// T23 checks actual repository records and retained run, not the HTTP error.
-// The same three error combinations apply to failed starts and explicit cancels.
+// T23 checks actual records, stopped dispatch and retained retry ownership.
+// Active runs now have only the final batch-ending operation: there is no
+// earlier StopPending write whose success can make rows terminal first.
 func TestProtocolContractQuestionAnswerFinalizationProjection(t *testing.T) {
 	for _, entry := range []string{"start", "cancel"} {
-		for _, combo := range []struct {
-			name        string
-			stop, final bool
-		}{
-			{"both_fail", true, true}, {"only_finalize_fails", false, true}, {"only_stop_fails", true, false},
-		} {
-			t.Run(entry+"/"+combo.name, func(t *testing.T) {
+		for _, fail := range []bool{false, true} {
+			name := "finalize_succeeds"
+			if fail {
+				name = "finalize_fails"
+			}
+			t.Run(entry+"/"+name, func(t *testing.T) {
 				base := newFakeQuestionAnswerRepository(TestQuestion{ID: "q", Name: "Q", Body: "fixture", Enabled: true})
 				repo := &protocolFinalizationRepository{fakeQuestionAnswerRepository: base}
-				repo.stopFails.Store(combo.stop)
-				repo.finalizeFails.Store(combo.final)
-				if entry == "cancel" {
-					repo.stopFails.Store(true)
-					repo.finalizeFails.Store(true)
-				}
+				// A cancel needs an owned failed start to retry; its actual final
+				// attempt is configured only after the uncertain create returns.
+				repo.finalizeFails.Store(fail || entry == "cancel")
 				service := newMultiTargetQuestionAnswerService("https://fixture.invalid", repo, newFakeRepository())
 				var sends atomic.Int32
 				transport := protocolContractTransport(func(r *http.Request) (*http.Response, error) {
@@ -68,7 +58,6 @@ func TestProtocolContractQuestionAnswerFinalizationProjection(t *testing.T) {
 				service.modelDiscovery.client.Transport = transport
 				service.questionAnswerHTTP.client.Transport = transport
 				t.Cleanup(func() {
-					repo.stopFails.Store(false)
 					repo.finalizeFails.Store(false)
 					if err := service.ShutdownQuestionAnswers(context.Background()); err != nil {
 						t.Errorf("shutdown cleanup: %v", err)
@@ -76,17 +65,18 @@ func TestProtocolContractQuestionAnswerFinalizationProjection(t *testing.T) {
 				})
 				const target = "sub2api:ws1:acc-a"
 				_, startErr := service.StartQuestionAnswerBatch(context.Background(), "user1", target, QuestionAnswerStartInput{Models: []string{"model-a"}, QuestionIDs: []string{"q"}})
-				if startErr == nil {
-					t.Fatal("uncertain commit must not publish a successful start")
+				var uncertain *uncertainQuestionAnswerCreateError
+				if !errors.As(startErr, &uncertain) || !strings.Contains(startErr.Error(), "fixture commit response lost") {
+					t.Fatalf("uncertain commit cause must remain visible: %v", startErr)
 				}
 				base.mu.Lock()
 				batchID := base.records[0].BatchID
 				base.mu.Unlock()
 				if entry == "cancel" {
-					repo.stopFails.Store(combo.stop)
-					repo.finalizeFails.Store(combo.final)
-					if _, err := service.StopQuestionAnswerBatch(context.Background(), "user1", target, batchID); err == nil {
-						t.Error("injected cancel error must remain visible")
+					repo.finalizeFails.Store(fail)
+					_, err := service.StopQuestionAnswerBatch(context.Background(), "user1", target, batchID)
+					if (err != nil) != fail {
+						t.Fatalf("cancel finalization error=%v fail=%v", err, fail)
 					}
 				}
 				latest, err := service.LatestQuestionAnswerBatch(context.Background(), "user1", target)
@@ -106,26 +96,26 @@ func TestProtocolContractQuestionAnswerFinalizationProjection(t *testing.T) {
 				service.questionAnswerMu.Lock()
 				run := service.questionAnswerRuns[questionAnswerRunKey("user1", target)]
 				service.questionAnswerMu.Unlock()
-				if combo.final {
-					if run == nil {
-						t.Error("failed finalization released duplicate-prevention reservation")
+				if fail {
+					if run == nil || projected.Finalization == nil || projected.Finalization.BatchID != batchID || projected.Finalization.Recovery != "cancel" {
+						t.Fatalf("failed ending lost visible same-batch retry: run=%v finalization=%+v", run != nil, projected.Finalization)
 					}
-					if projected.Finalization == nil || projected.Finalization.BatchID != batchID || projected.Finalization.Recovery != "cancel" {
-						t.Errorf("reopened page cannot find actual cleanup retry: finalization=%+v active=%v", projected.Finalization, latest.Active)
+					if len(latest.Records) != 1 || latest.Records[0].Status != QuestionAnswerPending {
+						t.Fatalf("failed final ending must retain unselected pending row: %+v", latest.Records)
 					}
-					if !combo.stop && latest.Active {
-						t.Error("StopPending succeeded: records must be terminal even while reservation remains")
-					}
-					repo.stopFails.Store(false)
 					repo.finalizeFails.Store(false)
 					if _, err := service.StopQuestionAnswerBatch(context.Background(), "user1", target, batchID); err != nil {
-						t.Errorf("explicit recovery: %v", err)
+						t.Fatalf("explicit recovery: %v", err)
 					}
 				} else if run != nil || projected.Finalization != nil {
-					t.Error("Finalize succeeded: merged error must not imply a retained reservation")
+					t.Error("successful final ending must release reservation")
+				}
+				records, err := base.ListQuestionAnswerBatch(context.Background(), "user1", target, batchID)
+				if err != nil || len(records) != 1 || records[0].Status != QuestionAnswerFailed {
+					t.Fatalf("recovery did not end the original record: %+v err=%v", records, err)
 				}
 				if sends.Load() != 0 {
-					t.Errorf("uncertain commit dispatched model HTTP=%d", sends.Load())
+					t.Errorf("uncertain create or recovery dispatched model HTTP=%d", sends.Load())
 				}
 				service.questionAnswerMu.Lock()
 				remaining := len(service.questionAnswerRuns)

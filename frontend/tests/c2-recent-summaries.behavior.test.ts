@@ -227,15 +227,24 @@ describe('C2 mounted main page keeps pure local recent polling separate from tod
   it('opens the exact latest batch even if the account is presently unable to start a new test', async () => {
     const wrapper = await mountMain()
     service.adminGroups.value.forEach(group => { group.accounts[0]!.probeAvailable = false }); await nextTick()
-    vi.mocked(fetch).mockImplementation(async (input: string) => {
-      if (String(input).includes('/batches/latest-frozen')) return json({ batchId: 'latest-frozen', records: [], stats: c2Stats(3, 1), active: false })
+    const firstDialogRead = vi.mocked(fetch).mock.calls.length
+    const frozenBatchPath = `/api/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches/latest-frozen`
+    vi.mocked(fetch).mockImplementation(async (input: string, init?: RequestInit) => {
+      const path = String(input)
+      if ((init?.method ?? 'GET') !== 'GET') throw new Error(`unexpected write ${path}`)
+      if (path === frozenBatchPath) return json({ batchId: 'latest-frozen', records: [], stats: c2Stats(3, 1), active: false })
+      if (path === '/api/connection-health/question-answer-queue?workspace=ws1') return json({ snapshotAt: new Date().toISOString(), capacity: 15, availableSlots: 15, workspaceOccupied: 0, heldCount: 0, queued: [], processing: [], stopping: [], preparingTargets: [], finalizingBatches: [], counts: { queued: 0, processing: 0, stopping: 0, preparingTargets: 0, finalizingBatches: 0 } })
       throw new Error(`unexpected ${input}`)
     })
     const cell = wrapper.get('tbody > tr').findAll('td')[8]!
     await cell.get('button').trigger('click'); await flushPromises()
     expect(wrapper.text()).toContain('按执行时的账号信息显示这批问答，只能查看')
     expect(wrapper.text()).toContain('当前批次总正确率 75%')
-    expect(vi.mocked(fetch).mock.calls.at(-1)![0]).toContain('/batches/latest-frozen')
+    const dialogReads = vi.mocked(fetch).mock.calls.slice(firstDialogRead)
+    const batchReads = dialogReads.filter(call => String(call[0]).includes('/question-answers/batches/'))
+    expect(batchReads).toHaveLength(1)
+    expect(String(batchReads[0]![0])).toBe(frozenBatchPath)
+    expect(dialogReads.every(([, init]) => (init?.method ?? 'GET') === 'GET')).toBe(true)
     expect(vi.mocked(fetch).mock.calls.some(call => String(call[0]).endsWith('/models'))).toBe(false)
   })
 })

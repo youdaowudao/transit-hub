@@ -48,6 +48,7 @@ type questionAnswerRepository interface {
 	CreateQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, models []string, questionIDs []string, reasoningEffort QuestionAnswerReasoningEffort, repeatCount int, snapshots ...QuestionAnswerConfigurationSnapshot) ([]QuestionAnswerRecord, error)
 	MarkQuestionAnswerRunning(ctx context.Context, userID string, batchID string, recordID string) (bool, error)
 	CompleteQuestionAnswer(ctx context.Context, userID string, batchID string, recordID string, completion QuestionAnswerCompletion) (bool, error)
+	ConfirmOrSaveQuestionAnswerCompletion(ctx context.Context, userID string, targetID string, batchID string, recordID string, completion QuestionAnswerCompletion, allowPending bool) (bool, error)
 	StopPendingQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error)
 	FinalizeQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string, status QuestionAnswerStatus, errorType string) (bool, error)
 	FailAbandonedQuestionAnswers(ctx context.Context, errorType string) (int64, error)
@@ -315,23 +316,72 @@ func (r *Repository) MarkQuestionAnswerRunning(ctx context.Context, userID strin
 }
 
 func (r *Repository) CompleteQuestionAnswer(ctx context.Context, userID string, batchID string, recordID string, completion QuestionAnswerCompletion) (bool, error) {
-	if err := validateQuestionAnswerCompletion(completion); err != nil {
-		return false, err
-	}
-	diagnostics, err := encodeQuestionAnswerDiagnostics(completion.Diagnostics)
+	values, err := questionAnswerCompletionValues(completion)
 	if err != nil {
 		return false, err
 	}
-	result, err := r.db.Exec(ctx, `
-  UPDATE connection_health_question_answer_records
-  SET status = $4, answer_body = $5, error_type = $6,
-   answer_judgment = $7, answer_judgment_source = $8,
-   manual_error = COALESCE($7 = 'incorrect', false),
-   upstream_status = $9, upstream_excerpt = $10, request_diagnostics = $11,
-   completed_at = now(), updated_at = now()
-  WHERE id = $1 AND user_id = $2 AND batch_id = $3 AND status = 'running'
- `, recordID, userID, batchID, completion.Status, completion.AnswerBody, completion.ErrorType, completion.AnswerJudgment, completion.JudgmentSource, completion.UpstreamStatus, completion.UpstreamExcerpt, diagnostics)
+	args := append([]any{recordID, userID, batchID}, values...)
+	result, err := r.db.Exec(ctx, `UPDATE connection_health_question_answer_records SET `+questionAnswerCompletionColumns+`
+ WHERE id = $1 AND user_id = $2 AND batch_id = $3 AND status = 'running'`, args...)
 	return result.RowsAffected() > 0, err
+}
+
+const questionAnswerCompletionColumns = `status = $4, answer_body = $5, error_type = $6,
+ answer_judgment = $7, answer_judgment_source = $8,
+ manual_error = COALESCE($7 = 'incorrect', false),
+ upstream_status = $9, upstream_excerpt = $10, request_diagnostics = $11,
+ completed_at = now(), updated_at = now()`
+
+func questionAnswerCompletionValues(completion QuestionAnswerCompletion) ([]any, error) {
+	if err := validateQuestionAnswerCompletion(completion); err != nil {
+		return nil, err
+	}
+	diagnostics, err := encodeQuestionAnswerDiagnostics(completion.Diagnostics)
+	if err != nil {
+		return nil, err
+	}
+	return []any{completion.Status, completion.AnswerBody, completion.ErrorType, completion.AnswerJudgment, completion.JudgmentSource, completion.UpstreamStatus, completion.UpstreamExcerpt, diagnostics}, nil
+}
+
+func questionAnswerPendingCompletionEvidence(completion QuestionAnswerCompletion) bool {
+	d := completion.Diagnostics
+	return (completion.Status == QuestionAnswerFailed || completion.Status == QuestionAnswerCancelled) && d != nil && d.SelectedAt != nil && d.FailureStep == "starting" && d.RequestStartedAt == nil
+}
+
+// A zero-row write is not a durable acknowledgement. Only the same owned row
+// already being terminal confirms it; that read never rewrites a later judgment.
+func (r *Repository) ConfirmOrSaveQuestionAnswerCompletion(ctx context.Context, userID, targetID, batchID, recordID string, completion QuestionAnswerCompletion, allowPending bool) (bool, error) {
+	if allowPending && !questionAnswerPendingCompletionEvidence(completion) {
+		return false, errors.New("没有足够过程记录确认这题尚未调用答题接口，不能保存仍在等待的记录")
+	}
+	values, err := questionAnswerCompletionValues(completion)
+	if err != nil {
+		return false, err
+	}
+	args := append([]any{recordID, userID, batchID}, values...)
+	args = append(args, targetID, allowPending)
+	result, err := r.db.Exec(ctx, `UPDATE connection_health_question_answer_records SET `+questionAnswerCompletionColumns+`
+ WHERE id = $1 AND user_id = $2 AND batch_id = $3 AND target_id = $12
+ AND (status = 'running' OR ($13 AND status = 'pending'))`, args...)
+	if err != nil {
+		return false, err
+	}
+	if result.RowsAffected() > 0 {
+		return true, nil
+	}
+	var status QuestionAnswerStatus
+	err = r.db.QueryRow(ctx, `SELECT status FROM connection_health_question_answer_records
+ WHERE id = $1 AND user_id = $2 AND target_id = $3 AND batch_id = $4`, recordID, userID, targetID, batchID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, errors.New("重新读取时没有找到这条答题记录，无法确认保存结果；请按批次和记录编号核查后台日志")
+	}
+	if err != nil {
+		return false, err
+	}
+	if status == QuestionAnswerSucceeded || status == QuestionAnswerFailed || status == QuestionAnswerCancelled {
+		return true, nil
+	}
+	return false, errors.New("这条题目仍未确认结束，保存结果尚未确认；请保留当前批次后重试保存并结束")
 }
 
 func validateQuestionAnswerCompletion(completion QuestionAnswerCompletion) error {

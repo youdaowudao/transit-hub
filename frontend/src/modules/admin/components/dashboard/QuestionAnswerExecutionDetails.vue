@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { QuestionAnswerRecord, QuestionAnswerRuntimeItem } from '../../types/connectionHealth'
 import { formatConnectionHealthTime } from '../../composables/useConnectionHealth'
-import { questionAnswerSnapshotTime } from '../../utils/questionAnswers'
+import { questionAnswerSavingMessage, questionAnswerSnapshotTime } from '../../utils/questionAnswers'
 
 const props = defineProps<{
   record: QuestionAnswerRecord
@@ -34,13 +34,18 @@ const httpElapsed = computed(() => {
   if (typeof d?.requestElapsedMs === 'number') return d.requestElapsedMs
   if (!d?.requestStartedAt) return null
   const started = Date.parse(d.requestStartedAt)
+  if (d.requestFinishedAt) return Number.isFinite(started) && Number.isFinite(Date.parse(d.requestFinishedAt)) ? Math.max(0, Date.parse(d.requestFinishedAt) - started) : null
   return Number.isFinite(started) ? Math.max(0, serverNow.value - started) : null
+})
+const saveWait = computed(() => {
+  const finished = diagnostics.value?.requestFinishedAt
+  return active.value && (props.runtime?.step === 'saving' || props.runtime?.step === 'confirming') && finished && Number.isFinite(Date.parse(finished)) ? Math.max(0, serverNow.value - Date.parse(finished)) : null
 })
 const stage = computed(() => {
   const d = diagnostics.value
   if (!active.value) return ''
   if (!props.runtime) return '后台过程信息不可用，无法确认当前进度。'
-  if (props.runtime.step === 'saving' || props.runtime.step === 'confirming') return `${props.runtime.pendingResultStatus === 'succeeded' ? '已取得完整回答' : '请求已结束'}，正在保存结果。`
+  if (props.runtime.step === 'saving' || props.runtime.step === 'confirming') return questionAnswerSavingMessage(props.runtime)
   if (d?.responseHeadersAt) return `已收到响应，最近在${time(d.lastReceivedAt)}收到内容；内容可能是心跳，不代表答案已生成。`
   if (d?.requestWrittenAt) return '客户端已写出请求，正在等响应；这不能证明对端已经收到。'
   return '已开始处理，正在记录开始/准备连接；尚无请求写出完成的记录。'
@@ -67,13 +72,14 @@ const failure = computed(() => {
 <template>
   <div data-testid="question-answer-execution-details" class="mt-2 space-y-2 text-xs leading-5 text-muted-foreground">
     <p v-if="stage" data-testid="question-answer-process-stage">{{ stage }}</p>
+    <p v-if="saveWait !== null" data-testid="question-answer-save-wait">从请求结束到现在已等待保存/结束确认 {{ duration(saveWait) }}；这段时间不计入HTTP等待。</p>
     <p v-if="failure" data-testid="question-answer-direct-failure" class="break-words">{{ failure }}</p>
     <p v-if="active && httpElapsed !== null && httpElapsed >= 180000 && !diagnostics?.requestFinishedAt">HTTP已等待{{ duration(httpElapsed) }}，本题最长等待{{ duration(diagnostics?.timeoutMs) }}，排队和保存不计入；仍在处理。</p>
     <p v-if="stale">当前过程截止于{{ time(snapshotAt) }}；读取尚未更新，等待时间暂停递增。</p>
     <details>
       <summary data-testid="question-answer-execution-toggle" class="cursor-pointer font-medium text-foreground">展开过程与错误详情</summary>
       <p>查看这题的请求过程、失败步骤和已有原因；不会修改结果或主站。</p>
-      <p class="break-all">账号 {{ record.targetId.split(':').at(-1) || record.targetId }} · 模型 {{ record.modelName }} · {{ record.questionName }} · {{ record.repeatIndex ? `第${record.repeatIndex}次` : '历史样本' }}</p>
+      <p class="break-all">账号 {{ record.targetId?.split(':').at(-1) || record.targetId || '当时未记录' }} · 模型 {{ record.modelName }} · {{ record.questionName }} · {{ record.repeatIndex ? `第${record.repeatIndex}次` : '历史样本' }}</p>
       <p class="break-all">批次 #{{ record.batchId }} · 记录 #{{ record.id }} · 创建 {{ time(record.createdAt) }}</p>
       <p v-if="record.diagnosticsUnavailable">过程记录无法读取，答案和原状态仍保留。请按批次、记录编号和时间核查后台日志。</p>
       <p v-else-if="!diagnostics">当时未记录网络过程，无法确认具体卡在哪一步；可凭批次编号{{ record.batchId }}和时间{{ time(record.createdAt) }}核查后台日志。</p>

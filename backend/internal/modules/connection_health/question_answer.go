@@ -266,7 +266,8 @@ type QuestionAnswerBatch struct {
 }
 
 // QuestionAnswerFinalization describes a retained runtime reservation. It is
-// independent of record status: StopPending may already have ended every row.
+// independent of record status: every row may be confirmed while the last
+// batch-end operation still has not been acknowledged.
 type QuestionAnswerFinalization struct {
 	Reason    string `json:"reason"`
 	Message   string `json:"message"`
@@ -292,6 +293,7 @@ type activeQuestionAnswerBatch struct {
 	cancel             context.CancelFunc
 	records            []QuestionAnswerRecord
 	progress           map[string]*QuestionAnswerProgress
+	pendingCompletions map[string]QuestionAnswerCompletion
 	next               int
 	inFlight           int
 	heldSlots          int
@@ -786,20 +788,6 @@ func (s *Service) finishFailedQuestionAnswerStart(key string, run *activeQuestio
 
 func (s *Service) finalizeFailedQuestionAnswerStart(key string, run *activeQuestionAnswerBatch) error {
 	s.questionAnswerMu.Lock()
-	status, errorType := questionAnswerRunFinalState(run, QuestionAnswerErrorStorage)
-	s.questionAnswerMu.Unlock()
-	stopCtx, cancel := s.questionAnswerStorageContext(context.Background())
-	defer cancel()
-	_, stopErr := func() (stopped bool, err error) {
-		defer func() {
-			if recover() != nil {
-				err = errQuestionAnswerInternal
-			}
-		}()
-		return s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, run.userID, run.targetID, run.batchID, status, errorType)
-	}()
-	cancel()
-	s.questionAnswerMu.Lock()
 	shouldFinalize := s.beginQuestionAnswerRunFinalizationLocked(key, run)
 	generation := run.finalizeGeneration
 	settled := run.finalizeSettled
@@ -811,10 +799,7 @@ func (s *Service) finalizeFailedQuestionAnswerStart(key string, run *activeQuest
 	s.questionAnswerMu.Lock()
 	finalErr := run.finalizeResults[generation]
 	s.questionAnswerMu.Unlock()
-	if errors.Is(stopErr, errQuestionAnswerInternal) {
-		log.Printf("[connection-health] failed question start stop panic recovered")
-	}
-	return errors.Join(stopErr, finalErr)
+	return finalErr
 }
 
 func (s *Service) waitQuestionAnswerShutdownAttempt(attempt *questionAnswerShutdownAttempt) error {
@@ -956,17 +941,41 @@ func (s *Service) stopQuestionAnswerBatchCore(ctx context.Context, userID, targe
 		run.cancel()
 		s.wakeQuestionAnswerDispatcher()
 	}
-	stopCtx, cancel := s.questionAnswerStorageContext(ctx)
-	found, stopErr := s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, userID, targetID, batchID, status, errorType)
-	cancel()
-	if stopErr == nil && !found {
-		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerBatchNotFound)
-	}
 	if run == nil {
+		stopCtx, cancel := s.questionAnswerStorageContext(ctx)
+		found, stopErr := s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, userID, targetID, batchID, status, errorType)
+		cancel()
 		if stopErr != nil {
 			return QuestionAnswerBatch{}, stopErr
 		}
+		if !found {
+			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerBatchNotFound)
+		}
 		return s.getQuestionAnswerBatchCore(ctx, userID, targetID, batchID)
+	}
+
+	// Cancelling an owned run still requires a real batch. A lost create
+	// response can leave only a reservation, which must retain shutdown recovery.
+	records, err := func() ([]QuestionAnswerRecord, error) {
+		readCtx, cancel := s.questionAnswerStorageContext(ctx)
+		defer cancel()
+		return s.questionAnswers.ListQuestionAnswerBatch(readCtx, userID, targetID, batchID)
+	}()
+	if err != nil {
+		err = errors.Join(errors.New("读取批次记录时失败，已经停止发送，结束结果尚未确认"), err)
+		s.questionAnswerMu.Lock()
+		if current := s.questionAnswerRuns[key]; current == run && !run.finalizing && run.inFlight == 0 && !questionAnswerChannelClosed(run.finalizeSettled) {
+			// An unselected batch has no worker to settle its first stop. Keep
+			// this existing attempt failed so a later verified read can retry it.
+			run.finalErr = err
+			run.finalizeResults[run.finalizeGeneration] = err
+			close(run.finalizeSettled)
+		}
+		s.questionAnswerMu.Unlock()
+		return QuestionAnswerBatch{}, err
+	}
+	if len(records) == 0 {
+		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerBatchNotFound)
 	}
 
 	s.questionAnswerMu.Lock()
@@ -989,13 +998,13 @@ func (s *Service) stopQuestionAnswerBatchCore(ctx context.Context, userID, targe
 		s.questionAnswerMu.Lock()
 		finalErr := run.finalizeResults[generation]
 		s.questionAnswerMu.Unlock()
-		return QuestionAnswerBatch{}, errors.Join(stopErr, finalErr, ctx.Err())
+		return QuestionAnswerBatch{}, errors.Join(finalErr, ctx.Err())
 	}
 	s.questionAnswerMu.Lock()
 	finalErr := run.finalizeResults[generation]
 	s.questionAnswerMu.Unlock()
-	if err := errors.Join(stopErr, finalErr); err != nil {
-		return QuestionAnswerBatch{}, err
+	if finalErr != nil {
+		return QuestionAnswerBatch{}, finalErr
 	}
 	return s.getQuestionAnswerBatchCore(ctx, userID, targetID, batchID)
 }
@@ -1149,21 +1158,6 @@ func (s *Service) runQuestionAnswerShutdown(attempt *questionAnswerShutdownAttem
 		}
 	}()
 	s.questionAnswerStartWG.Wait()
-	for _, item := range runs {
-		s.questionAnswerMu.Lock()
-		locked = true
-		status, errorType := questionAnswerRunFinalState(item.run, QuestionAnswerErrorServiceShutdown)
-		s.questionAnswerMu.Unlock()
-		locked = false
-		stopCtx, cancel := s.questionAnswerStorageContext(context.Background())
-		_, err := func() (bool, error) {
-			defer cancel()
-			return s.questionAnswers.StopPendingQuestionAnswerBatch(stopCtx, item.run.userID, item.run.targetID, item.run.batchID, status, errorType)
-		}()
-		if err != nil {
-			stopErrors = append(stopErrors, err)
-		}
-	}
 	if dispatcherDone != nil {
 		<-dispatcherDone
 	}

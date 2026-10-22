@@ -604,7 +604,7 @@ describe('question-answer compact layout primitives', () => {
     expect(wrapper.get('[data-testid="question-answer-processed"]').text()).toContain('判题结果 0 条'); expect(wrapper.get('[data-testid="question-answer-processed"]').text()).toContain('这一批没有可判的答案'); expect(wrapper.find('[data-testid="question-answer-processed-content"]').exists()).toBe(false)
   })
 
-  it('warns in the existing summary after three minutes without auto-terminating', async () => {
+  it.each([true, false])('warns after three minutes only with recorded HTTP and never auto-terminates (HTTP recorded=%s)', async recorded => {
     vi.useFakeTimers({ now: new Date('2026-09-01T00:04:00Z') })
     const activeRecord = record({
       id: 'slow-running',
@@ -627,12 +627,26 @@ describe('question-answer compact layout primitives', () => {
       completedCount: 0,
       runningCount: 1,
       active: true,
+      ...(recorded ? { runtime: { snapshotAt: '2026-09-01T00:04:00Z', items: [{
+        recordId: activeRecord.id, step: 'request', diagnostics: {
+          version: 1, selectedAt: '2026-09-01T00:00:01Z', timeoutMs: 600000,
+          requestStartedAt: '2026-09-01T00:00:02Z', requestFinishedAt: null, requestElapsedMs: null,
+          requestWrittenAt: null, firstResponseByteAt: null, responseHeadersAt: null, lastReceivedAt: null, receivedBytes: 0,
+        },
+      }] } } : {}),
     })
 
     const wrapper = await mountDialog()
     const processed = wrapper.get('[data-testid="question-answer-processed"]')
 
-    expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('已超过 3 分钟')
+    const summary = wrapper.get('[data-testid="question-answer-batch-line"]').text()
+    if (recorded) expect(summary).toContain('HTTP等待已超过3分钟')
+    else {
+      expect(summary).not.toContain('HTTP等待已超过')
+      expect(wrapper.text()).toContain('后台过程信息不可用，无法确认当前进度。')
+      expect(wrapper.find('[data-testid="question-answer-active-processes"]').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('HTTP已等待')
+    }
     expect(wrapper.get('[data-testid="question-answer-batch-line"]').text()).toContain('未返回 1 条')
     expect(harness.cancelQuestionAnswerBatch).not.toHaveBeenCalled()
   })

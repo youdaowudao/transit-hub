@@ -49,12 +49,6 @@ type protocolPostgresFinalizationFailure struct {
 	fail atomic.Bool
 }
 
-func (r *protocolPostgresFinalizationFailure) StopPendingQuestionAnswerBatch(ctx context.Context, user, target, batch string, status QuestionAnswerStatus, kind string) (bool, error) {
-	if r.fail.Load() {
-		return true, errors.New("injected storage finalization failure")
-	}
-	return r.Repository.StopPendingQuestionAnswerBatch(ctx, user, target, batch, status, kind)
-}
 func (r *protocolPostgresFinalizationFailure) FinalizeQuestionAnswerBatch(ctx context.Context, user, target, batch string, status QuestionAnswerStatus, kind string) (bool, error) {
 	if r.fail.Load() {
 		return true, errors.New("injected storage finalization failure")

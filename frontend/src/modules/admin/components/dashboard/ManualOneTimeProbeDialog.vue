@@ -1887,10 +1887,13 @@ const close = () => {
               <template v-else-if="qaFinalization">
                 <p>{{ t(prefix + '.questionAnswer.' + (qaFinalization.state === 'failed' ? 'finalizationFailed' : 'finalizationPending')) }}</p>
                 <p class="mt-1 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.finalizationBatch', { id: shortQuestionAnswerBatchId(qaFinalization.batchId) }) }}</p>
+                <p v-if="qaFinalization.message" class="mt-1 break-words text-xs">结束尚未确认：{{ qaFinalization.message }}</p>
+                <p v-if="qaFinalization.heldCount != null" class="mt-1 text-xs">批次尚未结束，{{ qaFinalization.heldCount }}个位置暂时保留；这不是未保存的题数，请查看每题实际结果。</p>
                 <p v-if="qaFinalization.recovery === 'service_shutdown'" class="mt-1 text-xs">{{ t(prefix + '.questionAnswer.finalizationShutdown') }}</p>
                 <button v-if="qaFinalization.recovery === 'cancel'" data-testid="question-answer-finalization-retry" type="button" class="mt-2 rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium disabled:opacity-50" :disabled="qaCancelling" @click="stopQuestionAnswers">
-                  {{ t(prefix + '.questionAnswer.finalizationRetry') }}
+                  {{ qaFinalization.reason === 'storage_error' || qaFinalization.state === 'failed' ? '重试保存并结束' : t(prefix + '.questionAnswer.finalizationRetry') }}
                 </button>
+                <p v-if="qaFinalization.recovery === 'cancel'" class="mt-1 text-xs text-muted-foreground">只保存已经取得的结果并结束剩余题，不会再次发送题目或修改主站。</p>
               </template>
             </div>
 

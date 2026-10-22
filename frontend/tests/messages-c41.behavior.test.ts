@@ -42,6 +42,7 @@ let savedPreset: ReturnType<typeof preset>
 const preset = () => ({ ...defaultHealthRulePreset(), id: 'custom-c41', name: 'C4.1 延迟线', kind: 'custom', createdAt: '', updatedAt: '', policies: [] })
 const testConfiguration = (): AdminGroupTestConfiguration => ({ adminGroupId: 'c41-group', adminGroupName: 'C4.1 组件分组', configuration: saved, inventoryComplete, affectedAccountCount: 1, conflictAccountCount: 0, accounts: [{ targetId, accountName: 'C4.1 组件账号', testConfiguration: { status: saved ? 'inherited' : 'default', protocol: saved?.protocol ?? 'chat_completions', probeTimeoutSeconds: saved?.probeTimeoutSeconds ?? 20, sourceGroups: [] } }] })
 const stats = questionAnswerFixtureStats([])
+const emptyQueue = () => ({ snapshotAt: new Date().toISOString(), capacity: 15, availableSlots: 15, workspaceOccupied: 0, heldCount: 0, queued: [], processing: [], stopping: [], preparingTargets: [], finalizingBatches: [], counts: { queued: 0, processing: 0, stopping: 0, preparingTargets: 0, finalizingBatches: 0 } })
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 const wrappers: VueWrapper[] = []
 const service = useConnectionHealth()
@@ -62,6 +63,7 @@ beforeEach(() => {
       if (url.endsWith('/manual-probe')) return json([{ modelName: model.id, result: 'ok', healthy: true, latencyMs: 42, firstTokenMs: 42, ruleVersion: 'v2', protocol: 'messages', probeTimeoutSeconds: 20, errorKey: '', errorDetail: '', probedAt: '2026-10-12T00:00:00Z' }])
       if (url.endsWith('/rule-presets/custom-c41')) { savedPreset = { ...savedPreset, ...body }; return json(savedPreset) }
     } else {
+      if (url === '/api/connection-health/question-answer-queue?workspace=c41-component') return json(emptyQueue())
       if (url.endsWith('/test-configuration')) return json(testConfiguration())
       if (url.endsWith('/policy-configuration')) return json({ adminGroupId: 'c41-group', policyIds: [], excludedTargetIds: [] })
       if (url.endsWith('/admin-groups')) return json([group()])

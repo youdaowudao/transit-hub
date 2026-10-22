@@ -36,8 +36,12 @@ func c44Ask(t *testing.T, body string, status int, contentType string, protocol 
 				t.Error("Messages streaming budget missing")
 			}
 		} else {
-			if request["stream"] == true {
-				t.Error("other protocol gained stream=true")
+			if protocol == TestProtocolResponses {
+				if request["stream"] != true {
+					t.Error("Responses question-answer must request streaming")
+				}
+			} else if request["stream"] == true {
+				t.Error("Chat question-answer gained stream=true")
 			}
 			if _, ok := request["max_tokens"]; ok {
 				t.Error("other protocol gained token budget")

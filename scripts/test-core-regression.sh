@@ -51,6 +51,9 @@ run_connection_health_gate() {
       "$ROOT_DIR/scripts/test-core-regression-membership.test.mjs" \
       "$ROOT_DIR/scripts/test-c43-core-membership.test.mjs"
 
+  run_step "frontend Responses question answer failure evidence" \
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- responses-question-answer.behavior.test.ts"
+
   run_step "backend connection_health, upstream and notifications tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test ./internal/modules/connection_health ./internal/modules/upstream ./internal/modules/group_rates ./internal/modules/notifications ./internal/modules/admin_accounts -count=1"
 

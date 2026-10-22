@@ -2082,12 +2082,15 @@ export default {
             cancelled: '已终止'
           },
           failureEvidence: {
-            listHint: '失败的条目如果保存了上游的返回，下面会显示返回码和原话；没有保存的不显示。',
-            note: '这是上游当时的返回，只用来看这条为什么失败，不会修改主站。偶尔失败可以稍后再答一次。一直失败时：有原话就把下面的原话发给上游询问；没有原话时具体原因无法确认，请记下时间、模型和返回码，请上游核查这一次的请求。',
-            noteIncomplete: '上游报告这道题的思考和回答用满了输出上限，通常是题目难或思考强度高，先把思考强度调低后重测；一直如此再联系上游。下面如有上游原话，只用来核对，不会修改主站。',
+            listHint: '失败条目会显示已保存的返回码、处理说明和上游错误。旧记录没有保存的信息无法补回。',
+            note: '这里显示已保存的处理结果，只供查看，不会修改主站。请按这条记录上方已知的失败原因处理；没有取得可判题完整答案的条目不判对错。',
+            noteIncomplete: '上游明确报告这道题已达到输出上限，本题不判对错。可以降低思考强度后重测；Messages每题上限64000个token，Responses的实际输出上限以上游为准。',
             status: '上游返回码',
-            excerpt: '上游原话（已隐藏账号密钥，最多 500 字）',
-            emptyExcerpt: '这条记录没有保存上游原话。'
+            excerpt: '失败详情（已隐藏账号密钥，最多500字；旧记录可能只保留开头）',
+            emptyExcerpt: '这条记录没有保存额外详情，已知原因请看上方的失败说明。',
+            timing: '开始时间：{time}；耗时：{elapsed}',
+            elapsedSeconds: '{seconds}秒',
+            unrecorded: '未记录'
           },
           errorTypes: {
             internal_error: '测试程序内部出错，本批次已停止，没有修改主站；可以重新发起测试。',
@@ -2097,9 +2100,9 @@ export default {
             model_not_found: '上游未找到该模型。',
             server_error: '上游服务返回错误。',
             invalid_response: '未能取得可用的答案：没有拿到可以判题的正文。常见原因：请求被上游拒绝、只收到思考没有正文、模型拒答或没有正常结束、回答内容无法解析。偶尔出现可以稍后重测。一直出现时：有上游原话就把原话发给上游询问；没有原话就记下时间、模型和返回码，请上游核查这一次的回答。',
-            response_incomplete: '回答不完整：思考和回答用满了这道题的输出上限（现在 Messages 每题 64000 个 token，思考也算在内），这道题不判对错。可以把思考强度调低后重测。',
+            response_incomplete: '上游明确报告这道题已达到输出上限，本题不判对错。可以降低思考强度后重测；Messages每题上限64000个token，Responses的实际输出上限以上游为准。',
             account_type_unsupported: 'Messages 问答只支持 API Key 类型的账号，这道题没有发出请求。请把账号所在分组的测试请求改回 Chat Completions，或在主站换成 API Key 类型的账号。',
-            response_too_large: '上游响应超过大小限制（现在 Messages 边生成边接收的回答最多 16 MiB、单行最多 1 MiB，其他回答最多 1 MiB），这道题不判对错。可以把思考强度调低后重测。',
+            response_too_large: '上游返回超过大小限制，本题不判对错。Responses流式接收最多16MiB、单行及单个事件最多1MiB；Messages流式接收最多16MiB、单行最多1MiB；完整JSON最多1MiB。可缩短回答或降低思考强度后重测。',
             timeout: '这道题没有在每题最长等待时间内完成（现在 Messages 20 分钟，Chat 和 Responses 10 分钟），不判对错。可以稍后重测，或把思考强度调低。',
             storage_error: '记录保存失败。',
             service_restarted: '服务重启中断了未完成请求。',

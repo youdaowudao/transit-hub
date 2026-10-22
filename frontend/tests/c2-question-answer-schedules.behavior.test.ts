@@ -325,10 +325,10 @@ describe('C2 running protection and retained account result display', () => {
 
 // 2026-10-10 SPEC §5.11: these are real mounts of the retained exact-batch dialog.
 const scheduleEvidenceCopy = {
-  note: '这是上游当时的返回，只用来看这条为什么失败，不会修改主站。偶尔失败可以稍后再答一次。一直失败时：有原话就把下面的原话发给上游询问；没有原话时具体原因无法确认，请记下时间、模型和返回码，请上游核查这一次的请求。',
+  note: '这里显示已保存的处理结果，只供查看，不会修改主站。请按这条记录上方已知的失败原因处理；没有取得可判题完整答案的条目不判对错。',
   status: '上游返回码',
-  excerpt: '上游原话（已隐藏账号密钥，最多 500 字）',
-  emptyExcerpt: '这条记录没有保存上游原话。',
+  excerpt: '失败详情（已隐藏账号密钥，最多500字；旧记录可能只保留开头）',
+  emptyExcerpt: '这条记录没有保存额外详情，已知原因请看上方的失败说明。',
 }
 const scheduleEvidenceStates = [
   { name: 'status and excerpt', fields: { upstreamStatus: 400, upstreamExcerpt: '{"error":"定时证据甲"}' }, status: 400, excerpt: '{"error":"定时证据甲"}' },
@@ -362,14 +362,14 @@ const mountScheduleEvidence = async (batchId: string) => {
   await flushPromises()
   return wrapper
 }
-const expectScheduleEvidence = (wrapper: VueWrapper, state: typeof scheduleEvidenceStates[number]) => {
+const expectScheduleEvidence = (wrapper: VueWrapper, state: typeof scheduleEvidenceStates[number], failed = true) => {
   const row = wrapper.get('article')
-  const visible = state.status !== null || Boolean(state.excerpt)
+  const visible = failed
   expect(row.text().includes(scheduleEvidenceCopy.note)).toBe(visible)
   expect(row.text().includes(scheduleEvidenceCopy.status)).toBe(state.status !== null)
   if (state.excerpt) expect(row.text()).toContain(scheduleEvidenceCopy.excerpt)
   else if (!visible) expect(row.text()).not.toContain(scheduleEvidenceCopy.excerpt)
-  expect(row.text().includes(scheduleEvidenceCopy.emptyExcerpt)).toBe(state.status !== null && !state.excerpt)
+  expect(row.text().includes(scheduleEvidenceCopy.emptyExcerpt)).toBe(failed && !state.excerpt)
   if (state.status !== null) {
     const value = row.findAll('*').find(element => element.text() === String(state.status))
     expect(value, 'saved status appears as its own readable value').toBeDefined()
@@ -410,10 +410,10 @@ describe('scheduled exact-batch failure evidence', () => {
     const batch = scheduleEvidenceBatch('schedule-reason', {}, errorType)
     api.getQuestionAnswerBatch.mockResolvedValue(batch)
     const wrapper = await mountScheduleEvidence(batch.batchId)
-    expect(wrapper.get('article').text()).toBe(`定时取证题目 schedule-reason · m1 · failed · ${expected}`)
+    expect(wrapper.get('article > p').text()).toBe(`定时取证题目 schedule-reason · m1 · failed · ${expected}`)
     expect(wrapper.text()).not.toContain(errorType)
     expect(wrapper.text()).not.toContain('格式无法识别')
-    expect(wrapper.text()).not.toContain(scheduleEvidenceCopy.note)
+    expect(wrapper.text()).toContain(scheduleEvidenceCopy.note)
   })
 
   it('keeps a cancelled empty-reason record without a fallback failure message or evidence', async () => {
@@ -422,7 +422,7 @@ describe('scheduled exact-batch failure evidence', () => {
     const wrapper = await mountScheduleEvidence(batch.batchId)
     expect(wrapper.get('article').text()).toBe('定时取证题目 schedule-cancelled · m1 · cancelled')
     expect(wrapper.text()).not.toContain('问答请求失败。')
-    expectScheduleEvidence(wrapper, scheduleEvidenceStates[4]!)
+    expectScheduleEvidence(wrapper, scheduleEvidenceStates[4]!, false)
   })
 
   it('refreshes the exact record and removes its previous saved evidence when both fields become empty', async () => {

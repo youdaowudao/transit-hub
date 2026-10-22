@@ -38,8 +38,8 @@ func TestQuestionAnswerProtocolResponsesUsesFixedSnapshotAndStrictCompletion(t *
 				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
 					t.Fatal(err)
 				}
-				if payload["stream"] != false || payload["store"] != false {
-					t.Errorf("nonstream/store fields=%v", payload)
+				if payload["stream"] != true || payload["store"] != false {
+					t.Errorf("stream/store fields=%v", payload)
 				}
 				reasoning, ok := payload["reasoning"].(map[string]any)
 				if !ok || reasoning["effort"] != "xhigh" {

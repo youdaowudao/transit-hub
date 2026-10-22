@@ -3948,11 +3948,11 @@ describe('question-answer retained finalization', () => {
 
 // 2026-10-10 SPEC §5.11: exercise saved upstream evidence through the real dialog.
 const failureEvidenceCopy = {
-  listHint: '失败的条目如果保存了上游的返回，下面会显示返回码和原话；没有保存的不显示。',
-  note: '这是上游当时的返回，只用来看这条为什么失败，不会修改主站。偶尔失败可以稍后再答一次。一直失败时：有原话就把下面的原话发给上游询问；没有原话时具体原因无法确认，请记下时间、模型和返回码，请上游核查这一次的请求。',
+  listHint: '失败条目会显示已保存的返回码、处理说明和上游错误。旧记录没有保存的信息无法补回。',
+  note: '这里显示已保存的处理结果，只供查看，不会修改主站。请按这条记录上方已知的失败原因处理；没有取得可判题完整答案的条目不判对错。',
   status: '上游返回码',
-  excerpt: '上游原话（已隐藏账号密钥，最多 500 字）',
-  emptyExcerpt: '这条记录没有保存上游原话。',
+  excerpt: '失败详情（已隐藏账号密钥，最多500字；旧记录可能只保留开头）',
+  emptyExcerpt: '这条记录没有保存额外详情，已知原因请看上方的失败说明。',
 }
 
 const evidenceStates = [
@@ -3996,12 +3996,12 @@ const expectNoMisleadingFailureCopy = (wrapper: VueWrapper) => {
 }
 
 const expectEvidenceRow = (row: ReturnType<typeof rowContaining>, state: typeof evidenceStates[number]) => {
-  const visible = state.status !== null || Boolean(state.excerpt)
+  const visible = true
   expect(row.text().includes(failureEvidenceCopy.note)).toBe(visible)
   expect(row.text().includes(failureEvidenceCopy.status)).toBe(state.status !== null)
   if (state.excerpt) expect(row.text()).toContain(failureEvidenceCopy.excerpt)
   else if (!visible) expect(row.text()).not.toContain(failureEvidenceCopy.excerpt)
-  expect(row.text().includes(failureEvidenceCopy.emptyExcerpt)).toBe(state.status !== null && !state.excerpt)
+  expect(row.text().includes(failureEvidenceCopy.emptyExcerpt)).toBe(!state.excerpt)
   if (state.status !== null) {
     const status = row.findAll('*').find(element => element.text() === String(state.status))
     expect(status, 'saved status appears as its own readable value').toBeDefined()
@@ -4051,7 +4051,7 @@ describe('question-answer failure evidence in current and historical batches', (
     const row = rowContaining(section, batch.records[0]!.questionName)
     expect(row.text()).toContain('未能取得可用的答案：没有拿到可以判题的正文。常见原因：请求被上游拒绝、只收到思考没有正文、模型拒答或没有正常结束、回答内容无法解析。偶尔出现可以稍后重测。一直出现时：有上游原话就把原话发给上游询问；没有原话就记下时间、模型和返回码，请上游核查这一次的回答。')
     expect(row.text()).toContain('失败题干保持可读')
-    expect(row.text()).not.toContain(failureEvidenceCopy.note)
+    expect(row.text()).toContain(failureEvidenceCopy.note)
     expectNoMisleadingFailureCopy(wrapper)
   })
 

@@ -14,6 +14,24 @@ import type {
 } from '../types/connectionHealth'
 import type { QuestionAnswerSelectionPreferences } from './connectionHealthPreferences'
 
+export const questionAnswerReadableError = (value: string, translate: (key: string) => string, exists: (key: string) => boolean): string => {
+  if (exists(value)) return translate(value)
+  const typeKey = `admin.connectionHealth.manualProbeDialog.questionAnswer.errorTypes.${value}`
+  if (exists(typeKey)) return translate(typeKey)
+  if (value && !value.startsWith('admin.') && !value.startsWith('auth.')) return value
+  return `${translate('admin.connectionHealth.errors.request')}；接口未提供更具体原因，请按批次编号和时间核查后台日志。`
+}
+
+export const questionAnswerOperationKey = (error: unknown): string => (
+  error instanceof Error && 'errorKey' in error && typeof error.errorKey === 'string' ? error.errorKey
+    : error instanceof Error ? error.message : 'admin.connectionHealth.errors.request'
+)
+
+export const questionAnswerSnapshotTime = (snapshotAt: string | undefined, receivedAt: number, now: number, stale = false): number => {
+  const snapshot = snapshotAt ? Date.parse(snapshotAt) : NaN
+  return Number.isFinite(snapshot) ? snapshot + (stale ? 0 : Math.max(0, now - receivedAt)) : now
+}
+
 export const TEST_QUESTION_KEYWORD_COUNT_LIMIT = 20
 export const TEST_QUESTION_KEYWORD_RUNE_LIMIT = 64
 export const TEST_QUESTION_KEYWORD_BYTES_LIMIT = 2048

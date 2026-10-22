@@ -4,7 +4,7 @@ import { useDocumentVisibility } from '@vueuse/core'
 import { t, te } from '@/locales'
 import { Loader2 } from 'lucide-vue-next'
 import { ConnectionHealthApiError, cancelQuestionAnswerScheduleExecution, getQuestionAnswerScheduleExecution } from '../../api/connectionHealth'
-import { connectionHealthMessageKey } from '../../composables/useConnectionHealth'
+import { questionAnswerReadableError } from '../../utils/questionAnswers'
 import { formatQuestionAnswerAccuracy, questionAnswerAccuracy } from '../../utils/questionAnswers'
 import { questionAnswerScheduleIsActive, questionAnswerScheduleReason, questionAnswerScheduleStatus, questionAnswerScheduleTime } from '../../utils/questionAnswerSchedules'
 import type { QuestionAnswerScheduleExecution, QuestionAnswerScheduleExecutionDetail, QuestionAnswerScheduleExecutionTarget, QuestionAnswerStats } from '../../types/connectionHealth'
@@ -14,7 +14,7 @@ const emit = defineEmits<{ (event: 'back'): void; (event: 'question-answer-view'
 const documentVisibility = useDocumentVisibility()
 const execution = ref<QuestionAnswerScheduleExecutionDetail | null>(null), loading = ref(false), cancelling = ref(false), error = ref(''), notice = ref('')
 let lifecycle = 0, revision = 0, timer: ReturnType<typeof setTimeout> | null = null, readController: AbortController | null = null, cancelController: AbortController | null = null
-const readable = (key: string) => t(connectionHealthMessageKey(key, te))
+const readable = (key: string) => questionAnswerReadableError(key, t, te)
 const accuracy = (stats: Pick<QuestionAnswerStats, 'reviews'>) => formatQuestionAnswerAccuracy(questionAnswerAccuracy(stats))
 const counts = (stats: QuestionAnswerStats) => `请求状态：成功 ${stats.requests.succeeded} · 失败 ${stats.requests.failed} · 取消 ${stats.requests.cancelled} · 进行中 ${stats.requests.inProgress}`
 const reviews = (stats: QuestionAnswerStats) => `判题状态：正确 ${stats.reviews.correct} · 错误 ${stats.reviews.incorrect} · 待人工 ${stats.reviews.unreviewed}`

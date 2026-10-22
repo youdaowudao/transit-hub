@@ -197,6 +197,7 @@ func (f *fakeQuestionAnswerRepository) CompleteQuestionAnswer(_ context.Context,
 			f.records[i].Status, f.records[i].AnswerBody, f.records[i].ErrorType = completion.Status, completion.AnswerBody, completion.ErrorType
 			f.records[i].AnswerJudgment, f.records[i].JudgmentSource = completion.AnswerJudgment, completion.JudgmentSource
 			f.records[i].UpstreamStatus, f.records[i].UpstreamExcerpt = completion.UpstreamStatus, completion.UpstreamExcerpt
+			f.records[i].Diagnostics = cloneQuestionAnswerDiagnostics(completion.Diagnostics)
 			f.records[i].ManualError = completion.AnswerJudgment != nil && *completion.AnswerJudgment == QuestionAnswerIncorrect
 			f.records[i].CompletedAt, f.records[i].UpdatedAt = &now, now
 			return true, nil

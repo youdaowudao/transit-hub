@@ -720,12 +720,12 @@ func (h *Handler) startQuestionAnswerBatch(w http.ResponseWriter, r *http.Reques
 	}
 	var input QuestionAnswerStartInput
 	if err := httpjson.Decode(r, &input); err != nil {
-		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		writeQuestionAnswerError(w, errors.Join(requestError(ErrorRequest), err), "preparing", "not_started", "")
 		return
 	}
 	batch, err := h.service.StartQuestionAnswerBatch(r.Context(), userID, r.PathValue("id"), input)
 	if err != nil {
-		writeError(w, err)
+		writeQuestionAnswerError(w, err, "preparing", "not_started", r.PathValue("batchId"))
 		return
 	}
 	httpjson.Write(w, http.StatusAccepted, batch)
@@ -742,7 +742,7 @@ func (h *Handler) latestQuestionAnswerBatch(w http.ResponseWriter, r *http.Reque
 	}
 	batch, err := h.service.LatestQuestionAnswerBatch(r.Context(), userID, r.PathValue("id"))
 	if err != nil {
-		writeError(w, err)
+		writeQuestionAnswerError(w, err, "reading", "completed", r.PathValue("batchId"))
 		return
 	}
 	httpjson.Write(w, http.StatusOK, batch)
@@ -759,7 +759,7 @@ func (h *Handler) getQuestionAnswerBatch(w http.ResponseWriter, r *http.Request)
 	}
 	batch, err := h.service.GetQuestionAnswerBatch(r.Context(), userID, r.PathValue("id"), r.PathValue("batchId"))
 	if err != nil {
-		writeError(w, err)
+		writeQuestionAnswerError(w, err, "reading", "completed", r.PathValue("batchId"))
 		return
 	}
 	httpjson.Write(w, http.StatusOK, batch)
@@ -776,7 +776,7 @@ func (h *Handler) stopQuestionAnswerBatch(w http.ResponseWriter, r *http.Request
 	}
 	batch, err := h.service.StopQuestionAnswerBatch(r.Context(), userID, r.PathValue("id"), r.PathValue("batchId"))
 	if err != nil {
-		writeError(w, err)
+		writeQuestionAnswerError(w, err, "cancelling", "unknown", r.PathValue("batchId"))
 		return
 	}
 	httpjson.Write(w, http.StatusOK, batch)
@@ -794,12 +794,12 @@ func (h *Handler) questionAnswerHistory(w http.ResponseWriter, r *http.Request) 
 	page := 1
 	if values, exists := r.URL.Query()["page"]; exists {
 		if len(values) != 1 {
-			httpjson.WriteError(w, http.StatusBadRequest, ErrorQuestionAnswerHistoryPage)
+			writeQuestionAnswerError(w, requestError(ErrorQuestionAnswerHistoryPage), "history", "not_started", "")
 			return
 		}
 		parsed, err := strconv.Atoi(values[0])
 		if err != nil || parsed < 1 {
-			httpjson.WriteError(w, http.StatusBadRequest, ErrorQuestionAnswerHistoryPage)
+			writeQuestionAnswerError(w, requestError(ErrorQuestionAnswerHistoryPage), "history", "not_started", "")
 			return
 		}
 		page = parsed
@@ -807,14 +807,14 @@ func (h *Handler) questionAnswerHistory(w http.ResponseWriter, r *http.Request) 
 	scope := "today"
 	if values, exists := r.URL.Query()["scope"]; exists {
 		if len(values) != 1 || (values[0] != "today" && values[0] != "all") {
-			httpjson.WriteError(w, http.StatusBadRequest, ErrorQuestionAnswerHistoryScope)
+			writeQuestionAnswerError(w, requestError(ErrorQuestionAnswerHistoryScope), "history", "not_started", "")
 			return
 		}
 		scope = values[0]
 	}
 	history, err := h.service.QuestionAnswerHistory(r.Context(), userID, r.PathValue("id"), page, scope)
 	if err != nil {
-		writeError(w, err)
+		writeQuestionAnswerError(w, err, "history", "completed", r.PathValue("batchId"))
 		return
 	}
 	httpjson.Write(w, http.StatusOK, history)
@@ -831,7 +831,7 @@ func (h *Handler) getQuestionAnswerSummary(w http.ResponseWriter, r *http.Reques
 	}
 	summary, err := h.service.GetQuestionAnswerSummary(r.Context(), userID, r.PathValue("id"))
 	if err != nil {
-		writeError(w, err)
+		writeQuestionAnswerError(w, err, "reading", "completed", r.PathValue("batchId"))
 		return
 	}
 	httpjson.Write(w, http.StatusOK, summary)
@@ -859,13 +859,17 @@ func (h *Handler) setQuestionAnswerJudgment(w http.ResponseWriter, r *http.Reque
 		Judgment          QuestionAnswerJudgment `json:"judgment"`
 		ExpectedUpdatedAt time.Time              `json:"expectedUpdatedAt"`
 	}
-	if err := httpjson.Decode(r, &input); err != nil || (!validQuestionAnswerJudgment(input.Judgment) || input.ExpectedUpdatedAt.IsZero()) {
-		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+	if err := httpjson.Decode(r, &input); err != nil {
+		writeQuestionAnswerError(w, errors.Join(requestError(ErrorRequest), err), "judging", "not_started", "")
+		return
+	}
+	if !validQuestionAnswerJudgment(input.Judgment) || input.ExpectedUpdatedAt.IsZero() {
+		writeQuestionAnswerError(w, errors.Join(requestError(ErrorRequest), errors.New("人工判断必须选择正确或错误，并带上当前记录的更新时间；请重新读取这条记录后再操作")), "judging", "not_started", "")
 		return
 	}
 	record, err := h.service.SetQuestionAnswerJudgment(r.Context(), userID, r.PathValue("id"), r.PathValue("recordId"), input.Judgment, input.ExpectedUpdatedAt)
 	if err != nil {
-		writeError(w, err)
+		writeQuestionAnswerError(w, err, "judging", "unknown", r.PathValue("batchId"))
 		return
 	}
 	httpjson.Write(w, http.StatusOK, record)

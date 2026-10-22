@@ -3951,7 +3951,7 @@ const failureEvidenceCopy = {
   listHint: '失败条目会显示已保存的返回码、处理说明和上游错误。旧记录没有保存的信息无法补回。',
   note: '这里显示已保存的处理结果，只供查看，不会修改主站。请按这条记录上方已知的失败原因处理；没有取得可判题完整答案的条目不判对错。',
   status: '上游返回码',
-  excerpt: '失败详情（已隐藏账号密钥，最多500字；旧记录可能只保留开头）',
+  excerpt: '失败详情：接口返回和已有说明（已隐藏账号密钥，最多500字；旧记录可能只保留开头）',
   emptyExcerpt: '这条记录没有保存额外详情，已知原因请看上方的失败说明。',
 }
 
@@ -4034,7 +4034,7 @@ describe('question-answer failure evidence in current and historical batches', (
       const row = rowContaining(section, batch.records[0]!.questionName)
       expect(row.text()).toContain('失败题干保持可读')
       expect(row.text()).toContain('model-a · Responses')
-      expect(row.text()).toContain('网络请求失败：连接没有建立，或者回答到一半断开了。可以稍后重测；一直失败时检查上游地址和网络。')
+      expect(row.text()).toContain('请求被记录为连接或读取错误。具体步骤和直接原因见下方详情；记录不足时无法确认中断位置，请先核查同一时刻的后台日志。')
       expectEvidenceRow(row, state)
       expect(section.findAll('*').filter(element => element.text() === failureEvidenceCopy.listHint)).not.toHaveLength(0)
       expectNoMisleadingFailureCopy(wrapper)
@@ -4049,7 +4049,7 @@ describe('question-answer failure evidence in current and historical batches', (
     const wrapper = await mountQuestionAnswerDialog()
     const section = await openFailedAnswers(wrapper)
     const row = rowContaining(section, batch.records[0]!.questionName)
-    expect(row.text()).toContain('未能取得可用的答案：没有拿到可以判题的正文。常见原因：请求被上游拒绝、只收到思考没有正文、模型拒答或没有正常结束、回答内容无法解析。偶尔出现可以稍后重测。一直出现时：有上游原话就把原话发给上游询问；没有原话就记下时间、模型和返回码，请上游核查这一次的回答。')
+    expect(row.text()).toContain('没有取得可判题的完整回答，本题不判对错。具体格式或结束原因见下方详情；当时未记录的过程无法补回，请先核查批次和同一时刻的后台日志。')
     expect(row.text()).toContain('失败题干保持可读')
     expect(row.text()).toContain(failureEvidenceCopy.note)
     expectNoMisleadingFailureCopy(wrapper)
@@ -4066,7 +4066,7 @@ describe('question-answer failure evidence in current and historical batches', (
     await wrapper.setProps({ open: true }); await flushPromises()
     section = await openFailedAnswers(wrapper)
     const row = rowContaining(section, refreshed.records[0]!.questionName)
-    expect(row.text()).toContain('网络请求失败：连接没有建立，或者回答到一半断开了。可以稍后重测；一直失败时检查上游地址和网络。')
+    expect(row.text()).toContain('请求被记录为连接或读取错误。具体步骤和直接原因见下方详情；记录不足时无法确认中断位置，请先核查同一时刻的后台日志。')
     expectEvidenceRow(row, evidenceStates[3]!)
     expect(wrapper.text()).not.toContain('刷新前唯一原话')
     expect(harness.getLatestQuestionAnswerBatch).toHaveBeenCalledTimes(2)

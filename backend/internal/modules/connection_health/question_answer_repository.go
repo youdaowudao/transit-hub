@@ -318,15 +318,19 @@ func (r *Repository) CompleteQuestionAnswer(ctx context.Context, userID string, 
 	if err := validateQuestionAnswerCompletion(completion); err != nil {
 		return false, err
 	}
+	diagnostics, err := encodeQuestionAnswerDiagnostics(completion.Diagnostics)
+	if err != nil {
+		return false, err
+	}
 	result, err := r.db.Exec(ctx, `
   UPDATE connection_health_question_answer_records
   SET status = $4, answer_body = $5, error_type = $6,
    answer_judgment = $7, answer_judgment_source = $8,
    manual_error = COALESCE($7 = 'incorrect', false),
-   upstream_status = $9, upstream_excerpt = $10,
+   upstream_status = $9, upstream_excerpt = $10, request_diagnostics = $11,
    completed_at = now(), updated_at = now()
   WHERE id = $1 AND user_id = $2 AND batch_id = $3 AND status = 'running'
- `, recordID, userID, batchID, completion.Status, completion.AnswerBody, completion.ErrorType, completion.AnswerJudgment, completion.JudgmentSource, completion.UpstreamStatus, completion.UpstreamExcerpt)
+ `, recordID, userID, batchID, completion.Status, completion.AnswerBody, completion.ErrorType, completion.AnswerJudgment, completion.JudgmentSource, completion.UpstreamStatus, completion.UpstreamExcerpt, diagnostics)
 	return result.RowsAffected() > 0, err
 }
 
@@ -500,7 +504,7 @@ func (r *Repository) ListQuestionAnswerHistory(ctx context.Context, userID strin
 	batches := make([]QuestionAnswerBatchSummary, 0, len(ids))
 	if len(ids) > 0 {
 		// History summaries do not load long answer bodies; exact GET retains those.
-		selectSummary := strings.Replace(questionAnswerRecordSelect, "answer_body,", "'' AS answer_body,", 1)
+		selectSummary := questionAnswerRecordSummarySelect()
 		rows, err := tx.Query(ctx, selectSummary+` WHERE user_id=$1 AND target_id=$2 AND batch_id=ANY($3::text[]) ORDER BY created_at,id`, userID, targetID, ids)
 		if err != nil {
 			return QuestionAnswerHistory{}, err
@@ -621,7 +625,7 @@ func (r *Repository) ListLatestTerminalQuestionAnswerSummaries(ctx context.Conte
 }
 
 func questionAnswerRecordSummarySelect() string {
-	return strings.Replace(questionAnswerRecordSelect, "answer_body,", "'' AS answer_body,", 1)
+	return strings.Replace(strings.Replace(questionAnswerRecordSelect, "answer_body,", "'' AS answer_body,", 1), "request_diagnostics", "NULL AS request_diagnostics", 1)
 }
 
 func (r *Repository) ListQuestionAnswerBatchSummaries(ctx context.Context, userID string, batchIDs []string) (map[string]QuestionAnswerBatchSummary, error) {
@@ -730,7 +734,7 @@ func (r *Repository) SetQuestionAnswerJudgment(ctx context.Context, userID strin
 	record, err = scanQuestionAnswerRecord(tx.QueryRow(ctx, `
   UPDATE connection_health_question_answer_records SET answer_judgment=$4,answer_judgment_source='manual',manual_error=($4='incorrect'),updated_at=GREATEST(clock_timestamp(),updated_at+interval '1 microsecond')
   WHERE id=$1 AND user_id=$2 AND target_id=$3 AND status='succeeded'
-  RETURNING id,target_id,batch_id,model_name,question_id,question_name,question_body,question_keyword_snapshot,reasoning_effort,answer_body,status,error_type,answer_judgment,created_at,started_at,completed_at,updated_at,request_protocol,answer_judgment_source,repeat_index,upstream_status,upstream_excerpt
+  RETURNING id,target_id,batch_id,model_name,question_id,question_name,question_body,question_keyword_snapshot,reasoning_effort,answer_body,status,error_type,answer_judgment,created_at,started_at,completed_at,updated_at,request_protocol,answer_judgment_source,repeat_index,upstream_status,upstream_excerpt,request_diagnostics
  `, recordID, userID, targetID, judgment))
 	if err != nil {
 		return nil, err
@@ -743,7 +747,7 @@ func (r *Repository) SetQuestionAnswerJudgment(ctx context.Context, userID strin
 
 const questionAnswerRecordSelect = `
 	SELECT id, target_id, batch_id, model_name, question_id, question_name, question_body, question_keyword_snapshot,
-		reasoning_effort, answer_body, status, error_type, answer_judgment, created_at, started_at, completed_at, updated_at, request_protocol, answer_judgment_source, repeat_index, upstream_status, upstream_excerpt
+		reasoning_effort, answer_body, status, error_type, answer_judgment, created_at, started_at, completed_at, updated_at, request_protocol, answer_judgment_source, repeat_index, upstream_status, upstream_excerpt, request_diagnostics
 	FROM connection_health_question_answer_records
 `
 
@@ -760,6 +764,7 @@ func scanQuestionAnswerRecords(rows pgx.Rows) ([]QuestionAnswerRecord, error) {
 }
 
 func scanQuestionAnswerRecord(row rowScanner) (*QuestionAnswerRecord, error) {
+	var diagnostics []byte
 	var record QuestionAnswerRecord
 	var reasoningEffort *string
 	if err := row.Scan(
@@ -767,7 +772,7 @@ func scanQuestionAnswerRecord(row rowScanner) (*QuestionAnswerRecord, error) {
 		&record.QuestionName, &record.QuestionBody, &record.QuestionKeywordSnapshot, &reasoningEffort, &record.AnswerBody, &record.Status,
 		&record.ErrorType, &record.AnswerJudgment, &record.CreatedAt, &record.StartedAt,
 		&record.CompletedAt, &record.UpdatedAt, &record.RequestProtocol, &record.JudgmentSource, &record.RepeatIndex,
-		&record.UpstreamStatus, &record.UpstreamExcerpt,
+		&record.UpstreamStatus, &record.UpstreamExcerpt, &diagnostics,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -792,6 +797,7 @@ func scanQuestionAnswerRecord(row rowScanner) (*QuestionAnswerRecord, error) {
 		record.ReasoningEffort = questionAnswerReasoningEffortPointer(normalized)
 	}
 	record.ManualError = record.AnswerJudgment != nil && *record.AnswerJudgment == QuestionAnswerIncorrect
+	record.Diagnostics, record.DiagnosticsUnavailable = decodeQuestionAnswerDiagnostics(diagnostics)
 	return &record, nil
 }
 
@@ -802,6 +808,7 @@ func questionAnswerReasoningEffortPointer(value QuestionAnswerReasoningEffort) *
 func cloneQuestionAnswerRecords(records []QuestionAnswerRecord) []QuestionAnswerRecord {
 	cloned := append([]QuestionAnswerRecord(nil), records...)
 	for i := range cloned {
+		cloned[i].Diagnostics = cloneQuestionAnswerDiagnostics(cloned[i].Diagnostics)
 		if cloned[i].QuestionKeywordSnapshot != nil {
 			cloned[i].QuestionKeywordSnapshot = append([]string{}, cloned[i].QuestionKeywordSnapshot...)
 		}

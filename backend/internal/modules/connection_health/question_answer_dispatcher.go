@@ -80,6 +80,10 @@ func (s *Service) nextQuestionAnswerDispatchLocked() (string, *activeQuestionAns
 			continue
 		}
 		record := run.records[run.next]
+		if run.progress == nil {
+			run.progress = make(map[string]*QuestionAnswerProgress)
+		}
+		run.progress[record.ID] = newQuestionAnswerProgress(time.Now())
 		run.next++
 		run.inFlight++
 		s.questionAnswerInFlight++
@@ -91,7 +95,17 @@ func (s *Service) nextQuestionAnswerDispatchLocked() (string, *activeQuestionAns
 
 func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionAnswerBatch, record QuestionAnswerRecord) {
 	terminalDurable := false
-	defer func() { s.finishQuestionAnswerDispatch(key, run, terminalDurable) }()
+	defer func() {
+		if terminalDurable {
+			s.questionAnswerMu.Lock()
+			delete(run.progress, record.ID)
+			s.questionAnswerMu.Unlock()
+		}
+		s.finishQuestionAnswerDispatch(key, run, terminalDurable)
+	}()
+	s.questionAnswerMu.Lock()
+	progress := run.progress[record.ID]
+	s.questionAnswerMu.Unlock()
 	defer func() {
 		if recover() != nil {
 			s.stopQuestionAnswerRunForInternalError(run)
@@ -102,6 +116,7 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 
 	running, err := s.questionAnswers.MarkQuestionAnswerRunning(run.ctx, run.userID, run.batchID, record.ID)
 	if err != nil {
+		progress.failure("starting", err, run.cred.Key)
 		if s.questionAnswerRunStopReason(run) == "" {
 			s.stopQuestionAnswerRunForStorage(run)
 		}
@@ -125,8 +140,9 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 		ttl = s.questionAnswerMessagesTTL
 	}
 	itemCtx, cancel := context.WithTimeout(run.ctx, ttl)
+	progress.startRequest(ttl, time.Now())
 	defer cancel()
-	result := s.questionAnswerHTTP.AskDetailed(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort), protocol)
+	result := s.questionAnswerHTTP.AskDetailedWithProgress(itemCtx, run.cred, record.ModelName, record.QuestionBody, questionAnswerReasoningEffortOrDefault(record.ReasoningEffort), progress, protocol)
 	itemErr := itemCtx.Err()
 	cancel()
 	if s.questionAnswerRunStopReason(run) != "" {
@@ -135,6 +151,12 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 	}
 
 	completion := questionAnswerCompletionFromAsk(result, errors.Is(itemErr, context.DeadlineExceeded), record, run.cred.Key)
+	if progress != nil {
+		progress.mu.Lock()
+		status := completion.Status
+		progress.pendingResultStatus = &status
+		progress.mu.Unlock()
+	}
 	completed, err := s.questionAnswers.CompleteQuestionAnswer(run.ctx, run.userID, run.batchID, record.ID, completion)
 	if err == nil && completed {
 		terminalDurable = true
@@ -144,7 +166,7 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 }
 
 func questionAnswerCompletionFromAsk(result QuestionAnswerAskResult, deadlineExceeded bool, record QuestionAnswerRecord, keys ...string) QuestionAnswerCompletion {
-	completion := QuestionAnswerCompletion{Status: QuestionAnswerSucceeded, AnswerBody: result.Answer, ErrorType: result.ErrorType}
+	completion := QuestionAnswerCompletion{Status: QuestionAnswerSucceeded, AnswerBody: result.Answer, ErrorType: result.ErrorType, Diagnostics: cloneQuestionAnswerDiagnostics(result.Diagnostics)}
 	if deadlineExceeded || result.ErrorType != "" {
 		completion.Status = QuestionAnswerFailed
 		completion.AnswerBody = ""
@@ -231,10 +253,18 @@ func (s *Service) completeStoppedQuestionAnswerRecord(run *activeQuestionAnswerB
 	}()
 	s.questionAnswerMu.Lock()
 	status, errorType := questionAnswerRunFinalState(run, QuestionAnswerErrorStorage)
+	progress := run.progress[record.ID]
 	s.questionAnswerMu.Unlock()
 	completeCtx, cancel := s.questionAnswerStorageContext(context.Background())
 	defer cancel()
-	completed, err := s.questionAnswers.CompleteQuestionAnswer(completeCtx, run.userID, run.batchID, record.ID, QuestionAnswerCompletion{Status: status, ErrorType: errorType})
+	var diagnostics *QuestionAnswerDiagnostics
+	if progress != nil {
+		diagnostics = progress.snapshot(record.ID).Diagnostics
+		if diagnostics.RequestStartedAt == nil {
+			diagnostics.FailureStep = "starting"
+		}
+	}
+	completed, err := s.questionAnswers.CompleteQuestionAnswer(completeCtx, run.userID, run.batchID, record.ID, QuestionAnswerCompletion{Status: status, ErrorType: errorType, Diagnostics: diagnostics})
 	cancel()
 	return err == nil && completed
 }

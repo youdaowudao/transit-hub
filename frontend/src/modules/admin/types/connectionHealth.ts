@@ -537,7 +537,38 @@ export type QuestionAnswerJudgment = 'unreviewed' | 'correct' | 'incorrect'
 export type QuestionAnswerJudgmentSource = 'automatic' | 'manual'
 export type QuestionAnswerHistoryScope = 'today' | 'all'
 
+export interface QuestionAnswerDiagnostics {
+  version: 1
+  timeoutMs: number | null
+  selectedAt: string | null
+  requestStartedAt: string | null
+  requestFinishedAt: string | null
+  requestElapsedMs: number | null
+  requestWrittenAt: string | null
+  firstResponseByteAt: string | null
+  responseHeadersAt: string | null
+  lastReceivedAt: string | null
+  receivedBytes: number
+  failureStep?: 'starting' | 'build' | 'request' | 'receive' | 'parse' | null
+  localError?: string | null
+}
+
+export interface QuestionAnswerRuntimeItem {
+  recordId: string
+  step: 'starting' | 'request' | 'receiving' | 'saving' | 'confirming'
+  diagnostics: QuestionAnswerDiagnostics | null
+  storageError?: string
+  pendingResultStatus?: QuestionAnswerStatus | null
+}
+
+export interface QuestionAnswerRuntime {
+  snapshotAt: string
+  items: QuestionAnswerRuntimeItem[]
+}
+
 export interface QuestionAnswerRecord {
+  diagnostics?: QuestionAnswerDiagnostics | null
+  diagnosticsUnavailable?: boolean
   requestProtocol?: TestProtocol | null
   id: string
   targetId: string
@@ -860,6 +891,7 @@ export interface QuestionAnswerFinalization {
 }
 
 export interface QuestionAnswerBatch {
+  runtime?: QuestionAnswerRuntime | null
   finalization?: QuestionAnswerFinalization | null
   batchId: string
   records: QuestionAnswerRecord[]

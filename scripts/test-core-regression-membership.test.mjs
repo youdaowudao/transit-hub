@@ -37,6 +37,8 @@ test('connection-health core gate keeps every question-answer regression member'
     'c1-question-answer-red.behavior.test.ts',
     'c1-question-answer-keywords.test.ts',
     'c1-question-answer.behavior.test.ts',
+    'question-answer-errors-compatibility.behavior.test.ts',
+    'question-answer-diagnostics.behavior.test.ts',
     'connection-health-question-answer.test.ts',
     'connection-health-question-answer.behavior.test.ts',
     'connection-health-question-answer-compact-layout.behavior.test.ts',

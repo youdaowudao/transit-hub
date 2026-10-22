@@ -133,6 +133,8 @@ type QuestionAnswerConfigurationSnapshot struct {
 }
 
 type QuestionAnswerRecord struct {
+	Diagnostics             *QuestionAnswerDiagnostics     `json:"diagnostics"`
+	DiagnosticsUnavailable  bool                           `json:"diagnosticsUnavailable,omitempty"`
 	UpstreamStatus          *int                           `json:"upstreamStatus"`
 	UpstreamExcerpt         string                         `json:"upstreamExcerpt"`
 	RequestProtocol         *TestProtocol                  `json:"requestProtocol"`
@@ -237,6 +239,7 @@ type QuestionAnswerBatchSummary struct {
 }
 
 type QuestionAnswerCompletion struct {
+	Diagnostics     *QuestionAnswerDiagnostics
 	UpstreamStatus  *int
 	UpstreamExcerpt string
 	Status          QuestionAnswerStatus
@@ -247,6 +250,7 @@ type QuestionAnswerCompletion struct {
 }
 
 type QuestionAnswerBatch struct {
+	Runtime         *QuestionAnswerRuntime         `json:"runtime,omitempty"`
 	Finalization    *QuestionAnswerFinalization    `json:"finalization,omitempty"`
 	BatchID         string                         `json:"batchId"`
 	Records         []QuestionAnswerRecord         `json:"records"`
@@ -284,6 +288,7 @@ type activeQuestionAnswerBatch struct {
 	ctx                context.Context
 	cancel             context.CancelFunc
 	records            []QuestionAnswerRecord
+	progress           map[string]*QuestionAnswerProgress
 	next               int
 	inFlight           int
 	heldSlots          int
@@ -644,7 +649,11 @@ func (s *Service) startQuestionAnswerBatchCore(reservation *questionAnswerTarget
 	return batch, nil
 }
 
-func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID, targetID string, input QuestionAnswerStartInput) (QuestionAnswerBatch, error) {
+func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID, targetID string, input QuestionAnswerStartInput) (batchResult QuestionAnswerBatch, operationErr error) {
+	operationResult, operationStep, operationBatchID := "not_started", "preparing", ""
+	defer func() {
+		operationErr = questionAnswerOperationError(operationErr, operationStep, operationResult, operationBatchID)
+	}()
 	if s.backgroundTasksDisabled {
 		return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
 	}
@@ -691,7 +700,7 @@ func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID, targetID s
 		if reservation.ctx.Err() != nil {
 			return QuestionAnswerBatch{}, requestError(ErrorQuestionAnswerServiceStopped)
 		}
-		return QuestionAnswerBatch{}, requestError(reasonToErrorKey(upstream.ProbeCredentialReason(err)))
+		return QuestionAnswerBatch{}, errors.Join(requestError(reasonToErrorKey(upstream.ProbeCredentialReason(err))), err)
 	}
 	discovered, err := s.modelDiscovery.ListModels(reservation.ctx, cred.BaseURL, cred.Key)
 	if err != nil {
@@ -709,6 +718,7 @@ func (s *Service) StartQuestionAnswerBatch(_ context.Context, userID, targetID s
 			return QuestionAnswerBatch{}, requestError(ErrorModelUnavailable)
 		}
 	}
+	operationResult, operationStep, operationBatchID = "unknown", "creating", batchID
 	return s.startQuestionAnswerBatchCore(reservation, cred, func(ctx context.Context) ([]QuestionAnswerRecord, bool, error) {
 		records, err := s.questionAnswers.CreateQuestionAnswerBatch(ctx, userID, targetID, batchID, models, questionIDs, effort, repeat, QuestionAnswerConfigurationSnapshot{AdminAccountID: workspace, Memberships: target.TestMemberships, InventoryComplete: target.InventoryComplete})
 		return records, true, err
@@ -815,7 +825,8 @@ func (s *Service) waitQuestionAnswerShutdownAttempt(attempt *questionAnswerShutd
 	return err
 }
 
-func (s *Service) LatestQuestionAnswerBatch(ctx context.Context, userID string, targetID string) (QuestionAnswerBatch, error) {
+func (s *Service) LatestQuestionAnswerBatch(ctx context.Context, userID string, targetID string) (operationValue QuestionAnswerBatch, operationErr error) {
+	defer func() { operationErr = questionAnswerOperationError(operationErr, "reading", "completed", "") }()
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerBatch{}, err
 	}
@@ -840,6 +851,7 @@ func (s *Service) LatestQuestionAnswerBatch(ctx context.Context, userID string, 
 		}
 		batch, err := buildQuestionAnswerBatch(records)
 		batch.Finalization = projection
+		s.attachQuestionAnswerRuntime(userID, targetID, &batch)
 		return batch, err
 	}
 }
@@ -879,7 +891,8 @@ func (s *Service) projectQuestionAnswerFinalization(userID, targetID string, run
 	return projection, true
 }
 
-func (s *Service) GetQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string) (QuestionAnswerBatch, error) {
+func (s *Service) GetQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string) (operationValue QuestionAnswerBatch, operationErr error) {
+	defer func() { operationErr = questionAnswerOperationError(operationErr, "reading", "completed", batchID) }()
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerBatch{}, err
 	}
@@ -899,10 +912,12 @@ func (s *Service) getQuestionAnswerBatchCore(ctx context.Context, userID, target
 	if run != nil {
 		batch.Finalization, _ = s.projectQuestionAnswerFinalization(userID, targetID, run, true)
 	}
+	s.attachQuestionAnswerRuntime(userID, targetID, &batch)
 	return batch, err
 }
 
-func (s *Service) StopQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string) (QuestionAnswerBatch, error) {
+func (s *Service) StopQuestionAnswerBatch(ctx context.Context, userID string, targetID string, batchID string) (operationValue QuestionAnswerBatch, operationErr error) {
+	defer func() { operationErr = questionAnswerOperationError(operationErr, "cancelling", "unknown", batchID) }()
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerBatch{}, err
 	}
@@ -978,7 +993,8 @@ func (s *Service) stopQuestionAnswerBatchCore(ctx context.Context, userID, targe
 	return s.getQuestionAnswerBatchCore(ctx, userID, targetID, batchID)
 }
 
-func (s *Service) QuestionAnswerHistory(ctx context.Context, userID string, targetID string, page int, scope string) (QuestionAnswerHistory, error) {
+func (s *Service) QuestionAnswerHistory(ctx context.Context, userID string, targetID string, page int, scope string) (operationValue QuestionAnswerHistory, operationErr error) {
+	defer func() { operationErr = questionAnswerOperationError(operationErr, "history", "completed", "") }()
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerHistory{}, err
 	}
@@ -990,23 +1006,25 @@ func (s *Service) QuestionAnswerHistory(ctx context.Context, userID string, targ
 	}
 	history, err := s.questionAnswers.ListQuestionAnswerHistory(ctx, userID, targetID, page, scope)
 	if err != nil {
-		return QuestionAnswerHistory{}, requestError(ErrorQuestionAnswerStorage)
+		return QuestionAnswerHistory{}, errors.Join(requestError(ErrorQuestionAnswerStorage), err)
 	}
 	return history, nil
 }
 
-func (s *Service) GetQuestionAnswerSummary(ctx context.Context, userID, targetID string) (QuestionAnswerSummary, error) {
+func (s *Service) GetQuestionAnswerSummary(ctx context.Context, userID, targetID string) (operationValue QuestionAnswerSummary, operationErr error) {
+	defer func() { operationErr = questionAnswerOperationError(operationErr, "reading", "completed", "") }()
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerSummary{}, err
 	}
 	stats, err := s.questionAnswers.GetQuestionAnswerTodayStats(ctx, userID, targetID)
 	if err != nil {
-		return QuestionAnswerSummary{}, requestError(ErrorQuestionAnswerStorage)
+		return QuestionAnswerSummary{}, errors.Join(requestError(ErrorQuestionAnswerStorage), err)
 	}
 	return QuestionAnswerSummary{TargetID: targetID, TodayStats: stats}, nil
 }
 
-func (s *Service) SetQuestionAnswerJudgment(ctx context.Context, userID string, targetID string, recordID string, judgment QuestionAnswerJudgment, expectedUpdatedAt time.Time) (QuestionAnswerRecord, error) {
+func (s *Service) SetQuestionAnswerJudgment(ctx context.Context, userID string, targetID string, recordID string, judgment QuestionAnswerJudgment, expectedUpdatedAt time.Time) (operationValue QuestionAnswerRecord, operationErr error) {
+	defer func() { operationErr = questionAnswerOperationError(operationErr, "judging", "unknown", "") }()
 	if err := s.validateQuestionAnswerTarget(ctx, userID, targetID); err != nil {
 		return QuestionAnswerRecord{}, err
 	}
@@ -1018,7 +1036,7 @@ func (s *Service) SetQuestionAnswerJudgment(ctx context.Context, userID string, 
 		if errors.Is(err, requestError(ErrorQuestionAnswerJudgmentConflict)) {
 			return QuestionAnswerRecord{}, err
 		}
-		return QuestionAnswerRecord{}, requestError(ErrorQuestionAnswerStorage)
+		return QuestionAnswerRecord{}, errors.Join(requestError(ErrorQuestionAnswerStorage), err)
 	}
 	if record == nil {
 		return QuestionAnswerRecord{}, requestError(ErrorQuestionAnswerJudgmentForbidden)

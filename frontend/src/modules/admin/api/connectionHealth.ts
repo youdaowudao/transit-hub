@@ -1,4 +1,6 @@
 import type { AdminGroupTestConfiguration, GroupTestConfiguration } from '../types/connectionHealth'
+import { t, te } from '@/locales'
+import { questionAnswerReadableError } from '../utils/questionAnswers'
 import type {
   AccountTier,
   AccountTierResult,
@@ -69,17 +71,69 @@ type ApiErrorPayload = {
   error?: string
   current?: unknown
   activeExecutionId?: string
+  detail?: string
+  step?: string
+  operationResult?: 'not_started' | 'unknown' | 'completed'
+  batchId?: string
 }
 
 // C2 conflicts carry the authoritative object; callers must not treat 409 as a completed mutation.
 export class ConnectionHealthApiError extends Error {
-  constructor(message: string, public readonly status: number, public readonly current?: unknown, public readonly activeExecutionId?: string) {
+  readonly errorKey: string
+  readonly step?: string
+  readonly operationResult?: 'not_started' | 'unknown' | 'completed'
+  readonly batchId?: string
+  constructor(message: string, public readonly status: number, public readonly current?: unknown, public readonly activeExecutionId?: string, metadata?: Pick<ApiErrorPayload, 'message' | 'step' | 'operationResult' | 'batchId'>) {
     super(message)
     this.name = 'ConnectionHealthApiError'
+    this.errorKey = metadata?.message ?? message
+    this.step = metadata?.step
+    this.operationResult = metadata?.operationResult
+    this.batchId = metadata?.batchId
   }
 }
 
+const questionAnswerOperationFailure = (path: string, options: RequestInit, status: number, key: string, payload: ApiErrorPayload = {}): ConnectionHealthApiError => {
+  const step = path.endsWith('/cancel') ? 'cancelling' : path.endsWith('/judgment') ? 'judging'
+    : options.method?.toUpperCase() === 'POST' ? 'creating' : path.includes('/history') ? 'history' : 'reading'
+  const reading = step === 'reading' || step === 'history'
+  const createValidationKeys = new Set([
+    'questionAnswerSelection', 'questionAnswerReasoningEffort', 'questionAnswerRepeatCount', 'questionAnswerBatchLimit', 'questionAnswerActive',
+    'testQuestionInvalid', 'testQuestionNotFound', 'testQuestionDisabled', 'modelUnavailable', 'targetNotFound', 'accountsFetch',
+    'credentialUnavailable', 'secureVerificationRequired', 'baseUrlUnavailable', 'exportUnavailable', 'credentialsRedacted',
+    'modelListUnavailable', 'modelListInvalid', 'testProtocolNotAllowed', 'testConfigurationConflict', 'testConfigurationUnavailable', 'questionAnswerServiceStopped', 'questionAnswerContractMismatch',
+  ].map(name => `admin.connectionHealth.errors.${name}`))
+  const knownPreparationRefusal = step === 'creating' && status > 0 && status < 500 && (createValidationKeys.has(key) || [
+    'admin.upstream.errors.announcementAckRequired', 'admin.upstream.errors.upstreamInsufficientBalance',
+    'admin.upstream.errors.upstreamKeyQuotaExhausted', 'admin.upstream.errors.upstreamKeyExpired', 'admin.adminAccounts.errors.noCurrentAccount',
+  ].includes(key))
+  const knownJudgmentRefusal = step === 'judging' && status > 0 && status < 500 && ['admin.connectionHealth.errors.questionAnswerJudgmentConflict', 'admin.connectionHealth.errors.questionAnswerJudgmentForbidden'].includes(key)
+  const result = payload.operationResult ?? (knownPreparationRefusal || knownJudgmentRefusal ? 'not_started' : 'unknown')
+  let message = payload.detail
+  // New backends supply complete, safe wording. Legacy keys alone prove no
+  // mutation outcome except for the known pre-create validation refusals.
+  if (!message || !payload.operationResult) {
+    const genericReason = key === 'admin.connectionHealth.errors.network' ? '连接后台失败，接口未返回更具体的原因'
+      : ['admin.connectionHealth.errors.request', 'admin.connectionHealth.errors.unknown'].includes(key) ? '接口未返回可确认的答题操作结果，也未提供更具体原因' : ''
+    const reason = payload.detail || genericReason || (key === 'admin.connectionHealth.errors.questionAnswerStorage'
+      ? '接口只返回了答题记录操作未取得确认的分类，没有提供更具体原因'
+      : key.endsWith('.internal_error')
+        ? '接口返回了答题程序内部错误分类，没有提供更具体原因'
+        : te(key) || te(`admin.connectionHealth.manualProbeDialog.questionAnswer.errorTypes.${key}`)
+          ? questionAnswerReadableError(key, t, te) : '接口没有返回可识别的错误分类，也未提供安全的具体原因，请按批次编号和时间核查后台日志')
+    const guidance = reading ? '本次只读取状态，没有重新发题；请重新读取批次或历史。'
+      : result === 'not_started' ? (step === 'judging' ? '本次没有保存或修改人工判断，请先重新读取这条记录后再操作。'
+        : step === 'cancelling' ? '本次没有执行停止操作，请处理已知原因后再操作。' : '本次尚未创建题目，请处理已知原因后再操作。')
+        : step === 'judging' ? '目前无法确认这次人工判断是否已保存，请先重新读取这条记录，再决定是否重试。'
+          : step === 'cancelling' ? '目前无法确认这批题是否已结束，请先重新读取该批次，不要把本次操作当作已完成。'
+            : '目前无法确认这批题是否已提交，请先查看账号最近批次或历史核对，本次不会自动重发。'
+    message = `${reason}。${guidance}`
+  }
+  return new ConnectionHealthApiError(message, status, payload.current, payload.activeExecutionId, { message: key, operationResult: result, step: payload.step ?? step, batchId: payload.batchId })
+}
+
 const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
+  const answerOperation = path.includes('/question-answers/')
   let response: Response
   try {
     response = await fetch(endpoint(path), {
@@ -93,18 +147,54 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
     })
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') throw error
+    if (answerOperation) {
+      throw questionAnswerOperationFailure(path, options, 0, 'admin.connectionHealth.errors.network', { detail: '连接后台时中断，接口未返回更具体原因' })
+    }
     throw new Error('admin.connectionHealth.errors.network')
   }
 
-  const text = await response.text()
-  const payload = text ? (JSON.parse(text) as T & ApiErrorPayload) : ({} as T & ApiErrorPayload)
+  let payload: T & ApiErrorPayload
+  try {
+    const text = await response.text()
+    payload = text ? (JSON.parse(text) as T & ApiErrorPayload) : ({} as T & ApiErrorPayload)
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error
+    if (!answerOperation) throw error
+    if (isUnauthorizedApiResponse(response.status, {})) {
+      handleAuthExpired()
+      throw new Error(authUnauthorizedErrorKey)
+    }
+    throw questionAnswerOperationFailure(path, options, response.status, 'admin.connectionHealth.errors.request', { detail: '后台返回的答题内容无法读取，接口未给出可确认的操作结果' })
+  }
+
+  if (answerOperation && (payload === null || typeof payload !== 'object' || Array.isArray(payload))) {
+    if (isUnauthorizedApiResponse(response.status, {})) {
+      handleAuthExpired()
+      throw new Error(authUnauthorizedErrorKey)
+    }
+    throw questionAnswerOperationFailure(path, options, response.status, 'admin.connectionHealth.errors.request', { operationResult: 'unknown' })
+  }
 
   if (!response.ok) {
+    if (answerOperation) {
+      const body = payload as unknown as Record<string, unknown>
+      const message = typeof body.message === 'string' ? body.message : undefined
+      if (isUnauthorizedApiResponse(response.status, { message })) {
+        handleAuthExpired()
+        throw new Error(authUnauthorizedErrorKey)
+      }
+      const key = message ?? (typeof body.error === 'string' ? body.error : 'admin.connectionHealth.errors.request')
+      const validFields = ['message', 'error', 'detail', 'step', 'batchId', 'activeExecutionId'].every(field => body[field] === undefined || typeof body[field] === 'string')
+        && (body.operationResult === undefined || body.operationResult === 'not_started' || body.operationResult === 'unknown' || body.operationResult === 'completed')
+      if (!validFields) throw questionAnswerOperationFailure(path, options, response.status, key, { operationResult: 'unknown' })
+      throw questionAnswerOperationFailure(path, options, response.status, key, payload)
+    }
     if (isUnauthorizedApiResponse(response.status, payload)) {
       handleAuthExpired()
       throw new Error(authUnauthorizedErrorKey)
     }
-    throw new ConnectionHealthApiError(payload.message ?? payload.error ?? 'admin.connectionHealth.errors.request', response.status, payload.current, payload.activeExecutionId)
+    const key = payload.message ?? payload.error ?? 'admin.connectionHealth.errors.request'
+    throw new ConnectionHealthApiError(key, response.status, payload.current, payload.activeExecutionId)
   }
 
   return payload

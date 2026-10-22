@@ -20,6 +20,8 @@ import {
   resolveQuestionAnswerSelection,
   questionAnswerDuplicateQuestionNames,
   selectQuestionAnswerBatchTargets,
+  questionAnswerReadableError,
+  questionAnswerOperationKey,
   type QuestionAnswerBatchTarget,
 } from '../../utils/questionAnswers'
 
@@ -338,8 +340,7 @@ const start = async () => {
       } catch (error) {
         if (error instanceof Error && error.name === 'AbortError') return
         if (!runIsCurrent(sequence, snapshot.preferenceScope)) return
-        const active = error instanceof Error
-          && error.message === 'admin.connectionHealth.errors.questionAnswerActive'
+        const active = questionAnswerOperationKey(error) === 'admin.connectionHealth.errors.questionAnswerActive'
         outcomes.value = [...outcomes.value, {
           targetId: preview.target.targetId,
           accountName: preview.target.accountName,
@@ -382,7 +383,7 @@ const outcomeReason = (outcome: BatchTargetOutcome): string => {
 }
 
 const safeConnectionHealthError = (rawKey: string): string => (
-  t(connectionHealthMessageKey(rawKey, te))
+  questionAnswerReadableError(rawKey, t, te)
 )
 
 const shortenedTargetId = (targetId: string): string => {

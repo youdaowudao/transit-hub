@@ -7,8 +7,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -21,6 +23,9 @@ type QuestionAnswerRunner struct {
 }
 
 type QuestionAnswerAskResult struct {
+	Diagnostics     *QuestionAnswerDiagnostics
+	failureStep     string
+	localError      error
 	Answer          string
 	ErrorType       string
 	UpstreamStatus  int
@@ -37,12 +42,25 @@ func (r *QuestionAnswerRunner) Ask(ctx context.Context, cred upstream.ProbeCrede
 }
 
 func (r *QuestionAnswerRunner) AskDetailed(ctx context.Context, cred upstream.ProbeCredential, model string, question string, reasoningEffort QuestionAnswerReasoningEffort, protocols ...TestProtocol) QuestionAnswerAskResult {
+	return r.askDetailed(ctx, cred, model, question, reasoningEffort, nil, protocols...)
+}
+
+func (r *QuestionAnswerRunner) AskDetailedWithProgress(ctx context.Context, cred upstream.ProbeCredential, model string, question string, reasoningEffort QuestionAnswerReasoningEffort, progress *QuestionAnswerProgress, protocols ...TestProtocol) QuestionAnswerAskResult {
+	return r.askDetailed(ctx, cred, model, question, reasoningEffort, progress, protocols...)
+}
+
+func (r *QuestionAnswerRunner) askDetailed(ctx context.Context, cred upstream.ProbeCredential, model string, question string, reasoningEffort QuestionAnswerReasoningEffort, progress *QuestionAnswerProgress, protocols ...TestProtocol) (out QuestionAnswerAskResult) {
+	defer func() { out.Diagnostics = progress.finish(out) }()
+	if progress != nil {
+		ctx = httptrace.WithClientTrace(ctx, progress.trace(cred.Key))
+	}
 	protocol := TestProtocolChatCompletions
 	if len(protocols) > 0 {
 		protocol = protocols[0]
 	}
 	request, err := buildTestRequest(ctx, testRequestInput{Protocol: protocol, BaseURL: cred.BaseURL, Key: cred.Key, Model: model, Prompt: question, ReasoningEffort: reasoningEffort, QuestionAnswer: true, AnthropicAuth: cred.AnthropicAuth})
 	if err != nil {
+		progress.failure("build", err, cred.Key)
 		if errors.Is(err, errMessagesAccountTypeUnsupported) {
 			return QuestionAnswerAskResult{ErrorType: QuestionAnswerErrorAccountTypeUnsupported}
 		}
@@ -50,10 +68,19 @@ func (r *QuestionAnswerRunner) AskDetailed(ctx context.Context, cred upstream.Pr
 	}
 	response, err := r.client.Do(request)
 	if err != nil {
+		progress.failure("request", err, cred.Key)
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return QuestionAnswerAskResult{ErrorType: QuestionAnswerErrorTimeout}
 		}
 		return QuestionAnswerAskResult{ErrorType: QuestionAnswerErrorNetwork}
+	}
+	if progress != nil {
+		progress.mu.Lock()
+		now := time.Now().UTC()
+		progress.diagnostics.ResponseHeadersAt = &now
+		progress.step = "receiving"
+		progress.mu.Unlock()
+		response.Body = &questionAnswerObservedBody{ReadCloser: response.Body, progress: progress, key: cred.Key}
 	}
 	defer response.Body.Close()
 	result := QuestionAnswerAskResult{}
@@ -68,6 +95,7 @@ func (r *QuestionAnswerRunner) AskDetailed(ctx context.Context, cred upstream.Pr
 	}
 	body, oversized, err := readProbeResponseBody(response.Body)
 	if err != nil {
+		progress.failure("receive", err, cred.Key)
 		result.ErrorType = QuestionAnswerErrorNetwork
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			result.ErrorType = QuestionAnswerErrorTimeout
@@ -80,9 +108,11 @@ func (r *QuestionAnswerRunner) AskDetailed(ctx context.Context, cred upstream.Pr
 		return result
 	}
 	if oversized {
+		progress.failure("receive", errors.New("完整响应超过1MiB读取上限"), cred.Key)
 		return failure(QuestionAnswerErrorResponseTooLarge)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		result.failureStep = "receive"
 		outcome := classifyTestHTTPResponse(protocol, response.StatusCode, body, cred.Key, 0)
 		if outcome.Result == ResultInvalidResponse {
 			return failure(QuestionAnswerErrorInvalidResponse)
@@ -98,12 +128,26 @@ func (r *QuestionAnswerRunner) AskDetailed(ctx context.Context, cred upstream.Pr
 	if protocol == TestProtocolMessages {
 		answer, errorType := extractMessagesQuestionAnswer(body)
 		if errorType != "" {
+			var payload any
+			if err := json.Unmarshal(body, &payload); err != nil {
+				progress.failure("parse", err, cred.Key)
+			} else if errorType == QuestionAnswerErrorResponseIncomplete {
+				progress.failure("parse", errors.New("接口以max_tokens结束，已达到本次输出上限，回答未完整结束"), cred.Key)
+			} else {
+				progress.failure("parse", errors.New("接口返回缺少完整Messages回答或有效结束标记"), cred.Key)
+			}
 			return failure(errorType)
 		}
 		return QuestionAnswerAskResult{Answer: answer}
 	}
 	answer, ok := decodeTestResponse(protocol, body, true)
 	if !ok {
+		var payload any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			progress.failure("parse", err, cred.Key)
+		} else {
+			progress.failure("parse", errors.New("接口返回不包含可判题的完整回答，或明确报告了失败"), cred.Key)
+		}
 		return failure(QuestionAnswerErrorInvalidResponse)
 	}
 	return QuestionAnswerAskResult{Answer: answer}
@@ -178,7 +222,12 @@ func readMessagesQuestionAnswerStream(ctx context.Context, body io.Reader, key s
 			Error json.RawMessage `json:"error"`
 		}
 		var object map[string]any
-		if json.Unmarshal([]byte(event), &payload) != nil || json.Unmarshal([]byte(event), &object) != nil {
+		if err := json.Unmarshal([]byte(event), &payload); err != nil {
+			result.failureStep, result.localError = "parse", err
+			return fail(QuestionAnswerErrorInvalidResponse, ""), true
+		}
+		if err := json.Unmarshal([]byte(event), &object); err != nil {
+			result.failureStep, result.localError = "parse", err
 			return fail(QuestionAnswerErrorInvalidResponse, ""), true
 		}
 		eventType := payload.Type
@@ -222,6 +271,7 @@ func readMessagesQuestionAnswerStream(ctx context.Context, body io.Reader, key s
 	for scanner.Scan() {
 		line := scanner.Text()
 		if total > messagesQuestionAnswerStreamLimit || len(line) > maxProbeResponseBytes {
+			result.failureStep, result.localError = "receive", errors.New("Messages流式响应超过16MiB总上限或1MiB单行上限")
 			return fail(QuestionAnswerErrorResponseTooLarge, "")
 		}
 		if line == "" {
@@ -235,6 +285,7 @@ func readMessagesQuestionAnswerStream(ctx context.Context, body io.Reader, key s
 		}
 	}
 	if errors.Is(scanner.Err(), bufio.ErrTooLong) {
+		result.failureStep, result.localError = "receive", scanner.Err()
 		return fail(QuestionAnswerErrorResponseTooLarge, "")
 	}
 	if scanner.Err() == nil {
@@ -243,7 +294,12 @@ func readMessagesQuestionAnswerStream(ctx context.Context, body io.Reader, key s
 		}
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		result.failureStep, result.localError = "receive", ctx.Err()
 		return fail(QuestionAnswerErrorTimeout, "")
+	}
+	result.failureStep, result.localError = "receive", scanner.Err()
+	if result.localError == nil {
+		result.localError = errors.New("响应已结束，但未收到完整Messages回答和结束标记")
 	}
 	return fail(QuestionAnswerErrorNetwork, "")
 }

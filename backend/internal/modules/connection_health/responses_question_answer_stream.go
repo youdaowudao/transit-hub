@@ -100,7 +100,11 @@ func readResponsesQuestionAnswerJSON(ctx context.Context, body io.Reader, prefix
 		return responsesQuestionAnswerReadFailure(ctx, key, result, responsesQuestionAnswerEvidence{})
 	}
 	var object map[string]any
-	parsed := json.Unmarshal(data, &object) == nil && object != nil
+	parseErr := json.Unmarshal(data, &object)
+	parsed := parseErr == nil && object != nil
+	if parseErr != nil {
+		result.failureStep, result.localError = "parse", parseErr
+	}
 	evidence := responsesQuestionAnswerEvidence{}
 	if parsed {
 		evidence = responsesQuestionAnswerExtractEvidence(object, key, true, evidence)
@@ -169,7 +173,8 @@ func readResponsesQuestionAnswerStream(ctx context.Context, reader *bufio.Reader
 			return responsesQuestionAnswerReadFailure(ctx, key, result, evidence), true
 		}
 		var object map[string]any
-		if json.Unmarshal([]byte(payload), &object) != nil || object == nil {
+		if err := json.Unmarshal([]byte(payload), &object); err != nil || object == nil {
+			result.failureStep, result.localError = "parse", err
 			return responsesQuestionAnswerFailure(ctx, key, result, QuestionAnswerErrorInvalidResponse, evidence, "接收回答时收到无法解析的事件，本题不判对错。可稍后重测，重复出现请上游核查返回内容。"), true
 		}
 		typeName, _ := object["type"].(string)
@@ -409,18 +414,27 @@ func responsesQuestionAnswerEventName(name, key string) string {
 }
 
 func responsesQuestionAnswerReadFailure(ctx context.Context, key string, result QuestionAnswerAskResult, evidence responsesQuestionAnswerEvidence) QuestionAnswerAskResult {
+	result.failureStep = "receive"
 	errorType := QuestionAnswerErrorNetwork
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		errorType = QuestionAnswerErrorTimeout
+		result.localError = ctx.Err()
 	}
 	return responsesQuestionAnswerFailure(ctx, key, result, errorType, evidence, "")
 }
 
 func responsesQuestionAnswerSizeFailure(ctx context.Context, key string, result QuestionAnswerAskResult, evidence responsesQuestionAnswerEvidence, limit string) QuestionAnswerAskResult {
+	result.failureStep, result.localError = "receive", errors.New(limit)
 	return responsesQuestionAnswerFailure(ctx, key, result, QuestionAnswerErrorResponseTooLarge, evidence, "接收回答时"+limit+"，本题不判对错。可缩短回答或降低思考强度后重测。")
 }
 
 func responsesQuestionAnswerFailure(ctx context.Context, key string, result QuestionAnswerAskResult, errorType string, evidence responsesQuestionAnswerEvidence, explanation string) QuestionAnswerAskResult {
+	if result.failureStep == "" {
+		result.failureStep = "parse"
+		if result.UpstreamStatus < 200 || result.UpstreamStatus >= 300 {
+			result.failureStep = "receive"
+		}
+	}
 	if explanation == "" {
 		switch errorType {
 		case QuestionAnswerErrorTimeout:

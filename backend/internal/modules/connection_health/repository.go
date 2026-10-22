@@ -361,6 +361,10 @@ END $$;`,
         CHECK (upstream_status IS NULL OR upstream_status BETWEEN 100 AND 999)`,
 		`ALTER TABLE connection_health_question_answer_records
     ADD COLUMN IF NOT EXISTS upstream_excerpt text NOT NULL DEFAULT ''`,
+		`ALTER TABLE connection_health_question_answer_records
+    ADD COLUMN IF NOT EXISTS request_diagnostics jsonb NULL
+    CONSTRAINT connection_health_question_answer_diagnostics
+        CHECK (request_diagnostics IS NULL OR jsonb_typeof(request_diagnostics) = 'object')`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_target_history ON connection_health_question_answer_records (user_id, target_id, created_at DESC, id DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_batch ON connection_health_question_answer_records (user_id, target_id, batch_id, created_at, id)`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_question_answers_active ON connection_health_question_answer_records (user_id, target_id, status) WHERE status IN ('pending', 'running')`,

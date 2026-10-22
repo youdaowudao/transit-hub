@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-// Mark the existing migrations applied, as on an upgraded site. Run discovers
-// the new migration normally, so its absence is a business RED.
+// Leave only the cadence migration unapplied: this partial fixture deliberately
+// omits unrelated tables. TestRunInitializesFreshDatabaseAndPreservesStateOnRestart
+// covers the complete migration chain.
 func TestMigrationSetsUntouchedRecommendedIntervalDaily(t *testing.T) {
 	for _, withPresets := range []bool{true, false} {
 		name := "without_preset_table"
@@ -24,7 +25,7 @@ func TestMigrationSetsUntouchedRecommendedIntervalDaily(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, entry := range entries {
-				if !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() >= "000042" {
+				if !strings.HasSuffix(entry.Name(), ".sql") || entry.Name() == "000042_connection_health_long_failure_daily.sql" {
 					continue
 				}
 				if _, err := pool.Exec(ctx, "INSERT INTO schema_migrations(version) VALUES($1)", strings.TrimSuffix(entry.Name(), ".sql")); err != nil {

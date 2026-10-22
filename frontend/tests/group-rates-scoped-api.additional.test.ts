@@ -118,3 +118,22 @@ it.each(['check', 'list'])('prioritizes a body-read AbortError over Hub401 for s
   await expect(read).rejects.toBe(abort)
   expect(auth.expired).not.toHaveBeenCalled()
 })
+
+// Account names are plain display text; error details keep their existing guard.
+describe('account-name response contract', () => {
+  it.each([undefined, '', '  213真实数字名称  ', '完整名称'.repeat(180) + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890尾部', '<b>纯文本</b>\u0000'])('preserves name presence and full plain text independently: %s', async accountName => {
+    const issue = { connectionId: 'a', accountId: '213', step: 'detail', detail: '上游维护 363 token=fixture-secret', next: '请刷新', retryAllowed: true, ...(accountName === undefined ? {} : { accountName }) }
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ...result(), issues: [issue] }))))
+    const actual = (await checkScopedRealConnections(request)).issues[0] as any
+    expect(Object.hasOwn(actual, 'accountName')).toBe(accountName !== undefined)
+    if (accountName !== undefined) expect(actual.accountName).toBe(accountName.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim())
+    expect(actual.detail).toContain('上游维护 363')
+    expect(actual.detail).not.toContain('fixture-secret')
+  })
+  it.each([{ accountName: null }, { accountName: 213 }, { accountName: {} }, { accountName: [] }])('rejects a present non-string name without accepting partial evidence: $accountName', async ({ accountName }) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ...result(), issues: [{ connectionId: 'a', accountId: '213', accountName, step: 'detail', detail: '原因', next: '请刷新', retryAllowed: true }] }))))
+    const error = await checkScopedRealConnections(request).catch(error => error)
+    expect(error).toBeInstanceOf(ScopedCheckApiError)
+    expect(error.result).toBeUndefined()
+  })
+})

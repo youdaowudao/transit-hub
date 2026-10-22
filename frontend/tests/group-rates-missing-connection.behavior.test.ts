@@ -275,7 +275,7 @@ describe('safe complete-disconnect rejection', () => {
     await flushPromises()
     expect(dialog.text()).toContain('账号删除尚未确认')
     expect(dialog.text()).toContain('Key 和本地记录已保留')
-    expect(dialog.text()).toContain('主站账号 account-active')
+    expect(dialog.text()).toContain('主站账号编号 account-active')
     expect(dialog.text()).toContain('上游 Key 编号 key-active')
     expect(dialog.text()).not.toContain('当前操作未发送')
     expect(dialog.text()).not.toContain('有远端操作尚未完成核对')
@@ -326,7 +326,7 @@ describe('safe complete-disconnect rejection', () => {
     expect(dialog.text().match(/账号删除尚未确认/g)).toHaveLength(1)
     expect(dialog.text()).toContain('Key 和本地记录已保留')
     expect(dialog.text()).not.toContain('账号、Key 和本地记录已保留')
-    expect(dialog.text()).toContain('主站账号 101')
+    expect(dialog.text()).toContain('主站账号编号 101')
     expect(dialog.text()).toContain('上游 Key 编号 207')
     expect(rowByGroup(wrapper, '正常分组').text()).toContain('已对接')
     expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
@@ -349,7 +349,7 @@ describe('safe complete-disconnect rejection', () => {
     await flushPromises()
     expect(dialog.text()).toContain('账号清理尚未确认')
     expect(dialog.text()).toContain('本地记录未保存')
-    expect(dialog.text()).toContain('主站账号 101')
+    expect(dialog.text()).toContain('主站账号编号 101')
     expect(dialog.text()).toContain('上游 Key 编号 207')
     expect(dialog.text()).not.toContain('本地记录已保留')
     expect(dialog.text()).not.toContain('当前操作未发送')
@@ -397,7 +397,7 @@ describe('safe complete-disconnect rejection', () => {
     expect(dialog.text()).toContain('账号删除尚未确认')
     expect(dialog.text()).toContain('最后一个可用账号')
     expect(dialog.text()).toContain('受保护分组：隔离分组（10）')
-    expect(dialog.text()).toContain('主站账号 101')
+    expect(dialog.text()).toContain('主站账号编号 101')
     expect(dialog.text()).toContain('上游 Key 编号 207')
     expect(rowByGroup(wrapper, '正常分组').text()).toContain('已对接')
     expect(harness.listGroupRates).toHaveBeenCalledTimes(2)
@@ -406,8 +406,8 @@ describe('safe complete-disconnect rejection', () => {
 
 describe('safe real-connect compensation rejection', () => {
   it.each([
-    ['admin.mySites.errors.accountCreationPendingVerification', '', '账号创建结果尚未确认', '主站账号 —'],
-    ['admin.mySites.errors.upstreamKeyCleanupPendingVerification', '101', '主站账号已删除', '主站账号 101'],
+    ['admin.mySites.errors.accountCreationPendingVerification', '', '账号创建结果尚未确认', '主站账号编号 —'],
+    ['admin.mySites.errors.upstreamKeyCleanupPendingVerification', '101', '主站账号已删除', '主站账号编号 101'],
   ])('describes unsaved local records and retained keys accurately: %s', async (key, adminResourceId, status, resource) => {
     harness.listRealConnections.mockResolvedValue([])
     harness.getMySiteMappingOptions.mockResolvedValue({ ownGroups: [{ id: '10', groupName: '隔离分组', platform: 'openai', multiplier: 1 }], mappings: [] })
@@ -422,6 +422,7 @@ describe('safe real-connect compensation rejection', () => {
     expect(dialog.text()).toContain(status)
     expect(dialog.text()).toContain('本地记录未保存')
     expect(dialog.text()).toContain(resource)
+    expect(dialog.text()).toContain('待核对资源：账号（名称暂未读到）')
     expect(dialog.text()).toContain('上游 Key 编号 207')
     expect(dialog.text()).not.toContain('本地记录已保留')
     expect(dialog.text()).not.toContain('账号删除尚未确认')
@@ -461,7 +462,7 @@ describe('safe real-connect compensation rejection', () => {
       expect(dialog.text()).not.toContain('最后一个可用账号')
     }
     expect(dialog.text()).toContain('受保护分组：隔离分组（10）')
-    expect(dialog.text()).toContain('主站账号 101')
+    expect(dialog.text()).toContain('主站账号编号 101')
     expect(dialog.text()).toContain('上游 Key 编号 207')
     expect(dialog.text()).not.toContain('真实对接创建失败')
     expect(row.text()).toContain('配置对接')
@@ -491,4 +492,33 @@ describe('safe real-connect compensation rejection', () => {
     expect(dialog.text()).not.toContain('unrecognized-create-error')
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
   })
+})
+
+describe('accurate retained account name', () => {
+  it.each(['account-active','other-account',''])('uses frozen name only for an exact retained account match: %s', async adminResourceId => {
+    harness.realDisconnect.mockRejectedValueOnce(Object.assign(new Error('admin.mySites.errors.resourcesPendingVerification'),{adminResourceId,upstreamKeyId:'207',reason:''}))
+    const wrapper=await mountView()
+    await rowByGroup(wrapper,'正常分组').findAll('button').at(-1)!.trigger('click')
+    const d=wrapper.get('[role="dialog"]')
+    await d.get('input[value="full"]').setValue(true)
+    await d.findAll('button').find(b=>b.text().trim()==='确定')!.trigger('click');await flushPromises()
+    expect(d.text()).toContain(adminResourceId==='account-active'?'待核对资源：账号「正常账号」（主站账号编号 account-active）':'待核对资源：账号（名称暂未读到）（主站账号编号')
+    expect(d.text()).toContain('上游 Key 编号 207')
+    expect(d.text()).toContain('Key 和本地记录已保留')
+    expect(d.text()).not.toContain('待核对资源：主站账号')
+    if(adminResourceId!=='account-active')expect(d.text()).not.toContain('账号「正常账号」')
+    expect(d.get('input[value="full"]').element).toHaveProperty('checked',true)
+  })
+})
+
+it('cannot treat two empty resource identities as a trusted account-name match', async () => {
+  harness.listRealConnections.mockResolvedValue(connections.map(item => item.id === 'connection-active' ? { ...item, adminAccountId: '' } : item))
+  harness.realDisconnect.mockRejectedValueOnce(Object.assign(new Error('admin.mySites.errors.resourcesPendingVerification'), { adminResourceId: '', upstreamKeyId: '207', reason: '' }))
+  const wrapper = await mountView()
+  await rowByGroup(wrapper, '正常分组').findAll('button').at(-1)!.trigger('click')
+  const d = wrapper.get('[role="dialog"]')
+  await d.findAll('button').find(b => b.text().trim() === '确定')!.trigger('click'); await flushPromises()
+  expect(d.text()).toContain('待核对资源：账号（名称暂未读到）（主站账号编号 —）')
+  expect(d.text()).not.toContain('账号「正常账号」')
+  expect(d.text()).toContain('Key 和本地记录已保留')
 })

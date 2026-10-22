@@ -337,3 +337,15 @@ describe('main-site groups critical business expectations', () => {
         expect(editor(w).text()).not.toContain('本次没有修改主站');
     });
 });
+
+describe('main-site group editor account name fallback',()=>{
+  it.each(['current','saved','empty'])('uses current then saved then explicit missing name: %s',async variant=>{
+    h.connections[0].adminAccountName=variant==='empty'?'':'保存账号全名'
+    h.groupRead=async()=>json({...readState('10','10'),account:{id:'101',name:variant==='current'?'当前账号全名':'',platform:'openai'}})
+    const w=await open();await click(w,'修改主站分组')
+    expect(editor(w).text()).toContain(variant==='current'?'当前账号全名':variant==='saved'?'保存账号全名':'账号名称暂未读到，请刷新后核对')
+    expect(editor(w).text()).toContain('101')
+    expect(groupReads()).toHaveLength(1)
+    expect(groupWrites()).toHaveLength(0)
+  })
+})

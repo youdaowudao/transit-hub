@@ -76,6 +76,7 @@ type ScopedCheckRequest struct {
 type ScopedCheckIssue struct {
 	ConnectionID string `json:"connectionId,omitempty"`
 	AccountID    string `json:"accountId,omitempty"`
+	AccountName  string `json:"accountName"`
 	Step         string `json:"step"`
 	Detail       string `json:"detail"`
 	Next         string `json:"next"`
@@ -104,6 +105,7 @@ type ScopedConnectionSnapshot struct {
 	UpstreamGroupID         string
 	UpstreamGroupName       string
 	AdminAccountID          string
+	AdminAccountName        string
 	AdminPlatform           string
 	Status                  string
 	Xmin                    string

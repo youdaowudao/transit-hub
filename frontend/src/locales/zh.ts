@@ -2714,7 +2714,7 @@ export default {
           pending: '不确定结果，请先核对主站和上游资源，勿再次导入。',
           operationId: '本次操作编号',
           resourceName: '本次上游资源名称',
-          resourceIds: '本次资源：主站账号 {adminResourceId}，上游 Key 编号 {upstreamKeyId}。',
+          resourceIds: '本次资源：{accountName}（主站账号编号 {adminResourceId}），上游 Key 编号 {upstreamKeyId}。',
           unknownId: '尚未取得',
           accountId: '主站账号编号',
           modelList: '查看模型列表',
@@ -3012,7 +3012,7 @@ export default {
         accountCreationPendingVerification: '账号创建结果尚未确认，上游 Key 已保留，本地记录未保存，请核对后再处理。',
         compensationPendingVerification: '本地记录未保存，账号清理尚未确认，上游 Key 已保留，请核对后再处理。',
         upstreamKeyCleanupPendingVerification: '主站账号已删除，本地记录未保存，上游 Key 清理尚未确认，请核对后再处理。',
-        retainedResources: '待核对资源：主站账号 {adminResourceId}，上游 Key 编号 {upstreamKeyId}。',
+        retainedResources: '待核对资源：{accountName}（主站账号编号 {adminResourceId}），上游 Key 编号 {upstreamKeyId}。',
         blockingGroup: '受保护分组：{groupName}（{groupId}）。'
       }
     },

@@ -3,7 +3,6 @@ package my_sites
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -32,6 +31,12 @@ func validScopedAccountID(id string) bool {
 }
 func scopedApplicable(row ScopedConnectionSnapshot) bool {
 	return strings.TrimSpace(row.AdminAccountID) != "" && (row.AdminPlatform == "" || row.AdminPlatform == string(upstream.PlatformSub2API))
+}
+func scopedConnectionIssue(row ScopedConnectionSnapshot, issue ScopedCheckIssue) ScopedCheckIssue {
+	issue.ConnectionID = row.ID
+	issue.AccountID = row.AdminAccountID
+	issue.AccountName = strings.TrimSpace(row.AdminAccountName)
+	return issue
 }
 func newScopedCheckResult(workspace string, total int) ScopedCheckResult {
 	return ScopedCheckResult{WorkspaceAdminAccountID: workspace, Total: total, ConfirmedConnectionIDs: []string{}, UnconfirmedConnectionIDs: []string{}, SkippedConnectionIDs: []string{}, ChangedConnectionIDs: []string{}, ConfirmedStatuses: make(map[string]string), Issues: []ScopedCheckIssue{}}
@@ -110,11 +115,11 @@ func (s *Service) CheckScopedRealConnections(ctx context.Context, userID string,
 		categories[row.ID] = "unconfirmed"
 		if !scopedApplicable(row) {
 			categories[row.ID] = "skipped"
-			result.Issues = append(result.Issues, ScopedCheckIssue{ConnectionID: row.ID, AccountID: row.AdminAccountID, Step: "scope", Detail: "这条记录没有主站账号ID，或使用其他主站平台，本次保持原状态", Next: "请沿原对接入口处理；本次未修改主站账号", RetryAllowed: false})
+			result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "scope", Detail: "这条记录没有主站账号ID，或使用其他主站平台，本次保持原状态", Next: "请沿原对接入口处理；本次未修改主站账号", RetryAllowed: false}))
 			continue
 		}
 		if !validScopedAccountID(row.AdminAccountID) {
-			result.Issues = append(result.Issues, ScopedCheckIssue{ConnectionID: row.ID, AccountID: row.AdminAccountID, Step: "account_id", Detail: "这条记录的主站账号ID格式不正确，当前仍保留上次状态", Next: "请检查对接资料中的账号ID后再刷新", RetryAllowed: false})
+			result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "account_id", Detail: "这条记录的主站账号ID格式不正确，当前仍保留上次状态", Next: "请检查对接资料中的账号ID后再刷新", RetryAllowed: false}))
 			continue
 		}
 		if _, exists := accounts[row.AdminAccountID]; !exists {
@@ -231,7 +236,7 @@ func (s *Service) CheckScopedRealConnections(ctx context.Context, userID string,
 				pendingMissing = append(pendingMissing, accountID)
 			} else {
 				for _, row := range accounts[accountID] {
-					result.Issues = append(result.Issues, ScopedCheckIssue{ConnectionID: row.ID, AccountID: accountID, Step: "detail", Detail: fmt.Sprintf("主站暂时查不到账号%s，尚不能确认是否已删除，当前仍保留上次状态", accountID), Next: "请点击刷新进一步核对；本次未创建或删除账号", RetryAllowed: true, HTTPStatus: http.StatusNotFound})
+					result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "detail", Detail: "主站暂时查不到这个账号，尚不能确认是否已删除，当前仍保留上次状态", Next: "请点击刷新进一步核对；本次未创建或删除账号", RetryAllowed: true, HTTPStatus: http.StatusNotFound}))
 				}
 			}
 			continue
@@ -245,7 +250,7 @@ func (s *Service) CheckScopedRealConnections(ctx context.Context, userID string,
 		}
 		detail, status := scopedRemoteCause(cause, session)
 		for _, row := range accounts[accountID] {
-			result.Issues = append(result.Issues, ScopedCheckIssue{ConnectionID: row.ID, AccountID: accountID, Step: "detail", Detail: fmt.Sprintf("读取主站账号%s时未能确认：%s；仍保留上次状态", accountID, detail), Next: "请稍后刷新，并检查主站账号详情是否能正常打开", RetryAllowed: true, HTTPStatus: status})
+			result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "detail", Detail: "读取主站账号时未能确认：" + detail + "；仍保留上次状态", Next: "请稍后刷新，并检查主站账号详情是否能正常打开", RetryAllowed: true, HTTPStatus: status}))
 		}
 	}
 	if len(pendingMissing) > 0 {
@@ -262,7 +267,7 @@ func (s *Service) CheckScopedRealConnections(ctx context.Context, userID string,
 			} else {
 				detail, status := scopedRemoteCause(listErr, session)
 				for _, row := range accounts[accountID] {
-					result.Issues = append(result.Issues, ScopedCheckIssue{ConnectionID: row.ID, AccountID: accountID, Step: "inventory", Detail: fmt.Sprintf("进一步核对账号%s是否已删除时，完整账号列表未能读取完成：%s；删除状态未更新", accountID, detail), Next: "请稍后刷新，并检查主站的账号列表是否能正常打开", RetryAllowed: true, HTTPStatus: status})
+					result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "inventory", Detail: "进一步核对这个账号是否已删除时，完整账号列表未能读取完成：" + detail + "；删除状态未更新", Next: "请稍后刷新，并检查主站的账号列表是否能正常打开", RetryAllowed: true, HTTPStatus: status}))
 				}
 			}
 		}
@@ -279,7 +284,7 @@ func (s *Service) CheckScopedRealConnections(ctx context.Context, userID string,
 		categories[id] = "changed"
 		for _, row := range snapshots {
 			if row.ID == id {
-				result.Issues = append(result.Issues, ScopedCheckIssue{ConnectionID: id, AccountID: row.AdminAccountID, Step: "changed", Detail: fmt.Sprintf("账号%s的关联资料在检查期间发生变化，本次结果没有覆盖它", row.AdminAccountID), Next: "请刷新查看最新记录", RetryAllowed: true})
+				result.Issues = append(result.Issues, scopedConnectionIssue(row, ScopedCheckIssue{Step: "changed", Detail: "账号的关联资料在检查期间发生变化，本次结果没有覆盖它", Next: "请刷新查看最新记录", RetryAllowed: true}))
 				break
 			}
 		}

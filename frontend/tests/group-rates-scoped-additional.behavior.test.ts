@@ -362,3 +362,44 @@ describe('Review2 retained new-range and real-failure boundaries', () => {
     expect(h.calls.filter(c => c.path.endsWith('/my-sites/real-connect'))).toHaveLength(1)
   })
 })
+
+describe('account name identity and asynchronous boundaries',()=>{
+  it('cannot publish old account names after workspace switching',async()=>{
+    const pending=deferred<Response>()
+    h.check=()=>pending.promise
+    const w=await open()
+    h.connections=[{...conn('101','2','新工作区分组'),adminAccountName:'新工作区账号'}]
+    h.rates=[rate('2','新工作区分组')]
+    const originalFetch=fetch
+    vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+      const response=await originalFetch(input,init)
+      if(String(input).includes('/group-rates?')&&new URL(String(input),'http://local').searchParams.get('workspaceAdminAccountId')==='ws-new')return json({...await response.json(),workspaceAdminAccountId:'ws-new'})
+      return response
+    }))
+    h.check=async()=>json({...result(),workspaceAdminAccountId:'ws-new'})
+    h.local=async()=>json({workspaceAdminAccountId:'ws-new',items:h.connections})
+    h.currentAccount.value={id:'ws-new',platform:'sub2api'};await flushPromises()
+    pending.resolve(json({...result([]),issues:[{connectionId:'101',accountId:'101',accountName:'旧工作区不应出现',step:'detail',detail:'读取未完成',next:'请刷新',retryAllowed:true}]}));await flushPromises()
+    expect(w.text()).not.toContain('旧工作区不应出现')
+    expect(row(w,'新工作区分组')).toBeDefined()
+    expect(row(w,'新工作区分组').findAll('button').find(b=>b.text().includes('取消对接'))!.element).toHaveProperty('disabled',false)
+    expect(checks()).toHaveLength(2)
+  })
+  it('keeps batch-wide errors unlabelled even if they carry an empty or accidental name',async()=>{
+    h.check=async()=>json({...result([]),issues:[{accountName:'不能借给全批次的账号',step:'verify',detail:'主站验证未完成',next:'请更新主站登录',retryAllowed:true}]})
+    const w=await open();expect(w.text()).toContain('主站验证未完成。请更新主站登录')
+    expect(w.text()).not.toContain('不能借给全批次的账号')
+    expect(w.text()).not.toContain('账号（名称暂未读到）：')
+  })
+  it('uses the frozen legacy name even if local rereading fails and keeps operations disabled',async()=>{
+    h.connections=[{...conn('213','1','分组甲'),adminAccountName:'检查前冻结完整名称'}]
+    let reads=0
+    h.local=async()=>++reads===1?json({workspaceAdminAccountId:'ws-scoped',items:h.connections}):json({message:'保存对接重新读取失败',detail:'查询中断，旧值仍保留',next:'请刷新重试'},500)
+    h.check=async()=>json({...result([]),issues:[{connectionId:'213',accountId:'213',step:'detail',detail:'读取主站账号213时未能确认：维护 363',next:'请刷新',retryAllowed:true}]})
+    const w=await open();expect(w.text()).toContain('账号「检查前冻结完整名称」：')
+    expect(w.text()).toContain('维护 363');expect(w.text()).not.toContain('账号213')
+    expect(row(w).findAll('button').some(b=>/取消对接|配置对接|清理本地/.test(b.text()))).toBe(false)
+    expect(w.text()).toContain('本页对接资料暂时无法读取')
+    expect(checks()).toHaveLength(1);expect(reads).toBe(2)
+  })
+})

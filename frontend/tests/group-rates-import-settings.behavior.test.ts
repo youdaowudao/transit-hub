@@ -316,7 +316,7 @@ describe('C5 actual API to group-rates import component', () => {
   it.each(['retained', 'pending'])('retains real failure resource IDs and blocks retry for cleanup=%s', async cleanup => {
     harness.importResponse = async () => json(failure({ cleanup, retryAllowed: false, adminResourceId: '101', reason: 'admin.connectionHealth.errors.sub2apiGroupLastUsable', groupId: '10', groupName: '受保护组' }), 409)
     const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
-    expect(dialog(wrapper).text()).toContain('主站账号 101')
+    expect(dialog(wrapper).text()).toContain('主站账号编号 101')
     expect(dialog(wrapper).text()).toContain('上游 Key 编号 207')
     expect(dialog(wrapper).text()).toContain('受保护分组：受保护组（10）')
     expect(dialog(wrapper).text()).toContain('最后一个可用账号')
@@ -330,7 +330,7 @@ describe('C5 actual API to group-rates import component', () => {
     harness.importResponse = async () => json(failure({ message: 'admin.mySites.errors.importUpstreamKeyFailed', stage: 'upstream_key', cleanup: 'retained', retryAllowed: false, upstreamKeyId: '' }), 409)
     const wrapper = await openView(); await chooseGroup(wrapper); await submit(wrapper)
     expect(dialog(wrapper).text()).toContain('C5-isolated-key')
-    expect(dialog(wrapper).text()).toContain('主站账号 尚未取得')
+    expect(dialog(wrapper).text()).toContain('主站账号编号 尚未取得')
     expect(dialog(wrapper).text()).toContain('上游 Key 编号 尚未取得')
     expect(dialog(wrapper).text()).not.toContain('清理已确认')
     expect(submitButton(wrapper).element).toHaveProperty('disabled', true)
@@ -1138,5 +1138,25 @@ describe('connect dialog shows each main-site group multiplier with its estimate
     await chooseBind(wrapper)
     expect(bindOptions(wrapper).map(option => option.text())).toEqual(['利润分组甲 · 1.5x · 利润率 —', '利润分组乙 · 1x · 利润率 —', '利润分组平 · 1.2x · 利润率 —', '利润分组零 · 0x · 利润率 —', '利润分组负 · -1x · 利润率 —'])
     expect(dialog(wrapper).get('[data-bind-profit-help]').text()).toBe(bindHelp)
+  })
+})
+
+describe('accurate import result account names', () => {
+  it('shows the saved account name when successful configuration cannot be read', async () => {
+    harness.importResponse=async(req:RealConnectRequest)=>{const payload:any=success(req);payload.configurationStatus='unavailable';delete payload.configuration;return json(payload)}
+    const w=await openView();await chooseGroup(w);await submit(w)
+    expect(dialog(w).get('[data-import-success]').text()).toContain('本地记录名称')
+    expect(dialog(w).get('[data-import-success]').text()).toContain('主站账号编号 101')
+    expect(dialog(w).find('[data-import-pending]').exists()).toBe(false)
+    expect(dialog(w).find('button[type="submit"]').exists()).toBe(false)
+  })
+  it.each(['pending','retained'])('labels missing account names and auxiliary IDs without borrowing the upstream name: %s',async cleanup=>{
+    harness.importResponse=async()=>json(failure({message:'admin.mySites.errors.accountCreationPendingVerification',stage:'account_create',cleanup,retryAllowed:false,adminResourceId:'213',upstreamResourceName:'这是上游资源名称不能冒充主站名'}),409)
+    const w=await openView();await chooseGroup(w);await submit(w)
+    expect(dialog(w).text()).toContain('本次资源：账号（名称暂未读到）（主站账号编号 213），上游 Key 编号 207。')
+    expect(dialog(w).text()).not.toContain('待核对资源：主站账号')
+    expect(dialog(w).text()).not.toContain('账号「这是上游资源名称不能冒充主站名」')
+    expect(submitButton(w).element).toHaveProperty('disabled',true)
+    await submit(w);expect(harness.requests).toHaveLength(1)
   })
 })

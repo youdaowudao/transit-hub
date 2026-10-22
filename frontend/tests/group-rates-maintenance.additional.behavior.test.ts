@@ -109,3 +109,37 @@ describe('maintenance scope, confirmed identity and outcomes', () => {
     expect(h.calls.filter(x => x.path.includes('/mapping-options'))).toHaveLength(0)
   })
 })
+
+describe('maintenance accurate account names', () => {
+  it('shows an explicit missing name and never uses an account identifier in its name cell', async () => {
+    h.records[0].connection.adminAccountName = ''
+    const w = await open(); await click(w, '查看已有对接')
+    const cells = w.get('[data-attention-connection-id="101"]').findAll('td')
+    expect(cells[1].text()).toContain('账号名称暂未读到，请刷新后核对')
+    expect(cells[1].text()).not.toContain('account-101')
+  })
+  it('names off-page issues in the site check without changing local unlink eligibility', async () => {
+    const w = await open(); await click(w, '查看已有对接')
+    h.check = async (body: any) => json({ workspaceAdminAccountId: body.workspaceAdminAccountId, total: 2, confirmedConnectionIds: [], unconfirmedConnectionIds: ['101','outside'], skippedConnectionIds: [], changedConnectionIds: [], confirmedStatuses: {}, storageUncertain: false, issues: [
+      { connectionId:'101', accountId:'account-101', accountName:'原账号101完整名称', step:'detail', detail:'主站暂时查不到这个账号', next:'请刷新；本次未修改主站账号', retryAllowed:true },
+      { connectionId:'outside', accountId:'363', accountName:'页外账号全名', step:'detail', detail:'读取主站账号时未能确认：维护', next:'请刷新', retryAllowed:true },
+    ] })
+    await click(w, '核对本站账号')
+    expect(w.text()).toContain('账号「原账号101完整名称」：')
+    expect(w.text()).toContain('账号「页外账号全名」：')
+    expect(w.text()).not.toContain('账号363')
+    await click(w, '处理对接'); expect(w.get('[role="dialog"]').find('input[value="full"]').exists()).toBe(false)
+  })
+  it.each(['', '保存完整账号名称'])('keeps the frozen name in local unlink failure: %s', async name => {
+    h.records[0].connection.adminAccountName = name
+    h.unlink = async () => { h.records[0].connection.adminAccountName='后来改名'; return json({message:'本地解除未完成', detail:'保存中断，对接仍保留',next:'请重新读取对接后重试'},503) }
+    const w=await open(); await click(w,'查看已有对接');await click(w,'处理对接');await click(w,'确定')
+    const text=w.get('[role="dialog"]').text()
+    expect(text).toContain((name ? `账号「${name}」` : '账号（名称暂未读到）')+'的本地解除未完成')
+    expect(text).toContain('保存中断，对接仍保留')
+    expect(text).toContain('请重新读取对接后重试')
+    expect(text).not.toContain('对接101的本地解除')
+    expect(text).not.toContain('后来改名')
+    expect(h.calls.filter(x=>x.path.includes('/real-disconnect'))).toHaveLength(1)
+  })
+})

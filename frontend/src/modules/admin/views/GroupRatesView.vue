@@ -12,7 +12,7 @@ import { costFailureText } from '../utils/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
-import type { ConnectionMainSiteGroups, MainSiteGroupMutationResult, OwnGroupRate, AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportDiagnostic, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, ConnectionNeedingAttention, ExpectedRealConnection, ScopedCheckRequest, ScopedCheckResult, ScopedGroupRef, UpstreamKeyItem } from '../types/mySites'
+import type { ConnectionMainSiteGroups, MainSiteGroupMutationResult, OwnGroupRate, AdminResourceOption, ConnectionCapabilities, ImportAccountSettings, ImportConfiguration, ImportDiagnostic, ImportFailure, MySiteMapping, MySiteMappingOwnGroupOption, RealConnectRequest, RealConnectResponse, RealConnection, ConnectionNeedingAttention, ExpectedRealConnection, ScopedCheckIssue, ScopedCheckRequest, ScopedCheckResult, ScopedGroupRef, UpstreamKeyItem } from '../types/mySites'
 import type { ImportApiError } from '../api/mySites'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
 import { isImportAccountPlatform } from '../utils/importPlatforms'
@@ -569,6 +569,41 @@ const consumeRouteFocus = async (found?: boolean) => {
   await router.replace({ query })
 }
 const displayCause = (error: unknown) => error instanceof Error ? (te(error.message) ? t(error.message) : error.message) : '原因无法确认，请查看Hub后端读取记录'
+// Account names are plain text. They do not use error redaction or its length limit.
+const accountNameText = (...names: unknown[]): string => {
+  for (const value of names) {
+    if (typeof value !== 'string') continue
+    const name = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim()
+    if (name) return name
+  }
+  return ''
+}
+const displayAccountName = (...names: unknown[]): string => accountNameText(...names) || '账号名称暂未读到，请刷新后核对'
+const labeledAccountName = (...names: unknown[]): string => {
+  const name = accountNameText(...names)
+  return name ? `账号「${name}」` : '账号（名称暂未读到）'
+}
+const connectionCheckIssueText = (issue: ScopedCheckIssue, before: readonly RealConnection[]): string => {
+  let detail = issue.detail
+  let prefix = ''
+  if (issue.connectionId) {
+    const hasAccountName = Object.prototype.hasOwnProperty.call(issue, 'accountName')
+    const frozen = hasAccountName ? undefined : before.find(connection => connection.id === issue.connectionId && (connection.adminAccountId ?? '') === (issue.accountId ?? ''))
+    prefix = `${labeledAccountName(hasAccountName ? issue.accountName : frozen?.adminAccountName)}：`
+    // Only the four known local legacy prefixes contain an account ID here.
+    // Preserve every number in the upstream cause and in the actual name.
+    const prefixes: [RegExp, string][] = [
+      [/^主站暂时查不到账号[0-9]+，/, '主站暂时查不到这个账号，'],
+      [/^读取主站账号[0-9]+时未能确认：/, '读取主站账号时未能确认：'],
+      [/^进一步核对(?:账号)[0-9]+是否已删除时，完整账号列表未能读取完成：/, '进一步核对这个账号是否已删除时，完整账号列表未能读取完成：'],
+      [/^账号[0-9]+的关联资料在检查期间发生变化，本次结果没有覆盖它/, '账号的关联资料在检查期间发生变化，本次结果没有覆盖它'],
+    ]
+    for (const [oldPrefix, replacement] of prefixes) {
+      if (oldPrefix.test(detail)) { detail = detail.replace(oldPrefix, replacement); break }
+    }
+  }
+  return `${prefix}${detail}。${issue.next}`
+}
 const showMissingWorkspace = () => {
   isLoading.value = false
   connectionDataKnown.value = false
@@ -915,7 +950,7 @@ const runScopedCheck = async (mode: 'automatic' | 'manual', scope: Omit<ScopedCh
     if (result) unconfirmedIds.value = new Set([...unconfirmedIds.value, ...result.confirmedConnectionIds])
     failure = `${failure ? failure + '；' : ''}账号检查已完成，但最新对接状态暂时无法读取：${connectionDataError.value || (errorKey.value ? displayCause(new Error(errorKey.value)) : '原因无法确认，请查看Hub后端读取记录')}；请刷新，本次未执行导入或解绑。`
   } else checkSummary.value = `本次确认0条账号对接记录，${unconfirmedIds.value.size}条仍显示上次状态。标签数量按本地保存结果统计，不代表所有账号刚刚检查过；未确认的账号可点击刷新重试。`
-  connectionCheckError.value = [failure, ...(result?.issues.map(issue => `${issue.detail}。${issue.next}`) ?? [])].filter(Boolean).join(' ')
+  connectionCheckError.value = [failure, ...(result?.issues.map(issue => connectionCheckIssueText(issue, before)) ?? [])].filter(Boolean).join(' ')
   isCheckingConnections.value = false
 }
 const enterPage = async () => {
@@ -1400,14 +1435,15 @@ const submitConnector = async () => {
 
 const realConnectError = ref('')
 
-const managedResourceErrorMessage = (error: unknown, fallbackKey: string): string => {
+const managedResourceErrorMessage = (error: unknown, fallbackKey: string, connection?: RealConnection): string => {
   const key = error instanceof Error ? error.message : ''
   let message = te(key) ? t(key) : t(fallbackKey)
   if (['admin.mySites.errors.resourcesPendingVerification', 'admin.mySites.errors.accountCreationPendingVerification', 'admin.mySites.errors.compensationPendingVerification', 'admin.mySites.errors.upstreamKeyCleanupPendingVerification'].includes(key) && error instanceof Error) {
     const retained = error as Error & { reason?: string; groupId?: string; groupName?: string; adminResourceId?: string; upstreamKeyId?: string }
     if (retained.reason && retained.reason !== key && te(retained.reason)) message += ` ${t(retained.reason)}`
     if (retained.groupId || retained.groupName) message += ` ${t('admin.mySites.errors.blockingGroup', { groupName: retained.groupName || '—', groupId: retained.groupId || '—' })}`
-    message += ` ${t('admin.mySites.errors.retainedResources', { adminResourceId: retained.adminResourceId || '—', upstreamKeyId: retained.upstreamKeyId || '—' })}`
+    const name = connection && retained.adminResourceId && retained.adminResourceId === connection.adminAccountId ? connection.adminAccountName : undefined
+    message += ` ${t('admin.mySites.errors.retainedResources', { accountName: labeledAccountName(name), adminResourceId: retained.adminResourceId || '—', upstreamKeyId: retained.upstreamKeyId || '—' })}`
   }
   return message
 }
@@ -1857,7 +1893,7 @@ const checkAttentionSite = async (connection: RealConnection) => {
   attentionCheckSummary.value = reread
     ? `本站账号核对已结束，本页有${attentionConfirmed}条对接的账号状态已确认；其他记录仍显示上次状态，可重新核对。核对覆盖这个网站全部已有对接，本次没有创建、删除或修改主站账号。`
     : '本站账号核对已结束，但最新已有对接暂时无法读取，当前不能确认本页状态；请重试读取，并查看Hub后端账号检查记录。本次没有创建、删除或修改主站账号。'
-  connectionCheckError.value = [failure, ...(result?.issues.map(issue => `${issue.detail}。${issue.next}`) ?? [])].filter(Boolean).join(' ')
+  connectionCheckError.value = [failure, ...(result?.issues.map(issue => connectionCheckIssueText(issue, before)) ?? [])].filter(Boolean).join(' ')
   isCheckingConnections.value = false
   attentionCheckingSite.value = ''
 }
@@ -1911,7 +1947,7 @@ const submitDisconnect = async () => {
     await refreshAfterMutation(() => pageIsMounted && workspace === (currentAccount.value?.id ?? ''), false, maintenance)
   } catch (error) {
     if (!isCurrent()) return
-    disconnectError.value = maintenance ? `对接${conn.adminAccountName || conn.id}的本地解除未完成：${displayCause(error)}` : managedResourceErrorMessage(error, 'admin.groupRates.disconnect.failed')
+    disconnectError.value = maintenance ? `${labeledAccountName(conn.adminAccountName)}的本地解除未完成：${displayCause(error)}` : managedResourceErrorMessage(error, 'admin.groupRates.disconnect.failed', conn)
   } finally { if (pageIsMounted && workspace === (currentAccount.value?.id ?? '') && (generation === disconnectGeneration || generation + 1 === disconnectGeneration && !disconnectConnection.value)) isDisconnecting.value = false }
 }
 
@@ -2018,7 +2054,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             <tbody class="divide-y divide-border/50">
               <tr v-for="item in attentionItems" :key="item.connection.id" :data-attention-connection-id="item.connection.id" class="align-top">
                 <td class="px-4 py-3"><div class="max-w-56 break-words font-medium">{{ attentionSiteName(item.connection) }}</div><div class="mt-1 max-w-56 break-words text-muted-foreground">{{ item.connection.upstreamGroupName || item.connection.upstreamGroupId || '分组名称暂缺' }}</div></td>
-                <td class="px-4 py-3"><div class="max-w-56 break-words font-medium">{{ item.connection.adminAccountName || item.connection.adminAccountId || '账号名称暂缺' }}</div><div class="mt-1 text-xs text-muted-foreground">{{ item.connection.status === 'missing' ? '上次核对时主站账号未找到' : item.connection.status === 'active' ? '已保存对接' : '旧对接状态尚未确认' }}</div><div class="mt-1 text-xs text-muted-foreground">对接编号 {{ item.connection.id }}</div></td>
+                <td class="px-4 py-3"><div class="max-w-56 break-words font-medium">{{ displayAccountName(item.connection.adminAccountName) }}</div><div class="mt-1 text-xs text-muted-foreground">{{ item.connection.status === 'missing' ? '上次核对时主站账号未找到' : item.connection.status === 'active' ? '已保存对接' : '旧对接状态尚未确认' }}</div><div class="mt-1 text-xs text-muted-foreground">对接编号 {{ item.connection.id }}</div></td>
                 <td class="px-4 py-3 text-muted-foreground">{{ formatDateTime(item.lastSyncedAt) }}</td>
                 <td class="px-4 py-3"><p class="max-w-md break-words text-xs leading-5 text-muted-foreground">{{ item.reason === 'group_not_found' ? 'Hub保存的上游分组资料里未找到这个分组，不能据此确认上游删除。已有对接仍保留，你可以核对主站账号或解除本地对接。' : `这个对接对应的上游分组资料暂时无法确认：${item.detail}。对接和主站账号未改变，请到上游管理核查网站资料。` }}</p>
                   <div class="mt-3 flex flex-wrap gap-2">
@@ -2147,7 +2183,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
 
     <div v-if="connectionCheckError" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
       <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
-      <span>{{ connectionCheckError }}</span>
+      <span class="min-w-0 break-words">{{ connectionCheckError }}</span>
     </div>
 
     <div id="group-rates-panel" class="flex flex-col overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm" role="tabpanel">
@@ -2799,7 +2835,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             <p v-if="connectFailure.retryAllowed">{{ t('admin.groupRates.connect.importResult.retry') }}</p>
             <p v-else-if="connectFailure.stage === 'validation' && connectFailure.cleanup === 'not_needed'">{{ connectPreflightGuide }}</p>
             <p v-if="connectFailure.groupId || connectFailure.groupName">{{ t('admin.mySites.errors.blockingGroup', { groupName: connectFailure.groupName || '—', groupId: connectFailure.groupId || '—' }) }}</p>
-            <p v-if="connectFailure.adminResourceId || connectFailure.upstreamKeyId || ['retained', 'pending'].includes(connectFailure.cleanup)">{{ t('admin.groupRates.connect.importResult.resourceIds', { adminResourceId: connectFailure.adminResourceId || t('admin.groupRates.connect.importResult.unknownId'), upstreamKeyId: connectFailure.upstreamKeyId || t('admin.groupRates.connect.importResult.unknownId') }) }}</p>
+            <p v-if="connectFailure.adminResourceId || connectFailure.upstreamKeyId || ['retained', 'pending'].includes(connectFailure.cleanup)">{{ t('admin.groupRates.connect.importResult.resourceIds', { accountName: labeledAccountName(), adminResourceId: connectFailure.adminResourceId || t('admin.groupRates.connect.importResult.unknownId'), upstreamKeyId: connectFailure.upstreamKeyId || t('admin.groupRates.connect.importResult.unknownId') }) }}</p>
             <p v-if="connectFailure.upstreamResourceName">{{ t('admin.groupRates.connect.importResult.resourceName') }}：{{ connectFailure.upstreamResourceName }}</p>
           </div>
           <div v-if="connectOutcome === 'pending'" role="status" class="space-y-2 break-words text-sm text-warning" data-import-pending>
@@ -2813,7 +2849,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <p class="text-sm">{{ t('admin.groupRates.connect.importResult.warningNext') }}</p>
             </template>
             <template v-if="connectConfiguration">
-              <p class="text-sm">{{ connectConfiguration.name }} · {{ t('admin.groupRates.connect.importResult.accountId') }} {{ connectConfiguration.adminAccountId }}</p>
+              <p class="text-sm">{{ displayAccountName(connectConfiguration.name, connectResult?.connection.adminAccountName) }} · {{ t('admin.groupRates.connect.importResult.accountId') }} {{ connectConfiguration.adminAccountId }}</p>
               <p class="text-xs text-muted-foreground">{{ t(`admin.groupRates.connect.importResult.observation.${connectConfiguration.observation}`) }}</p>
               <dl class="grid grid-cols-1 gap-2 text-sm sm:grid-cols-2">
                 <div><dt class="text-muted-foreground">Priority</dt><dd>{{ connectConfiguration.priority }}</dd></div>
@@ -2826,7 +2862,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <p class="text-sm">{{ connectModelSummary }}</p>
               <details v-if="connectConfiguration.models.length" class="text-sm"><summary class="cursor-pointer">{{ t('admin.groupRates.connect.importResult.modelList') }}</summary><ul class="mt-2 list-inside list-disc"><li v-for="model in connectConfiguration.models" :key="model">{{ model }}</li></ul></details>
             </template>
-            <p v-else class="text-sm">{{ t('admin.groupRates.connect.importResult.accountId') }} {{ connectResult?.connection.adminAccountId }}</p>
+            <p v-else class="text-sm">{{ displayAccountName(connectResult?.connection.adminAccountName) }} · {{ t('admin.groupRates.connect.importResult.accountId') }} {{ connectResult?.connection.adminAccountId }}</p>
           </section>
           <div v-if="connectDiagnostics.length" class="space-y-3 break-words text-sm text-warning" data-import-diagnostics>
             <div v-for="(diagnostic, index) in connectDiagnostics" :key="index" class="space-y-1">
@@ -2871,7 +2907,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           <template v-if="groupEditorData">
             <div class="space-y-2 break-words text-sm">
               <p>{{ t('admin.groupRates.groupEditor.upstream', { site: groupEditingRate.siteName, group: groupEditingRate.groupName }) }}</p>
-              <p>{{ t('admin.groupRates.groupEditor.account', { name: groupEditorData.account.name, id: groupEditorData.account.id }) }}</p>
+              <p>{{ t('admin.groupRates.groupEditor.account', { name: displayAccountName(groupEditorData.account.name, groupEditorData.connection.adminAccountName), id: groupEditorData.account.id }) }}</p>
               <p>{{ t('admin.groupRates.groupEditor.platform', { platform: groupEditorData.account.platform }) }}</p>
               <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.groupRates.groupEditor.reconfigure') }}</p>
             </div>
@@ -2933,7 +2969,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
 
         <div v-if="disconnectError" class="mx-6 mt-6 flex items-start gap-3 rounded-xl border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
           <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
-          <span>{{ disconnectError }}</span>
+          <span class="min-w-0 break-words">{{ disconnectError }}</span>
         </div>
 
         <div class="space-y-4 p-6">

@@ -127,3 +127,71 @@ describe('scoped group rates critical business contract', () => {
     expect(w.text()).not.toContain('网站选项暂时无法加载')
   })
 })
+
+describe('accurate per-account names in scoped notices', () => {
+  it.each(['automatic', 'manual', 'site'])('shows each complete response name including off-page accounts during %s', async mode => {
+    h.connections = [{ ...conn('213', '1', '分组甲'), adminAccountName: '旧保存名称' }]
+    if (mode === 'site') h.route.query = { siteId: 'site-a' }
+    const longName = '完整账号'.repeat(150) + 'ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890尾部'
+    const failed = () => ({ ...result([]), total: 2, unconfirmedConnectionIds: ['213', 'outside'], issues: [
+      { connectionId: '213', accountId: '213', accountName: longName, step: 'detail', detail: '主站暂时查不到这个账号，尚不能确认是否已删除，当前仍保留上次状态', next: '请点击刷新进一步核对；本次未创建或删除账号', retryAllowed: true },
+      { connectionId: 'outside', accountId: '363', accountName: '页外完整名称363', step: 'detail', detail: '上游维护 213', next: '请重试', retryAllowed: true },
+    ] })
+    if (mode !== 'manual') h.check = async () => json(failed())
+    const w = await open()
+    if (mode === 'manual') { h.check = async () => json(failed()); await button(w, '刷新数据').trigger('click'); await flushPromises() }
+    expect(w.text()).toContain(`账号「${longName}」`)
+    expect(w.text()).toContain('账号「页外完整名称363」')
+    expect(w.text()).toContain('上游维护 213')
+    expect(w.text()).not.toContain('账号213')
+    expect(w.text()).not.toContain('账号363')
+    expect(row(w).findAll('button').find(b => b.text().includes('取消对接'))!.element).toHaveProperty('disabled', true)
+    h.check = async () => json(result()); await button(w, '刷新数据').trigger('click'); await flushPromises()
+    expect(w.text()).not.toContain(`账号「${longName}」`)
+    expect(w.text()).not.toContain('页外完整名称363')
+  })
+  it.each(['missing-field', 'explicit-empty', 'wrong-account', 'changed'])('uses only the pre-check matching connection for %s', async variant => {
+    h.connections = [{ ...conn('213', '1', '分组甲'), adminAccountName: '冻结旧名称' }]
+    h.check = async () => {
+      const payload: any = { ...result([]), issues: [{ connectionId: '213', accountId: variant === 'wrong-account' ? '363' : '213', step: variant === 'changed' ? 'changed' : 'detail', detail: '账号213的关联资料在检查期间发生变化，本次结果没有覆盖它', next: '请刷新', retryAllowed: true, ...(variant === 'explicit-empty' ? { accountName: '' } : {}) }] }
+      h.connections = [{ ...h.connections[0], adminAccountId: '363', adminAccountName: '重绑后新名称' }]
+      return json(payload)
+    }
+    const w = await open()
+    expect(w.text()).toContain(variant === 'explicit-empty' || variant === 'wrong-account' ? '账号（名称暂未读到）：' : '账号「冻结旧名称」：')
+    expect(w.text()).not.toContain('账号「重绑后新名称」')
+    expect(w.text()).not.toContain('账号213')
+    expect(row(w).findAll('button').find(b => b.text().includes('取消对接'))!.element).toHaveProperty('disabled', true)
+  })
+  it.each([
+    '主站暂时查不到账号213，尚不能确认是否已删除',
+    '读取主站账号213时未能确认：上游账号363仍在维护，原数字 213 保留',
+    '进一步核对账号213是否已删除时，完整账号列表未能读取完成：上游账号363仍在维护',
+    '账号213的关联资料在检查期间发生变化，本次结果没有覆盖它',
+  ])('strips only the known local legacy prefix: %s', async detail => {
+    h.connections = [{ ...conn('213', '1', '分组甲'), adminAccountName: '213' }]
+    h.check = async () => json({ ...result([]), issues: [{ connectionId:'213', accountId:'213', step:'detail', detail, next:'请刷新', retryAllowed:true }] })
+    const w = await open()
+    expect(w.text()).toContain('账号「213」：')
+    expect(w.text()).not.toContain('账号213')
+    if (detail.includes('上游账号363')) expect(w.text()).toContain('上游账号363仍在维护')
+    if (detail.includes('原数字 213')) expect(w.text()).toContain('原数字 213 保留')
+  })
+})
+
+it('renders account-name markup as ordinary text without creating an HTML element', async () => {
+  const name = '<img src="name-test" onerror="window.nameTestExecuted=1">完整名称'
+  h.check = async () => json({ ...result([]), issues: [{ connectionId: '101', accountId: '101', accountName: name, step: 'detail', detail: '主站读取未完成', next: '请刷新', retryAllowed: true }] })
+  const w = await open()
+  expect(w.text()).toContain(`账号「${name}」：`)
+  expect(w.find('img[src="name-test"]').exists()).toBe(false)
+  expect((window as any).nameTestExecuted).toBeUndefined()
+})
+
+it('matches an omitted old-response account ID only to the same connection with an empty saved ID', async () => {
+  h.connections = [{ ...conn('empty-account', '1', '分组甲'), adminAccountId: '', adminAccountName: '没有编号但有保存名称' }]
+  h.check = async () => json({ ...result([]), unconfirmedConnectionIds: [], skippedConnectionIds: ['empty-account'], issues: [{ connectionId: 'empty-account', step: 'scope', detail: '这条记录没有主站账号ID，本次保持原状态', next: '请沿原对接入口处理', retryAllowed: false }] })
+  const w = await open()
+  expect(w.text()).toContain('账号「没有编号但有保存名称」：')
+  expect(w.text()).not.toContain('账号empty-account')
+})

@@ -349,6 +349,7 @@ export interface ScopedCheckRequest {
 export interface ScopedCheckIssue {
   connectionId?: string
   accountId?: string
+  accountName?: string
   step: string
   detail: string
   next: string

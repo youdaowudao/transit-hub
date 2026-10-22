@@ -108,7 +108,7 @@ func (r *Repository) ReadScopedConnectionSnapshots(ctx context.Context, userID, 
 	}
 	rows, err := r.db.Query(ctx, `
  SELECT id,user_id,workspace_admin_account_id,upstream_site_id,upstream_group_id,upstream_group_name,
- admin_account_id,admin_platform,status,xmin::text
+ admin_account_id,admin_account_name,admin_platform,status,xmin::text
  FROM real_connections AS connection_row
  WHERE user_id=$1 AND workspace_admin_account_id=$2 AND
  (($3<>'' AND upstream_site_id=$3) OR ($3='' AND EXISTS(
@@ -124,7 +124,7 @@ func (r *Repository) ReadScopedConnectionSnapshots(ctx context.Context, userID, 
 	result := make([]ScopedConnectionSnapshot, 0)
 	for rows.Next() {
 		var row ScopedConnectionSnapshot
-		if err := rows.Scan(&row.ID, &row.UserID, &row.WorkspaceAdminAccountID, &row.UpstreamSiteID, &row.UpstreamGroupID, &row.UpstreamGroupName, &row.AdminAccountID, &row.AdminPlatform, &row.Status, &row.Xmin); err != nil {
+		if err := rows.Scan(&row.ID, &row.UserID, &row.WorkspaceAdminAccountID, &row.UpstreamSiteID, &row.UpstreamGroupID, &row.UpstreamGroupName, &row.AdminAccountID, &row.AdminAccountName, &row.AdminPlatform, &row.Status, &row.Xmin); err != nil {
 			return nil, err
 		}
 		result = append(result, row)
@@ -157,7 +157,7 @@ func (r *Repository) ApplyScopedConnectionStatuses(ctx context.Context, snapshot
 			return ScopedStatusApplyResult{}, &ScopedStorageError{Cause: fmt.Errorf("invalid scoped connection status")}
 		}
 		var current ScopedConnectionSnapshot
-		err = tx.QueryRow(ctx, `SELECT id,user_id,workspace_admin_account_id,upstream_site_id,upstream_group_id,upstream_group_name,admin_account_id,admin_platform,status,xmin::text FROM real_connections WHERE id=$1 AND user_id=$2 AND workspace_admin_account_id=$3 FOR UPDATE`, snapshot.ID, snapshot.UserID, snapshot.WorkspaceAdminAccountID).Scan(&current.ID, &current.UserID, &current.WorkspaceAdminAccountID, &current.UpstreamSiteID, &current.UpstreamGroupID, &current.UpstreamGroupName, &current.AdminAccountID, &current.AdminPlatform, &current.Status, &current.Xmin)
+		err = tx.QueryRow(ctx, `SELECT id,user_id,workspace_admin_account_id,upstream_site_id,upstream_group_id,upstream_group_name,admin_account_id,admin_account_name,admin_platform,status,xmin::text FROM real_connections WHERE id=$1 AND user_id=$2 AND workspace_admin_account_id=$3 FOR UPDATE`, snapshot.ID, snapshot.UserID, snapshot.WorkspaceAdminAccountID).Scan(&current.ID, &current.UserID, &current.WorkspaceAdminAccountID, &current.UpstreamSiteID, &current.UpstreamGroupID, &current.UpstreamGroupName, &current.AdminAccountID, &current.AdminAccountName, &current.AdminPlatform, &current.Status, &current.Xmin)
 		if errors.Is(err, pgx.ErrNoRows) {
 			result.ChangedConnectionIDs = append(result.ChangedConnectionIDs, snapshot.ID)
 			continue

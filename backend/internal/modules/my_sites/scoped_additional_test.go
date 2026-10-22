@@ -368,3 +368,247 @@ func TestScopedBatchDeadlineAdditionalSavesEstablishedResults(t *testing.T) {
 		t.Fatalf("batch deadline did not stop queued work elapsed=%v reads=%d", elapsed, reads.Load())
 	}
 }
+
+// This regression deliberately uses JSON rather than a new struct member so the
+// original production code compiles and fails on the missing business result.
+func TestScopedAccountNamesPostgresIssuesAndStatusProtection(t *testing.T) {
+	repo, status := scopedAdditionalPGSetup(t)
+	ctx := context.Background()
+	if _, err := repo.db.Exec(ctx, `UPDATE real_connections SET admin_account_id=CASE id WHEN 'a' THEN '213' ELSE '363' END,admin_account_name=CASE id WHEN 'a' THEN '  保存账号甲213全名  ' ELSE '' END`); err != nil {
+		t.Fatal(err)
+	}
+	svc, _ := scopedTestService(&scopedAdditionalRepo{}, upstream.Session{Platform: upstream.PlatformSub2API, BaseURL: "http://scoped.invalid", AccessToken: "fixture"}, func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/me") {
+			return scopedResponse(`{"code":0,"data":{"role":"admin"}}`, 200), nil
+		}
+		return scopedResponse(`{"message":"not found"}`, 404), nil
+	})
+	svc.connRepository = repo
+	result, err := svc.CheckScopedRealConnections(ctx, "u", ScopedCheckRequest{WorkspaceAdminAccountID: "w", SiteID: "site", Mode: "automatic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Issues []map[string]any `json:"issues"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Issues) != 2 {
+		t.Fatalf("want two individually named issues, got %d", len(payload.Issues))
+	}
+	for _, issue := range payload.Issues {
+		want := ""
+		if issue["connectionId"] == "a" {
+			want = "保存账号甲213全名"
+		}
+		name, exists := issue["accountName"]
+		if !exists || name != want {
+			t.Errorf("connection %s must carry explicit saved accountName %q (present=%t)", issue["connectionId"], want, exists)
+		}
+		detail, _ := issue["detail"].(string)
+		if strings.Contains(detail, "账号213") || strings.Contains(detail, "账号363") {
+			t.Error("local detail still uses an identifier as a name")
+		}
+	}
+	if len(result.UnconfirmedConnectionIDs) != 2 || len(result.ConfirmedConnectionIDs) != 0 {
+		t.Fatal("404 changed the original conservative status")
+	}
+	snapshots, err := repo.ReadScopedConnectionSnapshots(ctx, "u", "w", ScopedConnectionScope{SiteID: "site"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, err := repo.ApplyScopedConnectionStatuses(ctx, snapshots, map[string]string{"a": ConnectionStatusMissing, "b": ConnectionStatusActive})
+	if err != nil || len(applied.ConfirmedConnectionIDs) != 2 {
+		t.Fatalf("named records must save through both snapshot reads: %v", err)
+	}
+	value, err := status("a")
+	if err != nil || value != ConnectionStatusMissing {
+		t.Fatal("named status not saved")
+	}
+	fresh, err := repo.ReadScopedConnectionSnapshots(ctx, "u", "w", ScopedConnectionScope{SiteID: "site"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.db.Exec(ctx, `UPDATE real_connections SET admin_account_name='改名后的账号' WHERE id='a'`); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := repo.ApplyScopedConnectionStatuses(ctx, fresh, map[string]string{"a": ConnectionStatusActive})
+	if err != nil || len(stale.ChangedConnectionIDs) != 1 || len(stale.ConfirmedConnectionIDs) != 0 {
+		t.Fatal("name-only change allowed stale result")
+	}
+	value, err = status("a")
+	if err != nil || value != ConnectionStatusMissing {
+		t.Fatal("name-only change lost original status")
+	}
+}
+
+type scopedAccountNameChangedRepo struct{ *scopedAdditionalRepo }
+
+func (r *scopedAccountNameChangedRepo) ApplyScopedConnectionStatuses(_ context.Context, snapshots []ScopedConnectionSnapshot, determined map[string]string) (ScopedStatusApplyResult, error) {
+	r.writes++
+	r.determined = determined
+	result := ScopedStatusApplyResult{}
+	for _, row := range snapshots {
+		if _, exists := determined[row.ID]; exists {
+			result.ChangedConnectionIDs = append(result.ChangedConnectionIDs, row.ID)
+		}
+	}
+	// Simulate names and bindings that have changed since the initial read.
+	for index := range r.snapshots {
+		r.snapshots[index].AdminAccountID = "999"
+		r.snapshots[index].AdminAccountName = "检查后另一账号的名称"
+	}
+	return result, nil
+}
+
+func TestScopedAccountNamesAdditionalIndividualIssues(t *testing.T) {
+	for _, scenario := range []string{"scope", "account_id", "automatic404", "detail failure", "inventory failure", "changed"} {
+		t.Run(scenario, func(t *testing.T) {
+			rows := []ScopedConnectionSnapshot{scopedTestRow("a", "213"), scopedTestRow("duplicate", "213"), scopedTestRow("b", "363"), scopedTestRow("blank", "464")}
+			rows[0].AdminAccountName = "  保存账号甲213全名  "
+			rows[1].AdminAccountName = strings.Repeat("同账号另一条完整名称", 80) + strings.Repeat("Ab9", 20)
+			rows[2].AdminAccountName = "363"
+			rows[3].AdminAccountName = " \t\n "
+			wantNames, wantAccounts := make(map[string]string), make(map[string]string)
+			for index := range rows {
+				if scenario == "scope" {
+					rows[index].AdminPlatform = string(upstream.PlatformNewAPI)
+				} else if scenario == "account_id" {
+					rows[index].AdminAccountID += ".5"
+				}
+				wantNames[rows[index].ID] = strings.TrimSpace(rows[index].AdminAccountName)
+				wantAccounts[rows[index].ID] = rows[index].AdminAccountID
+			}
+			repo := &scopedAdditionalRepo{snapshots: rows}
+			var verifyReads, detailReads, inventoryReads atomic.Int32
+			svc, state := scopedTestService(repo, upstream.Session{Platform: upstream.PlatformSub2API, BaseURL: "http://scoped.invalid", AccessToken: "fixture-secret"}, func(r *http.Request) (*http.Response, error) {
+				if r.Method != http.MethodGet {
+					t.Error("account check attempted a remote write")
+				}
+				if r.URL.Path == "/api/v1/auth/me" {
+					verifyReads.Add(1)
+					return scopedResponse(`{"code":0,"data":{"role":"admin"}}`, 200), nil
+				}
+				if r.URL.Path == "/api/v1/admin/accounts" {
+					inventoryReads.Add(1)
+					return scopedResponse(`{"message":"远端维护数字736，token=fixture-secret"}`, 403), nil
+				}
+				detailReads.Add(1)
+				id := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/accounts/")
+				if id != "213" && id != "363" && id != "464" {
+					t.Error("read escaped the original three accounts")
+				}
+				if scenario == "changed" {
+					return scopedResponse(fmt.Sprintf(`{"code":0,"data":{"id":%s}}`, id), 200), nil
+				}
+				if scenario == "detail failure" {
+					return scopedResponse(`{"message":"远端维护数字736，token=fixture-secret"}`, 403), nil
+				}
+				return scopedResponse(`{"message":"not found"}`, 404), nil
+			})
+			if scenario == "changed" {
+				svc.connRepository = &scopedAccountNameChangedRepo{repo}
+			}
+			mode, wantStep, wantHTTP, wantRetry := "automatic", "detail", 404, true
+			switch scenario {
+			case "scope", "account_id":
+				wantStep, wantHTTP, wantRetry = scenario, 0, false
+			case "detail failure":
+				wantHTTP = 403
+			case "inventory failure":
+				mode, wantStep, wantHTTP = "manual", "inventory", 403
+			case "changed":
+				wantStep, wantHTTP = "changed", 0
+			}
+			result, err := svc.CheckScopedRealConnections(context.Background(), "u", ScopedCheckRequest{WorkspaceAdminAccountID: "w", SiteID: "site", Mode: mode})
+			if err != nil || len(result.Issues) != len(rows) || len(result.ConfirmedConnectionIDs) != 0 || len(result.ConfirmedStatuses) != 0 {
+				t.Fatalf("incomplete or falsely confirmed issue batch: %#v err=%v", result, err)
+			}
+			for _, issue := range result.Issues {
+				wantName, exists := wantNames[issue.ConnectionID]
+				if !exists || issue.AccountName != wantName || issue.AccountID != wantAccounts[issue.ConnectionID] {
+					t.Errorf("issue did not retain its own initial name and identity: %#v", issue)
+				}
+				if issue.Step != wantStep || issue.HTTPStatus != wantHTTP || issue.RetryAllowed != wantRetry || issue.Next == "" {
+					t.Errorf("original failure evidence or guidance changed: %#v", issue)
+				}
+				if strings.Contains(issue.Detail, "账号213") || strings.Contains(issue.Detail, "账号363") || strings.Contains(issue.Detail, "账号464") || strings.Contains(issue.Detail, "fixture-secret") {
+					t.Error("detail contains identifier naming or a credential")
+				}
+				if (scenario == "detail failure" || scenario == "inventory failure") && !strings.Contains(issue.Detail, "远端维护数字736") {
+					t.Error("upstream specific cause and its unrelated number were lost")
+				}
+			}
+			if scenario == "scope" || scenario == "account_id" {
+				if verifyReads.Load() != 0 || detailReads.Load() != 0 || inventoryReads.Load() != 0 || repo.writes != 0 {
+					t.Fatal("inapplicable or invalid account requested remote data or saved state")
+				}
+			} else if verifyReads.Load() != 1 || detailReads.Load() != 3 {
+				t.Fatal("name projection changed account read deduplication")
+			}
+			wantInventory, wantWrites := int32(0), 0
+			if scenario == "inventory failure" {
+				wantInventory = 1
+			}
+			if scenario == "changed" {
+				wantWrites = 1
+			}
+			if inventoryReads.Load() != wantInventory || repo.writes != wantWrites || len(state.saves) != 0 {
+				t.Fatal("original inventory, status save, or session behavior changed")
+			}
+			if scenario == "scope" && len(result.SkippedConnectionIDs) != len(rows) || scenario == "changed" && len(result.ChangedConnectionIDs) != len(rows) || scenario != "scope" && scenario != "changed" && len(result.UnconfirmedConnectionIDs) != len(rows) {
+				t.Fatal("names changed conservative operation eligibility")
+			}
+		})
+	}
+}
+
+func TestScopedAccountNamesAdditionalBatchIssuesHaveNoAccount(t *testing.T) {
+	for _, scenario := range []string{"session", "verify", "save"} {
+		t.Run(scenario, func(t *testing.T) {
+			row := scopedTestRow("a", "213")
+			row.AdminAccountName = "不能套给整批的账号名称"
+			repo := &scopedAdditionalRepo{snapshots: []ScopedConnectionSnapshot{row}}
+			session := upstream.Session{Platform: upstream.PlatformSub2API, BaseURL: "http://scoped.invalid", AccessToken: "fixture"}
+			if scenario == "session" {
+				session.AccessToken = ""
+			}
+			if scenario == "save" {
+				repo.applyErr = &ScopedStorageError{Cause: errors.New("fixture storage failure")}
+			}
+			svc, _ := scopedTestService(repo, session, func(r *http.Request) (*http.Response, error) {
+				if strings.HasSuffix(r.URL.Path, "/me") {
+					if scenario == "verify" {
+						return scopedResponse(`{"message":"管理员验证暂不可用"}`, 403), nil
+					}
+					return scopedResponse(`{"code":0,"data":{"role":"admin"}}`, 200), nil
+				}
+				return scopedResponse(`{"code":0,"data":{"id":213}}`, 200), nil
+			})
+			result, err := svc.CheckScopedRealConnections(context.Background(), "u", ScopedCheckRequest{WorkspaceAdminAccountID: "w", SiteID: "site", Mode: "automatic"})
+			if (err != nil) != (scenario == "save") || len(result.Issues) != 1 || len(result.UnconfirmedConnectionIDs) != 1 || len(result.ConfirmedConnectionIDs) != 0 {
+				t.Fatalf("batch failure semantics changed: %#v err=%v", result, err)
+			}
+			issue := result.Issues[0]
+			if issue.Step != scenario || issue.ConnectionID != "" || issue.AccountID != "" || issue.AccountName != "" || strings.Contains(issue.Detail, row.AdminAccountName) {
+				t.Fatalf("batch problem was assigned to one account: %#v", issue)
+			}
+			raw, err := json.Marshal(issue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(raw, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if name, exists := payload["accountName"]; !exists || name != "" {
+				t.Fatal("new backend omitted explicit empty name")
+			}
+		})
+	}
+}

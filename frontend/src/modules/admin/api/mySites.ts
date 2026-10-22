@@ -520,6 +520,7 @@ export class ScopedCheckApiError extends Error {
   }
 }
 const scopedSafeText = safeScopedErrorText
+const scopedAccountNameText = (value: unknown): string => typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim() : ''
 const scopedIdentityText = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value)
 const scopedAbortError = (error: unknown): boolean => error instanceof Error && error.name === 'AbortError'
 const parseScopedCheckResult = (value: unknown, workspace: string): import('../types/mySites').ScopedCheckResult | undefined => {
@@ -536,8 +537,10 @@ const parseScopedCheckResult = (value: unknown, workspace: string): import('../t
   const issues: import('../types/mySites').ScopedCheckIssue[] = []
   for (const issue of value.issues) {
     if (!isObject(issue) || !scopedIdentityText(issue.step) || typeof issue.detail !== 'string' || typeof issue.next !== 'string' || typeof issue.retryAllowed !== 'boolean' || (issue.connectionId !== undefined && (!scopedIdentityText(issue.connectionId) || !seen.has(issue.connectionId))) || (issue.accountId !== undefined && !scopedIdentityText(issue.accountId)) || (issue.httpStatus !== undefined && !integerInRange(issue.httpStatus, 100, 599))) return undefined
+    const hasAccountName = Object.prototype.hasOwnProperty.call(issue, 'accountName')
+    if (hasAccountName && typeof issue.accountName !== 'string') return undefined
     issues.push({ step: issue.step, detail: scopedSafeText(issue.detail), next: scopedSafeText(issue.next), retryAllowed: issue.retryAllowed,
-      ...(typeof issue.connectionId === 'string' ? { connectionId: issue.connectionId } : {}), ...(typeof issue.accountId === 'string' ? { accountId: issue.accountId } : {}), ...(typeof issue.httpStatus === 'number' ? { httpStatus: issue.httpStatus } : {}) })
+      ...(typeof issue.connectionId === 'string' ? { connectionId: issue.connectionId } : {}), ...(typeof issue.accountId === 'string' ? { accountId: issue.accountId } : {}), ...(hasAccountName ? { accountName: scopedAccountNameText(issue.accountName) } : {}), ...(typeof issue.httpStatus === 'number' ? { httpStatus: issue.httpStatus } : {}) })
   }
   return { workspaceAdminAccountId: workspace, total: Number(value.total), confirmedConnectionIds: [...confirmed], unconfirmedConnectionIds: [...value.unconfirmedConnectionIds as string[]], skippedConnectionIds: [...value.skippedConnectionIds as string[]], changedConnectionIds: [...value.changedConnectionIds as string[]], confirmedStatuses: Object.fromEntries(confirmed.map(id => [id, (value.confirmedStatuses as Record<string, 'active' | 'missing'>)[id]])), issues, storageUncertain: value.storageUncertain }
 }

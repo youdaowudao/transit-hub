@@ -397,6 +397,7 @@ const storedPreferences = (
 const mountView = async (
   groups: AdminGroupHealth[],
   preferences = storedPreferences(),
+  realAnswers = false,
 ) => {
   window.localStorage.setItem(
     connectionHealthPreferencesStorageKey('ws1'),
@@ -409,10 +410,10 @@ const mountView = async (
       stubs: {
         Teleport: true,
         Transition: false,
-        AdminGroupHealthDetail: true,
+        AdminGroupHealthDetail: !realAnswers,
         ConnectionHealthEventsDialog: true,
         GroupHealthSetupDrawer: true,
-        ManualOneTimeProbeDialog: true,
+        ManualOneTimeProbeDialog: !realAnswers,
         PolicyConfigDrawer: true,
         ProbePolicyListDialog: true,
         TargetPolicyAssignmentDialog: true,
@@ -423,6 +424,36 @@ const mountView = async (
   await flushPromises()
   return wrapper
 }
+
+describe('model error parent entry preservation', () => {
+  it.each(['account', 'recent', 'management'] as const)('T9 opens the real %s entry with original target and exact batch', async entry => {
+    const id = 'sub2api:ws1:model-error-entry'
+    const batchId = 'model-error-exact-entry'
+    harness.discoverModels.mockResolvedValue({ errorKey: 'admin.upstream.errors.upstreamInsufficientBalance' })
+    const result = emptyBatch({ batchId, records: [record({ targetId: id, batchId, status: 'succeeded', answerBody: 'Preserved entry answer', answerJudgment: 'unreviewed' })] })
+    harness.getQuestionAnswerBatch.mockResolvedValue(result)
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(result)
+    const source = account(id, {
+      hasEnabledProbePolicy: true,
+      recentQuestionAnswer: { batchId, source: 'manual', createdAt: '2026-08-31T00:00:00Z', requests: { ...stats().requests, submitted: 1, succeeded: 1 }, reviews: { correct: 1, incorrect: 0, unreviewed: 0 }, byModel: [] } as any,
+      modelControl: { open: 1, closed: 0, attention: 0, models: [] },
+    })
+    const wrapper = await mountView([adminGroup('entry-group', [source])], storedPreferences(), true)
+    const detail = wrapper.get('section[aria-label="Group entry-group"]')
+    const button = entry === 'management' ? detail.get('[data-testid="model-control-summary"]')
+      : entry === 'account' ? detail.findAll('button').find(b => ['手动探活', '有未查看的问答测试'].includes(b.attributes('aria-label') || ''))
+        : detail.findAll('button').find(b => b.text().trim() === '100%')
+    expect(button).toBeDefined()
+    await button!.trigger('click'); await flushPromises()
+    const dialog = wrapper.getComponent(ManualOneTimeProbeDialog)
+    expect(dialog.props('target')?.targetId).toBe(id)
+    expect(dialog.props('initialQuestionAnswerBatchId')).toBe(entry === 'recent' ? batchId : null)
+    expect(dialog.get('[data-testid="question-answer-pending"]').text()).toContain('Preserved entry answer')
+    expect(dialog.text()).toContain('上游账户余额不足')
+    expect(startButton(dialog).attributes('disabled')).toBeDefined()
+    expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
+  })
+})
 
 describe('connection health two-column layout', () => {
   it('renders every visible group without a bounded scrolling sidebar', async () => {
@@ -656,7 +687,8 @@ describe('single-account preferences', () => {
       reasoningEffort: 'xhigh',
       repeatCount: 8,
     }))
-    const retry = wrapper.findAll('button').find(button => button.text().trim() === '重新加载')
+    expect(wrapper.find('[data-testid="question-answer-batch-line"]').exists()).toBe(true)
+    const retry = wrapper.findAll('button').find(button => button.text().trim() === '重新读取模型')
     expect(retry).toBeDefined()
     await retry!.trigger('click')
     await flushPromises()

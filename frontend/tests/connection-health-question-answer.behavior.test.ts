@@ -30,6 +30,8 @@ const harness = vi.hoisted(() => ({
   cancelQuestionAnswerBatch: vi.fn(),
   startQuestionAnswerBatch: vi.fn(),
   setQuestionAnswerJudgment: vi.fn(),
+  getModelControlTarget: vi.fn(),
+  verifyModelControl: vi.fn(),
 }))
 
 vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal) => {
@@ -50,10 +52,10 @@ vi.mock('@/modules/admin/composables/useConnectionHealth', async (importOriginal
 
 vi.mock('@/modules/admin/api/connectionHealth', async original => ({
   ...await original<typeof import('@/modules/admin/api/connectionHealth')>(),
-  getModelControlTarget: async (targetId: string) => ({ targetId, items: [], candidates: [] }),
+  getModelControlTarget: harness.getModelControlTarget,
   getModelControlAutoSettings: async () => c32AutoSettings(),
   getModelControlSettings: async () => ({ minAccuracyPercent: 50, minJudgedAnswers: 3, version: 0 }),
-  verifyModelControl: async () => ({ items: [], errors: [] }),
+  verifyModelControl: harness.verifyModelControl,
   cancelQuestionAnswerBatch: harness.cancelQuestionAnswerBatch,
   getLatestQuestionAnswerBatch: harness.getLatestQuestionAnswerBatch,
   getQuestionAnswerBatch: harness.getQuestionAnswerBatch,
@@ -229,6 +231,8 @@ beforeEach(() => {
   harness.cancelQuestionAnswerBatch.mockReset().mockResolvedValue({ ...activeBatch, active: false, runningCount: 0 })
   harness.startQuestionAnswerBatch.mockReset().mockResolvedValue(activeBatch)
   harness.setQuestionAnswerJudgment.mockReset()
+  harness.getModelControlTarget.mockReset().mockImplementation(async (targetId: string) => ({ targetId, items: [], candidates: [] }))
+  harness.verifyModelControl.mockReset().mockResolvedValue({ items: [], errors: [] })
 })
 
 afterEach(() => {
@@ -341,6 +345,326 @@ const openFailedAnswers = async (wrapper: VueWrapper) => {
 const appearsBefore = (first: Element, second: Element) => Boolean(
   first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING,
 )
+
+const modelFailure = { errorKey: 'admin.upstream.errors.upstreamInsufficientBalance' }
+const clickText = async (wrapper: VueWrapper, text: string) => {
+  const button = wrapper.findAll('button').find(candidate => candidate.text().trim() === text)
+  if (!button) throw new Error(`missing button: ${text}`)
+  await button.trigger('click')
+  await flushPromises()
+}
+
+describe('model failure preserves local answers', () => {
+  it('T1 retains answers, statistics, expansion and judgment when discovery refuses balance', async () => {
+    harness.discoverModels.mockResolvedValue(modelFailure)
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch())
+    harness.getQuestionAnswerHistory.mockResolvedValue(terminalReviewHistory())
+    const wrapper = mountClosedDialog()
+    await wrapper.setProps({ open: true })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="question-answer-stats-bar"]').exists()).toBe(true)
+    const pending = wrapper.get('[data-testid="question-answer-pending"]')
+    expect(pending.text()).toContain('Long unreviewed answer')
+    await clickText(rowContaining(wrapper, 'Unreviewed long'), '展开详情')
+    expect(pending.text()).toContain(reviewRecords[1].answerBody)
+    await openProcessedAnswers(wrapper)
+    expect(wrapper.text()).toContain('Answer reviewed correct')
+    const config = wrapper.get('[data-testid="question-answer-configuration"]')
+    expect(config.text()).toContain('上游账户余额不足，上游不允许读取。')
+    expect(config.text()).toContain('Concurrent Account')
+    expect(config.text()).toContain('已有答题结果仍可查看。')
+    expect(wrapper.get('[data-testid="question-answer-footer"]').text()).toContain('模型列表读取失败')
+    expect(wrapper.get('[data-testid="question-answer-footer"] button:last-child').attributes('disabled')).toBeDefined()
+    harness.setQuestionAnswerJudgment.mockRejectedValueOnce(new Error('admin.connectionHealth.errors.request'))
+    await judgmentButtons(rowContaining(wrapper, 'Unreviewed one'))[0].trigger('click')
+    await flushPromises()
+    expect(pending.text()).toContain('Answer unreviewed one')
+    expect(harness.setQuestionAnswerJudgment).toHaveBeenCalledWith(primaryTarget.targetId, 'unreviewed-1', 'correct', reviewRecords[0].updatedAt, expect.any(AbortSignal))
+    expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
+  })
+
+  it('T2 shows local results while models hang and no fake empty results before local success', async () => {
+    let resolveLocal!: (value: ReturnType<typeof terminalReviewBatch>) => void
+    harness.discoverModels.mockImplementation(() => new Promise(() => {}))
+    harness.getLatestQuestionAnswerBatch.mockImplementation(() => new Promise(resolve => { resolveLocal = resolve }))
+    const wrapper = mountClosedDialog()
+    await wrapper.setProps({ open: true }); await flushPromises()
+    expect(wrapper.find('[data-testid="question-answer-stats-loading"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="question-answer-pending"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('当前账号还没有问答批次')
+    expect(wrapper.text()).not.toContain('暂无问答记录')
+    expect(wrapper.text()).not.toContain('已有答题结果仍可查看')
+    resolveLocal(terminalReviewBatch()); await flushPromises()
+    expect(wrapper.get('[data-testid="question-answer-pending"]').text()).toContain('Answer unreviewed one')
+    expect(wrapper.get('[data-testid="question-answer-configuration"]').text()).toContain('正在读取“Concurrent Account”的模型列表')
+    expect(wrapper.text()).toContain('已有答题结果仍可查看')
+  })
+
+  it('T6 keeps expansion and local reads unchanged during a deduplicated manual model retry', async () => {
+    let resolveModels!: (value: { models: Array<{ id: string; name: string }> }) => void
+    harness.discoverModels.mockResolvedValueOnce(modelFailure).mockImplementationOnce(() => new Promise(resolve => { resolveModels = resolve }))
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch())
+    const wrapper = mountClosedDialog()
+    await wrapper.setProps({ open: true }); await flushPromises()
+    expect(wrapper.find('[data-testid="question-answer-pending"]').exists()).toBe(true)
+    await clickText(rowContaining(wrapper, 'Unreviewed long'), '展开详情')
+    await clickText(wrapper, '重新读取模型')
+    await clickText(wrapper, '重新读取模型')
+    expect(harness.discoverModels).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-testid="question-answer-pending"]').text()).toContain(reviewRecords[1].answerBody)
+    expect(harness.listTestQuestions).toHaveBeenCalledTimes(1)
+    expect(harness.getLatestQuestionAnswerBatch).toHaveBeenCalledTimes(1)
+    expect(harness.getQuestionAnswerHistory).toHaveBeenCalledTimes(1)
+    resolveModels({ models: [{ id: 'model-a', name: 'Model A' }] }); await flushPromises()
+    expect(wrapper.get('[data-testid="question-answer-pending"]').text()).toContain(reviewRecords[1].answerBody)
+    expect(harness.getQuestionAnswerBatch).not.toHaveBeenCalled()
+    expect(harness.cancelQuestionAnswerBatch).not.toHaveBeenCalled()
+    expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
+    expect(harness.setQuestionAnswerJudgment).not.toHaveBeenCalled()
+    expect(wrapper.emitted('question-answer-preferences-changed')).toBeUndefined()
+  })
+})
+
+const modelDeferred = <T>() => {
+  let resolve!: (value: T) => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+const qaFooter = (wrapper: VueWrapper) => wrapper.get('[data-testid="question-answer-footer"]')
+const qaStart = (wrapper: VueWrapper) => qaFooter(wrapper).get('button:last-child')
+const openModelFailure = async (target = primaryTarget) => {
+  harness.discoverModels.mockResolvedValue(modelFailure)
+  harness.getLatestQuestionAnswerBatch.mockResolvedValue(historicalBatch('model-error-local'))
+  const wrapper = mountClosedDialog()
+  await wrapper.setProps({ target, open: true }); await flushPromises()
+  return wrapper
+}
+
+describe('model failure recovery boundaries', () => {
+  it.each(['error', 'empty', 'ready'] as const)('T3/T6 keeps selected history, page, scope and expansion after retry %s', async outcome => {
+    const old = historicalBatch('model-error-old', 'Old chosen answer')
+    harness.getQuestionAnswerHistory.mockImplementation(async (_target: string, page: number) => ({ ...terminalReviewHistory(old.records), page, totalItems: 21, totalPages: 2 }))
+    harness.getQuestionAnswerBatch.mockResolvedValue(old)
+    const wrapper = await openModelFailure()
+    await clickText(wrapper, '批次历史')
+    await clickText(wrapper, '全部')
+    await clickText(wrapper, '2')
+    await clickText(wrapper, '查看该批次')
+    await clickText(rowContaining(wrapper, 'Unreviewed long'), '展开详情')
+    const reads = [harness.listTestQuestions.mock.calls.length, harness.getQuestionAnswerHistory.mock.calls.length, harness.getLatestQuestionAnswerBatch.mock.calls.length, harness.getQuestionAnswerBatch.mock.calls.length]
+    const pending = modelDeferred<any>()
+    harness.discoverModels.mockReturnValueOnce(pending.promise)
+    await clickText(wrapper, '重新读取模型')
+    expect(wrapper.get('[data-testid="question-answer-review-batch"]').text()).toContain(shortQuestionAnswerBatchId(old.batchId))
+    expect(wrapper.text()).toContain(old.records[1].answerBody)
+    expect(qaStart(wrapper).attributes('disabled')).toBeDefined()
+    pending.resolve(outcome === 'error' ? modelFailure : { models: outcome === 'empty' ? [] : [{ id: 'model-a', name: 'Model A' }] })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="question-answer-review-batch"]').text()).toContain(shortQuestionAnswerBatchId(old.batchId))
+    expect(wrapper.text()).toContain(old.records[1].answerBody)
+    expect(wrapper.findAll('button').find(b => b.text().trim() === '全部')?.attributes('aria-pressed')).toBe('true')
+    expect(wrapper.findAll('button').find(b => b.text().trim() === '2')?.classes()).toContain('bg-primary')
+    expect([harness.listTestQuestions.mock.calls.length, harness.getQuestionAnswerHistory.mock.calls.length, harness.getLatestQuestionAnswerBatch.mock.calls.length, harness.getQuestionAnswerBatch.mock.calls.length]).toEqual(reads)
+    expect(qaStart(wrapper).attributes('disabled') === undefined).toBe(outcome === 'ready')
+    expect(wrapper.emitted('question-answer-preferences-changed')).toBeUndefined()
+    expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
+    await clickText(wrapper, '返回最新')
+    expect(wrapper.get('[data-testid="question-answer-review-batch"]').text()).toContain(shortQuestionAnswerBatchId('model-error-local'))
+  })
+
+  it.each(['error', 'ready'] as const)('T4/T6 accepts a new judgment and updatedAt while model retry finishes %s', async outcome => {
+    const batch = historicalBatch('model-error-local')
+    const saved = { ...batch.records[0], answerJudgment: 'correct' as const, updatedAt: '2026-08-26T12:03:00Z' }
+    const refreshed = { ...batch, records: [saved, ...batch.records.slice(1)] }
+    const wrapper = await openModelFailure()
+    const pending = modelDeferred<any>()
+    harness.discoverModels.mockReturnValueOnce(pending.promise)
+    harness.setQuestionAnswerJudgment.mockResolvedValue(saved)
+    harness.getQuestionAnswerBatch.mockResolvedValue(refreshed)
+    await clickText(wrapper, '重新读取模型')
+    await judgmentButtons(rowContaining(wrapper, 'Unreviewed one'))[0].trigger('click'); await flushPromises()
+    expect(wrapper.get('[data-testid="question-answer-pending"]').text()).not.toContain('Unreviewed one')
+    pending.resolve(outcome === 'error' ? modelFailure : { models: [{ id: 'model-a', name: 'Model A' }] }); await flushPromises()
+    await openProcessedAnswers(wrapper)
+    const row = rowContaining(wrapper, 'Unreviewed one')
+    expect(judgmentButtons(row)[0].attributes('aria-pressed')).toBe('true')
+    await judgmentButtons(row)[1].trigger('click'); await flushPromises()
+    expect(harness.setQuestionAnswerJudgment).toHaveBeenLastCalledWith(primaryTarget.targetId, saved.id, 'incorrect', saved.updatedAt, expect.any(AbortSignal))
+    expect(harness.listTestQuestions).toHaveBeenCalledTimes(1)
+    expect(harness.getLatestQuestionAnswerBatch).toHaveBeenCalledTimes(1)
+    expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
+  })
+
+  it('T4 retains saved judgment after local refresh failure and model retry does not clear its recovery', async () => {
+    const wrapper = await openModelFailure()
+    const saved = { ...historicalBatch('model-error-local').records[0], answerJudgment: 'correct' as const }
+    harness.setQuestionAnswerJudgment.mockResolvedValue(saved)
+    harness.getQuestionAnswerBatch.mockRejectedValueOnce(new Error('admin.connectionHealth.errors.request'))
+    await judgmentButtons(rowContaining(wrapper, 'Unreviewed one'))[0].trigger('click'); await flushPromises()
+    expect(wrapper.text()).toContain('判定已保存，统计刷新失败')
+    await clickText(wrapper, '重新读取模型')
+    expect(wrapper.text()).toContain('判定已保存，统计刷新失败')
+    expect(wrapper.text()).not.toContain('判定保存失败')
+    await openProcessedAnswers(wrapper)
+    expect(judgmentButtons(rowContaining(wrapper, 'Unreviewed one'))[0].attributes('aria-pressed')).toBe('true')
+  })
+
+  it('T5/T6 preserves old review and finished cancellation while retry and history changes overlap', async () => {
+    const old = historicalBatch('model-error-old', 'Keep old during stop')
+    harness.discoverModels.mockResolvedValue(modelFailure)
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(activeBatch)
+    harness.getQuestionAnswerHistory.mockImplementation(async (_id: string, page: number) => ({ ...terminalReviewHistory(old.records), page, totalItems: 21, totalPages: 2 }))
+    harness.getQuestionAnswerBatch.mockResolvedValue(old)
+    const wrapper = await mountQuestionAnswerDialog()
+    await clickText(wrapper, '查看该批次')
+    const pending = modelDeferred<any>(); harness.discoverModels.mockReturnValueOnce(pending.promise)
+    await clickText(wrapper, '重新读取模型')
+    await clickText(wrapper, '全部'); await clickText(wrapper, '2')
+    await wrapper.get('[data-testid="question-answer-stop-latest"]').trigger('click'); await flushPromises()
+    expect(harness.cancelQuestionAnswerBatch).toHaveBeenCalledWith(primaryTarget.targetId, activeBatch.batchId, expect.any(AbortSignal))
+    pending.resolve({ models: [{ id: 'model-a', name: 'Model A' }] }); await flushPromises()
+    expect(wrapper.get('[data-testid="question-answer-review-batch"]').text()).toContain(shortQuestionAnswerBatchId(old.batchId))
+    expect(wrapper.find('[data-testid="question-answer-stop-latest"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Keep old during stop')
+    await clickText(wrapper, '离开')
+    expect(harness.cancelQuestionAnswerBatch).toHaveBeenCalledTimes(1)
+  })
+
+  it('T8 keeps independent first-read errors and original local retry loading and recovery', async () => {
+    harness.getLatestQuestionAnswerBatch.mockRejectedValueOnce(new Error('admin.connectionHealth.errors.questionAnswerStorage'))
+    const wrapper = await openModelFailure()
+    expect(wrapper.get('[data-testid="question-answer-stats-error"]').text()).toContain('Concurrent Account')
+    expect(wrapper.text()).toContain('此次未取得结果，不代表没有历史记录')
+    expect(wrapper.text()).toContain('上游账户余额不足')
+    expect(wrapper.text()).not.toContain('已有答题结果仍可查看')
+    expect(wrapper.find('[data-testid="question-answer-history"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('待人工判断 0')
+    expect(wrapper.text()).not.toContain('没有测试问题')
+    await clickText(wrapper, '重新读取模型')
+    expect(wrapper.text()).toContain('此次未取得结果，不代表没有历史记录')
+    expect(harness.getLatestQuestionAnswerBatch).toHaveBeenCalledTimes(1)
+    const local = modelDeferred<any>(); harness.getLatestQuestionAnswerBatch.mockReturnValueOnce(local.promise)
+    await clickText(wrapper, '重新加载')
+    expect(wrapper.find('[data-testid="question-answer-stats-loading"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="question-answer-stats-error"]').exists()).toBe(false)
+    local.resolve(historicalBatch('local-recovered')); await flushPromises()
+    expect(wrapper.text()).toContain('已有答题结果仍可查看')
+    expect(wrapper.text()).not.toContain('此次未取得结果')
+    expect(wrapper.get('[data-testid="question-answer-pending"]').text()).toContain('Answer unreviewed one')
+  })
+
+  it.each(['一次性测试', '正式手动探活'])('T8/T11 keeps old choices but blocks start after %s roundtrip local failure', async label => {
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(historicalBatch('before-roundtrip'))
+    const wrapper = await mountQuestionAnswerDialog()
+    await clickText(wrapper, label)
+    harness.getLatestQuestionAnswerBatch.mockRejectedValueOnce(new Error('admin.connectionHealth.errors.questionAnswerStorage'))
+    await clickText(wrapper, '问答测试')
+    expect(qaStart(wrapper).attributes('disabled')).toBeDefined()
+    expect(qaFooter(wrapper).text()).toContain('答题数据尚未读到')
+    expect(wrapper.find('[data-testid="question-answer-default-restored"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('已有答题结果仍可查看')
+    // The model and question choices survive the mode switch in existing memory.
+    expect((wrapper.vm as any).$.setupState.qaSelectedQuestions.size).toBeGreaterThan(0)
+    await qaStart(wrapper).trigger('click'); expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(historicalBatch('after-roundtrip'))
+    await clickText(wrapper, '重新加载')
+    expect(qaStart(wrapper).attributes('disabled')).toBeUndefined()
+  })
+
+  it('T7/T10 keeps folded errors visible and delays real model panel reads until discovery ready', async () => {
+    const wrapper = await openModelFailure()
+    await wrapper.get('[data-testid="question-answer-configuration-toggle"]').trigger('click')
+    expect(wrapper.find('#question-answer-configuration-content').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="question-answer-configuration"]').text()).toContain('上游账户余额不足')
+    expect(harness.getModelControlTarget).not.toHaveBeenCalled()
+    expect(harness.verifyModelControl).not.toHaveBeenCalled()
+    const pending = modelDeferred<any>(); harness.discoverModels.mockReturnValueOnce(pending.promise)
+    await clickText(wrapper, '重新读取模型')
+    expect(harness.getModelControlTarget).not.toHaveBeenCalled()
+    pending.resolve({ models: [] }); await flushPromises()
+    expect(wrapper.text()).toContain('当前没有可选模型')
+    expect(wrapper.find('[data-testid="question-answer-default-restored"]').exists()).toBe(false)
+    expect(qaStart(wrapper).attributes('disabled')).toBeDefined()
+    expect(harness.getModelControlTarget).toHaveBeenCalledTimes(1)
+    expect(harness.verifyModelControl).not.toHaveBeenCalled()
+  })
+
+  it.each(['conflict', 'unavailable'] as const)('T7 configuration %s keeps its reason above empty-model guidance', async status => {
+    harness.getLatestQuestionAnswerBatch.mockResolvedValue(terminalReviewBatch())
+    const wrapper = mountClosedDialog()
+    await wrapper.setProps({ target: { ...primaryTarget, testConfiguration: { status, sourceGroups: [] } }, open: true }); await flushPromises()
+    expect(harness.discoverModels).not.toHaveBeenCalled()
+    expect(qaStart(wrapper).attributes('disabled')).toBeDefined()
+    expect(qaFooter(wrapper).text()).not.toContain('当前没有可选模型')
+    expect(wrapper.text()).not.toContain('重新读取模型')
+    expect(wrapper.get('[data-testid="question-answer-pending"]').text()).toContain('Answer unreviewed one')
+  })
+
+  it.each(['close', 'target', 'formal-success', 'formal-error'] as const)('T11 rejects stale model retry effect on %s', async change => {
+    const wrapper = await openModelFailure({ ...primaryTarget, formalModels: [{ id: 'formal-model', name: 'Formal model' }] })
+    const pending = modelDeferred<any>(); harness.discoverModels.mockReturnValueOnce(pending.promise)
+    await clickText(wrapper, '重新读取模型')
+    const signal = harness.discoverModels.mock.calls.at(-1)![1] as AbortSignal
+    if (change === 'close') await wrapper.setProps({ open: false })
+    else if (change === 'target') {
+      harness.discoverModels.mockResolvedValueOnce({ models: [{ id: 'new-model', name: 'New account model' }] })
+      await wrapper.setProps({ target: secondaryTarget }); await flushPromises()
+    } else {
+      await clickText(wrapper, '正式手动探活')
+    }
+    pending.resolve(change === 'formal-error' ? modelFailure : { models: [{ id: 'old-model', name: 'Old account model' }] }); await flushPromises()
+    if (change === 'close' || change === 'target') expect(signal.aborted).toBe(true)
+    if (change === 'close') expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    else if (change === 'target') { expect(wrapper.text()).toContain('New account model'); expect(wrapper.text()).not.toContain('Old account model') }
+    else { expect(wrapper.text()).toContain('Formal model'); expect(wrapper.text()).not.toContain('Old account model'); expect(qaStart(wrapper).attributes('disabled')).toBeUndefined() }
+  })
+
+  it('T12 model recovery keeps empty questions blocked and never announces default restoration', async () => {
+    harness.listTestQuestions.mockResolvedValue([])
+    const wrapper = await openModelFailure()
+    harness.discoverModels.mockResolvedValueOnce({ models: [{ id: 'model-a', name: 'Model A' }] })
+    await clickText(wrapper, '重新读取模型')
+    expect(qaStart(wrapper).attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-testid="question-answer-default-restored"]').exists()).toBe(false)
+    await qaStart(wrapper).trigger('click'); expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
+  })
+
+  it('T12 keeps the 50/51 boundary and invalid repeat gate after model recovery', async () => {
+    harness.listTestQuestions.mockResolvedValue(Array.from({ length: 51 }, (_, i) => ({ id: `q${i}`, name: `Boundary ${i}`, body: 'body', keywords: [], enabled: true, isDefault: i === 0 })))
+    const wrapper = await openModelFailure()
+    harness.discoverModels.mockResolvedValueOnce({ models: [{ id: 'model-a', name: 'Model A' }] })
+    await clickText(wrapper, '重新读取模型')
+    const questions = wrapper.get('[data-testid="question-answer-questions"]').findAll('input[type="checkbox"]')
+    for (const question of questions.slice(1, 50)) await question.setValue(true)
+    expect(qaStart(wrapper).attributes('disabled')).toBeUndefined()
+    await questions[50].setValue(true)
+    expect(qaStart(wrapper).attributes('disabled')).toBeDefined()
+    expect(qaFooter(wrapper).text()).toContain('51')
+    await questions[50].setValue(false)
+    const repeat = wrapper.get('#question-answer-repeat-count')
+    await repeat.element.appendChild(Object.assign(document.createElement('option'), { value: '0', textContent: '0' })); await repeat.setValue('0'); expect((wrapper.vm as any).$.setupState.qaRepeatCount).toBe(1)
+    ;(wrapper.vm as any).$.setupState.qaRepeatCount = 0; await flushPromises(); expect(qaStart(wrapper).attributes('disabled')).toBeDefined()
+    await repeat.setValue('1'); expect(qaStart(wrapper).attributes('disabled')).toBeUndefined()
+    expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
+  })
+
+  it('T5/T12 keeps retained finalization and unknown termination above model failure', async () => {
+    harness.discoverModels.mockResolvedValue(modelFailure)
+    harness.getLatestQuestionAnswerBatch.mockResolvedValueOnce({ ...terminalReviewBatch(), finalization: { batchId: 'batch-review', state: 'failed', recovery: 'cancel' } }).mockRejectedValue(new Error('admin.connectionHealth.errors.request'))
+    harness.cancelQuestionAnswerBatch.mockRejectedValue(new Error('admin.connectionHealth.errors.request'))
+    const wrapper = await mountQuestionAnswerDialog()
+    expect(qaFooter(wrapper).text()).not.toContain('模型列表读取失败')
+    await wrapper.get('[data-testid="question-answer-finalization-retry"]').trigger('click'); await flushPromises()
+    expect(qaFooter(wrapper).text()).toContain('暂时查不到上一批问答是否已结束')
+    const pending = modelDeferred<any>(); harness.discoverModels.mockReturnValueOnce(pending.promise)
+    await clickText(wrapper, '重新读取模型')
+    pending.resolve({ models: [{ id: 'model-a', name: 'Model A' }] }); await flushPromises()
+    expect(qaStart(wrapper).attributes('disabled')).toBeDefined()
+    expect(qaFooter(wrapper).text()).toContain('暂时查不到上一批问答是否已结束')
+    expect(wrapper.find('[data-testid="question-answer-finalization-retry"]').exists()).toBe(false)
+  })
+})
 
 describe('question-answer low-operation review', () => {
   it('keeps manual review and accuracy while hiding retired intelligence controls', async () => {

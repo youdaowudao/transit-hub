@@ -123,7 +123,11 @@ func streamErrorResult(body []byte) ResultKey {
 	return ResultServerError
 }
 
-func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key string, started time.Time, now func() time.Time) (out ProbeOutcome) {
+func readStreamingProbeResponse(body io.Reader, req ProbeRequest, status int, started time.Time, now func() time.Time) (out ProbeOutcome) {
+	protocol := req.Protocol
+	validationDetail := func(raw []byte, cause string) string {
+		return formatProbeFailureDetail(req, status, "response_validation", "", ResultInvalidResponse, raw, cause)
+	}
 	defer func() {
 		out.LatencyMs = int(now().Sub(started).Milliseconds())
 	}()
@@ -150,6 +154,7 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 				out.Result = ResultOK
 			} else {
 				out.Result = ResultInvalidResponse
+				out.Detail = validationDetail(nil, "回答结束但没有有效正文")
 			}
 			return true
 		}
@@ -168,7 +173,7 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 		}
 		if json.Unmarshal([]byte(event), &payload) != nil {
 			out.Result = ResultInvalidResponse
-			out.Detail = "流式事件不是合法 JSON"
+			out.Detail = validationDetail(nil, "流式事件不是合法 JSON")
 			return true
 		}
 		eventType := payload.Type
@@ -188,7 +193,7 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 			out.FirstEventMs = intPtr(elapsed)
 		}
 		if eventType == "error" || eventType == "response.failed" || (len(payload.Error) > 0 && string(payload.Error) != "null") {
-			out.Result = streamErrorResult([]byte(event))
+			out.Result = classifyProbeStreamError(eventType, []byte(event))
 			if protocol == TestProtocolMessages {
 				var streamError struct {
 					Type string `json:"type"`
@@ -197,7 +202,7 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 					out.Result = ResultRateLimited
 				}
 			}
-			out.Detail = truncate(redact(event, key), 500)
+			out.Detail = formatProbeFailureDetail(req, status, "stream_error", eventType, out.Result, []byte(event), "")
 			return true
 		}
 		if protocol == TestProtocolMessages {
@@ -214,7 +219,7 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 			}
 			if eventType == "message_stop" {
 				out.Result = ResultInvalidResponse
-				out.Detail = "回答结束但没有正文"
+				out.Detail = validationDetail([]byte(event), "回答结束但没有有效正文")
 				return true
 			}
 		} else if protocol == TestProtocolResponses {
@@ -228,7 +233,7 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 			}
 			if eventType == "response.incomplete" {
 				out.Result = ResultInvalidResponse
-				out.Detail = "响应未完成"
+				out.Detail = validationDetail([]byte(event), "响应未完成")
 				return true
 			}
 			if eventType == "response.completed" {
@@ -240,6 +245,7 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 					}
 				} else {
 					out.Result = ResultInvalidResponse
+					out.Detail = validationDetail([]byte(event), "回答已结束，但回复格式或正文无效")
 				}
 				return true
 			}
@@ -266,6 +272,7 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 					out.Result = ResultOK
 				} else {
 					out.Result = ResultInvalidResponse
+					out.Detail = validationDetail([]byte(event), "回答结束但没有有效正文")
 				}
 				return true
 			}
@@ -277,7 +284,7 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 		total += len(line) + 1
 		if total > maxProbeResponseBytes {
 			out.Result = ResultInvalidResponse
-			out.Detail = "probe response exceeds 1 MiB limit"
+			out.Detail = validationDetail(nil, "回复超过 1 MiB，无法继续校验")
 			return
 		}
 		if line == "" {
@@ -298,10 +305,10 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 		out.RequestPhase = "reading_body"
 		if errors.Is(err, bufio.ErrTooLong) {
 			out.Result = ResultInvalidResponse
-			out.Detail = "probe response exceeds 1 MiB limit"
+			out.Detail = validationDetail(nil, "回复超过 1 MiB，无法继续校验")
 			return
 		}
-		out.Detail = truncate(redact(err.Error(), key), 500)
+		out.Detail = formatProbeFailureDetail(req, status, "reading_body", "", out.Result, nil, err.Error())
 		return
 	}
 	if consume() {
@@ -309,6 +316,6 @@ func readStreamingProbeResponse(body io.Reader, protocol TestProtocol, key strin
 	}
 	out.Result = ResultNetworkFluctuation
 	out.RequestPhase = "reading_body"
-	out.Detail = "流式回答中途断开或未结束"
+	out.Detail = formatProbeFailureDetail(req, status, "reading_body", "", out.Result, nil, "流式回答中途断开或未结束")
 	return
 }

@@ -43,7 +43,7 @@ func nullableProbeDisposition(disposition string) *string {
 // retains this audit note without populating the state's error fields.
 func probeOutcomeWithAuditMetadata(outcome ProbeOutcome) ProbeOutcome {
 	const note = "上游未返回流式"
-	if outcome.NonStreaming && !strings.HasSuffix(outcome.Detail, note) {
+	if outcome.NonStreaming && (outcome.Result == ResultOK || outcome.Result == ResultSlowResponse) && !strings.HasSuffix(outcome.Detail, note) {
 		if outcome.Detail == "" {
 			outcome.Detail = note
 		} else {

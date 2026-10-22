@@ -54,6 +54,9 @@ run_connection_health_gate() {
   run_step "frontend Responses question answer failure evidence" \
     bash -c "cd '$ROOT_DIR/frontend' && npm run test -- responses-question-answer.behavior.test.ts"
 
+  run_step "frontend probe diagnostics and platform help behavior" \
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- connection-health-probe-diagnostics.behavior.test.ts"
+
   run_step "backend connection_health, upstream and notifications tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test ./internal/modules/connection_health ./internal/modules/upstream ./internal/modules/group_rates ./internal/modules/notifications ./internal/modules/admin_accounts -count=1"
 
@@ -61,7 +64,7 @@ run_connection_health_gate() {
     bash -c "cd '$ROOT_DIR/backend' && go test ./internal/database/migrations -run 'TestModelControlV300' -count=1"
 
   run_step "backend connection_health priority race tests" \
-    bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/connection_health -run 'Test.*(Priority|Scheduler|Refresh|Sync|Regression|Protocol|ActionCheckpoint|ActionDiagnostics|ActionDispatch|RuntimeLease|ProbeModelC43|MessagesC41|MessagesC42|ModelControl|StageA|TaskA|TierSort|ManualSettings|TaskB|ManagedGroup)' -count=1"
+    bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/connection_health -run 'Test.*(Priority|Scheduler|Refresh|Sync|Regression|Protocol|ActionCheckpoint|ActionDiagnostics|ActionDispatch|RuntimeLease|ProbeModelC43|MessagesC41|MessagesC42|ModelControl|StageA|TaskA|TierSort|ManualSettings|TaskB|ManagedGroup|ProbeDiagnostics|ProbeErrorClassification|ProbeErrorState)' -count=1"
 
   run_step "backend upstream task B concurrency race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/upstream -run 'TestTaskBConcurrency' -count=1"

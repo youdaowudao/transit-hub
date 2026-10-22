@@ -7,6 +7,7 @@ export type UpstreamStatus = 'connecting' | 'syncing' | 'connected' | 'error'
 export type UpstreamAuthMode = 'password' | 'token' | 'user_key'
 
 export interface UpstreamSiteForm {
+  confirmDomainMigration?: boolean
   name: string
   siteUrl: string
   platform: UpstreamPlatform

@@ -680,9 +680,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		return Response{}, err
 	}
 	differences := make([]string, 0, 3)
-	if normalizedURL != originalURL {
-		differences = append(differences, "站点地址")
-	}
+	domainChanged := normalizedURL != originalURL
 	if dto.Platform != PlatformAuto && dto.Platform != site.Platform {
 		differences = append(differences, "平台")
 	}
@@ -696,7 +694,14 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	var result LoginResult
 	var audit *GroupSnapshotAudit
 	var rateInput *RateNoticeInput
-	if relogin {
+	if domainChanged {
+		result, err = s.domainMigrationLogin(ctx, original, dto, normalizedURL, relogin, providedUserID)
+		if err != nil {
+			return Response{}, err
+		}
+		audit = result.Metrics.GroupSnapshotAudit
+		rateInput = currentRateNoticeInput(result.Metrics, nil, s.keyUsageNow())
+	} else if relogin {
 		if original.Session == nil {
 			return Response{}, identityCheckError(site.Platform, "原站点没有保存过登录资料，无法核对新登录信息是不是原账号。请新增站点；原资料未保存，不会修改主站。")
 		}
@@ -765,6 +770,9 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 			result.Session.UserID, result.Session.UserIDConfirmed = newID, true
 		}
 	}
+	if domainChanged && ctx.Err() != nil {
+		return Response{}, ctx.Err()
+	}
 	s.mu.Lock()
 	current, readErr := s.readCurrentSite(ctx, id)
 	_, deleted := s.deletedSites[id]
@@ -772,9 +780,13 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		s.mu.Unlock()
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
-	if !reflect.DeepEqual(current.Session, original.Session) {
+	if !reflect.DeepEqual(current.Session, original.Session) || (domainChanged && (current.BaseURL != original.BaseURL || current.Platform != original.Platform || current.Account != original.Account)) {
 		s.mu.Unlock()
 		return Response{}, staleSiteRequestError()
+	}
+	if domainChanged && ctx.Err() != nil {
+		s.mu.Unlock()
+		return Response{}, ctx.Err()
 	}
 	expected := cloneSite(current)
 	candidate := cloneSite(current)
@@ -782,14 +794,16 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	candidate.Remark = strings.TrimSpace(dto.Remark)
 	candidate.RechargeRate = dto.RechargeRate
 	candidate.RequestedPlatform = dto.Platform
-	if relogin {
+	if relogin || domainChanged {
 		candidate.BaseURL = result.Session.BaseURL
 		candidate.Platform = result.Platform
-		switch mode {
-		case AuthModePassword:
-			candidate.Account = strings.TrimSpace(dto.Account)
-		case AuthModeUserKey:
-			candidate.Account = result.Session.UserID
+		if relogin {
+			switch mode {
+			case AuthModePassword:
+				candidate.Account = strings.TrimSpace(dto.Account)
+			case AuthModeUserKey:
+				candidate.Account = result.Session.UserID
+			}
 		}
 		candidate.Session = &result.Session
 		candidate.Metrics = mergeCostReadStatus(result.Metrics, current.Metrics)
@@ -799,10 +813,10 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		candidate.LastSyncedAt = &observed
 	}
 	var publication *groupPublication
-	if relogin {
+	if relogin || domainChanged {
 		publication = &groupPublication{Baseline: original}
 	}
-	retainLogin := relogin && mode == originalMode && candidate.Account == current.Account
+	retainLogin := !domainChanged && relogin && mode == originalMode && candidate.Account == current.Account
 	err = s.publishExistingSiteLocked(expected, candidate, retainLogin, nil, rateInput, publication)
 	if err == nil && publication != nil {
 		candidate = publication.Actual
@@ -812,10 +826,13 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	}
 	s.mu.Unlock()
 	if err != nil {
+		if domainChanged && relogin && mode == AuthModeToken && strings.TrimSpace(dto.RefreshToken) != "" {
+			err = migrationRefreshFailure(err)
+		}
 		return s.toResponse(ctx, current), err
 	}
 	response := s.toResponse(ctx, &candidate)
-	if relogin {
+	if relogin || domainChanged {
 		if publication.GroupsAccepted {
 			response.GroupRatesWarning = s.saveSnapshot(ctx, &candidate, audit, publication.RowVersion)
 			s.notifySiteLoginSucceeded(&candidate)

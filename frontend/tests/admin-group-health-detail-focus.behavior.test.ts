@@ -19,7 +19,7 @@ const scroll=vi.fn(function(this:Element){scrolled.push(this)})
 const open=async(props:Record<string,unknown>={})=>{const w=mount(AdminGroupHealthDetail,{attachTo:document.body,props:{group:group(),hideUnmonitoredAccounts:false,questionAnswerUnreadTargetIds:[],actionLoading:false,...props}});wrappers.push(w);await flushPromises();return w}
 const marked=(w:VueWrapper)=>w.findAll('tr[data-focused-account]')
 const A1='要找的账号「账号502」没有开启监控，被‘隐藏未监控’藏起来了。取消勾选分组标题右侧的‘隐藏未监控’就能看到；这只改本机显示，不会修改主站。'
-const A2='这个分组里没有找到要找的账号（账号编号 999），可能已从这个主站分组移除，或资料还没更新。请点右上角‘刷新’；仍没有时，到分组倍率检查这条对接。'
+const A2='在分组「甲组」中没有找到账号（名称暂未读到）。请点右上角‘刷新’；仍找不到时，到分组倍率检查这条对接。'
 beforeEach(()=>{scrolled=[];scroll.mockClear();vi.stubGlobal('fetch',vi.fn(async()=>new Response('[]')));Element.prototype.scrollIntoView=scroll})
 afterEach(()=>{for(const w of wrappers.splice(0))w.unmount();vi.unstubAllGlobals();document.body.innerHTML='';delete (Element.prototype as any).scrollIntoView})
 
@@ -47,13 +47,39 @@ describe('new account focus RED',()=>{
  it('D6 preserves the user filter without inventing a missing account warning',async()=>{
   const w=await open({focusedAccountIds:['501']});expect(marked(w)).toHaveLength(1)
   const filter=w.findAll('button').find(b=>b.text().includes('未配置'))!;expect(filter).toBeDefined();await filter.trigger('click');await flushPromises()
-  expect(marked(w)).toHaveLength(0);expect(w.text()).not.toContain('要找的账号「');expect(w.text()).not.toContain('这个分组里没有找到要找的账号')
+  expect(marked(w)).toHaveLength(0);expect(w.find('[data-account-focus-notice]').exists()).toBe(false)
  })
  it('D7 resets the scroll flag for a new set of target IDs',async()=>{
   const w=await open({focusedAccountIds:['501']});await w.setProps({focusedAccountIds:['503']});await flushPromises();expect(scroll).toHaveBeenCalledTimes(2);expect(scrolled[1]).toBe(marked(w)[0]!.element);expect(marked(w)[0]!.text()).toContain('账号503')
  })
  it('D8 displays both independent notices',async()=>{
   const w=await open({focusedAccountIds:['502','999'],hideUnmonitoredAccounts:true});expect(w.text()).toContain(A1);expect(w.text()).toContain(A2);expect(scroll).not.toHaveBeenCalled()
+ })
+ it('D9 identifies a missing account by its complete name and website instead of its ID',async()=>{
+  const name='完整账号名称-长期使用-保留全部后缀@example.test'
+  const w=await open({focusedAccountIds:['447'],focusedAccountLabels:{'447':{name,siteNames:['上游网站甲']}}})
+  expect(w.get('[data-account-focus-notice]').text()).toBe(`在分组「甲组」中没有找到账号「${name}」（网站「上游网站甲」）。请点右上角‘刷新’；仍找不到时，到分组倍率检查这条对接。`)
+  expect(w.get('[data-account-focus-notice]').classes()).toContain('break-words')
+  expect(w.text()).not.toContain('账号编号');expect(w.text()).not.toContain('447');expect(w.text()).not.toContain('可能已从这个主站分组移除')
+ })
+ it('D10 keeps multiple names and websites paired and renders names as text',async()=>{
+  const w=await open({focusedAccountIds:['448','447'],focusedAccountLabels:{'447':{name:'完整账号甲',siteNames:['网站甲','网站乙']},'448':{name:'完整账号<script>乙</script>',siteNames:[]}}})
+  expect(w.get('[data-account-focus-notice]').text()).toContain('账号「完整账号<script>乙</script>」、账号「完整账号甲」（网站「网站甲、网站乙」）')
+  expect(w.find('script').exists()).toBe(false);expect(w.text()).not.toContain('账号编号')
+ })
+ it('D11 replaces the unknown name when labels arrive and removes the notice when refresh finds the account',async()=>{
+  const w=await open({focusedAccountIds:['447']});expect(w.text()).toContain(A2)
+  await w.setProps({focusedAccountLabels:{'447':{name:'完整账号甲',siteNames:['网站甲']}}})
+  expect(w.text()).toContain('账号「完整账号甲」（网站「网站甲」）');expect(w.text()).not.toContain('名称暂未读到')
+  await w.setProps({group:group({accounts:[account('447')]})});await flushPromises()
+  expect(w.find('[data-account-focus-notice]').exists()).toBe(false);expect(marked(w)).toHaveLength(1)
+ })
+ it('D12 adds the website to hidden targets while keeping the current account name',async()=>{
+  const w=await open({focusedAccountIds:['502'],hideUnmonitoredAccounts:true,focusedAccountLabels:{'502':{name:'旧账号名称',siteNames:['网站甲']}}})
+  expect(w.get('[data-account-focus-notice]').text()).toBe(A1.replace('账号502」','账号502」（网站「网站甲」）'))
+  expect(w.text()).not.toContain('旧账号名称');expect(w.text()).not.toContain('没有找到')
+  await w.setProps({hideUnmonitoredAccounts:false});await flushPromises()
+  expect(w.find('[data-account-focus-notice]').exists()).toBe(false);expect(marked(w)).toHaveLength(1)
  })
 })
 describe('old behavior preserved',()=>{

@@ -482,6 +482,17 @@ const readableMessage = (rawKey: string): string => t(connectionHealthMessageKey
 const qaReadableError = computed(() => qaErrorKey.value.startsWith('admin.')
   ? t(qaErrorKey.value)
   : t(`${prefix}.questionAnswer.errorTypes.${qaErrorKey.value || 'unknown'}`))
+const qaModelReadGuidance = computed(() => {
+  const errorKey = connectionHealthMessageKey(loadErrorKey.value, te)
+  const guidanceKeys: Record<string, string> = {
+    'admin.upstream.errors.upstreamInsufficientBalance': 'modelBalanceGuidance',
+    'admin.upstream.errors.upstreamKeyQuotaExhausted': 'modelQuotaGuidance',
+    'admin.upstream.errors.upstreamKeyExpired': 'modelExpiredGuidance',
+    'admin.upstream.errors.announcementAckRequired': 'modelAnnouncementGuidance',
+  }
+  const guidance = guidanceKeys[errorKey] ?? 'modelOtherGuidance'
+  return t(`${prefix}.questionAnswer.${guidance}`)
+})
 
 watch(
   () => [props.open, props.target?.targetId, props.initialQuestionAnswerBatchId],
@@ -595,11 +606,19 @@ const qaSubmission = computed(() => questionAnswerSubmissionSummary(
   qaSelectedQuestions.value.size,
   qaRepeatCount.value,
 ))
+const qaConfigurationBlockedReason = computed(() => {
+  const status = props.target?.testConfiguration?.status
+  return status === 'conflict' || status === 'unavailable'
+    ? t(`admin.connectionHealth.testConfiguration.${status}`)
+    : ''
+})
 const canStartTest = computed(() => {
   if (props.target?.testConfiguration?.status === 'conflict' || props.target?.testConfiguration?.status === 'unavailable') return false
   if (!hasModels.value || (mode.value === 'questionAnswer' ? qaEffectiveModelIds.value.length : selected.value.size) === 0 || phase.value === 'testing') return false
   if (mode.value !== 'questionAnswer') return true
-  return qaSelectedQuestions.value.size > 0
+  return qaHistoryLoaded.value
+    && onceLoadState.value === 'ready'
+    && qaSelectedQuestions.value.size > 0
     && qaSubmission.value.validRepeatCount
     && qaSubmission.value.withinBatchLimit
     && !qaSelectionLocked.value
@@ -607,7 +626,16 @@ const canStartTest = computed(() => {
 })
 const qaStartBlockedReason = computed(() => {
   if (mode.value !== 'questionAnswer') return ''
+  if (qaConfigurationBlockedReason.value) return qaConfigurationBlockedReason.value
+  if (qaStarting.value) return t(`${prefix}.questionAnswer.submitting`)
+  if (qaFinalizationUnknown.value) return t(`${prefix}.questionAnswer.finalizationUnknown`)
+  if (qaFinalization.value) return t(`${prefix}.questionAnswer.finalizationBlocked`)
+  if (qaActive.value) return t(`${prefix}.questionAnswer.activeStartBlocked`)
   if (qaLoading.value) return t(`${prefix}.questionAnswer.loading`)
+  if (!qaHistoryLoaded.value) return t(`${prefix}.questionAnswer.localDataNotLoaded`)
+  if (onceLoadState.value === 'loading') return t(`${prefix}.questionAnswer.modelsLoadingBlocked`)
+  if (onceLoadState.value === 'error') return t(`${prefix}.questionAnswer.modelsFailedBlocked`)
+  if (!hasModels.value) return t(`${prefix}.questionAnswer.modelsEmptyBlocked`)
   if (!hasModels.value || qaEffectiveModelIds.value.length === 0 || qaSelectedQuestions.value.size === 0) {
     return t(`${prefix}.questionAnswer.selectionRequired`)
   }
@@ -615,10 +643,6 @@ const qaStartBlockedReason = computed(() => {
   if (!qaSubmission.value.withinBatchLimit) {
     return t(`${prefix}.questionAnswer.batchLimit`, { total: qaSubmission.value.total })
   }
-  if (qaStarting.value) return t(`${prefix}.questionAnswer.submitting`)
-  if (qaFinalizationUnknown.value) return t(`${prefix}.questionAnswer.finalizationUnknown`)
-  if (qaFinalization.value) return t(`${prefix}.questionAnswer.finalizationBlocked`)
-  if (qaActive.value) return t(`${prefix}.questionAnswer.activeStartBlocked`)
   return ''
 })
 const qaReviewPartition = computed(() => partitionQuestionAnswerReviewRecords(qaReviewBatch.value?.records ?? []))
@@ -846,24 +870,26 @@ const selectQuestionAnswerRepeatCount = (event: Event) => {
 }
 
 const retryLoad = async () => {
-  if (!props.target) return
+  if (!props.open || !props.target || onceLoadState.value === 'loading') return
+  if (mode.value === 'questionAnswer' && qaConfigurationBlockedReason.value) return
   const targetId = props.target.targetId
   const sequence = loadSequence
   const controller = beginModelDiscovery()
-  phase.value = 'loading'
+  if (currentProbeMode() !== 'formal') phase.value = 'loading'
   onceLoadState.value = 'loading'
   loadErrorKey.value = ''
   const outcome = await discoverModels(targetId, controller.signal)
   finishModelDiscovery(controller)
-  if (sequence !== loadSequence || !props.open || props.target?.targetId !== targetId) return
+  if (controller.signal.aborted || sequence !== loadSequence || !props.open || props.target?.targetId !== targetId) return
   if ('errorKey' in outcome) {
     loadErrorKey.value = outcome.errorKey
     onceLoadState.value = 'error'
-    phase.value = 'error'
+    if (currentProbeMode() !== 'formal') phase.value = 'error'
     return
   }
   onceModels.value = outcome.models
   onceLoadState.value = 'ready'
+  if (currentProbeMode() === 'formal') return
   models.value = outcome.models
   if (
     !restoreActiveQuestionAnswerSelection(qaRuntimeBatch.value)
@@ -1854,12 +1880,12 @@ const close = () => {
               </template>
             </div>
 
-            <div v-if="phase === 'loading'" class="flex flex-col items-center justify-center gap-2 py-16 text-center">
+            <div v-if="mode !== 'questionAnswer' && phase === 'loading'" class="flex flex-col items-center justify-center gap-2 py-16 text-center">
               <Loader2 class="h-6 w-6 animate-spin text-primary/60" />
               <p class="text-sm text-muted-foreground">{{ t(`${prefix}.loadingModels`) }}</p>
             </div>
 
-            <div v-else-if="phase === 'error'" class="flex flex-col items-center justify-center gap-3 py-16 text-center">
+            <div v-else-if="mode !== 'questionAnswer' && phase === 'error'" class="flex flex-col items-center justify-center gap-3 py-16 text-center">
               <ShieldAlert class="h-8 w-8 text-red-500/70" />
               <p class="text-sm text-red-600 dark:text-red-400">{{ readableMessage(loadErrorKey) }}</p>
               <button type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-surface-line" @click="retryLoad">
@@ -1879,11 +1905,11 @@ const close = () => {
                   data-question-answer-section="stats"
                   class="mb-3 rounded-lg border border-border/50 bg-surface-line/20 px-3 py-4"
                 >
-                  <div v-if="qaLoading" data-testid="question-answer-stats-loading" class="flex items-center gap-2 text-xs text-muted-foreground">
+                  <div v-if="qaLoading || !qaErrorKey" data-testid="question-answer-stats-loading" class="flex items-center gap-2 text-xs text-muted-foreground">
                     <Loader2 class="h-4 w-4 animate-spin" />
                     {{ t(prefix + '.questionAnswer.loading') }}
                   </div>
-                  <div v-else data-testid="question-answer-stats-error" class="text-xs text-red-600 dark:text-red-400"><p>{{ qaReadableError }}</p><button type="button" class="mt-2 rounded-md border border-border/60 px-3 py-1.5 font-medium" @click="retryQuestionAnswerData">重新加载</button></div>
+                  <div v-else data-testid="question-answer-stats-error" class="text-xs text-red-600 dark:text-red-400"><p>{{ t(prefix + '.questionAnswer.localDataFailed', { account: target.accountName, reason: qaReadableError }) }}</p><button type="button" class="mt-2 rounded-md border border-border/60 px-3 py-1.5 font-medium" @click="retryQuestionAnswerData">重新加载</button></div>
                 </section>
                 <QuestionAnswerStatsBar
                   v-else-if="mode === 'questionAnswer'"
@@ -1891,7 +1917,7 @@ const close = () => {
                   :review-stats="qaReviewBatch?.stats ?? null"
                   :today-stats="qaHistory.todayStats"
                 />
-                <QuestionAnswerModelControlPanel v-if="open && mode === 'questionAnswer' && target?.targetId.startsWith('sub2api:')" :target-id="target.targetId" :refresh-key="qaModelControlRefreshKey" :repeat-count="qaSummaryRepeatCount" :available-models="onceLoadState === 'ready' ? onceModels.map(model => model.id) : null" @managed-change="onManagedChange" @view-round="reviewQuestionAnswerBatch($event, { expandFailed: true })" @settled="onModelControlSettled" />
+                <QuestionAnswerModelControlPanel v-if="open && mode === 'questionAnswer' && onceLoadState === 'ready' && target?.targetId.startsWith('sub2api:')" :target-id="target.targetId" :refresh-key="qaModelControlRefreshKey" :repeat-count="qaSummaryRepeatCount" :available-models="onceModels.map(model => model.id)" @managed-change="onManagedChange" @view-round="reviewQuestionAnswerBatch($event, { expandFailed: true })" @settled="onModelControlSettled" />
                 <p v-if="mode === 'questionAnswer'" class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.protocolSummary') }}</p>
                 <template v-if="mode === 'questionAnswer'">
                   <div v-if="(qaErrorKey && qaHistoryLoaded) || qaLocalReadFailure || summaryRefreshFailed" data-testid="question-answer-statistics-error" class="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">
@@ -1901,11 +1927,11 @@ const close = () => {
                     <button v-if="qaLocalReadFailure" type="button" class="mt-2 rounded-md border border-red-500/30 px-2.5 py-1.5 font-medium disabled:opacity-50" :disabled="qaLocalRetrying" @click="retryQuestionAnswerLocalData">重新加载</button>
                     <button v-if="summaryRefreshFailed" type="button" class="mt-2 rounded-md border border-red-500/30 px-2.5 py-1.5 font-medium" @click="retryQuestionAnswerStats">重试统计</button>
                   </div>
-                  <section data-testid="question-answer-batch-line" class="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 p-3 text-xs">
+                  <section v-if="qaHistoryLoaded" data-testid="question-answer-batch-line" class="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 p-3 text-xs">
                     <p v-if="qaReviewBatch" data-testid="question-answer-review-batch" class="min-w-0 break-words text-muted-foreground">正在查看：批次 #{{ shortQuestionAnswerBatchId(qaReviewBatch.batchId) }} · {{ qaReviewBatchStatusLabel }}<span v-if="qaReviewCompletedAt"> · {{ t(prefix + '.questionAnswer.batchCompletedAt', { time: formatConnectionHealthTime(qaReviewCompletedAt) }) }}</span></p><p v-else class="text-muted-foreground">{{ t(prefix + '.questionAnswer.noBatch') }}</p>
                     <div class="flex flex-wrap items-center gap-2"><button v-if="qaRuntimeBatch && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" type="button" class="rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium hover:bg-surface-line" @click="reviewLatestQuestionAnswerBatch">返回最新</button><span v-if="qaRuntimeBatch?.active && qaReviewBatch?.batchId !== qaRuntimeBatch.batchId" data-testid="question-answer-latest-running-hint" class="text-primary">最新批次 #{{ shortQuestionAnswerBatchId(qaRuntimeBatch.batchId) }} 运行中</span><button v-if="qaRuntimeBatch?.active && !qaFinalization && !qaFinalizationUnknown" data-testid="question-answer-stop-latest" type="button" class="inline-flex items-center gap-1.5 rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-600 disabled:opacity-50 dark:text-red-400" :disabled="qaCancelling" @click="stopQuestionAnswers"><Loader2 v-if="qaCancelling" class="h-3.5 w-3.5 animate-spin" /><StopCircle v-else class="h-3.5 w-3.5" />终止 #{{ shortQuestionAnswerBatchId(qaRuntimeBatch.batchId) }}</button></div>
                   </section>
-                  <section data-question-answer-section="processed" data-testid="question-answer-processed" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
+                  <section v-if="qaHistoryLoaded" data-question-answer-section="processed" data-testid="question-answer-processed" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
                     <button v-if="qaReviewedRecords.length || qaFailedRecords.length" type="button" class="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left" :aria-expanded="qaProcessedOpen" @click="qaProcessedOpen = !qaProcessedOpen">
                       <span data-testid="question-answer-processed-summary" class="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold tabular-nums text-foreground">
                         <span>{{ t(prefix + '.questionAnswer.processedSummary', { total: qaReviewedRecords.length, correct: qaReviewedCorrectCount, incorrect: qaReviewedIncorrectCount }) }}</span>
@@ -1951,7 +1977,7 @@ const close = () => {
                     </div>
                   </section>
 
-                  <section data-question-answer-section="pending" data-testid="question-answer-pending" class="rounded-lg border border-border/50 bg-card p-3">
+                  <section v-if="qaHistoryLoaded" data-question-answer-section="pending" data-testid="question-answer-pending" class="rounded-lg border border-border/50 bg-card p-3">
                     <div class="flex flex-wrap items-center justify-between gap-3">
                       <div>
                         <button v-if="qaPendingReviewRecords.length" type="button" class="inline-flex items-center gap-2 text-sm font-semibold text-foreground" :aria-expanded="qaPendingOpen" @click="qaPendingOpen = !qaPendingOpen">待人工判断 {{ qaPendingReviewRecords.length }}<ChevronUp v-if="qaPendingOpen" class="h-4 w-4" /><ChevronDown v-else class="h-4 w-4" /></button>
@@ -1999,8 +2025,21 @@ const close = () => {
                         {{ qaConfigOpen ? t(prefix + '.questionAnswer.collapseConfiguration') : t(prefix + '.questionAnswer.modifyConfiguration') }}
                       </button>
                     </div>
-                    <p v-if="qaDefaultSelectionRestored && !qaSelectionLocked" data-testid="question-answer-default-restored" class="mt-2 text-xs text-muted-foreground">没有可用的记住选择，已选默认模型/题目。请确认本次配置，再点开始；此时还没有发请求。</p>
-                    <div v-if="!qaConfigOpen" id="question-answer-configuration-content" class="mt-3 rounded-lg bg-surface-line/30 px-3 py-2.5">
+                    <p v-if="qaConfigurationBlockedReason" class="mt-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">{{ qaConfigurationBlockedReason }}</p>
+                    <div v-else-if="onceLoadState !== 'ready' || !hasModels" data-testid="question-answer-model-status" class="mt-3 rounded-lg border border-border/50 px-3 py-2 text-xs">
+                      <p v-if="onceLoadState === 'loading'" class="flex items-center gap-2 text-muted-foreground"><Loader2 class="h-4 w-4 animate-spin" />{{ t(prefix + '.questionAnswer.modelsLoading', { account: target.accountName }) }}</p>
+                      <template v-else-if="onceLoadState === 'error'">
+                        <p class="break-words text-red-600 dark:text-red-400">{{ t(prefix + '.questionAnswer.modelsFailed', { account: target.accountName, reason: readableMessage(loadErrorKey) }) }}</p>
+                        <p class="mt-1 text-muted-foreground">{{ t(prefix + '.questionAnswer.modelsUnavailable') }}</p>
+                        <p class="mt-1 text-muted-foreground">{{ qaModelReadGuidance }}</p>
+                      </template>
+                      <p v-else class="text-muted-foreground">{{ t(prefix + '.questionAnswer.modelsEmpty') }}</p>
+                      <p v-if="qaHistoryLoaded" class="mt-1 text-muted-foreground">{{ t(prefix + '.questionAnswer.existingResultsAvailable') }}</p>
+                      <button type="button" data-testid="question-answer-model-retry" class="mt-2 rounded-lg border border-border/60 px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-surface-line disabled:cursor-not-allowed disabled:opacity-50" :disabled="onceLoadState === 'loading' || Boolean(qaConfigurationBlockedReason)" @click="retryLoad">{{ t(prefix + '.questionAnswer.retryModels') }}</button>
+                      <p class="mt-1 text-muted-foreground">{{ t(prefix + '.questionAnswer.retryModelsHint') }}</p>
+                    </div>
+                    <p v-if="qaDefaultSelectionRestored && !qaSelectionLocked && qaHistoryLoaded && onceLoadState === 'ready' && hasModels && qaSelectedQuestions.size > 0" data-testid="question-answer-default-restored" class="mt-2 text-xs text-muted-foreground">没有可用的记住选择，已选默认模型/题目。请确认本次配置，再点开始；此时还没有发请求。</p>
+                    <div v-if="!qaConfigOpen && (qaRuntimeBatch?.active || (qaHistoryLoaded && onceLoadState === 'ready' && hasModels && !qaConfigurationBlockedReason))" id="question-answer-configuration-content" class="mt-3 rounded-lg bg-surface-line/30 px-3 py-2.5">
                       <p class="break-words text-sm font-medium text-foreground">{{ qaSummaryModelNames.join('、') || '-' }}</p>
                       <p class="mt-1 text-xs text-muted-foreground">
                         {{ t(prefix + '.questionAnswer.configurationSummary', {
@@ -2013,9 +2052,9 @@ const close = () => {
                         {{ qaRuntimeBatch?.active ? t(prefix + '.questionAnswer.activeConfiguration') : t(prefix + '.questionAnswer.rememberedConfiguration') }}
                       </p>
                     </div>
-                    <div v-else id="question-answer-configuration-content" class="mt-3">
+                    <div v-else-if="qaConfigOpen" id="question-answer-configuration-content" class="mt-3">
                       <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
-                        <div data-testid="question-answer-models">
+                        <div v-if="onceLoadState === 'ready' && hasModels && !qaConfigurationBlockedReason" data-testid="question-answer-models">
                           <p class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.selectHint') }}</p>
                           <p v-if="qaSelectionLocked && !qaStarting" class="mb-2 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.managedRunningHint') }}</p><p v-if="qaManagedAddsInFlight > 0" class="mb-2 text-xs text-muted-foreground">正在纳入管理，当前测试选择保持；仍可按已选模型开始回答。</p><p v-if="qaManagedAddError" class="mb-2 text-xs text-destructive">{{ qaManagedAddError }}</p><div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                             <label v-for="model in models" :key="model.id" class="flex cursor-pointer items-start gap-2 rounded-lg border border-border/40 px-3 py-2 transition-colors" :class="qaEffectiveModelIds.includes(model.id) ? 'border-primary/50 bg-primary/5' : 'hover:bg-surface-line/40'">
@@ -2048,10 +2087,11 @@ const close = () => {
                           <h4 class="text-xs font-semibold text-foreground">{{ t(prefix + '.questionAnswer.questionsTitle') }}</h4>
                           <span class="text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.selectedFormula', { models: qaSubmission.modelCount, questions: qaSubmission.questionCount, repeat: qaSubmission.repeatCount, total: qaSubmission.total }) }}</span>
                         </div>
-                        <div v-if="qaLoading" class="flex items-center gap-2 rounded-lg border border-dashed border-border/50 px-3 py-4 text-xs text-muted-foreground">
+                        <div v-if="qaLoading || (!qaHistoryLoaded && !qaErrorKey)" class="flex items-center gap-2 rounded-lg border border-dashed border-border/50 px-3 py-4 text-xs text-muted-foreground">
                           <Loader2 class="h-4 w-4 animate-spin" />
                           {{ t(prefix + '.questionAnswer.loading') }}
                         </div>
+                        <div v-else-if="!qaHistoryLoaded" class="rounded-lg border border-dashed border-border/50 px-3 py-4 text-xs text-red-600 dark:text-red-400">{{ t(prefix + '.questionAnswer.localDataFailed', { account: target.accountName, reason: qaReadableError }) }}</div>
                         <div v-else-if="qaQuestions.length === 0" class="rounded-lg border border-dashed border-border/50 px-3 py-4 text-center text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.noQuestions') }}</div>
                         <div v-else class="space-y-1.5">
                           <label v-for="question in qaQuestions" :key="question.id" class="flex cursor-pointer items-start gap-2 rounded-md border border-border/40 px-3 py-2 transition-colors" :class="qaSelectedQuestions.has(question.id) ? 'border-primary/40 bg-primary/5' : 'hover:bg-surface-line/30'">
@@ -2071,7 +2111,7 @@ const close = () => {
                     </div>
                   </section>
 
-                  <section data-question-answer-section="history" data-testid="question-answer-history" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
+                  <section v-if="qaHistoryLoaded" data-question-answer-section="history" data-testid="question-answer-history" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
                     <button type="button" class="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left" @click="qaHistoryOpen = !qaHistoryOpen">
                       <span class="text-xs font-semibold text-foreground">{{ t(prefix + '.questionAnswer.todayHistoryTitle') }}</span>
                       <ChevronUp v-if="qaHistoryOpen" class="h-4 w-4 text-muted-foreground" />

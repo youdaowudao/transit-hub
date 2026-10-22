@@ -189,18 +189,19 @@ type CreateRequest struct {
 }
 
 type UpdateRequest struct {
-	Name         string   `json:"name"`
-	SiteURL      string   `json:"siteUrl"`
-	Platform     Platform `json:"platform"`
-	AuthMode     AuthMode `json:"authMode"`
-	Account      string   `json:"account"`
-	Password     string   `json:"password"`
-	AccessToken  string   `json:"accessToken"`
-	RefreshToken string   `json:"refreshToken"`
-	TokenType    string   `json:"tokenType"`
-	UserID       string   `json:"userId"`
-	Remark       string   `json:"remark"`
-	RechargeRate float64  `json:"rechargeRate"`
+	ConfirmDomainMigration bool     `json:"confirmDomainMigration,omitempty"`
+	Name                   string   `json:"name"`
+	SiteURL                string   `json:"siteUrl"`
+	Platform               Platform `json:"platform"`
+	AuthMode               AuthMode `json:"authMode"`
+	Account                string   `json:"account"`
+	Password               string   `json:"password"`
+	AccessToken            string   `json:"accessToken"`
+	RefreshToken           string   `json:"refreshToken"`
+	TokenType              string   `json:"tokenType"`
+	UserID                 string   `json:"userId"`
+	Remark                 string   `json:"remark"`
+	RechargeRate           float64  `json:"rechargeRate"`
 }
 
 type UpdateEnabledRequest struct {
@@ -320,6 +321,9 @@ type LoginResult struct {
 	Platform Platform
 	Session  Session
 	Metrics  Metrics
+	// MetricsError keeps the original whole-metrics failure for domain migration.
+	// Same-address NewAPI password login retains its historical fallback behavior.
+	MetricsError error
 }
 
 type GroupDailyStat struct {

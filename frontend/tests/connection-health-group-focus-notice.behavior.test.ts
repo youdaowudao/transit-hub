@@ -7,8 +7,7 @@ import { connectionHealthPreferencesStorageKey } from '@/modules/admin/utils/con
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import ConnectionHealthView from '@/modules/admin/views/ConnectionHealthView.vue'
-// 20261016/4：分组健康页新增已对接站点读取；本用例与它无关，隔离为空列表，不改原断言。
-vi.mock('@/modules/admin/api/mySites', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/modules/admin/api/mySites')>()), listRealConnections: vi.fn(async () => []) }))
+vi.mock('@/modules/admin/api/mySites', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/modules/admin/api/mySites')>()), listRealConnections: harness.listRealConnections }))
 
 const harness = vi.hoisted(() => ({
   route: null as any, replace: vi.fn(), refs: {} as Record<string, { value: any }>,
@@ -23,6 +22,7 @@ const harness = vi.hoisted(() => ({
   loadPolicies: vi.fn(),
   getPrioritySyncStatus: vi.fn(),
   listUpstreamSites: vi.fn(),
+  listRealConnections: vi.fn(),
   cancelAdminGroupsRefresh: vi.fn(),
   setAdminGroupsWorkspace: vi.fn(),
 }))
@@ -142,6 +142,7 @@ beforeEach(() => {
   harness.loadPolicies.mockReset().mockResolvedValue(true)
   harness.getPrioritySyncStatus.mockReset().mockResolvedValue({ workspaceId: 'ws-a', status: 'success', failedCount: 0 })
   harness.listUpstreamSites.mockReset().mockResolvedValue([{ id: 'site-wait', name: '阻塞站点' }, { id: 'site-failed', name: '失败站点' }])
+  harness.listRealConnections.mockReset().mockResolvedValue([])
   harness.currentAccount.value = { id: 'ws-a', displayName: '测试工作区' }
   harness.activeWorkspaceScope = 'ws-a'
   harness.route = reactive({ query: {} })
@@ -176,6 +177,7 @@ const notice=(w:VueWrapper)=>w.find('[data-group-focus-notice]')
 const detail=(w:VueWrapper)=>w.findComponent(AdminGroupHealthDetail)
 const leftGroup=(w:VueWrapper,name:string)=>w.findAll('nav button').find(b=>b.text().includes(name))!
 const marked=(w:VueWrapper)=>w.findAll('tr[data-focused-account]')
+const accountNotices=(w:VueWrapper)=>w.findAll('[data-account-focus-notice]').map(item=>item.text()).join('\n')
 const accountFocus={focusAccountIds:'501,502',focusWorkspace:'ws-a'}
 const G1='要查看的分组「甲组」在本页被设为不显示。请点左侧‘管理分组显示’勾选它，再在列表里点它；这只改本机显示，不会修改主站。'
 const G2='要查看的分组「甲组」被当前搜索或类型筛选挡住了。请清空搜索、把类型选为‘全部类型’，再在列表里点它。'
@@ -233,6 +235,59 @@ describe('new group focus RED',()=>{
  it('N16 waits for a known workspace then for its newly loaded data',async()=>{
   harness.currentAccount.value=null;harness.activeWorkspaceScope='anonymous';harness.refs.adminGroups.value.unshift(group('10','A组'));focus('11',accountFocus);const w=await mountView();expect(notice(w).exists()).toBe(false);expect(detail(w).props('group').id).not.toBe('11');expect(harness.route.query.focusWorkspace).toBe('ws-a')
   harness.currentAccount.value={id:'ws-a'};await flushPromises();expect(harness.route.query.focusGroupId).toBe('11');harness.refs.adminGroups.value=[group('11','甲组')];harness.refs.adminGroupsLoaded.value=true;await flushPromises();expect(marked(w)).toHaveLength(2);expect(harness.route.query).toEqual({})
+ })
+ it('N17 uses existing reads for full names and deduplicated websites without mixing platforms or accounts',async()=>{
+  harness.refs.adminGroups.value[1].accounts.push({...group('12','乙组').accounts[0],id:'447',name:'当前完整账号甲',targetId:'sub2api:ws-a:447'})
+  harness.listUpstreamSites.mockResolvedValue([{id:'site-a',name:'当前网站甲'}])
+  harness.listRealConnections.mockResolvedValue([
+   {adminAccountId:'447',adminAccountName:'其他平台错误账号',adminPlatform:'newapi',upstreamSiteId:'other',siteName:'其他平台网站'},
+   {adminAccountId:'448',adminAccountName:'完整账号乙',adminPlatform:'',upstreamSiteId:'site-c',siteName:'网站丙',status:'missing'},
+   {adminAccountId:' 447 ',adminAccountName:'旧账号甲',adminPlatform:'sub2api',upstreamSiteId:'site-a',siteName:'旧网站甲'},
+   {adminAccountId:'447',adminAccountName:'旧账号甲',adminPlatform:'sub2api',upstreamSiteId:'site-a',siteName:'旧网站甲'},
+   {adminAccountId:'447',adminAccountName:'旧账号甲',adminPlatform:'sub2api',upstreamSiteId:'site-b',siteName:'网站乙'},
+  ])
+  focus('11',{focusAccountIds:'448,447',focusWorkspace:'ws-a'});const w=await mountView()
+  expect(accountNotices(w)).toContain('账号「完整账号乙」（网站「网站丙」）、账号「当前完整账号甲」（网站「当前网站甲、网站乙」）')
+  for(const text of ['旧账号甲','旧网站甲','其他平台错误账号','其他平台网站','账号编号'])expect(accountNotices(w)).not.toContain(text)
+  expect(harness.listRealConnections).toHaveBeenCalledTimes(1);expect(harness.listUpstreamSites).toHaveBeenCalledTimes(2)
+  expect(harness.route.query).toEqual({});expect(marked(w)).toHaveLength(0)
+ })
+ it('N18 keeps connection names and websites when the website list cannot be read',async()=>{
+  harness.listUpstreamSites.mockRejectedValue(new Error('admin.upstream.errors.network'))
+  harness.listRealConnections.mockResolvedValue([{adminAccountId:'447',adminAccountName:'完整账号甲',siteName:'对接保存的网站',upstreamSiteId:'site-a',adminPlatform:'sub2api'}])
+  focus('11',{focusAccountIds:'447',focusWorkspace:'ws-a'});const w=await mountView()
+  expect(accountNotices(w)).toContain('账号「完整账号甲」（网站「对接保存的网站」）');expect(accountNotices(w)).not.toContain('名称暂未读到')
+  expect(w.find('[data-bound-site-rate-status]').exists()).toBe(true)
+ })
+ it('N19 explains an unknown name on connection failure and retries through the existing refresh button',async()=>{
+  harness.listRealConnections.mockRejectedValue(new Error('admin.mySites.errors.network'))
+  focus('11',{focusAccountIds:'447',focusWorkspace:'ws-a'});const w=await mountView()
+  expect(accountNotices(w)).toContain('账号（名称暂未读到）');expect(accountNotices(w)).not.toContain('447')
+  harness.listRealConnections.mockResolvedValue([{adminAccountId:'447',adminAccountName:'完整账号甲',siteName:'网站甲',upstreamSiteId:'site-a'}])
+  await findButton(w,'刷新').trigger('click');await flushPromises()
+  expect(accountNotices(w)).toContain('账号「完整账号甲」（网站「网站甲」）');expect(accountNotices(w)).not.toContain('名称暂未读到')
+  expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
+  harness.listRealConnections.mockRejectedValue(new Error('admin.mySites.errors.network'))
+  await findButton(w,'刷新').trigger('click');await flushPromises()
+  expect(accountNotices(w)).toContain('名称暂未读到');expect(accountNotices(w)).not.toContain('完整账号甲');expect(accountNotices(w)).not.toContain('网站甲')
+ })
+ it('N20 discards a late label read after a newer refresh in the same workspace',async()=>{
+  const old=deferred<any[]>();harness.listRealConnections.mockImplementationOnce(()=>old.promise)
+  focus('11',{focusAccountIds:'447',focusWorkspace:'ws-a'});const w=await mountView();expect(accountNotices(w)).toContain('名称暂未读到')
+  harness.listRealConnections.mockResolvedValue([{adminAccountId:'447',adminAccountName:'新读取账号',siteName:'新读取网站',upstreamSiteId:'site-a'}])
+  await findButton(w,'刷新').trigger('click');await flushPromises();expect(accountNotices(w)).toContain('新读取账号')
+  old.resolve([{adminAccountId:'447',adminAccountName:'迟到旧账号',siteName:'迟到旧网站',upstreamSiteId:'site-old'}]);await flushPromises()
+  expect(accountNotices(w)).toContain('新读取账号');expect(accountNotices(w)).not.toContain('迟到旧');expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
+ })
+ it('N21 clears labels on workspace change and rejects late same-ID names from the previous workspace',async()=>{
+  const old=deferred<any[]>();harness.listRealConnections.mockImplementationOnce(()=>old.promise)
+  focus('11',{focusAccountIds:'447',focusWorkspace:'ws-a'});const w=await mountView()
+  harness.listRealConnections.mockResolvedValue([{adminAccountId:'447',adminAccountName:'乙工作区账号',siteName:'乙工作区网站',upstreamSiteId:'site-b'}])
+  harness.currentAccount.value={id:'ws-b'};await flushPromises()
+  harness.refs.adminGroups.value=[group('11','甲组')];harness.refs.adminGroupsLoaded.value=true;focus('11',{focusAccountIds:'447',focusWorkspace:'ws-b'});await flushPromises()
+  expect(accountNotices(w)).toContain('乙工作区账号')
+  old.resolve([{adminAccountId:'447',adminAccountName:'甲工作区旧账号',siteName:'甲工作区旧网站',upstreamSiteId:'site-a'}]);await flushPromises()
+  expect(accountNotices(w)).toContain('乙工作区账号');expect(accountNotices(w)).not.toContain('甲工作区旧');expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
  })
 })
 describe('old behavior preserved',()=>{

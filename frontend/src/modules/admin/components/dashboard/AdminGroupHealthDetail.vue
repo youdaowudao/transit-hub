@@ -41,6 +41,7 @@ import {
   remoteActionLabelKey,
 } from '../../composables/useConnectionHealth'
 import type {
+  AccountFocusLabel,
   AccountTierResult,
   AccountManagementResult,
   AdminGroupAccount,
@@ -55,6 +56,7 @@ import {
 
 const props = withDefaults(defineProps<{
   focusedAccountIds?: string[]
+  focusedAccountLabels?: Record<string, AccountFocusLabel>
   group: AdminGroupHealth
   workspacePlatform?: string
   hideUnmonitoredAccounts: boolean
@@ -67,6 +69,7 @@ const props = withDefaults(defineProps<{
   modelControlFailures?: string[]
 }>(), {
   focusedAccountIds: () => [],
+  focusedAccountLabels: () => ({}),
   quickProbePhases: () => ({}),
   quickProbeErrors: () => ({}),
   quickProbeSuccesses: () => ({}),
@@ -584,18 +587,24 @@ const sortedAccounts = computed(() => [...filteredAccounts.value].sort((first, s
 const accountTableRef = ref<HTMLElement | null>(null)
 const focusedAccountSet = computed(() => new Set(props.focusedAccountIds))
 const isFocusedAccount = (account: AdminGroupAccount) => focusedAccountSet.value.has(account.id)
+const focusedAccountLabel = (id: string, currentName = ''): string => {
+  const label = props.focusedAccountLabels[id]
+  const name = currentName.trim() || label?.name?.trim()
+  const account = name ? `账号「${name}」` : '账号（名称暂未读到）'
+  return label?.siteNames.length ? `${account}（网站「${label.siteNames.join('、')}」）` : account
+}
 const focusedAccountNotices = computed(() => {
   if (props.group.accountsError || !props.focusedAccountIds.length) return []
   const notices: string[] = []
   const hidden = props.group.accounts.filter(account => isFocusedAccount(account) && shouldHideUnmonitored(account))
   if (hidden.length) {
-    const names = hidden.map(account => account.name || account.id).join('、')
-    notices.push(`要找的账号「${names}」没有开启监控，被‘隐藏未监控’藏起来了。取消勾选分组标题右侧的‘隐藏未监控’就能看到；这只改本机显示，不会修改主站。`)
+    const names = hidden.map(account => focusedAccountLabel(account.id, account.name)).join('、')
+    notices.push(`要找的${names}没有开启监控，被‘隐藏未监控’藏起来了。取消勾选分组标题右侧的‘隐藏未监控’就能看到；这只改本机显示，不会修改主站。`)
   }
   const missing = props.focusedAccountIds.filter(id => !props.group.accounts.some(account => account.id === id))
   if (missing.length) {
-    const ids = missing.map(id => `账号编号 ${id}`).join('、')
-    notices.push(`这个分组里没有找到要找的账号（${ids}），可能已从这个主站分组移除，或资料还没更新。请点右上角‘刷新’；仍没有时，到分组倍率检查这条对接。`)
+    const names = missing.map(id => focusedAccountLabel(id)).join('、')
+    notices.push(`在分组「${props.group.name}」中没有找到${names}。请点右上角‘刷新’；仍找不到时，到分组倍率检查这条对接。`)
   }
   return notices
 })
@@ -819,7 +828,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
           {{ t(`${detailPrefix}.filters.clear`) }}
         </button>
       </div>
-      <p v-for="notice in focusedAccountNotices" :key="notice" role="status" data-account-focus-notice class="mb-3 rounded-lg bg-warning/10 px-4 py-3 text-sm text-warning">{{ notice }}</p>
+      <p v-for="notice in focusedAccountNotices" :key="notice" role="status" data-account-focus-notice class="mb-3 break-words rounded-lg bg-warning/10 px-4 py-3 text-sm text-warning">{{ notice }}</p>
       <div v-if="group.accountsError" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
         {{ readableMessage(group.accountsError) }}
       </div>

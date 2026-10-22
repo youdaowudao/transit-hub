@@ -113,8 +113,8 @@ func TestQuestionAnswerEvidenceSecretProtection(t *testing.T) {
 		{"standard escaped", `fake"secret`, `error ` + quote(`fake"secret`), true, "***"},
 		{"nul joins key", "fake-secret", "fake-\x00secret", true, "***"},
 		{"invalid utf8 joins key", "fake-secret", "fake-\xffsecret", true, "***"},
-		{"sk token", "account-key", `{"error":"sk-abcdefghijklmnop","next":"keep"}`, true, `"next":"keep"`},
-		{"Bearer token", "account-key", `{"error":"bEaReR abcdefghijklmnop","next":"keep"}`, true, `bEaReR ***","next":"keep"`},
+		{"sk token", "account-key", `{"error":"sk-abcdefghijklmnop","next":"keep"}`, true, "***"},
+		{"Bearer token", "account-key", `{"error":"bEaReR abcdefghijklmnop","next":"keep"}`, true, "bEaReR ***"},
 		{"ordinary identifiers", "account-key", "task-abcdefghijklmnop NotBearer abcdefghijklmnop", true, "task-abcdefghijklmnop NotBearer abcdefghijklmnop"},
 		{"ordinary nested", "account-key", nested(`plain \"error\"`, 3), true, "plain"},
 		{"escaped slash", "a/b/c", `a\/b/c`, false, ""},
@@ -139,6 +139,9 @@ func TestQuestionAnswerEvidenceSecretProtection(t *testing.T) {
 			}
 			if c.contains != "" && !strings.Contains(result.UpstreamExcerpt, c.contains) {
 				t.Fatalf("excerpt=%q missing %q", result.UpstreamExcerpt, c.contains)
+			}
+			if (c.name == "sk token" || c.name == "Bearer token") && strings.Contains(result.UpstreamExcerpt, `"next":"keep"`) {
+				t.Fatal("Responses details must only retain the selected error, not unrelated JSON fields")
 			}
 			if c.key != "" && strings.Contains(result.UpstreamExcerpt, c.key) {
 				t.Fatal("complete fake key persisted")

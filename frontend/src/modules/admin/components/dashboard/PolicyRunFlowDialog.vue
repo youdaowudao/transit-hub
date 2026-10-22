@@ -4,6 +4,7 @@ import { BookOpenText, X } from 'lucide-vue-next'
 
 const props = defineProps<{
   open: boolean
+  workspacePlatform?: string
 }>()
 
 const emit = defineEmits<{
@@ -95,7 +96,7 @@ const stepKeys = [
           <div class="flex-1 space-y-4 overflow-y-auto px-5 py-4">
             <div v-for="stepKey in stepKeys" :key="stepKey" class="rounded-lg border border-border/40 bg-surface/30 p-3.5">
               <h4 class="text-sm font-semibold text-foreground">{{ t(`${prefix}.steps.${stepKey}.title`) }}</h4>
-              <p class="mt-1.5 text-xs leading-relaxed text-muted-foreground">{{ t(`${prefix}.steps.${stepKey}.description`) }}</p>
+              <p class="mt-1.5 text-xs leading-relaxed text-muted-foreground">{{ t(`${prefix}.steps.${stepKey}.${workspacePlatform === 'sub2api' && stepKey === 'autoDegradeVsRemoteAction' ? 'sub2apiDescription' : 'description'}`) }}<template v-if="workspacePlatform === 'sub2api' && stepKey === 'manualProbe'"> {{ t(`${prefix}.steps.manualProbe.sub2apiSupplement`) }}</template></p>
             </div>
           </div>
         </div>

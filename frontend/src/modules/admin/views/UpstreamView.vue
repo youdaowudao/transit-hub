@@ -111,9 +111,27 @@ const createEmptyForm = (): UpstreamSiteForm => ({
 const newSiteForm = ref<UpstreamSiteForm>(createEmptyForm())
 const editingAuthMode = ref<UpstreamSiteForm['authMode']>('password')
 const credentialsRequired = computed(() => !editingSiteId.value || newSiteForm.value.authMode !== editingAuthMode.value)
+const editingBaseURL = ref('')
+const domainMigrationConfirmed = ref(false)
+const domainMigrationConfirmationError = ref(false)
+// Keep the backend comparison rules, including case, without URL's automatic
+// hostname lowercasing. Validation remains the existing form/backend contract.
+const normalizedSiteURL = (value: string): string => {
+  const trimmed = value.trim()
+  const absolute = trimmed.includes('://') ? trimmed : `https://${trimmed}`
+  return absolute.split(/[?#]/, 1)[0]!.replace(/\/+$/, '')
+}
+const migrationTargetURL = computed(() => normalizedSiteURL(newSiteForm.value.siteUrl))
+const domainMigrationRequired = computed(() => Boolean(editingSiteId.value) && migrationTargetURL.value !== normalizedSiteURL(editingBaseURL.value))
+
+watch([() => newSiteForm.value.siteUrl, editingSiteId, isAddModalOpen], () => {
+  domainMigrationConfirmed.value = false
+  domainMigrationConfirmationError.value = false
+}, { flush: 'sync' })
+watch(domainMigrationConfirmed, () => { domainMigrationConfirmationError.value = false })
 
 const showEditFailureHelp = computed(() => Boolean(editingSiteId.value) && ['login', 'refresh', 'verify', 'metrics'].includes(addFailure.value?.stage ?? ''))
-const showRefreshTokenWarning = computed(() => newSiteForm.value.platform !== 'newapi' && newSiteForm.value.authMode === 'token' && newSiteForm.value.refreshToken.trim() !== '' && ['refresh', 'verify', 'metrics', 'save'].includes(addFailure.value?.stage ?? ''))
+const showRefreshTokenWarning = computed(() => newSiteForm.value.platform !== 'newapi' && newSiteForm.value.authMode === 'token' && newSiteForm.value.refreshToken.trim() !== '' && ['refresh', 'verify', 'metrics', 'save'].includes(addFailure.value?.stage ?? '') && !addFailure.value?.upstreamMessage?.includes(t('admin.upstream.failure.refreshTokenUsed')))
 
 watch(
   () => newSiteForm.value.platform,
@@ -127,8 +145,16 @@ watch(
 )
 
 const handleAddSite = async () => {
+  if (isAdding.value) return
+  if (domainMigrationRequired.value && !domainMigrationConfirmed.value) {
+    domainMigrationConfirmationError.value = true
+    return
+  }
   const success = editingSiteId.value
-    ? await updateSite(editingSiteId.value, newSiteForm.value)
+    ? await updateSite(editingSiteId.value, {
+      ...newSiteForm.value,
+      ...(domainMigrationRequired.value ? { confirmDomainMigration: domainMigrationConfirmed.value } : {}),
+    })
     : await addSite(newSiteForm.value)
   if (!success) return
   isAddModalOpen.value = false
@@ -140,6 +166,9 @@ const handleEditSite = (site: UpstreamSite) => {
   clearAddFailure()
   editingSiteId.value = site.id
   editingAuthMode.value = site.authMode ?? 'password'
+  editingBaseURL.value = site.baseUrl
+  domainMigrationConfirmed.value = false
+  domainMigrationConfirmationError.value = false
   newSiteForm.value = {
     name: site.name,
     siteUrl: site.baseUrl,
@@ -1124,6 +1153,7 @@ onBeforeUnmount(() => {
 
           <form @submit.prevent="handleAddSite" class="p-6">
             <p v-if="editingSiteId" class="mb-4 text-sm text-muted-foreground">{{ t('admin.upstream.modal.identityEditHelp') }}</p>
+            <p v-if="domainMigrationConfirmationError" role="alert" aria-live="polite" class="mb-4 text-sm text-destructive">{{ t('admin.upstream.modal.domainMigrationRequired') }}</p>
             <div v-if="addErrorKey" class="mb-5 flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert" aria-live="polite">
               <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
               <div class="min-w-0 space-y-1 break-words">
@@ -1231,6 +1261,16 @@ onBeforeUnmount(() => {
                   required
                   class="bg-surface border-border/50 focus:border-primary h-10"
                 />
+              </div>
+
+              <div v-if="domainMigrationRequired" class="space-y-3 rounded-xl border border-border/50 bg-surface p-4 text-sm sm:col-span-2">
+                <p class="break-all text-foreground">{{ editingBaseURL }} → {{ migrationTargetURL }}</p>
+                <p class="text-muted-foreground">{{ t('admin.upstream.modal.domainMigrationHelp') }}</p>
+                <label class="flex items-start gap-3">
+                  <input id="upstream-domain-migration-confirm" v-model="domainMigrationConfirmed" type="checkbox" :disabled="isAdding" class="mt-1" />
+                  <span>{{ t('admin.upstream.modal.domainMigrationConfirm') }}</span>
+                </label>
+                <p class="text-muted-foreground">{{ t('admin.upstream.modal.domainMigrationMainSiteHelp') }}</p>
               </div>
 
               <!-- Auth Mode -->
@@ -1431,7 +1471,7 @@ onBeforeUnmount(() => {
               <Button type="button" variant="ghost" :disabled="isAdding" @click="closeSiteModal" class="hover:bg-surface-line">
                 {{ t('admin.upstream.modal.cancel') }}
               </Button>
-              <Button type="submit" :disabled="isAdding" class="bg-primary text-primary-foreground hover:bg-primary/90">
+              <Button type="submit" :disabled="isAdding || (domainMigrationRequired && !domainMigrationConfirmed)" class="bg-primary text-primary-foreground hover:bg-primary/90">
                 <Loader2 v-if="isAdding" class="h-4 w-4 animate-spin" />
               {{ isAdding ? t('admin.upstream.modal.submitting') : t(editingSiteId ? 'admin.upstream.modal.updateSubmit' : 'admin.upstream.modal.submit') }}
             </Button>

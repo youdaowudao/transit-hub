@@ -134,7 +134,7 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 		return
 	}
 
-	completion := questionAnswerCompletionFromAsk(result, errors.Is(itemErr, context.DeadlineExceeded), record)
+	completion := questionAnswerCompletionFromAsk(result, errors.Is(itemErr, context.DeadlineExceeded), record, run.cred.Key)
 	completed, err := s.questionAnswers.CompleteQuestionAnswer(run.ctx, run.userID, run.batchID, record.ID, completion)
 	if err == nil && completed {
 		terminalDurable = true
@@ -143,7 +143,7 @@ func (s *Service) executeQuestionAnswerDispatch(key string, run *activeQuestionA
 	s.stopQuestionAnswerRunForStorage(run)
 }
 
-func questionAnswerCompletionFromAsk(result QuestionAnswerAskResult, deadlineExceeded bool, record QuestionAnswerRecord) QuestionAnswerCompletion {
+func questionAnswerCompletionFromAsk(result QuestionAnswerAskResult, deadlineExceeded bool, record QuestionAnswerRecord, keys ...string) QuestionAnswerCompletion {
 	completion := QuestionAnswerCompletion{Status: QuestionAnswerSucceeded, AnswerBody: result.Answer, ErrorType: result.ErrorType}
 	if deadlineExceeded || result.ErrorType != "" {
 		completion.Status = QuestionAnswerFailed
@@ -155,6 +155,13 @@ func questionAnswerCompletionFromAsk(result QuestionAnswerAskResult, deadlineExc
 		}
 		if deadlineExceeded {
 			completion.ErrorType = QuestionAnswerErrorTimeout
+			if record.RequestProtocol != nil && *record.RequestProtocol == TestProtocolResponses && completion.UpstreamExcerpt != "" {
+				key := ""
+				if len(keys) > 0 {
+					key = keys[0]
+				}
+				completion.UpstreamExcerpt = questionAnswerUpstreamExcerpt([]byte(responsesQuestionAnswerDeadlinePrefix+completion.UpstreamExcerpt), key)
+			}
 		}
 	} else {
 		judgment, judgeable := judgeQuestionAnswer(result.Answer, record.QuestionKeywordSnapshot)

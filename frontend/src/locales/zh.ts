@@ -1812,6 +1812,7 @@ export default {
         autoDegradeLabel: '自动降级',
         autoDegradeHelp: '按工作区判定规则与所选预设处理探活结果。新规则下延迟仍算成功；关闭自动降级时只记录探活结果。',
         autoRemoteActionLabel: '自动远端动作',
+        autoRemoteActionHelpSub2API: '这个开关控制是否自动停用或恢复账号。关闭后，已启用的健康优先级管理仍可能修改主站 Priority；只想检查一次且不改主站，请使用‘一次性测试’。',
         autoRemoteActionHelp: 'NewAPI 会修改 channel 权重/状态，Sub2API 会切换 admin 账号 active/inactive。关闭后只记录健康结果，不调用上游。',
         priorityModeLabel: '上游流量优先级',
         priorityModes: {
@@ -1838,6 +1839,7 @@ export default {
           observation: '人工恢复或自动恢复流程触发后会进入观察期，这段时间的连续探活结果用于确认链路是否真的已经稳定。',
           recoveryStep: '恢复过程中每次探活成功会按该百分比逐步提高本地权重，不是一次性恢复到 100%。',
           autoDegrade: '开启后，探活结果会推进链路的健康状态机并调整本地转发权重；关闭后只记录探活结果，不会自动改变状态或权重。',
+          autoRemoteActionSub2API: '这个开关控制是否自动停用或恢复账号。关闭后，已启用的健康优先级管理仍可能修改主站 Priority；只想检查一次且不改主站，请使用‘一次性测试’。',
           autoRemoteAction: '开启后，状态机触发降级/恢复时会执行受支持的上游动作：Sub2API 切换 admin 账号 active/inactive，NewAPI 调整 channel 权重/状态。关闭后只记录探活和状态结果。',
           priorityMode: '健康探活模式先看健康档位，再使用唯一可靠的上游 Key 倍率；确定性缺失或多 Key 冲突时使用分组配置的本地回退倍率，新规则下同档同倍率的 Priority 相同，旧规则保留延迟排序。上游查询暂不可用时保持上次排序。仅倍率模式始终只使用主站分组倍率。'
         },
@@ -1876,10 +1878,12 @@ export default {
               description: '关停后先等待预设的冷却时间。新规则下冷却后连续成功达到预设次数就直接恢复正常；延迟也算成功，中间任何失败会清空累计成功。旧规则和兼容人工恢复入口保留观察与逐步恢复。'
             },
             autoDegradeVsRemoteAction: {
+              sub2apiDescription: '自动降级按所选规则更新健康状态；已由系统管理健康优先级的账号，状态变化仍可能改变主站 Priority。自动远端动作另外控制账号是否自动停用或恢复。关闭自动远端动作不会停止健康优先级管理；要只看一次测试结果且不改主站，请使用‘一次性测试’。',
               title: '8. 自动降级和自动远端动作的区别',
               description: '自动降级只影响系统内部的状态机和本地展示权重，不会调用任何上游平台接口，属于低风险开关。自动远端动作只有策略显式开启（自动远端动作=开）且状态机判定需要远端动作时才会真实调用上游：NewAPI 对接链路路径会修改 channel 权重/状态；当前分组健康独立探活路径下，Sub2API target 会切换 admin 账号 active/inactive（不调整 priority），NewAPI target 维度暂未实现远端动作，会记录为 unsupported，不会真正调用上游。策略未开启自动远端动作时，两条路径都只记录 skipped，绝不调用任何上游接口。'
             },
             manualProbe: {
+              sub2apiSupplement: '历史记录可能把错误包耗时写成首字，或显示‘上游未返回流式’；这些旧说明不能证明上游不支持流式，请用‘一次性测试’查看最新结果。一次性测试仍可能产生上游调用费用。',
               title: '9. 手动探活',
               description: '手动探活弹窗有三种方式。问答测试见问答说明。一次性测试：可以测账号现有的任意模型，只看这一次能不能通，结果不记录、不改健康状态、不改 Priority、不占探活预算、不改主站。正式手动探活：只能测当前策略里的模型，结果和自动探活一样计入健康状态，记为“手动”；如果这个账号的 Priority 由系统管理，且分组没选“仅倍率优先级”，还会更新主站 Priority；不占每日自动探活预算，也不会开关主站调度。主站关闭某账号的调度后，这个账号的自动探活默认改为每 60 分钟一次。测试请求的限制见“测试请求限制”'
             },
@@ -1948,6 +1952,23 @@ export default {
           manualReviewHint: '题目没设关键词时，系统无法自动判对错，答案放在这里等你判断', processedWaiting: '答案返回后会自动判题，显示在这里', processedEmpty: '这一批没有可判的答案',
 
           loading: '正在读取测试问题和历史记录...',
+          modelsLoading: '正在读取“{account}”的模型列表，请等待读取完成。',
+          modelsFailed: '读取“{account}”的模型列表失败：{reason}',
+          modelsUnavailable: '当前不能开始新答题。',
+          existingResultsAvailable: '已有答题结果仍可查看。',
+          modelBalanceGuidance: '请先到对应上游账户处理余额，再点击“重新读取模型”。',
+          modelQuotaGuidance: '请在对应上游检查该 Key 的额度，再点击“重新读取模型”。',
+          modelExpiredGuidance: '请在对应上游更新该 Key，再点击“重新读取模型”。',
+          modelAnnouncementGuidance: '请先在对应上游网页确认公告，再点击“重新读取模型”。',
+          modelOtherGuidance: '请按上述原因检查对应上游账户、接口或连接，再点击“重新读取模型”；仍失败时请检查本项目后端日志中的模型读取错误。',
+          modelsEmpty: '当前没有可选模型，不能开始新答题。请检查对应上游的模型配置后重新读取。',
+          retryModels: '重新读取模型',
+          retryModelsHint: '只重新读取模型列表，不发起答题，也不修改主站。',
+          localDataFailed: '读取“{account}”的答题数据失败：{reason}。此次未取得结果，不代表没有历史记录。请点击“重新加载”；仍失败时请检查本项目后端运行日志。',
+          modelsLoadingBlocked: '正在读取模型列表，请等待读取完成。',
+          modelsFailedBlocked: '模型列表读取失败，请在答题配置区处理后重试。',
+          modelsEmptyBlocked: '当前没有可选模型，不能开始新答题。',
+          localDataNotLoaded: '答题数据尚未读到，请在上方重新加载答题数据。',
           questionsTitle: '选择测试问题',
           reasoningEffort: {
             title: '推理力度',
@@ -2065,12 +2086,15 @@ export default {
             cancelled: '已终止'
           },
           failureEvidence: {
-            listHint: '失败的条目如果保存了上游的返回，下面会显示返回码和原话；没有保存的不显示。',
-            note: '这是上游当时的返回，只用来看这条为什么失败，不会修改主站。偶尔失败可以稍后再答一次。一直失败时：有原话就把下面的原话发给上游询问；没有原话时具体原因无法确认，请记下时间、模型和返回码，请上游核查这一次的请求。',
-            noteIncomplete: '上游报告这道题的思考和回答用满了输出上限，通常是题目难或思考强度高，先把思考强度调低后重测；一直如此再联系上游。下面如有上游原话，只用来核对，不会修改主站。',
+            listHint: '失败条目会显示已保存的返回码、处理说明和上游错误。旧记录没有保存的信息无法补回。',
+            note: '这里显示已保存的处理结果，只供查看，不会修改主站。请按这条记录上方已知的失败原因处理；没有取得可判题完整答案的条目不判对错。',
+            noteIncomplete: '上游明确报告这道题已达到输出上限，本题不判对错。可以降低思考强度后重测；Messages每题上限64000个token，Responses的实际输出上限以上游为准。',
             status: '上游返回码',
-            excerpt: '上游原话（已隐藏账号密钥，最多 500 字）',
-            emptyExcerpt: '这条记录没有保存上游原话。'
+            excerpt: '失败详情（已隐藏账号密钥，最多500字；旧记录可能只保留开头）',
+            emptyExcerpt: '这条记录没有保存额外详情，已知原因请看上方的失败说明。',
+            timing: '开始时间：{time}；耗时：{elapsed}',
+            elapsedSeconds: '{seconds}秒',
+            unrecorded: '未记录'
           },
           errorTypes: {
             internal_error: '测试程序内部出错，本批次已停止，没有修改主站；可以重新发起测试。',
@@ -2080,9 +2104,9 @@ export default {
             model_not_found: '上游未找到该模型。',
             server_error: '上游服务返回错误。',
             invalid_response: '未能取得可用的答案：没有拿到可以判题的正文。常见原因：请求被上游拒绝、只收到思考没有正文、模型拒答或没有正常结束、回答内容无法解析。偶尔出现可以稍后重测。一直出现时：有上游原话就把原话发给上游询问；没有原话就记下时间、模型和返回码，请上游核查这一次的回答。',
-            response_incomplete: '回答不完整：思考和回答用满了这道题的输出上限（现在 Messages 每题 64000 个 token，思考也算在内），这道题不判对错。可以把思考强度调低后重测。',
+            response_incomplete: '上游明确报告这道题已达到输出上限，本题不判对错。可以降低思考强度后重测；Messages每题上限64000个token，Responses的实际输出上限以上游为准。',
             account_type_unsupported: 'Messages 问答只支持 API Key 类型的账号，这道题没有发出请求。请把账号所在分组的测试请求改回 Chat Completions，或在主站换成 API Key 类型的账号。',
-            response_too_large: '上游响应超过大小限制（现在 Messages 边生成边接收的回答最多 16 MiB、单行最多 1 MiB，其他回答最多 1 MiB），这道题不判对错。可以把思考强度调低后重测。',
+            response_too_large: '上游返回超过大小限制，本题不判对错。Responses流式接收最多16MiB、单行及单个事件最多1MiB；Messages流式接收最多16MiB、单行最多1MiB；完整JSON最多1MiB。可缩短回答或降低思考强度后重测。',
             timeout: '这道题没有在每题最长等待时间内完成（现在 Messages 20 分钟，Chat 和 Responses 10 分钟），不判对错。可以稍后重测，或把思考强度调低。',
             storage_error: '记录保存失败。',
             service_restarted: '服务重启中断了未完成请求。',
@@ -2306,7 +2330,11 @@ export default {
         cancel: '取消',
         submit: '确认新增',
         updateSubmit: '保存修改',
-        identityEditHelp: '更换站点地址、平台或账号请新增站点，原费用会保留在原站点。可以改用其他登录方式或更新凭据：保存前系统会核对新登录信息属于原账号，核对不通过不会保存；不会修改主站。',
+        identityEditHelp: '原站点更换域名时可以在这里修改，核实原账号后会保留原有费用和对接记录。也可以更新凭据或切换登录方式；核对不通过不会保存，不会修改主站。',
+        domainMigrationHelp: '请先确认新地址属于原站点。保存时会在新地址核实原账号，成功后本站从新地址读取数据，原费用和对接记录保留。',
+        domainMigrationConfirm: '我确认这是原站点的新地址，继续保留原有费用和对接记录。',
+        domainMigrationMainSiteHelp: '不会自动修改主站已导入账号的地址；主站仍使用旧地址时，请在主站单独更新。',
+        domainMigrationRequired: '更换站点地址前，请勾选确认这是原站点的新地址。本次没有请求上游，资料和费用未保存，不会修改主站。',
         submitting: '连接中...',
         form: {
           siteName: '站点名称',

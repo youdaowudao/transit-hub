@@ -96,16 +96,24 @@ func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) (outcome 
 	defer resp.Body.Close()
 
 	if !legacy && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated) && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		return readStreamingProbeResponse(resp.Body, req.Protocol, req.UpstreamKey, started, now)
+		return readStreamingProbeResponse(resp.Body, req, resp.StatusCode, started, now)
 	}
 
 	body, oversized, readErr := readProbeResponseBody(resp.Body)
 	latencyMs := int(now().Sub(started).Milliseconds())
 	if readErr != nil {
-		return ProbeOutcome{Result: classifyTransportError(readErr), LatencyMs: latencyMs, Detail: probeRequestErrorDetail(ctx, readErr, req, "reading_body"), RequestPhase: "reading_body"}
+		outcome = ProbeOutcome{Result: classifyTransportError(readErr), LatencyMs: latencyMs, Detail: probeRequestErrorDetail(ctx, readErr, req, "reading_body"), RequestPhase: "reading_body"}
+		if !legacy {
+			outcome.Detail = formatProbeFailureDetail(req, resp.StatusCode, "reading_body", "", outcome.Result, nil, outcome.Detail)
+		}
+		return outcome
 	}
 	if oversized && (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated) {
-		return ProbeOutcome{Result: ResultInvalidResponse, LatencyMs: latencyMs, Detail: "probe response exceeds 1 MiB limit"}
+		detail := "probe response exceeds 1 MiB limit"
+		if !legacy {
+			detail = formatProbeFailureDetail(req, resp.StatusCode, "response_validation", "", ResultInvalidResponse, nil, "回复超过 1 MiB，无法继续校验")
+		}
+		return ProbeOutcome{Result: ResultInvalidResponse, LatencyMs: latencyMs, Detail: detail}
 	}
 	if legacy {
 		return classifyHTTPResponse(resp.StatusCode, body, req.UpstreamKey, latencyMs)
@@ -114,8 +122,20 @@ func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) (outcome 
 	if outcome.Result == ResultSlowResponse {
 		outcome.Result = ResultOK
 	}
-	outcome.FirstTokenMs, outcome.FirstEventMs = intPtr(latencyMs), intPtr(latencyMs)
-	outcome.NonStreaming = true
+	if outcome.Result == ResultOK || outcome.Result == ResultSlowResponse {
+		outcome.FirstTokenMs, outcome.FirstEventMs = intPtr(latencyMs), intPtr(latencyMs)
+		outcome.NonStreaming = true
+	} else if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+		if !json.Valid(body) {
+			body = nil
+		}
+		outcome.Detail = formatProbeFailureDetail(req, resp.StatusCode, "response_validation", "", outcome.Result, body, "回复格式或正文无效，未能识别有效回答")
+	} else {
+		if oversized {
+			body = nil
+		}
+		outcome.Detail = formatProbeFailureDetail(req, resp.StatusCode, "http_error", "", outcome.Result, body, "")
+	}
 	return outcome
 }
 

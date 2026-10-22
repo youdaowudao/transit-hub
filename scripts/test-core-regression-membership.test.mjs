@@ -135,3 +135,11 @@ test('core gate retains group cost queue, cache refresh and shutdown regressions
   }
   assert.ok(script.includes("go test -race ./internal/modules/upstream ./internal/httpserver -run 'TestGroupCost(Queue|Retry|Snapshot|Shutdown)' -count=1"))
 })
+
+
+test('core gate discovers Responses answer behavior in its own step', async () => {
+  const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
+  assert.match(script, /run_step "frontend Responses question answer failure evidence"/)
+  assert.match(script, /npm run test -- responses-question-answer\.behavior\.test\.ts"/)
+  assert.ok(script.indexOf('frontend Responses question answer failure evidence') > script.indexOf('question answer browser fixture safety tests'))
+})

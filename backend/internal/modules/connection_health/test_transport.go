@@ -55,7 +55,7 @@ func buildTestRequest(ctx context.Context, input testRequestInput) (*http.Reques
 		payload["input"] = []map[string]any{{"role": "user", "content": input.Prompt}}
 		payload["store"] = false
 		if input.QuestionAnswer {
-			payload["stream"] = false
+			payload["stream"] = true
 		} else {
 			payload["stream"] = input.Stream
 		}

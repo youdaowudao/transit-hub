@@ -60,6 +60,9 @@ func (r *QuestionAnswerRunner) AskDetailed(ctx context.Context, cred upstream.Pr
 	if response.StatusCode >= 100 && response.StatusCode <= 999 {
 		result.UpstreamStatus = response.StatusCode
 	}
+	if protocol == TestProtocolResponses {
+		return readResponsesQuestionAnswer(ctx, response.Body, cred.Key, result)
+	}
 	if protocol == TestProtocolMessages && response.StatusCode >= 200 && response.StatusCode < 300 && strings.Contains(strings.ToLower(response.Header.Get("Content-Type")), "text/event-stream") {
 		return readMessagesQuestionAnswerStream(ctx, response.Body, cred.Key, result)
 	}

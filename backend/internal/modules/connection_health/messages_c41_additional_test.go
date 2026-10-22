@@ -38,8 +38,15 @@ func TestMessagesC41NonStreamingBodyTextAndTiming(t *testing.T) {
 				return protocolServiceResponse(req, 200, tc.body), nil
 			})
 			out := r.Probe(context.Background(), c41Request("x_api_key"))
-			if out.Result != tc.want || !out.NonStreaming || out.LatencyMs != 7300 || out.FirstTokenMs == nil || *out.FirstTokenMs != 7300 {
+			if out.Result != tc.want || out.LatencyMs != 7300 {
 				t.Fatalf("body and timing=%+v want=%s at 7300ms", out, tc.want)
+			}
+			if tc.want == ResultOK {
+				if !out.NonStreaming || out.FirstTokenMs == nil || *out.FirstTokenMs != 7300 || out.FirstEventMs == nil || *out.FirstEventMs != 7300 {
+					t.Fatalf("valid JSON measurements lost: %+v", out)
+				}
+			} else if out.NonStreaming || out.FirstTokenMs != nil || out.FirstEventMs != nil || !strings.Contains(out.Detail, "已收到回复（HTTP 200），但未能确认有效回答。已知原因：回复格式或正文无效，未能识别有效回答。") {
+				t.Fatalf("invalid JSON must have diagnosis without fake text measurements: %+v", out)
 			}
 		})
 	}
@@ -174,14 +181,14 @@ func TestMessagesC41StreamEndMalformedAndMetadata(t *testing.T) {
 		detail      string
 		firstEvent  bool
 	}{
-		{"DONE", "data: [DONE]\n\n", ResultInvalidResponse, "回答结束但没有正文", true},
-		{"message stop", c41Frame("message_stop", ""), ResultInvalidResponse, "回答结束但没有正文", true},
+		{"DONE", "data: [DONE]\n\n", ResultInvalidResponse, "回答结束但没有有效正文", true},
+		{"message stop", c41Frame("message_stop", ""), ResultInvalidResponse, "回答结束但没有有效正文", true},
 		{"malformed", "data: {oops}\n\n", ResultInvalidResponse, "流式事件不是合法 JSON", false},
 		{"metadata", c41Frame("message_start", "") + c41Frame("ping", ""), ResultNetworkFluctuation, "流式回答中途断开或未结束", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := c41Stream(t, []taskATimedFrame{{time.Second, tc.frame}})
-			if out.Result != tc.want || out.Detail != tc.detail || out.FirstTokenMs != nil || (out.FirstEventMs != nil) != tc.firstEvent {
+			if out.Result != tc.want || !strings.Contains(out.Detail, "已知原因："+tc.detail+"。") || !strings.Contains(out.Detail, "HTTP 200") || out.FirstTokenMs != nil || (out.FirstEventMs != nil) != tc.firstEvent {
 				t.Fatalf("end/metadata=%+v", out)
 			}
 			if out.FirstEventMs != nil && *out.FirstEventMs != 1000 {

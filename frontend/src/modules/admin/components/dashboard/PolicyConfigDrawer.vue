@@ -485,9 +485,9 @@ const handleSave = () => {
                   <div>
                     <div class="flex items-center gap-1 text-sm text-foreground">
                       {{ t(`${prefix}.autoRemoteActionLabel`) }}
-                      <HelpTooltip :text="t(`${prefix}.tooltips.autoRemoteAction`)" />
+                      <HelpTooltip :text="t(`${prefix}.tooltips.${isSub2API ? 'autoRemoteActionSub2API' : 'autoRemoteAction'}`)" />
                     </div>
-                    <div class="text-xs text-amber-700 dark:text-amber-400">{{ t(`${prefix}.autoRemoteActionHelp`) }}</div>
+                    <div class="text-xs text-amber-700 dark:text-amber-400">{{ t(`${prefix}.${isSub2API ? 'autoRemoteActionHelpSub2API' : 'autoRemoteActionHelp'}`) }}</div>
                   </div>
                   <label class="relative inline-flex cursor-pointer items-center shrink-0">
                     <input v-model="autoRemoteActionEnabled" type="checkbox" class="peer sr-only" :disabled="!autoDegradeEnabled" />
@@ -519,5 +519,5 @@ const handleSave = () => {
     </Transition>
   </Teleport>
 
-  <PolicyRunFlowDialog :open="runFlowOpen" @close="runFlowOpen = false" />
+  <PolicyRunFlowDialog :open="runFlowOpen" :workspace-platform="workspacePlatform" @close="runFlowOpen = false" />
 </template>

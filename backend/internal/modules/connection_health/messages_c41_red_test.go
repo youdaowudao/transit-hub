@@ -134,7 +134,7 @@ func TestMessagesC41K3NoTextEndIsInvalidAndDisconnectIsNetwork(t *testing.T) {
 				t.Fatalf("no-text result=%+v want %s", out, tc.result)
 			}
 			if tc.name == "end" {
-				if out.Detail != "回答结束但没有正文" {
+				if !strings.Contains(out.Detail, "已收到回复（HTTP 200），但未能确认有效回答。已知原因：回答结束但没有有效正文。") {
 					t.Errorf("end reason=%q", out.Detail)
 				}
 				state := ConnectionHealthState{State: StateHealthy, CurrentWeight: 100, CounterProtocol: protocolPointer(c41Messages), ConsecutiveFailures: 2, ConsecutiveSuccesses: 1}

@@ -147,8 +147,12 @@ func TestTaskAProbePayloadFallbackAndOneDeadline(t *testing.T) {
 		}
 		var payload map[string]any
 		_ = json.NewDecoder(request.Body).Decode(&payload)
-		if payload["stream"] == true {
-			t.Error("question answer must remain nonstream")
+		if protocol == TestProtocolResponses {
+			if payload["stream"] != true {
+				t.Error("Responses question answer must stream")
+			}
+		} else if payload["stream"] == true {
+			t.Error("Chat question answer must remain nonstream")
 		}
 	}
 }

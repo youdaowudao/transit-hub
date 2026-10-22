@@ -20,6 +20,7 @@ import type {
   PolicyInput,
 	PrioritySyncStatus,
   QuestionAnswerBatch,
+  QuestionAnswerQueue,
   QuestionAnswerJudgment,
   QuestionAnswerReasoningEffort,
   QuestionAnswerHistory,
@@ -94,9 +95,9 @@ export class ConnectionHealthApiError extends Error {
 }
 
 const questionAnswerOperationFailure = (path: string, options: RequestInit, status: number, key: string, payload: ApiErrorPayload = {}): ConnectionHealthApiError => {
-  const step = path.endsWith('/cancel') ? 'cancelling' : path.endsWith('/judgment') ? 'judging'
+  const step = path.startsWith('/connection-health/question-answer-queue') ? 'queue' : path.endsWith('/cancel') ? 'cancelling' : path.endsWith('/judgment') ? 'judging'
     : options.method?.toUpperCase() === 'POST' ? 'creating' : path.includes('/history') ? 'history' : 'reading'
-  const reading = step === 'reading' || step === 'history'
+  const reading = step === 'reading' || step === 'history' || step === 'queue'
   const createValidationKeys = new Set([
     'questionAnswerSelection', 'questionAnswerReasoningEffort', 'questionAnswerRepeatCount', 'questionAnswerBatchLimit', 'questionAnswerActive',
     'testQuestionInvalid', 'testQuestionNotFound', 'testQuestionDisabled', 'modelUnavailable', 'targetNotFound', 'accountsFetch',
@@ -132,8 +133,40 @@ const questionAnswerOperationFailure = (path: string, options: RequestInit, stat
   return new ConnectionHealthApiError(message, status, payload.current, payload.activeExecutionId, { message: key, operationResult: result, step: payload.step ?? step, batchId: payload.batchId })
 }
 
+const questionAnswerPayloadObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
+// Check only identities and the containers that the existing normalizers read.
+// Missing optional keyword/repeat/diagnostic fields retain their old defaults.
+const validQuestionAnswerRecordPayload = (value: unknown) => questionAnswerPayloadObject(value)
+  && ['id', 'targetId', 'batchId', 'updatedAt'].every(field => typeof value[field] === 'string' && value[field] !== '')
+  && ['pending', 'running', 'succeeded', 'failed', 'cancelled'].includes(String(value.status))
+const validQuestionAnswerQuestionStatsPayload = (value: unknown): boolean => questionAnswerPayloadObject(value)
+  && (value.normalizedKeywords == null || Array.isArray(value.normalizedKeywords))
+  && (value.byModel == null || (Array.isArray(value.byModel) && value.byModel.every(questionAnswerPayloadObject)))
+const validQuestionAnswerStatsPayload = (value: unknown): boolean => questionAnswerPayloadObject(value)
+  && questionAnswerPayloadObject(value.requests) && questionAnswerPayloadObject(value.reviews)
+  && (!Array.isArray(value.byModel) || value.byModel.every(questionAnswerPayloadObject))
+  && (!Array.isArray(value.byQuestion) || value.byQuestion.every(validQuestionAnswerQuestionStatsPayload))
+const validQuestionAnswerSuccess = (path: string, value: unknown): boolean => {
+  if (!questionAnswerPayloadObject(value)) return false
+  if (path.endsWith('/judgment')) {
+    const recordID = path.match(/\/records\/([^/]+)\/judgment$/)?.[1]
+    return typeof value.id === 'string' && Boolean(recordID) && value.id === decodeURIComponent(recordID!)
+  }
+  if (path.includes('/question-answers/batches')) return typeof value.batchId === 'string' && Array.isArray(value.records) && value.records.every(validQuestionAnswerRecordPayload) && validQuestionAnswerStatsPayload(value.stats)
+  if (path.includes('/question-answers/history')) return Array.isArray(value.batches) && value.batches.every(batch => questionAnswerPayloadObject(batch) && typeof batch.batchId === 'string' && Array.isArray(batch.models) && Array.isArray(batch.questions) && batch.questions.every(validQuestionAnswerQuestionStatsPayload) && validQuestionAnswerStatsPayload(batch.stats)) && validQuestionAnswerStatsPayload(value.todayStats)
+  if (path.endsWith('/question-answers/summary')) return typeof value.targetId === 'string' && validQuestionAnswerStatsPayload(value.todayStats)
+  return true
+}
+
 const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
-  const answerOperation = path.includes('/question-answers/')
+  const queueOperation = path.startsWith('/connection-health/question-answer-queue')
+  const answerOperation = path.includes('/question-answers/') || queueOperation
+  const answerSessionIdentity = answerOperation ? getAccessToken() : null
+  const requireCurrentAnswerSession = () => {
+    // An old answer response must not expire a newer login before its caller
+    // can reject that response. Other modules retain their existing behavior.
+    if (answerOperation && (options.signal?.aborted || answerSessionIdentity !== getAccessToken())) throw new DOMException('Aborted', 'AbortError')
+  }
   let response: Response
   try {
     response = await fetch(endpoint(path), {
@@ -146,6 +179,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       },
     })
   } catch (error) {
+    requireCurrentAnswerSession()
     if (error instanceof Error && error.name === 'AbortError') throw error
     if (answerOperation) {
       throw questionAnswerOperationFailure(path, options, 0, 'admin.connectionHealth.errors.network', { detail: '连接后台时中断，接口未返回更具体原因' })
@@ -155,9 +189,12 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
 
   let payload: T & ApiErrorPayload
   try {
+    requireCurrentAnswerSession()
     const text = await response.text()
+    requireCurrentAnswerSession()
     payload = text ? (JSON.parse(text) as T & ApiErrorPayload) : ({} as T & ApiErrorPayload)
   } catch (error) {
+    requireCurrentAnswerSession()
     if (error instanceof Error && error.name === 'AbortError') throw error
     if (!answerOperation) throw error
     if (isUnauthorizedApiResponse(response.status, {})) {
@@ -195,6 +232,10 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
     }
     const key = payload.message ?? payload.error ?? 'admin.connectionHealth.errors.request'
     throw new ConnectionHealthApiError(key, response.status, payload.current, payload.activeExecutionId)
+  }
+
+  if (answerOperation && !validQuestionAnswerSuccess(path, payload)) {
+    throw questionAnswerOperationFailure(path, options, response.status, 'admin.connectionHealth.errors.request', { detail: '后台返回的答题内容缺少必要记录或无法读取，未取得可确认的操作结果' })
   }
 
   return payload
@@ -931,6 +972,10 @@ export const setDefaultTestQuestion = async (questionId: string): Promise<TestQu
 export const deleteTestQuestion = async (questionId: string): Promise<void> => {
   await requestJson<{ ok: boolean }>(`/connection-health/test-questions/${encodeURIComponent(questionId)}`, { method: 'DELETE' })
 }
+
+export const getQuestionAnswerQueue = (workspace: string, signal?: AbortSignal): Promise<QuestionAnswerQueue> => (
+  requestJson<QuestionAnswerQueue>(`/connection-health/question-answer-queue?workspace=${encodeURIComponent(workspace)}`, { headers: questionAnswerContractHeaders, signal })
+)
 
 export const startQuestionAnswerBatch = async (
   targetId: string,

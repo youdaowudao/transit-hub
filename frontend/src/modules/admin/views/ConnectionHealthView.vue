@@ -41,6 +41,7 @@ import QuestionAnswerScheduleDrawer from '../components/dashboard/QuestionAnswer
 import QuestionAnswerModelControlDrawer from '../components/dashboard/QuestionAnswerModelControlDrawer.vue'
 import QuestionAnswerScheduleBatchDialog from '../components/dashboard/QuestionAnswerScheduleBatchDialog.vue'
 import { useQuestionAnswerRecentSummaries } from '../composables/useQuestionAnswerRecentSummaries'
+import { refreshQuestionAnswerQueue } from '../composables/useQuestionAnswerQueue'
 import PolicyConfigDrawer from '../components/dashboard/PolicyConfigDrawer.vue'
 import type { OwnGroupOption } from '../components/dashboard/PolicyConfigDrawer.vue'
 import ProbePolicyListDialog from '../components/dashboard/ProbePolicyListDialog.vue'
@@ -315,6 +316,7 @@ const refreshQuestionAnswerSummary = async (targetId: string) => {
 }
 const onQuestionAnswerStatsDirty = (targetId: string) => {
   if (!targetId.startsWith(`sub2api:${preferenceScope.value}:`)) return
+  refreshQuestionAnswerQueue(preferenceScope.value)
   questionAnswerSummaryPending.set(targetId, (questionAnswerSummaryPending.get(targetId) ?? 0) + 1)
   void refreshQuestionAnswerSummary(targetId)
   recentSummaries.refreshTargets([targetId])
@@ -891,6 +893,7 @@ const refreshAdminGroupsAutomatically = async (): Promise<boolean> => {
 }
 
 const refresh = async () => {
+  const refreshWorkspace = preferenceScope.value
   quickProbeErrors.value = {}
   clearAllQuickProbeSuccesses()
   const generation = refreshCoordinator.begin()
@@ -905,6 +908,7 @@ const refresh = async () => {
   } finally {
     completeRefresh(generation)
     void loadBoundSiteRateStatus()
+    if (refreshWorkspace === preferenceScope.value) refreshQuestionAnswerQueue(refreshWorkspace)
   }
 }
 
@@ -1102,7 +1106,10 @@ const onProbeAccount = (account: AdminGroupAccount) => {
 const onQuestionAnswerView = (value: { targetId: string; batchId?: string; expandFailed?: boolean }) => {
   const projections = adminGroups.value.flatMap(group => group.accounts.filter(account => account.targetId === value.targetId).map(account => ({ account, group })))
   const projection = projections.find(item => item.group.id === selectedGroup.value?.id) ?? projections[0]
-  if (projection && canOpenManualProbeHistory(projection.account)) openQuestionAnswerTarget(projection.account, projection.group, value.batchId ?? null, value.expandFailed === true)
+  if (projection && canOpenManualProbeHistory(projection.account)) {
+    scheduleReadOnlyBatch.value = null
+    openQuestionAnswerTarget(projection.account, projection.group, value.batchId ?? null, value.expandFailed === true)
+  }
   else if (value.batchId) scheduleReadOnlyBatch.value = { targetId: value.targetId, batchId: value.batchId, accountName: projection?.account.name || projection?.account.id || value.targetId }
 }
 const onScheduleQuestionAnswerView = (value: { targetId: string; batchId: string; accountName: string; platform: string; groupName: string; expandFailed?: boolean }) => {
@@ -1794,11 +1801,12 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       @tier-saved="onAccountTierSaved"
       @question-answer-started="onQuestionAnswerStarted"
       @question-answer-viewed="onQuestionAnswerViewed"
+      @question-answer-view="onQuestionAnswerView"
       @question-answer-stats-dirty="onQuestionAnswerStatsDirty"
       @question-answer-stats-retry="retryQuestionAnswerSummaries"
       @question-answer-preferences-changed="onQuestionAnswerPreferencesChanged"
     />
-    <QuestionAnswerScheduleBatchDialog v-if="scheduleReadOnlyBatch" :target-id="scheduleReadOnlyBatch.targetId" :batch-id="scheduleReadOnlyBatch.batchId" :account-name="scheduleReadOnlyBatch.accountName" :workspace="preferenceScope" @close="scheduleReadOnlyBatch = null" />
+    <QuestionAnswerScheduleBatchDialog v-if="scheduleReadOnlyBatch" :target-id="scheduleReadOnlyBatch.targetId" :batch-id="scheduleReadOnlyBatch.batchId" :account-name="scheduleReadOnlyBatch.accountName" :workspace="preferenceScope" @close="scheduleReadOnlyBatch = null" @question-answer-view="onQuestionAnswerView" />
 
     <ProbePolicyListDialog
       :open="policyListDialogOpen"

@@ -268,9 +268,12 @@ type QuestionAnswerBatch struct {
 // QuestionAnswerFinalization describes a retained runtime reservation. It is
 // independent of record status: StopPending may already have ended every row.
 type QuestionAnswerFinalization struct {
-	BatchID  string `json:"batchId"`
-	State    string `json:"state"`
-	Recovery string `json:"recovery"`
+	Reason    string `json:"reason"`
+	Message   string `json:"message"`
+	HeldCount int    `json:"heldCount"`
+	BatchID   string `json:"batchId"`
+	State     string `json:"state"`
+	Recovery  string `json:"recovery"`
 }
 
 type QuestionAnswerStartInput struct {
@@ -868,18 +871,19 @@ func (s *Service) questionAnswerFinalizationRun(userID, targetID, batchID string
 
 func (s *Service) projectQuestionAnswerFinalization(userID, targetID string, run *activeQuestionAnswerBatch, hasRecords bool) (*QuestionAnswerFinalization, bool) {
 	s.questionAnswerMu.Lock()
-	defer s.questionAnswerMu.Unlock()
 	current := s.questionAnswerRuns[questionAnswerRunKey(userID, targetID)]
 	if current != nil && current.stopReason == "" && !current.finalizing && current.finalErr == nil {
 		current = nil
 	}
 	if current != run {
+		s.questionAnswerMu.Unlock()
 		return nil, false
 	}
 	if run == nil {
+		s.questionAnswerMu.Unlock()
 		return nil, true
 	}
-	projection := &QuestionAnswerFinalization{BatchID: run.batchID, State: "pending", Recovery: "unavailable"}
+	projection := &QuestionAnswerFinalization{BatchID: run.batchID, State: "pending", Recovery: "unavailable", Reason: run.stopReason, HeldCount: run.heldSlots}
 	if run.finalErr != nil {
 		projection.State = "failed"
 	}
@@ -888,6 +892,9 @@ func (s *Service) projectQuestionAnswerFinalization(userID, targetID string, run
 	} else if run.finalErr != nil && !run.finalizing && run.inFlight == 0 {
 		projection.Recovery = "cancel"
 	}
+	finalErr, privateKey := run.finalErr, run.cred.Key
+	s.questionAnswerMu.Unlock()
+	projection.Message = questionAnswerFinalizationMessage(finalErr, projection.Reason, privateKey)
 	return projection, true
 }
 

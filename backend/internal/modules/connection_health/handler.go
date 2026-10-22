@@ -62,6 +62,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("POST /api/connection-health/test-questions/{questionId}/enabled", handler.setTestQuestionEnabled)
 	mux.HandleFunc("POST /api/connection-health/test-questions/{questionId}/default", handler.setDefaultTestQuestion)
 	mux.HandleFunc("DELETE /api/connection-health/test-questions/{questionId}", handler.deleteTestQuestion)
+	mux.HandleFunc("GET /api/connection-health/question-answer-queue", handler.getQuestionAnswerQueue)
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/question-answers/batches", handler.startQuestionAnswerBatch)
 	mux.HandleFunc("GET /api/connection-health/targets/{id}/question-answers/batches/latest", handler.latestQuestionAnswerBatch)
 	mux.HandleFunc("GET /api/connection-health/targets/{id}/question-answers/batches/{batchId}", handler.getQuestionAnswerBatch)

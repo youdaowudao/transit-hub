@@ -64,21 +64,12 @@ func (s *Service) nextQuestionAnswerDispatchLocked() (string, *activeQuestionAns
 	if s.questionAnswerClosed || s.questionAnswerInFlight >= s.questionAnswerConcurrency() || len(s.questionAnswerOrder) == 0 {
 		return "", nil, QuestionAnswerRecord{}, false
 	}
-	start := 0
-	if s.questionAnswerLastKey != "" {
-		for i, key := range s.questionAnswerOrder {
-			if key == s.questionAnswerLastKey {
-				start = (i + 1) % len(s.questionAnswerOrder)
-				break
-			}
-		}
-	}
-	for offset := 0; offset < len(s.questionAnswerOrder); offset++ {
-		key := s.questionAnswerOrder[(start+offset)%len(s.questionAnswerOrder)]
+	key, ok := nextQuestionAnswerChoice(s.questionAnswerOrder, s.questionAnswerLastKey, func(key string) bool {
 		run := s.questionAnswerRuns[key]
-		if run == nil || run.stopReason != "" || run.ctx.Err() != nil || run.next >= len(run.records) {
-			continue
-		}
+		return run != nil && run.stopReason == "" && run.ctx.Err() == nil && run.next < len(run.records)
+	})
+	if ok {
+		run := s.questionAnswerRuns[key]
 		record := run.records[run.next]
 		if run.progress == nil {
 			run.progress = make(map[string]*QuestionAnswerProgress)

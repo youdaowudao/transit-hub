@@ -75,6 +75,7 @@ import {
 import QuestionAnswerRecordCard from './QuestionAnswerRecordCard.vue'
 import QuestionAnswerFailureEvidence from './QuestionAnswerFailureEvidence.vue'
 import QuestionAnswerExecutionDetails from './QuestionAnswerExecutionDetails.vue'
+import QuestionAnswerQueuePanel from './QuestionAnswerQueuePanel.vue'
 import QuestionAnswerStatsBar from './QuestionAnswerStatsBar.vue'
 import QuestionAnswerModelControlPanel from './QuestionAnswerModelControlPanel.vue'
 import AccountTierEditor from './AccountTierEditor.vue'
@@ -111,6 +112,7 @@ const emit = defineEmits<{
   (event: 'completed'): void
   (event: 'question-answer-started', targetId: string): void
   (event: 'question-answer-viewed', targetId: string): void
+  (event: 'question-answer-view', value: { targetId: string; batchId: string }): void
   (event: 'question-answer-stats-dirty', targetId: string): void
   (event: 'question-answer-stats-retry', targetId: string): void
   (event: 'question-answer-preferences-changed', preferences: QuestionAnswerSelectionPreferences): void
@@ -1367,6 +1369,10 @@ const stopQuestionAnswers = async () => {
   }
 }
 
+const viewQueueBatch = (item: { targetId: string; batchId: string }) => {
+  if (item.targetId === props.target?.targetId) void reviewQuestionAnswerBatch(item.batchId)
+  else emit('question-answer-view', item)
+}
 const reviewQuestionAnswerBatch = async (batchId: string, options?: { expandFailed?: boolean }) => {
   if (!props.target || qaReviewLoadingBatchId.value === batchId) return
   abandonQuestionAnswerLocalSelectionFailure()
@@ -1874,6 +1880,7 @@ const close = () => {
             <p v-if="mode !== 'questionAnswer' && target?.testConfiguration?.protocol === 'messages'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesBudget') }}</p>
             <p v-if="mode === 'questionAnswer' && target?.testConfiguration?.protocol === 'messages'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesQuestionAnswerBudget') }}</p>
             <p v-if="mode === 'questionAnswer'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.questionAnswerTimeout') }}</p>
+            <QuestionAnswerQueuePanel v-if="mode === 'questionAnswer' && target?.targetId.startsWith('sub2api:')" :workspace="target.targetId.split(':')[1] || ''" :visible="open" :active="qaActive || qaStarting" :accounts="{ [target.targetId]: target.accountName }" @view="viewQueueBatch" />
 
             <div v-if="mode === 'questionAnswer' && (qaFinalization || qaFinalizationUnknown)" data-testid="question-answer-finalization" class="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
               <p v-if="qaFinalizationUnknown">{{ t(prefix + '.questionAnswer.finalizationUnknown') }}</p>

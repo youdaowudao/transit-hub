@@ -8,6 +8,7 @@ import { questionAnswerReadableError } from '../../utils/questionAnswers'
 import { formatQuestionAnswerAccuracy, questionAnswerAccuracy } from '../../utils/questionAnswers'
 import { questionAnswerScheduleIsActive, questionAnswerScheduleReason, questionAnswerScheduleStatus, questionAnswerScheduleTime } from '../../utils/questionAnswerSchedules'
 import type { QuestionAnswerScheduleExecution, QuestionAnswerScheduleExecutionDetail, QuestionAnswerScheduleExecutionTarget, QuestionAnswerStats } from '../../types/connectionHealth'
+import QuestionAnswerQueuePanel from './QuestionAnswerQueuePanel.vue'
 
 const props = defineProps<{ executionId: string; workspace: string; scheduleName: string; statsRevision?: number }>()
 const emit = defineEmits<{ (event: 'back'): void; (event: 'question-answer-view', value: { targetId: string; batchId: string; accountName: string; platform: string; groupName: string }): void; (event: 'settled', targetIds: string[]): void }>()
@@ -62,6 +63,11 @@ const cancel = async () => {
   } finally { if (current()) { cancelling.value = false; loading.value = false; schedulePoll() }; if (cancelController === controller) cancelController = null }
 }
 const viewBatch = (target: QuestionAnswerScheduleExecutionTarget) => { if (target.batchAvailable) emit('question-answer-view', { targetId: target.targetId, batchId: target.batchId, accountName: target.accountSnapshot.accountName || target.targetId, platform: target.accountSnapshot.platform, groupName: target.matchedGroupsSnapshot.map(group => group.name).join('、') }) }
+const queueAccounts = computed(() => Object.fromEntries((execution.value?.targets ?? []).map(target => [target.targetId, target.accountSnapshot.accountName])))
+const viewQueueBatch = (item: { targetId: string; batchId: string }) => {
+  const target = execution.value?.targets.find(target => target.targetId === item.targetId)
+  emit('question-answer-view', { ...item, accountName: target?.accountSnapshot.accountName || `账号编号 ${item.targetId.split(':').at(-1)}`, platform: target?.accountSnapshot.platform || 'sub2api', groupName: target?.matchedGroupsSnapshot.map(group => group.name).join('、') || '' })
+}
 const invalidate = () => { lifecycle++; revision++; clearTimer(); readController?.abort(); cancelController?.abort(); cancelling.value = false }
 watch(() => [props.executionId, props.workspace], () => { invalidate(); execution.value = null; notice.value = ''; error.value = ''; void load() }, { immediate: true })
 watch(documentVisibility, state => { revision++; clearTimer(); readController?.abort(); loading.value = false; if (state === 'visible' && !cancelling.value) void load() })
@@ -73,6 +79,7 @@ onBeforeUnmount(invalidate)
     <div class="flex flex-wrap items-center justify-between gap-2"><button type="button" class="text-xs text-muted-foreground" @click="emit('back')">回到执行历史</button><button type="button" class="inline-flex items-center gap-1 rounded-md border border-border/60 px-2.5 py-1.5 text-xs disabled:opacity-50" :disabled="cancelling" @click="load"><Loader2 v-if="loading" class="h-3.5 w-3.5 animate-spin" />刷新详情</button></div>
     <div v-if="error" role="alert" class="rounded-lg bg-destructive/10 p-3 text-xs text-destructive"><p class="break-words">{{ readable(error) }}</p><button type="button" class="mt-2 underline" :disabled="cancelling" @click="load">重试读取</button></div>
     <p v-if="loading && !execution" class="text-xs text-muted-foreground">正在读取执行记录…</p>
+    <QuestionAnswerQueuePanel :workspace="workspace" :active="active" :accounts="queueAccounts" @view="viewQueueBatch" />
     <template v-if="execution">
       <div><h3 class="break-words text-sm font-semibold">{{ scheduleName }} · {{ questionAnswerScheduleTime(execution.scheduledFor) }} · {{ t(`admin.connectionHealth.questionAnswerSchedule.sources.${execution.trigger}`) }}</h3><p data-testid="schedule-execution-status" class="mt-2 break-words text-xs">{{ questionAnswerScheduleStatus(execution.status) }}<template v-if="execution.statusReason"> · {{ questionAnswerScheduleReason(execution.statusReason) }}</template></p><p v-if="execution.terminationCause" class="mt-1 text-xs text-amber-600">{{ active ? (execution.terminationCause === 'user_cancel' ? '已接受终止，正在等它停下来' : '执行超时，正在等它停下来') : (execution.terminationCause === 'user_cancel' ? '终止原因：用户终止' : '终止原因：整次执行超时') }}</p></div>
       <section class="space-y-2 rounded-lg border border-border/50 p-4"><p class="text-xs text-muted-foreground">总正确率</p><strong data-testid="schedule-total-accuracy" class="text-3xl text-primary">{{ accuracy(execution.stats) }}</strong><p class="break-words text-xs">{{ counts(execution.stats) }}</p><p class="break-words text-xs">{{ reviews(execution.stats) }}</p><p class="text-[11px] text-muted-foreground">选择目标 {{ execution.plannedTargetCount }} · 已建批 {{ execution.batchCreatedTargetCount }} · 请求记录 {{ execution.requestRecordCount }} · 保留预算 {{ execution.reservedRequestCount }}</p><p v-if="execution.missedCount" class="break-words text-xs">错过 {{ execution.missedCount }} 个网格时刻：{{ questionAnswerScheduleTime(execution.missedFrom) }}–{{ questionAnswerScheduleTime(execution.missedThrough) }}</p></section>

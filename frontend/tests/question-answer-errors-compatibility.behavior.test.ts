@@ -57,3 +57,26 @@ it.each(bodies)('treats an invalid legacy error payload as unconfirmed with spec
     expect(fetcher).toHaveBeenCalledTimes(1)
   }
 })
+
+it.each([{}, { records: [], stats: null }])('keeps a malformed successful response unconfirmed and readable: %j', async body => {
+  for (const [operation, execute] of [
+    ['create', () => startQuestionAnswerBatch(target, ['m'], ['q'], 'medium', 1)],
+    ['cancel', () => cancelQuestionAnswerBatch(target, 'batch')],
+    ['judge', () => setQuestionAnswerJudgment(target, 'record', 'correct', '2026-10-22T00:00:00Z')],
+    ['read', () => getLatestQuestionAnswerBatch(target)],
+  ] as const) {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify(body), { status: 200 }))
+    vi.stubGlobal('fetch', fetcher)
+    const error = await execute().catch(error => error)
+    expect(error.operationResult, operation).toBe('unknown')
+    expect(error.message, operation).not.toMatch(/Cannot read|\.map|undefined|\[object Object\]/)
+    if (operation === 'create') {
+      expect(error.message).toContain('无法确认')
+      expect(error.message).toMatch(/最近批次|历史/)
+    } else {
+      expect(error.message).toContain('重新读取')
+      if (operation !== 'read') expect(error.message).toContain('无法确认')
+    }
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  }
+})

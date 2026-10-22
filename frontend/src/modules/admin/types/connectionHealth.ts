@@ -885,9 +885,42 @@ export interface QuestionAnswerHistory {
 }
 
 export interface QuestionAnswerFinalization {
+  reason?: string
+  message?: string
+  heldCount?: number
   batchId: string
   state: 'pending' | 'failed'
   recovery: 'cancel' | 'service_shutdown' | 'unavailable'
+}
+
+export interface QuestionAnswerQueueTarget { targetId: string; batchId: string }
+export interface QuestionAnswerQueueItem extends QuestionAnswerQueueTarget {
+  position?: number
+  recordId: string
+  modelName: string
+  questionName: string
+  repeatIndex: number | null
+  createdAt: string
+  runtime?: QuestionAnswerRuntimeItem
+}
+export interface QuestionAnswerQueueFinalization extends QuestionAnswerQueueTarget {
+  state: string
+  reason: string
+  message: string
+  heldCount: number
+}
+export interface QuestionAnswerQueue {
+  snapshotAt: string
+  capacity: number
+  availableSlots: number
+  workspaceOccupied: number
+  heldCount: number
+  preparingTargets: QuestionAnswerQueueTarget[]
+  queued: QuestionAnswerQueueItem[]
+  processing: QuestionAnswerQueueItem[]
+  stopping: QuestionAnswerQueueItem[]
+  finalizingBatches: QuestionAnswerQueueFinalization[]
+  counts: { queued: number; processing: number; stopping: number; preparingTargets: number; finalizingBatches: number }
 }
 
 export interface QuestionAnswerBatch {

@@ -47,8 +47,15 @@ export const loginWithEmail = async (form: LoginRequest): Promise<AuthTokenRespo
   }, 'auth.login.errors.login')
 )
 
+const authSessionListeners = new Set<() => void>()
+export const subscribeAuthSessionChange = (listener: () => void): (() => void) => {
+  authSessionListeners.add(listener)
+  return () => { authSessionListeners.delete(listener) }
+}
+
 export const storeAccessToken = (accessToken: string): void => {
   localStorage.setItem(authTokenStorageKey, accessToken)
+  for (const listener of authSessionListeners) listener()
 }
 
 export const getAccessToken = (): string | null => localStorage.getItem(authTokenStorageKey)
@@ -58,6 +65,7 @@ export const clearAccessToken = (): void => {
   // 清除 token 时同步重置 workspace 路由守卫缓存，
   // 防止下次登录（可能是不同用户）复用旧 workspace 状态。
   resetWorkspaceCheck()
+  for (const listener of authSessionListeners) listener()
 }
 
 export const isUnauthorizedApiResponse = (status: number, payload: ApiErrorPayload): boolean => (

@@ -1720,13 +1720,22 @@ func (s *PlatformService) loginNewAPI(baseURL string, username string, password 
 		}
 	}
 	loginData := dataRecord(response.Payload)
+	if value, exists := loginData["require_2fa"]; exists {
+		required, ok := value.(bool)
+		if !ok {
+			return LoginResult{}, incompleteNewAPILogin(response, "上游没有清楚说明是否需要额外验证，本站无法确认登录完成。请联系上游维护人员核查登录接口的额外验证状态后重试；本次没有保存，不会修改主站。")
+		}
+		if required {
+			return LoginResult{}, incompleteNewAPILogin(response, "上游明确要求两步验证，当前连接窗口暂不支持填写验证码。请在上游账号安全设置中核查登录验证方式后重试；本次没有保存，不会修改主站。")
+		}
+	}
 	userID := newAPIUserID(loginData)
 	session := Session{AuthMode: AuthModePassword, Platform: PlatformNewAPI, BaseURL: baseURL, Cookie: cookieHeader(response.Header), UserID: userID, UserIDConfirmed: true}
 	if strings.TrimSpace(session.Cookie) == "" {
-		return LoginResult{}, incompleteLogin(PlatformNewAPI, "login", response)
+		return LoginResult{}, incompleteNewAPILogin(response, "上游登录响应没有返回登录会话，本站无法继续读取账号。请联系上游维护人员核查登录接口的会话返回后重试；本次没有保存，不会修改主站。")
 	}
 	if strings.TrimSpace(session.UserID) == "" {
-		return LoginResult{}, incompleteLogin(PlatformNewAPI, "login", response)
+		return LoginResult{}, incompleteNewAPILogin(response, "上游登录响应带有会话，但没有合法的用户编号，无法确认登录账号。请联系上游维护人员核查登录接口返回的账号资料后重试；本次没有保存，不会修改主站。")
 	}
 	session.QuotaPerUnit = s.fetchNewAPIQuotaPerUnit(session)
 	metrics, err := s.fetchNewAPIMetrics(session, loginData, date)
@@ -1736,6 +1745,12 @@ func (s *PlatformService) loginNewAPI(baseURL string, username string, password 
 		metrics.RateNoticeObservation = &RateNoticeObservation{ObservedAt: s.keyUsageNow(), Reason: safeCostReason("登录已成功，但读取网站资料失败：" + costFailureCause(err) + "；本次倍率尚未确认，请重新同步并核查上游网站资料")}
 	}
 	return LoginResult{Platform: PlatformNewAPI, Session: session, Metrics: metrics, MetricsError: err}, nil
+}
+
+func incompleteNewAPILogin(response jsonResponse, message string) *RequestError {
+	err := incompleteLogin(PlatformNewAPI, "login", response)
+	err.UpstreamMessage = message
+	return err
 }
 
 func (s *PlatformService) loginSub2API(baseURL string, email string, password string, dates ...string) (LoginResult, error) {
@@ -1908,8 +1923,13 @@ func cookieHeader(headers http.Header) string {
 }
 
 func newAPIUserID(loginData map[string]any) string {
-	if value := firstNumber(loginData, []string{"id", "user_id", "userId"}); value != nil {
-		return strconv.FormatInt(int64(*value), 10)
+	user, _ := loginData["user"].(map[string]any)
+	for _, record := range []map[string]any{loginData, user} {
+		for _, key := range []string{"id", "user_id", "userId"} {
+			if id, ok := strictNumericID(record[key], false); ok {
+				return id
+			}
+		}
 	}
 	return ""
 }

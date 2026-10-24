@@ -54,10 +54,11 @@ const mountView = async () => {
   await flushPromises()
   return wrapper
 }
-const open = async (edit: boolean) => {
+const open = async (edit: boolean, mode: 'card' | 'list' = 'card') => {
   const view = await mountView()
   if (edit) {
-    await view.get('div.group.bg-card').findAll('button')[2]!.trigger('click')
+    if (mode === 'list') await view.get('button[aria-label="列表模式"]').trigger('click')
+    await view.get(mode === 'card' ? 'div.group.bg-card' : 'tbody tr').findAll('button')[2]!.trigger('click')
   } else {
     const add = view.findAll('button').find(button => button.text().includes('新增站点'))
     if (!add) throw new Error('add entry missing')
@@ -88,6 +89,71 @@ const failure = (stage: string, upstreamMessage = '上游具体原因', key = 'r
 const selectedMode = (view: VueWrapper) => (view.get('input[type="radio"]:checked').element as HTMLInputElement).value
 
 describe('same-site login method switching and Key-first entry', () => {
+  it.each(['card', 'list'] as const)('keeps the original site and password form after a precise login failure in %s mode', async mode => {
+    platform = 'newapi'
+    authMode = 'user_key'
+    const reason = '上游登录响应带有会话，但没有合法的用户编号，无法确认登录账号。请联系上游维护人员核查登录接口返回的账号资料后重试；本次没有保存，不会修改主站。'
+    payload = { message: 'admin.upstream.errors.loginIncomplete', failure: { errorKey: 'admin.upstream.errors.loginIncomplete', stage: 'login', httpStatus: 200, upstreamMessage: reason } }
+    const view = await open(true, mode)
+    await view.get('input[type="radio"][value="password"]').setValue(true)
+    await view.get('#upstream-site-account').setValue('owner@example.com')
+    await view.get('#upstream-site-password').setValue('fixture-new-password')
+    const alert = await submit(view)
+    expect(alert.text()).toContain(reason)
+    expect(alert.text()).toContain('失败步骤：登录')
+    expect(alert.text()).toContain('HTTP 状态：200')
+    expect(alert.text()).toContain(editUnchanged)
+    for (const absent of ['可能开启了两步验证', '请改用 Key 或 Token', refreshWarning, '已保存']) expect(alert.text()).not.toContain(absent)
+    expect(savedForm).toMatchObject({ authMode: 'password', account: 'owner@example.com', password: 'fixture-new-password' })
+    expect(selectedMode(view)).toBe('password')
+    expect(view.get('#upstream-site-account').element).toHaveProperty('value', 'owner@example.com')
+    expect(view.get('#upstream-site-password').element).toHaveProperty('value', 'fixture-new-password')
+    const entry = view.get(mode === 'card' ? 'div.group.bg-card' : 'tbody tr')
+    expect(entry.text()).toContain('验收-切换方式')
+    expect(entry.text()).toContain('已连接')
+    expect(view.findAll(mode === 'card' ? 'div.group.bg-card' : 'tbody tr')).toHaveLength(1)
+  })
+
+  it.each(['card', 'list'] as const)('saves and reopens the same site as password mode through the %s entry', async mode => {
+    platform = 'newapi'
+    authMode = 'user_key'
+    const view = await open(true, mode)
+    await view.get('input[type="radio"][value="password"]').setValue(true)
+    await view.get('#upstream-site-account').setValue('owner@example.com')
+    await view.get('#upstream-site-password').setValue('fixture-new-password')
+    status = 200
+    payload = { ...site(), authMode: 'password', account: 'owner@example.com' }
+    await view.get('[role="dialog"] form').trigger('submit'); await flushPromises()
+    expect(view.find('[role="dialog"]').exists()).toBe(false)
+    expect(savedForm).toMatchObject({ authMode: 'password', account: 'owner@example.com' })
+    const entry = view.get(mode === 'card' ? 'div.group.bg-card' : 'tbody tr')
+    expect(entry.text()).toContain('验收-切换方式')
+    expect(view.findAll(mode === 'card' ? 'div.group.bg-card' : 'tbody tr')).toHaveLength(1)
+    await entry.findAll('button')[2]!.trigger('click')
+    expect(selectedMode(view)).toBe('password')
+    expect(view.get('#upstream-site-account').element).toHaveProperty('value', 'owner@example.com')
+    expect(view.get('#upstream-site-password').element).toHaveProperty('value', '')
+  })
+
+  it.each(['card', 'list'] as const)('cancels the password switch without sending or changing the original %s entry', async mode => {
+    platform = 'newapi'
+    authMode = 'user_key'
+    const view = await open(true, mode)
+    await view.get('input[type="radio"][value="password"]').setValue(true)
+    await view.get('#upstream-site-account').setValue('owner@example.com')
+    await view.get('#upstream-site-password').setValue('fixture-new-password')
+    const cancel = view.get('[role="dialog"]').findAll('button').find(button => button.text() === '取消')
+    if (!cancel) throw new Error('cancel entry missing')
+    await cancel.trigger('click'); await flushPromises()
+    expect(savedForm).toBeUndefined()
+    expect(view.find('[role="dialog"]').exists()).toBe(false)
+    const entry = view.get(mode === 'card' ? 'div.group.bg-card' : 'tbody tr')
+    expect(entry.text()).toContain('验收-切换方式')
+    await entry.findAll('button')[2]!.trigger('click')
+    expect(selectedMode(view)).toBe('user_key')
+    expect(view.find('#upstream-site-password').exists()).toBe(false)
+  })
+
   it('defaults to Refresh Token, puts it first, and places Refresh Token before optional Access Token', async () => {
     const view = await open(false)
     expect(selectedMode(view)).toBe('token')

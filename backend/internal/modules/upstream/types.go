@@ -357,6 +357,7 @@ type BalanceFilter struct {
 // 由调用方（tickets.Service）按需降级展示，不在这里伪造数据。
 type Sub2APIAdminUser struct {
 	ID            string
+	Notes         string
 	Email         string
 	Username      string
 	Role          string
@@ -372,14 +373,16 @@ type Sub2APIAdminUser struct {
 // Sub2APIAdminUsersQuery 是 Sub2API admin 用户分页列表的安全查询对象。
 // 调用方只能通过这些显式字段影响远端查询，PlatformService 会继续做白名单和分页夹紧。
 type Sub2APIAdminUsersQuery struct {
-	Page      int
-	PageSize  int
-	Status    string
-	Role      string
-	Search    string
-	SortBy    string
-	SortOrder string
-	Timezone  string
+	IncludeSubscriptions *bool
+	StrictPagination     bool
+	Page                 int
+	PageSize             int
+	Status               string
+	Role                 string
+	Search               string
+	SortBy               string
+	SortOrder            string
+	Timezone             string
 }
 
 type Sub2APIAdminUsersPage struct {

@@ -136,6 +136,10 @@ func (s *Service) Summary(ctx context.Context, user, workspace string, query Sum
 	if err != nil {
 		return result, storageFailure(workspace, "核查当前已显示通知的状态", err)
 	}
+	result.SignupRisk, err = loadSignupRiskSummary(ctx, tx, user, workspace)
+	if err != nil {
+		return result, storageFailure(workspace, "读取高风险注册提醒和开关", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return result, storageFailure(workspace, "完成通知摘要读取", err)
 	}

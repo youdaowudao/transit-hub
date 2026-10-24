@@ -22,8 +22,47 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("GET /api/notifications", h.history)
 	mux.HandleFunc("GET /api/notifications/preferences", h.preferences)
 	mux.HandleFunc("PUT /api/notifications/preferences", h.savePreferences)
+	mux.HandleFunc("GET /api/notifications/signup-risk-preferences", h.signupRiskPreferences)
+	mux.HandleFunc("PUT /api/notifications/signup-risk-preferences", h.saveSignupRiskPreferences)
 	mux.HandleFunc("POST /api/notifications/progress", h.progress)
 	mux.HandleFunc("GET /api/notifications/{id}", h.detail)
+}
+
+func (h *Handler) signupRiskPreferences(w http.ResponseWriter, r *http.Request) {
+	user, workspace, ok := requestScope(w, r, r.URL.Query().Get("workspaceAdminAccountId"))
+	if !ok {
+		return
+	}
+	result, err := h.service.GetSignupRiskPreferences(r.Context(), user, workspace)
+	if err != nil {
+		writeRequestError(w, workspace, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) saveSignupRiskPreferences(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		WorkspaceAdminAccountID string `json:"workspaceAdminAccountId"`
+		Enabled                 *bool  `json:"enabled"`
+	}
+	if !decodeRequest(w, r, &body, func() string { return body.WorkspaceAdminAccountID }) {
+		return
+	}
+	user, workspace, ok := requestScope(w, r, body.WorkspaceAdminAccountID)
+	if !ok {
+		return
+	}
+	if body.Enabled == nil {
+		writeRequestError(w, workspace, invalidRequest(workspace, "必须明确选择是否开启高风险注册提醒（布尔值）；原设置没有改变"))
+		return
+	}
+	result, err := h.service.SaveSignupRiskPreferences(r.Context(), user, workspace, *body.Enabled)
+	if err != nil {
+		writeRequestError(w, workspace, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
 }
 
 func writeRequestError(w http.ResponseWriter, workspace string, err error) {

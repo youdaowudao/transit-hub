@@ -27,6 +27,7 @@ import (
 	"transithub/backend/internal/modules/my_sites"
 	"transithub/backend/internal/modules/notifications"
 	"transithub/backend/internal/modules/settings"
+	"transithub/backend/internal/modules/signup_risk"
 	"transithub/backend/internal/modules/system"
 	"transithub/backend/internal/modules/tickets"
 	"transithub/backend/internal/modules/upstream"
@@ -50,6 +51,7 @@ type Server struct {
 	lotteryCancel                  context.CancelFunc
 	lotteryWorker                  *lottery.Worker
 	connectionHealthService        *connection_health.Service
+	signupRiskService              *signup_risk.Service
 	upstreamService                interface{ ShutdownGroupCostSampling(context.Context) error }
 }
 
@@ -163,6 +165,8 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	upstreamRepository.SetRateNoticeWriter(notificationsRepository)
 	notificationService := notifications.NewService(notificationsRepository)
 	notifications.RegisterRoutes(server.mux, notificationService)
+	signupRiskService := signup_risk.NewService(notificationsRepository, mySitesService, platformService)
+	server.signupRiskService = signupRiskService
 	admin_accounts.RegisterRoutes(server.mux, adminAccountsService)
 
 	// 注入机器人通知能力，供自动调价成功后发送通知。
@@ -233,6 +237,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	// 避免后台任务在旧行尚未补齐 workspace 时读取或写回数据。
 	runStorageStartup(cfg, adminAccountsService.AssignLegacyRows, upstreamService.RestoreSavedSites)
 	if !cfg.APIOnly {
+		signupRiskService.Start(context.Background())
 		massEmailWorker.Start(context.Background())
 		campaignsService.StartScheduler(context.Background())
 		lotteryCtx, lotteryCancel := context.WithCancel(context.Background())
@@ -481,6 +486,11 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	var shutdownErrors []error
+	if s.signupRiskService != nil {
+		if err := s.signupRiskService.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
 	if s.upstreamService != nil {
 		if err := s.upstreamService.ShutdownGroupCostSampling(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)

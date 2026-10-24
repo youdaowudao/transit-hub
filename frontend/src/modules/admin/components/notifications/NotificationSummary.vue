@@ -1,10 +1,15 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import type { NotificationController } from '../../composables/useNotifications'
 const props = defineProps<{ controller: NotificationController }>()
 const { attentionItems, importantItems, summary, summaryLoading, managementRefreshPending, busyIds, progressError } = props.controller
+const signupRiskItems = props.controller.signupRiskItems
+const visibleImportantItems = computed(() => {
+  const riskIds = new Set(signupRiskItems.value.map(item => item.id))
+  return importantItems.value.filter(item => !riskIds.has(item.id))
+})
 const pointerHovered = ref(false)
 const focusWithin = ref(false)
 let timer: ReturnType<typeof setTimeout> | null = null
@@ -44,15 +49,21 @@ onBeforeUnmount(() => { clearTimer(); pointerHovered.value = focusWithin.value =
 </script>
 
 <template>
-  <div v-if="attentionItems.length || importantItems.length" class="fixed right-3 top-16 z-40 flex max-h-[calc(100dvh-5rem)] w-[calc(100%-1.5rem)] max-w-sm flex-col gap-3 sm:right-6">
+  <div v-if="attentionItems.length || importantItems.length || signupRiskItems.length" class="fixed right-3 top-16 z-40 flex max-h-[calc(100dvh-5rem)] w-[calc(100%-1.5rem)] max-w-sm flex-col gap-3 overflow-y-auto sm:right-6">
     <p v-if="managementRefreshPending" role="status" class="break-words bg-card p-3 text-xs text-muted-foreground">{{ controller.summaryError.value || '站点设置已变化，正在重新确认通知数量；这里不会修改主站。' }}</p>
-    <section v-if="importantItems.length" class="shrink-0 overflow-y-auto overscroll-contain rounded-xl border border-warning/40 bg-card p-4 shadow-lg" :class="attentionItems.length ? 'max-h-[calc((100dvh-5.75rem)/2)]' : 'max-h-[calc(100dvh-5rem)]'" aria-label="重要通知" aria-live="polite">
+    <section v-if="signupRiskItems.length" class="max-h-[calc((100dvh-5.75rem)/2)] shrink-0 overflow-y-auto overscroll-contain rounded-xl border border-warning/40 bg-card p-4 shadow-lg" aria-label="高风险注册提醒" aria-live="polite">
+      <div class="flex items-center justify-between gap-3"><h2 class="text-sm font-semibold">重要：注册提醒</h2><Button variant="ghost" size="sm" :disabled="signupRiskItems.some(item => busyIds.includes(item.id))" @click="controller.dismissSignupRisk()">收起这组注册提醒</Button></div>
+      <p class="mb-3 text-xs text-muted-foreground">注册提醒：这里最多显示20条；收起只停止这组提醒，消息仍可查看，不会修改主站。</p>
+      <div v-for="item in signupRiskItems" :key="item.id" class="mb-3 min-w-0 break-words text-sm"><p class="font-medium">{{ item.content.title }}</p><p class="whitespace-pre-wrap text-muted-foreground">{{ item.content.summary }}</p><button type="button" class="mt-1 text-primary underline" @click="controller.openDetail(item.id)">查看详情</button></div>
+      <p v-if="progressError" role="alert" class="break-words text-sm text-destructive">{{ progressError }}</p>
+    </section>
+    <section v-if="visibleImportantItems.length || importantItems.length && summary?.active.important.nextCursor" class="shrink-0 overflow-y-auto overscroll-contain rounded-xl border border-warning/40 bg-card p-4 shadow-lg" :class="attentionItems.length ? 'max-h-[calc((100dvh-5.75rem)/2)]' : 'max-h-[calc(100dvh-5rem)]'" aria-label="重要通知" aria-live="polite">
       <div class="flex items-center justify-between gap-3">
         <h2 class="text-sm font-semibold">重要：尽快检查</h2>
         <Button variant="ghost" size="sm" :disabled="importantItems.some(item => busyIds.includes(item.id))" @click="controller.dismissImportant()">收起</Button>
       </div>
-      <p class="mb-3 text-xs text-muted-foreground"><template v-if="!managementRefreshPending">共有{{ summary?.active.important.totalCount ?? importantItems.length }}条待提醒，</template>本摘要{{ importantItems.length }}条。收起只停止这些提醒，消息仍可查看，不会修改主站。</p>
-      <div v-for="item in importantItems" :key="item.id" class="mb-3 min-w-0 break-words text-sm">
+      <p class="mb-3 text-xs text-muted-foreground"><template v-if="!managementRefreshPending">共有{{ summary?.active.important.totalCount ?? importantItems.length }}条待提醒，</template>本摘要{{ importantItems.length }}条。收起只停止这些提醒，消息仍可查看，不会修改主站。<span v-if="visibleImportantItems.length !== importantItems.length">相同的注册消息已在上方单列显示。</span></p>
+      <div v-for="item in visibleImportantItems" :key="item.id" class="mb-3 min-w-0 break-words text-sm">
         <p class="font-medium">{{ item.content.title }}</p><p class="whitespace-pre-wrap text-muted-foreground">{{ item.content.summary }}</p>
         <button type="button" class="mt-1 text-primary underline" @click="controller.openDetail(item.id)">查看详情</button>
       </div>

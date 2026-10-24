@@ -44,6 +44,42 @@ beforeEach(() => {
 })
 afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.unstubAllGlobals(); localStorage.clear(); document.body.innerHTML = '' })
 describe('upstream failure fix stage A', () => {
+ it.each([
+  '上游登录响应没有返回登录会话，本站无法继续读取账号。请联系上游维护人员核查登录接口的会话返回后重试；本次没有保存，不会修改主站。',
+  '上游登录响应带有会话，但没有合法的用户编号，无法确认登录账号。请联系上游维护人员核查登录接口返回的账号资料后重试；本次没有保存，不会修改主站。',
+  '上游明确要求两步验证，当前连接窗口暂不支持填写验证码。请在上游账号安全设置中核查登录验证方式后重试；本次没有保存，不会修改主站。',
+  '上游没有清楚说明是否需要额外验证，本站无法确认登录完成。请联系上游维护人员核查登录接口的额外验证状态后重试；本次没有保存，不会修改主站。',
+ ])('password adding displays the known login cause without an invented verification hint: %s', async reason => {
+  payload = { message: 'admin.upstream.errors.loginIncomplete', failure: { errorKey: 'admin.upstream.errors.loginIncomplete', stage: 'login', httpStatus: 200, upstreamMessage: reason } }
+  const view = await openAdd()
+  await view.get('#upstream-site-platform').setValue('newapi')
+  await view.get('[role="dialog"] form').trigger('submit'); await flushPromises()
+  const alert = view.get('[role="dialog"] [role="alert"]')
+  expect(alert.text()).toContain('上游返回的登录资料不完整，当前无法确认登录结果。请查看具体原因后重试。')
+  expect(alert.text()).toContain(reason)
+  expect(alert.text()).toContain('失败步骤：登录')
+  expect(alert.text()).toContain('HTTP 状态：200')
+  expect(alert.text()).not.toContain('可能开启了两步验证')
+  expect(alert.text()).not.toContain('请改用 Key 或 Token')
+  expect(alert.text()).not.toContain('已保存')
+  expect(view.get('#upstream-site-name').element).toHaveProperty('value', '验收-添加')
+  expect(view.get('#upstream-site-account').element).toHaveProperty('value', 'fixture-account')
+  expect(view.get('#upstream-site-password').element).toHaveProperty('value', 'fixture-password')
+  expect(view.findAll('div.group.bg-card')).toHaveLength(1)
+  expect(view.get('div.group.bg-card').text()).toContain('验收-原站点')
+ })
+ it.each(['newapi', 'sub2api'])('uses a neutral shared fallback when %s does not return a detailed login cause', async platform => {
+  payload = { message: 'admin.upstream.errors.loginIncomplete', failure: { errorKey: 'admin.upstream.errors.loginIncomplete', stage: 'login', httpStatus: 200 } }
+  const view = await openAdd()
+  await view.get('#upstream-site-platform').setValue(platform)
+  await view.get('[role="dialog"] form').trigger('submit'); await flushPromises()
+  const alert = view.get('[role="dialog"] [role="alert"]')
+  expect(alert.text()).toContain('上游返回的登录资料不完整，当前无法确认登录结果。请查看具体原因后重试。')
+  expect(alert.text()).toContain('失败步骤：登录')
+  expect(alert.text()).toContain('HTTP 状态：200')
+  for (const absent of ['两步验证', '改用 Key', '改用 Token', '没有返回登录会话', '没有合法的用户编号', '已保存']) expect(alert.text()).not.toContain(absent)
+  expect(view.find('[role="dialog"]').exists()).toBe(true)
+ })
  it.each(['card', 'list'] as const)('local missing-site editing in %s mode preserves the form and avoids upstream 404 instructions', async mode => {
   status = 404; payload = { message: 'admin.upstream.errors.notFound' }
   const view = await mountView()

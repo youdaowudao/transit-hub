@@ -2482,7 +2482,7 @@ export default {
         identityCheckFailed: '没有保存，原有资料保持不变。',
         userKeyDetectFailed: '只用 Key 没能读到所属用户。新版 New-API 只需 Key，旧版 New-API 还需要填写用户 ID。请看下面的上游提示：提到 New-Api-User 或用户 ID 时，填写用户 ID 后重试；提到令牌无效时，请检查 Key 是否正确。',
         loginRejected: '上游拒绝登录：账号或密码不正确，或账号被停用。',
-        loginIncomplete: '上游登录没有返回会话信息，账号可能开启了两步验证，请改用 Key 或 Token 方式。',
+        loginIncomplete: '上游返回的登录资料不完整，当前无法确认登录结果。请查看具体原因后重试。',
         refreshTokenRejected: '刷新令牌已失效或已被使用，请重新获取后填写。',
         accessTokenRejected: '访问令牌无效，可能已在上游重新生成。',
         businessRejected: '上游拒绝此请求，请检查上游状态后重试。',

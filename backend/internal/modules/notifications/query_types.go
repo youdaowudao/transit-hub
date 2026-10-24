@@ -49,6 +49,7 @@ type DisplayedState struct {
 }
 
 type SummaryResponse struct {
+	SignupRisk              *SignupRiskSummary  `json:"signupRisk,omitempty"`
 	DisplayedStates         []DisplayedState    `json:"displayedStates"`
 	ServerTime              time.Time           `json:"serverTime"`
 	WorkspaceAdminAccountID string              `json:"workspaceAdminAccountId"`

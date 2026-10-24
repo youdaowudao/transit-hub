@@ -66,6 +66,8 @@ export function useNotifications(options: NotificationControllerOptions) {
   const lastCheckedAt = ref<string | null>(null)
   const attentionItems = shallowRef<SiteNotification[]>([])
   const importantItems = shallowRef<SiteNotification[]>([])
+  const signupRiskItems = shallowRef<SiteNotification[]>([])
+  const signupRiskEnabled = ref(false)
   const criticalBatch = shallowRef<SiteNotification[]>([])
   const criticalNextCursor = ref<string | null>(null)
   const criticalTotalCount = ref(0)
@@ -86,13 +88,15 @@ export function useNotifications(options: NotificationControllerOptions) {
   let workspaceEpoch = 0
   let lastCompletedAt: number | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
+  let signupRiskTimer: ReturnType<typeof setTimeout> | null = null
+  let currentSummaryCursors: Partial<NotificationSummaryQuery> = {}
   const requests = new Set<AbortController>()
   const notices = new Map<string, SiteNotification>()
   let historyRequest: AbortController | null = null
   let detailRequest: AbortController | null = null
   let preferenceRequest: AbortController | null = null
   let preferenceSaveRequest: AbortController | null = null
-  let flight: { controller: AbortController; promise: Promise<boolean> } | null = null
+  let flight: { controller: AbortController; promise: Promise<boolean>; signupRiskOnly: boolean } | null = null
 
   const ready = () => mounted && !stopped && Boolean(workspaceId.value) && !options.isSwitching.value && options.enabled?.value !== false
   const requestScope = () => {
@@ -110,8 +114,13 @@ export function useNotifications(options: NotificationControllerOptions) {
     if (timer !== null) clearTimeout(timer)
     timer = null
   }
+  const clearSignupRiskTimer = () => {
+    if (signupRiskTimer !== null) clearTimeout(signupRiskTimer)
+    signupRiskTimer = null
+  }
   const cancelSummary = () => {
     clearTimer()
+    clearSignupRiskTimer()
     flight?.controller.abort()
     flight = null
     summaryLoading.value = false
@@ -126,6 +135,7 @@ export function useNotifications(options: NotificationControllerOptions) {
     busyIds.value = []
     drawerOpen.value = criticalOpen.value = false
     attentionItems.value = importantItems.value = []
+    signupRiskItems.value = []
   }
   const reset = () => {
     summary.value = null
@@ -133,12 +143,15 @@ export function useNotifications(options: NotificationControllerOptions) {
     notices.clear()
     unreadCount.value = pendingCriticalCount.value = 0
     intervalSeconds.value = 300
+    signupRiskEnabled.value = false
+    currentSummaryCursors = {}
     preferenceConfirmed.value = preferenceSaved.value = false
     lastCheckedAt.value = null
     lastCompletedAt = null
     summaryError.value = progressError.value = preferenceError.value = historyError.value = detailError.value = ''
     summaryPreferenceError.value = ''
     attentionItems.value = importantItems.value = criticalBatch.value = historyItems.value = []
+    signupRiskItems.value = []
     drawerOpen.value = criticalOpen.value = false
     historyNextCursor.value = null
     criticalNextCursor.value = null
@@ -161,9 +174,11 @@ export function useNotifications(options: NotificationControllerOptions) {
     historyItems.value = historyItems.value.map(latest).filter(item => historyFilter.value === 'all' || historyFilter.value === 'unread' && item.subjectActive && !item.readAt || historyFilter.value === 'pending' && item.subjectActive && item.level === 4 && !item.reminderCompletedAt)
     attentionItems.value = attentionItems.value.map(latest).filter(item => item.subjectActive)
     importantItems.value = importantItems.value.map(latest).filter(item => item.subjectActive && !item.reminderCompletedAt)
+    signupRiskItems.value = signupRiskItems.value.map(latest).filter(item => item.subjectActive && !item.reminderCompletedAt)
     criticalBatch.value = criticalBatch.value.map(latest).filter(item => item.subjectActive && !item.reminderCompletedAt)
     if (detail.value) detail.value = { ...detail.value, item: latest(detail.value.item) }
     if (summary.value) summary.value = { ...summary.value, unreadCount: unreadCount.value, pendingCriticalCount: pendingCriticalCount.value,
+      ...(summary.value.signupRisk ? { signupRisk: { ...summary.value.signupRisk, items: summary.value.signupRisk.items.map(latest).filter(item => item.subjectActive && !item.reminderCompletedAt) } } : {}),
       active: {
         attention: { ...summary.value.active.attention, items: summary.value.active.attention.items.map(latest).filter(item => item.subjectActive && !item.reminderCompletedAt) },
         important: { ...summary.value.active.important, items: summary.value.active.important.items.map(latest).filter(item => item.subjectActive && !item.reminderCompletedAt) },
@@ -179,19 +194,22 @@ export function useNotifications(options: NotificationControllerOptions) {
     }
     attentionItems.value = attentionItems.value.map(project)
     importantItems.value = importantItems.value.map(project)
+    signupRiskItems.value = signupRiskItems.value.map(project)
     criticalBatch.value = criticalBatch.value.map(project)
     historyItems.value = historyItems.value.map(project)
     if (detail.value) detail.value = { ...detail.value, item: project(detail.value.item) }
     updateLoadedProgress()
   }
   const applyProgress = (items: NotificationProgress[], startingSummary: NotificationSummaryResponse | null) => {
+    const signupRiskOnly = items.length > 0 && items.every(item => notices.get(item.id)?.kind === 'sub2api.signup_risk')
     const sameSummary = summary.value !== null && summary.value === startingSummary && !managementRefreshPending.value
     // History and detail alone cannot prove that an ID contributes to this summary's counts.
     const countedIds = new Set(summary.value ? [
       ...summary.value.active.attention.items, ...summary.value.active.important.items,
       ...summary.value.active.critical.items, ...summary.value.displayedStates,
+      ...(summary.value.signupRisk?.items ?? []),
     ].filter(item => item.subjectActive).map(item => item.id) : [])
-    const displayed = [...(drawerOpen.value ? historyItems.value : []), ...attentionItems.value, ...importantItems.value, ...(criticalOpen.value ? criticalBatch.value : []), ...(drawerOpen.value && detail.value ? [detail.value.item] : [])]
+    const displayed = [...(drawerOpen.value ? historyItems.value : []), ...attentionItems.value, ...importantItems.value, ...signupRiskItems.value, ...(criticalOpen.value ? criticalBatch.value : []), ...(drawerOpen.value && detail.value ? [detail.value.item] : [])]
     let refreshNeeded = !sameSummary
     cancelSummary()
     for (const progress of items) {
@@ -212,7 +230,7 @@ export function useNotifications(options: NotificationControllerOptions) {
     }
     updateLoadedProgress()
     if (criticalOpen.value && criticalBatch.value.length === 0) criticalOpen.value = false
-    if (refreshNeeded) void refreshSummary()
+    if (refreshNeeded) void (signupRiskOnly ? refreshSignupRisk() : refreshSummary())
     else schedule()
   }
   const applyPreference = (seconds: number) => {
@@ -244,22 +262,35 @@ export function useNotifications(options: NotificationControllerOptions) {
   }
   const schedule = () => {
     clearTimer()
+    clearSignupRiskTimer()
     if (!ready() || !isVisible() || flight) return
     const remaining = lastCompletedAt === null ? intervalSeconds.value * 1000 : Math.max(0, lastCompletedAt + intervalSeconds.value * 1000 - Date.now())
     timer = setTimeout(() => { timer = null; void refreshSummary() }, remaining)
+    if (signupRiskEnabled.value) signupRiskTimer = setTimeout(() => {
+      signupRiskTimer = null
+      void refreshSummary({}, false, false, true)
+    }, 15_000)
   }
-  const refreshSummary = (cursors: Partial<NotificationSummaryQuery> = {}, forceCritical = false, suppressNewReminders = false): Promise<boolean> => {
+  const refreshSummary = (cursors: Partial<NotificationSummaryQuery> = {}, forceCritical = false, suppressNewReminders = false, signupRiskOnly = false): Promise<boolean> => {
     if (!ready()) return Promise.resolve(false)
-    if (flight) return flight.promise
+    if (flight) {
+      if (!signupRiskOnly && flight.signupRiskOnly) {
+        const workspace = workspaceId.value, epoch = workspaceEpoch
+        return flight.promise.then(() => ready() && workspaceId.value === workspace && workspaceEpoch === epoch ? refreshSummary(cursors, forceCritical, suppressNewReminders) : false)
+      }
+      return flight.promise
+    }
     clearTimer()
+    clearSignupRiskTimer()
     const scope = requestScope()
     summaryLoading.value = true
-    const candidate = { controller: scope.controller, promise: Promise.resolve(false) }
+    const candidate = { controller: scope.controller, promise: Promise.resolve(false), signupRiskOnly }
     flight = candidate
     candidate.promise = (async () => {
       try {
         const displayedIds = [...new Set([...attentionItems.value, ...importantItems.value, ...(criticalOpen.value ? criticalBatch.value : [])].map(item => item.id))]
-        const response = await getNotificationSummary({ ...cursors, workspaceAdminAccountId: scope.workspace, ...(displayedIds.length ? { displayedIds } : {}) }, scope.controller.signal)
+        const pageCursors = signupRiskOnly ? currentSummaryCursors : cursors
+        const response = await getNotificationSummary({ ...pageCursors, workspaceAdminAccountId: scope.workspace, ...(displayedIds.length ? { displayedIds } : {}) }, scope.controller.signal)
         if (!scope.current() || flight !== candidate) return false
         const hadCriticalOpen = criticalOpen.value
         const previousCriticalSize = criticalBatch.value.length
@@ -274,7 +305,16 @@ export function useNotifications(options: NotificationControllerOptions) {
           important: { ...response.active.important, items: response.active.important.items.map(mergeNotice).filter(item => item.subjectActive && !item.reminderCompletedAt) },
           critical: { ...response.active.critical, items: response.active.critical.items.map(mergeNotice).filter(item => item.subjectActive && !item.reminderCompletedAt) },
         }
+        // Supplemental reads may discover registrations, but must not replace
+        // the normal important page or its cursor with an unrelated first page.
+        if (signupRiskOnly && summary.value) active.important = {
+          ...summary.value.active.important, totalCount: active.important.totalCount,
+          items: summary.value.active.important.items.map(item => notices.get(item.id) ?? item).filter(item => item.subjectActive && !item.reminderCompletedAt),
+        }
+        if (!signupRiskOnly) currentSummaryCursors = { ...cursors }
         summary.value = { ...response, active }
+        signupRiskEnabled.value = response.signupRisk?.enabled ?? false
+        if (isVisible()) signupRiskItems.value = (response.signupRisk?.items ?? []).map(mergeNotice).filter(item => item.subjectActive && !item.reminderCompletedAt)
         unreadCount.value = response.unreadCount
         pendingCriticalCount.value = response.pendingCriticalCount
         summaryError.value = ''
@@ -287,7 +327,10 @@ export function useNotifications(options: NotificationControllerOptions) {
           summaryPreferenceError.value = `通知检查间隔暂时无法读取：${response.preferenceWarning ? [response.preferenceWarning.message, response.preferenceWarning.detail, response.preferenceWarning.next].filter(Boolean).join('；') : '原因尚无法确认，请核查Hub后端通知接口'}。消息仍可查看；暂按${intervalSeconds.value / 60}分钟检查，请重试读取通知设置。`
         }
         lastCheckedAt.value = new Date().toISOString()
-        if (forceCritical) {
+        if (signupRiskOnly) {
+          // Counts and the separate registration group update; ordinary alert
+          // presentation still waits for the original configured interval.
+        } else if (forceCritical) {
           // An explicit next page may replace an emptied batch, unless the user closed it while waiting.
           if (hadCriticalOpen) {
             criticalBatch.value = active.critical.items.slice(0, 20)
@@ -311,12 +354,24 @@ export function useNotifications(options: NotificationControllerOptions) {
         if (scope.current() && flight === candidate) {
           flight = null
           summaryLoading.value = false
-          lastCompletedAt = Date.now()
+          if (!signupRiskOnly) lastCompletedAt = Date.now()
           schedule()
         }
       }
     })()
     return candidate.promise
+  }
+  // A registration action must read after any older in-flight summary. It
+  // neither presents other levels nor moves their original reminder deadline.
+  const refreshSignupRisk = (): Promise<boolean> => {
+    const waiting = flight
+    if (waiting) {
+      const workspace = workspaceId.value, epoch = workspaceEpoch
+      return waiting.promise.then(() => ready() && workspaceId.value === workspace && workspaceEpoch === epoch ? refreshSignupRisk() : false)
+    }
+    // Before the first ordinary read completes, restore its existing startup
+    // behavior rather than creating a supplemental-only reminder clock.
+    return refreshSummary({}, false, false, lastCompletedAt !== null)
   }
   const nextSummaryPage = (level: NotificationLevel) => {
     if (!summary.value || level === 1) return Promise.resolve(false)
@@ -444,6 +499,7 @@ export function useNotifications(options: NotificationControllerOptions) {
     return progress('present', ids.filter(id => displayed.has(id)))
   }
   const dismissImportant = (ids = importantItems.value.map(item => item.id)) => progress('dismiss', ids)
+  const dismissSignupRisk = () => progress('dismiss', signupRiskItems.value.map(item => item.id))
   const acknowledgeCritical = async (ids = criticalBatch.value.map(item => item.id)) => {
     const workspace = workspaceId.value
     const epoch = workspaceEpoch
@@ -547,8 +603,13 @@ export function useNotifications(options: NotificationControllerOptions) {
   }
   const handleVisibility = () => {
     clearTimer()
-    if (!ready() || !isVisible()) return
+    clearSignupRiskTimer()
+    if (!ready() || !isVisible()) {
+      if (flight?.signupRiskOnly) cancelSummary()
+      return
+    }
     if (lastCompletedAt === null || Date.now() >= lastCompletedAt + intervalSeconds.value * 1000) void refreshSummary()
+    else if (signupRiskEnabled.value) void refreshSummary({}, false, false, true)
     else schedule()
   }
   const stop = () => { stopped = true; pause(); reset() }
@@ -574,9 +635,9 @@ export function useNotifications(options: NotificationControllerOptions) {
   return {
     workspaceId, summary, unreadCount, pendingCriticalCount, intervalSeconds, preferenceConfirmed, preferenceLoading,
     preferenceSaving, preferenceSaved, preferenceError, summaryPreferenceError, displayedPreferenceError, summaryLoading, summaryError, managementRefreshPending, progressError, lastCheckedAt,
-    attentionItems, importantItems, criticalBatch, criticalNextCursor, criticalTotalCount, criticalOpen, drawerOpen, historyFilter, historyItems,
+    attentionItems, importantItems, signupRiskItems, signupRiskEnabled, dismissSignupRisk, criticalBatch, criticalNextCursor, criticalTotalCount, criticalOpen, drawerOpen, historyFilter, historyItems,
     historyNextCursor, historyLoading, historyError, detail, detailLoading, detailError, busyIds,
-    refreshSummary, nextSummaryPage, openDrawer, closeDrawer, loadHistory, openDetail, markDetailRead, markPageRead,
+    refreshSummary, refreshSignupRisk, nextSummaryPage, openDrawer, closeDrawer, loadHistory, openDetail, markDetailRead, markPageRead,
     progress, presentAttention, dismissImportant, acknowledgeCritical, laterCritical, clearAttention,
     loadPreferences, savePreferences, siteManagementChanged, checkDetailAction, stop,
   }

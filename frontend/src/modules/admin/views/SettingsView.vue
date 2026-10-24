@@ -6,6 +6,8 @@ import { Input } from '@/components/ui/input'
 import EmailTemplatesPanel from '../components/settings/EmailTemplatesPanel.vue'
 import NotificationTemplateEditor from '../components/settings/NotificationTemplateEditor.vue'
 import TestQuestionsPanel from '../components/settings/TestQuestionsPanel.vue'
+import SignupRiskNotificationSettings from '../components/settings/SignupRiskNotificationSettings.vue'
+import { useAdminAccounts } from '../composables/useAdminAccounts'
 import { NotificationControllerKey } from '../composables/useNotifications'
 import {
   getSystemRestartStatus,
@@ -40,6 +42,7 @@ import { t } from '@/locales'
 // Tab Settings
 const activeTab = ref<'strategy' | 'questions' | 'channels' | 'email' | 'system'>('strategy')
 const notifications = inject(NotificationControllerKey, null)
+const { currentAccount: notificationAccount, isSwitching: notificationSwitching } = useAdminAccounts()
 const notificationInterval = ref(String((notifications?.intervalSeconds.value ?? 300) / 60))
 const notificationIntervalValid = computed(() => /^\d+$/.test(notificationInterval.value) && Number(notificationInterval.value) >= 1 && Number(notificationInterval.value) <= 60)
 if (notifications) {
@@ -1086,6 +1089,7 @@ onBeforeUnmount(() => {
               <p v-if="!notificationIntervalValid" class="text-sm text-destructive">请输入1—60之间的整数分钟后保存。</p>
               <p v-if="notifications.displayedPreferenceError.value" role="alert" class="break-words text-sm text-destructive">{{ notifications.displayedPreferenceError.value }}</p>
               <p v-if="notifications.preferenceSaved.value" role="status" aria-live="polite" class="text-sm text-green-500">通知检查间隔已确认保存为{{ notifications.intervalSeconds.value / 60 }}分钟；当前工作区使用新间隔，不会修改主站。</p>
+              <SignupRiskNotificationSettings :workspace-id="notifications.workspaceId.value" :platform="notificationAccount?.platform ?? ''" :switching="notificationSwitching" @saved="notifications.refreshSignupRisk()" />
             </div>
           </section>
           <!-- Strategy Header + Save button -->

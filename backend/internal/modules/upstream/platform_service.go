@@ -3613,6 +3613,11 @@ func (s *PlatformService) FetchSub2APIAdminUsersPageWithContext(ctx context.Cont
 	if err != nil {
 		return Sub2APIAdminUsersPage{}, err
 	}
+	if query.StrictPagination {
+		if err := validateSignupRiskUsersPage(response.Payload, query); err != nil {
+			return Sub2APIAdminUsersPage{}, err
+		}
+	}
 	return parseSub2APIAdminUsersPage(response.Payload, query), nil
 }
 
@@ -3707,6 +3712,9 @@ func sanitizeSub2APIAdminUsersValues(query Sub2APIAdminUsersQuery) url.Values {
 	values.Set("sort_by", query.SortBy)
 	values.Set("sort_order", query.SortOrder)
 	values.Set("include_subscriptions", "true")
+	if query.IncludeSubscriptions != nil {
+		values.Set("include_subscriptions", strconv.FormatBool(*query.IncludeSubscriptions))
+	}
 	if query.Status != "" {
 		values.Set("status", query.Status)
 	}
@@ -3868,6 +3876,9 @@ func (s *PlatformService) FetchSub2APIAdminUserBalanceHistory(session Session, u
 // snake_case / camelCase；字段缺失或类型不匹配时保持零值，由调用方按需要降级展示。
 func parseSub2APIAdminUser(value any) Sub2APIAdminUser {
 	user := Sub2APIAdminUser{ID: firstStringy(value, sub2APIUserIDKeys)}
+	if notes := firstString(value, []string{"notes"}); notes != nil {
+		user.Notes = *notes
+	}
 	if email := firstString(value, []string{"email"}); email != nil {
 		user.Email = *email
 	}

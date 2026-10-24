@@ -237,6 +237,13 @@ export const getNotificationSummary = async (query: NotificationSummaryQuery, si
     samplingState: sampling(result.samplingState, workspace), displayedStates,
   }
   if (result.preferenceWarning !== undefined) output.preferenceWarning = warning(result.preferenceWarning, workspace)
+  if (result.signupRisk !== undefined) {
+    const risk = record(result.signupRisk, workspace)
+    if (typeof risk.enabled !== 'boolean') return malformed(workspace)
+    const items = unique(list(risk.items, workspace, 20).map(value => notice(value, workspace)), workspace)
+    if (items.some(item => item.kind !== 'sub2api.signup_risk' || item.level !== 3 || !item.subjectActive || item.reminderCompletedAt !== null)) return malformed(workspace)
+    output.signupRisk = { enabled: risk.enabled, items }
+  }
   if (output.intervalSeconds === null && !output.preferenceWarning) return malformed(workspace)
   if (output.pendingCriticalCount !== output.active.critical.totalCount) return malformed(workspace)
   const activeItems = unique([...output.active.attention.items, ...output.active.important.items, ...output.active.critical.items], workspace)
@@ -297,5 +304,22 @@ export const saveNotificationPreferences = async (request: NotificationPreferenc
   parameters(workspace)
   const result = preferenceResponse(await requestJson('/preferences', workspace, { method: 'PUT', body: JSON.stringify(request), signal }, 'write'), workspace)
   if (result.intervalSeconds !== request.intervalMinutes * 60 || result.updatedAt === null) return malformed(workspace)
+  return result
+}
+import type { SignupRiskPreferences } from '../types/notifications'
+
+const signupRiskPreferenceResponse = (value: unknown, workspace: string): SignupRiskPreferences => {
+  const result = scope(value, workspace)
+  if (typeof result.enabled !== 'boolean' || typeof result.initialized !== 'boolean' || !result.enabled && result.initialized) return malformed(workspace)
+  return { workspaceAdminAccountId: workspace, enabled: result.enabled, initialized: result.initialized, updatedAt: nullableDate(result.updatedAt, workspace) }
+}
+export const getSignupRiskPreferences = async (workspace: string, signal?: AbortSignal): Promise<SignupRiskPreferences> => (
+  signupRiskPreferenceResponse(await requestJson(`/signup-risk-preferences?${parameters(workspace)}`, workspace, { signal }), workspace)
+)
+export const saveSignupRiskPreferences = async (request: { workspaceAdminAccountId: string; enabled: boolean }, signal?: AbortSignal): Promise<SignupRiskPreferences> => {
+  const workspace = request.workspaceAdminAccountId
+  parameters(workspace)
+  const result = signupRiskPreferenceResponse(await requestJson('/signup-risk-preferences', workspace, { method: 'PUT', body: JSON.stringify(request), signal }, 'write'), workspace)
+  if (result.enabled !== request.enabled || result.updatedAt === null) return malformed(workspace)
   return result
 }

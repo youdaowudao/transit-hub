@@ -49,6 +49,7 @@ export interface NotificationSamplingState {
   warning?: NotificationWarning
 }
 export interface NotificationSummaryResponse {
+  signupRisk?: { enabled: boolean; items: SiteNotification[] }
   serverTime: string
   workspaceAdminAccountId: string
   intervalSeconds: number | null
@@ -62,6 +63,13 @@ export interface NotificationSummaryResponse {
   }
   samplingState: NotificationSamplingState
   displayedStates: NotificationDisplayedState[]
+}
+
+export interface SignupRiskPreferences {
+  workspaceAdminAccountId: string
+  enabled: boolean
+  initialized: boolean
+  updatedAt: string | null
 }
 export interface NotificationHistoryResponse {
   workspaceAdminAccountId: string

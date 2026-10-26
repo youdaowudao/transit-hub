@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { accountLabelForTarget, accountReminderLabel, type AccountLabels } from '../../utils/connectionHealthAccountLabel'
 import { Activity, ArrowRight, X } from 'lucide-vue-next'
 import {
   buildConnectionHealthRecordSummary,
@@ -18,6 +19,7 @@ import type {
 } from '../../types/connectionHealth'
 
 const props = defineProps<{
+  accountLabels?: AccountLabels
   open: boolean
   events: ConnectionHealthEvent[]
   groups: OwnGroupHealth[]
@@ -242,7 +244,7 @@ const adminTargetMeta = computed(() => {
       }
       map.set(account.targetId, {
         groupNames: group.name ? [group.name] : [],
-        accountName: account.name || account.id,
+        accountName: accountReminderLabel(accountLabelForTarget(props.accountLabels, account.targetId, account.name)),
         platform: account.targetId.toLowerCase().startsWith('sub2api:') ? 'Sub2API' : account.targetId.toLowerCase().startsWith('newapi:') ? 'NewAPI' : 'custom',
         models,
         policyIds: [...(account.assignedPolicyIds ?? []), ...(group.assignedPolicyIds ?? [])],
@@ -406,7 +408,7 @@ const buildFocusedCards = (connectionId: string): StatusCard[] => {
       modelName,
       upstreamSiteId: latest.upstreamSiteId,
       upstreamGroupName: latest.upstreamGroupName,
-      accountName: '',
+      accountName: connectionId.startsWith('sub2api:') ? accountReminderLabel(accountLabelForTarget(props.accountLabels, connectionId)) : '',
       provider: 'custom',
       isActionCard: false,
       state,
@@ -449,7 +451,7 @@ const globalGroups = computed<GroupBlock[]>(() => {
   for (const ev of props.events) {
     const groupKey = ev.ownGroupName || ev.connectionId
     if (!groupMap.has(groupKey)) {
-      groupMap.set(groupKey, { name: ev.ownGroupName || ev.connectionId, cardOrder: [], cards: new Map() })
+      groupMap.set(groupKey, { name: ev.ownGroupName || '当时未记录分组名称', cardOrder: [], cards: new Map() })
       groupOrder.push(groupKey)
     }
     const bucket = groupMap.get(groupKey)!
@@ -485,7 +487,7 @@ const globalGroups = computed<GroupBlock[]>(() => {
           : latest.modelName,
         upstreamSiteId: latest.upstreamSiteId || adminMeta?.platform || '',
         upstreamGroupName: adminMeta?.groupNames.join('、') || latest.upstreamGroupName,
-        accountName: adminMeta?.accountName ?? '',
+        accountName: adminMeta?.accountName ?? (latest.connectionId.startsWith('sub2api:') ? accountReminderLabel(accountLabelForTarget(props.accountLabels, latest.connectionId)) : ''),
         provider: legacyModelMeta?.providerFamily ?? adminModelMeta?.providerFamily ?? 'custom',
         isActionCard: latest.modelName === '*' || latest.modelName === '',
         currentHealthResult: adminModelMeta?.currentHealthResult,

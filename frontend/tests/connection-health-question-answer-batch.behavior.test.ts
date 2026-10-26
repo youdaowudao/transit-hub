@@ -1224,7 +1224,7 @@ describe('batch drawer lifecycle and presentation', () => {
     expect(startOutcome.find('p:last-child').classes()).toContain('break-words')
   })
 
-  it('wraps long account identities and shortens the source target ID without horizontal overflow', async () => {
+  it('wraps long account identities and omits internal target IDs from the source label', async () => {
     const longTargetId = `sub2api:ws1:${'x'.repeat(100)}`
     const longAccountName = `超长账号${'名'.repeat(100)}`
     harness.startQuestionAnswerBatch.mockResolvedValue(emptyBatch({ batchId: 'batch-long', submittedCount: 1 }))
@@ -1241,8 +1241,9 @@ describe('batch drawer lifecycle and presentation', () => {
     expect(targetName.classes()).toContain('break-words')
     expect(targetName.classes()).not.toContain('truncate')
     const sourceText = drawer.get('[data-testid="question-answer-batch-source"]').text()
-    expect(sourceText).toContain('sub2api:ws1:')
-    expect(sourceText).toContain('…')
+    expect(sourceText).toContain(longAccountName)
+    expect(sourceText).not.toContain('sub2api:ws1:')
+    expect(sourceText).not.toContain('…')
     expect(sourceText).not.toContain(longTargetId)
     expect(drawer.get(`[data-testid="question-answer-batch-preview-identity-${longTargetId}"]`).classes())
       .toContain('break-all')
@@ -1272,7 +1273,7 @@ describe('batch drawer lifecycle and presentation', () => {
 
     const source = drawer.get('[data-testid="question-answer-batch-source"]').text()
     expect(source).toContain('Primary source')
-    expect(source).toContain('t1')
+    expect(source).not.toContain('t1')
     const config = drawer.get('[data-testid="question-answer-batch-config"]').text()
     expect(config).toContain('Question q1')
     expect(config).toContain('Question q2')

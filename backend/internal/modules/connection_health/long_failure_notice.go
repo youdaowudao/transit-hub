@@ -87,6 +87,9 @@ func (s *Service) collectLongFailureNotices(scan *schedulerScan, userID, workspa
 		input.DiscoveredAt = state.FailingSince.Add(time.Duration(preset.LongFailureAfterSeconds) * time.Second)
 		retry := longFailureRetryText(autoProbeRetryKind(configUsable, decision), preset.LongFailureIntervalSeconds)
 		account := noticeDisplayText(target.AccountName, 120)
+		if account == "" {
+			account = "账号名称暂未读到，请到分组健康核对"
+		}
 		model := noticeDisplayText(spec.modelName, 120)
 		since := longFailureTime(state.FailingSince)
 		recentError := longFailureErrorText(state.LastErrorKey, state.LastErrorDetail)
@@ -120,6 +123,9 @@ func (s *Service) collectLongFailureNotices(scan *schedulerScan, userID, workspa
 			retryKind = "scheduling_blocked"
 		}
 		account, status := noticeDisplayText(target.AccountName, 120), longFailureMainSiteStatus(target)
+		if account == "" {
+			account = "账号名称暂未读到，请到分组健康核对"
+		}
 		input.Content.Title = "系统关停的账号无法继续验证"
 		input.Content.Summary = fmt.Sprintf("%s 已被系统关停，且已超过 %s 没有新的探活结果，系统不会自动重新启用它。%s查看这条提醒不会修改主站。", account, longFailureDuration(minimumAfter), longFailureRetryText(retryKind, 0))
 		input.Content.Details = []notifications.Detail{{Label: "账号", Value: account}, {Label: "所属分组", Value: longFailureGroups(target)}, {Label: "最后一次探活", Value: longFailureTime(latest)}, {Label: "主站状态", Value: status}}

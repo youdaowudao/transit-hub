@@ -6,7 +6,7 @@ import { formatConnectionHealthTime } from '../../composables/useConnectionHealt
 import { questionAnswerElapsedMilliseconds } from '../../utils/questionAnswers'
 import QuestionAnswerExecutionDetails from './QuestionAnswerExecutionDetails.vue'
 
-const props = defineProps<{ record: QuestionAnswerRecord }>()
+const props = defineProps<{ accountName?: string; accountNameNote?: string; record: QuestionAnswerRecord }>()
 const prefix = 'admin.connectionHealth.manualProbeDialog.questionAnswer.failureEvidence'
 const status = computed(() => props.record.upstreamStatus ?? null)
 const excerpt = computed(() => props.record.upstreamExcerpt ?? '')
@@ -35,6 +35,6 @@ const elapsedLabel = computed(() => {
       <p class="mt-1 whitespace-pre-wrap break-all text-xs leading-5 text-foreground">{{ excerpt }}</p>
     </div>
     <p v-else class="text-xs text-muted-foreground">{{ t(prefix + '.emptyExcerpt') }}</p>
-    <QuestionAnswerExecutionDetails :record="record" />
+    <QuestionAnswerExecutionDetails :account-name="accountName" :account-name-note="accountNameNote" :record="record" />
   </div>
 </template>

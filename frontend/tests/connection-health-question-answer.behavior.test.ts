@@ -396,7 +396,7 @@ describe('model failure preserves local answers', () => {
     expect(wrapper.text()).not.toContain('已有答题结果仍可查看')
     resolveLocal(terminalReviewBatch()); await flushPromises()
     expect(wrapper.get('[data-testid="question-answer-pending"]').text()).toContain('Answer unreviewed one')
-    expect(wrapper.get('[data-testid="question-answer-configuration"]').text()).toContain('正在读取“Concurrent Account”的模型列表')
+    expect(wrapper.get('[data-testid="question-answer-configuration"]').text()).toContain('正在读取“账号「Concurrent Account」”的模型列表')
     expect(wrapper.text()).toContain('已有答题结果仍可查看')
   })
 

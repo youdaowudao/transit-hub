@@ -234,6 +234,22 @@ func TestModelControlV2911GroupSupplyDeduplicatesAndCountsClosedAcrossTypes(t *t
 	}
 }
 
+func TestModelControlGroupSupplyNamesMissingAccountsWithoutSubstitutingIDs(t *testing.T) {
+	account := modelControlTestAccount(map[string]string{"alias": "M"})
+	account.ID, account.Name = "229", " \t "
+	supply := buildModelControlGroupSupply([]upstream.AdminGroupAccountInfo{account}, "sub2api", "ws", map[string]*ModelControlAccountSummary{
+		"sub2api:ws:229": {Models: []ModelControlSummaryModel{{ModelName: "M", Status: "closed"}}},
+	}, time.Now())
+	if supply == nil || len(supply.Items) != 1 || supply.Items[0].Open != 1 || supply.Items[0].Closed != 1 {
+		t.Fatalf("existing supply counts changed: %+v", supply)
+	}
+	for _, names := range [][]string{supply.Items[0].OpenAccounts, supply.Items[0].ClosedAccounts} {
+		if len(names) != 1 || names[0] != "账号名称暂未读到" {
+			t.Fatalf("account identity must not be replaced by a number: %v", names)
+		}
+	}
+}
+
 func TestModelControlV2911AddAdmissionRejectsAllIneligibleStates(t *testing.T) {
 	good := ModelControlItem{Decision: "usable", Control: modelControlControl{Observation: modelControlObservation{State: "not_provided"}}}
 	if modelControlAdmission(good, "add") != nil {

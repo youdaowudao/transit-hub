@@ -190,7 +190,7 @@ export const collectPrioritySyncBlockers = (groups: AdminGroupHealth[]): Priorit
       if (!account.prioritySyncBlocked || byTarget.has(account.targetId)) continue
       byTarget.set(account.targetId, {
         targetId: account.targetId,
-        accountName: account.name || account.id,
+        accountName: account.name?.trim() || '账号名称暂未读到',
         siteId: account.upstreamSiteId ?? '',
         groupName: account.upstreamKeyGroupName ?? '',
         groupId: account.upstreamKeyGroupId ?? '',

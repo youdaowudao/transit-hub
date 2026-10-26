@@ -33,7 +33,7 @@ describe('connection health scheduling button state', () => {
   })
 
   it('requires confirmation before changing Sub2API scheduling', () => {
-    const confirmIndex = viewSource.indexOf('if (!confirm(`确认对 ${account.targetId} 执行「${action}」？`)) return')
+    const confirmIndex = viewSource.indexOf('if (!confirm(`确认对${accountReminderLabel(accountLabelForTarget(accountLabelsByTarget.value, account.targetId, account.name))}执行「${action}」？确认后会修改主站，取消不会执行。`)) return')
     const updateIndex = viewSource.indexOf('await updateTargetSchedulable(account.targetId, !account.schedulable)')
 
     expect(confirmIndex).toBeGreaterThan(-1)

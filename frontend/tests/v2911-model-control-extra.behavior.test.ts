@@ -36,6 +36,16 @@ const expectNoSiteAction = (w: VueWrapper, visible = false) => {
  expect(api.previewModelControl).not.toHaveBeenCalled(); expect(api.executeModelControl).not.toHaveBeenCalled()
 }
 describe('missing whitelist model copy', () => {
+ it('keeps an unnamed managed row identifiable with its existing connection label and does not hide a missing name', async () => {
+  const value = managed(); value.accountName = ' '
+  const w = row(value, { showAccount: true, accountLabel: { name: '已保存模型账号全名', siteNames: ['模型网站'] } })
+  expect(w.text()).toContain('账号「已保存模型账号全名」（网站「模型网站」）')
+  expect(w.text()).not.toContain(targetId)
+  await w.setProps({ accountLabel: undefined })
+  expect(w.text()).toContain('账号（名称暂未读到）')
+  expect(w.get('[data-testid="model-control-row"]').exists()).toBe(true)
+  expect(api.executeModelControl).not.toHaveBeenCalled()
+ })
  it('T1 identifies a judged bad round while preserving counts and allowing confirmed human opening', () => {
   const w = row(missingItem())
   expect(w.get('header').text()).toContain('本轮不合格 · 主站未开放')
@@ -98,6 +108,19 @@ describe('missing whitelist model copy', () => {
  })
 })
 describe('workspace header settings and complete counts', () => {
+ it('uses the existing connection name for verification failures and events instead of a target suffix', async () => {
+  const value = managed(); value.accountName = ''
+  api.listModelControlItems.mockResolvedValue({ items: [value], page: 1, totalPages: 1, counts })
+  api.verifyModelControl.mockResolvedValue({ items: [], errors: [{ targetId, reasonKey: 'request_failed' }] })
+  api.listModelControlEvents.mockResolvedValue({ items: [{ id: 'name-event', targetId, modelName: 'M', eventType: 'verify_failed', actorUserId: '', createdAt: '2026-10-08T00:00:00Z', detail: {} }], page: 1, totalPages: 1 })
+  const w = track(mount(Drawer, { props: { groups: [], workspace: 'ws1', platform: 'sub2api', accountLabels: { [targetId]: { name: '完整模型提醒账号', siteNames: ['模型网站'] } } } }))
+  await w.get('[data-testid="model-control-open"]').trigger('click'); await flushPromises()
+  expect(w.text()).toContain('完整模型提醒账号')
+  expect(w.text()).not.toContain(targetId.slice(-6))
+  await w.get('[data-testid="model-control-tab-events"]').trigger('click'); await flushPromises()
+  expect(w.get('[data-testid="model-control-event"]').text()).toContain('完整模型提醒账号')
+  expect(w.text()).not.toContain(targetId)
+ })
  it('saves two settings without model/source fields and handles optimistic conflicts', async () => {
   const w = track(mount(Header, { props: { scope: 'account', workspace: 'ws1', counts } })); await flushPromises(); await button(w, '修改').trigger('click')
   expect(w.findAll('input[type="checkbox"]')).toHaveLength(0)

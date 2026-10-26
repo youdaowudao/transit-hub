@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { accountNameText, accountReminderLabel, currentAccountNames, historicalAccountLabel, type AccountLabels, type HistoryAccountLabel } from '../../utils/connectionHealthAccountLabel'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import {
   AlertTriangle,
@@ -96,6 +97,8 @@ export interface ManualProbeTargetSummary {
 }
 
 const props = withDefaults(defineProps<{
+  accountLabels?: AccountLabels
+  historyAccountLabel?: HistoryAccountLabel | null
   open: boolean
   target: ManualProbeTargetSummary | null
   questionAnswerPreferences?: QuestionAnswerSelectionPreferences
@@ -189,6 +192,20 @@ watch(() => [qaRuntimeBatch.value?.batchId, qaRuntimeBatch.value?.active] as con
 })
 const onModelControlSettled = (targetId: string) => { qaModelControlRefreshKey.value++; emit('question-answer-stats-dirty', targetId) }
 const qaReviewBatch = ref<QuestionAnswerBatch | null>(null)
+const currentAccountReminder = computed(() => accountReminderLabel({
+  ...props.accountLabels?.[props.target?.targetId ?? ''],
+  name: accountNameText(props.accountLabels?.[props.target?.targetId ?? '']?.name, props.target?.accountName),
+}))
+const queueAccounts = computed(() => ({
+  ...(props.target ? { [props.target.targetId]: accountNameText(props.target.accountName) } : {}),
+  ...currentAccountNames(props.accountLabels),
+}))
+const questionAnswerAccount = (batchId?: string): HistoryAccountLabel => {
+  const saved = props.historyAccountLabel, targetId = props.target?.targetId ?? ''
+  if (saved && saved.targetId === targetId && saved.batchId === batchId && accountNameText(saved.name)) return saved
+  return historicalAccountLabel(targetId, batchId ?? '', '', accountNameText(props.accountLabels?.[targetId]?.name, props.target?.accountName))
+}
+
 const qaReviewBatchSyncFailed = ref(false)
 const qaReviewLoadingBatchId = ref<string | null>(null)
 const emptyQuestionAnswerStats = (): QuestionAnswerStats => ({ requests: { submitted: 0, inProgress: 0, succeeded: 0, failed: 0, cancelled: 0 }, reviews: { unreviewed: 0, correct: 0, incorrect: 0 }, byModel: [], byQuestion: [] })
@@ -1314,7 +1331,7 @@ const stopQuestionAnswers = async () => {
   if (!props.target || !batchId || qaCancelling.value || qaFinalizationUnknown.value) return
   if (qaFinalization.value && qaFinalization.value.recovery !== 'cancel') return
   const targetId = props.target.targetId
-  if (!qaFinalization.value && !window.confirm(`终止账号 ${props.target.accountName} 的最新运行批次 ${batchId}？`)) return
+  if (!qaFinalization.value && !window.confirm(`终止${currentAccountReminder.value}的最新运行批次 ${batchId}？`)) return
   const runtimeAtCancel = qaRuntimeBatch.value
   const sequence = loadSequence
   const cancelSequence = ++qaCancelSequence
@@ -1840,9 +1857,10 @@ const close = () => {
               </div>
               <div class="min-w-0">
                 <h3 class="truncate text-sm font-semibold text-foreground">{{ t(`${prefix}.title`) }}</h3>
-                <p class="truncate text-xs text-muted-foreground">
-                  {{ target.accountName }} · {{ target.platform || '-' }} · {{ target.type || '-' }} · {{ target.status || '-' }} · {{ target.groupName }}
+                <p class="break-words text-xs text-muted-foreground">
+                  {{ questionAnswerAccount(qaReviewBatch?.batchId).name || (qaReviewBatch ? '账号（当时未记录名称）' : '账号名称暂未读到') }} · {{ target.platform || '-' }} · {{ target.type || '-' }} · {{ target.status || '-' }} · {{ target.groupName }}
                 </p>
+                <p v-if="qaReviewBatch && questionAnswerAccount(qaReviewBatch.batchId).note" class="mt-1 break-words text-xs text-muted-foreground">{{ questionAnswerAccount(qaReviewBatch.batchId).note }}</p>
               </div>
               <AccountTierEditor
                 v-if="target.targetId.toLowerCase().startsWith('sub2api:')"
@@ -1880,7 +1898,7 @@ const close = () => {
             <p v-if="mode !== 'questionAnswer' && target?.testConfiguration?.protocol === 'messages'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesBudget') }}</p>
             <p v-if="mode === 'questionAnswer' && target?.testConfiguration?.protocol === 'messages'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.messagesQuestionAnswerBudget') }}</p>
             <p v-if="mode === 'questionAnswer'" class="mb-3 text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.questionAnswerTimeout') }}</p>
-            <QuestionAnswerQueuePanel v-if="mode === 'questionAnswer' && target?.targetId.startsWith('sub2api:')" :workspace="target.targetId.split(':')[1] || ''" :visible="open" :active="qaActive || qaStarting" :accounts="{ [target.targetId]: target.accountName }" @view="viewQueueBatch" />
+            <QuestionAnswerQueuePanel v-if="mode === 'questionAnswer' && target?.targetId.startsWith('sub2api:')" :workspace="target.targetId.split(':')[1] || ''" :visible="open" :active="qaActive || qaStarting" :accounts="queueAccounts" @view="viewQueueBatch" />
 
             <div v-if="mode === 'questionAnswer' && (qaFinalization || qaFinalizationUnknown)" data-testid="question-answer-finalization" class="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm">
               <p v-if="qaFinalizationUnknown">{{ t(prefix + '.questionAnswer.finalizationUnknown') }}</p>
@@ -1926,7 +1944,7 @@ const close = () => {
                     <Loader2 class="h-4 w-4 animate-spin" />
                     {{ t(prefix + '.questionAnswer.loading') }}
                   </div>
-                  <div v-else data-testid="question-answer-stats-error" class="text-xs text-red-600 dark:text-red-400"><p>{{ t(prefix + '.questionAnswer.localDataFailed', { account: target.accountName, reason: qaReadableError }) }}</p><button type="button" class="mt-2 rounded-md border border-border/60 px-3 py-1.5 font-medium" @click="retryQuestionAnswerData">重新加载</button></div>
+                  <div v-else data-testid="question-answer-stats-error" class="text-xs text-red-600 dark:text-red-400"><p>{{ t(prefix + '.questionAnswer.localDataFailed', { account: currentAccountReminder, reason: qaReadableError }) }}</p><button type="button" class="mt-2 rounded-md border border-border/60 px-3 py-1.5 font-medium" @click="retryQuestionAnswerData">重新加载</button></div>
                 </section>
                 <QuestionAnswerStatsBar
                   v-else-if="mode === 'questionAnswer'"
@@ -1952,7 +1970,7 @@ const close = () => {
                   <div v-if="qaReviewBatch?.runtime?.items.length" data-testid="question-answer-active-processes" class="mb-3 space-y-2 rounded-lg border border-border/50 p-3">
                     <div v-for="record in qaReviewBatch.records.filter(record => (record.status === 'pending' || record.status === 'running') && qaReviewBatch?.runtime?.items.some(item => item.recordId === record.id))" :key="record.id">
                       <p class="break-words text-xs font-medium">{{ record.questionName }} · {{ record.modelName }}</p>
-                      <QuestionAnswerExecutionDetails :record="record" :runtime="qaReviewBatch.runtime?.items.find(item => item.recordId === record.id)" :snapshot-at="qaReviewBatch.runtime?.snapshotAt" :stale="qaReviewBatchSyncFailed" />
+                      <QuestionAnswerExecutionDetails :account-name="questionAnswerAccount(record.batchId).name" :account-name-note="questionAnswerAccount(record.batchId).note" :record="record" :runtime="qaReviewBatch.runtime?.items.find(item => item.recordId === record.id)" :snapshot-at="qaReviewBatch.runtime?.snapshotAt" :stale="qaReviewBatchSyncFailed" />
                     </div>
                   </div>
                   <section v-if="qaHistoryLoaded" data-question-answer-section="processed" data-testid="question-answer-processed" class="mt-3 rounded-lg border border-border/50 bg-surface-line/10">
@@ -1973,7 +1991,7 @@ const close = () => {
                             <span class="break-words font-medium text-foreground">{{ group.questionName }}<template v-if="group.questionSnapshotKey"> · #{{ group.questionSnapshotKey.slice(0, 8) }}</template> · {{ group.modelName }} · {{ formatQuestionAnswerAccuracy(questionAnswerAccuracy(group)) }} · 重复 {{ group.records.length }} 次</span><span class="text-muted-foreground">{{ qaResultGroupsOpen.has(group.key) ? '收起' : `展开 ${group.records.length} 条` }}</span>
                           </button>
                           <ul v-if="qaResultGroupsOpen.has(group.key)" class="space-y-2 border-t border-border/40 p-3">
-                            <li v-for="record in group.records" :key="record.id" class="rounded-md border p-3" :class="questionAnswerRecordClass(record)"><QuestionAnswerRecordCard :record="record" :expanded="qaExpanded.has(record.id)" :saving="qaMarking.has(record.id)" :saving-judgment="qaMarking.get(record.id)" @expand="toggleQuestionAnswerExpanded(record.id)" @judge="saveQuestionAnswerJudgment(record, $event)" /></li>
+                            <li v-for="record in group.records" :key="record.id" class="rounded-md border p-3" :class="questionAnswerRecordClass(record)"><QuestionAnswerRecordCard :account-name="questionAnswerAccount(record.batchId).name" :account-name-note="questionAnswerAccount(record.batchId).note" :record="record" :expanded="qaExpanded.has(record.id)" :saving="qaMarking.has(record.id)" :saving-judgment="qaMarking.get(record.id)" @expand="toggleQuestionAnswerExpanded(record.id)" @judge="saveQuestionAnswerJudgment(record, $event)" /></li>
                           </ul>
                         </div>
                       </div>
@@ -1994,7 +2012,7 @@ const close = () => {
                               </div>
                             </div>
                             <p class="break-words text-xs text-red-600 dark:text-red-400">{{ questionAnswerErrorLabel(record.errorType) }}</p>
-                            <QuestionAnswerFailureEvidence :record="record" />
+                            <QuestionAnswerFailureEvidence :account-name="questionAnswerAccount(record.batchId).name" :account-name-note="questionAnswerAccount(record.batchId).note" :record="record" />
                           </li>
                         </ul>
                       </div>
@@ -2013,7 +2031,7 @@ const close = () => {
                     <p class="mt-1 text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.manualReviewHint') }}</p>
                     <template v-if="qaPendingOpen && qaPendingReviewRecords.length > 0">
                       <ul class="mt-3 space-y-3">
-                        <li v-for="record in qaPendingReviewRecords" :key="record.id" class="rounded-lg border border-border/60 bg-card p-3"><QuestionAnswerRecordCard :record="record" :expanded="qaExpanded.has(record.id)" :saving="qaMarking.has(record.id)" :saving-judgment="qaMarking.get(record.id)" @expand="toggleQuestionAnswerExpanded(record.id)" @judge="saveQuestionAnswerJudgment(record, $event)" /></li>
+                        <li v-for="record in qaPendingReviewRecords" :key="record.id" class="rounded-lg border border-border/60 bg-card p-3"><QuestionAnswerRecordCard :account-name="questionAnswerAccount(record.batchId).name" :account-name-note="questionAnswerAccount(record.batchId).note" :record="record" :expanded="qaExpanded.has(record.id)" :saving="qaMarking.has(record.id)" :saving-judgment="qaMarking.get(record.id)" @expand="toggleQuestionAnswerExpanded(record.id)" @judge="saveQuestionAnswerJudgment(record, $event)" /></li>
                       </ul>
                     </template>
                   </section>
@@ -2051,9 +2069,9 @@ const close = () => {
                     </div>
                     <p v-if="qaConfigurationBlockedReason" class="mt-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-600 dark:text-red-400">{{ qaConfigurationBlockedReason }}</p>
                     <div v-else-if="onceLoadState !== 'ready' || !hasModels" data-testid="question-answer-model-status" class="mt-3 rounded-lg border border-border/50 px-3 py-2 text-xs">
-                      <p v-if="onceLoadState === 'loading'" class="flex items-center gap-2 text-muted-foreground"><Loader2 class="h-4 w-4 animate-spin" />{{ t(prefix + '.questionAnswer.modelsLoading', { account: target.accountName }) }}</p>
+                      <p v-if="onceLoadState === 'loading'" class="flex items-center gap-2 text-muted-foreground"><Loader2 class="h-4 w-4 animate-spin" />{{ t(prefix + '.questionAnswer.modelsLoading', { account: currentAccountReminder }) }}</p>
                       <template v-else-if="onceLoadState === 'error'">
-                        <p class="break-words text-red-600 dark:text-red-400">{{ t(prefix + '.questionAnswer.modelsFailed', { account: target.accountName, reason: readableMessage(loadErrorKey) }) }}</p>
+                        <p class="break-words text-red-600 dark:text-red-400">{{ t(prefix + '.questionAnswer.modelsFailed', { account: currentAccountReminder, reason: readableMessage(loadErrorKey) }) }}</p>
                         <p class="mt-1 text-muted-foreground">{{ t(prefix + '.questionAnswer.modelsUnavailable') }}</p>
                         <p class="mt-1 text-muted-foreground">{{ qaModelReadGuidance }}</p>
                       </template>
@@ -2115,7 +2133,7 @@ const close = () => {
                           <Loader2 class="h-4 w-4 animate-spin" />
                           {{ t(prefix + '.questionAnswer.loading') }}
                         </div>
-                        <div v-else-if="!qaHistoryLoaded" class="rounded-lg border border-dashed border-border/50 px-3 py-4 text-xs text-red-600 dark:text-red-400">{{ t(prefix + '.questionAnswer.localDataFailed', { account: target.accountName, reason: qaReadableError }) }}</div>
+                        <div v-else-if="!qaHistoryLoaded" class="rounded-lg border border-dashed border-border/50 px-3 py-4 text-xs text-red-600 dark:text-red-400">{{ t(prefix + '.questionAnswer.localDataFailed', { account: currentAccountReminder, reason: qaReadableError }) }}</div>
                         <div v-else-if="qaQuestions.length === 0" class="rounded-lg border border-dashed border-border/50 px-3 py-4 text-center text-xs text-muted-foreground">{{ t(prefix + '.questionAnswer.noQuestions') }}</div>
                         <div v-else class="space-y-1.5">
                           <label v-for="question in qaQuestions" :key="question.id" class="flex cursor-pointer items-start gap-2 rounded-md border border-border/40 px-3 py-2 transition-colors" :class="qaSelectedQuestions.has(question.id) ? 'border-primary/40 bg-primary/5' : 'hover:bg-surface-line/30'">

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { costFailureText } from '../utils/upstream'
+import { accountLabelForTarget, accountNameText, accountReminderLabel, displayAccountName, missingAccountNameHelp, type HistoryAccountLabel } from '../utils/connectionHealthAccountLabel'
 import { computed, onActivated, onDeactivated, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
@@ -143,8 +144,17 @@ const focusedAccountLabels = computed<Record<string, AccountFocusLabel>>(() => {
 const preferences = ref<ConnectionHealthPreferences>(createDefaultConnectionHealthPreferences())
 const groupManagerOpen = ref(false)
 const prioritySyncStatus = ref<PrioritySyncStatus | null>(null)
-const actionDiagnosticAccountLabel = (diagnostic: { accountId: string; accountName?: string }): string =>
-  diagnostic.accountName ? `${diagnostic.accountName}（#${diagnostic.accountId}）` : `主站账号 #${diagnostic.accountId}`
+let priorityStatusRequestSequence = 0
+const actionDiagnosticAccountLabel = (diagnostic: { accountId: string; accountName?: string }): string => {
+  const targetId = `sub2api:${preferenceScope.value}:${diagnostic.accountId}`
+  const live = adminGroups.value.flatMap(group => group.accounts).find(account => account.targetId === targetId)
+  const label = accountLabelForTarget(accountLabelsByTarget.value, targetId)
+  return accountReminderLabel({ ...label, name: accountNameText(live?.name, diagnostic.accountName, label.name) })
+}
+const actionDiagnosticNameMissing = (diagnostic: { accountId: string; accountName?: string }): boolean => {
+  const targetId = `sub2api:${preferenceScope.value}:${diagnostic.accountId}`
+  return !accountNameText(accountLabelsByTarget.value[targetId]?.name, diagnostic.accountName)
+}
 const actionDiagnosticReasonLabel = (reason: string): string => {
   const prefix = 'admin.connectionHealth.groupDetail.remoteActionPending.reasons'
   const key = `${prefix}.${reason}`
@@ -156,6 +166,21 @@ const refreshWaitSeconds = ref(0)
 let refreshWaitTimer: ReturnType<typeof setInterval> | null = null
 const refreshCoordinator = createRefreshCoordinator()
 const preferenceScope = computed(() => currentAccount.value?.id ?? 'anonymous')
+const accountLabelsByTarget = computed<Record<string, AccountFocusLabel>>(() => {
+  const workspace = preferenceScope.value
+  const labels: Record<string, AccountFocusLabel> = {}
+  if (currentAccount.value && (!currentAccount.value.platform || currentAccount.value.platform === 'sub2api')) {
+    const saved = boundSiteRateState.value.kind === 'idle' ? {} : boundSiteRateState.value.accountLabels
+    for (const [id, label] of Object.entries(saved)) labels[`sub2api:${workspace}:${id}`] = label
+  }
+  for (const group of adminGroups.value) for (const account of group.accounts) {
+    const parts = account.targetId?.split(':')
+    if (parts?.length !== 3 || parts[1] !== workspace) continue
+    const saved = labels[account.targetId]
+    labels[account.targetId] = { name: accountNameText(account.name, saved?.name), siteNames: saved?.siteNames ?? [] }
+  }
+  return labels
+})
 const documentVisibility = useDocumentVisibility()
 const mainTableMounted = ref(false)
 const displayedQuestionAnswerTargetIds = ref<string[]>([])
@@ -163,7 +188,8 @@ const scheduleStatsRevision = ref(0)
 const recentSummaries = useQuestionAnswerRecentSummaries({ workspace: () => preferenceScope.value, visible: () => mainTableMounted.value && documentVisibility.value === 'visible', apply: applyQuestionAnswerRecentSummary })
 const recentSummaryFailures = recentSummaries.failures
 const modelControlFailures = recentSummaries.modelControlFailures
-const scheduleReadOnlyBatch = ref<{ targetId: string; batchId: string; accountName: string } | null>(null)
+const scheduleReadOnlyBatch = ref<{ targetId: string; batchId: string; accountName: string; accountNameNote?: string } | null>(null)
+const historyAccountLabel = ref<HistoryAccountLabel | null>(null)
 let loadedPreferenceScope = ''
 
 type QuickProbePhase = 'starting' | ProbeTargetProgressPhase
@@ -330,6 +356,9 @@ const retryPendingQuestionAnswerSummaries = () => {
 }
 
 watch(preferenceScope, (scope, previous) => {
+  prioritySyncStatus.value = null
+  priorityStatusRequestSequence++
+  historyAccountLabel.value = null
   focusNotice.value = ''
   focusAccountTarget.value = null
   boundSiteRateState.value = { kind: 'idle' }
@@ -533,7 +562,7 @@ const priorityFailureTime = computed(() => {
 		? t('admin.connectionHealth.prioritySync.unknownTime')
 		: parsed.toLocaleString(locale, { hour12: false, timeZone: 'Asia/Singapore' })
 })
-const prioritySyncBlockers = computed(() => collectPrioritySyncBlockers(adminGroups.value))
+const prioritySyncBlockers = computed(() => collectPrioritySyncBlockers(adminGroups.value).map(blocker => ({ ...blocker, accountName: displayAccountName(accountLabelsByTarget.value[blocker.targetId]?.name, blocker.accountName) })))
 const priorityWorkspaceLabel = computed(() => resolvePriorityWorkspaceLabel(
   currentAccount.value?.displayName,
   prioritySyncStatus.value?.workspaceId ?? currentAccount.value?.id ?? '',
@@ -576,10 +605,14 @@ const priorityBlockerDetailsChanged = computed(() => {
 })
 
 const loadPrioritySyncStatus = async (): Promise<boolean> => {
+  const workspace = preferenceScope.value, sequence = ++priorityStatusRequestSequence
 	try {
-		prioritySyncStatus.value = await getPrioritySyncStatus()
+    const result = await getPrioritySyncStatus()
+    if (workspace !== preferenceScope.value || sequence !== priorityStatusRequestSequence || result.workspaceId !== workspace) return true
+		prioritySyncStatus.value = result
     return true
 	} catch {
+    if (workspace !== preferenceScope.value || sequence !== priorityStatusRequestSequence) return true
 		// 同步状态是轻量辅助信息；读取失败不覆盖主列表的真实请求错误。
     return false
 	}
@@ -1073,6 +1106,7 @@ watch(() => {
 })
 
 const openQuestionAnswerTarget = (account: AdminGroupAccount, group: AdminGroupHealth, batchId: string | null = null, expandFailed = false) => {
+  if (!batchId) historyAccountLabel.value = null
   if (!canOpenManualProbeHistory(account)) return
   initialQuestionAnswerBatchId.value = batchId
   initialQuestionAnswerExpandFailed.value = expandFailed
@@ -1089,7 +1123,7 @@ const openQuestionAnswerTarget = (account: AdminGroupAccount, group: AdminGroupH
   probeDialogTarget.value = {
     targetId: account.targetId,
     accountTier: account.accountTier,
-    accountName: account.name || account.id,
+    accountName: accountNameText(account.name, accountLabelsByTarget.value[account.targetId]?.name),
     platform: group.platform,
     type: account.type,
     status: account.status,
@@ -1104,18 +1138,20 @@ const onProbeAccount = (account: AdminGroupAccount) => {
   if (selectedGroup.value) openQuestionAnswerTarget(account, selectedGroup.value)
 }
 const onQuestionAnswerView = (value: { targetId: string; batchId?: string; expandFailed?: boolean }) => {
+  if (!historyAccountLabel.value || historyAccountLabel.value.targetId !== value.targetId || historyAccountLabel.value.batchId !== value.batchId) historyAccountLabel.value = null
   const projections = adminGroups.value.flatMap(group => group.accounts.filter(account => account.targetId === value.targetId).map(account => ({ account, group })))
   const projection = projections.find(item => item.group.id === selectedGroup.value?.id) ?? projections[0]
   if (projection && canOpenManualProbeHistory(projection.account)) {
     scheduleReadOnlyBatch.value = null
     openQuestionAnswerTarget(projection.account, projection.group, value.batchId ?? null, value.expandFailed === true)
   }
-  else if (value.batchId) scheduleReadOnlyBatch.value = { targetId: value.targetId, batchId: value.batchId, accountName: projection?.account.name || projection?.account.id || value.targetId }
+  else if (value.batchId) scheduleReadOnlyBatch.value = { targetId: value.targetId, batchId: value.batchId, accountName: accountNameText(historyAccountLabel.value?.name, projection?.account.name, accountLabelsByTarget.value[value.targetId]?.name), accountNameNote: historyAccountLabel.value?.note ?? '当时未记录账号名称，以下名称来自当前资料' }
 }
-const onScheduleQuestionAnswerView = (value: { targetId: string; batchId: string; accountName: string; platform: string; groupName: string; expandFailed?: boolean }) => {
+const onScheduleQuestionAnswerView = (value: { targetId: string; batchId: string; accountName: string; accountNameNote?: string; platform: string; groupName: string; expandFailed?: boolean }) => {
+  historyAccountLabel.value = { targetId: value.targetId, batchId: value.batchId, name: accountNameText(value.accountName), note: value.accountNameNote ?? '当时未记录账号名称，以下名称来自当前资料' }
   const exists = adminGroups.value.some(group => group.accounts.some(account => account.targetId === value.targetId))
   if (exists) onQuestionAnswerView(value)
-  else scheduleReadOnlyBatch.value = { targetId: value.targetId, batchId: value.batchId, accountName: value.accountName }
+  else scheduleReadOnlyBatch.value = { targetId: value.targetId, batchId: value.batchId, accountName: value.accountName, accountNameNote: historyAccountLabel.value.note }
 }
 
 const formalProbeModels = (account: AdminGroupAccount): string[] => {
@@ -1319,7 +1355,7 @@ const onViewEventsAccount = async (account: AdminGroupAccount) => {
 const onSetTargetSchedulable = async (account: AdminGroupAccount) => {
   if (!account.targetId || !account.targetId.toLowerCase().startsWith('sub2api:') || account.schedulable == null) return
   const action = account.schedulable ? '关闭主站调度' : '恢复主站调度'
-  if (!confirm(`确认对 ${account.targetId} 执行「${action}」？`)) return
+  if (!confirm(`确认对${accountReminderLabel(accountLabelForTarget(accountLabelsByTarget.value, account.targetId, account.name))}执行「${action}」？确认后会修改主站，取消不会执行。`)) return
   const updated = await updateTargetSchedulable(account.targetId, !account.schedulable)
   if (updated) await loadMainListIfIdle(() => loadAll({ silent: true }))
 }
@@ -1517,6 +1553,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
 		<div v-if="prioritySyncStatus?.actionDiagnostics?.length" data-testid="remote-action-diagnostics" class="mb-4 space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-800 dark:text-amber-300" role="status">
         <p v-for="diagnostic in prioritySyncStatus.actionDiagnostics" :key="diagnostic.accountId" class="whitespace-pre-wrap break-words">
           {{ actionDiagnosticAccountLabel(diagnostic) }}：{{ actionDiagnosticReasonLabel(diagnostic.reason) }}
+          <span v-if="actionDiagnosticNameMissing(diagnostic)" class="block">{{ missingAccountNameHelp }}</span>
         </p>
       </div>
       <div
@@ -1537,6 +1574,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
 							account: actionDiagnosticAccountLabel(target),
 							reason: priorityFailedTargetReasonLabel(target.reason),
 						}) }}
+            <span v-if="actionDiagnosticNameMissing(target)" class="block">{{ missingAccountNameHelp }}</span>
 					</li>
 					<li v-if="priorityFailedTargetsMore > 0" class="break-words">
 						{{ t('admin.connectionHealth.prioritySync.failedTargetsMore', { count: priorityFailedTargetsMore }) }}
@@ -1614,7 +1652,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       <div v-else class="grid min-h-[34rem] lg:grid-cols-[19rem_minmax(0,1fr)]">
         <aside class="flex min-h-0 flex-col border-b border-border/50 lg:border-b-0 lg:border-r">
           <div class="grid grid-cols-2">
-          <QuestionAnswerBatchDrawer
+          <QuestionAnswerBatchDrawer :account-labels="accountLabelsByTarget"
             :groups="orderedGroups"
             :preference-scope="preferenceScope"
             :preferences="preferences.questionAnswer"
@@ -1622,8 +1660,8 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
             @question-answer-started="onQuestionAnswerStarted"
             @question-answer-view="onQuestionAnswerView"
           />
-          <QuestionAnswerScheduleDrawer :groups="orderedGroups" :workspace="preferenceScope" :platform="currentAccount?.platform ?? ''" :preferences="preferences.questionAnswer" :stats-revision="scheduleStatsRevision" @question-answer-view="onScheduleQuestionAnswerView" @settled="onScheduleSettled" />
-          <QuestionAnswerModelControlDrawer :groups="orderedGroups" :workspace="preferenceScope" :platform="currentAccount?.platform ?? ''" :refresh-key="scheduleStatsRevision" @question-answer-view="onQuestionAnswerView" @batch-view="onScheduleQuestionAnswerView" @settled="recentSummaries.refreshTargets($event)" />
+          <QuestionAnswerScheduleDrawer :account-labels="accountLabelsByTarget" :groups="orderedGroups" :workspace="preferenceScope" :platform="currentAccount?.platform ?? ''" :preferences="preferences.questionAnswer" :stats-revision="scheduleStatsRevision" @question-answer-view="onScheduleQuestionAnswerView" @settled="onScheduleSettled" />
+          <QuestionAnswerModelControlDrawer :account-labels="accountLabelsByTarget" :groups="orderedGroups" :workspace="preferenceScope" :platform="currentAccount?.platform ?? ''" :refresh-key="scheduleStatsRevision" @question-answer-view="onQuestionAnswerView" @batch-view="onScheduleQuestionAnswerView" @settled="recentSummaries.refreshTargets($event)" />
           </div>
           <div class="space-y-3 border-b border-border/50 p-4">
             <div class="relative">
@@ -1738,7 +1776,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           <Layers class="h-9 w-9 text-muted-foreground/40" />
           <p class="mt-3 text-sm text-muted-foreground">{{ t('admin.connectionHealth.adminEmpty') }}</p>
         </div>
-        <AdminGroupHealthDetail
+        <AdminGroupHealthDetail :account-labels="accountLabelsByTarget"
           :workspace-platform="currentAccount?.platform"
           v-else
           :key="selectedGroup.id"
@@ -1770,7 +1808,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       </div>
     </section>
 
-    <GroupHealthSetupDrawer
+    <GroupHealthSetupDrawer :account-labels="accountLabelsByTarget"
       :open="setupDrawerOpen"
       :workspace-platform="currentAccount?.platform ?? ''"
       :group="setupGroup"
@@ -1783,15 +1821,17 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
     <TargetPolicyAssignmentDialog
       :open="policyAssignmentDialogOpen"
       :target-id="policyAssignmentTarget?.targetId ?? ''"
-      :account-name="policyAssignmentTarget?.name || policyAssignmentTarget?.id || ''"
+      :account-name="policyAssignmentTarget?.name ?? ''"
+      :account-label="policyAssignmentTarget ? accountLabelsByTarget[policyAssignmentTarget.targetId] : undefined"
       :policies="policies"
       @close="policyAssignmentDialogOpen = false"
       @saved="onTargetPolicySaved"
     />
 
-    <ManualOneTimeProbeDialog
+    <ManualOneTimeProbeDialog :account-labels="accountLabelsByTarget"
       :open="probeDialogOpen"
       :target="probeDialogTarget"
+      :history-account-label="historyAccountLabel"
       :question-answer-preferences="preferences.questionAnswer"
       :initial-question-answer-batch-id="initialQuestionAnswerBatchId"
       :initial-question-answer-expand-failed="initialQuestionAnswerExpandFailed"
@@ -1806,7 +1846,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       @question-answer-stats-retry="retryQuestionAnswerSummaries"
       @question-answer-preferences-changed="onQuestionAnswerPreferencesChanged"
     />
-    <QuestionAnswerScheduleBatchDialog v-if="scheduleReadOnlyBatch" :target-id="scheduleReadOnlyBatch.targetId" :batch-id="scheduleReadOnlyBatch.batchId" :account-name="scheduleReadOnlyBatch.accountName" :workspace="preferenceScope" @close="scheduleReadOnlyBatch = null" @question-answer-view="onQuestionAnswerView" />
+    <QuestionAnswerScheduleBatchDialog :account-labels="accountLabelsByTarget" v-if="scheduleReadOnlyBatch" :target-id="scheduleReadOnlyBatch.targetId" :batch-id="scheduleReadOnlyBatch.batchId" :account-name="scheduleReadOnlyBatch.accountName" :account-name-note="scheduleReadOnlyBatch.accountNameNote" :workspace="preferenceScope" @close="scheduleReadOnlyBatch = null" @question-answer-view="onQuestionAnswerView" />
 
     <ProbePolicyListDialog
       :open="policyListDialogOpen"
@@ -1835,7 +1875,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
       @rules-changed="onHealthRulesChanged"
     />
 
-    <ConnectionHealthEventsDialog
+    <ConnectionHealthEventsDialog :account-labels="accountLabelsByTarget"
       :open="eventsDialogOpen"
       :events="events"
       :groups="groups"

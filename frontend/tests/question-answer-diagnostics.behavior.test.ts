@@ -28,6 +28,133 @@ const response = (payload: unknown, status = 200) => new Response(JSON.stringify
 afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); localStorage.clear(); document.body.innerHTML = '' })
 
 describe('A request diagnostics and direct causes', () => {
+  it.each([true, false])('shows historical-name provenance beside the manual title even when records exist=%s', async hasRecords => {
+    const r = record({ status: 'succeeded', errorType: '' }), current = batch(hasRecords ? [r] : [])
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith('/models')) return response([])
+      if (path.endsWith('/test-questions')) return response([])
+      if (path.includes('/question-answers/history')) return response(upgradeQuestionAnswerHistoryFixture({ records: current.records, page: 1, totalItems: current.records.length, totalPages: 1, todayStats: current.stats }))
+      if (path.includes('/question-answers/batches/')) return response(current)
+      return response({ items: [] })
+    }))
+    const wrapper = track(mount(ManualOneTimeProbeDialog, { props: {
+      open: false, target: { targetId: r.targetId, accountName: '', platform: 'sub2api', type: 'apikey', status: 'active', groupName: 'G', formalModels: [] },
+      initialQuestionAnswerBatchId: r.batchId, accountLabels: { [r.targetId]: { name: '当前补读名称', siteNames: [] } },
+    }, global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } } }))
+    await wrapper.setProps({ open: true }); await flushPromises()
+    const title = wrapper.get('[role="dialog"] > div').text()
+    expect(title).toContain('当前补读名称')
+    expect(title).toContain('当时未记录账号名称，以下名称来自当前资料')
+    expect(wrapper.findAll('details[open]')).toHaveLength(0)
+    expect(wrapper.findAllComponents(QuestionAnswerExecutionDetails)).toHaveLength(hasRecords ? 1 : 0)
+  })
+
+  it.each([['已保存的当前名称', false], ['', false], ['已保存的当前名称', true], ['', true]] as const)('uses available names and websites in manual errors and stop confirmation, with no cancel write: %s, dataFailure=%s', async (name, dataFailure) => {
+    const r = record({ status: 'running', errorType: '', completedAt: null }), current = batch([r])
+    const requests: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input); requests.push(path)
+      if (path.endsWith('/models')) return response({ message: 'admin.connectionHealth.errors.modelsFetch' }, 500)
+      if (path.endsWith('/test-questions')) return response([])
+      if (dataFailure && (path.includes('/question-answers/history') || path.includes('/question-answers/batches/'))) return response({ message: 'admin.connectionHealth.errors.questionAnswerStorage' }, 500)
+      if (path.includes('/question-answers/history')) return response(upgradeQuestionAnswerHistoryFixture({ records: [r], page: 1, totalItems: 1, totalPages: 1, todayStats: current.stats }))
+      if (path.includes('/question-answers/batches/')) return response(current)
+      return response({ items: [] })
+    }))
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const wrapper = track(mount(ManualOneTimeProbeDialog, { props: {
+      open: false, target: { targetId: r.targetId, accountName: '', platform: 'sub2api', type: 'apikey', status: 'active', groupName: 'G', formalModels: [] },
+      initialQuestionAnswerBatchId: r.batchId, accountLabels: { [r.targetId]: { name, siteNames: ['当前网站'] } },
+    }, global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } } }))
+    await wrapper.setProps({ open: true }); await flushPromises()
+    const expected = name || '账号（名称暂未读到）'
+    expect(wrapper.get('[data-testid="question-answer-model-status"]').text()).toContain(expected)
+    expect(wrapper.get('[data-testid="question-answer-model-status"]').text()).toContain('当前网站')
+    if (dataFailure) {
+      expect(wrapper.get('[data-testid="question-answer-stats-error"]').text()).toContain(expected)
+      expect(wrapper.get('[data-testid="question-answer-stats-error"]').text()).toContain('当前网站')
+      expect(confirm).not.toHaveBeenCalled()
+      expect(requests.some(path => path.endsWith('/cancel'))).toBe(false)
+      return
+    }
+    await wrapper.get('[data-testid="question-answer-stop-latest"]').trigger('click'); await flushPromises()
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(confirm.mock.calls[0]![0]).toContain(expected)
+    expect(confirm.mock.calls[0]![0]).toContain('当前网站')
+    expect(requests.some(path => path.endsWith('/cancel'))).toBe(false)
+  })
+
+  it('keeps the known name while a batch with an empty raw name is still being submitted', async () => {
+    const targetId = record().targetId
+    let resolve!: (value: Response) => void
+    const pending = new Promise<Response>(done => { resolve = done })
+    const submitted: string[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.endsWith('/test-questions')) return response([{ id: 'diagnostics-question', name: 'Q', body: 'question', enabled: true, isDefault: true, keywords: [] }])
+      if (path.endsWith('/models')) return response([{ id: 'diagnostics-model', name: 'model', providerFamily: 'openai' }])
+      if (path.endsWith('/question-answers/batches')) { submitted.push(path); return pending }
+      return response({ items: [] })
+    }))
+    const groups = [{ id: 'g', name: 'G', accounts: [{ id: 'diagnostics-account', targetId, name: '', platform: 'openai', type: 'apikey', status: 'active', probeAvailable: true, modelHealth: [] }] }] as AdminGroupHealth[]
+    const wrapper = track(mount(QuestionAnswerBatchDrawer, { props: { groups, accountLabels: { [targetId]: { name: '提交中的真实账号名', siteNames: [] } }, preferenceScope: 'diagnostics', preferences: { ...createDefaultConnectionHealthPreferences().questionAnswer, modelIds: ['diagnostics-model'], questionIds: ['diagnostics-question'], batchTargetIds: [targetId] } }, global: { stubs: { Teleport: true } } }))
+    try {
+      await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await flushPromises()
+      await wrapper.get('[data-testid="question-answer-batch-start"]').trigger('click'); await flushPromises()
+      expect(wrapper.get('[data-testid="question-answer-batch-submitting"]').text()).toContain('提交中的真实账号名')
+      expect(wrapper.get('[data-testid="question-answer-batch-submitting"]').text()).not.toContain('名称暂未读到')
+      expect(submitted).toEqual([`/api/connection-health/targets/${encodeURIComponent(targetId)}/question-answers/batches`])
+    } finally { resolve(response(batch([]))); await flushPromises() }
+  })
+
+  it.each(['succeeded', 'failed', 'running', 'pending', 'cancelled'] as const)('passes the batch account name through every read-only %s record component', async status => {
+    const r = record({ status, answerBody: status === 'succeeded' ? '保留的回答' : '', errorType: status === 'failed' ? 'network' : '' })
+    vi.stubGlobal('fetch', vi.fn(async () => response(batch([r]))))
+    const wrapper = track(mount(QuestionAnswerScheduleBatchDialog, { props: { targetId: r.targetId, batchId: r.batchId, accountName: '批次中的原账号名', accountNameNote: '', workspace: 'ws1' }, global: { stubs: { Teleport: true } } }))
+    await flushPromises()
+    const details = wrapper.findAllComponents(QuestionAnswerExecutionDetails)
+    expect(details.length).toBeGreaterThan(0)
+    for (const component of details) {
+      expect(component.text()).toContain('批次中的原账号名')
+      expect(component.text()).not.toContain('账号 diagnostics-account')
+    }
+    if (status === 'succeeded') expect(wrapper.text()).toContain('保留的回答')
+  })
+
+  it('uses an exact historical name in the manual dialog and switches back to current identity for another batch', async () => {
+    const r = record({ status: 'succeeded', answerBody: '保留原回答', errorType: '', answerJudgment: 'unreviewed' })
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input)
+      if (path.includes('/models')) return response([{ id: 'diagnostics-model', name: 'model' }])
+      if (path.endsWith('/test-questions')) return response([{ id: 'diagnostics-question', name: 'Q', body: 'question', enabled: true, isDefault: true, keywords: [] }])
+      if (path.includes('/question-answers/history')) return response(upgradeQuestionAnswerHistoryFixture({ records: [r], page: 1, totalItems: 1, totalPages: 1, todayStats: batch([r]).stats }))
+      if (path.endsWith('/batches/new-batch')) return response({ ...batch([{ ...r, batchId: 'new-batch' }]), batchId: 'new-batch' })
+      if (path.includes('/question-answers/batches/')) return response(batch([r]))
+      return response({ items: [], counts: { total: 0, open: 0, closed: 0, attention: 0, untested: 0 }, settings: {} })
+    }))
+    const wrapper = track(mount(ManualOneTimeProbeDialog, { props: {
+      open: false, target: { targetId: r.targetId, accountName: '当前名称', platform: 'sub2api', type: 'apikey', status: 'active', groupName: 'G', formalModels: [] },
+      initialQuestionAnswerBatchId: r.batchId,
+      accountLabels: { [r.targetId]: { name: '当前名称', siteNames: [] } },
+      historyAccountLabel: { targetId: r.targetId, batchId: r.batchId, name: '执行当时名称', note: '' },
+    }, global: { stubs: { Teleport: true, Transition: false, QuestionAnswerModelControlPanel: true } } }))
+    await wrapper.setProps({ open: true }); await flushPromises()
+    expect(wrapper.findComponent(QuestionAnswerExecutionDetails).text()).toContain('执行当时名称')
+    const queue = wrapper.findComponent({ name: 'QuestionAnswerQueuePanel' })
+    expect(queue.props('accounts')[r.targetId]).toBe('当前名称')
+    queue.vm.$emit('view', { targetId: r.targetId, batchId: 'new-batch' }); await flushPromises()
+    const detail = wrapper.findComponent(QuestionAnswerExecutionDetails)
+    expect(detail.text()).toContain('当前名称')
+    expect(detail.text()).not.toContain('执行当时名称')
+    expect(wrapper.text()).toContain('保留原回答')
+  })
+  it('uses the supplied account name throughout request details and never relabels its target number as a name', () => {
+    const wrapper = track(mount(QuestionAnswerExecutionDetails, { props: { record: record({ targetId: 'sub2api:ws1:229' }), accountName: '完整请求账号229' } }))
+    expect(wrapper.text()).toContain('完整请求账号229')
+    expect(wrapper.text()).not.toContain('账号 229')
+    expect(wrapper.text()).not.toContain('sub2api:ws1:229')
+  })
   it.each([
     ['parse', 'invalid character', 'invalid_response'], ['receive', '1MiB读取上限', 'response_too_large'], ['parse', 'max_tokens输出上限', 'response_incomplete'], ['build', '账号类型不支持', 'account_type_unsupported'],
   ] as const)('keeps known local %s reason and never invents a network root cause', (failureStep, localError, errorType) => {

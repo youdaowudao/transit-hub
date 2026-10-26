@@ -238,7 +238,7 @@ describe('C2 mounted main page keeps pure local recent polling separate from tod
     })
     const cell = wrapper.get('tbody > tr').findAll('td')[8]!
     await cell.get('button').trigger('click'); await flushPromises()
-    expect(wrapper.text()).toContain('按执行时的账号信息显示这批问答，只能查看')
+    expect(wrapper.text()).toContain('显示这批问答已有的账号资料，只能查看')
     expect(wrapper.text()).toContain('当前批次总正确率 75%')
     const dialogReads = vi.mocked(fetch).mock.calls.slice(firstDialogRead)
     const batchReads = dialogReads.filter(call => String(call[0]).includes('/question-answers/batches/'))

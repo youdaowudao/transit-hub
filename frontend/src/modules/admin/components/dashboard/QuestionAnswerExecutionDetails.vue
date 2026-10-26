@@ -1,10 +1,13 @@
 <script setup lang="ts">
+import { accountNameText, accountReminderLabel } from '../../utils/connectionHealthAccountLabel'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import type { QuestionAnswerRecord, QuestionAnswerRuntimeItem } from '../../types/connectionHealth'
 import { formatConnectionHealthTime } from '../../composables/useConnectionHealth'
 import { questionAnswerSavingMessage, questionAnswerSnapshotTime } from '../../utils/questionAnswers'
 
 const props = defineProps<{
+  accountName?: string
+  accountNameNote?: string
   record: QuestionAnswerRecord
   runtime?: QuestionAnswerRuntimeItem
   snapshotAt?: string
@@ -79,7 +82,8 @@ const failure = computed(() => {
     <details>
       <summary data-testid="question-answer-execution-toggle" class="cursor-pointer font-medium text-foreground">展开过程与错误详情</summary>
       <p>查看这题的请求过程、失败步骤和已有原因；不会修改结果或主站。</p>
-      <p class="break-all">账号 {{ record.targetId?.split(':').at(-1) || record.targetId || '当时未记录' }} · 模型 {{ record.modelName }} · {{ record.questionName }} · {{ record.repeatIndex ? `第${record.repeatIndex}次` : '历史样本' }}</p>
+      <p class="break-all">{{ accountNameNote && !accountNameText(accountName) ? '账号（当时未记录名称）' : accountReminderLabel({ name: accountName }) }} · 模型 {{ record.modelName }} · {{ record.questionName }} · {{ record.repeatIndex ? `第${record.repeatIndex}次` : '历史样本' }}</p>
+      <p v-if="accountNameNote" class="break-words">{{ accountNameNote }}</p>
       <p class="break-all">批次 #{{ record.batchId }} · 记录 #{{ record.id }} · 创建 {{ time(record.createdAt) }}</p>
       <p v-if="record.diagnosticsUnavailable">过程记录无法读取，答案和原状态仍保留。请按批次、记录编号和时间核查后台日志。</p>
       <p v-else-if="!diagnostics">当时未记录网络过程，无法确认具体卡在哪一步；可凭批次编号{{ record.batchId }}和时间{{ time(record.createdAt) }}核查后台日志。</p>

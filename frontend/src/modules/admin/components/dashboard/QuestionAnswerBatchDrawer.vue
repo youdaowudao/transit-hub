@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { accountNameText, currentAccountNames, displayAccountName, type AccountLabels } from '../../utils/connectionHealthAccountLabel'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Loader2, X } from 'lucide-vue-next'
 import { t, te } from '@/locales'
@@ -29,6 +30,7 @@ import {
 } from '../../utils/questionAnswers'
 
 const props = defineProps<{
+  accountLabels?: AccountLabels
   groups: AdminGroupHealth[]
   preferenceScope: string
   preferences: QuestionAnswerPreferences
@@ -137,7 +139,7 @@ const confirmedRequestTotal = computed(() => outcomes.value.reduce(
 ))
 const unknownCount = computed(() => outcomes.value.filter(outcome => outcome.kind === 'unknown').length)
 const acceptedRequestTotal = computed(() => unknownCount.value || running.value ? '尚未确认' : confirmedRequestTotal.value)
-const queueAccounts = computed(() => Object.fromEntries(candidates.value.map(target => [target.targetId, target.accountName])))
+const queueAccounts = computed(() => ({ ...Object.fromEntries(collectQuestionAnswerBatchTargets(props.groups).map(target => [target.targetId, accountNameText(target.accountName)])), ...currentAccountNames(props.accountLabels) }))
 const startedCount = computed(() => outcomes.value.filter(outcome => outcome.kind === 'started').length)
 const skippedCount = computed(() => outcomes.value.filter(outcome => outcome.kind === 'skipped').length)
 const failedCount = computed(() => outcomes.value.filter(outcome => outcome.kind === 'failed').length)
@@ -414,10 +416,7 @@ const safeConnectionHealthError = (rawKey: string): string => (
   questionAnswerReadableError(rawKey, t, te)
 )
 
-const shortenedTargetId = (targetId: string): string => {
-  if (targetId.length <= 36) return targetId
-  return `${targetId.slice(0, 20)}…${targetId.slice(-10)}`
-}
+
 
 const refreshPreparation = () => {
   if (!visible.value || running.value) return
@@ -636,14 +635,14 @@ onBeforeUnmount(() => {
                   <span
                     :data-testid="`question-answer-batch-target-name-${target.targetId}`"
                     class="block break-words text-sm font-medium text-foreground"
-                  >{{ target.accountName }}</span>
+                  >{{ displayAccountName(props.accountLabels?.[target.targetId]?.name, target.accountName) }}</span>
                   <span class="mt-0.5 block break-words text-xs text-muted-foreground">{{ target.groupNames.join('、') }}</span>
                 </span>
               </label>
             </div>
 
             <div v-if="sourceTarget" data-testid="question-answer-batch-source" class="rounded-lg bg-surface px-3 py-2 text-sm text-foreground">
-              {{ t('admin.connectionHealth.questionAnswerBatch.source', { account: sourceTarget.accountName, targetId: shortenedTargetId(sourceTarget.targetId) }) }}
+              {{ t('admin.connectionHealth.questionAnswerBatch.source', { account: displayAccountName(props.accountLabels?.[sourceTarget.targetId]?.name, sourceTarget.accountName) }) }}
             </div>
             <div v-if="preparedQuestionIds.length" data-testid="question-answer-batch-config" class="space-y-1 rounded-lg border border-border/50 px-3 py-2 text-xs text-muted-foreground">
               <p>{{ t('admin.connectionHealth.questionAnswerBatch.configModels', { models: preparedModelIds.join('、') }) }}</p>
@@ -661,7 +660,7 @@ onBeforeUnmount(() => {
                 <p
                   :data-testid="`question-answer-batch-preview-identity-${preview.target.targetId}`"
                   class="break-all font-medium text-foreground"
-                >{{ preview.target.accountName }} <span v-if="preview.target.testConfiguration" class="text-xs text-muted-foreground">· {{ testProtocolName(preview.target.testConfiguration.protocol) || t('admin.connectionHealth.testConfiguration.' + preview.target.testConfiguration.status) }}<template v-if="preview.target.testConfiguration.probeTimeoutSeconds"> / {{ preview.target.testConfiguration.probeTimeoutSeconds }}s</template></span> · {{ preview.target.targetId }}</p>
+                >{{ displayAccountName(props.accountLabels?.[preview.target.targetId]?.name, preview.target.accountName) }} <span v-if="preview.target.testConfiguration" class="text-xs text-muted-foreground">· {{ testProtocolName(preview.target.testConfiguration.protocol) || t('admin.connectionHealth.testConfiguration.' + preview.target.testConfiguration.status) }}<template v-if="preview.target.testConfiguration.probeTimeoutSeconds"> / {{ preview.target.testConfiguration.probeTimeoutSeconds }}s</template></span></p>
                 <p v-if="preview.target.testConfiguration?.sourceGroups.length" class="break-words">{{ preview.target.testConfiguration.sourceGroups.map(source => `${source.adminGroupName || source.adminGroupId}: ${testProtocolName(source.protocol)} / ${source.probeTimeoutSeconds}s`).join('；') }}</p>
                 <p>{{ t('admin.connectionHealth.testConfiguration.questionAnswerTimeout') }}</p>
                 <p>{{ t('admin.connectionHealth.questionAnswerBatch.compatibleModels', { models: preview.compatibleModelIds.join('、') || '-' }) }}</p>
@@ -693,8 +692,8 @@ onBeforeUnmount(() => {
               <p v-if="unknownCount" class="font-medium text-foreground">实际接受总量尚未确认；已确认受理 {{ confirmedRequestTotal }} 条，另有 {{ unknownCount }} 个账号提交未确认。</p>
               <p v-else-if="running" class="font-medium text-foreground">已确认受理 {{ confirmedRequestTotal }} 条；实际总量等待确认。</p>
               <p v-else class="font-medium text-foreground">{{ t('admin.connectionHealth.questionAnswerBatch.acceptedTotal', { total: acceptedRequestTotal }) }}</p>
-              <p v-if="submittingTarget" data-testid="question-answer-batch-submitting">{{ submittingAccount }} · 正在提交：正在准备账号和题目，后台尚未确认接收。</p>
-              <p v-for="preview in waitingTargets" :key="`waiting:${preview.target.targetId}`" data-testid="question-answer-batch-waiting">{{ preview.target.accountName }} · 等待提交：尚未向后台创建这批题。</p>
+              <p v-if="submittingTarget" data-testid="question-answer-batch-submitting">{{ displayAccountName(props.accountLabels?.[submittingTarget]?.name, submittingAccount) }} · 正在提交：正在准备账号和题目，后台尚未确认接收。</p>
+              <p v-for="preview in waitingTargets" :key="`waiting:${preview.target.targetId}`" data-testid="question-answer-batch-waiting">{{ displayAccountName(props.accountLabels?.[preview.target.targetId]?.name, preview.target.accountName) }} · 等待提交：尚未向后台创建这批题。</p>
               <div class="space-y-2">
                 <div
                   v-for="outcome in outcomes"
@@ -705,7 +704,7 @@ onBeforeUnmount(() => {
                   <p
                     :data-testid="`question-answer-batch-outcome-name-${outcome.targetId}`"
                     class="break-words font-medium text-foreground"
-                  >{{ outcome.accountName }}</p>
+                  >{{ displayAccountName(props.accountLabels?.[outcome.targetId]?.name, outcome.accountName) }}</p>
                   <p class="mt-0.5 break-words text-xs text-muted-foreground">{{ outcomeReason(outcome) }}</p>
                   <button v-if="outcome.kind === 'started' && outcome.batchId" type="button" class="mt-2 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium hover:bg-surface-line" @click="emit('question-answer-view', { targetId: outcome.targetId, batchId: outcome.batchId })">查看该批次</button>
                   <button v-else-if="outcome.reasonKey === 'activeBatch'" type="button" class="mt-2 rounded-md border border-border/60 px-2.5 py-1.5 text-xs font-medium hover:bg-surface-line" @click="emit('question-answer-view', { targetId: outcome.targetId })">打开该账号最近批次</button>

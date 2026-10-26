@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { accountLabelForTarget, accountReminderLabel, type AccountLabels } from '../../utils/connectionHealthAccountLabel'
 import { Activity, Eye, Layers, ShieldAlert, ShieldCheck, ShieldQuestion, X, Zap } from 'lucide-vue-next'
 import { Tooltip } from '@/components/ui/tooltip'
 import { judgedModelHealth, connectionHealthMessageKey, connectionHealthStateBadgeClass } from '../../composables/useConnectionHealth'
@@ -11,6 +12,7 @@ import type {
 } from '../../types/connectionHealth'
 
 const props = defineProps<{
+  accountLabels?: AccountLabels
   open: boolean
   group: AdminGroupHealth | null
 }>()
@@ -161,7 +163,7 @@ const assignedPolicyLabel = (account: AdminGroupAccount): string => {
               </thead>
               <tbody>
                 <tr v-for="account in group.accounts" :key="account.id" class="border-t border-border/20 align-top">
-                  <td class="py-2 pr-3 text-foreground">{{ account.name || account.id }}</td>
+                  <td class="py-2 pr-3 text-foreground">{{ accountReminderLabel(accountLabelForTarget(accountLabels, account.targetId, account.name)) }}</td>
                   <td class="py-2 pr-3 text-muted-foreground">{{ account.platform || '-' }}</td>
                   <td class="py-2 pr-3 text-muted-foreground">{{ account.type || '-' }}</td>
                   <td class="py-2 pr-3 text-muted-foreground">{{ account.status || '-' }}</td>

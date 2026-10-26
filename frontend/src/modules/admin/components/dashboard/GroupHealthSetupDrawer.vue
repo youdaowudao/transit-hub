@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { accountLabelForTarget, accountReminderLabel } from '../../utils/connectionHealthAccountLabel'
 import { computed, ref, watch } from 'vue'
 import {
   ArrowDownUp,
@@ -30,6 +31,7 @@ type Phase = 'loading' | 'ready' | 'saving' | 'error'
 type ModelSuggestionSource = 'common' | 'discovered' | 'none'
 
 const props = defineProps<{
+  accountLabels?: import('../../utils/connectionHealthAccountLabel').AccountLabels
   open: boolean
   workspacePlatform: string
   group: AdminGroupHealth | null
@@ -709,7 +711,7 @@ const close = () => {
                 <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.connectionHealth.testConfiguration.' + (isAnthropicGroup ? 'clearHelpAnthropic' : 'clearHelp')) }}</p>
                 <ul v-if="testConfiguration.conflictAccountCount" class="space-y-1 text-xs text-amber-700 dark:text-amber-400">
                   <li v-for="account in testConfiguration.accounts.filter(item => item.testConfiguration.status === 'conflict')" :key="account.targetId">
-                    {{ account.accountName }} · {{ account.testConfiguration.sourceGroups.map(source => `${source.adminGroupName || source.adminGroupId}: ${source.protocol} / ${source.probeTimeoutSeconds}s`).join('；') }}
+                    {{ accountReminderLabel(accountLabelForTarget(accountLabels, account.targetId, account.accountName)) }} · {{ account.testConfiguration.sourceGroups.map(source => `${source.adminGroupName || source.adminGroupId}: ${source.protocol} / ${source.probeTimeoutSeconds}s`).join('；') }}
                   </li>
                 </ul>
                 <div class="flex flex-wrap gap-2">
@@ -756,7 +758,7 @@ const close = () => {
                     >
                     <span class="min-w-0 flex-1">
                       <span class="flex flex-wrap items-center gap-2">
-                        <span class="truncate text-sm font-medium text-foreground">{{ account.name || account.id }}</span>
+                        <span class="break-words text-sm font-medium text-foreground">{{ accountReminderLabel(accountLabelForTarget(accountLabels, account.targetId, account.name)) }}</span>
                         <span class="text-xs text-muted-foreground">{{ account.status || '-' }}</span>
                       </span>
                       <span class="mt-1 block truncate text-xs text-muted-foreground">{{ account.models || t(`${prefix}.scope.modelsUnknown`) }}</span>
@@ -924,7 +926,7 @@ const close = () => {
                   <h4 class="text-xs font-semibold text-foreground">{{ t(`${prefix}.confirm.accountChanges`) }}</h4>
                   <div class="divide-y divide-border/50 rounded-lg border border-border/60">
                     <div v-for="change in changedAccounts" :key="change.account.targetId" class="px-4 py-3">
-                      <p class="text-sm font-medium text-foreground">{{ change.account.name || change.account.id }}</p>
+                      <p class="text-sm font-medium text-foreground">{{ accountReminderLabel(accountLabelForTarget(accountLabels, change.account.targetId, change.account.name)) }}</p>
                       <template v-if="change.change === 'excluded'">
                         <p class="mt-1 text-xs font-medium text-amber-700 dark:text-amber-400">{{ t(`${prefix}.scope.currentGroupOnly`) }}</p>
                         <p

@@ -133,7 +133,7 @@ const displayedErrorDetail = computed(() => {
           <Zap class="h-4 w-4" />
         </div>
         <div class="min-w-0">
-          <p class="truncate text-sm font-medium text-foreground">{{ accountName || siteLabel }}</p>
+          <p class="text-sm font-medium text-foreground" :class="accountName ? 'break-words' : 'truncate'">{{ accountName || siteLabel }}</p>
           <p class="truncate text-xs text-muted-foreground">{{ upstreamGroupName }} · {{ modelName }}</p>
           <p v-if="accountName && siteLabel" class="truncate text-[11px] text-muted-foreground">{{ siteLabel }}</p>
         </div>

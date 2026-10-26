@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { accountNameText } from '../../utils/connectionHealthAccountLabel'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { t, te } from '@/locales'
 import { useQuestionAnswerQueue } from '../../composables/useQuestionAnswerQueue'
@@ -20,7 +21,8 @@ watch(() => [expanded.value, props.visible, stale.value, snapshot.value?.process
 watch(() => props.workspace, () => { expanded.value = false; limit.value = 50 })
 onBeforeUnmount(clearClock)
 const time = (value?: string | null) => value && Number.isFinite(Date.parse(value)) ? formatConnectionHealthTime(value) : '当时未记录'
-const account = (targetId: string) => props.accounts?.[targetId] || `账号编号 ${targetId.split(':').at(-1) || targetId}`
+const account = (targetId: string) => accountNameText(props.accounts?.[targetId]) || '账号（名称暂未读到）'
+const missingAccountNames = computed(() => snapshot.value && [...snapshot.value.preparingTargets, ...snapshot.value.queued, ...snapshot.value.processing, ...snapshot.value.stopping, ...snapshot.value.finalizingBatches].some(item => !accountNameText(props.accounts?.[item.targetId])))
 const more = computed(() => snapshot.value && Math.max(snapshot.value.queued.length, snapshot.value.processing.length, snapshot.value.stopping.length, snapshot.value.preparingTargets.length, snapshot.value.finalizingBatches.length) > limit.value)
 const serverNow = computed(() => questionAnswerSnapshotTime(snapshot.value?.snapshotAt, receivedAt.value, clock.value, stale.value))
 const duration = (milliseconds: number) => `${Math.max(0, milliseconds / 1000).toFixed(1)}秒`
@@ -56,6 +58,7 @@ const view = (item: QuestionAnswerQueueTarget) => emit('view', { targetId: item.
     <div v-if="expanded" class="space-y-3">
       <p v-if="!snapshot" class="text-muted-foreground">{{ loading ? '正在读取本工作区排队信息…' : '后台过程信息不可用，无法确认当前进度；原批次结果和人工判断仍可查看。' }}</p>
       <template v-if="snapshot">
+        <p v-if="missingAccountNames" class="text-muted-foreground">当前资料没有这个账号的名称，请点“查看该批次”核对当时记录；查看不会重新发题或修改主站。</p>
         <p class="text-muted-foreground">这是当前工作区预计开始顺序，会随任务加入或终止变化；同时处理时，实际写出先后可能不同。</p>
         <article v-for="item in snapshot.preparingTargets.slice(0, limit)" :key="`preparing:${item.targetId}:${item.batchId}`" data-testid="question-answer-queue-preparing-row" class="space-y-1 border-t border-border/40 pt-2"><p>{{ account(item.targetId) }} · 准备批次 #{{ item.batchId }}</p><p>正在提交：正在准备账号和题目，后台尚未确认接收；题目数量尚未确认。</p><button type="button" class="underline" @click="view(item)">查看该批次</button></article>
         <article v-for="item in snapshot.queued.slice(0, limit)" :key="item.recordId" data-testid="question-answer-queue-queued-row" class="space-y-1 border-t border-border/40 pt-2"><p class="break-words">预计第{{ item.position }}位 · {{ account(item.targetId) }} · {{ item.modelName }} · {{ item.questionName }} · 第{{ item.repeatIndex ?? '—' }}次</p><p>本题仍在排队，尚未开始HTTP等待。创建 {{ time(item.createdAt) }} · 批次 #{{ item.batchId }} · 记录 #{{ item.recordId }}</p><button type="button" class="underline" @click="view(item)">查看该批次</button></article>

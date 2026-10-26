@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { accountNameText, accountReminderLabel, missingAccountNameHelp } from '../../utils/connectionHealthAccountLabel'
 import { Loader2, ShieldCheck, ShieldQuestion, X } from 'lucide-vue-next'
 import { connectionHealthMessageKey, useConnectionHealth } from '../../composables/useConnectionHealth'
 import type { ConnectionHealthPolicy } from '../../types/connectionHealth'
@@ -8,6 +9,7 @@ const props = defineProps<{
   open: boolean
   targetId: string
   accountName: string
+  accountLabel?: import('../../types/connectionHealth').AccountFocusLabel
   policies: ConnectionHealthPolicy[]
 }>()
 
@@ -18,6 +20,7 @@ const emit = defineEmits<{
 
 import { t, te } from '@/locales'
 const prefix = 'admin.connectionHealth.policyAssignment'
+const accountTitle = computed(() => accountReminderLabel({ ...props.accountLabel, name: accountNameText(props.accountLabel?.name, props.accountName) }))
 const { loadTargetPolicyAssignments, saveTargetPolicyAssignments } = useConnectionHealth()
 
 type Phase = 'loading' | 'ready' | 'saving' | 'error'
@@ -106,7 +109,8 @@ const close = () => {
               </div>
               <div class="min-w-0">
                 <h3 class="truncate text-sm font-semibold text-foreground">{{ t(`${prefix}.title`) }}</h3>
-                <p class="truncate text-xs text-muted-foreground">{{ accountName }} · {{ t(`${prefix}.subtitle`) }}</p>
+                <p class="break-words text-xs text-muted-foreground">{{ accountTitle }} · {{ t(`${prefix}.subtitle`) }}</p>
+                <p v-if="!accountNameText(accountLabel?.name, accountName)" class="text-xs text-muted-foreground">{{ missingAccountNameHelp }}</p>
               </div>
             </div>
             <button

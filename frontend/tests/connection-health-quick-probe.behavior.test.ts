@@ -5,6 +5,8 @@ import { defineComponent, h, nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AdminGroupHealthDetail from '@/modules/admin/components/dashboard/AdminGroupHealthDetail.vue'
+import AdminGroupAccountsDialog from '@/modules/admin/components/dashboard/AdminGroupAccountsDialog.vue'
+import ConnectionHealthEventsDialog from '@/modules/admin/components/dashboard/ConnectionHealthEventsDialog.vue'
 import ConnectionHealthView from '@/modules/admin/views/ConnectionHealthView.vue'
 import type {
   AdminGroupAccount,
@@ -15,6 +17,35 @@ import type {
 vi.mock('@/modules/admin/api/mySites', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/modules/admin/api/mySites')>()), listRealConnections: vi.fn(async () => []) }))
 
 describe('ActionDiagnostics RED-6 user-facing action reasons', () => {
+  it('uses existing names and websites in account rows, conflicts, and the retained accounts component', async () => {
+    const account = makeAccount({ id: '229', targetId: 'sub2api:ws1:229', name: '' })
+    const accountLabels = { [account.targetId]: { name: '已保存的完整账号名称', siteNames: ['已保存网站'] } }
+    const wrapper = mountDetail([account])
+    await wrapper.setProps({ accountLabels, group: makeGroup([account], { priorityConflicts: [{ targetId: account.targetId, accountName: '', currentPriority: 20, expectedPriority: 30 }] }) })
+    expect(wrapper.text()).toContain('账号「已保存的完整账号名称」（网站「已保存网站」）')
+    expect(wrapper.text()).not.toContain('sub2api:ws1:229')
+    const dialog = mount(AdminGroupAccountsDialog, { props: { open: true, group: makeGroup([account]), accountLabels }, global: { stubs: { Teleport: true } } })
+    mountedWrappers.push(dialog)
+    expect(dialog.text()).toContain('已保存的完整账号名称')
+    await dialog.setProps({ accountLabels: {} })
+    expect(dialog.text()).toContain('账号（名称暂未读到）')
+    expect(dialog.text()).not.toContain('229')
+  })
+
+  it('identifies a departed account in focused and global events without replacing the grouping key', async () => {
+    const targetId = 'sub2api:ws1:229'
+    const wrapper = mount(ConnectionHealthEventsDialog, { props: {
+      open: true, groups: [], adminGroups: [], selectedConnectionId: '', siteName: () => '',
+      accountLabels: { [targetId]: { name: '历史事件对应账号', siteNames: ['事件网站'] } },
+      events: [{ id: 'identity-event', connectionId: targetId, modelName: 'm1', ownGroupName: '', upstreamGroupName: '', upstreamSiteId: '', result: 'network', fromState: 'healthy', toState: 'degraded', errorKey: 'network', errorDetail: '具体网络原因', createdAt: '2026-08-30T10:00:00Z', latencyMs: 120 } as any],
+    }, global: { stubs: { Teleport: true } } }); mountedWrappers.push(wrapper)
+    expect(wrapper.text()).toContain('历史事件对应账号')
+    expect(wrapper.text()).not.toContain(targetId)
+    await wrapper.setProps({ selectedConnectionId: targetId })
+    expect(wrapper.text()).toContain('历史事件对应账号')
+    expect(wrapper.text()).not.toContain(targetId)
+    expect(wrapper.findAllComponents({ name: 'ConnectionHealthLinkDetailCard' })).toHaveLength(1)
+  })
   it('renders one account and reason per diagnostic with named and fallback identities', async () => {
     harness.getPrioritySyncStatus.mockResolvedValue({ workspaceId: 'ws1', status: 'success', failedCount: 0, actionDiagnostics: [
       { accountId: '101', accountName: '验收账号', targetId: 'sub2api:adminacct_internal:101', action: 'priority', dispatchId: 'red6-secret-dispatch', phase: 'uncertain', reason: 'uncertain' },
@@ -23,8 +54,9 @@ describe('ActionDiagnostics RED-6 user-facing action reasons', () => {
     const wrapper = await mountView([makeGroup([makeAccount()])])
     const diagnostics = wrapper.get('[data-testid="remote-action-diagnostics"]')
     expect(diagnostics.findAll('p')).toHaveLength(2)
-    expect(diagnostics.findAll('p')[0].text()).toBe('验收账号（#101）：远端操作结果未知，请在主站核对')
-    expect(diagnostics.findAll('p')[1].text()).toBe('主站账号 #102：主站当前值与 TransitHub 写入的值不一致，请在主站核对')
+    expect(diagnostics.findAll('p')[0].text()).toBe('账号「验收账号」：远端操作结果未知，请在主站核对')
+    expect(diagnostics.findAll('p')[1].text()).toContain('账号（名称暂未读到）：主站当前值与 TransitHub 写入的值不一致，请在主站核对')
+    expect(diagnostics.text()).not.toMatch(/#101|#102/)
     for (const internal of ['adminacct_', 'sub2api:', 'red6-secret-dispatch', 'red6-other-dispatch']) expect(diagnostics.text()).not.toContain(internal)
     expect(diagnostics.findAll('button')).toHaveLength(0)
   })
@@ -1471,9 +1503,9 @@ describe('protocol and unresolved remote action safety display', () => {
     const account = makeAccount({ remoteActionPending: { action: 'target', dispatchId: 'dispatch-visible', phase: 'uncertain', reason: 'uncertain' } })
     const wrapper = await mountView([makeGroup([account])])
     const diagnostics = wrapper.get('[data-testid="remote-action-diagnostics"]')
-    expect(diagnostics.text()).toContain('主站账号 #missing：已不在任何分组，TransitHub 已无法管理它；不再使用请在主站删除，继续使用请加回分组')
+    expect(diagnostics.text()).toContain('账号（名称暂未读到）：当前分组列表中找不到它，TransitHub 已无法管理它')
     expect(diagnostics.text()).not.toContain('dispatch-missing')
-    expect(diagnostics.text()).toContain('需核对账号（#visible）：远端操作结果未知，请在主站核对')
+    expect(diagnostics.text()).toContain('账号「需核对账号」：远端操作结果未知，请在主站核对')
     expect(diagnostics.findAll('button')).toHaveLength(0)
     expect(rowFor(wrapper, account.name).text()).not.toContain('dispatch-visible')
     expect(rowFor(wrapper, account.name).text()).toContain('远端操作结果未知，请在主站核对')

@@ -28,6 +28,26 @@ beforeEach(() => { harness.visibility.value = 'visible'; localStorage.clear() })
 afterEach(() => { wrappers.splice(0).forEach(wrapper => wrapper.unmount()); vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); localStorage.clear() })
 
 describe('B shared local queue projection', () => {
+  it('names all five queue states and gives unknown accounts a batch lookup without substituting an ID', async () => {
+    const targetId = 'sub2api:ws1:229', batchId = 'identity-batch'
+    vi.stubGlobal('fetch', vi.fn(async () => reply(queue(0, {
+      preparingTargets: [{ targetId, batchId }], queued: [item(0, { targetId, batchId })],
+      processing: [item(1, { targetId, batchId })], stopping: [item(2, { targetId, batchId })],
+      finalizingBatches: [{ targetId, batchId, state: 'stop_pending', reason: 'storage_error', message: '保存尚未确认', heldCount: 1 }],
+    }))))
+    const wrapper = panel({ accounts: { [targetId]: '当前完整账号名称' } }); await flushPromises()
+    await wrapper.get('[data-testid="question-answer-queue-toggle"]').trigger('click')
+    for (const state of ['preparing', 'queued', 'processing', 'stopping', 'finalizing']) {
+      expect(wrapper.get(`[data-testid="question-answer-queue-${state}-row"]`).text()).toContain('当前完整账号名称')
+    }
+    await wrapper.setProps({ accounts: {} })
+    expect(wrapper.text()).toContain('账号（名称暂未读到）')
+    expect(wrapper.text()).toContain('请点“查看该批次”核对当时记录')
+    expect(wrapper.text()).not.toContain('账号编号 229')
+    expect(wrapper.text()).not.toContain(targetId)
+    await wrapper.get('[data-testid="question-answer-queue-finalizing-row"] button').trigger('click')
+    expect(wrapper.emitted('view')?.at(-1)).toEqual([{ targetId, batchId }])
+  })
   it('reads idle scopes only on an existing task notification or an explicit refresh and ignores unobserved scopes', async () => {
     vi.useFakeTimers()
     const fetcher = vi.fn(async () => reply(queue())); vi.stubGlobal('fetch', fetcher)
@@ -220,7 +240,7 @@ describe('B shared local queue projection', () => {
     const snapshot = queue(0, { heldCount: 3, availableSlots: 12, workspaceOccupied: 3, preparingTargets: [{ targetId: 'sub2api:ws1:b', batchId: 'preparing-batch' }], stopping: [item(1)], finalizingBatches: [{ targetId: 'sub2api:ws1:c', batchId: 'final-batch', state: 'failed', reason: 'storage_error', message: 'final write confirmation lost', heldCount: 3 }] })
     vi.stubGlobal('fetch', vi.fn(async () => reply(snapshot)))
     const wrapper = panel({ accounts: { 'sub2api:ws1:b': 'Named account' } }); await flushPromises(); await wrapper.get('[data-testid="question-answer-queue-toggle"]').trigger('click')
-    expect(wrapper.text()).toContain('Named account'); expect(wrapper.text()).toContain('账号编号 c'); expect(wrapper.text()).toContain('暂时保留3个位置')
+    expect(wrapper.text()).toContain('Named account'); expect(wrapper.text()).toContain('账号（名称暂未读到）'); expect(wrapper.text()).not.toContain('账号编号 c'); expect(wrapper.text()).toContain('暂时保留3个位置')
     expect(wrapper.text()).toContain('final write confirmation lost'); expect(wrapper.text()).toContain('结束结果尚在确认')
     expect(wrapper.text()).not.toMatch(/3[条个]题|未保存3|service_shutdown|重试保存并结束|租约|回执/)
     await wrapper.get('[data-testid="question-answer-queue-finalizing-row"] button').trigger('click')

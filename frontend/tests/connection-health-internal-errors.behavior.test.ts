@@ -136,7 +136,8 @@ describe('background internal failures explain recovery', () => {
     const wrapper = mount(QuestionAnswerScheduleBatchDialog, { props: { targetId: 'sub2api:ws1:a', batchId: 'internal-fixture', accountName: '隔离账号', workspace: 'ws1' }, global: { stubs: { Teleport: true } } }); wrappers.push(wrapper); await flushPromises()
     expect(wrapper.get('article').text()).toContain('测试程序内部出错，本批次已停止，没有修改主站；可以重新发起测试。')
     expect(wrapper.get('article').text()).not.toContain('问答请求失败。')
-    expect(wrapper.get('article').text()).toContain('账号 当时未记录')
+    expect(wrapper.get('article').text()).toContain('账号「隔离账号」')
+    expect(wrapper.get('article').text()).toContain('当时未记录账号名称，以下名称来自当前资料')
   })
 
   it('displays the internal reason for the actual scheduled target', async () => {

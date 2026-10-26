@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { accountLabelForTarget, accountReminderLabel, type AccountLabels } from '../../utils/connectionHealthAccountLabel'
 import {
   Activity,
   AlertTriangle,
@@ -55,6 +56,7 @@ import {
 } from '../../utils/connectionHealthMultiplier'
 
 const props = withDefaults(defineProps<{
+  accountLabels?: AccountLabels
   focusedAccountIds?: string[]
   focusedAccountLabels?: Record<string, AccountFocusLabel>
   group: AdminGroupHealth
@@ -775,7 +777,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
         <ul v-if="group.priorityConflicts?.length" class="mt-1 space-y-0.5 text-xs">
           <li v-for="conflict in group.priorityConflicts" :key="conflict.targetId">
             {{ t(`${detailPrefix}.priorityConflictTarget`, {
-              target: conflict.accountName || conflict.targetId,
+              target: accountReminderLabel(accountLabelForTarget(accountLabels, conflict.targetId, conflict.accountName)),
               current: conflict.currentPriority ?? '-',
               expected: conflict.expectedPriority ?? '-',
               time: formatConnectionHealthTime(conflict.conflictAt ?? null),
@@ -929,7 +931,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                 </td>
                 <td class="px-3 py-3">
                   <div class="max-w-56">
-                    <p class="flex items-center gap-1 font-medium text-foreground"><span class="truncate">{{ account.name || account.id }}</span> <span v-if="isFocusedAccount(account)" class="inline-flex shrink-0 rounded-md border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary" title="从分组倍率跳转过来要找的账号；换到其他分组后标记消失。只是标记，不会修改主站。">要找的账号</span></p>
+                    <p class="flex items-center gap-1 font-medium text-foreground"><span class="break-words">{{ accountReminderLabel(accountLabelForTarget(accountLabels, account.targetId, account.name)) }}</span> <span v-if="isFocusedAccount(account)" class="inline-flex shrink-0 rounded-md border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold text-primary" title="从分组倍率跳转过来要找的账号；换到其他分组后标记消失。只是标记，不会修改主站。">要找的账号</span></p>
                     <AccountTierEditor
                       v-if="isSub2API(account)"
                       :target-id="account.targetId"

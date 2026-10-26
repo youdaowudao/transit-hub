@@ -107,6 +107,40 @@ func (f *noticePathsFixture) tick(t *testing.T) {
 	waitSchedulerPathsIdle(t, f.s)
 }
 
+func TestLongFailureNoticeMissingNameKeepsAnAccountExplanation(t *testing.T) {
+	for _, stopped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stopped=%t", stopped), func(t *testing.T) {
+			f := newNoticePathsFixture(t)
+			f.reader.accountsByGrp["g1"][0].Name = " \t "
+			f.s.platformGroups = f.reader
+			kind := "connection_health.long_failure"
+			if stopped {
+				f.systemStopped()
+				f.conflictConfiguration()
+				state := f.repo.states["sub2api:ws1:a"]["gpt-4o"]
+				last := time.Now().Add(-25 * time.Hour)
+				state.LastProbeAt, state.LastAppliedProbeAt = &last, &last
+				f.repo.states["sub2api:ws1:a"]["gpt-4o"] = state
+				kind = "connection_health.disabled_unverified"
+			}
+			f.tick(t)
+			for _, notice := range f.pub.snapshot() {
+				if notice.Kind != kind {
+					continue
+				}
+				if !strings.Contains(notice.Content.Summary, "账号名称暂未读到，请到分组健康核对") {
+					t.Fatalf("notification lost account identity explanation: %s", notice.Content.Summary)
+				}
+				if notice.SubjectID != "sub2api:ws1:a" || !strings.Contains(fmt.Sprint(notice.Content.Details), "隔离提醒组") {
+					t.Fatalf("existing target or group was changed: %+v", notice)
+				}
+				return
+			}
+			t.Fatalf("missing existing notice kind %s", kind)
+		})
+	}
+}
+
 func (f *noticePathsFixture) conflictConfiguration() {
 	f.reader.groups = append(f.reader.groups, upstream.AdminGroupInfo{ID: "g2", Name: "隔离冲突组"})
 	f.reader.accountsByGrp["g2"] = append([]upstream.AdminGroupAccountInfo(nil), f.reader.accountsByGrp["g1"]...)

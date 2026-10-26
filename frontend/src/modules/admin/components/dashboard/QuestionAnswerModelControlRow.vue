@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { accountNameText, accountReminderLabel } from '../../utils/connectionHealthAccountLabel'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { Tooltip } from '@/components/ui/tooltip'
 import { t } from '@/locales'
@@ -6,7 +7,7 @@ import { ConnectionHealthApiError, executeModelControl, previewModelControl, rem
 import type { ModelControlItem, ModelControlOperation, ModelControlPreview, ModelControlResult } from '../../types/connectionHealth'
 import { formatQuestionAnswerAccuracy } from '../../utils/questionAnswers'
 import { modelControlText as message, acquireModelControlBusy, releaseModelControlBusy, modelControlBusyTargets, modelControlCardView, modelControlAutoLines, modelControlEntryState, modelControlReason, modelControlRoundText, modelControlTime, addManagedModel, type ModelControlVerifyIssue } from '../../utils/questionAnswerModelControl'
-const props = defineProps<{ item?: ModelControlItem | null; targetId: string; modelName: string; workspace: string; showCoverage?: boolean; showAccount?: boolean; availableModels?: string[] | null; issue?: ModelControlVerifyIssue; executeUnconfirmed?: boolean; accountUnconfirmed?: boolean }>()
+const props = defineProps<{ accountLabel?: import('../../types/connectionHealth').AccountFocusLabel; item?: ModelControlItem | null; targetId: string; modelName: string; workspace: string; showCoverage?: boolean; showAccount?: boolean; availableModels?: string[] | null; issue?: ModelControlVerifyIssue; executeUnconfirmed?: boolean; accountUnconfirmed?: boolean }>()
 const emit = defineEmits<{ (event: 'updated', item: ModelControlItem): void; (event: 'refresh'): void; (event: 'settled', targetId: string): void; (event: 'removed'): void; (event: 'verify-now', targetId: string): void; (event: 'execute-unconfirmed', targetId: string, model: string): void; (event: 'view-round', batchId: string): void }>()
 const currentItem = ref(props.item ?? null), error = ref(''), notice = ref(''), preview = ref<ModelControlPreview | null>(null)
 const operation = ref<ModelControlOperation>('close'), confirmWithoutEvidence = ref(false), removing = ref(false), result = ref<ModelControlResult | null>(null), busy = ref(false)
@@ -98,7 +99,7 @@ const noEvidenceReason = computed(() => item.value?.decisionReason === 'not_toda
 </script>
 <template>
   <article data-testid="model-control-row" :data-model-name="modelName" :data-target-id="targetId" class="space-y-2 rounded-lg border p-3 text-xs" :class="toneClass">
-    <p v-if="showAccount && item?.accountName" class="break-words text-xs text-muted-foreground">{{ item.accountName }}</p>
+    <p v-if="showAccount" class="break-words text-xs text-muted-foreground">{{ accountReminderLabel({ ...accountLabel, name: accountNameText(accountLabel?.name, item?.accountName) }) }}</p>
     <header class="flex items-start justify-between gap-2"><h4 class="min-w-0 break-all text-sm font-semibold">{{ modelName }}</h4><span v-if="view" class="shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold" :class="labelClass">{{ view.label }}</span></header>
     <template v-if="item && view">
       <p class="text-2xl font-semibold tabular-nums" :class="view.tone === 'neutral' ? 'text-muted-foreground' : ''">{{ item.decision === 'no_evidence' ? '—' : formatQuestionAnswerAccuracy(item.round?.accuracyPercent ?? null) }}</p>

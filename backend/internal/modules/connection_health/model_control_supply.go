@@ -132,7 +132,7 @@ func buildModelControlGroupSupply(accounts []upstream.AdminGroupAccountInfo, pla
 		for _, account := range unique {
 			name := strings.TrimSpace(account.Name)
 			if name == "" {
-				name = account.ID
+				name = "账号名称暂未读到"
 			}
 			if summary := summaries[buildTargetID(platform, adminAccountID, account.ID)]; summary != nil {
 				for _, managed := range summary.Models {

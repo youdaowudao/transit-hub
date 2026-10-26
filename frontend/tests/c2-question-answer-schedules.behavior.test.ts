@@ -85,6 +85,28 @@ describe('C2 plan form uses explicit inventory preview and saved versions', () =
     expect(api.runQuestionAnswerSchedule).not.toHaveBeenCalled()
   })
 
+  it('keeps unnamed saved accounts selected and submits original identifiers without display placeholders', async () => {
+    const missingId = 'sub2api:ws1:229'
+    const initial = c2Schedule({ targetMode: 'accounts', selectedGroupIds: [], selectedAccountTargetIds: [missingId] })
+    const preview = c2Preview()
+    preview.targetPreview = [{ ...preview.targetPreview[0]!, targetId: missingId, accountId: '229', accountName: '', missing: true, matchedGroups: [] }]
+    initial.targetSelectionSnapshot.targetPreview = preview.targetPreview
+    api.previewQuestionAnswerSchedule.mockResolvedValue(preview)
+    const wrapper = form(initial); await flushPromises()
+    const missingLabel = wrapper.findAll('label').find(label => label.text().includes('账号名称暂未读到'))!
+    expect((missingLabel.get('input').element as HTMLInputElement).checked).toBe(true)
+    expect(wrapper.text()).not.toContain(missingId)
+    await button(wrapper, '查看账号').trigger('click')
+    expect(wrapper.text()).toContain('账号名称暂未读到 · 无当前分组 · 已删除')
+    await wrapper.get('[aria-label="计划名称"]').setValue('保留旧账号选择')
+    await wrapper.get('form').trigger('submit'); await flushPromises()
+    expect(api.updateQuestionAnswerSchedule).toHaveBeenCalledWith(initial.id, expect.objectContaining({
+      selectedAccountTargetIds: [missingId], selectedGroupIds: [], name: '保留旧账号选择',
+    }), initial.version, expect.any(AbortSignal))
+    expect(JSON.stringify(api.updateQuestionAnswerSchedule.mock.calls[0]![1])).not.toContain('名称暂未读到')
+    expect(api.runQuestionAnswerSchedule).not.toHaveBeenCalled()
+  })
+
   it('invalidates edited previews and ignores late responses after workspace change', async () => {
     const pending = deferred<Preview>()
     api.previewQuestionAnswerSchedule.mockReturnValueOnce(pending.promise)
@@ -181,6 +203,45 @@ describe('C2 drawer retains actions, local polling, and deleted history', () => 
 })
 
 describe('C2 execution details show records-derived totals and cancel authority', () => {
+  it('keeps an old execution name out of another batch of the same account in the current queue and its click', async () => {
+    const wrapper = track(mount(QuestionAnswerScheduleExecutionDetail, { props: {
+      executionId: 'execution1', workspace: 'ws1', scheduleName: '核心定时计划',
+      accountLabels: { 'sub2api:ws1:a': { name: '改名后的当前账号', siteNames: [] } },
+    } })); await flushPromises()
+    expect(wrapper.get('[data-testid="schedule-target"]').text()).toContain('冻结账号名')
+    const queue = wrapper.findComponent({ name: 'QuestionAnswerQueuePanel' })
+    expect(queue.props('accounts')).toEqual({ 'sub2api:ws1:a': '改名后的当前账号' })
+    queue.vm.$emit('view', { targetId: 'sub2api:ws1:a', batchId: 'new-batch' })
+    await nextTick()
+    expect(wrapper.emitted('question-answer-view')?.at(-1)?.[0]).toMatchObject({
+      targetId: 'sub2api:ws1:a', batchId: 'new-batch', accountName: '改名后的当前账号',
+      accountNameNote: '当时未记录账号名称，以下名称来自当前资料',
+    })
+    queue.vm.$emit('view', { targetId: 'sub2api:ws1:a', batchId: 'exact-batch' })
+    await nextTick()
+    expect(wrapper.emitted('question-answer-view')?.at(-1)?.[0]).toMatchObject({ accountName: '冻结账号名', accountNameNote: '' })
+  })
+
+  it('marks a current fallback as current and never exposes the target ID when a historical name is absent', async () => {
+    const execution = c2Execution(); execution.targets[0]!.accountSnapshot.accountName = '  '
+    api.getQuestionAnswerScheduleExecution.mockResolvedValue(execution)
+    const wrapper = track(mount(QuestionAnswerScheduleExecutionDetail, { props: {
+      executionId: 'execution1', workspace: 'ws1', scheduleName: '核心定时计划',
+      accountLabels: { 'sub2api:ws1:a': { name: '当前补读名称', siteNames: [] } },
+    } })); await flushPromises()
+    expect(wrapper.get('[data-testid="schedule-target"]').text()).toContain('当前补读名称')
+    expect(wrapper.text()).toContain('当时未记录账号名称，以下名称来自当前资料')
+    expect(wrapper.text()).not.toContain('sub2api:ws1:a')
+    vi.mocked(window.confirm).mockReturnValueOnce(false)
+    await button(wrapper, '终止本次执行').trigger('click'); await flushPromises()
+    expect(window.confirm).toHaveBeenLastCalledWith(expect.stringContaining('当前补读名称（当时未记录账号名称，以下名称来自当前资料）'))
+    expect(api.cancelQuestionAnswerScheduleExecution).not.toHaveBeenCalled()
+    await wrapper.setProps({ accountLabels: {} })
+    expect(wrapper.text()).toContain('账号（当时未记录名称）')
+    expect(wrapper.text()).not.toContain('当前补读名称')
+    await button(wrapper, '查看批次').trigger('click')
+    expect(wrapper.emitted('question-answer-view')?.at(-1)?.[0]).toMatchObject({ targetId: 'sub2api:ws1:a', batchId: 'exact-batch', accountName: '' })
+  })
   it('keeps active on cancel409 finalizer conflict, ignores an earlier read, and polls until actual terminal', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     const wrapper = detail(); await flushPromises()
@@ -314,7 +375,7 @@ describe('C2 running protection and retained account result display', () => {
     const wrapper = track(mount(QuestionAnswerScheduleBatchDialog, { props: { targetId: 'sub2api:ws1:a', batchId: 'exact-batch', accountName: '冻结账号名', workspace: 'ws1' }, global: { stubs: { Teleport: true } } })); await flushPromises()
     expect(api.getQuestionAnswerBatch).toHaveBeenCalledWith('sub2api:ws1:a', 'exact-batch', expect.any(AbortSignal))
     expect(wrapper.text()).toContain('当前批次总正确率 75%')
-    expect(wrapper.text()).toContain('按执行时的账号信息显示这批问答，只能查看')
+    expect(wrapper.text()).toContain('显示这批问答已有的账号资料，只能查看')
     expect(api.getLatestQuestionAnswerBatch).not.toHaveBeenCalled()
     expect(api.discoverManualProbeModels).not.toHaveBeenCalled()
     expect(api.listTestQuestions).not.toHaveBeenCalled()

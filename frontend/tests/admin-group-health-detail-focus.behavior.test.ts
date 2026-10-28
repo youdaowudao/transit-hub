@@ -55,29 +55,30 @@ describe('new account focus RED',()=>{
  it('D8 displays both independent notices',async()=>{
   const w=await open({focusedAccountIds:['502','999'],hideUnmonitoredAccounts:true});expect(w.text()).toContain(A1);expect(w.text()).toContain(A2);expect(scroll).not.toHaveBeenCalled()
  })
- it('D9 identifies a missing account by its complete name and website instead of its ID',async()=>{
+ it('D9 keeps the complete account name without an appended website or ID',async()=>{
   const name='完整账号名称-长期使用-保留全部后缀@example.test'
   const w=await open({focusedAccountIds:['447'],focusedAccountLabels:{'447':{name,siteNames:['上游网站甲']}}})
-  expect(w.get('[data-account-focus-notice]').text()).toBe(`在分组「甲组」中没有找到账号「${name}」（网站「上游网站甲」）。请点右上角‘刷新’；仍找不到时，到分组倍率检查这条对接。`)
+  expect(w.get('[data-account-focus-notice]').text()).toBe(`在分组「甲组」中没有找到账号「${name}」。请点右上角‘刷新’；仍找不到时，到分组倍率检查这条对接。`)
   expect(w.get('[data-account-focus-notice]').classes()).toContain('break-words')
+  expect(w.get('[data-account-focus-notice]').text()).not.toContain('上游网站甲')
   expect(w.text()).not.toContain('账号编号');expect(w.text()).not.toContain('447');expect(w.text()).not.toContain('可能已从这个主站分组移除')
  })
- it('D10 keeps multiple names and websites paired and renders names as text',async()=>{
+ it('D10 keeps multiple complete names as text without appended websites',async()=>{
   const w=await open({focusedAccountIds:['448','447'],focusedAccountLabels:{'447':{name:'完整账号甲',siteNames:['网站甲','网站乙']},'448':{name:'完整账号<script>乙</script>',siteNames:[]}}})
-  expect(w.get('[data-account-focus-notice]').text()).toContain('账号「完整账号<script>乙</script>」、账号「完整账号甲」（网站「网站甲、网站乙」）')
+  expect(w.get('[data-account-focus-notice]').text()).toContain('账号「完整账号<script>乙</script>」、账号「完整账号甲」')
   expect(w.find('script').exists()).toBe(false);expect(w.text()).not.toContain('账号编号')
  })
  it('D11 replaces the unknown name when labels arrive and removes the notice when refresh finds the account',async()=>{
   const w=await open({focusedAccountIds:['447']});expect(w.text()).toContain(A2)
   await w.setProps({focusedAccountLabels:{'447':{name:'完整账号甲',siteNames:['网站甲']}}})
-  expect(w.text()).toContain('账号「完整账号甲」（网站「网站甲」）');expect(w.text()).not.toContain('名称暂未读到')
+  expect(w.text()).toContain('账号「完整账号甲」');expect(w.text()).not.toContain('名称暂未读到')
   await w.setProps({group:group({accounts:[account('447')]})});await flushPromises()
   expect(w.find('[data-account-focus-notice]').exists()).toBe(false);expect(marked(w)).toHaveLength(1)
  })
- it('D12 adds the website to hidden targets while keeping the current account name',async()=>{
+ it('D12 keeps the current name for hidden targets without appending the website',async()=>{
   const w=await open({focusedAccountIds:['502'],hideUnmonitoredAccounts:true,focusedAccountLabels:{'502':{name:'旧账号名称',siteNames:['网站甲']}}})
-  expect(w.get('[data-account-focus-notice]').text()).toBe(A1.replace('账号502」','账号502」（网站「网站甲」）'))
-  expect(w.text()).not.toContain('旧账号名称');expect(w.text()).not.toContain('没有找到')
+  expect(w.get('[data-account-focus-notice]').text()).toBe(A1)
+  expect(w.get('[data-account-focus-notice]').text()).not.toContain('网站甲');expect(w.text()).not.toContain('旧账号名称');expect(w.text()).not.toContain('没有找到')
   await w.setProps({hideUnmonitoredAccounts:false});await flushPromises()
   expect(w.find('[data-account-focus-notice]').exists()).toBe(false);expect(marked(w)).toHaveLength(1)
  })

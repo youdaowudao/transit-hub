@@ -50,7 +50,7 @@ describe('A request diagnostics and direct causes', () => {
     expect(wrapper.findAllComponents(QuestionAnswerExecutionDetails)).toHaveLength(hasRecords ? 1 : 0)
   })
 
-  it.each([['已保存的当前名称', false], ['', false], ['已保存的当前名称', true], ['', true]] as const)('uses available names and websites in manual errors and stop confirmation, with no cancel write: %s, dataFailure=%s', async (name, dataFailure) => {
+  it.each([['已保存的当前名称', false], ['', false], ['已保存的当前名称', true], ['', true]] as const)('uses available names without website suffixes in manual errors and stop confirmation, with no cancel write: %s, dataFailure=%s', async (name, dataFailure) => {
     const r = record({ status: 'running', errorType: '', completedAt: null }), current = batch([r])
     const requests: string[] = []
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -70,10 +70,10 @@ describe('A request diagnostics and direct causes', () => {
     await wrapper.setProps({ open: true }); await flushPromises()
     const expected = name || '账号（名称暂未读到）'
     expect(wrapper.get('[data-testid="question-answer-model-status"]').text()).toContain(expected)
-    expect(wrapper.get('[data-testid="question-answer-model-status"]').text()).toContain('当前网站')
+    expect(wrapper.get('[data-testid="question-answer-model-status"]').text()).not.toContain('当前网站')
     if (dataFailure) {
       expect(wrapper.get('[data-testid="question-answer-stats-error"]').text()).toContain(expected)
-      expect(wrapper.get('[data-testid="question-answer-stats-error"]').text()).toContain('当前网站')
+      expect(wrapper.get('[data-testid="question-answer-stats-error"]').text()).not.toContain('当前网站')
       expect(confirm).not.toHaveBeenCalled()
       expect(requests.some(path => path.endsWith('/cancel'))).toBe(false)
       return
@@ -81,7 +81,7 @@ describe('A request diagnostics and direct causes', () => {
     await wrapper.get('[data-testid="question-answer-stop-latest"]').trigger('click'); await flushPromises()
     expect(confirm).toHaveBeenCalledOnce()
     expect(confirm.mock.calls[0]![0]).toContain(expected)
-    expect(confirm.mock.calls[0]![0]).toContain('当前网站')
+    expect(confirm.mock.calls[0]![0]).not.toContain('当前网站')
     expect(requests.some(path => path.endsWith('/cancel'))).toBe(false)
   })
 

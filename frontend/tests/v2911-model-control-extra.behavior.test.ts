@@ -39,7 +39,8 @@ describe('missing whitelist model copy', () => {
  it('keeps an unnamed managed row identifiable with its existing connection label and does not hide a missing name', async () => {
   const value = managed(); value.accountName = ' '
   const w = row(value, { showAccount: true, accountLabel: { name: '已保存模型账号全名', siteNames: ['模型网站'] } })
-  expect(w.text()).toContain('账号「已保存模型账号全名」（网站「模型网站」）')
+  expect(w.text()).toContain('账号「已保存模型账号全名」')
+  expect(w.text()).not.toContain('模型网站')
   expect(w.text()).not.toContain(targetId)
   await w.setProps({ accountLabel: undefined })
   expect(w.text()).toContain('账号（名称暂未读到）')

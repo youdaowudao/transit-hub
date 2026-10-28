@@ -320,6 +320,7 @@ func TestLoginMethodSwitchSub2API(t *testing.T) { // PLAN 1,2,3,3a,3b,4,5,11,12,
 }
 
 func TestLoginMethodSwitchNewAPI(t *testing.T) { // PLAN 6–10
+	typedIDMismatch := "新登录信息属于另一个账号：上游返回的用户编号是 43，原站点保存的用户编号是 42。这个编号是旧版本保存的，可能是当初手填的，没有经过上游核实。请用原账号的凭据重试；如果确认当初填错了编号，请新增站点。原资料未保存，不会修改主站。"
 	for _, tc := range []struct {
 		name                        string
 		oldMode, newMode            AuthMode
@@ -332,12 +333,15 @@ func TestLoginMethodSwitchNewAPI(t *testing.T) { // PLAN 6–10
 	}{
 		{"6密码换Key补头", AuthModePassword, AuthModeUserKey, 200, false, "42", "owner", "", 42, "", false},
 		{"7Key换密码", AuthModeUserKey, AuthModePassword, 200, false, "42", "42", "", 42, "", false},
-		{"8密码兜底不同", AuthModePassword, AuthModeUserKey, 401, false, "42", "owner", "", 43, "上游用户编号", false},
+		{"8密码兜底不同", AuthModePassword, AuthModeUserKey, 401, false, "42", "owner", "", 43, "上游用户编号与原站点保存的已核实编号不同", false},
 		{"8密码兜底相同", AuthModePassword, AuthModeUserKey, 401, false, "42", "owner", "", 42, "", false},
-		{"8旧Key不可信", AuthModeUserKey, AuthModeUserKey, 401, false, "42", "42", "", 42, "本次没有用新凭据登录", true},
+		{"8旧Key编号相同", AuthModeUserKey, AuthModeUserKey, 401, false, "42", "42", "", 42, "", false},
+		{"8旧Key编号不同", AuthModeUserKey, AuthModeUserKey, 401, false, "42", "42", "", 43, typedIDMismatch, false},
 		{"8旧密码资料相同", AuthMode(""), AuthModeUserKey, 401, false, "42", "owner", "", 42, "", false},
-		{"8旧密码资料不同", AuthMode(""), AuthModeUserKey, 401, false, "42", "owner", "", 43, "上游用户编号", false},
-		{"8旧Key资料", AuthMode(""), AuthModeUserKey, 401, false, "42", "42", "", 42, "本次没有用新凭据登录", true},
+		{"8旧密码资料不同", AuthMode(""), AuthModeUserKey, 401, false, "42", "owner", "", 43, "上游用户编号与原站点保存的已核实编号不同", false},
+		{"8旧Key资料相同", AuthMode(""), AuthModeUserKey, 401, false, "42", "42", "", 42, "", false},
+		{"8旧Key资料不同", AuthMode(""), AuthModeUserKey, 401, false, "42", "42", "", 43, typedIDMismatch, false},
+		{"8旧Key无编号", AuthModeUserKey, AuthModeUserKey, 401, false, "", "42", "", 42, "本次没有用新凭据登录", true},
 		{"8核实Key相同", AuthModeUserKey, AuthModeUserKey, 401, true, "42", "42", "", 42, "", false},
 		{"8核实Key不同", AuthModeUserKey, AuthModeUserKey, 401, true, "42", "42", "", 43, "上游用户编号", false},
 		{"9账号补头", AuthModeUserKey, AuthModeUserKey, 200, false, "", "42", "", 42, "", false},
@@ -365,7 +369,10 @@ func TestLoginMethodSwitchNewAPI(t *testing.T) { // PLAN 6–10
 			}
 			_, err := svc.Update(t.Context(), site.UserID, site.ID, dto)
 			if tc.want != "" {
-				switchError(t, err, tc.want)
+				detail := switchError(t, err, tc.want)
+				if tc.want != typedIDMismatch && strings.Contains(detail.UpstreamMessage, "可能是当初手填的") {
+					t.Fatal("已核实编号、密码方式或无编号不应显示旧手填编号说明")
+				}
 				switchUnchanged(t, c, r, site)
 			} else {
 				if err != nil {

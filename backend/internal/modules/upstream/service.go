@@ -711,13 +711,15 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		}
 		fallbackEmail := ""
 		usedStoredID := false
+		typedStoredID := false
 		if readErr != nil || oldID == "" {
 			storedID := strings.TrimSpace(original.Session.UserID)
 			switch {
 			case storedID != "" && original.Session.UserIDConfirmed:
 				oldID, usedStoredID = storedID, true
-			case original.Platform == PlatformNewAPI && originalMode == AuthModePassword && storedID != "":
+			case original.Platform == PlatformNewAPI && storedID != "":
 				oldID, usedStoredID = storedID, true
+				typedStoredID = originalMode == AuthModeUserKey
 			case original.Platform == PlatformSub2API && originalMode == AuthModePassword && strings.TrimSpace(original.Account) != "":
 				fallbackEmail = strings.TrimSpace(original.Account)
 			default:
@@ -760,6 +762,9 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 				return Response{}, identityCheckError(site.Platform, "原登录已不能读取，改用登录邮箱核对："+cause+"，无法确认是原账号。请用原账号的凭据重试，或新增站点。"+refreshWarning+"原资料未保存，不会修改主站。")
 			}
 		} else if oldID != newID {
+			if typedStoredID {
+				return Response{}, identityCheckError(site.Platform, "新登录信息属于另一个账号：上游返回的用户编号是 "+newID+"，原站点保存的用户编号是 "+oldID+"。这个编号是旧版本保存的，可能是当初手填的，没有经过上游核实。请用原账号的凭据重试；如果确认当初填错了编号，请新增站点。"+refreshWarning+"原资料未保存，不会修改主站。")
+			}
 			comparison := "原账号"
 			if usedStoredID {
 				comparison = "原站点保存的已核实编号"

@@ -22,12 +22,14 @@ func (s *Service) domainMigrationLogin(ctx context.Context, original Site, dto U
 		return LoginResult{}, err
 	}
 	oldID, oldEmail := "", ""
+	typedStoredID := false
 	storedID := strings.TrimSpace(original.Session.UserID)
 	switch {
 	case original.Session.UserIDConfirmed && storedID != "":
 		oldID = storedID
-	case original.Platform == PlatformNewAPI && original.Session.AuthMode == AuthModePassword && storedID != "":
+	case original.Platform == PlatformNewAPI && storedID != "":
 		oldID = storedID
+		typedStoredID = siteAuthMode(&original) == AuthModeUserKey
 	case original.Platform == PlatformSub2API && original.Session.AuthMode == AuthModePassword && strings.TrimSpace(original.Account) != "":
 		oldEmail = strings.TrimSpace(original.Account)
 	default:
@@ -95,6 +97,9 @@ func (s *Service) domainMigrationLogin(ctx context.Context, original Site, dto U
 			return LoginResult{}, identityCheckError(original.Platform, "使用原密码登录邮箱核对："+cause+"，无法确认是原账号。请核查原账号与新地址后重试，或新增站点。"+refreshWarning+"原资料和费用未保存，不会修改主站。")
 		}
 	} else if oldID != newID {
+		if typedStoredID {
+			return LoginResult{}, identityCheckError(original.Platform, "新地址上的登录资料属于另一个账号：上游返回的用户编号是 "+newID+"，原站点保存的用户编号是 "+oldID+"。这个编号是旧版本保存的，可能是当初手填的，没有经过上游核实。请使用原账号的凭据并核查新地址后重试；如果确认当初填错了编号，请新增站点。"+refreshWarning+"原资料和费用未保存，不会修改主站。")
+		}
 		return LoginResult{}, identityCheckError(original.Platform, "新地址上的登录资料属于另一个账号：上游用户编号与原账号不同。请使用原账号的凭据并核查新地址后重试，或新增站点。"+refreshWarning+"原资料和费用未保存，不会修改主站。")
 	}
 	result.Session.UserID, result.Session.UserIDConfirmed = newID, true

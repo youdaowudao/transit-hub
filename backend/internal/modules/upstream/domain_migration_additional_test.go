@@ -63,6 +63,7 @@ func TestDomainMigrationAdditionalFreshLoginAndFollowingSync(t *testing.T) {
 }
 
 func TestDomainMigrationAdditionalStoredIdentitySelection(t *testing.T) {
+	typedIDMismatch := "新地址上的登录资料属于另一个账号：上游返回的用户编号是 8，原站点保存的用户编号是 7。这个编号是旧版本保存的，可能是当初手填的，没有经过上游核实。请使用原账号的凭据并核查新地址后重试；如果确认当初填错了编号，请新增站点。原资料和费用未保存，不会修改主站。"
 	for _, tc := range []struct {
 		name                                                string
 		platform                                            Platform
@@ -70,16 +71,20 @@ func TestDomainMigrationAdditionalStoredIdentitySelection(t *testing.T) {
 		confirmed, cookie, clearID, oldAllowed, wantSuccess bool
 		newID                                               any
 		email                                               string
+		want                                                string
 	}{
-		{"明确NewAPI密码可用原编号", PlatformNewAPI, AuthModePassword, false, false, false, false, true, 7, ""},
-		{"明确Sub2API密码可用邮箱", PlatformSub2API, AuthModePassword, false, false, true, false, true, 7, "  OWNER@example.COM  "},
-		{"明确密码但新邮箱不同", PlatformSub2API, AuthModePassword, false, false, true, false, false, 7, "other@example.com"},
-		{"明确密码但新邮箱缺失", PlatformSub2API, AuthModePassword, false, false, true, false, false, 7, ""},
-		{"已核实编号不回退邮箱", PlatformSub2API, AuthModePassword, true, false, false, false, false, 8, "owner@example.com"},
-		{"旧Sub2API方式不推断邮箱", PlatformSub2API, "", false, false, false, false, false, 7, "owner@example.com"},
-		{"旧NewAPI方式不推断密码编号", PlatformNewAPI, "", false, true, false, false, false, 7, ""},
-		{"手填Key编号不能代替原身份", PlatformNewAPI, AuthModeUserKey, false, false, false, false, false, 7, ""},
-		{"无可信资料可读原账号一次", PlatformSub2API, AuthModeToken, false, false, false, true, true, 7, ""},
+		{"明确NewAPI密码可用原编号", PlatformNewAPI, AuthModePassword, false, false, false, false, true, 7, "", ""},
+		{"明确Sub2API密码可用邮箱", PlatformSub2API, AuthModePassword, false, false, true, false, true, 7, "  OWNER@example.COM  ", ""},
+		{"明确密码但新邮箱不同", PlatformSub2API, AuthModePassword, false, false, true, false, false, 7, "other@example.com", ""},
+		{"明确密码但新邮箱缺失", PlatformSub2API, AuthModePassword, false, false, true, false, false, 7, "", ""},
+		{"已核实编号不回退邮箱", PlatformSub2API, AuthModePassword, true, false, false, false, false, 8, "owner@example.com", ""},
+		{"旧Sub2API方式不推断邮箱", PlatformSub2API, "", false, false, false, false, false, 7, "owner@example.com", ""},
+		{"旧NewAPI有Cookie可用原编号", PlatformNewAPI, "", false, true, false, false, true, 7, "", ""},
+		{"旧Key保存编号可用", PlatformNewAPI, AuthModeUserKey, false, false, false, false, true, 7, "", ""},
+		{"旧Key资料可用原编号", PlatformNewAPI, "", false, false, false, false, true, 7, "", ""},
+		{"旧Key保存编号不同", PlatformNewAPI, AuthModeUserKey, false, false, false, false, false, 8, "", typedIDMismatch},
+		{"NewAPI无保存编号仍读原地址", PlatformNewAPI, AuthModeUserKey, false, false, true, false, false, 7, "", ""},
+		{"无可信资料可读原账号一次", PlatformSub2API, AuthModeToken, false, false, false, true, true, 7, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newSwitchFixture()
@@ -109,7 +114,7 @@ func TestDomainMigrationAdditionalStoredIdentitySelection(t *testing.T) {
 				next = AuthModeUserKey
 			}
 			dto := migrationConfirmedDTO(t, site, next, true)
-			if tc.name == "手填Key编号不能代替原身份" {
+			if tc.name == "旧Key保存编号可用" {
 				dto.UserID = "7"
 			}
 			_, err := svc.Update(t.Context(), site.UserID, site.ID, dto)
@@ -117,13 +122,20 @@ func TestDomainMigrationAdditionalStoredIdentitySelection(t *testing.T) {
 				if err != nil {
 					t.Fatalf("原身份可核对应成功：%v", err)
 				}
+				got, _ := c.Get(t.Context(), site.ID)
+				if got.Session.UserID != "7" || !got.Session.UserIDConfirmed || got.BaseURL != dto.SiteURL || r.checks != 1 || !reflect.DeepEqual(cloneSite(got), cloneSite(&r.durable)) {
+					t.Fatal("迁移成功没有保存新地址、已核实编号或一致的原站点资料")
+				}
 			} else {
 				if err == nil {
 					t.Fatal("无法核对原账号却迁移成功")
 				}
+				if tc.want != "" {
+					switchError(t, err, tc.want)
+				}
 				switchUnchanged(t, c, r, site)
 			}
-			untrusted := !tc.confirmed && (tc.mode == "" || tc.mode == AuthModeToken || tc.mode == AuthModeUserKey)
+			untrusted := !tc.confirmed && (tc.platform == PlatformNewAPI && tc.clearID || tc.platform == PlatformSub2API && (tc.mode == "" || tc.mode == AuthModeToken || tc.mode == AuthModeUserKey))
 			if untrusted && oldRequests != 1 || !untrusted && oldRequests != 0 {
 				t.Fatal("原身份依据没有按明确保存资料优先选择")
 			}

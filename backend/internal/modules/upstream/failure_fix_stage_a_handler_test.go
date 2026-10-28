@@ -27,7 +27,7 @@ func TestFailureFixStageAHandlerUpdateRejectedAndInvalidFields(t *testing.T) {
 			_, _ = io.WriteString(w, `{"message":"令牌无效"}`)
 		})
 		service, cache, repository := failureFixService(t, platform)
-		original := newTestSite("fixture-edit", "fixture-user", "fixture-workspace", 2, &Session{Platform: PlatformNewAPI, AuthMode: AuthModeUserKey, BaseURL: "http://fixture.invalid", UserID: "42", AccessToken: "fixture-old"})
+		original := newTestSite("fixture-edit", "fixture-user", "fixture-workspace", 2, &Session{Platform: PlatformNewAPI, AuthMode: AuthModeUserKey, BaseURL: "http://fixture.invalid", UserID: "", AccessToken: "fixture-old"})
 		original.Platform = PlatformNewAPI
 		cache.add(original)
 		dto := UpdateRequest{Name: "验收-新名称", SiteURL: "http://fixture.invalid", Platform: PlatformNewAPI, AuthMode: AuthModeUserKey, UserID: "42", AccessToken: "fixture-new", RechargeRate: 3}

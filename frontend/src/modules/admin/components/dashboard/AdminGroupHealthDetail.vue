@@ -592,8 +592,7 @@ const isFocusedAccount = (account: AdminGroupAccount) => focusedAccountSet.value
 const focusedAccountLabel = (id: string, currentName = ''): string => {
   const label = props.focusedAccountLabels[id]
   const name = currentName.trim() || label?.name?.trim()
-  const account = name ? `账号「${name}」` : '账号（名称暂未读到）'
-  return label?.siteNames.length ? `${account}（网站「${label.siteNames.join('、')}」）` : account
+  return name ? `账号「${name}」` : '账号（名称暂未读到）'
 }
 const focusedAccountNotices = computed(() => {
   if (props.group.accountsError || !props.focusedAccountIds.length) return []

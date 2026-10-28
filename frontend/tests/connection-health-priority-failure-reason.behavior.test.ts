@@ -124,7 +124,8 @@ describe('Priority failure reasons in the real status banner', () => {
     const wrapper = mount(TargetPolicyAssignmentDialog, { props: {
       open: false, targetId, accountName: '', accountLabel: { name: '策略分配对应账号', siteNames: ['策略网站'] }, policies: [policy],
     }, global: { stubs: { Teleport: true } } }); wrappers.push(wrapper); await wrapper.setProps({ open: true }); await flushPromises()
-    expect(wrapper.text()).toContain('账号「策略分配对应账号」（网站「策略网站」）')
+    expect(wrapper.text()).toContain('账号「策略分配对应账号」')
+    expect(wrapper.text()).not.toContain('策略网站')
     expect(wrapper.text()).not.toContain(targetId)
     expect(harness.loadTargetPolicyAssignments).toHaveBeenCalledWith(targetId)
     await wrapper.setProps({ open: false }); await wrapper.setProps({ open: true }); await flushPromises()
@@ -138,15 +139,16 @@ describe('Priority failure reasons in the real status banner', () => {
     expect(wrapper.emitted('close')).toHaveLength(1)
     expect(harness.saveTargetPolicyAssignments).toHaveBeenCalledTimes(calls)
   })
-  it('identifies an ungrouped account from the existing connection name and website instead of its number', async () => {
+  it('identifies an ungrouped account by its name without appending the website', async () => {
     harness.connections = [
       { adminPlatform: 'newapi', adminAccountId: '229', adminAccountName: '其他平台不得使用', upstreamSiteId: 'site-1' },
       { adminPlatform: 'sub2api', adminAccountId: '229', adminAccountName: '完整账号229保留名称中的数字', upstreamSiteId: 'site-1' },
     ]
     const wrapper = await mountView({ failedTargets: [{ accountId: '229', reason: 'not_visible' }] })
     const banner = wrapper.get('[role="alert"]')
-    expect(banner.text()).toContain('账号「完整账号229保留名称中的数字」（网站「原上游站点」）')
+    expect(banner.text()).toContain('账号「完整账号229保留名称中的数字」')
     expect(banner.text()).toContain('请先到主站账号列表核对')
+    expect(banner.text()).not.toContain('原上游站点')
     expect(banner.text()).not.toContain('#229')
     expect(banner.text()).not.toContain('其他平台不得使用')
   })

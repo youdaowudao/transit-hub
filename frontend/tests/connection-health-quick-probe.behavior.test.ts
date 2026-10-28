@@ -17,16 +17,18 @@ import type {
 vi.mock('@/modules/admin/api/mySites', async (importOriginal) => ({ ...(await importOriginal<typeof import('@/modules/admin/api/mySites')>()), listRealConnections: vi.fn(async () => []) }))
 
 describe('ActionDiagnostics RED-6 user-facing action reasons', () => {
-  it('uses existing names and websites in account rows, conflicts, and the retained accounts component', async () => {
+  it('keeps the original account name in rows, conflicts, and the retained accounts component without appending its website', async () => {
     const account = makeAccount({ id: '229', targetId: 'sub2api:ws1:229', name: '' })
-    const accountLabels = { [account.targetId]: { name: '已保存的完整账号名称', siteNames: ['已保存网站'] } }
+    const accountLabels = { [account.targetId]: { name: 'A-【黑洞】-0.12x', siteNames: ['黑洞'] } }
     const wrapper = mountDetail([account])
     await wrapper.setProps({ accountLabels, group: makeGroup([account], { priorityConflicts: [{ targetId: account.targetId, accountName: '', currentPriority: 20, expectedPriority: 30 }] }) })
-    expect(wrapper.text()).toContain('账号「已保存的完整账号名称」（网站「已保存网站」）')
+    expect(wrapper.text()).toContain('账号「A-【黑洞】-0.12x」')
+    expect(wrapper.text()).not.toContain('（网站')
     expect(wrapper.text()).not.toContain('sub2api:ws1:229')
     const dialog = mount(AdminGroupAccountsDialog, { props: { open: true, group: makeGroup([account]), accountLabels }, global: { stubs: { Teleport: true } } })
     mountedWrappers.push(dialog)
-    expect(dialog.text()).toContain('已保存的完整账号名称')
+    expect(dialog.text()).toContain('账号「A-【黑洞】-0.12x」')
+    expect(dialog.text()).not.toContain('（网站')
     await dialog.setProps({ accountLabels: {} })
     expect(dialog.text()).toContain('账号（名称暂未读到）')
     expect(dialog.text()).not.toContain('229')

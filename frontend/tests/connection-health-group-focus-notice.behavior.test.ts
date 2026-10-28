@@ -236,7 +236,7 @@ describe('new group focus RED',()=>{
   harness.currentAccount.value=null;harness.activeWorkspaceScope='anonymous';harness.refs.adminGroups.value.unshift(group('10','A组'));focus('11',accountFocus);const w=await mountView();expect(notice(w).exists()).toBe(false);expect(detail(w).props('group').id).not.toBe('11');expect(harness.route.query.focusWorkspace).toBe('ws-a')
   harness.currentAccount.value={id:'ws-a'};await flushPromises();expect(harness.route.query.focusGroupId).toBe('11');harness.refs.adminGroups.value=[group('11','甲组')];harness.refs.adminGroupsLoaded.value=true;await flushPromises();expect(marked(w)).toHaveLength(2);expect(harness.route.query).toEqual({})
  })
- it('N17 uses existing reads for full names and deduplicated websites without mixing platforms or accounts',async()=>{
+ it('N17 uses existing reads for full names without appended websites or mixed identities',async()=>{
   harness.refs.adminGroups.value[1].accounts.push({...group('12','乙组').accounts[0],id:'447',name:'当前完整账号甲',targetId:'sub2api:ws-a:447'})
   harness.listUpstreamSites.mockResolvedValue([{id:'site-a',name:'当前网站甲'}])
   harness.listRealConnections.mockResolvedValue([
@@ -247,16 +247,17 @@ describe('new group focus RED',()=>{
    {adminAccountId:'447',adminAccountName:'旧账号甲',adminPlatform:'sub2api',upstreamSiteId:'site-b',siteName:'网站乙'},
   ])
   focus('11',{focusAccountIds:'448,447',focusWorkspace:'ws-a'});const w=await mountView()
-  expect(accountNotices(w)).toContain('账号「完整账号乙」（网站「网站丙」）、账号「当前完整账号甲」（网站「当前网站甲、网站乙」）')
+  expect(accountNotices(w)).toContain('账号「完整账号乙」、账号「当前完整账号甲」')
   for(const text of ['旧账号甲','旧网站甲','其他平台错误账号','其他平台网站','账号编号'])expect(accountNotices(w)).not.toContain(text)
+  expect(accountNotices(w)).not.toContain('（网站');expect(accountNotices(w)).not.toContain('网站丙')
   expect(harness.listRealConnections).toHaveBeenCalledTimes(1);expect(harness.listUpstreamSites).toHaveBeenCalledTimes(2)
   expect(harness.route.query).toEqual({});expect(marked(w)).toHaveLength(0)
  })
- it('N18 keeps connection names and websites when the website list cannot be read',async()=>{
+ it('N18 keeps connection names without a website suffix when the website list cannot be read',async()=>{
   harness.listUpstreamSites.mockRejectedValue(new Error('admin.upstream.errors.network'))
   harness.listRealConnections.mockResolvedValue([{adminAccountId:'447',adminAccountName:'完整账号甲',siteName:'对接保存的网站',upstreamSiteId:'site-a',adminPlatform:'sub2api'}])
   focus('11',{focusAccountIds:'447',focusWorkspace:'ws-a'});const w=await mountView()
-  expect(accountNotices(w)).toContain('账号「完整账号甲」（网站「对接保存的网站」）');expect(accountNotices(w)).not.toContain('名称暂未读到')
+  expect(accountNotices(w)).toContain('账号「完整账号甲」');expect(accountNotices(w)).not.toContain('名称暂未读到')
   expect(w.find('[data-bound-site-rate-status]').exists()).toBe(true)
  })
  it('N19 explains an unknown name on connection failure and retries through the existing refresh button',async()=>{
@@ -265,7 +266,7 @@ describe('new group focus RED',()=>{
   expect(accountNotices(w)).toContain('账号（名称暂未读到）');expect(accountNotices(w)).not.toContain('447')
   harness.listRealConnections.mockResolvedValue([{adminAccountId:'447',adminAccountName:'完整账号甲',siteName:'网站甲',upstreamSiteId:'site-a'}])
   await findButton(w,'刷新').trigger('click');await flushPromises()
-  expect(accountNotices(w)).toContain('账号「完整账号甲」（网站「网站甲」）');expect(accountNotices(w)).not.toContain('名称暂未读到')
+  expect(accountNotices(w)).toContain('账号「完整账号甲」');expect(accountNotices(w)).not.toContain('名称暂未读到')
   expect(harness.listRealConnections).toHaveBeenCalledTimes(2)
   harness.listRealConnections.mockRejectedValue(new Error('admin.mySites.errors.network'))
   await findButton(w,'刷新').trigger('click');await flushPromises()

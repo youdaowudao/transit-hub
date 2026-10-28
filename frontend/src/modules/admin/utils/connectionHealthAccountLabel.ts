@@ -23,9 +23,7 @@ export const displayAccountName = (...candidates: unknown[]): string =>
 
 export const accountReminderLabel = (label?: Partial<AccountFocusLabel>): string => {
   const name = accountNameText(label?.name)
-  const sites = [...new Set((label?.siteNames ?? []).map(value => accountNameText(value)).filter(Boolean))]
-  return (name ? `账号「${name}」` : '账号（名称暂未读到）')
-    + (sites.length ? `（网站「${sites.join('、')}」）` : '')
+  return name ? `账号「${name}」` : '账号（名称暂未读到）'
 }
 
 export const accountLabelForTarget = (labels: AccountLabels | undefined, targetId: string, ...names: unknown[]): AccountFocusLabel => ({

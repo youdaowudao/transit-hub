@@ -45,6 +45,9 @@ func (h *Handler) saveSignupRiskPreferences(w http.ResponseWriter, r *http.Reque
 	var body struct {
 		WorkspaceAdminAccountID string `json:"workspaceAdminAccountId"`
 		Enabled                 *bool  `json:"enabled"`
+		WorkStart               string `json:"workStart"`
+		WorkEnd                 string `json:"workEnd"`
+		TimeZone                string `json:"timeZone"`
 	}
 	if !decodeRequest(w, r, &body, func() string { return body.WorkspaceAdminAccountID }) {
 		return
@@ -57,7 +60,7 @@ func (h *Handler) saveSignupRiskPreferences(w http.ResponseWriter, r *http.Reque
 		writeRequestError(w, workspace, invalidRequest(workspace, "必须明确选择是否开启高风险注册提醒（布尔值）；原设置没有改变"))
 		return
 	}
-	result, err := h.service.SaveSignupRiskPreferences(r.Context(), user, workspace, *body.Enabled)
+	result, err := h.service.SaveSignupRiskPreferences(r.Context(), user, workspace, *body.Enabled, SignupRiskSchedule{WorkStart: body.WorkStart, WorkEnd: body.WorkEnd, TimeZone: body.TimeZone})
 	if err != nil {
 		writeRequestError(w, workspace, err)
 		return

@@ -49,7 +49,7 @@ export interface NotificationSamplingState {
   warning?: NotificationWarning
 }
 export interface NotificationSummaryResponse {
-  signupRisk?: { enabled: boolean; items: SiteNotification[] }
+  signupRisk?: { enabled: boolean; items: SiteNotification[]; activeUntil: string | null; nextStartAt: string | null }
   serverTime: string
   workspaceAdminAccountId: string
   intervalSeconds: number | null
@@ -65,7 +65,15 @@ export interface NotificationSummaryResponse {
   displayedStates: NotificationDisplayedState[]
 }
 
-export interface SignupRiskPreferences {
+export interface SignupRiskSchedule {
+  workStart: string
+  workEnd: string
+  timeZone: string
+}
+export interface SignupRiskPreferences extends SignupRiskSchedule {
+  serverTime: string
+  activeUntil: string | null
+  nextStartAt: string | null
   workspaceAdminAccountId: string
   enabled: boolean
   initialized: boolean

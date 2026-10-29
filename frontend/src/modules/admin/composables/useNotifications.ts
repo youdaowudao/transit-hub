@@ -68,6 +68,11 @@ export function useNotifications(options: NotificationControllerOptions) {
   const importantItems = shallowRef<SiteNotification[]>([])
   const signupRiskItems = shallowRef<SiteNotification[]>([])
   const signupRiskEnabled = ref(false)
+  const signupRiskActive = ref(false)
+  // Keep the composition of the accepted total even when local progress later
+  // removes its registration items. The remaining page cannot prove that total.
+  const importantCountHasSignupRisk = ref(false)
+  const importantCountReliable = computed(() => !managementRefreshPending.value && (!importantCountHasSignupRisk.value || signupRiskActive.value))
   const criticalBatch = shallowRef<SiteNotification[]>([])
   const criticalNextCursor = ref<string | null>(null)
   const criticalTotalCount = ref(0)
@@ -89,6 +94,10 @@ export function useNotifications(options: NotificationControllerOptions) {
   let lastCompletedAt: number | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
   let signupRiskTimer: ReturnType<typeof setTimeout> | null = null
+  let signupRiskBoundaryTimer: ReturnType<typeof setTimeout> | null = null
+  let signupRiskUntil: number | null = null
+  let signupRiskNextStart: number | null = null
+  let signupRiskSettingsSaving = false
   let currentSummaryCursors: Partial<NotificationSummaryQuery> = {}
   const requests = new Set<AbortController>()
   const notices = new Map<string, SiteNotification>()
@@ -118,6 +127,42 @@ export function useNotifications(options: NotificationControllerOptions) {
     if (signupRiskTimer !== null) clearTimeout(signupRiskTimer)
     signupRiskTimer = null
   }
+  const riskAllowed = () => !signupRiskSettingsSaving && signupRiskEnabled.value && signupRiskUntil !== null && Date.now() < signupRiskUntil
+  const filterRisk = (items: SiteNotification[]) => items.filter(item => item.kind !== 'sub2api.signup_risk' || riskAllowed())
+  const hideSignupRisk = () => {
+    signupRiskActive.value = false
+    signupRiskItems.value = []
+    importantItems.value = importantItems.value.filter(item => item.kind !== 'sub2api.signup_risk')
+  }
+  const clearRiskWindowTiming = () => {
+    if (signupRiskBoundaryTimer !== null) clearTimeout(signupRiskBoundaryTimer)
+    signupRiskBoundaryTimer = null
+    signupRiskUntil = signupRiskNextStart = null
+  }
+  const clearRiskWindow = () => {
+    clearRiskWindowTiming()
+    hideSignupRisk()
+  }
+  const applyRiskWindow = (response: NotificationSummaryResponse, startedAt: number) => {
+    if (signupRiskSettingsSaving) { clearRiskWindow(); return }
+    clearRiskWindowTiming()
+    signupRiskEnabled.value = response.signupRisk?.enabled ?? false
+    const server = Date.parse(response.serverTime)
+    const end = response.signupRisk?.activeUntil ? Date.parse(response.signupRisk.activeUntil) : NaN
+    const next = response.signupRisk?.nextStartAt ? Date.parse(response.signupRisk.nextStartAt) : NaN
+    if (!signupRiskEnabled.value || !Number.isFinite(server)) { hideSignupRisk(); return }
+    if (Number.isFinite(next) && next > server) signupRiskNextStart = Date.now() + next - server
+    if (!Number.isFinite(end) || end <= server) { hideSignupRisk(); return }
+    signupRiskUntil = startedAt + end - server
+    signupRiskActive.value = riskAllowed()
+    if (!signupRiskActive.value) { hideSignupRisk(); return }
+    if (signupRiskActive.value) signupRiskBoundaryTimer = setTimeout(() => {
+      signupRiskBoundaryTimer = null
+      signupRiskUntil = null
+      hideSignupRisk()
+      schedule()
+    }, Math.max(0, signupRiskUntil - Date.now()))
+  }
   const cancelSummary = () => {
     clearTimer()
     clearSignupRiskTimer()
@@ -127,6 +172,8 @@ export function useNotifications(options: NotificationControllerOptions) {
   }
   const pause = () => {
     workspaceEpoch++
+    signupRiskSettingsSaving = false
+    clearRiskWindow()
     cancelSummary()
     for (const controller of requests) controller.abort()
     requests.clear()
@@ -144,6 +191,7 @@ export function useNotifications(options: NotificationControllerOptions) {
     unreadCount.value = pendingCriticalCount.value = 0
     intervalSeconds.value = 300
     signupRiskEnabled.value = false
+    importantCountHasSignupRisk.value = false
     currentSummaryCursors = {}
     preferenceConfirmed.value = preferenceSaved.value = false
     lastCheckedAt.value = null
@@ -173,8 +221,8 @@ export function useNotifications(options: NotificationControllerOptions) {
     }
     historyItems.value = historyItems.value.map(latest).filter(item => historyFilter.value === 'all' || historyFilter.value === 'unread' && item.subjectActive && !item.readAt || historyFilter.value === 'pending' && item.subjectActive && item.level === 4 && !item.reminderCompletedAt)
     attentionItems.value = attentionItems.value.map(latest).filter(item => item.subjectActive)
-    importantItems.value = importantItems.value.map(latest).filter(item => item.subjectActive && !item.reminderCompletedAt)
-    signupRiskItems.value = signupRiskItems.value.map(latest).filter(item => item.subjectActive && !item.reminderCompletedAt)
+    importantItems.value = filterRisk(importantItems.value.map(latest).filter(item => item.subjectActive && !item.reminderCompletedAt))
+    signupRiskItems.value = filterRisk(signupRiskItems.value.map(latest).filter(item => item.subjectActive && !item.reminderCompletedAt))
     criticalBatch.value = criticalBatch.value.map(latest).filter(item => item.subjectActive && !item.reminderCompletedAt)
     if (detail.value) detail.value = { ...detail.value, item: latest(detail.value.item) }
     if (summary.value) summary.value = { ...summary.value, unreadCount: unreadCount.value, pendingCriticalCount: pendingCriticalCount.value,
@@ -222,8 +270,11 @@ export function useNotifications(options: NotificationControllerOptions) {
       if (canCount && !previous.reminderCompletedAt && progress.reminderCompletedAt) {
         if (previous.level === 4) pendingCriticalCount.value = Math.max(0, pendingCriticalCount.value - 1)
         if (summary.value && previous.level > 1) {
-          const key = previous.level === 2 ? 'attention' : previous.level === 3 ? 'important' : 'critical'
-          summary.value.active[key].totalCount = Math.max(0, summary.value.active[key].totalCount - 1)
+          const importantCounted = previous.kind !== 'sub2api.signup_risk' || riskAllowed() && [...summary.value.active.important.items, ...(summary.value.signupRisk?.items ?? [])].some(item => item.id === previous.id)
+          if (!importantCounted) { refreshNeeded = true } else {
+            const key = previous.level === 2 ? 'attention' : previous.level === 3 ? 'important' : 'critical'
+            summary.value.active[key].totalCount = Math.max(0, summary.value.active[key].totalCount - 1)
+          }
         }
       }
       notices.set(progress.id, { ...previous, readAt: previous.readAt ?? progress.readAt, reminderCompletedAt: previous.reminderCompletedAt ?? progress.reminderCompletedAt })
@@ -246,7 +297,7 @@ export function useNotifications(options: NotificationControllerOptions) {
   }
   const showReminders = (forceCritical = false) => {
     if (!summary.value || !ready() || !isVisible() || managementRefreshPending.value) return
-    importantItems.value = summary.value.active.important.items.filter(item => item.subjectActive && !item.reminderCompletedAt)
+    importantItems.value = filterRisk(summary.value.active.important.items.filter(item => item.subjectActive && !item.reminderCompletedAt))
     if (criticalOpen.value && !forceCritical) return
     if (drawerOpen.value || hasVisibleNotificationDialog()) return
     const critical = summary.value.active.critical.items.filter(item => item.subjectActive && !item.reminderCompletedAt)
@@ -266,10 +317,13 @@ export function useNotifications(options: NotificationControllerOptions) {
     if (!ready() || !isVisible() || flight) return
     const remaining = lastCompletedAt === null ? intervalSeconds.value * 1000 : Math.max(0, lastCompletedAt + intervalSeconds.value * 1000 - Date.now())
     timer = setTimeout(() => { timer = null; void refreshSummary() }, remaining)
-    if (signupRiskEnabled.value) signupRiskTimer = setTimeout(() => {
-      signupRiskTimer = null
-      void refreshSummary({}, false, false, true)
-    }, 15_000)
+    if (!signupRiskSettingsSaving && signupRiskEnabled.value) {
+      const delay = riskAllowed() ? 60_000 : signupRiskNextStart !== null ? (signupRiskNextStart > Date.now() ? signupRiskNextStart - Date.now() : 60_000) : null
+      if (delay !== null && remaining > delay) signupRiskTimer = setTimeout(() => {
+        signupRiskTimer = null
+        void refreshSummary({}, false, false, true)
+      }, delay)
+    }
   }
   const refreshSummary = (cursors: Partial<NotificationSummaryQuery> = {}, forceCritical = false, suppressNewReminders = false, signupRiskOnly = false): Promise<boolean> => {
     if (!ready()) return Promise.resolve(false)
@@ -283,6 +337,7 @@ export function useNotifications(options: NotificationControllerOptions) {
     clearTimer()
     clearSignupRiskTimer()
     const scope = requestScope()
+    const startedAt = Date.now()
     summaryLoading.value = true
     const candidate = { controller: scope.controller, promise: Promise.resolve(false), signupRiskOnly }
     flight = candidate
@@ -292,6 +347,8 @@ export function useNotifications(options: NotificationControllerOptions) {
         const pageCursors = signupRiskOnly ? currentSummaryCursors : cursors
         const response = await getNotificationSummary({ ...pageCursors, workspaceAdminAccountId: scope.workspace, ...(displayedIds.length ? { displayedIds } : {}) }, scope.controller.signal)
         if (!scope.current() || flight !== candidate) return false
+        importantCountHasSignupRisk.value = Boolean(response.signupRisk?.items.length) || response.active.important.items.some(item => item.kind === 'sub2api.signup_risk')
+        applyRiskWindow(response, startedAt)
         const hadCriticalOpen = criticalOpen.value
         const previousCriticalSize = criticalBatch.value.length
         applySubjectStates(response.displayedStates)
@@ -302,19 +359,18 @@ export function useNotifications(options: NotificationControllerOptions) {
           : Math.min(criticalTotalCount.value, response.active.critical.totalCount)
         const active = {
           attention: { ...response.active.attention, items: response.active.attention.items.map(mergeNotice).filter(item => item.subjectActive && !item.reminderCompletedAt) },
-          important: { ...response.active.important, items: response.active.important.items.map(mergeNotice).filter(item => item.subjectActive && !item.reminderCompletedAt) },
+          important: { ...response.active.important, items: filterRisk(response.active.important.items.map(mergeNotice).filter(item => item.subjectActive && !item.reminderCompletedAt)) },
           critical: { ...response.active.critical, items: response.active.critical.items.map(mergeNotice).filter(item => item.subjectActive && !item.reminderCompletedAt) },
         }
         // Supplemental reads may discover registrations, but must not replace
         // the normal important page or its cursor with an unrelated first page.
         if (signupRiskOnly && summary.value) active.important = {
           ...summary.value.active.important, totalCount: active.important.totalCount,
-          items: summary.value.active.important.items.map(item => notices.get(item.id) ?? item).filter(item => item.subjectActive && !item.reminderCompletedAt),
+          items: filterRisk(summary.value.active.important.items.map(item => notices.get(item.id) ?? item).filter(item => item.subjectActive && !item.reminderCompletedAt)),
         }
         if (!signupRiskOnly) currentSummaryCursors = { ...cursors }
         summary.value = { ...response, active }
-        signupRiskEnabled.value = response.signupRisk?.enabled ?? false
-        if (isVisible()) signupRiskItems.value = (response.signupRisk?.items ?? []).map(mergeNotice).filter(item => item.subjectActive && !item.reminderCompletedAt)
+        if (isVisible()) signupRiskItems.value = filterRisk((response.signupRisk?.items ?? []).map(mergeNotice).filter(item => item.subjectActive && !item.reminderCompletedAt))
         unreadCount.value = response.unreadCount
         pendingCriticalCount.value = response.pendingCriticalCount
         summaryError.value = ''
@@ -360,6 +416,14 @@ export function useNotifications(options: NotificationControllerOptions) {
       }
     })()
     return candidate.promise
+  }
+  const setSignupRiskSettingsSaving = (value: boolean) => {
+    if (signupRiskSettingsSaving === value) return
+    signupRiskSettingsSaving = value
+    cancelSummary()
+    clearRiskWindow()
+    if (value) schedule()
+    else void refreshSignupRisk()
   }
   // A registration action must read after any older in-flight summary. It
   // neither presents other levels nor moves their original reminder deadline.
@@ -604,12 +668,13 @@ export function useNotifications(options: NotificationControllerOptions) {
   const handleVisibility = () => {
     clearTimer()
     clearSignupRiskTimer()
+    if (!riskAllowed()) hideSignupRisk()
     if (!ready() || !isVisible()) {
       if (flight?.signupRiskOnly) cancelSummary()
       return
     }
     if (lastCompletedAt === null || Date.now() >= lastCompletedAt + intervalSeconds.value * 1000) void refreshSummary()
-    else if (signupRiskEnabled.value) void refreshSummary({}, false, false, true)
+    else if (!signupRiskSettingsSaving && signupRiskEnabled.value && (riskAllowed() || signupRiskNextStart !== null && Date.now() >= signupRiskNextStart)) void refreshSummary({}, false, false, true)
     else schedule()
   }
   const stop = () => { stopped = true; pause(); reset() }
@@ -635,7 +700,7 @@ export function useNotifications(options: NotificationControllerOptions) {
   return {
     workspaceId, summary, unreadCount, pendingCriticalCount, intervalSeconds, preferenceConfirmed, preferenceLoading,
     preferenceSaving, preferenceSaved, preferenceError, summaryPreferenceError, displayedPreferenceError, summaryLoading, summaryError, managementRefreshPending, progressError, lastCheckedAt,
-    attentionItems, importantItems, signupRiskItems, signupRiskEnabled, dismissSignupRisk, criticalBatch, criticalNextCursor, criticalTotalCount, criticalOpen, drawerOpen, historyFilter, historyItems,
+    attentionItems, importantItems, importantCountReliable, signupRiskItems, signupRiskEnabled, signupRiskActive, setSignupRiskSettingsSaving, dismissSignupRisk, criticalBatch, criticalNextCursor, criticalTotalCount, criticalOpen, drawerOpen, historyFilter, historyItems,
     historyNextCursor, historyLoading, historyError, detail, detailLoading, detailError, busyIds,
     refreshSummary, refreshSignupRisk, nextSummaryPage, openDrawer, closeDrawer, loadHistory, openDetail, markDetailRead, markPageRead,
     progress, presentAttention, dismissImportant, acknowledgeCritical, laterCritical, clearAttention,

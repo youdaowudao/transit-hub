@@ -22,6 +22,10 @@ const (
 )
 
 type SignupRiskPreferences struct {
+	SignupRiskSchedule
+	ServerTime              time.Time  `json:"serverTime"`
+	ActiveUntil             *time.Time `json:"activeUntil"`
+	NextStartAt             *time.Time `json:"nextStartAt"`
 	WorkspaceAdminAccountID string     `json:"workspaceAdminAccountId"`
 	Enabled                 bool       `json:"enabled"`
 	Initialized             bool       `json:"initialized"`
@@ -31,6 +35,7 @@ type SignupRiskPreferences struct {
 // SignupRiskTarget identifies an existing administrator connection, never an
 // upstream resale site or an implicit current workspace.
 type SignupRiskTarget struct {
+	SignupRiskSchedule
 	UserID         string
 	AdminAccountID string
 	BaseURL        string
@@ -46,8 +51,10 @@ type SignupRiskUser struct {
 }
 
 type SignupRiskSummary struct {
-	Enabled bool     `json:"enabled"`
-	Items   []Notice `json:"items"`
+	ActiveUntil *time.Time `json:"activeUntil"`
+	NextStartAt *time.Time `json:"nextStartAt"`
+	Enabled     bool       `json:"enabled"`
+	Items       []Notice   `json:"items"`
 }
 
 func SignupRiskSiteKey(baseURL string) string {
@@ -136,10 +143,16 @@ func (s *Service) GetSignupRiskPreferences(ctx context.Context, user, workspace 
 	if err := tx.Commit(ctx); err != nil {
 		return result, storageFailure(workspace, "完成高风险注册提醒设置读取", err)
 	}
+	if err := result.at(time.Now()); err != nil {
+		return SignupRiskPreferences{}, storageFailure(workspace, "核查注册提醒工作时间", err)
+	}
 	return result, nil
 }
 
-func (s *Service) SaveSignupRiskPreferences(ctx context.Context, user, workspace string, enabled bool) (SignupRiskPreferences, error) {
+func (s *Service) SaveSignupRiskPreferences(ctx context.Context, user, workspace string, enabled bool, schedule SignupRiskSchedule) (SignupRiskPreferences, error) {
+	if err := schedule.Validate(); err != nil {
+		return SignupRiskPreferences{}, invalidRequest(workspace, err.Error())
+	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	tx, err := s.repository.beginWrite(ctx, user, workspace)
@@ -155,16 +168,19 @@ func (s *Service) SaveSignupRiskPreferences(ctx context.Context, user, workspace
 		return SignupRiskPreferences{}, invalidRequest(workspace, "这个工作区未连接 Sub2API，无法开启此提醒；请切换到 Sub2API 工作区。原设置没有改变")
 	}
 	result := SignupRiskPreferences{WorkspaceAdminAccountID: workspace}
-	err = tx.QueryRow(ctx, `INSERT INTO signup_risk_settings(user_id,admin_account_id,enabled) VALUES($1,$2,$3)
-ON CONFLICT(user_id,admin_account_id) DO UPDATE SET enabled=EXCLUDED.enabled,
+	err = tx.QueryRow(ctx, `INSERT INTO signup_risk_settings(user_id,admin_account_id,enabled,work_start,work_end,time_zone) VALUES($1,$2,$3,$4,$5,$6)
+ON CONFLICT(user_id,admin_account_id) DO UPDATE SET enabled=EXCLUDED.enabled,work_start=EXCLUDED.work_start,work_end=EXCLUDED.work_end,time_zone=EXCLUDED.time_zone,
 initialized=CASE WHEN signup_risk_settings.enabled=EXCLUDED.enabled THEN signup_risk_settings.initialized ELSE false END,
-updated_at=CASE WHEN signup_risk_settings.enabled=EXCLUDED.enabled THEN signup_risk_settings.updated_at ELSE GREATEST(clock_timestamp(),signup_risk_settings.updated_at+interval '1 microsecond') END
-RETURNING enabled,initialized,updated_at`, user, workspace, enabled).Scan(&result.Enabled, &result.Initialized, &result.UpdatedAt)
+updated_at=CASE WHEN (signup_risk_settings.enabled,signup_risk_settings.work_start,signup_risk_settings.work_end,signup_risk_settings.time_zone)=(EXCLUDED.enabled,EXCLUDED.work_start,EXCLUDED.work_end,EXCLUDED.time_zone) THEN signup_risk_settings.updated_at ELSE GREATEST(clock_timestamp(),signup_risk_settings.updated_at+interval '1 microsecond') END
+RETURNING enabled,initialized,updated_at,work_start,work_end,time_zone`, user, workspace, enabled, schedule.WorkStart, schedule.WorkEnd, schedule.TimeZone).Scan(&result.Enabled, &result.Initialized, &result.UpdatedAt, &result.WorkStart, &result.WorkEnd, &result.TimeZone)
 	if err != nil {
 		return SignupRiskPreferences{}, storageFailure(workspace, "保存高风险注册提醒设置", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return SignupRiskPreferences{}, commitFailure(workspace, "高风险注册提醒设置", err)
+	}
+	if err := result.at(time.Now()); err != nil {
+		return SignupRiskPreferences{}, storageFailure(workspace, "核查注册提醒工作时间", err)
 	}
 	return result, nil
 }

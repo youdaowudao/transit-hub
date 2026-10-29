@@ -15,7 +15,7 @@ func TestNotificationAPISignupRiskPreferencesScopeValidationAndOldIntervalPostgr
 		t.Fatal("wrong default risk preferences")
 	}
 	for _, scope := range []string{"workspace-b", "foreign-workspace"} {
-		w := f.request(t, http.MethodPut, path, map[string]any{"workspaceAdminAccountId": scope, "enabled": true}, true)
+		w := f.request(t, http.MethodPut, path, map[string]any{"workspaceAdminAccountId": scope, "enabled": true, "workStart": "09:00", "workEnd": "18:00", "timeZone": "Asia/Singapore"}, true)
 		if w.Code == http.StatusOK {
 			t.Fatal("foreign or non-current workspace settings changed")
 		}
@@ -27,7 +27,7 @@ func TestNotificationAPISignupRiskPreferencesScopeValidationAndOldIntervalPostgr
 		}
 		notificationResponse(t, f.request(t, http.MethodPut, path, body, true), http.StatusBadRequest)
 	}
-	saved := notificationResponse(t, f.request(t, http.MethodPut, path, map[string]any{"workspaceAdminAccountId": "workspace-a", "enabled": true}, true), http.StatusOK)
+	saved := notificationResponse(t, f.request(t, http.MethodPut, path, map[string]any{"workspaceAdminAccountId": "workspace-a", "enabled": true, "workStart": "09:00", "workEnd": "18:00", "timeZone": "Asia/Singapore"}, true), http.StatusOK)
 	if saved["enabled"] != true || saved["updatedAt"] == nil {
 		t.Fatal("risk switch was not confirmed")
 	}
@@ -43,5 +43,5 @@ func TestNotificationAPISignupRiskPreferencesScopeValidationAndOldIntervalPostgr
 	if _, err := f.pool.Exec(t.Context(), `UPDATE admin_accounts SET platform='new-api' WHERE id='workspace-a'`); err != nil {
 		t.Fatal("cannot prepare non-Sub2API fixture")
 	}
-	notificationResponse(t, f.request(t, http.MethodPut, path, map[string]any{"workspaceAdminAccountId": "workspace-a", "enabled": true}, true), http.StatusBadRequest)
+	notificationResponse(t, f.request(t, http.MethodPut, path, map[string]any{"workspaceAdminAccountId": "workspace-a", "enabled": true, "workStart": "09:00", "workEnd": "18:00", "timeZone": "Asia/Singapore"}, true), http.StatusBadRequest)
 }

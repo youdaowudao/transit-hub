@@ -29,7 +29,7 @@ func riskStoreKey(target notifications.SignupRiskTarget, id string) string {
 	return target.AdminAccountID + ":" + notifications.SignupRiskSiteKey(target.BaseURL) + ":" + id
 }
 func newRiskStore() *riskStore {
-	return &riskStore{targets: []notifications.SignupRiskTarget{{UserID: "user", AdminAccountID: "workspace", BaseURL: "https://fixture.invalid", SiteName: "隔离站点", UpdatedAt: time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)}}, processed: map[string]bool{}, notified: map[string]int{}}
+	return &riskStore{targets: []notifications.SignupRiskTarget{{SignupRiskSchedule: riskActiveSchedule(), UserID: "user", AdminAccountID: "workspace", BaseURL: "https://fixture.invalid", SiteName: "隔离站点", UpdatedAt: time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)}}, processed: map[string]bool{}, notified: map[string]int{}}
 }
 func (f *riskStore) ListSignupRiskTargets(context.Context) ([]notifications.SignupRiskTarget, error) {
 	f.mu.Lock()
@@ -343,4 +343,12 @@ func TestSignupRiskMissingIdentityAndMalformedRiskFactNeverAdvance(t *testing.T)
 			}
 		})
 	}
+}
+
+func riskActiveSchedule() notifications.SignupRiskSchedule {
+	zone := "UTC"
+	if time.Now().UTC().Hour() == 23 {
+		zone = "Asia/Singapore"
+	}
+	return notifications.SignupRiskSchedule{WorkStart: "00:00", WorkEnd: "23:59", TimeZone: zone}
 }

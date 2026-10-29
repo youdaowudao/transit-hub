@@ -19,6 +19,10 @@ func SafeStorageCause(err error) string {
 }
 
 func safeStorageCause(err error) string {
+	var scheduleError signupRiskScheduleError
+	if errors.As(err, &scheduleError) {
+		return string(scheduleError)
+	}
 	if errors.Is(err, errStoredContentFormat) {
 		return "已保存的通知内容不是可读取的完整格式，请维护人员核查这条通知的保存内容"
 	}

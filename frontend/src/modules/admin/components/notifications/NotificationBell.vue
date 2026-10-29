@@ -3,11 +3,11 @@ import { computed } from 'vue'
 import { Bell } from 'lucide-vue-next'
 import type { NotificationController } from '../../composables/useNotifications'
 const props = defineProps<{ controller: NotificationController }>()
-const { unreadCount, pendingCriticalCount, managementRefreshPending, summaryError, summary } = props.controller
+const { unreadCount, pendingCriticalCount, importantCountReliable, managementRefreshPending, summaryError, summary } = props.controller
 const marker = computed(() => {
   if (managementRefreshPending.value) return null
   if (pendingCriticalCount.value > 0) return { kind: 'critical', count: pendingCriticalCount.value }
-  const important = summary.value?.active.important.totalCount ?? 0
+  const important = importantCountReliable.value ? summary.value?.active.important.totalCount ?? 0 : 0
   if (important > 0) return { kind: 'important', count: important }
   if (unreadCount.value > 0) return { kind: 'unread', count: unreadCount.value }
   return null

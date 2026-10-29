@@ -1,3 +1,4 @@
+import { sameSignupRiskSettings, validSignupRiskSchedule } from '../utils/signupRiskSettings'
 import {
   authUnauthorizedErrorKey,
   getAccessToken,
@@ -242,7 +243,8 @@ export const getNotificationSummary = async (query: NotificationSummaryQuery, si
     if (typeof risk.enabled !== 'boolean') return malformed(workspace)
     const items = unique(list(risk.items, workspace, 20).map(value => notice(value, workspace)), workspace)
     if (items.some(item => item.kind !== 'sub2api.signup_risk' || item.level !== 3 || !item.subjectActive || item.reminderCompletedAt !== null)) return malformed(workspace)
-    output.signupRisk = { enabled: risk.enabled, items }
+    const window = signupRiskWindow(risk, output.serverTime, workspace, true)
+    output.signupRisk = { enabled: risk.enabled, items, ...window }
   }
   if (output.intervalSeconds === null && !output.preferenceWarning) return malformed(workspace)
   if (output.pendingCriticalCount !== output.active.critical.totalCount) return malformed(workspace)
@@ -308,18 +310,34 @@ export const saveNotificationPreferences = async (request: NotificationPreferenc
 }
 import type { SignupRiskPreferences } from '../types/notifications'
 
+const signupRiskWindow = (value: Record<string, unknown>, serverTime: string, workspace: string, allowOld = false) => {
+  // An old server can still supply ordinary notifications; registration reminders
+  // remain hidden until it supplies a confirmed working-time window.
+  if (allowOld && value.activeUntil === undefined && value.nextStartAt === undefined) return { activeUntil: null, nextStartAt: null }
+  const activeUntil = nullableDate(value.activeUntil, workspace)
+  const nextStartAt = nullableDate(value.nextStartAt, workspace)
+  const now = Date.parse(serverTime)
+  if (!value.enabled && (activeUntil !== null || nextStartAt !== null)) return malformed(workspace)
+  if (value.enabled && (!nextStartAt || Date.parse(nextStartAt) <= now)) return malformed(workspace)
+  if (activeUntil && (Date.parse(activeUntil) <= now || !nextStartAt || Date.parse(activeUntil) >= Date.parse(nextStartAt))) return malformed(workspace)
+  return { activeUntil, nextStartAt }
+}
 const signupRiskPreferenceResponse = (value: unknown, workspace: string): SignupRiskPreferences => {
   const result = scope(value, workspace)
   if (typeof result.enabled !== 'boolean' || typeof result.initialized !== 'boolean' || !result.enabled && result.initialized) return malformed(workspace)
-  return { workspaceAdminAccountId: workspace, enabled: result.enabled, initialized: result.initialized, updatedAt: nullableDate(result.updatedAt, workspace) }
+  const schedule = { workStart: text(result.workStart, workspace), workEnd: text(result.workEnd, workspace), timeZone: text(result.timeZone, workspace) }
+  if (!validSignupRiskSchedule(schedule)) return malformed(workspace)
+  const serverTime = date(result.serverTime, workspace)
+  return { workspaceAdminAccountId: workspace, enabled: result.enabled, initialized: result.initialized, updatedAt: nullableDate(result.updatedAt, workspace), ...schedule, serverTime, ...signupRiskWindow(result, serverTime, workspace) }
 }
 export const getSignupRiskPreferences = async (workspace: string, signal?: AbortSignal): Promise<SignupRiskPreferences> => (
   signupRiskPreferenceResponse(await requestJson(`/signup-risk-preferences?${parameters(workspace)}`, workspace, { signal }), workspace)
 )
-export const saveSignupRiskPreferences = async (request: { workspaceAdminAccountId: string; enabled: boolean }, signal?: AbortSignal): Promise<SignupRiskPreferences> => {
+export const saveSignupRiskPreferences = async (request: Pick<SignupRiskPreferences, 'workspaceAdminAccountId' | 'enabled' | 'workStart' | 'workEnd' | 'timeZone'>, signal?: AbortSignal): Promise<SignupRiskPreferences> => {
   const workspace = request.workspaceAdminAccountId
   parameters(workspace)
+  if (!validSignupRiskSchedule(request)) throw new NotificationRequestError('注册提醒设置没有保存', '工作开始时间必须早于结束时间，时区须从列表选择', '请检查工作时间后重试', false, workspace)
   const result = signupRiskPreferenceResponse(await requestJson('/signup-risk-preferences', workspace, { method: 'PUT', body: JSON.stringify(request), signal }, 'write'), workspace)
-  if (result.enabled !== request.enabled || result.updatedAt === null) return malformed(workspace)
+  if (!sameSignupRiskSettings(result, request) || result.updatedAt === null) return malformed(workspace)
   return result
 }

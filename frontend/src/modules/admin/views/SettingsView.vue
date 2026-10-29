@@ -1089,7 +1089,7 @@ onBeforeUnmount(() => {
               <p v-if="!notificationIntervalValid" class="text-sm text-destructive">请输入1—60之间的整数分钟后保存。</p>
               <p v-if="notifications.displayedPreferenceError.value" role="alert" class="break-words text-sm text-destructive">{{ notifications.displayedPreferenceError.value }}</p>
               <p v-if="notifications.preferenceSaved.value" role="status" aria-live="polite" class="text-sm text-green-500">通知检查间隔已确认保存为{{ notifications.intervalSeconds.value / 60 }}分钟；当前工作区使用新间隔，不会修改主站。</p>
-              <SignupRiskNotificationSettings :workspace-id="notifications.workspaceId.value" :platform="notificationAccount?.platform ?? ''" :switching="notificationSwitching" @saved="notifications.refreshSignupRisk()" />
+              <SignupRiskNotificationSettings :workspace-id="notifications.workspaceId.value" :platform="notificationAccount?.platform ?? ''" :switching="notificationSwitching" @settings-changing="notifications.setSignupRiskSettingsSaving($event)" />
             </div>
           </section>
           <!-- Strategy Header + Save button -->

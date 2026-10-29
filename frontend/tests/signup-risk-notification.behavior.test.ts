@@ -11,7 +11,7 @@ import type { NotificationSummaryResponse, SignupRiskPreferences, SiteNotificati
 const api = vi.hoisted(() => ({ get: vi.fn(), save: vi.fn(), summary: vi.fn(), progress: vi.fn() }))
 vi.mock('@/modules/admin/api/notifications', async original => ({ ...await original<typeof import('@/modules/admin/api/notifications')>(), getSignupRiskPreferences: api.get, saveSignupRiskPreferences: api.save, getNotificationSummary: api.summary, saveNotificationProgress: api.progress }))
 const when = '2031-01-01T00:00:00Z'
-const pref = (enabled = false, workspace = 'a'): SignupRiskPreferences => ({ workspaceAdminAccountId: workspace, enabled, initialized: false, updatedAt: when })
+const pref = (enabled = false, workspace = 'a'): SignupRiskPreferences => ({ workspaceAdminAccountId: workspace, enabled, initialized: false, updatedAt: when, workStart: '09:00', workEnd: '18:00', timeZone: 'Asia/Singapore', serverTime: when, activeUntil: enabled ? '2031-01-01T10:00:00Z' : null, nextStartAt: enabled ? '2031-01-02T01:00:00Z' : null })
 const pending = <T,>() => { let resolve!: (value: T) => void; let reject!: (value: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 const wrappers: VueWrapper[] = []
 const settings = () => { const w = mount(SignupRiskNotificationSettings, { props: { workspaceId: 'a', platform: 'sub2api' } }); wrappers.push(w); return w }
@@ -20,7 +20,7 @@ const fact = (id: string, risk = false, level: 3 | 4 = 3): SiteNotification => (
 const snapshot = (risk: SiteNotification[] = [], normal: SiteNotification[] = [], enabled = true): NotificationSummaryResponse => {
   const all = [...risk, ...normal]
   const bucket = (level: number) => ({ items: all.filter(item => item.level === level).slice(0, 20), totalCount: all.filter(item => item.level === level).length, nextCursor: null })
-  return { workspaceAdminAccountId: 'a', serverTime: when, intervalSeconds: 300, unreadCount: all.length, pendingCriticalCount: bucket(4).totalCount, active: { attention: { items: [], totalCount: 0, nextCursor: null }, important: bucket(3), critical: bucket(4) }, samplingState: { autoSyncEnabled: false, unconfirmedSiteCount: 0, sites: [] }, displayedStates: [], signupRisk: { enabled, items: risk } }
+  return { workspaceAdminAccountId: 'a', serverTime: when, intervalSeconds: 300, unreadCount: all.length, pendingCriticalCount: bucket(4).totalCount, active: { attention: { items: [], totalCount: 0, nextCursor: null }, important: bucket(3), critical: bucket(4) }, samplingState: { autoSyncEnabled: false, unconfirmedSiteCount: 0, sites: [] }, displayedStates: [], signupRisk: { enabled, items: risk, activeUntil: enabled ? "2031-01-01T10:00:00Z" : null, nextStartAt: enabled ? "2031-01-02T01:00:00Z" : null } }
 }
 function controller() {
   let value!: NotificationController
@@ -43,16 +43,16 @@ describe('signup risk settings complete request paths', () => {
     const w = settings(); await flushPromises()
     expect(w.text()).toContain('重要（弹窗提醒）')
     expect(w.text()).toContain('首次完整读取后开始提醒')
-    expect(w.text()).toContain('每15秒检查这类新提醒')
+    expect(w.text()).toContain('网页每1分钟读取新提醒')
     expect(w.text()).toContain('不会修改主站')
     await w.find('input').setValue(true)
     expect(api.save).not.toHaveBeenCalled()
-    await button(w, '保存高风险注册提醒').trigger('click'); await flushPromises()
-    expect(api.save).toHaveBeenCalledWith({ workspaceAdminAccountId: 'a', enabled: true }, expect.anything())
-    expect(w.text()).toContain('高风险注册提醒已开启')
+    await button(w, '保存并开启提醒').trigger('click'); await flushPromises()
+    expect(api.save).toHaveBeenCalledWith({ workspaceAdminAccountId: 'a', enabled: true, workStart: '09:00', workEnd: '18:00', timeZone: 'Asia/Singapore' }, expect.anything())
+    expect(w.text()).toContain('已开启')
     expect(w.emitted('saved')).toHaveLength(1)
-    await w.find('input').setValue(false); await button(w, '保存高风险注册提醒').trigger('click'); await flushPromises()
-    expect(w.text()).toContain('高风险注册提醒已关闭；不再生成新消息')
+    await w.find('input').setValue(false); await button(w, '保存并关闭提醒').trigger('click'); await flushPromises()
+    expect(w.text()).toContain('已关闭')
   })
   it('keeps an unknown load disabled for editing and recovers only by re-reading', async () => {
     api.get.mockRejectedValueOnce(new Error('通知数据库连接中断'))
@@ -62,7 +62,7 @@ describe('signup risk settings complete request paths', () => {
     expect(w.find('input').attributes('disabled')).toBeDefined()
     expect(w.text()).not.toContain('已关闭；')
     api.get.mockResolvedValue(pref(true))
-    await button(w, '重试读取注册提醒设置').trigger('click'); await flushPromises()
+    await button(w, '重试读取设置').trigger('click'); await flushPromises()
     expect((w.find('input').element as HTMLInputElement).checked).toBe(true)
     expect(w.find('input').attributes('disabled')).toBeUndefined()
     expect(api.save).not.toHaveBeenCalled()
@@ -71,19 +71,20 @@ describe('signup risk settings complete request paths', () => {
     const w = settings(); await flushPromises(); await w.find('input').setValue(true)
     api.save.mockRejectedValueOnce(new NotificationRequestError('提交结果未知', '连接中断', '重读设置', true, 'a', 503))
     api.get.mockResolvedValue(pref(true))
-    await button(w, '保存高风险注册提醒').trigger('click'); await flushPromises()
-    expect(w.text()).toContain('高风险注册提醒已开启')
+    await button(w, '保存并开启提醒').trigger('click'); await flushPromises()
+    expect(w.text()).toContain('已开启')
     expect(w.find('[role="alert"]').exists()).toBe(false)
   })
   it('never declares uncertain or rejected saves successful without matching persisted values', async () => {
     const w = settings(); await flushPromises(); await w.find('input').setValue(true)
     api.save.mockRejectedValueOnce(new Error('工作区已变化，本次没有保存'))
     api.get.mockResolvedValue(pref(false))
-    await button(w, '保存高风险注册提醒').trigger('click'); await flushPromises()
+    await button(w, '保存并开启提醒').trigger('click'); await flushPromises()
     expect(w.text()).toContain('工作区已变化')
     expect(w.text()).not.toContain('已开启；')
     expect(w.emitted('saved')).toBeUndefined()
-    expect(w.find('input').attributes('disabled')).toBeDefined()
+    expect(w.text()).toContain('保存结果与本次修改不一致')
+    expect(w.find('input').attributes('disabled')).toBeUndefined()
   })
   it('aborts a load as switching starts and ignores the old workspace response', async () => {
     const old = pending<SignupRiskPreferences>(); api.get.mockReturnValueOnce(old.promise)
@@ -98,7 +99,7 @@ describe('signup risk settings complete request paths', () => {
   it('aborts an in-flight save at switch or unmount without leaking success', async () => {
     const old = pending<SignupRiskPreferences>(); const w = settings(); await flushPromises()
     await w.find('input').setValue(true); api.save.mockReturnValueOnce(old.promise)
-    await button(w, '保存高风险注册提醒').trigger('click')
+    await button(w, '保存并开启提醒').trigger('click')
     const signal = api.save.mock.calls[0]![1] as AbortSignal
     await w.setProps({ switching: true }); expect(signal.aborted).toBe(true)
     old.resolve(pref(true)); await flushPromises()
@@ -108,7 +109,7 @@ describe('signup risk settings complete request paths', () => {
     const w = mount(SignupRiskNotificationSettings, { props: { workspaceId: 'a', platform: 'new-api' } }); wrappers.push(w); await flushPromises()
     expect(api.get).not.toHaveBeenCalled(); expect(api.save).not.toHaveBeenCalled()
     expect(w.text()).toContain('这个工作区未连接 Sub2API')
-    expect(button(w, '保存高风险注册提醒').attributes('disabled')).toBeDefined()
+    expect(button(w, '保存注册提醒设置').attributes('disabled')).toBeDefined()
   })
 })
 
@@ -138,7 +139,7 @@ describe('supplemental risk reads preserve existing alert behavior', () => {
     await value.nextSummaryPage(3); await flushPromises()
     const extra = snapshot([fact('risk', true)], [fact('ordinary-second')]); extra.active.important.nextCursor = 'to-third'
     api.summary.mockResolvedValue(extra)
-    await vi.advanceTimersByTimeAsync(15_000); await flushPromises()
+    await vi.advanceTimersByTimeAsync(60_000); await flushPromises()
     expect(api.summary).toHaveBeenLastCalledWith(expect.objectContaining({ importantCursor: 'to-second' }), expect.anything())
     expect(value.importantItems.value.map(item => item.id)).toEqual(['ordinary-second'])
     expect(value.summary.value?.active.important.nextCursor).toBe('to-third')
@@ -148,19 +149,19 @@ describe('supplemental risk reads preserve existing alert behavior', () => {
   it('dismisses only the registration group and does not restore it on repeated polling', async () => {
     const { value, w } = controller(); await flushPromises()
     api.summary.mockResolvedValue(snapshot([fact('risk', true)]))
-    await vi.advanceTimersByTimeAsync(15_000); await flushPromises()
+    await vi.advanceTimersByTimeAsync(60_000); await flushPromises()
     await value.dismissSignupRisk(); await flushPromises()
     expect(api.progress).toHaveBeenCalledWith({ workspaceAdminAccountId: 'a', action: 'dismiss', ids: ['risk'] }, expect.anything())
     expect(value.signupRiskItems.value).toEqual([])
     expect(value.summary.value?.active.important.totalCount).toBe(0)
-    await vi.advanceTimersByTimeAsync(15_000); await flushPromises()
+    await vi.advanceTimersByTimeAsync(60_000); await flushPromises()
     expect(w.text()).not.toContain('alice+1@example.com')
   })
   it('cancels a hidden in-flight extra read and does not render its late result', async () => {
     let visible = true; vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visible ? 'visible' : 'hidden')
     const { value, w } = controller(); await flushPromises()
     const old = pending<NotificationSummaryResponse>(); api.summary.mockReturnValueOnce(old.promise)
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(60_000)
     const signal = api.summary.mock.calls.at(-1)![1] as AbortSignal
     visible = false; document.dispatchEvent(new Event('visibilitychange'))
     expect(signal.aborted).toBe(true)
@@ -178,11 +179,11 @@ describe('supplemental risk reads preserve existing alert behavior', () => {
     api.summary.mockResolvedValue(snapshot([fact('risk', true)]))
     const { value } = controller(); await flushPromises()
     api.summary.mockRejectedValueOnce(new Error('通知数据库连接中断'))
-    await vi.advanceTimersByTimeAsync(15_000); await flushPromises()
+    await vi.advanceTimersByTimeAsync(60_000); await flushPromises()
     expect(value.signupRiskEnabled.value).toBe(true)
     expect(value.signupRiskItems.value.map(item => item.id)).toEqual(['risk'])
     expect(value.summaryError.value).toContain('通知数据库连接中断')
-    await vi.advanceTimersByTimeAsync(15_000); await flushPromises(); expect(api.summary).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(60_000); await flushPromises(); expect(api.summary).toHaveBeenCalledTimes(3)
   })
   it('does not create supplemental timers when the switch is off', async () => {
     api.summary.mockResolvedValue(snapshot([], [], false)); controller(); await flushPromises()

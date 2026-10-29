@@ -88,7 +88,7 @@ func TestSignupRiskPersistenceBootstrapDuplicateConcurrentRestartAndCleanupPostg
 	if p, err := service.GetSignupRiskPreferences(ctx, "user", "workspace"); err != nil || p.Enabled || p.Initialized || p.UpdatedAt != nil {
 		t.Fatal("missing config must be a read-only disabled default")
 	}
-	if _, err := service.SaveSignupRiskPreferences(ctx, "user", "workspace", true); err != nil {
+	if _, err := service.SaveSignupRiskPreferences(ctx, "user", "workspace", true, riskActiveSchedule()); err != nil {
 		t.Fatal(err)
 	}
 	target := signupRiskTarget(t, repo)
@@ -108,7 +108,7 @@ func TestSignupRiskPersistenceBootstrapDuplicateConcurrentRestartAndCleanupPostg
 		t.Fatal("first complete scan did not initialize")
 	}
 	oldTime := target.UpdatedAt
-	if same, err := service.SaveSignupRiskPreferences(ctx, "user", "workspace", true); err != nil || !same.Initialized || !same.UpdatedAt.Equal(oldTime) {
+	if same, err := service.SaveSignupRiskPreferences(ctx, "user", "workspace", true, riskActiveSchedule()); err != nil || !same.Initialized || !same.UpdatedAt.Equal(oldTime) {
 		t.Fatal("same-value setting reset initialization or invalidated the poll")
 	}
 	var wg sync.WaitGroup
@@ -154,10 +154,10 @@ func TestSignupRiskSameRemoteUserAcrossSitesAndWorkspaceIsolationPostgres(t *tes
 	repo := NewRepository(pool)
 	service := NewService(repo)
 	ctx := t.Context()
-	if _, err := service.SaveSignupRiskPreferences(ctx, "user", "workspace", true); err != nil {
+	if _, err := service.SaveSignupRiskPreferences(ctx, "user", "workspace", true, riskActiveSchedule()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.SaveSignupRiskPreferences(ctx, "another-user", "foreign-workspace", true); err != nil {
+	if _, err := service.SaveSignupRiskPreferences(ctx, "another-user", "foreign-workspace", true, riskActiveSchedule()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE admin_accounts SET base_url='https://second.invalid' WHERE id='foreign-workspace'`); err != nil {
@@ -193,9 +193,9 @@ func TestSignupRiskDisabledAndReopenedPollSnapshotCannotWritePostgres(t *testing
 	repo := NewRepository(pool)
 	service := NewService(repo)
 	ctx := t.Context()
-	_, _ = service.SaveSignupRiskPreferences(ctx, "user", "workspace", true)
+	_, _ = service.SaveSignupRiskPreferences(ctx, "user", "workspace", true, riskActiveSchedule())
 	old := signupRiskTarget(t, repo)
-	_, _ = service.SaveSignupRiskPreferences(ctx, "user", "workspace", false)
+	_, _ = service.SaveSignupRiskPreferences(ctx, "user", "workspace", false, riskActiveSchedule())
 	if targets, err := repo.ListSignupRiskTargets(ctx); err != nil || len(targets) != 0 {
 		t.Fatal("disabled workspace still starts new remote polls")
 	}
@@ -203,7 +203,7 @@ func TestSignupRiskDisabledAndReopenedPollSnapshotCannotWritePostgres(t *testing
 		t.Fatal(err)
 	}
 	riskCounts(t, pool, 0, 0)
-	_, _ = service.SaveSignupRiskPreferences(ctx, "user", "workspace", true)
+	_, _ = service.SaveSignupRiskPreferences(ctx, "user", "workspace", true, riskActiveSchedule())
 	if err := repo.CommitSignupRiskRound(ctx, old, []SignupRiskUser{riskTestUser("1")}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestSignupRiskRoundTransactionRollsBackAllIDsAndNoticesPostgres(t *testing.
 	repo := NewRepository(pool)
 	service := NewService(repo)
 	ctx := t.Context()
-	_, _ = service.SaveSignupRiskPreferences(ctx, "user", "workspace", true)
+	_, _ = service.SaveSignupRiskPreferences(ctx, "user", "workspace", true, riskActiveSchedule())
 	if err := repo.CommitSignupRiskRound(ctx, signupRiskTarget(t, repo), nil, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -246,4 +246,12 @@ func TestSignupRiskRoundTransactionRollsBackAllIDsAndNoticesPostgres(t *testing.
 		t.Fatal(err)
 	}
 	riskCounts(t, pool, 2, 2)
+}
+
+func riskActiveSchedule() SignupRiskSchedule {
+	zone := "UTC"
+	if time.Now().UTC().Hour() == 23 {
+		zone = "Asia/Singapore"
+	}
+	return SignupRiskSchedule{WorkStart: "00:00", WorkEnd: "23:59", TimeZone: zone}
 }

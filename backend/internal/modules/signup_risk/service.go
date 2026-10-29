@@ -29,6 +29,7 @@ type UsersClient interface {
 }
 
 type Service struct {
+	now         func() time.Time
 	repository  Repository
 	sessions    SessionReader
 	users       UsersClient
@@ -39,7 +40,7 @@ type Service struct {
 }
 
 func NewService(repository Repository, sessions SessionReader, users UsersClient) *Service {
-	return &Service{repository: repository, sessions: sessions, users: users}
+	return &Service{repository: repository, sessions: sessions, users: users, now: time.Now}
 }
 
 // RunOnce is explicit and never starts timers or listeners. Independent targets
@@ -74,7 +75,16 @@ func (s *Service) RunOnce(ctx context.Context) error {
 }
 
 func (s *Service) pollTarget(ctx context.Context, target notifications.SignupRiskTarget) error {
-	ctx, cancel := context.WithTimeout(ctx, 50*time.Second)
+	now := s.now()
+	activeUntil, _, err := target.SignupRiskSchedule.Window(now)
+	if err != nil {
+		return fmt.Errorf("工作时间设置无法使用：%s；本轮没有请求主站，请检查Hub注册提醒设置后重试", err)
+	}
+	if activeUntil == nil {
+		return nil
+	}
+	duration := min(50*time.Second, activeUntil.Sub(now))
+	ctx, cancel := context.WithTimeout(ctx, duration)
 	defer cancel()
 	session, exists, err := s.sessions.StoredSession(ctx, target.UserID, target.AdminAccountID)
 	if err != nil {
@@ -87,9 +97,12 @@ func (s *Service) pollTarget(ctx context.Context, target notifications.SignupRis
 	seen := make(map[string]bool)
 	var stopAt *time.Time
 	var previous *time.Time
-	discovered := time.Now().UTC()
+	discovered := s.now().UTC()
 	includeSubscriptions := false
 	for page := 1; ; page++ {
+		if !s.now().Before(*activeUntil) {
+			return nil
+		}
 		pageCtx, pageCancel := context.WithTimeout(ctx, 10*time.Second)
 		result, fetchErr := s.users.FetchSub2APIAdminUsersPageWithContext(pageCtx, session, upstream.Sub2APIAdminUsersQuery{
 			Page: page, PageSize: 50, Search: notifications.SignupRiskMarker,
@@ -97,6 +110,9 @@ func (s *Service) pollTarget(ctx context.Context, target notifications.SignupRis
 		})
 		pageCancel()
 		if fetchErr != nil {
+			if !s.now().Before(*activeUntil) {
+				return nil
+			}
 			return pollFailure(page, fetchErr)
 		}
 		if !result.TotalKnown || !result.PagesKnown || result.Page != page || result.PageSize != 50 || result.Pages < 1 || len(result.Items) > 50 {
@@ -165,6 +181,9 @@ func (s *Service) pollTarget(ctx context.Context, target notifications.SignupRis
 		if len(result.Items) == 0 || newOnPage == 0 {
 			return fmt.Errorf("用户列表第%d页未返回可继续核查的用户，后续页是否完整无法确认；本轮没有登记或通知，请核查 Sub2API 分页，下分钟从第一页重试", page)
 		}
+	}
+	if !s.now().Before(*activeUntil) {
+		return nil
 	}
 	return s.repository.CommitSignupRiskRound(ctx, target, candidates, discovered)
 }

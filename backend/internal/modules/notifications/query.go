@@ -102,8 +102,22 @@ func (s *Service) Summary(ctx context.Context, user, workspace string, query Sum
 		return result, err
 	}
 	defer tx.Rollback(ctx)
+	prefs, err := readSignupRiskPreferences(ctx, tx, user, workspace)
+	if err != nil {
+		return result, storageFailure(workspace, "读取注册提醒工作时间", err)
+	}
+	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&result.ServerTime); err != nil {
+		return result, storageFailure(workspace, "读取通知检查时间", err)
+	}
+	if err = prefs.at(result.ServerTime); err != nil {
+		return result, storageFailure(workspace, "核查注册提醒工作时间", err)
+	}
+	riskFilter := ""
+	if prefs.ActiveUntil == nil {
+		riskFilter = " AND n.kind <> 'sub2api.signup_risk'"
+	}
 	var attentionCount, importantCount int64
-	err = tx.QueryRow(ctx, `SELECT clock_timestamp(),count(*) FILTER(WHERE read_at IS NULL),count(*) FILTER(WHERE level=4 AND reminder_completed_at IS NULL),count(*) FILTER(WHERE level=2 AND reminder_completed_at IS NULL),count(*) FILTER(WHERE level=3 AND reminder_completed_at IS NULL) FROM site_notifications n WHERE n.user_id=$1 AND n.admin_account_id=$2 AND `+subjectActiveExpression, user, workspace).Scan(&result.ServerTime, &result.UnreadCount, &result.PendingCriticalCount, &attentionCount, &importantCount)
+	err = tx.QueryRow(ctx, `SELECT count(*) FILTER(WHERE read_at IS NULL),count(*) FILTER(WHERE level=4 AND reminder_completed_at IS NULL),count(*) FILTER(WHERE level=2 AND reminder_completed_at IS NULL),count(*) FILTER(WHERE level=3 AND reminder_completed_at IS NULL`+riskFilter+`) FROM site_notifications n WHERE n.user_id=$1 AND n.admin_account_id=$2 AND `+subjectActiveExpression, user, workspace).Scan(&result.UnreadCount, &result.PendingCriticalCount, &attentionCount, &importantCount)
 	if err != nil {
 		return result, storageFailure(workspace, "读取通知数量", err)
 	}
@@ -112,6 +126,9 @@ func (s *Service) Summary(ctx context.Context, user, workspace string, query Sum
 	for i, bucket := range buckets {
 		level := Level(i + 2)
 		sql := `SELECT ` + noticeColumns + ` FROM site_notifications n WHERE n.user_id=$1 AND n.admin_account_id=$2 AND level=$3 AND reminder_completed_at IS NULL AND ` + subjectActiveExpression
+		if level == LevelImportant {
+			sql += riskFilter
+		}
 		args := []any{user, workspace, level}
 		if cursor := cursors[i]; cursor != nil {
 			sql += ` AND (created_at,id)>($4,$5)`
@@ -136,7 +153,7 @@ func (s *Service) Summary(ctx context.Context, user, workspace string, query Sum
 	if err != nil {
 		return result, storageFailure(workspace, "核查当前已显示通知的状态", err)
 	}
-	result.SignupRisk, err = loadSignupRiskSummary(ctx, tx, user, workspace)
+	result.SignupRisk, err = loadSignupRiskSummary(ctx, tx, user, workspace, prefs, result.ServerTime)
 	if err != nil {
 		return result, storageFailure(workspace, "读取高风险注册提醒和开关", err)
 	}

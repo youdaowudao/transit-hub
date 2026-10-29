@@ -62,7 +62,7 @@ onBeforeUnmount(() => { clearTimer(); pointerHovered.value = focusWithin.value =
         <h2 class="text-sm font-semibold">重要：尽快检查</h2>
         <Button variant="ghost" size="sm" :disabled="importantItems.some(item => busyIds.includes(item.id))" @click="controller.dismissImportant()">收起</Button>
       </div>
-      <p class="mb-3 text-xs text-muted-foreground"><template v-if="!managementRefreshPending">共有{{ summary?.active.important.totalCount ?? importantItems.length }}条待提醒，</template>本摘要{{ importantItems.length }}条。收起只停止这些提醒，消息仍可查看，不会修改主站。<span v-if="visibleImportantItems.length !== importantItems.length">相同的注册消息已在上方单列显示。</span></p>
+      <p class="mb-3 text-xs text-muted-foreground"><template v-if="controller.importantCountReliable.value">共有{{ summary?.active.important.totalCount ?? importantItems.length }}条待提醒，</template>本摘要{{ importantItems.length }}条。收起只停止这些提醒，消息仍可查看，不会修改主站。<span v-if="visibleImportantItems.length !== importantItems.length">相同的注册消息已在上方单列显示。</span></p>
       <div v-for="item in visibleImportantItems" :key="item.id" class="mb-3 min-w-0 break-words text-sm">
         <p class="font-medium">{{ item.content.title }}</p><p class="whitespace-pre-wrap text-muted-foreground">{{ item.content.summary }}</p>
         <button type="button" class="mt-1 text-primary underline" @click="controller.openDetail(item.id)">查看详情</button>

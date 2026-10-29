@@ -76,7 +76,7 @@ run_connection_health_gate() {
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/httpserver -run 'TestNotificationAPI' -count=1"
 
   run_step "backend high-risk signup read-only polling and persistence race tests" \
-    bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/signup_risk ./internal/modules/notifications ./internal/modules/upstream ./internal/httpserver -run 'Test.*SignupRisk' -count=1"
+    bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/signup_risk ./internal/modules/notifications ./internal/modules/upstream ./internal/httpserver ./internal/database/migrations -run 'Test.*SignupRisk' -count=1"
 
   run_step "backend Singapore cost persistence race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/upstream ./internal/modules/dashboard -run 'TestSingaporeCost' -count=1"
@@ -103,7 +103,7 @@ run_connection_health_gate() {
     bash -c "cd '$ROOT_DIR/frontend' && npm run typecheck"
 
   run_step "frontend notification scoped API and workspace UI contracts" \
-    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- notifications-api-critical.test.ts notifications-controller-critical.behavior.test.ts notifications-layout-critical.behavior.test.ts signup-risk-notification-red.behavior.test.ts signup-risk-refresh-red.behavior.test.ts signup-risk-notification.behavior.test.ts signup-risk-api.test.ts admin-layout-update-notice.behavior.test.ts admin-menu-hierarchy.behavior.test.ts"
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- notifications-api-critical.test.ts notifications-controller-critical.behavior.test.ts notifications-layout-critical.behavior.test.ts signup-risk-notification-red.behavior.test.ts signup-risk-hours-regression.behavior.test.ts signup-risk-hours-additional.behavior.test.ts signup-risk-refresh-red.behavior.test.ts signup-risk-notification.behavior.test.ts signup-risk-api.test.ts admin-layout-update-notice.behavior.test.ts admin-menu-hierarchy.behavior.test.ts"
 }
 
 run_globalization_gate() {

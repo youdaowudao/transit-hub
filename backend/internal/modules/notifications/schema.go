@@ -65,5 +65,9 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		return err
 	}
 	_, err = r.db.Exec(ctx, SignupRiskSchemaSQL)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(ctx, SignupRiskHoursSchemaSQL)
 	return err
 }

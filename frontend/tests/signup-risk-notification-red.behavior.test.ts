@@ -23,7 +23,7 @@ const snapshot = (risk: SiteNotification[] = [], rest: SiteNotification[] = [], 
   return { workspaceAdminAccountId: 'workspace', serverTime: when, intervalSeconds: 300, unreadCount: all.length, pendingCriticalCount: bucket(4).totalCount,
     active: { attention: { items: [], totalCount: 0, nextCursor: null }, important: bucket(3), critical: bucket(4) },
     displayedStates: [], samplingState: { autoSyncEnabled: false, unconfirmedSiteCount: 0, sites: [] },
-    ...{ signupRisk: { enabled, items: risk } },
+    ...{ signupRisk: { enabled, items: risk, activeUntil: enabled ? "2031-01-01T10:00:00Z" : null, nextStartAt: enabled ? "2031-01-02T01:00:00Z" : null } },
   }
 }
 let wrapper: VueWrapper | undefined
@@ -43,10 +43,10 @@ beforeEach(() => {
 afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks() })
 
 describe('high risk signup regression on the existing notification surface', () => {
-  it('checks new signup reminders within 15 seconds without advancing another level reminder', async () => {
+  it('checks new signup reminders once per minute without advancing another level reminder', async () => {
     const controller = start(); await flushPromises()
     api.summary.mockResolvedValue(snapshot([fact('risk-42', true)], [fact('urgent', false, 4)]))
-    await vi.advanceTimersByTimeAsync(15_000); await flushPromises()
+    await vi.advanceTimersByTimeAsync(60_000); await flushPromises()
     expect(api.summary).toHaveBeenCalledTimes(2)
     expect(wrapper!.text()).toContain('Sub2API 高风险注册提醒')
     expect(wrapper!.text()).toContain('alice+1@example.com')
@@ -65,7 +65,7 @@ describe('high risk signup regression on the existing notification surface', () 
     const extra = snapshot([fact('risk-42', true)], original)
     extra.active.important.items = original; extra.active.important.totalCount = 31; extra.active.important.nextCursor = 'original-page-2'
     api.summary.mockResolvedValue(extra)
-    await vi.advanceTimersByTimeAsync(15_000); await flushPromises()
+    await vi.advanceTimersByTimeAsync(60_000); await flushPromises()
     expect(controller.importantItems.value.map(n => n.id)).toEqual(original.map(n => n.id))
     expect(wrapper!.text()).toContain('收起这组注册提醒')
     expect(wrapper!.text()).toContain('alice+1@example.com')

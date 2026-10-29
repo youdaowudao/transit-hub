@@ -21,7 +21,7 @@ const when = '2031-01-01T00:00:00Z'
 const item = (risk: boolean): SiteNotification => ({ id: risk ? 'risk' : 'urgent', adminAccountId: 'a', kind: risk ? 'sub2api.signup_risk' : 'fixture.fact', subjectType: 'admin_account', subjectId: 'a', subjectActive: true, subjectInactiveMessage: '', level: risk ? 3 : 4, discoveredAt: when, createdAt: when, readAt: null, reminderCompletedAt: null, content: { title: risk ? '注册风险' : '原有紧急消息', summary: '只提醒，不修改主站', details: [] } })
 const snapshot = (risk = false, enabled = true): NotificationSummaryResponse => {
   const risks = risk ? [item(true)] : []
-  return { workspaceAdminAccountId: 'a', serverTime: when, intervalSeconds: 300, unreadCount: 1 + risks.length, pendingCriticalCount: 1, active: { attention: { items: [], totalCount: 0, nextCursor: null }, important: { items: risks, totalCount: risks.length, nextCursor: null }, critical: { items: [item(false)], totalCount: 1, nextCursor: null } }, displayedStates: [], samplingState: { autoSyncEnabled: false, unconfirmedSiteCount: 0, sites: [] }, signupRisk: { enabled, items: risks } }
+  return { workspaceAdminAccountId: 'a', serverTime: when, intervalSeconds: 300, unreadCount: 1 + risks.length, pendingCriticalCount: 1, active: { attention: { items: [], totalCount: 0, nextCursor: null }, important: { items: risks, totalCount: risks.length, nextCursor: null }, critical: { items: [item(false)], totalCount: 1, nextCursor: null } }, displayedStates: [], samplingState: { autoSyncEnabled: false, unconfirmedSiteCount: 0, sites: [] }, signupRisk: { enabled, items: risks, activeUntil: enabled ? "2031-01-01T10:00:00Z" : null, nextStartAt: enabled ? "2031-01-02T01:00:00Z" : null } }
 }
 const pending = <T,>() => { let resolve!: (value: T) => void; const promise = new Promise<T>(yes => { resolve = yes }); return { promise, resolve } }
 const wrappers: VueWrapper[] = []
@@ -37,8 +37,8 @@ beforeEach(() => {
   vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) { return { x: 0, y: 0, top: 0, left: 0, bottom: 40, right: 100, width: 100, height: 40, toJSON: () => ({}) } })
   api.summary.mockResolvedValue(snapshot())
-  api.getRisk.mockResolvedValue({ workspaceAdminAccountId: 'a', enabled: true, initialized: true, updatedAt: when })
-  api.saveRisk.mockImplementation(async request => ({ workspaceAdminAccountId: 'a', enabled: request.enabled, initialized: false, updatedAt: when }))
+  api.getRisk.mockResolvedValue({ workspaceAdminAccountId: 'a', enabled: true, initialized: true, updatedAt: when, workStart: '09:00', workEnd: '18:00', timeZone: 'Asia/Singapore', serverTime: when, activeUntil: '2031-01-01T10:00:00Z', nextStartAt: '2031-01-02T01:00:00Z' })
+  api.saveRisk.mockImplementation(async request => ({ workspaceAdminAccountId: 'a', enabled: request.enabled, initialized: false, updatedAt: when, workStart: '09:00', workEnd: '18:00', timeZone: 'Asia/Singapore', serverTime: when, activeUntil: '2031-01-01T10:00:00Z', nextStartAt: '2031-01-02T01:00:00Z' }))
 })
 afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks() })
 
@@ -65,10 +65,10 @@ describe('registration-only actions cannot advance another reminder level', () =
   it('confirms the new switch after a summary started before its save returns', async () => {
     const old = pending<NotificationSummaryResponse>()
     api.summary.mockReturnValueOnce(old.promise).mockResolvedValue(snapshot(false, true))
-    api.getRisk.mockResolvedValue({ workspaceAdminAccountId: 'a', enabled: false, initialized: false, updatedAt: when })
+    api.getRisk.mockResolvedValue({ workspaceAdminAccountId: 'a', enabled: false, initialized: false, updatedAt: when, workStart: '09:00', workEnd: '18:00', timeZone: 'Asia/Singapore', serverTime: when, activeUntil: '2031-01-01T10:00:00Z', nextStartAt: '2031-01-02T01:00:00Z' })
     const { w, controller } = await start()
     await w.find('input[aria-label="Sub2API 高风险注册提醒"]').setValue(true)
-    await w.findAll('button').find(b => b.text() === '保存高风险注册提醒')!.trigger('click'); await flushPromises()
+    await w.findAll('button').find(b => b.text() === '保存并开启提醒')!.trigger('click'); await flushPromises()
     old.resolve(snapshot(false, false)); await flushPromises()
     expect(api.summary).toHaveBeenCalledTimes(2)
     expect(controller.signupRiskEnabled.value).toBe(true)
@@ -80,7 +80,7 @@ describe('registration-only actions cannot advance another reminder level', () =
     await vi.advanceTimersByTimeAsync(1000)
     api.summary.mockResolvedValue(snapshot(false, false))
     await w.find('input[aria-label="Sub2API 高风险注册提醒"]').setValue(false)
-    await w.findAll('button').find(b => b.text() === '保存高风险注册提醒')!.trigger('click'); await flushPromises()
+    await w.findAll('button').find(b => b.text() === '保存并关闭提醒')!.trigger('click'); await flushPromises()
     expect(controller.signupRiskEnabled.value).toBe(false)
     expect(controller.criticalOpen.value).toBe(false)
     await vi.advanceTimersByTimeAsync(298_999); await flushPromises()
@@ -94,12 +94,12 @@ describe('registration-only actions cannot advance another reminder level', () =
     const held = pending<{ workspaceAdminAccountId: string; items: { id: string; readAt: null; reminderCompletedAt: string }[] }>()
     api.progress.mockReturnValueOnce(held.promise)
     const saved = controller.dismissSignupRisk()
-    await vi.advanceTimersByTimeAsync(15_000); await flushPromises()
+    await vi.advanceTimersByTimeAsync(60_000); await flushPromises()
     expect(controller.criticalOpen.value).toBe(false)
     held.resolve({ workspaceAdminAccountId: 'a', items: [{ id: 'risk', readAt: null, reminderCompletedAt: when }] })
     await saved; await flushPromises()
     expect(controller.criticalOpen.value).toBe(false)
-    await vi.advanceTimersByTimeAsync(284_999); await flushPromises()
+    await vi.advanceTimersByTimeAsync(239_999); await flushPromises()
     expect(controller.criticalOpen.value).toBe(false)
     await vi.advanceTimersByTimeAsync(1); await flushPromises()
     expect(controller.criticalOpen.value).toBe(true)

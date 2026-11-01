@@ -178,6 +178,11 @@ func (h *Handler) update(w http.ResponseWriter, r *http.Request) {
 		h.updateEnabled(w, r, userID, id)
 		return
 	}
+	// PATCH /api/upstream-sites/{id}/pinned → 置顶或取消置顶，只影响上游站点页排列顺序。
+	if id, ok := pathID(r.URL.Path, "/api/upstream-sites/", "/pinned"); ok && r.Method == http.MethodPatch {
+		h.updatePinned(w, r, userID, id)
+		return
+	}
 
 	id, ok := pathID(r.URL.Path, "/api/upstream-sites/", "")
 	if !ok {
@@ -204,6 +209,20 @@ func (h *Handler) updateEnabled(w http.ResponseWriter, r *http.Request, userID, 
 		return
 	}
 	response, err := h.service.UpdateEnabled(r.Context(), userID, siteID, dto.Enabled)
+	if err != nil {
+		writeUpstreamError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, response)
+}
+
+func (h *Handler) updatePinned(w http.ResponseWriter, r *http.Request, userID, siteID string) {
+	var dto UpdatePinnedRequest
+	if err := httpjson.Decode(r, &dto); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	response, err := h.service.UpdatePinned(r.Context(), userID, siteID, dto.Pinned)
 	if err != nil {
 		writeUpstreamError(w, err)
 		return

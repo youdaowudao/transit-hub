@@ -91,10 +91,11 @@ export const listUpstreamSites = async (siteId?: string, signal?: AbortSignal): 
   return sites
 }
 
-export const createUpstreamSite = async (form: UpstreamSiteForm): Promise<UpstreamSiteResponse> => (
+// 只有新增时开启置顶才带 pinned；未开启时请求体与原来一致。
+export const createUpstreamSite = async (form: UpstreamSiteForm, pinned?: boolean): Promise<UpstreamSiteResponse> => (
   requestJson<UpstreamSiteResponse>('/upstream-sites', {
     method: 'POST',
-    body: JSON.stringify(form),
+    body: JSON.stringify(pinned ? { ...form, pinned: true } : form),
   })
 )
 
@@ -109,6 +110,13 @@ export const updateUpstreamSiteEnabled = async (id: string, enabled: boolean): P
   requestJson<UpstreamSiteResponse>(`/upstream-sites/${id}/enabled`, {
     method: 'PATCH',
     body: JSON.stringify({ enabled }),
+  })
+)
+
+export const updateUpstreamSitePinned = async (id: string, pinned: boolean): Promise<UpstreamSiteResponse> => (
+  requestJson<UpstreamSiteResponse>(`/upstream-sites/${id}/pinned`, {
+    method: 'PATCH',
+    body: JSON.stringify({ pinned }),
   })
 )
 

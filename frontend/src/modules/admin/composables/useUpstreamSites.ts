@@ -11,6 +11,7 @@ import {
   syncAllUpstreamSites,
   syncUpstreamSite,
   updateUpstreamSiteEnabled,
+  updateUpstreamSitePinned,
   updateUpstreamSite,
   updateSiteSettings,
 } from '../api/upstream'
@@ -87,6 +88,8 @@ export const useUpstreamSites = () => {
   const clearAddFailure = () => { addErrorKey.value = null; addFailure.value = null }
   const enabledUpdatingIds = ref(new Set<string>())
   const enabledErrorKeys = ref(new Map<string, string>())
+  const pinnedUpdatingIds = ref(new Set<string>())
+  const pinnedErrorKeys = ref(new Map<string, string>())
   const siteSyncStates = ref(new Map<string, SiteSyncState>())
   const syncingSiteIds = ref(new Set<string>())
   const siteOperationVersions = ref(new Map<string, number>())
@@ -136,7 +139,8 @@ export const useUpstreamSites = () => {
     const index = sites.value.findIndex(site => site.id === remote.id)
     if (index < 0 || removedIds.has(remote.id)) return
     const current = sites.value[index]!
-    const next = normalizeSite(remote, current.logoBg)
+    // 同步不会改置顶；逐站结果保留本地置顶，避免较早的同步结果覆盖刚保存的置顶。
+    const next = normalizeSite({ ...remote, pinned: current.pinned }, current.logoBg)
     if (preserveWarning && remote.groupRatesWarning === undefined) next.groupRatesWarning = current.groupRatesWarning
     sites.value[index] = next
   }
@@ -181,12 +185,12 @@ export const useUpstreamSites = () => {
     return true
   }
 
-  const addSite = async (form: UpstreamSiteForm): Promise<boolean> => {
+  const addSite = async (form: UpstreamSiteForm, pinned = false): Promise<boolean> => {
     const token = { epoch, workspace: workspaceId.value }
     isAdding.value = true
     clearAddFailure()
     try {
-      const site = await createUpstreamSite(form)
+      const site = await (pinned ? createUpstreamSite(form, true) : createUpstreamSite(form))
       if (!sameWorkspace(token)) return false
       removedIds.delete(site.id)
       invalidateRead(site.id)
@@ -286,7 +290,7 @@ export const useUpstreamSites = () => {
         const current = sites.value.find(site => site.id === remote.id)
         if ((token && isCurrent(token)) || (!token && !siteOperationVersions.value.has(remote.id))) {
           invalidateRead(remote.id)
-          result.push(normalizeSite(remote, current?.logoBg ?? logoClasses[index % logoClasses.length]!))
+          result.push(normalizeSite(current ? { ...remote, pinned: current.pinned } : remote, current?.logoBg ?? logoClasses[index % logoClasses.length]!))
         } else if (current) result.push(current)
       }
       const ids = new Set(result.map(site => site.id))
@@ -401,6 +405,28 @@ export const useUpstreamSites = () => {
     }
   }
 
+  // 置顶只改本地排列顺序：不占用同步/读取版本（进行中的同步结果照常显示）、
+  // 不发站点管理通知，失败时保持原状态。
+  const setSitePinned = async (id: string, pinned: boolean) => {
+    if (pinnedUpdatingIds.value.has(id)) return
+    const site = sites.value.find(item => item.id === id)
+    if (!site || (site.pinned === true) === pinned) return
+    const token = { epoch, workspace: workspaceId.value }
+    pinnedUpdatingIds.value = new Set([...pinnedUpdatingIds.value, id])
+    pinnedErrorKeys.value.delete(id)
+    try {
+      const nextSite = await updateUpstreamSitePinned(id, pinned)
+      if (!sameWorkspace(token)) return
+      const current = sites.value.find(item => item.id === id)
+      if (!current || removedIds.has(id)) return
+      current.pinned = nextSite.pinned === true
+    } catch (error) {
+      if (sameWorkspace(token) && sites.value.some(item => item.id === id)) pinnedErrorKeys.value.set(id, error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined)?.errorDetail ?? safeUpstreamErrorKey(error) : safeUpstreamErrorKey(error))
+    } finally {
+      if (sameWorkspace(token)) { const next = new Set(pinnedUpdatingIds.value); next.delete(id); pinnedUpdatingIds.value = next }
+    }
+  }
+
   watch(workspaceId, () => {
     epoch++
     streamController?.abort()
@@ -411,6 +437,7 @@ export const useUpstreamSites = () => {
     siteOperationVersions.value = new Map(); pendingSiteOperations.value = new Set()
     siteSyncStates.value = new Map(); syncingSiteIds.value = new Set()
     enabledUpdatingIds.value = new Set(); enabledErrorKeys.value = new Map()
+    pinnedUpdatingIds.value = new Set(); pinnedErrorKeys.value = new Map()
     isAdding.value = false; isRefreshing.value = false; clearAddFailure()
     void loadSites()
   }, { flush: 'sync' })
@@ -424,9 +451,9 @@ export const useUpstreamSites = () => {
   })
   return {
     sites, workspaceId, isAdding, isRefreshing, addErrorKey, addFailure, clearAddFailure,
-    connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, siteSyncStates,
+    connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, pinnedUpdatingIds, pinnedErrorKeys, siteSyncStates,
     syncingSiteIds, siteOperationVersions, pendingSiteOperations, readSiteSnapshot,
     addSite, updateSite, saveSiteSettings, syncSite, refreshSingleSite, refreshSites,
-    streamRefreshSites, deleteSite, setSiteEnabled, loadSites,
+    streamRefreshSites, deleteSite, setSiteEnabled, setSitePinned, loadSites,
   }
 }

@@ -547,6 +547,7 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 		Remark:            strings.TrimSpace(dto.Remark),
 		RechargeRate:      dto.RechargeRate,
 		Enabled:           boolPointer(true),
+		Pinned:            dto.Pinned,
 		Status:            StatusConnecting,
 		ErrorKey:          nil,
 		Metrics:           defaultMetrics(),
@@ -1763,7 +1764,15 @@ func (s *Service) UpdateSettings(ctx context.Context, userID, siteID string, dto
 func (s *Service) UpdateEnabled(ctx context.Context, userID, siteID string, enabled bool) (Response, error) {
 	return s.updateLocalSiteFields(ctx, userID, siteID, func(site *Site) { site.Enabled = boolPointer(enabled) })
 }
+
+// UpdatePinned 只保存置顶，不重新安排该站点的自动刷新计时。
+func (s *Service) UpdatePinned(ctx context.Context, userID, siteID string, pinned bool) (Response, error) {
+	return s.saveLocalSiteFields(ctx, userID, siteID, false, func(site *Site) { site.Pinned = pinned })
+}
 func (s *Service) updateLocalSiteFields(ctx context.Context, userID, siteID string, change func(*Site)) (Response, error) {
+	return s.saveLocalSiteFields(ctx, userID, siteID, true, change)
+}
+func (s *Service) saveLocalSiteFields(ctx context.Context, userID, siteID string, reschedule bool, change func(*Site)) (Response, error) {
 	aid, err := s.requireCurrentAdminAccountID(ctx, userID)
 	if err != nil {
 		return Response{}, err
@@ -1782,7 +1791,7 @@ func (s *Service) updateLocalSiteFields(ctx context.Context, userID, siteID stri
 	candidate := cloneSite(current)
 	change(&candidate)
 	err = s.publishExistingSiteLocked(expected, candidate, false, nil, nil)
-	if err == nil {
+	if err == nil && reschedule {
 		s.scheduleSyncLocked(siteID, &candidate)
 		if !candidate.IsEnabled() {
 			s.cancelGroupCostWork(costWorkKey(&candidate))
@@ -1822,6 +1831,7 @@ func toResponseForDate(site *Site, date string) Response {
 		Remark:            site.Remark,
 		RechargeRate:      site.RechargeRate,
 		Enabled:           boolPointer(site.IsEnabled()),
+		Pinned:            site.Pinned,
 		Status:            site.Status,
 		ErrorKey:          site.ErrorKey,
 		Metrics:           maskUnverifiedTodayCost(site.Metrics, date),

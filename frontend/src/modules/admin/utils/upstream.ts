@@ -25,6 +25,9 @@ export function sortUpstreamSites(
   return [...sites].sort((first, second) => {
     if (first.enabled !== second.enabled) return first.enabled ? -1 : 1
     if (!first.enabled) return compareSitesByName(first, second)
+    // 启用站点中置顶的排最前；两组内部仍按当前排序字段和方向。
+    const firstPinned = first.pinned === true
+    if (firstPinned !== (second.pinned === true)) return firstPinned ? -1 : 1
 
     const firstValue = metricAmountValue(first, field)
     const secondValue = metricAmountValue(second, field)

@@ -120,6 +120,8 @@ export interface UpstreamSite {
   account: string
   rechargeRate: number
   enabled: boolean
+  /** 置顶只影响上游站点页排列顺序；旧数据没有此字段时视为未置顶。 */
+  pinned?: boolean
   remark: string
   logo: string
   logoBg: string

@@ -186,6 +186,8 @@ type CreateRequest struct {
 	UserID       string   `json:"userId"`
 	Remark       string   `json:"remark"`
 	RechargeRate float64  `json:"rechargeRate"`
+	// Pinned 只在新增时可选提交；修改站点资料不带此字段，置顶走 /pinned。
+	Pinned bool `json:"pinned"`
 }
 
 type UpdateRequest struct {
@@ -208,6 +210,11 @@ type UpdateEnabledRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
+// UpdatePinnedRequest 只改变上游站点页的排列顺序，不影响刷新、统计或主站。
+type UpdatePinnedRequest struct {
+	Pinned bool `json:"pinned"`
+}
+
 // SiteSettings 站点级预警覆盖配置。nil 表示使用全局默认值。
 type SiteSettings struct {
 	BalanceThreshold *float64 `json:"balanceThreshold"`
@@ -225,6 +232,7 @@ type Site struct {
 	Remark            string       `json:"remark"`
 	RechargeRate      float64      `json:"rechargeRate"`
 	Enabled           *bool        `json:"enabled"`
+	Pinned            bool         `json:"pinned"`
 	Status            Status       `json:"status"`
 	ErrorKey          *string      `json:"errorKey"`
 	Metrics           Metrics      `json:"metrics"`
@@ -247,6 +255,7 @@ type Response struct {
 	Remark            string             `json:"remark"`
 	RechargeRate      float64            `json:"rechargeRate"`
 	Enabled           *bool              `json:"enabled"`
+	Pinned            bool               `json:"pinned"`
 	Status            Status             `json:"status"`
 	ErrorKey          *string            `json:"errorKey"`
 	Metrics           Metrics            `json:"metrics"`

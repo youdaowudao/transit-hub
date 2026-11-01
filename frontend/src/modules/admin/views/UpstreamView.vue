@@ -20,7 +20,7 @@ import { t, locale } from '@/locales'
 const router = useRouter()
 const searchQuery = ref('')
 const isAddModalOpen = ref(false)
-const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, addFailure, clearAddFailure, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, streamRefreshSites, refreshSingleSite, workspaceId, readSiteSnapshot, pendingSiteOperations, saveSiteSettings } = useUpstreamSites()
+const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, addFailure, clearAddFailure, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, pinnedUpdatingIds, pinnedErrorKeys, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, setSitePinned, streamRefreshSites, refreshSingleSite, workspaceId, readSiteSnapshot, pendingSiteOperations, saveSiteSettings } = useUpstreamSites()
 const deletingSiteId = ref<string | null>(null)
 const deleteErrorKey = ref<string | null>(null)
 const deleteFailure = ref<UpstreamFailure | null>(null)
@@ -109,6 +109,8 @@ const createEmptyForm = (): UpstreamSiteForm => ({
 })
 
 const newSiteForm = ref<UpstreamSiteForm>(createEmptyForm())
+// 新增站点时的置顶选择：只在“确认新增”成功时随新增保存。
+const newSitePinned = ref(false)
 const editingAuthMode = ref<UpstreamSiteForm['authMode']>('password')
 const credentialsRequired = computed(() => !editingSiteId.value || newSiteForm.value.authMode !== editingAuthMode.value)
 const editingBaseURL = ref('')
@@ -155,10 +157,11 @@ const handleAddSite = async () => {
       ...newSiteForm.value,
       ...(domainMigrationRequired.value ? { confirmDomainMigration: domainMigrationConfirmed.value } : {}),
     })
-    : await addSite(newSiteForm.value)
+    : await addSite(newSiteForm.value, newSitePinned.value)
   if (!success) return
   isAddModalOpen.value = false
   newSiteForm.value = createEmptyForm()
+  newSitePinned.value = false
   editingSiteId.value = null
 }
 
@@ -193,6 +196,7 @@ const editingSite = computed(() => {
 
 const openAddSiteModal = () => {
   clearAddFailure()
+  newSitePinned.value = false
   isAddModalOpen.value = true
 }
 
@@ -207,6 +211,7 @@ const closeSiteModal = () => {
   isAddModalOpen.value = false
   editingSiteId.value = null
   newSiteForm.value = createEmptyForm()
+  newSitePinned.value = false
 }
 
 const requestDeleteSite = (id: string) => {
@@ -267,6 +272,27 @@ const statusLabel = (status: UpstreamStatus): string => t(`admin.upstream.status
 
 const toggleSiteEnabled = (site: UpstreamSite) => {
   void setSiteEnabled(site.id, !site.enabled)
+}
+
+// 修改站点时点一下立即保存；新增站点时只记录选择，随“确认新增”保存。
+const pinSwitchOn = computed(() => editingSite.value ? editingSite.value.pinned === true : newSitePinned.value)
+const pinHelpText = computed(() => {
+  if (!editingSite.value) return t('admin.upstream.pin.createHelp')
+  return t(pinSwitchOn.value ? 'admin.upstream.pin.pinnedHelp' : 'admin.upstream.pin.unpinnedHelp')
+})
+const togglePin = () => {
+  if (editingSite.value) {
+    void setSitePinned(editingSite.value.id, !pinSwitchOn.value)
+    return
+  }
+  if (!editingSiteId.value) newSitePinned.value = !newSitePinned.value
+}
+const pinFailureText = (value: string): string => {
+  let reason = value
+  if (value === 'admin.upstream.errors.siteNotFound' || value === 'auth.errors.unauthorized') reason = t(value)
+  else if (value === 'admin.upstream.errors.network') reason = t('admin.upstream.pin.networkReason')
+  else if (/^(?:admin|auth)\.[A-Za-z0-9_.]+$/.test(value)) reason = t('admin.upstream.pin.unknownReason')
+  return t('admin.upstream.pin.failed', { reason })
 }
 
 const deletingSite = computed(() => upstreamSites.value.find((site) => site.id === deletingSiteId.value) ?? null)
@@ -710,14 +736,22 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <div
-              class="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium border shrink-0"
-              :class="site.enabled ? statusClasses[site.status] : 'bg-muted text-muted-foreground border-border/60'"
-            >
-              <Loader2 v-if="site.enabled && (site.status === 'connecting' || site.status === 'syncing')" class="w-3 h-3 animate-spin" />
-              <CheckCircle2 v-else-if="site.enabled && site.status === 'connected'" class="w-3 h-3" />
-              <XCircle v-else class="w-3 h-3" />
-              {{ site.enabled ? statusLabel(site.status) : t('admin.upstream.status.disabled') }}
+            <div class="flex shrink-0 items-center gap-1.5">
+              <span
+                v-if="site.enabled && site.pinned === true"
+                data-test="site-pinned-label"
+                class="text-[11px] text-muted-foreground"
+                :title="t('admin.upstream.pin.badgeTitle')"
+              >{{ t('admin.upstream.pin.badge') }}</span>
+              <div
+                class="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium border shrink-0"
+                :class="site.enabled ? statusClasses[site.status] : 'bg-muted text-muted-foreground border-border/60'"
+              >
+                <Loader2 v-if="site.enabled && (site.status === 'connecting' || site.status === 'syncing')" class="w-3 h-3 animate-spin" />
+                <CheckCircle2 v-else-if="site.enabled && site.status === 'connected'" class="w-3 h-3" />
+                <XCircle v-else class="w-3 h-3" />
+                {{ site.enabled ? statusLabel(site.status) : t('admin.upstream.status.disabled') }}
+              </div>
             </div>
           </div>
         </div>
@@ -877,6 +911,12 @@ onBeforeUnmount(() => {
                 </span>
               </td>
               <td class="px-6 py-4">
+                <span
+                  v-if="site.enabled && site.pinned === true"
+                  data-test="site-pinned-label"
+                  class="mr-1.5 text-xs text-muted-foreground"
+                  :title="t('admin.upstream.pin.badgeTitle')"
+                >{{ t('admin.upstream.pin.badge') }}</span>
                 <div
                   v-if="site.enabled && (siteSyncStates.get(site.id)?.phase === 'syncing' || siteSyncStates.get(site.id)?.phase === 'done')"
                   class="inline-flex items-center gap-1.5 text-xs font-medium"
@@ -1198,6 +1238,31 @@ onBeforeUnmount(() => {
                 <span
                   class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200"
                   :class="editingSite.enabled ? 'translate-x-5' : 'translate-x-0'"
+                />
+              </button>
+            </div>
+
+            <div v-if="editingSite || !editingSiteId" class="mb-5 flex items-center justify-between gap-4 rounded-xl border border-border/50 bg-surface px-4 py-3">
+              <div class="min-w-0">
+                <p class="text-sm font-medium text-foreground">{{ t('admin.upstream.pin.label') }}</p>
+                <p class="mt-0.5 text-xs text-muted-foreground">{{ pinHelpText }}</p>
+                <p v-if="editingSite && pinnedErrorKeys.get(editingSite.id)" class="mt-1 text-xs text-destructive" role="alert" aria-live="polite">
+                  {{ pinFailureText(pinnedErrorKeys.get(editingSite.id) ?? 'admin.upstream.errors.unknown') }}
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="pinSwitchOn"
+                :aria-label="t('admin.upstream.pin.label')"
+                :disabled="editingSite ? pinnedUpdatingIds.has(editingSite.id) : isAdding"
+                class="relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-wait disabled:opacity-50"
+                :class="pinSwitchOn ? 'bg-primary' : 'bg-muted'"
+                @click="togglePin"
+              >
+                <span
+                  class="pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition duration-200"
+                  :class="pinSwitchOn ? 'translate-x-5' : 'translate-x-0'"
                 />
               </button>
             </div>

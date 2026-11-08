@@ -107,7 +107,10 @@ type FailureAttempt struct {
 	UpstreamMessage string   `json:"upstreamMessage,omitempty"`
 }
 
-type FieldValidationError struct{ Fields []string }
+type FieldValidationError struct {
+	Fields []string
+	Detail string // Safe local validation text; never contains submitted URLs or credentials.
+}
 
 type SiteInUseError struct{ Connections, Mappings int }
 

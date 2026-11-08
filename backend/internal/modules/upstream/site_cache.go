@@ -49,6 +49,7 @@ type sitePayload struct {
 	AdminAccountID    string       `json:"adminAccountId"`
 	Name              string       `json:"name"`
 	BaseURL           string       `json:"baseUrl"`
+	WebsiteURL        string       `json:"websiteUrl"`
 	Platform          Platform     `json:"platform"`
 	RequestedPlatform Platform     `json:"requestedPlatform"`
 	Account           string       `json:"account"`
@@ -71,6 +72,7 @@ func toPayload(site *Site) sitePayload {
 		AdminAccountID:    site.AdminAccountID,
 		Name:              site.Name,
 		BaseURL:           site.BaseURL,
+		WebsiteURL:        site.WebsiteURL,
 		Platform:          site.Platform,
 		RequestedPlatform: site.RequestedPlatform,
 		Account:           site.Account,
@@ -94,6 +96,7 @@ func fromPayload(p sitePayload) *Site {
 		AdminAccountID:    p.AdminAccountID,
 		Name:              p.Name,
 		BaseURL:           p.BaseURL,
+		WebsiteURL:        p.WebsiteURL,
 		Platform:          p.Platform,
 		RequestedPlatform: p.RequestedPlatform,
 		Account:           p.Account,

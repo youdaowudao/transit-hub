@@ -1,6 +1,34 @@
 import { t } from '@/locales'
 import type { UpstreamGroupInfo, UpstreamSite } from '../types/upstream'
 
+export interface UpstreamLink {
+  href: string
+  host: string
+  disabledReason: string
+}
+
+// Browser links only. Never use a website fallback for an API request/session.
+export const parseUpstreamLink = (value?: string): UpstreamLink => {
+  const href = value?.trim() ?? ''
+  try {
+    if (!/^https?:\/\//i.test(href) || /[\s\u0000-\u001f\u007f]/u.test(href)) throw new Error('invalid link')
+    const parsed = new URL(href)
+    if (!parsed.hostname || parsed.username || parsed.password) throw new Error('invalid link')
+    return { href, host: parsed.host, disabledReason: '' }
+  } catch {
+    return { href: '', host: '', disabledReason: '请先填写有效的 API 地址，再打开站点获取登录信息。' }
+  }
+}
+
+export const upstreamWebsiteLink = (site: { websiteUrl?: string; baseUrl?: string }): UpstreamLink => {
+  const website = site.websiteUrl?.trim() ?? ''
+  const result = parseUpstreamLink(website || site.baseUrl)
+  if (!result.disabledReason) return result
+  return { ...result, disabledReason: website
+    ? '这个站点保存的网站地址格式不对，暂时无法打开；请到上游站点编辑网站地址后重试，不会修改主站。'
+    : '这个站点保存的 API 地址为空或格式不对，暂时无法打开；请到上游站点编辑 API 地址后重试，不会修改主站。' }
+}
+
 export type UpstreamSortField = 'balance' | 'todayConsume' | 'historyRecharge'
 export type UpstreamSortDirection = 'asc' | 'desc'
 

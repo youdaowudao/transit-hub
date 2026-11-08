@@ -131,7 +131,7 @@ describe('upstream failure fix stage A', () => {
   const view = await openAdd()
   await view.get('[role="dialog"] form').trigger('submit'); await flushPromises()
   const alert = view.get('[role="dialog"] [role="alert"]')
-  expect(alert.text()).toContain('站点 URL')
+  expect(alert.text()).toContain('API 地址')
   expect(alert.text()).toContain('用户 ID')
   expect(alert.text()).not.toContain('上游接口请求失败')
  })

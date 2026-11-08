@@ -2339,8 +2339,15 @@ export default {
         form: {
           siteName: '站点名称',
           siteNamePlaceholder: '输入站点名称',
-          siteUrl: '站点 URL',
+          siteUrl: 'API 地址',
           siteUrlPlaceholder: '输入完整的站点地址，如 https://api.example.com',
+          apiUrlHelp: '系统用这个地址接入、刷新登录和同步数据；只填写网站地址不会更改这里，也不会修改主站。',
+          websiteUrl: '网站地址（选填）',
+          websiteUrlHelp: '点击站点名称或‘打开上游网站’时打开这里；留空沿用 API 地址。只改这里不用重新填写登录信息，不会修改主站。',
+          websiteLinkHelp: '点击站点名称打开网站；未填网站地址时打开 API 站点，不会修改主站。',
+          openApiSite: '打开 API 站点',
+          openApiHelp: '在新标签页打开上面填写的 API 站点，可到该站登录并获取 Refresh Token；点击只打开网页，不保存地址，也不会修改主站。',
+          openApiDisabled: '请先填写有效的 API 地址，再打开站点获取登录信息。',
           platform: '选择平台',
           platforms: {
             auto: '自动识别',

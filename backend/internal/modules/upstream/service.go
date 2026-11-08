@@ -520,6 +520,10 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 	if err := validateCreate(dto); err != nil {
 		return Response{}, err
 	}
+	websiteURL, err := normalizeWebsiteURL(dto.WebsiteURL)
+	if err != nil {
+		return Response{}, err
+	}
 	// 创建站点必须归属于当前工作区。
 	adminAccountID, err := s.requireCurrentAdminAccountID(ctx, userID)
 	if err != nil {
@@ -541,6 +545,7 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 		AdminAccountID:    adminAccountID,
 		Name:              strings.TrimSpace(dto.Name),
 		BaseURL:           strings.TrimSpace(dto.SiteURL),
+		WebsiteURL:        websiteURL,
 		Platform:          platform,
 		RequestedPlatform: requestedPlatform,
 		Account:           account,
@@ -635,6 +640,14 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateRequest) (Response, error) {
 	if err := validateUpdate(dto); err != nil {
 		return Response{}, err
+	}
+	websiteURL := ""
+	if dto.WebsiteURL != nil {
+		normalized, err := normalizeWebsiteURL(*dto.WebsiteURL)
+		if err != nil {
+			return Response{}, err
+		}
+		websiteURL = normalized
 	}
 	site, err := s.readCurrentSite(ctx, id)
 	if err != nil {
@@ -796,6 +809,9 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	}
 	expected := cloneSite(current)
 	candidate := cloneSite(current)
+	if dto.WebsiteURL != nil {
+		candidate.WebsiteURL = websiteURL
+	}
 	candidate.Name = strings.TrimSpace(dto.Name)
 	candidate.Remark = strings.TrimSpace(dto.Remark)
 	candidate.RechargeRate = dto.RechargeRate
@@ -1824,6 +1840,7 @@ func toResponseForDate(site *Site, date string) Response {
 		UserID:            site.UserID,
 		Name:              site.Name,
 		BaseURL:           site.BaseURL,
+		WebsiteURL:        site.WebsiteURL,
 		Platform:          site.Platform,
 		RequestedPlatform: site.RequestedPlatform,
 		AuthMode:          siteAuthMode(site),

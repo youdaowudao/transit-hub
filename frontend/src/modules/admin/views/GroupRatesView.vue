@@ -8,7 +8,7 @@ import { listUpstreamSiteOptions } from '../api/upstream'
 import { getUpstreamKeyUsageToday, getUpstreamKeyRecordedTotals, type UpstreamKeyUsageTodayResponse, type UpstreamKeyRecordedTotalsResponse } from '../api/dashboardAdmin'
 import type { UpstreamSiteOption } from '../types/upstream'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
-import { costFailureText } from '../utils/upstream'
+import { costFailureText, upstreamWebsiteLink } from '../utils/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
@@ -779,13 +779,7 @@ const siteMenuWebsite = computed(() => {
   const site = upstreamSiteOptions.value.find(site => site.id === siteMenuRate.value?.siteId)
   const unavailable = (disabledReason: string) => ({ href: '', host: '', disabledReason })
   if (!site) return unavailable(siteOptionsError.value || '网站资料里没有这个网站，可能还在读取，或已在上游管理删除。请稍后点‘刷新数据’；仍没有时到上游管理检查。')
-  try {
-    const parsed = new URL(site.baseUrl ?? '')
-    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error('invalid website URL')
-    return { href: site.baseUrl!, host: parsed.host, disabledReason: '' }
-  } catch {
-    return unavailable('上游管理里这个网站的网址为空或格式不对（只支持 http/https 开头的网址），无法打开；请到上游管理修改网址。')
-  }
+  return upstreamWebsiteLink(site)
 })
 const goToHealthGroup = (item: SiteMenuHealthItem) => {
   if (item.disabledReason) return
@@ -1990,7 +1984,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         <span class="block">打开上游网站</span><span class="mt-1 block text-xs leading-5">{{ siteMenuWebsite.disabledReason }}</span>
       </div>
       <a v-else role="menuitem" :href="siteMenuWebsite.href" target="_blank" rel="noopener noreferrer" class="block px-3 py-2.5 text-sm text-muted-foreground hover:bg-surface-line hover:text-foreground" @click="closeSiteMenu()">
-        <span class="block">打开上游网站</span><span class="mt-1 block text-xs leading-5">在新标签页打开 {{ siteMenuWebsite.host }}</span>
+        <span class="block">打开上游网站</span><span class="mt-1 block text-xs leading-5">在新标签页打开 {{ siteMenuWebsite.host }}；只打开网页，不会修改主站。</span>
       </a>
     </div>
   </Teleport>

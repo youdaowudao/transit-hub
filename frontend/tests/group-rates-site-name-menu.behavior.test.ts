@@ -116,6 +116,22 @@ describe('new site menu RED', () => {
   expect(link.getAttribute('target')).toBe('_blank'); expect(link.getAttribute('rel')).toBe('noopener noreferrer')
   link.addEventListener('click', e => e.preventDefault()); await pick('打开上游网站'); expect(menu()).toBeNull(); expect(h.calls).toHaveLength(n)
  })
+ it('opens a distinct website without changing the API option or sending requests', async () => {
+  h.siteOptions[0].websiteUrl='https://website.example.test:9443/account/?tab=keys#token'
+  const w=await open();const n=h.calls.length;await openMenu(w)
+  expect(item('打开上游网站').getAttribute('href')).toBe(h.siteOptions[0].websiteUrl)
+  expect(item('打开上游网站').textContent).toContain('website.example.test:9443')
+  expect(item('打开上游网站').textContent).toContain('只打开网页，不会修改主站。')
+  expect(h.siteOptions[0].baseUrl).toBe('https://up.example.test:8443/path')
+  expect(h.calls).toHaveLength(n)
+ })
+ it.each(['javascript:alert(1)','https://user:password@website.example.test','https://website.example.test:65536','https://[not-an-ip]/','https://256.1.2.3/'])('does not fall back to API for unsafe website %s',async websiteUrl=>{
+  h.siteOptions[0].websiteUrl=websiteUrl
+  const w=await open();await openMenu(w)
+  expect(item('打开上游网站').getAttribute('aria-disabled')).toBe('true')
+  expect(item('打开上游网站').hasAttribute('href')).toBe(false)
+  expect(item('打开上游网站').textContent).toContain('这个站点保存的网站地址格式不对，暂时无法打开')
+ })
  it.each([
   ['H1','对接资料还没读到，请点‘刷新数据’后再试。'],
   ['H2','对接的主站账号已不存在，分组健康里看不到它；可点右侧‘清理本地失效对接’。'],
@@ -138,7 +154,7 @@ describe('new site menu RED', () => {
   else if(kind==='W2')h.siteOptions=[]
   else h.siteOptions[0].baseUrl=kind==='empty'?'':kind==='script'?'javascript:alert(1)':'https://u:p@up.example.test'
   const w=await open();await openMenu(w);const e=item('打开上游网站');expect(e.getAttribute('aria-disabled')).toBe('true');expect(e.hasAttribute('href')).toBe(false)
-  const reason=kind==='W1'?w.findAll('[role="alert"]').find(a=>a.text().startsWith('网站选项暂时无法加载'))!.text():kind==='W2'?'网站资料里没有这个网站，可能还在读取，或已在上游管理删除。请稍后点‘刷新数据’；仍没有时到上游管理检查。':'上游管理里这个网站的网址为空或格式不对（只支持 http/https 开头的网址），无法打开；请到上游管理修改网址。'
+  const reason=kind==='W1'?w.findAll('[role="alert"]').find(a=>a.text().startsWith('网站选项暂时无法加载'))!.text():kind==='W2'?'网站资料里没有这个网站，可能还在读取，或已在上游管理删除。请稍后点‘刷新数据’；仍没有时到上游管理检查。':'这个站点保存的 API 地址为空或格式不对，暂时无法打开；请到上游站点编辑 API 地址后重试，不会修改主站。'
   expect(e.textContent).toContain(reason);expect(document.body.innerHTML).not.toContain('href="javascript:');expect(menu().textContent).not.toContain('u:p')
  })
  it('F6 retains the last successful URL after an options refresh failure',async()=>{

@@ -20,6 +20,7 @@ type SiteOption struct {
 	ID          string          `json:"id"`
 	Name        string          `json:"name"`
 	BaseURL     string          `json:"baseUrl"`
+	WebsiteURL  string          `json:"websiteUrl"`
 	Consumption SiteConsumption `json:"consumption"`
 }
 type SiteOptionsResponse struct {
@@ -46,7 +47,7 @@ func (s *Service) ListOptions(ctx context.Context, userID, workspaceID string) (
 	result := SiteOptionsResponse{WorkspaceAdminAccountID: workspaceID, Items: make([]SiteOption, 0)}
 	for _, site := range sites {
 		if site != nil && site.UserID == userID && site.AdminAccountID == workspaceID {
-			result.Items = append(result.Items, SiteOption{ID: site.ID, Name: site.Name, BaseURL: optionBaseURL(site.BaseURL), Consumption: SiteConsumption{
+			result.Items = append(result.Items, SiteOption{ID: site.ID, Name: site.Name, BaseURL: optionBaseURL(site.BaseURL), WebsiteURL: site.WebsiteURL, Consumption: SiteConsumption{
 				Balance: metric(site.Metrics.Balance.Value), RechargeRate: site.RechargeRate,
 			}})
 		}

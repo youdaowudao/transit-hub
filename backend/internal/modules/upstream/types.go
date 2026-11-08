@@ -176,6 +176,7 @@ type CostFetchMeta struct {
 type CreateRequest struct {
 	Name         string   `json:"name"`
 	SiteURL      string   `json:"siteUrl"`
+	WebsiteURL   string   `json:"websiteUrl"`
 	Platform     Platform `json:"platform"`
 	AuthMode     AuthMode `json:"authMode"`
 	Account      string   `json:"account"`
@@ -194,6 +195,7 @@ type UpdateRequest struct {
 	ConfirmDomainMigration bool     `json:"confirmDomainMigration,omitempty"`
 	Name                   string   `json:"name"`
 	SiteURL                string   `json:"siteUrl"`
+	WebsiteURL             *string  `json:"websiteUrl,omitempty"`
 	Platform               Platform `json:"platform"`
 	AuthMode               AuthMode `json:"authMode"`
 	Account                string   `json:"account"`
@@ -226,6 +228,7 @@ type Site struct {
 	AdminAccountID    string       `json:"-"`
 	Name              string       `json:"name"`
 	BaseURL           string       `json:"baseUrl"`
+	WebsiteURL        string       `json:"websiteUrl"`
 	Platform          Platform     `json:"platform"`
 	RequestedPlatform Platform     `json:"requestedPlatform"`
 	Account           string       `json:"account"`
@@ -248,6 +251,7 @@ type Response struct {
 	AdminAccountID    string             `json:"-"`
 	Name              string             `json:"name"`
 	BaseURL           string             `json:"baseUrl"`
+	WebsiteURL        string             `json:"websiteUrl"`
 	Platform          Platform           `json:"platform"`
 	RequestedPlatform Platform           `json:"requestedPlatform"`
 	AuthMode          AuthMode           `json:"authMode"`

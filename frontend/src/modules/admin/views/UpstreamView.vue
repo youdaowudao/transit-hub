@@ -14,7 +14,7 @@ import type { UpstreamFailure, UpstreamGroupInfo, UpstreamMetricValue, UpstreamS
 import type { AdminGroupHealth } from '../types/connectionHealth'
 import type { RealConnection } from '../types/mySites'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
-import { groupCostForDisplay, groupCostObservedTime, nextGroupCostDisplayBoundary, costFailureText, sortUpstreamSites, type UpstreamSortDirection, type UpstreamSortField } from '../utils/upstream'
+import { groupCostForDisplay, groupCostObservedTime, nextGroupCostDisplayBoundary, costFailureText, sortUpstreamSites, parseUpstreamLink, upstreamWebsiteLink, type UpstreamSortDirection, type UpstreamSortField } from '../utils/upstream'
 
 import { t, locale } from '@/locales'
 const router = useRouter()
@@ -93,9 +93,10 @@ const loadRefreshSettings = async () => {
   }
 }
 
-const createEmptyForm = (): UpstreamSiteForm => ({
+const createEmptyForm = (): UpstreamSiteForm & { websiteUrl: string } => ({
   name: '',
   siteUrl: '',
+  websiteUrl: '',
   platform: 'auto',
   authMode: 'token',
   account: '',
@@ -108,7 +109,7 @@ const createEmptyForm = (): UpstreamSiteForm => ({
   remark: '',
 })
 
-const newSiteForm = ref<UpstreamSiteForm>(createEmptyForm())
+const newSiteForm = ref<ReturnType<typeof createEmptyForm>>(createEmptyForm())
 // 新增站点时的置顶选择：只在“确认新增”成功时随新增保存。
 const newSitePinned = ref(false)
 const editingAuthMode = ref<UpstreamSiteForm['authMode']>('password')
@@ -124,6 +125,7 @@ const normalizedSiteURL = (value: string): string => {
   return absolute.split(/[?#]/, 1)[0]!.replace(/\/+$/, '')
 }
 const migrationTargetURL = computed(() => normalizedSiteURL(newSiteForm.value.siteUrl))
+const apiSiteLink = computed(() => parseUpstreamLink(normalizedSiteURL(newSiteForm.value.siteUrl)))
 const domainMigrationRequired = computed(() => Boolean(editingSiteId.value) && migrationTargetURL.value !== normalizedSiteURL(editingBaseURL.value))
 
 watch([() => newSiteForm.value.siteUrl, editingSiteId, isAddModalOpen], () => {
@@ -175,6 +177,7 @@ const handleEditSite = (site: UpstreamSite) => {
   newSiteForm.value = {
     name: site.name,
     siteUrl: site.baseUrl,
+    websiteUrl: site.websiteUrl ?? '',
     platform: site.platform,
     authMode: site.authMode ?? 'password',
     account: site.account,
@@ -202,7 +205,7 @@ const openAddSiteModal = () => {
 
 const failureFieldLabel = (field: string): string => {
   if (field === 'accessToken' && newSiteForm.value.authMode === 'user_key') return t('admin.upstream.modal.form.userKey')
-  const fields: Record<string, string> = { name: 'siteName', siteUrl: 'siteUrl', platform: 'platform', authMode: 'authMode', account: 'account', password: 'password', accessToken: 'accessToken', refreshToken: 'refreshToken', tokenType: 'tokenType', userId: 'userId', rechargeRate: 'rechargeRate', remark: 'remark' }
+  const fields: Record<string, string> = { name: 'siteName', siteUrl: 'siteUrl', websiteUrl: 'websiteUrl', platform: 'platform', authMode: 'authMode', account: 'account', password: 'password', accessToken: 'accessToken', refreshToken: 'refreshToken', tokenType: 'tokenType', userId: 'userId', rechargeRate: 'rechargeRate', remark: 'remark' }
   return fields[field] ? t(`admin.upstream.modal.form.${fields[field]}`) : t('admin.upstream.errors.invalidFields')
 }
 
@@ -650,6 +653,7 @@ onBeforeUnmount(() => {
         <p class="text-xs text-muted-foreground">
           {{ t('admin.upstream.summary', { connected: connectedCount, total: enabledSiteCount }) }}
         </p>
+        <p class="text-xs text-muted-foreground">{{ t('admin.upstream.modal.form.websiteLinkHelp') }}</p>
       </div>
 
       <div class="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
@@ -727,9 +731,10 @@ onBeforeUnmount(() => {
                 {{ site.logo }}
               </div>
               <div class="flex flex-col min-w-0">
-                <a :href="site.baseUrl" target="_blank" rel="noopener noreferrer" class="font-semibold text-lg text-foreground hover:text-primary transition-colors cursor-pointer truncate" :title="site.name">
+                <a v-if="!upstreamWebsiteLink(site).disabledReason" :href="upstreamWebsiteLink(site).href" target="_blank" rel="noopener noreferrer" class="font-semibold text-lg text-foreground hover:text-primary transition-colors cursor-pointer truncate" :title="site.name">
                   {{ site.name }}
                 </a>
+                <template v-else><span class="font-semibold text-lg text-foreground truncate">{{ site.name }}</span><p class="text-xs text-muted-foreground">{{ upstreamWebsiteLink(site).disabledReason }}</p></template>
                 <span class="px-2 py-0.5 mt-1 rounded-md bg-primary/10 text-primary border border-primary/20 text-[10px] font-bold uppercase tracking-wider w-fit">
                   {{ t(`admin.upstream.modal.form.platforms.${site.platform}`) }}
                 </span>
@@ -900,9 +905,10 @@ onBeforeUnmount(() => {
                   <div :class="['w-8 h-8 rounded-lg flex items-center justify-center font-bold text-sm shrink-0', site.logoBg]">
                     {{ site.logo }}
                   </div>
-                  <a :href="site.baseUrl" target="_blank" rel="noopener noreferrer" class="font-medium text-foreground hover:text-primary transition-colors truncate max-w-[150px] inline-block">
+                  <a v-if="!upstreamWebsiteLink(site).disabledReason" :href="upstreamWebsiteLink(site).href" target="_blank" rel="noopener noreferrer" class="font-medium text-foreground hover:text-primary transition-colors truncate max-w-[150px] inline-block">
                     {{ site.name }}
                   </a>
+                  <div v-else class="min-w-0"><span class="font-medium text-foreground">{{ site.name }}</span><p class="text-xs text-muted-foreground">{{ upstreamWebsiteLink(site).disabledReason }}</p></div>
                 </div>
               </td>
               <td class="px-6 py-4">
@@ -1326,6 +1332,10 @@ onBeforeUnmount(() => {
                   required
                   class="bg-surface border-border/50 focus:border-primary h-10"
                 />
+                <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.upstream.modal.form.apiUrlHelp') }}</p>
+                <a v-if="!apiSiteLink.disabledReason" :href="apiSiteLink.href" target="_blank" rel="noopener noreferrer" class="text-sm text-primary hover:underline">{{ t('admin.upstream.modal.form.openApiSite') }}</a>
+                <span v-else class="text-sm text-muted-foreground" aria-disabled="true">{{ t('admin.upstream.modal.form.openApiSite') }}</span>
+                <p class="text-xs leading-5 text-muted-foreground">{{ t(apiSiteLink.disabledReason ? 'admin.upstream.modal.form.openApiDisabled' : 'admin.upstream.modal.form.openApiHelp') }}</p>
               </div>
 
               <div v-if="domainMigrationRequired" class="space-y-3 rounded-xl border border-border/50 bg-surface p-4 text-sm sm:col-span-2">
@@ -1336,6 +1346,12 @@ onBeforeUnmount(() => {
                   <span>{{ t('admin.upstream.modal.domainMigrationConfirm') }}</span>
                 </label>
                 <p class="text-muted-foreground">{{ t('admin.upstream.modal.domainMigrationMainSiteHelp') }}</p>
+              </div>
+
+              <div class="space-y-2 sm:col-span-2">
+                <label for="upstream-site-website-url" class="text-sm font-medium text-foreground">{{ t('admin.upstream.modal.form.websiteUrl') }}</label>
+                <Input id="upstream-site-website-url" v-model="newSiteForm.websiteUrl" name="websiteUrl" type="text" inputmode="url" placeholder="https://www.example.com" :disabled="isAdding" class="bg-surface border-border/50 focus:border-primary h-10" />
+                <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.upstream.modal.form.websiteUrlHelp') }}</p>
               </div>
 
               <!-- Auth Mode -->

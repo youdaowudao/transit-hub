@@ -357,10 +357,14 @@ type formFailure struct {
 func writeUpstreamFormError(w http.ResponseWriter, err error) {
 	var fields *FieldValidationError
 	if errors.As(err, &fields) {
+		failure := formFailure{Fields: fields.Fields}
+		if fields.Detail != "" {
+			failure.Stage, failure.UpstreamMessage = "check", fields.Detail
+		}
 		httpjson.Write(w, http.StatusBadRequest, struct {
 			Message string      `json:"message"`
 			Failure formFailure `json:"failure"`
-		}{ErrorInvalidFields, formFailure{Fields: fields.Fields}})
+		}{ErrorInvalidFields, failure})
 		return
 	}
 	var detail *RequestError

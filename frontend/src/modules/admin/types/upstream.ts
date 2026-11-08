@@ -10,6 +10,7 @@ export interface UpstreamSiteForm {
   confirmDomainMigration?: boolean
   name: string
   siteUrl: string
+  websiteUrl?: string
   platform: UpstreamPlatform
   authMode: UpstreamAuthMode
   account: string
@@ -81,6 +82,7 @@ export interface UpstreamSiteOption {
   id: string
   name: string
   baseUrl?: string
+  websiteUrl?: string
   consumption?: UpstreamSiteConsumption
 }
 
@@ -114,6 +116,7 @@ export interface UpstreamSite {
   id: string
   name: string
   baseUrl: string
+  websiteUrl?: string
   platform: ResolvedUpstreamPlatform
   requestedPlatform: UpstreamPlatform
   authMode?: UpstreamAuthMode

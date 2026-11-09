@@ -471,6 +471,72 @@ func (r *MetricsRepository) ReplaceAdditionalCost(ctx context.Context, userID, a
 	return replacement, nil
 }
 
+// DeleteAdditionalCost removes every allocation of a manual source and updates
+// its existing daily projections in the same transaction as the deletion.
+func (r *MetricsRepository) DeleteAdditionalCost(ctx context.Context, userID, adminAccountID, sourceID string) error {
+	if strings.TrimSpace(sourceID) == "" {
+		return ErrAdditionalCostNotFound
+	}
+	starter, ok := r.db.(metricsTxStarter)
+	if !ok {
+		return errors.New("dashboard.additionalCost.errors.unavailable")
+	}
+	tx, err := starter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "dashboard-additional-cost|"+userID+"|"+adminAccountID+"|"+sourceID); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT type,business_date::text,batch_id,account_asset_id
+		FROM dashboard_additional_costs
+		WHERE user_id=$1 AND admin_account_id=$2 AND ((source_id=$3 AND source_id <> '') OR (id=$3 AND source_id=''))
+		ORDER BY business_date,id FOR UPDATE`, userID, adminAccountID, sourceID)
+	if err != nil {
+		return err
+	}
+	dates := make(map[string]struct{})
+	for rows.Next() {
+		var item AdditionalCostRecord
+		if err := rows.Scan(&item.Type, &item.BusinessDate, &item.BatchID, &item.AccountAssetID); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := validateEditableAdditionalCostRecord(item); err != nil {
+			rows.Close()
+			return err
+		}
+		dates[item.BusinessDate] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(dates) == 0 {
+		return ErrAdditionalCostNotFound
+	}
+	ordered := make([]string, 0, len(dates))
+	for date := range dates {
+		ordered = append(ordered, date)
+	}
+	sort.Strings(ordered)
+	for _, date := range ordered {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "dashboard-daily-cost|"+userID+"|"+adminAccountID+"|"+date); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM dashboard_additional_costs WHERE user_id=$1 AND admin_account_id=$2 AND ((source_id=$3 AND source_id <> '') OR (id=$3 AND source_id=''))`, userID, adminAccountID, sourceID); err != nil {
+		return err
+	}
+	if err := r.reprojectDailySnapshotsForDates(ctx, tx, userID, adminAccountID, ordered); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (r *MetricsRepository) insertAdditionalCosts(ctx context.Context, db metricsDB, records []AdditionalCostRecord) error {
 	if len(records) == 0 {
 		return nil

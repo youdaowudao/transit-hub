@@ -1,9 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createAccountBatch, createAccountEvent, getAdditionalCost, listAccountCostLedger, replaceAccountLink, updateAdditionalCost } from '../src/modules/admin/api/dashboardAdmin'
+import { createAccountBatch, createAccountEvent, deleteAdditionalCost, getAdditionalCost, listAccountCostLedger, replaceAccountLink, updateAdditionalCost } from '../src/modules/admin/api/dashboardAdmin'
 
 afterEach(() => vi.unstubAllGlobals())
 
 describe('account cost API', () => {
+  it('deletes a complete encoded source through DELETE and accepts an empty 204 response', async () => {
+    vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null) })
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(deleteAdditionalCost('source/1')).resolves.toBeUndefined()
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(String(url)).toContain('/dashboard/additional-costs/source%2F1')
+    expect(options.method).toBe('DELETE')
+    expect(options.body).toBeUndefined()
+  })
   it('sends idempotency keys for batch and lifecycle writes', async () => {
 	vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null) })
     const fetchMock = vi.fn()

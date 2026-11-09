@@ -50,7 +50,7 @@ type AdditionalCostRecord struct {
 	BusinessDate   string    `json:"businessDate"`
 	AmountCents    int64     `json:"amountCents"`
 	Amount         float64   `json:"amount"`
-	OriginalAmount float64   `json:"originalAmount,omitempty"`
+	OriginalAmount float64   `json:"originalAmount"`
 	Rate           float64   `json:"rate,omitempty"`
 	UsageRate      float64   `json:"usageRate,omitempty"`
 	Days           int       `json:"days,omitempty"`
@@ -112,6 +112,10 @@ type AdditionalCostRepository interface {
 
 type rechargeFeeRateHistoryRepository interface {
 	ListRechargeFeeRates(ctx context.Context, userID, adminAccountID string) ([]RechargeFeeRate, error)
+}
+
+type additionalCostDeleteRepository interface {
+	DeleteAdditionalCost(ctx context.Context, userID, adminAccountID, sourceID string) error
 }
 
 func normalizeAdditionalCostInput(input AdditionalCostInput) (AdditionalCostInput, error) {

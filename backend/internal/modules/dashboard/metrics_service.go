@@ -328,6 +328,21 @@ func (s *MetricsService) GetAdditionalCost(ctx context.Context, userID, sourceID
 	return s.additionalCosts.GetAdditionalCost(ctx, userID, adminAccountID, sourceID)
 }
 
+func (s *MetricsService) DeleteAdditionalCost(ctx context.Context, userID, sourceID string) error {
+	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(sourceID) == "" {
+		return ErrAdditionalCostNotFound
+	}
+	repository, ok := s.additionalCosts.(additionalCostDeleteRepository)
+	if !ok {
+		return errors.New("dashboard.additionalCost.errors.unavailable")
+	}
+	return repository.DeleteAdditionalCost(ctx, userID, adminAccountID, sourceID)
+}
+
 func (s *MetricsService) ListAdditionalCosts(ctx context.Context, userID, from, to string) ([]AdditionalCostRecord, error) {
 	if s.additionalCosts == nil {
 		return []AdditionalCostRecord{}, nil

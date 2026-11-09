@@ -10,6 +10,7 @@ import {
   createAdditionalCost,
   getAdditionalCost,
   updateAdditionalCost,
+  deleteAdditionalCost,
   getAccountAsset,
   getRechargeFeeRate,
   listRechargeFeeRateHistory,
@@ -67,6 +68,16 @@ const loading = ref(false)
 const saving = ref(false)
 const errorText = ref('')
 const statsNotice = ref('')
+const costNotice = ref('')
+const costReloadNeeded = ref(false)
+const legacyCostNotice = ref('')
+const todayLedgerError = ref('')
+// Reads must distinguish closing and reopening the same workspace.
+const costReadGeneration = ref(0)
+const clearCostNotice = () => {
+  costNotice.value = ''
+  costReloadNeeded.value = false
+}
 const assets = ref<AccountAsset[]>([])
 const ledger = ref<AdditionalCostRecord[]>([])
 const todayLedger = ref<AdditionalCostRecord[]>([])
@@ -110,6 +121,9 @@ type WorkspaceRequest = { workspaceId: string; generation: number }
 const currentWorkspaceRequest = (): WorkspaceRequest => ({ workspaceId: props.workspaceId, generation: workspaceGeneration.value })
 const isCurrentWorkspaceRequest = (request: WorkspaceRequest) => (
   request.workspaceId === props.workspaceId && request.generation === workspaceGeneration.value
+)
+const isCurrentCostRead = (request: WorkspaceRequest, generation: number) => (
+  isCurrentWorkspaceRequest(request) && generation === costReadGeneration.value && props.open
 )
 
 watch(() => batchForm.quantity, (quantity) => {
@@ -229,29 +243,125 @@ const ledgerGroups = computed(() => {
   return [...groups.values()]
 })
 
+const isManualCost = (record: AdditionalCostRecord) => (
+  ['promotion', 'fixed', 'adjustment'].includes(record.type) && !record.batchId && !record.accountAssetId
+)
+const knownOriginalAmount = (records: AdditionalCostRecord[]) => {
+  const value = records[0]?.originalAmount
+  if (value == null || !Number.isFinite(value) || (value === 0 && records.some(item => item.amount !== 0))) return null
+  return value
+}
+const originalAmountText = (records: AdditionalCostRecord[]) => {
+  const original = knownOriginalAmount(records)
+  return original == null ? '原始总额未记录' : formatAmount(original)
+}
+const expectedAmount = (records: AdditionalCostRecord[]) => {
+  const original = knownOriginalAmount(records)
+  if (original == null) return null
+  if (records[0]?.type !== 'promotion') return original
+  const rate = records[0]?.usageRate
+  if (rate == null && records.some(item => item.amount !== 0)) return null
+  return Math.round(original * (rate ?? 0) * 100) / 100
+}
+const costErrorReason = (error: unknown) => {
+  const message = error instanceof Error ? error.message : ''
+  const known: Record<string, string> = {
+    'dashboard.additionalCost.errors.invalidType': '费用类型不支持，请选择固定费用、活动赠送或手工调整',
+    'dashboard.additionalCost.errors.invalidAmount': '金额无效，请填写有效金额；固定费用和赠送金额不能为负数',
+    'dashboard.additionalCost.errors.invalidDate': '日期无效，请重新选择费用日期',
+    'dashboard.additionalCost.errors.invalidDays': '固定费用金额不能为负数，分摊天数必须为大于零的整数，请核对后保存',
+    'dashboard.additionalCost.errors.invalidRate': '使用率或费率必须在0至100%之间，活动分摊天数必须大于零，请核对后保存',
+    'dashboard.additionalCost.errors.notFound': '这笔费用已不存在或不属于当前工作区，请重新加载费用确认',
+    'dashboard.additionalCost.errors.protected': '这条记录由买号、退款或系统统计生成，请到对应功能处理',
+    'dashboard.additionalCost.errors.unavailable': '费用存储暂时无法使用，请检查后端存储连接后重新加载费用',
+    'admin.dashboard.adminAuth.errors.network': '无法连接本站后端，请检查网络及后端服务',
+    'auth.errors.unauthorized': '本站登录已失效，请重新登录后到成本账本核查结果',
+    'admin.dashboard.adminAuth.errors.request': '后端没有返回具体原因，请查看后端日志核查本次费用操作',
+  }
+  if (known[message]) return known[message]
+  if (!message || /^(?:admin|dashboard|auth)\.[\w.]+$/.test(message) || /(?:SQLSTATE|SELECT\s|INSERT\s|UPDATE\s|DELETE\s|postgres(?:ql)?:\/\/)/i.test(message)) return '后端未返回可确认的具体原因，请查看后端日志核查本次费用操作'
+  return message
+    .replace(/(?:Bearer\s+)[^\s,;]+/gi, 'Bearer [已隐藏]')
+    .replace(/((?:password|passwd|secret|token|api[_-]?key|authorization|cookie)[\s"':=]+)[^\s,;]+/gi, '$1[已隐藏]')
+    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1[已隐藏]@')
+    .replace(/[A-Za-z0-9_-]{40,}(?:\.[A-Za-z0-9_-]+)*/g, '[已隐藏]')
+    .slice(0, 500)
+}
+const costFailureText = (error: unknown, step: '读取' | '保存' | '删除' | '保存费率') => {
+  const reason = costErrorReason(error)
+  if (step === '读取') return `费用读取失败：${reason}。请重新加载费用后再操作；不会修改主站。`
+  if (error instanceof Error && /^dashboard\.additionalCost\.errors\.(?:invalidType|invalidAmount|invalidDate|invalidDays|invalidRate|notFound|protected)$/.test(error.message)) {
+    return `费用${step === '保存费率' ? '费率保存' : step}未执行：${reason}。原记录未改变，请按原因核对后重试；不会修改主站。`
+  }
+  return `费用${step === '保存费率' ? '费率保存' : step}未能确认：${reason}。暂时无法确认费用是否${step === '删除' ? '删除' : '保存'}，请先到成本账本核查，再决定是否重试；不会修改主站。`
+}
 const beginCostEdit = async (group: { records: AdditionalCostRecord[] }) => {
   const first = group.records[0]
-  if (!first || !['promotion', 'fixed', 'adjustment'].includes(first.type)) return
+  if (saving.value || !first || !isManualCost(first)) return
   const sourceId = first.sourceId || first.id
   const request = currentWorkspaceRequest()
+  const generation = ++costReadGeneration.value
+  loading.value = false
+  saving.value = true
   errorText.value = ''
+  costNotice.value = ''
+  costReloadNeeded.value = false
+  legacyCostNotice.value = ''
   try {
     const result = await getAdditionalCost(sourceId)
-    if (!isCurrentWorkspaceRequest(request)) return
+    if (!isCurrentCostRead(request, generation)) return
     const records = result.items.slice().sort((left, right) => left.businessDate.localeCompare(right.businessDate))
     const source = records[0]
-    if (!source) return
+    if (!source || records.some(item => !isManualCost(item))) throw new Error('这笔费用没有可编辑的完整记录，请重新加载费用确认')
     editingCost.value = { sourceId, type: source.type as 'promotion' | 'fixed' | 'adjustment' }
     costForm.type = editingCost.value.type
     costForm.name = source.name
-    costForm.amount = String(source.originalAmount ?? source.amount)
+    const original = knownOriginalAmount(records)
+    costForm.amount = original == null ? '' : String(original)
+    if (original == null) legacyCostNotice.value = '这笔旧费用未记录原始总额，请重新填写总额并核对日期、天数和使用率后保存；不会修改主站。'
     costForm.businessDate = source.businessDate
-    costForm.usageRate = String((source.usageRate ?? 0) * 100)
-    costForm.days = String(source.days ?? records.length)
+    costForm.usageRate = source.usageRate == null && records.some(item => item.amount !== 0) && source.type === 'promotion' ? '' : String((source.usageRate ?? 0) * 100)
+    costForm.days = String(source.days && source.days > 0 ? source.days : records.length)
     costForm.note = source.note || ''
     activeTab.value = 'today'
   } catch (error) {
-    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '成本读取失败'
+    if (isCurrentCostRead(request, generation)) errorText.value = costFailureText(error, '读取')
+  } finally {
+    if (isCurrentWorkspaceRequest(request)) saving.value = false
+  }
+}
+const removeCost = async (group: { records: AdditionalCostRecord[] }) => {
+  const first = group.records[0]
+  if (saving.value || !first || !isManualCost(first)) return
+  const sourceId = first.sourceId || first.id
+  const request = currentWorkspaceRequest()
+  const generation = ++costReadGeneration.value
+  loading.value = false
+  saving.value = true
+  errorText.value = ''
+  costNotice.value = ''
+  costReloadNeeded.value = false
+  let step: '读取' | '删除' = '读取'
+  try {
+    const result = await getAdditionalCost(sourceId)
+    if (!isCurrentCostRead(request, generation)) return
+    const records = result.items.slice().sort((left, right) => left.businessDate.localeCompare(right.businessDate))
+    const source = records[0]
+    if (!source || records.some(item => !isManualCost(item))) throw new Error('这笔费用没有可删除的完整记录，请重新加载费用确认')
+    const total = records.reduce((sum, record) => sum + record.amountCents, 0) / 100
+    const original = knownOriginalAmount(records)
+    const originalText = original == null ? '未记录' : formatAmount(original)
+    if (!window.confirm(`删除整笔费用「${source.name}」？输入金额 ${originalText}，计入总额 ${formatAmount(total)}，覆盖 ${source.businessDate} 至 ${records[records.length - 1]!.businessDate}，共 ${records.length} 条分摊。删除后将重算这些日期的成本和利润；不会修改主站。确定后删除，取消则保留原记录。`)) return
+    step = '删除'
+    await deleteAdditionalCost(sourceId)
+    if (!isCurrentWorkspaceRequest(request)) return
+    if (editingCost.value?.sourceId === sourceId) cancelCostEdit()
+    emit('updated')
+    await refreshAfterCostWrite('费用已删除，相关日期的成本和利润已重新计算；不会修改主站。', request)
+  } catch (error) {
+    if (isCurrentWorkspaceRequest(request) && (step === '删除' || isCurrentCostRead(request, generation))) errorText.value = costFailureText(error, step)
+  } finally {
+    if (isCurrentWorkspaceRequest(request)) saving.value = false
   }
 }
 
@@ -264,6 +374,7 @@ const cancelCostEdit = () => {
   costForm.usageRate = '80'
   costForm.days = '30'
   costForm.note = ''
+  legacyCostNotice.value = ''
 }
 
 const resetWorkspaceData = () => {
@@ -301,10 +412,13 @@ const resetWorkspaceData = () => {
 const filterStorageKey = computed(() => `transithub.account-assets.filters.v1:${props.workspaceId || 'unknown'}`)
 watch(() => props.workspaceId, () => {
 	workspaceGeneration.value += 1
+  costReadGeneration.value += 1
 	Object.assign(assetFilters, { platform: '', channel: '', accountType: '', status: '', search: '' })
 	resetWorkspaceData()
 	errorText.value = ''
   statsNotice.value = ''
+  costNotice.value = ''
+  costReloadNeeded.value = false
   try {
     const saved = localStorage.getItem(filterStorageKey.value)
     if (saved) Object.assign(assetFilters, JSON.parse(saved))
@@ -338,96 +452,171 @@ const loadAssets = async (request = currentWorkspaceRequest()) => {
 	connections.value = availableConnections
 }
 
-const loadLedger = async (request = currentWorkspaceRequest()) => {
-  const result = await listAccountCostLedger({ ...ledgerFilters, page: ledgerPage.value, pageSize: 100 })
-	if (!isCurrentWorkspaceRequest(request)) return
-  ledger.value = result.items
-  ledgerHasMore.value = result.hasMore
+const loadLedger = async (request = currentWorkspaceRequest(), generation = costReadGeneration.value) => {
+  if (!isCurrentCostRead(request, generation)) return
+  try {
+    const result = await listAccountCostLedger({ ...ledgerFilters, page: ledgerPage.value, pageSize: 100 })
+    if (!isCurrentCostRead(request, generation)) return
+    ledger.value = result.items
+    ledgerHasMore.value = result.hasMore
+  } catch (error) {
+    if (isCurrentCostRead(request, generation)) throw error
+  }
 }
 
-const loadTodayLedger = async (request = currentWorkspaceRequest()) => {
-	todayLedgerLoadFailed.value = false
-	try {
-		const businessDate = today()
-		const records: AdditionalCostRecord[] = []
-		let page = 1
-		for (;;) {
-			const result = await listAccountCostLedger({ from: businessDate, to: businessDate, page, pageSize: 100 })
-			if (!isCurrentWorkspaceRequest(request)) return
-			records.push(...result.items)
-			if (!result.hasMore) break
-			page += 1
-		}
-		if (isCurrentWorkspaceRequest(request)) todayLedger.value = records
-	} catch {
-		if (isCurrentWorkspaceRequest(request)) {
-			todayLedger.value = []
-			todayLedgerLoadFailed.value = true
-		}
-	}
+const loadTodayLedger = async (request = currentWorkspaceRequest(), generation = costReadGeneration.value): Promise<unknown | null> => {
+  if (!isCurrentCostRead(request, generation)) return null
+  if (isCurrentCostRead(request, generation)) { todayLedgerLoadFailed.value = false; todayLedgerError.value = '' }
+  try {
+    const businessDate = today()
+    const records: AdditionalCostRecord[] = []
+    let page = 1
+    for (;;) {
+      const result = await listAccountCostLedger({ from: businessDate, to: businessDate, page, pageSize: 100 })
+      if (!isCurrentCostRead(request, generation)) return null
+      records.push(...result.items)
+      if (!result.hasMore) break
+      page += 1
+    }
+    if (isCurrentCostRead(request, generation)) todayLedger.value = records
+    return null
+  } catch (error) {
+    if (isCurrentCostRead(request, generation)) {
+      todayLedger.value = []
+      todayLedgerLoadFailed.value = true
+      todayLedgerError.value = costFailureText(error, '读取')
+      return error
+    }
+    return null
+  }
 }
+const refreshAfterCostWrite = async (success: string, request: WorkspaceRequest, rules = false, previousResult = '') => {
+  if (!isCurrentWorkspaceRequest(request) || !props.open) return
+  const generation = ++costReadGeneration.value
+  loading.value = false
+  costNotice.value = success || '正在重新加载费用，仅更新显示，不会重复保存或删除；不会修改主站。'
+  costReloadNeeded.value = false
+  const results = await Promise.allSettled(rules ? [loadRules(request, generation)] : [loadLedger(request, generation), loadTodayLedger(request, generation)])
+  if (!isCurrentCostRead(request, generation)) return
+  const reasons = results.flatMap(result => result.status === 'rejected' ? [result.reason] : result.value ? [result.value] : [])
+  if (reasons.length) {
+    costReloadNeeded.value = true
+    const confirmed = previousResult || (success.startsWith('费用已删除') ? '费用已删除' : rules ? '费率已保存' : '费用已保存')
+    costNotice.value = `${confirmed}，但${rules ? '费率及历史' : '费用列表'}更新失败。请点击‘重新加载费用’查看结果，不要重复录入；不会修改主站。具体原因：${reasons.map(costErrorReason).join('；')}`
+  } else if (!success) costNotice.value = '费用列表已更新；不会修改主站。'
+}
+const retryCostRead = async () => {
+  if (saving.value) return
+  const request = currentWorkspaceRequest()
+  saving.value = true
+  errorText.value = ''
+  try {
+    const previousResult = costNotice.value.match(/^(费用已保存|费用已删除|费率已保存)/)?.[1] ?? '费用读取'
+    await refreshAfterCostWrite('', request, activeTab.value === 'rules', previousResult)
+    if (isCurrentWorkspaceRequest(request)) emit('updated')
+  } finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
+}
+const requestClose = () => { if (!saving.value) emit('close') }
+const selectTab = (tab: WorkspaceTab) => { if (!saving.value) activeTab.value = tab }
+const showUpstreamDetails = () => { if (!saving.value) emit('open-upstream-details') }
 
 const searchAssets = () => { assetPage.value = 1; void loadAssets() }
-const searchLedger = () => { ledgerPage.value = 1; void loadLedger() }
+const readLedgerPage = async (page: number) => {
+  if (saving.value) return
+  const request = currentWorkspaceRequest()
+  const generation = ++costReadGeneration.value
+  loading.value = false
+  saving.value = true
+  errorText.value = ''
+  clearCostNotice()
+  ledgerPage.value = page
+  try { await loadLedger(request, generation) }
+  catch (error) { if (isCurrentCostRead(request, generation)) errorText.value = costFailureText(error, '读取') }
+  finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
+}
+const searchLedger = () => readLedgerPage(1)
 const changeAssetPage = (delta: number) => { assetPage.value = Math.max(1, assetPage.value + delta); void loadAssets() }
-const changeLedgerPage = (delta: number) => { ledgerPage.value = Math.max(1, ledgerPage.value + delta); void loadLedger() }
+const changeLedgerPage = (delta: number) => readLedgerPage(Math.max(1, ledgerPage.value + delta))
 const openUpstreamManagement = () => {
+	if (saving.value) return
 	emit('close')
 	void router.push({ name: 'AdminUpstream' })
 }
 
-const loadFeeRateHistory = async (request = currentWorkspaceRequest()) => {
-	feeRateHistoryLoadFailed.value = false
+const loadFeeRateHistory = async (request = currentWorkspaceRequest(), generation = costReadGeneration.value) => {
+  if (!isCurrentCostRead(request, generation)) return null
+	if (isCurrentCostRead(request, generation)) feeRateHistoryLoadFailed.value = false
 	try {
 		const history = await listRechargeFeeRateHistory()
-		if (isCurrentWorkspaceRequest(request)) feeRateHistory.value = history.items
-	} catch {
-		if (isCurrentWorkspaceRequest(request)) feeRateHistoryLoadFailed.value = true
+		if (isCurrentCostRead(request, generation)) feeRateHistory.value = history.items
+		return null
+	} catch (error) {
+		if (isCurrentCostRead(request, generation)) {
+      feeRateHistoryLoadFailed.value = true
+      return error
+    }
+    return null
 	}
 }
 
-const loadRules = async (request = currentWorkspaceRequest()) => {
-	const [result] = await Promise.all([
-		getRechargeFeeRate(today()),
-		loadFeeRateHistory(request),
-	])
-	if (!isCurrentWorkspaceRequest(request)) return
-  feeForm.rate = String(result.rate * 100)
-  feeForm.effectiveDate = result.effectiveDate || today()
+const loadRules = async (request = currentWorkspaceRequest(), generation = costReadGeneration.value) => {
+  if (!isCurrentCostRead(request, generation)) return
+  try {
+    const [result, historyError] = await Promise.all([
+      getRechargeFeeRate(today()),
+      loadFeeRateHistory(request, generation),
+    ])
+    if (!isCurrentCostRead(request, generation)) return
+    feeForm.rate = String(result.rate * 100)
+    feeForm.effectiveDate = result.effectiveDate || today()
+    if (historyError) throw historyError
+  } catch (error) {
+    if (isCurrentCostRead(request, generation)) throw error
+  }
 }
 
 const loadTab = async () => {
+  if (!props.open) return
   const request = currentWorkspaceRequest()
+  const generation = costReadGeneration.value
+  const tab = activeTab.value
   loading.value = true
   errorText.value = ''
 	try {
-		if (activeTab.value === 'today') await loadTodayLedger(request)
-		if (activeTab.value === 'assets') await loadAssets(request)
-    if (activeTab.value === 'ledger') await loadLedger(request)
-    if (activeTab.value === 'rules') await loadRules(request)
+    if (tab === 'today') await loadTodayLedger(request, generation)
+    else if (tab === 'assets') await loadAssets(request)
+    else if (tab === 'ledger') await loadLedger(request, generation)
+    else if (tab === 'rules') await loadRules(request, generation)
   } catch (error) {
-    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '加载失败'
+    if (isCurrentCostRead(request, generation)) errorText.value = costFailureText(error, '读取')
   } finally {
-    if (isCurrentWorkspaceRequest(request)) loading.value = false
+    if (isCurrentCostRead(request, generation)) loading.value = false
   }
 }
 
 const reloadActiveTab = async () => {
+  if (!props.open) return
   const request = currentWorkspaceRequest()
+  const generation = costReadGeneration.value
+  const tab = activeTab.value
   try {
-    if (activeTab.value === 'today') await loadTodayLedger(request)
-    if (activeTab.value === 'assets') await loadAssets(request)
-    if (activeTab.value === 'ledger') await loadLedger(request)
-    if (activeTab.value === 'rules') await loadRules(request)
+    if (tab === 'today') await loadTodayLedger(request, generation)
+    else if (tab === 'assets') await loadAssets(request)
+    else if (tab === 'ledger') await loadLedger(request, generation)
+    else if (tab === 'rules') await loadRules(request, generation)
   } catch (error) {
-    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '加载失败'
+    if (isCurrentCostRead(request, generation)) errorText.value = costFailureText(error, '读取')
   }
 }
 
 watch(() => props.open, (open) => {
 	if (!open) {
-		editingCost.value = null
+    costReadGeneration.value += 1
+    loading.value = false
+    cancelCostEdit()
 		selectedDetail.value = null
+    costNotice.value = ''
+    costReloadNeeded.value = false
 		return
 	}
 	const nextTab = props.initialTab ?? 'today'
@@ -438,7 +627,12 @@ watch(() => props.open, (open) => {
   ledgerFilters.to = today()
 	if (!changed) void loadTab()
 })
-watch(activeTab, () => void loadTab())
+watch(activeTab, () => {
+  costReadGeneration.value += 1
+  costNotice.value = ''
+  costReloadNeeded.value = false
+  void loadTab()
+})
 
 const submitBatch = async () => {
   const amountCents = totalAmountCents.value
@@ -517,7 +711,7 @@ const openAsset = async (asset: AccountAsset) => {
 		eventForm.upstreamReferenceUrl = selectedDetail.value.asset.upstreamReferenceUrl || ''
   }
   catch (error) {
-    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '加载失败'
+    if (isCurrentWorkspaceRequest(request)) errorText.value = costFailureText(error, '读取')
   }
   finally { if (isCurrentWorkspaceRequest(request)) loading.value = false }
 }
@@ -631,9 +825,39 @@ const submitStatsMode = async () => {
   finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
 }
 
+const costAmountLabel = computed(() => costForm.type === 'promotion' ? '赠送总额' : costForm.type === 'adjustment' ? '调整金额' : '费用总额')
+const addBusinessDays = (value: string, days: number) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
+  const parsed = new Date(`${value}T00:00:00Z`)
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) return null
+  parsed.setUTCDate(parsed.getUTCDate() + days)
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString().slice(0, 10) : null
+}
+const costPreview = computed(() => {
+  if (String(costForm.amount).trim() === '' || !Number.isFinite(Number(costForm.amount))) return null
+  const value = Number(costForm.amount)
+  if (Math.abs(value) > 1e12 || (costForm.type !== 'adjustment' && value < 0)) return null
+  const days = costForm.type === 'adjustment' ? 1 : Number(costForm.days)
+  const rate = costForm.type === 'promotion' ? Number(costForm.usageRate) / 100 : 1
+  if (!Number.isInteger(days) || days < 1 || (costForm.type === 'promotion' && (String(costForm.usageRate).trim() === '' || !Number.isFinite(rate) || rate < 0 || rate > 1))) return null
+  const endDate = addBusinessDays(costForm.businessDate, days - 1)
+  if (endDate == null) return null
+  const raw = value * rate
+  const totalCents = Math.sign(raw) * Math.round(Math.abs(raw) * 100)
+  const dailyCents = Math.trunc(totalCents / days)
+  return { total: totalCents / 100, daily: dailyCents / 100, last: (totalCents - dailyCents * (days - 1)) / 100, endDate }
+})
 const submitCost = async () => {
   if (saving.value) return
+  costNotice.value = ''
+  costReloadNeeded.value = false
+  if (!costForm.name.trim() || !costPreview.value) {
+    errorText.value = '费用尚未保存：请填写名称、有效金额和日期；分摊天数须为大于零的整数，活动使用率须在0至100%之间。补齐后可以保存，不会修改主站。'
+    return
+  }
   const request = currentWorkspaceRequest()
+  costReadGeneration.value += 1
+  loading.value = false
   saving.value = true
   errorText.value = ''
   try {
@@ -645,31 +869,36 @@ const submitCost = async () => {
     if (editingCost.value) await updateAdditionalCost(editingCost.value.sourceId, input)
     else await createAdditionalCost(input)
     if (!isCurrentWorkspaceRequest(request)) return
-    await Promise.all([loadLedger(request), loadTodayLedger(request)])
-    if (!isCurrentWorkspaceRequest(request)) return
-    editingCost.value = null
-    costForm.name = ''; costForm.amount = ''; costForm.note = ''
+    cancelCostEdit()
     emit('updated')
+    await refreshAfterCostWrite('费用已保存，本站统计将更新；不会修改主站。', request)
   } catch (error) {
-    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '保存失败'
-  }
-  finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
+    if (isCurrentWorkspaceRequest(request)) errorText.value = costFailureText(error, '保存')
+  } finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
 }
-
 const submitFee = async () => {
+  if (saving.value) return
+  costNotice.value = ''
+  costReloadNeeded.value = false
+  if (!String(feeForm.rate).trim() || !Number.isFinite(Number(feeForm.rate)) || Number(feeForm.rate) < 0 || Number(feeForm.rate) > 100 || !addBusinessDays(feeForm.effectiveDate, 0)) {
+    errorText.value = '费率尚未保存：请填写0至100%的费率和有效生效日期，核对后可以保存；不会修改主站。'
+    return
+  }
   const request = currentWorkspaceRequest()
+  costReadGeneration.value += 1
+  loading.value = false
   saving.value = true
   errorText.value = ''
   try {
-		await saveRechargeFeeRate({ effectiveDate: feeForm.effectiveDate, rate: Number(feeForm.rate) / 100 })
-	if (!isCurrentWorkspaceRequest(request)) return
-		await loadRules(request)
-	if (!isCurrentWorkspaceRequest(request)) return
-		emit('updated')
+    const effectiveDate = feeForm.effectiveDate
+    const ratePercent = Number(feeForm.rate)
+    await saveRechargeFeeRate({ effectiveDate, rate: ratePercent / 100 })
+    if (!isCurrentWorkspaceRequest(request)) return
+    emit('updated')
+    await refreshAfterCostWrite(`费率已保存，将从 ${effectiveDate} 起按 ${ratePercent}% 估算手续费；不会修改主站。`, request, true)
   } catch (error) {
-    if (isCurrentWorkspaceRequest(request)) errorText.value = error instanceof Error ? error.message : '保存失败'
-  }
-  finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
+    if (isCurrentWorkspaceRequest(request)) errorText.value = costFailureText(error, '保存费率')
+  } finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
 }
 
 const refreshStats = async () => {
@@ -736,32 +965,32 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
 <template>
   <Teleport to="body">
     <div v-if="open" class="fixed inset-0 z-[160]">
-      <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="emit('close')" />
+      <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="requestClose" />
       <section role="dialog" aria-modal="true" aria-label="成本与买号" class="absolute inset-y-0 right-0 flex w-full max-w-6xl flex-col border-l border-border/60 bg-card shadow-2xl">
         <header class="flex shrink-0 items-center justify-between border-b border-border/60 px-4 py-3 sm:px-6">
           <div><h2 class="text-base font-semibold text-foreground">成本与买号</h2><p class="mt-0.5 text-xs text-muted-foreground">{{ businessDate }} · 经营成本、账号资产与历史账本</p></div>
-          <button type="button" class="rounded-md p-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground" title="关闭" @click="emit('close')"><X class="h-5 w-5" /></button>
+          <button type="button" class="rounded-md p-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground" title="关闭" :disabled="saving" @click="requestClose"><X class="h-5 w-5" /></button>
         </header>
 
         <nav class="flex shrink-0 gap-1 overflow-x-auto border-b border-border/60 px-4 py-2 sm:px-6">
-          <button v-for="tab in tabs" :key="tab.key" type="button" class="h-9 shrink-0 rounded-md px-3 text-sm font-medium transition-colors" :class="activeTab === tab.key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-surface-elevated hover:text-foreground'" @click="activeTab = tab.key">{{ tab.label }}</button>
+          <button v-for="tab in tabs" :key="tab.key" type="button" class="h-9 shrink-0 rounded-md px-3 text-sm font-medium transition-colors" :class="activeTab === tab.key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-surface-elevated hover:text-foreground'"  :disabled="saving" @click="selectTab(tab.key)">{{ tab.label }}</button>
         </nav>
 
         <main class="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
-          <div v-if="activeTab === 'ledger' && ledgerGroups.length" class="mb-4 flex flex-wrap gap-2">
-            <template v-for="group in ledgerGroups" :key="`edit-${group.key}`">
-              <Button v-if="['promotion', 'fixed', 'adjustment'].includes(group.type)" size="sm" variant="secondary" type="button" @click="beginCostEdit(group)">编辑 {{ group.name }}</Button>
-            </template>
-          </div>
           <p v-if="errorText" class="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{{ errorText }}</p>
+          <div v-if="costNotice" role="status" class="mb-4 space-y-2 rounded-md border border-border/60 bg-surface-elevated px-3 py-2 text-sm text-muted-foreground">
+            <p>{{ costNotice }}</p><Button v-if="costReloadNeeded" type="button" size="sm" variant="secondary" :disabled="saving" @click="retryCostRead">重新加载费用</Button>
+          </div>
           <p v-if="statsNotice" role="status" class="mb-4 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-sm text-muted-foreground">{{ statsNotice }}</p>
           <div v-if="loading" class="flex justify-center py-16"><Loader2 class="h-6 w-6 animate-spin text-muted-foreground" /></div>
 
           <section v-else-if="activeTab === 'today'" class="space-y-6">
  <p class="text-xs text-muted-foreground">费用按新加坡日期统计，使用最近一次同步结果；暂缺的费用不会计作零。</p>
+            <p class="text-xs text-muted-foreground">这里记录和管理本站的额外费用，会影响成本和利润统计，不会修改主站。</p>
+            <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><p>编辑、删除会处理整笔费用；历史费用请到成本账本按日期查询。</p><Button type="button" size="sm" variant="secondary" :disabled="saving" @click="selectTab('ledger')">查看历史费用</Button></div>
  <p v-if="summary?.accountQuality && summary.accountQuality !== 'complete'" class="text-xs text-warning">这份账号费用尚未按新加坡日期重新核对，请点击‘刷新账号统计’。旧历史记录保留；此操作不会修改主站。</p>
  <p v-if="summary?.unavailableReason" class="text-xs text-warning">{{ summary.unavailableReason }}</p>
-            <div class="flex flex-wrap justify-end gap-2"><Button variant="secondary" @click="emit('open-upstream-details')"><ExternalLink class="mr-2 h-4 w-4" />查看上游成本明细</Button><Button variant="secondary" :disabled="saving" @click="refreshStats"><RefreshCw class="mr-2 h-4 w-4" :class="saving ? 'animate-spin' : ''" />刷新账号统计</Button></div>
+            <div class="flex flex-wrap justify-end gap-2"><Button variant="secondary" :disabled="saving" @click="showUpstreamDetails"><ExternalLink class="mr-2 h-4 w-4" />查看上游成本明细</Button><Button variant="secondary" :disabled="saving" @click="refreshStats"><RefreshCw class="mr-2 h-4 w-4" :class="saving ? 'animate-spin' : ''" />刷新账号统计</Button></div>
             <div class="grid gap-3 sm:grid-cols-3">
               <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日营收</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatAmount(todayRevenue ?? null) }}</p></div>
               <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日总成本</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatAmount(operatingCost) }}</p></div>
@@ -773,18 +1002,39 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
             <div class="grid gap-x-8 sm:grid-cols-2">
               <div v-for="line in costLines" :key="line.label" class="flex items-center justify-between border-b border-border/50 py-2.5 text-sm"><span class="text-muted-foreground">{{ line.label }}</span><span class="font-medium tabular-nums">{{ formatAmount(line.value) }}</span></div>
             </div>
-            <div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">当日成本变动</h3><p v-if="todayLedgerLoadFailed" class="py-5 text-sm text-destructive">当日成本变动加载失败</p><p v-else-if="!todayLedger.length" class="py-5 text-sm text-muted-foreground">当日暂无成本变动</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="record in todayLedger" :key="record.id" class="grid gap-1 py-2.5 text-sm sm:grid-cols-[5rem_1fr_auto]"><span class="text-muted-foreground">{{ costTypeText(record.type) }}</span><span class="min-w-0 break-all">{{ record.name }}<p v-if="record.note" class="text-xs text-warning">{{ record.note }}</p><span class="ml-2 text-xs text-muted-foreground">来源 {{ record.sourceId || record.batchId || record.accountAssetId || record.id }}</span></span><span class="font-medium tabular-nums">{{ formatAmount(record.amount) }}</span></div></div></div>
-            <form class="space-y-3 border-t border-border/60 pt-5" @submit.prevent="submitCost">
-              <div class="flex flex-wrap items-center justify-between gap-2"><div><h3 class="text-sm font-semibold">{{ editingCost ? '编辑手工成本' : '记一笔成本' }}</h3><p v-if="editingCost" class="mt-1 text-xs text-muted-foreground">来源 {{ editingCost.sourceId }} · 保存后会重算旧日期和新日期</p></div><div class="flex gap-2"><Button v-if="editingCost" type="button" variant="ghost" @click="cancelCostEdit">取消编辑</Button><Button v-else type="button" variant="secondary" @click="activeTab = 'assets'; showBatchForm = true"><Plus class="mr-2 h-4 w-4" />录入买号</Button></div></div>
-              <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <select v-model="costForm.type" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="promotion">活动赠送</option><option value="fixed">固定费用</option><option value="adjustment">手工调整</option></select>
-                <Input v-model="costForm.name" placeholder="名称" required />
-                <Input v-model="costForm.amount" type="number" step="0.01" placeholder="金额" required />
-                <Input v-model="costForm.businessDate" type="date" required />
-                <Input v-if="costForm.type === 'promotion'" v-model="costForm.usageRate" type="number" min="0" max="100" placeholder="预计使用率 %" />
-                <Input v-if="costForm.type !== 'adjustment'" v-model="costForm.days" type="number" min="1" placeholder="分摊天数" />
-                <Input v-model="costForm.note" class="sm:col-span-2" placeholder="说明（可选）" />
+            <div class="border-t border-border/60 pt-5">
+              <h3 class="text-sm font-semibold">当日成本变动</h3>
+              <div v-if="todayLedgerLoadFailed" class="space-y-2 py-5 text-sm text-destructive"><p>当日成本变动加载失败</p><p>{{ todayLedgerError }}</p><Button type="button" variant="secondary" size="sm" :disabled="saving" @click="retryCostRead">重新加载费用</Button></div>
+              <p v-else-if="!todayLedger.length" class="py-5 text-sm text-muted-foreground">当日暂无成本变动</p>
+              <div v-else class="mt-2 divide-y divide-border/50">
+                <div v-for="record in todayLedger" :key="record.id" class="grid gap-2 py-2.5 text-sm sm:grid-cols-[5rem_1fr_auto]">
+                  <span class="text-muted-foreground">{{ costTypeText(record.type) }}</span>
+                  <div class="min-w-0 break-all">{{ record.name }}<p v-if="record.note" class="text-xs text-warning">{{ record.note }}</p><p class="text-xs text-muted-foreground">来源 {{ record.sourceId || record.batchId || record.accountAssetId || record.id }}</p>
+                    <div v-if="isManualCost(record)" class="mt-2 flex flex-wrap gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving" @click="beginCostEdit({ records: [record] })">编辑 {{ record.name }}</Button><Button type="button" size="sm" variant="secondary" :disabled="saving" @click="removeCost({ records: [record] })">删除 {{ record.name }}</Button></div>
+                  </div><span class="font-medium tabular-nums">{{ formatAmount(record.amount) }}</span>
+                </div>
               </div>
+            </div>
+            <form class="space-y-3 border-t border-border/60 pt-5" @input="clearCostNotice" @change="clearCostNotice" @submit.prevent="submitCost">
+              <div class="flex flex-wrap items-center justify-between gap-2"><div><h3 class="text-sm font-semibold">{{ editingCost ? '编辑手工成本' : '记一笔成本' }}</h3><p v-if="editingCost" class="mt-1 text-xs text-muted-foreground">正在修改整笔费用；保存后会重新计算原日期和新日期的成本与利润，不会修改主站。</p></div><div class="flex gap-2"><Button v-if="editingCost" type="button" variant="ghost" :disabled="saving" @click="cancelCostEdit">取消编辑</Button><Button v-else type="button" variant="secondary" :disabled="saving" @click="selectTab('assets'); showBatchForm = true"><Plus class="mr-2 h-4 w-4" />录入买号</Button></div></div>
+              <p v-if="legacyCostNotice" class="text-xs text-warning">{{ legacyCostNotice }}</p>
+              <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <label class="space-y-1 text-xs text-muted-foreground"><span>费用类型</span><select v-model="costForm.type" :disabled="saving" class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"><option value="promotion">活动赠送</option><option value="fixed">固定费用</option><option value="adjustment">手工调整</option></select></label>
+                <label class="space-y-1 text-xs text-muted-foreground"><span>名称</span><Input v-model="costForm.name" :disabled="saving" placeholder="名称" required /></label>
+                <label class="space-y-1 text-xs text-muted-foreground"><span>{{ costAmountLabel }}</span><Input v-model="costForm.amount" :disabled="saving" type="number" step="0.01" placeholder="金额" required /></label>
+                <label class="space-y-1 text-xs text-muted-foreground"><span>{{ costForm.type === 'adjustment' ? '计入日期' : '开始日期' }}</span><Input v-model="costForm.businessDate" :disabled="saving" type="date" required /></label>
+                <label v-if="costForm.type === 'promotion'" class="space-y-1 text-xs text-muted-foreground"><span>预计使用率 %</span><Input v-model="costForm.usageRate" :disabled="saving" type="number" min="0" max="100" step="0.01" placeholder="预计使用率 %" required /></label>
+                <label v-if="costForm.type !== 'adjustment'" class="space-y-1 text-xs text-muted-foreground"><span>分摊天数</span><Input v-model="costForm.days" :disabled="saving" type="number" min="1" step="1" placeholder="分摊天数" required /></label>
+                <label class="space-y-1 text-xs text-muted-foreground sm:col-span-2"><span>说明（可选）</span><Input v-model="costForm.note" :disabled="saving" placeholder="说明（可选）" /></label>
+              </div>
+              <p v-if="costForm.type === 'fixed'" class="text-xs text-muted-foreground">填写这段期间的费用总额，系统按天分摊；不会自动每月续记。只计一天时填 1 天。</p>
+              <p v-else-if="costForm.type === 'promotion'" class="text-xs text-muted-foreground">这是赠送金额按预计使用率计算的额外成本估算，不跟随实际用量自动修正；如果相关支出已计入上游成本，请先核查，避免重复计入。</p>
+              <p v-else class="text-xs text-muted-foreground">只调整所选日期：正数增加成本，负数减少成本；不会修改主站。</p>
+              <div v-if="costPreview" class="flex flex-wrap gap-x-6 gap-y-1 rounded-md bg-surface-elevated px-3 py-2 text-xs text-muted-foreground">
+                <template v-if="costForm.type === 'adjustment'"><span>计入日期 {{ costForm.businessDate }}</span><span>{{ costPreview.total < 0 ? '本次减少成本' : '本次增加成本' }} {{ formatAmount(Math.abs(costPreview.total)) }}</span></template>
+                <template v-else><span>预计计入总额 {{ formatAmount(costPreview.total) }}</span><span>分摊期间 {{ costForm.businessDate }} 至 {{ costPreview.endDate }}</span><span>每天计入 {{ formatAmount(costPreview.daily) }}</span><span>最后一天计入 {{ formatAmount(costPreview.last) }}</span></template>
+              </div>
+              <p v-else class="text-xs text-muted-foreground">填写有效金额、日期及分摊参数后，可在这里查看计入金额；核对后再保存，不会修改主站。</p>
               <Button :disabled="saving" type="submit"><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" /><Save v-else class="mr-2 h-4 w-4" />保存记录</Button>
             </form>
           </section>
@@ -911,9 +1161,23 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
             </template>
           </section>
 
-          <section v-else-if="activeTab === 'ledger'" class="space-y-4"><div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><Input v-model="ledgerFilters.from" type="date" /><Input v-model="ledgerFilters.to" type="date" /><select v-model="ledgerFilters.type" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="">全部类型</option><option value="account_purchase">买号确认</option><option value="account_refund">退款冲减</option><option value="recharge_fee">手续费</option><option value="promotion">活动</option><option value="fixed">固定</option><option value="adjustment">调整</option></select><Input v-model="ledgerFilters.platform" placeholder="平台" /><Input v-model="ledgerFilters.channel" placeholder="渠道" /><Input v-model="ledgerFilters.batchId" placeholder="批次 ID" /><Input v-model="ledgerFilters.accountAssetId" placeholder="单号 ID" /><Button variant="secondary" @click="searchLedger"><Search class="mr-2 h-4 w-4" />查询账本</Button></div><div class="divide-y divide-border/50"><details v-for="group in ledgerGroups" :key="group.key" class="group py-3"><summary class="grid cursor-pointer list-none grid-cols-[1fr_auto] items-center gap-3 text-sm sm:grid-cols-[1fr_9rem_8rem]"><div class="min-w-0"><p class="truncate font-medium">{{ group.name }}</p><p class="text-xs text-muted-foreground">{{ group.type }} · {{ group.records.length }} 条确认记录</p></div><span class="hidden text-xs text-muted-foreground sm:block">{{ group.records[0]?.businessDate }}</span><span class="text-right font-semibold tabular-nums" :class="group.amount < 0 ? 'text-emerald-600' : ''">{{ formatAmount(group.amount) }}</span></summary><div class="mt-3 overflow-x-auto border-t border-border/40"><table class="w-full min-w-[680px] text-left text-xs"><thead class="text-muted-foreground"><tr><th class="py-2">业务日</th><th>金额</th><th>批次 / 单号</th><th>质量</th><th>录入时间</th></tr></thead><tbody><tr v-for="record in group.records" :key="record.id" class="border-t border-border/30"><td class="py-2">{{ record.businessDate }}</td><td>{{ formatAmount(record.amount) }}</td><td>{{ record.batchId || '—' }} / {{ record.accountAssetId || '—' }}</td><td>{{ record.note?.includes('尚未按新加坡日期重新确认') ? '待重新确认' : record.estimated ? '估算' : '已确认' }}<p v-if="record.note" class="text-warning">{{ record.note }}</p></td><td>{{ historyCreatedAtText(record.createdAt) }}</td></tr></tbody></table></div></details><p v-if="!ledgerGroups.length" class="py-12 text-center text-sm text-muted-foreground">所选范围暂无记录</p></div><div v-if="ledger.length || ledgerPage > 1" class="flex items-center justify-end gap-2"><Button variant="secondary" size="sm" title="上一页" :disabled="ledgerPage === 1" @click="changeLedgerPage(-1)"><ArrowLeft class="h-4 w-4" /></Button><span class="text-xs text-muted-foreground">第 {{ ledgerPage }} 页</span><Button variant="secondary" size="sm" title="下一页" :disabled="!ledgerHasMore" @click="changeLedgerPage(1)"><ArrowRight class="h-4 w-4" /></Button></div></section>
+          <section v-else-if="activeTab === 'ledger'" class="space-y-4">
+            <p class="text-xs text-muted-foreground">下面只显示查询日期内的费用。整笔金额与这段日期计入金额可能不同；修改、删除会影响整笔费用，不会修改主站。</p>
+            <p class="text-xs text-muted-foreground">当前查询日期：{{ ledgerFilters.from || '不限开始日期' }} 至 {{ ledgerFilters.to || '不限结束日期' }}。查看历史费用时修改日期后点击“查询账本”。</p>
+            <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><Input v-model="ledgerFilters.from" :disabled="saving" type="date" aria-label="查询开始日期" /><Input v-model="ledgerFilters.to" :disabled="saving" type="date" aria-label="查询结束日期" /><select v-model="ledgerFilters.type" :disabled="saving" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="">全部类型</option><option value="account_purchase">买号确认</option><option value="account_refund">退款冲减</option><option value="recharge_fee">手续费</option><option value="promotion">活动</option><option value="fixed">固定</option><option value="adjustment">调整</option></select><Input v-model="ledgerFilters.platform" :disabled="saving" placeholder="平台" /><Input v-model="ledgerFilters.channel" :disabled="saving" placeholder="渠道" /><Input v-model="ledgerFilters.batchId" :disabled="saving" placeholder="批次 ID" /><Input v-model="ledgerFilters.accountAssetId" :disabled="saving" placeholder="单号 ID" /><Button variant="secondary" :disabled="saving" @click="searchLedger"><Search class="mr-2 h-4 w-4" />查询账本</Button></div>
+            <div class="divide-y divide-border/50">
+              <div v-for="group in ledgerGroups" :key="group.key" class="py-3">
+                <div v-if="isManualCost(group.records[0]!)" class="mb-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>原始输入金额 {{ originalAmountText(group.records) }}</span><span>预计计入总额 {{ expectedAmount(group.records) == null ? '未记录' : formatAmount(expectedAmount(group.records)) }}</span><Button size="sm" variant="secondary" type="button" :disabled="saving" @click="beginCostEdit(group)">编辑 {{ group.name }}</Button><Button size="sm" variant="secondary" type="button" :disabled="saving" @click="removeCost(group)">删除 {{ group.name }}</Button></div>
+                <details class="group"><summary class="grid cursor-pointer list-none grid-cols-[1fr_auto] items-center gap-3 text-sm sm:grid-cols-[1fr_9rem_10rem]"><div class="min-w-0"><p class="truncate font-medium">{{ group.name }}</p><p class="text-xs text-muted-foreground">{{ costTypeText(group.type) }} · {{ group.records.length }} 条确认记录</p></div><span class="hidden text-xs text-muted-foreground sm:block">{{ group.records[0]?.businessDate }}</span><span class="text-right font-semibold tabular-nums" :class="group.amount < 0 ? 'text-emerald-600' : ''"><span class="block text-xs font-normal text-muted-foreground">所选日期计入</span>{{ formatAmount(group.amount) }}</span></summary>
+                  <div class="mt-3 overflow-x-auto border-t border-border/40"><table class="w-full min-w-[680px] text-left text-xs"><thead class="text-muted-foreground"><tr><th class="py-2">业务日</th><th>金额</th><th>批次 / 单号</th><th>质量</th><th>录入时间</th></tr></thead><tbody><tr v-for="record in group.records" :key="record.id" class="border-t border-border/30"><td class="py-2">{{ record.businessDate }}</td><td>{{ formatAmount(record.amount) }}</td><td>{{ record.batchId || '—' }} / {{ record.accountAssetId || '—' }}</td><td>{{ record.note?.includes('尚未按新加坡日期重新确认') ? '待重新确认' : record.estimated ? '估算' : '已确认' }}<p v-if="record.note" class="text-warning">{{ record.note }}</p></td><td>{{ historyCreatedAtText(record.createdAt) }}</td></tr></tbody></table></div>
+                </details>
+              </div>
+              <p v-if="!ledgerGroups.length" class="py-12 text-center text-sm text-muted-foreground">所选范围暂无记录</p>
+            </div>
+            <div v-if="ledger.length || ledgerPage > 1" class="flex items-center justify-end gap-2"><Button variant="secondary" size="sm" title="上一页" :disabled="saving || ledgerPage === 1" @click="changeLedgerPage(-1)"><ArrowLeft class="h-4 w-4" /></Button><span class="text-xs text-muted-foreground">第 {{ ledgerPage }} 页</span><Button variant="secondary" size="sm" title="下一页" :disabled="saving || !ledgerHasMore" @click="changeLedgerPage(1)"><ArrowRight class="h-4 w-4" /></Button></div>
+          </section>
 
-          <section v-else class="max-w-3xl space-y-6"><div><h3 class="text-sm font-semibold">充值手续费</h3><div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]"><Input v-model="feeForm.rate" type="number" min="0" max="100" step="0.01" placeholder="费率 %" /><Input v-model="feeForm.effectiveDate" type="date" /><Button :disabled="saving" @click="submitFee"><Save class="mr-2 h-4 w-4" />保存费率</Button></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">费率生效历史</h3><p v-if="feeRateHistoryLoadFailed" class="py-5 text-sm text-destructive">费率历史加载失败</p><p v-else-if="!feeRateHistory.length" class="py-5 text-sm text-muted-foreground">暂无费率历史</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in feeRateHistory" :key="rate.id" class="grid gap-1 py-2.5 text-sm sm:grid-cols-[7rem_1fr_auto]"><span>{{ rate.effectiveDate }}</span><span>{{ (rate.rate * 100).toFixed(2) }}% · {{ rate.id }}</span><span class="text-xs text-muted-foreground">{{ historyCreatedAtText(rate.createdAt) }}</span></div></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">核算说明</h3><dl class="mt-3 space-y-3 text-sm"><div><dt class="font-medium">替代上游成本</dt><dd class="mt-1 text-muted-foreground">购买价包含额度时，从上游直接成本扣除该账号已核对的 Key 成本，再计入买号确认成本。</dd></div><div><dt class="font-medium">叠加上游成本</dt><dd class="mt-1 text-muted-foreground">购买价是订阅或接入费时，买号确认成本与关联上游按量成本同时计入。</dd></div><div><dt class="font-medium">历史成本更正</dt><dd class="mt-1 text-muted-foreground">手工成本可以直接编辑，保存后会重算受影响历史日；买号购买、退款和状态仍按事件追加记录。</dd></div></dl></div></section>
+          <section v-else class="max-w-3xl space-y-6"><div><h3 class="text-sm font-semibold">充值手续费（按营收估算）</h3><p class="mt-2 text-xs text-muted-foreground">按当天营收 × 费率估算手续费，默认 1.6%；不是支付平台实际账单。新费率从所选日期生效，不自动重算已保存的历史手续费，不会修改主站。</p><div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]" @input="clearCostNotice" @change="clearCostNotice"><Input v-model="feeForm.rate" :disabled="saving" aria-label="费率 %" type="number" min="0" max="100" step="0.01" placeholder="费率 %" /><Input v-model="feeForm.effectiveDate" :disabled="saving" aria-label="费率生效日期" type="date" /><Button :disabled="saving" @click="submitFee"><Save class="mr-2 h-4 w-4" />保存费率</Button></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">费率生效历史</h3><p v-if="feeRateHistoryLoadFailed" class="py-5 text-sm text-destructive">费率历史加载失败</p><p v-else-if="!feeRateHistory.length" class="py-5 text-sm text-muted-foreground">暂无费率历史</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in feeRateHistory" :key="rate.id" class="grid gap-1 py-2.5 text-sm sm:grid-cols-[7rem_1fr_auto]"><span>{{ rate.effectiveDate }}</span><span>{{ (rate.rate * 100).toFixed(2) }}% · {{ rate.id }}</span><span class="text-xs text-muted-foreground">{{ historyCreatedAtText(rate.createdAt) }}</span></div></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">核算说明</h3><dl class="mt-3 space-y-3 text-sm"><div><dt class="font-medium">替代上游成本</dt><dd class="mt-1 text-muted-foreground">购买价包含额度时，从上游直接成本扣除该账号已核对的 Key 成本，再计入买号确认成本。</dd></div><div><dt class="font-medium">叠加上游成本</dt><dd class="mt-1 text-muted-foreground">购买价是订阅或接入费时，买号确认成本与关联上游按量成本同时计入。</dd></div><div><dt class="font-medium">历史成本更正</dt><dd class="mt-1 text-muted-foreground">手工成本可以编辑或删除整笔费用，操作后会重新计算受影响日期的成本和利润，不会修改主站；买号购买、退款和状态请到买号资产处理。</dd></div></dl></div></section>
         </main>
       </section>
     </div>

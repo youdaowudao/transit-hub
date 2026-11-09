@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import AccountCostWorkspace from '@/modules/admin/components/dashboard/AccountCostWorkspace.vue'
 import DashboardView from '@/modules/admin/views/DashboardView.vue'
+import * as dashboardAdminState from '@/modules/admin/composables/useDashboardAdmin'
 
 const harness = vi.hoisted(() => ({
   getDashboardMetrics: vi.fn(),
@@ -16,6 +17,7 @@ const harness = vi.hoisted(() => ({
   listAccountCostLedger: vi.fn(),
   listAccountAssets: vi.fn(),
   listRealConnections: vi.fn(),
+  currentAccount: null as { value: { id: string; displayName: string } } | null,
 }))
 
 vi.mock('vue-router', () => ({ useRouter: () => ({ push: vi.fn() }) }))
@@ -45,7 +47,9 @@ vi.mock('@/modules/admin/composables/useDashboardAdmin', async () => {
 
 vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
   const { ref } = await import('vue')
-  return { useAdminAccounts: () => ({ currentAccount: ref({ id: 'workspace-a', displayName: '工作区 A' }) }) }
+  const currentAccount = ref({ id: 'workspace-a', displayName: '工作区 A' })
+  harness.currentAccount = currentAccount
+  return { useAdminAccounts: () => ({ currentAccount }) }
 })
 
 vi.mock('@/modules/admin/composables/useDashboardMetrics', async () => {
@@ -170,6 +174,7 @@ const ledgerItem = (id: string, name: string) => ({
 })
 
 beforeEach(() => {
+  harness.currentAccount!.value = { id: 'workspace-a', displayName: '工作区 A' }
   harness.getDashboardMetrics.mockReset()
   harness.getDashboardTrends.mockReset().mockResolvedValue({ points: [] })
   harness.refreshAccountStats.mockReset().mockResolvedValue({
@@ -193,6 +198,56 @@ afterEach(() => {
 })
 
 describe('reviewed dashboard cost regressions', () => {
+  it('loads the new workspace when switching while a cost refresh is queued', async () => {
+    const wrapper = await mountDashboard(baseMetrics)
+    let resolve!: (value: typeof baseMetrics) => void
+    harness.getDashboardMetrics.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    const drawer = wrapper.findComponent({ name: 'AccountCostWorkspace' })
+    drawer.vm.$emit('updated'); await flushPromises()
+    drawer.vm.$emit('updated')
+    harness.currentAccount!.value = { id: 'workspace-b', displayName: '工作区 B' }
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('固定 3.00')
+    harness.getDashboardMetrics.mockResolvedValue({ ...baseMetrics, additionalCosts: { ...baseMetrics.additionalCosts, fixed: 11 } })
+    resolve(baseMetrics); await flushPromises()
+    expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(3)
+    expect(costCompositionText(wrapper)).toContain('固定 11.00')
+    expect(costCompositionText(wrapper)).not.toContain('固定 3.00')
+  })
+
+  it('refreshes costs again when a cost mutation completes during an older homepage read', async () => {
+    const wrapper = await mountDashboard(baseMetrics)
+    let resolve!: (value: typeof baseMetrics) => void
+    harness.getDashboardMetrics.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    const updated = { ...baseMetrics, additionalCosts: { ...baseMetrics.additionalCosts, fixed: 9 } }
+    harness.getDashboardMetrics.mockResolvedValue(updated)
+    const drawer = wrapper.findComponent({ name: 'AccountCostWorkspace' })
+    drawer.vm.$emit('updated')
+    await flushPromises()
+    expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(2)
+    drawer.vm.$emit('updated')
+    resolve(baseMetrics)
+    await flushPromises()
+    expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(3)
+    expect(costCompositionText(wrapper)).toContain('固定 9.00')
+    expect(costCompositionText(wrapper)).not.toContain('固定 3.00')
+  })
+
+  it('does not let an older trend response restore cost values from before the mutation', async () => {
+    let resolve!: (value: { points: unknown[] }) => void
+    harness.getDashboardTrends.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    const wrapper = await mountDashboard(baseMetrics)
+    const updated = { ...baseMetrics, additionalCosts: { ...baseMetrics.additionalCosts, fixed: 9 } }
+    harness.getDashboardMetrics.mockResolvedValue(updated)
+    wrapper.findComponent({ name: 'AccountCostWorkspace' }).vm.$emit('updated')
+    await flushPromises()
+    expect(costCompositionText(wrapper)).toContain('固定 9.00')
+    resolve({ points: [] })
+    await flushPromises()
+    expect(costCompositionText(wrapper)).toContain('固定 9.00')
+    expect(costCompositionText(wrapper)).not.toContain('固定 3.00')
+  })
+
   it('R03 treats an omitted replacement deduction as zero only for a complete available account summary', async () => {
     const complete = await mountDashboard(baseMetrics)
     expect(costCompositionText(complete)).toContain('上游直接 40.00')
@@ -249,7 +304,7 @@ describe('reviewed dashboard cost regressions', () => {
     harness.getRechargeFeeRate.mockResolvedValue({
       id: 'rate-current', effectiveDate: '2026-08-20', rate: 0.025, createdAt: '2026-08-20T00:00:00Z',
     })
-    harness.listRechargeFeeRateHistory.mockRejectedValue(new Error('history initial unavailable'))
+    harness.listRechargeFeeRateHistory.mockRejectedValue(new Error('读取费率历史时数据库连接中断'))
 
     const wrapper = mount(AccountCostWorkspace, {
       props: { ...workspaceProps, initialTab: 'rules' },
@@ -262,13 +317,14 @@ describe('reviewed dashboard cost regressions', () => {
     expect((wrapper.find('input[placeholder="费率 %"]').element as HTMLInputElement).value).toBe('2.5')
     expect((wrapper.find('input[type="date"]').element as HTMLInputElement).value).toBe('2026-08-20')
     expect(wrapper.text()).toContain('费率历史加载失败')
-    expect(wrapper.text()).not.toContain('history initial unavailable')
+    expect(wrapper.text()).toContain('读取费率历史时数据库连接中断')
+    expect(wrapper.text()).toContain('请重新加载费用后再操作')
   })
 
   it('R07 keeps a successful save and emits updated when the following history refresh fails', async () => {
     harness.listRechargeFeeRateHistory
       .mockResolvedValueOnce({ items: [] })
-      .mockRejectedValueOnce(new Error('history refresh unavailable'))
+      .mockRejectedValueOnce(new Error('读取费率历史时数据库连接中断'))
 
     const wrapper = mount(AccountCostWorkspace, {
       props: { ...workspaceProps, initialTab: 'rules' },
@@ -287,6 +343,118 @@ describe('reviewed dashboard cost regressions', () => {
     expect(wrapper.emitted('updated')).toHaveLength(1)
     expect(wrapper.text()).toContain('费率历史加载失败')
     expect(wrapper.text()).not.toContain('保存失败')
-    expect(wrapper.text()).not.toContain('history refresh unavailable')
+    expect(wrapper.text()).toContain('读取费率历史时数据库连接中断')
+    expect(wrapper.text()).toContain('费率已保存')
+    expect(wrapper.text()).toContain('不要重复录入')
+  })
+})
+
+describe('homepage cost read coordination additional behavior', () => {
+  it('coalesces multiple cost updates during one pending metrics read', async () => {
+    const wrapper = await mountDashboard(baseMetrics)
+    let resolve!: (value: typeof baseMetrics) => void
+    harness.getDashboardMetrics.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    harness.getDashboardMetrics.mockResolvedValue({ ...baseMetrics, additionalCosts: { ...baseMetrics.additionalCosts, fixed: 9 } })
+    const drawer = wrapper.findComponent({ name: 'AccountCostWorkspace' })
+    drawer.vm.$emit('updated'); await flushPromises()
+    for (let i = 0; i < 4; i += 1) drawer.vm.$emit('updated')
+    resolve(baseMetrics); await flushPromises()
+    expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(3)
+    expect(costCompositionText(wrapper)).toContain('固定 9.00')
+  })
+
+  it('does not retry a failed supplemental read without a new event', async () => {
+    const wrapper = await mountDashboard(baseMetrics)
+    let reject!: (reason: Error) => void
+    harness.getDashboardMetrics.mockReturnValueOnce(new Promise((_resolve, fail) => { reject = fail }))
+    harness.getDashboardMetrics.mockRejectedValueOnce(new Error('补充读取连接中断'))
+    const drawer = wrapper.findComponent({ name: 'AccountCostWorkspace' })
+    drawer.vm.$emit('updated'); await flushPromises()
+    drawer.vm.$emit('updated')
+    reject(new Error('旧读取连接中断')); await flushPromises()
+    expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(3)
+    await flushPromises()
+    expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(3)
+    drawer.vm.$emit('updated'); await flushPromises()
+    expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(4)
+    expect(costCompositionText(wrapper)).toContain('固定 3.00')
+  })
+
+  it('invalidates an old A read after switching A to B and back to A', async () => {
+    const wrapper = await mountDashboard(baseMetrics)
+    let resolve!: (value: typeof baseMetrics) => void
+    harness.getDashboardMetrics.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    harness.getDashboardMetrics.mockResolvedValue({ ...baseMetrics, additionalCosts: { ...baseMetrics.additionalCosts, fixed: 15 } })
+    const drawer = wrapper.findComponent({ name: 'AccountCostWorkspace' })
+    drawer.vm.$emit('updated'); await flushPromises()
+    harness.currentAccount!.value = { id: 'workspace-b', displayName: '工作区 B' }; await flushPromises()
+    harness.currentAccount!.value = { id: 'workspace-a', displayName: '工作区 A' }; await flushPromises()
+    expect(drawer.props('summary')).toBeUndefined()
+    resolve(baseMetrics); await flushPromises()
+    expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(3)
+    expect(costCompositionText(wrapper)).toContain('固定 15.00')
+    expect(costCompositionText(wrapper)).not.toContain('固定 3.00')
+  })
+
+  it('clears old costs and queued reads when the workspace becomes empty', async () => {
+    const wrapper = await mountDashboard(baseMetrics)
+    let resolve!: (value: typeof baseMetrics) => void
+    harness.getDashboardMetrics.mockReturnValueOnce(new Promise(r => { resolve = r }))
+    const drawer = wrapper.findComponent({ name: 'AccountCostWorkspace' })
+    drawer.vm.$emit('updated'); await flushPromises()
+    drawer.vm.$emit('updated')
+    harness.currentAccount!.value = { id: '', displayName: '' }; await flushPromises()
+    expect(drawer.props('summary')).toBeUndefined()
+    expect(drawer.props('operatingCost')).toBeNull()
+    resolve(baseMetrics); await flushPromises()
+    expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(2)
+    expect(drawer.props('summary')).toBeUndefined()
+  })
+
+  it('retains the queued workspace status check across another fee update and releases an unauthenticated read', async () => {
+    const original = dashboardAdminState.useDashboardAdmin
+    let admin!: ReturnType<typeof original>
+    const spy = vi.spyOn(dashboardAdminState, 'useDashboardAdmin').mockImplementationOnce(() => {
+      admin = original()
+      return admin
+    })
+    try {
+      const wrapper = await mountDashboard(baseMetrics)
+      let resolve!: (value: typeof baseMetrics) => void
+      harness.getDashboardMetrics.mockReturnValueOnce(new Promise(r => { resolve = r }))
+      harness.getDashboardMetrics.mockResolvedValue({ ...baseMetrics, additionalCosts: { ...baseMetrics.additionalCosts, fixed: 11 } })
+      vi.mocked(admin.checkStatus).mockImplementationOnce(async () => { admin.status.value = { authenticated: false } })
+      const drawer = wrapper.findComponent({ name: 'AccountCostWorkspace' })
+      drawer.vm.$emit('updated'); await flushPromises()
+      harness.currentAccount!.value = { id: 'workspace-b', displayName: '工作区 B' }; await flushPromises()
+      drawer.vm.$emit('updated')
+      resolve(baseMetrics); await flushPromises()
+      expect(admin.checkStatus).toHaveBeenCalledTimes(2)
+      expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(2)
+      expect(drawer.props('summary')).toBeUndefined()
+      admin.status.value = { authenticated: true }; await flushPromises()
+      expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(3)
+      expect(costCompositionText(wrapper)).toContain('固定 11.00')
+    } finally { spy.mockRestore() }
+  })
+
+  it('releases a rejected status check and waits for a new event instead of looping', async () => {
+    const original = dashboardAdminState.useDashboardAdmin
+    let admin!: ReturnType<typeof original>
+    const spy = vi.spyOn(dashboardAdminState, 'useDashboardAdmin').mockImplementationOnce(() => {
+      admin = original()
+      return admin
+    })
+    try {
+      const wrapper = await mountDashboard(baseMetrics)
+      vi.mocked(admin.checkStatus).mockRejectedValueOnce(new Error('会话检查连接中断'))
+      harness.currentAccount!.value = { id: 'workspace-b', displayName: '工作区 B' }; await flushPromises()
+      expect(admin.checkStatus).toHaveBeenCalledTimes(2)
+      expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(1)
+      await flushPromises()
+      expect(admin.checkStatus).toHaveBeenCalledTimes(2)
+      wrapper.findComponent({ name: 'AccountCostWorkspace' }).vm.$emit('updated'); await flushPromises()
+      expect(harness.getDashboardMetrics).toHaveBeenCalledTimes(2)
+    } finally { spy.mockRestore() }
   })
 })

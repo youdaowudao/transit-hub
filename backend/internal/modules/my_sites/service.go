@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -686,6 +687,11 @@ func (s *Service) listUpstreamKeysForWorkspace(ctx context.Context, userID strin
 		log.Printf("[list-upstream-keys] 获取上游 key 列表失败 site=%s platform=%s err=%v", upstreamSite.Name, session.Platform, err)
 		return nil, err
 	}
+	if session.Platform == upstream.PlatformSub2API {
+		if err := s.validateWorkspaceUpstreamRead(ctx, upstreamSite); err != nil {
+			return nil, err
+		}
+	}
 	return keys, nil
 }
 
@@ -705,7 +711,21 @@ func (s *Service) GetUpstreamKeyForWorkspace(ctx context.Context, userID string,
 		log.Printf("[get-upstream-key] 获取上游 key 失败 site=%s platform=%s key_id=%s err=%v", upstreamSite.Name, upstreamSite.Session.Platform, keyID, err)
 		return upstream.Sub2APIKeyItem{}, err
 	}
+	if err := s.validateWorkspaceUpstreamRead(ctx, upstreamSite); err != nil {
+		return upstream.Sub2APIKeyItem{}, err
+	}
 	return item, nil
+}
+
+func (s *Service) validateWorkspaceUpstreamRead(ctx context.Context, original *upstream.Site) error {
+	current, err := s.upstreamLookup.GetSite(ctx, original.ID)
+	if err != nil {
+		return &upstream.RequestError{MessageKey: upstream.ErrorRequest, Platform: original.Platform, Stage: "check", UpstreamMessage: "复核本站 Key 读取结果时无法取得当前站点资料，本次未使用旧 Key 结果；请检查 Hub 后端站点读取记录后重试，不会修改主站。", Cause: err}
+	}
+	if current == nil || current.ID != original.ID || current.UserID != original.UserID || current.AdminAccountID != original.AdminAccountID || current.Platform != original.Platform || current.IsEnabled() != original.IsEnabled() || !reflect.DeepEqual(current.Session, original.Session) {
+		return &upstream.RequestError{MessageKey: upstream.ErrorRequest, Platform: original.Platform, Stage: "check", UpstreamMessage: "本站资料或登录信息在读取 Key 时已经变化，本次未使用旧 Key 结果；请重新读取，不会修改主站。"}
+	}
+	return upstream.SiteReadResultError(upstream.SiteReadAuthError(current))
 }
 
 func (s *Service) workspaceUpstreamSite(ctx context.Context, userID string, adminAccountID string, siteID string) (*upstream.Site, error) {
@@ -715,6 +735,9 @@ func (s *Service) workspaceUpstreamSite(ctx context.Context, userID string, admi
 	upstreamSite, err := s.upstreamLookup.GetSite(ctx, siteID)
 	if err != nil || upstreamSite == nil || upstreamSite.Session == nil || upstreamSite.UserID != userID || upstreamSite.AdminAccountID != adminAccountID {
 		return nil, requestError(ErrorRequest)
+	}
+	if authErr := upstream.SiteReadAuthError(upstreamSite); authErr != nil {
+		return nil, authErr
 	}
 	return upstreamSite, nil
 }

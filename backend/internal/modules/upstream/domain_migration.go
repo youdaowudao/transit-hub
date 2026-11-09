@@ -18,6 +18,9 @@ func (s *Service) domainMigrationLogin(ctx context.Context, original Site, dto U
 	if original.Session == nil {
 		return LoginResult{}, identityCheckError(original.Platform, "原站点没有保存过登录资料，无法核对新地址上的账号。请新增站点；本次没有请求上游，原资料和费用未保存，不会修改主站。")
 	}
+	if authErr := SiteReadAuthError(&original); authErr != nil && !relogin {
+		return LoginResult{}, authErr
+	}
 	if err := ctx.Err(); err != nil {
 		return LoginResult{}, err
 	}
@@ -34,7 +37,11 @@ func (s *Service) domainMigrationLogin(ctx context.Context, original Site, dto U
 		oldEmail = strings.TrimSpace(original.Account)
 	default:
 		var readErr error
-		oldID, _, readErr = s.platformService.readLoginPrincipal(ctx, *original.Session)
+		if authErr := SiteReadAuthError(&original); authErr != nil {
+			readErr = authErr
+		} else {
+			oldID, _, readErr = s.platformService.readLoginPrincipal(ctx, *original.Session)
+		}
 		if err := ctx.Err(); err != nil {
 			return LoginResult{}, err
 		}

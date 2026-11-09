@@ -68,7 +68,30 @@ func TestFailureFixReview3SyncKeepsBaselineCategory(t *testing.T) {
 			site.Platform = tc.platform
 			cache.add(site)
 			response, err := service.Sync(context.Background(), site.UserID, site.ID)
-			if err != nil || response.ErrorKey == nil {
+			if tc.name == "refresh_401" {
+				// A saved refresh rejection now returns the actionable failure;
+				// the original coarse category and card/batch reason stay intact.
+				var detail *RequestError
+				if !errors.As(err, &detail) || detail.MessageKey != tc.category || detail.Reason != tc.reason || detail.Stage != "refresh" || detail.StatusCode != 401 || !strings.Contains(detail.UpstreamMessage, "fixture rejection") {
+					t.Fatalf("refresh refusal lost its category or known reason: %v", err)
+				}
+				actual := syncSiteResult(site.ID, response, err)
+				if actual.Status != "auth_failed" || actual.ErrorKey != "site_sync_auth" || actual.ErrorDetail != detail.UpstreamMessage {
+					t.Fatalf("returned refresh error lost its actionable batch classification: %+v", actual)
+				}
+				recorder := httptest.NewRecorder()
+				writeUpstreamError(recorder, err)
+				var payload struct {
+					Message string
+					Failure formFailure
+				}
+				if json.Unmarshal(recorder.Body.Bytes(), &payload) != nil || recorder.Code != http.StatusUnprocessableEntity || payload.Message != tc.reason || payload.Failure.HTTPStatus != 401 || payload.Failure.ErrorDetail != detail.UpstreamMessage {
+					t.Fatal("upstream rejection must retain safe detail without logging the Hub user out")
+				}
+			} else if err != nil {
+				t.Fatalf("unchanged synchronization category unexpectedly returned an error: %v", err)
+			}
+			if response.ErrorKey == nil {
 				t.Fatalf("missing synchronization response: %v", err)
 			}
 			if errorCategory(*response.ErrorKey) != tc.category {

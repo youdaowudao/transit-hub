@@ -1,4 +1,4 @@
-import { costFailureText } from '../utils/upstream'
+import { costFailureText, upstreamRefreshRejectedKey, upstreamSiteAuthUnconfirmed } from '../utils/upstream'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
 import { computed, inject, onBeforeUnmount, ref, watch } from 'vue'
 import { useAdminAccounts } from './useAdminAccounts'
@@ -95,7 +95,7 @@ export const useUpstreamSites = () => {
   const siteOperationVersions = ref(new Map<string, number>())
   const pendingSiteOperations = ref(new Set<string>())
   const enabledSiteCount = computed(() => sites.value.filter((site) => site.enabled).length)
-  const connectedCount = computed(() => sites.value.filter((site) => site.enabled && (site.status === 'connected' || site.status === 'syncing')).length)
+  const connectedCount = computed(() => sites.value.filter((site) => site.enabled && !upstreamSiteAuthUnconfirmed(site, siteSyncStates.value.get(site.id)) && (site.status === 'connected' || site.status === 'syncing')).length)
 
   // Reading and mutations have separate generations: an older finally must not
   // invalidate the result of a newer mutation. Each workspace owns its maps.
@@ -181,6 +181,7 @@ export const useUpstreamSites = () => {
     if (!Array.isArray(remote) || remote.length !== 1 || remote[0]?.id !== id || !remote[0]?.metrics || !Array.isArray(remote[0].metrics.groups)) throw new Error('本站缓存返回内容不完整，请检查 Hub 服务读取日志后重试；不会修改主站。')
     if (!sites.value.some(site => site.id === id)) return false
     applySite(remote[0], true)
+    if (remote[0].status === 'connected' && siteSyncStates.value.get(id)?.errorKey === upstreamRefreshRejectedKey) siteSyncStates.value.delete(id)
     invalidateRead(id)
     return true
   }
@@ -217,6 +218,7 @@ export const useUpstreamSites = () => {
       const current = sites.value.find(site => site.id === id)
       if (!current || removedIds.has(id)) return false
       applySite({ ...nextSite, settings: current.settings, enabled: current.enabled })
+      if (nextSite.status === 'connected' && [form.password, form.accessToken, form.refreshToken].some(value => value.trim() !== '') && siteSyncStates.value.get(id)?.errorKey === upstreamRefreshRejectedKey) siteSyncStates.value.delete(id)
       return true
     } catch (error) {
       if (isCurrent(token)) {
@@ -257,20 +259,43 @@ export const useUpstreamSites = () => {
   const refreshSingleSite = async (id: string) => {
     if (!sites.value.find(site => site.id === id)?.enabled || syncingSiteIds.value.has(id) || pending.has(id) || removedIds.has(id)) return
     const token = beginOperation(id, false)
+    let reconcileAuth = false
     siteSyncStates.value.delete(id)
     syncingSiteIds.value = new Set([...syncingSiteIds.value, id])
     try {
       const nextSite = await syncUpstreamSite(id)
       if (isCurrent(token)) applySite(nextSite)
     } catch (error) {
-      if (isCurrent(token)) siteSyncStates.value.set(id, {
-        phase: 'error', errorKey: safeUpstreamErrorKey(error),
-        errorDetail: error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined)?.errorDetail : undefined,
-      })
+      if (isCurrent(token)) {
+        const errorKey = safeUpstreamErrorKey(error)
+        siteSyncStates.value.set(id, {
+          phase: 'error', errorKey,
+          errorDetail: error instanceof Error && 'failure' in error ? (error.failure as UpstreamFailure | undefined)?.errorDetail : undefined,
+        })
+        reconcileAuth = errorKey === upstreamRefreshRejectedKey
+      }
     } finally {
+      const mayReconcile = reconcileAuth && isCurrent(token) && !removedIds.has(id)
       finishOperation(token)
       if (sameWorkspace(token)) {
         const next = new Set(syncingSiteIds.value); next.delete(id); syncingSiteIds.value = next
+      }
+      if (mayReconcile && sameWorkspace(token) && !pending.has(id)) {
+        const version = siteOperationVersions.value.get(id)
+        try {
+          await readSiteSnapshot(id, undefined, token.workspace)
+        } catch (error) {
+          if (sameWorkspace(token) && !pending.has(id) && !removedIds.has(id) && version === siteOperationVersions.value.get(id)) {
+            const previous = siteSyncStates.value.get(id)
+            if (previous?.phase === 'error' && previous.errorKey === upstreamRefreshRejectedKey) {
+              const failure = error instanceof Error && 'failure' in error ? error.failure as UpstreamFailure | undefined : undefined
+              const key = safeUpstreamErrorKey(error)
+              const cause = safeScopedErrorText(failure?.errorDetail || failure?.upstreamMessage)
+                || (key !== 'admin.upstream.errors.unknown' ? costFailureText(key) : '具体原因未返回，请检查 Hub 后端站点读取记录')
+              siteSyncStates.value.set(id, { ...previous, errorDetail: `${previous.errorDetail || costFailureText(previous.errorKey)} 读取本站最新连接状态失败：${cause}。页面尚未核实当前状态，请刷新站点列表查看；不会修改主站。` })
+            }
+          }
+        }
       }
     }
   }

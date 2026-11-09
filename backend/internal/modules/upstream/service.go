@@ -72,19 +72,20 @@ type Service struct {
 	initialSchedules        map[refreshWorkspaceKey]bool
 	backgroundTasksDisabled bool
 	// groupCostQueueMu never nests service/cache operations. Workers own at most two reads.
-	groupCostQueueMu  sync.Mutex
-	groupCostQueue    *groupCostQueue
-	groupCostClosed   bool
-	groupCostDisabled bool
-	timers            map[string]*time.Timer
-	afterFunc         func(time.Duration, func()) *time.Timer
-	deletedSites      map[string]struct{}
-	syncFlights       map[string]*syncFlight
-	keyUsageFlights   map[string]*keyUsageFlight
-	keyUsageChanged   chan struct{}
-	keyUsageFinished  map[string]time.Time
-	now               func() time.Time
-	mu                sync.Mutex
+	groupCostQueueMu      sync.Mutex
+	groupCostQueue        *groupCostQueue
+	groupCostClosed       bool
+	groupCostDisabled     bool
+	timers                map[string]*time.Timer
+	afterFunc             func(time.Duration, func()) *time.Timer
+	deletedSites          map[string]struct{}
+	sessionRefreshFlights map[string]*sessionRefreshFlight
+	syncFlights           map[string]*syncFlight
+	keyUsageFlights       map[string]*keyUsageFlight
+	keyUsageChanged       chan struct{}
+	keyUsageFinished      map[string]time.Time
+	now                   func() time.Time
+	mu                    sync.Mutex
 
 	siteLoginSuccessCallback func(userID, adminAccountID, siteID string)
 	// AfterSync 在站点同步成功持久化后被调用，传入同步前后的指标及状态。
@@ -318,13 +319,12 @@ func (s *Service) FetchGroupDailyStats(ctx context.Context, userID string, id st
 	if site.AdminAccountID != aid {
 		return nil, newRequestError(ErrorNotFound, "")
 	}
-	session := *site.Session
 	groups := append([]GroupInfo(nil), site.Metrics.Groups...)
-
-	refreshedSession, err := s.platformService.RefreshSession(session)
+	prepared, err := s.prepareSiteReadSession(ctx, *site, time.Duration(refreshSkewMS)*time.Millisecond, true)
 	if err != nil {
 		return nil, err
 	}
+	refreshedSession := prepared.Session
 	var stats []GroupDailyStat
 	if refreshedSession.Platform == PlatformNewAPI {
 		stats, err = s.platformService.FetchNewAPIGroupDailyStats(refreshedSession, groups)
@@ -337,12 +337,17 @@ func (s *Service) FetchGroupDailyStats(ctx context.Context, userID string, id st
 		return nil, err
 	}
 
-	proceed, saveErr := s.persistKeyUsageSession(*site, refreshedSession)
-	if !proceed || saveErr != nil {
-		if saveErr == nil {
-			saveErr = staleSiteRequestError()
+	if !prepared.Persisted {
+		proceed, saveErr := s.persistKeyUsageSession(*site, refreshedSession)
+		if !proceed || saveErr != nil {
+			if saveErr == nil {
+				saveErr = staleSiteRequestError()
+			}
+			return nil, SiteReadResultError(saveErr)
 		}
-		return nil, saveErr
+	}
+	if err := s.validateSiteReadResult(ctx, *site, refreshedSession); err != nil {
+		return nil, SiteReadResultError(err)
 	}
 	return stats, nil
 }
@@ -401,9 +406,9 @@ func (s *Service) KeyUsageForDate(ctx context.Context, userID, adminAccountID, d
 				SiteID: site.ID, SiteName: site.Name, Platform: site.Platform,
 				RechargeRate: site.RechargeRate, Items: []KeyUsageTodayItem{},
 			}
-			session := *site.Session
 			groups := append([]GroupInfo(nil), site.Metrics.Groups...)
-			refreshedSession, refreshErr := s.platformService.RefreshSessionContext(ctx, session)
+			prepared, refreshErr := s.prepareSiteReadSession(ctx, *site, time.Duration(refreshSkewMS)*time.Millisecond, true)
+			refreshedSession := prepared.Session
 			if refreshErr != nil {
 				logDatedUsageFailure(site, date, "refresh", refreshErr)
 				siteResult.Error = formatCostFailure("逐Key登录资料刷新", refreshErr)
@@ -417,12 +422,19 @@ func (s *Service) KeyUsageForDate(ctx context.Context, userID, adminAccountID, d
 				result.Sites[index] = siteResult
 				return
 			}
-			proceed, saveErr := s.persistKeyUsageSession(*site, refreshedSession)
-			if !proceed || saveErr != nil {
-				if saveErr == nil {
-					saveErr = staleSiteRequestError()
+			if !prepared.Persisted {
+				proceed, saveErr := s.persistKeyUsageSession(*site, refreshedSession)
+				if !proceed || saveErr != nil {
+					if saveErr == nil {
+						saveErr = staleSiteRequestError()
+					}
+					siteResult.Error = taskErrorDetail(SiteReadResultError(saveErr))
+					result.Sites[index] = siteResult
+					return
 				}
-				siteResult.Error = taskErrorDetail(saveErr)
+			}
+			if validationErr := s.validateSiteReadResult(ctx, *site, refreshedSession); validationErr != nil {
+				siteResult.Error = formatCostFailure("指定日费用读取结果复核", SiteReadResultError(validationErr))
 				result.Sites[index] = siteResult
 				return
 			}
@@ -719,7 +731,13 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		if original.Session == nil {
 			return Response{}, identityCheckError(site.Platform, "原站点没有保存过登录资料，无法核对新登录信息是不是原账号。请新增站点；原资料未保存，不会修改主站。")
 		}
-		oldID, _, readErr := s.platformService.readLoginPrincipal(ctx, *original.Session)
+		oldID := ""
+		var readErr error
+		if authErr := SiteReadAuthError(&original); authErr != nil {
+			readErr = authErr
+		} else {
+			oldID, _, readErr = s.platformService.readLoginPrincipal(ctx, *original.Session)
+		}
 		if ctx.Err() != nil {
 			return Response{}, ctx.Err()
 		}
@@ -789,7 +807,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 			result.Session.UserID, result.Session.UserIDConfirmed = newID, true
 		}
 	}
-	if domainChanged && ctx.Err() != nil {
+	if (domainChanged || relogin) && ctx.Err() != nil {
 		return Response{}, ctx.Err()
 	}
 	s.mu.Lock()
@@ -803,7 +821,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		s.mu.Unlock()
 		return Response{}, staleSiteRequestError()
 	}
-	if domainChanged && ctx.Err() != nil {
+	if (domainChanged || relogin) && ctx.Err() != nil {
 		s.mu.Unlock()
 		return Response{}, ctx.Err()
 	}
@@ -1075,6 +1093,9 @@ func syncSiteResult(siteID string, response Response, err error) (result SyncSit
 	if errors.Is(err, context.DeadlineExceeded) || response.syncTimedOut {
 		return SyncSiteResult{SiteID: siteID, Status: "timeout", ErrorKey: "site_sync_timeout"}
 	}
+	if isSiteReadAuthFailure(err) {
+		return SyncSiteResult{SiteID: siteID, Status: "auth_failed", ErrorKey: "site_sync_auth", ErrorDetail: taskErrorDetail(err)}
+	}
 	if err != nil {
 		return SyncSiteResult{SiteID: siteID, Status: "unavailable", ErrorKey: "site_sync_failed", ErrorDetail: taskErrorDetail(err)}
 	}
@@ -1290,14 +1311,14 @@ func (s *Service) runSyncFlight(id string, flight *syncFlight) {
 }
 
 // refreshSessionForSync uses only this site's workspace setting for early refresh.
-func (s *Service) refreshSessionForSync(ctx context.Context, site *Site, session Session) (Session, error) {
+func (s *Service) refreshSessionForSync(ctx context.Context, site *Site) (siteReadSessionResult, error) {
 	s.mu.Lock()
 	config := s.refreshConfigs[refreshWorkspaceKey{userID: site.UserID, adminAccountID: site.AdminAccountID}]
 	s.mu.Unlock()
 	if config.Enabled && config.Interval > 0 {
-		return s.platformService.refreshSessionContextWithWindow(ctx, session, config.Interval+5*time.Minute, false)
+		return s.prepareSiteReadSession(ctx, *site, config.Interval+5*time.Minute, false)
 	}
-	return s.platformService.RefreshSessionContext(ctx, session)
+	return s.prepareSiteReadSession(ctx, *site, time.Duration(refreshSkewMS)*time.Millisecond, true)
 }
 
 // syncOnce 执行单个站点的同步流程：刷新会话 → 拉取最新指标 → 更新缓存和数据库。
@@ -1316,6 +1337,10 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 		s.mu.Unlock()
 		return s.toResponse(ctx, site), newRequestError(ErrorDisabled, "")
 	}
+	if authErr := SiteReadAuthError(site); authErr != nil {
+		s.mu.Unlock()
+		return s.toResponse(ctx, site), authErr
+	}
 	original := cloneSite(site)
 	oldMetrics, oldStatus := original.Metrics, original.Status
 	transient := cloneSite(site)
@@ -1326,15 +1351,41 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	}
 	s.mu.Unlock()
 	syncDate := businesstime.DateAt(s.keyUsageNow())
-	session := *original.Session
-	refreshed, fetchErr := s.refreshSessionForSync(ctx, &original, session)
+	prepared, fetchErr := s.refreshSessionForSync(ctx, &original)
+	refreshed := prepared.Session
 	refreshedOK := fetchErr == nil
+	if fetchErr != nil {
+		var detail *RequestError
+		ordinaryRefreshFailure := errors.As(fetchErr, &detail) && detail.Stage == "refresh" && !isSiteReadAuthFailure(fetchErr)
+		if prepared.Rejected || !ordinaryRefreshFailure || ctx.Err() != nil {
+			s.mu.Lock()
+			current, _ := s.readCurrentSite(ctx, id)
+			if current != nil && current.UserID == original.UserID && current.AdminAccountID == original.AdminAccountID {
+				s.revokeSyncingLocked(current, original)
+				effective := original
+				effective.Session = &refreshed
+				s.revokeSyncingLocked(current, effective)
+				if latest, err := s.readCurrentSite(ctx, id); err == nil && latest != nil {
+					current = latest
+				}
+			}
+			s.mu.Unlock()
+			if current != nil {
+				return s.toResponse(ctx, current), fetchErr
+			}
+			return Response{}, fetchErr
+		}
+	}
 	metrics := Metrics{}
 	if fetchErr == nil {
 		metrics, fetchErr = s.platformService.FetchMetricsForDate(refreshed, syncDate)
 	}
 	audit := metrics.GroupSnapshotAudit
 	rateInput := currentRateNoticeInput(metrics, fetchErr, s.keyUsageNow())
+	effective := original
+	if prepared.Persisted {
+		effective.Session = &refreshed
+	}
 	s.mu.Lock()
 	current, readErr := s.readCurrentSite(ctx, id)
 	_, deleted := s.deletedSites[id]
@@ -1344,11 +1395,15 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	}
 	if !current.IsEnabled() {
 		s.clearTimerLocked(id)
-		s.revokeSyncingLocked(current, original)
+		s.revokeSyncingLocked(current, effective)
 		s.mu.Unlock()
 		return s.toResponse(ctx, current), newRequestError(ErrorDisabled, "")
 	}
-	if !reflect.DeepEqual(current.Session, original.Session) {
+	if authErr := SiteReadAuthError(current); authErr != nil {
+		s.mu.Unlock()
+		return s.toResponse(ctx, current), SiteReadResultError(authErr)
+	}
+	if !reflect.DeepEqual(current.Session, effective.Session) {
 		s.mu.Unlock()
 		return s.toResponse(ctx, current), staleSiteRequestError()
 	}
@@ -1359,7 +1414,7 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 	}
 	if fetchErr != nil {
 		candidate.Status = StatusError
-		key := siteErrorKey(fetchErr)
+		key := siteReadStatusErrorKey(fetchErr)
 		candidate.ErrorKey = &key
 		if metrics.TodayConsumeStatus == "unreadable" && metrics.TodayConsumeFailedAt != nil {
 			failedMetrics := current.Metrics
@@ -1382,7 +1437,7 @@ func (s *Service) syncOnce(ctx context.Context, id string) (Response, error) {
 		candidate = publication.Actual
 	}
 	if saveErr != nil {
-		s.revokeSyncingLocked(current, original)
+		s.revokeSyncingLocked(current, effective)
 		s.mu.Unlock()
 		return s.toResponse(ctx, current), saveErr
 	}
@@ -1427,7 +1482,7 @@ func (s *Service) revokeSyncingLocked(current *Site, original Site) {
 }
 func taskErrorDetail(err error) string {
 	var detail *RequestError
-	if errors.As(err, &detail) && detail.Stage == "save" {
+	if errors.As(err, &detail) && (detail.Stage == "save" || isSiteReadAuthFailure(err)) {
 		return detail.UpstreamMessage
 	}
 	return ""
@@ -1649,7 +1704,7 @@ func (s *Service) scheduleSyncWithModeLocked(id string, site *Site, initial bool
 	if _, deleted := s.deletedSites[id]; deleted {
 		return false
 	}
-	if site == nil || !site.IsEnabled() || site.Session == nil {
+	if site == nil || !site.IsEnabled() || site.Session == nil || SiteReadAuthError(site) != nil {
 		return false
 	}
 	config, ok := s.refreshConfigs[refreshWorkspaceKey{userID: site.UserID, adminAccountID: site.AdminAccountID}]
@@ -1970,7 +2025,21 @@ func (s *Service) FetchSiteCostsForDate(ctx context.Context, userID, adminAccoun
 				results[idx] = r
 				return
 			}
+			if site.Platform == PlatformSub2API {
+				if readErr := s.validateSiteReadResult(ctx, site, *site.Session); readErr != nil {
+					r.Err = readErr
+					results[idx] = r
+					return
+				}
+			}
 			rawCost, meta, fetchErr := s.platformService.fetchCostForDateForSite(site.ID, *site.Session, date)
+			if fetchErr == nil && site.Platform == PlatformSub2API {
+				if readErr := s.validateSiteReadResult(ctx, site, *site.Session); readErr != nil {
+					r.Err = SiteReadResultError(readErr)
+					results[idx] = r
+					return
+				}
+			}
 			r.RawCost = rawCost
 			r.Meta = meta
 			r.Err = fetchErr

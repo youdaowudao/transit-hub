@@ -138,10 +138,11 @@ test('core gate keeps the scoped group rates business regressions', async () => 
 
 test('core gate retains group cost queue, cache refresh and shutdown regressions', async () => {
   const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
-  for (const member of ['upstream-group-cost-refresh.behavior.test.ts', 'upstream-group-cost-additional.behavior.test.ts', 'upstream-group-cost-api.test.ts', 'upstream-group-rates-warning.behavior.test.ts']) {
+  for (const member of ['upstream-group-cost-refresh.behavior.test.ts', 'upstream-group-cost-additional.behavior.test.ts', 'upstream-group-cost-api.test.ts', 'upstream-group-rates-warning.behavior.test.ts', 'upstream-site-read-session.behavior.test.ts', 'upstream-site-read-session-race.behavior.test.ts']) {
     assert.ok(script.includes(member), `missing group cost regression: ${member}`)
   }
   assert.ok(script.includes("go test -race ./internal/modules/upstream ./internal/httpserver -run 'TestGroupCost(Queue|Retry|Snapshot|Shutdown)' -count=1"))
+  assert.ok(script.includes("go test -race ./internal/modules/upstream ./internal/modules/my_sites -run 'TestSiteRead' -count=1"))
 })
 
 

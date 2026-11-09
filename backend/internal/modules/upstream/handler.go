@@ -318,7 +318,7 @@ func writeWorkspaceError(w http.ResponseWriter, err error) {
 
 func writeUpstreamError(w http.ResponseWriter, err error) {
 	var saveErr *RequestError
-	if errors.As(err, &saveErr) && saveErr.Stage == "save" {
+	if errors.As(err, &saveErr) && (saveErr.Stage == "save" || isSiteReadAuthFailure(err)) {
 		writeUpstreamFormError(w, err)
 		return
 	}

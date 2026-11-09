@@ -209,20 +209,23 @@ func (s *PlatformService) RefreshSessionContext(ctx context.Context, session Ses
 	return s.refreshSessionContextWithWindow(ctx, session, time.Duration(refreshSkewMS)*time.Millisecond, true)
 }
 
-func (s *PlatformService) refreshSessionContextWithWindow(ctx context.Context, session Session, window time.Duration, inclusive bool) (Session, error) {
-	if session.Platform == PlatformNewAPI {
-		return session, nil
-	}
-	now := s.keyUsageNow().UnixMilli()
-	if session.RefreshToken == "" {
-		return session, nil
+func (s *PlatformService) sessionNeedsRefresh(session Session, window time.Duration, inclusive bool) bool {
+	if session.Platform == PlatformNewAPI || session.RefreshToken == "" {
+		return false
 	}
 	if session.ExpiresAt != nil {
-		remaining := *session.ExpiresAt - now
+		remaining := *session.ExpiresAt - s.keyUsageNow().UnixMilli()
 		windowMS := window.Milliseconds()
 		if remaining > windowMS || (!inclusive && remaining == windowMS) {
-			return session, nil
+			return false
 		}
+	}
+	return true
+}
+
+func (s *PlatformService) refreshSessionContextWithWindow(ctx context.Context, session Session, window time.Duration, inclusive bool) (Session, error) {
+	if !s.sessionNeedsRefresh(session, window, inclusive) {
+		return session, nil
 	}
 	return s.refreshSub2APISessionContext(ctx, session)
 }

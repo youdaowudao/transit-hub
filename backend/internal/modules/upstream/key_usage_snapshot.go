@@ -82,7 +82,7 @@ func (s *Service) keyUsageDate() string { return businesstime.DateAt(s.keyUsageN
 
 // Called only after sync's done channel is closed, so upstream-page waiting is unchanged.
 func (s *Service) enqueueKeyUsageCollection(site Site) {
-	if s.keyUsageStore() == nil || !site.IsEnabled() || site.Session == nil {
+	if s.keyUsageStore() == nil || !site.IsEnabled() || site.Session == nil || SiteReadAuthError(&site) != nil {
 		return
 	}
 	s.mu.Lock()
@@ -168,12 +168,13 @@ func (s *Service) collectKeyUsageSnapshot(site Site) {
 	if s.isSiteDeleted(site.ID) {
 		return
 	}
-	if current, err := s.cache.Get(ctx, site.ID); err != nil || !keyUsageSiteMatches(current, site) || !reflect.DeepEqual(current.Session, site.Session) {
+	if current, err := s.cache.Get(ctx, site.ID); err != nil || !keyUsageSiteMatches(current, site) || !reflect.DeepEqual(current.Session, site.Session) || SiteReadAuthError(current) != nil {
 		return
 	}
-	session, err := s.platformService.RefreshSessionContext(ctx, *site.Session)
-	sessionPersisted := false
-	if err == nil {
+	prepared, err := s.prepareSiteReadSession(ctx, site, time.Duration(refreshSkewMS)*time.Millisecond, true)
+	session := prepared.Session
+	sessionPersisted := prepared.Persisted
+	if err == nil && !sessionPersisted {
 		proceed, saveErr := s.persistKeyUsageSession(site, session)
 		if !proceed && saveErr == nil {
 			return
@@ -224,7 +225,7 @@ func (s *Service) collectKeyUsageSnapshot(site Site) {
 	saveCtx, saveCancel := context.WithTimeout(context.Background(), persistenceTimeout)
 	defer saveCancel()
 	current, cacheErr := s.cache.Get(saveCtx, site.ID)
-	if cacheErr != nil || !keyUsageSiteMatches(current, site) {
+	if cacheErr != nil || !keyUsageSiteMatches(current, site) || value.Complete && SiteReadAuthError(current) != nil {
 		return
 	}
 	// An in-flight attempt must not publish results for a replaced session.
@@ -264,6 +265,9 @@ func (s *Service) persistKeyUsageSession(original Site, refreshed Session) (bool
 	if !keyUsageSiteMatches(current, original) || !reflect.DeepEqual(current.Session, original.Session) {
 		return false, nil
 	}
+	if authErr := SiteReadAuthError(current); authErr != nil {
+		return false, authErr
+	}
 	expected := cloneSite(current)
 	candidate := cloneSite(current)
 	candidate.Session = &refreshed
@@ -275,8 +279,8 @@ func (s *Service) persistKeyUsageSession(original Site, refreshed Session) (bool
 }
 
 func keyUsageSessionPersistenceError(platform Platform, cause error) error {
-	detail := newRequestError(ErrorRequest, platform)
-	detail.Cause = cause
+	detail := saveFailureError("读取本站已保存的登录资料失败："+safePersistenceCause(cause)+"；本次未开始后续费用读取或发布新费用，请维护人员检查 PostgreSQL 和 Redis 站点保存记录后重试；不会修改主站。", cause, 503)
+	detail.Platform = platform
 	return detail
 }
 

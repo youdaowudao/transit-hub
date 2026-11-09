@@ -1,5 +1,16 @@
 import { t } from '@/locales'
-import type { UpstreamGroupInfo, UpstreamSite } from '../types/upstream'
+import type { SiteSyncState, UpstreamGroupInfo, UpstreamSite } from '../types/upstream'
+
+export const upstreamRefreshRejectedKey = 'admin.upstream.errors.refreshTokenRejected'
+export const upstreamAuthPauseHelp = '上次延长登录有效期时被上游拒绝，本站已暂停自动访问。请点“编辑站点”，用原账号重新登录；原资料和历史费用保留，不会直接修改主站账号。'
+
+export const upstreamSiteAuthPaused = (site: Pick<UpstreamSite, 'platform' | 'status' | 'errorKey'>): boolean => (
+  site.platform === 'sub2api' && site.status === 'error' && site.errorKey === upstreamRefreshRejectedKey
+)
+
+export const upstreamSiteAuthUnconfirmed = (site: Pick<UpstreamSite, 'platform' | 'status' | 'errorKey'>, state?: SiteSyncState): boolean => (
+  site.platform === 'sub2api' && !upstreamSiteAuthPaused(site) && state?.phase === 'error' && state.errorKey === upstreamRefreshRejectedKey
+)
 
 export interface UpstreamLink {
   href: string

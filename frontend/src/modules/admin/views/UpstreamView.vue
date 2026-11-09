@@ -14,7 +14,7 @@ import type { UpstreamFailure, UpstreamGroupInfo, UpstreamMetricValue, UpstreamS
 import type { AdminGroupHealth } from '../types/connectionHealth'
 import type { RealConnection } from '../types/mySites'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
-import { groupCostForDisplay, groupCostObservedTime, nextGroupCostDisplayBoundary, costFailureText, sortUpstreamSites, parseUpstreamLink, upstreamWebsiteLink, type UpstreamSortDirection, type UpstreamSortField } from '../utils/upstream'
+import { groupCostForDisplay, groupCostObservedTime, nextGroupCostDisplayBoundary, costFailureText, upstreamAuthPauseHelp, upstreamSiteAuthPaused, upstreamSiteAuthUnconfirmed, sortUpstreamSites, parseUpstreamLink, upstreamWebsiteLink, type UpstreamSortDirection, type UpstreamSortField } from '../utils/upstream'
 
 import { t, locale } from '@/locales'
 const router = useRouter()
@@ -272,6 +272,8 @@ const statusClasses: Record<UpstreamStatus, string> = {
 }
 
 const statusLabel = (status: UpstreamStatus): string => t(`admin.upstream.status.${status}`)
+const siteDisplayStatus = (site: UpstreamSite): UpstreamStatus => upstreamSiteAuthUnconfirmed(site, siteSyncStates.value.get(site.id)) ? 'error' : site.status
+const siteStatusLabel = (site: UpstreamSite): string => upstreamSiteAuthUnconfirmed(site, siteSyncStates.value.get(site.id)) ? '连接状态待确认' : statusLabel(site.status)
 
 const toggleSiteEnabled = (site: UpstreamSite) => {
   void setSiteEnabled(site.id, !site.enabled)
@@ -750,12 +752,12 @@ onBeforeUnmount(() => {
               >{{ t('admin.upstream.pin.badge') }}</span>
               <div
                 class="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium border shrink-0"
-                :class="site.enabled ? statusClasses[site.status] : 'bg-muted text-muted-foreground border-border/60'"
+                :class="site.enabled ? statusClasses[siteDisplayStatus(site)] : 'bg-muted text-muted-foreground border-border/60'"
               >
-                <Loader2 v-if="site.enabled && (site.status === 'connecting' || site.status === 'syncing')" class="w-3 h-3 animate-spin" />
-                <CheckCircle2 v-else-if="site.enabled && site.status === 'connected'" class="w-3 h-3" />
+                <Loader2 v-if="site.enabled && (siteDisplayStatus(site) === 'connecting' || siteDisplayStatus(site) === 'syncing')" class="w-3 h-3 animate-spin" />
+                <CheckCircle2 v-else-if="site.enabled && siteDisplayStatus(site) === 'connected'" class="w-3 h-3" />
                 <XCircle v-else class="w-3 h-3" />
-                {{ site.enabled ? statusLabel(site.status) : t('admin.upstream.status.disabled') }}
+                {{ site.enabled ? siteStatusLabel(site) : t('admin.upstream.status.disabled') }}
               </div>
             </div>
           </div>
@@ -856,6 +858,7 @@ onBeforeUnmount(() => {
           <span>
             <span class="font-medium">{{ siteFailureKey(site) ? t('admin.upstream.syncStream.error') : '今日成本不可读' }}：</span>
             {{ siteFailureKey(site) ? costFailureText(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') : costFailureDisplay(site) }}
+            <span v-if="upstreamSiteAuthPaused(site)" class="block">{{ upstreamAuthPauseHelp }}</span>
           </span>
         </div>
 
@@ -939,18 +942,19 @@ onBeforeUnmount(() => {
                 <div
                   v-else
                   class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border"
-                  :class="site.enabled ? statusClasses[site.status] : 'bg-muted text-muted-foreground border-border/60'"
+                  :class="site.enabled ? statusClasses[siteDisplayStatus(site)] : 'bg-muted text-muted-foreground border-border/60'"
                 >
-                  <Loader2 v-if="site.enabled && (site.status === 'connecting' || site.status === 'syncing')" class="w-3.5 h-3.5 animate-spin" />
-                  <CheckCircle2 v-else-if="site.enabled && site.status === 'connected'" class="w-3.5 h-3.5" />
+                  <Loader2 v-if="site.enabled && (siteDisplayStatus(site) === 'connecting' || siteDisplayStatus(site) === 'syncing')" class="w-3.5 h-3.5 animate-spin" />
+                  <CheckCircle2 v-else-if="site.enabled && siteDisplayStatus(site) === 'connected'" class="w-3.5 h-3.5" />
                   <XCircle v-else class="w-3.5 h-3.5" />
-                  {{ site.enabled ? statusLabel(site.status) : t('admin.upstream.status.disabled') }}
+                  {{ site.enabled ? siteStatusLabel(site) : t('admin.upstream.status.disabled') }}
                 </div>
                 <div v-if="site.enabled && (siteFailureKey(site) || costFailureDisplay(site))" class="mt-2 flex max-w-xs items-start gap-1.5 text-xs leading-5 text-destructive" role="alert" aria-live="polite">
                   <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>
                     <span class="font-medium">{{ siteFailureKey(site) ? t('admin.upstream.syncStream.error') : '今日成本不可读' }}：</span>
                     {{ siteFailureKey(site) ? costFailureText(siteFailureKey(site) ?? 'admin.upstream.errors.unknown') : costFailureDisplay(site) }}
+            <span v-if="upstreamSiteAuthPaused(site)" class="block">{{ upstreamAuthPauseHelp }}</span>
                   </span>
                 </div>
               </td>

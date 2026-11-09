@@ -192,7 +192,7 @@ func (s *Service) readGroupCostCandidate(ctx context.Context, key groupCostWorkK
 		return nil, err
 	}
 	_, deleted := s.deletedSites[key.siteID]
-	if deleted || current == nil || costWorkKey(current) != key || !current.IsEnabled() {
+	if deleted || current == nil || costWorkKey(current) != key || !current.IsEnabled() || SiteReadAuthError(current) != nil {
 		return nil, nil
 	}
 	copy := cloneSite(current)

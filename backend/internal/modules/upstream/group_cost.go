@@ -212,7 +212,7 @@ func (s *Service) sampleGroupCostsContext(parent context.Context, original Site,
 		outcome.kind, outcome.reason = "save_failed", "site_read_failed"
 		return
 	}
-	if !keyUsageSiteMatches(current, original) || !reflect.DeepEqual(current.Session, original.Session) || !sameCostGroupIdentifiers(session.Platform, current.Metrics.Groups, groups) {
+	if !keyUsageSiteMatches(current, original) || SiteReadAuthError(current) != nil || !reflect.DeepEqual(current.Session, original.Session) || !sameCostGroupIdentifiers(session.Platform, current.Metrics.Groups, groups) {
 		outcome.kind, outcome.reason = "discarded", "site_changed"
 		return
 	}

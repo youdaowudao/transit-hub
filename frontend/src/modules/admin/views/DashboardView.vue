@@ -164,6 +164,8 @@ const initialLoading = ref(true)
 const isRefreshingData = ref(false)
 const refreshDataFailed = ref(false)
 const lastUpdatedAt = ref<number | null>(null)
+const dashboardDataRevision = ref(0)
+const pendingDashboardRead = ref<{ workspaceId: string; checkStatus: boolean } | null>(null)
 
 const hydrateSnapshot = (snapshot: DashboardDataSnapshot | null): boolean => {
   if (!snapshot) return false
@@ -267,28 +269,32 @@ const loadOperationalData = async () => {
 
 const loadAllData = async (options: { skipStatusCheck?: boolean } = {}) => {
   if (isRefreshingData.value) return
+  const key = workspaceID.value
+  if (!key) {
+    initialLoading.value = false
+    return
+  }
+  const revision = dashboardDataRevision.value
+  const isCurrentRead = () => revision === dashboardDataRevision.value && key === workspaceID.value
+  if (pendingDashboardRead.value?.workspaceId === key) pendingDashboardRead.value = null
   isRefreshingData.value = true
   refreshDataFailed.value = false
 
-  if (!options.skipStatusCheck) {
-    await checkAdminStatus({ preserveAuthenticatedOnError: metrics.value.length > 0 })
-  }
-  if (!adminStatus.value.authenticated) {
-    initialLoading.value = false
-    isRefreshingData.value = false
-    return
-  }
-
-  const trendsRequest = getDashboardTrends(30).catch(() => null)
   try {
+    if (!options.skipStatusCheck) {
+      await checkAdminStatus({ preserveAuthenticatedOnError: metrics.value.length > 0 })
+    }
+    if (!isCurrentRead() || !adminStatus.value.authenticated) return
+
+    const trendsRequest = getDashboardTrends(30).catch(() => null)
     const live = await getDashboardMetrics()
-    const previous = getDashboardDataSnapshot(workspaceID.value)
+    if (!isCurrentRead()) return
+    const previous = getDashboardDataSnapshot(key)
     const cachedTrends = previous?.trends ?? { points: [] }
     groupCount.value = live.groupCount ?? null
     applyRawData(live, cachedTrends)
     const updatedAt = Date.now()
     lastUpdatedAt.value = updatedAt
-    const key = workspaceID.value
     if (key) {
       saveDashboardDataSnapshot(key, {
         adminStatus: { ...adminStatus.value },
@@ -303,6 +309,7 @@ const loadAllData = async (options: { skipStatusCheck?: boolean } = {}) => {
     }
     void loadOperationalData()
     void trendsRequest.then((trends) => {
+      if (!isCurrentRead()) return
       if (!trends) {
         refreshDataFailed.value = true
         return
@@ -314,11 +321,28 @@ const loadAllData = async (options: { skipStatusCheck?: boolean } = {}) => {
       }
     })
   } catch {
-    refreshDataFailed.value = true
+    if (isCurrentRead()) refreshDataFailed.value = true
   } finally {
-    initialLoading.value = false
+    if (isCurrentRead()) initialLoading.value = false
     isRefreshingData.value = false
+    const pending = pendingDashboardRead.value
+    pendingDashboardRead.value = null
+    if (pending?.workspaceId === workspaceID.value && pending.workspaceId) {
+      void loadAllData({ skipStatusCheck: !pending.checkStatus })
+    }
   }
+}
+
+const handleAccountCostUpdated = () => {
+  dashboardDataRevision.value += 1
+  const key = workspaceID.value
+  if (!key) return
+  if (isRefreshingData.value) {
+    const checkStatus = pendingDashboardRead.value?.workspaceId === key && pendingDashboardRead.value.checkStatus
+    pendingDashboardRead.value = { workspaceId: key, checkStatus }
+    return
+  }
+  void loadAllData({ skipStatusCheck: true })
 }
 
 const adminExpiry = computed(() => {
@@ -349,14 +373,27 @@ watch(() => adminStatus.value.authenticated, (authenticated) => {
 })
 
 watch(workspaceID, (next, previous) => {
-  if (!next || next === previous || isRefreshingData.value) return
+  if (next === previous) return
+  dashboardDataRevision.value += 1
+  pendingDashboardRead.value = null
   groupUsage.value = null
   groupProfit.value = null
   balanceBreakdown.value = null
   healthSummary.value = null
+  groupCount.value = null
   metrics.value = []
+  liveData.value = null
+  lastUpdatedAt.value = null
+  if (!next) {
+    initialLoading.value = false
+    return
+  }
   const restored = hydrateSnapshot(getDashboardDataSnapshot(next))
   if (!restored) initialLoading.value = true
+  if (isRefreshingData.value) {
+    pendingDashboardRead.value = { workspaceId: next, checkStatus: true }
+    return
+  }
   void loadAllData()
 })
 
@@ -1371,7 +1408,7 @@ const lastProbeLabel = computed(() => {
       :workspace-id="workspaceID"
       @close="closeAccountCostWorkspace"
 			@open-upstream-details="openUpstreamDetailsFromAccountCost"
-      @updated="loadAllData({ skipStatusCheck: true })"
+      @updated="handleAccountCostUpdated"
     />
     <AdminLoginModal
       :open="adminModalOpen"

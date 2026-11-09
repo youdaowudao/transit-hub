@@ -40,6 +40,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, metricsService *Metric
 	mux.HandleFunc("GET /api/dashboard/additional-costs/{id}", handler.getAdditionalCost)
 	mux.HandleFunc("POST /api/dashboard/additional-costs", handler.createAdditionalCost)
 	mux.HandleFunc("PUT /api/dashboard/additional-costs/{id}", handler.updateAdditionalCost)
+	mux.HandleFunc("DELETE /api/dashboard/additional-costs/{id}", handler.deleteAdditionalCost)
 	mux.HandleFunc("GET /api/dashboard/recharge-fee-rate", handler.getRechargeFeeRate)
 	mux.HandleFunc("GET /api/dashboard/recharge-fee-rates", handler.listRechargeFeeRates)
 	mux.HandleFunc("PUT /api/dashboard/recharge-fee-rate", handler.saveRechargeFeeRate)
@@ -339,6 +340,19 @@ func (h *Handler) updateAdditionalCost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpjson.Write(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *Handler) deleteAdditionalCost(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if err := h.metricsService.DeleteAdditionalCost(r.Context(), userID, r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {

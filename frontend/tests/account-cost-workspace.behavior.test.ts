@@ -10,6 +10,7 @@ const harness = vi.hoisted(() => ({
   createAdditionalCost: vi.fn(),
   getAdditionalCost: vi.fn(),
   updateAdditionalCost: vi.fn(),
+  deleteAdditionalCost: vi.fn(),
   getRechargeFeeRate: vi.fn(),
   listRechargeFeeRateHistory: vi.fn(),
   listAccountAssets: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
   createAdditionalCost: harness.createAdditionalCost,
   getAdditionalCost: harness.getAdditionalCost,
   updateAdditionalCost: harness.updateAdditionalCost,
+  deleteAdditionalCost: harness.deleteAdditionalCost,
   getAccountAsset: vi.fn(),
   getRechargeFeeRate: harness.getRechargeFeeRate,
   listRechargeFeeRateHistory: harness.listRechargeFeeRateHistory,
@@ -110,6 +112,7 @@ beforeEach(() => {
   harness.createAdditionalCost.mockReset().mockResolvedValue({ items: [] })
   harness.getAdditionalCost.mockReset().mockResolvedValue({ items: [] })
   harness.updateAdditionalCost.mockReset().mockResolvedValue({ items: [] })
+  harness.deleteAdditionalCost.mockReset().mockResolvedValue(undefined)
   harness.getRechargeFeeRate.mockReset().mockResolvedValue({
     id: 'rate-current', effectiveDate: '2026-08-22', rate: 0.016, createdAt: '2026-08-22T08:00:00Z',
   })
@@ -127,6 +130,131 @@ afterEach(() => {
 })
 
 describe('AccountCostWorkspace regression behavior', () => {
+  it('ignores a rejected ledger query from a closed drawer and releases its busy state', async () => {
+    const wrapper = await mountWorkspace('ledger')
+    let reject!: (reason: Error) => void
+    harness.listAccountCostLedger.mockReturnValueOnce(new Promise((_resolve, fail) => { reject = fail }))
+    await findButton(wrapper, '查询账本').trigger('click')
+    await wrapper.setProps({ open: false }); await wrapper.setProps({ open: true }); await flushPromises()
+    reject(new Error('旧查询的失效错误')); await flushPromises()
+    expect(wrapper.text()).toContain('所选范围暂无记录')
+    expect(wrapper.text()).not.toContain('旧查询的失效错误')
+    expect(findButton(wrapper, '查询账本').attributes('disabled')).toBeUndefined()
+  })
+
+  it.each(['resolve', 'reject'])('ignores an old current-day read that will %s after reopening with fresh rows', async outcome => {
+    const record = { id: 'fresh-today', sourceId: 'fresh-today', type: 'fixed', name: '本轮当天费用', businessDate: '2026-08-22', originalAmount: 3, amount: 3, amountCents: 300, days: 1, estimated: false, createdAt: '2026-08-22T00:00:00Z' }
+    let resolve!: (value: { items: typeof record[]; hasMore: boolean }) => void
+    let reject!: (reason: Error) => void
+    harness.listAccountCostLedger.mockReturnValueOnce(new Promise((done, fail) => { resolve = done; reject = fail }))
+    const wrapper = await mountWorkspace('today')
+    harness.listAccountCostLedger.mockResolvedValue({ items: [record], hasMore: false })
+    await wrapper.setProps({ open: false }); await wrapper.setProps({ open: true }); await flushPromises()
+    if (outcome === 'resolve') resolve({ items: [{ ...record, id: 'stale', name: '旧轮当天费用' }], hasMore: false })
+    else reject(new Error('旧轮当天费用读取错误'))
+    await flushPromises()
+    expect(wrapper.text()).toContain('本轮当天费用')
+    expect(wrapper.text()).not.toContain('旧轮当天费用')
+    expect(wrapper.text()).not.toContain('当日成本变动加载失败')
+    expect(findButton(wrapper, '保存记录').attributes('disabled')).toBeUndefined()
+  })
+
+  it.each(['resolve', 'reject'])('ignores old fee values and history that will %s after leaving and returning to Rules', async outcome => {
+    const currentRate = { id: 'fresh-rate', effectiveDate: '2026-08-22', rate: 0.025, createdAt: '2026-08-22T00:00:00Z' }
+    let resolveRate!: (value: typeof currentRate) => void
+    let resolveHistory!: (value: { items: typeof currentRate[] }) => void
+    let rejectHistory!: (reason: Error) => void
+    harness.getRechargeFeeRate.mockReturnValueOnce(new Promise(done => { resolveRate = done })).mockResolvedValueOnce(currentRate)
+    harness.listRechargeFeeRateHistory.mockReturnValueOnce(new Promise((done, fail) => { resolveHistory = done; rejectHistory = fail })).mockResolvedValueOnce({ items: [currentRate] })
+    const wrapper = await mountWorkspace('rules')
+    await findButton(wrapper, '今日成本').trigger('click'); await flushPromises()
+    await findButton(wrapper, '成本规则').trigger('click'); await flushPromises()
+    const oldRate = { ...currentRate, id: 'stale-rate', rate: 0.99 }
+    resolveRate(oldRate)
+    if (outcome === 'resolve') resolveHistory({ items: [oldRate] })
+    else rejectHistory(new Error('旧轮费率历史错误'))
+    await flushPromises()
+    expect(wrapper.find('input[placeholder="费率 %"]').element).toHaveProperty('value', '2.5')
+    expect(wrapper.text()).toContain('fresh-rate')
+    expect(wrapper.text()).not.toContain('stale-rate')
+    expect(wrapper.text()).not.toContain('旧轮费率历史错误')
+    expect(wrapper.text()).not.toContain('费率历史加载失败')
+    expect(harness.getRechargeFeeRate).toHaveBeenCalledTimes(2)
+    expect(harness.listRechargeFeeRateHistory).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not invent a successful write when a read-only retry fails again', async () => {
+    harness.listAccountCostLedger.mockRejectedValue(new Error('隔离费用读取中断'))
+    const wrapper = await mountWorkspace('today')
+    await findButton(wrapper, '重新加载费用').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('隔离费用读取中断')
+    expect(wrapper.text()).not.toContain('费用已保存')
+    expect(wrapper.text()).not.toContain('费用已删除')
+    expect(harness.createAdditionalCost).not.toHaveBeenCalled()
+    expect(harness.deleteAdditionalCost).not.toHaveBeenCalled()
+  })
+
+  it('keeps a confirmed deletion distinct when its read-only retry also fails', async () => {
+    const record = {
+      id: 'delete-retry', sourceId: 'delete-retry', type: 'fixed', name: '删除后只读重试',
+      businessDate: '2026-08-22', originalAmount: 3, amount: 3, amountCents: 300, days: 1,
+      estimated: false, createdAt: '2026-08-22T00:00:00Z',
+    }
+    harness.listAccountCostLedger.mockResolvedValue({ items: [record], hasMore: false })
+    harness.getAdditionalCost.mockResolvedValue({ items: [record] })
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    try {
+      const wrapper = await mountWorkspace('today')
+      harness.deleteAdditionalCost.mockImplementationOnce(async () => {
+        harness.listAccountCostLedger.mockRejectedValue(new Error('隔离删除后读取中断'))
+      })
+      await findButton(wrapper, '删除 删除后只读重试').trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('费用已删除')
+      await findButton(wrapper, '重新加载费用').trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('费用已删除')
+      expect(wrapper.text()).not.toContain('费用已保存')
+      expect(harness.deleteAdditionalCost).toHaveBeenCalledOnce()
+    } finally { confirm.mockRestore() }
+  })
+
+  it('clears a previous success notice before a new save fails and keeps the new input', async () => {
+    const wrapper = await mountWorkspace('today')
+    await wrapper.find('input[placeholder="名称"]').setValue('第一笔')
+    await wrapper.find('input[placeholder="金额"]').setValue('10')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.text()).toContain('费用已保存')
+    harness.createAdditionalCost.mockRejectedValueOnce(new Error('dashboard.additionalCost.errors.invalidAmount'))
+    await wrapper.find('input[placeholder="名称"]').setValue('第二笔')
+    await wrapper.find('input[placeholder="金额"]').setValue('20')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('费用已保存')
+    expect(wrapper.text()).toContain('金额无效')
+    expect(wrapper.text()).toContain('原记录未改变')
+    expect(wrapper.text()).not.toContain('dashboard.additionalCost')
+    expect(wrapper.find('input[placeholder="名称"]').element).toHaveProperty('value', '第二笔')
+  })
+
+  it('preserves a zero-use promotion face value and hides operations for protected sources', async () => {
+    const promotion = { id: 'zero-promotion', sourceId: 'zero-promotion', type: 'promotion', name: '零使用活动', businessDate: '2026-08-22', originalAmount: 500, amount: 0, amountCents: 0, usageRate: 0, days: 1, estimated: true, createdAt: '2026-08-22T00:00:00Z' }
+    const protectedCost = { ...promotion, id: 'protected-cost', sourceId: 'protected-cost', type: 'fixed', name: '系统关联费用', batchId: 'batch-1' }
+    harness.listAccountCostLedger.mockResolvedValue({ items: [promotion, protectedCost], hasMore: false })
+    harness.getAdditionalCost.mockResolvedValue({ items: [promotion] })
+    const wrapper = await mountWorkspace('today')
+    expect(wrapper.findAll('button').some(button => button.text().includes('编辑 系统关联费用') || button.text().includes('删除 系统关联费用'))).toBe(false)
+    await findButton(wrapper, '编辑 零使用活动').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('input[placeholder="金额"]').element).toHaveProperty('value', '500')
+    expect(wrapper.find('input[placeholder="预计使用率 %"]').element).toHaveProperty('value', '0')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+    expect(harness.updateAdditionalCost).toHaveBeenCalledWith('zero-promotion', expect.objectContaining({ amount: 500, usageRate: 0 }))
+  })
+
   it('shows saved quota amounts with the current confirmation warning in today and ledger views', async () => {
     const note = '这笔金额保留为原记录，尚未按新加坡日期重新确认；请点击‘刷新账号统计’，不会修改主站。'
     harness.listAccountCostLedger.mockResolvedValue({ items: [{

@@ -101,6 +101,7 @@ test('core gate retains globalization recipient, language and amount regressions
     './internal/modules/my_sites', './internal/modules/group_rate_campaigns',
     'locale-configuration.test.ts', 'globalization-amount.behavior.test.ts', 'globalization-time-input.behavior.test.ts',
     'notification-recipients.behavior.test.ts', 'user-last-used.test.ts',
+    'account-cost-management-red.behavior.test.ts', 'dashboard-cost-review-regressions.behavior.test.ts',
     'run_globalization_gate',
   ]) {
     assert.ok(script.includes(member), `missing globalization core regression: ${member}`)

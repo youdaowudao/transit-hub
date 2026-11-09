@@ -426,6 +426,10 @@ export const createAdditionalCost = async (input: {
 export const getAdditionalCost = async (sourceId: string): Promise<{ items: AdditionalCostRecord[] }> =>
   requestJson<{ items: AdditionalCostRecord[] }>(`/dashboard/additional-costs/${encodeURIComponent(sourceId)}`)
 
+export const deleteAdditionalCost = async (sourceId: string): Promise<void> => {
+  await requestJson(`/dashboard/additional-costs/${encodeURIComponent(sourceId)}`, { method: 'DELETE' })
+}
+
 export const updateAdditionalCost = async (sourceId: string, input: {
   type: 'promotion' | 'fixed' | 'adjustment'
   name: string

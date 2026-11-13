@@ -108,6 +108,7 @@ vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
   getAccountAsset: vi.fn(),
   getRechargeFeeRate: harness.getRechargeFeeRate,
   listRechargeFeeRateHistory: harness.listRechargeFeeRateHistory,
+  listRevenueDiscountRates: vi.fn(async () => ({ items: [] })),
   listAccountAssets: harness.listAccountAssets,
   listAccountCostLedger: harness.listAccountCostLedger,
   replaceAccountLink: vi.fn(),
@@ -315,7 +316,7 @@ describe('reviewed dashboard cost regressions', () => {
     await flushPromises()
 
     expect((wrapper.find('input[placeholder="费率 %"]').element as HTMLInputElement).value).toBe('2.5')
-    expect((wrapper.find('input[type="date"]').element as HTMLInputElement).value).toBe('2026-08-20')
+    expect((wrapper.find('input[aria-label="费率生效日期"]').element as HTMLInputElement).value).toBe('2026-08-20')
     expect(wrapper.text()).toContain('费率历史加载失败')
     expect(wrapper.text()).toContain('读取费率历史时数据库连接中断')
     expect(wrapper.text()).toContain('请重新加载费用后再操作')

@@ -61,6 +61,7 @@ import {
   computeDelta,
   computeDashboardMetricDelta,
   formatAmount,
+  netRevenueOf,
   formatDateTime,
 } from '../utils/dashboard'
 
@@ -490,6 +491,10 @@ const cards = computed<DashboardCoreCard[]>(() => {
                 })
             : t('admin.dashboard.costQuality.netProfitCeiling', { value: formatAmount(current.current) }))
       : ''
+    const discount = liveData.value?.additionalCosts?.revenueDiscount
+    const revenueDiscountStatus = key === 'todayProfit' && discount != null && liveData.value?.todayProfit != null
+      ? `已扣营收折扣 ${formatAmount(discount)}（主站消费 ${formatAmount(liveData.value.todayProfit)}）`
+      : ''
     return [{
       key,
       label: t(METRIC_META[key].labelKey),
@@ -501,6 +506,7 @@ const cards = computed<DashboardCoreCard[]>(() => {
       statusText: metricErrorText(current.error)
         || fallbackStatus
         || partialStatus
+        || revenueDiscountStatus
         || (deltaUnavailable ? t('admin.dashboard.costQuality.deltaUnsettled') : ''),
       clickable: key === 'todayProfit' || key === 'todayPurchase' || key === 'netProfit',
       negativeWhenUp: key === 'todayPurchase',
@@ -546,7 +552,8 @@ const cards = computed<DashboardCoreCard[]>(() => {
   return result
 })
 
-const displayedTodayRevenue = computed(() => liveData.value?.todayProfit ?? null)
+// 实收营收 = 主站消费 - 营收折扣；未设置折扣时等于主站消费。
+const displayedTodayRevenue = computed(() => netRevenueOf(liveData.value?.todayProfit, liveData.value?.additionalCosts?.revenueDiscount))
 const displayedTodayCost = computed(() => {
   if (liveData.value?.todayPurchase != null) return liveData.value.todayPurchase
   const quality = liveData.value?.costQuality

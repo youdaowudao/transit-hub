@@ -6,6 +6,7 @@ import AccountCostWorkspace from '@/modules/admin/components/dashboard/AccountCo
 const api = vi.hoisted(() => ({
   createAdditionalCost: vi.fn(), getAdditionalCost: vi.fn(), updateAdditionalCost: vi.fn(), deleteAdditionalCost: vi.fn(),
   listAccountCostLedger: vi.fn(), getRechargeFeeRate: vi.fn(), listRechargeFeeRateHistory: vi.fn(), saveRechargeFeeRate: vi.fn(),
+  listRevenueDiscountRates: vi.fn(), saveRevenueDiscountRate: vi.fn(), deleteRevenueDiscountRate: vi.fn(), deleteRechargeFeeRate: vi.fn(),
 }))
 vi.mock('vue-router', () => ({ useRouter: () => ({ push: vi.fn() }) }))
 vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
@@ -53,6 +54,7 @@ beforeEach(() => {
   api.getRechargeFeeRate.mockResolvedValue({ rate: 0.016, effectiveDate: businessDate })
   api.listRechargeFeeRateHistory.mockResolvedValue({ items: [] })
   api.saveRechargeFeeRate.mockResolvedValue({ rate: 0.02, effectiveDate: businessDate })
+  api.listRevenueDiscountRates.mockResolvedValue({ items: [] })
   vi.spyOn(window, 'confirm').mockReturnValue(true)
 })
 afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); vi.restoreAllMocks(); localStorage.clear() })
@@ -274,11 +276,24 @@ describe('manual cost management critical regressions', () => {
     await w.find('input[placeholder="分摊天数"]').setValue('3')
     for (const text of ['费用总额', '预计计入总额', '33.33', '33.34', '不会自动每月续记']) expect(w.text()).toContain(text)
     const type = w.find('form select')
-    await type.setValue('promotion'); await amount(w).setValue('900'); await w.find('input[placeholder="分摊天数"]').setValue('10')
-    for (const text of ['赠送总额', '720.00', '72.00', '避免重复计入']) expect(w.text()).toContain(text)
+    // 活动赠送已停止新增：新增表单只剩固定费用和手工调整。
+    expect(type.findAll('option').map(option => option.attributes('value'))).toEqual(['fixed', 'adjustment'])
     await type.setValue('adjustment'); await amount(w).setValue('-5')
     expect(w.text()).toContain('本次减少成本')
     expect(w.find('input[placeholder="分摊天数"]').exists()).toBe(false)
+  })
+
+  it('keeps the promotion estimate preview when editing an existing promotion record', async () => {
+    api.listAccountCostLedger.mockResolvedValue({ items: [source('promotion', '旧活动')], hasMore: false })
+    api.getAdditionalCost.mockResolvedValueOnce({ items: fullSource('promotion', '旧活动') })
+    const w = await open('ledger'); await button(w, '编辑 旧活动').trigger('click'); await flushPromises()
+    const type = w.find('form select')
+    expect(type.findAll('option').map(option => option.attributes('value'))).toEqual(['promotion', 'fixed', 'adjustment'])
+    expect((type.element as HTMLSelectElement).value).toBe('promotion')
+    await amount(w).setValue('900'); await w.find('input[placeholder="分摊天数"]').setValue('10')
+    for (const text of ['赠送总额', '720.00', '72.00', '避免重复计入', '活动赠送已停止新增']) expect(w.text()).toContain(text)
+    await button(w, '取消编辑').trigger('click')
+    expect(w.find('form select').findAll('option').map(option => option.attributes('value'))).toEqual(['fixed', 'adjustment'])
   })
 
   it('requires legacy missing original amounts to be re-entered but preserves a recorded zero', async () => {
@@ -297,7 +312,7 @@ describe('manual cost management critical regressions', () => {
 
   it('explains fee estimation and retains confirmed fee-save success after history read failure', async () => {
     const w = await open('rules')
-    expect(w.text()).toContain('按当天营收')
+    expect(w.text()).toContain('按当天实收营收（主站消费扣除营收折扣后）')
     expect(w.text()).toContain('不是支付平台实际账单')
     api.getRechargeFeeRate.mockRejectedValueOnce(new Error('费率读取连接中断'))
     await button(w, '保存费率').trigger('click'); await flushPromises()

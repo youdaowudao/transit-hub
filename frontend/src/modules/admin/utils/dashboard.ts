@@ -43,6 +43,21 @@ export function formatAmount(value: number | null | undefined): string {
 }
 
 /** 把毫秒时间戳格式化为可读时间；空值或非数字返回 null，由调用方回退「未知」文案。 */
+/**
+ * 实收营收 = 主站消费 - 营收折扣。没有折扣时返回主站消费原值；主站消费不可用时返回 null。
+ */
+export function netRevenueOf(gross: number | null | undefined, discount: number | null | undefined): number | null {
+  if (gross == null) return null
+  if (discount == null) return gross
+  return gross - discount
+}
+
+/** 比率（小数）显示为百分比，最多保留两位小数，去掉多余的 0。 */
+export function formatRatePercent(rate: number | null | undefined): string {
+  if (rate == null || !Number.isFinite(rate)) return '—'
+  return `${Number((rate * 100).toFixed(2))}%`
+}
+
 export function formatDateTime(ms: number | null | undefined, formatLocale = locale): string | null {
   if (ms == null || !Number.isFinite(ms)) return null
   return new Intl.DateTimeFormat(formatLocale, {

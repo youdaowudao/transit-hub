@@ -154,6 +154,7 @@ func TestListRangePreservesSnapshotWhenCostQualityModeIsNull(t *testing.T) {
 		nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil,
+		nil, nil, // revenue_discount, revenue_discount_rate：旧快照为空
 	}}}
 	repo := newMetricsRepository(&nullableCostQualityDB{rows: rows})
 
@@ -184,6 +185,7 @@ func TestLatestDashboardSnapshotPreservesSnapshotWhenCostQualityModeIsNull(t *te
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil,
+		nil, nil, // revenue_discount, revenue_discount_rate：旧快照为空
 	}}
 	db := &latestSnapshotDB{row: row}
 	repo := newMetricsRepository(db)
@@ -356,6 +358,7 @@ func TestListDailyStatsPreservesSnapshotWhenCostQualityModeIsNull(t *testing.T) 
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil,
 		"", nil, nil, "missing", nil, nil,
+		nil, nil, // revenue_discount, revenue_discount_rate：旧快照为空
 	}}}
 	repo := newMetricsRepository(&nullableCostQualityDB{rows: rows})
 

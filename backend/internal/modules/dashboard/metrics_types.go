@@ -105,6 +105,7 @@ type TrendPoint struct {
 	AdditionalCost     *float64 `json:"additionalCost,omitempty"`
 	OperatingCost      *float64 `json:"operatingCost,omitempty"`
 	AdjustedNetProfit  *float64 `json:"adjustedNetProfit,omitempty"`
+	RevenueDiscount    *float64 `json:"revenueDiscount,omitempty"` // 已从营收扣除的营收折扣；空表示这天没有扣
 }
 
 // DailySnapshot 是 dashboard_daily_stats 表的行结构。
@@ -138,6 +139,8 @@ type DailySnapshot struct {
 	PromotionCost         *float64
 	FixedCost             *float64
 	AdjustmentCost        *float64
+	RevenueDiscount       *float64 // 营收折扣金额；NULL 表示这天没有扣折扣
+	RevenueDiscountRate   *float64 // 计算当天使用的合计折扣率
 	AdditionalCostRecords []AdditionalCostRecord
 	OperatingCost         *float64
 	AdjustedNetProfit     *float64
@@ -176,31 +179,34 @@ type SiteDailyCost struct {
 
 // DailyStatItem 是 GET /api/dashboard/daily-stats 返回的单日数据。
 type DailyStatItem struct {
-	Date                  string                 `json:"date"`
-	SettlementStatus      string                 `json:"settlementStatus"` // missing/provisional/fallback/partial/final
-	SnapshotSource        string                 `json:"snapshotSource,omitempty"`
-	TodayProfit           *float64               `json:"todayProfit,omitempty"`
-	ConfirmedCost         *float64               `json:"confirmedCost,omitempty"`    // 成本下限
-	NetProfitCeiling      *float64               `json:"netProfitCeiling,omitempty"` // 暂估上限：todayProfit - confirmedCost
-	MarginCeiling         *float64               `json:"marginCeiling,omitempty"`
-	CostExpectedCount     *int                   `json:"costExpectedCount,omitempty"`
-	CostCollectedCount    *int                   `json:"costCollectedCount,omitempty"`
-	CostFreshCount        *int                   `json:"costFreshCount,omitempty"`
-	CostRetainedCount     *int                   `json:"costRetainedCount,omitempty"`
-	CostMissingCount      *int                   `json:"costMissingCount,omitempty"`
-	CostQualityMode       string                 `json:"costQualityMode,omitempty"`
-	FinalizedAt           *string                `json:"finalizedAt,omitempty"`
-	SiteCosts             []SiteCostDetail       `json:"siteCosts,omitempty"`          // expand=true 时填充
-	SiteCostsLoadError    bool                   `json:"siteCostsLoadError,omitempty"` // expand=true 但查询失败
-	AdditionalCosts       *AdditionalCostSummary `json:"additionalCosts,omitempty"`
-	OperatingCost         *float64               `json:"operatingCost,omitempty"`
-	AdjustedNetProfit     *float64               `json:"adjustedNetProfit,omitempty"`
-	AccountSnapshotRunID  string                 `json:"accountSnapshotRunId,omitempty"`
-	AccountExpectedCount  *int                   `json:"accountExpectedCount,omitempty"`
-	AccountCompletedCount *int                   `json:"accountCompletedCount,omitempty"`
-	AccountStatsQuality   string                 `json:"accountStatsQuality,omitempty"`
-	AccountPurchaseCost   *float64               `json:"accountPurchaseCost,omitempty"`
-	ReplacementDeduction  *float64               `json:"replacementDeduction,omitempty"`
+	Date               string                 `json:"date"`
+	SettlementStatus   string                 `json:"settlementStatus"` // missing/provisional/fallback/partial/final
+	SnapshotSource     string                 `json:"snapshotSource,omitempty"`
+	TodayProfit        *float64               `json:"todayProfit,omitempty"`
+	ConfirmedCost      *float64               `json:"confirmedCost,omitempty"`    // 成本下限
+	NetProfitCeiling   *float64               `json:"netProfitCeiling,omitempty"` // 暂估上限：todayProfit - confirmedCost
+	MarginCeiling      *float64               `json:"marginCeiling,omitempty"`
+	CostExpectedCount  *int                   `json:"costExpectedCount,omitempty"`
+	CostCollectedCount *int                   `json:"costCollectedCount,omitempty"`
+	CostFreshCount     *int                   `json:"costFreshCount,omitempty"`
+	CostRetainedCount  *int                   `json:"costRetainedCount,omitempty"`
+	CostMissingCount   *int                   `json:"costMissingCount,omitempty"`
+	CostQualityMode    string                 `json:"costQualityMode,omitempty"`
+	FinalizedAt        *string                `json:"finalizedAt,omitempty"`
+	SiteCosts          []SiteCostDetail       `json:"siteCosts,omitempty"`          // expand=true 时填充
+	SiteCostsLoadError bool                   `json:"siteCostsLoadError,omitempty"` // expand=true 但查询失败
+	AdditionalCosts    *AdditionalCostSummary `json:"additionalCosts,omitempty"`
+	// RevenueDiscount 与趋势一样直接取快照已存折扣（今天取实时汇总），不依赖费用是否可用。
+	RevenueDiscount       *float64 `json:"revenueDiscount,omitempty"`
+	RevenueDiscountRate   *float64 `json:"revenueDiscountRate,omitempty"`
+	OperatingCost         *float64 `json:"operatingCost,omitempty"`
+	AdjustedNetProfit     *float64 `json:"adjustedNetProfit,omitempty"`
+	AccountSnapshotRunID  string   `json:"accountSnapshotRunId,omitempty"`
+	AccountExpectedCount  *int     `json:"accountExpectedCount,omitempty"`
+	AccountCompletedCount *int     `json:"accountCompletedCount,omitempty"`
+	AccountStatsQuality   string   `json:"accountStatsQuality,omitempty"`
+	AccountPurchaseCost   *float64 `json:"accountPurchaseCost,omitempty"`
+	ReplacementDeduction  *float64 `json:"replacementDeduction,omitempty"`
 }
 
 // SiteCostDetail 是逐日明细中单个站点的成本展示数据。

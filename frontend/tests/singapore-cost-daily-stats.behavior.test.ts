@@ -92,3 +92,43 @@ describe('current daily cost details reuse confirmed results', () => {
     expect(details.text()).not.toContain('新加坡时间')
   })
 })
+
+describe('V3.1.6 daily stats use net revenue', () => {
+  it('shows net revenue, the stored discount and a margin on net revenue', async () => {
+    harness.getDailyStats.mockResolvedValue({ items: [{
+      date: '2031-02-02', settlementStatus: 'final', todayProfit: 100, operatingCost: 46, adjustedNetProfit: 47,
+      revenueDiscount: 6, revenueDiscountRate: 0.06,
+      additionalCosts: { rechargeFee: 1.41, accountPurchase: 0, accountRefund: 0, promotion: 0, fixed: 0, adjustment: 0,
+        total: 1.41, available: true, revenueDiscount: 6, revenueDiscountRate: 0.06, netRevenue: 94 },
+    }, {
+      date: '2031-02-01', settlementStatus: 'final', todayProfit: 80, operatingCost: 40, adjustedNetProfit: 40,
+      additionalCosts: { rechargeFee: 1.28, accountPurchase: 0, accountRefund: 0, promotion: 0, fixed: 0, adjustment: 0, total: 1.28, available: true },
+    }] })
+    wrapper = mount(DailyStatsPanel)
+    await flushPromises()
+    const rows = wrapper.findAll('tbody tr')
+    expect(rows[0]!.text()).toContain('94.00')
+    expect(rows[0]!.text()).not.toContain('100.00')
+    expect(rows[0]!.text()).toContain('50.0%')
+    expect(rows[1]!.text()).toContain('80.00')
+    expect(rows[1]!.text()).toContain('50.0%')
+    await rows[0]!.trigger('click')
+    await flushPromises()
+    const details = wrapper.findAll('tbody tr')[1]!
+    expect(details.text()).toContain('营收折扣（6%）：6.00；主站消费 100.00；营收折扣不计入成本。')
+  })
+
+  it('keeps net revenue when the cost summary of that day is unavailable', async () => {
+    harness.getDailyStats.mockResolvedValue({ items: [{
+      date: '2031-02-02', settlementStatus: 'partial', todayProfit: 100, revenueDiscount: 6, revenueDiscountRate: 0.06,
+    }] })
+    wrapper = mount(DailyStatsPanel)
+    await flushPromises()
+    const row = wrapper.findAll('tbody tr')[0]!
+    expect(row.text()).toContain('94.00')
+    expect(row.text()).not.toContain('100.00')
+    await row.trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('tbody tr')[1]!.text()).toContain('营收折扣（6%）：6.00；主站消费 100.00')
+  })
+})

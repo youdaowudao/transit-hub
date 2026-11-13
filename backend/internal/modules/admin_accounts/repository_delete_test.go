@@ -48,6 +48,7 @@ func TestWorkspaceDeleteStatementsCoverAllWorkspaceTables(t *testing.T) {
 		"dashboard_account_events",
 		"dashboard_account_links",
 		"dashboard_additional_costs",
+		"dashboard_revenue_discount_rates",
 		"dashboard_account_assets",
 		"dashboard_account_batches",
 		"dashboard_upstream_key_daily_costs",
@@ -92,8 +93,8 @@ func TestLegacyWorkspaceDescriptorsCoverDeleteTables(t *testing.T) {
 		descriptors[table.Name] = table.WorkspaceColumn
 	}
 	for _, stmt := range workspaceDeleteStatements {
-		// Notifications start with explicit workspace ownership and never contain legacy rows.
-		if stmt.Name == "site_notifications" || stmt.Name == "site_notification_preferences" || stmt.Name == "upstream_rate_notice_baselines" {
+		// Notifications and revenue discount rates start with explicit workspace ownership and never contain legacy rows.
+		if stmt.Name == "site_notifications" || stmt.Name == "site_notification_preferences" || stmt.Name == "upstream_rate_notice_baselines" || stmt.Name == "dashboard_revenue_discount_rates" {
 			continue
 		}
 		column, ok := descriptors[stmt.Name]

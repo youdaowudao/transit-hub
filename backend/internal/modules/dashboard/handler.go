@@ -44,6 +44,10 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, metricsService *Metric
 	mux.HandleFunc("GET /api/dashboard/recharge-fee-rate", handler.getRechargeFeeRate)
 	mux.HandleFunc("GET /api/dashboard/recharge-fee-rates", handler.listRechargeFeeRates)
 	mux.HandleFunc("PUT /api/dashboard/recharge-fee-rate", handler.saveRechargeFeeRate)
+	mux.HandleFunc("DELETE /api/dashboard/recharge-fee-rates/{id}", handler.deleteRechargeFeeRate)
+	mux.HandleFunc("GET /api/dashboard/revenue-discount-rates", handler.listRevenueDiscountRates)
+	mux.HandleFunc("PUT /api/dashboard/revenue-discount-rate", handler.saveRevenueDiscountRate)
+	mux.HandleFunc("DELETE /api/dashboard/revenue-discount-rates/{id}", handler.deleteRevenueDiscountRate)
 	mux.HandleFunc("POST /api/dashboard/account-batches", handler.createAccountBatch)
 	mux.HandleFunc("GET /api/dashboard/account-assets", handler.listAccountAssets)
 	mux.HandleFunc("GET /api/dashboard/account-assets/{id}", handler.getAccountAsset)
@@ -266,6 +270,65 @@ func (h *Handler) saveRechargeFeeRate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpjson.Write(w, http.StatusOK, value)
+}
+
+func (h *Handler) deleteRechargeFeeRate(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if err := h.metricsService.DeleteRechargeFeeRate(r.Context(), userID, r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) listRevenueDiscountRates(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	items, err := h.metricsService.ListRevenueDiscountRates(r.Context(), userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (h *Handler) saveRevenueDiscountRate(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input RevenueDiscountRateInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	value, err := h.metricsService.SaveRevenueDiscountRate(r.Context(), userID, input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, value)
+}
+
+func (h *Handler) deleteRevenueDiscountRate(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if err := h.metricsService.DeleteRevenueDiscountRate(r.Context(), userID, r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) listAdditionalCosts(w http.ResponseWriter, r *http.Request) {
@@ -590,15 +653,16 @@ func writeError(w http.ResponseWriter, err error) {
 		httpjson.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if errors.Is(err, ErrAdditionalCostInvalidType) || errors.Is(err, ErrAdditionalCostInvalidAmount) || errors.Is(err, ErrAdditionalCostInvalidDate) || errors.Is(err, ErrAdditionalCostInvalidDays) || errors.Is(err, ErrAdditionalCostInvalidRate) {
+	if errors.Is(err, ErrAdditionalCostInvalidType) || errors.Is(err, ErrAdditionalCostInvalidAmount) || errors.Is(err, ErrAdditionalCostInvalidDate) || errors.Is(err, ErrAdditionalCostInvalidDays) || errors.Is(err, ErrAdditionalCostInvalidRate) ||
+		errors.Is(err, ErrAdditionalCostPromotionRetired) || errors.Is(err, ErrRevenueDiscountInvalidRate) || errors.Is(err, ErrRevenueDiscountInvalidDate) || errors.Is(err, ErrRevenueDiscountPastDate) {
 		httpjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if errors.Is(err, ErrAdditionalCostNotFound) {
+	if errors.Is(err, ErrAdditionalCostNotFound) || errors.Is(err, ErrRechargeFeeRateNotFound) || errors.Is(err, ErrRevenueDiscountNotFound) {
 		httpjson.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if errors.Is(err, ErrAdditionalCostProtected) {
+	if errors.Is(err, ErrAdditionalCostProtected) || errors.Is(err, ErrRevenueDiscountLocked) {
 		httpjson.WriteError(w, http.StatusConflict, err.Error())
 		return
 	}

@@ -17,7 +17,7 @@ import {
   type DashboardTrendPoint,
   type DashboardTrendsResponse,
 } from '../api/dashboardAdmin'
-import { selectDashboardTrendValue } from '../utils/dashboard'
+import { netRevenueOf, selectDashboardTrendValue } from '../utils/dashboard'
 
 const METRIC_CONFIGS: { key: DashboardMetricKey; color: DashboardColorToken }[] = [
   { key: 'todayProfit', color: 'primary' },
@@ -41,11 +41,15 @@ function buildMetricData(
   trendPoints: DashboardTrendPoint[],
 ): DashboardMetricData {
   // 对于 nullable 指标，取值时需区分 null（不可用）和 0（真实零值）。
+  // 营收卡、营收趋势和利润率序列都使用实收营收（主站消费 - 营收折扣）；未设置折扣时等于主站消费。
+  const liveRevenue = netRevenueOf(live.todayProfit, live.additionalCosts?.revenueDiscount)
   const rawValue = key === 'todayPurchase'
     ? live.operatingCost
     : key === 'netProfit'
       ? live.adjustedNetProfit
-      : live[key]
+      : key === 'todayProfit'
+        ? liveRevenue
+        : live[key]
   const current = typeof rawValue === 'number' ? rawValue : (rawValue ?? null)
 
   // 使用本地类型，允许 nullable 字段携带 null（live 数据来源可能为 null）
@@ -73,7 +77,7 @@ function buildMetricData(
   for (const point of trendPoints) {
     if (point.date) pointsByDate.set(point.date, {
       date: point.date,
-      todayProfit: point.todayProfit,
+      todayProfit: netRevenueOf(point.todayProfit, point.revenueDiscount),
       siteBalance: point.siteBalance,
       todayPurchase: point.operatingCost ?? null,
       netProfit: point.adjustedNetProfit ?? null,
@@ -96,7 +100,7 @@ function buildMetricData(
     // 保留 null，不再用 coerceNumeric 强转，与历史趋势点的处理保持一致。
     pointsByDate.set(live.date, {
       date: live.date,
-      todayProfit: live.todayProfit,
+      todayProfit: liveRevenue,
       siteBalance: live.siteBalance,
       todayPurchase: live.operatingCost ?? null,
       netProfit: live.adjustedNetProfit ?? null,

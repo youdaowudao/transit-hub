@@ -287,6 +287,9 @@ func (s *MetricsService) CreateAdditionalCost(ctx context.Context, userID string
 	if s.additionalCosts == nil {
 		return nil, errors.New("dashboard.additionalCost.errors.unavailable")
 	}
+	if strings.TrimSpace(input.Type) == AdditionalCostPromotion {
+		return nil, ErrAdditionalCostPromotionRetired
+	}
 	adminAccountID, err := s.requireCurrentAdminAccount(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -313,6 +316,15 @@ func (s *MetricsService) UpdateAdditionalCost(ctx context.Context, userID, sourc
 	}
 	if strings.TrimSpace(sourceID) == "" {
 		return nil, ErrAdditionalCostNotFound
+	}
+	if strings.TrimSpace(input.Type) == AdditionalCostPromotion {
+		existing, err := s.additionalCosts.GetAdditionalCost(ctx, userID, adminAccountID, sourceID)
+		if err != nil {
+			return nil, err
+		}
+		if len(existing) == 0 || existing[0].Type != AdditionalCostPromotion {
+			return nil, ErrAdditionalCostPromotionRetired
+		}
 	}
 	return s.additionalCosts.ReplaceAdditionalCost(ctx, userID, adminAccountID, sourceID, input)
 }
@@ -366,23 +378,44 @@ func (s *MetricsService) additionalCostSummary(ctx context.Context, userID, admi
 	if s.additionalCosts == nil {
 		return nil
 	}
+	// 先确定营收折扣：后面任何一步失败提前返回时，折扣也已经是“已扣/没有规则/读取失败”之一。
+	var rule *RevenueDiscountRate
+	var discountErr error
+	if revenue != nil {
+		rule, discountErr = s.revenueDiscountRule(ctx, userID, adminAccountID, date)
+	}
+	applyRule := func(summary *AdditionalCostSummary) {
+		if discountErr != nil {
+			summary.RechargeFee = nil
+			summary.Available = false
+			summary.UnavailableReason = revenueDiscountUnavailableReason
+			summary.revenueDiscountReadFailed = true
+		} else if rule != nil {
+			total := rule.TotalRate
+			applyRevenueDiscount(summary, revenue, &total)
+			summary.RevenueDiscountRule = rule
+		}
+	}
 	items, err := s.additionalCosts.ListAdditionalCosts(ctx, userID, adminAccountID, date, date)
 	if err != nil {
-		return &AdditionalCostSummary{Available: false, UnavailableReason: err.Error()}
+		summary := &AdditionalCostSummary{Available: false, UnavailableReason: err.Error()}
+		applyRule(summary)
+		return summary
 	}
 	base := summarizeAdditionalCostRecords(items)
 	summary := &base
+	applyRule(summary)
 	if revenue == nil {
 		summary.RechargeFee = nil
 		summary.Available = false
 		summary.UnavailableReason = "revenue_unavailable"
-	} else {
+	} else if !summary.revenueDiscountReadFailed {
 		rate, rateErr := s.additionalCosts.GetRechargeFeeRate(ctx, userID, adminAccountID, date)
 		if rateErr != nil {
 			summary.Available = false
 			summary.UnavailableReason = rateErr.Error()
 		} else {
-			fee := math.Round(*revenue*rate.Rate*100) / 100
+			fee := math.Round(feeRevenueBase(summary, *revenue)*rate.Rate*100) / 100
 			summary.RechargeFee = &fee
 			summary.FeeRate = &rate.Rate
 		}
@@ -765,6 +798,11 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		settlementStatus = SettlementStatusPartial
 	}
 	additionalCosts := s.additionalCostSummary(ctx, userID, adminAccountID, today, todayProfit)
+	// 折扣率读取失败时实收营收未知：营收按不可用显示并说明原因（沿用营收读取失败的显示），不写快照。
+	discountUnknown := revenueDiscountReadFailed(additionalCosts)
+	if discountUnknown {
+		todayProfit = nil
+	}
 	var components AccountCostComponents
 	var componentErr error
 	accountSnapshotRunID := ""
@@ -849,6 +887,8 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 		result.MetricErrors = map[string]string{
 			"todayProfit": todayProfitErr.Error(),
 		}
+	} else if discountUnknown {
+		result.MetricErrors = map[string]string{"todayProfit": revenueDiscountUnavailableReason}
 	}
 
 	// 营收与成本独立保存；成本不完整时仍保留可用营收（live_cache 不覆盖 final 行）。
@@ -914,6 +954,7 @@ func (s *MetricsService) Trends(ctx context.Context, userID string, days int) (T
 			AdditionalCost:     snap.AdditionalCost,
 			OperatingCost:      snap.OperatingCost,
 			AdjustedNetProfit:  snap.AdjustedNetProfit,
+			RevenueDiscount:    snap.RevenueDiscount,
 		})
 	}
 	return TrendResponse{Points: points}, nil
@@ -999,10 +1040,17 @@ func (s *MetricsService) upsertSnapshot(ctx context.Context, userID, adminAccoun
 	var promotionCost *float64
 	var fixedCost *float64
 	var adjustmentCost *float64
+	var revenueDiscount, revenueDiscountRate *float64
+	if revenueDiscountReadFailed(metrics.AdditionalCosts) {
+		// 折扣未知时保留已存快照，不把折扣写成空值；下一轮刷新再写。
+		log.Printf("dashboard metrics: skip snapshot, revenue discount unavailable user_id=%s date=%s", userID, date)
+		return
+	}
 	if metrics.AdditionalCosts != nil {
 		additionalCost = metrics.AdditionalCosts.Total
 		rechargeFee, rechargeFeeRate = rechargeFeeSummary(metrics.AdditionalCosts)
 		promotionCost, fixedCost, adjustmentCost = additionalCostCategorySummary(metrics.AdditionalCosts)
+		revenueDiscount, revenueDiscountRate = revenueDiscountSummary(metrics.AdditionalCosts)
 	}
 	snapshotTodayPurchase := metrics.TodayPurchase
 	snapshotNetProfit := metrics.NetProfit
@@ -1036,6 +1084,8 @@ func (s *MetricsService) upsertSnapshot(ctx context.Context, userID, adminAccoun
 		PromotionCost:         promotionCost,
 		FixedCost:             fixedCost,
 		AdjustmentCost:        adjustmentCost,
+		RevenueDiscount:       revenueDiscount,
+		RevenueDiscountRate:   revenueDiscountRate,
 		AdditionalCostRecords: additionalCostRecords(metrics.AdditionalCosts),
 		OperatingCost:         snapshotOperatingCost,
 		AdjustedNetProfit:     snapshotAdjustedNetProfit,
@@ -1475,8 +1525,19 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 		return idErr
 	}
 	additionalCosts := s.additionalCostSummary(ctx, userID, adminAccountID, date, ptrF64(revenue))
+	if revenueDiscountReadFailed(additionalCosts) {
+		// 折扣未知时不写快照（与营收读取失败相同），等待下一轮重试。
+		for _, attempt := range attempts {
+			if upsertErr := s.metricsRepo.UpsertSiteCost(ctx, attempt); upsertErr != nil {
+				log.Printf("dashboard finalize: upsert site attempt failed user_id=%s site_id=%s date=%s err=%v", userID, attempt.SiteID, date, upsertErr)
+			}
+		}
+		log.Printf("dashboard finalize: revenue discount unavailable user_id=%s date=%s", userID, date)
+		return errRevenueDiscountUnavailable
+	}
 	rechargeFee, rechargeFeeRate := rechargeFeeSummary(additionalCosts)
 	promotionCost, fixedCost, adjustmentCost := additionalCostCategorySummary(additionalCosts)
+	revenueDiscount, revenueDiscountRate := revenueDiscountSummary(additionalCosts)
 	snapshot := DailySnapshot{
 		ID:                    snapshotID,
 		UserID:                userID,
@@ -1498,6 +1559,8 @@ func (s *MetricsService) finalizeBusinessDate(ctx context.Context, ref ActiveSes
 		PromotionCost:         promotionCost,
 		FixedCost:             fixedCost,
 		AdjustmentCost:        adjustmentCost,
+		RevenueDiscount:       revenueDiscount,
+		RevenueDiscountRate:   revenueDiscountRate,
 		AdditionalCostRecords: additionalCostRecords(additionalCosts),
 	}
 	if finalizer, ok := s.metricsRepo.(dailySnapshotAccountFinalizer); ok {
@@ -1743,6 +1806,8 @@ func (s *MetricsService) DailyStats(ctx context.Context, userID string, from, to
 				AccountStatsQuality:   snap.AccountStatsQuality,
 				AccountPurchaseCost:   snap.AccountPurchaseCost,
 				ReplacementDeduction:  snap.ReplacementDeduction,
+				RevenueDiscount:       snap.RevenueDiscount,
+				RevenueDiscountRate:   snap.RevenueDiscountRate,
 			}
 			if snap.TodayPurchase != nil {
 				item.ConfirmedCost = snap.TodayPurchase
@@ -1773,6 +1838,7 @@ func (s *MetricsService) DailyStats(ctx context.Context, userID string, from, to
 					summary.Adjustment = *snap.AdjustmentCost
 				}
 				summary.Records = snap.AdditionalCostRecords
+				applySnapshotRevenueDiscount(&summary, snap)
 				item.AdditionalCosts = &summary
 			}
 			if dateStr == currentDate {
@@ -1809,6 +1875,11 @@ func (s *MetricsService) DailyStats(ctx context.Context, userID string, from, to
 					item.ReplacementDeduction = nil
 				}
 				item.AdditionalCosts = s.additionalCostSummary(ctx, userID, adminAccountID, dateStr, item.TodayProfit)
+				item.RevenueDiscount, item.RevenueDiscountRate = revenueDiscountSummary(item.AdditionalCosts)
+				if revenueDiscountReadFailed(item.AdditionalCosts) {
+					// 折扣未知时当天实收营收未知，不按主站消费原值显示。
+					item.TodayProfit = nil
+				}
 				if s.accountCosts != nil {
 					components, err := s.accountCosts.AccountCostComponentsForSnapshotRun(ctx, userID, adminAccountID, dateStr, id, currentDate)
 					item.OperatingCost, item.AdjustedNetProfit, _ = projectOperatingCost(item.ConfirmedCost, item.TodayProfit, item.AdditionalCosts, components, err)
@@ -1943,6 +2014,9 @@ type BackfillResponse struct {
 	Results []BackfillDayResult `json:"results"`
 }
 
+// ErrorBackfillPastOnly：回填只接受昨天及以前的日期。
+const ErrorBackfillPastOnly = "dashboard.errors.backfillPastOnly"
+
 // Backfill 受控回填指定日期范围的历史数据（仅管理员可调用）。
 // dryRun=true 时只返回预览，不写库；force=true 时允许覆盖 final 行并写审计日志。
 func (s *MetricsService) Backfill(ctx context.Context, userID string, req BackfillRequest) (BackfillResponse, error) {
@@ -1979,6 +2053,10 @@ func (s *MetricsService) Backfill(ctx context.Context, userID string, req Backfi
 	totalDays := int(toTime.Sub(fromTime).Hours()/24) + 1
 	if totalDays > 90 {
 		return BackfillResponse{}, requestError("dashboard.errors.rangeTooLarge")
+	}
+	// 今天和以后尚未结束：回填成最终结果后实时刷新不再更新它，营收折扣率也可能在零点边界改变。
+	if toTime.Format("2006-01-02") >= businesstime.DateAt(s.currentTime()) {
+		return BackfillResponse{}, requestError(ErrorBackfillPastOnly)
 	}
 
 	results := make([]BackfillDayResult, 0)

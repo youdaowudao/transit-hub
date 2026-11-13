@@ -137,6 +137,13 @@ export interface AdditionalCostSummary {
   adjustment: number
   total: number | null
   feeRate?: number
+  /** 已从营收扣除的营收折扣；为空表示这天没有扣。营收折扣不计入 total。 */
+  revenueDiscount?: number | null
+  revenueDiscountRate?: number | null
+  /** 只有按规则现算（今天）时才有三项明细。 */
+  revenueDiscountRule?: RevenueDiscountRate | null
+  /** 实收营收 = 主站消费 - 营收折扣。 */
+  netRevenue?: number | null
   available: boolean
   unavailableReason?: string
   records?: AdditionalCostRecord[]
@@ -299,6 +306,17 @@ export interface RechargeFeeRate {
   createdAt: string
 }
 
+/** 营收折扣率：三项都是占主站消费的比例（小数），totalRate 为合计。 */
+export interface RevenueDiscountRate {
+  id: string
+  effectiveDate: string
+  giftRate: number
+  newUserRate: number
+  referralRate: number
+  totalRate: number
+  createdAt: string
+}
+
 /** 成本质量信息，描述缓存成本的完整性。 */
 export interface CostQuality {
   businessDate: string
@@ -344,6 +362,7 @@ export interface DashboardTrendPoint {
   additionalCost?: number | null
   operatingCost?: number | null
   adjustedNetProfit?: number | null
+  revenueDiscount?: number | null
   accountSnapshotRunId?: string
   accountExpectedCount?: number | null
   accountCompletedCount?: number | null
@@ -408,6 +427,20 @@ export const listRechargeFeeRateHistory = async (): Promise<{ items: RechargeFee
 
 export const saveRechargeFeeRate = async (input: { effectiveDate: string; rate: number }): Promise<RechargeFeeRate> =>
   requestJson<RechargeFeeRate>('/dashboard/recharge-fee-rate', { method: 'PUT', body: JSON.stringify(input) })
+
+export const deleteRechargeFeeRate = async (id: string): Promise<void> => {
+  await requestJson(`/dashboard/recharge-fee-rates/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export const listRevenueDiscountRates = async (): Promise<{ items: RevenueDiscountRate[] }> =>
+  requestJson<{ items: RevenueDiscountRate[] }>('/dashboard/revenue-discount-rates')
+
+export const saveRevenueDiscountRate = async (input: { effectiveDate: string; giftRate: number; newUserRate: number; referralRate: number }): Promise<RevenueDiscountRate> =>
+  requestJson<RevenueDiscountRate>('/dashboard/revenue-discount-rate', { method: 'PUT', body: JSON.stringify(input) })
+
+export const deleteRevenueDiscountRate = async (id: string): Promise<void> => {
+  await requestJson(`/dashboard/revenue-discount-rates/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
 
 export const listAdditionalCosts = async (from: string, to: string = from): Promise<{ items: AdditionalCostRecord[] }> =>
   requestJson<{ items: AdditionalCostRecord[] }>(`/dashboard/additional-costs?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
@@ -614,6 +647,9 @@ export interface DailyStatItem {
   siteCosts?: SiteCostDetail[]
   siteCostsLoadError?: boolean  // expand=true 但站点明细查询失败时为 true
   additionalCosts?: AdditionalCostSummary
+  /** 快照已存的营收折扣（今天取实时汇总）；费用不可用时也有值，与趋势同一口径。 */
+  revenueDiscount?: number | null
+  revenueDiscountRate?: number | null
   operatingCost?: number | null
   adjustedNetProfit?: number | null
   accountSnapshotRunId?: string

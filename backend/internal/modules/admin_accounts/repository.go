@@ -72,6 +72,7 @@ var workspaceDeleteStatements = []workspaceDeleteStatement{
 	{Name: "dashboard_account_events", SQL: `DELETE FROM dashboard_account_events WHERE user_id = $1 AND admin_account_id = $2`},
 	{Name: "dashboard_account_links", SQL: `DELETE FROM dashboard_account_links WHERE user_id = $1 AND admin_account_id = $2`},
 	{Name: "dashboard_additional_costs", SQL: `DELETE FROM dashboard_additional_costs WHERE user_id = $1 AND admin_account_id = $2`},
+	{Name: "dashboard_revenue_discount_rates", SQL: `DELETE FROM dashboard_revenue_discount_rates WHERE user_id = $1 AND admin_account_id = $2`},
 	{Name: "dashboard_account_assets", SQL: `DELETE FROM dashboard_account_assets WHERE user_id = $1 AND admin_account_id = $2`},
 	{Name: "dashboard_account_batches", SQL: `DELETE FROM dashboard_account_batches WHERE user_id = $1 AND admin_account_id = $2`},
 	{Name: "dashboard_upstream_key_daily_costs", SQL: `DELETE FROM dashboard_upstream_key_daily_costs WHERE user_id = $1 AND admin_account_id = $2`},

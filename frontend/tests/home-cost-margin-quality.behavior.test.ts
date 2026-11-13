@@ -201,3 +201,62 @@ describe('D8 nullable operating trends reach the chart', () => {
     expect(option.series[2]!.data[1]!.value).toBe(20)
   })
 })
+
+describe('V3.1.6 revenue discount on the home page', () => {
+  it('shows net revenue on the revenue card with the deducted discount, and keeps gross revenue without a rule', async () => {
+    harness.getDashboardMetrics.mockResolvedValue({
+      ...liveMetrics,
+      additionalCosts: { ...liveMetrics.additionalCosts, revenueDiscount: 7.8, revenueDiscountRate: 0.065, netRevenue: 112.2 },
+    })
+    const wrapper = mountDashboard()
+    await flushPromises()
+    const card = wrapper.findAll('[data-dashboard-core-card]').find(item => item.text().includes('今日营收'))
+      ?? wrapper.findAll('button').find(item => item.text().includes('今日营收'))
+    expect(card, 'revenue card').toBeDefined()
+    expect(card!.text()).toContain('112.20')
+    expect(card!.text()).toContain('已扣营收折扣 7.80（主站消费 120.00）')
+  })
+
+  it('keeps the gross amount and no discount line when no discount rule applies', async () => {
+    const wrapper = mountDashboard()
+    await flushPromises()
+    const card = wrapper.findAll('[data-dashboard-core-card]').find(item => item.text().includes('今日营收'))
+      ?? wrapper.findAll('button').find(item => item.text().includes('今日营收'))
+    expect(card!.text()).toContain('120.00')
+    expect(card!.text()).not.toContain('已扣营收折扣')
+  })
+
+  it('shows revenue unavailable with the plain reason when the discount rate cannot be read', async () => {
+    harness.getDashboardMetrics.mockResolvedValue({
+      ...liveMetrics, todayProfit: null, adjustedNetProfit: null, adjustedProfitMargin: null,
+      metricErrors: { todayProfit: '营收折扣率读取失败，暂不计算成本和利润；请稍后刷新，仍失败请检查本站数据库连接。不会修改主站。' },
+      additionalCosts: { ...liveMetrics.additionalCosts, total: null, available: false },
+    })
+    const wrapper = mountDashboard()
+    await flushPromises()
+    const card = wrapper.findAll('[data-dashboard-core-card]').find(item => item.text().includes('今日营收'))
+      ?? wrapper.findAll('button').find(item => item.text().includes('今日营收'))
+    expect(card!.text()).toContain('营收折扣率读取失败')
+    expect(card!.text()).not.toContain('120.00')
+    expect(card!.text()).not.toContain('已扣营收折扣')
+  })
+
+  it('draws net revenue in the trend from the stored discount of each day', async () => {
+    harness.getDashboardTrends.mockResolvedValue({ points: [
+      { date: '2026-08-20', todayProfit: 100, revenueDiscount: 6, siteBalance: 0, upstreamBalance: 0,
+        todayPurchase: 40, netProfit: 60, operatingCost: 40, adjustedNetProfit: 54, settlementStatus: 'final' },
+      { date: '2026-08-21', todayProfit: 50, siteBalance: 0, upstreamBalance: 0,
+        todayPurchase: 10, netProfit: 40, operatingCost: 10, adjustedNetProfit: 40, settlementStatus: 'final' },
+    ] })
+    const wrapper = mountDashboard()
+    await flushPromises()
+    const chart = wrapper.findAllComponents({ name: 'DashboardEChart' }).find(item => {
+      const option = item.props('option') as { series?: unknown[] } | undefined
+      return option?.series?.length === 3
+    })
+    expect(chart, 'performance chart').toBeDefined()
+    const option = chart!.props('option') as { series: Array<{ data: Array<{ value: number } | null> }> }
+    expect(option.series[0]!.data[0]!.value).toBe(94)
+    expect(option.series[0]!.data[1]!.value).toBe(50)
+  })
+})

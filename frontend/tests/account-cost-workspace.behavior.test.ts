@@ -34,6 +34,7 @@ vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
   getAccountAsset: vi.fn(),
   getRechargeFeeRate: harness.getRechargeFeeRate,
   listRechargeFeeRateHistory: harness.listRechargeFeeRateHistory,
+  listRevenueDiscountRates: vi.fn(async () => ({ items: [] })),
   listAccountAssets: harness.listAccountAssets,
   listAccountCostLedger: harness.listAccountCostLedger,
   refreshAccountStats: harness.refreshAccountStats,

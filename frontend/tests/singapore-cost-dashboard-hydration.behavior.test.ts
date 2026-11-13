@@ -88,6 +88,7 @@ vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
   getAccountAsset: vi.fn(),
   getRechargeFeeRate: vi.fn(async () => ({ id: 'rate-current', effectiveDate: '2026-08-22', rate: 0.016, createdAt: '2026-08-22T00:00:00Z' })),
   listRechargeFeeRateHistory: vi.fn(async () => ({ items: [] })),
+  listRevenueDiscountRates: vi.fn(async () => ({ items: [] })),
   listAccountAssets: harness.listAccountAssets,
   listAccountCostLedger: harness.listAccountCostLedger,
   replaceAccountLink: vi.fn(),

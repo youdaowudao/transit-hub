@@ -999,7 +999,7 @@ describe('Grok complete import result and existing binding interaction', () => {
     const wrapper = await openView('grok'); await chooseGroup(wrapper, 'Grok 分组甲'); await submit(wrapper)
     const text = dialog(wrapper).text()
     expect(text).toContain('导入成功，模型未同步。')
-    expect(text).toContain('主站账号和本地关联已保存。尚未建立模型白名单，主站按该平台现有规则处理模型；导入成功不代表模型可用。')
+    expect(text).toContain('主站账号和本地关联已保存。读取上游模型列表失败，尚未建立模型白名单；导入成功不代表模型可用。模型同步失败不会自动停用主站账号。')
     expect(text).toContain('请到主站账号设置重新同步并保存模型白名单，无需再次导入。')
     expect(text).toContain(modelWarningDiagnostic.detail)
     expect(text).toContain('Grok')

@@ -30,6 +30,8 @@ var (
 	ErrAdditionalCostInvalidRate   = errors.New("dashboard.additionalCost.errors.invalidRate")
 	ErrAdditionalCostNotFound      = errors.New("dashboard.additionalCost.errors.notFound")
 	ErrAdditionalCostProtected     = errors.New("dashboard.additionalCost.errors.protected")
+	// 活动赠送已改为在成本规则里按营收折扣率扣除；只允许修改或删除旧记录。
+	ErrAdditionalCostPromotionRetired = errors.New("dashboard.additionalCost.errors.promotionRetired")
 )
 
 type RechargeFeeRate struct {
@@ -74,8 +76,16 @@ type AdditionalCostSummary struct {
 	Total                *float64               `json:"total"`
 	Records              []AdditionalCostRecord `json:"records,omitempty"`
 	FeeRate              *float64               `json:"feeRate,omitempty"`
-	Available            bool                   `json:"available"`
-	UnavailableReason    string                 `json:"unavailableReason,omitempty"`
+	// 营收折扣从营收中扣除，不计入 Total；为空表示这天没有扣折扣。
+	RevenueDiscount     *float64             `json:"revenueDiscount,omitempty"`
+	RevenueDiscountRate *float64             `json:"revenueDiscountRate,omitempty"`
+	RevenueDiscountRule *RevenueDiscountRate `json:"revenueDiscountRule,omitempty"`
+	NetRevenue          *float64             `json:"netRevenue,omitempty"`
+	// revenueDiscountReadFailed 只在内存中标记折扣率读取失败（不输出、不保存）。
+	// UnavailableReason 会被后面的账号核查覆盖，不能用来判断，所以单独标记。
+	revenueDiscountReadFailed bool
+	Available                 bool   `json:"available"`
+	UnavailableReason         string `json:"unavailableReason,omitempty"`
 }
 
 type AdditionalCostInput struct {

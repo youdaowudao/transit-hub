@@ -159,6 +159,10 @@ func projectOperatingCost(upstreamDirect, revenue *float64, summary *AdditionalC
 	if revenue == nil {
 		return operating, nil, nil
 	}
+	// 有营收折扣时，净利润和利润率都按实收营收计算。
+	if summary.NetRevenue != nil {
+		revenue = summary.NetRevenue
+	}
 	profitValue := *revenue - operatingValue
 	profit := &profitValue
 	if *revenue <= 0 {

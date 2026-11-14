@@ -41,7 +41,15 @@ async function open(tab: 'today' | 'rules' = 'rules', props: Record<string, unkn
   wrappers.push(wrapper)
   await wrapper.setProps({ open: true })
   await flushPromises()
+  // 赠送记录的录入表单默认收起：像用户一样点“新增一笔”展开（主站不支持时按钮不可点）。
+  if (tab === 'rules') await expandGift(wrapper)
   return wrapper
+}
+async function expandGift(w: VueWrapper) {
+  if (w.find('input[aria-label="主站用户 ID"]').exists()) return
+  const expander = w.findAll('button').find(b => b.text() === '新增一笔')
+  if (!expander || expander.attributes('disabled') !== undefined) return
+  await expander.trigger('click'); await flushPromises()
 }
 function button(w: VueWrapper, name: string) {
   const match = w.findAll('button').find(b => b.attributes('aria-label') === name || b.text() === name)
@@ -75,7 +83,7 @@ describe('gift ledger section on the cost rules page', () => {
       '少数客户每次赠送比例不同（例如充 100 送 20）时，在这里每送一笔记一笔。',
       '花超过已记录到账总额的部分，是他自己充的钱，按整站折扣率计算。只读主站消费，不会修改主站。',
       '估算上面的整站折扣率时，不要再把这些客户的赠送算进去，否则会重复扣除。',
-      '实付填客户实际付的钱，赠送填这次多给的全部余额（包括主站自动送的）；零散赠送或返利实付填 0。',
+      '赠送填这次多给的全部余额（包括主站自动送的）。实付默认 0，只填赠送也可以：这一笔到账就只算赠送金额，照样按先充先用，轮到这一笔时花的钱全部当作赠送从营收扣除。知道实付就填上更准：按赠送占到账的比例分摊扣除，实付那部分也算在这一笔里，不会再按整站折扣率重复扣。',
       '补录过去日期的充值时，从那天起他已经花掉的部分会自动算作用掉了；那些日子已经结算过，按整站折扣率计算，不再补扣。',
       '更早的充值请按今天零点的剩余录入，日期填今天；剩余来自几笔比例不同的充值时，按先充先用算出每笔还剩多少，分别录入，先录早的。',
       '还没有单独客户赠送记录，所有客户都按整站折扣率计算。',
@@ -84,6 +92,21 @@ describe('gift ledger section on the cost rules page', () => {
     expect(hasButton(w, '查询这个用户')).toBe(true)
     expect(hasButton(w, '保存记录')).toBe(true)
     for (const word of ['ledger', 'FIFO', 'snapshot', 'jsonb']) expect(text).not.toContain(word)
+  })
+
+  it('defaults the paid amount to 0 so a gift alone can be saved, and resets it to 0 after saving', async () => {
+    const w = await open()
+    expect(input(w, '实付金额').element).toHaveProperty('value', '0')
+    await input(w, '主站用户 ID').setValue('123')
+    await input(w, '充值日期').setValue('2026-08-20')
+    await input(w, '赠送金额').setValue('30')
+    await button(w, '保存记录').trigger('click'); await flushPromises()
+    expect(api.createGiftLedgerRecord).toHaveBeenCalledWith({ mainUserId: '123', rechargeDate: '2026-08-20', paidAmount: 0, giftAmount: 30, note: '' })
+    // 保存后表单收起；再点“新增一笔”时实付仍默认 0、赠送已清空。
+    expect(input(w, '实付金额').exists()).toBe(false)
+    await expandGift(w)
+    expect(input(w, '实付金额').element).toHaveProperty('value', '0')
+    expect(input(w, '赠送金额').element).toHaveProperty('value', '')
   })
 
   it('saves a new record, shows the success text and reloads the list and home numbers', async () => {
@@ -98,6 +121,8 @@ describe('gift ledger section on the cost rules page', () => {
     expect(w.text()).toContain('记录已保存：a@example.com 2026-08-20 实付 100.00 送 20.00。今天起按先充先用计算，已经结算的日期不变，不会修改主站。')
     expect(w.emitted('updated')).toHaveLength(1)
     expect(api.getGiftLedger).toHaveBeenCalledTimes(2)
+    expect(input(w, '主站用户 ID').exists()).toBe(false)
+    await expandGift(w)
     expect(input(w, '主站用户 ID').element).toHaveProperty('value', '')
   })
 
@@ -196,9 +221,11 @@ describe('gift ledger section on the cost rules page', () => {
     api.getGiftLedger.mockResolvedValue(overview({ supported: false, statusError: '当前主站不是 Sub2API，不能按客户查询消费' }))
     const w = await open()
     expect(w.text()).toContain('当前主站不是 Sub2API，不能按客户查询消费，暂不支持单独客户赠送记录。')
-    expect(button(w, '查询这个用户').attributes('disabled')).toBeDefined()
-    expect(button(w, '保存记录').attributes('disabled')).toBeDefined()
-    expect(input(w, '主站用户 ID').attributes('disabled')).toBeDefined()
+    // 不支持时“新增一笔”不可点，录入表单展开不了，也就没有查询、保存入口。
+    expect(button(w, '新增一笔').attributes('disabled')).toBeDefined()
+    expect(input(w, '主站用户 ID').exists()).toBe(false)
+    expect(hasButton(w, '查询这个用户')).toBe(false)
+    expect(hasButton(w, '保存记录')).toBe(false)
   })
 
   it('explains a list load failure in plain words', async () => {
@@ -252,6 +279,9 @@ describe('gift ledger section on the cost rules page', () => {
     expect(section(edited).text()).not.toContain('a@example.com')
     resolveB(overview()); await flushPromises()
     expect(section(edited).text()).toContain('还没有单独客户赠送记录，所有客户都按整站折扣率计算。')
+    // 切换工作区后录入表单收起；重新展开时是空白的新增表单。
+    expect(input(edited, '主站用户 ID').exists()).toBe(false)
+    await expandGift(edited)
     expect((input(edited, '主站用户 ID').element as HTMLInputElement).value).toBe('')
     expect(input(edited, '主站用户 ID').attributes('disabled')).toBeUndefined()
     expect(hasButton(edited, '保存修改')).toBe(false)
@@ -269,8 +299,10 @@ describe('gift ledger section on the cost rules page', () => {
     await drafted.setProps({ workspaceId: 'workspace-b' }); await flushPromises()
     resolveCheck({ mainUserId: '123', email: 'a@example.com', balance: 10, todayConsumption: 1 }); await flushPromises()
     expect(section(drafted).text()).not.toContain('a@example.com')
+    expect(input(drafted, '主站用户 ID').exists()).toBe(false)
+    await expandGift(drafted)
     expect((input(drafted, '主站用户 ID').element as HTMLInputElement).value).toBe('')
-    expect((input(drafted, '实付金额').element as HTMLInputElement).value).toBe('')
+    expect((input(drafted, '实付金额').element as HTMLInputElement).value).toBe('0')
     expect(button(drafted, '查询这个用户').attributes('disabled')).toBeUndefined()
   })
 

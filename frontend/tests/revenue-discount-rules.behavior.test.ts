@@ -41,7 +41,14 @@ function button(w: VueWrapper, name: string) {
   return match
 }
 const input = (w: VueWrapper, label: string) => w.find(`input[aria-label="${label}"]`)
+// 成本规则的表单默认收起：像用户一样先点“修改折扣率”或“修改费率”展开。
+async function expandRule(w: VueWrapper, expander: string, probe: string) {
+  if (input(w, probe).exists()) return
+  await button(w, expander).trigger('click'); await flushPromises()
+  expect(input(w, probe).exists()).toBe(true)
+}
 async function fillDiscount(w: VueWrapper, gift: string, newUser: string, referral: string, date = tomorrow) {
+  await expandRule(w, '修改折扣率', '充值赠送 %')
   await input(w, '充值赠送 %').setValue(gift)
   await input(w, '新用户福利 %').setValue(newUser)
   await input(w, '邀请返利 %').setValue(referral)
@@ -65,9 +72,10 @@ afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); vi.restoreAllMoc
 describe('revenue discount rules', () => {
   it('explains the empty state, totals three parts live and saves them as fractions from tomorrow', async () => {
     const w = await open()
-    for (const text of ['营收折扣率（从营收中扣除）', '营收折扣不计入成本，不会修改主站', '不是活动面额', '还没有设置折扣率，营收按主站消费原值计算。'])
+    for (const text of ['营收折扣率（从营收中扣除）', '营收折扣不计入成本，不会修改主站', '还没有设置折扣率，营收按主站消费原值计算。'])
       expect(w.text()).toContain(text)
     await fillDiscount(w, '3', '1.5', '2')
+    expect(w.text()).toContain('不是活动面额')
     expect(w.text()).toContain('合计折扣率 6.5%')
     await button(w, '保存折扣率').trigger('click'); await flushPromises()
     expect(api.saveRevenueDiscountRate).toHaveBeenCalledWith({ effectiveDate: tomorrow, giftRate: 0.03, newUserRate: 0.015, referralRate: 0.02 })
@@ -110,6 +118,7 @@ describe('revenue discount rules', () => {
     const w = await open()
     expect(w.text()).toContain('2026-08-20 起 · 合计 6.5% · 充值赠送 3% · 新用户福利 1.5% · 邀请返利 2%')
     expect(w.text()).toContain('2026-08-25 起 · 合计 7% · 充值赠送 4% · 新用户福利 1% · 邀请返利 2%')
+    await expandRule(w, '修改折扣率', '充值赠送 %')
     expect(input(w, '充值赠送 %').element).toHaveProperty('value', '3')
     expect(input(w, '新用户福利 %').element).toHaveProperty('value', '1.5')
     expect(input(w, '折扣率生效日期').element).toHaveProperty('value', tomorrow)
@@ -167,9 +176,9 @@ describe('recharge fee rules', () => {
   it('fills the form when editing and deletes only after confirmation', async () => {
     api.listRechargeFeeRateHistory.mockResolvedValue({ items: [fee] })
     const w = await open()
+    await button(w, '编辑 2026-08-01 起的手续费率').trigger('click'); await flushPromises()
     expect(w.text()).toContain('按当天实收营收（主站消费扣除营收折扣后）× 费率估算手续费')
     expect(w.text()).toContain('要改生效日期，请删除旧的再新增')
-    await button(w, '编辑 2026-08-01 起的手续费率').trigger('click')
     expect(input(w, '费率 %').element).toHaveProperty('value', '1.8')
     expect(input(w, '费率生效日期').element).toHaveProperty('value', '2026-08-01')
     vi.mocked(window.confirm).mockReturnValueOnce(false)
@@ -210,6 +219,7 @@ describe('today tab revenue explanation', () => {
   it('says no discount applies when no rule is set, and offers no promotion type for new costs', async () => {
     const w = await open('today', { todayRevenue: 100, summary })
     expect(w.text()).toContain('今天没有生效的营收折扣率，营收按主站消费原值计算；可在‘成本规则’设置，最早明天起生效。')
+    await button(w, '记一笔成本').trigger('click'); await flushPromises()
     expect(w.find('form select').findAll('option').map(option => option.text())).toEqual(['固定费用', '手工调整'])
   })
 })

@@ -65,6 +65,8 @@ const defaultProps = {
     available: true,
   },
   initialTab: 'today' as const,
+  // 等同于从首页“记一笔成本”进入：录入表单直接展开。
+  openCostForm: true,
   workspaceId: 'workspace-a',
 }
 
@@ -89,7 +91,7 @@ const mountWorkspaceWithRealTeleport = async () => {
   await wrapper.setProps({ open: true })
   await flushPromises()
 
-  const formElement = [...document.body.querySelectorAll('form')].find(item => item.textContent?.includes('记一笔成本'))
+  const formElement = [...document.body.querySelectorAll('form')].find(item => item.textContent?.includes('费用类型'))
   if (!formElement) throw new Error('missing teleported manual cost form')
   return { wrapper, form: new DOMWrapper(formElement) }
 }
@@ -175,6 +177,7 @@ describe('AccountCostWorkspace regression behavior', () => {
     if (outcome === 'resolve') resolveHistory({ items: [oldRate] })
     else rejectHistory(new Error('旧轮费率历史错误'))
     await flushPromises()
+    await findButton(wrapper, '修改费率').trigger('click'); await flushPromises()
     expect(wrapper.find('input[placeholder="费率 %"]').element).toHaveProperty('value', '2.5')
     expect(wrapper.text()).toContain('fresh-rate')
     expect(wrapper.text()).not.toContain('stale-rate')
@@ -229,6 +232,9 @@ describe('AccountCostWorkspace regression behavior', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('费用已保存')
     harness.createAdditionalCost.mockRejectedValueOnce(new Error('dashboard.additionalCost.errors.invalidAmount'))
+    // 保存成功后录入表单收起，像用户一样再点“记一笔成本”录下一笔。
+    expect(wrapper.find('input[placeholder="名称"]').exists()).toBe(false)
+    await findButton(wrapper, '记一笔成本').trigger('click'); await flushPromises()
     await wrapper.find('input[placeholder="名称"]').setValue('第二笔')
     await wrapper.find('input[placeholder="金额"]').setValue('20')
     await wrapper.find('form').trigger('submit')

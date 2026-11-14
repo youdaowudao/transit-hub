@@ -110,7 +110,7 @@ test('core gate retains globalization recipient, language and amount regressions
 
 test('core gate includes individual customer gift ledger regressions', async () => {
   const script = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
-  for (const member of ['gift-ledger.behavior.test.ts', 'gift-ledger-request.behavior.test.ts', 'revenue-discount-rules.behavior.test.ts']) {
+  for (const member of ['gift-ledger.behavior.test.ts', 'gift-ledger-request.behavior.test.ts', 'revenue-discount-rules.behavior.test.ts', 'cost-workspace-layout.behavior.test.ts']) {
     assert.ok(script.includes(member), `missing gift ledger core regression: ${member}`)
   }
   assert.match(script, /go test -race \.\/internal\/modules\/dashboard -run 'GiftLedger\|FinalizeLedger\|FinalizeRetry\|LiveMetricsRevenue\|LiveMetricsToday\|BackfillShows\|AccountSubstateAndDaily\|NoGiftLedger'/)

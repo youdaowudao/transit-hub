@@ -315,11 +315,19 @@ describe('reviewed dashboard cost regressions', () => {
     await wrapper.setProps({ open: true })
     await flushPromises()
 
+    // 费率表单默认收起：历史读取失败时“修改费率”仍可展开，表单里是当前费率。
+    const expandFee = wrapper.findAll('button').find(button => button.text() === '修改费率')
+    if (!expandFee) throw new Error('missing fee rate expander')
+    expect(expandFee.attributes('disabled')).toBeUndefined()
+    await expandFee.trigger('click'); await flushPromises()
     expect((wrapper.find('input[placeholder="费率 %"]').element as HTMLInputElement).value).toBe('2.5')
     expect((wrapper.find('input[aria-label="费率生效日期"]').element as HTMLInputElement).value).toBe('2026-08-20')
     expect(wrapper.text()).toContain('费率历史加载失败')
     expect(wrapper.text()).toContain('读取费率历史时数据库连接中断')
     expect(wrapper.text()).toContain('请重新加载费用后再操作')
+    // 历史读不到时不推算“现在”的费率，也不说成“默认”或“没有设置”。
+    expect(wrapper.text()).not.toContain('现在按')
+    expect(wrapper.text()).not.toContain('还没有生效的费率设置')
   })
 
   it('R07 keeps a successful save and emits updated when the following history refresh fails', async () => {
@@ -335,6 +343,9 @@ describe('reviewed dashboard cost regressions', () => {
     await wrapper.setProps({ open: true })
     await flushPromises()
 
+    const expandFee = wrapper.findAll('button').find(button => button.text() === '修改费率')
+    if (!expandFee) throw new Error('missing fee rate expander')
+    await expandFee.trigger('click'); await flushPromises()
     const saveButton = wrapper.findAll('button').find(button => button.text().includes('保存费率'))
     if (!saveButton) throw new Error('missing save fee rate button')
     await saveButton.trigger('click')

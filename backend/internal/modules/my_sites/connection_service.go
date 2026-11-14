@@ -268,7 +268,7 @@ func (s *Service) createAdminResource(connectionCtx connectionContext, requested
 			channelType = groupTypeToNewAPIChannelType(connectionCtx.groupType)
 		}
 		name := fmt.Sprintf("%s-【%s】-%s", newAPIChannelTypeName(channelType), connectionCtx.upstreamSite.Name, connectionCtx.groupName)
-		id, err := s.platformService.CreateNewAPIChannel(connectionCtx.state.Session, name, connectionCtx.upstreamSite.BaseURL, key, channelType, ownGroupIDs)
+		id, err := s.platformService.CreateNewAPIChannel(connectionCtx.state.Session, name, connectionCtx.upstreamSite.ImportBaseURL(), key, channelType, ownGroupIDs)
 		return id, name, err
 	}
 
@@ -281,7 +281,7 @@ func (s *Service) createAdminResource(connectionCtx connectionContext, requested
 		rateLabel = connectionCtx.groupName
 	}
 	name := fmt.Sprintf("%s-【%s】-%s", groupTypePrefix(connectionCtx.groupType), connectionCtx.upstreamSite.Name, rateLabel)
-	payload := buildLegacyAccountPayload(connectionCtx.groupType, connectionCtx.upstreamSite.BaseURL, key, numericGroupIDs, name)
+	payload := buildLegacyAccountPayload(connectionCtx.groupType, connectionCtx.upstreamSite.ImportBaseURL(), key, numericGroupIDs, name)
 	id, err := s.platformService.CreateSub2APIAdminAccount(connectionCtx.state.Session, payload)
 	return id, name, err
 }

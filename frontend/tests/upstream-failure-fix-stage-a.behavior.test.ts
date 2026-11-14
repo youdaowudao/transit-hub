@@ -44,6 +44,39 @@ beforeEach(() => {
 })
 afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.unstubAllGlobals(); localStorage.clear(); document.body.innerHTML = '' })
 describe('upstream failure fix stage A', () => {
+ const openTokenAdd = async () => {
+  const view = await mountView()
+  await view.findAll('button').find(item => item.text().includes('新增站点'))!.trigger('click')
+  await view.get('#upstream-site-name').setValue('验收-令牌')
+  await view.get('#upstream-site-url').setValue('https://api.fixture.invalid')
+  await view.get('#upstream-site-refresh-token').setValue('synthetic-refresh')
+  return view
+ }
+ const tokenUsed = '填写的 Refresh Token 可能已被使用，重试前请到上游重新获取。'
+ const tokenNotUsed = '这个网站地址上没有登录接口，填写的 Refresh Token 没有被使用。请把网站地址改成你登录上游网页的地址（不是 API 地址），改正后可以用同一个 Refresh Token 重试。'
+ it('refresh 404 says the token was not used and points to the website address', async () => {
+  payload = { message: 'admin.upstream.errors.notFound', failure: { errorKey: 'admin.upstream.errors.notFound', stage: 'refresh', httpStatus: 404 } }
+  const view = await openTokenAdd()
+  await view.get('[role="dialog"] form').trigger('submit'); await flushPromises()
+  const alert = view.get('[role="dialog"] [role="alert"]').text()
+  expect(alert).toContain('上游接口不存在（404）。请检查网站地址是不是你登录上游网页的地址（不是 API 地址）')
+  expect(alert).toContain('失败步骤：刷新令牌')
+  expect(alert).toContain(tokenNotUsed)
+  expect(alert).not.toContain(tokenUsed)
+  expect((view.get('#upstream-site-refresh-token').element as HTMLInputElement).value).toBe('synthetic-refresh')
+ })
+ it.each([
+  ['refresh', 401, 'admin.upstream.errors.refreshTokenRejected'],
+  ['refresh', 0, 'admin.upstream.errors.networkTimeout'],
+  ['metrics', 404, 'admin.upstream.errors.notFound'],
+ ])('keeps the may-be-used warning for %s %s', async (stage, httpStatus, errorKey) => {
+  payload = { message: errorKey, failure: { errorKey, stage, httpStatus } }
+  const view = await openTokenAdd()
+  await view.get('[role="dialog"] form').trigger('submit'); await flushPromises()
+  const alert = view.get('[role="dialog"] [role="alert"]').text()
+  expect(alert).toContain(tokenUsed)
+  expect(alert).not.toContain(tokenNotUsed)
+ })
  it.each([
   '上游登录响应没有返回登录会话，本站无法继续读取账号。请联系上游维护人员核查登录接口的会话返回后重试；本次没有保存，不会修改主站。',
   '上游登录响应带有会话，但没有合法的用户编号，无法确认登录账号。请联系上游维护人员核查登录接口返回的账号资料后重试；本次没有保存，不会修改主站。',
@@ -131,7 +164,8 @@ describe('upstream failure fix stage A', () => {
   const view = await openAdd()
   await view.get('[role="dialog"] form').trigger('submit'); await flushPromises()
   const alert = view.get('[role="dialog"] [role="alert"]')
-  expect(alert.text()).toContain('API 地址')
+  expect(alert.text()).toContain('网站地址')
+  expect(alert.text()).not.toContain('API 地址')
   expect(alert.text()).toContain('用户 ID')
   expect(alert.text()).not.toContain('上游接口请求失败')
  })
@@ -179,9 +213,9 @@ describe('upstream failure fix stage A', () => {
   payload = { message: 'admin.upstream.errors.invalidResponse', failure: { errorKey: 'admin.upstream.errors.invalidResponse', stage: 'login', httpStatus: 200 } }
   const view = await openAdd()
   await view.get('[role="dialog"] form').trigger('submit'); await flushPromises()
-  expect(view.get('[role="dialog"] [role="alert"]').text()).toContain('上游返回的不是有效 JSON，地址可能不是 API 地址。')
+  expect(view.get('[role="dialog"] [role="alert"]').text()).toContain('上游返回的不是有效 JSON，网站地址可能填错了：请填你登录上游网页的地址，不要填 API 地址。')
   expect(view.get('div.group.bg-card').text()).toContain('上游返回内容无法解析。')
-  expect(view.get('div.group.bg-card').text()).not.toContain('地址可能不是 API 地址')
+  expect(view.get('div.group.bg-card').text()).not.toContain('网站地址可能填错了')
  })
  it('API preserves the structured error and falls back safely for malformed non-JSON errors', async () => {
   let rejection: unknown

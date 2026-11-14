@@ -1194,7 +1194,7 @@ func (s *Service) ProbeConnection(ctx context.Context, userID string, connection
 	for _, mt := range targets {
 		outcome := s.probeRunner.Probe(ctx, ProbeRequest{
 			Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10, LegacyCompatibility: true,
-			BaseURL: site.BaseURL, UpstreamKey: conn.UpstreamKey, ProviderFamily: mt.target.ProviderFamily,
+			BaseURL: site.ImportBaseURL(), UpstreamKey: conn.UpstreamKey, ProviderFamily: mt.target.ProviderFamily,
 			ModelName: mt.target.ModelName, MaxTokens: mt.target.MaxProbeTokens, ProbePrompt: mt.target.ProbePrompt,
 		})
 		latencyMs := outcome.LatencyMs
@@ -1357,7 +1357,7 @@ func (s *Service) probeOnce(ctx context.Context, conn my_sites.RealConnection, p
 
 	outcome := s.probeRunner.Probe(ctx, ProbeRequest{
 		Protocol: TestProtocolChatCompletions, ProbeTimeoutSeconds: 10, LegacyCompatibility: true,
-		BaseURL: site.BaseURL, UpstreamKey: conn.UpstreamKey, ProviderFamily: target.ProviderFamily,
+		BaseURL: site.ImportBaseURL(), UpstreamKey: conn.UpstreamKey, ProviderFamily: target.ProviderFamily,
 		ModelName: target.ModelName, MaxTokens: target.MaxProbeTokens, ProbePrompt: target.ProbePrompt,
 	})
 

@@ -207,7 +207,7 @@ func TestRateNoticeCriticalCreateRestartAndSiteDeletePostgres(t *testing.T) {
 	pool := rateNoticeCriticalPool(t)
 	sample := &rateNoticeCriticalSample{rate: 1, status: 200, name: "a"}
 	svc, cache := rateNoticeCriticalService(t, pool, sample)
-	created, err := svc.Create(t.Context(), "user", CreateRequest{Name: "通知新建夹具", SiteURL: "http://fixture.invalid", Platform: PlatformSub2API, AuthMode: AuthModeToken, Account: "fixture-user", AccessToken: "fixture-only", RechargeRate: 1})
+	created, err := svc.Create(t.Context(), "user", CreateRequest{Name: "通知新建夹具", SiteURL: "http://fixture.invalid", APIURL: "http://api.fixture.invalid", Platform: PlatformSub2API, AuthMode: AuthModeToken, Account: "fixture-user", AccessToken: "fixture-only", RechargeRate: 1})
 	if err != nil {
 		t.Fatalf("原新建入口失败：%v", err)
 	}
@@ -550,7 +550,7 @@ func TestRateNoticeCriticalCreateHandlerRetainsFailureAndUnknownCommitPostgres(t
 			} else if _, err := pool.Exec(t.Context(), `CREATE FUNCTION reject_baseline_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE SQLSTATE '42P01' USING MESSAGE='fixture-raw-secret-do-not-display',DETAIL='password=fixture-raw-secret-do-not-display'; END $$; CREATE TRIGGER reject_baseline_fixture BEFORE INSERT ON upstream_rate_notice_baselines FOR EACH ROW EXECUTE FUNCTION reject_baseline_fixture()`); err != nil {
 				t.Fatal("新建保存失败夹具创建失败")
 			}
-			body, _ := json.Marshal(CreateRequest{Name: "通知新建失败夹具", SiteURL: "http://fixture.invalid", Platform: PlatformSub2API, AuthMode: AuthModeToken, Account: "fixture-user", AccessToken: "fixture-only", RechargeRate: 1})
+			body, _ := json.Marshal(CreateRequest{Name: "通知新建失败夹具", SiteURL: "http://fixture.invalid", APIURL: "http://api.fixture.invalid", Platform: PlatformSub2API, AuthMode: AuthModeToken, Account: "fixture-user", AccessToken: "fixture-only", RechargeRate: 1})
 			request := httptest.NewRequest(http.MethodPost, "/api/upstream-sites", bytes.NewReader(body))
 			request = request.WithContext(authctx.WithUserID(request.Context(), "user"))
 			response := httptest.NewRecorder()
@@ -680,7 +680,7 @@ func TestRateNoticeCriticalCreateFailedCleanupExplainsBothActualResultsPostgres(
 	if _, err := pool.Exec(t.Context(), `CREATE FUNCTION reject_baseline_cleanup_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE SQLSTATE '23514'; END $$; CREATE TRIGGER reject_baseline_cleanup_fixture BEFORE INSERT ON upstream_rate_notice_baselines FOR EACH ROW EXECUTE FUNCTION reject_baseline_cleanup_fixture()`); err != nil {
 		t.Fatal("新建双失败夹具创建失败")
 	}
-	_, err := svc.Create(t.Context(), "user", CreateRequest{Name: "新建双失败夹具", SiteURL: "http://fixture.invalid", Platform: PlatformSub2API, AuthMode: AuthModeToken, Account: "fixture-user", AccessToken: "fixture-only", RechargeRate: 1})
+	_, err := svc.Create(t.Context(), "user", CreateRequest{Name: "新建双失败夹具", SiteURL: "http://fixture.invalid", APIURL: "http://api.fixture.invalid", Platform: PlatformSub2API, AuthMode: AuthModeToken, Account: "fixture-user", AccessToken: "fixture-only", RechargeRate: 1})
 	detail := taskErrorDetail(err)
 	if err == nil || !strings.Contains(detail, "资料未保存") || !strings.Contains(detail, "测试中的运行记录清理连接已中断") || !strings.Contains(detail, "核查当前运行资料") {
 		t.Fatal("必须同时说明PG回滚和运行记录清理失败的实际结果")
@@ -702,7 +702,7 @@ func TestRateNoticeCriticalCreateSiteSQLFailureNeverShowsRawDiagnosticsPostgres(
 	if _, err := pool.Exec(t.Context(), `CREATE FUNCTION reject_site_insert_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE SQLSTATE '42P01' USING MESSAGE='fixture-raw-secret-do-not-display',DETAIL='password=fixture-raw-secret-do-not-display'; END $$; CREATE TRIGGER reject_site_insert_fixture BEFORE INSERT ON upstream_sites FOR EACH ROW EXECUTE FUNCTION reject_site_insert_fixture()`); err != nil {
 		t.Fatal("原站点INSERT失败夹具创建失败")
 	}
-	body, _ := json.Marshal(CreateRequest{Name: "原站点SQL失败夹具", SiteURL: "http://fixture.invalid", Platform: PlatformSub2API, AuthMode: AuthModeToken, Account: "fixture-user", AccessToken: "fixture-only", RechargeRate: 1})
+	body, _ := json.Marshal(CreateRequest{Name: "原站点SQL失败夹具", SiteURL: "http://fixture.invalid", APIURL: "http://api.fixture.invalid", Platform: PlatformSub2API, AuthMode: AuthModeToken, Account: "fixture-user", AccessToken: "fixture-only", RechargeRate: 1})
 	request := httptest.NewRequest(http.MethodPost, "/api/upstream-sites", bytes.NewReader(body))
 	request = request.WithContext(authctx.WithUserID(request.Context(), "user"))
 	response := httptest.NewRecorder()
@@ -740,7 +740,7 @@ func TestRateNoticeCriticalCreateMissingParentKeepsExistingNotFoundResponsePostg
 	if _, err := pool.Exec(t.Context(), `DELETE FROM admin_accounts WHERE id='workspace'`); err != nil {
 		t.Fatal("父工作区消失夹具失败")
 	}
-	body, _ := json.Marshal(CreateRequest{Name: "父工作区消失夹具", SiteURL: "http://fixture.invalid", Platform: PlatformSub2API, AuthMode: AuthModeToken, Account: "fixture-user", AccessToken: "fixture-only", RechargeRate: 1})
+	body, _ := json.Marshal(CreateRequest{Name: "父工作区消失夹具", SiteURL: "http://fixture.invalid", APIURL: "http://api.fixture.invalid", Platform: PlatformSub2API, AuthMode: AuthModeToken, Account: "fixture-user", AccessToken: "fixture-only", RechargeRate: 1})
 	request := httptest.NewRequest(http.MethodPost, "/api/upstream-sites", bytes.NewReader(body))
 	request = request.WithContext(authctx.WithUserID(request.Context(), "user"))
 	response := httptest.NewRecorder()

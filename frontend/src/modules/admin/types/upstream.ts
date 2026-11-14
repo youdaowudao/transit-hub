@@ -11,6 +11,7 @@ export interface UpstreamSiteForm {
   name: string
   siteUrl: string
   websiteUrl?: string
+  apiUrl?: string
   platform: UpstreamPlatform
   authMode: UpstreamAuthMode
   account: string
@@ -117,6 +118,7 @@ export interface UpstreamSite {
   name: string
   baseUrl: string
   websiteUrl?: string
+  apiUrl?: string
   platform: ResolvedUpstreamPlatform
   requestedPlatform: UpstreamPlatform
   authMode?: UpstreamAuthMode

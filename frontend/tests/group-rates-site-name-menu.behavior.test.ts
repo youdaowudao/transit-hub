@@ -130,7 +130,7 @@ describe('new site menu RED', () => {
   const w=await open();await openMenu(w)
   expect(item('打开上游网站').getAttribute('aria-disabled')).toBe('true')
   expect(item('打开上游网站').hasAttribute('href')).toBe(false)
-  expect(item('打开上游网站').textContent).toContain('这个站点保存的网站地址格式不对，暂时无法打开')
+  expect(item('打开上游网站').textContent).toContain('这个站点以前单独保存的网站链接格式不对，暂时无法打开')
  })
  it.each([
   ['H1','对接资料还没读到，请点‘刷新数据’后再试。'],
@@ -154,7 +154,7 @@ describe('new site menu RED', () => {
   else if(kind==='W2')h.siteOptions=[]
   else h.siteOptions[0].baseUrl=kind==='empty'?'':kind==='script'?'javascript:alert(1)':'https://u:p@up.example.test'
   const w=await open();await openMenu(w);const e=item('打开上游网站');expect(e.getAttribute('aria-disabled')).toBe('true');expect(e.hasAttribute('href')).toBe(false)
-  const reason=kind==='W1'?w.findAll('[role="alert"]').find(a=>a.text().startsWith('网站选项暂时无法加载'))!.text():kind==='W2'?'网站资料里没有这个网站，可能还在读取，或已在上游管理删除。请稍后点‘刷新数据’；仍没有时到上游管理检查。':'这个站点保存的 API 地址为空或格式不对，暂时无法打开；请到上游站点编辑 API 地址后重试，不会修改主站。'
+  const reason=kind==='W1'?w.findAll('[role="alert"]').find(a=>a.text().startsWith('网站选项暂时无法加载'))!.text():kind==='W2'?'网站资料里没有这个网站，可能还在读取，或已在上游管理删除。请稍后点‘刷新数据’；仍没有时到上游管理检查。':'这个站点保存的网站地址为空或格式不对，暂时无法打开；请到上游站点编辑网站地址后重试，不会修改主站。'
   expect(e.textContent).toContain(reason);expect(document.body.innerHTML).not.toContain('href="javascript:');expect(menu().textContent).not.toContain('u:p')
  })
  it('F6 retains the last successful URL after an options refresh failure',async()=>{

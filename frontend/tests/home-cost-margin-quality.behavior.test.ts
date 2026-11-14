@@ -217,6 +217,20 @@ describe('V3.1.6 revenue discount on the home page', () => {
     expect(card!.text()).toContain('已扣营收折扣 7.80（主站消费 120.00）')
   })
 
+  it('V3.1.7 shows the site-wide part and individual customer gifts when the discount has a split', async () => {
+    harness.getDashboardMetrics.mockResolvedValue({
+      ...liveMetrics,
+      additionalCosts: { ...liveMetrics.additionalCosts, revenueDiscount: 13, revenueDiscountRate: 0.05, netRevenue: 107,
+        revenueDiscountDetail: { version: 1, generalRate: 0.05, generalBase: 60, generalDiscount: 3, ledgerCovered: 60, ledgerGift: 10, customers: [] } },
+    })
+    const wrapper = mountDashboard()
+    await flushPromises()
+    const card = wrapper.findAll('[data-dashboard-core-card]').find(item => item.text().includes('今日营收'))
+      ?? wrapper.findAll('button').find(item => item.text().includes('今日营收'))
+    expect(card!.text()).toContain('已扣营收折扣 13.00（整站 3.00 + 单独客户赠送 10.00；主站消费 120.00）')
+    expect(card!.text()).not.toContain('已扣营收折扣 13.00（主站消费 120.00）')
+  })
+
   it('keeps the gross amount and no discount line when no discount rule applies', async () => {
     const wrapper = mountDashboard()
     await flushPromises()

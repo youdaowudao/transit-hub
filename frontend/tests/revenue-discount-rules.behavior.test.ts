@@ -8,6 +8,8 @@ const api = vi.hoisted(() => ({
   createAdditionalCost: vi.fn(), getAdditionalCost: vi.fn(), updateAdditionalCost: vi.fn(), deleteAdditionalCost: vi.fn(),
   listAccountCostLedger: vi.fn(), getRechargeFeeRate: vi.fn(), listRechargeFeeRateHistory: vi.fn(), saveRechargeFeeRate: vi.fn(),
   listRevenueDiscountRates: vi.fn(), saveRevenueDiscountRate: vi.fn(), deleteRevenueDiscountRate: vi.fn(), deleteRechargeFeeRate: vi.fn(),
+  // V3.1.7 单独客户赠送记录随成本规则一起加载。
+  getGiftLedger: vi.fn(), checkGiftLedgerCustomer: vi.fn(), createGiftLedgerRecord: vi.fn(), updateGiftLedgerRecord: vi.fn(), deleteGiftLedgerRecord: vi.fn(),
 }))
 vi.mock('vue-router', () => ({ useRouter: () => ({ push: vi.fn() }) }))
 vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
@@ -55,6 +57,7 @@ beforeEach(() => {
   api.saveRevenueDiscountRate.mockImplementation(async (input: Record<string, unknown>) => ({ id: 'saved', ...input }))
   api.deleteRevenueDiscountRate.mockResolvedValue(undefined)
   api.deleteRechargeFeeRate.mockResolvedValue(undefined)
+  api.getGiftLedger.mockResolvedValue({ supported: true, statusAvailable: true, statusError: '', today: businessDate, customers: [] })
   vi.spyOn(window, 'confirm').mockReturnValue(true)
 })
 afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); vi.restoreAllMocks(); localStorage.clear() })

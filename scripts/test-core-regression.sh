@@ -84,6 +84,9 @@ run_connection_health_gate() {
   run_step "backend Singapore cost persistence race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/upstream ./internal/modules/dashboard -run 'TestSingaporeCost' -count=1"
 
+  run_step "backend gift ledger revenue discount race tests (real PG only when explicitly configured)" \
+    bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/dashboard -run 'GiftLedger|FinalizeLedger|FinalizeRetry|LiveMetricsRevenue|LiveMetricsToday|BackfillShows|AccountSubstateAndDaily|NoGiftLedger' -count=1"
+
   run_step "backend group cost queue, read-only snapshot and shutdown race tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/modules/upstream ./internal/httpserver -run 'TestGroupCost(Queue|Retry|Snapshot|Shutdown)' -count=1"
 
@@ -114,7 +117,7 @@ run_globalization_gate() {
     bash -c "cd '$ROOT_DIR/backend' && go test ./cmd/notification-cleanup ./internal/modules/settings ./internal/shared/businesstime ./internal/modules/my_sites ./internal/modules/group_rate_campaigns ./internal/modules/leaderboard ./internal/modules/lottery ./internal/modules/dashboard ./internal/modules/upstream ./internal/httpserver -count=1"
 
   run_step "frontend language, amount and Telegram recipient regression tests" \
-    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- locale-configuration.test.ts globalization-amount.behavior.test.ts globalization-time-input.behavior.test.ts notification-recipients.behavior.test.ts user-last-used.test.ts dashboard-cost-entrypoints.behavior.test.ts account-cost-workspace.behavior.test.ts account-cost-management-red.behavior.test.ts revenue-discount-rules.behavior.test.ts dashboard-cost-review-regressions.behavior.test.ts home-cost-snapshot.behavior.test.ts home-cost-margin-quality.behavior.test.ts dashboard-provisional-trend.test.ts dashboard-profit-margin.test.ts"
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- locale-configuration.test.ts globalization-amount.behavior.test.ts globalization-time-input.behavior.test.ts notification-recipients.behavior.test.ts user-last-used.test.ts dashboard-cost-entrypoints.behavior.test.ts account-cost-workspace.behavior.test.ts account-cost-management-red.behavior.test.ts revenue-discount-rules.behavior.test.ts gift-ledger.behavior.test.ts gift-ledger-request.behavior.test.ts dashboard-cost-review-regressions.behavior.test.ts home-cost-snapshot.behavior.test.ts home-cost-margin-quality.behavior.test.ts dashboard-provisional-trend.test.ts dashboard-profit-margin.test.ts"
 
   run_step "frontend group rates import and retained behavior regression tests" \
     bash -c "cd '$ROOT_DIR/frontend' && npm run test -- group-rates-account-consumption.behavior.test.ts group-rates-import-domestic.behavior.test.ts group-rates-import-settings.behavior.test.ts group-rates-missing-connection.behavior.test.ts group-rates-scoped-critical.behavior.test.ts group-rates-scoped-additional.behavior.test.ts group-rates-scoped-api.additional.test.ts group-rates-cleanup-critical.behavior.test.ts group-associations-cleanup-critical.behavior.test.ts group-rates-maintenance.additional.behavior.test.ts group-rates-maintenance-api.additional.test.ts group-rates-maintenance-dialog-critical.behavior.test.ts group-associations-cleanup.additional.behavior.test.ts upstream-group-rates-warning.behavior.test.ts connection-health-group-rates-warning.behavior.test.ts connection-health-bound-site-rate-status.behavior.test.ts group-rates-type-edge-space.behavior.test.ts group-rates-sales-columns.behavior.test.ts group-rates-main-site-groups.behavior.test.ts my-sites-api.test.ts"

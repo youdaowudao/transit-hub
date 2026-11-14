@@ -41,6 +41,7 @@ type fakeMetricsRepository struct {
 	dailyStatsCalls      int
 	dailyStatsFrom       string
 	dailyStatsTo         string
+	dailyStatsRanges     []string
 }
 
 type liveMetricsAccountingRepository struct {
@@ -147,6 +148,7 @@ func (f *fakeMetricsRepository) ListDailyStats(ctx context.Context, userID, admi
 	f.dailyStatsCalls++
 	f.dailyStatsFrom = from
 	f.dailyStatsTo = to
+	f.dailyStatsRanges = append(f.dailyStatsRanges, from+".."+to)
 	return f.dailyStatsSnapshots, nil
 }
 
@@ -391,8 +393,9 @@ func TestStartupRecoveryWithoutBaselineUsesRecentWindowAndLimitedMissingBackfill
 
 	service.startupRecovery(context.Background())
 
-	if repo.dailyStatsFrom != windowStart || repo.dailyStatsTo != yesterday {
-		t.Fatalf("ListDailyStats range = %s..%s, want %s..%s", repo.dailyStatsFrom, repo.dailyStatsTo, windowStart, yesterday)
+	// 日结时单独客户部分会再读一次当天快照，所以取第一次读取（补结扫描范围）。
+	if len(repo.dailyStatsRanges) == 0 || repo.dailyStatsRanges[0] != windowStart+".."+yesterday {
+		t.Fatalf("ListDailyStats ranges = %v, want first %s..%s", repo.dailyStatsRanges, windowStart, yesterday)
 	}
 	wantDates := []string{nonFinalDate, yesterday}
 	if gotDates := snapshotBusinessDates(repo.snapshots); !reflect.DeepEqual(gotDates, wantDates) {
@@ -423,8 +426,9 @@ func TestStartupRecoveryExplicitBaselinePreservesRangeGapBackfill(t *testing.T) 
 
 	service.startupRecovery(context.Background())
 
-	if repo.dailyStatsFrom != baseline || repo.dailyStatsTo != yesterday {
-		t.Fatalf("ListDailyStats range = %s..%s, want %s..%s", repo.dailyStatsFrom, repo.dailyStatsTo, baseline, yesterday)
+	// 日结时单独客户部分会再读一次当天快照，所以取第一次读取（补结扫描范围）。
+	if len(repo.dailyStatsRanges) == 0 || repo.dailyStatsRanges[0] != baseline+".."+yesterday {
+		t.Fatalf("ListDailyStats ranges = %v, want first %s..%s", repo.dailyStatsRanges, baseline, yesterday)
 	}
 	wantDates := []string{baseline, missingDate, yesterday}
 	if gotDates := snapshotBusinessDates(repo.snapshots); !reflect.DeepEqual(gotDates, wantDates) {

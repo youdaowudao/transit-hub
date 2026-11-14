@@ -536,6 +536,10 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 	if err != nil {
 		return Response{}, err
 	}
+	apiURL, err := normalizeImportAPIURL(dto.APIURL)
+	if err != nil {
+		return Response{}, err
+	}
 	// 创建站点必须归属于当前工作区。
 	adminAccountID, err := s.requireCurrentAdminAccountID(ctx, userID)
 	if err != nil {
@@ -593,6 +597,9 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 			log.Printf("[upstream] 新建站点登录成功但未核实用户编号 host=%s category=%s", safeHost(dto.SiteURL), siteErrorKey(principalErr))
 		}
 	}
+
+	// API 地址只给自动导入用；留空时读一次 Sub2API 上游公开的地址，读不到沿用网站地址。
+	site.APIURL = s.resolveSiteAPIURL(ctx, apiURL, result.Platform, result.Session.BaseURL)
 
 	// 登录成功：更新站点状态。
 	observedAt := s.keyUsageNow()
@@ -660,6 +667,14 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 			return Response{}, err
 		}
 		websiteURL = normalized
+	}
+	apiURL := ""
+	if dto.APIURL != nil {
+		normalized, err := normalizeImportAPIURL(*dto.APIURL)
+		if err != nil {
+			return Response{}, err
+		}
+		apiURL = normalized
 	}
 	site, err := s.readCurrentSite(ctx, id)
 	if err != nil {
@@ -810,6 +825,13 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	if (domainChanged || relogin) && ctx.Err() != nil {
 		return Response{}, ctx.Err()
 	}
+	if dto.APIURL != nil {
+		platform, baseURL := site.Platform, originalURL
+		if domainChanged || relogin {
+			platform, baseURL = result.Platform, result.Session.BaseURL
+		}
+		apiURL = s.resolveSiteAPIURL(ctx, apiURL, platform, baseURL)
+	}
 	s.mu.Lock()
 	current, readErr := s.readCurrentSite(ctx, id)
 	_, deleted := s.deletedSites[id]
@@ -821,6 +843,10 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		s.mu.Unlock()
 		return Response{}, staleSiteRequestError()
 	}
+	if dto.APIURL != nil && current.APIURL != original.APIURL {
+		s.mu.Unlock()
+		return Response{}, apiURLChangedError()
+	}
 	if (domainChanged || relogin) && ctx.Err() != nil {
 		s.mu.Unlock()
 		return Response{}, ctx.Err()
@@ -829,6 +855,9 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	candidate := cloneSite(current)
 	if dto.WebsiteURL != nil {
 		candidate.WebsiteURL = websiteURL
+	}
+	if dto.APIURL != nil {
+		candidate.APIURL = apiURL
 	}
 	candidate.Name = strings.TrimSpace(dto.Name)
 	candidate.Remark = strings.TrimSpace(dto.Remark)
@@ -1896,6 +1925,7 @@ func toResponseForDate(site *Site, date string) Response {
 		Name:              site.Name,
 		BaseURL:           site.BaseURL,
 		WebsiteURL:        site.WebsiteURL,
+		APIURL:            site.APIURL,
 		Platform:          site.Platform,
 		RequestedPlatform: site.RequestedPlatform,
 		AuthMode:          siteAuthMode(site),

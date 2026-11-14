@@ -93,7 +93,7 @@ func (r *Repository) SaveExistingSiteWithGroupGuard(ctx context.Context, expecte
 	var current Site
 	var rawMetrics, rawSession, rawSettings []byte
 	var enabled bool
-	err = tx.QueryRow(ctx, `SELECT id,user_id,admin_account_id,name,base_url,platform,requested_platform,account,remark,recharge_rate,status,error_key,metrics,session,settings,last_synced_at,enabled,pinned,website_url FROM upstream_sites WHERE id=$1 AND user_id=$2 AND admin_account_id=$3 FOR UPDATE`, expected.ID, expected.UserID, expected.AdminAccountID).Scan(&current.ID, &current.UserID, &current.AdminAccountID, &current.Name, &current.BaseURL, &current.Platform, &current.RequestedPlatform, &current.Account, &current.Remark, &current.RechargeRate, &current.Status, &current.ErrorKey, &rawMetrics, &rawSession, &rawSettings, &current.LastSyncedAt, &enabled, &current.Pinned, &current.WebsiteURL)
+	err = tx.QueryRow(ctx, `SELECT id,user_id,admin_account_id,name,base_url,platform,requested_platform,account,remark,recharge_rate,status,error_key,metrics,session,settings,last_synced_at,enabled,pinned,website_url,api_url FROM upstream_sites WHERE id=$1 AND user_id=$2 AND admin_account_id=$3 FOR UPDATE`, expected.ID, expected.UserID, expected.AdminAccountID).Scan(&current.ID, &current.UserID, &current.AdminAccountID, &current.Name, &current.BaseURL, &current.Platform, &current.RequestedPlatform, &current.Account, &current.Remark, &current.RechargeRate, &current.Status, &current.ErrorKey, &rawMetrics, &rawSession, &rawSettings, &current.LastSyncedAt, &enabled, &current.Pinned, &current.WebsiteURL, &current.APIURL)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Site{}, "", false, false, nil
 	}
@@ -142,7 +142,7 @@ func (r *Repository) SaveExistingSiteWithGroupGuard(ctx context.Context, expecte
 		return Site{}, "", false, false, err
 	}
 	var version string
-	err = tx.QueryRow(ctx, `UPDATE upstream_sites SET name=$4,base_url=$5,platform=$6,requested_platform=$7,account=$8,remark=$9,recharge_rate=$10,status=$11,error_key=$12,metrics=$13::jsonb,session=$14::jsonb,settings=$15::jsonb,last_synced_at=$16,enabled=$17,updated_at=$18,pinned=$19,website_url=$20 WHERE id=$1 AND user_id=$2 AND admin_account_id=$3 RETURNING xmin::text`, next.ID, next.UserID, next.AdminAccountID, next.Name, next.BaseURL, next.Platform, next.RequestedPlatform, next.Account, next.Remark, next.RechargeRate, next.Status, next.ErrorKey, string(rawMetrics), nullableJSONString(rawSession), string(rawSettings), next.LastSyncedAt, next.IsEnabled(), time.Now(), next.Pinned, next.WebsiteURL).Scan(&version)
+	err = tx.QueryRow(ctx, `UPDATE upstream_sites SET name=$4,base_url=$5,platform=$6,requested_platform=$7,account=$8,remark=$9,recharge_rate=$10,status=$11,error_key=$12,metrics=$13::jsonb,session=$14::jsonb,settings=$15::jsonb,last_synced_at=$16,enabled=$17,updated_at=$18,pinned=$19,website_url=$20,api_url=$21 WHERE id=$1 AND user_id=$2 AND admin_account_id=$3 RETURNING xmin::text`, next.ID, next.UserID, next.AdminAccountID, next.Name, next.BaseURL, next.Platform, next.RequestedPlatform, next.Account, next.Remark, next.RechargeRate, next.Status, next.ErrorKey, string(rawMetrics), nullableJSONString(rawSession), string(rawSettings), next.LastSyncedAt, next.IsEnabled(), time.Now(), next.Pinned, next.WebsiteURL, next.APIURL).Scan(&version)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Site{}, "", false, false, nil
 	}

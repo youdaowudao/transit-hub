@@ -25,6 +25,10 @@ type c5RedTransport struct {
 	secondGroupPlatform                                                       string
 	keyCreates, accountCreates, previews, reads, keyDeletes, protectedDeletes int
 	created                                                                   map[string]any
+	// previewBaseURL overrides the expected preview/account address; empty keeps the source site address.
+	previewBaseURL string
+	// onAccountCreate runs when the main account is created, to change state mid-import.
+	onAccountCreate func()
 }
 
 // Review regression: a failed HTTP receipt with an observed resource ID is
@@ -123,7 +127,11 @@ func (f *c5RedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		if f.mainPlatform != "" {
 			mainPlatform = f.mainPlatform
 		}
-		if body["platform"] != mainPlatform || body["type"] != "apikey" || body["base_url"] != "https://c5-source.invalid" || body["api_key"] != "synthetic-c5-key" {
+		wantBaseURL := "https://c5-source.invalid"
+		if f.previewBaseURL != "" {
+			wantBaseURL = f.previewBaseURL
+		}
+		if body["platform"] != mainPlatform || body["type"] != "apikey" || body["base_url"] != wantBaseURL || body["api_key"] != "synthetic-c5-key" {
 			f.t.Errorf("preview did not use the captured upstream credential and platform")
 		}
 		if _, exists := body["model_mapping"]; exists {
@@ -137,6 +145,9 @@ func (f *c5RedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/admin/accounts":
 		f.accountCreates++
+		if f.onAccountCreate != nil {
+			f.onAccountCreate()
+		}
 		if err := json.NewDecoder(r.Body).Decode(&f.created); err != nil {
 			f.t.Fatal(err)
 		}

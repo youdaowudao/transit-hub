@@ -224,6 +224,8 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 		return RealConnectResponse{}, importValidationFailure(err)
 	}
 	sourceBaseURL, sourcePlatform := connectionCtx.upstreamSite.BaseURL, connectionCtx.upstreamSite.Platform
+	// 主站账号调模型用上游站点的 API 地址；未填写时沿用网站地址。
+	sourceImportURL := connectionCtx.upstreamSite.ImportBaseURL()
 	ids, names, err := s.resolveImportAdminGroups(ctx, state, req.OwnGroupIDs, connectionCtx.groupType)
 	if err != nil {
 		return RealConnectResponse{}, importValidationFailure(err)
@@ -278,7 +280,7 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 		return RealConnectResponse{}, stopBeforeCreate(err)
 	}
 	if !settings.Passthrough {
-		modelResult.Models, err = s.platformService.PreviewSub2APIImportModelsContext(ctx, state.Session, connectionCtx.groupType, connectionCtx.upstreamSite.BaseURL, credential.Key)
+		modelResult.Models, err = s.platformService.PreviewSub2APIImportModelsContext(ctx, state.Session, connectionCtx.groupType, sourceImportURL, credential.Key)
 		if parentErr := ctx.Err(); parentErr != nil {
 			return RealConnectResponse{}, stopBeforeCreate(parentErr)
 		}
@@ -292,7 +294,7 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 		rateLabel = connectionCtx.groupName
 	}
 	accountName := fmt.Sprintf("%s-【%s】-%s", groupTypePrefix(connectionCtx.groupType), connectionCtx.upstreamSite.Name, rateLabel)
-	payload, err := buildAccountPayload(connectionCtx.groupType, connectionCtx.upstreamSite.BaseURL, credential.Key, numericIDs, accountName, settings, modelResult)
+	payload, err := buildAccountPayload(connectionCtx.groupType, sourceImportURL, credential.Key, numericIDs, accountName, settings, modelResult)
 	if err != nil {
 		failure := importFailure(ErrorImportModelSyncFailed, "model_sync", "main", "pending", http.StatusBadGateway, err)
 		failure.UpstreamKeyID, failure.UpstreamResourceName = credential.ID, resourceName
@@ -339,7 +341,7 @@ func (s *Service) realConnectManaged(ctx context.Context, userID string, req Rea
 	if sourceErr != nil {
 		sourceDetail = "Hub 无法读取当前上游站点资料，具体原因无法确认；账号和 Key 保留，关联未保存，请查看 Hub 后端记录"
 	}
-	if sourceErr == nil && (currentSite == nil || currentSite.Session == nil || currentSite.UserID != userID || currentSite.AdminAccountID != workspace || currentSite.BaseURL != sourceBaseURL || currentSite.Platform != sourcePlatform || currentSite.Session.Platform != connectionCtx.upstreamSession.Platform || currentSite.Session.BaseURL != connectionCtx.upstreamSession.BaseURL) {
+	if sourceErr == nil && (currentSite == nil || currentSite.Session == nil || currentSite.UserID != userID || currentSite.AdminAccountID != workspace || currentSite.BaseURL != sourceBaseURL || currentSite.ImportBaseURL() != sourceImportURL || currentSite.Platform != sourcePlatform || currentSite.Session.Platform != connectionCtx.upstreamSession.Platform || currentSite.Session.BaseURL != connectionCtx.upstreamSession.BaseURL) {
 		sourceErr = importInvalid(ErrorRequest, "上游站点、登录来源或所属工作区已变化，账号和 Key 保留，关联未保存；请刷新上游站点并核对已有资源")
 	}
 	var currentGroup upstream.GroupInfo

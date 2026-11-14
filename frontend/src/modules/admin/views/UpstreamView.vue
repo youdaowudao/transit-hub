@@ -93,10 +93,11 @@ const loadRefreshSettings = async () => {
   }
 }
 
-const createEmptyForm = (): UpstreamSiteForm & { websiteUrl: string } => ({
+// 旧的单独网站链接不再出现在表单里，也不随保存提交，已保存的值保持不变。
+const createEmptyForm = (): UpstreamSiteForm & { apiUrl: string } => ({
   name: '',
   siteUrl: '',
-  websiteUrl: '',
+  apiUrl: '',
   platform: 'auto',
   authMode: 'token',
   account: '',
@@ -125,7 +126,7 @@ const normalizedSiteURL = (value: string): string => {
   return absolute.split(/[?#]/, 1)[0]!.replace(/\/+$/, '')
 }
 const migrationTargetURL = computed(() => normalizedSiteURL(newSiteForm.value.siteUrl))
-const apiSiteLink = computed(() => parseUpstreamLink(normalizedSiteURL(newSiteForm.value.siteUrl)))
+const siteLink = computed(() => parseUpstreamLink(normalizedSiteURL(newSiteForm.value.siteUrl)))
 const domainMigrationRequired = computed(() => Boolean(editingSiteId.value) && migrationTargetURL.value !== normalizedSiteURL(editingBaseURL.value))
 
 watch([() => newSiteForm.value.siteUrl, editingSiteId, isAddModalOpen], () => {
@@ -135,7 +136,11 @@ watch([() => newSiteForm.value.siteUrl, editingSiteId, isAddModalOpen], () => {
 watch(domainMigrationConfirmed, () => { domainMigrationConfirmationError.value = false })
 
 const showEditFailureHelp = computed(() => Boolean(editingSiteId.value) && ['login', 'refresh', 'verify', 'metrics'].includes(addFailure.value?.stage ?? ''))
-const showRefreshTokenWarning = computed(() => newSiteForm.value.platform !== 'newapi' && newSiteForm.value.authMode === 'token' && newSiteForm.value.refreshToken.trim() !== '' && ['refresh', 'verify', 'metrics', 'save'].includes(addFailure.value?.stage ?? '') && !addFailure.value?.upstreamMessage?.includes(t('admin.upstream.failure.refreshTokenUsed')))
+const usesRefreshToken = computed(() => newSiteForm.value.platform !== 'newapi' && newSiteForm.value.authMode === 'token' && newSiteForm.value.refreshToken.trim() !== '')
+// 刷新接口 404 说明这个地址上没有登录接口，Refresh Token 没有被使用，不能提示“可能已被使用”。
+const refreshRouteMissing = computed(() => addFailure.value?.stage === 'refresh' && addFailure.value?.httpStatus === 404)
+const showRefreshTokenNotUsed = computed(() => usesRefreshToken.value && refreshRouteMissing.value)
+const showRefreshTokenWarning = computed(() => usesRefreshToken.value && !refreshRouteMissing.value && ['refresh', 'verify', 'metrics', 'save'].includes(addFailure.value?.stage ?? '') && !addFailure.value?.upstreamMessage?.includes(t('admin.upstream.failure.refreshTokenUsed')))
 
 watch(
   () => newSiteForm.value.platform,
@@ -177,7 +182,7 @@ const handleEditSite = (site: UpstreamSite) => {
   newSiteForm.value = {
     name: site.name,
     siteUrl: site.baseUrl,
-    websiteUrl: site.websiteUrl ?? '',
+    apiUrl: site.apiUrl ?? '',
     platform: site.platform,
     authMode: site.authMode ?? 'password',
     account: site.account,
@@ -205,7 +210,7 @@ const openAddSiteModal = () => {
 
 const failureFieldLabel = (field: string): string => {
   if (field === 'accessToken' && newSiteForm.value.authMode === 'user_key') return t('admin.upstream.modal.form.userKey')
-  const fields: Record<string, string> = { name: 'siteName', siteUrl: 'siteUrl', websiteUrl: 'websiteUrl', platform: 'platform', authMode: 'authMode', account: 'account', password: 'password', accessToken: 'accessToken', refreshToken: 'refreshToken', tokenType: 'tokenType', userId: 'userId', rechargeRate: 'rechargeRate', remark: 'remark' }
+  const fields: Record<string, string> = { name: 'siteName', siteUrl: 'siteUrl', websiteUrl: 'websiteUrl', apiUrl: 'apiUrl', platform: 'platform', authMode: 'authMode', account: 'account', password: 'password', accessToken: 'accessToken', refreshToken: 'refreshToken', tokenType: 'tokenType', userId: 'userId', rechargeRate: 'rechargeRate', remark: 'remark' }
   return fields[field] ? t(`admin.upstream.modal.form.${fields[field]}`) : t('admin.upstream.errors.invalidFields')
 }
 
@@ -1214,6 +1219,7 @@ onBeforeUnmount(() => {
                 <p v-if="addFailure?.upstreamMessage">{{ addFailure.stage === 'save' ? '实际结果：' : t(addFailure.stage === 'check' ? 'admin.upstream.failure.checkReason' : 'admin.upstream.failure.upstreamMessage') }}{{ addFailure.upstreamMessage }}</p>
                 <p v-if="showEditFailureHelp">{{ t('admin.upstream.failure.editNotSaved') }}</p>
                 <p v-if="showRefreshTokenWarning">{{ t('admin.upstream.failure.refreshTokenUsed') }}</p>
+                <p v-if="showRefreshTokenNotUsed">{{ t('admin.upstream.failure.refreshTokenNotUsed') }}</p>
                 <p v-if="addFailure?.fields?.length">{{ t('admin.upstream.failure.fields') }}{{ addFailure.fields.map(failureFieldLabel).join('、') }}</p>
                 <div v-for="(attempt, index) in addFailure?.attempts ?? []" :key="index" class="space-y-1">
                   <p>{{ attempt.platform === 'newapi' ? 'NewAPI' : 'Sub2API' }}：{{ t(attempt.errorKey ?? 'admin.upstream.errors.unknown') }}</p>
@@ -1336,10 +1342,10 @@ onBeforeUnmount(() => {
                   required
                   class="bg-surface border-border/50 focus:border-primary h-10"
                 />
-                <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.upstream.modal.form.apiUrlHelp') }}</p>
-                <a v-if="!apiSiteLink.disabledReason" :href="apiSiteLink.href" target="_blank" rel="noopener noreferrer" class="text-sm text-primary hover:underline">{{ t('admin.upstream.modal.form.openApiSite') }}</a>
-                <span v-else class="text-sm text-muted-foreground" aria-disabled="true">{{ t('admin.upstream.modal.form.openApiSite') }}</span>
-                <p class="text-xs leading-5 text-muted-foreground">{{ t(apiSiteLink.disabledReason ? 'admin.upstream.modal.form.openApiDisabled' : 'admin.upstream.modal.form.openApiHelp') }}</p>
+                <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.upstream.modal.form.siteUrlHelp') }}</p>
+                <a v-if="!siteLink.disabledReason" :href="siteLink.href" target="_blank" rel="noopener noreferrer" class="text-sm text-primary hover:underline">{{ t('admin.upstream.modal.form.openSite') }}</a>
+                <span v-else class="text-sm text-muted-foreground" aria-disabled="true">{{ t('admin.upstream.modal.form.openSite') }}</span>
+                <p class="text-xs leading-5 text-muted-foreground">{{ t(siteLink.disabledReason ? 'admin.upstream.modal.form.openSiteDisabled' : 'admin.upstream.modal.form.openSiteHelp') }}</p>
               </div>
 
               <div v-if="domainMigrationRequired" class="space-y-3 rounded-xl border border-border/50 bg-surface p-4 text-sm sm:col-span-2">
@@ -1353,9 +1359,9 @@ onBeforeUnmount(() => {
               </div>
 
               <div class="space-y-2 sm:col-span-2">
-                <label for="upstream-site-website-url" class="text-sm font-medium text-foreground">{{ t('admin.upstream.modal.form.websiteUrl') }}</label>
-                <Input id="upstream-site-website-url" v-model="newSiteForm.websiteUrl" name="websiteUrl" type="text" inputmode="url" placeholder="https://www.example.com" :disabled="isAdding" class="bg-surface border-border/50 focus:border-primary h-10" />
-                <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.upstream.modal.form.websiteUrlHelp') }}</p>
+                <label for="upstream-site-api-url" class="text-sm font-medium text-foreground">{{ t('admin.upstream.modal.form.apiUrl') }}</label>
+                <Input id="upstream-site-api-url" v-model="newSiteForm.apiUrl" name="apiUrl" type="text" inputmode="url" :placeholder="t('admin.upstream.modal.form.apiUrlPlaceholder')" :disabled="isAdding" class="bg-surface border-border/50 focus:border-primary h-10" />
+                <p class="text-xs leading-5 text-muted-foreground">{{ t('admin.upstream.modal.form.apiUrlHelp') }}</p>
               </div>
 
               <!-- Auth Mode -->

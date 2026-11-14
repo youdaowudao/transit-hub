@@ -15,7 +15,7 @@ import (
 // excluded because a sync may already have published its transient status.
 func unchangedSiteConfiguration(current, expected Site) bool {
 	return current.ID == expected.ID && current.UserID == expected.UserID && current.AdminAccountID == expected.AdminAccountID &&
-		reflect.DeepEqual(current.Session, expected.Session) && current.Name == expected.Name && current.BaseURL == expected.BaseURL && current.WebsiteURL == expected.WebsiteURL &&
+		reflect.DeepEqual(current.Session, expected.Session) && current.Name == expected.Name && current.BaseURL == expected.BaseURL && current.WebsiteURL == expected.WebsiteURL && current.APIURL == expected.APIURL &&
 		current.Platform == expected.Platform && current.RequestedPlatform == expected.RequestedPlatform && current.Account == expected.Account &&
 		current.Remark == expected.Remark && current.RechargeRate == expected.RechargeRate && current.IsEnabled() == expected.IsEnabled() && current.Pinned == expected.Pinned && reflect.DeepEqual(current.Settings, expected.Settings)
 }
@@ -29,6 +29,9 @@ func mergeExistingSiteChanges(current, expected, candidate Site) Site {
 	}
 	if candidate.WebsiteURL != expected.WebsiteURL {
 		next.WebsiteURL = candidate.WebsiteURL
+	}
+	if candidate.APIURL != expected.APIURL {
+		next.APIURL = candidate.APIURL
 	}
 	if candidate.BaseURL != expected.BaseURL {
 		next.BaseURL = candidate.BaseURL
@@ -86,7 +89,7 @@ func (r *Repository) SaveExistingSiteIfUnchanged(ctx context.Context, expected, 
 	var current Site
 	var metricsJSON, sessionJSON, settingsJSON []byte
 	var enabled bool
-	err = tx.QueryRow(ctx, `SELECT id,user_id,admin_account_id,name,base_url,platform,requested_platform,account,remark,recharge_rate,status,error_key,metrics,session,settings,last_synced_at,enabled,pinned,website_url FROM upstream_sites WHERE id=$1 AND user_id=$2 AND admin_account_id=$3 FOR UPDATE`, expected.ID, expected.UserID, expected.AdminAccountID).Scan(&current.ID, &current.UserID, &current.AdminAccountID, &current.Name, &current.BaseURL, &current.Platform, &current.RequestedPlatform, &current.Account, &current.Remark, &current.RechargeRate, &current.Status, &current.ErrorKey, &metricsJSON, &sessionJSON, &settingsJSON, &current.LastSyncedAt, &enabled, &current.Pinned, &current.WebsiteURL)
+	err = tx.QueryRow(ctx, `SELECT id,user_id,admin_account_id,name,base_url,platform,requested_platform,account,remark,recharge_rate,status,error_key,metrics,session,settings,last_synced_at,enabled,pinned,website_url,api_url FROM upstream_sites WHERE id=$1 AND user_id=$2 AND admin_account_id=$3 FOR UPDATE`, expected.ID, expected.UserID, expected.AdminAccountID).Scan(&current.ID, &current.UserID, &current.AdminAccountID, &current.Name, &current.BaseURL, &current.Platform, &current.RequestedPlatform, &current.Account, &current.Remark, &current.RechargeRate, &current.Status, &current.ErrorKey, &metricsJSON, &sessionJSON, &settingsJSON, &current.LastSyncedAt, &enabled, &current.Pinned, &current.WebsiteURL, &current.APIURL)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -125,7 +128,7 @@ func (r *Repository) SaveExistingSiteIfUnchanged(ctx context.Context, expected, 
 	if err != nil {
 		return false, err
 	}
-	result, err := tx.Exec(ctx, `UPDATE upstream_sites SET name=$4,base_url=$5,platform=$6,requested_platform=$7,account=$8,remark=$9,recharge_rate=$10,status=$11,error_key=$12,metrics=$13::jsonb,session=$14::jsonb,settings=$15::jsonb,last_synced_at=$16,enabled=$17,updated_at=$18,pinned=$19,website_url=$20 WHERE id=$1 AND user_id=$2 AND admin_account_id=$3 AND EXISTS(SELECT 1 FROM admin_accounts WHERE user_id=$2 AND id=$3)`, next.ID, next.UserID, next.AdminAccountID, next.Name, next.BaseURL, next.Platform, next.RequestedPlatform, next.Account, next.Remark, next.RechargeRate, next.Status, next.ErrorKey, string(metricsJSON), nullableJSONString(sessionJSON), string(settingsJSON), next.LastSyncedAt, next.IsEnabled(), time.Now(), next.Pinned, next.WebsiteURL)
+	result, err := tx.Exec(ctx, `UPDATE upstream_sites SET name=$4,base_url=$5,platform=$6,requested_platform=$7,account=$8,remark=$9,recharge_rate=$10,status=$11,error_key=$12,metrics=$13::jsonb,session=$14::jsonb,settings=$15::jsonb,last_synced_at=$16,enabled=$17,updated_at=$18,pinned=$19,website_url=$20,api_url=$21 WHERE id=$1 AND user_id=$2 AND admin_account_id=$3 AND EXISTS(SELECT 1 FROM admin_accounts WHERE user_id=$2 AND id=$3)`, next.ID, next.UserID, next.AdminAccountID, next.Name, next.BaseURL, next.Platform, next.RequestedPlatform, next.Account, next.Remark, next.RechargeRate, next.Status, next.ErrorKey, string(metricsJSON), nullableJSONString(sessionJSON), string(settingsJSON), next.LastSyncedAt, next.IsEnabled(), time.Now(), next.Pinned, next.WebsiteURL, next.APIURL)
 	if err != nil {
 		return false, err
 	}

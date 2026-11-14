@@ -177,6 +177,7 @@ type CreateRequest struct {
 	Name         string   `json:"name"`
 	SiteURL      string   `json:"siteUrl"`
 	WebsiteURL   string   `json:"websiteUrl"`
+	APIURL       string   `json:"apiUrl"`
 	Platform     Platform `json:"platform"`
 	AuthMode     AuthMode `json:"authMode"`
 	Account      string   `json:"account"`
@@ -196,6 +197,7 @@ type UpdateRequest struct {
 	Name                   string   `json:"name"`
 	SiteURL                string   `json:"siteUrl"`
 	WebsiteURL             *string  `json:"websiteUrl,omitempty"`
+	APIURL                 *string  `json:"apiUrl,omitempty"`
 	Platform               Platform `json:"platform"`
 	AuthMode               AuthMode `json:"authMode"`
 	Account                string   `json:"account"`
@@ -229,6 +231,7 @@ type Site struct {
 	Name              string       `json:"name"`
 	BaseURL           string       `json:"baseUrl"`
 	WebsiteURL        string       `json:"websiteUrl"`
+	APIURL            string       `json:"apiUrl"`
 	Platform          Platform     `json:"platform"`
 	RequestedPlatform Platform     `json:"requestedPlatform"`
 	Account           string       `json:"account"`
@@ -252,6 +255,7 @@ type Response struct {
 	Name              string             `json:"name"`
 	BaseURL           string             `json:"baseUrl"`
 	WebsiteURL        string             `json:"websiteUrl"`
+	APIURL            string             `json:"apiUrl"`
 	Platform          Platform           `json:"platform"`
 	RequestedPlatform Platform           `json:"requestedPlatform"`
 	AuthMode          AuthMode           `json:"authMode"`

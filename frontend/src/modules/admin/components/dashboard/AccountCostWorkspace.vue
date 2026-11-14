@@ -23,6 +23,16 @@ import {
   listRevenueDiscountRates,
   saveRevenueDiscountRate,
   deleteRevenueDiscountRate,
+  getGiftLedger,
+  checkGiftLedgerCustomer,
+  createGiftLedgerRecord,
+  updateGiftLedgerRecord,
+  deleteGiftLedgerRecord,
+  type AdminRequestError,
+  type GiftLedgerCustomer,
+  type GiftLedgerCustomerCheck,
+  type GiftLedgerOverview,
+  type GiftLedgerRecord,
   type AccountAsset,
   type AccountAssetDetail,
   type AccountBatchInput,
@@ -93,6 +103,11 @@ const feeRateHistoryLoadFailed = ref(false)
 const discountHistory = ref<RevenueDiscountRate[]>([])
 const discountHistoryLoadFailed = ref(false)
 const discountEditNotice = ref('')
+const giftLedger = ref<GiftLedgerOverview | null>(null)
+const giftLedgerLoadError = ref('')
+const giftEditing = ref<GiftLedgerRecord | null>(null)
+const giftCheck = ref<GiftLedgerCustomerCheck | null>(null)
+const giftCheckError = ref('')
 const selectedDetail = ref<AccountAssetDetail | null>(null)
 const showBatchForm = ref(false)
 const recentBatch = ref<{ id: string; name: string; quantity: number } | null>(null)
@@ -122,6 +137,7 @@ const costForm = reactive({ type: 'fixed' as 'promotion' | 'fixed' | 'adjustment
 const feeForm = reactive({ rate: '1.6', effectiveDate: today() })
 // 营收折扣率三项都按占主站消费的百分比填写。
 const discountForm = reactive({ giftRate: '', newUserRate: '', referralRate: '', effectiveDate: tomorrow() })
+const giftForm = reactive({ mainUserId: '', rechargeDate: today(), paidAmount: '', giftAmount: '', note: '' })
 const eventForm = reactive({ eventType: 'status', effectiveDate: today(), status: 'dead', statsMode: 'automatic', quotaUsed: '', revenue: '', upstreamCost: '', refund: '', refundClose: false, identifier: '', platform: '', channel: '', accountType: '', purchaseUrl: '', upstreamReferenceUrl: '', note: '' })
 const linkForm = reactive({ connectionId: '', upstreamReferenceUrl: '', effectiveFrom: '', manualSameDaySplit: false, previousQuotaUsed: '', previousRevenue: '', replacementQuotaUsed: '', replacementRevenue: '', note: '' })
 
@@ -430,6 +446,13 @@ const resetWorkspaceData = () => {
   discountHistoryLoadFailed.value = false
   discountEditNotice.value = ''
   Object.assign(discountForm, { giftRate: '', newUserRate: '', referralRate: '', effectiveDate: tomorrow() })
+  // 单独客户赠送记录属于工作区：切换后不能带着上一个工作区的记录、查询结果、编辑中的记录或未保存的草稿。
+  giftLedger.value = null
+  giftLedgerLoadError.value = ''
+  giftEditing.value = null
+  giftCheck.value = null
+  giftCheckError.value = ''
+  Object.assign(giftForm, { mainUserId: '', rechargeDate: today(), paidAmount: '', giftAmount: '', note: '' })
   assetPage.value = 1
   assetHasMore.value = false
   ledgerPage.value = 1
@@ -536,7 +559,7 @@ const refreshAfterCostWrite = async (success: string, request: WorkspaceRequest,
   const reasons = results.flatMap(result => result.status === 'rejected' ? [result.reason] : result.value ? [result.value] : [])
   if (reasons.length) {
     costReloadNeeded.value = true
-    const confirmed = previousResult || success.match(/^(费用已删除|费率已删除|折扣率已保存|折扣率已删除)/)?.[1] || (rules ? '费率已保存' : '费用已保存')
+    const confirmed = previousResult || success.match(/^(费用已删除|费率已删除|折扣率已保存|折扣率已删除|记录已保存|记录已删除)/)?.[1] || (rules ? '费率已保存' : '费用已保存')
     costNotice.value = `${confirmed}，但${rules ? '规则及历史' : '费用列表'}更新失败。请点击‘重新加载费用’查看结果，不要重复录入；不会修改主站。具体原因：${reasons.map(costErrorReason).join('；')}`
   } else if (!success) costNotice.value = '费用列表已更新；不会修改主站。'
 }
@@ -546,7 +569,7 @@ const retryCostRead = async () => {
   saving.value = true
   errorText.value = ''
   try {
-    const previousResult = costNotice.value.match(/^(费用已保存|费用已删除|费率已保存|费率已删除|折扣率已保存|折扣率已删除)/)?.[1] ?? '费用读取'
+    const previousResult = costNotice.value.match(/^(费用已保存|费用已删除|费率已保存|费率已删除|折扣率已保存|折扣率已删除|记录已保存|记录已删除)/)?.[1] ?? '费用读取'
     await refreshAfterCostWrite('', request, activeTab.value === 'rules', previousResult)
     if (isCurrentWorkspaceRequest(request)) emit('updated')
   } finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
@@ -615,19 +638,39 @@ const loadDiscountHistory = async (request = currentWorkspaceRequest(), generati
   }
 }
 
+// 单独客户赠送记录：随成本规则一起加载。加载失败时区块显示原因，并像其他历史一样交给上层提示。
+const loadGiftLedger = async (request = currentWorkspaceRequest(), generation = costReadGeneration.value) => {
+  if (!isCurrentCostRead(request, generation)) return null
+  giftLedgerLoadError.value = ''
+  try {
+    const overview = await getGiftLedger()
+    if (isCurrentCostRead(request, generation)) giftLedger.value = overview
+    return null
+  } catch (error) {
+    if (isCurrentCostRead(request, generation)) {
+      giftLedger.value = null
+      giftLedgerLoadError.value = costErrorReason(error)
+      return error
+    }
+    return null
+  }
+}
+
 const loadRules = async (request = currentWorkspaceRequest(), generation = costReadGeneration.value) => {
   if (!isCurrentCostRead(request, generation)) return
   try {
-    const [result, historyError, discountError] = await Promise.all([
+    const [result, historyError, discountError, giftError] = await Promise.all([
       getRechargeFeeRate(today()),
       loadFeeRateHistory(request, generation),
       loadDiscountHistory(request, generation),
+      loadGiftLedger(request, generation),
     ])
     if (!isCurrentCostRead(request, generation)) return
     feeForm.rate = String(result.rate * 100)
     feeForm.effectiveDate = result.effectiveDate || today()
     if (historyError) throw historyError
     if (discountError) throw discountError
+    if (giftError) throw giftError
   } catch (error) {
     if (isCurrentCostRead(request, generation)) throw error
   }
@@ -1055,12 +1098,161 @@ const removeFee = async (rate: RechargeFeeRate) => {
   } finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
 }
 
-// 今日营收说明：营收 = 主站消费 - 营收折扣。
+// ---- 单独客户赠送记录 ----
+const giftLedgerSupported = computed(() => giftLedger.value?.supported !== false)
+const giftKeyText = (key: string, result: '没有保存' | '没有查到', mainUserId: string): string | null => {
+  const texts: Record<string, string> = {
+    invalidUser: `主站用户 ID 需要填数字（主站后台用户列表里的 ID）；${result}`,
+    userNotFound: `主站找不到 ID 为 ${mainUserId} 的用户，请核对后重新填写；${result}`,
+    invalidAmount: `实付和赠送都要填 0 到 10,000,000 之间的金额（最多两位小数），两者不能都是 0；${result}`,
+    invalidNote: `备注最多 200 字；${result}`,
+    invalidDate: `充值日期无效，请重新选择；${result}`,
+    futureDate: `充值日期不能晚于今天；${result}`,
+    tooOld: `充值日期最早可填 60 天前（主站只保留近 90 天消费）。更早的充值请按今天零点的剩余录入，日期填今天；${result}`,
+    notFound: '这条记录已不存在或不属于当前工作区，请点击‘重新加载费用’确认',
+    unsupported: '当前主站不是 Sub2API，不能按客户查询消费，暂不支持单独客户赠送记录。',
+  }
+  return texts[key] ?? null
+}
+// 失败说明：业务校验失败写明没有保存（或没有查到）；向主站核对失败带上后端给出的原因；其他失败说明结果未确认。
+const giftFailureText = (error: unknown, action: '保存' | '删除' | '查询', mainUserId = '') => {
+  const message = error instanceof Error ? error.message : ''
+  const reason = (error as AdminRequestError | null)?.reason ?? ''
+  const result = action === '查询' ? '没有查到' : '没有保存'
+  const key = message.match(/^dashboard\.giftLedger\.errors\.(\w+)$/)?.[1] ?? ''
+  if (key === 'userLookupFailed') return `无法向主站核对这个用户（${reason || '主站没有返回具体原因'}）；${result}，请检查主站登录状态后重试`
+  if (key === 'usageLookupFailed') return reason || '读取他今天的消费失败（主站没有返回具体原因）；今天已花没有查到，请稍后重试'
+  const known = giftKeyText(key, result, mainUserId)
+  if (known) return known
+  if (action === '查询') return `查询这个用户失败：${costErrorReason(error)}；没有查到，请稍后重试；不会修改主站。`
+  return `记录${action}未能确认：${costErrorReason(error)}。暂时无法确认是否已${action}，请点击‘重新加载费用’查看记录，再决定是否重试；不会修改主站。`
+}
+// 结果未确认或记录已不存在时需要重新加载确认；校验失败、向主站核对失败都确定没有保存，不需要。
+const giftNoReloadKeys = ['invalidUser', 'userNotFound', 'invalidAmount', 'invalidNote', 'invalidDate', 'futureDate', 'tooOld', 'unsupported', 'userLookupFailed', 'usageLookupFailed']
+const giftNeedsReload = (error: unknown) => {
+  const message = error instanceof Error ? error.message : ''
+  const key = message.match(/^dashboard\.giftLedger\.errors\.(\w+)$/)?.[1] ?? ''
+  return !giftNoReloadKeys.includes(key)
+}
+const giftAmount = (value: string) => (String(value).trim() === '' ? 0 : Number(value))
+const giftSharePercent = (share: number) => `${Number((share * 100).toFixed(2))}%`
+const giftStateText = (state: string) => ({ unused: '未开始用', using: '正在用', used_up: '已用完' } as Record<string, string>)[state] ?? ''
+const resetGiftForm = () => {
+  giftEditing.value = null
+  Object.assign(giftForm, { mainUserId: '', rechargeDate: today(), paidAmount: '', giftAmount: '', note: '' })
+}
+const giftEditNotice = computed(() => giftEditing.value
+  ? `正在编辑 ${giftEditing.value.email} ${giftEditing.value.rechargeDate} 的记录：主站用户不能改，要换用户请删除后重新录入。保存后今天起按改后的记录重新推算，已经结算的日期不变。`
+  : '')
+const giftCustomerTodayText = (customer: GiftLedgerCustomer) => {
+  if (customer.todayConsumption == null) return ''
+  if (customer.todayConsumption <= 0) return '今天还没有消费。'
+  const uncovered = customer.todayUncovered ?? 0
+  return `今天花了 ${formatAmount(customer.todayConsumption)}：其中 ${formatAmount(customer.todayCovered)} 用的是已记录的充值，扣赠送 ${formatAmount(customer.todayGift)}${uncovered > 0 ? `；${formatAmount(uncovered)} 超出记录，按整站折扣率计算` : ''}。`
+}
+const giftBalanceWarning = (customer: GiftLedgerCustomer) => {
+  if (customer.mainBalance == null || customer.remaining == null || customer.mainBalance + 1 >= customer.remaining) return ''
+  return `主站余额比按记录剩余少 ${formatAmount(customer.remaining - customer.mainBalance)}：可能有退款、管理员扣了余额或记录填多了，请核对后修改记录；改正前这位客户的赠送可能扣多了。`
+}
+const giftCheckText = computed(() => {
+  const check = giftCheck.value
+  if (!check) return ''
+  const zeroBalance = check.balance == null ? null : check.balance + check.todayConsumption
+  return `${check.email}（主站 ID ${check.mainUserId}）：主站当前余额 ${formatAmount(check.balance)}，今天已花 ${formatAmount(check.todayConsumption)}。按“今天零点的剩余”录入时，零点余额约为 ${formatAmount(zeroBalance)}（今天如有新充值，要再减去）。`
+})
+const checkGiftCustomer = async () => {
+  if (saving.value || !giftLedgerSupported.value) return
+  const request = currentWorkspaceRequest()
+  const mainUserId = giftForm.mainUserId.trim()
+  giftCheck.value = null
+  giftCheckError.value = ''
+  saving.value = true
+  try {
+    const result = await checkGiftLedgerCustomer(mainUserId)
+    if (isCurrentWorkspaceRequest(request)) giftCheck.value = result
+  } catch (error) {
+    if (isCurrentWorkspaceRequest(request)) giftCheckError.value = giftFailureText(error, '查询', mainUserId)
+  } finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
+}
+const editGiftRecord = (record: GiftLedgerRecord) => {
+  if (saving.value) return
+  clearCostNotice()
+  errorText.value = ''
+  giftCheck.value = null
+  giftCheckError.value = ''
+  giftEditing.value = record
+  Object.assign(giftForm, { mainUserId: record.mainUserId, rechargeDate: record.rechargeDate, paidAmount: String(record.paidAmount), giftAmount: String(record.giftAmount), note: record.note })
+}
+const cancelGiftEdit = () => { if (!saving.value) resetGiftForm() }
+const submitGiftRecord = async () => {
+  if (saving.value || !giftLedgerSupported.value) return
+  clearCostNotice()
+  const editing = giftEditing.value
+  const paidAmount = giftAmount(giftForm.paidAmount)
+  const giftValue = giftAmount(giftForm.giftAmount)
+  if (!Number.isFinite(paidAmount) || !Number.isFinite(giftValue)) {
+    errorText.value = giftKeyText('invalidAmount', '没有保存', '') ?? ''
+    return
+  }
+  const input = { mainUserId: giftForm.mainUserId.trim(), rechargeDate: giftForm.rechargeDate, paidAmount, giftAmount: giftValue, note: giftForm.note }
+  const request = currentWorkspaceRequest()
+  costReadGeneration.value += 1
+  loading.value = false
+  saving.value = true
+  errorText.value = ''
+  try {
+    const saved = editing ? await updateGiftLedgerRecord(editing.id, input) : await createGiftLedgerRecord(input)
+    if (!isCurrentWorkspaceRequest(request)) return
+    resetGiftForm()
+    giftCheck.value = null
+    emit('updated')
+    await refreshAfterCostWrite(`记录已保存：${saved.email} ${saved.rechargeDate} 实付 ${formatAmount(saved.paidAmount)} 送 ${formatAmount(saved.giftAmount)}。今天起按先充先用计算，已经结算的日期不变，不会修改主站。`, request, true)
+  } catch (error) {
+    if (isCurrentWorkspaceRequest(request)) {
+      errorText.value = giftFailureText(error, '保存', input.mainUserId)
+      costReloadNeeded.value = giftNeedsReload(error)
+    }
+  } finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
+}
+const removeGiftRecord = async (record: GiftLedgerRecord) => {
+  if (saving.value) return
+  clearCostNotice()
+  errorText.value = ''
+  const used = record.usedAmount ?? 0
+  const prefix = used > 0 ? `这笔已经用掉 ${formatAmount(used)}。` : ''
+  if (!window.confirm(`${prefix}删除 ${record.email} ${record.rechargeDate} 实付 ${formatAmount(record.paidAmount)} 送 ${formatAmount(record.giftAmount)} 的记录？删除表示这笔从没发生过：今天起按剩下的记录重新推算；已经结算的日期不变，不会修改主站。已经用完的记录不要为了整理而删除。`)) return
+  const request = currentWorkspaceRequest()
+  costReadGeneration.value += 1
+  loading.value = false
+  saving.value = true
+  try {
+    await deleteGiftLedgerRecord(record.id)
+    if (!isCurrentWorkspaceRequest(request)) return
+    if (giftEditing.value?.id === record.id) resetGiftForm()
+    emit('updated')
+    await refreshAfterCostWrite('记录已删除；今天起按剩下的记录计算，已经结算的日期不变，不会修改主站。', request, true)
+  } catch (error) {
+    if (isCurrentWorkspaceRequest(request)) {
+      errorText.value = giftFailureText(error, '删除')
+      costReloadNeeded.value = giftNeedsReload(error)
+    }
+  } finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
+}
+
+// 今日营收说明：营收 = 主站消费 - 营收折扣。有单独客户赠送时写出整站部分和单独客户部分。
 const revenueDiscountLine = computed(() => {
   const summary = props.summary
   const net = summary?.netRevenue ?? props.todayRevenue
   if (summary?.revenueDiscount == null || net == null) return ''
   const gross = net + summary.revenueDiscount
+  const detail = summary.revenueDiscountDetail
+  if (detail) {
+    if (gross + 1e-9 < detail.ledgerCovered) {
+      return `营收 ${formatAmount(net)} = 主站消费 ${formatAmount(gross)} − 单独客户赠送 ${formatAmount(detail.ledgerGift)}。主站消费暂时小于单独客户已记录部分 ${formatAmount(detail.ledgerCovered)}（两次查询时间相差几十秒），整站折扣暂按 0 计算；稍后刷新会更新。营收折扣不计入成本。`
+    }
+    const rateText = detail.generalRate == null ? '0（今天没有生效的整站折扣率）' : formatRatePercent(detail.generalRate)
+    return `营收 ${formatAmount(net)} = 主站消费 ${formatAmount(gross)} − 营收折扣 ${formatAmount(summary.revenueDiscount)}。其中整站折扣 ${formatAmount(detail.generalDiscount)} =（主站消费 ${formatAmount(gross)} − 单独客户已记录部分 ${formatAmount(detail.ledgerCovered)}）× ${rateText}；单独客户赠送 ${formatAmount(detail.ledgerGift)}（${detail.customers.length} 位客户）。营收折扣不计入成本。`
+  }
   const rule = summary.revenueDiscountRule
   const parts = rule
     ? `：充值赠送 ${formatRatePercent(rule.giftRate)}、新用户福利 ${formatRatePercent(rule.newUserRate)}、邀请返利 ${formatRatePercent(rule.referralRate)}`
@@ -1144,7 +1336,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
         </nav>
 
         <main class="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
-          <p v-if="errorText" class="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{{ errorText }}</p>
+          <p v-if="errorText" class="mb-4 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{{ errorText }}</p><Button v-if="errorText && costReloadNeeded && !costNotice" type="button" size="sm" variant="secondary" class="mb-4" :disabled="saving" data-testid="error-reload" @click="retryCostRead">重新加载费用</Button>
           <div v-if="costNotice" role="status" class="mb-4 space-y-2 rounded-md border border-border/60 bg-surface-elevated px-3 py-2 text-sm text-muted-foreground">
             <p>{{ costNotice }}</p><Button v-if="costReloadNeeded" type="button" size="sm" variant="secondary" :disabled="saving" @click="retryCostRead">重新加载费用</Button>
           </div>
@@ -1346,7 +1538,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
             <div v-if="ledger.length || ledgerPage > 1" class="flex items-center justify-end gap-2"><Button variant="secondary" size="sm" title="上一页" :disabled="saving || ledgerPage === 1" @click="changeLedgerPage(-1)"><ArrowLeft class="h-4 w-4" /></Button><span class="text-xs text-muted-foreground">第 {{ ledgerPage }} 页</span><Button variant="secondary" size="sm" title="下一页" :disabled="saving || !ledgerHasMore" @click="changeLedgerPage(1)"><ArrowRight class="h-4 w-4" /></Button></div>
           </section>
 
-          <section v-else class="max-w-3xl space-y-6"><div><h3 class="text-sm font-semibold">营收折扣率（从营收中扣除）</h3><p class="mt-2 text-xs text-muted-foreground">用户花掉的充值赠送、新用户福利、邀请返利不是实际收到的钱。这里按比例从主站消费中扣除，得到实收营收；营收折扣不计入成本，不会修改主站。</p><div class="mt-3 grid gap-3 sm:grid-cols-4" @input="clearCostNotice" @change="clearCostNotice"><label class="space-y-1 text-xs text-muted-foreground"><span>充值赠送 %</span><Input v-model="discountForm.giftRate" :disabled="saving" aria-label="充值赠送 %" type="number" min="0" max="100" step="0.01" placeholder="充值赠送 %" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>新用户福利 %</span><Input v-model="discountForm.newUserRate" :disabled="saving" aria-label="新用户福利 %" type="number" min="0" max="100" step="0.01" placeholder="新用户福利 %" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>邀请返利 %</span><Input v-model="discountForm.referralRate" :disabled="saving" aria-label="邀请返利 %" type="number" min="0" max="100" step="0.01" placeholder="邀请返利 %" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>生效日期</span><Input v-model="discountForm.effectiveDate" :disabled="saving" aria-label="折扣率生效日期" type="date" :min="tomorrow()" /></label></div><div class="mt-3 flex flex-wrap items-center gap-3"><p class="text-sm">合计折扣率 <span class="text-lg font-bold tabular-nums">{{ discountTotalPercent == null ? '—' : `${discountTotalPercent}%` }}</span></p><Button :disabled="saving" @click="submitDiscount"><Save class="mr-2 h-4 w-4" />保存折扣率</Button></div><p class="mt-2 text-xs text-muted-foreground">每项都填占主站消费的比例，不是活动面额：例如邀请返利是 10% × 被邀请用户充值占主站消费的比例。生效日期最早为明天：新规则从所选日期起生效，之前的日期不受影响；只有还没生效的折扣率可以删除；已经结算的日期不会重算。</p><p v-if="discountEditNotice" role="status" class="mt-2 text-xs text-warning">{{ discountEditNotice }}</p></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">折扣率生效历史</h3><p v-if="discountHistoryLoadFailed" class="py-5 text-sm text-destructive">折扣率历史加载失败</p><p v-else-if="!discountHistory.length" class="py-5 text-sm text-muted-foreground">还没有设置折扣率，营收按主站消费原值计算。</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in discountHistory" :key="rate.id" class="flex flex-wrap items-center justify-between gap-2 py-2.5 text-sm"><span>{{ rate.effectiveDate }} 起 · 合计 <strong class="tabular-nums">{{ formatRatePercent(rate.totalRate) }}</strong> · 充值赠送 {{ formatRatePercent(rate.giftRate) }} · 新用户福利 {{ formatRatePercent(rate.newUserRate) }} · 邀请返利 {{ formatRatePercent(rate.referralRate) }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`编辑 ${rate.effectiveDate} 起的折扣率`" @click="editDiscount(rate)">编辑</Button><Button v-if="rate.effectiveDate > today()" type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${rate.effectiveDate} 起的折扣率`" @click="removeDiscount(rate)">删除</Button></span><span v-if="rate.effectiveDate <= today()" class="w-full text-xs text-muted-foreground">已经生效，不能删除；要停用，请新增一条从明天起生效的折扣率（可都填 0）。</span></div></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">充值手续费（按营收估算）</h3><p class="mt-2 text-xs text-muted-foreground">按当天实收营收（主站消费扣除营收折扣后）× 费率估算手续费，默认 1.6%；不是支付平台实际账单。新费率从所选日期生效，不自动重算已保存的历史手续费，不会修改主站。</p><div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]" @input="clearCostNotice" @change="clearCostNotice"><Input v-model="feeForm.rate" :disabled="saving" aria-label="费率 %" type="number" min="0" max="100" step="0.01" placeholder="费率 %" /><Input v-model="feeForm.effectiveDate" :disabled="saving" aria-label="费率生效日期" type="date" /><Button :disabled="saving" @click="submitFee"><Save class="mr-2 h-4 w-4" />保存费率</Button></div><p class="mt-2 text-xs text-muted-foreground">编辑会把该条填入上面的表单，保存后覆盖同一生效日期；要改生效日期，请删除旧的再新增。</p></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">费率生效历史</h3><p v-if="feeRateHistoryLoadFailed" class="py-5 text-sm text-destructive">费率历史加载失败</p><p v-else-if="!feeRateHistory.length" class="py-5 text-sm text-muted-foreground">暂无费率历史</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in feeRateHistory" :key="rate.id" class="grid items-center gap-1 py-2.5 text-sm sm:grid-cols-[7rem_1fr_auto_auto]"><span>{{ rate.effectiveDate }}</span><span>{{ (rate.rate * 100).toFixed(2) }}% · {{ rate.id }}</span><span class="text-xs text-muted-foreground">{{ historyCreatedAtText(rate.createdAt) }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`编辑 ${rate.effectiveDate} 起的手续费率`" @click="editFee(rate)">编辑</Button><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${rate.effectiveDate} 起的手续费率`" @click="removeFee(rate)">删除</Button></span></div></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">核算说明</h3><dl class="mt-3 space-y-3 text-sm"><div><dt class="font-medium">替代上游成本</dt><dd class="mt-1 text-muted-foreground">购买价包含额度时，从上游直接成本扣除该账号已核对的 Key 成本，再计入买号确认成本。</dd></div><div><dt class="font-medium">叠加上游成本</dt><dd class="mt-1 text-muted-foreground">购买价是订阅或接入费时，买号确认成本与关联上游按量成本同时计入。</dd></div><div><dt class="font-medium">历史成本更正</dt><dd class="mt-1 text-muted-foreground">手工成本可以编辑或删除整笔费用，操作后会重新计算受影响日期的成本和利润，不会修改主站；买号购买、退款和状态请到买号资产处理。</dd></div></dl></div></section>
+          <section v-else class="max-w-3xl space-y-6"><div><h3 class="text-sm font-semibold">营收折扣率（从营收中扣除）</h3><p class="mt-2 text-xs text-muted-foreground">用户花掉的充值赠送、新用户福利、邀请返利不是实际收到的钱。这里按比例从主站消费中扣除，得到实收营收；营收折扣不计入成本，不会修改主站。</p><div class="mt-3 grid gap-3 sm:grid-cols-4" @input="clearCostNotice" @change="clearCostNotice"><label class="space-y-1 text-xs text-muted-foreground"><span>充值赠送 %</span><Input v-model="discountForm.giftRate" :disabled="saving" aria-label="充值赠送 %" type="number" min="0" max="100" step="0.01" placeholder="充值赠送 %" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>新用户福利 %</span><Input v-model="discountForm.newUserRate" :disabled="saving" aria-label="新用户福利 %" type="number" min="0" max="100" step="0.01" placeholder="新用户福利 %" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>邀请返利 %</span><Input v-model="discountForm.referralRate" :disabled="saving" aria-label="邀请返利 %" type="number" min="0" max="100" step="0.01" placeholder="邀请返利 %" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>生效日期</span><Input v-model="discountForm.effectiveDate" :disabled="saving" aria-label="折扣率生效日期" type="date" :min="tomorrow()" /></label></div><div class="mt-3 flex flex-wrap items-center gap-3"><p class="text-sm">合计折扣率 <span class="text-lg font-bold tabular-nums">{{ discountTotalPercent == null ? '—' : `${discountTotalPercent}%` }}</span></p><Button :disabled="saving" @click="submitDiscount"><Save class="mr-2 h-4 w-4" />保存折扣率</Button></div><p class="mt-2 text-xs text-muted-foreground">每项都填占主站消费的比例，不是活动面额：例如邀请返利是 10% × 被邀请用户充值占主站消费的比例。生效日期最早为明天：新规则从所选日期起生效，之前的日期不受影响；只有还没生效的折扣率可以删除；已经结算的日期不会重算。</p><p v-if="discountEditNotice" role="status" class="mt-2 text-xs text-warning">{{ discountEditNotice }}</p></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">折扣率生效历史</h3><p v-if="discountHistoryLoadFailed" class="py-5 text-sm text-destructive">折扣率历史加载失败</p><p v-else-if="!discountHistory.length" class="py-5 text-sm text-muted-foreground">还没有设置折扣率，营收按主站消费原值计算。</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in discountHistory" :key="rate.id" class="flex flex-wrap items-center justify-between gap-2 py-2.5 text-sm"><span>{{ rate.effectiveDate }} 起 · 合计 <strong class="tabular-nums">{{ formatRatePercent(rate.totalRate) }}</strong> · 充值赠送 {{ formatRatePercent(rate.giftRate) }} · 新用户福利 {{ formatRatePercent(rate.newUserRate) }} · 邀请返利 {{ formatRatePercent(rate.referralRate) }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`编辑 ${rate.effectiveDate} 起的折扣率`" @click="editDiscount(rate)">编辑</Button><Button v-if="rate.effectiveDate > today()" type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${rate.effectiveDate} 起的折扣率`" @click="removeDiscount(rate)">删除</Button></span><span v-if="rate.effectiveDate <= today()" class="w-full text-xs text-muted-foreground">已经生效，不能删除；要停用，请新增一条从明天起生效的折扣率（可都填 0）。</span></div></div></div><div class="border-t border-border/60 pt-5" data-testid="gift-ledger-section"><h3 class="text-sm font-semibold">单独客户赠送记录（从营收中扣除）</h3><p class="mt-2 text-xs text-muted-foreground">少数客户每次赠送比例不同（例如充 100 送 20）时，在这里每送一笔记一笔。这些客户花钱时先用最早的充值：花到已记录的部分，按那一笔的赠送占比从营收中扣除，不再按整站折扣率；花超过已记录到账总额的部分，是他自己充的钱，按整站折扣率计算。只读主站消费，不会修改主站。</p><p class="mt-2 text-xs text-warning">估算上面的整站折扣率时，不要再把这些客户的赠送算进去，否则会重复扣除。</p><p v-if="giftLedger && !giftLedger.supported" role="status" class="mt-2 text-sm text-destructive">当前主站不是 Sub2API，不能按客户查询消费，暂不支持单独客户赠送记录。</p><div class="mt-3 grid gap-3 sm:grid-cols-5" @input="clearCostNotice" @change="clearCostNotice"><label class="space-y-1 text-xs text-muted-foreground"><span>主站用户 ID</span><Input v-model="giftForm.mainUserId" :disabled="saving || !giftLedgerSupported || !!giftEditing" aria-label="主站用户 ID" inputmode="numeric" placeholder="主站用户 ID" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>充值日期</span><Input v-model="giftForm.rechargeDate" :disabled="saving || !giftLedgerSupported" aria-label="充值日期" type="date" :max="today()" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>实付金额</span><Input v-model="giftForm.paidAmount" :disabled="saving || !giftLedgerSupported" aria-label="实付金额" type="number" min="0" step="0.01" placeholder="实付金额" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>赠送金额</span><Input v-model="giftForm.giftAmount" :disabled="saving || !giftLedgerSupported" aria-label="赠送金额" type="number" min="0" step="0.01" placeholder="赠送金额" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>备注（可选）</span><Input v-model="giftForm.note" :disabled="saving || !giftLedgerSupported" aria-label="备注（可选）" maxlength="200" placeholder="备注（可选）" /></label></div><div class="mt-3 flex flex-wrap items-center gap-2"><Button v-if="!giftEditing" type="button" variant="secondary" :disabled="saving || !giftLedgerSupported" @click="checkGiftCustomer"><Search class="mr-2 h-4 w-4" />查询这个用户</Button><Button type="button" :disabled="saving || !giftLedgerSupported" @click="submitGiftRecord"><Save class="mr-2 h-4 w-4" />{{ giftEditing ? '保存修改' : '保存记录' }}</Button><Button v-if="giftEditing" type="button" variant="secondary" :disabled="saving" @click="cancelGiftEdit">取消编辑</Button></div><p v-if="giftEditNotice" role="status" class="mt-2 text-xs text-warning">{{ giftEditNotice }}</p><p v-if="giftCheckText" role="status" class="mt-2 text-sm">{{ giftCheckText }}</p><p v-if="giftCheckError" role="alert" class="mt-2 text-sm text-destructive">{{ giftCheckError }}</p><p class="mt-2 text-xs text-muted-foreground">实付填客户实际付的钱，赠送填这次多给的全部余额（包括主站自动送的）；零散赠送或返利实付填 0。主站用户 ID 是主站后台用户列表里的数字，保存前可点“查询这个用户”核对邮箱。充值日期最早可填 60 天前，不能晚于今天。补录过去日期的充值时，从那天起他已经花掉的部分会自动算作用掉了；那些日子已经结算过，按整站折扣率计算，不再补扣。更早的充值请按今天零点的剩余录入，日期填今天；剩余来自几笔比例不同的充值时，按先充先用算出每笔还剩多少，分别录入，先录早的。修改或删除只影响今天和还没结算的日期，已经结算的日期不变。</p><div v-if="giftLedgerLoadError" class="space-y-2 py-5 text-sm text-destructive"><p>单独客户赠送记录加载失败：{{ giftLedgerLoadError }}</p><Button v-if="!costReloadNeeded" type="button" size="sm" variant="secondary" :disabled="saving" @click="retryCostRead">重新加载费用</Button></div><template v-else-if="giftLedger"><div v-if="giftLedger.supported && !giftLedger.statusAvailable && giftLedger.customers.length" class="mt-3 space-y-2"><p role="status" class="text-sm text-warning">暂时查不到主站消费，下面只显示记录本身：{{ giftLedger.statusError }}。请稍后点击‘重新加载费用’；不会修改主站。</p><Button v-if="!costReloadNeeded" type="button" size="sm" variant="secondary" :disabled="saving" @click="retryCostRead">重新加载费用</Button></div><p v-if="!giftLedger.customers.length" class="py-5 text-sm text-muted-foreground">还没有单独客户赠送记录，所有客户都按整站折扣率计算。</p><div v-else class="mt-3 grid gap-3 lg:grid-cols-2"><article v-for="customer in giftLedger.customers" :key="customer.mainUserId" class="rounded-lg border border-border/60 p-3 text-sm" data-testid="gift-ledger-customer"><h4 class="font-semibold">{{ customer.email }}（主站 ID {{ customer.mainUserId }}）</h4><p class="mt-1">已记录到账 <strong class="text-base tabular-nums">{{ formatAmount(customer.creditedTotal) }}</strong> · 累计已用 <strong class="text-base tabular-nums">{{ formatAmount(customer.usedTotal) }}</strong> · 按记录剩余 <strong class="text-base tabular-nums">{{ formatAmount(customer.remaining) }}</strong></p><p v-if="giftCustomerTodayText(customer)" class="mt-1 text-muted-foreground">{{ giftCustomerTodayText(customer) }}</p><p class="mt-1 text-muted-foreground">主站当前余额 {{ formatAmount(customer.mainBalance) }}</p><p v-if="giftBalanceWarning(customer)" role="alert" class="mt-1 text-xs text-warning"><AlertTriangle class="mr-1 inline h-3.5 w-3.5" />{{ giftBalanceWarning(customer) }}</p><div class="mt-2 divide-y divide-border/50"><div v-for="record in customer.records" :key="record.id" class="flex flex-wrap items-center justify-between gap-2 py-2" data-testid="gift-ledger-record"><span>{{ record.rechargeDate }} · 实付 {{ formatAmount(record.paidAmount) }} · 赠送 {{ formatAmount(record.giftAmount) }}（占到账 {{ giftSharePercent(record.giftShare) }}）· 已用 {{ formatAmount(record.usedAmount) }}/{{ formatAmount(record.creditAmount) }}{{ giftStateText(record.state) ? ` · ${giftStateText(record.state)}` : '' }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving || !giftLedgerSupported" :aria-label="`编辑 ${record.email} ${record.rechargeDate} 的记录`" @click="editGiftRecord(record)">编辑</Button><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${record.email} ${record.rechargeDate} 的记录`" @click="removeGiftRecord(record)">删除</Button></span><span v-if="record.note" class="w-full text-xs text-muted-foreground">{{ record.note }}</span></div></div></article></div></template></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">充值手续费（按营收估算）</h3><p class="mt-2 text-xs text-muted-foreground">按当天实收营收（主站消费扣除营收折扣后）× 费率估算手续费，默认 1.6%；不是支付平台实际账单。新费率从所选日期生效，不自动重算已保存的历史手续费，不会修改主站。</p><div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]" @input="clearCostNotice" @change="clearCostNotice"><Input v-model="feeForm.rate" :disabled="saving" aria-label="费率 %" type="number" min="0" max="100" step="0.01" placeholder="费率 %" /><Input v-model="feeForm.effectiveDate" :disabled="saving" aria-label="费率生效日期" type="date" /><Button :disabled="saving" @click="submitFee"><Save class="mr-2 h-4 w-4" />保存费率</Button></div><p class="mt-2 text-xs text-muted-foreground">编辑会把该条填入上面的表单，保存后覆盖同一生效日期；要改生效日期，请删除旧的再新增。</p></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">费率生效历史</h3><p v-if="feeRateHistoryLoadFailed" class="py-5 text-sm text-destructive">费率历史加载失败</p><p v-else-if="!feeRateHistory.length" class="py-5 text-sm text-muted-foreground">暂无费率历史</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in feeRateHistory" :key="rate.id" class="grid items-center gap-1 py-2.5 text-sm sm:grid-cols-[7rem_1fr_auto_auto]"><span>{{ rate.effectiveDate }}</span><span>{{ (rate.rate * 100).toFixed(2) }}% · {{ rate.id }}</span><span class="text-xs text-muted-foreground">{{ historyCreatedAtText(rate.createdAt) }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`编辑 ${rate.effectiveDate} 起的手续费率`" @click="editFee(rate)">编辑</Button><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${rate.effectiveDate} 起的手续费率`" @click="removeFee(rate)">删除</Button></span></div></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">核算说明</h3><dl class="mt-3 space-y-3 text-sm"><div><dt class="font-medium">替代上游成本</dt><dd class="mt-1 text-muted-foreground">购买价包含额度时，从上游直接成本扣除该账号已核对的 Key 成本，再计入买号确认成本。</dd></div><div><dt class="font-medium">叠加上游成本</dt><dd class="mt-1 text-muted-foreground">购买价是订阅或接入费时，买号确认成本与关联上游按量成本同时计入。</dd></div><div><dt class="font-medium">历史成本更正</dt><dd class="mt-1 text-muted-foreground">手工成本可以编辑或删除整笔费用，操作后会重新计算受影响日期的成本和利润，不会修改主站；买号购买、退款和状态请到买号资产处理。</dd></div></dl></div></section>
         </main>
       </section>
     </div>

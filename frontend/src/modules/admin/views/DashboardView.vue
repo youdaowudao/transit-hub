@@ -492,8 +492,11 @@ const cards = computed<DashboardCoreCard[]>(() => {
             : t('admin.dashboard.costQuality.netProfitCeiling', { value: formatAmount(current.current) }))
       : ''
     const discount = liveData.value?.additionalCosts?.revenueDiscount
+    const discountDetail = liveData.value?.additionalCosts?.revenueDiscountDetail
     const revenueDiscountStatus = key === 'todayProfit' && discount != null && liveData.value?.todayProfit != null
-      ? `已扣营收折扣 ${formatAmount(discount)}（主站消费 ${formatAmount(liveData.value.todayProfit)}）`
+      ? discountDetail
+        ? `已扣营收折扣 ${formatAmount(discount)}（整站 ${formatAmount(discountDetail.generalDiscount)} + 单独客户赠送 ${formatAmount(discountDetail.ledgerGift)}；主站消费 ${formatAmount(liveData.value.todayProfit)}）`
+        : `已扣营收折扣 ${formatAmount(discount)}（主站消费 ${formatAmount(liveData.value.todayProfit)}）`
       : ''
     return [{
       key,

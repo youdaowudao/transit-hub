@@ -121,7 +121,7 @@ func TestAdditionalCostSummaryUsesConfiguredRechargeFeeRate(t *testing.T) {
 		items: []AdditionalCostRecord{{Type: AdditionalCostFixed, Amount: 5}},
 	}
 	service := &MetricsService{additionalCosts: repository}
-	summary := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-08-13", &revenue)
+	summary := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-08-13", &revenue, revenueDiscountSource{})
 	if summary == nil || summary.RechargeFee == nil || *summary.RechargeFee != 2 || summary.FeeRate == nil || *summary.FeeRate != 0.02 || summary.Total == nil || *summary.Total != 7 {
 		t.Fatalf("summary = %+v, want 2%% fee and total 7", summary)
 	}
@@ -133,7 +133,7 @@ func TestAdditionalCostSummaryKeepsTotalUnavailableWithoutRevenue(t *testing.T) 
 		items: []AdditionalCostRecord{{Type: AdditionalCostFixed, Amount: 5}},
 	}
 	service := &MetricsService{additionalCosts: repository}
-	summary := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-08-13", nil)
+	summary := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-08-13", nil, revenueDiscountSource{})
 	if summary == nil || summary.Available || summary.Total != nil || summary.UnavailableReason != "revenue_unavailable" {
 		t.Fatalf("summary = %+v, want unavailable without total", summary)
 	}
@@ -157,7 +157,7 @@ func TestAdditionalCostSummaryIncludesAccountPurchaseAndRefundWithLedgerSigns(t 
 		items: summary.Records,
 	}
 	service := &MetricsService{additionalCosts: repository}
-	withFee := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-08-13", &revenue)
+	withFee := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-08-13", &revenue, revenueDiscountSource{})
 	if withFee.Total == nil || *withFee.Total != 14 {
 		t.Fatalf("ledger total = %#v, want fixed 5 + purchase 10 - refund 3 + fee 2 = 14", withFee.Total)
 	}

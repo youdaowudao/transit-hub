@@ -93,7 +93,8 @@
             </tr>
             <tr v-else-if="expandedDates.has(item.date)" class="bg-muted/30">
               <td colspan="7" class="py-2 pl-8 pr-4">
-                <p v-if="item.revenueDiscount != null" class="mb-2 text-xs text-muted-foreground">营收折扣{{ item.revenueDiscountRate != null ? `（${formatRatePercent(item.revenueDiscountRate)}）` : '' }}：{{ formatAmount(item.revenueDiscount) }}；主站消费 {{ formatAmount(item.todayProfit ?? null) }}；营收折扣不计入成本。</p>
+                <p v-if="item.revenueDiscount != null && item.revenueDiscountDetail" class="mb-2 text-xs text-muted-foreground">{{ ledgerDiscountLine(item) }}</p>
+                <p v-else-if="item.revenueDiscount != null" class="mb-2 text-xs text-muted-foreground">营收折扣{{ item.revenueDiscountRate != null ? `（${formatRatePercent(item.revenueDiscountRate)}）` : '' }}：{{ formatAmount(item.revenueDiscount) }}；主站消费 {{ formatAmount(item.todayProfit ?? null) }}；营收折扣不计入成本。</p>
                 <div v-if="item.additionalCosts" class="mb-3 grid gap-1 border-b border-border/60 pb-3 text-xs text-muted-foreground sm:grid-cols-2">
                   <span>充值手续费{{ item.additionalCosts.feeRate != null ? ` (${(item.additionalCosts.feeRate * 100).toFixed(2)}%)` : '' }}：{{ formatAmount(item.additionalCosts.rechargeFee) }}</span>
                   <span>活动赠送摊销：{{ formatAmount(item.additionalCosts.promotion) }}</span>
@@ -195,6 +196,14 @@ const expandedDates = ref(new Set<string>())
 
 // 营收列和利润率按实收营收（主站消费 - 营收折扣）计算；没有折扣时等于主站消费。
 const netRevenue = (item: DailyStatItem): number | null => netRevenueOf(item.todayProfit, item.revenueDiscount)
+// 有单独客户赠送时的营收折扣说明：整站部分 + 单独客户赠送；事后补结的客户这天没有扣赠送。
+const ledgerDiscountLine = (item: DailyStatItem): string => {
+  const detail = item.revenueDiscountDetail
+  if (!detail || item.revenueDiscount == null) return ''
+  const late = detail.customers.filter(customer => customer.lateProtected).length
+  const lateText = late > 0 ? `其中 ${late} 位客户这天是事后补结，为避免与后面日期重复，这天没有扣他们的赠送。` : ''
+  return `营收折扣：${formatAmount(item.revenueDiscount)}（整站 ${formatAmount(detail.generalDiscount)} + 单独客户赠送 ${formatAmount(detail.ledgerGift)}）；主站消费 ${formatAmount(item.todayProfit ?? null)}，其中单独客户已记录部分 ${formatAmount(detail.ledgerCovered)}；营收折扣不计入成本。${lateText}`
+}
 const adjustedMargin = (item: DailyStatItem): number | null => {
   const revenue = netRevenue(item)
   return revenue != null && revenue > 0 && item.adjustedNetProfit != null

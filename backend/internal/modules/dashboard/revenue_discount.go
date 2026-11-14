@@ -137,11 +137,63 @@ func revenueDiscountReadFailed(summary *AdditionalCostSummary) bool {
 	return summary != nil && summary.revenueDiscountReadFailed
 }
 
-func revenueDiscountSummary(summary *AdditionalCostSummary) (*float64, *float64) {
+// revenueDiscountSummary 返回写快照用的折扣、整站折扣率和单独客户明细（JSON）。
+func revenueDiscountSummary(summary *AdditionalCostSummary) (*float64, *float64, []byte) {
 	if summary == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return summary.RevenueDiscount, summary.RevenueDiscountRate
+	var detail []byte
+	if summary.RevenueDiscountDetail != nil {
+		raw, err := summary.RevenueDiscountDetail.marshal()
+		if err == nil {
+			detail = raw
+		}
+	}
+	return summary.RevenueDiscount, summary.RevenueDiscountRate, detail
+}
+
+// revenueDiscountSource 决定营收折扣怎么算（SPEC 6.4）：
+//   - snapshot 非空：用快照已存的折扣和明细，不查规则；
+//   - 否则 ledgerErr 非空：单独客户赠送未知，按读取失败处理；
+//   - ledger 非空：整站部分 + 单独客户赠送；
+//   - 都为空：与 V3.1.6 相同，按当天规则现算。
+type revenueDiscountSource struct {
+	snapshot  *DailySnapshot
+	ledger    *giftLedgerDayResult
+	ledgerErr error
+	// strict 为真（过去日期）时做一致性检查：客户消费合计不能超过主站总消费 + 0.01。
+	strict bool
+}
+
+// revenueDiscountUnavailableError 是单独客户赠送未知时的错误：Error() 返回白话原因，
+// errors.Is(err, errRevenueDiscountUnavailable) 仍为真，现有判断不变。
+type revenueDiscountUnavailableError struct{ Reason string }
+
+func (e revenueDiscountUnavailableError) Error() string { return e.Reason }
+
+func (e revenueDiscountUnavailableError) Is(target error) bool {
+	return target == errRevenueDiscountUnavailable
+}
+
+// revenueDiscountFailure 返回写快照路径应返回的错误：单独客户失败时带白话原因，整站规则读取失败保持原错误。
+func revenueDiscountFailure(summary *AdditionalCostSummary) error {
+	if summary != nil && summary.revenueDiscountReason != "" {
+		return revenueDiscountUnavailableError{Reason: summary.revenueDiscountReason}
+	}
+	return errRevenueDiscountUnavailable
+}
+
+func giftLedgerUnavailableText(reason string) string {
+	return "单独客户赠送计算失败：" + reason + "。暂不计算营收、成本和利润，也不保存今天的数字；请稍后刷新，仍失败请按原因处理。不会修改主站。"
+}
+
+// giftLedgerErrorReason 取单独客户错误的白话原因；不是已知类型时给出核查位置。
+func giftLedgerErrorReason(err error, date string) string {
+	var computeErr giftLedgerComputeError
+	if errors.As(err, &computeErr) {
+		return computeErr.Reason
+	}
+	return "原因未知，请查看本站后端日志中 " + date + " 的 dashboard 记录"
 }
 
 func (s *MetricsService) revenueDiscountRepository() (revenueDiscountRateRepository, bool) {

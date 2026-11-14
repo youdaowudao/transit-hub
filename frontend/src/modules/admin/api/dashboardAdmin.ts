@@ -19,7 +19,12 @@ const authHeaders = (): HeadersInit => {
 
 type AdminErrorPayload = {
   message?: string
+  /** 单独客户赠送记录：向主站核对失败时后端给出的脱敏白话原因。 */
+  reason?: string
 }
+
+/** 带后端原因的请求错误：message 仍是错误 key，reason 为后端给出的白话原因。 */
+export type AdminRequestError = Error & { reason?: string }
 
 // 与 mySites.ts 保持一致的请求封装：附带 TransitHub 鉴权头，并把后端返回的
 // i18n 错误 key 透传为 Error.message，由调用方用 t() 渲染。
@@ -47,7 +52,9 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       handleAuthExpired()
       throw new Error(authUnauthorizedErrorKey)
     }
-    throw new Error(payload.message ?? 'admin.dashboard.adminAuth.errors.request')
+    const error: AdminRequestError = new Error(payload.message ?? 'admin.dashboard.adminAuth.errors.request')
+    if (typeof payload.reason === 'string' && payload.reason) error.reason = payload.reason
+    throw error
   }
 
   return payload
@@ -144,6 +151,8 @@ export interface AdditionalCostSummary {
   revenueDiscountRule?: RevenueDiscountRate | null
   /** 实收营收 = 主站消费 - 营收折扣。 */
   netRevenue?: number | null
+  /** 有单独客户赠送记录时的拆分：整站部分 + 单独客户赠送。 */
+  revenueDiscountDetail?: RevenueDiscountDetail | null
   available: boolean
   unavailableReason?: string
   records?: AdditionalCostRecord[]
@@ -306,6 +315,28 @@ export interface RechargeFeeRate {
   createdAt: string
 }
 
+/** 营收折扣拆分中一位单独客户当天的结果；金额字段为微单位（元 × 1,000,000）或分。 */
+export interface RevenueDiscountCustomer {
+  mainUserId: string
+  email: string
+  consumptionMicros: number
+  coveredMicros: number
+  uncoveredMicros: number
+  giftCents: number
+  lateProtected: boolean
+}
+
+/** 营收折扣拆分：整站折扣 = (主站消费 − 单独客户已记录部分) × 整站折扣率；另加单独客户赠送。 */
+export interface RevenueDiscountDetail {
+  version: number
+  generalRate: number | null
+  generalBase: number
+  generalDiscount: number
+  ledgerCovered: number
+  ledgerGift: number
+  customers: RevenueDiscountCustomer[]
+}
+
 /** 营收折扣率：三项都是占主站消费的比例（小数），totalRate 为合计。 */
 export interface RevenueDiscountRate {
   id: string
@@ -440,6 +471,75 @@ export const saveRevenueDiscountRate = async (input: { effectiveDate: string; gi
 
 export const deleteRevenueDiscountRate = async (id: string): Promise<void> => {
   await requestJson(`/dashboard/revenue-discount-rates/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export type GiftLedgerRecordState = 'unused' | 'using' | 'used_up' | ''
+
+export interface GiftLedgerRecord {
+  id: string
+  mainUserId: string
+  email: string
+  rechargeDate: string
+  paidAmount: number
+  giftAmount: number
+  creditAmount: number
+  giftShare: number
+  note: string
+  usedAmount: number | null
+  state: GiftLedgerRecordState
+}
+
+export interface GiftLedgerCustomer {
+  mainUserId: string
+  email: string
+  creditedTotal: number
+  usedTotal: number | null
+  remaining: number | null
+  todayConsumption: number | null
+  todayCovered: number | null
+  todayUncovered: number | null
+  todayGift: number | null
+  mainBalance: number | null
+  records: GiftLedgerRecord[]
+}
+
+export interface GiftLedgerOverview {
+  supported: boolean
+  statusAvailable: boolean
+  statusError: string
+  today: string
+  customers: GiftLedgerCustomer[]
+}
+
+export interface GiftLedgerCustomerCheck {
+  mainUserId: string
+  email: string
+  balance: number | null
+  todayConsumption: number
+}
+
+export interface GiftLedgerInput {
+  mainUserId: string
+  rechargeDate: string
+  paidAmount: number
+  giftAmount: number
+  note: string
+}
+
+export const getGiftLedger = async (): Promise<GiftLedgerOverview> =>
+  requestJson<GiftLedgerOverview>('/dashboard/gift-ledger')
+
+export const checkGiftLedgerCustomer = async (mainUserId: string): Promise<GiftLedgerCustomerCheck> =>
+  requestJson<GiftLedgerCustomerCheck>(`/dashboard/gift-ledger/customer?mainUserId=${encodeURIComponent(mainUserId)}`)
+
+export const createGiftLedgerRecord = async (input: GiftLedgerInput): Promise<GiftLedgerRecord> =>
+  requestJson<GiftLedgerRecord>('/dashboard/gift-ledger/records', { method: 'POST', body: JSON.stringify(input) })
+
+export const updateGiftLedgerRecord = async (id: string, input: GiftLedgerInput): Promise<GiftLedgerRecord> =>
+  requestJson<GiftLedgerRecord>(`/dashboard/gift-ledger/records/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(input) })
+
+export const deleteGiftLedgerRecord = async (id: string): Promise<void> => {
+  await requestJson(`/dashboard/gift-ledger/records/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 export const listAdditionalCosts = async (from: string, to: string = from): Promise<{ items: AdditionalCostRecord[] }> =>
@@ -650,6 +750,7 @@ export interface DailyStatItem {
   /** 快照已存的营收折扣（今天取实时汇总）；费用不可用时也有值，与趋势同一口径。 */
   revenueDiscount?: number | null
   revenueDiscountRate?: number | null
+  revenueDiscountDetail?: RevenueDiscountDetail | null
   operatingCost?: number | null
   adjustedNetProfit?: number | null
   accountSnapshotRunId?: string

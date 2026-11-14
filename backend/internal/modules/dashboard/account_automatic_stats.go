@@ -84,16 +84,17 @@ func (s *MetricsService) finalizeAutomaticAccountSubstate(
 		snapshot.AccountStatsQuality = KeyCostQualityMissing
 	}
 
-	additionalCosts := s.additionalCostSummary(ctx, snapshot.UserID, snapshot.AdminAccountID, date, snapshot.TodayProfit)
+	// 快照有单独客户明细时用快照已存的折扣（现算需要主站会话和按客户查询）；没有明细时与 V3.1.6 相同。
+	additionalCosts := s.additionalCostSummary(ctx, snapshot.UserID, snapshot.AdminAccountID, date, snapshot.TodayProfit, storedRevenueDiscountSource(snapshot))
 	if revenueDiscountReadFailed(additionalCosts) {
 		// 折扣未知时不覆盖已结算快照，等待下一轮补结。
-		return errRevenueDiscountUnavailable
+		return revenueDiscountFailure(additionalCosts)
 	}
 	if additionalCosts != nil {
 		snapshot.AdditionalCost = additionalCostTotal(additionalCosts)
 		snapshot.RechargeFee, snapshot.RechargeFeeRate = rechargeFeeSummary(additionalCosts)
 		snapshot.PromotionCost, snapshot.FixedCost, snapshot.AdjustmentCost = additionalCostCategorySummary(additionalCosts)
-		snapshot.RevenueDiscount, snapshot.RevenueDiscountRate = revenueDiscountSummary(additionalCosts)
+		snapshot.RevenueDiscount, snapshot.RevenueDiscountRate, snapshot.RevenueDiscountDetail = revenueDiscountSummary(additionalCosts)
 		snapshot.AdditionalCostRecords = additionalCostRecords(additionalCosts)
 		accountPurchase := additionalCosts.AccountPurchase
 		snapshot.AccountPurchaseCost = &accountPurchase

@@ -60,7 +60,7 @@ func TestAdditionalCostSummaryDeductsRevenueDiscountBeforeFee(t *testing.T) {
 		rule:                         &RevenueDiscountRate{EffectiveDate: "2026-11-14", GiftRate: 0.03, NewUserRate: 0.02, ReferralRate: 0.01, TotalRate: 0.06},
 	}
 	service := &MetricsService{additionalCosts: repository}
-	summary := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue)
+	summary := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue, revenueDiscountSource{})
 	if summary == nil || summary.RevenueDiscount == nil || *summary.RevenueDiscount != 6 || summary.NetRevenue == nil || *summary.NetRevenue != 94 ||
 		summary.RevenueDiscountRate == nil || *summary.RevenueDiscountRate != 0.06 || summary.RevenueDiscountRule == nil {
 		t.Fatalf("summary = %+v, want discount 6 and net revenue 94", summary)
@@ -82,7 +82,7 @@ func TestAdditionalCostSummaryWithoutDiscountRuleKeepsOldNumbers(t *testing.T) {
 		fakeAdditionalCostRepository: fakeAdditionalCostRepository{rate: RechargeFeeRate{Rate: 0.02}, items: []AdditionalCostRecord{{Type: AdditionalCostFixed, Amount: 5}}},
 	}
 	service := &MetricsService{additionalCosts: repository}
-	summary := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue)
+	summary := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue, revenueDiscountSource{})
 	if summary == nil || summary.RevenueDiscount != nil || summary.NetRevenue != nil || summary.RevenueDiscountRule != nil {
 		t.Fatalf("summary without rule carries discount: %+v", summary)
 	}
@@ -98,7 +98,7 @@ func TestAdditionalCostSummaryDiscountReadFailureHidesCosts(t *testing.T) {
 		ruleErr:                      errors.New("database down"),
 	}
 	service := &MetricsService{additionalCosts: repository}
-	summary := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue)
+	summary := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue, revenueDiscountSource{})
 	if summary == nil || summary.Available || summary.Total != nil || summary.RechargeFee != nil || summary.UnavailableReason != revenueDiscountUnavailableReason {
 		t.Fatalf("summary = %+v, want unavailable costs with a plain reason", summary)
 	}
@@ -200,7 +200,7 @@ func TestRevenueDiscountReadFailureSkipsEverySnapshotWrite(t *testing.T) {
 	// 实时刷新：汇总带失败标记，upsertSnapshot 跳过。
 	live := &fakeMetricsRepository{}
 	liveService := &MetricsService{metricsRepo: live, additionalCosts: failing()}
-	summary := liveService.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue)
+	summary := liveService.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue, revenueDiscountSource{})
 	if !revenueDiscountReadFailed(summary) {
 		t.Fatalf("summary = %+v, want the discount failure marked", summary)
 	}
@@ -210,7 +210,7 @@ func TestRevenueDiscountReadFailureSkipsEverySnapshotWrite(t *testing.T) {
 	}
 	// 反向：确认没有规则时照常写入，折扣为空。
 	liveService.additionalCosts = &discountAdditionalCostRepository{fakeAdditionalCostRepository: fakeAdditionalCostRepository{rate: RechargeFeeRate{Rate: 0.02}}}
-	noRule := liveService.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue)
+	noRule := liveService.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue, revenueDiscountSource{})
 	liveService.upsertSnapshot(context.Background(), "user-1", "workspace-1", "2026-11-14", MetricsResponse{TodayProfit: &revenue, AdditionalCosts: noRule})
 	if len(live.snapshots) != 1 || live.snapshots[0].RevenueDiscount != nil {
 		t.Fatalf("no-rule snapshot = %+v, want one write without discount", live.snapshots)
@@ -266,12 +266,12 @@ func TestAdditionalCostSummaryListFailureStillDeterminesDiscount(t *testing.T) {
 		listErr: errors.New("list down"),
 	}
 	service := &MetricsService{additionalCosts: repository}
-	summary := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue)
+	summary := service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue, revenueDiscountSource{})
 	if summary.Available || summary.RevenueDiscount == nil || *summary.RevenueDiscount != 6 || revenueDiscountReadFailed(summary) {
 		t.Fatalf("summary = %+v, want costs unavailable but discount 6 known", summary)
 	}
 	repository.ruleErr = errors.New("rule down")
-	summary = service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue)
+	summary = service.additionalCostSummary(context.Background(), "user-1", "workspace-1", "2026-11-14", &revenue, revenueDiscountSource{})
 	if !revenueDiscountReadFailed(summary) || summary.RevenueDiscount != nil {
 		t.Fatalf("summary = %+v, want discount marked unknown", summary)
 	}
@@ -454,11 +454,11 @@ func TestRevenueDiscountPostgresRulesSnapshotsAndReprojection(t *testing.T) {
 
 	// 生效日按规则扣折扣；生效日之前（含今天）没有折扣。
 	revenue := 100.0
-	effective := service.additionalCostSummary(ctx, "user-1", "workspace-1", "2026-11-15", &revenue)
+	effective := service.additionalCostSummary(ctx, "user-1", "workspace-1", "2026-11-15", &revenue, revenueDiscountSource{})
 	if effective.RevenueDiscount == nil || *effective.RevenueDiscount != 6 || effective.RechargeFee == nil || !approxEqual(*effective.RechargeFee, 1.5) {
 		t.Fatalf("effective-day summary = %+v, want discount 6 and default 1.6%% fee on 94", effective)
 	}
-	if before := service.additionalCostSummary(ctx, "user-1", "workspace-1", "2026-11-14", &revenue); before.RevenueDiscount != nil {
+	if before := service.additionalCostSummary(ctx, "user-1", "workspace-1", "2026-11-14", &revenue, revenueDiscountSource{}); before.RevenueDiscount != nil {
 		t.Fatalf("today (before the rule) got discount %+v", before)
 	}
 
@@ -524,7 +524,7 @@ func TestRevenueDiscountPostgresRulesSnapshotsAndReprojection(t *testing.T) {
 	if w := discountRequest(mux, http.MethodDelete, "/api/dashboard/revenue-discount-rates/"+saved.ID, "", "user-1"); w.Code != http.StatusNotFound {
 		t.Fatalf("repeat DELETE = %d, want 404", w.Code)
 	}
-	if after := service.additionalCostSummary(ctx, "user-1", "workspace-1", "2026-11-15", &revenue); after.RevenueDiscount == nil || *after.RevenueDiscount != 50 {
+	if after := service.additionalCostSummary(ctx, "user-1", "workspace-1", "2026-11-15", &revenue, revenueDiscountSource{}); after.RevenueDiscount == nil || *after.RevenueDiscount != 50 {
 		t.Fatalf("after delete summary = %+v, want the earlier rule (50%%) to apply again", after)
 	}
 	// 已经生效的规则（过去 11-01、今天 11-14）都不能删除：删除会让今天或过去日期回落到更早的规则。
@@ -539,10 +539,10 @@ func TestRevenueDiscountPostgresRulesSnapshotsAndReprojection(t *testing.T) {
 	if w := discountRequest(mux, http.MethodDelete, "/api/dashboard/revenue-discount-rates/legacy", "", "user-2"); w.Code != http.StatusNotFound {
 		t.Fatalf("other workspace DELETE past rule = %d, want 404", w.Code)
 	}
-	if still := service.additionalCostSummary(ctx, "user-1", "workspace-1", "2026-11-10", &revenue); still.RevenueDiscount == nil || *still.RevenueDiscount != 50 {
+	if still := service.additionalCostSummary(ctx, "user-1", "workspace-1", "2026-11-10", &revenue, revenueDiscountSource{}); still.RevenueDiscount == nil || *still.RevenueDiscount != 50 {
 		t.Fatalf("past-effective rule removed: %+v", still)
 	}
-	if still := service.additionalCostSummary(ctx, "user-1", "workspace-1", "2026-11-14", &revenue); still.RevenueDiscount == nil || *still.RevenueDiscount != 10 {
+	if still := service.additionalCostSummary(ctx, "user-1", "workspace-1", "2026-11-14", &revenue, revenueDiscountSource{}); still.RevenueDiscount == nil || *still.RevenueDiscount != 10 {
 		t.Fatalf("today's rule removed: %+v", still)
 	}
 

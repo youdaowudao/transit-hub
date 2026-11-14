@@ -586,6 +586,45 @@ func (s *PlatformService) FetchSub2APIAdminUsageStats(session Session, startDate
 	return *cost, nil
 }
 
+// 单独客户每日消费读取失败的区分原因：主站返回了内容，但不能当作消费金额使用。
+const (
+	GiftUsageMissingCost  = "admin.upstream.errors.giftUsageMissingCost"
+	GiftUsageNegativeCost = "admin.upstream.errors.giftUsageNegativeCost"
+)
+
+// FetchSub2APIAdminUserUsageCost 按主站用户查询指定新加坡业务日期范围内的实际消费（与总营收同一口径），
+// 只读调用 GET /api/v1/admin/usage/stats?user_id=…。缺少消费金额或金额为负时报错，不当作 0，
+// 错误带实际状态码和区分原因，调用方据此写出白话原因。
+func (s *PlatformService) FetchSub2APIAdminUserUsageCost(session Session, mainUserID, startDate, endDate string) (float64, error) {
+	if session.Platform != PlatformSub2API {
+		return 0, newRequestError(ErrorUnsupported, session.Platform)
+	}
+	if !session.IsAuthenticated() {
+		return 0, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	query := url.Values{}
+	query.Set("user_id", strings.TrimSpace(mainUserID))
+	query.Set("start_date", startDate)
+	query.Set("end_date", endDate)
+	query.Set("timezone", businesstime.Timezone)
+	response, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/admin/usage/stats?"+query.Encode(), adminAuthOptions(session))
+	if err != nil {
+		return 0, err
+	}
+	cost := firstNumber(dataRecord(response.Payload), []string{"total_actual_cost", "totalActualCost"})
+	if cost == nil {
+		requestErr := newRequestErrorWithStatus(ErrorInvalidResponse, PlatformSub2API, response.StatusCode)
+		requestErr.Reason = GiftUsageMissingCost
+		return 0, requestErr
+	}
+	if *cost < 0 {
+		requestErr := newRequestErrorWithStatus(ErrorInvalidResponse, PlatformSub2API, response.StatusCode)
+		requestErr.Reason = GiftUsageNegativeCost
+		return 0, requestErr
+	}
+	return *cost, nil
+}
+
 // FetchAdminUsageStatsForScope 按管理员账号/渠道和主站分组读取指定业务日用量。
 // 该能力目前只对 Sub2API 有明确的 account_id + group_id 合同；其他平台不猜测替代接口。
 func (s *PlatformService) FetchAdminUsageStatsForScope(session Session, accountID, groupID, startDate, endDate string) (AdminUsageStats, error) {

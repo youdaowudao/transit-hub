@@ -48,6 +48,11 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, metricsService *Metric
 	mux.HandleFunc("GET /api/dashboard/revenue-discount-rates", handler.listRevenueDiscountRates)
 	mux.HandleFunc("PUT /api/dashboard/revenue-discount-rate", handler.saveRevenueDiscountRate)
 	mux.HandleFunc("DELETE /api/dashboard/revenue-discount-rates/{id}", handler.deleteRevenueDiscountRate)
+	mux.HandleFunc("GET /api/dashboard/gift-ledger", handler.giftLedgerOverview)
+	mux.HandleFunc("GET /api/dashboard/gift-ledger/customer", handler.checkGiftLedgerCustomer)
+	mux.HandleFunc("POST /api/dashboard/gift-ledger/records", handler.createGiftLedgerRecord)
+	mux.HandleFunc("PUT /api/dashboard/gift-ledger/records/{id}", handler.updateGiftLedgerRecord)
+	mux.HandleFunc("DELETE /api/dashboard/gift-ledger/records/{id}", handler.deleteGiftLedgerRecord)
 	mux.HandleFunc("POST /api/dashboard/account-batches", handler.createAccountBatch)
 	mux.HandleFunc("GET /api/dashboard/account-assets", handler.listAccountAssets)
 	mux.HandleFunc("GET /api/dashboard/account-assets/{id}", handler.getAccountAsset)
@@ -749,4 +754,104 @@ func (h *Handler) backfill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) giftLedgerOverview(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	value, err := h.metricsService.GiftLedgerOverview(r.Context(), userID)
+	if err != nil {
+		writeGiftLedgerError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, value)
+}
+
+func (h *Handler) checkGiftLedgerCustomer(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	value, err := h.metricsService.CheckGiftLedgerCustomer(r.Context(), userID, r.URL.Query().Get("mainUserId"))
+	if err != nil {
+		writeGiftLedgerError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, value)
+}
+
+func (h *Handler) createGiftLedgerRecord(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input GiftLedgerInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	value, err := h.metricsService.CreateGiftLedgerRecord(r.Context(), userID, input)
+	if err != nil {
+		writeGiftLedgerError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, value)
+}
+
+func (h *Handler) updateGiftLedgerRecord(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input GiftLedgerInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	value, err := h.metricsService.UpdateGiftLedgerRecord(r.Context(), userID, r.PathValue("id"), input)
+	if err != nil {
+		writeGiftLedgerError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, value)
+}
+
+func (h *Handler) deleteGiftLedgerRecord(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	if err := h.metricsService.DeleteGiftLedgerRecord(r.Context(), userID, r.PathValue("id")); err != nil {
+		writeGiftLedgerError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeGiftLedgerError 映射单独客户记录的错误；向主站核对失败时同时返回脱敏原因，其余错误交给 writeError。
+func writeGiftLedgerError(w http.ResponseWriter, err error) {
+	var lookupErr giftLedgerLookupError
+	if errors.As(err, &lookupErr) {
+		httpjson.Write(w, http.StatusBadGateway, map[string]string{"message": lookupErr.Key, "reason": lookupErr.Reason})
+		return
+	}
+	switch {
+	case errors.Is(err, ErrGiftLedgerInvalidUser), errors.Is(err, ErrGiftLedgerInvalidAmount), errors.Is(err, ErrGiftLedgerInvalidNote),
+		errors.Is(err, ErrGiftLedgerInvalidDate), errors.Is(err, ErrGiftLedgerFutureDate), errors.Is(err, ErrGiftLedgerTooOld),
+		errors.Is(err, ErrGiftLedgerUserNotFound):
+		httpjson.WriteError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrGiftLedgerNotFound):
+		httpjson.WriteError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrGiftLedgerUnsupported):
+		httpjson.WriteError(w, http.StatusNotImplemented, err.Error())
+	default:
+		writeError(w, err)
+	}
 }

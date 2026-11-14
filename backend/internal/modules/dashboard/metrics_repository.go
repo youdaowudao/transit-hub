@@ -158,6 +158,7 @@ func (r *MetricsRepository) EnsureSchema(ctx context.Context) error {
 		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS cost_quality_mode text;
 		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS revenue_discount double precision;
 		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS revenue_discount_rate double precision;
+		ALTER TABLE dashboard_daily_stats ADD COLUMN IF NOT EXISTS revenue_discount_detail jsonb;
 
 		-- V0.1.16：金额字段改为允许 NULL，区分”真零消费”(0.0)与”无数据”(NULL)。
 		-- 只在字段仍为 NOT NULL 时执行，已经是 nullable 的字段直接跳过；
@@ -281,6 +282,35 @@ func (r *MetricsRepository) EnsureSchema(ctx context.Context) error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_dashboard_revenue_discount_rates_date
 			ON dashboard_revenue_discount_rates (user_id, admin_account_id, effective_date DESC);
+
+		-- 单独客户赠送记录：每送一笔记一笔，金额按分保存。
+		CREATE TABLE IF NOT EXISTS dashboard_gift_ledger_records (
+			id               text PRIMARY KEY,
+			user_id          text NOT NULL,
+			admin_account_id text NOT NULL,
+			main_user_id     bigint NOT NULL CHECK (main_user_id > 0),
+			main_user_email  text NOT NULL DEFAULT '',
+			recharge_date    date NOT NULL,
+			paid_cents       bigint NOT NULL CHECK (paid_cents >= 0),
+			gift_cents       bigint NOT NULL CHECK (gift_cents >= 0),
+			note             text NOT NULL DEFAULT '',
+			created_at       timestamptz NOT NULL DEFAULT now(),
+			updated_at       timestamptz NOT NULL DEFAULT now(),
+			CHECK (paid_cents + gift_cents > 0)
+		);
+		CREATE INDEX IF NOT EXISTS idx_dashboard_gift_ledger_records_order
+			ON dashboard_gift_ledger_records (user_id, admin_account_id, main_user_id, recharge_date, created_at, id);
+
+		-- 单独客户每日消费：每位客户每天最多一个值，第一次保存后不再改（微单位）。
+		CREATE TABLE IF NOT EXISTS dashboard_gift_customer_usage (
+			user_id            text NOT NULL,
+			admin_account_id   text NOT NULL,
+			main_user_id       bigint NOT NULL,
+			usage_date         date NOT NULL,
+			actual_cost_micros bigint NOT NULL CHECK (actual_cost_micros >= 0),
+			observed_at        timestamptz NOT NULL,
+			PRIMARY KEY (user_id, admin_account_id, main_user_id, usage_date)
+		);
 
 		CREATE TABLE IF NOT EXISTS dashboard_additional_costs (
 			id               text PRIMARY KEY,
@@ -839,7 +869,7 @@ func loadDashboardSnapshotForUpdate(ctx context.Context, db metricsDB, userID, a
 		       additional_cost,recharge_fee,recharge_fee_rate,promotion_cost,fixed_cost,adjustment_cost,
 		       additional_cost_records,operating_cost,adjusted_net_profit,COALESCE(account_snapshot_run_id,''),
 		       account_expected_count,account_completed_count,COALESCE(account_stats_quality,'missing'),account_purchase_cost,replacement_deduction,
-		       revenue_discount,revenue_discount_rate
+		       revenue_discount,revenue_discount_rate,revenue_discount_detail
 		FROM dashboard_daily_stats
 		WHERE user_id=$1 AND admin_account_id=$2 AND date=$3::date FOR UPDATE
 	`, userID, adminAccountID, date).Scan(
@@ -852,7 +882,7 @@ func loadDashboardSnapshotForUpdate(ctx context.Context, db metricsDB, userID, a
 		&snapshot.AdjustmentCost, &recordsJSON, &snapshot.OperatingCost, &snapshot.AdjustedNetProfit,
 		&accountSnapshotRunID, &snapshot.AccountExpectedCount, &snapshot.AccountCompletedCount,
 		&accountStatsQuality, &snapshot.AccountPurchaseCost, &snapshot.ReplacementDeduction,
-		&snapshot.RevenueDiscount, &snapshot.RevenueDiscountRate,
+		&snapshot.RevenueDiscount, &snapshot.RevenueDiscountRate, &snapshot.RevenueDiscountDetail,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DailySnapshot{}, false, nil
@@ -986,9 +1016,9 @@ func (r *MetricsRepository) upsert(ctx context.Context, db metricsDB, snapshot D
 			additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost,
 			adjustment_cost, additional_cost_records, operating_cost, adjusted_net_profit,
 			account_snapshot_run_id,account_expected_count,account_completed_count,account_stats_quality,
-			account_purchase_cost,replacement_deduction,revenue_discount,revenue_discount_rate
+			account_purchase_cost,replacement_deduction,revenue_discount,revenue_discount_rate,revenue_discount_detail
 		)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28::jsonb, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28::jsonb, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39::jsonb
 		WHERE EXISTS (SELECT 1 FROM admin_accounts WHERE user_id = $2 AND id = $3)
 		ON CONFLICT (user_id, admin_account_id, date) DO UPDATE SET
 			today_profit        = EXCLUDED.today_profit,
@@ -1025,9 +1055,22 @@ func (r *MetricsRepository) upsert(ctx context.Context, db metricsDB, snapshot D
 			account_purchase_cost = EXCLUDED.account_purchase_cost,
 			replacement_deduction = EXCLUDED.replacement_deduction,
 			revenue_discount = EXCLUDED.revenue_discount,
-			revenue_discount_rate = EXCLUDED.revenue_discount_rate
+			revenue_discount_rate = EXCLUDED.revenue_discount_rate,
+			revenue_discount_detail = EXCLUDED.revenue_discount_detail
 		WHERE EXISTS (SELECT 1 FROM admin_accounts WHERE user_id = EXCLUDED.user_id AND id = EXCLUDED.admin_account_id)
 		  AND (dashboard_daily_stats.settlement_status != 'final' OR EXCLUDED.snapshot_source != 'live_cache')
+		  -- 已日结行（日结来源且写入时间不早于当天新加坡 24:00）不能被改回未日结，客户明细也不能变：
+		  -- 只接受同样已日结、客户明细相同（都为空也算相同）的写入。迟到的实时写入、拿着旧行的账号补结重试会被跳过。
+		  -- observed_at 为空的旧行按未日结处理（IS NOT TRUE）。
+		  AND (
+		    (dashboard_daily_stats.snapshot_source IN ('dated_query','backfill')
+		     AND dashboard_daily_stats.observed_at >= ((dashboard_daily_stats.date + 1)::timestamp AT TIME ZONE $40)) IS NOT TRUE
+		    OR (
+		      (EXCLUDED.snapshot_source IN ('dated_query','backfill')
+		       AND EXCLUDED.observed_at >= ((EXCLUDED.date + 1)::timestamp AT TIME ZONE $40)) IS TRUE
+		      AND (EXCLUDED.revenue_discount_detail -> 'customers') IS NOT DISTINCT FROM (dashboard_daily_stats.revenue_discount_detail -> 'customers')
+		    )
+		  )
 	`, snapshot.ID, snapshot.UserID, snapshot.AdminAccountID, snapshot.Date,
 		snapshot.TodayProfit, snapshot.SiteBalance, snapshot.TodayPurchase,
 		snapshot.NetProfit, snapshot.UpstreamBalance, snapshot.CreatedAt,
@@ -1039,7 +1082,8 @@ func (r *MetricsRepository) upsert(ctx context.Context, db metricsDB, snapshot D
 		snapshot.FixedCost, snapshot.AdjustmentCost, recordsJSON, snapshot.OperatingCost,
 		snapshot.AdjustedNetProfit, snapshot.AccountSnapshotRunID, snapshot.AccountExpectedCount,
 		snapshot.AccountCompletedCount, snapshot.AccountStatsQuality, snapshot.AccountPurchaseCost,
-		snapshot.ReplacementDeduction, snapshot.RevenueDiscount, snapshot.RevenueDiscountRate)
+		snapshot.ReplacementDeduction, snapshot.RevenueDiscount, snapshot.RevenueDiscountRate,
+		nullableJSON(snapshot.RevenueDiscountDetail), businesstime.Timezone)
 	return err
 }
 
@@ -1052,7 +1096,7 @@ func (r *MetricsRepository) ListRange(ctx context.Context, userID, adminAccountI
 		       additional_cost, recharge_fee, recharge_fee_rate, promotion_cost, fixed_cost, adjustment_cost, operating_cost, adjusted_net_profit,
 		       COALESCE(account_snapshot_run_id,''),account_expected_count,account_completed_count,
 		       COALESCE(account_stats_quality,'missing'),account_purchase_cost,replacement_deduction,
-		       revenue_discount,revenue_discount_rate
+		       revenue_discount,revenue_discount_rate,revenue_discount_detail
 		FROM dashboard_daily_stats
 		WHERE user_id = $1 AND admin_account_id = $2 AND date >= ($3::date - $4::int) AND date < $3::date
 		ORDER BY date ASC
@@ -1074,7 +1118,7 @@ func (r *MetricsRepository) ListRange(ctx context.Context, userID, adminAccountI
 			&s.RechargeFeeRate, &s.PromotionCost, &s.FixedCost, &s.AdjustmentCost,
 			&s.OperatingCost, &s.AdjustedNetProfit, &accountSnapshotRunID, &s.AccountExpectedCount,
 			&s.AccountCompletedCount, &accountStatsQuality, &s.AccountPurchaseCost, &s.ReplacementDeduction,
-			&s.RevenueDiscount, &s.RevenueDiscountRate); err != nil {
+			&s.RevenueDiscount, &s.RevenueDiscountRate, &s.RevenueDiscountDetail); err != nil {
 			return nil, err
 		}
 		s.CostQualityMode = costQualityMode.String()
@@ -1654,7 +1698,7 @@ func (r *MetricsRepository) LatestDashboardSnapshot(ctx context.Context, userID,
 		       COALESCE(account_snapshot_run_id,''),account_expected_count,account_completed_count,
 		       COALESCE(account_stats_quality,'missing'),
 		       account_purchase_cost,replacement_deduction,
-		       revenue_discount,revenue_discount_rate
+		       revenue_discount,revenue_discount_rate,revenue_discount_detail
 		FROM dashboard_daily_stats
 		WHERE user_id = $1 AND admin_account_id = $2 AND date = $3::date
 		ORDER BY created_at DESC
@@ -1669,7 +1713,7 @@ func (r *MetricsRepository) LatestDashboardSnapshot(ctx context.Context, userID,
 		&snapshot.AdjustmentCost, &recordsJSON, &snapshot.OperatingCost, &snapshot.AdjustedNetProfit,
 		&accountSnapshotRunID, &snapshot.AccountExpectedCount, &snapshot.AccountCompletedCount,
 		&accountStatsQuality, &snapshot.AccountPurchaseCost, &snapshot.ReplacementDeduction,
-		&snapshot.RevenueDiscount, &snapshot.RevenueDiscountRate,
+		&snapshot.RevenueDiscount, &snapshot.RevenueDiscountRate, &snapshot.RevenueDiscountDetail,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -1750,7 +1794,7 @@ func (r *MetricsRepository) ListDailyStats(ctx context.Context, userID, adminAcc
 		       COALESCE(account_snapshot_run_id,''),account_expected_count,account_completed_count,
 		       COALESCE(account_stats_quality,'missing'),
 		       account_purchase_cost,replacement_deduction,
-		       revenue_discount,revenue_discount_rate
+		       revenue_discount,revenue_discount_rate,revenue_discount_detail
 		FROM dashboard_daily_stats
 		WHERE user_id = $1 AND admin_account_id = $2
 		  AND date >= $3::date AND date <= $4::date
@@ -1777,7 +1821,7 @@ func (r *MetricsRepository) ListDailyStats(ctx context.Context, userID, adminAcc
 			&s.AdjustmentCost, &recordsJSON, &s.OperatingCost, &s.AdjustedNetProfit,
 			&accountSnapshotRunID, &s.AccountExpectedCount, &s.AccountCompletedCount,
 			&accountStatsQuality, &s.AccountPurchaseCost, &s.ReplacementDeduction,
-			&s.RevenueDiscount, &s.RevenueDiscountRate,
+			&s.RevenueDiscount, &s.RevenueDiscountRate, &s.RevenueDiscountDetail,
 		); err != nil {
 			return nil, err
 		}

@@ -81,11 +81,16 @@ type AdditionalCostSummary struct {
 	RevenueDiscountRate *float64             `json:"revenueDiscountRate,omitempty"`
 	RevenueDiscountRule *RevenueDiscountRate `json:"revenueDiscountRule,omitempty"`
 	NetRevenue          *float64             `json:"netRevenue,omitempty"`
+	// RevenueDiscountDetail 在当天有单独客户赠送记录时说明折扣怎样拆成整站折扣和单独客户赠送；没有时为空。
+	RevenueDiscountDetail *RevenueDiscountDetail `json:"revenueDiscountDetail,omitempty"`
 	// revenueDiscountReadFailed 只在内存中标记折扣率读取失败（不输出、不保存）。
 	// UnavailableReason 会被后面的账号核查覆盖，不能用来判断，所以单独标记。
 	revenueDiscountReadFailed bool
-	Available                 bool   `json:"available"`
-	UnavailableReason         string `json:"unavailableReason,omitempty"`
+	// revenueDiscountReason 是单独客户赠送失败的白话原因；整站规则读取失败时为空（沿用原固定文字）。
+	// 同样不会被账号核查覆盖，首页、日结、账号补结都取它。
+	revenueDiscountReason string
+	Available             bool   `json:"available"`
+	UnavailableReason     string `json:"unavailableReason,omitempty"`
 }
 
 type AdditionalCostInput struct {

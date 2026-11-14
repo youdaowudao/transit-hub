@@ -112,35 +112,37 @@ type TrendPoint struct {
 // 每天至多一行（user_id + admin_account_id + date 唯一）。
 // 金额字段允许 NULL：nil 表示该指标未采集到数据，0.0 表示真实零值。
 type DailySnapshot struct {
-	ID                    string
-	UserID                string
-	AdminAccountID        string
-	Date                  time.Time
-	TodayProfit           *float64
-	SiteBalance           *float64
-	TodayPurchase         *float64
-	NetProfit             *float64
-	UpstreamBalance       *float64
-	CreatedAt             time.Time
-	SettlementStatus      string     // provisional/fallback/partial/final
-	SnapshotSource        string     // live_cache/dated_query/backfill
-	ObservedAt            *time.Time // 数据实际采集时间
-	FinalizedAt           *time.Time // 日结成功写入时间，仅 final 行有值
-	CostExpectedCount     *int       // 应包含的上游站点数
-	CostCollectedCount    *int       // 有同日确认成本的站点数
-	CostFreshCount        *int       // 本次尝试新确认的站点数
-	CostRetainedCount     *int       // 本次失败但沿用同日确认值的站点数
-	CostMissingCount      *int       // 没有同日确认值的站点数
-	CostQualityMode       string     // exact/retained/partial/unavailable/unknown
-	BalanceObservedAt     *time.Time // 余额观测时间
-	AdditionalCost        *float64
-	RechargeFee           *float64
-	RechargeFeeRate       *float64
-	PromotionCost         *float64
-	FixedCost             *float64
-	AdjustmentCost        *float64
-	RevenueDiscount       *float64 // 营收折扣金额；NULL 表示这天没有扣折扣
-	RevenueDiscountRate   *float64 // 计算当天使用的合计折扣率
+	ID                  string
+	UserID              string
+	AdminAccountID      string
+	Date                time.Time
+	TodayProfit         *float64
+	SiteBalance         *float64
+	TodayPurchase       *float64
+	NetProfit           *float64
+	UpstreamBalance     *float64
+	CreatedAt           time.Time
+	SettlementStatus    string     // provisional/fallback/partial/final
+	SnapshotSource      string     // live_cache/dated_query/backfill
+	ObservedAt          *time.Time // 数据实际采集时间
+	FinalizedAt         *time.Time // 日结成功写入时间，仅 final 行有值
+	CostExpectedCount   *int       // 应包含的上游站点数
+	CostCollectedCount  *int       // 有同日确认成本的站点数
+	CostFreshCount      *int       // 本次尝试新确认的站点数
+	CostRetainedCount   *int       // 本次失败但沿用同日确认值的站点数
+	CostMissingCount    *int       // 没有同日确认值的站点数
+	CostQualityMode     string     // exact/retained/partial/unavailable/unknown
+	BalanceObservedAt   *time.Time // 余额观测时间
+	AdditionalCost      *float64
+	RechargeFee         *float64
+	RechargeFeeRate     *float64
+	PromotionCost       *float64
+	FixedCost           *float64
+	AdjustmentCost      *float64
+	RevenueDiscount     *float64 // 营收折扣金额；NULL 表示这天没有扣折扣
+	RevenueDiscountRate *float64 // 计算当天使用的合计折扣率
+	// RevenueDiscountDetail 是 revenue_discount_detail 原始 JSON：当天有单独客户时保存拆分和每位客户的结果，否则为空。
+	RevenueDiscountDetail []byte
 	AdditionalCostRecords []AdditionalCostRecord
 	OperatingCost         *float64
 	AdjustedNetProfit     *float64
@@ -197,16 +199,18 @@ type DailyStatItem struct {
 	SiteCostsLoadError bool                   `json:"siteCostsLoadError,omitempty"` // expand=true 但查询失败
 	AdditionalCosts    *AdditionalCostSummary `json:"additionalCosts,omitempty"`
 	// RevenueDiscount 与趋势一样直接取快照已存折扣（今天取实时汇总），不依赖费用是否可用。
-	RevenueDiscount       *float64 `json:"revenueDiscount,omitempty"`
-	RevenueDiscountRate   *float64 `json:"revenueDiscountRate,omitempty"`
-	OperatingCost         *float64 `json:"operatingCost,omitempty"`
-	AdjustedNetProfit     *float64 `json:"adjustedNetProfit,omitempty"`
-	AccountSnapshotRunID  string   `json:"accountSnapshotRunId,omitempty"`
-	AccountExpectedCount  *int     `json:"accountExpectedCount,omitempty"`
-	AccountCompletedCount *int     `json:"accountCompletedCount,omitempty"`
-	AccountStatsQuality   string   `json:"accountStatsQuality,omitempty"`
-	AccountPurchaseCost   *float64 `json:"accountPurchaseCost,omitempty"`
-	ReplacementDeduction  *float64 `json:"replacementDeduction,omitempty"`
+	RevenueDiscount     *float64 `json:"revenueDiscount,omitempty"`
+	RevenueDiscountRate *float64 `json:"revenueDiscountRate,omitempty"`
+	// RevenueDiscountDetail 与 RevenueDiscount 同源：历史行取快照，今天取汇总。
+	RevenueDiscountDetail *RevenueDiscountDetail `json:"revenueDiscountDetail,omitempty"`
+	OperatingCost         *float64               `json:"operatingCost,omitempty"`
+	AdjustedNetProfit     *float64               `json:"adjustedNetProfit,omitempty"`
+	AccountSnapshotRunID  string                 `json:"accountSnapshotRunId,omitempty"`
+	AccountExpectedCount  *int                   `json:"accountExpectedCount,omitempty"`
+	AccountCompletedCount *int                   `json:"accountCompletedCount,omitempty"`
+	AccountStatsQuality   string                 `json:"accountStatsQuality,omitempty"`
+	AccountPurchaseCost   *float64               `json:"accountPurchaseCost,omitempty"`
+	ReplacementDeduction  *float64               `json:"replacementDeduction,omitempty"`
 }
 
 // SiteCostDetail 是逐日明细中单个站点的成本展示数据。

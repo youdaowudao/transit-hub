@@ -26,7 +26,8 @@ const fullSource = (type = 'fixed', name = '隔离费用') => [0, 1, 2].map((day
 const wrappers: VueWrapper[] = []
 async function open(tab: 'today' | 'ledger' | 'rules' = 'today') {
   const wrapper = mount(AccountCostWorkspace, {
-    props: { open: false, initialTab: tab, businessDate, workspaceId: 'workspace-a', directCost: 20, operatingCost: 30, adjustedNetProfit: 70 },
+    // 等同于从首页“记一笔成本”进入：录入表单直接展开。
+    props: { open: false, initialTab: tab, openCostForm: true, businessDate, workspaceId: 'workspace-a', directCost: 20, operatingCost: 30, adjustedNetProfit: 70 },
     global: { stubs: { Teleport: true } },
   })
   wrappers.push(wrapper)
@@ -34,13 +35,36 @@ async function open(tab: 'today' | 'ledger' | 'rules' = 'today') {
   await flushPromises()
   return wrapper
 }
+function findButton(w: VueWrapper, name: string) {
+  return w.findAll('button').find(b => b.text().includes(name) || b.attributes('aria-label') === name)
+}
+// 成本规则的表单默认收起：像用户一样先点“修改费率”展开，再找表单里的按钮。
+const ruleExpanders: Record<string, string> = { 保存费率: '修改费率', 保存折扣率: '修改折扣率' }
 function button(w: VueWrapper, name: string) {
-  const match = w.findAll('button').find(b => b.text().includes(name) || b.attributes('aria-label') === name)
+  const match = findButton(w, name)
   if (!match) throw new Error(`missing button ${name}`)
   return match
 }
+async function expandRule(w: VueWrapper, saveButton: string) {
+  if (findButton(w, saveButton)) return
+  const expander = findButton(w, ruleExpanders[saveButton] ?? '')
+  if (!expander) throw new Error(`missing expander for ${saveButton}`)
+  await expander.trigger('click'); await flushPromises()
+}
 const amount = (w: VueWrapper) => w.find('input[placeholder="金额"]')
+// 录入表单保存成功或取消后会收起：像用户一样点“记一笔成本”重新展开。
+async function ensureCostForm(w: VueWrapper) {
+  if (amount(w).exists()) return
+  await button(w, '记一笔成本').trigger('click'); await flushPromises()
+}
+// 确认保存后草稿必须清空：表单已收起，重新展开时金额为空。
+async function expectClearedCostForm(w: VueWrapper) {
+  expect(amount(w).exists()).toBe(false)
+  await ensureCostForm(w)
+  expect(amount(w).element).toHaveProperty('value', '')
+}
 async function enter(w: VueWrapper, value = '100') {
+  await ensureCostForm(w)
   await w.find('input[placeholder="名称"]').setValue('新增隔离费用')
   await amount(w).setValue(value)
 }
@@ -92,7 +116,7 @@ describe('manual cost management critical regressions', () => {
   it('does not redirect a failed fee-history reload to the ledger after changing tabs', async () => {
     const w = await open('rules')
     api.listRechargeFeeRateHistory.mockRejectedValueOnce(new Error('费率历史中断'))
-    await button(w, '保存费率').trigger('click'); await flushPromises()
+    await expandRule(w, '保存费率'); await button(w, '保存费率').trigger('click'); await flushPromises()
     expect(w.text()).toContain('费率已保存')
     await button(w, '今日成本').trigger('click'); await flushPromises()
     expect(w.text()).not.toContain('费率已保存')
@@ -125,10 +149,11 @@ describe('manual cost management critical regressions', () => {
 
   it('clears an earlier successful fee notice before rejecting a new invalid rate', async () => {
     const w = await open('rules')
-    await button(w, '保存费率').trigger('click'); await flushPromises()
+    await expandRule(w, '保存费率'); await button(w, '保存费率').trigger('click'); await flushPromises()
     expect(w.text()).toContain('费率已保存')
+    await expandRule(w, '保存费率')
     await w.find('input[placeholder="费率 %"]').setValue('101')
-    await button(w, '保存费率').trigger('click'); await flushPromises()
+    await expandRule(w, '保存费率'); await button(w, '保存费率').trigger('click'); await flushPromises()
     expect(w.text()).toContain('费率尚未保存')
     expect(w.text()).not.toContain('费率已保存')
     expect(api.saveRechargeFeeRate).toHaveBeenCalledOnce()
@@ -211,7 +236,7 @@ describe('manual cost management critical regressions', () => {
     expect(w.emitted('updated')).toHaveLength(1)
     expect(w.text()).toContain('费用已保存')
     expect(w.text()).not.toContain('保存失败')
-    expect(amount(w).element).toHaveProperty('value', '')
+    await expectClearedCostForm(w)
     await button(w, '重新加载费用').trigger('click'); await flushPromises()
     expect(api.createAdditionalCost).toHaveBeenCalledOnce()
     expect(api.updateAdditionalCost).not.toHaveBeenCalled()
@@ -266,8 +291,8 @@ describe('manual cost management critical regressions', () => {
     await w.setProps({ open: false }); await w.setProps({ open: true }); await flushPromises()
     expect(button(w, '保存记录').attributes('disabled')).toBeDefined()
     resolve({ items: fullSource() }); await flushPromises()
+    await expectClearedCostForm(w)
     expect(button(w, '保存记录').attributes('disabled')).toBeUndefined()
-    expect(amount(w).element).toHaveProperty('value', '')
     expect(api.createAdditionalCost).toHaveBeenCalledOnce()
   })
 
@@ -293,6 +318,7 @@ describe('manual cost management critical regressions', () => {
     await amount(w).setValue('900'); await w.find('input[placeholder="分摊天数"]').setValue('10')
     for (const text of ['赠送总额', '720.00', '72.00', '避免重复计入', '活动赠送已停止新增']) expect(w.text()).toContain(text)
     await button(w, '取消编辑').trigger('click')
+    await ensureCostForm(w)
     expect(w.find('form select').findAll('option').map(option => option.attributes('value'))).toEqual(['fixed', 'adjustment'])
   })
 
@@ -312,10 +338,11 @@ describe('manual cost management critical regressions', () => {
 
   it('explains fee estimation and retains confirmed fee-save success after history read failure', async () => {
     const w = await open('rules')
+    await expandRule(w, '保存费率')
     expect(w.text()).toContain('按当天实收营收（主站消费扣除营收折扣后）')
     expect(w.text()).toContain('不是支付平台实际账单')
     api.getRechargeFeeRate.mockRejectedValueOnce(new Error('费率读取连接中断'))
-    await button(w, '保存费率').trigger('click'); await flushPromises()
+    await expandRule(w, '保存费率'); await button(w, '保存费率').trigger('click'); await flushPromises()
     expect(api.saveRechargeFeeRate).toHaveBeenCalledOnce()
     expect(w.emitted('updated')).toHaveLength(1)
     expect(w.text()).toContain('费率已保存')

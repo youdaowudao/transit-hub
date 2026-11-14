@@ -62,6 +62,8 @@ const props = defineProps<{
   profitMargin?: number | null
   summary?: AdditionalCostSummary | null
   initialTab?: WorkspaceTab
+  // 从首页“记一笔成本”进入时直接展开录入表单；从其他入口进入只看结果。
+  openCostForm?: boolean
   workspaceId: string
 }>()
 
@@ -110,6 +112,13 @@ const giftCheck = ref<GiftLedgerCustomerCheck | null>(null)
 const giftCheckError = ref('')
 const selectedDetail = ref<AccountAssetDetail | null>(null)
 const showBatchForm = ref(false)
+// 结果在上、设置收起：点按钮才展开对应表单；成本规则同一时间只展开一个表单。
+type RuleEditor = '' | 'fee' | 'discount' | 'gift'
+const ruleEditor = ref<RuleEditor>('')
+const costFormOpen = ref(false)
+const assetEditor = ref<'' | 'link' | 'event'>('')
+const giftShowAll = ref(false)
+const giftCustomerPreviewCount = 5
 const recentBatch = ref<{ id: string; name: string; quantity: number } | null>(null)
 const assetPage = ref(1)
 const assetHasMore = ref(false)
@@ -137,7 +146,7 @@ const costForm = reactive({ type: 'fixed' as 'promotion' | 'fixed' | 'adjustment
 const feeForm = reactive({ rate: '1.6', effectiveDate: today() })
 // 营收折扣率三项都按占主站消费的百分比填写。
 const discountForm = reactive({ giftRate: '', newUserRate: '', referralRate: '', effectiveDate: tomorrow() })
-const giftForm = reactive({ mainUserId: '', rechargeDate: today(), paidAmount: '', giftAmount: '', note: '' })
+const giftForm = reactive({ mainUserId: '', rechargeDate: today(), paidAmount: '0', giftAmount: '', note: '' })
 const eventForm = reactive({ eventType: 'status', effectiveDate: today(), status: 'dead', statsMode: 'automatic', quotaUsed: '', revenue: '', upstreamCost: '', refund: '', refundClose: false, identifier: '', platform: '', channel: '', accountType: '', purchaseUrl: '', upstreamReferenceUrl: '', note: '' })
 const linkForm = reactive({ connectionId: '', upstreamReferenceUrl: '', effectiveFrom: '', manualSameDaySplit: false, previousQuotaUsed: '', previousRevenue: '', replacementQuotaUsed: '', replacementRevenue: '', note: '' })
 
@@ -370,6 +379,7 @@ const beginCostEdit = async (group: { records: AdditionalCostRecord[] }) => {
     costForm.usageRate = source.usageRate == null && records.some(item => item.amount !== 0) && source.type === 'promotion' ? '' : String((source.usageRate ?? 0) * 100)
     costForm.days = String(source.days && source.days > 0 ? source.days : records.length)
     costForm.note = source.note || ''
+    costFormOpen.value = true
     activeTab.value = 'today'
   } catch (error) {
     if (isCurrentCostRead(request, generation)) errorText.value = costFailureText(error, '读取')
@@ -414,6 +424,7 @@ const removeCost = async (group: { records: AdditionalCostRecord[] }) => {
 
 const cancelCostEdit = () => {
   editingCost.value = null
+  costFormOpen.value = false
   costForm.type = 'fixed'
   costForm.name = ''
   costForm.amount = ''
@@ -452,7 +463,7 @@ const resetWorkspaceData = () => {
   giftEditing.value = null
   giftCheck.value = null
   giftCheckError.value = ''
-  Object.assign(giftForm, { mainUserId: '', rechargeDate: today(), paidAmount: '', giftAmount: '', note: '' })
+  Object.assign(giftForm, { mainUserId: '', rechargeDate: today(), paidAmount: '0', giftAmount: '', note: '' })
   assetPage.value = 1
   assetHasMore.value = false
   ledgerPage.value = 1
@@ -464,6 +475,9 @@ const resetWorkspaceData = () => {
   ledgerFilters.channel = ''
   ledgerFilters.batchId = ''
   ledgerFilters.accountAssetId = ''
+  ruleEditor.value = ''
+  assetEditor.value = ''
+  giftShowAll.value = false
   cancelCostEdit()
 }
 
@@ -488,6 +502,9 @@ watch(assetFilters, () => {
   try { localStorage.setItem(filterStorageKey.value, JSON.stringify(assetFilters)) } catch { /* storage unavailable */ }
 }, { deep: true })
 
+// 成本构成只列不为 0 的项（暂缺的也列出），为 0 的合成一行。
+const visibleCostLines = computed(() => costLines.value.filter(line => line.value !== 0))
+const zeroCostLabels = computed(() => costLines.value.filter(line => line.value === 0).map(line => line.label))
 const costLines = computed(() => [
   { label: '上游直接成本', value: props.directCost },
   { label: '替代成本扣减', value: props.summary?.replacementDeduction == null ? null : -props.summary.replacementDeduction },
@@ -723,6 +740,7 @@ watch(() => props.open, (open) => {
 	const nextTab = props.initialTab ?? 'today'
 	const changed = activeTab.value !== nextTab
 	activeTab.value = nextTab
+	costFormOpen.value = nextTab === 'today' && props.openCostForm === true
   selectedDetail.value = null
   ledgerFilters.from = today()
   ledgerFilters.to = today()
@@ -794,6 +812,7 @@ const openAsset = async (asset: AccountAsset) => {
 	const detail = await getAccountAsset(asset.id)
 	if (!isCurrentWorkspaceRequest(request)) return
 	selectedDetail.value = detail
+	assetEditor.value = ''
 	linkForm.upstreamReferenceUrl = selectedDetail.value.asset.upstreamReferenceUrl || ''
 	linkForm.connectionId = ''
 	linkForm.effectiveFrom = ''
@@ -850,7 +869,7 @@ const submitEvent = async () => {
 	if (!isCurrentWorkspaceRequest(request)) return
     const refreshed = await getAccountAsset(assetId)
 	if (!isCurrentWorkspaceRequest(request)) return
-    selectedDetail.value = refreshed
+    selectedDetail.value = refreshed; assetEditor.value = ''
     await loadAssets(request)
     emit('updated')
 		eventAttempt.value = null
@@ -888,7 +907,7 @@ const submitLink = async () => {
 		})
 		const refreshed = await replaceAccountLink(assetId, input, linkAttempt.value.key)
 	if (!isCurrentWorkspaceRequest(request)) return
-		selectedDetail.value = refreshed
+		selectedDetail.value = refreshed; assetEditor.value = ''
 	await loadAssets(request)
 	emit('updated')
 		linkAttempt.value = null
@@ -917,7 +936,7 @@ const submitStatsMode = async () => {
 	if (!isCurrentWorkspaceRequest(request)) return
 	const refreshed = await getAccountAsset(assetId)
 	if (!isCurrentWorkspaceRequest(request)) return
-	selectedDetail.value = refreshed
+	selectedDetail.value = refreshed; assetEditor.value = ''
 	await loadAssets(request)
 		statsModeAttempt.value = null
   } catch (error) {
@@ -995,6 +1014,7 @@ const submitFee = async () => {
     const ratePercent = Number(feeForm.rate)
     await saveRechargeFeeRate({ effectiveDate, rate: ratePercent / 100 })
     if (!isCurrentWorkspaceRequest(request)) return
+    ruleEditor.value = ''
     emit('updated')
     await refreshAfterCostWrite(`费率已保存，将从 ${effectiveDate} 起按 ${ratePercent}% 估算手续费；不会修改主站。`, request, true)
   } catch (error) {
@@ -1020,6 +1040,7 @@ const editDiscount = (rate: RevenueDiscountRate) => {
   if (saving.value) return
   clearCostNotice()
   errorText.value = ''
+  openRuleEditor('discount')
   fillDiscountForm(rate)
   discountEditNotice.value = '已把这组比率填入上方表单；生效日期最早为明天，保存后从该日期起生效。'
 }
@@ -1047,6 +1068,7 @@ const submitDiscount = async () => {
     await saveRevenueDiscountRate({ effectiveDate, giftRate, newUserRate, referralRate })
     if (!isCurrentWorkspaceRequest(request)) return
     discountEditNotice.value = ''
+    ruleEditor.value = ''
     emit('updated')
     await refreshAfterCostWrite(`折扣率已保存，从 ${effectiveDate} 起按 ${total}% 扣除营收折扣；之前的日期不受影响，不会修改主站。`, request, true)
   } catch (error) {
@@ -1076,6 +1098,7 @@ const editFee = (rate: RechargeFeeRate) => {
   if (saving.value) return
   clearCostNotice()
   errorText.value = ''
+  openRuleEditor('fee')
   feeForm.rate = percentText(rate.rate)
   feeForm.effectiveDate = rate.effectiveDate
 }
@@ -1139,7 +1162,7 @@ const giftSharePercent = (share: number) => `${Number((share * 100).toFixed(2))}
 const giftStateText = (state: string) => ({ unused: '未开始用', using: '正在用', used_up: '已用完' } as Record<string, string>)[state] ?? ''
 const resetGiftForm = () => {
   giftEditing.value = null
-  Object.assign(giftForm, { mainUserId: '', rechargeDate: today(), paidAmount: '', giftAmount: '', note: '' })
+  Object.assign(giftForm, { mainUserId: '', rechargeDate: today(), paidAmount: '0', giftAmount: '', note: '' })
 }
 const giftEditNotice = computed(() => giftEditing.value
   ? `正在编辑 ${giftEditing.value.email} ${giftEditing.value.rechargeDate} 的记录：主站用户不能改，要换用户请删除后重新录入。保存后今天起按改后的记录重新推算，已经结算的日期不变。`
@@ -1180,10 +1203,40 @@ const editGiftRecord = (record: GiftLedgerRecord) => {
   errorText.value = ''
   giftCheck.value = null
   giftCheckError.value = ''
+  openRuleEditor('gift')
   giftEditing.value = record
   Object.assign(giftForm, { mainUserId: record.mainUserId, rechargeDate: record.rechargeDate, paidAmount: String(record.paidAmount), giftAmount: String(record.giftAmount), note: record.note })
 }
 const cancelGiftEdit = () => { if (!saving.value) resetGiftForm() }
+// 切换或收起规则表单时，丢掉被收起表单里“正在编辑”的状态，避免看不见的编辑继续生效。
+const openRuleEditor = (editor: RuleEditor) => {
+  if (ruleEditor.value === 'gift' && editor !== 'gift' && giftEditing.value) resetGiftForm()
+  if (ruleEditor.value === 'discount' && editor !== 'discount') discountEditNotice.value = ''
+  ruleEditor.value = editor
+}
+// 只切换显示：不清除保存结果、错误或“重新加载费用”入口。
+const toggleRuleEditor = (editor: Exclude<RuleEditor, ''>) => {
+  if (saving.value) return
+  openRuleEditor(ruleEditor.value === editor ? '' : editor)
+}
+const toggleAssetEditor = (editor: 'link' | 'event') => {
+  if (!saving.value) assetEditor.value = assetEditor.value === editor ? '' : editor
+}
+const giftLedgerSummaryText = computed(() => {
+  const ledger = giftLedger.value
+  if (!ledger) return ''
+  if (!ledger.customers.length) return '还没有单独客户赠送记录，所有客户都按整站折扣率计算。'
+  const records = ledger.customers.reduce((sum, customer) => sum + customer.records.length, 0)
+  return `${ledger.customers.length} 位客户 · ${records} 笔记录。点客户可以展开查看每一笔。`
+})
+// 折叠部分里有主站余额异常的客户时直接显示全部，异常不能藏在折叠里。
+const giftHiddenHasWarning = computed(() => (giftLedger.value?.customers ?? []).slice(giftCustomerPreviewCount).some(customer => Boolean(giftBalanceWarning(customer))))
+const visibleGiftCustomers = computed(() => {
+  const customers = giftLedger.value?.customers ?? []
+  return giftShowAll.value || giftHiddenHasWarning.value ? customers : customers.slice(0, giftCustomerPreviewCount)
+})
+const hiddenGiftCustomerCount = computed(() => Math.max(0, (giftLedger.value?.customers.length ?? 0) - giftCustomerPreviewCount))
+const ledgerHasExtraFilters = computed(() => Boolean(ledgerFilters.platform || ledgerFilters.channel || ledgerFilters.batchId || ledgerFilters.accountAssetId))
 const submitGiftRecord = async () => {
   if (saving.value || !giftLedgerSupported.value) return
   clearCostNotice()
@@ -1205,6 +1258,7 @@ const submitGiftRecord = async () => {
     if (!isCurrentWorkspaceRequest(request)) return
     resetGiftForm()
     giftCheck.value = null
+    ruleEditor.value = ''
     emit('updated')
     await refreshAfterCostWrite(`记录已保存：${saved.email} ${saved.rechargeDate} 实付 ${formatAmount(saved.paidAmount)} 送 ${formatAmount(saved.giftAmount)}。今天起按先充先用计算，已经结算的日期不变，不会修改主站。`, request, true)
   } catch (error) {
@@ -1343,28 +1397,33 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
           <p v-if="statsNotice" role="status" class="mb-4 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-sm text-muted-foreground">{{ statsNotice }}</p>
           <div v-if="loading" class="flex justify-center py-16"><Loader2 class="h-6 w-6 animate-spin text-muted-foreground" /></div>
 
-          <section v-else-if="activeTab === 'today'" class="space-y-6">
- <p class="text-xs text-muted-foreground">费用按新加坡日期统计，使用最近一次同步结果；暂缺的费用不会计作零。</p>
-            <p class="text-xs text-muted-foreground">这里记录和管理本站的额外费用，会影响成本和利润统计，不会修改主站。</p>
-            <div class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><p>编辑、删除会处理整笔费用；历史费用请到成本账本按日期查询。</p><Button type="button" size="sm" variant="secondary" :disabled="saving" @click="selectTab('ledger')">查看历史费用</Button></div>
- <p v-if="summary?.accountQuality && summary.accountQuality !== 'complete'" class="text-xs text-warning">这份账号费用尚未按新加坡日期重新核对，请点击‘刷新账号统计’。旧历史记录保留；此操作不会修改主站。</p>
- <p v-if="summary?.unavailableReason" class="text-xs text-warning">{{ summary.unavailableReason }}</p>
-            <div class="flex flex-wrap justify-end gap-2"><Button variant="secondary" :disabled="saving" @click="showUpstreamDetails"><ExternalLink class="mr-2 h-4 w-4" />查看上游成本明细</Button><Button variant="secondary" :disabled="saving" @click="refreshStats"><RefreshCw class="mr-2 h-4 w-4" :class="saving ? 'animate-spin' : ''" />刷新账号统计</Button></div>
-            <div class="grid gap-3 sm:grid-cols-3">
+          <section v-else-if="activeTab === 'today'" class="space-y-5">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <p class="max-w-2xl text-xs text-muted-foreground">费用按新加坡日期统计，使用最近一次同步结果；暂缺的费用不会计作零。这里记录本站的额外费用，只影响成本和利润统计，不会修改主站。</p>
+              <div class="flex flex-wrap gap-2"><Button size="sm" variant="secondary" :disabled="saving" @click="showUpstreamDetails"><ExternalLink class="mr-2 h-4 w-4" />查看上游成本明细</Button><Button size="sm" variant="secondary" :disabled="saving" @click="refreshStats"><RefreshCw class="mr-2 h-4 w-4" :class="saving ? 'animate-spin' : ''" />刷新账号统计</Button></div>
+            </div>
+            <p v-if="summary?.accountQuality && summary.accountQuality !== 'complete'" class="text-xs text-warning">这份账号费用尚未按新加坡日期重新核对，请点击‘刷新账号统计’。旧历史记录保留；此操作不会修改主站。</p>
+            <p v-if="summary?.unavailableReason" class="text-xs text-warning">{{ summary.unavailableReason }}</p>
+            <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
               <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日营收</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatAmount(todayRevenue ?? null) }}</p></div>
               <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日总成本</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatAmount(operatingCost) }}</p></div>
               <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日净利润</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ formatAmount(adjustedNetProfit) }}</p></div>
               <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">今日利润率</p>{{ ' ' }}<p class="mt-1 text-xl font-bold tabular-nums">{{ percentageText(profitMargin) }}</p></div>
-              <div class="rounded-md border border-border/60 p-4"><p class="text-xs text-muted-foreground">账号统计质量</p><p class="mt-1 text-sm font-semibold">{{ summary?.accountQuality === 'complete' ? '完整' : summary?.accountQuality ? '部分数据' : '暂无可靠数据' }}</p></div>
             </div>
+            <p class="text-xs text-muted-foreground">账号统计质量：{{ summary?.accountQuality === 'complete' ? '完整' : summary?.accountQuality ? '部分数据' : '暂无可靠数据' }}</p>
             <p v-if="revenueDiscountLine" class="text-sm text-muted-foreground">{{ revenueDiscountLine }}</p>
             <p v-else-if="summary?.available" class="text-sm text-muted-foreground">今天没有生效的营收折扣率，营收按主站消费原值计算；可在‘成本规则’设置，最早明天起生效。</p>
-            <div class="space-y-1 text-sm text-muted-foreground"><p>营收 = 主站消费 − 营收折扣</p><p>净利润 = 营收 - 总成本</p><p>利润率 = 净利润 ÷ 营收</p></div>
-            <div class="grid gap-x-8 sm:grid-cols-2">
-              <div v-for="line in costLines" :key="line.label" class="flex items-center justify-between border-b border-border/50 py-2.5 text-sm"><span class="text-muted-foreground">{{ line.label }}</span><span class="font-medium tabular-nums">{{ formatAmount(line.value) }}</span></div>
+            <div>
+              <h3 class="text-sm font-semibold">成本构成</h3>
+              <div class="mt-1 grid gap-x-8 sm:grid-cols-2">
+                <div v-for="line in visibleCostLines" :key="line.label" class="flex items-center justify-between border-b border-border/50 py-2.5 text-sm"><span class="text-muted-foreground">{{ line.label }}</span><span class="font-medium tabular-nums">{{ formatAmount(line.value) }}</span></div>
+              </div>
+              <p v-if="zeroCostLabels.length" class="mt-2 text-xs text-muted-foreground">其余为 0：{{ zeroCostLabels.join('、') }}</p>
+              <details class="mt-2 text-xs text-muted-foreground"><summary class="cursor-pointer">计算方式</summary><div class="mt-2 space-y-1"><p>营收 = 主站消费 − 营收折扣</p><p>净利润 = 营收 - 总成本</p><p>利润率 = 净利润 ÷ 营收</p></div></details>
             </div>
             <div class="border-t border-border/60 pt-5">
-              <h3 class="text-sm font-semibold">当日成本变动</h3>
+              <div class="flex flex-wrap items-center justify-between gap-2"><h3 class="text-sm font-semibold">当日成本变动<span v-if="todayLedger.length" class="ml-1 font-normal text-muted-foreground">（{{ todayLedger.length }} 笔）</span></h3><Button type="button" size="sm" variant="secondary" :disabled="saving" @click="selectTab('ledger')">查看历史费用</Button></div>
+              <p class="mt-1 text-xs text-muted-foreground">编辑、删除会处理整笔费用；历史费用请到成本账本按日期查询。</p>
               <div v-if="todayLedgerLoadFailed" class="space-y-2 py-5 text-sm text-destructive"><p>当日成本变动加载失败</p><p>{{ todayLedgerError }}</p><Button type="button" variant="secondary" size="sm" :disabled="saving" @click="retryCostRead">重新加载费用</Button></div>
               <p v-else-if="!todayLedger.length" class="py-5 text-sm text-muted-foreground">当日暂无成本变动</p>
               <div v-else class="mt-2 divide-y divide-border/50">
@@ -1376,9 +1435,13 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
                 </div>
               </div>
             </div>
-            <form class="space-y-3 border-t border-border/60 pt-5" @input="clearCostNotice" @change="clearCostNotice" @submit.prevent="submitCost">
-              <div class="flex flex-wrap items-center justify-between gap-2"><div><h3 class="text-sm font-semibold">{{ editingCost ? '编辑手工成本' : '记一笔成本' }}</h3><p v-if="editingCost" class="mt-1 text-xs text-muted-foreground">正在修改整笔费用；保存后会重新计算原日期和新日期的成本与利润，不会修改主站。</p></div><div class="flex gap-2"><Button v-if="editingCost" type="button" variant="ghost" :disabled="saving" @click="cancelCostEdit">取消编辑</Button><Button v-else type="button" variant="secondary" :disabled="saving" @click="selectTab('assets'); showBatchForm = true"><Plus class="mr-2 h-4 w-4" />录入买号</Button></div></div>
-              <p v-if="legacyCostNotice" class="text-xs text-warning">{{ legacyCostNotice }}</p>
+            <div class="border-t border-border/60 pt-5">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div><h3 class="text-sm font-semibold">{{ editingCost ? '编辑手工成本' : '记一笔成本' }}</h3><p class="mt-1 text-xs text-muted-foreground">{{ editingCost ? '正在修改整笔费用；保存后会重新计算原日期和新日期的成本与利润，不会修改主站。' : costFormOpen ? '填写固定费用或手工调整，核对计入金额后保存；不会修改主站。' : '固定费用、手工调整等本站额外费用点“记一笔成本”填写；买号请点“录入买号”。' }}</p></div>
+                <div class="flex gap-2"><Button v-if="editingCost" type="button" variant="ghost" :disabled="saving" @click="cancelCostEdit">取消编辑</Button><Button v-else-if="costFormOpen" type="button" variant="ghost" :disabled="saving" @click="costFormOpen = false">收起</Button><Button v-else type="button" :disabled="saving" @click="costFormOpen = true"><Plus class="mr-2 h-4 w-4" />记一笔成本</Button><Button v-if="!editingCost" type="button" variant="secondary" :disabled="saving" @click="selectTab('assets'); showBatchForm = true"><Plus class="mr-2 h-4 w-4" />录入买号</Button></div>
+              </div>
+              <form v-if="costFormOpen" class="mt-3 space-y-3" @input="clearCostNotice" @change="clearCostNotice" @submit.prevent="submitCost">
+                <p v-if="legacyCostNotice" class="text-xs text-warning">{{ legacyCostNotice }}</p>
               <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <label class="space-y-1 text-xs text-muted-foreground"><span>费用类型</span><select v-model="costForm.type" :disabled="saving" class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"><option v-if="editingCost?.type === 'promotion'" value="promotion">活动赠送</option><option value="fixed">固定费用</option><option value="adjustment">手工调整</option></select></label>
                 <label class="space-y-1 text-xs text-muted-foreground"><span>名称</span><Input v-model="costForm.name" :disabled="saving" placeholder="名称" required /></label>
@@ -1397,13 +1460,13 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
               </div>
               <p v-else class="text-xs text-muted-foreground">填写有效金额、日期及分摊参数后，可在这里查看计入金额；核对后再保存，不会修改主站。</p>
               <Button :disabled="saving" type="submit"><Loader2 v-if="saving" class="mr-2 h-4 w-4 animate-spin" /><Save v-else class="mr-2 h-4 w-4" />保存记录</Button>
-            </form>
+              </form>
+            </div>
           </section>
 
           <section v-else-if="activeTab === 'assets'" class="space-y-4">
             <template v-if="selectedDetail">
-              <form class="flex flex-wrap items-center justify-end gap-2" @submit.prevent="submitStatsMode"><span class="text-xs text-muted-foreground">统计方式</span><select v-model="eventForm.statsMode" class="h-8 rounded-md border border-input bg-background px-2 text-sm"><option value="manual">手工</option><option value="automatic">自动</option></select><Button size="sm" variant="secondary" :disabled="saving || eventForm.statsMode === selectedDetail.asset.statsMode">切换</Button></form>
-              <button type="button" class="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" @click="selectedDetail = null"><ArrowLeft class="h-4 w-4" />返回资产列表</button>
+              <div class="flex flex-wrap items-center justify-between gap-2"><button type="button" class="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground" @click="selectedDetail = null"><ArrowLeft class="h-4 w-4" />返回资产列表</button><form class="flex flex-wrap items-center justify-end gap-2" @submit.prevent="submitStatsMode"><span class="text-xs text-muted-foreground">统计方式</span><select v-model="eventForm.statsMode" class="h-8 rounded-md border border-input bg-background px-2 text-sm"><option value="manual">手工</option><option value="automatic">自动</option></select><Button size="sm" variant="secondary" :disabled="saving || eventForm.statsMode === selectedDetail.asset.statsMode">切换</Button></form></div>
               <div class="flex flex-wrap items-start justify-between gap-3"><div><h3 class="text-lg font-semibold">{{ selectedDetail.asset.identifier }}</h3><p class="text-sm text-muted-foreground">{{ selectedDetail.asset.platform }} · {{ selectedDetail.asset.channel }} · {{ selectedDetail.asset.accountType }}</p></div><span class="rounded-md bg-surface-elevated px-2 py-1 text-xs font-medium">{{ statusText(selectedDetail.asset.currentStatus) }}</span></div>
               <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <div class="rounded-md border border-border/60 p-3"><p class="text-xs text-muted-foreground">买号成本</p><p class="mt-1 font-semibold">{{ centsText(selectedDetail.asset.purchaseCostCents) }}</p></div>
@@ -1415,9 +1478,9 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
                 <div class="rounded-md border border-border/60 p-3"><p class="text-xs text-muted-foreground">退款累计</p><p class="mt-1 font-semibold">{{ centsText(detailTotals.refunds) }}</p></div>
                 <div class="rounded-md border border-border/60 p-3"><p class="text-xs text-muted-foreground">ROI</p><p class="mt-1 font-semibold">{{ selectedDetail.performance.roi == null ? '暂无可靠数据' : `${(selectedDetail.performance.roi * 100).toFixed(1)}%` }}</p></div>
               </div>
-              <div class="grid gap-4 lg:grid-cols-2">
-                <div class="space-y-2 rounded-md border border-border/60 p-4"><h4 class="text-sm font-semibold">来源与关联</h4><div class="flex flex-wrap gap-3"><a v-if="selectedDetail.batch.purchaseUrl" :href="selectedDetail.batch.purchaseUrl" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-sm text-primary hover:underline">购买链接<ExternalLink class="h-3.5 w-3.5" /></a><a v-if="selectedDetail.asset.upstreamReferenceUrl" :href="selectedDetail.asset.upstreamReferenceUrl" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-sm text-primary hover:underline">上游参考<ExternalLink class="h-3.5 w-3.5" /></a></div><p v-if="!selectedDetail.links.length" class="text-sm text-muted-foreground">暂未关联可信连接</p><div v-for="link in selectedDetail.links" :key="link.id" class="border-t border-border/40 pt-2 text-sm"><p>{{ link.siteName }} / {{ link.keyName }} / {{ link.ownGroupName }}</p><p class="mt-0.5 text-xs text-muted-foreground">{{ link.effectiveFrom }} 至 {{ link.effectiveTo || '当前' }}</p></div></div>
-                <form class="space-y-3 rounded-md border border-border/60 p-4" @submit.prevent="submitLink">
+              <div class="space-y-2 rounded-md border border-border/60 p-4"><h4 class="text-sm font-semibold">来源与关联</h4><div class="flex flex-wrap gap-3"><a v-if="selectedDetail.batch.purchaseUrl" :href="selectedDetail.batch.purchaseUrl" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-sm text-primary hover:underline">购买链接<ExternalLink class="h-3.5 w-3.5" /></a><a v-if="selectedDetail.asset.upstreamReferenceUrl" :href="selectedDetail.asset.upstreamReferenceUrl" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-sm text-primary hover:underline">上游参考<ExternalLink class="h-3.5 w-3.5" /></a></div><p v-if="!selectedDetail.links.length" class="text-sm text-muted-foreground">暂未关联可信连接</p><div v-for="link in selectedDetail.links" :key="link.id" class="border-t border-border/40 pt-2 text-sm"><p>{{ link.siteName }} / {{ link.keyName }} / {{ link.ownGroupName }}</p><p class="mt-0.5 text-xs text-muted-foreground">{{ link.effectiveFrom }} 至 {{ link.effectiveTo || '当前' }}</p></div></div>
+              <div class="flex flex-wrap items-center gap-2"><Button type="button" size="sm" :variant="assetEditor === 'link' ? 'ghost' : 'secondary'" :disabled="saving" @click="toggleAssetEditor('link')">{{ assetEditor === 'link' ? '收起关联表单' : '补充或更换上游关联' }}</Button><Button type="button" size="sm" :variant="assetEditor === 'event' ? 'ghost' : 'secondary'" :disabled="saving" @click="toggleAssetEditor('event')">{{ assetEditor === 'event' ? '收起记录表单' : '补充生命周期记录' }}</Button><span class="text-xs text-muted-foreground">要换关联，或补记状态、退款、额度时再展开填写；只改本站记录，不会修改主站。</span></div>
+                <form v-if="assetEditor === 'link'" class="space-y-3 rounded-md border border-border/60 p-4" @submit.prevent="submitLink">
                   <h4 class="text-sm font-semibold">补充或更换上游关联</h4>
                   <select v-model="linkForm.connectionId" class="h-9 w-full rounded-md border border-input bg-background px-3 text-sm">
                     <option value="">仅更新参考链接</option>
@@ -1437,7 +1500,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
                   <Input v-model="linkForm.note" placeholder="更换原因（可选）" />
                   <Button type="submit" :disabled="saving"><Save class="mr-2 h-4 w-4" />保存关联</Button>
                 </form>
-                <form class="space-y-3 rounded-md border border-border/60 p-4 lg:col-span-2" @submit.prevent="submitEvent">
+                <form v-if="assetEditor === 'event'" class="space-y-3 rounded-md border border-border/60 p-4" @submit.prevent="submitEvent">
                   <h4 class="text-sm font-semibold">补充生命周期记录</h4>
 				  <div v-if="eventForm.eventType === 'status' && ['dead', 'exhausted', 'closed'].includes(eventForm.status) && selectedDetail.asset.hasActiveLink" class="flex flex-wrap items-center gap-2 rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-sm"><AlertTriangle class="h-4 w-4 shrink-0 text-warning" /><span class="min-w-0 flex-1">该账号仍关联运行中的上游连接。保存状态不会停用真实连接，请同时安排替换或处理关联。</span><Button type="button" size="sm" variant="secondary" @click="openUpstreamManagement">前往上游处理关联</Button></div>
                   <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -1461,7 +1524,7 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
                   </div>
                   <Button type="submit" :disabled="saving"><Save class="mr-2 h-4 w-4" />保存事件</Button>
                 </form>
-              </div>
+
               <p v-if="selectedDetail.performance.missingFields?.length" class="text-sm text-warning">暂不计算盈亏：缺少 {{ selectedDetail.performance.missingFields.map(missingFieldText).join('、') }}</p>
               <div>
                 <h4 class="mb-2 text-sm font-semibold">每日经营快照</h4>
@@ -1523,9 +1586,9 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
           </section>
 
           <section v-else-if="activeTab === 'ledger'" class="space-y-4">
-            <p class="text-xs text-muted-foreground">下面只显示查询日期内的费用。整笔金额与这段日期计入金额可能不同；修改、删除会影响整笔费用，不会修改主站。</p>
-            <p class="text-xs text-muted-foreground">当前查询日期：{{ ledgerFilters.from || '不限开始日期' }} 至 {{ ledgerFilters.to || '不限结束日期' }}。查看历史费用时修改日期后点击“查询账本”。</p>
-            <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><Input v-model="ledgerFilters.from" :disabled="saving" type="date" aria-label="查询开始日期" /><Input v-model="ledgerFilters.to" :disabled="saving" type="date" aria-label="查询结束日期" /><select v-model="ledgerFilters.type" :disabled="saving" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="">全部类型</option><option value="account_purchase">买号确认</option><option value="account_refund">退款冲减</option><option value="recharge_fee">手续费</option><option value="promotion">活动</option><option value="fixed">固定</option><option value="adjustment">调整</option></select><Input v-model="ledgerFilters.platform" :disabled="saving" placeholder="平台" /><Input v-model="ledgerFilters.channel" :disabled="saving" placeholder="渠道" /><Input v-model="ledgerFilters.batchId" :disabled="saving" placeholder="批次 ID" /><Input v-model="ledgerFilters.accountAssetId" :disabled="saving" placeholder="单号 ID" /><Button variant="secondary" :disabled="saving" @click="searchLedger"><Search class="mr-2 h-4 w-4" />查询账本</Button></div>
+            <p class="text-xs text-muted-foreground">当前查询日期：{{ ledgerFilters.from || '不限开始日期' }} 至 {{ ledgerFilters.to || '不限结束日期' }}。只显示这段日期内计入的费用，整笔金额可能不同；修改、删除会影响整笔费用，不会修改主站。改日期后点“查询账本”。</p>
+            <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><Input v-model="ledgerFilters.from" :disabled="saving" type="date" aria-label="查询开始日期" /><Input v-model="ledgerFilters.to" :disabled="saving" type="date" aria-label="查询结束日期" /><select v-model="ledgerFilters.type" :disabled="saving" class="h-9 rounded-md border border-input bg-background px-3 text-sm"><option value="">全部类型</option><option value="account_purchase">买号确认</option><option value="account_refund">退款冲减</option><option value="recharge_fee">手续费</option><option value="promotion">活动</option><option value="fixed">固定</option><option value="adjustment">调整</option></select><Button variant="secondary" :disabled="saving" @click="searchLedger"><Search class="mr-2 h-4 w-4" />查询账本</Button></div>
+            <details class="text-sm" :open="ledgerHasExtraFilters"><summary class="cursor-pointer text-xs text-muted-foreground">更多筛选（平台、渠道、批次、单号）</summary><div class="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><Input v-model="ledgerFilters.platform" :disabled="saving" placeholder="平台" /><Input v-model="ledgerFilters.channel" :disabled="saving" placeholder="渠道" /><Input v-model="ledgerFilters.batchId" :disabled="saving" placeholder="批次 ID" /><Input v-model="ledgerFilters.accountAssetId" :disabled="saving" placeholder="单号 ID" /></div></details>
             <div class="divide-y divide-border/50">
               <div v-for="group in ledgerGroups" :key="group.key" class="py-3">
                 <div v-if="isManualCost(group.records[0]!)" class="mb-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground"><span>原始输入金额 {{ originalAmountText(group.records) }}</span><span>预计计入总额 {{ expectedAmount(group.records) == null ? '未记录' : formatAmount(expectedAmount(group.records)) }}</span><Button size="sm" variant="secondary" type="button" :disabled="saving" @click="beginCostEdit(group)">编辑 {{ group.name }}</Button><Button size="sm" variant="secondary" type="button" :disabled="saving" @click="removeCost(group)">删除 {{ group.name }}</Button></div>
@@ -1538,7 +1601,28 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
             <div v-if="ledger.length || ledgerPage > 1" class="flex items-center justify-end gap-2"><Button variant="secondary" size="sm" title="上一页" :disabled="saving || ledgerPage === 1" @click="changeLedgerPage(-1)"><ArrowLeft class="h-4 w-4" /></Button><span class="text-xs text-muted-foreground">第 {{ ledgerPage }} 页</span><Button variant="secondary" size="sm" title="下一页" :disabled="saving || !ledgerHasMore" @click="changeLedgerPage(1)"><ArrowRight class="h-4 w-4" /></Button></div>
           </section>
 
-          <section v-else class="max-w-3xl space-y-6"><div><h3 class="text-sm font-semibold">营收折扣率（从营收中扣除）</h3><p class="mt-2 text-xs text-muted-foreground">用户花掉的充值赠送、新用户福利、邀请返利不是实际收到的钱。这里按比例从主站消费中扣除，得到实收营收；营收折扣不计入成本，不会修改主站。</p><div class="mt-3 grid gap-3 sm:grid-cols-4" @input="clearCostNotice" @change="clearCostNotice"><label class="space-y-1 text-xs text-muted-foreground"><span>充值赠送 %</span><Input v-model="discountForm.giftRate" :disabled="saving" aria-label="充值赠送 %" type="number" min="0" max="100" step="0.01" placeholder="充值赠送 %" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>新用户福利 %</span><Input v-model="discountForm.newUserRate" :disabled="saving" aria-label="新用户福利 %" type="number" min="0" max="100" step="0.01" placeholder="新用户福利 %" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>邀请返利 %</span><Input v-model="discountForm.referralRate" :disabled="saving" aria-label="邀请返利 %" type="number" min="0" max="100" step="0.01" placeholder="邀请返利 %" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>生效日期</span><Input v-model="discountForm.effectiveDate" :disabled="saving" aria-label="折扣率生效日期" type="date" :min="tomorrow()" /></label></div><div class="mt-3 flex flex-wrap items-center gap-3"><p class="text-sm">合计折扣率 <span class="text-lg font-bold tabular-nums">{{ discountTotalPercent == null ? '—' : `${discountTotalPercent}%` }}</span></p><Button :disabled="saving" @click="submitDiscount"><Save class="mr-2 h-4 w-4" />保存折扣率</Button></div><p class="mt-2 text-xs text-muted-foreground">每项都填占主站消费的比例，不是活动面额：例如邀请返利是 10% × 被邀请用户充值占主站消费的比例。生效日期最早为明天：新规则从所选日期起生效，之前的日期不受影响；只有还没生效的折扣率可以删除；已经结算的日期不会重算。</p><p v-if="discountEditNotice" role="status" class="mt-2 text-xs text-warning">{{ discountEditNotice }}</p></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">折扣率生效历史</h3><p v-if="discountHistoryLoadFailed" class="py-5 text-sm text-destructive">折扣率历史加载失败</p><p v-else-if="!discountHistory.length" class="py-5 text-sm text-muted-foreground">还没有设置折扣率，营收按主站消费原值计算。</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in discountHistory" :key="rate.id" class="flex flex-wrap items-center justify-between gap-2 py-2.5 text-sm"><span>{{ rate.effectiveDate }} 起 · 合计 <strong class="tabular-nums">{{ formatRatePercent(rate.totalRate) }}</strong> · 充值赠送 {{ formatRatePercent(rate.giftRate) }} · 新用户福利 {{ formatRatePercent(rate.newUserRate) }} · 邀请返利 {{ formatRatePercent(rate.referralRate) }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`编辑 ${rate.effectiveDate} 起的折扣率`" @click="editDiscount(rate)">编辑</Button><Button v-if="rate.effectiveDate > today()" type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${rate.effectiveDate} 起的折扣率`" @click="removeDiscount(rate)">删除</Button></span><span v-if="rate.effectiveDate <= today()" class="w-full text-xs text-muted-foreground">已经生效，不能删除；要停用，请新增一条从明天起生效的折扣率（可都填 0）。</span></div></div></div><div class="border-t border-border/60 pt-5" data-testid="gift-ledger-section"><h3 class="text-sm font-semibold">单独客户赠送记录（从营收中扣除）</h3><p class="mt-2 text-xs text-muted-foreground">少数客户每次赠送比例不同（例如充 100 送 20）时，在这里每送一笔记一笔。这些客户花钱时先用最早的充值：花到已记录的部分，按那一笔的赠送占比从营收中扣除，不再按整站折扣率；花超过已记录到账总额的部分，是他自己充的钱，按整站折扣率计算。只读主站消费，不会修改主站。</p><p class="mt-2 text-xs text-warning">估算上面的整站折扣率时，不要再把这些客户的赠送算进去，否则会重复扣除。</p><p v-if="giftLedger && !giftLedger.supported" role="status" class="mt-2 text-sm text-destructive">当前主站不是 Sub2API，不能按客户查询消费，暂不支持单独客户赠送记录。</p><div class="mt-3 grid gap-3 sm:grid-cols-5" @input="clearCostNotice" @change="clearCostNotice"><label class="space-y-1 text-xs text-muted-foreground"><span>主站用户 ID</span><Input v-model="giftForm.mainUserId" :disabled="saving || !giftLedgerSupported || !!giftEditing" aria-label="主站用户 ID" inputmode="numeric" placeholder="主站用户 ID" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>充值日期</span><Input v-model="giftForm.rechargeDate" :disabled="saving || !giftLedgerSupported" aria-label="充值日期" type="date" :max="today()" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>实付金额</span><Input v-model="giftForm.paidAmount" :disabled="saving || !giftLedgerSupported" aria-label="实付金额" type="number" min="0" step="0.01" placeholder="实付金额" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>赠送金额</span><Input v-model="giftForm.giftAmount" :disabled="saving || !giftLedgerSupported" aria-label="赠送金额" type="number" min="0" step="0.01" placeholder="赠送金额" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>备注（可选）</span><Input v-model="giftForm.note" :disabled="saving || !giftLedgerSupported" aria-label="备注（可选）" maxlength="200" placeholder="备注（可选）" /></label></div><div class="mt-3 flex flex-wrap items-center gap-2"><Button v-if="!giftEditing" type="button" variant="secondary" :disabled="saving || !giftLedgerSupported" @click="checkGiftCustomer"><Search class="mr-2 h-4 w-4" />查询这个用户</Button><Button type="button" :disabled="saving || !giftLedgerSupported" @click="submitGiftRecord"><Save class="mr-2 h-4 w-4" />{{ giftEditing ? '保存修改' : '保存记录' }}</Button><Button v-if="giftEditing" type="button" variant="secondary" :disabled="saving" @click="cancelGiftEdit">取消编辑</Button></div><p v-if="giftEditNotice" role="status" class="mt-2 text-xs text-warning">{{ giftEditNotice }}</p><p v-if="giftCheckText" role="status" class="mt-2 text-sm">{{ giftCheckText }}</p><p v-if="giftCheckError" role="alert" class="mt-2 text-sm text-destructive">{{ giftCheckError }}</p><p class="mt-2 text-xs text-muted-foreground">实付填客户实际付的钱，赠送填这次多给的全部余额（包括主站自动送的）；零散赠送或返利实付填 0。主站用户 ID 是主站后台用户列表里的数字，保存前可点“查询这个用户”核对邮箱。充值日期最早可填 60 天前，不能晚于今天。补录过去日期的充值时，从那天起他已经花掉的部分会自动算作用掉了；那些日子已经结算过，按整站折扣率计算，不再补扣。更早的充值请按今天零点的剩余录入，日期填今天；剩余来自几笔比例不同的充值时，按先充先用算出每笔还剩多少，分别录入，先录早的。修改或删除只影响今天和还没结算的日期，已经结算的日期不变。</p><div v-if="giftLedgerLoadError" class="space-y-2 py-5 text-sm text-destructive"><p>单独客户赠送记录加载失败：{{ giftLedgerLoadError }}</p><Button v-if="!costReloadNeeded" type="button" size="sm" variant="secondary" :disabled="saving" @click="retryCostRead">重新加载费用</Button></div><template v-else-if="giftLedger"><div v-if="giftLedger.supported && !giftLedger.statusAvailable && giftLedger.customers.length" class="mt-3 space-y-2"><p role="status" class="text-sm text-warning">暂时查不到主站消费，下面只显示记录本身：{{ giftLedger.statusError }}。请稍后点击‘重新加载费用’；不会修改主站。</p><Button v-if="!costReloadNeeded" type="button" size="sm" variant="secondary" :disabled="saving" @click="retryCostRead">重新加载费用</Button></div><p v-if="!giftLedger.customers.length" class="py-5 text-sm text-muted-foreground">还没有单独客户赠送记录，所有客户都按整站折扣率计算。</p><div v-else class="mt-3 grid gap-3 lg:grid-cols-2"><article v-for="customer in giftLedger.customers" :key="customer.mainUserId" class="rounded-lg border border-border/60 p-3 text-sm" data-testid="gift-ledger-customer"><h4 class="font-semibold">{{ customer.email }}（主站 ID {{ customer.mainUserId }}）</h4><p class="mt-1">已记录到账 <strong class="text-base tabular-nums">{{ formatAmount(customer.creditedTotal) }}</strong> · 累计已用 <strong class="text-base tabular-nums">{{ formatAmount(customer.usedTotal) }}</strong> · 按记录剩余 <strong class="text-base tabular-nums">{{ formatAmount(customer.remaining) }}</strong></p><p v-if="giftCustomerTodayText(customer)" class="mt-1 text-muted-foreground">{{ giftCustomerTodayText(customer) }}</p><p class="mt-1 text-muted-foreground">主站当前余额 {{ formatAmount(customer.mainBalance) }}</p><p v-if="giftBalanceWarning(customer)" role="alert" class="mt-1 text-xs text-warning"><AlertTriangle class="mr-1 inline h-3.5 w-3.5" />{{ giftBalanceWarning(customer) }}</p><div class="mt-2 divide-y divide-border/50"><div v-for="record in customer.records" :key="record.id" class="flex flex-wrap items-center justify-between gap-2 py-2" data-testid="gift-ledger-record"><span>{{ record.rechargeDate }} · 实付 {{ formatAmount(record.paidAmount) }} · 赠送 {{ formatAmount(record.giftAmount) }}（占到账 {{ giftSharePercent(record.giftShare) }}）· 已用 {{ formatAmount(record.usedAmount) }}/{{ formatAmount(record.creditAmount) }}{{ giftStateText(record.state) ? ` · ${giftStateText(record.state)}` : '' }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving || !giftLedgerSupported" :aria-label="`编辑 ${record.email} ${record.rechargeDate} 的记录`" @click="editGiftRecord(record)">编辑</Button><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${record.email} ${record.rechargeDate} 的记录`" @click="removeGiftRecord(record)">删除</Button></span><span v-if="record.note" class="w-full text-xs text-muted-foreground">{{ record.note }}</span></div></div></article></div></template></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">充值手续费（按营收估算）</h3><p class="mt-2 text-xs text-muted-foreground">按当天实收营收（主站消费扣除营收折扣后）× 费率估算手续费，默认 1.6%；不是支付平台实际账单。新费率从所选日期生效，不自动重算已保存的历史手续费，不会修改主站。</p><div class="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]" @input="clearCostNotice" @change="clearCostNotice"><Input v-model="feeForm.rate" :disabled="saving" aria-label="费率 %" type="number" min="0" max="100" step="0.01" placeholder="费率 %" /><Input v-model="feeForm.effectiveDate" :disabled="saving" aria-label="费率生效日期" type="date" /><Button :disabled="saving" @click="submitFee"><Save class="mr-2 h-4 w-4" />保存费率</Button></div><p class="mt-2 text-xs text-muted-foreground">编辑会把该条填入上面的表单，保存后覆盖同一生效日期；要改生效日期，请删除旧的再新增。</p></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">费率生效历史</h3><p v-if="feeRateHistoryLoadFailed" class="py-5 text-sm text-destructive">费率历史加载失败</p><p v-else-if="!feeRateHistory.length" class="py-5 text-sm text-muted-foreground">暂无费率历史</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in feeRateHistory" :key="rate.id" class="grid items-center gap-1 py-2.5 text-sm sm:grid-cols-[7rem_1fr_auto_auto]"><span>{{ rate.effectiveDate }}</span><span>{{ (rate.rate * 100).toFixed(2) }}% · {{ rate.id }}</span><span class="text-xs text-muted-foreground">{{ historyCreatedAtText(rate.createdAt) }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`编辑 ${rate.effectiveDate} 起的手续费率`" @click="editFee(rate)">编辑</Button><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${rate.effectiveDate} 起的手续费率`" @click="removeFee(rate)">删除</Button></span></div></div></div><div class="border-t border-border/60 pt-5"><h3 class="text-sm font-semibold">核算说明</h3><dl class="mt-3 space-y-3 text-sm"><div><dt class="font-medium">替代上游成本</dt><dd class="mt-1 text-muted-foreground">购买价包含额度时，从上游直接成本扣除该账号已核对的 Key 成本，再计入买号确认成本。</dd></div><div><dt class="font-medium">叠加上游成本</dt><dd class="mt-1 text-muted-foreground">购买价是订阅或接入费时，买号确认成本与关联上游按量成本同时计入。</dd></div><div><dt class="font-medium">历史成本更正</dt><dd class="mt-1 text-muted-foreground">手工成本可以编辑或删除整笔费用，操作后会重新计算受影响日期的成本和利润，不会修改主站；买号购买、退款和状态请到买号资产处理。</dd></div></dl></div></section>
+          <section v-else class="max-w-3xl space-y-4">
+            <p class="text-xs text-muted-foreground">每一块先显示规则和生效记录；要修改时点右边的按钮展开表单。保存只影响本站统计，不会修改主站。</p>
+            <div class="rounded-lg border border-border/60 p-4" data-testid="rule-fee">
+              <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div class="min-w-0 flex-1"><h3 class="text-sm font-semibold">充值手续费（按营收估算）</h3><p class="mt-1 text-xs text-muted-foreground">按实收营收估算支付手续费，计入成本；没有设置时按默认 1.6%。下面的生效历史里，日期不晚于今天的最近一条正在生效。</p></div><Button type="button" size="sm" class="shrink-0 self-start" :variant="ruleEditor === 'fee' ? 'ghost' : 'secondary'" :disabled="saving" @click="toggleRuleEditor('fee')">{{ ruleEditor === 'fee' ? '收起' : '修改费率' }}</Button></div>
+              <div v-if="ruleEditor === 'fee'" class="mt-3 space-y-2 border-t border-border/50 pt-3"><p class="text-xs text-muted-foreground">按当天实收营收（主站消费扣除营收折扣后）× 费率估算手续费，默认 1.6%；不是支付平台实际账单。新费率从所选日期生效，不自动重算已保存的历史手续费，不会修改主站。</p><div class="grid gap-3 sm:grid-cols-[1fr_1fr_auto]" @input="clearCostNotice" @change="clearCostNotice"><Input v-model="feeForm.rate" :disabled="saving" aria-label="费率 %" type="number" min="0" max="100" step="0.01" placeholder="费率 %" /><Input v-model="feeForm.effectiveDate" :disabled="saving" aria-label="费率生效日期" type="date" /><Button :disabled="saving" @click="submitFee"><Save class="mr-2 h-4 w-4" />保存费率</Button></div><p class="text-xs text-muted-foreground">在下面的生效历史里点“编辑”会把该条填入这个表单，保存后覆盖同一生效日期；要改生效日期，请删除旧的再新增。</p></div>
+              <p v-if="feeRateHistoryLoadFailed" class="mt-3 text-sm text-destructive">费率历史加载失败</p>
+              <details v-else open class="mt-3" data-testid="rule-fee-history"><summary class="cursor-pointer text-xs text-muted-foreground">费率生效历史（{{ feeRateHistory.length }} 条）</summary><p v-if="!feeRateHistory.length" class="py-3 text-sm text-muted-foreground">暂无费率历史</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in feeRateHistory" :key="rate.id" class="grid items-center gap-1 py-2.5 text-sm sm:grid-cols-[7rem_1fr_auto_auto]"><span>{{ rate.effectiveDate }}</span><span>{{ (rate.rate * 100).toFixed(2) }}% · {{ rate.id }}</span><span class="text-xs text-muted-foreground">{{ historyCreatedAtText(rate.createdAt) }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`编辑 ${rate.effectiveDate} 起的手续费率`" @click="editFee(rate)">编辑</Button><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${rate.effectiveDate} 起的手续费率`" @click="removeFee(rate)">删除</Button></span></div></div></details>
+            </div>
+            <div class="rounded-lg border border-border/60 p-4" data-testid="rule-discount">
+              <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div class="min-w-0 flex-1"><h3 class="text-sm font-semibold">营收折扣率（从营收中扣除）</h3><p class="mt-1 text-xs text-muted-foreground">用户花掉的充值赠送、新用户福利、邀请返利不是实际收到的钱。这里按比例从主站消费中扣除，得到实收营收；营收折扣不计入成本，不会修改主站。</p><p class="mt-1 text-xs text-muted-foreground">下面的生效历史里，日期不晚于今天的最近一条正在生效；一条都没有时不扣折扣。</p></div><Button type="button" size="sm" class="shrink-0 self-start" :variant="ruleEditor === 'discount' ? 'ghost' : 'secondary'" :disabled="saving" @click="toggleRuleEditor('discount')">{{ ruleEditor === 'discount' ? '收起' : '修改折扣率' }}</Button></div>
+              <div v-if="ruleEditor === 'discount'" class="mt-3 space-y-3 border-t border-border/50 pt-3"><div class="grid gap-3 sm:grid-cols-4" @input="clearCostNotice" @change="clearCostNotice"><label class="space-y-1 text-xs text-muted-foreground"><span>充值赠送 %</span><Input v-model="discountForm.giftRate" :disabled="saving" aria-label="充值赠送 %" type="number" min="0" max="100" step="0.01" placeholder="充值赠送 %" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>新用户福利 %</span><Input v-model="discountForm.newUserRate" :disabled="saving" aria-label="新用户福利 %" type="number" min="0" max="100" step="0.01" placeholder="新用户福利 %" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>邀请返利 %</span><Input v-model="discountForm.referralRate" :disabled="saving" aria-label="邀请返利 %" type="number" min="0" max="100" step="0.01" placeholder="邀请返利 %" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>生效日期</span><Input v-model="discountForm.effectiveDate" :disabled="saving" aria-label="折扣率生效日期" type="date" :min="tomorrow()" /></label></div><div class="flex flex-wrap items-center gap-3"><p class="text-sm">合计折扣率 <span class="text-lg font-bold tabular-nums">{{ discountTotalPercent == null ? '—' : `${discountTotalPercent}%` }}</span></p><Button :disabled="saving" @click="submitDiscount"><Save class="mr-2 h-4 w-4" />保存折扣率</Button></div><p class="text-xs text-muted-foreground">每项都填占主站消费的比例，不是活动面额：例如邀请返利是 10% × 被邀请用户充值占主站消费的比例。生效日期最早为明天：新规则从所选日期起生效，之前的日期不受影响；只有还没生效的折扣率可以删除；已经结算的日期不会重算。</p><p v-if="discountEditNotice" role="status" class="text-xs text-warning">{{ discountEditNotice }}</p></div>
+              <p v-if="discountHistoryLoadFailed" class="mt-3 text-sm text-destructive">折扣率历史加载失败</p>
+              <details v-else open class="mt-3" data-testid="rule-discount-history"><summary class="cursor-pointer text-xs text-muted-foreground">折扣率生效历史（{{ discountHistory.length }} 条）</summary><p v-if="!discountHistory.length" class="py-3 text-sm text-muted-foreground">还没有设置折扣率，营收按主站消费原值计算。</p><div v-else class="mt-2 divide-y divide-border/50"><div v-for="rate in discountHistory" :key="rate.id" class="flex flex-wrap items-center justify-between gap-2 py-2.5 text-sm"><span>{{ rate.effectiveDate }} 起 · 合计 <strong class="tabular-nums">{{ formatRatePercent(rate.totalRate) }}</strong> · 充值赠送 {{ formatRatePercent(rate.giftRate) }} · 新用户福利 {{ formatRatePercent(rate.newUserRate) }} · 邀请返利 {{ formatRatePercent(rate.referralRate) }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`编辑 ${rate.effectiveDate} 起的折扣率`" @click="editDiscount(rate)">编辑</Button><Button v-if="rate.effectiveDate > today()" type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${rate.effectiveDate} 起的折扣率`" @click="removeDiscount(rate)">删除</Button></span><span v-if="rate.effectiveDate <= today()" class="w-full text-xs text-muted-foreground">已经生效，不能删除；要停用，请新增一条从明天起生效的折扣率（可都填 0）。</span></div></div></details>
+            </div>
+            <div class="rounded-lg border border-border/60 p-4" data-testid="gift-ledger-section">
+              <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div class="min-w-0 flex-1"><h3 class="text-sm font-semibold">单独客户赠送记录（从营收中扣除）</h3><p class="mt-1 text-xs text-muted-foreground">少数客户每次赠送比例不同时，每送一笔记一笔；已记录的部分按每笔的赠送占比扣，不再按整站折扣率。只读主站消费，不会修改主站。</p><p v-if="giftLedgerSummaryText" class="mt-2 text-sm font-medium" data-testid="gift-ledger-summary">{{ giftLedgerSummaryText }}</p></div><Button type="button" size="sm" class="shrink-0 self-start" :variant="ruleEditor === 'gift' ? 'ghost' : 'secondary'" :disabled="saving || (!giftLedgerSupported && ruleEditor !== 'gift')" @click="toggleRuleEditor('gift')">{{ ruleEditor === 'gift' ? '收起' : '新增一笔' }}</Button></div>
+              <p class="mt-2 text-xs text-warning">估算上面的整站折扣率时，不要再把这些客户的赠送算进去，否则会重复扣除。</p><p v-if="giftLedger && !giftLedger.supported" role="status" class="mt-2 text-sm text-destructive">当前主站不是 Sub2API，不能按客户查询消费，暂不支持单独客户赠送记录。</p>
+              <div v-if="ruleEditor === 'gift'" class="mt-3 space-y-3 border-t border-border/50 pt-3"><p class="text-xs text-muted-foreground">少数客户每次赠送比例不同（例如充 100 送 20）时，在这里每送一笔记一笔。这些客户花钱时先用最早的充值：花到已记录的部分，按那一笔的赠送占比从营收中扣除，不再按整站折扣率；花超过已记录到账总额的部分，是他自己充的钱，按整站折扣率计算。只读主站消费，不会修改主站。</p><div class="grid gap-3 sm:grid-cols-5" @input="clearCostNotice" @change="clearCostNotice"><label class="space-y-1 text-xs text-muted-foreground"><span>主站用户 ID</span><Input v-model="giftForm.mainUserId" :disabled="saving || !giftLedgerSupported || !!giftEditing" aria-label="主站用户 ID" inputmode="numeric" placeholder="主站用户 ID" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>充值日期</span><Input v-model="giftForm.rechargeDate" :disabled="saving || !giftLedgerSupported" aria-label="充值日期" type="date" :max="today()" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>实付金额</span><Input v-model="giftForm.paidAmount" :disabled="saving || !giftLedgerSupported" aria-label="实付金额" type="number" min="0" step="0.01" placeholder="实付金额" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>赠送金额</span><Input v-model="giftForm.giftAmount" :disabled="saving || !giftLedgerSupported" aria-label="赠送金额" type="number" min="0" step="0.01" placeholder="赠送金额" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>备注（可选）</span><Input v-model="giftForm.note" :disabled="saving || !giftLedgerSupported" aria-label="备注（可选）" maxlength="200" placeholder="备注（可选）" /></label></div><div class="flex flex-wrap items-center gap-2"><Button v-if="!giftEditing" type="button" variant="secondary" :disabled="saving || !giftLedgerSupported" @click="checkGiftCustomer"><Search class="mr-2 h-4 w-4" />查询这个用户</Button><Button type="button" :disabled="saving || !giftLedgerSupported" @click="submitGiftRecord"><Save class="mr-2 h-4 w-4" />{{ giftEditing ? '保存修改' : '保存记录' }}</Button><Button v-if="giftEditing" type="button" variant="secondary" :disabled="saving" @click="cancelGiftEdit">取消编辑</Button></div><p v-if="giftEditNotice" role="status" class="text-xs text-warning">{{ giftEditNotice }}</p><p v-if="giftCheckText" role="status" class="text-sm">{{ giftCheckText }}</p><p v-if="giftCheckError" role="alert" class="text-sm text-destructive">{{ giftCheckError }}</p><p class="text-xs text-muted-foreground">赠送填这次多给的全部余额（包括主站自动送的）。实付默认 0，只填赠送也可以：这一笔到账就只算赠送金额，照样按先充先用，轮到这一笔时花的钱全部当作赠送从营收扣除。知道实付就填上更准：按赠送占到账的比例分摊扣除，实付那部分也算在这一笔里，不会再按整站折扣率重复扣。主站用户 ID 是主站后台用户列表里的数字，保存前可点“查询这个用户”核对邮箱。充值日期最早可填 60 天前，不能晚于今天。补录过去日期的充值时，从那天起他已经花掉的部分会自动算作用掉了；那些日子已经结算过，按整站折扣率计算，不再补扣。更早的充值请按今天零点的剩余录入，日期填今天；剩余来自几笔比例不同的充值时，按先充先用算出每笔还剩多少，分别录入，先录早的。修改或删除只影响今天和还没结算的日期，已经结算的日期不变。</p></div>
+              <div v-if="giftLedgerLoadError" class="mt-3 space-y-2 text-sm text-destructive"><p>单独客户赠送记录加载失败：{{ giftLedgerLoadError }}</p><Button v-if="!costReloadNeeded" type="button" size="sm" variant="secondary" :disabled="saving" @click="retryCostRead">重新加载费用</Button></div><template v-else-if="giftLedger"><div v-if="giftLedger.supported && !giftLedger.statusAvailable && giftLedger.customers.length" class="mt-3 space-y-2"><p role="status" class="text-sm text-warning">暂时查不到主站消费，下面只显示记录本身：{{ giftLedger.statusError }}。请稍后点击‘重新加载费用’；不会修改主站。</p><Button v-if="!costReloadNeeded" type="button" size="sm" variant="secondary" :disabled="saving" @click="retryCostRead">重新加载费用</Button></div><div v-if="giftLedger.customers.length" class="mt-3 divide-y divide-border/50 rounded-md border border-border/50"><details v-for="customer in visibleGiftCustomers" :key="customer.mainUserId" class="px-3 py-2 text-sm" :open="Boolean(giftBalanceWarning(customer))" data-testid="gift-ledger-customer"><summary class="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2"><span class="min-w-0 truncate font-medium">{{ customer.email }}（主站 ID {{ customer.mainUserId }}）</span><span class="text-xs text-muted-foreground tabular-nums"><AlertTriangle v-if="giftBalanceWarning(customer)" class="mr-1 inline h-3.5 w-3.5 text-warning" />{{ customer.records.length }} 笔 · 剩余 {{ formatAmount(customer.remaining) }} / 到账 {{ formatAmount(customer.creditedTotal) }}</span></summary><div class="mt-2 border-t border-border/40 pt-2"><p class="mt-1">已记录到账 <strong class="text-base tabular-nums">{{ formatAmount(customer.creditedTotal) }}</strong> · 累计已用 <strong class="text-base tabular-nums">{{ formatAmount(customer.usedTotal) }}</strong> · 按记录剩余 <strong class="text-base tabular-nums">{{ formatAmount(customer.remaining) }}</strong></p><p v-if="giftCustomerTodayText(customer)" class="mt-1 text-muted-foreground">{{ giftCustomerTodayText(customer) }}</p><p class="mt-1 text-muted-foreground">主站当前余额 {{ formatAmount(customer.mainBalance) }}</p><p v-if="giftBalanceWarning(customer)" role="alert" class="mt-1 text-xs text-warning"><AlertTriangle class="mr-1 inline h-3.5 w-3.5" />{{ giftBalanceWarning(customer) }}</p><div class="mt-2 divide-y divide-border/50"><div v-for="record in customer.records" :key="record.id" class="flex flex-wrap items-center justify-between gap-2 py-2" data-testid="gift-ledger-record"><span>{{ record.rechargeDate }} · 实付 {{ formatAmount(record.paidAmount) }} · 赠送 {{ formatAmount(record.giftAmount) }}（占到账 {{ giftSharePercent(record.giftShare) }}）· 已用 {{ formatAmount(record.usedAmount) }}/{{ formatAmount(record.creditAmount) }}{{ giftStateText(record.state) ? ` · ${giftStateText(record.state)}` : '' }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving || !giftLedgerSupported" :aria-label="`编辑 ${record.email} ${record.rechargeDate} 的记录`" @click="editGiftRecord(record)">编辑</Button><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${record.email} ${record.rechargeDate} 的记录`" @click="removeGiftRecord(record)">删除</Button></span><span v-if="record.note" class="w-full text-xs text-muted-foreground">{{ record.note }}</span></div></div></div></details><div v-if="hiddenGiftCustomerCount && !giftHiddenHasWarning" class="px-3 py-2"><Button type="button" size="sm" variant="ghost" @click="giftShowAll = !giftShowAll">{{ giftShowAll ? '只显示前 ' + giftCustomerPreviewCount + ' 位客户' : '展开其余 ' + hiddenGiftCustomerCount + ' 位客户' }}</Button></div></div></template>
+            </div>
+            <details class="rounded-lg border border-border/60 p-4"><summary class="cursor-pointer text-sm font-semibold">核算说明</summary><dl class="mt-3 space-y-3 text-sm"><div><dt class="font-medium">替代上游成本</dt><dd class="mt-1 text-muted-foreground">购买价包含额度时，从上游直接成本扣除该账号已核对的 Key 成本，再计入买号确认成本。</dd></div><div><dt class="font-medium">叠加上游成本</dt><dd class="mt-1 text-muted-foreground">购买价是订阅或接入费时，买号确认成本与关联上游按量成本同时计入。</dd></div><div><dt class="font-medium">历史成本更正</dt><dd class="mt-1 text-muted-foreground">手工成本可以编辑或删除整笔费用，操作后会重新计算受影响日期的成本和利润，不会修改主站；买号购买、退款和状态请到买号资产处理。</dd></div></dl></details>
+          </section>
         </main>
       </section>
     </div>

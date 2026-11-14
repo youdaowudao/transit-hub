@@ -237,6 +237,24 @@ describe('Dashboard cost entrypoint behavior', () => {
     expect(wrapper.find('[data-test="upstream-key-usage"]').exists()).toBe(true)
   })
 
+  it('opens the cost entry form only from the homepage 记一笔成本 button, not from a result card', async () => {
+    const wrapper = await mountDashboard()
+    await findCard(wrapper, '今日总成本').trigger('click')
+    await nextTick()
+    const workspace = wrapper.findComponent(AccountCostWorkspace)
+    expect(workspace.props('open')).toBe(true)
+    expect(workspace.props('openCostForm')).toBe(false)
+    workspace.vm.$emit('close')
+    await nextTick()
+    const record = wrapper.findAll('button').find(button => button.text() === '记一笔成本')
+    if (!record) throw new Error('missing homepage 记一笔成本 button')
+    await record.trigger('click')
+    await nextTick()
+    expect(workspace.props('open')).toBe(true)
+    expect(workspace.props('initialTab')).toBe('today')
+    expect(workspace.props('openCostForm')).toBe(true)
+  })
+
   it('R03 renders the six fixed homepage cost components and keeps their sum equal to total cost', async () => {
     const wrapper = await mountDashboard()
     const section = wrapper.findAll('section').find(item => item.text().includes('成本构成'))

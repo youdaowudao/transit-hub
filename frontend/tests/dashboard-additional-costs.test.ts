@@ -19,7 +19,8 @@ describe('dashboard cost composition', () => {
     }
     expect(dashboardSource).not.toContain("{ label: '其他', value:")
     expect(dashboardSource).toContain('const displayedTodayCost = computed')
-    expect(dashboardSource).toContain("@click=\"openAccountCostWorkspace('today')\">记一笔成本")
+    // 首页“记一笔成本”打开抽屉时直接展开录入表单。
+    expect(dashboardSource).toContain("@click=\"openAccountCostWorkspace('today', true)\">记一笔成本")
     expect(dashboardSource).toContain("@click=\"openAccountCostWorkspace('assets')\">录入买号")
     expect(dashboardSource).not.toContain('v-for="record in liveData.additionalCosts.records"')
   })

@@ -104,6 +104,7 @@ const upstreamBalanceBreakdownOpen = ref(false)
 const dailyStatsPanelOpen = ref(false)
 const accountCostWorkspaceOpen = ref(false)
 const accountCostInitialTab = ref<'today' | 'assets' | 'ledger' | 'rules'>('today')
+const accountCostOpenForm = ref(false)
 
 const openBalanceFilter = () => { balanceFilterOpen.value = true }
 const closeBalanceFilter = () => { balanceFilterOpen.value = false }
@@ -116,8 +117,10 @@ const openUpstreamBalanceBreakdown = () => { upstreamBalanceBreakdownOpen.value 
 const closeUpstreamBalanceBreakdown = () => { upstreamBalanceBreakdownOpen.value = false }
 const openDailyStatsPanel = () => { dailyStatsPanelOpen.value = true }
 const closeDailyStatsPanel = () => { dailyStatsPanelOpen.value = false }
-const openAccountCostWorkspace = (tab: 'today' | 'assets' | 'ledger' | 'rules' = 'today') => {
+// openForm 只给首页“记一笔成本”按钮用：打开后直接展开录入表单；点数字卡片进来只看结果。
+const openAccountCostWorkspace = (tab: 'today' | 'assets' | 'ledger' | 'rules' = 'today', openForm = false) => {
 	accountCostInitialTab.value = tab
+	accountCostOpenForm.value = openForm
 	accountCostWorkspaceOpen.value = true
 }
 const closeAccountCostWorkspace = () => { accountCostWorkspaceOpen.value = false }
@@ -1140,7 +1143,7 @@ const lastProbeLabel = computed(() => {
 				<span v-for="line in homepageCostLines" :key="line.label" class="text-muted-foreground">{{ line.label }} {{ formatAmount(line.value) }}</span>
 			</div>
 			<div class="flex shrink-0 gap-2">
-				<button type="button" class="h-8 rounded-md border border-border px-3 text-xs font-medium hover:bg-surface-elevated" @click="openAccountCostWorkspace('today')">记一笔成本</button>
+				<button type="button" class="h-8 rounded-md border border-border px-3 text-xs font-medium hover:bg-surface-elevated" @click="openAccountCostWorkspace('today', true)">记一笔成本</button>
 				<button type="button" class="h-8 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90" @click="openAccountCostWorkspace('assets')">录入买号</button>
 			</div>
 		</section>
@@ -1415,6 +1418,7 @@ const lastProbeLabel = computed(() => {
 			:profit-margin="profitMarginState.mode === 'exact' ? profitMarginState.value : null"
       :summary="liveData?.additionalCosts"
       :initial-tab="accountCostInitialTab"
+      :open-cost-form="accountCostOpenForm"
       :workspace-id="workspaceID"
       @close="closeAccountCostWorkspace"
 			@open-upstream-details="openUpstreamDetailsFromAccountCost"

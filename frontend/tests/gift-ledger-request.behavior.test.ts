@@ -30,6 +30,9 @@ describe('gift ledger lookup failure through the real request parser', () => {
     })
     await wrapper.setProps({ open: true })
     await flushPromises()
+    // 录入表单默认收起：像用户一样先点“新增一笔”。
+    await wrapper.findAll('button').find(b => b.text() === '新增一笔')!.trigger('click')
+    await flushPromises()
     await wrapper.find('input[aria-label="主站用户 ID"]').setValue('777')
     await wrapper.findAll('button').find(b => b.text() === '查询这个用户')!.trigger('click')
     await flushPromises()

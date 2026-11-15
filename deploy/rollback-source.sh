@@ -171,6 +171,26 @@ acquire_maintenance_lock() {
     fi
 }
 
+# systemd 以固定 PATH 拉起回滚服务，不会加载登录 shell 里的 nvm 等环境。
+# 在任何改动之前检查必需命令，缺失时以 69 退出，代码和数据库都不动。
+require_commands() {
+    local name
+    local missing=()
+    for name in "$@"; do
+        if ! command -v "$name" >/dev/null 2>&1; then
+            missing+=("$name")
+        fi
+    done
+    if ((${#missing[@]} == 0)); then
+        return 0
+    fi
+    printf '回滚失败：回滚服务找不到以下命令：%s。\n' "${missing[*]}" >&2
+    printf '回滚服务只在这些目录里找命令：%s（不会加载登录 shell 里的 nvm 等环境）。\n' "$PATH" >&2
+    printf '处理办法：把缺少的命令安装到 /usr/bin 或 /usr/local/bin；Node.js 若用 nvm 安装，可用 root 执行 ln -sf "$(command -v node)" /usr/local/bin/node 和 ln -sf "$(command -v npm)" /usr/local/bin/npm。\n' >&2
+    printf '本次回滚尚未改动代码和数据库。\n' >&2
+    exit 69
+}
+
 read_json_string() {
     local file="$1"
     local key="$2"
@@ -307,6 +327,7 @@ trap 'on_signal TERM 143' TERM
 trap 'on_signal HUP 129' HUP
 
 acquire_maintenance_lock
+require_commands git sudo docker curl node npm go
 
 if [[ ! -s "$ROLLBACK_POINT_FILE" ]]; then
     printf '回滚失败：当前没有可用还原点，请先通过一键升级产生一次还原点。\n' >&2

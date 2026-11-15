@@ -80,10 +80,13 @@ if [[ ! -x "$ROLLBACK_SCRIPT" ]]; then
     finish_failed 72 '版本回滚失败：回滚脚本不存在或没有执行权限。'
 fi
 
-set +e
-"$ROLLBACK_SCRIPT" >>"$LOG_FILE" 2>&1
-rollback_exit_code=$?
-set -e
+# 必须放在 if 条件里执行：ERR trap 不受 set +e 约束，裸执行时回滚脚本一失败就会进入
+# on_error 直接退出，下面按退出码给出的可读原因永远不会出现。
+if "$ROLLBACK_SCRIPT" >>"$LOG_FILE" 2>&1; then
+    rollback_exit_code=0
+else
+    rollback_exit_code=$?
+fi
 
 if ((rollback_exit_code == 0)); then
     write_status 'succeeded' "$(date -u +'%Y-%m-%dT%H:%M:%S.%NZ')" 0
@@ -94,6 +97,7 @@ case "$rollback_exit_code" in
 64) finish_failed 64 '当前代码已经处于还原点，无需回滚。' ;;
 65) finish_failed 65 '还原点记录的提交在本地仓库中不存在，无法回滚。' ;;
 66) finish_failed 66 '当前没有可用还原点，请先执行过一次一键升级。' ;;
+69) finish_failed 69 '回滚服务找不到必需的命令（缺少哪些见上方日志），回滚未执行。' ;;
 70) finish_failed 70 '无法读取数据库当前迁移版本，回滚已中止。' ;;
 73) finish_failed 73 '无法打开维护锁文件，回滚已中止。' ;;
 75) finish_failed 75 '源码升级或后台服务重启正在执行，请稍后再试。' ;;

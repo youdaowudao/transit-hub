@@ -28,18 +28,62 @@ MAINTENANCE_UNITS=(
     'transithub-restart.service'
 )
 
+# 升级前所在提交、是否已切换源码、是否已开始改写线上产物。
+# 失败时据此决定能否把源码退回原提交，见 restore_source_before_artifacts。
+previous_commit=''
+source_switched=0
+artifacts_touched=0
+
 on_error() {
     local exit_code=$?
+    trap - ERR
     printf '升级失败（第 %s 行，退出码 %s）：%s\n' "$1" "$exit_code" "$2" >&2
     if [[ "$2" == *systemctl* || "$2" == *curl* || "$2" == *health_response* ]]; then
         print_service_diagnostics
     fi
+    restore_source_before_artifacts
     exit "$exit_code"
 }
 
 print_service_diagnostics() {
     sudo systemctl status "$SERVICE" --no-pager -l >&2 || true
     sudo journalctl -u "$SERVICE" -n 100 --no-pager >&2 || true
+}
+
+# 切换源码之后、改写前端 dist 之前失败（备份、npm ci 等）时，线上服务和产物都还是旧版，
+# 把源码退回原提交，保持「工作树 = 正在运行的版本」。否则下次重试会把这次未验证的新提交
+# 当作还原点写入，回滚就退不回真正的旧版本。已开始改写产物后不再退回，交给一键回滚处理。
+restore_source_before_artifacts() {
+    if ((source_switched == 0 || artifacts_touched == 1)) || [[ -z "$previous_commit" ]]; then
+        return 0
+    fi
+    if git -C "$PROJECT_DIR" switch --detach "$previous_commit" >/dev/null 2>&1; then
+        printf '已把源码退回升级前的提交 %s，线上服务未受影响，处理完上述问题后可直接重新升级。\n' \
+            "$previous_commit" >&2
+    else
+        printf '源码未能退回升级前的提交 %s，重新升级前请先在服务器执行：git -C %s switch --detach %s\n' \
+            "$previous_commit" "$PROJECT_DIR" "$previous_commit" >&2
+    fi
+}
+
+# systemd 以固定 PATH 拉起升级服务，不会加载登录 shell 里的 nvm 等环境。
+# 在写还原点、切换代码之前检查必需命令，缺失时直接退出，代码和数据库都不动。
+require_commands() {
+    local name
+    local missing=()
+    for name in "$@"; do
+        if ! command -v "$name" >/dev/null 2>&1; then
+            missing+=("$name")
+        fi
+    done
+    if ((${#missing[@]} == 0)); then
+        return 0
+    fi
+    printf '升级失败：升级服务找不到以下命令：%s。\n' "${missing[*]}" >&2
+    printf '升级服务只在这些目录里找命令：%s（不会加载登录 shell 里的 nvm 等环境）。\n' "$PATH" >&2
+    printf '处理办法：把缺少的命令安装到 /usr/bin 或 /usr/local/bin；Node.js 若用 nvm 安装，可用 root 执行 ln -sf "$(command -v node)" /usr/local/bin/node 和 ln -sf "$(command -v npm)" /usr/local/bin/npm。\n' >&2
+    printf '本次升级尚未改动代码和数据库，处理后直接重新升级即可。\n' >&2
+    exit 69
 }
 
 # 把仓库内 deploy/ 下的维护脚本与 systemd 单元同步到仓库外的执行位置。
@@ -192,7 +236,9 @@ read_app_version() {
 }
 
 on_signal() {
+    trap - ERR
     printf '升级失败：收到 %s 信号，已停止执行。\n' "$1" >&2
+    restore_source_before_artifacts
     exit "$2"
 }
 
@@ -203,6 +249,7 @@ trap 'on_signal TERM 143' TERM
 trap 'on_signal HUP 129' HUP
 
 acquire_maintenance_lock
+require_commands git sudo docker curl node npm go
 
 cd "$PROJECT_DIR"
 git fetch origin main
@@ -216,6 +263,7 @@ previous_schema_version="$(read_schema_version)"
 # dumpPath 指向固定路径，后续 pg_dump 会写入该路径，此处先行记录不影响正确性。
 capture_rollback_point "$previous_commit" "$previous_version" "$previous_schema_version"
 
+source_switched=1
 git switch --detach origin/main
 
 sudo mkdir -p "$BACKUP_DIR"
@@ -235,6 +283,8 @@ sudo docker exec "$POSTGRES_CONTAINER" rm -f "$CONTAINER_BACKUP"
 
 cd "$PROJECT_DIR/frontend"
 npm ci --registry=https://registry.npmjs.org
+# npm run build 会直接改写线上前端 dist，从这里起失败不再退回源码。
+artifacts_touched=1
 npm run build
 
 cd "$PROJECT_DIR/backend"

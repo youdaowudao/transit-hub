@@ -57,10 +57,13 @@ trap 'on_signal HUP 129' HUP
 
 # 维护锁由 update-source.sh 自行持有：它需要在 git 切换前抢到锁，
 # 这里再持一次会因 tee 管道继承 fd 而造成锁生命周期难以判断。
-set +e
-"$UPGRADE_SCRIPT" 2>&1 | tee -a "$LOG_FILE"
-pipeline_status=("${PIPESTATUS[@]}")
-set -e
+# 必须放在 if 条件里执行：ERR trap 不受 set +e 约束，裸执行时升级脚本一失败就会进入
+# on_error，多打一行指向 tee 的误导性错误。条件里的失败不触发 ERR，PIPESTATUS 照常保留。
+if "$UPGRADE_SCRIPT" 2>&1 | tee -a "$LOG_FILE"; then
+    pipeline_status=(0 0)
+else
+    pipeline_status=("${PIPESTATUS[@]}")
+fi
 
 exit_code="${pipeline_status[0]}"
 if [[ "$exit_code" -eq 0 && "${pipeline_status[1]}" -ne 0 ]]; then

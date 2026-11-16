@@ -15,7 +15,7 @@ import {
   updateUpstreamSite,
   updateSiteSettings,
 } from '../api/upstream'
-import type { SiteSettings, UpstreamFailure, SiteSyncState, UpstreamMetricValue, UpstreamMetrics, UpstreamSite, UpstreamSiteForm, UpstreamSiteResponse } from '../types/upstream'
+import type { CreateUpstreamSiteOptions, SiteSettings, UpstreamFailure, SiteSyncState, UpstreamMetricValue, UpstreamMetrics, UpstreamSite, UpstreamSiteForm, UpstreamSiteResponse } from '../types/upstream'
 
 const logoClasses = [
   'bg-primary/10 text-primary border-primary/20',
@@ -82,6 +82,7 @@ export const useUpstreamSites = () => {
   const workspaceId = computed(() => currentAccount.value?.id ?? '')
   const sites = ref<UpstreamSite[]>([])
   const isAdding = ref(false)
+  const isForceSaving = ref(false)
   const isRefreshing = ref(false)
   const addErrorKey = ref<string | null>(null)
   const addFailure = ref<UpstreamFailure | null>(null)
@@ -186,12 +187,14 @@ export const useUpstreamSites = () => {
     return true
   }
 
-  const addSite = async (form: UpstreamSiteForm, pinned = false): Promise<boolean> => {
+  const addSite = async (form: UpstreamSiteForm, pinned = false, options?: CreateUpstreamSiteOptions): Promise<boolean> => {
+    if (isAdding.value) return false
     const token = { epoch, workspace: workspaceId.value }
     isAdding.value = true
+    isForceSaving.value = options?.forceSave === true
     clearAddFailure()
     try {
-      const site = await (pinned ? createUpstreamSite(form, true) : createUpstreamSite(form))
+      const site = await (options?.forceSave ? createUpstreamSite(form, pinned, options) : pinned ? createUpstreamSite(form, true) : createUpstreamSite(form))
       if (!sameWorkspace(token)) return false
       removedIds.delete(site.id)
       invalidateRead(site.id)
@@ -204,7 +207,7 @@ export const useUpstreamSites = () => {
       }
       return false
     } finally {
-      if (sameWorkspace(token)) isAdding.value = false
+      if (sameWorkspace(token)) { isAdding.value = false; isForceSaving.value = false }
     }
   }
 
@@ -463,7 +466,7 @@ export const useUpstreamSites = () => {
     siteSyncStates.value = new Map(); syncingSiteIds.value = new Set()
     enabledUpdatingIds.value = new Set(); enabledErrorKeys.value = new Map()
     pinnedUpdatingIds.value = new Set(); pinnedErrorKeys.value = new Map()
-    isAdding.value = false; isRefreshing.value = false; clearAddFailure()
+    isAdding.value = false; isForceSaving.value = false; isRefreshing.value = false; clearAddFailure()
     void loadSites()
   }, { flush: 'sync' })
 
@@ -475,7 +478,7 @@ export const useUpstreamSites = () => {
     doneTimers.clear()
   })
   return {
-    sites, workspaceId, isAdding, isRefreshing, addErrorKey, addFailure, clearAddFailure,
+    sites, workspaceId, isAdding, isForceSaving, isRefreshing, addErrorKey, addFailure, clearAddFailure,
     connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, pinnedUpdatingIds, pinnedErrorKeys, siteSyncStates,
     syncingSiteIds, siteOperationVersions, pendingSiteOperations, readSiteSnapshot,
     addSite, updateSite, saveSiteSettings, syncSite, refreshSingleSite, refreshSites,

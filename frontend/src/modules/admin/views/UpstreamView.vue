@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search, Plus, CheckCircle2, XCircle, X, Loader2, AlertCircle, Trash2, Edit2, LayoutGrid, List, RefreshCw, Settings2, ArrowUpDown, ChevronDown, ChevronUp } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
@@ -20,7 +20,7 @@ import { t, locale } from '@/locales'
 const router = useRouter()
 const searchQuery = ref('')
 const isAddModalOpen = ref(false)
-const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, addFailure, clearAddFailure, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, pinnedUpdatingIds, pinnedErrorKeys, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, setSitePinned, streamRefreshSites, refreshSingleSite, workspaceId, readSiteSnapshot, pendingSiteOperations, saveSiteSettings } = useUpstreamSites()
+const { sites: upstreamSites, isAdding, isForceSaving, isRefreshing, addErrorKey, addFailure, clearAddFailure, connectedCount, enabledSiteCount, enabledUpdatingIds, enabledErrorKeys, pinnedUpdatingIds, pinnedErrorKeys, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, setSiteEnabled, setSitePinned, streamRefreshSites, refreshSingleSite, workspaceId, readSiteSnapshot, pendingSiteOperations, saveSiteSettings } = useUpstreamSites()
 const deletingSiteId = ref<string | null>(null)
 const deleteErrorKey = ref<string | null>(null)
 const deleteFailure = ref<UpstreamFailure | null>(null)
@@ -136,6 +136,50 @@ watch([() => newSiteForm.value.siteUrl, editingSiteId, isAddModalOpen], () => {
 watch(domainMigrationConfirmed, () => { domainMigrationConfirmationError.value = false })
 
 const showEditFailureHelp = computed(() => Boolean(editingSiteId.value) && ['login', 'refresh', 'verify', 'metrics'].includes(addFailure.value?.stage ?? ''))
+const isTokenCreate = computed(() => !editingSiteId.value && newSiteForm.value.authMode === 'token' && newSiteForm.value.platform !== 'newapi')
+const compactTokenFailure = computed(() => isTokenCreate.value && Boolean(addErrorKey.value) && ['refresh', 'verify', 'metrics'].includes(addFailure.value?.stage ?? '') && !addFailure.value?.fields?.length && !['admin.upstream.errors.invalidFields', 'admin.upstream.errors.identityCheckFailed'].includes(addErrorKey.value ?? ''))
+const canForceSave = computed(() => compactTokenFailure.value)
+const failureDetailsVersion = ref(0)
+watch(addFailure, () => { failureDetailsVersion.value += 1 }, { flush: 'sync' })
+const failureAlert = ref<HTMLDivElement | null>(null)
+watch(failureDetailsVersion, async (_version, _previous, onCleanup) => {
+  if (!isAddModalOpen.value || !compactTokenFailure.value) return
+  const expectedFailure = addFailure.value
+  const expectedWorkspace = workspaceId.value
+  let cancelled = false
+  onCleanup(() => { cancelled = true })
+  await nextTick()
+  if (cancelled || !isAddModalOpen.value || !compactTokenFailure.value || addFailure.value !== expectedFailure || workspaceId.value !== expectedWorkspace) return
+  failureAlert.value?.scrollIntoView?.({ block: 'nearest' })
+}, { flush: 'post' })
+watch([newSiteForm, newSitePinned], () => {
+  if (!editingSiteId.value) clearAddFailure()
+}, { deep: true, flush: 'sync' })
+// These reasons come from concrete transport/response evidence or an explicit
+// upstream business refusal. HTTP authentication failures alone prove no cause.
+const directFailureReasonKeys = new Set([
+  'admin.upstream.errors.networkTimeout',
+  'admin.upstream.errors.networkUnreachable',
+  'admin.upstream.errors.tlsFailed',
+  'admin.upstream.errors.announcementAckRequired',
+  'admin.upstream.errors.upstreamInsufficientBalance',
+  'admin.upstream.errors.upstreamKeyQuotaExhausted',
+  'admin.upstream.errors.upstreamKeyExpired',
+  'admin.upstream.errors.invalidResponse',
+  'admin.upstream.errors.loginIncomplete',
+])
+const tokenFailureSummary = computed(() => {
+  const stage = addFailure.value?.stage
+  const step = t(stage === 'verify' ? 'admin.upstream.failure.readAccountFailed' : stage === 'metrics' ? 'admin.upstream.failure.readDataFailed' : 'admin.upstream.failure.refreshFailed')
+  const status = addFailure.value?.httpStatus
+  const response = typeof status === 'number' && status > 0 ? String(status) : t('admin.upstream.failure.noResponse')
+  const reasonKey = addFailure.value?.errorKey || addErrorKey.value || ''
+  const fallbackReason = t(directFailureReasonKeys.has(reasonKey) ? reasonKey : 'admin.upstream.failure.noUpstreamReason')
+  const reason = stage === 'refresh' && status === 404 ? t('admin.upstream.failure.refreshRouteMissing') : addFailure.value?.upstreamMessage?.trim() || fallbackReason
+  return `${step}（${response}）：${reason}`
+})
+const savedWithoutVerificationKey = 'admin.upstream.errors.savedWithoutVerification'
+const siteNeedsVerification = (site: UpstreamSite): boolean => site.platform === 'sub2api' && site.status === 'error' && site.errorKey === savedWithoutVerificationKey
 const usesRefreshToken = computed(() => newSiteForm.value.platform !== 'newapi' && newSiteForm.value.authMode === 'token' && newSiteForm.value.refreshToken.trim() !== '')
 // 刷新接口 404 说明这个地址上没有登录接口，Refresh Token 没有被使用，不能提示“可能已被使用”。
 const refreshRouteMissing = computed(() => addFailure.value?.stage === 'refresh' && addFailure.value?.httpStatus === 404)
@@ -153,7 +197,7 @@ watch(
   },
 )
 
-const handleAddSite = async () => {
+const submitSite = async (forceSave = false) => {
   if (isAdding.value) return
   if (domainMigrationRequired.value && !domainMigrationConfirmed.value) {
     domainMigrationConfirmationError.value = true
@@ -164,12 +208,18 @@ const handleAddSite = async () => {
       ...newSiteForm.value,
       ...(domainMigrationRequired.value ? { confirmDomainMigration: domainMigrationConfirmed.value } : {}),
     })
-    : await addSite(newSiteForm.value, newSitePinned.value)
+    : await addSite(newSiteForm.value, newSitePinned.value, forceSave ? { forceSave: true } : undefined)
   if (!success) return
   isAddModalOpen.value = false
   newSiteForm.value = createEmptyForm()
   newSitePinned.value = false
   editingSiteId.value = null
+}
+
+const handleAddSite = () => submitSite()
+const handleForceSave = () => {
+  if (!canForceSave.value || isAdding.value) return
+  return submitSite(true)
 }
 
 const handleEditSite = (site: UpstreamSite) => {
@@ -281,6 +331,7 @@ const siteDisplayStatus = (site: UpstreamSite): UpstreamStatus => upstreamSiteAu
 const siteStatusLabel = (site: UpstreamSite): string => upstreamSiteAuthUnconfirmed(site, siteSyncStates.value.get(site.id)) ? '连接状态待确认' : statusLabel(site.status)
 
 const toggleSiteEnabled = (site: UpstreamSite) => {
+  if (siteNeedsVerification(site)) return
   void setSiteEnabled(site.id, !site.enabled)
 }
 
@@ -578,6 +629,7 @@ watch(selectedSiteForGroups, (site) => {
   }
 })
 watch(workspaceId, () => {
+  clearAddFailure()
   closeGroupsModal()
   groupSnapshotError.value = ''; groupSiteDeletedMessage.value = ''
   closeSiteSettings()
@@ -858,6 +910,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
+        <p v-if="siteNeedsVerification(site)" class="mt-4 text-xs text-muted-foreground">{{ t('admin.upstream.failure.savedWithoutVerification') }}</p>
         <div v-if="site.enabled && (siteFailureKey(site) || costFailureDisplay(site))" class="mt-4 flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning" role="alert" aria-live="polite">
           <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>
@@ -954,6 +1007,7 @@ onBeforeUnmount(() => {
                   <XCircle v-else class="w-3.5 h-3.5" />
                   {{ site.enabled ? siteStatusLabel(site) : t('admin.upstream.status.disabled') }}
                 </div>
+                <p v-if="siteNeedsVerification(site)" class="mt-2 max-w-xs text-xs leading-5 text-muted-foreground">{{ t('admin.upstream.failure.savedWithoutVerification') }}</p>
                 <div v-if="site.enabled && (siteFailureKey(site) || costFailureDisplay(site))" class="mt-2 flex max-w-xs items-start gap-1.5 text-xs leading-5 text-destructive" role="alert" aria-live="polite">
                   <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>
@@ -1209,9 +1263,36 @@ onBeforeUnmount(() => {
           <form @submit.prevent="handleAddSite" class="p-6">
             <p v-if="editingSiteId" class="mb-4 text-sm text-muted-foreground">{{ t('admin.upstream.modal.identityEditHelp') }}</p>
             <p v-if="domainMigrationConfirmationError" role="alert" aria-live="polite" class="mb-4 text-sm text-destructive">{{ t('admin.upstream.modal.domainMigrationRequired') }}</p>
-            <div v-if="addErrorKey" class="mb-5 flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert" aria-live="polite">
+            <div v-if="addErrorKey" ref="failureAlert" class="mb-5 flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert" aria-live="polite">
               <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
               <div class="min-w-0 space-y-1 break-words">
+                <template v-if="compactTokenFailure">
+                  <p>{{ tokenFailureSummary }}</p>
+                  <p>{{ t('admin.upstream.failure.createNotSaved') }}</p>
+                  <details :key="failureDetailsVersion">
+                    <summary class="cursor-pointer">{{ t('admin.upstream.failure.details') }}</summary>
+                    <div class="mt-2 space-y-1">
+                      <p>{{ t('admin.upstream.failure.detailsHelp') }}</p>
+                      <p v-if="addFailure?.stage">{{ t('admin.upstream.failure.stage') }}{{ t(`admin.upstream.failure.stages.${addFailure.stage}`) }}</p>
+                      <p v-if="addFailure?.upstreamMessage">{{ t('admin.upstream.failure.upstreamMessage') }}{{ addFailure.upstreamMessage }}</p>
+                      <p v-if="addErrorKey === 'admin.upstream.errors.invalidResponse'">{{ t('admin.upstream.failure.invalidResponseHelp') }}</p>
+                      <p v-if="showRefreshTokenNotUsed">{{ t('admin.upstream.failure.refreshTokenNotUsed') }}</p>
+                      <p v-else-if="usesRefreshToken">{{ t('admin.upstream.failure.refreshTokenUnconfirmed') }}</p>
+                      <div v-for="(attempt, index) in addFailure?.attempts ?? []" :key="index" class="space-y-1">
+                        <p>{{ attempt.platform === 'newapi' ? 'NewAPI' : 'Sub2API' }}：{{ t(attempt.errorKey ?? 'admin.upstream.errors.unknown') }}</p>
+                        <p v-if="attempt.stage">{{ t('admin.upstream.failure.stage') }}{{ t(`admin.upstream.failure.stages.${attempt.stage}`) }}</p>
+                        <p v-if="attempt.httpStatus !== undefined">{{ t('admin.upstream.failure.httpStatus') }}{{ attempt.httpStatus || t('admin.upstream.failure.noResponse') }}</p>
+                        <p v-if="attempt.upstreamMessage">{{ t('admin.upstream.failure.upstreamMessage') }}{{ attempt.upstreamMessage }}</p>
+                      </div>
+                    </div>
+                  </details>
+                  <div v-if="canForceSave" class="space-y-1 pt-1">
+                    <Button type="button" variant="secondary" :disabled="isAdding" @click="handleForceSave">{{ t('admin.upstream.failure.forceSave') }}</Button>
+                    <p>{{ t('admin.upstream.failure.forceSaveHelp') }}</p>
+                    <p v-if="usesRefreshToken && ['verify', 'metrics'].includes(addFailure?.stage ?? '')">{{ t('admin.upstream.failure.rotatedTokenHelp') }}</p>
+                  </div>
+                </template>
+                <template v-else>
                 <p>{{ t(addFailure?.stage === 'save' ? 'admin.upstream.failure.saveProblem' : addErrorKey) }}</p>
                 <p v-if="addErrorKey === 'admin.upstream.errors.invalidResponse'">{{ t('admin.upstream.failure.invalidResponseHelp') }}</p>
                 <p v-if="addFailure?.stage">{{ t('admin.upstream.failure.stage') }}{{ t(`admin.upstream.failure.stages.${addFailure.stage}`) }}</p>
@@ -1228,6 +1309,7 @@ onBeforeUnmount(() => {
                   <p v-if="attempt.httpStatus !== undefined">{{ t('admin.upstream.failure.httpStatus') }}{{ attempt.httpStatus || t('admin.upstream.failure.noResponse') }}</p>
                   <p v-if="attempt.upstreamMessage">{{ t('admin.upstream.failure.upstreamMessage') }}{{ attempt.upstreamMessage }}</p>
                 </div>
+                </template>
               </div>
             </div>
 
@@ -1235,7 +1317,7 @@ onBeforeUnmount(() => {
               <div class="min-w-0">
                 <p class="text-sm font-medium text-foreground">{{ t('admin.upstream.lifecycle.label') }}</p>
                 <p class="mt-0.5 text-xs text-muted-foreground">
-                  {{ editingSite.enabled ? t('admin.upstream.lifecycle.enabledHelp') : t('admin.upstream.lifecycle.disabledHelp') }}
+                  {{ siteNeedsVerification(editingSite) ? t('admin.upstream.failure.verifyBeforeEnabling') : editingSite.enabled ? t('admin.upstream.lifecycle.enabledHelp') : t('admin.upstream.lifecycle.disabledHelp') }}
                 </p>
                 <p v-if="enabledErrorKeys.get(editingSite.id)" class="mt-1 text-xs text-destructive" role="alert" aria-live="polite">
                   {{ t(enabledErrorKeys.get(editingSite.id) ?? 'admin.upstream.errors.unknown') }}
@@ -1246,7 +1328,7 @@ onBeforeUnmount(() => {
                 role="switch"
                 :aria-checked="editingSite.enabled"
                 :aria-label="t('admin.upstream.lifecycle.label')"
-                :disabled="enabledUpdatingIds.has(editingSite.id)"
+                :disabled="enabledUpdatingIds.has(editingSite.id) || siteNeedsVerification(editingSite)"
                 class="relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 disabled:cursor-wait disabled:opacity-50"
                 :class="editingSite.enabled ? 'bg-primary' : 'bg-muted'"
                 @click="toggleSiteEnabled(editingSite)"
@@ -1564,7 +1646,7 @@ onBeforeUnmount(() => {
               </Button>
               <Button type="submit" :disabled="isAdding || (domainMigrationRequired && !domainMigrationConfirmed)" class="bg-primary text-primary-foreground hover:bg-primary/90">
                 <Loader2 v-if="isAdding" class="h-4 w-4 animate-spin" />
-              {{ isAdding ? t('admin.upstream.modal.submitting') : t(editingSiteId ? 'admin.upstream.modal.updateSubmit' : 'admin.upstream.modal.submit') }}
+              {{ isAdding ? t(isForceSaving ? 'admin.upstream.modal.saving' : 'admin.upstream.modal.submitting') : t(editingSiteId ? 'admin.upstream.modal.updateSubmit' : 'admin.upstream.modal.submit') }}
             </Button>
             </div>
           </form>

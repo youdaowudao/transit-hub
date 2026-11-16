@@ -5,13 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useUpstreamSites } from '@/modules/admin/composables/useUpstreamSites'
 import type { UpstreamSiteForm, UpstreamSiteResponse } from '@/modules/admin/types/upstream'
 
-const api = vi.hoisted(() => ({ list: vi.fn(), sync: vi.fn(), update: vi.fn(), stream: vi.fn(), remove: vi.fn(), account: undefined as Ref<{ id: string }> | undefined }))
+const api = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), sync: vi.fn(), update: vi.fn(), stream: vi.fn(), remove: vi.fn(), account: undefined as Ref<{ id: string }> | undefined }))
 vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
   const { ref } = await import('vue')
   api.account = ref({ id: 'workspace-a' })
   return { useAdminAccounts: () => ({ currentAccount: api.account }) }
 })
-vi.mock('@/modules/admin/api/upstream', () => ({ listUpstreamSites: api.list, syncUpstreamSite: api.sync, updateUpstreamSite: api.update, streamSyncAllUpstreamSites: api.stream, removeUpstreamSite: api.remove, syncAllUpstreamSites: vi.fn(), createUpstreamSite: vi.fn(), updateUpstreamSiteEnabled: vi.fn(), updateUpstreamSitePinned: vi.fn(), updateSiteSettings: vi.fn() }))
+vi.mock('@/modules/admin/api/upstream', () => ({ listUpstreamSites: api.list, syncUpstreamSite: api.sync, updateUpstreamSite: api.update, streamSyncAllUpstreamSites: api.stream, removeUpstreamSite: api.remove, syncAllUpstreamSites: vi.fn(), createUpstreamSite: api.create, updateUpstreamSiteEnabled: vi.fn(), updateUpstreamSitePinned: vi.fn(), updateSiteSettings: vi.fn() }))
 
 const rejectedKey = 'admin.upstream.errors.refreshTokenRejected'
 const rejection = () => Object.assign(new Error(rejectedKey), { failure: { stage: 'refresh', httpStatus: 401, errorDetail: '已暂停自动访问，请用原账号重新登录。' } })
@@ -106,4 +106,51 @@ describe('认证状态重取和恢复的并发保护', () => {
     expect(state.siteSyncStates.value.get('site')?.errorKey).toBe(rejectedKey)
     expect(state.sites.value[0]?.errorKey).toBe(rejectedKey)
   })
+})
+
+
+describe('creation progress keeps its workspace ownership', () => {
+ it('does not clear new normal-connection progress when the old workspace force-save completes', async () => {
+  const state = await start()
+  const oldSave = deferred<UpstreamSiteResponse>()
+  const currentLogin = deferred<UpstreamSiteResponse>()
+  api.create.mockReturnValueOnce(oldSave.promise).mockReturnValueOnce(currentLogin.promise)
+  const previous = state.addSite(form('fixture-old'), false, {forceSave:true})
+  expect(state.isAdding.value).toBe(true)
+  expect(state.isForceSaving.value).toBe(true)
+  api.account!.value = {id:'workspace-b'}; await flushPromises()
+  expect(state.isAdding.value).toBe(false)
+  expect(state.isForceSaving.value).toBe(false)
+  const current = state.addSite(form('fixture-current'))
+  expect(state.isAdding.value).toBe(true)
+  expect(state.isForceSaving.value).toBe(false)
+  oldSave.resolve(fixture('from-old-workspace')); expect(await previous).toBe(false)
+  expect(state.isAdding.value).toBe(true)
+  expect(state.isForceSaving.value).toBe(false)
+  expect(state.sites.value.some(site => site.id === 'from-old-workspace')).toBe(false)
+  currentLogin.resolve(fixture('current-site')); expect(await current).toBe(true)
+  expect(state.isAdding.value).toBe(false)
+  expect(state.isForceSaving.value).toBe(false)
+ })
+ it('retains new force-save progress across an old normal response and clears it on failure', async () => {
+  const state = await start()
+  const oldLogin = deferred<UpstreamSiteResponse>()
+  const currentSave = deferred<UpstreamSiteResponse>()
+  api.create.mockReturnValueOnce(oldLogin.promise).mockReturnValueOnce(currentSave.promise)
+  const previous = state.addSite(form('fixture-old'))
+  expect(state.isForceSaving.value).toBe(false)
+  api.account!.value = {id:'workspace-b'}; await flushPromises()
+  const current = state.addSite(form('fixture-current'), false, {forceSave:true})
+  expect(state.isAdding.value).toBe(true)
+  expect(state.isForceSaving.value).toBe(true)
+  oldLogin.resolve(fixture('from-old-workspace')); expect(await previous).toBe(false)
+  expect(state.isAdding.value).toBe(true)
+  expect(state.isForceSaving.value).toBe(true)
+  currentSave.reject(new Error('admin.upstream.errors.request')); expect(await current).toBe(false)
+  expect(state.isAdding.value).toBe(false)
+  expect(state.isForceSaving.value).toBe(false)
+  api.create.mockResolvedValueOnce(fixture('normal-retry'))
+  expect(await state.addSite(form('fixture-retry'))).toBe(true)
+  expect(state.isForceSaving.value).toBe(false)
+ })
 })

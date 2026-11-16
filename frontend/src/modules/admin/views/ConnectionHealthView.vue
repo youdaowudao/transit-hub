@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useChanshuiLauncher } from '../composables/useChanshuiLauncher'
 import { costFailureText } from '../utils/upstream'
 import { accountLabelForTarget, accountNameText, accountReminderLabel, displayAccountName, missingAccountNameHelp, type HistoryAccountLabel } from '../utils/connectionHealthAccountLabel'
 import { computed, onActivated, onDeactivated, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
@@ -12,6 +13,7 @@ import {
   ChevronDown,
   ChevronUp,
   Gauge,
+  FlaskConical,
   Layers,
   Loader2,
   RefreshCw,
@@ -1440,6 +1442,9 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
     deletingPolicyId.value = ''
   }
 }
+const modelAudit = useChanshuiLauncher()
+watch(() => currentAccount.value?.id ?? '', id => { void modelAudit.load(id) }, { immediate: true })
+const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ targetId: account.targetId, accountName: account.name, groupId: selectedGroup.value?.id, groupName: selectedGroup.value?.name })
 </script>
 
 <template>
@@ -1450,6 +1455,9 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
         <p class="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">{{ t('admin.connectionHealth.simplifiedSubtitle') }}</p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
+        <Tooltip v-if="modelAudit.enabled.value && currentAccount?.platform === 'sub2api'" text="打开检测页，选择账号或查看以前的报告；不会修改主站。">
+          <Button variant="secondary" data-testid="chanshui-main-entry" @click="modelAudit.open()"><FlaskConical class="h-4 w-4" />模型检测</Button>
+        </Tooltip>
         <Button variant="secondary" size="sm" @click="policyListDialogOpen = true">
           <Settings2 class="h-4 w-4" />
           {{ t('admin.connectionHealth.topActions.policies') }}
@@ -1778,6 +1786,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
         </div>
         <AdminGroupHealthDetail :account-labels="accountLabelsByTarget"
           :workspace-platform="currentAccount?.platform"
+          :model-audit-enabled="modelAudit.enabled.value && currentAccount?.platform === 'sub2api'"
           v-else
           :key="selectedGroup.id"
           :group="selectedGroup"
@@ -1796,6 +1805,7 @@ const handleDeletePolicy = async (policy: ConnectionHealthPolicy) => {
           @displayed-targets="onDisplayedQuestionAnswerTargets"
           @setup="openSetup"
           @probe="onProbeAccount"
+          @open-model-audit="openModelAuditAccount"
           @quick-probe="onQuickProbeAccount"
           @view-events="onViewEventsAccount"
           @set-schedulable="onSetTargetSchedulable"

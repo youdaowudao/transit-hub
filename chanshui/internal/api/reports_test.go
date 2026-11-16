@@ -1,0 +1,213 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/kiss-kedaya/chanshui/internal/history"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+func getJSON(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+	return w
+}
+func TestSavedReportShareIndependentFromTask(t *testing.T) {
+	s, up, fail, calls := testSetup(t)
+	fail.Store(true)
+	q := Request{BaseURL: up.URL + "/v1", Key: "do-not-share-this-key", Model: "claude-opus-5", Timeout: 10}
+	w := post(t, s, "/api/detect", q)
+	var started map[string]string
+	json.Unmarshal(w.Body.Bytes(), &started)
+	task := waitTask(t, s, started["task_id"])
+	oldID := task.ReportID
+	if !history.ValidReportID(oldID) || oldID != task.ID {
+		t.Fatal("public ID missing or shares mutation task ID")
+	}
+	response := getJSON(t, s.Handler(), "/api/reports/"+oldID)
+	if response.Code != 200 || strings.Contains(response.Body.String(), q.Key) {
+		t.Fatal("cannot anonymously read sanitized report", response.Code)
+	}
+	var detail struct {
+		ReportID string `json:"report_id"`
+	}
+	json.Unmarshal(response.Body.Bytes(), &detail)
+	if detail.ReportID != oldID || strings.Contains(response.Body.String(), "base_url") || strings.Contains(response.Body.String(), `"host"`) {
+		t.Fatal(detail)
+	}
+	fail.Store(false)
+	before := calls.Load()
+	postToken(t, s, "/api/detect/"+task.ID+"/retry", q, started["control_token"])
+	waitTask(t, s, task.ID)
+	if task.ReportID != oldID || calls.Load()-before != 1 {
+		t.Fatal("retry replaced shared snapshot or repeated successful probes")
+	}
+	if getJSON(t, s.Handler(), "/api/reports/"+oldID).Code != 200 {
+		t.Fatal("job URL changed on retry")
+	}
+	restarted, e := New(s.store, Options{})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer restarted.Close()
+	if restarted.find(task.ID) != nil {
+		t.Fatal("test server unexpectedly has memory task")
+	}
+	if r := getJSON(t, restarted.Handler(), "/api/reports/"+task.ReportID); r.Code != 200 {
+		t.Fatal("persistent report cannot survive task eviction", r.Body.String())
+	}
+	list := getJSON(t, restarted.Handler(), "/api/history?limit=1")
+	var entries []history.Summary
+	json.Unmarshal(list.Body.Bytes(), &entries)
+	if len(entries) != 1 || entries[0].ReportID != task.ReportID {
+		t.Fatal("global history missing newest report")
+	}
+	// Public IDs do not allow someone to cancel or retry the private task.
+	if r := post(t, restarted, "/api/detect/"+oldID+"/cancel", map[string]any{}); r.Code != 403 {
+		t.Fatal("public ID permitted mutation")
+	}
+}
+func TestReportIDsAndHostValidation(t *testing.T) {
+	s, _, _, _ := testSetup(t)
+	for _, c := range []struct {
+		path   string
+		status int
+	}{{"/api/reports/nope", 400}, {"/api/reports/00000000000000000000000000000000", 404}, {"/api/history?before=-1", 400}, {"/api/history?before=bad", 400}} {
+		w := getJSON(t, s.Handler(), c.path)
+		if w.Code != c.status {
+			t.Errorf("%s: %d", c.path, w.Code)
+		}
+	}
+}
+
+func TestHistoryAndReportsNeverExposeUpstreamSite(t *testing.T) {
+	s, _, _, _ := testSetup(t)
+	id := strings.Repeat("cd", 16)
+	key := "job-capability-secret"
+	base := "https://private-gateway.example:9443/prefix/v1?token=should-not-return"
+	historyID, err := s.store.CreateJob(context.Background(), history.Record{
+		ReportID: id, CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		BaseURL: base, Model: "claude-opus-5", Verdict: json.RawMessage(`{"protocol":"anthropic","fingerprint":{"reference":{"source":"https://api.deepseek.com","training_samples":36}}}`),
+	}, json.RawMessage(`[]`), controlHash(key), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := &Task{ID: id, ReportID: id, HistoryID: historyID, BaseURL: base, Model: "claude-opus-5", Status: "running", ExpiresAt: time.Now().Add(time.Hour).Unix(), controlHash: controlHash(key), Probes: []Probe{{ID: "Q1", Status: "running"}}}
+	s.mu.Lock()
+	s.tasks[id] = task
+	s.mu.Unlock()
+
+	paths := []string{"/api/detect/" + id, "/api/reports/" + id, "/api/history/" + fmt.Sprint(historyID), "/api/history?limit=50"}
+	for _, path := range paths {
+		for _, token := range []string{"", "wrong-key", key} {
+			r := httptest.NewRequest("GET", path, nil)
+			if token != "" {
+				r.Header.Set("X-Job-Token", token)
+			}
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, r)
+			if w.Code != 200 {
+				t.Fatalf("%s: HTTP %d", path, w.Code)
+			}
+			body := w.Body.String()
+			if strings.Contains(body, "private-gateway.example") || strings.Contains(body, "/prefix/v1") ||
+				strings.Contains(body, ":9443") || strings.Contains(body, "api.deepseek.com") || strings.Contains(body, `"base_url"`) || strings.Contains(body, `"host"`) {
+				t.Fatalf("%s leaked upstream site: %s", path, body)
+			}
+		}
+	}
+}
+
+func TestHistoryDefaultsToTenAndPaginates(t *testing.T) {
+	s, _, _, _ := testSetup(t)
+	for i := 1; i <= 12; i++ {
+		score := 60 + i
+		if _, err := s.store.Save(history.Record{
+			ReportID:  fmt.Sprintf("%032x", i),
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+			BaseURL:   "https://gw.example.com/v1",
+			Model:     "gpt-6-astra",
+			IQScore:   &score,
+			Verdict:   json.RawMessage(`{}`),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var first []history.Summary
+	w := getJSON(t, s.Handler(), "/api/history")
+	if w.Code != 200 {
+		t.Fatalf("history: %d %s", w.Code, w.Body.String())
+	}
+	json.Unmarshal(w.Body.Bytes(), &first)
+	if len(first) != 10 {
+		t.Fatalf("default page = %d, want 10", len(first))
+	}
+	var next []history.Summary
+	w = getJSON(t, s.Handler(), "/api/history?before="+fmt.Sprint(first[len(first)-1].ID))
+	if w.Code != 200 {
+		t.Fatalf("history before: %d %s", w.Code, w.Body.String())
+	}
+	json.Unmarshal(w.Body.Bytes(), &next)
+	if len(next) != 2 {
+		t.Fatalf("second page = %d, want 2", len(next))
+	}
+	var capped []history.Summary
+	w = getJSON(t, s.Handler(), "/api/history?limit=50")
+	if w.Code != 200 {
+		t.Fatalf("history capped: %d %s", w.Code, w.Body.String())
+	}
+	json.Unmarshal(w.Body.Bytes(), &capped)
+	if len(capped) != 10 {
+		t.Fatalf("limit=50 page = %d, want 10", len(capped))
+	}
+}
+
+func TestHistoryListOnlyDropsConfirmedFingerprint(t *testing.T) {
+	cases := []struct {
+		name    string
+		verdict string
+		want    string
+	}{
+		{
+			// No numeric baseline recorded: the list must not lower the score.
+			name:    "unconfirmed",
+			verdict: `{"fingerprint":{"family":"gpt","top_model":"gpt-5.6-luna"},"total":{"score":85,"parts":[{"key":"fingerprint","contribution":32,"coefficient":32}]}}`,
+			want:    `"total_score":85`,
+		},
+		{
+			// Numeric baseline at 100% on another family: section goes to zero.
+			name:    "confirmed",
+			verdict: `{"fingerprint":{"basis":"numeric","top_prob":1,"family":"anthropic","top_model":"claude-opus-4-6"},"total":{"score":85,"parts":[{"key":"fingerprint","contribution":32,"coefficient":32}]}}`,
+			want:    `"total_score":53`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _, _ := testSetup(t)
+			verdict := json.RawMessage(tc.verdict)
+			id := strings.Repeat("ab", 16)
+			if _, err := s.store.CreateJob(context.Background(), history.Record{
+				ReportID: id, CreatedAt: time.Now().UTC().Format(time.RFC3339),
+				BaseURL: "https://gw.example.com/v1", Model: "gpt-6-astra", Verdict: verdict,
+			}, json.RawMessage(`[]`), "hash", ""); err != nil {
+				t.Fatal(err)
+			}
+			score := 85
+			if err := s.store.UpdateJob(context.Background(), history.Record{
+				ReportID: id, Status: "done", Family: "gpt", Verdict: verdict, TotalScore: &score,
+			}, json.RawMessage(`[]`)); err != nil {
+				t.Fatal(err)
+			}
+			body := getJSON(t, s.Handler(), "/api/history?limit=50").Body.String()
+			if !strings.Contains(body, tc.want) || strings.Contains(body, "gpt-5.6-luna") {
+				t.Fatalf("history total was not presented: %s", body)
+			}
+		})
+	}
+}

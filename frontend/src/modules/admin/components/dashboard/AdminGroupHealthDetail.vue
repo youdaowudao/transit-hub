@@ -14,6 +14,7 @@ import {
   Gauge,
   Loader2,
   Radar,
+  FlaskConical,
   Settings2,
   ShieldCheck,
   ShieldQuestion,
@@ -61,6 +62,7 @@ const props = withDefaults(defineProps<{
   focusedAccountLabels?: Record<string, AccountFocusLabel>
   group: AdminGroupHealth
   workspacePlatform?: string
+  modelAuditEnabled?: boolean
   hideUnmonitoredAccounts: boolean
   questionAnswerUnreadTargetIds: string[]
   actionLoading: boolean
@@ -88,6 +90,7 @@ const emit = defineEmits<{
   (event: 'concurrency-saved', result: AccountManagementResult): void
   (event: 'setup', group: AdminGroupHealth): void
   (event: 'probe', account: AdminGroupAccount): void
+  (event: 'open-model-audit', account: AdminGroupAccount): void
   (event: 'quick-probe', account: AdminGroupAccount): void
   (event: 'view-events', account: AdminGroupAccount): void
   (event: 'update:hide-unmonitored-accounts', value: boolean): void
@@ -1061,6 +1064,9 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                       >
                         <ShieldCheck class="h-4 w-4" />
                       </button>
+                      </Tooltip>
+                      <Tooltip v-if="modelAuditEnabled" text="打开模型检测，自动带入这个账号；此时不会发出检测请求。">
+                        <button type="button" class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface hover:text-primary" aria-label="检测此账号模型" data-testid="chanshui-account-entry" @click="emit('open-model-audit', account)"><FlaskConical class="h-4 w-4" /></button>
                       </Tooltip>
                       <Tooltip :text="hasUnreadQuestionAnswer(account) ? t(`${prefix}.actions.questionAnswerUnread`) : t(`${prefix}.actions.probe`)">
                       <button

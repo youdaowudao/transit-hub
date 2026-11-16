@@ -1,0 +1,25 @@
+{
+  "name": "chanshui-web",
+  "version": "0.1.0",
+  "description": "Frontend for the Chanshui LLM gateway audit station",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3300",
+    "build": "next build",
+    "start": "node -e \"console.error('静态导出由 Go 服务托管，请使用 scripts/start-local.ps1');process.exit(1)\"",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/*.test.cjs"
+  },
+  "dependencies": {
+    "next": "14.2.15",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "typescript": "^5"
+  }
+}

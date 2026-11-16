@@ -1,0 +1,10 @@
+[Unit]
+Description=TransitHub model detection shared memory budget
+StopWhenUnneeded=yes
+
+[Slice]
+MemoryAccounting=yes
+MemoryMax=500000000
+MemoryHigh=450000000
+MemorySwapMax=0
+TasksMax=64

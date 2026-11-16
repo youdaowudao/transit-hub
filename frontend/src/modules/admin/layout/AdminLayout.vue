@@ -5,6 +5,7 @@ import { LayoutDashboard, Network, Settings, LogOut, Moon, Sun, Percent, Megapho
 import { useDark, useToggle } from '@vueuse/core'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import { NotificationControllerKey, useNotifications } from '../composables/useNotifications'
+import ChanshuiHost from '../components/chanshui/ChanshuiHost.vue'
 import NotificationBell from '../components/notifications/NotificationBell.vue'
 import NotificationDrawer from '../components/notifications/NotificationDrawer.vue'
 import NotificationSummary from '../components/notifications/NotificationSummary.vue'
@@ -178,6 +179,7 @@ watch(
 </script>
 
 <template>
+  <ChanshuiHost :workspace-id="currentAccount?.id ?? ''" />
   <div class="flex h-dvh overflow-hidden overflow-x-hidden bg-background text-foreground">
     <a
       href="#admin-main-content"

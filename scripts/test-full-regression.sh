@@ -48,3 +48,12 @@ run_step "frontend full test suite" \
 
 run_step "frontend typecheck" \
   bash -c "cd '$ROOT_DIR/frontend' && npm run typecheck"
+
+run_step "chanshui full Go module suite" \
+  bash -c "cd '$ROOT_DIR/chanshui' && go test ./... -count=1"
+
+run_step "chanshui original and Hub browser contracts" \
+  bash -c "cd '$ROOT_DIR/chanshui/web' && npm test && npm run typecheck"
+
+run_step "chanshui deployment artifact build" \
+  env CHANSHUI_SKIP_NPM_CI=1 bash "$ROOT_DIR/scripts/build-chanshui.sh"

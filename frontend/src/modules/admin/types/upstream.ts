@@ -6,6 +6,11 @@ export type UpstreamStatus = 'connecting' | 'syncing' | 'connected' | 'error'
 
 export type UpstreamAuthMode = 'password' | 'token' | 'user_key'
 
+// Only explicit creation can skip upstream verification; edits use the existing form.
+export interface CreateUpstreamSiteOptions {
+  forceSave?: boolean
+}
+
 export interface UpstreamSiteForm {
   confirmDomainMigration?: boolean
   name: string

@@ -12,7 +12,8 @@ import (
 type RequestError struct {
 	MessageKey string
 	Platform   Platform
-	// Failure details are ephemeral: upstream hints never enter storage or logs.
+	// Failure details are ephemeral and never enter storage. Only Create may log
+	// its safe message summary after masking all submitted credentials again.
 	Reason          string
 	Stage           string
 	UpstreamMessage string
@@ -81,22 +82,23 @@ func requestTimedOut(err error) bool {
 }
 
 const (
-	ErrorLoginRejected        = "admin.upstream.errors.loginRejected"
-	ErrorLoginIncomplete      = "admin.upstream.errors.loginIncomplete"
-	ErrorRefreshTokenRejected = "admin.upstream.errors.refreshTokenRejected"
-	ErrorAccessTokenRejected  = "admin.upstream.errors.accessTokenRejected"
-	ErrorBusinessRejected     = "admin.upstream.errors.businessRejected"
-	ErrorForbidden            = "admin.upstream.errors.forbidden"
-	ErrorRateLimited          = "admin.upstream.errors.rateLimited"
-	ErrorUpstreamServer       = "admin.upstream.errors.upstreamServerError"
-	ErrorNetworkTimeout       = "admin.upstream.errors.networkTimeout"
-	ErrorNetworkUnreachable   = "admin.upstream.errors.networkUnreachable"
-	ErrorTLSFailed            = "admin.upstream.errors.tlsFailed"
-	ErrorAutoDetectFailed     = "admin.upstream.errors.autoDetectFailed"
-	ErrorInvalidFields        = "admin.upstream.errors.invalidFields"
-	ErrorSiteInUse            = "admin.upstream.errors.siteInUse"
-	ErrorIdentityCheckFailed  = "admin.upstream.errors.identityCheckFailed"
-	ErrorUserKeyDetectFailed  = "admin.upstream.errors.userKeyDetectFailed"
+	ErrorSavedWithoutVerification = "admin.upstream.errors.savedWithoutVerification"
+	ErrorLoginRejected            = "admin.upstream.errors.loginRejected"
+	ErrorLoginIncomplete          = "admin.upstream.errors.loginIncomplete"
+	ErrorRefreshTokenRejected     = "admin.upstream.errors.refreshTokenRejected"
+	ErrorAccessTokenRejected      = "admin.upstream.errors.accessTokenRejected"
+	ErrorBusinessRejected         = "admin.upstream.errors.businessRejected"
+	ErrorForbidden                = "admin.upstream.errors.forbidden"
+	ErrorRateLimited              = "admin.upstream.errors.rateLimited"
+	ErrorUpstreamServer           = "admin.upstream.errors.upstreamServerError"
+	ErrorNetworkTimeout           = "admin.upstream.errors.networkTimeout"
+	ErrorNetworkUnreachable       = "admin.upstream.errors.networkUnreachable"
+	ErrorTLSFailed                = "admin.upstream.errors.tlsFailed"
+	ErrorAutoDetectFailed         = "admin.upstream.errors.autoDetectFailed"
+	ErrorInvalidFields            = "admin.upstream.errors.invalidFields"
+	ErrorSiteInUse                = "admin.upstream.errors.siteInUse"
+	ErrorIdentityCheckFailed      = "admin.upstream.errors.identityCheckFailed"
+	ErrorUserKeyDetectFailed      = "admin.upstream.errors.userKeyDetectFailed"
 )
 
 type FailureAttempt struct {

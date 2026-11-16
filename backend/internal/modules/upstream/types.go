@@ -174,6 +174,8 @@ type CostFetchMeta struct {
 }
 
 type CreateRequest struct {
+	// ForceSave only stores an unverified Sub2API token site; it never logs in.
+	ForceSave    bool     `json:"forceSave,omitempty"`
 	Name         string   `json:"name"`
 	SiteURL      string   `json:"siteUrl"`
 	WebsiteURL   string   `json:"websiteUrl"`

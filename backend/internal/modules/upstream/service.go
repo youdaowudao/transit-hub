@@ -576,45 +576,56 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 		Session:           nil,
 	}
 
-	log.Printf("[upstream] 创建站点登录开始 name=%q host=%s platform=%s", safeUpstreamMessage(dto.Name), safeHost(dto.SiteURL), dto.Platform)
-	result, loginErr := s.createLogin(dto)
-	if loginErr != nil {
-		logSiteFailure("登录失败", "新建", dto.Name, dto.SiteURL, loginErr)
-		return Response{}, loginErr
-	}
-	if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey {
-		providedUserID := strings.TrimSpace(dto.UserID)
-		if providedUserID != "" && providedUserID != result.Session.UserID {
-			return Response{}, identityCheckError(result.Platform, "Key 实际属于用户编号 "+result.Session.UserID+"，与填写的用户 ID "+providedUserID+" 不同。请改正用户 ID，或留空让系统自动读取；没有保存，不会修改主站。")
+	var audit *GroupSnapshotAudit
+	var rateInput *RateNoticeInput
+	if dto.ForceSave {
+		if err := s.prepareForceSavedSite(site, dto, apiURL); err != nil {
+			return Response{}, err
 		}
-		site.Account = result.Session.UserID
-	}
-	if result.Platform == PlatformSub2API {
-		principalID, _, principalErr := s.platformService.readLoginPrincipal(ctx, result.Session)
-		if principalErr == nil && principalID != "" {
-			result.Session.UserID, result.Session.UserIDConfirmed = principalID, true
-		} else {
-			log.Printf("[upstream] 新建站点登录成功但未核实用户编号 host=%s category=%s", safeHost(dto.SiteURL), siteErrorKey(principalErr))
+	} else {
+		log.Printf("[upstream] 创建站点登录开始 name=%q host=%s platform=%s", safeUpstreamMessage(dto.Name, dto.Password, dto.AccessToken, dto.RefreshToken), safeHost(dto.SiteURL), dto.Platform)
+		result, loginErr := s.createLogin(dto)
+		if loginErr != nil {
+			logCreateLoginFailure(dto, loginErr)
+			return Response{}, loginErr
 		}
+		if normalizedAuthMode(dto.AuthMode) == AuthModeUserKey {
+			providedUserID := strings.TrimSpace(dto.UserID)
+			if providedUserID != "" && providedUserID != result.Session.UserID {
+				return Response{}, identityCheckError(result.Platform, "Key 实际属于用户编号 "+result.Session.UserID+"，与填写的用户 ID "+providedUserID+" 不同。请改正用户 ID，或留空让系统自动读取；没有保存，不会修改主站。")
+			}
+			site.Account = result.Session.UserID
+		}
+		if result.Platform == PlatformSub2API {
+			principalID, _, principalErr := s.platformService.readLoginPrincipal(ctx, result.Session)
+			if principalErr == nil && principalID != "" {
+				result.Session.UserID, result.Session.UserIDConfirmed = principalID, true
+			} else {
+				log.Printf("[upstream] 新建站点登录成功但未核实用户编号 host=%s category=%s", safeHost(dto.SiteURL), siteErrorKey(principalErr))
+			}
+		}
+
+		// API 地址只给自动导入用；留空时读一次 Sub2API 上游公开的地址，读不到沿用网站地址。
+		site.APIURL = s.resolveSiteAPIURL(ctx, apiURL, result.Platform, result.Session.BaseURL)
+
+		// 登录成功：更新站点状态。
+		observedAt := s.keyUsageNow()
+		now := observedAt.UnixMilli()
+		site.BaseURL = result.Session.BaseURL
+		site.Platform = result.Platform
+		site.Session = &result.Session
+		site.Metrics = result.Metrics.WithSyncDate(businesstime.DateAt(observedAt), observedAt)
+		site.Status = StatusConnected
+		site.ErrorKey = nil
+		site.LastSyncedAt = &now
+
+		audit = site.Metrics.GroupSnapshotAudit
+		rateInput = currentRateNoticeInput(site.Metrics, nil, observedAt)
 	}
-
-	// API 地址只给自动导入用；留空时读一次 Sub2API 上游公开的地址，读不到沿用网站地址。
-	site.APIURL = s.resolveSiteAPIURL(ctx, apiURL, result.Platform, result.Session.BaseURL)
-
-	// 登录成功：更新站点状态。
-	observedAt := s.keyUsageNow()
-	now := observedAt.UnixMilli()
-	site.BaseURL = result.Session.BaseURL
-	site.Platform = result.Platform
-	site.Session = &result.Session
-	site.Metrics = result.Metrics.WithSyncDate(businesstime.DateAt(observedAt), observedAt)
-	site.Status = StatusConnected
-	site.ErrorKey = nil
-	site.LastSyncedAt = &now
-
-	audit := site.Metrics.GroupSnapshotAudit
-	rateInput := currentRateNoticeInput(site.Metrics, nil, observedAt)
 	if err := s.setCachedSite(ctx, site); err != nil {
+		if dto.ForceSave {
+			return Response{}, saveFailureError("保存新网站运行资料失败："+safePersistenceCause(err)+"；数据库资料未保存，运行资料写入结果尚未确认；请维护人员核查存储连接和实际保存结果后重试，不会修改主站。", err, 503)
+		}
 		return Response{}, err
 	}
 	response := s.toResponse(ctx, site)
@@ -645,6 +656,9 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 			detail += "本次新网站运行资料的回收也未成功：" + safePersistenceCause(cleanupErr) + "；请维护人员核查当前运行资料后重试。"
 		}
 		return response, saveFailureError(detail, saveErr, 503)
+	}
+	if dto.ForceSave {
+		return response, nil
 	}
 	s.mu.Lock()
 	s.scheduleSyncLocked(id, site)
@@ -691,6 +705,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
 	original := cloneSite(site)
+	unverified := siteSavedWithoutVerification(&original)
 	mode := normalizedAuthMode(dto.AuthMode)
 	originalMode := siteAuthMode(&original)
 	providedUserID := strings.TrimSpace(dto.UserID)
@@ -703,6 +718,9 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		}
 	}
 	relogin := hasNewCredentials(dto)
+	if unverified && mode != AuthModeToken {
+		return Response{}, unverifiedSiteChangeError(site.Platform)
+	}
 	if mode != originalMode && !relogin {
 		field := "password"
 		if mode == AuthModeToken {
@@ -722,6 +740,10 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	}
 	differences := make([]string, 0, 3)
 	domainChanged := normalizedURL != originalURL
+	if unverified && domainChanged {
+		return Response{}, unverifiedSiteChangeError(site.Platform)
+	}
+	firstVerification := unverified && relogin
 	if dto.Platform != PlatformAuto && dto.Platform != site.Platform {
 		differences = append(differences, "平台")
 	}
@@ -735,7 +757,14 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	var result LoginResult
 	var audit *GroupSnapshotAudit
 	var rateInput *RateNoticeInput
-	if domainChanged {
+	if firstVerification {
+		result, err = s.verifyForceSavedSite(ctx, dto, originalURL)
+		if err != nil {
+			return Response{}, err
+		}
+		audit = result.Metrics.GroupSnapshotAudit
+		rateInput = currentRateNoticeInput(result.Metrics, nil, s.keyUsageNow())
+	} else if domainChanged {
 		result, err = s.domainMigrationLogin(ctx, original, dto, normalizedURL, relogin, providedUserID)
 		if err != nil {
 			return Response{}, err
@@ -830,7 +859,13 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		if domainChanged || relogin {
 			platform, baseURL = result.Platform, result.Session.BaseURL
 		}
-		apiURL = s.resolveSiteAPIURL(ctx, apiURL, platform, baseURL)
+		if unverified && !relogin {
+			if apiURL == "" {
+				apiURL = originalURL
+			}
+		} else {
+			apiURL = s.resolveSiteAPIURL(ctx, apiURL, platform, baseURL)
+		}
 	}
 	s.mu.Lock()
 	current, readErr := s.readCurrentSite(ctx, id)
@@ -840,6 +875,10 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
 	if !reflect.DeepEqual(current.Session, original.Session) || (domainChanged && (current.BaseURL != original.BaseURL || current.Platform != original.Platform || current.Account != original.Account)) {
+		s.mu.Unlock()
+		return Response{}, staleSiteRequestError()
+	}
+	if firstVerification && !siteSavedWithoutVerification(current) {
 		s.mu.Unlock()
 		return Response{}, staleSiteRequestError()
 	}
@@ -885,7 +924,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, dto UpdateReque
 	if relogin || domainChanged {
 		publication = &groupPublication{Baseline: original}
 	}
-	retainLogin := !domainChanged && relogin && mode == originalMode && candidate.Account == current.Account
+	retainLogin := !firstVerification && !domainChanged && relogin && mode == originalMode && candidate.Account == current.Account
 	err = s.publishExistingSiteLocked(expected, candidate, retainLogin, nil, rateInput, publication)
 	if err == nil && publication != nil {
 		candidate = publication.Actual
@@ -1775,6 +1814,9 @@ func (s *Service) clearTimerLocked(id string) {
 }
 
 func validateCreate(dto CreateRequest) error {
+	if dto.ForceSave && (normalizedAuthMode(dto.AuthMode) != AuthModeToken || dto.Platform != PlatformAuto && dto.Platform != PlatformSub2API) {
+		return &FieldValidationError{Fields: []string{"platform", "authMode"}, Detail: "强行保存仅适用于 Sub2API 的 Token 登录资料；请选择 Sub2API 或自动识别并填写令牌。本次没有请求上游或保存资料，不会修改主站。"}
+	}
 	fields := make([]string, 0)
 	if strings.TrimSpace(dto.Name) == "" {
 		fields = append(fields, "name")
@@ -1890,6 +1932,10 @@ func (s *Service) saveLocalSiteFields(ctx context.Context, userID, siteID string
 	expected := cloneSite(current)
 	candidate := cloneSite(current)
 	change(&candidate)
+	if siteSavedWithoutVerification(current) && candidate.IsEnabled() {
+		s.mu.Unlock()
+		return Response{}, saveFailureError("资料尚未验证，未启用；请先编辑站点填写令牌并保存，不会修改主站。", nil, 409)
+	}
 	err = s.publishExistingSiteLocked(expected, candidate, false, nil, nil)
 	if err == nil && reschedule {
 		s.scheduleSyncLocked(siteID, &candidate)

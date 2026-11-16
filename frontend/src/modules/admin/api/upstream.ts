@@ -1,5 +1,6 @@
 import { scopedReadFailureText } from '../utils/scopedErrorText'
 import type {
+  CreateUpstreamSiteOptions,
   SiteSettings,
   UpstreamSiteOption,
   UpstreamFailure,
@@ -92,10 +93,10 @@ export const listUpstreamSites = async (siteId?: string, signal?: AbortSignal): 
 }
 
 // 只有新增时开启置顶才带 pinned；未开启时请求体与原来一致。
-export const createUpstreamSite = async (form: UpstreamSiteForm, pinned?: boolean): Promise<UpstreamSiteResponse> => (
+export const createUpstreamSite = async (form: UpstreamSiteForm, pinned?: boolean, options?: CreateUpstreamSiteOptions): Promise<UpstreamSiteResponse> => (
   requestJson<UpstreamSiteResponse>('/upstream-sites', {
     method: 'POST',
-    body: JSON.stringify(pinned ? { ...form, pinned: true } : form),
+    body: JSON.stringify({ ...form, ...(pinned ? { pinned: true } : {}), ...(options?.forceSave ? { forceSave: true } : {}) }),
   })
 )
 

@@ -278,7 +278,13 @@ describe('same-site login method switching and Key-first entry', () => {
     const view = await open(edit)
     await selectToken(view)
     const alert = await submit(view)
-    expect(alert.text().split(refreshWarning)).toHaveLength(2)
+    if (!edit && stage !== 'save') {
+      expect(alert.text()).toContain('令牌是否仍可用尚未确认；只保存原填写内容，不会换新令牌。')
+      expect(alert.text()).not.toContain(refreshWarning)
+      expect(alert.find('details').exists()).toBe(true)
+    } else {
+      expect(alert.text().split(refreshWarning)).toHaveLength(2)
+    }
   })
 
   it.each(['verify', 'save'])('does not add Refresh Token wording for Access Token only at %s', async stage => {

@@ -34,6 +34,10 @@ func copyReadSession(session Session) Session {
 // SiteReadAuthError is a local check, not an upstream request. It deliberately
 // does not change Enabled or make local metadata and history inaccessible.
 func SiteReadAuthError(site *Site) error {
+	if siteSavedWithoutVerification(site) {
+		return &RequestError{MessageKey: ErrorSavedWithoutVerification, Reason: ErrorSavedWithoutVerification, Platform: PlatformSub2API, Stage: "verify",
+			UpstreamMessage: "这条站点资料尚未验证登录，本次没有访问上游；请编辑站点填写令牌并保存，不会修改主站。"}
+	}
 	if site == nil || site.Platform != PlatformSub2API || site.Status != StatusError ||
 		site.ErrorKey == nil || *site.ErrorKey != ErrorRefreshTokenRejected {
 		return nil

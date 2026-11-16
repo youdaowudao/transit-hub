@@ -38,12 +38,16 @@ describe('home cost multiplier refusal reasons', () => {
     ['admin.upstream.errors.upstreamInsufficientBalance', '上游账户余额不足，上游不允许读取。'],
     ['admin.upstream.errors.upstreamKeyQuotaExhausted', '该 Key 在上游的额度已用尽。'],
     ['admin.upstream.errors.upstreamKeyExpired', '该 Key 在上游已过期。'],
-    ['admin.upstream.errors.refreshTokenRejected', '刷新令牌已失效或已被使用，请重新获取后填写。'],
+    ['admin.upstream.errors.refreshTokenRejected', '上游拒绝了本次登录续期，请查看具体原因。'],
     ['admin.upstream.errors.accessTokenRejected', '访问令牌无效，可能已在上游重新生成。'],
   ])('shows the safe reason %s in the account and preserves it in Priority blockers', (reason, text) => {
     const { wrapper, group } = mountReason(reason)
     expect(wrapper.text()).toContain(text)
     expect(wrapper.text()).not.toContain('上游当前找不到该 Key')
+    if (reason === 'admin.upstream.errors.refreshTokenRejected') {
+      expect(wrapper.text()).not.toContain('已失效')
+      expect(wrapper.text()).not.toContain('已被使用')
+    }
     expect(collectPrioritySyncBlockers([group])[0]?.reason).toBe(reason)
     expect(resolvePrioritySyncBlockReasonMessage(reason, '', '').key).toBe(reason)
   })

@@ -1,0 +1,849 @@
+package api
+
+import (
+	"github.com/kiss-kedaya/chanshui/internal/cachecheck"
+	"github.com/kiss-kedaya/chanshui/internal/capability"
+	"github.com/kiss-kedaya/chanshui/internal/fingerprint"
+	"github.com/kiss-kedaya/chanshui/internal/gateway"
+
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"github.com/kiss-kedaya/chanshui/internal/inject"
+	"github.com/kiss-kedaya/chanshui/internal/integrity"
+	"github.com/kiss-kedaya/chanshui/internal/iq"
+	"github.com/kiss-kedaya/chanshui/internal/knowledge"
+	"github.com/kiss-kedaya/chanshui/internal/thinking"
+	"math/rand"
+	"strings"
+	"sync"
+	"time"
+)
+
+func redact(text, key string) string {
+	if key != "" {
+		text = strings.ReplaceAll(text, key, "[密钥已隐藏]")
+	}
+	return text
+}
+func sanitize(v any, key string) any {
+	b, e := json.Marshal(v)
+	if e != nil {
+		return map[string]string{"error": "结果序列化失败"}
+	}
+	var out any
+	if e = json.Unmarshal([]byte(redact(string(b), key)), &out); e != nil {
+		return map[string]string{"error": "结果脱敏失败"}
+	}
+	return out
+}
+
+type thinkAdapter struct {
+	g       gateway.Client
+	timeout int
+}
+
+func (a thinkAdapter) CallMessages(ctx context.Context, q thinking.CallRequest) (thinking.Metrics, error) {
+	req := gateway.CallRequest{
+		Model: q.Model, MaxTokens: q.MaxTokens, Stream: q.Stream, Effort: q.Effort,
+		StopOnInvalidSignature: q.StopOnInvalidSignature, TimeoutSeconds: a.timeout,
+	}
+	if q.Replay != nil {
+		req.PriorUser = q.Replay.PriorUser
+		req.PriorSignature = q.Replay.Signature
+		req.Prompt = q.Replay.FollowUp
+	} else {
+		if len(q.Messages) == 0 {
+			return thinking.Metrics{}, fmt.Errorf("thinking request has no message")
+		}
+		req.Prompt = q.Messages[0].Content
+		req.Stream = true
+		if q.Thinking != nil {
+			req.Thinking = &gateway.ThinkingConfig{Type: q.Thinking.Type, Display: q.Thinking.Display}
+		}
+	}
+	m, e := a.g.CallMessages(ctx, req)
+	return thinking.Metrics{Status: m.Status, Ms: m.Ms, Err: m.Err, Answer: m.Answer, ThinkLen: m.ThinkLen, SigLen: m.SigLen, ThinkingTokens: m.ThinkingTokens, ThinkingText: m.ThinkingText, Signature: m.Signature, StopReason: m.StopReason, RefusalCategory: m.RefusalCategory}, e
+}
+
+type behaviorAdapter struct {
+	g       gateway.Client
+	timeout int
+}
+
+func (a behaviorAdapter) Call(ctx context.Context, model, prompt string, max int) (string, error) {
+	m, e := a.g.CallMessages(ctx, gateway.CallRequest{Model: model, Prompt: prompt, MaxTokens: max, Stream: true, TimeoutSeconds: a.timeout, SuppressDefaultEffort: true})
+	if e != nil {
+		return "", e
+	}
+	if m.Err != "" {
+		return "", fmt.Errorf("%s", m.Err)
+	}
+	return m.Answer, nil
+}
+func (s *Server) numeric(ctx context.Context, g gateway.Client, q Request) (any, error) {
+	bank := s.currentBank()
+	if !familyHasNumericBaseline(bank, q.Model) {
+		b, e := fingerprint.CompareBehavior(ctx, behaviorAdapter{g, q.Timeout}, q.Model, bank, fingerprint.Attribution{LowConfidence: true})
+		if e != nil {
+			return nil, e
+		}
+		return behaviorFallback(q.Model, bank, b), nil
+	}
+	const minSamples = 3
+	const maxSamples = 10
+	const sampleBatch = 3
+	const confidenceTarget = 0.90
+	const maxRequests = 10
+	minValid := bank.Numeric.MinimumValidNumbers
+	challenges := fingerprint.GenerateChallenges(maxRequests, rand.New(rand.NewSource(time.Now().UnixNano())))
+	outs := make([]fingerprint.Output, 0, maxSamples)
+	evidence := make([]any, 0, maxRequests)
+	requests := 0
+	firstError := ""
+	for len(outs) < maxSamples && requests < len(challenges) {
+		if ctx.Err() != nil {
+			break
+		}
+		batch := maxSamples - len(outs)
+		if batch > sampleBatch {
+			batch = sampleBatch
+		}
+		if room := len(challenges) - requests; batch > room {
+			batch = room
+		}
+		type slot struct {
+			out       fingerprint.Output
+			ev        any
+			ok        bool
+			err       string
+			permanent bool
+		}
+		slots := make([]slot, batch)
+		var batchWG sync.WaitGroup
+		for i := 0; i < batch; i++ {
+			ch := challenges[requests+i]
+			batchWG.Add(1)
+			go func(i int, ch fingerprint.Challenge) {
+				defer batchWG.Done()
+				// Messages prefers a buffered response for long numeric samples.
+				// Responses/Chat stream by default; some gateways require it.
+				maxTokens := 4096
+				if ref := bank.NumericModel(q.Model); (ref != nil && ref.ReferenceSamples > 0) || integrity.ModelFamily(q.Model) == "deepseek" {
+					maxTokens = 16384
+				}
+				m, e := g.CallMessages(ctx, gateway.CallRequest{Model: q.Model, Prompt: ch.Prompt, MaxTokens: maxTokens, Stream: g.ProtocolFor(q.Model) != "messages", TimeoutSeconds: q.Timeout, SuppressDefaultEffort: true})
+				errText := m.Err
+				if e != nil {
+					errText = e.Error()
+				}
+				ok := errText == "" && fingerprint.Usable(m.Answer, ch.ExpectedCount, minValid)
+				answer := m.Answer
+				if !ok {
+					answer = ""
+				}
+				slots[i] = slot{
+					out:       fingerprint.Output{Text: answer, ExpectedCount: ch.ExpectedCount},
+					ev:        map[string]any{"id": ch.ID, "expected_count": ch.ExpectedCount, "parsed_count": len(fingerprint.ParseNumbers(m.Answer)), "answer": m.Answer, "error": errText, "ms": m.Ms, "usable": ok, "http_status": m.Status, "attempts": m.Attempts, "protocol": m.Protocol},
+					ok:        ok,
+					err:       errText,
+					permanent: errText != "" && gateway.PermanentRequestError(m.Status),
+				}
+			}(i, ch)
+		}
+		batchWG.Wait()
+		requests += batch
+		failedRequests, permanent := 0, false
+		for _, sl := range slots {
+			evidence = append(evidence, sl.ev)
+			if sl.err != "" {
+				failedRequests++
+				if firstError == "" {
+					firstError = sl.err
+				}
+			}
+			permanent = permanent || sl.permanent
+			if sl.ok && len(outs) < maxSamples {
+				outs = append(outs, sl.out)
+			}
+		}
+		// More challenge text cannot fix credentials or an exhausted upstream
+		// outage. Keep the ten-challenge budget for successful but unusable output.
+		if permanent || failedRequests == batch {
+			break
+		}
+		if len(outs) >= minSamples {
+			snapshot := fingerprint.Attribute(outs, bank)
+			if snapshot.TopProb >= confidenceTarget {
+				break
+			}
+		}
+	}
+	a := fingerprint.Attribute(outs, bank)
+	res := []map[string]any{}
+	for _, v := range a.Results {
+		if v.Prob <= 0 {
+			continue
+		}
+		res = append(res, map[string]any{"model": v.ModelID, "display": v.DisplayName, "probability": v.Prob, "similarity": v.JSSimilarity})
+	}
+	note := "概率只在数字库内的候选之间比较。从 3 个有效样本开始，顶部概率达到 90% 就停；否则最多取 10 个样本。归因和所选模型一致，这项才记满分。"
+	if bank.NumericModel(q.Model) == nil {
+		note += " 所选名称不是库内 ID，已按同家族候选直接比对。"
+	}
+	if ref := bank.NumericModel(a.TopModel); ref != nil && ref.ReferenceSamples > 0 {
+		note += " 此候选为单一接口采样基线；候选权重沿用原库温度，未完成跨供应商概率校准，不能单独证明模型身份。"
+	}
+	family, familyName := a.Family, a.FamilyName
+	if a.UsedOutputs == 0 {
+		family, familyName = "unknown", "没有有效样本"
+		note = fmt.Sprintf("%d 次里没有拿到有效数字样本，这项记 0 分。", requests)
+	} else if a.UsedOutputs < minSamples {
+		note = "有效样本不足 3 个，这项记 0 分。"
+	}
+	topDisplay := a.TopModel
+	if ref := bank.NumericModel(a.TopModel); ref != nil && ref.DisplayName != "" {
+		topDisplay = ref.DisplayName
+	}
+	out := map[string]any{"basis": "numeric", "family": family, "family_name": familyName, "family_prob": a.FamilyProb, "top_model": a.TopModel, "top_display": topDisplay, "top_prob": a.TopProb, "results": res, "used_outputs": a.UsedOutputs, "requests": requests, "low_confidence": a.LowConfidence || a.UsedOutputs < minSamples, "sample_min": minSamples, "sample_limit": maxSamples, "confidence_target": confidenceTarget, "confidence_reached": a.TopProb >= confidenceTarget, "evidence": evidence, "note": note}
+	if ref := bank.NumericModel(a.TopModel); ref != nil && ref.ReferenceSamples > 0 {
+		out["reference"] = map[string]any{"training_samples": ref.ReferenceSamples, "aliases": ref.Aliases, "calibration": "inherited_candidate_weights_not_recalibrated"}
+	}
+	if ctx.Err() != nil {
+		return out, ctx.Err()
+	}
+	if a.UsedOutputs < minSamples {
+		if firstError == "" {
+			firstError = "上游返回的数字不足或格式无效"
+		}
+		return out, fmt.Errorf("指纹采样未完成（有效样本 %d/%d）：%s", a.UsedOutputs, minSamples, firstError)
+	}
+	if a.UsedOutputs > 0 && a.LowConfidence {
+		b, e := fingerprint.CompareBehavior(ctx, behaviorAdapter{g, q.Timeout}, q.Model, bank, a)
+		if e != nil {
+			out["behavior_note"] = "行为探针失败：" + e.Error()
+		} else {
+			out["behavioral_top3"] = b.Top3
+			out["behavior_note"] = "轻量行为探针只作参考，不参与这一项的分数。"
+		}
+	}
+	return out, nil
+}
+
+func (s *Server) run(ctx context.Context, t *Task, q Request, selected map[string]bool) {
+	defer t.cancel()
+	started := time.Now()
+	t.mu.Lock()
+	previousMs, runs := int64(0), 0
+	if t.Verdict.Timing != nil {
+		previousMs, runs = t.Verdict.Timing.TotalMs, t.Verdict.Timing.Runs
+	}
+	t.Verdict.Timing = &Timing{StartedAt: started.UTC().Format(time.RFC3339Nano), TotalMs: previousMs, Runs: runs + 1}
+	t.mu.Unlock()
+
+	g, clientErr := s.client(q)
+	var wg sync.WaitGroup
+	jobWithSignal := func(id string, f func() (any, error), signal chan struct{}) {
+		if selected != nil && !selected[id] {
+			if signal != nil {
+				close(signal)
+			}
+			return
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			start := time.Now()
+			t.mu.Lock()
+			for i := range t.Probes {
+				if t.Probes[i].ID == id {
+					t.Probes[i].Status = "running"
+				}
+			}
+			t.mu.Unlock()
+			if signal != nil {
+				close(signal)
+			}
+			var result any
+			var e error
+			if clientErr != nil {
+				e = clientErr
+			} else {
+				result, e = f()
+			}
+			if e != nil && result == nil {
+				result = map[string]string{"error": redact(e.Error(), q.Key)}
+			}
+			result = sanitize(result, q.Key)
+			if e != nil {
+				if obj, ok := result.(map[string]any); ok {
+					obj["error"] = redact(e.Error(), q.Key)
+				}
+			}
+			t.mu.Lock()
+			switch id {
+			case "tools":
+				t.Verdict.Tools = result
+			case "web":
+				t.Verdict.Web = result
+			case "knowledge":
+				t.Verdict.Knowledge = result
+			case "cache":
+				t.Verdict.Cache = result
+			case "injection":
+				t.Verdict.Injection = result
+			case "fingerprint":
+				t.Verdict.Fingerprint = result
+			case "thinking":
+				t.Verdict.Thinking = result
+			case "vision":
+				t.Verdict.Vision = result
+			}
+			for i := range t.Probes {
+				if t.Probes[i].ID == id {
+					p := &t.Probes[i]
+					p.Ms = time.Since(start).Milliseconds()
+					p.Status = "done"
+					if e != nil {
+						p.Status = "error"
+						p.Error = redact(e.Error(), q.Key)
+					}
+					if ctx.Err() != nil {
+						p.Status = "cancelled"
+						p.Error = "检测已停止"
+					}
+				}
+			}
+			t.mu.Unlock()
+			s.persist(t)
+		}()
+	}
+	job := func(id string, f func() (any, error)) {
+		jobWithSignal(id, f, nil)
+	}
+	fingerprintStarted := make(chan struct{})
+	jobWithSignal("fingerprint", func() (any, error) { return s.numeric(ctx, g, q) }, fingerprintStarted)
+	// Give the fingerprint probes the first upstream slots. The other
+	// sections are still concurrent, but they start after fingerprint has
+	// entered its first request batch.
+	<-fingerprintStarted
+	time.Sleep(25 * time.Millisecond)
+	job("injection", func() (any, error) {
+		v, e := inject.Measure(ctx, g, q.Model, q.Timeout)
+		if e != nil {
+			return map[string]any{"error": e.Error(), "points": v.Points}, e
+		}
+		return v, nil
+	})
+	if q.Cache || (selected != nil && selected["cache"]) {
+		job("cache", func() (any, error) {
+			v, e := cachecheck.Measure(ctx, g, q.Model, q.Timeout)
+			if e != nil {
+				return v, e
+			}
+			return v, nil
+		})
+	}
+	job("tools", func() (any, error) { return capability.Tools(ctx, g, q.Model, q.Timeout) })
+	job("web", func() (any, error) {
+		if integrity.ModelFamily(q.Model) == "deepseek" {
+			return capability.DeepSeekSearch(ctx, g, q.Timeout)
+		}
+		return capability.Web(ctx, g, q.Model, q.Timeout)
+	})
+	job("knowledge", func() (any, error) {
+		v, e := knowledge.Check(ctx, g, q.Model, q.Timeout)
+		if e != nil {
+			return v, e
+		}
+		return v, nil
+	})
+	if gateway.IsClaude(q.Model) {
+		job("thinking", func() (any, error) {
+			adapter := thinkAdapter{g, q.Timeout}
+			v, e := thinking.Check(ctx, adapter, q.Model)
+			if e != nil {
+				return map[string]string{"error": e.Error(), "reason": "请求失败，不能据此判定思考被清空"}, e
+			}
+			return v, nil
+		})
+	}
+	for _, question := range t.questions {
+		if question.ID == "vision" {
+			continue
+		}
+		item := iq.WithChartImage(question)
+		job(item.ID, func() (any, error) {
+			v, e := s.askQuestion(ctx, g, q, item)
+			t.mu.Lock()
+			t.answers[item.ID] = v
+			t.mu.Unlock()
+			return v, e
+		})
+	}
+	if item, ok := visionQuestion(t.questions); ok {
+		job("vision", func() (any, error) {
+			v, e := s.askQuestion(ctx, g, q, item)
+			if v.Skipped {
+				e = nil
+			}
+			return visionResult(item, v, e), e
+		})
+	}
+	wg.Wait()
+	t.mu.Lock()
+	items := []iq.QItem{}
+	lines := []QuestionResult{}
+	complete := true
+	answered := 0
+	for _, item := range t.questions {
+		if item.ID == "vision" {
+			continue
+		}
+		v := t.answers[item.ID]
+		if v.ID == "" {
+			v = QuestionResult{ID: item.ID, Title: item.Title, Max: item.MaxScore, Error: "请求未完成", Tags: []string{}}
+		}
+		if v.Error != "" && !v.Skipped {
+			complete = false
+		}
+		if v.Error == "" && !v.Skipped {
+			answered++
+		}
+		lines = append(lines, v)
+		if v.Skipped {
+			continue
+		}
+		items = append(items, iq.QItem{ID: v.ID, Title: v.Title, Max: v.Max, Earned: v.Earned, Half: v.Half, Tags: v.Tags})
+	}
+	if len(lines) > 0 {
+		score := iq.Score(items)
+		var validScore any
+		if answered > 0 {
+			validScore = score.Score
+		}
+		t.Verdict.IQ = map[string]any{"score": validScore, "max": 100, "paper_max": score.Max, "complete": complete, "per_question": lines, "note": fmt.Sprintf("当前卷面 %d；半分仅在卷面展示，不进入百分制通过分。失败请求标记未完成，但已答题目照常计分，不伪装为模型答错。", score.Max)}
+	}
+	sections := selected
+	if t.Source != "api" {
+		sections = nil
+	}
+	t.Verdict.Integrity = buildIntegrity(t.Verdict, lines, q.Model, sections)
+	t.Verdict.Total = buildTotalFor(t.Verdict, q.Model, sections)
+	t.Status = "done"
+	if ctx.Err() != nil {
+		t.Status = "cancelled"
+	}
+	for _, p := range t.Probes {
+		if p.Status == "error" && t.Status == "done" {
+			t.Status = "partial"
+		}
+	}
+	t.finished = time.Now()
+	t.Verdict.Timing.FinishedAt = t.finished.UTC().Format(time.RFC3339Nano)
+	t.Verdict.Timing.LastRunMs = time.Since(started).Milliseconds()
+	t.Verdict.Timing.TotalMs = previousMs + t.Verdict.Timing.LastRunMs
+	t.mu.Unlock()
+	s.persist(t)
+}
+
+// askQuestion runs one IQ or vision item. It is shared so the standalone
+// vision section never forks the judging and self-score path.
+func (s *Server) askQuestion(ctx context.Context, g gateway.Client, q Request, item iq.Question) (QuestionResult, error) {
+	prompt := item.Prompt
+	if item.ID == "vision" {
+		// 题面已经画在图上，再发一遍文字等于把题泄给看不到图的接口。
+		prompt = ""
+	}
+	// 截断不等于失败：先按已经吐出的正文判分；整段只剩思考或空白时，
+	// 去掉 thinking 与 effort 再要一次短答，别把 8192 全花在推理上。
+	truncated := func(m gateway.Metrics) bool {
+		return m.StopReason == "max_tokens" || m.StopReason == "length"
+	}
+	ask := func(plain bool) (gateway.Metrics, error) {
+		req := gateway.CallRequest{Model: q.Model, Prompt: prompt, Images: questionImages(item), System: []gateway.SystemBlock{{Text: "禁止使用任何工具。直接给出结论，不要展开推导过程；回答最后单独一行：最终答案: <短结论>。"}}, Thinking: iqThinking(q.Model), MaxTokens: 8192, Stream: true, TimeoutSeconds: q.Timeout, Validate: func(m gateway.Metrics) error {
+			if !truncated(m) && strings.TrimSpace(m.Answer) == "" && (!gateway.IsClaude(q.Model) || strings.TrimSpace(m.ThinkingText) == "") {
+				return fmt.Errorf("empty response")
+			}
+			return nil
+		}}
+		if plain {
+			req.Thinking = nil
+			req.SuppressDefaultEffort = true
+		}
+		// DeepSeek 默认思考会一路吃完 max_tokens；识图题直接关掉思考。
+		if item.ID == "vision" && gateway.IsDeepSeek(q.Model) {
+			req.Effort = "none"
+			req.SuppressDefaultEffort = true
+		}
+		return g.CallMessages(ctx, req)
+	}
+	m, e := ask(false)
+	if e == nil && m.Err != "" {
+		e = fmt.Errorf("%s", m.Err)
+	}
+	// 截断的思考不是答案，别拿它冒充识图结果。
+	text := m.Answer
+	if strings.TrimSpace(text) == "" && gateway.IsClaude(q.Model) && !truncated(m) {
+		text = m.ThinkingText
+	}
+	if strings.TrimSpace(text) == "" && (e == nil || m.Status == 200) {
+		if m2, e2 := ask(true); e2 == nil && m2.Status == 200 {
+			m, e = m2, nil
+			if m.Err != "" {
+				e = fmt.Errorf("%s", m.Err)
+			}
+			text = m.Answer
+			if strings.TrimSpace(text) == "" && !truncated(m) {
+				text = m.ThinkingText
+			}
+		}
+	}
+	if e == nil && strings.TrimSpace(text) == "" {
+		if truncated(m) {
+			e = fmt.Errorf("输出被 max_tokens 截断，未作为错误答案判分")
+		} else {
+			e = fmt.Errorf("正文与思考均为空")
+		}
+	}
+	if !gateway.IsClaude(q.Model) {
+		m.ThinkingText = ""
+		m.Signature = ""
+		m.SSEFrames = nil
+	}
+	m.SSEFrames = nil
+	v := QuestionResult{ID: item.ID, Title: item.Title, Max: item.MaxScore, Prompt: item.Prompt, Expected: item.Answer, Answer: m.Answer, ThinkingText: m.ThinkingText, Signature: m.Signature, Ms: m.Ms, Tags: []string{}, Metrics: m}
+	if len(item.ImagePNG) > 0 {
+		v.Image = "data:image/png;base64," + base64.StdEncoding.EncodeToString(item.ImagePNG)
+	}
+	// Text evidence already lives on the question, not twice in metrics.
+	v.Metrics.Answer, v.Metrics.ThinkingText, v.Metrics.Signature = "", "", ""
+	if e != nil {
+		v.Error = redact(e.Error(), q.Key)
+		if item.ID == "vision" && unsupportedImage(v.Error) {
+			v.Skipped = true
+			v.Error = "该模型不接受图片输入，识图项记 0 分"
+		}
+	} else {
+		earned, half, tags := iq.Judge(item, text)
+		// Grade locally only: never disclose the canonical answer to the tested model.
+		v.Earned = earned
+		v.Half = half
+		if tags == nil {
+			tags = []string{}
+		}
+		v.Tags = tags
+	}
+	raw, _ := json.Marshal(sanitize(v, q.Key))
+	_ = json.Unmarshal(raw, &v)
+	return v, e
+}
+
+func visionQuestion(list []iq.Question) (iq.Question, bool) {
+	for _, q := range list {
+		if q.ID == "vision" {
+			return iq.WithChartImage(q), true
+		}
+	}
+	return iq.Question{}, false
+}
+
+// visionResult scores the two dimensions separately: whether the image was
+// read at all (50) and whether the closing digits were summed correctly (50).
+func visionResult(item iq.Question, v QuestionResult, e error) map[string]any {
+	v.Prompt = "" // 题面只在图上，报告里不再回显文字。
+	recognized := e == nil && v.Error == "" && !v.Skipped && iq.NumericAnswer(v.Answer)
+	seen := 0
+	if recognized {
+		seen = 50
+	}
+	answer := 0
+	if item.MaxScore > 0 {
+		answer = (v.Earned*50 + item.MaxScore/2) / item.MaxScore
+	}
+	out := map[string]any{
+		"score": seen + answer, "max": 100,
+		"recognized": recognized, "recognized_score": seen, "recognized_max": 50,
+		"answer_score": answer, "answer_max": 50,
+		"correct": v.Earned == item.MaxScore && !v.Skipped,
+		"half":    v.Half, "earned": v.Earned, "question_max": item.MaxScore,
+		"skipped": v.Skipped, "question": v,
+		"note": "识图 50 分看图片是否被接受并读出一个整数；答对 50 分按 40 根 K 线收盘价的个位数字之和判分，误差 ±2 记一半。",
+	}
+	if v.Error != "" {
+		out["error"] = v.Error
+	}
+	return out
+}
+
+func buildIntegrity(v Verdict, results []QuestionResult, model string, selected map[string]bool) any {
+	input := integrity.Inputs{Protocol: gateway.Protocol(model), ThinkingApply: gateway.IsClaude(model), InjectionApply: true}
+	if selected != nil {
+		input.InjectionApply = selected["injection"]
+		input.ThinkingApply = input.ThinkingApply && selected["thinking"]
+	}
+	if m, ok := v.Injection.(map[string]any); ok {
+		if n, ok := asInt(m["score"]); ok {
+			input.InjectionScore = &n
+		}
+	}
+	if m, ok := v.Cache.(map[string]any); ok {
+		input.CacheApplicable = true
+		input.CachePass, _ = asBoolPtr(m["pass"])
+	}
+	if m, ok := v.Tools.(map[string]any); ok {
+		input.ToolsApplicable = true
+		input.ToolsPass, _ = asBoolPtr(m["pass"])
+	}
+	if m, ok := v.Web.(map[string]any); ok {
+		input.WebApplicable = m["status"] != "unknown"
+		input.WebPass, _ = asBoolPtr(m["pass"])
+	}
+	if m, ok := v.Thinking.(map[string]any); ok {
+		if n, ok := asInt(m["score"]); ok {
+			input.ThinkingScore = &n
+		}
+	}
+	stream := false
+	streamKnown := false
+	for _, result := range results {
+		if result.Error == "" {
+			streamKnown = true
+			stream = result.Metrics.StreamComplete
+			break
+		}
+	}
+	if streamKnown {
+		input.StreamPass = &stream
+	}
+	return integrity.Calculate(input)
+}
+
+func asInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
+	}
+}
+func asBoolPtr(v any) (*bool, bool) {
+	if v == nil {
+		return nil, false
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return nil, false
+	}
+	return &b, true
+}
+
+// iqThinking 给“答题”这一步挑 thinking 配置：Claude 走 adaptive+摘要。
+func iqThinking(model string) *gateway.ThinkingConfig {
+	if gateway.IsClaude(model) {
+		return &gateway.ThinkingConfig{Type: "adaptive", Display: "summarized"}
+	}
+	return nil
+}
+
+// gradeThinking 给“自评打分”这一步挑 thinking 配置。
+//
+// 以前这里固定发 thinking.type=disabled，但 claude-opus-5-5 明确拒绝该值
+// （400: "thinking.type.disabled" is not supported for this model），导致该题
+// 自评环节报错、分数拿不回来。实测 claude-sonnet-5 / sonnet-4-5 / opus-4-6 /
+// haiku-4-5 都接受 disabled，唯独 opus-5-5 不行。
+//
+// 打分只要一个整数，不需要思考。统一不传 thinking 字段，让上游用默认行为：
+// 实测五个模型“不传”全部 200，是最稳的一档。
+func gradeThinking(model string) *gateway.ThinkingConfig {
+	return nil
+}
+
+func buildTotal(v Verdict, model string) integrity.Total {
+	return buildTotalFor(v, model, nil)
+}
+
+func buildTotalFor(v Verdict, model string, selected map[string]bool) integrity.Total {
+	fpPoints, fpKnown := 0, false
+	if m, ok := v.Fingerprint.(map[string]any); ok {
+		errText, _ := m["error"].(string)
+		if errText == "" {
+			fpKnown = true
+			family, _ := m["family"].(string)
+			top, _ := m["top_model"].(string)
+			used, _ := asInt(m["used_outputs"])
+			// A near-tie between two candidates is not evidence of dilution.
+			// Without this guard gpt-6.1-sol and gpt-6-astra, whose endpoints
+			// produce near-identical number distributions, marked each other as
+			// diluted on roughly one in six live draws.
+			lowConfidence, _ := m["low_confidence"].(bool)
+			got := integrity.FingerprintFamily(family)
+			basis, _ := m["basis"].(string)
+			prob, _ := m["top_prob"].(float64)
+			// Only a numeric baseline that pins a different model outright may
+			// cost points. Behavioral attribution, close candidates and thin
+			// samples keep the section whole, so it never scores on guesswork.
+			confirmed := !lowConfidence && integrity.Confirmed(basis, prob) &&
+				integrity.FingerprintState(model, family, top) != integrity.FingerprintMatch
+			if used >= 3 && got != "" && got != "unknown" {
+				if confirmed {
+					fpPoints = 0
+				} else {
+					fpPoints = 10
+				}
+			}
+		}
+	}
+	iqPoints, iqKnown := 0, false
+	if m, ok := v.IQ.(map[string]any); ok {
+		iqKnown = true
+		if n, ok := asInt(m["score"]); ok {
+			iqPoints = n
+		}
+	}
+	visionApply := false
+	if selected == nil {
+		visionApply = v.Vision != nil
+	} else {
+		visionApply = selected["vision"]
+	}
+	visionPoints, visionKnown := 0, false
+	if m, ok := v.Vision.(map[string]any); ok {
+		visionKnown = true
+		if errText, _ := m["error"].(string); errText == "" {
+			if n, ok := asInt(m["score"]); ok {
+				visionPoints = n
+			}
+		}
+	}
+	if !visionApply {
+		visionKnown, visionPoints = false, 0
+	}
+	injPoints, injKnown := 0, false
+	if m, ok := v.Injection.(map[string]any); ok {
+		injKnown = true
+		errText, _ := m["error"].(string)
+		if errText == "" {
+			if n, ok := asInt(m["score"]); ok {
+				injPoints = n
+			}
+		}
+	}
+	toolPoints, toolKnown := boolPart(v.Tools)
+	webApply, webPoints, webKnown := webPart(v.Web)
+	thinkApply := gateway.IsClaude(model)
+	thinkPoints, thinkKnown := 0, false
+	if thinkApply {
+		if m, ok := v.Thinking.(map[string]any); ok {
+			thinkKnown = true
+			errText, _ := m["error"].(string)
+			if errText == "" {
+				if n, ok := asInt(m["score"]); ok {
+					thinkPoints = n
+				}
+			}
+		}
+	}
+	cacheApply := v.Cache != nil
+	cachePoints, cacheKnown := 0, false
+	if cacheApply {
+		cachePoints, cacheKnown = boolPart(v.Cache)
+	}
+	want := func(id string) bool { return selected == nil || selected[id] }
+	if !want("fingerprint") {
+		fpKnown, fpPoints = false, 0
+	}
+	if !want("iq") {
+		iqKnown, iqPoints = false, 0
+	}
+	if !want("injection") {
+		injKnown, injPoints = false, 0
+	}
+	if !want("tools") {
+		toolKnown, toolPoints = false, 0
+	}
+	if !want("web") {
+		webApply = false
+	}
+	if !want("thinking") {
+		thinkApply = false
+	}
+	if selected != nil {
+		cacheApply = selected["cache"]
+	}
+	return integrity.Compose([]integrity.Part{
+		{Key: "fingerprint", Label: "模型指纹归因", Applicable: want("fingerprint"), Known: fpKnown, Points: fpPoints, MaxPoints: 10},
+		{Key: "iq", Label: "推理表现", Applicable: want("iq"), Known: iqKnown, Points: iqPoints, MaxPoints: 100},
+		{Key: "vision", Label: "识图能力", Applicable: visionApply, Known: visionKnown, Points: visionPoints, MaxPoints: 100},
+		{Key: "injection", Label: "注入大小", Applicable: want("injection"), Known: injKnown, Points: injPoints, MaxPoints: 10},
+		{Key: "tools", Label: "工具调用", Applicable: want("tools"), Known: toolKnown, Points: toolPoints, MaxPoints: 1},
+		{Key: "web", Label: "联网检测", Applicable: webApply, Known: webKnown, Points: webPoints, MaxPoints: 1},
+		{Key: "thinking", Label: "思维链回传", Applicable: thinkApply, Known: thinkKnown, Points: thinkPoints, MaxPoints: 5},
+		{Key: "cache", Label: "缓存读写", Applicable: cacheApply, Known: cacheKnown, Points: cachePoints, MaxPoints: 1},
+	})
+}
+
+func boolPart(v any) (int, bool) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	if errText, _ := m["error"].(string); errText != "" {
+		return 0, true
+	}
+	pass, ok := asBoolPtr(m["pass"])
+	if !ok || pass == nil {
+		return 0, true
+	}
+	if *pass {
+		return 1, true
+	}
+	return 0, true
+}
+
+func webPart(v any) (bool, int, bool) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return true, 0, false
+	}
+	status, _ := m["status"].(string)
+	protocol, _ := m["protocol"].(string)
+	_, hasPass := asBoolPtr(m["pass"])
+	if !hasPass && (status == "unsupported" || (protocol == "deepseek_search" && status == "unknown")) {
+		return false, 0, false
+	}
+	if status == "unknown" && !hasPass && protocol == "chat" {
+		return false, 0, false
+	}
+	points, known := boolPart(v)
+	return true, points, known
+}
+
+// questionImages hands Q10's rendered chart to the gateway.
+func questionImages(q iq.Question) []gateway.Image {
+	if len(q.ImagePNG) == 0 {
+		return nil
+	}
+	return []gateway.Image{{MIME: "image/png", Data: q.ImagePNG}}
+}
+
+// unsupportedImage recognises an upstream that rejects inline images, so the
+// vision item is scored "not applicable" instead of nulling the whole IQ
+// section on text-only models.
+// shortcut: keyword match on the 400/422 detail; revisit if upstreams start
+// returning structured error codes.
+func unsupportedImage(msg string) bool {
+	lower := strings.ToLower(msg)
+	if !strings.Contains(lower, "http 400") && !strings.Contains(lower, "http 422") {
+		return false
+	}
+	for _, kw := range []string{"image", "vision", "multimodal", "图片"} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}

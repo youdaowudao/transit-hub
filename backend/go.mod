@@ -3,6 +3,7 @@ module transithub/backend
 go 1.25.0
 
 require (
+	github.com/godbus/dbus/v5 v5.1.0
 	github.com/jackc/pgx/v5 v5.7.1
 	github.com/redis/go-redis/v9 v9.21.0
 	golang.org/x/crypto v0.36.0

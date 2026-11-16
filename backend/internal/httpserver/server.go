@@ -16,6 +16,7 @@ import (
 	"transithub/backend/internal/config"
 	"transithub/backend/internal/modules/admin_accounts"
 	"transithub/backend/internal/modules/auth"
+	"transithub/backend/internal/modules/chanshui"
 	"transithub/backend/internal/modules/connection_health"
 	"transithub/backend/internal/modules/dashboard"
 	"transithub/backend/internal/modules/group_rate_campaigns"
@@ -51,6 +52,7 @@ type Server struct {
 	lotteryCancel                  context.CancelFunc
 	lotteryWorker                  *lottery.Worker
 	connectionHealthService        *connection_health.Service
+	chanshuiService                *chanshui.Service
 	signupRiskService              *signup_risk.Service
 	upstreamService                interface{ ShutdownGroupCostSampling(context.Context) error }
 }
@@ -232,6 +234,8 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	mySitesService.SetManagedAccountGroupChanger(connHealthService)
 	connection_health.RegisterRoutes(server.mux, connHealthService)
 	server.connectionHealthService = connHealthService
+	server.chanshuiService = chanshui.NewService(cfg, adminAccountsService, connHealthService)
+	chanshui.RegisterRoutes(server.mux, server.chanshuiService)
 
 	// 所有 workspace 表 schema 完成后再补 legacy 归属；随后才启动 restore、worker 和 scheduler，
 	// 避免后台任务在旧行尚未补齐 workspace 时读取或写回数据。
@@ -468,6 +472,10 @@ func (s *Server) Handler() http.Handler {
 
 	return s.logRequests(s.cors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.setSecurityHeaders(w, r)
+		if s.chanshuiService != nil && (r.URL.Path == "/chanshui" || strings.HasPrefix(r.URL.Path, "/chanshui/")) {
+			s.chanshuiService.StaticHandler().ServeHTTP(w, r)
+			return
+		}
 		if !strings.HasPrefix(r.URL.Path, apiPrefix) {
 			static.ServeHTTP(w, r)
 			return
@@ -486,6 +494,11 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	var shutdownErrors []error
+	if s.chanshuiService != nil {
+		if err := s.chanshuiService.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
 	if s.signupRiskService != nil {
 		if err := s.signupRiskService.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
@@ -522,6 +535,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) protectedPath(path string) bool {
+	if path == "/api/chanshui" || strings.HasPrefix(path, "/api/chanshui/") {
+		return true
+	}
 	return strings.HasPrefix(path, "/api/notifications") || strings.HasPrefix(path, "/api/users") || strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email")
 }
 
@@ -598,7 +614,7 @@ func (s *Server) cors(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-TransitHub-Question-Answer-Contract")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-TransitHub-Question-Answer-Contract, X-Chanshui-Workspace, If-Match")
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

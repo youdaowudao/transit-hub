@@ -1,0 +1,90 @@
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"github.com/kiss-kedaya/chanshui/internal/api"
+	"github.com/kiss-kedaya/chanshui/internal/history"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"path"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+)
+
+func main() {
+	addr := flag.String("addr", "127.0.0.1:8770", "local listen address")
+	db := flag.String("db", ".local/history.db", "local SQLite path")
+	web := flag.String("web", "web/out-build", "Next.js static export directory")
+	allowPrivate := flag.Bool("allow-private", false, "allow private gateway targets for local mock testing")
+	skipRecover := flag.Bool("skip-recover", false, "do not mark another instance's queued/running jobs interrupted during a rolling start")
+	workers := flag.Int("workers", 16, "maximum concurrently executing jobs")
+	queue := flag.Int("queue", 128, "bounded waiting jobs")
+	upstream := flag.Int("upstream-concurrency", 64, "global upstream request cap")
+	flag.Parse()
+	host, _, e := net.SplitHostPort(*addr)
+	if e != nil || (host != "" && net.ParseIP(host) == nil) {
+		log.Fatal("invalid listen address")
+	}
+	if _, e := os.Stat(filepath.Join(*web, "index.html")); e != nil {
+		log.Fatal("missing web export: run scripts/start-local.ps1")
+	}
+	store, e := history.Open(*db)
+	if e != nil {
+		log.Fatal(e)
+	}
+	defer store.Close()
+	apiServer, e := api.New(store, api.Options{AutoSync: true, AllowPrivate: *allowPrivate, SkipRecover: *skipRecover, Workers: *workers, QueueSize: *queue, MaxRequests: *upstream})
+	if e != nil {
+		log.Fatal(e)
+	}
+	defer apiServer.Close()
+	app := apiServer.Handler()
+	static := http.FileServer(http.Dir(*web))
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			app.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		// Hashed assets never change, but a miss must not be cached: the
+		// browser or an edge would keep a transient 404 after the file lands.
+		cache := "no-store"
+		if strings.HasPrefix(r.URL.Path, "/_next/static/") {
+			cleaned := path.Clean(r.URL.Path)
+			if info, err := os.Stat(filepath.Join(*web, filepath.FromSlash(cleaned))); err == nil && info.Mode().IsRegular() {
+				cache = "public, max-age=31536000, immutable"
+			}
+		}
+		w.Header().Set("Cache-Control", cache)
+		if r.URL.Path == "/history" || r.URL.Path == "/admin" || r.URL.Path == "/docs" {
+			copy := r.Clone(r.Context())
+			copy.URL.Path = r.URL.Path + ".html"
+			static.ServeHTTP(w, copy)
+			return
+		}
+		static.ServeHTTP(w, r)
+	})
+	srv := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	stopDrainSignal := installDrainSignal(apiServer, ctx)
+	defer stopDrainSignal()
+	go func() {
+		<-ctx.Done()
+		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(c)
+	}()
+	fmt.Printf("掺水？本地检测站 http://%s\n", *addr)
+	if e := srv.ListenAndServe(); e != nil && e != http.ErrServerClosed {
+		log.Fatal(e)
+	}
+}

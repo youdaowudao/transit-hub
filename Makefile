@@ -1,6 +1,7 @@
 SHELL := /usr/bin/env bash
 
 .DEFAULT_GOAL := test
+CI_SUITE ?= all
 
 .PHONY: test test-dev test-ci test-chanshui
 
@@ -12,7 +13,7 @@ test-dev:
 
 # CI 入口：由 GitHub Actions 调用；不继承本地开发限速。
 test-ci:
-	@CI=true bash scripts/test-full-regression.sh
+	@CI=true bash scripts/test-full-regression.sh "$(CI_SUITE)"
 
 # 独立模块核心合同；真实系统资源验收仅显式启用时执行。
 test-chanshui:

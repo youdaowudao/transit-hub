@@ -126,17 +126,24 @@ func TestC3ModelControlReviewREDNoPendingVerifyRequiresActualCommitProof(t *test
 
 type c3ReviewBlockedStorage struct {
 	modelControlRepository
-	armed   *atomic.Bool
-	event   bool
-	bounded atomic.Bool
+	armed    *atomic.Bool
+	event    bool
+	realWait bool
+	bounded  atomic.Bool
 }
 
 func (r *c3ReviewBlockedStorage) wait(ctx context.Context) error {
-	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= 5*time.Second && ctx.Err() == nil {
-		r.bounded.Store(true)
+	deadline, ok := ctx.Deadline()
+	if !ok || ctx.Err() != nil || time.Until(deadline) <= 0 || time.Until(deadline) > 5*time.Second {
+		return errors.New("fixture did not receive an active recovery context with a five-second limit")
 	}
-	// Simulate an occupied pool. A deadline releases it; an unbounded read
-	// receives a late successful answer after the permitted recovery budget.
+	r.bounded.Store(true)
+	if !r.realWait {
+		return context.DeadlineExceeded
+	}
+	// One HTTP/PG path still waits for the real deadline. Other paths inject
+	// the same storage error after verifying the supplied budget; the pure
+	// synctest contract separately proves the deadline and cancellation.
 	timer := time.NewTimer(6 * time.Second)
 	defer timer.Stop()
 	select {
@@ -178,7 +185,7 @@ func TestC3ModelControlReviewREDBoundedStorageRecoveryAndFinalResponse(t *testin
 				op = "restore"
 			}
 			p := f.preview("1", "A", op)
-			storage := &c3ReviewBlockedStorage{modelControlRepository: f.service.modelControls, armed: &atomic.Bool{}, event: path == "unknown_event"}
+			storage := &c3ReviewBlockedStorage{modelControlRepository: f.service.modelControls, armed: &atomic.Bool{}, event: path == "unknown_event", realWait: path == "final_response"}
 			f.service.modelControls = storage
 			stage := path
 			if path == "no_remote_restore" || path == "verify" || path == "final_response" {

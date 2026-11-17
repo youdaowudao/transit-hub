@@ -1,12 +1,33 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 const guardPath = fileURLToPath(new URL('./check-test-calendar-boundaries.mjs', import.meta.url))
+
+test('isolated CI guard loads only after its frontend TypeScript dependency is installed', () => {
+  const root = mkdtempSync(join(tmpdir(), 'transithub-ci-guard-dependency-'))
+  try {
+    mkdirSync(join(root, 'scripts'))
+    mkdirSync(join(root, 'frontend/tests'), { recursive: true })
+    const isolatedGuard = join(root, 'scripts/check-test-calendar-boundaries.mjs')
+    copyFileSync(guardPath, isolatedGuard)
+    writeFileSync(join(root, 'frontend/tests/safe.test.ts'), "test('static fixture', () => { const day = '2030-01-02' })\n")
+    const missing = spawnSync(process.execPath, [isolatedGuard, '--root', root], { encoding: 'utf8', timeout: 10_000 })
+    assert.notEqual(missing.status, 0)
+    assert.match(missing.stderr, /Cannot find module.*typescript/)
+
+    mkdirSync(join(root, 'frontend/node_modules'))
+    symlinkSync(fileURLToPath(new URL('../frontend/node_modules/typescript', import.meta.url)), join(root, 'frontend/node_modules/typescript'), 'dir')
+    const installed = spawnSync(process.execPath, [isolatedGuard, '--root', root], { encoding: 'utf8', timeout: 10_000 })
+    assert.equal(installed.status, 0, installed.stderr || String(installed.error ?? ''))
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+})
 
 const runGuard = (files) => {
   const root = mkdtempSync(join(tmpdir(), 'transithub-test-calendar-'))

@@ -896,13 +896,22 @@ func TestRefreshHandlerPublishesHeartbeatWithoutEndingBlockedRun(t *testing.T) {
 	syncer := newBlockingRefreshRunSync()
 	t.Cleanup(syncer.releaseAll)
 	service := refreshRunTestService(syncer, fakePlatformGroupReader{})
+	service.refreshHeartbeat = 50 * time.Millisecond
 	server := refreshRunTestServer(t, service)
 
-	responses, errs := startRefreshRequest(server.Client(), newRefreshRunRequest(t, http.MethodGet, server.URL+"/api/connection-health/admin-groups/refresh"))
+	requestCtx, cancelRequest := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancelRequest()
+	request := newRefreshRunRequest(t, http.MethodGet, server.URL+"/api/connection-health/admin-groups/refresh").WithContext(requestCtx)
+	responses, errs := startRefreshRequest(server.Client(), request)
 	response := awaitRefreshResponse(t, responses, errs)
 	defer response.Body.Close()
+	select {
+	case <-syncer.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("site sync did not enter the blocked state")
+	}
 	reader, first := requireRefreshSnapshot(t, response)
-	for first.data["stage"] != "site_sync" {
+	for first.data["stage"] != "site_sync" || first.data["stageTotalSites"] != float64(1) {
 		event, err := readRefreshSSEEvent(reader)
 		if err != nil {
 			t.Fatalf("read blocked site-sync snapshot: %v", err)
@@ -914,11 +923,13 @@ func TestRefreshHandlerPublishesHeartbeatWithoutEndingBlockedRun(t *testing.T) {
 			first = event
 		}
 	}
-	firstRevision := first.data["revision"].(float64)
-	heartbeatStartedAt := time.Now()
+	lastRevision := first.data["revision"].(float64)
+	runID := first.data["runId"]
 
 	events := make(chan refreshSSEEvent, 1)
 	readErrs := make(chan error, 1)
+	stopReading := make(chan struct{})
+	defer close(stopReading)
 	go func() {
 		for {
 			event, err := readRefreshSSEEvent(reader)
@@ -926,11 +937,16 @@ func TestRefreshHandlerPublishesHeartbeatWithoutEndingBlockedRun(t *testing.T) {
 				readErrs <- err
 				return
 			}
-			events <- event
+			select {
+			case events <- event:
+			case <-stopReading:
+				return
+			}
 		}
 	}()
-	deadline := time.NewTimer(31 * time.Second)
+	deadline := time.NewTimer(2 * time.Second)
 	defer deadline.Stop()
+	heartbeats := 0
 	for {
 		select {
 		case err := <-readErrs:
@@ -939,18 +955,25 @@ func TestRefreshHandlerPublishesHeartbeatWithoutEndingBlockedRun(t *testing.T) {
 			if event.name == "terminal" {
 				t.Fatalf("blocked run ended before heartbeat: %#v", event.data)
 			}
-			if event.name != "snapshot" || event.data["runState"] != "running" {
+			if event.name != "snapshot" {
 				continue
 			}
-			if time.Since(heartbeatStartedAt) < 29*time.Second {
-				continue
+			if event.data["runId"] != runID || event.data["runState"] != "running" || event.data["stage"] != "site_sync" || event.data["stageTotalSites"] != float64(1) || event.data["stageCompletedSites"] != float64(0) {
+				t.Fatalf("heartbeat changed the blocked run: %#v", event.data)
 			}
-			if revision, ok := event.data["revision"].(float64); !ok || revision <= firstRevision {
-				t.Fatalf("heartbeat revision = %#v, want > %.0f", event.data["revision"], firstRevision)
+			revision, ok := event.data["revision"].(float64)
+			if !ok || revision < lastRevision {
+				t.Fatalf("heartbeat revision = %#v, want >= %.0f", event.data["revision"], lastRevision)
 			}
-			return
+			if revision > lastRevision {
+				lastRevision = revision
+				heartbeats++
+			}
+			if heartbeats >= 2 {
+				return
+			}
 		case <-deadline.C:
-			t.Fatal("blocked run published no heartbeat within 30 seconds")
+			t.Fatal("blocked run did not publish two heartbeats within two seconds")
 		}
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -35,6 +36,7 @@ type Transport struct {
 	Attempts      atomic.Int64
 	MaxAttempts   int
 	BeforeAttempt func(context.Context) error
+	attemptMu     sync.Mutex
 }
 type limitedBody struct {
 	io.ReadCloser
@@ -73,17 +75,32 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		return nil, r.Context().Err()
 	}
 	release := func() { <-t.sem }
-	n := t.Attempts.Add(1)
-	if n > int64(t.MaxAttempts) {
+	if err := r.Context().Err(); err != nil {
+		release()
+		return nil, err
+	}
+	// Admission and the durable per-item count are one ordered step. HTTP runs
+	// outside this lock, so a slow response never blocks the next free slot.
+	t.attemptMu.Lock()
+	if err := r.Context().Err(); err != nil {
+		t.attemptMu.Unlock()
+		release()
+		return nil, err
+	}
+	if t.Attempts.Load() >= int64(t.MaxAttempts) {
+		t.attemptMu.Unlock()
 		release()
 		return nil, fmt.Errorf("已达到本次%d次上游尝试上限，未再发送请求", t.MaxAttempts)
 	}
 	if t.BeforeAttempt != nil {
 		if e := t.BeforeAttempt(r.Context()); e != nil {
+			t.attemptMu.Unlock()
 			release()
 			return nil, e
 		}
 	}
+	t.Attempts.Add(1)
+	t.attemptMu.Unlock()
 	res, e := t.Base.RoundTrip(r)
 	if e != nil {
 		release()
@@ -98,9 +115,10 @@ func publicIP(ip netip.Addr) bool {
 func NewTransport(concurrency, maxAttempts int, allowPrivate bool, override http.RoundTripper) (*Transport, *http.Transport) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil
-	tr.MaxIdleConns = 2
-	tr.MaxIdleConnsPerHost = 2
-	tr.MaxConnsPerHost = 2
+	concurrency = max(1, min(concurrency, 64))
+	tr.MaxIdleConns = concurrency
+	tr.MaxIdleConnsPerHost = concurrency
+	tr.MaxConnsPerHost = concurrency
 	tr.TLSHandshakeTimeout = 10 * time.Second
 	tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		host, port, e := net.SplitHostPort(address)

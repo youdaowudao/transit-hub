@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -76,10 +77,14 @@ func mainRun() error {
 		if e = wire.Decode(env.Args, &args); e != nil {
 			return e
 		}
+		var outputMu sync.Mutex
+		encoder := json.NewEncoder(os.Stdout)
 		notify := func(event string, data map[string]any) {
+			outputMu.Lock()
+			defer outputMu.Unlock()
 			data["v"] = 1
 			data["event"] = event
-			_ = json.NewEncoder(os.Stdout).Encode(data)
+			_ = encoder.Encode(data)
 		}
 		e = engine.RunOne(ctx, s, env.Owner, args.ReportID, *control.Credential, engine.Config{Deployment: env.Deployment, Notify: notify})
 		if e != nil {
@@ -239,6 +244,18 @@ func query(ctx context.Context, s *store.Store, env wire.Envelope, c wire.Contin
 		}
 		v, e := s.Image(ctx, o, a.ReportID, a.ItemID)
 		return v, "image/png", e
+	case "cancel-queued":
+		var a struct {
+			ReportID string `json:"reportId"`
+		}
+		if e := decode(env.Args, &a); e != nil {
+			return nil, "", e
+		}
+		if e := s.CancelQueued(ctx, o, a.ReportID); e != nil {
+			return nil, "", e
+		}
+		v, e := s.Report(ctx, o, a.ReportID)
+		return store.ReportView(v), "", e
 	case "finish-interrupted":
 		var a struct {
 			ReportID string         `json:"reportId"`

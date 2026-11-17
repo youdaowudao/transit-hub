@@ -254,6 +254,9 @@ func (s *Store) Report(ctx context.Context, o Owner, id string) (Report, error) 
 	}
 	out.MemoryLimitMiB = out.Settings.MemoryLimitMiB
 	out.TotalTimeoutSeconds = out.Settings.TotalTimeoutSeconds
+	if e = s.db.QueryRowContext(ctx, `SELECT COALESCE(min(NULLIF(started_at_ms,0)),0) FROM hub_items WHERE report_id=?`, id).Scan(&out.StartedAtMs); e != nil {
+		return out, e
+	}
 	rows, e := s.db.QueryContext(ctx, `SELECT status,count(*) FROM hub_items WHERE report_id=? GROUP BY status`, id)
 	if e != nil {
 		return out, e

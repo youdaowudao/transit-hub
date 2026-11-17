@@ -1,4 +1,5 @@
 "use client";
+import type { ReactNode } from "react";
 import { cacheToken as formatCacheToken, cacheRate as formatCacheRate, capabilityLabel } from "@/components/ProbeEvidence";
 import AnimatedNumber from "@/components/AnimatedNumber";
 import ResultSkeleton from "@/components/ResultSkeleton";
@@ -7,10 +8,11 @@ import Hint from "@/components/Hint";
 import { fingerprintState, presentedTotal, probabilityVisible } from "@/lib/report-view";
 import { DetectVerdict } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
-function ScoreShare({ verdict, part }: { verdict: DetectVerdict; part: string }) {
+function ScoreShare({ verdict, part, preserve = false }: { verdict: DetectVerdict; part: string; preserve?: boolean }) {
   const { t: tr } = useI18n();
   const row = verdict.total?.parts?.find((item) => item.key === part && item.applicable);
   if (!row) return null;
+  if (preserve && !row.known) return <b className="score-chip">{tr("尚未确认")}</b>;
   return (
     <b className={"score-chip" + (row.contribution === 0 ? " is-zero" : "")} title={tr("计入总分 / 系数")}>
       {row.contribution}/{row.coefficient}
@@ -65,11 +67,16 @@ export default function ResultCards({
   model,
   loading = false,
   showCache = false,
+  savedScore = false, totalLabel = "", questions, sectionContent,
 }: {
   verdict: DetectVerdict;
   model?: string;
   loading?: boolean;
   showCache?: boolean;
+  savedScore?: boolean;
+  totalLabel?: string;
+  questions?: Partial<Record<string, ReactNode>>;
+  sectionContent?: Partial<Record<string, ReactNode>>;
 }) {
   const { t: tr } = useI18n();
   const a = v.injection,
@@ -118,7 +125,7 @@ export default function ResultCards({
         });
   const diluted = fpState === "fake";
   const suspicious = fpState === "suspicious";
-  const scored: DetectVerdict = v.total
+  const scored: DetectVerdict = v.total && !savedScore
     ? {
         ...v,
         total: {
@@ -135,20 +142,21 @@ export default function ResultCards({
         <section className="result-card total-card">
           <div className="rc-head">
             <h3>{tr("总分")}</h3>
-            <b className="score-chip">{scored.total.score} / 100</b>
+            <b className="score-chip">{totalLabel || `${scored.total.score} / 100`}</b>
           </div>
           <div className="metric-line">
             <strong className={scored.total.score >= 90 ? "good" : scored.total.score >= 60 ? "score-mid" : "bad"}>
-              <AnimatedNumber value={scored.total.score} />
+              {totalLabel || <AnimatedNumber value={scored.total.score} />}
             </strong>
-            <span>/ 100</span>
+            {!totalLabel && <span>/ 100</span>}
           </div>
+          {totalLabel && <p className="muted">{totalLabel === '本次不计总分' ? '本次没有自动计分项，请展开题目人工查看。' : '仍有计分项未确认，请查看对应题目；未知不当0分。'}</p>}
           <div className="integrity-signals">
             {scored.total.parts.filter((item) => item.applicable).map((item) => (
               <div className="integrity-signal" key={item.key}>
                 <span>{tr(item.label)}</span>
                 <b className={item.contribution === item.coefficient ? "good" : "bad"}>
-                  {item.contribution}/{item.coefficient}
+                  {savedScore && !item.known ? tr("尚未确认") : `${item.contribution}/${item.coefficient}`}
                 </b>
               </div>
             ))}
@@ -159,7 +167,7 @@ export default function ResultCards({
         <div className="rc-head">
           <CardTitle title={tr("模型指纹归因")} label={tr("指纹归因说明")} text={f?.note} />
           <span className="rc-score">
-            <ScoreShare verdict={scored} part="fingerprint" />
+            <ScoreShare preserve={savedScore} verdict={scored} part="fingerprint" />
             <span className="card-number">01</span>
           </span>
         </div>
@@ -168,7 +176,7 @@ export default function ResultCards({
             <span>{tr(diluted ? "假" : "可疑")}</span>
           </div>
         )}
-        {!f ? (
+        {sectionContent?.fingerprint !== undefined ? sectionContent.fingerprint : !f ? (
           <ResultSkeleton label={loading ? tr("指纹检测中…") : tr("暂无结果")} />
         ) : (
           <>
@@ -276,16 +284,17 @@ export default function ResultCards({
             ) : null}
           </>
         )}
+      {questions?.fingerprint}
       </section>
       <section className="result-card">
         <div className="rc-head">
           <CardTitle title={tr("注入大小")} label={tr("注入估计说明")} text={a?.note} />
           <span className="rc-score">
-            <ScoreShare verdict={scored} part="injection" />
+            <ScoreShare preserve={savedScore} verdict={scored} part="injection" />
             <span className="card-number">02</span>
           </span>
         </div>
-        {!a ? (
+        {sectionContent?.injection !== undefined ? sectionContent.injection : !a ? (
           <ResultSkeleton label={loading ? tr("采样中…") : tr("暂无结果")} />
         ) : a.error ? (
           <ErrorFold text={a.error} />
@@ -357,6 +366,7 @@ export default function ResultCards({
             />
           </>
         )}
+      {questions?.injection}
       </section>
       {!v.total && integrity && (
         <section className="result-card integrity-card">
@@ -389,11 +399,11 @@ export default function ResultCards({
           <div className="rc-head">
             <h3>{tr("思维链回传")}</h3>
             <span className="rc-score">
-              <ScoreShare verdict={scored} part="thinking" />
+              <ScoreShare preserve={savedScore} verdict={scored} part="thinking" />
               <span className="card-number">03</span>
             </span>
           </div>
-          {!t ? (
+          {sectionContent?.thinking !== undefined ? sectionContent.thinking : !t ? (
             <ResultSkeleton label={loading ? tr("等待思维链…") : tr("暂无结果")} />
           ) : t.error || t.err ? (
             <ErrorFold text={t.error || t.err || ""} />
@@ -408,14 +418,15 @@ export default function ResultCards({
               <Details label={tr("探针回答")} value={t.answer} />
             </>
           )}
-        </section>
+        {questions?.thinking}
+      </section>
       )}
       <section className="result-card knowledge-card">
         <div className="rc-head">
           <h3>{tr("知识截止日期")}</h3>
           <span className="card-number">INFO</span>
         </div>
-        {!knowledge ? (
+        {sectionContent?.knowledge !== undefined ? sectionContent.knowledge : !knowledge ? (
           <ResultSkeleton label={loading ? tr("知识截止探针中…") : tr("暂无结果")} />
         ) : knowledge.error ? (
           <ErrorFold text={knowledge.error} />
@@ -443,12 +454,13 @@ export default function ResultCards({
             )}
           </>
         )}
+      {questions?.knowledge}
       </section>
       <section className="result-card">
         <div className="rc-head">
           <CardTitle title={tr("推理表现")} label={tr("评分说明")} text={q?.note} />
           <span className="rc-score">
-            <ScoreShare verdict={scored} part="iq" />
+            <ScoreShare preserve={savedScore} verdict={scored} part="iq" />
             <span className="card-number">04</span>
           </span>
         </div>
@@ -456,7 +468,7 @@ export default function ResultCards({
           <ResultSkeleton label={loading ? tr("推理测试中…") : tr("暂无结果")} />
         ) : (
           <>
-            <div className="metric-line">
+            {sectionContent?.iq ?? <div className="metric-line">
               <strong>
                 {q.score == null ? "—" : <AnimatedNumber value={q.score} />}
               </strong>
@@ -464,9 +476,9 @@ export default function ResultCards({
               <b className="score-chip">
                 {q.complete ? tr("本次测评") : tr("尚未完成")}
               </b>
-            </div>
+            </div>}
             <div className="question-list">
-              {q.per_question.map((x, index) => (
+              {questions?.iq ?? q.per_question.map((x, index) => (
                 <details key={x.id} className="question">
                   <summary>
                     <span>
@@ -528,7 +540,7 @@ export default function ResultCards({
           </>
         )}
       </section>
-      {(vision || loading) && (
+      {sectionContent?.vision !== null && (vision || loading || questions?.vision || sectionContent?.vision) && (
         <section className="result-card vision-card">
           <div className="rc-head">
             <CardTitle
@@ -537,11 +549,11 @@ export default function ResultCards({
               text={vision?.note}
             />
             <span className="rc-score">
-              <ScoreShare verdict={scored} part="vision" />
+              <ScoreShare preserve={savedScore} verdict={scored} part="vision" />
               <span className="card-number">05</span>
             </span>
           </div>
-          {!vision ? (
+          {sectionContent?.vision !== undefined ? sectionContent.vision : !vision ? (
             <ResultSkeleton label={loading ? tr("识图测试中…") : tr("暂无结果")} />
           ) : (
             <>
@@ -599,17 +611,18 @@ export default function ResultCards({
               )}
             </>
           )}
-        </section>
+        {questions?.vision}
+      </section>
       )}
       {(showCache || cache) && <section className="result-card cache-card">
         <div className="rc-head">
           <h3>{tr("缓存读写验证")}</h3>
           <span className="rc-score">
-            <ScoreShare verdict={scored} part="cache" />
+            <ScoreShare preserve={savedScore} verdict={scored} part="cache" />
             <span className="card-number">CACHE</span>
           </span>
         </div>
-        {!v.cache ? (
+        {sectionContent?.cache !== undefined ? sectionContent.cache : !v.cache ? (
           <ResultSkeleton label={loading ? tr("缓存验证中…") : tr("暂无结果")} />
         ) : v.cache.error ? (
           <ErrorFold text={v.cache.error} />
@@ -711,6 +724,7 @@ export default function ResultCards({
             />
           </>
         )}
+      {questions?.cache}
       </section>}
       {(
         [
@@ -726,12 +740,13 @@ export default function ResultCards({
                 <span className="basis-chip behavioral">DeepSeek Search API</span>
               )}
               <ScoreShare
+                preserve={savedScore}
                 verdict={scored}
                 part={title === tr("工具调用检测") ? "tools" : "web"}
               />
             </span>
           </div>
-          {!result ? (
+          {sectionContent?.[title === tr("工具调用检测") ? "tools" : "web"] !== undefined ? sectionContent[title === tr("工具调用检测") ? "tools" : "web"] : !result ? (
             <ResultSkeleton label={loading ? tr("检测中…") : tr("暂无结果")} />
           ) : result.error ? (
             <ErrorFold text={result.error} />
@@ -748,6 +763,7 @@ export default function ResultCards({
               )}
             </>
           )}
+          {questions?.[title === tr("工具调用检测") ? "tools" : "web"]}
         </section>
       ))}
     </div>

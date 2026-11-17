@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"sync"
 	"transithub/backend/internal/config"
 	"transithub/backend/internal/modules/connection_health"
@@ -21,11 +20,18 @@ type TargetReader interface {
 	ResolveAuditContext(context.Context, string, string, string, bool) (connection_health.AuditContext, error)
 }
 type activeTask struct {
-	Owner                 Owner
-	ReportID, AccountName string
-	Job                   *Job
-	Diagnostic            string
-	OperationResult       string
+	Owner                   Owner
+	ReportID, AccountName   string
+	Job                     *Job
+	Diagnostic              string
+	OperationResult         string
+	Input                   StartInput
+	Preparing               bool
+	CancelRequested         bool
+	CancelPrepare           context.CancelFunc
+	PreparationDone         chan struct{}
+	prepareContext          context.Context
+	memoryMiB, totalSeconds int
 }
 type Service struct {
 	cfg         config.Config
@@ -38,6 +44,9 @@ type Service struct {
 	admission   sync.Mutex
 	mu          sync.Mutex
 	active      *activeTask
+	waiting     []*waitingTask
+	blocked     map[reportKey]*blockedReport
+	closing     bool
 }
 
 func projectDir() string {
@@ -137,7 +146,7 @@ func (s *Service) queryJSON(ctx context.Context, op string, owner Owner, args an
 		return nil, problem(503, "query", "检测摘要读取中断，请重新读取；本操作不会重新调用模型")
 	}
 	if err := response.Body.Close(); err != nil {
-		return nil, problem(503, "query-exit", "检测数据已返回，但未能确认辅助程序退出；请核查运行状态后重试："+err.Error())
+		return nil, problem(503, "query-exit", "检测数据已返回，但辅助程序清理未完成；请核查运行状态后重试："+err.Error())
 	}
 	return json.RawMessage(data), nil
 }
@@ -184,123 +193,6 @@ type StartInput struct {
 
 var reportIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
-func (s *Service) Start(ctx context.Context, owner Owner, input StartInput) (any, error) {
-	if !reportIDPattern.MatchString(input.ReportID) || strings.TrimSpace(input.TargetID) == "" || len(input.Model) < 1 || len(input.Model) > 256 {
-		return nil, problem(422, "input", "报告编号、账号或模型名称无效，请重新打开账号并选择模型后重试")
-	}
-	if err := s.ensureInitialized(ctx); err != nil {
-		return nil, err
-	}
-	s.admission.Lock()
-	defer s.admission.Unlock()
-	previous, err := s.queryJSON(ctx, "read-report", owner, map[string]any{"reportId": input.ReportID, "request": input}, nil, false)
-	if err == nil {
-		s.mu.Lock()
-		pending := s.active
-		s.mu.Unlock()
-		if pending != nil && pending.Owner == owner && pending.ReportID == input.ReportID && (pending.Job == nil || pending.Job.Info().Exited) {
-			if err = s.recoverExited(ctx, pending); err != nil {
-				return nil, err
-			}
-			previous, err = s.queryJSON(ctx, "read-report", owner, map[string]any{"reportId": input.ReportID, "request": input}, nil, false)
-			if err != nil {
-				return nil, err
-			}
-		}
-		var result map[string]any
-		if json.Unmarshal(previous, &result) != nil || result == nil || result["reportId"] != input.ReportID {
-			return nil, problem(503, "storage", "旧报告摘要无法读取或编号不一致，请检查检测程序版本；不会重复执行模型请求")
-		}
-		result["processExited"] = s.processExited(owner, input.ReportID)
-		result["accepted"] = true
-		return result, nil
-	}
-	if asProblem(err).Status != 404 {
-		return nil, err
-	}
-	s.mu.Lock()
-	active := s.active
-	s.mu.Unlock()
-	if active != nil {
-		if active.Job == nil || active.Job.Info().Exited {
-			if err = s.recoverExited(ctx, active); err != nil {
-				return nil, err
-			}
-		} else {
-			return nil, problem(409, "busy", "当前已有检测正在执行，请等待或查看结果；本次尚未发出检测请求")
-		}
-	}
-	audit, err := s.targets.ResolveAuditContext(ctx, owner.UserID, input.TargetID, input.GroupID, true)
-	if err != nil {
-		return nil, problem(409, "account", err.Error())
-	}
-	if !audit.CanRun {
-		return nil, problem(422, "account", audit.Reason)
-	}
-	if expected(audit) != input.ExpectedContext || audit.WorkspaceID != owner.WorkspaceID {
-		return nil, problem(409, "context", "账号、分组、地址或协议已变化，请刷新账号信息后重新确认；尚未发出检测请求")
-	}
-	cred, err := checkedCredential(audit)
-	if err != nil {
-		return nil, err
-	}
-	active = &activeTask{Owner: owner, ReportID: input.ReportID, AccountName: audit.AccountName, OperationResult: "not_started"}
-	s.mu.Lock()
-	s.active = active
-	s.mu.Unlock()
-	created, err := s.queryJSON(ctx, "create-report", owner, map[string]any{
-		"reportId": input.ReportID, "targetId": input.TargetID, "groupId": input.GroupID, "model": input.Model, "selectedSectionIds": input.SelectedSectionIDs, "selectedQuestionIds": input.SelectedQuestionIDs, "expectedContext": input.ExpectedContext, "request": input,
-		"target": map[string]any{"accountId": audit.AccountID, "accountName": audit.AccountName, "groupName": audit.GroupName, "baseURL": audit.BaseURL, "protocol": audit.Protocol},
-	}, nil, false)
-	if err != nil {
-		e := asProblem(err)
-		e.ReportID = input.ReportID
-		e.OperationResult = "not_started"
-		s.mu.Lock()
-		active.Diagnostic = e.Message
-		s.mu.Unlock()
-		_ = s.recoverExited(context.WithoutCancel(ctx), active)
-		return nil, e
-	}
-	var report struct {
-		MemoryLimitMiB      int    `json:"memoryLimitMiB"`
-		TotalTimeoutSeconds int    `json:"totalTimeoutSeconds"`
-		Status              string `json:"status"`
-	}
-	if json.Unmarshal(created, &report) != nil {
-		e := problem(503, "storage", "已创建报告，但无法读取运行设置；尚未发送模型请求，请查看此报告，不要重复新建")
-		e.ReportID = input.ReportID
-		s.mu.Lock()
-		active.Diagnostic = e.Message
-		s.mu.Unlock()
-		_ = s.recoverExited(context.WithoutCancel(ctx), active)
-		return nil, e
-	}
-	job, startErr := s.runner.Start(ctx, Envelope{V: 1, Operation: "run", Owner: owner, Args: map[string]any{"reportId": input.ReportID}}, cred, report.MemoryLimitMiB, report.TotalTimeoutSeconds)
-	s.mu.Lock()
-	active.Job = job
-	active.OperationResult = "unknown"
-	s.mu.Unlock()
-	if startErr != nil {
-		s.mu.Lock()
-		active.Diagnostic = asProblem(startErr).Message
-		active.OperationResult = asProblem(startErr).OperationResult
-		s.mu.Unlock()
-		if job == nil || job.Info().Exited {
-			_ = s.recoverExited(context.WithoutCancel(ctx), active)
-		}
-		e := asProblem(startErr)
-		e.ReportID = input.ReportID
-		return nil, e
-	}
-	go func() {
-		<-job.Done
-		s.admission.Lock()
-		defer s.admission.Unlock()
-		_ = s.recoverExited(context.Background(), active)
-	}()
-	return map[string]any{"reportId": input.ReportID, "status": "running", "accepted": true, "processExited": false}, nil
-}
 func (s *Service) recoverExited(ctx context.Context, active *activeTask) error {
 	s.mu.Lock()
 	if s.active != active {
@@ -308,7 +200,11 @@ func (s *Service) recoverExited(ctx context.Context, active *activeTask) error {
 		return nil
 	}
 	job, diagnostic, operationResult := active.Job, active.Diagnostic, active.OperationResult
+	preparing, userCancelled := active.Preparing, active.CancelRequested
 	s.mu.Unlock()
+	if preparing {
+		return problem(503, "prepare", "正在结束检测准备，请稍后核查；已保存回答仍可查看")
+	}
 	if job != nil && !job.Info().Exited {
 		return problem(503, "exit", "尚未确认整个检测进程组已退出，新检测已暂停；请稍后核查运行状态")
 	}
@@ -327,7 +223,16 @@ func (s *Service) recoverExited(ctx context.Context, active *activeTask) error {
 	if operationResult == "" {
 		operationResult = "unknown"
 	}
-	_, err := s.queryJSON(ctx, "finish-interrupted", active.Owner, map[string]any{"reportId": active.ReportID, "error": map[string]any{"message": message, "step": "exit", "operationResult": operationResult}}, nil, true)
+	var err error
+	var saved json.RawMessage
+	if userCancelled && operationResult == "not_started" {
+		saved, err = s.queryJSON(ctx, "cancel-queued", active.Owner, map[string]any{"reportId": active.ReportID}, nil, true)
+	} else {
+		saved, err = s.queryJSON(ctx, "finish-interrupted", active.Owner, map[string]any{"reportId": active.ReportID, "error": map[string]any{"message": message, "step": "exit", "operationResult": operationResult}}, nil, true)
+	}
+	if err == nil {
+		err = confirmTerminal(saved)
+	}
 	if err != nil && job == nil && operationResult == "not_started" && asProblem(err).Status == 404 {
 		err = nil
 	}
@@ -353,62 +258,6 @@ func (s *Service) processExited(owner Owner, id string) bool {
 	}
 	return true
 }
-func (s *Service) Cancel(ctx context.Context, owner Owner, id string) (any, error) {
-	if err := s.ensureInitialized(ctx); err != nil {
-		return nil, err
-	}
-	if _, err := s.queryJSON(ctx, "read-report", owner, map[string]any{"reportId": id}, nil, false); err != nil {
-		return nil, err
-	}
-	s.admission.Lock()
-	defer s.admission.Unlock()
-	s.mu.Lock()
-	active := s.active
-	s.mu.Unlock()
-	if active != nil && active.ReportID == id && active.Owner == owner {
-		if active.Job != nil && !active.Job.Info().Exited {
-			if err := active.Job.Stop(ctx); err != nil {
-				return nil, problem(503, "cancel", "停止检测的请求未完成："+err.Error()+"；请核查运行状态后重试，不能确认已经停止")
-			}
-			return map[string]any{"reportId": id, "status": "stopping", "processExited": false}, nil
-		}
-		if err := s.recoverExited(ctx, active); err != nil {
-			return nil, err
-		}
-	}
-	data, err := s.queryJSON(ctx, "read-report", owner, map[string]any{"reportId": id}, nil, false)
-	if err != nil {
-		return nil, err
-	}
-	var result map[string]any
-	_ = json.Unmarshal(data, &result)
-	result["processExited"] = true
-	return result, nil
-}
-func (s *Service) Shutdown(ctx context.Context) error {
-	if !s.cfg.ChanshuiEnabled {
-		return nil
-	}
-	s.admission.Lock()
-	defer s.admission.Unlock()
-	if err := s.runner.Shutdown(ctx); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	active := s.active
-	s.mu.Unlock()
-	if active == nil {
-		return nil
-	}
-	if active.Job != nil {
-		select {
-		case <-active.Job.Done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return s.recoverExited(ctx, active)
-}
 func (s *Service) runtime(ctx context.Context, owner Owner) map[string]any {
 	result := map[string]any{"enabled": s.cfg.ChanshuiEnabled, "available": false, "memoryCeilingBytes": MemoryCeiling}
 	if !s.cfg.ChanshuiEnabled {
@@ -422,17 +271,30 @@ func (s *Service) runtime(ctx context.Context, owner Owner) map[string]any {
 	result["available"] = true
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.active != nil {
-		active := s.active
+	result["queuedCount"] = len(s.waiting)
+	if len(s.blocked) > 0 {
+		result["queueBlocked"] = true
+		result["reason"] = "有报告状态尚未保存，等待队列已暂停；请在原报告点击停止检测以重试保存"
+		for _, entry := range s.blocked {
+			if entry.Owner == owner {
+				result["reason"] = entry.Message
+				break
+			}
+		}
+	}
+	if active := s.active; active != nil {
 		if active.Owner == owner {
 			info := ExitInfo{}
 			if active.Job != nil {
 				info = active.Job.Info()
 			}
-			result["active"] = map[string]any{"reportId": active.ReportID, "accountName": active.AccountName, "status": "running", "processExited": info.Exited, "diagnostic": active.Diagnostic, "memoryPeakBytes": info.MemoryPeak, "taskMemoryMaxBytes": info.TaskMemoryMaxBytes, "sliceMemoryMaxBytes": info.SliceMemoryMaxBytes, "swapMaxBytes": info.SwapMaxBytes}
+			status := "running"
+			if active.Preparing {
+				status = "queued"
+			}
+			result["active"] = map[string]any{"reportId": active.ReportID, "accountName": active.AccountName, "model": active.Input.Model, "status": status, "processExited": info.Exited, "diagnostic": active.Diagnostic, "stopRequested": active.CancelRequested, "memoryPeakBytes": info.MemoryPeak, "taskMemoryMaxBytes": info.TaskMemoryMaxBytes, "sliceMemoryMaxBytes": info.SliceMemoryMaxBytes, "swapMaxBytes": info.SwapMaxBytes}
 		} else {
-			result["busy"] = true
-			result["reason"] = "当前已有检测正在执行，请等待后再开始"
+			result["reason"] = "另一个检测正在执行，新报告可以加入等待队列"
 		}
 	}
 	return result

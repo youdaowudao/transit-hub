@@ -30,6 +30,7 @@ async function mountLayout() {
     history: createMemoryHistory(),
     routes: [
       { path: '/admin', component: EmptyPage },
+      { path: '/admin/accounts', name: 'AdminAccounts', component: EmptyPage },
       { path: '/admin/group-rates', component: EmptyPage },
       ...['upstream', 'group-associations', 'connection-health', 'settings'].map(path => ({
         path: `/admin/${path}`, component: EmptyPage,
@@ -51,6 +52,23 @@ afterEach(() => {
 })
 
 describe('页头新版本提醒', () => {
+  it('主站侧栏从当前页面直接空上下文打开检测，移动菜单随点击收起', async () => {
+    vi.mocked(getSystemVersion).mockResolvedValue({ version: 'V3.1.16' })
+    const targets: unknown[] = []
+    const capture = (event: Event) => targets.push((event as CustomEvent).detail)
+    window.addEventListener('transithub:open-chanshui', capture)
+    try {
+      const { wrapper, router } = await mountLayout()
+      await wrapper.get('[aria-controls="admin-mobile-sidebar"]').trigger('click')
+      expect(wrapper.get('[aria-controls="admin-mobile-sidebar"]').attributes('aria-expanded')).toBe('true')
+      await wrapper.get('[data-testid="chanshui-sidebar-entry"]').trigger('click')
+      expect(targets).toEqual([{}])
+      expect(router.currentRoute.value.path).toBe('/admin')
+      expect(wrapper.get('[aria-controls="admin-mobile-sidebar"]').attributes('aria-expanded')).toBe('false')
+      await router.push('/admin/accounts'); await flushPromises()
+      expect(wrapper.find('[data-testid="chanshui-sidebar-entry"]').exists()).toBe(false)
+    } finally { window.removeEventListener('transithub:open-chanshui', capture) }
+  })
   it('有新版本时只显示灰色小字，保留原版本号和 GitHub 链接', async () => {
     vi.mocked(getSystemVersion).mockResolvedValue({ version: 'V2.9.11', updateAvailable: true })
     const { wrapper, router } = await mountLayout()

@@ -5148,6 +5148,16 @@ html[data-mode="dark"] .agent-onboard-tip {
 
 /* 调度站嵌入：沿用原卡片、侧栏和控件，只补容器内布局。 */
 .hub-app { min-width: 0; }
+.hub-nav-button { background: transparent; text-align: left; }
+.sidebar-logo.hub-nav-button, .sidebar-title .hub-nav-button { border: 0; }
+.hist-item.hub-nav-button { width: calc(100% - 6px); }
+.hub-extra-nav { display: flex; flex-direction: column; }
+.hub-read-status { min-height: 24px; font-size: 13px; color: var(--muted); margin-top: 12px; overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .hub-extra-nav { display: none; }
+  .mobile-open .hub-extra-nav { display: flex; }
+  .hub-extra-nav .nav-home { position: static; width: auto; height: auto; min-height: 46px; padding: 12px 13px; gap: 12px; font-size: 14px; justify-content: flex-start; }
+}
 .hub-main { padding: 0 24px 32px; min-width: 0; }
 .hub-main .page-shell { max-width: 1240px; }
 .hub-page-heading { padding: 18px 0 4px; }

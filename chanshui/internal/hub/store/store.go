@@ -60,7 +60,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	if e := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); e != nil {
 		return e
 	}
-	if version > 1 {
+	if version > 2 {
 		return Fail(503, "检测数据库由更新版本创建，请使用匹配版本，当前程序未修改数据", "migration")
 	}
 	for _, p := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA foreign_keys=ON", "PRAGMA cache_size=-2048"} {
@@ -68,7 +68,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return e
 		}
 	}
-	if version == 1 {
+	if version == 2 {
 		return nil
 	}
 	tx, e := s.db.BeginTx(ctx, nil)
@@ -81,10 +81,14 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS hub_questions(user_id TEXT NOT NULL,workspace_id TEXT NOT NULL,question_id TEXT NOT NULL,definition_json TEXT NOT NULL CHECK(json_valid(definition_json)),revision INTEGER NOT NULL CHECK(revision>=1),PRIMARY KEY(user_id,workspace_id,question_id))`,
 		`CREATE INDEX IF NOT EXISTS hub_questions_order ON hub_questions(user_id,workspace_id,json_extract(definition_json,'$.order'),question_id)`,
 		`CREATE TABLE IF NOT EXISTS hub_reports(report_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,workspace_id TEXT NOT NULL,target_id TEXT NOT NULL,account_id TEXT NOT NULL,account_name TEXT NOT NULL,group_id TEXT NOT NULL,group_name TEXT NOT NULL,base_url TEXT NOT NULL,protocol TEXT NOT NULL,model TEXT NOT NULL,created_at_ms INTEGER NOT NULL,updated_at_ms INTEGER NOT NULL,status TEXT NOT NULL CHECK(status IN('queued','running','done','partial','cancelled','interrupted')),request_json TEXT NOT NULL CHECK(json_valid(request_json)),snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json)),error_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(error_json)),summary_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(summary_json)))`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS hub_reports_one_active ON hub_reports((1)) WHERE status IN('queued','running')`,
+		`DROP INDEX IF EXISTS hub_reports_one_active`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS hub_reports_one_active ON hub_reports((1)) WHERE status='running'`,
+		`CREATE INDEX IF NOT EXISTS hub_reports_queue_order ON hub_reports(created_at_ms,report_id) WHERE status='queued'`,
 		`CREATE INDEX IF NOT EXISTS hub_reports_owner_date ON hub_reports(user_id,workspace_id,created_at_ms DESC,report_id DESC)`,
 		`CREATE TABLE IF NOT EXISTS hub_items(report_id TEXT NOT NULL REFERENCES hub_reports(report_id),item_id TEXT NOT NULL,section_id TEXT NOT NULL,order_index INTEGER NOT NULL,status TEXT NOT NULL CHECK(status IN('queued','running','done','error','cancelled')),attempts INTEGER NOT NULL DEFAULT 0,started_at_ms INTEGER NOT NULL DEFAULT 0,completed_at_ms INTEGER NOT NULL DEFAULT 0,result_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(result_json)),question_json TEXT NOT NULL CHECK(json_valid(question_json)),image BLOB,PRIMARY KEY(report_id,item_id))`,
-		`CREATE INDEX IF NOT EXISTS hub_items_order ON hub_items(report_id,order_index,item_id)`, `PRAGMA user_version=1`} {
+		`CREATE INDEX IF NOT EXISTS hub_items_order ON hub_items(report_id,order_index,item_id)`,
+		`UPDATE hub_settings SET settings_json=json_set(settings_json,'$.concurrency',CASE WHEN json_extract(settings_json,'$.concurrency')=2 THEN 32 ELSE json_extract(settings_json,'$.concurrency') END,'$.totalTimeoutSeconds',CASE WHEN json_extract(settings_json,'$.totalTimeoutSeconds')=600 THEN 3600 ELSE json_extract(settings_json,'$.totalTimeoutSeconds') END),revision=revision+1 WHERE json_extract(settings_json,'$.concurrency')=2 OR json_extract(settings_json,'$.totalTimeoutSeconds')=600`,
+		`PRAGMA user_version=2`} {
 		if _, e = tx.ExecContext(ctx, q); e != nil {
 			return e
 		}

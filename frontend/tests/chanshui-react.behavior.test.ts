@@ -73,7 +73,7 @@ describe('父页真实HTTP到原检测页面的回收警告', () => {
     expect(incoming.some(m => m.kind === 'chanshui.response' && m.ok && m.value?.revision === 2 && m.warning?.message === cleanupWarning.message)).toBe(true)
     expect(fetch.mock.calls.filter(([, init]) => init.method === 'PUT')).toHaveLength(1)
     expect(outgoing.some(m => m.op === 'start' || m.op === 'models')).toBe(false)
-    await run(() => (container.querySelector('.hub-history-list button') as HTMLButtonElement).click()); for (let i = 0; i < 5; i++) await tick()
+    await run(() => (container.querySelector('.sidebar-list button[data-report-id]') as HTMLButtonElement).click()); for (let i = 0; i < 5; i++) await tick()
     expect(container.textContent).toContain('已经完整读出的回答')
     partial = true
     await click('核查运行状态'); await tick()
@@ -86,6 +86,17 @@ describe('父页真实HTTP到原检测页面的回收警告', () => {
 })
 
 describe('检测设置实际读写和预设删除', () => {
+  it('可保存64并发及7200秒，超出并发范围时保留草稿且不发送保存', async () => {
+    const call = vi.fn(async (op: string, params: Record<string, unknown> = {}) => op === 'settings' ? settings : op === 'save-settings' ? { ...params, revision: 2 } : { items: [] })
+    await run(() => root.render(React.createElement(HubSettings, { call, onDirtyChange: () => undefined }))); await tick()
+    await fill('上游并发', '64'); await fill('任务总时长', '7200')
+    await click('保存运行设置')
+    expect(call.mock.calls.find(([op]) => op === 'save-settings')?.[1]).toMatchObject({ concurrency: 64, totalTimeoutSeconds: 7200 })
+    expect(container.textContent).toContain('运行设置已保存，仅供新任务使用')
+    await fill('上游并发', '65'); await click('保存运行设置')
+    expect(container.textContent).toContain('上游并发必须为1～64的整数')
+    expect(call.mock.calls.filter(([op]) => op === 'save-settings')).toHaveLength(1)
+  })
   it('所有分类可展开、预设可删除，新增题保存后出现在回答配置列表', async () => {
     const defs = HUB_KINDS.map((kind, index): HubQuestion => ({ id: kind.value === 'iq' ? 'Q1' : kind.value, title: `${kind.label}预设`, kind: kind.value, enabled: true, order: index * 100, maxScore: kind.value === 'iq' ? 6 : 0, template: '原题正文', parameters: { generator: 'static' }, judge: { type: kind.value === 'iq' ? 'legacy' : 'manual', expectedText: '不叫醒' }, revision: 1 }))
     const presetDefinitions = structuredClone(defs)
@@ -235,14 +246,14 @@ describe('原结果卡片的白话展示和未知边界', () => {
 describe('不适用和未抽到的题目', () => {
   it('活动报告仍显示真实等待状态，旧数据中的字符串跳过结果也不会误显示等待', async () => {
     const base = { itemId: 'tools', definition: { title: '工具检测', kind: 'tools', maxScore: 0, judge: { type: 'manual' } }, prompt: '', expected: '' }
-    for (const [status, label] of [['queued', '准备中'], ['running', '检测中']]) {
+    for (const [status, label] of [['queued', '等待中'], ['running', '检测中']]) {
       await run(() => root.render(React.createElement(HubItemCard, { item: { ...base, status }, reportId: 'a'.repeat(32), reportStatus: 'running', call: async () => ({}) })))
-      expect(container.querySelector('.rc-head')?.textContent).toContain(label)
-      expect(container.querySelector('.rc-head')?.textContent).not.toContain('未完成')
+      expect(container.querySelector('details.question > summary')?.textContent).toContain(label)
+      expect(container.querySelector('details.question > summary')?.textContent).not.toContain('未完成')
     }
     for (const [judgment, label] of [['not_asked', '本次未提问'], ['not_applicable', '不适用']]) {
       await run(() => root.render(React.createElement(HubItemCard, { item: { ...base, status: 'running', result: { judgment } }, reportId: 'a'.repeat(32), reportStatus: 'interrupted', call: async () => ({}) })))
-      expect(container.querySelector('.rc-head')?.textContent).toContain(label)
+      expect(container.querySelector('details.question > summary')?.textContent).toContain(label)
       expect(container.textContent).not.toContain('本项正在检测')
     }
   })
@@ -250,32 +261,32 @@ describe('不适用和未抽到的题目', () => {
     const make = (status: string, judgment?: Record<string, unknown>) => ({ itemId: status, definition: { title: '检测项', kind: 'tools', maxScore: 0, judge: { type: 'manual' } }, prompt: '', expected: '', status, result: judgment ? { judgment } : undefined })
     for (const status of ['queued', 'running']) {
       await run(() => root.render(React.createElement(HubItemCard, { item: make(status), reportId: 'a'.repeat(32), reportStatus, call: async () => ({}) })))
-      expect(container.querySelector('.rc-head')?.textContent).toContain('未完成')
+      expect(container.querySelector('details.question > summary')?.textContent).toContain('未完成')
       expect(container.textContent).not.toContain('准备中')
       expect(container.textContent).not.toContain('正在检测')
       expect(container.textContent).toContain(status === 'queued' ? '此项未执行' : '此项未完成')
       if (status === 'running') expect(container.textContent).toContain('可能已计费')
     }
     await run(() => root.render(React.createElement(HubItemCard, { item: make('done', { status: 'known' }), reportId: 'a'.repeat(32), reportStatus, call: async () => ({}) })))
-    expect(container.querySelector('.rc-head')?.textContent).toContain('完成')
-    expect(container.querySelector('.rc-head')?.textContent).not.toContain('未完成')
+    expect(container.querySelector('details.question > summary')?.textContent).toContain('完成')
+    expect(container.querySelector('details.question > summary')?.textContent).not.toContain('未完成')
     await run(() => root.render(React.createElement(HubItemCard, { item: { ...make('error'), result: { error: '已保存的具体上游错误' } }, reportId: 'a'.repeat(32), reportStatus, call: async () => ({}) })))
-    expect(container.querySelector('.rc-head')?.textContent).toContain('失败')
+    expect(container.querySelector('details.question > summary')?.textContent).toContain('失败')
     expect(container.textContent).toContain('已保存的具体上游错误')
     for (const [status, label] of [['not_asked', '本次未提问'], ['not_applicable', '不适用']]) {
       await run(() => root.render(React.createElement(HubItemCard, { item: make('queued', { status }), reportId: 'a'.repeat(32), reportStatus, call: async () => ({}) })))
-      expect(container.querySelector('.rc-head')?.textContent).toContain(label)
-      expect(container.querySelector('.rc-head')?.textContent).not.toContain('未完成')
+      expect(container.querySelector('details.question > summary')?.textContent).toContain(label)
+      expect(container.querySelector('details.question > summary')?.textContent).not.toContain('未完成')
     }
   })
   it('不把不适用/未提问显示成完成检测，也不制造缺证据错误或人工总分', async () => {
     const item = { itemId: 'thinking', definition: { title: '思维摘要', kind: 'thinking', maxScore: 0, judge: { type: 'manual' } }, prompt: '', expected: '', status: 'done', result: { judgment: { status: 'not_applicable', reason: '此项仅适用Claude，本次没有发送请求' } } }
     await run(() => root.render(React.createElement(HubItemCard, { item, reportId: 'a'.repeat(32), call: async () => ({}) })))
-    expect(container.querySelector('.rc-head')?.textContent).toContain('不适用')
+    expect(container.querySelector('details.question > summary')?.textContent).toContain('不适用')
     expect(container.textContent).not.toContain('尚无可确认的检测证据')
     const skipped = { ...item, definition: { ...item.definition, kind: 'knowledge' }, result: { judgment: { status: 'not_asked', reason: '本次事件题未抽到，不作为答错' } } }
     await run(() => root.render(React.createElement(HubItemCard, { item: skipped, reportId: 'a'.repeat(32), call: async () => ({}) })))
-    expect(container.querySelector('.rc-head')?.textContent).toContain('本次未提问')
+    expect(container.querySelector('details.question > summary')?.textContent).toContain('本次未提问')
     expect(container.textContent).not.toContain('尚无可确认的检测证据')
     await run(() => root.render(React.createElement(HubReportSummary, { summary: { total: { score: null, complete: true, parts: [{ label: '推理', applicable: false, known: false }] } } })))
     expect(container.querySelector('.metric-line')?.textContent).toContain('本次不计总分')
@@ -322,7 +333,7 @@ describe('手动运行状态核查', () => {
       if (m.op === 'context') value = { ...base, workspaceId: 'w', groupId: 'gpt', baseURL: 'https://safe.invalid', protocol: 'messages', canRun: true, expectedContext: { targetId: 'a', workspaceId: 'w' } }
       if (m.op === 'models') value = { models: [{ id: 'gpt-6.1-sol' }] }
       if (m.op === 'reports') value = { items: [] }
-      if (m.op === 'items') value = { items: [{ itemId: p.cursor ? 'page-two' : 'page-one', sectionId: 'iq', definition: { title: p.cursor ? '第二页题' : '第一页题', kind: 'iq', maxScore: 0, judge: { type: 'manual' } }, prompt: p.cursor ? '第二页实际题干' : '第一页实际题干', expected: '', status: 'done', result: { answer: p.cursor ? '第二页回答' : '第一页回答', judgment: 'unreviewed' } }], nextCursor: p.cursor ? '' : 'page-two' }
+      if (m.op === 'items') value = { items: [{ itemId: p.cursor ? 'page-two' : 'page-one', sectionId: 'iq', definition: { title: p.cursor ? '第二页题' : '第一页题', kind: 'iq', maxScore: 0, judge: { type: 'manual' } }, prompt: p.cursor ? '第二页实际题干' : '第一页实际题干', expected: '', status: 'done', result: { answer: (p.reportId !== base.reportId ? '旧报告' : '当前任务') + (p.cursor ? '第二页回答' : '第一页回答'), judgment: 'unreviewed' } }], nextCursor: p.cursor ? '' : 'page-two' }
       if (m.op === 'report') {
         if (state.phase === 'failed') { respond({ kind: 'chanshui.response', v: 1, generation: m.generation, id: m.id, ok: false, error: { message: '夹具模拟状态读取中断，请重试读取' } }); return }
         const oldReport = p.reportId !== base.reportId
@@ -370,10 +381,10 @@ describe('手动运行状态核查', () => {
     expect(Array.from(container.querySelectorAll('button')).find(b => b.textContent?.trim() === '开始检测')?.disabled).toBe(false)
     expect(calls.some(c => c.op === 'start')).toBe(false)
   })
-  it('其他工作区任务结束后可手动核查解除busy，不新增轮询或再次调用模型', async () => {
+  it('其他工作区任务执行中可提交等待，核查结束后恢复直接开始且不重复调用模型', async () => {
     const { state, calls, pendingPolls } = await setup(true, true)
     expect(container.textContent).toContain('当前已有检测正在执行')
-    expect(Array.from(container.querySelectorAll('button')).find(b => b.textContent?.trim() === '开始检测')?.disabled).toBe(true)
+    expect(Array.from(container.querySelectorAll('button')).find(b => b.textContent?.trim() === '加入等待队列')?.disabled).toBe(false)
     expect(pendingPolls).toHaveLength(0)
     state.busy = false; state.phase = 'recovered'
     await click('核查运行状态')
@@ -404,7 +415,7 @@ describe('手动运行状态核查', () => {
     expect(container.textContent).toContain('已结束旧报告')
     expect(container.textContent).toContain('当前任务：核查账号')
     await click('新建检测')
-    expect(Array.from(container.querySelectorAll('button')).find(b => b.textContent?.trim() === '开始检测')?.disabled).toBe(true)
+    expect(Array.from(container.querySelectorAll('button')).find(b => b.textContent?.trim() === '加入等待队列')?.disabled).toBe(false)
     expect(calls.some(c => c.op === 'start')).toBe(false)
   })
 
@@ -424,36 +435,37 @@ describe('手动运行状态核查', () => {
     expect(calls.some(c => c.op === 'start')).toBe(false)
   })
 
-  it('翻到下一页后，旧页迟到的成功结果不能写回同一报告', async () => {
-    const { state, poll, heldItems } = await setup()
+  it('连续读取自动覆盖全部批次，换报告后旧任务迟到成功不能写回新报告', async () => {
+    const { state, heldItems } = await setup()
     state.holdNextItems = true
     await click('查看该任务')
     expect(heldItems).toHaveLength(1)
-    // A newer refresh of page one completes while its first read is delayed.
-    await poll(2000)
-    expect(container.textContent).toContain('第一页实际题干')
-    await click('下一页回答')
-    expect(container.textContent).toContain('第二页实际题干')
+    await click('查找更早记录')
+    await fill('按报告编号查找', 'd'.repeat(32))
+    await click('打开此报告')
+    expect(container.textContent).toContain('旧报告第一页回答')
+    expect(container.textContent).toContain('旧报告第二页回答')
+    expect(container.textContent).not.toContain('下一页回答')
     await run(() => heldItems[0]()); await tick()
-    expect(container.textContent).toContain('第二页实际题干')
-    expect(container.textContent).not.toContain('第一页实际题干')
+    expect(container.textContent).toContain('旧报告第二页回答')
+    expect(container.textContent).not.toContain('当前任务第一页回答')
   })
 
-  it('旧页迟到的错误和finally不能污染新页或提前结束新页加载', async () => {
-    const { state, poll, heldItems } = await setup()
+  it('换报告后旧任务迟到错误和finally不能污染新报告或提前结束加载', async () => {
+    const { state, heldItems } = await setup()
     state.holdNextItems = true
     await click('查看该任务')
-    await poll(2000)
+    await click('查找更早记录')
+    await fill('按报告编号查找', 'd'.repeat(32))
     state.holdNextItems = true
-    await click('下一页回答')
+    await click('打开此报告')
     expect(heldItems).toHaveLength(2)
-    expect(container.textContent).toContain('正在读取本页回答')
-    await run(() => heldItems[0]('旧第一页读取失败，不应显示在第二页')); await tick()
-    expect(container.textContent).not.toContain('旧第一页读取失败')
-    expect(container.textContent).toContain('正在读取本页回答')
-    expect(Array.from(container.querySelectorAll('button')).find(b => b.textContent?.trim() === '上一页回答')?.disabled).toBe(true)
+    expect(container.textContent).toContain('正在读取本次报告的题目与回答')
+    await run(() => heldItems[0]('旧任务读取失败，不应显示在新报告')); await tick()
+    expect(container.textContent).not.toContain('旧任务读取失败')
+    expect(container.textContent).toContain('正在读取本次报告的题目与回答')
     await run(() => heldItems[1]()); await tick()
-    expect(container.textContent).toContain('第二页实际题干')
-    expect(container.textContent).not.toContain('正在读取本页回答')
+    expect(container.textContent).toContain('旧报告第二页回答')
+    expect(container.textContent).not.toContain('正在读取本次报告的题目与回答')
   })
 })

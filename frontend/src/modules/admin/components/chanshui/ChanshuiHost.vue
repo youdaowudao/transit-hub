@@ -18,9 +18,10 @@ const targetSnapshot = (): ChanshuiTargetInput => ({
 let generation = 0, timeout: ReturnType<typeof setTimeout> | undefined, loadingTimer: ReturnType<typeof setTimeout> | undefined
 const requests = new Map<string, AbortController>()
 let serial = Promise.resolve()
+let stopGeneration: number | undefined
 const send = (kind: string, data: Record<string, unknown> = {}) => iframe.value?.contentWindow?.postMessage({ kind, v: 1, generation, ...data }, window.location.origin)
 const clearTimers = () => { if (timeout) clearTimeout(timeout); if (loadingTimer) clearTimeout(loadingTimer) }
-const invalidate = () => { generation++; for (const c of requests.values()) c.abort(); requests.clear(); serial = Promise.resolve() }
+const invalidate = () => { generation++; for (const c of requests.values()) c.abort(); requests.clear(); serial = Promise.resolve(); stopGeneration = undefined }
 const close = () => { dirty.value = false; invalidate(); clearTimers(); open.value = false; minimized.value = false; ready.value = false; error.value = ''; iframe.value = null }
 const requestClose = () => { if (!dirty.value || window.confirm('检测设置有未保存的修改，确定关闭并放弃吗？已经开始的任务不会停止。')) close() }
 const arm = () => {
@@ -50,7 +51,12 @@ const onMessage = (event: MessageEvent) => {
   if (message.kind === 'chanshui.DIRTY' && message.generation === generation && typeof message.dirty === 'boolean') { dirty.value = message.dirty; return }
   if (message.kind !== 'chanshui.request' || message.generation !== generation || typeof message.id !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(message.id) || typeof message.op !== 'string') return
   const scope = generation, requestId = message.id, workspaceId = props.workspaceId
-  if (requests.has(requestId) || requests.size >= 12) return
+  if (requests.has(requestId)) return
+  const priorityStop = message.op === 'cancel'
+  if ((!priorityStop && requests.size >= 12) || (priorityStop && stopGeneration === generation)) {
+    send('chanshui.response', { id: requestId, ok: false, error: { message: priorityStop ? '停止请求正在处理，已保存回答仍可查看；请稍候核查运行状态。' : '正在处理其他页面操作，已显示内容仍可查看；请稍后重试读取。', status: 429 } })
+    return
+  }
   let params: Record<string, unknown>
   try {
     params = message.params && typeof message.params === 'object' && !Array.isArray(message.params) ? message.params : {}
@@ -58,17 +64,19 @@ const onMessage = (event: MessageEvent) => {
     chanshuiRequestSpec(message.op, params)
   } catch (e) { send('chanshui.response', { id: requestId, ok: false, error: { message: e instanceof Error ? e.message : '此操作无法识别。' } }); return }
   const controller = new AbortController(); requests.set(requestId, controller)
+  if (priorityStop) stopGeneration = scope
   const run = async () => {
-    if (scope !== generation) { requests.delete(requestId); return }
+    if (scope !== generation) { requests.delete(requestId); if (priorityStop && stopGeneration === scope) stopGeneration = undefined; return }
     try {
       let warning: Record<string, unknown> | undefined
       const value = await requestChanshui(message.op, params, workspaceId, controller.signal, value => { warning = value })
       if (scope === generation) send('chanshui.response', { id: requestId, ok: true, value, ...(warning ? { warning } : {}) })
     } catch (e) {
       if (scope === generation) send('chanshui.response', { id: requestId, ok: false, error: { ...(e instanceof ChanshuiError ? e.details : {}), message: e instanceof Error ? e.message : '读取结果时中断，请重试读取。', status: e instanceof ChanshuiError ? e.status : 0 } })
-    } finally { requests.delete(requestId) }
+    } finally { requests.delete(requestId); if (priorityStop && stopGeneration === scope) stopGeneration = undefined }
   }
-  serial = serial.then(run, run)
+  if (priorityStop) void run()
+  else serial = serial.then(run, run)
 }
 watch(() => props.workspaceId, close)
 let unsubscribe: (() => void) | undefined

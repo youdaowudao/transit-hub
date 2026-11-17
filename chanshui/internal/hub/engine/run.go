@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -69,6 +70,13 @@ func clean(value any, secrets ...string) any {
 	}
 	return visit(v)
 }
+
+type itemAttemptContextKey struct{}
+type itemAttempts struct {
+	ID    string
+	Count atomic.Int64
+}
+
 func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Credential, cfg Config) error {
 	if e := validateCredential(c); e != nil {
 		return e
@@ -83,99 +91,151 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 	if report.Status != "queued" {
 		return store.Fail(409, "本次报告已受理或结束，不会重复调用模型", "run")
 	}
+	if err := snap.Settings.Validate(); err != nil {
+		return fmt.Errorf("本次报告的运行设置无效，未发送检测请求：%w", err)
+	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(snap.Settings.TotalTimeoutSeconds)*time.Second)
 	defer cancel()
 	if e = s.BeginRun(ctx, o, id); e != nil {
 		return e
 	}
-	if cfg.Notify != nil {
-		cfg.Notify("accepted", map[string]any{"reportId": id})
+	var notifyMu sync.Mutex
+	notify := func(event string, data map[string]any) {
+		if cfg.Notify != nil {
+			notifyMu.Lock()
+			defer notifyMu.Unlock()
+			cfg.Notify(event, data)
+		}
 	}
+	notify("accepted", map[string]any{"reportId": id})
 	t, tr := NewTransport(snap.Settings.Concurrency, snap.Settings.MaxAttempts, cfg.Deployment.AllowPrivateTargets, cfg.Transport)
 	defer tr.CloseIdleConnections()
 	g := client(c, t, snap.Settings.Retries)
-	var currentID atomic.Value
-	currentID.Store("")
-	t.BeforeAttempt = func(callCtx context.Context) error { return s.RecordAttempt(callCtx, o, id, currentID.Load().(string)) }
+	var resultMu sync.Mutex
 	hadError := false
 	itemResults := map[string]itemResult{}
-	knowledgeDefs := []questions.Generated{}
 	fatalStorage := error(nil)
-	execute := func(q questions.Generated) (itemResult, error) {
-		currentID.Store(q.Definition.ID)
-		if e := s.BeginItem(ctx, o, id, q.Definition.ID); e != nil {
-			return itemResult{}, e
+	failStorage := func(err error) {
+		resultMu.Lock()
+		if fatalStorage == nil {
+			fatalStorage = err
 		}
-		before := t.Attempts.Load()
+		resultMu.Unlock()
+		cancel()
+	}
+	t.BeforeAttempt = func(callCtx context.Context) error {
+		item, ok := callCtx.Value(itemAttemptContextKey{}).(*itemAttempts)
+		if !ok {
+			return fmt.Errorf("检测请求没有对应题目，未发送上游请求")
+		}
+		if err := s.RecordAttempt(callCtx, o, id, item.ID); err != nil {
+			if ctx.Err() == nil {
+				failStorage(err)
+			}
+			return err
+		}
+		item.Count.Add(1)
+		return nil
+	}
+	execute := func(q questions.Generated) (itemResult, error) {
+		if err := ctx.Err(); err != nil {
+			return itemResult{}, err
+		}
+		item := &itemAttempts{ID: q.Definition.ID}
+		itemCtx := context.WithValue(ctx, itemAttemptContextKey{}, item)
+		if err := s.BeginItem(itemCtx, o, id, q.Definition.ID); err != nil {
+			if ctx.Err() == nil {
+				failStorage(err)
+			}
+			return itemResult{}, err
+		}
 		started := time.Now()
-		result, err := runItem(ctx, s, o, id, report.Model, q, g, cfg)
+		result, err := runItem(itemCtx, s, o, id, report.Model, q, g, cfg)
 		result.Ms = time.Since(started).Milliseconds()
-		result.Attempts = int(t.Attempts.Load() - before)
+		result.Attempts = int(item.Count.Load())
 		if err != nil {
 			result.Error = err.Error()
 			result.Judgment = questions.Judgment{Status: "unknown", Max: q.Definition.MaxScore, Reason: "本项未完成，请人工查看已保存的错误"}
-			hadError = true
-		}
-		if result.Judgment.Status == "unknown" {
-			hadError = true
 		}
 		result.Metrics = trimMetrics(result.Metrics)
 		cleaned := clean(result, c.Key)
 		raw, _ := json.Marshal(cleaned)
 		if len(raw) > 256<<10 {
 			result = itemResult{Error: "本题结果超过256KiB，已停止完整保存；本题未完成，不使用截断内容判分", Judgment: questions.Judgment{Status: "unknown", Max: q.Definition.MaxScore}, Attempts: result.Attempts, Ms: result.Ms}
-			if len(raw) > 64<<10 {
-				result.Evidence = string(raw[:64<<10])
-			} else {
-				result.Evidence = string(raw)
-			}
+			result.Evidence = string(raw[:min(len(raw), 64<<10)])
 			cleaned = clean(result, c.Key)
-			hadError = true
 		}
 		status := "done"
 		if result.Error != "" {
 			status = "error"
 		}
-		saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(ctx), 11*time.Second)
+		saveCtx, saveCancel := context.WithTimeout(context.WithoutCancel(itemCtx), 11*time.Second)
 		defer saveCancel()
-		if e := s.SaveItem(saveCtx, o, id, q.Definition.ID, status, cleaned, result.Attempts); e != nil {
-			return result, e
+		if err := s.SaveItem(saveCtx, o, id, q.Definition.ID, status, cleaned, result.Attempts); err != nil {
+			failStorage(err)
+			return result, err
 		}
-		if cfg.Notify != nil {
-			cfg.Notify("item-saved", map[string]any{"reportId": id, "itemId": q.Definition.ID})
-		}
+		notify("item-saved", map[string]any{"reportId": id, "itemId": q.Definition.ID})
 		compact := itemResult{Judgment: result.Judgment, Error: result.Error, Recognized: result.Recognized}
 		if q.Definition.Kind == "fingerprint_behavior" {
 			compact.Answer = result.Answer
 		}
+		resultMu.Lock()
 		itemResults[q.Definition.ID] = compact
+		if result.Error != "" || result.Judgment.Status == "unknown" {
+			hadError = true
+		}
+		resultMu.Unlock()
 		return result, nil
 	}
+	knowledgeDefs := []questions.Generated{}
+	work := []func() error{}
 	for _, q := range snap.Questions {
 		if q.Definition.Kind == "knowledge" {
 			knowledgeDefs = append(knowledgeDefs, q)
 			continue
 		}
-		if ctx.Err() != nil {
-			hadError = true
-			break
-		}
-		_, e := execute(q)
-		if e != nil {
-			fatalStorage = e
-			cancel()
-			break
-		}
-
+		work = append(work, func() error { _, err := execute(q); return err })
 	}
 	knowledgeSummary := map[string]any{"status": "not_selected"}
-	if fatalStorage == nil && ctx.Err() == nil && len(knowledgeDefs) > 0 {
-		knowledgeSummary, e = runKnowledge(ctx, s, o, id, knowledgeDefs, execute)
-		if e != nil {
-			fatalStorage = e
-			cancel()
+	if len(knowledgeDefs) > 0 {
+		work = append(work, func() error {
+			value, err := runKnowledge(ctx, s, o, id, knowledgeDefs, execute)
+			if err == nil {
+				knowledgeSummary = value
+			}
+			return err
+		})
+	}
+	jobs := make(chan func() error)
+	var workers sync.WaitGroup
+	for i := 0; i < min(len(work), snap.Settings.Concurrency); i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for job := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				if err := job(); err != nil {
+					if ctx.Err() == nil {
+						failStorage(err)
+					}
+					return
+				}
+			}
+		}()
+	}
+dispatch:
+	for _, job := range work {
+		select {
+		case jobs <- job:
+		case <-ctx.Done():
+			break dispatch
 		}
 	}
+	close(jobs)
+	workers.Wait()
 	summary := map[string]any{"complete": !hadError && ctx.Err() == nil, "attempts": min(t.Attempts.Load(), int64(snap.Settings.MaxAttempts)), "knowledge": knowledgeSummary, "upstreamVersion": snap.UpstreamVersion}
 	for key, value := range summarize(snap.Questions, itemResults) {
 		summary[key] = value
@@ -197,9 +257,7 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 	if e = s.Finish(finishCtx, o, id, status, summary, detail); e != nil {
 		return fmt.Errorf("结果结束状态保存失败：%w", e)
 	}
-	if cfg.Notify != nil {
-		cfg.Notify("persisted", map[string]any{"reportId": id, "status": status})
-	}
+	notify("persisted", map[string]any{"reportId": id, "status": status})
 	return nil
 }
 func trimMetrics(m *gateway.Metrics) *gateway.Metrics {

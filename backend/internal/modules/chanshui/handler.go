@@ -267,20 +267,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var result map[string]any
 		_ = json.Unmarshal(data, &result)
-		result["processExited"] = s.processExited(owner, parts[1])
-		s.mu.Lock()
-		if s.active != nil && s.active.Owner == owner && s.active.ReportID == parts[1] {
-			if s.active.Diagnostic != "" {
-				result["diagnostic"] = s.active.Diagnostic
-			}
-			if s.active.Job != nil {
-				info := s.active.Job.Info()
-				result["taskMemoryMaxBytes"] = info.TaskMemoryMaxBytes
-				result["sliceMemoryMaxBytes"] = info.SliceMemoryMaxBytes
-				result["swapMaxBytes"] = info.SwapMaxBytes
-			}
-		}
-		s.mu.Unlock()
+		s.decorateReport(owner, parts[1], result)
 		reply(w, 200, result)
 		return
 	case len(parts) == 3 && parts[0] == "reports" && parts[2] == "items" && r.Method == http.MethodGet:

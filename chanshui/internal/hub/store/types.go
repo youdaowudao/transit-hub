@@ -29,16 +29,19 @@ type Settings struct {
 	Revision            int `json:"revision"`
 }
 
-func DefaultSettings() Settings { return Settings{120, 600, 2, 4096, 0, 128, 256, 1} }
+// Leave room for outer process cleanup before converting seconds to Duration.
+const MaxTotalTimeoutSeconds = 9223371976
+
+func DefaultSettings() Settings { return Settings{120, 3600, 32, 4096, 0, 128, 256, 1} }
 func (s Settings) Validate() error {
 	if s.TimeoutSeconds < 10 || s.TimeoutSeconds > 600 {
 		return fmt.Errorf("单请求超时必须为10～600秒")
 	}
-	if s.TotalTimeoutSeconds < 60 || s.TotalTimeoutSeconds > 1800 || s.TimeoutSeconds > s.TotalTimeoutSeconds {
-		return fmt.Errorf("任务总时长必须为60～1800秒，且不少于单请求超时")
+	if s.TotalTimeoutSeconds < 60 || s.TotalTimeoutSeconds > MaxTotalTimeoutSeconds || s.TimeoutSeconds > s.TotalTimeoutSeconds {
+		return fmt.Errorf("任务总时长必须为60～%d秒，且不少于单请求超时", MaxTotalTimeoutSeconds)
 	}
-	if s.Concurrency < 1 || s.Concurrency > 2 {
-		return fmt.Errorf("上游并发仅支持1或2")
+	if s.Concurrency < 1 || s.Concurrency > 64 {
+		return fmt.Errorf("上游并发必须为1～64")
 	}
 	if s.MaxOutputTokens < 128 || s.MaxOutputTokens > 16384 {
 		return fmt.Errorf("普通推理输出预算必须为128～16384")
@@ -120,6 +123,7 @@ type Summary struct {
 }
 type Report struct {
 	Summary
+	StartedAtMs         int64           `json:"startedAtMs"`
 	Request             json.RawMessage `json:"request"`
 	Settings            Settings        `json:"settings"`
 	ItemCounts          map[string]int  `json:"itemCounts"`

@@ -26,6 +26,22 @@ const captureClonedPosts = (frame: HTMLIFrameElement) => {
 beforeEach(() => { state.request.mockReset().mockResolvedValue({ items: [] }); wrapper = mount(ChanshuiHost, { attachTo: document.body, props: { workspaceId: 'workspace-a' }, global: { stubs: { Teleport: false } } }) })
 afterEach(() => { wrapper?.unmount(); useChanshuiLauncher().clear(); localStorage.removeItem(authTokenStorageKey); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.innerHTML = '' })
 describe('唯一检测弹窗', () => {
+  it('普通RPC已满12项时停止仍优先送达，不等待普通查询释放', async () => {
+    await launch()
+    const frame = portal().get('iframe').element as HTMLIFrameElement
+    const { post } = captureClonedPosts(frame)
+    message(frame, { kind: 'chanshui.READY', v: 1 }); await flushPromises()
+    const generation = post.mock.calls[0][0].generation
+    let release!: (value: unknown) => void
+    state.request.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    for (let i = 0; i < 12; i++) message(frame, { kind: 'chanshui.request', v: 1, generation, id: `ordinary-${i}`, op: 'report', params: { reportId: 'a'.repeat(32) } })
+    await flushPromises()
+    try {
+      message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'priority-stop', op: 'cancel', params: { reportId: 'a'.repeat(32) } })
+      await flushPromises()
+      expect(state.request.mock.calls.some(([op]) => op === 'cancel')).toBe(true)
+    } finally { release({}); await flushPromises() }
+  })
   it('有工作区时入口默认可见，运行状态接口失败不隐藏入口，也不预读接口', async () => {
     const launcher = useChanshuiLauncher()
     launcher.clear()

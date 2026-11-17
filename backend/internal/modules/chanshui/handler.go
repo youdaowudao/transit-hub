@@ -427,13 +427,13 @@ func (s *Service) bankInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	file, e := os.Open(filepath.Join(s.webDir, "bank-manifest.json"))
 	if e != nil {
-		fail(w, problem(503, "package", "参考库说明文件缺失，请重新构建并安装完整检测包"))
+		fail(w, problem(503, "package", "参考库说明文件缺失，请重新执行整站升级，并查看检测参考库构建步骤"))
 		return
 	}
 	defer file.Close()
 	info, e := file.Stat()
 	if e != nil || info.Size() > 128*1024 {
-		fail(w, problem(503, "package", "参考库说明文件大小不符合要求，请重新安装完整检测包"))
+		fail(w, problem(503, "package", "参考库说明文件大小不符合要求，请重新执行整站升级，并查看检测参考库构建步骤"))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

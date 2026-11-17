@@ -1,32 +1,26 @@
-# 构建与启用
+# 统一构建与运行
 
-本功能在浏览器里显示页面，向模型发请求的检测器在服务器按需执行。没有空闲检测 daemon 或新监听端口；页面收起/关闭不会取消任务。报告保存后检测器自行退出，报告和题库长期保存在 SQLite。
+模型检测随调度站现有的一键源码升级构建和安装，不需要单独的本机构建、Release包或启用开关。源码仍独立放在项目的chanshui/目录；没有常驻Node/Next服务、新daemon、容器或监听端口。
 
-在构建机器运行 `bash scripts/build-chanshui.sh`（从项目根目录）。需要 Go 1.25、Node 22 或更高的兼容版本、npm、Python3；脚本把缓存放在项目里，不安装系统服务。部署产物是：
+现有升级服务按同一维护流程顺序生成主前端、主后端、检测程序和检测静态页面。frontend的npm prebuild是首次旧升级脚本的兼容入口，用户无须另执行子项目命令。新升级/回滚直接调用脚本内嵌的检测函数，再使用npm --ignore-scripts run build执行原Vue构建，避免重复构建与递归拿锁。Go按-p=1低并发构建，Next沿用单worker；编译峰值与检测运行占用分别验收。
 
-- `chanshui/.artifacts/bin/transithub-chanshui`
-- `chanshui/web/out-build/`，包含构建时生成的 `bank-manifest.json`
-- 本目录的 `transithub-chanshui.slice`
+稳定产物保持历史位置：
 
-生产服务器不需要安装检测页面的 Node/Next 服务。现有 Hub 源码升级脚本的旧构建流程保持；独立检测产物必须在构建机器制作后随发布包交付。Docker 构建也打入这些产物，但默认不启用本功能；普通容器若没有经过配置的 systemd/cgroup 执行环境，维持关闭，不降级成无限制进程。
+- chanshui/.artifacts/bin/transithub-chanshui
+- chanshui/web/out-build/，包含bank-manifest.json
 
-启用前须按主项目服务器规则逐条审核安装/配置/服务重启命令，本文件不授权现场操作。系统或用户 manager 必须可访问，cgroup v2 的 memory/pids 控制器可用；将 slice 配置装入选定 manager 并验证父级限制可用。slice 不创建进程，只为 run/query 及后代设置合计 500000000 字节、swap=0、TasksMax=64。`GOMEMLIMIT` 是补充软限制，不能替代硬限制。
+检测函数唯一源在deploy/chanshui-build.sh；两个维护脚本内的标记区块是生成副本，由测试逐字校验。已安装的维护脚本完全自包含，不依赖回滚后可能不存在的helper文件，也不会生成根helper安装副本。
 
-Hub 配置：
+检测构建共同使用项目.cache/chanshui-build.lock。新维护脚本先取原维护锁，再取构建锁，持有到构建、配对发布、恢复和清理完成；内部函数不重拿锁。暂存/备份只位于chanshui/.artifacts/。两份产物完整检查后才备份并切换，失败或信号恢复原配对；这不表示多个目录或整站发布是一个文件系统原子操作。已有未恢复备份会阻止覆盖并显示位置。
 
-| 配置 | 含义 |
-| --- | --- |
-| `CHANSHUI_ENABLED` | 默认 false；产物、路径、权限和实际资源验收通过后才开启 |
-| `CHANSHUI_BINARY_PATH` | 当前项目部署目录内的可信绝对二进制路径，不允许网页上传覆盖 |
-| `CHANSHUI_WEB_DIR` | 当前项目内 `web/out-build` 的绝对路径 |
-| `CHANSHUI_DATA_DIR` | 当前项目内 `data/chanshui` 的绝对路径；目录0700、SQLite/WAL/SHM文件0600 |
-| `CHANSHUI_SYSTEMD_MANAGER` | 生产通常 system，本机验收 user；缺权限拒绝检测，不自动提权 |
-| `CHANSHUI_TEST_ALLOW_PRIVATE_TARGETS` | 默认false；仅隔离开发模拟允许开启，不进入正式配置 |
+回滚到有检测源码的旧版本，会从目标源码重建配对，不要求目标版本已有prebuild/helper。没有检测源码的目标则跳过，保留ignored检测文件与SQLite，旧主服务不会挂载它们。原PG备份、迁移判断、Redis、维护日志和健康检查流程保持。
 
-模型 Key 仅在服务器核验账号后通过 stdin 传给已验证限制的检测器，不进入网页、URL、环境变量、命令行或报告。模型下拉按当前账号的列表预填，列模型不代表已开始付费检测。
+正常Hub默认提供检测；旧CHANSHUI_ENABLED环境值已不再控制功能。APIOnly实例仍不启动执行者，页面会说明接口模式不能运行检测。manager未明确配置时按当前身份一次选择：root使用system，普通用户使用user；原有明确配置优先，无权限时直接报错，不换manager或提权。
 
-验收先运行 `make test-chanshui`；真实资源门禁需显式设置 `TRANSITHUB_CHANSHUI_RESOURCE_TEST=1`，使用当前项目的 user manager 和隔离数据，不访问真实模型。普通测试和 CI 不会默认启动 systemd 单元。还须在项目唯一5444/5555和固定专用浏览器profile核对两个入口、全量预设及增删、账号/工作区切换、历史和停止/关闭行为。
+首次需要执行时，现有D-Bus运行器可建立缺失的固定限制slice，引用绑定短连接，并严格读回限额；已有不合格配置拒绝运行，不自动修改。所有run/query及后代共同受500000000字节、swap=0、TasksMax=64约束，任务上限128～384MiB，查询64MiB。退出后释放进程和空组，不建立清理daemon。系统需systemd≥252、cgroup v2及相应管理权限；具体错误在页面可见，不把入口隐藏。
 
-任务内存可设128～384MiB，默认256MiB；短查询64MiB，始终共同受0.5GB上限。超过限制只应结束本模块；错误必须说明已保存范围和可能产生的费用。正常完成、停止、超限后都要确认整个进程组退出；无法确认时暂停新任务，不自动重新付费执行。
+模型Key只在服务器核实账号后经stdin交付给受限执行者，不进入网页、URL、环境或报告。打开页面/读取模型不开始检测，仍须明确点击开始。收起或关闭页面不取消已接受任务。
 
-SQLite 备份使用在线backup或停止写入后的完整一致备份，不能只拷贝活跃WAL模式下的主文件。回退先禁用入口、停止本模块执行者，保留SQLite及备份，再换回产物；不清理Hub旧数据库、不自动删除报告。
+报告和题库位于原data/chanshui/hub.sqlite，构建和回滚不删除、不覆盖、不整体还原它。SQLite备份须使用在线backup或停止写入后的一致备份；不能只拷贝活跃WAL下的主文件。
+
+本文件不授权生产现场命令。实际升级、配置或服务操作继续遵守主项目审核要求。默认测试不启动systemd任务；真实资源门禁须显式启用，并清理隔离执行者与临时数据。

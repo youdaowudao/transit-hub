@@ -26,7 +26,7 @@ const requestClose = () => { if (!dirty.value || window.confirm('检测设置有
 const arm = () => {
   clearTimers(); ready.value = false; error.value = ''; loadingText.value = '正在打开检测页…'
   loadingTimer = setTimeout(() => { loadingText.value = '页面仍在加载，请稍候；此时没有开始检测。' }, 3000)
-  timeout = setTimeout(() => { if (!ready.value) error.value = '10秒内没有收到检测页响应。请检查检测静态页面是否已安装，再点击重新载入；此时没有开始检测。' }, 10000)
+  timeout = setTimeout(() => { if (!ready.value) error.value = '10秒内没有收到检测页响应。请重新执行整站升级，并查看升级日志中的检测页面构建步骤；此时没有开始检测。' }, 10000)
 }
 const launch = async (event: Event) => {
   if (!props.workspaceId) return

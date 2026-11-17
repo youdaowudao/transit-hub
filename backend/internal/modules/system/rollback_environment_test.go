@@ -197,7 +197,7 @@ func TestRollbackReportsBothOriginalAndRecoveryErrors(t *testing.T) {
 	if restoreStart < 0 || restoreEnd < 0 {
 		t.Fatal("unable to extract restore_previous_artifacts")
 	}
-	restoreSection := script[restoreStart : restoreStart+restoreEnd+2]
+	restoreSection := chanshuiFunctionBlock(t, "deploy/rollback-source.sh") + "\n" + script[restoreStart:restoreStart+restoreEnd+2]
 	requireTextContains(t, restoreSection, "local restore_error=''")
 	requireTextContains(t, restoreSection, "恢复错误")
 	requireTextContains(t, restoreSection, "systemctl restart")
@@ -211,7 +211,7 @@ func TestRollbackReportsArtifactRestoreFailureEvenWhenHealthRecovers(t *testing.
 	if restoreStart < 0 || restoreEnd < 0 {
 		t.Fatal("unable to extract restore_previous_artifacts")
 	}
-	restoreSection := script[restoreStart : restoreStart+restoreEnd+2]
+	restoreSection := chanshuiFunctionBlock(t, "deploy/rollback-source.sh") + "\n" + script[restoreStart:restoreStart+restoreEnd+2]
 	tempDir := t.TempDir()
 	binaryPrevious := filepath.Join(tempDir, "transithub-api.previous")
 	if err := os.WriteFile(binaryPrevious, []byte("old binary"), 0o755); err != nil {
@@ -330,7 +330,7 @@ func TestRollbackArmsRecoveryBeforeArtifactMutations(t *testing.T) {
 
 func TestRollbackDisarmsRecoveryBeforeDiscardingBackups(t *testing.T) {
 	script := readProjectFileForUpgradeTest(t, "deploy/rollback-source.sh")
-	healthAt := strings.Index(script, `health_response="$(wait_for_health)"`)
+	healthAt := strings.Index(script, `health_response="$(trap - ERR; wait_for_health)"`)
 	backupRemovalAt := strings.Index(script[healthAt:], `rm -rf "$DIST_PREVIOUS"`)
 	if healthAt < 0 || backupRemovalAt < 0 {
 		t.Fatal("unable to extract successful rollback finalization")
@@ -381,7 +381,7 @@ func TestRollbackIgnoresSecondTerminationSignalDuringRecovery(t *testing.T) {
 	if restoreStart < 0 || restoreEnd < 0 || signalStart < 0 || signalEnd < 0 {
 		t.Fatal("unable to extract rollback recovery functions")
 	}
-	restoreFunction := script[restoreStart : restoreStart+restoreEnd+2]
+	restoreFunction := chanshuiFunctionBlock(t, "deploy/rollback-source.sh") + "\n" + script[restoreStart:restoreStart+restoreEnd+2]
 	signalFunction := script[signalStart : signalStart+signalEnd+2]
 
 	tempDir := t.TempDir()
@@ -458,7 +458,7 @@ func runArtifactSignalAfterMutation(t *testing.T, stage string) (string, string,
 	if restoreStart < 0 || restoreEnd < 0 || signalStart < 0 || signalEnd < 0 || switchStart < 0 || switchEnd < 0 {
 		t.Fatal("unable to extract rollback signal test sections")
 	}
-	restoreFunction := script[restoreStart : restoreStart+restoreEnd+2]
+	restoreFunction := chanshuiFunctionBlock(t, "deploy/rollback-source.sh") + "\n" + script[restoreStart:restoreStart+restoreEnd+2]
 	signalFunction := script[signalStart : signalStart+signalEnd+2]
 	switchSection := script[switchStart : switchStart+switchEnd]
 
@@ -540,7 +540,7 @@ func runPartialArtifactRestore(t *testing.T, frontendSwitched bool) (string, str
 	if start < 0 || endRelative < 0 {
 		t.Fatal("unable to extract restore_previous_artifacts")
 	}
-	restoreFunction := script[start : start+endRelative+2]
+	restoreFunction := chanshuiFunctionBlock(t, "deploy/rollback-source.sh") + "\n" + script[start:start+endRelative+2]
 
 	tempDir := t.TempDir()
 	distDir := filepath.Join(tempDir, "dist")

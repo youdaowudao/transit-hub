@@ -140,7 +140,9 @@ chanshui_build_stage() {
     (
         trap - ERR
         cd "$root/chanshui/web"
-        npm ci --registry=https://registry.npmjs.org
+        if [[ "${CHANSHUI_SKIP_NPM_CI:-0}" != "1" ]]; then
+            npm ci --registry=https://registry.npmjs.org
+        fi
         npm run build
     )
     python3 - "$root" "$stage" <<'PY'

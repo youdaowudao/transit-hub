@@ -12,7 +12,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  guards:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install TypeScript dependency for calendar guards
+        run: npm ci --prefix frontend --registry=https://registry.npmjs.org
+      - name: Run fixture and membership guards
+        run: make test-ci CI_SUITE=guards
+
+  backend:
     runs-on: ubuntu-latest
     env:
       TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/transithub_test?sslmode=disable
@@ -33,15 +49,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
           go-version-file: backend/go.mod
-          cache-dependency-path: |
-            backend/go.sum
-            chanshui/go.sum
+          cache-dependency-path: backend/go.sum
+      - name: Setup Node for maintenance lifecycle tests
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: Run backend full suite
+        run: make test-ci CI_SUITE=backend
 
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
@@ -50,12 +74,45 @@ jobs:
           cache-dependency-path: |
             frontend/package-lock.json
             chanshui/web/package-lock.json
-
       - name: Install frontend dependencies
         run: npm ci --prefix frontend --registry=https://registry.npmjs.org
+      - name: Install dependencies for cross-directory React tests
+        run: npm ci --prefix chanshui/web --registry=https://registry.npmjs.org
+      - name: Run frontend full suite and types
+        run: make test-ci CI_SUITE=frontend
 
+  chanshui:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: chanshui/go.sum
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: chanshui/web/package-lock.json
       - name: Install model detection frontend dependencies
         run: npm ci --prefix chanshui/web --registry=https://registry.npmjs.org
+      - name: Run model detection full suite and artifact build
+        run: make test-ci CI_SUITE=chanshui
 
-      - name: Run full test gate
-        run: make test-ci
+  test:
+    if: ${{ always() }}
+    needs: [guards, backend, frontend, chanshui]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Require every full suite to succeed
+        run: >-
+          bash scripts/check-ci-jobs.sh
+          '${{ needs.guards.result }}'
+          '${{ needs.backend.result }}'
+          '${{ needs.frontend.result }}'
+          '${{ needs.chanshui.result }}'

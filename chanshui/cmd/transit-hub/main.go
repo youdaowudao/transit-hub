@@ -194,6 +194,13 @@ func query(ctx context.Context, s *store.Store, env wire.Envelope, c wire.Contin
 			return nil, "", store.Fail(422, e.Error(), "preview")
 		}
 		return v.Preview(), "", nil
+	case "retry-report":
+		var a store.RetryRequest
+		if e := decode(env.Args, &a); e != nil {
+			return nil, "", e
+		}
+		v, e := s.RetryReport(ctx, o, a)
+		return store.ReportView(v), "", e
 	case "create-report":
 		var a store.CreateRequest
 		if e := decode(env.Args, &a); e != nil {

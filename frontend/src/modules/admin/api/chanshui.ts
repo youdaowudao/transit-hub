@@ -79,7 +79,8 @@ export function chanshuiRequestSpec(op: string, p: Params = {}): { path: string;
     case 'items': return { path: `/reports/${key(p.reportId)}/items${query({ cursor: p.cursor, limit: 5 })}`, method: 'GET' }
     case 'image': return { path: `/reports/${key(p.reportId)}/items/${key(p.itemId)}/image`, method: 'GET', image: true }
     case 'start': return { path: '/reports', method: 'POST', body: p }
-    case 'cancel': return { path: `/reports/${key(p.reportId)}/cancel`, method: 'POST', body: {} }
+    case 'retry': return { path: `/reports/${key(p.reportId)}/retry`, method: 'POST', body: { retryId: p.retryId, expectedRetryId: p.expectedRetryId ?? '', itemIds: p.itemIds } }
+    case 'cancel': return { path: `/reports/${key(p.reportId)}/cancel`, method: 'POST', body: { expectedRetryId: p.expectedRetryId ?? '' } }
     case 'settings': return { path: '/settings', method: 'GET' }
     case 'save-settings': return { path: '/settings', method: 'PUT', body: p }
     case 'questions': return { path: `/questions${query(p)}`, method: 'GET' }

@@ -7,11 +7,11 @@ import { hubReportView } from '../lib/hub-report-view';
 import { isHubTerminal } from '../lib/hub-policy';
 import type { HubCall, HubItem, HubReport } from '../lib/hub-types';
 
-export default function HubReportContent({ report, items, complete, call }: { report: HubReport; items: HubItem[]; complete: boolean; call: HubCall }) {
+export default function HubReportContent({ report, items, complete, call, onRetry, retryDisabled }: { report: HubReport; items: HubItem[]; complete: boolean; call: HubCall; onRetry?: (ids: string[]) => void; retryDisabled?: boolean }) {
   const view = hubReportView(report, items, complete);
   const questions: Record<string, ReactNode> = {};
   for (const [kind, rows] of Object.entries(view.groups)) {
-    const folds = rows.map((item, index) => <HubQuestionDetails key={report.reportId + ':' + item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} number={kind === 'iq' ? index + 1 : undefined} />);
+    const folds = rows.map((item, index) => <HubQuestionDetails key={report.reportId + ':' + item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} number={kind === 'iq' ? index + 1 : undefined} onRetry={onRetry} retryDisabled={retryDisabled} previous={Boolean(report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status))} />);
     questions[kind] = kind === 'iq' ? <><p className="muted">点击题目查看本次题面、回答和判定；默认收起，不会重新检测或修改主站。</p>{folds}</> : <div className="question-list">{folds}</div>;
   }
   const sectionContent: Record<string, ReactNode> = Object.fromEntries(Object.entries(view.messages).map(([key, text]) => [key, <p key={key} className="muted">{text}</p>]));

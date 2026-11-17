@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import HubApp, { HubItemCard } from '../../chanshui/web/components/HubApp'
-import { restorationItems, restorationReport, restorationSettings } from './fixtures/chanshui-report-restoration'
+import { detailedRestorationItems, restorationItems, restorationReport, restorationSettings } from './fixtures/chanshui-report-restoration'
 import type { HubItem, HubReport } from '../../chanshui/web/lib/hub-types'
 import { hubReportView, newItemRead, readReportItems, reportError } from '../../chanshui/web/lib/hub-report-view'
 
@@ -24,7 +24,7 @@ beforeEach(() => {
 })
 afterEach(async () => { await act(() => root.unmount()); dispose?.(); dispose = undefined; container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
-async function openReport(report: HubReport = restorationReport(), items: HubItem[] = restorationItems(), failCursor = '', history: HubReport[] = [report], hold?: { cursor: string; used?: boolean; fail?: () => void }) {
+async function openReport(report: HubReport = restorationReport(), items: HubItem[] = restorationItems(), failCursor = '', history: HubReport[] = [report], hold?: { cursor: string; used?: boolean; fail?: () => void }, retryFailure?: { once: boolean }) {
   const calls: { op: string; params: Record<string, any> }[] = []
   let failed = false
   const respond = (data: unknown) => window.dispatchEvent(new MessageEvent('message', { data, source: window, origin: location.origin }))
@@ -38,6 +38,10 @@ async function openReport(report: HubReport = restorationReport(), items: HubIte
     if (m.op === 'targets') value = { items: [] }
     if (m.op === 'reports') value = { items: history }
     if (m.op === 'report') value = report
+    if (m.op === 'retry' && retryFailure?.once) {
+      retryFailure.once = false; report.status = 'running'; report.processExited = false
+      respond({ kind: 'chanshui.response', v: 1, generation: 1, id: m.id, ok: false, error: { status: 503, message: '受理返回丢失' } }); return
+    }
     if (m.op === 'items') {
       if (hold && !hold.used && m.params.cursor === hold.cursor) {
         hold.used = true
@@ -58,6 +62,71 @@ async function openReport(report: HubReport = restorationReport(), items: HubIte
 }
 
 describe('原版报告恢复的业务回归', () => {
+  it('原版丰富明细不能被未知判分和不适用判定整段隐藏', async () => {
+    const items = detailedRestorationItems()
+    await openReport(restorationReport({ summary: { total: { score: null, complete: false, parts: [] }, knowledge: { status: 'range', lower: '2026-01-01', upper: '2026-02-22', observations: [{ id: '事件1', date: '2026-01-01', kind: 'know' }, { id: '事件2', date: '2026-02-22', kind: 'unknown' }] } } }), items)
+    const cards = [...container.querySelectorAll('.results > .result-card')]
+    const card = (title: string) => cards.find(c => c.querySelector('h3')?.textContent === title)!
+    expect(card('模型指纹归因').textContent).toContain('顶部概率达到 90%，已提前停止采样。')
+    expect(card('模型指纹归因').querySelector('.model-claim')?.textContent).toContain('GPT 原版名称')
+    expect(card('注入大小').querySelector('.fold > summary')?.textContent).toContain('采样明细与评分标准')
+    expect(card('注入大小').querySelectorAll('table tbody tr')).toHaveLength(1)
+    expect(card('缓存读写验证').querySelector('.cache-table')!.querySelectorAll('tbody tr')).toHaveLength(6)
+    expect(card('缓存读写验证').textContent).toContain('多轮缓存明细与衔接')
+    expect(card('工具调用检测').textContent).toContain('tool-observation-kept')
+    const rows = card('知识截止日期').querySelectorAll('.knowledge-ladder li')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].textContent).toContain('知道2026-01-01事件1实际事件')
+    expect(rows[1].textContent).toContain('不知道2026-02-22事件2实际事件')
+    expect([...container.querySelectorAll<HTMLDetailsElement>('details.question')].every(q => !q.open)).toBe(true)
+  })
+
+  it('单项补测使用原报告编号，成功结果保留且不创建新报告', async () => {
+    const report = restorationReport({ status: 'partial', summary: { total: { score: null, complete: false, parts: [] } } })
+    const items = restorationItems(2); items[1].status = 'error'; items[1].result = { error: '上游临时中断', judgment: { status: 'unknown' } }
+    const calls = await openReport(report, items)
+    const fold = container.querySelector<HTMLDetailsElement>('[data-item-id="custom:2"]')!
+    await act(() => fold.querySelector('summary')!.click())
+    const button = [...fold.querySelectorAll('button')].find(b => b.textContent?.includes('补测此项'))
+    expect(button).toBeTruthy()
+    await act(() => button!.click()); await settle()
+    const retries = calls.filter(c => c.op === 'retry')
+    expect(retries).toHaveLength(1)
+    expect(retries[0].params.reportId).toBe(report.reportId)
+    expect(retries[0].params.itemIds).toEqual(['custom:2'])
+    expect(retries[0].params.retryId).toMatch(/^[a-f0-9]{32}$/)
+    expect(calls.some(c => c.op === 'start')).toBe(false)
+    expect(container.textContent).toContain('已保存回答1')
+  })
+  it('补测返回丢失后运行中的同一轮仍能用原操作确认，不产生新操作ID', async () => {
+    const report = restorationReport({ status: 'partial' }), items = restorationItems(2)
+    items[1].status = 'error'; items[1].result = { error: '连接中断', judgment: { status: 'unknown' } }
+    const calls = await openReport(report, items, '', [report], undefined, { once: true })
+    await click('补测失败项（1）')
+    await click('核查运行状态')
+    const confirm = [...container.querySelectorAll('button')].find(b => b.textContent === '用原操作确认补测受理')!
+    expect(confirm).toBeTruthy(); expect(confirm.disabled).toBe(false)
+    await act(() => confirm.click()); await settle()
+    const retry = calls.filter(c => c.op === 'retry')
+    expect(retry).toHaveLength(2); expect(retry[1].params).toEqual(retry[0].params)
+    expect(calls.filter(c => c.op === 'start')).toHaveLength(0)
+  })
+  it('知识梯级保留五种真实判定，无法判定不冒充答错，未抽题不混入', async () => {
+    const kinds = ['know', 'wrong', 'unknown', 'invalid', 'error', 'not_asked']
+    const items = kinds.map((kind, index) => {
+      const item = restorationItems(1)[0]
+      item.itemId = `event:${index}`; item.definition = { ...item.definition, id: item.itemId, kind: 'knowledge', title: kind + '事件', parameters: { date: '2026-01-01', event: kind + '事件' } }
+      item.status = kind === 'error' ? 'error' : 'done'
+      item.result = { answer: kind, evidence: { kind }, judgment: { status: kind === 'not_asked' ? 'not_asked' : kind === 'invalid' ? 'unknown' : 'reference' }, ...(kind === 'error' ? { error: '请求连接中断' } : {}) }
+      return item
+    })
+    await openReport(restorationReport({ status: 'partial', summary: { knowledge: { status: 'unknown' } } }), items)
+    const rows = [...container.querySelectorAll('.knowledge-ladder li')]
+    expect(rows).toHaveLength(5)
+    expect(rows.map(row => row.querySelector('b')?.textContent)).toEqual(['知道', '答错', '不知道', '无效', '失败'])
+    expect(rows[3].textContent).not.toContain('答错')
+    expect(container.querySelector('[data-item-id="event:5"] summary')?.textContent).toContain('本次未提问')
+  })
   it('接回原版卡片并保留66分与0指纹贡献，正常空错误不显示红字', async () => {
     const calls = await openReport()
     expect(container.querySelector('.results > .total-card')).toBeTruthy()
@@ -137,7 +206,7 @@ describe('原版报告恢复的业务回归', () => {
     expect(reportError({})).toBe(''); expect(reportError({ step: 'persist' })).toContain('未提供具体原因')
     const report = restorationReport({ summary: { total: { score: null, complete: false, parts: [{ key: 'iq', label: '推理表现', applicable: true, known: false, points: 0, contribution: 0, coefficient: 100 }] } } })
     await openReport(report)
-    expect(container.querySelector('.total-card')?.textContent).toContain('尚未完成')
+    expect(container.querySelector('.total-card')?.textContent).toContain('总分尚未确认')
     expect(container.querySelector('.total-card')?.textContent).toContain('未知不当0分')
     expect(container.querySelector('.total-card')?.textContent).not.toContain('0 / 100')
     expect(container.querySelector('.integrity-signals')?.textContent).toContain('尚未确认')
@@ -182,7 +251,7 @@ describe('原版报告恢复的业务回归', () => {
     expect(sidebar.textContent).toContain('同名组 #group-a'); expect(sidebar.textContent).toContain('同名组 #group-b')
     expect(sidebar.querySelector('[data-report-id="' + 'b'.repeat(32) + '"]')?.textContent).toContain('0 分')
     const partial = sidebar.querySelector('[data-report-id="' + 'c'.repeat(32) + '"]')!
-    expect(partial.textContent).toContain('未完成'); expect(partial.querySelector('.hist-badge')?.getAttribute('title')).toBe('推理分')
+    expect(partial.textContent).toContain('已结束，部分项目未确认'); expect(partial.querySelector('.hist-badge')?.getAttribute('title')).toBe('推理分')
     expect(sidebar.textContent).toContain('未记录分组'); expect(sidebar.textContent).toContain('已删除账号快照')
     expect(calls.filter(c => c.op === 'reports').every(c => c.params.scope === 'sidebar')).toBe(true)
   })

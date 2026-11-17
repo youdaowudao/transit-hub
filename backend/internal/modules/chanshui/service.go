@@ -182,6 +182,7 @@ func checkedCredential(c connection_health.AuditContext) (Credential, error) {
 }
 
 type StartInput struct {
+	RetryID             string          `json:"-"`
 	ReportID            string          `json:"reportId"`
 	TargetID            string          `json:"targetId"`
 	GroupID             string          `json:"groupId"`

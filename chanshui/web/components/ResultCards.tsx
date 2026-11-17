@@ -44,14 +44,14 @@ function Details({ label, value }: { label: string; value: unknown }) {
 
 
 function knowledgeMark(row: { kind?: string; ok: boolean; unsure: boolean; error?: string }, tr: (source: string) => string) {
+  if (row.kind === "error" || row.error) return { text: tr("失败"), cls: "warn" };
+  if (row.kind === "invalid") return { text: tr("无效"), cls: "warn" };
   if (row.kind === "know" || (row.ok && row.kind !== "wrong" && row.kind !== "error" && row.kind !== "invalid")) {
     return { text: tr("知道"), cls: "good" };
   }
   if (row.kind === "wrong" || (!row.ok && !row.unsure && !row.error && row.kind !== "unknown")) {
     return { text: tr("答错"), cls: "warn" };
   }
-  if (row.kind === "invalid") return { text: tr("无效"), cls: "warn" };
-  if (row.kind === "error" || row.error) return { text: tr("失败"), cls: "warn" };
   return { text: tr("不知道"), cls: "muted" };
 }
 
@@ -302,7 +302,7 @@ export default function ResultCards({
           <>
             <div className="metric-line">
               <strong>
-                ≈ <AnimatedNumber value={a.inj} />
+                ≈ {a.inj == null ? "—" : <AnimatedNumber value={a.inj} />}
               </strong>
               <span>{tr("token / 请求")}</span>
               <b className="score-chip">
@@ -311,7 +311,7 @@ export default function ResultCards({
             </div>
             <div className="mini-stats">
               <span>
-                {tr("斜率")} <b>{a.slope.toFixed(3)}</b>
+                {tr("斜率")} <b>{a.slope?.toFixed(3) ?? "—"}</b>
               </span>
               <span>
                 {tr("复用采样")} <b>{tr("{n} 次", { n: a.points.length })}</b>
@@ -322,6 +322,7 @@ export default function ResultCards({
                 </span>
               )}
             </div>
+            {!a.reliable && <p className="muted">{a.note}</p>}
             <details className="fold">
               <summary>{tr("采样明细与评分标准")}</summary>
               <div className="table-wrap">

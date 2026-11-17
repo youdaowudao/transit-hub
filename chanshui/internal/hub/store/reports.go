@@ -217,7 +217,7 @@ func (s *Store) BeginRun(ctx context.Context, o Owner, id string) error {
 }
 func (s *Store) BeginItem(ctx context.Context, o Owner, id, itemID string) error {
 	return retryWrite(ctx, func() error {
-		res, e := s.db.ExecContext(ctx, `UPDATE hub_items SET status='running',attempts=0,started_at_ms=? WHERE report_id=? AND item_id=? AND status='queued' AND EXISTS(SELECT 1 FROM hub_reports r WHERE r.report_id=hub_items.report_id AND r.user_id=? AND r.workspace_id=? AND r.status='running')`, Now().UnixMilli(), id, itemID, o.UserID, o.WorkspaceID)
+		res, e := s.db.ExecContext(ctx, `UPDATE hub_items SET status='running',started_at_ms=? WHERE report_id=? AND item_id=? AND status='queued' AND EXISTS(SELECT 1 FROM hub_reports r WHERE r.report_id=hub_items.report_id AND r.user_id=? AND r.workspace_id=? AND r.status='running')`, Now().UnixMilli(), id, itemID, o.UserID, o.WorkspaceID)
 		if e != nil {
 			return e
 		}
@@ -237,7 +237,7 @@ func (s *Store) SaveItem(ctx context.Context, o Owner, id, itemID, status string
 		return Fail(422, "本题结果超过256KiB，不能保存为完整答案", "item")
 	}
 	return retryWrite(ctx, func() error {
-		res, e := s.db.ExecContext(ctx, `UPDATE hub_items SET status=?,result_json=?,attempts=?,completed_at_ms=? WHERE report_id=? AND item_id=? AND status IN('queued','running') AND EXISTS(SELECT 1 FROM hub_reports r WHERE r.report_id=hub_items.report_id AND r.user_id=? AND r.workspace_id=? AND r.status='running')`, status, string(raw), attempts, Now().UnixMilli(), id, itemID, o.UserID, o.WorkspaceID)
+		res, e := s.db.ExecContext(ctx, `UPDATE hub_items SET status=?,result_json=?,attempts=MAX(attempts,?),completed_at_ms=? WHERE report_id=? AND item_id=? AND status IN('queued','running') AND EXISTS(SELECT 1 FROM hub_reports r WHERE r.report_id=hub_items.report_id AND r.user_id=? AND r.workspace_id=? AND r.status='running')`, status, string(raw), attempts, Now().UnixMilli(), id, itemID, o.UserID, o.WorkspaceID)
 		if e != nil {
 			return e
 		}
@@ -260,10 +260,17 @@ func (s *Store) Finish(ctx context.Context, o Owner, id, status string, summary,
 	})
 }
 func (s *Store) FinishInterrupted(ctx context.Context, o Owner, id string, detail any) error {
-	if _, e := s.Report(ctx, o, id); e != nil {
+	r, e := s.Report(ctx, o, id)
+	if e != nil {
 		return e
 	}
-	return s.Finish(ctx, o, id, "interrupted", map[string]any{"complete": false}, detail)
+	summary := map[string]any{}
+	_ = json.Unmarshal(r.Summary.Summary, &summary)
+	if summary == nil {
+		summary = map[string]any{}
+	}
+	summary["complete"] = false
+	return s.Finish(ctx, o, id, "interrupted", summary, detail)
 }
 
 // CancelQueued never changes a running or completed report. The caller removes
@@ -279,8 +286,15 @@ func (s *Store) CancelQueued(ctx context.Context, o Owner, id string) error {
 	if r.Status != "queued" {
 		return Fail(409, "本报告已开始执行，请停止正在运行的检测；未取消其他任务", "cancel")
 	}
+	summary := map[string]any{}
+	_ = json.Unmarshal(r.Summary.Summary, &summary)
+	if summary == nil {
+		summary = map[string]any{}
+	}
+	summary["complete"] = false
+	summaryJSON, _ := json.Marshal(summary)
 	return retryWrite(ctx, func() error {
-		res, err := s.db.ExecContext(ctx, `UPDATE hub_reports SET status='cancelled',updated_at_ms=?,summary_json='{"complete":false}',error_json='{"message":"已取消等待，本报告没有发送检测请求","step":"cancel","operationResult":"not_started"}' WHERE user_id=? AND workspace_id=? AND report_id=? AND status='queued'`, Now().UnixMilli(), o.UserID, o.WorkspaceID, id)
+		res, err := s.db.ExecContext(ctx, `UPDATE hub_reports SET status='cancelled',updated_at_ms=?,summary_json=?,error_json='{"message":"已取消等待，本轮没有发送检测请求；此前已保存的结果保留","step":"cancel","operationResult":"not_started"}' WHERE user_id=? AND workspace_id=? AND report_id=? AND status='queued'`, Now().UnixMilli(), string(summaryJSON), o.UserID, o.WorkspaceID, id)
 		if err != nil {
 			return err
 		}

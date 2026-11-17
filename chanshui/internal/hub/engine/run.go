@@ -114,6 +114,35 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 	var resultMu sync.Mutex
 	hadError := false
 	itemResults := map[string]itemResult{}
+	allowed := map[string]bool{}
+	previousSummary := map[string]any{}
+	_ = json.Unmarshal(report.Summary.Summary, &previousSummary)
+	if snap.Retry != nil {
+		for _, itemID := range snap.Retry.ItemIDs {
+			allowed[itemID] = true
+		}
+		cursor := ""
+		for {
+			page, err := s.ListItems(ctx, o, id, store.Filters{Cursor: cursor, Limit: 5})
+			if err != nil {
+				return err
+			}
+			for _, item := range page.Items {
+				result, err := savedResult(item.Result)
+				if err != nil {
+					return fmt.Errorf("原报告题目%s的结果无法读取，未开始补测：%w", item.ItemID, err)
+				}
+				if item.Status != "done" {
+					result.Judgment.Status = "unknown"
+				}
+				itemResults[item.ItemID] = compactResult(item.Definition.Kind, result)
+			}
+			if page.NextCursor == "" {
+				break
+			}
+			cursor = page.NextCursor
+		}
+	}
 	fatalStorage := error(nil)
 	failStorage := func(err error) {
 		resultMu.Lock()
@@ -176,10 +205,7 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 			return result, err
 		}
 		notify("item-saved", map[string]any{"reportId": id, "itemId": q.Definition.ID})
-		compact := itemResult{Judgment: result.Judgment, Error: result.Error, Recognized: result.Recognized}
-		if q.Definition.Kind == "fingerprint_behavior" {
-			compact.Answer = result.Answer
-		}
+		compact := compactResult(q.Definition.Kind, result)
 		resultMu.Lock()
 		itemResults[q.Definition.ID] = compact
 		if result.Error != "" || result.Judgment.Status == "unknown" {
@@ -191,13 +217,21 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 	knowledgeDefs := []questions.Generated{}
 	work := []func() error{}
 	for _, q := range snap.Questions {
-		if q.Definition.Kind == "knowledge" {
+		if snap.Retry != nil && !allowed[q.Definition.ID] {
+			continue
+		}
+		if snap.Retry == nil && q.Definition.Kind == "knowledge" {
 			knowledgeDefs = append(knowledgeDefs, q)
 			continue
 		}
 		work = append(work, func() error { _, err := execute(q); return err })
 	}
 	knowledgeSummary := map[string]any{"status": "not_selected"}
+	if snap.Retry != nil {
+		if old, ok := previousSummary["knowledge"].(map[string]any); ok {
+			knowledgeSummary = old
+		}
+	}
 	if len(knowledgeDefs) > 0 {
 		work = append(work, func() error {
 			value, err := runKnowledge(ctx, s, o, id, knowledgeDefs, execute)
@@ -236,7 +270,22 @@ dispatch:
 	}
 	close(jobs)
 	workers.Wait()
-	summary := map[string]any{"complete": !hadError && ctx.Err() == nil, "attempts": min(t.Attempts.Load(), int64(snap.Settings.MaxAttempts)), "knowledge": knowledgeSummary, "upstreamVersion": snap.UpstreamVersion}
+	for _, result := range itemResults {
+		if result.Error != "" || result.Judgment.Status == "unknown" {
+			hadError = true
+		}
+	}
+	attempts := min(t.Attempts.Load(), int64(snap.Settings.MaxAttempts))
+	if snap.Retry != nil {
+		attempts += int64(snap.Retry.AttemptsBefore)
+		for _, q := range snap.Questions {
+			if allowed[q.Definition.ID] && q.Definition.Kind == "knowledge" {
+				knowledgeSummary = retryKnowledgeSummary(snap.Questions, itemResults)
+				break
+			}
+		}
+	}
+	summary := map[string]any{"complete": !hadError && ctx.Err() == nil, "attempts": attempts, "knowledge": knowledgeSummary, "upstreamVersion": snap.UpstreamVersion}
 	for key, value := range summarize(snap.Questions, itemResults) {
 		summary[key] = value
 	}
@@ -264,7 +313,6 @@ func trimMetrics(m *gateway.Metrics) *gateway.Metrics {
 	if m != nil {
 		m.Answer = ""
 		m.ThinkingText = ""
-		m.Signature = ""
 		m.SSEFrames = nil
 	}
 	return m
@@ -309,7 +357,15 @@ func runItem(ctx context.Context, s *store.Store, o store.Owner, id, model strin
 			return out, fmt.Errorf("上游输出被长度预算截断，本题未完成，不使用截断答案判分")
 		}
 		if strings.TrimSpace(m.Answer) == "" {
-			return out, fmt.Errorf("上游没有返回正文答案，请人工检查模型及输出预算")
+			stop := m.StopReason
+			if stop == "" {
+				stop = "未提供"
+			}
+			usage := "未报告输出用量"
+			if m.OutputReported {
+				usage = fmt.Sprintf("输出用量%d token", m.OutputTokens)
+			}
+			return out, fmt.Errorf("上游返回HTTP %d但正文答案为空（结束标记：%s；%s）；本题未判分，请展开响应记录核对上游返回后补测此项", m.Status, stop, usage)
 		}
 		if def.Kind == "fingerprint_behavior" {
 			out.Judgment = questions.Judgment{Status: "reference", Max: 0}
@@ -473,4 +529,76 @@ func runKnowledge(ctx context.Context, s *store.Store, o store.Owner, id string,
 		status = "not_applicable"
 	}
 	return map[string]any{"status": status, "lower": lower, "upper": upper, "observations": observed, "note": "本次事件题推测范围，不证明模型训练日期"}, nil
+}
+
+// Keep only the observations needed for a complete report aggregation. The full
+// saved answers remain in SQLite and are never overwritten for unselected rows.
+func compactResult(kind string, r itemResult) itemResult {
+	out := itemResult{Judgment: r.Judgment, Error: r.Error, Recognized: r.Recognized}
+	if kind == "fingerprint_behavior" || kind == "knowledge" {
+		out.Answer = r.Answer
+	}
+	return out
+}
+func retryKnowledgeSummary(defs []questions.Generated, results map[string]itemResult) map[string]any {
+	observations := []map[string]string{}
+	lower, upper := "", ""
+	valid := true
+	for _, q := range defs {
+		if q.Definition.Kind != "knowledge" {
+			continue
+		}
+		r, ok := results[q.Definition.ID]
+		if !ok || r.Judgment.Status == "not_asked" || r.Judgment.Status == "not_applicable" {
+			continue
+		}
+		kind, reason := questions.GradeKnowledge(q.Definition, r.Answer)
+		if r.Error != "" {
+			kind = "error"
+			reason = r.Error
+		}
+		if kind == "error" || kind == "invalid" {
+			valid = false
+		}
+		date := questions.Text(q.Definition.Parameters, "date")
+		observations = append(observations, map[string]string{"id": q.Definition.ID, "date": date, "kind": kind, "reason": reason})
+		if kind == "know" && date > lower {
+			lower = date
+		}
+		if kind == "unknown" && (upper == "" || date < upper) {
+			upper = date
+		}
+	}
+	if upper != "" && lower != "" && upper <= lower {
+		valid = false
+	}
+	status := "range"
+	if !valid {
+		status = "unknown"
+	}
+	return map[string]any{"status": status, "lower": lower, "upper": upper, "observations": observations, "note": "本次事件题推测范围，不证明模型训练日期"}
+}
+
+// Read old string judgments and current structured judgments alike. Ignore
+// large evidence bodies here; aggregation only needs these persisted fields.
+func savedResult(raw json.RawMessage) (itemResult, error) {
+	var saved struct {
+		Answer     string          `json:"answer"`
+		Error      string          `json:"error"`
+		Recognized bool            `json:"recognized"`
+		Judgment   json.RawMessage `json:"judgment"`
+	}
+	if e := json.Unmarshal(raw, &saved); e != nil {
+		return itemResult{}, e
+	}
+	out := itemResult{Answer: saved.Answer, Error: saved.Error, Recognized: saved.Recognized}
+	if len(saved.Judgment) > 0 {
+		var status string
+		if json.Unmarshal(saved.Judgment, &status) == nil {
+			out.Judgment.Status = status
+		} else if e := json.Unmarshal(saved.Judgment, &out.Judgment); e != nil {
+			return itemResult{}, e
+		}
+	}
+	return out, nil
 }

@@ -101,6 +101,7 @@ type CreateRequest struct {
 	Protocol            string          `json:"protocol,omitempty"`
 }
 type Snapshot struct {
+	Retry           *Retry                `json:"retry,omitempty"`
 	Settings        Settings              `json:"settings"`
 	Questions       []questions.Generated `json:"questions"`
 	UpstreamVersion string                `json:"upstreamVersion"`
@@ -122,6 +123,7 @@ type Summary struct {
 	Error       json.RawMessage `json:"error"`
 }
 type Report struct {
+	Retry *Retry `json:"retry,omitempty"`
 	Summary
 	StartedAtMs         int64           `json:"startedAtMs"`
 	Request             json.RawMessage `json:"request"`

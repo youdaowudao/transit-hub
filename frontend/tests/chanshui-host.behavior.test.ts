@@ -24,8 +24,21 @@ const captureClonedPosts = (frame: HTMLIFrameElement) => {
   return { post, delivered, cloneErrors }
 }
 beforeEach(() => { state.request.mockReset().mockResolvedValue({ items: [] }); wrapper = mount(ChanshuiHost, { attachTo: document.body, props: { workspaceId: 'workspace-a' }, global: { stubs: { Teleport: false } } }) })
-afterEach(() => { wrapper?.unmount(); useChanshuiLauncher().clear(); localStorage.removeItem(authTokenStorageKey); vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.innerHTML = '' })
+afterEach(() => { wrapper?.unmount(); useChanshuiLauncher().clear(); localStorage.removeItem(authTokenStorageKey); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.innerHTML = '' })
 describe('唯一检测弹窗', () => {
+  it('有工作区时入口默认可见，运行状态接口失败不隐藏入口，也不预读接口', async () => {
+    const launcher = useChanshuiLauncher()
+    launcher.clear()
+    state.request.mockRejectedValue(new Error('检测资源暂时不可用'))
+    await launcher.load('workspace-a')
+    expect(launcher.enabled.value).toBe(true)
+    expect(state.request).not.toHaveBeenCalled()
+    launcher.clear()
+    expect(launcher.enabled.value).toBe(false)
+    await launcher.load('')
+    expect(launcher.enabled.value).toBe(false)
+    expect(state.request).not.toHaveBeenCalled()
+  })
   it('总入口BOOT与账号切换消息使用可克隆普通快照', async () => {
     window.dispatchEvent(new CustomEvent(chanshuiOpenEvent, { detail: {} })); await flushPromises()
     const frame = portal().get('iframe').element as HTMLIFrameElement
@@ -96,11 +109,42 @@ describe('唯一检测弹窗', () => {
     expect(state.request).not.toHaveBeenCalled()
     expect(cloneErrors).toEqual([])
   })
-  it('总入口可用性读取携带load传入的工作区快照', async () => {
+  it('连续切换和清空工作区只更新入口显示，不保留前一工作区的读取请求', async () => {
     const launcher = useChanshuiLauncher(); launcher.clear()
-    state.request.mockResolvedValue({ enabled: true, available: true })
     await launcher.load('workspace-a')
-    expect(state.request).toHaveBeenLastCalledWith('runtime', {}, 'workspace-a')
+    expect(launcher.enabled.value).toBe(true)
+    await launcher.load('workspace-b')
+    expect(launcher.enabled.value).toBe(true)
+    await launcher.load('')
+    expect(launcher.enabled.value).toBe(false)
+    await launcher.load('workspace-b')
+    launcher.clear()
+    expect(launcher.enabled.value).toBe(false)
+    expect(state.request).not.toHaveBeenCalled()
+  })
+  it('缺页超时指引整站升级，重新载入恢复同一个弹窗且不会开始检测', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    await launch()
+    const frame = portal().get('iframe').element as HTMLIFrameElement
+    await vi.advanceTimersByTimeAsync(9999)
+    expect(portal().get('[role="status"]').text()).not.toContain('10秒内没有收到')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(portal().get('[role="status"]').text()).toContain('10秒内没有收到检测页响应。请重新执行整站升级，并查看升级日志中的检测页面构建步骤；此时没有开始检测。')
+    expect(portal().text()).not.toContain('检查检测静态页面是否已安装')
+    const reload = portal().findAll('button').find(button => button.text() === '重新载入页面')!
+    await reload.trigger('click')
+    expect(portal().get('iframe').element).toBe(frame)
+    expect(frame.src).toBe(`${origin}/chanshui/`)
+    expect(portal().get('[role="status"]').text()).toBe('正在打开检测页…')
+    expect(portal().findAll('button').some(button => button.text() === '重新载入页面')).toBe(false)
+    expect(state.request).not.toHaveBeenCalled()
+    const { delivered, cloneErrors } = captureClonedPosts(frame)
+    message(frame, { kind: 'chanshui.READY', v: 1 }); await flushPromises()
+    expect(delivered.find(m => m.kind === 'chanshui.BOOT')).toMatchObject({ workspaceId: 'workspace-a', target: { targetId: 'account-a' } })
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(portal().find('[role="status"]').exists()).toBe(false)
+    expect(state.request).not.toHaveBeenCalled()
+    expect(cloneErrors).toEqual([])
   })
   it('请求缺少工作区时先明确拒绝，不发HTTP请求', async () => {
     const actual = await vi.importActual<typeof import('@/modules/admin/api/chanshui')>('@/modules/admin/api/chanshui')

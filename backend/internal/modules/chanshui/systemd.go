@@ -2,6 +2,7 @@ package chanshui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,15 +42,19 @@ type listedUnit struct {
 	JobType                                                        string
 	JobPath                                                        dbus.ObjectPath
 }
+type managerConnection interface {
+	Object(string, dbus.ObjectPath) dbus.BusObject
+	Close() error
+}
 type systemManager struct {
-	conn   *dbus.Conn
+	conn   managerConnection
 	binary string
 }
 
 func connectManager(ctx context.Context, cfg RunnerConfig) (*systemManager, error) {
 	address := "unix:path=/run/dbus/system_bus_socket"
 	if cfg.Manager == "user" {
-		address = "unix:path=/run/user/" + strconv.Itoa(os.Getuid()) + "/bus"
+		address = "unix:path=/run/user/" + strconv.Itoa(os.Geteuid()) + "/bus"
 	} else if cfg.Manager != "system" {
 		return nil, fmt.Errorf("systemd管理器必须设置为system或user")
 	}
@@ -112,13 +117,56 @@ func number(v dbus.Variant) uint64 {
 	}
 	return 0
 }
-func (m *systemManager) checkSlice(ctx context.Context) error {
+func (m *systemManager) checkSlice(ctx context.Context) (err error) {
 	if _, err := os.Stat("/sys/fs/cgroup/cgroup.controllers"); err != nil {
 		return fmt.Errorf("当前环境没有cgroup v2，不能启用服务器硬内存限制")
 	}
-	var p dbus.ObjectPath
-	if err := m.call(ctx, "LoadUnit", sliceName).Store(&p); err != nil {
-		return fmt.Errorf("无法加载检测专用内存限制配置%s；请安装部署目录中的slice配置后重试：%w", sliceName, err)
+	unitLifecycle.Lock()
+	defer unitLifecycle.Unlock()
+	created := false
+	defer func() {
+		if err == nil {
+			return
+		}
+		cleanup, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if created {
+			err = errors.Join(err, m.stopEmptySlice(cleanup, ""))
+		}
+		_ = m.call(cleanup, "UnrefUnit", sliceName).Err
+	}()
+	p, err := m.path(ctx, sliceName)
+	if err != nil {
+		if !namedBusError(err, "org.freedesktop.systemd1.NoSuchUnit") {
+			return fmt.Errorf("无法确认检测专用内存限制是否存在；请检查systemd连接权限后重试：%w", err)
+		}
+		properties := []unitProperty{
+			{"Description", dbus.MakeVariant("TransitHub isolated model detection budget")},
+			// systemd 252 adds this sender reference before queuing the start
+			// job. A later RefUnit can lose the transient budget to automatic GC.
+			{"AddRef", dbus.MakeVariant(true)},
+			{"MemoryAccounting", dbus.MakeVariant(true)}, {"MemoryMax", dbus.MakeVariant(MemoryCeiling)},
+			{"MemoryHigh", dbus.MakeVariant(uint64(450000000))}, {"MemorySwapMax", dbus.MakeVariant(uint64(0))},
+			{"TasksMax", dbus.MakeVariant(uint64(64))}, {"StopWhenUnneeded", dbus.MakeVariant(true)},
+		}
+		if startErr := m.call(ctx, "StartTransientUnit", sliceName, "fail", properties, []unitAux{}).Err; startErr != nil {
+			if !namedBusError(startErr, "org.freedesktop.systemd1.UnitExists") {
+				return fmt.Errorf("无法自动建立检测专用硬内存限制；请检查systemd创建slice的权限并查看升级日志后重试：%w", startErr)
+			}
+			if err = m.call(ctx, "LoadUnit", sliceName).Store(&p); err != nil {
+				return fmt.Errorf("磁盘已有检测限制配置，但无法加载；请检查原slice配置及systemd权限后重试：%w", err)
+			}
+		} else {
+			created = true
+			if p, err = m.path(ctx, sliceName); err != nil {
+				return fmt.Errorf("检测限制已建立，但无法读取运行对象；请核查systemd运行状态后重试：%w", err)
+			}
+		}
+	}
+	if !created {
+		if err = m.call(ctx, "RefUnit", sliceName).Err; err != nil {
+			return fmt.Errorf("无法保持检测限制供本次启动核验；请检查systemd管理权限后重试：%w", err)
+		}
 	}
 	props, err := m.props(ctx, p, "Slice")
 	if err != nil {
@@ -128,15 +176,37 @@ func (m *systemManager) checkSlice(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("无法读取检测进程组空闲回收设置：%w", err)
 	}
+	return validateSlice(props, unit)
+}
+func namedBusError(err error, name string) bool {
+	var busError dbus.Error
+	return errors.As(err, &busError) && busError.Name == name
+}
+func limitValue(v dbus.Variant) (uint64, bool) {
+	switch n := v.Value().(type) {
+	case uint64:
+		return n, true
+	case uint32:
+		return uint64(n), true
+	case int64:
+		if n >= 0 {
+			return uint64(n), true
+		}
+	}
+	return 0, false
+}
+func validateSlice(props, unit map[string]dbus.Variant) error {
 	if stop, ok := unit["StopWhenUnneeded"].Value().(bool); !ok || !stop {
 		return fmt.Errorf("检测进程组未配置空闲回收，请在slice的[Unit]中设置StopWhenUnneeded=yes后重试；尚未启动检测")
 	}
-	if _, ok := props["MemorySwapMax"]; !ok {
-		return fmt.Errorf("当前systemd无法读取swap硬限制，不能开始检测")
+	max, maxOK := limitValue(props["MemoryMax"])
+	swap, swapOK := limitValue(props["MemorySwapMax"])
+	tasks, tasksOK := limitValue(props["TasksMax"])
+	if !maxOK || !swapOK || !tasksOK {
+		return fmt.Errorf("无法完整读取检测内存、swap或进程硬限制；请核查systemd版本和原slice配置，尚未启动检测")
 	}
-	max, swap, tasks := number(props["MemoryMax"]), number(props["MemorySwapMax"]), number(props["TasksMax"])
 	if max == 0 || max > MemoryCeiling || swap != 0 || tasks == 0 || tasks > 64 {
-		return fmt.Errorf("检测专用限制不符合要求：内存上限%d字节、swap上限%d字节、进程上限%d；须内存不超过500000000字节、swap为0、进程不超过64", max, swap, tasks)
+		return fmt.Errorf("检测专用限制不符合要求：内存上限%d字节、swap上限%d字节、进程上限%d；须内存不超过500000000字节、swap为0、进程不超过64；请修正原slice配置后重试", max, swap, tasks)
 	}
 	return nil
 }
@@ -230,15 +300,21 @@ func (m *systemManager) kill(ctx context.Context, name string) error {
 	}
 	return m.call(ctx, "KillUnit", name, "all", int32(9)).Err
 }
-func (m *systemManager) release(name string) error {
+func (m *systemManager) release(name string) (err error) {
 	unitLifecycle.Lock()
 	defer unitLifecycle.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	defer m.conn.Close()
-	_ = m.call(ctx, "UnrefUnit", name).Err
-	_ = m.call(ctx, "ResetFailedUnit", name).Err
-	return m.stopEmptySlice(ctx, name)
+	defer func() { err = errors.Join(err, m.conn.Close()) }()
+	if name != "" {
+		_ = m.call(ctx, "UnrefUnit", name).Err
+		_ = m.call(ctx, "ResetFailedUnit", name).Err
+	}
+	err = m.stopEmptySlice(ctx, name)
+	if unrefErr := m.call(ctx, "UnrefUnit", sliceName).Err; unrefErr != nil && !namedBusError(unrefErr, "org.freedesktop.systemd1.NoSuchUnit") {
+		err = errors.Join(err, fmt.Errorf("检测程序已关闭，但无法释放内存限制的连接引用；请核查systemd运行状态：%w", unrefErr))
+	}
+	return err
 }
 
 // StopWhenUnneeded is rate limited by systemd (16 automatic stops/10 seconds).

@@ -80,8 +80,7 @@ func (r *Runner) Available(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	m.conn.Close()
-	return nil
+	return m.release("")
 }
 func within(root, path string) bool {
 	rel, e := filepath.Rel(root, path)
@@ -218,21 +217,18 @@ func (r *Runner) launch(ctx context.Context, role string, env Envelope, limit ui
 	}
 	var nonce [16]byte
 	if _, err = rand.Read(nonce[:]); err != nil {
-		m.conn.Close()
-		return nil, err
+		return nil, errors.Join(err, m.release(""))
 	}
 	name := "transithub-chanshui-" + role + "-" + hex.EncodeToString(nonce[:]) + ".service"
 	inR, inW, err := os.Pipe()
 	if err != nil {
-		m.conn.Close()
-		return nil, err
+		return nil, errors.Join(err, m.release(""))
 	}
 	outR, outW, err := os.Pipe()
 	if err != nil {
 		inR.Close()
 		inW.Close()
-		m.conn.Close()
-		return nil, err
+		return nil, errors.Join(err, m.release(""))
 	}
 	errR, errW, err := os.Pipe()
 	if err != nil {
@@ -240,8 +236,7 @@ func (r *Runner) launch(ctx context.Context, role string, env Envelope, limit ui
 		inW.Close()
 		outR.Close()
 		outW.Close()
-		m.conn.Close()
-		return nil, err
+		return nil, errors.Join(err, m.release(""))
 	}
 	p := &process{manager: m, name: name, input: inW, output: outR, stderr: errR, reader: bufio.NewReaderSize(outR, 4096), done: make(chan struct{})}
 	err = m.start(ctx, name, role, r.cfg, limit, seconds, inR, outW, errW)
@@ -359,7 +354,7 @@ func (r *Runner) Query(ctx context.Context, env Envelope, cred *Credential, inte
 		<-p.done
 		p.close()
 		release()
-		return nil, problem(503, "query", "检测程序返回的数据格式或大小不符合要求，请核对安装包版本后重试")
+		return nil, problem(503, "query", "检测程序返回的数据格式或大小不符合要求，请重新执行整站升级，并核对检测程序与调度站版本一致后重试")
 	}
 	if !header.OK {
 		cancel()
@@ -496,12 +491,12 @@ func (r *Runner) Start(ctx context.Context, env Envelope, cred Credential, memor
 	return job, nil
 }
 
-func (r *Runner) Recover(ctx context.Context) error {
+func (r *Runner) Recover(ctx context.Context) (err error) {
 	m, err := connectManager(ctx, r.cfg)
 	if err != nil {
 		return err
 	}
-	defer m.conn.Close()
+	defer func() { err = errors.Join(err, m.release("")) }()
 	var units []listedUnit
 	if err = m.call(ctx, "ListUnitsByPatterns", []string{}, []string{"transithub-chanshui-run-*.service", "transithub-chanshui-query-*.service"}).Store(&units); err != nil {
 		return err

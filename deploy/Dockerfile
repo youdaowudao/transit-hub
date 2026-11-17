@@ -6,7 +6,7 @@ RUN npm ci
 COPY frontend/ .
 ARG VITE_API_BASE_URL=/api
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
-RUN npm run build
+RUN npm --ignore-scripts run build
 
 # ---- 阶段 2：后端构建 ----
 FROM golang:1.25-alpine AS backend-builder
@@ -49,7 +49,6 @@ COPY --from=chanshui-builder /out/transithub-chanshui /app/chanshui/.artifacts/b
 COPY --from=chanshui-web-builder /src/chanshui/web/out /app/chanshui/web/out-build
 COPY --from=chanshui-builder /out/bank-manifest.json /app/chanshui/web/out-build/bank-manifest.json
 # 缺少受限systemd执行环境时仅此功能不可用，不改变原Hub容器行为。
-ENV CHANSHUI_ENABLED=false
 
 ENV PORT=10621
 ENV PUBLIC_DIR=/app/public

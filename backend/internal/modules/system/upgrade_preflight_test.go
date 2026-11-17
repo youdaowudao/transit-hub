@@ -13,7 +13,7 @@ import (
 // 升级、回滚服务由 systemd 以固定 PATH 拉起，不加载 nvm 等登录环境。
 // 必需命令要在写还原点、切换代码之前检查，缺失时不能留下任何改动。
 func TestMaintenanceScriptsCheckRequiredCommandsBeforeAnyChange(t *testing.T) {
-	const preflight = "\nrequire_commands git sudo docker curl node npm go\n"
+	const preflight = "\nrequire_commands git sudo docker curl node npm go python3\n"
 	for relativePath, firstChanges := range map[string][]string{
 		"deploy/update-source.sh": {
 			`capture_rollback_point "$previous_commit"`,
@@ -27,6 +27,11 @@ func TestMaintenanceScriptsCheckRequiredCommandsBeforeAnyChange(t *testing.T) {
 		},
 	} {
 		script := readProjectFileForUpgradeTest(t, relativePath)
+		mainAt := strings.Index(script, "\nacquire_maintenance_lock\n")
+		if mainAt < 0 {
+			t.Fatalf("%s missing maintenance entry", relativePath)
+		}
+		script = script[mainAt:]
 		lockAt := strings.Index(script, "\nacquire_maintenance_lock\n")
 		preflightAt := strings.Index(script, preflight)
 		if lockAt < 0 || preflightAt < 0 || preflightAt < lockAt {
@@ -79,7 +84,7 @@ func TestUpgradeRestoresSourceOnlyBeforeArtifactsChange(t *testing.T) {
 	requireTextContains(t, script, "source_switched=1\ngit switch --detach origin/main\n")
 	npmCIAt := strings.Index(script, "npm ci --registry")
 	touchedAt := strings.Index(script, "\nartifacts_touched=1\n")
-	buildAt := strings.Index(script, "\nnpm run build\n")
+	buildAt := strings.Index(script, "\nnpm --ignore-scripts run build\n")
 	if npmCIAt < 0 || touchedAt < npmCIAt || buildAt < touchedAt {
 		t.Fatalf("artifacts_touched 必须位于 npm ci 与 npm run build 之间：ci=%d touched=%d build=%d", npmCIAt, touchedAt, buildAt)
 	}

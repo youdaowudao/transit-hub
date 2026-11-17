@@ -14,7 +14,7 @@ const (
 	defaultPublicDir = "/app/public"
 	// 升级、回滚脚本的 read_app_version 和新版本检查都按行首读这一行；
 	// 不要改这一行的格式，否则已部署的旧版本收不到新版本提示。
-	defaultAppVersion = "V3.1.13"
+	defaultAppVersion = "V3.1.14"
 )
 
 type Config struct {
@@ -97,11 +97,11 @@ func Load() Config {
 
 		SMTPEncryptionKey:               os.Getenv("SMTP_ENCRYPTION_KEY"),
 		ProbeGlobalConcurrency:          envPositiveInt("TRANSITHUB_PROBE_GLOBAL_CONCURRENCY", 12),
-		ChanshuiEnabled:                 os.Getenv("CHANSHUI_ENABLED") == "true",
+		ChanshuiEnabled:                 true,
 		ChanshuiBinaryPath:              os.Getenv("CHANSHUI_BINARY_PATH"),
 		ChanshuiWebDir:                  os.Getenv("CHANSHUI_WEB_DIR"),
 		ChanshuiDataDir:                 os.Getenv("CHANSHUI_DATA_DIR"),
-		ChanshuiSystemdManager:          envOrDefault("CHANSHUI_SYSTEMD_MANAGER", "system"),
+		ChanshuiSystemdManager:          os.Getenv("CHANSHUI_SYSTEMD_MANAGER"),
 		ChanshuiTestAllowPrivateTargets: os.Getenv("CHANSHUI_TEST_ALLOW_PRIVATE_TARGETS") == "true",
 	}
 }

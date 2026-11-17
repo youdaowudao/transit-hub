@@ -1,40 +1,32 @@
 #!/usr/bin/env bash
-# Build on a development/build machine. This script never installs or starts services.
+# Internal npm prebuild hook; deployment is performed by the source upgrader.
 set -Eeuo pipefail
 chanshui_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-export GOTOOLCHAIN=local
-export GOMAXPROCS="${GOMAXPROCS:-2}"
-export GOCACHE="${GOCACHE:-$chanshui_root/backend/.cache/go-build}"
-export GOMODCACHE="${GOMODCACHE:-$chanshui_root/backend/.cache/go-mod}"
-export GOPATH="${GOPATH:-$chanshui_root/backend/.cache/gopath}"
-export GOTMPDIR="${GOTMPDIR:-$chanshui_root/backend/.cache/tmp}"
-export TMPDIR="$chanshui_root/.cache/chanshui-build/tmp"
-export npm_config_cache="$chanshui_root/.cache/npm"
-export NEXT_TELEMETRY_DISABLED=1
-export NEXT_PUBLIC_TRANSITHUB=1
-mkdir -p "$GOCACHE" "$GOMODCACHE" "$GOPATH" "$GOTMPDIR" "$TMPDIR" "$chanshui_root/chanshui/.artifacts/bin"
-cd "$chanshui_root/chanshui"
-CGO_ENABLED=0 go build -p=1 -trimpath -o .artifacts/bin/transithub-chanshui ./cmd/transit-hub
-go run -p=1 ./cmd/hub-manifest > .artifacts/bank-manifest.json
-cd web
-if [[ "${CHANSHUI_SKIP_NPM_CI:-0}" != "1" ]]; then
-  npm ci --registry=https://registry.npmjs.org
-fi
-npm run build
-python3 - "$chanshui_root" <<'PY'
-from pathlib import Path
-import shutil, sys
-root = Path(sys.argv[1]).resolve()
-web = root / 'chanshui/web'
-# Next's distDir is its compiler output; only the exported HTML is deployable.
-source = web / 'out'
-assert (source / 'index.html').is_file(), 'Next没有生成out/index.html，未替换现有静态页面'
-assert (source / '_next').is_dir(), '静态导出缺少_next目录，未替换现有静态页面'
-target = web / 'out-build'
-assert target.parent == web and web.is_relative_to(root)
-if target.exists():
-    shutil.rmtree(target)
-shutil.copytree(source, target)
-shutil.copyfile(root / 'chanshui/.artifacts/bank-manifest.json', target / 'bank-manifest.json')
-print('构建完成：chanshui/.artifacts/bin/transithub-chanshui 和 chanshui/web/out-build；尚未部署或启用。')
-PY
+source "$chanshui_root/deploy/chanshui-build.sh"
+
+chanshui_wrapper_error() {
+    local code=$?
+    trap - ERR
+    trap '' INT TERM HUP
+    printf '整站构建中的检测步骤失败（退出码%s），正在恢复本次已替换的检测文件。\n' "$code" >&2
+    chanshui_restore_pair || true
+    exit "$code"
+}
+chanshui_wrapper_signal() {
+    trap - ERR
+    trap '' INT TERM HUP
+    printf '检测构建收到%s信号，正在恢复本次已替换的检测文件。\n' "$1" >&2
+    chanshui_restore_pair || true
+    exit "$2"
+}
+chanshui_require_commands go node npm python3 flock
+chanshui_acquire_build_lock "$chanshui_root"
+trap chanshui_wrapper_error ERR
+trap 'chanshui_cleanup_stage || true' EXIT
+trap 'chanshui_wrapper_signal INT 130' INT
+trap 'chanshui_wrapper_signal TERM 143' TERM
+trap 'chanshui_wrapper_signal HUP 129' HUP
+chanshui_build_stage "$chanshui_root" "$chanshui_root/chanshui/.artifacts/build.next"
+chanshui_publish_pair
+chanshui_commit_pair
+printf '整站构建中的检测程序和静态页面已生成，继续原前端构建。\n'

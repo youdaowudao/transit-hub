@@ -40,7 +40,7 @@ func TestSourceUpgradeWaitsForHealthAfterRestart(t *testing.T) {
 		"local attempts=60",
 		`health_response="$(curl -fsS "$HEALTH_URL" 2>/dev/null)"`,
 		"sleep 1",
-		`health_response="$(wait_for_health)"`,
+		`health_response="$(trap - ERR; wait_for_health)"`,
 	} {
 		requireTextContains(t, script, want)
 	}

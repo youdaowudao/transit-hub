@@ -52,7 +52,11 @@ func NewService(cfg config.Config, workspace WorkspaceResolver, targets TargetRe
 		cfg.ChanshuiEnabled = false
 	}
 	if cfg.ChanshuiSystemdManager == "" {
-		cfg.ChanshuiSystemdManager = "system"
+		if os.Geteuid() == 0 {
+			cfg.ChanshuiSystemdManager = "system"
+		} else {
+			cfg.ChanshuiSystemdManager = "user"
+		}
 	}
 	root := projectDir()
 	binary := cfg.ChanshuiBinaryPath
@@ -74,7 +78,7 @@ func NewService(cfg config.Config, workspace WorkspaceResolver, targets TargetRe
 }
 func (s *Service) ensureInitialized(ctx context.Context) error {
 	if !s.cfg.ChanshuiEnabled {
-		return problem(503, "configuration", "模型检测尚未启用。请按部署说明安装程序并配置硬内存限制后启用；原调度功能不受影响")
+		return problem(503, "configuration", "当前实例仅提供接口，不能运行检测；请打开正常调度站实例。原调度功能不受影响")
 	}
 	s.initMu.Lock()
 	defer s.initMu.Unlock()
@@ -83,7 +87,7 @@ func (s *Service) ensureInitialized(ctx context.Context) error {
 	}
 	if s.webDir != "" {
 		if info, err := os.Stat(filepath.Join(s.webDir, "index.html")); err != nil || !info.Mode().IsRegular() {
-			return problem(503, "package", "检测页面文件缺失，请构建并安装完整检测包后重试")
+			return problem(503, "package", "检测页面文件缺失，请重新执行整站升级并查看检测构建步骤后重试")
 		}
 	}
 	if r, ok := s.runner.(*Runner); ok {
@@ -408,7 +412,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 func (s *Service) runtime(ctx context.Context, owner Owner) map[string]any {
 	result := map[string]any{"enabled": s.cfg.ChanshuiEnabled, "available": false, "memoryCeilingBytes": MemoryCeiling}
 	if !s.cfg.ChanshuiEnabled {
-		result["reason"] = "模型检测尚未启用，请按部署说明配置后启用；原调度功能不受影响"
+		result["reason"] = "当前实例仅提供接口，不能运行检测；请打开正常调度站实例，原调度功能不受影响"
 		return result
 	}
 	if err := s.ensureInitialized(ctx); err != nil {

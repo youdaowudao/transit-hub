@@ -71,7 +71,7 @@ describe('左侧菜单层级', () => {
     ])
     expect(nav.text()).not.toContain('分组管理')
     expect(nav.text()).not.toContain('嵌入功能')
-    expect(nav.findAll('button').map(button => button.text())).toEqual(['二级功能'])
+    expect(nav.findAll('button').map(button => button.text())).toEqual(['模型检测', '二级功能'])
     for (const [, path] of secondaryEntries) expect(nav.find(`a[href="${path}"]`).exists()).toBe(false)
 
     for (const [label, path] of primaryEntries) {
@@ -82,8 +82,8 @@ describe('左侧菜单层级', () => {
       expect(nav.findAll('a.bg-primary').map(link => link.text())).toEqual([label])
     }
 
-    await nav.get('button').trigger('click')
-    expect(nav.get('button').attributes('aria-expanded')).toBe('true')
+    await nav.get('button[aria-controls="admin-menu-embedded-features"]').trigger('click')
+    expect(nav.get('button[aria-controls="admin-menu-embedded-features"]').attributes('aria-expanded')).toBe('true')
     expect(nav.findAll(':scope > div a').map(link => link.text())).toEqual(secondaryEntries.map(([label]) => label))
     for (const [label, path] of secondaryEntries) {
       expect(nav.findAll(`a[href="${path}"]`)).toHaveLength(1)
@@ -94,22 +94,22 @@ describe('左侧菜单层级', () => {
       expect(wrapper.get('header h1').text()).toBe(label)
       expect(nav.findAll('a.bg-primary').map(link => link.text())).toEqual([label])
     }
-    await nav.get('button').trigger('click')
-    expect(nav.get('button').attributes('aria-expanded')).toBe('false')
-    expect(nav.get('button').classes()).toContain('text-primary')
+    await nav.get('button[aria-controls="admin-menu-embedded-features"]').trigger('click')
+    expect(nav.get('button[aria-controls="admin-menu-embedded-features"]').attributes('aria-expanded')).toBe('false')
+    expect(nav.get('button[aria-controls="admin-menu-embedded-features"]').classes()).toContain('text-primary')
     expect(nav.findAll(':scope > div a')).toHaveLength(0)
   })
 
   it.each(secondaryEntries.slice(-2))('%s 直接进入时默认展开，手动收起保持有效', async (label, path) => {
     const { wrapper, router } = await mountMenu(path)
     const nav = wrapper.get('nav')
-    expect(nav.get('button').attributes('aria-expanded')).toBe('true')
+    expect(nav.get('button[aria-controls="admin-menu-embedded-features"]').attributes('aria-expanded')).toBe('true')
     expect(nav.get(`a[href="${path}"]`).classes()).toContain('bg-primary')
     expect(wrapper.get('header h1').text()).toBe(label)
-    await nav.get('button').trigger('click')
+    await nav.get('button[aria-controls="admin-menu-embedded-features"]').trigger('click')
     await router.push(path === '/admin/mass-email' ? '/admin/user-last-used' : '/admin/mass-email')
     await flushPromises()
-    expect(nav.get('button').attributes('aria-expanded')).toBe('false')
+    expect(nav.get('button[aria-controls="admin-menu-embedded-features"]').attributes('aria-expanded')).toBe('false')
     expect(nav.findAll(':scope > div a')).toHaveLength(0)
   })
 
@@ -121,7 +121,7 @@ describe('左侧菜单层级', () => {
       await openButton.trigger('click')
       expect(openButton.attributes('aria-expanded')).toBe('true')
       expect(sidebar.classes()).toContain('translate-x-0')
-      const group = wrapper.get('nav button')
+      const group = wrapper.get('nav button[aria-controls="admin-menu-embedded-features"]')
       if (path === '/admin/mass-email' && group.attributes('aria-expanded') === 'false') await group.trigger('click')
       await sidebar.get(`a[href="${path}"]`).trigger('click')
       await flushPromises()

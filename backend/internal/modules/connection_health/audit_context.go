@@ -84,6 +84,27 @@ func (s *Service) ResolveAuditContext(ctx context.Context, userID, targetID, cli
 	if err != nil {
 		return AuditContext{}, fmt.Errorf("无法核实此账号属于当前工作区；请重新打开分组健康并选择账号")
 	}
+	return s.resolveAuditContext(ctx, userID, targetID, clickedGroupID, needCredential, session, workspace, accountID)
+}
+
+// ResolveAuditContextInWorkspace uses the task's captured workspace without changing
+// the user's currently selected workspace. RequireSession still checks ownership.
+func (s *Service) ResolveAuditContextInWorkspace(ctx context.Context, userID, workspace, targetID, clickedGroupID string, needCredential bool) (AuditContext, error) {
+	parsed, ok := parseTargetID(targetID)
+	if !ok || workspace == "" || parsed.adminAccountID != workspace || s.platformGroups == nil {
+		return AuditContext{}, fmt.Errorf("排队报告的账号与原工作区不一致，未开始检测")
+	}
+	session, err := s.mySites.RequireSession(ctx, userID, workspace)
+	if err != nil {
+		return AuditContext{}, fmt.Errorf("无法访问排队报告的原工作区，请检查本人工作区登录和权限；未开始检测")
+	}
+	if parsed.platform != string(session.Platform) {
+		return AuditContext{}, fmt.Errorf("排队报告的主站类型已改变，未开始检测")
+	}
+	return s.resolveAuditContext(ctx, userID, targetID, clickedGroupID, needCredential, session, workspace, parsed.accountID)
+}
+
+func (s *Service) resolveAuditContext(ctx context.Context, userID, targetID, clickedGroupID string, needCredential bool, session upstream.Session, workspace, accountID string) (AuditContext, error) {
 	if session.Platform != upstream.PlatformSub2API {
 		return AuditContext{}, fmt.Errorf("此检测只支持Sub2API账号，尚未向上游发出检测请求")
 	}

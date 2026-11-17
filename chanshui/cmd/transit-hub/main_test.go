@@ -53,3 +53,36 @@ func TestReadReportComparesLargeRequestButAlwaysReturnsBoundedSummary(t *testing
 		t.Fatal("cross-owner report exposed", e)
 	}
 }
+
+func TestCancelQueuedOperationIsStrictOwnerScopedAndDoesNotStartRun(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	owner := store.Owner{UserID: "queue-cli", WorkspaceID: "isolated"}
+	id := strings.Repeat("a", 32)
+	if _, err = s.CreateReport(t.Context(), owner, store.CreateRequest{ReportID: id, TargetID: "fixture", Model: "fixture", SelectedQuestionIDs: []string{"Q2"}}); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{"reportId": id})
+	other := store.Owner{UserID: "other", WorkspaceID: "isolated"}
+	if _, _, err = query(t.Context(), s, wire.Envelope{Operation: "cancel-queued", Owner: other, Args: args}, wire.Continue{}); err == nil {
+		t.Fatal("cancel exposed foreign report")
+	}
+	value, _, err := query(t.Context(), s, wire.Envelope{Operation: "cancel-queued", Owner: owner, Args: args}, wire.Continue{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(value)
+	if !strings.Contains(string(raw), `"status":"cancelled"`) || strings.Contains(string(raw), `"request"`) {
+		t.Fatal("invalid cancelled report response", string(raw))
+	}
+	if err = s.BeginRun(t.Context(), owner, id); err == nil {
+		t.Fatal("cancelled report could start")
+	}
+	extra, _ := json.Marshal(map[string]any{"reportId": id, "credential": "not-an-argument"})
+	if _, _, err = query(t.Context(), s, wire.Envelope{Operation: "cancel-queued", Owner: owner, Args: extra}, wire.Continue{}); err == nil {
+		t.Fatal("cancel accepted arbitrary wire fields")
+	}
+}

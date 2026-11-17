@@ -328,10 +328,11 @@ func TestAcceptedResponseLostReplayNeverCreatesSecondRun(t *testing.T) {
 	if _, err := s.Start(t.Context(), Owner{"user-a", "workspace-a"}, input); err != nil {
 		t.Fatal(err)
 	}
+	resolvedBeforeReplay := targets.calls.Load()
 	if _, err := s.Start(t.Context(), Owner{"user-a", "workspace-a"}, input); err != nil {
 		t.Fatal(err)
 	}
-	if f.starts.Load() != 1 || targets.calls.Load() != 1 {
+	if f.starts.Load() != 1 || targets.calls.Load() != resolvedBeforeReplay {
 		t.Fatal("response-lost replay resolved credentials or created another run")
 	}
 }
@@ -360,18 +361,28 @@ func TestStartCreatesSnapshotAndUsesServerCredential(t *testing.T) {
 	if _, err := s.Start(t.Context(), Owner{"user-a", "workspace-a"}, startInput()); err != nil {
 		t.Fatal(err)
 	}
-	if f.starts.Load() != 1 || targets.calls.Load() != 1 {
-		t.Fatal("expected one accepted task using account resolver")
+	if f.starts.Load() != 1 || targets.calls.Load() != 2 {
+		t.Fatal("expected one accepted task with admission and execution-time account checks")
 	}
 }
 func mustJSON(value any) string { b, _ := json.Marshal(value); return string(b) }
 func TestTerminalSQLDoesNotReleaseStillRunningProcess(t *testing.T) {
 	s, f, targets := fixture(t)
-	s.active = &activeTask{Owner: Owner{"other", "other"}, ReportID: "old", Job: &Job{info: func() ExitInfo { return ExitInfo{Exited: false} }}}
-	f.fn = func(e Envelope) (any, error) { return nil, problem(404, "report", "missing") }
-	_, err := s.Start(t.Context(), Owner{"user-a", "workspace-a"}, startInput())
-	if asProblem(err).Status != 409 || f.starts.Load() != 0 || targets.calls.Load() != 0 {
-		t.Fatalf("active old process admitted a new task: %v", err)
+	old := &activeTask{Owner: Owner{"other", "other"}, ReportID: "old", Job: &Job{info: func() ExitInfo { return ExitInfo{Exited: false} }}}
+	s.active = old
+	f.fn = func(e Envelope) (any, error) {
+		if e.Operation == "read-report" {
+			return nil, problem(404, "report", "missing")
+		}
+		if e.Operation == "create-report" {
+			return map[string]any{"memoryLimitMiB": 128, "totalTimeoutSeconds": 60, "status": "queued"}, nil
+		}
+		t.Fatalf("unexpected %s", e.Operation)
+		return nil, nil
+	}
+	result, err := s.Start(t.Context(), Owner{"user-a", "workspace-a"}, startInput())
+	if err != nil || result.(map[string]any)["status"] != "queued" || f.starts.Load() != 0 || targets.calls.Load() != 1 || s.active != old {
+		t.Fatalf("old live process was replaced or overlapped: result=%v error=%v", result, err)
 	}
 }
 func TestRecoveryBusyRetainsHandleAndNextAttemptSavesWithoutModel(t *testing.T) {
@@ -397,7 +408,7 @@ func TestOtherWorkspaceRuntimeHidesAccountAndReport(t *testing.T) {
 	s, _, _ := fixture(t)
 	s.active = &activeTask{Owner: Owner{"other", "private"}, ReportID: "private-report", AccountName: "private-account"}
 	result := mustJSON(s.runtime(t.Context(), Owner{"user-a", "workspace-a"}))
-	if strings.Contains(result, "private") || !strings.Contains(result, "busy") {
+	if strings.Contains(result, "private") || strings.Contains(result, `"busy":true`) || !strings.Contains(result, "可以加入等待") {
 		t.Fatalf("other owner leaked: %s", result)
 	}
 }
@@ -582,7 +593,10 @@ func TestCreateResponseLostRecoversCommittedQueuedReportWithoutModel(t *testing.
 	f.fn = func(e Envelope) (any, error) {
 		switch e.Operation {
 		case "read-report":
-			return nil, problem(404, "report", "missing")
+			if status == "" {
+				return nil, problem(404, "report", "missing")
+			}
+			return map[string]any{"reportId": startInput().ReportID, "status": status}, nil
 		case "create-report":
 			status = "queued"
 			return nil, problem(503, "query", "提交后读取响应中断")

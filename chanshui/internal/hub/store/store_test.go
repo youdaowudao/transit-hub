@@ -179,11 +179,19 @@ func TestReportSnapshotOwnerIdempotenceAndSingleActivity(t *testing.T) {
 	if e != nil || len(items.Items) != 1 || items.Items[0].Definition.Title != "洗车路径" {
 		t.Fatal("deletion damaged old snapshot", e)
 	}
-	if _, e = s.CreateReport(ctx, testOwner, createRequest(strings.Repeat("b", 32))); e == nil {
-		t.Fatal("second active report allowed")
+	next := createRequest(strings.Repeat("b", 32))
+	next.SelectedQuestionIDs = []string{"Q1"}
+	if _, e = s.CreateReport(ctx, testOwner, next); e != nil {
+		t.Fatal("second waiting report rejected", e)
+	}
+	if e = s.BeginRun(ctx, testOwner, r.ReportID); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.BeginRun(ctx, testOwner, next.ReportID); e == nil {
+		t.Fatal("second running report allowed")
 	}
 }
-func TestConcurrentDifferentIDsAcceptOneAndTerminalCASPreserved(t *testing.T) {
+func TestConcurrentDifferentIDsCanWaitButOnlyOneRunsAndTerminalCASPreserved(t *testing.T) {
 	s := memoryStore(t)
 	ctx := context.Background()
 	if e := s.EnsureScope(ctx, testOwner); e != nil {
@@ -205,7 +213,7 @@ func TestConcurrentDifferentIDsAcceptOneAndTerminalCASPreserved(t *testing.T) {
 		}(n)
 	}
 	wg.Wait()
-	if len(ids) != 1 {
+	if len(ids) != 2 {
 		t.Fatalf("accepted %d tasks", len(ids))
 	}
 	id := ids[0]
@@ -214,6 +222,9 @@ func TestConcurrentDifferentIDsAcceptOneAndTerminalCASPreserved(t *testing.T) {
 	}
 	if e := s.BeginRun(ctx, testOwner, id); e == nil {
 		t.Fatal("replayed running task")
+	}
+	if e := s.BeginRun(ctx, testOwner, ids[1]); e == nil {
+		t.Fatal("another running report accepted")
 	}
 	if e := s.Finish(ctx, testOwner, id, "done", map[string]any{"iqScore": 0}, map[string]any{}); e != nil {
 		t.Fatal(e)
@@ -286,7 +297,7 @@ func TestSettingsCASAndHigherSchemaRefusesMigration(t *testing.T) {
 	if _, e = s.SaveSettings(ctx, testOwner, saved); e == nil {
 		t.Fatal("oversized memory accepted")
 	}
-	if _, e = s.db.ExecContext(ctx, "PRAGMA user_version=2"); e != nil {
+	if _, e = s.db.ExecContext(ctx, "PRAGMA user_version=3"); e != nil {
 		t.Fatal(e)
 	}
 	if e = s.migrate(ctx); e == nil {

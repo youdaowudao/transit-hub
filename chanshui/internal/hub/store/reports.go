@@ -265,6 +265,42 @@ func (s *Store) FinishInterrupted(ctx context.Context, o Owner, id string, detai
 	}
 	return s.Finish(ctx, o, id, "interrupted", map[string]any{"complete": false}, detail)
 }
+
+// CancelQueued never changes a running or completed report. The caller removes
+// its FIFO entry only after this state transition has been committed.
+func (s *Store) CancelQueued(ctx context.Context, o Owner, id string) error {
+	r, err := s.Report(ctx, o, id)
+	if err != nil {
+		return err
+	}
+	if r.Status == "cancelled" || r.Status == "done" || r.Status == "partial" || r.Status == "interrupted" {
+		return nil
+	}
+	if r.Status != "queued" {
+		return Fail(409, "本报告已开始执行，请停止正在运行的检测；未取消其他任务", "cancel")
+	}
+	return retryWrite(ctx, func() error {
+		res, err := s.db.ExecContext(ctx, `UPDATE hub_reports SET status='cancelled',updated_at_ms=?,summary_json='{"complete":false}',error_json='{"message":"已取消等待，本报告没有发送检测请求","step":"cancel","operationResult":"not_started"}' WHERE user_id=? AND workspace_id=? AND report_id=? AND status='queued'`, Now().UnixMilli(), o.UserID, o.WorkspaceID, id)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			current, readErr := s.Report(ctx, o, id)
+			if readErr != nil {
+				return readErr
+			}
+			if current.Status == "cancelled" || current.Status == "done" || current.Status == "partial" || current.Status == "interrupted" {
+				return nil
+			}
+			return Fail(409, "报告状态已变化，请重新读取后停止正在运行的检测；未覆盖已保存结果", "cancel")
+		}
+		return nil
+	})
+}
 func (s *Store) Recover(ctx context.Context) error {
 	return retryWrite(ctx, func() error {
 		_, e := s.db.ExecContext(ctx, `UPDATE hub_reports SET status='interrupted',updated_at_ms=?,error_json='{"message":"检测服务已重启，已停止旧任务；已保存结果仍可查看，不会自动重新调用模型","step":"recover","operationResult":"unknown"}' WHERE status IN('queued','running')`, Now().UnixMilli())

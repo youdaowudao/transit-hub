@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,6 +71,19 @@ func main() {
 	if input.Operation == "bad-limits" {
 		max = 0
 	}
+	if input.Operation == "delayed-ready-run" {
+		waiting, _ := input.Args["waitingFile"].(string)
+		allow, _ := input.Args["allowReadyFile"].(string)
+		if err := os.WriteFile(waiting, []byte(strconv.Itoa(os.Getpid())), 0600); err != nil {
+			panic(err)
+		}
+		for {
+			if _, err := os.Stat(allow); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	emit(map[string]any{"v": 1, "event": "ready", "limits": map[string]uint64{"taskMax": max, "sliceMax": limit(sliceDir, "memory.max"), "swapMax": limit(dir, "memory.swap.max")}})
 	line, err = reader.ReadBytes('\n')
 	if err != nil {
@@ -83,6 +97,14 @@ func main() {
 		if err := os.WriteFile(path, []byte("continued"), 0600); err != nil {
 			panic(err)
 		}
+	}
+	if input.Operation == "delayed-ready-run" {
+		endpoint, _ := input.Args["modelURL"].(string)
+		response, err := http.Post(endpoint, "application/json", strings.NewReader(`{"isolated":true}`))
+		if err != nil {
+			panic(err)
+		}
+		response.Body.Close()
 	}
 	if input.Operation == "hold-query" {
 		time.Sleep(time.Minute)

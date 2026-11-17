@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount, provide, watch, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { LayoutDashboard, Network, Settings, LogOut, Moon, Sun, Percent, Megaphone, ChevronDown, ArrowRightLeft, Link2, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes, Clock3 } from 'lucide-vue-next'
+import { LayoutDashboard, Network, Settings, LogOut, Moon, Sun, Percent, Megaphone, ChevronDown, ArrowRightLeft, Link2, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes, Clock3, FlaskConical } from 'lucide-vue-next'
 import { useDark, useToggle } from '@vueuse/core'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import { NotificationControllerKey, useNotifications } from '../composables/useNotifications'
 import ChanshuiHost from '../components/chanshui/ChanshuiHost.vue'
+import { openChanshui } from '../composables/useChanshuiLauncher'
 import NotificationBell from '../components/notifications/NotificationBell.vue'
 import NotificationDrawer from '../components/notifications/NotificationDrawer.vue'
 import NotificationSummary from '../components/notifications/NotificationSummary.vue'
@@ -109,6 +110,7 @@ interface MenuChild {
 // 三个分组功能为一级入口；辅助功能收纳在“二级功能”下。
 type MenuEntry =
   | { type: 'leaf'; name: string; path: string; icon: Component }
+  | { type: 'action'; id: string; name: string; icon: Component }
   | { type: 'group'; id: string; name: string; icon: Component; children: MenuChild[] }
 
 const menuItems = computed<MenuEntry[]>(() => [
@@ -117,6 +119,7 @@ const menuItems = computed<MenuEntry[]>(() => [
   { type: 'leaf', name: t('admin.menu.groupRates'), path: '/admin/group-rates', icon: Percent },
   { type: 'leaf', name: t('admin.menu.groupAssociations'), path: '/admin/group-associations', icon: Link2 },
   { type: 'leaf', name: t('admin.menu.connectionHealth'), path: '/admin/connection-health', icon: Activity },
+  { type: 'action', id: 'model-audit', name: '模型检测', icon: FlaskConical },
   {
     type: 'group',
     id: 'embedded-features',
@@ -148,6 +151,10 @@ const toggleGroup = (group: Extract<MenuEntry, { type: 'group' }>) => {
 
 const handleMenuRouteClick = () => {
   closeMobileSidebar()
+}
+const openModelAudit = () => {
+  closeMobileSidebar()
+  openChanshui({})
 }
 
 // 摊平查找当前路由对应的菜单文案，供顶部标题使用（叶子和分组子项都要能查到）。
@@ -233,6 +240,16 @@ watch(
             <component :is="item.icon" class="w-5 h-5" aria-hidden="true" />
             {{ item.name }}
           </router-link>
+          <button
+            v-else-if="item.type === 'action'"
+            type="button"
+            data-testid="chanshui-sidebar-entry"
+            class="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-muted-foreground transition-colors hover:bg-surface-line hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            @click="openModelAudit"
+          >
+            <component :is="item.icon" class="w-5 h-5" aria-hidden="true" />
+            {{ item.name }}
+          </button>
           <div v-else>
             <button
               type="button"

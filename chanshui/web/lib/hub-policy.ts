@@ -1,4 +1,5 @@
 export type HubKind = 'iq' | 'vision' | 'knowledge' | 'tools' | 'cache' | 'injection' | 'web' | 'thinking' | 'fingerprint_numeric' | 'fingerprint_behavior';
+export const HUB_MAX_TOTAL_SECONDS = 9223371976;
 export const HUB_KINDS: { value: HubKind; label: string }[] = [
   { value: 'iq', label: '推理题' }, { value: 'vision', label: '识图' }, { value: 'knowledge', label: '知识事件' },
   { value: 'tools', label: '工具调用' }, { value: 'cache', label: '缓存读写' }, { value: 'injection', label: '注入大小' },
@@ -24,10 +25,11 @@ export function sidebarDayLabel(createdAtMs: number, now = Date.now()): string |
   return null;
 }
 export function reportStatus(status: string): string {
-  return ({ queued: '准备中', running: '检测中', done: '完成', partial: '未完成', cancelled: '已停止', interrupted: '异常中断', error: '失败' } as Record<string, string>)[status] ?? status;
+  return ({ queued: '等待执行', running: '检测中', done: '完成', partial: '未完成', cancelled: '已停止', interrupted: '异常中断', error: '失败' } as Record<string, string>)[status] ?? status;
 }
 export function isHubTerminal(status: string): boolean { return ['done', 'partial', 'cancelled', 'interrupted'].includes(status); }
 export function reportPollDecision(report: { status: string; processExited?: boolean }, terminalSince: number | null, now: number): { poll: boolean; message: string; terminalSince: number | null } {
+  if (report.status === 'queued') return { poll: true, message: '等待执行，轮到后自动开始；尚未发送检测题目，等待时间不计入任务总时长。', terminalSince: null };
   if (report.processExited && !isHubTerminal(report.status)) return { poll: false, message: '检测程序已退出，但报告状态尚未保存；请处理提示的问题，再点击停止检测以重试保存状态，不会再次调用模型。', terminalSince };
   if (!isHubTerminal(report.status)) return { poll: true, message: '', terminalSince: null };
   if (report.processExited) return { poll: false, message: '报告已保存；本次检测程序已结束，服务器不再保留这次检测进程。', terminalSince };

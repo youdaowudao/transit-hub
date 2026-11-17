@@ -211,6 +211,9 @@ func validateSlice(props, unit map[string]dbus.Variant) error {
 	return nil
 }
 func (m *systemManager) start(ctx context.Context, name, role string, cfg RunnerConfig, limit uint64, seconds int, in, out, stderr *os.File) error {
+	if seconds < 1 || seconds > maxTaskSeconds {
+		return fmt.Errorf("检测运行时限超出支持范围，未启动进程；请使用1～9223371976秒")
+	}
 	unitLifecycle.Lock()
 	defer unitLifecycle.Unlock()
 	props := []unitProperty{

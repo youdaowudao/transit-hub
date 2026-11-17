@@ -20,12 +20,19 @@ type RunnerConfig struct {
 	BinaryPath, DataDir, ProjectDir, Manager string
 	AllowPrivateTargets                      bool
 }
+
+// The one existing admission slot also owns an unconfirmed helper. Keeping the
+// process here retains its control connection without adding a recovery worker.
+type queryProcessSlot struct{ process *process }
+
 type Runner struct {
 	cfg       RunnerConfig
-	querySlot chan struct{}
+	querySlot chan *queryProcessSlot
 }
 
-func NewRunner(cfg RunnerConfig) *Runner { return &Runner{cfg: cfg, querySlot: make(chan struct{}, 1)} }
+func NewRunner(cfg RunnerConfig) *Runner {
+	return &Runner{cfg: cfg, querySlot: make(chan *queryProcessSlot, 1)}
+}
 func (r *Runner) prepareDataDir() error {
 	if !filepath.IsAbs(r.cfg.DataDir) || !within(r.cfg.ProjectDir, r.cfg.DataDir) {
 		return fmt.Errorf("检测数据目录必须位于当前项目内，请修正部署配置")
@@ -132,6 +139,10 @@ func (p *process) stopAndWait() {
 			p.setExit(info, nil)
 			return
 		}
+		if namedBusError(err, "org.freedesktop.systemd1.NoSuchUnit") {
+			p.setExit(ExitInfo{Exited: true}, nil)
+			return
+		}
 		time.Sleep(30 * time.Millisecond)
 	}
 	killCtx, killCancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -142,6 +153,10 @@ func (p *process) stopAndWait() {
 		info, err := p.manager.inspect(killCtx, p.name)
 		if err == nil && info.Exited {
 			p.setExit(info, nil)
+			return
+		}
+		if namedBusError(err, "org.freedesktop.systemd1.NoSuchUnit") {
+			p.setExit(ExitInfo{Exited: true}, nil)
 			return
 		}
 		time.Sleep(30 * time.Millisecond)
@@ -197,6 +212,51 @@ func (p *process) close() error {
 	defer p.mu.Unlock()
 	return p.exitErr
 }
+func (p *process) interruptControlIO(ctx context.Context) func() bool {
+	return context.AfterFunc(ctx, func() {
+		_ = p.input.Close()
+		_ = p.output.Close()
+	})
+}
+
+func preparationCancelled(ctx context.Context) *Problem {
+	message := "检测准备等待超时"
+	if errors.Is(ctx.Err(), context.Canceled) {
+		message = "检测准备已取消"
+	}
+	return problem(409, "cancel", message+"，未交付账号凭据，也未发送检测请求；已结束本次准备")
+}
+
+func (p *process) failLaunch(issue error) (*process, error) {
+	p.stopAndWait()
+	if !p.info().Exited {
+		e := asProblem(issue)
+		e.Message += "；仍无法确认准备进程退出，已暂停后续任务，请核查运行状态"
+		return p, e
+	}
+	_ = p.close()
+	return nil, issue
+}
+
+// An unknown exit must retain its admission slot; a closed Done channel alone
+// is not evidence that the systemd process group has exited.
+const queryExitUnconfirmedMessage = "查询程序退出尚未确认，后续查询已暂停；请检查检测运行诊断，确认原查询退出并重启服务后再读取；已保存报告保留，不会自动重跑模型"
+
+func (p *process) closeAfterConfirmedExit(release func()) error {
+	<-p.done
+	if !p.info().Exited {
+		p.mu.Lock()
+		exitErr := p.exitErr
+		p.mu.Unlock()
+		return errors.Join(errors.New(queryExitUnconfirmedMessage), exitErr)
+	}
+	err := p.close()
+	if release != nil {
+		release()
+	}
+	return err
+}
+
 func readLine(reader *bufio.Reader) ([]byte, error) {
 	line, err := reader.ReadSlice('\n')
 	if err != nil {
@@ -239,13 +299,14 @@ func (r *Runner) launch(ctx context.Context, role string, env Envelope, limit ui
 		return nil, errors.Join(err, m.release(""))
 	}
 	p := &process{manager: m, name: name, input: inW, output: outR, stderr: errR, reader: bufio.NewReaderSize(outR, 4096), done: make(chan struct{})}
+	stopControlIO := p.interruptControlIO(ctx)
+	defer stopControlIO()
 	err = m.start(ctx, name, role, r.cfg, limit, seconds, inR, outW, errW)
 	inR.Close()
 	outW.Close()
 	errW.Close()
 	if err != nil {
-		p.close()
-		return nil, problem(503, "startup", err.Error()+"；尚未向上游发送检测请求")
+		return p.failLaunch(problem(503, "startup", err.Error()+"；尚未向上游发送检测请求"))
 	}
 	// Never retain stderr, which may contain arbitrary upstream text. A child
 	// violating the bounded protocol is stopped rather than blocking a pipe.
@@ -259,18 +320,24 @@ func (r *Runner) launch(ctx context.Context, role string, env Envelope, limit ui
 	env.Deployment = Deployment{r.cfg.AllowPrivateTargets}
 	encoded, err := json.Marshal(env)
 	if err != nil || len(encoded) > 128*1024 {
-		p.close()
-		return nil, problem(422, "input", "检测参数超过128KiB或无法编码，请减少选择后重试")
+		return p.failLaunch(problem(422, "input", "检测参数超过128KiB或无法编码，请减少选择后重试"))
+	}
+	if ctx.Err() != nil {
+		return p.failLaunch(preparationCancelled(ctx))
 	}
 	if _, err = p.input.Write(append(encoded, '\n')); err != nil {
-		p.close()
-		return nil, problem(503, "handshake", "无法交付检测启动参数，尚未发送模型请求；请检查程序版本后重试")
+		if ctx.Err() != nil {
+			return p.failLaunch(preparationCancelled(ctx))
+		}
+		return p.failLaunch(problem(503, "handshake", "无法交付检测启动参数，尚未发送模型请求；请检查程序版本后重试"))
 	}
 	_ = p.output.SetReadDeadline(time.Now().Add(10 * time.Second))
 	line, err := readLine(p.reader)
-	if err != nil {
-		p.close()
-		return nil, problem(503, "handshake", "检测程序在10秒内未完成启动核验，尚未发送模型请求；请检查程序版本、内存限制和运行诊断")
+	if err != nil || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return p.failLaunch(preparationCancelled(ctx))
+		}
+		return p.failLaunch(problem(503, "handshake", "检测程序在10秒内未完成启动核验，尚未发送模型请求；请检查程序版本、内存限制和运行诊断"))
 	}
 	var ready struct {
 		V      int                                         `json:"v"`
@@ -278,14 +345,20 @@ func (r *Runner) launch(ctx context.Context, role string, env Envelope, limit ui
 		Limits struct{ TaskMax, SliceMax, SwapMax uint64 } `json:"limits"`
 	}
 	if json.Unmarshal(line, &ready) != nil || ready.V != 1 || ready.Event != "ready" || ready.Limits.TaskMax == 0 || ready.Limits.TaskMax > limit || ready.Limits.SliceMax == 0 || ready.Limits.SliceMax > MemoryCeiling || ready.Limits.SwapMax != 0 {
-		p.close()
-		return nil, problem(503, "limits", "检测程序没有确认有效硬内存限制，已拒绝交付密钥；尚未发送模型请求。请核对slice及程序版本")
+		return p.failLaunch(problem(503, "limits", "检测程序没有确认有效硬内存限制，已拒绝交付密钥；尚未发送模型请求。请核对slice及程序版本"))
+	}
+	stopControlIO()
+	if ctx.Err() != nil {
+		return p.failLaunch(preparationCancelled(ctx))
 	}
 	p.setExit(ExitInfo{TaskMemoryMaxBytes: ready.Limits.TaskMax, SliceMemoryMaxBytes: ready.Limits.SliceMax, SwapMaxBytes: ready.Limits.SwapMax}, nil)
 	_ = p.output.SetReadDeadline(time.Time{})
 	return p, nil
 }
-func continueProcess(p *process, cred *Credential) error {
+
+// The bool describes bytes actually written in this one handoff. Once any
+// credential bytes were sent, a missing acknowledgement must remain unknown.
+func continueProcess(ctx context.Context, p *process, cred *Credential) (bool, error) {
 	wire := struct {
 		V          int         `json:"v"`
 		Command    string      `json:"command"`
@@ -293,74 +366,109 @@ func continueProcess(p *process, cred *Credential) error {
 	}{1, "continue", cred}
 	encoded, err := json.Marshal(wire)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if len(encoded) > 16*1024 {
-		return fmt.Errorf("账号凭据超过16KiB，请检查主站账号配置")
+		return false, fmt.Errorf("账号凭据超过16KiB，请检查主站账号配置")
 	}
-	_, err = p.input.Write(append(encoded, '\n'))
-	p.input.Close()
-	return err
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	stopControlIO := context.AfterFunc(ctx, func() { _ = p.input.Close() })
+	defer stopControlIO()
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	wireBytes := append(encoded, '\n')
+	n, err := p.input.Write(wireBytes)
+	_ = p.input.Close()
+	if err == nil && n != len(wireBytes) {
+		err = io.ErrShortWrite
+	}
+	return n > 0, err
 }
 
 func (r *Runner) Query(ctx context.Context, env Envelope, cred *Credential, internal bool) (*QueryResponse, error) {
+	return r.query(ctx, env, cred, internal, r.launch)
+}
+
+// The launch boundary is passed explicitly so the full query protocol can be
+// tested with real pipes and a deterministic process-exit result.
+func (r *Runner) query(ctx context.Context, env Envelope, cred *Credential, internal bool, launch func(context.Context, string, Envelope, uint64, int) (*process, error)) (*QueryResponse, error) {
+	slot := &queryProcessSlot{}
 	if internal {
 		wait, cancel := context.WithTimeout(ctx, 25*time.Second)
 		defer cancel()
 		select {
-		case r.querySlot <- struct{}{}:
+		case r.querySlot <- slot:
 		case <-wait.Done():
 			return nil, problem(503, "recovery", "保存检测结束状态时等待其他查询超时，请稍后点击停止检测以重试保存；不会重新调用模型")
 		}
 	} else {
 		select {
-		case r.querySlot <- struct{}{}:
+		case r.querySlot <- slot:
 		default:
 			return nil, problem(429, "query", "另一个检测查询正在处理，请稍后重试；尚未重复执行本次操作")
 		}
 	}
 	release := func() { <-r.querySlot }
 	queryCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	p, err := r.launch(queryCtx, "query", env, 64*1024*1024, 15)
+	p, err := launch(queryCtx, "query", env, 64*1024*1024, 15)
+	slot.process = p
 	if err != nil {
 		cancel()
-		release()
+		if p == nil {
+			release()
+		} else {
+			if !p.monitored {
+				reclaim, finish := context.WithTimeout(context.Background(), 25*time.Second)
+				p.monitored = true
+				go func() { p.monitor(reclaim); finish() }()
+			}
+			select {
+			case <-p.done:
+				if cleanupErr := p.closeAfterConfirmedExit(release); cleanupErr != nil {
+					issue := asProblem(err)
+					issue.Message += "；" + cleanupErr.Error()
+					err = issue
+				}
+			default:
+				issue := asProblem(err)
+				issue.Message += "；" + queryExitUnconfirmedMessage
+				err = issue
+				go p.closeAfterConfirmedExit(release)
+			}
+		}
 		return nil, err
 	}
-	if err = continueProcess(p, cred); err != nil {
-		p.close()
+	if !p.monitored {
+		p.monitored = true
+		go p.monitor(queryCtx)
+	}
+	failQuery := func(issue *Problem) (*QueryResponse, error) {
 		cancel()
-		release()
+		if cleanupErr := p.closeAfterConfirmedExit(release); cleanupErr != nil {
+			issue.Message += "；" + cleanupErr.Error()
+		}
+		return nil, issue
+	}
+	if _, err = continueProcess(queryCtx, p, cred); err != nil {
 		e := problem(503, "query", "交付查询参数时连接中断，请重新读取结果；尚未重新开始检测")
 		if cred != nil {
 			e.OperationResult = "unknown"
 		}
-		return nil, e
+		return failQuery(e)
 	}
-	p.monitored = true
-	go p.monitor(queryCtx)
 	_ = p.output.SetReadDeadline(time.Now().Add(15 * time.Second))
 	line, err := readLine(p.reader)
 	if err != nil {
-		cancel()
-		<-p.done
-		p.close()
-		release()
-		return nil, problem(503, "query", "读取检测数据失败，程序已停止；请检查磁盘权限、可用空间及运行诊断后重试")
+		return failQuery(problem(503, "query", "读取检测数据失败；请检查磁盘权限、可用空间及检测运行诊断后重试"))
 	}
 	var header wireHeader
 	if json.Unmarshal(line, &header) != nil || header.V != 1 || header.Length < 0 || header.Length > 2*1024*1024 {
-		cancel()
-		<-p.done
-		p.close()
-		release()
-		return nil, problem(503, "query", "检测程序返回的数据格式或大小不符合要求，请重新执行整站升级，并核对检测程序与调度站版本一致后重试")
+		return failQuery(problem(503, "query", "检测程序返回的数据格式或大小不符合要求，请重新执行整站升级，并核对检测程序与调度站版本一致后重试"))
 	}
 	if !header.OK {
-		cancel()
-		<-p.done
-		p.close()
-		release()
 		e := problem(header.Status, "query", "检测数据读取或保存未完成，请检查设置后重试")
 		var detail Problem
 		if json.Unmarshal(header.Error, &detail) == nil && detail.Message != "" {
@@ -370,7 +478,7 @@ func (r *Runner) Query(ctx context.Context, env Envelope, cred *Credential, inte
 		if e.Status < 400 {
 			e.Status = 503
 		}
-		return nil, e
+		return failQuery(e)
 	}
 	if header.Status == 0 {
 		header.Status = 200
@@ -416,44 +524,70 @@ func (b *queryBody) Close() error {
 			b.cancel()
 			<-b.p.done
 		}
-		b.err = b.p.close()
+		b.err = b.p.closeAfterConfirmedExit(b.release)
 		b.cancel()
-		b.release()
 	})
 	return b.err
 }
 
 func (r *Runner) Start(ctx context.Context, env Envelope, cred Credential, memoryMiB, totalSeconds int) (*Job, error) {
-	if memoryMiB < 128 || memoryMiB > 384 || totalSeconds < 60 || totalSeconds > 1800 {
-		return nil, problem(422, "settings", "任务内存须为128～384MiB，总时限须为60～1800秒；请修改运行设置后重试")
+	if memoryMiB < 128 || memoryMiB > 384 || totalSeconds < 60 || totalSeconds > maxTaskSeconds {
+		return nil, problem(422, "settings", "任务内存须为128～384MiB，总时限须为60～9223371976秒；请修改运行设置后重试")
 	}
 	startup, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	p, err := r.launch(startup, "run", env, uint64(memoryMiB)*1024*1024, totalSeconds)
-	if err != nil {
+	if p == nil {
 		return nil, err
 	}
 	runCtx, runCancel := context.WithTimeout(context.Background(), time.Duration(totalSeconds+10)*time.Second)
 	p.monitored = true
 	go func() { p.monitor(runCtx); runCancel() }()
 	job := &Job{ID: p.name, Done: p.done, stop: p.stop, info: p.info}
-	if err = continueProcess(p, &cred); err != nil {
+	if err != nil {
+		go p.closeAfterConfirmedExit(nil)
+		return job, err
+	}
+	stopControlIO := p.interruptControlIO(startup)
+	defer stopControlIO()
+	delivered, err := continueProcess(startup, p, &cred)
+	if err != nil || startup.Err() != nil {
+		stopControlIO()
 		p.stopAndWait()
-		p.close()
+		if p.info().Exited {
+			_ = p.close()
+		} else {
+			go p.closeAfterConfirmedExit(nil)
+		}
 		e := problem(503, "accept", "交付账号信息时连接中断，无法确认请求是否已开始；部分请求可能已计费，请查询同一报告，不要重复新建")
 		e.OperationResult = "unknown"
+		if !delivered {
+			e.OperationResult = "not_started"
+			e.Message = "账号凭据未交付，尚未发送检测请求；本次准备已结束，请查看原报告"
+			if startup.Err() != nil {
+				e = preparationCancelled(startup)
+			}
+			if p.info().Exited {
+				return nil, e
+			}
+		}
 		return job, e
 	}
 	_ = p.output.SetReadDeadline(time.Now().Add(10 * time.Second))
 	line, err := readLine(p.reader)
+	stopControlIO()
 	var event struct {
 		V     int    `json:"v"`
 		Event string `json:"event"`
 	}
-	if err != nil || json.Unmarshal(line, &event) != nil || event.Event != "accepted" {
+	if err != nil || startup.Err() != nil || json.Unmarshal(line, &event) != nil || event.Event != "accepted" {
 		p.stopAndWait()
-		p.close()
-		e := problem(503, "accept", "未能确认检测受理结果，已请求停止；部分请求可能已计费，请查询此报告，不要重复新建")
+		if p.info().Exited {
+			_ = p.close()
+		} else {
+			go p.closeAfterConfirmedExit(nil)
+		}
+		e := problem(503, "accept", "账号凭据已交付，但未能确认检测受理结果，已请求停止；部分请求可能已计费，请查询此报告，不要重复新建")
 		e.OperationResult = "unknown"
 		return job, e
 	}

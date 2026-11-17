@@ -57,7 +57,7 @@ func TestChanshuiActualBootstrapWithoutManualSlice(t *testing.T) {
 	if e, ok := err.(dbus.Error); !ok || e.Name != "org.freedesktop.systemd1.NoSuchUnit" {
 		t.Fatalf("cannot confirm absent slice: %v", err)
 	}
-	runner := NewRunner(RunnerConfig{BinaryPath: helper, DataDir: dir, ProjectDir: root, Manager: "user"})
+	runner := NewRunner(RunnerConfig{DisableBankSync: true, BinaryPath: helper, DataDir: dir, ProjectDir: root, Manager: "user"})
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 	if err := runner.Available(ctx); err != nil {

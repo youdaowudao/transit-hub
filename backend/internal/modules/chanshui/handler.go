@@ -133,6 +133,15 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	if path == "reference-info" && r.Method == http.MethodGet {
+		data, e := s.queryJSON(r.Context(), "reference-info", owner, map[string]any{}, nil, false)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		reply(w, 200, data)
+		return
+	}
 	if path == "targets" && r.Method == http.MethodGet {
 		items, e := s.targets.ListAuditTargets(r.Context(), owner.UserID)
 		if e != nil {

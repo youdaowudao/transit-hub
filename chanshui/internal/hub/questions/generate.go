@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kiss-kedaya/chanshui/internal/iq"
+	"github.com/kiss-kedaya/chanshui/internal/knowledge"
 )
 
 func Expand(t string, values map[string]string) string {
@@ -27,6 +28,26 @@ func Generate(q Definition, seed int64) (Generated, error) {
 	g := Generated{Definition: Clone(q), Seed: seed, Prompt: q.Template, Expected: q.Judge.ExpectedText}
 	if q.Judge.Type == "manual" {
 		g.Expected = q.Judge.ReferenceAnswer
+	}
+	if native, ok := originalGeneration(q, seed); ok {
+		g.Prompt, g.Tags, g.Image = native.Prompt, native.Tags, native.ImagePNG
+		if q.Judge.Type == "legacy" || ((q.Judge.Type == "text" || q.Judge.Type == "number") && q.Judge.ExpectedFrom == "generator") {
+			g.Expected = native.Answer
+		}
+		if q.Judge.Type == "number" && q.Judge.ExpectedFrom != "generator" {
+			g.Expected = strconv.FormatFloat(q.Judge.ExpectedNumber, 'g', -1, 64)
+		}
+		return g, nil
+	}
+	if p, ok := OriginalKnowledge(q); ok {
+		g.Prompt = p.Prompt()
+		for _, choice := range p.Choices {
+			if choice.Kind == "know" {
+				g.Expected = choice.Letter
+				break
+			}
+		}
+		return g, nil
 	}
 	r := rand.New(rand.NewSource(seed))
 	values := map[string]string{}
@@ -199,4 +220,36 @@ func NumericPrompt(q Definition, count int, r *rand.Rand) string {
 		values[pair[0]] = a[r.Intn(len(a))]
 	}
 	return Expand(q.Template, values)
+}
+
+// OriginalQuestion never applies the original ID-based judge to a custom ID.
+func OriginalQuestion(q Definition, seed int64) (iq.Question, bool) {
+	if !IsOriginalQuestion(q) {
+		return iq.Question{}, false
+	}
+	return iq.PaperQuestion(rand.New(rand.NewSource(seed)), q.ID)
+}
+func OriginalKnowledge(q Definition) (knowledge.Probe, bool) {
+	if q.Kind != "knowledge" || !Compatible(q) {
+		return knowledge.Probe{}, false
+	}
+	return knowledge.Anchor(strings.TrimPrefix(q.ID, "knowledge:"))
+}
+
+func IsOriginalQuestion(q Definition) bool {
+	if q.Judge.Type != "legacy" || (q.Kind != "iq" && q.Kind != "vision") || !Compatible(q) {
+		return false
+	}
+	_, ok := Preset(q.ID)
+	return ok
+}
+
+func originalGeneration(q Definition, seed int64) (iq.Question, bool) {
+	if (q.Kind != "iq" && q.Kind != "vision") || !Compatible(q) {
+		return iq.Question{}, false
+	}
+	if _, ok := Preset(q.ID); !ok {
+		return iq.Question{}, false
+	}
+	return iq.PaperQuestion(rand.New(rand.NewSource(seed)), q.ID)
 }

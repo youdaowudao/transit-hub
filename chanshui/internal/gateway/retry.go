@@ -44,6 +44,22 @@ func Protocol(model string) string {
 	return "messages"
 }
 func (c *Client) CallMessages(ctx context.Context, q CallRequest) (Metrics, error) {
+	if c.BeforeCall != nil {
+		var err error
+		ctx, err = c.BeforeCall(ctx, q)
+		if err != nil {
+			return Metrics{}, err
+		}
+	}
+	m, err := c.callMessages(ctx, q)
+	if c.AfterCall != nil {
+		if observed := c.AfterCall(ctx, q, m, err); observed != nil {
+			return m, observed
+		}
+	}
+	return m, err
+}
+func (c *Client) callMessages(ctx context.Context, q CallRequest) (Metrics, error) {
 	start := time.Now()
 	var m Metrics
 	var err error
@@ -199,8 +215,8 @@ func (c *Client) retries() int {
 		if *c.RetryLimit < 0 {
 			return 0
 		}
-		if *c.RetryLimit > 2 {
-			return 2
+		if *c.RetryLimit > RetryCount {
+			return RetryCount
 		}
 		return *c.RetryLimit
 	}

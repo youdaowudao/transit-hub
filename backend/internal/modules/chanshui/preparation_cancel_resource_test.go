@@ -31,7 +31,7 @@ func TestChanshuiActualPreparationCancelBeforeReady(t *testing.T) {
 	if out, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build isolated fixture: %v: %s", err, out)
 	}
-	runner := NewRunner(RunnerConfig{BinaryPath: helper, DataDir: dir, ProjectDir: root, Manager: "user"})
+	runner := NewRunner(RunnerConfig{DisableBankSync: true, BinaryPath: helper, DataDir: dir, ProjectDir: root, Manager: "user"})
 	ctx, done := context.WithTimeout(t.Context(), 20*time.Second)
 	defer done()
 	var calls atomic.Int32

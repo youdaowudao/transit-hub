@@ -34,13 +34,14 @@ func TestChanshuiActualConcurrencyMemory(t *testing.T) {
 	if binary == "" {
 		binary = filepath.Join(root, "chanshui/.artifacts/bin/transithub-chanshui")
 	}
-	runner := NewRunner(RunnerConfig{BinaryPath: binary, DataDir: dir, ProjectDir: root, Manager: "user", AllowPrivateTargets: true})
+	runner := NewRunner(RunnerConfig{DisableBankSync: true, BinaryPath: binary, DataDir: dir, ProjectDir: root, Manager: "user", AllowPrivateTargets: true})
 	manager, err := connectManager(ctx, runner.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer manager.release("")
 	owner := Owner{UserID: "resource-concurrency", WorkspaceID: "isolated-resource-only"}
+	queryPeak := uint64(0)
 	query := func(op string, args any) json.RawMessage {
 		t.Helper()
 		res, err := runner.Query(ctx, Envelope{V: 1, Operation: op, Owner: owner, Args: args}, nil, true)
@@ -49,6 +50,15 @@ func TestChanshuiActualConcurrencyMemory(t *testing.T) {
 		}
 		body, readErr := io.ReadAll(res.Body)
 		closeErr := res.Body.Close()
+		if body, ok := res.Body.(*queryBody); ok {
+			info := body.p.info()
+			if info.MemoryPeak > queryPeak {
+				queryPeak = info.MemoryPeak
+			}
+			if info.OOM {
+				t.Fatal("query exceeded original 64MiB hard limit", info)
+			}
+		}
 		if readErr != nil || closeErr != nil {
 			t.Fatalf("%s read=%v close=%v", op, readErr, closeErr)
 		}
@@ -92,6 +102,7 @@ func TestChanshuiActualConcurrencyMemory(t *testing.T) {
 		{32, 4096, false, false, false}, {32, 900 * 1024, true, false, false},
 		{64, 4096, false, false, false}, {64, 900 * 1024, true, false, false},
 		{64, 4096, true, true, false}, {64, 4096, true, false, true},
+		{1, 7 * 1024 * 1024, false, false, false},
 	}
 	for caseIndex, scenario := range cases {
 		t.Run(fmt.Sprintf("c%d_bytes%d_sse%v_retry%v_cancel%v", scenario.Limit, scenario.Bytes, scenario.SSE, scenario.Retry, scenario.Cancel), func(t *testing.T) {
@@ -146,6 +157,7 @@ func TestChanshuiActualConcurrencyMemory(t *testing.T) {
 				t.Fatal(err)
 			}
 			settings["concurrency"], settings["totalTimeoutSeconds"], settings["timeoutSeconds"], settings["maxAttempts"] = scenario.Limit, 60, 10, 256
+			settings["protocol"] = "chat"
 			settings["retries"] = 0
 			if scenario.Retry {
 				settings["retries"] = 1
@@ -234,6 +246,13 @@ func TestChanshuiActualConcurrencyMemory(t *testing.T) {
 			}
 			if err := json.Unmarshal(query("read-report", map[string]any{"reportId": id}), &report); err != nil {
 				t.Fatal(err)
+			}
+			if scenario.Bytes > 2*1024*1024 {
+				raw := query("list-items", map[string]any{"reportId": id, "limit": 5})
+				if len(raw) < scenario.Bytes || !strings.Contains(string(raw), answer) {
+					t.Fatal("original-size answer was clipped or cannot be read")
+				}
+				t.Logf("LARGE_ITEM bytes=%d queryMemoryPeakBytes=%d queryLimitBytes=%d", len(raw), queryPeak, 64<<20)
 			}
 			if scenario.Cancel {
 				if report.Status != "cancelled" {

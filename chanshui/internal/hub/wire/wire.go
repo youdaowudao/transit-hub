@@ -169,8 +169,8 @@ func Result(out io.Writer, status int, payload any, contentType string) error {
 			return e
 		}
 	}
-	if len(b) > 2<<20 {
-		return fmt.Errorf("读取结果超过2MiB，请分页")
+	if len(b) > 16<<20 {
+		return fmt.Errorf("读取结果超过16MiB，请检查本项完整结果大小后重试")
 	}
 	if e = json.NewEncoder(out).Encode(map[string]any{"v": 1, "ok": status >= 200 && status < 300, "status": status, "contentType": contentType, "length": len(b)}); e != nil {
 		return e

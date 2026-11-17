@@ -61,13 +61,14 @@ type Server struct {
 	draining       atomic.Bool
 }
 type Request struct {
-	Protocol    string `json:"protocol,omitempty"`
-	BaseURL     string `json:"base_url"`
-	Key         string `json:"key"`
-	Model       string `json:"model"`
-	Concurrency int    `json:"concurrency"`
-	Timeout     int    `json:"timeout"`
-	Cache       bool   `json:"cache"`
+	OutputTokens int    `json:"-"`
+	Protocol     string `json:"protocol,omitempty"`
+	BaseURL      string `json:"base_url"`
+	Key          string `json:"key"`
+	Model        string `json:"model"`
+	Concurrency  int    `json:"concurrency"`
+	Timeout      int    `json:"timeout"`
+	Cache        bool   `json:"cache"`
 }
 type Probe struct {
 	ID     string `json:"id"`
@@ -299,7 +300,8 @@ func (s *Server) supported(id string) bool {
 	}
 	return false
 }
-func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
+func (s *Server) stats(w http.ResponseWriter, r *http.Request) { reply(w, 200, s.bankStats()) }
+func (s *Server) bankStats() map[string]any {
 	bank := s.currentBank()
 	seen := map[string]bool{}
 	familySet := map[string]bool{}
@@ -323,7 +325,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		families = append(families, family)
 	}
 	sort.Strings(families)
-	reply(w, 200, map[string]any{"supported_models": ids, "fingerprint_count": len(ids), "numeric_count": len(bank.Numeric.Models), "behavioral_count": len(bank.Behavioral.Models), "families": []string{"GPT", "Claude", "Gemini", "DeepSeek", "Grok", "GLM"}, "numeric_families": families, "source": bank.Source})
+	return map[string]any{"supported_models": ids, "fingerprint_count": len(ids), "numeric_count": len(bank.Numeric.Models), "behavioral_count": len(bank.Behavioral.Models), "families": []string{"GPT", "Claude", "Gemini", "DeepSeek", "Grok", "GLM"}, "numeric_families": families, "source": bank.Source}
 }
 func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 	if s.draining.Load() {
@@ -351,7 +353,7 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 	}
 	t := &Task{ID: id, ReportID: id, Status: "queued", BaseURL: q.BaseURL, Model: q.Model, CreatedAt: time.Now().UTC().Format(time.RFC3339), ExpiresAt: time.Now().Add(history.JobTTL).Unix(), controlHash: controlHash(token), visitorHash: visitorHashOf(r), answers: map[string]QuestionResult{}}
 	rng := mathrand.New(mathrand.NewSource(time.Now().UnixNano()))
-	t.questions = []iq.Question{iq.GenPill(), iq.GenCarWash(), iq.GenBatBall(), iq.GenColorBlind(rng), iq.GenAnchor(), iq.GenCandyClassic(rng), iq.GenCandyVariant(rng), iq.GenSocks(rng), iq.GenBridge(), iq.GenChart(rng)}
+	t.questions = iq.Paper(rng)
 	t.Verdict.Protocol = q.Protocol
 	t.Verdict.ScoringVersion = "2026-10-02-v6-total"
 	t.Probes = []Probe{{ID: "fingerprint", Name: "模型指纹归因", Status: "queued"}, {ID: "injection", Name: "注入大小", Status: "queued"}, {ID: "tools", Name: "工具调用检测", Status: "queued"}, {ID: "web", Name: "联网检测", Status: "queued"}, {ID: "knowledge", Name: "知识截止日期", Status: "queued"}, {ID: "vision", Name: "识图能力", Status: "queued"}}

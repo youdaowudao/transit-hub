@@ -97,6 +97,11 @@ func (s *Store) RetryReport(ctx context.Context, o Owner, r RetryRequest) (Repor
 		if r.Target != nil && (target.AccountID != r.Target.AccountID || target.BaseURL != r.Target.BaseURL || target.Protocol != r.Target.Protocol) {
 			return Fail(409, "原报告的账号、地址或协议已变化，请重新检测；没有修改原报告", "retry")
 		}
+		// The report's original detection protocol survives later settings edits.
+		originalProtocol := snap.Settings.Protocol
+		if originalProtocol == "" {
+			originalProtocol = target.Protocol
+		}
 		var settingsRaw string
 		var revision int
 		if e = tx.QueryRowContext(ctx, `SELECT settings_json,revision FROM hub_settings WHERE user_id=? AND workspace_id=?`, o.UserID, o.WorkspaceID).Scan(&settingsRaw, &revision); e != nil {
@@ -106,6 +111,7 @@ func (s *Store) RetryReport(ctx context.Context, o Owner, r RetryRequest) (Repor
 			return e
 		}
 		snap.Settings.Revision = revision
+		snap.Settings.Protocol = originalProtocol
 		if e = snap.Settings.Validate(); e != nil {
 			return e
 		}

@@ -46,12 +46,12 @@ func TestRetryExecutesOnlyFailureAndRebuildsFullOriginalScore(t *testing.T) {
 		}
 		return fixtureResponse(r, "最终答案: "+answers[prompt]), nil
 	})
-	if e = RunOne(ctx, s, o, id, c, Config{Transport: transport}); e != nil {
+	if e = RunOne(ctx, s, o, id, c, Config{DisableBankSync: true, Transport: transport}); e != nil {
 		t.Fatal(e)
 	}
 	before, _ := s.ListItems(ctx, o, id, store.Filters{Limit: 5})
 	r, _ := s.Report(ctx, o, id)
-	if r.Status != "partial" || calls.Load() != 2 {
+	if r.Status != "partial" || calls.Load() != 3 {
 		t.Fatal(r.Status, calls.Load())
 	}
 	request := store.RetryRequest{ReportID: id, RetryID: strings.Repeat("b", 32), ItemIDs: []string{"Q3"}}
@@ -63,24 +63,24 @@ func TestRetryExecutesOnlyFailureAndRebuildsFullOriginalScore(t *testing.T) {
 		t.Fatal("old execution time leaked into queued retry")
 	}
 	retry.Store(true)
-	if e = RunOne(ctx, s, o, id, c, Config{Transport: transport}); e != nil {
+	if e = RunOne(ctx, s, o, id, c, Config{DisableBankSync: true, Transport: transport}); e != nil {
 		t.Fatal(e)
 	}
 	after, _ := s.ListItems(ctx, o, id, store.Filters{Limit: 5})
 	r, _ = s.Report(ctx, o, id)
-	if len(after.Items) != 2 || string(before.Items[0].Result) != string(after.Items[0].Result) || after.Items[0].Attempts != 1 || after.Items[1].Attempts != 2 || calls.Load() != 3 {
+	if len(after.Items) != 2 || string(before.Items[0].Result) != string(after.Items[0].Result) || after.Items[0].Attempts != 1 || after.Items[1].Attempts != 3 || calls.Load() != 4 {
 		t.Fatal("changed success/repeated calls/lost cumulative usage", after, calls.Load())
 	}
 	var summary map[string]any
 	_ = json.Unmarshal(r.Summary.Summary, &summary)
 	total := summary["total"].(map[string]any)
-	if r.Status != "done" || summary["iqScore"] != float64(100) || total["score"] != float64(100) || summary["attempts"] != float64(3) {
+	if r.Status != "done" || summary["iqScore"] != float64(100) || total["score"] != float64(100) || summary["attempts"] != float64(4) {
 		t.Fatal("retry did not rebuild full report", string(r.Summary.Summary))
 	}
 	if _, e = s.RetryReport(ctx, o, request); e != nil {
 		t.Fatal("same operation must only read result", e)
 	}
-	if e = RunOne(ctx, s, o, id, c, Config{Transport: transport}); e == nil || calls.Load() != 3 {
+	if e = RunOne(ctx, s, o, id, c, Config{DisableBankSync: true, Transport: transport}); e == nil || calls.Load() != 4 {
 		t.Fatal("same retry replayed paid calls")
 	}
 	page, _ := s.ListReports(ctx, o, store.Filters{})

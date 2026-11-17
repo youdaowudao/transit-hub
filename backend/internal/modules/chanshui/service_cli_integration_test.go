@@ -82,7 +82,7 @@ func TestChanshuiActualServiceSequentialRunsAndCredentialEnums(t *testing.T) {
 				authScheme = "x_api_key"
 			}
 			audit := connection_health.AuditContext{WorkspaceID: "workspace-a", TargetID: "fixture-account", AccountID: "fixture-account", AccountName: "跨模块隔离验收", GroupID: "fixture-group", GroupName: "GPT隔离组", BaseURL: up.URL, Protocol: protocol, CanRun: true, Credential: upstream.ProbeCredential{BaseURL: up.URL, Key: key, AnthropicAuth: authScheme}}
-			runner := NewRunner(RunnerConfig{BinaryPath: filepath.Join(root, "chanshui/.artifacts/bin/transithub-chanshui"), DataDir: t.TempDir(), ProjectDir: root, Manager: "user", AllowPrivateTargets: true})
+			runner := NewRunner(RunnerConfig{DisableBankSync: true, BinaryPath: filepath.Join(root, "chanshui/.artifacts/bin/transithub-chanshui"), DataDir: t.TempDir(), ProjectDir: root, Manager: "user", AllowPrivateTargets: true})
 			s := &Service{cfg: config.Config{ChanshuiEnabled: true}, workspace: fakeWorkspace{}, targets: actualServiceTargets{audit}, runner: runner, initialized: true}
 			t.Cleanup(func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)

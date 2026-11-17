@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/kiss-kedaya/chanshui/internal/api"
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
 )
 
@@ -19,21 +20,27 @@ func (o Owner) Validate() error {
 }
 
 type Settings struct {
-	TimeoutSeconds      int `json:"timeoutSeconds"`
-	TotalTimeoutSeconds int `json:"totalTimeoutSeconds"`
-	Concurrency         int `json:"concurrency"`
-	MaxOutputTokens     int `json:"maxOutputTokens"`
-	Retries             int `json:"retries"`
-	MaxAttempts         int `json:"maxAttempts"`
-	MemoryLimitMiB      int `json:"memoryLimitMiB"`
-	Revision            int `json:"revision"`
+	Protocol            string `json:"protocol,omitempty"`
+	TimeoutSeconds      int    `json:"timeoutSeconds"`
+	TotalTimeoutSeconds int    `json:"totalTimeoutSeconds"`
+	Concurrency         int    `json:"concurrency"`
+	MaxOutputTokens     int    `json:"maxOutputTokens"`
+	Retries             int    `json:"retries"`
+	MaxAttempts         int    `json:"maxAttempts"`
+	MemoryLimitMiB      int    `json:"memoryLimitMiB"`
+	Revision            int    `json:"revision"`
 }
 
 // Leave room for outer process cleanup before converting seconds to Duration.
 const MaxTotalTimeoutSeconds = 9223371976
 
-func DefaultSettings() Settings { return Settings{120, 3600, 32, 4096, 0, 128, 256, 1} }
+func DefaultSettings() Settings {
+	return Settings{Protocol: "auto", TimeoutSeconds: 360, TotalTimeoutSeconds: 3600, Concurrency: 32, MaxOutputTokens: 8192, Retries: 3, MaxAttempts: 0, MemoryLimitMiB: 256, Revision: 1}
+}
 func (s Settings) Validate() error {
+	if s.Protocol != "" && s.Protocol != "auto" && s.Protocol != "chat" && s.Protocol != "anthropic" && s.Protocol != "openai" {
+		return fmt.Errorf("检测接口模式必须为自动、Chat、Messages或Responses")
+	}
 	if s.TimeoutSeconds < 10 || s.TimeoutSeconds > 600 {
 		return fmt.Errorf("单请求超时必须为10～600秒")
 	}
@@ -46,8 +53,8 @@ func (s Settings) Validate() error {
 	if s.MaxOutputTokens < 128 || s.MaxOutputTokens > 16384 {
 		return fmt.Errorf("普通推理输出预算必须为128～16384")
 	}
-	if s.Retries < 0 || s.Retries > 2 || s.MaxAttempts < 16 || s.MaxAttempts > 256 {
-		return fmt.Errorf("重试次数为0～2，尝试总数为16～256")
+	if s.Retries < 0 || s.Retries > 3 || (s.MaxAttempts != 0 && s.MaxAttempts < 16) || s.MaxAttempts > 256 {
+		return fmt.Errorf("重试次数为0～3，尝试总数为0（不限）或16～256")
 	}
 	if s.MemoryLimitMiB < 128 || s.MemoryLimitMiB > 384 {
 		return fmt.Errorf("检测任务内存上限必须为128～384MiB")
@@ -85,22 +92,24 @@ type Target struct {
 	Protocol    string `json:"protocol"`
 }
 type CreateRequest struct {
-	Request             json.RawMessage `json:"request,omitempty"`
-	ReportID            string          `json:"reportId"`
-	TargetID            string          `json:"targetId"`
-	GroupID             any             `json:"groupId"`
-	Model               string          `json:"model"`
-	SelectedSectionIDs  []string        `json:"selectedSectionIds"`
-	SelectedQuestionIDs []string        `json:"selectedQuestionIds"`
-	ExpectedContext     json.RawMessage `json:"expectedContext"`
-	Target              Target          `json:"target"`
-	AccountID           string          `json:"accountId,omitempty"`
-	AccountName         string          `json:"accountName,omitempty"`
-	GroupName           string          `json:"groupName,omitempty"`
-	BaseURL             string          `json:"baseURL,omitempty"`
-	Protocol            string          `json:"protocol,omitempty"`
+	SingleAsk           *api.SingleAskInput `json:"singleAsk,omitempty"`
+	Request             json.RawMessage     `json:"request,omitempty"`
+	ReportID            string              `json:"reportId"`
+	TargetID            string              `json:"targetId"`
+	GroupID             any                 `json:"groupId"`
+	Model               string              `json:"model"`
+	SelectedSectionIDs  []string            `json:"selectedSectionIds"`
+	SelectedQuestionIDs []string            `json:"selectedQuestionIds"`
+	ExpectedContext     json.RawMessage     `json:"expectedContext"`
+	Target              Target              `json:"target"`
+	AccountID           string              `json:"accountId,omitempty"`
+	AccountName         string              `json:"accountName,omitempty"`
+	GroupName           string              `json:"groupName,omitempty"`
+	BaseURL             string              `json:"baseURL,omitempty"`
+	Protocol            string              `json:"protocol,omitempty"`
 }
 type Snapshot struct {
+	SingleAsk       *api.SingleAskInput   `json:"singleAsk,omitempty"`
 	Retry           *Retry                `json:"retry,omitempty"`
 	Settings        Settings              `json:"settings"`
 	Questions       []questions.Generated `json:"questions"`

@@ -8,7 +8,7 @@ export function itemJudgment(item: HubItem) {
   return typeof item.result?.judgment === 'string' ? { status: item.result.judgment } : item.result?.judgment ?? {};
 }
 export function canRetryHubItem(item: HubItem): boolean {
-  return item.status === 'error' || itemJudgment(item).status === 'unknown' || ['queued', 'running'].includes(item.status);
+  return item.status === 'error' || Boolean(item.result?.error) || itemJudgment(item).status === 'unknown' || ['queued', 'running'].includes(item.status);
 }
 export function itemLabel(item: HubItem, parentStatus: string): string {
   const j = itemJudgment(item);
@@ -34,7 +34,7 @@ export function reportError(value: unknown): string {
 export const reportVersion = (report: HubReport) => `${report.updatedAtMs ?? ''}:${report.status}:${JSON.stringify(report.itemCounts ?? {})}`;
 
 /** Only adapt saved observations to the upstream presentation shape. */
-export function hubReportView(report: HubReport, items: HubItem[], complete: boolean) {
+function legacyHubReportView(report: HubReport, items: HubItem[], complete: boolean) {
   const summary = object(report.summary), total = object(summary.total);
   const parts: TotalPart[] = Array.isArray(total.parts) ? total.parts : [];
   const applicable = parts.filter(p => p.applicable);
@@ -108,7 +108,7 @@ export function hubReportView(report: HubReport, items: HubItem[], complete: boo
     if (['not_asked', 'not_applicable'].includes(j.status ?? '') || ['queued', 'running'].includes(item.status)) return [];
     const observation = (Array.isArray(k.observations) ? k.observations : []).find((row: any) => row.id === item.itemId);
     const kind = item.result?.error ? 'error' : e.kind ?? observation?.kind ?? 'invalid';
-    return [{ id: item.itemId, quarter: '', happened_at: String(item.definition.parameters.date ?? observation?.date ?? ''), event: String(item.definition.parameters.event ?? item.definition.title), ok: kind === 'know', unsure: kind === 'unknown', kind, answer: item.result?.answer ?? '', error: item.result?.error }];
+    return [{ id: item.itemId, quarter: '', happened_at: String(item.definition.parameters.date ?? observation?.date ?? ''), event: String(item.definition.parameters.event ?? item.definition.title), ok: kind === 'know', unsure: ['unknown','invalid','error'].includes(kind), kind, answer: item.result?.answer ?? '', error: item.result?.error }];
   });
   if (k.status === 'not_applicable') messages.knowledge = k.note || '本次没有适用的已发生事件；本次未提问。';
   else if (Object.keys(k).length && k.status !== 'not_selected' || knowledgeRows.length) {
@@ -117,7 +117,7 @@ export function hubReportView(report: HubReport, items: HubItem[], complete: boo
     // knowledge boundary, even in old reports whose summary used that bound.
     const unknownUpper = knowledgeRows.some(row => row.happened_at === k.upper && row.kind === 'unknown');
     const label = range && k.lower && unknownUpper ? `知识≈${k.lower} 至 ${k.upper}（${knowledgeRows.length}问）` : k.lower ? `已答对事件至 ${k.lower}` : '本次知识事件检测';
-    v.knowledge = { status: k.status ?? 'unknown', label, correct: knowledgeRows.filter(row => row.ok).length, total: knowledgeRows.length, reason: [k.note || '本次事件题推测范围，不证明模型训练日期。', !range && knowledgeRows.length ? '请以以下实际事件回答为准，无法确认连续日期范围。' : ''].filter(Boolean).join('\n'), protocol: report.protocol ?? '', rows: knowledgeRows };
+    v.knowledge = { status: k.status ?? 'unknown', label, correct: knowledgeRows.filter(row => row.ok).length, total: knowledgeRows.length, reason: k.note || '旧报告保存的事件观测；取题和范围来自当时的版本。', protocol: report.protocol ?? '', rows: knowledgeRows };
   } else messages.knowledge = (groups.knowledge?.length ?? 0) ? '请展开逐题查看本次事件题观测；日期范围尚未确认。' : complete ? '本次未选择知识事件检测。' : '正在读取本次已保存的结果…';
   const probes: Probe[] = items.map(item => {
     const label = itemLabel(item, report.status), j = itemJudgment(item);
@@ -130,6 +130,74 @@ export function hubReportView(report: HubReport, items: HubItem[], complete: boo
   const finished = counts ? (counts.done ?? 0) + (counts.error ?? 0) : items.filter(i => ['done', 'error'].includes(i.status)).length;
   const unfinished = isHubTerminal(report.status) && totalCount !== null ? Math.max(0, totalCount - finished) : 0;
   return { verdict: v, totalLabel, groups, messages, probes, progress: { total: totalCount, finished, statusTexts, unfinished } };
+}
+
+/** Decide per item: old/custom data must keep its readable fallback. */
+export function hasOriginalItemDTO(item: HubItem): boolean {
+  const e = object(item.result?.evidence);
+  switch (item.definition.kind) {
+    case 'iq': return typeof e.id === 'string' && typeof e.metrics === 'object';
+    case 'vision': return 'question' in e;
+    case 'knowledge': return typeof e.row === 'object' && e.row !== null;
+    case 'fingerprint_numeric': return typeof e.basis === 'string';
+    case 'fingerprint_behavior': return false;
+    default: return Object.keys(e).length > 0;
+  }
+}
+
+/** Native reports preserve the original probe DTOs and original summary.
+ * Legacy reports are displayed as saved, never regraded into a fake new verdict. */
+export function hubReportView(report: HubReport, items: HubItem[], complete: boolean) {
+ const view=legacyHubReportView(report,items,complete);
+ const saved=object(object(report.summary).verdict);
+ if (!Object.keys(saved).length) return {...view,native:false};
+ const v={...saved} as DetectVerdict;
+ const messages:Record<string,string>={};
+ const iq=object(saved.iq), lines:Record<string,any>[]=[];
+ for (const item of items) {
+  const e=object(item.result?.evidence);
+  if (!Object.keys(e).length) continue;
+  switch(item.definition.kind) {
+   case 'iq': if(typeof e.id==='string' && typeof e.metrics==='object') lines.push(e); break;
+   case 'vision': if('question' in e) v.vision=e as any;break;
+   case 'fingerprint_numeric': if('basis' in e) v.fingerprint=e as any;break;
+   case 'injection': v.injection=e as any;break;
+   case 'tools':v.tools=e as any;break;
+   case 'web':v.web=e as any;break;
+   case 'cache':v.cache=e as any;break;
+   case 'thinking':v.thinking=e as any;break;
+  }
+ }
+ if(Object.keys(iq).length) v.iq={...iq,per_question:lines} as any;
+ for (const kind of ['fingerprint','injection','tools','web','cache','thinking','vision'] as const) {
+  if (!v[kind] && view.verdict[kind]) (v as any)[kind] = view.verdict[kind];
+ }
+ // Section metadata and all original knowledge fields are copied verbatim.
+ // Full answer/sample bodies are joined from the item which stored that DTO.
+ for(const kind of ['fingerprint','injection','tools','web','cache','thinking','vision','knowledge'] as const) {
+  if(!v[kind] && view.groups[kind]?.length) messages[kind]=complete?'本项尚无原版完整结果，请展开已保存的题目查看或补测失败项。':'正在读取本次已保存的原版结果…';
+ }
+
+ const nativeProbes:Probe[]=[];
+ const grouped=new Set<string>();
+ const sectionNames:Record<string,string>={fingerprint:'模型指纹归因',injection:'注入大小',cache:'缓存读写验证',tools:'工具调用检测',web:'联网检测',knowledge:'知识截止日期',thinking:'思维链回传',vision:'识图能力'};
+ for(const item of items) {
+  const kind=item.definition.kind.startsWith('fingerprint_')?'fingerprint':item.definition.kind;
+  if(kind==='thinking' && !report.model.toLowerCase().replace(/^[^/]+\//,'').startsWith('claude-')) continue;
+  if(item.definition.kind==='fingerprint_behavior' && (view.groups.fingerprint??[]).some(x=>x.definition.kind==='fingerprint_numeric')) continue;
+  const individual=kind==='iq' || item.definition.kind==='fingerprint_behavior';
+  if(!individual && grouped.has(kind)) continue;
+  if(!individual) grouped.add(kind);
+  const rows=individual?[item]:(view.groups[kind]??[item]).filter(x=>x.definition.kind!=='fingerprint_behavior');
+  const ended=isHubTerminal(report.status), pending=rows.some(x=>x.status==='running'||x.status==='queued');
+  const observed=rows.some(x=>['done','error'].includes(x.status));
+  const failed=kind==='knowledge' ? object(v.knowledge).status==='error' : rows.some(x=>x.status==='error');
+  const status=pending&&!ended?(observed||rows.some(x=>x.status==='running')?'running':'queued'):failed?'error':pending?'cancelled':'done';
+  nativeProbes.push({id:individual?item.itemId:kind,name:individual?item.definition.title:(sectionNames[kind]??item.definition.title),status,ms:rows.reduce((sum,x)=>sum+(Number(x.result?.ms)||0),0),error:failed?rows.find(x=>x.result?.error)?.result?.error:undefined});
+ }
+ const finished=nativeProbes.filter(x=>['done','error','cancelled'].includes(x.status)).length;
+ return {...view,verdict:v,totalLabel:report.retry && !isHubTerminal(report.status) ? '补测中' : '',messages,native:true,probes:nativeProbes,progress:{total:complete?nativeProbes.length:null,finished,statusTexts:{},unfinished:isHubTerminal(report.status)?nativeProbes.filter(x=>x.status==='cancelled').length:0}};
+
 }
 
 export interface ItemReadState { cursor: string; batches: number; ids: Set<string>; cursors: Set<string>; complete: boolean }

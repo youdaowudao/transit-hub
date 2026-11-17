@@ -63,7 +63,7 @@ export default function RootLayout({
         />
       </head>
       <body>
-        <I18nProvider>
+        <I18nProvider fixedLang={hubProfile ? "zh" : undefined}>
           {!hubProfile && <BuildGuard />}
           <SkipLink />
           {!hubProfile && <Sidebar />}

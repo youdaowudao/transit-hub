@@ -21,6 +21,7 @@ type Credential struct {
 	AnthropicAuth string `json:"anthropicAuth,omitempty"`
 }
 type Deployment struct {
+	DisableBankSync     bool `json:"disableBankSync,omitempty"`
 	AllowPrivateTargets bool `json:"allowPrivateTargets"`
 }
 type Envelope struct {

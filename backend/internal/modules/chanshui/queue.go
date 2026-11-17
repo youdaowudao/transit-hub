@@ -33,6 +33,7 @@ type workspaceTargetReader interface {
 }
 
 func copyStartInput(input StartInput) StartInput {
+	input.SingleAsk = append(json.RawMessage(nil), input.SingleAsk...)
 	input.SelectedSectionIDs = append([]string(nil), input.SelectedSectionIDs...)
 	input.SelectedQuestionIDs = append([]string(nil), input.SelectedQuestionIDs...)
 	return input
@@ -141,7 +142,7 @@ func (s *Service) Start(ctx context.Context, owner Owner, input StartInput) (any
 		return nil, err
 	}
 	created, err := s.queryJSON(ctx, "create-report", owner, map[string]any{
-		"reportId": input.ReportID, "targetId": input.TargetID, "groupId": input.GroupID, "model": input.Model, "selectedSectionIds": input.SelectedSectionIDs, "selectedQuestionIds": input.SelectedQuestionIDs, "expectedContext": input.ExpectedContext, "request": input,
+		"reportId": input.ReportID, "targetId": input.TargetID, "groupId": input.GroupID, "model": input.Model, "selectedSectionIds": input.SelectedSectionIDs, "selectedQuestionIds": input.SelectedQuestionIDs, "singleAsk": input.SingleAsk, "expectedContext": input.ExpectedContext, "request": input,
 		"target": map[string]any{"accountId": audit.AccountID, "accountName": audit.AccountName, "groupName": audit.GroupName, "baseURL": audit.BaseURL, "protocol": audit.Protocol},
 	}, nil, false)
 	if err != nil {

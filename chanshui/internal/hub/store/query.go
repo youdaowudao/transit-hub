@@ -330,7 +330,7 @@ func (s *Store) ListItems(ctx context.Context, o Owner, id string, f Filters) (P
 		if e = rows.Scan(&v.ItemID, &v.SectionID, &order, &v.Status, &v.Attempts, &v.StartedAtMs, &v.CompletedAtMs, &result, &raw, &v.ImageAvailable); e != nil {
 			return out, e
 		}
-		if len(out.Items) == limit || bytes+len(result)+len(raw) > 2<<20 {
+		if len(out.Items) == limit || (len(out.Items) > 0 && bytes+len(result)+len(raw) > 2<<20) {
 			out.NextCursor = encodeCursor(lastOrder, lastID)
 			break
 		}

@@ -10,6 +10,7 @@ const open = ref(false), minimized = ref(false), ready = ref(false), loadingText
 const iframe = ref<HTMLIFrameElement | null>(null), dirty = ref(false)
 const target = ref<ChanshuiTargetInput>({})
 const targetSnapshot = (): ChanshuiTargetInput => ({
+  reportId: typeof target.value.reportId === 'string' ? target.value.reportId : undefined,
   targetId: typeof target.value.targetId === 'string' ? target.value.targetId : undefined,
   groupId: typeof target.value.groupId === 'string' ? target.value.groupId : undefined,
   accountName: typeof target.value.accountName === 'string' ? target.value.accountName : undefined,
@@ -32,7 +33,7 @@ const arm = () => {
 const launch = async (event: Event) => {
   if (!props.workspaceId) return
   const payload = (event as CustomEvent<ChanshuiTargetInput>).detail ?? {}
-  target.value = { targetId: payload.targetId, groupId: payload.groupId, accountName: payload.accountName, groupName: payload.groupName }
+  target.value = { reportId: payload.reportId, targetId: payload.targetId, groupId: payload.groupId, accountName: payload.accountName, groupName: payload.groupName }
   if (!open.value) { invalidate(); open.value = true; minimized.value = false; arm(); await nextTick() }
   else { minimized.value = false; send('chanshui.VISIBILITY', { visible: true }); send('chanshui.OPEN_TARGET', { target: targetSnapshot() }) }
 }
@@ -78,9 +79,10 @@ const onMessage = (event: MessageEvent) => {
   if (priorityStop) void run()
   else serial = serial.then(run, run)
 }
-watch(() => props.workspaceId, close)
+const openSharedReport=()=>{const reportId=new URLSearchParams(window.location.search).get('detectorReport');if(props.workspaceId && reportId && /^[0-9a-f]{32}$/.test(reportId)) void launch(new CustomEvent(chanshuiOpenEvent,{detail:{reportId}}))}
+watch(() => props.workspaceId, () => {close();openSharedReport()})
 let unsubscribe: (() => void) | undefined
-onMounted(() => { window.addEventListener(chanshuiOpenEvent, launch); window.addEventListener('message', onMessage); unsubscribe = subscribeAuthSessionChange(() => { if (!getAccessToken()) close() }) })
+onMounted(() => { openSharedReport(); window.addEventListener(chanshuiOpenEvent, launch); window.addEventListener('message', onMessage); unsubscribe = subscribeAuthSessionChange(() => { if (!getAccessToken()) close() }) })
 onBeforeUnmount(() => { close(); unsubscribe?.(); window.removeEventListener(chanshuiOpenEvent, launch); window.removeEventListener('message', onMessage) })
 </script>
 

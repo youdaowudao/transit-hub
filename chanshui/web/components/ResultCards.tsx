@@ -44,14 +44,14 @@ function Details({ label, value }: { label: string; value: unknown }) {
 
 
 function knowledgeMark(row: { kind?: string; ok: boolean; unsure: boolean; error?: string }, tr: (source: string) => string) {
-  if (row.kind === "error" || row.error) return { text: tr("失败"), cls: "warn" };
-  if (row.kind === "invalid") return { text: tr("无效"), cls: "warn" };
   if (row.kind === "know" || (row.ok && row.kind !== "wrong" && row.kind !== "error" && row.kind !== "invalid")) {
     return { text: tr("知道"), cls: "good" };
   }
   if (row.kind === "wrong" || (!row.ok && !row.unsure && !row.error && row.kind !== "unknown")) {
     return { text: tr("答错"), cls: "warn" };
   }
+  if (row.kind === "invalid") return { text: tr("无效"), cls: "warn" };
+  if (row.kind === "error" || row.error) return { text: tr("失败"), cls: "warn" };
   return { text: tr("不知道"), cls: "muted" };
 }
 
@@ -67,7 +67,7 @@ export default function ResultCards({
   model,
   loading = false,
   showCache = false,
-  savedScore = false, totalLabel = "", questions, sectionContent,
+  savedScore = false, totalLabel = "", questions, sectionContent, questionExtra, onQuestionOpen, collapseVision = false, questionTail, knowledgeExtra,
 }: {
   verdict: DetectVerdict;
   model?: string;
@@ -77,6 +77,11 @@ export default function ResultCards({
   totalLabel?: string;
   questions?: Partial<Record<string, ReactNode>>;
   sectionContent?: Partial<Record<string, ReactNode>>;
+  questionExtra?: (id:string) => ReactNode;
+  onQuestionOpen?: (id:string) => void;
+  collapseVision?: boolean;
+  questionTail?: ReactNode;
+  knowledgeExtra?: (id:string)=>ReactNode;
 }) {
   const { t: tr } = useI18n();
   const a = v.injection,
@@ -425,7 +430,7 @@ export default function ResultCards({
       <section className="result-card knowledge-card">
         <div className="rc-head">
           <h3>{tr("知识截止日期")}</h3>
-          <span className="card-number">INFO</span>
+          <span className="card-number">{tr("说明")}</span>
         </div>
         {sectionContent?.knowledge !== undefined ? sectionContent.knowledge : !knowledge ? (
           <ResultSkeleton label={loading ? tr("知识截止探针中…") : tr("暂无结果")} />
@@ -446,9 +451,10 @@ export default function ResultCards({
               <ul className="knowledge-ladder">
                 {knowledge.rows.map((row) => (
                   <li key={row.id}>
-                    <b className={knowledgeMark(row, tr).cls}>{knowledgeMark(row, tr).text}</b>
-                    <span>{row.happened_at || row.quarter}</span>
-                    <span>{row.event}</span>
+                    {knowledgeExtra ? <details className="knowledge-answer" data-item-id={row.id}>
+                      <summary title="只展开本题已保存的题目、回答和判定，不重新检测或修改主站。"><b className={knowledgeMark(row,tr).cls}>{knowledgeMark(row,tr).text}</b><span>{row.happened_at||row.quarter}</span><span>{row.event}</span></summary>
+                      {knowledgeExtra(row.id)}
+                    </details> : <><b className={knowledgeMark(row,tr).cls}>{knowledgeMark(row,tr).text}</b><span>{row.happened_at||row.quarter}</span><span>{row.event}</span></>}
                   </li>
                 ))}
               </ul>
@@ -466,7 +472,7 @@ export default function ResultCards({
           </span>
         </div>
         {!q ? (
-          <ResultSkeleton label={loading ? tr("推理测试中…") : tr("暂无结果")} />
+          sectionContent?.iq ?? <ResultSkeleton label={loading ? tr("推理测试中…") : tr("暂无结果")} />
         ) : (
           <>
             {sectionContent?.iq ?? <div className="metric-line">
@@ -480,7 +486,7 @@ export default function ResultCards({
             </div>}
             <div className="question-list">
               {questions?.iq ?? q.per_question.map((x, index) => (
-                <details key={x.id} className="question">
+                <details key={x.id} className="question" data-item-id={x.id} onToggle={e => { if(e.currentTarget.open) onQuestionOpen?.(x.id); }}>
                   <summary>
                     <span>
                       Q{index + 1} · {tr(x.title)}
@@ -503,6 +509,7 @@ export default function ResultCards({
                           : x.earned + " / " + x.max + (x.half ? tr("（半分）") : "")}
                     </b>
                   </summary>
+                  {questionExtra?.(x.id)}
                   {x.skipped && <p>{x.error}</p>}
                   {x.error && !x.skipped && <ErrorFold text={x.error} />}
                   <h4>{tr("题目")}</h4>
@@ -537,6 +544,7 @@ export default function ResultCards({
                   {x.tags?.length > 0 && <p>{x.tags.join(" · ")}</p>}
                 </details>
               ))}
+              {questionTail}
             </div>
           </>
         )}
@@ -586,7 +594,7 @@ export default function ResultCards({
               </div>
               {vision.error && <p className="muted">{tr(vision.error)}</p>}
               {vision.question && (
-                <details className="question" open>
+                <details className="question" data-item-id="vision" open={collapseVision ? undefined : true} onToggle={e => {if(e.currentTarget.open) onQuestionOpen?.("vision");}}>
                   <summary>
                     <span>{tr("K线读数")}</span>
                     <b
@@ -601,6 +609,7 @@ export default function ResultCards({
                       {vision.earned ?? 0} / {vision.question_max ?? vision.question.max}
                     </b>
                   </summary>
+                  {questionExtra?.("vision")}
                   {vision.question.image && (
                     <img className="question-image" src={vision.question.image} alt="" />
                   )}
@@ -620,7 +629,7 @@ export default function ResultCards({
           <h3>{tr("缓存读写验证")}</h3>
           <span className="rc-score">
             <ScoreShare preserve={savedScore} verdict={scored} part="cache" />
-            <span className="card-number">CACHE</span>
+            <span className="card-number">{tr("缓存")}</span>
           </span>
         </div>
         {sectionContent?.cache !== undefined ? sectionContent.cache : !v.cache ? (

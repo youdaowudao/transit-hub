@@ -393,38 +393,8 @@ func (s *Server) run(ctx context.Context, t *Task, q Request, selected map[strin
 	}
 	wg.Wait()
 	t.mu.Lock()
-	items := []iq.QItem{}
-	lines := []QuestionResult{}
-	complete := true
-	answered := 0
-	for _, item := range t.questions {
-		if item.ID == "vision" {
-			continue
-		}
-		v := t.answers[item.ID]
-		if v.ID == "" {
-			v = QuestionResult{ID: item.ID, Title: item.Title, Max: item.MaxScore, Error: "请求未完成", Tags: []string{}}
-		}
-		if v.Error != "" && !v.Skipped {
-			complete = false
-		}
-		if v.Error == "" && !v.Skipped {
-			answered++
-		}
-		lines = append(lines, v)
-		if v.Skipped {
-			continue
-		}
-		items = append(items, iq.QItem{ID: v.ID, Title: v.Title, Max: v.Max, Earned: v.Earned, Half: v.Half, Tags: v.Tags})
-	}
-	if len(lines) > 0 {
-		score := iq.Score(items)
-		var validScore any
-		if answered > 0 {
-			validScore = score.Score
-		}
-		t.Verdict.IQ = map[string]any{"score": validScore, "max": 100, "paper_max": score.Max, "complete": complete, "per_question": lines, "note": fmt.Sprintf("当前卷面 %d；半分仅在卷面展示，不进入百分制通过分。失败请求标记未完成，但已答题目照常计分，不伪装为模型答错。", score.Max)}
-	}
+	var lines []QuestionResult
+	t.Verdict.IQ, lines = aggregateIQ(t.questions, t.answers)
 	sections := selected
 	if t.Source != "api" {
 		sections = nil
@@ -461,8 +431,12 @@ func (s *Server) askQuestion(ctx context.Context, g gateway.Client, q Request, i
 	truncated := func(m gateway.Metrics) bool {
 		return m.StopReason == "max_tokens" || m.StopReason == "length"
 	}
+	outputTokens := q.OutputTokens
+	if outputTokens == 0 {
+		outputTokens = 8192
+	}
 	ask := func(plain bool) (gateway.Metrics, error) {
-		req := gateway.CallRequest{Model: q.Model, Prompt: prompt, Images: questionImages(item), System: []gateway.SystemBlock{{Text: "禁止使用任何工具。直接给出结论，不要展开推导过程；回答最后单独一行：最终答案: <短结论>。"}}, Thinking: iqThinking(q.Model), MaxTokens: 8192, Stream: true, TimeoutSeconds: q.Timeout, Validate: func(m gateway.Metrics) error {
+		req := gateway.CallRequest{Model: q.Model, Prompt: prompt, Images: questionImages(item), System: []gateway.SystemBlock{{Text: "禁止使用任何工具。直接给出结论，不要展开推导过程；回答最后单独一行：最终答案: <短结论>。"}}, Thinking: iqThinking(q.Model), MaxTokens: outputTokens, Stream: true, TimeoutSeconds: q.Timeout, Validate: func(m gateway.Metrics) error {
 			if !truncated(m) && strings.TrimSpace(m.Answer) == "" && (!gateway.IsClaude(q.Model) || strings.TrimSpace(m.ThinkingText) == "") {
 				return fmt.Errorf("empty response")
 			}
@@ -527,7 +501,38 @@ func (s *Server) askQuestion(ctx context.Context, g gateway.Client, q Request, i
 		}
 	} else {
 		earned, half, tags := iq.Judge(item, text)
-		// Grade locally only: never disclose the canonical answer to the tested model.
+		// The chart answer is an exact integer; a self-grade would only make
+		// the correctness half of the vision score softer.
+		if item.ID != "vision" && earned == 0 {
+			grade, ge := g.CallMessages(ctx, gateway.CallRequest{
+				Model: q.Model,
+				History: []gateway.ConversationMessage{
+					{Role: "user", Content: item.Prompt},
+					{Role: "assistant", Content: text},
+				},
+				Prompt:         fmt.Sprintf("评分开始。标准答案是：%s。本题满分 %d。对照你上一轮的回答，完全符合只返回 %d，部分符合返回中间的整数，完全不对返回最低分。返回的是本题得分，不要把标准答案再写一遍。只返回一个整数。", item.Answer, item.MaxScore, item.MaxScore),
+				System:         []gateway.SystemBlock{{Text: "沿用上一轮对话。现在只给自己的上一轮回答打分，只返回一个整数。"}},
+				Thinking:       gradeThinking(q.Model),
+				MaxTokens:      256,
+				Stream:         true,
+				TimeoutSeconds: q.Timeout,
+			})
+			if ge == nil && grade.Err == "" {
+				scored, ok := iq.ParseSelfScore(grade.Answer, item.MaxScore)
+				if !ok && gateway.IsClaude(q.Model) {
+					scored, ok = iq.ParseSelfScore(grade.ThinkingText, item.MaxScore)
+				}
+				if ok {
+					earned = scored
+					half = false
+					if scored > 0 {
+						tags = []string{"自评"}
+					} else {
+						tags = nil
+					}
+				}
+			}
+		}
 		v.Earned = earned
 		v.Half = half
 		if tags == nil {

@@ -5239,3 +5239,9 @@ html[data-mode="dark"] .agent-onboard-tip {
   .hub-search { align-items: stretch; flex-direction: column; }
   .hub-main .connection-grid { grid-template-columns: 1fr; }
 }
+
+/* Preserve the original event row; only its saved answer expands on demand. */
+.hub-main .knowledge-ladder li > .knowledge-answer { grid-column: 1 / -1; min-width: 0; }
+.hub-main .knowledge-answer > summary { display: grid; grid-template-columns: 52px 78px minmax(0, 1fr); gap: 8px; align-items: baseline; cursor: pointer; }
+.hub-main .knowledge-answer > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hub-main .knowledge-answer > pre { white-space: pre-wrap; overflow-wrap: anywhere; }

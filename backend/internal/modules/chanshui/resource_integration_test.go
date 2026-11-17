@@ -40,7 +40,7 @@ func TestChanshuiActualResourceLifecycle(t *testing.T) {
 		t.Fatalf("build explicit resource fixture: %v: %s", err, output)
 	}
 	conn := actualSlice(t)
-	runner := NewRunner(RunnerConfig{BinaryPath: helper, DataDir: dir, ProjectDir: root, Manager: "user"})
+	runner := NewRunner(RunnerConfig{DisableBankSync: true, BinaryPath: helper, DataDir: dir, ProjectDir: root, Manager: "user"})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	t.Cleanup(func() {

@@ -1,18 +1,18 @@
 import { getAccessToken, handleAuthExpired } from '@/modules/auth/api/auth'
 
-export interface ChanshuiTargetInput { targetId?: string; groupId?: string; accountName?: string; groupName?: string }
+export interface ChanshuiTargetInput { reportId?: string; targetId?: string; groupId?: string; accountName?: string; groupName?: string }
 export interface ChanshuiRuntime { enabled: boolean; available: boolean; reason?: string; memoryCeilingBytes?: number }
 export class ChanshuiError extends Error {
   constructor(message: string, readonly status = 0, readonly details: Record<string, unknown> = {}) { super(message) }
 }
 type Params = Record<string, unknown>
 const resultContentType = 'application/vnd.transithub.chanshui-result+json'
-const maxResultBytes = 2 * 1024 * 1024, maxPacketBytes = 3 * 1024 * 1024, maxMetadataBytes = 64 * 1024
+const maxResultBytes = 16 * 1024 * 1024, maxPacketBytes = Math.ceil(maxResultBytes / 3) * 4 + 64 * 1024, maxMetadataBytes = 64 * 1024
 const record = (value: unknown): value is Params => !!value && typeof value === 'object' && !Array.isArray(value)
 const resultError = (reason: string) => new ChanshuiError(`检测结果${reason}，本次没有替换页面原有内容。请重新读取并核查保存结果；不要直接重复保存、删除或新建检测。`)
 const problemMessage = (problem: Params) => [problem.message, problem.detail].filter((value, index, all) => typeof value === 'string' && value && all.indexOf(value) === index).join('。')
 
-async function readResult(response: Response, image: boolean, onWarning?: (warning: Params) => void): Promise<unknown> {
+async function readResult(response: Response, image: boolean, onWarning?: (warning: Params) => void, largeResult = false): Promise<unknown> {
   // The base64 body is bounded before JSON parsing; a missing size header must
   // never turn an interrupted result into an unbounded in-memory read.
   const reader = response.body?.getReader()
@@ -24,7 +24,7 @@ async function readResult(response: Response, image: boolean, onWarning?: (warni
       const chunk = await reader.read()
       if (chunk.done) break
       received += chunk.value.byteLength
-      if (received > maxPacketBytes) { await reader.cancel().catch(() => undefined); throw resultError('超过允许大小') }
+      if (received > (largeResult ? maxPacketBytes : 3 * 1024 * 1024)) { await reader.cancel().catch(() => undefined); throw resultError('超过允许大小') }
       packet += decoder.decode(chunk.value, { stream: true })
     }
     packet += decoder.decode()
@@ -36,11 +36,12 @@ async function readResult(response: Response, image: boolean, onWarning?: (warni
   const { payloadBase64, ...metadata } = body
   if (new TextEncoder().encode(JSON.stringify(metadata)).byteLength > maxMetadataBytes) throw resultError('说明内容超过允许大小')
   if (body.v !== 1 || typeof body.length !== 'number' || !Number.isInteger(body.length) || body.length < 0) throw resultError('缺少有效版本或原内容长度')
-  if (body.length > maxResultBytes) throw resultError('原内容超过允许大小（最多2MiB）')
+  const contentLimit = largeResult && !image ? maxResultBytes : 2 * 1024 * 1024
+  if (body.length > contentLimit) throw resultError(`原内容超过允许大小（最多${largeResult && !image ? 16 : 2}MiB）`)
   if (body.contentType !== (image ? 'image/png' : 'application/json')) throw resultError('内容类型与本次读取不一致')
   if (body.error !== undefined && (!record(body.error) || typeof body.error.message !== 'string' || !body.error.message.trim())) throw resultError('清理说明缺少具体原因')
   if (body.complete !== true) throw resultError(`未完整传输${record(body.error) ? `：${problemMessage(body.error)}` : '，缺少完成确认'}`)
-  if (typeof payloadBase64 !== 'string' || payloadBase64.length > Math.ceil(maxResultBytes / 3) * 4) throw resultError('编码内容缺失或超过允许大小')
+  if (typeof payloadBase64 !== 'string' || payloadBase64.length > Math.ceil(contentLimit / 3) * 4) throw resultError('编码内容缺失或超过允许大小')
   let binary: string
   try {
     if (payloadBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(payloadBase64)) throw new Error('invalid base64')
@@ -71,6 +72,7 @@ const query = (params: Params) => {
 export function chanshuiRequestSpec(op: string, p: Params = {}): { path: string; method: string; body?: unknown; revision?: unknown; image?: boolean } {
   switch (op) {
     case 'runtime': return { path: '/runtime', method: 'GET' }
+    case 'reference-info': return { path: '/reference-info', method: 'GET' }
     case 'targets': return { path: '/targets', method: 'GET' }
     case 'context': return { path: `/targets/${key(p.targetId)}/context${query({ groupId: p.groupId })}`, method: 'GET' }
     case 'models': return { path: `/targets/${key(p.targetId)}/models`, method: 'POST', body: { groupId: p.groupId, expectedContext: p.expectedContext } }
@@ -112,7 +114,7 @@ export async function requestChanshui<T = unknown>(op: string, params: Params, w
     throw new ChanshuiError('无法连接调度站。请检查网络后重试读取；若刚点击开始，请按原报告编号查询，部分请求可能已经计费。')
   }
   if (response.status === 401) { handleAuthExpired(); throw new ChanshuiError('登录已失效，请重新登录后查看原报告。', 401) }
-  if (response.ok && response.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() === resultContentType) return await readResult(response, spec.image === true, onWarning) as T
+  if (response.ok && response.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase() === resultContentType) return await readResult(response, spec.image === true, onWarning, op === 'items') as T
   if (spec.image && response.ok) {
     const blob = await response.blob()
     if (blob.size > 2 * 1024 * 1024) throw new ChanshuiError('报告图片超过允许大小，请检查此报告的图片记录。')

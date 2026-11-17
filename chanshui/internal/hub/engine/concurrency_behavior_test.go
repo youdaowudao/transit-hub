@@ -30,6 +30,8 @@ func concurrentFixture(t *testing.T, count, concurrency int, configure ...func(*
 		t.Fatal(err)
 	}
 	settings.Concurrency = concurrency
+	settings.Protocol = "chat"
+	settings.Retries = 0
 	for _, option := range configure {
 		option(&settings)
 	}
@@ -94,7 +96,7 @@ func TestConfiguredConcurrencyTwoThirtyTwoAndSixtyFourAndNotificationSafety(t *t
 				}
 				return fixtureResponse(r, "已保存回答"), nil
 			})
-			err := RunOne(ctx, s, o, id, c, Config{Transport: fake, Notify: func(string, map[string]any) {
+			err := RunOne(ctx, s, o, id, c, Config{DisableBankSync: true, Transport: fake, Notify: func(string, map[string]any) {
 				if notifying.Add(1) != 1 {
 					overlap.Add(1)
 				}
@@ -146,7 +148,7 @@ func TestCancellationStopsFetchingQueuedQuestionsAndKeepsSavedAttempts(t *testin
 		return nil, r.Context().Err()
 	})
 	done := make(chan error, 1)
-	go func() { done <- RunOne(ctx, s, o, id, c, Config{Transport: fake}) }()
+	go func() { done <- RunOne(ctx, s, o, id, c, Config{DisableBankSync: true, Transport: fake}) }()
 	for i := 0; i < 2; i++ {
 		select {
 		case <-started:
@@ -185,7 +187,7 @@ func TestAttemptAdmissionFailureDoesNotCountAnUnsentHTTPRequest(t *testing.T) {
 func TestNotApplicableQuestionHasNoHTTPAttempts(t *testing.T) {
 	s, o, id, c := setup(t, []string{"thinking"}, "chat")
 	var calls atomic.Int32
-	err := RunOne(t.Context(), s, o, id, c, Config{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
+	err := RunOne(t.Context(), s, o, id, c, Config{DisableBankSync: true, Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		return fixtureResponse(r, "unexpected"), nil
 	})})
@@ -217,7 +219,7 @@ func TestNotApplicableQuestionHasNoHTTPAttempts(t *testing.T) {
 func TestGlobalRequestBudgetStopsParallelRequestsWithoutInflatingItemAttempts(t *testing.T) {
 	s, o, id, c := concurrentFixture(t, 40, 32, func(s *store.Settings) { s.MaxAttempts = 16 })
 	var calls atomic.Int32
-	err := RunOne(t.Context(), s, o, id, c, Config{Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
+	err := RunOne(t.Context(), s, o, id, c, Config{DisableBankSync: true, Transport: fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		return fixtureResponse(r, "已保存回答"), nil
 	})})
@@ -276,7 +278,7 @@ func TestConcurrentRetriesStayWithTheirOwnQuestion(t *testing.T) {
 		}
 		return fixtureResponse(r, "已保存回答"), nil
 	})
-	if err := RunOne(t.Context(), s, o, id, c, Config{Transport: fake}); err != nil {
+	if err := RunOne(t.Context(), s, o, id, c, Config{DisableBankSync: true, Transport: fake}); err != nil {
 		t.Fatal(err)
 	}
 	cursor := ""

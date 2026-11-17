@@ -1,8 +1,8 @@
 import type { HubKind } from './hub-policy';
 export interface HubTarget { targetId: string; accountId?: string; accountName: string; providerFamily?: string; groups?: { id: string; name: string }[] }
-export interface HubTargetInput { targetId?: string; groupId?: string; accountName?: string; groupName?: string }
+export interface HubTargetInput { reportId?: string; targetId?: string; groupId?: string; accountName?: string; groupName?: string }
 export interface HubContext extends HubTarget { workspaceId: string; groupId: string; groupName: string; baseURL: string; protocol: string; canRun: boolean; reason?: string; expectedContext: Record<string, string> }
-export interface HubSettings { timeoutSeconds: number; totalTimeoutSeconds: number; concurrency: number; maxOutputTokens: number; retries: number; maxAttempts: number; memoryLimitMiB: number; revision: number }
+export interface HubSettings { protocol?: string; timeoutSeconds: number; totalTimeoutSeconds: number; concurrency: number; maxOutputTokens: number; retries: number; maxAttempts: number; memoryLimitMiB: number; revision: number }
 export interface HubJudge { type: 'legacy' | 'text' | 'number' | 'keywords' | 'manual'; expectedText?: string; expectedNumber?: number; expectedFrom?: string; match?: string; required?: string[]; forbidden?: string[]; referenceAnswer?: string }
 export interface HubQuestion { id: string; title: string; kind: HubKind; enabled: boolean; order: number; maxScore: number; template: string; parameters: Record<string, unknown>; judge: HubJudge; revision?: number }
 export type HubQuestionSummary = Pick<HubQuestion, 'id' | 'title' | 'kind' | 'enabled' | 'order' | 'revision'>;

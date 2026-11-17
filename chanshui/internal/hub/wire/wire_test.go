@@ -81,7 +81,7 @@ func TestWireUnknownFieldsLengthAndExactPayload(t *testing.T) {
 		t.Fatal("payload length mismatch")
 	}
 	out.Reset()
-	if Result(&out, 200, strings.Repeat("x", 2<<20), "") == nil {
+	if Result(&out, 200, strings.Repeat("x", 16<<20), "") == nil {
 		t.Fatal("oversized payload accepted")
 	}
 }

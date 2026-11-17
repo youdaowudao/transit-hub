@@ -1,8 +1,9 @@
 package engine
 
 import (
+	"encoding/json"
+	"github.com/kiss-kedaya/chanshui/internal/api"
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
-	"github.com/kiss-kedaya/chanshui/internal/integrity"
 	"github.com/kiss-kedaya/chanshui/internal/iq"
 )
 
@@ -19,112 +20,96 @@ func boolJudgment(pass *bool, reason string) questions.Judgment {
 	return j
 }
 
-// summarize reuses upstream IQ half-credit aggregation and section weights.
-// Compose's partial zero score is never presented as a completed Hub result.
-func summarize(defs []questions.Generated, results map[string]itemResult) map[string]any {
-	parts := []integrity.Part{{Key: "fingerprint", Label: "模型指纹归因", MaxPoints: 10}, {Key: "iq", Label: "推理表现", MaxPoints: 100}, {Key: "vision", Label: "识图能力", MaxPoints: 100}, {Key: "injection", Label: "注入大小", MaxPoints: 10}, {Key: "tools", Label: "工具调用", MaxPoints: 1}, {Key: "web", Label: "联网检测", MaxPoints: 1}, {Key: "thinking", Label: "思维摘要回传", MaxPoints: 5}, {Key: "cache", Label: "缓存读写", MaxPoints: 1}}
-	index := map[string]int{}
-	for i, p := range parts {
-		index[p.Key] = i
+// summarize delegates IQ, integrity and total calculation to the original API.
+func summarize(defs []questions.Generated, results map[string]itemResult, models ...string) map[string]any {
+	model := "fixture"
+	if len(models) > 0 {
+		model = models[0]
 	}
-	paper := []iq.QItem{}
-	iqKnown := true
-	counts := map[string]int{}
+	v := api.Verdict{}
+	selected := map[string]bool{}
+	paper := []iq.Question{}
+	answers := map[string]api.QuestionResult{}
 	for _, q := range defs {
 		kind := q.Definition.Kind
-		if kind == "knowledge" || kind == "fingerprint_behavior" {
+		r := results[q.Definition.ID]
+		if kind == "fingerprint_behavior" || kind == "knowledge" {
 			continue
 		}
 		if (kind == "iq" || kind == "vision") && q.Definition.Judge.Type == "manual" {
 			continue
 		}
+		if r.Judgment.Status == "not_applicable" && kind != "vision" {
+			continue
+		}
 		key := kind
-		if kind == "fingerprint_numeric" {
+		if key == "fingerprint_numeric" {
 			key = "fingerprint"
 		}
-		i, ok := index[key]
-		if !ok {
-			continue
+		selected[key] = true
+		ev := asMap(r.Evidence)
+		if ev == nil {
+			ev = map[string]any{}
 		}
-		res, exists := results[q.Definition.ID]
-		if exists && res.Judgment.Status == "not_applicable" {
-			continue
+		if r.Error != "" {
+			ev["error"] = r.Error
 		}
-		part := &parts[i]
-		if counts[key] == 0 {
-			part.Known = true
-			part.Points = 0
-			if kind != "iq" {
-				part.MaxPoints = 0
-			}
-		}
-		counts[key]++
-		part.Applicable = true
-		known := exists && res.Error == "" && res.Judgment.Status == "known" && res.Judgment.Earned != nil
-		if !known {
-			part.Known = false
-		}
-		if kind == "iq" {
-			item := iq.QItem{ID: q.Definition.ID, Title: q.Definition.Title, Max: q.Definition.MaxScore}
-			if known {
-				item.Earned = *res.Judgment.Earned
-				item.Half = res.Judgment.Half
-			} else {
-				iqKnown = false
-			}
+		switch key {
+		case "iq":
+			item := q.IQ()
 			paper = append(paper, item)
-			continue
-		}
-		if kind == "vision" {
-			part.MaxPoints += 100
-			if known {
-				seen := 0
-				if res.Recognized {
-					seen = 50
+			var answer api.QuestionResult
+			raw, _ := json.Marshal(ev)
+			_ = json.Unmarshal(raw, &answer)
+			if answer.ID == "" {
+				answer = api.QuestionResult{ID: item.ID, Title: item.Title, Max: item.MaxScore, Error: r.Error, Half: r.Judgment.Half, Tags: r.Judgment.Tags}
+				if r.Judgment.Earned != nil {
+					answer.Earned = *r.Judgment.Earned
 				}
-				if q.Definition.MaxScore > 0 {
-					part.Points += seen + (*res.Judgment.Earned*50+q.Definition.MaxScore/2)/q.Definition.MaxScore
+				if r.Judgment.Status != "known" && answer.Error == "" {
+					answer.Error = "请求未完成"
 				}
 			}
-			continue
-		}
-		max := res.Judgment.Max
-		if max < 1 {
-			max = map[string]int{"fingerprint": 10, "injection": 10, "thinking": 5, "tools": 1, "web": 1, "cache": 1}[key]
-		}
-		part.MaxPoints += max
-		if known {
-			part.Points += *res.Judgment.Earned
-		}
-	}
-	iqResult := iq.Score(paper)
-	parts[index["iq"]].Points = iqResult.Score
-	parts[index["iq"]].Known = iqKnown && len(paper) > 0
-	total := integrity.Compose(parts)
-	applicable, complete := 0, true
-	for _, p := range total.Parts {
-		if p.Applicable {
-			applicable++
-			if !p.Known {
-				complete = false
+			answers[item.ID] = answer
+		case "vision":
+			if len(ev) == 0 {
+				item := q.IQ()
+				answer := api.QuestionResult{ID: item.ID, Max: item.MaxScore, Error: r.Error}
+				if r.Judgment.Earned != nil {
+					answer.Earned = *r.Judgment.Earned
+				}
+				answer.Answer = ""
+				if r.Recognized {
+					answer.Answer = "0"
+				}
+				ev = api.VisionResult(item, answer, nil)
 			}
+			v.Vision = ev
+		case "fingerprint":
+			v.Fingerprint = ev
+		case "injection":
+			v.Injection = ev
+		case "tools":
+			v.Tools = ev
+		case "web":
+			v.Web = ev
+		case "cache":
+			v.Cache = ev
+		case "thinking":
+			v.Thinking = ev
 		}
 	}
-	var score any
-	if complete && applicable > 0 {
-		score = total.Score
+	v = api.AssembleVerdict(v, paper, answers, model, selected)
+	// Original question bodies live once in each item, then the frontend joins
+	// those DTOs into per_question. This summary stays below the 64KiB channel.
+	if iqMap, ok := v.IQ.(map[string]any); ok {
+		delete(iqMap, "per_question")
 	}
-	reason := "仅对本次选中的适用板块按原权重计算；人工题、知识题、行为参考和不适用项不计总分。"
-	if !complete {
-		reason += "仍有项目未确认，总分尚未完成，请查看逐项结果。"
-	} else if applicable == 0 {
-		reason += "本次没有自动计分项，请人工查看答案。"
-	} else {
-		reason += "这些板块已完成；不同题库配置不直接比较总分。"
+	verdict := asMap(v)
+	for _, key := range []string{"fingerprint", "vision", "injection", "tools", "web", "cache", "thinking"} {
+		verdict[key] = nil
 	}
-	out := map[string]any{"total": map[string]any{"score": score, "max": 100, "parts": total.Parts, "complete": complete, "reason": reason}, "totalScore": score, "parts": total.Parts, "iqMax": iqResult.Max, "iqScore": nil}
-	if iqKnown && len(paper) > 0 {
-		out["iqScore"] = iqResult.Score
-	}
-	return out
+	iqMap := asMap(v.IQ)
+	total := asMap(v.Total)
+	return map[string]any{"verdict": verdict, "total": total, "totalScore": total["score"], "parts": total["parts"], "iqMax": iqMap["paper_max"], "iqScore": iqMap["score"]}
 }

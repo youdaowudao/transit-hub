@@ -4,6 +4,7 @@ import Select from './Select';
 import HubSettings from './HubSettings';
 import ReportShare from './ReportShare';
 import ThemeMenu from './ThemeMenu';
+import KnowledgeDates from './KnowledgeDates';
 import GitHubLink from './GitHubLink';
 import UpstreamApiDocs from './UpstreamApiDocs';
 import AuditHero from './AuditHero';
@@ -317,7 +318,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
         {historyError && <p role="alert" className="sidebar-empty">{historyError}</p>}
       </div><div className="sidebar-bottom"><p className="sidebar-retention">只显示当前工作区今天和昨天的记录；更早报告仍可查找。</p></div>
     </aside>
-    <main className="main hub-main" id="main-content"><div className="top-tools"><button type="button" className="theme-trigger docs-entry" onClick={()=>navigate('docs')}><Icon name="layers" /><span className="tool-label">接口文档</span></button><ThemeMenu /><GitHubLink /></div><div className={"page-shell" + (view === 'report' ? ' history-page' : '')}><header hidden={view === 'report'} className="hub-page-heading"><p className="muted">此页只做检测和保存结果，不会修改主站账号或调度设置。</p><p className="muted">收起或关闭页面不会停止已开始的检测；需要中止请点击停止检测。</p></header>
+    <main className="main hub-main" id="main-content"><div className="top-tools"><KnowledgeDates /><button type="button" className="theme-trigger docs-entry" onClick={()=>navigate('docs')}><Icon name="layers" /><span className="tool-label">接口文档</span></button><ThemeMenu /><GitHubLink /></div><div className={"page-shell" + (view === 'report' ? ' history-page' : '')}><header hidden={view === 'report'} className="hub-page-heading"><p className="muted">此页只做检测和保存结果，不会修改主站账号或调度设置。</p><p className="muted">收起或关闭页面不会停止已开始的检测；需要中止请点击停止检测。</p></header>
       {!boot && <section className="hero-card hub-card"><h1>正在连接调度站…</h1><p>请从调度站中的模型检测入口打开此页。静态页面不会启动检测程序。</p></section>}
       {runtime && (!runtime.available || runtime.queueBlocked) && <section className="hero-card hub-card"><p className="hub-error" role="alert">{runtime.reason || (runtime.busy ? '当前已有检测正在执行，请等待后点击核查运行状态；仍可查看自己的历史和设置。' : '当前环境未启用硬内存限制，不能开始检测。请按部署说明配置后重试。')}</p><button type="button" className="btn-secondary" onClick={() => void checkRuntime()}>核查运行状态</button></section>}
       {runtime?.available && runtime.busy && <div className="hub-note" role="status">当前已有检测正在执行，新报告可加入等待队列，不会与它同时执行。<button type="button" className="hub-text-button" onClick={() => void checkRuntime()}>核查运行状态</button></div>}

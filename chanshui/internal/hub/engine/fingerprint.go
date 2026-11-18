@@ -72,7 +72,7 @@ func numeric(ctx context.Context, g gateway.Client, model string, timeout int, q
 	ev["attribution"] = attr
 	ev["note"] = "概率仅在参考库候选内比较，不能单独证明模型身份"
 	points := 10
-	if !attr.LowConfidence && integrity.Confirmed("numeric", attr.TopProb) && integrity.FingerprintState(model, attr.Family, attr.TopModel) != integrity.FingerprintMatch {
+	if !attr.LowConfidence && integrity.Confirmed("numeric", attr.TopProb) && integrity.FingerprintMismatch(model, attr.Family, attr.TopModel) {
 		points = 0
 	}
 	out.Judgment = questions.Judgment{Status: "known", Max: 10, Earned: &points}

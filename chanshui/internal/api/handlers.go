@@ -572,11 +572,9 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 		if items[i].TotalScore == nil {
 			continue
 		}
-		state := integrity.FingerprintState(items[i].Model, items[i].Family, items[i].TopModel)
-		switch {
-		case !integrity.Confirmed(items[i].FingerprintBasis, items[i].FingerprintTopProb):
-			state = integrity.FingerprintMatch
-		case state != integrity.FingerprintMatch:
+		state := integrity.FingerprintMatch
+		if integrity.Confirmed(items[i].FingerprintBasis, items[i].FingerprintTopProb) &&
+			integrity.FingerprintMismatch(items[i].Model, items[i].Family, items[i].TopModel, items[i].FingerprintNumericEvidence) {
 			state = integrity.FingerprintFake
 		}
 		shown := integrity.PresentedScore(*items[i].TotalScore, items[i].FingerprintContribution, items[i].FingerprintCoefficient, state)

@@ -143,6 +143,9 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 	allowed := map[string]bool{}
 	previousSummary := map[string]any{}
 	_ = json.Unmarshal(report.Summary.Summary, &previousSummary)
+	if _, ok := previousSummary["knowledge"].(map[string]any); !ok {
+		previousSummary["knowledge"] = asMap(previousSummary["verdict"])["knowledge"]
+	}
 	previousTiming := asMap(asMap(previousSummary["verdict"])["timing"])
 	number := func(v any) int64 {
 		if f, ok := v.(float64); ok {
@@ -192,6 +195,8 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 			knowledgeSummary = old
 		}
 	}
+	pendingKnowledge := knowledgeSummary
+	pendingBoundary := asMap(pendingKnowledge["boundary_review"])["reason"] == "retry_pending"
 	fatalStorage := error(nil)
 	failStorage := func(err error) {
 		resultMu.Lock()
@@ -220,11 +225,18 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 		if snap.Retry != nil {
 			summary["attempts"] = t.Attempts.Load() + int64(snap.Retry.AttemptsBefore)
 		}
+		publishedKnowledge := knowledgeSummary
+		if pendingBoundary {
+			publishedKnowledge = pendingKnowledge
+		}
+		if cfg.singleAsk == nil && publishedKnowledge["boundary_review"] != nil {
+			summary["knowledge"] = publishedKnowledge
+		}
 		if v, ok := summary["verdict"].(map[string]any); ok {
 			v["protocol"] = g.Mode
 			v["timing"] = timing(false)
-			if knowledgeSummary["status"] != "not_selected" {
-				v["knowledge"] = knowledgeSummary
+			if publishedKnowledge["status"] != "not_selected" {
+				v["knowledge"] = publishedKnowledge
 			}
 		}
 		resultMu.Unlock()
@@ -400,6 +412,9 @@ dispatch:
 	attempts := t.Attempts.Load()
 	if snap.Retry != nil {
 		attempts += int64(snap.Retry.AttemptsBefore)
+	}
+	if pendingBoundary && ctx.Err() != nil {
+		knowledgeSummary = pendingKnowledge
 	}
 	summary := map[string]any{"complete": !hadError && ctx.Err() == nil, "attempts": attempts, "knowledge": knowledgeSummary, "upstreamVersion": snap.UpstreamVersion}
 	for key, value := range summarize(snap.Questions, itemResults, report.Model) {

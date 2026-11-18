@@ -211,7 +211,8 @@ func (s *Server) numeric(ctx context.Context, g gateway.Client, q Request) (any,
 		out["reference"] = map[string]any{"training_samples": ref.ReferenceSamples, "aliases": ref.Aliases, "calibration": "inherited_candidate_weights_not_recalibrated"}
 	}
 	if ctx.Err() != nil {
-		return out, ctx.Err()
+		out["error"] = "数字指纹检测已中止，本项未完成。已保存样本可查看，报告结束后可补测本项。"
+		return out, fmt.Errorf("%s（%w）", out["error"], ctx.Err())
 	}
 	if a.UsedOutputs < minSamples {
 		if firstError == "" {
@@ -228,6 +229,14 @@ func (s *Server) numeric(ctx context.Context, g gateway.Client, q Request) (any,
 			out["behavior_note"] = "轻量行为探针只作参考，不参与这一项的分数。"
 		}
 	}
+	if ctx.Err() != nil {
+		out["error"] = "数字指纹检测已中止，本项未完成。已保存样本可查看，报告结束后可补测本项。"
+		return out, fmt.Errorf("%s（%w）", out["error"], ctx.Err())
+	}
+	if integrity.FingerprintFamily(family) == "gpt" && integrity.GPTFingerprintOverlap(q.Model, a.TopModel) {
+		out["note"] = strings.ReplaceAll(note, "归因和所选模型一致，这项才记满分。", "数字指纹只在现有参考之间比较。这两款暂时分不开，当前无法确认具体型号。")
+	}
+
 	return out, nil
 }
 
@@ -692,7 +701,7 @@ func buildTotalFor(v Verdict, model string, selected map[string]bool) integrity.
 			// cost points. Behavioral attribution, close candidates and thin
 			// samples keep the section whole, so it never scores on guesswork.
 			confirmed := !lowConfidence && integrity.Confirmed(basis, prob) &&
-				integrity.FingerprintState(model, family, top) != integrity.FingerprintMatch
+				integrity.FingerprintMismatch(model, family, top)
 			if used >= 3 && got != "" && got != "unknown" {
 				if confirmed {
 					fpPoints = 0

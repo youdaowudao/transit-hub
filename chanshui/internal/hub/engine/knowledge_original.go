@@ -36,8 +36,12 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 	if current || (complete && matchesKnowledgeBank(byID, knowledge.Anchors)) {
 		check := knowledge.Check
 		skipReason := "原版知识探针按已取得的回答继续选题，本轮没有选到此题；不作为答错"
+		reviewed := current && knowledge.ReviewModel(model)
 		if current {
 			check = knowledge.CheckCurrent
+			if reviewed {
+				check = knowledge.CheckCurrentReviewed
+			}
 			skipReason = "串行二分按已经取得的回答继续选题，本轮未选到这道题；不算答错。"
 		}
 		seen := map[string]bool{}
@@ -64,6 +68,9 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 			failure := m.Err
 			if err != nil {
 				failure = err.Error()
+			}
+			if reviewed {
+				failure = knowledge.ReviewResponseError(m, err)
 			}
 			row := knowledge.Observe(p, m.Answer, failure)
 			item := callCtx.Value(itemAttemptContextKey{}).(*itemAttempts)
@@ -135,7 +142,7 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 			p, original := questions.OriginalKnowledge(def)
 			custom = custom || !original
 			result, ok := results[def.ID]
-			if !ok || result.Judgment.Status == "not_asked" || result.Judgment.Status == "not_applicable" {
+			if !ok || result.Judgment.Status == "not_asked" || result.Judgment.Status == "not_applicable" || (previous["boundary_review"] != nil && result.Judgment.Status == "unknown" && result.Error == "") {
 				continue
 			}
 			ev := asMap(result.Evidence)
@@ -178,6 +185,10 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 		// Preserve the original saved row order; retry replaces only the chosen row.
 		orderKnowledgeRows(rows, previous)
 		verdict = knowledge.FromRows(rows, g.ProtocolFor(model), attempts)
+		var old knowledge.Verdict
+		raw, _ := json.Marshal(previous)
+		_ = json.Unmarshal(raw, &old)
+		verdict = knowledge.ReviewAfterRetry(verdict, old.BoundaryReview)
 	}
 	return asMap(verdict), executionErr
 }

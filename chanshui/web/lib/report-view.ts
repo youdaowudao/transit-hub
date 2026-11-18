@@ -51,7 +51,11 @@ export function canonModel(model: string): string {
   return model.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-export type FingerprintState = "match" | "suspicious" | "fake";
+export type FingerprintState = "match" | "unconfirmed" | "suspicious" | "fake";
+
+function overlappingGPTFingerprint(model: string): boolean {
+  return model === "gpt6astra" || model === "gpt61sol";
+}
 
 // Mirrors integrity.FingerprintState on the Go side. A different family or a
 // different named Claude line is a confirmed substitution; any other name
@@ -63,10 +67,14 @@ export function fingerprintState(
   requested: string,
   family: string,
   topModel = "",
-  opts: { behavioral?: boolean; prob?: number } = {},
+  opts: { behavioral?: boolean; numericEvidence?: boolean; lowConfidence?: boolean; prob?: number } = {},
 ): FingerprintState {
   // Behavioral attribution has no numeric baseline, so it never judges a model.
   if (opts.behavioral) return "match";
+  if (opts.numericEvidence !== false && fingerprintFamily(family) === "gpt" &&
+      overlappingGPTFingerprint(canonModel(requested)) &&
+      overlappingGPTFingerprint(canonModel(topModel))) return "unconfirmed";
+  if (opts.lowConfidence) return "match";
   const differs = claimDiffers(requested, family, topModel);
   if (!differs) return "match";
   return (opts.prob ?? 0) >= 0.999 ? "fake" : "suspicious";

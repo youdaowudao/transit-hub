@@ -57,22 +57,23 @@ type Record struct {
 
 // Summary is the sidebar list entry.
 type Summary struct {
-	Status                  string  `json:"status"`
-	ExpiresAt               int64   `json:"expires_at"`
-	ReportID                string  `json:"report_id"`
-	ID                      int64   `json:"id"`
-	CreatedAt               string  `json:"created_at"`
-	BaseURL                 string  `json:"-"`
-	Model                   string  `json:"model"`
-	IQScore                 *int    `json:"iq_score,omitempty"`
-	TotalScore              *int    `json:"total_score,omitempty"`
-	Family                  string  `json:"family,omitempty"`
-	ThinkingPass            *bool   `json:"thinking_pass,omitempty"`
-	TopModel                string  `json:"-"`
-	FingerprintBasis        string  `json:"-"`
-	FingerprintTopProb      float64 `json:"-"`
-	FingerprintContribution int     `json:"-"`
-	FingerprintCoefficient  int     `json:"-"`
+	Status                     string  `json:"status"`
+	ExpiresAt                  int64   `json:"expires_at"`
+	ReportID                   string  `json:"report_id"`
+	ID                         int64   `json:"id"`
+	CreatedAt                  string  `json:"created_at"`
+	BaseURL                    string  `json:"-"`
+	Model                      string  `json:"model"`
+	IQScore                    *int    `json:"iq_score,omitempty"`
+	TotalScore                 *int    `json:"total_score,omitempty"`
+	Family                     string  `json:"family,omitempty"`
+	ThinkingPass               *bool   `json:"thinking_pass,omitempty"`
+	TopModel                   string  `json:"-"`
+	FingerprintNumericEvidence bool    `json:"-"`
+	FingerprintBasis           string  `json:"-"`
+	FingerprintTopProb         float64 `json:"-"`
+	FingerprintContribution    int     `json:"-"`
+	FingerprintCoefficient     int     `json:"-"`
 }
 
 // Open opens (or creates) the database at path and ensures the schema.
@@ -188,6 +189,10 @@ func (s *Store) ListBefore(limit int, before int64) ([]Summary, error) {
 		json_extract(verdict_json, '$.fingerprint.top_model'),
 		json_extract(verdict_json, '$.fingerprint.basis'),
 		CAST(json_extract(verdict_json, '$.fingerprint.top_prob') AS REAL),
+        COALESCE(json_extract(verdict_json, '$.fingerprint.basis')='numeric'
+            AND json_type(verdict_json, '$.fingerprint.used_outputs')='integer'
+            AND json_extract(verdict_json, '$.fingerprint.used_outputs')>0
+            AND COALESCE(json_extract(verdict_json, '$.fingerprint.error'),'')='',0),
 		CAST((SELECT json_extract(j.value, '$.contribution')
 			FROM json_each(json_extract(verdict_json, '$.total.parts')) AS j
 			WHERE json_extract(j.value, '$.key') = 'fingerprint' LIMIT 1) AS INTEGER),
@@ -217,7 +222,7 @@ func (s *Store) ListBefore(limit int, before int64) ([]Summary, error) {
 		var pass sql.NullBool
 		var score, total, contrib, coeff sql.NullInt64
 		if err := rows.Scan(&sum.ID, &sum.ReportID, &sum.Status, &sum.ExpiresAt, &sum.CreatedAt, &sum.BaseURL, &sum.Model,
-			&family, &pass, &score, &total, &top, &basis, &prob, &contrib, &coeff); err != nil {
+			&family, &pass, &score, &total, &top, &basis, &prob, &sum.FingerprintNumericEvidence, &contrib, &coeff); err != nil {
 			return nil, fmt.Errorf("history: scan: %w", err)
 		}
 		sum.Family = family.String

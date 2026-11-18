@@ -27,7 +27,7 @@ test("hide displayed 0.0 percent without changing nonzero probabilities",()=>{
 });
 
 test("fingerprint state separates confirmed swaps from suspicion",()=>{
-  assert.equal(fingerprintState("openai/gpt-6.1-sol","gpt","gpt-6.1-sol"), "match");
+  assert.equal(fingerprintState("openai/gpt-6.1-sol","gpt","gpt-6.1-sol"), "unconfirmed");
   assert.equal(fingerprintState("openai/gpt-6.1-sol","gpt","gpt-6-sol"), "suspicious");
   assert.equal(fingerprintState("anthropic/claude-fable-5","claude","claude-fable-5"), "match");
   assert.equal(fingerprintState("deepseek-ai/DeepSeek-V4.1-Flash-1017","deepseek","DeepSeek-V4.1-Flash-1017",{prob:1}), "match");

@@ -16,6 +16,9 @@ func TestFingerprintState(t *testing.T) {
 		{"claude-opus-4-6", "claude", "claude-sonnet-4-5", FingerprintFake},
 		{"claude-fable-5-2", "claude", "claude-opus-5-5", FingerprintSuspicious},
 		{"gpt-6-astra", "gpt", "gpt-5.6-luna", FingerprintSuspicious},
+		{"openai/gpt-6.1-sol", "openai", "gpt-6-astra", FingerprintUnconfirmed},
+		{"gpt-6-astra", "gpt", "gpt-6.1-sol", FingerprintUnconfirmed},
+		{"gpt-6.2-astra", "gpt", "gpt-6-astra", FingerprintSuspicious},
 		{"gpt-6-sol", "claude", "claude-opus-4-6", FingerprintFake},
 		{"gemini-2.5-pro", "unknown", "", FingerprintMatch},
 		{"GPT-5.4", "openai", "gpt-5.4", FingerprintMatch},
@@ -43,5 +46,14 @@ func TestPresentedScore(t *testing.T) {
 	}
 	if got := PresentedScore(20, 32, 32, FingerprintFake); got != 0 {
 		t.Fatalf("floor %d", got)
+	}
+}
+
+func TestOverlapRequiresActualEvidenceInHistory(t *testing.T) {
+	if FingerprintMismatch("gpt-6-astra", "gpt", "gpt-6.1-sol", true) {
+		t.Fatal("valid overlap was penalized")
+	}
+	if !FingerprintMismatch("gpt-6-astra", "gpt", "gpt-6.1-sol", false) {
+		t.Fatal("legacy mismatch rule was changed without numeric evidence")
 	}
 }

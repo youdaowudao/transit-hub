@@ -132,3 +132,92 @@ it('旧数字指纹成功记录在原报告补测后仍显示原兼容归因和�
   expect(view.verdict.fingerprint?.top_model).toBe('legacy-model')
   expect(view.verdict.fingerprint?.evidence?.[0].answer).toBe('旧成功采样')
 })
+
+it('知识结果只在报告结束且读完时显示同厂商一句对照，原事件行仍在', async () => {
+  vi.stubGlobal('React', React); vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  const node = document.createElement('div'); document.body.append(node); const root = createRoot(node)
+  const knowledge = {
+    status: 'estimated', reason: '原版说明', protocol: 'chat', rows: [
+      { id: 'bulgaria', happened_at: '2026-01-01', event: '保加利亚加入欧元区', kind: 'know', ok: true },
+      { id: 'olympics', happened_at: '2026-02-22', event: '冬奥会闭幕', kind: 'unknown', unsure: true },
+    ],
+  }
+  const render = (status: string, complete: boolean, verdict = knowledge) => React.act(async () => root.render(
+    React.createElement(I18nProvider, { fixedLang: 'zh' },
+      React.createElement(HubReportContent, { report: restorationReport({ model:'chat-latest', status, summary: { verdict: { knowledge: verdict } } }), items: [], complete, call: vi.fn() })),
+  ))
+  const comparison = () => node.querySelector('[data-testid="knowledge-date-comparison"]')
+  try {
+    await render('running', true)
+    expect(comparison()).toBeNull()
+    await render('done', false)
+    expect(comparison()).toBeNull()
+    await render('done', true)
+    expect(comparison()?.textContent).toContain('GPT-5.6 Luna')
+    expect(comparison()?.textContent).not.toContain('Claude')
+    expect(node.querySelectorAll('.knowledge-ladder li')).toHaveLength(2)
+    for (const status of ['not_selected', 'not_applicable']) {
+      await render('done', true, { ...knowledge, status, rows: [] })
+      expect(comparison()).toBeNull()
+    }
+  } finally { await React.act(async () => root.unmount()); node.remove() }
+})
+
+it('原生数字证据不能盖掉题目单独保存的错误和补测中状态', () => {
+  const fingerprint = { basis:'numeric', family:'gpt', family_prob:1, top_model:'gpt-6-astra', used_outputs:3, top_prob:1 }
+  const item = {itemId:'fingerprint:numeric',definition:{kind:'fingerprint_numeric'},status:'error',result:{error:'检测已停止，请查看已保存样本',evidence:fingerprint}} as HubItem
+  const report = restorationReport({summary:{verdict:{fingerprint}}})
+  expect(hubReportView(report,[item],true).verdict.fingerprint?.error).toBe('检测已停止，请查看已保存样本')
+  item.status='running'
+  item.result!.error=undefined
+  report.retry={id:'fixture',itemIds:[item.itemId]} as any
+  expect(hubReportView(report,[item],false).verdict.fingerprint?.error).toContain('正在补测')
+})
+
+it('知识汇总等待重算时只展示最新逐题证据，隐藏旧日期标签', async () => {
+  vi.stubGlobal('React',React);vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT',true)
+  const node=document.body.appendChild(document.createElement('div')),root=createRoot(node)
+  const knowledge={status:'estimated',label:'旧范围已经确认',reason:'旧摘要',
+    boundary_review:{status:'unconfirmed',reason:'retry_pending'},rows:[{id:'mamdani',happened_at:'2025-11-04',kind:'unknown',event:'旧标签不应显示',answer:'旧答案'}]}
+  const item={itemId:'knowledge:mamdani',sectionId:'knowledge',status:'done',definition:{id:'knowledge:mamdani',kind:'knowledge',title:'最新题目',parameters:{},judge:{type:'manual'}},result:{answer:'最新正确回答',judgment:{status:'reference'},evidence:{row:{id:'mamdani',kind:'know',happened_at:'2025-11-04',event:'最新题目'}}}} as HubItem
+  const report=restorationReport({status:'interrupted',summary:{knowledge,verdict:{knowledge}}})
+  try{
+    await React.act(async()=>root.render(React.createElement(I18nProvider,{fixedLang:'zh'},React.createElement(HubReportContent,{report,items:[item],complete:true,call:vi.fn()}))))
+    expect(node.textContent).toContain('未能保存复核结论')
+    expect(node.textContent).toContain('最新正确回答')
+    expect(node.textContent).not.toContain('旧范围已经确认')
+    expect(node.textContent).not.toContain('旧标签不应显示')
+    expect(node.textContent).not.toContain('正在补测知识题')
+    report.status='running'
+    item.status='queued'
+    report.retry={id:'fixture',itemIds:[item.itemId]} as any
+    await React.act(async()=>root.render(React.createElement(I18nProvider,{fixedLang:'zh'},React.createElement(HubReportContent,{report,items:[item],complete:true,call:vi.fn()}))))
+    expect(node.textContent).toContain('下面保留的是上次结果')
+    expect(node.textContent).not.toContain('未能保存复核结论')
+    report.retry={id:'other-section',itemIds:['tools']} as any
+    await React.act(async()=>root.render(React.createElement(I18nProvider,{fixedLang:'zh'},React.createElement(HubReportContent,{report,items:[item],complete:true,call:vi.fn()}))))
+    expect(node.textContent).not.toContain('正在补测知识题')
+    expect(node.textContent).not.toContain('正在补测；下面')
+    report.status='interrupted'
+    report.retry={id:'fixture',itemIds:[item.itemId]} as any
+    await React.act(async()=>root.render(React.createElement(I18nProvider,{fixedLang:'zh'},React.createElement(HubReportContent,{report,items:[item],complete:true,call:vi.fn()}))))
+    expect(node.textContent).not.toContain('正在补测')
+    expect(node.textContent).toContain('停止前保存的结果')
+  }finally{await React.act(async()=>root.unmount());node.remove()}
+})
+
+it('数字重叠的共同日期说明也适用于原知识报告，并依赖实际数字结果', async () => {
+  vi.stubGlobal('React',React);vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT',true)
+  const node=document.body.appendChild(document.createElement('div')),root=createRoot(node)
+  const knowledge={status:'estimated',label:'原知识说明',reason:'原版',rows:[]}
+  const fingerprint={basis:'numeric',family:'gpt',top_model:'gpt-6-astra',top_prob:1,used_outputs:3}
+  const report=restorationReport({model:'gpt-6-astra',status:'done',summary:{verdict:{knowledge,fingerprint}}})
+  const render=()=>React.act(async()=>root.render(React.createElement(I18nProvider,{fixedLang:'zh'},React.createElement(HubReportContent,{report,items:[],complete:true,call:vi.fn()}))))
+  try{
+    await render()
+    expect(node.textContent).toContain('知识日期无法区分两款')
+    fingerprint.top_model='gpt-6.2-sol'
+    await render()
+    expect(node.textContent).not.toContain('知识日期无法区分两款')
+  }finally{await React.act(async()=>root.unmount());node.remove()}
+})

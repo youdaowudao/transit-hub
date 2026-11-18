@@ -186,6 +186,21 @@ func TestHistoryListOnlyDropsConfirmedFingerprint(t *testing.T) {
 			verdict: `{"fingerprint":{"basis":"numeric","top_prob":1,"family":"anthropic","top_model":"claude-opus-4-6"},"total":{"score":85,"parts":[{"key":"fingerprint","contribution":32,"coefficient":32}]}}`,
 			want:    `"total_score":53`,
 		},
+		{
+			name:    "valid GPT overlap",
+			verdict: `{"fingerprint":{"basis":"numeric","top_prob":1,"family":"gpt","top_model":"gpt-6.1-sol","used_outputs":3},"total":{"score":85,"parts":[{"key":"fingerprint","contribution":32,"coefficient":32}]}}`,
+			want:    `"total_score":85`,
+		},
+		{
+			name:    "zero samples keep original mismatch",
+			verdict: `{"fingerprint":{"basis":"numeric","top_prob":1,"family":"gpt","top_model":"gpt-6.1-sol","used_outputs":0},"total":{"score":85,"parts":[{"key":"fingerprint","contribution":32,"coefficient":32}]}}`,
+			want:    `"total_score":53`,
+		},
+		{
+			name:    "cancelled evidence keeps original mismatch",
+			verdict: `{"fingerprint":{"basis":"numeric","top_prob":1,"family":"gpt","top_model":"gpt-6.1-sol","used_outputs":3,"error":"检测已停止"},"total":{"score":85,"parts":[{"key":"fingerprint","contribution":32,"coefficient":32}]}}`,
+			want:    `"total_score":53`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

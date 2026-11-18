@@ -358,6 +358,7 @@ type search struct {
 	wrongs  int
 	errors  int
 	invalid bool
+	current bool
 	rows    []Row
 	seen    map[string]bool
 	kinds   map[string]string
@@ -378,16 +379,17 @@ func (s *search) next() (Probe, bool) {
 		return Probe{}, false
 	}
 	id, mode := s.script()
-	if mode == modeStop {
-		return Probe{}, false
-	}
-	if mode == modeFallback {
-		id = s.fallback()
-		if id == "" {
-			return Probe{}, false
+	switch mode {
+	case modeStop:
+		if s.current && !s.lo.IsZero() && !s.hi.IsZero() {
+			return s.nearest(CurrentAnchors(), s.lo, s.hi, true)
 		}
+		return Probe{}, false
+	case modeFallback:
+		return s.fallback()
+	default:
+		return s.slot(id), true
 	}
-	return anchorByID(id), true
 }
 
 func (s *search) script() (string, int) {
@@ -565,8 +567,10 @@ const (
 )
 
 func (s *search) gate(id string) int {
+	p := s.slot(id)
+	id = p.ID
 	if !s.seen[id] {
-		if !s.open(id) {
+		if !s.open(p.at()) {
 			return gateSkip
 		}
 		return gateAsk
@@ -581,8 +585,14 @@ func (s *search) gate(id string) int {
 	}
 }
 
-func (s *search) open(id string) bool {
-	at := anchorByID(id).at()
+func (s *search) slot(id string) Probe {
+	if s.current {
+		return currentSlot(id)
+	}
+	return anchorByID(id)
+}
+
+func (s *search) open(at time.Time) bool {
 	if !s.lo.IsZero() && !at.After(s.lo) {
 		return false
 	}
@@ -592,7 +602,7 @@ func (s *search) open(id string) bool {
 	return true
 }
 
-func (s *search) fallback() string {
+func (s *search) fallback() (Probe, bool) {
 	lo := s.lo
 	hi := s.hi
 	if lo.IsZero() {
@@ -601,23 +611,32 @@ func (s *search) fallback() string {
 	if hi.IsZero() {
 		hi = time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	}
+	anchors := Anchors
+	if s.current {
+		anchors = CurrentAnchors()
+	}
+	return s.nearest(anchors, lo, hi, false)
+}
+
+func (s *search) nearest(anchors []Probe, lo, hi time.Time, supplementsOnly bool) (Probe, bool) {
 	mid := lo.Add(hi.Sub(lo) / 2)
-	best := ""
+	var best Probe
 	var bestDist time.Duration = 1<<63 - 1
-	for _, p := range Anchors {
-		if s.seen[p.ID] || !s.open(p.ID) {
+	for _, p := range anchors {
+		at := p.at()
+		if s.seen[p.ID] || !s.open(at) || (supplementsOnly && !IsSupplement(p.ID)) {
 			continue
 		}
-		d := p.at().Sub(mid)
+		d := at.Sub(mid)
 		if d < 0 {
 			d = -d
 		}
 		if d < bestDist {
 			bestDist = d
-			best = p.ID
+			best = p
 		}
 	}
-	return best
+	return best, best.ID != ""
 }
 
 func (s *search) apply(p Probe, kind, answer string) {
@@ -725,7 +744,17 @@ func (s *search) label() string {
 
 // Check asks dated events one at a time. The first question is always the 2025-11-04 mayoral election.
 func Check(ctx context.Context, c gateway.Client, model string, timeout int) (Verdict, error) {
+	return check(ctx, c, model, timeout, newSearch())
+}
+
+// CheckCurrent uses the Hub's refreshed bank with the original serial search and request rules.
+func CheckCurrent(ctx context.Context, c gateway.Client, model string, timeout int) (Verdict, error) {
 	s := newSearch()
+	s.current = true
+	return check(ctx, c, model, timeout, s)
+}
+
+func check(ctx context.Context, c gateway.Client, model string, timeout int, s *search) (Verdict, error) {
 	attempts := 0
 	protocol := c.ProtocolFor(model)
 	for {

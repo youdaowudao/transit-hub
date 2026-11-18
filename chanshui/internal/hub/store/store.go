@@ -58,27 +58,8 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 func (s *Store) Close() error { return s.db.Close() }
-func (s *Store) migrate(ctx context.Context) error {
-	var version int
-	if e := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); e != nil {
-		return e
-	}
-	if version > 3 {
-		return Fail(503, "检测数据库由更新版本创建，请使用匹配版本，当前程序未修改数据", "migration")
-	}
-	for _, p := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA foreign_keys=ON", "PRAGMA cache_size=-2048"} {
-		if _, e := s.db.ExecContext(ctx, p); e != nil {
-			return e
-		}
-	}
-	if version == 3 {
-		return nil
-	}
-	tx, e := s.db.BeginTx(ctx, nil)
-	if e != nil {
-		return e
-	}
-	defer tx.Rollback()
+func migrateToV3(ctx context.Context, conn *sql.Conn, version int) error {
+	var e error
 	for _, q := range []string{
 		`CREATE TABLE IF NOT EXISTS hub_settings(user_id TEXT NOT NULL,workspace_id TEXT NOT NULL,settings_json TEXT NOT NULL CHECK(json_valid(settings_json)),revision INTEGER NOT NULL CHECK(revision>=1),PRIMARY KEY(user_id,workspace_id))`,
 		`CREATE TABLE IF NOT EXISTS hub_questions(user_id TEXT NOT NULL,workspace_id TEXT NOT NULL,question_id TEXT NOT NULL,definition_json TEXT NOT NULL CHECK(json_valid(definition_json)),revision INTEGER NOT NULL CHECK(revision>=1),PRIMARY KEY(user_id,workspace_id,question_id))`,
@@ -93,16 +74,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS runtime_state(name TEXT PRIMARY KEY,value BLOB NOT NULL)`,
 		`UPDATE hub_settings SET settings_json=json_set(settings_json,'$.timeoutSeconds',CASE WHEN json_extract(settings_json,'$.timeoutSeconds')=120 THEN 360 ELSE json_extract(settings_json,'$.timeoutSeconds') END,'$.retries',CASE WHEN json_extract(settings_json,'$.retries')=0 THEN 3 ELSE json_extract(settings_json,'$.retries') END,'$.maxOutputTokens',CASE WHEN json_extract(settings_json,'$.maxOutputTokens')=4096 THEN 8192 ELSE json_extract(settings_json,'$.maxOutputTokens') END,'$.maxAttempts',CASE WHEN json_extract(settings_json,'$.maxAttempts')=128 THEN 0 ELSE json_extract(settings_json,'$.maxAttempts') END,'$.protocol',COALESCE(json_extract(settings_json,'$.protocol'),'auto')),revision=revision+1 WHERE json_extract(settings_json,'$.protocol') IS NULL OR json_extract(settings_json,'$.timeoutSeconds')=120 OR json_extract(settings_json,'$.retries')=0 OR json_extract(settings_json,'$.maxOutputTokens')=4096 OR json_extract(settings_json,'$.maxAttempts')=128`,
 		`PRAGMA user_version=3`} {
-		if _, e = tx.ExecContext(ctx, q); e != nil {
+		if _, e = conn.ExecContext(ctx, q); e != nil {
 			return e
 		}
 	}
 	if version < 2 {
-		if _, e = tx.ExecContext(ctx, `UPDATE hub_settings SET settings_json=json_set(settings_json,'$.concurrency',CASE WHEN json_extract(settings_json,'$.concurrency')=2 THEN 32 ELSE json_extract(settings_json,'$.concurrency') END,'$.totalTimeoutSeconds',CASE WHEN json_extract(settings_json,'$.totalTimeoutSeconds')=600 THEN 3600 ELSE json_extract(settings_json,'$.totalTimeoutSeconds') END),revision=revision+1 WHERE json_extract(settings_json,'$.concurrency')=2 OR json_extract(settings_json,'$.totalTimeoutSeconds')=600`); e != nil {
+		if _, e = conn.ExecContext(ctx, `UPDATE hub_settings SET settings_json=json_set(settings_json,'$.concurrency',CASE WHEN json_extract(settings_json,'$.concurrency')=2 THEN 32 ELSE json_extract(settings_json,'$.concurrency') END,'$.totalTimeoutSeconds',CASE WHEN json_extract(settings_json,'$.totalTimeoutSeconds')=600 THEN 3600 ELSE json_extract(settings_json,'$.totalTimeoutSeconds') END),revision=revision+1 WHERE json_extract(settings_json,'$.concurrency')=2 OR json_extract(settings_json,'$.totalTimeoutSeconds')=600`); e != nil {
 			return e
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 func (s *Store) writable() error {
 	if s.path == ":memory:" {

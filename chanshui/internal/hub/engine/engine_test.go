@@ -31,6 +31,11 @@ func fixtureResponse(r *http.Request, answer string) *http.Response {
 }
 func setup(t *testing.T, selected []string, protocol string) (*store.Store, store.Owner, string, Credential) {
 	t.Helper()
+	return setupReport(t, selected, protocol, nil)
+}
+
+func setupReport(t *testing.T, selected []string, protocol string, seed func(*store.Store, store.Owner)) (*store.Store, store.Owner, string, Credential) {
+	t.Helper()
 	s, e := store.Open(":memory:")
 	if e != nil {
 		t.Fatal(e)
@@ -45,6 +50,9 @@ func setup(t *testing.T, selected []string, protocol string) (*store.Store, stor
 	settings.Retries = 0
 	if _, err = s.SaveSettings(t.Context(), o, settings); err != nil {
 		t.Fatal(err)
+	}
+	if seed != nil {
+		seed(s, o)
 	}
 	id := strings.Repeat("a", 32)
 	c := Credential{BaseURL: "https://fixture.invalid", Key: "test-secret-do-not-persist", Protocol: protocol, AnthropicAuth: "bearer"}

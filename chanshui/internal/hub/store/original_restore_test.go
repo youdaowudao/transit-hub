@@ -96,7 +96,7 @@ func TestOriginalDefaultsMigrationFromV2IsTransactionalAndPreservesReports(t *te
 		t.Fatal("migration rewrote a paid report snapshot", err)
 	}
 	var version int
-	if err = s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 3 {
+	if err = s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
 		t.Fatal(version, err)
 	}
 	if _, err = s.db.Exec(`INSERT INTO runtime_state(name,value) VALUES('fixture',?)`, []byte(`{"original":true}`)); err != nil {

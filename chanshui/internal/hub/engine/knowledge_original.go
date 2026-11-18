@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -15,24 +14,32 @@ import (
 	"github.com/kiss-kedaya/chanshui/internal/knowledge"
 )
 
-// The complete original catalogue uses Check itself. The observers only attach
-// item ownership, attempts and storage; they never select or classify differently.
+// Complete built-in catalogues use the original serial request loop. The
+// observers only attach item ownership, attempts and storage.
 func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id string, defs []questions.Generated, allDefs []questions.Generated, previous map[string]any, g gateway.Client, timeout int, model string, retry *store.Retry, execute func(questions.Generated) (itemResult, error), results map[string]itemResult, mu *sync.Mutex, fail func(error), notify func(string, map[string]any)) (map[string]any, error) {
 	byPrompt := map[string]questions.Generated{}
-	full := retry == nil && len(defs) == len(knowledge.Anchors)
+	byID := map[string]bool{}
+	frozenPromptsMatch := true
 	for _, q := range defs {
 		if p, ok := questions.OriginalKnowledge(q.Definition); ok {
-			byPrompt[p.Prompt()] = q
-		} else {
-			full = false
+			prompt := p.Prompt()
+			byPrompt[prompt] = q
+			byID[p.ID] = true
+			frozenPromptsMatch = frozenPromptsMatch && q.Prompt == prompt
 		}
-	}
-	if len(byPrompt) != len(knowledge.Anchors) {
-		full = false
 	}
 	var verdict knowledge.Verdict
 	var executionErr error
-	if full {
+	complete := retry == nil && len(byPrompt) == len(defs)
+	// Earlier releases stored the same old definitions with a different prompt format.
+	current := complete && frozenPromptsMatch && matchesKnowledgeBank(byID, knowledge.CurrentAnchors())
+	if current || (complete && matchesKnowledgeBank(byID, knowledge.Anchors)) {
+		check := knowledge.Check
+		skipReason := "原版知识探针按已取得的回答继续选题，本轮没有选到此题；不作为答错"
+		if current {
+			check = knowledge.CheckCurrent
+			skipReason = "串行二分按已经取得的回答继续选题，本轮未选到这道题；不算答错。"
+		}
 		seen := map[string]bool{}
 		observed := g
 		observed.BeforeCall = func(callCtx context.Context, request gateway.CallRequest) (context.Context, error) {
@@ -79,7 +86,7 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 			return nil
 		}
 		var err error
-		verdict, err = knowledge.Check(ctx, observed, model, timeout)
+		verdict, err = check(ctx, observed, model, timeout)
 		// Probe failure is represented by original rows/verdict and report partial,
 		// whereas storage failure cancels the round through fail.
 		if err != nil && ctx.Err() != nil {
@@ -90,7 +97,7 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 				if seen[q.Definition.ID] {
 					continue
 				}
-				if err := s.SaveItem(ctx, o, id, q.Definition.ID, "done", map[string]any{"judgment": map[string]any{"status": "not_asked", "reason": "原版知识探针按已取得的回答继续选题，本轮没有选到此题；不作为答错"}}, 0); err != nil {
+				if err := s.SaveItem(ctx, o, id, q.Definition.ID, "done", map[string]any{"judgment": map[string]any{"status": "not_asked", "reason": skipReason}}, 0); err != nil {
 					return nil, err
 				}
 			}
@@ -98,7 +105,6 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 	} else {
 		// Explicit subsets/custom definitions cannot let Check ask disabled items.
 		// This is the existing user-editable path, never a replacement binary search.
-		customObservations := []map[string]any{}
 		for _, q := range defs {
 			if ctx.Err() != nil {
 				executionErr = ctx.Err()
@@ -110,27 +116,32 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 				}
 				continue
 			}
-			result, err := execute(q)
+			_, err := execute(q)
 			if err != nil {
 				executionErr = err
 				break
 			}
-			kind, reason := questions.GradeKnowledge(q.Definition, result.Answer)
-			if result.Error != "" {
-				kind, reason = "error", result.Error
-			}
-			customObservations = append(customObservations, map[string]any{"id": q.Definition.ID, "date": questions.Text(q.Definition.Parameters, "date"), "kind": kind, "reason": reason})
 		}
 		rows := []knowledge.Row{}
 		attempts := 0
 		custom := false
+		customObservations := []map[string]any{}
 		mu.Lock()
-		for itemID, result := range results {
-			if p, ok := knowledge.Anchor(trimKnowledgePrefix(itemID)); ok {
-				if result.Judgment.Status == "not_asked" || result.Judgment.Status == "not_applicable" {
-					continue
-				}
-				ev := asMap(result.Evidence)
+		for _, q := range allDefs {
+			def := q.Definition
+			if def.Kind != "knowledge" {
+				continue
+			}
+			p, original := questions.OriginalKnowledge(def)
+			custom = custom || !original
+			result, ok := results[def.ID]
+			if !ok || result.Judgment.Status == "not_asked" || result.Judgment.Status == "not_applicable" {
+				continue
+			}
+			ev := asMap(result.Evidence)
+			var kind, reason string
+			switch {
+			case original:
 				var row knowledge.Row
 				raw, _ := json.Marshal(ev["row"])
 				_ = json.Unmarshal(raw, &row)
@@ -139,35 +150,23 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 				}
 				rows = append(rows, row)
 				attempts += result.Attempts
+				kind, reason = row.Kind, row.Answer
+				if row.Error != "" {
+					reason = row.Error
+				}
+			case result.Error != "":
+				kind, reason = "error", result.Error
+			default:
+				kind, _ = ev["kind"].(string)
+				reason, _ = ev["reason"].(string)
+				if kind == "" {
+					kind, reason = questions.GradeKnowledge(def, result.Answer)
+				}
 			}
+			customObservations = append(customObservations, map[string]any{"id": def.ID, "date": questions.Text(def.Parameters, "date"), "kind": kind, "reason": reason})
 		}
 		mu.Unlock()
-		for _, q := range allDefs {
-			if q.Definition.Kind != "knowledge" {
-				continue
-			}
-			if _, ok := questions.OriginalKnowledge(q.Definition); !ok {
-				custom = true
-			}
-		}
 		if custom {
-			customObservations = nil
-			mu.Lock()
-			for _, q := range allDefs {
-				if q.Definition.Kind != "knowledge" {
-					continue
-				}
-				r, ok := results[q.Definition.ID]
-				if !ok || r.Judgment.Status == "not_asked" || r.Judgment.Status == "not_applicable" {
-					continue
-				}
-				kind, reason := questions.GradeKnowledge(q.Definition, r.Answer)
-				if r.Error != "" {
-					kind, reason = "error", r.Error
-				}
-				customObservations = append(customObservations, map[string]any{"id": q.Definition.ID, "date": questions.Text(q.Definition.Parameters, "date"), "kind": kind, "reason": reason})
-			}
-			mu.Unlock()
 			if len(customObservations) == 0 {
 				if executionErr != nil {
 					return map[string]any{"status": "error", "label": "知识检测已停止", "reason": "本轮已停止，尚无完成的事件回答；已保存记录保留，可补测未完成项。", "rows": rows, "observations": customObservations, "total": 0}, executionErr
@@ -182,6 +181,19 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 	}
 	return asMap(verdict), executionErr
 }
+
+func matchesKnowledgeBank(ids map[string]bool, anchors []knowledge.Probe) bool {
+	if len(ids) != len(anchors) {
+		return false
+	}
+	for _, p := range anchors {
+		if !ids[p.ID] {
+			return false
+		}
+	}
+	return true
+}
+
 func asMap(v any) map[string]any {
 	raw, _ := json.Marshal(v)
 	var out map[string]any
@@ -189,17 +201,19 @@ func asMap(v any) map[string]any {
 	return out
 }
 
-func trimKnowledgePrefix(id string) string { return strings.TrimPrefix(id, "knowledge:") }
 func orderKnowledgeRows(rows []knowledge.Row, previous map[string]any) {
 	index := map[string]int{}
-	for i, p := range knowledge.Anchors {
-		index[p.ID] = i + len(knowledge.Anchors)
+	oldRows, _ := previous["rows"].([]any)
+	next := len(oldRows)
+	for _, bank := range [][]knowledge.Probe{knowledge.Anchors, knowledge.CurrentAnchors()} {
+		for _, p := range bank {
+			index[p.ID] = next
+			next++
+		}
 	}
-	if oldRows, ok := previous["rows"].([]any); ok {
-		for i, value := range oldRows {
-			if id, ok := asMap(value)["id"].(string); ok {
-				index[id] = i
-			}
+	for i, value := range oldRows {
+		if id, ok := asMap(value)["id"].(string); ok {
+			index[id] = i
 		}
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return index[rows[i].ID] < index[rows[j].ID] })

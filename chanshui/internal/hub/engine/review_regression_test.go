@@ -126,8 +126,18 @@ func TestReviewKnowledgeCancellationKeepsObservedVerdict(t *testing.T) {
 }
 
 func TestReviewKnowledgeRetryUsesCumulativePersistedAttempts(t *testing.T) {
-	ids := []string{"knowledge:mamdani", "knowledge:bulgaria"}
-	s, o, id, c := setup(t, ids, "chat")
+	t.Run("legacy", func(t *testing.T) {
+		s, o, id, c := setupLegacyKnowledgeReport(t, []string{"knowledge:mamdani", "knowledge:bulgaria"})
+		assertCumulativeKnowledgeRetry(t, s, o, id, c)
+	})
+	t.Run("current", func(t *testing.T) {
+		s, o, id, c := setup(t, []string{"knowledge:virginia_2025_governor", "knowledge:ao_2026_women"}, "chat")
+		assertCumulativeKnowledgeRetry(t, s, o, id, c)
+	})
+}
+
+func assertCumulativeKnowledgeRetry(t *testing.T, s *store.Store, o store.Owner, id string, c Credential) {
+	t.Helper()
 	_, snap, err := s.LoadRun(t.Context(), o, id)
 	if err != nil || len(snap.Questions) != 2 {
 		t.Fatal("test needs two original anchors", err, len(snap.Questions))

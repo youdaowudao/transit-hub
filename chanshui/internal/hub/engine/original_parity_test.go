@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
@@ -45,13 +46,42 @@ func requestPrompt(t *testing.T, r *http.Request) (string, map[string]any) {
 }
 
 func TestOriginalKnowledgeExecutionMatchesOriginalCheck(t *testing.T) {
+	t.Run("native-snapshot", func(t *testing.T) { assertOriginalKnowledgeExecution(t, false) })
+	t.Run("historical-v3.1.11-snapshot", func(t *testing.T) { assertOriginalKnowledgeExecution(t, true) })
+}
+
+func assertOriginalKnowledgeExecution(t *testing.T, historicalPrompt bool) {
 	ids := []string{}
-	for _, q := range questions.Presets() {
-		if q.Kind == "knowledge" {
-			ids = append(ids, q.ID)
+	for _, q := range questions.LegacyKnowledge() {
+		ids = append(ids, q.ID)
+	}
+	s, o, id, c := setupLegacyKnowledgeReport(t, ids)
+	if historicalPrompt {
+		_, snap, err := s.LoadRun(t.Context(), o, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, q := range snap.Questions {
+			p, _ := questions.OriginalKnowledge(q.Definition)
+			var historical strings.Builder
+			historical.WriteString(q.Definition.Template + "\n")
+			for _, option := range p.Choices {
+				fmt.Fprintf(&historical, "%s. %s\n", option.Letter, option.Text)
+			}
+			historical.WriteString("仅凭已有知识回答，禁止联网或工具；最后单独一行以“最终答案: ”给出选项字母。无法确认请选择不知道的选项。")
+			snap.Questions[i].Prompt = historical.String()
+			if _, err = s.RuntimeDB().Exec(`UPDATE hub_items SET question_json=json_set(question_json,'$.prompt',?) WHERE report_id=? AND item_id=?`, historical.String(), id, q.Definition.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		raw, err := json.Marshal(snap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = s.RuntimeDB().Exec("UPDATE hub_reports SET snapshot_json=? WHERE report_id=?", string(raw), id); err != nil {
+			t.Fatal(err)
 		}
 	}
-	s, o, id, c := setup(t, ids, "chat")
 	traces := [2][]string{}
 	makeTransport := func(index int) fixtureTransport {
 		return func(r *http.Request) (*http.Response, error) {
@@ -85,6 +115,21 @@ func TestOriginalKnowledgeExecutionMatchesOriginalCheck(t *testing.T) {
 	if !reflect.DeepEqual(oracle, got) {
 		t.Fatalf("original knowledge fields changed:\noriginal=%+v\nmigrated=%+v", oracle, got)
 	}
+}
+
+func setupLegacyKnowledgeReport(t *testing.T, ids []string) (*store.Store, store.Owner, string, Credential) {
+	t.Helper()
+	return setupReport(t, ids, "chat", func(s *store.Store, o store.Owner) {
+		for _, q := range questions.LegacyKnowledge() {
+			raw, err := json.Marshal(q)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = s.RuntimeDB().Exec("INSERT INTO hub_questions VALUES(?,?,?,?,1)", o.UserID, o.WorkspaceID, q.ID, string(raw)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
 }
 
 func TestOriginalQuestionBudgetSystemEffortAndEmptyAnswerFallback(t *testing.T) {

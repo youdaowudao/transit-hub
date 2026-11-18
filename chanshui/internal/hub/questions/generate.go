@@ -198,19 +198,21 @@ func Compatible(q Definition) bool {
 		if q.Kind == "fingerprint_behavior" && Int(p.Parameters, "slot") != Int(q.Parameters, "slot") {
 			continue
 		}
-		a, _ := json.Marshal(struct {
-			Template   string
-			Parameters map[string]any
-		}{q.Template, q.Parameters})
-		b, _ := json.Marshal(struct {
-			Template   string
-			Parameters map[string]any
-		}{p.Template, p.Parameters})
-		if string(a) == string(b) {
+		if sameGeneratorInput(q, p) {
 			return true
 		}
 	}
 	return false
+}
+
+func sameGeneratorInput(q, preset Definition) bool {
+	type input struct {
+		Template   string
+		Parameters map[string]any
+	}
+	a, _ := json.Marshal(input{q.Template, q.Parameters})
+	b, _ := json.Marshal(input{preset.Template, preset.Parameters})
+	return string(a) == string(b)
 }
 
 func NumericPrompt(q Definition, count int, r *rand.Rand) string {
@@ -230,7 +232,11 @@ func OriginalQuestion(q Definition, seed int64) (iq.Question, bool) {
 	return iq.PaperQuestion(rand.New(rand.NewSource(seed)), q.ID)
 }
 func OriginalKnowledge(q Definition) (knowledge.Probe, bool) {
-	if q.Kind != "knowledge" || !Compatible(q) {
+	if q.Kind != "knowledge" || !strings.HasPrefix(q.ID, "knowledge:") {
+		return knowledge.Probe{}, false
+	}
+	preset, ok := Preset(q.ID)
+	if !ok || !sameGeneratorInput(q, preset) {
 		return knowledge.Probe{}, false
 	}
 	return knowledge.Anchor(strings.TrimPrefix(q.ID, "knowledge:"))

@@ -11,7 +11,7 @@ import (
 
 func TestEveryUpstreamPresetIsEditableDefinitionAndGenerates(t *testing.T) {
 	defs := Presets()
-	want := 9 + 1 + len(knowledge.Anchors) + 5 + 1 + len(fingerprint.BehaviorProbes)
+	want := 9 + 1 + len(knowledge.CurrentAnchors()) + 5 + 1 + len(fingerprint.BehaviorProbes)
 	if len(defs) != want {
 		t.Fatalf("preset coverage %d want %d", len(defs), want)
 	}

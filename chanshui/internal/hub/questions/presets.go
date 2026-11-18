@@ -22,8 +22,9 @@ const numericTemplate = "{{opening}}。{{action}} {{count}} 个 {{min}} 到 {{ma
 // Each returned value is independent: editing cannot mutate a future seed.
 func Presets() []Definition {
 	out := []Definition{}
+	orderOffset := 0
 	add := func(id, title, kind, template string, params map[string]any, max int, judge Judge) {
-		out = append(out, Definition{ID: id, Title: title, Kind: kind, Template: template, Parameters: params, MaxScore: max, Judge: judge, Enabled: true, Order: (len(out) + 1) * 100})
+		out = append(out, Definition{ID: id, Title: title, Kind: kind, Template: template, Parameters: params, MaxScore: max, Judge: judge, Enabled: true, Order: (len(out)+1)*100 - orderOffset})
 	}
 	r := rand.New(rand.NewSource(1))
 	for _, q := range []iq.Question{iq.GenPill(), iq.GenCarWash(), iq.GenBatBall(), iq.GenAnchor(), iq.GenBridge()} {
@@ -42,13 +43,9 @@ func Presets() []Definition {
 		out[i].Order = int(out[i].ID[1]-'0') * 100
 	}
 	add("vision", "K线读数", "vision", "", map[string]any{"generator": "chart_v1", "lines": iq.ChartPanelTemplates()}, 20, Judge{Type: "legacy", ExpectedFrom: "generator"})
-	for _, p := range knowledge.Anchors {
-		choices := []any{}
-		for _, c := range p.Choices {
-			choices = append(choices, map[string]any{"text": c.Text, "kind": c.Kind})
-		}
-		add("knowledge:"+p.ID, p.Event, "knowledge", p.Question, map[string]any{"generator": "event_v1", "date": p.HappenedAt, "event": p.Event, "choices": choices, "knowAliases": []string{}, "wrongAliases": []string{}, "unknownAliases": []string{}}, 0, Judge{Type: "manual"})
-	}
+	events := CurrentKnowledge()
+	out = append(out, events...)
+	orderOffset = (len(events) - len(knowledge.Anchors)) * 100
 	add("tools", "工具调用检测", "tools", toolsTemplate, map[string]any{"generator": "tools_v1", "lhs": 17, "rhs": 25}, 0, Judge{Type: "manual"})
 	add("cache", "缓存读写验证", "cache", "", map[string]any{"generator": "cache_v1", "prefixHeading": "Stable agent brief. Keep this document byte-for-byte identical across turns.", "prefixLineTemplate": "Cache prefix sentence {{index}} remains byte for byte identical.", "turnTemplate": "Continue the same document. Do not rewrite earlier turns. Reply with only noted-{{turn}}."}, 0, Judge{Type: "manual"})
 	out[len(out)-1].Enabled = false
@@ -63,10 +60,64 @@ func Presets() []Definition {
 	return out
 }
 func Preset(id string) (Definition, bool) {
+	if strings.HasPrefix(id, "knowledge:") {
+		for _, defs := range [][]Definition{CurrentKnowledge(), LegacyKnowledge()} {
+			for _, q := range defs {
+				if q.ID == id {
+					return q, true
+				}
+			}
+		}
+		return Definition{}, false
+	}
 	for _, q := range Presets() {
 		if q.ID == id {
 			return q, true
 		}
 	}
 	return Definition{}, false
+}
+
+const firstKnowledgeOrder = 1100
+
+// LegacyKnowledge returns the exact original definitions for historical snapshots and migration.
+func LegacyKnowledge() []Definition {
+	defs := make([]Definition, 0, len(knowledge.Anchors))
+	for i, p := range knowledge.Anchors {
+		defs = append(defs, knowledgeDefinition(p, firstKnowledgeOrder+i*100))
+	}
+	return defs
+}
+
+// CurrentKnowledge returns the refreshed defaults, placing supplemental dates in existing gaps.
+func CurrentKnowledge() []Definition {
+	anchors := knowledge.CurrentAnchors()
+	defs := make([]Definition, 0, len(anchors))
+	nextReplacement, gap := firstKnowledgeOrder, 0
+	for _, p := range anchors {
+		if knowledge.IsSupplement(p.ID) {
+			gap += 10
+			defs = append(defs, knowledgeDefinition(p, nextReplacement-100+gap))
+			continue
+		}
+		defs = append(defs, knowledgeDefinition(p, nextReplacement))
+		nextReplacement += 100
+		gap = 0
+	}
+	return defs
+}
+
+func knowledgeDefinition(p knowledge.Probe, order int) Definition {
+	choices := make([]any, 0, len(p.Choices))
+	for _, c := range p.Choices {
+		choices = append(choices, map[string]any{"text": c.Text, "kind": c.Kind})
+	}
+	return Definition{
+		ID: "knowledge:" + p.ID, Title: p.Event, Kind: "knowledge", Template: p.Question,
+		Parameters: map[string]any{
+			"generator": "event_v1", "date": p.HappenedAt, "event": p.Event, "choices": choices,
+			"knowAliases": []string{}, "wrongAliases": []string{}, "unknownAliases": []string{},
+		},
+		Judge: Judge{Type: "manual"}, Enabled: true, Order: order,
+	}
 }

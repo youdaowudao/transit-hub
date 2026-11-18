@@ -1,13 +1,18 @@
 package knowledge
 
 // Prompt and Classify expose the original implementation for persistence and
-// explicit per-question retries. Check's search and parser remain unchanged.
+// explicit per-question retries.
 func (p Probe) Prompt() string                          { return p.prompt() }
 func (p Probe) Classify(answer string) (string, string) { return classify(p, answer) }
 func Anchor(id string) (Probe, bool) {
 	for _, p := range Anchors {
 		if p.ID == id {
 			return p, true
+		}
+	}
+	for _, event := range currentEvents {
+		if event.ID == id {
+			return event.Probe, true
 		}
 	}
 	return Probe{}, false

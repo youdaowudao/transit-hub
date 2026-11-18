@@ -40,7 +40,7 @@ export default function HubReportContent({ report, items, complete, call, onRetr
       const skipped=rows.filter(item=>['not_asked','not_applicable'].includes(itemJudgment(item).status??''));
       const represented=new Set((view.verdict.knowledge?.rows??[]).map(row=>row.id.replace(/^knowledge:/,'')));
       const extra=rows.filter(item=>!skipped.includes(item)&&!represented.has(item.itemId.replace(/^knowledge:/,'')));
-      questions.knowledge=<><p className="muted">点击上方事件行可查看本题已保存回答，默认收起，不重新检测或修改主站。</p>{extra.map(item=><HubQuestionDetails key={item.itemId} item={item} call={call} reportId={report.reportId} reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled} />)}{skipped.length>0 && <details className="fold"><summary>本轮未提问的题目与原因（{skipped.length}）</summary><p className="muted">完整原题库沿用原程序的串行二分，最多10问；未选到的题不当作答错。自定义或部分选择时按设置执行。</p><div className="question-list">{skipped.map(item=><HubQuestionDetails key={item.itemId} item={item} call={call} reportId={report.reportId} reportStatus={report.status}/>)}</div></details>}</>;
+      questions.knowledge=<><p className="muted">点击上方事件行可查看本题已保存回答，默认收起，不重新检测或修改主站。</p>{extra.map(item=><HubQuestionDetails key={item.itemId} item={item} call={call} reportId={report.reportId} reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled} />)}{skipped.length>0 && <details className="fold"><summary>本轮未提问的题目与原因（{skipped.length}）</summary><p className="muted">完整默认题库沿用原程序的串行二分，每次最多提问10道；列表会写明本轮未选到的题目，未选到的题不算答错。自定义或部分选择时按设置执行。</p><div className="question-list">{skipped.map(item=><HubQuestionDetails key={item.itemId} item={item} call={call} reportId={report.reportId} reportStatus={report.status}/>)}</div></details>}</>;
       continue;
     }
 

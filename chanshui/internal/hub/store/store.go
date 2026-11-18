@@ -16,6 +16,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// MaxItemBytes accommodates full original DTOs without clipping normal 8MiB responses.
+const MaxItemBytes = 12 << 20
+
 type Store struct {
 	db   *sql.DB
 	path string
@@ -60,7 +63,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	if e := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); e != nil {
 		return e
 	}
-	if version > 2 {
+	if version > 3 {
 		return Fail(503, "检测数据库由更新版本创建，请使用匹配版本，当前程序未修改数据", "migration")
 	}
 	for _, p := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA foreign_keys=ON", "PRAGMA cache_size=-2048"} {
@@ -68,7 +71,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return e
 		}
 	}
-	if version == 2 {
+	if version == 3 {
 		return nil
 	}
 	tx, e := s.db.BeginTx(ctx, nil)
@@ -87,9 +90,15 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS hub_reports_owner_date ON hub_reports(user_id,workspace_id,created_at_ms DESC,report_id DESC)`,
 		`CREATE TABLE IF NOT EXISTS hub_items(report_id TEXT NOT NULL REFERENCES hub_reports(report_id),item_id TEXT NOT NULL,section_id TEXT NOT NULL,order_index INTEGER NOT NULL,status TEXT NOT NULL CHECK(status IN('queued','running','done','error','cancelled')),attempts INTEGER NOT NULL DEFAULT 0,started_at_ms INTEGER NOT NULL DEFAULT 0,completed_at_ms INTEGER NOT NULL DEFAULT 0,result_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(result_json)),question_json TEXT NOT NULL CHECK(json_valid(question_json)),image BLOB,PRIMARY KEY(report_id,item_id))`,
 		`CREATE INDEX IF NOT EXISTS hub_items_order ON hub_items(report_id,order_index,item_id)`,
-		`UPDATE hub_settings SET settings_json=json_set(settings_json,'$.concurrency',CASE WHEN json_extract(settings_json,'$.concurrency')=2 THEN 32 ELSE json_extract(settings_json,'$.concurrency') END,'$.totalTimeoutSeconds',CASE WHEN json_extract(settings_json,'$.totalTimeoutSeconds')=600 THEN 3600 ELSE json_extract(settings_json,'$.totalTimeoutSeconds') END),revision=revision+1 WHERE json_extract(settings_json,'$.concurrency')=2 OR json_extract(settings_json,'$.totalTimeoutSeconds')=600`,
-		`PRAGMA user_version=2`} {
+		`CREATE TABLE IF NOT EXISTS runtime_state(name TEXT PRIMARY KEY,value BLOB NOT NULL)`,
+		`UPDATE hub_settings SET settings_json=json_set(settings_json,'$.timeoutSeconds',CASE WHEN json_extract(settings_json,'$.timeoutSeconds')=120 THEN 360 ELSE json_extract(settings_json,'$.timeoutSeconds') END,'$.retries',CASE WHEN json_extract(settings_json,'$.retries')=0 THEN 3 ELSE json_extract(settings_json,'$.retries') END,'$.maxOutputTokens',CASE WHEN json_extract(settings_json,'$.maxOutputTokens')=4096 THEN 8192 ELSE json_extract(settings_json,'$.maxOutputTokens') END,'$.maxAttempts',CASE WHEN json_extract(settings_json,'$.maxAttempts')=128 THEN 0 ELSE json_extract(settings_json,'$.maxAttempts') END,'$.protocol',COALESCE(json_extract(settings_json,'$.protocol'),'auto')),revision=revision+1 WHERE json_extract(settings_json,'$.protocol') IS NULL OR json_extract(settings_json,'$.timeoutSeconds')=120 OR json_extract(settings_json,'$.retries')=0 OR json_extract(settings_json,'$.maxOutputTokens')=4096 OR json_extract(settings_json,'$.maxAttempts')=128`,
+		`PRAGMA user_version=3`} {
 		if _, e = tx.ExecContext(ctx, q); e != nil {
+			return e
+		}
+	}
+	if version < 2 {
+		if _, e = tx.ExecContext(ctx, `UPDATE hub_settings SET settings_json=json_set(settings_json,'$.concurrency',CASE WHEN json_extract(settings_json,'$.concurrency')=2 THEN 32 ELSE json_extract(settings_json,'$.concurrency') END,'$.totalTimeoutSeconds',CASE WHEN json_extract(settings_json,'$.totalTimeoutSeconds')=600 THEN 3600 ELSE json_extract(settings_json,'$.totalTimeoutSeconds') END),revision=revision+1 WHERE json_extract(settings_json,'$.concurrency')=2 OR json_extract(settings_json,'$.totalTimeoutSeconds')=600`); e != nil {
 			return e
 		}
 	}
@@ -341,3 +350,6 @@ func errorSQL(err error) error {
 }
 
 var Now = time.Now
+
+// RuntimeDB is borrowed only by the original reference-bank state adapter.
+func (s *Store) RuntimeDB() *sql.DB { return s.db }

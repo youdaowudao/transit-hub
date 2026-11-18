@@ -150,6 +150,8 @@ describe('检测设置实际读写和预设删除', () => {
     })
     await run(() => root.render(React.createElement(HubSettings, { call, onDirtyChange: () => undefined }))); await tick()
     await click('编辑')
+    expect(container.textContent).toContain('零分时可能将参考答案发给被测模型自评')
+    expect(container.textContent).not.toContain('参考答案不会发给被测模型自评')
     const max = Array.from(container.querySelectorAll('label')).find(l => l.textContent?.startsWith('满分'))!.querySelector('input')!
     expect(max.disabled).toBe(true); expect(max.value).toBe('6')
     await fill('题干／提示模板', '改过的新题正文')
@@ -184,7 +186,7 @@ describe('账号预填、模型下拉和实际回答列表', () => {
     }
     window.addEventListener('message', server); cleanup = () => window.removeEventListener('message', server)
     await run(() => root.render(React.createElement(HubApp))); for (let i = 0; i < 6; i++) await tick()
-    const modelSelect = () => Array.from(container.querySelectorAll('label')).find(l => l.firstChild?.textContent?.startsWith('检测模型'))?.querySelector('select')
+    const modelSelect = () => container.querySelector<HTMLInputElement>('#model')
     expect(modelSelect()?.value).toBe('gpt-6.1-sol')
     expect(calls.some(c => c.op === 'start')).toBe(false)
     expect(container.textContent).toContain('零分历史账号'); expect(container.textContent).not.toContain('三天前账号')

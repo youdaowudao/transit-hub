@@ -25,7 +25,7 @@ export function sidebarDayLabel(createdAtMs: number, now = Date.now()): string |
   return null;
 }
 export function reportStatus(status: string): string {
-  return ({ queued: '等待执行', running: '检测中', done: '完成', partial: '未完成', cancelled: '已停止', interrupted: '异常中断', error: '失败' } as Record<string, string>)[status] ?? status;
+  return ({ queued: '等待执行', running: '检测中', done: '完成', partial: '已结束，部分项目未确认', cancelled: '已停止', interrupted: '异常中断', error: '失败' } as Record<string, string>)[status] ?? status;
 }
 export function isHubTerminal(status: string): boolean { return ['done', 'partial', 'cancelled', 'interrupted'].includes(status); }
 export function reportPollDecision(report: { status: string; processExited?: boolean }, terminalSince: number | null, now: number): { poll: boolean; message: string; terminalSince: number | null } {

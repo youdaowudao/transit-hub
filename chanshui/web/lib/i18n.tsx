@@ -93,16 +93,17 @@ const I18nContext = createContext<I18nValue>({
   locale: "zh-CN",
 });
 
-export function I18nProvider({ children }: { children: ReactNode }) {
-  const [lang, setLangState] = useState<Lang>("zh");
-  const [follow, setFollow] = useState(true);
+export function I18nProvider({ children, fixedLang }: { children: ReactNode; fixedLang?: Lang }) {
+  const [lang, setLangState] = useState<Lang>(fixedLang ?? "zh");
+  const [follow, setFollow] = useState(!fixedLang);
   useEffect(() => {
+    if (fixedLang) { setLangState(fixedLang); setFollow(false); return; }
     let saved: string | null = null;
     try { saved = localStorage.getItem("chanshui-lang"); } catch {}
     const next = isLang(saved) ? saved : detectLang(navigator.languages?.length ? navigator.languages : [navigator.language || "zh"]);
     setLangState(next);
     setFollow(!isLang(saved));
-  }, []);
+  }, [fixedLang]);
   useEffect(() => {
     document.documentElement.lang = htmlLang(lang);
     document.documentElement.dataset.lang = lang;
@@ -113,6 +114,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     locale: htmlLang(lang),
     t: (source, vars) => translate(lang, source, vars),
     setLang: (next) => {
+      if (fixedLang) return;
       if (next === "auto") {
         try { localStorage.removeItem("chanshui-lang"); } catch {}
         const detected = detectLang(navigator.languages?.length ? navigator.languages : [navigator.language || "zh"]);
@@ -124,7 +126,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       setFollow(false);
       setLangState(next);
     },
-  }), [lang, follow]);
+  }), [lang, follow, fixedLang]);
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
 

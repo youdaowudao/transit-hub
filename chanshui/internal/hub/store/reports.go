@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/kiss-kedaya/chanshui/internal/api"
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
 )
 
@@ -41,6 +42,20 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 	}
 	if strings.TrimSpace(r.Model) == "" || len(r.Model) > 256 || r.TargetID == "" {
 		return Report{}, Fail(422, "请先选择账号并填写模型名（最多256字节）", "create")
+	}
+	if r.SingleAsk != nil {
+		copyInput := *r.SingleAsk
+		if copyInput.Thinking != nil {
+			copyThinking := *copyInput.Thinking
+			copyInput.Thinking = &copyThinking
+		}
+		r.SingleAsk = &copyInput
+		if len(copyInput.Prompt) > 16<<10 {
+			return Report{}, Fail(422, "单问单答的问题最多16KiB，请缩短后重新发送；本次没有创建记录或发送请求", "ask")
+		}
+		if err := api.ValidateSingleAsk(r.Model, r.SingleAsk); err != nil {
+			return Report{}, Fail(422, err.Error()+"；本次没有创建记录或发送请求", "ask")
+		}
 	}
 	req := canonicalRequest(r)
 	exists, e := s.Exists(ctx, o, r.ReportID, req)
@@ -79,7 +94,7 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 		for _, id := range r.SelectedQuestionIDs {
 			ids[id] = true
 		}
-		rows, e := tx.QueryContext(ctx, `SELECT definition_json,revision FROM hub_questions WHERE user_id=? AND workspace_id=? AND json_extract(definition_json,'$.enabled')=1 ORDER BY json_extract(definition_json,'$.order'),question_id`, o.UserID, o.WorkspaceID)
+		rows, e := tx.QueryContext(ctx, `SELECT definition_json,revision FROM hub_questions WHERE user_id=? AND workspace_id=? AND (json_extract(definition_json,'$.enabled')=1 OR (question_id='cache' AND revision=1 AND json_extract(definition_json,'$.enabled')=0)) ORDER BY json_extract(definition_json,'$.order'),question_id`, o.UserID, o.WorkspaceID)
 		if e != nil {
 			return e
 		}
@@ -97,6 +112,11 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 				return e
 			}
 			q.Revision = revision
+			// The untouched original cache default means the homepage checkbox
+			// starts it only for this report. Explicit edits/deletion stay final.
+			if !q.Enabled && !(q.ID == "cache" && revision == 1 && questions.Compatible(q) && (sections["cache"] || ids["cache"])) {
+				continue
+			}
 			section := q.Kind
 			if strings.HasPrefix(section, "fingerprint_") {
 				section = "fingerprint"
@@ -118,11 +138,19 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 			return e
 		}
 		rows.Close()
+		if r.SingleAsk != nil {
+			defs = []questions.Definition{{ID: "custom:" + r.ReportID, Title: "单问单答", Kind: "iq", Enabled: true, Order: 100, Template: r.SingleAsk.Prompt, Parameters: map[string]any{"generator": "static"}, Judge: questions.Judge{Type: "manual"}}}
+		}
 		if len(defs) == 0 {
 			return Fail(422, "没有可执行的题目，请在设置中新增或启用题目并重新选择", "create")
 		}
-		snap := Snapshot{Settings: settings, Questions: []questions.Generated{}, UpstreamVersion: "308315dc9c0dd83504f042bde2a96e82e243fe73"}
+		snap := Snapshot{SingleAsk: r.SingleAsk, Settings: settings, Questions: []questions.Generated{}, UpstreamVersion: "308315dc9c0dd83504f042bde2a96e82e243fe73"}
 		counts := map[string]int{}
+		var paperSeedBytes [8]byte
+		if _, e = rand.Read(paperSeedBytes[:]); e != nil {
+			return e
+		}
+		paperSeed := int64(binary.LittleEndian.Uint64(paperSeedBytes[:]) & 0x1fffffffffffff)
 		for _, q := range defs {
 			counts[q.Kind]++
 			if (q.Kind == "iq" || q.Kind == "knowledge") && counts[q.Kind] > 32 {
@@ -133,7 +161,15 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 				return e
 			}
 			seed := int64(binary.LittleEndian.Uint64(seedBytes[:]) & 0x1fffffffffffff)
-			g, e := questions.Generate(q, seed)
+			if questions.IsOriginalQuestion(q) {
+				seed = paperSeed
+			}
+			var g questions.Generated
+			if r.SingleAsk != nil {
+				g = questions.Generated{Definition: q, Seed: seed, Prompt: r.SingleAsk.Prompt}
+			} else {
+				g, e = questions.Generate(q, seed)
+			}
 			if e != nil {
 				return Fail(422, fmt.Sprintf("题目%s无法生成：%s", q.Title, e), "generate")
 			}
@@ -170,6 +206,11 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 		_, e = tx.ExecContext(ctx, `INSERT INTO hub_reports(report_id,user_id,workspace_id,target_id,account_id,account_name,group_id,group_name,base_url,protocol,model,created_at_ms,updated_at_ms,status,request_json,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)`, r.ReportID, o.UserID, o.WorkspaceID, r.TargetID, target.AccountID, target.AccountName, groupID, target.GroupName, target.BaseURL, target.Protocol, r.Model, now, now, string(req), string(snapshotJSON))
 		if e != nil {
 			return e
+		}
+		if r.SingleAsk != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE hub_reports SET summary_json='{"singleAsk":true}' WHERE report_id=?`, r.ReportID); err != nil {
+				return err
+			}
 		}
 		for i, g := range snap.Questions {
 			raw, _ := json.Marshal(g)
@@ -217,7 +258,7 @@ func (s *Store) BeginRun(ctx context.Context, o Owner, id string) error {
 }
 func (s *Store) BeginItem(ctx context.Context, o Owner, id, itemID string) error {
 	return retryWrite(ctx, func() error {
-		res, e := s.db.ExecContext(ctx, `UPDATE hub_items SET status='running',attempts=0,started_at_ms=? WHERE report_id=? AND item_id=? AND status='queued' AND EXISTS(SELECT 1 FROM hub_reports r WHERE r.report_id=hub_items.report_id AND r.user_id=? AND r.workspace_id=? AND r.status='running')`, Now().UnixMilli(), id, itemID, o.UserID, o.WorkspaceID)
+		res, e := s.db.ExecContext(ctx, `UPDATE hub_items SET status='running',started_at_ms=? WHERE report_id=? AND item_id=? AND status='queued' AND EXISTS(SELECT 1 FROM hub_reports r WHERE r.report_id=hub_items.report_id AND r.user_id=? AND r.workspace_id=? AND r.status='running')`, Now().UnixMilli(), id, itemID, o.UserID, o.WorkspaceID)
 		if e != nil {
 			return e
 		}
@@ -233,11 +274,11 @@ func (s *Store) SaveItem(ctx context.Context, o Owner, id, itemID, status string
 	if e != nil {
 		return e
 	}
-	if len(raw) > 256<<10 {
-		return Fail(422, "本题结果超过256KiB，不能保存为完整答案", "item")
+	if len(raw) > MaxItemBytes {
+		return Fail(422, "本题完整结果超过12MiB保存上限，未覆盖已有结果；请降低输出预算后补测此项", "item")
 	}
 	return retryWrite(ctx, func() error {
-		res, e := s.db.ExecContext(ctx, `UPDATE hub_items SET status=?,result_json=?,attempts=?,completed_at_ms=? WHERE report_id=? AND item_id=? AND status IN('queued','running') AND EXISTS(SELECT 1 FROM hub_reports r WHERE r.report_id=hub_items.report_id AND r.user_id=? AND r.workspace_id=? AND r.status='running')`, status, string(raw), attempts, Now().UnixMilli(), id, itemID, o.UserID, o.WorkspaceID)
+		res, e := s.db.ExecContext(ctx, `UPDATE hub_items SET status=?,result_json=?,attempts=MAX(attempts,?),completed_at_ms=? WHERE report_id=? AND item_id=? AND status IN('queued','running') AND EXISTS(SELECT 1 FROM hub_reports r WHERE r.report_id=hub_items.report_id AND r.user_id=? AND r.workspace_id=? AND r.status='running')`, status, string(raw), attempts, Now().UnixMilli(), id, itemID, o.UserID, o.WorkspaceID)
 		if e != nil {
 			return e
 		}
@@ -260,10 +301,17 @@ func (s *Store) Finish(ctx context.Context, o Owner, id, status string, summary,
 	})
 }
 func (s *Store) FinishInterrupted(ctx context.Context, o Owner, id string, detail any) error {
-	if _, e := s.Report(ctx, o, id); e != nil {
+	r, e := s.Report(ctx, o, id)
+	if e != nil {
 		return e
 	}
-	return s.Finish(ctx, o, id, "interrupted", map[string]any{"complete": false}, detail)
+	summary := map[string]any{}
+	_ = json.Unmarshal(r.Summary.Summary, &summary)
+	if summary == nil {
+		summary = map[string]any{}
+	}
+	summary["complete"] = false
+	return s.Finish(ctx, o, id, "interrupted", summary, detail)
 }
 
 // CancelQueued never changes a running or completed report. The caller removes
@@ -279,8 +327,15 @@ func (s *Store) CancelQueued(ctx context.Context, o Owner, id string) error {
 	if r.Status != "queued" {
 		return Fail(409, "本报告已开始执行，请停止正在运行的检测；未取消其他任务", "cancel")
 	}
+	summary := map[string]any{}
+	_ = json.Unmarshal(r.Summary.Summary, &summary)
+	if summary == nil {
+		summary = map[string]any{}
+	}
+	summary["complete"] = false
+	summaryJSON, _ := json.Marshal(summary)
 	return retryWrite(ctx, func() error {
-		res, err := s.db.ExecContext(ctx, `UPDATE hub_reports SET status='cancelled',updated_at_ms=?,summary_json='{"complete":false}',error_json='{"message":"已取消等待，本报告没有发送检测请求","step":"cancel","operationResult":"not_started"}' WHERE user_id=? AND workspace_id=? AND report_id=? AND status='queued'`, Now().UnixMilli(), o.UserID, o.WorkspaceID, id)
+		res, err := s.db.ExecContext(ctx, `UPDATE hub_reports SET status='cancelled',updated_at_ms=?,summary_json=?,error_json='{"message":"已取消等待，本轮没有发送检测请求；此前已保存的结果保留","step":"cancel","operationResult":"not_started"}' WHERE user_id=? AND workspace_id=? AND report_id=? AND status='queued'`, Now().UnixMilli(), string(summaryJSON), o.UserID, o.WorkspaceID, id)
 		if err != nil {
 			return err
 		}
@@ -325,6 +380,32 @@ func (s *Store) RecordAttempt(ctx context.Context, o Owner, id, itemID string) e
 		n, _ := res.RowsAffected()
 		if n != 1 {
 			return Fail(409, "报告已结束，停止新的模型请求", "attempt")
+		}
+		return nil
+	})
+}
+
+// SaveProgress mirrors the original per-probe persist without changing the
+// running report status or any completed item. Large DTOs stay in hub_items.
+func (s *Store) SaveProgress(ctx context.Context, o Owner, id string, summary any) error {
+	if err := o.Validate(); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(summary)
+	if err != nil {
+		return err
+	}
+	if len(raw) > 60<<10 {
+		return Fail(422, "报告摘要超过60KiB，已保存回答保留；请检查本项诊断长度后重试读取", "summary")
+	}
+	return retryWrite(ctx, func() error {
+		result, err := s.db.ExecContext(ctx, `UPDATE hub_reports SET summary_json=?,updated_at_ms=? WHERE user_id=? AND workspace_id=? AND report_id=? AND status='running'`, string(raw), Now().UnixMilli(), o.UserID, o.WorkspaceID, id)
+		if err != nil {
+			return err
+		}
+		n, _ := result.RowsAffected()
+		if n != 1 {
+			return Fail(409, "报告已结束，未覆盖已保存结果", "summary")
 		}
 		return nil
 	})

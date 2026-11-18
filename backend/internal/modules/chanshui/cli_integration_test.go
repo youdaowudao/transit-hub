@@ -46,7 +46,7 @@ func TestChanshuiActualCLIAllPresetsAndMemoryRelease(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 	conn := actualSlice(t)
-	runner := NewRunner(RunnerConfig{BinaryPath: binary, DataDir: dir, ProjectDir: root, Manager: "user", AllowPrivateTargets: true})
+	runner := NewRunner(RunnerConfig{DisableBankSync: true, BinaryPath: binary, DataDir: dir, ProjectDir: root, Manager: "user", AllowPrivateTargets: true})
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
@@ -231,7 +231,7 @@ func TestChanshuiActualCLIFullPresetResourceBudget(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 	conn := actualSlice(t)
-	runner := NewRunner(RunnerConfig{BinaryPath: filepath.Join(root, "chanshui/.artifacts/bin/transithub-chanshui"), DataDir: dir, ProjectDir: root, Manager: "user", AllowPrivateTargets: true})
+	runner := NewRunner(RunnerConfig{DisableBankSync: true, BinaryPath: filepath.Join(root, "chanshui/.artifacts/bin/transithub-chanshui"), DataDir: dir, ProjectDir: root, Manager: "user", AllowPrivateTargets: true})
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 		defer cancel()
@@ -372,7 +372,7 @@ func TestChanshuiActualCLICurrentRevisionProjection(t *testing.T) {
 	}
 	defer os.RemoveAll(dir)
 	conn := actualSlice(t)
-	runner := NewRunner(RunnerConfig{BinaryPath: filepath.Join(root, "chanshui/.artifacts/bin/transithub-chanshui"), DataDir: dir, ProjectDir: root, Manager: "user"})
+	runner := NewRunner(RunnerConfig{DisableBankSync: true, BinaryPath: filepath.Join(root, "chanshui/.artifacts/bin/transithub-chanshui"), DataDir: dir, ProjectDir: root, Manager: "user"})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	owner := Owner{UserID: "cas-resource", WorkspaceID: "cas-isolated"}

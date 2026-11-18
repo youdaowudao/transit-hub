@@ -83,7 +83,7 @@ func NewService(cfg config.Config, workspace WorkspaceResolver, targets TargetRe
 	binary, _ = filepath.Abs(binary)
 	data, _ = filepath.Abs(data)
 	web, _ = filepath.Abs(web)
-	return &Service{cfg: cfg, workspace: workspace, targets: targets, webDir: web, runner: NewRunner(RunnerConfig{binary, data, root, cfg.ChanshuiSystemdManager, cfg.ChanshuiTestAllowPrivateTargets})}
+	return &Service{cfg: cfg, workspace: workspace, targets: targets, webDir: web, runner: NewRunner(RunnerConfig{BinaryPath: binary, DataDir: data, ProjectDir: root, Manager: cfg.ChanshuiSystemdManager, AllowPrivateTargets: cfg.ChanshuiTestAllowPrivateTargets})}
 }
 func (s *Service) ensureInitialized(ctx context.Context) error {
 	if !s.cfg.ChanshuiEnabled {
@@ -182,6 +182,8 @@ func checkedCredential(c connection_health.AuditContext) (Credential, error) {
 }
 
 type StartInput struct {
+	SingleAsk           json.RawMessage `json:"singleAsk,omitempty"`
+	RetryID             string          `json:"-"`
 	ReportID            string          `json:"reportId"`
 	TargetID            string          `json:"targetId"`
 	GroupID             string          `json:"groupId"`

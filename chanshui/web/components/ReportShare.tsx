@@ -1,22 +1,25 @@
 "use client";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import Icon from "@/components/Icon";
 import Link from "next/link";
 import { reportPath } from "@/lib/report-view";
 import { useI18n } from "@/lib/i18n";
 export default function ReportShare({
   id,
-  expiresAt,
+  expiresAt, reportHref, actions, identityLabel,
 }: {
   id: string;
   expiresAt?: number;
+  reportHref?: string;
+  actions?: ReactNode;
+  identityLabel?: string;
 }) {
   const { t: tr, locale } = useI18n();
   const [message, setMessage] = useState("");
   const [manual, setManual] = useState("");
   async function copy(link: boolean) {
     const text = link
-      ? new URL(reportPath(id), window.location.origin).href
+      ? reportHref || new URL(reportPath(id), window.location.origin).href
       : id;
     try {
       await navigator.clipboard.writeText(text);
@@ -30,7 +33,7 @@ export default function ReportShare({
   return (
     <div className="report-share">
       <div className="report-identity">
-        <span>Job ID</span>
+        <span>{identityLabel || "Job ID"}</span>
         <code>{id}</code>
         {expiresAt && (
           <small className="muted">
@@ -59,10 +62,12 @@ export default function ReportShare({
           className="btn-secondary"
           aria-label={tr("打开独立报告")}
           title={tr("打开独立报告")}
-          href={reportPath(id)}
+          href={reportHref || reportPath(id)}
+          target={reportHref ? "_top" : undefined}
         >
           <Icon name="arrow" width="16" height="16" />
         </Link>
+        {actions}
       </div>
       {message && (
         <span className="muted" role="status">

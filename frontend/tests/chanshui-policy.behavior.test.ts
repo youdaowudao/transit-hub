@@ -45,6 +45,11 @@ describe('模型检测退出核查不提前完成', () => {
 })
 
 describe('检测父页只允许具体操作', () => {
+  it('补测固定原报告路径且停止携带轮次，不能附带新账号和模型', () => {
+    expect(chanshuiRequestSpec('retry', { reportId: 'a', retryId: 'b', expectedRetryId: 'c', itemIds: ['Q2'], targetId: 'ignored', model: 'ignored' })).toEqual({ path: '/reports/a/retry', method: 'POST', body: { retryId: 'b', expectedRetryId: 'c', itemIds: ['Q2'] } })
+    expect(chanshuiRequestSpec('cancel', { reportId: 'a', expectedRetryId: 'b' }).body).toEqual({ expectedRetryId: 'b' })
+  })
+
   it('预设删除使用版本条件且目标编号被编码，不能传任意URL', () => {
     expect(chanshuiRequestSpec('delete-question', { id: 'Q1', revision: 3 })).toEqual({ path: '/questions/Q1', method: 'DELETE', revision: 3 })
     expect(chanshuiRequestSpec('question', { id: '../settings' }).path).toBe('/questions/..%2Fsettings')

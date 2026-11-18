@@ -2,57 +2,66 @@ package engine
 
 import (
 	"fmt"
+	"github.com/kiss-kedaya/chanshui/internal/api"
 	"github.com/kiss-kedaya/chanshui/internal/fingerprint"
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
-	"github.com/kiss-kedaya/chanshui/internal/integrity"
+	"github.com/kiss-kedaya/chanshui/internal/iq"
+	"reflect"
 	"testing"
 )
 
 func points(n int) *int { return &n }
-func TestSelectedTotalReusesComposeAndHidesUnknownRatherThanZero(t *testing.T) {
-	iq, _ := questions.Preset("Q2")
+func TestSelectedTotalMatchesOriginalAPIIncludingPartialResults(t *testing.T) {
+	q, _ := questions.Preset("Q2")
 	tools, _ := questions.Preset("tools")
-	manual := questions.Clone(iq)
-	manual.ID = "custom:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	manual.Judge.Type = "manual"
-	manual.MaxScore = 0
-	numeric, _ := questions.Preset("fingerprint:numeric")
-	defs := []questions.Generated{{Definition: iq}, {Definition: tools}, {Definition: manual}, {Definition: numeric}}
-	results := map[string]itemResult{iq.ID: {Judgment: questions.Judgment{Status: "known", Max: 5, Earned: points(5)}}, tools.ID: {Judgment: questions.Judgment{Status: "known", Max: 1, Earned: points(0)}}, manual.ID: {Judgment: questions.Judgment{Status: "unreviewed"}}, numeric.ID: {Judgment: questions.Judgment{Status: "not_applicable"}}}
-	summary := summarize(defs, results)
-	total := summary["total"].(map[string]any)
-	want := integrity.Compose([]integrity.Part{{Key: "iq", Applicable: true, Known: true, Points: 100, MaxPoints: 100}, {Key: "tools", Applicable: true, Known: true, Points: 0, MaxPoints: 1}})
-	if total["score"] != want.Score || summary["iqScore"] != 100 {
-		t.Fatal("weights/score diverged", total, want)
-	}
-	results[tools.ID] = itemResult{Judgment: questions.Judgment{Status: "unknown", Max: 1}}
-	summary = summarize(defs, results)
-	total = summary["total"].(map[string]any)
-	if total["score"] != nil || summary["totalScore"] != nil || total["complete"] != false || summary["iqScore"] != 100 {
-		t.Fatal("unknown became zero or hid completed IQ", summary)
+	defs := []questions.Generated{{Definition: q}, {Definition: tools}}
+	results := map[string]itemResult{q.ID: {Judgment: questions.Judgment{Status: "known", Max: 5, Earned: points(5)}}, tools.ID: {Evidence: map[string]any{"pass": false, "status": "fail"}, Judgment: questions.Judgment{Status: "known", Max: 1, Earned: points(0)}}}
+	for _, failure := range []bool{false, true} {
+		tool := map[string]any{"pass": false, "status": "fail"}
+		if failure {
+			tool = map[string]any{"error": "isolated upstream failure"}
+			results[tools.ID] = itemResult{Error: "isolated upstream failure", Evidence: tool, Judgment: questions.Judgment{Status: "unknown"}}
+		}
+		original := api.AssembleVerdict(api.Verdict{Tools: tool}, []iq.Question{defs[0].IQ()}, map[string]api.QuestionResult{q.ID: {ID: q.ID, Title: q.Title, Max: 5, Earned: 5}}, "fixture", map[string]bool{"iq": true, "tools": true})
+		summary := summarize(defs, results)
+		if !reflect.DeepEqual(summary["total"], asMap(original.Total)) || summary["iqScore"] != float64(100) {
+			t.Fatalf("original partial scoring diverged: got %v original %v", summary, original.Total)
+		}
 	}
 }
-func TestManualKnowledgeBehaviorNeverCreateAutomaticFullScore(t *testing.T) {
+func TestManualOnlyNeverCreatesAutomaticApplicableParts(t *testing.T) {
 	q, _ := questions.Preset("Q2")
 	q.Judge.Type = "manual"
 	q.MaxScore = 0
 	summary := summarize([]questions.Generated{{Definition: q}}, map[string]itemResult{q.ID: {Judgment: questions.Judgment{Status: "unreviewed"}}})
-	total := summary["total"].(map[string]any)
-	if total["score"] != nil {
-		t.Fatal("manual-only report given score", total)
+	for _, p := range summary["parts"].([]any) {
+		if p.(map[string]any)["applicable"] == true {
+			t.Fatal("manual question acquired an automatic score", summary)
+		}
+	}
+	if summary["iqScore"] != nil {
+		t.Fatal("manual-only question received IQ score", summary)
 	}
 }
 func TestVisionKeepsOriginalRecognitionAndAnswerHalves(t *testing.T) {
 	q, _ := questions.Preset("vision")
 	defs := []questions.Generated{{Definition: q}}
-	summary := summarize(defs, map[string]itemResult{q.ID: {Judgment: questions.Judgment{Status: "known", Max: 20, Earned: points(0)}, Recognized: true}})
-	total := summary["total"].(map[string]any)
-	if total["score"] != 50 {
-		t.Fatal("vision recognition half changed", total)
-	}
-	summary = summarize(defs, map[string]itemResult{q.ID: {Judgment: questions.Judgment{Status: "unknown", Max: 20}}})
-	if summary["total"].(map[string]any)["score"] != nil {
-		t.Fatal("unfinished vision scored")
+	for _, failure := range []bool{false, true} {
+		question := defs[0].IQ()
+		answer := api.QuestionResult{ID: "vision", Max: 20, Answer: "0"}
+		result := itemResult{Recognized: true, Judgment: questions.Judgment{Status: "known", Max: 20, Earned: points(0)}}
+		if failure {
+			answer.Error = "请求未完成"
+			result.Error = answer.Error
+			result.Judgment.Status = "unknown"
+		}
+		evidence := api.VisionResult(question, answer, nil)
+		result.Evidence = evidence
+		original := api.AssembleVerdict(api.Verdict{Vision: evidence}, nil, nil, "fixture", map[string]bool{"vision": true})
+		got := summarize(defs, map[string]itemResult{q.ID: result})
+		if !reflect.DeepEqual(got["total"], asMap(original.Total)) {
+			t.Fatal("vision score differs from original", got, original.Total)
+		}
 	}
 }
 

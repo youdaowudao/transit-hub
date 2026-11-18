@@ -37,6 +37,15 @@ func setup(t *testing.T, selected []string, protocol string) (*store.Store, stor
 	}
 	t.Cleanup(func() { s.Close() })
 	o := store.Owner{UserID: "test-user", WorkspaceID: "test-workspace"}
+	settings, err := s.Settings(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Protocol = protocol
+	settings.Retries = 0
+	if _, err = s.SaveSettings(t.Context(), o, settings); err != nil {
+		t.Fatal(err)
+	}
 	id := strings.Repeat("a", 32)
 	c := Credential{BaseURL: "https://fixture.invalid", Key: "test-secret-do-not-persist", Protocol: protocol, AnthropicAuth: "bearer"}
 	_, e = s.CreateReport(context.Background(), o, store.CreateRequest{ReportID: id, TargetID: "1", Model: "fixture", SelectedQuestionIDs: selected, Target: store.Target{AccountID: "1", AccountName: "隔离测试账号", BaseURL: c.BaseURL, Protocol: protocol}})
@@ -45,7 +54,7 @@ func setup(t *testing.T, selected []string, protocol string) (*store.Store, stor
 	}
 	return s, o, id, c
 }
-func TestWrongAnswersNeverLeakStandardsOrAskForSelfGrade(t *testing.T) {
+func TestOriginalLowScoreUsesSelfGradeAndKeepsCredentialsPrivate(t *testing.T) {
 	s, o, id, c := setup(t, []string{"Q2"}, "chat")
 	var calls atomic.Int32
 	events := []string{}
@@ -53,15 +62,15 @@ func TestWrongAnswersNeverLeakStandardsOrAskForSelfGrade(t *testing.T) {
 		calls.Add(1)
 		b, _ := io.ReadAll(r.Body)
 		if strings.Contains(string(b), "标准答案") || strings.Contains(string(b), "给自己的上一轮回答打分") {
-			t.Fatal("self-grade request leaked")
+			return fixtureResponse(r, "0"), nil
 		}
 		return fixtureResponse(r, "最终答案: 走路去"), nil
 	})
-	e := RunOne(context.Background(), s, o, id, c, Config{Transport: fake, Notify: func(event string, _ map[string]any) { events = append(events, event) }})
+	e := RunOne(context.Background(), s, o, id, c, Config{DisableBankSync: true, Transport: fake, Notify: func(event string, _ map[string]any) { events = append(events, event) }})
 	if e != nil {
 		t.Fatal(e)
 	}
-	if calls.Load() != 1 {
+	if calls.Load() != 2 {
 		t.Fatalf("unexpected paid calls %d", calls.Load())
 	}
 	r, e := s.Report(context.Background(), o, id)
@@ -86,7 +95,7 @@ func TestWrongAnswersNeverLeakStandardsOrAskForSelfGrade(t *testing.T) {
 	if strings.Join(events, ",") != "accepted,item-saved,persisted" {
 		t.Fatal(events)
 	}
-	if e = RunOne(context.Background(), s, o, id, c, Config{Transport: fake}); e == nil || calls.Load() != 1 {
+	if e = RunOne(context.Background(), s, o, id, c, Config{DisableBankSync: true, Transport: fake}); e == nil || calls.Load() != 2 {
 		t.Fatal("same report executed twice")
 	}
 }
@@ -107,7 +116,7 @@ func TestAllExplicitProtocolsAndAnthropicBearerPreserved(t *testing.T) {
 				}
 				return fixtureResponse(r, "最终答案: 开车去"), nil
 			})
-			if e := RunOne(context.Background(), s, o, id, c, Config{Transport: fake}); e != nil {
+			if e := RunOne(context.Background(), s, o, id, c, Config{DisableBankSync: true, Transport: fake}); e != nil {
 				t.Fatal(e)
 			}
 		})
@@ -118,7 +127,7 @@ func TestOversizedResponseNeverGradesTruncatedAnswerAndRedactsErrors(t *testing.
 	fake := fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		return fixtureResponse(r, "最终答案: 开车去"+strings.Repeat("x", MaxResponseBytes+1)), nil
 	})
-	if e := RunOne(context.Background(), s, o, id, c, Config{Transport: fake}); e != nil {
+	if e := RunOne(context.Background(), s, o, id, c, Config{DisableBankSync: true, Transport: fake}); e != nil {
 		t.Fatal(e)
 	}
 	items, e := s.ListItems(context.Background(), o, id, store.Filters{})
@@ -172,7 +181,7 @@ func TestCancellationSavesTerminalAndDoesNotWaitForBrowser(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	fake := fixtureTransport(func(r *http.Request) (*http.Response, error) { cancel(); return nil, context.Canceled })
 	start := time.Now()
-	if e := RunOne(ctx, s, o, id, c, Config{Transport: fake}); e != nil {
+	if e := RunOne(ctx, s, o, id, c, Config{DisableBankSync: true, Transport: fake}); e != nil {
 		t.Fatal(e)
 	}
 	if time.Since(start) > time.Second {
@@ -213,7 +222,7 @@ func TestAddedQuestionIsExecutedAndOldSnapshotUnaffected(t *testing.T) {
 		}
 		return fixtureResponse(r, "最终答案: alpha"), nil
 	})
-	if e = RunOne(context.Background(), s, o, id, c, Config{Transport: fake}); e != nil {
+	if e = RunOne(context.Background(), s, o, id, c, Config{DisableBankSync: true, Transport: fake}); e != nil {
 		t.Fatal(e)
 	}
 	items, e := s.ListItems(context.Background(), o, id, store.Filters{})
@@ -250,6 +259,15 @@ func configuredReport(t *testing.T, defs []questions.Definition, model string) (
 	}
 	t.Cleanup(func() { s.Close() })
 	o := store.Owner{UserID: "configured-user", WorkspaceID: "configured-workspace"}
+	settings, err := s.Settings(t.Context(), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Protocol = "chat"
+	settings.Retries = 0
+	if _, err = s.SaveSettings(t.Context(), o, settings); err != nil {
+		t.Fatal(err)
+	}
 	ids := []string{}
 	for _, q := range defs {
 		q.Enabled = true
@@ -302,7 +320,7 @@ func TestConfiguredToolsTemplateAndOperandsActuallyReachToolRoundTrip(t *testing
 		token := body[at : at+len("tool-confirm-")+24]
 		return fixtureResponse(r, token), nil
 	})
-	if e := RunOne(context.Background(), s, o, id, c, Config{Transport: fake}); e != nil {
+	if e := RunOne(context.Background(), s, o, id, c, Config{DisableBankSync: true, Transport: fake}); e != nil {
 		t.Fatal(e)
 	}
 	if calls != 2 {
@@ -352,7 +370,7 @@ func TestConfiguredCachePrefixAndTurnTemplatesActuallyUsedAcrossSixTurns(t *test
 		}
 		return fixtureResponse(r, fmt.Sprintf("noted-%d", calls)), nil
 	})
-	if e := RunOne(context.Background(), s, o, id, c, Config{Transport: fake}); e != nil {
+	if e := RunOne(context.Background(), s, o, id, c, Config{DisableBankSync: true, Transport: fake}); e != nil {
 		t.Fatal(e)
 	}
 	if calls != 6 {
@@ -367,17 +385,17 @@ func TestConfiguredCachePrefixAndTurnTemplatesActuallyUsedAcrossSixTurns(t *test
 	r, _ := s.Report(context.Background(), o, id)
 	var summary map[string]any
 	json.Unmarshal(r.Summary.Summary, &summary)
-	if summary["totalScore"] != nil {
+	if summary["totalScore"] != float64(0) {
 		t.Fatal("unknown cache produced full total")
 	}
 }
-func TestDeepSeekNetworkUnknownRemainsApplicableAndBlocksTotal(t *testing.T) {
+func TestDeepSeekUnknownKeepsOriginalNetworkApplicability(t *testing.T) {
 	q, _ := questions.Preset("web")
 	s, o, id, c := configuredReport(t, []questions.Definition{q}, "deepseek-test")
 	fake := fixtureTransport(func(*http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("isolated search network unavailable")
 	})
-	if e := RunOne(context.Background(), s, o, id, c, Config{Transport: fake}); e != nil {
+	if e := RunOne(context.Background(), s, o, id, c, Config{DisableBankSync: true, Transport: fake}); e != nil {
 		t.Fatal(e)
 	}
 	items, _ := s.ListItems(context.Background(), o, id, store.Filters{})
@@ -390,7 +408,13 @@ func TestDeepSeekNetworkUnknownRemainsApplicableAndBlocksTotal(t *testing.T) {
 	var summary map[string]any
 	json.Unmarshal(r.Summary.Summary, &summary)
 	total := summary["total"].(map[string]any)
-	if total["score"] != nil {
+	if total["score"] != float64(0) {
 		t.Fatal("network error yielded full score", total)
+	}
+	for _, part := range total["parts"].([]any) {
+		p := part.(map[string]any)
+		if p["key"] == "web" && p["applicable"] != false {
+			t.Fatal("changed original unknown web applicability", p)
+		}
 	}
 }

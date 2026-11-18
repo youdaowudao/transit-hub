@@ -5159,7 +5159,19 @@ html[data-mode="dark"] .agent-onboard-tip {
   .hub-extra-nav .nav-home { position: static; width: auto; height: auto; min-height: 46px; padding: 12px 13px; gap: 12px; font-size: 14px; justify-content: flex-start; }
 }
 .hub-main { padding: 0 24px 32px; min-width: 0; }
-.hub-main .page-shell { max-width: 1240px; }
+.hub-main .page-shell { max-width: none; width: 100%; }
+/* The embedded report has the host's full content area. Keep the upstream
+   sections, increase legibility and let their columns use that actual width. */
+.hub-main .rc-head h3 { font-size: 18px; }
+.hub-main .question > summary { font-size: 15px; }
+.hub-main .question > summary b { font-size: 13px; }
+.hub-main .muted, .hub-main .mini-stats, .hub-main .knowledge-ladder { font-size: 14px; }
+.hub-main .probe { font-size: 15px; align-items: start; }
+.hub-main .probe-state, .hub-main .cache-table th, .hub-main .cache-table td { font-size: 13px; }
+.hub-main .fold > summary { font-size: 14px; }
+.hub-main pre { font-size: 14px; line-height: 1.65; }
+.hub-main .result-card { min-width: 0; }
+.hub-main .question > summary > span { min-width: 0; overflow-wrap: anywhere; }
 .hub-page-heading { padding: 18px 0 4px; }
 .hub-page-heading p { margin-bottom: 3px; }
 .hub-card { padding: 22px; margin: 16px 0; }
@@ -5227,3 +5239,9 @@ html[data-mode="dark"] .agent-onboard-tip {
   .hub-search { align-items: stretch; flex-direction: column; }
   .hub-main .connection-grid { grid-template-columns: 1fr; }
 }
+
+/* Preserve the original event row; only its saved answer expands on demand. */
+.hub-main .knowledge-ladder li > .knowledge-answer { grid-column: 1 / -1; min-width: 0; }
+.hub-main .knowledge-answer > summary { display: grid; grid-template-columns: 52px 78px minmax(0, 1fr); gap: 8px; align-items: baseline; cursor: pointer; }
+.hub-main .knowledge-answer > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.hub-main .knowledge-answer > pre { white-space: pre-wrap; overflow-wrap: anywhere; }

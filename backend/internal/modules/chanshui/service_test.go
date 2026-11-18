@@ -499,7 +499,7 @@ func TestReportDateFiltersUseSingaporeAndInclusiveEndDate(t *testing.T) {
 	}
 }
 func TestNoShellUnrestrictedRunnerFallback(t *testing.T) {
-	cfg := RunnerConfig{BinaryPath: "/outside/binary", DataDir: "/outside/data", ProjectDir: "/project", Manager: "user"}
+	cfg := RunnerConfig{DisableBankSync: true, BinaryPath: "/outside/binary", DataDir: "/outside/data", ProjectDir: "/project", Manager: "user"}
 	if err := NewRunner(cfg).Available(t.Context()); err == nil {
 		t.Fatal("invalid deployment path accepted")
 	}

@@ -133,6 +133,15 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, err)
 		return
 	}
+	if path == "reference-info" && r.Method == http.MethodGet {
+		data, e := s.queryJSON(r.Context(), "reference-info", owner, map[string]any{}, nil, false)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		reply(w, 200, data)
+		return
+	}
 	if path == "targets" && r.Method == http.MethodGet {
 		items, e := s.targets.ListAuditTargets(r.Context(), owner.UserID)
 		if e != nil {
@@ -237,8 +246,31 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(w, 202, result)
 		return
 	}
+	if len(parts) == 3 && parts[0] == "reports" && parts[2] == "retry" && r.Method == http.MethodPost {
+		var input RetryInput
+		if e := decode(r, &input); e != nil {
+			fail(w, e)
+			return
+		}
+		result, e := s.Retry(r.Context(), owner, parts[1], input)
+		if e != nil {
+			fail(w, e)
+			return
+		}
+		reply(w, 202, result)
+		return
+	}
 	if len(parts) == 3 && parts[0] == "reports" && parts[2] == "cancel" && r.Method == http.MethodPost {
-		result, e := s.Cancel(r.Context(), owner, parts[1])
+		var input struct {
+			ExpectedRetryID string `json:"expectedRetryId"`
+		}
+		if r.ContentLength != 0 {
+			if e := decode(r, &input); e != nil {
+				fail(w, e)
+				return
+			}
+		}
+		result, e := s.CancelRound(r.Context(), owner, parts[1], input.ExpectedRetryID)
 		if e != nil {
 			fail(w, e)
 			return

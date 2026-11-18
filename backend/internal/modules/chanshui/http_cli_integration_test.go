@@ -28,7 +28,7 @@ func TestChanshuiActualHTTPSettingsQuestionsAndImagePreview(t *testing.T) {
 		t.Fatal(err)
 	}
 	conn := actualSlice(t)
-	runner := NewRunner(RunnerConfig{BinaryPath: filepath.Join(root, "chanshui/.artifacts/bin/transithub-chanshui"), DataDir: t.TempDir(), ProjectDir: root, Manager: "user"})
+	runner := NewRunner(RunnerConfig{DisableBankSync: true, BinaryPath: filepath.Join(root, "chanshui/.artifacts/bin/transithub-chanshui"), DataDir: t.TempDir(), ProjectDir: root, Manager: "user"})
 	s := &Service{cfg: config.Config{ChanshuiEnabled: true}, workspace: fakeWorkspace{}, runner: runner, initialized: true}
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)

@@ -86,3 +86,59 @@ func TestCancelQueuedOperationIsStrictOwnerScopedAndDoesNotStartRun(t *testing.T
 		t.Fatal("cancel accepted arbitrary wire fields")
 	}
 }
+
+func TestRetryUpdatesOriginalReportAndLeavesSuccessfulAnswersUntouched(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := t.Context()
+	owner := store.Owner{UserID: "retry", WorkspaceID: "isolated"}
+	id := strings.Repeat("a", 32)
+	if _, err = s.CreateReport(ctx, owner, store.CreateRequest{ReportID: id, TargetID: "fixture", Model: "fixture", SelectedQuestionIDs: []string{"Q1", "Q2"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.BeginRun(ctx, owner, id); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []string{"Q1", "Q2"} {
+		if err = s.BeginItem(ctx, owner, id, item); err != nil {
+			t.Fatal(err)
+		}
+		if err = s.RecordAttempt(ctx, owner, id, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	success := map[string]any{"answer": "saved answer", "judgment": map[string]any{"status": "known", "earned": 6, "max": 6}}
+	if err = s.SaveItem(ctx, owner, id, "Q1", "done", success, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SaveItem(ctx, owner, id, "Q2", "error", map[string]any{"error": "fixture failure", "judgment": map[string]any{"status": "unknown"}}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Finish(ctx, owner, id, "partial", map[string]any{"complete": false}, nil); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := s.ListItems(ctx, owner, id, store.Filters{Limit: 5})
+	args, _ := json.Marshal(map[string]any{"reportId": id, "retryId": strings.Repeat("b", 32), "expectedRetryId": "", "itemIds": []string{"Q2"}})
+	value, _, err := query(ctx, s, wire.Envelope{Operation: "retry-report", Owner: owner, Args: args}, wire.Continue{})
+	if err != nil {
+		t.Fatalf("failed item cannot be retried in its report: %v", err)
+	}
+	raw, _ := json.Marshal(value)
+	if !strings.Contains(string(raw), `"status":"queued"`) {
+		t.Fatal(string(raw))
+	}
+	after, _ := s.ListItems(ctx, owner, id, store.Filters{Limit: 5})
+	if len(after.Items) != 2 || string(before.Items[0].Result) != string(after.Items[0].Result) || after.Items[0].Attempts != 1 || after.Items[1].Attempts != 1 || after.Items[1].Status != "queued" {
+		t.Fatal("successful result or cumulative attempts changed", after)
+	}
+	page, _ := s.ListReports(ctx, owner, store.Filters{})
+	if len(page.Items) != 1 || page.Items[0].ReportID != id {
+		t.Fatal("retry created another report")
+	}
+	if _, _, err = query(ctx, s, wire.Envelope{Operation: "retry-report", Owner: owner, Args: args}, wire.Continue{}); err != nil {
+		t.Fatal("same retry must only confirm acceptance", err)
+	}
+}

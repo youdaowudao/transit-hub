@@ -22,3 +22,26 @@ export function restorationItems(count = 12): HubItem[] {
     prompt: `实际题面${i + 1}`, expected: '42', result: { answer: `已保存回答${i + 1}`, judgment: { status: 'known', earned: i === 0 ? 0 : 6, max: 6 } },
   }))
 }
+
+// Same observations the original report sections consume, including inconclusive
+// measurements: an unknown score must not erase the actual sample records.
+export function detailedRestorationItems(): HubItem[] {
+  const make = (id: string, kind: HubItem['definition']['kind'], evidence: unknown, status = 'known'): HubItem => ({
+    itemId: id, sectionId: kind, status: 'done', prompt: '已保存题目', expected: '42',
+    definition: { id, kind, title: id, maxScore: 10, enabled: true, order: 0, template: '原题', parameters: {}, judge: { type: 'legacy' } },
+    result: { judgment: { status }, evidence },
+  })
+  const samples = Array.from({ length: 6 }, (_, i) => ({ index: i + 1, read: 4096 + i, write: 1800 + i, input: 160 + i, output: 8, total: 6060 + i, hit_rate: 96.57, attempts: 1, read_reported: true, write_reported: true, input_reported: true, output_reported: true }))
+  return [
+    make('数字指纹', 'fingerprint_numeric', { compatible: true, attribution: { family: 'gpt', familyName: 'GPT', familyProb: 1, topModel: 'gpt-6.1-sol', topProb: 0.97, lowConfidence: false, results: [{ modelId: 'gpt-6.1-sol', displayName: 'GPT 原版名称', prob: 0.97, jsSimilarity: 0.8 }] }, usedOutputs: 3, sampleMin: 3, sampleLimit: 10, samples: Array.from({ length: 3 }, () => ({ expectedCount: 300, parsedCount: 300, answer: '1,2,3', ms: 12 })) }),
+    make('注入测量', 'injection', { reliable: false, score: null, max_score: 10, inj: 12, slope: 0.5, note: '采样不足，保留已取得的观测', points: [{ n: 100, input: 50, total: 52 }], cache_header: 'cached observation', probe: { sse_ok: true, sse_frames: 4 } }, 'unknown'),
+    make('缓存验证', 'cache', { status: 'unknown', pass: null, reason: '缺少可靠衔接，仍保留六轮用量', samples, transitions: [{ from: 5, to: 6, aligned: false }], third_read_ratio: null, third_read_baseline: 6230 }, 'unknown'),
+    make('工具检测', 'tools', { status: 'unsupported', pass: null, protocol: 'chat', reason: '当前接口没有提供结构化证据', evidence: { observed: 'tool-observation-kept' } }, 'not_applicable'),
+    make('事件1', 'knowledge', { kind: 'know', reason: '与参考答案一致' }, 'reference'),
+    make('事件2', 'knowledge', { kind: 'unknown', reason: '明确回答不知道' }, 'reference'),
+    make('事件3', 'knowledge', {}, 'not_asked'),
+  ].map(item => {
+    if (item.definition.kind === 'knowledge') { item.definition.parameters = { date: item.itemId === '事件1' ? '2026-01-01' : '2026-02-22', event: item.itemId + '实际事件' }; item.result!.answer = item.itemId + '回答' }
+    return item
+  })
+}

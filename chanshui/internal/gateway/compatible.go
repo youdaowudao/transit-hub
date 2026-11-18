@@ -119,6 +119,35 @@ func (c *Client) callCompatibleOnce(ctx context.Context, q CallRequest) (Metrics
 		}
 		if json.Unmarshal(errBody, &apiErr) == nil && apiErr.Error.Message != "" {
 			m.Err = fmt.Sprintf("HTTP %d %s %s", resp.StatusCode, apiErr.Error.Type, Redact(apiErr.Error.Message))
+		} else if c.PreserveErrorReason {
+			var detail struct {
+				Message string          `json:"message"`
+				Detail  string          `json:"detail"`
+				Error   json.RawMessage `json:"error"`
+			}
+			message := ""
+			if json.Unmarshal(errBody, &detail) == nil {
+				parts := []string{}
+				for _, v := range []string{detail.Message, detail.Detail} {
+					if strings.TrimSpace(v) != "" {
+						parts = append(parts, v)
+					}
+				}
+				var stringError string
+				if json.Unmarshal(detail.Error, &stringError) == nil && strings.TrimSpace(stringError) != "" {
+					parts = append(parts, stringError)
+				}
+				message = strings.Join(parts, "；")
+			} else if !strings.Contains(strings.ToLower(string(errBody)), "<html") && !strings.Contains(strings.ToLower(string(errBody)), "<!doctype") {
+				message = strings.TrimSpace(string(errBody))
+			}
+			if message == "" {
+				message = "上游没有提供可读取的具体错误原因，请检查上游请求日志后补测"
+			}
+			if c.Key != "" {
+				message = strings.ReplaceAll(message, c.Key, "[密钥已隐藏]")
+			}
+			m.Err = fmt.Sprintf("HTTP %d：%s", resp.StatusCode, trunc(Redact(message), 1200))
 		} else {
 			m.Err = fmt.Sprintf("HTTP %d", resp.StatusCode)
 		}

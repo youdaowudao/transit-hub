@@ -19,6 +19,7 @@ import (
 type RunnerConfig struct {
 	BinaryPath, DataDir, ProjectDir, Manager string
 	AllowPrivateTargets                      bool
+	DisableBankSync                          bool
 }
 
 // The one existing admission slot also owns an unconfirmed helper. Keeping the
@@ -317,7 +318,7 @@ func (r *Runner) launch(ctx context.Context, role string, env Envelope, limit ui
 		}
 	}()
 	env.V = 1
-	env.Deployment = Deployment{r.cfg.AllowPrivateTargets}
+	env.Deployment = Deployment{AllowPrivateTargets: r.cfg.AllowPrivateTargets, DisableBankSync: r.cfg.DisableBankSync}
 	encoded, err := json.Marshal(env)
 	if err != nil || len(encoded) > 128*1024 {
 		return p.failLaunch(problem(422, "input", "检测参数超过128KiB或无法编码，请减少选择后重试"))
@@ -465,7 +466,7 @@ func (r *Runner) query(ctx context.Context, env Envelope, cred *Credential, inte
 		return failQuery(problem(503, "query", "读取检测数据失败；请检查磁盘权限、可用空间及检测运行诊断后重试"))
 	}
 	var header wireHeader
-	if json.Unmarshal(line, &header) != nil || header.V != 1 || header.Length < 0 || header.Length > 2*1024*1024 {
+	if json.Unmarshal(line, &header) != nil || header.V != 1 || header.Length < 0 || header.Length > 16*1024*1024 {
 		return failQuery(problem(503, "query", "检测程序返回的数据格式或大小不符合要求，请重新执行整站升级，并核对检测程序与调度站版本一致后重试"))
 	}
 	if !header.OK {

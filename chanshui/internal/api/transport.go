@@ -132,9 +132,7 @@ func (s *Server) models(w http.ResponseWriter, r *http.Request) {
 func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 	var q struct {
 		Request
-		Prompt   string                  `json:"prompt"`
-		Thinking *gateway.ThinkingConfig `json:"thinking"`
-		Effort   string                  `json:"effort,omitempty"`
+		SingleAskInput
 	}
 	if !s.readJSON(w, r, &q, true, true) {
 		return
@@ -143,42 +141,16 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 		reply(w, 400, map[string]string{"error": e.Error()})
 		return
 	}
-	if q.Effort != "" && q.Effort != "low" && q.Effort != "medium" && q.Effort != "high" && q.Effort != "max" {
-		reply(w, 400, map[string]string{"error": "effort 档位无效"})
+	if e := ValidateSingleAsk(q.Model, &q.SingleAskInput); e != nil {
+		reply(w, 400, map[string]string{"error": e.Error()})
 		return
-	}
-	if strings.TrimSpace(q.Prompt) == "" {
-		reply(w, 400, map[string]string{"error": "请填写问题"})
-		return
-	}
-	if !gateway.IsClaude(q.Model) {
-		q.Thinking = nil
-	}
-	if q.Thinking != nil {
-		if q.Thinking.Type != "adaptive" && q.Thinking.Type != "enabled" && q.Thinking.Type != "disabled" {
-			reply(w, 400, map[string]string{"error": "thinking 类型无效"})
-			return
-		}
-		// updates 需要 anthropic-beta: thinking-display-updates-2026-08-18，网关会自动补上。
-		if q.Thinking.Display != "" && q.Thinking.Display != "summarized" && q.Thinking.Display != "omitted" && q.Thinking.Display != "highlights" && q.Thinking.Display != "updates" {
-			reply(w, 400, map[string]string{"error": "display 模式无效"})
-			return
-		}
-		if q.Thinking.Type == "enabled" && (q.Thinking.BudgetTokens < 1024 || q.Thinking.BudgetTokens > 8192) {
-			reply(w, 400, map[string]string{"error": "预算应在 1024～8192 token"})
-			return
-		}
 	}
 	g, e := s.client(q.Request)
 	if e != nil {
 		reply(w, 400, map[string]string{"error": e.Error()})
 		return
 	}
-	max := 4096
-	if q.Thinking != nil && q.Thinking.BudgetTokens >= max {
-		max = q.Thinking.BudgetTokens + 2048
-	}
-	m, e := g.CallMessages(r.Context(), gateway.CallRequest{Model: q.Model, Prompt: q.Prompt, Thinking: q.Thinking, MaxTokens: max, Stream: true, TimeoutSeconds: q.Timeout, Effort: q.Effort})
+	m, e := SingleAsk(r.Context(), g, q.Request, q.SingleAskInput)
 	if e != nil {
 		reply(w, 502, map[string]string{"error": redact(e.Error(), q.Key)})
 		return

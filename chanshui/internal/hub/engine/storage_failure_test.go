@@ -47,7 +47,7 @@ func TestStorageFailureNeverClaimsPersistedOrRepeatsModel(t *testing.T) {
 				calls++
 				return fixtureResponse(r, "最终答案: 开车去"), nil
 			})
-			err = RunOne(ctx, s, o, id, c, Config{Transport: fake, Notify: func(event string, _ map[string]any) { events = append(events, event) }})
+			err = RunOne(ctx, s, o, id, c, Config{DisableBankSync: true, Transport: fake, Notify: func(event string, _ map[string]any) { events = append(events, event) }})
 			if err == nil || !strings.Contains(err.Error(), "storage write unavailable") || calls != 1 || strings.Contains(strings.Join(events, ","), "persisted") {
 				t.Fatalf("unconfirmed save or paid retry: err=%v calls=%d events=%v", err, calls, events)
 			}
@@ -72,7 +72,7 @@ func TestStorageFailureNeverClaimsPersistedOrRepeatsModel(t *testing.T) {
 			if err != nil || r.Status != "interrupted" {
 				t.Fatal(r, err)
 			}
-			if err = RunOne(ctx, s, o, id, c, Config{Transport: fake}); err == nil || calls != 1 {
+			if err = RunOne(ctx, s, o, id, c, Config{DisableBankSync: true, Transport: fake}); err == nil || calls != 1 {
 				t.Fatalf("recovery replayed paid request: err=%v calls=%d", err, calls)
 			}
 		})

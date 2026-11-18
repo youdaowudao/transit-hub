@@ -20,7 +20,7 @@ func eventDefinitions(dates []string) []questions.Definition {
 	}
 	return defs
 }
-func TestDateDrivenKnowledgeRangesFailureFutureAndContradiction(t *testing.T) {
+func TestExplicitCustomKnowledgeUsesSelectedItemsWithoutInventingOriginalBoundaries(t *testing.T) {
 	base := []string{"2020-01-01", "2021-01-01", "2022-01-01", "2023-01-01", "2100-01-01"}
 	cases := []struct {
 		name                 string
@@ -73,7 +73,7 @@ func TestDateDrivenKnowledgeRangesFailureFutureAndContradiction(t *testing.T) {
 				}
 				return fixtureResponse(r, "最终答案: "+tc.answer(*chosen)), nil
 			})
-			if e := RunOne(context.Background(), s, o, id, c, Config{Transport: fake}); e != nil {
+			if e := RunOne(context.Background(), s, o, id, c, Config{DisableBankSync: true, Transport: fake}); e != nil {
 				t.Fatal(e)
 			}
 			r, e := s.Report(context.Background(), o, id)
@@ -83,24 +83,35 @@ func TestDateDrivenKnowledgeRangesFailureFutureAndContradiction(t *testing.T) {
 			var summary map[string]any
 			json.Unmarshal(r.Summary.Summary, &summary)
 			k := summary["knowledge"].(map[string]any)
-			if k["lower"] != tc.lower || k["upper"] != tc.upper || k["status"] != tc.status {
-				t.Fatalf("unexpected range %+v", k)
+			eligible := 0
+			for _, q := range defs {
+				if questions.Text(q.Parameters, "date") <= "2099-01-01" {
+					eligible++
+				}
 			}
-			if calls > 10 {
-				t.Fatal("question budget exceeded", calls)
+			if calls != eligible {
+				t.Fatalf("selected custom items were skipped or repeated: got %d want %d", calls, eligible)
 			}
-			if (tc.failure || tc.name == "unparseable-stops-boundary") && calls != 1 {
-				t.Fatal("failed/invalid answer repeated", calls)
+			if k["lower"] != nil || k["upper"] != nil {
+				t.Fatal("custom collection fabricated original boundaries", k)
 			}
-			if tc.name == "future-only-no-call" && calls != 0 {
-				t.Fatal("future call", calls)
+			if eligible == 0 {
+				if k["status"] != "not_applicable" {
+					t.Fatal(k)
+				}
+			} else {
+				if k["status"] != "custom" || len(k["observations"].([]any)) != eligible {
+					t.Fatal("custom observations missing", k)
+				}
 			}
 			items, e := s.ListItems(context.Background(), o, id, store.Filters{Limit: 5})
 			if e != nil || len(items.Items) != len(defs) {
 				t.Fatal("answer list lost configured events", e, len(items.Items))
 			}
-			if summary["totalScore"] != nil {
-				t.Fatal("knowledge was added to total score")
+			for _, part := range summary["parts"].([]any) {
+				if part.(map[string]any)["applicable"] == true {
+					t.Fatal("knowledge was added to total score")
+				}
 			}
 		})
 	}

@@ -15,11 +15,12 @@ import (
 	"time"
 
 	"github.com/kiss-kedaya/chanshui/internal/gateway"
+	"github.com/kiss-kedaya/chanshui/internal/hub/store"
 )
 
-const MaxResponseBytes = 1 << 20
+const MaxResponseBytes = 8 << 20
 
-var ErrResponseTooLarge = errors.New("上游响应超过1MiB，本题未完成；已停止读取，不使用截断答案判分")
+var ErrResponseTooLarge = errors.New("上游响应超过原版8MiB上限，本题未完成；已停止读取，不使用截断答案判分")
 
 type Credential struct {
 	BaseURL       string `json:"baseURL"`
@@ -28,6 +29,7 @@ type Credential struct {
 	AnthropicAuth string `json:"anthropicAuth"`
 }
 type Deployment struct {
+	DisableBankSync     bool `json:"disableBankSync,omitempty"`
 	AllowPrivateTargets bool `json:"allowPrivateTargets"`
 }
 type Transport struct {
@@ -87,7 +89,7 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		release()
 		return nil, err
 	}
-	if t.Attempts.Load() >= int64(t.MaxAttempts) {
+	if t.MaxAttempts > 0 && t.Attempts.Load() >= int64(t.MaxAttempts) {
 		t.attemptMu.Unlock()
 		release()
 		return nil, fmt.Errorf("已达到本次%d次上游尝试上限，未再发送请求", t.MaxAttempts)
@@ -167,19 +169,26 @@ func validateCredential(c Credential) error {
 	return nil
 }
 func client(c Credential, t *Transport, retries int) gateway.Client {
-	return gateway.Client{BaseURL: c.BaseURL, Key: c.Key, Mode: c.Protocol, RetryLimit: &retries, AnthropicAuth: c.AnthropicAuth, DiscardSSEFrames: true, PreserveErrorReason: true, HTTP: &http.Client{Transport: t, CheckRedirect: func(*http.Request, []*http.Request) error {
+	return gateway.Client{BaseURL: c.BaseURL, Key: c.Key, Mode: c.Protocol, DefaultEffort: "medium", RetryLimit: &retries, AnthropicAuth: c.AnthropicAuth, DiscardSSEFrames: false, PreserveErrorReason: true, HTTP: &http.Client{Transport: t, CheckRedirect: func(*http.Request, []*http.Request) error {
 		return fmt.Errorf("上游重定向已阻止，请核对账号API地址")
 	}}}
 }
-func Models(ctx context.Context, c Credential, deployment Deployment, override http.RoundTripper) ([]string, error) {
+func Models(ctx context.Context, c Credential, deployment Deployment, override http.RoundTripper, options ...store.Settings) ([]string, error) {
 	if e := validateCredential(c); e != nil {
 		return nil, e
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	t, tr := NewTransport(1, 1, deployment.AllowPrivateTargets, override)
+	t, tr := NewTransport(1, 0, deployment.AllowPrivateTargets, override)
 	defer tr.CloseIdleConnections()
-	g := client(c, t, 0)
+	settings := store.DefaultSettings()
+	if len(options) > 0 {
+		settings = options[0]
+	}
+	g := client(c, t, settings.Retries)
+	if settings.Protocol != "" {
+		g.Mode = settings.Protocol
+	}
 	ids, e := g.ListModels(ctx)
 	if e != nil {
 		return nil, fmt.Errorf("读取模型列表未完成：%s；请核对账号API地址和上游提示后重新读取", strings.ReplaceAll(e.Error(), c.Key, "[密钥已隐藏]"))

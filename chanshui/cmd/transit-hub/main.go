@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kiss-kedaya/chanshui/internal/api"
 	"github.com/kiss-kedaya/chanshui/internal/hub/engine"
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
 	"github.com/kiss-kedaya/chanshui/internal/hub/store"
@@ -126,8 +127,19 @@ func query(ctx context.Context, s *store.Store, env wire.Envelope, c wire.Contin
 		if c.Credential == nil {
 			return nil, "", store.Fail(422, "未提供账号凭据，未读取模型列表", "models")
 		}
-		ids, e := engine.Models(ctx, *c.Credential, env.Deployment, nil)
+		settings, e := s.Settings(ctx, o)
+		if e != nil {
+			return nil, "", e
+		}
+		ids, e := engine.Models(ctx, *c.Credential, env.Deployment, nil, settings)
 		return map[string]any{"models": ids}, "", e
+	case "reference-info":
+		runner, e := api.NewProbeRunner(ctx, s.RuntimeDB(), false)
+		if e != nil {
+			return nil, "", e
+		}
+		defer runner.Close()
+		return runner.BankStats(), "", nil
 	case "read-settings":
 		v, e := s.Settings(ctx, o)
 		return v, "", e
@@ -194,6 +206,13 @@ func query(ctx context.Context, s *store.Store, env wire.Envelope, c wire.Contin
 			return nil, "", store.Fail(422, e.Error(), "preview")
 		}
 		return v.Preview(), "", nil
+	case "retry-report":
+		var a store.RetryRequest
+		if e := decode(env.Args, &a); e != nil {
+			return nil, "", e
+		}
+		v, e := s.RetryReport(ctx, o, a)
+		return store.ReportView(v), "", e
 	case "create-report":
 		var a store.CreateRequest
 		if e := decode(env.Args, &a); e != nil {

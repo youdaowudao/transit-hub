@@ -246,15 +246,35 @@ func (s *Store) Report(ctx context.Context, o Owner, id string) (Report, error) 
 	}
 	out.Request = json.RawMessage(requestRaw)
 	var raw string
-	if e = s.db.QueryRowContext(ctx, `SELECT json_extract(snapshot_json,'$.settings') FROM hub_reports WHERE user_id=? AND workspace_id=? AND report_id=?`, o.UserID, o.WorkspaceID, id).Scan(&raw); e != nil {
+	if e = s.db.QueryRowContext(ctx, `SELECT snapshot_json FROM hub_reports WHERE user_id=? AND workspace_id=? AND report_id=?`, o.UserID, o.WorkspaceID, id).Scan(&raw); e != nil {
 		return out, e
 	}
-	if e = json.Unmarshal([]byte(raw), &out.Settings); e != nil {
+	var snapshot Snapshot
+	if e = json.Unmarshal([]byte(raw), &snapshot); e != nil {
 		return out, e
 	}
+	out.Settings = snapshot.Settings
+	out.Retry = snapshot.Retry
 	out.MemoryLimitMiB = out.Settings.MemoryLimitMiB
 	out.TotalTimeoutSeconds = out.Settings.TotalTimeoutSeconds
-	if e = s.db.QueryRowContext(ctx, `SELECT COALESCE(min(NULLIF(started_at_ms,0)),0) FROM hub_items WHERE report_id=?`, id).Scan(&out.StartedAtMs); e != nil {
+	var attempts int
+	if e = s.db.QueryRowContext(ctx, `SELECT COALESCE(sum(attempts),0) FROM hub_items WHERE report_id=?`, id).Scan(&attempts); e != nil {
+		return out, e
+	}
+	summary := map[string]any{}
+	_ = json.Unmarshal(out.Summary.Summary, &summary)
+	if summary == nil {
+		summary = map[string]any{}
+	}
+	summary["attempts"] = attempts
+	out.Summary.Summary, _ = json.Marshal(summary)
+	if snapshot.Retry != nil {
+		ids, _ := json.Marshal(snapshot.Retry.ItemIDs)
+		e = s.db.QueryRowContext(ctx, `SELECT COALESCE(min(NULLIF(started_at_ms,0)),0) FROM hub_items WHERE report_id=? AND item_id IN(SELECT value FROM json_each(?))`, id, string(ids)).Scan(&out.StartedAtMs)
+	} else {
+		e = s.db.QueryRowContext(ctx, `SELECT COALESCE(min(NULLIF(started_at_ms,0)),0) FROM hub_items WHERE report_id=?`, id).Scan(&out.StartedAtMs)
+	}
+	if e != nil {
 		return out, e
 	}
 	rows, e := s.db.QueryContext(ctx, `SELECT status,count(*) FROM hub_items WHERE report_id=? GROUP BY status`, id)
@@ -310,7 +330,7 @@ func (s *Store) ListItems(ctx context.Context, o Owner, id string, f Filters) (P
 		if e = rows.Scan(&v.ItemID, &v.SectionID, &order, &v.Status, &v.Attempts, &v.StartedAtMs, &v.CompletedAtMs, &result, &raw, &v.ImageAvailable); e != nil {
 			return out, e
 		}
-		if len(out.Items) == limit || bytes+len(result)+len(raw) > 2<<20 {
+		if len(out.Items) == limit || (len(out.Items) > 0 && bytes+len(result)+len(raw) > 2<<20) {
 			out.NextCursor = encodeCursor(lastOrder, lastID)
 			break
 		}

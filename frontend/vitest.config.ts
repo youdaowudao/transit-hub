@@ -5,7 +5,7 @@ import { defineConfig } from 'vitest/config'
 const isCI = process.env.CI === 'true'
 // Exercise the existing React report components alongside the Vue host.
 const chanshuiAliases = Object.fromEntries([
-  'lib/i18n', 'lib/i18n-rows', 'lib/report-view',
+  'lib/i18n', 'lib/i18n-rows', 'lib/report-view', 'lib/model-picker',
   'components/AnimatedNumber', 'components/ResultSkeleton', 'components/ErrorFold',
   'components/Hint', 'components/Icon', 'components/ProbeEvidence', 'components/ElapsedTime',
 ].map(name => [`@/${name}`, path.resolve(__dirname, '../chanshui/web', name)]))

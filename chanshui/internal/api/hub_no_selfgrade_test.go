@@ -16,9 +16,8 @@ type hubGradeTransport func(*http.Request) (*http.Response, error)
 
 func (f hubGradeTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// The upstream lies when asked to grade itself. A wrong answer must stay wrong,
-// and neither its canonical answer nor a grading request may reach that upstream.
-func TestHubWrongAnswerNeverAsksTestedModelToGradeItself(t *testing.T) {
+// Preserve the original low-score self-grade, including its score and tag.
+func TestHubOriginalLowScoreCallsSelfGrade(t *testing.T) {
 	calls, leaked := 0, false
 	g := gateway.Client{Mode: "anthropic", BaseURL: "https://fixture.invalid", NoRetry: true,
 		HTTP: &http.Client{Transport: hubGradeTransport(func(r *http.Request) (*http.Response, error) {
@@ -43,7 +42,7 @@ func TestHubWrongAnswerNeverAsksTestedModelToGradeItself(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 || leaked || result.Earned != 0 {
-		t.Fatalf("wrong answer must remain zero without self-grading: calls=%d leaked=%v earned=%d", calls, leaked, result.Earned)
+	if calls != 2 || !leaked || result.Earned != 5 || len(result.Tags) != 1 || result.Tags[0] != "自评" {
+		t.Fatalf("original low-score self-grade changed: calls=%d leaked=%v earned=%d", calls, leaked, result.Earned)
 	}
 }

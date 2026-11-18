@@ -498,7 +498,7 @@ func TestQueueMetadataDoesNotExposeOtherOwnersAndForeignStopCannotCancel(t *test
 }
 
 func TestRunnerAcceptsLongExecutionLimitAndRejectsOverflowBeforeLaunch(t *testing.T) {
-	r := NewRunner(RunnerConfig{BinaryPath: filepath.Join(t.TempDir(), "not-installed"), DataDir: t.TempDir()})
+	r := NewRunner(RunnerConfig{DisableBankSync: true, BinaryPath: filepath.Join(t.TempDir(), "not-installed"), DataDir: t.TempDir()})
 	for _, seconds := range []int{3600, 7200, maxTaskSeconds} {
 		_, err := r.Start(t.Context(), Envelope{}, Credential{}, 128, seconds)
 		if err == nil || asProblem(err).Step == "settings" {
@@ -594,7 +594,7 @@ func TestSystemdLongDurationKeepsCleanupAllowanceAndRejectsUnsafeValues(t *testi
 		t.Fatal(err)
 	}
 	defer dev.Close()
-	if err = m.start(t.Context(), "duration-test.service", "run", RunnerConfig{BinaryPath: "/project/probe", ProjectDir: "/project", DataDir: "/project/data", Manager: "user"}, 128<<20, maxTaskSeconds, dev, dev, dev); err != nil {
+	if err = m.start(t.Context(), "duration-test.service", "run", RunnerConfig{DisableBankSync: true, BinaryPath: "/project/probe", ProjectDir: "/project", DataDir: "/project/data", Manager: "user"}, 128<<20, maxTaskSeconds, dev, dev, dev); err != nil {
 		t.Fatal(err)
 	}
 	calls := callsNamed(f, "StartTransientUnit")

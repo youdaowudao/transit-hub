@@ -33,6 +33,7 @@ type workspaceTargetReader interface {
 }
 
 func copyStartInput(input StartInput) StartInput {
+	input.SingleAsk = append(json.RawMessage(nil), input.SingleAsk...)
 	input.SelectedSectionIDs = append([]string(nil), input.SelectedSectionIDs...)
 	input.SelectedQuestionIDs = append([]string(nil), input.SelectedQuestionIDs...)
 	return input
@@ -141,7 +142,7 @@ func (s *Service) Start(ctx context.Context, owner Owner, input StartInput) (any
 		return nil, err
 	}
 	created, err := s.queryJSON(ctx, "create-report", owner, map[string]any{
-		"reportId": input.ReportID, "targetId": input.TargetID, "groupId": input.GroupID, "model": input.Model, "selectedSectionIds": input.SelectedSectionIDs, "selectedQuestionIds": input.SelectedQuestionIDs, "expectedContext": input.ExpectedContext, "request": input,
+		"reportId": input.ReportID, "targetId": input.TargetID, "groupId": input.GroupID, "model": input.Model, "selectedSectionIds": input.SelectedSectionIDs, "selectedQuestionIds": input.SelectedQuestionIDs, "singleAsk": input.SingleAsk, "expectedContext": input.ExpectedContext, "request": input,
 		"target": map[string]any{"accountId": audit.AccountID, "accountName": audit.AccountName, "groupName": audit.GroupName, "baseURL": audit.BaseURL, "protocol": audit.Protocol},
 	}, nil, false)
 	if err != nil {
@@ -259,10 +260,10 @@ func (s *Service) startReserved(active *activeTask) (any, error) {
 	if cancelled || ctx.Err() != nil || err != nil {
 		message := "准备检测未完成，尚未发送模型请求，请查看账号和工作区后手动新建"
 		if err != nil {
-			message = "排队报告开始前核查失败：" + err.Error() + "；本报告未发送检测请求，请处理后手动新建"
+			message = "排队报告开始前核查失败：" + err.Error() + "；本轮未发送检测请求，请处理后手动新建"
 		}
 		if cancelled {
-			message = "已取消准备，本报告没有发送检测请求"
+			message = "已取消准备，本轮没有发送检测请求"
 		}
 		s.mu.Lock()
 		active.Preparing = false
@@ -413,6 +414,9 @@ func (s *Service) cancelWaitingLocked(ctx context.Context, owner Owner, id strin
 }
 
 func (s *Service) Cancel(ctx context.Context, owner Owner, id string) (any, error) {
+	return s.CancelRound(ctx, owner, id, "")
+}
+func (s *Service) CancelRound(ctx context.Context, owner Owner, id, expectedRetryID string) (any, error) {
 	if err := s.ensureInitialized(ctx); err != nil {
 		return nil, err
 	}
@@ -420,6 +424,10 @@ func (s *Service) Cancel(ctx context.Context, owner Owner, id string) (any, erro
 	s.mu.Lock()
 	active := s.active
 	if active != nil && active.Owner == owner && active.ReportID == id {
+		if active.Input.RetryID != expectedRetryID {
+			s.mu.Unlock()
+			return nil, staleStop()
+		}
 		active.CancelRequested = true
 		cancel, job, preparing := active.CancelPrepare, active.Job, active.Preparing
 		s.mu.Unlock()
@@ -444,13 +452,39 @@ func (s *Service) Cancel(ctx context.Context, owner Owner, id string) (any, erro
 	stillPreparing := active != nil && (active.Preparing || active.Job != nil && !active.Job.Info().Exited)
 	waiting := s.containsWaitingLocked(owner, id)
 	blocked := s.blocked[reportKey{owner, id}]
+	mismatch := active != nil && active.Owner == owner && active.ReportID == id && active.Input.RetryID != expectedRetryID
+	for _, entry := range s.waiting {
+		if entry.Owner == owner && entry.Input.ReportID == id && entry.Input.RetryID != expectedRetryID {
+			mismatch = true
+		}
+	}
 	s.mu.Unlock()
+	if mismatch {
+		s.admission.Unlock()
+		return nil, staleStop()
+	}
+	if blocked != nil && !waiting && (active == nil || active.Owner != owner || active.ReportID != id) {
+		raw, e := s.queryJSON(ctx, "read-report", owner, map[string]any{"reportId": id}, nil, true)
+		if e != nil {
+			s.admission.Unlock()
+			return nil, e
+		}
+		v, e := decodeReport(raw, id)
+		if e != nil {
+			s.admission.Unlock()
+			return nil, e
+		}
+		if retryID(v) != expectedRetryID {
+			s.admission.Unlock()
+			return nil, staleStop()
+		}
+	}
 	var result any
 	var err error
 	if active != nil && active.Owner == owner && active.ReportID == id {
 		if stillPreparing {
 			s.admission.Unlock()
-			return s.Cancel(ctx, owner, id)
+			return s.CancelRound(ctx, owner, id, expectedRetryID)
 		}
 		err = s.recoverExited(ctx, active)
 	} else if waiting {
@@ -464,6 +498,9 @@ func (s *Service) Cancel(ctx context.Context, owner Owner, id string) (any, erro
 		if err == nil {
 			var report map[string]any
 			report, err = decodeReport(raw, id)
+			if err == nil && retryID(report) != expectedRetryID {
+				err = staleStop()
+			}
 			if err == nil && report["status"] == "queued" {
 				result, err = s.cancelWaitingLocked(ctx, owner, id)
 			} else if err == nil {

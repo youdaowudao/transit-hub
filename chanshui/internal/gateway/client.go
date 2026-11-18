@@ -158,6 +158,11 @@ type Metrics struct {
 }
 
 type Client struct {
+	// Optional observers attach persistence to a complete original call. They
+	// never select prompts, change retries, or replace response classification.
+	BeforeCall func(context.Context, CallRequest) (context.Context, error)
+	AfterCall  func(context.Context, CallRequest, Metrics, error) error
+
 	// Optional Hub limits leave standalone defaults unchanged.
 	RetryLimit          *int
 	AnthropicAuth       string

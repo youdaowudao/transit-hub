@@ -91,7 +91,7 @@ func TestConcurrentSaveFailureStopsWaitingQuestionsAndKeepsSavedAnswer(t *testin
 	done, finished := make(chan error, 1), make(chan struct{})
 	go func() {
 		defer close(finished)
-		done <- RunOne(ctx, s, o, id, c, Config{Transport: fake, Notify: func(event string, data map[string]any) {
+		done <- RunOne(ctx, s, o, id, c, Config{DisableBankSync: true, Transport: fake, Notify: func(event string, data map[string]any) {
 			events = append(events, event)
 			if event == "item-saved" && data["itemId"] == ids[0] {
 				close(firstSaved)

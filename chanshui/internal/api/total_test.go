@@ -56,6 +56,10 @@ func TestBuildTotalLowConfidenceTieIsNotDiluted(t *testing.T) {
 		t.Fatalf("under-certain mismatch scored %d, want 100", total.Score)
 	}
 	v.Fingerprint = map[string]any{"basis": "numeric", "family": "gpt", "top_model": "gpt-6-astra", "top_prob": 1.0, "used_outputs": 3, "low_confidence": false}
+	if total := buildTotal(v, "gpt-6.1-sol"); total.Score != 100 {
+		t.Fatalf("overlapping models scored %d, want 100", total.Score)
+	}
+	v.Fingerprint = map[string]any{"basis": "numeric", "family": "gpt", "top_model": "gpt-6.2-astra", "top_prob": 1.0, "used_outputs": 3, "low_confidence": false}
 	if part := fingerprintPart(buildTotal(v, "gpt-6.1-sol")); part.Points != 0 || part.Contribution != 0 {
 		t.Fatalf("confirmed mismatch scored %+v", part)
 	}

@@ -8,6 +8,8 @@ import ProbeTimeline from './ProbeTimeline';
 import HubQuestionDetails from './HubQuestionDetails';
 import { hubReportView, itemJudgment, canRetryHubItem, hasOriginalItemDTO } from '../lib/hub-report-view';
 import { isHubTerminal } from '../lib/hub-policy';
+import { fingerprintState } from '../lib/report-view';
+import { knowledgeDateComparison } from '../lib/knowledge-dates';
 import type { HubCall, HubItem, HubReport } from '../lib/hub-types';
 
 export default function HubReportContent({ report, items, complete, call, onRetry, retryDisabled }: { report: HubReport; items: HubItem[]; complete: boolean; call: HubCall; onRetry?: (ids: string[]) => void; retryDisabled?: boolean }) {
@@ -34,13 +36,36 @@ export default function HubReportContent({ report, items, complete, call, onRetr
   </>};
   const knowledgeDetail=(id:string)=>{const item=items.find(x=>x.itemId===id || x.itemId==='knowledge:'+id);return item ? <HubQuestionDetails bodyOnly item={item} call={call} reportId={report.reportId} reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled} previous={Boolean(report.retry?.itemIds.includes(item.itemId)&&['queued','running'].includes(item.status))}/> : <p className="muted">正在读取本题已保存的详细结果，请稍候；不会重新检测。</p>};
   const questions: Record<string, ReactNode> = {};
+  const retryRunning = ['queued','running'].includes(report.status);
+  const activeKnowledgeRetry = retryRunning &&
+    Boolean(view.groups.knowledge?.some(item => report.retry?.itemIds.includes(item.itemId)));
+  const pendingKnowledge = view.verdict.knowledge?.boundary_review?.reason === 'retry_pending';
+  if (pendingKnowledge && originalVerdict.knowledge) {
+    let reason = '补测未完成或未能保存复核结论，请查看最新逐题结果和运行状态。';
+    if (activeKnowledgeRetry) {
+      reason = '正在补测知识题，日期边界暂未确认。已保存的回答仍可查看。';
+    } else if (!complete && retryRunning) {
+      reason = '正在读取本轮补测状态，已保存回答仍可查看。';
+    }
+    originalVerdict.knowledge = {...originalVerdict.knowledge, rows:[], label:'日期边界未确认',reason};
+    view.verdict.knowledge = originalVerdict.knowledge;
+  }
+  const knowledge = view.verdict.knowledge;
+  const fp = originalVerdict.fingerprint;
+  const overlap = fp && !fp.error && fp.basis === 'numeric' && Number.isInteger(fp.used_outputs) && fp.used_outputs > 0 &&
+    fingerprintState(report.model,fp.family || '',fp.top_model || '') === 'unconfirmed';
+  const sharedDate = overlap && knowledge && !['not_selected','not_applicable'].includes(knowledge.status)
+    ? 'GPT-6 Astra 和 GPT-6.1 Sol 的公开知识截止日期均为 2026-04-30，知识日期无法区分两款。' : '';
+  const knowledgeComparison = complete && (report.status === 'done' || report.status === 'partial') && knowledge
+    ? knowledgeDateComparison(report.model, knowledge)
+    : undefined;
  let customIQ:ReactNode;
   for (const [kind, rows] of Object.entries(view.groups)) {
     if(kind==='knowledge') {
       const skipped=rows.filter(item=>['not_asked','not_applicable'].includes(itemJudgment(item).status??''));
       const represented=new Set((view.verdict.knowledge?.rows??[]).map(row=>row.id.replace(/^knowledge:/,'')));
       const extra=rows.filter(item=>!skipped.includes(item)&&!represented.has(item.itemId.replace(/^knowledge:/,'')));
-      questions.knowledge=<><p className="muted">点击上方事件行可查看本题已保存回答，默认收起，不重新检测或修改主站。</p>{extra.map(item=><HubQuestionDetails key={item.itemId} item={item} call={call} reportId={report.reportId} reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled} />)}{skipped.length>0 && <details className="fold"><summary>本轮未提问的题目与原因（{skipped.length}）</summary><p className="muted">完整默认题库沿用原程序的串行二分，每次最多提问10道；列表会写明本轮未选到的题目，未选到的题不算答错。自定义或部分选择时按设置执行。</p><div className="question-list">{skipped.map(item=><HubQuestionDetails key={item.itemId} item={item} call={call} reportId={report.reportId} reportStatus={report.status}/>)}</div></details>}</>;
+      questions.knowledge=<><p className="muted">点击上方事件行可查看本题已保存回答，默认收起，不重新检测或修改主站。</p>{pendingKnowledge && complete && !activeKnowledgeRetry && extra.some(item=>['queued','running'].includes(item.status)) && <p className="muted">下面保留的是停止前保存的结果，未完成题目可按状态补测。</p>}{extra.map(item=><HubQuestionDetails key={item.itemId} item={item} call={call} reportId={report.reportId} reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled} previous={activeKnowledgeRetry && Boolean(report.retry?.itemIds.includes(item.itemId) && ['queued','running'].includes(item.status))} />)}{skipped.length>0 && <details className="fold"><summary>本轮未提问的题目与原因（{skipped.length}）</summary><p className="muted">完整默认题库沿用原程序的串行二分，每次最多提问10道；列表会写明本轮未选到的题目，未选到的题不算答错。自定义或部分选择时按设置执行。</p><div className="question-list">{skipped.map(item=><HubQuestionDetails key={item.itemId} item={item} call={call} reportId={report.reportId} reportStatus={report.status}/>)}</div></details>}</>;
       continue;
     }
 
@@ -59,6 +84,9 @@ export default function HubReportContent({ report, items, complete, call, onRetr
     if(originalQuestionItems) continue;
     if(view.native && kind==='iq' && view.verdict.iq) {customIQ=<>{rows.filter(item=>!('id' in ((item.result?.evidence as Record<string,unknown>)||{}))).map(item=><HubQuestionDetails key={item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} onRetry={onRetry} retryDisabled={retryDisabled} />)}</>;continue;}
     questions[kind] = kind === 'iq'  ? <><p className="muted">点击题目查看本次题面、回答和判定；默认收起，不会重新检测或修改主站。</p>{folds}</> : <div className="question-list">{folds}</div>;
+  }
+  if (knowledgeComparison || sharedDate) {
+    questions.knowledge = <><p className="muted" data-testid="knowledge-date-comparison">{[sharedDate,knowledgeComparison].filter(Boolean).join(" ")}</p>{questions.knowledge}</>;
   }
   const sectionContent: Record<string, ReactNode> = Object.fromEntries(Object.entries(view.messages).map(([key, text]) => [key, <p key={key} className="muted">{text}</p>]));
   if (view.native && !view.verdict.iq && questions.iq) sectionContent.iq = questions.iq;

@@ -71,7 +71,7 @@ function legacyHubReportView(report: HubReport, items: HubItem[], complete: bool
     const e = object(numeric.result?.evidence), a = object(e.attribution), behavior = object(summary.behavior);
     if (numeric.result?.error || e.compatible === false || !finite(a.topProb) || !finite(a.familyProb) || !finite(e.usedOutputs ?? a.usedOutputs)) messages.fingerprint = numeric.result?.error || e.note || '数字指纹尚未确认，不能据此判断模型身份。';
     else v.fingerprint = {
-      family: a.family ?? '', family_name: a.familyName ?? '', family_prob: a.familyProb ?? 0, top_model: a.topModel ?? '', top_prob: a.topProb,
+      basis: 'numeric', family: a.family ?? '', family_name: a.familyName ?? '', family_prob: a.familyProb ?? 0, top_model: a.topModel ?? '', top_prob: a.topProb,
       top_display: a.results?.find((r: any) => r.modelId === a.topModel)?.displayName,
       sample_min: e.sampleMin, confidence_target: 0.9, confidence_reached: a.topProb >= 0.9,
       results: (Array.isArray(a.results) ? a.results : []).map((r: any) => ({ model: r.modelId, display: r.displayName, probability: r.prob, similarity: r.jsSimilarity ?? 0 })),
@@ -160,7 +160,12 @@ export function hubReportView(report: HubReport, items: HubItem[], complete: boo
   switch(item.definition.kind) {
    case 'iq': if(typeof e.id==='string' && typeof e.metrics==='object') lines.push(e); break;
    case 'vision': if('question' in e) v.vision=e as any;break;
-   case 'fingerprint_numeric': if('basis' in e) v.fingerprint=e as any;break;
+   case 'fingerprint_numeric': if('basis' in e) {
+    const pending=report.retry?.itemIds.includes(item.itemId) && ['queued','running'].includes(item.status);
+    v.fingerprint={...e} as any;
+    const failure=item.result?.error || e.error || (pending ? '正在补测，下面保留的是上次回答。' : '');
+    if (failure && v.fingerprint) v.fingerprint.error=String(failure);
+   }break;
    case 'injection': v.injection=e as any;break;
    case 'tools':v.tools=e as any;break;
    case 'web':v.web=e as any;break;

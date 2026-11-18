@@ -1,11 +1,12 @@
 "use client";
+import { boundaryReviewText } from "@/lib/knowledge-dates";
 import type { ReactNode } from "react";
 import { cacheToken as formatCacheToken, cacheRate as formatCacheRate, capabilityLabel } from "@/components/ProbeEvidence";
 import AnimatedNumber from "@/components/AnimatedNumber";
 import ResultSkeleton from "@/components/ResultSkeleton";
 import ErrorFold from "@/components/ErrorFold";
 import Hint from "@/components/Hint";
-import { fingerprintState, presentedTotal, probabilityVisible } from "@/lib/report-view";
+import { canonModel, fingerprintState, presentedTotal, probabilityVisible } from "@/lib/report-view";
 import { DetectVerdict } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 function ScoreShare({ verdict, part, preserve = false }: { verdict: DetectVerdict; part: string; preserve?: boolean }) {
@@ -122,14 +123,19 @@ export default function ResultCards({
   const sampleLimit =
     f?.sample_limit ?? (f?.confidence_reached === undefined ? 3 : 10);
   const fpState =
-    !f || f.error || f.low_confidence
+    !f || f.error
       ? "match"
       : fingerprintState(model || "", f.family || "", f.top_model || "", {
           behavioral,
+          numericEvidence: f.basis === "numeric" && Number.isInteger(f.used_outputs) && f.used_outputs > 0,
+          lowConfidence: f.low_confidence,
           prob: f.top_prob,
         });
   const diluted = fpState === "fake";
   const suspicious = fpState === "suspicious";
+  const unconfirmed = fpState === "unconfirmed" && f?.basis === "numeric" &&
+    Number.isInteger(f.used_outputs) && f.used_outputs > 0;
+  const astraUnconfirmed = unconfirmed && canonModel(model || "") === "gpt6astra";
   const scored: DetectVerdict = v.total && !savedScore
     ? {
         ...v,
@@ -170,7 +176,7 @@ export default function ResultCards({
       )}
       <section className={"result-card" + (diluted ? " fingerprint-bad" : "")}>
         <div className="rc-head">
-          <CardTitle title={tr("模型指纹归因")} label={tr("指纹归因说明")} text={f?.note} />
+          <CardTitle title={tr("模型指纹归因")} label={tr("指纹归因说明")} text={unconfirmed ? tr("数字指纹只在现有参考之间比较。这两款暂时分不开，当前无法确认具体型号。") : f?.note} />
           <span className="rc-score">
             <ScoreShare preserve={savedScore} verdict={scored} part="fingerprint" />
             <span className="card-number">01</span>
@@ -197,10 +203,15 @@ export default function ResultCards({
                   <p>
                     <span>{tr("实际")}</span>
                     <b className={diluted ? "bad" : suspicious ? "warn" : ""}>
-                      {f.top_display || f.top_model || f.family_name || tr("未归因")}
+                      {unconfirmed ? tr(astraUnconfirmed ? "Astra 未验明" : "型号未确认") : f.top_display || f.top_model || f.family_name || tr("未归因")}
                     </b>
                   </p>
+                  {unconfirmed && <p>
+                    <span>{tr("最接近的候选")}</span>
+                    <b>{f.top_display || f.top_model}</b>
+                  </p>}
                 </div>
+                {unconfirmed && <p className="muted">{tr(astraUnconfirmed ? "数字指纹接近 GPT-6 Astra 或 GPT-6.1 Sol，无法排除 GPT-6.1 Sol。" : "数字指纹接近 GPT-6 Astra 或 GPT-6.1 Sol。")}</p>}
                 <p className="basis-line">
                   <span className={"basis-chip" + (behavioral ? " behavioral" : "")}>
                     {behavioral ? tr("行为归因") : tr("数字归因")}
@@ -445,6 +456,7 @@ export default function ResultCards({
               <span>{tr("客观事件")}</span>
             </div>
             <p className="muted">{tr(knowledge.reason || "")}</p>
+            {knowledge.boundary_review && knowledge.boundary_review.status !== "not_needed" && knowledge.boundary_review.reason !== "retry_pending" && <p className="knowledge-note">{boundaryReviewText(knowledge.boundary_review.reason)}</p>}
             {knowledge.web_suspect && <p className="knowledge-note">{tr(knowledge.web_suspect)}</p>}
             {knowledge.gap_note && <p className="knowledge-note">{tr(knowledge.gap_note)}</p>}
             {!!knowledge.rows?.length && (

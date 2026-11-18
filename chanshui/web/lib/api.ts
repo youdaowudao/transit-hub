@@ -85,7 +85,16 @@ export interface KnowledgeRow {
   answer: string;
   error?: string;
 }
+export interface BoundaryReview {
+  from?: string;
+  to?: string;
+  anchor_id?: string;
+  check_id?: string;
+  status: 'not_needed' | 'two_unknown' | 'unconfirmed';
+  reason: string;
+}
 export interface KnowledgeVerdict {
+  boundary_review?: BoundaryReview;
   status: string;
   cutoff?: string;
   label?: string;

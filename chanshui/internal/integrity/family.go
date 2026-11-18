@@ -86,12 +86,21 @@ func CanonModel(model string) string {
 // a name the library does not carry, so it stays suspicious and keeps part of
 // the section's points.
 const (
-	FingerprintMatch      = "match"
-	FingerprintSuspicious = "suspicious"
-	FingerprintFake       = "fake"
+	FingerprintMatch       = "match"
+	FingerprintUnconfirmed = "unconfirmed"
+	FingerprintSuspicious  = "suspicious"
+	FingerprintFake        = "fake"
 )
 
-func FingerprintState(requested, family, topModel string) string {
+func overlappingGPTFingerprint(model string) bool {
+	return model == "gpt6astra" || model == "gpt61sol"
+}
+
+func GPTFingerprintOverlap(requested, actual string) bool {
+	return overlappingGPTFingerprint(CanonModel(requested)) && overlappingGPTFingerprint(CanonModel(actual))
+}
+
+func FingerprintState(requested, family, topModel string, numericEvidence ...bool) string {
 	claimed := CanonModel(requested)
 	actual := CanonModel(topModel)
 	want, got := ModelFamily(requested), FingerprintFamily(family)
@@ -101,6 +110,9 @@ func FingerprintState(requested, family, topModel string) string {
 	wantLine, gotLine := lineName(requested), lineName(topModel)
 	if wantLine != "" && gotLine != "" && wantLine != gotLine {
 		return FingerprintFake
+	}
+	if (len(numericEvidence) == 0 || numericEvidence[0]) && claimed != actual && got == "gpt" && GPTFingerprintOverlap(requested, topModel) {
+		return FingerprintUnconfirmed
 	}
 	if claimed != "" && actual != "" && claimed != actual {
 		// A non-dated version claim is compatible with any dated baseline of
@@ -113,6 +125,11 @@ func FingerprintState(requested, family, topModel string) string {
 		return FingerprintSuspicious
 	}
 	return FingerprintMatch
+}
+
+func FingerprintMismatch(requested, family, topModel string, numericEvidence ...bool) bool {
+	state := FingerprintState(requested, family, topModel, numericEvidence...)
+	return state == FingerprintFake || state == FingerprintSuspicious
 }
 
 // Diluted is true only for a confirmed substitution.

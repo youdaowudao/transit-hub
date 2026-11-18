@@ -14,17 +14,18 @@ import (
 
 // Verdict is informational only. It never contributes to IQ, integrity, or attribution.
 type Verdict struct {
-	Status     string `json:"status"`
-	Cutoff     string `json:"cutoff,omitempty"`
-	Label      string `json:"label"`
-	Correct    int    `json:"correct"`
-	Total      int    `json:"total"`
-	WebSuspect string `json:"web_suspect,omitempty"`
-	GapNote    string `json:"gap_note,omitempty"`
-	Reason     string `json:"reason"`
-	Protocol   string `json:"protocol"`
-	Attempts   int    `json:"attempts"`
-	Rows       []Row  `json:"rows"`
+	BoundaryReview *BoundaryReview `json:"boundary_review,omitempty"`
+	Status         string          `json:"status"`
+	Cutoff         string          `json:"cutoff,omitempty"`
+	Label          string          `json:"label"`
+	Correct        int             `json:"correct"`
+	Total          int             `json:"total"`
+	WebSuspect     string          `json:"web_suspect,omitempty"`
+	GapNote        string          `json:"gap_note,omitempty"`
+	Reason         string          `json:"reason"`
+	Protocol       string          `json:"protocol"`
+	Attempts       int             `json:"attempts"`
+	Rows           []Row           `json:"rows"`
 }
 
 type Row struct {
@@ -352,6 +353,7 @@ func decide(p Probe, text string, explicit bool) string {
 }
 
 type search struct {
+	review  bool
 	lo, hi  time.Time
 	asked   int
 	correct int
@@ -757,14 +759,7 @@ func CheckCurrent(ctx context.Context, c gateway.Client, model string, timeout i
 func check(ctx context.Context, c gateway.Client, model string, timeout int, s *search) (Verdict, error) {
 	attempts := 0
 	protocol := c.ProtocolFor(model)
-	for {
-		if ctx.Err() != nil {
-			break
-		}
-		p, ok := s.next()
-		if !ok {
-			break
-		}
+	ask := func(p Probe) {
 		m, err := c.CallMessages(ctx, gateway.CallRequest{
 			Model: model, Prompt: p.prompt(), MaxTokens: 512, TimeoutSeconds: timeout,
 		})
@@ -772,19 +767,45 @@ func check(ctx context.Context, c gateway.Client, model string, timeout int, s *
 		if m.Protocol != "" {
 			protocol = m.Protocol
 		}
+		if s.review && err == nil {
+			err = reviewMissingError(m)
+		}
 		if err != nil || m.Err != "" {
 			msg := m.Err
 			if err != nil {
 				msg = err.Error()
 			}
 			s.apply(p, kindError, msg)
-			continue
+			return
 		}
 		kind, focus := classify(p, m.Answer)
 		s.apply(p, kind, focus)
-		if kind == kindInvalid {
+	}
+	for ctx.Err() == nil {
+		p, ok := s.next()
+		if !ok {
 			break
 		}
+		ask(p)
+	}
+	if s.review {
+		preliminary, next := reviewBoundary(s.verdict(nowFn()), ctx.Err() != nil, true)
+		if next != nil {
+			ask(*next)
+		}
+		checkID := ""
+		if next != nil {
+			checkID = next.ID
+		}
+		reviewed, _ := evaluateBoundary(s.verdict(nowFn()), ctx.Err() != nil, false, checkID)
+		if next != nil && reviewed.BoundaryReview.CheckID == "" {
+			reviewed.BoundaryReview.CheckID = preliminary.BoundaryReview.CheckID
+		}
+		reviewed.Attempts, reviewed.Protocol = attempts, protocol
+		if reviewed.Status == "error" {
+			return reviewed, fmt.Errorf("知识截止探针没有拿到有效回答")
+		}
+		return reviewed, nil
 	}
 	verdict := s.verdict(nowFn())
 	verdict.Attempts = attempts

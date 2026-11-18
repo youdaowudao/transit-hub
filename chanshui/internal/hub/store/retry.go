@@ -176,6 +176,21 @@ func (s *Store) RetryReport(ctx context.Context, o Owner, r RetryRequest) (Repor
 		}
 		summary["complete"] = false
 		summary["attempts"] = attempts
+		if kinds["knowledge"] {
+			k, ok := summary["knowledge"].(map[string]any)
+			v, _ := summary["verdict"].(map[string]any)
+			if !ok && v != nil {
+				k, _ = v["knowledge"].(map[string]any)
+			}
+			if review, ok := k["boundary_review"].(map[string]any); ok {
+				review["status"], review["reason"] = "unconfirmed", "retry_pending"
+				k["label"] = "日期边界未确认"
+				summary["knowledge"] = k
+				if v != nil {
+					v["knowledge"] = k
+				}
+			}
+		}
 		if total, ok := summary["total"].(map[string]any); ok {
 			affected := false
 			if parts, ok := total["parts"].([]any); ok {

@@ -80,7 +80,8 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 			}
 			row := knowledge.Observe(p, m.Answer, failure)
 			item := callCtx.Value(itemAttemptContextKey{}).(*itemAttempts)
-			result := itemResult{Answer: m.Answer, ThinkingText: m.ThinkingText, Error: failure, Attempts: int(item.Count.Load()), Ms: m.Ms, Metrics: trimMetrics(&m), Evidence: map[string]any{"row": row, "prompt": p.Prompt()}, Judgment: questions.Judgment{Status: "reference"}}
+			result := itemResult{Answer: m.Answer, ThinkingText: m.ThinkingText, Error: failure, Attempts: int(item.Count.Load()), Ms: m.Ms, Metrics: &m, Evidence: map[string]any{"row": row, "prompt": p.Prompt()}, Judgment: questions.Judgment{Status: "reference"}}
+			result.Metrics = trimMetrics(result.Metrics)
 			// An invalid original knowledge measurement is informational, not an HTTP failure.
 			status := "done"
 			if failure != "" {
@@ -88,7 +89,14 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 			}
 			saveCtx, cancel := context.WithTimeout(context.WithoutCancel(callCtx), 11*time.Second)
 			defer cancel()
-			if err := s.SaveItem(saveCtx, o, id, item.ID, status, clean(result, g.Key), result.Attempts); err != nil {
+			cleaned := clean(result, g.Key)
+			// Keep the observation if the raw reply cannot fit in a stored item.
+			if raw, _ := json.Marshal(cleaned); len(raw) > store.MaxItemBytes {
+				result.Answer, result.ThinkingText = "", ""
+				result.Judgment.Reason = "模型原始回答超过单题保存上限，已保留判定摘录。"
+				cleaned = clean(result, g.Key)
+			}
+			if err := s.SaveItem(saveCtx, o, id, item.ID, status, cleaned, result.Attempts); err != nil {
 				fail(err)
 				return err
 			}

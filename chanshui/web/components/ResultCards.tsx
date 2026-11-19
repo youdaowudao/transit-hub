@@ -1,7 +1,7 @@
 "use client";
 import { boundaryReviewText } from "@/lib/knowledge-dates";
-import type { ReactNode } from "react";
-import { cacheToken as formatCacheToken, cacheRate as formatCacheRate, capabilityLabel } from "@/components/ProbeEvidence";
+import { useRef, type ReactNode } from "react";
+import { cacheToken as formatCacheToken, cacheRate as formatCacheRate, capabilityLabel, cacheRoundInput, cacheSampleHitRate, cacheValidationReason, CacheTransitionNote } from "@/components/ProbeEvidence";
 import AnimatedNumber from "@/components/AnimatedNumber";
 import ResultSkeleton from "@/components/ResultSkeleton";
 import ErrorFold from "@/components/ErrorFold";
@@ -29,11 +29,12 @@ function CardTitle({ title, label, text }: { title: string; label?: string; text
     </div>
   );
 }
-function Details({ label, value }: { label: string; value: unknown }) {
+function Details({ label, value, children }: { label: string; value: unknown; children?: ReactNode }) {
   const { t: tr } = useI18n();
   return (
     <details className="fold">
       <summary>{tr(label)}</summary>
+      {children}
       <pre>
         {typeof value === "string"
           ? value || tr("未回传")
@@ -53,7 +54,7 @@ function knowledgeMark(row: { kind?: string; ok: boolean; unsure: boolean; error
   }
   if (row.kind === "invalid") return { text: tr("无效"), cls: "warn" };
   if (row.kind === "error" || row.error) return { text: tr("失败"), cls: "warn" };
-  return { text: tr("不知道"), cls: "muted" };
+  return { text: tr("不知道"), cls: "warn" };
 }
 
 function knowledgeLabel(k: { label?: string; cutoff?: string; correct?: number; total?: number }, tr: (source: string, vars?: Record<string, string | number>) => string) {
@@ -92,6 +93,22 @@ export default function ResultCards({
   // v0.1.27/28 落库的报告里 signals/asks 可能是 null（后端 nil 切片），
   // 旧报告不会被重写，所以前端必须兜底。
   const knowledge = v.knowledge;
+  const eventList = useRef<HTMLUListElement>(null);
+  const eventRows = [...(knowledge?.rows ?? [])].sort((a, b) =>
+    (a.happened_at || a.quarter || '\uffff').localeCompare(b.happened_at || b.quarter || '\uffff'));
+  const review = knowledge?.boundary_review;
+  const legacyUnknownPair = review?.status === "two_unknown" && review.method !== "cross_year";
+  const crossYearEstimate = review?.method === "cross_year" && knowledge?.status === "estimated" && review.status === "two_unknown";
+  const reviewedIds = [review?.anchor_id, review?.check_id].filter(Boolean);
+  const reviewedRows = review && review.status !== "not_needed" && review.reason !== "retry_pending"
+    ? eventRows.filter(row => reviewedIds.includes(row.id)) : [];
+  function openReviewedEvents() {
+    const details = Array.from(eventList.current?.querySelectorAll<HTMLDetailsElement>(".knowledge-answer") ?? [])
+      .filter(row => reviewedRows.some(event => event.id === row.dataset.itemId));
+    for (const row of details) row.open = true;
+    details[0]?.querySelector("summary")?.focus({ preventScroll: true });
+    details[0]?.scrollIntoView?.({ block: "nearest" });
+  }
   const vision = v.vision;
   const integrity = v.integrity;
   const claude = (model || "").toLowerCase().startsWith("claude-");
@@ -100,17 +117,8 @@ export default function ResultCards({
   const cacheSamples = cache?.samples ?? [];
   const thirdCache = cacheSamples.length ? cacheSamples[cacheSamples.length - 1] : undefined;
   const previousCache = cacheSamples.length > 1 ? cacheSamples[cacheSamples.length - 2] : undefined;
-  const thirdTotal = thirdCache && thirdCache.read_reported !== false ? thirdCache.total : null;
-  const previousCacheTotal = previousCache
-    ? cache?.third_read_baseline != null
-      ? cache.third_read_baseline
-      : previousCache.read_reported !== false
-        ? previousCache.write_reported === true
-          ? previousCache.read + previousCache.write
-          : previousCache.read
-        : null
-    : null;
-  const cacheKnown = cache?.status !== "unknown" && cache?.third_read_ratio != null;
+  const thirdTotal = cacheRoundInput(thirdCache);
+  const lastHitRate = cacheSampleHitRate(thirdCache);
   const reportedReads = cacheSamples.filter(
     (row) => row.read_reported !== false && !row.error,
   ).length;
@@ -118,6 +126,13 @@ export default function ResultCards({
     cacheSamples.length > 1 &&
     cacheSamples.every((row) => row.write_reported === false && !row.error) &&
     reportedReads >= 2;
+  const readOnlyReference = readOnlyCache
+    ? cacheSamples.slice(0, -1).reverse().find(row => row.read_reported !== false && Number.isFinite(row.read))
+    : undefined;
+  const previousCacheTotal = readOnlyCache ? readOnlyReference?.read
+    : previousCache && !previousCache.error && previousCache.read_reported !== false && previousCache.write_reported !== false
+      ? previousCache.read + previousCache.write
+      : undefined;
   const cacheToken = formatCacheToken;
   const cacheRate = formatCacheRate;
   const behavioral = f?.basis === "behavioral";
@@ -446,30 +461,52 @@ export default function ResultCards({
         </div>
         {sectionContent?.knowledge !== undefined ? sectionContent.knowledge : !knowledge ? (
           <ResultSkeleton label={loading ? tr("知识截止探针中…") : tr("暂无结果")} />
-        ) : knowledge.error ? (
+        ) : knowledge.error && !eventRows.length ? (
           <ErrorFold text={knowledge.error} />
         ) : (
           <>
             <div className="metric-line">
-              <strong className={knowledge.correct ? "good" : "warn"}>
-                {knowledgeLabel(knowledge, tr)}
+              <strong className={knowledge.correct && !legacyUnknownPair ? "good" : "warn"}>
+                {legacyUnknownPair ? tr("两道事件均回答不知道") : knowledgeLabel(knowledge, tr)}
               </strong>
               <span>{tr("客观事件")}</span>
             </div>
             <p className="muted">{tr(knowledge.reason || "")}</p>
-            {knowledge.boundary_review && knowledge.boundary_review.status !== "not_needed" && knowledge.boundary_review.reason !== "retry_pending" && <p className="knowledge-note">{boundaryReviewText(knowledge.boundary_review.reason, knowledge.boundary_review.method)}</p>}
+            {knowledge.error && <ErrorFold text={knowledge.error} />}
+            {review && review.status !== "not_needed" && review.reason !== "retry_pending" && reviewedRows.length === 0 && <p className="knowledge-note">{boundaryReviewText(review.reason, review.method)}</p>}
+            {reviewedRows.length > 0 && <div>
+              <p className="knowledge-note">
+                {tr("用于核查日期边界的事件")} · {reviewedRows.map(row => `${row.happened_at || row.quarter} ${row.event}`).join("；")}
+              </p>
+              <p className="muted">{legacyUnknownPair ? tr("已收到两道题的回答，现有结果还不能确定知识日期边界。") : boundaryReviewText(review?.reason || "", review?.method)}</p>
+              <button type="button" className="btn-secondary" onClick={openReviewedEvents}>
+                {reviewedRows.length === 2 ? tr("查看这两道题的回答") : tr("查看这道题的回答")}
+              </button>
+              <p className="muted">{tr("展开已保存的题目和回答，不重新提问或修改主站。")}</p>
+            </div>}
             {knowledge.web_suspect && <p className="knowledge-note">{tr(knowledge.web_suspect)}</p>}
             {knowledge.gap_note && <p className="knowledge-note">{tr(knowledge.gap_note)}</p>}
-            {!!knowledge.rows?.length && (
-              <ul className="knowledge-ladder">
-                {knowledge.rows.map((row) => (
-                  <li key={row.id}>
-                    {knowledgeExtra ? <details className="knowledge-answer" data-item-id={row.id}>
-                      <summary title="只展开本题已保存的题目、回答和判定，不重新检测或修改主站。"><b className={knowledgeMark(row,tr).cls}>{knowledgeMark(row,tr).text}</b><span>{row.happened_at||row.quarter}</span><span>{row.event}</span></summary>
-                      {knowledgeExtra(row.id)}
-                    </details> : <><b className={knowledgeMark(row,tr).cls}>{knowledgeMark(row,tr).text}</b><span>{row.happened_at||row.quarter}</span><span>{row.event}</span></>}
-                  </li>
-                ))}
+            {eventRows.length > 0 && (
+              <ul className="knowledge-ladder" ref={eventList}>
+                {eventRows.map(row => {
+                  const mark = knowledgeMark(row, tr);
+                  const needsReview = reviewedRows.includes(row);
+                  return <li key={row.id}>
+                    <details className="knowledge-answer" data-item-id={row.id}>
+                      <summary title={tr("展开已保存的题目和回答，不重新提问或修改主站。")}>
+                        <b className={mark.cls}>{mark.text}</b>
+                        <span>{row.happened_at || row.quarter || "—"}</span>
+                        <span>{row.event}{needsReview && <small className="score-chip">{tr(crossYearEstimate ? "估计范围依据" : "边界待核查")}</small>}</span>
+                      </summary>
+                      {knowledgeExtra?.(row.id) ?? <>
+                        {row.error ? <ErrorFold text={row.error} /> : <>
+                          <p className="muted">{tr("这份报告没有保存模型原话。")}</p>
+                          {row.answer && <><h4>{tr("已保存的判定摘录")}</h4><pre>{row.answer}</pre></>}
+                        </>}
+                      </>}
+                    </details>
+                  </li>;
+                })}
               </ul>
             )}
           </>
@@ -660,13 +697,13 @@ export default function ResultCards({
                     : tr("无法验证")}
               </strong>
             </div>
-            <p className="muted">{v.cache.reason}</p>
+            <p className="muted">{tr(cacheValidationReason(v.cache.reason || ""))}</p>
             {v.cache.samples ? (
               <>
                 <div className="cache-rates">
                   <div>
-                    <span>{tr("末轮缓存率")}</span>
-                    <strong>{cacheKnown ? cacheRate(v.cache.third_read_ratio) : "—"}</strong>
+                    <span>{tr("末轮缓存命中率")}</span>
+                    <strong>{cacheRate(lastHitRate)}</strong>
                   </div>
                   <div>
                     <span>{tr("末轮读取")}</span>
@@ -674,31 +711,17 @@ export default function ResultCards({
                   </div>
                   <div>
                     <span>{tr("末轮总输入")}</span>
-                    <strong>{cacheToken(thirdTotal, thirdCache?.read_reported)}</strong>
+                    <strong>{cacheToken(thirdTotal)}</strong>
                   </div>
                   <div>
-                    <span>{readOnlyCache ? tr("上一轮读取") : tr("上一轮读 ＋ 写")}</span>
+                    <span>{readOnlyCache ? tr(readOnlyReference && readOnlyReference !== previousCache ? "此前最近一次读取" : "上一轮读取") : tr("上一轮读 ＋ 写")}</span>
                     <strong>{cacheToken(previousCacheTotal)}</strong>
                   </div>
                 </div>
                 <p className="muted">
-                  {cacheKnown && readOnlyCache
-                    ? `${cacheToken(thirdCache?.read, thirdCache?.read_reported)} ÷ ${cacheToken(thirdTotal, thirdCache?.read_reported)}`
-                    : cacheKnown && previousCacheTotal != null
-                    ? `${cacheToken(thirdCache?.read, thirdCache?.read_reported)} ÷ ${cacheToken(previousCacheTotal)} × 100%`
-                    : "—"}
-                  <Hint
-                    label={tr("末轮缓存率说明")}
-                    text={
-                      readOnlyCache
-                        ? tr("上游没有缓存写入时，末轮缓存率 = 末轮读取 ÷ 末轮总输入。上一轮读取作为读取链参考，缺写不当成 0。")
-                        : tr("上一条缓存读 + 写 = 下一条缓存读，就是 100%。末轮缓存率 = 末轮读取 ÷ 上一轮读加写。缺字段或请求失败时不计算。")
-                    }
-                  />
+                  {lastHitRate == null ? "—" : `${thirdCache?.read} ÷ ${thirdTotal} × 100%`}
+                  <Hint label={tr("末轮缓存命中率")} text={tr("命中率按当轮缓存读取除以当轮总输入计算。“—”表示没有提供或无法计算。")} />
                 </p>
-                {v.cache.third_read_ratio != null && v.cache.third_read_ratio > 100 && (
-                  <p className="muted">{tr("末轮读取超过上一轮读加写，保留原始比例。")}</p>
-                )}
                 <div className="table-wrap">
                   <table className="cache-table">
                     <thead>
@@ -720,7 +743,7 @@ export default function ResultCards({
                           <td>{cacheToken(row.write, row.write_reported)}</td>
                           <td>{cacheToken(row.input, row.input_reported)}</td>
                           <td>{cacheToken(row.output, row.output_reported)}</td>
-                          <td>{cacheRate(row.hit_rate)}</td>
+                          <td>{cacheRate(cacheSampleHitRate(row))}</td>
                           <td>{row.index > 1 && !row.error && row.read === 0 && row.write > 64 ? tr("整段重写") : ""}</td>
                         </tr>
                       ))}
@@ -744,7 +767,9 @@ export default function ResultCards({
             <Details
               label={v.cache.samples ? tr("多轮缓存明细与衔接") : tr("旧报告缓存明细")}
               value={v.cache}
-            />
+            >
+              <CacheTransitionNote samples={v.cache.samples} ratio={v.cache.third_read_ratio} baseline={v.cache.third_read_baseline} />
+            </Details>
           </>
         )}
       {questions?.cache}

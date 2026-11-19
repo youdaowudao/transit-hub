@@ -91,11 +91,12 @@ func TestKnowledgeAsksAcrossYearsBeforeNarrowingAfterUnknown(t *testing.T) {
 }
 
 func TestRotatedKnowledgeUsesSerial2026Midpoints(t *testing.T) {
-	t.Run("previously queued report", func(t *testing.T) { testRotatedKnowledgeSerial(t, true) })
-	t.Run("new report", func(t *testing.T) { testRotatedKnowledgeSerial(t, false) })
+	t.Run("previously queued report", func(t *testing.T) { testRotatedKnowledgeSerial(t, true, false) })
+	t.Run("new report", func(t *testing.T) { testRotatedKnowledgeSerial(t, false, false) })
+	t.Run("oversized answer preserves other events", func(t *testing.T) { testRotatedKnowledgeSerial(t, false, true) })
 }
 
-func testRotatedKnowledgeSerial(t *testing.T, legacy bool) {
+func testRotatedKnowledgeSerial(t *testing.T, legacy, oversized bool) {
 	t.Helper()
 	ids := []string{}
 	for _, q := range questions.Presets() {
@@ -137,6 +138,7 @@ func testRotatedKnowledgeSerial(t *testing.T, legacy bool) {
 		byPrompt[q.Prompt] = q
 	}
 	var requested []string
+	var oversizedItem string
 	transport := fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		prompt, _ := requestPrompt(t, r)
 		q, ok := byPrompt[prompt]
@@ -145,6 +147,12 @@ func testRotatedKnowledgeSerial(t *testing.T, legacy bool) {
 		}
 		date := questions.Text(q.Definition.Parameters, "date")
 		requested = append(requested, date)
+		if oversized && len(requested) == 1 {
+			oversizedItem = q.Definition.ID
+			answer := strings.Repeat("<", store.MaxItemBytes/6+1) + fmt.Sprintf(`{"choice":%q}`, q.Expected)
+			body := fmt.Sprintf(`{"choices":[{"message":{"content":%q},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`, answer)
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		}
 		if date <= "2026-05-18" {
 			return fixtureResponse(r, fmt.Sprintf(`{"choice":%q}`, q.Expected)), nil
 		}
@@ -194,6 +202,24 @@ func testRotatedKnowledgeSerial(t *testing.T, legacy bool) {
 			var result itemResult
 			if err = json.Unmarshal(item.Result, &result); err != nil {
 				t.Fatal(err)
+			}
+			if item.ItemID == oversizedItem {
+				row := asMap(asMap(result.Evidence)["row"])
+				if result.Answer != "" || item.Status != "done" || row["kind"] != "know" ||
+					!strings.Contains(result.Judgment.Reason, "超过单题保存上限") {
+					t.Fatalf("oversized answer lost its assessment or reported full text: %s %s %v", item.Status, result.Judgment.Reason, row)
+				}
+			} else if result.Judgment.Status == "reference" {
+				wantAnswer := fmt.Sprintf(`{"choice":%q}`, item.Expected)
+				if questions.Text(item.Definition.Parameters, "date") > "2026-05-18" {
+					wantAnswer = `{"choice":"D"}`
+				}
+				if result.Answer != wantAnswer {
+					t.Fatalf("knowledge question %s saved answer %q, want %q", item.ItemID, result.Answer, wantAnswer)
+				}
+				if result.Metrics == nil || result.Metrics.Answer != "" {
+					t.Fatalf("knowledge question %s duplicated the answer in metrics", item.ItemID)
+				}
 			}
 			if result.Judgment.Status == "not_asked" {
 				skipped++

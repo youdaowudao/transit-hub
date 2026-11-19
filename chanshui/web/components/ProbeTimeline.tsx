@@ -16,7 +16,7 @@ export default function ProbeTimeline({
   status: string;
   children?: ReactNode;
   timing?: DetectionTiming;
-  progress?: { total: number | null; finished: number; statusTexts: Record<string, string>; unfinished: number };
+  progress?: { total: number | null; finished: number; statusTexts: Record<string, string>; unfinished: number; hasRequestFailure?: boolean; unconfirmedSelfReport?: boolean };
 }) {
   const { t: tr } = useI18n();
   const questionProbes = probes.filter((p) => /^Q\d+$/.test(p.id));
@@ -26,6 +26,11 @@ export default function ProbeTimeline({
   const active = ["queued", "running"].includes(status);
   const total = progress ? progress.total : probes.length;
   const ratio = total ? Math.min(1, finished / total) : 0;
+  const partialTitle = progress?.hasRequestFailure || probes.some(probe => probe.status === "error")
+    ? tr("报告已生成，部分请求失败")
+    : progress?.unconfirmedSelfReport
+      ? tr("检测已结束，模型自报题尚未判分")
+      : tr("检测已结束，部分项目未确认");
   const title =
     status === "queued"
       ? tr("任务已排队")
@@ -34,7 +39,7 @@ export default function ProbeTimeline({
         : status === "cancelled"
           ? tr("检测已停止")
           : status === "partial"
-            ? tr("报告已生成，部分请求失败")
+            ? partialTitle
             : status === "interrupted"
               ? tr("检测已中断")
               : tr("检测报告已生成");
@@ -90,7 +95,7 @@ export default function ProbeTimeline({
             </span>
             <small className="probe-state">
               <span className="probe-dot" />
-              {progress?.statusTexts[p.id] ?? (p.status === "queued"
+              {(progress?.statusTexts[p.id] ? tr(progress.statusTexts[p.id]) : undefined) ?? (p.status === "queued"
                 ? tr("等待中")
                 : p.status === "running"
                   ? tr("检测中")

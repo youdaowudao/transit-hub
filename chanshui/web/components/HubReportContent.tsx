@@ -34,7 +34,7 @@ export default function HubReportContent({ report, items, complete, call, onRetr
     {loadingImages[id] && <p className="muted">正在读取本次已保存图片，不重新检测。</p>}
     {imageErrors[id] && <p className="error-box" role="alert">{imageErrors[id]}</p>}
   </>};
-  const knowledgeDetail=(id:string)=>{const item=items.find(x=>x.itemId===id || x.itemId==='knowledge:'+id);return item ? <HubQuestionDetails bodyOnly item={item} call={call} reportId={report.reportId} reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled} previous={Boolean(report.retry?.itemIds.includes(item.itemId)&&['queued','running'].includes(item.status))}/> : <p className="muted">正在读取本题已保存的详细结果，请稍候；不会重新检测。</p>};
+  const knowledgeDetail=(id:string)=>{const item=items.find(x=>x.itemId===id || x.itemId==='knowledge:'+id);return item ? <HubQuestionDetails bodyOnly item={item} call={call} reportId={report.reportId} reportStatus={report.status} onRetry={onRetry} retryDisabled={retryDisabled} previous={Boolean(report.retry?.itemIds.includes(item.itemId)&&['queued','running'].includes(item.status))}/> : complete ? undefined : <p className="muted">正在读取本题已保存的详细结果，请稍候；不会重新检测。</p>};
   const questions: Record<string, ReactNode> = {};
   const retryRunning = ['queued','running'].includes(report.status);
   const activeKnowledgeRetry = retryRunning &&
@@ -72,9 +72,11 @@ export default function HubReportContent({ report, items, complete, call, onRetr
  let customIQ:ReactNode;
   for (const [kind, rows] of Object.entries(view.groups)) {
     if(kind==='knowledge') {
-      const skipped=rows.filter(item=>['not_asked','not_applicable'].includes(itemJudgment(item).status??''));
+      const chronological = [...rows].sort((a, b) =>
+        String(a.definition.parameters?.date || '\uffff').localeCompare(String(b.definition.parameters?.date || '\uffff')));
+      const skipped=chronological.filter(item=>['not_asked','not_applicable'].includes(itemJudgment(item).status??''));
       const represented=new Set((view.verdict.knowledge?.rows??[]).map(row=>row.id.replace(/^knowledge:/,'')));
-      const extra=rows.filter(item=>!skipped.includes(item)&&!represented.has(item.itemId.replace(/^knowledge:/,'')));
+      const extra=chronological.filter(item=>!skipped.includes(item)&&!represented.has(item.itemId.replace(/^knowledge:/,'')));
       const skippedExplanation = crossYear
         ? '完整默认题库先问两道 2026 年事件，再根据回答选题，每次最多 10 道。展开可查看本轮未选到的题目，未选到的题不算答错。自选题按所选范围检测。'
         : '完整默认题库沿用原程序的串行二分，每次最多提问10道；列表会写明本轮未选到的题目，未选到的题不算答错。自定义或部分选择时按设置执行。';

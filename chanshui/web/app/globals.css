@@ -5269,7 +5269,8 @@ html[data-mode="dark"] .agent-onboard-tip {
 }
 
 /* Preserve the original event row; only its saved answer expands on demand. */
-.hub-main .knowledge-ladder li > .knowledge-answer { grid-column: 1 / -1; min-width: 0; }
-.hub-main .knowledge-answer > summary { display: grid; grid-template-columns: 52px 78px minmax(0, 1fr); gap: 8px; align-items: baseline; cursor: pointer; }
-.hub-main .knowledge-answer > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.hub-main .knowledge-answer > pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.knowledge-ladder li > .knowledge-answer { grid-column: 1 / -1; min-width: 0; }
+.knowledge-ladder .knowledge-answer > summary { display: grid; grid-template-columns: 52px 78px minmax(0, 1fr); gap: 8px; align-items: baseline; cursor: pointer; }
+.knowledge-ladder .knowledge-answer .score-chip { display: inline-block; margin-inline-start: 8px; }
+.knowledge-ladder .knowledge-answer > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.knowledge-ladder .knowledge-answer > pre { white-space: pre-wrap; overflow-wrap: anywhere; }

@@ -1,3 +1,5 @@
+import type { CacheSample } from '@/lib/api';
+import { useI18n } from '@/lib/i18n';
 import type { HubItem } from '../lib/hub-types';
 
 // Shared with the original ResultCards: missing usage is not a reported zero.
@@ -10,6 +12,40 @@ const number = (value: unknown): number | undefined => typeof value === 'number'
 const text = (value: unknown): string => typeof value === 'string' ? value : '';
 const bool = (value: unknown): boolean | undefined => typeof value === 'boolean' ? value : undefined;
 const percent = (value: unknown) => number(value) === undefined ? '—' : `${(Number(value) * 100).toFixed(1)}%`;
+export function cacheRoundInput(sample?: Partial<CacheSample>): number | undefined {
+  return sample?.input_reported === false ? undefined : number(sample?.total);
+}
+
+export function cacheSampleHitRate(sample?: Partial<CacheSample>): number | undefined {
+  const total = cacheRoundInput(sample);
+  const read = number(sample?.read);
+  if (sample?.error || sample?.read_reported === false || total == null || total <= 0 ||
+    read == null || read < 0 || read > total) return undefined;
+  return read / total * 100;
+}
+
+export function cacheValidationReason(reason: string): string {
+  return reason.replace(/末轮缓存率是末轮读取除以上一轮读加写(?:，相等为 100%)?。/, '');
+}
+
+export function CacheTransitionNote({ samples, ratio, baseline }: {
+  samples?: Partial<CacheSample>[];
+  ratio?: number | null;
+  baseline?: number;
+}) {
+  const { t: tr } = useI18n();
+  const last = samples?.at(-1);
+  const previous = samples?.at(-2);
+  if (number(ratio) == null || !last || !previous || last.error || previous.error ||
+    last.read_reported === false || previous.read_reported === false || previous.write_reported === false) return null;
+  const read = number(last.read);
+  const previousRead = number(previous.read);
+  const previousWrite = number(previous.write);
+  const base = number(baseline) ?? (previousRead == null || previousWrite == null ? undefined : previousRead + previousWrite);
+  if (read == null || base == null || base <= 0) return null;
+  return <p className="muted">{tr('末轮读取与上一轮读加写的比值')} {cacheRate(ratio)} · {tr('相差 {delta} token', { delta: Math.abs(read - base) })}</p>;
+}
+
 const safeURL = (value: unknown) => { try { const url = new URL(String(value)); return ['http:', 'https:'].includes(url.protocol) ? url.href : ''; } catch { return ''; } };
 
 export function readableReportError(value: unknown): string {
@@ -30,7 +66,33 @@ export function HubProbeEvidence({ item }: { item: HubItem }) {
     const details = object(e.evidence), sources = Array.isArray(details.sources) ? details.sources : [];
     return <div><div className="metric-line"><strong className={e.pass === true ? 'good' : 'warn'}>{capabilityLabel(bool(e.pass))}</strong></div><p className="muted">{text(e.reason) || '没有收到足够的结构化证据，本项未经验证。'}</p>{kind === 'tools' && <div className="mini-stats"><span>结构化调用 <b>{Array.isArray(details.calls) ? details.calls.length : '—'}</b></span><span>工具结果往返 <b>{details.roundtrip === true ? '已确认' : details.roundtrip === false ? '未确认' : '—'}</b></span></div>}{kind === 'web' && sources.length > 0 && <ul>{sources.map((source, index) => { const value = typeof source === 'string' ? source : object(source).url; const url = safeURL(value); return url ? <li key={index}><a href={url} target="_blank" rel="noreferrer">{typeof source === 'object' ? text(object(source).title) || url : url}</a></li> : null; })}</ul>}</div>;
   }
-  if (kind === 'cache') return <div><div className="metric-line"><strong className={e.pass === true ? 'good' : 'warn'}>{e.pass === false ? '未对齐' : capabilityLabel(bool(e.pass))}</strong></div><p className="muted">{text(e.reason)}</p><div className="cache-rates"><div><span>末轮缓存率</span><strong>{cacheRate(number(e.third_read_ratio))}</strong></div><div><span>已记录轮数</span><strong>{rows(e.samples).length} / 6</strong></div></div><div className="table-wrap"><table className="cache-table"><thead><tr><th>请求</th><th>读取</th><th>写入</th><th>输入</th><th>输出</th><th>命中率</th></tr></thead><tbody>{rows(e.samples).map((s, i) => <tr key={i}><td>#{String(s.index ?? i + 1)}</td><td>{cacheToken(number(s.read), bool(s.read_reported))}</td><td>{cacheToken(number(s.write), bool(s.write_reported))}</td><td>{cacheToken(number(s.input), bool(s.input_reported))}</td><td>{cacheToken(number(s.output), bool(s.output_reported))}</td><td>{cacheRate(number(s.hit_rate))}</td></tr>)}</tbody></table></div><p className="muted">“—”表示没有提供或无法计算，不能当0。失败或重试影响可靠性时，以具体说明为准。</p></div>;
+  if (kind === 'cache') {
+    const samples = rows(e.samples) as Partial<CacheSample>[];
+    return <div>
+      <div className="metric-line"><strong className={e.pass === true ? 'good' : 'warn'}>{e.pass === false ? '未对齐' : capabilityLabel(bool(e.pass))}</strong></div>
+      <p className="muted">{cacheValidationReason(text(e.reason))}</p>
+      <div className="cache-rates">
+        <div><span>末轮缓存命中率</span><strong>{cacheRate(cacheSampleHitRate(samples.at(-1)))}</strong></div>
+        <div><span>已记录轮数</span><strong>{samples.length} / 6</strong></div>
+      </div>
+      <div className="table-wrap"><table className="cache-table">
+        <thead><tr><th>请求</th><th>读取</th><th>写入</th><th>输入</th><th>输出</th><th>命中率</th></tr></thead>
+        <tbody>{samples.map((sample, i) => <tr key={sample.index ?? i}>
+          <td>#{String(sample.index ?? i + 1)}</td>
+          <td>{cacheToken(sample.read, sample.read_reported)}</td>
+          <td>{cacheToken(sample.write, sample.write_reported)}</td>
+          <td>{cacheToken(sample.input, sample.input_reported)}</td>
+          <td>{cacheToken(sample.output, sample.output_reported)}</td>
+          <td>{cacheRate(cacheSampleHitRate(sample))}</td>
+        </tr>)}</tbody>
+      </table></div>
+      <p className="muted">命中率按当轮缓存读取除以当轮总输入计算。“—”表示没有提供或无法计算。</p>
+      <details className="fold"><summary>多轮缓存明细与衔接</summary>
+        <CacheTransitionNote samples={samples} ratio={number(e.third_read_ratio)} baseline={number(e.third_read_baseline)} />
+        <p className="muted">这里比较相邻两轮的缓存用量。失败或重试影响可靠性时，以本项说明为准。</p>
+      </details>
+    </div>;
+  }
   if (kind === 'injection') return <div><div className="metric-line"><strong>{e.reliable === true ? cacheToken(number(e.inj)) : '未确认'}</strong><span>{e.reliable === true ? '估计 token' : ''}</span></div><div className="mini-stats"><span>有效样本 <b>{rows(e.points).length} / 2</b></span><span>斜率 <b>{number(e.slope)?.toFixed(3) ?? '—'}</b></span><span>得分 <b>{e.reliable === true && number(e.score) !== undefined ? `${e.score} / 10` : '尚未确认'}</b></span></div><p className="muted">{text(e.note)} 这是固定协议开销的近似值，不能据此判断恶意注入。</p></div>;
   if (kind === 'thinking') return <div><div className="metric-line"><strong className={e.pass === true ? 'good' : 'warn'}>{capabilityLabel(bool(e.pass))}</strong></div><p className="muted">{text(e.reason)}</p><div className="mini-stats"><span>摘要字符 <b>{cacheToken(number(e.think_len))}</b></span><span>签名字符 <b>{cacheToken(number(e.sig_len))}</b></span><span>思维用量 <b>{cacheToken(number(e.thinking_tokens))}</b></span></div>{text(e.thinking_text) && <details className="fold"><summary>实际返回的可见摘要</summary><pre>{text(e.thinking_text)}</pre></details>}<p className="muted">只判断接口返回的可见摘要，不代表完整内部推理。</p></div>;
   if (kind === 'knowledge') { const row=Object.keys(object(e.row)).length?object(e.row):e; return <div><div className="metric-line"><strong>{({ know: '知道', wrong: '答错', unknown: '不知道', invalid: '无法判定', error: '请求失败' } as Record<string, string>)[text(row.kind)] ?? '未确认'}</strong></div><p className="muted">{text(row.error)||text(row.reason)||text(row.answer)}</p></div>; }

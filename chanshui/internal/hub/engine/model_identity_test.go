@@ -30,8 +30,9 @@ func TestModelIdentityScoringNormalizes105AndNeverConfirmsMissingAnswer(t *testi
 	if got["iqMax"] != float64(105) || got["iqScore"] != float64(95) {
 		t.Fatal(got)
 	}
-	results["Q10"] = itemResult{Judgment: questions.Judgment{Status: "known", Max: 5, Earned: points(5)}}
-	if got = summarize(defs, results, "gpt-6.2-sol"); got["iqScore"] != float64(100) {
+	answer := "我是 OpenAI 的 ChatGPT。当前会话没有向我提供具体的底层模型名称或版本，因此我无法准确确认。没有联网。"
+	results["Q10"] = itemResult{Answer: answer, Judgment: questions.Grade(identityDefinition(), answer)}
+	if got = summarize(defs, results, "gpt-6.2-sol"); got["iqScore"] != float64(100) || got["totalScore"] != float64(100) {
 		t.Fatal(got)
 	}
 	delete(results, "Q10")

@@ -2,6 +2,7 @@
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { HubProbeEvidence } from '../../chanshui/web/components/ProbeEvidence'
 import HubReportContent from '../../chanshui/web/components/HubReportContent'
 import HubSettings, { HubQuestionEditor } from '../../chanshui/web/components/HubSettings'
 import type { HubItem, HubQuestion, HubReport } from '../../chanshui/web/lib/hub-types'
@@ -36,6 +37,27 @@ describe('模型自报计分在原报告中的展示', () => {
   const fold = container.querySelector<HTMLDetailsElement>('details[data-item-id="Q10"]')!; expect(fold.open).toBe(false)
   await act(() => fold.querySelector('summary')!.click()); expect(fold.textContent).toContain('我是一个AI助手。'); expect(fold.textContent).toContain('不调用模型自评')
   await click('补测此项', fold); expect(retry).toHaveBeenCalledWith(['Q10'])
+ })
+ it('distinguishes an answered but ungraded self report from a failed request in the progress view', async () => {
+  const { report, item } = fixture(false)
+  const show = async (entry: HubItem) => {
+   await act(() => root.render(React.createElement(HubReportContent, { report, items: [entry], complete: true, call: vi.fn() })))
+   await settle()
+   return container.querySelector('.timeline')!
+  }
+  let progress = await show(item)
+  expect(progress.textContent).toContain('检测已结束，模型自报题尚未判分')
+  expect(progress.querySelector('.probe-state')?.textContent).toContain('尚未确认')
+  expect(progress.textContent).not.toContain('部分请求失败')
+  report.itemCounts = { done: 1, error: 1 }
+  progress = await show(item)
+  expect(progress.textContent).toContain('报告已生成，部分请求失败')
+  expect(progress.textContent).not.toContain('模型自报题尚未判分')
+  report.itemCounts = undefined
+  progress = await show({ ...item, status: 'error', result: { ...item.result, answer: '', error: '上游未返回正文' } })
+  expect(progress.textContent).toContain('报告已生成，部分请求失败')
+  expect(progress.textContent).toContain('上游未返回正文')
+  expect(progress.textContent).not.toContain('模型自报题尚未判分')
  })
  it.each([0, 5])('确定结果%d分参与原推理折算并继续折叠', async earned => {
   const { report, item } = fixture(true, earned)
@@ -73,4 +95,78 @@ describe('自报题设置与两条复制入口', () => {
   const entry = call.mock.calls.find(([op]) => op === 'create-question') as any
   expect(entry[1].definition.id).toMatch(/^custom:[0-9a-f]{32}$/); expect(entry[1].definition.maxScore).toBe(5); expect(entry[1].definition.judge.type).toBe('model_identity')
  })
+})
+
+describe('缓存报告按当轮输入显示命中率', () => {
+ const samples = [
+  { index: 4, input: 3, total: 2000, read: 1997, write: 0, input_reported: false, read_reported: true, write_reported: true, hit_rate: 101.53 },
+  { index: 5, input: 3, total: 2030, read: 2027, write: 0, input_reported: true, read_reported: true, write_reported: true, hit_rate: 101.50 },
+  { index: 6, input: 3, total: 2060, read: 2057, write: 0, input_reported: true, read_reported: true, write_reported: true, hit_rate: 101.48 },
+ ]
+ const evidence = { status: 'pass', pass: true, samples, third_read_ratio: 101.48, third_read_baseline: 2027, delta: 30,
+  reason: '上一轮读加写与末轮读相差不超过 64 token。末轮缓存率是末轮读取除以上一轮读加写，相等为 100%。' }
+ const cache: HubItem = { itemId: 'cache', sectionId: 'cache', status: 'done', prompt: '', expected: '',
+  definition: { ...question, id: 'cache', kind: 'cache' }, result: { judgment: { status: 'known' }, evidence } }
+ it.each(['report card', 'saved item detail'])('shows both metrics with their own label in %s', async entry => {
+  const { report } = fixture(true)
+  await act(() => root.render(entry === 'report card'
+   ? React.createElement(HubReportContent, { report, items: [cache], complete: true, call: vi.fn() })
+   : React.createElement(HubProbeEvidence, { item: cache })))
+  await settle()
+  expect(container.querySelector('.cache-rates')?.textContent).toContain('末轮缓存命中率99.85%')
+  const rows = container.querySelectorAll('tbody tr')
+  expect(rows[0].children[5].textContent).toBe('—')
+  expect(rows[1].children[5].textContent).toBe('99.85%')
+  expect(rows[2].children[5].textContent).toBe('99.85%')
+  expect(container.textContent).toContain('末轮读取与上一轮读加写的比值')
+  expect(container.textContent).toContain('101.48%')
+  expect(container.textContent).toContain('30 token')
+  expect(container.querySelector('.cache-rates')?.previousElementSibling?.textContent).not.toContain('末轮缓存率是末轮读取除以上一轮读加写')
+ })
+})
+
+it('names the two boundary events, sorts dates, and opens only their saved answers', async () => {
+ const { report } = fixture(true)
+ const rows = [
+  { id: 'ucl', happened_at: '2026-05-30', event: '欧洲冠军联赛决赛', kind: 'unknown', unsure: true, answer: 'D 不知道' },
+  { id: 'old', happened_at: '2025-11-04', event: '弗吉尼亚州长选举', kind: 'know', ok: true, answer: 'A' },
+  { id: 'europa', happened_at: '2026-05-20', event: '欧洲联赛决赛', kind: 'unknown', unsure: true, answer: 'D 不知道' },
+ ]
+ const saved = (report.summary as any).verdict
+ saved.knowledge = { rows, status: 'estimated', label: '这两道事件均未确认',
+  boundary_review: { status: 'two_unknown', reason: 'two_unknown', anchor_id: 'europa', check_id: 'ucl' } }
+ const items: HubItem[] = rows.map(row => ({ itemId: 'knowledge:' + row.id, sectionId: 'knowledge', status: 'done',
+  definition: { ...question, id: 'knowledge:' + row.id, title: row.event, kind: 'knowledge', judge: { type: 'manual' }, parameters: { date: row.happened_at } },
+  prompt: '实际事件题', expected: '参考答案', result: { judgment: { status: 'reference' }, evidence: { row },
+   ...(row.id === 'ucl' ? { answer: '这是模型实际输出：D' } : {}) } }))
+ const call = vi.fn(), retry = vi.fn()
+ await act(() => root.render(React.createElement(HubReportContent, { report, items, complete: true, call, onRetry: retry })))
+ await settle()
+ const card = container.querySelector('.knowledge-card')!
+ const ordered = [...card.querySelectorAll<HTMLDetailsElement>('.knowledge-answer')]
+ expect(ordered.map(row => row.dataset.itemId)).toEqual(['old', 'europa', 'ucl'])
+ expect(ordered[1].querySelector('summary')?.textContent).toContain('边界待核查')
+ expect(ordered[2].querySelector('summary')?.textContent).toContain('边界待核查')
+ expect(ordered[0].querySelector('summary')?.textContent).not.toContain('边界待核查')
+ const note = card.querySelector('.knowledge-note')!
+ expect(note.textContent).toContain('2026-05-20 欧洲联赛决赛')
+ expect(note.textContent).toContain('2026-05-30 欧洲冠军联赛决赛')
+ await click('查看这两道题的回答', card)
+ expect(ordered.map(row => row.open)).toEqual([false, true, true])
+ expect(ordered[2].textContent).toContain('模型原始回答这是模型实际输出：D')
+ expect(ordered[1].textContent).toContain('这份报告没有保存模型原话')
+ expect(ordered[1].textContent).toContain('已保存的判定摘录D 不知道')
+ expect(call).not.toHaveBeenCalled()
+ expect(retry).not.toHaveBeenCalled()
+
+ const range = '本轮事件题估计范围 2025-11-04 至 2026-05-20'
+ saved.knowledge = { ...saved.knowledge, label: range, boundary_review: {
+  ...saved.knowledge.boundary_review, method: 'cross_year', from: '2025-11-04', to: '2026-05-20',
+ } }
+ await act(() => root.render(React.createElement(HubReportContent, { report, items, complete: true, call, onRetry: retry })))
+ await settle()
+ expect(card.textContent).toContain(range)
+ expect(card.textContent).not.toContain('现有结果还不能确定知识日期边界')
+ expect(card.textContent).not.toContain('边界待核查')
+ expect([...card.querySelectorAll('.knowledge-answer summary')].filter(row => row.textContent?.includes('估计范围依据'))).toHaveLength(2)
 })

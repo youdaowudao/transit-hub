@@ -22,6 +22,10 @@ export function itemLabel(item: HubItem, parentStatus: string): string {
   if (j.status === 'unknown') return '尚未确认';
   return reportStatus(item.status);
 }
+function isUnconfirmedSelfReport(item: HubItem): boolean {
+  return item.definition.judge?.type === 'model_identity' && item.status === 'done' &&
+    !item.result?.error && itemJudgment(item).status === 'unknown';
+}
 export function itemPoints(item: HubItem): string {
   const j = itemJudgment(item), earned = item.result?.earned ?? j.earned, max = item.result?.max ?? j.max ?? item.definition.maxScore;
   return j.status === 'known' && finite(earned) && finite(max) ? `${earned} / ${max}${j.half || item.result?.half ? '（半分）' : ''}` : '';
@@ -122,7 +126,7 @@ function legacyHubReportView(report: HubReport, items: HubItem[], complete: bool
   } else messages.knowledge = (groups.knowledge?.length ?? 0) ? '请展开逐题查看本次事件题观测；日期范围尚未确认。' : complete ? '本次未选择知识事件检测。' : '正在读取本次已保存的结果…';
   const probes: Probe[] = items.map(item => {
     const label = itemLabel(item, report.status), j = itemJudgment(item);
-    const status = ['not_asked', 'not_applicable'].includes(j.status ?? '') ? 'queued' : label === '未完成' ? 'cancelled' : item.status;
+    const status = ['not_asked', 'not_applicable'].includes(j.status ?? '') ? 'queued' : label === '未完成' ? 'cancelled' : label === '请求失败' ? 'error' : item.status;
     return { id: item.itemId, name: item.definition.title, status, ms: typeof item.result?.ms === 'number' ? item.result.ms : Math.max(0, (item.completedAtMs ?? 0) - (item.startedAtMs ?? 0)), error: item.result?.error };
   });
   const statusTexts = Object.fromEntries(items.map(item => [item.itemId, itemLabel(item, report.status)]));
@@ -130,7 +134,7 @@ function legacyHubReportView(report: HubReport, items: HubItem[], complete: bool
   const totalCount = counts ? Object.values(counts).reduce((n, count) => n + count, 0) : complete ? items.length : null;
   const finished = counts ? (counts.done ?? 0) + (counts.error ?? 0) : items.filter(i => ['done', 'error'].includes(i.status)).length;
   const unfinished = isHubTerminal(report.status) && totalCount !== null ? Math.max(0, totalCount - finished) : 0;
-  return { verdict: v, totalLabel, groups, messages, probes, progress: { total: totalCount, finished, statusTexts, unfinished } };
+  return { verdict: v, totalLabel, groups, messages, probes, progress: { total: totalCount, finished, statusTexts, unfinished, hasRequestFailure: (counts?.error ?? 0) > 0, unconfirmedSelfReport: items.some(isUnconfirmedSelfReport) } };
 }
 
 /** Decide per item: old/custom data must keep its readable fallback. */
@@ -185,6 +189,7 @@ export function hubReportView(report: HubReport, items: HubItem[], complete: boo
  }
 
  const nativeProbes:Probe[]=[];
+ const statusTexts: Record<string, string> = {};
  const grouped=new Set<string>();
  const sectionNames:Record<string,string>={fingerprint:'模型指纹归因',injection:'注入大小',cache:'缓存读写验证',tools:'工具调用检测',web:'联网检测',knowledge:'知识截止日期',thinking:'思维链回传',vision:'识图能力'};
  for(const item of items) {
@@ -197,12 +202,13 @@ export function hubReportView(report: HubReport, items: HubItem[], complete: boo
   const rows=individual?[item]:(view.groups[kind]??[item]).filter(x=>x.definition.kind!=='fingerprint_behavior');
   const ended=isHubTerminal(report.status), pending=rows.some(x=>x.status==='running'||x.status==='queued');
   const observed=rows.some(x=>['done','error'].includes(x.status));
-  const failed=kind==='knowledge' ? object(v.knowledge).status==='error' : rows.some(x=>x.status==='error');
+  const failed=rows.some(x=>x.status==='error'||x.result?.error) || kind==='knowledge' && object(v.knowledge).status==='error';
+  if (isUnconfirmedSelfReport(item)) statusTexts[item.itemId] = '尚未确认';
   const status=pending&&!ended?(observed||rows.some(x=>x.status==='running')?'running':'queued'):failed?'error':pending?'cancelled':'done';
   nativeProbes.push({id:individual?item.itemId:kind,name:individual?item.definition.title:(sectionNames[kind]??item.definition.title),status,ms:rows.reduce((sum,x)=>sum+(Number(x.result?.ms)||0),0),error:failed?rows.find(x=>x.result?.error)?.result?.error:undefined});
  }
  const finished=nativeProbes.filter(x=>['done','error','cancelled'].includes(x.status)).length;
- return {...view,verdict:v,totalLabel:report.retry && !isHubTerminal(report.status) ? '补测中' : hasUnconfirmedIQ(v) ? isHubTerminal(report.status) ? '总分尚未确认' : '尚未完成' : '',messages,native:true,probes:nativeProbes,progress:{total:complete?nativeProbes.length:null,finished,statusTexts:{},unfinished:isHubTerminal(report.status)?nativeProbes.filter(x=>x.status==='cancelled').length:0}};
+ return {...view,verdict:v,totalLabel:report.retry && !isHubTerminal(report.status) ? '补测中' : hasUnconfirmedIQ(v) ? isHubTerminal(report.status) ? '总分尚未确认' : '尚未完成' : '',messages,native:true,probes:nativeProbes,progress:{...view.progress,total:complete?nativeProbes.length:null,finished,statusTexts,unfinished:isHubTerminal(report.status)?nativeProbes.filter(x=>x.status==='cancelled').length:0}};
 
 }
 

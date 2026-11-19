@@ -11,6 +11,7 @@ import ManualOneTimeProbeDialog, {
 } from '@/modules/admin/components/dashboard/ManualOneTimeProbeDialog.vue'
 import ConnectionHealthView from '@/modules/admin/views/ConnectionHealthView.vue'
 import QuestionAnswerScheduleBatchDialog from '@/modules/admin/components/dashboard/QuestionAnswerScheduleBatchDialog.vue'
+import QuestionAnswerBatchDrawer from '@/modules/admin/components/dashboard/QuestionAnswerBatchDrawer.vue'
 import * as queuePolling from '@/modules/admin/composables/useQuestionAnswerQueue'
 import type {
   AdminGroupAccount,
@@ -55,6 +56,9 @@ const harness = vi.hoisted(() => ({
   loadPolicies: vi.fn(),
   cancelAdminGroupsRefresh: vi.fn(),
   setAdminGroupsWorkspace: vi.fn(),
+  listHiddenAccounts: vi.fn(),
+  hideAccount: vi.fn(),
+  unhideAccount: vi.fn(),
 }))
 
 vi.mock('vue-router', () => ({
@@ -135,6 +139,9 @@ vi.mock('@/modules/admin/api/connectionHealth', async original => ({
   probeTargetWithProgress: harness.probeTargetWithProgress,
   setQuestionAnswerJudgment: harness.setQuestionAnswerJudgment,
   startQuestionAnswerBatch: harness.startQuestionAnswerBatch,
+  listHiddenAccounts: harness.listHiddenAccounts,
+  hideAccount: harness.hideAccount,
+  unhideAccount: harness.unhideAccount,
 }))
 
 vi.mock('@/modules/admin/api/upstream', () => ({
@@ -247,6 +254,9 @@ beforeEach(() => {
   harness.getQuestionAnswerBatch.mockReset().mockResolvedValue(emptyBatch())
   harness.cancelQuestionAnswerBatch.mockReset().mockResolvedValue(emptyBatch())
   harness.startQuestionAnswerBatch.mockReset().mockResolvedValue(emptyBatch({ batchId: 'batch-started' }))
+  harness.listHiddenAccounts.mockReset().mockResolvedValue({ workspaceId: 'ws1', items: [] })
+  harness.hideAccount.mockReset().mockResolvedValue({ kind: 'saved', targetId: '', hidden: true })
+  harness.unhideAccount.mockReset().mockResolvedValue({ kind: 'saved', targetId: '', hidden: false })
   harness.setQuestionAnswerJudgment.mockReset()
   harness.discoverTargetModels.mockReset().mockResolvedValue([
     { id: 'model-a', name: 'Model A' },
@@ -751,143 +761,321 @@ describe('single-account preferences', () => {
   })
 })
 
-describe('batch target preparation', () => {
-  it('uses every ordered group, deduplicates target IDs, cleans stale saved IDs, and derives source from display order', async () => {
-    const preferences = storedPreferences(
-      { batchTargetIds: ['t2', 't2', 'gone', 't1'] },
-      { groupOrder: ['g1', 'g2'], hiddenGroupIds: ['g2'] },
-    )
-    const wrapper = await mountView([
-      adminGroup('g1', [account('t1'), account('t2')]),
-      adminGroup('g2', [
-        account('t1', { name: 'Duplicate t1' }),
-        account('t3', { status: 'disabled', schedulable: false, probeAvailable: false }),
-      ]),
-    ], preferences)
+const checkGroup = async (drawer: ReturnType<VueWrapper['find']>, groupId: string) => {
+  await drawer.get(`input[type="checkbox"][data-group-id="${groupId}"]`).trigger('change')
+  await flushPromises()
+}
+const startButtonOf = (drawer: ReturnType<VueWrapper['find']>) => drawer.get('[data-testid="question-answer-batch-start"]')
+const blockReasonOf = (drawer: ReturnType<VueWrapper['find']>) => drawer.find('[data-testid="question-answer-batch-block-reason"]')
+const simplePreferences = (overrides: Partial<QuestionAnswerPreferences> = {}) => storedPreferences({ modelIds: ['model-a'], questionIds: ['q1'], repeatCount: 1, ...overrides })
 
+describe('batch drawer: pick questions, groups and accounts, models, then start', () => {
+  it('opens with every group unchecked, expands a checked group with all accounts selected, and submits only the kept accounts in display order', async () => {
+    const wrapper = await mountView([adminGroup('g1', [account('t1'), account('t2'), account('t3')]), adminGroup('g2', [account('t4')])], simplePreferences({ batchTargetIds: ['t1', 't2'] }))
     const drawer = await openBatchDrawer(wrapper)
-    expect(drawer.exists()).toBe(true)
-    expect(drawer.findAll('input[type="checkbox"][data-target-id="t1"]')).toHaveLength(1)
-    expect(batchTargetCheckbox(drawer, 't1').exists()).toBe(true)
-    expect(batchTargetCheckbox(drawer, 't2').exists()).toBe(true)
-    expect(batchTargetCheckbox(drawer, 't3').exists()).toBe(true)
-    expect((batchTargetCheckbox(drawer, 't1').element as HTMLInputElement).checked).toBe(true)
-    expect((batchTargetCheckbox(drawer, 't2').element as HTMLInputElement).checked).toBe(true)
-    expect((batchTargetCheckbox(drawer, 't3').element as HTMLInputElement).checked).toBe(false)
-    expect(drawer.get('[data-testid="question-answer-batch-source"]').text()).toContain('Account t1')
-
-    expect(harness.listTestQuestions).toHaveBeenCalledTimes(1)
-    expect(harness.discoverTargetModels.mock.calls.map(call => call[0])).toEqual(['t1', 't2'])
-    expect(readConnectionHealthPreferences('ws1').questionAnswer).toEqual({
-      modelIds: ['model-a', 'model-b'],
-      questionIds: ['q1', 'q2'],
-      reasoningEffort: 'high',
-      repeatCount: 2,
-      batchTargetIds: ['t2', 't1'],
-    })
-    expect(drawer.text()).toContain('共 16 次请求')
-
-    await batchTargetCheckbox(drawer, 't3').setValue(true)
-    await flushPromises()
-    expect(readConnectionHealthPreferences('ws1').questionAnswer.batchTargetIds).toEqual(['t1', 't2', 't3'])
-
-    await drawer.get('[data-testid="question-answer-batch-close"]').trigger('click')
-    await openBatchDrawer(wrapper)
-    expect((batchTargetCheckbox(wrapper, 't3').element as HTMLInputElement).checked).toBe(true)
-  })
-
-  it('blocks all preparation and preserves saved IDs when any group account list is incomplete', async () => {
-    const wrapper = await mountView([
-      adminGroup('g1', [], {
-        name: 'Failed Group',
-        accountsError: 'admin.connectionHealth.errors.request',
-      }),
-    ], storedPreferences({ batchTargetIds: ['target-from-failed-group'] }))
-
-    const drawer = await openBatchDrawer(wrapper)
-    expect(drawer.exists()).toBe(true)
-    expect(drawer.text()).toContain('Failed Group')
-    expect(drawer.text()).toContain('刷新')
-    expect(harness.listTestQuestions).not.toHaveBeenCalled()
+    expect(drawer.findAll('input[data-group-id]').every(input => !(input.element as HTMLInputElement).checked)).toBe(true)
+    expect(batchTargetCheckbox(drawer as unknown as VueWrapper, 't1').exists()).toBe(false)
+    expect(blockReasonOf(drawer).text()).toBe('先勾选分组或账号')
     expect(harness.discoverTargetModels).not.toHaveBeenCalled()
-    expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
-    expect(drawer.get('[data-testid="question-answer-batch-start"]').attributes('disabled')).toBeDefined()
-    expect(readConnectionHealthPreferences('ws1').questionAnswer.batchTargetIds)
-      .toEqual(['target-from-failed-group'])
+
+    await checkGroup(drawer, 'g1')
+    for (const id of ['t1', 't2', 't3']) expect((batchTargetCheckbox(drawer as unknown as VueWrapper, id).element as HTMLInputElement).checked).toBe(true)
+    expect(batchTargetCheckbox(drawer as unknown as VueWrapper, 't4').exists()).toBe(false)
+    await batchTargetCheckbox(drawer as unknown as VueWrapper, 't2').trigger('change')
+    await flushPromises()
+    expect(drawer.get('[data-testid="question-answer-batch-selection-summary"]').text()).toContain('已选 1 个分组、2 个账号')
+    await vi.waitFor(() => expect(startButtonOf(drawer).attributes('disabled')).toBeUndefined())
+    await startButtonOf(drawer).trigger('click')
+    await vi.waitFor(() => expect(harness.startQuestionAnswerBatch).toHaveBeenCalledTimes(2))
+    expect(harness.startQuestionAnswerBatch.mock.calls.map(call => call.slice(0, 5))).toEqual([
+      ['t1', ['model-a'], ['q1'], 'high', 1],
+      ['t3', ['model-a'], ['q1'], 'high', 1],
+    ])
+  })
+
+  it('keeps one selection per shared account, keeps it when another checked group still covers it, and reselects all on recheck', async () => {
+    const shared = account('shared')
+    const wrapper = await mountView([adminGroup('g1', [shared, account('a1')]), adminGroup('g2', [shared, account('b1')])], simplePreferences())
+    const drawer = await openBatchDrawer(wrapper)
+    await checkGroup(drawer, 'g1')
+    await checkGroup(drawer, 'g2')
+    const sharedBoxes = () => drawer.findAll('input[data-target-id="shared"]')
+    expect(sharedBoxes()).toHaveLength(2)
+    expect(drawer.text()).toContain('也在：Group g2')
+    await sharedBoxes()[0].trigger('change')
+    await flushPromises()
+    expect(sharedBoxes().every(box => !(box.element as HTMLInputElement).checked)).toBe(true)
+    await checkGroup(drawer, 'g1')
+    expect(sharedBoxes()).toHaveLength(1)
+    expect((sharedBoxes()[0].element as HTMLInputElement).checked).toBe(false)
+    await checkGroup(drawer, 'g1')
+    expect(sharedBoxes().every(box => (box.element as HTMLInputElement).checked)).toBe(true)
+  })
+
+  it('edits questions, effort, repeat and models in the drawer, writes the shared preference, keeps unseen saved models and submits the new choice', async () => {
+    harness.discoverTargetModels.mockResolvedValue([{ id: 'model-a', name: 'A' }, { id: 'model-b', name: 'B' }])
+    const wrapper = await mountView([adminGroup('g1', [account('t1')])], simplePreferences({ modelIds: ['model-a', 'unseen-model'] }))
+    const drawer = await openBatchDrawer(wrapper)
+    await checkGroup(drawer, 'g1')
+    await vi.waitFor(() => expect(drawer.find('input[data-model-id="model-b"]').exists()).toBe(true))
+    await drawer.get('input[data-question-id="q2"]').trigger('change')
+    await drawer.get('[data-testid="question-answer-batch-effort"]').setValue('low')
+    await drawer.get('[data-testid="question-answer-batch-repeat"]').setValue('3')
+    await drawer.get('input[data-model-id="model-b"]').trigger('change')
+    await flushPromises()
+    const saved = readConnectionHealthPreferences('ws1').questionAnswer
+    expect(saved.questionIds).toEqual(['q1', 'q2'])
+    expect(saved.reasoningEffort).toBe('low')
+    expect(saved.repeatCount).toBe(3)
+    expect(saved.modelIds).toEqual(['unseen-model', 'model-a', 'model-b'])
+    expect(drawer.text()).toContain('1/1 个账号有')
+    await startButtonOf(drawer).trigger('click')
+    await vi.waitFor(() => expect(harness.startQuestionAnswerBatch).toHaveBeenCalledOnce())
+    expect(harness.startQuestionAnswerBatch.mock.calls[0]?.slice(0, 5)).toEqual(['t1', ['model-a', 'model-b'], ['q1', 'q2'], 'low', 3])
+  })
+
+  it('shows default question and model without writing them, and does not refill after the user clears every choice', async () => {
+    harness.discoverTargetModels.mockResolvedValue([{ id: 'other', name: 'Other' }, { id: 'gpt-5.6-sol', name: 'Sol' }])
+    const wrapper = await mountView([adminGroup('g1', [account('t1')])], storedPreferences({ modelIds: ['missing'], questionIds: ['gone'] }))
+    const drawer = await openBatchDrawer(wrapper)
+    await checkGroup(drawer, 'g1')
+    await vi.waitFor(() => expect(drawer.find('input[data-model-id="gpt-5.6-sol"]').exists()).toBe(true))
+    expect((drawer.get('input[data-question-id="q1"]').element as HTMLInputElement).checked).toBe(true)
+    expect((drawer.get('input[data-model-id="gpt-5.6-sol"]').element as HTMLInputElement).checked).toBe(true)
+    expect(readConnectionHealthPreferences('ws1').questionAnswer.questionIds).toEqual(['gone'])
+    expect(readConnectionHealthPreferences('ws1').questionAnswer.modelIds).toEqual(['missing'])
+    await drawer.get('input[data-question-id="q1"]').trigger('change')
+    await flushPromises()
+    expect(drawer.findAll('input[data-question-id]').every(box => !(box.element as HTMLInputElement).checked)).toBe(true)
+    expect(blockReasonOf(drawer).text()).toBe('先勾选题目')
+    expect(startButtonOf(drawer).attributes('disabled')).toBeDefined()
+  })
+
+  it('reads models with at most four requests at once, drops queued accounts that were unchecked, and does not reread cached accounts', async () => {
+    const pending = new Map<string, ReturnType<typeof deferred<Array<{ id: string; name: string }>>>>()
+    let inFlight = 0
+    let maxInFlight = 0
+    harness.discoverTargetModels.mockImplementation((targetId: string) => {
+      inFlight++
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      const waiter = deferred<Array<{ id: string; name: string }>>()
+      pending.set(targetId, waiter)
+      return waiter.promise.finally(() => { inFlight-- })
+    })
+    const ids = ['t1', 't2', 't3', 't4', 't5', 't6']
+    const wrapper = await mountView([adminGroup('g1', ids.map(id => account(id)))], simplePreferences())
+    const drawer = await openBatchDrawer(wrapper)
+    await checkGroup(drawer, 'g1')
+    expect(harness.discoverTargetModels.mock.calls.map(call => call[0])).toEqual(['t1', 't2', 't3', 't4'])
+    expect(blockReasonOf(drawer).text()).toBe('正在读取账号模型，请稍等')
+    await batchTargetCheckbox(drawer as unknown as VueWrapper, 't6').trigger('change')
+    await flushPromises()
+    for (const id of ['t1', 't2', 't3', 't4']) pending.get(id)!.resolve([{ id: 'model-a', name: 'A' }])
+    await flushPromises()
+    await vi.waitFor(() => expect(harness.discoverTargetModels.mock.calls.map(call => call[0])).toEqual(['t1', 't2', 't3', 't4', 't5']))
+    pending.get('t5')!.resolve([{ id: 'model-a', name: 'A' }])
+    await flushPromises()
+    expect(maxInFlight).toBeLessThanOrEqual(4)
+    await batchTargetCheckbox(drawer as unknown as VueWrapper, 't1').trigger('change')
+    await batchTargetCheckbox(drawer as unknown as VueWrapper, 't1').trigger('change')
+    await flushPromises()
+    expect(harness.discoverTargetModels.mock.calls.filter(call => call[0] === 't1')).toHaveLength(1)
+    expect(harness.discoverTargetModels.mock.calls.some(call => call[0] === 't6')).toBe(false)
+  })
+
+  it('keeps the existing whole-drawer stop when any group account list is incomplete', async () => {
+    const wrapper = await mountView([adminGroup('g1', [account('t1')]), adminGroup('broken', [], { accountsError: 'admin.connectionHealth.errors.accountsFetch' })], simplePreferences())
+    const drawer = await openBatchDrawer(wrapper)
+    expect(drawer.text()).toContain('账号列表尚未完整')
+    expect(drawer.find('input[data-group-id="g1"]').exists()).toBe(false)
+    expect(startButtonOf(drawer).attributes('disabled')).toBeDefined()
+    expect(harness.discoverTargetModels).not.toHaveBeenCalled()
+  })
+
+  it('explains empty model lists and blocked configurations per account and never requests models for blocked accounts', async () => {
+    harness.discoverTargetModels.mockImplementation(async (targetId: string) => targetId === 'empty' ? [] : [{ id: 'model-a', name: 'A' }])
+    const blocked = account('blocked', { testConfiguration: { status: 'conflict', protocol: '', probeTimeoutSeconds: 0, sourceGroups: [], blockedReason: 'admin.connectionHealth.errors.testConfigurationConflict' } as unknown as AdminGroupAccount['testConfiguration'] })
+    const wrapper = await mountView([adminGroup('g1', [account('ok'), account('empty'), blocked])], simplePreferences())
+    const drawer = await openBatchDrawer(wrapper)
+    await checkGroup(drawer, 'g1')
+    await vi.waitFor(() => expect(drawer.get('[data-testid="question-answer-batch-preview-empty"]').text()).toContain('没有读到任何模型'))
+    expect(drawer.get('[data-testid="question-answer-batch-preview-blocked"]').text()).toContain('测试配置不可用')
+    expect(drawer.get('[data-testid="question-answer-batch-preview-ok"]').text()).toContain('1 次')
+    expect(harness.discoverTargetModels.mock.calls.some(call => call[0] === 'blocked')).toBe(false)
+    expect(drawer.get('[data-testid="question-answer-batch-total"]').text()).toContain('共 1 个账号、1 次请求')
+  })
+
+  it('blocks start with the first applicable reason, including an account over 50 requests', async () => {
+    harness.discoverTargetModels.mockResolvedValue(Array.from({ length: 6 }, (_, index) => ({ id: `m${index}`, name: `M${index}` })))
+    const wrapper = await mountView([adminGroup('g1', [account('t1')])], storedPreferences({ modelIds: ['m0', 'm1', 'm2', 'm3', 'm4', 'm5'], questionIds: ['q1', 'q2'], repeatCount: 5 }))
+    const drawer = await openBatchDrawer(wrapper)
+    await checkGroup(drawer, 'g1')
+    await vi.waitFor(() => expect(blockReasonOf(drawer).text()).toContain('超过单个账号 50 次请求'))
+    expect(startButtonOf(drawer).attributes('disabled')).toBeDefined()
+  })
+
+  it('hides accounts in the hidden list from the drawer and never submits them', async () => {
+    const preferences = simplePreferences().questionAnswer
+    const wrapper = mount(QuestionAnswerBatchDrawer, {
+      attachTo: document.body,
+      props: { groups: [adminGroup('g1', [account('image'), account('text')])], hiddenTargetIds: new Set(['image']), preferenceScope: 'ws1', preferences },
+    })
+    mountedWrappers.push(wrapper)
+    const drawer = await openBatchDrawer(wrapper)
+    expect(drawer.text()).toContain('Group g1 · 1 个账号 · 另有 1 个已屏蔽')
+    await checkGroup(drawer, 'g1')
+    expect(batchTargetCheckbox(wrapper, 'image').exists()).toBe(false)
+    await vi.waitFor(() => expect(startButtonOf(drawer).attributes('disabled')).toBeUndefined())
+    await startButtonOf(drawer).trigger('click')
+    await vi.waitFor(() => expect(harness.startQuestionAnswerBatch).toHaveBeenCalledOnce())
+    expect(harness.startQuestionAnswerBatch.mock.calls[0]?.[0]).toBe('text')
+    expect(harness.discoverTargetModels.mock.calls.some(call => call[0] === 'image')).toBe(false)
   })
 })
 
-describe('batch global configuration gates', () => {
-  it.each([
-    {
-      name: 'enabled-question loading failure',
-      configure: () => harness.listTestQuestions.mockRejectedValue(new Error('questions unavailable')),
-      expected: '读取启用问题失败',
-    },
-    {
-      name: 'source model discovery failure',
-      configure: () => harness.discoverTargetModels.mockRejectedValue(new Error('models unavailable')),
-      expected: '配置来源模型发现失败',
-    },
-    {
-      name: 'source without a legal model',
-      configure: () => harness.discoverTargetModels.mockResolvedValue([]),
-      expected: '配置来源没有可用模型',
-    },
-    {
-      name: 'no enabled questions',
-      configure: () => harness.listTestQuestions.mockResolvedValue([
-        { ...question('q1', true), enabled: false },
-      ]),
-      expected: '没有启用问题',
-    },
-    {
-      name: 'shared configuration exceeds the per-account limit',
-      configure: () => {
-        const questions = Array.from({ length: 51 }, (_, index) => question(`q${index + 1}`, index === 0))
-        harness.listTestQuestions.mockResolvedValue(questions)
-      },
-      expected: '减少模型、问题或次数',
-      preferenceQuestions: Array.from({ length: 51 }, (_, index) => `q${index + 1}`),
-    },
-  ])('shows an actionable $name reason and creates no batch or unread marker', async ({
-    configure,
-    expected,
-    preferenceQuestions,
-  }) => {
-    configure()
-    const { drawer } = await openPreparedBatch(
-      [adminGroup('g1', [account('t1')])],
-      storedPreferences({
-        modelIds: ['model-a'],
-        questionIds: preferenceQuestions ?? ['q1'],
-        repeatCount: 1,
-        batchTargetIds: ['t1'],
-      }),
-    )
-
-    await vi.waitFor(() => expect(drawer.text()).toContain(expected))
-    expect(drawer.get('[data-testid="question-answer-batch-start"]').attributes('disabled')).toBeDefined()
-    expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
-    expect(readConnectionHealthPreferences('ws1').questionAnswerUnreadTargetIds).toEqual([])
+describe('hidden account page notice', () => {
+  it('clears the page notice that asks for a reread once a manual reread succeeds, but not after an automatic read', async () => {
+    harness.currentAccount!.value = { id: 'ws1', displayName: 'Workspace One', platform: 'sub2api' } as { id: string; displayName: string }
+    harness.hideAccount.mockResolvedValue({ kind: 'unknown', reason: 'network' })
+    const wrapper = await mountView([adminGroup('g1', [account('sub2api:ws1:t1')])], simplePreferences(), true)
+    await flushPromises()
+    await wrapper.get('[data-testid="hide-account-button"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="hidden-accounts-notice"]').text()).toContain('的结果没有确认')
+    const panelButton = wrapper.findAll('button').find(item => item.text().includes('管理分组显示'))
+    await panelButton!.trigger('click')
+    await flushPromises()
+    harness.listHiddenAccounts.mockRejectedValueOnce(new Error('offline'))
+    const reread = () => wrapper.get('[data-testid="hidden-accounts-panel"]').findAll('button').find(item => item.text() === '重新读取')!
+    await reread().trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="hidden-accounts-notice"]').exists()).toBe(true)
+    await reread().trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="hidden-accounts-notice"]').exists()).toBe(false)
   })
 })
 
-describe('batch sequential submission', () => {
+describe('hidden account page notice when a manual reread finishes first', () => {
+  it('does not show the unconfirmed page notice after a manual reread already resolved it during the automatic reread', async () => {
+    harness.currentAccount!.value = { id: 'ws1', displayName: 'Workspace One', platform: 'sub2api' } as { id: string; displayName: string }
+    const automatic = deferred<{ workspaceId: string; items: [] }>()
+    harness.hideAccount.mockImplementation(async () => {
+      harness.listHiddenAccounts.mockReturnValueOnce(automatic.promise)
+      return { kind: 'unknown', reason: 'network' }
+    })
+    const wrapper = await mountView([adminGroup('g1', [account('sub2api:ws1:t1')])], simplePreferences(), true)
+    await flushPromises()
+    await wrapper.findAll('button').find(item => item.text().includes('管理分组显示'))!.trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="hide-account-button"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="hidden-accounts-panel"]').text()).toContain('有一次屏蔽设置的结果没有确认')
+    await wrapper.get('[data-testid="hidden-accounts-panel"]').findAll('button').find(item => item.text() === '重新读取')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="hidden-accounts-panel"]').text()).not.toContain('有一次屏蔽设置的结果没有确认')
+    automatic.resolve({ workspaceId: 'ws1', items: [] })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="hidden-accounts-notice"]').exists()).toBe(false)
+  })
+})
+
+describe('batch drawer review fixes', () => {
+  it('rereads models when an account model list changes and ignores the late answer for the old list', async () => {
+    const first = deferred<Array<{ id: string; name: string }>>()
+    harness.discoverTargetModels.mockReturnValueOnce(first.promise).mockResolvedValueOnce([{ id: 'model-new', name: 'New' }])
+    const groups = [adminGroup('g1', [account('t1', { models: 'model-old' })])]
+    const preferences = simplePreferences().questionAnswer
+    const wrapper = mount(QuestionAnswerBatchDrawer, { attachTo: document.body, props: { groups, preferenceScope: 'ws1', preferences } })
+    mountedWrappers.push(wrapper)
+    const drawer = await openBatchDrawer(wrapper)
+    await checkGroup(drawer, 'g1')
+    await wrapper.setProps({ groups: [adminGroup('g1', [account('t1', { models: 'model-new' })])] })
+    await flushPromises()
+    expect(harness.discoverTargetModels).toHaveBeenCalledTimes(2)
+    first.resolve([{ id: 'model-old', name: 'Old' }])
+    await flushPromises()
+    expect(drawer.find('input[data-model-id="model-old"]').exists()).toBe(false)
+    expect(drawer.find('input[data-model-id="model-new"]').exists()).toBe(true)
+  })
+
+  it('keeps the running progress and the finished results visible when a group account list later fails, while still blocking a new round', async () => {
+    const pending = deferred<QuestionAnswerBatch>()
+    harness.startQuestionAnswerBatch.mockReturnValue(pending.promise)
+    const preferences = simplePreferences().questionAnswer
+    const wrapper = mount(QuestionAnswerBatchDrawer, { attachTo: document.body, props: { groups: [adminGroup('g1', [account('t1')])], preferenceScope: 'ws1', preferences } })
+    mountedWrappers.push(wrapper)
+    const drawer = await openBatchDrawer(wrapper)
+    await checkGroup(drawer, 'g1')
+    await vi.waitFor(() => expect(startButtonOf(drawer).attributes('disabled')).toBeUndefined())
+    await startButtonOf(drawer).trigger('click')
+    await flushPromises()
+    const broken = [adminGroup('g1', [account('t1')]), adminGroup('broken', [], { accountsError: 'admin.connectionHealth.errors.accountsFetch' })]
+    await wrapper.setProps({ groups: broken })
+    await flushPromises()
+    expect(drawer.text()).toContain('账号列表尚未完整')
+    expect(drawer.find('[data-testid="question-answer-batch-run-summary"]').exists()).toBe(true)
+    expect(drawer.find('[data-testid="question-answer-batch-submitting"]').exists()).toBe(true)
+    pending.resolve(emptyBatch({ batchId: 'b1', submittedCount: 1 }))
+    await flushPromises()
+    await vi.waitFor(() => expect(drawer.find('[data-testid="question-answer-batch-outcome-t1"]').exists()).toBe(true))
+    expect(drawer.find('[data-testid="question-answer-batch-run-summary"]').exists()).toBe(true)
+    expect(startButtonOf(drawer).attributes('disabled')).toBeDefined()
+  })
+
+  it('does not allow starting on reopen until this session reads the questions again', async () => {
+    const wrapper = await mountView([adminGroup('g1', [account('t1')])], simplePreferences())
+    let drawer = await openBatchDrawer(wrapper)
+    await drawer.get('[data-testid="question-answer-batch-close"]').trigger('click')
+    const slow = deferred<TestQuestion[]>()
+    harness.listTestQuestions.mockReturnValueOnce(slow.promise)
+    drawer = await openBatchDrawer(wrapper)
+    await checkGroup(drawer, 'g1')
+    expect(drawer.findAll('input[data-question-id]')).toHaveLength(0)
+    expect(blockReasonOf(drawer).text()).toBe('正在读取测试题，请稍等')
+    expect(startButtonOf(drawer).attributes('disabled')).toBeDefined()
+    slow.resolve([question('q1', true)])
+    await flushPromises()
+    await vi.waitFor(() => expect(startButtonOf(drawer).attributes('disabled')).toBeUndefined())
+  })
+
+  it('hides the live selection steps while a run is submitting from its frozen plan', async () => {
+    const pending = deferred<QuestionAnswerBatch>()
+    harness.startQuestionAnswerBatch.mockReturnValue(pending.promise)
+    const wrapper = await mountView([adminGroup('g1', [account('t1')])], simplePreferences())
+    const drawer = await openBatchDrawer(wrapper)
+    await checkGroup(drawer, 'g1')
+    await vi.waitFor(() => expect(startButtonOf(drawer).attributes('disabled')).toBeUndefined())
+    await startButtonOf(drawer).trigger('click')
+    await flushPromises()
+    expect(drawer.find('[data-testid="question-answer-batch-step-groups"]').exists()).toBe(false)
+    expect(drawer.find('[data-testid="question-answer-batch-step-confirm"]').exists()).toBe(false)
+    expect(drawer.text()).toContain('本轮开始时确定的账号和进度')
+    pending.resolve(emptyBatch({ batchId: 'b1', submittedCount: 1 }))
+    await flushPromises()
+    expect(drawer.find('[data-testid="question-answer-batch-step-groups"]').exists()).toBe(true)
+  })
+})
+
+describe('batch sequential submission (kept behaviors)', () => {
+  const prepared = async (groups: AdminGroupHealth[], preferences = simplePreferences()) => {
+    const wrapper = await mountView(groups, preferences)
+    const drawer = await openBatchDrawer(wrapper)
+    for (const group of groups) await checkGroup(drawer, group.id)
+    await vi.waitFor(() => expect(blockReasonOf(drawer).exists() && blockReasonOf(drawer).text() === '正在读取账号模型，请稍等').toBe(false))
+    return { wrapper, drawer }
+  }
+
   it.each(['Asia/Tokyo', 'America/New_York'])('shows the started batch summary in Singapore from %s without changing submitted requests', async timezone => {
     vi.stubEnv('TZ', timezone)
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(new Date('2026-10-03T00:00:00Z'))
     const pending = deferred<QuestionAnswerBatch>()
     harness.startQuestionAnswerBatch.mockReturnValue(pending.promise)
-    const { wrapper, drawer } = await openPreparedBatch(
-      [adminGroup('sg-group', [account('sg-target')])],
-      storedPreferences({ modelIds: ['model-a'], questionIds: ['q1'], repeatCount: 1, batchTargetIds: ['sg-target'] }),
-    )
+    const { wrapper, drawer } = await prepared([adminGroup('sg-group', [account('sg-target')])])
     try {
-      await drawer.get('[data-testid="question-answer-batch-start"]').trigger('click')
+      await startButtonOf(drawer).trigger('click')
       await flushPromises()
-      expect(harness.startQuestionAnswerBatch).toHaveBeenCalledOnce()
       expect(harness.startQuestionAnswerBatch.mock.calls[0]?.slice(0, 5)).toEqual(['sg-target', ['model-a'], ['q1'], 'high', 1])
       const summary = wrapper.get('[data-testid="question-answer-batch-entry-summary"]')
       expect(summary.text()).toContain('08:00')
@@ -898,7 +1086,7 @@ describe('batch sequential submission', () => {
     }
   })
 
-  it('freezes display order, starts compatible targets serially, and reconciles mixed outcomes and accepted totals', async () => {
+  it('starts compatible targets serially in display order and reconciles mixed outcomes and accepted totals', async () => {
     let inFlight = 0
     let maxInFlight = 0
     harness.discoverTargetModels.mockImplementation(async (targetId: string) => {
@@ -913,76 +1101,52 @@ describe('batch sequential submission', () => {
       inFlight--
       if (targetId === 't2') throw new Error('admin.connectionHealth.errors.questionAnswerActive')
       if (targetId === 't5') throw new Error('start failed')
-      return emptyBatch({
-        batchId: `batch-${targetId}`,
-        submittedCount: targetId === 't1' ? 8 : 7,
-      })
+      return emptyBatch({ batchId: `batch-${targetId}`, submittedCount: targetId === 't1' ? 8 : 7 })
     })
-
-    const { drawer } = await openPreparedBatch(
+    const { drawer } = await prepared(
       [adminGroup('g1', ['t1', 't2', 't3', 't4', 't5', 't6'].map(targetId => account(targetId)))],
-      storedPreferences({
-        modelIds: ['model-a', 'model-b'],
-        questionIds: ['q1', 'q2'],
-        reasoningEffort: 'high',
-        repeatCount: 2,
-        batchTargetIds: ['t6', 't2', 't1', 't5', 't3', 't4'],
-      }),
+      storedPreferences({ modelIds: ['model-a', 'model-b'], questionIds: ['q1', 'q2'], reasoningEffort: 'high', repeatCount: 2 }),
     )
-
     await vi.waitFor(() => expect(drawer.text()).toContain('预览总量 32'))
-    expect(drawer.get('[data-testid="question-answer-batch-source"]').text()).toContain('Account t1')
-    const start = drawer.get('[data-testid="question-answer-batch-start"]')
-    expect(start.attributes('disabled')).toBeUndefined()
-    await start.trigger('click')
+    await startButtonOf(drawer).trigger('click')
     await vi.waitFor(() => expect(harness.startQuestionAnswerBatch).toHaveBeenCalledTimes(4))
     await flushPromises()
-
     expect(maxInFlight).toBe(1)
     expect(harness.startQuestionAnswerBatch.mock.calls.map(call => call[0])).toEqual(['t1', 't2', 't5', 't6'])
-    expect(harness.startQuestionAnswerBatch.mock.calls[0]?.slice(0, 5)).toEqual([
-      't1', ['model-a', 'model-b'], ['q1', 'q2'], 'high', 2,
-    ])
     expect(drawer.text()).toContain('已处理 6/6')
     expect(drawer.text()).toContain('已启动 2')
     expect(drawer.text()).toContain('已跳过 2')
     expect(drawer.text()).toContain('失败 1')
-    expect(drawer.text()).toContain('预览总量 32')
     expect(drawer.text()).toContain('实际接受总量尚未确认')
     expect(drawer.text()).toContain('已确认受理 15 条')
-    expect(drawer.text()).not.toContain('实际接受总量 15')
     expect(drawer.get('[data-testid="question-answer-batch-outcome-t2"]').text()).toContain('已有活动批次')
     expect(drawer.get('[data-testid="question-answer-batch-outcome-t3"]').text()).toContain('无兼容模型')
     expect(drawer.get('[data-testid="question-answer-batch-outcome-t4"]').text()).toContain('模型发现失败')
-    expect(drawer.get('[data-testid="question-answer-batch-outcome-t5"]').text()).toContain('提交未确认')
     expect(drawer.get('[data-testid="question-answer-batch-outcome-t5"]').text()).toContain('不会自动重发')
     expect(readConnectionHealthPreferences('ws1').questionAnswerUnreadTargetIds).toEqual(['t1', 't6'])
   })
 
-  it('ignores a double start and keeps the same run alive across close and reopen', async () => {
+  it('ignores a double start, keeps the same run across close and reopen, and resets the choices after the run ends', async () => {
     const response = deferred<QuestionAnswerBatch>()
     harness.startQuestionAnswerBatch.mockReturnValue(response.promise)
-    const { wrapper, drawer } = await openPreparedBatch(
-      [adminGroup('g1', [account('t1')])],
-      storedPreferences({ modelIds: ['model-a'], questionIds: ['q1'], batchTargetIds: ['t1'] }),
-    )
-    await vi.waitFor(() => expect(drawer.get('[data-testid="question-answer-batch-start"]').attributes('disabled')).toBeUndefined())
-
-    const start = drawer.get('[data-testid="question-answer-batch-start"]')
+    const { wrapper, drawer } = await prepared([adminGroup('g1', [account('t1')])])
+    const start = startButtonOf(drawer)
     await Promise.all([start.trigger('click'), start.trigger('click')])
     expect(harness.startQuestionAnswerBatch).toHaveBeenCalledTimes(1)
-
     await drawer.get('[data-testid="question-answer-batch-close"]').trigger('click')
     const reopened = await openBatchDrawer(wrapper)
     expect(reopened.text()).toContain('已处理 0/1')
-    expect(reopened.get('[data-testid="question-answer-batch-start"]').attributes('disabled')).toBeDefined()
-    expect(harness.startQuestionAnswerBatch).toHaveBeenCalledTimes(1)
-
+    expect(reopened.text()).toContain('本轮正在提交')
+    expect(startButtonOf(reopened).attributes('disabled')).toBeDefined()
     response.resolve(emptyBatch({ batchId: 'batch-t1', submittedCount: 1 }))
     await flushPromises()
-    expect(harness.startQuestionAnswerBatch).toHaveBeenCalledTimes(1)
     expect(reopened.text()).toContain('已处理 1/1')
     expect(reopened.text()).toContain('实际接受总量 1')
+    await reopened.get('[data-testid="question-answer-batch-close"]').trigger('click')
+    const third = await openBatchDrawer(wrapper)
+    expect(third.text()).toContain('已处理 1/1')
+    expect((third.get('input[data-group-id="g1"]').element as HTMLInputElement).checked).toBe(false)
+    expect(wrapper.get('[data-testid="question-answer-batch-entry-summary"]').text()).toContain('已处理 1/1')
   })
 
   it('aborts the pending request on scope change and rejects its late unread write', async () => {
@@ -990,304 +1154,17 @@ describe('batch sequential submission', () => {
     harness.startQuestionAnswerBatch
       .mockResolvedValueOnce(emptyBatch({ batchId: 'batch-t1', submittedCount: 1 }))
       .mockReturnValueOnce(secondResponse.promise)
-    const { drawer } = await openPreparedBatch(
-      [adminGroup('g1', [account('t1'), account('t2')])],
-      storedPreferences({ modelIds: ['model-a'], questionIds: ['q1'], batchTargetIds: ['t1', 't2'] }),
-    )
-    await vi.waitFor(() => expect(drawer.get('[data-testid="question-answer-batch-start"]').attributes('disabled')).toBeUndefined())
-    await drawer.get('[data-testid="question-answer-batch-start"]').trigger('click')
+    const { drawer } = await prepared([adminGroup('g1', [account('t1'), account('t2')])])
+    await startButtonOf(drawer).trigger('click')
     await vi.waitFor(() => expect(harness.startQuestionAnswerBatch).toHaveBeenCalledTimes(2))
-
     harness.currentAccount!.value = { id: 'ws2', displayName: 'Workspace Two' }
     await nextTick()
     await flushPromises()
     const pendingSignal = harness.startQuestionAnswerBatch.mock.calls[1]?.[5] as AbortSignal
     expect(pendingSignal.aborted).toBe(true)
-
     secondResponse.resolve(emptyBatch({ batchId: 'batch-t2', submittedCount: 1 }))
     await flushPromises()
     expect(readConnectionHealthPreferences('ws1').questionAnswerUnreadTargetIds).toEqual(['t1'])
     expect(readConnectionHealthPreferences('ws2').questionAnswerUnreadTargetIds).toEqual([])
-  })
-
-  it('does not clear the next scope saved targets when an idle open drawer observes the workspace reset', async () => {
-    window.localStorage.setItem(
-      connectionHealthPreferencesStorageKey('ws2'),
-      JSON.stringify(storedPreferences({ batchTargetIds: ['t2'] })),
-    )
-    const { wrapper } = await openPreparedBatch(
-      [adminGroup('g1', [account('t1')])],
-      storedPreferences({ batchTargetIds: ['t1'] }),
-    )
-    harness.setAdminGroupsWorkspace.mockImplementation((scope: string) => {
-      if (scope === 'ws2') harness.refs.adminGroups.value = []
-    })
-
-    harness.currentAccount!.value = { id: 'ws2', displayName: 'Workspace Two' }
-    await nextTick()
-    await flushPromises()
-
-    expect(wrapper.find('[data-testid="question-answer-batch-drawer"]').exists()).toBe(false)
-    expect(readConnectionHealthPreferences('ws1').questionAnswer.batchTargetIds).toEqual(['t1'])
-    expect(readConnectionHealthPreferences('ws2').questionAnswer.batchTargetIds).toEqual(['t2'])
-  })
-})
-
-describe('batch drawer lifecycle and presentation', () => {
-  it('starts with no targets and lets group actions update one deduplicated target set', async () => {
-    const { drawer } = await openPreparedBatch(
-      [
-        adminGroup('g1', [account('t1'), account('t2')]),
-        adminGroup('g2', [account('t1', { name: 'Duplicate t1' }), account('t3')]),
-      ],
-      storedPreferences({ batchTargetIds: [] }),
-    )
-
-    expect(drawer.findAll('input[type="checkbox"][data-target-id]:checked')).toHaveLength(0)
-    expect(harness.listTestQuestions).not.toHaveBeenCalled()
-    expect(harness.discoverTargetModels).not.toHaveBeenCalled()
-
-    await drawer.get('[data-testid="question-answer-batch-group-select-g1"]').trigger('click')
-    expect(readConnectionHealthPreferences('ws1').questionAnswer.batchTargetIds).toEqual(['t1', 't2'])
-    await drawer.get('[data-testid="question-answer-batch-group-select-g2"]').trigger('click')
-    expect(readConnectionHealthPreferences('ws1').questionAnswer.batchTargetIds).toEqual(['t1', 't2', 't3'])
-    await drawer.get('[data-testid="question-answer-batch-group-clear-g1"]').trigger('click')
-    expect(readConnectionHealthPreferences('ws1').questionAnswer.batchTargetIds).toEqual(['t3'])
-    expect((batchTargetCheckbox(drawer, 't1').element as HTMLInputElement).checked).toBe(false)
-    expect((batchTargetCheckbox(drawer, 't3').element as HTMLInputElement).checked).toBe(true)
-  })
-
-  it('discards late preparation and only renders the latest target snapshot', async () => {
-    const firstDiscovery = deferred<Array<{ id: string; name: string }>>()
-    let t1Calls = 0
-    harness.discoverTargetModels.mockImplementation((targetId: string) => {
-      if (targetId === 't1' && t1Calls++ === 0) return firstDiscovery.promise
-      return Promise.resolve([{ id: 'model-a', name: 'Model A' }])
-    })
-    const { drawer } = await openPreparedBatch(
-      [adminGroup('g1', [account('t1'), account('t2')])],
-      storedPreferences({
-        modelIds: ['model-a', 'model-b'],
-        questionIds: ['q1'],
-        repeatCount: 1,
-        batchTargetIds: ['t1'],
-      }),
-    )
-    await vi.waitFor(() => expect(harness.discoverTargetModels).toHaveBeenCalledTimes(1))
-
-    await batchTargetCheckbox(drawer, 't2').setValue(true)
-    await vi.waitFor(() => expect(harness.discoverTargetModels).toHaveBeenCalledTimes(3))
-    firstDiscovery.resolve([
-      { id: 'model-a', name: 'Model A' },
-      { id: 'model-b', name: 'Model B' },
-    ])
-    await flushPromises()
-
-    expect(drawer.text()).toContain('预览总量 2')
-    expect(drawer.get('[data-testid="question-answer-batch-preview-t1"]').text()).not.toContain('model-b')
-    expect(drawer.get('[data-testid="question-answer-batch-preview-t2"]').text()).toContain('model-a')
-    expect(harness.startQuestionAnswerBatch).not.toHaveBeenCalled()
-  })
-
-  it('reconciles candidates and re-prepares when the shared selection changes while open', async () => {
-    const { wrapper, drawer } = await openPreparedBatch(
-      [adminGroup('g1', [account('t1'), account('t2')])],
-      storedPreferences({
-        modelIds: ['model-a'],
-        questionIds: ['q1'],
-        repeatCount: 1,
-        batchTargetIds: ['t1', 't2'],
-      }),
-    )
-    await vi.waitFor(() => expect(drawer.text()).toContain('预览总量 2'))
-
-    harness.refs.adminGroups.value = [adminGroup('g1', [account('t1')])]
-    await nextTick()
-    await flushPromises()
-    await vi.waitFor(() => expect(readConnectionHealthPreferences('ws1').questionAnswer.batchTargetIds).toEqual(['t1']))
-
-    const manualDialog = wrapper.findComponent(ManualOneTimeProbeDialog)
-    expect(manualDialog.exists()).toBe(true)
-    manualDialog.vm.$emit('question-answer-preferences-changed', {
-      modelIds: ['model-a', 'model-b'],
-      questionIds: ['q1'],
-      reasoningEffort: 'xhigh',
-      repeatCount: 2,
-    } satisfies QuestionAnswerSelectionPreferences)
-    await nextTick()
-    await flushPromises()
-
-    await vi.waitFor(() => expect(drawer.text()).toContain('预览总量 4'))
-    expect(readConnectionHealthPreferences('ws1').questionAnswer).toEqual({
-      modelIds: ['model-a', 'model-b'],
-      questionIds: ['q1'],
-      reasoningEffort: 'xhigh',
-      repeatCount: 2,
-      batchTargetIds: ['t1'],
-    })
-  })
-
-  it('keeps the finished run and start time beside the list entry after close and reopen', async () => {
-    harness.startQuestionAnswerBatch.mockResolvedValue(emptyBatch({ batchId: 'batch-t1', submittedCount: 1 }))
-    const { wrapper, drawer } = await openPreparedBatch(
-      [adminGroup('g1', [account('t1')])],
-      storedPreferences({ modelIds: ['model-a'], questionIds: ['q1'], batchTargetIds: ['t1'] }),
-    )
-    expect(wrapper.find('aside [data-testid="question-answer-batch-open"]').exists()).toBe(true)
-    await vi.waitFor(() => expect(drawer.get('[data-testid="question-answer-batch-start"]').attributes('disabled')).toBeUndefined())
-    await drawer.get('[data-testid="question-answer-batch-start"]').trigger('click')
-    await vi.waitFor(() => expect(drawer.text()).toContain('已处理 1/1'))
-    await drawer.get('[data-testid="question-answer-batch-close"]').trigger('click')
-
-    const entrySummary = wrapper.get('[data-testid="question-answer-batch-entry-summary"]').text()
-    expect(entrySummary).toMatch(/\d{2}:\d{2} 开始/)
-    expect(entrySummary).toContain('已处理 1/1')
-    expect(entrySummary).toContain('已启动 1')
-    expect(entrySummary).toContain('实际接受总量 1')
-
-    const reopened = await openBatchDrawer(wrapper)
-    expect(reopened.text()).toContain('已处理 1/1')
-    expect(reopened.text()).toContain('实际接受总量 1')
-    expect(harness.startQuestionAnswerBatch).toHaveBeenCalledTimes(1)
-  })
-
-  it('keeps the old outcome but re-prepares dirty targets and shared settings before a new run', async () => {
-    harness.startQuestionAnswerBatch.mockResolvedValue(emptyBatch({ batchId: 'batch', submittedCount: 1 }))
-    const { wrapper, drawer } = await openPreparedBatch(
-      [adminGroup('g1', [account('t1'), account('t2')])],
-      storedPreferences({
-        modelIds: ['model-a', 'model-b'],
-        questionIds: ['q1'],
-        reasoningEffort: 'high',
-        repeatCount: 1,
-        batchTargetIds: ['t1', 't2'],
-      }),
-    )
-    await vi.waitFor(() => expect(drawer.text()).toContain('预览总量 4'))
-    await drawer.get('[data-testid="question-answer-batch-start"]').trigger('click')
-    await vi.waitFor(() => expect(harness.startQuestionAnswerBatch).toHaveBeenCalledTimes(2))
-    await drawer.get('[data-testid="question-answer-batch-close"]').trigger('click')
-
-    harness.refs.adminGroups.value = [adminGroup('g1', [account('t1')])]
-    wrapper.findComponent(ManualOneTimeProbeDialog).vm.$emit('question-answer-preferences-changed', {
-      modelIds: ['model-a'],
-      questionIds: ['q1'],
-      reasoningEffort: 'xhigh',
-      repeatCount: 3,
-    } satisfies QuestionAnswerSelectionPreferences)
-    await nextTick()
-    await flushPromises()
-
-    const reopened = await openBatchDrawer(wrapper)
-    expect(reopened.text()).toContain('已处理 2/2')
-    await vi.waitFor(() => expect(harness.discoverTargetModels).toHaveBeenCalledTimes(3))
-    await vi.waitFor(() => expect(reopened.text()).toContain('预览总量 3'))
-    const previousRunPreview = reopened.get('[data-testid="question-answer-batch-run-preview-total"]')
-    expect(previousRunPreview.text()).toContain('上轮预览总量 4')
-    expect(previousRunPreview.text()).not.toContain('预览总量 3')
-    expect(reopened.get('[data-testid="question-answer-batch-run-summary"]').text()).toContain('实际接受总量 2')
-    expect(readConnectionHealthPreferences('ws1').questionAnswer.batchTargetIds).toEqual(['t1'])
-    const restart = reopened.get('[data-testid="question-answer-batch-start"]')
-    expect(restart.attributes('disabled')).toBeUndefined()
-    await restart.trigger('click')
-    await vi.waitFor(() => expect(harness.startQuestionAnswerBatch).toHaveBeenCalledTimes(3))
-    expect(harness.startQuestionAnswerBatch.mock.calls.map(call => call[0])).toEqual(['t1', 't2', 't1'])
-    expect(harness.startQuestionAnswerBatch.mock.calls[2]?.slice(0, 5)).toEqual([
-      't1', ['model-a'], ['q1'], 'xhigh', 3,
-    ])
-  })
-
-  it('keeps safe per-target discovery and start failure reasons distinguishable', async () => {
-    harness.discoverTargetModels.mockImplementation(async (targetId: string) => {
-      if (targetId === 't2') throw new Error('admin.connectionHealth.errors.network')
-      return [{ id: 'model-a', name: 'Model A' }]
-    })
-    harness.startQuestionAnswerBatch.mockImplementation(async (targetId: string) => {
-      if (targetId === 't3') throw new Error('admin.connectionHealth.errors.request')
-      return emptyBatch({ batchId: `batch-${targetId}`, submittedCount: 1 })
-    })
-    const { drawer } = await openPreparedBatch(
-      [adminGroup('g1', [account('t1'), account('t2'), account('t3')])],
-      storedPreferences({ modelIds: ['model-a'], questionIds: ['q1'], batchTargetIds: ['t1', 't2', 't3'] }),
-    )
-    await vi.waitFor(() => expect(drawer.get('[data-testid="question-answer-batch-preview-t2"]').text())
-      .toContain('网络异常，请检查连接后重试。'))
-    await drawer.get('[data-testid="question-answer-batch-start"]').trigger('click')
-    await vi.waitFor(() => expect(drawer.text()).toContain('已处理 3/3'))
-
-    const discoveryOutcome = drawer.get('[data-testid="question-answer-batch-outcome-t2"]')
-    const startOutcome = drawer.get('[data-testid="question-answer-batch-outcome-t3"]')
-    expect(discoveryOutcome.text()).toContain('网络异常，请检查连接后重试。')
-    expect(startOutcome.text()).toContain('操作失败，请稍后重试。')
-    expect(discoveryOutcome.text()).not.toBe(startOutcome.text())
-    expect(discoveryOutcome.find('p:last-child').classes()).toContain('break-words')
-    expect(startOutcome.find('p:last-child').classes()).toContain('break-words')
-  })
-
-  it('wraps long account identities and omits internal target IDs from the source label', async () => {
-    const longTargetId = `sub2api:ws1:${'x'.repeat(100)}`
-    const longAccountName = `超长账号${'名'.repeat(100)}`
-    harness.startQuestionAnswerBatch.mockResolvedValue(emptyBatch({ batchId: 'batch-long', submittedCount: 1 }))
-    const { drawer } = await openPreparedBatch(
-      [adminGroup('g1', [account(longTargetId, { name: longAccountName })])],
-      storedPreferences({
-        modelIds: ['model-a'], questionIds: ['q1'], repeatCount: 1, batchTargetIds: [longTargetId],
-      }),
-    )
-    await vi.waitFor(() => expect(drawer.text()).toContain('预览总量 1'))
-
-    const targetName = drawer.get(`[data-testid="question-answer-batch-target-name-${longTargetId}"]`)
-    expect(targetName.text()).toBe(longAccountName)
-    expect(targetName.classes()).toContain('break-words')
-    expect(targetName.classes()).not.toContain('truncate')
-    const sourceText = drawer.get('[data-testid="question-answer-batch-source"]').text()
-    expect(sourceText).toContain(longAccountName)
-    expect(sourceText).not.toContain('sub2api:ws1:')
-    expect(sourceText).not.toContain('…')
-    expect(sourceText).not.toContain(longTargetId)
-    expect(drawer.get(`[data-testid="question-answer-batch-preview-identity-${longTargetId}"]`).classes())
-      .toContain('break-all')
-    expect(drawer.find('section').classes()).toContain('overflow-hidden')
-
-    await drawer.get('[data-testid="question-answer-batch-start"]').trigger('click')
-    await vi.waitFor(() => expect(drawer.text()).toContain('已处理 1/1'))
-    expect(drawer.get(`[data-testid="question-answer-batch-outcome-name-${longTargetId}"]`).classes())
-      .toContain('break-words')
-  })
-
-  it('shows the shared configuration and per-target compatibility in a fixed responsive drawer', async () => {
-    harness.discoverTargetModels.mockImplementation(async (targetId: string) => targetId === 't1'
-      ? [{ id: 'model-a', name: 'Model A' }, { id: 'model-b', name: 'Model B' }]
-      : [{ id: 'model-a', name: 'Model A' }])
-    const { drawer } = await openPreparedBatch(
-      [adminGroup('g1', [account('t1', { name: 'Primary source' }), account('t2')])],
-      storedPreferences({
-        modelIds: ['model-a', 'model-b'],
-        questionIds: ['q1', 'q2'],
-        reasoningEffort: 'high',
-        repeatCount: 2,
-        batchTargetIds: ['t1', 't2'],
-      }),
-    )
-    await vi.waitFor(() => expect(drawer.text()).toContain('预览总量 12'))
-
-    const source = drawer.get('[data-testid="question-answer-batch-source"]').text()
-    expect(source).toContain('Primary source')
-    expect(source).not.toContain('t1')
-    const config = drawer.get('[data-testid="question-answer-batch-config"]').text()
-    expect(config).toContain('Question q1')
-    expect(config).toContain('Question q2')
-    expect(config).toContain('high')
-    expect(config).toContain('每组合 2 次')
-    const t2Preview = drawer.get('[data-testid="question-answer-batch-preview-t2"]').text()
-    expect(t2Preview).toContain('model-a')
-    expect(t2Preview).toContain('model-b')
-    expect(t2Preview).toContain('不兼容')
-    expect(t2Preview).toContain('4 次请求')
-    expect(drawer.get('[data-testid="question-answer-batch-body"]').classes()).toContain('overflow-y-auto')
-    expect(drawer.get('[data-testid="question-answer-batch-footer"]').classes()).toContain('shrink-0')
-    expect(drawer.text()).not.toContain('队列位置')
-    expect(drawer.text()).not.toContain('预计完成')
-    expect(drawer.text()).not.toContain('全部问答完成')
   })
 })

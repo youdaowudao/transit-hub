@@ -282,6 +282,11 @@ func (s *Service) resolveQuestionAnswerScheduleExecution(ctx context.Context, ex
 	config := requested.Schedule
 	inventory, err := s.resolveQuestionAnswerScheduleTargets(ctx, execution.UserID, execution.AdminAccountID, config)
 	if err != nil {
+		var reqErr requestError
+		if errors.As(err, &reqErr) && reqErr == requestError(ErrorHiddenAccountsRead) {
+			fail("hidden_accounts_unavailable", "")
+			return
+		}
 		fail("test_configuration_unavailable", "")
 		return
 	}

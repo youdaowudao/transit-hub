@@ -42,6 +42,14 @@ func (s *Service) modelControlAutoStillEligible(ctx context.Context, run *modelC
 	if !ok {
 		return false, 0, nil
 	}
+	// 执行前两次资格检查都核对屏蔽状态；发往主站前的第二次检查为截止点。
+	hidden, err := s.hiddenAccountTargetSet(ctx, run.user, run.ws)
+	if err != nil {
+		return false, 0, requestError(modelControlError("Storage"))
+	}
+	if hidden[run.target] {
+		return false, settings.Version, nil
+	}
 	savedAt, err := r.GetModelControlRuleSavedAt(ctx, run.user, run.ws)
 	if err != nil {
 		return false, 0, requestError(modelControlError("Storage"))

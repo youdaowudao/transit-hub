@@ -21,6 +21,7 @@ import {
   Power,
   X,
   Zap,
+  EyeOff,
 } from 'lucide-vue-next'
 import { Tooltip } from '@/components/ui/tooltip'
 import { formatQuestionAnswerAccuracy, questionAnswerAccuracy, questionAnswerAccuracyRatio } from '../../utils/questionAnswers'
@@ -71,6 +72,8 @@ const props = withDefaults(defineProps<{
   quickProbeSuccesses?: Record<string, { modelName: string; latencyMs: number; protocol?: string | null; timeoutSeconds?: number | null }>
   recentSummaryFailures?: string[]
   modelControlFailures?: string[]
+  hiddenTargetIds?: Set<string>
+  hideEnabled?: boolean
 }>(), {
   focusedAccountIds: () => [],
   focusedAccountLabels: () => ({}),
@@ -79,6 +82,8 @@ const props = withDefaults(defineProps<{
   quickProbeSuccesses: () => ({}),
   recentSummaryFailures: () => [],
   modelControlFailures: () => [],
+  hiddenTargetIds: () => new Set<string>(),
+  hideEnabled: false,
 })
 
 const modelSupplyExpanded = ref(false)
@@ -99,6 +104,7 @@ const emit = defineEmits<{
   (event: 'question-answer-view', value: { targetId: string; batchId?: string }): void
   (event: 'question-answer-recent-retry', targetId: string): void
   (event: 'displayed-targets', targetIds: string[]): void
+  (event: 'hide-account', account: AdminGroupAccount): void
 }>()
 
 import { t, te } from '@/locales'
@@ -597,10 +603,19 @@ const focusedAccountLabel = (id: string, currentName = ''): string => {
   const name = currentName.trim() || label?.name?.trim()
   return name ? `账号「${name}」` : '账号（名称暂未读到）'
 }
+// 表格可见账号：只在账号表行、空态、自动滚动和 displayed-targets 中剔除屏蔽清单里的账号；
+// 统计回退、模型摘要错误提示、定位判断和 Priority 同值提示仍按全部成员。
+const isHiddenAccount = (account: AdminGroupAccount): boolean => props.hiddenTargetIds.has(account.targetId)
+const hiddenInGroupCount = computed(() => props.group.accounts.filter(isHiddenAccount).length)
+const allAccountsHidden = computed(() => props.group.accounts.length > 0 && hiddenInGroupCount.value === props.group.accounts.length)
 const focusedAccountNotices = computed(() => {
   if (props.group.accountsError || !props.focusedAccountIds.length) return []
   const notices: string[] = []
-  const hidden = props.group.accounts.filter(account => isFocusedAccount(account) && shouldHideUnmonitored(account))
+  const blocked = props.group.accounts.filter(account => isFocusedAccount(account) && isHiddenAccount(account))
+  if (blocked.length) {
+    notices.push(`${blocked.map(account => focusedAccountLabel(account.id, account.name)).join('、')}已屏蔽，不在列表中显示；可在左侧「分组显示管理」里取消屏蔽。`)
+  }
+  const hidden = props.group.accounts.filter(account => isFocusedAccount(account) && !isHiddenAccount(account) && shouldHideUnmonitored(account))
   if (hidden.length) {
     const names = hidden.map(account => focusedAccountLabel(account.id, account.name)).join('、')
     notices.push(`要找的${names}没有开启监控，被‘隐藏未监控’藏起来了。取消勾选分组标题右侧的‘隐藏未监控’就能看到；这只改本机显示，不会修改主站。`)
@@ -616,8 +631,9 @@ let hasAutoScrolled = false
 watch([() => props.group.id, () => JSON.stringify([...props.focusedAccountIds].sort())], () => {
   hasAutoScrolled = false
 }, { flush: 'pre' })
+const tableAccounts = computed(() => sortedAccounts.value.filter(account => !isHiddenAccount(account)))
 watch(
-  [() => props.group.id, () => JSON.stringify([...props.focusedAccountIds].sort()), () => sortedAccounts.value.find(isFocusedAccount)?.targetId, accountTableRef],
+  [() => props.group.id, () => JSON.stringify([...props.focusedAccountIds].sort()), () => tableAccounts.value.find(isFocusedAccount)?.targetId, accountTableRef],
   () => {
     if (hasAutoScrolled) return
     const row = accountTableRef.value?.querySelector<HTMLElement>('[data-focused-account]')
@@ -627,7 +643,7 @@ watch(
   },
   { flush: 'post' },
 )
-watch(() => sortedAccounts.value.map(account => account.targetId).join('\n'), () => emit('displayed-targets', sortedAccounts.value.map(account => account.targetId)), { immediate: true })
+watch(() => tableAccounts.value.map(account => account.targetId).join('\n'), () => emit('displayed-targets', tableAccounts.value.map(account => account.targetId)), { immediate: true })
 
 const filteredModelHealth = (account: AdminGroupAccount) => {
   const filter = activeFilter.value
@@ -833,6 +849,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
         </button>
       </div>
       <p v-for="notice in focusedAccountNotices" :key="notice" role="status" data-account-focus-notice class="mb-3 break-words rounded-lg bg-warning/10 px-4 py-3 text-sm text-warning">{{ notice }}</p>
+      <p v-if="!group.accountsError && hiddenInGroupCount" data-testid="hidden-accounts-in-group" class="mb-3 text-xs text-muted-foreground">另有 {{ hiddenInGroupCount }} 个已屏蔽账号未显示，可在左侧「分组显示管理」里取消屏蔽。上面的统计包含它们。</p>
       <div v-if="group.accountsError" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
         {{ readableMessage(group.accountsError) }}
       </div>
@@ -913,12 +930,12 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
             </tr>
           </thead>
           <tbody>
-            <tr v-if="sortedAccounts.length === 0">
-              <td colspan="10" class="px-4 py-12 text-center text-sm text-muted-foreground">
-                {{ t(`${detailPrefix}.filters.noMatches`) }}
+            <tr v-if="tableAccounts.length === 0">
+              <td colspan="10" class="px-4 py-12 text-center text-sm text-muted-foreground" data-testid="account-table-empty">
+                {{ allAccountsHidden ? '本组账号都已屏蔽。' : t(`${detailPrefix}.filters.noMatches`) }}
               </td>
             </tr>
-            <template v-else v-for="account in sortedAccounts" :key="account.targetId">
+            <template v-else v-for="account in tableAccounts" :key="account.targetId">
               <tr class="border-t border-border/40 transition-colors hover:bg-surface/35" :data-focused-account="isFocusedAccount(account) ? account.id : undefined" :class="isFocusedAccount(account) ? 'bg-primary/[0.10] outline outline-2 -outline-offset-2 outline-primary/70' : ''">
                 <td class="px-3 py-3">
                   <button
@@ -1108,6 +1125,18 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                         @click="emit('set-schedulable', account)"
                       >
                         <Power class="h-4 w-4" />
+                      </button>
+                      </Tooltip>
+                      <Tooltip v-if="isSub2API(account)" text="屏蔽这个账号：以后不出现在本页账号列表、批量和计划问答、模型管理里。不改变健康探测，也不改主站。" wide>
+                      <button
+                        type="button"
+                        data-testid="hide-account-button"
+                        class="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-surface hover:text-foreground disabled:cursor-not-allowed disabled:opacity-35"
+                        aria-label="屏蔽这个账号"
+                        :disabled="!hideEnabled"
+                        @click="emit('hide-account', account)"
+                      >
+                        <EyeOff class="h-4 w-4" />
                       </button>
                       </Tooltip>
                       <Tooltip :text="t(`${prefix}.actions.viewEvents`)">

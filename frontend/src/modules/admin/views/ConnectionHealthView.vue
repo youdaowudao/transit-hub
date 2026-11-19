@@ -44,6 +44,8 @@ import QuestionAnswerScheduleDrawer from '../components/dashboard/QuestionAnswer
 import QuestionAnswerModelControlDrawer from '../components/dashboard/QuestionAnswerModelControlDrawer.vue'
 import QuestionAnswerScheduleBatchDialog from '../components/dashboard/QuestionAnswerScheduleBatchDialog.vue'
 import { useQuestionAnswerRecentSummaries } from '../composables/useQuestionAnswerRecentSummaries'
+import { useHiddenAccounts, hiddenWriteReason } from '../composables/useHiddenAccounts'
+import { formatLastUsedAt } from '../utils/userLastUsed'
 import { refreshQuestionAnswerQueue } from '../composables/useQuestionAnswerQueue'
 import PolicyConfigDrawer from '../components/dashboard/PolicyConfigDrawer.vue'
 import type { OwnGroupOption } from '../components/dashboard/PolicyConfigDrawer.vue'
@@ -88,6 +90,7 @@ const {
   overview,
   groups,
   adminGroups,
+  adminGroupsAcceptedRevision,
   adminGroupsLoaded,
   events,
   policies,
@@ -168,6 +171,11 @@ const refreshWaitSeconds = ref(0)
 let refreshWaitTimer: ReturnType<typeof setInterval> | null = null
 const refreshCoordinator = createRefreshCoordinator()
 const preferenceScope = computed(() => currentAccount.value?.id ?? 'anonymous')
+// 屏蔽清单：只影响分组详情账号表、批量问答候选、计划表单候选和模型管理条目，不改健康探测与统计。
+const hiddenAccounts = useHiddenAccounts()
+const hiddenNotice = ref('')
+const hiddenListEnabled = computed(() => currentAccount.value?.platform === 'sub2api' && preferenceScope.value !== 'anonymous')
+const hiddenTargetIds = computed(() => hiddenAccounts.hiddenTargetIds.value)
 const accountLabelsByTarget = computed<Record<string, AccountFocusLabel>>(() => {
   const workspace = preferenceScope.value
   const labels: Record<string, AccountFocusLabel> = {}
@@ -355,6 +363,62 @@ const onScheduleSettled = (targetIds: string[]) => { for (const targetId of targ
 const onDisplayedQuestionAnswerTargets = (targetIds: string[]) => { displayedQuestionAnswerTargetIds.value = [...new Set(targetIds)]; recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value) }
 const retryPendingQuestionAnswerSummaries = () => {
   for (const [targetId, version] of questionAnswerSummaryPending) if (version > (questionAnswerSummarySettled.get(targetId) ?? 0)) void refreshQuestionAnswerSummary(targetId)
+}
+
+watch([preferenceScope, hiddenListEnabled], ([scope, enabled]) => {
+  hiddenAccounts.reset(enabled ? scope : '')
+  hiddenNotice.value = ''
+  if (enabled) void hiddenAccounts.load()
+}, { immediate: true })
+// 每次接受新的分组主列表（普通读取和刷新流两条路径）后重读屏蔽清单，使另一标签页的修改在下次刷新时生效。
+// 摘要、探活结果等本地补丁不触发重读。
+watch(() => adminGroupsAcceptedRevision?.value, () => { if (hiddenListEnabled.value) void hiddenAccounts.load() })
+const hiddenCountForGroup = (group: AdminGroupHealth): number => group.accounts.filter(account => hiddenTargetIds.value.has(account.targetId)).length
+const hiddenDisplayName = (targetId: string, fallback?: string): string => accountNameText(accountLabelsByTarget.value[targetId]?.name, fallback, targetId.split(':').pop())
+// 页首提示里要求用户点「重新读取」的那一条（未确认、回读失败、取消屏蔽没有保存）：手动重读成功后与清单面板的未确认提示一起清除。
+let hiddenRereadNotice = ''
+const onHideAccount = async (account: AdminGroupAccount) => {
+  if (!hiddenListEnabled.value || !account.targetId || hiddenAccounts.writing.value) return
+  const name = hiddenDisplayName(account.targetId, account.name)
+  if (!confirm(`确认屏蔽「${name}」？屏蔽后它不再出现在分组健康的账号列表、批量问答、计划问答和模型管理里，也不会被模型自动关闭或恢复（已关闭的模型保持关闭）。屏蔽不改变健康探测和统计，也不改主站。如果它不需要健康探测，请到分组策略里处理（抽屉里会标出“已屏蔽”）。可在左侧「分组显示管理 → 屏蔽的账号」里取消屏蔽。`)) return
+  hiddenNotice.value = ''
+  const result = await hiddenAccounts.write(account.targetId, true, name)
+  if (!result) return
+  const { outcome, reread } = result
+  if (outcome.kind === 'saved') {
+    hiddenNotice.value = reread || !hiddenAccounts.readError.value ? '' : `已屏蔽「${name}」，但屏蔽清单没有读到：${hiddenAccounts.readError.value || '原因未知'}。页面已按本次结果隐藏它；请稍后在「分组显示管理」点「重新读取」，仍失败请检查后端服务和数据库连接。`
+    hiddenRereadNotice = hiddenNotice.value
+  } else if (outcome.kind === 'rejected') {
+    hiddenNotice.value = `屏蔽「${name}」没有保存：${hiddenWriteReason(outcome)}。${outcome.status === 400 || outcome.status === 409 ? '请刷新页面后再试' : '可以再点一次'}。`
+  } else if (hiddenAccounts.unconfirmed.value) {
+    hiddenNotice.value = `屏蔽「${name}」的结果没有确认（${hiddenWriteReason(outcome)}）：可能已经保存，也可能没有。请稍后点「分组显示管理」里的「重新读取」核对，清单里有它就是已屏蔽。`
+    hiddenRereadNotice = hiddenNotice.value
+  }
+}
+const onUnhideAccount = async (targetId: string, savedName: string) => {
+  if (!hiddenListEnabled.value || hiddenAccounts.writing.value) return
+  const name = hiddenDisplayName(targetId, savedName)
+  hiddenNotice.value = ''
+  const result = await hiddenAccounts.write(targetId, false, '')
+  if (!result) return
+  const { outcome, reread } = result
+  if (outcome.kind === 'saved') {
+    hiddenNotice.value = reread || !hiddenAccounts.readError.value ? `已取消屏蔽「${name}」。如果它仍在原来的分组里，会重新显示。` : `已取消屏蔽「${name}」，但屏蔽清单没有读到：${hiddenAccounts.readError.value || '原因未知'}。请稍后点「重新读取」。`
+    hiddenRereadNotice = reread || !hiddenAccounts.readError.value ? '' : hiddenNotice.value
+  } else if (outcome.kind === 'rejected') {
+    hiddenNotice.value = `取消屏蔽「${name}」没有保存：${hiddenWriteReason(outcome)}。请点「重新读取」确认它现在的状态后再试。`
+    hiddenRereadNotice = hiddenNotice.value
+  } else if (hiddenAccounts.unconfirmed.value) {
+    hiddenNotice.value = `取消屏蔽「${name}」的结果没有确认（${hiddenWriteReason(outcome)}）：可能已经生效，也可能没有。请稍后点「重新读取」核对。`
+    hiddenRereadNotice = hiddenNotice.value
+  }
+}
+const reloadHiddenAccounts = async () => {
+  const notice = hiddenRereadNotice
+  if (await hiddenAccounts.load(true) && notice && hiddenNotice.value === notice) {
+    hiddenNotice.value = ''
+    hiddenRereadNotice = ''
+  }
 }
 
 watch(preferenceScope, (scope, previous) => {
@@ -1643,6 +1707,8 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
 
     <p v-if="errorKey" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">{{ readableMessage(errorKey) }}</p>
     <p v-if="focusNotice" role="status" data-group-focus-notice class="rounded-lg bg-warning/10 px-4 py-3 text-sm text-warning">{{ focusNotice }}</p>
+    <p v-if="hiddenNotice" role="status" data-testid="hidden-accounts-notice" class="break-words rounded-lg bg-surface px-4 py-3 text-sm text-foreground">{{ hiddenNotice }}</p>
+    <p v-if="hiddenListEnabled && hiddenAccounts.status.value === 'failed'" role="status" data-testid="hidden-accounts-never-loaded" class="break-words rounded-lg bg-warning/10 px-4 py-3 text-sm text-warning">屏蔽清单还没读到：{{ hiddenAccounts.readError.value }}。已屏蔽的账号可能暂时显示出来。请点「重新读取」，仍失败请检查后端服务和数据库连接。 <button type="button" class="underline" @click="reloadHiddenAccounts">重新读取</button></p>
 
     <section class="overflow-hidden rounded-lg border border-border/60 bg-card text-card-foreground shadow-sm">
       <div v-if="isLoading && adminGroups.length === 0" class="grid min-h-[34rem] lg:grid-cols-[19rem_minmax(0,1fr)]">
@@ -1662,14 +1728,15 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
           <div class="grid grid-cols-2">
           <QuestionAnswerBatchDrawer :account-labels="accountLabelsByTarget"
             :groups="orderedGroups"
+            :hidden-target-ids="hiddenTargetIds"
             :preference-scope="preferenceScope"
             :preferences="preferences.questionAnswer"
             @preferences-changed="onQuestionAnswerPreferencesReplaced"
             @question-answer-started="onQuestionAnswerStarted"
             @question-answer-view="onQuestionAnswerView"
           />
-          <QuestionAnswerScheduleDrawer :account-labels="accountLabelsByTarget" :groups="orderedGroups" :workspace="preferenceScope" :platform="currentAccount?.platform ?? ''" :preferences="preferences.questionAnswer" :stats-revision="scheduleStatsRevision" @question-answer-view="onScheduleQuestionAnswerView" @settled="onScheduleSettled" />
-          <QuestionAnswerModelControlDrawer :account-labels="accountLabelsByTarget" :groups="orderedGroups" :workspace="preferenceScope" :platform="currentAccount?.platform ?? ''" :refresh-key="scheduleStatsRevision" @question-answer-view="onQuestionAnswerView" @batch-view="onScheduleQuestionAnswerView" @settled="recentSummaries.refreshTargets($event)" />
+          <QuestionAnswerScheduleDrawer :account-labels="accountLabelsByTarget" :groups="orderedGroups" :hidden-target-ids="hiddenTargetIds" :workspace="preferenceScope" :platform="currentAccount?.platform ?? ''" :preferences="preferences.questionAnswer" :stats-revision="scheduleStatsRevision" @question-answer-view="onScheduleQuestionAnswerView" @settled="onScheduleSettled" />
+          <QuestionAnswerModelControlDrawer :account-labels="accountLabelsByTarget" :groups="orderedGroups" :hidden-group-ids="preferences.hiddenGroupIds" :hidden-target-ids="hiddenTargetIds" :hidden-list-pending="hiddenListEnabled && hiddenAccounts.status.value !== 'loaded'" :workspace="preferenceScope" :platform="currentAccount?.platform ?? ''" :refresh-key="scheduleStatsRevision" @question-answer-view="onQuestionAnswerView" @batch-view="onScheduleQuestionAnswerView" @settled="recentSummaries.refreshTargets($event)" />
           </div>
           <div class="space-y-3 border-b border-border/50 p-4">
             <div class="relative">
@@ -1736,6 +1803,25 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
                   <ChevronDown class="h-4 w-4" />
                 </button>
               </div>
+              <div v-if="hiddenListEnabled" data-testid="hidden-accounts-panel" class="space-y-2 border-t border-border/50 px-1 pt-2">
+                <div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>屏蔽的账号（{{ hiddenAccounts.items.value.length }}）</span>
+                  <button type="button" class="underline disabled:opacity-50" :disabled="hiddenAccounts.writing.value" @click="reloadHiddenAccounts">重新读取</button>
+                </div>
+                <p class="text-[11px] leading-5 text-muted-foreground">这里的账号不出现在分组健康的账号列表、批量和计划问答、模型管理里，也不会被模型自动关闭或恢复。屏蔽不改变健康探测和统计；需要时请在分组策略里处理。屏蔽保存在服务器，换电脑也生效；上面的分组显示和排序只保存在当前浏览器。</p>
+                <p v-if="hiddenAccounts.writing.value" class="text-[11px] text-muted-foreground">正在保存屏蔽设置…</p>
+                <p v-if="hiddenAccounts.unconfirmed.value" role="status" class="break-words text-[11px] text-warning">有一次屏蔽设置的结果没有确认（{{ hiddenAccounts.unconfirmed.value }}）。请稍后点「重新读取」核对。</p>
+                <p v-if="hiddenAccounts.status.value === 'failed'" class="break-words text-[11px] text-destructive">屏蔽清单还没读到：{{ hiddenAccounts.readError.value }}。已屏蔽的账号可能暂时显示出来。请点「重新读取」，仍失败请检查后端服务和数据库连接。</p>
+                <p v-else-if="hiddenAccounts.readError.value" class="break-words text-[11px] text-destructive">屏蔽清单这次没读到：{{ hiddenAccounts.readError.value }}。下面是上次读到的清单。</p>
+                <p v-if="hiddenAccounts.status.value === 'loaded' && hiddenAccounts.items.value.length === 0" class="text-[11px] text-muted-foreground">还没有屏蔽的账号。在账号行点「屏蔽」图标即可加入。</p>
+                <div v-for="item in hiddenAccounts.items.value" :key="`hidden:${item.targetId}`" data-testid="hidden-account-row" class="flex items-center justify-between gap-2 rounded-md px-1 py-1 text-xs hover:bg-surface/60">
+                  <span class="min-w-0 flex-1">
+                    <span class="block truncate text-foreground" :title="hiddenDisplayName(item.targetId, item.accountName)">{{ hiddenDisplayName(item.targetId, item.accountName) }}</span>
+                    <span class="block text-[11px] text-muted-foreground">{{ formatLastUsedAt(new Date(item.hiddenAt)) }} 屏蔽</span>
+                  </span>
+                  <button type="button" class="shrink-0 rounded-md border border-border/60 px-2 py-1 text-[11px] disabled:opacity-50" :disabled="hiddenAccounts.writing.value" @click="onUnhideAccount(item.targetId, item.accountName)">取消屏蔽</button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1766,7 +1852,7 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
                     <ArrowDownUp v-if="group.priorityMode === 'multiplier'" class="h-3.5 w-3.5 shrink-0 text-primary" />
                   </span>
                   <span class="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                    <span>{{ t('admin.connectionHealth.groupList.monitored', { count: group.monitoredAccountCount ?? 0, total: group.accountCount }) }}</span>
+                    <span>{{ t('admin.connectionHealth.groupList.monitored', { count: group.monitoredAccountCount ?? 0, total: group.accountCount }) }}<template v-if="hiddenCountForGroup(group)"> · 已屏蔽 {{ hiddenCountForGroup(group) }}</template></span>
                     <span>{{ group.multiplierDisplay || '-' }}</span>
                   </span>
                   <span class="mt-1 grid grid-cols-2 gap-x-2 text-[11px] leading-tight text-muted-foreground/80" :title="'按新加坡当天统计；近一小时需要同一天的完整记录，记录不足时显示未知。费用显示不会改变主站调度。' + groupCostReasonDisplay(group.costReason)">
@@ -1790,6 +1876,8 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
           v-else
           :key="selectedGroup.id"
           :group="selectedGroup"
+          :hidden-target-ids="hiddenTargetIds"
+          :hide-enabled="hiddenListEnabled && !hiddenAccounts.writing.value"
           :focused-account-ids="focusAccountTarget?.groupId === selectedGroup.id ? focusAccountTarget.accountIds : []"
           :focused-account-labels="focusAccountTarget?.groupId === selectedGroup.id ? focusedAccountLabels : {}"
           :hide-unmonitored-accounts="preferences.hideUnmonitoredAccounts"
@@ -1809,6 +1897,7 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
           @quick-probe="onQuickProbeAccount"
           @view-events="onViewEventsAccount"
           @set-schedulable="onSetTargetSchedulable"
+          @hide-account="onHideAccount"
           @assign-policy="onAssignPolicy"
           @tier-saved="onAccountTierSaved"
           @priority-saved="applyAccountPriority"
@@ -1819,6 +1908,7 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
     </section>
 
     <GroupHealthSetupDrawer :account-labels="accountLabelsByTarget"
+      :hidden-target-ids="hiddenTargetIds"
       :open="setupDrawerOpen"
       :workspace-platform="currentAccount?.platform ?? ''"
       :group="setupGroup"

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"transithub/backend/internal/shared/httpjson"
 )
 
@@ -119,9 +120,8 @@ func (h *Handler) listModelControlItems(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	ws, err := h.service.modelControlScope(r.Context(), user, "")
-	if err != nil {
-		writeModelControlError(w, err)
+	ws, ok := h.modelControlRequestScope(w, r, user)
+	if !ok {
 		return
 	}
 	page, err := modelControlPage(r)
@@ -142,6 +142,16 @@ func (h *Handler) listModelControlItems(w http.ResponseWriter, r *http.Request) 
 		writeModelControlError(w, err)
 		return
 	}
+	// excludeTargetIds：页面按屏蔽清单和左侧隐藏分组算出的“不显示账号”，条目与计数都去掉。
+	if excluded := modelControlExcludedTargetIDs(r); len(excluded) > 0 {
+		kept := make([]ModelControlItem, 0, len(all))
+		for _, i := range all {
+			if !excluded[i.TargetID] {
+				kept = append(kept, i)
+			}
+		}
+		all = kept
+	}
 	model := r.URL.Query().Get("modelName")
 	items := []ModelControlItem{}
 	for _, i := range all {
@@ -152,6 +162,10 @@ func (h *Handler) listModelControlItems(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 		items = append(items, i)
+	}
+	if r.URL.Query().Get("all") == "1" {
+		httpjson.Write(w, 200, map[string]any{"items": items, "page": 1, "totalPages": 1, "counts": modelControlCounts(all)})
+		return
 	}
 	pages := (len(items) + 49) / 50
 	start := (page - 1) * 50
@@ -260,12 +274,66 @@ func (h *Handler) getModelControlVerifyTargets(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	ids, err := h.service.ModelControlVerifyTargets(r.Context(), user)
+	ws, ok := h.modelControlRequestScope(w, r, user)
+	if !ok {
+		return
+	}
+	ids, err := h.service.modelControlVerifyTargetsFor(r.Context(), user, ws)
 	if err != nil {
 		writeModelControlError(w, err)
 		return
 	}
 	httpjson.Write(w, 200, map[string]any{"targetIds": ids})
+}
+
+// modelControlRequestScope：请求带 workspace 时先与当前工作区比对（另一页面已切换，包括切到非 Sub2API 工作区，都返回 409），
+// 一致后再对同一工作区做会话和平台校验；校验期间又被切换时再比对一次。不带 workspace 的旧调用保持原行为。
+func (h *Handler) modelControlRequestScope(w http.ResponseWriter, r *http.Request, user string) (string, bool) {
+	if strings.TrimSpace(r.URL.Query().Get("workspace")) != "" {
+		if current, err := h.service.currentAdminAccountID(r.Context(), user); err == nil && rejectModelControlWorkspaceMismatch(w, r, current) {
+			return "", false
+		}
+	}
+	ws, err := h.service.modelControlScope(r.Context(), user, "")
+	if err != nil {
+		// 校验期间另一页面切走（例如切到非 Sub2API 工作区）时，按工作区已切换返回 409，而不是平台或会话错误。
+		if strings.TrimSpace(r.URL.Query().Get("workspace")) != "" {
+			if current, currentErr := h.service.currentAdminAccountID(r.Context(), user); currentErr == nil && rejectModelControlWorkspaceMismatch(w, r, current) {
+				return "", false
+			}
+		}
+		writeModelControlError(w, err)
+		return "", false
+	}
+	if rejectModelControlWorkspaceMismatch(w, r, ws) {
+		return "", false
+	}
+	return ws, true
+}
+
+// rejectModelControlWorkspaceMismatch：请求带了 workspace 但与服务器当前工作区不同（另一页面已切换）时返回 409。
+// 不带 workspace 的旧调用保持原行为。
+func rejectModelControlWorkspaceMismatch(w http.ResponseWriter, r *http.Request, current string) bool {
+	workspace := strings.TrimSpace(r.URL.Query().Get("workspace"))
+	if workspace == "" || workspace == current {
+		return false
+	}
+	httpjson.Write(w, http.StatusConflict, map[string]string{"message": ErrorWorkspaceChanged, "detail": "读取模型管理失败：当前工作区已在其他页面切换，请刷新页面后再打开模型管理；这次只读取，没有改动任何设置。"})
+	return true
+}
+
+func modelControlExcludedTargetIDs(r *http.Request) map[string]bool {
+	raw := strings.TrimSpace(r.URL.Query().Get("excludeTargetIds"))
+	if raw == "" {
+		return nil
+	}
+	result := map[string]bool{}
+	for _, id := range strings.Split(raw, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			result[id] = true
+		}
+	}
+	return result
 }
 func (h *Handler) verifyModelControl(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.questionAnswerScheduleUser(w, r, true)

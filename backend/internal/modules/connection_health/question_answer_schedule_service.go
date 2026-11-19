@@ -202,7 +202,16 @@ func (s *Service) resolveQuestionAnswerScheduleTargets(ctx context.Context, user
 		}
 		targetIDs = append(targetIDs, config.SelectedAccountTargetIDs...)
 	} else {
+		// 按分组方式时，去掉被屏蔽的成员（屏蔽只影响测试选择，不改健康管理）。
+		// 指定账号方式按用户明确勾选的账号测试，不在这里过滤。
+		hidden, err := s.hiddenAccountTargetSet(ctx, user, workspace)
+		if err != nil {
+			return result, requestError(ErrorHiddenAccountsRead)
+		}
 		for id := range selectedAccounts {
+			if hidden[id] {
+				continue
+			}
 			targetIDs = append(targetIDs, id)
 		}
 	}

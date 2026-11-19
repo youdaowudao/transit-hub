@@ -12,6 +12,7 @@ import QuestionAnswerRecordCard from '@/modules/admin/components/dashboard/Quest
 import QuestionAnswerScheduleBatchDialog from '@/modules/admin/components/dashboard/QuestionAnswerScheduleBatchDialog.vue'
 import type { AdminGroupHealth, AdminGroupTestConfiguration, GroupTestConfiguration, TestProtocol, QuestionAnswerRecord } from '@/modules/admin/types/connectionHealth'
 import { questionAnswerFixtureStats } from './fixtures/c1QuestionAnswerHistory'
+import { selectAllBatchTargets } from './fixtures/batchDrawerSelection'
 
 const copy = {
   option: 'Messages（Anthropic 原生接口）',
@@ -234,9 +235,11 @@ describe('C4.4 streaming question-answer retained component paths', () => {
     const preferences = { ...createDefaultQuestionAnswerPreferences(), modelIds: [model.id], questionIds: ['c44-question'], batchTargetIds: [targetId] }
     const wrapper = mount(QuestionAnswerBatchDrawer, { ...setup, props: { groups: [current], preferenceScope: 'c44-preview', preferences } })
     wrappers.push(wrapper)
-    await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click')
+    await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await selectAllBatchTargets(wrapper)
     await flushPromises()
-    const preview = wrapper.get(`[data-testid="question-answer-batch-preview-${targetId}"]`)
+    // 新版抽屉把协议与超时说明放在「查看每个账号的明细」里。
+    await wrapper.findAll('button').find(button => button.text() === '查看每个账号的明细')!.trigger('click')
+    const preview = wrapper.get(`[data-testid="question-answer-batch-detail-${targetId}"]`)
     expect(preview.text()).toContain(c44Copy.timeout)
     expect(preview.text()).not.toContain('问答每题仍为 10 分钟')
     expect(writes).toEqual([])

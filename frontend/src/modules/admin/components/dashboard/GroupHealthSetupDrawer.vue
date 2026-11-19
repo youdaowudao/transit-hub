@@ -32,6 +32,8 @@ type ModelSuggestionSource = 'common' | 'discovered' | 'none'
 
 const props = defineProps<{
   accountLabels?: import('../../utils/connectionHealthAccountLabel').AccountLabels
+  /** 屏蔽清单：抽屉照常列出这些账号，只在名字后标「已屏蔽」，方便用户在这里取消勾选以停止探测。 */
+  hiddenTargetIds?: Set<string>
   open: boolean
   workspacePlatform: string
   group: AdminGroupHealth | null
@@ -758,7 +760,7 @@ const close = () => {
                     >
                     <span class="min-w-0 flex-1">
                       <span class="flex flex-wrap items-center gap-2">
-                        <span class="break-words text-sm font-medium text-foreground">{{ accountReminderLabel(accountLabelForTarget(accountLabels, account.targetId, account.name)) }}</span>
+                        <span class="break-words text-sm font-medium text-foreground">{{ accountReminderLabel(accountLabelForTarget(accountLabels, account.targetId, account.name)) }}<span v-if="hiddenTargetIds?.has(account.targetId)" data-testid="setup-hidden-account-tag" class="ml-1.5 rounded bg-surface px-1.5 py-0.5 text-[11px] font-normal text-muted-foreground">已屏蔽</span></span>
                         <span class="text-xs text-muted-foreground">{{ account.status || '-' }}</span>
                       </span>
                       <span class="mt-1 block truncate text-xs text-muted-foreground">{{ account.models || t(`${prefix}.scope.modelsUnknown`) }}</span>

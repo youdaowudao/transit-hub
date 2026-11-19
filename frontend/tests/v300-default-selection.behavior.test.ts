@@ -7,6 +7,7 @@ import { c2Groups } from './fixtures/c2QuestionAnswerSchedules'
 import { c32AutoSettings } from './fixtures/c32ModelControl'
 import { batch, emptyBatch, now, target, targetId } from './fixtures/v2911ModelControl'
 import { questionAnswerFixtureStats } from './fixtures/c1QuestionAnswerHistory'
+import { selectAllBatchTargets } from './fixtures/batchDrawerSelection'
 const api = vi.hoisted(() => Object.fromEntries(['discoverTargetModels', 'listTestQuestions', 'getLatestQuestionAnswerBatch', 'getQuestionAnswerHistory', 'getQuestionAnswerBatch', 'startQuestionAnswerBatch', 'getModelControlTarget', 'getModelControlAutoSettings', 'getModelControlSettings', 'verifyModelControl'].map(name => [name, vi.fn()])))
 vi.mock('@/modules/admin/api/connectionHealth', async original => ({ ...await original<typeof import('@/modules/admin/api/connectionHealth')>(), ...api }))
 const wrappers: VueWrapper[] = []
@@ -40,15 +41,15 @@ describe('V3.0.0 restored defaults stay explicit without a contradictory post-su
   api.listTestQuestions.mockResolvedValue([{ id: 'disabled', name: '旧停用题', body: '旧题', keywords: [], enabled: false, isDefault: false, createdAt: now, updatedAt: now }, { id: 'q', name: '启用默认题', body: '答案', keywords: ['答案'], enabled: true, isDefault: true, createdAt: now, updatedAt: now }])
   const groups = c2Groups(); groups[0]!.accounts = [{ ...groups[0]!.accounts[0]!, targetId }]
   const w = mount(Drawer, { props: { groups, preferenceScope: 'ws1', preferences: { ...preferences, modelIds: ['A'], questionIds: ['disabled'], repeatCount: 2, batchTargetIds: [targetId] } }, global: { stubs: { Teleport: true } } }); wrappers.push(w)
-  await w.get('[data-testid="question-answer-batch-open"]').trigger('click'); await flushPromises()
-  const config = w.get('[data-testid="question-answer-batch-config"]'); expect(config.text()).toContain('启用默认题'); expect(config.text()).not.toContain('旧停用题'); expect(config.text()).toContain('每组合 2 次'); expect(w.text()).toContain(text); expect(api.startQuestionAnswerBatch).not.toHaveBeenCalled()
+  await w.get('[data-testid="question-answer-batch-open"]').trigger('click'); await selectAllBatchTargets(w); await flushPromises()
+  const config = w.get('[data-testid="question-answer-batch-step-questions"]'); expect(config.text()).toContain('启用默认题'); expect(config.text()).not.toContain('旧停用题'); expect((config.get('input[data-question-id="q"]').element as HTMLInputElement).checked).toBe(true); expect((w.get('[data-testid="question-answer-batch-repeat"]').element as HTMLSelectElement).value).toBe('2'); expect(w.text()).toContain(text); expect(api.startQuestionAnswerBatch).not.toHaveBeenCalled()
   await w.get('[data-testid="question-answer-batch-start"]').trigger('click'); await flushPromises(); expect(api.startQuestionAnswerBatch.mock.calls[0]!.slice(0, 5)).toEqual([targetId, ['A'], ['q'], 'medium', 2]); expect(w.text()).not.toContain(text)
  })
  it('C1 restored preparation is visible before requests, and the notice does not return after completion', async () => {
   const groups = c2Groups(); groups[0]!.accounts = [{ ...groups[0]!.accounts[0]!, targetId }]
   let resolve!: (value: ReturnType<typeof batch>) => void; api.startQuestionAnswerBatch.mockReturnValueOnce(new Promise(done => { resolve = done }))
   const w = mount(Drawer, { props: { groups, preferenceScope: 'ws1', preferences: { ...preferences, batchTargetIds: [targetId] } }, global: { stubs: { Teleport: true } } }); wrappers.push(w)
-  await w.get('[data-testid="question-answer-batch-open"]').trigger('click'); await flushPromises(); expect(w.text()).toContain(text); expect(api.startQuestionAnswerBatch).not.toHaveBeenCalled()
+  await w.get('[data-testid="question-answer-batch-open"]').trigger('click'); await selectAllBatchTargets(w); await flushPromises(); expect(w.text()).toContain(text); expect(api.startQuestionAnswerBatch).not.toHaveBeenCalled()
   await w.get('[data-testid="question-answer-batch-start"]').trigger('click'); await flushPromises(); expect(api.startQuestionAnswerBatch).toHaveBeenCalledTimes(1); expect(w.text()).not.toContain(text)
   resolve(batch()); await flushPromises(); expect(w.text()).not.toContain(text)
  })

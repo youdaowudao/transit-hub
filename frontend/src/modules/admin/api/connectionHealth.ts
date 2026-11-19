@@ -1283,11 +1283,97 @@ export const saveModelControlAutoSettings = async (settings: ModelControlAutoSet
 export const getModelControlSettings = (signal?: AbortSignal): Promise<ModelControlSettings> => requestJson(`${modelControlPath}/settings`, { signal })
 export const saveModelControlSettings = (settings: Omit<ModelControlSettings, 'version'>, expectedVersion: number, signal?: AbortSignal): Promise<ModelControlSettings> => requestJson(`${modelControlPath}/settings`, { method: 'PUT', body: JSON.stringify({ minAccuracyPercent: settings.minAccuracyPercent, minJudgedAnswers: settings.minJudgedAnswers, expectedVersion }), signal })
 export const getModelControlTarget = (targetId: string, signal?: AbortSignal): Promise<{ targetId: string; items: ModelControlItem[]; candidates: string[] }> => modelControlItemRequest(`${modelControlPath}/targets/${encodeURIComponent(targetId)}`, { signal }, value => parseModelControlItems(value, targetId), { stage: 'read', targetId })
-export const listModelControlItems = (view: 'attention' | 'all', modelName: string, page: number, signal?: AbortSignal): Promise<ModelControlPage<ModelControlItem> & { counts: ModelControlCounts }> => modelControlItemRequest(`${modelControlPath}/items?${new URLSearchParams({ view, modelName, page: String(page) })}`, { signal }, parseModelControlItems, { stage: 'read' })
+export interface ModelControlListScope { workspace: string; excludeTargetIds: string[] }
+const modelControlScopeParams = (scope?: ModelControlListScope): Record<string, string> => scope ? { all: '1', workspace: scope.workspace, ...(scope.excludeTargetIds.length ? { excludeTargetIds: scope.excludeTargetIds.join(',') } : {}) } : {}
+export const listModelControlItems = (view: 'attention' | 'all', modelName: string, page: number, signal?: AbortSignal, scope?: ModelControlListScope): Promise<ModelControlPage<ModelControlItem> & { counts: ModelControlCounts }> => modelControlItemRequest(`${modelControlPath}/items?${new URLSearchParams({ view, modelName, page: String(page), ...modelControlScopeParams(scope) })}`, { signal }, parseModelControlItems, { stage: 'read' })
 export const addModelControlManaged = (targetId: string, modelName: string, signal?: AbortSignal): Promise<ModelControlItem> => modelControlItemRequest(`${modelControlPath}/managed`, { method: 'POST', body: JSON.stringify({ targetId, modelName }), signal }, value => parseModelControlItem(value, targetId, modelName), { stage: 'manage', targetId, modelName })
 export const removeModelControlManaged = (targetId: string, modelName: string, expectedVersion: number, abandonClosed: boolean, signal?: AbortSignal): Promise<void> => modelControlItemRequest(`${modelControlPath}/managed`, { method: 'DELETE', body: JSON.stringify({ targetId, modelName, expectedVersion, abandonClosed }), signal }, value => value, { stage: 'manage', targetId, modelName })
 export const previewModelControl = (targetId: string, modelName: string, operation: ModelControlOperation, basis: ModelControlBasis, signal?: AbortSignal): Promise<ModelControlPreview> => modelControlItemRequest(`${modelControlPath}/preview`, { method: 'POST', body: JSON.stringify({ targetId, modelName, operation, basis }), signal }, value => parseModelControlPreview(value, targetId, modelName), { stage: 'preview', targetId, modelName })
 export const executeModelControl = (targetId: string, modelName: string, operation: ModelControlOperation, basis: ModelControlBasis, planFingerprint: string, confirmWithoutEvidence: boolean, signal?: AbortSignal): Promise<ModelControlResult> => modelControlItemRequest(`${modelControlPath}/${operation === 'close_account' ? 'close-account' : operation}`, { method: 'POST', body: JSON.stringify({ targetId, modelName, basis, planFingerprint, ...(operation !== 'close_account' ? { confirmWithoutEvidence } : {}) }), signal }, value => { if (!modelControlObject(value)) modelControlInvalid('对象不匹配'); parseModelControlItem(value.item, targetId, modelName); if (!['closed', 'restored', 'added', 'partial', 'failed', 'blocked', 'unknown'].includes(value.outcome ?? '') || typeof value.reasonKey !== 'string' || !modelControlEntries(value.entries) || !modelControlSources(value.groups) || !Array.isArray(value.hintKeys) || !value.hintKeys.every(hint => typeof hint === 'string') || (value.errorKey !== undefined && typeof value.errorKey !== 'string')) modelControlInvalid('无效执行结果'); return value }, { stage: 'execute', targetId, modelName })
-export const getModelControlVerifyTargets = (signal?: AbortSignal): Promise<{ targetIds: string[] }> => requestJson(`${modelControlPath}/verify-targets`, { signal })
+export const getModelControlVerifyTargets = (signal?: AbortSignal, workspace?: string): Promise<{ targetIds: string[] }> => requestJson(`${modelControlPath}/verify-targets${workspace ? `?${new URLSearchParams({ workspace })}` : ''}`, { signal })
 export const verifyModelControl = (targetIds: string[], signal?: AbortSignal): Promise<{ items: ModelControlItem[]; errors: Array<{ targetId: string; reasonKey: string }> }> => modelControlItemRequest(`${modelControlPath}/verify`, { method: 'POST', body: JSON.stringify({ targetIds }), signal }, value => { parseModelControlItems(value); if (value.items.some(item => !targetIds.includes(item.targetId)) || !Array.isArray(value.errors) || !value.errors.every(error => modelControlObject(error) && targetIds.includes(error.targetId) && typeof error.reasonKey === 'string')) modelControlInvalid('对象不匹配'); return value }, { stage: 'read', targetIds })
 export const listModelControlEvents = async (targetId: string, modelName: string, page: number, signal?: AbortSignal): Promise<ModelControlPage<ModelControlEvent>> => { const value = await requestJson<ModelControlPage<ModelControlEvent>>(`${modelControlPath}/events?${new URLSearchParams({ targetId, modelName, page: String(page) })}`, { signal }); if (value.items.some(event => event.actorUserId !== undefined && typeof event.actorUserId !== 'string')) throw new Error('admin.connectionHealth.errors.request'); return value }
+
+// 屏蔽清单：只影响分组健康页显示、批量/计划问答选择和模型自动关闭恢复，不改健康管理。
+// 这里自己解析响应，区分“成功”“服务器明确拒绝（没有保存）”“结果未确认”，不使用通用请求函数补的默认错误键。
+export interface HiddenAccount { targetId: string; accountName: string; hiddenAt: string }
+export interface HiddenAccountList { workspaceId: string; items: HiddenAccount[] }
+export type HiddenAccountWriteOutcome =
+  | { kind: 'saved'; targetId: string; hidden: boolean; hiddenAt?: string }
+  | { kind: 'rejected'; status: number; errorKey: string; detail?: string }
+  | { kind: 'unknown'; reason: 'network' | 'unparseable' | 'server'; status?: number; errorKey?: string }
+
+export class HiddenAccountsReadError extends Error {
+  constructor(readonly reason: 'network' | 'unparseable' | 'server' | 'workspace', readonly status?: number, readonly errorKey?: string, readonly detail?: string) {
+    super(errorKey || 'admin.connectionHealth.errors.request')
+    this.name = 'HiddenAccountsReadError'
+  }
+}
+
+const hiddenAccountsPath = '/connection-health/hidden-accounts'
+const hiddenAccountsFetch = async (path: string, init: RequestInit): Promise<{ status: number; body: unknown; parsed: boolean } | null> => {
+  let response: Response
+  try {
+    response = await fetch(endpoint(path), { ...init, headers: { Accept: 'application/json', 'Content-Type': 'application/json', ...authHeaders(), ...(init.headers ?? {}) } })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error
+    return null
+  }
+  let body: unknown = null
+  let parsed = false
+  try {
+    const text = await response.text()
+    body = text ? JSON.parse(text) : null
+    parsed = true
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error
+  }
+  const record = body && typeof body === 'object' && !Array.isArray(body) ? body as Record<string, unknown> : {}
+  if (isUnauthorizedApiResponse(response.status, { message: typeof record.message === 'string' ? record.message : undefined })) {
+    handleAuthExpired()
+    throw new Error(authUnauthorizedErrorKey)
+  }
+  return { status: response.status, body, parsed }
+}
+const hiddenAccountRecord = (value: unknown): Record<string, unknown> => (value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {})
+const serverErrorKey = (value: unknown): string | undefined => {
+  const record = hiddenAccountRecord(value)
+  return typeof record.message === 'string' && record.message ? record.message : (typeof record.error === 'string' && record.error ? record.error : undefined)
+}
+
+export const listHiddenAccounts = async (workspace: string, signal?: AbortSignal): Promise<HiddenAccountList> => {
+  const result = await hiddenAccountsFetch(`${hiddenAccountsPath}?${new URLSearchParams({ workspace })}`, { signal })
+  if (!result) throw new HiddenAccountsReadError('network')
+  if (!result.parsed) throw new HiddenAccountsReadError('unparseable', result.status)
+  const record = hiddenAccountRecord(result.body)
+  if (result.status === 409 && serverErrorKey(record) === 'admin.connectionHealth.errors.workspaceChanged') {
+    throw new HiddenAccountsReadError('workspace', 409, serverErrorKey(record), typeof record.detail === 'string' ? record.detail : undefined)
+  }
+  if (result.status < 200 || result.status >= 300) throw new HiddenAccountsReadError('server', result.status, serverErrorKey(record))
+  const items = record.items
+  const valid = typeof record.workspaceId === 'string' && Array.isArray(items) && items.every(item => {
+    const value = hiddenAccountRecord(item)
+    return typeof value.targetId === 'string' && value.targetId !== '' && typeof value.accountName === 'string' && typeof value.hiddenAt === 'string'
+  })
+  if (!valid) throw new HiddenAccountsReadError('unparseable', result.status)
+  return { workspaceId: record.workspaceId as string, items: (items as HiddenAccount[]).map(item => ({ targetId: item.targetId, accountName: item.accountName, hiddenAt: item.hiddenAt })) }
+}
+
+const writeHiddenAccount = async (targetId: string, hidden: boolean, accountName: string): Promise<HiddenAccountWriteOutcome> => {
+  const result = await hiddenAccountsFetch(`${hiddenAccountsPath}/${encodeURIComponent(targetId)}`, hidden
+    ? { method: 'PUT', body: JSON.stringify({ accountName }) }
+    : { method: 'DELETE' })
+  if (!result) return { kind: 'unknown', reason: 'network' }
+  if (!result.parsed) return { kind: 'unknown', reason: 'unparseable', status: result.status }
+  const record = hiddenAccountRecord(result.body)
+  if (result.status >= 200 && result.status < 300) {
+    const valid = record.targetId === targetId && record.hidden === hidden && (!hidden || typeof record.hiddenAt === 'string')
+    if (!valid) return { kind: 'unknown', reason: 'unparseable', status: result.status }
+    return { kind: 'saved', targetId, hidden, ...(hidden ? { hiddenAt: record.hiddenAt as string } : {}) }
+  }
+  const errorKey = serverErrorKey(record)
+  if (result.status >= 400 && result.status < 500 && errorKey) return { kind: 'rejected', status: result.status, errorKey, ...(typeof record.detail === 'string' ? { detail: record.detail } : {}) }
+  return { kind: 'unknown', reason: 'server', status: result.status, ...(errorKey ? { errorKey } : {}) }
+}
+export const hideAccount = (targetId: string, accountName: string): Promise<HiddenAccountWriteOutcome> => writeHiddenAccount(targetId, true, accountName)
+export const unhideAccount = (targetId: string): Promise<HiddenAccountWriteOutcome> => writeHiddenAccount(targetId, false, '')

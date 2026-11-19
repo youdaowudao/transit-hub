@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import QuestionAnswerBatchDrawer from '@/modules/admin/components/dashboard/QuestionAnswerBatchDrawer.vue'
 import type { AdminGroupHealth } from '@/modules/admin/types/connectionHealth'
 import { createDefaultConnectionHealthPreferences } from '@/modules/admin/utils/connectionHealthPreferences'
+import { selectAllBatchTargets } from './fixtures/batchDrawerSelection'
 
 const wrappers: VueWrapper[] = []
 afterEach(() => {
@@ -33,7 +34,7 @@ describe('question answer public internal-error response', () => {
       global: { stubs: { Teleport: true } },
     })
     wrappers.push(wrapper)
-    await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click')
+    await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await selectAllBatchTargets(wrapper)
     await flushPromises()
     await vi.waitFor(() => expect(wrapper.get('[data-testid="question-answer-batch-start"]').attributes('disabled')).toBeUndefined())
     await wrapper.get('[data-testid="question-answer-batch-start"]').trigger('click')

@@ -5,6 +5,7 @@ import QuestionAnswerBatchDrawer from '@/modules/admin/components/dashboard/Ques
 import { useConnectionHealth } from '@/modules/admin/composables/useConnectionHealth'
 import { questionAnswerAccuracy, formatQuestionAnswerAccuracy } from '@/modules/admin/utils/questionAnswers'
 import type { AdminGroupHealth, QuestionAnswerStats } from '@/modules/admin/types/connectionHealth'
+import { selectAllBatchTargets } from './fixtures/batchDrawerSelection'
 
 const api = vi.hoisted(() => ({ questions: vi.fn(), models: vi.fn(), start: vi.fn(), refresh: vi.fn() }))
 vi.mock('@/modules/admin/api/connectionHealth', async (importOriginal) => ({
@@ -49,6 +50,7 @@ const drawer = async () => {
   wrappers.push(wrapper)
   ;(wrapper.vm as unknown as { open: () => void }).open()
   await flushPromises()
+  await selectAllBatchTargets(wrapper)
   const button = wrapper.findAll('button').find(item => item.text().includes('开始') && !item.attributes('disabled'))
   expect(button).toBeDefined()
   await button!.trigger('click')

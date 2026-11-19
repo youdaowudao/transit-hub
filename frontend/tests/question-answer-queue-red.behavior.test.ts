@@ -4,6 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import QuestionAnswerBatchDrawer from '@/modules/admin/components/dashboard/QuestionAnswerBatchDrawer.vue'
 import type { AdminGroupHealth } from '@/modules/admin/types/connectionHealth'
 import { createDefaultConnectionHealthPreferences } from '@/modules/admin/utils/connectionHealthPreferences'
+import { selectAllBatchTargets } from './fixtures/batchDrawerSelection'
 
 let wrapper: VueWrapper | undefined
 afterEach(() => { wrapper?.unmount(); wrapper = undefined; vi.unstubAllGlobals() })
@@ -29,7 +30,7 @@ it('keeps browser waiting targets separate and never resends an uncertain creati
   wrapper = mount(QuestionAnswerBatchDrawer, {
     props: { groups, preferenceScope: 'isolated-queue-red', preferences: { ...createDefaultConnectionHealthPreferences().questionAnswer, modelIds: ['m'], questionIds: ['q'], repeatCount: 1, batchTargetIds: targets } }, global: { stubs: { Teleport: true } },
   })
-  await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click')
+  await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await selectAllBatchTargets(wrapper)
   await flushPromises()
   await vi.waitFor(() => expect(wrapper!.get('[data-testid="question-answer-batch-start"]').attributes('disabled')).toBeUndefined())
   await wrapper.get('[data-testid="question-answer-batch-start"]').trigger('click')

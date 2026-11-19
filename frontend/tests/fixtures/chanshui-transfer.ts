@@ -7,3 +7,11 @@ export function resultEnvelope(value: unknown, contentType = 'application/json',
 export function resultResponse(value: unknown, contentType = 'application/json', extra: Record<string, unknown> = {}) {
   return new Response(JSON.stringify(resultEnvelope(value, contentType, extra)), { headers: { 'Content-Type': resultContentType } })
 }
+
+export function approveFixtureStart(request: { op: string; guardStart?: boolean; generation: number; id: string; params: { expectedContext?: { protocol?: string } } }, protocol = request.params.expectedContext?.protocol) {
+  if (request.op !== 'start' || !request.guardStart) return true
+  return !window.dispatchEvent(new CustomEvent('chanshui.before-start', {
+    cancelable: true,
+    detail: { generation: request.generation, id: request.id, protocol },
+  }))
+}

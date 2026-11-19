@@ -54,13 +54,13 @@ export function readableReportError(value: unknown): string {
   return [text(e.message), text(e.detail)].filter((s, i, all) => s && all.indexOf(s) === i).join('。');
 }
 
-export function HubProbeEvidence({ item }: { item: HubItem }) {
+export function HubProbeEvidence({ item, verifiedCache = false, previous = false, inlineCache = false }: { item: HubItem; verifiedCache?: boolean; previous?: boolean; inlineCache?: boolean }) {
   const e = object(item.result?.evidence), kind = item.definition.kind;
   const judgment = object(item.result?.judgment);
   const judgmentStatus = typeof item.result?.judgment === 'string' ? item.result.judgment : text(judgment.status);
   if (['not_asked', 'not_applicable'].includes(judgmentStatus)) return null;
   const has = Object.keys(e).length > 0;
-  if (item.status === 'queued' || item.status === 'running') return <p className="muted">{item.status === 'queued' ? '本项尚未执行；当前没有结果。' : '本项正在检测，等待上游结果。'}</p>;
+  if ((item.status === 'queued' || item.status === 'running') && !(verifiedCache && previous)) return <p className="muted">{item.status === 'queued' ? '本项尚未执行；当前没有结果。' : '本项正在检测，等待上游结果。'}</p>;
   if (!has) return ['iq', 'vision', 'fingerprint_behavior'].includes(kind) ? null : <p className="muted">本项尚无可确认的检测证据，请查看本项错误或报告状态。</p>;
   if (kind === 'tools' || kind === 'web') {
     const details = object(e.evidence), sources = Array.isArray(details.sources) ? details.sources : [];
@@ -68,22 +68,25 @@ export function HubProbeEvidence({ item }: { item: HubItem }) {
   }
   if (kind === 'cache') {
     const samples = rows(e.samples) as Partial<CacheSample>[];
+    const pass = verifiedCache && judgmentStatus !== 'known' ? undefined : bool(e.pass);
     return <div>
-      <div className="metric-line"><strong className={e.pass === true ? 'good' : 'warn'}>{e.pass === false ? '未对齐' : capabilityLabel(bool(e.pass))}</strong></div>
+      {verifiedCache && samples.length > 0 && <p className="muted">本题已保存样本{previous ? '（上次结果）' : ''}</p>}
+      {!inlineCache && <div className="metric-line"><strong className={pass === true ? 'good' : 'warn'}>{verifiedCache ? pass === undefined ? '尚未确认' : capabilityLabel(pass) : pass === false ? '未对齐' : capabilityLabel(pass)}</strong></div>}
       <p className="muted">{cacheValidationReason(text(e.reason))}</p>
       <div className="cache-rates">
         <div><span>末轮缓存命中率</span><strong>{cacheRate(cacheSampleHitRate(samples.at(-1)))}</strong></div>
         <div><span>已记录轮数</span><strong>{samples.length} / 6</strong></div>
       </div>
       <div className="table-wrap"><table className="cache-table">
-        <thead><tr><th>请求</th><th>读取</th><th>写入</th><th>输入</th><th>输出</th><th>命中率</th></tr></thead>
+        <thead><tr><th>请求</th><th>读取</th><th>写入</th><th>{verifiedCache ? '总输入' : '输入'}</th><th>输出</th><th>命中率</th>{verifiedCache && <th>状态</th>}</tr></thead>
         <tbody>{samples.map((sample, i) => <tr key={sample.index ?? i}>
           <td>#{String(sample.index ?? i + 1)}</td>
           <td>{cacheToken(sample.read, sample.read_reported)}</td>
           <td>{cacheToken(sample.write, sample.write_reported)}</td>
-          <td>{cacheToken(sample.input, sample.input_reported)}</td>
+          <td>{cacheToken(verifiedCache ? sample.total : sample.input, sample.input_reported)}</td>
           <td>{cacheToken(sample.output, sample.output_reported)}</td>
           <td>{cacheRate(cacheSampleHitRate(sample))}</td>
+          {verifiedCache && <td>{sample.error || (sample.index && sample.index > 1 && sample.read_reported === true && sample.write_reported === true && sample.read === 0 && Number(sample.write) > 64 ? '整段重写' : '')}</td>}
         </tr>)}</tbody>
       </table></div>
       <p className="muted">命中率按当轮缓存读取除以当轮总输入计算。“—”表示没有提供或无法计算。</p>

@@ -204,21 +204,21 @@ export default function ModelPicker({
         }}
       />
       <span className="model-picker-actions">
-        <button
+        {onRefresh && <><button
           type="button"
           className="model-action"
           title={tr("获取模型列表")}
           aria-label={tr("获取模型列表")}
           aria-busy={loading}
           disabled={disabled || refreshDisabled}
-          onClick={() => onRefresh?.()}
+          onClick={onRefresh}
         >
           <Icon
             name={loading ? "spinner" : "refresh"}
             className={loading ? "icon-spin" : ""}
           />
         </button>
-        <span className="model-action-sep" aria-hidden="true" />
+        <span className="model-action-sep" aria-hidden="true" /></>}
         <button
           type="button"
           className="model-action model-toggle"

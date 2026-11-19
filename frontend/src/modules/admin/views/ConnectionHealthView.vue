@@ -32,6 +32,7 @@ import type { UpstreamSiteResponse } from '../types/upstream'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
 import { canOpenManualProbeHistory, connectionHealthMessageKey, testProtocolName, useConnectionHealth } from '../composables/useConnectionHealth'
 import { createRefreshCoordinator } from '../utils/connectionHealthRefresh'
+import { publishChanshuiCatalog } from '../composables/chanshuiCatalog'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import AdminGroupHealthDetail from '../components/dashboard/AdminGroupHealthDetail.vue'
 import ConnectionHealthEventsDialog from '../components/dashboard/ConnectionHealthEventsDialog.vue'
@@ -93,6 +94,7 @@ const {
   adminGroupsAcceptedRevision,
   adminGroupsReadFailure,
   adminGroupsLoaded,
+  getAdminGroupsCatalogScope,
   events,
   policies,
   isLoading,
@@ -509,6 +511,12 @@ const orderedGroups = computed(() => {
     return group ? [group] : []
   })
 })
+
+watch([preferenceScope, adminGroupsLoaded, () => adminGroupsAcceptedRevision?.value, filteredGroups], ([scope, loaded, , groups]) => {
+  const source = getAdminGroupsCatalogScope?.()
+  if (scope === 'anonymous' || scope !== loadedPreferenceScope || !loaded || source?.workspaceId !== scope || currentAccount.value?.platform !== 'sub2api') return
+  publishChanshuiCatalog(scope, groups, source.session)
+}, { immediate: true, flush: 'post' })
 
 const sameStringArray = (first: string[], second: string[]): boolean =>
   first.length === second.length && first.every((value, index) => value === second[index])

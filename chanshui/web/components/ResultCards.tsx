@@ -6,7 +6,7 @@ import AnimatedNumber from "@/components/AnimatedNumber";
 import ResultSkeleton from "@/components/ResultSkeleton";
 import ErrorFold from "@/components/ErrorFold";
 import Hint from "@/components/Hint";
-import { canonModel, fingerprintState, presentedTotal, probabilityVisible, hasUnconfirmedIQ } from "@/lib/report-view";
+import { canonModel, fingerprintState, presentedTotal, probabilityVisible, hasUnconfirmedIQ, HUB_SCORING_VERSION } from "@/lib/report-view";
 import { DetectVerdict } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 function ScoreShare({ verdict, part, preserve = false }: { verdict: DetectVerdict; part: string; preserve?: boolean }) {
@@ -113,6 +113,7 @@ export default function ResultCards({
   const integrity = v.integrity;
   const claude = (model || "").toLowerCase().startsWith("claude-");
   const cache = v.cache;
+  const verifiedHub = v.scoring_version === HUB_SCORING_VERSION;
   const unconfirmedIQ = hasUnconfirmedIQ(v);
   const cacheSamples = cache?.samples ?? [];
   const thirdCache = cacheSamples.length ? cacheSamples[cacheSamples.length - 1] : undefined;
@@ -152,7 +153,7 @@ export default function ResultCards({
   const unconfirmed = fpState === "unconfirmed" && f?.basis === "numeric" &&
     Number.isInteger(f.used_outputs) && f.used_outputs > 0;
   const astraUnconfirmed = unconfirmed && canonModel(model || "") === "gpt6astra";
-  const scored: DetectVerdict = v.total && !savedScore
+  const scored: DetectVerdict = v.total && typeof v.total.score === 'number' && !savedScore
     ? {
         ...v,
         total: {
@@ -161,6 +162,9 @@ export default function ResultCards({
         },
       }
     : v;
+  const score = scored.total?.score;
+  const totalText = totalLabel || (score === null ? tr("总分尚未确认") : "");
+  const unknownCache = verifiedHub && scored.total?.parts.some(part => part.key === 'cache' && part.applicable && !part.known);
   return (
     <div
       className={"results " + (loading ? "results-loading" : "results-settled")}
@@ -169,21 +173,21 @@ export default function ResultCards({
         <section className="result-card total-card">
           <div className="rc-head">
             <h3>{tr("总分")}</h3>
-            <b className="score-chip">{totalLabel || `${scored.total.score} / 100`}</b>
+            <b className="score-chip">{totalText || `${score} / 100`}</b>
           </div>
           <div className="metric-line">
-            <strong className={scored.total.score >= 90 ? "good" : scored.total.score >= 60 ? "score-mid" : "bad"}>
-              {totalLabel || <AnimatedNumber value={scored.total.score} />}
+            <strong className={typeof score !== 'number' ? undefined : score >= 90 ? "good" : score >= 60 ? "score-mid" : "bad"}>
+              {totalText || (typeof score === 'number' && <AnimatedNumber value={score} />)}
             </strong>
-            {!totalLabel && <span>/ 100</span>}
+            {!totalText && <span>/ 100</span>}
           </div>
-          {totalLabel && <p className="muted">{totalLabel === '本次不计总分' ? '本次没有自动计分项，请展开题目人工查看。' : '仍有计分项未确认，请查看对应题目；未知不当0分。'}</p>}
+          {totalText && <p className="muted">{totalText === '本次不计总分' ? '本次没有自动计分项，请展开题目人工查看。' : score === null && (unknownCache || unconfirmedIQ) && scored.total.reason ? scored.total.reason : '仍有计分项未确认，请查看对应题目；未知不当0分。'}</p>}
           <div className="integrity-signals">
             {scored.total.parts.filter((item) => item.applicable).map((item) => (
               <div className="integrity-signal" key={item.key}>
                 <span>{tr(item.label)}</span>
-                <b className={item.contribution === item.coefficient ? "good" : "bad"}>
-                  {(savedScore || unconfirmedIQ && item.key === 'iq') && !item.known ? tr("尚未确认") : `${item.contribution}/${item.coefficient}`}
+                <b className={verifiedHub && item.key === 'cache' && !item.known ? undefined : item.contribution === item.coefficient ? "good" : "bad"}>
+                  {(savedScore || unconfirmedIQ && item.key === 'iq' || verifiedHub && item.key === 'cache') && !item.known ? tr("尚未确认") : `${item.contribution}/${item.coefficient}`}
                 </b>
               </div>
             ))}
@@ -515,7 +519,7 @@ export default function ResultCards({
       </section>
       <section className="result-card">
         <div className="rc-head">
-          <CardTitle title={tr("推理表现")} label={tr("评分说明")} text={q?.note} />
+          <CardTitle title={tr("推理表现")} label={tr("评分说明")} text={verifiedHub ? undefined : q?.note} />
           <span className="rc-score">
             <ScoreShare preserve={savedScore || unconfirmedIQ} verdict={scored} part="iq" />
             <span className="card-number">04</span>
@@ -534,6 +538,7 @@ export default function ResultCards({
                 {q.complete ? tr("本次测评") : tr("尚未完成")}
               </b>
             </div>}
+            {verifiedHub && q.note && <p className="muted">{tr(q.note)}</p>}
             <div className="question-list">
               {questions?.iq ?? q.per_question.map((x, index) => (
                 <details key={x.id} className="question" data-item-id={x.id} onToggle={e => { if(e.currentTarget.open) onQuestionOpen?.(x.id); }}>
@@ -678,7 +683,7 @@ export default function ResultCards({
         <div className="rc-head">
           <h3>{tr("缓存读写验证")}</h3>
           <span className="rc-score">
-            <ScoreShare preserve={savedScore} verdict={scored} part="cache" />
+            <ScoreShare preserve={savedScore || verifiedHub} verdict={scored} part="cache" />
             <span className="card-number">{tr("缓存")}</span>
           </span>
         </div>

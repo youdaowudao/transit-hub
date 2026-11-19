@@ -6,14 +6,16 @@ import {object} from '../lib/hub-report-view';
 import type {Metrics} from '../lib/api';
 import ProbeTimeline from './ProbeTimeline';
 import HubQuestionDetails from './HubQuestionDetails';
-import { hubReportView, itemJudgment, canRetryHubItem, hasOriginalItemDTO } from '../lib/hub-report-view';
+import { HubProbeEvidence } from './ProbeEvidence';
+import { hubReportView, itemJudgment, canRetryHubItem, hasOriginalItemDTO, isVerifiedHubReport } from '../lib/hub-report-view';
 import { isHubTerminal } from '../lib/hub-policy';
 import { fingerprintState } from '../lib/report-view';
 import { boundaryReviewText, knowledgeDateComparison } from '../lib/knowledge-dates';
 import type { HubCall, HubItem, HubReport } from '../lib/hub-types';
 
-export default function HubReportContent({ report, items, complete, call, onRetry, retryDisabled }: { report: HubReport; items: HubItem[]; complete: boolean; call: HubCall; onRetry?: (ids: string[]) => void; retryDisabled?: boolean }) {
-  const view = hubReportView(report, items, complete);
+export default function HubReportContent({ report, items, complete, readFailed, call, onRetry, retryDisabled }: { report: HubReport; items: HubItem[]; complete: boolean; readFailed?: boolean; call: HubCall; onRetry?: (ids: string[]) => void; retryDisabled?: boolean }) {
+  const view = hubReportView(report, items, complete, readFailed);
+  const verified = isVerifiedHubReport(report);
 
   const [images,setImages]=useState<Record<string,string>>({}), [imageErrors,setImageErrors]=useState<Record<string,string>>({});
   const [loadingImages,setLoadingImages]=useState<Record<string,boolean>>({});
@@ -71,6 +73,19 @@ export default function HubReportContent({ report, items, complete, call, onRetr
     : undefined;
  let customIQ:ReactNode;
   for (const [kind, rows] of Object.entries(view.groups)) {
+    if (kind === 'cache' && view.cacheView) {
+      const inlineItem = view.cacheView.inlineItem;
+      questions.cache = <>
+        {inlineItem && <HubProbeEvidence item={inlineItem} verifiedCache inlineCache />}
+        <div className="question-list">{rows.map(item => {
+          const samples = object(item.result?.evidence).samples;
+          const previous = report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status) && Array.isArray(samples) && samples.length > 0;
+          return <HubQuestionDetails key={item.itemId} item={item} reportId={report.reportId} reportStatus={report.status}
+            call={call} onRetry={onRetry} retryDisabled={retryDisabled} previous={previous} verifiedScoring cacheEvidenceInline={item === inlineItem} />;
+        })}</div>
+      </>;
+      continue;
+    }
     if(kind==='knowledge') {
       const chronological = [...rows].sort((a, b) =>
         String(a.definition.parameters?.date || '\uffff').localeCompare(String(b.definition.parameters?.date || '\uffff')));
@@ -109,16 +124,26 @@ export default function HubReportContent({ report, items, complete, call, onRetr
       continue;
     }
 
-    const folds = rows.map((item, index) => <HubQuestionDetails key={report.reportId + ':' + item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} number={kind === 'iq' ? index + 1 : undefined} onRetry={onRetry} retryDisabled={retryDisabled} previous={Boolean(report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status))} />);
+    const folds = rows.map((item, index) => <HubQuestionDetails key={report.reportId + ':' + item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} number={kind === 'iq' ? index + 1 : undefined} onRetry={onRetry} retryDisabled={retryDisabled} verifiedScoring={verified} previous={Boolean(report.retry?.itemIds.includes(item.itemId) && ['queued', 'running'].includes(item.status))} />);
     const originalQuestionItems = view.native && ['iq','vision'].includes(kind) && rows.every(item => typeof (item.result?.evidence as Record<string,unknown> | undefined)?.[kind==='vision'?'question':'id'] !== 'undefined');
     if(originalQuestionItems) continue;
-    if(view.native && kind==='iq' && view.verdict.iq) {customIQ=<>{rows.filter(item=>!('id' in ((item.result?.evidence as Record<string,unknown>)||{}))).map(item=><HubQuestionDetails key={item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} onRetry={onRetry} retryDisabled={retryDisabled} />)}</>;continue;}
+    if(view.native && kind==='iq' && view.verdict.iq) {customIQ=<>{rows.filter(item=>!('id' in ((item.result?.evidence as Record<string,unknown>)||{}))).map(item=><HubQuestionDetails key={item.itemId} item={item} reportId={report.reportId} reportStatus={report.status} call={call} onRetry={onRetry} retryDisabled={retryDisabled} verifiedScoring={verified} />)}</>;continue;}
     questions[kind] = kind === 'iq'  ? <><p className="muted">点击题目查看本次题面、回答和判定；默认收起，不会重新检测或修改主站。</p>{folds}</> : <div className="question-list">{folds}</div>;
   }
   if (knowledgeComparison || sharedDate) {
     questions.knowledge = <><p className="muted" data-testid="knowledge-date-comparison">{[sharedDate,knowledgeComparison].filter(Boolean).join(" ")}</p>{questions.knowledge}</>;
   }
   const sectionContent: Record<string, ReactNode> = Object.fromEntries(Object.entries(view.messages).map(([key, text]) => [key, <p key={key} className="muted">{text}</p>]));
+  if (view.cacheView) {
+    const part = view.cacheView.part;
+    sectionContent.cache = <>
+      <div className="metric-line"><strong className={part?.known && part.points === 1 ? 'good' : undefined}>
+        {!part ? '等待结果' : !part.known ? '尚未确认' : part.points === 1 ? '通过' : '未通过'}
+      </strong></div>
+      {!part ? <p className="muted">本项尚未记录分类结果，请查看本次检测状态。</p> : !part.known &&
+        <p className="muted">缓存尚未确认。可以展开本项查看缺少的回包字段或未完成的轮次，本次报告的总分也暂未确认。</p>}
+    </>;
+  }
   if (view.native && !view.verdict.iq && questions.iq) sectionContent.iq = questions.iq;
   // Preserve the upstream omission of an unselected vision section.
   if (complete && !view.groups.vision?.length) sectionContent.vision = null;
@@ -133,7 +158,7 @@ export default function HubReportContent({ report, items, complete, call, onRetr
   return <>
     {view.native && items.some(item=>item.status==='done'&&item.definition.judge.type!=='model_identity'&&!hasOriginalItemDTO(item)&&!['not_asked','not_applicable'].includes(itemJudgment(item).status??'')) && <p className="muted">本报告含自定义或旧格式结果，已保存回答可逐项展开；旧版未保存的原诊断不能补回，成功结果不会重新提问。</p>}
     {!view.native && ended && <p className="muted">这是旧版接入保存的报告；已有回答保留，但当时未保存的原版诊断不能补回。新检测使用原程序；失败项可在原报告补测。</p>}
-    <ResultCards verdict={view.native ? originalVerdict : view.verdict} model={report.model} loading={!ended} showCache={Boolean(view.groups.cache)} savedScore={!view.native} totalLabel={view.totalLabel} questions={questions} sectionContent={sectionContent} questionExtra={view.native ? extras : undefined} onQuestionOpen={view.native ? id=>void openQuestion(id) : undefined} collapseVision={view.native} questionTail={customIQ} knowledgeExtra={knowledgeDetail} />
+    <ResultCards verdict={view.native ? originalVerdict : view.verdict} model={report.model} loading={!ended} showCache={view.cacheView?.visible ?? Boolean(view.groups.cache)} savedScore={!view.native} totalLabel={view.totalLabel} questions={questions} sectionContent={sectionContent} questionExtra={view.native ? extras : undefined} onQuestionOpen={view.native ? id=>void openQuestion(id) : undefined} collapseVision={view.native} questionTail={customIQ} knowledgeExtra={knowledgeDetail} />
     <ProbeTimeline probes={view.probes} status={report.status} timing={view.native ? view.verdict.timing || timing : timing} progress={view.progress}>
       {!report.model.toLowerCase().startsWith('claude-') && questions.thinking}
     </ProbeTimeline>

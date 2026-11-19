@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import SingleAskPanel from '../../chanshui/web/components/SingleAskPanel'
 import { I18nProvider } from '../../chanshui/web/lib/i18n'
 import HubApp from '../../chanshui/web/components/HubApp'
+import { approveFixtureStart } from './fixtures/chanshui-transfer'
 
 vi.mock('../../chanshui/web/components/Select', () => ({ default: (p: any) => (globalThis as any).React.createElement('select', { id: p.id, value: p.value, onChange: p.onChange, disabled: p.disabled }, p.children) }))
 const require = createRequire(path.resolve(process.cwd(), '../chanshui/web/package.json'))
@@ -55,18 +56,22 @@ for (const scenario of ['start-response-lost', 'retry-response-lost'] as const) 
   vi.stubGlobal('React', React); vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }))
   const node = document.createElement('div'); document.body.append(node); const root = createRoot(node)
-  const starts: any[] = [], retries: any[] = []; let reportId = '', failed = scenario === 'retry-response-lost'
-  const report = () => ({ reportId, targetId: 'a', accountName: '原账号', groupName: 'Claude', model: 'claude-opus-5-5', status: failed ? 'partial' : 'done', processExited: true, createdAtMs: Date.now(), summary: { singleAsk: true } })
+  const starts: any[] = [], retries: any[] = []; let checks = 0, reportId = '', failed = scenario === 'retry-response-lost'
+  const report = () => ({ reportId, targetId: 'a', accountName: '原账号', groupName: 'Claude', model: 'claude-opus-5-5', status: failed ? 'partial' : 'done', processExited: true, createdAtMs: Date.now(), updatedAtMs: failed ? 1 : 2, summary: { singleAsk: true } })
   const respond = (data: unknown) => window.dispatchEvent(new MessageEvent('message', { source: window, origin: location.origin, data }))
+  const catalog = { workspaceId: 'w', groups: [{ id: 'g', name: 'Claude', accounts: [{ targetId: 'a', accountId: '1', accountName: '原账号', models: 'claude-opus-5-5', protocol: 'anthropic' }] }] }
   const server = (event: MessageEvent) => {
     const m = event.data
-    if (m?.kind === 'chanshui.READY') { respond({ kind: 'chanshui.BOOT', v: 1, generation: 1, workspaceId: 'w', visible: true, target: { targetId: 'a', groupId: 'g' } }); return }
+    if (m?.kind === 'chanshui.READY') { respond({ kind: 'chanshui.BOOT', v: 1, generation: 1, workspaceId: 'w', visible: true, target: { targetId: 'a', groupId: 'g' }, catalog }); return }
     if (m?.kind !== 'chanshui.request') return
+    if (!approveFixtureStart(m)) return
     let value: unknown = {}
     if (m.op === 'runtime') value = { available: true, enabled: true, active: null }
-    if (m.op === 'targets') value = { items: [{ targetId: 'a', accountName: '原账号', groups: [{ id: 'g', name: 'Claude' }] }] }
-    if (m.op === 'context') value = { targetId: 'a', accountName: '原账号', groupId: 'g', groupName: 'Claude', canRun: true, expectedContext: {} }
-    if (m.op === 'models') value = { models: ['claude-opus-5-5'] }
+    if (m.op === 'context') {
+      checks++
+      const context = { workspaceId: 'w', targetId: 'a', groupId: 'g', baseURL: 'https://fixture.invalid', protocol: 'anthropic' }
+      value = { ...context, accountName: '原账号', groupName: 'Claude', canRun: true, expectedContext: context }
+    }
     if (m.op === 'reference-info') value = { supported_models: ['claude-opus-5-5'], fingerprint_count: 1 }
     if (m.op === 'reports') value = { items: reportId ? [report()] : [] }
     if (m.op === 'settings') value = { protocol: 'auto', timeoutSeconds: 360, totalTimeoutSeconds: 3600, concurrency: 32, retries: 3, maxOutputTokens: 8192, maxAttempts: 0, memoryLimitMiB: 256, revision: 1 }
@@ -74,8 +79,8 @@ for (const scenario of ['start-response-lost', 'retry-response-lost'] as const) 
       starts.push(structuredClone(m.params)); reportId ||= m.params.reportId; value = report()
       if (scenario === 'start-response-lost' && starts.length === 1) { respond({ kind: 'chanshui.response', v: 1, generation: 1, id: m.id, ok: false, error: { status: 503, operationResult: 'unknown', message: '受理返回丢失' } }); return }
     }
-    if (m.op === 'report') value = report()
-    if (m.op === 'items') value = { items: [{ itemId: 'custom:' + reportId, definition: { kind: 'iq', title: '单问单答', judge: { type: 'manual' } }, status: failed ? 'error' : 'done', result: { ...(failed ? { error: '模拟上游失败' } : {}), evidence: { single_ask: { ...answer, Err: failed ? '模拟上游失败' : '' } } } }] }
+    if (m.op === 'report') value = { ...report(), reportId: m.params.reportId }
+    if (m.op === 'items') value = { items: [{ itemId: 'custom:' + reportId, definition: { kind: 'iq', title: '单问单答', judge: { type: 'manual' } }, status: failed ? 'error' : 'done', result: { answer: answer.Answer, ...(failed ? { error: '模拟上游失败' } : {}), evidence: { single_ask: { ...answer, Err: failed ? '模拟上游失败' : '' } } } }] }
     if (m.op === 'retry') {
       retries.push(structuredClone(m.params)); failed = false
       respond({ kind: 'chanshui.response', v: 1, generation: 1, id: m.id, ok: false, error: { status: 503, operationResult: 'unknown', message: '补测返回丢失' } }); return
@@ -84,17 +89,29 @@ for (const scenario of ['start-response-lost', 'retry-response-lost'] as const) 
   }
   window.addEventListener('message', server)
   const settle = async () => { for (let i = 0; i < 8; i++) await act(() => undefined) }
-  const send = async () => { await act(() => [...node.querySelectorAll('button')].find(b => b.textContent === '发送问题')!.click()); await settle() }
+  const click = async (label: string) => {
+    const button = [...node.querySelectorAll('button')].find(b => b.textContent === label)!
+    expect(button).toBeTruthy()
+    await act(() => button.click()); await settle()
+  }
   try {
     await act(() => root.render(React.createElement(HubApp))); await settle()
     const question = node.querySelector('#question') as HTMLTextAreaElement; expect(question).toBeTruthy()
     await act(() => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(question, '原样问题'); question.dispatchEvent(new Event('input', { bubbles: true })) })
-    await send(); expect(starts).toHaveLength(1); const firstId = starts[0].reportId
-    await send()
+    await click('发送问题'); expect(starts).toHaveLength(1); const firstId = starts[0].reportId
     if (scenario === 'retry-response-lost') {
+      await click('发送问题')
+      expect(starts).toHaveLength(1); expect(checks).toBe(1)
+      expect(retries).toHaveLength(0)
+      await click('查看原问答记录')
+      await click('补测失败项（1）')
       expect(retries).toHaveLength(1); expect(retries[0]).toMatchObject({ reportId: firstId, itemIds: ['custom:' + firstId] })
-      await send(); expect(starts).toHaveLength(1); expect(retries).toHaveLength(1)
-    } else { expect(starts).toHaveLength(2); expect(starts[1]).toEqual(starts[0]); expect(retries).toHaveLength(0) }
+      await click('核查运行状态'); expect(starts).toHaveLength(1); expect(retries).toHaveLength(1)
+    } else {
+      expect(node.textContent).toContain(firstId)
+      await click('用原编号重试受理')
+      expect(starts).toHaveLength(2); expect(starts[1]).toEqual(starts[0]); expect(retries).toHaveLength(0)
+    }
     expect(node.querySelector('.answer-panel')?.textContent).toContain('原完整答复')
   } finally { await act(() => root.unmount()); window.removeEventListener('message', server); node.remove() }
 })

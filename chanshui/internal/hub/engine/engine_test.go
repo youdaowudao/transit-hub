@@ -393,8 +393,8 @@ func TestConfiguredCachePrefixAndTurnTemplatesActuallyUsedAcrossSixTurns(t *test
 	r, _ := s.Report(context.Background(), o, id)
 	var summary map[string]any
 	json.Unmarshal(r.Summary.Summary, &summary)
-	if summary["totalScore"] != float64(0) {
-		t.Fatal("unknown cache produced full total")
+	if summary["totalScore"] != nil || asMap(summary["total"])["score"] != nil || asMap(asMap(summary["verdict"])["total"])["score"] != nil {
+		t.Fatal("unknown cache published a formal total", summary)
 	}
 }
 func TestDeepSeekUnknownKeepsOriginalNetworkApplicability(t *testing.T) {

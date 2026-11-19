@@ -133,7 +133,8 @@ export interface TotalPart {
   contribution: number;
 }
 export interface TotalVerdict {
-  score: number;
+  score: number | null;
+  complete?: boolean;
   max: number;
   reason: string;
   parts: TotalPart[];
@@ -156,6 +157,7 @@ export interface VisionVerdict {
   error?: string;
 }
 export interface DetectVerdict {
+  scoring_version?: string;
   timing?: { started_at: string; finished_at?: string; total_ms: number; last_run_ms: number; runs: number };
   protocol?: string;
   tools?: CapabilityResult | null;

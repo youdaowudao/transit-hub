@@ -403,7 +403,7 @@ func (s *Server) run(ctx context.Context, t *Task, q Request, selected map[strin
 	wg.Wait()
 	t.mu.Lock()
 	var lines []QuestionResult
-	t.Verdict.IQ, lines = aggregateIQ(t.questions, t.answers)
+	t.Verdict.IQ, lines = aggregateIQ(t.questions, t.answers, false)
 	sections := selected
 	if t.Source != "api" {
 		sections = nil
@@ -429,7 +429,7 @@ func (s *Server) run(ctx context.Context, t *Task, q Request, selected map[strin
 
 // askQuestion runs one IQ or vision item. It is shared so the standalone
 // vision section never forks the judging and self-score path.
-func (s *Server) askQuestion(ctx context.Context, g gateway.Client, q Request, item iq.Question) (QuestionResult, error) {
+func (s *Server) askQuestion(ctx context.Context, g gateway.Client, q Request, item iq.Question, allowQ4Equivalent ...bool) (QuestionResult, error) {
 	prompt := item.Prompt
 	if item.ID == "vision" {
 		// 题面已经画在图上，再发一遍文字等于把题泄给看不到图的接口。
@@ -509,7 +509,11 @@ func (s *Server) askQuestion(ctx context.Context, g gateway.Client, q Request, i
 			v.Error = "该模型不接受图片输入，识图项记 0 分"
 		}
 	} else {
-		earned, half, tags := iq.Judge(item, text)
+		answerBody := ""
+		if item.ID == "Q4" && len(allowQ4Equivalent) > 0 && allowQ4Equivalent[0] {
+			answerBody = m.Answer
+		}
+		earned, half, tags := iq.JudgeWithAnswer(item, text, answerBody)
 		// The chart answer is an exact integer; a self-grade would only make
 		// the correctness half of the vision score softer.
 		if item.ID != "vision" && earned == 0 {
@@ -765,6 +769,14 @@ func buildTotalFor(v Verdict, model string, selected map[string]bool) integrity.
 	cachePoints, cacheKnown := 0, false
 	if cacheApply {
 		cachePoints, cacheKnown = boolPart(v.Cache)
+		if v.ScoringVersion == HubScoringVersion {
+			evidence, _ := v.Cache.(map[string]any)
+			_, hasPass := evidence["pass"].(bool)
+			reportError, _ := evidence["error"].(string)
+			if !hasPass || reportError != "" {
+				cachePoints, cacheKnown = 0, false
+			}
+		}
 	}
 	want := func(id string) bool { return selected == nil || selected[id] }
 	if !want("fingerprint") {

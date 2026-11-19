@@ -115,7 +115,7 @@ func (s *Store) ListQuestions(ctx context.Context, o Owner, f Filters) (Page[Que
 
 const summaryCols = `report_id,target_id,account_id,account_name,group_id,group_name,base_url,protocol,model,created_at_ms,updated_at_ms,status,summary_json,error_json`
 
-const historySummaryCols = `report_id,target_id,account_id,account_name,group_id,group_name,base_url,protocol,model,created_at_ms,updated_at_ms,status,json_object('iqScore',json_extract(summary_json,'$.iqScore'),'totalScore',json_extract(summary_json,'$.totalScore'),'complete',json_extract(summary_json,'$.complete')),json_object('message',substr(json_extract(error_json,'$.message'),1,512),'step',json_extract(error_json,'$.step'))`
+const historySummaryCols = `report_id,target_id,account_id,account_name,group_id,group_name,base_url,protocol,model,created_at_ms,updated_at_ms,status,json_object('iqScore',json_extract(summary_json,'$.iqScore'),'totalScore',json_extract(summary_json,'$.totalScore'),'complete',json_extract(summary_json,'$.complete'),'verdict',json_object('scoring_version',json_extract(summary_json,'$.verdict.scoring_version'))),json_object('message',substr(json_extract(error_json,'$.message'),1,512),'step',json_extract(error_json,'$.step'))`
 
 func scanSummary(row interface{ Scan(...any) error }) (Summary, error) {
 	v := Summary{}

@@ -5,13 +5,14 @@ import { HubProbeEvidence } from './ProbeEvidence';
 import type { HubCall, HubItem } from '../lib/hub-types';
 import { canRetryHubItem, itemJudgment, itemLabel, itemPoints, object } from '../lib/hub-report-view';
 
-export default function HubQuestionDetails({ item, call, reportId, reportStatus = '', number, onRetry, retryDisabled, previous, bodyOnly=false }: { item: HubItem; call: HubCall; reportId: string; reportStatus?: string; number?: number; onRetry?: (ids: string[]) => void; retryDisabled?: boolean; previous?: boolean; bodyOnly?: boolean }) {
+export default function HubQuestionDetails({ item, call, reportId, reportStatus = '', number, onRetry, retryDisabled, previous, bodyOnly = false, verifiedScoring = false, cacheEvidenceInline = false }: { item: HubItem; call: HubCall; reportId: string; reportStatus?: string; number?: number; onRetry?: (ids: string[]) => void; retryDisabled?: boolean; previous?: boolean; bodyOnly?: boolean; verifiedScoring?: boolean; cacheEvidenceInline?: boolean }) {
   const { t: tr } = useI18n();
   const [image, setImage] = useState(''), [error, setError] = useState('');
   const label = itemLabel(item, reportStatus), points = label === '完成' ? itemPoints(item) : '', result = item.result ?? {}, judgment = itemJudgment(item);
   const earned = result.earned ?? judgment.earned, max = result.max ?? judgment.max ?? item.definition.maxScore;
   const full = Boolean(points) && judgment.status === 'known' && typeof earned === 'number' && earned === max && !result.half && !judgment.half;
   const knowledge = item.definition.kind === 'knowledge';
+  const verifiedCache = verifiedScoring && item.definition.kind === 'cache';
   const observation = object(object(result.evidence).row);
   const extract = typeof observation.answer === 'string' ? observation.answer : '';
   const hasAnswer = typeof result.answer === 'string' && Boolean(result.answer.trim());
@@ -30,10 +31,11 @@ export default function HubQuestionDetails({ item, call, reportId, reportStatus 
     {!knowledge && typeof result.answer === 'string' && <><h4>模型回答</h4><pre>{result.answer || '尚未返回正文'}</pre></>}
     {item.expected && <><h4>检测端参考答案</h4><p className="muted">{item.definition.judge.type === 'model_identity' ? '本题按检测端规则计分，不调用模型自评。' : knowledge ? '这道知识事件题用于判断日期范围，不计入总分。' : '原版推理题先按本地规则判分，零分时可能调用被测模型自评；识图和自定义题按各自规则处理。'}</p><pre>{item.expected}</pre></>}
     {label === '待人工查看' && <p className="muted">此题只供人工查看，不参与自动得分。</p>}
-    {(result.half || judgment.half) && <p className="muted">本题半分只展示卷面，不进入推理通过分子。</p>}
+    {(result.half || judgment.half) && <p className="muted">{verifiedScoring && item.definition.kind === 'iq' ? '本题实际获得的分数计入推理百分制。' : '本题半分只展示卷面，不进入推理通过分子。'}</p>}
     {judgment.reason && <p className="muted">{judgment.reason}</p>}
     {(result.error || error) && <p className="error-box" role="alert">{result.error || error}</p>}
-    {label === '未完成' ? <p className="muted">{item.status === 'queued' ? '本次检测已结束，此项未执行。' : '本次检测已结束，此项未完成；已发出的请求可能已计费。'}</p> : <HubProbeEvidence item={item} />}
+    {label === '未完成' && <p className="muted">{item.status === 'queued' ? '本次检测已结束，此项未执行。' : '本次检测已结束，此项未完成；已发出的请求可能已计费。'}</p>}
+    {!cacheEvidenceInline && (label !== '未完成' || verifiedCache && previous) && <HubProbeEvidence item={item} verifiedCache={verifiedCache} previous={previous} />}
     {typeof (result.metrics as { Signature?: unknown } | undefined)?.Signature === 'string' && <details className="fold"><summary>已返回的签名</summary><pre>{(result.metrics as { Signature: string }).Signature}</pre></details>}
     {typeof result.thinkingText === 'string' && result.thinkingText && <details className="fold"><summary>实际返回的可见推导</summary><pre>{result.thinkingText}</pre></details>}
     {result.evidence !== undefined && <details className="fold"><summary>查看原始检测证据</summary><pre>{JSON.stringify(result.evidence, null, 2)}</pre></details>}

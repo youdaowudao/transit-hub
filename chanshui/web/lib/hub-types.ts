@@ -1,6 +1,10 @@
 import type { HubKind } from './hub-policy';
 export interface HubTarget { targetId: string; accountId?: string; accountName: string; providerFamily?: string; groups?: { id: string; name: string }[] }
 export interface HubTargetInput { reportId?: string; targetId?: string; groupId?: string; accountName?: string; groupName?: string }
+export type HubProtocol = 'chat' | 'openai' | 'anthropic';
+export interface HubCatalogAccount { targetId: string; accountId: string; accountName: string; priority?: number; models?: string; protocol?: HubProtocol }
+export interface HubCatalogGroup { id: string; name: string; accountsError?: boolean; accounts: HubCatalogAccount[] }
+export interface HubCatalog { workspaceId: string; groups: HubCatalogGroup[] }
 export interface HubContext extends HubTarget { workspaceId: string; groupId: string; groupName: string; baseURL: string; protocol: string; canRun: boolean; reason?: string; expectedContext: Record<string, string> }
 export interface HubSettings { protocol?: string; timeoutSeconds: number; totalTimeoutSeconds: number; concurrency: number; maxOutputTokens: number; retries: number; maxAttempts: number; memoryLimitMiB: number; revision: number }
 export interface HubJudge { type: 'legacy' | 'text' | 'number' | 'keywords' | 'model_identity' | 'manual'; expectedText?: string; expectedNumber?: number; expectedFrom?: string; match?: string; required?: string[]; forbidden?: string[]; referenceAnswer?: string }
@@ -10,4 +14,5 @@ export interface HubReport { retry?: { id: string; expectedRetryId: string; item
 export interface HubItem { tags?: string[]; itemId: string; sectionId: string; definition: HubQuestion; prompt: string; expected: string; status: string; attempts?: number; startedAtMs?: number; completedAtMs?: number; imageAvailable?: boolean; result?: { answer?: string; earned?: number | null; max?: number; half?: boolean; judgment?: string | { status?: string; reason?: string; earned?: number | null; max?: number; half?: boolean }; error?: string; metrics?: unknown; evidence?: unknown; [key: string]: unknown } }
 export interface HubRuntime { enabled: boolean; available: boolean; reason?: string; memoryCeilingBytes?: number; busy?: boolean; queueBlocked?: boolean; queuedCount?: number; active?: HubReport | null }
 export interface HubPage<T> { items: T[]; nextCursor?: string }
-export type HubCall = <T = unknown>(op: string, params?: Record<string, unknown>) => Promise<T>;
+export type HubStartApproval = (currentProtocol?: HubProtocol) => boolean;
+export type HubCall = <T = unknown>(op: string, params?: Record<string, unknown>, approveStart?: HubStartApproval) => Promise<T>;

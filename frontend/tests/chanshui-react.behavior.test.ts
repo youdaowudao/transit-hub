@@ -11,7 +11,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import ChanshuiHost from '../src/modules/admin/components/chanshui/ChanshuiHost.vue'
 import { chanshuiOpenEvent } from '../src/modules/admin/composables/useChanshuiLauncher'
 import { authTokenStorageKey } from '../src/modules/auth/api/auth'
-import { cleanupWarning, resultResponse } from './fixtures/chanshui-transfer'
+import { approveFixtureStart, cleanupWarning, resultResponse } from './fixtures/chanshui-transfer'
 
 vi.mock('../../chanshui/web/components/Select', () => ({ default: (props: { value: string; onChange: unknown; disabled?: boolean; children: unknown }) => (globalThis as unknown as { React: { createElement: (...args: unknown[]) => unknown } }).React.createElement('select', { value: props.value, onChange: props.onChange, disabled: props.disabled }, props.children) }))
 const require = createRequire(path.resolve(process.cwd(), '../chanshui/web/package.json'))
@@ -163,22 +163,28 @@ describe('检测设置实际读写和预设删除', () => {
 })
 
 describe('账号预填、模型下拉和实际回答列表', () => {
-  it('开页只读模型，GPT和Claude采用实际默认ID，显式开始才发检测，0分历史不隐藏', async () => {
+  it('开页使用名单中的模型，GPT和Claude采用实际默认ID，显式开始才发检测，0分历史不隐藏', async () => {
     const calls: { op: string; params: Record<string, any> }[] = []
     const now = Date.now(), reportId = 'a'.repeat(32)
     const saved = { reportId, targetId: 'b', accountName: '账号B', groupName: '克劳德', model: 'claude-opus-5-5', status: 'done', processExited: true, createdAtMs: now, summary: { score: 0 } }
     const respond = (data: unknown) => window.dispatchEvent(new MessageEvent('message', { data, source: window, origin: location.origin }))
+    const catalog = { workspaceId: 'w', groups: [
+      { id: 'gpt', name: 'GPT', accounts: [{ targetId: 'a', accountId: '1', accountName: '账号A', models: 'first,gpt-6.1-sol', protocol: 'chat' }] },
+      { id: 'claude', name: '克劳德', accounts: [{ targetId: 'b', accountId: '2', accountName: '账号B', models: 'other,claude-opus-5-5', protocol: 'anthropic' }] },
+    ] }
     const server = async (event: MessageEvent) => {
       const m = event.data
-      if (m?.kind === 'chanshui.READY') { respond({ kind: 'chanshui.BOOT', v: 1, generation: 1, workspaceId: 'w', visible: true, target: { targetId: 'a', groupId: 'gpt' } }); return }
+      if (m?.kind === 'chanshui.READY') { respond({ kind: 'chanshui.BOOT', v: 1, generation: 1, workspaceId: 'w', visible: true, target: { targetId: 'a', groupId: 'gpt' }, catalog }); return }
       if (m?.kind !== 'chanshui.request') return
+      if (!approveFixtureStart(m)) return
       const p = m.params ?? {}; calls.push({ op: m.op, params: p }); let value: unknown = {}
       if (m.op === 'runtime') value = { enabled: true, available: true }
-      if (m.op === 'targets') value = { items: [{ targetId: 'a', accountName: '账号A', groups: [{ id: 'gpt', name: 'GPT' }] }, { targetId: 'b', accountName: '账号B', groups: [{ id: 'claude', name: '克劳德' }] }] }
       if (m.op === 'settings') value = settings
       if (m.op === 'reports') value = { items: [{ ...saved, accountName: '零分历史账号' }, { ...saved, reportId: 'b'.repeat(32), createdAtMs: now - 3 * 86400000, accountName: '三天前账号' }] }
-      if (m.op === 'context') value = { workspaceId: 'w', targetId: p.targetId, accountName: p.targetId === 'a' ? '账号A' : '账号B', groupId: p.groupId, groupName: p.targetId === 'a' ? 'GPT' : '克劳德', baseURL: 'https://safe.invalid', protocol: 'messages', canRun: true, expectedContext: { targetId: p.targetId, workspaceId: 'w' } }
-      if (m.op === 'models') value = { models: p.targetId === 'a' ? [{ id: 'first' }, { id: 'gpt-6.1-sol' }] : [{ id: 'other' }, { id: 'claude-opus-5-5' }] }
+      if (m.op === 'context') {
+        const context = { workspaceId: 'w', targetId: p.targetId, groupId: p.groupId, baseURL: 'https://safe.invalid', protocol: p.targetId === 'a' ? 'chat' : 'anthropic' }
+        value = { ...context, accountName: p.targetId === 'a' ? '账号A' : '账号B', groupName: p.targetId === 'a' ? 'GPT' : '克劳德', canRun: true, expectedContext: context }
+      }
       if (m.op === 'start') value = { reportId: p.reportId, accepted: true }
       if (m.op === 'report') value = { ...saved, reportId: p.reportId }
       if (m.op === 'items') value = { items: [{ itemId: 'custom:1', sectionId: 'iq', definition: { id: 'custom:1', title: '本次新增题', kind: 'iq', maxScore: 0, judge: { type: 'manual' } }, prompt: '新增题实际题干', expected: '人工核对', status: 'done', result: { answer: '模型的实际回答', judgment: 'unreviewed' } }] }
@@ -192,7 +198,7 @@ describe('账号预填、模型下拉和实际回答列表', () => {
     expect(container.textContent).toContain('零分历史账号'); expect(container.textContent).not.toContain('三天前账号')
     await run(() => respond({ kind: 'chanshui.OPEN_TARGET', v: 1, generation: 1, target: { targetId: 'b', groupId: 'claude' } })); for (let i = 0; i < 4; i++) await tick()
     expect(modelSelect()?.value).toBe('claude-opus-5-5')
-    expect(calls.some(c => c.op === 'start')).toBe(false)
+    expect(calls.some(c => ['targets', 'context', 'models', 'start'].includes(c.op))).toBe(false)
     await click('开始检测'); for (let i = 0; i < 5; i++) await tick()
     expect(calls.filter(c => c.op === 'start')).toHaveLength(1)
     expect(calls.find(c => c.op === 'start')?.params).toMatchObject({ targetId: 'b', model: 'claude-opus-5-5' })
@@ -323,17 +329,15 @@ describe('手动运行状态核查', () => {
     const calls: { op: string; params: Record<string, any> }[] = []
     const base = { reportId: 'c'.repeat(32), targetId: 'a', accountName: '核查账号', groupName: 'GPT', model: 'gpt-6.1-sol', status: 'running', processExited: false, createdAtMs: now }
     const respond = (data: unknown) => window.dispatchEvent(new MessageEvent('message', { data, source: window, origin: location.origin }))
+    const catalog = { workspaceId: 'w', groups: [{ id: 'gpt', name: 'GPT', accounts: [{ targetId: 'a', accountId: '1', accountName: '核查账号', models: 'gpt-6.1-sol', protocol: 'chat' }] }] }
     // Replies stay in one React interaction batch, as cached/fast IPC replies
     // can in the browser. A manual check must not rely on pollId changing.
     vi.spyOn(window, 'postMessage').mockImplementation(m => {
-      if (m?.kind === 'chanshui.READY') { respond({ kind: 'chanshui.BOOT', v: 1, generation: 1, workspaceId: 'w', visible: true, target: { targetId: 'a', groupId: 'gpt' } }); return }
+      if (m?.kind === 'chanshui.READY') { respond({ kind: 'chanshui.BOOT', v: 1, generation: 1, workspaceId: 'w', visible: true, target: { targetId: 'a', groupId: 'gpt' }, catalog }); return }
       if (m?.kind !== 'chanshui.request') return
       const p = m.params ?? {}; calls.push({ op: m.op, params: p }); let value: unknown = {}
       if (m.op === 'runtime') value = { enabled: true, available: state.available, busy: state.busy, reason: state.available ? '' : '运行状态暂时无法确认，请手动核查', active: state.busy || state.phase === 'recovered' ? null : base }
-      if (m.op === 'targets') value = { items: [{ targetId: 'a', accountName: '核查账号', groups: [{ id: 'gpt', name: 'GPT' }] }] }
       if (m.op === 'settings') value = settings
-      if (m.op === 'context') value = { ...base, workspaceId: 'w', groupId: 'gpt', baseURL: 'https://safe.invalid', protocol: 'messages', canRun: true, expectedContext: { targetId: 'a', workspaceId: 'w' } }
-      if (m.op === 'models') value = { models: [{ id: 'gpt-6.1-sol' }] }
       if (m.op === 'reports') value = { items: [] }
       if (m.op === 'items') value = { items: [{ itemId: p.cursor ? 'page-two' : 'page-one', sectionId: 'iq', definition: { title: p.cursor ? '第二页题' : '第一页题', kind: 'iq', maxScore: 0, judge: { type: 'manual' } }, prompt: p.cursor ? '第二页实际题干' : '第一页实际题干', expected: '', status: 'done', result: { answer: (p.reportId !== base.reportId ? '旧报告' : '当前任务') + (p.cursor ? '第二页回答' : '第一页回答'), judgment: 'unreviewed' } }], nextCursor: p.cursor ? '' : 'page-two' }
       if (m.op === 'report') {

@@ -212,9 +212,15 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 			if _, err := tx.ExecContext(ctx, `UPDATE hub_reports SET summary_json='{"singleAsk":true}' WHERE report_id=?`, r.ReportID); err != nil {
 				return err
 			}
-		} else if questions.MatchesCurrentKnowledge(snap.Questions) {
-			initial := knowledge.InitialCrossYear()
-			summary, err := json.Marshal(map[string]any{"knowledge": initial, "verdict": api.Verdict{Knowledge: initial}})
+		} else {
+			verdict := api.Verdict{ScoringVersion: api.HubScoringVersion}
+			initial := map[string]any{}
+			if questions.MatchesCurrentKnowledge(snap.Questions) {
+				verdict.Knowledge = knowledge.InitialCrossYear()
+				initial["knowledge"] = verdict.Knowledge
+			}
+			initial["verdict"] = verdict
+			summary, err := json.Marshal(initial)
 			if err != nil {
 				return err
 			}

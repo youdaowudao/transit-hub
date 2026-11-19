@@ -69,6 +69,7 @@ const adminGroups = ref<AdminGroupHealth[]>([])
 const adminGroupsLoaded = ref(false)
 // 每次接受一份新的分组主列表（普通读取或刷新流终态）时递增；本地补丁（摘要、探活结果）不递增。
 const adminGroupsAcceptedRevision = ref(0)
+const adminGroupsReadFailure = ref<{ revision: number; errorKey: string } | null>(null)
 const events = ref<ConnectionHealthEvent[]>([])
 const policies = ref<ConnectionHealthPolicy[]>([])
 const isLoading = ref(false)
@@ -192,6 +193,7 @@ export function useConnectionHealth() {
     if (!adminGroupsWorkspace) return
     adminGroupsReloadPending = true
     void flushAdminGroupsReload()
+    return adminGroupsDataRevision
   }
 
   const setAdminGroupsWorkspace = (workspaceId: string) => {
@@ -209,6 +211,7 @@ export function useConnectionHealth() {
     savedModelControlSummaries.clear()
     adminGroups.value = []
     adminGroupsLoaded.value = false
+    adminGroupsReadFailure.value = null
     overview.value = null
     manualRefreshState.value = null
     manualRefreshSites.value = []
@@ -385,11 +388,13 @@ export function useConnectionHealth() {
         adminGroups.value = preserveModelControlSummaries(preserveQuestionAnswerRecentSummaries(preserveQuestionAnswerSummaries(confirmConcurrencyRead(acceptedGroups), questionAnswerRevision), recentRevision), recentRevision)
         overview.value = overviewFromAdminGroups(adminGroups.value)
         adminGroupsLoaded.value = true
+        adminGroupsReadFailure.value = null
         adminGroupsAcceptedRevision.value++
         return true
       } catch (err) {
         if (sequence !== adminGroupsRequestSequence || dataRevision !== adminGroupsDataRevision) return false
         errorKey.value = err instanceof Error ? err.message : 'admin.connectionHealth.errors.request'
+        adminGroupsReadFailure.value = { revision: dataRevision, errorKey: errorKey.value }
         return false
       } finally {
         adminGroupsActiveRequests--
@@ -468,6 +473,7 @@ export function useConnectionHealth() {
         adminGroups.value = preserveModelControlSummaries(preserveQuestionAnswerRecentSummaries(preserveQuestionAnswerSummaries(confirmConcurrencyRead(acceptedGroups), state.questionAnswerRevision), state.recentRevision), state.recentRevision)
         overview.value = overviewFromAdminGroups(adminGroups.value)
         adminGroupsLoaded.value = true
+        adminGroupsReadFailure.value = null
         adminGroupsAcceptedRevision.value++
       }
     }
@@ -907,6 +913,7 @@ export function useConnectionHealth() {
     adminGroups,
     adminGroupsLoaded,
     adminGroupsAcceptedRevision,
+    adminGroupsReadFailure,
     events,
     policies,
     isLoading,
@@ -921,6 +928,7 @@ export function useConnectionHealth() {
     cancelAdminGroupsRefresh,
     setAdminGroupsWorkspace,
     invalidateAdminGroupsReads,
+    invalidateAndScheduleAdminGroupsReload,
     applyAccountTier,
     applyQuestionAnswerTodaySummary,
     applyQuestionAnswerRecentSummary,

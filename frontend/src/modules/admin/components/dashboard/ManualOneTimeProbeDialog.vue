@@ -93,6 +93,7 @@ export interface ManualProbeTargetSummary {
   status: string
   groupName: string
   formalModels: ManualProbeModelOption[]
+  probeEntryBlock?: 'hidden' | 'unconfirmed'
   testConfiguration?: EffectiveTestConfiguration
 }
 
@@ -129,6 +130,7 @@ type ProbeMode = 'once' | 'formal' | 'questionAnswer'
 
 const phase = ref<Phase>('loading')
 const mode = ref<ProbeMode>('questionAnswer')
+const probeEntryBlock = computed(() => props.target?.probeEntryBlock)
 const contractLimitKey = computed(() => props.target?.testConfiguration?.protocol === 'messages'
   ? 'contractLimitMessages'
   : 'contractLimit')
@@ -501,7 +503,13 @@ const emitQuestionAnswerPreferences = (changedField: QuestionAnswerPreferenceFie
   })
 }
 
-const readableMessage = (rawKey: string): string => mode.value === 'questionAnswer' ? questionAnswerReadableError(rawKey, t, te) : t(connectionHealthMessageKey(rawKey, te))
+const readableMessage = (rawKey: string): string => {
+  if (mode.value === 'questionAnswer') return questionAnswerReadableError(rawKey, t, te)
+  const key = mode.value === 'formal' && rawKey === 'admin.connectionHealth.errors.hiddenAccountsRead'
+    ? 'admin.connectionHealth.errors.hiddenHealthProbeRead'
+    : connectionHealthMessageKey(rawKey, te)
+  return t(key)
+}
 const qaReadableError = computed(() => questionAnswerReadableError(qaErrorKey.value, t, te))
 const qaModelReadGuidance = computed(() => {
   const errorKey = connectionHealthMessageKey(loadErrorKey.value, te)
@@ -1875,7 +1883,7 @@ const close = () => {
           </div>
 
           <div data-testid="question-answer-scroll" class="flex-1 overflow-y-auto px-5 py-4">
-            <div v-if="mode !== 'questionAnswer'" class="mb-4 inline-flex max-w-full overflow-x-auto rounded-lg border border-border/60 bg-surface-line/30 p-1">
+            <div v-if="!probeEntryBlock && mode !== 'questionAnswer'" class="mb-4 inline-flex max-w-full overflow-x-auto rounded-lg border border-border/60 bg-surface-line/30 p-1">
               <button type="button" class="whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground" :disabled="phase === 'testing'" @click="mode = 'questionAnswer'">
                 {{ t(`${prefix}.modes.questionAnswer`) }}
               </button>
@@ -2037,7 +2045,8 @@ const close = () => {
                   </section>
 
                   <section data-question-answer-section="configuration" data-testid="question-answer-configuration" class="mt-3 rounded-lg border border-border/50 bg-card p-3">
-                    <div class="inline-flex max-w-full overflow-x-auto rounded-lg border border-border/60 bg-surface-line/30 p-1">
+                    <p v-if="probeEntryBlock" class="break-words text-xs text-muted-foreground">{{ t(prefix + '.probeEntryBlocked.' + probeEntryBlock) }}</p>
+                    <div v-else class="inline-flex max-w-full overflow-x-auto rounded-lg border border-border/60 bg-surface-line/30 p-1">
                       <button type="button" class="whitespace-nowrap rounded-md bg-background px-3 py-1.5 text-xs font-medium text-foreground shadow-sm" :disabled="phase === 'testing'">{{ t(prefix + '.modes.questionAnswer') }}</button>
                       <button type="button" class="whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground" :disabled="phase === 'testing'" @click="mode = 'formal'">{{ t(prefix + '.modes.formal') }}</button>
                       <button type="button" class="whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground" :disabled="phase === 'testing'" @click="mode = 'once'">{{ t(prefix + '.modes.once') }}</button>

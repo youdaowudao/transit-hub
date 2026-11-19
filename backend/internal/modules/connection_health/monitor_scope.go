@@ -51,6 +51,7 @@ func buildAdminMonitoringScope(
 	targetAssignments []PolicyAssignment,
 	groupAssignments []GroupPolicyAssignment,
 	exclusions []GroupTargetExclusion,
+	hidden map[string]bool,
 ) (adminMonitoringScope, error) {
 	if !adminInventoryComplete(inventory) {
 		return adminMonitoringScope{}, fmt.Errorf("admin inventory is incomplete")
@@ -101,6 +102,9 @@ func buildAdminMonitoringScope(
 				continue
 			}
 			targetID := buildTargetID(platform, adminAccountID, account.ID)
+			if hidden[targetID] {
+				continue
+			}
 			directPolicies := directByTarget[targetID]
 			inheritedPolicies := inheritedByGroup[groupInventory.group.ID]
 			if !hasEnabledTargetPolicy(directPolicies) && excludedByGroup[groupInventory.group.ID][targetID] {
@@ -161,6 +165,6 @@ func (s *Service) loadAdminMonitoringScope(
 		return adminMonitoringScope{}, err
 	}
 	return buildAdminMonitoringScope(
-		userID, adminAccountID, inventory, policies, targetAssignments, groupAssignments, exclusions,
+		userID, adminAccountID, inventory, policies, targetAssignments, groupAssignments, exclusions, nil,
 	)
 }

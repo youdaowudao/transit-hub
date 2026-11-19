@@ -849,7 +849,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
         </button>
       </div>
       <p v-for="notice in focusedAccountNotices" :key="notice" role="status" data-account-focus-notice class="mb-3 break-words rounded-lg bg-warning/10 px-4 py-3 text-sm text-warning">{{ notice }}</p>
-      <p v-if="!group.accountsError && hiddenInGroupCount" data-testid="hidden-accounts-in-group" class="mb-3 text-xs text-muted-foreground">另有 {{ hiddenInGroupCount }} 个已屏蔽账号未显示，可在左侧「分组显示管理」里取消屏蔽。上面的统计包含它们。</p>
+      <p v-if="!group.accountsError && hiddenInGroupCount" data-testid="hidden-accounts-in-group" class="mb-3 text-xs text-muted-foreground">另有 {{ hiddenInGroupCount }} 个已屏蔽账号未显示。账号总数包含它们，健康监控不计入。需要重新参加时，可在「分组显示管理」取消屏蔽，后台会按当前策略处理。</p>
       <div v-if="group.accountsError" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
         {{ readableMessage(group.accountsError) }}
       </div>
@@ -1127,7 +1127,7 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                         <Power class="h-4 w-4" />
                       </button>
                       </Tooltip>
-                      <Tooltip v-if="isSub2API(account)" text="屏蔽这个账号：以后不出现在本页账号列表、批量和计划问答、模型管理里。不改变健康探测，也不改主站。" wide>
+                      <Tooltip v-if="isSub2API(account)" text="屏蔽这个账号会停止健康管理。后台可能恢复健康管理曾改过的主站设置，请确认后继续。" wide>
                       <button
                         type="button"
                         data-testid="hide-account-button"

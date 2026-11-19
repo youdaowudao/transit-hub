@@ -1913,6 +1913,10 @@ export default {
         noResults: '探活已执行，但未获取到任何结果，请稍后重试或检查上游站点连通性。'
       },
       manualProbeDialog: {
+        probeEntryBlocked: {
+          hidden: '此账号已屏蔽，不能探活。请在「管理分组显示」取消屏蔽，刷新分组健康后重新打开此窗口。',
+          unconfirmed: '暂时无法确认这个账号能否探活。请关闭此窗口，到「管理分组显示」重新读取屏蔽清单，再打开此窗口。',
+        },
         title: '手动探活',
         loadingModels: '正在从上游获取可用模型列表...',
         retryLoad: '重新加载',
@@ -2243,6 +2247,12 @@ export default {
         noMatchingModels: '所选模型未匹配当前探活策略。',
         accountsFetch: '该分组账号列表加载失败。',
         hiddenAccountsRead: '读取屏蔽清单失败，暂时无法确定计划要测哪些账号。计划配置没有改动，请稍后重试。',
+        probeTargetHidden: '账号已屏蔽，本次正式探测没有发送模型请求，也没有改主站。如需探活，请到「管理分组显示」取消屏蔽并刷新分组健康。',
+        hiddenHealthStatisticsRead: '读取屏蔽清单失败，无法更新分组健康统计。{statistics}。这次读取不会改主站，请刷新分组健康，仍失败请检查后端日志和数据库连接。',
+        hiddenHealthStatisticsRetained: '仍显示上次统计',
+        hiddenHealthStatisticsEmpty: '暂无最新统计',
+        hiddenHealthProbeRead: '读取屏蔽清单失败，无法确认这个账号是否已屏蔽。这次正式探测没有发送模型请求，也没有改主站。请刷新分组健康，仍失败请检查后端日志和数据库连接。',
+        hiddenHealthPriorityRead: '读取屏蔽清单失败，本次 Priority 同步没有改主站。原操作记录已保留，后台会按原安排重试。持续失败请检查后端日志和数据库连接。',
         workspaceChanged: '当前工作区已在其他页面切换，请刷新页面后再操作；这次只读取，没有改动任何设置。',
         targetNotFound: '探活目标不存在或不属于当前工作区。',
         schedulableActionFailed: '主站调度开关修改失败，实际状态未确认。',

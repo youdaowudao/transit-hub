@@ -41,6 +41,7 @@ func TestBuildAdminMonitoringScope_GroupPolicyExcludesTarget(t *testing.T) {
 		"user1", "ws1", inventory, []Policy{policy}, nil,
 		[]GroupPolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID}},
 		[]GroupTargetExclusion{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", TargetID: targetID}},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("build scope: %v", err)
@@ -66,6 +67,7 @@ func TestBuildAdminMonitoringScope_DoesNotUseUnassignedSiblingGroup(t *testing.T
 	scope, err := buildAdminMonitoringScope(
 		"user1", "ws1", inventory, []Policy{policy}, nil,
 		[]GroupPolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID}}, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("build scope: %v", err)
@@ -89,6 +91,7 @@ func TestBuildAdminMonitoringScope_MultiplierOnlyIsNotMonitoring(t *testing.T) {
 	scope, err := buildAdminMonitoringScope(
 		"user1", "ws1", inventory, []Policy{policy}, nil,
 		[]GroupPolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID}}, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("build scope: %v", err)
@@ -116,6 +119,7 @@ func TestBuildAdminMonitoringScope_DirectPolicyCoversAllCurrentMembershipGroups(
 		"user1", "ws1", inventory, []Policy{policy},
 		[]PolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", TargetID: targetID, PolicyID: policy.ID}}, nil,
 		[]GroupTargetExclusion{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g2", TargetID: targetID}},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("build scope: %v", err)
@@ -144,6 +148,7 @@ func TestBuildAdminMonitoringScope_Sub2APIManualPriorityIsHardExcluded(t *testin
 		[]PolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", TargetID: manualTargetID, PolicyID: directPolicy.ID}},
 		[]GroupPolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: groupPolicy.ID}},
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("build scope: %v", err)
@@ -166,6 +171,7 @@ func TestBuildAdminMonitoringScope_RequiresApplicableEnabledModel(t *testing.T) 
 	scope, err := buildAdminMonitoringScope(
 		"user1", "ws1", inventory, []Policy{policy}, nil,
 		[]GroupPolicyAssignment{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", PolicyID: policy.ID}}, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("build scope: %v", err)
@@ -189,6 +195,7 @@ func TestBuildAdminMonitoringScope_FiltersEveryInputByWorkspace(t *testing.T) {
 		[]PolicyAssignment{{UserID: "other-user", AdminAccountID: "other-workspace", TargetID: "sub2api:ws1:acc-1", PolicyID: foreign.ID}},
 		[]GroupPolicyAssignment{{UserID: "other-user", AdminAccountID: "other-workspace", AdminGroupID: "g1", PolicyID: foreign.ID}},
 		[]GroupTargetExclusion{{UserID: "other-user", AdminAccountID: "other-workspace", AdminGroupID: "g1", TargetID: "sub2api:ws1:acc-1"}},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("build scope: %v", err)

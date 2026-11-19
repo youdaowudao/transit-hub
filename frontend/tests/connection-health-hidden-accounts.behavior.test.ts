@@ -182,7 +182,7 @@ describe('group detail hides only table rows', () => {
     const wrapper = mountDetail(['sub2api:ws1:img'])
     await flushPromises()
     expect(wrapper.text()).toContain('另有 1 个已屏蔽账号未显示')
-    expect(wrapper.text()).toContain('上面的统计包含它们')
+    expect(wrapper.text()).toContain('账号总数包含它们，健康监控不计入')
     expect(wrapper.text()).not.toContain('Account sub2api:ws1:img')
     expect(wrapper.text()).toContain('Account sub2api:ws1:txt')
     const displayed = wrapper.emitted('displayed-targets')!.at(-1)![0] as string[]

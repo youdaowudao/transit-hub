@@ -3,6 +3,7 @@ package connection_health
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -12,8 +13,7 @@ import (
 	"transithub/backend/internal/modules/upstream"
 )
 
-// 屏蔽清单只影响分组健康页的显示、批量/计划问答的选择和模型自动关闭恢复。
-// 它不登记 Priority 同步、不递增健康配置代次，也不修改分组排除或任何主站设置。
+// 屏蔽清单参与健康管理范围。保存只改本地设置，后台按原排除流程处理退场。
 
 const hiddenAccountNameMaxRunes = 200
 
@@ -69,7 +69,7 @@ func (r *Repository) ListHiddenAccounts(ctx context.Context, userID, workspaceID
 // SaveAccountHidden 在一个事务里先用 FOR SHARE 复核工作区仍存在（与删除工作区的
 // FOR UPDATE 互斥），再只写两列屏蔽字段，不改档位等其他列。
 func (r *Repository) SaveAccountHidden(ctx context.Context, userID, workspaceID, targetID string, hidden bool, name string) (*time.Time, error) {
-	tx, err := r.db.Begin(ctx)
+	tx, err := r.beginWorkspaceTransaction(ctx, userID, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -80,6 +80,12 @@ func (r *Repository) SaveAccountHidden(ctx context.Context, userID, workspaceID,
 		return nil, requestError(ErrorNoCurrentAccount)
 	}
 	if err != nil {
+		return nil, err
+	}
+	var previouslyHidden bool
+	err = tx.QueryRow(ctx, `SELECT display_hidden_at IS NOT NULL FROM connection_health_account_configs
+		WHERE user_id = $1 AND admin_account_id = $2 AND target_id = $3`, userID, workspaceID, targetID).Scan(&previouslyHidden)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
 	var hiddenAt *time.Time
@@ -101,6 +107,11 @@ func (r *Repository) SaveAccountHidden(ctx context.Context, userID, workspaceID,
 		if _, err := tx.Exec(ctx, `UPDATE connection_health_account_configs
 			SET display_hidden_at = NULL, display_hidden_name = ''
 			WHERE user_id = $1 AND admin_account_id = $2 AND target_id = $3 AND display_hidden_at IS NOT NULL`, userID, workspaceID, targetID); err != nil {
+			return nil, err
+		}
+	}
+	if previouslyHidden != hidden {
+		if err := bumpExistingHealthConfigGenerationTx(ctx, tx, userID, workspaceID); err != nil {
 			return nil, err
 		}
 	}
@@ -140,6 +151,22 @@ func (s *Service) hiddenAccountTargetSet(ctx context.Context, userID, workspaceI
 		result[item.TargetID] = true
 	}
 	return result, nil
+}
+
+const ErrorProbeTargetHidden = "admin.connectionHealth.errors.probeTargetHidden"
+
+func (s *Service) checkFormalProbeHidden(ctx context.Context, userID, workspaceID string, platform upstream.Platform, targetID string) error {
+	if platform != upstream.PlatformSub2API {
+		return nil
+	}
+	hidden, err := s.hiddenAccountTargetSet(ctx, userID, workspaceID)
+	if err != nil {
+		return fmt.Errorf("%w: %v", requestError(ErrorHiddenAccountsRead), err)
+	}
+	if hidden[targetID] {
+		return requestError(ErrorProbeTargetHidden)
+	}
+	return nil
 }
 
 func (s *Service) ListHiddenAccounts(ctx context.Context, userID, workspace string) (HiddenAccountList, error) {

@@ -70,7 +70,12 @@ func (s *Service) cleanupUnmonitoredHealthStates(ctx context.Context, scan *sche
 			if !exists || cached.err != nil || cached.inventory == nil || cached.inventory.session.Platform != upstream.PlatformSub2API || !adminInventoryComplete(*cached.inventory) {
 				continue
 			}
-			scope, err = buildAdminMonitoringScope(workspace.userID, workspace.adminAccountID, *cached.inventory, scan.policies, scan.assignments, scan.groupAssignments, scan.exclusions)
+			hidden, hiddenErr := s.schedulerHiddenHealthTargets(ctx, workspace.userID, workspace.adminAccountID, *cached.inventory)
+			if hiddenErr != nil {
+				log.Printf("[connection-health] cleanup read hidden accounts failed workspace=%s err=%v", key, hiddenErr)
+				continue
+			}
+			scope, err = buildAdminMonitoringScope(workspace.userID, workspace.adminAccountID, *cached.inventory, scan.policies, scan.assignments, scan.groupAssignments, scan.exclusions, hidden)
 			if err != nil {
 				continue
 			}

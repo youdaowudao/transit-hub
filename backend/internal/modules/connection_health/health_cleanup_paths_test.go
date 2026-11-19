@@ -155,7 +155,7 @@ func cleanupPathsState(repo *fakeRepository, workspace, account, model string) s
 }
 
 func TestUnmonitoredTargetStatesDeleted(t *testing.T) {
-	for _, kind := range []string{"excluded", "manual-priority", "left-groups"} {
+	for _, kind := range []string{"excluded", "manual-priority", "left-groups", "screened"} {
 		t.Run(kind, func(t *testing.T) {
 			s, repo, stored, _ := cleanupPathsFixture(t, true)
 			delete(repo.targetActionStates, "user1|ws1|"+stored.TargetID)
@@ -169,6 +169,12 @@ func TestUnmonitoredTargetStatesDeleted(t *testing.T) {
 				reader.accountsByGrp["g1"][0].Priority = intPointer(5)
 			case "left-groups":
 				reader.accountsByGrp["g1"] = nil
+			case "screened":
+				hiddenRepo := &hiddenFakeRepository{fakeRepository: repo, hidden: map[string]HiddenAccount{}}
+				if _, err := hiddenRepo.SaveAccountHidden(t.Context(), "user1", "ws1", id, true, "a"); err != nil {
+					t.Fatal(err)
+				}
+				s.repo = hiddenRepo
 			}
 			s.platformGroups = reader
 			s.runSchedulerTick(context.Background())
@@ -180,13 +186,13 @@ func TestUnmonitoredTargetStatesDeleted(t *testing.T) {
 }
 
 func TestStatesKeptWhenNotProvablyUnmonitored(t *testing.T) {
-	for _, kind := range []string{"incomplete", "monitored", "target-checkpoint", "priority-checkpoint", "changed-generation"} {
+	for _, kind := range []string{"incomplete", "monitored", "target-checkpoint", "priority-checkpoint", "changed-generation", "screening-unavailable"} {
 		t.Run(kind, func(t *testing.T) {
 			s, repo, stored, _ := cleanupPathsFixture(t, true)
 			delete(repo.targetActionStates, "user1|ws1|"+stored.TargetID)
 			id := cleanupPathsState(repo, "ws1", "a", "gpt-4o")
 			reader := s.platformGroups.(fakePlatformGroupReader)
-			if kind != "monitored" {
+			if kind != "monitored" && kind != "screening-unavailable" {
 				reader.accountsByGrp["g1"] = nil
 			}
 			switch kind {
@@ -197,6 +203,11 @@ func TestStatesKeptWhenNotProvablyUnmonitored(t *testing.T) {
 				repo.targetActionStates["user1|ws1|"+id] = stored
 			case "priority-checkpoint":
 				repo.priorityStates["user1|ws1|"+id] = PrioritySyncState{UserID: "user1", AdminAccountID: "ws1", TargetID: id, OriginalPriority: 20, LastAppliedPriority: 20}
+			case "screening-unavailable":
+				// With a readable list the exclusion permits deletion, so falling
+				// back to an empty list on failure would lose this state.
+				repo.groupExclusions = []GroupTargetExclusion{{UserID: "user1", AdminAccountID: "ws1", AdminGroupID: "g1", TargetID: id}}
+				s.repo = &hiddenFakeRepository{fakeRepository: repo, listErr: errors.New("fixture hidden list unavailable")}
 			case "changed-generation":
 				s.repo = cleanupPathsSnapshotRepository{repo}
 				base := reader

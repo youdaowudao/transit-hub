@@ -38,7 +38,7 @@ func TestLongFailureNoticePostgresPublisherValidatesProducer(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			// Explicit TEST_DATABASE_URL only; this is the established isolated
 			// schema helper, and never creates a cluster, database or listener.
-			pool := openQuestionAnswerPostgresPool(t)
+			pool := stageAPostgresPool(t)
 			if _, err := pool.Exec(t.Context(), `CREATE TABLE admin_accounts(id text PRIMARY KEY,user_id text NOT NULL); INSERT INTO admin_accounts(id,user_id) VALUES('ws1','user1')`); err != nil {
 				t.Fatal(err)
 			}

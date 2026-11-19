@@ -47,6 +47,10 @@ func bumpHealthConfigGenerationTx(ctx context.Context, tx pgx.Tx, userID, worksp
 	if err := ensureWorkspaceHealthSettings(ctx, tx, userID, workspace); err != nil {
 		return err
 	}
+	return bumpExistingHealthConfigGenerationTx(ctx, tx, userID, workspace)
+}
+
+func bumpExistingHealthConfigGenerationTx(ctx context.Context, tx pgx.Tx, userID, workspace string) error {
 	_, err := tx.Exec(ctx, `UPDATE connection_health_workspace_settings SET config_generation=config_generation+1,updated_at=clock_timestamp() WHERE user_id=$1 AND admin_account_id=$2`, userID, workspace)
 	return err
 }

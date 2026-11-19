@@ -20,6 +20,7 @@ type schedulerRoundEvidence struct {
 	targets    []PolicyAssignment
 	groups     []GroupPolicyAssignment
 	exclusions []GroupTargetExclusion
+	hidden     map[string]healthHiddenScopeRead
 }
 
 type schedulerRoundStats struct {
@@ -90,7 +91,36 @@ func (s *Service) beginSchedulerRound(ctx context.Context) (context.Context, *sc
 	return context.WithValue(ctx, schedulerRoundKey{}, round), round
 }
 
-func recordSchedulerInventory(ctx context.Context, userID, workspace string, inventory adminWorkspaceInventory) {
+type healthHiddenScopeRead struct {
+	targets map[string]bool
+	err     error
+}
+
+// schedulerHiddenHealthTargets shares the first scope read in a scheduler round.
+// Formal probe batches call the probe guard separately for a fresh read.
+func (s *Service) schedulerHiddenHealthTargets(ctx context.Context, userID, workspace string, inventory adminWorkspaceInventory) (map[string]bool, error) {
+	if inventory.session.Platform != upstream.PlatformSub2API {
+		return nil, nil
+	}
+	round, inRound := ctx.Value(schedulerRoundKey{}).(*schedulerRoundEvidence)
+	if !inRound {
+		return s.hiddenAccountTargetSet(ctx, userID, workspace)
+	}
+	key := userID + "|" + workspace
+	round.mu.Lock()
+	read, cached := round.hidden[key]
+	if !cached {
+		read.targets, read.err = s.hiddenAccountTargetSet(ctx, userID, workspace)
+		if round.hidden == nil {
+			round.hidden = make(map[string]healthHiddenScopeRead)
+		}
+		round.hidden[key] = read
+	}
+	round.mu.Unlock()
+	return read.targets, read.err
+}
+
+func recordSchedulerInventory(ctx context.Context, userID, workspace string, inventory adminWorkspaceInventory, hidden map[string]bool) {
 	round, ok := ctx.Value(schedulerRoundKey{}).(*schedulerRoundEvidence)
 	if !ok || inventory.session.Platform != upstream.PlatformSub2API {
 		return
@@ -110,7 +140,7 @@ func recordSchedulerInventory(ctx context.Context, userID, workspace string, inv
 	for index := range readable.groups {
 		readable.groups[index].err = nil
 	}
-	scope, err := buildAdminMonitoringScope(userID, workspace, readable, round.policies, round.targets, round.groups, round.exclusions)
+	scope, err := buildAdminMonitoringScope(userID, workspace, readable, round.policies, round.targets, round.groups, round.exclusions, hidden)
 	assigned := assignedEnabledPoliciesByGroup(round.policies, round.groups)[key]
 	for _, group := range inventory.groups {
 		monitored := scope.monitoredByGroup[group.group.ID]

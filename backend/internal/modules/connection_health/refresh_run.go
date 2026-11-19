@@ -269,6 +269,10 @@ func (s *Service) executeAdminGroupsRefreshRun(run *adminGroupsRefreshRun, userI
 					s.finishAdminGroupsRefreshRun(run, run.failureTerminal("refresh_internal_error"))
 					return
 				}
+				if errors.Is(result.err, requestError(ErrorHiddenAccountsRead)) {
+					s.finishAdminGroupsRefreshRun(run, run.failureTerminal(ErrorHiddenAccountsRead))
+					return
+				}
 				s.finishAdminGroupsRefreshRun(run, run.pipelineFailureTerminal())
 				return
 			}

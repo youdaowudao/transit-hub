@@ -101,7 +101,7 @@ func TestMessagesC45K1DefaultAgreesAcrossSixConfigurationEntries(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				inventory, complete, err := s.priorityInventoryForSnapshot(snapshot, "ws1", map[string][]Policy{c45Target: repo.policies}, nil, nil, nil, upstreamMultiplierLookup{})
+				inventory, complete, err := s.priorityInventoryForSnapshot(snapshot, "ws1", map[string][]Policy{c45Target: repo.policies}, nil, nil, nil, upstreamMultiplierLookup{}, nil)
 				if err != nil || !complete || inventory[c45Target] == nil {
 					t.Fatalf("priority inventory prerequisite: complete=%v err=%v", complete, err)
 				}

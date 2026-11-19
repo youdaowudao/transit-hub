@@ -9,8 +9,7 @@ import {
 } from '../api/connectionHealth'
 import { connectionHealthMessageKey } from './useConnectionHealth'
 
-// 屏蔽清单是分组健康页隐藏账号的唯一依据，只影响四处显示：分组详情账号表、批量问答候选、
-// 计划表单指定账号候选、模型管理条目。它不改变健康探测和任何统计。
+// 保存并重读当前工作区的屏蔽清单，忽略旧工作区迟到的响应。
 
 export type HiddenListStatus = 'never' | 'loaded' | 'failed'
 

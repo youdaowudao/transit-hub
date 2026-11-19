@@ -113,7 +113,7 @@ func TestMessagesC45AllMembershipGenerationEntries(t *testing.T) {
 				}
 				got = testConfigurationMemberships(refresh.memberships)
 			case "priority":
-				items, complete, e := s.priorityInventoryForSnapshot(snapshot, "ws1", map[string][]Policy{c45Target: repo.policies}, nil, nil, nil, upstreamMultiplierLookup{})
+				items, complete, e := s.priorityInventoryForSnapshot(snapshot, "ws1", map[string][]Policy{c45Target: repo.policies}, nil, nil, nil, upstreamMultiplierLookup{}, nil)
 				if e != nil || !complete || items[c45Target] == nil {
 					t.Fatalf("priority fixture invalid: %v", e)
 				}

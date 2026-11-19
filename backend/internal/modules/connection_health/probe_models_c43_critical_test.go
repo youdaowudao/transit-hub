@@ -199,7 +199,7 @@ func c43CriticalPriorityResult(t *testing.T, first bool) (int, []int) {
 	}
 	mult := 1.0
 	lookup := upstreamMultiplierLookup{byAccount: map[string]upstreamMultiplierResolution{"1": {status: MultiplierResolutionResolved, info: upstreamKeyGroupInfo{effectiveMultiplier: &mult}}}}
-	items, complete, err := f.service.priorityInventoryForSnapshot(snapshot, c32REDWorkspace, map[string][]Policy{c32REDTarget("1"): policies}, nil, nil, nil, lookup)
+	items, complete, err := f.service.priorityInventoryForSnapshot(snapshot, c32REDWorkspace, map[string][]Policy{c32REDTarget("1"): policies}, nil, nil, nil, lookup, nil)
 	if err != nil || !complete {
 		t.Fatal(err, complete)
 	}
@@ -374,7 +374,7 @@ func TestProbeModelC43E2OtherPlatformRemainsUnchanged(t *testing.T) {
 	inv.session.Platform = upstream.PlatformNewAPI
 	check := func(policy Policy) adminMonitoringScope {
 		assignments := []GroupPolicyAssignment{{UserID: c32REDUser, AdminAccountID: c32REDWorkspace, AdminGroupID: "1", PolicyID: policy.ID}}
-		scope, e := buildAdminMonitoringScope(c32REDUser, c32REDWorkspace, *inv, []Policy{policy}, nil, assignments, nil)
+		scope, e := buildAdminMonitoringScope(c32REDUser, c32REDWorkspace, *inv, []Policy{policy}, nil, assignments, nil, nil)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -414,7 +414,7 @@ func TestProbeModelC43E3MonitoringAccountsUnchanged(t *testing.T) {
 		assignments = append(assignments, PolicyAssignment{UserID: c32REDUser, AdminAccountID: c32REDWorkspace, TargetID: c32REDTarget(id), PolicyID: p.ID})
 	}
 	check := func(policy Policy) adminMonitoringScope {
-		s, e := buildAdminMonitoringScope(c32REDUser, c32REDWorkspace, *inv, []Policy{policy}, assignments, nil, nil)
+		s, e := buildAdminMonitoringScope(c32REDUser, c32REDWorkspace, *inv, []Policy{policy}, assignments, nil, nil, nil)
 		if e != nil {
 			t.Fatal(e)
 		}

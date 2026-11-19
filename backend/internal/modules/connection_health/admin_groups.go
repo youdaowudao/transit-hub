@@ -349,10 +349,16 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 	groupFetchDuration := time.Since(groupFetchStarted)
 	localReadStarted := time.Now()
 	accountTiers := make(map[string]int)
+	var hidden map[string]bool
 	if session.Platform == upstream.PlatformSub2API {
 		ctx, err = s.captureWorkspaceRules(ctx, userID, adminAccountID)
 		if err != nil {
 			return nil, err
+		}
+		hidden, err = s.hiddenAccountTargetSet(ctx, userID, adminAccountID)
+		if err != nil {
+			log.Printf("[connection-health] admin groups read hidden accounts failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
+			return nil, requestError(ErrorHiddenAccountsRead)
 		}
 		accountTiers, err = s.repo.ListAccountTiers(ctx, userID, adminAccountID)
 		if err != nil {
@@ -588,6 +594,9 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 		}
 		for _, account := range inventory.accounts {
 			targetID := buildTargetID(platform, adminAccountID, account.ID)
+			if hidden[targetID] {
+				continue
+			}
 			directPolicies := make([]Policy, 0, len(assignmentsByTarget[targetID]))
 			for _, assignment := range assignmentsByTarget[targetID] {
 				if policy, ok := policyByID[assignment.PolicyID]; ok {
@@ -708,6 +717,9 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 				policiesForIDs(explicitIDs, policyByID),
 				policiesForIDs(inheritedIDs, policyByID),
 			)
+			if hidden[targetID] {
+				effectivePolicies = nil
+			}
 			decisionAccount := decisionAccountByTarget[targetID]
 			monitoringPolicies := effectivePolicies
 			if accountHardExcludedFromAdminMonitoring(platform, decisionAccount) {

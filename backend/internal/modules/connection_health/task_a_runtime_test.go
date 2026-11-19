@@ -291,9 +291,9 @@ func TestTaskARoundEvidencePrecedesRestoreAndUnknownIsSeparate(t *testing.T) {
 	round.policies = []Policy{p}
 	round.groups = []GroupPolicyAssignment{{UserID: "u", AdminAccountID: "w", AdminGroupID: "g", PolicyID: "p"}}
 	inventory := adminWorkspaceInventory{groupsComplete: true, session: upstream.Session{Platform: upstream.PlatformSub2API}, groups: []adminInventoryGroup{{group: upstream.AdminGroupInfo{ID: "g"}, accounts: []upstream.AdminGroupAccountInfo{{ID: "a", Status: "inactive", Schedulable: boolPointer(true), TempUnschedulableKnown: true, Models: "m"}}}}}
-	recordSchedulerInventory(ctx, "u", "w", inventory)
+	recordSchedulerInventory(ctx, "u", "w", inventory, nil)
 	updateAdminInventoryTargetState(&inventory, "a", "active", nil)
-	recordSchedulerInventory(ctx, "u", "w", inventory)
+	recordSchedulerInventory(ctx, "u", "w", inventory, nil)
 	if round.zero["u|w|g"] != 1 || len(round.unknown) != 0 {
 		t.Fatalf("restore erased prior zero evidence: %+v", round)
 	}
@@ -301,7 +301,7 @@ func TestTaskARoundEvidencePrecedesRestoreAndUnknownIsSeparate(t *testing.T) {
 	round.policies = []Policy{p}
 	round.groups = []GroupPolicyAssignment{{UserID: "u", AdminAccountID: "w", AdminGroupID: "g", PolicyID: "p"}}
 	inventory.groups[0].accounts[0].TempUnschedulableKnown = false
-	recordSchedulerInventory(ctx, "u", "w", inventory)
+	recordSchedulerInventory(ctx, "u", "w", inventory, nil)
 	if len(round.zero) != 0 || round.unknown["u|w|g"] != 1 {
 		t.Fatal("unknown temporary state was counted as zero")
 	}
@@ -309,7 +309,7 @@ func TestTaskARoundEvidencePrecedesRestoreAndUnknownIsSeparate(t *testing.T) {
 	ctx, round = s.beginSchedulerRound(context.Background())
 	round.policies = []Policy{p}
 	round.groups = []GroupPolicyAssignment{{UserID: "u", AdminAccountID: "w", AdminGroupID: "g", PolicyID: "p"}}
-	recordSchedulerInventory(ctx, "u", "w", inventory)
+	recordSchedulerInventory(ctx, "u", "w", inventory, nil)
 	if len(round.zero) != 0 || round.unknown["u|w|g"] != 1 {
 		t.Fatal("partial inventory was counted as zero")
 	}

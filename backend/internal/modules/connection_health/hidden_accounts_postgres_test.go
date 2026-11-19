@@ -234,3 +234,138 @@ func (hiddenReadFailingRepository) ListHiddenAccounts(context.Context, string, s
 func (hiddenReadFailingRepository) SaveAccountHidden(context.Context, string, string, string, bool, string) (*time.Time, error) {
 	return nil, errors.New("hidden list unavailable")
 }
+
+func TestHiddenHealthSaveGenerationPostgres(t *testing.T) {
+	pool := stageAPostgresPool(t)
+	ctx := t.Context()
+	repo := NewRepository(pool)
+	if err := repo.EnsureSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS admin_accounts (id text PRIMARY KEY, user_id text NOT NULL);
+		INSERT INTO admin_accounts (id, user_id) VALUES ('ws1', 'user1')`); err != nil {
+		t.Fatal(err)
+	}
+	save := func(hidden bool) {
+		t.Helper()
+		if _, err := repo.SaveAccountHidden(ctx, "user1", "ws1", "sub2api:ws1:img", hidden, "image"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertRows := func(wantGeneration int, wantPresets int) {
+		t.Helper()
+		var generation, presets int
+		err := pool.QueryRow(ctx, `SELECT COALESCE((SELECT config_generation FROM connection_health_workspace_settings), -1), (SELECT count(*) FROM connection_health_rule_presets)`).Scan(&generation, &presets)
+		if err != nil || generation != wantGeneration || presets != wantPresets {
+			t.Fatalf("after screen change, config generation=%d, presets=%d, want %d and %d: %v", generation, presets, wantGeneration, wantPresets, err)
+		}
+	}
+	save(true)
+	assertRows(-1, 0)
+	save(false)
+	assertRows(-1, 0)
+	if _, err := pool.Exec(ctx, `INSERT INTO connection_health_workspace_settings (user_id, admin_account_id, config_generation) VALUES ('user1','ws1',4)`); err != nil {
+		t.Fatal(err)
+	}
+	save(true)
+	assertRows(5, 0)
+	save(true)
+	assertRows(5, 0)
+	save(false)
+	assertRows(6, 0)
+	save(false)
+	assertRows(6, 0)
+
+	if _, err := pool.Exec(ctx, `ALTER TABLE connection_health_workspace_settings ADD CONSTRAINT test_reject_generation CHECK (config_generation <= 6)`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := repo.SaveAccountHidden(ctx, "user1", "ws1", "sub2api:ws1:img", true, "image")
+	if err == nil {
+		t.Fatal("hiding must report a failed generation write")
+	}
+	items, err := repo.ListHiddenAccounts(ctx, "user1", "ws1")
+	if err != nil || len(items) != 0 {
+		t.Fatalf("failed transaction must leave the target visible: %v, %v", items, err)
+	}
+	assertRows(6, 0)
+}
+
+func TestHiddenHealthSaveAndWorkspaceDeletionSerializePostgres(t *testing.T) {
+	pool := stageAPostgresPool(t)
+	ctx := t.Context()
+	repo := NewRepository(pool)
+	if err := repo.EnsureSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `CREATE TABLE admin_accounts (id text PRIMARY KEY, user_id text NOT NULL);
+		INSERT INTO admin_accounts (id, user_id) VALUES ('delete-first', 'u'), ('hide-first', 'u');
+		INSERT INTO connection_health_workspace_settings (user_id, admin_account_id, config_generation) VALUES ('u', 'hide-first', 4)`); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, workspace := range []string{"delete-first", "hide-first"} {
+		target := "sub2api:" + workspace + ":fixture"
+		wantGeneration := -1
+		if workspace == "hide-first" {
+			if hiddenAt, err := repo.SaveAccountHidden(ctx, "u", workspace, target, true, "fixture"); err != nil || hiddenAt == nil {
+				t.Fatalf("hide before deletion: timestamp=%v err=%v", hiddenAt, err)
+			}
+			wantGeneration = 5
+		}
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		var deletingPID int
+		// Reproduce the workspace row lock and the relevant deletes in
+		// admin_accounts.Repository.DeleteWorkspace for this isolated schema.
+		if err := tx.QueryRow(ctx, `SELECT pg_backend_pid() FROM admin_accounts WHERE user_id = $1 AND id = $2 FOR UPDATE`, "u", workspace).Scan(&deletingPID); err != nil {
+			t.Fatal(err)
+		}
+		result := make(chan error, 1)
+		if workspace == "delete-first" {
+			go func() {
+				_, err := repo.SaveAccountHidden(ctx, "u", workspace, target, true, "fixture")
+				result <- err
+			}()
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				var waiting bool
+				err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE $1=ANY(pg_blocking_pids(a.pid)))`, deletingPID).Scan(&waiting)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if waiting {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("screening did not wait for the workspace deletion row lock")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM connection_health_account_configs WHERE user_id = $1 AND admin_account_id = $2`, "u", workspace); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM admin_accounts WHERE user_id = $1 AND id = $2`, "u", workspace); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if workspace == "delete-first" {
+			if err := <-result; !errors.Is(err, requestError(ErrorNoCurrentAccount)) {
+				t.Fatalf("save after deletion must be rejected: %v", err)
+			}
+		}
+		var generation, presets, configs int
+		err = pool.QueryRow(ctx, `SELECT
+			COALESCE((SELECT config_generation FROM connection_health_workspace_settings WHERE admin_account_id=$1), -1),
+			(SELECT count(*) FROM connection_health_rule_presets WHERE admin_account_id=$1),
+			(SELECT count(*) FROM connection_health_account_configs WHERE admin_account_id=$1)`, workspace).Scan(&generation, &presets, &configs)
+		if err != nil || generation != wantGeneration || presets != 0 || configs != 0 {
+			t.Fatalf("%s after deletion: generation=%d (want %d) presets=%d configs=%d err=%v", workspace, generation, wantGeneration, presets, configs, err)
+		}
+	}
+}

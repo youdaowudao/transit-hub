@@ -91,6 +91,7 @@ const {
   groups,
   adminGroups,
   adminGroupsAcceptedRevision,
+  adminGroupsReadFailure,
   adminGroupsLoaded,
   events,
   policies,
@@ -104,6 +105,7 @@ const {
   cancelAdminGroupsRefresh,
   setAdminGroupsWorkspace,
   invalidateAdminGroupsReads,
+  invalidateAndScheduleAdminGroupsReload,
   applyAccountTier,
   applyAccountPriority,
   applyAccountConcurrency,
@@ -365,53 +367,69 @@ const retryPendingQuestionAnswerSummaries = () => {
   for (const [targetId, version] of questionAnswerSummaryPending) if (version > (questionAnswerSummarySettled.get(targetId) ?? 0)) void refreshQuestionAnswerSummary(targetId)
 }
 
+let hiddenRereadNotice = ''
+let hiddenReloadRevision: number | undefined
+const savedHiddenOperation = ref<{ action: string; revision: number } | null>(null)
 watch([preferenceScope, hiddenListEnabled], ([scope, enabled]) => {
   hiddenAccounts.reset(enabled ? scope : '')
   hiddenNotice.value = ''
+  hiddenRereadNotice = ''
+  hiddenReloadRevision = undefined
+  savedHiddenOperation.value = null
   if (enabled) void hiddenAccounts.load()
 }, { immediate: true })
 // 每次接受新的分组主列表（普通读取和刷新流两条路径）后重读屏蔽清单，使另一标签页的修改在下次刷新时生效。
 // 摘要、探活结果等本地补丁不触发重读。
-watch(() => adminGroupsAcceptedRevision?.value, () => { if (hiddenListEnabled.value) void hiddenAccounts.load() })
+watch(() => adminGroupsAcceptedRevision?.value, () => {
+  savedHiddenOperation.value = null
+  if (hiddenListEnabled.value) void hiddenAccounts.load()
+})
+watch([preferenceScope, hiddenTargetIds], ([scope, ids], [previousScope, previousIds]) => {
+  if (!hiddenListEnabled.value || scope !== previousScope) return
+  if (ids.size === previousIds.size && [...ids].every(id => previousIds.has(id))) return
+  hiddenReloadRevision = invalidateAndScheduleAdminGroupsReload?.()
+})
 const hiddenCountForGroup = (group: AdminGroupHealth): number => group.accounts.filter(account => hiddenTargetIds.value.has(account.targetId)).length
 const hiddenDisplayName = (targetId: string, fallback?: string): string => accountNameText(accountLabelsByTarget.value[targetId]?.name, fallback, targetId.split(':').pop())
-// 页首提示里要求用户点「重新读取」的那一条（未确认、回读失败、取消屏蔽没有保存）：手动重读成功后与清单面板的未确认提示一起清除。
-let hiddenRereadNotice = ''
-const onHideAccount = async (account: AdminGroupAccount) => {
-  if (!hiddenListEnabled.value || !account.targetId || hiddenAccounts.writing.value) return
-  const name = hiddenDisplayName(account.targetId, account.name)
-  if (!confirm(`确认屏蔽「${name}」？屏蔽后它不再出现在分组健康的账号列表、批量问答、计划问答和模型管理里，也不会被模型自动关闭或恢复（已关闭的模型保持关闭）。屏蔽不改变健康探测和统计，也不改主站。如果它不需要健康探测，请到分组策略里处理（抽屉里会标出“已屏蔽”）。可在左侧「分组显示管理 → 屏蔽的账号」里取消屏蔽。`)) return
+const changeHiddenAccount = async (targetId: string, hidden: boolean, name: string) => {
+  const action = `${hidden ? '屏蔽' : '取消屏蔽'}「${name}」`
   hiddenNotice.value = ''
-  const result = await hiddenAccounts.write(account.targetId, true, name)
+  hiddenRereadNotice = ''
+  savedHiddenOperation.value = null
+  const previousReloadRevision = hiddenReloadRevision
+  const previousAcceptedRevision = adminGroupsAcceptedRevision?.value
+  const result = await hiddenAccounts.write(targetId, hidden, hidden ? name : '')
   if (!result) return
   const { outcome, reread } = result
   if (outcome.kind === 'saved') {
-    hiddenNotice.value = reread || !hiddenAccounts.readError.value ? '' : `已屏蔽「${name}」，但屏蔽清单没有读到：${hiddenAccounts.readError.value || '原因未知'}。页面已按本次结果隐藏它；请稍后在「分组显示管理」点「重新读取」，仍失败请检查后端服务和数据库连接。`
-    hiddenRereadNotice = hiddenNotice.value
+    if (hiddenReloadRevision !== undefined && hiddenReloadRevision !== previousReloadRevision && adminGroupsAcceptedRevision?.value === previousAcceptedRevision) {
+      savedHiddenOperation.value = { action, revision: hiddenReloadRevision }
+    }
+    const reason = hiddenAccounts.readError.value
+    if (!reread && reason) {
+      hiddenNotice.value = `「${action}」已保存，屏蔽清单没有读到（${reason}）。主站结果尚未确认，请重新读取清单并刷新分组健康。`
+      hiddenRereadNotice = hiddenNotice.value
+    } else {
+      hiddenNotice.value = hidden
+        ? `已保存「${action}」。后台处理结果可在分组健康页的状态和操作诊断查看。`
+        : `已取消屏蔽「${name}」。后台将按当前策略判断是否探测或调整主站，请到分组详情查看。`
+    }
   } else if (outcome.kind === 'rejected') {
-    hiddenNotice.value = `屏蔽「${name}」没有保存：${hiddenWriteReason(outcome)}。${outcome.status === 400 || outcome.status === 409 ? '请刷新页面后再试' : '可以再点一次'}。`
+    hiddenNotice.value = `「${action}」没有保存（${hiddenWriteReason(outcome)}）。这次请求没有改主站。请核对工作区和账号，或按上面的原因处理后重试。`
   } else if (hiddenAccounts.unconfirmed.value) {
-    hiddenNotice.value = `屏蔽「${name}」的结果没有确认（${hiddenWriteReason(outcome)}）：可能已经保存，也可能没有。请稍后点「分组显示管理」里的「重新读取」核对，清单里有它就是已屏蔽。`
+    hiddenNotice.value = `「${action}」没有确认（${hiddenWriteReason(outcome)}）。可能已经保存，后台也可能开始处理。请先重新读取清单核对，再决定是否重试。`
     hiddenRereadNotice = hiddenNotice.value
   }
 }
+const onHideAccount = async (account: AdminGroupAccount) => {
+  if (!hiddenListEnabled.value || !account.targetId || hiddenAccounts.writing.value) return
+  const name = hiddenDisplayName(account.targetId, account.name)
+  if (!confirm(`确认屏蔽「${name}」？检查到屏蔽的新一批正式探测会停止，已经放行的一批仍可能继续请求。后台可能恢复健康管理曾改过的 Priority 或启用状态，也可能重新排列其他受管账号。可到「分组显示管理 → 屏蔽的账号」取消屏蔽。`)) return
+  await changeHiddenAccount(account.targetId, true, name)
+}
 const onUnhideAccount = async (targetId: string, savedName: string) => {
   if (!hiddenListEnabled.value || hiddenAccounts.writing.value) return
-  const name = hiddenDisplayName(targetId, savedName)
-  hiddenNotice.value = ''
-  const result = await hiddenAccounts.write(targetId, false, '')
-  if (!result) return
-  const { outcome, reread } = result
-  if (outcome.kind === 'saved') {
-    hiddenNotice.value = reread || !hiddenAccounts.readError.value ? `已取消屏蔽「${name}」。如果它仍在原来的分组里，会重新显示。` : `已取消屏蔽「${name}」，但屏蔽清单没有读到：${hiddenAccounts.readError.value || '原因未知'}。请稍后点「重新读取」。`
-    hiddenRereadNotice = reread || !hiddenAccounts.readError.value ? '' : hiddenNotice.value
-  } else if (outcome.kind === 'rejected') {
-    hiddenNotice.value = `取消屏蔽「${name}」没有保存：${hiddenWriteReason(outcome)}。请点「重新读取」确认它现在的状态后再试。`
-    hiddenRereadNotice = hiddenNotice.value
-  } else if (hiddenAccounts.unconfirmed.value) {
-    hiddenNotice.value = `取消屏蔽「${name}」的结果没有确认（${hiddenWriteReason(outcome)}）：可能已经生效，也可能没有。请稍后点「重新读取」核对。`
-    hiddenRereadNotice = hiddenNotice.value
-  }
+  await changeHiddenAccount(targetId, false, hiddenDisplayName(targetId, savedName))
 }
 const reloadHiddenAccounts = async () => {
   const notice = hiddenRereadNotice
@@ -583,7 +601,19 @@ const clearGroupHighlight = () => {
 
 const monitoredGroupCount = computed(() => adminGroups.value.filter(groupMonitoringEnabled).length)
 const conflictCount = computed(() => adminGroups.value.reduce((sum, group) => sum + (group.priorityConflictCount ?? 0), 0))
+const hiddenAccountsReadKey = 'admin.connectionHealth.errors.hiddenAccountsRead'
+const healthStatisticsReadFailure = () => t('admin.connectionHealth.errors.hiddenHealthStatisticsRead', {
+  statistics: t(`admin.connectionHealth.errors.${adminGroupsLoaded.value ? 'hiddenHealthStatisticsRetained' : 'hiddenHealthStatisticsEmpty'}`),
+})
 const readableMessage = (rawKey: string): string => t(connectionHealthMessageKey(rawKey, te))
+const displayedHiddenNotice = computed(() => {
+  const operation = savedHiddenOperation.value
+  const failure = adminGroupsReadFailure?.value
+  if (!operation || !failure || operation.revision !== failure.revision || hiddenAccounts.readError.value) return hiddenNotice.value
+  const reason = failure.errorKey === hiddenAccountsReadKey ? '读取屏蔽清单失败' : readableMessage(failure.errorKey)
+  return `「${operation.action}」已保存，分组健康统计没有读到（${reason}）。主站结果尚未确认，请重新读取清单并刷新分组健康。`
+})
+
 const auxiliarySourceLabel = (source: AuxiliaryFailureSource): string =>
   t(`admin.connectionHealth.refreshStatus.auxiliarySource.${source}`)
 const auxiliaryFailureText = (failure: AuxiliaryFailure): string =>
@@ -636,6 +666,7 @@ const priorityWorkspaceLabel = computed(() => resolvePriorityWorkspaceLabel(
 const priorityFailureText = computed(() => {
 	const status = prioritySyncStatus.value
 	if (!status || (status.status !== 'failed' && status.status !== 'partial')) return ''
+	if (status.errorKey === hiddenAccountsReadKey) return t('admin.connectionHealth.errors.hiddenHealthPriorityRead')
 	const reasonKey = connectionHealthMessageKey(status.errorKey, te)
 	const reason = t(reasonKey === 'admin.connectionHealth.errors.unknown'
 		? 'admin.connectionHealth.prioritySync.unknownReason'
@@ -689,16 +720,11 @@ const applySavedGroupConfiguration = (configuration?: AdminGroupPolicyConfigurat
 	const index = adminGroups.value.findIndex(group => group.id === configuration.adminGroupId)
 	if (index < 0) return
 	const current = adminGroups.value[index]
-	const enabledPolicies = configuration.policies.filter(policy => policy.enabled)
 	const excluded = new Set(configuration.excludedTargetIds)
 	adminGroups.value[index] = {
 		...current,
 		assignedPolicyIds: [...configuration.policyIds],
 		assignedPolicies: [...configuration.policies],
-		hasAssignedPolicy: configuration.policyIds.length > 0,
-		hasEnabledPolicy: enabledPolicies.length > 0,
-		hasEnabledProbePolicy: enabledPolicies.some(policy => (policy.strategyMode ?? 'health_probe') === 'health_probe'),
-		priorityMode: enabledPolicies.some(policy => policy.priorityMode === 'multiplier') ? 'multiplier' : 'none',
 		probeSortFallbackMultiplier: configuration.probeSortFallbackMultiplier ?? null,
 		excludedAccountCount: current.accounts.filter(account => excluded.has(account.targetId)).length,
 		accounts: current.accounts.map(account => ({ ...account, excludedFromGroupPolicy: excluded.has(account.targetId) })),
@@ -1064,6 +1090,7 @@ const refreshFailureMessagesByStatus: Record<string, RefreshFailureMessage> = {
 }
 
 const refreshFailureLabel = (errorKey: string, status: string, retained = false): string => {
+  if (errorKey === hiddenAccountsReadKey) return healthStatisticsReadFailure()
   const failureMessage = refreshFailureMessages[errorKey] ?? refreshFailureMessagesByStatus[status]
   const phase = t(`admin.connectionHealth.refreshStatus.failurePhase.${failureMessage?.phase ?? 'unknown'}`)
   const reason = t(`admin.connectionHealth.refreshStatus.failureReason.${failureMessage?.reason ?? 'unknown'}`)
@@ -1186,15 +1213,23 @@ const openQuestionAnswerTarget = (account: AdminGroupAccount, group: AdminGroupH
       })
     }
   }
+  const targetWorkspace = account.targetId.startsWith('sub2api:') ? account.targetId.split(':')[1] : undefined
+  const probeEntryBlock = hiddenTargetIds.value.has(account.targetId)
+    ? 'hidden'
+    : targetWorkspace !== undefined && (
+      !hiddenListEnabled.value || targetWorkspace !== preferenceScope.value
+      || hiddenAccounts.status.value !== 'loaded' || Boolean(hiddenAccounts.readError.value)
+    ) ? 'unconfirmed' : undefined
   probeDialogTarget.value = {
     targetId: account.targetId,
+    probeEntryBlock,
     accountTier: account.accountTier,
     accountName: accountNameText(account.name, accountLabelsByTarget.value[account.targetId]?.name),
     platform: group.platform,
     type: account.type,
     status: account.status,
     groupName: group.name,
-    formalModels: Array.from(formalModelMap.values()),
+    formalModels: probeEntryBlock ? [] : Array.from(formalModelMap.values()),
     testConfiguration: account.testConfiguration,
   }
   probeDialogOpen.value = true
@@ -1247,7 +1282,9 @@ const setQuickProbeError = (targetId: string, message: string) => {
 }
 
 const safeQuickProbeErrorMessage = (rawKey: string): string => {
-  const key = connectionHealthMessageKey(rawKey.trim(), te)
+  const key = rawKey.trim() === hiddenAccountsReadKey
+    ? 'admin.connectionHealth.errors.hiddenHealthProbeRead'
+    : connectionHealthMessageKey(rawKey.trim(), te)
   return te(key) ? t(key) : t('admin.connectionHealth.groupDetail.quickProbe.requestFailed')
 }
 
@@ -1705,9 +1742,9 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
       </dl>
     </section>
 
-    <p v-if="errorKey" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">{{ readableMessage(errorKey) }}</p>
+    <p v-if="errorKey" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">{{ errorKey === hiddenAccountsReadKey ? healthStatisticsReadFailure() : readableMessage(errorKey) }}</p>
     <p v-if="focusNotice" role="status" data-group-focus-notice class="rounded-lg bg-warning/10 px-4 py-3 text-sm text-warning">{{ focusNotice }}</p>
-    <p v-if="hiddenNotice" role="status" data-testid="hidden-accounts-notice" class="break-words rounded-lg bg-surface px-4 py-3 text-sm text-foreground">{{ hiddenNotice }}</p>
+    <p v-if="displayedHiddenNotice" role="status" data-testid="hidden-accounts-notice" class="break-words rounded-lg bg-surface px-4 py-3 text-sm text-foreground">{{ displayedHiddenNotice }}</p>
     <p v-if="hiddenListEnabled && hiddenAccounts.status.value === 'failed'" role="status" data-testid="hidden-accounts-never-loaded" class="break-words rounded-lg bg-warning/10 px-4 py-3 text-sm text-warning">屏蔽清单还没读到：{{ hiddenAccounts.readError.value }}。已屏蔽的账号可能暂时显示出来。请点「重新读取」，仍失败请检查后端服务和数据库连接。 <button type="button" class="underline" @click="reloadHiddenAccounts">重新读取</button></p>
 
     <section class="overflow-hidden rounded-lg border border-border/60 bg-card text-card-foreground shadow-sm">
@@ -1808,7 +1845,7 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
                   <span>屏蔽的账号（{{ hiddenAccounts.items.value.length }}）</span>
                   <button type="button" class="underline disabled:opacity-50" :disabled="hiddenAccounts.writing.value" @click="reloadHiddenAccounts">重新读取</button>
                 </div>
-                <p class="text-[11px] leading-5 text-muted-foreground">这里的账号不出现在分组健康的账号列表、批量和计划问答、模型管理里，也不会被模型自动关闭或恢复。屏蔽不改变健康探测和统计；需要时请在分组策略里处理。屏蔽保存在服务器，换电脑也生效；上面的分组显示和排序只保存在当前浏览器。</p>
+                <p class="text-[11px] leading-5 text-muted-foreground">这里的账号已退出健康管理。后台可能恢复健康管理曾改过的主站设置。需要按当前策略重新参加时，请点「取消屏蔽」。</p>
                 <p v-if="hiddenAccounts.writing.value" class="text-[11px] text-muted-foreground">正在保存屏蔽设置…</p>
                 <p v-if="hiddenAccounts.unconfirmed.value" role="status" class="break-words text-[11px] text-warning">有一次屏蔽设置的结果没有确认（{{ hiddenAccounts.unconfirmed.value }}）。请稍后点「重新读取」核对。</p>
                 <p v-if="hiddenAccounts.status.value === 'failed'" class="break-words text-[11px] text-destructive">屏蔽清单还没读到：{{ hiddenAccounts.readError.value }}。已屏蔽的账号可能暂时显示出来。请点「重新读取」，仍失败请检查后端服务和数据库连接。</p>

@@ -6,7 +6,7 @@ import (
 )
 
 func TestAbandonConflictedTargetActionPostgresEventRollback(t *testing.T) {
-	pool := openQuestionAnswerPostgresPool(t)
+	pool := stageAPostgresPool(t)
 	r := NewRepository(pool)
 	ctx := t.Context()
 	if err := r.EnsureSchema(ctx); err != nil {
@@ -59,7 +59,7 @@ CREATE TRIGGER reject_abandon_event BEFORE INSERT ON connection_health_events FO
 }
 
 func TestAbandonConflictedTargetActionPostgresGenerationAndPending(t *testing.T) {
-	pool := openQuestionAnswerPostgresPool(t)
+	pool := stageAPostgresPool(t)
 	r := NewRepository(pool)
 	ctx := t.Context()
 	if err := r.EnsureSchema(ctx); err != nil {
@@ -115,7 +115,7 @@ func TestAbandonConflictedTargetActionPostgresGenerationAndPending(t *testing.T)
 }
 
 func TestDeleteUnmonitoredStatesPostgresCheckpointsAndScope(t *testing.T) {
-	pool := openQuestionAnswerPostgresPool(t)
+	pool := stageAPostgresPool(t)
 	r := NewRepository(pool)
 	ctx := t.Context()
 	if err := r.EnsureSchema(ctx); err != nil {
@@ -183,7 +183,7 @@ func TestDeleteUnmonitoredStatesPostgresCheckpointsAndScope(t *testing.T) {
 }
 
 func TestDeleteUnmonitoredStatesPostgresWaitsForGenerationTransaction(t *testing.T) {
-	pool := openQuestionAnswerPostgresPool(t)
+	pool := stageAPostgresPool(t)
 	r := NewRepository(pool)
 	ctx := t.Context()
 	if err := r.EnsureSchema(ctx); err != nil {

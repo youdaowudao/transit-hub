@@ -555,7 +555,7 @@ func c43Comparison(t *testing.T, first bool, selectedState string) c43Comparison
 		lookup.byAccount[id] = upstreamMultiplierResolution{status: MultiplierResolutionResolved, info: upstreamKeyGroupInfo{effectiveMultiplier: float64Ptr(1)}}
 		assignments[c32REDTarget(id)] = policies
 	}
-	items, complete, err := f.service.priorityInventoryForSnapshot(snapshot, c32REDWorkspace, assignments, nil, nil, nil, lookup)
+	items, complete, err := f.service.priorityInventoryForSnapshot(snapshot, c32REDWorkspace, assignments, nil, nil, nil, lookup, nil)
 	if err != nil || !complete {
 		t.Fatal(err, complete)
 	}

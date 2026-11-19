@@ -107,7 +107,12 @@ func (s *Service) loadAdminInventory(ctx context.Context, userID string, adminAc
 		inventory.groups = append(inventory.groups, adminInventoryGroup{group: group, accounts: accounts, err: accountsErr})
 	}
 	guardAdminInventoryTimes(inventory)
-	recordSchedulerInventory(ctx, userID, adminAccountID, *inventory)
+	if _, inRound := ctx.Value(schedulerRoundKey{}).(*schedulerRoundEvidence); inRound && session.Platform == upstream.PlatformSub2API {
+		hidden, hiddenErr := s.schedulerHiddenHealthTargets(ctx, userID, adminAccountID, *inventory)
+		if hiddenErr == nil {
+			recordSchedulerInventory(ctx, userID, adminAccountID, *inventory, hidden)
+		}
+	}
 	s.rememberActionInventory(userID, adminAccountID, inventory)
 	cache[key] = adminInventoryCacheEntry{inventory: inventory}
 	return inventory, nil
@@ -423,6 +428,10 @@ func (s *Service) runAdminProbeJob(ctx context.Context, j adminProbeJob, release
 		return
 	}
 
+	if err := s.checkFormalProbeHidden(ctx, j.userID, j.adminAccountID, j.session.Platform, j.target.TargetID); err != nil {
+		log.Printf("[connection-health] check hidden accounts before scheduled probe stopped target_id=%s err=%v", j.target.TargetID, err)
+		return
+	}
 	cred, err := s.resolveProbeCredential(ctx, j.session, j.account)
 	if err != nil {
 		reason := upstream.ProbeCredentialReason(err)
@@ -672,8 +681,13 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 		}
 		session := inventory.session
 		platform := string(session.Platform)
+		hidden, hiddenErr := s.schedulerHiddenHealthTargets(ctx, ws.userID, ws.adminAccountID, *inventory)
+		if hiddenErr != nil {
+			log.Printf("[connection-health] scheduler read hidden accounts failed user_id=%s admin_account_id=%s err=%v", ws.userID, ws.adminAccountID, hiddenErr)
+			continue
+		}
 		monitoringScope, scopeErr := buildAdminMonitoringScope(
-			ws.userID, ws.adminAccountID, *inventory, policies, assignments, groupAssignments, exclusions,
+			ws.userID, ws.adminAccountID, *inventory, policies, assignments, groupAssignments, exclusions, hidden,
 		)
 		if scopeErr != nil {
 			log.Printf("[connection-health] scheduler build monitoring scope failed user_id=%s admin_account_id=%s err=%v", ws.userID, ws.adminAccountID, scopeErr)
@@ -712,6 +726,9 @@ func (s *Service) collectAdminProbeJobsWithGroupsAndCache(ctx context.Context, p
 					AccountWeight:  cloneIntPointer(acc.Weight),
 					ProviderFamily: acc.Platform,
 					Models:         splitModelList(acc.Models), modelSource: probeModelSourceFromAccount(acc),
+				}
+				if hidden[target.TargetID] {
+					continue
 				}
 				inheritedPolicies := assignedGroups[group.ID]
 				if excludedByWorkspace[key][group.ID][target.TargetID] {

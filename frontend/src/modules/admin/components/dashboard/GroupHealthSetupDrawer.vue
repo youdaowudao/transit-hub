@@ -32,7 +32,6 @@ type ModelSuggestionSource = 'common' | 'discovered' | 'none'
 
 const props = defineProps<{
   accountLabels?: import('../../utils/connectionHealthAccountLabel').AccountLabels
-  /** 屏蔽清单：抽屉照常列出这些账号，只在名字后标「已屏蔽」，方便用户在这里取消勾选以停止探测。 */
   hiddenTargetIds?: Set<string>
   open: boolean
   workspacePlatform: string
@@ -267,6 +266,19 @@ watch(
   },
 )
 
+const restoreHiddenTargetSelections = () => {
+  if (!props.open || !props.hiddenTargetIds?.size) return
+  const restored = new Set(selectedTargetIds.value)
+  for (const account of props.group?.accounts ?? []) {
+    const id = account.targetId
+    if (!props.hiddenTargetIds.has(id)) continue
+    if (initialExcludedTargetIds.value.has(id)) restored.delete(id)
+    else restored.add(id)
+  }
+  selectedTargetIds.value = restored
+}
+watch(() => props.hiddenTargetIds, restoreHiddenTargetSelections)
+
 watch(mode, (nextMode) => {
   if (nextMode === 'monitor' || nextMode === 'multiplierOnly') autoRemoteActionEnabled.value = false
   if (nextMode === 'stable' || nextMode === 'multiplier') autoRemoteActionEnabled.value = true
@@ -412,13 +424,15 @@ const buildExclusionOutcome = (account: AdminGroupAccount): ExclusionOutcome => 
 }
 
 const exclusionOutcomes = computed(() => new Map(
-	(props.group?.accounts ?? []).map(account => [account.targetId, buildExclusionOutcome(account)]),
+	(props.group?.accounts ?? []).filter(account => !props.hiddenTargetIds?.has(account.targetId))
+    .map(account => [account.targetId, buildExclusionOutcome(account)]),
 ))
 
 const exclusionOutcome = (account: AdminGroupAccount): ExclusionOutcome => exclusionOutcomes.value.get(account.targetId)
 	?? { kind: 'unknown', lines: [t(`${prefix}.scope.outcomeUnknown`)] }
 
 const changedAccounts = computed(() => (props.group?.accounts ?? []).flatMap((account) => {
+	if (props.hiddenTargetIds?.has(account.targetId)) return []
 	const wasExcluded = initialExcludedTargetIds.value.has(account.targetId)
 	const isExcluded = !selectedTargetIds.value.has(account.targetId)
 	if (wasExcluded === isExcluded) return []
@@ -452,6 +466,7 @@ const fallbackMultiplier = computed<number | null>(() => {
 const fallbackMultiplierInvalid = computed(() => fallbackMultiplierText.value.trim() !== '' && fallbackMultiplier.value == null)
 
 const toggleTarget = (targetId: string) => {
+  if (props.hiddenTargetIds?.has(targetId)) return
   const next = new Set(selectedTargetIds.value)
   if (next.has(targetId)) next.delete(targetId)
   else next.add(targetId)
@@ -582,7 +597,9 @@ const save = async () => {
   const policyIds = mode.value === 'existing' ? Array.from(selectedPolicyIds.value) : []
 
   const excludedTargetIds = group.accounts
-    .filter((account) => !selectedTargetIds.value.has(account.targetId))
+    .filter((account) => props.hiddenTargetIds?.has(account.targetId)
+      ? initialExcludedTargetIds.value.has(account.targetId)
+      : !selectedTargetIds.value.has(account.targetId))
     .map((account) => account.targetId)
   const quickPolicy = mode.value === 'existing' ? null : createQuickPolicyInput()
 
@@ -756,6 +773,7 @@ const close = () => {
                       type="checkbox"
                       class="mt-0.5 h-4 w-4 rounded border-border"
                       :checked="selectedTargetIds.has(account.targetId)"
+                      :disabled="hiddenTargetIds?.has(account.targetId)"
                       @change="toggleTarget(account.targetId)"
                     >
                     <span class="min-w-0 flex-1">
@@ -764,7 +782,7 @@ const close = () => {
                         <span class="text-xs text-muted-foreground">{{ account.status || '-' }}</span>
                       </span>
                       <span class="mt-1 block truncate text-xs text-muted-foreground">{{ account.models || t(`${prefix}.scope.modelsUnknown`) }}</span>
-                      <span v-if="!selectedTargetIds.has(account.targetId)" class="mt-2 block space-y-1 border-l-2 border-amber-500/40 pl-2">
+                      <span v-if="!hiddenTargetIds?.has(account.targetId) && !selectedTargetIds.has(account.targetId)" class="mt-2 block space-y-1 border-l-2 border-amber-500/40 pl-2">
                         <span class="block text-xs font-medium text-amber-700 dark:text-amber-400">{{ t(`${prefix}.scope.currentGroupOnly`) }}</span>
                         <span
                           v-for="(line, index) in exclusionOutcome(account).lines"
@@ -775,7 +793,8 @@ const close = () => {
                         </span>
                       </span>
                     </span>
-                    <span class="shrink-0 text-xs" :class="account.probeAvailable ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'">
+                    <span v-if="hiddenTargetIds?.has(account.targetId)" class="max-w-48 break-words text-xs text-muted-foreground">已屏蔽，暂不参加健康管理。这里保留原勾选。要调整，请先到「管理分组显示」取消屏蔽。</span>
+                    <span v-else class="shrink-0 text-xs" :class="account.probeAvailable ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'">
                       {{ t(`${prefix}.scope.${account.probeAvailable ? 'probeable' : 'pending'}`) }}
                     </span>
                   </label>

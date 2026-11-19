@@ -314,9 +314,11 @@ func (h *Handler) waitAdminGroupsRefreshRunJSON(w http.ResponseWriter, r *http.R
 	}
 	terminal := snapshot.Terminal
 	if terminal.Status != "success" || terminal.Groups == nil {
-		// JSON callers keep the pre-streaming failure contract; detailed safe run failures
-		// are exposed only by the SSE terminal union.
-		httpjson.WriteError(w, http.StatusInternalServerError, ErrorUnknown)
+		message := ErrorUnknown
+		if terminal.ErrorKey == ErrorHiddenAccountsRead {
+			message = ErrorHiddenAccountsRead
+		}
+		httpjson.WriteError(w, http.StatusInternalServerError, message)
 		return
 	}
 	result := AdminGroupsFreshResult{

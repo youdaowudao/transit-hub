@@ -317,9 +317,15 @@ func (s *Service) syncMultiplierPrioritiesWithCacheMode(
 			if workspaceUsesMultiplierPriority(assignedTargets[workspaceKey], assignedGroups[workspaceKey]) {
 				multiplierLookup = s.upstreamMultiplierResolutionsByAdminAccount(ctx, userID, adminAccountID, string(session.Platform))
 			}
+			hidden, hiddenErr := s.schedulerHiddenHealthTargets(ctx, userID, adminAccountID, *inventorySnapshot)
+			if hiddenErr != nil {
+				log.Printf("[connection-health] priority sync inventory failed reading hidden accounts user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, hiddenErr)
+				failGeneration(requestError(ErrorHiddenAccountsRead))
+				return
+			}
 			inventory, inventoryComplete, err := s.priorityInventoryForSnapshot(
 				inventorySnapshot, adminAccountID, assignedTargets[workspaceKey], assignedGroups[workspaceKey], excluded[workspaceKey],
-				fallbackByGroup, multiplierLookup,
+				fallbackByGroup, multiplierLookup, hidden,
 			)
 			if err != nil {
 				log.Printf("[connection-health] priority sync inventory failed user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
@@ -377,6 +383,7 @@ func (s *Service) priorityInventoryForSnapshot(
 	excludedByGroup map[string]map[string]bool,
 	fallbackByGroup map[string]*float64,
 	multiplierLookup upstreamMultiplierLookup,
+	hidden map[string]bool,
 ) (map[string]*priorityTargetInventory, bool, error) {
 	session := snapshot.session
 	platform := string(session.Platform)
@@ -412,6 +419,9 @@ func (s *Service) priorityInventoryForSnapshot(
 			item.target.TestMemberships = append(item.target.TestMemberships, testConfigurationMembership(group, account))
 			item.target.InventoryComplete = inventoryComplete
 			item.upstreamMultiplier = resolutionForAdminAccount(multiplierLookup, account.ID)
+			if hidden[targetID] {
+				continue
+			}
 			inherited := groupPolicies[group.ID]
 			excluded := excludedByGroup[group.ID][targetID]
 			if excluded {

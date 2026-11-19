@@ -2087,6 +2087,7 @@ func TestPriorityInventory_EnabledTargetPolicyExcludesInheritedGroupPolicy(t *te
 		map[string]map[string]bool{},
 		map[string]*float64{},
 		upstreamMultiplierLookup{},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("priorityInventoryForSnapshot() error = %v", err)

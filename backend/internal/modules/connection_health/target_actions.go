@@ -873,6 +873,12 @@ func (s *Service) restoreUnmanagedTargetActions(
 			}
 			stored = *pair.Target
 		}
+		hidden, hiddenErr := s.schedulerHiddenHealthTargets(ctx, stored.UserID, stored.AdminAccountID, *inventory)
+		if hiddenErr != nil {
+			log.Printf("[connection-health] restore unmanaged target read hidden accounts failed target_id=%s err=%v", stored.TargetID, hiddenErr)
+			continue
+		}
+		hardExcluded = hardExcluded || hidden[stored.TargetID]
 		effectivePolicies := effectivePoliciesForTarget(targetPolicySet, inheritedPolicies)
 		if hasRemoteActionModel(candidateModelSpecs(target.Models, effectivePolicies, target.Platform, target.modelSource, true)) && !hardExcluded && !oldRulePrimaryUnmanaged(target.Platform, captured.RuleVersion, tiers[stored.TargetID]) {
 			continue

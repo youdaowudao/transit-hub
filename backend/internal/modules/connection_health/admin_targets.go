@@ -479,6 +479,10 @@ func (s *Service) probeTarget(ctx context.Context, userID string, targetID strin
 		return nil, requestError(ErrorNoMatchingModels)
 	}
 
+	if err := s.checkFormalProbeHidden(ctx, userID, adminAccountID, session.Platform, target.TargetID); err != nil {
+		return nil, err
+	}
+
 	for _, spec := range specs {
 		current, stateErr := s.repo.GetState(ctx, target.TargetID, spec.modelName)
 		if stateErr != nil {

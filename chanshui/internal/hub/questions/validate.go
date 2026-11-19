@@ -166,6 +166,10 @@ func Validate(q Definition) error {
 	}
 	if q.Kind == "iq" || q.Kind == "vision" {
 		switch q.Judge.Type {
+		case ModelIdentityJudge:
+			if q.Kind != "iq" || gen != "static" || strings.TrimSpace(q.Template) == "" || q.MaxScore < 1 || q.MaxScore > 100 {
+				return fmt.Errorf("模型自报检查只支持普通推理文字题，题干不能为空，满分必须为1～100")
+			}
 		case "legacy":
 			if !isPreset || preset.Judge.Type != "legacy" || q.MaxScore != preset.MaxScore || q.Template != preset.Template || q.Judge.ExpectedText != preset.Judge.ExpectedText {
 				return fmt.Errorf("原判分规则只支持原题干、答案与固定满分；修改后请选通用判题或人工查看")

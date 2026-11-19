@@ -17,7 +17,7 @@ export default function HubQuestionDetails({ item, call, reportId, reportStatus 
     <h4>本次实际题目</h4><pre>{(result.evidence && typeof result.evidence==='object' && 'prompt' in result.evidence ? String((result.evidence as {prompt:string}).prompt) : item.prompt) || (item.imageAvailable ? '题面在图片中' : '使用本项固定检测流程')}</pre>
     {item.imageAvailable && <><button type="button" className="btn-secondary" onClick={async () => { try { const data = await call<{ dataURL: string }>('image', { reportId, itemId: item.itemId }); setImage(data.dataURL); setError(''); } catch (e) { setError(e instanceof Error ? e.message : '读取已保存图片时中断，请重试读取；不会重新检测。'); } }}>查看题目图片</button><p className="muted">只读取本次已保存图片，不重新检测。</p>{image && <img className="question-image" src={image} alt="本次检测实际使用的题目图片" />}</>}
     {typeof result.answer === 'string' && <><h4>模型回答</h4><pre>{result.answer || '尚未返回正文'}</pre></>}
-    {item.expected && <><h4>检测端参考答案</h4><p className="muted">原版推理题先按本地规则判分，零分时可能调用被测模型自评；识图和自定义题按各自规则处理。</p><pre>{item.expected}</pre></>}
+    {item.expected && <><h4>检测端参考答案</h4><p className="muted">{item.definition.judge.type === 'model_identity' ? '本题按检测端规则计分，不调用模型自评。' : '原版推理题先按本地规则判分，零分时可能调用被测模型自评；识图和自定义题按各自规则处理。'}</p><pre>{item.expected}</pre></>}
     {label === '待人工查看' && <p className="muted">此题只供人工查看，不参与自动得分。</p>}
     {(result.half || judgment.half) && <p className="muted">本题半分只展示卷面，不进入推理通过分子。</p>}
     {judgment.reason && <p className="muted">{judgment.reason}</p>}

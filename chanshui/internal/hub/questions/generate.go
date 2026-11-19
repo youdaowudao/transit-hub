@@ -29,6 +29,10 @@ func Generate(q Definition, seed int64) (Generated, error) {
 	if q.Judge.Type == "manual" {
 		g.Expected = q.Judge.ReferenceAnswer
 	}
+	if q.Judge.Type == ModelIdentityJudge {
+		g.Expected = ModelIdentityReference
+		return g, nil
+	}
 	if native, ok := originalGeneration(q, seed); ok {
 		g.Prompt, g.Tags, g.Image = native.Prompt, native.Tags, native.ImagePNG
 		if q.Judge.Type == "legacy" || ((q.Judge.Type == "text" || q.Judge.Type == "number") && q.Judge.ExpectedFrom == "generator") {

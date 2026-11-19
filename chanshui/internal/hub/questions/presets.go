@@ -57,6 +57,7 @@ func Presets() []Definition {
 	for i, p := range fingerprint.BehaviorProbes {
 		add(fmt.Sprintf("fingerprint:behavior:%d", i+1), fmt.Sprintf("行为指纹 %d", i+1), "fingerprint_behavior", p.Prompt, map[string]any{"generator": "fingerprint_behavior_v1", "slot": i, "probeKind": p.Kind}, 0, Judge{Type: "manual"})
 	}
+	out = append(out, Definition{ID: "Q10", Title: "模型自报检查", Kind: "iq", Enabled: true, Order: 950, MaxScore: 5, Template: ModelIdentityPrompt, Parameters: map[string]any{"generator": "static"}, Judge: Judge{Type: ModelIdentityJudge}})
 	return out
 }
 func Preset(id string) (Definition, bool) {

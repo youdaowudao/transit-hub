@@ -9,7 +9,7 @@ import (
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 func (s *Store) migrate(ctx context.Context) error {
 	conn, err := s.db.Conn(ctx)
@@ -17,11 +17,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	defer conn.Close()
+	// The first version read can encounter WAL recovery or an exclusive lock.
+	// Apply the existing wait window before any read, without changing the file.
+	if _, err = conn.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
+		return err
+	}
 	version, err := databaseVersion(ctx, conn)
 	if err != nil {
 		return err
 	}
-	for _, pragma := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA foreign_keys=ON", "PRAGMA cache_size=-2048"} {
+	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA foreign_keys=ON", "PRAGMA cache_size=-2048"} {
 		if _, err = conn.ExecContext(ctx, pragma); err != nil {
 			return err
 		}
@@ -42,10 +47,15 @@ func (s *Store) migrate(ctx context.Context) error {
 			return migrationFailure(err)
 		}
 	}
-	if err = rotateKnowledgeDefaults(ctx, conn); err != nil {
+	if version < 4 {
+		if err = rotateKnowledgeDefaults(ctx, conn); err != nil {
+			return migrationFailure(err)
+		}
+	}
+	if err = addModelIdentityDefault(ctx, conn); err != nil {
 		return migrationFailure(err)
 	}
-	if _, err = conn.ExecContext(ctx, "PRAGMA user_version=4"); err != nil {
+	if _, err = conn.ExecContext(ctx, "PRAGMA user_version=5"); err != nil {
 		return migrationFailure(err)
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {

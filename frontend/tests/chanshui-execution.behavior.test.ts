@@ -23,12 +23,12 @@ beforeEach(() => {
 })
 afterEach(async () => { await act(() => root.unmount()); dispose?.(); dispose = undefined; container.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
-async function boot() {
+async function boot(target: Record<string, unknown> = {}) {
   const state = { report: restorationReport(), items: restorationItems(3), failRead: false, failAfterCancel: false, calls: [] as { op: string; params: any }[] }
   const reply = (m: any) => window.dispatchEvent(new MessageEvent('message', { data: m, source: window, origin: location.origin }))
   const listener = (event: MessageEvent) => {
     const m = event.data
-    if (m?.kind === 'chanshui.READY') { reply({ kind: 'chanshui.BOOT', v: 1, generation: 1, workspaceId: 'workspace-a', target: {}, visible: true }); return }
+    if (m?.kind === 'chanshui.READY') { reply({ kind: 'chanshui.BOOT', v: 1, generation: 1, workspaceId: 'workspace-a', target, visible: true }); return }
     if (m?.kind !== 'chanshui.request') return
     state.calls.push({ op: m.op, params: m.params })
     let value: unknown = {}
@@ -55,6 +55,31 @@ async function boot() {
 }
 
 describe('检测执行入口与停止后的结果保持', () => {
+  it.each([{}, { targetId: 'account-a', groupId: 'group-a' }])('两个入口首次勾选缓存，用户取消后换账号、热入口和重新检测保持取消', async target => {
+    const s = await boot(target)
+    const cache = () => [...container.querySelectorAll('label.hub-checkbox')].find(l => l.textContent === '缓存读写')!.querySelector('input')!
+    expect(cache().checked).toBe(true)
+    expect(container.textContent).toContain('缓存默认勾选')
+    await act(() => cache().click()); expect(cache().checked).toBe(false)
+    await choose('分组', 'group-b'); expect(cache().checked).toBe(false)
+    await act(() => window.dispatchEvent(new MessageEvent('message', { data: { kind: 'chanshui.OPEN_TARGET', v: 1, generation: 1, target: { targetId: 'account-a', groupId: 'group-a' } }, source: window, origin: location.origin }))); await settle()
+    expect(cache().checked).toBe(false)
+    await act(() => button(s.report.accountName).click()); await settle()
+    await act(() => button('重新检测（新任务）').click()); await settle()
+    expect(cache().checked).toBe(false)
+    await act(() => cache().click()); expect(cache().checked).toBe(true)
+    expect(s.calls.some(c => c.op === 'start')).toBe(false)
+  })
+
+  it.each([true, false])('开始请求准确保留缓存选择=%s', async selected => {
+    const s = await boot()
+    const cache = [...container.querySelectorAll('label.hub-checkbox')].find(l => l.textContent === '缓存读写')!.querySelector('input')!
+    if (!selected) await act(() => cache.click())
+    await choose('分组', 'group-a'); await choose('账号', 'account-a')
+    await act(() => button('开始检测').click()); await settle()
+    const request = s.calls.find(c => c.op === 'start')!
+    expect(request).toBeTruthy(); expect(request.params.selectedSectionIds.includes('cache')).toBe(selected)
+  })
   it('停止后最新查询繁忙仍保留原报告、回答和已展开题目', async () => {
     const s = await boot(); s.report.status = 'running'; s.report.processExited = false
     await act(() => button(s.report.accountName).click()); await settle()

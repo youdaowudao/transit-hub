@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -74,22 +75,40 @@ func connectManager(ctx context.Context, cfg RunnerConfig) (*systemManager, erro
 		return nil, fmt.Errorf("systemd连接不支持管道传递，不能安全交付检测密钥")
 	}
 	m := &systemManager{c, cfg.BinaryPath}
-	managerProps, versionErr := m.props(ctx, managerPath, "Manager")
-	version, _ := managerProps["Version"].Value().(string)
-	end := 0
-	for end < len(version) && version[end] >= '0' && version[end] <= '9' {
-		end++
-	}
-	major, _ := strconv.Atoi(version[:end])
-	if versionErr != nil || major < 252 {
+	if err = checkManagerVersion(m.props(ctx, managerPath, "Manager")); err != nil {
 		c.Close()
-		return nil, fmt.Errorf("检测需要systemd 252或更新版本，当前版本无法确认或过旧；请升级后重试")
+		return nil, err
 	}
 	if err = m.checkSlice(ctx); err != nil {
 		c.Close()
 		return nil, err
 	}
 	return m, nil
+}
+
+// minSystemdVersion is the oldest systemd whose official source was checked
+// for every required D-Bus property and method here (v249, Ubuntu 22.04).
+// The optional D-Bus MemoryPeak property only exists from v255; without it,
+// inspect takes the peak from the unit's own cgroup files (cgroupMemoryPeak).
+const minSystemdVersion = 249
+
+func checkManagerVersion(props map[string]dbus.Variant, readErr error) error {
+	if readErr != nil {
+		return fmt.Errorf("无法读取服务器systemd版本，尚未启动检测；请按下面的原因核对systemd管理器是否正常运行、连接是否中断或超时、本程序是否有权限访问，再重试：%w", readErr)
+	}
+	version, _ := props["Version"].Value().(string)
+	end := 0
+	for end < len(version) && version[end] >= '0' && version[end] <= '9' {
+		end++
+	}
+	major, err := strconv.Atoi(version[:end])
+	if err != nil {
+		return fmt.Errorf("无法识别服务器systemd版本（读到“%s”），尚未启动检测；请在服务器执行systemctl --version核对后重试", version)
+	}
+	if major < minSystemdVersion {
+		return fmt.Errorf("检测需要systemd %d或更新版本，服务器当前为%s，尚未启动检测；请升级systemd后重试", minSystemdVersion, version)
+	}
+	return nil
 }
 func (m *systemManager) call(ctx context.Context, method string, args ...any) *dbus.Call {
 	return m.conn.Object("org.freedesktop.systemd1", managerPath).CallWithContext(ctx, managerInterface+"."+method, 0, args...)
@@ -142,8 +161,9 @@ func (m *systemManager) checkSlice(ctx context.Context) (err error) {
 		}
 		properties := []unitProperty{
 			{"Description", dbus.MakeVariant("TransitHub isolated model detection budget")},
-			// systemd 252 adds this sender reference before queuing the start
-			// job. A later RefUnit can lose the transient budget to automatic GC.
+			// systemd (same code in v249 and v252) adds this sender reference
+			// before queuing the start job. A later RefUnit can lose the
+			// transient budget to automatic GC.
 			{"AddRef", dbus.MakeVariant(true)},
 			{"MemoryAccounting", dbus.MakeVariant(true)}, {"MemoryMax", dbus.MakeVariant(MemoryCeiling)},
 			{"MemoryHigh", dbus.MakeVariant(uint64(450000000))}, {"MemorySwapMax", dbus.MakeVariant(uint64(0))},
@@ -261,6 +281,27 @@ func firstExecPath(v dbus.Variant) string {
 	}
 	return ""
 }
+
+// cgroupMemoryPeak reads the unit's own cgroup while it still exists, so the
+// peak works on systemd below 255 (no MemoryPeak property). memory.peak is the
+// exact kernel peak (Linux 5.19+); older kernels fall back to memory.current,
+// sampled on every 75ms check. Unreadable values mean "no peak" (0).
+// cgroupRoot is where inspect reads unit cgroups; tests point it at a fixture.
+var cgroupRoot = "/sys/fs/cgroup"
+
+func cgroupMemoryPeak(dir string) uint64 {
+	for _, name := range []string{"memory.peak", "memory.current"} {
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		if n, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64); err == nil {
+			return n
+		}
+		return 0
+	}
+	return 0
+}
 func (m *systemManager) inspect(ctx context.Context, name string) (ExitInfo, error) {
 	p, err := m.path(ctx, name)
 	if err != nil {
@@ -273,21 +314,27 @@ func (m *systemManager) inspect(ctx context.Context, name string) (ExitInfo, err
 	if s, _ := props["Slice"].Value().(string); s != sliceName || firstExecPath(props["ExecStart"]) != m.binary {
 		return ExitInfo{}, fmt.Errorf("检测程序归属与预期不符，拒绝操作不明进程")
 	}
-	info := ExitInfo{Result: fmt.Sprint(props["Result"].Value()), MemoryPeak: number(props["MemoryPeak"])}
+	info := ExitInfo{Result: fmt.Sprint(props["Result"].Value())}
+	// systemd 255+ answers UINT64_MAX when it cannot read the peak.
+	if peak := number(props["MemoryPeak"]); peak != math.MaxUint64 {
+		info.MemoryPeak = peak
+	}
 	group, _ := props["ControlGroup"].Value().(string)
 	populated := number(props["MainPID"]) != 0
 	if group != "" {
-		events, e := os.ReadFile(filepath.Join("/sys/fs/cgroup", group, "cgroup.events"))
+		events, e := os.ReadFile(filepath.Join(cgroupRoot, group, "cgroup.events"))
 		if e == nil {
 			populated = populated || strings.Contains(string(events), "populated 1")
 		} else if !os.IsNotExist(e) {
 			return info, fmt.Errorf("无法确认检测进程组是否清空：%w", e)
 		}
+		info.MemoryPeak = max(info.MemoryPeak, cgroupMemoryPeak(filepath.Join(cgroupRoot, group)))
 	}
 	info.Exited = !populated
 	info.OOM = info.Result == "oom-kill"
 	return info, nil
 }
+
 func (m *systemManager) stop(ctx context.Context, name string) error {
 	if _, err := m.inspect(ctx, name); err != nil {
 		return err

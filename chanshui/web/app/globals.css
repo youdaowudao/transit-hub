@@ -5226,6 +5226,11 @@ html[data-mode="dark"] .agent-onboard-tip {
 .hub-sections { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 9px; }
 .hub-checkbox { display: flex; gap: 8px; align-items: center; font-size: 14px; margin: 9px 0; }
 .hub-checkbox input { width: 16px; height: 16px; accent-color: var(--accent); }
+.hub-main .hub-section-picker > summary, .hub-section-picker .hub-checkbox { font-size: 18px; }
+.hub-main .hub-section-picker > .muted { font-size: 16px; line-height: 1.6; }
+.hub-section-picker .hub-sections { grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); }
+.hub-section-picker .hub-checkbox { min-height: 44px; line-height: 1.5; }
+.hub-section-picker .hub-checkbox input { width: 20px; height: 20px; flex-shrink: 0; }
 .hub-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 17px; margin: 18px 0; }
 .hub-form-grid > .hub-parameter-array { grid-column: 1 / -1; }
 .hub-parameter-array { padding: 12px 0; border-top: 1px solid var(--line); }

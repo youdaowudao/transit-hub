@@ -53,6 +53,9 @@ func ExtractCandidate(raw string) string {
 }
 func Grade(g Generated, answer string) Judgment {
 	q := g.Definition
+	if q.Judge.Type == ModelIdentityJudge {
+		return gradeModelIdentity(g, answer)
+	}
 	j := Judgment{Status: "known", Max: q.MaxScore, Tags: []string{}}
 	if q.Judge.Type == "manual" {
 		j.Status = "unreviewed"

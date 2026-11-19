@@ -112,6 +112,10 @@ func (p *process) info() ExitInfo { p.mu.Lock(); defer p.mu.Unlock(); return p.e
 func (p *process) setExit(info ExitInfo, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Keep the highest peak seen, even from a late sample whose state is
+	// otherwise ignored: later checks may sample lower, and the cgroup (and
+	// its peak file) disappears once the process exits.
+	p.exit.MemoryPeak = max(p.exit.MemoryPeak, info.MemoryPeak)
 	if p.exit.Exited && !info.Exited {
 		return
 	}
@@ -120,6 +124,7 @@ func (p *process) setExit(info ExitInfo, err error) {
 		info.SliceMemoryMaxBytes = p.exit.SliceMemoryMaxBytes
 		info.SwapMaxBytes = p.exit.SwapMaxBytes
 	}
+	info.MemoryPeak = p.exit.MemoryPeak
 	p.exit = info
 	p.exitErr = err
 }

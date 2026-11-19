@@ -487,6 +487,10 @@ func runItem(ctx context.Context, s *store.Store, o store.Owner, id, model strin
 		return out, err
 	}
 
+	if def.Judge.Type == questions.ModelIdentityJudge && !questions.ModelIdentityApplies(model) {
+		out.Judgment = questions.Judgment{Status: "not_applicable", Reason: "本题只检查选测GPT-6系列时的自报矛盾；当前模型不适用，未发送请求，不计入卷面。"}
+		return out, nil
+	}
 	if questions.IsOriginalQuestion(def) {
 		item := q.IQ()
 		if def.Kind == "vision" {

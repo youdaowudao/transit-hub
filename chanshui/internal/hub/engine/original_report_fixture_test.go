@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
 	"github.com/kiss-kedaya/chanshui/internal/hub/store"
 	"github.com/kiss-kedaya/chanshui/internal/knowledge"
 )
@@ -41,6 +42,9 @@ func TestOriginalReportKeepsEveryProbeDTOAndCanExportBrowserFixture(t *testing.T
 	grade := regexp.MustCompile(`本题满分 (\d+)`)
 	fake := fixtureTransport(func(r *http.Request) (*http.Response, error) {
 		prompt, body := requestPrompt(t, r)
+		if prompt == questions.ModelIdentityPrompt {
+			return fixtureResponse(r, "我是GPT-6。"), nil
+		}
 		if _, ok := body["tools"]; ok {
 			return &http.Response{StatusCode: 400, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":{"message":"本地原版报告示例：未模拟工具往返，保留原错误诊断"}}`)), Request: r}, nil
 		}
@@ -94,6 +98,13 @@ func TestOriginalReportKeepsEveryProbeDTOAndCanExportBrowserFixture(t *testing.T
 		}
 		for _, item := range page.Items {
 			items = append(items, item)
+			if item.Definition.Judge.Type == questions.ModelIdentityJudge {
+				var result itemResult
+				if err = json.Unmarshal(item.Result, &result); err != nil || result.Answer != "我是GPT-6。" || result.Judgment.Earned == nil || *result.Judgment.Earned != 5 {
+					t.Fatal("new local scored question missing", result, err)
+				}
+				continue
+			}
 			if item.Definition.Kind == "fingerprint_behavior" || item.Definition.Kind == "knowledge" || item.Definition.Kind == "thinking" {
 				continue
 			}

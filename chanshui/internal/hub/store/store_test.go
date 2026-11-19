@@ -297,7 +297,7 @@ func TestSettingsCASAndHigherSchemaRefusesMigration(t *testing.T) {
 	if _, e = s.SaveSettings(ctx, testOwner, saved); e == nil {
 		t.Fatal("oversized memory accepted")
 	}
-	if _, e = s.db.ExecContext(ctx, "PRAGMA user_version=5"); e != nil {
+	if _, e = s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion+1)); e != nil {
 		t.Fatal(e)
 	}
 	if e = s.migrate(ctx); e == nil {

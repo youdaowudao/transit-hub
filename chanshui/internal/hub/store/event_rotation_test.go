@@ -191,7 +191,7 @@ func TestEventRotationRollsBackPartialWritesAndCanRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err = s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 4 {
+	if err = s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != schemaVersion {
 		t.Fatal("upgrade did not succeed on retry", version, err)
 	}
 }

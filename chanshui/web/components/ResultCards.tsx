@@ -6,7 +6,7 @@ import AnimatedNumber from "@/components/AnimatedNumber";
 import ResultSkeleton from "@/components/ResultSkeleton";
 import ErrorFold from "@/components/ErrorFold";
 import Hint from "@/components/Hint";
-import { canonModel, fingerprintState, presentedTotal, probabilityVisible } from "@/lib/report-view";
+import { canonModel, fingerprintState, presentedTotal, probabilityVisible, hasUnconfirmedIQ } from "@/lib/report-view";
 import { DetectVerdict } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 function ScoreShare({ verdict, part, preserve = false }: { verdict: DetectVerdict; part: string; preserve?: boolean }) {
@@ -96,6 +96,7 @@ export default function ResultCards({
   const integrity = v.integrity;
   const claude = (model || "").toLowerCase().startsWith("claude-");
   const cache = v.cache;
+  const unconfirmedIQ = hasUnconfirmedIQ(v);
   const cacheSamples = cache?.samples ?? [];
   const thirdCache = cacheSamples.length ? cacheSamples[cacheSamples.length - 1] : undefined;
   const previousCache = cacheSamples.length > 1 ? cacheSamples[cacheSamples.length - 2] : undefined;
@@ -167,7 +168,7 @@ export default function ResultCards({
               <div className="integrity-signal" key={item.key}>
                 <span>{tr(item.label)}</span>
                 <b className={item.contribution === item.coefficient ? "good" : "bad"}>
-                  {savedScore && !item.known ? tr("尚未确认") : `${item.contribution}/${item.coefficient}`}
+                  {(savedScore || unconfirmedIQ && item.key === 'iq') && !item.known ? tr("尚未确认") : `${item.contribution}/${item.coefficient}`}
                 </b>
               </div>
             ))}
@@ -479,7 +480,7 @@ export default function ResultCards({
         <div className="rc-head">
           <CardTitle title={tr("推理表现")} label={tr("评分说明")} text={q?.note} />
           <span className="rc-score">
-            <ScoreShare preserve={savedScore} verdict={scored} part="iq" />
+            <ScoreShare preserve={savedScore || unconfirmedIQ} verdict={scored} part="iq" />
             <span className="card-number">04</span>
           </span>
         </div>

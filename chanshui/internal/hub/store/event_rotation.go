@@ -9,7 +9,7 @@ import (
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 func (s *Store) migrate(ctx context.Context) error {
 	conn, err := s.db.Conn(ctx)
@@ -42,10 +42,15 @@ func (s *Store) migrate(ctx context.Context) error {
 			return migrationFailure(err)
 		}
 	}
-	if err = rotateKnowledgeDefaults(ctx, conn); err != nil {
+	if version < 4 {
+		if err = rotateKnowledgeDefaults(ctx, conn); err != nil {
+			return migrationFailure(err)
+		}
+	}
+	if err = addModelIdentityDefault(ctx, conn); err != nil {
 		return migrationFailure(err)
 	}
-	if _, err = conn.ExecContext(ctx, "PRAGMA user_version=4"); err != nil {
+	if _, err = conn.ExecContext(ctx, "PRAGMA user_version=5"); err != nil {
 		return migrationFailure(err)
 	}
 	if _, err = conn.ExecContext(ctx, "COMMIT"); err != nil {

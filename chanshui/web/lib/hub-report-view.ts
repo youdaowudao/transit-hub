@@ -1,6 +1,7 @@
 import type { DetectVerdict, Probe, TotalPart } from './api';
 import type { HubItem, HubReport } from './hub-types';
 import { isHubTerminal, reportStatus } from './hub-policy';
+import { hasUnconfirmedIQ } from './report-view';
 
 export const object = (value: unknown): Record<string, any> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {};
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
@@ -201,7 +202,7 @@ export function hubReportView(report: HubReport, items: HubItem[], complete: boo
   nativeProbes.push({id:individual?item.itemId:kind,name:individual?item.definition.title:(sectionNames[kind]??item.definition.title),status,ms:rows.reduce((sum,x)=>sum+(Number(x.result?.ms)||0),0),error:failed?rows.find(x=>x.result?.error)?.result?.error:undefined});
  }
  const finished=nativeProbes.filter(x=>['done','error','cancelled'].includes(x.status)).length;
- return {...view,verdict:v,totalLabel:report.retry && !isHubTerminal(report.status) ? '补测中' : '',messages,native:true,probes:nativeProbes,progress:{total:complete?nativeProbes.length:null,finished,statusTexts:{},unfinished:isHubTerminal(report.status)?nativeProbes.filter(x=>x.status==='cancelled').length:0}};
+ return {...view,verdict:v,totalLabel:report.retry && !isHubTerminal(report.status) ? '补测中' : hasUnconfirmedIQ(v) ? isHubTerminal(report.status) ? '总分尚未确认' : '尚未完成' : '',messages,native:true,probes:nativeProbes,progress:{total:complete?nativeProbes.length:null,finished,statusTexts:{},unfinished:isHubTerminal(report.status)?nativeProbes.filter(x=>x.status==='cancelled').length:0}};
 
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"github.com/kiss-kedaya/chanshui/internal/api"
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
+	"github.com/kiss-kedaya/chanshui/internal/integrity"
 	"github.com/kiss-kedaya/chanshui/internal/iq"
 )
 
@@ -30,9 +31,16 @@ func summarize(defs []questions.Generated, results map[string]itemResult, models
 	selected := map[string]bool{}
 	paper := []iq.Question{}
 	answers := map[string]api.QuestionResult{}
+	identityPending := false
 	for _, q := range defs {
 		kind := q.Definition.Kind
 		r := results[q.Definition.ID]
+		if q.Definition.Judge.Type == questions.ModelIdentityJudge {
+			if !questions.ModelIdentityApplies(model) {
+				continue
+			}
+			identityPending = identityPending || r.Error != "" || r.Judgment.Status != "known" || r.Judgment.Earned == nil
+		}
 		if kind == "fingerprint_behavior" || kind == "knowledge" {
 			continue
 		}
@@ -68,6 +76,9 @@ func summarize(defs []questions.Generated, results map[string]itemResult, models
 				}
 				if r.Judgment.Status != "known" && answer.Error == "" {
 					answer.Error = "请求未完成"
+					if q.Definition.Judge.Type == questions.ModelIdentityJudge && r.Judgment.Reason != "" {
+						answer.Error = r.Judgment.Reason
+					}
 				}
 			}
 			answers[item.ID] = answer
@@ -100,6 +111,20 @@ func summarize(defs []questions.Generated, results map[string]itemResult, models
 		}
 	}
 	v = api.AssembleVerdict(v, paper, answers, model, selected)
+	if identityPending {
+		if m, ok := v.IQ.(map[string]any); ok {
+			m["score"], m["complete"], m["note"] = nil, false, questions.ModelIdentityPending
+		}
+		composed := v.Total.(integrity.Total)
+		for i := range composed.Parts {
+			if composed.Parts[i].Key == "iq" {
+				composed.Parts[i].Known, composed.Parts[i].Points = false, 0
+			}
+		}
+		composed = integrity.Compose(composed.Parts)
+		composed.Reason = questions.ModelIdentityPending
+		v.Total = composed
+	}
 	// Original question bodies live once in each item, then the frontend joins
 	// those DTOs into per_question. This summary stays below the 64KiB channel.
 	if iqMap, ok := v.IQ.(map[string]any); ok {
@@ -111,5 +136,9 @@ func summarize(defs []questions.Generated, results map[string]itemResult, models
 	}
 	iqMap := asMap(v.IQ)
 	total := asMap(v.Total)
-	return map[string]any{"verdict": verdict, "total": total, "totalScore": total["score"], "parts": total["parts"], "iqMax": iqMap["paper_max"], "iqScore": iqMap["score"]}
+	var totalScore any = total["score"]
+	if identityPending {
+		totalScore = nil
+	}
+	return map[string]any{"verdict": verdict, "total": total, "totalScore": totalScore, "parts": total["parts"], "iqMax": iqMap["paper_max"], "iqScore": iqMap["score"]}
 }

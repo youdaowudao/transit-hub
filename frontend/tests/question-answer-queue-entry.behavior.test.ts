@@ -11,6 +11,7 @@ import { storeAccessToken } from '@/modules/auth/api/auth'
 import { cancelQuestionAnswerBatch, getQuestionAnswerBatch, getQuestionAnswerHistory, getQuestionAnswerSummary, setQuestionAnswerJudgment, startQuestionAnswerBatch } from '@/modules/admin/api/connectionHealth'
 import { questionAnswerFixtureStats, upgradeQuestionAnswerHistoryFixture } from './fixtures/c1QuestionAnswerHistory'
 import { c2Execution } from './fixtures/c2QuestionAnswerSchedules'
+import { selectAllBatchTargets } from './fixtures/batchDrawerSelection'
 
 const wrappers: VueWrapper[] = []
 const track = <T extends VueWrapper>(wrapper: T) => { wrappers.push(wrapper); return wrapper }
@@ -79,7 +80,7 @@ describe('B queue entry preservation', () => {
     }))
     try {
       const wrapper = track(mount(QuestionAnswerBatchDrawer, { props: { groups: groups(), preferenceScope: 'ws1', preferences: preferences() } }))
-      await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await flushPromises()
+      await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await selectAllBatchTargets(wrapper); await flushPromises()
       await wrapper.get('[data-testid="question-answer-batch-start"]').trigger('click'); await flushPromises()
       expect(posts).toBe(1)
       if (mode !== 'unauthorized') storeAccessToken('isolated-batch-session-b')
@@ -140,7 +141,7 @@ describe('B queue entry preservation', () => {
     const calls: { path: string; method?: string }[] = []
     vi.stubGlobal('fetch', vi.fn(async (input: unknown, init?: RequestInit) => { calls.push({ path: String(input), method: init?.method }); return baseReply(String(input)) }))
     const wrapper = entry === 'batch' ? track(mount(QuestionAnswerBatchDrawer, { props: { groups: groups(), preferenceScope: 'ws1', preferences: preferences() } })) : track(mount(QuestionAnswerScheduleExecutionDetail, { props: { executionId: 'execution1', workspace: 'ws1', scheduleName: '隔离定时计划' } }))
-    if (entry === 'batch') await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click')
+    if (entry === 'batch') await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await selectAllBatchTargets(wrapper)
     await flushPromises(); await wrapper.get('[data-testid="question-answer-queue-toggle"]').trigger('click')
     await wrapper.get('[data-testid="question-answer-queue-queued-row"] button').trigger('click'); await flushPromises()
     expect(wrapper.emitted('question-answer-view')?.at(-1)?.[0]).toMatchObject({ targetId: target, batchId })
@@ -165,7 +166,7 @@ describe('B queue entry preservation', () => {
       return baseReply(path)
     }))
     const wrapper = track(mount(QuestionAnswerBatchDrawer, { props: { groups: groups(), preferenceScope: 'ws1', preferences: preferences() } }))
-    await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await flushPromises()
+    await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await selectAllBatchTargets(wrapper); await flushPromises()
     await wrapper.get('[data-testid="question-answer-batch-start"]').trigger('click'); await flushPromises()
     expect(posts).toHaveLength(1)
     expect(wrapper.get('[data-testid="question-answer-batch-submitting"]').text()).toContain('入口账号a')
@@ -174,7 +175,7 @@ describe('B queue entry preservation', () => {
     expect(wrapper.text()).toContain('刷新页面会丢失尚未提交的计划')
     await wrapper.get('[data-testid="question-answer-batch-close"]').trigger('click')
     release!(); await flushPromises(); expect(posts).toHaveLength(2)
-    await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await flushPromises()
+    await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await selectAllBatchTargets(wrapper); await flushPromises()
     const outcome = wrapper.get(`[data-testid="question-answer-batch-outcome-${target}"]`)
     expect(outcome.text()).toContain('提交未确认'); expect(outcome.text()).toContain('不会自动重发')
     expect(wrapper.get('[data-testid="question-answer-batch-run-summary"]').text()).toContain('实际接受总量尚未确认')

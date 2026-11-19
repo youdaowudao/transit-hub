@@ -2,7 +2,7 @@ import { ref } from 'vue'
 import { t, te } from '@/locales'
 import { addModelControlManaged } from '../api/connectionHealth'
 import { formatConnectionHealthTime } from '../composables/useConnectionHealth'
-import type { ModelControlCounts, ModelControlDecision, ModelControlEvent, ModelControlItem, ModelControlRound } from '../types/connectionHealth'
+import type { AdminGroupHealth, ModelControlCounts, ModelControlDecision, ModelControlEvent, ModelControlItem, ModelControlRound } from '../types/connectionHealth'
 
 export const modelControlBusyTargets = ref(new Set<string>())
 const busyOwners = new Map<string, symbol>()
@@ -90,6 +90,8 @@ export const createModelControlVerifyState = ({ verify }: { verify: (ids: string
     isUnconfirmed: (targetId: string, model: string) => unconfirmed.value.has(`${targetId}|${model}`),
     accountUnconfirmed: (targetId: string) => [...unconfirmed.value.keys()].some(key => key.startsWith(`${targetId}|`)),
     dispose() { generation++; issued.clear(); processed.clear(); issues.value = new Map(); unconfirmed.value = new Map() },
+    /** 显示范围变化：作废在途核对与失败提示，但保留“操作结果未确认”，直到该账号核对成功。 */
+    resetScope() { generation++; issued.clear(); processed.clear(); issues.value = new Map() },
   }
 }
 
@@ -182,4 +184,63 @@ export const modelControlSummaryTooltip = (summary: import('../types/connectionH
   const attention = summary.models.filter(model => model.attention)
   if (attention.length) lines.push(`需处理：${attention.map(model => `${model.modelName}（${modelControlDecision(model.decision)}）`).join('、')}`)
   return lines.join('；')
+}
+
+// ---- 模型管理抽屉：按分组健康左侧顺序分段，组内按 Priority 从小到大 ----
+
+export interface ModelControlScope { excludeTargetIds: string[]; partial: boolean }
+
+/** 不显示账号 = 屏蔽清单里的账号 + 只出现在左侧隐藏分组里的账号。有显示分组的账号没读到时，只排除屏蔽清单。 */
+export const modelControlExcludedTargets = (groups: AdminGroupHealth[], hiddenGroupIds: string[], hiddenTargetIds: Set<string>): ModelControlScope => {
+  const hiddenGroups = new Set(hiddenGroupIds)
+  const visibleGroups = groups.filter(group => !hiddenGroups.has(group.id))
+  const partial = visibleGroups.some(group => Boolean(group.accountsError))
+  const excluded = new Set(hiddenTargetIds)
+  if (!partial) {
+    const inVisible = new Set(visibleGroups.flatMap(group => group.accounts.map(account => account.targetId)))
+    for (const group of groups) {
+      if (!hiddenGroups.has(group.id)) continue
+      for (const account of group.accounts) if (!inVisible.has(account.targetId)) excluded.add(account.targetId)
+    }
+  }
+  return { excludeTargetIds: [...excluded].sort(), partial }
+}
+
+export interface ModelControlAccountRow { targetId: string; alsoIn: string; items: ModelControlItem[] }
+export interface ModelControlSection { key: string; title: string; modelCount: number; rows: ModelControlAccountRow[] }
+
+/** 按左侧分组顺序分段：账号放在它第一个出现的显示分组；段内按 Priority 升序（空值最后）、账号名、账号 ID；同账号模型按名字。 */
+export const modelControlSections = (items: ModelControlItem[], groups: AdminGroupHealth[], hiddenGroupIds: string[]): ModelControlSection[] => {
+  const hiddenGroups = new Set(hiddenGroupIds)
+  const visibleGroups = groups.filter(group => !hiddenGroups.has(group.id))
+  const byTarget = new Map<string, ModelControlItem[]>()
+  for (const item of items) byTarget.set(item.targetId, [...(byTarget.get(item.targetId) ?? []), item])
+  const placed = new Set<string>()
+  const sections: ModelControlSection[] = []
+  const sortItems = (list: ModelControlItem[]) => [...list].sort((a, b) => a.modelName.localeCompare(b.modelName))
+  for (const group of visibleGroups) {
+    const accounts = group.accounts
+      .filter(account => byTarget.has(account.targetId) && !placed.has(account.targetId))
+      .sort((a, b) => {
+        const left = a.priority ?? null, right = b.priority ?? null
+        if (left !== right) {
+          if (left === null) return 1
+          if (right === null) return -1
+          return left - right
+        }
+        return (a.name || '').localeCompare(b.name || '') || a.targetId.localeCompare(b.targetId)
+      })
+    if (accounts.length === 0) continue
+    const rows = accounts.map((account) => {
+      placed.add(account.targetId)
+      const alsoIn = visibleGroups.filter(other => other.id !== group.id && other.accounts.some(member => member.targetId === account.targetId)).map(other => other.name).join('、')
+      return { targetId: account.targetId, alsoIn, items: sortItems(byTarget.get(account.targetId) ?? []) }
+    })
+    sections.push({ key: `group:${group.id}`, title: group.name, modelCount: rows.reduce((total, row) => total + row.items.length, 0), rows })
+  }
+  const rest = [...byTarget.keys()].filter(targetId => !placed.has(targetId))
+    .map(targetId => ({ targetId, alsoIn: '', items: sortItems(byTarget.get(targetId) ?? []) }))
+    .sort((a, b) => (a.items[0]?.accountName ?? '').localeCompare(b.items[0]?.accountName ?? '') || a.targetId.localeCompare(b.targetId))
+  if (rest.length) sections.push({ key: 'ungrouped', title: '不在已读到分组里的账号', modelCount: rest.reduce((total, row) => total + row.items.length, 0), rows: rest })
+  return sections
 }

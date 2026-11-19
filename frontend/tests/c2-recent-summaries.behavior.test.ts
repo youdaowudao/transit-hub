@@ -196,7 +196,8 @@ describe('C2 mounted main page keeps pure local recent polling separate from tod
     dialog.vm.$emit('question-answer-stats-retry', targetId); await flushPromises()
     expect(wrapper.text()).toContain('75%')
     expect(service.adminGroups.value.map(group => group.accounts[0]!.recentQuestionAnswer?.batchId)).toEqual(['real-latest', 'real-latest'])
-    expect(fetchMock.mock.calls.every(call => /recent-summaries\?|question-answers\/summary/.test(String(call[0])))).toBe(true)
+    // 页面进入和接受主列表后会读取屏蔽清单（只读、与摘要轮询无关），这里不计入。
+    expect(fetchMock.mock.calls.filter(call => !String(call[0]).includes('/hidden-accounts')).every(call => /recent-summaries\?|question-answers\/summary/.test(String(call[0])))).toBe(true)
   })
 
   it('polls displayed targets only, suspends when hidden, catches up visible, and cancels on workspace/unmount', async () => {
@@ -206,15 +207,17 @@ describe('C2 mounted main page keeps pure local recent polling separate from tod
     expect(initialReads).toBeGreaterThan(0)
     await vi.advanceTimersByTimeAsync(30000); await flushPromises()
     expect(fetchMock.mock.calls.length).toBeGreaterThan(initialReads)
-    expect(fetchMock.mock.calls.every(call => idsOf(String(call[0])).length === 1)).toBe(true)
+    expect(fetchMock.mock.calls.filter(call => !String(call[0]).includes('/hidden-accounts')).every(call => idsOf(String(call[0])).length === 1)).toBe(true)
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); await nextTick()
     const hiddenReads = fetchMock.mock.calls.length
     await vi.advanceTimersByTimeAsync(60000); await flushPromises(); expect(fetchMock.mock.calls.length).toBe(hiddenReads)
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }); document.dispatchEvent(new Event('visibilitychange')); await flushPromises()
     expect(fetchMock.mock.calls.length).toBeGreaterThan(hiddenReads)
-    const late = deferred<Response>(); fetchMock.mockReturnValueOnce(late.promise)
+    // 只让下一次摘要请求挂起；期间可能插入的屏蔽清单读取照常返回。
+    const late = deferred<Response>(); const base = fetchMock.getMockImplementation()!; let lateUsed = false
+    fetchMock.mockImplementation(async (input: string, init?: RequestInit) => { if (!lateUsed && String(input).includes('recent-summaries')) { lateUsed = true; return late.promise } return base(input, init) })
     await vi.advanceTimersByTimeAsync(30000); await flushPromises()
-    const signal = fetchMock.mock.calls.at(-1)![1]!.signal as AbortSignal
+    const signal = fetchMock.mock.calls.filter(call => String(call[0]).includes('recent-summaries')).at(-1)![1]!.signal as AbortSignal
     api.workspace.value = { id: 'ws2', displayName: 'Workspace2', platform: 'sub2api' }; await flushPromises()
     expect(signal.aborted).toBe(true)
     late.resolve(json({ items: [recent(targetId, 4, 0, 'foreign-old')] })); await flushPromises()

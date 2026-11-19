@@ -67,6 +67,8 @@ const groups = ref<OwnGroupHealth[]>([])
 // 与旧的 groups（我的分组链路）并存，供改造后的 ConnectionHealthView 主列表使用。
 const adminGroups = ref<AdminGroupHealth[]>([])
 const adminGroupsLoaded = ref(false)
+// 每次接受一份新的分组主列表（普通读取或刷新流终态）时递增；本地补丁（摘要、探活结果）不递增。
+const adminGroupsAcceptedRevision = ref(0)
 const events = ref<ConnectionHealthEvent[]>([])
 const policies = ref<ConnectionHealthPolicy[]>([])
 const isLoading = ref(false)
@@ -383,6 +385,7 @@ export function useConnectionHealth() {
         adminGroups.value = preserveModelControlSummaries(preserveQuestionAnswerRecentSummaries(preserveQuestionAnswerSummaries(confirmConcurrencyRead(acceptedGroups), questionAnswerRevision), recentRevision), recentRevision)
         overview.value = overviewFromAdminGroups(adminGroups.value)
         adminGroupsLoaded.value = true
+        adminGroupsAcceptedRevision.value++
         return true
       } catch (err) {
         if (sequence !== adminGroupsRequestSequence || dataRevision !== adminGroupsDataRevision) return false
@@ -465,6 +468,7 @@ export function useConnectionHealth() {
         adminGroups.value = preserveModelControlSummaries(preserveQuestionAnswerRecentSummaries(preserveQuestionAnswerSummaries(confirmConcurrencyRead(acceptedGroups), state.questionAnswerRevision), state.recentRevision), state.recentRevision)
         overview.value = overviewFromAdminGroups(adminGroups.value)
         adminGroupsLoaded.value = true
+        adminGroupsAcceptedRevision.value++
       }
     }
     return state.terminalSucceeded
@@ -902,6 +906,7 @@ export function useConnectionHealth() {
     groups,
     adminGroups,
     adminGroupsLoaded,
+    adminGroupsAcceptedRevision,
     events,
     policies,
     isLoading,

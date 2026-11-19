@@ -99,6 +99,8 @@ const (
 	// AdminGroupHealth.AccountsError 上的安全 i18n key（不含上游错误明文），前端据此展示
 	// 该分组「账号列表加载失败」，其余分组不受影响。
 	ErrorAccountsFetch = "admin.connectionHealth.errors.accountsFetch"
+	// ErrorWorkspaceChanged 表示请求携带的工作区与服务器当前工作区不一致（另一页面已切换）。
+	ErrorWorkspaceChanged = "admin.connectionHealth.errors.workspaceChanged"
 	// ErrorModelListUnavailable / ErrorModelListInvalid：手动模型发现接口的结构化错误——
 	// 上游 /v1/models 不可达/非 2xx，或返回的不是可识别的 OpenAI 兼容结构。
 	ErrorModelListUnavailable = "admin.connectionHealth.errors.modelListUnavailable"

@@ -11,6 +11,7 @@ import { t, te } from '@/locales'
 import type { AdminGroupHealth, QuestionAnswerBatch, QuestionAnswerDiagnostics, QuestionAnswerRecord } from '@/modules/admin/types/connectionHealth'
 import { createDefaultConnectionHealthPreferences } from '@/modules/admin/utils/connectionHealthPreferences'
 import { questionAnswerFixtureStats, upgradeQuestionAnswerHistoryFixture } from './fixtures/c1QuestionAnswerHistory'
+import { selectAllBatchTargets } from './fixtures/batchDrawerSelection'
 
 const wrappers: VueWrapper[] = []
 const track = <T extends VueWrapper>(wrapper: T): T => { wrappers.push(wrapper); return wrapper }
@@ -100,7 +101,7 @@ describe('A request diagnostics and direct causes', () => {
     const groups = [{ id: 'g', name: 'G', accounts: [{ id: 'diagnostics-account', targetId, name: '', platform: 'openai', type: 'apikey', status: 'active', probeAvailable: true, modelHealth: [] }] }] as AdminGroupHealth[]
     const wrapper = track(mount(QuestionAnswerBatchDrawer, { props: { groups, accountLabels: { [targetId]: { name: '提交中的真实账号名', siteNames: [] } }, preferenceScope: 'diagnostics', preferences: { ...createDefaultConnectionHealthPreferences().questionAnswer, modelIds: ['diagnostics-model'], questionIds: ['diagnostics-question'], batchTargetIds: [targetId] } }, global: { stubs: { Teleport: true } } }))
     try {
-      await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await flushPromises()
+      await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await selectAllBatchTargets(wrapper); await flushPromises()
       await wrapper.get('[data-testid="question-answer-batch-start"]').trigger('click'); await flushPromises()
       expect(wrapper.get('[data-testid="question-answer-batch-submitting"]').text()).toContain('提交中的真实账号名')
       expect(wrapper.get('[data-testid="question-answer-batch-submitting"]').text()).not.toContain('名称暂未读到')
@@ -288,7 +289,7 @@ describe('A dedicated API detail compatibility', () => {
     }))
     const groups = [{ id: 'g', name: 'G', accounts: [{ id: 'diagnostics-account', targetId, name: 'A', platform: 'openai', type: 'apikey', status: 'active', probeAvailable: true, modelHealth: [] }] }] as AdminGroupHealth[]
     const wrapper = track(mount(QuestionAnswerBatchDrawer, { props: { groups, preferenceScope: 'diagnostics', preferences: { ...createDefaultConnectionHealthPreferences().questionAnswer, modelIds: ['diagnostics-model'], questionIds: ['diagnostics-question'], batchTargetIds: [targetId] } }, global: { stubs: { Teleport: true } } }))
-    await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await flushPromises()
+    await wrapper.get('[data-testid="question-answer-batch-open"]').trigger('click'); await selectAllBatchTargets(wrapper); await flushPromises()
     await wrapper.get('[data-testid="question-answer-batch-start"]').trigger('click'); await flushPromises()
     const outcome = wrapper.get(`[data-testid="question-answer-batch-outcome-${targetId}"]`).text()
     expect(outcome).toContain(expected)

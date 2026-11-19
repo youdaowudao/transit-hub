@@ -165,7 +165,9 @@ describe('AdminGroupHealthDetail latest question-answer accuracy', () => {
     const secondary = row.get('.account-actions-secondary')
 
     expect(primary.findAll('button')).toHaveLength(3)
-    expect(secondary.findAll('button')).toHaveLength(2)
+    // 第二排新增「屏蔽这个账号」按钮（只改本项目显示与测试选择，不改主站）。
+    expect(secondary.findAll('button')).toHaveLength(3)
+    expect(buttonByAria(secondary, '屏蔽这个账号').exists()).toBe(true)
 
     await buttonByAria(primary, '设置账号策略').trigger('click')
     await buttonByAria(primary, '手动探活').trigger('click')

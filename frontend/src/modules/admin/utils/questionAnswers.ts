@@ -506,3 +506,82 @@ export const groupQuestionAnswerResults = (records: QuestionAnswerRecord[], ques
   }
   return Array.from(groups.values())
 }
+
+// ---- 批量问答抽屉（选题目 → 选分组和账号 → 选模型 → 开始）的选择规则 ----
+
+/** 已勾分组中、未被取消、未被屏蔽的账号，按分组顺序与组内顺序，首次出现为准。 */
+export const selectedBatchTargets = (
+  groups: AdminGroupHealth[],
+  checkedGroupIds: string[],
+  uncheckedTargetIds: Set<string>,
+  hiddenTargetIds: Set<string>,
+): QuestionAnswerBatchTarget[] => {
+  const all = new Map(collectQuestionAnswerBatchTargets(groups).map(target => [target.targetId, target]))
+  const checked = new Set(checkedGroupIds)
+  const result: QuestionAnswerBatchTarget[] = []
+  const seen = new Set<string>()
+  for (const group of groups) {
+    if (!checked.has(group.id)) continue
+    for (const account of group.accounts) {
+      const targetId = account.targetId.trim()
+      if (!targetId || seen.has(targetId) || hiddenTargetIds.has(targetId) || uncheckedTargetIds.has(targetId)) continue
+      const target = all.get(targetId)
+      if (!target) continue
+      seen.add(targetId)
+      result.push(target)
+    }
+  }
+  return result
+}
+
+/** 勾选分组：该组账号全部重新选中；取消分组：不再属于任何已勾分组的账号从“取消的账号”中移除。 */
+export const toggleBatchGroup = (
+  groups: AdminGroupHealth[],
+  checkedGroupIds: string[],
+  uncheckedTargetIds: Set<string>,
+  groupId: string,
+): { checkedGroupIds: string[]; uncheckedTargetIds: Set<string> } => {
+  const group = groups.find(item => item.id === groupId)
+  const members = new Set((group?.accounts ?? []).map(account => account.targetId.trim()).filter(Boolean))
+  const unchecked = new Set(uncheckedTargetIds)
+  if (checkedGroupIds.includes(groupId)) {
+    const nextChecked = checkedGroupIds.filter(id => id !== groupId)
+    const stillCovered = new Set(groups.filter(item => nextChecked.includes(item.id)).flatMap(item => item.accounts.map(account => account.targetId.trim())))
+    for (const id of members) if (!stillCovered.has(id)) unchecked.delete(id)
+    return { checkedGroupIds: nextChecked, uncheckedTargetIds: unchecked }
+  }
+  for (const id of members) unchecked.delete(id)
+  const order = groups.map(item => item.id)
+  return { checkedGroupIds: [...checkedGroupIds, groupId].sort((a, b) => order.indexOf(a) - order.indexOf(b)), uncheckedTargetIds: unchecked }
+}
+
+/** 已读到模型的账号的模型并集，附“有这个模型的账号数”，按账号数降序、再按名字。 */
+export const batchModelCoverage = (modelLists: string[][]): Array<{ id: string; count: number }> => {
+  const counts = new Map<string, number>()
+  for (const models of modelLists) for (const id of new Set(models)) counts.set(id, (counts.get(id) ?? 0) + 1)
+  return [...counts.entries()].map(([id, count]) => ({ id, count })).sort((a, b) => b.count - a.count || a.id.localeCompare(b.id))
+}
+
+/** 显示勾选的模型：用户改动过时只按偏好；未改动且偏好与并集无交集时显示默认值（不写入偏好）。 */
+export const displayedBatchModelIds = (saved: string[], coverageIds: string[], touched: boolean): string[] => {
+  const available = new Set(coverageIds)
+  const kept = stableUniqueIds(saved).filter(id => available.has(id))
+  if (touched || kept.length > 0 || coverageIds.length === 0) return kept
+  return [coverageIds.includes('gpt-5.6-sol') ? 'gpt-5.6-sol' : coverageIds[0]]
+}
+
+/** 用户改动模型后写入偏好：偏好中不在当前并集里的模型原样保留，并集内按勾选结果。 */
+export const mergeBatchModelPreference = (saved: string[], coverageIds: string[], checked: string[]): string[] => {
+  const available = new Set(coverageIds)
+  return stableUniqueIds([...saved.filter(id => !available.has(id)), ...checked.filter(id => available.has(id))])
+}
+
+/** 显示勾选的题目：用户改动过时只按偏好；未改动且偏好没有仍启用的题目时显示默认题（不写入偏好）。 */
+export const displayedBatchQuestionIds = (saved: string[], questions: TestQuestion[], touched: boolean): string[] => {
+  const enabled = questions.filter(question => question.enabled)
+  const enabledIds = new Set(enabled.map(question => question.id))
+  const kept = stableUniqueIds(saved).filter(id => enabledIds.has(id))
+  if (touched || kept.length > 0) return kept
+  const fallback = enabled.find(question => question.isDefault)
+  return fallback ? [fallback.id] : []
+}

@@ -41,6 +41,9 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		`ALTER TABLE connection_health_account_configs ADD COLUMN IF NOT EXISTS account_tier integer NULL
 			CONSTRAINT connection_health_account_configs_account_tier CHECK (account_tier IS NULL OR account_tier IN (1, 2))`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_account_configs_workspace ON connection_health_account_configs (user_id, admin_account_id)`,
+		// 屏蔽清单只影响分组健康页显示、批量/计划问答选择与模型自动关闭恢复，不参与健康管理。
+		`ALTER TABLE connection_health_account_configs ADD COLUMN IF NOT EXISTS display_hidden_at timestamptz NULL`,
+		`ALTER TABLE connection_health_account_configs ADD COLUMN IF NOT EXISTS display_hidden_name text NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS connection_health_policies (
 			id text PRIMARY KEY,
 			user_id text NOT NULL,

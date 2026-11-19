@@ -156,9 +156,16 @@ func (s *Service) runModelControlAutoScan(ctx context.Context, user, ws string) 
 			errorKey = modelControlAutoReason(err)
 			return
 		}
+		// 被屏蔽账号不参加模型自动关闭与恢复；在截取前 10 个之前去掉。屏蔽清单读取失败时
+		// 本轮不做任何自动关闭与恢复，但后面的到期核对照常执行。
+		hidden, hiddenErr := s.hiddenAccountTargetSet(ctx, user, ws)
+		if hiddenErr != nil {
+			log.Printf("[connection-health] automatic model hidden accounts read failed")
+			errorKey = modelControlError("Storage")
+		}
 		indices := []int{}
 		for n, item := range items {
-			if item.Auto != nil && item.Auto.State == "eligible" {
+			if hiddenErr == nil && item.Auto != nil && item.Auto.State == "eligible" && !hidden[item.TargetID] {
 				indices = append(indices, n)
 			}
 		}

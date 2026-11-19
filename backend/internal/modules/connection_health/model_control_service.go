@@ -343,6 +343,11 @@ func (s *Service) ModelControlVerifyTargets(ctx context.Context, user string) ([
 	if err != nil {
 		return nil, err
 	}
+	return s.modelControlVerifyTargetsFor(ctx, user, ws)
+}
+
+// modelControlVerifyTargetsFor 用调用方已解析的工作区查询核对名单，避免两次读取当前工作区之间被另一页面切换。
+func (s *Service) modelControlVerifyTargetsFor(ctx context.Context, user, ws string) ([]string, error) {
 	targets, err := s.modelControls.ListModelControlTargets(ctx, user, ws)
 	if err != nil {
 		return nil, err

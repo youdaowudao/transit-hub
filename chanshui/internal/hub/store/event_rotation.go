@@ -17,11 +17,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	defer conn.Close()
+	// The first version read can encounter WAL recovery or an exclusive lock.
+	// Apply the existing wait window before any read, without changing the file.
+	if _, err = conn.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
+		return err
+	}
 	version, err := databaseVersion(ctx, conn)
 	if err != nil {
 		return err
 	}
-	for _, pragma := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA foreign_keys=ON", "PRAGMA cache_size=-2048"} {
+	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA foreign_keys=ON", "PRAGMA cache_size=-2048"} {
 		if _, err = conn.ExecContext(ctx, pragma); err != nil {
 			return err
 		}

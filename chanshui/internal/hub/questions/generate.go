@@ -246,6 +246,31 @@ func OriginalKnowledge(q Definition) (knowledge.Probe, bool) {
 	return knowledge.Anchor(strings.TrimPrefix(q.ID, "knowledge:"))
 }
 
+// MatchesCurrentKnowledge checks the frozen knowledge questions only.
+func MatchesCurrentKnowledge(defs []Generated) bool {
+	ids := make(map[string]bool)
+	for _, q := range defs {
+		if q.Definition.Kind != "knowledge" {
+			continue
+		}
+		p, ok := OriginalKnowledge(q.Definition)
+		if !ok || q.Prompt != p.Prompt() || ids[p.ID] {
+			return false
+		}
+		ids[p.ID] = true
+	}
+	bank := knowledge.CurrentAnchors()
+	if len(ids) != len(bank) {
+		return false
+	}
+	for _, p := range bank {
+		if !ids[p.ID] {
+			return false
+		}
+	}
+	return true
+}
+
 func IsOriginalQuestion(q Definition) bool {
 	if q.Judge.Type != "legacy" || (q.Kind != "iq" && q.Kind != "vision") || !Compatible(q) {
 		return false

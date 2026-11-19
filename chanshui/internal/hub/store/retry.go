@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+
+	"github.com/kiss-kedaya/chanshui/internal/knowledge"
 )
 
 // Only the latest explicit retry is retained. Original request and questions
@@ -185,6 +187,14 @@ func (s *Store) RetryReport(ctx context.Context, o Owner, r RetryRequest) (Repor
 			if review, ok := k["boundary_review"].(map[string]any); ok {
 				review["status"], review["reason"] = "unconfirmed", "retry_pending"
 				k["label"] = "日期边界未确认"
+				if review["method"] == knowledge.CrossYearMethod {
+					k["status"] = "unknown"
+					k["label"] = knowledge.InitialCrossYear().Label
+					delete(k, "cutoff")
+					for _, field := range []string{"from", "to", "anchor_id", "check_id"} {
+						delete(review, field)
+					}
+				}
 				summary["knowledge"] = k
 				if v != nil {
 					v["knowledge"] = k

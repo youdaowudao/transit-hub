@@ -16,27 +16,25 @@ import (
 
 // Complete built-in catalogues use the original serial request loop. The
 // observers only attach item ownership, attempts and storage.
-func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id string, defs []questions.Generated, allDefs []questions.Generated, previous map[string]any, g gateway.Client, timeout int, model string, retry *store.Retry, execute func(questions.Generated) (itemResult, error), results map[string]itemResult, mu *sync.Mutex, fail func(error), notify func(string, map[string]any)) (map[string]any, error) {
+func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id string, defs []questions.Generated, allDefs []questions.Generated, previous map[string]any, crossYear bool, g gateway.Client, timeout int, model string, retry *store.Retry, execute func(questions.Generated) (itemResult, error), results map[string]itemResult, mu *sync.Mutex, fail func(error), notify func(string, map[string]any)) (map[string]any, error) {
 	byPrompt := map[string]questions.Generated{}
 	byID := map[string]bool{}
-	frozenPromptsMatch := true
 	for _, q := range defs {
 		if p, ok := questions.OriginalKnowledge(q.Definition); ok {
 			prompt := p.Prompt()
 			byPrompt[prompt] = q
 			byID[p.ID] = true
-			frozenPromptsMatch = frozenPromptsMatch && q.Prompt == prompt
 		}
 	}
 	var verdict knowledge.Verdict
 	var executionErr error
 	complete := retry == nil && len(byPrompt) == len(defs)
 	// Earlier releases stored the same old definitions with a different prompt format.
-	current := complete && frozenPromptsMatch && matchesKnowledgeBank(byID, knowledge.CurrentAnchors())
-	if current || (complete && matchesKnowledgeBank(byID, knowledge.Anchors)) {
+	current := complete && (crossYear || questions.MatchesCurrentKnowledge(defs))
+	if (!hasCrossYearMethod(previous) || crossYear) && (current || (complete && matchesKnowledgeBank(byID, knowledge.Anchors))) {
 		check := knowledge.Check
 		skipReason := "原版知识探针按已取得的回答继续选题，本轮没有选到此题；不作为答错"
-		reviewed := current && knowledge.ReviewModel(model)
+		reviewed := crossYear || (current && knowledge.ReviewModel(model))
 		if current {
 			check = knowledge.CheckCurrent
 			if reviewed {
@@ -44,6 +42,11 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 			}
 			skipReason = "串行二分按已经取得的回答继续选题，本轮未选到这道题；不算答错。"
 		}
+		if crossYear {
+			check = knowledge.CheckCrossYear
+			skipReason = "本轮根据已取得的回答选择了其他题目。这道题未提问，不算答错。"
+		}
+		roundDate := time.Now().UTC().Format("2006-01-02")
 		seen := map[string]bool{}
 		observed := g
 		observed.BeforeCall = func(callCtx context.Context, request gateway.CallRequest) (context.Context, error) {
@@ -56,6 +59,9 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 			item := &itemAttempts{ID: q.Definition.ID}
 			callCtx = context.WithValue(callCtx, itemAttemptContextKey{}, item)
 			if err := s.BeginItem(callCtx, o, id, item.ID); err != nil {
+				if crossYear && callCtx.Err() != nil {
+					return callCtx, callCtx.Err()
+				}
 				fail(err)
 				return callCtx, err
 			}
@@ -96,6 +102,20 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 		verdict, err = check(ctx, observed, model, timeout)
 		// Probe failure is represented by original rows/verdict and report partial,
 		// whereas storage failure cancels the round through fail.
+		if crossYear && ctx.Err() != nil {
+			// A cancellation during BeforeCall never reaches AfterCall; the
+			// search can contain an error for a question that was never saved.
+			var saved []knowledge.Row
+			mu.Lock()
+			for _, row := range verdict.Rows {
+				if _, ok := results["knowledge:"+row.ID]; ok {
+					saved = append(saved, row)
+				}
+			}
+			mu.Unlock()
+			verdict = knowledge.InterruptCrossYear(knowledge.CrossYearFromRows(saved, verdict.Protocol, verdict.Attempts))
+			return asMap(verdict), ctx.Err()
+		}
 		if err != nil && ctx.Err() != nil {
 			return asMap(verdict), err
 		}
@@ -104,7 +124,14 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 				if seen[q.Definition.ID] {
 					continue
 				}
-				if err := s.SaveItem(ctx, o, id, q.Definition.ID, "done", map[string]any{"judgment": map[string]any{"status": "not_asked", "reason": skipReason}}, 0); err != nil {
+				reason := skipReason
+				if crossYear && questions.Text(q.Definition.Parameters, "date") > roundDate {
+					reason = "此事件日期晚于今天，本轮不提问"
+				}
+				if err := s.SaveItem(ctx, o, id, q.Definition.ID, "done", map[string]any{"judgment": map[string]any{"status": "not_asked", "reason": reason}}, 0); err != nil {
+					if crossYear && ctx.Err() != nil {
+						return asMap(knowledge.InterruptCrossYear(verdict)), err
+					}
 					return nil, err
 				}
 			}
@@ -142,10 +169,13 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 			p, original := questions.OriginalKnowledge(def)
 			custom = custom || !original
 			result, ok := results[def.ID]
-			if !ok || result.Judgment.Status == "not_asked" || result.Judgment.Status == "not_applicable" || (previous["boundary_review"] != nil && result.Judgment.Status == "unknown" && result.Error == "") {
+			if !ok || result.Judgment.Status == "not_asked" || result.Judgment.Status == "not_applicable" {
 				continue
 			}
 			ev := asMap(result.Evidence)
+			if previous["boundary_review"] != nil && result.Judgment.Status == "unknown" && result.Error == "" && (!crossYear || ev["row"] == nil) {
+				continue
+			}
 			var kind, reason string
 			switch {
 			case original:
@@ -184,13 +214,24 @@ func originalKnowledge(ctx context.Context, s *store.Store, o store.Owner, id st
 		}
 		// Preserve the original saved row order; retry replaces only the chosen row.
 		orderKnowledgeRows(rows, previous)
-		verdict = knowledge.FromRows(rows, g.ProtocolFor(model), attempts)
-		var old knowledge.Verdict
-		raw, _ := json.Marshal(previous)
-		_ = json.Unmarshal(raw, &old)
-		verdict = knowledge.ReviewAfterRetry(verdict, old.BoundaryReview)
+		if crossYear {
+			verdict = knowledge.CrossYearFromRows(rows, g.ProtocolFor(model), attempts)
+		} else {
+			verdict = knowledge.FromRows(rows, g.ProtocolFor(model), attempts)
+			if !hasCrossYearMethod(previous) {
+				var old knowledge.Verdict
+				raw, _ := json.Marshal(previous)
+				_ = json.Unmarshal(raw, &old)
+				verdict = knowledge.ReviewAfterRetry(verdict, old.BoundaryReview)
+			}
+		}
 	}
 	return asMap(verdict), executionErr
+}
+
+func hasCrossYearMethod(summary map[string]any) bool {
+	meta, _ := summary["boundary_review"].(map[string]any)
+	return meta["method"] == knowledge.CrossYearMethod
 }
 
 func matchesKnowledgeBank(ids map[string]bool, anchors []knowledge.Probe) bool {

@@ -457,7 +457,7 @@ export default function ResultCards({
               <span>{tr("客观事件")}</span>
             </div>
             <p className="muted">{tr(knowledge.reason || "")}</p>
-            {knowledge.boundary_review && knowledge.boundary_review.status !== "not_needed" && knowledge.boundary_review.reason !== "retry_pending" && <p className="knowledge-note">{boundaryReviewText(knowledge.boundary_review.reason)}</p>}
+            {knowledge.boundary_review && knowledge.boundary_review.status !== "not_needed" && knowledge.boundary_review.reason !== "retry_pending" && <p className="knowledge-note">{boundaryReviewText(knowledge.boundary_review.reason, knowledge.boundary_review.method)}</p>}
             {knowledge.web_suspect && <p className="knowledge-note">{tr(knowledge.web_suspect)}</p>}
             {knowledge.gap_note && <p className="knowledge-note">{tr(knowledge.gap_note)}</p>}
             {!!knowledge.rows?.length && (

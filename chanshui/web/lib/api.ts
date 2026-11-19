@@ -86,6 +86,7 @@ export interface KnowledgeRow {
   error?: string;
 }
 export interface BoundaryReview {
+  method?: string;
   from?: string;
   to?: string;
   anchor_id?: string;

@@ -146,6 +146,9 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 	if _, ok := previousSummary["knowledge"].(map[string]any); !ok {
 		previousSummary["knowledge"] = asMap(previousSummary["verdict"])["knowledge"]
 	}
+	previousKnowledge := asMap(previousSummary["knowledge"])
+	crossYear := hasCrossYearMethod(previousKnowledge) && questions.MatchesCurrentKnowledge(snap.Questions)
+	crossYearFirst := crossYear && snap.Retry == nil
 	previousTiming := asMap(asMap(previousSummary["verdict"])["timing"])
 	number := func(v any) int64 {
 		if f, ok := v.(float64); ok {
@@ -180,6 +183,9 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 				if item.Status != "done" {
 					result.Judgment.Status = "unknown"
 				}
+				if crossYear && item.Definition.Kind == "knowledge" && (item.Status == "queued" || item.Status == "running") {
+					result.Answer, result.Error, result.Evidence = "", "", nil
+				}
 				result.Attempts = item.Attempts
 				itemResults[item.ItemID] = compactResult(item.Definition.Kind, result)
 			}
@@ -190,10 +196,8 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 		}
 	}
 	knowledgeSummary := map[string]any{"status": "not_selected"}
-	if snap.Retry != nil {
-		if old, ok := previousSummary["knowledge"].(map[string]any); ok {
-			knowledgeSummary = old
-		}
+	if crossYearFirst || (snap.Retry != nil && previousKnowledge != nil) {
+		knowledgeSummary = previousKnowledge
 	}
 	pendingKnowledge := knowledgeSummary
 	pendingBoundary := asMap(pendingKnowledge["boundary_review"])["reason"] == "retry_pending"
@@ -226,7 +230,7 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 			summary["attempts"] = t.Attempts.Load() + int64(snap.Retry.AttemptsBefore)
 		}
 		publishedKnowledge := knowledgeSummary
-		if pendingBoundary {
+		if pendingBoundary || crossYearFirst {
 			publishedKnowledge = pendingKnowledge
 		}
 		if cfg.singleAsk == nil && publishedKnowledge["boundary_review"] != nil {
@@ -325,6 +329,11 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 	}
 	if snap.Retry == nil {
 		initial := map[string]any{"verdict": api.Verdict{Timing: timing(false), Protocol: g.Mode, ScoringVersion: "2026-10-02-v6-total"}, "upstreamVersion": snap.UpstreamVersion}
+		if crossYearFirst {
+			v := initial["verdict"].(api.Verdict)
+			v.Knowledge = previousKnowledge
+			initial["verdict"], initial["knowledge"] = v, previousKnowledge
+		}
 		if cfg.singleAsk != nil {
 			initial["singleAsk"] = true
 			initial["verdict"] = map[string]any{"timing": timing(false), "protocol": g.Mode}
@@ -363,7 +372,7 @@ func RunOne(ctx context.Context, s *store.Store, o store.Owner, id string, c Cre
 
 	if len(knowledgeDefs) > 0 {
 		work = append(work, func() error {
-			value, err := originalKnowledge(ctx, s, o, id, knowledgeDefs, snap.Questions, asMap(previousSummary["knowledge"]), g, snap.Settings.TimeoutSeconds, report.Model, snap.Retry, execute, itemResults, &resultMu, failStorage, notify)
+			value, err := originalKnowledge(ctx, s, o, id, knowledgeDefs, snap.Questions, previousKnowledge, crossYear, g, snap.Settings.TimeoutSeconds, report.Model, snap.Retry, execute, itemResults, &resultMu, failStorage, notify)
 			if value != nil {
 				resultMu.Lock()
 				knowledgeSummary = value
@@ -413,7 +422,7 @@ dispatch:
 	if snap.Retry != nil {
 		attempts += int64(snap.Retry.AttemptsBefore)
 	}
-	if pendingBoundary && ctx.Err() != nil {
+	if pendingBoundary && !crossYear && ctx.Err() != nil {
 		knowledgeSummary = pendingKnowledge
 	}
 	summary := map[string]any{"complete": !hadError && ctx.Err() == nil, "attempts": attempts, "knowledge": knowledgeSummary, "upstreamVersion": snap.UpstreamVersion}
@@ -448,6 +457,21 @@ dispatch:
 	if ctx.Err() != nil {
 		status = "cancelled"
 		detail = map[string]any{"message": "检测已停止或达到本次总时长；已发出的请求可能已计费，未自动重试", "step": "run", "operationResult": "unknown"}
+		if crossYear {
+			summary["complete"] = false
+			if pendingBoundary {
+				knowledgeSummary = pendingKnowledge
+			} else if crossYearFirst {
+				var v knowledge.Verdict
+				raw, _ := json.Marshal(knowledgeSummary)
+				_ = json.Unmarshal(raw, &v)
+				knowledgeSummary = asMap(knowledge.InterruptCrossYear(v))
+			}
+			summary["knowledge"] = knowledgeSummary
+			if v, ok := summary["verdict"].(map[string]any); ok {
+				v["knowledge"] = knowledgeSummary
+			}
+		}
 	} else if hadError {
 		status = "partial"
 	}

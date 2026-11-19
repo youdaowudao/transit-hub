@@ -42,10 +42,13 @@ export const claudeFableMythosDates = [
 export function knowledgeDateComparison(model: string, knowledge: KnowledgeVerdict): string | undefined {
   if (knowledge.status === 'not_selected' || knowledge.status === 'not_applicable') return;
 
-  const normalized = model.trim().toLowerCase().replace(/^[^/]+\//, '').replace(/[^a-z0-9]/g, '');
+  const name = model.trim().toLowerCase().replace(/^[^/]+\//, '');
+  const normalized = name.replace(/[^a-z0-9]/g, '');
+  const review = knowledge.boundary_review;
+  const crossYear = review?.method === 'cross_year';
   const reviewedModels = ['gpt6sol','gpt6astra','gpt61sol','gpt6luna','gpt61terra','gpt62astra','gpt62sol'];
   if (reviewedModels.includes(normalized)) {
-    if (!knowledge.boundary_review) return;
+    if (!review) return;
     const match = gptDates.find(([name]) => name.toLowerCase().replace(/[^a-z0-9]/g, '') === normalized);
     if (!match) return;
     const [name, date] = match;
@@ -54,19 +57,28 @@ export function knowledgeDateComparison(model: string, knowledge: KnowledgeVerdi
     const unknownDates = rows.filter(row => row.kind === 'unknown' && !row.error).map(row => row.happened_at).sort();
     const known = rows.filter(row => row.kind === 'know' && !row.error);
     const conflict = unknownDates.length > 0 && known.some(row => row.happened_at >= unknownDates[0]);
-    const allowed = ['no_anchor','outside_window','two_unknown','no_question','limit'].includes(knowledge.boundary_review.reason);
+    const reasons = ['no_anchor', 'two_unknown', 'no_question', 'limit'];
+    const allowed = reasons.includes(review.reason) || (!crossYear && review.reason === 'outside_window');
     const later = new Set(known.filter(row => row.happened_at > date).map(row => row.happened_at));
     const ids = new Set(known.filter(row => row.happened_at > date).map(row => row.id));
-    const safe = knowledge.status === 'estimated' && !knowledge.web_suspect &&
+    const safe = (knowledge.status === 'estimated' || (crossYear && knowledge.status === 'unknown')) && !knowledge.web_suspect &&
       !rows.some(row => row.error || row.kind === 'invalid' || row.kind === 'error') && !conflict && allowed;
     return reference + (safe && later.size >= 2 && ids.size >= 2
       ? '本轮答对了多道晚于所声明型号公开参考日期的事件。请核对上游型号和是否补充资料。' : '');
   }
 
-  const name = model.trim().toLowerCase().replace(/^[^/]+\//, '');
   const family = name === 'chat-latest' ? 'gpt' : modelFamily(model);
   if (family !== 'gpt' && family !== 'claude') return;
   const provider = family === 'gpt' ? 'GPT' : 'Claude';
+  const dates = family === 'gpt' ? gptDates : [...claudeDates, ...claudeFableMythosDates];
+  const verifiedRange = crossYear && review.status === 'two_unknown' && review.reason === 'two_unknown' && knowledge.status === 'estimated' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(review.from ?? '') && /^\d{4}-\d{2}-\d{2}$/.test(review.to ?? '') &&
+    review.from! < review.to! && !knowledge.web_suspect && !knowledge.rows?.some(row => row.error || row.kind === 'invalid' || row.kind === 'error');
+  if (crossYear && !verifiedRange) {
+    const match = dates.find(([candidate]) => candidate.toLowerCase().replace(/[^a-z0-9]/g, '') === normalized ||
+      (name === 'chat-latest' && candidate.includes('（chat-latest）')));
+    return match ? `${match[0]} 的公开知识截止日期为 ${match[1]}。` : undefined;
+  }
 
   if (knowledge.status === 'custom') return '本轮使用自定义事件题，暂无法按官方知识日期对照。';
   if (knowledge.status === 'invalid' || knowledge.web_suspect || knowledge.rows?.some(row => row.kind === 'invalid')) {
@@ -76,12 +88,11 @@ export function knowledgeDateComparison(model: string, knowledge: KnowledgeVerdi
   const rows = knowledge.rows?.filter(row => !row.error && /^\d{4}-\d{2}-\d{2}$/.test(row.happened_at)) ?? [];
   const known = Array.from(new Set(rows.filter(row => row.kind === 'know').map(row => row.happened_at))).sort();
   const unknown = Array.from(new Set(rows.filter(row => row.kind === 'unknown').map(row => row.happened_at))).sort();
-  const lastKnown = known[known.length - 1];
-  const firstUnknown = unknown[0];
+  const lastKnown = crossYear ? review.from : known[known.length - 1];
+  const firstUnknown = crossYear ? review.to : unknown[0];
   if (!lastKnown || !firstUnknown) return `本轮事件题证据不足，暂无法判断接近哪款 ${provider} 模型。`;
   if (lastKnown >= firstUnknown) return `本轮事件回答的日期边界互相冲突，暂无法对照 ${provider} 型号。`;
 
-  const dates = family === 'gpt' ? gptDates : [...claudeDates, ...claudeFableMythosDates];
   const matches = dates.filter(([, date]) => {
     if (date.length === 7) return date >= lastKnown.slice(0, 7) && `${date}-01` < firstUnknown;
     return date >= lastKnown && date < firstUnknown;
@@ -89,7 +100,7 @@ export function knowledgeDateComparison(model: string, knowledge: KnowledgeVerdi
   if (matches.length === 0) return `参考名单中没有 ${provider} 型号的官方知识截止日期落在本轮区间。`;
   if (matches.length === 1) {
     const [candidate] = matches[0];
-    if (known.length < 2 || unknown.length < 2) return `只有 ${candidate} 的官方知识截止日期落在本轮区间，仍需更多题确认。`;
+    if (known.length < 2 || (!crossYear && unknown.length < 2)) return `只有 ${candidate} 的官方知识截止日期落在本轮区间，仍需更多题确认。`;
     return `本轮知识表现最接近 ${candidate} 的公开知识日期。`;
   }
   const names = matches.slice(0, 3).map(([candidate]) => candidate).join('、');
@@ -97,7 +108,21 @@ export function knowledgeDateComparison(model: string, knowledge: KnowledgeVerdi
   return `本轮知识表现接近 ${candidates}，暂无法区分。`;
 }
 
-export function boundaryReviewText(reason: string): string {
+export function boundaryReviewText(reason: string, method?: string): string {
+  if (method === 'cross_year') {
+    const reasons: Record<string, string> = {
+      two_unknown: '有两道日期接近的事件均明确回答不知道。可展开查看题目和回答。',
+      coverage_missing: '本报告不足两道不同日期的 2026 年事件答复，可展开查看已有回答。',
+      no_anchor: '本轮缺少足够的答对或明确不知道的事件，可展开查看已有回答。',
+      no_question: '附近没有第二道明确回答不知道的事件，可展开查看已有回答。',
+      limit: '本轮已问满 10 道，可展开查看已有回答。',
+      conflict: '较晚的事件答对了，现有回答还不足以确认日期范围。',
+      main_error: '本轮有知识题未完成，展开失败题可查看具体原因和补测入口。',
+      invalid: '本轮有无效回答或疑似联网，可展开查看回答和判定。',
+      interrupted: '检测已停止，已保存的回答仍可查看。',
+    };
+    return reasons[reason] ?? '';
+  }
   const reasons: Record<string,string> = {
     two_unknown: '这两道事件均未确认。可展开查看题目与回答。',
     no_question: '这个窗口只有一道可用题，日期边界未确认。',

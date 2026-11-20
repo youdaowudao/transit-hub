@@ -34,6 +34,7 @@ import (
 	"transithub/backend/internal/modules/upstream"
 	"transithub/backend/internal/modules/user_activity"
 	"transithub/backend/internal/modules/users"
+	"transithub/backend/internal/modules/vip"
 	"transithub/backend/internal/shared/authctx"
 	"transithub/backend/internal/shared/httpjson"
 	"transithub/backend/internal/shared/secretbox"
@@ -55,6 +56,7 @@ type Server struct {
 	lotteryWorker                  *lottery.Worker
 	connectionHealthService        *connection_health.Service
 	userActivityService            *user_activity.Service
+	vipService                     *vip.Service
 	chanshuiService                *chanshui.Service
 	signupRiskService              *signup_risk.Service
 	upstreamService                interface{ ShutdownGroupCostSampling(context.Context) error }
@@ -258,6 +260,12 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	server.userActivityService = userActivityService
 	user_activity.RegisterRoutes(server.mux, userActivityService)
 
+	vipRepository := vip.NewRepository(db)
+	runStorageStartup(cfg, vipRepository.EnsureSchema)
+	vipService := vip.NewService(vipRepository, settingsService, cfg.APIOnly)
+	server.vipService = vipService
+	vip.RegisterRoutes(server.mux, vipService)
+
 	// 所有 workspace 表 schema 完成后再补 legacy 归属；随后才启动 restore、worker 和 scheduler，
 	// 避免后台任务在旧行尚未补齐 workspace 时读取或写回数据。
 	if err := credentialStores.Verify(); err != nil {
@@ -268,6 +276,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		if err := userActivityService.Start(); err != nil {
 			panic(err)
 		}
+		vipService.Start()
 		signupRiskService.Start(context.Background())
 		massEmailWorker.Start(context.Background())
 		campaignsService.StartScheduler(context.Background())
@@ -521,6 +530,11 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	var shutdownErrors []error
+	if s.vipService != nil {
+		if err := s.vipService.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
 	if s.userActivityService != nil {
 		if err := s.userActivityService.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
@@ -570,7 +584,7 @@ func (s *Server) protectedPath(path string) bool {
 	if path == "/api/chanshui" || strings.HasPrefix(path, "/api/chanshui/") {
 		return true
 	}
-	return strings.HasPrefix(path, "/api/user-activity") || strings.HasPrefix(path, "/api/notifications") || strings.HasPrefix(path, "/api/users") || strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email")
+	return strings.HasPrefix(path, "/api/vip") || strings.HasPrefix(path, "/api/user-activity") || strings.HasPrefix(path, "/api/notifications") || strings.HasPrefix(path, "/api/users") || strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email")
 }
 
 func (s *Server) setSecurityHeaders(w http.ResponseWriter, r *http.Request) {

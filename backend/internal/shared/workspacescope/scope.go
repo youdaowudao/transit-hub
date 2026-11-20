@@ -57,6 +57,18 @@ func Transaction(ctx context.Context, db Beginner, scope Scope, current bool, fn
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err = Lock(ctx, tx, scope, current); err != nil {
+		return err
+	}
+	if err = fn(tx); err != nil {
+		return err
+	}
+	return Commit(ctx, tx)
+}
+
+// Lock allows a caller-owned Repeatable Read transaction to use the same lock order.
+func Lock(ctx context.Context, tx pgx.Tx, scope Scope, current bool) error {
+	var err error
 	if current {
 		var id string
 		err = tx.QueryRow(ctx, `SELECT current_admin_account_id
@@ -86,9 +98,11 @@ func Transaction(ctx context.Context, db Beginner, scope Scope, current bool, fn
 	if created.Format(time.RFC3339Nano) != scope.CreatedAt {
 		return ErrChanged
 	}
-	if err = fn(tx); err != nil {
-		return err
-	}
+	return nil
+}
+
+func Commit(ctx context.Context, tx pgx.Tx) error {
+	var err error
 	if err = tx.Commit(ctx); err != nil {
 		if errors.Is(err, pgx.ErrTxCommitRollback) {
 			return err

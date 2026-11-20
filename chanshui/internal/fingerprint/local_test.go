@@ -1,9 +1,7 @@
 package fingerprint
 
 import (
-	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"testing"
 )
 
@@ -36,38 +34,32 @@ func TestLocalReferenceValidationAndIdempotence(t *testing.T) {
 	}
 }
 
-func TestCollectedGPTReferencesLoadFrozenTrainingOnly(t *testing.T) {
-	expected := map[string]string{
-		"gpt-6.2-sol":   "155084e2d9b6068fb46dea0b4ec0d925edf230d7a6604c45a8313278ef0a589f",
-		"gpt-6.2-astra": "43cf9368761db595b7857859333af745992bc251234bd9d989ccf1e15ca64e97",
-		"gpt-6.1-terra": "5b27557bd4e8bd4a3405d5abe9a0fd7f360f66a295ed1176f4cc36fa2e9d9b72",
-	}
+func TestReviewedBankCarriesOfficialReferences(t *testing.T) {
 	bank, err := LoadBank()
 	if err != nil {
 		t.Fatal(err)
 	}
 	var refs []LocalReference
-	if err = json.Unmarshal(localReferences, &refs); err != nil {
-		t.Fatal(err)
+	if err = json.Unmarshal(localReferences, &refs); err != nil || len(refs) != 0 {
+		t.Fatalf("embedded single-channel references should be retired: %d %v", len(refs), err)
 	}
-	for id, hash := range expected {
-		m := bank.NumericModel(id)
-		if m == nil || m.ID != id || m.ReferenceSamples != 36 || m.Family != "gpt" {
-			t.Fatalf("reference %s was not loaded with its 36 training samples", id)
+	if bank.Source["repository"] != "Ikaleio/lm-detector" {
+		t.Fatalf("bank source %v", bank.Source)
+	}
+	for name, id := range map[string]string{
+		"gpt-6.2-sol": "gpt-6.2-sol", "gpt-6.2-astra": "gpt-6.2-astra", "gpt-6.1-terra": "gpt-6.1-terra",
+		"gpt-6.1-sol": "gpt-6-astra", "claude-opus-4-7": "claude-opus-4-7", "claude-opus-4.7": "claude-opus-4-7",
+		"claude-fable-5-2": "claude-fable-5-2", "claude-haiku-4-5-20251001": "claude-haiku-4-5-20251001",
+		"deepseek-v4.1-flash-1017": "deepseek-v4.1-flash-1017", "qwen3.8-max-0902": "qwen3.8-max-0902",
+	} {
+		m := bank.NumericModel(name)
+		if m == nil || m.ID != id || m.ReferenceSamples != 0 {
+			t.Fatalf("%s should resolve to bank model %s", name, id)
 		}
-		found := false
-		for _, r := range refs {
-			if r.ID != id {
-				continue
-			}
-			found = true
-			raw, _ := json.Marshal(r.Samples)
-			if len(r.Samples) != 36 || fmt.Sprintf("%x", sha256.Sum256(raw)) != hash {
-				t.Fatalf("frozen training changed for %s", id)
-			}
-		}
-		if !found {
-			t.Fatal("missing embedded reference", id)
+	}
+	for _, retired := range []string{"claude-opus-4-5", "deepseek-v4.1-flash-0910"} {
+		if bank.NumericModel(retired) != nil {
+			t.Fatalf("retired reference %s still loaded", retired)
 		}
 	}
 }

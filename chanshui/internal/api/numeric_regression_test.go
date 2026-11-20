@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/kiss-kedaya/chanshui/internal/fingerprint"
 	"github.com/kiss-kedaya/chanshui/internal/gateway"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +14,35 @@ import (
 	"testing"
 	"time"
 )
+
+// referenceLikeAnswer spreads 315 values in proportion to one bank model's
+// reference counts and shuffles them with a fixed seed. A looping toy sequence
+// is no longer pinned at 90% by the calibrated 75-model bank, so these tests
+// use an answer that resembles a real reference.
+func referenceLikeAnswer(t *testing.T, model string) string {
+	t.Helper()
+	bank, err := fingerprint.LoadBank()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := bank.NumericModel(model)
+	if m == nil {
+		t.Fatalf("missing bank model %s", model)
+	}
+	total := 0
+	for _, c := range m.Counts {
+		total += c
+	}
+	nums, acc := []string{}, 0.0
+	for v, c := range m.Counts {
+		acc += float64(c) * 315 / float64(total)
+		for float64(len(nums)) < acc-0.5 {
+			nums = append(nums, fmt.Sprint(v+1))
+		}
+	}
+	rand.New(rand.NewSource(1)).Shuffle(len(nums), func(i, j int) { nums[i], nums[j] = nums[j], nums[i] })
+	return strings.Join(nums, ",")
+}
 
 func TestNumericSelectsStreamByProtocol(t *testing.T) {
 	for _, tc := range []struct {
@@ -27,6 +58,7 @@ func TestNumericSelectsStreamByProtocol(t *testing.T) {
 	} {
 		t.Run(tc.mode+"-"+tc.model, func(t *testing.T) {
 			s, _, _, _ := testSetup(t)
+			answer := referenceLikeAnswer(t, tc.model)
 			var calls atomic.Int32
 			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
@@ -38,7 +70,6 @@ func TestNumericSelectsStreamByProtocol(t *testing.T) {
 				if r.URL.Path != tc.path {
 					t.Errorf("path=%s want %s", r.URL.Path, tc.path)
 				}
-				answer := strings.Repeat("247,83,319,", 105)
 				var response any
 				switch tc.path {
 				case "/v1/responses":
@@ -106,11 +137,12 @@ func TestNumericResamplesInvalidAnswersWithinChallengeBudget(t *testing.T) {
 	for _, recover := range []bool{false, true} {
 		t.Run(fmt.Sprint(recover), func(t *testing.T) {
 			s, _, _, _ := testSetup(t)
+			valid := referenceLikeAnswer(t, "claude-opus-5")
 			var calls atomic.Int32
 			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				answer := "not a numeric sample"
 				if calls.Add(1) > 3 && recover {
-					answer = strings.Repeat("247,83,319,", 105)
+					answer = valid
 				}
 				json.NewEncoder(w).Encode(map[string]any{"content": []any{map[string]string{"type": "text", "text": answer}}})
 			}))
@@ -130,10 +162,10 @@ func TestNumericResamplesInvalidAnswersWithinChallengeBudget(t *testing.T) {
 
 func TestNumericAliasUsesFamilyBaseline(t *testing.T) {
 	s, _, _, _ := testSetup(t)
+	answer := referenceLikeAnswer(t, "deepseek-v4.1-flash-1017")
 	var calls atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
-		answer := strings.Repeat("247,83,319,", 105)
 		json.NewEncoder(w).Encode(map[string]any{
 			"choices": []any{map[string]any{
 				"message":       map[string]string{"content": answer},

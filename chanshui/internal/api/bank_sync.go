@@ -13,6 +13,7 @@ import (
 )
 
 const bankStateKey = "modeltrace-bank-v1"
+const modelTraceRepository = "xqy2006/ModelTrace"
 const latestBankCommitURL = "https://api.github.com/repos/xqy2006/ModelTrace/commits/main"
 
 var commitPattern = regexp.MustCompile("^[a-f0-9]{40}$")
@@ -28,7 +29,9 @@ func (s *Server) loadCachedBank() {
 		return
 	}
 	var b fingerprint.Bank
-	if json.Unmarshal(raw, &b) == nil && fingerprint.MergeLocalReferences(&b) == nil && s.mergeCustomReferences(&b) == nil {
+	// A cache from another source must not replace the reviewed embedded bank.
+	if json.Unmarshal(raw, &b) == nil && b.Source["repository"] == s.bank.Source["repository"] &&
+		fingerprint.MergeLocalReferences(&b) == nil && s.mergeCustomReferences(&b) == nil {
 		s.bank = &b
 	}
 }
@@ -84,6 +87,13 @@ func fetchSyncJSON(ctx context.Context, c *http.Client, url string, out any) err
 	return json.Unmarshal(raw, out)
 }
 func (s *Server) syncBank(ctx context.Context, c *http.Client) error {
+	current := s.currentBank()
+	// The embedded bank is a reviewed lm-detector snapshot, updated by hand via
+	// scripts/sync-bank.cjs and scripts/convert_bank.py. Syncing the frozen
+	// ModelTrace head here would silently swap it back to the old bank.
+	if current.Source["repository"] != modelTraceRepository {
+		return nil
+	}
 	var head struct {
 		SHA string `json:"sha"`
 	}
@@ -93,7 +103,6 @@ func (s *Server) syncBank(ctx context.Context, c *http.Client) error {
 	if !commitPattern.MatchString(head.SHA) {
 		return fmt.Errorf("invalid source commit")
 	}
-	current := s.currentBank()
 	if current.Source["commit"] == head.SHA {
 		return nil
 	}
@@ -105,7 +114,7 @@ func (s *Server) syncBank(ctx context.Context, c *http.Client) error {
 	if e := fetchSyncJSON(ctx, c, url, &remote); e != nil {
 		return e
 	}
-	next := &fingerprint.Bank{Numeric: remote.NumericBank, Behavioral: current.Behavioral, Source: map[string]string{"repository": "xqy2006/ModelTrace", "commit": head.SHA, "path": "data/unified_bank.json", "built_at": remote.BuiltAt, "synced_at": time.Now().UTC().Format(time.RFC3339)}}
+	next := &fingerprint.Bank{Numeric: remote.NumericBank, Behavioral: current.Behavioral, Source: map[string]string{"repository": modelTraceRepository, "commit": head.SHA, "path": "data/unified_bank.json", "built_at": remote.BuiltAt, "synced_at": time.Now().UTC().Format(time.RFC3339)}}
 	return s.publishBank(ctx, next)
 }
 func (s *Server) startBankSync() {

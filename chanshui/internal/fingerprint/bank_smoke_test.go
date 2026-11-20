@@ -14,7 +14,7 @@ func TestLoadBank(t *testing.T) {
 	if err := json.Unmarshal(localReferences, &localRefs); err != nil {
 		t.Fatal(err)
 	}
-	numericModels := 18 + len(localRefs)
+	numericModels := 75 + len(localRefs)
 	if len(b.Numeric.Models) != numericModels {
 		t.Fatalf("numeric models: %d", len(b.Numeric.Models))
 	}
@@ -32,13 +32,13 @@ func TestLoadBank(t *testing.T) {
 	if len(ob.Centroids) != numericModels || len(ob.Centroids[0]) != 74 {
 		t.Fatalf("ordered centroids %dx%d", len(ob.Centroids), len(ob.Centroids[0]))
 	}
-	if len(ob.EnvironmentCentroids) != 12 || len(ob.EnvironmentCentroids[0]) != numericModels || len(ob.EnvironmentCentroids[0][0]) != 74 {
+	if len(ob.EnvironmentCentroids) != 4 || len(ob.EnvironmentCentroids[0]) != numericModels || len(ob.EnvironmentCentroids[0][0]) != 74 {
 		t.Fatalf("env centroids %dx%dx%d", len(ob.EnvironmentCentroids), len(ob.EnvironmentCentroids[0]), len(ob.EnvironmentCentroids[0][0]))
 	}
 	if ob.Weight != 0.25 {
 		t.Fatalf("ordered weight %v", ob.Weight)
 	}
-	if b.Numeric.Calibration["3"].Beta != 11.99999999999999 {
+	if b.Numeric.Calibration["3"].Beta != 4.891270208477193 {
 		t.Fatalf("calibration beta: %v", b.Numeric.Calibration["3"].Beta)
 	}
 }

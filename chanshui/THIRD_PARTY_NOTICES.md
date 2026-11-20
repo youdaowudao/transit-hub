@@ -2,17 +2,21 @@
 
 This project contains code, model references and captured model outputs from several sources. The MIT license in `LICENSE` applies to this project's code; it does not relicense third-party data, model names or dependencies.
 
+## lm-detector numeric bank
+
+The embedded numeric bank is derived from `data/unified_bank.json` of Ikaleio/lm-detector, the maintained successor of ModelTrace by the same author, at the commit recorded in `data_ref/provenance.json`. `data_ref/unified_bank.json` is that file with `models[].frequency_references` removed; `scripts/convert_bank.py` keeps the matrices verbatim and only maps Claude IDs to the dash names this project already used. The repository declares MIT; its notice is retained in `data_ref/LM_DETECTOR_LICENSE`. Each model's `sources` field records the third-party channel its reference answers came from; those channels are not independent proof of model identity.
+
 ## ModelTrace numeric baselines
 
-Some numeric candidate baselines are derived from the ModelTrace data referenced in `data_ref/provenance.json` (commit `d4131b30243dfa05e70180b5eedde742103f1d73` at the time of writing). Check the upstream repository's license and terms before redistributing or using the data commercially.
+The previous ModelTrace bank (commit `6cd4a8ff0f3f4e49d6d6969dd2fbadfa1569fde2`) is kept only as test data in `internal/fingerprint/testdata/modeltrace-unified-bank.json`, so the Go port is still checked against ModelTrace `fingerprint.py` output. It is no longer embedded.
 
 ## DeepSeek samples
 
-The dated `DeepSeek-V4.1-Flash-0910` and `DeepSeek-V4.1-Flash-1017` baselines were captured through `https://api.deepseek.com` with the request name `deepseek-flash`. Each baseline records 36 training samples and 12 independent validation samples. The dated names are capture labels, not an official version claim by the API. See `docs/deepseek-fingerprint-2026-10-05.md` and the capture files under `data_ref/`.
+The dated `DeepSeek-V4.1-Flash-0910` and `DeepSeek-V4.1-Flash-1017` captures were made through `https://api.deepseek.com` with the request name `deepseek-flash`. They remain under `data_ref/captures/` as capture records and are no longer embedded; the bank uses lm-detector's DeepSeek references. The dated names are capture labels, not an official version claim by the API. See `docs/deepseek-fingerprint-2026-10-05.md`.
 
 ## Grok samples
 
-The Grok 4.6/4.7 numeric baselines were captured through a third-party gateway, not an official xAI endpoint. They are reference samples for the model names returned by that gateway and are not independent proof of model identity. See `docs/grok-fingerprints-2026-10-05.md` and `data_ref/captures/`.
+The Grok 4.6/4.7 captures under `data_ref/captures/` were made through a third-party gateway, not an official xAI endpoint. They are capture records only and are not embedded. See `docs/grok-fingerprints-2026-10-05.md`.
 
 ## Dependencies
 
@@ -28,7 +32,7 @@ Model fingerprints, cache measurements, tool/web checks and scores are evidence,
 
 ## TransitHub distribution attribution
 
-The referenced ModelTrace revision `d4131b30243dfa05e70180b5eedde742103f1d73` declares MIT. Its original copyright and permission notice is retained in `data_ref/MODELTRACE_LICENSE`. This does not change the other source notices above or claim ownership of model outputs.
+The referenced ModelTrace revision `d4131b30243dfa05e70180b5eedde742103f1d73` declares MIT. Its original copyright and permission notice is retained in `data_ref/MODELTRACE_LICENSE`; the lm-detector notice is retained in `data_ref/LM_DETECTOR_LICENSE`. This does not change the other source notices above or claim ownership of model outputs.
 
 ## Codex prompt references
 

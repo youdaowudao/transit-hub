@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"github.com/kiss-kedaya/chanshui/internal/fingerprint"
@@ -57,7 +56,7 @@ func TestUpstreamOnlyCachedBankKeepsLocalReference(t *testing.T) {
 }
 
 func (f syncTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-func TestAutomaticSyncValidatedSwapAndPersistence(t *testing.T) {
+func TestReviewedBankIgnoresModelTraceSyncAndCache(t *testing.T) {
 	db, e := history.Open(filepath.Join(t.TempDir(), "sync.db"))
 	if e != nil {
 		t.Fatal(e)
@@ -69,54 +68,44 @@ func TestAutomaticSyncValidatedSwapAndPersistence(t *testing.T) {
 	}
 	defer s.Close()
 	old := s.currentBank()
-	sha := strings.Repeat("a", 40)
+	if old.Source["repository"] != "Ikaleio/lm-detector" {
+		t.Fatalf("embedded bank source %v", old.Source)
+	}
 	count := 0
 	client := &http.Client{Transport: syncTransport(func(r *http.Request) (*http.Response, error) {
 		count++
-		var v any
-		if strings.Contains(r.URL.Path, "/commits/") {
-			v = map[string]string{"sha": sha}
-		} else {
-			if !strings.Contains(r.URL.Path, sha+"/data/unified_bank.json") {
-				t.Error(r.URL.Path)
-			}
-			v = old.Numeric
-		}
-		raw, _ := json.Marshal(v)
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(raw)), Header: http.Header{}}, nil
+		return nil, io.ErrUnexpectedEOF
 	})}
-	if e = s.syncBank(context.Background(), client); e != nil {
+	if e = s.syncBank(context.Background(), client); e != nil || count != 0 || s.currentBank() != old {
+		t.Fatal("reviewed bank was synced from ModelTrace", e, count)
+	}
+	// A cache left by an earlier ModelTrace sync must not come back after restart.
+	stale, e := fingerprint.CloneBank(old)
+	if e != nil {
 		t.Fatal(e)
 	}
-	if s.currentBank() == old || old.Source["commit"] == sha || s.currentBank().Source["commit"] != sha {
-		t.Fatal("bank snapshot mutation")
-	}
-	if count != 2 {
-		t.Fatal(count)
-	}
-	if e = s.syncBank(context.Background(), client); e != nil || count != 3 {
-		t.Fatal("unchanged commit redownloaded", e, count)
-	}
-	raw, _ := json.Marshal(s.currentBank())
-	var invalid fingerprint.Bank
-	json.Unmarshal(raw, &invalid)
-	invalid.Numeric.Robust.OrderedBlocks.Centroids[0] = []float64{1}
-	if e = s.publishBank(context.Background(), &invalid); e == nil {
-		t.Fatal("invalid matrix accepted")
-	}
-	if s.currentBank().Source["commit"] != sha {
-		t.Fatal("bad update replaced verified bank")
+	stale.Source = map[string]string{"repository": modelTraceRepository, "commit": strings.Repeat("a", 40)}
+	raw, _ := json.Marshal(stale)
+	if e = db.SaveRuntimeState(context.Background(), bankStateKey, raw); e != nil {
+		t.Fatal(e)
 	}
 	next, e := New(db, Options{})
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer next.Close()
-	if next.currentBank().Source["commit"] != sha {
-		t.Fatal("verified cache not loaded")
+	if next.currentBank().Source["repository"] != old.Source["repository"] || next.currentBank().Source["commit"] != old.Source["commit"] {
+		t.Fatal("stale ModelTrace cache replaced the embedded bank")
 	}
-	if next.currentBank().NumericModel("gpt-6-astra") == nil {
-		t.Fatal("enrolled model lost after restart")
+	raw, _ = json.Marshal(s.currentBank())
+	var invalid fingerprint.Bank
+	json.Unmarshal(raw, &invalid)
+	invalid.Numeric.Robust.OrderedBlocks.Centroids[0] = []float64{1}
+	if e = s.publishBank(context.Background(), &invalid); e == nil {
+		t.Fatal("invalid matrix accepted")
+	}
+	if s.currentBank() != old {
+		t.Fatal("bad update replaced verified bank")
 	}
 	var wg sync.WaitGroup
 	for i := 0; i < 8; i++ {

@@ -3,6 +3,7 @@
 上游固定版本和原文件摘要见 `UPSTREAM_VERSION`。这是普通源码目录，保留独立 Go module、React 页面、LICENSE 和 THIRD_PARTY_NOTICES；不是 Git submodule。
 
 - `cmd/transit-hub` 与 `internal/hub/` 提供一次性执行和查询。Hub 不运行原 `main.go` HTTP 服务，不启动原匿名历史、24小时清理、worker 或模型库定时同步。
+- 数字指纹库改用 Ikaleio/lm-detector 快照（来源见 `data_ref/provenance.json`），用 `scripts/sync-bank.cjs` 手动拉取，再用 `scripts/convert_bank.py` 生成内置库；Claude 型号 ID 沿用原来的横线写法，gpt-6.1-sol 作为 gpt-6-astra 合并类的别名。`local.references.json` 里的单渠道参考已清空。`bank_sync.go` 只同步 ModelTrace 来源的库，来源不同的运行时缓存也不会覆盖内置库。库内模型的指纹采样统一使用 16384 输出上限。
 - `internal/api/run.go` 删除把参考答案发回被测模型自评的分支；关键回归在 `hub_no_selfgrade_test.go`。Hub 检测使用本地判题。
 - Hub侧D-Bus管理器仅在所有run/query及启动任务均空、整个进程组无程序时回收空slice，避免systemd自动回收限流留下内核记账；创建与空组回收使用固定互斥，无常驻清理器。
 - `internal/gateway/` 和各探针中的可选配置保留原独立程序的默认行为；Hub 显式使用重试、输出大小、调用次数、协议及鉴权限制。题目、答案和参考库只在子进程里加载。

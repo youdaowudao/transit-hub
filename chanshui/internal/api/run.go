@@ -130,7 +130,7 @@ func (s *Server) numeric(ctx context.Context, g gateway.Client, q Request) (any,
 				// Messages prefers a buffered response for long numeric samples.
 				// Responses/Chat stream by default; some gateways require it.
 				maxTokens := 4096
-				if ref := bank.NumericModel(q.Model); (ref != nil && ref.ReferenceSamples > 0) || integrity.ModelFamily(q.Model) == "deepseek" {
+				if bank.NumericModel(q.Model) != nil || integrity.ModelFamily(q.Model) == "deepseek" {
 					maxTokens = 16384
 				}
 				m, e := g.CallMessages(ctx, gateway.CallRequest{Model: q.Model, Prompt: ch.Prompt, MaxTokens: maxTokens, Stream: g.ProtocolFor(q.Model) != "messages", TimeoutSeconds: q.Timeout, SuppressDefaultEffort: true})

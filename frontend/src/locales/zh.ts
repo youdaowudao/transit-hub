@@ -101,6 +101,7 @@ export default {
       tickets: '工单',
       massEmail: '群发邮件',
       userLastUsed: '用户最后使用',
+      userActivity: '用户分析',
       signOut: '退出登录'
     },
     leaderboard: {
@@ -3369,6 +3370,33 @@ export default {
         recipientLimitReached: '本次选择超过 10,000 个收件人上限，请缩小筛选范围后重试。',
         itemGeneric: '该收件人发送失败，请稍后查看批次获取最新详情。'
       }
+    },
+    userActivity: {
+      title: '用户分析',
+      intro: '从 Sub2API 读取用户、用量和入账，之后每小时更新。不会修改主站；首次读取较久，点击后可以离开页面。',
+      running: '正在读取资料，你可以离开页面；已核实的部分会逐项更新，未核实部分保留原值，不会修改主站。',
+      incomplete: '现有资料覆盖{from}至{to}，暂不能完整比较所选日期；请等待历史资料读取完成。',
+      noCoverage: '历史用量尚未核实，暂不能完整比较日期；请开始同步或查看具体读取提示。',
+      partialHelp: '旧资料可能仅覆盖部分日期，仍可查看实有逐日值；完整期间比较只使用连续核实范围，未知值不按0计算。',
+      start: '开始同步', refresh: '刷新本地资料', noWorkspace: '请先选择一个 Sub2API 管理员账号，再读取这个工作区的本地资料。',
+      lastSuccess: '最近完整读取成功：', loading: '正在读取本站已保存的资料，不会请求或修改主站。',
+      unknown: '未核实', coverage: '资料日期范围', usageRange: '用量：', rechargeRange: '入账：',
+      users: '已保存用户', snapshotHelp: '来自完整用户清单，余额与使用时间以最近读取为准。',
+      totalBalance: '用户余额总和', todayCost: '今日临时消费', temporary: '今日临时观察', todayRecharge: '今日已保存入账', deduction: '扣减：',
+      period: '近{days}个完整自然日', periodHelp: '截至昨天，与此前相同天数比较；资料不完整时不显示比例。',
+      cost: '实际消费', change: '消费环比', requests: '请求数', activeUsers: '活跃用户', retained: '两期均活跃', churned: '本期未再使用',
+      daily: '每日用量', days: '显示天数', readLocal: '读取本地', dailyDetails: '查看逐日明细', day: '日期', recharge: '入账', dataStatus: '资料情况', partial: '部分资料', verified: '已核实范围',
+      channels: '今日已保存渠道明细', moneyHelp: '入账区分充值、兑换、管理员调整和返利转入；仅展示本站已有资料，部分渠道缺失时不当作0，也不等于首页消费营收。',
+      noFundingRows: '今天尚无已保存的入账记录；这不代表已经确认所有渠道为0。',
+      userList: '本地用户清单', listHelp: '筛选和详情只读本站资料，不会修改客户或主站；未查到使用记录不代表从未使用。复制后请自行使用，不会发送邮件。',
+      search: '编号、邮箱或用户名', segment: '使用情况', inactiveDays: '未使用天数', role: '角色', status: '状态', all: '全部', regularUser: '普通用户', administrator: '管理员', active: '正常', disabled: '停用',
+      sort: '排序', order: '顺序', asc: '从小到大', desc: '从大到小', pageSize: '每页数量', filter: '查询本地资料', user: '用户', balance: '余额', lastUsed: '最后使用', cost7d: '近7日消费', cost30d: '近30日消费', actions: '操作', detail: '用户详情', copy: '复制邮箱', copied: '已复制',
+      lastUsedUnknown: '主站未提供最后使用时间', emptyUsers: '暂无匹配的本地用户；首次使用请开始同步，已有资料可调整筛选。', total: '共{total}位，第{page}页', previous: '上一页', next: '下一页', close: '关闭详情', created: '注册时间：',
+      detailHelp: '查看这位用户最近90日的本地用量和周月对比，不向主站补查；未知日期不按0计算。',
+      readError: '本地资料读取未完成，具体原因尚未确认；请检查本站服务日志后重试。', copyError: '邮箱复制失败；请检查浏览器剪贴板权限，或手动选择邮箱复制。',
+      segmentName: { all: '全部', active_1d: '近1日使用', active_7d: '近7日使用', active_30d: '近30日使用', inactive: '超过指定天数未使用', churned_7d: '前7日使用、近7日未使用', declining: '近7日消费降至一半或以下', growing: '近7日消费达到前期150%' },
+      sortName: { lastUsedAt: '最后使用时间', cost7d: '近7日消费', cost30d: '近30日消费', balance: '余额', createdAt: '注册时间' },
+      channel: { payment: '在线充值', redeem: '兑换码', admin_add: '管理员加款', admin_deduct: '管理员扣款', affiliate: '返利转入' }
     },
     userLastUsed: {
 		tabs: {

@@ -132,6 +132,7 @@ const menuItems = computed<MenuEntry[]>(() => [
       { name: t('admin.menu.tickets'), path: '/admin/tickets', icon: MessageSquare },
       { name: t('admin.menu.massEmail'), path: '/admin/mass-email', icon: Mail },
       { name: t('admin.menu.userLastUsed'), path: '/admin/user-last-used', icon: Clock3 },
+      { name: t('admin.menu.userActivity'), path: '/admin/user-activity', icon: Clock3 },
     ],
   },
   { type: 'leaf', name: t('admin.menu.settings'), path: '/admin/settings', icon: Settings },

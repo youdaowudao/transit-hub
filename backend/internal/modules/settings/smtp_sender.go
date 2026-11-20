@@ -2,10 +2,12 @@ package settings
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
-	"mime"
 	"net"
 	"net/mail"
 	"net/smtp"
@@ -166,10 +168,9 @@ func validateSMTPHeaderValue(value string) error {
 
 // buildSMTPTestMessage 构造 HTML 邮件。Subject/HTMLBody 为空时回退到固定 SMTP 测试内容，
 // 保持既有 /api/settings/smtp/test-email 的静态测试邮件合同不变。
-// From/To 头使用 net/mail.Address 编码，Subject 使用 MIME encoded-word，避免手写不安全的头拼接。
+// 标题和显示名称按字符边界分段做 RFC 2047 B 编码，正文做 base64 编码，并补齐标准邮件头。
+// 头部的值在 Send 中已经过 validateSMTPHeaderValue 的 CRLF 检查。
 func buildSMTPTestMessage(cfg smtpSendConfig) []byte {
-	from := (&mail.Address{Name: cfg.FromName, Address: cfg.FromEmail}).String()
-	to := (&mail.Address{Address: cfg.RecipientEmail}).String()
 	subjectText := cfg.Subject
 	if subjectText == "" {
 		subjectText = smtpTestSubject
@@ -178,16 +179,81 @@ func buildSMTPTestMessage(cfg smtpSendConfig) []byte {
 	if htmlBody == "" {
 		htmlBody = smtpTestHTMLBody
 	}
-	subject := mime.QEncoding.Encode("UTF-8", subjectText)
 
 	var b strings.Builder
-	b.WriteString("From: " + from + "\r\n")
-	b.WriteString("To: " + to + "\r\n")
-	b.WriteString("Subject: " + subject + "\r\n")
+	b.WriteString("From: " + formatFromAddress(cfg.FromName, cfg.FromEmail) + "\r\n")
+	b.WriteString("To: " + (&mail.Address{Address: cfg.RecipientEmail}).String() + "\r\n")
+	b.WriteString("Subject: " + encodeHeaderText(subjectText) + "\r\n")
+	b.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n")
+	b.WriteString("Message-ID: " + newMessageID(cfg.FromEmail) + "\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
 	b.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
+	b.WriteString("Content-Transfer-Encoding: base64\r\n")
 	b.WriteString("\r\n")
-	b.WriteString(htmlBody)
-	b.WriteString("\r\n")
+	encoded := base64.StdEncoding.EncodeToString([]byte(htmlBody))
+	for len(encoded) > base64LineLength {
+		b.WriteString(encoded[:base64LineLength] + "\r\n")
+		encoded = encoded[base64LineLength:]
+	}
+	b.WriteString(encoded + "\r\n")
 	return []byte(b.String())
+}
+
+const (
+	// base64LineLength 是正文 base64 每行的字符数（MIME 规定不超过 76）。
+	base64LineLength = 76
+	// headerWordBytes 是标题每个编码段最多装的原文字节数：base64 后 48 个字符，加上 =?UTF-8?B?…?= 共 60 个，
+	// 每个编码段不超过 RFC 2047 规定的 75 个字符。
+	headerWordBytes = 36
+)
+
+// encodeHeaderText 把头部文字编码成 RFC 2047 的 B 编码段，一段一行（折行续写）。纯 ASCII 原样返回。
+// 切分只在字符边界上，不会把一个中文字拆到两段里。
+func encodeHeaderText(text string) string {
+	if isPrintableASCII(text) {
+		return text
+	}
+	var words []string
+	chunk := make([]byte, 0, headerWordBytes)
+	for _, r := range text {
+		encoded := string(r)
+		if len(chunk) > 0 && len(chunk)+len(encoded) > headerWordBytes {
+			words = append(words, "=?UTF-8?B?"+base64.StdEncoding.EncodeToString(chunk)+"?=")
+			chunk = chunk[:0]
+		}
+		chunk = append(chunk, encoded...)
+	}
+	if len(chunk) > 0 {
+		words = append(words, "=?UTF-8?B?"+base64.StdEncoding.EncodeToString(chunk)+"?=")
+	}
+	return strings.Join(words, "\r\n ")
+}
+
+// formatFromAddress 写发件人：名字是纯 ASCII 时交给 net/mail（它会按需加引号）；有中文时用 encodeHeaderText，
+// 避免编码后挤在一行里过长。
+func formatFromAddress(name string, address string) string {
+	if name == "" || isPrintableASCII(name) {
+		return (&mail.Address{Name: name, Address: address}).String()
+	}
+	return encodeHeaderText(name) + " <" + address + ">"
+}
+
+func isPrintableASCII(text string) bool {
+	for i := 0; i < len(text); i++ {
+		if text[i] < 0x20 || text[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// newMessageID 生成 <随机数@发件域名> 形式的 Message-ID。
+func newMessageID(fromEmail string) string {
+	domain := "transithub.invalid"
+	if at := strings.LastIndex(fromEmail, "@"); at >= 0 && at < len(fromEmail)-1 {
+		domain = fromEmail[at+1:]
+	}
+	random := make([]byte, 16)
+	_, _ = rand.Read(random)
+	return "<" + hex.EncodeToString(random) + "@" + domain + ">"
 }

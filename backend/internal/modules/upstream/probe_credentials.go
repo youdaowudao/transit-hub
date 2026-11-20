@@ -204,6 +204,10 @@ func (s *PlatformService) resolveSub2APIAccountCredentialContext(ctx context.Con
 		}
 	}
 	if baseURL == "" {
+		// 导出资料缺少地址时，最后回退到同账号列表中已解析的地址。
+		baseURL = strings.TrimSpace(account.BaseURL)
+	}
+	if baseURL == "" {
 		return ProbeCredential{}, newProbeCredentialError(ReasonBaseURLUnavailable)
 	}
 

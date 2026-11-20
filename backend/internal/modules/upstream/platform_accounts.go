@@ -39,9 +39,9 @@ type AdminGroupAccountInfo struct {
 	GroupIDs       []string   // 所属分组 ID/名称列表
 	Schedulable    *bool      // 是否可调度（sub2api）
 	UpdatedAt      *time.Time // 上游账号记录最后更新时间；用于区分本地用户动作与后续主站直接修改
-	// BaseURL 是 new-api channel 转发到的上游 provider 地址（channel.base_url）。
-	// 独立探活需要用它 + channel key 直接对上游发起 OpenAI 兼容请求。sub2api 账号在列表阶段
-	// 拿不到 base_url，探活前再从单账号导出凭据里解析，故此处可能为空。
+	// BaseURL 是账号/渠道转发到的上游地址：new-api 取 channel.base_url；sub2api 取账号列表里的
+	// credentials 地址字段。列表不提供地址时留空，探活时仍先读取单账号导出资料。
+	// 这里只保存地址，凭据中的任何密钥字段都不会进入本结构。
 	BaseURL                 string
 	TempUnschedulableUntil  *time.Time
 	TempUnschedulableKnown  bool
@@ -345,6 +345,10 @@ func parseSub2APIAccount(record map[string]any) AdminGroupAccountInfo {
 	}
 	if m := firstString(record, []string{"models"}); m != nil {
 		account.Models = *m
+	}
+	// 只读取已允许的上游地址字段；api_key / access_token 等敏感值一律不取。
+	if credentials, ok := record["credentials"].(map[string]any); ok {
+		account.BaseURL = firstBaseURL(credentials)
 	}
 	return account
 }

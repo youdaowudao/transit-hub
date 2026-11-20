@@ -111,6 +111,12 @@ const routes = [
         component: () => import('./modules/admin/views/MassEmailView.vue')
       },
       {
+        path: 'sales',
+        name: 'AdminSales',
+        meta: { requiresWorkspace: true },
+        component: () => import('./modules/admin/views/SalesView.vue')
+      },
+      {
         path: 'vip',
         name: 'AdminVip',
         meta: { requiresWorkspace: true },

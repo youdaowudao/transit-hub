@@ -27,6 +27,7 @@ import (
 	"transithub/backend/internal/modules/mass_email"
 	"transithub/backend/internal/modules/my_sites"
 	"transithub/backend/internal/modules/notifications"
+	"transithub/backend/internal/modules/sales"
 	"transithub/backend/internal/modules/settings"
 	"transithub/backend/internal/modules/signup_risk"
 	"transithub/backend/internal/modules/system"
@@ -265,6 +266,11 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	vipService := vip.NewService(vipRepository, settingsService, cfg.APIOnly)
 	server.vipService = vipService
 	vip.RegisterRoutes(server.mux, vipService)
+
+	salesRepository := sales.NewRepository(db)
+	runStorageStartup(cfg, salesRepository.EnsureSchema)
+	salesService := sales.NewService(salesRepository, cfg.APIOnly)
+	sales.RegisterRoutes(server.mux, salesService)
 
 	// 所有 workspace 表 schema 完成后再补 legacy 归属；随后才启动 restore、worker 和 scheduler，
 	// 避免后台任务在旧行尚未补齐 workspace 时读取或写回数据。
@@ -584,7 +590,7 @@ func (s *Server) protectedPath(path string) bool {
 	if path == "/api/chanshui" || strings.HasPrefix(path, "/api/chanshui/") {
 		return true
 	}
-	return strings.HasPrefix(path, "/api/vip") || strings.HasPrefix(path, "/api/user-activity") || strings.HasPrefix(path, "/api/notifications") || strings.HasPrefix(path, "/api/users") || strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email")
+	return strings.HasPrefix(path, "/api/sales") || strings.HasPrefix(path, "/api/vip") || strings.HasPrefix(path, "/api/user-activity") || strings.HasPrefix(path, "/api/notifications") || strings.HasPrefix(path, "/api/users") || strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email")
 }
 
 func (s *Server) setSecurityHeaders(w http.ResponseWriter, r *http.Request) {

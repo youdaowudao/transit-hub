@@ -9,15 +9,23 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"regexp"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/kiss-kedaya/chanshui/internal/api"
 	"github.com/kiss-kedaya/chanshui/internal/hub/engine"
+	"github.com/kiss-kedaya/chanshui/internal/hub/prefixcheck"
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
 	"github.com/kiss-kedaya/chanshui/internal/hub/store"
 	"github.com/kiss-kedaya/chanshui/internal/hub/wire"
+)
+
+var (
+	promptIDPattern  = regexp.MustCompile(`^[a-z0-9.-]{1,64}$`)
+	crossCheckResult = prefixcheck.CrossCheck
+	readPrefixPrompt = prefixcheck.PromptJSON
 )
 
 func main() {
@@ -252,7 +260,54 @@ func query(ctx context.Context, s *store.Store, env wire.Envelope, c wire.Contin
 			return nil, "", e
 		}
 		v, e := s.ListItems(ctx, o, a.ReportID, store.Filters{Cursor: a.Cursor, Limit: a.Limit})
+		if e == nil {
+			for i := range v.Items {
+				item := &v.Items[i]
+				if item.Definition.Kind == "injection" {
+					_, injection, _ := prefixcheck.Extract(prefixcheck.StoredItem{
+						ItemID: item.ItemID, OrderIndex: item.OrderIndex, Kind: item.Definition.Kind,
+						Template: item.Definition.Template, Result: item.Result,
+					})
+					count := len(injection.Points)
+					item.UsableInjectionPoints = &count
+				}
+			}
+		}
 		return v, "", e
+	case "cross-check":
+		var a struct {
+			ReportID string `json:"reportId"`
+		}
+		if e := decode(env.Args, &a); e != nil {
+			return nil, "", e
+		}
+		in, e := s.CrossCheckData(ctx, o, a.ReportID)
+		if e != nil {
+			return nil, "", e
+		}
+		result := crossCheckResult(toCrossInput(in))
+		if result.TooLarge {
+			return nil, "", store.Fail(503, "判读结果超过 256KiB，未返回；请核查本报告题目数量后重试。", "cross-check")
+		}
+		return result, "", nil
+	case "read-prefix-prompt":
+		var a struct {
+			PromptID string `json:"promptId"`
+		}
+		if e := decode(env.Args, &a); e != nil {
+			return nil, "", e
+		}
+		if !promptIDPattern.MatchString(a.PromptID) {
+			return nil, "", store.Fail(422, "提示词编号格式不正确，请重新打开报告后重试；未读取任何内容。", "prefix-prompt")
+		}
+		raw, ok := readPrefixPrompt(a.PromptID)
+		if !ok {
+			return nil, "", store.Fail(404, "程序附带的提示词库里没有这一份，可能是程序版本不一致；请刷新页面后重试。", "prefix-prompt")
+		}
+		if len(raw) > 64<<10 {
+			return nil, "", store.Fail(503, "提示词全文超过 64KiB，未返回；请核查程序附带的提示词库。", "prefix-prompt")
+		}
+		return json.RawMessage(raw), "", nil
 	case "read-image":
 		var a struct {
 			ReportID string `json:"reportId"`
@@ -290,6 +345,38 @@ func query(ctx context.Context, s *store.Store, env wire.Envelope, c wire.Contin
 		return store.ReportView(v), "", e
 	}
 	return nil, "", store.Fail(422, "不支持此检测操作，未执行任何模型请求", "operation")
+}
+
+func toCrossInput(projected store.CrossCheckProjection) prefixcheck.CrossInput {
+	r := projected.Report
+	in := prefixcheck.CrossInput{Report: prefixcheck.ReportInput{
+		ReportID: r.ReportID, AccountID: r.AccountID, Model: r.Model, Status: r.Status,
+		CreatedAtMs: r.CreatedAtMs, UpdatedAtMs: r.UpdatedAtMs, Prefix: r.Prefix, PrefixWrongType: r.PrefixWrongType,
+		KnowledgeRows: r.KnowledgeRows, Vision: r.Vision,
+	}}
+	for _, item := range projected.Items {
+		in.Items = append(in.Items, prefixcheck.ItemIndex{ItemID: item.ItemID, OrderIndex: item.OrderIndex, CompletedAtMs: item.CompletedAtMs})
+	}
+	for _, item := range projected.Injections {
+		result, _ := json.Marshal(map[string]any{
+			"evidence": map[string]any{"points": item.Points, "reliable": item.Reliable},
+			"error":    item.Error,
+		})
+		_, injection, _ := prefixcheck.Extract(prefixcheck.StoredItem{
+			ItemID: item.ItemID, OrderIndex: item.OrderIndex, Kind: "injection", Template: item.Template, Result: result,
+		})
+		in.Injections = append(in.Injections, *injection)
+	}
+	if value := projected.Identity; value != nil {
+		in.Identity = &prefixcheck.IdentityInput{ItemID: value.ItemID, OrderIndex: value.OrderIndex, Status: value.Status, Earned: value.Earned, Max: value.Max}
+	}
+	for _, peer := range projected.Peers {
+		in.Peers = append(in.Peers, prefixcheck.PeerInput{
+			ReportID: peer.ReportID, AccountName: peer.AccountName, Status: peer.Status, CreatedAtMs: peer.CreatedAtMs,
+			Prefix: peer.Prefix, KnowledgeRows: peer.KnowledgeRows, Vision: peer.Vision,
+		})
+	}
+	return in
 }
 func replaceSecret(s, secret string) string {
 	if secret == "" {

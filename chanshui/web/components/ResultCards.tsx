@@ -70,6 +70,7 @@ export default function ResultCards({
   loading = false,
   showCache = false,
   savedScore = false, totalLabel = "", questions, sectionContent, questionExtra, onQuestionOpen, collapseVision = false, questionTail, knowledgeExtra,
+  injectionNote, injectionDetail,
 }: {
   verdict: DetectVerdict;
   model?: string;
@@ -84,6 +85,8 @@ export default function ResultCards({
   collapseVision?: boolean;
   questionTail?: ReactNode;
   knowledgeExtra?: (id:string)=>ReactNode;
+  injectionNote?: string;
+  injectionDetail?: ReactNode;
 }) {
   const { t: tr } = useI18n();
   const a = v.injection,
@@ -324,16 +327,16 @@ export default function ResultCards({
       </section>
       <section className="result-card">
         <div className="rc-head">
-          <CardTitle title={tr("注入大小")} label={tr("注入估计说明")} text={a?.note} />
+          <CardTitle title={tr("注入大小")} label={tr("注入估计说明")} text={injectionNote ?? a?.note} />
           <span className="rc-score">
             <ScoreShare preserve={savedScore} verdict={scored} part="injection" />
             <span className="card-number">02</span>
           </span>
         </div>
-        {sectionContent?.injection !== undefined ? sectionContent.injection : !a ? (
+        {sectionContent?.injection !== undefined ? <>{sectionContent.injection}{injectionDetail}</> : !a ? (
           <ResultSkeleton label={loading ? tr("采样中…") : tr("暂无结果")} />
         ) : a.error ? (
-          <ErrorFold text={a.error} />
+          <><ErrorFold text={a.error} />{injectionDetail}</>
         ) : (
           <>
             <div className="metric-line">
@@ -359,7 +362,7 @@ export default function ResultCards({
               )}
             </div>
             {!a.reliable && <p className="muted">{a.note}</p>}
-            <details className="fold">
+            {injectionDetail ?? <details className="fold">
               <summary>{tr("采样明细与评分标准")}</summary>
               <div className="table-wrap">
                 <table>
@@ -392,7 +395,7 @@ export default function ResultCards({
               <p className="muted">
                 {tr("<50：10分 · 50～1000：8分 · 1001～3000：6分 · 3001～6000：4分 · 6001～10000：2分 · >10000：0分")}
               </p>
-            </details>
+            </details>}
             <Details
               label={
                 a.probe

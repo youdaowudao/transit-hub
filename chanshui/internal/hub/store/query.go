@@ -334,11 +334,12 @@ func (s *Store) ListItems(ctx context.Context, o Owner, id string, f Filters) (P
 			out.NextCursor = encodeCursor(lastOrder, lastID)
 			break
 		}
-		var g SnapshotQuestion
-		if e = json.Unmarshal([]byte(raw), &g); e != nil {
-			return out, e
+		g, decodeErr := decodeListedQuestion(raw, v.SectionID)
+		if decodeErr != nil {
+			return out, decodeErr
 		}
 		v.Definition = g.Definition
+		v.OrderIndex = int(order)
 		v.Seed = g.Seed
 		v.Prompt = g.Prompt
 		v.Expected = g.Expected
@@ -349,6 +350,36 @@ func (s *Store) ListItems(ctx context.Context, o Owner, id string, f Filters) (P
 		lastOrder, lastID = order, v.ItemID
 	}
 	return out, rows.Err()
+}
+
+func decodeListedQuestion(raw, section string) (SnapshotQuestion, error) {
+	var question SnapshotQuestion
+	err := json.Unmarshal([]byte(raw), &question)
+	if err == nil || section != "injection" {
+		return question, err
+	}
+	// Older stored injection templates may be non-text. Use the default template
+	// for that value and still validate every other field through the same DTO.
+	var saved, definition map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &saved) != nil || json.Unmarshal(saved["definition"], &definition) != nil {
+		return question, err
+	}
+	template := definition["template"]
+	if len(template) == 0 || template[0] == '"' || string(template) == "null" {
+		return question, err
+	}
+	definition["template"] = json.RawMessage(`""`)
+	saved["definition"], err = json.Marshal(definition)
+	if err != nil {
+		return question, err
+	}
+	normalized, err := json.Marshal(saved)
+	if err != nil {
+		return question, err
+	}
+	question = SnapshotQuestion{}
+	err = json.Unmarshal(normalized, &question)
+	return question, err
 }
 
 type SnapshotQuestion = struct {
@@ -416,5 +447,8 @@ func ReportView(r Report) map[string]any {
 	var v map[string]any
 	_ = json.Unmarshal(raw, &v)
 	delete(v, "request")
+	if summary, ok := v["summary"].(map[string]any); ok {
+		delete(summary, "prefix")
+	}
 	return v
 }

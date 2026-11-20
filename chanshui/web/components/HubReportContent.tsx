@@ -1,21 +1,130 @@
 "use client";
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import ResultCards from './ResultCards';
+import HubCrossCheckCard from './HubCrossCheckCard';
+import HubInjectionDetail from './HubInjectionDetail';
 import {SingleAnswer} from './SingleAskPanel';
 import {object} from '../lib/hub-report-view';
 import type {Metrics} from '../lib/api';
 import ProbeTimeline from './ProbeTimeline';
 import HubQuestionDetails from './HubQuestionDetails';
 import { HubProbeEvidence } from './ProbeEvidence';
-import { hubReportView, itemJudgment, canRetryHubItem, hasOriginalItemDTO, isVerifiedHubReport } from '../lib/hub-report-view';
+import { hubReportView, itemJudgment, canRetryHubItem, hasOriginalItemDTO, isVerifiedHubReport, reportVersion } from '../lib/hub-report-view';
 import { isHubTerminal } from '../lib/hub-policy';
+import { CROSS_UNKNOWN_ERROR, INJECTION_NOTE, usablePoints, type CrossView } from '../lib/hub-crosscheck';
 import { fingerprintState } from '../lib/report-view';
 import { boundaryReviewText, knowledgeDateComparison } from '../lib/knowledge-dates';
-import type { HubCall, HubItem, HubReport } from '../lib/hub-types';
+import type { HubCall, HubCrossCheck, HubItem, HubReport } from '../lib/hub-types';
 
-export default function HubReportContent({ report, items, complete, readFailed, call, onRetry, retryDisabled }: { report: HubReport; items: HubItem[]; complete: boolean; readFailed?: boolean; call: HubCall; onRetry?: (ids: string[]) => void; retryDisabled?: boolean }) {
+type CrossState = {
+  version: string; op: number; state: 'idle' | 'loading' | 'ok' | 'error' | 'stale';
+  attempts: number; data?: HubCrossCheck; error?: string;
+};
+const crossBackoff = [1000, 2000, 4000] as const;
+
+export default function HubReportContent({
+  report, items, complete, readFailed, call, onRetry, retryDisabled,
+  itemsReadVersion, retryHold, readHold, onRefresh,
+}: {
+  report: HubReport; items: HubItem[]; complete: boolean; readFailed?: boolean; call: HubCall;
+  onRetry?: (ids: string[]) => void; retryDisabled?: boolean;
+  itemsReadVersion: string; retryHold: boolean; readHold: boolean; onRefresh: () => Promise<void>;
+}) {
   const view = hubReportView(report, items, complete, readFailed);
   const verified = isVerifiedHubReport(report);
+  const currentVersion = reportVersion(report);
+  const singleAsk = object(report.summary).singleAsk === true;
+  const retryActive = Boolean(report.retry) && ['queued', 'running'].includes(report.status);
+  const itemsReady = complete && itemsReadVersion === currentVersion;
+  const crossReady = !singleAsk && isHubTerminal(report.status) && !retryActive && !retryHold && !readHold && itemsReady;
+
+  const [cross, setCross] = useState<CrossState>({ version: '', op: 0, state: 'idle', attempts: 0 });
+  const opSeq = useRef(0);
+  const busyOp = useRef(0);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  const live = useRef({ version: currentVersion, crossReady });
+  live.current = { version: currentVersion, crossReady };
+  const [wake, setWake] = useState(0);
+  const [manualRefresh, setManualRefresh] = useState(false);
+  const effective = cross.version === currentVersion ? cross : { state: 'idle' as const, attempts: 0 };
+
+  const own = (op: number, next: Omit<CrossState, 'op'>) => {
+    setCross(existing => existing.op === op ? { ...next, op } : existing);
+  };
+  const finish = (op: number) => {
+    if (busyOp.current === op) busyOp.current = 0;
+    setWake(n => n + 1);
+  };
+  const loadCross = async (used: number) => {
+    const op = ++opSeq.current;
+    busyOp.current = op;
+    const version = currentVersion;
+    const updated = report.updatedAtMs;
+    const status = report.status;
+    const attempts = used + 1;
+    const base = { version, attempts };
+    setCross({ ...base, op, state: 'loading' });
+    const canRetry = () => alive.current && live.current.version === version && live.current.crossReady;
+    const shouldPause = () => live.current.version !== version || (attempts === 1 && !live.current.crossReady);
+    try {
+      let data: HubCrossCheck;
+      for (let request = 0; ; request++) {
+        try {
+          data = await call<HubCrossCheck>('cross-check', { reportId: report.reportId });
+          break;
+        } catch (error) {
+          if (object(error).status !== 429 || request >= crossBackoff.length || !canRetry()) throw error;
+          await new Promise(resolve => setTimeout(resolve, crossBackoff[request]));
+          if (!canRetry()) throw error;
+        }
+      }
+      if (!alive.current) return;
+      if (live.current.version !== version) own(op, { ...base, state: 'idle' });
+      else if (data.reportUpdatedAtMs === updated && data.reportStatus === status) own(op, { ...base, state: 'ok', data });
+      else if (shouldPause()) own(op, { ...base, state: 'idle' });
+      else own(op, { ...base, state: 'stale' });
+    } catch (error) {
+      if (!alive.current) return;
+      if (shouldPause()) own(op, { ...base, state: 'idle' });
+      else own(op, { ...base, state: 'error', error: (error instanceof Error && error.message) || CROSS_UNKNOWN_ERROR });
+    } finally {
+      finish(op);
+    }
+  };
+  useEffect(() => {
+    if (crossReady && effective.state === 'idle' && busyOp.current === 0) void loadCross(effective.attempts);
+  }, [crossReady, currentVersion, cross, wake]);
+
+  const retryCross = () => setCross({ version: currentVersion, op: 0, state: 'idle', attempts: 0 });
+  const refreshCross = async () => {
+    const pressed = currentVersion;
+    setManualRefresh(true);
+    try {
+      await onRefresh();
+    } catch {
+      // The existing report flow displays its own refresh error.
+    } finally {
+      if (alive.current) {
+        setManualRefresh(false);
+        setCross(existing => existing.state === 'stale' && existing.version === pressed
+          ? { version: live.current.version, op: 0, state: 'idle', attempts: 0 }
+          : existing);
+      }
+    }
+  };
+  const refreshingStale = manualRefresh && effective.state === 'stale' && !readHold && !retryHold;
+  const crossView: CrossView =
+    !crossReady && !refreshingStale ? { phase: 'wait', wait: (!isHubTerminal(report.status) || retryActive || retryHold) ? 'H3' : 'H3b' }
+    : effective.state === 'ok' ? { phase: 'ok', data: effective.data }
+    : effective.state === 'error' ? { phase: 'error', error: effective.error }
+    : effective.state === 'stale' ? { phase: 'stale' }
+    : { phase: 'loading' };
+  const injections = itemsReady ? items.filter(item => item.definition.kind === 'injection') : [];
+  const injection = injections.length === 1 && usablePoints(injections[0]).a ? injections[0] : undefined;
 
   const [images,setImages]=useState<Record<string,string>>({}), [imageErrors,setImageErrors]=useState<Record<string,string>>({});
   const [loadingImages,setLoadingImages]=useState<Record<string,boolean>>({});
@@ -150,7 +259,7 @@ export default function HubReportContent({ report, items, complete, readFailed, 
   const ended = isHubTerminal(report.status);
   const startedAt = typeof report.startedAtMs === 'number' ? report.startedAtMs : report.status === 'queued' ? 0 : report.createdAtMs;
   const timing = startedAt && (!ended || report.updatedAtMs) ? { started_at: new Date(startedAt).toISOString(), ...(ended ? { finished_at: new Date(report.updatedAtMs!).toISOString() } : {}), total_ms: ended ? Math.max(0, report.updatedAtMs! - startedAt) : 0, last_run_ms: 0, runs: 1 } : undefined;
-  if(object(report.summary).singleAsk===true){const item=items[0],raw=object(object(item?.result?.evidence).single_ask);return <>
+  if(singleAsk){const item=items[0],raw=object(object(item?.result?.evidence).single_ask);return <>
     <section className="result-card"><h3>单问单答</h3><p className="muted">这是当前账号的一次独立问答，不计推理或总分；展开查看原问题、完整回答和用量，失败可在本记录补测。</p>
     {item && <details className="question" data-item-id={item.itemId}><summary><span>本次问题与回答</span><b>{item.status==='error'?'请求失败':ended?'已结束':'等待回答'}</b></summary><pre>{item.prompt}</pre>{item.result?.error && <p className="error-box" role="alert">{item.result.error}</p>}<SingleAnswer model={report.model} answer={Object.keys(raw).length?raw as Metrics:null} />{extras(item.itemId)}</details>}
     </section><ProbeTimeline probes={view.probes} status={report.status} timing={view.verdict.timing||timing} progress={view.progress}/></>;
@@ -158,7 +267,9 @@ export default function HubReportContent({ report, items, complete, readFailed, 
   return <>
     {view.native && items.some(item=>item.status==='done'&&item.definition.judge.type!=='model_identity'&&!hasOriginalItemDTO(item)&&!['not_asked','not_applicable'].includes(itemJudgment(item).status??'')) && <p className="muted">本报告含自定义或旧格式结果，已保存回答可逐项展开；旧版未保存的原诊断不能补回，成功结果不会重新提问。</p>}
     {!view.native && ended && <p className="muted">这是旧版接入保存的报告；已有回答保留，但当时未保存的原版诊断不能补回。新检测使用原程序；失败项可在原报告补测。</p>}
-    <ResultCards verdict={view.native ? originalVerdict : view.verdict} model={report.model} loading={!ended} showCache={view.cacheView?.visible ?? Boolean(view.groups.cache)} savedScore={!view.native} totalLabel={view.totalLabel} questions={questions} sectionContent={sectionContent} questionExtra={view.native ? extras : undefined} onQuestionOpen={view.native ? id=>void openQuestion(id) : undefined} collapseVision={view.native} questionTail={customIQ} knowledgeExtra={knowledgeDetail} />
+    <HubCrossCheckCard cross={crossView} items={items} onRetry={retryCross} onRefresh={() => void refreshCross()} refreshing={manualRefresh} />
+    <ResultCards verdict={view.native ? originalVerdict : view.verdict} model={report.model} loading={!ended} showCache={view.cacheView?.visible ?? Boolean(view.groups.cache)} savedScore={!view.native} totalLabel={view.totalLabel} questions={questions} sectionContent={sectionContent} questionExtra={view.native ? extras : undefined} onQuestionOpen={view.native ? id=>void openQuestion(id) : undefined} collapseVision={view.native} questionTail={customIQ} knowledgeExtra={knowledgeDetail}
+      injectionNote={injection ? INJECTION_NOTE : undefined} injectionDetail={injection ? <HubInjectionDetail item={injection} cross={crossView} model={report.model} call={call} /> : undefined} />
     <ProbeTimeline probes={view.probes} status={report.status} timing={view.native ? view.verdict.timing || timing : timing} progress={view.progress}>
       {!report.model.toLowerCase().startsWith('claude-') && questions.thinking}
     </ProbeTimeline>

@@ -28,6 +28,29 @@ const captureClonedPosts = (frame: HTMLIFrameElement) => {
 beforeEach(() => { state.request.mockReset().mockResolvedValue({ items: [] }); wrapper = mount(ChanshuiHost, { attachTo: document.body, props: { workspaceId: 'workspace-a' }, global: { stubs: { Teleport: false } } }) })
 afterEach(() => { wrapper?.unmount(); useChanshuiLauncher().clear(); clearChanshuiCatalogForWorkspace(''); localStorage.removeItem(authTokenStorageKey); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.innerHTML = '' })
 describe('唯一检测弹窗', () => {
+  it('历史报告读取完成前，同页的判读请求仍在宿主队列等待', async () => {
+    await launch()
+    const frame = portal().get('iframe').element as HTMLIFrameElement
+    const { delivered } = captureClonedPosts(frame)
+    message(frame, { kind: 'chanshui.READY', v: 1 })
+    await flushPromises()
+    const generation = delivered[0].generation
+    let release!: (value: unknown) => void
+    state.request.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'history', op: 'reports', params: { scope: 'sidebar' } })
+    await flushPromises()
+    const reportId = 'a'.repeat(32)
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'cross', op: 'cross-check', params: { reportId } })
+    await flushPromises()
+    expect(state.request.mock.calls.map(([op]) => op)).toEqual(['reports'])
+    expect(delivered.some(m => m.id === 'cross')).toBe(false)
+    release({ items: [] })
+    await flushPromises()
+    expect(state.request.mock.calls.map(([op]) => op)).toEqual(['reports', 'cross-check'])
+    expect(state.request.mock.calls[1][1]).toMatchObject({ reportId })
+    expect(delivered.find(m => m.id === 'cross')).toMatchObject({ ok: true })
+  })
+
   it('排在其他请求后的首次检测，实际发起前已取消就不会发送', async () => {
     const groups = [{ id: 'gpt', name: 'GPT', accounts: [{ id: 'a', targetId: 'account-a', name: '账号甲' }] }] as AdminGroupHealth[]
     publishChanshuiCatalog('workspace-a', groups, chanshuiCatalogSession())

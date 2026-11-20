@@ -427,6 +427,9 @@ func (s *Server) run(ctx context.Context, t *Task, q Request, selected map[strin
 	s.persist(t)
 }
 
+// IQSystemPrompt is the system text sent with IQ and vision questions.
+const IQSystemPrompt = "禁止使用任何工具。直接给出结论，不要展开推导过程；回答最后单独一行：最终答案: <短结论>。"
+
 // askQuestion runs one IQ or vision item. It is shared so the standalone
 // vision section never forks the judging and self-score path.
 func (s *Server) askQuestion(ctx context.Context, g gateway.Client, q Request, item iq.Question, allowQ4Equivalent ...bool) (QuestionResult, error) {
@@ -445,7 +448,7 @@ func (s *Server) askQuestion(ctx context.Context, g gateway.Client, q Request, i
 		outputTokens = 8192
 	}
 	ask := func(plain bool) (gateway.Metrics, error) {
-		req := gateway.CallRequest{Model: q.Model, Prompt: prompt, Images: questionImages(item), System: []gateway.SystemBlock{{Text: "禁止使用任何工具。直接给出结论，不要展开推导过程；回答最后单独一行：最终答案: <短结论>。"}}, Thinking: iqThinking(q.Model), MaxTokens: outputTokens, Stream: true, TimeoutSeconds: q.Timeout, Validate: func(m gateway.Metrics) error {
+		req := gateway.CallRequest{Model: q.Model, Prompt: prompt, Images: questionImages(item), System: []gateway.SystemBlock{{Text: IQSystemPrompt}}, Thinking: iqThinking(q.Model), MaxTokens: outputTokens, Stream: true, TimeoutSeconds: q.Timeout, Validate: func(m gateway.Metrics) error {
 			if !truncated(m) && strings.TrimSpace(m.Answer) == "" && (!gateway.IsClaude(q.Model) || strings.TrimSpace(m.ThinkingText) == "") {
 				return fmt.Errorf("empty response")
 			}

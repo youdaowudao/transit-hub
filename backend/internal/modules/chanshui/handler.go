@@ -302,6 +302,12 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.decorateReport(owner, parts[1], result)
 		reply(w, 200, result)
 		return
+	case len(parts) == 3 && parts[0] == "reports" && parts[2] == "cross-check" && r.Method == http.MethodGet:
+		operation = "cross-check"
+		args["reportId"] = parts[1]
+	case len(parts) == 2 && parts[0] == "prefix-prompts" && r.Method == http.MethodGet:
+		operation = "read-prefix-prompt"
+		args["promptId"] = parts[1]
 	case len(parts) == 3 && parts[0] == "reports" && parts[2] == "items" && r.Method == http.MethodGet:
 		operation = "list-items"
 		args["reportId"] = parts[1]

@@ -16,6 +16,7 @@ import { readableReportError } from './ProbeEvidence';
 import HubReportContent from './HubReportContent';
 import Icon from './Icon';
 import { canRetryHubItem, isVerifiedHubReport, newItemRead, readReportItems, reportError, reportVersion, object, type ItemReadState } from '../lib/hub-report-view';
+import { displayTime } from '../lib/hub-crosscheck';
 import { createHubBridge, HubRequestError, type HubBoot } from '../lib/hub-bridge';
 import { catalogAccount, catalogGroup, catalogModels, checkingContext, emptyDraft, missingSelection, pendingWarning, readSections, sectionsStorageKey, selectDraft, storageWarning, verifiedContext, type DraftAccount } from '../lib/hub-draft';
 import { HUB_KINDS, isHubTerminal, newHubID, reportPollDecision, reportStatus, sidebarDayLabel } from '../lib/hub-policy';
@@ -36,7 +37,6 @@ const acceptedReport = (result: HubReport, id: string, scope: HubBoot) => {
   }
   return result;
 };
-const displayTime = (value: number, full = false) => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Singapore', ...(full ? { year: 'numeric', month: '2-digit', day: '2-digit' } as const : {}), hour: '2-digit', minute: '2-digit', hour12: false }).format(value);
 function CheckedMemory({ report }: { report?: HubReport | null }) {
   return report?.taskMemoryMaxBytes ? <p className="muted">本次启动已核验：任务最多 {(report.taskMemoryMaxBytes / 1048576).toFixed(0)}MiB；整个检测子项目最多 {((report.sliceMemoryMaxBytes ?? 500000000) / 1000000).toFixed(0)}MB；{report.swapMaxBytes === 0 ? '交换内存已禁用' : '交换内存上限待核查'}。{report.memoryPeakBytes ? `已记录峰值 ${(report.memoryPeakBytes / 1048576).toFixed(1)}MiB。` : ''}</p> : null;
 }
@@ -63,6 +63,8 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
   const [stopRequested, setStopRequested] = useState('');
   const [retryBusy, setRetryBusy] = useState(false), [retryPending, setRetryPending] = useState<{ reportId: string; retryId: string; expectedRetryId: string; itemIds: string[] } | null>(null);
   const [items, setItems] = useState<HubItem[]>([]), [itemBusy, setItemBusy] = useState(false), [itemsComplete, setItemsComplete] = useState(false), [itemError, setItemError] = useState(''), [pollEpoch, setPollEpoch] = useState(0);
+  const [itemsReadVersion, setItemsReadVersion] = useState('');
+  const runtimeChecks = useRef(0), [runtimeChecking, setRuntimeChecking] = useState(false);
   const itemReader = useRef<{ id: string; request: number; state: ItemReadState; promise?: Promise<void>; version: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [actions, setActions] = useState<Partial<Record<Submission, StartAction>>>({}), actionsRef = useRef(actions);
@@ -159,6 +161,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
     const selectedReader = reader;
     // An interrupted hidden read must remain eligible when this view returns.
     selectedReader.version = '';
+    setItemsReadVersion('');
     setItemBusy(true); setItemError('');
     const run = async () => {
       for (let round = 0; round < 2 && current(); round++) {
@@ -170,6 +173,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
           });
           if (!current()) return;
           selectedReader.version = startedVersion; setItemsComplete(selectedReader.state.complete);
+          setItemsReadVersion(selectedReader.state.complete ? startedVersion : '');
           if (selectedReader.state.complete && startedVersion !== reportVersion(lastReport.current!) && round === 0) { selectedReader.state = newItemRead(); continue; }
           break;
         } catch (e) {
@@ -206,7 +210,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
   const openReport = useCallback(async (id: string, known?: HubReport) => {
     const same = lastReport.current?.reportId === id;
     const request = ++reportRequest.current; itemReader.current = null; setItemBusy(false); setItemError(''); setReportLookup(id);
-    if (!same) { setRetryPending(null); setReport(null); lastReport.current = null; setItemsComplete(false); setItems([]); setStopRequested(''); terminalSince.current = null; }
+    if (!same) { setRetryPending(null); setReport(null); lastReport.current = null; setItemsComplete(false); setItemsReadVersion(''); setItems([]); setStopRequested(''); terminalSince.current = null; }
     setError(''); if (!same) setReportMessage(''); changeView('report');
     try { const result = known ?? await call<HubReport>('report', { reportId: id }); if (request !== reportRequest.current) return; applyReportState(result, true); await loadItems(id); }
     catch (e) { if (request === reportRequest.current) { setError(`读取最新报告未完成：${problem(e)}${same ? '。已显示的回答仍可查看，请点击核查运行状态；不会重新检测。' : `。请按报告编号 ${id} 重试读取，不要重复新建。`}`); } }
@@ -228,7 +232,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
         sectionsRef.current = saved.sections; setSections(saved.sections); setSectionWarning(saved.warning);
       }
       reportRequest.current++; lastReport.current = null; itemReader.current = null; terminalSince.current = null;
-      setReport(null); setItems([]); setItemBusy(false); setItemsComplete(false); setItemError(''); setReportMessage('');
+      setReport(null); setItems([]); setItemBusy(false); setItemsComplete(false); setItemsReadVersion(''); setItemError(''); setReportMessage('');
       setRuntime(null); setActive(null); setArchive({ items: [] }); setTargets([]); setArchiveTarget(''); setReportLookup('');
       setSettings(null); setBankStats(null); setHistory({ items: [] }); setHistoryError('');
       setRetryBusy(false); setRetryPending(null); setStopRequested(''); setBusy(false);
@@ -441,17 +445,23 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
     finally { setBusy(false); }
   };
   const checkRuntime = async () => {
-    const request = ++reportRequest.current, id = lastReport.current?.reportId;
-    setError(''); setItemBusy(false);
+    runtimeChecks.current++;
+    setRuntimeChecking(true);
     try {
-      await loadRuntime();
-      if (request !== reportRequest.current || !id) return;
-      const value = await call<HubReport>('report', { reportId: id });
-      if (request !== reportRequest.current) return;
-      const decision = applyReportState(value, true);
-      await loadItems(id, false, true);
-      if (decision.poll) setPollEpoch(n => n + 1);
-    } catch (e) { if (request === reportRequest.current) setError(problem(e)); }
+      const request = ++reportRequest.current, id = lastReport.current?.reportId;
+      setError(''); setItemBusy(false);
+      try {
+        await loadRuntime();
+        if (request !== reportRequest.current || !id) return;
+        const value = await call<HubReport>('report', { reportId: id });
+        if (request !== reportRequest.current) return;
+        const decision = applyReportState(value, true);
+        await loadItems(id, false, true);
+        if (decision.poll) setPollEpoch(n => n + 1);
+      } catch (e) { if (request === reportRequest.current) setError(problem(e)); }
+    } finally {
+      if (--runtimeChecks.current === 0) setRuntimeChecking(false);
+    }
   };
   const retryItems = async (ids: string[]) => {
     if (!report || retryBusy) return;
@@ -616,7 +626,13 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
           {itemError && <button type="button" className="btn-secondary" disabled={itemBusy} title="只读取已保存的回答，不重新检测。" onClick={() => void loadItems(report.reportId, true, true)}>继续读取回答</button>}
           <details className="fold"><summary>运行与资源详情</summary><CheckedMemory report={report} /><p className="muted">结果只供人工检阅，不会自动降权、停用或恢复账号。配置不同的报告不宜只比较总分。</p></details>
         </section>
-        <HubReportContent key={report.reportId} report={report} items={items} complete={itemsComplete} readFailed={Boolean(itemError) || itemBusy} call={call} onRetry={ids => void retryItems(ids)} retryDisabled={retryBusy || !itemsComplete || !isHubTerminal(report.status) || report.processExited !== true || Boolean(retryPending)} />
+        <HubReportContent key={report.reportId} report={report} items={items} complete={itemsComplete} itemsReadVersion={itemsReadVersion}
+          retryHold={retryBusy || retryPending?.reportId === report.reportId} readHold={runtimeChecking}
+          onRefresh={() => {
+            setItemsReadVersion('');
+            return openReport(report.reportId);
+          }}
+          readFailed={Boolean(itemError) || itemBusy} call={call} onRetry={ids => void retryItems(ids)} retryDisabled={retryBusy || !itemsComplete || !isHubTerminal(report.status) || report.processExited !== true || Boolean(retryPending)} />
       </>}
       {view === 'docs' && <><p className="hub-note">以下保留原版独立检测服务的接口说明，本站未开放这些匿名公共接口；本站检测请使用当前页面的账号入口。查看说明不会发起检测或修改主站。</p><UpstreamApiDocs referenceOnly /></>}
       {view === 'archive' && boot && <section className="hero-card hub-card"><h1>查找更早记录</h1><p className="muted">历史报告长期保存在磁盘，按新加坡日期筛选；默认查询最近30天。不会重新调用模型。</p><div className="hub-form-grid"><div className="field"><label>开始日期<input type="date" value={from} onChange={e => setFrom(e.target.value)} /></label></div><div className="field"><label>结束日期<input type="date" value={to} onChange={e => setTo(e.target.value)} /></label></div><div className="field"><label>账号<Select value={archiveTarget} onChange={e => setArchiveTarget(e.target.value)}><option value="">全部账号</option>{targets.map(t => <option key={t.targetId} value={t.targetId}>{t.accountName}</option>)}</Select></label></div></div><button type="button" className="btn-primary" onClick={() => void findArchive()}>查找报告</button><div className="hub-search field"><label>按报告编号查找<input value={reportLookup} onChange={e => setReportLookup(e.target.value)} /></label><button type="button" className="btn-secondary" onClick={() => void openReport(reportLookup.trim())}>打开此报告</button></div>{archive.items.map(row => <div className="hub-question-row" key={row.reportId}><div><strong>{row.accountName} · {row.model}</strong><p className="muted">{displayTime(row.createdAtMs, true)} · {row.groupName} · {reportStatus(row.status)}</p></div><button type="button" className="btn-secondary" onClick={() => void openReport(row.reportId)}>查看报告</button></div>)}{archive.items.length === 0 && <p className="muted">此范围没有报告，可调整日期或直接输入报告编号。</p>}{archive.nextCursor && <button type="button" className="btn-secondary" onClick={() => void findArchive(archive.nextCursor)}>下一页报告</button>}</section>}

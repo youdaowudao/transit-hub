@@ -14,6 +14,7 @@ import (
 	"github.com/kiss-kedaya/chanshui/internal/cachecheck"
 	"github.com/kiss-kedaya/chanshui/internal/capability"
 	"github.com/kiss-kedaya/chanshui/internal/gateway"
+	"github.com/kiss-kedaya/chanshui/internal/hub/prefixcheck"
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
 	"github.com/kiss-kedaya/chanshui/internal/hub/store"
 	"github.com/kiss-kedaya/chanshui/internal/inject"
@@ -447,6 +448,10 @@ dispatch:
 	}
 	close(jobs)
 	workers.Wait()
+	var pa prefixcheck.Analysis
+	if cfg.singleAsk == nil {
+		pa = prefixSummary(ctx, s, o, id)
+	}
 	for _, result := range itemResults {
 		if result.Error != "" || result.Judgment.Status == "unknown" {
 			hadError = true
@@ -516,7 +521,17 @@ dispatch:
 	}
 	finishCtx, finishCancel := context.WithTimeout(context.Background(), 11*time.Second)
 	defer finishCancel()
-	if e = s.Finish(finishCtx, o, id, status, cleanSummary(summary), clean(detail, c.Key)); e != nil {
+	finalSummary := cleanSummary(summary)
+	if cfg.singleAsk == nil {
+		if root, ok := finalSummary.(map[string]any); ok {
+			if reason, ok := clean(pa.Reason, c.Key).(string); ok {
+				pa.Reason = reason
+			}
+			pa.Reason = prefixcheck.LimitReason(pa.Reason)
+			root["prefix"] = pa
+		}
+	}
+	if e = s.Finish(finishCtx, o, id, status, finalSummary, clean(detail, c.Key)); e != nil {
 		return fmt.Errorf("结果结束状态保存失败：%w", e)
 	}
 	notify("persisted", map[string]any{"reportId": id, "status": status})

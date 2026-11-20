@@ -29,3 +29,11 @@ Model fingerprints, cache measurements, tool/web checks and scores are evidence,
 ## TransitHub distribution attribution
 
 The referenced ModelTrace revision `d4131b30243dfa05e70180b5eedde742103f1d73` declares MIT. Its original copyright and permission notice is retained in `data_ref/MODELTRACE_LICENSE`. This does not change the other source notices above or claim ownership of model outputs.
+
+## Codex prompt references
+
+The Codex prompts in `internal/hub/prefixcheck/library` come from OpenAI Codex (Apache License 2.0), via Sub2API revision `be00b83e3`. The manifest identifies the older Sub2API placeholder separately.
+
+## Offline tokenizer
+
+`github.com/pkoukk/tiktoken-go` and `github.com/pkoukk/tiktoken-go-loader` are MIT-licensed. The latter embeds OpenAI tiktoken vocabulary files.

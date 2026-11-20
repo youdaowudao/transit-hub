@@ -29,6 +29,7 @@ import StatCard from '../components/dashboard/StatCard.vue'
 import UpstreamBalanceBreakdownModal from '../components/dashboard/UpstreamBalanceBreakdownModal.vue'
 import UpstreamKeyUsageTodayModal from '../components/dashboard/UpstreamKeyUsageTodayModal.vue'
 import DailyStatsPanel from '../components/dashboard/DailyStatsPanel.vue'
+import OperatingInsights from '../components/dashboard/OperatingInsights.vue'
 import AccountCostWorkspace from '../components/dashboard/AccountCostWorkspace.vue'
 import {
   getDashboardMetrics,
@@ -1411,6 +1412,8 @@ const lastProbeLabel = computed(() => {
         {{ t('admin.dashboard.adminAuth.login') }}
       </button>
     </div>
+
+    <OperatingInsights />
 
     <AccountCostWorkspace
       :open="accountCostWorkspaceOpen"

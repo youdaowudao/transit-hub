@@ -34,6 +34,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, metricsService *Metric
 	mux.HandleFunc("GET /api/dashboard/upstream-balance-breakdown", handler.upstreamBalanceBreakdown)
 	mux.HandleFunc("GET /api/dashboard/balance-filter", handler.getBalanceFilter)
 	mux.HandleFunc("PUT /api/dashboard/balance-filter", handler.saveBalanceFilter)
+	mux.HandleFunc("GET /api/dashboard/operating-insights", handler.operatingInsights)
 	mux.HandleFunc("GET /api/dashboard/daily-stats", handler.dailyStats)
 	mux.HandleFunc("POST /api/dashboard/backfill", handler.backfill)
 	mux.HandleFunc("GET /api/dashboard/additional-costs", handler.listAdditionalCosts)

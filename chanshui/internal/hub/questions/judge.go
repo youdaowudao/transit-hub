@@ -51,7 +51,7 @@ func ExtractCandidate(raw string) string {
 	}
 	return candidate
 }
-func Grade(g Generated, answer string) Judgment {
+func Grade(g Generated, answer string, allowQ4Equivalent ...bool) Judgment {
 	q := g.Definition
 	if q.Judge.Type == ModelIdentityJudge {
 		return gradeModelIdentity(g, answer)
@@ -63,7 +63,11 @@ func Grade(g Generated, answer string) Judgment {
 		return j
 	}
 	if q.Judge.Type == "legacy" {
-		n, half, tags := iq.Judge(g.IQ(), answer)
+		answerBody := ""
+		if len(allowQ4Equivalent) > 0 && allowQ4Equivalent[0] {
+			answerBody = answer
+		}
+		n, half, tags := iq.JudgeWithAnswer(g.IQ(), answer, answerBody)
 		j.Earned = &n
 		j.Half = half
 		j.Tags = tags

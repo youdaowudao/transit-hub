@@ -142,19 +142,21 @@ type Report struct {
 	TotalTimeoutSeconds int             `json:"totalTimeoutSeconds"`
 }
 type Item struct {
-	ItemID         string               `json:"itemId"`
-	SectionID      string               `json:"sectionId"`
-	Definition     questions.Definition `json:"definition"`
-	Seed           int64                `json:"seed"`
-	Prompt         string               `json:"prompt"`
-	Expected       string               `json:"expected"`
-	Tags           []string             `json:"tags,omitempty"`
-	Status         string               `json:"status"`
-	Attempts       int                  `json:"attempts"`
-	Result         json.RawMessage      `json:"result"`
-	ImageAvailable bool                 `json:"imageAvailable"`
-	StartedAtMs    int64                `json:"startedAtMs"`
-	CompletedAtMs  int64                `json:"completedAtMs"`
+	ItemID                string               `json:"itemId"`
+	OrderIndex            int                  `json:"orderIndex"`
+	UsableInjectionPoints *int                 `json:"usableInjectionPoints,omitempty"`
+	SectionID             string               `json:"sectionId"`
+	Definition            questions.Definition `json:"definition"`
+	Seed                  int64                `json:"seed"`
+	Prompt                string               `json:"prompt"`
+	Expected              string               `json:"expected"`
+	Tags                  []string             `json:"tags,omitempty"`
+	Status                string               `json:"status"`
+	Attempts              int                  `json:"attempts"`
+	Result                json.RawMessage      `json:"result"`
+	ImageAvailable        bool                 `json:"imageAvailable"`
+	StartedAtMs           int64                `json:"startedAtMs"`
+	CompletedAtMs         int64                `json:"completedAtMs"`
 }
 type Page[T any] struct {
 	Items      []T    `json:"items"`

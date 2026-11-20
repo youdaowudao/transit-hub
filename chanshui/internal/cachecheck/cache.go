@@ -60,6 +60,7 @@ type Result struct {
 	TotalOutput       int          `json:"total_output"`
 	PrefixHash        string       `json:"prefix_sha256"`
 	RetriesObserved   bool         `json:"retries_observed"`
+	omitTotalRead     bool
 }
 
 func chainRate(read, baseline int) *float64 {
@@ -351,6 +352,10 @@ func Collect(ctx context.Context, c gateway.Client, model string, timeout int) (
 	return CollectWithTemplates(ctx, c, model, timeout, nil)
 }
 func CollectWithTemplates(ctx context.Context, c gateway.Client, model string, timeout int, templates *HubTemplates) (Collection, error) {
+	return collect(ctx, c, model, timeout, templates, false)
+}
+
+func collect(ctx context.Context, c gateway.Client, model string, timeout int, templates *HubTemplates, verified bool) (Collection, error) {
 	col := Collection{Metrics: make([]gateway.Metrics, 0, cacheTurns), Units: make([]int, 0, cacheTurns)}
 	systemText := cacheSystemText(prefixSentences(model))
 	if templates != nil {
@@ -367,7 +372,11 @@ func CollectWithTemplates(ctx context.Context, c gateway.Client, model string, t
 	var shapes []Sample
 	var history []gateway.ConversationMessage
 	finish := func() {
-		col.Result = FromMetrics(col.Metrics, prefixHash, protocol, hasRetry(col.Metrics))
+		if verified {
+			col.Result = fromVerifiedMetrics(col.Metrics, prefixHash, protocol, hasRetry(col.Metrics))
+		} else {
+			col.Result = FromMetrics(col.Metrics, prefixHash, protocol, hasRetry(col.Metrics))
+		}
 		for i, shape := range shapes {
 			if i >= len(col.Result.Samples) {
 				break
@@ -395,13 +404,14 @@ func CollectWithTemplates(ctx context.Context, c gateway.Client, model string, t
 		}
 		hist := append([]gateway.ConversationMessage(nil), history...)
 		q := gateway.CallRequest{
-			Model:          model,
-			Prompt:         prompt,
-			MaxTokens:      64,
-			TimeoutSeconds: timeout,
-			Validate:       validateSample,
-			System:         []gateway.SystemBlock{{Text: systemText}},
-			History:        hist,
+			Model:             model,
+			Prompt:            prompt,
+			MaxTokens:         64,
+			TimeoutSeconds:    timeout,
+			Validate:          validateSample,
+			CaptureCacheUsage: verified,
+			System:            []gateway.SystemBlock{{Text: systemText}},
+			History:           hist,
 		}
 		if protocol == "messages" {
 			q.System[0].CacheControl = mark
@@ -450,7 +460,11 @@ func CollectWithTemplates(ctx context.Context, c gateway.Client, model string, t
 		col.Units = append(col.Units, len(visible))
 		if m.Err != "" {
 			finish()
-			col.Result.Reason = "缓存请求未完成，保留已完成样本；不把缺失样本当成0。"
+			if verified {
+				col.Result.Reason = fmt.Sprintf("第%d轮缓存请求未完成。此前已完成的样本仍可查看。请按此轮错误提示核对后补测。", i+1)
+			} else {
+				col.Result.Reason = "缓存请求未完成，保留已完成样本；不把缺失样本当成0。"
+			}
 			return col, fmt.Errorf("第%d次缓存请求：%s", i+1, m.Err)
 		}
 		if i == 0 {

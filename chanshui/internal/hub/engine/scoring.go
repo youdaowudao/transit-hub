@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+
 	"github.com/kiss-kedaya/chanshui/internal/api"
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
 	"github.com/kiss-kedaya/chanshui/internal/integrity"
@@ -21,17 +22,52 @@ func boolJudgment(pass *bool, reason string) questions.Judgment {
 	return j
 }
 
+// Keep public score identifiers at the three service-generated paths when
+// a short credential matches part of an identifier. Other text stays redacted.
+func restoreScorePartKeys(source, cleaned map[string]any) {
+	sourceTotal, _ := source["total"].(map[string]any)
+	cleanTotal, _ := cleaned["total"].(map[string]any)
+	sourceVerdict, _ := source["verdict"].(map[string]any)
+	cleanVerdict, _ := cleaned["verdict"].(map[string]any)
+	sourceVerdictTotal, _ := sourceVerdict["total"].(map[string]any)
+	cleanVerdictTotal, _ := cleanVerdict["total"].(map[string]any)
+	for _, pair := range [][2]map[string]any{{source, cleaned}, {sourceTotal, cleanTotal}, {sourceVerdictTotal, cleanVerdictTotal}} {
+		original, _ := pair[0]["parts"].([]any)
+		redacted, _ := pair[1]["parts"].([]any)
+		if len(original) != len(redacted) {
+			continue
+		}
+		for i, raw := range original {
+			before, _ := raw.(map[string]any)
+			after, ok := redacted[i].(map[string]any)
+			if !ok {
+				continue
+			}
+			switch key, _ := before["key"].(string); key {
+			case "fingerprint", "iq", "vision", "injection", "tools", "web", "thinking", "cache":
+				after["key"] = key
+			}
+		}
+	}
+}
+
 // summarize delegates IQ, integrity and total calculation to the original API.
 func summarize(defs []questions.Generated, results map[string]itemResult, models ...string) map[string]any {
 	model := "fixture"
 	if len(models) > 0 {
 		model = models[0]
 	}
-	v := api.Verdict{}
+	return summarizeForVersion(defs, results, model, api.DefaultScoringVersion)
+}
+
+func summarizeForVersion(defs []questions.Generated, results map[string]itemResult, model, scoringVersion string) map[string]any {
+	v := api.Verdict{ScoringVersion: scoringVersion}
+	verifiedCache := scoringVersion == api.HubScoringVersion
 	selected := map[string]bool{}
 	paper := []iq.Question{}
 	answers := map[string]api.QuestionResult{}
 	identityPending := false
+	cachePending := false
 	for _, q := range defs {
 		kind := q.Definition.Kind
 		r := results[q.Definition.ID]
@@ -105,10 +141,16 @@ func summarize(defs []questions.Generated, results map[string]itemResult, models
 		case "web":
 			v.Web = ev
 		case "cache":
+			_, hasPass := ev["pass"].(bool)
+			evidenceError, _ := ev["error"].(string)
+			cachePending = cachePending || (verifiedCache && (r.Judgment.Status != "known" || !hasPass || evidenceError != ""))
 			v.Cache = ev
 		case "thinking":
 			v.Thinking = ev
 		}
+	}
+	if cachePending {
+		v.Cache = map[string]any{"pass": nil}
 	}
 	v = api.AssembleVerdict(v, paper, answers, model, selected)
 	if identityPending {
@@ -136,6 +178,13 @@ func summarize(defs []questions.Generated, results map[string]itemResult, models
 	}
 	iqMap := asMap(v.IQ)
 	total := asMap(v.Total)
+	if cachePending {
+		total["score"], total["complete"] = nil, false
+		if !identityPending {
+			total["reason"] = api.HubCachePendingReason
+		}
+		verdict["total"] = total
+	}
 	var totalScore any = total["score"]
 	if identityPending {
 		totalScore = nil

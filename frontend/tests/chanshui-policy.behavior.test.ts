@@ -45,6 +45,11 @@ describe('模型检测退出核查不提前完成', () => {
 })
 
 describe('检测父页只允许具体操作', () => {
+  it('判读和提示词全文使用各自的只读路径', () => {
+    expect(chanshuiRequestSpec('cross-check', { reportId: 'report/42' })).toEqual({ path: '/reports/report%2F42/cross-check', method: 'GET' })
+    expect(chanshuiRequestSpec('prefix-prompt', { promptId: 'codex-gpt-6.2-sol' })).toEqual({ path: '/prefix-prompts/codex-gpt-6.2-sol', method: 'GET' })
+  })
+
   it('补测固定原报告路径且停止携带轮次，不能附带新账号和模型', () => {
     expect(chanshuiRequestSpec('retry', { reportId: 'a', retryId: 'b', expectedRetryId: 'c', itemIds: ['Q2'], targetId: 'ignored', model: 'ignored' })).toEqual({ path: '/reports/a/retry', method: 'POST', body: { retryId: 'b', expectedRetryId: 'c', itemIds: ['Q2'] } })
     expect(chanshuiRequestSpec('cancel', { reportId: 'a', expectedRetryId: 'b' }).body).toEqual({ expectedRetryId: 'b' })

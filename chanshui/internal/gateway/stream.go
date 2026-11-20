@@ -178,6 +178,9 @@ func parseStreamWithOptions(body io.Reader, m *Metrics, retain bool) error {
 				m.ThinkingTokens = d.Thinking
 			}
 		}
+		if m.CacheUsage != nil && len(e.Usage) > 0 {
+			m.CacheUsage.merge(messagesCacheUsage(e.Usage), e.Type == "message_delta")
+		}
 		m.ThinkLen = utf8.RuneCountInString(m.ThinkingText)
 		m.SigLen = len(m.Signature)
 		return nil

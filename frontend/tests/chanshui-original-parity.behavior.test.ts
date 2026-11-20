@@ -39,6 +39,56 @@ it('原生知识DTO的label/reason/gap_note/web_suspect直接传原卡片，禁�
   expect(view.verdict.total?.score).toBe(62)
 })
 
+it('跨年知识卡显示逐题结果与未提问原因，补测期间隐藏旧结论', async () => {
+  vi.stubGlobal('React', React); vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  const eventRow = { id: 'ao_2026_women', happened_at: '2026-01-31', event: '澳网女单决赛', kind: 'unknown', unsure: true, answer: 'D 不知道' }
+  const item = (id: string, judgment: string): HubItem => ({
+    itemId: 'knowledge:' + id, sectionId: 'knowledge', definition: {
+      id: 'knowledge:' + id, title: id, kind: 'knowledge', enabled: true, order: 1, maxScore: 0, template: '',
+      parameters: {}, judge: { type: 'reference' },
+    }, status: 'done', prompt: '冻结题面', expected: '', result: { judgment: { status: judgment } },
+  })
+  const seen = item(eventRow.id, 'reference')
+  seen.result = { answer: '保存的真实答复', evidence: { row: eventRow }, judgment: { status: 'reference' } }
+  const skipped = item('worldcup_2026_boot', 'not_asked')
+  const node = document.createElement('div'); document.body.append(node)
+  const root = createRoot(node)
+  const call = vi.fn()
+  const show = (status: string, reason: string, label: string) => React.act(async () => {
+    const unstarted = reason === 'no_anchor'
+    const knowledge = { status: 'unknown', label, reason: unstarted ? '知识结论尚未发布，可查看检测状态和已保存回答。' : '',
+      protocol: 'chat', rows: unstarted ? [] : [eventRow],
+      boundary_review: { method: 'cross_year', status: unstarted ? 'not_needed' : 'unconfirmed', reason } }
+    const report = restorationReport({ model: 'gpt-6.1-sol', status, summary: { verdict: { knowledge } } })
+    root.render(React.createElement(I18nProvider, { fixedLang: 'zh' },
+      React.createElement(HubReportContent, { report, items: [seen, skipped], complete: true, call, onRetry: vi.fn() })))
+  })
+  try {
+    await show('done', 'no_question', '知识截止日期未确认')
+    const card = node.querySelector('.knowledge-card')!
+    const fold = card.querySelector('details.knowledge-answer') as HTMLDetailsElement
+    expect(fold.open).toBe(false)
+    expect(fold.textContent).toContain('保存的真实答复')
+    expect(card.textContent).toContain('附近没有第二道明确回答不知道的事件')
+    expect(card.textContent).toContain('完整默认题库先问两道 2026 年事件')
+    expect(card.querySelector('.fold button')).toBeNull()
+    expect(card.textContent).not.toContain('2025-10-19 至 2025-11-04')
+    expect(call).not.toHaveBeenCalled()
+    await show('running', 'retry_pending', '旧区间候选')
+    expect(card.textContent).toContain('知识截止日期未确认')
+    expect(card.textContent).not.toContain('旧区间候选')
+    for (const status of ['cancelled', 'interrupted']) {
+      await show(status, 'no_anchor', '知识截止日期未确认')
+      expect(card.textContent).toContain('检测已停止，已保存的回答仍可查看。')
+      expect(card.textContent).toContain('保存的真实答复')
+      expect(card.textContent).not.toContain('知识结论尚未发布')
+    }
+  } finally {
+    await React.act(async () => root.unmount())
+    node.remove()
+  }
+})
+
 it('原题用原版题目明细和用量模板，默认折叠且不被接入层大卡片替换', async () => {
   vi.stubGlobal('React', React); vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }))

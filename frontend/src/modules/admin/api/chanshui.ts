@@ -78,6 +78,8 @@ export function chanshuiRequestSpec(op: string, p: Params = {}): { path: string;
     case 'models': return { path: `/targets/${key(p.targetId)}/models`, method: 'POST', body: { groupId: p.groupId, expectedContext: p.expectedContext } }
     case 'reports': return { path: `/reports${query(p)}`, method: 'GET' }
     case 'report': return { path: `/reports/${key(p.reportId)}`, method: 'GET' }
+    case 'cross-check': return { path: `/reports/${key(p.reportId)}/cross-check`, method: 'GET' }
+    case 'prefix-prompt': return { path: `/prefix-prompts/${key(p.promptId)}`, method: 'GET' }
     case 'items': return { path: `/reports/${key(p.reportId)}/items${query({ cursor: p.cursor, limit: 5 })}`, method: 'GET' }
     case 'image': return { path: `/reports/${key(p.reportId)}/items/${key(p.itemId)}/image`, method: 'GET', image: true }
     case 'start': return { path: '/reports', method: 'POST', body: p }

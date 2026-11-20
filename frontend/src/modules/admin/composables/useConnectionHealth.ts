@@ -1,5 +1,6 @@
 import { locale } from '@/locales'
 import { ref } from 'vue'
+import { chanshuiCatalogSession } from './chanshuiCatalog'
 import type {
   AccountTierResult,
   QuestionAnswerTodaySummary,
@@ -69,6 +70,9 @@ const adminGroups = ref<AdminGroupHealth[]>([])
 const adminGroupsLoaded = ref(false)
 // 每次接受一份新的分组主列表（普通读取或刷新流终态）时递增；本地补丁（摘要、探活结果）不递增。
 const adminGroupsAcceptedRevision = ref(0)
+type AdminGroupsCatalogScope = { workspaceId: string; session: number }
+let adminGroupsCatalogScope: AdminGroupsCatalogScope | null = null
+const captureAdminGroupsCatalogScope = (): AdminGroupsCatalogScope => ({ workspaceId: adminGroupsWorkspace, session: chanshuiCatalogSession() })
 const adminGroupsReadFailure = ref<{ revision: number; errorKey: string } | null>(null)
 const events = ref<ConnectionHealthEvent[]>([])
 const policies = ref<ConnectionHealthPolicy[]>([])
@@ -211,6 +215,7 @@ export function useConnectionHealth() {
     savedModelControlSummaries.clear()
     adminGroups.value = []
     adminGroupsLoaded.value = false
+    adminGroupsCatalogScope = null
     adminGroupsReadFailure.value = null
     overview.value = null
     manualRefreshState.value = null
@@ -374,6 +379,7 @@ export function useConnectionHealth() {
     const questionAnswerRevision = questionAnswerSummaryRevision
     const recentRevision = questionAnswerRecentRevision
     const dataRevision = adminGroupsDataRevision
+    const catalogScope = captureAdminGroupsCatalogScope()
     adminGroupsActiveRequests++
     const request = (async () => {
       if (!opts.silent) {
@@ -389,6 +395,7 @@ export function useConnectionHealth() {
         overview.value = overviewFromAdminGroups(adminGroups.value)
         adminGroupsLoaded.value = true
         adminGroupsReadFailure.value = null
+        adminGroupsCatalogScope = catalogScope
         adminGroupsAcceptedRevision.value++
         return true
       } catch (err) {
@@ -413,6 +420,7 @@ export function useConnectionHealth() {
     recentRevision: number
     tierRevision: number
     dataRevision: number
+    catalogScope: AdminGroupsCatalogScope
     runId: string
     revision: number
     terminalAccepted: boolean
@@ -474,6 +482,7 @@ export function useConnectionHealth() {
         overview.value = overviewFromAdminGroups(adminGroups.value)
         adminGroupsLoaded.value = true
         adminGroupsReadFailure.value = null
+        adminGroupsCatalogScope = state.catalogScope
         adminGroupsAcceptedRevision.value++
       }
     }
@@ -514,6 +523,7 @@ export function useConnectionHealth() {
       questionAnswerRevision: questionAnswerSummaryRevision,
       recentRevision: questionAnswerRecentRevision,
       dataRevision: adminGroupsDataRevision,
+      catalogScope: captureAdminGroupsCatalogScope(),
       runId: '',
       revision: -1,
       terminalAccepted: false,
@@ -913,6 +923,7 @@ export function useConnectionHealth() {
     adminGroups,
     adminGroupsLoaded,
     adminGroupsAcceptedRevision,
+    getAdminGroupsCatalogScope: () => adminGroupsCatalogScope,
     adminGroupsReadFailure,
     events,
     policies,

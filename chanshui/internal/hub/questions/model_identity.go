@@ -30,6 +30,10 @@ const identityUnknownEN = `(?:i\s+)?(?:don't know|do not know|cannot confirm|can
 
 var identityUnknownBare = regexp.MustCompile(`(?i)^(?:(?:我)?(?:不知道|不清楚|不确定|无法确认|不能确认|无法确定|无法获知|无法得知)|(?:i\s+)?(?:don't know|do not know|cannot confirm|can't confirm|cannot determine|can't determine))$`)
 var identityUnknownChinese = regexp.MustCompile(`^` + identityUnknownCN + `\s*(?:(?:我|自己|的|当前|具体|实际|底层|准确|确切|使用的|所用的|运行的|部署的|版本|模型|型号|名称|信息|是|什么|哪一|哪种|哪个)\s*)*$`)
+
+// A reply may explain the missing model information before stating uncertainty.
+var identityUnknownBecauseChinese = regexp.MustCompile(`^(?:(?:当前|本次|这次)?(?:会话|对话|上下文)(?:中)?\s*)?(?:没有|并未|未)\s*(?:(?:向我|给我)\s*)?提供\s*(我的)?\s*(?:具体的?|准确的?|确切的?)?\s*(?:(?:实际|底层)的?)?\s*(?:模型(?:的)?(?:名称|型号|版本)?|型号)\s*(?:(?:或|和|及|以及|、)\s*(?:版本|型号|名称))?\s*[，,]\s*(?:因此|所以|因而)\s*(?:我)?(?:无法|不能)(?:准确|确切)?(?:确认|确定)$`)
+var identityChatGPTIntroduction = regexp.MustCompile(`^(?:我是|我为)\s*(?:openai\s*(?:的|开发的)?\s*)?chatgpt$`)
 var identityUnknownEnglish = regexp.MustCompile(`(?i)^` + identityUnknownEN + `\s*(?:(?:my|own|exact|actual|specific|underlying|current|model|identity|name|version|information|the|of|to|deployment)\s*)*$`)
 var identitySentences = regexp.MustCompile(`[^。.!！?？;；\n]+`)
 
@@ -200,12 +204,17 @@ func gradeModelIdentity(g Generated, answer string) Judgment {
 	if len(claims) == 0 && len(mentions) == 0 && len(other) == 0 {
 		bare := identityUnknownBare.MatchString(strings.Trim(strings.ToLower(raw), " \r\n\t。.!！?？;；"))
 		ownModel := false
+		introducedSelf := false
 		for _, span := range identitySentences.FindAllStringIndex(s, -1) {
 			first := strings.TrimSpace(strings.ToLower(s[span[0]:span[1]]))
 			modelObject := strings.Contains(first, "型号") || strings.Contains(first, "模型") || strings.Contains(first, "版本") || strings.Contains(first, "model") || strings.Contains(first, "identity") || strings.Contains(first, "version")
-			if modelObject && clearPrefix(span[0]) && (identityUnknownChinese.MatchString(first) || identityUnknownEnglish.MatchString(first)) {
+			directUnknown := modelObject && (identityUnknownChinese.MatchString(first) || identityUnknownEnglish.MatchString(first))
+			explained := identityUnknownBecauseChinese.FindStringSubmatch(first)
+			explainedOwnModel := explained != nil && (explained[1] != "" || introducedSelf)
+			if clearPrefix(span[0]) && (directUnknown || explainedOwnModel) {
 				ownModel = true
 			}
+			introducedSelf = identityChatGPTIntroduction.MatchString(first)
 		}
 		if bare || ownModel {
 			points = g.Definition.MaxScore

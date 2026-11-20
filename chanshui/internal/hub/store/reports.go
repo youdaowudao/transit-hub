@@ -12,6 +12,7 @@ import (
 
 	"github.com/kiss-kedaya/chanshui/internal/api"
 	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
+	"github.com/kiss-kedaya/chanshui/internal/knowledge"
 )
 
 var reportPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -209,6 +210,21 @@ func (s *Store) CreateReport(ctx context.Context, o Owner, r CreateRequest) (Rep
 		}
 		if r.SingleAsk != nil {
 			if _, err := tx.ExecContext(ctx, `UPDATE hub_reports SET summary_json='{"singleAsk":true}' WHERE report_id=?`, r.ReportID); err != nil {
+				return err
+			}
+		} else {
+			verdict := api.Verdict{ScoringVersion: api.HubScoringVersion}
+			initial := map[string]any{}
+			if questions.MatchesCurrentKnowledge(snap.Questions) {
+				verdict.Knowledge = knowledge.InitialCrossYear()
+				initial["knowledge"] = verdict.Knowledge
+			}
+			initial["verdict"] = verdict
+			summary, err := json.Marshal(initial)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE hub_reports SET summary_json=? WHERE report_id=?`, string(summary), r.ReportID); err != nil {
 				return err
 			}
 		}

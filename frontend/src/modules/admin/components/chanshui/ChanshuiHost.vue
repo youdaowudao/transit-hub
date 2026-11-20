@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Minimize2, RotateCw, X } from 'lucide-vue-next'
-import { subscribeAuthSessionChange, getAccessToken } from '@/modules/auth/api/auth'
+import { authTokenStorageKey, subscribeAuthSessionChange, getAccessToken } from '@/modules/auth/api/auth'
 import { chanshuiOpenEvent } from '../../composables/useChanshuiLauncher'
+import { chanshuiCatalog, clearChanshuiCatalogForSession, clearChanshuiCatalogForWorkspace } from '../../composables/chanshuiCatalog'
 import { requestChanshui, ChanshuiError, chanshuiRequestSpec, type ChanshuiTargetInput } from '../../api/chanshui'
 
 const props = defineProps<{ workspaceId: string }>()
 const open = ref(false), minimized = ref(false), ready = ref(false), loadingText = ref('正在打开检测页…'), error = ref('')
 const iframe = ref<HTMLIFrameElement | null>(null), dirty = ref(false)
 const target = ref<ChanshuiTargetInput>({})
+const catalog = computed(() => chanshuiCatalog.value?.workspaceId === props.workspaceId ? chanshuiCatalog.value : null)
 const targetSnapshot = (): ChanshuiTargetInput => ({
   reportId: typeof target.value.reportId === 'string' ? target.value.reportId : undefined,
   targetId: typeof target.value.targetId === 'string' ? target.value.targetId : undefined,
@@ -21,6 +23,14 @@ const requests = new Map<string, AbortController>()
 let serial = Promise.resolve()
 let stopGeneration: number | undefined
 const send = (kind: string, data: Record<string, unknown> = {}) => iframe.value?.contentWindow?.postMessage({ kind, v: 1, generation, ...data }, window.location.origin)
+const discardDraftChecks = (nextTarget?: ChanshuiTargetInput) => {
+  if (!ready.value) return
+  try {
+    iframe.value?.contentWindow?.dispatchEvent(new CustomEvent('chanshui.discard-checks', { detail: { generation, target: nextTarget } }))
+  } catch {
+    // A frame the host cannot reach also cannot approve a first POST.
+  }
+}
 const clearTimers = () => { if (timeout) clearTimeout(timeout); if (loadingTimer) clearTimeout(loadingTimer) }
 const invalidate = () => { generation++; for (const c of requests.values()) c.abort(); requests.clear(); serial = Promise.resolve(); stopGeneration = undefined }
 const close = () => { dirty.value = false; invalidate(); clearTimers(); open.value = false; minimized.value = false; ready.value = false; error.value = ''; iframe.value = null }
@@ -35,18 +45,41 @@ const launch = async (event: Event) => {
   const payload = (event as CustomEvent<ChanshuiTargetInput>).detail ?? {}
   target.value = { reportId: payload.reportId, targetId: payload.targetId, groupId: payload.groupId, accountName: payload.accountName, groupName: payload.groupName }
   if (!open.value) { invalidate(); open.value = true; minimized.value = false; arm(); await nextTick() }
-  else { minimized.value = false; send('chanshui.VISIBILITY', { visible: true }); send('chanshui.OPEN_TARGET', { target: targetSnapshot() }) }
+  else {
+    const nextTarget = targetSnapshot()
+    discardDraftChecks(nextTarget)
+    restore()
+    send('chanshui.OPEN_TARGET', { target: nextTarget })
+  }
 }
-const minimize = () => { minimized.value = true; send('chanshui.VISIBILITY', { visible: false }) }
-const restore = () => { minimized.value = false; send('chanshui.VISIBILITY', { visible: true }) }
+const minimize = () => { minimized.value = true; discardDraftChecks(); send('chanshui.VISIBILITY', { visible: false }) }
+const restore = () => {
+  if (minimized.value && ready.value) send('chanshui.CATALOG', { catalog: catalog.value })
+  minimized.value = false
+  send('chanshui.VISIBILITY', { visible: true })
+}
 const reload = () => { if (dirty.value && !window.confirm('检测设置有未保存的修改，确定重新载入并放弃吗？')) return; dirty.value = false; invalidate(); arm(); if (iframe.value) iframe.value.src = '/chanshui/' }
+const checkFirstStart = (scope: number, id: string, workspaceId: string, params: Record<string, unknown>) => {
+  if (!open.value || !ready.value || minimized.value || scope !== generation || workspaceId !== props.workspaceId) return '检测页已关闭、收起或切换工作区。'
+  try {
+    if (session !== getAccessToken()) return '登录状态已切换。'
+    const group = catalog.value?.groups.find(group => group.id === params.groupId)
+    const account = group?.accounts.find(account => account.targetId === params.targetId)
+    if (!account || group?.accountsError) return '分组健康的最新名单已没有这个分组或账号。'
+    const guard = new CustomEvent('chanshui.before-start', { cancelable: true, detail: { generation: scope, id, protocol: account.protocol } })
+    if (iframe.value?.contentWindow?.dispatchEvent(guard) === false) return ''
+  } catch {
+    return '无法连接当前检测页。'
+  }
+  return '发送前无法确认原来的检测选项仍有效。'
+}
 const onMessage = (event: MessageEvent) => {
   if (!open.value || event.origin !== window.location.origin || event.source !== iframe.value?.contentWindow) return
   const message = event.data
   if (!message || message.v !== 1 || typeof message.kind !== 'string') return
   if (message.kind === 'chanshui.READY') {
     invalidate(); ready.value = true; error.value = ''; clearTimers()
-    send('chanshui.BOOT', { workspaceId: props.workspaceId, target: targetSnapshot(), visible: !minimized.value })
+    send('chanshui.BOOT', { workspaceId: props.workspaceId, target: targetSnapshot(), visible: !minimized.value, catalog: catalog.value })
     return
   }
   if (message.kind === 'chanshui.DIRTY' && message.generation === generation && typeof message.dirty === 'boolean') { dirty.value = message.dirty; return }
@@ -54,6 +87,7 @@ const onMessage = (event: MessageEvent) => {
   const scope = generation, requestId = message.id, workspaceId = props.workspaceId
   if (requests.has(requestId)) return
   const priorityStop = message.op === 'cancel'
+  const guardStart = message.op === 'start' && message.guardStart === true
   if ((!priorityStop && requests.size >= 12) || (priorityStop && stopGeneration === generation)) {
     send('chanshui.response', { id: requestId, ok: false, error: { message: priorityStop ? '停止请求正在处理，已保存回答仍可查看；请稍候核查运行状态。' : '正在处理其他页面操作，已显示内容仍可查看；请稍后重试读取。', status: 429 } })
     return
@@ -67,23 +101,52 @@ const onMessage = (event: MessageEvent) => {
   const controller = new AbortController(); requests.set(requestId, controller)
   if (priorityStop) stopGeneration = scope
   const run = async () => {
-    if (scope !== generation) { requests.delete(requestId); if (priorityStop && stopGeneration === scope) stopGeneration = undefined; return }
+    if (scope !== generation) return
     try {
+      const blockedStart = guardStart ? checkFirstStart(scope, requestId, workspaceId, params) : ''
+      if (blockedStart) {
+        send('chanshui.response', { id: requestId, ok: false, error: { message: `${blockedStart} 请回到新建检测后重新操作。本次没有发送问题。`, status: 409, operationResult: 'not_started' } })
+        return
+      }
       let warning: Record<string, unknown> | undefined
       const value = await requestChanshui(message.op, params, workspaceId, controller.signal, value => { warning = value })
       if (scope === generation) send('chanshui.response', { id: requestId, ok: true, value, ...(warning ? { warning } : {}) })
     } catch (e) {
       if (scope === generation) send('chanshui.response', { id: requestId, ok: false, error: { ...(e instanceof ChanshuiError ? e.details : {}), message: e instanceof Error ? e.message : '读取结果时中断，请重试读取。', status: e instanceof ChanshuiError ? e.status : 0 } })
-    } finally { requests.delete(requestId); if (priorityStop && stopGeneration === scope) stopGeneration = undefined }
+    } finally { if (scope === generation) requests.delete(requestId); if (priorityStop && stopGeneration === scope) stopGeneration = undefined }
   }
   if (priorityStop) void run()
   else serial = serial.then(run, run)
 }
 const openSharedReport=()=>{const reportId=new URLSearchParams(window.location.search).get('detectorReport');if(props.workspaceId && reportId && /^[0-9a-f]{32}$/.test(reportId)) void launch(new CustomEvent(chanshuiOpenEvent,{detail:{reportId}}))}
-watch(() => props.workspaceId, () => {close();openSharedReport()})
+watch(() => props.workspaceId, workspaceId => { close(); clearChanshuiCatalogForWorkspace(workspaceId); openSharedReport() })
+watch(catalog, value => { if (open.value && ready.value && !minimized.value) send('chanshui.CATALOG', { catalog: value }) })
 let unsubscribe: (() => void) | undefined
-onMounted(() => { openSharedReport(); window.addEventListener(chanshuiOpenEvent, launch); window.addEventListener('message', onMessage); unsubscribe = subscribeAuthSessionChange(() => { if (!getAccessToken()) close() }) })
-onBeforeUnmount(() => { close(); unsubscribe?.(); window.removeEventListener(chanshuiOpenEvent, launch); window.removeEventListener('message', onMessage) })
+let session: string | null = null
+const onAuthChange = () => {
+  const next = getAccessToken()
+  if (next && session === next) return
+  session = next
+  close()
+  clearChanshuiCatalogForSession()
+}
+const onStorage = (event: StorageEvent) => { if (event.key === authTokenStorageKey || event.key === null) onAuthChange() }
+onMounted(() => {
+  session = getAccessToken()
+  clearChanshuiCatalogForWorkspace(props.workspaceId)
+  openSharedReport()
+  window.addEventListener(chanshuiOpenEvent, launch)
+  window.addEventListener('message', onMessage)
+  window.addEventListener('storage', onStorage)
+  unsubscribe = subscribeAuthSessionChange(onAuthChange)
+})
+onBeforeUnmount(() => {
+  close()
+  unsubscribe?.()
+  window.removeEventListener(chanshuiOpenEvent, launch)
+  window.removeEventListener('message', onMessage)
+  window.removeEventListener('storage', onStorage)
+})
 </script>
 
 <template>

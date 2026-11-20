@@ -13,6 +13,7 @@ import (
 
 // BoundaryReview records evidence within a date window, never a training date.
 type BoundaryReview struct {
+	Method   string `json:"method,omitempty"`
 	From     string `json:"from,omitempty"`
 	To       string `json:"to,omitempty"`
 	AnchorID string `json:"anchor_id,omitempty"`

@@ -153,6 +153,9 @@ func (c *Client) callCompatibleOnce(ctx context.Context, q CallRequest) (Metrics
 		}
 		return m, nil
 	}
+	if q.CaptureCacheUsage {
+		m.CacheUsage = &CacheUsage{}
+	}
 	if q.Stream && strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		err = parseCompatibleStreamWithOptions(resp.Body, protocol, &m, c.DiscardSSEFrames)
 	} else {
@@ -211,6 +214,9 @@ func compatibleUsage(u map[string]json.RawMessage, m *Metrics) {
 	var inputDetails, promptDetails map[string]json.RawMessage
 	json.Unmarshal(u["input_tokens_details"], &inputDetails)
 	json.Unmarshal(u["prompt_tokens_details"], &promptDetails)
+	if m.CacheUsage != nil {
+		m.CacheUsage.merge(compatibleCacheUsage(u, inputDetails, promptDetails), false)
+	}
 	// Nested keys win even when they are zero or null. Positive top-level
 	// aliases are only a fallback. This is the sub2api responses/chat order.
 	switch {

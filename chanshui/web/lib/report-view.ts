@@ -1,6 +1,8 @@
 // Formatting only: scoring and fingerprint inference remain on the Go backend.
 import type { DetectVerdict } from './api';
 
+export const HUB_SCORING_VERSION = '2026-11-19-v7-hub';
+
 /** Read the existing unknown-IQ fields emitted for an unfinished self report. */
 export function hasUnconfirmedIQ(verdict: DetectVerdict): boolean {
   return Boolean(verdict.iq && verdict.iq.score === null && verdict.iq.complete === false &&

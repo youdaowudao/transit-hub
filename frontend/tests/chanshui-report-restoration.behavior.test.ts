@@ -62,6 +62,25 @@ async function openReport(report: HubReport = restorationReport(), items: HubIte
 }
 
 describe('原版报告恢复的业务回归', () => {
+  it('新版多道缓存的待确认分项不会被任何一道已通过的逐题证据覆盖', async () => {
+    const base = detailedRestorationItems().find(item => item.definition.kind === 'cache')!
+    const saved = base.result!.evidence as Record<string, unknown>
+    const pending: HubItem = { ...base, itemId: '缓存待确认题', definition: { ...base.definition, title: '缓存待确认题' } }
+    const passed: HubItem = { ...base, itemId: '另一道缓存题', definition: { ...base.definition, title: '另一道缓存题' },
+      result: { judgment: { status: 'known', earned: 1, max: 1 }, evidence: { ...saved, status: 'pass', pass: true, reason: '只是这道题通过' } } }
+    const part = { key: 'cache', label: '缓存读写', applicable: true, known: false, points: 0, max_points: 1, contribution: 0, coefficient: 100 }
+    const total = { score: null, max: 100, complete: false, parts: [part] }
+    const report = restorationReport({ status: 'partial', summary: { total, totalScore: null, verdict: { scoring_version: '2026-11-19-v7-hub', total } } })
+    await openReport(report, [pending, passed])
+    const card = container.querySelector('.cache-card')!
+    expect(card.querySelector('.rc-score')?.textContent).toContain('尚未确认')
+    expect(card.querySelector('.rc-score')?.textContent).not.toContain('0/100')
+    expect(card.querySelectorAll('details.question')).toHaveLength(2)
+    expect(card.querySelector(':scope > .cache-rates')).toBeNull()
+    expect(container.querySelector('.total-card .score-chip')?.textContent).toContain('总分尚未确认')
+    expect(card.querySelector('[data-item-id="另一道缓存题"]')?.textContent).toContain('只是这道题通过')
+  })
+
   it('原版丰富明细不能被未知判分和不适用判定整段隐藏', async () => {
     const items = detailedRestorationItems()
     await openReport(restorationReport({ summary: { total: { score: null, complete: false, parts: [] }, knowledge: { status: 'range', lower: '2026-01-01', upper: '2026-02-22', observations: [{ id: '事件1', date: '2026-01-01', kind: 'know' }, { id: '事件2', date: '2026-02-22', kind: 'unknown' }] } } }), items)

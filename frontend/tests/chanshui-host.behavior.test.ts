@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { isProxy, ref } from 'vue'
 import ChanshuiHost from '../src/modules/admin/components/chanshui/ChanshuiHost.vue'
 import { chanshuiOpenEvent, useChanshuiLauncher } from '../src/modules/admin/composables/useChanshuiLauncher'
+import { chanshuiCatalogSession, clearChanshuiCatalogForWorkspace, publishChanshuiCatalog } from '../src/modules/admin/composables/chanshuiCatalog'
+import type { AdminGroupHealth } from '../src/modules/admin/types/connectionHealth'
 import { authTokenStorageKey } from '../src/modules/auth/api/auth'
 
 const state = vi.hoisted(() => ({ request: vi.fn() }))
@@ -24,8 +26,98 @@ const captureClonedPosts = (frame: HTMLIFrameElement) => {
   return { post, delivered, cloneErrors }
 }
 beforeEach(() => { state.request.mockReset().mockResolvedValue({ items: [] }); wrapper = mount(ChanshuiHost, { attachTo: document.body, props: { workspaceId: 'workspace-a' }, global: { stubs: { Teleport: false } } }) })
-afterEach(() => { wrapper?.unmount(); useChanshuiLauncher().clear(); localStorage.removeItem(authTokenStorageKey); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.innerHTML = '' })
+afterEach(() => { wrapper?.unmount(); useChanshuiLauncher().clear(); clearChanshuiCatalogForWorkspace(''); localStorage.removeItem(authTokenStorageKey); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); document.body.innerHTML = '' })
 describe('唯一检测弹窗', () => {
+  it('历史报告读取完成前，同页的判读请求仍在宿主队列等待', async () => {
+    await launch()
+    const frame = portal().get('iframe').element as HTMLIFrameElement
+    const { delivered } = captureClonedPosts(frame)
+    message(frame, { kind: 'chanshui.READY', v: 1 })
+    await flushPromises()
+    const generation = delivered[0].generation
+    let release!: (value: unknown) => void
+    state.request.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'history', op: 'reports', params: { scope: 'sidebar' } })
+    await flushPromises()
+    const reportId = 'a'.repeat(32)
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'cross', op: 'cross-check', params: { reportId } })
+    await flushPromises()
+    expect(state.request.mock.calls.map(([op]) => op)).toEqual(['reports'])
+    expect(delivered.some(m => m.id === 'cross')).toBe(false)
+    release({ items: [] })
+    await flushPromises()
+    expect(state.request.mock.calls.map(([op]) => op)).toEqual(['reports', 'cross-check'])
+    expect(state.request.mock.calls[1][1]).toMatchObject({ reportId })
+    expect(delivered.find(m => m.id === 'cross')).toMatchObject({ ok: true })
+  })
+
+  it('排在其他请求后的首次检测，实际发起前已取消就不会发送', async () => {
+    const groups = [{ id: 'gpt', name: 'GPT', accounts: [{ id: 'a', targetId: 'account-a', name: '账号甲' }] }] as AdminGroupHealth[]
+    publishChanshuiCatalog('workspace-a', groups, chanshuiCatalogSession())
+    await launch()
+    const frame = portal().get('iframe').element as HTMLIFrameElement
+    const { delivered } = captureClonedPosts(frame)
+    message(frame, { kind: 'chanshui.READY', v: 1 }); await flushPromises()
+    const generation = delivered[0].generation
+    let release!: (value: unknown) => void
+    state.request.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'slow-read', op: 'report', params: { reportId: 'a'.repeat(32) } })
+    await flushPromises()
+    let valid = true
+    frame.contentWindow!.addEventListener('chanshui.before-start', event => { if (valid) event.preventDefault() })
+    const start = { kind: 'chanshui.request', v: 1, generation, id: 'queued-first-start', op: 'start', guardStart: true, params: { reportId: 'b'.repeat(32), groupId: 'gpt', targetId: 'account-a' } }
+    message(frame, start)
+    valid = false
+    release({}); await flushPromises()
+    expect(state.request.mock.calls.some(([op]) => op === 'start')).toBe(false)
+    expect(delivered.find(m => m.id === start.id)).toMatchObject({ ok: false, error: { operationResult: 'not_started' } })
+    valid = true
+    message(frame, { ...start, id: 'approved-first-start' }); await flushPromises()
+    expect(state.request.mock.calls.filter(([op]) => op === 'start')).toHaveLength(1)
+
+    state.request.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'second-slow-read', op: 'report', params: { reportId: 'a'.repeat(32) } })
+    await flushPromises()
+    message(frame, { ...start, id: 'removed-account-start' })
+    // The iframe still approves its old selection while the host already has the new list.
+    publishChanshuiCatalog('workspace-a', [], chanshuiCatalogSession())
+    release({}); await flushPromises()
+    expect(state.request.mock.calls.filter(([op]) => op === 'start')).toHaveLength(1)
+    expect(delivered.find(m => m.id === 'removed-account-start')).toMatchObject({ ok: false, error: { operationResult: 'not_started', message: expect.stringContaining('最新名单已没有') } })
+  })
+  it.each(['收起再恢复', '从外部切换账号'])('%s时宿主尚未交付排队消息，旧首次请求仍不会发送', async action => {
+    const groups = [{ id: 'gpt', name: 'GPT', accounts: [{ id: 'a', targetId: 'account-a', name: '账号甲' }, { id: 'b', targetId: 'account-b', name: '账号乙' }] }] as AdminGroupHealth[]
+    publishChanshuiCatalog('workspace-a', groups, chanshuiCatalogSession())
+    await launch()
+    const frame = portal().get('iframe').element as HTMLIFrameElement
+    const { delivered } = captureClonedPosts(frame)
+    message(frame, { kind: 'chanshui.READY', v: 1 }); await flushPromises()
+    const generation = delivered[0].generation
+    let valid = true
+    frame.contentWindow!.addEventListener('message', (event: MessageEvent) => {
+      const m = event.data
+      if ((m.kind === 'chanshui.VISIBILITY' && !m.visible) || (m.kind === 'chanshui.OPEN_TARGET' && m.target.targetId !== 'account-a')) valid = false
+    })
+    frame.contentWindow!.addEventListener('chanshui.discard-checks', event => {
+      const detail = (event as CustomEvent).detail
+      if (detail.generation === generation && (!detail.target || detail.target.groupId !== 'gpt' || detail.target.targetId !== 'account-a')) valid = false
+    })
+    frame.contentWindow!.addEventListener('chanshui.before-start', event => { if (valid) event.preventDefault() })
+    let release!: (value: unknown) => void
+    state.request.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'slow-first-read', op: 'report', params: { reportId: 'a'.repeat(32) } })
+    await flushPromises()
+    message(frame, { kind: 'chanshui.request', v: 1, generation, id: 'old-first-start', op: 'start', guardStart: true, params: { reportId: 'b'.repeat(32), groupId: 'gpt', targetId: 'account-a' } })
+    if (action === '收起再恢复') {
+      await portal().get('[aria-label="收起检测页"]').trigger('click')
+      await portal().get('[data-testid="chanshui-minimized"] button').trigger('click')
+    } else {
+      await launch('account-b')
+    }
+    release({}); await flushPromises()
+    expect(state.request.mock.calls.some(([op]) => op === 'start')).toBe(false)
+    expect(delivered.find(m => m.id === 'old-first-start')).toMatchObject({ ok: false, error: { operationResult: 'not_started' } })
+  })
   it('普通RPC已满12项时停止仍优先送达，不等待普通查询释放', async () => {
     await launch()
     const frame = portal().get('iframe').element as HTMLIFrameElement

@@ -34,9 +34,9 @@ function renderCache(overrides) {
       cache: {
         status: "mismatch", pass: false, reason: "fixture",
         samples: [
-          { index: 1, input: 4, output: 2, read: 0, write: 1000, input_reported: true, output_reported: true, read_reported: true, write_reported: true, hit_rate: 0 },
-          { index: 2, input: 4, output: 2, read: 1000, write: 500, input_reported: true, output_reported: true, read_reported: true, write_reported: true, hit_rate: 66.49 },
-          { index: 3, input: 4, output: 2, read: 1800, write: 0, input_reported: true, output_reported: true, read_reported: true, write_reported: false, hit_rate: null },
+          { index: 1, input: 4, output: 2, total: 1004, read: 0, write: 1000, input_reported: true, output_reported: true, read_reported: true, write_reported: true, hit_rate: 0 },
+          { index: 2, input: 4, output: 2, total: 1504, read: 1000, write: 500, input_reported: true, output_reported: true, read_reported: true, write_reported: true, hit_rate: 66.49 },
+          { index: 3, input: 4, output: 2, total: 1804, read: 1800, write: 0, input_reported: true, output_reported: true, read_reported: true, write_reported: false, hit_rate: null },
         ],
         third_read_ratio: 120,
         ...overrides,
@@ -45,14 +45,14 @@ function renderCache(overrides) {
   }));
 }
 
-test("cache card shows per-request rates, missing writes, and unbounded third-round ratio", () => {
+test("cache card shows per-request rates, missing writes, and separate transition ratio", () => {
   const html = renderCache({});
-  assert.match(html, /末轮缓存率<\/span><strong>120\.00%<\/strong>/);
+  assert.match(html, /末轮缓存命中率<\/span><strong>99\.78%<\/strong>/);
   assert.match(html, /上一轮读 ＋ 写<\/span><strong>1500<\/strong>/);
   assert.match(html, /<th>命中率<\/th>/);
   assert.match(html, /<td>#1<\/td><td>0<\/td><td>1000<\/td><td>4<\/td><td>2<\/td><td>0\.00%<\/td>/);
-  assert.match(html, /<td>#3<\/td><td>1800<\/td><td>—<\/td><td>4<\/td><td>2<\/td><td>—<\/td>/);
-  assert.match(html, /保留原始比例/);
+  assert.match(html, /<td>#3<\/td><td>1800<\/td><td>—<\/td><td>4<\/td><td>2<\/td><td>99\.78%<\/td>/);
+  assert.match(html, /末轮读取与上一轮读加写的比值 120\.00% · 相差 300 token/);
 });
 
 test("cache card uses the previous read for a read-only chain", () => {
@@ -60,14 +60,26 @@ test("cache card uses the previous read for a read-only chain", () => {
     status: "pass",
     pass: true,
     samples: [
-      { index: 2, input: 4, output: 2, input_reported: true, output_reported: true, read: 1000, write: 0, read_reported: true, write_reported: false, hit_rate: null },
-      { index: 3, input: 4, output: 2, input_reported: true, output_reported: true, read: 1000, write: 0, read_reported: true, write_reported: false, hit_rate: null },
+      { index: 2, input: 4, output: 2, total: 1004, input_reported: true, output_reported: true, read: 1000, write: 0, read_reported: true, write_reported: false, hit_rate: null },
+      { index: 3, input: 4, output: 2, total: 1004, input_reported: true, output_reported: true, read: 1000, write: 0, read_reported: true, write_reported: false, hit_rate: null },
     ],
     third_read_baseline: 1000,
     third_read_ratio: 99.6,
   });
-  assert.match(html, /末轮缓存率<\/span><strong>99\.60%<\/strong>/);
+  assert.match(html, /末轮缓存命中率<\/span><strong>99\.60%<\/strong>/);
   assert.match(html, /上一轮读取<\/span><strong>1000<\/strong>/);
+
+  const withMissingRead = renderCache({
+    status: "pass",
+    samples: [
+      {index: 1, read: 1000, total: 1004, read_reported:true, write_reported:false},
+      {index: 2, read: 0, total: 1004, read_reported:false, write_reported:false},
+      {index: 3, read: 1000, total: 1004, read_reported:true, write_reported:false},
+    ],
+    third_read_baseline: 1000,
+  });
+  assert.match(withMissingRead, /此前最近一次读取<\/span><strong>1000<\/strong>/);
+
 });
 
 test("read-only cold start with an unreported first read still passes", () => {
@@ -86,7 +98,7 @@ test("read-only cold start with an unreported first read still passes", () => {
     third_read_ratio: 87.89,
     samples: rows,
   });
-  assert.match(html, /末轮缓存率<\/span><strong>87\.89%<\/strong>/);
+  assert.match(html, /末轮缓存命中率<\/span><strong>87\.89%<\/strong>/);
   assert.match(html, /末轮读取<\/span><strong>1792<\/strong>/);
   assert.match(html, /末轮总输入<\/span><strong>2039<\/strong>/);
   assert.match(html, /上一轮读取<\/span><strong>1792<\/strong>/);
@@ -104,4 +116,12 @@ test("cache card distinguishes absent input from a reported zero", () => {
   });
   assert.match(html, /<td>#1<\/td><td>—<\/td><td>—<\/td><td>—<\/td>/);
   assert.match(html, /<td>#2<\/td><td>1000<\/td><td>0<\/td><td>0<\/td>/);
+});
+
+test("cache card distinguishes an absent baseline from an explicitly reported zero", () => {
+  const previous = {index: 1, total: 25, read: 0, write: 0, read_reported: true, write_reported: true};
+  const last = {index: 2, total: 25, read: 20, write: 0, read_reported: true, write_reported: true};
+  assert.match(renderCache({ samples: [previous, last], third_read_baseline: 0 }), /上一轮读 ＋ 写<\/span><strong>0<\/strong>/);
+  assert.match(renderCache({ samples: [{...previous, write_reported:false}, last], third_read_baseline: 0 }), /上一轮读 ＋ 写<\/span><strong>—<\/strong>/);
+  assert.match(renderCache({ samples: [{...previous, error:'失败'}, last], third_read_baseline: 0 }), /上一轮读 ＋ 写<\/span><strong>—<\/strong>/);
 });

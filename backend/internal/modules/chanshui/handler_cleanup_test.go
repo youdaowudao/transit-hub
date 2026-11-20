@@ -34,10 +34,12 @@ type cleanupExecutor struct {
 	partial    bool
 	closeErr   error
 	payload    []byte
+	lastQuery  Envelope
 }
 
 func (f *cleanupExecutor) Query(_ context.Context, e Envelope, _ *Credential, _ bool) (*QueryResponse, error) {
 	f.queryCalls++
+	f.lastQuery = e
 	if e.Operation == "save-settings" || e.Operation == "save-question" || e.Operation == "delete-question" {
 		f.writes++ // The operation commits before the helper writes its result.
 	}
@@ -50,6 +52,42 @@ func (f *cleanupExecutor) Query(_ context.Context, e Envelope, _ *Credential, _ 
 		contentType = "image/png"
 	}
 	return &QueryResponse{Status: 200, ContentType: contentType, Length: int64(len(f.payload)), Body: cleanupBody{io.NopCloser(bytes.NewReader(data)), &f.closeCalls, f.closeErr}}, nil
+}
+
+func TestPrefixReadRoutesUseTheirExactOperationAndParameter(t *testing.T) {
+	for _, tc := range []struct{ path, op, param, value string }{
+		{"/reports/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cross-check", "cross-check", "reportId", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+		{"/prefix-prompts/codex-gpt-6.2-sol", "read-prefix-prompt", "promptId", "codex-gpt-6.2-sol"},
+		{"/not-a-route", "", "", ""},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			s, original, _ := fixture(t)
+			runner := &cleanupExecutor{fakeExecutor: original, payload: []byte("{}")}
+			s.runner = runner
+			req := httptest.NewRequest("GET", "/api/chanshui"+tc.path, nil)
+			req.Header.Set(WorkspaceHeader, "workspace-a")
+			req = req.WithContext(authctx.WithUserID(req.Context(), "user-a"))
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, req)
+			if tc.op == "" {
+				var result Problem
+				if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+					t.Fatal(err)
+				}
+				if w.Code != 404 || result.Message != "此模型检测页面操作不存在，请刷新页面后重试" || runner.queryCalls != 0 {
+					t.Fatalf("unknown path changed: %d, %s, %d", w.Code, result.Message, runner.queryCalls)
+				}
+				return
+			}
+			if w.Code != 200 || runner.queryCalls != 1 || runner.lastQuery.Operation != tc.op {
+				t.Fatalf("route called %q (%d calls), HTTP %d", runner.lastQuery.Operation, runner.queryCalls, w.Code)
+			}
+			args, ok := runner.lastQuery.Args.(map[string]any)
+			if !ok || len(args) != 1 || args[tc.param] != tc.value {
+				t.Fatalf("route passed args %#v", runner.lastQuery.Args)
+			}
+		})
+	}
 }
 
 func TestGenericHTTPCompleteBodyPreservesResultAndReportsCleanupFailure(t *testing.T) {

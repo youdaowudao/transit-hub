@@ -1,10 +1,15 @@
 import type { DetectVerdict, Probe, TotalPart } from './api';
 import type { HubItem, HubReport } from './hub-types';
 import { isHubTerminal, reportStatus } from './hub-policy';
-import { hasUnconfirmedIQ } from './report-view';
+import { hasUnconfirmedIQ, HUB_SCORING_VERSION } from './report-view';
 
 export const object = (value: unknown): Record<string, any> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {};
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+const earnedIQNote = '百分制按各题实际得到的分数计算。逐题可以查看得分、半分和保留的模型回答。';
+
+export function isVerifiedHubReport(report: HubReport): boolean {
+  return object(object(report.summary).verdict).scoring_version === HUB_SCORING_VERSION;
+}
 export function itemJudgment(item: HubItem) {
   return typeof item.result?.judgment === 'string' ? { status: item.result.judgment } : item.result?.judgment ?? {};
 }
@@ -22,6 +27,10 @@ export function itemLabel(item: HubItem, parentStatus: string): string {
   if (j.status === 'unknown') return '尚未确认';
   return reportStatus(item.status);
 }
+function isUnconfirmedSelfReport(item: HubItem): boolean {
+  return item.definition.judge?.type === 'model_identity' && item.status === 'done' &&
+    !item.result?.error && itemJudgment(item).status === 'unknown';
+}
 export function itemPoints(item: HubItem): string {
   const j = itemJudgment(item), earned = item.result?.earned ?? j.earned, max = item.result?.max ?? j.max ?? item.definition.maxScore;
   return j.status === 'known' && finite(earned) && finite(max) ? `${earned} / ${max}${j.half || item.result?.half ? '（半分）' : ''}` : '';
@@ -35,9 +44,11 @@ export function reportError(value: unknown): string {
 export const reportVersion = (report: HubReport) => `${report.updatedAtMs ?? ''}:${report.status}:${JSON.stringify(report.itemCounts ?? {})}`;
 
 /** Only adapt saved observations to the upstream presentation shape. */
-function legacyHubReportView(report: HubReport, items: HubItem[], complete: boolean) {
-  const summary = object(report.summary), total = object(summary.total);
-  const parts: TotalPart[] = Array.isArray(total.parts) ? total.parts : [];
+function legacyHubReportView(report: HubReport, items: HubItem[], complete: boolean, verified: boolean) {
+  const summary = object(report.summary), saved = object(summary.verdict);
+  const nativeTotal = object(saved.total);
+  const total = verified && Object.keys(nativeTotal).length ? nativeTotal : object(summary.total);
+  const parts: TotalPart[] = Array.isArray(total.parts) ? total.parts : verified && Array.isArray(summary.parts) ? summary.parts : [];
   const applicable = parts.filter(p => p.applicable);
   const scoreKnown = finite(total.score) && applicable.length > 0 && applicable.every(p => p.known) && total.complete !== false;
   const totalLabel = scoreKnown ? '' : Object.keys(total).length && !applicable.length ? '本次不计总分' : isHubTerminal(report.status) ? '总分尚未确认' : '尚未完成';
@@ -62,9 +73,10 @@ function legacyHubReportView(report: HubReport, items: HubItem[], complete: bool
     return null;
   };
   const v: DetectVerdict = { injection: null, hidden: null, fingerprint: null, thinking: null, iq: null,
-    total: { score: scoreKnown ? total.score : 0, max: total.max ?? 100, reason: total.reason ?? '', parts },
+    total: { score: scoreKnown && (!verified || summary.totalScore !== null) ? total.score : verified ? null : 0, max: total.max ?? 100, reason: total.reason ?? '', parts },
   };
-  v.iq = { score: finite(summary.iqScore) ? summary.iqScore : null, max: 100, paper_max: finite(summary.iqMax) ? summary.iqMax : 0, complete: finite(summary.iqScore), per_question: [], note: total.reason ?? '' };
+  if (verified) v.scoring_version = HUB_SCORING_VERSION;
+  v.iq = { score: finite(summary.iqScore) ? summary.iqScore : null, max: 100, paper_max: finite(summary.iqMax) ? summary.iqMax : 0, complete: finite(summary.iqScore), per_question: [], note: verified ? earnedIQNote : total.reason ?? '' };
   if (complete && !groups.iq?.length) messages.iq = '本次没有推理题，不计算推理分。';
   else if (complete && groups.iq?.every(item => item.definition.judge.type === 'manual')) messages.iq = '本次推理题仅供人工查看，不计算推理分。';
   const numeric = (groups.fingerprint ?? []).find(i => i.definition.kind === 'fingerprint_numeric');
@@ -88,7 +100,7 @@ function legacyHubReportView(report: HubReport, items: HubItem[], complete: bool
     const e = evidence(kind);
     if (e) v[kind] = { ...e, status: typeof e.status === 'string' ? e.status : 'unknown', pass: typeof e.pass === 'boolean' ? e.pass : null, reason: e.reason ?? '没有收到足够的结构化证据，本项未经验证。', protocol: e.protocol ?? '' };
   }
-  const cache = evidence('cache');
+  const cache = verified ? null : evidence('cache');
   if (cache) v.cache = { ...cache, pass: typeof cache.pass === 'boolean' ? cache.pass : null } as DetectVerdict['cache'];
   const thinking = evidence('thinking');
   if (thinking) v.thinking = { ...thinking, summary_score: thinking.summary_score ?? thinking.score } as DetectVerdict['thinking'];
@@ -122,7 +134,7 @@ function legacyHubReportView(report: HubReport, items: HubItem[], complete: bool
   } else messages.knowledge = (groups.knowledge?.length ?? 0) ? '请展开逐题查看本次事件题观测；日期范围尚未确认。' : complete ? '本次未选择知识事件检测。' : '正在读取本次已保存的结果…';
   const probes: Probe[] = items.map(item => {
     const label = itemLabel(item, report.status), j = itemJudgment(item);
-    const status = ['not_asked', 'not_applicable'].includes(j.status ?? '') ? 'queued' : label === '未完成' ? 'cancelled' : item.status;
+    const status = ['not_asked', 'not_applicable'].includes(j.status ?? '') ? 'queued' : label === '未完成' ? 'cancelled' : label === '请求失败' ? 'error' : item.status;
     return { id: item.itemId, name: item.definition.title, status, ms: typeof item.result?.ms === 'number' ? item.result.ms : Math.max(0, (item.completedAtMs ?? 0) - (item.startedAtMs ?? 0)), error: item.result?.error };
   });
   const statusTexts = Object.fromEntries(items.map(item => [item.itemId, itemLabel(item, report.status)]));
@@ -130,7 +142,22 @@ function legacyHubReportView(report: HubReport, items: HubItem[], complete: bool
   const totalCount = counts ? Object.values(counts).reduce((n, count) => n + count, 0) : complete ? items.length : null;
   const finished = counts ? (counts.done ?? 0) + (counts.error ?? 0) : items.filter(i => ['done', 'error'].includes(i.status)).length;
   const unfinished = isHubTerminal(report.status) && totalCount !== null ? Math.max(0, totalCount - finished) : 0;
-  return { verdict: v, totalLabel, groups, messages, probes, progress: { total: totalCount, finished, statusTexts, unfinished } };
+  return { verdict: v, totalLabel, groups, messages, probes, progress: { total: totalCount, finished, statusTexts, unfinished, hasRequestFailure: (counts?.error ?? 0) > 0, unconfirmedSelfReport: items.some(isUnconfirmedSelfReport) } };
+}
+
+function verifiedCacheView(verdict: DetectVerdict, cacheItems: HubItem[], complete: boolean) {
+  const part = verdict.total?.parts?.find(part => part.key === 'cache');
+  const visible = part?.applicable ?? (cacheItems.length > 0);
+  const item = complete && cacheItems.length === 1 ? cacheItems[0] : undefined;
+  let inlineItem: HubItem | undefined;
+  if (item && part?.applicable && part.known && item.status === 'done' && itemJudgment(item).status === 'known' && !canRetryHubItem(item)) {
+    const evidence = object(item.result?.evidence);
+    if (!evidence.error && typeof evidence.pass === 'boolean' && Array.isArray(evidence.samples) && evidence.samples.length &&
+        part.points === Number(evidence.pass) && part.contribution === (evidence.pass ? part.coefficient : 0)) {
+      inlineItem = item;
+    }
+  }
+  return { part, visible, inlineItem };
 }
 
 /** Decide per item: old/custom data must keep its readable fallback. */
@@ -148,11 +175,20 @@ export function hasOriginalItemDTO(item: HubItem): boolean {
 
 /** Native reports preserve the original probe DTOs and original summary.
  * Legacy reports are displayed as saved, never regraded into a fake new verdict. */
-export function hubReportView(report: HubReport, items: HubItem[], complete: boolean) {
- const view=legacyHubReportView(report,items,complete);
- const saved=object(object(report.summary).verdict);
- if (!Object.keys(saved).length) return {...view,native:false};
+export function hubReportView(report: HubReport, items: HubItem[], complete: boolean, readFailed = false) {
+ const verified = isVerifiedHubReport(report);
+ const view=legacyHubReportView(report,items,complete,verified);
+ const summary=object(report.summary), saved=object(summary.verdict);
+ const cacheView = verified ? verifiedCacheView(view.verdict, view.groups.cache ?? [], complete && !readFailed) : undefined;
+ if (!Object.keys(saved).length || verified && !Object.keys(saved).some(key => key !== 'scoring_version')) return {...view,native:false,cacheView};
  const v={...saved} as DetectVerdict;
+ if (verified) {
+  if (v.total || Object.keys(object(summary.total)).length) {
+   v.total={...view.verdict.total!, ...v.total, parts: view.verdict.total?.parts ?? []};
+   if (summary.totalScore === null) v.total.score = null;
+  }
+  v.cache=null;
+ }
  const messages:Record<string,string>={};
  const iq=object(saved.iq), lines:Record<string,any>[]=[];
  for (const item of items) {
@@ -170,21 +206,24 @@ export function hubReportView(report: HubReport, items: HubItem[], complete: boo
    case 'injection': v.injection=e as any;break;
    case 'tools':v.tools=e as any;break;
    case 'web':v.web=e as any;break;
-   case 'cache':v.cache=e as any;break;
+   case 'cache':if(!verified) v.cache=e as any;break;
    case 'thinking':v.thinking=e as any;break;
   }
  }
  if(Object.keys(iq).length) v.iq={...iq,per_question:lines} as any;
+ else if (verified && (finite(summary.iqScore) || finite(summary.iqMax))) v.iq = view.verdict.iq;
  for (const kind of ['fingerprint','injection','tools','web','cache','thinking','vision'] as const) {
   if (!v[kind] && view.verdict[kind]) (v as any)[kind] = view.verdict[kind];
  }
  // Section metadata and all original knowledge fields are copied verbatim.
  // Full answer/sample bodies are joined from the item which stored that DTO.
  for(const kind of ['fingerprint','injection','tools','web','cache','thinking','vision','knowledge'] as const) {
+  if(verified && kind==='cache') continue;
   if(!v[kind] && view.groups[kind]?.length) messages[kind]=complete?'本项尚无原版完整结果，请展开已保存的题目查看或补测失败项。':'正在读取本次已保存的原版结果…';
  }
 
  const nativeProbes:Probe[]=[];
+ const statusTexts: Record<string, string> = {};
  const grouped=new Set<string>();
  const sectionNames:Record<string,string>={fingerprint:'模型指纹归因',injection:'注入大小',cache:'缓存读写验证',tools:'工具调用检测',web:'联网检测',knowledge:'知识截止日期',thinking:'思维链回传',vision:'识图能力'};
  for(const item of items) {
@@ -197,12 +236,14 @@ export function hubReportView(report: HubReport, items: HubItem[], complete: boo
   const rows=individual?[item]:(view.groups[kind]??[item]).filter(x=>x.definition.kind!=='fingerprint_behavior');
   const ended=isHubTerminal(report.status), pending=rows.some(x=>x.status==='running'||x.status==='queued');
   const observed=rows.some(x=>['done','error'].includes(x.status));
-  const failed=kind==='knowledge' ? object(v.knowledge).status==='error' : rows.some(x=>x.status==='error');
+  const failed=rows.some(x=>x.status==='error'||x.result?.error) || kind==='knowledge' && object(v.knowledge).status==='error';
+  if (isUnconfirmedSelfReport(item)) statusTexts[item.itemId] = '尚未确认';
   const status=pending&&!ended?(observed||rows.some(x=>x.status==='running')?'running':'queued'):failed?'error':pending?'cancelled':'done';
   nativeProbes.push({id:individual?item.itemId:kind,name:individual?item.definition.title:(sectionNames[kind]??item.definition.title),status,ms:rows.reduce((sum,x)=>sum+(Number(x.result?.ms)||0),0),error:failed?rows.find(x=>x.result?.error)?.result?.error:undefined});
  }
  const finished=nativeProbes.filter(x=>['done','error','cancelled'].includes(x.status)).length;
- return {...view,verdict:v,totalLabel:report.retry && !isHubTerminal(report.status) ? '补测中' : hasUnconfirmedIQ(v) ? isHubTerminal(report.status) ? '总分尚未确认' : '尚未完成' : '',messages,native:true,probes:nativeProbes,progress:{total:complete?nativeProbes.length:null,finished,statusTexts:{},unfinished:isHubTerminal(report.status)?nativeProbes.filter(x=>x.status==='cancelled').length:0}};
+ const totalLabel=report.retry && !isHubTerminal(report.status) ? '补测中' : hasUnconfirmedIQ(v) || verified && v.total?.score === null ? isHubTerminal(report.status) ? '总分尚未确认' : '尚未完成' : '';
+ return {...view,verdict:v,totalLabel,messages,native:true,cacheView,probes:nativeProbes,progress:{...view.progress,total:complete?nativeProbes.length:null,finished,statusTexts,unfinished:isHubTerminal(report.status)?nativeProbes.filter(x=>x.status==='cancelled').length:0}};
 
 }
 

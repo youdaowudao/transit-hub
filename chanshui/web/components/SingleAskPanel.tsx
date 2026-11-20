@@ -4,6 +4,7 @@ import Select from './Select';
 import ErrorFold from './ErrorFold';
 import {useI18n} from '../lib/i18n';
 import {modelFamily} from '../lib/report-view';
+import {pendingWarning} from '../lib/hub-draft';
 import type {Metrics} from '../lib/api';
 export interface SingleAskPayload {prompt:string;thinking:{type:string;display?:string;budget_tokens?:number}|null;effort:string}
 export function SingleAnswer({answer,model}:{answer:Metrics|null;model:string}) {const {t:tr}=useI18n();return <>{answer && (
@@ -27,16 +28,32 @@ export function SingleAnswer({answer,model}:{answer:Metrics|null;model:string}) 
             )}
           </div>
         )}</>;} 
-export default function SingleAskPanel({model,canRun,onAsk}:{model:string;canRun:boolean;onAsk:(input:SingleAskPayload,signal:AbortSignal)=>Promise<Metrics>}) {
+type PendingAsk = {
+  reportId: string;
+  accepted?: boolean;
+  busy: boolean;
+  confirm: (method: 'lookup' | 'replay', signal: AbortSignal) => Promise<Metrics | null>;
+  open: () => void;
+};
+export default function SingleAskPanel({model,canRun,onAsk,pending}:{model:string;canRun:boolean;onAsk:(input:SingleAskPayload,signal:AbortSignal)=>Promise<Metrics | null>;pending?:PendingAsk}) {
  const {t:tr}=useI18n();
  const [prompt,setPrompt]=useState(''),[mode,setMode]=useState('summary'),[budget,setBudget]=useState(2048),[effort,setEffort]=useState('');
  const [answer,setAnswer]=useState<Metrics|null>(null),[asking,setAsking]=useState(false),[askError,setAskError]=useState('');
  const active=useRef<AbortController|null>(null);
  useEffect(()=>()=>active.current?.abort(),[]);
- const askOnce=async()=>{
+ const run=async(work:(signal:AbortSignal)=>Promise<Metrics | null>)=>{
+  if(active.current)return;
   const controller=new AbortController();active.current=controller;
   setAsking(true);setAskError('');setAnswer(null);
-    try {
+  try {
+    const m = await work(controller.signal);
+    if(m&&!controller.signal.aborted){setAnswer(m);if(m.Err)setAskError(m.Err);}
+  }catch(error){if(!controller.signal.aborted)setAskError(error instanceof Error?error.message:'单问单答未完成，请按记录编号查询。');}
+  finally{if(active.current===controller){active.current=null;if(!controller.signal.aborted)setAsking(false);}}
+ };
+ const cancel=()=>{active.current?.abort();active.current=null;setAsking(false);};
+ const askOnce=()=>{
+    if (!canRun || !prompt.trim() || asking) return;
       const thinking = modelFamily(model) !== "claude"
         ? null
         : mode === "omit"
@@ -56,10 +73,7 @@ export default function SingleAskPanel({model,canRun,onAsk}:{model:string;canRun
               : mode === "summary"
                 ? { type: "adaptive", display: "summarized" }
                 : { type: "adaptive" };
-      const m = await onAsk({prompt, thinking, effort}, controller.signal);
-      if(!controller.signal.aborted){setAnswer(m);if(m.Err)setAskError(m.Err);}
-  }catch(error){if(!controller.signal.aborted)setAskError(error instanceof Error?error.message:'单问单答未完成，请按记录编号查询。');}
-  finally{if(!controller.signal.aborted)setAsking(false);}
+      void run(signal => onAsk({prompt, thinking, effort}, signal));
  };
  return <>      <details className="ask-panel">
         <summary>{tr("单问单答")}</summary><p className="muted">只向当前账号模型发送这一个问题，沿同一队列等待；可能产生费用，结果保存在一份问答记录，失败补测写回该记录，不修改主站。问题最多16KiB。</p>
@@ -142,7 +156,17 @@ export default function SingleAskPanel({model,canRun,onAsk}:{model:string;canRun
         >
           {asking ? tr("正在回答…") : tr("发送问题")}
         </button>
+        {asking && <button type="button" className="btn-secondary" onClick={cancel}>取消等待问答</button>}
         {askError && <ErrorFold text={askError} />}
         <SingleAnswer answer={answer} model={model} />
-      </details></>;
+      </details>
+      {pending && <section className="hub-note" aria-label="单问单答受理">
+        {pending.accepted ? <p>原问答记录已保存，可打开查看结果或补测失败项。</p> : <p>{pendingWarning}</p>}
+        <p>原报告编号 <strong>{pending.reportId}</strong></p>
+        {pending.accepted ? <button type="button" className="btn-secondary" onClick={pending.open}>查看原问答记录</button> : <div className="actions hub-wrap">
+          <button type="button" className="btn-secondary" disabled={pending.busy || asking} onClick={() => void run(signal => pending.confirm('lookup', signal))}>查询本次受理结果</button>
+          <button type="button" className="btn-secondary" disabled={pending.busy || asking} onClick={() => void run(signal => pending.confirm('replay', signal))}>用原编号重试受理</button>
+        </div>}
+      </section>}
+      </>;
 }

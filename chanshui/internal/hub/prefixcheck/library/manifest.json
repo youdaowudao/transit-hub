@@ -1,0 +1,82 @@
+[
+  {
+    "id": "sub2api-placeholder",
+    "name": "Sub2API 旧版占位提示词",
+    "identity": "",
+    "tokens": 7,
+    "source": "Sub2API 2026-05-04 前的代码",
+    "file": "sub2api-placeholder.txt"
+  },
+  {
+    "id": "codex-default-gpt5",
+    "name": "Codex 早期默认提示词（写明基于 GPT-5）",
+    "identity": "GPT-5",
+    "tokens": 1435,
+    "source": "openai/codex 官方提示词，经 Sub2API 仓库提交 be00b83e3 取得",
+    "file": "codex-default-gpt5.txt"
+  },
+  {
+    "id": "codex-gpt-5.1",
+    "name": "Codex GPT-5.1 版提示词",
+    "identity": "GPT-5",
+    "tokens": 5076,
+    "source": "openai/codex 官方提示词，经 Sub2API 仓库提交 be00b83e3 取得",
+    "file": "codex-gpt-5.1.txt"
+  },
+  {
+    "id": "codex-gpt-5.2",
+    "name": "Codex GPT-5.2 版提示词",
+    "identity": "GPT-5",
+    "tokens": 4570,
+    "source": "openai/codex 官方提示词，经 Sub2API 仓库提交 be00b83e3 取得",
+    "file": "codex-gpt-5.2.txt"
+  },
+  {
+    "id": "codex-gpt-5.5",
+    "name": "Codex GPT-5.5 版提示词",
+    "identity": "GPT-5",
+    "tokens": 4376,
+    "source": "openai/codex 官方提示词，经 Sub2API 仓库提交 be00b83e3 取得",
+    "file": "codex-gpt-5.5.txt"
+  },
+  {
+    "id": "codex-gpt-6-astra",
+    "name": "Codex GPT-6 Astra 版提示词",
+    "identity": "GPT-6",
+    "tokens": 4110,
+    "source": "openai/codex 官方提示词，经 Sub2API 仓库提交 be00b83e3 取得",
+    "file": "codex-gpt-6-astra.txt"
+  },
+  {
+    "id": "codex-gpt-6.1-sol",
+    "name": "Codex GPT-6.1 Sol 版提示词",
+    "identity": "GPT-6",
+    "tokens": 4212,
+    "source": "openai/codex 官方提示词，经 Sub2API 仓库提交 be00b83e3 取得",
+    "file": "codex-gpt-6.1-sol.txt"
+  },
+  {
+    "id": "codex-gpt-6.1-terra",
+    "name": "Codex GPT-6.1 Terra 版提示词",
+    "identity": "GPT-6",
+    "tokens": 4148,
+    "source": "openai/codex 官方提示词，经 Sub2API 仓库提交 be00b83e3 取得",
+    "file": "codex-gpt-6.1-terra.txt"
+  },
+  {
+    "id": "codex-gpt-6.2-sol",
+    "name": "Codex GPT-6.2 Sol 版提示词",
+    "identity": "GPT-6",
+    "tokens": 5410,
+    "source": "openai/codex 官方提示词，经 Sub2API 仓库提交 be00b83e3 取得",
+    "file": "codex-gpt-6.2-sol.txt"
+  },
+  {
+    "id": "codex-gpt-6.2-astra",
+    "name": "Codex GPT-6.2 Astra 版提示词",
+    "identity": "GPT-6",
+    "tokens": 5359,
+    "source": "openai/codex 官方提示词，经 Sub2API 仓库提交 be00b83e3 取得",
+    "file": "codex-gpt-6.2-astra.txt"
+  }
+]

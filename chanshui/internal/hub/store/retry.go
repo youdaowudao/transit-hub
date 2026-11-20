@@ -7,6 +7,10 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+
+	"github.com/kiss-kedaya/chanshui/internal/api"
+	"github.com/kiss-kedaya/chanshui/internal/hub/questions"
+	"github.com/kiss-kedaya/chanshui/internal/knowledge"
 )
 
 // Only the latest explicit retry is retained. Original request and questions
@@ -185,6 +189,14 @@ func (s *Store) RetryReport(ctx context.Context, o Owner, r RetryRequest) (Repor
 			if review, ok := k["boundary_review"].(map[string]any); ok {
 				review["status"], review["reason"] = "unconfirmed", "retry_pending"
 				k["label"] = "日期边界未确认"
+				if review["method"] == knowledge.CrossYearMethod {
+					k["status"] = "unknown"
+					k["label"] = knowledge.InitialCrossYear().Label
+					delete(k, "cutoff")
+					for _, field := range []string{"from", "to", "anchor_id", "check_id"} {
+						delete(review, field)
+					}
+				}
 				summary["knowledge"] = k
 				if v != nil {
 					v["knowledge"] = k
@@ -206,6 +218,22 @@ func (s *Store) RetryReport(ctx context.Context, o Owner, r RetryRequest) (Repor
 				total["score"] = nil
 				summary["totalScore"] = nil
 			}
+		}
+		if verdict, ok := summary["verdict"].(map[string]any); ok && verdict["scoring_version"] == api.HubScoringVersion && kinds["cache"] {
+			clearCacheRetryPart(summary["parts"])
+			for _, parent := range []map[string]any{summary, verdict} {
+				total, _ := parent["total"].(map[string]any)
+				if total == nil {
+					total = map[string]any{"max": 100, "parts": []any{}}
+					parent["total"] = total
+				}
+				clearCacheRetryPart(total["parts"])
+				total["score"], total["complete"] = nil, false
+				if total["reason"] != questions.ModelIdentityPending {
+					total["reason"] = api.HubCachePendingReason
+				}
+			}
+			summary["totalScore"] = nil
 		}
 		if kinds["iq"] {
 			summary["iqScore"] = nil
@@ -229,4 +257,14 @@ func (s *Store) RetryReport(ctx context.Context, o Owner, r RetryRequest) (Repor
 	}
 	return s.Report(ctx, o, r.ReportID)
 }
+
+func clearCacheRetryPart(value any) {
+	parts, _ := value.([]any)
+	for _, raw := range parts {
+		if part, ok := raw.(map[string]any); ok && part["key"] == "cache" && part["applicable"] == true {
+			part["known"], part["points"], part["contribution"] = false, 0, 0
+		}
+	}
+}
+
 func stringValue(v any) string { s, _ := v.(string); return s }

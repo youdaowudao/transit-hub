@@ -181,9 +181,14 @@ func numEq(a, b float64) bool {
 // 判分
 
 // Judge scores a full model response against its question. earned follows the
-// per-question rule; half marks half-credit (counted as a flag, NOT into the
-// 0-100 numerator); tags carry diagnostic labels like 替代建模.
+// per-question rule; half flags half-credit and tags carry diagnostic labels.
 func Judge(q Question, fullText string) (earned int, half bool, tags []string) {
+	return JudgeWithAnswer(q, fullText, "")
+}
+
+// JudgeWithAnswer also accepts the narrow Q4 equivalences in a raw answer body.
+// fullText retains the legacy extraction and fallback to Claude's thinking summary.
+func JudgeWithAnswer(q Question, fullText, answerBody string) (earned int, half bool, tags []string) {
 	slot, tail := ExtractAnswer(fullText)
 	text := slot
 	if text == "" {
@@ -197,7 +202,7 @@ func Judge(q Question, fullText string) (earned int, half bool, tags []string) {
 	case "Q3":
 		earned, half, tags = judgeBatBall(text)
 	case "Q4":
-		earned, half, tags = judgeColorBlind(text)
+		earned, half, tags = judgeColorBlind(text, answerBody)
 	case "Q5":
 		earned, half, tags = judgeAnchor(text, tail)
 	case "Q6", "Q8":
@@ -322,11 +327,37 @@ var (
 	cbNegPrefix = regexp.MustCompile(`(?:不|非|并|未|无法|不可)(?:可能)?(亲生|正常)`)
 )
 
-func judgeColorBlind(text string) (int, bool, []string) {
+const cbMarkerText = `(?:最终答案|最后答案|本题答案|答案)`
+
+var cbAnswerMarker = regexp.MustCompile(`^(?:` + cbMarkerText + `[:：]|` +
+	`\*\*` + cbMarkerText + `(?:\*\*[:：]|[:：]\*\*)|` +
+	`__` + cbMarkerText + `(?:__[:：]|[:：]__))`)
+
+func colorBlindEquivalent(answerBody string) bool {
+	answer := strings.TrimSpace(answerBody)
+	if strings.ContainsAny(answer, "\r\n") {
+		return false
+	}
+	answer = strings.TrimSpace(cbAnswerMarker.ReplaceAllString(answer, ""))
+	if strings.HasSuffix(answer, "。") {
+		answer = strings.TrimSuffix(answer, "。")
+	} else {
+		answer = strings.TrimSuffix(answer, ".")
+	}
+	answer = strings.TrimSpace(strings.TrimPrefix(answer, "在题设条件下，"))
+	switch answer {
+	case "女儿非该父亲亲生", "女儿并非这位父亲的亲生女儿", "女儿不是这位父亲的亲生女儿":
+		return true
+	default:
+		return false
+	}
+}
+
+func judgeColorBlind(text, answerBody string) (int, bool, []string) {
 	if regexp.MustCompile(`不能排除|无法排除|不一定|不能断定|无法断定`).MatchString(text) {
 		return 0, false, nil
 	}
-	if cbFullRe.MatchString(text) {
+	if cbFullRe.MatchString(text) || colorBlindEquivalent(answerBody) {
 		return 14, false, nil
 	}
 	if cbChainRe.MatchString(text) {

@@ -353,17 +353,18 @@ func decide(p Probe, text string, explicit bool) string {
 }
 
 type search struct {
-	review  bool
-	lo, hi  time.Time
-	asked   int
-	correct int
-	wrongs  int
-	errors  int
-	invalid bool
-	current bool
-	rows    []Row
-	seen    map[string]bool
-	kinds   map[string]string
+	review    bool
+	crossYear bool
+	lo, hi    time.Time
+	asked     int
+	correct   int
+	wrongs    int
+	errors    int
+	invalid   bool
+	current   bool
+	rows      []Row
+	seen      map[string]bool
+	kinds     map[string]string
 }
 
 func newSearch() *search {
@@ -759,6 +760,12 @@ func CheckCurrent(ctx context.Context, c gateway.Client, model string, timeout i
 func check(ctx context.Context, c gateway.Client, model string, timeout int, s *search) (Verdict, error) {
 	attempts := 0
 	protocol := c.ProtocolFor(model)
+	var bank []Probe
+	var today time.Time
+	if s.crossYear {
+		bank = CurrentAnchors()
+		today = nowFn().UTC().Truncate(24 * time.Hour)
+	}
 	ask := func(p Probe) {
 		m, err := c.CallMessages(ctx, gateway.CallRequest{
 			Model: model, Prompt: p.prompt(), MaxTokens: 512, TimeoutSeconds: timeout,
@@ -767,7 +774,7 @@ func check(ctx context.Context, c gateway.Client, model string, timeout int, s *
 		if m.Protocol != "" {
 			protocol = m.Protocol
 		}
-		if s.review && err == nil {
+		if (s.review || s.crossYear) && err == nil {
 			err = reviewMissingError(m)
 		}
 		if err != nil || m.Err != "" {
@@ -782,7 +789,16 @@ func check(ctx context.Context, c gateway.Client, model string, timeout int, s *
 		s.apply(p, kind, focus)
 	}
 	for ctx.Err() == nil {
-		p, ok := s.next()
+		var p Probe
+		var ok bool
+		if s.crossYear {
+			if s.invalid || s.asked >= maxAsks {
+				break
+			}
+			p, ok = nextCrossYear(bank, s.rows, today)
+		} else {
+			p, ok = s.next()
+		}
 		if !ok {
 			break
 		}
@@ -810,6 +826,12 @@ func check(ctx context.Context, c gateway.Client, model string, timeout int, s *
 	verdict := s.verdict(nowFn())
 	verdict.Attempts = attempts
 	verdict.Protocol = protocol
+	if s.crossYear {
+		verdict = crossYearVerdict(verdict, s.asked >= maxAsks)
+		if ctx.Err() != nil {
+			return InterruptCrossYear(verdict), ctx.Err()
+		}
+	}
 	if verdict.Status == "error" {
 		return verdict, fmt.Errorf("知识截止探针没有拿到有效回答")
 	}

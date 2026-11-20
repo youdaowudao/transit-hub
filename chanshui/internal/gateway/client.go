@@ -72,6 +72,8 @@ type CallRequest struct {
 	// TimeoutSeconds overrides the per-request timeout when > 0. When 0 the
 	// request runs under the context deadline only.
 	TimeoutSeconds int
+	// CaptureCacheUsage records field provenance for verified cache reports.
+	CaptureCacheUsage bool
 }
 
 // thinkingDisplayUpdatesBeta gates thinking.display="updates". Without it the
@@ -126,6 +128,7 @@ type Metrics struct {
 	EffortFallback     bool
 	CacheReadReported  bool
 	CacheWriteReported bool
+	CacheUsage         *CacheUsage `json:"-"`
 	Status             int
 	Ms                 int64
 	Err                string
@@ -328,6 +331,9 @@ func (c *Client) callMessagesOnce(ctx context.Context, req CallRequest) (Metrics
 		Status: httpResp.StatusCode, Protocol: "messages",
 		Ms:  time.Since(start).Milliseconds(),
 		Via: "direct",
+	}
+	if req.CaptureCacheUsage {
+		m.CacheUsage = &CacheUsage{}
 	}
 	m.CacheHeader = firstNonEmpty(httpResp.Header.Get("x-cache"), httpResp.Header.Get("cf-cache-status"))
 
@@ -541,6 +547,9 @@ func parseMessagesBody(raw []byte, m *Metrics) error {
 	m.CacheRead = resp.Usage.CacheReadInputTokens
 	if resp.Usage.OutputTokensDetails != nil {
 		m.ThinkingTokens = resp.Usage.OutputTokensDetails.ThinkingTokens
+	}
+	if m.CacheUsage != nil {
+		m.CacheUsage.merge(messagesCacheUsage(usageFields), false)
 	}
 	return nil
 }

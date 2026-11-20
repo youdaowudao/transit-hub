@@ -60,3 +60,32 @@ it('完整新版只显示实际型号公开日期，旧路径与部分选题无�
   result.boundary_review = {status:'unconfirmed',reason:'retry_pending'}
   expect(knowledgeDateComparison('gpt-6-astra',result)).not.toContain('答对了多道')
 })
+
+it('跨年报告未确认时只给声明型号日期，确认后使用后端复核的范围', () => {
+  const result = observations(
+    event('2025-11-04', 'unknown'), event('2026-01-31', 'know'),
+    event('2026-04-12', 'know'), event('2026-04-26', 'unknown'), event('2026-05-16', 'unknown'),
+  )
+  result.status = 'unknown'
+  result.boundary_review = { method: 'cross_year', status: 'unconfirmed', reason: 'conflict' }
+  expect(knowledgeDateComparison('chat-latest', result)).toBe('Chat Latest（chat-latest） 的公开知识截止日期为 2026-04-20。')
+  expect(knowledgeDateComparison('gpt-unlisted', result)).toBeUndefined()
+  result.status = 'estimated'
+  result.boundary_review = { method: 'cross_year', status: 'two_unknown', reason: 'two_unknown', from: '2026-04-12', to: '2026-04-26' }
+  expect(knowledgeDateComparison('chat-latest', result)).toContain('本轮知识表现接近 GPT-6 Sol、Chat Latest')
+  expect(knowledgeDateComparison('chat-latest', result)).not.toContain('互相冲突')
+  result.boundary_review.to = '2025-11-04'
+  expect(knowledgeDateComparison('chat-latest', result)).not.toContain('本轮知识表现')
+})
+
+it('跨年报告只有独立的较晚正答可提示核对，早期未知或失败抑制提示', () => {
+  const result = observations(event('2026-05-16', 'know'), event('2026-05-20', 'know'))
+  result.status = 'unknown'
+  result.boundary_review = { method: 'cross_year', status: 'unconfirmed', reason: 'no_anchor' }
+  expect(knowledgeDateComparison('gpt-6.1-sol', result)).toContain('答对了多道')
+  result.rows!.push(event('2025-11-04', 'unknown'))
+  expect(knowledgeDateComparison('gpt-6.1-sol', result)).not.toContain('答对了多道')
+  result.rows!.pop()
+  result.boundary_review.reason = 'main_error'
+  expect(knowledgeDateComparison('gpt-6.1-sol', result)).not.toContain('答对了多道')
+})

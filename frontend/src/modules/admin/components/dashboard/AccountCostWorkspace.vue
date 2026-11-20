@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { AlertTriangle, ArrowLeft, ArrowRight, ExternalLink, Loader2, Plus, RefreshCw, Save, Search, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
@@ -62,7 +62,7 @@ const props = defineProps<{
   profitMargin?: number | null
   summary?: AdditionalCostSummary | null
   initialTab?: WorkspaceTab
-  // 从首页“记一笔成本”进入时直接展开录入表单；从其他入口进入只看结果。
+  // 首页直达：today 展开手工成本，rules 展开客户赠送；其他入口沿原查看方式。
   openCostForm?: boolean
   workspaceId: string
 }>()
@@ -108,6 +108,9 @@ const discountEditNotice = ref('')
 const giftLedger = ref<GiftLedgerOverview | null>(null)
 const giftLedgerLoadError = ref('')
 const giftEditing = ref<GiftLedgerRecord | null>(null)
+const giftFormElement = ref<HTMLElement | null>(null)
+// 原生数字框的未完整数字也会传出空值，需要保留当前有效性，避免把它当作实付 0。
+const giftBadInputFields = ref<string[]>([])
 const giftCheck = ref<GiftLedgerCustomerCheck | null>(null)
 const giftCheckError = ref('')
 const selectedDetail = ref<AccountAssetDetail | null>(null)
@@ -463,6 +466,7 @@ const resetWorkspaceData = () => {
   giftEditing.value = null
   giftCheck.value = null
   giftCheckError.value = ''
+  giftBadInputFields.value = []
   Object.assign(giftForm, { mainUserId: '', rechargeDate: today(), paidAmount: '0', giftAmount: '', note: '' })
   assetPage.value = 1
   assetHasMore.value = false
@@ -658,6 +662,8 @@ const loadDiscountHistory = async (request = currentWorkspaceRequest(), generati
 // 单独客户赠送记录：随成本规则一起加载。加载失败时区块显示原因，并像其他历史一样交给上层提示。
 const loadGiftLedger = async (request = currentWorkspaceRequest(), generation = costReadGeneration.value) => {
   if (!isCurrentCostRead(request, generation)) return null
+  // 进入规则页时不沿用旧支持状态；同页重载不提前清空旧列表。
+  if (loading.value) giftLedger.value = null
   giftLedgerLoadError.value = ''
   try {
     const overview = await getGiftLedger()
@@ -741,6 +747,7 @@ watch(() => props.open, (open) => {
 	const changed = activeTab.value !== nextTab
 	activeTab.value = nextTab
 	costFormOpen.value = nextTab === 'today' && props.openCostForm === true
+  if (nextTab === 'rules' && props.openCostForm) startGiftRecord()
   selectedDetail.value = null
   ledgerFilters.from = today()
   ledgerFilters.to = today()
@@ -1160,10 +1167,44 @@ const giftNeedsReload = (error: unknown) => {
 const giftAmount = (value: string) => (String(value).trim() === '' ? 0 : Number(value))
 const giftSharePercent = (share: number) => `${Number((share * 100).toFixed(2))}%`
 const giftStateText = (state: string) => ({ unused: '未开始用', using: '正在用', used_up: '已用完' } as Record<string, string>)[state] ?? ''
+const syncGiftAmountValidity = (event?: Event) => {
+  const invalid = Array.from(giftFormElement.value?.querySelectorAll<HTMLInputElement>('input[type="number"]') ?? [])
+    .filter(input => input.validity.badInput)
+  // 失焦可能把不完整数字归为空串，只有用户再次编辑该字段时才清除原来的无效标记。
+  const edited = event?.type === 'input' && event.target instanceof HTMLInputElement
+    ? event.target.getAttribute('aria-label') : null
+  const retained = giftBadInputFields.value.filter(label => label !== edited)
+  giftBadInputFields.value = Array.from(new Set([...retained, ...invalid.map(input => input.getAttribute('aria-label') || '金额')]))
+  return giftBadInputFields.value
+}
 const resetGiftForm = () => {
   giftEditing.value = null
+  giftBadInputFields.value = []
+  // model 已为空时，仍需清除数字框中尚未完成、无法通过 value 读出的文字。
+  giftFormElement.value?.querySelectorAll<HTMLInputElement>('input[type="number"]').forEach(input => {
+    if (input.validity.badInput) input.value = ''
+  })
   Object.assign(giftForm, { mainUserId: '', rechargeDate: today(), paidAmount: '0', giftAmount: '', note: '' })
 }
+const giftCreditPreview = computed(() => {
+  if (giftBadInputFields.value.length) return null
+  const amounts = [giftAmount(giftForm.paidAmount), giftAmount(giftForm.giftAmount)]
+  if (amounts.some(value => !Number.isFinite(value) || value < 0 || value > 10_000_000
+    || Math.abs(value * 100 - Math.round(value * 100)) > 1e-6)) return null
+  const paidCents = Math.round(amounts[0]! * 100)
+  const giftCents = Math.round(amounts[1]! * 100)
+  if (paidCents + giftCents <= 0) return null
+  return { paid: paidCents / 100, gift: giftCents / 100, total: (paidCents + giftCents) / 100 }
+})
+const focusGiftForm = async () => {
+  const request = currentWorkspaceRequest()
+  await nextTick()
+  if (!props.open || !isCurrentWorkspaceRequest(request) || activeTab.value !== 'rules') return
+  const element = giftFormElement.value
+  element?.scrollIntoView?.({ block: 'start', inline: 'nearest' })
+  element?.querySelector<HTMLInputElement>('input:not(:disabled)')?.focus({ preventScroll: true })
+}
+watch(giftFormElement, element => { if (element) void focusGiftForm() }, { flush: 'post' })
 const giftEditNotice = computed(() => giftEditing.value
   ? `正在编辑 ${giftEditing.value.email} ${giftEditing.value.rechargeDate} 的记录：主站用户不能改，要换用户请删除后重新录入。保存后今天起按改后的记录重新推算，已经结算的日期不变。`
   : '')
@@ -1175,7 +1216,7 @@ const giftCustomerTodayText = (customer: GiftLedgerCustomer) => {
 }
 const giftBalanceWarning = (customer: GiftLedgerCustomer) => {
   if (customer.mainBalance == null || customer.remaining == null || customer.mainBalance + 1 >= customer.remaining) return ''
-  return `主站余额比按记录剩余少 ${formatAmount(customer.remaining - customer.mainBalance)}：可能有退款、管理员扣了余额或记录填多了，请核对后修改记录；改正前这位客户的赠送可能扣多了。`
+  return `主站余额比按记录剩余少 ${formatAmount(customer.remaining - customer.mainBalance)}：请先检查是否把到账总额填进了赠送金额，再核对是否有退款、管理员扣余额或录入金额不符；改正前这位客户的赠送可能扣多了。`
 }
 const giftCheckText = computed(() => {
   const check = giftCheck.value
@@ -1197,15 +1238,29 @@ const checkGiftCustomer = async () => {
     if (isCurrentWorkspaceRequest(request)) giftCheckError.value = giftFailureText(error, '查询', mainUserId)
   } finally { if (isCurrentWorkspaceRequest(request)) saving.value = false }
 }
+const startGiftRecord = (customer?: GiftLedgerCustomer) => {
+  if (saving.value) return
+  if (customer || giftEditing.value) {
+    resetGiftForm()
+    giftCheck.value = null
+    giftCheckError.value = ''
+  }
+  if (customer) giftForm.mainUserId = customer.mainUserId
+  openRuleEditor('gift')
+  selectTab('rules')
+  if (giftFormElement.value) void focusGiftForm()
+}
 const editGiftRecord = (record: GiftLedgerRecord) => {
   if (saving.value) return
   clearCostNotice()
   errorText.value = ''
   giftCheck.value = null
   giftCheckError.value = ''
+  giftBadInputFields.value = []
   openRuleEditor('gift')
   giftEditing.value = record
   Object.assign(giftForm, { mainUserId: record.mainUserId, rechargeDate: record.rechargeDate, paidAmount: String(record.paidAmount), giftAmount: String(record.giftAmount), note: record.note })
+  if (giftFormElement.value) void focusGiftForm()
 }
 const cancelGiftEdit = () => { if (!saving.value) resetGiftForm() }
 // 切换或收起规则表单时，丢掉被收起表单里“正在编辑”的状态，避免看不见的编辑继续生效。
@@ -1218,6 +1273,7 @@ const openRuleEditor = (editor: RuleEditor) => {
 const toggleRuleEditor = (editor: Exclude<RuleEditor, ''>) => {
   if (saving.value) return
   openRuleEditor(ruleEditor.value === editor ? '' : editor)
+  if (ruleEditor.value === 'gift' && giftFormElement.value) void focusGiftForm()
 }
 const toggleAssetEditor = (editor: 'link' | 'event') => {
   if (!saving.value) assetEditor.value = assetEditor.value === editor ? '' : editor
@@ -1239,7 +1295,7 @@ const hiddenGiftCustomerCount = computed(() => Math.max(0, (giftLedger.value?.cu
 const ledgerHasExtraFilters = computed(() => Boolean(ledgerFilters.platform || ledgerFilters.channel || ledgerFilters.batchId || ledgerFilters.accountAssetId))
 const submitGiftRecord = async () => {
   if (saving.value || !giftLedgerSupported.value) return
-  clearCostNotice()
+  if (syncGiftAmountValidity().length) return
   const editing = giftEditing.value
   const paidAmount = giftAmount(giftForm.paidAmount)
   const giftValue = giftAmount(giftForm.giftAmount)
@@ -1247,6 +1303,10 @@ const submitGiftRecord = async () => {
     errorText.value = giftKeyText('invalidAmount', '没有保存', '') ?? ''
     return
   }
+  const preview = giftCreditPreview.value
+  if (preview && preview.paid > 0 && preview.gift >= preview.paid
+    && !window.confirm(`这笔实付 ${formatAmount(preview.paid)}、赠送 ${formatAmount(preview.gift)}，合计到账 ${formatAmount(preview.total)}。是否把到账总额填进了赠送金额？例如充 200 送 15，赠送应填 15。金额无误请点‘确定’保存；点‘取消’返回修改。这里只记账，不会修改主站余额。`)) return
+  clearCostNotice()
   const input = { mainUserId: giftForm.mainUserId.trim(), rechargeDate: giftForm.rechargeDate, paidAmount, giftAmount: giftValue, note: giftForm.note }
   const request = currentWorkspaceRequest()
   costReadGeneration.value += 1
@@ -1379,14 +1439,18 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
   <Teleport to="body">
     <div v-if="open" class="fixed inset-0 z-[160]">
       <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="requestClose" />
-      <section role="dialog" aria-modal="true" aria-label="成本与买号" class="absolute inset-y-0 right-0 flex w-full max-w-6xl flex-col border-l border-border/60 bg-card shadow-2xl">
+      <section role="dialog" aria-modal="true" aria-label="成本与买号" class="cost-workspace absolute inset-y-0 right-0 flex w-full max-w-6xl flex-col border-l border-border/60 bg-card shadow-2xl">
         <header class="flex shrink-0 items-center justify-between border-b border-border/60 px-4 py-3 sm:px-6">
           <div><h2 class="text-base font-semibold text-foreground">成本与买号</h2><p class="mt-0.5 text-xs text-muted-foreground">{{ businessDate }} · 经营成本、账号资产与历史账本</p></div>
           <button type="button" class="rounded-md p-2 text-muted-foreground hover:bg-surface-elevated hover:text-foreground" title="关闭" :disabled="saving" @click="requestClose"><X class="h-5 w-5" /></button>
         </header>
 
-        <nav class="flex shrink-0 gap-1 overflow-x-auto border-b border-border/60 px-4 py-2 sm:px-6">
+        <nav class="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/60 px-4 py-2 sm:px-6">
+          <div class="flex min-w-0 flex-1 gap-1 overflow-x-auto">
           <button v-for="tab in tabs" :key="tab.key" type="button" class="h-9 shrink-0 rounded-md px-3 text-sm font-medium transition-colors" :class="activeTab === tab.key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-surface-elevated hover:text-foreground'"  :disabled="saving" @click="selectTab(tab.key)">{{ tab.label }}</button>
+          </div>
+          <Button type="button" variant="secondary" :disabled="saving || (activeTab === 'rules' && !giftLedgerSupported)" @click="startGiftRecord()"><Plus class="h-4 w-4" />记客户赠送</Button>
+          <p class="w-full text-xs text-muted-foreground">直接填写客户赠送记录，只影响本站统计，不会修改主站。</p>
         </nav>
 
         <main class="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6">
@@ -1618,8 +1682,30 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
             <div class="rounded-lg border border-border/60 p-4" data-testid="gift-ledger-section">
               <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div class="min-w-0 flex-1"><h3 class="text-sm font-semibold">单独客户赠送记录（从营收中扣除）</h3><p class="mt-1 text-xs text-muted-foreground">少数客户每次赠送比例不同时，每送一笔记一笔；已记录的部分按每笔的赠送占比扣，不再按整站折扣率。只读主站消费，不会修改主站。</p><p v-if="giftLedgerSummaryText" class="mt-2 text-sm font-medium" data-testid="gift-ledger-summary">{{ giftLedgerSummaryText }}</p></div><Button type="button" size="sm" class="shrink-0 self-start" :variant="ruleEditor === 'gift' ? 'ghost' : 'secondary'" :disabled="saving || (!giftLedgerSupported && ruleEditor !== 'gift')" @click="toggleRuleEditor('gift')">{{ ruleEditor === 'gift' ? '收起' : '新增一笔' }}</Button></div>
               <p class="mt-2 text-xs text-warning">估算上面的整站折扣率时，不要再把这些客户的赠送算进去，否则会重复扣除。</p><p v-if="giftLedger && !giftLedger.supported" role="status" class="mt-2 text-sm text-destructive">当前主站不是 Sub2API，不能按客户查询消费，暂不支持单独客户赠送记录。</p>
-              <div v-if="ruleEditor === 'gift'" class="mt-3 space-y-3 border-t border-border/50 pt-3"><p class="text-xs text-muted-foreground">少数客户每次赠送比例不同（例如充 100 送 20）时，在这里每送一笔记一笔。这些客户花钱时先用最早的充值：花到已记录的部分，按那一笔的赠送占比从营收中扣除，不再按整站折扣率；花超过已记录到账总额的部分，是他自己充的钱，按整站折扣率计算。只读主站消费，不会修改主站。</p><div class="grid gap-3 sm:grid-cols-5" @input="clearCostNotice" @change="clearCostNotice"><label class="space-y-1 text-xs text-muted-foreground"><span>主站用户 ID</span><Input v-model="giftForm.mainUserId" :disabled="saving || !giftLedgerSupported || !!giftEditing" aria-label="主站用户 ID" inputmode="numeric" placeholder="主站用户 ID" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>充值日期</span><Input v-model="giftForm.rechargeDate" :disabled="saving || !giftLedgerSupported" aria-label="充值日期" type="date" :max="today()" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>实付金额</span><Input v-model="giftForm.paidAmount" :disabled="saving || !giftLedgerSupported" aria-label="实付金额" type="number" min="0" step="0.01" placeholder="实付金额" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>赠送金额</span><Input v-model="giftForm.giftAmount" :disabled="saving || !giftLedgerSupported" aria-label="赠送金额" type="number" min="0" step="0.01" placeholder="赠送金额" /></label><label class="space-y-1 text-xs text-muted-foreground"><span>备注（可选）</span><Input v-model="giftForm.note" :disabled="saving || !giftLedgerSupported" aria-label="备注（可选）" maxlength="200" placeholder="备注（可选）" /></label></div><div class="flex flex-wrap items-center gap-2"><Button v-if="!giftEditing" type="button" variant="secondary" :disabled="saving || !giftLedgerSupported" @click="checkGiftCustomer"><Search class="mr-2 h-4 w-4" />查询这个用户</Button><Button type="button" :disabled="saving || !giftLedgerSupported" @click="submitGiftRecord"><Save class="mr-2 h-4 w-4" />{{ giftEditing ? '保存修改' : '保存记录' }}</Button><Button v-if="giftEditing" type="button" variant="secondary" :disabled="saving" @click="cancelGiftEdit">取消编辑</Button></div><p v-if="giftEditNotice" role="status" class="text-xs text-warning">{{ giftEditNotice }}</p><p v-if="giftCheckText" role="status" class="text-sm">{{ giftCheckText }}</p><p v-if="giftCheckError" role="alert" class="text-sm text-destructive">{{ giftCheckError }}</p><p class="text-xs text-muted-foreground">赠送填这次多给的全部余额（包括主站自动送的）。实付默认 0，只填赠送也可以：这一笔到账就只算赠送金额，照样按先充先用，轮到这一笔时花的钱全部当作赠送从营收扣除。知道实付就填上更准：按赠送占到账的比例分摊扣除，实付那部分也算在这一笔里，不会再按整站折扣率重复扣。主站用户 ID 是主站后台用户列表里的数字，保存前可点“查询这个用户”核对邮箱。充值日期最早可填 60 天前，不能晚于今天。补录过去日期的充值时，从那天起他已经花掉的部分会自动算作用掉了；那些日子已经结算过，按整站折扣率计算，不再补扣。更早的充值请按今天零点的剩余录入，日期填今天；剩余来自几笔比例不同的充值时，按先充先用算出每笔还剩多少，分别录入，先录早的。修改或删除只影响今天和还没结算的日期，已经结算的日期不变。</p></div>
-              <div v-if="giftLedgerLoadError" class="mt-3 space-y-2 text-sm text-destructive"><p>单独客户赠送记录加载失败：{{ giftLedgerLoadError }}</p><Button v-if="!costReloadNeeded" type="button" size="sm" variant="secondary" :disabled="saving" @click="retryCostRead">重新加载费用</Button></div><template v-else-if="giftLedger"><div v-if="giftLedger.supported && !giftLedger.statusAvailable && giftLedger.customers.length" class="mt-3 space-y-2"><p role="status" class="text-sm text-warning">暂时查不到主站消费，下面只显示记录本身：{{ giftLedger.statusError }}。请稍后点击‘重新加载费用’；不会修改主站。</p><Button v-if="!costReloadNeeded" type="button" size="sm" variant="secondary" :disabled="saving" @click="retryCostRead">重新加载费用</Button></div><div v-if="giftLedger.customers.length" class="mt-3 divide-y divide-border/50 rounded-md border border-border/50"><details v-for="customer in visibleGiftCustomers" :key="customer.mainUserId" class="px-3 py-2 text-sm" :open="Boolean(giftBalanceWarning(customer))" data-testid="gift-ledger-customer"><summary class="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2"><span class="min-w-0 truncate font-medium">{{ customer.email }}（主站 ID {{ customer.mainUserId }}）</span><span class="text-xs text-muted-foreground tabular-nums"><AlertTriangle v-if="giftBalanceWarning(customer)" class="mr-1 inline h-3.5 w-3.5 text-warning" />{{ customer.records.length }} 笔 · 剩余 {{ formatAmount(customer.remaining) }} / 到账 {{ formatAmount(customer.creditedTotal) }}</span></summary><div class="mt-2 border-t border-border/40 pt-2"><p class="mt-1">已记录到账 <strong class="text-base tabular-nums">{{ formatAmount(customer.creditedTotal) }}</strong> · 累计已用 <strong class="text-base tabular-nums">{{ formatAmount(customer.usedTotal) }}</strong> · 按记录剩余 <strong class="text-base tabular-nums">{{ formatAmount(customer.remaining) }}</strong></p><p v-if="giftCustomerTodayText(customer)" class="mt-1 text-muted-foreground">{{ giftCustomerTodayText(customer) }}</p><p class="mt-1 text-muted-foreground">主站当前余额 {{ formatAmount(customer.mainBalance) }}</p><p v-if="giftBalanceWarning(customer)" role="alert" class="mt-1 text-xs text-warning"><AlertTriangle class="mr-1 inline h-3.5 w-3.5" />{{ giftBalanceWarning(customer) }}</p><div class="mt-2 divide-y divide-border/50"><div v-for="record in customer.records" :key="record.id" class="flex flex-wrap items-center justify-between gap-2 py-2" data-testid="gift-ledger-record"><span>{{ record.rechargeDate }} · 实付 {{ formatAmount(record.paidAmount) }} · 赠送 {{ formatAmount(record.giftAmount) }}（占到账 {{ giftSharePercent(record.giftShare) }}）· 已用 {{ formatAmount(record.usedAmount) }}/{{ formatAmount(record.creditAmount) }}{{ giftStateText(record.state) ? ` · ${giftStateText(record.state)}` : '' }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving || !giftLedgerSupported" :aria-label="`编辑 ${record.email} ${record.rechargeDate} 的记录`" @click="editGiftRecord(record)">编辑</Button><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${record.email} ${record.rechargeDate} 的记录`" @click="removeGiftRecord(record)">删除</Button></span><span v-if="record.note" class="w-full text-xs text-muted-foreground">{{ record.note }}</span></div></div></div></details><div v-if="hiddenGiftCustomerCount && !giftHiddenHasWarning" class="px-3 py-2"><Button type="button" size="sm" variant="ghost" @click="giftShowAll = !giftShowAll">{{ giftShowAll ? '只显示前 ' + giftCustomerPreviewCount + ' 位客户' : '展开其余 ' + hiddenGiftCustomerCount + ' 位客户' }}</Button></div></div></template>
+              <div v-if="ruleEditor === 'gift' && giftLedgerSupported && (giftLedger?.supported || giftLedgerLoadError)" ref="giftFormElement" class="mt-3 scroll-mt-4 space-y-3 border-t border-border/50 pt-3">
+                <p class="text-sm text-muted-foreground">赠送只填额外送的钱。例如充 200 送 15，赠送填 15；215 是到账合计。实付默认 0，只填赠送也可以。这里只记账，不会修改主站余额。</p>
+                <div class="grid gap-4 sm:grid-cols-2" @input="syncGiftAmountValidity($event); clearCostNotice()" @change="syncGiftAmountValidity($event); clearCostNotice()">
+                  <label class="space-y-1 text-sm text-muted-foreground"><span>主站用户 ID</span><Input v-model="giftForm.mainUserId" :disabled="saving || !giftLedgerSupported || !!giftEditing" aria-label="主站用户 ID" inputmode="numeric" placeholder="主站用户 ID" /></label>
+                  <label class="space-y-1 text-sm text-muted-foreground"><span>充值日期</span><Input v-model="giftForm.rechargeDate" :disabled="saving || !giftLedgerSupported" aria-label="充值日期" type="date" :max="today()" /></label>
+                  <label class="space-y-1 text-sm text-muted-foreground"><span>实付金额</span><Input v-model="giftForm.paidAmount" :disabled="saving || !giftLedgerSupported" aria-label="实付金额" type="number" min="0" step="0.01" placeholder="实付金额" /></label>
+                  <label class="space-y-1 text-sm text-muted-foreground"><span>赠送金额</span><Input v-model="giftForm.giftAmount" :disabled="saving || !giftLedgerSupported" aria-label="赠送金额" type="number" min="0" step="0.01" placeholder="赠送金额" /></label>
+                  <label class="space-y-1 text-sm text-muted-foreground sm:col-span-2"><span>备注（可选）</span><Input v-model="giftForm.note" :disabled="saving || !giftLedgerSupported" aria-label="备注（可选）" maxlength="200" placeholder="备注（可选）" /></label>
+                </div>
+                <p v-if="giftCreditPreview" class="rounded-md bg-surface-elevated px-3 py-3 font-medium" data-testid="gift-credit-preview">实付 {{ formatAmount(giftCreditPreview.paid) }} ＋ 赠送 {{ formatAmount(giftCreditPreview.gift) }} ＝ 本笔到账 {{ formatAmount(giftCreditPreview.total) }}。这里只记账，不会修改主站余额。</p>
+                <p v-else class="text-sm text-muted-foreground">填写有效的实付或赠送金额后显示到账合计。</p>
+                <p v-if="giftBadInputFields.length" role="alert" class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">记录没有保存：{{ giftBadInputFields.join('和') }}还没有输入完整，请重新填写有效数字后再保存。其他已填内容保留，修正后可以重试；不会修改主站余额。</p>
+                <div class="flex flex-wrap items-center gap-2">
+                  <Button v-if="!giftEditing" type="button" variant="secondary" :disabled="saving || !giftLedgerSupported" @click="checkGiftCustomer"><Search class="mr-2 h-4 w-4" />查询这个用户</Button>
+                  <Button type="button" :disabled="saving || !giftLedgerSupported" @click="submitGiftRecord"><Save class="mr-2 h-4 w-4" />{{ giftEditing ? '保存修改' : '保存记录' }}</Button>
+                  <Button v-if="giftEditing" type="button" variant="secondary" :disabled="saving" @click="cancelGiftEdit">取消编辑</Button>
+                </div>
+                <p v-if="giftEditNotice" role="status" class="text-xs text-warning">{{ giftEditNotice }}</p>
+                <p v-if="giftCheckText" role="status" class="text-sm">{{ giftCheckText }}</p>
+                <p v-if="giftCheckError" role="alert" class="text-sm text-destructive">{{ giftCheckError }}</p>
+                <details class="text-sm text-muted-foreground"><summary class="cursor-pointer">补录、纯赠送和计算说明</summary><div class="mt-2 space-y-2"><p>少数客户每次赠送比例不同（例如充 100 送 20）时，在这里每送一笔记一笔。这些客户花钱时先用最早的充值：花到已记录的部分，按那一笔的赠送占比从营收中扣除，不再按整站折扣率；花超过已记录到账总额的部分，是他自己充的钱，按整站折扣率计算。只读主站消费，不会修改主站。</p><p>赠送填这次多给的全部余额（包括主站自动送的）。实付默认 0，只填赠送也可以：这一笔到账就只算赠送金额，照样按先充先用，轮到这一笔时花的钱全部当作赠送从营收扣除。知道实付就填上更准：按赠送占到账的比例分摊扣除，实付那部分也算在这一笔里，不会再按整站折扣率重复扣。主站用户 ID 是主站后台用户列表里的数字，保存前可点“查询这个用户”核对邮箱。充值日期最早可填 60 天前，不能晚于今天。补录过去日期的充值时，从那天起他已经花掉的部分会自动算作用掉了；那些日子已经结算过，按整站折扣率计算，不再补扣。更早的充值请按今天零点的剩余录入，日期填今天；剩余来自几笔比例不同的充值时，按先充先用算出每笔还剩多少，分别录入，先录早的。修改或删除只影响今天和还没结算的日期，已经结算的日期不变。</p></div></details>
+              </div>
+              <p v-if="giftLedger?.customers.length" class="mt-2 text-xs text-muted-foreground">点‘再记一笔’会带入这位客户的 ID，金额需要重新填写；这里只记账，不会修改主站。</p>
+              <div v-if="giftLedgerLoadError" class="mt-3 space-y-2 text-sm text-destructive"><p>单独客户赠送记录加载失败：{{ giftLedgerLoadError }}</p><Button v-if="!costReloadNeeded" type="button" size="sm" variant="secondary" :disabled="saving" @click="retryCostRead">重新加载费用</Button></div><template v-else-if="giftLedger"><div v-if="giftLedger.supported && !giftLedger.statusAvailable && giftLedger.customers.length" class="mt-3 space-y-2"><p role="status" class="text-sm text-warning">暂时查不到主站消费，下面只显示记录本身：{{ giftLedger.statusError }}。请稍后点击‘重新加载费用’；不会修改主站。</p><Button v-if="!costReloadNeeded" type="button" size="sm" variant="secondary" :disabled="saving" @click="retryCostRead">重新加载费用</Button></div><div v-if="giftLedger.customers.length" class="mt-3 divide-y divide-border/50 rounded-md border border-border/50"><details v-for="customer in visibleGiftCustomers" :key="customer.mainUserId" class="px-3 py-2 text-sm" :open="Boolean(giftBalanceWarning(customer))" data-testid="gift-ledger-customer"><summary class="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2"><span class="min-w-0 truncate font-medium">{{ customer.email }}（主站 ID {{ customer.mainUserId }}）</span><span class="text-xs text-muted-foreground tabular-nums"><AlertTriangle v-if="giftBalanceWarning(customer)" class="mr-1 inline h-3.5 w-3.5 text-warning" />{{ customer.records.length }} 笔 · 剩余 {{ formatAmount(customer.remaining) }} / 到账 {{ formatAmount(customer.creditedTotal) }}</span><Button type="button" size="sm" variant="secondary" :disabled="saving || !giftLedgerSupported" :aria-label="`给 ${customer.email} 再记一笔`" @click.stop.prevent="startGiftRecord(customer)">再记一笔</Button></summary><div class="mt-2 border-t border-border/40 pt-2"><p class="mt-1">已记录到账 <strong class="text-base tabular-nums">{{ formatAmount(customer.creditedTotal) }}</strong> · 累计已用 <strong class="text-base tabular-nums">{{ formatAmount(customer.usedTotal) }}</strong> · 按记录剩余 <strong class="text-base tabular-nums">{{ formatAmount(customer.remaining) }}</strong></p><p v-if="giftCustomerTodayText(customer)" class="mt-1 text-muted-foreground">{{ giftCustomerTodayText(customer) }}</p><p class="mt-1 text-muted-foreground">主站当前余额 {{ formatAmount(customer.mainBalance) }}</p><p v-if="giftBalanceWarning(customer)" role="alert" class="mt-1 text-xs text-warning"><AlertTriangle class="mr-1 inline h-3.5 w-3.5" />{{ giftBalanceWarning(customer) }}</p><div class="mt-2 divide-y divide-border/50"><div v-for="record in customer.records" :key="record.id" class="flex flex-wrap items-center justify-between gap-2 py-2" data-testid="gift-ledger-record"><span>{{ record.rechargeDate }} · 实付 {{ formatAmount(record.paidAmount) }} · 赠送 {{ formatAmount(record.giftAmount) }}（占到账 {{ giftSharePercent(record.giftShare) }}）· 已用 {{ formatAmount(record.usedAmount) }}/{{ formatAmount(record.creditAmount) }}{{ giftStateText(record.state) ? ` · ${giftStateText(record.state)}` : '' }}</span><span class="flex gap-2"><Button type="button" size="sm" variant="secondary" :disabled="saving || !giftLedgerSupported" :aria-label="`编辑 ${record.email} ${record.rechargeDate} 的记录`" @click="editGiftRecord(record)">编辑</Button><Button type="button" size="sm" variant="secondary" :disabled="saving" :aria-label="`删除 ${record.email} ${record.rechargeDate} 的记录`" @click="removeGiftRecord(record)">删除</Button></span><span v-if="record.note" class="w-full text-xs text-muted-foreground">{{ record.note }}</span></div></div></div></details><div v-if="hiddenGiftCustomerCount && !giftHiddenHasWarning" class="px-3 py-2"><Button type="button" size="sm" variant="ghost" @click="giftShowAll = !giftShowAll">{{ giftShowAll ? '只显示前 ' + giftCustomerPreviewCount + ' 位客户' : '展开其余 ' + hiddenGiftCustomerCount + ' 位客户' }}</Button></div></div></template>
             </div>
             <details class="rounded-lg border border-border/60 p-4"><summary class="cursor-pointer text-sm font-semibold">核算说明</summary><dl class="mt-3 space-y-3 text-sm"><div><dt class="font-medium">替代上游成本</dt><dd class="mt-1 text-muted-foreground">购买价包含额度时，从上游直接成本扣除该账号已核对的 Key 成本，再计入买号确认成本。</dd></div><div><dt class="font-medium">叠加上游成本</dt><dd class="mt-1 text-muted-foreground">购买价是订阅或接入费时，买号确认成本与关联上游按量成本同时计入。</dd></div><div><dt class="font-medium">历史成本更正</dt><dd class="mt-1 text-muted-foreground">手工成本可以编辑或删除整笔费用，操作后会重新计算受影响日期的成本和利润，不会修改主站；买号购买、退款和状态请到买号资产处理。</dd></div></dl></details>
           </section>
@@ -1628,3 +1714,53 @@ const eventSummary = (event: AccountAssetDetail['events'][number]) => {
     </div>
   </Teleport>
 </template>
+
+
+<style scoped>
+.cost-workspace {
+  font-size: 1rem;
+  line-height: 1.5rem;
+}
+.cost-workspace :deep(.text-xs) {
+  font-size: 0.875rem;
+  line-height: 1.5rem;
+}
+.cost-workspace :deep(.text-sm) {
+  font-size: 1rem;
+  line-height: 1.5rem;
+}
+.cost-workspace :deep(.text-base) {
+  font-size: 1.125rem;
+  line-height: 1.75rem;
+}
+.cost-workspace :deep(.text-lg) {
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+}
+.cost-workspace :deep(.text-xl) {
+  font-size: 1.5rem;
+  line-height: 2rem;
+}
+.cost-workspace h2.font-semibold {
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+}
+.cost-workspace h3.font-semibold,
+.cost-workspace h4.font-semibold {
+  font-size: 1.125rem;
+  line-height: 1.75rem;
+}
+.cost-workspace :deep(button),
+.cost-workspace :deep(input:not([type='checkbox']):not([type='radio'])),
+.cost-workspace :deep(select),
+.cost-workspace :deep(textarea) {
+  min-height: 2.75rem;
+  font-size: 1rem;
+}
+.cost-workspace :deep(input),
+.cost-workspace :deep(select),
+.cost-workspace :deep(textarea) {
+  min-width: 0;
+  max-width: 100%;
+}
+</style>

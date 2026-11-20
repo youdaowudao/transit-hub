@@ -117,7 +117,7 @@ const openUpstreamBalanceBreakdown = () => { upstreamBalanceBreakdownOpen.value 
 const closeUpstreamBalanceBreakdown = () => { upstreamBalanceBreakdownOpen.value = false }
 const openDailyStatsPanel = () => { dailyStatsPanelOpen.value = true }
 const closeDailyStatsPanel = () => { dailyStatsPanelOpen.value = false }
-// openForm 只给首页“记一笔成本”按钮用：打开后直接展开录入表单；点数字卡片进来只看结果。
+// 首页录入入口直接展开对应表单；点数字卡片进来只看结果。
 const openAccountCostWorkspace = (tab: 'today' | 'assets' | 'ledger' | 'rules' = 'today', openForm = false) => {
 	accountCostInitialTab.value = tab
 	accountCostOpenForm.value = openForm
@@ -1138,13 +1138,17 @@ const lastProbeLabel = computed(() => {
         </section>
 
 		<section class="flex flex-col gap-3 border-y border-border/60 py-3 sm:flex-row sm:items-center sm:justify-between">
-			<div class="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1 text-sm">
+				<div class="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1 text-base">
 				<span class="font-medium text-foreground">成本构成</span>
 				<span v-for="line in homepageCostLines" :key="line.label" class="text-muted-foreground">{{ line.label }} {{ formatAmount(line.value) }}</span>
 			</div>
-			<div class="flex shrink-0 gap-2">
-				<button type="button" class="h-8 rounded-md border border-border px-3 text-xs font-medium hover:bg-surface-elevated" @click="openAccountCostWorkspace('today', true)">记一笔成本</button>
-				<button type="button" class="h-8 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90" @click="openAccountCostWorkspace('assets')">录入买号</button>
+				<div class="flex shrink-0 flex-col gap-1">
+					<div class="flex flex-wrap gap-2">
+						<button type="button" class="h-11 rounded-md border border-border px-3 text-base font-medium hover:bg-surface-elevated" @click="openAccountCostWorkspace('today', true)">记一笔成本</button>
+						<button type="button" class="h-11 rounded-md bg-primary px-3 text-base font-medium text-primary-foreground hover:bg-primary/90" @click="openAccountCostWorkspace('assets')">录入买号</button>
+						<button type="button" class="h-11 rounded-md border border-border px-3 text-base font-medium hover:bg-surface-elevated" @click="openAccountCostWorkspace('rules', true)">记客户赠送</button>
+					</div>
+					<p class="text-sm text-muted-foreground">记录客户实付和赠送，只影响本站统计，不会修改主站。</p>
 			</div>
 		</section>
 

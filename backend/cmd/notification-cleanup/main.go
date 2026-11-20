@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"transithub/backend/internal/modules/settings"
+	"transithub/backend/internal/shared/secretbox"
 )
 
 type cleanupOptions struct {
@@ -35,7 +36,9 @@ func main() {
 	flag.Parse()
 	if err := run(opts); err != nil {
 		// Database/client errors can contain connection credentials. Do not print their text.
-		if errors.Is(err, settings.ErrCleanupBackupIntegrity) {
+		if errors.Is(err, secretbox.ErrInvalidKey) || errors.Is(err, secretbox.ErrNoKey) || errors.Is(err, secretbox.ErrUndecryptable) || errors.Is(err, secretbox.ErrRandom) {
+			fmt.Fprintln(os.Stderr, "通知配置清理已停止："+err.Error()+"；本次数据库修改尚未提交。")
+		} else if errors.Is(err, settings.ErrCleanupBackupIntegrity) {
 			fmt.Fprintln(os.Stderr, "notification cleanup stopped: backup integrity validation failed")
 		} else {
 			fmt.Fprintln(os.Stderr, "notification cleanup stopped: validation, snapshot, transaction, or backup failed; no uncommitted changes were applied")
@@ -65,6 +68,10 @@ func run(opts cleanupOptions) error {
 	if err := validateOptions(opts); err != nil {
 		return err
 	}
+	box, err := secretbox.FromConfig(os.Getenv("CREDENTIAL_ENCRYPTION_KEY"))
+	if err != nil {
+		return err
+	}
 	var restore settings.CleanupPlan
 	if opts.restore != "" {
 		path, err := backupPath(opts.restore, false)
@@ -78,6 +85,10 @@ func run(opts cleanupOptions) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
+		}
+		data, err = box.Open(string(data), secretbox.AAD("notification-cleanup.backup", opts.userID, opts.workspaceID))
+		if err != nil {
+			return secretbox.At("notification-cleanup.backup", opts.userID, opts.workspaceID, opts.restore, err)
 		}
 		if json.Unmarshal(data, &restore) != nil {
 			return settings.ErrCleanupBackupIntegrity
@@ -115,7 +126,7 @@ func run(opts cleanupOptions) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	snapshot, err := readSnapshot(ctx, tx, opts.userID, opts.workspaceID, !readOnly)
+	snapshot, err := readSnapshot(ctx, tx, opts.userID, opts.workspaceID, !readOnly, box)
 	if err != nil {
 		return err
 	}
@@ -134,7 +145,7 @@ func run(opts cleanupOptions) error {
 			if !found {
 				return errors.New("rollback row missing")
 			}
-			if err := updateRow(ctx, tx, opts.userID, opts.workspaceID, change, change.Before); err != nil {
+			if err := updateRow(ctx, tx, opts.userID, opts.workspaceID, change, change.Before, box); err != nil {
 				return err
 			}
 		}
@@ -157,6 +168,11 @@ func run(opts cleanupOptions) error {
 		if err != nil {
 			return err
 		}
+		sealedBackup, err := box.Seal(backup, secretbox.AAD("notification-cleanup.backup", opts.userID, opts.workspaceID))
+		if err != nil {
+			return secretbox.At("notification-cleanup.backup", opts.userID, opts.workspaceID, opts.backup, err)
+		}
+		backup = []byte(sealedBackup)
 		file, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
 			return err
@@ -173,7 +189,7 @@ func run(opts cleanupOptions) error {
 			return err
 		}
 		for _, row := range plan.Rows {
-			if err := updateRow(ctx, tx, opts.userID, opts.workspaceID, row, row.After); err != nil {
+			if err := updateRow(ctx, tx, opts.userID, opts.workspaceID, row, row.After, box); err != nil {
 				return err
 			}
 		}
@@ -189,7 +205,7 @@ func run(opts cleanupOptions) error {
 	}{opts.apply, plan.Digest, plan.Summary})
 }
 
-func readSnapshot(ctx context.Context, tx pgx.Tx, userID, workspaceID string, lock bool) ([]settings.CleanupRow, error) {
+func readSnapshot(ctx context.Context, tx pgx.Tx, userID, workspaceID string, lock bool, boxes ...*secretbox.Box) ([]settings.CleanupRow, error) {
 	queries := []struct{ table, query string }{
 		{"notification_channel_settings", `SELECT '', settings FROM notification_channel_settings WHERE user_id=$1 AND admin_account_id=$2`},
 		{"strategy_settings", `SELECT '', settings FROM strategy_settings WHERE user_id=$1 AND admin_account_id=$2`},
@@ -213,6 +229,13 @@ func readSnapshot(ctx context.Context, tx pgx.Tx, userID, workspaceID string, lo
 				rows.Close()
 				return nil, err
 			}
+			if row.Table == "notification_channel_settings" {
+				row.Before, err = settings.OpenNotificationChannelsJSON(secretbox.Optional(boxes), userID, workspaceID, row.Before)
+				if err != nil {
+					rows.Close()
+					return nil, err
+				}
+			}
 			result = append(result, row)
 		}
 		err = rows.Err()
@@ -224,11 +247,16 @@ func readSnapshot(ctx context.Context, tx pgx.Tx, userID, workspaceID string, lo
 	return result, nil
 }
 
-func updateRow(ctx context.Context, tx pgx.Tx, userID, workspaceID string, row settings.CleanupRow, raw []byte) error {
+func updateRow(ctx context.Context, tx pgx.Tx, userID, workspaceID string, row settings.CleanupRow, raw []byte, boxes ...*secretbox.Box) error {
 	var query string
 	args := []any{userID, workspaceID, string(raw)}
 	switch row.Table {
 	case "notification_channel_settings":
+		sealed, err := settings.SealNotificationChannelsJSON(secretbox.Optional(boxes), userID, workspaceID, raw)
+		if err != nil {
+			return err
+		}
+		args[2] = string(sealed)
 		query = `UPDATE notification_channel_settings SET settings=$3::jsonb WHERE user_id=$1 AND admin_account_id=$2`
 	case "strategy_settings":
 		query = `UPDATE strategy_settings SET settings=$3::jsonb WHERE user_id=$1 AND admin_account_id=$2`

@@ -238,14 +238,14 @@ func (r *Repository) DeleteRealConnectionWithPricingMappingChecked(ctx context.C
 	}
 	var state *State
 	if removePricing && expected.PricingMappingEnabled {
-		state, err = scanState(tx.QueryRow(ctx, `SELECT user_id,admin_account_id,base_url,email,session,mappings,own_groups FROM my_site_states WHERE user_id=$1 AND admin_account_id=$2 FOR UPDATE`, expected.UserID, expected.WorkspaceAdminAccountID))
+		state, err = scanState(tx.QueryRow(ctx, `SELECT user_id,admin_account_id,base_url,email,session,mappings,own_groups FROM my_site_states WHERE user_id=$1 AND admin_account_id=$2 FOR UPDATE`, expected.UserID, expected.WorkspaceAdminAccountID), r.box)
 		if err != nil {
 			return &checkedDisconnectStorageError{Step: "读取并锁定调价映射", Cause: err}
 		}
 	}
 	current, err := scanRealConnection(tx.QueryRow(ctx, `SELECT id,user_id,workspace_admin_account_id,upstream_site_id,upstream_group_id,upstream_group_name,
  upstream_key_id,''::text,admin_account_id,admin_account_name,own_group_ids,own_group_names,group_type,provisioning_mode,status,
- upstream_platform,admin_platform,pricing_mapping_enabled,''::text,created_at FROM real_connections WHERE id=$1 AND user_id=$2 AND workspace_admin_account_id=$3 FOR UPDATE`, expected.ID, expected.UserID, expected.WorkspaceAdminAccountID))
+ upstream_platform,admin_platform,pricing_mapping_enabled,''::text,created_at FROM real_connections WHERE id=$1 AND user_id=$2 AND workspace_admin_account_id=$3 FOR UPDATE`, expected.ID, expected.UserID, expected.WorkspaceAdminAccountID), r.box)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return checkedConnectionChanged()
 	}
@@ -279,7 +279,7 @@ func (r *Repository) DeleteRealConnectionWithPricingMappingChecked(ctx context.C
 				removeMappingTargetForOwnGroups(state, []string{oldName}, target)
 			}
 		}
-		if err := updateStateInTx(ctx, tx, *state); err != nil {
+		if err := updateStateInTx(ctx, tx, *state, r.box); err != nil {
 			return failure("保存调价映射", err)
 		}
 	}

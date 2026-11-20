@@ -4,13 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+	"transithub/backend/internal/shared/secretbox"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Repository struct {
-	db *pgxpool.Pool
+	db  *pgxpool.Pool
+	box *secretbox.Box
 }
 
 const createEmailTemplateSQL = `
@@ -28,8 +30,8 @@ const createEmailTemplateSQL = `
 	RETURNING id, name, subject, html_body, is_builtin, created_at, updated_at
 `
 
-func NewRepository(db *pgxpool.Pool) *Repository {
-	return &Repository{db: db}
+func NewRepository(db *pgxpool.Pool, boxes ...*secretbox.Box) *Repository {
+	return &Repository{db: db, box: secretbox.Optional(boxes)}
 }
 
 func (r *Repository) EnsureSchema(ctx context.Context) error {
@@ -150,6 +152,10 @@ func (r *Repository) GetNotificationChannels(ctx context.Context, userID string,
 		}
 		return settings, err
 	}
+	settingsJSON, err := OpenNotificationChannelsJSON(r.box, userID, adminAccountID, settingsJSON)
+	if err != nil {
+		return settings, err
+	}
 	if err := unmarshalNotificationChannelSettings(settingsJSON, &settings); err != nil {
 		return settings, err
 	}
@@ -182,6 +188,10 @@ func unmarshalNotificationChannelSettings(data []byte, settings *NotificationCha
 
 func (r *Repository) SaveNotificationChannels(ctx context.Context, userID string, adminAccountID string, settings NotificationChannelSettings) error {
 	settingsJSON, err := json.Marshal(settings)
+	if err != nil {
+		return err
+	}
+	settingsJSON, err = SealNotificationChannelsJSON(r.box, userID, adminAccountID, settingsJSON)
 	if err != nil {
 		return err
 	}
@@ -360,4 +370,14 @@ func scanEmailTemplate(scanner emailTemplateScanner) (EmailTemplate, error) {
 	template.CreatedAt = &createdAt
 	template.UpdatedAt = &updatedAt
 	return template, nil
+}
+
+// These codecs are shared with the explicitly invoked notification cleanup command.
+func OpenNotificationChannelsJSON(box *secretbox.Box, userID, workspaceID string, raw []byte) ([]byte, error) {
+	plain, err := box.OpenJSON(raw, secretbox.AAD("notification_channel_settings.settings", userID, workspaceID))
+	return plain, secretbox.At("notification_channel_settings.settings", userID, workspaceID, "", err)
+}
+func SealNotificationChannelsJSON(box *secretbox.Box, userID, workspaceID string, raw []byte) ([]byte, error) {
+	sealed, err := box.SealJSON(raw, secretbox.AAD("notification_channel_settings.settings", userID, workspaceID))
+	return sealed, secretbox.At("notification_channel_settings.settings", userID, workspaceID, "", err)
 }

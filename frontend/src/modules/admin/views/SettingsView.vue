@@ -10,6 +10,7 @@ import SignupRiskNotificationSettings from '../components/settings/SignupRiskNot
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import { NotificationControllerKey } from '../composables/useNotifications'
 import {
+  getCredentialsStatus,
   getSystemRestartStatus,
   getSystemRollbackStatus,
   getSystemUpgradeStatus,
@@ -21,6 +22,7 @@ import {
   startSystemUpgrade,
 } from '../api/system'
 import type {
+  CredentialsStatusResponse,
   SystemRestartStatusResponse,
   SystemRollbackStatusResponse,
   SystemUpgradeStatusResponse,
@@ -948,6 +950,17 @@ const closeRestartResult = () => {
   restartResult.value = null
 }
 
+const credentialsStatus = ref<CredentialsStatusResponse | null>(null)
+const credentialsStatusError = ref('')
+const loadCredentialsStatus = async () => {
+  credentialsStatusError.value = ''
+  try {
+    credentialsStatus.value = await getCredentialsStatus()
+  } catch (error) {
+    credentialsStatusError.value = t('admin.settings.credentials.loadError', { reason: localizeSystemError(error) })
+  }
+}
+
 const currentVersion = ref('')
 
 const loadCurrentVersion = async () => {
@@ -965,6 +978,7 @@ onMounted(async () => {
   void loadStrategy()
   void loadSmtp()
   void loadCurrentVersion()
+  void loadCredentialsStatus()
   void restoreUpgradeStatus()
   void restoreRestartStatus()
   void restoreRollbackStatus()
@@ -1463,6 +1477,14 @@ onBeforeUnmount(() => {
         <!-- System Upgrade Tab                           -->
         <!-- ============================================ -->
         <div v-else id="settings-panel-system" class="space-y-4" role="tabpanel" aria-labelledby="settings-tab-system">
+          <section class="w-full overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm">
+            <div class="space-y-2 p-6">
+              <h3 class="text-lg font-semibold text-foreground">{{ t('admin.settings.credentials.title') }}</h3>
+              <p v-if="credentialsStatusError" class="text-sm text-destructive" role="alert">{{ credentialsStatusError }}</p>
+              <p v-else-if="credentialsStatus" class="text-sm text-muted-foreground">{{ credentialsStatus.message }}</p>
+              <p v-else class="text-sm text-muted-foreground">{{ t('admin.settings.credentials.loading') }}</p>
+            </div>
+          </section>
           <section class="w-full overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm">
             <div class="flex flex-col gap-5 p-6 sm:flex-row sm:items-center sm:justify-between">
               <div class="flex min-w-0 items-center gap-3">

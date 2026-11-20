@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"transithub/backend/internal/shared/credentialstore"
+	"transithub/backend/internal/shared/secretbox"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -21,6 +23,7 @@ const (
 // Repository 封装仪表盘 admin 会话在 Redis 中的读写。
 type Repository struct {
 	client *redis.Client
+	box    *secretbox.Box
 }
 
 type ActiveSessionRef struct {
@@ -28,8 +31,8 @@ type ActiveSessionRef struct {
 	AdminAccountID string
 }
 
-func NewRepository(client *redis.Client) *Repository {
-	return &Repository{client: client}
+func NewRepository(client *redis.Client, boxes ...*secretbox.Box) *Repository {
+	return &Repository{client: client, box: secretbox.Optional(boxes)}
 }
 
 func sessionKey(userID string, adminAccountID string) string {
@@ -49,8 +52,12 @@ func (r *Repository) Get(ctx context.Context, userID string, adminAccountID stri
 		}
 		return nil, err
 	}
+	plain, err := r.box.Open(raw, secretbox.AAD(sessionKey(userID, adminAccountID), userID, adminAccountID))
+	if err != nil {
+		return nil, secretbox.At("Redis 主站会话", userID, adminAccountID, "", err)
+	}
 	var session AdminSession
-	if err := json.Unmarshal([]byte(raw), &session); err != nil {
+	if err := json.Unmarshal(plain, &session); err != nil {
 		return nil, err
 	}
 	return &session, nil
@@ -63,8 +70,12 @@ func (r *Repository) Save(ctx context.Context, userID string, adminAccountID str
 	if err != nil {
 		return err
 	}
+	stored, err := r.box.Seal(payload, secretbox.AAD(sessionKey(userID, adminAccountID), userID, adminAccountID))
+	if err != nil {
+		return secretbox.At("Redis 主站会话", userID, adminAccountID, "", err)
+	}
 	pipe := r.client.TxPipeline()
-	pipe.Set(ctx, sessionKey(userID, adminAccountID), payload, 0)
+	pipe.Set(ctx, sessionKey(userID, adminAccountID), stored, 0)
 	pipe.SAdd(ctx, activeSetKey, activeMember(userID, adminAccountID))
 	_, err = pipe.Exec(ctx)
 	return err
@@ -94,4 +105,67 @@ func (r *Repository) ActiveSessions(ctx context.Context) ([]ActiveSessionRef, er
 		refs = append(refs, ActiveSessionRef{UserID: parts[0], AdminAccountID: parts[1]})
 	}
 	return refs, nil
+}
+
+// VerifyCredentials uses only the existing active-session index, including legacy members.
+// It does not change membership, values or expiration.
+func (r *Repository) VerifyCredentials(ctx context.Context) error {
+	return r.visitCredentials(ctx, false)
+}
+func (r *Repository) EncryptCredentials(ctx context.Context) error {
+	return r.visitCredentials(ctx, true)
+}
+func (r *Repository) visitCredentials(ctx context.Context, convert bool) error {
+	if r == nil || r.client == nil {
+		return nil
+	}
+	var cursor uint64
+	for {
+		members, next, err := r.client.SScan(ctx, activeSetKey, cursor, "*", 100).Result()
+		if err != nil {
+			return errors.New("核验 Redis 主站会话失败：无法读取原会话索引；请检查 Redis 连接后重试，尚未恢复业务服务")
+		}
+		for _, member := range members {
+			parts := strings.SplitN(member, ":", 2)
+			user, workspace := parts[0], ""
+			if len(parts) == 2 {
+				workspace = parts[1]
+			}
+			key := sessionKeyPrefix + member
+			raw, err := r.client.Get(ctx, key).Result()
+			if errors.Is(err, redis.Nil) {
+				continue
+			}
+			if err != nil {
+				return secretbox.At("Redis 主站会话", user, workspace, "", errors.New("无法读取已登记会话；请检查 Redis 连接后重试"))
+			}
+			if secretbox.IsSealed(raw) && (user == "" || workspace == "") {
+				return secretbox.At("Redis 主站会话", user, workspace, "", errors.New("已加密会话缺少归属，不能自动重新分配；请恢复原归属和对应密钥后重试"))
+			}
+			plain, err := r.box.Open(raw, secretbox.AAD(key, user, workspace))
+			if err != nil {
+				return secretbox.At("Redis 主站会话", user, workspace, "", err)
+			}
+			var session AdminSession
+			if json.Unmarshal(plain, &session) != nil {
+				return secretbox.At("Redis 主站会话", user, workspace, "", errors.New("会话内容格式损坏；请核对备份后重试，未改动该会话"))
+			}
+			if convert && r.box != nil && !secretbox.IsSealed(raw) {
+				if user == "" || workspace == "" {
+					return secretbox.At("Redis 主站会话", user, workspace, "", errors.New("旧会话仍缺少归属，不能确定加密位置；请核查原会话索引后重试，本次未改写这条会话"))
+				}
+				sealed, err := r.box.Seal(plain, secretbox.AAD(key, user, workspace))
+				if err == nil {
+					err = credentialstore.ReplaceRedisIfUnchanged(ctx, r.client, key, raw, sealed)
+				}
+				if err != nil {
+					return secretbox.At("Redis 主站会话", user, workspace, "", err)
+				}
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return nil
+		}
+	}
 }

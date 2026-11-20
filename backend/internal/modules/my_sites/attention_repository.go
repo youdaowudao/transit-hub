@@ -116,7 +116,7 @@ func (r *Repository) ListConnectionsNeedingAttention(ctx context.Context, userID
 	for rows.Next() {
 		var item NeedsAttentionItem
 		var owned bool
-		conn, err := scanListedRealConnection(attentionRowScanner{row: rows, total: &result.Total, siteOwned: &owned, reason: &item.Reason, detail: &item.Detail, syncedAt: &item.LastSyncedAt})
+		conn, err := scanListedRealConnection(attentionRowScanner{row: rows, total: &result.Total, siteOwned: &owned, reason: &item.Reason, detail: &item.Detail, syncedAt: &item.LastSyncedAt}, r.box)
 		if err != nil {
 			return NeedsAttentionResponse{}, err
 		}

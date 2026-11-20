@@ -3415,6 +3415,11 @@ export default {
 			}
 		},
     settings: {
+      credentials: {
+        title: '管理凭据保存方式',
+        loading: '正在读取管理凭据保存方式；此处只显示状态，不会修改主站或启用加密。',
+        loadError: '管理凭据保存方式未读取成功：{reason}。请重新打开系统设置；仍失败时查看服务日志。'
+      },
       title: '系统设置',
       subtitle: '管理系统运行参数、通知渠道及自动化策略。',
       save: '保存配置',

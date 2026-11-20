@@ -170,3 +170,13 @@ export const startSystemRollback = async (): Promise<SystemRollbackStartResponse
 export const getSystemRollbackStatus = async (): Promise<SystemRollbackStatusResponse> => (
   requestJson<SystemRollbackStatusResponse>('/system/rollback')
 )
+
+export interface CredentialsStatusResponse {
+  configured: boolean
+  mode: 'legacy' | 'encrypted' | 'unverified'
+  message: string
+}
+
+export const getCredentialsStatus = async (): Promise<CredentialsStatusResponse> => (
+  requestJson<CredentialsStatusResponse>('/system/credentials/status')
+)

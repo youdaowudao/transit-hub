@@ -35,6 +35,7 @@ import (
 	"transithub/backend/internal/modules/users"
 	"transithub/backend/internal/shared/authctx"
 	"transithub/backend/internal/shared/httpjson"
+	"transithub/backend/internal/shared/secretbox"
 )
 
 const (
@@ -58,6 +59,10 @@ type Server struct {
 }
 
 func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server {
+	credentialBox, err := secretbox.FromConfig(cfg.CredentialEncryptionKey)
+	if err != nil {
+		panic(err)
+	}
 	server := &Server{
 		cfg:     cfg,
 		mux:     http.NewServeMux(),
@@ -77,20 +82,20 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	auth.RegisterRoutes(server.mux, authService)
 	users.RegisterRoutes(server.mux, users.NewService(users.NewRepository(db)))
 	adminAccountsService := admin_accounts.NewService(admin_accounts.NewRepository(db))
-	upstreamRepository := upstream.NewRepository(db)
+	upstreamRepository := upstream.NewRepository(db, credentialBox)
 	runStorageStartup(cfg, upstreamRepository.EnsureSchema)
 	groupRatesService := group_rates.NewService(group_rates.NewRepository(db))
 	runStorageStartup(cfg, groupRatesService.EnsureSchema)
 	group_rates.RegisterRoutes(server.mux, groupRatesService, adminAccountsService)
 	upstreamHTTPClient := &http.Client{Timeout: upstreamRequestTimeout}
 	platformService := upstream.NewPlatformService(upstream.NewHTTPClient(upstreamHTTPClient))
-	upstreamCache := upstream.NewRedisSiteCache(redisClient)
+	upstreamCache := upstream.NewRedisSiteCache(redisClient, credentialBox)
 	upstreamService := upstream.NewService(platformService, upstreamRepository, groupRateSnapshotWriter{service: groupRatesService}, upstreamCache)
 	server.upstreamService = upstreamService
 	upstreamService.SetBackgroundTasksDisabled(cfg.APIOnly)
 	upstreamService.SetAdminAccountResolver(adminAccountsService)
 	upstream.RegisterRoutes(server.mux, upstreamService, adminAccountsService)
-	mySitesService := my_sites.NewService(my_sites.NewRepository(db), platformService, upstreamService)
+	mySitesService := my_sites.NewService(my_sites.NewRepository(db, credentialBox), platformService, upstreamService)
 	runStorageStartup(cfg, mySitesService.EnsureSchema)
 	upstreamService.SetSiteReferenceChecker(mySitesService)
 	my_sites.RegisterRoutes(server.mux, mySitesService)
@@ -144,7 +149,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	server.lotteryFrameAncestorOrigin = lotteryService.FrameAncestorOrigin
 	lottery.RegisterRoutes(server.mux, lotteryService)
 
-	settingsService := settings.NewService(&http.Client{Timeout: upstreamRequestTimeout}, settings.NewRepository(db))
+	settingsService := settings.NewService(&http.Client{Timeout: upstreamRequestTimeout}, settings.NewRepository(db, credentialBox))
 	settingsService.SetAdminAccountResolver(adminAccountsService)
 	runStorageStartup(cfg, settingsService.EnsureSchema)
 	// SMTP_ENCRYPTION_KEY 是可选项：空值不影响启动；显式配置了非法值（非 base64 或非 32 字节）
@@ -158,6 +163,14 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	// 因为 admin_accounts.EnsureSchema 的 legacy 迁移会 UPDATE dashboard 表。
 	metricsRepo := dashboard.NewMetricsRepository(db)
 	runStorageStartup(cfg, metricsRepo.EnsureSchema)
+
+	dashboardSessionStore := dashboard.NewRepository(redisClient, credentialBox)
+	credentialStores := startupCredentialStores{db: db, box: credentialBox, dashboard: dashboardSessionStore, sites: upstreamCache}
+	// EnsureSchema itself assigns legacy ownership, so verify before its first possible rebind.
+	// This read-only check also runs in APIOnly and with no configured encryption key.
+	if err := credentialStores.Verify(); err != nil {
+		panic(err)
+	}
 
 	// admin_accounts 最后执行 schema：此时所有业务表和 workspace 字段已存在，
 	// legacy 迁移可以安全地 UPDATE 所有业务表的 admin_account_id。
@@ -239,7 +252,10 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 
 	// 所有 workspace 表 schema 完成后再补 legacy 归属；随后才启动 restore、worker 和 scheduler，
 	// 避免后台任务在旧行尚未补齐 workspace 时读取或写回数据。
-	runStorageStartup(cfg, adminAccountsService.AssignLegacyRows, upstreamService.RestoreSavedSites)
+	if err := credentialStores.Verify(); err != nil {
+		panic(err)
+	}
+	runStorageStartup(cfg, adminAccountsService.AssignLegacyRows, credentialStores.Encrypt, upstreamService.RestoreSavedSites)
 	if !cfg.APIOnly {
 		signupRiskService.Start(context.Background())
 		massEmailWorker.Start(context.Background())
@@ -278,7 +294,6 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 
 	// 仪表盘 admin 登录门禁：复用 sub2api 平台客户端（platformService），会话存于 Redis，
 	// 并启动后台协程对临期令牌做自动刷新。
-	dashboardSessionStore := dashboard.NewRepository(redisClient)
 	dashboardService := dashboard.NewService(dashboardSessionStore, platformService)
 	dashboardService.SetAdminAccountService(adminAccountsService)
 	dashboardService.SetMySiteSync(mySitesService)
@@ -322,6 +337,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 
 	// 系统信息 API：展示版本号及新版本提示，API-only 不启动后台检查。
 	systemService := system.NewService(cfg)
+	systemService.SetCredentialsVerified(credentialBox != nil)
 	if !cfg.APIOnly {
 		systemService.StartUpdateCheck(context.Background())
 	}

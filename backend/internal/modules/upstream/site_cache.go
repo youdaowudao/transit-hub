@@ -3,7 +3,9 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"transithub/backend/internal/shared/secretbox"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -34,10 +36,11 @@ type SiteCache interface {
 // 因此使用 sitePayload 包装结构绕过标签限制，保证完整序列化。
 type RedisSiteCache struct {
 	client *redis.Client
+	box    *secretbox.Box
 }
 
-func NewRedisSiteCache(client *redis.Client) *RedisSiteCache {
-	return &RedisSiteCache{client: client}
+func NewRedisSiteCache(client *redis.Client, boxes ...*secretbox.Box) *RedisSiteCache {
+	return &RedisSiteCache{client: client, box: secretbox.Optional(boxes)}
 }
 
 // sitePayload 是 Site 在 Redis 中的序列化格式。
@@ -133,8 +136,12 @@ func (c *RedisSiteCache) Get(ctx context.Context, id string) (*Site, error) {
 		}
 		return nil, err
 	}
+	plain, err := c.box.Open(raw, secretbox.AAD(siteKey(id), id))
+	if err != nil {
+		return nil, secretbox.At("Redis 上游站点", "", "", id, err)
+	}
 	var p sitePayload
-	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+	if err := json.Unmarshal(plain, &p); err != nil {
 		return nil, err
 	}
 	return fromPayload(p), nil
@@ -147,8 +154,12 @@ func (c *RedisSiteCache) Set(ctx context.Context, site *Site) error {
 	if err != nil {
 		return err
 	}
+	stored, err := c.box.Seal(payload, secretbox.AAD(siteKey(site.ID), site.ID))
+	if err != nil {
+		return secretbox.At("Redis 上游站点", site.UserID, site.AdminAccountID, site.ID, err)
+	}
 	pipe := c.client.TxPipeline()
-	pipe.Set(ctx, siteKey(site.ID), payload, 0)
+	pipe.Set(ctx, siteKey(site.ID), stored, 0)
 	if strings.TrimSpace(site.UserID) != "" {
 		pipe.SAdd(ctx, userSitesKey(site.UserID), site.ID)
 	}
@@ -190,7 +201,7 @@ func (c *RedisSiteCache) ListByUser(ctx context.Context, userID string) ([]*Site
 	}
 
 	sites := make([]*Site, 0, len(ids))
-	for _, cmd := range cmds {
+	for i, cmd := range cmds {
 		raw, err := cmd.Result()
 		if err != nil {
 			if err == redis.Nil {
@@ -198,8 +209,12 @@ func (c *RedisSiteCache) ListByUser(ctx context.Context, userID string) ([]*Site
 			}
 			return nil, err
 		}
+		plain, err := c.box.Open(raw, secretbox.AAD(siteKey(ids[i]), ids[i]))
+		if err != nil {
+			return nil, secretbox.At("Redis 上游站点", userID, "", ids[i], err)
+		}
 		var p sitePayload
-		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		if err := json.Unmarshal(plain, &p); err != nil {
 			return nil, err
 		}
 		sites = append(sites, fromPayload(p))
@@ -221,6 +236,55 @@ func (c *RedisSiteCache) Flush(ctx context.Context) error {
 		}
 		if err := iter.Err(); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// VerifyCredentials follows known users' existing site sets and persisted site IDs.
+// Startup still restores the cache exclusively from PostgreSQL after verification.
+func (c *RedisSiteCache) VerifyCredentials(ctx context.Context, userIDs, siteIDs []string) error {
+	if c == nil || c.client == nil {
+		return nil
+	}
+	ids := make(map[string]struct{}, len(siteIDs))
+	for _, id := range siteIDs {
+		ids[id] = struct{}{}
+	}
+	for _, user := range userIDs {
+		var cursor uint64
+		for {
+			members, next, err := c.client.SScan(ctx, userSitesKey(user), cursor, "*", 100).Result()
+			if err != nil {
+				return secretbox.At("Redis 上游站点索引", user, "", "", errors.New("无法读取原站点索引；请检查 Redis 连接后重试"))
+			}
+			for _, id := range members {
+				ids[id] = struct{}{}
+			}
+			cursor = next
+			if cursor == 0 {
+				break
+			}
+		}
+	}
+	for id := range ids {
+		raw, err := c.client.Get(ctx, siteKey(id)).Result()
+		if err == redis.Nil {
+			continue
+		}
+		if err != nil {
+			return secretbox.At("Redis 上游站点", "", "", id, errors.New("无法读取已登记站点；请检查 Redis 连接后重试"))
+		}
+		plain, err := c.box.Open(raw, secretbox.AAD(siteKey(id), id))
+		if err != nil {
+			return secretbox.At("Redis 上游站点", "", "", id, err)
+		}
+		var payload sitePayload
+		if json.Unmarshal(plain, &payload) != nil {
+			return secretbox.At("Redis 上游站点", "", "", id, errors.New("站点缓存格式损坏；请核对备份后重试，本次未清理缓存"))
+		}
+		if secretbox.IsSealed(raw) && (payload.UserID == "" || payload.AdminAccountID == "") {
+			return secretbox.At("Redis 上游站点", payload.UserID, payload.AdminAccountID, id, errors.New("已加密站点缓存缺少归属，不能自动重新分配；请恢复原归属和对应密钥后重试"))
 		}
 	}
 	return nil

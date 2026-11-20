@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/jackc/pgx/v5"
 	"time"
+	"transithub/backend/internal/shared/secretbox"
 )
 
 type GroupReassignmentError struct {
@@ -30,9 +31,9 @@ func (e *GroupReassignmentError) Error() string {
 func (e *GroupReassignmentError) Unwrap() error { return e.Cause }
 
 func (r *Repository) ReassignRealConnectionGroupsChecked(ctx context.Context, expected RealConnection, ids, names []string, removeOldPricing bool) error {
-	return reassignRealConnectionGroupsChecked(ctx, expected, ids, names, removeOldPricing, r.db.Begin)
+	return reassignRealConnectionGroupsChecked(ctx, expected, ids, names, removeOldPricing, r.db.Begin, r.box)
 }
-func reassignRealConnectionGroupsChecked(ctx context.Context, expected RealConnection, ids, names []string, removeOldPricing bool, begin func(context.Context) (pgx.Tx, error)) error {
+func reassignRealConnectionGroupsChecked(ctx context.Context, expected RealConnection, ids, names []string, removeOldPricing bool, begin func(context.Context) (pgx.Tx, error), boxes ...*secretbox.Box) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	fail := func(step string, cause error) error {
@@ -52,7 +53,7 @@ func reassignRealConnectionGroupsChecked(ctx context.Context, expected RealConne
 	}
 	var state *State
 	if expected.PricingMappingEnabled {
-		state, err = scanState(tx.QueryRow(ctx, `SELECT user_id,admin_account_id,base_url,email,session,mappings,own_groups FROM my_site_states WHERE user_id=$1 AND admin_account_id=$2 FOR UPDATE`, expected.UserID, expected.WorkspaceAdminAccountID))
+		state, err = scanState(tx.QueryRow(ctx, `SELECT user_id,admin_account_id,base_url,email,session,mappings,own_groups FROM my_site_states WHERE user_id=$1 AND admin_account_id=$2 FOR UPDATE`, expected.UserID, expected.WorkspaceAdminAccountID), boxes...)
 		if err != nil {
 			return fail("读取并锁定调价数据源", err)
 		}
@@ -60,7 +61,7 @@ func reassignRealConnectionGroupsChecked(ctx context.Context, expected RealConne
 			return fail("读取并锁定调价数据源", errGroupReassignmentStateMissing)
 		}
 	}
-	current, err := scanRealConnection(tx.QueryRow(ctx, `SELECT id,user_id,workspace_admin_account_id,upstream_site_id,upstream_group_id,upstream_group_name,upstream_key_id,''::text,admin_account_id,admin_account_name,own_group_ids,own_group_names,group_type,provisioning_mode,status,upstream_platform,admin_platform,pricing_mapping_enabled,''::text,created_at FROM real_connections WHERE id=$1 AND user_id=$2 AND workspace_admin_account_id=$3 FOR UPDATE`, expected.ID, expected.UserID, expected.WorkspaceAdminAccountID))
+	current, err := scanRealConnection(tx.QueryRow(ctx, `SELECT id,user_id,workspace_admin_account_id,upstream_site_id,upstream_group_id,upstream_group_name,upstream_key_id,''::text,admin_account_id,admin_account_name,own_group_ids,own_group_names,group_type,provisioning_mode,status,upstream_platform,admin_platform,pricing_mapping_enabled,''::text,created_at FROM real_connections WHERE id=$1 AND user_id=$2 AND workspace_admin_account_id=$3 FOR UPDATE`, expected.ID, expected.UserID, expected.WorkspaceAdminAccountID), boxes...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &GroupReassignmentError{Kind: "removed"}
 	}
@@ -95,7 +96,7 @@ func reassignRealConnectionGroupsChecked(ctx context.Context, expected RealConne
 			}
 		}
 		addMappingTargetForOwnGroups(state, names, target)
-		if err := updateStateInTx(ctx, tx, *state); err != nil {
+		if err := updateStateInTx(ctx, tx, *state, boxes...); err != nil {
 			return fail("保存调价数据源", err)
 		}
 	}

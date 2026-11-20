@@ -105,6 +105,10 @@ func (r *Repository) SaveExistingSiteWithGroupGuard(ctx context.Context, expecte
 		return Site{}, "", false, false, err
 	}
 	if len(rawSession) > 0 {
+		rawSession, err = openSiteSessionJSON(rawSession, current, r.box)
+		if err != nil {
+			return Site{}, "", false, false, err
+		}
 		if err = json.Unmarshal(rawSession, &current.Session); err != nil {
 			return Site{}, "", false, false, err
 		}
@@ -132,7 +136,7 @@ func (r *Repository) SaveExistingSiteWithGroupGuard(ctx context.Context, expecte
 	}
 	rawSession = nil
 	if next.Session != nil {
-		rawSession, err = json.Marshal(next.Session)
+		rawSession, err = r.marshalSiteSession(next)
 		if err != nil {
 			return Site{}, "", false, false, err
 		}

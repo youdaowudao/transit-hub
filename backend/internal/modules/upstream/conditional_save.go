@@ -101,6 +101,10 @@ func (r *Repository) SaveExistingSiteIfUnchanged(ctx context.Context, expected, 
 		return false, err
 	}
 	if len(sessionJSON) > 0 {
+		sessionJSON, err = openSiteSessionJSON(sessionJSON, current, r.box)
+		if err != nil {
+			return false, err
+		}
 		if err = json.Unmarshal(sessionJSON, &current.Session); err != nil {
 			return false, err
 		}
@@ -119,7 +123,7 @@ func (r *Repository) SaveExistingSiteIfUnchanged(ctx context.Context, expected, 
 	}
 	sessionJSON = nil
 	if next.Session != nil {
-		sessionJSON, err = json.Marshal(next.Session)
+		sessionJSON, err = r.marshalSiteSession(next)
 		if err != nil {
 			return false, err
 		}

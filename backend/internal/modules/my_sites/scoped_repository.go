@@ -86,7 +86,7 @@ func (r *Repository) ListScopedRealConnections(ctx context.Context, userID, work
 	defer rows.Close()
 	result := make([]RealConnection, 0)
 	for rows.Next() {
-		conn, err := scanListedRealConnection(rows)
+		conn, err := scanListedRealConnection(rows, r.box)
 		if err != nil {
 			return nil, err
 		}

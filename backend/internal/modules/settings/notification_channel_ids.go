@@ -50,11 +50,28 @@ func (r *Repository) PersistTelegramChannelIDs(ctx context.Context, userID, admi
 	if err := tx.QueryRow(ctx, `SELECT settings FROM notification_channel_settings WHERE user_id=$1 AND admin_account_id=$2 FOR UPDATE`, userID, adminAccountID).Scan(&current); err != nil {
 		return err
 	}
+	current, err = OpenNotificationChannelsJSON(r.box, userID, adminAccountID, current)
+	if err != nil {
+		return err
+	}
 	telegram, err := telegramJSONWithStableIDs(current, original, normalized)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE notification_channel_settings SET settings=jsonb_set(settings,'{telegram}',$3::jsonb,true),updated_at=now() WHERE user_id=$1 AND admin_account_id=$2`, userID, adminAccountID, string(telegram)); err != nil {
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(current, &root); err != nil {
+		return err
+	}
+	root["telegram"] = telegram
+	current, err = json.Marshal(root)
+	if err != nil {
+		return err
+	}
+	current, err = SealNotificationChannelsJSON(r.box, userID, adminAccountID, current)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE notification_channel_settings SET settings=$3::jsonb,updated_at=now() WHERE user_id=$1 AND admin_account_id=$2`, userID, adminAccountID, string(current)); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

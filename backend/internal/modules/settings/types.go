@@ -1,6 +1,9 @@
 package settings
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type NotificationChannel string
 
@@ -23,6 +26,9 @@ type NotificationChannelSettings struct {
 }
 
 type StrategySettings struct {
+	DailyReportEnabled                json.RawMessage            `json:"dailyReportEnabled,omitempty"`
+	DailyReportTime                   json.RawMessage            `json:"dailyReportTime,omitempty"`
+	DailyReportBotIDs                 json.RawMessage            `json:"dailyReportBotIds,omitempty"`
 	BalanceNotifyRecipientsInvalid    bool                       `json:"balanceNotifyRecipientsInvalid,omitempty"`
 	MultiplierNotifyRecipientsInvalid bool                       `json:"multiplierNotifyRecipientsInvalid,omitempty"`
 	EnableRefreshInterval             bool                       `json:"enableRefreshInterval"`

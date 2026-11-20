@@ -35,6 +35,7 @@ type RollbackExecutor interface {
 
 // Service 提供系统版本查询和维护操作，只检查 GitHub 上有没有新版本，不会自动更新。
 type Service struct {
+	credentials      CredentialsStatus
 	cfg              config.Config
 	upgradeExecutor  UpgradeExecutor
 	restartExecutor  RestartExecutor

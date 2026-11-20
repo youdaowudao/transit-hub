@@ -53,6 +53,8 @@ type Config struct {
 	// SMTP 密码加密密钥：base64 编码的 32 字节 AES-256-GCM key，由 settings 模块解析和校验。
 	// 应用启动时是可选项，缺失不影响启动；这里只原样读取环境变量原值，不做任何解析或校验。
 	SMTPEncryptionKey string
+	// 管理凭据使用独立可选密钥；不复用 SMTP 密钥、不自动生成文件。
+	CredentialEncryptionKey string
 
 	ProbeGlobalConcurrency int
 
@@ -96,6 +98,7 @@ func Load() Config {
 		TicketUploadDir: envOrDefault("TICKET_UPLOAD_DIR", "data/ticket-uploads"),
 
 		SMTPEncryptionKey:               os.Getenv("SMTP_ENCRYPTION_KEY"),
+		CredentialEncryptionKey:         os.Getenv("CREDENTIAL_ENCRYPTION_KEY"),
 		ProbeGlobalConcurrency:          envPositiveInt("TRANSITHUB_PROBE_GLOBAL_CONCURRENCY", 12),
 		ChanshuiEnabled:                 true,
 		ChanshuiBinaryPath:              os.Getenv("CHANSHUI_BINARY_PATH"),

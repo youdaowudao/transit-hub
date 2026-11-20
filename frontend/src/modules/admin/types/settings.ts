@@ -18,6 +18,9 @@ export type NotificationChannelSettings = {
 }
 
 export type StrategySettings = {
+  dailyReportEnabled?: unknown
+  dailyReportTime?: unknown
+  dailyReportBotIds?: unknown
   enableRefreshInterval: boolean
   refreshInterval: number
   enableBalanceWarning: boolean

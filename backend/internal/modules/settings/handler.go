@@ -59,12 +59,20 @@ func (h *Handler) saveStrategy(w http.ResponseWriter, r *http.Request) {
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
 		return
 	}
-	var dto StrategySettings
-	if err := httpjson.Decode(r, &dto); err != nil {
-		httpjson.WriteError(w, http.StatusBadRequest, "Invalid request body")
+	dto, reportUpdate, err := decodeStrategyRequest(w, r)
+	if err != nil {
+		if reportUpdate {
+			writeDailyReportSaveError(w, dto.Scope, err, true)
+		} else {
+			httpjson.WriteError(w, http.StatusBadRequest, "Invalid request body")
+		}
 		return
 	}
-	settings, err := h.service.SaveStrategy(r.Context(), userID, dto)
+	if reportUpdate {
+		h.saveDailyReportStrategy(w, r, userID, dto)
+		return
+	}
+	settings, err := h.service.SaveStrategy(r.Context(), userID, dto.StrategySettings)
 	if err != nil {
 		if writeWorkspaceError(w, err) {
 			return

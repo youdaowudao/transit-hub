@@ -12,8 +12,11 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
+	"mime"
 	"net"
+	"net/mail"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +55,22 @@ func generateTestCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {
 	return cert, pool
 }
 
+func decodeSMTPMessageForAssertion(t *testing.T, raw string) (*mail.Message, string) {
+	t.Helper()
+	message, err := mail.ReadMessage(strings.NewReader(raw))
+	if err != nil {
+		t.Fatalf("read SMTP MIME message: %v", err)
+	}
+	if message.Header.Get("Content-Transfer-Encoding") != "base64" {
+		t.Fatal("SMTP message must use standard base64 body encoding")
+	}
+	body, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, message.Body))
+	if err != nil {
+		t.Fatalf("decode SMTP HTML body: %v", err)
+	}
+	return message, string(body)
+}
+
 func TestBuildSMTPTestMessageUsesCustomSubjectAndHTMLBody(t *testing.T) {
 	message := string(buildSMTPTestMessage(smtpSendConfig{
 		FromEmail:      "mailer@example.com",
@@ -60,11 +79,13 @@ func TestBuildSMTPTestMessageUsesCustomSubjectAndHTMLBody(t *testing.T) {
 		Subject:        "TransitHub 限时活动",
 		HTMLBody:       "<h1>自定义正文</h1>",
 	}))
-	if !strings.Contains(message, "Subject: =?UTF-8?q?TransitHub_=E9=99=90=E6=97=B6=E6=B4=BB=E5=8A=A8?=") {
-		t.Fatalf("expected MIME encoded custom subject, got %s", message)
+	parsed, body := decodeSMTPMessageForAssertion(t, message)
+	subject, err := new(mime.WordDecoder).DecodeHeader(parsed.Header.Get("Subject"))
+	if err != nil || subject != "TransitHub 限时活动" {
+		t.Fatalf("MIME subject did not preserve the custom text: %v", err)
 	}
-	if !strings.Contains(message, "<h1>自定义正文</h1>") || strings.Contains(message, smtpTestHTMLBody) {
-		t.Fatalf("expected custom html body only, got %s", message)
+	if body != "<h1>自定义正文</h1>" || strings.Contains(body, smtpTestHTMLBody) {
+		t.Fatal("expected the exact custom HTML body and no default content")
 	}
 }
 
@@ -275,8 +296,9 @@ func TestSMTPSenderStarttlsSendsDataSuccessfully(t *testing.T) {
 
 	select {
 	case data := <-capture.dataReceived:
-		if !strings.Contains(data, "TransitHub SMTP test email was sent successfully") {
-			t.Fatalf("expected test HTML body in DATA payload, got %q", data)
+		_, body := decodeSMTPMessageForAssertion(t, data)
+		if body != smtpTestHTMLBody {
+			t.Fatal("SMTP DATA did not preserve the complete default HTML body")
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("expected DATA to be received by fake server, timed out")

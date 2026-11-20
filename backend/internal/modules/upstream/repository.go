@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+	"transithub/backend/internal/shared/credentialstore"
+	"transithub/backend/internal/shared/secretbox"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -12,13 +14,14 @@ import (
 )
 
 type Repository struct {
+	box                      *secretbox.Box
 	db                       *pgxpool.Pool
 	rateNoticeWriter         rateNoticeWriter
 	rateNoticeKeyAssignments RateNoticeKeyAssignmentReader
 }
 
-func NewRepository(db *pgxpool.Pool) *Repository {
-	return &Repository{db: db, rateNoticeWriter: notifications.NewRepository(db)}
+func NewRepository(db *pgxpool.Pool, boxes ...*secretbox.Box) *Repository {
+	return &Repository{db: db, box: secretbox.Optional(boxes), rateNoticeWriter: notifications.NewRepository(db)}
 }
 
 func (r *Repository) EnsureSchema(ctx context.Context) error {
@@ -82,6 +85,11 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 	`); err != nil {
 		return err
 	}
+	// The next legacy UPDATE changes user ownership; encrypted rows must be readable
+	// under their original identity before any rebind can occur.
+	if err := credentialstore.VerifyPostgresTable(ctx, r.db, r.box, "upstream_sites"); err != nil {
+		return err
+	}
 	if _, err := r.db.Exec(ctx, `
 		WITH single_user AS (
 			SELECT min(id) AS id
@@ -113,7 +121,7 @@ func (r *Repository) ListSites(ctx context.Context) ([]Site, error) {
 	if err != nil {
 		return nil, err
 	}
-	return scanSites(rows)
+	return scanSites(rows, r.box)
 }
 
 func (r *Repository) ListSitesForUser(ctx context.Context, userID string) ([]Site, error) {
@@ -127,7 +135,7 @@ func (r *Repository) ListSitesForUser(ctx context.Context, userID string) ([]Sit
 	if err != nil {
 		return nil, err
 	}
-	return scanSites(rows)
+	return scanSites(rows, r.box)
 }
 
 func (r *Repository) SaveSite(ctx context.Context, site Site) error {
@@ -138,7 +146,7 @@ func (r *Repository) SaveSite(ctx context.Context, site Site) error {
 
 	var sessionJSON []byte
 	if site.Session != nil {
-		sessionJSON, err = json.Marshal(site.Session)
+		sessionJSON, err = r.marshalSiteSession(site)
 		if err != nil {
 			return err
 		}
@@ -201,7 +209,7 @@ func (r *Repository) SaveSiteWithSnapshotVersion(ctx context.Context, site Site,
 
 	var sessionJSON []byte
 	if site.Session != nil {
-		sessionJSON, err = json.Marshal(site.Session)
+		sessionJSON, err = r.marshalSiteSession(site)
 		if err != nil {
 			return "", err
 		}
@@ -320,7 +328,7 @@ func (r *Repository) DeleteSite(ctx context.Context, userID string, id string) (
 	return tx.Commit(ctx)
 }
 
-func scanSites(rows pgx.Rows) ([]Site, error) {
+func scanSites(rows pgx.Rows, boxes ...*secretbox.Box) ([]Site, error) {
 	defer rows.Close()
 
 	sites := make([]Site, 0)
@@ -359,6 +367,11 @@ func scanSites(rows pgx.Rows) ([]Site, error) {
 			return nil, err
 		}
 		if len(sessionJSON) > 0 {
+			var err error
+			sessionJSON, err = openSiteSessionJSON(sessionJSON, site, secretbox.Optional(boxes))
+			if err != nil {
+				return nil, err
+			}
 			var session Session
 			if err := json.Unmarshal(sessionJSON, &session); err != nil {
 				return nil, err
@@ -399,4 +412,21 @@ func readSiteNotificationEnabled(ctx context.Context, db siteNotificationRowRead
 	var enabled bool
 	err := db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM upstream_sites WHERE user_id=$1 AND admin_account_id=$2 AND id=$3 AND enabled=true)`, userID, workspaceID, siteID).Scan(&enabled)
 	return enabled, err
+}
+
+func (r *Repository) marshalSiteSession(site Site) ([]byte, error) {
+	if site.Session == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(site.Session)
+	if err != nil {
+		return nil, err
+	}
+	raw, err = r.box.SealJSON(raw, secretbox.AAD("upstream_sites.session", site.UserID, site.AdminAccountID, site.ID))
+	return raw, secretbox.At("upstream_sites.session", site.UserID, site.AdminAccountID, site.ID, err)
+}
+
+func openSiteSessionJSON(raw []byte, site Site, box *secretbox.Box) ([]byte, error) {
+	plain, err := box.OpenJSON(raw, secretbox.AAD("upstream_sites.session", site.UserID, site.AdminAccountID, site.ID))
+	return plain, secretbox.At("upstream_sites.session", site.UserID, site.AdminAccountID, site.ID, err)
 }

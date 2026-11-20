@@ -170,3 +170,34 @@ export const startSystemRollback = async (): Promise<SystemRollbackStartResponse
 export const getSystemRollbackStatus = async (): Promise<SystemRollbackStatusResponse> => (
   requestJson<SystemRollbackStatusResponse>('/system/rollback')
 )
+
+export interface CredentialsStatusResponse {
+  configured: boolean
+  mode: 'legacy' | 'encrypted' | 'unverified'
+  message: string
+}
+
+export const getCredentialsStatus = async (): Promise<CredentialsStatusResponse> => {
+  let response: Response
+  try {
+    response = await fetch(endpoint('/system/credentials/status'), { headers: { Accept: 'application/json', ...authHeaders() } })
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error
+    throw new Error('连接本站凭据保存状态接口失败；请检查网络后重新打开系统设置。')
+  }
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error
+    throw new Error('凭据保存状态接口未返回完整JSON；请查看本站日志后重新打开系统设置。')
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('凭据保存状态资料格式不完整；请查看本站日志后重新打开系统设置。')
+  const value = payload as Record<string, unknown>
+  if (!response.ok) {
+    if (response.status === 401) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+    throw new Error(typeof value.message === 'string' && value.message ? value.message : `读取凭据保存状态未完成（本站HTTP ${response.status}）；请查看本站日志后重试。`)
+  }
+  if (typeof value.configured !== 'boolean' || typeof value.mode !== 'string' || !['legacy', 'encrypted', 'unverified'].includes(value.mode) || typeof value.message !== 'string') throw new Error('凭据保存状态资料格式不完整；请查看本站日志后重新打开系统设置。')
+  return value as unknown as CredentialsStatusResponse
+}

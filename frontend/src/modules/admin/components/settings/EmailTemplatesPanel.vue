@@ -186,6 +186,8 @@ onMounted(() => { void loadTemplates() })
       </Button>
     </header>
 
+    <p v-if="errorMessage" class="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">{{ t(errorMessage) }}</p>
+
     <div v-if="isLoading" class="flex items-center justify-center gap-2 p-12 text-sm text-muted-foreground">
       <Loader2 class="h-4 w-4 animate-spin" />{{ t('admin.settings.emailTemplates.loading') }}
     </div>
@@ -282,7 +284,6 @@ onMounted(() => { void loadTemplates() })
         </div>
 
         <p v-if="!isValid" class="mt-4 text-sm text-destructive">{{ t('admin.settings.emailTemplates.errors.validation') }}</p>
-        <p v-if="errorMessage" class="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">{{ t(errorMessage) }}</p>
         <p v-if="successMessage" class="mt-4 flex items-center gap-2 text-sm text-green-600 dark:text-green-400"><CheckCircle2 class="h-4 w-4" />{{ t(successMessage) }}</p>
       </div>
     </div>

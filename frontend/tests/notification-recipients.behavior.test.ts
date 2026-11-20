@@ -2,6 +2,7 @@
 
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import DailyReportPanel from '@/modules/admin/components/settings/DailyReportPanel.vue'
 import SettingsView from '@/modules/admin/views/SettingsView.vue'
 import CampaignEditorDrawer from '@/modules/admin/components/group-rate-campaigns/CampaignEditorDrawer.vue'
 import CampaignDetailDrawer from '@/modules/admin/components/group-rate-campaigns/CampaignDetailDrawer.vue'
@@ -21,6 +22,11 @@ vi.mock('vue-router', () => ({
   useRoute: () => ({ query: {}, path: '/group-rate-campaigns' }),
   useRouter: () => ({ replace: vi.fn() }),
 }))
+
+vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
+  const { ref } = await import('vue')
+  return { useAdminAccounts: () => ({ currentAccount: ref({ id: 'fixture-workspace', createdAt: '2026-11-01T00:00:00Z', platform: 'Sub2API' }), isSwitching: ref(false) }) }
+})
 
 vi.mock('@/modules/admin/composables/useGroupRateCampaigns', async () => {
   const { ref } = await import('vue')
@@ -43,6 +49,7 @@ vi.mock('@/modules/admin/api/settings', () => ({
 }))
 
 vi.mock('@/modules/admin/api/system', () => ({
+  getCredentialsStatus: vi.fn(async () => ({ configured: false, mode: 'legacy', message: 'Fixture existing credential state' })),
   getSystemUpgradeStatus: vi.fn(async () => ({ state: 'idle' })),
   getSystemRestartStatus: vi.fn(async () => ({ state: 'idle' })),
   getSystemRollbackStatus: vi.fn(async () => ({ state: 'idle' })),
@@ -233,9 +240,13 @@ describe('Telegram recipient reconciliation', () => {
     await button(wrapper, t('admin.settings.save')).trigger('click')
     await flushPromises()
     expect(harness.saveStrategy).toHaveBeenLastCalledWith(expect.objectContaining({ balanceNotifyBotIds: ['tg-original'], enableBalanceWarning: true }))
+    await vi.advanceTimersByTimeAsync(3000)
     harness.getChannels.mockRejectedValue(new Error('admin.settings.errors.network'))
-    wrapper = keep(mount(SettingsView, { global }))
+    wrapper.findComponent(DailyReportPanel).vm.$emit('reload')
     await flushPromises()
+    await wrapper.get('#settings-tab-channels').trigger('click')
+    expect(wrapper.text()).toContain(t('admin.settings.errors.network'))
+    await wrapper.get('#settings-tab-strategy').trigger('click')
     await button(wrapper, t('admin.settings.save')).trigger('click')
     await flushPromises()
     expect(harness.saveStrategy).toHaveBeenLastCalledWith(expect.objectContaining({ balanceNotifyBotIds: ['tg-original'], enableBalanceWarning: true }))
@@ -250,7 +261,8 @@ describe('Telegram recipient reconciliation', () => {
     await button(wrapper, t('admin.settings.sections.channels.testConnection')).trigger('click')
     await flushPromises()
     expect(harness.testBot).toHaveBeenCalledExactlyOnceWith({ channel: 'telegram', telegramBotToken: 'test-token', telegramChatId: 'test-chat', telegramProxyUrl: '' })
-    await button(wrapper, t('admin.settings.save')).trigger('click')
+    const saveButton = wrapper.get('#settings-panel-channels').findAll('button').find(item => item.text() === t('admin.settings.save'))!
+    await saveButton.trigger('click')
     await flushPromises()
     expect(harness.saveChannels).toHaveBeenCalledExactlyOnceWith({ telegram: [telegram] })
   })

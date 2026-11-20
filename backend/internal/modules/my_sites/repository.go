@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"transithub/backend/internal/shared/secretbox"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -18,11 +19,12 @@ import (
 type StateMutation func(*State) error
 
 type Repository struct {
-	db *pgxpool.Pool
+	db  *pgxpool.Pool
+	box *secretbox.Box
 }
 
-func NewRepository(db *pgxpool.Pool) *Repository {
-	return &Repository{db: db}
+func NewRepository(db *pgxpool.Pool, boxes ...*secretbox.Box) *Repository {
+	return &Repository{db: db, box: secretbox.Optional(boxes)}
 }
 
 func (*Repository) realConnectionSiteNamesProvided() {}
@@ -105,14 +107,14 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 }
 
 func (r *Repository) Get(ctx context.Context, userID string, adminAccountID string) (*State, error) {
-	return scanState(r.db.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2`, userID, adminAccountID))
+	return scanState(r.db.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2`, userID, adminAccountID), r.box)
 }
 
 type stateScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanState(row stateScanner) (*State, error) {
+func scanState(row stateScanner, boxes ...*secretbox.Box) (*State, error) {
 	var state State
 	var sessionJSON []byte
 	var mappingsJSON []byte
@@ -122,6 +124,10 @@ func scanState(row stateScanner) (*State, error) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	sessionJSON, err := secretbox.Optional(boxes).OpenJSON(sessionJSON, secretbox.AAD("my_site_states.session", state.UserID, state.AdminAccountID))
+	if err != nil {
+		return nil, secretbox.At("my_site_states.session", state.UserID, state.AdminAccountID, "", err)
 	}
 	if err := json.Unmarshal(sessionJSON, &state.Session); err != nil {
 		return nil, err
@@ -135,10 +141,14 @@ func scanState(row stateScanner) (*State, error) {
 	return &state, nil
 }
 
-func marshalStateJSON(state State) (sessionJSON, mappingsJSON, ownGroupsJSON []byte, err error) {
+func marshalStateJSON(state State, boxes ...*secretbox.Box) (sessionJSON, mappingsJSON, ownGroupsJSON []byte, err error) {
 	sessionJSON, err = json.Marshal(state.Session)
 	if err != nil {
 		return nil, nil, nil, err
+	}
+	sessionJSON, err = secretbox.Optional(boxes).SealJSON(sessionJSON, secretbox.AAD("my_site_states.session", state.UserID, state.AdminAccountID))
+	if err != nil {
+		return nil, nil, nil, secretbox.At("my_site_states.session", state.UserID, state.AdminAccountID, "", err)
 	}
 	mappingsJSON, err = json.Marshal(state.Mappings)
 	if err != nil {
@@ -152,7 +162,7 @@ func marshalStateJSON(state State) (sessionJSON, mappingsJSON, ownGroupsJSON []b
 }
 
 func (r *Repository) Save(ctx context.Context, state State) error {
-	sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(state)
+	sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(state, r.box)
 	if err != nil {
 		return err
 	}
@@ -184,7 +194,7 @@ func (r *Repository) MutateState(ctx context.Context, userID string, adminAccoun
 		}
 	}()
 
-	state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, userID, adminAccountID))
+	state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, userID, adminAccountID), r.box)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +204,7 @@ func (r *Repository) MutateState(ctx context.Context, userID string, adminAccoun
 	if err := mutate(state); err != nil {
 		return nil, err
 	}
-	sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(*state)
+	sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(*state, r.box)
 	if err != nil {
 		return nil, err
 	}
@@ -219,6 +229,14 @@ func (r *Repository) MutateState(ctx context.Context, userID string, adminAccoun
 
 // SaveRealConnection 持久化一条真实对接绑定记录。
 func (r *Repository) SaveRealConnection(ctx context.Context, conn RealConnection) error {
+	key := conn.UpstreamKey
+	if key != "" {
+		var err error
+		key, err = r.box.Seal([]byte(key), secretbox.AAD("real_connections.upstream_key", conn.UserID, conn.WorkspaceAdminAccountID, conn.ID))
+		if err != nil {
+			return secretbox.At("real_connections.upstream_key", conn.UserID, conn.WorkspaceAdminAccountID, conn.ID, err)
+		}
+	}
 	ownGroupIDsJSON, err := json.Marshal(conn.OwnGroupIDs)
 	if err != nil {
 		return err
@@ -236,7 +254,7 @@ func (r *Repository) SaveRealConnection(ctx context.Context, conn RealConnection
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20)
 	`, conn.ID, conn.UserID, conn.WorkspaceAdminAccountID, conn.UpstreamSiteID, conn.UpstreamGroupID, conn.UpstreamGroupName,
-		conn.UpstreamKeyID, conn.UpstreamKey, conn.AdminAccountID, conn.AdminAccountName,
+		conn.UpstreamKeyID, key, conn.AdminAccountID, conn.AdminAccountName,
 		string(ownGroupIDsJSON), string(ownGroupNamesJSON), conn.GroupType, conn.ProvisioningMode,
 		conn.Status, conn.UpstreamPlatform, conn.AdminPlatform, conn.PricingMappingEnabled, conn.OperationID, conn.CreatedAt)
 	return err
@@ -246,18 +264,18 @@ func (r *Repository) SaveRealConnection(ctx context.Context, conn RealConnection
 // pricing source in one transaction. Remote resources are created before this
 // call; only a confirmed not-committed error permits remote compensation.
 func (r *Repository) SaveRealConnectionWithPricingMapping(ctx context.Context, conn RealConnection) error {
-	return saveRealConnectionWithPricingMapping(ctx, conn, r.db.Begin)
+	return saveRealConnectionWithPricingMapping(ctx, conn, r.db.Begin, r.box)
 }
 
-func saveRealConnectionWithPricingMapping(ctx context.Context, conn RealConnection, begin func(context.Context) (pgx.Tx, error)) error {
+func saveRealConnectionWithPricingMapping(ctx context.Context, conn RealConnection, begin func(context.Context) (pgx.Tx, error), boxes ...*secretbox.Box) error {
 	tx, err := begin(ctx)
 	if err != nil {
 		return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: err}
 	}
-	return saveRealConnectionWithPricingMappingTx(ctx, tx, conn)
+	return saveRealConnectionWithPricingMappingTx(ctx, tx, conn, boxes...)
 }
 
-func saveRealConnectionWithPricingMappingTx(ctx context.Context, tx pgx.Tx, conn RealConnection) error {
+func saveRealConnectionWithPricingMappingTx(ctx context.Context, tx pgx.Tx, conn RealConnection, boxes ...*secretbox.Box) error {
 	committed := false
 	defer func() {
 		if !committed {
@@ -266,7 +284,7 @@ func saveRealConnectionWithPricingMappingTx(ctx context.Context, tx pgx.Tx, conn
 	}()
 
 	if conn.PricingMappingEnabled || conn.AdminPlatform == string(upstream.PlatformSub2API) {
-		state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
+		state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID), boxes...)
 		if err != nil {
 			return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: err}
 		}
@@ -285,13 +303,13 @@ func saveRealConnectionWithPricingMappingTx(ctx context.Context, tx pgx.Tx, conn
 		}
 		if conn.PricingMappingEnabled {
 			addMappingTargetForOwnGroups(state, conn.OwnGroupNames, UpstreamGroupRef{SiteID: conn.UpstreamSiteID, GroupName: conn.UpstreamGroupName})
-			if err := updateStateInTx(ctx, tx, *state); err != nil {
+			if err := updateStateInTx(ctx, tx, *state, boxes...); err != nil {
 				return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: err}
 			}
 		}
 	}
 
-	if err := insertRealConnection(ctx, tx, conn); err != nil {
+	if err := insertRealConnection(ctx, tx, conn, boxes...); err != nil {
 		return &ConnectionCommitError{Outcome: CommitConfirmedNotCommitted, Cause: err}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -305,7 +323,15 @@ func saveRealConnectionWithPricingMappingTx(ctx context.Context, tx pgx.Tx, conn
 	return nil
 }
 
-func insertRealConnection(ctx context.Context, tx pgx.Tx, conn RealConnection) error {
+func insertRealConnection(ctx context.Context, tx pgx.Tx, conn RealConnection, boxes ...*secretbox.Box) error {
+	key := conn.UpstreamKey
+	if key != "" {
+		var err error
+		key, err = secretbox.Optional(boxes).Seal([]byte(key), secretbox.AAD("real_connections.upstream_key", conn.UserID, conn.WorkspaceAdminAccountID, conn.ID))
+		if err != nil {
+			return secretbox.At("real_connections.upstream_key", conn.UserID, conn.WorkspaceAdminAccountID, conn.ID, err)
+		}
+	}
 	ownGroupIDsJSON, err := json.Marshal(conn.OwnGroupIDs)
 	if err != nil {
 		return err
@@ -323,14 +349,14 @@ func insertRealConnection(ctx context.Context, tx pgx.Tx, conn RealConnection) e
 		)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13, $14, $15, $16, $17, $18, $19, $20)
 	`, conn.ID, conn.UserID, conn.WorkspaceAdminAccountID, conn.UpstreamSiteID, conn.UpstreamGroupID, conn.UpstreamGroupName,
-		conn.UpstreamKeyID, conn.UpstreamKey, conn.AdminAccountID, conn.AdminAccountName,
+		conn.UpstreamKeyID, key, conn.AdminAccountID, conn.AdminAccountName,
 		string(ownGroupIDsJSON), string(ownGroupNamesJSON), conn.GroupType, conn.ProvisioningMode,
 		conn.Status, conn.UpstreamPlatform, conn.AdminPlatform, conn.PricingMappingEnabled, conn.OperationID, conn.CreatedAt)
 	return err
 }
 
-func updateStateInTx(ctx context.Context, tx pgx.Tx, state State) error {
-	sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(state)
+func updateStateInTx(ctx context.Context, tx pgx.Tx, state State, boxes ...*secretbox.Box) error {
+	sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(state, boxes...)
 	if err != nil {
 		return err
 	}
@@ -399,15 +425,15 @@ type realConnectionScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanRealConnection(row realConnectionScanner) (*RealConnection, error) {
-	return scanRealConnectionColumns(row, false)
+func scanRealConnection(row realConnectionScanner, boxes ...*secretbox.Box) (*RealConnection, error) {
+	return scanRealConnectionColumns(row, false, boxes...)
 }
 
-func scanListedRealConnection(row realConnectionScanner) (*RealConnection, error) {
-	return scanRealConnectionColumns(row, true)
+func scanListedRealConnection(row realConnectionScanner, boxes ...*secretbox.Box) (*RealConnection, error) {
+	return scanRealConnectionColumns(row, true, boxes...)
 }
 
-func scanRealConnectionColumns(row realConnectionScanner, includeSiteName bool) (*RealConnection, error) {
+func scanRealConnectionColumns(row realConnectionScanner, includeSiteName bool, boxes ...*secretbox.Box) (*RealConnection, error) {
 	var conn RealConnection
 	var ownGroupIDsJSON []byte
 	var ownGroupNamesJSON []byte
@@ -425,6 +451,14 @@ func scanRealConnectionColumns(row realConnectionScanner, includeSiteName bool) 
 	}
 	if err := row.Scan(destinations...); err != nil {
 		return nil, err
+	}
+	// Several read-only projections deliberately select an empty key; keep it empty.
+	if conn.UpstreamKey != "" {
+		plain, err := secretbox.Optional(boxes).Open(conn.UpstreamKey, secretbox.AAD("real_connections.upstream_key", conn.UserID, conn.WorkspaceAdminAccountID, conn.ID))
+		if err != nil {
+			return nil, secretbox.At("real_connections.upstream_key", conn.UserID, conn.WorkspaceAdminAccountID, conn.ID, err)
+		}
+		conn.UpstreamKey = string(plain)
 	}
 	if err := json.Unmarshal(ownGroupIDsJSON, &conn.OwnGroupIDs); err != nil {
 		return nil, err
@@ -466,7 +500,7 @@ const listRealConnectionsSQL = `
 func (r *Repository) ListRealConnections(ctx context.Context, userID string, adminAccountID string) ([]RealConnection, error) {
 	return listRealConnections(ctx, userID, adminAccountID, func(ctx context.Context, query string, args ...any) (realConnectionRows, error) {
 		return r.db.Query(ctx, query, args...)
-	})
+	}, r.box)
 }
 
 // ReconcileRealConnectionStatuses atomically updates every checkable Sub2API
@@ -515,7 +549,7 @@ func (r *Repository) ReconcileRealConnectionStatuses(ctx context.Context, userID
 	return response, nil
 }
 
-func listRealConnections(ctx context.Context, userID string, adminAccountID string, query realConnectionQuery) ([]RealConnection, error) {
+func listRealConnections(ctx context.Context, userID string, adminAccountID string, query realConnectionQuery, boxes ...*secretbox.Box) ([]RealConnection, error) {
 	rows, err := query(ctx, listRealConnectionsSQL, userID, adminAccountID)
 	if err != nil {
 		return nil, err
@@ -524,7 +558,7 @@ func listRealConnections(ctx context.Context, userID string, adminAccountID stri
 
 	var connections []RealConnection
 	for rows.Next() {
-		conn, err := scanListedRealConnection(rows)
+		conn, err := scanListedRealConnection(rows, boxes...)
 		if err != nil {
 			return nil, err
 		}
@@ -542,7 +576,7 @@ func (r *Repository) GetRealConnection(ctx context.Context, id string, userID st
 		       upstream_platform, admin_platform, pricing_mapping_enabled, operation_id, created_at
 		FROM real_connections WHERE id = $1 AND user_id = $2 AND workspace_admin_account_id = $3
 	`, id, userID, adminAccountID)
-	conn, err := scanRealConnection(row)
+	conn, err := scanRealConnection(row, r.box)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
@@ -565,7 +599,7 @@ func (r *Repository) GetRealConnectionByOperationID(ctx context.Context, userID 
 		       upstream_platform, admin_platform, pricing_mapping_enabled, operation_id, created_at
 		FROM real_connections WHERE user_id = $1 AND workspace_admin_account_id = $2 AND operation_id = $3
 	`, userID, adminAccountID, operationID)
-	conn, err := scanRealConnection(row)
+	conn, err := scanRealConnection(row, r.box)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -600,7 +634,7 @@ func (r *Repository) ReassignRealConnectionGroups(ctx context.Context, conn Real
 		}
 	}()
 
-	state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
+	state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID), r.box)
 	if err != nil {
 		return err
 	}
@@ -626,7 +660,7 @@ func (r *Repository) ReassignRealConnectionGroups(ctx context.Context, conn Real
 			}
 			addMappingTargetForOwnGroups(state, ownGroupNames, target)
 		}
-		sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(*state)
+		sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(*state, r.box)
 		if err != nil {
 			return err
 		}
@@ -690,7 +724,7 @@ func (r *Repository) DeleteRealConnectionWithPricingMapping(ctx context.Context,
 	}()
 
 	if removePricingMapping && conn.PricingMappingEnabled {
-		state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
+		state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID), r.box)
 		if err != nil {
 			return err
 		}
@@ -713,7 +747,7 @@ func (r *Repository) DeleteRealConnectionWithPricingMapping(ctx context.Context,
 					removeMappingTargetForOwnGroups(state, []string{oldName}, target)
 				}
 			}
-			if err := updateStateInTx(ctx, tx, *state); err != nil {
+			if err := updateStateInTx(ctx, tx, *state, r.box); err != nil {
 				return err
 			}
 		}
@@ -745,13 +779,13 @@ func (r *Repository) RemoveUpstreamMappingAndDeleteConnection(ctx context.Contex
 		}
 	}()
 
-	state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, userID, adminAccountID))
+	state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, userID, adminAccountID), r.box)
 	if err != nil {
 		return err
 	}
 	if state != nil {
 		removeMappingTargetFromState(state, siteID, groupName)
-		sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(*state)
+		sessionJSON, mappingsJSON, ownGroupsJSON, err := marshalStateJSON(*state, r.box)
 		if err != nil {
 			return err
 		}

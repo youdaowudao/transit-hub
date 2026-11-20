@@ -17,6 +17,7 @@ type Handler struct {
 func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	handler := &Handler{service: service}
 	mux.HandleFunc("GET /api/system/version", handler.version)
+	mux.HandleFunc("GET /api/system/credentials/status", handler.credentialsStatus)
 	mux.HandleFunc("POST /api/system/upgrade", handler.startUpgrade)
 	mux.HandleFunc("GET /api/system/upgrade", handler.upgradeStatus)
 	mux.HandleFunc("POST /api/system/restart", handler.startRestart)
@@ -99,4 +100,8 @@ func maintenanceConflict(err error) bool {
 
 func (h *Handler) version(w http.ResponseWriter, r *http.Request) {
 	httpjson.Write(w, http.StatusOK, h.service.Version())
+}
+
+func (h *Handler) credentialsStatus(w http.ResponseWriter, r *http.Request) {
+	httpjson.Write(w, http.StatusOK, h.service.CredentialsStatus())
 }

@@ -27,14 +27,19 @@ import (
 	"transithub/backend/internal/modules/mass_email"
 	"transithub/backend/internal/modules/my_sites"
 	"transithub/backend/internal/modules/notifications"
+	"transithub/backend/internal/modules/reports"
+	"transithub/backend/internal/modules/sales"
 	"transithub/backend/internal/modules/settings"
 	"transithub/backend/internal/modules/signup_risk"
 	"transithub/backend/internal/modules/system"
 	"transithub/backend/internal/modules/tickets"
 	"transithub/backend/internal/modules/upstream"
+	"transithub/backend/internal/modules/user_activity"
 	"transithub/backend/internal/modules/users"
+	"transithub/backend/internal/modules/vip"
 	"transithub/backend/internal/shared/authctx"
 	"transithub/backend/internal/shared/httpjson"
+	"transithub/backend/internal/shared/secretbox"
 )
 
 const (
@@ -52,12 +57,19 @@ type Server struct {
 	lotteryCancel                  context.CancelFunc
 	lotteryWorker                  *lottery.Worker
 	connectionHealthService        *connection_health.Service
+	userActivityService            *user_activity.Service
+	vipService                     *vip.Service
+	reportsService                 *reports.Service
 	chanshuiService                *chanshui.Service
 	signupRiskService              *signup_risk.Service
 	upstreamService                interface{ ShutdownGroupCostSampling(context.Context) error }
 }
 
 func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server {
+	credentialBox, err := secretbox.FromConfig(cfg.CredentialEncryptionKey)
+	if err != nil {
+		panic(err)
+	}
 	server := &Server{
 		cfg:     cfg,
 		mux:     http.NewServeMux(),
@@ -77,20 +89,20 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	auth.RegisterRoutes(server.mux, authService)
 	users.RegisterRoutes(server.mux, users.NewService(users.NewRepository(db)))
 	adminAccountsService := admin_accounts.NewService(admin_accounts.NewRepository(db))
-	upstreamRepository := upstream.NewRepository(db)
+	upstreamRepository := upstream.NewRepository(db, credentialBox)
 	runStorageStartup(cfg, upstreamRepository.EnsureSchema)
 	groupRatesService := group_rates.NewService(group_rates.NewRepository(db))
 	runStorageStartup(cfg, groupRatesService.EnsureSchema)
 	group_rates.RegisterRoutes(server.mux, groupRatesService, adminAccountsService)
 	upstreamHTTPClient := &http.Client{Timeout: upstreamRequestTimeout}
 	platformService := upstream.NewPlatformService(upstream.NewHTTPClient(upstreamHTTPClient))
-	upstreamCache := upstream.NewRedisSiteCache(redisClient)
+	upstreamCache := upstream.NewRedisSiteCache(redisClient, credentialBox)
 	upstreamService := upstream.NewService(platformService, upstreamRepository, groupRateSnapshotWriter{service: groupRatesService}, upstreamCache)
 	server.upstreamService = upstreamService
 	upstreamService.SetBackgroundTasksDisabled(cfg.APIOnly)
 	upstreamService.SetAdminAccountResolver(adminAccountsService)
 	upstream.RegisterRoutes(server.mux, upstreamService, adminAccountsService)
-	mySitesService := my_sites.NewService(my_sites.NewRepository(db), platformService, upstreamService)
+	mySitesService := my_sites.NewService(my_sites.NewRepository(db, credentialBox), platformService, upstreamService)
 	runStorageStartup(cfg, mySitesService.EnsureSchema)
 	upstreamService.SetSiteReferenceChecker(mySitesService)
 	my_sites.RegisterRoutes(server.mux, mySitesService)
@@ -144,8 +156,9 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	server.lotteryFrameAncestorOrigin = lotteryService.FrameAncestorOrigin
 	lottery.RegisterRoutes(server.mux, lotteryService)
 
-	settingsService := settings.NewService(&http.Client{Timeout: upstreamRequestTimeout}, settings.NewRepository(db))
+	settingsService := settings.NewService(&http.Client{Timeout: upstreamRequestTimeout}, settings.NewRepository(db, credentialBox))
 	settingsService.SetAdminAccountResolver(adminAccountsService)
+	settingsService.SetDailyReportWritesDisabled(cfg.APIOnly)
 	runStorageStartup(cfg, settingsService.EnsureSchema)
 	// SMTP_ENCRYPTION_KEY 是可选项：空值不影响启动；显式配置了非法值（非 base64 或非 32 字节）
 	// 必须尽早启动失败，避免运行时才发现加密能力不可用。抽成 configureSMTPEncryptionKey
@@ -158,6 +171,14 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	// 因为 admin_accounts.EnsureSchema 的 legacy 迁移会 UPDATE dashboard 表。
 	metricsRepo := dashboard.NewMetricsRepository(db)
 	runStorageStartup(cfg, metricsRepo.EnsureSchema)
+
+	dashboardSessionStore := dashboard.NewRepository(redisClient, credentialBox)
+	credentialStores := startupCredentialStores{db: db, box: credentialBox, dashboard: dashboardSessionStore, sites: upstreamCache}
+	// EnsureSchema itself assigns legacy ownership, so verify before its first possible rebind.
+	// This read-only check also runs in APIOnly and with no configured encryption key.
+	if err := credentialStores.Verify(); err != nil {
+		panic(err)
+	}
 
 	// admin_accounts 最后执行 schema：此时所有业务表和 workspace 字段已存在，
 	// legacy 迁移可以安全地 UPDATE 所有业务表的 admin_account_id。
@@ -237,10 +258,34 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	server.chanshuiService = chanshui.NewService(cfg, adminAccountsService, connHealthService)
 	chanshui.RegisterRoutes(server.mux, server.chanshuiService)
 
+	userActivityRepository := user_activity.NewRepository(db)
+	runStorageStartup(cfg, userActivityRepository.EnsureSchema)
+	userActivityService := user_activity.NewService(userActivityRepository, mySitesService, platformService, cfg.APIOnly)
+	server.userActivityService = userActivityService
+	user_activity.RegisterRoutes(server.mux, userActivityService)
+
+	vipRepository := vip.NewRepository(db)
+	runStorageStartup(cfg, vipRepository.EnsureSchema)
+	vipService := vip.NewService(vipRepository, settingsService, cfg.APIOnly)
+	server.vipService = vipService
+	vip.RegisterRoutes(server.mux, vipService)
+
+	salesRepository := sales.NewRepository(db)
+	runStorageStartup(cfg, salesRepository.EnsureSchema)
+	salesService := sales.NewService(salesRepository, cfg.APIOnly)
+	sales.RegisterRoutes(server.mux, salesService)
+
 	// 所有 workspace 表 schema 完成后再补 legacy 归属；随后才启动 restore、worker 和 scheduler，
 	// 避免后台任务在旧行尚未补齐 workspace 时读取或写回数据。
-	runStorageStartup(cfg, adminAccountsService.AssignLegacyRows, upstreamService.RestoreSavedSites)
+	if err := credentialStores.Verify(); err != nil {
+		panic(err)
+	}
+	runStorageStartup(cfg, adminAccountsService.AssignLegacyRows, credentialStores.Encrypt, upstreamService.RestoreSavedSites)
 	if !cfg.APIOnly {
+		if err := userActivityService.Start(); err != nil {
+			panic(err)
+		}
+		vipService.Start()
 		signupRiskService.Start(context.Background())
 		massEmailWorker.Start(context.Background())
 		campaignsService.StartScheduler(context.Background())
@@ -278,7 +323,6 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 
 	// 仪表盘 admin 登录门禁：复用 sub2api 平台客户端（platformService），会话存于 Redis，
 	// 并启动后台协程对临期令牌做自动刷新。
-	dashboardSessionStore := dashboard.NewRepository(redisClient)
 	dashboardService := dashboard.NewService(dashboardSessionStore, platformService)
 	dashboardService.SetAdminAccountService(adminAccountsService)
 	dashboardService.SetMySiteSync(mySitesService)
@@ -319,9 +363,16 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		metricsService.StartScheduler(context.Background())
 	}
 	dashboard.RegisterRoutes(server.mux, dashboardService, metricsService)
+	reportsService := reports.NewService(reports.NewRepository(db), metricsRepo, salesService, settingsService, redisClient, cfg.APIOnly)
+	server.reportsService = reportsService
+	reports.RegisterRoutes(server.mux, reportsService)
+	if !cfg.APIOnly {
+		reportsService.Start()
+	}
 
 	// 系统信息 API：展示版本号及新版本提示，API-only 不启动后台检查。
 	systemService := system.NewService(cfg)
+	systemService.SetCredentialsVerified(credentialBox != nil)
 	if !cfg.APIOnly {
 		systemService.StartUpdateCheck(context.Background())
 	}
@@ -494,6 +545,21 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	var shutdownErrors []error
+	if s.reportsService != nil {
+		if err := s.reportsService.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
+	if s.vipService != nil {
+		if err := s.vipService.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
+	if s.userActivityService != nil {
+		if err := s.userActivityService.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
 	if s.chanshuiService != nil {
 		if err := s.chanshuiService.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
@@ -538,7 +604,7 @@ func (s *Server) protectedPath(path string) bool {
 	if path == "/api/chanshui" || strings.HasPrefix(path, "/api/chanshui/") {
 		return true
 	}
-	return strings.HasPrefix(path, "/api/notifications") || strings.HasPrefix(path, "/api/users") || strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email")
+	return strings.HasPrefix(path, "/api/reports") || strings.HasPrefix(path, "/api/sales") || strings.HasPrefix(path, "/api/vip") || strings.HasPrefix(path, "/api/user-activity") || strings.HasPrefix(path, "/api/notifications") || strings.HasPrefix(path, "/api/users") || strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email")
 }
 
 func (s *Server) setSecurityHeaders(w http.ResponseWriter, r *http.Request) {

@@ -1,7 +1,9 @@
 {
-  "repository": "xqy2006/ModelTrace",
-  "commit": "6cd4a8ff0f3f4e49d6d6969dd2fbadfa1569fde2",
+  "repository": "Ikaleio/lm-detector",
+  "commit": "70159b7536a2ceb55c478c8c9472da81d3627e59",
   "path": "data/unified_bank.json",
-  "synced_at": "2026-11-12T16:15:31.532Z",
-  "built_at": "2026-10-09T06:24:27.469312+00:00"
+  "upstream_sha256": "81d96a68404e2c394731d482f0e261f02b1a9c12e3bcfb4ccb677f8f0c715048",
+  "trimmed": "models[].frequency_references removed; all other fields verbatim",
+  "synced_at": "2026-11-20T09:39:20Z",
+  "built_at": "2026-11-19T05:26:09.347356+00:00"
 }

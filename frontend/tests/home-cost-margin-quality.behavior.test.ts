@@ -48,6 +48,7 @@ vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
   return {
     useAdminAccounts: () => ({
       currentAccount: ref({ id: 'workspace-a', displayName: '工作区 A' }),
+      isSwitching: ref(false),
     }),
   }
 })

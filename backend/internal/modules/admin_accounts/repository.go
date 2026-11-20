@@ -391,6 +391,9 @@ func (r *Repository) DeleteWorkspace(ctx context.Context, userID string, account
 			return nil, err
 		}
 	}
+	if err := deleteAnalysisWorkspaceRows(ctx, tx, userID, accountID); err != nil {
+		return nil, err
+	}
 	result, err := tx.Exec(ctx, `DELETE FROM admin_accounts WHERE user_id = $1 AND id = $2`, userID, accountID)
 	if err != nil {
 		return nil, err

@@ -96,6 +96,92 @@ describe('today tab: results first, the entry form opens on demand', () => {
 })
 
 describe('rules tab: fee, discount, gift records in order with current results first', () => {
+  it('opens gifts while the old today query is still pending and ignores that late response', async () => {
+    let finish!: (value: unknown) => void
+    api.listAccountCostLedger.mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    const w = await open('today')
+    expect(findButton(w, '记客户赠送')!.attributes('disabled')).toBeUndefined()
+    await click(w, '记客户赠送')
+    expect(input(w, '主站用户 ID').exists()).toBe(true)
+    finish({ items: [], hasMore: false }); await flushPromises()
+    expect(input(w, '主站用户 ID').exists()).toBe(true)
+    expect(w.text()).not.toContain('当日成本变动')
+    expect(api.getGiftLedger).toHaveBeenCalledOnce()
+  })
+
+  it('opens the gift form immediately from the homepage rules+openForm intent', async () => {
+    const w = await open('rules', { openCostForm: true })
+    expect(input(w, '主站用户 ID').exists()).toBe(true)
+    expect(input(w, '费率 %').exists()).toBe(false)
+  })
+
+  it('waits for a delayed gift read after an early fee failure and never mounts unsupported entry controls', async () => {
+    let finish!: (value: unknown) => void
+    api.getRechargeFeeRate.mockRejectedValue(new Error('费率查询中断'))
+    api.getGiftLedger.mockReturnValue(new Promise(resolve => { finish = resolve }))
+    const w = await open('today')
+    await click(w, '记客户赠送')
+    expect(w.text()).toContain('费率查询中断')
+    expect(input(w, '主站用户 ID').exists()).toBe(false)
+    expect(findButton(w, '保存记录')).toBeUndefined()
+    finish({ supported: false, statusAvailable: false, statusError: '', today: businessDate, customers: [] }); await flushPromises()
+    expect(input(w, '主站用户 ID').exists()).toBe(false)
+    expect(findButton(w, '查询这个用户')).toBeUndefined()
+    expect(api.createGiftLedgerRecord).not.toHaveBeenCalled()
+  })
+
+  it('waits for current-workspace gift data and focuses after it becomes available', async () => {
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus')
+    const w = await open('rules', { openCostForm: true })
+    let finish!: (value: unknown) => void
+    api.getGiftLedger.mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    await w.setProps({ workspaceId: 'workspace-b' }); await flushPromises()
+    await click(w, '记客户赠送')
+    expect(input(w, '主站用户 ID').exists()).toBe(false)
+    finish({ supported: true, statusAvailable: true, statusError: '', today: businessDate, customers: [] }); await flushPromises()
+    const field = input(w, '主站用户 ID')
+    expect(field.exists()).toBe(true)
+    expect(focus.mock.contexts).toContain(field.element)
+    expect(api.createGiftLedgerRecord).not.toHaveBeenCalled()
+  })
+
+  it('refocuses an already open draft without clearing it, and refocuses the date when editing', async () => {
+    api.getGiftLedger.mockResolvedValue({ supported: true, statusAvailable: true, statusError: '', today: businessDate, customers: [customer('123')] })
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus')
+    const w = await open('rules', { openCostForm: true })
+    await input(w, '主站用户 ID').setValue('456')
+    await input(w, '赠送金额').setValue('17')
+    focus.mockClear()
+    await click(w, '记客户赠送')
+    expect(input(w, '主站用户 ID').element).toHaveProperty('value', '456')
+    expect(input(w, '赠送金额').element).toHaveProperty('value', '17')
+    expect(focus.mock.contexts).toContain(input(w, '主站用户 ID').element)
+    focus.mockClear()
+    await click(w, '编辑 123@example.com 2026-08-20 的记录')
+    expect(focus.mock.contexts).toContain(input(w, '充值日期').element)
+  })
+
+  it('keeps the old manual entry and reload path after gift reading fails', async () => {
+    api.getGiftLedger.mockRejectedValue(new Error('客户记录查询测试错误'))
+    const w = await open('rules', { openCostForm: true })
+    expect(w.text()).toContain('客户记录查询测试错误')
+    expect(input(w, '主站用户 ID').exists()).toBe(true)
+    expect(findButton(w, '重新加载费用')).toBeDefined()
+    expect(api.createGiftLedgerRecord).not.toHaveBeenCalled()
+  })
+
+  it('does not reuse an unsupported status after entering rules from another page', async () => {
+    api.getGiftLedger.mockResolvedValue({ supported: true, statusAvailable: false, statusError: '消费暂不可读', today: businessDate, customers: [customer('123')] })
+    const w = await open('rules')
+    api.getGiftLedger.mockResolvedValue({ supported: false, statusAvailable: false, statusError: '', today: businessDate, customers: [] })
+    await click(w, '今日成本'); await click(w, '成本规则')
+    expect(findButton(w, '记客户赠送')!.attributes('disabled')).toBeDefined()
+    await click(w, '今日成本')
+    api.getGiftLedger.mockResolvedValue({ supported: true, statusAvailable: true, statusError: '', today: businessDate, customers: [] })
+    await click(w, '记客户赠送')
+    expect(input(w, '主站用户 ID').exists()).toBe(true)
+  })
+
   it('orders the three blocks fee, discount, gift and keeps every form collapsed', async () => {
     const w = await open('rules')
     const ids = w.findAll('[data-testid="rule-fee"], [data-testid="rule-discount"], [data-testid="gift-ledger-section"]').map(node => node.attributes('data-testid'))

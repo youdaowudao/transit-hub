@@ -40,12 +40,13 @@ var (
 )
 
 type Service struct {
-	client            *http.Client
-	repository        *Repository
-	notificationRepo  notificationRepository
-	strategyRepo      strategyRepository
-	accounts          AdminAccountResolver
-	OnStrategyChanged func(userID, adminAccountID string, settings StrategySettings)
+	dailyReportWritesDisabled bool
+	client                    *http.Client
+	repository                *Repository
+	notificationRepo          notificationRepository
+	strategyRepo              strategyRepository
+	accounts                  AdminAccountResolver
+	OnStrategyChanged         func(userID, adminAccountID string, settings StrategySettings)
 
 	// smtpRepo 是 SMTP 存储层的窄接口，由 *Repository 结构性满足；测试可注入内存 fake。
 	smtpRepo smtpRepository
@@ -106,6 +107,9 @@ func DefaultNotificationChannelSettings() NotificationChannelSettings {
 
 func DefaultStrategySettings() StrategySettings {
 	return StrategySettings{
+		DailyReportEnabled:       json.RawMessage("false"),
+		DailyReportTime:          json.RawMessage(`"08:00"`),
+		DailyReportBotIDs:        json.RawMessage("[]"),
 		RefreshInterval:          minRefreshIntervalSeconds,
 		BalanceTemplateFormat:    NotificationTemplateFormatText,
 		MultiplierTemplateFormat: NotificationTemplateFormatText,
@@ -165,7 +169,12 @@ func (s *Service) SaveStrategy(ctx context.Context, userID string, settings Stra
 	if err != nil {
 		return StrategySettings{}, err
 	}
-	if err := s.strategyRepo.SaveStrategy(ctx, userID, adminAccountID, settings); err != nil {
+	if repository, ok := s.strategyRepo.(preservingStrategyRepository); ok {
+		settings, err = repository.SaveStrategyPreservingReport(ctx, userID, adminAccountID, settings)
+		if err != nil {
+			return StrategySettings{}, err
+		}
+	} else if err := s.strategyRepo.SaveStrategy(ctx, userID, adminAccountID, settings); err != nil {
 		return StrategySettings{}, err
 	}
 	if s.OnStrategyChanged != nil {

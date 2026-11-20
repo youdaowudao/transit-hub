@@ -51,6 +51,7 @@ vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
   return {
     useAdminAccounts: () => ({
       currentAccount: ref({ id: 'workspace-a', displayName: '工作区 A' }),
+      isSwitching: ref(false),
     }),
   }
 })
@@ -114,6 +115,7 @@ vi.mock('@/modules/admin/api/dashboardAdmin', () => ({
   getRechargeFeeRate: vi.fn(async () => ({ id: 'rate-current', effectiveDate: '2026-08-22', rate: 0.016, createdAt: '2026-08-22T00:00:00Z' })),
   listRechargeFeeRateHistory: vi.fn(async () => ({ items: [] })),
   listRevenueDiscountRates: vi.fn(async () => ({ items: [] })),
+  getGiftLedger: vi.fn(async () => ({ supported: true, statusAvailable: true, statusError: '', today: '2026-08-22', customers: [] })),
   listAccountAssets: harness.listAccountAssets,
   listAccountCostLedger: harness.listAccountCostLedger,
   replaceAccountLink: vi.fn(),
@@ -203,6 +205,21 @@ afterEach(() => {
 })
 
 describe('Dashboard cost entrypoint behavior', () => {
+  it('opens the existing gift form in one homepage click and clears that intent for later result-card openings', async () => {
+    const wrapper = await mountDashboard()
+    await findButton(wrapper, '记客户赠送').trigger('click'); await flushPromises()
+    const workspace = wrapper.findComponent(AccountCostWorkspace)
+    expect(workspace.props('initialTab')).toBe('rules')
+    expect(workspace.props('openCostForm')).toBe(true)
+    expect(workspace.find('input[aria-label="主站用户 ID"]').exists()).toBe(true)
+    workspace.vm.$emit('close'); await nextTick()
+    await findCard(wrapper, '今日总成本').trigger('click'); await flushPromises()
+    expect(workspace.props('initialTab')).toBe('today')
+    expect(workspace.props('openCostForm')).toBe(false)
+    expect(workspace.find('input[aria-label="主站用户 ID"]').exists()).toBe(false)
+    expect(harness.refreshAccountStats).not.toHaveBeenCalled()
+  })
+
   it('D1/D2 opening the dashboard does not refresh account statistics', async () => {
     await mountDashboard()
     expect(harness.refreshAccountStats).not.toHaveBeenCalled()

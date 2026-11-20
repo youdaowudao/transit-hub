@@ -110,7 +110,7 @@ func (s *Service) Summary(ctx context.Context, scope Scope, span DayRange) (Summ
 			}
 			result.Previous = &previous
 		}
-		result.Channels, err = readChannels(ctx, tx, scope, span, cfg, result.Coverage.HasKnownData)
+		result.Channels, err = readChannels(ctx, tx, scope, span, cfg, result.Coverage.Complete)
 		if err != nil {
 			return err
 		}
@@ -122,7 +122,7 @@ func (s *Service) Summary(ctx context.Context, scope Scope, span DayRange) (Summ
 		if err != nil {
 			return err
 		}
-		result.Exclusions, err = readExclusions(ctx, tx, scope, span, cfg, result.Coverage.HasKnownData)
+		result.Exclusions, err = readExclusions(ctx, tx, scope, span, cfg, result.Coverage.Complete)
 		return err
 	})
 	return result, err
@@ -154,7 +154,7 @@ func (s *Service) Entries(ctx context.Context, scope Scope, span DayRange, query
 		if err != nil {
 			return err
 		}
-		result.Exclusions, err = readExclusions(ctx, tx, scope, span, cfg, result.Coverage.HasKnownData)
+		result.Exclusions, err = readExclusions(ctx, tx, scope, span, cfg, result.Coverage.Complete)
 		return err
 	})
 	return result, err
@@ -292,11 +292,7 @@ func (s *Service) ChangeExclusions(ctx context.Context, scope Scope, keys []Entr
 		if err != nil {
 			return err
 		}
-		_, known, err := readTotals(ctx, tx, scope, span, state)
-		if err != nil {
-			return err
-		}
-		summary, err := readExclusions(ctx, tx, scope, span, cfg, known)
+		summary, err := readExclusions(ctx, tx, scope, span, cfg, covered(state, span))
 		if err == nil {
 			result.Exclusions = &summary
 		}

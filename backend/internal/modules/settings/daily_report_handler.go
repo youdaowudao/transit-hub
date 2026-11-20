@@ -22,6 +22,7 @@ const strategyReportBodyLimit = 64 << 10
 type strategyReportRequest struct {
 	StrategySettings
 	workspacescope.Scope
+	legacyPatch map[string]json.RawMessage
 }
 
 func reportPatch(settings StrategySettings) DailyReportPatch {
@@ -69,8 +70,28 @@ func decodeStrategyRequest(w http.ResponseWriter, r *http.Request) (strategyRepo
 		io.Closer
 	}{Reader: io.MultiReader(bytes.NewReader(prefix), original), Closer: original}
 	if prefixHasDailyReportField(prefix) {
-		_, err := httpjson.DecodeStrictObject(w, r, &dto)
-		return dto, true, err
+		fields, err := httpjson.DecodeStrictObject(w, r, &dto)
+		if err != nil {
+			return dto, true, err
+		}
+		encoded, err := json.Marshal(dto.StrategySettings)
+		if err != nil {
+			return dto, true, err
+		}
+		var values map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &values); err != nil {
+			return dto, true, err
+		}
+		dto.legacyPatch = map[string]json.RawMessage{}
+		for _, key := range legacyStrategyKeys {
+			for submitted := range fields {
+				if strings.EqualFold(submitted, key) {
+					dto.legacyPatch[key] = values[key]
+					break
+				}
+			}
+		}
+		return dto, true, nil
 	}
 	// Do not admit scope fields or other new parameters into the original contract.
 	err = httpjson.Decode(r, &dto.StrategySettings)
@@ -151,7 +172,7 @@ func (h *Handler) saveDailyReportStrategy(w http.ResponseWriter, r *http.Request
 		writeDailyReportSaveError(w, dto.Scope, errors.New("工作区编号或创建时间缺失、格式不正确；请重新读取当前工作区后保存。"), true)
 		return
 	}
-	saved, err := h.service.SaveStrategyWithDailyReport(r.Context(), dto.Scope, dto.StrategySettings, reportPatch(dto.StrategySettings))
+	saved, err := h.service.SaveStrategyWithDailyReport(r.Context(), dto.Scope, dto.legacyPatch, reportPatch(dto.StrategySettings))
 	if err != nil {
 		writeDailyReportSaveError(w, dto.Scope, err, false)
 		return

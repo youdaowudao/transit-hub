@@ -19,7 +19,7 @@ export interface SalesTotals {
   payers: number | null
   repeatPayers: number | null
   newPayers: number | null
-  registered: number
+  registered: number | null
   registeredPaid: number | null
   conversion: number | null
   averagePerPayer: number | null

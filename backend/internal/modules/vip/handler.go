@@ -185,6 +185,10 @@ func (h *Handler) summary(w http.ResponseWriter, r *http.Request) {
 		h.failure(w, scope, "大户关注", err, false)
 		return
 	}
+	if err := workspacescope.Resolve(r.Context(), h.service.repo.db, scope); err != nil {
+		h.failure(w, scope, "确认读取工作区", err, false)
+		return
+	}
 	h.write(w, scope, result)
 }
 
@@ -201,6 +205,10 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
 	result, err := h.service.repo.Search(r.Context(), scope, query)
 	if err != nil {
 		h.failure(w, scope, "搜索客户", err, false)
+		return
+	}
+	if err := workspacescope.Resolve(r.Context(), h.service.repo.db, scope); err != nil {
+		h.failure(w, scope, "确认读取工作区", err, false)
 		return
 	}
 	h.write(w, scope, map[string]any{"items": result})

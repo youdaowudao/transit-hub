@@ -160,3 +160,17 @@ test('core gate discovers Responses answer behavior in its own step', async () =
   assert.match(script, /npm run test -- responses-question-answer\.behavior\.test\.ts"/)
   assert.ok(script.indexOf('frontend Responses question answer failure evidence') > script.indexOf('question answer browser fixture safety tests'))
 })
+
+
+test('upstream absorption keeps local core membership and full CI discovery', async () => {
+  const core = await readFile(path.join(rootDir, 'scripts/test-core-regression.sh'), 'utf8')
+  for (const member of ['./internal/shared/secretbox', './internal/modules/user_activity', './internal/modules/vip', './internal/modules/sales', './internal/modules/reports', 'TestAbsorb', 'upstream-absorb-clipboard.behavior.test.ts', 'upstream-absorb-api.test.ts', 'upstream-absorb-activity.behavior.test.ts', 'upstream-absorb-user-count.behavior.test.ts', 'upstream-absorb-vip-sales.behavior.test.ts', 'upstream-absorb-insights.behavior.test.ts', 'upstream-absorb-dashboard.behavior.test.ts', 'upstream-absorb-reports.behavior.test.ts']) {
+    assert.ok(core.includes(member), `missing absorption regression: ${member}`)
+  }
+  const full = await readFile(path.join(rootDir, 'scripts/test-full-regression.sh'), 'utf8')
+  assert.ok(full.includes('go test ./... -count=1 -v'))
+  assert.ok(full.includes('npm run test'))
+  const ci = await readFile(path.join(rootDir, '.github/workflows/ci.yml'), 'utf8')
+  assert.ok(ci.includes('TEST_REDIS_URL: redis://localhost:6379/0'))
+  assert.ok(ci.includes('image: redis:7-alpine'))
+})

@@ -230,12 +230,12 @@ func encodeHeaderText(text string) string {
 }
 
 // formatFromAddress 写发件人：名字是纯 ASCII 时交给 net/mail（它会按需加引号）；有中文时用 encodeHeaderText，
-// 避免编码后挤在一行里过长。
+// 编码词与地址分行，避免含编码词的物理行超过 RFC 2047 的 76 字符限制。
 func formatFromAddress(name string, address string) string {
 	if name == "" || isPrintableASCII(name) {
 		return (&mail.Address{Name: name, Address: address}).String()
 	}
-	return encodeHeaderText(name) + " <" + address + ">"
+	return encodeHeaderText(name) + "\r\n <" + address + ">"
 }
 
 func isPrintableASCII(text string) bool {

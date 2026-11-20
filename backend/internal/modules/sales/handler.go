@@ -210,6 +210,10 @@ func (h *Handler) summary(w http.ResponseWriter, r *http.Request) {
 		h.failure(w, scope, "销售概览", err, false)
 		return
 	}
+	if err := workspacescope.Resolve(r.Context(), h.service.repo.db, scope); err != nil {
+		h.failure(w, scope, "确认读取工作区", err, false)
+		return
+	}
 	h.write(w, scope, result)
 }
 
@@ -243,6 +247,10 @@ func (h *Handler) entries(w http.ResponseWriter, r *http.Request) {
 	result, err := h.service.Entries(r.Context(), scope, span, EntryQuery{Page: page, PageSize: size, Channel: channel, Search: search, ExcludedOnly: excluded == "1"})
 	if err != nil {
 		h.failure(w, scope, "销售明细", err, false)
+		return
+	}
+	if err := workspacescope.Resolve(r.Context(), h.service.repo.db, scope); err != nil {
+		h.failure(w, scope, "确认读取工作区", err, false)
 		return
 	}
 	h.write(w, scope, result)

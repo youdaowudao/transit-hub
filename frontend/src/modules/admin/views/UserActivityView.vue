@@ -5,6 +5,7 @@ import type { EChartsCoreOption } from 'echarts/core'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { t } from '@/locales'
+import { copyText } from '../utils/clipboard'
 import DashboardEChart from '../components/dashboard/DashboardEChart.vue'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import { getActivityDetail, getActivitySummary, getActivitySync, getActivityUsers, startActivitySync } from '../api/userActivity'
@@ -22,6 +23,7 @@ const error = ref('')
 const detailError = ref('')
 const copied = ref('')
 const days = ref(60)
+const appliedDays = ref(60)
 const query = ref<ActivityUserQuery>({ page: 1, pageSize: 20, segment: 'all', inactiveDays: 30, search: '', role: '', status: '', sort: 'lastUsedAt', order: 'desc' })
 let epoch = 0
 let detailEpoch = 0
@@ -31,6 +33,7 @@ let detailController: AbortController | null = null
 let startController: AbortController | null = null
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let disposed = false
+let loadedQuery: Parameters<typeof getActivityUsers>[1] = { ...query.value }
 const running = computed(() => sync.value?.status === 'running')
 const number = (value: number | null | undefined) => value == null ? t('admin.userActivity.unknown') : value.toLocaleString('zh-CN', { maximumFractionDigits: 6 })
 const date = (value?: string | null) => value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Singapore', dateStyle: 'medium', timeStyle: 'medium' }).format(new Date(value)) : t('admin.userActivity.unknown')
@@ -42,6 +45,7 @@ const reset = () => {
   epoch++; detailEpoch++; stopPoll(); loadController?.abort(); detailController?.abort(); startController?.abort()
   summary.value = null; list.value = null; sync.value = null; detail.value = null
   error.value = ''; detailError.value = ''; copied.value = ''; loading.value = false; starting.value = false; detailLoading.value = false
+  days.value = appliedDays.value
 }
 const schedulePoll = () => {
   stopPoll()
@@ -54,6 +58,10 @@ const schedulePoll = () => {
     try {
       const state = await getActivitySync(captured, controller.signal)
       if (!current(generation) || controller.signal.aborted || pollController !== controller) return
+      if (state.status !== 'running' && loading.value) {
+        schedulePoll()
+        return
+      }
       sync.value = state
       if (state.status === 'running') schedulePoll()
       else await load()
@@ -62,15 +70,22 @@ const schedulePoll = () => {
     }
   }, 5000)
 }
-const load = async () => {
+const load = async (requestedDays = appliedDays.value, requestedQuery = loadedQuery) => {
   if (!scope.value || isSwitching.value || starting.value) return
   const generation = epoch; const captured = { ...scope.value }
+  const filters = { ...requestedQuery }
+  if (filters.segment !== 'inactive') delete filters.inactiveDays
   loadController?.abort(); const controller = new AbortController(); loadController = controller
   loading.value = true; error.value = ''
   try {
-    const [overview, users] = await Promise.all([getActivitySummary(captured, days.value, controller.signal), getActivityUsers(captured, { ...query.value }, controller.signal)])
+    const [overview, users] = await Promise.all([getActivitySummary(captured, requestedDays, controller.signal), getActivityUsers(captured, filters, controller.signal)])
     if (!current(generation) || controller.signal.aborted || loadController !== controller) return
-    summary.value = overview; list.value = users; sync.value = overview.sync; schedulePoll()
+    summary.value = overview
+    list.value = users
+    loadedQuery = { ...filters, page: users.page, pageSize: users.pageSize }
+    if (!running.value) sync.value = overview.sync
+    appliedDays.value = requestedDays
+    schedulePoll()
   } catch (cause) { if (current(generation) && loadController === controller && !controller.signal.aborted && !aborted(cause)) error.value = reason(cause) }
   finally { if (current(generation) && loadController === controller) loading.value = false }
 }
@@ -82,8 +97,26 @@ const start = async () => {
   catch (cause) { if (current(generation) && !aborted(cause)) error.value = reason(cause) }
   finally { if (current(generation)) starting.value = false }
 }
-const apply = () => { query.value.page = 1; void load() }
-const page = (offset: number) => { query.value.page += offset; void load() }
+const applyDays = () => {
+  if (Number.isInteger(days.value) && days.value >= 1 && days.value <= 400) void load(days.value)
+}
+const apply = () => {
+  if (![20, 50, 100].includes(query.value.pageSize)) {
+    error.value = '每页数量须选择20、50或100；请重新选择后查询，已读取资料保持不变。'
+    return
+  }
+  if (query.value.segment === 'inactive' && (!Number.isInteger(query.value.inactiveDays) || query.value.inactiveDays < 1 || query.value.inactiveDays > 3650)) {
+    error.value = '未使用天数须为1—3650之间的整数；请填写后再查询，已读取资料保持不变。'
+    return
+  }
+  void load(appliedDays.value, { ...query.value, page: 1 })
+}
+const page = (offset: number) => {
+  if (loading.value || !list.value) return
+  const next = loadedQuery.page + offset
+  if (!Number.isInteger(next) || next < 1) return
+  void load(appliedDays.value, { ...loadedQuery, page: next })
+}
 const openDetail = async (id: string) => {
   if (!scope.value) return
   const generation = epoch; const request = ++detailEpoch; const captured = { ...scope.value }
@@ -94,7 +127,13 @@ const openDetail = async (id: string) => {
   finally { if (current(generation) && request === detailEpoch) detailLoading.value = false }
 }
 const closeDetail = () => { detailEpoch++; detailController?.abort(); detail.value = null; detailError.value = ''; detailLoading.value = false }
-const copy = async (email: string) => { const generation = epoch; try { await navigator.clipboard.writeText(email); if (current(generation)) copied.value = email } catch { if (current(generation)) error.value = t('admin.userActivity.copyError') } }
+const copy = async (email: string) => {
+  const generation = epoch
+  copied.value = ''
+  if (error.value === t('admin.userActivity.copyError')) error.value = ''
+  try { await copyText(email); if (current(generation)) copied.value = email }
+  catch { if (current(generation)) error.value = t('admin.userActivity.copyError') }
+}
 const partial = (point: ActivityDay) => !point.temporary && (!summary.value?.coverage.usageFrom || point.day < summary.value.coverage.usageFrom || point.day > summary.value.coverage.usageTo)
 const delta = (period: ActivityPeriod) => period.current && period.previous && period.previous.cost > 0 ? `${((period.current.cost / period.previous.cost - 1) * 100).toFixed(1)}%` : t('admin.userActivity.unknown')
 const chart = computed<EChartsCoreOption>(() => ({
@@ -102,7 +141,12 @@ const chart = computed<EChartsCoreOption>(() => ({
   xAxis: { type: 'category', data: summary.value?.daily.map(point => point.day) ?? [] }, yAxis: { type: 'value' },
   dataZoom: [{ type: 'inside' }], series: [{ name: t('admin.userActivity.cost'), type: 'line', connectNulls: false, data: summary.value?.daily.map(point => point.cost) ?? [], showSymbol: false }],
 }))
-watch(() => [scope.value?.workspaceAdminAccountId, scope.value?.workspaceCreatedAt, isSwitching.value], () => { reset(); query.value.page = 1; if (scope.value && !isSwitching.value) void load() }, { immediate: true })
+watch(() => [scope.value?.workspaceAdminAccountId, scope.value?.workspaceCreatedAt, isSwitching.value], () => {
+  reset()
+  loadedQuery = { ...loadedQuery, page: 1 }
+  query.value = { ...loadedQuery, inactiveDays: loadedQuery.inactiveDays ?? 30 }
+  if (scope.value && !isSwitching.value) void load()
+}, { immediate: true })
 onMounted(() => { if (!currentAccount.value) void loadCurrentAccount() })
 onBeforeUnmount(() => { disposed = true; reset() })
 </script>
@@ -115,7 +159,7 @@ onBeforeUnmount(() => { disposed = true; reset() })
         <p class="mt-2 max-w-3xl text-sm text-muted-foreground">{{ t('admin.userActivity.intro') }}</p>
       </div>
       <div class="flex gap-2">
-        <Button variant="outline" :disabled="!scope || loading || starting || isSwitching" @click="load">
+        <Button variant="secondary" :disabled="!scope || loading || starting || isSwitching" @click="load()">
           <RefreshCw class="mr-2 h-4 w-4" />{{ t('admin.userActivity.refresh') }}</Button>
         <Button :disabled="!scope || isSwitching || loading || starting || running" @click="start">
           <Loader2 v-if="starting || running" class="mr-2 h-4 w-4 animate-spin" />{{ t('admin.userActivity.start') }}</Button>
@@ -195,8 +239,8 @@ onBeforeUnmount(() => { disposed = true; reset() })
       <section class="rounded-xl border border-border/50 bg-card p-5">
         <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
           <h2 class="font-semibold">{{ t('admin.userActivity.daily') }}</h2>
-          <label class="flex items-center gap-2 text-sm">{{ t('admin.userActivity.days') }}<Input v-model.number="days" type="number" min="1" max="400" class="w-24" />
-            <Button variant="outline" :disabled="loading || days < 1 || days > 400" @click="load">{{ t('admin.userActivity.readLocal') }}</Button>
+          <label class="flex items-center gap-2 text-sm">{{ t('admin.userActivity.days') }}<Input :model-value="String(days)" @update:model-value="days = Number.parseFloat($event)" type="number" min="1" max="400" class="w-24" />
+            <Button variant="secondary" :disabled="loading || !Number.isInteger(days) || days < 1 || days > 400" @click="applyDays">{{ t('admin.userActivity.readLocal') }}</Button>
           </label>
         </div>
         <div class="h-64">
@@ -248,7 +292,7 @@ onBeforeUnmount(() => { disposed = true; reset() })
               <option v-for="segment in ['all','active_1d','active_7d','active_30d','inactive','churned_7d','declining','growing']" :key="segment" :value="segment">{{ t(`admin.userActivity.segmentName.${segment}`) }}</option>
             </select>
           </label>
-          <label v-if="query.segment === 'inactive'" class="text-sm">{{ t('admin.userActivity.inactiveDays') }}<Input v-model.number="query.inactiveDays" type="number" min="1" max="3650" class="mt-1" />
+          <label v-if="query.segment === 'inactive'" class="text-sm">{{ t('admin.userActivity.inactiveDays') }}<Input :model-value="String(query.inactiveDays)" @update:model-value="query.inactiveDays = Number.parseFloat($event)" type="number" min="1" max="3650" class="mt-1" />
           </label>
           <label class="text-sm">{{ t('admin.userActivity.role') }}<select v-model="query.role" class="mt-1 h-10 w-full rounded-md border border-border bg-background px-3">
               <option value="">{{ t('admin.userActivity.all') }}</option>
@@ -306,7 +350,7 @@ onBeforeUnmount(() => { disposed = true; reset() })
               <td class="px-4 py-3">{{ number(user.cost30d) }}</td>
               <td class="px-4 py-3">
                 <div class="flex gap-2">
-                  <Button variant="outline" size="sm" @click="openDetail(user.siteUserId)">{{ t('admin.userActivity.detail') }}</Button>
+                  <Button variant="secondary" size="sm" @click="openDetail(user.siteUserId)">{{ t('admin.userActivity.detail') }}</Button>
                   <Button variant="ghost" size="sm" :disabled="!user.email" :aria-label="t('admin.userActivity.copy')" @click="copy(user.email)">
                     <Copy class="h-4 w-4" />
                   </Button>
@@ -321,10 +365,10 @@ onBeforeUnmount(() => { disposed = true; reset() })
         </table>
       </div>
       <div class="flex items-center justify-between gap-3 p-4 text-sm">
-        <span>{{ t('admin.userActivity.total', { total: list?.total ?? t('admin.userActivity.unknown'), page: query.page }) }}</span>
+        <span>{{ t('admin.userActivity.total', { total: list?.total ?? t('admin.userActivity.unknown'), page: list?.page ?? 1 }) }}</span>
         <div class="flex gap-2">
-          <Button variant="outline" :disabled="loading || query.page <= 1" @click="page(-1)">{{ t('admin.userActivity.previous') }}</Button>
-          <Button variant="outline" :disabled="loading || !list || query.page * query.pageSize >= list.total" @click="page(1)">{{ t('admin.userActivity.next') }}</Button>
+          <Button variant="secondary" :disabled="loading || !list || list.page <= 1" @click="page(-1)">{{ t('admin.userActivity.previous') }}</Button>
+          <Button variant="secondary" :disabled="loading || !list || list.page * list.pageSize >= list.total" @click="page(1)">{{ t('admin.userActivity.next') }}</Button>
         </div>
       </div>
     </section>

@@ -39,6 +39,7 @@ func (r *Repository) Ready(ctx context.Context) error {
            AND to_regclass('sales_settings') IS NOT NULL
            AND to_regclass('user_activity_recharge_daily') IS NOT NULL
            AND to_regclass('user_activity_profiles') IS NOT NULL
+           AND to_regclass('user_activity_site_daily') IS NOT NULL
            AND to_regclass('user_activity_sync_states') IS NOT NULL
     `).Scan(&ready)
 	if err != nil {

@@ -85,7 +85,7 @@ func salesSection(day string, value sales.Summary) Section {
 	if !value.Coverage.Complete {
 		section.Text += "仅为已保存部分，日期覆盖不完整，不作完整比较。"
 	}
-	section.Text += "资料最近完整同步：" + observed(section.ObservedAt) + "。"
+	section.Text += "库存与近期用量最近成功同步：" + observed(section.ObservedAt) + "。"
 	return section
 }
 
@@ -100,7 +100,7 @@ func usageSection(day string, value localActivity) Section {
 	if !section.Coverage.Complete {
 		section.Text += "仅为已保存部分，无法确认昨日完整用量。"
 	}
-	section.Text += "资料最近完整同步：" + observed(section.ObservedAt) + "。"
+	section.Text += "库存与近期用量最近成功同步：" + observed(section.ObservedAt) + "。"
 	return section
 }
 

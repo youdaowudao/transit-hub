@@ -106,6 +106,14 @@ func (h *Handler) scope(w http.ResponseWriter, r *http.Request, extra ...string)
 	return s, true
 }
 func (h *Handler) write(w http.ResponseWriter, r *http.Request, status int, s Scope, value any) {
+	// These reads span several queries. Reject a replaced workspace before
+	// publishing their result; a confirmed mutation must keep its actual result.
+	if r.Method == http.MethodGet {
+		if err := workspacescope.Resolve(r.Context(), h.s.repo.db, s); err != nil {
+			h.failure(w, s, err)
+			return
+		}
+	}
 	raw, e := json.Marshal(value)
 	if e != nil {
 		h.failure(w, s, e)

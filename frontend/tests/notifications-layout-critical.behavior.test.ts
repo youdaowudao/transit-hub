@@ -35,6 +35,7 @@ vi.mock('@/modules/admin/api/settings', () => ({
   getSmtpSettings: vi.fn(async () => ({ host: '', port: 587, username: '', fromEmail: '', fromName: '', tlsMode: 'starttls', passwordConfigured: false, updatedAt: null })), saveSmtpSettings: vi.fn(), testSmtpEmail: vi.fn(),
 }))
 vi.mock('@/modules/admin/api/system', () => ({
+  getCredentialsStatus: vi.fn(async () => ({ configured: false, mode: 'legacy', message: 'Fixture existing credential state' })),
   getSystemVersion: vi.fn(async () => ({ version: 'V3.0.5' })),
   getSystemRestartStatus: vi.fn(async () => ({ state: 'idle' })), getSystemRollbackStatus: vi.fn(async () => ({ state: 'idle' })), getSystemUpgradeStatus: vi.fn(async () => ({ state: 'idle' })),
   isRollbackRouteNotFound: vi.fn(() => false), isTransientSystemApiError: vi.fn(() => false), startSystemRestart: vi.fn(), startSystemRollback: vi.fn(), startSystemUpgrade: vi.fn(),

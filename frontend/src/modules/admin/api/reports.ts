@@ -1,4 +1,4 @@
-import { authUnauthorizedErrorKey, getAccessToken, handleAuthExpired, isUnauthorizedApiResponse } from '@/modules/auth/api/auth'
+import { authUnauthorizedErrorKey, getAccessToken, handleAuthExpired } from '@/modules/auth/api/auth'
 import type { DailyReportPatch, DailyReportPreview, DailyReportScope, DailyReportTest } from '../types/reports'
 import type { StrategySettings } from '../types/settings'
 
@@ -28,7 +28,7 @@ const request = async <T>(scope: DailyReportScope, path: string, method = 'GET',
   }
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw new Error(`日报接口返回的资料不是完整对象。${followUp}`)
   if (!response.ok) {
-    if (isUnauthorizedApiResponse(response.status, payload)) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+    if (response.status === 401) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
     throw new Error(typeof payload.message === 'string' && payload.message ? payload.message : `日报操作未完成（本站HTTP ${response.status}），具体原因尚未确认；请先重新读取并核查本站日志。`)
   }
   if (payload.workspaceAdminAccountId !== scope.workspaceAdminAccountId || payload.workspaceCreatedAt !== scope.workspaceCreatedAt) throw new Error(`日报响应与请求的工作区不一致，已停止显示该响应。${followUp}`)
@@ -36,4 +36,7 @@ const request = async <T>(scope: DailyReportScope, path: string, method = 'GET',
 }
 export const getDailyReportPreview = (scope: DailyReportScope, signal?: AbortSignal) => request<DailyReportPreview>(scope, '/reports/daily/preview', 'GET', {}, signal)
 export const testDailyReport = (scope: DailyReportScope, signal?: AbortSignal) => request<DailyReportTest>(scope, '/reports/daily/test', 'POST', {}, signal)
-export const saveStrategyWithDailyReport = (scope: DailyReportScope, strategy: StrategySettings, patch: DailyReportPatch, signal?: AbortSignal) => request<StrategySettings>(scope, '/settings/strategy', 'PUT', { ...strategy, ...patch }, signal)
+export const saveStrategyWithDailyReport = (scope: DailyReportScope, strategy: Partial<StrategySettings>, patch: DailyReportPatch, signal?: AbortSignal) => {
+  const { dailyReportEnabled: _enabled, dailyReportTime: _time, dailyReportBotIds: _botIds, ...legacy } = strategy
+  return request<StrategySettings>(scope, '/settings/strategy', 'PUT', { ...legacy, ...patch }, signal)
+}

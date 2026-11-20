@@ -168,7 +168,7 @@ onBeforeUnmount(() => { disposed = true; reset() })
         <h1 class="text-2xl font-semibold text-foreground">{{ t('admin.sales.title') }}</h1>
         <p class="mt-2 max-w-3xl text-sm text-muted-foreground">{{ summary ? t('admin.sales.intro', { channels: includedChannels }) : t('admin.sales.introPending') }}</p>
       </div>
-      <Button variant="outline" :disabled="!scope || loading || writing || isSwitching" @click="load">
+      <Button variant="secondary" :disabled="!scope || loading || writing || isSwitching" @click="load">
         <Loader2 v-if="loading" class="mr-2 h-4 w-4 animate-spin" />
         <RefreshCw v-else class="mr-2 h-4 w-4" />{{ t('admin.sales.refresh') }}</Button>
     </header>
@@ -330,8 +330,8 @@ onBeforeUnmount(() => { disposed = true; reset() })
           </form>
           <div class="flex flex-wrap items-center gap-3">
             <span class="text-sm">{{ t('admin.sales.selected', { count: selected.length }) }}</span>
-            <Button variant="outline" :disabled="!canExclude" @click="changeExclusions(false)">{{ t('admin.sales.exclude') }}</Button>
-            <Button variant="outline" :disabled="!canRestore" @click="changeExclusions(true)">{{ t('admin.sales.restore') }}</Button>
+            <Button variant="secondary" :disabled="!canExclude" @click="changeExclusions(false)">{{ t('admin.sales.exclude') }}</Button>
+            <Button variant="secondary" :disabled="!canRestore" @click="changeExclusions(true)">{{ t('admin.sales.restore') }}</Button>
           </div>
         </div>
         <div class="overflow-x-auto">
@@ -378,8 +378,8 @@ onBeforeUnmount(() => { disposed = true; reset() })
         <div class="flex flex-wrap items-center justify-between gap-3 border-t border-border/50 p-4 text-sm">
           <span>{{ t('admin.sales.page', { page: entries.page, pages: Math.max(1, Math.ceil(entries.total / entries.pageSize)) }) }}</span>
           <div class="flex gap-2">
-            <Button variant="outline" size="sm" :disabled="loading || writing || entries.page <= 1" @click="page(-1)">{{ t('admin.sales.previousPage') }}</Button>
-            <Button variant="outline" size="sm" :disabled="loading || writing || entries.page * entries.pageSize >= entries.total" @click="page(1)">{{ t('admin.sales.nextPage') }}</Button>
+            <Button variant="secondary" size="sm" :disabled="loading || writing || entries.page <= 1" @click="page(-1)">{{ t('admin.sales.previousPage') }}</Button>
+            <Button variant="secondary" size="sm" :disabled="loading || writing || entries.page * entries.pageSize >= entries.total" @click="page(1)">{{ t('admin.sales.nextPage') }}</Button>
           </div>
         </div>
       </section>

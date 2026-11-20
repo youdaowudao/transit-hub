@@ -171,10 +171,12 @@ type TelegramBotForm = {
 const telegramBots = ref<TelegramBotForm[]>([])
 
 const addBot = (type: NotificationChannel) => {
+  if (!reportScope.value || !channelsLoaded.value || notificationSwitching.value || settingsDisposed) return
   if (type === 'telegram') telegramBots.value.push({ id: uniqueId(), name: '', enabled: true, botToken: '', chatId: '', proxyUrl: '' })
 }
 
 const removeBot = (type: NotificationChannel, index: number) => {
+  if (!reportScope.value || !channelsLoaded.value || notificationSwitching.value || settingsDisposed) return
   if (type === 'telegram') {
     telegramBots.value.splice(index, 1)
     reconcileStrategyRecipients()
@@ -195,7 +197,7 @@ const reconcileStrategyRecipients = () => {
 }
 
 const saveStrategy = async () => {
-  if (isSavingStrategy.value || notificationSwitching.value || settingsDisposed) return
+  if (isSavingStrategy.value || !reportScope.value || !savedReportStrategy.value || !channelsLoaded.value || notificationSwitching.value || settingsDisposed) return
   const patch = dailyReportPanel.value?.getPatch() ?? {}
   const reportChanged = Object.keys(patch).length > 0
   const captured = reportScope.value ? { ...reportScope.value } : null
@@ -211,8 +213,11 @@ const saveStrategy = async () => {
   try {
     reconcileStrategyRecipients()
     const legacy = currentStrategySettings()
+    const legacyPatch = Object.fromEntries(Object.entries(legacy).filter(([key, value]) =>
+      JSON.stringify(value) !== JSON.stringify(savedReportStrategy.value?.[key as keyof StrategySettings]),
+    )) as Partial<StrategySettings>
     const saved = reportChanged && captured
-      ? await saveStrategyWithDailyReport(captured, legacy, patch, controller.signal)
+      ? await saveStrategyWithDailyReport(captured, legacyPatch, patch, controller.signal)
       : await saveStrategySettings(legacy)
     if (!currentStrategyGeneration(generation) || strategySaveController !== controller || controller.signal.aborted) return
     applyStrategySettings(saved)
@@ -246,7 +251,7 @@ const applyStrategySettings = (settings: StrategySettings) => {
   const usesDefaultMultiplierTemplate = shouldUseDefaultTemplate(settings.multiplierTemplate, legacyMultiplierTemplates)
   multiplierTemplate.value = usesDefaultMultiplierTemplate ? defaultMultiplierTemplate.value : settings.multiplierTemplate
   multiplierTemplateFormat.value = usesDefaultMultiplierTemplate ? 'markdown' : normalizeTemplateFormat(settings.multiplierTemplateFormat)
-  savedReportStrategy.value = settings
+  savedReportStrategy.value = { ...settings, ...currentStrategySettings() }
 }
 
 const currentStrategySettings = (): StrategySettings => ({
@@ -254,17 +259,17 @@ const currentStrategySettings = (): StrategySettings => ({
   refreshInterval: Math.max(Number.parseInt(refreshInterval.value, 10) || minimumRefreshInterval, minimumRefreshInterval),
   enableBalanceWarning: enableBalanceWarning.value,
   defaultBalanceThreshold: Number.parseFloat(defaultBalanceThreshold.value) || 10,
-  balanceNotifyBotIds: balanceSelectedBots.value,
+  balanceNotifyBotIds: [...balanceSelectedBots.value],
   balanceTemplate: balanceTemplate.value,
   balanceTemplateFormat: balanceTemplateFormat.value,
   enableMultiplierAlert: enableMultiplierAlert.value,
-  multiplierNotifyBotIds: multiplierSelectedBots.value,
+  multiplierNotifyBotIds: [...multiplierSelectedBots.value],
   multiplierTemplate: multiplierTemplate.value.trim(),
   multiplierTemplateFormat: multiplierTemplateFormat.value,
 })
 
 const loadStrategy = async () => {
-  if (isLoadingStrategy.value || isSavingStrategy.value || notificationSwitching.value || settingsDisposed) return
+  if (isLoadingStrategy.value || isSavingStrategy.value || !reportScope.value || notificationSwitching.value || settingsDisposed) return
   const generation = strategyGeneration; const request = ++strategyReadSequence
   strategyReadController?.abort(); const controller = new AbortController(); strategyReadController = controller
   isLoadingStrategy.value = true
@@ -280,7 +285,7 @@ const loadStrategy = async () => {
 }
 
 const saveChannels = async () => {
-  if (isSavingChannels.value || notificationSwitching.value || settingsDisposed) return
+  if (isSavingChannels.value || !reportScope.value || !channelsLoaded.value || notificationSwitching.value || settingsDisposed) return
   const generation = strategyGeneration
   channelsReadSequence++; isLoadingChannels.value = false
   isSavingChannels.value = true
@@ -332,7 +337,7 @@ const currentNotificationChannelSettings = (): NotificationChannelSettings => ({
 })
 
 const loadChannels = async () => {
-  if (isLoadingChannels.value || isSavingChannels.value || notificationSwitching.value || settingsDisposed) return
+  if (isLoadingChannels.value || isSavingChannels.value || !reportScope.value || notificationSwitching.value || settingsDisposed) return
   const generation = strategyGeneration; const request = ++channelsReadSequence
   isLoadingChannels.value = true
   errorChannels.value = ''
@@ -349,7 +354,8 @@ const loadChannels = async () => {
 }
 
 const testBot = async (channel: NotificationChannel, id: string) => {
-  if (testingBotId.value) return
+  if (testingBotId.value || !reportScope.value || !channelsLoaded.value || notificationSwitching.value || settingsDisposed) return
+  const generation = strategyGeneration
   const payload = testPayload(channel, id)
   if (!payload) return
   testingBotId.value = id
@@ -357,13 +363,16 @@ const testBot = async (channel: NotificationChannel, id: string) => {
   errorBotMessage.value = ''
   try {
     await testNotificationChannel(payload)
+    if (!currentStrategyGeneration(generation)) return
     successBotId.value = id
-    setTimeout(() => { successBotId.value = null }, 2000)
+    setTimeout(() => { if (currentStrategyGeneration(generation)) successBotId.value = null }, 2000)
   } catch (error) {
-    errorBotId.value = id
-    errorBotMessage.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
+    if (currentStrategyGeneration(generation)) {
+      errorBotId.value = id
+      errorBotMessage.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
+    }
   } finally {
-    testingBotId.value = null
+    if (currentStrategyGeneration(generation)) testingBotId.value = null
   }
 }
 
@@ -377,11 +386,13 @@ const allBots = computed(() => telegramBots.value.filter(bot => bot.enabled))
 const hasBots = computed(() => allBots.value.length > 0)
 
 const toggleBalanceBot = (botId: string) => {
+  if (!reportScope.value || !savedReportStrategy.value || !channelsLoaded.value || notificationSwitching.value || settingsDisposed) return
   const idx = balanceSelectedBots.value.indexOf(botId)
   if (idx >= 0) balanceSelectedBots.value.splice(idx, 1)
   else balanceSelectedBots.value.push(botId)
 }
 const toggleMultiplierBot = (botId: string) => {
+  if (!reportScope.value || !savedReportStrategy.value || !channelsLoaded.value || notificationSwitching.value || settingsDisposed) return
   const idx = multiplierSelectedBots.value.indexOf(botId)
   if (idx >= 0) multiplierSelectedBots.value.splice(idx, 1)
   else multiplierSelectedBots.value.push(botId)
@@ -480,20 +491,43 @@ const applySmtpSettings = (settings: SmtpSettings) => {
 }
 
 const loadSmtp = async () => {
-  if (isLoadingSmtp.value) return
+  if (isLoadingSmtp.value || !reportScope.value || notificationSwitching.value || settingsDisposed) return
+  const generation = strategyGeneration
   isLoadingSmtp.value = true
   errorSmtp.value = ''
   try {
-    applySmtpSettings(await getSmtpSettings())
+    const saved = await getSmtpSettings()
+    if (currentStrategyGeneration(generation)) applySmtpSettings(saved)
   } catch (error) {
-    errorSmtp.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
+    if (currentStrategyGeneration(generation)) errorSmtp.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
   } finally {
-    isLoadingSmtp.value = false
+    if (currentStrategyGeneration(generation)) isLoadingSmtp.value = false
   }
 }
 
+const resetSmtpWorkspace = () => {
+  isLoadingSmtp.value = false
+  isSavingSmtp.value = false
+  isTestingSmtp.value = false
+  showSuccessSmtp.value = false
+  successSmtpTest.value = false
+  errorSmtp.value = ''
+  errorSmtpTest.value = ''
+  smtpHost.value = ''
+  smtpPort.value = '587'
+  smtpUsername.value = ''
+  smtpPassword.value = ''
+  smtpFromEmail.value = ''
+  smtpFromName.value = ''
+  smtpTlsMode.value = 'starttls'
+  smtpPasswordConfigured.value = false
+  smtpBaseline.value = null
+  smtpTestRecipient.value = ''
+}
+
 const saveSmtp = async () => {
-  if (isSavingSmtp.value) return
+  if (isSavingSmtp.value || !reportScope.value || !smtpBaseline.value || notificationSwitching.value || settingsDisposed) return
+  const generation = strategyGeneration
   if (smtpPortInvalid.value) {
     // 防御性兜底：正常情况下保存按钮已经因为 smtpPortInvalid 被禁用，这里避免任何
     // 程序化调用绕过 UI 禁用状态直接把非法端口发给后端。
@@ -516,29 +550,33 @@ const saveSmtp = async () => {
       fromName: smtpFromName.value.trim(),
       tlsMode: smtpTlsMode.value,
     }
-    applySmtpSettings(await saveSmtpSettings(payload))
+    const saved = await saveSmtpSettings(payload)
+    if (!currentStrategyGeneration(generation)) return
+    applySmtpSettings(saved)
     showSuccessSmtp.value = true
-    setTimeout(() => { showSuccessSmtp.value = false }, 3000)
+    setTimeout(() => { if (currentStrategyGeneration(generation)) showSuccessSmtp.value = false }, 3000)
   } catch (error) {
-    errorSmtp.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
+    if (currentStrategyGeneration(generation)) errorSmtp.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
   } finally {
-    isSavingSmtp.value = false
+    if (currentStrategyGeneration(generation)) isSavingSmtp.value = false
   }
 }
 
 const testSmtp = async () => {
-  if (isTestingSmtp.value || smtpDirty.value) return
+  if (isTestingSmtp.value || !reportScope.value || !smtpBaseline.value || smtpDirty.value || notificationSwitching.value || settingsDisposed) return
+  const generation = strategyGeneration
   isTestingSmtp.value = true
   errorSmtpTest.value = ''
   successSmtpTest.value = false
   try {
     await testSmtpEmail({ recipientEmail: smtpTestRecipient.value.trim() })
+    if (!currentStrategyGeneration(generation)) return
     successSmtpTest.value = true
-    setTimeout(() => { successSmtpTest.value = false }, 3000)
+    setTimeout(() => { if (currentStrategyGeneration(generation)) successSmtpTest.value = false }, 3000)
   } catch (error) {
-    errorSmtpTest.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
+    if (currentStrategyGeneration(generation)) errorSmtpTest.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
   } finally {
-    isTestingSmtp.value = false
+    if (currentStrategyGeneration(generation)) isTestingSmtp.value = false
   }
 }
 
@@ -649,6 +687,7 @@ const startUpgrade = async () => {
 const restoreUpgradeStatus = async () => {
   try {
     const status = await getSystemUpgradeStatus()
+    if (settingsDisposed) return
     upgradeStatus.value = status
     if (status.state === 'starting' || status.state === 'running') {
       beginUpgradePolling()
@@ -833,6 +872,7 @@ const confirmRollback = async () => {
 const restoreRollbackStatus = async () => {
   try {
     const status = await getSystemRollbackStatus()
+    if (settingsDisposed) return
     rollbackStatus.value = status
     if (status.state === 'starting' || status.state === 'running') {
       beginRollbackPolling()
@@ -974,6 +1014,7 @@ const startRestart = async () => {
 const restoreRestartStatus = async () => {
   try {
     const status = await getSystemRestartStatus()
+    if (settingsDisposed) return
     restartStatus.value = status
     if (status.state === 'starting' || status.state === 'running') {
       beginRestartPolling()
@@ -1031,19 +1072,37 @@ watch([
   savedReportStrategy.value = null; savedReportBots.value = []
   isLoadingStrategy.value = false; isSavingStrategy.value = false; showSuccessStrategy.value = false; errorStrategy.value = ''
   isLoadingChannels.value = false; isSavingChannels.value = false; channelsLoaded.value = false
+  enableRefreshInterval.value = false
+  refreshInterval.value = String(minimumRefreshInterval)
+  enableBalanceWarning.value = false
+  defaultBalanceThreshold.value = '10.00'
+  balanceSelectedBots.value = []
+  balanceTemplate.value = defaultBalanceTemplate.value
+  balanceTemplateFormat.value = 'markdown'
+  enableMultiplierAlert.value = false
+  multiplierSelectedBots.value = []
+  multiplierTemplate.value = defaultMultiplierTemplate.value
+  multiplierTemplateFormat.value = 'markdown'
+  balanceRecipientsInvalid.value = false
+  multiplierRecipientsInvalid.value = false
+  telegramBots.value = []
+  showSuccessChannels.value = false
+  errorChannels.value = ''
+  testingBotId.value = null
+  successBotId.value = null
+  errorBotId.value = null
+  errorBotMessage.value = ''
+  resetSmtpWorkspace()
   if (!notificationSwitching.value && reportScope.value) {
     void nextTick().then(() => {
-      if (currentStrategyGeneration(generation)) void reloadReportSettings()
+      if (currentStrategyGeneration(generation)) { void reloadReportSettings(); void loadSmtp() }
     })
   }
 }, { flush: 'sync' })
 
-onMounted(async () => {
-  const generation = strategyGeneration
-  if (notifications) void nextTick().then(() => notifications.loadPreferences())
-  await loadChannels()
-  if (!currentStrategyGeneration(generation)) return
-  void loadStrategy()
+onMounted(() => {
+  if (notifications) void nextTick().then(() => { if (!settingsDisposed) void notifications.loadPreferences() })
+  void reloadReportSettings()
   void loadSmtp()
   void loadCurrentVersion()
   void loadCredentialsStatus()
@@ -1151,19 +1210,10 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="relative">
-      <transition
-        mode="out-in"
-        enter-active-class="transition-[opacity,transform] duration-200 ease-out"
-        enter-from-class="opacity-0 translate-y-2"
-        enter-to-class="opacity-100 translate-y-0"
-        leave-active-class="transition-[opacity,transform] duration-150 ease-in"
-        leave-from-class="opacity-100 translate-y-0"
-        leave-to-class="opacity-0 -translate-y-2"
-      >
         <!-- ============================================ -->
         <!-- Strategy Tab                                 -->
         <!-- ============================================ -->
-        <div v-if="activeTab === 'strategy'" id="settings-panel-strategy" class="space-y-5" role="tabpanel" aria-labelledby="settings-tab-strategy">
+        <div v-show="activeTab === 'strategy'" id="settings-panel-strategy" class="space-y-5" role="tabpanel" aria-labelledby="settings-tab-strategy">
           <section v-if="notifications" class="overflow-hidden rounded-2xl border border-border/50 bg-card shadow-sm" aria-label="站内通知设置">
             <div class="space-y-4 p-5">
               <div><h3 class="text-lg font-semibold text-foreground">站内通知</h3><p class="mt-1 text-sm text-muted-foreground">默认每5分钟读取已保存的通知。只影响网页检查，不改变上游同步和主站。</p></div>
@@ -1183,7 +1233,7 @@ onBeforeUnmount(() => {
               <h3 class="text-lg font-semibold text-foreground">{{ t('admin.settings.tabs.strategy') }}</h3>
               <p class="text-sm text-muted-foreground mt-0.5">{{ t('admin.settings.strategyDescription') }}</p>
             </div>
-            <Button :disabled="isSavingStrategy" @click="saveStrategy" class="min-w-[120px]">
+            <Button :disabled="isSavingStrategy || !reportScope || !savedReportStrategy || !channelsLoaded || notificationSwitching" @click="saveStrategy" class="min-w-[120px]">
               <Loader2 v-if="isSavingStrategy" class="h-4 w-4 animate-spin mr-2" />
               <CheckCircle2 v-else-if="showSuccessStrategy" class="h-4 w-4 mr-2 text-green-400" />
               <Save v-else class="h-4 w-4 mr-2" />
@@ -1195,6 +1245,11 @@ onBeforeUnmount(() => {
             {{ t(errorStrategy) }}
           </p>
 
+          <p v-if="errorChannels && !channelsLoaded" role="alert" class="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            通知渠道读取失败：{{ t(errorChannels) }}。请点击下方“{{ t('admin.settings.dailyReport.reloadSettings') }}”；读取成功后才能保存，不会修改主站。
+          </p>
+
+          <fieldset :disabled="!reportScope || !savedReportStrategy || !channelsLoaded || notificationSwitching" class="space-y-5">
           <!-- Card 1: Data Refresh -->
           <div class="rounded-2xl border border-border/50 bg-card shadow-sm overflow-hidden">
             <div class="p-5 flex items-start justify-between gap-4">
@@ -1331,13 +1386,25 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          </fieldset>
+
           <DailyReportPanel ref="dailyReportPanel" :strategy="savedReportStrategy" :bots="savedReportBots" :bots-loaded="channelsLoaded" :saving="isSavingStrategy" :loading="isLoadingStrategy || isLoadingChannels" @reload="reloadReportSettings" />
         </div>
 
+      <div v-show="activeTab !== 'strategy'">
+      <transition
+        mode="out-in"
+        enter-active-class="transition-[opacity,transform] duration-200 ease-out"
+        enter-from-class="opacity-0 translate-y-2"
+        enter-to-class="opacity-100 translate-y-0"
+        leave-active-class="transition-[opacity,transform] duration-150 ease-in"
+        leave-from-class="opacity-100 translate-y-0"
+        leave-to-class="opacity-0 -translate-y-2"
+      >
         <!-- ============================================ -->
         <!-- Test Questions Tab                           -->
         <!-- ============================================ -->
-        <div v-else-if="activeTab === 'questions'" id="settings-panel-questions" role="tabpanel" aria-labelledby="settings-tab-questions">
+        <div v-if="activeTab === 'questions'" id="settings-panel-questions" role="tabpanel" aria-labelledby="settings-tab-questions">
           <TestQuestionsPanel />
         </div>
 
@@ -1355,7 +1422,7 @@ onBeforeUnmount(() => {
                 <p class="text-sm text-muted-foreground">{{ t('admin.settings.sections.channels.description') }}</p>
               </div>
             </div>
-            <Button :disabled="isSavingChannels || isLoadingChannels" @click="saveChannels" class="min-w-[120px]">
+            <Button :disabled="isSavingChannels || isLoadingChannels || !reportScope || !channelsLoaded || notificationSwitching" @click="saveChannels" class="min-w-[120px]">
               <Loader2 v-if="isSavingChannels" class="h-4 w-4 animate-spin mr-2" />
               <CheckCircle2 v-else-if="showSuccessChannels" class="h-4 w-4 mr-2 text-green-400" />
               <Save v-else class="h-4 w-4 mr-2" />
@@ -1384,11 +1451,11 @@ onBeforeUnmount(() => {
                   <h4 class="font-medium text-foreground">{{ t('admin.settings.sections.channels.telegram') }}</h4>
                   <p class="text-xs text-muted-foreground mt-0.5">{{ t('admin.settings.sections.channels.telegramHelp') }}</p>
                 </div>
-                <Button variant="secondary" size="sm" class="h-8" @click="addBot('telegram')">
+                <Button variant="secondary" size="sm" class="h-8" :disabled="!reportScope || !channelsLoaded || notificationSwitching" @click="addBot('telegram')">
                   <Plus class="h-3 w-3 mr-1.5" /> {{ t('admin.settings.addTelegramBot') }}
                 </Button>
               </div>
-              <div class="grid md:grid-cols-2 gap-4">
+              <fieldset :disabled="!reportScope || !channelsLoaded || notificationSwitching" class="grid md:grid-cols-2 gap-4">
                 <div v-for="(bot, idx) in telegramBots" :key="bot.id" class="p-4 rounded-xl border border-border/50 bg-surface/20 relative group">
                   <Button variant="ghost" size="sm" class="absolute top-2 right-2 h-8 w-8 p-0 opacity-0 group-hover:opacity-100 transition-opacity text-red-500 hover:bg-red-500/10" @click="removeBot('telegram', idx)">
                     <Trash2 class="h-4 w-4" />
@@ -1412,7 +1479,7 @@ onBeforeUnmount(() => {
                       <p class="text-xs text-muted-foreground">{{ t('admin.settings.sections.channels.proxyUrlHelp') }}</p>
                     </div>
                     <div>
-                      <Button variant="secondary" size="sm" class="h-8" :disabled="testingBotId === bot.id || !bot.botToken || !bot.chatId" @click="testBot('telegram', bot.id)">
+                      <Button variant="secondary" size="sm" class="h-8" :disabled="!reportScope || !channelsLoaded || notificationSwitching || testingBotId === bot.id || !bot.botToken || !bot.chatId" @click="testBot('telegram', bot.id)">
                         <Loader2 v-if="testingBotId === bot.id" class="h-3 w-3 animate-spin mr-1.5" />
                         <CheckCircle2 v-else-if="successBotId === bot.id" class="h-3 w-3 mr-1.5 text-green-500" />
                         <Send v-else class="h-3 w-3 mr-1.5 text-muted-foreground" />
@@ -1422,7 +1489,7 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                 </div>
-              </div>
+              </fieldset>
               <div v-if="telegramBots.length === 0" class="text-center py-6 text-sm text-muted-foreground border border-dashed border-border/50 rounded-xl">
                 {{ t('admin.settings.emptyTelegram') }}
               </div>
@@ -1446,7 +1513,7 @@ onBeforeUnmount(() => {
                 <p class="text-sm text-muted-foreground">{{ t('admin.settings.smtp.description') }}</p>
               </div>
             </div>
-            <Button :disabled="isSavingSmtp || isLoadingSmtp || smtpPortInvalid" @click="saveSmtp" class="min-w-[120px]">
+            <Button :disabled="isSavingSmtp || isLoadingSmtp || smtpPortInvalid || !reportScope || !smtpBaseline || notificationSwitching" @click="saveSmtp" class="min-w-[120px]">
               <Loader2 v-if="isSavingSmtp" class="h-4 w-4 animate-spin mr-2" />
               <CheckCircle2 v-else-if="showSuccessSmtp" class="h-4 w-4 mr-2 text-green-400" />
               <Save v-else class="h-4 w-4 mr-2" />
@@ -1456,8 +1523,9 @@ onBeforeUnmount(() => {
           <div class="p-6 space-y-5">
             <p v-if="isLoadingSmtp" class="text-sm text-muted-foreground">{{ t('admin.settings.sections.channels.loading') }}</p>
             <p v-if="errorSmtp" class="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">{{ t(errorSmtp) }}</p>
+            <p v-if="errorSmtp && !smtpBaseline" class="text-sm text-muted-foreground">邮件设置尚未读取，请刷新页面重新读取；读取成功后才能编辑、保存或测试，不会修改主站。</p>
 
-            <div class="grid md:grid-cols-2 gap-4">
+            <fieldset :disabled="!reportScope || !smtpBaseline || notificationSwitching" class="grid md:grid-cols-2 gap-4">
               <div class="grid gap-2">
                 <label for="smtp-host" class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.smtp.host') }}</label>
                 <Input id="smtp-host" v-model="smtpHost" placeholder="smtp.example.com" class="h-9 text-sm" />
@@ -1515,9 +1583,9 @@ onBeforeUnmount(() => {
                 <label for="smtp-from-name" class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.smtp.fromName') }}</label>
                 <Input id="smtp-from-name" v-model="smtpFromName" class="h-9 text-sm" />
               </div>
-            </div>
+            </fieldset>
 
-            <div class="border-t border-border/40 pt-5 space-y-3">
+            <fieldset :disabled="!reportScope || !smtpBaseline || notificationSwitching" class="border-t border-border/40 pt-5 space-y-3">
               <div class="grid gap-2 max-w-sm">
                 <label for="smtp-test-recipient" class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.smtp.testRecipient') }}</label>
                 <Input id="smtp-test-recipient" type="email" v-model="smtpTestRecipient" class="h-9 text-sm" />
@@ -1525,7 +1593,7 @@ onBeforeUnmount(() => {
               <div class="flex items-center gap-3">
                 <Button
                   variant="secondary"
-                  :disabled="isTestingSmtp || smtpDirty || !smtpTestRecipient.trim()"
+                  :disabled="isTestingSmtp || smtpDirty || !smtpTestRecipient.trim() || !reportScope || !smtpBaseline || notificationSwitching"
                   @click="testSmtp"
                 >
                   <Loader2 v-if="isTestingSmtp" class="h-4 w-4 animate-spin mr-2" />
@@ -1539,16 +1607,16 @@ onBeforeUnmount(() => {
                 </p>
               </div>
               <p v-if="errorSmtpTest" class="text-xs text-destructive">{{ t(errorSmtpTest) }}</p>
-            </div>
+            </fieldset>
           </div>
         </section>
-        <EmailTemplatesPanel />
+        <EmailTemplatesPanel v-if="reportScope && !notificationSwitching" :key="JSON.stringify([reportScope.workspaceAdminAccountId, reportScope.workspaceCreatedAt])" />
         </div>
 
         <!-- ============================================ -->
         <!-- System Upgrade Tab                           -->
         <!-- ============================================ -->
-        <div v-else id="settings-panel-system" class="space-y-4" role="tabpanel" aria-labelledby="settings-tab-system">
+        <div v-else-if="activeTab === 'system'" id="settings-panel-system" class="space-y-4" role="tabpanel" aria-labelledby="settings-tab-system">
           <section class="w-full overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm">
             <div class="space-y-2 p-6">
               <h3 class="text-lg font-semibold text-foreground">{{ t('admin.settings.credentials.title') }}</h3>
@@ -1644,6 +1712,7 @@ onBeforeUnmount(() => {
           </section>
         </div>
       </transition>
+      </div>
     </div>
 
     <Teleport to="body">

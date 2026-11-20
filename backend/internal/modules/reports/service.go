@@ -292,11 +292,16 @@ func (s *Service) runScheduled(ctx context.Context, scope Scope) error {
 	if !cfg.Enabled || now.In(businesstime.Location()).Format("15:04") < cfg.Time {
 		return nil
 	}
+	sendingDate := businesstime.DateAt(now)
+	exists, err = s.store.exists(ctx, reportKey(scope, sendingDate))
+	if err != nil || exists {
+		return err
+	}
 	document, err := s.build(ctx, scope, now)
 	if err != nil {
 		return err
 	}
-	prepared, err := s.prepare(ctx, scope, document, false, businesstime.DateAt(now))
+	prepared, err := s.prepare(ctx, scope, document, false, sendingDate)
 	if err != nil || prepared == nil {
 		return err
 	}

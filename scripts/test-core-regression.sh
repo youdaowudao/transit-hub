@@ -116,6 +116,12 @@ run_connection_health_gate() {
 }
 
 run_globalization_gate() {
+  run_step "backend upstream absorption storage, scope and delivery regression tests" \
+    bash -c "cd '$ROOT_DIR/backend' && go test -race ./internal/shared/secretbox ./internal/modules/user_activity ./internal/modules/vip ./internal/modules/sales ./internal/modules/reports ./internal/modules/dashboard ./internal/modules/upstream ./internal/modules/settings ./internal/httpserver ./internal/modules/admin_accounts -run 'TestAbsorb' -count=1"
+
+  run_step "frontend upstream absorption behavior and API regression tests" \
+    bash -c "cd '$ROOT_DIR/frontend' && npm run test -- upstream-absorb-clipboard.behavior.test.ts upstream-absorb-api.test.ts upstream-absorb-activity.behavior.test.ts upstream-absorb-user-count.behavior.test.ts upstream-absorb-vip-sales.behavior.test.ts upstream-absorb-insights.behavior.test.ts upstream-absorb-dashboard.behavior.test.ts upstream-absorb-reports.behavior.test.ts"
+
   run_step "backend globalization behavior and amount regression tests" \
     bash -c "cd '$ROOT_DIR/backend' && go test ./cmd/notification-cleanup ./internal/modules/settings ./internal/shared/businesstime ./internal/modules/my_sites ./internal/modules/group_rate_campaigns ./internal/modules/leaderboard ./internal/modules/lottery ./internal/modules/dashboard ./internal/modules/upstream ./internal/httpserver -count=1"
 

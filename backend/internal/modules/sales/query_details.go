@@ -11,8 +11,8 @@ func readDaily(ctx context.Context, db reader, scope Scope, span DayRange, state
 	rows, err := db.Query(ctx, `
         WITH src AS (`+rechargeSource()+`)
         SELECT day::text,
-               COALESCE(sum(effective_amount) FILTER(WHERE effective_amount>0),0),
-               COALESCE(-sum(effective_amount) FILTER(WHERE effective_amount<0),0)
+               sum(effective_amount) FILTER(WHERE raw_amount>0),
+               -sum(effective_amount) FILTER(WHERE raw_amount<0)
         FROM src WHERE day BETWEEN $3::date AND $4::date GROUP BY day ORDER BY day
     `, scope.UserID, scope.AdminAccountID, span.From, span.To)
 	if err != nil {
@@ -22,11 +22,9 @@ func readDaily(ctx context.Context, db reader, scope Scope, span DayRange, state
 	values := map[string]DailyPoint{}
 	for rows.Next() {
 		var item DailyPoint
-		var credits, deductions float64
-		if err := rows.Scan(&item.Day, &credits, &deductions); err != nil {
+		if err := rows.Scan(&item.Day, &item.Credits, &item.Deductions); err != nil {
 			return nil, err
 		}
-		item.Credits, item.Deductions = &credits, &deductions
 		values[item.Day] = item
 	}
 	if err := rows.Err(); err != nil {
@@ -34,12 +32,16 @@ func readDaily(ctx context.Context, db reader, scope Scope, span DayRange, state
 	}
 	result := make([]DailyPoint, 0, span.Days)
 	for day := span.From; day <= span.To; day = shift(day, 1) {
-		item, exists := values[day]
+		item := values[day]
 		item.Day = day
 		item.Complete = state.From != "" && state.To != "" && state.From <= day && state.To >= day
-		if !exists && item.Complete {
-			zero := float64(0)
-			item.Credits, item.Deductions = &zero, &zero
+		if item.Complete {
+			if item.Credits == nil {
+				item.Credits = new(float64)
+			}
+			if item.Deductions == nil {
+				item.Deductions = new(float64)
+			}
 		}
 		result = append(result, item)
 	}

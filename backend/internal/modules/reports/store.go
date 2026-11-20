@@ -20,6 +20,22 @@ func reportKey(scope Scope, day string) string {
 	return "reports:daily:" + base64.RawURLEncoding.EncodeToString(encoded)
 }
 
+// Any existing daily marker blocks automatic rebuilding, even when its result is unreadable.
+// This read never refreshes the original marker TTL; register remains the final admission gate.
+func (s *dailyStore) exists(ctx context.Context, key string) (bool, error) {
+	if s == nil || s.client == nil {
+		return false, ErrReportStore
+	}
+	count, err := s.client.Exists(ctx, key).Result()
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return false, err
+		}
+		return false, ErrReportStore
+	}
+	return count > 0, nil
+}
+
 func (s *dailyStore) register(ctx context.Context, key, raw string) (bool, error) {
 	if s == nil || s.client == nil {
 		return false, ErrReportStore

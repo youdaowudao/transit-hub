@@ -135,7 +135,7 @@ defineExpose({ getPatch, invalidatePreview })
     <p class="text-sm text-muted-foreground">{{ t('admin.settings.dailyReport.enableHelp') }}</p>
     <p class="text-xs text-muted-foreground">{{ t('admin.settings.dailyReport.oneTarget') }}</p>
     <p v-if="!base" class="text-sm text-warning">{{ t('admin.settings.dailyReport.notLoaded') }}</p>
-    <Button v-if="!base || !botsLoaded" variant="outline" :disabled="loading || saving || isSwitching" @click="emit('reload')">{{ t('admin.settings.dailyReport.reloadSettings') }}</Button>
+    <Button v-if="!base || !botsLoaded" variant="secondary" :disabled="loading || saving || isSwitching" @click="emit('reload')">{{ t('admin.settings.dailyReport.reloadSettings') }}</Button>
     <p v-if="storedProblem" role="status" class="text-sm text-warning">{{ storedProblem }}</p>
     <p v-if="base && !storedProblem" class="text-xs text-muted-foreground">{{ base.enabled ? t('admin.settings.dailyReport.enabled') : t('admin.settings.dailyReport.off') }}</p>
     <fieldset :disabled="!base || saving || isSwitching" class="space-y-4">
@@ -151,7 +151,7 @@ defineExpose({ getPatch, invalidatePreview })
           </select>
         </label>
       </div>
-      <Button type="button" variant="outline" @click="closeAndClear">{{ t('admin.settings.dailyReport.closeAndClear') }}</Button>
+      <Button type="button" variant="secondary" @click="closeAndClear">{{ t('admin.settings.dailyReport.closeAndClear') }}</Button>
       <p class="text-xs text-muted-foreground">{{ t('admin.settings.dailyReport.clearHelp') }}</p>
     </fieldset>
     <p class="text-xs text-muted-foreground">{{ t('admin.settings.dailyReport.saveHelp') }}</p>
@@ -160,7 +160,7 @@ defineExpose({ getPatch, invalidatePreview })
     <div class="border-t border-border/50 pt-4 space-y-3">
       <p class="text-sm text-muted-foreground">{{ t('admin.settings.dailyReport.previewHelp') }}</p>
       <p class="text-xs text-muted-foreground">{{ t('admin.settings.dailyReport.savedPreview') }}</p>
-      <Button variant="outline" :disabled="!scope || isSwitching || saving || previewLoading" @click="loadPreview"><Loader2 v-if="previewLoading" class="mr-2 h-4 w-4 animate-spin" />{{ t('admin.settings.dailyReport.preview') }}</Button>
+      <Button variant="secondary" :disabled="!scope || isSwitching || saving || previewLoading" @click="loadPreview"><Loader2 v-if="previewLoading" class="mr-2 h-4 w-4 animate-spin" />{{ t('admin.settings.dailyReport.preview') }}</Button>
       <p v-if="previewError" role="alert" class="text-sm text-destructive">{{ previewError }}</p>
       <template v-if="preview">
         <p class="text-xs text-muted-foreground">{{ t('admin.settings.dailyReport.previewAt') }} {{ time(preview.observedAt) }}</p>
@@ -192,7 +192,7 @@ defineExpose({ getPatch, invalidatePreview })
       <p class="text-sm text-muted-foreground">{{ t('admin.settings.dailyReport.testHelp') }}</p>
       <p class="text-xs text-muted-foreground">{{ t('admin.settings.dailyReport.testTwice') }}</p>
       <p v-if="!storedTarget" class="text-sm text-warning">{{ t('admin.settings.dailyReport.testNeedTarget') }}</p>
-      <Button variant="outline" :disabled="!scope || isSwitching || saving || dirty || testing || !storedTarget" @click="sendTest"><Loader2 v-if="testing" class="mr-2 h-4 w-4 animate-spin" />{{ t('admin.settings.dailyReport.test') }}</Button>
+      <Button variant="secondary" :disabled="!scope || isSwitching || saving || dirty || testing || !storedTarget" @click="sendTest"><Loader2 v-if="testing" class="mr-2 h-4 w-4 animate-spin" />{{ t('admin.settings.dailyReport.test') }}</Button>
       <p v-if="testError" role="alert" class="text-sm text-destructive">{{ testError }}</p>
       <div v-if="testResult" role="status" class="space-y-2 rounded-lg border border-border/50 p-4 text-sm">
         <p>{{ t('admin.settings.dailyReport.testAt') }} {{ testTime }}</p>

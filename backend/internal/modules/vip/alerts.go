@@ -43,6 +43,29 @@ func shouldNotify(state string, previous *alertState, now time.Time) bool {
 	return previous.Delivery == settings.DeliverySent && previous.State == "low" && state == "empty"
 }
 
+// Recovery needs positive, known balance and proof that every enabled threshold
+// is clear. Missing usage or an inactive customer cannot establish a new episode.
+func recoveryProven(row Row, cfg Settings) bool {
+	if row.Balance == nil || *row.Balance <= 0 || row.Requests7 <= 0 {
+		return false
+	}
+	if cfg.AlertBalance > 0 && *row.Balance < cfg.AlertBalance {
+		return false
+	}
+	return cfg.AlertDays <= 0 || (row.DaysLeft != nil && *row.DaysLeft > cfg.AlertDays)
+}
+
+func needsAlertAction(row Row, cfg Settings, now time.Time) bool {
+	var previous *alertState
+	if row.LastAlertAt != nil {
+		previous = &alertState{State: row.LastAlertState, At: *row.LastAlertAt, Recovered: row.LastAlertRecovered, Delivery: row.LastAlertStatus}
+	}
+	if row.Status == "low" || row.Status == "empty" {
+		return row.Requests7 > 0 && shouldNotify(row.Status, previous, now)
+	}
+	return previous != nil && !previous.Recovered && recoveryProven(row, cfg)
+}
+
 func concise(value string, limit int) string {
 	value = strings.Join(strings.Fields(value), " ")
 	runes := []rune(value)
@@ -142,7 +165,7 @@ func (s *Service) prepare(ctx context.Context, conn *pgxpool.Conn, scope Scope, 
 	}
 	urgent := fresh.Status == "low" || fresh.Status == "empty"
 	if !urgent {
-		if previous != nil && !previous.Recovered {
+		if previous != nil && !previous.Recovered && recoveryProven(*fresh, cfg) {
 			_, err = tx.Exec(ctx, `
                 UPDATE vip_alert_states SET recovered=true
                 WHERE user_id=$1 AND admin_account_id=$2 AND site_user_id=$3
@@ -229,7 +252,7 @@ func (s *Service) alertWorkspace(ctx context.Context, scope Scope) error {
 	today := businesstime.Today()
 	now := time.Now()
 	for _, row := range summary.Items {
-		if coherent(state, row, today, now) {
+		if coherent(state, row, today, now) && needsAlertAction(row, summary.Settings, now) {
 			drafts = append(drafts, draft{row, alertText(row)})
 		}
 	}

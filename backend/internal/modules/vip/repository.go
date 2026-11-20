@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"transithub/backend/internal/database/migrations"
+	"transithub/backend/internal/shared/workspacescope"
 )
 
 var ErrUnavailable = errors.New("大户关注或用户分析资料表尚未初始化，请先用正常服务完成升级；原功能可继续使用。")
@@ -197,7 +198,20 @@ func readAlert(ctx context.Context, tx pgx.Tx, scope Scope, id string) (*alertSt
 }
 
 func (r *Repository) Search(ctx context.Context, scope Scope, query string) ([]Candidate, error) {
-	rows, err := r.db.Query(ctx, `
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	var created time.Time
+	err = tx.QueryRow(ctx, `SELECT created_at FROM admin_accounts WHERE user_id=$1 AND id=$2`, scope.UserID, scope.AdminAccountID).Scan(&created)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && created.Format(time.RFC3339Nano) != scope.CreatedAt) {
+		return nil, workspacescope.ErrChanged
+	}
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `
         SELECT p.site_user_id,p.email,p.username,p.balance,
                COALESCE(w.kind='manual',false),COALESCE(w.kind='dismissed',false)
         FROM user_activity_profiles p

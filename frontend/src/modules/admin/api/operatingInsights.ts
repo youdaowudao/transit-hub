@@ -1,4 +1,4 @@
-import { authUnauthorizedErrorKey, getAccessToken, handleAuthExpired, isUnauthorizedApiResponse } from '@/modules/auth/api/auth'
+import { authUnauthorizedErrorKey, getAccessToken, handleAuthExpired } from '@/modules/auth/api/auth'
 import type { OperatingInsightsResponse, OperatingInsightsScope } from '../types/operatingInsights'
 
 const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/$/, '')
@@ -24,7 +24,7 @@ export const getOperatingInsights = async (scope: OperatingInsightsScope, signal
   }
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('经营提示接口返回的资料不是完整对象；请检查本站服务日志后重新读取。')
   if (!response.ok) {
-    if (isUnauthorizedApiResponse(response.status, payload)) {
+    if (response.status === 401) {
       handleAuthExpired()
       throw new Error(authUnauthorizedErrorKey)
     }

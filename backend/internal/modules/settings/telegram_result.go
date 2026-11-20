@@ -3,6 +3,7 @@ package settings
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -86,7 +88,7 @@ func (s *Service) TelegramTargets(ctx context.Context, reader telegramTargetRead
 	for _, bot := range channels.Telegram {
 		targets = append(targets, TelegramTarget{
 			ID: bot.ID, Name: bot.Name, Enabled: bot.Enabled,
-			botToken: bot.BotToken, chatID: bot.ChatID, proxyURL: bot.ProxyURL,
+			botToken: strings.TrimSpace(bot.BotToken), chatID: strings.TrimSpace(bot.ChatID), proxyURL: strings.TrimSpace(bot.ProxyURL),
 		})
 	}
 	return targets, nil
@@ -197,7 +199,7 @@ func (s *Service) SendFrozenTelegramWithResult(ctx context.Context, target Teleg
 		Description string      `json:"description"`
 		ErrorCode   json.Number `json:"error_code"`
 		Result      struct {
-			MessageID json.Number `json:"message_id"`
+			MessageID json.RawMessage `json:"message_id"`
 		} `json:"result"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -208,6 +210,9 @@ func (s *Service) SendFrozenTelegramWithResult(ctx context.Context, target Teleg
 	var extra any
 	if decoder.Decode(&extra) != io.EOF || result.OK == nil {
 		return DeliveryResult{Status: DeliveryUnknown, Attempted: true, Reason: "Telegram 响应不完整或包含额外内容，未确认是否送达；请先检查 Telegram。"}
+	}
+	if !telegramConfirmationFieldsUnique(raw) {
+		return DeliveryResult{Status: DeliveryUnknown, Attempted: true, Reason: "Telegram 返回了重复的送达确认字段，无法确认消息是否收到；请先检查 Telegram，本次不自动重发。"}
 	}
 	if !*result.OK {
 		code, _ := strconv.Atoi(string(result.ErrorCode))
@@ -225,6 +230,58 @@ func (s *Service) SendFrozenTelegramWithResult(ctx context.Context, target Teleg
 	return DeliveryResult{Status: DeliverySent, Attempted: true, Reason: "Telegram 已明确确认收到这条消息。"}
 }
 
+// The caller already checked one complete typed JSON object. Only the fields
+// deciding delivery are inspected; unknown values and their nested keys stay opaque.
+func telegramConfirmationFieldsUnique(raw []byte) bool {
+	var result json.RawMessage
+	var seenOK, seenResult, seenMessageID bool
+	for depth := range 2 {
+		if depth == 1 {
+			if len(result) == 0 || bytes.Equal(bytes.TrimSpace(result), []byte("null")) {
+				return true
+			}
+			raw = result
+		}
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+			return false
+		}
+		for decoder.More() {
+			token, err := decoder.Token()
+			if err != nil {
+				return false
+			}
+			name, ok := token.(string)
+			if !ok {
+				return false
+			}
+			var value json.RawMessage
+			if err := decoder.Decode(&value); err != nil {
+				return false
+			}
+			switch {
+			case depth == 0 && strings.EqualFold(name, "ok"):
+				if seenOK {
+					return false
+				}
+				seenOK = true
+			case depth == 0 && strings.EqualFold(name, "result"):
+				if seenResult {
+					return false
+				}
+				seenResult = true
+				result = value
+			case depth == 1 && strings.EqualFold(name, "message_id"):
+				if seenMessageID {
+					return false
+				}
+				seenMessageID = true
+			}
+		}
+	}
+	return true
+}
+
 var telegramPercentEscapes = regexp.MustCompile(`(?:%[0-9A-Fa-f]{2})+`)
 
 var telegramDescriptionSecrets = regexp.MustCompile(`(?i)(https?://\S+|(?:bearer|basic)\s+\S+|(?:token|api_key|password|chat_id)\s*[:=]\s*\S+)`)
@@ -233,21 +290,60 @@ func redactTelegramDescription(description string, target TelegramTarget) string
 	secrets := []string{target.botToken, target.chatID, target.proxyURL}
 	if proxy, err := url.Parse(target.proxyURL); err == nil && proxy.User != nil {
 		password, _ := proxy.User.Password()
-		secrets = append(secrets, proxy.User.Username(), password)
+		secrets = append(secrets, proxy.User.Username(), password, base64.StdEncoding.EncodeToString([]byte(proxy.User.Username()+":"+password)))
 	}
-	// Normalize URL escaping before redacting so percent-encoded credentials cannot bypass masking.
+	// Find every known variant in the original normalized text before changing it.
+	// Merge overlapping matches so hiding one credential cannot expose part of another.
 	description = decodeTelegramEscapes(description)
+	patterns := map[string]struct{}{}
 	for _, secret := range secrets {
-		secret = decodeTelegramEscapes(secret)
-		if secret != "" {
-			for _, encoded := range []string{secret, url.QueryEscape(secret), url.PathEscape(secret)} {
-				description = strings.ReplaceAll(description, encoded, "[已隐藏]")
-				lowerEscapes := telegramPercentEscapes.ReplaceAllStringFunc(encoded, strings.ToLower)
-				description = strings.ReplaceAll(description, lowerEscapes, "[已隐藏]")
+		for _, value := range []string{secret, decodeTelegramEscapes(secret)} {
+			if value == "" {
+				continue
+			}
+			for _, encoded := range []string{value, url.QueryEscape(value), url.PathEscape(value)} {
+				patterns[encoded] = struct{}{}
+				patterns[decodeTelegramEscapes(encoded)] = struct{}{}
+				patterns[telegramPercentEscapes.ReplaceAllStringFunc(encoded, strings.ToLower)] = struct{}{}
 			}
 		}
 	}
-	description = telegramDescriptionSecrets.ReplaceAllString(description, "[已隐藏]")
+	var matches [][2]int
+	for _, match := range telegramDescriptionSecrets.FindAllStringIndex(description, -1) {
+		matches = append(matches, [2]int{match[0], match[1]})
+	}
+	for pattern := range patterns {
+		for offset := 0; offset < len(description); {
+			index := strings.Index(description[offset:], pattern)
+			if index < 0 {
+				break
+			}
+			start := offset + index
+			matches = append(matches, [2]int{start, start + len(pattern)})
+			offset = start + 1
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i][0] == matches[j][0] {
+			return matches[i][1] > matches[j][1]
+		}
+		return matches[i][0] < matches[j][0]
+	})
+	var masked strings.Builder
+	cursor := 0
+	for i := 0; i < len(matches); {
+		start, end := matches[i][0], matches[i][1]
+		i++
+		for i < len(matches) && matches[i][0] <= end {
+			end = max(end, matches[i][1])
+			i++
+		}
+		masked.WriteString(description[cursor:start])
+		masked.WriteString("[已隐藏]")
+		cursor = end
+	}
+	masked.WriteString(description[cursor:])
+	description = masked.String()
 	return strings.Join(strings.Fields(description), " ")
 }
 

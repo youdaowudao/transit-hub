@@ -10,11 +10,62 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"transithub/backend/internal/shared/businesstime"
+	"transithub/backend/internal/shared/workspacescope"
 )
 
+// Each response reads the same published rows and one captured business day.
+// The write repository keeps its original pool and publication paths.
+type activityReader interface {
+	rowReader
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+type activityRead struct{ db activityReader }
+
+func (r *Repository) readSnapshot(ctx context.Context, scope Scope, fn func(*activityRead, time.Time) error) error {
+	if r == nil || r.db == nil {
+		return ErrUnavailable
+	}
+	now := time.Now().In(businesstime.Location())
+	tx, err := r.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := workspacescope.Resolve(ctx, tx, scope); err != nil {
+		return err
+	}
+	return fn(&activityRead{db: tx}, now)
+}
+func (s *Service) Summary(ctx context.Context, scope Scope, days int) (Summary, error) {
+	var result Summary
+	err := s.repo.readSnapshot(ctx, scope, func(r *activityRead, now time.Time) error {
+		var err error
+		result, err = r.summary(ctx, scope, days, now)
+		return err
+	})
+	return result, err
+}
+func (s *Service) Users(ctx context.Context, scope Scope, query ListQuery) (UserList, error) {
+	var result UserList
+	err := s.repo.readSnapshot(ctx, scope, func(r *activityRead, now time.Time) error {
+		var err error
+		result, err = r.usersPage(ctx, scope, query, now)
+		return err
+	})
+	return result, err
+}
+func (s *Service) Detail(ctx context.Context, scope Scope, id string) (Detail, error) {
+	var result Detail
+	err := s.repo.readSnapshot(ctx, scope, func(r *activityRead, now time.Time) error {
+		var err error
+		result, err = r.detail(ctx, scope, id, now)
+		return err
+	})
+	return result, err
+}
+
 func pointer[T any](v T) *T { return &v }
-func (r *Repository) users(ctx context.Context, s Scope, st SyncState, id string) ([]UserRow, error) {
-	today := businesstime.Today()
+func (r *activityRead) users(ctx context.Context, s Scope, st SyncState, id, today string) ([]UserRow, error) {
 	rows, e := r.db.Query(ctx, `SELECT p.site_user_id,
         p.email,
         p.username,
@@ -25,37 +76,37 @@ func (r *Repository) users(ctx context.Context, s Scope, st SyncState, id string
         p.last_used_at,
         p.first_observed_at,
         p.updated_at,
-        
+
  COALESCE(sum(d.actual_cost) FILTER(WHERE d.day>=$3::date-7
         AND d.day<$3::date),
         0)::float8,
-        
+
  COALESCE(sum(d.actual_cost) FILTER(WHERE d.day>=$3::date-30
         AND d.day<$3::date),
         0)::float8,
-        
+
  COALESCE(sum(d.actual_cost) FILTER(WHERE d.day>=$3::date-14
         AND d.day<$3::date-7),
         0)::float8,
-        
+
  COALESCE(sum(d.actual_cost) FILTER(WHERE d.day>=$3::date-60
         AND d.day<$3::date-30),
         0)::float8,
-        
+
  COALESCE(sum(d.requests) FILTER(WHERE d.day>=$3::date-7
         AND d.day<$3::date),
         0)::bigint,
-        
+
  COALESCE(sum(d.requests) FILTER(WHERE d.day>=$3::date-14
         AND d.day<$3::date-7),
         0)::bigint,
-        
+
  COALESCE(sum(d.requests) FILTER(WHERE d.day=$3::date),
         0)::bigint,
-        
+
  COALESCE(sum(d.actual_cost) FILTER(WHERE d.day=$3::date),
         0)::float8,
-        
+
  count(d.site_user_id) FILTER(WHERE d.day=$3::date)>0
         FROM user_activity_profiles p
         LEFT JOIN user_activity_daily d ON d.user_id=p.user_id
@@ -106,8 +157,7 @@ func (r *Repository) users(ctx context.Context, s Scope, st SyncState, id string
 	}
 	return out, rows.Err()
 }
-func (r *Repository) daily(ctx context.Context, s Scope, st SyncState, days int, id string) ([]DailyPoint, error) {
-	today := businesstime.Today()
+func (r *activityRead) daily(ctx context.Context, s Scope, st SyncState, days int, id, today string) ([]DailyPoint, error) {
 	from := shift(today, -days+1)
 	points := map[string]*DailyPoint{}
 	out := make([]DailyPoint, 0, days)
@@ -167,10 +217,8 @@ func (r *Repository) daily(ctx context.Context, s Scope, st SyncState, days int,
 		return nil, e
 	}
 	rows, e = r.db.Query(ctx, `SELECT day::text,
-        COALESCE(sum(amount) FILTER(WHERE amount>0),
-        0)::float8,
-        COALESCE(-sum(amount) FILTER(WHERE amount<0),
-        0)::float8
+        sum(amount) FILTER(WHERE amount>0)::float8,
+        (-sum(amount) FILTER(WHERE amount<0))::float8
         FROM user_activity_recharge_daily
         WHERE user_id=$1
         AND admin_account_id=$2
@@ -185,18 +233,23 @@ func (r *Repository) daily(ctx context.Context, s Scope, st SyncState, days int,
 	defer rows.Close()
 	for rows.Next() {
 		var day string
-		var positive, negative float64
+		var positive, negative *float64
 		if e = rows.Scan(&day, &positive, &negative); e != nil {
 			return nil, e
 		}
 		p := points[day]
 		if p != nil {
-			p.Recharge, p.Deduction = pointer(positive), pointer(negative)
+			if positive != nil {
+				p.Recharge = positive
+			}
+			if negative != nil {
+				p.Deduction = negative
+			}
 		}
 	}
 	return out, rows.Err()
 }
-func (r *Repository) metrics(ctx context.Context, s Scope, st SyncState, from, to, id string) (*Metrics, error) {
+func (r *activityRead) metrics(ctx context.Context, s Scope, st SyncState, from, to, id string) (*Metrics, error) {
 	if !covered(st.UsageFrom, st.UsageTo, from, to) {
 		return nil, nil
 	}
@@ -216,9 +269,8 @@ func (r *Repository) metrics(ctx context.Context, s Scope, st SyncState, from, t
         AND ($5='' OR site_user_id=$5)`, s.UserID, s.AdminAccountID, from, to, id).Scan(&m.Requests, &m.Tokens, &m.Cost, &m.ActiveUsers)
 	return m, e
 }
-func (r *Repository) periods(ctx context.Context, s Scope, st SyncState, id string) (map[string]Period, error) {
+func (r *activityRead) periods(ctx context.Context, s Scope, st SyncState, id, today string) (map[string]Period, error) {
 	out := map[string]Period{}
-	today := businesstime.Today()
 	for _, entry := range []struct {
 		name string
 		days int
@@ -262,27 +314,29 @@ func (r *Repository) periods(ctx context.Context, s Scope, st SyncState, id stri
 	}
 	return out, nil
 }
-func (s *Service) Summary(ctx context.Context, scope Scope, days int) (Summary, error) {
-	st, e := s.repo.Sync(ctx, scope)
+func (r *activityRead) summary(ctx context.Context, scope Scope, days int, now time.Time) (Summary, error) {
+	today := businesstime.DateAt(now)
+	st, e := readSync(ctx, r.db, scope)
 	if e != nil {
 		return Summary{}, e
 	}
-	daily, e := s.repo.daily(ctx, scope, st, max(2, days), "")
+	daily, e := r.daily(ctx, scope, st, max(2, days), "", today)
 	if e != nil {
 		return Summary{}, e
 	}
-	periods, e := s.repo.periods(ctx, scope, st, "")
+	periods, e := r.periods(ctx, scope, st, "", today)
 	if e != nil {
 		return Summary{}, e
 	}
-	money := Money{Channels: []ChannelAmount{}, Complete: covered(st.RechargeFrom, st.RechargeTo, shift(businesstime.Today(), -1), shift(businesstime.Today(), -1))}
+	money := Money{Channels: []ChannelAmount{}, Complete: covered(st.RechargeFrom, st.RechargeTo, shift(today, -1), shift(today, -1))}
 	var observed time.Time
-	e = s.repo.db.QueryRow(ctx, `SELECT total_balance,
+	e = r.db.QueryRow(ctx, `SELECT total_balance,
+        user_count,
         observed_at
         FROM user_activity_site_daily
         WHERE user_id=$1
         AND admin_account_id=$2
-        ORDER BY day DESC LIMIT 1`, scope.UserID, scope.AdminAccountID).Scan(&money.TotalBalance, &observed)
+        ORDER BY day DESC LIMIT 1`, scope.UserID, scope.AdminAccountID).Scan(&money.TotalBalance, &st.UserCount, &observed)
 	if e != nil && !errors.Is(e, pgx.ErrNoRows) {
 		return Summary{}, e
 	}
@@ -293,7 +347,7 @@ func (s *Service) Summary(ctx context.Context, scope Scope, days int) (Summary, 
 	if len(daily) > 1 {
 		money.YesterdayRecharge, money.YesterdayDeduction = daily[len(daily)-2].Recharge, daily[len(daily)-2].Deduction
 	}
-	rows, e := s.repo.db.Query(ctx, `SELECT channel,
+	rows, e := r.db.Query(ctx, `SELECT channel,
         sum(amount)::float8,
         sum(events)::int
         FROM user_activity_recharge_daily
@@ -301,7 +355,7 @@ func (s *Service) Summary(ctx context.Context, scope Scope, days int) (Summary, 
         AND admin_account_id=$2
         AND day=$3::date
         GROUP BY channel
-        ORDER BY channel`, scope.UserID, scope.AdminAccountID, businesstime.Today())
+        ORDER BY channel`, scope.UserID, scope.AdminAccountID, today)
 	if e != nil {
 		return Summary{}, e
 	}
@@ -324,17 +378,17 @@ func (s *Service) Summary(ctx context.Context, scope Scope, days int) (Summary, 
 	}
 	return Summary{st, daily[len(daily)-1], periods, visibleDaily, money, coverage(st), st.Warnings, businesstime.Timezone}, nil
 }
-func (s *Service) Users(ctx context.Context, scope Scope, q ListQuery) (UserList, error) {
-	st, e := s.repo.Sync(ctx, scope)
+func (r *activityRead) usersPage(ctx context.Context, scope Scope, q ListQuery, now time.Time) (UserList, error) {
+	today := businesstime.DateAt(now)
+	st, e := readSync(ctx, r.db, scope)
 	if e != nil {
 		return UserList{}, e
 	}
-	users, e := s.repo.users(ctx, scope, st, "")
+	users, e := r.users(ctx, scope, st, "", today)
 	if e != nil {
 		return UserList{}, e
 	}
 	filtered := make([]UserRow, 0, len(users))
-	now := time.Now()
 	search := strings.ToLower(q.Search)
 	for _, u := range users {
 		if q.Role != "" && u.Role != q.Role || q.Status != "" && u.Status != q.Status {
@@ -419,23 +473,24 @@ func (s *Service) Users(ctx context.Context, scope Scope, q ListQuery) (UserList
 	end := min(total, start+q.PageSize)
 	return UserList{filtered[start:end], total, q.Page, q.PageSize, st, coverage(st)}, nil
 }
-func (s *Service) Detail(ctx context.Context, scope Scope, id string) (Detail, error) {
-	st, e := s.repo.Sync(ctx, scope)
+func (r *activityRead) detail(ctx context.Context, scope Scope, id string, now time.Time) (Detail, error) {
+	today := businesstime.DateAt(now)
+	st, e := readSync(ctx, r.db, scope)
 	if e != nil {
 		return Detail{}, e
 	}
-	users, e := s.repo.users(ctx, scope, st, id)
+	users, e := r.users(ctx, scope, st, id, today)
 	if e != nil {
 		return Detail{}, e
 	}
 	if len(users) == 0 {
 		return Detail{}, ErrNotFound
 	}
-	daily, e := s.repo.daily(ctx, scope, st, 90, id)
+	daily, e := r.daily(ctx, scope, st, 90, id, today)
 	if e != nil {
 		return Detail{}, e
 	}
-	periods, e := s.repo.periods(ctx, scope, st, id)
+	periods, e := r.periods(ctx, scope, st, id, today)
 	if e != nil {
 		return Detail{}, e
 	}

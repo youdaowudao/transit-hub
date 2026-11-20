@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -122,6 +123,23 @@ var legacyStrategyKeys = []string{
 }
 
 func mergeStrategyJSON(original []byte, legacy StrategySettings, patch DailyReportPatch) ([]byte, StrategySettings, error) {
+	encoded, err := json.Marshal(legacy)
+	if err != nil {
+		return nil, StrategySettings{}, err
+	}
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &values); err != nil {
+		return nil, StrategySettings{}, err
+	}
+	// Pure legacy forms still replace every original field, including omitted false warning flags.
+	fields := make(map[string]json.RawMessage, len(legacyStrategyKeys))
+	for _, key := range legacyStrategyKeys {
+		fields[key] = values[key]
+	}
+	return mergeStrategyFieldsJSON(original, fields, patch)
+}
+
+func mergeStrategyFieldsJSON(original []byte, fields map[string]json.RawMessage, patch DailyReportPatch) ([]byte, StrategySettings, error) {
 	root := map[string]json.RawMessage{}
 	if len(original) > 0 {
 		if err := json.Unmarshal(original, &root); err != nil {
@@ -131,18 +149,13 @@ func mergeStrategyJSON(original []byte, legacy StrategySettings, patch DailyRepo
 			root = map[string]json.RawMessage{}
 		}
 	}
-	encoded, err := json.Marshal(legacy)
-	if err != nil {
-		return nil, StrategySettings{}, err
-	}
-	var values map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &values); err != nil {
-		return nil, StrategySettings{}, err
-	}
 	for _, key := range legacyStrategyKeys {
-		delete(root, key)
-		if value, exists := values[key]; exists {
-			root[key] = value
+		if value, present := fields[key]; present {
+			if len(value) == 0 {
+				delete(root, key)
+			} else {
+				root[key] = value
+			}
 		}
 	}
 	if len(patch.Enabled) > 0 {
@@ -154,7 +167,7 @@ func mergeStrategyJSON(original []byte, legacy StrategySettings, patch DailyRepo
 	if len(patch.BotIDs) > 0 {
 		root["dailyReportBotIds"] = patch.BotIDs
 	}
-	encoded, err = json.Marshal(root)
+	encoded, err := json.Marshal(root)
 	if err != nil {
 		return nil, StrategySettings{}, err
 	}
@@ -163,6 +176,49 @@ func mergeStrategyJSON(original []byte, legacy StrategySettings, patch DailyRepo
 		return nil, StrategySettings{}, err
 	}
 	return encoded, merged, nil
+}
+
+// Only submitted old fields are legalized. Recipient changes retain their original
+// derived warning/disable behavior; unrelated old JSON is never rewritten.
+func normalizeLegacyStrategyPatch(original []byte, fields map[string]json.RawMessage, targets []TelegramTarget) (map[string]json.RawMessage, error) {
+	if len(fields) == 0 {
+		return fields, nil
+	}
+	_, candidate, err := mergeStrategyFieldsJSON(original, fields, DailyReportPatch{})
+	if err != nil {
+		return nil, err
+	}
+	// Explicit legacy edits retain the original save-time invalid-recipient calculation.
+	candidate.BalanceNotifyRecipientsInvalid = false
+	candidate.MultiplierNotifyRecipientsInvalid = false
+	projected := projectStrategyWithTargets(normalizeStrategySettings(candidate), targets)
+	raw, err := json.Marshal(projected)
+	if err != nil {
+		return nil, err
+	}
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil, err
+	}
+	normalized := make(map[string]json.RawMessage, len(fields))
+	for _, key := range legacyStrategyKeys {
+		if _, present := fields[key]; present {
+			normalized[key] = values[key]
+		}
+	}
+	if _, present := fields["balanceNotifyBotIds"]; present {
+		normalized["balanceNotifyRecipientsInvalid"] = values["balanceNotifyRecipientsInvalid"]
+		if !projected.EnableBalanceWarning {
+			normalized["enableBalanceWarning"] = values["enableBalanceWarning"]
+		}
+	}
+	if _, present := fields["multiplierNotifyBotIds"]; present {
+		normalized["multiplierNotifyRecipientsInvalid"] = values["multiplierNotifyRecipientsInvalid"]
+		if !projected.EnableMultiplierAlert {
+			normalized["enableMultiplierAlert"] = values["enableMultiplierAlert"]
+		}
+	}
+	return normalized, nil
 }
 
 func readStrategyForUpdate(ctx context.Context, tx pgx.Tx, userID, workspaceID string) ([]byte, error) {
@@ -215,11 +271,9 @@ func (r *Repository) SaveStrategyPreservingReport(ctx context.Context, userID, w
 func projectStrategyWithTargets(strategy StrategySettings, targets []TelegramTarget) StrategySettings {
 	channels := NotificationChannelSettings{Telegram: []TelegramChannelSettings{}}
 	for _, target := range targets {
-		channels.Telegram = append(channels.Telegram, TelegramChannelSettings{ID: target.ID})
+		channels.Telegram = append(channels.Telegram, TelegramChannelSettings{ID: strings.TrimSpace(target.ID)})
 	}
 	strategy.BalanceTemplate = projectDefaultBalanceTemplate(strategy.BalanceTemplate)
-	strategy.BalanceNotifyRecipientsInvalid = false
-	strategy.MultiplierNotifyRecipientsInvalid = false
 	if len(strategy.BalanceNotifyBotIDs) > 0 {
 		original := strategy.BalanceNotifyBotIDs
 		strategy.BalanceNotifyBotIDs = projectRecipientIDs(original, channels)
@@ -239,14 +293,15 @@ func projectStrategyWithTargets(strategy StrategySettings, targets []TelegramTar
 	return strategy
 }
 
-func (s *Service) SaveStrategyWithDailyReport(ctx context.Context, scope workspacescope.Scope, legacy StrategySettings, patch DailyReportPatch) (StrategySettings, error) {
+func (s *Service) SaveStrategyWithDailyReport(ctx context.Context, scope workspacescope.Scope, legacyPatch map[string]json.RawMessage, patch DailyReportPatch) (StrategySettings, error) {
 	if s.dailyReportWritesDisabled {
 		return StrategySettings{}, ErrDailyReportWritesDisabled
 	}
 	if s.repository == nil || s.repository.db == nil {
 		return StrategySettings{}, ErrDailyReportUnavailable
 	}
-	var merged StrategySettings
+	var merged, runtimeStrategy StrategySettings
+	refreshChanged := false
 	err := workspacescope.Transaction(ctx, s.repository.db, scope, true, func(tx pgx.Tx) error {
 		targets, err := s.TelegramTargets(ctx, tx, scope.UserID, scope.AdminAccountID, true)
 		if err != nil {
@@ -256,8 +311,16 @@ func (s *Service) SaveStrategyWithDailyReport(ctx context.Context, scope workspa
 		if err != nil {
 			return err
 		}
-		projected := projectStrategyWithTargets(normalizeStrategySettings(legacy), targets)
-		raw, value, err := mergeStrategyJSON(original, projected, patch)
+		before := DefaultStrategySettings()
+		if err := json.Unmarshal(original, &before); err != nil {
+			return err
+		}
+		before = normalizeStrategySettings(before)
+		fields, err := normalizeLegacyStrategyPatch(original, legacyPatch, targets)
+		if err != nil {
+			return err
+		}
+		raw, value, err := mergeStrategyFieldsJSON(original, fields, patch)
 		if err != nil {
 			return err
 		}
@@ -273,14 +336,24 @@ func (s *Service) SaveStrategyWithDailyReport(ctx context.Context, scope workspa
 		if err := writeStrategyJSON(ctx, tx, scope.UserID, scope.AdminAccountID, raw); err != nil {
 			return err
 		}
-		merged = value
+		runtimeStrategy = normalizeStrategySettings(value)
+		refreshChanged = before.EnableRefreshInterval != runtimeStrategy.EnableRefreshInterval || before.RefreshInterval != runtimeStrategy.RefreshInterval
+		// Omitted reminder fields use the same read projection as GET without rewriting JSON.
+		merged = projectStrategyWithTargets(value, targets)
+		// Explicit recipient edits keep their existing immediate save-time warning.
+		if _, present := legacyPatch["balanceNotifyBotIds"]; present {
+			merged.BalanceNotifyRecipientsInvalid = value.BalanceNotifyRecipientsInvalid
+		}
+		if _, present := legacyPatch["multiplierNotifyBotIds"]; present {
+			merged.MultiplierNotifyRecipientsInvalid = value.MultiplierNotifyRecipientsInvalid
+		}
 		return nil
 	})
 	if err != nil {
 		return StrategySettings{}, err
 	}
-	if s.OnStrategyChanged != nil {
-		s.OnStrategyChanged(scope.UserID, scope.AdminAccountID, merged)
+	if refreshChanged && s.OnStrategyChanged != nil {
+		s.OnStrategyChanged(scope.UserID, scope.AdminAccountID, runtimeStrategy)
 	}
 	return merged, nil
 }

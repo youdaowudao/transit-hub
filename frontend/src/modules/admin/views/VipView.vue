@@ -4,6 +4,7 @@ import { Copy, Loader2, RefreshCw, Search, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { t } from '@/locales'
+import { copyText } from '../utils/clipboard'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import { getVipSummary, restoreVipRecommendations, saveVipSettings, searchVipUsers, unwatchVipUser, watchVipUser } from '../api/vip'
 import type { VipCandidate, VipMutationResponse, VipRow, VipScope, VipSettings, VipSummary } from '../types/vip'
@@ -127,7 +128,9 @@ const saveSettings = () => {
 }
 const copy = async (row: VipRow) => {
   const generation = epoch
-  try { await navigator.clipboard.writeText(row.reminder); if (current(generation)) copied.value = row.siteUserId }
+  copied.value = ''
+  if (error.value === t('admin.vip.copyError')) error.value = ''
+  try { await copyText(row.reminder); if (current(generation)) copied.value = row.siteUserId }
   catch { if (current(generation)) error.value = t('admin.vip.copyError') }
 }
 watch(() => [scope.value?.workspaceAdminAccountId, scope.value?.workspaceCreatedAt, isSwitching.value], () => {
@@ -145,7 +148,7 @@ onBeforeUnmount(() => { disposed = true; reset() })
         <h1 class="text-2xl font-semibold text-foreground">{{ t('admin.vip.title') }}</h1>
         <p class="mt-2 max-w-3xl text-sm text-muted-foreground">{{ t('admin.vip.intro') }}</p>
       </div>
-      <Button variant="outline" :disabled="!scope || loading || writing || isSwitching" @click="load">
+      <Button variant="secondary" :disabled="!scope || loading || writing || isSwitching" @click="load">
         <Loader2 v-if="loading" class="mr-2 h-4 w-4 animate-spin" />
         <RefreshCw v-else class="mr-2 h-4 w-4" />
         {{ t('admin.vip.refresh') }}
@@ -196,7 +199,7 @@ onBeforeUnmount(() => { disposed = true; reset() })
                 <td class="px-4 py-3 tabular-nums">{{ row.daysLeft == null ? t('admin.vip.unknown') : t('admin.vip.days', { days: number(row.daysLeft) }) }}</td>
                 <td class="px-4 py-3 tabular-nums">{{ number(row.recordedConsumption) }}<p class="mt-1 whitespace-nowrap text-xs text-muted-foreground">{{ t('admin.vip.recordedFrom') }}{{ row.recordedFrom || t('admin.vip.unknown') }}</p></td>
                 <td class="px-4 py-3"><span v-if="row.source.manual">{{ t('admin.vip.manual') }}</span><p v-if="row.source.dailyRank">{{ t('admin.vip.dailyRank', { rank: row.source.dailyRank }) }}</p><p v-if="row.source.lifetimeRank">{{ t('admin.vip.lifetimeRank', { rank: row.source.lifetimeRank }) }}</p><p v-if="row.source.note" class="mt-1 max-w-xs break-words text-muted-foreground">{{ row.source.note }}</p></td>
-                <td class="px-4 py-3"><div class="flex flex-wrap gap-2"><Button size="sm" variant="outline" :disabled="loading || writing" @click="edit(row)">{{ row.source.manual ? t('admin.vip.editNote') : t('admin.vip.watch') }}</Button><Button size="sm" variant="outline" :disabled="loading || writing" @click="remove(row.siteUserId)">{{ t('admin.vip.remove') }}</Button><Button size="sm" variant="ghost" @click="copy(row)"><Copy class="mr-1 h-4 w-4" />{{ t('admin.vip.copy') }}</Button></div><p v-if="copied === row.siteUserId" class="mt-1 text-xs text-emerald-700 dark:text-emerald-300">{{ t('admin.vip.copied') }}</p></td>
+                <td class="px-4 py-3"><div class="flex flex-wrap gap-2"><Button size="sm" variant="secondary" :disabled="loading || writing" @click="edit(row)">{{ row.source.manual ? t('admin.vip.editNote') : t('admin.vip.watch') }}</Button><Button size="sm" variant="secondary" :disabled="loading || writing" @click="remove(row.siteUserId)">{{ t('admin.vip.remove') }}</Button><Button size="sm" variant="ghost" @click="copy(row)"><Copy class="mr-1 h-4 w-4" />{{ t('admin.vip.copy') }}</Button></div><p v-if="copied === row.siteUserId" class="mt-1 text-xs text-emerald-700 dark:text-emerald-300">{{ t('admin.vip.copied') }}</p></td>
               </tr>
               <tr v-if="!rows.length"><td colspan="8" class="px-4 py-8 text-center text-muted-foreground">{{ t('admin.vip.empty') }}</td></tr>
             </tbody>
@@ -208,7 +211,7 @@ onBeforeUnmount(() => { disposed = true; reset() })
         <p class="mt-2 text-sm text-muted-foreground">{{ t('admin.vip.searchHelp') }}</p>
         <form class="mt-4 flex gap-2" @submit.prevent="search"><Input v-model="searchText" maxlength="100" :disabled="writing" :placeholder="t('admin.vip.searchPlaceholder')" /><Button type="submit" :disabled="searching || writing || !scope"><Loader2 v-if="searching" class="mr-2 h-4 w-4 animate-spin" /><Search v-else class="mr-2 h-4 w-4" />{{ t('admin.vip.search') }}</Button></form>
         <p v-if="searchDone && !candidates.length" role="status" class="mt-4 text-sm text-muted-foreground">{{ t('admin.vip.searchEmpty') }}</p>
-        <ul v-if="candidates.length" class="mt-4 divide-y divide-border/50"><li v-for="candidate in candidates" :key="candidate.siteUserId" class="flex flex-wrap items-center justify-between gap-3 py-3"><div class="min-w-0 text-sm"><p class="break-all font-medium">{{ candidate.email || candidate.username || candidate.siteUserId }}</p><p class="text-muted-foreground">{{ candidate.siteUserId }} · {{ t('admin.vip.balance') }} {{ number(candidate.balance) }} · {{ candidate.watched ? t('admin.vip.watched') : candidate.dismissed ? t('admin.vip.dismissed') : t('admin.vip.unwatched') }}</p></div><Button variant="outline" size="sm" :disabled="loading || writing" @click="edit(candidate)">{{ candidate.watched ? t('admin.vip.editNote') : t('admin.vip.watch') }}</Button></li></ul>
+        <ul v-if="candidates.length" class="mt-4 divide-y divide-border/50"><li v-for="candidate in candidates" :key="candidate.siteUserId" class="flex flex-wrap items-center justify-between gap-3 py-3"><div class="min-w-0 text-sm"><p class="break-all font-medium">{{ candidate.email || candidate.username || candidate.siteUserId }}</p><p class="text-muted-foreground">{{ candidate.siteUserId }} · {{ t('admin.vip.balance') }} {{ number(candidate.balance) }} · {{ candidate.watched ? t('admin.vip.watched') : candidate.dismissed ? t('admin.vip.dismissed') : t('admin.vip.unwatched') }}</p></div><Button variant="secondary" size="sm" :disabled="loading || writing" @click="edit(candidate)">{{ candidate.watched ? t('admin.vip.editNote') : t('admin.vip.watch') }}</Button></li></ul>
       </section>
       <section v-if="editing" class="rounded-xl border border-border/50 bg-card p-5">
         <div class="flex items-center justify-between"><h2 class="font-semibold">{{ t('admin.vip.editTitle') }} · {{ editing.name }}</h2><Button variant="ghost" size="sm" :disabled="writing" :aria-label="t('admin.vip.close')" @click="editing = null"><X class="h-4 w-4" /></Button></div>
@@ -223,10 +226,10 @@ onBeforeUnmount(() => { disposed = true; reset() })
         <form class="mt-5 space-y-5" @submit.prevent="saveSettings">
           <fieldset :disabled="loading || writing" class="space-y-5">
             <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <label class="text-sm">{{ t('admin.vip.dailyTop') }}<Input v-model.number="draft.dailyTop" type="number" min="0" max="100" class="mt-2" /></label>
-              <label class="text-sm">{{ t('admin.vip.lifetimeTop') }}<Input v-model.number="draft.lifetimeTop" type="number" min="0" max="100" class="mt-2" /></label>
-              <label class="text-sm">{{ t('admin.vip.alertDays') }}<Input v-model.number="draft.alertDays" type="number" min="0" max="30" step="0.1" class="mt-2" /></label>
-              <label class="text-sm">{{ t('admin.vip.alertBalance') }}<Input v-model.number="draft.alertBalance" type="number" min="0" max="1000000" step="0.01" class="mt-2" /></label>
+              <label class="text-sm">{{ t('admin.vip.dailyTop') }}<Input :model-value="String(draft.dailyTop)" @update:model-value="draft.dailyTop = Number.parseFloat($event)" type="number" min="0" max="100" class="mt-2" /></label>
+              <label class="text-sm">{{ t('admin.vip.lifetimeTop') }}<Input :model-value="String(draft.lifetimeTop)" @update:model-value="draft.lifetimeTop = Number.parseFloat($event)" type="number" min="0" max="100" class="mt-2" /></label>
+              <label class="text-sm">{{ t('admin.vip.alertDays') }}<Input :model-value="String(draft.alertDays)" @update:model-value="draft.alertDays = Number.parseFloat($event)" type="number" min="0" max="30" step="0.1" class="mt-2" /></label>
+              <label class="text-sm">{{ t('admin.vip.alertBalance') }}<Input :model-value="String(draft.alertBalance)" @update:model-value="draft.alertBalance = Number.parseFloat($event)" type="number" min="0" max="1000000" step="0.01" class="mt-2" /></label>
             </div>
             <p class="text-xs text-muted-foreground">{{ t('admin.vip.thresholdHelp') }}</p>
             <label class="flex items-center gap-2 text-sm"><input v-model="draft.alertsEnabled" type="checkbox" class="h-4 w-4 rounded border-border" />{{ t('admin.vip.enable') }}</label>
@@ -239,7 +242,7 @@ onBeforeUnmount(() => { disposed = true; reset() })
             <Button type="submit" :disabled="!validDraft || loading || writing"><Loader2 v-if="writing" class="mr-2 h-4 w-4 animate-spin" />{{ t('admin.vip.saveSettings') }}</Button>
           </fieldset>
         </form>
-        <div class="mt-6 border-t border-border/50 pt-5"><h3 class="text-sm font-medium">{{ t('admin.vip.restoreTitle') }} · {{ summary.dismissedCount }}</h3><p class="mt-2 text-sm text-muted-foreground">{{ t('admin.vip.actionsHelp') }}</p><Button variant="outline" class="mt-3" :disabled="!summary.dismissedCount || loading || writing" @click="restore">{{ t('admin.vip.restore') }}</Button></div>
+        <div class="mt-6 border-t border-border/50 pt-5"><h3 class="text-sm font-medium">{{ t('admin.vip.restoreTitle') }} · {{ summary.dismissedCount }}</h3><p class="mt-2 text-sm text-muted-foreground">{{ t('admin.vip.actionsHelp') }}</p><Button variant="secondary" class="mt-3" :disabled="!summary.dismissedCount || loading || writing" @click="restore">{{ t('admin.vip.restore') }}</Button></div>
       </section>
     </template>
   </div>

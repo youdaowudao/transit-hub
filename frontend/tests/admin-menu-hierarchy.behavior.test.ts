@@ -28,7 +28,7 @@ const primaryEntries = [
   ['调价映射', '/admin/group-associations'],
   ['分组健康', '/admin/connection-health'],
 ] as const
-const secondaryEntries = [
+const legacySecondaryEntries = [
   ['排行榜', '/admin/leaderboard'],
   ['抽奖活动', '/admin/lottery'],
   ['活动调价', '/admin/group-rate-campaigns'],
@@ -36,6 +36,12 @@ const secondaryEntries = [
   ['群发邮件', '/admin/mass-email'],
   ['用户最后使用', '/admin/user-last-used'],
 ] as const
+const absorbedEntries = [
+  ['用户分析', '/admin/user-activity'],
+  ['大户关注', '/admin/vip'],
+  ['销售入账', '/admin/sales'],
+] as const
+const secondaryEntries = [...legacySecondaryEntries, ...absorbedEntries] as const
 const wrappers: VueWrapper[] = []
 
 async function mountMenu(path = '/admin') {
@@ -100,7 +106,7 @@ describe('左侧菜单层级', () => {
     expect(nav.findAll(':scope > div a')).toHaveLength(0)
   })
 
-  it.each(secondaryEntries.slice(-2))('%s 直接进入时默认展开，手动收起保持有效', async (label, path) => {
+  it.each([...legacySecondaryEntries.slice(-2), ...absorbedEntries])('%s 直接进入时默认展开，手动收起保持有效', async (label, path) => {
     const { wrapper, router } = await mountMenu(path)
     const nav = wrapper.get('nav')
     expect(nav.get('button[aria-controls="admin-menu-embedded-features"]').attributes('aria-expanded')).toBe('true')
@@ -113,11 +119,11 @@ describe('左侧菜单层级', () => {
     expect(nav.findAll(':scope > div a')).toHaveLength(0)
   })
 
-  it('手机导航点击五个移动入口后收起，工作区选择页继续隐藏业务导航', async () => {
+  it('手机导航点击已有与新增入口后收起，工作区选择页继续隐藏业务导航', async () => {
     const { wrapper, router } = await mountMenu()
     const sidebar = wrapper.get('#admin-mobile-sidebar')
     const openButton = wrapper.get('header button[aria-controls="admin-mobile-sidebar"]')
-    for (const [label, path] of [...primaryEntries, ...secondaryEntries.slice(-2)]) {
+    for (const [label, path] of [...primaryEntries, ...legacySecondaryEntries.slice(-2), ...absorbedEntries]) {
       await openButton.trigger('click')
       expect(openButton.attributes('aria-expanded')).toBe('true')
       expect(sidebar.classes()).toContain('translate-x-0')

@@ -42,9 +42,10 @@ func (s *Service) fetchInventory(ctx context.Context, p *pacedReader, session up
 	out := []upstream.Sub2APIAdminUser{}
 	seen := map[string]bool{}
 	expected := -1
+	includeSubscriptions := false
 	for page := 1; page <= 501; page++ {
 		result, e := call(ctx, p, func(c context.Context) (upstream.Sub2APIAdminUsersPage, error) {
-			return s.platform.FetchSub2APIAdminUsersPageWithContext(c, session, upstream.Sub2APIAdminUsersQuery{Page: page, PageSize: 100, SortBy: "id", SortOrder: "asc", Timezone: businesstime.Timezone, StrictPagination: true})
+			return s.platform.FetchSub2APIAdminUsersPageWithContext(c, session, upstream.Sub2APIAdminUsersQuery{Page: page, PageSize: 100, SortBy: "created_at", SortOrder: "asc", IncludeSubscriptions: &includeSubscriptions, Timezone: businesstime.Timezone, StrictPagination: true})
 		})
 		if e != nil {
 			return nil, e
@@ -115,14 +116,44 @@ func (s *Service) collect(ctx context.Context, conn *pgxpool.Conn, scope Scope, 
 	today := dayAt(*st.StartedAt)
 	p := &pacedReader{}
 	complete := true
-	recordError := func(step, object string, e error) {
-		if errors.Is(e, workspacescope.ErrChanged) {
+	recordError := func(step, object string, e error, required bool) {
+		authFailed := authenticationFailure(e)
+		if authFailed || errors.Is(e, workspacescope.ErrChanged) {
 			cancelTask()
 		}
-		complete = false
-		st.Error = failure(step, object, e)
-		joinWarnings(&st, st.Error)
+		detail := failure(step, object, e)
+		if required || authFailed || errors.Is(e, workspacescope.ErrChanged) {
+			complete = false
+			if st.Error == "" || authFailed {
+				st.Error = detail
+			}
+		}
+		joinWarnings(&st, detail)
 	}
+	defer func() {
+		if e := ctx.Err(); e != nil {
+			complete = false
+			if st.Error == "" {
+				recordError("本轮读取", scope.AdminAccountID, e, true)
+			}
+		}
+		st.Status = "failed"
+		if complete {
+			// Success means this batch verified the complete inventory and both
+			// recent closed usage days; optional sources retain their own warnings.
+			st.Status = "success"
+			st.Error = ""
+			now := time.Now()
+			st.LastSyncedAt = &now
+		} else if st.Error == "" {
+			st.Error = "本轮用户清单或最近两个完整日的用量尚未核实，已核实部分可能已经更新；请查看具体提示后重新同步。"
+		}
+		terminalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := publish(terminalCtx, conn, scope, func(tx pgx.Tx) error { return writeSync(terminalCtx, tx, scope, st) }); err != nil {
+			logStorageFailure("保存用户分析完成状态失败，已核实资料仍保留", err)
+		}
+	}()
 	session, exists, sessionErr := s.sessions.StoredSession(ctx, scope.UserID, scope.AdminAccountID)
 	if sessionErr == nil && (!exists || !session.IsAuthenticated()) {
 		sessionErr = fail("主站登录资料不可用，请到管理员账号入口重新连接后重试")
@@ -131,11 +162,7 @@ func (s *Service) collect(ctx context.Context, conn *pgxpool.Conn, scope Scope, 
 		sessionErr = fail("用户分析仅支持Sub2API主站，请切换管理员账号后重试")
 	}
 	if sessionErr != nil {
-		recordError("主站登录资料", scope.AdminAccountID, sessionErr)
-		st.Status = "failed"
-		terminalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = publish(terminalCtx, conn, scope, func(tx pgx.Tx) error { return writeSync(terminalCtx, tx, scope, st) })
+		recordError("主站登录资料", scope.AdminAccountID, sessionErr, true)
 		return
 	}
 	users, e := s.fetchInventory(ctx, p, session)
@@ -148,9 +175,12 @@ func (s *Service) collect(ctx context.Context, conn *pgxpool.Conn, scope Scope, 
 		inventoryOK = e == nil
 	}
 	if !inventoryOK {
-		recordError("用户清单", "完整库存", e)
+		recordError("用户清单", "完整库存", e, true)
 	} else {
 		st.UserCount = len(users)
+	}
+	if ctx.Err() != nil {
+		return
 	}
 	if inventoryOK {
 		attempted := map[string]bool{}
@@ -159,7 +189,7 @@ func (s *Service) collect(ctx context.Context, conn *pgxpool.Conn, scope Scope, 
 			attempted[day] = true
 			rows, e := s.usageDay(ctx, p, session, day, today, users)
 			if e != nil {
-				recordError("每日用量", day, e)
+				recordError("每日用量", day, e, day == shift(today, -2) || day == shift(today, -1))
 				return false
 			}
 			next := st
@@ -171,16 +201,19 @@ func (s *Service) collect(ctx context.Context, conn *pgxpool.Conn, scope Scope, 
 			}
 			if e = publishUsage(ctx, conn, scope, day, rows, next); e != nil {
 				cancelTask()
-				recordError("保存每日用量", day, e)
+				recordError("保存每日用量", day, e, true)
 				return false
 			}
 			st = next
 			freshOK[day] = true
 			return true
 		}
-		readDay(shift(today, -2))
-		readDay(shift(today, -1))
-		readDay(today)
+		for _, day := range []string{shift(today, -2), shift(today, -1), today} {
+			readDay(day)
+			if ctx.Err() != nil {
+				return
+			}
+		}
 		// Extend only the latest verified closed segment, never jump over an unknown day.
 		budget := 31
 		if previous.UsageFrom == "" && previous.UsageTo == "" {
@@ -202,6 +235,9 @@ func (s *Service) collect(ctx context.Context, conn *pgxpool.Conn, scope Scope, 
 			complete = false
 		}
 	}
+	if ctx.Err() != nil {
+		return
+	}
 	// Funding sources are independent from inventory and usage publication.
 	collector := newRechargeCollector(s, p, session)
 	from := shift(today, -2)
@@ -214,10 +250,10 @@ func (s *Service) collect(ctx context.Context, conn *pgxpool.Conn, scope Scope, 
 			joinWarnings(&st, warning)
 		}
 		if e != nil {
-			recordError("入账记录", left+"至"+shift(right, -1), e)
+			recordError("入账记录", left+"至"+shift(right, -1), e, false)
 		}
-		if !all {
-			complete = false
+		if ctx.Err() != nil {
+			return false
 		}
 		if len(channels) == 0 {
 			return false
@@ -232,7 +268,7 @@ func (s *Service) collect(ctx context.Context, conn *pgxpool.Conn, scope Scope, 
 		}
 		if e = publishRechargeSources(ctx, conn, scope, left, right, channels, rows, next); e != nil {
 			cancelTask()
-			recordError("保存入账", left, e)
+			recordError("保存入账", left, e, true)
 			return false
 		}
 		st = next
@@ -241,8 +277,14 @@ func (s *Service) collect(ctx context.Context, conn *pgxpool.Conn, scope Scope, 
 	// Publish recent closed dates before the temporary current day and older backfill.
 	if from < today {
 		publishWindow(from, today)
+		if ctx.Err() != nil {
+			return
+		}
 	}
 	publishWindow(today, shift(today, 1))
+	if ctx.Err() != nil {
+		return
+	}
 	if previous.RechargeFrom != "" {
 		left := st.RechargeFrom
 		if left == "" || st.RechargeTo < shift(today, -400) {
@@ -254,31 +296,16 @@ func (s *Service) collect(ctx context.Context, conn *pgxpool.Conn, scope Scope, 
 		}
 		if older < left {
 			publishWindow(older, left)
+			if ctx.Err() != nil {
+				return
+			}
 		}
 	}
 	retentionDay := businesstime.Today()
 	clipCoverage(&st, shift(retentionDay, -399))
 	if e = retainHistory(ctx, conn, scope, retentionDay, st); e != nil {
-		recordError("清理过期分析资料", scope.AdminAccountID, e)
+		recordError("清理过期分析资料", scope.AdminAccountID, e, true)
 	}
-	if e = ctx.Err(); e != nil {
-		complete = false
-		if st.Error == "" {
-			recordError("本轮读取", scope.AdminAccountID, e)
-		}
-	}
-	st.Status = "failed"
-	if complete {
-		st.Status = "success"
-		st.Error = ""
-		now := time.Now()
-		st.LastSyncedAt = &now
-	} else if st.Error == "" {
-		st.Error = "本轮部分资料尚未核实，已核实部分可能已经更新；请查看具体提示后重新同步。"
-	}
-	terminalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = publish(terminalCtx, conn, scope, func(tx pgx.Tx) error { return writeSync(terminalCtx, tx, scope, st) })
 }
 func publishRechargeSources(ctx context.Context, db workspacescope.Beginner, s Scope, from, to string, channels []string, rows []Recharge, st SyncState) error {
 	return publish(ctx, db, s, func(tx pgx.Tx) error {

@@ -49,7 +49,7 @@ vi.mock('@/modules/admin/composables/useAdminAccounts', async () => {
   const { ref } = await import('vue')
   const currentAccount = ref({ id: 'workspace-a', displayName: '工作区 A' })
   harness.currentAccount = currentAccount
-  return { useAdminAccounts: () => ({ currentAccount }) }
+  return { useAdminAccounts: () => ({ currentAccount, isSwitching: ref(false) }) }
 })
 
 vi.mock('@/modules/admin/composables/useDashboardMetrics', async () => {

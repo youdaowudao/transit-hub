@@ -3,10 +3,11 @@ package upstream
 import (
 	"fmt"
 	"math"
+	"reflect"
 	"strconv"
 )
 
-// Only risk polling opts in. Legacy query pages retain their tolerant parser.
+// Risk polling and activity inventory opt in. Legacy query pages retain their tolerant parser.
 func validateSignupRiskUsersPage(payload any, query Sub2APIAdminUsersQuery) error {
 	invalid := func(format string, args ...any) error {
 		err := newRequestError(ErrorInvalidResponse, PlatformSub2API)
@@ -25,6 +26,14 @@ func validateSignupRiskUsersPage(payload any, query Sub2APIAdminUsersQuery) erro
 	items, ok := data["items"].([]any)
 	if !ok {
 		return invalid("用户列表条目不是数组或已经缺失")
+	}
+	if raw, present := outer["items"]; present && !reflect.DeepEqual(raw, items) {
+		return invalid("用户列表的多种条目数组不一致")
+	}
+	for _, key := range []string{"list", "records", "orders", "groups", "platform_quotas"} {
+		if raw, present := data[key]; present && !reflect.DeepEqual(raw, items) {
+			return invalid("用户列表的多种条目数组不一致")
+		}
 	}
 	if len(items) > query.PageSize {
 		return invalid("本页最多可返回%d条用户，实际返回%d条", query.PageSize, len(items))

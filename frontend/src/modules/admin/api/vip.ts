@@ -1,4 +1,4 @@
-import { authUnauthorizedErrorKey, getAccessToken, handleAuthExpired, isUnauthorizedApiResponse } from '@/modules/auth/api/auth'
+import { authUnauthorizedErrorKey, getAccessToken, handleAuthExpired } from '@/modules/auth/api/auth'
 import type { VipScope, VipSummary, VipSettings, VipSearchResponse, VipMutationResponse } from '../types/vip'
 const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/$/, '')
 const request = async <T>(scope: VipScope, path: string, method = 'GET', values: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T & VipScope> => {
@@ -27,8 +27,8 @@ const request = async <T>(scope: VipScope, path: string, method = 'GET', values:
   }
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('大户关注接口返回的资料不是完整对象；请检查本站服务日志后重新读取。')
   if (!response.ok) {
-    if (isUnauthorizedApiResponse(response.status, payload)) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
-    throw new Error(payload.message ?? `大户关注操作未完成（本站HTTP ${response.status}），具体原因尚未确认；请查看本站服务日志并重新读取。`)
+    if (response.status === 401) { handleAuthExpired(); throw new Error(authUnauthorizedErrorKey) }
+    throw new Error(typeof payload.message === 'string' && payload.message ? payload.message : `大户关注操作未完成（本站HTTP ${response.status}），具体原因尚未确认；请查看本站服务日志并重新读取。`)
   }
   if (payload.workspaceAdminAccountId !== scope.workspaceAdminAccountId || payload.workspaceCreatedAt !== scope.workspaceCreatedAt) throw new Error('大户关注响应与请求的工作区不一致，已停止显示该响应；请重新读取当前工作区。')
   return payload

@@ -54,7 +54,7 @@ onBeforeUnmount(() => { disposed = true; close() })
         <p class="mt-2 max-w-3xl text-sm text-muted-foreground">{{ t('admin.dashboard.operating.intro') }}</p>
         <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.dashboard.operating.onDemand') }}</p>
       </div>
-      <Button variant="outline" :disabled="!scope || isSwitching" :aria-expanded="open" aria-controls="operating-insights-content" @click="toggle">
+      <Button variant="secondary" :disabled="!scope || isSwitching" :aria-expanded="open" aria-controls="operating-insights-content" @click="toggle">
         <ChevronDown class="mr-2 h-4 w-4 transition-transform" :class="{ 'rotate-180': open }" />
         {{ open ? t('admin.dashboard.operating.collapse') : t('admin.dashboard.operating.expand') }}
       </Button>
@@ -63,7 +63,7 @@ onBeforeUnmount(() => { disposed = true; close() })
     <div v-if="open" id="operating-insights-content" class="mt-5 space-y-5">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <p class="text-xs text-muted-foreground">{{ t('admin.dashboard.operating.localOnly') }}</p>
-        <Button variant="outline" size="sm" :disabled="loading || !scope || isSwitching" @click="load">
+        <Button variant="secondary" size="sm" :disabled="loading || !scope || isSwitching" @click="load">
           <Loader2 v-if="loading" class="mr-2 h-4 w-4 animate-spin" />
           <RefreshCw v-else class="mr-2 h-4 w-4" />
           {{ t('admin.dashboard.operating.retry') }}

@@ -47,39 +47,48 @@ func (c *rechargeCollector) redeems(ctx context.Context, kind, from, to string) 
 		if e != nil {
 			return nil, e
 		}
+		total, known := stream.total, stream.known
 		if result.TotalKnown {
 			if stream.known && stream.total != result.Total {
 				return nil, fail(kind + "入账总数在分页期间变化")
 			}
-			stream.total = result.Total
-			stream.known = true
+			total, known = result.Total, true
+		}
+		if len(result.Items) > 500 || (known && (total < 0 || len(stream.rows)+len(result.Items) > total)) {
+			return nil, fail(kind + "入账条数超过本页限制或总数")
 		}
 		if len(result.Items) == 0 {
-			if stream.known && len(stream.rows) != stream.total {
+			if known && len(stream.rows) != total {
 				return nil, fail(kind + "入账在总数收齐前返回空页")
 			}
+			stream.total, stream.known = total, known
 			stream.done = true
 			break
 		}
+		// Validate the entire page before moving the shared cursor or publishing
+		// any of its rows to later windows. Requests still consume the same budget.
+		pageIDs := map[string]bool{}
+		last := stream.last
 		for _, r := range result.Items {
-			if r.UsedAt == nil || stream.seen[r.ID] {
+			if r.ID == "" || r.UsedAt == nil || stream.seen[r.ID] || pageIDs[r.ID] {
 				return nil, fail(kind + "入账包含缺失时间或重复编号")
 			}
-			if stream.last != nil && r.UsedAt.After(*stream.last) {
+			if last != nil && r.UsedAt.After(*last) {
 				return nil, fail(kind + "入账跨页使用时间不是降序")
 			}
-			stream.seen[r.ID] = true
-			stream.last = r.UsedAt
-			stream.rows = append(stream.rows, r)
-		}
-		if stream.known {
-			if len(stream.rows) > stream.total {
-				return nil, fail(kind + "入账条数超过总数")
+			if kind == "balance" && r.Value < 0 {
+				return nil, fail("普通充值或兑换记录出现负数金额，未替换窗口")
 			}
-			if len(stream.rows) == stream.total {
-				stream.done = true
-			}
+			pageIDs[r.ID] = true
+			last = r.UsedAt
 		}
+		for id := range pageIDs {
+			stream.seen[id] = true
+		}
+		stream.total, stream.known = total, known
+		stream.last = last
+		stream.rows = append(stream.rows, result.Items...)
+		stream.done = known && len(stream.rows) == total
 		stream.page++
 	}
 	out := []Recharge{}
@@ -162,17 +171,40 @@ func (c *rechargeCollector) affiliates(ctx context.Context, from, to string) ([]
 		}
 	}
 }
+
+func rechargeSourceFailure(source string, err error) error {
+	requestErr := authenticationError(err)
+	if requestErr == nil && !errors.As(err, &requestErr) {
+		return errors.Join(fail(source+"："+safeReason(err)), err)
+	}
+	// The HTTP client already masks this public message. Keep its typed cause
+	// and add only the fixed local source name; never format a raw error body.
+	detail := *requestErr
+	detail.UpstreamMessage = source + "：" + requestReason(requestErr)
+	detail.Cause = err
+	return &detail
+}
+
 func (c *rechargeCollector) window(ctx context.Context, from, to string) ([]Recharge, []string, bool, string, error) {
 	rows := []Recharge{}
 	channels := []string{}
 	all := true
 	warning := ""
 	var failures []error
+	readAffiliate := true
 	for _, kind := range []string{"balance", "admin_balance"} {
 		part, e := c.redeems(ctx, kind, from, to)
 		if e != nil {
 			all = false
-			failures = append(failures, fail(kind+"："+safeReason(e)))
+			source := "支付充值与兑换码入账"
+			if kind == "admin_balance" {
+				source = "管理员加款与扣款"
+			}
+			failures = append(failures, rechargeSourceFailure(source, e))
+			if authenticationFailure(e) {
+				readAffiliate = false
+				break
+			}
 			continue
 		}
 		rows = append(rows, part...)
@@ -182,18 +214,23 @@ func (c *rechargeCollector) window(ctx context.Context, from, to string) ([]Rech
 			channels = append(channels, "admin_add", "admin_deduct")
 		}
 	}
-	affiliates, e := c.affiliates(ctx, from, to)
-	if e != nil {
-		all = false
-		var requestErr *upstream.RequestError
-		if errors.As(e, &requestErr) && requestErr.StatusCode == 404 {
-			warning = "当前主站未提供返利转入记录，入账仅显示已读取的部分，完整期间比较与首次入账判断暂不可用。"
+	if readAffiliate {
+		affiliates, e := c.affiliates(ctx, from, to)
+		if e != nil {
+			all = false
+			var requestErr *upstream.RequestError
+			if errors.As(e, &requestErr) && requestErr.StatusCode == 404 {
+				warning = "当前主站未提供返利转入记录，入账仅显示已读取的部分，完整期间比较与首次入账判断暂不可用。"
+				if reason := strings.TrimSpace(requestErr.UpstreamMessage); reason != "" {
+					warning = "返利转入：" + reason + "（HTTP 404）。" + warning
+				}
+			} else {
+				failures = append(failures, rechargeSourceFailure("返利转入", e))
+			}
 		} else {
-			failures = append(failures, fail("返利："+safeReason(e)))
+			channels = append(channels, "affiliate")
+			rows = append(rows, affiliates...)
 		}
-	} else {
-		channels = append(channels, "affiliate")
-		rows = append(rows, affiliates...)
 	}
 	// Aggregate one row per user/day/channel before publishing a window.
 	merged := map[string]Recharge{}
@@ -208,6 +245,14 @@ func (c *rechargeCollector) window(ctx context.Context, from, to string) ([]Rech
 	rows = rows[:0]
 	for _, row := range merged {
 		rows = append(rows, row)
+	}
+	// Keep every observed source failure in the existing warning channel. The
+	// joined typed error still lets the collector stop on a real authentication failure.
+	for _, failed := range failures {
+		if warning != "" {
+			warning += "\n"
+		}
+		warning += safeReason(failed)
 	}
 	return rows, channels, all, warning, errors.Join(failures...)
 }

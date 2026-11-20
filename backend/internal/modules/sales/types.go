@@ -40,7 +40,7 @@ type Totals struct {
 	Payers          *int64   `json:"payers"`
 	RepeatPayers    *int64   `json:"repeatPayers"`
 	NewPayers       *int64   `json:"newPayers"`
-	Registered      int64    `json:"registered"`
+	Registered      *int64   `json:"registered"`
 	RegisteredPaid  *int64   `json:"registeredPaid"`
 	Conversion      *float64 `json:"conversion"`
 	AveragePerPayer *float64 `json:"averagePerPayer"`

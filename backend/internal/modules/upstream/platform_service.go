@@ -3679,6 +3679,9 @@ func (s *PlatformService) FetchSub2APIAdminUsersPageWithContext(ctx context.Cont
 		if err := validateSignupRiskUsersPage(response.Payload, query); err != nil {
 			return Sub2APIAdminUsersPage{}, err
 		}
+		// Consume exactly the array and metadata validated above. The tolerant
+		// parser's root.items fallback remains unchanged for legacy callers.
+		return parseSub2APIAdminUsersPage(map[string]any{"data": dataRecord(response.Payload)}, query), nil
 	}
 	return parseSub2APIAdminUsersPage(response.Payload, query), nil
 }

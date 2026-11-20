@@ -128,17 +128,7 @@ func (r *Repository) GetStrategy(ctx context.Context, userID string, adminAccoun
 }
 
 func (r *Repository) SaveStrategy(ctx context.Context, userID string, adminAccountID string, settings StrategySettings) error {
-	settingsJSON, err := json.Marshal(settings)
-	if err != nil {
-		return err
-	}
-	_, err = r.db.Exec(ctx, `
-		INSERT INTO strategy_settings (user_id, admin_account_id, settings, updated_at)
-		VALUES ($1, $2, $3::jsonb, now())
-		ON CONFLICT (user_id, admin_account_id) DO UPDATE SET
-			settings = EXCLUDED.settings,
-			updated_at = EXCLUDED.updated_at
-	`, userID, adminAccountID, string(settingsJSON))
+	_, err := r.SaveStrategyPreservingReport(ctx, userID, adminAccountID, settings)
 	return err
 }
 

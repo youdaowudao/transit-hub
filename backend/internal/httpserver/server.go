@@ -27,6 +27,7 @@ import (
 	"transithub/backend/internal/modules/mass_email"
 	"transithub/backend/internal/modules/my_sites"
 	"transithub/backend/internal/modules/notifications"
+	"transithub/backend/internal/modules/reports"
 	"transithub/backend/internal/modules/sales"
 	"transithub/backend/internal/modules/settings"
 	"transithub/backend/internal/modules/signup_risk"
@@ -58,6 +59,7 @@ type Server struct {
 	connectionHealthService        *connection_health.Service
 	userActivityService            *user_activity.Service
 	vipService                     *vip.Service
+	reportsService                 *reports.Service
 	chanshuiService                *chanshui.Service
 	signupRiskService              *signup_risk.Service
 	upstreamService                interface{ ShutdownGroupCostSampling(context.Context) error }
@@ -156,6 +158,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 
 	settingsService := settings.NewService(&http.Client{Timeout: upstreamRequestTimeout}, settings.NewRepository(db, credentialBox))
 	settingsService.SetAdminAccountResolver(adminAccountsService)
+	settingsService.SetDailyReportWritesDisabled(cfg.APIOnly)
 	runStorageStartup(cfg, settingsService.EnsureSchema)
 	// SMTP_ENCRYPTION_KEY 是可选项：空值不影响启动；显式配置了非法值（非 base64 或非 32 字节）
 	// 必须尽早启动失败，避免运行时才发现加密能力不可用。抽成 configureSMTPEncryptionKey
@@ -360,6 +363,12 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		metricsService.StartScheduler(context.Background())
 	}
 	dashboard.RegisterRoutes(server.mux, dashboardService, metricsService)
+	reportsService := reports.NewService(reports.NewRepository(db), metricsRepo, salesService, settingsService, redisClient, cfg.APIOnly)
+	server.reportsService = reportsService
+	reports.RegisterRoutes(server.mux, reportsService)
+	if !cfg.APIOnly {
+		reportsService.Start()
+	}
 
 	// 系统信息 API：展示版本号及新版本提示，API-only 不启动后台检查。
 	systemService := system.NewService(cfg)
@@ -536,6 +545,11 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	var shutdownErrors []error
+	if s.reportsService != nil {
+		if err := s.reportsService.Shutdown(ctx); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+	}
 	if s.vipService != nil {
 		if err := s.vipService.Shutdown(ctx); err != nil {
 			shutdownErrors = append(shutdownErrors, err)
@@ -590,7 +604,7 @@ func (s *Server) protectedPath(path string) bool {
 	if path == "/api/chanshui" || strings.HasPrefix(path, "/api/chanshui/") {
 		return true
 	}
-	return strings.HasPrefix(path, "/api/sales") || strings.HasPrefix(path, "/api/vip") || strings.HasPrefix(path, "/api/user-activity") || strings.HasPrefix(path, "/api/notifications") || strings.HasPrefix(path, "/api/users") || strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email")
+	return strings.HasPrefix(path, "/api/reports") || strings.HasPrefix(path, "/api/sales") || strings.HasPrefix(path, "/api/vip") || strings.HasPrefix(path, "/api/user-activity") || strings.HasPrefix(path, "/api/notifications") || strings.HasPrefix(path, "/api/users") || strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email")
 }
 
 func (s *Server) setSecurityHeaders(w http.ResponseWriter, r *http.Request) {

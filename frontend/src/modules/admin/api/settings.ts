@@ -72,8 +72,8 @@ export const testNotificationChannel = async (
   })
 )
 
-export const getStrategySettings = async (): Promise<StrategySettings> => (
-  requestJson<StrategySettings>('/settings/strategy')
+export const getStrategySettings = async (signal?: AbortSignal): Promise<StrategySettings> => (
+  requestJson<StrategySettings>('/settings/strategy', { signal })
 )
 
 export const saveStrategySettings = async (settings: StrategySettings): Promise<StrategySettings> => (

@@ -4,6 +4,9 @@ import { Plus, Save, Loader2, CheckCircle2, ListChecks, MessageSquare, Send, Tra
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import EmailTemplatesPanel from '../components/settings/EmailTemplatesPanel.vue'
+import DailyReportPanel from '../components/settings/DailyReportPanel.vue'
+import { saveStrategyWithDailyReport } from '../api/reports'
+import type { DailyReportBot, DailyReportScope } from '../types/reports'
 import NotificationTemplateEditor from '../components/settings/NotificationTemplateEditor.vue'
 import TestQuestionsPanel from '../components/settings/TestQuestionsPanel.vue'
 import SignupRiskNotificationSettings from '../components/settings/SignupRiskNotificationSettings.vue'
@@ -65,6 +68,18 @@ const isSavingStrategy = ref(false)
 const showSuccessStrategy = ref(false)
 const isLoadingStrategy = ref(false)
 const errorStrategy = ref('')
+const savedReportStrategy = ref<StrategySettings | null>(null)
+const savedReportBots = ref<DailyReportBot[]>([])
+const dailyReportPanel = ref<InstanceType<typeof DailyReportPanel> | null>(null)
+const reportScope = computed<DailyReportScope | null>(() => notificationAccount.value ? { workspaceAdminAccountId: notificationAccount.value.id, workspaceCreatedAt: notificationAccount.value.createdAt } : null)
+let strategyGeneration = 0
+let strategyReadSequence = 0
+let channelsReadSequence = 0
+let settingsDisposed = false
+let strategyReadController: AbortController | null = null
+let strategySaveController: AbortController | null = null
+let strategySuccessTimer: ReturnType<typeof setTimeout> | null = null
+const currentStrategyGeneration = (generation: number) => !settingsDisposed && generation === strategyGeneration
 
 const isSavingChannels = ref(false)
 const showSuccessChannels = ref(false)
@@ -180,19 +195,33 @@ const reconcileStrategyRecipients = () => {
 }
 
 const saveStrategy = async () => {
-  if (isSavingStrategy.value) return
+  if (isSavingStrategy.value || notificationSwitching.value || settingsDisposed) return
+  const patch = dailyReportPanel.value?.getPatch() ?? {}
+  const reportChanged = Object.keys(patch).length > 0
+  const captured = reportScope.value ? { ...reportScope.value } : null
+  if (reportChanged && !captured) { errorStrategy.value = t('admin.settings.dailyReport.notLoaded'); return }
+  const generation = strategyGeneration
+  strategyReadSequence++; strategyReadController?.abort(); isLoadingStrategy.value = false
+  dailyReportPanel.value?.invalidatePreview()
+  const controller = new AbortController(); strategySaveController = controller
+  if (strategySuccessTimer) clearTimeout(strategySuccessTimer)
   isSavingStrategy.value = true
   errorStrategy.value = ''
   showSuccessStrategy.value = false
   try {
     reconcileStrategyRecipients()
-    applyStrategySettings(await saveStrategySettings(currentStrategySettings()))
+    const legacy = currentStrategySettings()
+    const saved = reportChanged && captured
+      ? await saveStrategyWithDailyReport(captured, legacy, patch, controller.signal)
+      : await saveStrategySettings(legacy)
+    if (!currentStrategyGeneration(generation) || strategySaveController !== controller || controller.signal.aborted) return
+    applyStrategySettings(saved)
     showSuccessStrategy.value = true
-    setTimeout(() => { showSuccessStrategy.value = false }, 3000)
+    strategySuccessTimer = setTimeout(() => { if (currentStrategyGeneration(generation)) showSuccessStrategy.value = false }, 3000)
   } catch (error) {
-    errorStrategy.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
+    if (currentStrategyGeneration(generation) && strategySaveController === controller && !controller.signal.aborted) errorStrategy.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
   } finally {
-    isSavingStrategy.value = false
+    if (currentStrategyGeneration(generation) && strategySaveController === controller) isSavingStrategy.value = false
   }
 }
 
@@ -217,6 +246,7 @@ const applyStrategySettings = (settings: StrategySettings) => {
   const usesDefaultMultiplierTemplate = shouldUseDefaultTemplate(settings.multiplierTemplate, legacyMultiplierTemplates)
   multiplierTemplate.value = usesDefaultMultiplierTemplate ? defaultMultiplierTemplate.value : settings.multiplierTemplate
   multiplierTemplateFormat.value = usesDefaultMultiplierTemplate ? 'markdown' : normalizeTemplateFormat(settings.multiplierTemplateFormat)
+  savedReportStrategy.value = settings
 }
 
 const currentStrategySettings = (): StrategySettings => ({
@@ -234,33 +264,40 @@ const currentStrategySettings = (): StrategySettings => ({
 })
 
 const loadStrategy = async () => {
-  if (isLoadingStrategy.value) return
+  if (isLoadingStrategy.value || isSavingStrategy.value || notificationSwitching.value || settingsDisposed) return
+  const generation = strategyGeneration; const request = ++strategyReadSequence
+  strategyReadController?.abort(); const controller = new AbortController(); strategyReadController = controller
   isLoadingStrategy.value = true
   errorStrategy.value = ''
   try {
-    applyStrategySettings(await getStrategySettings())
+    const saved = await getStrategySettings(controller.signal)
+    if (currentStrategyGeneration(generation) && request === strategyReadSequence && strategyReadController === controller && !controller.signal.aborted) applyStrategySettings(saved)
   } catch (error) {
-    errorStrategy.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
+    if (currentStrategyGeneration(generation) && request === strategyReadSequence && strategyReadController === controller && !controller.signal.aborted) errorStrategy.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
   } finally {
-    isLoadingStrategy.value = false
+    if (currentStrategyGeneration(generation) && request === strategyReadSequence && strategyReadController === controller) isLoadingStrategy.value = false
   }
 }
 
 const saveChannels = async () => {
-  if (isSavingChannels.value) return
+  if (isSavingChannels.value || notificationSwitching.value || settingsDisposed) return
+  const generation = strategyGeneration
+  channelsReadSequence++; isLoadingChannels.value = false
   isSavingChannels.value = true
   errorChannels.value = ''
   showSuccessChannels.value = false
   try {
-    applyNotificationChannelSettings(await saveNotificationChannelSettings(currentNotificationChannelSettings()))
+    const saved = await saveNotificationChannelSettings(currentNotificationChannelSettings())
+    if (!currentStrategyGeneration(generation)) return
+    applyNotificationChannelSettings(saved)
     channelsLoaded.value = true
     reconcileStrategyRecipients()
     showSuccessChannels.value = true
-    setTimeout(() => { showSuccessChannels.value = false }, 3000)
+    setTimeout(() => { if (currentStrategyGeneration(generation)) showSuccessChannels.value = false }, 3000)
   } catch (error) {
-    errorChannels.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
+    if (currentStrategyGeneration(generation)) errorChannels.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
   } finally {
-    isSavingChannels.value = false
+    if (currentStrategyGeneration(generation)) isSavingChannels.value = false
   }
 }
 
@@ -280,6 +317,7 @@ const applyNotificationChannelSettings = (settings: NotificationChannelSettings)
     chatId: bot.chatId,
     proxyUrl: bot.proxyUrl,
   }))
+  savedReportBots.value = telegramBots.value.map(bot => ({ id: bot.id, name: bot.name, enabled: bot.enabled }))
 }
 
 const currentNotificationChannelSettings = (): NotificationChannelSettings => ({
@@ -294,16 +332,19 @@ const currentNotificationChannelSettings = (): NotificationChannelSettings => ({
 })
 
 const loadChannels = async () => {
-  if (isLoadingChannels.value) return
+  if (isLoadingChannels.value || isSavingChannels.value || notificationSwitching.value || settingsDisposed) return
+  const generation = strategyGeneration; const request = ++channelsReadSequence
   isLoadingChannels.value = true
   errorChannels.value = ''
   try {
-    applyNotificationChannelSettings(await getNotificationChannelSettings())
+    const saved = await getNotificationChannelSettings()
+    if (!currentStrategyGeneration(generation) || request !== channelsReadSequence) return
+    applyNotificationChannelSettings(saved)
     channelsLoaded.value = true
   } catch (error) {
-    errorChannels.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
+    if (currentStrategyGeneration(generation) && request === channelsReadSequence) errorChannels.value = error instanceof Error ? error.message : 'admin.settings.errors.unknown'
   } finally {
-    isLoadingChannels.value = false
+    if (currentStrategyGeneration(generation) && request === channelsReadSequence) isLoadingChannels.value = false
   }
 }
 
@@ -972,9 +1013,36 @@ const loadCurrentVersion = async () => {
   }
 }
 
+const reloadReportSettings = async () => {
+  const generation = strategyGeneration
+  await loadChannels()
+  if (currentStrategyGeneration(generation)) void loadStrategy()
+}
+
+watch([
+  () => reportScope.value?.workspaceAdminAccountId,
+  () => reportScope.value?.workspaceCreatedAt,
+  () => notificationSwitching.value,
+], () => {
+  strategyGeneration++; strategyReadSequence++; channelsReadSequence++
+  const generation = strategyGeneration
+  strategyReadController?.abort(); strategySaveController?.abort()
+  if (strategySuccessTimer) clearTimeout(strategySuccessTimer)
+  savedReportStrategy.value = null; savedReportBots.value = []
+  isLoadingStrategy.value = false; isSavingStrategy.value = false; showSuccessStrategy.value = false; errorStrategy.value = ''
+  isLoadingChannels.value = false; isSavingChannels.value = false; channelsLoaded.value = false
+  if (!notificationSwitching.value && reportScope.value) {
+    void nextTick().then(() => {
+      if (currentStrategyGeneration(generation)) void reloadReportSettings()
+    })
+  }
+}, { flush: 'sync' })
+
 onMounted(async () => {
+  const generation = strategyGeneration
   if (notifications) void nextTick().then(() => notifications.loadPreferences())
   await loadChannels()
+  if (!currentStrategyGeneration(generation)) return
   void loadStrategy()
   void loadSmtp()
   void loadCurrentVersion()
@@ -985,6 +1053,9 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  settingsDisposed = true; strategyGeneration++; strategyReadSequence++; channelsReadSequence++
+  strategyReadController?.abort(); strategySaveController?.abort()
+  if (strategySuccessTimer) clearTimeout(strategySuccessTimer)
   clearUpgradePoll()
   clearRestartPoll()
   clearRollbackPoll()
@@ -1260,6 +1331,7 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
+          <DailyReportPanel ref="dailyReportPanel" :strategy="savedReportStrategy" :bots="savedReportBots" :bots-loaded="channelsLoaded" :saving="isSavingStrategy" :loading="isLoadingStrategy || isLoadingChannels" @reload="reloadReportSettings" />
         </div>
 
         <!-- ============================================ -->

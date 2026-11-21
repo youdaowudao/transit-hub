@@ -1,5 +1,5 @@
-import { HUB_KINDS, selectHubDefaultModel } from './hub-policy';
-import type { HubCatalog, HubCatalogAccount, HubContext, HubProtocol } from './hub-types';
+import { HUB_KINDS } from './hub-policy';
+import type { HubCatalog, HubContext, HubProtocol } from './hub-types';
 
 const allSections = HUB_KINDS.map(section => section.value);
 export const sectionsStorageKey = (workspaceId: string) => 'transithub.chanshui.sections.v1:' + workspaceId;
@@ -32,10 +32,31 @@ export interface HubDraft {
   selectionError: string;
 }
 export const emptyDraft: HubDraft = { groupId: '', targetId: '', model: '', modelNotice: '', selectionError: '' };
-export const catalogModels = (account?: HubCatalogAccount) => {
-  const names = (account?.models ?? '').split(',').map(model => model.trim()).filter(Boolean);
-  if (names.length) return Array.from(new Set(names));
-  return account?.probeModels ?? [];
+// upstreamModelIds 整理检测宿主 models 读取的回包：兼容字符串和 { id } 两种写法，按原值去重并保持上游顺序。
+// 和 V3.1.29 相同：排除空字符串，其余模型 ID 原样保留。
+export const upstreamModelIds = (value: { models?: unknown } | null | undefined): string[] => {
+  const list = Array.isArray(value?.models) ? value.models : [];
+  const ids = list.map(item => typeof item === 'string' ? item : item && typeof item === 'object' && typeof (item as { id?: unknown }).id === 'string' ? (item as { id: string }).id : '');
+  return Array.from(new Set(ids.filter(Boolean)));
+};
+// 使用本次计数及分组、账号标记读取结果，避免新读取启动前显示上次的列表或失败原因。
+export const modelKey = (reload: number, groupId: string, targetId: string) => groupId && targetId ? `${reload}\n${groupId}\n${targetId}` : '';
+// waitingForModels：已选中账号、但本次读取还没有结果（包括刷新或重新打开后、读取刚要开始的那次渲染）都算读取中，
+// 此时模型框、开始检测和发送问题都不可用。
+export const waitingForModels = (hasAccount: boolean, status?: 'loading' | 'done' | 'failed') => hasAccount && status !== 'done' && status !== 'failed';
+// 桥接超时和宿主连不上调度站时的通用提示原文，含只适用于报告的指引；模型读取时整句换成读取模型的说法。
+const reportOnlyReasons: Record<string, string> = {
+  '等待调度站结果超过45秒，请重试读取；若刚开始检测，请按原报告编号查询，部分请求可能已计费。': '等待调度站结果超过45秒',
+  '无法连接调度站。请检查网络后重试读取；若刚点击开始，请按原报告编号查询，部分请求可能已经计费。': '无法连接调度站，请检查网络',
+};
+// modelReadReason 给模型读取失败用的原因：调度站登录失效只按 401 判断；上面两句通用提示整句替换；其他原因（含上游原文）原样保留。
+export const modelReadReason = (reason: string, status = 0): string => {
+  if (status === 401) return '登录已失效，请重新登录调度站后再选择账号';
+  const text = reason.trim();
+  // 宿主读不懂调度站回包时的提示带 HTTP 状态和「不要重复新建检测」；读取模型时只保留原因和状态。
+  const unreadable = /^调度站返回的内容无法读取（HTTP (\d+)）。请查看运行诊断后重试读取；不要重复新建检测。$/.exec(text);
+  if (unreadable) return `调度站返回的内容无法读取（HTTP ${unreadable[1]}），请查看运行诊断`;
+  return reportOnlyReasons[text] ?? (text.replace(/[。.]+$/, '') || '原因没有返回，请到分组健康核对此账号的地址和密钥');
 };
 export const catalogGroup = (catalog: HubCatalog | null, groupId: string) => catalog?.groups.find(group => group.id === groupId);
 export const catalogAccount = (catalog: HubCatalog | null, groupId: string, targetId: string) => {
@@ -47,9 +68,8 @@ export function selectDraft(catalog: HubCatalog | null, groupId = '', targetId =
   const group = catalogGroup(catalog, groupId);
   const account = catalogAccount(catalog, groupId, targetId);
   if ((groupId && !group) || (targetId && !account)) return { ...emptyDraft, selectionError: missingSelection };
-  const models = catalogModels(account);
-  const selected = models.length ? selectHubDefaultModel(models, group?.name ?? '') : { model: '', notice: '' };
-  return { ...emptyDraft, groupId, targetId, model: selected.model, modelNotice: selected.notice };
+  // 模型不从名单取：选中账号后由页面向上游读取，读到后再按分组默认规则预选。
+  return { ...emptyDraft, groupId, targetId };
 }
 
 export interface DraftAccount { groupId: string; targetId: string; protocol?: HubProtocol }

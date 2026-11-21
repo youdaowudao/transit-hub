@@ -2,7 +2,7 @@ import type { HubKind } from './hub-policy';
 export interface HubTarget { targetId: string; accountId?: string; accountName: string; providerFamily?: string; groups?: { id: string; name: string }[] }
 export interface HubTargetInput { reportId?: string; targetId?: string; groupId?: string; accountName?: string; groupName?: string }
 export type HubProtocol = 'chat' | 'openai' | 'anthropic';
-export interface HubCatalogAccount { targetId: string; accountId: string; accountName: string; priority?: number; models?: string; probeModels?: string[]; protocol?: HubProtocol }
+export interface HubCatalogAccount { targetId: string; accountId: string; accountName: string; priority?: number; models?: string; protocol?: HubProtocol }
 export interface HubCatalogGroup { id: string; name: string; accountsError?: boolean; accounts: HubCatalogAccount[] }
 export interface HubCatalog { workspaceId: string; groups: HubCatalogGroup[] }
 export interface HubContext extends HubTarget { workspaceId: string; groupId: string; groupName: string; baseURL: string; protocol: string; canRun: boolean; reason?: string; expectedContext: Record<string, string> }

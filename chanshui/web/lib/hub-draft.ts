@@ -32,7 +32,11 @@ export interface HubDraft {
   selectionError: string;
 }
 export const emptyDraft: HubDraft = { groupId: '', targetId: '', model: '', modelNotice: '', selectionError: '' };
-export const catalogModels = (account?: HubCatalogAccount) => Array.from(new Set((account?.models ?? '').split(',').map(model => model.trim()).filter(Boolean)));
+export const catalogModels = (account?: HubCatalogAccount) => {
+  const names = (account?.models ?? '').split(',').map(model => model.trim()).filter(Boolean);
+  if (names.length) return Array.from(new Set(names));
+  return account?.probeModels ?? [];
+};
 export const catalogGroup = (catalog: HubCatalog | null, groupId: string) => catalog?.groups.find(group => group.id === groupId);
 export const catalogAccount = (catalog: HubCatalog | null, groupId: string, targetId: string) => {
   const group = catalogGroup(catalog, groupId);

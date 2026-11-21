@@ -563,7 +563,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
               <label htmlFor="model">目标模型</label>
               <ModelPicker id="model" value={draft.model} options={models} onChange={value => storeDraft({ ...draftRef.current, model: value })} placeholder="可选择或输入模型名称" describedBy="model-help" />
               <small id="model-help">可选择或输入自定义名称，请求时原样发送；没有对应基线时不代表已验证型号。</small>
-              {models.length === 0 && <p className="muted">分组健康暂无该账号的模型名单。可以手动输入模型名称，发送时会使用你填写的名称。</p>}
+              {models.length === 0 && <p className="muted">当前名单里没有此账号的模型记录，可以手动输入模型名称。</p>}
               {draft.modelNotice && <p className="muted">{draft.modelNotice}</p>}
             </div>
           </div>

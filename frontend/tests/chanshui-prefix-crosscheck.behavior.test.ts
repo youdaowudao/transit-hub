@@ -356,7 +356,8 @@ async function bootApp() {
   const calls: Array<{ op: string; params: Record<string, any> }> = []
   const next = new Map<string, (() => unknown)[]>()
   const state = {
-    report: v.report, items: v.items, data: v.data,
+    // Keep the report in the sidebar's recent window without changing its fixture version.
+    report: { ...v.report, createdAtMs: Date.now() }, items: v.items, data: v.data,
     calls,
     count(op: string) { return calls.filter(call => call.op === op).length },
     enqueue(op: string, callback: () => unknown) {

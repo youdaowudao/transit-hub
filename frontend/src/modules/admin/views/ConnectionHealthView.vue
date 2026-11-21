@@ -512,10 +512,11 @@ const orderedGroups = computed(() => {
   })
 })
 
-watch([preferenceScope, adminGroupsLoaded, () => adminGroupsAcceptedRevision?.value, filteredGroups], ([scope, loaded, , groups]) => {
+// 模型检测名单与账号表用同一份屏蔽清单扣掉屏蔽账号；清单还没读到时与账号表一样暂时不扣。
+watch([preferenceScope, adminGroupsLoaded, () => adminGroupsAcceptedRevision?.value, filteredGroups, hiddenTargetIds], ([scope, loaded, , groups, hidden]) => {
   const source = getAdminGroupsCatalogScope?.()
   if (scope === 'anonymous' || scope !== loadedPreferenceScope || !loaded || source?.workspaceId !== scope || currentAccount.value?.platform !== 'sub2api') return
-  publishChanshuiCatalog(scope, groups, source.session)
+  publishChanshuiCatalog(scope, groups, source.session, hidden)
 }, { immediate: true, flush: 'post' })
 
 const sameStringArray = (first: string[], second: string[]): boolean =>

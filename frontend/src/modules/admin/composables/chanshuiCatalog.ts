@@ -45,14 +45,15 @@ const catalogProbeModels = (account: AdminGroupAccount): string[] | undefined =>
   return names.length ? Array.from(new Set(names)) : undefined
 }
 
-export function publishChanshuiCatalog(workspaceId: string, groups: AdminGroupHealth[], sourceSession: number) {
+// hiddenTargetIds 是分组健康页已读到的屏蔽清单；被屏蔽账号与分组健康账号表一样不进入检测名单。
+export function publishChanshuiCatalog(workspaceId: string, groups: AdminGroupHealth[], sourceSession: number, hiddenTargetIds: ReadonlySet<string> = new Set()) {
   // Data from a read that began in the previous session cannot be published.
   if (sourceSession !== session) return
   const next: ChanshuiCatalog = { workspaceId, groups: groups.map(group => {
     const accounts = new Map<string, CatalogAccount>()
     if (!group.accountsError) {
       for (const account of group.accounts) {
-        if (!account.targetId || accounts.has(account.targetId)) continue
+        if (!account.targetId || accounts.has(account.targetId) || hiddenTargetIds.has(account.targetId)) continue
         const protocol = account.testConfiguration?.protocol
         accounts.set(account.targetId, {
           targetId: account.targetId,

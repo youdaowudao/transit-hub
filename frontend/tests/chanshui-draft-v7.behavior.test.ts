@@ -165,6 +165,27 @@ it('原名单为空时用本组本账号的探活模型，仍允许对真正的�
   }
 })
 
+it('屏蔽清单里的账号不进入模型检测名单，取消屏蔽后重新出现', () => {
+  const member = (id: string, priority: number) => ({ targetId: id, id, name: id, priority })
+  const source = [
+    { id: '10', name: 'GPT混合分组', accounts: [member('画图A', 1), member('普通', 2), member('画图B', 3)] },
+    { id: '8', name: '专门画图分组', accounts: [member('画图A', 1), member('画图B', 2)] },
+  ] as AdminGroupHealth[]
+  const accountsOf = (groupId: string) => chanshuiCatalog.value?.groups.find(group => group.id === groupId)?.accounts.map(account => account.targetId)
+  try {
+    publishChanshuiCatalog('workspace-hidden', source, chanshuiCatalogSession(), new Set(['画图A', '画图B']))
+    expect(accountsOf('10')).toEqual(['普通'])
+    expect(chanshuiCatalog.value?.groups.find(group => group.id === '8')).toMatchObject({ accountsError: false, accounts: [] })
+    publishChanshuiCatalog('workspace-hidden', source, chanshuiCatalogSession(), new Set(['画图B']))
+    expect(accountsOf('10')).toEqual(['画图A', '普通'])
+    expect(accountsOf('8')).toEqual(['画图A'])
+    publishChanshuiCatalog('workspace-hidden', source, chanshuiCatalogSession())
+    expect(accountsOf('10')).toEqual(['画图A', '普通', '画图B'])
+  } finally {
+    clearChanshuiCatalogForSession()
+  }
+})
+
 it('分组健康名单保留左栏顺序，按数字 Priority 排列并隔离旧登录', () => {
   const member = (id: string, priority?: number) => ({ targetId: id, id, name: id, priority })
   const source = [

@@ -163,7 +163,7 @@ describe('检测设置实际读写和预设删除', () => {
 })
 
 describe('账号预填、模型下拉和实际回答列表', () => {
-  it('开页使用名单中的模型，GPT和Claude采用实际默认ID，显式开始才发检测，0分历史不隐藏', async () => {
+  it('开页向上游读取所选账号的模型，GPT和Claude采用实际默认ID，显式开始才发检测，0分历史不隐藏', async () => {
     const calls: { op: string; params: Record<string, any> }[] = []
     const now = Date.now(), reportId = 'a'.repeat(32)
     const saved = { reportId, targetId: 'b', accountName: '账号B', groupName: '克劳德', model: 'claude-opus-5-5', status: 'done', processExited: true, createdAtMs: now, summary: { score: 0 } }
@@ -185,6 +185,8 @@ describe('账号预填、模型下拉和实际回答列表', () => {
         const context = { workspaceId: 'w', targetId: p.targetId, groupId: p.groupId, baseURL: 'https://safe.invalid', protocol: p.targetId === 'a' ? 'chat' : 'anthropic' }
         value = { ...context, accountName: p.targetId === 'a' ? '账号A' : '账号B', groupName: p.targetId === 'a' ? 'GPT' : '克劳德', canRun: true, expectedContext: context }
       }
+      // 账号的模型由上游读取回答；名单里的 models 文本不再作为候选。
+      if (m.op === 'models') value = { models: p.targetId === 'a' ? ['first', 'gpt-6.1-sol'] : ['other', { id: 'claude-opus-5-5' }] }
       if (m.op === 'start') value = { reportId: p.reportId, accepted: true }
       if (m.op === 'report') value = { ...saved, reportId: p.reportId }
       if (m.op === 'items') value = { items: [{ itemId: 'custom:1', sectionId: 'iq', definition: { id: 'custom:1', title: '本次新增题', kind: 'iq', maxScore: 0, judge: { type: 'manual' } }, prompt: '新增题实际题干', expected: '人工核对', status: 'done', result: { answer: '模型的实际回答', judgment: 'unreviewed' } }] }
@@ -198,7 +200,7 @@ describe('账号预填、模型下拉和实际回答列表', () => {
     expect(container.textContent).toContain('零分历史账号'); expect(container.textContent).not.toContain('三天前账号')
     await run(() => respond({ kind: 'chanshui.OPEN_TARGET', v: 1, generation: 1, target: { targetId: 'b', groupId: 'claude' } })); for (let i = 0; i < 4; i++) await tick()
     expect(modelSelect()?.value).toBe('claude-opus-5-5')
-    expect(calls.some(c => ['targets', 'context', 'models', 'start'].includes(c.op))).toBe(false)
+    expect(calls.filter(c => ['targets', 'context', 'models', 'start'].includes(c.op)).map(c => `${c.op}:${c.params.targetId}`)).toEqual(['context:a', 'models:a', 'context:b', 'models:b'])
     await click('开始检测'); for (let i = 0; i < 5; i++) await tick()
     expect(calls.filter(c => c.op === 'start')).toHaveLength(1)
     expect(calls.find(c => c.op === 'start')?.params).toMatchObject({ targetId: 'b', model: 'claude-opus-5-5' })
@@ -339,6 +341,8 @@ describe('手动运行状态核查', () => {
       if (m.op === 'runtime') value = { enabled: true, available: state.available, busy: state.busy, reason: state.available ? '' : '运行状态暂时无法确认，请手动核查', active: state.busy || state.phase === 'recovered' ? null : base }
       if (m.op === 'settings') value = settings
       if (m.op === 'reports') value = { items: [] }
+      if (m.op === 'context') { const context = { workspaceId: 'w', targetId: p.targetId, groupId: p.groupId, baseURL: 'https://safe.invalid', protocol: 'chat' }; value = { ...context, canRun: true, expectedContext: context } }
+      if (m.op === 'models') value = { models: ['gpt-6.1-sol'] }
       if (m.op === 'items') value = { items: [{ itemId: p.cursor ? 'page-two' : 'page-one', sectionId: 'iq', definition: { title: p.cursor ? '第二页题' : '第一页题', kind: 'iq', maxScore: 0, judge: { type: 'manual' } }, prompt: p.cursor ? '第二页实际题干' : '第一页实际题干', expected: '', status: 'done', result: { answer: (p.reportId !== base.reportId ? '旧报告' : '当前任务') + (p.cursor ? '第二页回答' : '第一页回答'), judgment: 'unreviewed' } }], nextCursor: p.cursor ? '' : 'page-two' }
       if (m.op === 'report') {
         if (state.phase === 'failed') { respond({ kind: 'chanshui.response', v: 1, generation: m.generation, id: m.id, ok: false, error: { message: '夹具模拟状态读取中断，请重试读取' } }); return }

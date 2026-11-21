@@ -1,5 +1,5 @@
 import { shallowRef } from 'vue'
-import type { AdminGroupAccount, AdminGroupHealth, TestProtocol } from '../types/connectionHealth'
+import type { AdminGroupHealth, TestProtocol } from '../types/connectionHealth'
 
 type ChanshuiProtocol = 'chat' | 'openai' | 'anthropic'
 interface CatalogAccount {
@@ -8,7 +8,6 @@ interface CatalogAccount {
   accountName: string
   priority?: number
   models?: string
-  probeModels?: string[]
   protocol?: ChanshuiProtocol
 }
 interface CatalogGroup {
@@ -34,17 +33,6 @@ const compareAccounts = (a: CatalogAccount, b: CatalogAccount) => {
   return a.targetId < b.targetId ? -1 : Number(a.targetId > b.targetId)
 }
 
-const catalogProbeModels = (account: AdminGroupAccount): string[] | undefined => {
-  if (account.models?.split(',').some(model => model.trim())) return undefined
-
-  const probeModels = [...(account.modelHealth ?? []), ...(account.unprobedModels ?? [])]
-  const names = probeModels
-    .filter(model => !model.modelControlClosed)
-    .map(model => model.modelName.trim())
-    .filter(Boolean)
-  return names.length ? Array.from(new Set(names)) : undefined
-}
-
 // hiddenTargetIds 是分组健康页已读到的屏蔽清单；被屏蔽账号与分组健康账号表一样不进入检测名单。
 export function publishChanshuiCatalog(workspaceId: string, groups: AdminGroupHealth[], sourceSession: number, hiddenTargetIds: ReadonlySet<string> = new Set()) {
   // Data from a read that began in the previous session cannot be published.
@@ -61,7 +49,6 @@ export function publishChanshuiCatalog(workspaceId: string, groups: AdminGroupHe
           accountName: account.name || account.id,
           priority: Number.isFinite(account.priority) ? account.priority : undefined,
           models: account.models,
-          probeModels: catalogProbeModels(account),
           protocol: protocol ? protocols[protocol] : undefined,
         })
       }

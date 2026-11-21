@@ -46,6 +46,8 @@ async function boot(target: Record<string, unknown> = {}) {
       value = { ...state.report, reportId: m.params.reportId }
     }
     if (m.op === 'items') value = { items: state.items }
+    // 选中账号后页面向上游读取模型；夹具按名单里该账号原有的模型回答。
+    if (m.op === 'models') value = { models: ['model-a'] }
     if (m.op === 'cancel') { state.failRead = state.failAfterCancel; value = { reportId: state.report.reportId, status: 'stopping', processExited: false } }
     if (m.op === 'context') {
       const context = { workspaceId: 'workspace-a', targetId: m.params.targetId, groupId: m.params.groupId, baseURL: 'https://fixture.invalid', protocol: 'chat' }
@@ -91,7 +93,10 @@ describe('检测执行入口与停止后的结果保持', () => {
     await act(() => window.dispatchEvent(new MessageEvent('message', { data: { kind: 'chanshui.OPEN_TARGET', v: 1, generation: 1, target: { targetId: 'account-a', groupId: 'group-a' } }, source: window, origin: location.origin }))); await settle()
     expect(cache().checked).toBe(false)
     await act(() => button(s.report.accountName).click()); await settle()
+    const modelReads = s.calls.filter(c => c.op === 'models').length
     await act(() => button('重新检测（新任务）').click()); await settle()
+    expect(s.calls.filter(c => c.op === 'models')).toHaveLength(modelReads + 1)
+    expect(container.querySelector<HTMLInputElement>('#model')?.value).toBe('model-a')
     expect(cache().checked).toBe(false)
     await act(() => cache().click()); expect(cache().checked).toBe(true)
     expect(s.calls.some(c => c.op === 'start')).toBe(false)
@@ -109,6 +114,7 @@ describe('检测执行入口与停止后的结果保持', () => {
   })
   it('首次请求的 503 明确未开始时清除待确认，下一次使用新编号重新核验', async () => {
     const s = await boot({ targetId: 'account-a', groupId: 'group-a' })
+    const selectionChecks = s.calls.filter(c => c.op === 'context').length
     s.rejectStart = true
     await act(() => button('开始检测').click()); await settle()
     expect(container.textContent).toContain('检测服务正在结束旧任务')
@@ -116,12 +122,13 @@ describe('检测执行入口与停止后的结果保持', () => {
     expect(button('开始检测').disabled).toBe(false)
     s.rejectStart = false
     await act(() => button('开始检测').click()); await settle()
-    expect(s.calls.filter(c => c.op === 'context')).toHaveLength(2)
+    expect(s.calls.filter(c => c.op === 'context')).toHaveLength(selectionChecks + 2)
     const ids = s.calls.filter(c => c.op === 'start').map(c => c.params.reportId)
     expect(ids).toHaveLength(2); expect(ids[0]).not.toBe(ids[1])
   })
   it('首次明确没开始但已创建记录的 503 保留原编号，只读查询可以打开该报告', async () => {
     const s = await boot({ targetId: 'account-a', groupId: 'group-a' })
+    const selectionChecks = s.calls.filter(c => c.op === 'context').length
     s.storedStart = true
     await act(() => button('开始检测').click()); await settle()
     const id = s.calls.find(c => c.op === 'start')?.params.reportId
@@ -129,9 +136,12 @@ describe('检测执行入口与停止后的结果保持', () => {
     expect(pending?.textContent).toContain(id)
     expect(container.textContent).toContain('请按原编号查看')
     expect(button('开始检测').disabled).toBe(true)
+    // 受理结果未确认、等用户查询或重试时，模型框和刷新可用；查询或重试会直接打开原编号报告。
+    expect(container.querySelector<HTMLInputElement>('#model')!.disabled).toBe(false)
+    expect(container.querySelector<HTMLButtonElement>('button[aria-label="获取模型列表"]')!.disabled).toBe(false)
     await act(() => button('查询本次受理结果').click()); await settle()
     expect(s.calls.filter(c => c.op === 'start')).toHaveLength(1)
-    expect(s.calls.filter(c => c.op === 'context')).toHaveLength(1)
+    expect(s.calls.filter(c => c.op === 'context')).toHaveLength(selectionChecks + 1)
     expect(s.calls.some(c => c.op === 'report' && c.params.reportId === id)).toBe(true)
     expect(container.querySelector('.total-card')).toBeTruthy()
   })
@@ -173,10 +183,11 @@ describe('检测执行入口与停止后的结果保持', () => {
   })
   it('账号核验通过后切组，排队的首次发送不留下报告编号', async () => {
     const s = await boot({ targetId: 'account-a', groupId: 'group-a' })
+    const selectionChecks = s.calls.filter(c => c.op === 'context').length
     s.holdStart = true
     await act(() => button('开始检测').click()); await settle()
     expect(s.releaseStart).toBeTypeOf('function')
-    expect(s.calls.filter(c => c.op === 'context')).toHaveLength(1)
+    expect(s.calls.filter(c => c.op === 'context')).toHaveLength(selectionChecks + 1)
     expect(container.querySelector('[aria-label="普通检测受理"]')).toBeNull()
     await choose('分组', 'group-b')
     await act(() => s.releaseStart?.()); await settle()
@@ -223,9 +234,11 @@ describe('检测执行入口与停止后的结果保持', () => {
     expect(s.calls.some(c => ['context', 'models', 'start'].includes(c.op))).toBe(false)
     await choose('分组', 'group-a')
     expect([...field('账号').options].map(o => o.value)).toEqual(['', 'account-a'])
+    expect(s.calls.some(c => ['context', 'models'].includes(c.op))).toBe(false)
     await choose('账号', 'account-a')
     expect(container.querySelector<HTMLInputElement>('#model')?.value).toBe('model-a')
-    expect(s.calls.some(c => ['targets', 'context', 'models'].includes(c.op))).toBe(false)
+    expect(s.calls.filter(c => ['targets', 'context', 'models'].includes(c.op)).map(c => c.op)).toEqual(['context', 'models'])
+    expect(s.calls.find(c => c.op === 'models')?.params).toMatchObject({ targetId: 'account-a', groupId: 'group-a' })
     await choose('分组', 'group-b')
     expect(field('账号').value).toBe('')
     expect([...field('账号').options].map(o => o.value)).toEqual(['', 'account-b'])

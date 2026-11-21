@@ -73,6 +73,8 @@ for (const scenario of ['start-response-lost', 'retry-response-lost'] as const) 
       value = { ...context, accountName: '原账号', groupName: 'Claude', canRun: true, expectedContext: context }
     }
     if (m.op === 'reference-info') value = { supported_models: ['claude-opus-5-5'], fingerprint_count: 1 }
+    // 选中账号后页面向上游读取模型；夹具按该账号原有模型回答。
+    if (m.op === 'models') value = { models: ['claude-opus-5-5'] }
     if (m.op === 'reports') value = { items: reportId ? [report()] : [] }
     if (m.op === 'settings') value = { protocol: 'auto', timeoutSeconds: 360, totalTimeoutSeconds: 3600, concurrency: 32, retries: 3, maxOutputTokens: 8192, maxAttempts: 0, memoryLimitMiB: 256, revision: 1 }
     if (m.op === 'start') {
@@ -98,10 +100,11 @@ for (const scenario of ['start-response-lost', 'retry-response-lost'] as const) 
     await act(() => root.render(React.createElement(HubApp))); await settle()
     const question = node.querySelector('#question') as HTMLTextAreaElement; expect(question).toBeTruthy()
     await act(() => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(question, '原样问题'); question.dispatchEvent(new Event('input', { bubbles: true })) })
+    const selectionChecks = checks
     await click('发送问题'); expect(starts).toHaveLength(1); const firstId = starts[0].reportId
     if (scenario === 'retry-response-lost') {
       await click('发送问题')
-      expect(starts).toHaveLength(1); expect(checks).toBe(1)
+      expect(starts).toHaveLength(1); expect(checks - selectionChecks).toBe(1)
       expect(retries).toHaveLength(0)
       await click('查看原问答记录')
       await click('补测失败项（1）')

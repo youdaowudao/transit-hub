@@ -18,8 +18,8 @@ import Icon from './Icon';
 import { canRetryHubItem, isVerifiedHubReport, newItemRead, readReportItems, reportError, reportVersion, object, type ItemReadState } from '../lib/hub-report-view';
 import { displayTime } from '../lib/hub-crosscheck';
 import { createHubBridge, HubRequestError, type HubBoot } from '../lib/hub-bridge';
-import { catalogAccount, catalogGroup, catalogModels, checkingContext, emptyDraft, missingSelection, pendingWarning, readSections, sectionsStorageKey, selectDraft, storageWarning, verifiedContext, type DraftAccount } from '../lib/hub-draft';
-import { HUB_KINDS, isHubTerminal, newHubID, reportPollDecision, reportStatus, sidebarDayLabel } from '../lib/hub-policy';
+import { catalogAccount, catalogGroup, checkingContext, emptyDraft, missingSelection, modelKey, modelReadReason, pendingWarning, readSections, sectionsStorageKey, selectDraft, storageWarning, upstreamModelIds, verifiedContext, waitingForModels, type DraftAccount } from '../lib/hub-draft';
+import { HUB_KINDS, isHubTerminal, newHubID, reportPollDecision, reportStatus, selectHubDefaultModel, sidebarDayLabel } from '../lib/hub-policy';
 import type { HubCall, HubCatalog, HubContext, HubItem, HubPage, HubReport, HubRuntime, HubSettings as Settings, HubStartApproval, HubTarget, HubTargetInput } from '../lib/hub-types';
 
 type View = 'new' | 'report' | 'settings' | 'archive' | 'docs';
@@ -27,6 +27,8 @@ type Submission = 'report' | 'single';
 type Confirmation = 'lookup' | 'replay';
 type PendingStart = { reportId: string; payload: Record<string, unknown>; accepted?: boolean };
 type StartAction = { scope: HubBoot; target?: DraftAccount };
+// 选中账号后向该账号上游读到的模型列表。key 由刷新计数、分组和账号组成（modelKey）。
+type UpstreamModels = { key: string; status: 'loading' | 'done' | 'failed'; models: string[]; error: string };
 const problem = (error: unknown) => error instanceof HubRequestError ? readableReportError(error.details) || error.message : error instanceof Error ? error.message : '读取检测结果时中断，原因尚未确认；请重试读取，不要重复新建检测。';
 const contextFailure = (reason: string) => `所选账号或协议未通过核对。${reason} 请到分组健康核对配置后再试；本次没有发送问题。`;
 const acceptedReport = (result: HubReport, id: string, scope: HubBoot) => {
@@ -52,6 +54,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
   const [mobileOpen, setMobileOpen] = useState(false);
   const [catalog, setCatalog] = useState<HubCatalog | null>(null), catalogRef = useRef<HubCatalog | null>(null);
   const [draft, setDraft] = useState(emptyDraft), draftRef = useRef(emptyDraft);
+  const [upstreamModels, setUpstreamModels] = useState<UpstreamModels | null>(null), [modelReload, setModelReload] = useState(0), modelRequest = useRef(0);
   const awaitingPrefill = useRef<HubTargetInput | null>(null);
   const [runtime, setRuntime] = useState<HubRuntime | null>(null), [targets, setTargets] = useState<HubTarget[]>([]);
   const [contextError, setContextError] = useState(''), [error, setError] = useState('');
@@ -91,6 +94,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
     latestView.current = next; setView(next);
   }, [discardChecks]);
   const chooseDraft = (next: HubTargetInput, prefill = false) => {
+    modelRequest.current++; // 任何重新选择（含 BOOT、重新打开同一账号）都让进行中的模型读取立即作废。
     const keep = (target: DraftAccount) => target.groupId === next.groupId && target.targetId === next.targetId;
     const discarded = discardChecks(keep);
     setContextError(discarded ? contextFailure('核对期间更换了分组或账号。') : '');
@@ -102,6 +106,8 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
     }
     if (requested && !catalogRef.current) awaitingPrefill.current = next;
     storeDraft(awaitingPrefill.current ? emptyDraft : selectDraft(catalogRef.current, next.groupId, next.targetId));
+    // 每次明确选择或重新打开账号都重新读取上游模型（同一账号再次打开也会读取并重新预选）。
+    setModelReload(n => n + 1);
   };
   const applyCatalog = (value: HubCatalog | null) => {
     if (value && value.workspaceId !== scopeRef.current?.workspaceId) return;
@@ -206,6 +212,42 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
     }, e => { if (live && scopeRef.current === boot) setError(problem(e)); });
     return () => { live = false; };
   }, [boot, view, visible, call]);
+
+  // 选中账号后，和分组健康「账号问答」一样实时向该账号的上游读取模型列表（先核对账号，再读模型）。
+  // 只读取，不修改主站、不开始检测。重新选择（含 BOOT、重新打开）、换账号、检测页收到名单移除账号后，旧请求不再发出第二步，也不写入结果；
+  // 卸载时桥接让未完成的调用失败，不会再发第二步（失败分支对已卸载页面的状态更新由 React 忽略）。
+  const draftAccountReady = Boolean(catalogAccount(catalog, draft.groupId, draft.targetId));
+  useEffect(() => {
+    const request = ++modelRequest.current;
+    const groupId = draft.groupId, targetId = draft.targetId;
+    const key = modelKey(modelReload, groupId, targetId);
+    if (!boot || !key || !draftAccountReady) { setUpstreamModels(null); return; }
+    // 改分组或账号只有两条路：chooseDraft（BOOT、重新打开、手动选择都走它）会让请求编号失效；
+    // 名单移除账号时 applyCatalog 会同步清空草稿里的账号。两项都核对即可丢弃旧读取。
+    const stillCurrent = () => request === modelRequest.current
+      && draftRef.current.groupId === groupId && draftRef.current.targetId === targetId;
+    setUpstreamModels({ key, status: 'loading', models: [], error: '' });
+    void (async () => {
+      let step = '核对账号';
+      try {
+        const value = await call<HubContext>('context', { targetId, groupId });
+        if (!stillCurrent()) return;
+        const expectedContext = verifiedContext(value, boot.workspaceId, { groupId, targetId });
+        step = '读取上游模型';
+        const list = await call<{ models?: unknown }>('models', { targetId, groupId, expectedContext });
+        if (!stillCurrent()) return;
+        const ids = upstreamModelIds(list);
+        setUpstreamModels({ key, status: 'done', models: ids, error: '' });
+        if (!ids.length) return;
+        // 和 V3.1.29 一样优先用本次核对返回的分组名判断默认模型（分组刚改名、名单还没更新时也按新名）；页面上的分组和账号仍按名单显示。
+        const selection = selectHubDefaultModel(ids, value.groupName || catalogGroup(catalogRef.current, groupId)?.name || '');
+        storeDraft({ ...draftRef.current, model: selection.model, modelNotice: selection.notice });
+      } catch (e) {
+        if (stillCurrent()) setUpstreamModels({ key, status: 'failed', models: [], error: `${step}时${modelReadReason(e instanceof HubRequestError ? problem(e) : e instanceof Error ? e.message : '', e instanceof HubRequestError ? e.status : 0)}` });
+      }
+    })();
+    // 不需要清理函数：effect 每次重新执行都会先让请求编号加一。
+  }, [boot, draft.groupId, draft.targetId, draftAccountReady, modelReload, call]);
 
   const openReport = useCallback(async (id: string, known?: HubReport) => {
     const same = lastReport.current?.reportId === id;
@@ -498,7 +540,12 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
   const group = catalogGroup(catalog, draft.groupId);
   const account = catalogAccount(catalog, draft.groupId, draft.targetId);
   const groupAccounts = group?.accountsError ? [] : group?.accounts ?? [];
-  const models = catalogModels(account);
+  const draftKey = account ? modelKey(modelReload, draft.groupId, draft.targetId) : '';
+  const upstream = upstreamModels?.key === draftKey ? upstreamModels : null;
+  const modelLoading = waitingForModels(Boolean(account), upstream?.status);
+  // 上游读到模型就只列这些；读取失败或上游没返回模型时，暂列检测题库的模型，也可以直接输入。
+  const libraryFallback = Boolean(upstream && upstream.status !== 'loading' && upstream.models.length === 0);
+  const models = upstream?.status === 'done' && upstream.models.length ? upstream.models : libraryFallback ? bankStats?.supported_models ?? [] : [];
   const isChecking = Boolean(actions.report?.target || actions.single?.target);
   const hasDraft = Boolean(account && draft.model.trim());
   return <div className="hub-app">
@@ -537,7 +584,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
       {view === 'settings' && boot && <HubSettings call={call} onDirtyChange={onDirtyChange} />}
       {view === 'new' && boot && <div className="opening"><AuditHero /><section className="hero-card connection-card hub-card">
         <div className="section-heading"><h1>新建账号检测</h1><span className="muted">只预填，不自动检测</span></div>
-        <p className="muted">分组和账号来自本次已加载的分组健康名单。切换选项不会查询上游或修改主站。</p>
+        <p className="muted">分组和账号按分组健康当前名单的顺序列出。选中账号后会向该账号的上游读取模型列表，不会修改主站，也不会开始检测。</p>
         <div className="connection-grid">
           <div className="field"><label>分组<Select value={draft.groupId} onChange={e => chooseDraft({ groupId: e.target.value })}>
             <option value="">请选择分组</option>
@@ -561,10 +608,16 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
             <div className="field"><label>API 密钥<input readOnly value="使用此账号已配置的密钥" /></label><p className="muted">页面不显示或保存密钥；执行时由服务器读取。</p></div>
             <div className="field">
               <label htmlFor="model">目标模型</label>
-              <ModelPicker id="model" value={draft.model} options={models} onChange={value => storeDraft({ ...draftRef.current, model: value })} placeholder="可选择或输入模型名称" describedBy="model-help" />
+              <ModelPicker id="model" value={draft.model} options={models} loading={modelLoading} disabled={modelLoading || Boolean(actions.report)} onRefresh={() => {
+                storeDraft({ ...draftRef.current, model: '', modelNotice: '' });
+                setModelReload(n => n + 1);
+              }} onChange={value => storeDraft({ ...draftRef.current, model: value, modelNotice: '' })} placeholder="可选择或输入模型名称" describedBy="model-help" />
               <small id="model-help">可选择或输入自定义名称，请求时原样发送；没有对应基线时不代表已验证型号。</small>
-              {models.length === 0 && <p className="muted">当前名单里没有此账号的模型记录，可以手动输入模型名称。</p>}
-              {draft.modelNotice && <p className="muted">{draft.modelNotice}</p>}
+              {modelLoading && <p role="status" className="muted">正在向上游读取此账号的模型列表，读完后才能编辑模型、开始检测或发送问题；本次只读取模型列表，不发送检测题目。</p>}
+              {upstream?.status === 'failed' && <p role="alert" className="hub-error">读取此账号的模型列表未完成：{upstream.error}。可点模型框右侧的刷新按钮重新读取，也可以直接输入模型名称；本次读取不会开始检测。</p>}
+              {upstream?.status === 'done' && upstream.models.length === 0 && <p className="muted">此账号的上游没有返回可选择的模型，请检查上游模型列表后点刷新按钮重新读取。</p>}
+              {libraryFallback && <p className="muted">{models.length ? '下拉里暂列的是检测题库的模型，不代表此账号支持。' : '下拉里没有可选模型，可以直接在模型框输入模型名称。'}</p>}
+              {draft.modelNotice && upstream?.status === 'done' && <p className="muted">{draft.modelNotice}</p>}
             </div>
           </div>
         </>}
@@ -578,7 +631,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
         </details>
         <p className="hub-note">点击开始后会向所选上游发送请求，可能产生费用；请先核对账号、模型和题目。检测任务默认{settings?.memoryLimitMiB ?? 256}MiB，整个检测子项目最多约0.5GB；报告保存后程序退出。</p>
         <div className="actions hub-wrap">
-          <button type="button" className="btn-primary" disabled={Boolean(actions.report || pending.report) || !hasDraft || !sections.length || runtime?.available !== true || runtime?.queueBlocked === true} onClick={() => void start()}>{actions.report?.target ? '正在核对账号…' : actions.report ? '正在确认受理…' : active || runtime?.busy || (runtime?.queuedCount ?? 0) > 0 ? '加入等待队列' : '开始检测'}</button>
+          <button type="button" className="btn-primary" disabled={Boolean(actions.report || pending.report) || !hasDraft || modelLoading || !sections.length || runtime?.available !== true || runtime?.queueBlocked === true} onClick={() => void start()}>{actions.report?.target ? '正在核对账号…' : actions.report ? '正在确认受理…' : active || runtime?.busy || (runtime?.queuedCount ?? 0) > 0 ? '加入等待队列' : '开始检测'}</button>
           <button type="button" className="btn-secondary" onClick={() => navigate('settings')}>设置与全部题目</button>
         </div>
         {pending.report && <section className="hub-note" aria-label="普通检测受理">
@@ -593,7 +646,7 @@ export default function HubApp({ initialView = 'new' }: { initialView?: View }) 
       {view === 'new' && boot && <SingleAskPanel
         key={boot.generation}
         model={draft.model}
-        canRun={hasDraft && !actions.single && (!pending.single || pending.single.accepted === true)}
+        canRun={hasDraft && !modelLoading && !actions.single && (!pending.single || pending.single.accepted === true)}
         onAsk={askOne}
         pending={pending.single && {
           reportId: pending.single.reportId,

@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { AlertCircle, ArrowUpDown, Check, ChevronDown, History, KeyRound, Link2, Loader2, Megaphone, RefreshCw, Search, ServerCog, Sparkles, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
-import { readOwnGroupRates, readConnectionMainSiteGroups, changeConnectionMainSiteGroups, syncConnectionHubGroups, MainSiteGroupsApiError, checkScopedRealConnections, listScopedRealConnections, listConnectionsNeedingAttention, ScopedCheckApiError, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, realDisconnect } from '../api/mySites'
+import { readOwnGroupRates, readConnectionMainSiteGroups, changeConnectionMainSiteGroups, syncConnectionHubGroups, MainSiteGroupsApiError, checkScopedRealConnections, listRealConnections, listScopedRealConnections, listConnectionsNeedingAttention, ScopedCheckApiError, getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, realDisconnect } from '../api/mySites'
 import { listUpstreamSiteOptions } from '../api/upstream'
 import { getUpstreamKeyUsageToday, getUpstreamKeyRecordedTotals, type UpstreamKeyUsageTodayResponse, type UpstreamKeyRecordedTotalsResponse } from '../api/dashboardAdmin'
 import type { UpstreamSiteOption } from '../types/upstream'
@@ -218,7 +218,21 @@ let groupEditorConnectionId = ''
 let groupEditorExpected: ExpectedRealConnection | null = null
 let groupEditorRequestSent = false
 let groupEditorController: AbortController | null = null
-const isAnyDialogOpen = computed(() => Boolean(isHistoryOpen.value || editingRate.value || connectingRate.value || disconnectingRate.value || groupEditingRate.value))
+type StaleCleanupRow = { label: string; expected: ExpectedRealConnection }
+type StaleCleanupDialog = {
+  workspace: string
+  phase: 'intro' | 'checking' | 'ready' | 'unlinking' | 'complete'
+  progress: string
+  error: string
+  candidates: StaleCleanupRow[]
+  mapped: StaleCleanupRow[]
+  selected: string[]
+  siteIssues: { siteId: string; name: string; messages: string[] }[]
+  results: { id: string; label: string; message: string; success: boolean }[]
+}
+const staleCleanup = ref<StaleCleanupDialog | null>(null)
+let staleCleanupCheckController: AbortController | null = null
+const isAnyDialogOpen = computed(() => Boolean(isHistoryOpen.value || editingRate.value || connectingRate.value || disconnectingRate.value || groupEditingRate.value || staleCleanup.value))
 let previouslyFocusedElement: HTMLElement | null = null
 let previousBodyOverflow = ''
 
@@ -236,7 +250,8 @@ const handleDialogKeydown = (event: KeyboardEvent) => {
   if (!dialog) return
   if (event.key === 'Escape') {
     event.preventDefault()
-    if (groupEditingRate.value) { if (!groupEditorBusy.value) closeGroupEditor() }
+    if (staleCleanup.value) dismissStaleCleanup()
+    else if (groupEditingRate.value) { if (!groupEditorBusy.value) closeGroupEditor() }
     else if (disconnectingRate.value && !isDisconnecting.value) closeDisconnect()
     else if (connectingRate.value && !isActionLoading.value) closeConnector()
     else if (editingRate.value && !isActionLoading.value) closeTypeEditor()
@@ -374,6 +389,7 @@ watch(supportsConnectPassthrough, (supported) => {
 watch([() => currentAccount.value?.id, adminPlatform], () => {
   closeSiteMenu()
   resetGroupEditor()
+  resetStaleCleanup()
   connectorGeneration++
   disconnectGeneration++
   closeDisconnect()
@@ -1089,6 +1105,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', handleSiteMenuResize)
   pageIsMounted = false
   resetGroupEditor()
+  resetStaleCleanup()
   resetOwnGroupRates()
   invalidatePage(true)
   optionsController?.abort()
@@ -1945,6 +1962,146 @@ const submitDisconnect = async () => {
   } finally { if (pageIsMounted && workspace === (currentAccount.value?.id ?? '') && (generation === disconnectGeneration || generation + 1 === disconnectGeneration && !disconnectConnection.value)) isDisconnecting.value = false }
 }
 
+const staleCleanupCopy = 'admin.groupRates.staleCleanup.'
+const resetStaleCleanup = () => {
+  staleCleanupCheckController?.abort()
+  staleCleanupCheckController = null
+  staleCleanup.value = null
+}
+const openStaleCleanup = () => {
+  const workspace = currentAccount.value?.id
+  if (!workspace || adminPlatform.value !== 'sub2api' || isAnyDialogOpen.value || isCheckingConnections.value) return
+  staleCleanup.value = { workspace, phase: 'intro', progress: '', error: '', candidates: [], mapped: [], selected: [], siteIssues: [], results: [] }
+}
+const dismissStaleCleanup = () => {
+  const dialog = staleCleanup.value
+  if (!dialog || dialog.phase === 'unlinking') return
+  if (dialog.phase === 'checking') {
+    staleCleanupCheckController?.abort()
+    dialog.progress = t(staleCleanupCopy + 'readingResults')
+    return
+  }
+  resetStaleCleanup()
+}
+const isCurrentStaleCleanup = (dialog: StaleCleanupDialog) => pageIsMounted && staleCleanup.value === dialog && dialog.workspace === currentAccount.value?.id && adminPlatform.value === 'sub2api'
+const isSub2APICleanupConnection = (connection: RealConnection) => !connection.adminPlatform || connection.adminPlatform === 'sub2api'
+const readStaleCleanupConnections = async (): Promise<RealConnection[]> => {
+  const connections = await listRealConnections()
+  if (!Array.isArray(connections)) throw new Error(t(staleCleanupCopy + 'invalidList'))
+  return connections
+}
+const startStaleCleanup = async () => {
+  const dialog = staleCleanup.value
+  if (!dialog || dialog.phase !== 'intro' || !isCurrentStaleCleanup(dialog)) return
+  const controller = new AbortController()
+  staleCleanupCheckController = controller
+  dialog.phase = 'checking'
+  dialog.progress = t(staleCleanupCopy + 'readingConnections')
+  dialog.error = ''
+  dialog.siteIssues = []
+  let listRead = false
+  try {
+    const connections = await readStaleCleanupConnections()
+    if (!isCurrentStaleCleanup(dialog)) return
+    listRead = true
+    const bySite = new Map<string, RealConnection[]>()
+    for (const connection of connections) {
+      if (!connection.upstreamSiteId || !isSub2APICleanupConnection(connection) || !['', 'active', 'missing'].includes(connection.status ?? '')) continue
+      const siteRows = bySite.get(connection.upstreamSiteId) ?? []
+      siteRows.push(connection)
+      bySite.set(connection.upstreamSiteId, siteRows)
+    }
+    const confirmedMissing = new Map<string, string>()
+    let index = 0
+    for (const [siteId, rows] of bySite) {
+      if (controller.signal.aborted) break
+      const siteName = attentionSiteName(rows[0]!)
+      dialog.progress = t(staleCleanupCopy + 'checking', { index: ++index, total: bySite.size, site: siteName })
+      let result: ScopedCheckResult | undefined
+      const messages: string[] = []
+      try {
+        result = await checkScopedRealConnections({ workspaceAdminAccountId: dialog.workspace, siteId, mode: 'manual' }, controller.signal)
+      } catch (error) {
+        if (controller.signal.aborted) break
+        if (error instanceof ScopedCheckApiError) {
+          result = error.result
+          messages.push([displayCause(error), error.detail, error.next].filter(Boolean).join('；'))
+        } else {
+          messages.push(t(staleCleanupCopy + 'siteCheckFailed', { reason: displayCause(error) }))
+        }
+      }
+      if (!isCurrentStaleCleanup(dialog)) return
+      if (controller.signal.aborted) break
+      if (result) {
+        for (const [id, status] of Object.entries(result.confirmedStatuses)) {
+          if (status === 'missing') confirmedMissing.set(id, siteId)
+        }
+        messages.push(...result.issues.map(issue => connectionCheckIssueText(issue, rows)))
+      }
+      if (messages.length) dialog.siteIssues.push({ siteId, name: siteName, messages })
+    }
+    if (!isCurrentStaleCleanup(dialog)) return
+    dialog.progress = t(staleCleanupCopy + 'readingResults')
+    const latest = await readStaleCleanupConnections()
+    if (!isCurrentStaleCleanup(dialog)) return
+    const candidates: StaleCleanupRow[] = []
+    const mapped: StaleCleanupRow[] = []
+    for (const connection of latest) {
+      if (connection.status !== 'missing' || !isSub2APICleanupConnection(connection) || confirmedMissing.get(connection.id) !== connection.upstreamSiteId) continue
+      const row = {
+        label: [labeledAccountName(connection.adminAccountName), attentionSiteName(connection), connection.upstreamGroupName].filter(Boolean).join(' · '),
+        expected: freezeExpectedConnection(connection, dialog.workspace),
+      }
+      if (row.expected.pricingMappingEnabled) mapped.push(row)
+      else candidates.push(row)
+    }
+    dialog.candidates = candidates
+    dialog.mapped = mapped
+    dialog.selected = candidates.map(row => row.expected.id)
+    dialog.phase = 'ready'
+  } catch (error) {
+    if (!isCurrentStaleCleanup(dialog)) return
+    dialog.error = t(staleCleanupCopy + (listRead ? 'rereadFailed' : 'readFailed'), { reason: displayCause(error) })
+    dialog.phase = 'intro'
+  } finally {
+    if (staleCleanupCheckController === controller) staleCleanupCheckController = null
+  }
+}
+const unlinkStaleConnections = async () => {
+  const dialog = staleCleanup.value
+  if (!dialog || dialog.phase !== 'ready' || !isCurrentStaleCleanup(dialog)) return
+  const rows = dialog.candidates.filter(row => dialog.selected.includes(row.expected.id))
+  if (!rows.length) return
+  dialog.phase = 'unlinking'
+  for (const [index, row] of rows.entries()) {
+    if (!isCurrentStaleCleanup(dialog)) return
+    const { expected, label } = row
+    dialog.progress = t(staleCleanupCopy + 'unlinking', { index: index + 1, total: rows.length })
+    try {
+      await realDisconnect({ connectionId: expected.id, mode: 'unlink', removePricingMapping: false, expectedConnection: expected })
+      if (!isCurrentStaleCleanup(dialog)) return
+      dialog.results.push({ id: expected.id, label, message: t(staleCleanupCopy + 'unlinked'), success: true })
+    } catch (error) {
+      if (!isCurrentStaleCleanup(dialog)) return
+      dialog.results.push({ id: expected.id, label, message: displayCause(error), success: false })
+    }
+  }
+  dialog.progress = t(staleCleanupCopy + 'refreshing')
+  const current = () => isCurrentStaleCleanup(dialog)
+  const refreshed = await refreshAfterMutation(current, true, true)
+  if (!current()) return
+  if (!refreshed) dialog.error = t(staleCleanupCopy + 'refreshFailed')
+  dialog.phase = 'complete'
+}
+let handledStaleCleanupQuery = false
+watch([() => queryValue(route.query.cleanup), () => currentAccount.value?.id, adminPlatform, isAnyDialogOpen, isCheckingConnections], ([cleanup]) => {
+  if (cleanup !== 'stale') handledStaleCleanupQuery = false
+  else if (!handledStaleCleanupQuery) {
+    openStaleCleanup()
+    handledStaleCleanupQuery = Boolean(staleCleanup.value)
+  }
+}, { immediate: true })
+
 const historyTitle = computed(() => {
   if (!selectedRate.value) return t('admin.groupRates.history.title')
   return t('admin.groupRates.history.titleWithGroup', {
@@ -2146,6 +2303,9 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         <Button variant="secondary" class="h-10 gap-2" @click="router.push('/admin/group-rate-campaigns?action=create')">
           <Megaphone class="h-4 w-4" />
           {{ t('admin.groupRates.actions.createCampaign') }}
+        </Button>
+        <Button v-if="adminPlatform === 'sub2api'" variant="secondary" class="h-10" :disabled="isCheckingConnections || isAnyDialogOpen" @click="openStaleCleanup">
+          {{ t(staleCleanupCopy + 'title') }}
         </Button>
         <Button class="h-10 gap-2 shadow-sm" :disabled="isLoading || isCheckingConnections || isAnyDialogOpen" @click="checkThenLoadRates">
           <Loader2 v-if="isLoading || isCheckingConnections" class="h-4 w-4 animate-spin" />
@@ -2942,6 +3102,61 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             <Button variant="secondary" :disabled="groupEditorBusy" @click="closeGroupEditor">{{ t('admin.groupRates.actions.cancel') }}</Button>
             <Button v-if="groupEditorState !== 'loading'" variant="secondary" :disabled="groupEditorBusy" @click="readGroupEditor">{{ t('admin.groupRates.groupEditor.reread') }}</Button>
             <Button v-if="groupEditorData" :disabled="groupEditorBusy || !groupEditorSelected.length || groupEditorUnchanged" @click="submitGroupEditor(false)">{{ t('admin.groupRates.groupEditor.save') }}</Button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="staleCleanup" class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
+      <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-stale-cleanup-title" tabindex="-1" class="max-h-[calc(100dvh-2rem)] w-full max-w-lg overflow-y-auto overscroll-contain rounded-xl border border-border/50 bg-card shadow-xl">
+        <div class="border-b border-border/50 p-6">
+          <h2 id="group-rate-stale-cleanup-title" class="text-xl font-semibold text-foreground">{{ t(staleCleanupCopy + 'title') }}</h2>
+          <p class="mt-2 text-sm leading-6 text-muted-foreground">{{ t(staleCleanupCopy + 'description') }}</p>
+        </div>
+        <div class="space-y-4 p-6">
+          <p v-if="staleCleanup.error" role="alert" class="break-words rounded-xl border border-warning/20 bg-warning/10 p-3 text-sm text-warning">{{ staleCleanup.error }}</p>
+          <p v-if="staleCleanup.phase === 'checking' || staleCleanup.phase === 'unlinking'" role="status" class="text-sm text-muted-foreground">{{ staleCleanup.progress }}</p>
+          <template v-if="staleCleanup.phase === 'ready'">
+            <fieldset class="space-y-2">
+              <legend class="text-sm font-semibold text-foreground">{{ t(staleCleanupCopy + 'candidates', { count: staleCleanup.candidates.length }) }}</legend>
+              <p v-if="!staleCleanup.candidates.length" class="text-sm text-muted-foreground">{{ t(staleCleanupCopy + 'empty') }}</p>
+              <label v-for="row in staleCleanup.candidates" :key="row.expected.id" class="flex items-start gap-3 rounded-xl border border-border/50 bg-surface/50 p-3 text-sm text-foreground">
+                <input v-model="staleCleanup.selected" type="checkbox" :value="row.expected.id" class="mt-0.5 h-4 w-4 shrink-0 accent-primary" />
+                <span class="min-w-0 break-words">{{ row.label }}</span>
+              </label>
+            </fieldset>
+            <section class="space-y-2">
+              <h3 class="text-sm font-semibold text-foreground">{{ t(staleCleanupCopy + 'protectedRows', { count: staleCleanup.mapped.length }) }}</h3>
+              <ul v-if="staleCleanup.mapped.length" class="space-y-2 text-sm text-muted-foreground">
+                <li v-for="row in staleCleanup.mapped" :key="row.expected.id" class="break-words">
+                  <p>{{ row.label }}</p>
+                  <p>{{ t(staleCleanupCopy + 'mappingReason') }}</p>
+                </li>
+              </ul>
+            </section>
+          </template>
+          <section v-if="staleCleanup.phase === 'ready' || staleCleanup.phase === 'intro' && staleCleanup.siteIssues.length" class="space-y-2">
+            <h3 class="text-sm font-semibold text-foreground">{{ t(staleCleanupCopy + 'failedSites', { count: staleCleanup.siteIssues.length }) }}</h3>
+            <ul v-if="staleCleanup.siteIssues.length" class="space-y-2 text-sm text-warning">
+              <li v-for="site in staleCleanup.siteIssues" :key="site.siteId" class="break-words">
+                <p class="font-medium">{{ site.name }}</p>
+                <ul class="space-y-1"><li v-for="(message, index) in site.messages" :key="index">{{ message }}</li></ul>
+              </li>
+            </ul>
+          </section>
+          <ul v-if="staleCleanup.results.length" class="space-y-2 text-sm">
+            <li v-for="result in staleCleanup.results" :key="result.id" class="break-words" :class="result.success ? 'text-muted-foreground' : 'text-warning'">
+              {{ t(staleCleanupCopy + 'result', { label: result.label, message: result.message }) }}
+            </li>
+          </ul>
+          <div class="flex flex-wrap justify-end gap-2">
+            <Button v-if="staleCleanup.phase !== 'unlinking'" variant="secondary" @click="dismissStaleCleanup">
+              {{ t(staleCleanupCopy + (staleCleanup.phase === 'intro' || staleCleanup.phase === 'checking' ? 'cancel' : 'close')) }}
+            </Button>
+            <Button v-if="staleCleanup.phase === 'intro'" @click="startStaleCleanup">{{ t(staleCleanupCopy + 'start') }}</Button>
+            <Button v-if="staleCleanup.phase === 'ready'" :disabled="!staleCleanup.selected.length" @click="unlinkStaleConnections">
+              {{ t(staleCleanupCopy + 'confirm', { count: staleCleanup.selected.length }) }}
+            </Button>
           </div>
         </div>
       </div>

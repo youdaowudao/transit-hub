@@ -202,8 +202,7 @@ func (r *Repository) ReconcileRemoteAction(ctx context.Context, observation Remo
 		for _, kind := range []string{ActionKindPriority, ActionKindTarget} {
 			_, owner, phase, pending := pair.dispatch(kind)
 			if pending && phase == DispatchPrepared && owner != "" {
-				var valid bool
-				err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM connection_health_runtime_leases WHERE owner_id=$1 AND expires_at>clock_timestamp())`, owner).Scan(&valid)
+				valid, err := remoteActionOwnerRunning(ctx, tx, owner)
 				if err != nil {
 					return err
 				}
@@ -211,6 +210,62 @@ func (r *Repository) ReconcileRemoteAction(ctx context.Context, observation Remo
 			}
 		}
 		reconcileRemoteAction(pair, observation, func(owner string) bool { return ownerValidity[owner] })
+		return nil
+	})
+}
+
+func remoteActionOwnerRunning(ctx context.Context, q stateQuerier, owner string) (bool, error) {
+	var running bool
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM connection_health_runtime_leases WHERE owner_id=$1 AND expires_at>clock_timestamp())`, owner).Scan(&running)
+	return running, err
+}
+
+func (r *Repository) RemoteActionOwnerRunning(ctx context.Context, owner string) (bool, error) {
+	return remoteActionOwnerRunning(ctx, r.db, owner)
+}
+
+func (r *Repository) ResolveUncertainAction(ctx context.Context, claim RemoteActionClaim, observation RemoteActionObservation) (RemoteActionCheckpoints, error) {
+	scope := claim.RemoteActionScope
+	return r.actionCheckpointTransaction(ctx, scope, &claim, true, func(tx pgx.Tx, pair *RemoteActionCheckpoints, _ time.Time) error {
+		state := pair.Target
+		accountID, valid := scopedActionAccountID(scope.TargetID, scope.AdminAccountID)
+		if !valid || scope.TargetID != buildTargetID(string(upstream.PlatformSub2API), scope.AdminAccountID, accountID) ||
+			!targetActionPending(state) || state.PendingDispatchID == "" || state.PendingDispatchID != claim.DispatchID ||
+			state.PendingActionKind != TargetMutationStatus || state.PendingDispatchPhase != DispatchUncertain {
+			return actionConfirmChanged
+		}
+		running, err := remoteActionOwnerRunning(ctx, tx, state.PendingOwnerID)
+		if err != nil {
+			return err
+		}
+		if running {
+			return actionConfirmOriginalRunning
+		}
+		aliases, err := lockActionCheckpointAliases(ctx, tx, scope)
+		if err != nil {
+			return err
+		}
+		pending := 0
+		for _, alias := range aliases {
+			pending += alias.pendingCount()
+		}
+		if pending != 1 {
+			return actionConfirmMultiple
+		}
+		if !observation.SnapshotStartedAt.After(state.UpdatedAt) {
+			return actionConfirmChanged
+		}
+		if observation.RemoteActionScope != scope || !observation.InventoryComplete || !observation.Visible {
+			return actionConfirmReconcileFailed
+		}
+		phase := remoteActionConfirmationPhase(state.PendingStatus, observation.Status)
+		if phase == "" {
+			return actionConfirmReconcileFailed
+		}
+		state.PendingDispatchPhase = phase
+		if !reconcileRemoteAction(pair, observation, func(string) bool { return running }) || pair.pendingCount() != 0 {
+			return actionConfirmReconcileFailed
+		}
 		return nil
 	})
 }
@@ -309,7 +364,7 @@ func (r *Repository) deleteActionCheckpoint(ctx context.Context, scope RemoteAct
 // The workspace W lock already serializes writers. Lock the Sub2API rows in
 // that scope and match IDs in Go so all TrimSpace aliases (including Unicode)
 // use the same identity as grouped and complete upstream inventories.
-func lockDeletedAccountAliases(ctx context.Context, tx pgx.Tx, scope RemoteActionScope) (map[string]RemoteActionCheckpoints, error) {
+func lockActionCheckpointAliases(ctx context.Context, tx pgx.Tx, scope RemoteActionScope) (map[string]RemoteActionCheckpoints, error) {
 	aliases := make(map[string]RemoteActionCheckpoints)
 	id, valid := scopedActionAccountID(scope.TargetID, scope.AdminAccountID)
 	if !valid {
@@ -367,7 +422,7 @@ func lockDeletedAccountAliases(ctx context.Context, tx pgx.Tx, scope RemoteActio
 func (r *Repository) ClearDeletedAccountCheckpoint(ctx context.Context, scope RemoteActionScope, snapshotStartedAt, now time.Time) (bool, error) {
 	cleared := false
 	_, err := r.actionCheckpointTransaction(ctx, scope, nil, false, func(tx pgx.Tx, pair *RemoteActionCheckpoints, _ time.Time) error {
-		aliases, err := lockDeletedAccountAliases(ctx, tx, scope)
+		aliases, err := lockActionCheckpointAliases(ctx, tx, scope)
 		if err != nil {
 			return err
 		}

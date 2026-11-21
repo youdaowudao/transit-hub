@@ -83,6 +83,7 @@ const mountView = async (status: Record<string, unknown>) => {
       ConnectionHealthEventsDialog: true, GroupHealthSetupDrawer: true,
       ManualOneTimeProbeDialog: true, QuestionAnswerBatchDrawer: true,
       PolicyConfigDrawer: true, ProbePolicyListDialog: true, TargetPolicyAssignmentDialog: true,
+      RouterLink: { props: ['to'], template: '<a :href="to"><slot /></a>' },
     } },
   })
   wrappers.push(wrapper)
@@ -237,7 +238,8 @@ describe('Priority failure reasons in the real status banner', () => {
     expect(banner.exists()).toBe(true)
     expect(banner.text()).toContain('2 项倍率资料异常')
     expect(banner.text()).toContain('其他账号已正常调度，系统将在后台重试。')
-    expect(banner.text()).toContain('倍率异常账号 · 原上游站点：上游站点或 Key 绑定不完整')
+    expect(banner.text()).toContain('倍率异常账号 · 原上游站点：这条对接缺少站点或 Key 资料，请到分组倍率页重新对接')
+    expect(banner.get('a').attributes('href')).toBe('/admin/group-rates?siteId=site-1')
     expect(banner.text()).toContain('当前账号资料已发生变化，后台状态将在下一轮重试后更新。')
     expect(banner.text()).not.toContain('不得展示的失败账号')
     expect(banner.text()).not.toContain('后台同步失败')
@@ -256,7 +258,8 @@ describe('Priority failure reasons in the real status banner', () => {
     })
     const banner = wrapper.get('[role="alert"]')
     expect(banner.text()).toContain('账号「失败账号」：Priority 写入失败')
-    expect(banner.text()).toContain('倍率异常账号 · 原上游站点：上游站点或 Key 绑定不完整')
+    expect(banner.text()).toContain('倍率异常账号 · 原上游站点：这条对接缺少站点或 Key 资料，请到分组倍率页重新对接')
+    expect(banner.get('a').attributes('href')).toBe('/admin/group-rates?siteId=site-1')
     expect(banner.text()).not.toContain('当前账号资料已发生变化')
   })
 })

@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"encoding/json"
 	"math"
 	"net"
 	"regexp"
@@ -199,6 +200,11 @@ func readNumber(value any) *float64 {
 	case float64:
 		if isFinite(typed) {
 			return &typed
+		}
+	case json.Number:
+		parsed, err := typed.Float64()
+		if err == nil && isFinite(parsed) {
+			return &parsed
 		}
 	case string:
 		trimmed := strings.TrimSpace(typed)

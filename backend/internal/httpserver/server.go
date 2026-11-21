@@ -62,7 +62,10 @@ type Server struct {
 	reportsService                 *reports.Service
 	chanshuiService                *chanshui.Service
 	signupRiskService              *signup_risk.Service
-	upstreamService                interface{ ShutdownGroupCostSampling(context.Context) error }
+	upstreamService                interface {
+		StopSiteSyncRetries()
+		ShutdownGroupCostSampling(context.Context) error
+	}
 }
 
 func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server {
@@ -544,6 +547,9 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.upstreamService != nil {
+		s.upstreamService.StopSiteSyncRetries()
+	}
 	var shutdownErrors []error
 	if s.reportsService != nil {
 		if err := s.reportsService.Shutdown(ctx); err != nil {

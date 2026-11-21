@@ -38,8 +38,11 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("GET /api/connection-health/admin-groups/refresh", handler.refreshAdminGroups)
 	mux.HandleFunc("POST /api/connection-health/admin-groups/refresh", handler.refreshAdminGroups)
 	mux.HandleFunc("GET /api/connection-health/priority-sync-status", handler.prioritySyncStatus)
+	mux.HandleFunc("GET /api/connection-health/accounts/{accountId}/remote-action/current", handler.getRemoteActionCurrent)
+	mux.HandleFunc("POST /api/connection-health/accounts/{accountId}/remote-action/confirm-current", handler.postRemoteActionConfirmCurrent)
 	mux.HandleFunc("GET /api/connection-health/events", handler.events)
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/probe", handler.probe)
+	mux.HandleFunc("POST /api/connection-health/targets/{id}/multiplier-refresh", handler.refreshTargetMultiplier)
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/probe", handler.probeTarget)
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/probe-stream", handler.probeTargetStream)
 	// Retain the retired route so older clients can roll forward without an error.

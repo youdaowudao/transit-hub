@@ -461,7 +461,11 @@ func (s *Service) adminGroupsForWorkspaceWithConnectionsProgress(ctx context.Con
 	// 保证既有分组健康功能不会因为可选的倍率信息不可用而中断。
 	if !waitForFresh {
 		multiplierStarted := time.Now()
-		upstreamMultiplierLookup = s.cachedAdminGroupMultiplierLookup(ctx, userID, adminAccountID, platform)
+		if connectionsReady {
+			upstreamMultiplierLookup = s.multiplierLookupForWorkspaceWithConnections(ctx, userID, adminAccountID, platform, connections, true, true, false, false)
+		} else {
+			upstreamMultiplierLookup = s.cachedAdminGroupMultiplierLookup(ctx, userID, adminAccountID, platform)
+		}
 		multiplierDuration = time.Since(multiplierStarted)
 	}
 	costSnapshotsBySource := make(map[string]upstream.GroupCostSnapshot)
@@ -1387,8 +1391,9 @@ func validConfirmedMultiplier(value float64) bool {
 }
 
 type upstreamMultiplierLookup struct {
-	byAccount   map[string]upstreamMultiplierResolution
-	unavailable bool
+	byAccount        map[string]upstreamMultiplierResolution
+	unavailable      bool
+	connectionsKnown bool
 }
 
 type upstreamKeyMetadata struct {
@@ -1583,6 +1588,7 @@ func (s *Service) upstreamMultiplierResolutionsByAdminAccountLegacy(
 		}
 		lookup.byAccount[accountID] = upstreamMultiplierResolution{status: status, info: resolved}
 	}
+	lookup.connectionsKnown = true
 	return lookup
 }
 
@@ -1666,7 +1672,7 @@ func resolutionForAdminAccount(lookup upstreamMultiplierLookup, accountID string
 	if resolution, ok := lookup.byAccount[strings.TrimSpace(accountID)]; ok {
 		return resolution
 	}
-	if lookup.unavailable {
+	if !lookup.connectionsKnown {
 		return upstreamMultiplierResolution{status: MultiplierResolutionUnavailable, reason: MultiplierReasonSiteUnavailable}
 	}
 	return upstreamMultiplierResolution{status: MultiplierResolutionUnassociated}

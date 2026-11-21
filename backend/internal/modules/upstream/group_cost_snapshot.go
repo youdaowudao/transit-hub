@@ -20,7 +20,7 @@ func (s *Service) ReadSiteSnapshot(ctx context.Context, userID, siteID string) (
 	if err != nil {
 		return Response{}, err
 	}
-	site, err := s.cache.Get(ctx, siteID)
+	site, retry, err := s.readSiteWithSyncRetry(ctx, siteID)
 	if err != nil || ctx.Err() != nil {
 		if ctx.Err() != nil {
 			err = ctx.Err()
@@ -33,6 +33,7 @@ func (s *Service) ReadSiteSnapshot(ctx context.Context, userID, siteID string) (
 	// The detached response cannot mutate slices shared by in-memory cache fakes.
 	copy := cloneSite(site)
 	response := toResponseForDate(&copy, s.keyUsageDate())
+	response.SyncRetry = retry
 	snapshots, err := s.groupCostSnapshotsForSite(ctx, &copy)
 	if ctx.Err() != nil {
 		return Response{}, siteSnapshotReadError(ctx.Err())

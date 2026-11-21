@@ -118,6 +118,13 @@ export interface GroupRatesWarning {
   next: string
 }
 
+export interface SiteSyncRetry {
+  phase: 'waiting' | 'running' | 'exhausted' | 'stopped'
+  attempted: number
+  errorKey?: string
+  errorDetail?: string
+}
+
 export interface UpstreamSite {
   id: string
   name: string
@@ -142,6 +149,7 @@ export interface UpstreamSite {
   session?: UpstreamSession | null
   lastSyncedAt: number | null
   groupRatesWarning?: GroupRatesWarning
+  syncRetry?: SiteSyncRetry
 }
 
 export type UpstreamSiteResponse = Omit<UpstreamSite, 'session' | 'logo' | 'logoBg' | 'enabled'> & { enabled?: boolean }

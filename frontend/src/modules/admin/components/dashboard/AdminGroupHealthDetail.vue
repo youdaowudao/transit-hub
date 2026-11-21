@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { accountLabelForTarget, accountReminderLabel, type AccountLabels } from '../../utils/connectionHealthAccountLabel'
+import { accountLabelForTarget, accountReminderLabel, upstreamAccountStatus, type AccountLabels } from '../../utils/connectionHealthAccountLabel'
 import {
   Activity,
   AlertTriangle,
@@ -14,6 +14,7 @@ import {
   Gauge,
   Loader2,
   Radar,
+  RefreshCw,
   FlaskConical,
   Settings2,
   ShieldCheck,
@@ -50,8 +51,10 @@ import type {
   AdminGroupAccount,
   AdminGroupHealth,
   ConnectionHealthState,
+  TargetMultiplierRefreshLine,
 } from '../../types/connectionHealth'
 import {
+  isDisabledUpstreamSchedulable,
   resolveConnectionHealthMultiplierDisplay,
   resolvePrioritySyncBlockReasonMessage,
   prioritySyncBlockReasonTranslationKey,
@@ -67,6 +70,9 @@ const props = withDefaults(defineProps<{
   hideUnmonitoredAccounts: boolean
   questionAnswerUnreadTargetIds: string[]
   actionLoading: boolean
+  refreshing?: boolean
+  multiplierRefreshingTargets?: ReadonlySet<string>
+  multiplierRefreshResults?: ReadonlyMap<string, TargetMultiplierRefreshLine[]>
   quickProbePhases?: Record<string, 'starting' | 'queued' | 'running'>
   quickProbeErrors?: Record<string, string>
   quickProbeSuccesses?: Record<string, { modelName: string; latencyMs: number; protocol?: string | null; timeoutSeconds?: number | null }>
@@ -105,6 +111,7 @@ const emit = defineEmits<{
   (event: 'question-answer-recent-retry', targetId: string): void
   (event: 'displayed-targets', targetIds: string[]): void
   (event: 'hide-account', account: AdminGroupAccount): void
+  (event: 'refresh-multiplier', targetId: string): void
 }>()
 
 import { t, te } from '@/locales'
@@ -271,9 +278,9 @@ const remotePendingLabel = (account: AdminGroupAccount): string => {
 }
 
 const upstreamStatusLabel = (account: AdminGroupAccount): string => {
-  const status = account.status?.toLowerCase()
-  if (status === 'active' || status === '1') return t(`${detailPrefix}.upstreamAccountActive`)
-  if (status === 'inactive' || status === '0' || status === 'disabled') return t(`${detailPrefix}.upstreamAccountInactive`)
+  const status = upstreamAccountStatus(account.status)
+  if (status === 'active') return t(`${detailPrefix}.upstreamAccountActive`)
+  if (status === 'inactive') return t(`${detailPrefix}.upstreamAccountInactive`)
   return t(`${detailPrefix}.upstreamStatus`, { status: account.status || t(`${detailPrefix}.unknownUpstreamStatus`) })
 }
 
@@ -1033,10 +1040,36 @@ const prioritySyncBlockReasonLabel = (account: AdminGroupAccount): string => {
                   </p>
                 </td>
                 <td class="px-3 py-3 text-[13px] tabular-nums text-foreground">
-                  <span>{{ formatMultiplier(effectiveMultiplier(account)) }}</span>
+                  <div class="flex items-center gap-1">
+                    <span>{{ formatMultiplier(effectiveMultiplier(account)) }}</span>
+                    <Tooltip
+                      v-if="workspacePlatform === 'sub2api'"
+                      :text="t(refreshing ? `${prefix}.targetMultiplierRefresh.manualInProgress` : `${prefix}.targetMultiplierRefresh.label`)"
+                      wide
+                    >
+                      <button
+                        type="button"
+                        class="rounded p-1 text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+                        :aria-label="t(`${prefix}.targetMultiplierRefresh.label`)"
+                        :disabled="refreshing || multiplierRefreshingTargets?.has(account.targetId)"
+                        @click="emit('refresh-multiplier', account.targetId)"
+                      >
+                        <RefreshCw class="h-3 w-3" :class="{ 'animate-spin': multiplierRefreshingTargets?.has(account.targetId) }" />
+                      </button>
+                    </Tooltip>
+                  </div>
                   <span class="mt-0.5 block max-w-40 text-[11px] leading-4 text-muted-foreground">
                     {{ multiplierSourceLabel(account) }}
                   </span>
+                  <p v-if="workspacePlatform === 'sub2api' && isDisabledUpstreamSchedulable(account)" class="mt-0.5 max-w-40 text-[11px] leading-4 text-amber-600 dark:text-amber-400">
+                    {{ t(`${prefix}.disabledUpstream.row`) }}
+                  </p>
+                  <div v-if="multiplierRefreshResults?.has(account.targetId)" class="mt-0.5 max-w-52 space-y-0.5 text-[11px] leading-4" role="status">
+                    <p v-for="(line, index) in multiplierRefreshResults.get(account.targetId)" :key="index" class="break-words"
+                      :class="{ 'text-destructive': line.tone === 'error', 'text-amber-600 dark:text-amber-400': line.tone === 'warning', 'text-muted-foreground': line.tone === 'muted' }">
+                      {{ line.text }}
+                    </p>
+                  </div>
                 </td>
                 <td class="px-3 py-3 text-[13px] tabular-nums">
                   <span v-if="accountLatency(account) == null" class="text-muted-foreground">-</span>

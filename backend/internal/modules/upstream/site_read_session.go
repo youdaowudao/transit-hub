@@ -204,6 +204,10 @@ func (s *Service) persistSiteReadRejection(original Site) error {
 		return err
 	}
 	s.clearTimerLocked(original.ID)
+	// A running retry can report the actual shared 401 when it completes.
+	if flight := s.syncFlights[original.ID]; flight == nil || flight.retry == nil {
+		s.cancelSiteSyncRetryLocked(original.ID)
+	}
 	return nil
 }
 

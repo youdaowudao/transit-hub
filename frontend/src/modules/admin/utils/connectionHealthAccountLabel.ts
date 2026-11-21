@@ -26,6 +26,13 @@ export const accountReminderLabel = (label?: Partial<AccountFocusLabel>): string
   return name ? `账号「${name}」` : '账号（名称暂未读到）'
 }
 
+export const upstreamAccountStatus = (value: string | undefined): 'active' | 'inactive' | 'other' => {
+  const status = value?.toLowerCase()
+  if (status === 'active' || status === '1') return 'active'
+  if (status === 'inactive' || status === '0' || status === 'disabled') return 'inactive'
+  return 'other'
+}
+
 export const accountLabelForTarget = (labels: AccountLabels | undefined, targetId: string, ...names: unknown[]): AccountFocusLabel => ({
   name: accountNameText(...names, labels?.[targetId]?.name),
   siteNames: labels?.[targetId]?.siteNames ?? [],

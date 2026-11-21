@@ -276,9 +276,14 @@ describe('bound upstream site rate status on group health', () => {
     expect(block(wrapper).exists()).toBe(false)
   })
 
-  it('H4 does not reload on the 30-second automatic refresh', async () => {
+  it('H4 reloads on return to the foreground and does not reload on the 30-second interval', async () => {
     const wrapper = await mountView()
+    const entryConnections = harness.listRealConnections.mock.calls.length
+    const entrySites = harness.listUpstreamSites.mock.calls.length
     harness.visibility.value = 'visible'
+    await flushPromises()
+    expect(harness.listRealConnections.mock.calls.length).toBe(entryConnections + 1)
+    expect(harness.listUpstreamSites.mock.calls.length).toBe(entrySites + 1)
     const connections = harness.listRealConnections.mock.calls.length
     const sites = harness.listUpstreamSites.mock.calls.length
     const automatic = harness.refreshAdminGroupsAutomatically.mock.calls.length

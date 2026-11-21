@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"math"
 	"net/url"
@@ -86,6 +87,16 @@ func (s *PlatformService) ListAdminGroupAccountsContext(ctx context.Context, ses
 // inventory to distinguish a deleted main-site account from an account that
 // merely moved to another group.
 func (s *PlatformService) ListSub2APIAdminAccountsContext(ctx context.Context, session Session) ([]AdminGroupAccountInfo, error) {
+	return s.listSub2APIAdminAccountsContext(ctx, session, false)
+}
+
+// ListSub2APIAdminAccountsForStatusCheck keeps status strings and JSON numbers
+// verbatim so callers can distinguish supported statuses from malformed values.
+func (s *PlatformService) ListSub2APIAdminAccountsForStatusCheck(ctx context.Context, session Session) ([]AdminGroupAccountInfo, error) {
+	return s.listSub2APIAdminAccountsContext(ctx, session, true)
+}
+
+func (s *PlatformService) listSub2APIAdminAccountsContext(ctx context.Context, session Session, preserveStatus bool) ([]AdminGroupAccountInfo, error) {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
 		return nil, newRequestError(ErrorAuth, PlatformSub2API)
 	}
@@ -93,6 +104,7 @@ func (s *PlatformService) ListSub2APIAdminAccountsContext(ctx context.Context, s
 	const pageSize = 100
 	const maxPages = 100
 	authOptions := adminAuthOptions(session)
+	authOptions.PreserveJSONNumbers = preserveStatus
 	accounts := make([]AdminGroupAccountInfo, 0)
 	seenAccountIDs := make(map[string]struct{})
 	expectedTotal := -1
@@ -105,7 +117,7 @@ func (s *PlatformService) ListSub2APIAdminAccountsContext(ctx context.Context, s
 			return nil, err
 		}
 		responseTimes = append(responseTimes, InventoryResponseTime{HTTPDate: response.Header.Get("Date"), ReceivedAt: response.ReceivedAt})
-		items, validItems := sub2APIAccountPageItems(response.Payload)
+		items, validItems := sub2APIAccountPageItemsWithStatus(response.Payload, preserveStatus)
 		if !validItems {
 			return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 		}
@@ -127,6 +139,9 @@ func (s *PlatformService) ListSub2APIAdminAccountsContext(ctx context.Context, s
 				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 			}
 			account := parseSub2APIAccount(record)
+			if status, ok := record["status"].(rawSub2APIAccountStatusNumber); ok {
+				account.Status = string(status)
+			}
 			accountID := strings.TrimSpace(account.ID)
 			if accountID == "" {
 				return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
@@ -149,6 +164,42 @@ func (s *PlatformService) ListSub2APIAdminAccountsContext(ctx context.Context, s
 		}
 	}
 	return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+}
+
+type rawSub2APIAccountStatusNumber string
+
+func restoreAccountJSONNumbers(value any) (any, bool) {
+	switch typed := value.(type) {
+	case json.Number:
+		number, err := typed.Float64()
+		return number, err == nil
+	case map[string]any:
+		for key, entry := range typed {
+			parsed, ok := restoreAccountJSONNumbers(entry)
+			if !ok {
+				return nil, false
+			}
+			typed[key] = parsed
+		}
+	case []any:
+		for index, entry := range typed {
+			parsed, ok := restoreAccountJSONNumbers(entry)
+			if !ok {
+				return nil, false
+			}
+			typed[index] = parsed
+		}
+	}
+	return value, true
+}
+
+// SafeSub2APIAccountStatusForDisplay sanitizes unexpected status text after the
+// caller has classified the original value.
+func SafeSub2APIAccountStatusForDisplay(value string, session Session) string {
+	if session.RefreshToken != "" {
+		value = strings.ReplaceAll(value, session.RefreshToken, "[已遮盖]")
+	}
+	return safeRequestMessage(value, requestOptions{AccessToken: session.AccessToken, AdminAPIKey: session.AdminAPIKey, Cookie: session.Cookie})
 }
 
 // listSub2APIGroupAccounts 分页拉取 sub2api 某分组下的账号。
@@ -231,6 +282,10 @@ func (s *PlatformService) listSub2APIGroupAccountsContext(ctx context.Context, s
 // Sub2API 的账号接口在不同版本中使用过多种容器与分页字段。这里允许兼容字段并存，
 // 但只在其值完全一致时接受；任何歧义都必须让完整库存轮次失败，不能静默挑选一个字段。
 func sub2APIAccountPageItems(value any) ([]any, bool) {
+	return sub2APIAccountPageItemsWithStatus(value, false)
+}
+
+func sub2APIAccountPageItemsWithStatus(value any, preserveStatus bool) ([]any, bool) {
 	record, ok := value.(map[string]any)
 	if !ok {
 		return nil, false
@@ -265,6 +320,24 @@ func sub2APIAccountPageItems(value any) ([]any, bool) {
 	}
 	if len(candidates) == 0 {
 		return nil, false
+	}
+	if preserveStatus {
+		for _, candidate := range candidates {
+			for _, item := range candidate {
+				account, ok := item.(map[string]any)
+				if !ok {
+					return nil, false
+				}
+				if number, ok := account["status"].(json.Number); ok {
+					account["status"] = rawSub2APIAccountStatusNumber(number.String())
+				}
+				// Restore ordinary number semantics before comparing compatibility
+				// copies and passing metadata to the shared account parser.
+				if _, valid := restoreAccountJSONNumbers(account); !valid {
+					return nil, false
+				}
+			}
+		}
 	}
 	for _, candidate := range candidates[1:] {
 		if !reflect.DeepEqual(candidates[0], candidate) {

@@ -154,6 +154,108 @@ afterEach(() => {
 })
 
 describe('upstream refresh failure card behavior', () => {
+  it('reads only the site that is retrying and clears the 429 after recovery', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const recoveredSite = siteFixture('site-failed', '失败站点')
+    const waitingSite = {
+      ...recoveredSite,
+      status: 'error' as const,
+      errorKey: 'admin.upstream.errors.rateLimited',
+      syncRetry: { phase: 'waiting' as const, attempted: 1 },
+    }
+    harness.syncUpstreamSite.mockResolvedValueOnce(waitingSite)
+    const wrapper = await mountView()
+    await findSiteCard(wrapper, '失败站点').findAll('button')[0].trigger('click')
+    await flushPromises()
+
+    expect(findSiteCard(wrapper, '失败站点').text()).toContain('后台正在重试（已尝试 1/6 次）')
+    expect(findSiteCard(wrapper, '正常站点').text()).not.toContain('429')
+    harness.listUpstreamSites.mockClear().mockResolvedValue([recoveredSite])
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+
+    expect(harness.listUpstreamSites).toHaveBeenCalledTimes(1)
+    expect(harness.listUpstreamSites.mock.calls[0]?.[0]).toBe('site-failed')
+    expect(findSiteCard(wrapper, '失败站点').text()).not.toContain('429')
+    expect(findSiteCard(wrapper, '失败站点').text()).toContain('已连接')
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(harness.listUpstreamSites).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears an intervening manual refresh error once the scheduled retry succeeds', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const site = siteFixture('site-failed', '失败站点')
+    harness.syncUpstreamSite.mockResolvedValueOnce({
+      ...site,
+      status: 'error',
+      errorKey: 'admin.upstream.errors.rateLimited',
+      syncRetry: { phase: 'waiting', attempted: 1 },
+    }).mockRejectedValueOnce(new Error('admin.upstream.errors.network'))
+    const wrapper = await mountView()
+    const refresh = () => findSiteCard(wrapper, '失败站点').findAll('button')[0].trigger('click')
+    await refresh()
+    await flushPromises()
+    await refresh()
+    await flushPromises()
+    expect(harness.syncUpstreamSite).toHaveBeenCalledTimes(2)
+
+    harness.listUpstreamSites.mockResolvedValue([site])
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+    expect(findSiteCard(wrapper, '失败站点').text()).toContain('已连接')
+    expect(findSiteCard(wrapper, '失败站点').text()).not.toContain('同步失败')
+  })
+
+  it('shows exhaustion in the list and stops requesting progress', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const waitingSite = {
+      ...siteFixture('site-failed', '失败站点', 'admin.upstream.errors.rateLimited'),
+      status: 'error' as const,
+      syncRetry: { phase: 'waiting' as const, attempted: 1 },
+    }
+    harness.streamSyncAllUpstreamSites.mockImplementation(async (onEvent: (event: SyncStreamEvent) => void) => {
+      onEvent({ event: 'error', siteId: waitingSite.id, site: waitingSite, errorKey: waitingSite.errorKey! })
+      onEvent({ event: 'complete', siteId: '' })
+    })
+    const wrapper = await mountView()
+    await wrapper.get('button[aria-label="列表模式"]').trigger('click')
+    expect(wrapper.text()).toContain('后台正在重试（已尝试 1/6 次）')
+
+    harness.listUpstreamSites.mockClear().mockResolvedValue([{
+      ...waitingSite, syncRetry: { phase: 'exhausted', attempted: 6 },
+    }])
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已尝试 6 次，上游仍返回 429')
+    expect(wrapper.text()).not.toContain('后台正在重试')
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(harness.listUpstreamSites).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    'admin.upstream.errors.siteNotFound',
+    'admin.adminAccounts.errors.noCurrentAccount',
+  ])('keeps the card and stops progress reads for %s', async key => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    harness.syncUpstreamSite.mockResolvedValueOnce({
+      ...siteFixture('site-failed', '失败站点', 'admin.upstream.errors.rateLimited'),
+      status: 'error',
+      syncRetry: { phase: 'waiting', attempted: 1 },
+    })
+    const wrapper = await mountView()
+    await findSiteCard(wrapper, '失败站点').findAll('button')[0].trigger('click')
+    await flushPromises()
+    harness.listUpstreamSites.mockClear().mockRejectedValue(new Error(key))
+    await vi.advanceTimersByTimeAsync(5000)
+    await flushPromises()
+
+    expect(findSiteCard(wrapper, '失败站点').text()).toContain('暂时无法确认本站刷新结果')
+    expect(findSiteCard(wrapper, '失败站点').text()).not.toContain('后台正在重试')
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(harness.listUpstreamSites).toHaveBeenCalledTimes(1)
+  })
+
   it('R1/R3 keeps the failed card visible and shows the latest stream error inline without a blocking overlay', async () => {
     const wrapper = await mountView()
     const failedCard = findSiteCard(wrapper, '失败站点')

@@ -28,10 +28,10 @@ describe('connection health refresh prompt', () => {
     expect(localeSource).toContain('沿用旧数据')
   })
 
-  it('separates disabled sites from active refresh failures', () => {
+  it('excludes disabled sites from refresh summaries and active refresh failures', () => {
     expect(viewSource).toContain("site.status !== 'success' && site.status !== 'disabled'")
-    expect(viewSource).toContain('nonParticipatingRefreshSites')
-    expect(localeSource).toContain('未参与本轮')
+    expect(viewSource).not.toContain('nonParticipatingRefreshSites')
+    expect(localeSource).not.toContain("nonParticipatingSitesLabel: '未参与本轮'")
   })
 
   it('labels disabled multiplier accounts explicitly instead of unknown', () => {
@@ -57,7 +57,7 @@ describe('connection health refresh prompt', () => {
 
     expect(resolveConnectionHealthMultiplierDisplay(disabledAccount, null))
       .toEqual({ value: null, sourceKey: 'disabledNonParticipating' })
-    expect(localeSource).toContain('上游站点已禁用，未参与本轮倍率读取')
+    expect(localeSource).toContain("disabledNonParticipating: '上游站点已禁用'")
   })
 
   it('shows a summary-level refresh failure phase when no site result is available', () => {

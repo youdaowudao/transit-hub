@@ -11,6 +11,7 @@ vi.mock('@/modules/admin/api/mySites', async (importOriginal) => ({ ...(await im
 const harness = vi.hoisted(() => ({
   refs: {} as Record<string, { value: any }>,
   currentAccount: null as any,
+  visibility: null as any,
   activeWorkspaceScope: '',
   loadAll: vi.fn(),
   loadGroups: vi.fn(),
@@ -32,8 +33,9 @@ vi.mock('vue-router', () => ({
 
 vi.mock('@vueuse/core', async () => {
   const { ref } = await import('vue')
+  harness.visibility = ref('hidden')
   return {
-    useDocumentVisibility: () => ref('hidden'),
+    useDocumentVisibility: () => harness.visibility,
     useIntervalFn: () => ({ pause: vi.fn(), resume: vi.fn() }),
   }
 })
@@ -124,6 +126,7 @@ const deferred = <T,>() => {
 }
 
 beforeEach(() => {
+  harness.visibility.value = 'hidden'
   for (const refValue of Object.values(harness.refs)) refValue.value = Array.isArray(refValue.value) ? [] : null
   if (harness.refs.isLoading) harness.refs.isLoading.value = false
   if (harness.refs.isActionLoading) harness.refs.isActionLoading.value = false
@@ -408,6 +411,8 @@ describe('connection health refresh progress behavior', () => {
     expect(wrapper.text()).toContain('41')
     expect(wrapper.text()).toContain('失败站点')
     expect(wrapper.text()).toContain('网络')
+    expect(findButton(wrapper, '刷新').find('.animate-spin').exists()).toBe(true)
+    expect(wrapper.text()).toContain('正在刷新，已等待')
     expect(wrapper.find('[data-test="connection-health-list"]').exists() || wrapper.text().includes('暂无')).toBe(true)
     refresh.resolve(true)
   })
@@ -435,7 +440,7 @@ describe('connection health refresh progress behavior', () => {
     }
     await nextTick()
 
-    expect(wrapper.text()).toContain('本轮刷新失败，已保留旧数据')
+    expect(wrapper.text()).not.toContain('本轮刷新失败，已保留旧数据')
     expect(wrapper.text()).toContain('主站分组读取')
     expect(wrapper.text()).not.toContain('本轮刷新全部成功')
   })
@@ -454,9 +459,9 @@ describe('connection health refresh progress behavior', () => {
 
     expect(wrapper.text()).toContain('失败站点')
     expect(wrapper.text()).toContain('失败站点: 上游站点同步：网络不可达')
-    expect(wrapper.text()).toContain('未参与本轮')
-    expect(wrapper.text()).toContain('阻塞站点: 上游站点同步：站点已禁用')
-    expect(wrapper.text()).toContain('本轮刷新失败，已保留旧数据')
+    expect(wrapper.text()).not.toContain('未参与本轮')
+    expect(wrapper.text()).not.toContain('阻塞站点: 上游站点同步：站点已禁用')
+    expect(wrapper.text()).not.toContain('本轮刷新失败，已保留旧数据')
     expect(wrapper.text()).toContain('主站分组读取')
     expect(wrapper.text()).not.toContain('本轮刷新全部成功')
   })
@@ -488,6 +493,142 @@ describe('connection health refresh progress behavior', () => {
     await nextTick()
 
     expect(wrapper.text()).toContain('进度连接中断，正在重新连接')
+  })
+
+  it('keeps the entry refresh disabled without showing a spinner, elapsed time or progress', async () => {
+    const entry = deferred<boolean>()
+    harness.refreshAdminGroupsAutomatically.mockReturnValueOnce(entry.promise)
+    const wrapper = await mountView()
+    harness.refs.refreshRunSnapshot.value = {
+      runId: 'automatic-entry', revision: 1, runState: 'running', stage: 'site_sync',
+      stageCompletedSites: 11, stageTotalSites: 17, waiting: [], issues: [],
+    }
+    await nextTick()
+
+    const button = findButton(wrapper, '刷新')
+    expect(button.attributes('disabled')).toBeDefined()
+    expect(button.find('.animate-spin').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('正在刷新，已等待')
+    expect(wrapper.text()).not.toContain('11 / 17')
+    entry.resolve(true)
+  })
+
+  it('keeps the previous failure phase and site visible until the new automatic terminal is received', async () => {
+    const wrapper = await mountView()
+    harness.refs.terminalRefreshSummary.value = {
+      state: 'failure', errorKey: 'main_groups_unavailable',
+      sites: [{ siteId: 'site-failed', status: 'unavailable', errorKey: 'site_sync_network' }],
+    }
+    const automatic = deferred<boolean>()
+    harness.refreshAdminGroupsAutomatically.mockReturnValueOnce(automatic.promise)
+    harness.visibility.value = 'visible'
+    await nextTick()
+
+    expect(wrapper.text()).toContain('主站分组读取')
+    expect(wrapper.text()).toContain('失败站点: 上游站点同步：网络不可达')
+
+    harness.refs.terminalRefreshSummary.value = {
+      state: 'partial', sites: [{ siteId: 'site-wait', status: 'unavailable', errorKey: 'site_sync_auth' }],
+    }
+    await nextTick()
+    expect(wrapper.text()).toContain('阻塞站点: 上游站点同步：鉴权失败')
+    expect(wrapper.text()).not.toContain('主站分组读取')
+    expect(wrapper.text()).not.toContain('失败站点: 上游站点同步：网络不可达')
+    automatic.resolve(true)
+  })
+
+  it.each([
+    ['success', '本轮刷新全部成功'],
+    ['partial', '本轮刷新部分完成'],
+    ['failure', '本轮刷新失败，已保留旧数据'],
+  ])('excludes the automatic %s terminal from the button status during and after completion', async (state, statusText) => {
+    const wrapper = await mountView()
+    harness.refreshAdminGroups.mockImplementationOnce(async () => {
+      harness.refs.terminalRefreshSummary.value = { state: 'success', sites: [] }
+      return true
+    })
+    await findButton(wrapper, '刷新').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('本轮刷新全部成功')
+
+    const automatic = deferred<boolean>()
+    harness.refreshAdminGroupsAutomatically.mockReturnValueOnce(automatic.promise)
+    harness.visibility.value = 'visible'
+    await nextTick()
+    harness.refs.terminalRefreshSummary.value = {
+      state, sites: [], ...(state === 'failure' ? { errorKey: 'main_groups_unavailable' } : {}),
+    }
+    await nextTick()
+    expect(wrapper.text()).not.toContain(statusText)
+    expect(wrapper.text()).not.toContain('本轮刷新全部成功')
+
+    automatic.resolve(state === 'success')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain(statusText)
+    if (state === 'failure') expect(wrapper.text()).toContain('主站分组读取')
+  })
+
+  it('shows a true manual failure beside the button but leaves a conflicting automatic result in the summary only', async () => {
+    const wrapper = await mountView()
+    const failure = { state: 'failure', errorKey: 'main_groups_unavailable', sites: [] }
+    harness.refreshAdminGroups.mockImplementationOnce(async () => {
+      harness.refs.terminalRefreshSummary.value = failure
+      return false
+    })
+    await findButton(wrapper, '刷新').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('本轮刷新失败，已保留旧数据')
+
+    harness.refreshAdminGroups.mockImplementationOnce(async () => {
+      harness.refs.refreshConflictNotice.value = '自动刷新正在进行，本次未执行强制刷新'
+      harness.refs.terminalRefreshSummary.value = failure
+      return false
+    })
+    await findButton(wrapper, '刷新').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('自动刷新正在进行，本次未执行强制刷新')
+    expect(wrapper.text()).toContain('主站分组读取')
+    expect(wrapper.text()).not.toContain('本轮刷新失败，已保留旧数据')
+  })
+
+  it('uses only the current automatic snapshot for the existing group rate warning', async () => {
+    const wrapper = await mountView()
+    const snapshot = (message: string) => ({
+      runId: 'rate-warning', revision: 1, runState: 'running', stage: 'site_sync',
+      waiting: [],
+      issues: [{ siteId: 'site-failed', phase: 'site_sync', status: 'success', errorKey: '',
+        groupRatesWarning: { message, detail: '本地写入失败', next: '稍后查阅' } }],
+    })
+    harness.refs.refreshRunSnapshot.value = snapshot('上一轮告警')
+    await nextTick()
+    const warning = () => wrapper.find('[data-group-rates-warning]')
+    expect(warning().text()).toContain('上一轮告警')
+
+    const automatic = deferred<boolean>()
+    harness.refreshAdminGroupsAutomatically.mockImplementationOnce(() => {
+      harness.refs.refreshRunSnapshot.value = null
+      return automatic.promise
+    })
+    harness.visibility.value = 'visible'
+    await nextTick()
+    expect(warning().exists()).toBe(false)
+    harness.refs.refreshRunSnapshot.value = snapshot('本轮告警')
+    await nextTick()
+    expect(warning().exists()).toBe(false)
+    automatic.resolve(true)
+    await flushPromises()
+    expect(warning().text()).toContain('本轮告警')
+    expect(warning().text()).not.toContain('上一轮告警')
+
+    harness.visibility.value = 'hidden'
+    await nextTick()
+    harness.refreshAdminGroupsAutomatically.mockImplementationOnce(async () => {
+      harness.refs.refreshRunSnapshot.value = null
+      return true
+    })
+    harness.visibility.value = 'visible'
+    await flushPromises()
+    expect(warning().exists()).toBe(false)
   })
 
   it('cancels the page subscription on unmount and does not render workspace A groups after entering workspace B', async () => {

@@ -19,10 +19,10 @@ import (
 )
 
 const (
-	multiplierSnapshotTTL        = 60 * time.Second
+	multiplierSnapshotTTL        = 30 * time.Minute
 	multiplierRefreshTimeout     = 90 * time.Second
 	multiplierLocalRetryDelay    = 30 * time.Second
-	multiplierSnapshotRetention  = 10 * time.Minute
+	multiplierSnapshotRetention  = 60 * time.Minute
 	multiplierResolutionStale    = "stale"
 	multiplierResolutionUpdating = "updating"
 	multiplierResolutionPartial  = "partial"
@@ -358,6 +358,7 @@ func (s *Service) multiplierLookupForWorkspaceWithConnectionsProgress(ctx contex
 			lookup.unavailable = true
 		}
 	}
+	lookup.connectionsKnown = true
 	return lookup
 }
 

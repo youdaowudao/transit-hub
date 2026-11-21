@@ -38,6 +38,8 @@ type requestOptions struct {
 	PreserveImportMutationID bool
 	// ImportDiagnostics opts only this import request into ephemeral safe hints.
 	ImportDiagnostics bool
+	// PreserveJSONNumbers retains numeric spelling for callers that validate an enum.
+	PreserveJSONNumbers bool
 }
 
 type jsonResponse struct {
@@ -237,7 +239,7 @@ func (c *HTTPClient) requestJSONWithContextLimit(ctx context.Context, reqURL str
 		counted = &importDiagnosticReader{Reader: reader}
 		reader = counted
 	}
-	payload, err := parseJSONWithLimit(reader, reqURL, maxResponseBytes)
+	payload, err := parseJSONWithNumberMode(reader, reqURL, maxResponseBytes, options.PreserveJSONNumbers)
 	if err != nil {
 		var requestErr *RequestError
 		if errors.As(err, &requestErr) {
@@ -295,6 +297,10 @@ func parseJSON(reader io.Reader, reqURL string) (any, error) {
 }
 
 func parseJSONWithLimit(reader io.Reader, reqURL string, maxBytes int64) (any, error) {
+	return parseJSONWithNumberMode(reader, reqURL, maxBytes, false)
+}
+
+func parseJSONWithNumberMode(reader io.Reader, reqURL string, maxBytes int64, preserveNumbers bool) (any, error) {
 	if maxBytes > 0 {
 		reader = io.LimitReader(reader, maxBytes+1)
 	}
@@ -311,11 +317,27 @@ func parseJSONWithLimit(reader io.Reader, reqURL string, maxBytes int64) (any, e
 		return map[string]any{}, nil
 	}
 	var payload any
-	if err := json.Unmarshal(data, &payload); err != nil {
+	if err := decodeJSONResponse(data, &payload, preserveNumbers); err != nil {
 		log.Printf("[http-client] JSON 解析失败 %s category=%s", safeHTTPDiagnostic(reqURL), ErrorInvalidResponse)
 		return nil, newRequestError(ErrorInvalidResponse, "")
 	}
 	return payload, nil
+}
+
+func decodeJSONResponse(data []byte, payload *any, preserveNumbers bool) error {
+	if !preserveNumbers {
+		return json.Unmarshal(data, payload)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(payload); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return errors.New("expected a single JSON response")
+	}
+	return nil
 }
 
 func safeRemoteReason(value string) bool {

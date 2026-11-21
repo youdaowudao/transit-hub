@@ -97,7 +97,7 @@ func TestHomeCostReviewDeletedMarkerKeepsValidKeyRefreshAndBindingRecovery(t *te
 			changed.Session = &nextSession
 			reader.session = nextSession
 			cache.set(&changed, nil)
-			offset.Store(int64(61 * time.Second))
+			offset.Store(int64(multiplierSnapshotTTL + time.Second))
 			assertResult(refresh(false), wantEffective, 1, 1, 2)
 			reader.connections = append(reader.connections, snapshotConnection("new", "site-1", "3"))
 			assertResult(refresh(false), wantEffective, 2, 2, 4)
@@ -194,7 +194,7 @@ func TestHomeCostReviewDeletedMarkerDoesNotCrossActualUpstreamPlatform(t *testin
 			changed.Session = &next
 			reader.session = next
 			cache.set(&changed, nil)
-			offset.Store(int64(61 * time.Second))
+			offset.Store(int64(multiplierSnapshotTTL + time.Second))
 			for _, force := range []bool{false, true} {
 				if got := refresh(force); got.reason == MultiplierReasonKeyDeleted || safeMultiplierBlockReason(got) == MultiplierReasonKeyDeleted {
 					t.Errorf("Sub2API deletion evidence crossed actual upstream platform: %+v", got)
@@ -274,7 +274,7 @@ func TestHomeCostReviewDeletedMarkerRechecksPlatformWhenWorkerStarts(t *testing.
 			}
 			reader.session = next
 			cache.armed.Store(true)
-			offset.Store(int64(61 * time.Second))
+			offset.Store(int64(multiplierSnapshotTTL + time.Second))
 			got := refresh()
 			if outcome == "available" && (got.status != MultiplierResolutionResolved || got.reason != "") {
 				t.Errorf("worker applied Sub2API deletion to available NewAPI Key: result=%+v", got)

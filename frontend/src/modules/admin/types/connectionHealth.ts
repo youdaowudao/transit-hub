@@ -368,6 +368,11 @@ export interface AdminGroupHealth {
   accounts: AdminGroupAccount[]
 }
 
+export interface TargetMultiplierRefreshLine {
+  text: string
+  tone: 'muted' | 'warning' | 'error'
+}
+
 export interface AdminPriorityConflict {
   targetId: string
   accountName: string

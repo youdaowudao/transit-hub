@@ -33,13 +33,13 @@ func rateNoticePeekAssertUnknown(t *testing.T, got map[string]upstream.RateNotic
 	}
 }
 
-func TestRateNoticePeekKeyAssignmentsUsesFullSixtySecondsWithoutRefresh(t *testing.T) {
+func TestRateNoticePeekKeyAssignmentsUsesFullThirtyMinutesWithoutRefresh(t *testing.T) {
 	service, entry, bindings, now := rateNoticePeekFixture()
-	for _, elapsed := range []time.Duration{0, 59*time.Second + 999*time.Millisecond, 60 * time.Second} {
+	for _, elapsed := range []time.Duration{0, 30*time.Minute - time.Millisecond, 30 * time.Minute} {
 		t.Run(elapsed.String(), func(t *testing.T) {
 			entry.fetchedAt, entry.expiresAt = now.Add(-elapsed), now.Add(multiplierSnapshotTTL-elapsed)
 			got := service.PeekKeyAssignments("user", "workspace", "site", upstream.PlatformSub2API, bindings)
-			if elapsed == 60*time.Second {
+			if elapsed == 30*time.Minute {
 				rateNoticePeekAssertUnknown(t, got, "key-1")
 				return
 			}

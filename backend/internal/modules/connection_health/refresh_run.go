@@ -351,8 +351,15 @@ func (s *Service) adminGroupsRefreshResultWithRun(ctx context.Context, userID st
 	multiplierProgressSeen := make(map[string]struct{})
 	var multiplierProgressWaiting []adminGroupsRefreshWaiting
 	multiplierProgressTotal := 0
+	manual := run.runMode == adminGroupsRefreshModeManual
+	mergeSummary := func(multiplier AdminGroupsRefreshSummary) AdminGroupsRefreshSummary {
+		if !manual {
+			multiplier = AdminGroupsRefreshSummary{}
+		}
+		return mergeAdminGroupsRefreshSummary(syncSites, multiplier, syncErrorKey)
+	}
 
-	groups, err := s.adminGroupsForWorkspaceWithConnectionsProgress(ctx, userID, adminAccountID, true, run.runMode == adminGroupsRefreshModeManual, connections, connectionsReady, func(siteIDs []string) {
+	groups, err := s.adminGroupsForWorkspaceWithConnectionsProgress(ctx, userID, adminAccountID, manual, manual, connections, connectionsReady, func(siteIDs []string) {
 		multiplierProgressMu.Lock()
 		multiplierProgressWaiting = adminGroupsRefreshWaitingForSiteIDs(siteIDs, connections, "multiplier_refresh")
 		multiplierProgressTotal = len(multiplierProgressWaiting)
@@ -374,7 +381,7 @@ func (s *Service) adminGroupsRefreshResultWithRun(ctx context.Context, userID st
 		}
 		multiplierProgressWaiting = remaining
 		_, issues := adminGroupsRefreshProgressForMultiplier(AdminGroupsRefreshSummary{Sites: []AdminGroupsRefreshSite{site}}, connections)
-		run.setRefreshSummary(mergeAdminGroupsRefreshSummary(syncSites, s.multiplierRefreshSummary(userID, adminAccountID), syncErrorKey))
+		run.setRefreshSummary(mergeSummary(s.multiplierRefreshSummary(userID, adminAccountID)))
 		run.publishStage(adminGroupsRefreshStageMultiplierRefresh, len(multiplierProgressSeen), multiplierProgressTotal, remaining, issues)
 	}, func(multiplier AdminGroupsRefreshSummary) {
 		_, multiplierIssues := adminGroupsRefreshProgressForMultiplier(multiplier, connections)
@@ -382,12 +389,12 @@ func (s *Service) adminGroupsRefreshResultWithRun(ctx context.Context, userID st
 		multiplierCompleted := len(multiplierProgressSeen)
 		multiplierTotal := multiplierProgressTotal
 		multiplierProgressMu.Unlock()
-		refresh := mergeAdminGroupsRefreshSummary(syncSites, multiplier, syncErrorKey)
+		refresh := mergeSummary(multiplier)
 		run.setRefreshSummary(refresh)
 		run.publishStage(adminGroupsRefreshStageMultiplierRefresh, multiplierCompleted, multiplierTotal, nil, multiplierIssues)
 		run.publishStage(adminGroupsRefreshStageMainGroups, 0, 0, nil, nil)
 	}, time.Now(), 0)
-	refresh := mergeAdminGroupsRefreshSummary(syncSites, s.multiplierRefreshSummary(userID, adminAccountID), syncErrorKey)
+	refresh := mergeSummary(s.multiplierRefreshSummary(userID, adminAccountID))
 	run.setRefreshSummary(refresh)
 	return AdminGroupsFreshResult{Groups: groups, Refresh: refresh}, err
 }

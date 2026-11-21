@@ -5,6 +5,9 @@ export interface ConnectionHealthMultiplierDisplay {
   sourceKey: string
 }
 
+export const isDisabledUpstreamSchedulable = (account: AdminGroupAccount): boolean =>
+  account.multiplierResolutionStatus === 'disabled' && account.schedulable === true
+
 type MultiplierParticipation = 'multiplier_only' | 'health_multiplier' | 'not_participating' | 'unknown'
 
 const resolveMultiplierParticipation = (account: AdminGroupAccount): MultiplierParticipation => {

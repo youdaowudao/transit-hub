@@ -46,6 +46,7 @@ import type {
   HealthRulePresetInput,
   WorkspaceHealthSettings,
 } from '../types/connectionHealth'
+import type { GroupRatesWarning } from '../types/upstream'
 import {
   authUnauthorizedErrorKey,
   getAccessToken,
@@ -76,6 +77,8 @@ type ApiErrorPayload = {
   step?: string
   operationResult?: 'not_started' | 'unknown' | 'completed'
   batchId?: string
+  blockedReason?: string
+  currentValue?: string
 }
 
 // C2 conflicts carry the authoritative object; callers must not treat 409 as a completed mutation.
@@ -158,7 +161,11 @@ const validQuestionAnswerSuccess = (path: string, value: unknown): boolean => {
   return true
 }
 
-const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
+const requestJson = async <T>(
+  path: string,
+  options: RequestInit = {},
+  readError?: (payload: ApiErrorPayload, status: number) => Error,
+): Promise<T> => {
   const queueOperation = path.startsWith('/connection-health/question-answer-queue')
   const answerOperation = path.includes('/question-answers/') || queueOperation
   const answerSessionIdentity = answerOperation ? getAccessToken() : null
@@ -230,6 +237,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       handleAuthExpired()
       throw new Error(authUnauthorizedErrorKey)
     }
+    if (readError) throw readError(payload, response.status)
     const key = payload.message ?? payload.error ?? 'admin.connectionHealth.errors.request'
     throw new ConnectionHealthApiError(key, response.status, payload.current, payload.activeExecutionId)
   }
@@ -752,8 +760,70 @@ export const refreshConnectionHealthAdminGroupsAutomatically = async (
   options: AdminGroupsRefreshStreamOptions = {},
 ): Promise<AdminGroupsRefreshResult> => refreshAdminGroupsWithStream('GET', options)
 
+export interface TargetMultiplierRefreshSite {
+  siteId: string
+  siteName?: string
+  status: string
+  errorKey?: string
+  errorDetail?: string
+  groupRatesWarning?: GroupRatesWarning
+}
+
+interface TargetMultiplierRefreshResult {
+  noBinding: boolean
+  sites: TargetMultiplierRefreshSite[]
+}
+
+export const refreshTargetMultiplier = async (targetId: string, workspaceId: string): Promise<TargetMultiplierRefreshResult> => {
+  const result = await requestJson<TargetMultiplierRefreshResult>(
+    `/connection-health/targets/${encodeURIComponent(targetId)}/multiplier-refresh`,
+    { method: 'POST', body: JSON.stringify({ workspaceId }) },
+  )
+  if (typeof result?.noBinding !== 'boolean' || !Array.isArray(result.sites)) {
+    throw new Error('admin.connectionHealth.targetMultiplierRefresh.invalidResponse')
+  }
+  return result
+}
+
 export const getPrioritySyncStatus = async (): Promise<PrioritySyncStatus> =>
 	requestJson<PrioritySyncStatus>('/connection-health/priority-sync-status')
+
+export interface RemoteActionCurrent {
+  dispatchId?: string
+  pendingValue?: 'active' | 'inactive'
+  currentValue?: string
+  observedAt?: string
+  recordedAt?: string
+  willMarkAs?: 'applied' | 'rejected'
+  source?: string
+  canConfirm: boolean
+  blockedReason?: string
+  detail?: string
+}
+
+export class RemoteActionCurrentError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly blockedReason: string,
+    public readonly currentValue?: string,
+    public readonly detail?: string,
+  ) {
+    super(blockedReason)
+  }
+}
+
+const readRemoteActionError = (payload: ApiErrorPayload, status: number): RemoteActionCurrentError =>
+  new RemoteActionCurrentError(status, payload.blockedReason ?? payload.message ?? '', payload.currentValue, payload.detail)
+
+export const getRemoteActionCurrent = (accountId: string): Promise<RemoteActionCurrent> =>
+  requestJson(`/connection-health/accounts/${encodeURIComponent(accountId)}/remote-action/current`, {}, readRemoteActionError)
+
+export const confirmRemoteActionCurrent = async (accountId: string, dispatchId: string, currentValue: 'active' | 'inactive'): Promise<void> => {
+  await requestJson(`/connection-health/accounts/${encodeURIComponent(accountId)}/remote-action/confirm-current`, {
+    method: 'POST',
+    body: JSON.stringify({ dispatchId, currentValue }),
+  }, readRemoteActionError)
+}
 
 export const getConnectionHealthEvents = async (connectionId?: string, limit = 100): Promise<ConnectionHealthEvent[]> => {
   const params = new URLSearchParams()

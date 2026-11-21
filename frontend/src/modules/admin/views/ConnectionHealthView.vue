@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { useChanshuiLauncher } from '../composables/useChanshuiLauncher'
 import { costFailureText } from '../utils/upstream'
-import { accountLabelForTarget, accountNameText, accountReminderLabel, displayAccountName, missingAccountNameHelp, type HistoryAccountLabel } from '../utils/connectionHealthAccountLabel'
-import { computed, onActivated, onDeactivated, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
+import { accountLabelForTarget, accountNameText, accountReminderLabel, displayAccountName, missingAccountNameHelp, upstreamAccountStatus, type HistoryAccountLabel } from '../utils/connectionHealthAccountLabel'
+import { computed, onActivated, onDeactivated, onBeforeUnmount, onMounted, ref, shallowRef, watch, watchEffect } from 'vue'
 import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -24,14 +24,18 @@ import {
 import { Button } from '@/components/ui/button'
 import { Tooltip } from '@/components/ui/tooltip'
 import { modelControlRuleRevision, modelControlSupplyWarning } from '../utils/questionAnswerModelControl'
-import { getPrioritySyncStatus, probeTargetWithProgress } from '../api/connectionHealth'
-import type { AdminGroupsRefreshSite, ProbeTargetProgressPhase } from '../api/connectionHealth'
+import {
+  confirmRemoteActionCurrent, ConnectionHealthApiError, getPrioritySyncStatus, getRemoteActionCurrent,
+  probeTargetWithProgress, refreshTargetMultiplier, RemoteActionCurrentError,
+} from '../api/connectionHealth'
+import type { AdminGroupsRefreshSite, ProbeTargetProgressPhase, RemoteActionCurrent, TargetMultiplierRefreshSite } from '../api/connectionHealth'
 import { listUpstreamSites } from '../api/upstream'
 import { listRealConnections } from '../api/mySites'
 import type { UpstreamSiteResponse } from '../types/upstream'
 import { safeScopedErrorText } from '../utils/scopedErrorText'
-import { canOpenManualProbeHistory, connectionHealthMessageKey, testProtocolName, useConnectionHealth } from '../composables/useConnectionHealth'
+import { canOpenManualProbeHistory, connectionHealthMessageKey, formatConnectionHealthTime, testProtocolName, useConnectionHealth } from '../composables/useConnectionHealth'
 import { createRefreshCoordinator } from '../utils/connectionHealthRefresh'
+import { collectConnectionHealthSiteIssues, isSiteLevelPriorityFailure, isSub2APIBinding, siteWebsiteLink, type BoundSiteRateState } from '../utils/connectionHealthSiteIssues'
 import { publishChanshuiCatalog } from '../composables/chanshuiCatalog'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
 import AdminGroupHealthDetail from '../components/dashboard/AdminGroupHealthDetail.vue'
@@ -62,10 +66,12 @@ import type {
 	ModelHealth,
 	PolicyInput,
 	PrioritySyncStatus,
+  TargetMultiplierRefreshLine,
 } from '../types/connectionHealth'
 import { resolveConnectionHealthStrategyMode } from '../utils/connectionHealthPolicy'
 import {
   collectPrioritySyncBlockers,
+  isDisabledUpstreamSchedulable,
   type PrioritySyncBlocker,
   resolvePrioritySyncBlockReasonMessage,
   prioritySyncBlockReasonTranslationKey,
@@ -137,10 +143,6 @@ const eventsDialogOpen = ref(false)
 let eventsOpenRequestSequence = 0
 const siteNameMap = ref<Map<string, string>>(new Map())
 // 常驻提示区：已对接站点最近一次分组倍率读取未确认。独立于站点名称读取和"辅助读取失败"。
-type BoundSiteRateState =
-  | { kind: 'idle' }
-  | { kind: 'ready'; sites: UpstreamSiteResponse[]; boundIds: Set<string>; accountLabels: Record<string, AccountFocusLabel> }
-  | { kind: 'failed'; failedSites: boolean; failedConnections: boolean; reasons: string[]; accountLabels: Record<string, AccountFocusLabel> }
 const boundSiteRateState = ref<BoundSiteRateState>({ kind: 'idle' })
 let boundSiteRateSeq = 0
 const focusedAccountLabels = computed<Record<string, AccountFocusLabel>>(() => {
@@ -154,6 +156,27 @@ const preferences = ref<ConnectionHealthPreferences>(createDefaultConnectionHeal
 const groupManagerOpen = ref(false)
 const prioritySyncStatus = ref<PrioritySyncStatus | null>(null)
 let priorityStatusRequestSequence = 0
+type RemoteAccountStatus = 'active' | 'inactive'
+type ConfirmableRemoteAction = RemoteActionCurrent & {
+  dispatchId: string
+  pendingValue: RemoteAccountStatus
+  currentValue: RemoteAccountStatus
+  willMarkAs: 'applied' | 'rejected'
+}
+type RemoteActionDialog = {
+  workspaceId: string
+  accountId: string
+  accountLabel: string
+  phase: 'reading' | 'ready' | 'submitting' | 'blocked'
+  preview?: ConfirmableRemoteAction
+  message?: string
+}
+const remoteActionDialog = shallowRef<RemoteActionDialog | null>(null)
+const remoteActionNotice = ref('')
+const clearRemoteAction = () => {
+  remoteActionDialog.value = null
+  remoteActionNotice.value = ''
+}
 const actionDiagnosticAccountLabel = (diagnostic: { accountId: string; accountName?: string }): string => {
   const targetId = `sub2api:${preferenceScope.value}:${diagnostic.accountId}`
   const live = adminGroups.value.flatMap(group => group.accounts).find(account => account.targetId === targetId)
@@ -170,11 +193,25 @@ const actionDiagnosticReasonLabel = (reason: string): string => {
   return te(key) ? t(key) : t(`${prefix}.unknown`)
 }
 const refreshLoading = ref(false)
+type RefreshMode = 'manual' | 'automatic'
+const refreshMode = ref<RefreshMode | null>(null)
+const lastRefreshMode = ref<RefreshMode | null>(null)
+const manualRefreshLoading = computed(() => refreshLoading.value && refreshMode.value === 'manual')
 const refreshStartedAt = ref<number | null>(null)
 const refreshWaitSeconds = ref(0)
 let refreshWaitTimer: ReturnType<typeof setInterval> | null = null
 const refreshCoordinator = createRefreshCoordinator()
 const preferenceScope = computed(() => currentAccount.value?.id ?? 'anonymous')
+const multiplierRefreshingTargets = ref(new Set<string>())
+const multiplierRefreshResults = ref(new Map<string, TargetMultiplierRefreshLine[]>())
+let multiplierRefreshWorkspaceRevision = 0
+let multiplierRefreshViewRevision = 0
+const clearMultiplierRefreshResults = () => {
+  multiplierRefreshViewRevision++
+  multiplierRefreshResults.value.clear()
+}
+watch(preferenceScope, () => { multiplierRefreshWorkspaceRevision++ }, { flush: 'sync' })
+watch([preferenceScope, () => currentAccount.value?.platform], clearRemoteAction, { flush: 'sync' })
 // 屏蔽清单：只影响分组详情账号表、批量问答候选、计划表单候选和模型管理条目，不改健康探测与统计。
 const hiddenAccounts = useHiddenAccounts()
 const hiddenNotice = ref('')
@@ -535,6 +572,7 @@ watch(
 
 const selectedGroup = computed(() => filteredGroups.value.find(group => group.id === selectedGroupId.value) ?? filteredGroups.value[0] ?? null)
 watch(selectedGroup, group => { if (!group) displayedQuestionAnswerTargetIds.value = [] })
+watch([preferenceScope, () => selectedGroup.value?.id], clearMultiplierRefreshResults, { flush: 'sync' })
 
 watch(filteredGroups, (nextGroups) => {
   if (nextGroups.some((group) => group.id === selectedGroupId.value)) return
@@ -698,7 +736,23 @@ const priorityFailedTargetReasonLabel = (reason: string): string => {
   const key = `${prefix}.${reason}`
   return te(key) ? t(key) : t(`${prefix}.other`)
 }
+const pendingDiagnosticReasons = new Set(['pending', 'conflict', 'uncertain', 'legacy', 'dual_claim', 'overdue'])
+const pendingDiagnosticAccountIds = computed(() => new Set(
+  (prioritySyncStatus.value?.actionDiagnostics ?? [])
+    .filter(diagnostic => pendingDiagnosticReasons.has(diagnostic.reason))
+    .map(diagnostic => diagnostic.accountId),
+))
 const priorityBlockReasonLabel = (blocker: PrioritySyncBlocker): string => {
+  if (blocker.reason === 'group_missing') {
+    const group = blocker.groupName ? `「${blocker.groupName}」` : ''
+    const id = blocker.groupId ? `（ID ${blocker.groupId}）` : ''
+    return t('admin.connectionHealth.siteIssues.priority.groupMissing', {
+      group: group + id || t('admin.connectionHealth.siteIssues.priority.unknownGroup'),
+      groups: availablePrioritySiteGroups(blocker.siteId),
+    })
+  }
+  if (blocker.reason === 'key_missing' || blocker.reason === 'key_deleted') return t('admin.connectionHealth.siteIssues.priority.keyMissing')
+  if (blocker.reason === 'binding_missing') return t('admin.connectionHealth.siteIssues.priority.bindingMissing')
   const message = resolvePrioritySyncBlockReasonMessage(blocker.reason, blocker.groupName, blocker.groupId)
   return t(prioritySyncBlockReasonTranslationKey(message.key), message.params)
 }
@@ -793,7 +847,7 @@ const loadBoundSiteRateStatus = async (): Promise<void> => {
       const siteId = typeof connection?.upstreamSiteId === 'string' ? connection.upstreamSiteId.trim() : ''
       if (siteId) boundIds.add(siteId)
     }
-    boundSiteRateState.value = { kind: 'ready', sites, boundIds, accountLabels }
+    boundSiteRateState.value = { kind: 'ready', sites, connections, boundIds, accountLabels }
     return
   }
   const unknown = t('admin.connectionHealth.boundSiteRateStatus.reasonUnknown')
@@ -835,6 +889,81 @@ const boundSiteRateFailureText = computed(() => {
     ...(state.failedConnections ? [t('admin.connectionHealth.boundSiteRateStatus.failedConnections')] : []),
   ]
   return t('admin.connectionHealth.boundSiteRateStatus.failure', { items: items.join('、'), reasons: state.reasons.join('；') })
+})
+
+const siteIssues = computed(() => collectConnectionHealthSiteIssues(boundSiteRateState.value, adminGroups.value))
+const siteIssueIds = computed(() => new Set(siteIssues.value.map(site => site.id)))
+const siteIssuesPrefix = 'admin.connectionHealth.siteIssues'
+const siteIssueText = (site: (typeof siteIssues.value)[number]): string => {
+  const reason = (te(site.issueKey) ? t(site.issueKey) : t(`${siteIssuesPrefix}.${site.issueKey ? 'unknownError' : 'noErrorRecorded'}`)).replace(/。$/, '')
+  const accounts = site.accounts.map(account => account.groups.length
+    ? t(`${siteIssuesPrefix}.accountInGroups`, { account: account.name, groups: account.groups.join('、') })
+    : account.name).join('、')
+  return t(`${siteIssuesPrefix}.site`, {
+    site: site.name, reason, count: site.count,
+    accounts: site.count > site.accounts.length ? accounts + t(`${siteIssuesPrefix}.moreAccounts`, { count: site.count }) : accounts,
+    advice: t(`${siteIssuesPrefix}.advice.${site.category}`),
+  })
+}
+const staleConnectionCount = computed(() => currentAccount.value?.platform === 'sub2api' && boundSiteRateState.value.kind === 'ready'
+  ? boundSiteRateState.value.connections.filter(connection => connection?.status === 'missing' && isSub2APIBinding(connection)).length
+  : 0)
+const boundSite = (siteId: string): UpstreamSiteResponse | undefined => boundSiteRateState.value.kind === 'ready'
+  ? boundSiteRateState.value.sites.find(site => site?.id === siteId)
+  : undefined
+const availablePrioritySiteGroups = (siteId: string): string => {
+  const groups = boundSite(siteId)?.metrics?.groups
+  if (!groups?.length) return t(`${siteIssuesPrefix}.priority.groupsUnavailable`)
+  return [...groups].sort((first, second) => first.name.localeCompare(second.name, locale)).slice(0, 10)
+    .map(group => `${group.name} ${group.multiplier == null ? t(`${siteIssuesPrefix}.priority.unknownMultiplier`) : group.multiplierDisplay || `${group.multiplier}x`}`).join('、')
+}
+const priorityBlockerWebsite = (blocker: PrioritySyncBlocker): string => siteWebsiteLink(boundSite(blocker.siteId))
+const priorityGroupReasons = new Set(['group_missing', 'group_ambiguous', 'group_not_found'])
+const priorityBindingReasons = new Set([...priorityGroupReasons, 'key_missing', 'key_deleted', 'binding_missing'])
+const groupRatesLink = (siteId: string): string => siteId ? `/admin/group-rates?siteId=${encodeURIComponent(siteId)}` : '/admin/group-rates'
+
+const disabledUpstreamAccounts = computed(() => {
+  if (currentAccount.value?.platform !== 'sub2api') return []
+  const byTarget = new Map<string, { account: AdminGroupAccount; groupNames: Map<string, string> }>()
+  for (const group of adminGroups.value) {
+    for (const account of group.accounts) {
+      if (!isDisabledUpstreamSchedulable(account)) continue
+      const entry = byTarget.get(account.targetId) ?? { account, groupNames: new Map<string, string>() }
+      entry.groupNames.set(group.id, group.name)
+      byTarget.set(account.targetId, entry)
+    }
+  }
+  const state = boundSiteRateState.value
+  return [...byTarget.values()].map(({ account, groupNames }) => {
+    const siteName = state.kind === 'ready' ? state.sites.find(site => site.id === account.upstreamSiteId)?.name : ''
+    return {
+      targetId: account.targetId,
+      name: displayAccountName(account.name),
+      id: account.id,
+      site: siteName || account.upstreamSiteId || t('admin.connectionHealth.disabledUpstream.unknownSite'),
+      groups: [...groupNames.values()].join('、'),
+      status: t(`admin.connectionHealth.disabledUpstream.status.${upstreamAccountStatus(account.status)}`, {
+        status: account.status || t('admin.connectionHealth.groupDetail.unknownUpstreamStatus'),
+      }),
+    }
+  })
+})
+
+const mainSiteAccountListUrl = computed(() => {
+  const baseUrl = currentAccount.value?.baseUrl
+  if (!baseUrl) return ''
+  try {
+    const url = new URL(baseUrl)
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return ''
+    url.username = ''
+    url.password = ''
+    url.search = ''
+    url.hash = ''
+    url.pathname = `${url.pathname.replace(/\/+$/, '')}/admin/accounts`
+    return url.href
+  } catch {
+    return ''
+  }
 })
 
 const moveGroup = (groupId: string, offset: -1 | 1) => {
@@ -958,24 +1087,26 @@ const flushPendingQuickProbeReload = async () => {
   })
 }
 
-let setupGroupReloadPending = false
-const reloadSetupGroupsAuthoritatively = async () => {
+let groupReloadPending = false
+const reloadGroupsAfterMutation = async () => {
 	const started = await loadMainListIfIdle(() => loadAdminGroups({ silent: true }))
-	if (!started) setupGroupReloadPending = true
+	if (!started) groupReloadPending = true
 }
 
-const flushPendingSetupGroupReload = async () => {
-	if (!setupGroupReloadPending) return
-	setupGroupReloadPending = false
+const flushPendingGroupReload = async () => {
+	if (!groupReloadPending) return
+	groupReloadPending = false
 	const started = await loadMainListIfIdle(() => loadAdminGroups({ silent: true }))
-	if (!started) setupGroupReloadPending = true
+	if (!started) groupReloadPending = true
 }
 
 const completeRefresh = (generation: number) => {
 	if (!refreshCoordinator.complete(generation)) return
+	lastRefreshMode.value = refreshMode.value === 'manual' && !refreshConflictNotice.value ? 'manual' : 'automatic'
+	refreshMode.value = null
 	refreshLoading.value = false
 	stopRefreshWaitTimer()
-	void flushPendingSetupGroupReload()
+	void flushPendingGroupReload()
 	void flushPendingQuickProbeReload()
 }
 
@@ -995,7 +1126,12 @@ const refreshOnEntry = () => {
 
 onMounted(() => { mainTableMounted.value = true; recentSummaries.resume(); refreshOnEntry() })
 onActivated(() => { mainTableMounted.value = true; recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value); refreshOnEntry() })
-onDeactivated(() => { mainTableMounted.value = false; recentSummaries.suspend() })
+onDeactivated(() => {
+  mainTableMounted.value = false
+  recentSummaries.suspend()
+  clearMultiplierRefreshResults()
+  clearRemoteAction()
+})
 const autoRefresh = async () => {
   if (documentVisibility.value !== 'visible' || probeDialogOpen.value || !refreshCoordinator.shouldRunAutomaticRefresh()) return
   await Promise.all([
@@ -1010,13 +1146,20 @@ useIntervalFn(() => void autoRefresh(), 30_000, { immediate: true, immediateCall
 useIntervalFn(() => { if (mainTableMounted.value && documentVisibility.value === 'visible') recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value) }, 30_000, { immediate: true, immediateCallback: false })
 watch(modelControlRuleRevision, value => { if (value.workspace === preferenceScope.value) recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value) })
 watch(documentVisibility, (visibility) => {
-  if (visibility === 'visible') { retryPendingQuestionAnswerSummaries(); recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value); recentSummaries.resume(); void autoRefresh() }
+  if (visibility === 'visible') {
+    retryPendingQuestionAnswerSummaries()
+    recentSummaries.refreshTargets(displayedQuestionAnswerTargetIds.value)
+    recentSummaries.resume()
+    void autoRefresh()
+    if (mainTableMounted.value) void loadBoundSiteRateStatus()
+  }
   else recentSummaries.suspend()
 })
 
 const refreshAdminGroupsAutomatically = async (): Promise<boolean> => {
   const generation = refreshCoordinator.beginAutomatic()
   if (generation === null) return false
+  refreshMode.value = 'automatic'
   refreshLoading.value = true
   startRefreshWaitTimer()
   try {
@@ -1032,6 +1175,7 @@ const refresh = async () => {
   clearAllQuickProbeSuccesses()
   const generation = refreshCoordinator.begin()
   if (generation === null) return
+  refreshMode.value = 'manual'
   refreshLoading.value = true
   startRefreshWaitTimer()
   void runAuxiliaryRequest('policies', () => loadPolicies({ recordError: false }))
@@ -1048,12 +1192,13 @@ const refresh = async () => {
 
 onBeforeUnmount(() => {
   mainTableMounted.value = false
+  clearRemoteAction()
   recentSummaries.reset()
   clearQuestionAnswerSummaryRequests()
   invalidateQuickProbeSession(true)
   cancelAdminGroupsRefresh()
   stopRefreshWaitTimer()
-	setupGroupReloadPending = false
+	groupReloadPending = false
 })
 
 const siteName = (siteId: string): string => siteNameMap.value.get(siteId) ?? siteId
@@ -1114,7 +1259,6 @@ const refreshSiteStatusLabel = (site: AdminGroupsRefreshSite): string => {
   return refreshFailureLabel(errorKey, site.status, site.status === 'stale')
 }
 
-const nonParticipatingRefreshSites = computed(() => (terminalRefreshSummary.value?.sites ?? []).filter(site => site.status === 'disabled'))
 const failedRefreshSites = computed(() => (terminalRefreshSummary.value?.sites ?? []).filter(site => site.status !== 'success' && site.status !== 'disabled'))
 const refreshSummaryState = computed(() => terminalRefreshSummary.value?.state ?? null)
 const refreshSummaryErrorKey = computed(() => {
@@ -1147,6 +1291,152 @@ const refreshWaitingLabel = (siteName: string, phase: string, elapsedSeconds: nu
 const refreshIssueLabel = (issue: { errorKey: string; status: string; groupRatesWarning?: import('../types/upstream').GroupRatesWarning }): string =>
   issue.groupRatesWarning ? [issue.groupRatesWarning.message, issue.groupRatesWarning.detail, issue.groupRatesWarning.next].filter(Boolean).join('；') : refreshFailureLabel(issue.errorKey, issue.status)
 
+const targetMultiplierRefreshPrefix = 'admin.connectionHealth.targetMultiplierRefresh'
+const multiplierRefreshSiteLine = (site: TargetMultiplierRefreshSite): TargetMultiplierRefreshLine | null => {
+  if (site.status === 'site_read_failed') return { tone: 'error', text: t(`${targetMultiplierRefreshPrefix}.siteReadFailed`) }
+  const name = site.siteName || site.siteId
+  if (site.errorKey === 'site_sync_timeout' || site.errorKey === 'site_sync_cancelled') {
+    return { tone: 'muted', text: t(`${targetMultiplierRefreshPrefix}.siteUnconfirmed`, { site: name }) }
+  }
+  if (site.status === 'success') {
+    if (!site.groupRatesWarning) return null
+    const warning = refreshIssueLabel({ ...site, errorKey: site.errorKey ?? '' })
+    return { tone: 'warning', text: t(`${targetMultiplierRefreshPrefix}.siteWarning`, { site: name, warning }) }
+  }
+  const reason = [refreshFailureLabel(site.errorKey ?? '', site.status), safeScopedErrorText(site.errorDetail)].filter(Boolean).join('；')
+  return { tone: 'error', text: t(`${targetMultiplierRefreshPrefix}.siteFailed`, { site: name, reason }) }
+}
+
+const multiplierRefreshErrorText = (error: unknown): string => {
+  const key = error instanceof Error ? error.message : ''
+  const refusedKey = `${targetMultiplierRefreshPrefix}.refusedReasons.${key}`
+  if (te(refusedKey)) return t(`${targetMultiplierRefreshPrefix}.refused`, { reason: t(refusedKey) })
+  const reason = key === 'admin.connectionHealth.errors.network'
+    ? t(`${targetMultiplierRefreshPrefix}.network`)
+    : te(key) && key !== 'admin.connectionHealth.errors.request'
+      ? t(key)
+      : error instanceof ConnectionHealthApiError
+        ? t(`${targetMultiplierRefreshPrefix}.unknownWithStatus`, { status: error.status })
+        : t(`${targetMultiplierRefreshPrefix}.unknown`)
+  return t(`${targetMultiplierRefreshPrefix}.requestFailed`, { reason })
+}
+
+const onRefreshTargetMultiplier = async (targetId: string) => {
+  const workspaceId = currentAccount.value?.id
+  if (!workspaceId || currentAccount.value?.platform !== 'sub2api' || !targetId || manualRefreshLoading.value
+    || multiplierRefreshingTargets.value.has(targetId)) return
+
+  const workspaceRevision = multiplierRefreshWorkspaceRevision
+  const viewRevision = multiplierRefreshViewRevision
+  multiplierRefreshingTargets.value.add(targetId)
+  multiplierRefreshResults.value.delete(targetId)
+  let lines: TargetMultiplierRefreshLine[]
+  try {
+    const result = await refreshTargetMultiplier(targetId, workspaceId)
+    lines = []
+    if (result.noBinding) {
+      lines.push({ tone: 'muted', text: t(`${targetMultiplierRefreshPrefix}.noBinding`) })
+    } else {
+      if (result.sites.some(site => site.status === 'success')) {
+        lines.push({ tone: 'muted', text: t(`${targetMultiplierRefreshPrefix}.synced`) })
+      }
+      for (const site of result.sites) {
+        const line = multiplierRefreshSiteLine(site)
+        if (line) lines.push(line)
+      }
+    }
+  } catch (error) {
+    lines = [{ tone: 'error', text: multiplierRefreshErrorText(error) }]
+  } finally {
+    multiplierRefreshingTargets.value.delete(targetId)
+  }
+  if (!mainTableMounted.value || workspaceRevision !== multiplierRefreshWorkspaceRevision) return
+  if (viewRevision === multiplierRefreshViewRevision) multiplierRefreshResults.value.set(targetId, lines)
+  void refreshAdminGroupsAutomatically()
+  void loadBoundSiteRateStatus()
+}
+
+const remoteConfirmPrefix = 'admin.connectionHealth.remoteActionConfirm'
+const remoteStatusLabel = (value: RemoteAccountStatus): string => t(`${remoteConfirmPrefix}.status.${value}`)
+const canConfirmRemoteAction = (preview: RemoteActionCurrent): preview is ConfirmableRemoteAction => preview?.canConfirm === true
+  && typeof preview.dispatchId === 'string' && preview.dispatchId.length > 0
+  && (preview.pendingValue === 'active' || preview.pendingValue === 'inactive')
+  && (preview.currentValue === 'active' || preview.currentValue === 'inactive')
+  && (preview.willMarkAs === 'applied' || preview.willMarkAs === 'rejected')
+const remoteActionBlockedText = (source?: Pick<RemoteActionCurrent, 'blockedReason' | 'currentValue' | 'detail'>): string => {
+  const key = `${remoteConfirmPrefix}.blocked.${source?.blockedReason ?? ''}`
+  if (!te(key)) return ''
+  return t(key, {
+    value: safeScopedErrorText(source?.currentValue) || t(`${remoteConfirmPrefix}.emptyStatus`),
+    reason: safeScopedErrorText(source?.detail) || t(`${remoteConfirmPrefix}.mainSiteReasonUnknown`),
+  })
+}
+const remoteActionNotChangedText = (error: RemoteActionCurrentError): string => {
+  if (error.status !== 500 || (error.blockedReason !== 'read_failed' && error.blockedReason !== 'prepare_failed')) return ''
+  return safeScopedErrorText(error.detail) || t(`${remoteConfirmPrefix}.notChanged.${error.blockedReason}`)
+}
+const remoteActionIsCurrent = (dialog: RemoteActionDialog): boolean =>
+  remoteActionDialog.value === dialog && dialog.workspaceId === preferenceScope.value && currentAccount.value?.platform === 'sub2api'
+const remoteActionCanOpen = (diagnostic: {action: string; reason: string}): boolean =>
+  currentAccount.value?.platform === 'sub2api' && diagnostic.action === 'status' && diagnostic.reason === 'uncertain'
+const openRemoteAction = async (diagnostic: NonNullable<PrioritySyncStatus['actionDiagnostics']>[number]) => {
+  if (!remoteActionCanOpen(diagnostic) || !diagnostic.accountId || remoteActionDialog.value) return
+  remoteActionNotice.value = ''
+  const dialog: RemoteActionDialog = {
+    workspaceId: preferenceScope.value, accountId: diagnostic.accountId,
+    accountLabel: actionDiagnosticAccountLabel(diagnostic), phase: 'reading',
+  }
+  remoteActionDialog.value = dialog
+  try {
+    const preview = await getRemoteActionCurrent(dialog.accountId)
+    if (!remoteActionIsCurrent(dialog)) return
+    remoteActionDialog.value = canConfirmRemoteAction(preview)
+      ? { ...dialog, phase: 'ready', preview }
+      : { ...dialog, phase: 'blocked', message: remoteActionBlockedText(preview) || t(`${remoteConfirmPrefix}.previewFailed`) }
+  } catch (error) {
+    if (!remoteActionIsCurrent(dialog)) return
+    const reason = error instanceof RemoteActionCurrentError
+      ? remoteActionNotChangedText(error) || remoteActionBlockedText(error)
+      : error instanceof Error && error.message === 'admin.connectionHealth.errors.network'
+        ? t(`${remoteConfirmPrefix}.previewNetworkFailed`)
+        : ''
+    remoteActionDialog.value = { ...dialog, phase: 'blocked', message: reason || t(`${remoteConfirmPrefix}.previewFailed`) }
+  }
+}
+const closeRemoteAction = () => {
+  if (remoteActionDialog.value?.phase !== 'submitting') remoteActionDialog.value = null
+}
+const confirmRemoteAction = async () => {
+  const current = remoteActionDialog.value
+  if (!current || !remoteActionIsCurrent(current) || current.phase !== 'ready' || !current.preview) return
+  const preview = current.preview
+  const dialog: RemoteActionDialog = { ...current, phase: 'submitting' }
+  remoteActionDialog.value = dialog
+  try {
+    await confirmRemoteActionCurrent(dialog.accountId, preview.dispatchId, preview.currentValue)
+  } catch (error) {
+    if (!remoteActionIsCurrent(dialog)) return
+    let message = t(`${remoteConfirmPrefix}.resultUnknown`)
+    if (error instanceof RemoteActionCurrentError) {
+      message = remoteActionNotChangedText(error) || message
+      if (error.status === 409 || error.status === 400) {
+        const reason = remoteActionBlockedText(error)
+        if (error.blockedReason === 'changed') message = t(`${remoteConfirmPrefix}.changed`)
+        else if (reason) message = t(`${remoteConfirmPrefix}.noChanges`, { reason: reason.replace(/。$/, '') })
+      }
+    }
+    remoteActionDialog.value = { ...dialog, phase: 'blocked', message }
+    return
+  }
+  if (!remoteActionIsCurrent(dialog)) return
+  remoteActionDialog.value = null
+  remoteActionNotice.value = t(`${remoteConfirmPrefix}.success`)
+  await Promise.all([
+    reloadGroupsAfterMutation(),
+    runAuxiliaryRequest('priority', loadPrioritySyncStatus),
+  ])
+}
+
 // 分组启用/管理抽屉。
 const setupDrawerOpen = ref(false)
 const setupGroup = ref<AdminGroupHealth | null>(null)
@@ -1167,7 +1457,7 @@ const onSetupSaved = async (configuration?: AdminGroupPolicyConfiguration) => {
     prioritySyncStatus.value = { workspaceId: currentAccount.value.id, status: 'pending', failedCount: 0 }
   }
   await Promise.all([
-    reloadSetupGroupsAuthoritatively(),
+    reloadGroupsAfterMutation(),
     runAuxiliaryRequest('policies', () => loadPolicies({ recordError: false })),
     runAuxiliaryRequest('priority', loadPrioritySyncStatus),
   ])
@@ -1577,17 +1867,17 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
           {{ t('admin.connectionHealth.topActions.events') }}
         </Button>
         <Button variant="secondary" size="sm" :disabled="refreshLoading" @click="refresh">
-          <Loader2 v-if="refreshLoading" class="h-4 w-4 animate-spin" />
+          <Loader2 v-if="manualRefreshLoading" class="h-4 w-4 animate-spin" />
           <RefreshCw v-else class="h-4 w-4" />
           {{ t('admin.connectionHealth.refresh') }}
         </Button>
-        <span v-if="refreshLoading" class="text-xs text-muted-foreground" aria-live="polite">
+        <span v-if="manualRefreshLoading" class="text-xs text-muted-foreground" aria-live="polite">
           {{ t('admin.connectionHealth.refreshStatus.running', { seconds: refreshWaitSeconds }) }}
         </span>
-        <span v-else-if="refreshSummaryState === 'success'" class="text-xs text-emerald-600 dark:text-emerald-400" aria-live="polite">
+        <span v-else-if="!refreshLoading && lastRefreshMode === 'manual' && refreshSummaryState === 'success'" class="text-xs text-emerald-600 dark:text-emerald-400" aria-live="polite">
           {{ t('admin.connectionHealth.refreshStatus.success') }}
         </span>
-        <span v-else-if="refreshSummaryState" class="text-xs text-muted-foreground" aria-live="polite">
+        <span v-else-if="!refreshLoading && lastRefreshMode === 'manual' && refreshSummaryState" class="text-xs text-muted-foreground" aria-live="polite">
           {{ t(`admin.connectionHealth.refreshStatus.${refreshSummaryState}`) }}
         </span>
       </div>
@@ -1611,7 +1901,7 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
     </p>
 
     <div
-      v-if="refreshLoading && refreshRunSnapshot"
+      v-if="manualRefreshLoading && refreshRunSnapshot"
       class="space-y-2 text-sm text-muted-foreground"
       aria-live="polite"
     >
@@ -1643,16 +1933,10 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
       </template>
     </div>
 
-    <div v-if="!refreshLoading" class="space-y-1 text-xs text-muted-foreground" aria-live="polite">
+    <div v-if="!manualRefreshLoading" class="space-y-1 text-xs text-muted-foreground" aria-live="polite">
       <div v-if="failedRefreshSites.length > 0" class="flex flex-wrap items-center gap-x-4 gap-y-1">
         <span class="font-medium text-destructive">{{ t('admin.connectionHealth.refreshStatus.failedSitesLabel') }}</span>
         <span v-for="site in failedRefreshSites" :key="`failed:${site.siteId}`">
-          {{ siteName(site.siteId) }}: {{ refreshSiteStatusLabel(site) }}
-        </span>
-      </div>
-      <div v-if="nonParticipatingRefreshSites.length > 0" class="flex flex-wrap items-center gap-x-4 gap-y-1">
-        <span class="font-medium text-muted-foreground">{{ t('admin.connectionHealth.refreshStatus.nonParticipatingSitesLabel') }}</span>
-        <span v-for="site in nonParticipatingRefreshSites" :key="`disabled:${site.siteId}`">
           {{ siteName(site.siteId) }}: {{ refreshSiteStatusLabel(site) }}
         </span>
       </div>
@@ -1668,12 +1952,47 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
       </p>
     </div>
 
+    <div v-if="disabledUpstreamAccounts.length" class="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-800 dark:text-amber-300" role="status" data-testid="disabled-upstream-schedulable-notice">
+      <p class="font-semibold">{{ t('admin.connectionHealth.disabledUpstream.title') }}</p>
+      <ul class="space-y-1">
+        <li v-for="account in disabledUpstreamAccounts" :key="account.targetId" class="break-words">
+          {{ t('admin.connectionHealth.disabledUpstream.account', account) }}
+        </li>
+      </ul>
+      <p class="break-words">
+        <a v-if="mainSiteAccountListUrl" :href="mainSiteAccountListUrl" class="font-medium underline" target="_blank" rel="noopener noreferrer">
+          {{ t('admin.connectionHealth.disabledUpstream.openMainAccounts') }}
+        </a>
+        {{ ' ' + t('admin.connectionHealth.disabledUpstream.next') }}
+      </p>
+    </div>
+
+    <div v-if="siteIssues.length" class="space-y-2 rounded-lg border border-warning/20 bg-warning/10 px-4 py-3 text-xs text-warning" role="status" data-testid="upstream-site-issues">
+      <p class="font-semibold">{{ t(`${siteIssuesPrefix}.title`) }}</p>
+      <ul class="space-y-2">
+        <li v-for="site in siteIssues" :key="site.id" class="break-words">
+          {{ siteIssueText(site) }}
+          <RouterLink class="ml-2 font-medium underline" to="/admin/upstream">{{ t(`${siteIssuesPrefix}.openSiteList`) }}</RouterLink>
+          <a v-if="site.href" class="ml-2 font-medium underline" :href="site.href" target="_blank" rel="noopener noreferrer">
+            {{ t(`${siteIssuesPrefix}.openSite`) }}
+          </a>
+        </li>
+      </ul>
+    </div>
+    <p v-if="staleConnectionCount" class="text-xs text-warning">
+      <RouterLink to="/admin/group-rates?cleanup=stale" class="underline">{{ t(`${siteIssuesPrefix}.staleConnections`, { count: staleConnectionCount }) }}</RouterLink>
+    </p>
+
 		<div v-if="prioritySyncStatus?.actionDiagnostics?.length" data-testid="remote-action-diagnostics" class="mb-4 space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-800 dark:text-amber-300" role="status">
         <p v-for="diagnostic in prioritySyncStatus.actionDiagnostics" :key="diagnostic.accountId" class="whitespace-pre-wrap break-words">
           {{ actionDiagnosticAccountLabel(diagnostic) }}：{{ actionDiagnosticReasonLabel(diagnostic.reason) }}
           <span v-if="actionDiagnosticNameMissing(diagnostic)" class="block">{{ missingAccountNameHelp }}</span>
+          <button v-if="remoteActionCanOpen(diagnostic)" type="button" class="ml-2 font-medium underline" @click="openRemoteAction(diagnostic)">
+            {{ t(`${remoteConfirmPrefix}.open`) }}
+          </button>
         </p>
       </div>
+    <p v-if="remoteActionNotice" class="rounded-lg bg-emerald-500/10 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300" role="status">{{ remoteActionNotice }}</p>
       <div
 			v-if="prioritySyncStatus?.status === 'failed' || prioritySyncStatus?.status === 'partial'"
 			class="flex items-start gap-3 rounded-lg border px-4 py-3 text-sm"
@@ -1692,6 +2011,7 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
 							account: actionDiagnosticAccountLabel(target),
 							reason: priorityFailedTargetReasonLabel(target.reason),
 						}) }}
+            <span v-if="target.reason === 'waiting_timeout' && pendingDiagnosticAccountIds.has(target.accountId)">{{ t(`${remoteConfirmPrefix}.priorityReference`) }}</span>
             <span v-if="actionDiagnosticNameMissing(target)" class="block">{{ missingAccountNameHelp }}</span>
 					</li>
 					<li v-if="priorityFailedTargetsMore > 0" class="break-words">
@@ -1705,6 +2025,16 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
 							site: priorityBlockerSiteLabel(blocker.siteId),
 							reason: priorityBlockReasonLabel(blocker),
 						}) }}
+            <span v-if="isSiteLevelPriorityFailure(blocker.reason) && siteIssueIds.has(blocker.siteId)">{{ t(`${siteIssuesPrefix}.priority.siteReference`) }}</span>
+            <a
+              v-if="priorityGroupReasons.has(blocker.reason) && priorityBlockerWebsite(blocker)"
+              class="ml-2 font-medium underline" :href="priorityBlockerWebsite(blocker)" target="_blank" rel="noopener noreferrer"
+            >
+              {{ t(`${siteIssuesPrefix}.openSite`) }}
+            </a>
+            <RouterLink v-if="priorityBindingReasons.has(blocker.reason)" class="ml-2 font-medium underline" :to="groupRatesLink(blocker.siteId)">
+              {{ t(`${siteIssuesPrefix}.openGroupRates`) }}
+            </RouterLink>
 					</li>
 				</ul>
 				<p v-if="priorityBlockerDetailsChanged" class="mt-2 text-xs opacity-80">
@@ -1929,6 +2259,9 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
           :hide-unmonitored-accounts="preferences.hideUnmonitoredAccounts"
           :question-answer-unread-target-ids="preferences.questionAnswerUnreadTargetIds"
           :action-loading="isActionLoading"
+          :refreshing="manualRefreshLoading"
+          :multiplier-refreshing-targets="multiplierRefreshingTargets"
+          :multiplier-refresh-results="multiplierRefreshResults"
           :quick-probe-phases="quickProbePhases"
           :quick-probe-errors="quickProbeErrors"
           :quick-probe-successes="quickProbeSuccesses"
@@ -1941,6 +2274,7 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
           @probe="onProbeAccount"
           @open-model-audit="openModelAuditAccount"
           @quick-probe="onQuickProbeAccount"
+          @refresh-multiplier="onRefreshTargetMultiplier"
           @view-events="onViewEventsAccount"
           @set-schedulable="onSetTargetSchedulable"
           @hide-account="onHideAccount"
@@ -1952,6 +2286,42 @@ const openModelAuditAccount = (account: AdminGroupAccount) => modelAudit.open({ 
         />
       </div>
     </section>
+
+    <Teleport to="body">
+      <div v-if="remoteActionDialog" class="fixed inset-0 z-[150] flex items-center justify-center p-4">
+        <div class="absolute inset-0 bg-background/60 backdrop-blur-sm" @click="closeRemoteAction" />
+        <div role="dialog" aria-modal="true" aria-labelledby="remote-action-confirm-title" class="relative w-full max-w-lg space-y-4 rounded-2xl border border-border/60 bg-card px-5 py-4 text-sm shadow-2xl" @keydown.esc="closeRemoteAction">
+          <div>
+            <h2 id="remote-action-confirm-title" class="font-semibold text-foreground">{{ t(`${remoteConfirmPrefix}.open`) }}</h2>
+            <p class="mt-1 break-words text-muted-foreground">{{ remoteActionDialog.accountLabel }}</p>
+          </div>
+          <p v-if="remoteActionDialog.phase === 'reading'" role="status" class="text-muted-foreground">{{ t(`${remoteConfirmPrefix}.reading`) }}</p>
+          <template v-else-if="remoteActionDialog.preview && remoteActionDialog.phase !== 'blocked'">
+            <p>{{ t(`${remoteConfirmPrefix}.preview`, {
+              pending: remoteStatusLabel(remoteActionDialog.preview.pendingValue),
+              current: remoteStatusLabel(remoteActionDialog.preview.currentValue),
+              observedAt: formatConnectionHealthTime(remoteActionDialog.preview.observedAt ?? null),
+              recordedAt: formatConnectionHealthTime(remoteActionDialog.preview.recordedAt ?? null),
+            }) }}</p>
+            <p>{{ t(`${remoteConfirmPrefix}.effect`, {
+              outcome: t(`${remoteConfirmPrefix}.outcome.${remoteActionDialog.preview.willMarkAs}`),
+              note: remoteActionDialog.preview.willMarkAs === 'rejected' && remoteActionDialog.preview.source === 'health_probe'
+                ? t(`${remoteConfirmPrefix}.automaticNote`, { pending: remoteStatusLabel(remoteActionDialog.preview.pendingValue) }) : '',
+            }) }}</p>
+          </template>
+          <p v-if="remoteActionDialog.message" class="break-words text-warning" role="status">{{ remoteActionDialog.message }}</p>
+          <div class="flex justify-end gap-2">
+            <Button type="button" variant="secondary" :disabled="remoteActionDialog.phase === 'submitting'" @click="closeRemoteAction">
+              {{ t(`${remoteConfirmPrefix}.${remoteActionDialog.phase === 'blocked' ? 'close' : 'cancel'}`) }}
+            </Button>
+            <Button v-if="remoteActionDialog.phase === 'ready' || remoteActionDialog.phase === 'submitting'" type="button"
+              :disabled="remoteActionDialog.phase === 'submitting'" @click="confirmRemoteAction">
+              {{ t(`${remoteConfirmPrefix}.${remoteActionDialog.phase === 'submitting' ? 'submitting' : 'confirm'}`) }}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
 
     <GroupHealthSetupDrawer :account-labels="accountLabelsByTarget"
       :hidden-target-ids="hiddenTargetIds"

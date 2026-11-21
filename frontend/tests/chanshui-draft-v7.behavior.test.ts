@@ -3,6 +3,8 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import HubApp from '../../chanshui/web/components/HubApp'
+import { catalogModels } from '../../chanshui/web/lib/hub-draft'
+import type { HubCatalog } from '../../chanshui/web/lib/hub-types'
 import { chanshuiCatalog, chanshuiCatalogSession, clearChanshuiCatalogForSession, publishChanshuiCatalog } from '../src/modules/admin/composables/chanshuiCatalog'
 import type { AdminGroupHealth } from '../src/modules/admin/types/connectionHealth'
 import { approveFixtureStart } from './fixtures/chanshui-transfer'
@@ -13,7 +15,7 @@ vi.mock('../../chanshui/web/components/Select', () => ({
 
 const require = createRequire(path.resolve(process.cwd(), '../chanshui/web/package.json'))
 const React = require('react'), { createRoot } = require('react-dom/client')
-const groups = [
+const groups: HubCatalog['groups'] = [
   { id: 'z', name: 'Z', accounts: [{ targetId: 'first', accountId: '13', accountName: '较优先账号', priority: 0, models: 'local-model', protocol: 'chat' }] },
   { id: 'a', name: 'A', accounts: [] },
 ]
@@ -46,14 +48,14 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-async function boot() {
+async function boot(catalog: HubCatalog = { workspaceId: 'workspace-v7-fixture', groups }) {
   const workspaceId = 'workspace-v7-fixture'
   const calls: string[] = []
   const respond = (data: unknown) => window.dispatchEvent(new MessageEvent('message', { data, source: window, origin: location.origin }))
   const server = (event: MessageEvent) => {
     const request = event.data
     if (request?.kind === 'chanshui.READY') {
-      respond({ kind: 'chanshui.BOOT', v: 1, generation: 1, workspaceId, visible: true, target: {}, catalog: { workspaceId, groups } })
+      respond({ kind: 'chanshui.BOOT', v: 1, generation: 1, workspaceId, visible: true, target: {}, catalog })
     }
     if (request?.kind !== 'chanshui.request') return
     if (!approveFixtureStart(request)) return
@@ -106,6 +108,61 @@ it('按分组健康名单顺序选组和模型，按下开始后才核验账号'
   await act(() => start.click())
   await settle()
   expect(targetRead()).toEqual(['context', 'start'])
+})
+
+it('原名单为空时用本组本账号的探活模型，仍允许对真正的空名单手输', async () => {
+  const model = (modelName: string, modelControlClosed = false) => ({ modelName, modelControlClosed })
+  const member = (targetId: string, models: string | undefined, modelHealth = [model('gpt-6.1-sol')], unprobedModels = [model('gpt-6.1-sol'), model(' gpt-5.6-sol '), model('已关闭', true), model(' ')]) => ({
+    targetId, id: targetId, name: targetId, models, modelHealth, unprobedModels,
+  })
+  const source = [
+    { id: '10', name: 'GPT混合分组', accounts: [
+      member('439', undefined),
+      member('existing', ' local-b , local-a '),
+      member('unprobed', ' , ', [], [model('待探活')]),
+      member('none', '', [model('已关闭', true)], []),
+      member('empty', undefined, [], []),
+    ] },
+    { id: '20', name: '另一分组', accounts: [member('439', '', [], [model('route-a,route-b'), model('route-b')])] },
+  ] as AdminGroupHealth[]
+  const workspaceId = 'workspace-v7-fixture'
+  try {
+    publishChanshuiCatalog(workspaceId, source, chanshuiCatalogSession())
+    const catalog = chanshuiCatalog.value!
+    const accountFor = (groupId: string, targetId: string) => catalog.groups.find(group => group.id === groupId)?.accounts.find(account => account.targetId === targetId)
+    const modelsFor = (groupId: string, targetId: string) => catalogModels(accountFor(groupId, targetId))
+    expect(modelsFor('10', '439')).toEqual(['gpt-6.1-sol', 'gpt-5.6-sol'])
+    expect(modelsFor('10', 'existing')).toEqual(['local-b', 'local-a'])
+    expect(modelsFor('10', 'unprobed')).toEqual(['待探活'])
+    expect(modelsFor('10', 'none')).toEqual([])
+    expect(modelsFor('10', 'empty')).toEqual([])
+    expect(modelsFor('20', '439')).toEqual(['route-a,route-b', 'route-b'])
+    const modelsForOldFrame = (groupId: string, targetId: string) => (accountFor(groupId, targetId)?.models ?? '').split(',').map(model => model.trim()).filter(Boolean)
+    expect(modelsForOldFrame('10', '439')).toEqual([])
+    expect(modelsForOldFrame('10', 'none')).toEqual([])
+    expect(modelsForOldFrame('10', 'existing')).toEqual(['local-b', 'local-a'])
+
+    const calls = await boot(catalog)
+    const choose = async (label: string, value: string) => {
+      const select = [...node.querySelectorAll('label')].find(item => item.firstChild?.textContent?.trim() === label)!.querySelector('select')!
+      await act(() => { select.value = value; select.dispatchEvent(new Event('change', { bubbles: true })) })
+    }
+    await choose('分组', '10')
+    await choose('账号', '439')
+    expect(node.querySelector<HTMLInputElement>('#model')?.value).toBe('gpt-6.1-sol')
+    expect(node.textContent).not.toContain('当前名单里没有此账号的模型记录')
+    await choose('账号', 'empty')
+    const input = node.querySelector<HTMLInputElement>('#model')!
+    expect(input.value).toBe('')
+    expect(input.disabled).toBe(false)
+    expect(node.textContent).toContain('当前名单里没有此账号的模型记录，可以手动输入模型名称。')
+    await choose('分组', '20')
+    await choose('账号', '439')
+    expect(node.querySelector<HTMLInputElement>('#model')?.value).toBe('route-a,route-b')
+    expect(calls.filter(op => ['targets', 'context', 'models', 'start'].includes(op))).toEqual([])
+  } finally {
+    clearChanshuiCatalogForSession()
+  }
 })
 
 it('分组健康名单保留左栏顺序，按数字 Priority 排列并隔离旧登录', () => {
